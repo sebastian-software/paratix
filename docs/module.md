@@ -257,6 +257,263 @@ run: [
 
 ---
 
+## compose — Container-Compose-Verwaltung (Docker & Podman)
+
+Verwaltet Container-Stacks ueber `docker compose` oder `podman compose`.
+Das Modul erkennt automatisch, welche Runtime verfuegbar ist, oder akzeptiert
+eine explizite Angabe (`runtime: "docker" | "podman"`). Alle Operationen
+arbeiten relativ zu einem `project_dir`, in dem die `compose.yml` (bzw.
+`docker-compose.yml`) liegt.
+
+| Modul | Beschreibung | Check-Strategie | Aufwand |
+|---|---|---|---|
+| `compose.up` | Stellt sicher, dass alle Services eines Compose-Projekts laufen. Fuehrt `compose up -d` aus, falls Container fehlen oder nicht laufen. Akzeptiert ein `project_dir` (Pfad auf dem Server zur `compose.yml`) und optional eine Liste von Service-Namen. | `compose ps --format json` parsen — alle erwarteten Container muessen `running` sein | mittel |
+| `compose.pull` | Zieht die neuesten Images fuer alle Services eines Compose-Projekts. Gibt `changed` zurueck, wenn mindestens ein Image aktualisiert wurde. | `compose pull` ausfuehren und Ausgabe auf `Pulling`/`Downloaded` pruefen | mittel |
+| `compose.down` | Stoppt und entfernt alle Container eines Compose-Projekts. Optional mit `--volumes` zum Entfernen persistenter Volumes. | `compose ps --format json` parsen — keine Container duerfen existieren | einfach |
+| `compose.config` | Deployt eine `compose.yml`-Datei auf den Server (via `file.copy` oder `file.template`) und validiert sie mit `compose config`. Kombiniert Datei-Deployment mit Syntax-Pruefung. | SHA-256-Vergleich der Compose-Datei | mittel |
+
+**Runtime-Erkennung:**
+
+```typescript
+// Automatisch (prueft erst docker, dann podman)
+compose.up({ projectDir: "/opt/traefik" })
+
+// Explizit
+compose.up({ projectDir: "/opt/traefik", runtime: "podman" })
+```
+
+**Beispiel im Playbook:**
+
+```typescript
+recipe("traefik", [
+  file.directory("/opt/traefik"),
+  file.template("/opt/traefik/compose.yml", "./templates/traefik-compose.yml.tpl"),
+  compose.pull({ projectDir: "/opt/traefik" }),
+  compose.up({ projectDir: "/opt/traefik" }),
+], {
+  signals: [compose.restart({ projectDir: "/opt/traefik" })],
+})
+```
+
+> **Hinweis:** `compose.restart` ist ein Signal-Modul analog zu `service.restart`.
+> Es fuehrt `compose down && compose up -d` aus und wird nur getriggert, wenn
+> innerhalb der Recipe ein Modul `changed` zurueckgegeben hat.
+
+---
+
+## sysctl — Kernel-Parameter
+
+| Modul | Beschreibung | Check-Strategie | Aufwand |
+|---|---|---|---|
+| `sysctl.set` | Setzt einen Kernel-Parameter zur Laufzeit und persistiert ihn in `/etc/sysctl.d/`. Akzeptiert Key-Value-Paare. Der Parameter wird sofort via `sysctl -w` angewendet und in eine Datei unter `/etc/sysctl.d/60-paratix.conf` geschrieben, damit er Reboots ueberlebt. | `sysctl -n <key>` abfragen und mit Soll-Wert vergleichen | einfach |
+
+**Beispiel:**
+
+```typescript
+sysctl.set({
+  "net.ipv6.conf.all.forwarding": 1,
+  "net.ipv4.ip_forward": 1,
+  "kernel.core_pattern": "/dev/null",   // Core-Dumps deaktivieren
+})
+```
+
+**Persistenz:** Alle von Paratix gesetzten Parameter werden in einer einzigen
+Datei `/etc/sysctl.d/60-paratix.conf` gesammelt. Bei jedem Aufruf wird die
+Datei aktualisiert (bestehende Keys ueberschrieben, neue angehaengt).
+Anschliessend wird `sysctl --system` ausgefuehrt, um alle Dateien neu zu laden.
+
+---
+
+## mount — Dateisystem-Mounts
+
+| Modul | Beschreibung | Check-Strategie | Aufwand |
+|---|---|---|---|
+| `mount.present` | Stellt sicher, dass ein Dateisystem gemountet ist. Unterstuetzt Block-Devices, tmpfs, NFS und andere Dateisysteme. Kann den Mount in `/etc/fstab` persistieren, sodass er Reboots ueberlebt. Erstellt den Mountpoint automatisch, falls er nicht existiert. | `findmnt <mountpoint>` pruefen + fstab-Eintrag vergleichen | mittel |
+| `mount.absent` | Stellt sicher, dass ein Mountpoint nicht gemountet ist. Entfernt optional den fstab-Eintrag und den Mountpoint-Ordner. | `findmnt <mountpoint>` pruefen | einfach |
+
+**Parameter fuer `mount.present`:**
+
+```typescript
+mount.present({
+  path: "/tmp",                          // Mountpoint
+  src: "tmpfs",                          // Device oder "tmpfs", "none", NFS-Pfad, ...
+  fstype: "tmpfs",                       // Dateisystemtyp
+  opts: "noexec,nosuid,nodev,size=512m", // Mount-Optionen
+  persist: true,                         // In /etc/fstab eintragen (Standard: true)
+})
+```
+
+**Beispiele:**
+
+```typescript
+// tmpfs mit Sicherheitsoptionen (Hardening)
+mount.present({
+  path: "/tmp",
+  src: "tmpfs",
+  fstype: "tmpfs",
+  opts: "noexec,nosuid,nodev,size=512m",
+})
+
+// Shared Memory absichern
+mount.present({
+  path: "/run/shm",
+  src: "tmpfs",
+  fstype: "tmpfs",
+  opts: "noexec,nosuid,nodev",
+})
+
+// Block-Device mounten
+mount.present({
+  path: "/mnt/data",
+  src: "/dev/sdb1",
+  fstype: "ext4",
+  opts: "defaults,noatime",
+})
+```
+
+**fstab-Management:** Das Modul identifiziert fstab-Eintraege ueber den
+Mountpoint (`path`). Existiert bereits ein Eintrag fuer denselben Mountpoint
+mit abweichenden Optionen, wird er aktualisiert. Bei `mount.absent` mit
+`persist: true` wird der fstab-Eintrag entfernt.
+
+---
+
+## rsync — Datei-Synchronisation
+
+| Modul | Beschreibung | Check-Strategie | Aufwand |
+|---|---|---|---|
+| `rsync.sync` | Synchronisiert Dateien vom Controller (lokal) auf den Server via rsync ueber SSH. Unterstuetzt Include/Exclude-Patterns, Delete-Modus und Berechtigungen. Ideal fuer Application-Deployments mit komplexen Dateistrukturen. | rsync im `--dry-run`-Modus ausfuehren und pruefen ob Aenderungen anstehen | mittel |
+
+**Parameter:**
+
+```typescript
+rsync.sync({
+  src: "./dist/",                        // Lokaler Quellpfad (auf dem Controller)
+  dest: "/opt/myapp/",                   // Zielpfad auf dem Server
+  exclude: [".git", "node_modules"],     // Ausgeschlossene Patterns
+  include: ["dist/**", "package.json"],  // Eingeschlossene Patterns (vor exclude ausgewertet)
+  delete: true,                          // Dateien im Ziel loeschen, die in der Quelle fehlen
+  owner: "deploy",                       // Besitzer der Dateien auf dem Server (optional)
+  group: "deploy",                       // Gruppe (optional)
+  chmod: "D755,F644",                    // Berechtigungen (optional, rsync-Syntax)
+})
+```
+
+**Beispiel — Monorepo-Deployment:**
+
+```typescript
+rsync.sync({
+  src: "./",
+  dest: "/opt/convex-manager/",
+  include: [
+    "packages/backend/dist/***",
+    "package.json",
+    "pnpm-lock.yaml",
+    "pnpm-workspace.yaml",
+  ],
+  exclude: ["*"],                        // Alles andere ausschliessen
+  delete: true,
+})
+```
+
+**Umsetzung:** Das Modul ruft `rsync` lokal auf dem Controller auf und nutzt
+die bestehende SSH-Verbindungskonfiguration (Port, Key) fuer den Transfer.
+Die SSH-Optionen werden automatisch aus der Serverdefinition abgeleitet.
+
+---
+
+## op — 1Password Secret-Aufloesung
+
+| Modul | Beschreibung | Check-Strategie | Aufwand |
+|---|---|---|---|
+| `op.resolve` | Loest `op://`-Referenzen ueber die 1Password CLI (`op`) auf dem Controller auf. Akzeptiert ein `Record<string, string>` mit Env-Keys und `op://`-URIs als Werte. Alle Referenzen werden in einem einzigen `op`-Aufruf aufgeloest und die echten Werte als Meta-Eintraege in den Env geschrieben. **Laeuft lokal auf dem Controller, nicht auf dem Server.** | Immer `ok` (reines Lesen, keine Serveraenderung) | mittel |
+
+**Wichtig:** Dieses Modul ist ein **lokales Modul** — es nutzt kein SSH,
+sondern ruft `op` auf dem Controller-Rechner auf. Es implementiert dennoch
+die Plugin-Schnittstelle und gibt seine Ergebnisse ueber `meta` zurueck.
+
+**Parameter:**
+
+```typescript
+op.resolve({
+  "db.password":       "op://Employee/Database/password",
+  "api.token":         "op://Employee/API-Service/credential",
+  "admin.otp":         "op://Employee/Palamedes Admin/one-time-password",
+  "backup.passphrase": "op://Infrastructure/Restic/password",
+})
+```
+
+**Rueckgabe (meta):**
+
+```typescript
+{
+  "db.password":       "s3cret!",                      // string — sofort aufgeloest
+  "api.token":         "tok_abc123...",                 // string — sofort aufgeloest
+  "admin.otp":         () => calculateOTP("otpauth://totp/...?secret=JBSWY3DPEHPK3PXP"),
+  "backup.passphrase": "correct-horse-battery-staple",  // string — sofort aufgeloest
+}
+```
+
+**Lazy OTP-Aufloesung:** OTP-Felder (`one-time-password`) werden als
+**lazy Env-Werte** (Funktionen) in den Env geschrieben. Der TOTP-Code wird
+erst berechnet, wenn ein Modul oder Template tatsaechlich auf den Wert
+zugreift (via `resolveEnv`). Das ist notwendig, weil OTPs nur 30 Sekunden
+gueltig sind und zwischen `op.resolve()` und der tatsaechlichen Verwendung
+beliebig viel Zeit vergehen kann.
+
+Regulaere Secrets (Passwoerter, Tokens, etc.) werden sofort als Strings
+aufgeloest, da sie sich nicht zeitlich aendern.
+
+**Umsetzung via `op inject`:** Das Modul nutzt `op inject`, um alle
+Referenzen in einem einzigen CLI-Aufruf aufzuloesen. Dafuer wird intern
+ein JSON-Template gebaut und durch `op inject` gepipt:
+
+```bash
+echo '{"db.password":"op://Employee/Database/password","api.token":"op://Employee/API-Service/credential"}' | op inject
+# → {"db.password":"s3cret!","api.token":"tok_abc123..."}
+```
+
+Das Ergebnis wird geparst und die Werte in den Env geschrieben. Ein einziger
+`op inject`-Aufruf loest alle regulaeren Referenzen auf.
+
+**OTP-Felder** werden separat behandelt:
+
+- OTP-Referenzen (Feld endet auf `one-time-password` oder `otp`) werden aus
+  dem `op inject`-Batch herausgenommen.
+- Fuer jedes OTP-Feld wird einmalig via `op read <reference>` die
+  `otpauth://`-URI abgerufen (enthaelt das TOTP-Secret).
+- In den Env wird eine Funktion `() => string` geschrieben, die bei jedem
+  Zugriff aus dem Secret einen frischen TOTP-Code berechnet (lokal, ohne
+  erneuten `op`-Aufruf).
+
+**Sicherheit:**
+- Aufgeloeste Werte werden **nie in der Konsolenausgabe** angezeigt.
+  Das Modul zeigt nur die Keys an, nicht die Werte (`✓ op: db.password, api.token, admin.otp, backup.passphrase`).
+- Die `op`-CLI muss auf dem Controller installiert und authentifiziert sein
+  (`op signin` oder biometrische Entsperrung).
+
+**Beispiel im Playbook:**
+
+```typescript
+export default server({
+  name: "backend",
+  host: "1.2.3.4",
+  ssh: { user: "bs5", ports: [2222] },
+
+  run: [
+    op.resolve({
+      "convex.jwt_secret":    "op://Infrastructure/Convex/jwt-secret",
+      "convex.admin_pw_hash": "op://Infrastructure/Convex/admin-password-hash",
+      "restic.password":      "op://Infrastructure/Restic/password",
+    }),
+
+    // Ab hier stehen die Secrets im Env zur Verfuegung:
+    file.template("/opt/convex-manager/.env", "./templates/convex.env.tpl"),
+    // Template kann {{convex.jwt_secret}} verwenden
+  ],
+})
+```
+
 ---
 
 # Built-in-Funktionen (keine Module)

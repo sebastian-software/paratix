@@ -45,7 +45,10 @@ Ein Modul ist die kleinste Einheit. Es bildet eine einzelne idempotente
 Operation auf dem Server ab und implementiert die **Plugin-Schnittstelle**:
 
 ```typescript
-type Env = Record<string, string | number>;
+/** Einfacher Wert oder lazy evaluierte Funktion (z.B. für OTPs) */
+type EnvValue = string | number | (() => string | number) | (() => Promise<string | number>);
+
+type Env = Record<string, EnvValue>;
 
 interface ModuleResult {
   status: "ok" | "changed" | "skipped" | "failed";
@@ -66,6 +69,25 @@ interface Module {
 Jedes Modul erhält bei `check` und `apply` den aktuellen `env` — eine
 aggregierte Map aller bisherigen Meta-Einträge plus der initialen Env-Werte
 aus CLI, `.env`-Datei und Playbook.
+
+**Lazy Env-Werte:** Ein Env-Wert kann statt eines direkten Strings auch eine
+Funktion sein, die den Wert erst bei Zugriff erzeugt (optional asynchron).
+Das ist notwendig für zeitkritische Werte wie OTPs, die erst zum
+Verwendungszeitpunkt generiert werden dürfen — nicht bereits beim Auflösen.
+Der Runner bietet eine Hilfsfunktion `resolveEnv(env, key)` die den Wert
+transparent auflöst:
+
+```typescript
+/** Löst einen Env-Wert auf (direkt oder lazy) */
+async function resolveEnv(env: Env, key: string): Promise<string | number> {
+  const value = env[key];
+  if (typeof value === "function") return await value();
+  return value;
+}
+```
+
+Templates und Module nutzen `resolveEnv` statt direktem Zugriff auf `env[key]`,
+damit lazy Werte korrekt aufgelöst werden.
 
 ### Recipe
 
@@ -508,8 +530,10 @@ auf ihre Domänenlogik konzentrieren können statt auf SSH-Plumbing.
 ### Env — der gemeinsame Kontext
 
 Alle Module teilen sich einen gemeinsamen `Env` — eine flache
-`Record<string, string | number>`-Map. Der Env wird aus drei Quellen befüllt,
-wobei spätere Quellen frühere überschreiben:
+`Record<string, EnvValue>`-Map (siehe `EnvValue`-Typ oben). Werte sind in der
+Regel Strings oder Zahlen; für zeitkritische Werte wie OTPs können sie auch
+lazy Funktionen sein. Der Env wird aus drei Quellen befüllt, wobei spätere
+Quellen frühere überschreiben:
 
 ```
 1. .env-Datei    (z.B. .env.production)
