@@ -97,8 +97,12 @@ Eine Recipe bündelt mehrere Module zu einer logischen Einheit (z.B.
 **Recipes implementieren dieselbe Plugin-Schnittstelle wie Module.** Ein
 Playbook muss nicht unterscheiden, ob es ein einzelnes Modul oder eine Recipe
 ausführt (Composite Pattern). Die Recipe reicht dabei die Einzelergebnisse
-ihrer Module transparent nach oben durch, sodass die Ausgabe die volle
-Granularität behält.
+ihrer Module als `ModuleResult[]` transparent nach oben durch, sodass die
+Ausgabe die volle Granularität behält.
+
+**Status-Aggregation:** Der aggregierte Status einer Recipe ergibt sich aus
+den Einzelergebnissen: Wenn mindestens ein Modul `failed` → `failed`. Wenn
+mindestens ein Modul `changed` → `changed`. Sonst `ok`.
 
 ### Playbook (Serverdefinition)
 
@@ -264,6 +268,30 @@ apt-upgrade-20240310   ← läuft beim nächsten Upgrade mit neuem Datum erneut
 podman-install-v5.0    ← läuft erneut wenn auf v5.1 aktualisiert wird
 ```
 
+### Flag-Cleanup (Prefix-basiert)
+
+Beim Setzen eines neuen Flags werden alte Flags mit demselben Prefix
+automatisch geloescht. Jedes State-Flag-Modul kennt seinen Prefix (z.B.
+`apt-upgrade-`). Wird `apt-upgrade-20240310` gesetzt, loescht das Modul
+alle bestehenden Flags die mit `apt-upgrade-` beginnen und nicht dem neuen
+Flag-Namen entsprechen:
+
+```
+VORHER:
+  /var/lib/paratix/flags/apt-upgrade-20230815
+  /var/lib/paratix/flags/apt-upgrade-20240201
+
+APPLY: apt.upgrade("2024-03-10")
+  → rm apt-upgrade-20230815, apt-upgrade-20240201
+  → touch apt-upgrade-20240310
+
+NACHHER:
+  /var/lib/paratix/flags/apt-upgrade-20240310
+```
+
+Dadurch wachsen die Flags nicht unbegrenzt, und es ist kein manuelles
+Cleanup noetig.
+
 ---
 
 ## Kernkonzept 3: Stabile SSH-Verbindung
@@ -306,12 +334,18 @@ bis eine Verbindung steht. Das ermöglicht:
 ### Port-Umlegung zur Laufzeit
 
 Wenn ein Modul den SSH-Port ändert (z.B. `sshd.port(22022)`), meldet es den
-neuen Port über `meta` zurück (`{ "sshd.port": 22022 }`). Paratix erkennt
-diesen Key und stellt die SSH-Verbindung auf den neuen Port um.
+neuen Port über `meta` zurück (`{ "sshd.port": 22022 }`). Paratix fuegt den
+neuen Port dynamisch zur internen Port-Liste hinzu, damit er bei einem
+Reconnect beruecksichtigt wird. Die Portaenderung im SSHD wird erst nach
+einem Service-Restart wirksam — der Reconnect erfolgt automatisch, wenn die
+bestehende Verbindung dabei abbricht.
 
 **Sicherheitsprüfung:** Das `sshd.port`-Modul validiert vor der Umlegung, dass
 der Zielport in der `ssh.ports`-Liste der Serverdefinition eingetragen ist.
 Andernfalls würde Paratix sich nach einem Reboot nicht mehr verbinden können.
+
+**Fehlerfall:** Wenn der Reconnect auf dem neuen Port fehlschlaegt (Timeout
+erreicht), bricht der gesamte Run mit einem Fehler ab.
 
 ### Reconnect bei Verbindungsverlust
 
@@ -492,6 +526,20 @@ interface SshConnection {
    *   if (remoteHash === localHash) return "ok";
    */
   sha256(remotePath: string): Promise<string | null>;
+
+  // --- Verbindungsinformationen ---
+
+  /**
+   * Gibt die aktuelle Verbindungskonfiguration zurueck.
+   * Wird von Modulen wie rsync.sync benoetigt, die lokal laufen
+   * aber SSH-Parameter fuer den Transfer brauchen.
+   */
+  getConnectionInfo(): {
+    host: string;
+    port: number;
+    user: string;
+    privateKeyPath: string;
+  };
 }
 ```
 
@@ -913,6 +961,68 @@ Aenderungen anstehen (`needs-apply`).
   kompakt (eine Zeile pro Modul). SSH-Output-Streaming bei `apply()` liefert
   Details wenn noetig.
 
+### Fehlerausgabe bei failed
+
+Bei `status: "failed"` wird die Modul-Zeile rot markiert. Darunter werden
+stderr und stdout eingerueckt ausgegeben. Der Run bricht sofort ab (kein
+`continueOnError`).
+
+```
+[hardening]
+  ✓  apt: fail2ban ufw              ok
+  ✗  sshd: port → 22022             failed
+     │ Error: Could not write to /etc/ssh/sshd_config
+     │ Permission denied
+```
+
+Der eingerueckte Block mit `│`-Prefix zeigt die kombinierte stderr/stdout-
+Ausgabe des fehlgeschlagenen Befehls. Das gibt dem Benutzer sofort Kontext
+fuer die Fehlerdiagnose.
+
+### CLI Exit-Codes
+
+```
+Exit-Code 0: Alle Module ok oder changed — Run erfolgreich
+Exit-Code 1: Mindestens ein Modul failed — Run abgebrochen
+Exit-Code 2: Usage-Error (ungueltige Parameter, Datei nicht gefunden, Syntaxfehler)
+```
+
+### Signal-Ausfuehrung im Runner
+
+Signal-Module (`service.restart`, `service.reload`, `compose.restart`)
+implementieren das Module-Interface, werden aber vom Runner anders aufgerufen
+als normale Module. Der Runner fuehrt Signale NICHT im normalen sequenziellen
+Durchlauf aus, sondern:
+
+- Nach Abschluss aller Module einer Recipe prueft der Runner, ob mindestens
+  ein Modul `changed` zurueckgegeben hat.
+- Falls ja: Alle Signal-Module der Recipe werden sequenziell ausgefuehrt
+  (`check` wird uebersprungen, direkt `apply`).
+- Falls nein: Alle Signal-Module werden mit Status `ok` in der Ausgabe
+  angezeigt, aber nicht ausgefuehrt.
+- Dasselbe gilt fuer Playbook-level Signale am Ende des gesamten Runs.
+
+Signal-Module haben keinen sinnvollen `check` — ihr `check` gibt immer
+`needs-apply` zurueck. Die Entscheidung ob sie ausgefuehrt werden trifft der
+Runner basierend auf dem aggregierten `changed`-Status, nicht das Signal-Modul
+selbst.
+
+### rsync — Verbindungsdaten
+
+`SshConnection` bietet eine Methode `getConnectionInfo()` die
+`{ host, port, user, privateKeyPath }` zurueckgibt. Das `rsync.sync`-Modul
+ist kein lokales Modul — es erhaelt die `SshConnection`, liest die
+Verbindungsdaten via `getConnectionInfo()`, und fuehrt `rsync` lokal via
+`child_process` aus.
+
+### command.shell (kein command.run)
+
+Nur `command.shell` wird implementiert. Ein separates `command.run` ohne
+Shell-Interpretation entfaellt, da ueber SSH ohnehin alles durch eine Shell
+laeuft. `command.shell` fuehrt einen Befehl via `/bin/sh -c` aus und gibt
+immer `changed` zurueck, es sei denn ein benutzerdefinierter Check-Befehl
+ist angegeben.
+
 ### Projekt-Setup und Tooling
 
 | Aspekt           | Wahl          | Begruendung                              |
@@ -923,6 +1033,46 @@ Aenderungen anstehen (`needs-apply`).
 | CLI-Parser       | `commander`   | Etabliert, grosse Community, stabil      |
 | Package-Struktur | Single Package| Alles haengt zusammen, kein Monorepo     |
 | Paketmanager     | `pnpm`        | Bereits konfiguriert                     |
+
+### Projektstruktur
+
+```
+src/
+├── cli.ts                  # Commander-Setup, Entry-Point
+├── runner.ts               # Sequenzieller Executor
+├── ssh.ts                  # SshConnection-Klasse
+├── env.ts                  # Env-Handling, resolveEnv
+├── template.ts             # Template-Engine
+├── types.ts                # Module, ModuleResult, Env, etc.
+├── output.ts               # Terminal-Renderer (picocolors)
+├── recipe.ts               # recipe()-Funktion
+├── server.ts               # server()-Funktion
+└── modules/
+    ├── index.ts             # Re-Export aller Module
+    ├── apt.ts
+    ├── file.ts
+    ├── service.ts
+    ├── sshd.ts
+    ├── ufw.ts
+    ├── user.ts
+    ├── group.ts
+    └── op.ts
+```
+
+Zwei Export-Pfade in `package.json`:
+
+```json
+{
+  "exports": {
+    ".": "./dist/index.js",
+    "./modules": "./dist/modules/index.js"
+  }
+}
+```
+
+`src/index.ts` exportiert `server`, `recipe`, `when`, `assert`, `debug`,
+`fail`, `pause`. Das Package `paratix/modules` exportiert alle Modul-Namespaces
+(`apt`, `file`, `service`, etc.).
 
 ### Lokale Module (Controller-seitig)
 
@@ -944,7 +1094,7 @@ Befehle auf dem Controller aus (z.B. via `child_process`), nicht ueber SSH.
 
 ### Secret-Masking
 
-Env-Keys die `password`, `secret`, `token` oder `key` enthalten
+Env-Keys die `password`, `secret` oder `token` enthalten
 (case-insensitive) werden in jeder Konsolenausgabe automatisch maskiert
 (`***`). Das betrifft Debug-Ausgaben, Fehlerausgaben und Template-Rendering-
 Logs. Die Werte selbst bleiben intern unveraendert — nur die Anzeige wird
@@ -980,3 +1130,107 @@ function recipe(name: string, modules: Module[], options?: {
 `server()` validiert die uebergebene Konfiguration und gibt sie typisiert
 zurueck. `recipe()` erzeugt ein Composite-Module, das seine Kinder sequenziell
 ausfuehrt und Signale nur bei `changed`-Status triggert.
+
+### Built-in-Funktionen als Module
+
+Die Ablaufsteuerungsfunktionen `assert`, `debug`, `fail` und `pause`
+implementieren die Module-Schnittstelle. Dadurch bleibt der Runner einfach
+(nur `Module[]`, kein Union-Typ) und die Funktionen erscheinen in der Ausgabe
+wie jedes andere Modul.
+
+```typescript
+function assert(condition: (env: Env) => boolean, message: string): Module;
+// check: condition(env) ? "ok" : wirft Fehler mit message
+// apply: wird nie aufgerufen (check wirft bei Fehler)
+
+function debug(message: string): Module;
+// check: immer "ok" (gibt message auf der Konsole aus)
+// apply: wird nie aufgerufen
+
+function fail(message: string): Module;
+// check: wirft immer einen Fehler mit message
+// apply: wird nie aufgerufen
+
+function pause(message?: string): Module;
+// check: immer "needs-apply"
+// apply: wartet auf Benutzerbestaetigung im Terminal, gibt "changed" zurueck
+```
+
+Ausgabe-Beispiel:
+
+```
+  ✓  assert: Port muss positiv sein    ok
+  ✓  debug: Starting deployment...     ok
+  ⏸  pause: Continue?                  waiting
+```
+
+### Bedingte Ausfuehrung mit when()
+
+Da das `run`-Array zur **Importzeit** (beim Laden der TypeScript-Datei)
+ausgewertet wird, steht der Env zu diesem Zeitpunkt noch nicht zur Verfuegung.
+Bedingte Logik, die auf Env-Werten basiert (z.B. Ergebnisse von
+`system.facts`), kann daher nicht mit normalen Spread-Ausdruecken realisiert
+werden.
+
+Paratix bietet dafuer den `when()`-Wrapper:
+
+```typescript
+function when(
+  condition: (env: Env) => boolean,
+  ...modules: Module[]
+): Module;
+```
+
+`when()` gibt ein Module zurueck, dessen `check` und `apply` nur ausgefuehrt
+werden, wenn die Bedingung zur **Laufzeit** (mit dem aktuellen Env) erfuellt
+ist. Andernfalls gibt es `{ status: "skipped" }` zurueck.
+
+**Beispiel:**
+
+```typescript
+import { server, recipe, when } from "paratix";
+import { system, apt } from "paratix/modules";
+
+export default server({
+  // ...
+  run: [
+    system.facts(),
+
+    // Bedingt: nur auf Ubuntu
+    when(
+      (env) => env["system.os"] === "ubuntu",
+      apt.repository("ppa:nginx/stable"),
+    ),
+
+    // Mehrere Module bedingt ausfuehren
+    when(
+      (env) => Number(env["system.ram.total"]) >= 4096,
+      apt.installed("elasticsearch"),
+      file.template("/etc/elasticsearch/elasticsearch.yml", "./templates/es.yml.tpl"),
+    ),
+  ],
+});
+```
+
+**Ausgabeverhalten:** Bei nicht erfuellter Bedingung zeigt `when()` eine
+einzelne Zeile mit Status `skipped` an:
+
+```
+  ⊘  when: system.os === ubuntu        skipped (condition)
+```
+
+Bei erfuellter Bedingung werden die enthaltenen Module einzeln mit ihrem
+jeweiligen Status angezeigt — `when()` selbst erscheint dann nicht in der
+Ausgabe. Das ergibt minimale Ausgabe bei Skip und volle Granularitaet bei
+Ausfuehrung:
+
+```
+  ✓  apt: ppa:nginx/stable             ok
+```
+
+`when()` kann auch innerhalb von Recipes verwendet werden.
+
+**when() und Signals:** Wenn alle Module innerhalb eines `when()` in einer
+Recipe `skipped` sind (Bedingung nicht erfuellt), zaehlt dies als
+"kein `changed`" fuer die Signal-Ausloesung. Signale werden nur getriggert,
+wenn mindestens ein Modul tatsaechlich `changed` zurueckgegeben hat.

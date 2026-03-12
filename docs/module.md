@@ -17,8 +17,8 @@ idempotent, sofern nicht anders vermerkt.
 | `apt.absent` | Stellt sicher, dass ein Paket nicht installiert ist. Entfernt es bei Bedarf. | `dpkg -l <paket>` pruefen | einfach |
 | `apt.upgrade` | Fuehrt ein vollstaendiges `apt-get upgrade` durch. Nutzt State-Flag mit Datum, da die Operation teuer ist und nicht effizient geprueft werden kann. | State-Flag: `/var/lib/paratix/flags/apt-upgrade-<datum>` | einfach |
 | `apt.distUpgrade` | Fuehrt ein `apt-get dist-upgrade` durch. Wie `apt.upgrade`, aber mit Distribution-Upgrade. Nutzt State-Flag mit Datum. | State-Flag: `/var/lib/paratix/flags/apt-dist-upgrade-<datum>` | einfach |
-| `apt.key` | Fuegt einen GPG-Schluessel fuer APT hinzu oder entfernt ihn. Wird benoetigt, um Drittanbieter-Repositories zu authentifizieren. | Pruefung ob Key-ID in `apt-key list` vorhanden | einfach |
-| `apt.repository` | Fuegt ein APT-Repository hinzu oder entfernt es. Verwaltet Dateien in `/etc/apt/sources.list.d/`. | Pruefung ob Datei in `/etc/apt/sources.list.d/` existiert und korrekt ist | einfach |
+| `apt.key` | Fuegt einen GPG-Schluessel fuer APT hinzu. Laedt den Key von einer URL und speichert ihn unter `/etc/apt/keyrings/<name>.gpg` (moderne Methode, kein `apt-key`). Wird von `apt.repository` via `signed-by` referenziert. | Pruefung ob `/etc/apt/keyrings/<name>.gpg` existiert und korrekt ist | einfach |
+| `apt.repository` | Fuegt ein APT-Repository hinzu oder entfernt es. Verwaltet Dateien in `/etc/apt/sources.list.d/`. Unterstuetzt `signed-by` Parameter fuer Verknuepfung mit einem via `apt.key` installierten GPG-Schluessel (wird automatisch aus dem Key-Namen abgeleitet, falls nicht explizit angegeben). | Pruefung ob Datei in `/etc/apt/sources.list.d/` existiert und korrekt ist | einfach |
 | `apt.debconf` | Setzt vorkonfigurierte Antworten fuer interaktive Paketinstallationen (z.B. Postfix-Konfigurationstyp). | `debconf-show <paket>` parsen | mittel |
 
 ---
@@ -29,8 +29,8 @@ idempotent, sofern nicht anders vermerkt.
 |---|---|---|---|
 | `file.copy` | Kopiert eine lokale Datei auf den Server. Vergleicht per SHA-256-Hash, ob die Datei bereits identisch ist. | SHA-256-Vergleich lokal vs. remote | einfach |
 | `file.template` | Rendert ein Template mit dem aktuellen Env und kopiert das Ergebnis auf den Server. Templates nutzen `{{key}}`-Syntax fuer Env-Zugriff. | SHA-256 des gerenderten Templates vs. Remote-Datei | einfach |
-| `file.line` | Stellt sicher, dass eine bestimmte Zeile in einer Datei vorhanden ist. Kann optional eine Zeile ersetzen, die einem Muster entspricht. | `grep -qF` nach Zeile oder Muster | mittel |
-| `file.block` | Fuegt einen Textblock mit Marker-Zeilen in eine Datei ein oder aktualisiert ihn. Marker ermoglichen wiederholtes Aktualisieren desselben Blocks. | `grep` nach Marker-Zeilen, Inhalt zwischen Markern vergleichen | mittel |
+| `file.line` | Stellt sicher, dass eine bestimmte Zeile in einer Datei vorhanden ist. Ohne `match`-Parameter: fuegt die Zeile am Ende hinzu, falls nicht vorhanden. Mit `match`-Parameter (Regex): ersetzt die erste Zeile die auf das Muster passt. Beispiel: `file.line("/etc/ssh/sshd_config", "PermitRootLogin no", { match: "^PermitRootLogin" })`. | `grep -qF` nach Zeile oder `grep` nach `match`-Pattern | mittel |
+| `file.block` | Fuegt einen Textblock mit Marker-Zeilen in eine Datei ein oder aktualisiert ihn. Marker-Format: `# BEGIN paratix: <block-name>` / `# END paratix: <block-name>`. Der Kommentar-Prefix (`#`, `//`, `;`) ist konfigurierbar (Default: `#`). Ermoeglicht wiederholtes Aktualisieren desselben Blocks. | `grep` nach Marker-Zeilen, Inhalt zwischen Markern vergleichen | mittel |
 | `file.replace` | Ersetzt alle Vorkommen eines regulaeren Ausdrucks in einer Datei. | `grep` nach Pattern, pruefen ob Ersetzung noetig | mittel |
 | `file.assemble` | Setzt eine Konfigurationsdatei aus mehreren Fragmentdateien zusammen. Nützlich fuer modulare Konfigurationen (z.B. sudoers.d-Stil). | SHA-256 der konkatenierten Fragmente vs. Zieldatei | mittel |
 | `file.properties` | Verwaltet Dateieigenschaften: Berechtigungen (mode), Besitzer (owner), Gruppe (group), Typ (file/directory/symlink/absent). | `stat`-Befehl, Vergleich aller Properties | mittel |
@@ -129,13 +129,18 @@ idempotent, sofern nicht anders vermerkt.
 |---|---|---|---|
 | `git.clone` | Klont ein Git-Repository oder aktualisiert es auf einen bestimmten Branch, Tag oder Commit. Nützlich fuer Code-Deployments auf den Server. | `git rev-parse HEAD` im Zielverzeichnis vs. gewuenschte Referenz | mittel |
 
+> **Hinweis:** Authentifizierung fuer private Repositories (SSH-Agent-Forwarding,
+> Deploy-Keys) ist aktuell nicht im Scope. `git.clone` funktioniert mit
+> oeffentlichen Repositories und Repositories, die ueber bereits auf dem Server
+> konfigurierte SSH-Keys erreichbar sind.
+
 ---
 
 ## download — Datei-Downloads
 
 | Modul | Beschreibung | Check-Strategie | Aufwand |
 |---|---|---|---|
-| `download.url` | Laedt eine Datei von einer HTTP/HTTPS-URL auf den Server herunter. Unterstuetzt Checksum-Verifikation (SHA-256). | Checksum der existierenden Datei vs. erwartete Checksum | mittel |
+| `download.url` | Laedt eine Datei von einer HTTP/HTTPS-URL auf den Server herunter. Nutzt `curl` (Default) mit Fallback auf `wget` falls curl nicht installiert ist. Unterstuetzt Checksum-Verifikation (SHA-256). | Checksum der existierenden Datei vs. erwartete Checksum | mittel |
 | `download.large` | Wie `download.url`, aber fuer grosse Dateien. Nutzt State-Flag, da der Download teuer ist und die Checksum-Pruefung bei sehr grossen Dateien langsam sein kann. | State-Flag: `/var/lib/paratix/flags/download-<url-hash>` | mittel |
 
 ---
@@ -160,8 +165,7 @@ idempotent, sofern nicht anders vermerkt.
 
 | Modul | Beschreibung | Check-Strategie | Aufwand |
 |---|---|---|---|
-| `command.run` | Fuehrt einen Befehl auf dem Server aus (ohne Shell-Interpretation). Gibt immer `changed` zurueck, da keine Idempotenz-Pruefung moeglich. Optional: benutzerdefinierter Check-Befehl. | Kein Check (always changed) oder benutzerdefinierter Check | trivial |
-| `command.shell` | Wie `command.run`, aber mit Shell-Interpretation (`/bin/sh -c`). Ermoeglicht Pipes, Redirects und Shell-Variablen. | Kein Check (always changed) oder benutzerdefinierter Check | trivial |
+| `command.shell` | Fuehrt einen Befehl auf dem Server via `/bin/sh -c` aus. Ermoeglicht Pipes, Redirects und Shell-Variablen. Gibt immer `changed` zurueck, es sei denn ein benutzerdefinierter Check-Befehl ist angegeben. | Kein Check (always changed) oder benutzerdefinierter Check | trivial |
 
 ---
 
@@ -169,7 +173,7 @@ idempotent, sofern nicht anders vermerkt.
 
 | Modul | Beschreibung | Check-Strategie | Aufwand |
 |---|---|---|---|
-| `net.waitFor` | Wartet darauf, dass eine Bedingung erfuellt ist: Port offen, Datei vorhanden, oder String in Datei. Nützlich nach Service-Starts oder Deployments. | Polling mit Timeout | mittel |
+| `net.waitFor` | Wartet darauf, dass eine Bedingung erfuellt ist: Port offen, Datei vorhanden, oder String in Datei. Nützlich nach Service-Starts oder Deployments. Polling-Intervall: 2s (konfigurierbar). Default-Timeout: 60s (konfigurierbar). | Polling mit Timeout | mittel |
 | `net.request` | Fuehrt einen HTTP-Request vom Server aus und prueft die Antwort (Statuscode, Body). Nützlich fuer Health-Checks. | HTTP-Statuscode und optionaler Body-Check | mittel |
 
 ---
@@ -219,6 +223,11 @@ Ergebnisse als flache Key-Value-Paare in den Env:
 | `system.ip.private` | `ip -4 addr` parsen (erster RFC-1918-Bereich) |
 | `system.disk.root` | `df -m /` parsen |
 
+**Fehlerverhalten:** Wenn ein einzelner Befehl fehlschlaegt (z.B. `lsb_release`
+nicht installiert), gibt `system.facts` `failed` zurueck. Alle Befehle muessen
+erfolgreich sein, da nachfolgende Module und `when()`-Bedingungen sich auf
+vollstaendige System-Informationen verlassen.
+
 **Nutzung in Templates:**
 
 ```
@@ -227,18 +236,30 @@ Ergebnisse als flache Key-Value-Paare in den Env:
 worker_processes {{system.cpu.cores}};
 ```
 
-**Nutzung in Playbooks (bedingte Logik):**
+**Nutzung in Playbooks (bedingte Logik via `when()`):**
 
 ```typescript
-run: [
-  system.facts(),
+import { server, when } from "paratix";
+import { system, apt } from "paratix/modules";
 
-  // Bedingt: nur auf Ubuntu
-  ...(env["system.os"] === "ubuntu" ? [
-    apt.repository("ppa:nginx/stable"),
-  ] : []),
-]
+export default server({
+  // ...
+  run: [
+    system.facts(),
+
+    // Bedingt: nur auf Ubuntu
+    when(
+      (env) => env["system.os"] === "ubuntu",
+      apt.repository("ppa:nginx/stable"),
+    ),
+  ],
+});
 ```
+
+> **Hinweis:** Bedingte Logik, die auf Env-Werten basiert, muss `when()`
+> verwenden, da das `run`-Array zur Importzeit ausgewertet wird und der Env
+> erst zur Laufzeit zur Verfuegung steht. Siehe `when()` in der
+> [Initialbeschreibung](./initialbeschreibung.md).
 
 > **Hinweis:** `system.facts` muss nicht am Anfang jedes Playbooks stehen.
 > Es ist ein normales Modul — wer die Werte nicht braucht, laesst es weg.
@@ -270,7 +291,8 @@ arbeiten relativ zu einem `project_dir`, in dem die `compose.yml` (bzw.
 | `compose.up` | Stellt sicher, dass alle Services eines Compose-Projekts laufen. Fuehrt `compose up -d` aus, falls Container fehlen oder nicht laufen. Akzeptiert ein `project_dir` (Pfad auf dem Server zur `compose.yml`) und optional eine Liste von Service-Namen. | `compose ps --format json` parsen — alle erwarteten Container muessen `running` sein | mittel |
 | `compose.pull` | Zieht die neuesten Images fuer alle Services eines Compose-Projekts. Gibt `changed` zurueck, wenn mindestens ein Image aktualisiert wurde. | `compose pull` ausfuehren und Ausgabe auf `Pulling`/`Downloaded` pruefen | mittel |
 | `compose.down` | Stoppt und entfernt alle Container eines Compose-Projekts. Optional mit `--volumes` zum Entfernen persistenter Volumes. | `compose ps --format json` parsen — keine Container duerfen existieren | einfach |
-| `compose.config` | Deployt eine `compose.yml`-Datei auf den Server (via `file.copy` oder `file.template`) und validiert sie mit `compose config`. Kombiniert Datei-Deployment mit Syntax-Pruefung. | SHA-256-Vergleich der Compose-Datei | mittel |
+| `compose.config` | Deployt eine `compose.yml`-Datei auf den Server (via `file.copy` oder `file.template` als Komposition) und validiert sie mit `compose config`. Kombiniert Datei-Deployment mit Syntax-Pruefung. | SHA-256-Vergleich der Compose-Datei | mittel |
+| `compose.restart` | Signal-Modul: Fuehrt `compose down && compose up -d` aus. Wird nur als Signal in Recipes verwendet und nur getriggert, wenn innerhalb der Recipe ein Modul `changed` zurueckgegeben hat. | Signal-basiert (kein eigenstaendiger Check) | einfach |
 
 **Runtime-Erkennung:**
 
