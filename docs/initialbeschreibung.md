@@ -325,6 +325,7 @@ ssh: {
   ports: [22, 22022],
   privateKey: "~/.ssh/id_ed25519",
   passwordFallback: true,
+  sudoPassword: "...",       // optional, fuer non-root User
 }
 ```
 
@@ -341,6 +342,66 @@ Reihenfolge der Authentifizierung:
 
 1. Key-basiert (`privateKey`)
 2. Interaktive Passwortabfrage im Terminal (falls `passwordFallback: true`)
+
+### Sudo (Privilege Escalation)
+
+Wenn `ssh.user` nicht `root` ist, fuehrt Paratix automatisch alle Befehle
+mit `sudo` aus. Module muessen sich nicht darum kuemmern — die
+`SshConnection` prefixed Befehle transparent mit `sudo`.
+
+**Sudo-Passwort — Reihenfolge:**
+
+1. Versuche `sudo` ohne Passwort (NOPASSWD-Konfiguration auf dem Server)
+2. Falls ein Passwort noetig ist und `ssh.sudoPassword` gesetzt ist → verwende es
+3. Falls kein `sudoPassword` gesetzt → interaktive Abfrage im Terminal (einmalig)
+4. Passwort wird fuer die Dauer des Runs im Speicher gecacht
+
+Das Passwort wird via `sudo -S` ueber stdin uebergeben.
+
+**Konfiguration:**
+
+```typescript
+// Variante 1: Passwortloses sudo (NOPASSWD in sudoers)
+ssh: {
+  user: "deploy",
+  ports: [22],
+  privateKey: "~/.ssh/id_ed25519",
+}
+
+// Variante 2: Sudo-Passwort explizit (z.B. via op.resolve in den Env gelegt)
+ssh: {
+  user: "deploy",
+  ports: [22],
+  privateKey: "~/.ssh/id_ed25519",
+  sudoPassword: env["deploy.sudo_password"],
+}
+
+// Variante 3: Interaktive Abfrage (kein sudoPassword, Paratix fragt im Terminal)
+ssh: {
+  user: "deploy",
+  ports: [22],
+  privateKey: "~/.ssh/id_ed25519",
+}
+```
+
+Variante 1 und 3 sehen identisch aus — der Unterschied ergibt sich zur
+Laufzeit: Hat der User NOPASSWD konfiguriert, laeuft sudo ohne Passwort.
+Wenn nicht, fragt Paratix interaktiv.
+
+**Dateioperationen als Non-Root:**
+
+SFTP als non-root User kann nicht direkt nach `/etc/` schreiben. Die
+`SshConnection` loest das transparent:
+
+- `ssh.writeFile()` nutzt intern `sudo tee` statt SFTP
+- `ssh.uploadFile()` laedt nach `/tmp/` hoch, dann `sudo mv` ans Ziel
+- `ssh.readFile()` nutzt `sudo cat`
+- `ssh.sha256()` nutzt `sudo sha256sum`
+
+Module bemerken keinen Unterschied — die API bleibt identisch.
+
+**Scope:** Sudo eskaliert immer zu `root`. `sudo -u <anderer-user>` ist
+aktuell nicht vorgesehen.
 
 ### Multi-Port-Verbindung
 
@@ -1148,8 +1209,7 @@ paratix/                         # Repository-Root
 ├── package.json                 # Workspace-Root (private: true)
 ├── docs/                        # Dokumentation
 │   ├── initialbeschreibung.md
-│   ├── module.md
-│   └── ansible.md
+│   └── module.md
 │
 ├── packages/
 │   ├── paratix/                 # Hauptpackage (npm: paratix)
@@ -1238,6 +1298,16 @@ Zwischenspeichern, kein Cleanup noetig.
 ### server() und recipe(): Rueckgabetypen
 
 ```typescript
+interface SshConfig {
+  user: string;
+  ports: number[];
+  privateKey: string;
+  passwordFallback?: boolean;
+  /** Sudo-Passwort fuer non-root User. Optional — wenn nicht gesetzt und
+   *  sudo ein Passwort verlangt, wird interaktiv im Terminal gefragt. */
+  sudoPassword?: string;
+}
+
 interface ServerDefinition {
   name: string;
   host: string;
