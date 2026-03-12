@@ -809,3 +809,174 @@ paratix apply ./vps-backup.ts
 | Lernkurve       | moderat        | gering (plain TypeScript)  |
 | Erweiterbarkeit | Plugins/Roles  | Plugin-Schnittstelle (TS)  |
 | SSH-Resilienz   | begrenzt       | Multi-Port + Auto-Reconnect|
+
+---
+
+## Implementierungsentscheidungen
+
+Die folgenden Entscheidungen konkretisieren die technische Umsetzung der oben
+beschriebenen Architektur.
+
+---
+
+### Runner: Laden der TypeScript-Datei
+
+Die Playbook-Datei wird per `await import()` mit tsx als ESM-Loader direkt in
+den Runner-Prozess geladen (`--import tsx/esm`). Kein Child-Process, kein IPC.
+Der Runner importiert das Default-Export (`ServerDefinition`) und verarbeitet
+es direkt.
+
+### Runner: Fehlerbehandlung
+
+Bei `status: "failed"` bricht der gesamte Run sofort ab. Nachfolgende Module
+und Recipes werden nicht mehr ausgefuehrt. Es gibt kein `continueOnError` —
+ein Fehler ist ein unerwarteter Zustand, bei dem Weiterausfuehrung riskant
+waere, da nachfolgende Module auf dem Ergebnis aufbauen koennten.
+
+### SSH-Library
+
+Paratix nutzt `ssh2` (npm) fuer die SSH-Verbindung. Die Library bietet volle
+Kontrolle ueber Connections, SFTP, Streaming und Reconnect-Logik. Die
+`SshConnection`-API mappt direkt auf `ssh2`-Primitiven.
+
+### SSH: Connection-Modell
+
+Eine einzelne persistente SSH-Verbindung pro Run. Sequenzielle Ausfuehrung
+benoetigt keine parallelen Connections. Die `SshConnection`-Klasse kapselt
+eine `ssh2`-Connection mit integrierter Reconnect-Logik.
+
+### SSH: Reconnect-Backoff
+
+```
+Initial:    1s
+Faktor:     2x
+Maximum:    30s
+Jitter:     ±25%
+Timeout:    konfigurierbar (--reconnect-timeout), Default: unbegrenzt
+```
+
+Verlauf: 1s → 2s → 4s → 8s → 16s → 30s → 30s → ... (jeweils ±25% Jitter).
+Bei jedem Reconnect-Versuch werden alle konfigurierten Ports der Reihe nach
+durchprobiert.
+
+### Template-Engine
+
+Bewusst minimalistisch — nur `{{key}}`-Ersetzung:
+
+- `{{key}}` wird durch `resolveEnv(env, key)` ersetzt.
+- **Fehlende Keys werfen einen Fehler.** Stilles Ignorieren wuerde zu
+  kaputten Konfigurationsdateien fuehren.
+- **Escaping:** `\{{` fuer literales `{{`.
+- **Kein Looping, kein Conditional** — dafuer gibt es TypeScript im Playbook.
+  Komplexe Logik gehoert in die Playbook-Datei, nicht in Templates.
+- **Encoding:** immer UTF-8.
+
+### file.copy / file.template: Berechtigungen
+
+Beide Module akzeptieren optionale Parameter `mode` und `owner`:
+
+```typescript
+file.copy("/etc/ssh/sshd_config", "./configs/sshd_config", {
+  mode: "644",
+  owner: "root:root",
+})
+```
+
+- **Default `mode`:** nicht gesetzt → Datei erhaelt Standard-Permissions (`644`).
+- **Default `owner`:** nicht gesetzt → bleibt beim SSH-User (typisch: `root`).
+
+### Verschachtelte Recipes
+
+Erlaubt. Da Recipe das Module-Interface implementiert (Composite Pattern),
+koennen Recipes andere Recipes enthalten. Das ergibt sich natuerlich aus der
+Architektur und erfordert keinen zusaetzlichen Code.
+
+### Parallele Ausfuehrung
+
+Nicht vorgesehen. Alle Module und Recipes laufen streng sequenziell, wie in
+der Architektur beschrieben. Parallelisierung waere ein Breaking Change im
+mentalen Modell und kann spaeter als explizites Opt-in ergaenzt werden.
+
+### Dry-Run-Modus
+
+`--dry-run` stellt eine SSH-Verbindung her und fuehrt alle `check()`-Methoden
+aus, aber kein `apply()`. Der Benutzer sieht den **tatsaechlichen**
+Server-Zustand: welche Module bereits erfuellt sind (`ok`) und welche
+Aenderungen anstehen (`needs-apply`).
+
+### Ausgabe und Terminal
+
+- **Kein Logging-Framework.** Direkte Terminal-Ausgabe mit eigenem Renderer
+  (die Ausgabeformatierung ist spezifisch fuer Paratix).
+- **Farben:** `picocolors` — winzig, keine Abhaengigkeiten.
+- **Kein `--verbose`/`--quiet`** im ersten Release. Die Ausgabe ist bereits
+  kompakt (eine Zeile pro Modul). SSH-Output-Streaming bei `apply()` liefert
+  Details wenn noetig.
+
+### Projekt-Setup und Tooling
+
+| Aspekt           | Wahl          | Begruendung                              |
+| ---------------- | ------------- | ---------------------------------------- |
+| Runtime          | Node.js >= 24 | Fuer `import()`, Top-Level-Await, tsx     |
+| Build            | `tsup`        | Schnell, esbuild-basiert, erzeugt ESM    |
+| Test             | `vitest`      | Schnell, TypeScript-nativ                |
+| CLI-Parser       | `commander`   | Etabliert, grosse Community, stabil      |
+| Package-Struktur | Single Package| Alles haengt zusammen, kein Monorepo     |
+| Paketmanager     | `pnpm`        | Bereits konfiguriert                     |
+
+### Lokale Module (Controller-seitig)
+
+Module koennen sich als `local` markieren. Der Runner uebergibt ihnen dann
+kein SSH-Objekt. So koennen neben `op.resolve` spaeter weitere lokale Module
+hinzukommen (z.B. `local.exec`, `terraform.apply`) ohne Sonderbehandlung.
+
+```typescript
+interface Module {
+  name: string;
+  local?: boolean;
+  check(ssh: SshConnection | null, env: Env): Promise<"ok" | "needs-apply">;
+  apply(ssh: SshConnection | null, env: Env): Promise<ModuleResult>;
+}
+```
+
+Bei `local: true` wird `ssh` als `null` uebergeben. Lokale Module fuehren
+Befehle auf dem Controller aus (z.B. via `child_process`), nicht ueber SSH.
+
+### Secret-Masking
+
+Env-Keys die `password`, `secret`, `token` oder `key` enthalten
+(case-insensitive) werden in jeder Konsolenausgabe automatisch maskiert
+(`***`). Das betrifft Debug-Ausgaben, Fehlerausgaben und Template-Rendering-
+Logs. Die Werte selbst bleiben intern unveraendert — nur die Anzeige wird
+maskiert.
+
+### Temp-Dateien
+
+Keine Temp-Dateien. Gerenderte Templates werden im Speicher gehalten und
+direkt via `ssh.writeFile()` auf den Server geschrieben. Kein lokales
+Zwischenspeichern, kein Cleanup noetig.
+
+### server() und recipe(): Rueckgabetypen
+
+```typescript
+interface ServerDefinition {
+  name: string;
+  host: string;
+  ssh: SshConfig;
+  env?: Env;
+  run: Module[];
+  signals?: Module[];
+}
+
+function server(config: ServerDefinition): ServerDefinition;
+// Identity-Funktion mit Typ-Validierung.
+
+function recipe(name: string, modules: Module[], options?: {
+  signals?: Module[];
+}): Module;
+// Gibt ein Module zurueck (Composite Pattern).
+```
+
+`server()` validiert die uebergebene Konfiguration und gibt sie typisiert
+zurueck. `recipe()` erzeugt ein Composite-Module, das seine Kinder sequenziell
+ausfuehrt und Signale nur bei `changed`-Status triggert.
