@@ -320,6 +320,187 @@ pollt Paratix aktiv auf allen konfigurierten Ports, bis der Server wieder
 erreichbar ist. Danach setzt es den Lauf fort — alle bereits erledigten
 Schritte überspringen sich via Idempotenz-Check.
 
+### Output-Streaming
+
+Die Ausgabe von SSH-Befehlen wird in Echtzeit auf das lokale Terminal
+gestreamt. Das ist wichtig für:
+
+- **Lange Operationen:** `apt upgrade` oder `docker build` können Minuten
+  dauern — der Benutzer sieht den Fortschritt live statt auf ein stilles
+  Terminal zu starren.
+- **Fehlerdiagnose:** Fehlermeldungen erscheinen sofort, nicht erst nach
+  Abschluss des Befehls.
+- **Interaktive Kontrolle:** Der Benutzer kann bei hängenden Prozessen
+  frühzeitig Ctrl+C drücken.
+
+Das Streaming ist standardmäßig aktiv. Module können es pro Befehl steuern:
+
+```typescript
+// Ausgabe wird live gestreamt (Standard bei apply)
+await ssh.exec("apt-get upgrade -y");
+
+// Ausgabe wird unterdrückt, nur Rückgabewert zählt (Standard bei check)
+const result = await ssh.exec("dpkg -l nginx", { silent: true });
+```
+
+Bei `check()` wird die Ausgabe standardmäßig unterdrückt (silent), da Checks
+schnell und unauffällig laufen sollen. Bei `apply()` wird sie gestreamt, damit
+der Benutzer den Fortschritt verfolgen kann. Module können dieses Verhalten
+bei Bedarf überschreiben.
+
+### SshConnection-API
+
+Die `SshConnection` ist das zentrale Objekt, das Module für alle
+Server-Interaktionen nutzen. Sie bietet Hilfsmethoden für typische
+Operationen, damit Module nicht selbst SSH-Befehle zusammenbauen und
+Ausgaben parsen müssen.
+
+```typescript
+interface ExecResult {
+  /** Exit-Code des Befehls */
+  code: number;
+  /** Gesamte stdout-Ausgabe */
+  stdout: string;
+  /** Gesamte stderr-Ausgabe */
+  stderr: string;
+}
+
+interface ExecOptions {
+  /** Ausgabe unterdrücken (Standard: false bei apply, true bei check) */
+  silent?: boolean;
+  /** Timeout in Millisekunden (Standard: kein Timeout) */
+  timeout?: number;
+  /** Bei Exit-Code != 0 keinen Fehler werfen (Standard: false) */
+  ignoreExitCode?: boolean;
+  /** Umgebungsvariablen für den Befehl */
+  env?: Record<string, string>;
+}
+
+interface SshConnection {
+  // --- Befehlsausführung ---
+
+  /** Führt einen Shell-Befehl aus. Wirft bei Exit-Code != 0. */
+  exec(command: string, options?: ExecOptions): Promise<ExecResult>;
+
+  /**
+   * Führt einen Befehl aus und gibt nur den Exit-Code zurück.
+   * Wirft nie — ideal für Checks.
+   *
+   * Beispiel:
+   *   const installed = await ssh.test("dpkg -l nginx");
+   *   const exists = await ssh.test("[ -f /etc/nginx/nginx.conf ]");
+   */
+  test(command: string): Promise<boolean>;
+
+  /**
+   * Führt einen Befehl aus und gibt stdout zurück (getrimmt).
+   * Wirft bei Exit-Code != 0.
+   *
+   * Beispiel:
+   *   const hostname = await ssh.output("hostname");
+   *   const hash = await ssh.output("sha256sum /etc/ssh/sshd_config | cut -d' ' -f1");
+   */
+  output(command: string, options?: ExecOptions): Promise<string>;
+
+  /**
+   * Führt einen Befehl aus und gibt stdout als Zeilen-Array zurück.
+   *
+   * Beispiel:
+   *   const packages = await ssh.lines("dpkg --get-selections | grep -v deinstall | awk '{print $1}'");
+   */
+  lines(command: string, options?: ExecOptions): Promise<string[]>;
+
+  // --- Dateioperationen ---
+
+  /**
+   * Liest eine Datei vom Server.
+   *
+   * Beispiel:
+   *   const config = await ssh.readFile("/etc/ssh/sshd_config");
+   */
+  readFile(remotePath: string): Promise<string>;
+
+  /**
+   * Schreibt eine Datei auf den Server. Erstellt Elternverzeichnisse
+   * automatisch. Setzt optional Berechtigungen und Besitzer.
+   *
+   * Beispiel:
+   *   await ssh.writeFile("/etc/nginx/sites-available/app", renderedConfig, {
+   *     mode: "644",
+   *     owner: "root:root",
+   *   });
+   */
+  writeFile(remotePath: string, content: string, options?: {
+    mode?: string;
+    owner?: string;
+  }): Promise<void>;
+
+  /**
+   * Kopiert eine lokale Datei auf den Server.
+   *
+   * Beispiel:
+   *   await ssh.uploadFile("./configs/sshd_config", "/etc/ssh/sshd_config");
+   */
+  uploadFile(localPath: string, remotePath: string, options?: {
+    mode?: string;
+    owner?: string;
+  }): Promise<void>;
+
+  /**
+   * Lädt eine Datei vom Server herunter.
+   *
+   * Beispiel:
+   *   await ssh.downloadFile("/var/log/auth.log", "./logs/auth.log");
+   */
+  downloadFile(remotePath: string, localPath: string): Promise<void>;
+
+  /**
+   * Prüft ob eine Datei/ein Verzeichnis existiert.
+   * Shortcut für ssh.test("[ -e <path> ]").
+   */
+  exists(remotePath: string): Promise<boolean>;
+
+  /**
+   * Gibt den SHA-256-Hash einer Remote-Datei zurück.
+   * Gibt null zurück wenn die Datei nicht existiert.
+   *
+   * Beispiel:
+   *   const remoteHash = await ssh.sha256("/etc/ssh/sshd_config");
+   *   const localHash = sha256(fs.readFileSync("./configs/sshd_config"));
+   *   if (remoteHash === localHash) return "ok";
+   */
+  sha256(remotePath: string): Promise<string | null>;
+}
+```
+
+### Warum Hilfsmethoden?
+
+Ohne Hilfsmethoden müsste jedes Modul SSH-Befehle als Strings
+zusammenbauen, Exit-Codes manuell prüfen und Ausgaben parsen:
+
+```typescript
+// Ohne Hilfsmethoden (fehleranfällig, repetitiv)
+const result = await ssh.exec("dpkg -l nginx 2>/dev/null | grep -q '^ii'", {
+  ignoreExitCode: true,
+});
+if (result.code === 0) return "ok";
+
+// Mit Hilfsmethoden (klar, kurz)
+if (await ssh.test("dpkg -l nginx | grep -q '^ii'")) return "ok";
+```
+
+```typescript
+// Ohne Hilfsmethoden
+const result = await ssh.exec("sha256sum /etc/ssh/sshd_config");
+const hash = result.stdout.split(" ")[0].trim();
+
+// Mit Hilfsmethoden
+const hash = await ssh.sha256("/etc/ssh/sshd_config");
+```
+
+Die Hilfsmethoden eliminieren Boilerplate und sorgen dafür, dass Module sich
+auf ihre Domänenlogik konzentrieren können statt auf SSH-Plumbing.
+
 ---
 
 ## Kernkonzept 4: Env-System und Templates
