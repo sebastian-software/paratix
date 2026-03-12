@@ -46,7 +46,11 @@ Operation auf dem Server ab und implementiert die **Plugin-Schnittstelle**:
 
 ```typescript
 /** Einfacher Wert oder lazy evaluierte Funktion (z.B. für OTPs) */
-type EnvValue = string | number | (() => string | number) | (() => Promise<string | number>);
+type EnvValue =
+  | string
+  | number
+  | (() => string | number)
+  | (() => Promise<string | number>);
 
 type Env = Record<string, EnvValue>;
 
@@ -129,27 +133,42 @@ export default server({
   },
 
   run: [
-    recipe("hardening", [
-      apt.installed("ufw", "fail2ban"),
-      sshd.port(22022),
-      file.template("/etc/ssh/sshd_config", "./templates/sshd_config.tpl"),
-      ufw.rule("allow", [22022, 80, 443]),
-    ], {
-      signals: [service.restart("sshd")],
-    }),
+    recipe(
+      "hardening",
+      [
+        apt.installed("ufw", "fail2ban"),
+        sshd.port(22022),
+        file.template("/etc/ssh/sshd_config", "./files/sshd_config.tmpl"),
+        ufw.rule("allow", [22022, 80, 443]),
+      ],
+      {
+        signals: [service.restart("sshd")],
+      },
+    ),
 
-    recipe("podman", [
-      apt.installed("podman"),
-      file.copy("/etc/containers/registries.conf", "./configs/registries.conf"),
-    ], {
-      signals: [service.restart("podman")],
-    }),
+    recipe(
+      "podman",
+      [
+        apt.installed("podman"),
+        file.copy("/etc/containers/registries.conf", "./files/registries.conf"),
+      ],
+      {
+        signals: [service.restart("podman")],
+      },
+    ),
 
-    recipe("app", [
-      file.template("/etc/nginx/sites-available/app", "./templates/nginx-app.tpl"),
-    ], {
-      signals: [service.restart("nginx")],
-    }),
+    recipe(
+      "app",
+      [
+        file.template(
+          "/etc/nginx/sites-available/app",
+          "./files/nginx-app.tmpl.conf",
+        ),
+      ],
+      {
+        signals: [service.restart("nginx")],
+      },
+    ),
 
     apt.upgrade("2024-03-10"),
   ],
@@ -196,15 +215,15 @@ STATUS: ok
 
 ```
 CHECK:  sha256sum /etc/ssh/sshd_config → a3f9...
-        sha256sum ./configs/sshd_config → a3f9...  (identisch)
+        sha256sum ./files/sshd_config → a3f9...  (identisch)
 APPLY:  (entfällt)
 STATUS: ok
 
 --- nach lokaler Änderung an sshd_config ---
 
 CHECK:  sha256sum /etc/ssh/sshd_config → a3f9...
-        sha256sum ./configs/sshd_config → 7c21...  (unterschiedlich)
-APPLY:  scp ./configs/sshd_config → /etc/ssh/sshd_config
+        sha256sum ./files/sshd_config → 7c21...  (unterschiedlich)
+APPLY:  scp ./files/sshd_config → /etc/ssh/sshd_config
 STATUS: changed
 ```
 
@@ -319,6 +338,7 @@ Ersteinrichtung eines frischen Servers, auf dem der eigene Key noch nicht
 hinterlegt ist. Passwörter werden nicht in der Serverdefinition gespeichert.
 
 Reihenfolge der Authentifizierung:
+
 1. Key-basiert (`privateKey`)
 2. Interaktive Passwortabfrage im Terminal (falls `passwordFallback: true`)
 
@@ -486,21 +506,29 @@ interface SshConnection {
    *     owner: "root:root",
    *   });
    */
-  writeFile(remotePath: string, content: string, options?: {
-    mode?: string;
-    owner?: string;
-  }): Promise<void>;
+  writeFile(
+    remotePath: string,
+    content: string,
+    options?: {
+      mode?: string;
+      owner?: string;
+    },
+  ): Promise<void>;
 
   /**
    * Kopiert eine lokale Datei auf den Server.
    *
    * Beispiel:
-   *   await ssh.uploadFile("./configs/sshd_config", "/etc/ssh/sshd_config");
+   *   await ssh.uploadFile("./files/sshd_config", "/etc/ssh/sshd_config");
    */
-  uploadFile(localPath: string, remotePath: string, options?: {
-    mode?: string;
-    owner?: string;
-  }): Promise<void>;
+  uploadFile(
+    localPath: string,
+    remotePath: string,
+    options?: {
+      mode?: string;
+      owner?: string;
+    },
+  ): Promise<void>;
 
   /**
    * Lädt eine Datei vom Server herunter.
@@ -522,7 +550,7 @@ interface SshConnection {
    *
    * Beispiel:
    *   const remoteHash = await ssh.sha256("/etc/ssh/sshd_config");
-   *   const localHash = sha256(fs.readFileSync("./configs/sshd_config"));
+   *   const localHash = sha256(fs.readFileSync("./files/sshd_config"));
    *   if (remoteHash === localHash) return "ok";
    */
   sha256(remotePath: string): Promise<string | null>;
@@ -611,7 +639,7 @@ Für die Generierung von Konfigurationsdateien bietet Paratix ein
 Template-System. Templates haben Zugriff auf alle Env-Einträge:
 
 ```
-# ./templates/nginx-app.tpl
+# ./files/nginx-app.tmpl.conf
 server {
     listen 80;
     server_name {{app.domain}};
@@ -672,13 +700,17 @@ Signale werden am Ende einer Recipe deklariert und **nur ausgeführt, wenn
 mindestens ein Modul innerhalb der Recipe `changed` zurückgegeben hat**:
 
 ```typescript
-recipe("hardening", [
-  sshd.port(22022),
-  file.copy("/etc/ssh/sshd_config", "./configs/sshd_config"),
-  ufw.rule("allow", [22022, 80, 443]),
-], {
-  signals: [service.restart("sshd")],
-})
+recipe(
+  "hardening",
+  [
+    sshd.port(22022),
+    file.copy("/etc/ssh/sshd_config", "./files/sshd_config"),
+    ufw.rule("allow", [22022, 80, 443]),
+  ],
+  {
+    signals: [service.restart("sshd")],
+  },
+);
 ```
 
 Wenn weder `sshd.port` noch `file.copy` etwas geändert haben, wird `sshd`
@@ -692,7 +724,9 @@ des gesamten Laufs ausgewertet:
 ```typescript
 export default server({
   // ...
-  run: [ /* ... */ ],
+  run: [
+    /* ... */
+  ],
   signals: [service.restart("nginx")],
 });
 ```
@@ -744,12 +778,12 @@ Die TypeScript-Datei wird via `tsx` ausgeführt.
 
 ### Parameter
 
-| Parameter              | Beschreibung                                          |
-| ---------------------- | ----------------------------------------------------- |
-| `--reconnect-timeout`  | Timeout in Sekunden für SSH-Reconnect (Standard: ∞)   |
-| `--dry-run`            | Nur Check ausführen, keine Änderungen vornehmen       |
-| `--env key=value`      | Env-Eintrag setzen (überschreibt Playbook-Werte)      |
-| `--env-file <path>`    | Env-Einträge aus DotEnv-Datei laden                   |
+| Parameter             | Beschreibung                                        |
+| --------------------- | --------------------------------------------------- |
+| `--reconnect-timeout` | Timeout in Sekunden für SSH-Reconnect (Standard: ∞) |
+| `--dry-run`           | Nur Check ausführen, keine Änderungen vornehmen     |
+| `--env key=value`     | Env-Eintrag setzen (überschreibt Playbook-Werte)    |
+| `--env-file <path>`   | Env-Einträge aus DotEnv-Datei laden                 |
 
 ---
 
@@ -846,17 +880,17 @@ paratix apply ./vps-backup.ts
 
 ## Abgrenzung zu Ansible
 
-| Merkmal         | Ansible        | Paratix                    |
-| --------------- | -------------- | -------------------------- |
-| Sprache         | YAML + Python  | TypeScript                 |
-| Typsicherheit   | Nein           | Ja                         |
-| Idempotenz      | Ja (Module)    | Ja (Module)                |
-| State           | zustandslos    | zustandslos + opt. Flags   |
-| Modulökosystem  | riesig (3000+) | selbst gebaut, klein       |
-| Agentless       | Ja             | Ja                         |
-| Lernkurve       | moderat        | gering (plain TypeScript)  |
-| Erweiterbarkeit | Plugins/Roles  | Plugin-Schnittstelle (TS)  |
-| SSH-Resilienz   | begrenzt       | Multi-Port + Auto-Reconnect|
+| Merkmal         | Ansible        | Paratix                     |
+| --------------- | -------------- | --------------------------- |
+| Sprache         | YAML + Python  | TypeScript                  |
+| Typsicherheit   | Nein           | Ja                          |
+| Idempotenz      | Ja (Module)    | Ja (Module)                 |
+| State           | zustandslos    | zustandslos + opt. Flags    |
+| Modulökosystem  | riesig (3000+) | selbst gebaut, klein        |
+| Agentless       | Ja             | Ja                          |
+| Lernkurve       | moderat        | gering (plain TypeScript)   |
+| Erweiterbarkeit | Plugins/Roles  | Plugin-Schnittstelle (TS)   |
+| SSH-Resilienz   | begrenzt       | Multi-Port + Auto-Reconnect |
 
 ---
 
@@ -924,10 +958,10 @@ Bewusst minimalistisch — nur `{{key}}`-Ersetzung:
 Beide Module akzeptieren optionale Parameter `mode` und `owner`:
 
 ```typescript
-file.copy("/etc/ssh/sshd_config", "./configs/sshd_config", {
+file.copy("/etc/ssh/sshd_config", "./files/sshd_config", {
   mode: "644",
   owner: "root:root",
-})
+});
 ```
 
 - **Default `mode`:** nicht gesetzt → Datei erhaelt Standard-Permissions (`644`).
@@ -1023,43 +1057,138 @@ laeuft. `command.shell` fuehrt einen Befehl via `/bin/sh -c` aus und gibt
 immer `changed` zurueck, es sei denn ein benutzerdefinierter Check-Befehl
 ist angegeben.
 
+### Template-Namenskonvention
+
+Alle lokalen Dateien (Templates und statische Konfigurationen) liegen in einem
+gemeinsamen `files/`-Verzeichnis. Ob eine Datei ein Template ist, wird im Code
+durch die Wahl von `file.template` vs. `file.copy` entschieden — nicht durch
+das Verzeichnis.
+
+Fuer menschliche Lesbarkeit und IDE-Unterstuetzung gilt folgende
+Namenskonvention:
+
+- **Template mit Extension:** `*.tmpl.*` — das `.tmpl` steht vor der
+  Original-Extension, damit die IDE den Dateityp erkennt.
+  Beispiel: `nginx-app.tmpl.conf`, `traefik-compose.tmpl.yml`
+- **Template ohne Extension:** `*.tmpl` — da die Originaldatei keine
+  Extension hat, wird `.tmpl` als Extension angehaengt.
+  Beispiel: `sshd_config.tmpl`
+- **Statische Datei:** Originalname ohne `.tmpl`.
+  Beispiel: `registries.conf`
+
+Die Konvention ist rein informativ — `file.template` und `file.copy`
+unterscheiden sich durch den Funktionsaufruf, nicht durch den Dateinamen.
+
+### Projekt-Scaffolding (`create-paratix`)
+
+Ein neues Server-Projekt wird per Scaffolding erstellt:
+
+```
+pnpm create paratix vps-01-mailcow
+npm create paratix vps-01-mailcow
+```
+
+Dies erzeugt folgende Verzeichnisstruktur:
+
+```
+vps-01-mailcow/
+├── package.json              # Dependency auf paratix
+├── tsconfig.json             # TypeScript-Konfiguration fuer IDE-Support
+├── .gitignore                # node_modules, .env, dist
+├── .env.example              # Beispiel-Env-Werte (Template fuer .env)
+├── server.ts                 # Beispiel-Playbook
+└── files/                    # Templates und Konfigurationsdateien
+    └── .gitkeep
+```
+
+**Paketmanager-Erkennung:** `create-paratix` erkennt den aufrufenden
+Paketmanager via `process.env.npm_config_user_agent` (z.B. `pnpm/10.30.3`
+oder `npm/10.8.0`) und traegt ihn in die `package.json` des generierten
+Projekts ein (`packageManager`-Feld). Anschliessend wird automatisch
+`install` ausgefuehrt.
+
+**Beispiel-Playbook (`server.ts`):**
+
+```typescript
+import { server } from "paratix";
+import { apt, hostname } from "paratix/modules";
+
+export default server({
+  name: "vps-01",
+  host: "1.2.3.4",
+  ssh: {
+    user: "root",
+    ports: [22],
+    privateKey: "~/.ssh/id_ed25519",
+  },
+
+  run: [hostname.set("vps-01"), apt.upgrade("2024-03-10")],
+});
+```
+
+Das Beispiel ist bewusst minimal aber funktional — es setzt den Hostnamen
+und fuehrt ein Systemupdate durch. Der Benutzer erweitert es nach Bedarf.
+
 ### Projekt-Setup und Tooling
 
-| Aspekt           | Wahl          | Begruendung                              |
-| ---------------- | ------------- | ---------------------------------------- |
-| Runtime          | Node.js >= 24 | Fuer `import()`, Top-Level-Await, tsx     |
-| Build            | `tsup`        | Schnell, esbuild-basiert, erzeugt ESM    |
-| Test             | `vitest`      | Schnell, TypeScript-nativ                |
-| CLI-Parser       | `commander`   | Etabliert, grosse Community, stabil      |
-| Package-Struktur | Single Package| Alles haengt zusammen, kein Monorepo     |
-| Paketmanager     | `pnpm`        | Bereits konfiguriert                     |
+| Aspekt           | Wahl          | Begruendung                           |
+| ---------------- | ------------- | ------------------------------------- |
+| Runtime          | Node.js >= 24 | Fuer `import()`, Top-Level-Await, tsx |
+| Build            | `tsup`        | Schnell, esbuild-basiert, erzeugt ESM |
+| Test             | `vitest`      | Schnell, TypeScript-nativ             |
+| CLI-Parser       | `commander`   | Etabliert, grosse Community, stabil   |
+| Package-Struktur | pnpm Monorepo | `paratix` + `create-paratix`          |
+| Paketmanager     | `pnpm`        | Bereits konfiguriert                  |
 
-### Projektstruktur
+### Projektstruktur (Monorepo)
 
 ```
-src/
-├── cli.ts                  # Commander-Setup, Entry-Point
-├── runner.ts               # Sequenzieller Executor
-├── ssh.ts                  # SshConnection-Klasse
-├── env.ts                  # Env-Handling, resolveEnv
-├── template.ts             # Template-Engine
-├── types.ts                # Module, ModuleResult, Env, etc.
-├── output.ts               # Terminal-Renderer (picocolors)
-├── recipe.ts               # recipe()-Funktion
-├── server.ts               # server()-Funktion
-└── modules/
-    ├── index.ts             # Re-Export aller Module
-    ├── apt.ts
-    ├── file.ts
-    ├── service.ts
-    ├── sshd.ts
-    ├── ufw.ts
-    ├── user.ts
-    ├── group.ts
-    └── op.ts
+paratix/                         # Repository-Root
+├── pnpm-workspace.yaml
+├── package.json                 # Workspace-Root (private: true)
+├── docs/                        # Dokumentation
+│   ├── initialbeschreibung.md
+│   ├── module.md
+│   └── ansible.md
+│
+├── packages/
+│   ├── paratix/                 # Hauptpackage (npm: paratix)
+│   │   ├── package.json
+│   │   └── src/
+│   │       ├── cli.ts           # Commander-Setup, Entry-Point
+│   │       ├── runner.ts        # Sequenzieller Executor
+│   │       ├── ssh.ts           # SshConnection-Klasse
+│   │       ├── env.ts           # Env-Handling, resolveEnv
+│   │       ├── template.ts      # Template-Engine
+│   │       ├── types.ts         # Module, ModuleResult, Env, etc.
+│   │       ├── output.ts        # Terminal-Renderer (picocolors)
+│   │       ├── recipe.ts        # recipe()-Funktion
+│   │       ├── server.ts        # server()-Funktion
+│   │       └── modules/
+│   │           ├── index.ts     # Re-Export aller Module
+│   │           ├── apt.ts
+│   │           ├── file.ts
+│   │           ├── service.ts
+│   │           ├── sshd.ts
+│   │           ├── ufw.ts
+│   │           ├── user.ts
+│   │           ├── group.ts
+│   │           └── op.ts
+│   │
+│   └── create-paratix/          # Scaffolding-Tool (npm: create-paratix)
+│       ├── package.json
+│       ├── src/
+│       │   └── index.ts         # CLI-Entry-Point
+│       └── template/            # Dateien die ins neue Projekt kopiert werden
+│           ├── server.ts
+│           ├── tsconfig.json
+│           ├── gitignore        # Wird zu .gitignore umbenannt
+│           ├── env.example      # Wird zu .env.example umbenannt
+│           └── files/
+│               └── .gitkeep
 ```
 
-Zwei Export-Pfade in `package.json`:
+Zwei Export-Pfade in `packages/paratix/package.json`:
 
 ```json
 {
@@ -1121,9 +1250,13 @@ interface ServerDefinition {
 function server(config: ServerDefinition): ServerDefinition;
 // Identity-Funktion mit Typ-Validierung.
 
-function recipe(name: string, modules: Module[], options?: {
-  signals?: Module[];
-}): Module;
+function recipe(
+  name: string,
+  modules: Module[],
+  options?: {
+    signals?: Module[];
+  },
+): Module;
 // Gibt ein Module zurueck (Composite Pattern).
 ```
 
@@ -1175,10 +1308,7 @@ werden.
 Paratix bietet dafuer den `when()`-Wrapper:
 
 ```typescript
-function when(
-  condition: (env: Env) => boolean,
-  ...modules: Module[]
-): Module;
+function when(condition: (env: Env) => boolean, ...modules: Module[]): Module;
 ```
 
 `when()` gibt ein Module zurueck, dessen `check` und `apply` nur ausgefuehrt
@@ -1206,7 +1336,10 @@ export default server({
     when(
       (env) => Number(env["system.ram.total"]) >= 4096,
       apt.installed("elasticsearch"),
-      file.template("/etc/elasticsearch/elasticsearch.yml", "./templates/es.yml.tpl"),
+      file.template(
+        "/etc/elasticsearch/elasticsearch.yml",
+        "./files/elasticsearch.tmpl.yml",
+      ),
     ),
   ],
 });

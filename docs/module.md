@@ -231,7 +231,7 @@ vollstaendige System-Informationen verlassen.
 **Nutzung in Templates:**
 
 ```
-# ./templates/nginx.tpl
+# ./files/nginx.tmpl.conf
 # Konfiguriert fuer {{system.hostname}} ({{system.os}} {{system.os.version}})
 worker_processes {{system.cpu.cores}};
 ```
@@ -309,7 +309,7 @@ compose.up({ projectDir: "/opt/traefik", runtime: "podman" })
 ```typescript
 recipe("traefik", [
   file.directory("/opt/traefik"),
-  file.template("/opt/traefik/compose.yml", "./templates/traefik-compose.yml.tpl"),
+  file.template("/opt/traefik/compose.yml", "./files/traefik-compose.tmpl.yml"),
   compose.pull({ projectDir: "/opt/traefik" }),
   compose.up({ projectDir: "/opt/traefik" }),
 ], {
@@ -530,7 +530,7 @@ export default server({
     }),
 
     // Ab hier stehen die Secrets im Env zur Verfuegung:
-    file.template("/opt/convex-manager/.env", "./templates/convex.env.tpl"),
+    file.template("/opt/convex-manager/.env", "./files/convex.tmpl.env"),
     // Template kann {{convex.jwt_secret}} verwenden
   ],
 })
