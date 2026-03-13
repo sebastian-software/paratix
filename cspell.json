@@ -3,6 +3,7 @@
   "language": "en,de",
   "import": ["@cspell/dict-de-de/cspell-ext.json"],
   "words": [
+    "alice",
     "chpasswd",
     "claude",
     "dearmor",
