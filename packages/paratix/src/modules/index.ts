@@ -1,6 +1,7 @@
 /** Built-in modules for managing common server resources. */
 export { apt } from "./apt.js"
 export { command } from "./command.js"
+export { cron } from "./cron.js"
 export { file } from "./file.js"
 export { group } from "./group.js"
 export { hostname } from "./hostname.js"
