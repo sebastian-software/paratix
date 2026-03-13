@@ -2,5 +2,23 @@
   "version": "0.2",
   "language": "en,de",
   "import": ["@cspell/dict-de-de/cspell-ext.json"],
-  "words": ["paratix", "getent", "mktemp", "userdel", "usermod", "tmpl"]
+  "words": [
+    "chpasswd",
+    "claude",
+    "dpkg",
+    "getent",
+    "groupadd",
+    "groupdel",
+    "hostnamectl",
+    "mktemp",
+    "nginx",
+    "oxlint",
+    "paratix",
+    "passwordless",
+    "sshd",
+    "systemctl",
+    "tmpl",
+    "userdel",
+    "usermod"
+  ]
 }

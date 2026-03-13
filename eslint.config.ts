@@ -16,32 +16,4 @@ export default [
       "**/*.yml",
     ],
   },
-  {
-    rules: {
-      "@cspell/spellchecker": [
-        "warn",
-        {
-          cspell: {
-            words: [
-              "paratix",
-              "getent",
-              "userdel",
-              "usermod",
-              "tmpl",
-              "oxlint",
-              "nginx",
-              "sshd",
-              "dpkg",
-              "hostnamectl",
-              "systemctl",
-              "groupadd",
-              "groupdel",
-              "chpasswd",
-              "claude",
-            ],
-          },
-        },
-      ],
-    },
-  },
 ]
