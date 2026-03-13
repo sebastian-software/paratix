@@ -8,7 +8,8 @@
       "Bash(pnpm prettier:*)",
       "Bash(pnpm typecheck:*)",
       "Bash(pnpm --filter paratix test)",
-      "Bash(npx prettier:*)"
+      "Bash(npx prettier:*)",
+      "Bash(pnpm format:check)"
     ]
   }
 }
