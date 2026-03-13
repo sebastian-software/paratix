@@ -96,6 +96,8 @@ export type SshConnection = {
   lines: (command: string) => Promise<string[]>
   /** Run a command and return trimmed stdout. */
   output: (command: string) => Promise<string>
+  /** Probe whether passwordless sudo works; prompt interactively if not and cache the password. */
+  probeSudo: () => Promise<void>
   /** Read the full contents of a remote file as a string. */
   readFile: (remotePath: string) => Promise<string>
   /** Return the SHA-256 hex digest of a remote file, or `null` if not found. */

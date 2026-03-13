@@ -2,6 +2,9 @@ import type { ExecResult, SshConnection } from "../../src/types.js"
 
 import { shellQuote } from "../../src/ssh.js"
 
+// eslint-disable-next-line @typescript-eslint/no-empty-function -- Mock noop
+const noop = async (): Promise<void> => {}
+
 export function createMockSsh(
   responses?: Record<string, Partial<ExecResult>>
 ): { calls: string[] } & SshConnection {
@@ -14,9 +17,7 @@ export function createMockSsh(
     disconnect() {
       /* noop */
     },
-    async downloadFile() {
-      /* noop */
-    },
+    downloadFile: noop,
     // eslint-disable-next-line @typescript-eslint/require-await -- Mock implementation
     async exec(command, _options) {
       calls.push(command)
@@ -38,6 +39,7 @@ export function createMockSsh(
       calls.push(command)
       return responses?.[command]?.stdout?.trim() ?? ""
     },
+    probeSudo: noop,
     async readFile(path) {
       return this.output(`cat ${shellQuote(path)}`)
     },
@@ -52,11 +54,7 @@ export function createMockSsh(
       const match = responses?.[command]
       return match ? match.code === 0 : true
     },
-    async uploadFile() {
-      /* noop */
-    },
-    async writeFile() {
-      /* noop */
-    },
+    uploadFile: noop,
+    writeFile: noop,
   }
 }

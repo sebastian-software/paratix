@@ -216,6 +216,7 @@ export async function runPlaybook(
   const environment = initializeEnvironment(options, definition)
   const ssh = new SshConnectionImpl(definition.host, definition.ssh)
   await ssh.connect()
+  await ssh.probeSudo()
 
   const stats = new RunStats()
 
