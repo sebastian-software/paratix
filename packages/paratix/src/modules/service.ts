@@ -60,6 +60,42 @@ export const service = {
   },
 
   /**
+   * Collect status information for all systemd services and expose them as
+   * meta entries. Does not change anything on the server.
+   * @returns A Module that gathers service facts into `service.<name>` meta keys.
+   */
+  facts(): Module {
+    return {
+      async apply(ssh: null | SshConnection): Promise<ModuleResult> {
+        if (!ssh) return { status: "failed" }
+        const result = await ssh.exec(
+          `${SYSTEMCTL} list-units --type=service --all --no-pager --no-legend`,
+          { ignoreExitCode: true, silent: true }
+        )
+        if (result.code !== 0) return { status: "failed" }
+        const meta: Record<string, string> = {}
+        for (const line of result.stdout.split("\n")) {
+          // Strip leading Unicode bullet (● or ○) that systemd prepends to failed units
+          const trimmed = line.trim().replace(/^[\u25CF\u25CB]\s*/v, "")
+          if (!trimmed) continue
+          const parts = trimmed.split(/\s+/v)
+          const unit = parts[0]
+          const active = parts[2]
+          if (!unit || !active) continue
+          const name = unit.replace(/\.service$/v, "")
+          meta[`service.${name}`] = active
+        }
+        return { meta, status: "ok" }
+      },
+      // eslint-disable-next-line @typescript-eslint/require-await -- Interface requires async
+      async check(): Promise<"needs-apply" | "ok"> {
+        return "ok"
+      },
+      name: "service.facts",
+    }
+  },
+
+  /**
    * Reload a systemd service. Intended as a recipe signal -- always applies.
    * @param name - The systemd unit name.
    * @returns A Module that reloads the service.
