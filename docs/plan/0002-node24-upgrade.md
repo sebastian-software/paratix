@@ -38,23 +38,3 @@ Explizites `engines`-Feld in allen drei `package.json`-Dateien, damit pnpm/npm b
 | `package.json` (Root)                    | `engines.node: ">=24.0.0"` hinzugefügt                        |
 | `packages/paratix/package.json`          | `engines.node: ">=24.0.0"` hinzugefügt                        |
 | `packages/create-paratix/package.json`   | `engines.node: ">=24.0.0"` hinzugefügt                        |
-
-## Testergebnisse
-
-### Vorher/Nachher-Vergleich
-
-| Prüfung           | Vorher                      | Nachher         |
-| ----------------- | --------------------------- | --------------- |
-| TypeScript-Fehler | 0                           | 0               |
-| Lint-Warnungen    | 2 (deprecated Env/EnvValue) | 2 (identisch)   |
-| Build             | Erfolg                      | Erfolg          |
-| Tests             | 67/67 bestanden             | 67/67 bestanden |
-
-Keine Regressionen.
-
-## Review-Findings
-
-- **Hinweis:** Das Scaffold-Template generiert kein `engines`-Feld im neuen Projekt (nicht-kritisch)
-- **Hinweis:** Root `package.json` hat kein `"type": "module"` (pre-existing, nicht upgrade-bezogen)
-
-Keine kritischen Findings.

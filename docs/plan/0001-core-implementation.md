@@ -80,27 +80,6 @@ TypeScript, das per SSH Module auf Zielservern ausführt.
 
 8 Test-Dateien mit 67 Tests, Mock-SSH-Helper für Module.
 
-## Review-Findings und Behebung
-
-| #   | Schweregrad | Finding                            | Behebung                                              |
-| --- | ----------- | ---------------------------------- | ----------------------------------------------------- |
-| 1   | KRITISCH    | Shell Injection in SSH-Befehlen    | shellQuote() exportiert und überall eingesetzt        |
-| 2   | KRITISCH    | Sudo-Passwort per echo sichtbar    | printf statt echo verwendet                           |
-| 3   | HOCH        | writeFile Heredoc-Injection        | Einheitlicher printf+tee Ansatz für root und non-root |
-| 5   | HOCH        | Recipe gibt gesamtes Env als meta  | Nur neue/geänderte Keys als meta zurückgeben          |
-| 6   | HOCH        | ignoreExitCode nicht implementiert | exec() rejected bei non-zero wenn nicht ignoriert     |
-| 9   | MITTEL      | Vorhersagbare Temp-Dateinamen      | mktemp statt Date.now()                               |
-| 11  | MITTEL      | Timeout räumt Stream nicht auf     | stream.close() im Timeout-Handler                     |
-
-## Testergebnisse
-
-- 67/67 Tests bestanden
-- oxlint: 0 Fehler
-- eslint: 0 Fehler
-- prettier: Alle Dateien formatiert
-- tsc --noEmit: Keine Typfehler
-- pnpm agent:check: BESTANDEN
-
 ## Offene Punkte (für spätere Iterationen)
 
 - Weitere Module: compose, sysctl, mount, rsync, op, system, net, download, etc.
