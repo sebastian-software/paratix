@@ -104,6 +104,8 @@ export type SshConnection = {
   sha256: (remotePath: string) => Promise<null | string>
   /** Run a command and return `true` if the exit code is zero. */
   test: (command: string) => Promise<boolean>
+  /** Update the target host address (e.g. after a reboot with new IP). */
+  updateHost: (host: string) => void
   /** Upload a local file to the remote host via SFTP. */
   uploadFile: (localPath: string, remotePath: string) => Promise<void>
   /** Write a string to a remote file, creating or overwriting it. */

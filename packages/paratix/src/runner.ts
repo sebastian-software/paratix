@@ -85,6 +85,24 @@ async function handlePortChange(ssh: SshConnectionImpl, meta: Environment): Prom
   }
 }
 
+async function handleReboot(ssh: SshConnectionImpl, meta: Environment): Promise<void> {
+  const reboot = meta["system.reboot"]
+  // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition -- meta values may be undefined at runtime
+  if (reboot == null) return
+
+  const newHost = meta["system.host"]
+  // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition -- meta values may be undefined at runtime
+  if (newHost != null) {
+    ssh.updateHost(String(newHost))
+  }
+
+  try {
+    await ssh.reconnect()
+  } catch (error) {
+    console.error(`Failed to reconnect after reboot: ${String(error)}`)
+  }
+}
+
 async function runRecipeModule(
   recipeModule: RecipeModule,
   environment: Environment,
@@ -96,6 +114,7 @@ async function runRecipeModule(
   if (result.meta != null) {
     currentEnvironment = mergeEnvironment(currentEnvironment, result.meta)
     await handlePortChange(ssh, result.meta)
+    await handleReboot(ssh, result.meta)
   }
 
   return {
@@ -118,6 +137,7 @@ async function applyModule(
   if (result.meta != null) {
     environment = mergeEnvironment(environment, result.meta)
     await handlePortChange(ssh, result.meta)
+    await handleReboot(ssh, result.meta)
   }
 
   return {

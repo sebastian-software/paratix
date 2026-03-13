@@ -56,11 +56,12 @@ export default server({
 | `service`  | Start, stop, enable, disable systemd services                      |
 | `ssh`      | Manage `authorized_keys` and `known_hosts`                         |
 | `sshd`     | Change SSH port, set `sshd_config` options                         |
+| `system`   | Reboot the server with automatic reconnect, read system uptime     |
 | `systemd`  | Deploy systemd unit files and reload the daemon                    |
 | `ufw`      | Add firewall rules, enable UFW                                     |
 | `user`     | Create and remove user accounts                                    |
 
-Additional modules in the spec (not yet implemented): `compose`, `sysctl`, `mount`, `rsync`, `op`, `system`, `package`, `net`, `script`.
+Additional modules in the spec (not yet implemented): `compose`, `sysctl`, `mount`, `rsync`, `op`, `package`, `net`, `script`.
 
 ## CLI options
 

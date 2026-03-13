@@ -54,6 +54,9 @@ export function createMockSsh(
       const match = responses?.[command]
       return match ? match.code === 0 : true
     },
+    updateHost() {
+      /* noop */
+    },
     uploadFile: noop,
     writeFile: noop,
   }

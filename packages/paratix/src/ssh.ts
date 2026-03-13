@@ -30,7 +30,7 @@ export class SshConnectionImpl implements SshConnection {
   private client: Client | null = null
   private readonly config: SshConfig
   private connectedPort = 0
-  private readonly host: string
+  private host: string
 
   public constructor(host: string, config: SshConfig) {
     this.host = host
@@ -191,6 +191,10 @@ export class SshConnectionImpl implements SshConnection {
     } catch {
       return false
     }
+  }
+
+  public updateHost(host: string): void {
+    this.host = host
   }
 
   public async uploadFile(localPath: string, remotePath: string): Promise<void> {
