@@ -16,6 +16,9 @@
   },
   "author": "Sebastian Fastner <s.fastner@sebastian-software.de>",
   "license": "MIT",
+  "engines": {
+    "node": ">=24.0.0"
+  },
   "packageManager": "pnpm@10.30.3",
   "pnpm": {
     "onlyBuiltDependencies": [

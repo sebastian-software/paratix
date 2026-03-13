@@ -11,5 +11,5 @@ export default defineConfig({
   format: ["esm"],
   sourcemap: true,
   splitting: true,
-  target: "node22",
+  target: "node24",
 })

@@ -5,5 +5,5 @@ export default defineConfig({
   clean: true,
   entry: ["src/index.ts"],
   format: ["esm"],
-  target: "node22",
+  target: "node24",
 })
