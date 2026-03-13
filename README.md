@@ -45,16 +45,22 @@ export default server({
 | Module     | What it does                                                       |
 | ---------- | ------------------------------------------------------------------ |
 | `apt`      | Install/remove packages, add repositories, run upgrades            |
+| `archive`  | Extract tar and zip archives, optionally upload from local         |
+| `command`  | Run a shell command (with optional idempotency check)              |
+| `cron`     | Add, update, or remove crontab entries                             |
+| `download` | Download files from HTTP/HTTPS URLs with checksum verification     |
 | `file`     | Copy files, render templates, manage lines/blocks, set permissions |
-| `service`  | Start, stop, enable, disable systemd services                      |
-| `sshd`     | Change SSH port, set `sshd_config` options                         |
-| `ufw`      | Add firewall rules, enable UFW                                     |
-| `user`     | Create and remove user accounts                                    |
+| `git`      | Clone or update a Git repository to a specific ref                 |
 | `group`    | Create and remove system groups                                    |
 | `hostname` | Set the server hostname                                            |
-| `command`  | Run a shell command (with optional idempotency check)              |
+| `service`  | Start, stop, enable, disable systemd services                      |
+| `ssh`      | Manage `authorized_keys` and `known_hosts`                         |
+| `sshd`     | Change SSH port, set `sshd_config` options                         |
+| `systemd`  | Deploy systemd unit files and reload the daemon                    |
+| `ufw`      | Add firewall rules, enable UFW                                     |
+| `user`     | Create and remove user accounts                                    |
 
-Additional modules in the spec (not yet implemented): `compose`, `sysctl`, `mount`, `rsync`, `op`, `git`, `download`, `cron`, `systemd`, `system`, `package`, `net`, `script`, `archive`, `ssh`.
+Additional modules in the spec (not yet implemented): `compose`, `sysctl`, `mount`, `rsync`, `op`, `system`, `package`, `net`, `script`.
 
 ## CLI options
 
