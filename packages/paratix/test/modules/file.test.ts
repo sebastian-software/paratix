@@ -1,3 +1,7 @@
+import { createHash } from "node:crypto"
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs"
+import { tmpdir } from "node:os"
+import { join } from "node:path"
 import { describe, expect, it } from "vitest"
 
 import { file } from "../../src/modules/file.js"
@@ -54,5 +58,626 @@ describe("file.absent", () => {
     const mod = file.absent("/tmp/old-file")
     const result = await mod.check(null, emptyEnv)
     expect(result).toBe("needs-apply")
+  })
+})
+
+// Helper: compute sha256 hex of a string
+function sha256Hex(content: string): string {
+  return createHash("sha256").update(content, "utf8").digest("hex")
+}
+
+// Helper: compute sha256 hex of a buffer
+function sha256HexBuffer(buf: Buffer): string {
+  return createHash("sha256").update(buf).digest("hex")
+}
+
+describe("file.copy", () => {
+  it("check returns ok when SHA-256 matches", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "paratix-test-"))
+    try {
+      const localPath = join(dir, "source.txt")
+      writeFileSync(localPath, "hello world")
+      const localHash = sha256HexBuffer(Buffer.from("hello world"))
+
+      const ssh = createMockSsh({
+        // exists check: [ -e '/remote/file.txt' ] -> true
+        "[ -e '/remote/file.txt' ]": { code: 0 },
+        // sha256 check: [ -f '/remote/file.txt' ] -> true
+        "[ -f '/remote/file.txt' ]": { code: 0 },
+        // sha256sum returns matching hash
+        "sha256sum '/remote/file.txt'": { stdout: `${localHash}  /remote/file.txt` },
+      })
+
+      const mod = file.copy("/remote/file.txt", localPath)
+      const result = await mod.check(ssh, emptyEnv)
+      expect(result).toBe("ok")
+    } finally {
+      rmSync(dir, { recursive: true })
+    }
+  })
+
+  it("check returns needs-apply when file does not exist", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "paratix-test-"))
+    try {
+      const localPath = join(dir, "source.txt")
+      writeFileSync(localPath, "hello world")
+
+      const ssh = createMockSsh({
+        // exists check: file does not exist
+        "[ -e '/remote/file.txt' ]": { code: 1 },
+      })
+
+      const mod = file.copy("/remote/file.txt", localPath)
+      const result = await mod.check(ssh, emptyEnv)
+      expect(result).toBe("needs-apply")
+    } finally {
+      rmSync(dir, { recursive: true })
+    }
+  })
+
+  it("check returns needs-apply when SHA-256 differs", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "paratix-test-"))
+    try {
+      const localPath = join(dir, "source.txt")
+      writeFileSync(localPath, "hello world")
+
+      const ssh = createMockSsh({
+        "[ -e '/remote/file.txt' ]": { code: 0 },
+        "[ -f '/remote/file.txt' ]": { code: 0 },
+        // sha256sum returns a different hash
+        "sha256sum '/remote/file.txt'": { stdout: "deadbeef00000000  /remote/file.txt" },
+      })
+
+      const mod = file.copy("/remote/file.txt", localPath)
+      const result = await mod.check(ssh, emptyEnv)
+      expect(result).toBe("needs-apply")
+    } finally {
+      rmSync(dir, { recursive: true })
+    }
+  })
+
+  it("check returns needs-apply when ssh is null", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "paratix-test-"))
+    try {
+      const localPath = join(dir, "source.txt")
+      writeFileSync(localPath, "hello world")
+
+      const mod = file.copy("/remote/file.txt", localPath)
+      const result = await mod.check(null, emptyEnv)
+      expect(result).toBe("needs-apply")
+    } finally {
+      rmSync(dir, { recursive: true })
+    }
+  })
+
+  it("apply calls uploadFile", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "paratix-test-"))
+    try {
+      const localPath = join(dir, "source.txt")
+      writeFileSync(localPath, "hello world")
+
+      const uploadedFiles: Array<{ local: string; remote: string }> = []
+      const ssh = createMockSsh()
+      // eslint-disable-next-line @typescript-eslint/require-await -- Mock
+      ssh.uploadFile = async (local: string, remote: string) => {
+        uploadedFiles.push({ local, remote })
+      }
+
+      const mod = file.copy("/remote/file.txt", localPath)
+      const result = await mod.apply(ssh, emptyEnv)
+
+      expect(result.status).toBe("changed")
+      expect(uploadedFiles).toStrictEqual([{ local: localPath, remote: "/remote/file.txt" }])
+    } finally {
+      rmSync(dir, { recursive: true })
+    }
+  })
+
+  it("apply sets mode and owner when specified", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "paratix-test-"))
+    try {
+      const localPath = join(dir, "source.txt")
+      writeFileSync(localPath, "hello world")
+
+      const ssh = createMockSsh()
+      const mod = file.copy("/remote/file.txt", localPath, { mode: "0644", owner: "www-data" })
+      await mod.apply(ssh, emptyEnv)
+
+      expect(ssh.calls).toContain("chmod '0644' '/remote/file.txt'")
+      expect(ssh.calls).toContain("chown 'www-data' '/remote/file.txt'")
+    } finally {
+      rmSync(dir, { recursive: true })
+    }
+  })
+})
+
+describe("file.line", () => {
+  it("check returns ok when line exists (without match)", async () => {
+    const ssh = createMockSsh({
+      "grep -qF 'my-line' '/etc/config'": { code: 0 },
+    })
+    const mod = file.line("/etc/config", "my-line")
+    const result = await mod.check(ssh, emptyEnv)
+    expect(result).toBe("ok")
+  })
+
+  it("check returns needs-apply when line is missing (without match)", async () => {
+    const ssh = createMockSsh({
+      "grep -qF 'my-line' '/etc/config'": { code: 1 },
+    })
+    const mod = file.line("/etc/config", "my-line")
+    const result = await mod.check(ssh, emptyEnv)
+    expect(result).toBe("needs-apply")
+  })
+
+  it("check returns ok when exact line exists (with match)", async () => {
+    const ssh = createMockSsh({
+      // match regex found
+      "grep -qE 'KEY=.*' '/etc/config'": { code: 0 },
+      // exact line also found
+      "grep -qF 'KEY=value' '/etc/config'": { code: 0 },
+    })
+    const mod = file.line("/etc/config", "KEY=value", { match: "KEY=.*" })
+    const result = await mod.check(ssh, emptyEnv)
+    expect(result).toBe("ok")
+  })
+
+  it("check returns needs-apply when match found but line differs", async () => {
+    const ssh = createMockSsh({
+      // match regex found
+      "grep -qE 'KEY=.*' '/etc/config'": { code: 0 },
+      // but exact line not found
+      "grep -qF 'KEY=value' '/etc/config'": { code: 1 },
+    })
+    const mod = file.line("/etc/config", "KEY=value", { match: "KEY=.*" })
+    const result = await mod.check(ssh, emptyEnv)
+    expect(result).toBe("needs-apply")
+  })
+
+  it("check returns needs-apply when match not found", async () => {
+    const ssh = createMockSsh({
+      // match regex not found
+      "grep -qE 'KEY=.*' '/etc/config'": { code: 1 },
+    })
+    const mod = file.line("/etc/config", "KEY=value", { match: "KEY=.*" })
+    const result = await mod.check(ssh, emptyEnv)
+    expect(result).toBe("needs-apply")
+  })
+
+  it("check returns needs-apply when ssh is null", async () => {
+    const mod = file.line("/etc/config", "my-line")
+    const result = await mod.check(null, emptyEnv)
+    expect(result).toBe("needs-apply")
+  })
+})
+
+describe("file.template", () => {
+  it("check returns ok when rendered SHA-256 matches remote", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "paratix-test-"))
+    try {
+      const templatePath = join(dir, "template.txt")
+      writeFileSync(templatePath, "Hello World")
+      const renderedHash = sha256Hex("Hello World")
+
+      const ssh = createMockSsh({
+        "[ -e '/remote/out.txt' ]": { code: 0 },
+        "[ -f '/remote/out.txt' ]": { code: 0 },
+        "sha256sum '/remote/out.txt'": { stdout: `${renderedHash}  /remote/out.txt` },
+      })
+
+      const mod = file.template("/remote/out.txt", templatePath)
+      const result = await mod.check(ssh, emptyEnv)
+      expect(result).toBe("ok")
+    } finally {
+      rmSync(dir, { recursive: true })
+    }
+  })
+
+  it("check returns needs-apply when file does not exist", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "paratix-test-"))
+    try {
+      const templatePath = join(dir, "template.txt")
+      writeFileSync(templatePath, "Hello World")
+
+      const ssh = createMockSsh({
+        "[ -e '/remote/out.txt' ]": { code: 1 },
+      })
+
+      const mod = file.template("/remote/out.txt", templatePath)
+      const result = await mod.check(ssh, emptyEnv)
+      expect(result).toBe("needs-apply")
+    } finally {
+      rmSync(dir, { recursive: true })
+    }
+  })
+
+  it("check returns needs-apply when SHA-256 differs", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "paratix-test-"))
+    try {
+      const templatePath = join(dir, "template.txt")
+      writeFileSync(templatePath, "Hello World")
+
+      const ssh = createMockSsh({
+        "[ -e '/remote/out.txt' ]": { code: 0 },
+        "[ -f '/remote/out.txt' ]": { code: 0 },
+        "sha256sum '/remote/out.txt'": { stdout: "deadbeef00000000  /remote/out.txt" },
+      })
+
+      const mod = file.template("/remote/out.txt", templatePath)
+      const result = await mod.check(ssh, emptyEnv)
+      expect(result).toBe("needs-apply")
+    } finally {
+      rmSync(dir, { recursive: true })
+    }
+  })
+
+  it("check returns needs-apply when ssh is null", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "paratix-test-"))
+    try {
+      const templatePath = join(dir, "template.txt")
+      writeFileSync(templatePath, "Hello World")
+
+      const mod = file.template("/remote/out.txt", templatePath)
+      const result = await mod.check(null, emptyEnv)
+      expect(result).toBe("needs-apply")
+    } finally {
+      rmSync(dir, { recursive: true })
+    }
+  })
+
+  it("apply writes rendered content", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "paratix-test-"))
+    try {
+      const templatePath = join(dir, "template.txt")
+      writeFileSync(templatePath, "Hello {{name}}")
+
+      const writtenFiles: Array<{ content: string; path: string }> = []
+      const ssh = createMockSsh()
+      // eslint-disable-next-line @typescript-eslint/require-await -- Mock
+      ssh.writeFile = async (path: string, content: string) => {
+        writtenFiles.push({ content, path })
+      }
+
+      const mod = file.template("/remote/out.txt", templatePath)
+      const result = await mod.apply(ssh, { name: "World" })
+
+      expect(result.status).toBe("changed")
+      expect(writtenFiles).toStrictEqual([{ content: "Hello World", path: "/remote/out.txt" }])
+    } finally {
+      rmSync(dir, { recursive: true })
+    }
+  })
+})
+
+describe("file.assemble", () => {
+  it("check returns ok when SHA-256 of concatenated fragments matches", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "paratix-test-"))
+    try {
+      const frag1 = join(dir, "frag1.txt")
+      const frag2 = join(dir, "frag2.txt")
+      writeFileSync(frag1, "Hello ")
+      writeFileSync(frag2, "World")
+      const combinedHash = sha256Hex("Hello World")
+
+      const ssh = createMockSsh({
+        "[ -e '/remote/assembled.txt' ]": { code: 0 },
+        "[ -f '/remote/assembled.txt' ]": { code: 0 },
+        "sha256sum '/remote/assembled.txt'": { stdout: `${combinedHash}  /remote/assembled.txt` },
+      })
+
+      const mod = file.assemble("/remote/assembled.txt", [frag1, frag2])
+      const result = await mod.check(ssh, emptyEnv)
+      expect(result).toBe("ok")
+    } finally {
+      rmSync(dir, { recursive: true })
+    }
+  })
+
+  it("check returns needs-apply when file does not exist", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "paratix-test-"))
+    try {
+      const frag1 = join(dir, "frag1.txt")
+      writeFileSync(frag1, "Hello")
+
+      const ssh = createMockSsh({
+        "[ -e '/remote/assembled.txt' ]": { code: 1 },
+      })
+
+      const mod = file.assemble("/remote/assembled.txt", [frag1])
+      const result = await mod.check(ssh, emptyEnv)
+      expect(result).toBe("needs-apply")
+    } finally {
+      rmSync(dir, { recursive: true })
+    }
+  })
+
+  it("check returns needs-apply when SHA-256 differs", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "paratix-test-"))
+    try {
+      const frag1 = join(dir, "frag1.txt")
+      writeFileSync(frag1, "Hello")
+
+      const ssh = createMockSsh({
+        "[ -e '/remote/assembled.txt' ]": { code: 0 },
+        "[ -f '/remote/assembled.txt' ]": { code: 0 },
+        "sha256sum '/remote/assembled.txt'": { stdout: "deadbeef00000000  /remote/assembled.txt" },
+      })
+
+      const mod = file.assemble("/remote/assembled.txt", [frag1])
+      const result = await mod.check(ssh, emptyEnv)
+      expect(result).toBe("needs-apply")
+    } finally {
+      rmSync(dir, { recursive: true })
+    }
+  })
+
+  it("check returns needs-apply when ssh is null", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "paratix-test-"))
+    try {
+      const frag1 = join(dir, "frag1.txt")
+      writeFileSync(frag1, "Hello")
+
+      const mod = file.assemble("/remote/assembled.txt", [frag1])
+      const result = await mod.check(null, emptyEnv)
+      expect(result).toBe("needs-apply")
+    } finally {
+      rmSync(dir, { recursive: true })
+    }
+  })
+
+  it("apply writes concatenated fragments", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "paratix-test-"))
+    try {
+      const frag1 = join(dir, "frag1.txt")
+      const frag2 = join(dir, "frag2.txt")
+      writeFileSync(frag1, "Hello ")
+      writeFileSync(frag2, "World")
+
+      const writtenFiles: Array<{ content: string; path: string }> = []
+      const ssh = createMockSsh()
+      // eslint-disable-next-line @typescript-eslint/require-await -- Mock
+      ssh.writeFile = async (path: string, content: string) => {
+        writtenFiles.push({ content, path })
+      }
+
+      const mod = file.assemble("/remote/assembled.txt", [frag1, frag2])
+      const result = await mod.apply(ssh, emptyEnv)
+
+      expect(result.status).toBe("changed")
+      expect(writtenFiles).toStrictEqual([
+        { content: "Hello World", path: "/remote/assembled.txt" },
+      ])
+    } finally {
+      rmSync(dir, { recursive: true })
+    }
+  })
+})
+
+describe("file.block", () => {
+  it("check returns ok when block exists with correct content", async () => {
+    const beginMarker = "# BEGIN paratix: myblock"
+    const endMarker = "# END paratix: myblock"
+    const fileContent = `some line\n${beginMarker}\ncontent line\n${endMarker}\nother line`
+
+    const ssh = createMockSsh({
+      [`cat '/etc/hosts'`]: { stdout: fileContent },
+      [`grep -qF '# BEGIN paratix: myblock' '/etc/hosts'`]: { code: 0 },
+    })
+
+    const mod = file.block("/etc/hosts", { content: "content line", name: "myblock" })
+    const result = await mod.check(ssh, emptyEnv)
+    expect(result).toBe("ok")
+  })
+
+  it("check returns needs-apply when markers not found", async () => {
+    const ssh = createMockSsh({
+      [`grep -qF '# BEGIN paratix: myblock' '/etc/hosts'`]: { code: 1 },
+    })
+
+    const mod = file.block("/etc/hosts", { content: "content line", name: "myblock" })
+    const result = await mod.check(ssh, emptyEnv)
+    expect(result).toBe("needs-apply")
+  })
+
+  it("check returns needs-apply when block content differs", async () => {
+    const beginMarker = "# BEGIN paratix: myblock"
+    const endMarker = "# END paratix: myblock"
+    const fileContent = `${beginMarker}\nold content\n${endMarker}`
+
+    const ssh = createMockSsh({
+      [`cat '/etc/hosts'`]: { stdout: fileContent },
+      [`grep -qF '# BEGIN paratix: myblock' '/etc/hosts'`]: { code: 0 },
+    })
+
+    const mod = file.block("/etc/hosts", { content: "new content", name: "myblock" })
+    const result = await mod.check(ssh, emptyEnv)
+    expect(result).toBe("needs-apply")
+  })
+
+  it("check returns needs-apply when ssh is null", async () => {
+    const mod = file.block("/etc/hosts", { content: "content line", name: "myblock" })
+    const result = await mod.check(null, emptyEnv)
+    expect(result).toBe("needs-apply")
+  })
+
+  it("apply appends block when markers not found", async () => {
+    const writtenFiles: Array<{ content: string; path: string }> = []
+    const ssh = createMockSsh({
+      [`cat '/etc/hosts'`]: { stdout: "existing content\n" },
+      [`grep -qF '# BEGIN paratix: myblock' '/etc/hosts'`]: { code: 1 },
+    })
+    // eslint-disable-next-line @typescript-eslint/require-await -- Mock
+    ssh.writeFile = async (path: string, content: string) => {
+      writtenFiles.push({ content, path })
+    }
+
+    const mod = file.block("/etc/hosts", { content: "my line", name: "myblock" })
+    const result = await mod.apply(ssh, emptyEnv)
+
+    expect(result.status).toBe("changed")
+    expect(writtenFiles[0]?.path).toBe("/etc/hosts")
+    expect(writtenFiles[0]?.content).toContain("# BEGIN paratix: myblock")
+    expect(writtenFiles[0]?.content).toContain("my line")
+    expect(writtenFiles[0]?.content).toContain("# END paratix: myblock")
+    expect(writtenFiles[0]?.content).toContain("existing content")
+  })
+
+  it("apply replaces block content when markers exist", async () => {
+    const beginMarker = "# BEGIN paratix: myblock"
+    const endMarker = "# END paratix: myblock"
+    const existingContent = `before\n${beginMarker}\nold content\n${endMarker}\nafter`
+
+    const writtenFiles: Array<{ content: string; path: string }> = []
+    const ssh = createMockSsh({
+      [`cat '/etc/hosts'`]: { stdout: existingContent },
+      [`grep -qF '# BEGIN paratix: myblock' '/etc/hosts'`]: { code: 0 },
+    })
+    // eslint-disable-next-line @typescript-eslint/require-await -- Mock
+    ssh.writeFile = async (path: string, content: string) => {
+      writtenFiles.push({ content, path })
+    }
+
+    const mod = file.block("/etc/hosts", { content: "new content", name: "myblock" })
+    const result = await mod.apply(ssh, emptyEnv)
+
+    expect(result.status).toBe("changed")
+    expect(writtenFiles[0]?.content).toContain("new content")
+    expect(writtenFiles[0]?.content).not.toContain("old content")
+  })
+})
+
+describe("file.properties", () => {
+  it("check returns ok when all properties match", async () => {
+    const ssh = createMockSsh({
+      "stat -c '%a %U %G' '/var/app'": { stdout: "644 www-data www-data" },
+    })
+
+    const mod = file.properties("/var/app", { group: "www-data", mode: "0644", owner: "www-data" })
+    const result = await mod.check(ssh, emptyEnv)
+    expect(result).toBe("ok")
+  })
+
+  it("check returns needs-apply when mode differs", async () => {
+    const ssh = createMockSsh({
+      "stat -c '%a %U %G' '/var/app'": { stdout: "755 www-data www-data" },
+    })
+
+    const mod = file.properties("/var/app", { mode: "0644" })
+    const result = await mod.check(ssh, emptyEnv)
+    expect(result).toBe("needs-apply")
+  })
+
+  it("check returns needs-apply when owner differs", async () => {
+    const ssh = createMockSsh({
+      "stat -c '%a %U %G' '/var/app'": { stdout: "644 root www-data" },
+    })
+
+    const mod = file.properties("/var/app", { owner: "www-data" })
+    const result = await mod.check(ssh, emptyEnv)
+    expect(result).toBe("needs-apply")
+  })
+
+  it("check returns needs-apply when ssh is null", async () => {
+    const mod = file.properties("/var/app", { mode: "0644" })
+    const result = await mod.check(null, emptyEnv)
+    expect(result).toBe("needs-apply")
+  })
+
+  it("apply runs chmod and chown", async () => {
+    const ssh = createMockSsh()
+    const mod = file.properties("/var/app", { mode: "0644", owner: "www-data" })
+    const result = await mod.apply(ssh, emptyEnv)
+
+    expect(result.status).toBe("changed")
+    expect(ssh.calls).toContain("chmod '0644' '/var/app'")
+    expect(ssh.calls).toContain("chown 'www-data' '/var/app'")
+  })
+})
+
+describe("file.replace", () => {
+  it("check returns ok when pattern not found (nothing to replace)", async () => {
+    const ssh = createMockSsh({
+      "grep -qE 'old-value' '/etc/config'": { code: 1 },
+    })
+
+    const mod = file.replace("/etc/config", "old-value", "new-value")
+    const result = await mod.check(ssh, emptyEnv)
+    expect(result).toBe("ok")
+  })
+
+  it("check returns needs-apply when pattern found", async () => {
+    const ssh = createMockSsh({
+      "grep -qE 'old-value' '/etc/config'": { code: 0 },
+    })
+
+    const mod = file.replace("/etc/config", "old-value", "new-value")
+    const result = await mod.check(ssh, emptyEnv)
+    expect(result).toBe("needs-apply")
+  })
+
+  it("check returns needs-apply when ssh is null", async () => {
+    const mod = file.replace("/etc/config", "old-value", "new-value")
+    const result = await mod.check(null, emptyEnv)
+    expect(result).toBe("needs-apply")
+  })
+
+  it("apply reads file, replaces content and writes back", async () => {
+    const writtenFiles: Array<{ content: string; path: string }> = []
+    const ssh = createMockSsh({
+      "cat '/etc/config'": { stdout: "foo old-value bar old-value baz" },
+    })
+    // eslint-disable-next-line @typescript-eslint/require-await -- Mock
+    ssh.writeFile = async (path: string, content: string) => {
+      writtenFiles.push({ content, path })
+    }
+
+    const mod = file.replace("/etc/config", "old-value", "new-value")
+    const result = await mod.apply(ssh, emptyEnv)
+
+    expect(result.status).toBe("changed")
+    expect(writtenFiles[0]?.content).toBe("foo new-value bar new-value baz")
+  })
+})
+
+describe("file.stat", () => {
+  it("check always returns needs-apply so runner invokes apply", async () => {
+    const ssh = createMockSsh()
+    const mod = file.stat("/var/app/file.txt")
+    const result = await mod.check(ssh, emptyEnv)
+    expect(result).toBe("needs-apply")
+  })
+
+  it("check returns needs-apply when ssh is null", async () => {
+    const mod = file.stat("/var/app/file.txt")
+    const result = await mod.check(null, emptyEnv)
+    expect(result).toBe("needs-apply")
+  })
+
+  it("apply returns metadata in meta field", async () => {
+    const ssh = createMockSsh({
+      "stat -c '%s %a %U %G %F %Y' '/var/app/file.txt'": {
+        stdout: "1234 644 www-data www-data regular file 1700000000",
+      },
+    })
+
+    const mod = file.stat("/var/app/file.txt")
+    const result = await mod.apply(ssh, emptyEnv)
+
+    expect(result.status).toBe("ok")
+    expect(result.meta).toMatchObject({
+      "file.stat.group": "www-data",
+      "file.stat.mode": "644",
+      "file.stat.mtime": "1700000000",
+      "file.stat.owner": "www-data",
+      "file.stat.size": "1234",
+      "file.stat.type": "regular file",
+    })
+  })
+
+  it("apply returns failed when ssh is null", async () => {
+    const mod = file.stat("/var/app/file.txt")
+    const ssh = null
+    const result = await mod.apply(ssh, emptyEnv)
+    expect(result.status).toBe("failed")
   })
 })

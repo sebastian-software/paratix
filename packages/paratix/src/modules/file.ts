@@ -1,4 +1,3 @@
-import { createHash } from "node:crypto"
 import { readFileSync } from "node:fs"
 
 import { shellQuote } from "../ssh.js"
@@ -10,16 +9,10 @@ import {
   NEEDS_APPLY,
   type SshConnection,
 } from "../types.js"
+import { assemble, block, properties, replace, stat } from "./fileExtra.js"
+import { localSha256, sha256String } from "./fileHelpers.js"
 
-function localSha256(filePath: string): string {
-  // eslint-disable-next-line security/detect-non-literal-fs-filename
-  const content = readFileSync(filePath)
-  return createHash("sha256").update(content).digest("hex")
-}
-
-function sha256String(content: string): string {
-  return createHash("sha256").update(content, "utf8").digest("hex")
-}
+export type { BlockOptions } from "./fileExtra.js"
 
 /**
  * Modules for managing remote files and directories.
@@ -48,6 +41,10 @@ export const file = {
       name: `file.absent: ${remotePath}`,
     }
   },
+
+  assemble,
+
+  block,
 
   /**
    * Upload a local file to the remote host.
@@ -168,7 +165,6 @@ export const file = {
             `grep -qE ${shellQuote(options.match)} ${shellQuote(remotePath)}`
           )
           if (!hasMatch) return NEEDS_APPLY
-          // Check if the exact line already exists
           const exactLineExists = await ssh.test(
             `grep -qF ${shellQuote(line)} ${shellQuote(remotePath)}`
           )
@@ -181,6 +177,12 @@ export const file = {
       name: `file.line: ${remotePath}`,
     }
   },
+
+  properties,
+
+  replace,
+
+  stat,
 
   /**
    * Render a local template file with env values and write the result to the remote host.
