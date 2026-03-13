@@ -2,6 +2,7 @@
 export { apt } from "./apt.js"
 export { command } from "./command.js"
 export { cron } from "./cron.js"
+export { download } from "./download.js"
 export { file } from "./file.js"
 export { git } from "./git.js"
 export { group } from "./group.js"

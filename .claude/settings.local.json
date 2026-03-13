@@ -6,7 +6,9 @@
       "Bash(pnpm agent:check)",
       "Bash(pnpm test:*)",
       "Bash(pnpm prettier:*)",
-      "Bash(pnpm typecheck:*)"
+      "Bash(pnpm typecheck:*)",
+      "Bash(pnpm --filter paratix test)",
+      "Bash(npx prettier:*)"
     ]
   }
 }
