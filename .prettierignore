@@ -1,0 +1,6 @@
+dist/
+node_modules/
+.claude/
+pnpm-lock.yaml
+CHANGELOG.md
+*.tmp.md

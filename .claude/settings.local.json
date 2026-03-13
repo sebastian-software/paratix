@@ -1,7 +1,5 @@
 {
   "permissions": {
-    "allow": [
-      "mcp__fetch__fetch"
-    ]
+    "allow": ["mcp__fetch__fetch", "Bash(pnpm exec:*)"]
   }
 }

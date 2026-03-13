@@ -1,17 +1,35 @@
 {
-  "name": "@sebastian-gmbh/paratix",
-  "version": "1.0.0",
-  "description": "",
-  "main": "index.js",
+  "name": "@sebastian-gmbh/paratix-workspace",
+  "private": true,
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "build": "pnpm -r build",
+    "test": "pnpm -r test",
+    "typecheck": "pnpm -r --filter './packages/*' exec tsc --noEmit",
+    "lint": "oxlint && eslint",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
+    "agent:check": "pnpm lint && pnpm format:check && pnpm typecheck && pnpm test"
   },
   "repository": {
     "type": "git",
     "url": "https://github.com/sebastian-software/paratix.git"
   },
-  "keywords": [],
   "author": "Sebastian Fastner <s.fastner@sebastian-software.de>",
   "license": "MIT",
-  "packageManager": "pnpm@10.30.3"
+  "packageManager": "pnpm@10.30.3",
+  "pnpm": {
+    "onlyBuiltDependencies": [
+      "cpu-features",
+      "esbuild",
+      "ssh2"
+    ]
+  },
+  "devDependencies": {
+    "@cspell/dict-de-de": "^4.1.2",
+    "eslint": "^10.0.3",
+    "eslint-config-setup": "^0.3.3",
+    "jiti": "^2.6.1",
+    "oxlint": "^1.55.0",
+    "prettier": "^3.8.1"
+  }
 }

@@ -1,0 +1,33 @@
+{
+  "name": "paratix",
+  "version": "0.1.0",
+  "description": "Idempotent VPS setup tool in TypeScript",
+  "type": "module",
+  "exports": {
+    ".": "./dist/index.js",
+    "./modules": "./dist/modules/index.js"
+  },
+  "bin": {
+    "paratix": "./dist/cli.js"
+  },
+  "scripts": {
+    "build": "tsup",
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "dependencies": {
+    "commander": "^13.1.0",
+    "picocolors": "^1.1.1",
+    "ssh2": "^1.16.0"
+  },
+  "devDependencies": {
+    "@types/node": "^25.5.0",
+    "@types/ssh2": "^1.15.4",
+    "tsup": "^8.4.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.8.0",
+    "vitest": "^3.1.0"
+  },
+  "author": "Sebastian Fastner <s.fastner@sebastian-software.de>",
+  "license": "MIT"
+}

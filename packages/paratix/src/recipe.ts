@@ -1,0 +1,142 @@
+import { mergeEnvironment } from "./environment.js"
+import { printModuleResult, printRecipeHeader } from "./output.js"
+import {
+  type Environment,
+  type Module,
+  type ModuleResult,
+  NEEDS_APPLY,
+  type SshConnection,
+} from "./types.js"
+
+/**
+ * Internal representation of a recipe module.
+ * The `_isRecipe` flag lets the runner distinguish recipes from leaf modules.
+ * @internal
+ */
+export type RecipeModule = {
+  _isRecipe: true
+  _modules: Module[]
+  _signals?: Module[]
+} & Module
+
+type RecipeState = {
+  env: Environment
+  status: "changed" | "failed" | "ok"
+}
+
+async function executeOneModule(
+  targetModule: Module,
+  ssh: null | SshConnection,
+  currentEnvironment: Environment
+): Promise<{ env: Environment; status: string } | null> {
+  const checkResult = await targetModule.check(ssh, currentEnvironment)
+
+  if (checkResult === "ok") {
+    printModuleResult(targetModule.name, "ok")
+    return null
+  }
+
+  const result = await targetModule.apply(ssh, currentEnvironment)
+  printModuleResult(targetModule.name, result.status)
+
+  const environment =
+    result.meta == null ? currentEnvironment : mergeEnvironment(currentEnvironment, result.meta)
+  return { env: environment, status: result.status }
+}
+
+async function executeModules(
+  modules: Module[],
+  ssh: null | SshConnection,
+  environment: Environment
+): Promise<RecipeState> {
+  let aggregatedStatus: "changed" | "failed" | "ok" = "ok"
+  let currentEnvironment = { ...environment }
+
+  for (const currentModule of modules) {
+    // eslint-disable-next-line no-await-in-loop
+    const step = await executeOneModule(currentModule, ssh, currentEnvironment)
+    if (step == null) continue
+
+    if (step.status === "failed") {
+      return { env: step.env, status: "failed" }
+    }
+    currentEnvironment = step.env
+    if (step.status === "changed") aggregatedStatus = "changed"
+  }
+
+  return { env: currentEnvironment, status: aggregatedStatus }
+}
+
+async function triggerSignals(
+  signals: Module[],
+  ssh: null | SshConnection,
+  environment: Environment
+): Promise<void> {
+  for (const signal of signals) {
+    // eslint-disable-next-line no-await-in-loop
+    const result = await signal.apply(ssh, environment)
+    printModuleResult(`signal: ${signal.name}`, result.status)
+  }
+}
+
+/**
+ * Group a list of modules into a named, self-contained recipe.
+ *
+ * The recipe runs each child module in order, short-circuits on the first
+ * failure, and propagates `meta` env values from one module to all subsequent
+ * ones. If any child reports `"changed"`, the optional `signals` are triggered
+ * at the end of the run.
+ *
+ * @param name - Display name shown in the run output header.
+ * @param modules - Ordered list of modules to execute.
+ * @param options - Optional recipe configuration.
+ * @param options.signals - Modules to fire when at least one child changed state.
+ * @returns A RecipeModule that groups the child modules.
+ *
+ * @example
+ * export const nginxRecipe = recipe("nginx", [
+ *   apt.installed("nginx"),
+ *   file.template("/etc/nginx/nginx.conf", "./files/nginx.conf.tmpl"),
+ *   service.enabled("nginx"),
+ * ], {
+ *   signals: [service.reload("nginx")],
+ * });
+ */
+export function recipe(
+  name: string,
+  modules: Module[],
+  options?: { signals?: Module[] }
+): RecipeModule {
+  return {
+    _isRecipe: true,
+    _modules: modules,
+    _signals: options?.signals,
+    async apply(ssh: null | SshConnection, environment: Environment): Promise<ModuleResult> {
+      printRecipeHeader(name)
+      const state = await executeModules(modules, ssh, environment)
+
+      if (state.status === "changed" && options?.signals) {
+        await triggerSignals(options.signals, ssh, state.env)
+      }
+
+      // Only return new/changed meta keys, not the entire environment
+      const meta: Environment = {}
+      let hasMeta = false
+      for (const key of Object.keys(state.env)) {
+        if (!(key in environment) || state.env[key] !== environment[key]) {
+          meta[key] = state.env[key]
+          hasMeta = true
+        }
+      }
+
+      return { meta: hasMeta ? meta : undefined, status: state.status }
+    },
+
+    // eslint-disable-next-line @typescript-eslint/require-await -- Interface requires async
+    async check(): Promise<"needs-apply" | "ok"> {
+      return NEEDS_APPLY
+    },
+
+    name,
+  }
+}

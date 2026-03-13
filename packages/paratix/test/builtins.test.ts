@@ -1,0 +1,169 @@
+import { describe, expect, it, vi } from "vitest"
+
+import type { Environment, Module } from "../src/types.js"
+
+import { assert, debug, fail, when } from "../src/builtins.js"
+
+const emptyEnv: Environment = {}
+
+function makeAlwaysOkModule(): Module {
+  return {
+    // eslint-disable-next-line @typescript-eslint/require-await -- Interface requires async
+    async apply() {
+      return { status: "ok" }
+    },
+    // eslint-disable-next-line @typescript-eslint/require-await -- Interface requires async
+    async check() {
+      return "ok"
+    },
+    name: "always-ok",
+  }
+}
+
+function makeNeedsApplyModule(applyStatus: "changed" | "failed" | "ok" = "changed"): Module {
+  return {
+    // eslint-disable-next-line @typescript-eslint/require-await -- Interface requires async
+    async apply() {
+      return { status: applyStatus }
+    },
+    // eslint-disable-next-line @typescript-eslint/require-await -- Interface requires async
+    async check() {
+      return "needs-apply"
+    },
+    name: "needs-apply-module",
+  }
+}
+
+describe("assert", () => {
+  it("check returns ok when condition is true", async () => {
+    const mod = assert(() => true, "condition must be true")
+    const result = await mod.check(null, emptyEnv)
+    expect(result).toBe("ok")
+  })
+
+  it("check returns needs-apply when condition is false", async () => {
+    const mod = assert(() => false, "condition must be true")
+    const result = await mod.check(null, emptyEnv)
+    expect(result).toBe("needs-apply")
+  })
+
+  it("apply returns ok when condition is true", async () => {
+    const mod = assert(() => true, "condition must be true")
+    // eslint-disable-next-line prefer-spread
+    const result = await mod.apply(null, emptyEnv)
+    expect(result.status).toBe("ok")
+  })
+
+  it("apply returns failed when condition is false", async () => {
+    const mod = assert(() => false, "condition must be true")
+    // eslint-disable-next-line prefer-spread
+    const result = await mod.apply(null, emptyEnv)
+    expect(result.status).toBe("failed")
+  })
+
+  it("passes env to the condition function", async () => {
+    const env: Environment = { ready: "true" }
+    const mod = assert((e) => e.ready === "true", "must be ready")
+    const result = await mod.check(null, env)
+    expect(result).toBe("ok")
+  })
+})
+
+describe("debug", () => {
+  it("check always returns needs-apply", async () => {
+    // eslint-disable-next-line testing-library/no-debugging-utils -- paratix debug module, not testing-library debug
+    const mod = debug("some debug message")
+    const result = await mod.check(null, emptyEnv)
+    expect(result).toBe("needs-apply")
+  })
+
+  it("apply always returns ok", async () => {
+    const consoleSpy = vi.spyOn(console, "log").mockImplementation(() => {
+      /* noop */
+    })
+    // eslint-disable-next-line testing-library/no-debugging-utils -- paratix debug module, not testing-library debug
+    const mod = debug("some debug message")
+    // eslint-disable-next-line prefer-spread
+    const result = await mod.apply(null, emptyEnv)
+    expect(result.status).toBe("ok")
+    consoleSpy.mockRestore()
+  })
+})
+
+describe("fail", () => {
+  it("check always returns needs-apply", async () => {
+    const mod = fail("something went wrong")
+    const result = await mod.check(null, emptyEnv)
+    expect(result).toBe("needs-apply")
+  })
+
+  it("apply always returns failed", async () => {
+    const consoleSpy = vi.spyOn(console, "error").mockImplementation(() => {
+      /* noop */
+    })
+    const mod = fail("something went wrong")
+    // eslint-disable-next-line prefer-spread
+    const result = await mod.apply(null, emptyEnv)
+    expect(result.status).toBe("failed")
+    consoleSpy.mockRestore()
+  })
+})
+
+describe("when", () => {
+  it("check returns ok when condition is false (modules are skipped)", async () => {
+    const innerModule = makeNeedsApplyModule()
+    const mod = when(() => false, innerModule)
+    const result = await mod.check(null, emptyEnv)
+    expect(result).toBe("ok")
+  })
+
+  it("check returns ok when condition is true and all inner modules are ok", async () => {
+    const innerModule = makeAlwaysOkModule()
+    const mod = when(() => true, innerModule)
+    const result = await mod.check(null, emptyEnv)
+    expect(result).toBe("ok")
+  })
+
+  it("check returns needs-apply when condition is true and an inner module needs apply", async () => {
+    const innerModule = makeNeedsApplyModule()
+    const mod = when(() => true, innerModule)
+    const result = await mod.check(null, emptyEnv)
+    expect(result).toBe("needs-apply")
+  })
+
+  it("apply returns skipped when condition is false", async () => {
+    const innerModule = makeNeedsApplyModule()
+    const mod = when(() => false, innerModule)
+    // eslint-disable-next-line prefer-spread
+    const result = await mod.apply(null, emptyEnv)
+    expect(result.status).toBe("skipped")
+  })
+
+  it("apply executes inner modules and returns changed when condition is true and module changed", async () => {
+    const innerModule = makeNeedsApplyModule("changed")
+    const mod = when(() => true, innerModule)
+    // eslint-disable-next-line prefer-spread
+    const result = await mod.apply(null, emptyEnv)
+    expect(result.status).toBe("changed")
+  })
+
+  it("apply returns ok when condition is true and all inner modules are already ok", async () => {
+    const innerModule = makeAlwaysOkModule()
+    const mod = when(() => true, innerModule)
+    // eslint-disable-next-line prefer-spread
+    const result = await mod.apply(null, emptyEnv)
+    expect(result.status).toBe("ok")
+  })
+
+  it("apply returns failed when an inner module returns failed", async () => {
+    const consoleSpy = vi.spyOn(console, "error").mockImplementation(() => {
+      /* noop */
+    })
+    const innerModule = makeNeedsApplyModule("failed")
+    const mod = when(() => true, innerModule)
+    // eslint-disable-next-line prefer-spread
+    const result = await mod.apply(null, emptyEnv)
+    expect(result.status).toBe("failed")
+    consoleSpy.mockRestore()
+  })
+})

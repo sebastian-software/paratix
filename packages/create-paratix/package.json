@@ -1,0 +1,19 @@
+{
+  "name": "create-paratix",
+  "version": "0.1.0",
+  "description": "Scaffold a new Paratix server project",
+  "type": "module",
+  "bin": {
+    "create-paratix": "./dist/index.js"
+  },
+  "scripts": {
+    "build": "tsup"
+  },
+  "devDependencies": {
+    "@types/node": "^25.5.0",
+    "tsup": "^8.4.0",
+    "typescript": "^5.8.0"
+  },
+  "author": "Sebastian Fastner <s.fastner@sebastian-software.de>",
+  "license": "MIT"
+}

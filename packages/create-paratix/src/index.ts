@@ -1,0 +1,163 @@
+import { execSync } from "node:child_process"
+import { existsSync, mkdirSync, writeFileSync } from "node:fs"
+import { join, resolve } from "node:path"
+
+const SERVER_TEMPLATE = `import { server, recipe } from "paratix";
+import { apt, hostname, sshd, ufw, file, service, user } from "paratix/modules";
+
+export default server({
+  name: "my-server",
+  host: "1.2.3.4",
+  ssh: {
+    user: "root",
+    ports: [22],
+    privateKey: "~/.ssh/id_ed25519",
+  },
+  env: {
+    SERVER_NAME: "my-server",
+    SSH_PORT: 2222,
+  },
+  run: [
+    hostname.set("my-server"),
+    apt.upgrade("2026-03-01"),
+    apt.installed("nginx", "curl", "htop"),
+
+    recipe("ssh-hardening", [
+      sshd.port(2222),
+      sshd.config({
+        PermitRootLogin: "no",
+        PasswordAuthentication: "no",
+      }),
+    ], {
+      signals: [service.restart("sshd")],
+    }),
+
+    recipe("firewall", [
+      ufw.rule("allow", [22, 2222, 80, 443]),
+      ufw.enabled(),
+    ]),
+  ],
+});
+`
+
+const TSCONFIG_TEMPLATE = `{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "Node16",
+    "moduleResolution": "Node16",
+    "strict": true,
+    "esModuleInterop": true,
+    "skipLibCheck": true
+  },
+  "include": ["*.ts"]
+}
+`
+
+const GITIGNORE_TEMPLATE = `node_modules/
+dist/
+.env
+*.log
+`
+
+const ENV_EXAMPLE_TEMPLATE = `# Server configuration
+# SUDO_PASSWORD=your-sudo-password
+# SSH_KEY_PATH=~/.ssh/id_ed25519
+`
+
+function detectPackageManager(): { command: string; name: string } {
+  const agent = process.env.npm_config_user_agent ?? ""
+
+  if (agent.startsWith("pnpm")) {
+    return { command: "pnpm install", name: "pnpm" }
+  }
+  if (agent.startsWith("yarn")) {
+    return { command: "yarn install", name: "yarn" }
+  }
+  if (agent.startsWith("bun")) {
+    return { command: "bun install", name: "bun" }
+  }
+  return { command: "npm install", name: "npm" }
+}
+
+function writeProjectFiles(projectDirectory: string): void {
+  // eslint-disable-next-line security/detect-non-literal-fs-filename
+  mkdirSync(projectDirectory, { recursive: true })
+  // eslint-disable-next-line security/detect-non-literal-fs-filename
+  mkdirSync(join(projectDirectory, "files"), { recursive: true })
+
+  const packageJson = {
+    dependencies: {
+      paratix: "^0.1.0",
+    },
+    name: projectDirectory.split("/").pop(),
+    private: true,
+    scripts: {
+      apply: "paratix apply server.ts",
+      "apply:dry": "paratix apply server.ts --dry-run",
+    },
+    type: "module",
+  }
+
+  // eslint-disable-next-line security/detect-non-literal-fs-filename
+  writeFileSync(join(projectDirectory, "package.json"), `${JSON.stringify(packageJson, null, 2)}\n`)
+  // eslint-disable-next-line security/detect-non-literal-fs-filename
+  writeFileSync(join(projectDirectory, "server.ts"), SERVER_TEMPLATE)
+  // eslint-disable-next-line security/detect-non-literal-fs-filename
+  writeFileSync(join(projectDirectory, "tsconfig.json"), TSCONFIG_TEMPLATE)
+  // eslint-disable-next-line security/detect-non-literal-fs-filename
+  writeFileSync(join(projectDirectory, ".gitignore"), GITIGNORE_TEMPLATE)
+  // eslint-disable-next-line security/detect-non-literal-fs-filename
+  writeFileSync(join(projectDirectory, ".env.example"), ENV_EXAMPLE_TEMPLATE)
+  // eslint-disable-next-line security/detect-non-literal-fs-filename
+  writeFileSync(join(projectDirectory, "files", ".gitkeep"), "")
+}
+
+function installDependencies(
+  projectDirectory: string,
+  pm: { command: string; name: string }
+): void {
+  console.log(`Installing dependencies with ${pm.name}...`)
+  try {
+    execSync(pm.command, { cwd: projectDirectory, stdio: "inherit" })
+  } catch {
+    console.log("Could not install dependencies automatically. Run install manually.")
+  }
+}
+
+function main(): void {
+  const projectName = process.argv[2]
+
+  if (!projectName) {
+    console.error("Usage: create-paratix <project-name>")
+    // eslint-disable-next-line node/no-process-exit
+    process.exit(1)
+  }
+
+  const projectDirectory = resolve(projectName)
+
+  // eslint-disable-next-line security/detect-non-literal-fs-filename
+  if (existsSync(projectDirectory)) {
+    console.error(`Error: Directory "${projectName}" already exists.`)
+    // eslint-disable-next-line node/no-process-exit
+    process.exit(1)
+  }
+
+  const pm = detectPackageManager()
+
+  console.log(`Creating Paratix project in ${projectDirectory}...`)
+
+  writeProjectFiles(projectDirectory)
+  installDependencies(projectDirectory, pm)
+
+  console.log(`
+Project created successfully!
+
+  cd ${projectName}
+
+Edit server.ts with your server details, then:
+
+  ${pm.name === "npm" ? "npm run" : pm.name} apply
+`)
+}
+
+main()

@@ -46,27 +46,23 @@ Operation auf dem Server ab und implementiert die **Plugin-Schnittstelle**:
 
 ```typescript
 /** Einfacher Wert oder lazy evaluierte Funktion (z.B. für OTPs) */
-type EnvValue =
-  | string
-  | number
-  | (() => string | number)
-  | (() => Promise<string | number>);
+type EnvValue = string | number | (() => string | number) | (() => Promise<string | number>)
 
-type Env = Record<string, EnvValue>;
+type Env = Record<string, EnvValue>
 
 interface ModuleResult {
-  status: "ok" | "changed" | "skipped" | "failed";
+  status: "ok" | "changed" | "skipped" | "failed"
   /** Optionale Metadaten, die in den Env einfließen */
-  meta?: Env;
+  meta?: Env
 }
 
 interface Module {
   /** Menschenlesbarer Name für die Ausgabe */
-  name: string;
+  name: string
   /** Prüft ob der gewünschte Zustand bereits erreicht ist */
-  check(ssh: SshConnection, env: Env): Promise<"ok" | "needs-apply">;
+  check(ssh: SshConnection, env: Env): Promise<"ok" | "needs-apply">
   /** Führt die Änderung durch */
-  apply(ssh: SshConnection, env: Env): Promise<ModuleResult>;
+  apply(ssh: SshConnection, env: Env): Promise<ModuleResult>
 }
 ```
 
@@ -84,9 +80,9 @@ transparent auflöst:
 ```typescript
 /** Löst einen Env-Wert auf (direkt oder lazy) */
 async function resolveEnv(env: Env, key: string): Promise<string | number> {
-  const value = env[key];
-  if (typeof value === "function") return await value();
-  return value;
+  const value = env[key]
+  if (typeof value === "function") return await value()
+  return value
 }
 ```
 
@@ -114,8 +110,8 @@ Das Playbook ist die TypeScript-Datei, die der Benutzer schreibt. Es definiert
 den Server und eine geordnete Liste von Recipes und Modulen:
 
 ```typescript
-import { server, recipe } from "paratix";
-import { apt, sshd, file, ufw, service } from "paratix/modules";
+import { server, recipe } from "paratix"
+import { apt, sshd, file, ufw, service } from "paratix/modules"
 
 export default server({
   name: "vps-primary",
@@ -143,7 +139,7 @@ export default server({
       ],
       {
         signals: [service.restart("sshd")],
-      },
+      }
     ),
 
     recipe(
@@ -154,25 +150,20 @@ export default server({
       ],
       {
         signals: [service.restart("podman")],
-      },
+      }
     ),
 
     recipe(
       "app",
-      [
-        file.template(
-          "/etc/nginx/sites-available/app",
-          "./files/nginx-app.tmpl.conf",
-        ),
-      ],
+      [file.template("/etc/nginx/sites-available/app", "./files/nginx-app.tmpl.conf")],
       {
         signals: [service.restart("nginx")],
-      },
+      }
     ),
 
     apt.upgrade("2024-03-10"),
   ],
-});
+})
 ```
 
 Die **Definitionsreihenfolge bestimmt die Ausführungsreihenfolge**. Es gibt
@@ -474,10 +465,10 @@ Das Streaming ist standardmäßig aktiv. Module können es pro Befehl steuern:
 
 ```typescript
 // Ausgabe wird live gestreamt (Standard bei apply)
-await ssh.exec("apt-get upgrade -y");
+await ssh.exec("apt-get upgrade -y")
 
 // Ausgabe wird unterdrückt, nur Rückgabewert zählt (Standard bei check)
-const result = await ssh.exec("dpkg -l nginx", { silent: true });
+const result = await ssh.exec("dpkg -l nginx", { silent: true })
 ```
 
 Bei `check()` wird die Ausgabe standardmäßig unterdrückt (silent), da Checks
@@ -495,29 +486,29 @@ Ausgaben parsen müssen.
 ```typescript
 interface ExecResult {
   /** Exit-Code des Befehls */
-  code: number;
+  code: number
   /** Gesamte stdout-Ausgabe */
-  stdout: string;
+  stdout: string
   /** Gesamte stderr-Ausgabe */
-  stderr: string;
+  stderr: string
 }
 
 interface ExecOptions {
   /** Ausgabe unterdrücken (Standard: false bei apply, true bei check) */
-  silent?: boolean;
+  silent?: boolean
   /** Timeout in Millisekunden (Standard: kein Timeout) */
-  timeout?: number;
+  timeout?: number
   /** Bei Exit-Code != 0 keinen Fehler werfen (Standard: false) */
-  ignoreExitCode?: boolean;
+  ignoreExitCode?: boolean
   /** Umgebungsvariablen für den Befehl */
-  env?: Record<string, string>;
+  env?: Record<string, string>
 }
 
 interface SshConnection {
   // --- Befehlsausführung ---
 
   /** Führt einen Shell-Befehl aus. Wirft bei Exit-Code != 0. */
-  exec(command: string, options?: ExecOptions): Promise<ExecResult>;
+  exec(command: string, options?: ExecOptions): Promise<ExecResult>
 
   /**
    * Führt einen Befehl aus und gibt nur den Exit-Code zurück.
@@ -527,7 +518,7 @@ interface SshConnection {
    *   const installed = await ssh.test("dpkg -l nginx");
    *   const exists = await ssh.test("[ -f /etc/nginx/nginx.conf ]");
    */
-  test(command: string): Promise<boolean>;
+  test(command: string): Promise<boolean>
 
   /**
    * Führt einen Befehl aus und gibt stdout zurück (getrimmt).
@@ -537,7 +528,7 @@ interface SshConnection {
    *   const hostname = await ssh.output("hostname");
    *   const hash = await ssh.output("sha256sum /etc/ssh/sshd_config | cut -d' ' -f1");
    */
-  output(command: string, options?: ExecOptions): Promise<string>;
+  output(command: string, options?: ExecOptions): Promise<string>
 
   /**
    * Führt einen Befehl aus und gibt stdout als Zeilen-Array zurück.
@@ -545,7 +536,7 @@ interface SshConnection {
    * Beispiel:
    *   const packages = await ssh.lines("dpkg --get-selections | grep -v deinstall | awk '{print $1}'");
    */
-  lines(command: string, options?: ExecOptions): Promise<string[]>;
+  lines(command: string, options?: ExecOptions): Promise<string[]>
 
   // --- Dateioperationen ---
 
@@ -555,7 +546,7 @@ interface SshConnection {
    * Beispiel:
    *   const config = await ssh.readFile("/etc/ssh/sshd_config");
    */
-  readFile(remotePath: string): Promise<string>;
+  readFile(remotePath: string): Promise<string>
 
   /**
    * Schreibt eine Datei auf den Server. Erstellt Elternverzeichnisse
@@ -571,10 +562,10 @@ interface SshConnection {
     remotePath: string,
     content: string,
     options?: {
-      mode?: string;
-      owner?: string;
-    },
-  ): Promise<void>;
+      mode?: string
+      owner?: string
+    }
+  ): Promise<void>
 
   /**
    * Kopiert eine lokale Datei auf den Server.
@@ -586,10 +577,10 @@ interface SshConnection {
     localPath: string,
     remotePath: string,
     options?: {
-      mode?: string;
-      owner?: string;
-    },
-  ): Promise<void>;
+      mode?: string
+      owner?: string
+    }
+  ): Promise<void>
 
   /**
    * Lädt eine Datei vom Server herunter.
@@ -597,13 +588,13 @@ interface SshConnection {
    * Beispiel:
    *   await ssh.downloadFile("/var/log/auth.log", "./logs/auth.log");
    */
-  downloadFile(remotePath: string, localPath: string): Promise<void>;
+  downloadFile(remotePath: string, localPath: string): Promise<void>
 
   /**
    * Prüft ob eine Datei/ein Verzeichnis existiert.
    * Shortcut für ssh.test("[ -e <path> ]").
    */
-  exists(remotePath: string): Promise<boolean>;
+  exists(remotePath: string): Promise<boolean>
 
   /**
    * Gibt den SHA-256-Hash einer Remote-Datei zurück.
@@ -614,7 +605,7 @@ interface SshConnection {
    *   const localHash = sha256(fs.readFileSync("./files/sshd_config"));
    *   if (remoteHash === localHash) return "ok";
    */
-  sha256(remotePath: string): Promise<string | null>;
+  sha256(remotePath: string): Promise<string | null>
 
   // --- Verbindungsinformationen ---
 
@@ -624,11 +615,11 @@ interface SshConnection {
    * aber SSH-Parameter fuer den Transfer brauchen.
    */
   getConnectionInfo(): {
-    host: string;
-    port: number;
-    user: string;
-    privateKeyPath: string;
-  };
+    host: string
+    port: number
+    user: string
+    privateKeyPath: string
+  }
 }
 ```
 
@@ -641,20 +632,20 @@ zusammenbauen, Exit-Codes manuell prüfen und Ausgaben parsen:
 // Ohne Hilfsmethoden (fehleranfällig, repetitiv)
 const result = await ssh.exec("dpkg -l nginx 2>/dev/null | grep -q '^ii'", {
   ignoreExitCode: true,
-});
-if (result.code === 0) return "ok";
+})
+if (result.code === 0) return "ok"
 
 // Mit Hilfsmethoden (klar, kurz)
-if (await ssh.test("dpkg -l nginx | grep -q '^ii'")) return "ok";
+if (await ssh.test("dpkg -l nginx | grep -q '^ii'")) return "ok"
 ```
 
 ```typescript
 // Ohne Hilfsmethoden
-const result = await ssh.exec("sha256sum /etc/ssh/sshd_config");
-const hash = result.stdout.split(" ")[0].trim();
+const result = await ssh.exec("sha256sum /etc/ssh/sshd_config")
+const hash = result.stdout.split(" ")[0].trim()
 
 // Mit Hilfsmethoden
-const hash = await ssh.sha256("/etc/ssh/sshd_config");
+const hash = await ssh.sha256("/etc/ssh/sshd_config")
 ```
 
 Die Hilfsmethoden eliminieren Boilerplate und sorgen dafür, dass Module sich
@@ -734,7 +725,7 @@ export default server({
     "app.port": 3000,
   },
   // ...
-});
+})
 ```
 
 ### Env via CLI und .env-Datei
@@ -770,8 +761,8 @@ recipe(
   ],
   {
     signals: [service.restart("sshd")],
-  },
-);
+  }
+)
 ```
 
 Wenn weder `sshd.port` noch `file.copy` etwas geändert haben, wird `sshd`
@@ -789,7 +780,7 @@ export default server({
     /* ... */
   ],
   signals: [service.restart("nginx")],
-});
+})
 ```
 
 ### Signale als Module
@@ -921,7 +912,7 @@ export default server({
   host: "1.2.3.4",
   ssh: { user: "root", ports: [22, 22022] },
   run: [hardening, podman],
-});
+})
 
 // vps-backup.ts
 export default server({
@@ -929,7 +920,7 @@ export default server({
   host: "5.6.7.8",
   ssh: { user: "root", ports: [22, 22022] },
   run: [hardening, podman],
-});
+})
 ```
 
 ```
@@ -1022,7 +1013,7 @@ Beide Module akzeptieren optionale Parameter `mode` und `owner`:
 file.copy("/etc/ssh/sshd_config", "./files/sshd_config", {
   mode: "644",
   owner: "root:root",
-});
+})
 ```
 
 - **Default `mode`:** nicht gesetzt → Datei erhaelt Standard-Permissions (`644`).
@@ -1171,8 +1162,8 @@ Projekts ein (`packageManager`-Feld). Anschliessend wird automatisch
 **Beispiel-Playbook (`server.ts`):**
 
 ```typescript
-import { server } from "paratix";
-import { apt, hostname } from "paratix/modules";
+import { server } from "paratix"
+import { apt, hostname } from "paratix/modules"
 
 export default server({
   name: "vps-01",
@@ -1184,7 +1175,7 @@ export default server({
   },
 
   run: [hostname.set("vps-01"), apt.upgrade("2024-03-10")],
-});
+})
 ```
 
 Das Beispiel ist bewusst minimal aber funktional — es setzt den Hostnamen
@@ -1271,10 +1262,10 @@ hinzukommen (z.B. `local.exec`, `terraform.apply`) ohne Sonderbehandlung.
 
 ```typescript
 interface Module {
-  name: string;
-  local?: boolean;
-  check(ssh: SshConnection | null, env: Env): Promise<"ok" | "needs-apply">;
-  apply(ssh: SshConnection | null, env: Env): Promise<ModuleResult>;
+  name: string
+  local?: boolean
+  check(ssh: SshConnection | null, env: Env): Promise<"ok" | "needs-apply">
+  apply(ssh: SshConnection | null, env: Env): Promise<ModuleResult>
 }
 ```
 
@@ -1299,34 +1290,34 @@ Zwischenspeichern, kein Cleanup noetig.
 
 ```typescript
 interface SshConfig {
-  user: string;
-  ports: number[];
-  privateKey: string;
-  passwordFallback?: boolean;
+  user: string
+  ports: number[]
+  privateKey: string
+  passwordFallback?: boolean
   /** Sudo-Passwort fuer non-root User. Optional — wenn nicht gesetzt und
    *  sudo ein Passwort verlangt, wird interaktiv im Terminal gefragt. */
-  sudoPassword?: string;
+  sudoPassword?: string
 }
 
 interface ServerDefinition {
-  name: string;
-  host: string;
-  ssh: SshConfig;
-  env?: Env;
-  run: Module[];
-  signals?: Module[];
+  name: string
+  host: string
+  ssh: SshConfig
+  env?: Env
+  run: Module[]
+  signals?: Module[]
 }
 
-function server(config: ServerDefinition): ServerDefinition;
+function server(config: ServerDefinition): ServerDefinition
 // Identity-Funktion mit Typ-Validierung.
 
 function recipe(
   name: string,
   modules: Module[],
   options?: {
-    signals?: Module[];
-  },
-): Module;
+    signals?: Module[]
+  }
+): Module
 // Gibt ein Module zurueck (Composite Pattern).
 ```
 
@@ -1342,19 +1333,19 @@ implementieren die Module-Schnittstelle. Dadurch bleibt der Runner einfach
 wie jedes andere Modul.
 
 ```typescript
-function assert(condition: (env: Env) => boolean, message: string): Module;
+function assert(condition: (env: Env) => boolean, message: string): Module
 // check: condition(env) ? "ok" : wirft Fehler mit message
 // apply: wird nie aufgerufen (check wirft bei Fehler)
 
-function debug(message: string): Module;
+function debug(message: string): Module
 // check: immer "ok" (gibt message auf der Konsole aus)
 // apply: wird nie aufgerufen
 
-function fail(message: string): Module;
+function fail(message: string): Module
 // check: wirft immer einen Fehler mit message
 // apply: wird nie aufgerufen
 
-function pause(message?: string): Module;
+function pause(message?: string): Module
 // check: immer "needs-apply"
 // apply: wartet auf Benutzerbestaetigung im Terminal, gibt "changed" zurueck
 ```
@@ -1378,7 +1369,7 @@ werden.
 Paratix bietet dafuer den `when()`-Wrapper:
 
 ```typescript
-function when(condition: (env: Env) => boolean, ...modules: Module[]): Module;
+function when(condition: (env: Env) => boolean, ...modules: Module[]): Module
 ```
 
 `when()` gibt ein Module zurueck, dessen `check` und `apply` nur ausgefuehrt
@@ -1388,8 +1379,8 @@ ist. Andernfalls gibt es `{ status: "skipped" }` zurueck.
 **Beispiel:**
 
 ```typescript
-import { server, recipe, when } from "paratix";
-import { system, apt } from "paratix/modules";
+import { server, recipe, when } from "paratix"
+import { system, apt } from "paratix/modules"
 
 export default server({
   // ...
@@ -1397,22 +1388,16 @@ export default server({
     system.facts(),
 
     // Bedingt: nur auf Ubuntu
-    when(
-      (env) => env["system.os"] === "ubuntu",
-      apt.repository("ppa:nginx/stable"),
-    ),
+    when((env) => env["system.os"] === "ubuntu", apt.repository("ppa:nginx/stable")),
 
     // Mehrere Module bedingt ausfuehren
     when(
       (env) => Number(env["system.ram.total"]) >= 4096,
       apt.installed("elasticsearch"),
-      file.template(
-        "/etc/elasticsearch/elasticsearch.yml",
-        "./files/elasticsearch.tmpl.yml",
-      ),
+      file.template("/etc/elasticsearch/elasticsearch.yml", "./files/elasticsearch.tmpl.yml")
     ),
   ],
-});
+})
 ```
 
 **Ausgabeverhalten:** Bei nicht erfuellter Bedingung zeigt `when()` eine
