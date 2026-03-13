@@ -7,12 +7,14 @@
     "create-paratix": "./dist/index.js"
   },
   "scripts": {
-    "build": "tsup"
+    "build": "tsup",
+    "test": "vitest run"
   },
   "devDependencies": {
     "@types/node": "^25.5.0",
     "tsup": "^8.4.0",
-    "typescript": "^5.8.0"
+    "typescript": "^5.8.0",
+    "vitest": "^3.1.0"
   },
   "engines": {
     "node": ">=24.0.0"

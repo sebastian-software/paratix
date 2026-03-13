@@ -79,7 +79,7 @@ function detectPackageManager(): { command: string; name: string } {
   return { command: "npm install", name: "npm" }
 }
 
-function writeProjectFiles(projectDirectory: string): void {
+export function writeProjectFiles(projectDirectory: string): void {
   // eslint-disable-next-line security/detect-non-literal-fs-filename
   mkdirSync(projectDirectory, { recursive: true })
   // eslint-disable-next-line security/detect-non-literal-fs-filename
@@ -88,6 +88,9 @@ function writeProjectFiles(projectDirectory: string): void {
   const packageJson = {
     dependencies: {
       paratix: "^0.1.0",
+    },
+    engines: {
+      node: ">=24.0.0",
     },
     name: projectDirectory.split("/").pop(),
     private: true,
@@ -160,4 +163,7 @@ Edit server.ts with your server details, then:
 `)
 }
 
-main()
+// Only run when executed directly, not when imported (e.g. in tests)
+if (import.meta.url.endsWith(process.argv[1].replaceAll("\\", "/"))) {
+  main()
+}
