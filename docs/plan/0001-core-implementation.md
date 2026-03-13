@@ -83,7 +83,7 @@ TypeScript, das per SSH Module auf Zielservern ausführt.
 ## Offene Punkte (für spätere Iterationen)
 
 - Weitere Module: compose, sysctl, mount, rsync, op, system, net, download, etc.
-- user.present Check erkennt keine Attribut-Änderungen (#7)
-- Klartext-Passwort in chpasswd (#8)
-- reconnectTimeout CLI-Option wird nicht durchgereicht (#12)
-- when() Environment-Propagation im Check (#13)
+- ~~user.present Check erkennt keine Attribut-Änderungen (#7)~~ — Erledigt
+- ~~Klartext-Passwort in chpasswd (#8)~~ — Erledigt
+- ~~reconnectTimeout CLI-Option wird nicht durchgereicht (#12)~~ — Erledigt
+- ~~when() Environment-Propagation im Check (#13)~~ — Erledigt

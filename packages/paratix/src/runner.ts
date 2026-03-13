@@ -214,7 +214,11 @@ export async function runPlaybook(
   options: RunOptions = {}
 ): Promise<void> {
   const environment = initializeEnvironment(options, definition)
-  const ssh = new SshConnectionImpl(definition.host, definition.ssh)
+  const sshConfig =
+    options.reconnectTimeout == null
+      ? definition.ssh
+      : { ...definition.ssh, reconnectTimeout: options.reconnectTimeout }
+  const ssh = new SshConnectionImpl(definition.host, sshConfig)
   await ssh.connect()
   await ssh.probeSudo()
 

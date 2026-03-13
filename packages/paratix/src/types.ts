@@ -118,6 +118,8 @@ export type SshConfig = {
   ports: number[]
   /** Absolute path to the private key file used for authentication. */
   privateKey: string
+  /** Maximum time in milliseconds to spend attempting reconnection before giving up. */
+  reconnectTimeout?: number
   /** Password used for `sudo` escalation on the remote host. */
   sudoPassword?: string
   /** Username to authenticate as. */

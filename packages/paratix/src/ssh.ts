@@ -21,7 +21,7 @@ export function shellQuote(s: string): string {
 const COMMAND_TIMEOUT = 120_000
 const RECONNECT_BASE_DELAY = 1000
 const RECONNECT_MAX_DELAY = 30_000
-const MAX_RECONNECT_RETRIES = 6
+const DEFAULT_RECONNECT_TIMEOUT = 120_000
 const JITTER_BASE = 0.75
 const JITTER_RANGE = 0.5
 
@@ -154,7 +154,11 @@ export class SshConnectionImpl implements SshConnection {
   }
 
   public async reconnect(): Promise<void> {
-    for (let attempt = 0; attempt < MAX_RECONNECT_RETRIES; attempt++) {
+    const timeout = this.config.reconnectTimeout ?? DEFAULT_RECONNECT_TIMEOUT
+    const deadline = Date.now() + timeout
+    let attempt = 0
+
+    while (Date.now() < deadline) {
       try {
         this.disconnect()
         // eslint-disable-next-line no-await-in-loop
@@ -167,9 +171,10 @@ export class SshConnectionImpl implements SshConnection {
         await new Promise<void>((resolve) => {
           setTimeout(resolve, jitter)
         })
+        attempt++
       }
     }
-    throw new Error(`Failed to reconnect to ${this.host} after ${MAX_RECONNECT_RETRIES} attempts`)
+    throw new Error(`Failed to reconnect to ${this.host} after ${timeout}ms`)
   }
 
   public async sha256(remotePath: string): Promise<null | string> {

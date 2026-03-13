@@ -166,4 +166,68 @@ describe("when", () => {
     expect(result.status).toBe("failed")
     consoleSpy.mockRestore()
   })
+
+  // Bug #13 regression: when().check() must copy the environment before passing it to inner modules
+  it("check does not mutate the caller's environment object", async () => {
+    const receivedEnvs: Environment[] = []
+    const snoopModule: Module = {
+      // eslint-disable-next-line @typescript-eslint/require-await -- Interface requires async
+      async apply(_ssh, env) {
+        return { meta: env, status: "ok" }
+      },
+      // eslint-disable-next-line @typescript-eslint/require-await -- Interface requires async
+      async check(_ssh, env) {
+        receivedEnvs.push(env)
+        // Mutate the received env to verify the caller's object is not affected
+        Object.assign(env, { injected: "yes" })
+        return "ok"
+      },
+      name: "snoop",
+    }
+
+    const callerEnv: Environment = { original: "value" }
+    const mod = when(() => true, snoopModule)
+    await mod.check(null, callerEnv)
+
+    // The inner module received a copy, not the original object
+    expect(receivedEnvs[0]).not.toBe(callerEnv)
+    // The caller's env must be unchanged
+    expect(callerEnv).not.toHaveProperty("injected")
+  })
+
+  it("check passes the same copied environment to all inner modules", async () => {
+    const envsSeenBySecond: Environment[] = []
+    const firstModule: Module = {
+      // eslint-disable-next-line @typescript-eslint/require-await -- Interface requires async
+      async apply() {
+        return { status: "ok" }
+      },
+      // eslint-disable-next-line @typescript-eslint/require-await -- Interface requires async
+      async check(_ssh, env) {
+        // Mutate the env copy to test that inner modules share the same copied env
+        Object.assign(env, { fromFirst: "mutated" })
+        return "ok"
+      },
+      name: "first",
+    }
+    const secondModule: Module = {
+      // eslint-disable-next-line @typescript-eslint/require-await -- Interface requires async
+      async apply() {
+        return { status: "ok" }
+      },
+      // eslint-disable-next-line @typescript-eslint/require-await -- Interface requires async
+      async check(_ssh, env) {
+        envsSeenBySecond.push({ ...env })
+        return "needs-apply"
+      },
+      name: "second",
+    }
+
+    const mod = when(() => true, firstModule, secondModule)
+    await mod.check(null, { original: "value" })
+
+    // The second module's env should reflect the first module's mutation
+    // because the inner copy is shared between inner modules
+    expect(envsSeenBySecond[0]).toHaveProperty("fromFirst", "mutated")
+  })
 })

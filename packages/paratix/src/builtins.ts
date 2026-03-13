@@ -159,16 +159,17 @@ export function when(
       return applyConditionalModules(ssh, environment, modules)
     },
     async check(
-      _ssh: null | SshConnection,
+      ssh: null | SshConnection,
       environment: Environment
     ): Promise<"needs-apply" | "ok"> {
       if (!condition(environment)) {
         return "ok"
       }
+      const currentEnvironment = { ...environment }
       // Check each child module
       for (const currentModule of modules) {
         // eslint-disable-next-line no-await-in-loop
-        const result = await currentModule.check(_ssh, environment)
+        const result = await currentModule.check(ssh, currentEnvironment)
         if (result === NEEDS_APPLY) {
           return NEEDS_APPLY
         }
