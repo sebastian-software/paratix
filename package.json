@@ -1,5 +1,6 @@
 {
   "name": "@sebastian-gmbh/paratix-workspace",
+  "type": "module",
   "private": true,
   "scripts": {
     "build": "pnpm -r build",
