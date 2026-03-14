@@ -7,6 +7,9 @@ const EXEC_OPTS = { ignoreExitCode: true, silent: true } as const
 /** Supported system package managers. */
 type PackageManager = "apk" | "apt" | "dnf" | "yum"
 
+/** Per-connection cache for the detected package manager (avoids repeated SSH roundtrips). */
+const pmCache = new WeakMap<SshConnection, null | PackageManager>()
+
 const INSTALL_COMMANDS = {
   apk: (pkgs: string) => `apk add ${pkgs}`,
   apt: (pkgs: string) => `DEBIAN_FRONTEND=noninteractive apt-get install -y ${pkgs}`,
@@ -38,17 +41,24 @@ const UPGRADE_COMMANDS = {
 /**
  * Detect the system package manager by probing for known binaries.
  *
- * Checks in order: apt, dnf, yum, apk.
+ * Checks in order: apt, dnf, yum, apk. The result is cached per
+ * {@link SshConnection} instance so subsequent calls avoid extra SSH roundtrips.
  *
  * @param ssh - Active SSH connection to the remote host.
  * @returns The detected package manager, or `null` when none is found.
  */
 async function detectPackageManager(ssh: SshConnection): Promise<null | PackageManager> {
-  if (await ssh.test("which apt-get")) return "apt"
-  if (await ssh.test("which dnf")) return "dnf"
-  if (await ssh.test("which yum")) return "yum"
-  if (await ssh.test("which apk")) return "apk"
-  return null
+  const cached = pmCache.get(ssh)
+  if (cached !== undefined) return cached
+
+  let result: null | PackageManager = null
+  if (await ssh.test("which apt-get")) result = "apt"
+  else if (await ssh.test("which dnf")) result = "dnf"
+  else if (await ssh.test("which yum")) result = "yum"
+  else if (await ssh.test("which apk")) result = "apk"
+
+  pmCache.set(ssh, result)
+  return result
 }
 
 /**
