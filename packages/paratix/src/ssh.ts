@@ -96,7 +96,12 @@ export class SshConnectionImpl implements SshConnection {
           return
         }
         activeStream = stream
-        collectStreamOutput({ command, options, reject, resolve, stream, timer })
+        // Write sudo password to stdin instead of embedding in command
+        if (this.cachedSudoPassword != null && this.config.user !== "root") {
+          stream.write(`${this.cachedSudoPassword}\n`)
+        }
+        const secrets = this.cachedSudoPassword == null ? [] : [this.cachedSudoPassword]
+        collectStreamOutput({ command, options, reject, resolve, secrets, stream, timer })
       })
     })
   }
@@ -226,7 +231,7 @@ export class SshConnectionImpl implements SshConnection {
   private sudoCommand(command: string): string {
     if (this.config.user === "root") return command
     if (this.cachedSudoPassword != null) {
-      return `printf '%s\\n' ${shellQuote(this.cachedSudoPassword)} | sudo -S bash -c ${shellQuote(command)}`
+      return `sudo -S bash -c ${shellQuote(command)}`
     }
     return `sudo bash -c ${shellQuote(command)}`
   }

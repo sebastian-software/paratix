@@ -9,8 +9,19 @@ export type StreamOutputParameters = {
   options: ExecOptions
   reject: (reason: Error) => void
   resolve: (value: ExecResult) => void
+  secrets?: string[]
   stream: ClientChannel
   timer: ReturnType<typeof setTimeout>
+}
+
+function maskSecrets(text: string, secrets: string[]): string {
+  let masked = text
+  for (const secret of secrets) {
+    if (secret.length > 0) {
+      masked = masked.replaceAll(secret, "***")
+    }
+  }
+  return masked
 }
 
 /**
@@ -39,9 +50,10 @@ export function collectStreamOutput(parameters: StreamOutputParameters): void {
     // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition -- ssh2 may pass undefined despite type signature
     const exitCode = code ?? 0
     if (exitCode !== 0 && options.ignoreExitCode !== true) {
+      const mask = (text: string): string => maskSecrets(text, parameters.secrets ?? [])
       reject(
         new Error(
-          `Command failed with exit code ${exitCode}: ${command}\nstdout: ${stdout}\nstderr: ${stderr}`
+          `Command failed with exit code ${exitCode}: ${mask(command)}\nstdout: ${mask(stdout)}\nstderr: ${mask(stderr)}`
         )
       )
       return

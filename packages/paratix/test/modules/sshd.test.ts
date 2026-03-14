@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest"
+import { describe, expect, it, vi } from "vitest"
 
 import { sshd } from "../../src/modules/sshd.js"
 import { createMockSsh } from "../helpers/mockSsh.js"
@@ -7,23 +7,31 @@ const emptyEnv = {}
 const SSHD_CONFIG = "/etc/ssh/sshd_config"
 const CAT_SSHD = `cat '${SSHD_CONFIG}'`
 
+function trackWriteFile(mockSsh: ReturnType<typeof createMockSsh>): Array<{ content: string; path: string }> {
+  const writtenFiles: Array<{ content: string; path: string }> = []
+  // eslint-disable-next-line @typescript-eslint/promise-function-async -- vi.mockImplementation requires matching return type
+  vi.spyOn(mockSsh, "writeFile").mockImplementation((path: string, content: string) => {
+    writtenFiles.push({ content, path })
+    return Promise.resolve()
+  })
+  return writtenFiles
+}
+
 // ─── sshd.config — apply ──────────────────────────────────────────────────────
 
 describe("sshd.config — apply", () => {
   it("returns failed when conn is null", async () => {
     const mod = sshd.config({ PasswordAuthentication: "no" })
+    // eslint-disable-next-line prefer-spread -- mod.apply is a Module method, not Function.prototype.apply
     const result = await mod.apply(null, emptyEnv)
     expect(result.status).toBe("failed")
   })
 
   it("replaces an existing key in-place and returns changed", async () => {
-    const writtenFiles: Array<{ content: string; path: string }> = []
     const mockSsh = createMockSsh({
       [CAT_SSHD]: { stdout: "PasswordAuthentication yes\n" },
     })
-    mockSsh.writeFile = async (path: string, content: string): Promise<void> => {
-      writtenFiles.push({ content, path })
-    }
+    const writtenFiles = trackWriteFile(mockSsh)
 
     const mod = sshd.config({ PasswordAuthentication: "no" })
     const result = await mod.apply(mockSsh, emptyEnv)
@@ -36,13 +44,10 @@ describe("sshd.config — apply", () => {
   })
 
   it("appends a new key when it does not yet exist in sshd_config", async () => {
-    const writtenFiles: Array<{ content: string; path: string }> = []
     const mockSsh = createMockSsh({
       [CAT_SSHD]: { stdout: "# sshd config\n" },
     })
-    mockSsh.writeFile = async (path: string, content: string): Promise<void> => {
-      writtenFiles.push({ content, path })
-    }
+    const writtenFiles = trackWriteFile(mockSsh)
 
     const mod = sshd.config({ PermitRootLogin: "no" })
     const result = await mod.apply(mockSsh, emptyEnv)
@@ -54,49 +59,40 @@ describe("sshd.config — apply", () => {
   })
 
   it("appends newline separator when original content does not end with newline", async () => {
-    const writtenFiles: Array<{ content: string; path: string }> = []
     const mockSsh = createMockSsh({
       [CAT_SSHD]: { stdout: "# sshd config" },
     })
-    mockSsh.writeFile = async (path: string, content: string): Promise<void> => {
-      writtenFiles.push({ content, path })
-    }
+    const writtenFiles = trackWriteFile(mockSsh)
 
     const mod = sshd.config({ X11Forwarding: "no" })
     await mod.apply(mockSsh, emptyEnv)
 
     const written = writtenFiles.find((f) => f.path === SSHD_CONFIG)
-    expect(written?.content).toMatch(/\nX11Forwarding no\n$/)
+    expect(written?.content).toMatch(/\nX11Forwarding no\n$/v)
   })
 
   it("applies multiple settings in sequence (regression: no command injection via key/value)", async () => {
-    const writtenFiles: Array<{ content: string; path: string }> = []
     // First read returns original, subsequent reads should reflect writes in real code.
     // The mock always returns the same content; we verify both keys are written.
     const mockSsh = createMockSsh({
       [CAT_SSHD]: { stdout: "PasswordAuthentication yes\nPermitRootLogin yes\n" },
     })
-    mockSsh.writeFile = async (path: string, content: string): Promise<void> => {
-      writtenFiles.push({ content, path })
-    }
+    const writtenFiles = trackWriteFile(mockSsh)
 
     const mod = sshd.config({ PasswordAuthentication: "no", PermitRootLogin: "no" })
     const result = await mod.apply(mockSsh, emptyEnv)
 
     expect(result.status).toBe("changed")
     // writeFile must have been called for each setting
-    expect(writtenFiles.length).toBe(2)
+    expect(writtenFiles).toHaveLength(2)
   })
 
   it("regression — key with RegExp special chars is handled safely (no injection)", async () => {
-    const writtenFiles: Array<{ content: string; path: string }> = []
     // Key contains a dot which is a RegExp special char
     const mockSsh = createMockSsh({
       [CAT_SSHD]: { stdout: "Match.User root\n" },
     })
-    mockSsh.writeFile = async (path: string, content: string): Promise<void> => {
-      writtenFiles.push({ content, path })
-    }
+    const writtenFiles = trackWriteFile(mockSsh)
 
     const mod = sshd.config({ "Match.User": "admin" })
     await mod.apply(mockSsh, emptyEnv)
@@ -107,29 +103,24 @@ describe("sshd.config — apply", () => {
   })
 
   it("regression — value with RegExp special chars like * and [ does not throw", async () => {
-    const writtenFiles: Array<{ content: string; path: string }> = []
     const mockSsh = createMockSsh({
       [CAT_SSHD]: { stdout: "AllowUsers root\n" },
     })
-    mockSsh.writeFile = async (path: string, content: string): Promise<void> => {
-      writtenFiles.push({ content, path })
-    }
+    trackWriteFile(mockSsh)
 
     // Value with a shell glob — previously could cause RegExp errors or injection
     const mod = sshd.config({ AllowUsers: "admin*" })
     await expect(mod.apply(mockSsh, emptyEnv)).resolves.not.toThrow()
-    const written = writtenFiles.find((f) => f.path === SSHD_CONFIG)
-    expect(written?.content).toContain("AllowUsers admin*")
+    const calls = vi.mocked(mockSsh.writeFile).mock.calls
+    expect(calls).toHaveLength(1)
+    expect(calls[0][1]).toContain("AllowUsers admin*")
   })
 
   it("regression — value with forward slash does not break file path or pattern", async () => {
-    const writtenFiles: Array<{ content: string; path: string }> = []
     const mockSsh = createMockSsh({
       [CAT_SSHD]: { stdout: "AuthorizedKeysFile .ssh/authorized_keys\n" },
     })
-    mockSsh.writeFile = async (path: string, content: string): Promise<void> => {
-      writtenFiles.push({ content, path })
-    }
+    const writtenFiles = trackWriteFile(mockSsh)
 
     const mod = sshd.config({ AuthorizedKeysFile: "/etc/ssh/authorized_keys/%u" })
     await mod.apply(mockSsh, emptyEnv)
