@@ -1,9 +1,21 @@
 import { shellQuote } from "../ssh.js"
 import { type Module, type ModuleResult, NEEDS_APPLY, type SshConnection } from "../types.js"
+import {
+  buildCurlHeaderFlags,
+  buildWaitForName,
+  buildWaitForTestCommand,
+  checkHttpCondition,
+  delay,
+  type HttpCheckParameters,
+  type WaitForOptions,
+} from "./netHelpers.js"
 
 const EXEC_OPTS = { ignoreExitCode: true, silent: true } as const
 const HOSTS_FILE = "/etc/hosts"
 const NETWORKCTL_RELOAD = "networkctl reload"
+const DEFAULT_POLL_INTERVAL_MS = 2000
+const DEFAULT_POLL_TIMEOUT_MS = 60_000
+const DEFAULT_EXPECTED_STATUS = 200
 
 /**
  * Sanitize a destination string for use in a filename.
@@ -229,10 +241,6 @@ export const net = {
   /**
    * Configure a network interface via Netplan (when available) or systemd-networkd.
    *
-   * Auto-detects whether Netplan is in use by checking for /etc/netplan/.
-   * When Netplan is detected, a YAML config is written; otherwise a
-   * systemd-networkd .network file is written.
-   *
    * @param name - The interface name (e.g. "eth0").
    * @param options - Network configuration options.
    * @returns A Module that manages the interface configuration.
@@ -279,10 +287,48 @@ export const net = {
   },
 
   /**
-   * Manage /etc/resolv.conf (nameservers and search domains).
+   * Check that an HTTP endpoint returns the expected status code and/or body.
    *
-   * Removes any existing symlink (e.g. from systemd-resolved) before writing
-   * the file directly.
+   * @param url - The URL to request.
+   * @param options - Optional request settings.
+   * @param options.body - Expected string in the response body.
+   * @param options.headers - Additional HTTP headers.
+   * @param options.method - HTTP method (default: `"GET"`).
+   * @param options.status - Expected HTTP status code (default: `200`).
+   * @returns A Module that checks the HTTP endpoint.
+   */
+  request(
+    url: string,
+    options?: { body?: string; headers?: Record<string, string>; method?: string; status?: number }
+  ): Module {
+    const method = options?.method ?? "GET"
+    const parameters: HttpCheckParameters = {
+      expectedBody: options?.body,
+      expectedStatus: options?.status ?? DEFAULT_EXPECTED_STATUS,
+      headerFlags: buildCurlHeaderFlags(options?.headers ?? {}),
+      methodFlag: method === "GET" ? "" : `-X ${shellQuote(method)} `,
+      url,
+    }
+
+    return {
+      async apply(conn: null | SshConnection): Promise<ModuleResult> {
+        if (!conn) return { status: "failed" }
+
+        const ok = await checkHttpCondition(conn, parameters)
+        return ok ? { status: "ok" } : { status: "failed" }
+      },
+      async check(conn: null | SshConnection): Promise<"needs-apply" | "ok"> {
+        if (!conn) return NEEDS_APPLY
+
+        const ok = await checkHttpCondition(conn, parameters)
+        return ok ? "ok" : NEEDS_APPLY
+      },
+      name: `net.request: ${method} ${url}`,
+    }
+  },
+
+  /**
+   * Manage /etc/resolv.conf (nameservers and search domains).
    *
    * @param options - Resolver configuration.
    * @param options.nameservers - List of nameserver IP addresses.
@@ -313,9 +359,6 @@ export const net = {
 
   /**
    * Manage persistent static routes via `ip route` and a systemd-networkd drop-in.
-   *
-   * The route is applied immediately via `ip route replace` and persisted as a
-   * systemd-networkd .network file so it survives reboots.
    *
    * @param destination - The route destination (e.g. "10.0.0.0/24").
    * @param gateway - The gateway IP address.
@@ -369,6 +412,43 @@ export const net = {
         return hasRoute ? NEEDS_APPLY : "ok"
       },
       name: `net.route: ${state} ${destination} via ${gateway}`,
+    }
+  },
+
+  /**
+   * Wait for a condition to become true on the remote host.
+   *
+   * @param options - Wait condition and timing options.
+   * @returns A Module that waits for the condition.
+   */
+  waitFor(options: WaitForOptions): Module {
+    const interval = options.interval ?? DEFAULT_POLL_INTERVAL_MS
+    const timeout = options.timeout ?? DEFAULT_POLL_TIMEOUT_MS
+    const host = options.host ?? "127.0.0.1"
+    const testCommand = buildWaitForTestCommand(options, host)
+
+    return {
+      async apply(conn: null | SshConnection): Promise<ModuleResult> {
+        if (!conn) return { status: "failed" }
+
+        const start = Date.now()
+        while (Date.now() - start < timeout) {
+          // eslint-disable-next-line no-await-in-loop
+          const success = await conn.test(testCommand)
+          if (success) return { status: "changed" }
+          // eslint-disable-next-line no-await-in-loop
+          await delay(interval)
+        }
+
+        return { status: "failed" }
+      },
+      async check(conn: null | SshConnection): Promise<"needs-apply" | "ok"> {
+        if (!conn) return NEEDS_APPLY
+
+        const success = await conn.test(testCommand)
+        return success ? "ok" : NEEDS_APPLY
+      },
+      name: buildWaitForName(options),
     }
   },
 }

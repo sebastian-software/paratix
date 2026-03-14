@@ -631,3 +631,219 @@ describe("net.interface — apply", () => {
     expect(mockSsh.calls).toContain("test -d '/etc/netplan'")
   })
 })
+
+// ─── net.waitFor ──────────────────────────────────────────────────────────────
+
+/* eslint-disable testing-library/await-async-utils -- net.waitFor is not testing-library waitFor */
+
+describe("net.waitFor — check", () => {
+  it("returns needs-apply when conn is null", async () => {
+    const mod = net.waitFor({ port: 8080 })
+    const result = await mod.check(null, emptyEnv)
+    expect(result).toBe("needs-apply")
+  })
+
+  it("returns ok when port is open (nc -z)", async () => {
+    const mockSsh = createMockSsh({
+      "nc -z '127.0.0.1' '8080'": { code: 0 },
+    })
+    const mod = net.waitFor({ port: 8080 })
+    const result = await mod.check(mockSsh, emptyEnv)
+    expect(result).toBe("ok")
+  })
+
+  it("returns needs-apply when port is closed", async () => {
+    const mockSsh = createMockSsh({
+      "nc -z '127.0.0.1' '8080'": { code: 1 },
+    })
+    const mod = net.waitFor({ port: 8080 })
+    const result = await mod.check(mockSsh, emptyEnv)
+    expect(result).toBe("needs-apply")
+  })
+
+  it("returns ok when file exists (test -f)", async () => {
+    const mockSsh = createMockSsh({
+      "test -f '/tmp/ready'": { code: 0 },
+    })
+    const mod = net.waitFor({ file: "/tmp/ready" })
+    const result = await mod.check(mockSsh, emptyEnv)
+    expect(result).toBe("ok")
+  })
+
+  it("returns needs-apply when file does not exist", async () => {
+    const mockSsh = createMockSsh({
+      "test -f '/tmp/ready'": { code: 1 },
+    })
+    const mod = net.waitFor({ file: "/tmp/ready" })
+    const result = await mod.check(mockSsh, emptyEnv)
+    expect(result).toBe("needs-apply")
+  })
+
+  it("returns ok when file contains expected string (grep -q)", async () => {
+    const mockSsh = createMockSsh({
+      "grep -q 'READY' '/tmp/status'": { code: 0 },
+    })
+    const mod = net.waitFor({ contains: "READY", file: "/tmp/status" })
+    const result = await mod.check(mockSsh, emptyEnv)
+    expect(result).toBe("ok")
+  })
+
+  it("returns needs-apply when file does not contain expected string", async () => {
+    const mockSsh = createMockSsh({
+      "grep -q 'READY' '/tmp/status'": { code: 1 },
+    })
+    const mod = net.waitFor({ contains: "READY", file: "/tmp/status" })
+    const result = await mod.check(mockSsh, emptyEnv)
+    expect(result).toBe("needs-apply")
+  })
+
+  it("has correct name format for port wait", async () => {
+    const mod = net.waitFor({ port: 8080 })
+    expect(mod.name).toBe("net.waitFor: port 8080")
+    const result = await mod.check(null, emptyEnv)
+    expect(result).toBe("needs-apply")
+  })
+
+  it("has correct name format for file wait", async () => {
+    const mod = net.waitFor({ file: "/tmp/ready" })
+    expect(mod.name).toBe("net.waitFor: file /tmp/ready")
+    const result = await mod.check(null, emptyEnv)
+    expect(result).toBe("needs-apply")
+  })
+
+  it("has correct name format for file contains wait", async () => {
+    const mod = net.waitFor({ contains: "READY", file: "/tmp/status" })
+    expect(mod.name).toBe("net.waitFor: /tmp/status contains READY")
+    const result = await mod.check(null, emptyEnv)
+    expect(result).toBe("needs-apply")
+  })
+})
+
+describe("net.waitFor — apply", () => {
+  it("returns failed when conn is null", async () => {
+    const mod = net.waitFor({ port: 8080 })
+    // eslint-disable-next-line prefer-spread
+    const result = await mod.apply(null, emptyEnv)
+    expect(result.status).toBe("failed")
+  })
+
+  it("returns changed when port becomes available immediately", async () => {
+    const mockSsh = createMockSsh({
+      "nc -z '127.0.0.1' '8080'": { code: 0 },
+    })
+    const mod = net.waitFor({ port: 8080 })
+    const result = await mod.apply(mockSsh, emptyEnv)
+    expect(result.status).toBe("changed")
+  })
+
+  it("returns failed on timeout when condition never becomes true", async () => {
+    const mockSsh = createMockSsh({
+      "nc -z '127.0.0.1' '9999'": { code: 1 },
+    })
+    const mod = net.waitFor({ interval: 5, port: 9999, timeout: 10 })
+    const result = await mod.apply(mockSsh, emptyEnv)
+    expect(result.status).toBe("failed")
+  })
+})
+
+/* eslint-enable testing-library/await-async-utils */
+
+// ─── net.request ──────────────────────────────────────────────────────────────
+
+describe("net.request — check", () => {
+  it("returns needs-apply when conn is null", async () => {
+    const mod = net.request("https://example.com/health")
+    const result = await mod.check(null, emptyEnv)
+    expect(result).toBe("needs-apply")
+  })
+
+  it("returns ok when status matches (200)", async () => {
+    const mockSsh = createMockSsh({
+      "curl -s -o /dev/null -w '%{http_code}' 'https://example.com/health'": { stdout: "200" },
+    })
+    const mod = net.request("https://example.com/health")
+    const result = await mod.check(mockSsh, emptyEnv)
+    expect(result).toBe("ok")
+  })
+
+  it("returns needs-apply when status does not match", async () => {
+    const mockSsh = createMockSsh({
+      "curl -s -o /dev/null -w '%{http_code}' 'https://example.com/health'": { stdout: "503" },
+    })
+    const mod = net.request("https://example.com/health")
+    const result = await mod.check(mockSsh, emptyEnv)
+    expect(result).toBe("needs-apply")
+  })
+
+  it("returns ok when status AND body match", async () => {
+    const mockSsh = createMockSsh({
+      "curl -s -o /dev/null -w '%{http_code}' 'https://example.com/health'": { stdout: "200" },
+      "curl -s 'https://example.com/health'": { stdout: "OK" },
+    })
+    const mod = net.request("https://example.com/health", { body: "OK" })
+    const result = await mod.check(mockSsh, emptyEnv)
+    expect(result).toBe("ok")
+  })
+
+  it("returns needs-apply when body does not match even if status matches", async () => {
+    const mockSsh = createMockSsh({
+      "curl -s -o /dev/null -w '%{http_code}' 'https://example.com/health'": { stdout: "200" },
+      "curl -s 'https://example.com/health'": { stdout: "ERROR" },
+    })
+    const mod = net.request("https://example.com/health", { body: "OK" })
+    const result = await mod.check(mockSsh, emptyEnv)
+    expect(result).toBe("needs-apply")
+  })
+
+  it("returns ok with custom method (POST)", async () => {
+    const mockSsh = createMockSsh({
+      "curl -s -o /dev/null -w '%{http_code}' -X 'POST' 'https://example.com/api'": {
+        stdout: "200",
+      },
+    })
+    const mod = net.request("https://example.com/api", { method: "POST" })
+    const result = await mod.check(mockSsh, emptyEnv)
+    expect(result).toBe("ok")
+  })
+
+  it("has correct name format: net.request: GET <url>", async () => {
+    const mod = net.request("https://example.com/health")
+    expect(mod.name).toBe("net.request: GET https://example.com/health")
+    const result = await mod.check(null, emptyEnv)
+    expect(result).toBe("needs-apply")
+  })
+
+  it("has correct name format with custom method: net.request: POST <url>", async () => {
+    const mod = net.request("https://example.com/api", { method: "POST" })
+    expect(mod.name).toBe("net.request: POST https://example.com/api")
+    const result = await mod.check(null, emptyEnv)
+    expect(result).toBe("needs-apply")
+  })
+})
+
+describe("net.request — apply", () => {
+  it("returns failed when conn is null", async () => {
+    const mod = net.request("https://example.com/health")
+    // eslint-disable-next-line prefer-spread
+    const result = await mod.apply(null, emptyEnv)
+    expect(result.status).toBe("failed")
+  })
+
+  it("returns ok when request succeeds", async () => {
+    const mockSsh = createMockSsh({
+      "curl -s -o /dev/null -w '%{http_code}' 'https://example.com/health'": { stdout: "200" },
+    })
+    const mod = net.request("https://example.com/health")
+    const result = await mod.apply(mockSsh, emptyEnv)
+    expect(result.status).toBe("ok")
+  })
+
+  it("returns failed when request fails (wrong status)", async () => {
+    const mockSsh = createMockSsh({
+      "curl -s -o /dev/null -w '%{http_code}' 'https://example.com/health'": { stdout: "503" },
+    })
+    const mod = net.request("https://example.com/health")
+    const result = await mod.apply(mockSsh, emptyEnv)
+    expect(result.status).toBe("failed")
+  })
+})

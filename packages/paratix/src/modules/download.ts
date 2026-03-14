@@ -1,3 +1,5 @@
+import { createHash } from "node:crypto"
+
 import { shellQuote } from "../ssh.js"
 import { type Module, type ModuleResult, NEEDS_APPLY, type SshConnection } from "../types.js"
 
@@ -135,6 +137,17 @@ async function checkDownload(
   return fileExists ? "ok" : NEEDS_APPLY
 }
 
+const FLAGS_DIRECTORY = "/var/lib/paratix/flags"
+
+/**
+ * Ensure the flags directory exists on the remote host.
+ *
+ * @param ssh - Active SSH connection.
+ */
+async function ensureFlagsDirectory(ssh: SshConnection): Promise<void> {
+  await ssh.exec(`mkdir -p ${FLAGS_DIRECTORY}`, { silent: true })
+}
+
 /**
  * Modules for downloading files to remote servers via `curl`.
  */
@@ -210,6 +223,71 @@ export const download = {
   },
 
   /**
+   * Download a large file that should only be fetched once.
+   *
+   * Unlike {@link download.url}, this method does not use SHA-256 verification
+   * or a `force` flag. Instead it tracks whether the download has been performed
+   * by writing a flag file under `/var/lib/paratix/flags/`. The flag name is
+   * derived from a SHA-256 hash of the URL.
+   *
+   * @param destination - Absolute path on the remote server where the file is saved.
+   * @param url - The URL to download from.
+   * @param options - Optional settings for ownership, permissions, and headers.
+   * @param options.group - Group owner to set on the downloaded file via `chown`.
+   * @param options.mode - File mode to set via `chmod` (e.g. `"0755"`).
+   * @param options.owner - User owner to set on the downloaded file via `chown`.
+   * @param options.headers - Additional HTTP headers sent with the curl request.
+   * @returns A Module that manages the large file download.
+   */
+  large(
+    destination: string,
+    url: string,
+    options?: {
+      /** Group owner to set on the downloaded file via `chown`. */
+      group?: string
+      /** Additional HTTP headers sent with the curl request. */
+      headers?: Record<string, string>
+      /** File mode to set via `chmod` (e.g. `"0755"`). */
+      mode?: string
+      /** User owner to set on the downloaded file via `chown`. */
+      owner?: string
+    }
+  ): Module {
+    const urlHash = createHash("sha256").update(url).digest("hex")
+    const flagName = `download-${urlHash}`
+    const downloadParameters: DownloadParameters = {
+      destination,
+      group: options?.group,
+      headers: options?.headers,
+      mode: options?.mode,
+      owner: options?.owner,
+      url,
+    }
+
+    return {
+      async apply(conn: null | SshConnection): Promise<ModuleResult> {
+        if (!conn) return { status: "failed" }
+
+        const result = await performDownload(conn, downloadParameters)
+
+        if (result.status === "changed") {
+          await ensureFlagsDirectory(conn)
+          await conn.exec(`touch ${FLAGS_DIRECTORY}/${shellQuote(flagName)}`, { silent: true })
+        }
+
+        return result
+      },
+      async check(conn: null | SshConnection): Promise<"needs-apply" | "ok"> {
+        if (!conn) return NEEDS_APPLY
+
+        const flagExists = await conn.test(`[ -f ${FLAGS_DIRECTORY}/${shellQuote(flagName)} ]`)
+        return flagExists ? "ok" : NEEDS_APPLY
+      },
+      name: `download.large: ${destination}`,
+    }
+  },
+
+  /**
    * Download a file from a URL to the remote server via `curl -fsSL`.
    *
    * Idempotency is determined by SHA-256 comparison (when `sha256` is
@@ -219,12 +297,6 @@ export const download = {
    * @param destination - Absolute path on the remote server where the file is saved.
    * @param url - The URL to download from.
    * @param options - Optional settings for integrity, ownership, and headers.
-   * @param options.force - Force re-download even if the file already exists.
-   * @param options.headers - Additional HTTP headers sent with the curl request.
-   * @param options.sha256 - Expected SHA-256 hex digest for integrity verification.
-   * @param options.mode - File mode to set via `chmod` (e.g. `"0755"`).
-   * @param options.owner - User owner to set on the downloaded file via `chown`.
-   * @param options.group - Group owner to set on the downloaded file via `chown`.
    * @returns A Module that manages the file download.
    */
   url(

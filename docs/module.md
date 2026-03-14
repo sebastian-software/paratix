@@ -223,6 +223,38 @@ net.route("10.0.0.0/24", "192.168.1.1", { device: "eth0" })
 net.route("10.0.0.0/24", "192.168.1.1", { state: "absent" })
 ```
 
+**`net.waitFor` — Beispiel:**
+
+```typescript
+// Warten bis Port 5432 (PostgreSQL) erreichbar ist
+net.waitFor({ port: 5432 })
+
+// Warten bis eine Datei existiert (z.B. nach einem Service-Start)
+net.waitFor({ file: "/var/run/myapp.pid" })
+
+// Warten bis eine Datei einen bestimmten String enthaelt
+net.waitFor({ file: "/var/log/myapp.log", contains: "Server started" })
+
+// Timeout und Polling-Intervall anpassen (Werte in Millisekunden)
+net.waitFor({ port: 8080, timeout: 120_000, interval: 5000 })
+```
+
+**`net.request` — Beispiel:**
+
+```typescript
+// Health-Check: HTTP 200 erwarten
+net.request("http://localhost/health")
+
+// Bestimmten Statuscode und Body-String pruefen
+net.request("http://localhost/api/status", { status: 200, body: '"ok"' })
+
+// POST-Request mit Header
+net.request("http://localhost/api/ping", {
+  method: "POST",
+  headers: { "Content-Type": "application/json" },
+})
+```
+
 > **Hinweis:** `net.interface` schreibt bei Netplan nach
 > `/etc/netplan/60-paratix-<name>.yaml` und fuehrt `netplan apply` aus.
 > Bei systemd-networkd wird `/etc/systemd/network/60-paratix-<name>.network`

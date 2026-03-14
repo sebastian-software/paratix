@@ -293,3 +293,75 @@ describe("download.github", () => {
     })
   })
 })
+
+// ─── download.large ───────────────────────────────────────────────────────────
+
+describe("download.large", () => {
+  const destination = "/opt/data/large-file.iso"
+  const url = "https://example.com/large-file.iso"
+  // SHA-256 of the URL, matching the flag name computed in the implementation
+  const urlHash = "b7c3ff8df8e2258a442ec7d03db1667124ea34ff39bd3197136e4238fab27fb3"
+  const flagName = `download-${urlHash}`
+
+  describe("check", () => {
+    it("returns needs-apply when conn is null", async () => {
+      const mod = download.large(destination, url)
+      const result = await mod.check(null, emptyEnv)
+      expect(result).toBe("needs-apply")
+    })
+
+    it("returns ok when flag file exists", async () => {
+      const mockSsh = createMockSsh({
+        [`[ -f /var/lib/paratix/flags/'${flagName}' ]`]: { code: 0 },
+      })
+      const mod = download.large(destination, url)
+      const result = await mod.check(mockSsh, emptyEnv)
+      expect(result).toBe("ok")
+    })
+
+    it("returns needs-apply when flag file does not exist", async () => {
+      const mockSsh = createMockSsh({
+        [`[ -f /var/lib/paratix/flags/'${flagName}' ]`]: { code: 1 },
+      })
+      const mod = download.large(destination, url)
+      const result = await mod.check(mockSsh, emptyEnv)
+      expect(result).toBe("needs-apply")
+    })
+  })
+
+  describe("apply", () => {
+    it("returns failed when conn is null", async () => {
+      const mod = download.large(destination, url)
+      // eslint-disable-next-line prefer-spread
+      const result = await mod.apply(null, emptyEnv)
+      expect(result.status).toBe("failed")
+    })
+
+    it("downloads file and sets flag on success", async () => {
+      const mockSsh = createMockSsh()
+      const mod = download.large(destination, url)
+      const result = await mod.apply(mockSsh, emptyEnv)
+      expect(result.status).toBe("changed")
+      expect(mockSsh.calls).toContain(`curl -fsSL -o '${destination}' '${url}'`)
+      expect(mockSsh.calls).toContain(`touch /var/lib/paratix/flags/'${flagName}'`)
+    })
+
+    it("creates flags directory before setting flag", async () => {
+      const mockSsh = createMockSsh()
+      const mod = download.large(destination, url)
+      await mod.apply(mockSsh, emptyEnv)
+      expect(mockSsh.calls).toContain("mkdir -p /var/lib/paratix/flags")
+      const mkdirIndex = mockSsh.calls.indexOf("mkdir -p /var/lib/paratix/flags")
+      const touchIndex = mockSsh.calls.indexOf(`touch /var/lib/paratix/flags/'${flagName}'`)
+      expect(mkdirIndex).toBeLessThan(touchIndex)
+    })
+  })
+
+  describe("name", () => {
+    // eslint-disable-next-line @typescript-eslint/require-await
+    it("has correct format: download.large: <destination>", async () => {
+      const mod = download.large(destination, url)
+      expect(mod.name).toBe(`download.large: ${destination}`)
+    })
+  })
+})
