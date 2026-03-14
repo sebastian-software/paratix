@@ -194,7 +194,7 @@ describe("file.copy", () => {
 describe("file.line", () => {
   it("check returns ok when line exists (without match)", async () => {
     const ssh = createMockSsh({
-      "grep -qF 'my-line' '/etc/config'": { code: 0 },
+      "cat '/etc/config'": { stdout: "some-line\nmy-line\nother-line" },
     })
     const mod = file.line("/etc/config", "my-line")
     const result = await mod.check(ssh, emptyEnv)
@@ -203,7 +203,7 @@ describe("file.line", () => {
 
   it("check returns needs-apply when line is missing (without match)", async () => {
     const ssh = createMockSsh({
-      "grep -qF 'my-line' '/etc/config'": { code: 1 },
+      "cat '/etc/config'": { stdout: "some-line\nother-line" },
     })
     const mod = file.line("/etc/config", "my-line")
     const result = await mod.check(ssh, emptyEnv)
@@ -212,10 +212,7 @@ describe("file.line", () => {
 
   it("check returns ok when exact line exists (with match)", async () => {
     const ssh = createMockSsh({
-      // match regex found
-      "grep -qE 'KEY=.*' '/etc/config'": { code: 0 },
-      // exact line also found
-      "grep -qF 'KEY=value' '/etc/config'": { code: 0 },
+      "cat '/etc/config'": { stdout: "OTHER=foo\nKEY=value\nMORE=bar" },
     })
     const mod = file.line("/etc/config", "KEY=value", { match: "KEY=.*" })
     const result = await mod.check(ssh, emptyEnv)
@@ -224,10 +221,7 @@ describe("file.line", () => {
 
   it("check returns needs-apply when match found but line differs", async () => {
     const ssh = createMockSsh({
-      // match regex found
-      "grep -qE 'KEY=.*' '/etc/config'": { code: 0 },
-      // but exact line not found
-      "grep -qF 'KEY=value' '/etc/config'": { code: 1 },
+      "cat '/etc/config'": { stdout: "OTHER=foo\nKEY=old\nMORE=bar" },
     })
     const mod = file.line("/etc/config", "KEY=value", { match: "KEY=.*" })
     const result = await mod.check(ssh, emptyEnv)
@@ -236,8 +230,7 @@ describe("file.line", () => {
 
   it("check returns needs-apply when match not found", async () => {
     const ssh = createMockSsh({
-      // match regex not found
-      "grep -qE 'KEY=.*' '/etc/config'": { code: 1 },
+      "cat '/etc/config'": { stdout: "OTHER=foo\nMORE=bar" },
     })
     const mod = file.line("/etc/config", "KEY=value", { match: "KEY=.*" })
     const result = await mod.check(ssh, emptyEnv)
@@ -247,6 +240,87 @@ describe("file.line", () => {
   it("check returns needs-apply when ssh is null", async () => {
     const mod = file.line("/etc/config", "my-line")
     const result = await mod.check(null, emptyEnv)
+    expect(result).toBe("needs-apply")
+  })
+})
+
+describe("file.line — sed-Escaping Regression (apply with options.match)", () => {
+  it("apply replaces line containing & without treating it as a backreference", async () => {
+    // JS String.replace with a RegExp treats $& as "insert matched substring".
+    // The implementation must escape the replacement string so that & is literal.
+    const writtenFiles: Array<{ content: string; path: string }> = []
+    const ssh = createMockSsh({
+      "cat '/etc/config'": { stdout: "DB_URL=old\n" },
+    })
+    // eslint-disable-next-line @typescript-eslint/require-await -- Mock
+    ssh.writeFile = async (path: string, content: string) => {
+      writtenFiles.push({ content, path })
+    }
+
+    const mod = file.line("/etc/config", "DB_URL=postgres://user:pass@host/db & more", {
+      match: "DB_URL=.*",
+    })
+    await mod.apply(ssh, emptyEnv)
+
+    expect(writtenFiles[0]?.content).toContain("DB_URL=postgres://user:pass@host/db & more")
+    expect(writtenFiles[0]?.content).not.toContain("DB_URL=oldDB_URL=old")
+  })
+
+  it("apply replaces line containing backslash without treating it as an escape sequence", async () => {
+    // JS String.replace treats $` and $' specially. A bare backslash in the
+    // replacement is literal in JS, but the implementation must not mangle it.
+    const writtenFiles: Array<{ content: string; path: string }> = []
+    const ssh = createMockSsh({
+      "cat '/etc/config'": { stdout: "LOG_DIR=old\n" },
+    })
+    // eslint-disable-next-line @typescript-eslint/require-await -- Mock
+    ssh.writeFile = async (path: string, content: string) => {
+      writtenFiles.push({ content, path })
+    }
+
+    const mod = file.line("/etc/config", "LOG_DIR=C:\\logs\\app", { match: "LOG_DIR=.*" })
+    await mod.apply(ssh, emptyEnv)
+
+    expect(writtenFiles[0]?.content).toContain("LOG_DIR=C:\\logs\\app")
+  })
+
+  it("apply replaces line containing forward slashes correctly", async () => {
+    const writtenFiles: Array<{ content: string; path: string }> = []
+    const ssh = createMockSsh({
+      "cat '/etc/nginx/nginx.conf'": { stdout: "include old;\n" },
+    })
+    // eslint-disable-next-line @typescript-eslint/require-await -- Mock
+    ssh.writeFile = async (path: string, content: string) => {
+      writtenFiles.push({ content, path })
+    }
+
+    const mod = file.line("/etc/nginx/nginx.conf", "include /etc/nginx/conf.d/*.conf;", {
+      match: "include .*",
+    })
+    await mod.apply(ssh, emptyEnv)
+
+    expect(writtenFiles[0]?.content).toContain("include /etc/nginx/conf.d/*.conf;")
+  })
+})
+
+describe("file.line — clientseitiges Matching (check with options.match)", () => {
+  it("check returns ok when exact line is present after match", async () => {
+    const ssh = createMockSsh({
+      "cat '/etc/config'": { stdout: "OTHER=foo\nDB_URL=postgres://user:pass@host/db & more\nEND=bar" },
+    })
+    const mod = file.line("/etc/config", "DB_URL=postgres://user:pass@host/db & more", {
+      match: "DB_URL=.*",
+    })
+    const result = await mod.check(ssh, emptyEnv)
+    expect(result).toBe("ok")
+  })
+
+  it("check returns needs-apply when match exists but line content differs", async () => {
+    const ssh = createMockSsh({
+      "cat '/etc/config'": { stdout: "OTHER=foo\nDB_URL=old-value\nEND=bar" },
+    })
+    const mod = file.line("/etc/config", "DB_URL=new-value", { match: "DB_URL=.*" })
+    const result = await mod.check(ssh, emptyEnv)
     expect(result).toBe("needs-apply")
   })
 })

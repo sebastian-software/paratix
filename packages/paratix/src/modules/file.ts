@@ -147,12 +147,12 @@ export const file = {
             silent: true,
           })
         } else {
-          // Replace matching line with the new line
-          const escaped = line.replaceAll("/", "\\/")
-          const matchEscaped = options.match.replaceAll("/", "\\/")
-          await ssh.exec(`sed -i 's/${matchEscaped}/${escaped}/' ${shellQuote(remotePath)}`, {
-            silent: true,
-          })
+          // Replace matching line with the new line (client-side to avoid sed escaping issues)
+          const content = await ssh.readFile(remotePath)
+          // eslint-disable-next-line security/detect-non-literal-regexp
+          const pattern = new RegExp(options.match, "mu")
+          const newContent = content.replace(pattern, line)
+          await ssh.writeFile(remotePath, newContent)
         }
 
         return { status: "changed" }
@@ -160,19 +160,16 @@ export const file = {
       async check(ssh: null | SshConnection): Promise<"needs-apply" | "ok"> {
         if (!ssh) return NEEDS_APPLY
 
+        const content = await ssh.readFile(remotePath)
+
         if (options?.match != null) {
-          const hasMatch = await ssh.test(
-            `grep -qE ${shellQuote(options.match)} ${shellQuote(remotePath)}`
-          )
-          if (!hasMatch) return NEEDS_APPLY
-          const exactLineExists = await ssh.test(
-            `grep -qF ${shellQuote(line)} ${shellQuote(remotePath)}`
-          )
-          return exactLineExists ? "ok" : NEEDS_APPLY
+          // eslint-disable-next-line security/detect-non-literal-regexp
+          const matchPattern = new RegExp(options.match, "mu")
+          if (!matchPattern.test(content)) return NEEDS_APPLY
+          return content.includes(line) ? "ok" : NEEDS_APPLY
         }
 
-        const lineExists = await ssh.test(`grep -qF ${shellQuote(line)} ${shellQuote(remotePath)}`)
-        return lineExists ? "ok" : NEEDS_APPLY
+        return content.includes(line) ? "ok" : NEEDS_APPLY
       },
       name: `file.line: ${remotePath}`,
     }
