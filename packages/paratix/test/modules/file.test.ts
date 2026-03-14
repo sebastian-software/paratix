@@ -306,7 +306,9 @@ describe("file.line — sed-Escaping Regression (apply with options.match)", () 
 describe("file.line — clientseitiges Matching (check with options.match)", () => {
   it("check returns ok when exact line is present after match", async () => {
     const ssh = createMockSsh({
-      "cat '/etc/config'": { stdout: "OTHER=foo\nDB_URL=postgres://user:pass@host/db & more\nEND=bar" },
+      "cat '/etc/config'": {
+        stdout: "OTHER=foo\nDB_URL=postgres://user:pass@host/db & more\nEND=bar",
+      },
     })
     const mod = file.line("/etc/config", "DB_URL=postgres://user:pass@host/db & more", {
       match: "DB_URL=.*",

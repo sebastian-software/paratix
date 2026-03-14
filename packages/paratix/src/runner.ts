@@ -82,6 +82,7 @@ async function handlePortChange(ssh: SshConnectionImpl, meta: Environment): Prom
     await ssh.reconnect()
   } catch (error) {
     console.error(`Failed to reconnect after port change: ${String(error)}`)
+    throw error
   }
 }
 
@@ -100,6 +101,7 @@ async function handleReboot(ssh: SshConnectionImpl, meta: Environment): Promise<
     await ssh.reconnect()
   } catch (error) {
     console.error(`Failed to reconnect after reboot: ${String(error)}`)
+    throw error
   }
 }
 
