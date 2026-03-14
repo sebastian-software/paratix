@@ -8,6 +8,70 @@ import { runPlaybook } from "./runner.js"
 
 const SECONDS_TO_MS = 1000
 
+/**
+ * Type guard that checks whether `value` has the minimal shape of a
+ * {@link ServerDefinition} (an object with a string `host` and an array `run`).
+ *
+ * @param value - The value to inspect.
+ * @returns `true` when `value` satisfies the structural requirements of `ServerDefinition`.
+ */
+export function isServerDefinitionLike(value: unknown): value is ServerDefinition {
+  return collectDefinitionErrors(value).length === 0
+}
+
+/**
+ * Collects human-readable error messages for every property of `value` that
+ * does not conform to the `ServerDefinition` shape.
+ *
+ * @param value - The value to validate.
+ * @returns An array of error strings, empty when `value` is structurally valid.
+ */
+export function collectDefinitionErrors(value: unknown): string[] {
+  const errors: string[] = []
+  if (typeof value !== "object" || value === null) {
+    errors.push("Export is not an object")
+    return errors
+  }
+  if (!("host" in value)) {
+    errors.push("Missing property 'host' (expected string)")
+  } else if (typeof value.host !== "string") {
+    errors.push(`Invalid property 'host' (expected string, got ${typeof value.host})`)
+  } else if (value.host.length === 0) {
+    errors.push("Property 'host' must not be empty")
+  }
+  if (!("run" in value)) {
+    errors.push("Missing property 'run' (expected array)")
+  } else if (!Array.isArray(value.run)) {
+    errors.push(`Invalid property 'run' (expected array, got ${typeof value.run})`)
+  } else if (value.run.length === 0) {
+    errors.push("Property 'run' must not be empty")
+  }
+  return errors
+}
+
+/**
+ * Assertion function that ensures `value` is a valid {@link ServerDefinition}.
+ *
+ * When validation fails, all collected errors are printed to stderr and the
+ * process exits with code `2`, so callers can treat the function as a
+ * narrowing assertion without additional error handling.
+ *
+ * @param value - The value to validate.
+ * @param file - Path of the file that exported `value`, used in the error message.
+ */
+function validateServerDefinition(value: unknown, file: string): asserts value is ServerDefinition {
+  if (isServerDefinitionLike(value)) {
+    return
+  }
+  const errors = collectDefinitionErrors(value)
+  const details = errors.map((entry) => `  - ${entry}`).join("\n")
+  console.error(
+    `Error: ${file} does not export a valid ServerDefinition.\n${details}\n  Use the server() helper to create a valid definition.`
+  )
+  // eslint-disable-next-line node/no-process-exit
+  process.exit(2)
+}
+
 const program = new Command()
 
 program.name("paratix").description("Idempotent VPS setup tool in TypeScript").version("0.1.0")
@@ -38,11 +102,7 @@ program
       // eslint-disable-next-line @typescript-eslint/no-unsafe-member-access, @typescript-eslint/no-unsafe-type-assertion -- Accessing .default on dynamic import
       const definition = (imported.default ?? imported) as ServerDefinition
 
-      if (definition.host.length === 0 || definition.run.length === 0) {
-        console.error("Error: File must export a valid ServerDefinition (use server() helper)")
-        // eslint-disable-next-line node/no-process-exit
-        process.exit(2)
-      }
+      validateServerDefinition(definition, filePath)
 
       await runPlaybook(definition, {
         // eslint-disable-next-line @typescript-eslint/no-unsafe-type-assertion -- Commander options typed as Record<string, unknown>
