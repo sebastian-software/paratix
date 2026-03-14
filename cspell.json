@@ -15,6 +15,7 @@
     "groupadd",
     "groupdel",
     "hashicorp",
+    "hotp",
     "hostnamectl",
     "keyrings",
     "metaget",
@@ -23,12 +24,14 @@
     "nginx",
     "nodistro",
     "ondrej",
+    "otpauth",
     "oxlint",
     "paratix",
     "passwordless",
     "sshd",
     "systemctl",
     "tmpl",
+    "totp",
     "userdel",
     "usermod"
   ]
