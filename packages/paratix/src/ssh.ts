@@ -1,4 +1,6 @@
-import { readFileSync } from "node:fs"
+import { readFileSync, unlinkSync, writeFileSync } from "node:fs"
+import { tmpdir } from "node:os"
+import { join } from "node:path"
 import { Client, type ClientChannel } from "ssh2"
 
 import type { ExecOptions, ExecResult, SshConfig, SshConnection } from "./types.js"
@@ -18,6 +20,7 @@ export function shellQuote(s: string): string {
   return `'${s.replaceAll("'", "'\\''")}'`
 }
 
+const SFTP_WRITE_THRESHOLD = 65_536
 const COMMAND_TIMEOUT = 120_000
 const RECONNECT_BASE_DELAY = 1000
 const RECONNECT_MAX_DELAY = 30_000
@@ -210,11 +213,35 @@ export class SshConnectionImpl implements SshConnection {
   }
 
   public async writeFile(remotePath: string, content: string): Promise<void> {
-    const escaped = shellQuote(content)
-    await this.exec(
-      `printf '%s' ${escaped} | ${this.sudoPrefix()}tee ${shellQuote(remotePath)} > /dev/null`,
-      { silent: true }
-    )
+    if (Buffer.byteLength(content) <= SFTP_WRITE_THRESHOLD) {
+      const escaped = shellQuote(content)
+      await this.exec(
+        `printf '%s' ${escaped} | ${this.sudoPrefix()}tee ${shellQuote(remotePath)} > /dev/null`,
+        { silent: true }
+      )
+      return
+    }
+
+    // Large content: write to local tmp file, SFTP upload, then move into place
+    const client = this.ensureClient()
+    const localTemporary = join(tmpdir(), `paratix-write-${Date.now()}`)
+    const remoteTemporary = await this.output("mktemp /tmp/paratix-write.XXXXXX")
+    try {
+      // eslint-disable-next-line security/detect-non-literal-fs-filename
+      writeFileSync(localTemporary, content)
+      await sftpUpload(client, localTemporary, remoteTemporary)
+      await this.exec(
+        `${this.sudoPrefix()}mv ${shellQuote(remoteTemporary)} ${shellQuote(remotePath)}`,
+        { silent: true }
+      )
+    } finally {
+      try {
+        // eslint-disable-next-line security/detect-non-literal-fs-filename
+        unlinkSync(localTemporary)
+      } catch {
+        // local cleanup is best-effort
+      }
+    }
   }
 
   private buildEnvPrefix(environment?: Record<string, string>): string {
