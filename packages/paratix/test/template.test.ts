@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest"
+import { describe, expect, it, vi } from "vitest"
 
 import type { Environment } from "../src/types.js"
 
@@ -40,5 +40,34 @@ describe("renderTemplate", () => {
     const env: Environment = { PORT: 8080 }
     const view = await renderTemplate("Port: {{PORT}}", env)
     expect(view).toBe("Port: 8080")
+  })
+
+  it("replaces the same placeholder used twice", async () => {
+    const env: Environment = { A: "x" }
+    const view = await renderTemplate("{{A}} and {{A}}", env)
+    expect(view).toBe("x and x")
+  })
+
+  it("inserts a value containing placeholder syntax verbatim (single-pass)", async () => {
+    const env: Environment = { A: "{{B}}", B: "SHOULD_NOT_APPEAR" }
+    const view = await renderTemplate("result: {{A}}", env)
+    expect(view).toBe("result: {{B}}")
+  })
+
+  // String.prototype.replace() treats $&, $`, $', and $1–$9 in the
+  // replacement string as special sequences.  The cursor-based assembly in
+  // renderTemplate avoids this pitfall so dollar signs pass through verbatim.
+  it("preserves dollar signs in resolved values", async () => {
+    const env: Environment = { PRICE: "$100" }
+    const view = await renderTemplate("Cost: {{PRICE}}", env)
+    expect(view).toBe("Cost: $100")
+  })
+
+  it("calls a lazy function value once per placeholder occurrence", async () => {
+    const lazy = vi.fn(() => "val")
+    const env: Environment = { A: lazy }
+    const view = await renderTemplate("{{A}} and {{A}}", env)
+    expect(view).toBe("val and val")
+    expect(lazy).toHaveBeenCalledTimes(2)
   })
 })
