@@ -34,7 +34,7 @@ export const script = {
     const scriptArguments = options?.args
     const flagName = `script-${name}-${version}`
     const remotePath = `/tmp/paratix-script-${name}`
-    const flagPrefix = `script-${shellQuote(name)}-`
+    const flagPrefix = `script-${name}-`
 
     return {
       async apply(ssh: null | SshConnection): Promise<ModuleResult> {
