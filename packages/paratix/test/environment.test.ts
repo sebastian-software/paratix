@@ -50,7 +50,6 @@ describe("loadDotEnvironment", () => {
 
   afterEach(() => {
     try {
-      // eslint-disable-next-line security/detect-non-literal-fs-filename
       unlinkSync(tmpFile)
     } catch {
       // noop
@@ -58,7 +57,6 @@ describe("loadDotEnvironment", () => {
   })
 
   it("parses KEY=value lines into an Environment object", () => {
-    // eslint-disable-next-line security/detect-non-literal-fs-filename
     writeFileSync(tmpFile, "HOST=example.com\nPORT=3000\n")
     const env = loadDotEnvironment(tmpFile)
     expect(env.HOST).toBe("example.com")
@@ -66,7 +64,6 @@ describe("loadDotEnvironment", () => {
   })
 
   it("ignores comment lines starting with #", () => {
-    // eslint-disable-next-line security/detect-non-literal-fs-filename
     writeFileSync(tmpFile, "# This is a comment\nHOST=example.com\n")
     const env = loadDotEnvironment(tmpFile)
     expect(Object.keys(env)).toHaveLength(1)
@@ -74,7 +71,6 @@ describe("loadDotEnvironment", () => {
   })
 
   it("ignores empty lines", () => {
-    // eslint-disable-next-line security/detect-non-literal-fs-filename
     writeFileSync(tmpFile, "\n\nHOST=example.com\n\n")
     const env = loadDotEnvironment(tmpFile)
     expect(Object.keys(env)).toHaveLength(1)
@@ -82,14 +78,12 @@ describe("loadDotEnvironment", () => {
   })
 
   it("strips surrounding double quotes from values", () => {
-    // eslint-disable-next-line security/detect-non-literal-fs-filename
     writeFileSync(tmpFile, 'TOKEN="my-secret-token"\n')
     const env = loadDotEnvironment(tmpFile)
     expect(env.TOKEN).toBe("my-secret-token")
   })
 
   it("strips surrounding single quotes from values", () => {
-    // eslint-disable-next-line security/detect-non-literal-fs-filename
     writeFileSync(tmpFile, "TOKEN='my-secret-token'\n")
     const env = loadDotEnvironment(tmpFile)
     expect(env.TOKEN).toBe("my-secret-token")

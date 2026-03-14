@@ -197,6 +197,7 @@ export const compose = {
 
         let desiredContent: string
         if (options.src !== undefined && options.src !== "") {
+          // eslint-disable-next-line security/detect-non-literal-fs-filename -- path from module config, not user input
           desiredContent = readFileSync(options.src, "utf8")
         } else if (options.content !== undefined && options.content !== "") {
           desiredContent = options.content

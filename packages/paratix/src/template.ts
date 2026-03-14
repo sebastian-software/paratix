@@ -24,8 +24,7 @@ export async function renderTemplate(template: string, environment: Environment)
   let match: null | RegExpExecArray
 
   while ((match = pattern.exec(result)) !== null) {
-    // eslint-disable-next-line @typescript-eslint/no-non-null-assertion -- Named group always present when regex matches
-    matches.push({ full: match[0], key: match.groups!.varName })
+    matches.push({ full: match[0], key: match.groups?.varName ?? "" })
   }
 
   // Resolve all keys

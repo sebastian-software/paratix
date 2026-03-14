@@ -8,12 +8,8 @@ import { sha256String } from "./fileHelpers.js"
 const STAT_TYPE_START_INDEX = 4
 
 function concatFragments(fragments: string[]): string {
-  return (
-    fragments
-      // eslint-disable-next-line security/detect-non-literal-fs-filename
-      .map((f) => readFileSync(f, "utf8"))
-      .join("")
-  )
+  // eslint-disable-next-line security/detect-non-literal-fs-filename -- paths from module config, not user input
+  return fragments.map((f) => readFileSync(f, "utf8")).join("")
 }
 
 type BlockMarkers = { begin: string; end: string; full: string }
@@ -249,6 +245,7 @@ export function replace(remotePath: string, pattern: string, replacement: string
       if (!ssh) return { status: "failed" }
 
       const content = await ssh.readFile(remotePath)
+      // eslint-disable-next-line security/detect-non-literal-regexp -- pattern from module config, not user input
       const updated = content.replaceAll(new RegExp(pattern, "gu"), replacement)
       await ssh.writeFile(remotePath, updated)
 

@@ -2,8 +2,9 @@ import type { ExecResult, SshConnection } from "../../src/types.js"
 
 import { shellQuote } from "../../src/ssh.js"
 
-// eslint-disable-next-line @typescript-eslint/no-empty-function -- Mock noop
-const noop = async (): Promise<void> => {}
+const noop = async (): Promise<void> => {
+  /* mock noop */
+}
 
 export function createMockSsh(
   responses?: Record<string, Partial<ExecResult>>

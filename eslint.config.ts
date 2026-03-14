@@ -18,6 +18,12 @@ const eslintConfig: Linter.Config[] = [
       "**/*.yml",
     ],
   },
+  {
+    files: ["**/test/**/*.ts"],
+    rules: {
+      "security/detect-non-literal-fs-filename": "off",
+    },
+  },
 ]
 
 export default eslintConfig

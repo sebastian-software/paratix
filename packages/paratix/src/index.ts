@@ -13,10 +13,8 @@ export { server } from "./server.js"
 export { shellQuote } from "./ssh.js"
 export { NEEDS_APPLY } from "./types.js"
 export type {
-  Env,
   Environment,
   EnvironmentValue,
-  EnvValue,
   ExecOptions,
   ExecResult,
   Module,

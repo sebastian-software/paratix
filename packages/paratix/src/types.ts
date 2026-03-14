@@ -14,13 +14,6 @@ export type Environment = Record<string, EnvironmentValue>
 /** Check result indicating the module's desired state is not yet present. */
 export const NEEDS_APPLY = "needs-apply" as const
 
-/** @deprecated Use `Environment` instead. */
-// eslint-disable-next-line unicorn/prevent-abbreviations -- Backward-compatible alias
-export type Env = Environment
-/** @deprecated Use `EnvironmentValue` instead. */
-// eslint-disable-next-line unicorn/prevent-abbreviations -- Backward-compatible alias
-export type EnvValue = EnvironmentValue
-
 /** The outcome of a module's apply step. */
 export type ModuleResult = {
   /** Optional key-value pairs to merge into the env for subsequent modules. */

@@ -88,7 +88,7 @@ export async function tryConnectOnPort(parameters: ConnectParameters): Promise<v
       readyTimeout: CONNECTION_TIMEOUT,
       username,
     }
-    if (password != null) {
+    if (typeof password === "string") {
       connectConfig.password = password
       connectConfig.tryKeyboard = true
     }
