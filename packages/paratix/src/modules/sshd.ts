@@ -4,12 +4,32 @@ import { type Module, type ModuleResult, NEEDS_APPLY, type SshConnection } from 
 const DEFAULT_SSH_PORT = 22
 const SSHD_CONFIG_PATH = "/etc/ssh/sshd_config"
 
+// prettier-ignore
+const REGEXP_SPECIAL = new Set(["?", ".", "(", ")", "[", "]", "{", "}", "*", "\\", "^", "+", "|", "$"])
+
+function escapeRegExp(s: string): string {
+  let result = ""
+  for (const ch of s) {
+    result += REGEXP_SPECIAL.has(ch) ? `\\${ch}` : ch
+  }
+  return result
+}
+
 async function applySshdSetting(ssh: SshConnection, key: string, value: string): Promise<void> {
-  const exists = await ssh.test(`grep -qE '^${key}\\s' ${SSHD_CONFIG_PATH}`)
-  const command = exists
-    ? `sed -i 's/^${key}\\s.*/${key} ${value}/' ${SSHD_CONFIG_PATH}`
-    : `printf '%s\\n' ${shellQuote([key, value].join(" "))} >> ${SSHD_CONFIG_PATH}`
-  await ssh.exec(command, { silent: true })
+  const content = await ssh.readFile(SSHD_CONFIG_PATH)
+  // eslint-disable-next-line security/detect-non-literal-regexp
+  const pattern = new RegExp(`^${escapeRegExp(key)}\\s.*`, "mv")
+  let newContent: string
+
+  if (pattern.test(content)) {
+    newContent = content.replace(pattern, `${key} ${value}`)
+  } else {
+    newContent = content.endsWith("\n")
+      ? `${content}${key} ${value}\n`
+      : `${content}\n${key} ${value}\n`
+  }
+
+  await ssh.writeFile(SSHD_CONFIG_PATH, newContent)
 }
 
 /**
@@ -19,7 +39,7 @@ async function applySshdSetting(ssh: SshConnection, key: string, value: string):
 export const sshd = {
   /**
    * Apply one or more key-value settings to `sshd_config`.
-   * Existing directives are updated in-place via `sed`; missing directives are appended.
+   * Existing directives are updated in-place; missing directives are appended.
    *
    * @param settings - A map of sshd_config directive names to their desired values
    *   (e.g. `{ PasswordAuthentication: "no" }`).
@@ -44,7 +64,7 @@ export const sshd = {
         const content = await ssh.readFile(SSHD_CONFIG_PATH)
         for (const [key, value] of Object.entries(settings)) {
           // eslint-disable-next-line security/detect-non-literal-regexp
-          const pattern = new RegExp(`^${key}\\s+${value}$`, "mv")
+          const pattern = new RegExp(`^${escapeRegExp(key)}\\s+${escapeRegExp(value)}$`, "mv")
           if (!pattern.test(content)) {
             return NEEDS_APPLY
           }
