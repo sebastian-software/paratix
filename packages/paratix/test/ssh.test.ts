@@ -1,0 +1,477 @@
+import type { Client, SFTPWrapper } from "ssh2"
+
+import { EventEmitter } from "node:events"
+import { afterEach, describe, expect, it, vi } from "vitest"
+
+import { sftpDownload } from "../src/sftp.js"
+import { SshConnectionImpl } from "../src/ssh.js"
+import { tryConnectOnPort } from "../src/sshHelpers.js"
+
+// ---------------------------------------------------------------------------
+// Mocks
+// ---------------------------------------------------------------------------
+
+vi.mock("node:fs", () => ({
+  readFileSync: vi.fn().mockReturnValue("fake-private-key"),
+  unlinkSync: vi.fn(),
+  writeFileSync: vi.fn(),
+}))
+
+vi.mock("../src/sftp.js", () => ({
+  sftpDownload: vi.fn().mockResolvedValue(null),
+  sftpUpload: vi.fn(),
+}))
+
+vi.mock("../src/sshHelpers.js", async () => {
+  const { collectStreamOutput } = await vi.importActual("../src/sshHelpers.js")
+  return {
+    collectStreamOutput,
+    tryConnectOnPort: vi.fn(),
+  }
+})
+
+vi.mock("../src/terminal.js", () => ({
+  promptTerminal: vi.fn().mockResolvedValue("mock-password"),
+}))
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+type StreamWithStderr = {
+  close: () => void
+  stderr: EventEmitter
+  write: ReturnType<typeof vi.fn>
+} & EventEmitter
+
+type ExecCallback = (error: Error | undefined, stream: StreamWithStderr) => void
+
+function makeStream(): StreamWithStderr {
+  const stream = new EventEmitter() as StreamWithStderr
+  stream.stderr = new EventEmitter()
+  // Define methods on the object so vi.spyOn can find them
+  stream.write = (() => true) as unknown as ReturnType<typeof vi.fn>
+  stream.close = () => {
+    /* noop */
+  }
+  vi.spyOn(stream, "write" as never).mockImplementation((() => true) as never)
+  vi.spyOn(stream, "close" as never).mockImplementation((() => {
+    /* noop */
+  }) as never)
+  return stream
+}
+
+function makeClientWithEnd(endSpy: ReturnType<typeof vi.fn>): Client {
+  return {
+    end: endSpy,
+    exec: vi.fn().mockImplementation((_command: string, callback: ExecCallback) => {
+      const stream = makeStream()
+      callback(undefined, stream)
+      stream.emit("close", 0)
+    }),
+    sftp: vi.fn().mockImplementation((callback: Parameters<Client["sftp"]>[0]) => {
+      callback(undefined, {} as SFTPWrapper)
+    }),
+  } as unknown as Client
+}
+
+function makeClientWithExecSpy(execSpy: ReturnType<typeof vi.fn>): Client {
+  return {
+    end: vi.fn(),
+    exec: execSpy,
+    sftp: vi.fn().mockImplementation((callback: Parameters<Client["sftp"]>[0]) => {
+      callback(undefined, {} as SFTPWrapper)
+    }),
+  } as unknown as Client
+}
+
+function makeConnectedSsh(
+  client: Client,
+  options: { sudoPassword?: string; user?: string } = {}
+): SshConnectionImpl {
+  const config = {
+    ports: [22],
+    privateKey: "/dev/null",
+    sudoPassword: options.sudoPassword,
+    user: options.user ?? "root",
+  }
+  const ssh = new SshConnectionImpl("1.2.3.4", config)
+  ;(ssh as unknown as Record<string, unknown>).client = client
+  return ssh
+}
+
+function makeSshInstance(
+  overrides: { host?: string; ports?: number[]; reconnectTimeout?: number; user?: string } = {}
+): SshConnectionImpl {
+  const config = {
+    ports: overrides.ports ?? [22],
+    privateKey: "/dev/null",
+    reconnectTimeout: overrides.reconnectTimeout,
+    user: overrides.user ?? "root",
+  }
+  return new SshConnectionImpl(overrides.host ?? "1.2.3.4", config)
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+describe("SshConnectionImpl", () => {
+  afterEach(() => {
+    vi.resetAllMocks()
+    vi.useRealTimers()
+  })
+
+  // -------------------------------------------------------------------------
+  // ensureClient
+  // -------------------------------------------------------------------------
+
+  describe("ensureClient (via exec)", () => {
+    it("throws 'SSH not connected' when client is null", async () => {
+      const ssh = makeSshInstance()
+
+      await expect(ssh.exec("whoami")).rejects.toThrow("SSH not connected")
+    })
+  })
+
+  // -------------------------------------------------------------------------
+  // disconnect
+  // -------------------------------------------------------------------------
+
+  describe("disconnect", () => {
+    it("calls client.end() when connected", () => {
+      const endSpy = vi.fn()
+      const client = makeClientWithEnd(endSpy)
+      const ssh = makeConnectedSsh(client)
+
+      ssh.disconnect()
+
+      expect(endSpy).toHaveBeenCalledOnce()
+    })
+
+    it("is idempotent — calling twice does not throw", () => {
+      const endSpy = vi.fn()
+      const client = makeClientWithEnd(endSpy)
+      const ssh = makeConnectedSsh(client)
+
+      ssh.disconnect()
+      ssh.disconnect()
+
+      expect(endSpy).toHaveBeenCalledOnce()
+    })
+  })
+
+  // -------------------------------------------------------------------------
+  // addPort
+  // -------------------------------------------------------------------------
+
+  describe("addPort", () => {
+    it("adds a new port to the config", () => {
+      const ssh = makeSshInstance({ ports: [22] })
+
+      ssh.addPort(2222)
+
+      expect((ssh as unknown as Record<string, { ports: number[] }>).config.ports).toContain(2222)
+    })
+
+    it("does not add a duplicate port", () => {
+      const ssh = makeSshInstance({ ports: [22] })
+
+      ssh.addPort(22)
+
+      expect((ssh as unknown as Record<string, { ports: number[] }>).config.ports).toHaveLength(1)
+    })
+  })
+
+  // -------------------------------------------------------------------------
+  // updateHost
+  // -------------------------------------------------------------------------
+
+  describe("updateHost", () => {
+    it("updates the host used for connections", () => {
+      const ssh = makeSshInstance({ host: "old-host" })
+
+      ssh.updateHost("new-host")
+
+      expect(ssh.getConnectionInfo().host).toBe("new-host")
+    })
+  })
+
+  // -------------------------------------------------------------------------
+  // reconnect
+  // -------------------------------------------------------------------------
+
+  describe("reconnect", () => {
+    it("succeeds after N failed connect attempts", async () => {
+      vi.useFakeTimers()
+
+      vi.mocked(tryConnectOnPort)
+        .mockRejectedValueOnce(new Error("Connection refused (attempt 1)"))
+        .mockRejectedValueOnce(new Error("Connection refused (attempt 2)"))
+        .mockResolvedValueOnce()
+
+      const ssh = makeSshInstance({ reconnectTimeout: 300_000 })
+
+      const reconnectPromise = ssh.reconnect()
+
+      // Advance timers for first backoff delay
+      await vi.advanceTimersByTimeAsync(2000)
+      // Advance timers for second backoff delay
+      await vi.advanceTimersByTimeAsync(4000)
+
+      await reconnectPromise
+
+      expect(tryConnectOnPort).toHaveBeenCalledTimes(3)
+    })
+
+    it("throws after deadline when all connect attempts fail", async () => {
+      vi.useFakeTimers()
+
+      vi.mocked(tryConnectOnPort).mockRejectedValue(new Error("Connection refused"))
+
+      const ssh = makeSshInstance({ reconnectTimeout: 5000 })
+
+      const reconnectPromise = ssh.reconnect()
+
+      // Register rejection handler before advancing timers to prevent unhandled rejection
+      reconnectPromise.catch(() => {
+        /* handled below */
+      })
+
+      // Advance time in steps to let pending microtasks settle between advances
+      for (let elapsed = 0; elapsed < 12_000; elapsed += 1000) {
+        // eslint-disable-next-line no-await-in-loop
+        await vi.advanceTimersByTimeAsync(1000)
+      }
+
+      await expect(reconnectPromise).rejects.toThrow(
+        /Failed to reconnect to 1\.2\.3\.4 after 5000ms/v
+      )
+    })
+  })
+
+  // -------------------------------------------------------------------------
+  // exec
+  // -------------------------------------------------------------------------
+
+  describe("exec", () => {
+    it("rejects with timeout error when stream never closes", async () => {
+      vi.useFakeTimers()
+
+      const execSpy = vi.fn().mockImplementation((_command: string, callback: ExecCallback) => {
+        const stream = makeStream()
+        callback(undefined, stream)
+        // Stream never emits 'close' — simulates a hanging command
+      })
+      const client = makeClientWithExecSpy(execSpy)
+      const ssh = makeConnectedSsh(client)
+
+      const execPromise = ssh.exec("sleep infinity", { timeout: 5000 })
+
+      // Register rejection handler before advancing timers to prevent unhandled rejection
+      execPromise.catch(() => {
+        /* handled below */
+      })
+
+      await vi.advanceTimersByTimeAsync(5001)
+
+      await expect(execPromise).rejects.toThrow(/Command timed out after 5000ms/v)
+    })
+
+    it("writes sudo password to stdin for non-root user with cachedSudoPassword", async () => {
+      const execSpy = vi.fn().mockImplementation((_command: string, callback: ExecCallback) => {
+        const stream = makeStream()
+        callback(undefined, stream)
+        // Verify write was called before close
+        expect(stream.write).toHaveBeenCalledWith("my-sudo-pass\n")
+        stream.emit("close", 0)
+      })
+      const client = makeClientWithExecSpy(execSpy)
+      const ssh = makeConnectedSsh(client, { sudoPassword: "my-sudo-pass", user: "deploy" })
+
+      await ssh.exec("whoami")
+
+      expect(execSpy).toHaveBeenCalledOnce()
+    })
+
+    it("rejects when client.exec callback receives an error", async () => {
+      const execSpy = vi.fn().mockImplementation((_command: string, callback: ExecCallback) => {
+        callback(new Error("SSH channel open failed"), undefined as unknown as StreamWithStderr)
+      })
+      const client = makeClientWithExecSpy(execSpy)
+      const ssh = makeConnectedSsh(client)
+
+      await expect(ssh.exec("whoami")).rejects.toThrow("SSH channel open failed")
+    })
+  })
+
+  // -------------------------------------------------------------------------
+  // sha256
+  // -------------------------------------------------------------------------
+
+  describe("sha256", () => {
+    it("returns null when the file does not exist", async () => {
+      const execSpy = vi.fn().mockImplementation((_command: string, callback: ExecCallback) => {
+        const stream = makeStream()
+        callback(undefined, stream)
+        stream.emit("close", 1) // file does not exist
+      })
+      const client = makeClientWithExecSpy(execSpy)
+      const ssh = makeConnectedSsh(client)
+
+      const result = await ssh.sha256("/nonexistent")
+
+      expect(result).toBeNull()
+    })
+
+    it("returns the hash when the file exists", async () => {
+      const execSpy = vi
+        .fn()
+        // First call: test() — file exists, exit 0
+        .mockImplementationOnce((_command: string, callback: ExecCallback) => {
+          const stream = makeStream()
+          callback(undefined, stream)
+          stream.emit("close", 0)
+        })
+        // Second call: sha256sum output
+        .mockImplementationOnce((_command: string, callback: ExecCallback) => {
+          const stream = makeStream()
+          callback(undefined, stream)
+          stream.emit("data", Buffer.from("abc123def456  /etc/hosts\n"))
+          stream.emit("close", 0)
+        })
+      const client = makeClientWithExecSpy(execSpy)
+      const ssh = makeConnectedSsh(client)
+
+      const result = await ssh.sha256("/etc/hosts")
+
+      expect(result).toBe("abc123def456")
+    })
+  })
+
+  // -------------------------------------------------------------------------
+  // lines
+  // -------------------------------------------------------------------------
+
+  describe("lines", () => {
+    it("returns an empty array for empty output", async () => {
+      const execSpy = vi.fn().mockImplementation((_command: string, callback: ExecCallback) => {
+        const stream = makeStream()
+        callback(undefined, stream)
+        stream.emit("data", Buffer.from("   \n"))
+        stream.emit("close", 0)
+      })
+      const client = makeClientWithExecSpy(execSpy)
+      const ssh = makeConnectedSsh(client)
+
+      const result = await ssh.lines("echo ''")
+
+      expect(result).toStrictEqual([])
+    })
+  })
+
+  // -------------------------------------------------------------------------
+  // readFile
+  // -------------------------------------------------------------------------
+
+  describe("readFile", () => {
+    it("uses sudo prefix for non-root user", async () => {
+      const execSpy = vi.fn().mockImplementation((_command: string, callback: ExecCallback) => {
+        const stream = makeStream()
+        callback(undefined, stream)
+        stream.emit("data", Buffer.from("file content"))
+        stream.emit("close", 0)
+      })
+      const client = makeClientWithExecSpy(execSpy)
+      const ssh = makeConnectedSsh(client, { user: "deploy" })
+
+      await ssh.readFile("/etc/shadow")
+
+      const [executedCommand] = execSpy.mock.calls[0] as [string, ...unknown[]]
+      expect(executedCommand).toContain("sudo")
+      expect(executedCommand).toContain("cat")
+      expect(executedCommand).toContain("/etc/shadow")
+    })
+
+    it("does not use sudo prefix for root user", async () => {
+      const execSpy = vi.fn().mockImplementation((_command: string, callback: ExecCallback) => {
+        const stream = makeStream()
+        callback(undefined, stream)
+        stream.emit("data", Buffer.from("file content"))
+        stream.emit("close", 0)
+      })
+      const client = makeClientWithExecSpy(execSpy)
+      const ssh = makeConnectedSsh(client, { user: "root" })
+
+      await ssh.readFile("/etc/hosts")
+
+      const [executedCommand] = execSpy.mock.calls[0] as [string, ...unknown[]]
+      expect(executedCommand).not.toContain("sudo")
+      expect(executedCommand).toContain("cat")
+    })
+  })
+
+  // -------------------------------------------------------------------------
+  // downloadFile
+  // -------------------------------------------------------------------------
+
+  describe("downloadFile", () => {
+    it("downloads directly via SFTP for root user", async () => {
+      const execSpy = vi.fn()
+      const client = makeClientWithExecSpy(execSpy)
+      const ssh = makeConnectedSsh(client, { user: "root" })
+
+      await ssh.downloadFile("/var/log/syslog", "/tmp/local-syslog")
+
+      expect(vi.mocked(sftpDownload)).toHaveBeenCalledWith(
+        client,
+        "/var/log/syslog",
+        "/tmp/local-syslog"
+      )
+      // No exec calls for cp/chmod/rm
+      expect(execSpy).not.toHaveBeenCalled()
+    })
+
+    it("uses mktemp, cp, chmod, sftp, rm for non-root user", async () => {
+      const executedCommands: string[] = []
+      const mktempOutput = "/tmp/paratix-download.ABCDEF"
+
+      function makeExecHandler(output: string): (_command: string, callback: ExecCallback) => void {
+        return (cmd: string, callback: ExecCallback) => {
+          executedCommands.push(cmd)
+          const stream = makeStream()
+          callback(undefined, stream)
+          stream.emit("data", Buffer.from(output))
+          stream.emit("close", 0)
+        }
+      }
+
+      const execSpy = vi
+        .fn()
+        // First call: mktemp (via output()) — returns temp path
+        .mockImplementationOnce(makeExecHandler(mktempOutput))
+        // Second call: cp
+        .mockImplementationOnce(makeExecHandler(""))
+        // Third call: chmod
+        .mockImplementationOnce(makeExecHandler(""))
+        // Fourth call: rm -f
+        .mockImplementationOnce(makeExecHandler(""))
+
+      const client = makeClientWithExecSpy(execSpy)
+      const ssh = makeConnectedSsh(client, { user: "deploy" })
+
+      await ssh.downloadFile("/var/log/secure", "/tmp/local-secure")
+
+      // Verify the sequence: mktemp, cp, chmod, then sftpDownload, then rm
+      expect(executedCommands.some((cmd) => cmd.includes("mktemp"))).toBe(true)
+      expect(executedCommands.some((cmd) => cmd.includes("cp"))).toBe(true)
+      expect(executedCommands.some((cmd) => cmd.includes("chmod 644"))).toBe(true)
+      expect(vi.mocked(sftpDownload)).toHaveBeenCalledWith(
+        client,
+        mktempOutput,
+        "/tmp/local-secure"
+      )
+      expect(executedCommands.some((cmd) => cmd.includes("rm -f"))).toBe(true)
+    })
+  })
+})

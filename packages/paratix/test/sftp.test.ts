@@ -112,6 +112,59 @@ describe("sftpDownload", () => {
     // Assert — sftp session must be closed so no resource leak occurs
     expect(sftpEnd).toHaveBeenCalledOnce()
   })
+
+  it("rejects when the local writeStream emits an error", async () => {
+    // Arrange
+    const { sftp } = makeSftpSession()
+    const client = makeClientMock(sftp)
+
+    const localWriteStream = new EventEmitter()
+    vi.mocked(createWriteStream).mockReturnValue(localWriteStream as unknown as WriteStream)
+
+    const writeError = new Error("local write stream broke")
+
+    // Act — start the promise, then synchronously emit the error
+    const promise = sftpDownload(client, "/remote/file.txt", "/local/file.txt")
+    localWriteStream.emit("error", writeError)
+
+    // Assert — promise must reject, not hang
+    await expect(promise).rejects.toThrow("local write stream broke")
+  })
+
+  it("closes the sftp session when the local writeStream emits an error", async () => {
+    // Arrange
+    const { sftp, sftpEnd } = makeSftpSession()
+    const client = makeClientMock(sftp)
+
+    const localWriteStream = new EventEmitter()
+    vi.mocked(createWriteStream).mockReturnValue(localWriteStream as unknown as WriteStream)
+
+    // Act
+    const promise = sftpDownload(client, "/remote/file.txt", "/local/file.txt")
+    localWriteStream.emit("error", new Error("disk write error"))
+    await promise.catch(() => {
+      /* expected rejection */
+    })
+
+    // Assert — sftp session must be closed so no resource leak occurs
+    expect(sftpEnd).toHaveBeenCalledOnce()
+  })
+
+  it("resolves when the local writeStream emits close", async () => {
+    // Arrange
+    const { sftp } = makeSftpSession()
+    const client = makeClientMock(sftp)
+
+    const localWriteStream = new EventEmitter()
+    vi.mocked(createWriteStream).mockReturnValue(localWriteStream as unknown as WriteStream)
+
+    // Act — start the promise, then simulate a successful transfer completion
+    const promise = sftpDownload(client, "/remote/file.txt", "/local/file.txt")
+    localWriteStream.emit("close")
+
+    // Assert — promise must resolve on successful transfer
+    await expect(promise).resolves.toBeUndefined()
+  })
 })
 
 // ---------------------------------------------------------------------------
@@ -171,5 +224,58 @@ describe("sftpUpload", () => {
 
     // Assert — sftp session must be closed so no resource leak occurs
     expect(sftpEnd).toHaveBeenCalledOnce()
+  })
+
+  it("rejects when the remote writeStream emits an error", async () => {
+    // Arrange
+    const { sftp, sftpWriteStream } = makeSftpSession()
+    const client = makeClientMock(sftp)
+
+    const localReadStream = makeMockStream()
+    vi.mocked(createReadStream).mockReturnValue(localReadStream as unknown as ReadStream)
+
+    const writeError = new Error("remote write stream broke")
+
+    // Act — start the promise, then synchronously emit the error
+    const promise = sftpUpload(client, "/local/file.txt", "/remote/file.txt")
+    sftpWriteStream.emit("error", writeError)
+
+    // Assert — promise must reject, not hang
+    await expect(promise).rejects.toThrow("remote write stream broke")
+  })
+
+  it("closes the sftp session when the remote writeStream emits an error", async () => {
+    // Arrange
+    const { sftp, sftpEnd, sftpWriteStream } = makeSftpSession()
+    const client = makeClientMock(sftp)
+
+    const localReadStream = makeMockStream()
+    vi.mocked(createReadStream).mockReturnValue(localReadStream as unknown as ReadStream)
+
+    // Act
+    const promise = sftpUpload(client, "/local/file.txt", "/remote/file.txt")
+    sftpWriteStream.emit("error", new Error("remote write error"))
+    await promise.catch(() => {
+      /* expected rejection */
+    })
+
+    // Assert — sftp session must be closed so no resource leak occurs
+    expect(sftpEnd).toHaveBeenCalledOnce()
+  })
+
+  it("resolves when the remote writeStream emits close", async () => {
+    // Arrange
+    const { sftp, sftpWriteStream } = makeSftpSession()
+    const client = makeClientMock(sftp)
+
+    const localReadStream = makeMockStream()
+    vi.mocked(createReadStream).mockReturnValue(localReadStream as unknown as ReadStream)
+
+    // Act — start the promise, then simulate a successful transfer completion
+    const promise = sftpUpload(client, "/local/file.txt", "/remote/file.txt")
+    sftpWriteStream.emit("close")
+
+    // Assert — promise must resolve on successful transfer
+    await expect(promise).resolves.toBeUndefined()
   })
 })
