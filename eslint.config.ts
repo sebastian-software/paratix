@@ -21,6 +21,11 @@ const eslintConfig: Linter.Config[] = [
   {
     files: ["**/test/**/*.ts"],
     rules: {
+      // Test helpers routinely create partial mock objects that are narrower
+      // than the full interface — unsafe-type-assertion and unsafe-argument
+      // false-positives are expected here.
+      "@typescript-eslint/no-unsafe-argument": "off",
+      "@typescript-eslint/no-unsafe-type-assertion": "off",
       "security/detect-non-literal-fs-filename": "off",
     },
   },

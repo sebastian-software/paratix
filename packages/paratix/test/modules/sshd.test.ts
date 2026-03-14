@@ -7,7 +7,9 @@ const emptyEnv = {}
 const SSHD_CONFIG = "/etc/ssh/sshd_config"
 const CAT_SSHD = `cat '${SSHD_CONFIG}'`
 
-function trackWriteFile(mockSsh: ReturnType<typeof createMockSsh>): Array<{ content: string; path: string }> {
+function trackWriteFile(
+  mockSsh: ReturnType<typeof createMockSsh>
+): Array<{ content: string; path: string }> {
   const writtenFiles: Array<{ content: string; path: string }> = []
   // eslint-disable-next-line @typescript-eslint/promise-function-async -- vi.mockImplementation requires matching return type
   vi.spyOn(mockSsh, "writeFile").mockImplementation((path: string, content: string) => {

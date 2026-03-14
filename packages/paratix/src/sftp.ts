@@ -33,6 +33,10 @@ export async function sftpDownload(
         sftp.end()
         reject(writeError)
       })
+      readStream.on("error", (readError: Error) => {
+        sftp.end()
+        reject(readError)
+      })
       readStream.pipe(writeStream)
     })
   })
@@ -68,6 +72,10 @@ export async function sftpUpload(
       writeStream.on("error", (writeError: Error) => {
         sftp.end()
         reject(writeError)
+      })
+      readStream.on("error", (readError: Error) => {
+        sftp.end()
+        reject(readError)
       })
       readStream.pipe(writeStream)
     })

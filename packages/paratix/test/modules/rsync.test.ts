@@ -1,4 +1,3 @@
-/* eslint-disable @typescript-eslint/no-unsafe-type-assertion -- Mocking callback-based Node.js APIs requires unsafe casts */
 import { execFile } from "node:child_process"
 import { beforeEach, describe, expect, it, vi } from "vitest"
 

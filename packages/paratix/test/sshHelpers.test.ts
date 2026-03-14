@@ -10,7 +10,6 @@ import { collectStreamOutput, type StreamOutputParameters } from "../src/sshHelp
 type MockChannel = { stderr: EventEmitter } & EventEmitter
 
 function createMockChannel(): { stderr: EventEmitter; stream: MockChannel } {
-  // eslint-disable-next-line @typescript-eslint/no-unsafe-type-assertion -- mock EventEmitter standing in for ssh2 ClientChannel
   const stream = new EventEmitter() as MockChannel
   const stderr = new EventEmitter()
   stream.stderr = stderr
@@ -39,7 +38,6 @@ async function runCollect(
       options: { silent: true },
       reject,
       resolve,
-      // eslint-disable-next-line @typescript-eslint/no-unsafe-type-assertion -- mock EventEmitter standing in for ssh2 ClientChannel
       stream: stream as unknown as StreamOutputParameters["stream"],
       timer,
       ...params,
@@ -58,7 +56,6 @@ async function getErrorMessage(promise: Promise<unknown>): Promise<string> {
     await promise
     throw new Error("Expected promise to reject")
   } catch (error) {
-    // eslint-disable-next-line @typescript-eslint/no-unsafe-type-assertion -- error is always an Error in these tests
     return (error as Error).message
   }
 }
@@ -208,24 +205,24 @@ describe("collectStreamOutput", () => {
   it("treats undefined exit code (ssh2 quirk) as 0 and resolves", async () => {
     const { stream } = createMockChannel()
 
-    const result = await new Promise<{ code: number; stderr: string; stdout: string }>((resolve, reject) => {
-      const timer = setTimeout(() => {
-        /* intentionally never fires in tests */
-      }, 60_000)
-      collectStreamOutput({
-        command: "reboot",
-        options: { silent: true },
-        reject,
-        resolve,
-        // eslint-disable-next-line @typescript-eslint/no-unsafe-type-assertion -- mock EventEmitter standing in for ssh2 ClientChannel
-        stream: stream as unknown as StreamOutputParameters["stream"],
-        timer,
-      })
-      // Simulate ssh2 sending undefined for the code
-      // eslint-disable-next-line @typescript-eslint/no-unsafe-type-assertion -- ssh2 may pass undefined despite type signature
-      stream.emit("close", undefined as unknown as number)
-      clearTimeout(timer)
-    })
+    const result = await new Promise<{ code: number; stderr: string; stdout: string }>(
+      (resolve, reject) => {
+        const timer = setTimeout(() => {
+          /* intentionally never fires in tests */
+        }, 60_000)
+        collectStreamOutput({
+          command: "reboot",
+          options: { silent: true },
+          reject,
+          resolve,
+          stream: stream as unknown as StreamOutputParameters["stream"],
+          timer,
+        })
+        // Simulate ssh2 sending undefined for the code
+        stream.emit("close", undefined as unknown as number)
+        clearTimeout(timer)
+      }
+    )
 
     expect(result.code).toBe(0)
   })

@@ -71,7 +71,6 @@ describe("op.resolve — apply", () => {
     // eslint-disable-next-line prefer-spread
     const result = await module_.apply(null, emptyEnv)
 
-    // eslint-disable-next-line @typescript-eslint/no-unsafe-type-assertion -- test assertion on known mock shape
     const lazyFunction = result.meta?.token as () => string
     const code = lazyFunction()
     expect(code).toMatch(/^\d{6}$/v)
