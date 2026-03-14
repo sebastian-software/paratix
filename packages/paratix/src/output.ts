@@ -1,9 +1,5 @@
 import pc from "picocolors"
 
-import type { Environment } from "./types.js"
-
-import { isSecretKey } from "./environment.js"
-
 const MODULE_NAME_WIDTH = 36
 
 const STATUS_ICONS: Record<string, string> = {
@@ -106,22 +102,4 @@ export function printSummary(stats: {
     pc.cyan(`${stats.signals} signals triggered`),
   ]
   console.log(`\n${parts.join(pc.dim(" \u00b7 "))}`)
-}
-
-/**
- * Replace any resolved secret values found in `text` with `***`.
- * Only string env values whose keys match {@link isSecretKey} are masked.
- *
- * @param text - The text to sanitize (e.g., command output before logging).
- * @param environment - The env map used to identify and look up secret values.
- * @returns The sanitized text with secret values replaced.
- */
-export function maskSecrets(text: string, environment: Environment): string {
-  let masked = text
-  for (const [key, value] of Object.entries(environment)) {
-    if (isSecretKey(key) && typeof value === "string" && value.length > 0) {
-      masked = masked.replaceAll(value, "***")
-    }
-  }
-  return masked
 }

@@ -83,19 +83,6 @@ export function mergeEnvironment(...environments: Array<Environment | undefined>
   return result
 }
 
-const SECRET_PATTERNS = /password|secret|token/iv
-
-/**
- * Return `true` if the key name suggests it holds a sensitive value.
- * Used by the output layer to mask secrets in log output.
- *
- * @param key - The env key name to test.
- * @returns Whether the key matches a secret pattern.
- */
-export function isSecretKey(key: string): boolean {
-  return SECRET_PATTERNS.test(key)
-}
-
 /**
  * Like {@link resolveEnvironment} but always returns a string.
  * Numbers are converted via `String()`.
