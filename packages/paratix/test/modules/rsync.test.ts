@@ -196,7 +196,7 @@ describe("rsync.sync — argument building", () => {
     expect(args).toContain("--itemize-changes")
   })
 
-  it("includes SSH transport with correct port, key, and StrictHostKeyChecking=no", async () => {
+  it("includes SSH transport with correct port, key, and StrictHostKeyChecking=accept-new", async () => {
     const mockSsh = createMockSsh()
     const mod = rsync.sync({ dest: "/remote/dest", src: "/local/src" })
     await mod.apply(mockSsh, emptyEnv)
@@ -208,7 +208,33 @@ describe("rsync.sync — argument building", () => {
     expect(transportArg).toContain("ssh")
     expect(transportArg).toContain("-p 22")
     expect(transportArg).toContain('-i "~/.ssh/id"')
+    expect(transportArg).toContain("-o StrictHostKeyChecking=accept-new")
+  })
+
+  it("uses custom StrictHostKeyChecking value when provided", async () => {
+    const mockSsh = createMockSsh()
+    const mod = rsync.sync({ dest: "/remote/dest", src: "/local/src", strictHostKeyChecking: "no" })
+    await mod.apply(mockSsh, emptyEnv)
+
+    const args = getArgs()
+    const eIdx = args.indexOf("-e")
+    const transportArg = args[eIdx + 1]
     expect(transportArg).toContain("-o StrictHostKeyChecking=no")
+  })
+
+  it("passes StrictHostKeyChecking=yes to ssh transport when set to yes", async () => {
+    const mockSsh = createMockSsh()
+    const mod = rsync.sync({
+      dest: "/remote/dest",
+      src: "/local/src",
+      strictHostKeyChecking: "yes",
+    })
+    await mod.apply(mockSsh, emptyEnv)
+
+    const args = getArgs()
+    const eIdx = args.indexOf("-e")
+    const transportArg = args[eIdx + 1]
+    expect(transportArg).toContain("-o StrictHostKeyChecking=yes")
   })
 
   it("adds --include before --exclude patterns", async () => {

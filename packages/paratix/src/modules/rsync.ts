@@ -23,6 +23,15 @@ type SyncOptions = {
   owner?: string
   /** Local source path (file or directory) to synchronize. */
   src: string
+  /**
+   * SSH `StrictHostKeyChecking` option passed to the `-o` flag.
+   *
+   * Defaults to `"accept-new"`, which accepts unknown host keys on first
+   * connection but rejects changed keys. Use `"yes"` to enforce strict
+   * checking for already-known hosts, or `"no"` to disable checking entirely
+   * (not recommended for production).
+   */
+  strictHostKeyChecking?: "accept-new" | "no" | "off" | "yes"
 }
 
 /**
@@ -82,8 +91,9 @@ function buildOwnershipArguments(options: SyncOptions): string[] {
  *
  * Always enables archive mode (`-a`), compression (`-z`), and itemized
  * output (`--itemize-changes`). The SSH transport is configured from
- * the connection info with strict host-key checking disabled so that
- * first-time connections do not block.
+ * the connection info with host-key checking set to `accept-new` by
+ * default so that first-time connections succeed while changed keys
+ * are still rejected.
  *
  * @param options - Sync options describing source, destination, and filters.
  * @param connectionInfo - SSH connection details obtained from `SshConnection.getConnectionInfo`.
@@ -107,7 +117,7 @@ function buildArguments(
 
   result.push(
     "-e",
-    `ssh -p ${connectionInfo.port} -i "${connectionInfo.privateKeyPath}" -o StrictHostKeyChecking=no`
+    `ssh -p ${connectionInfo.port} -i "${connectionInfo.privateKeyPath}" -o StrictHostKeyChecking=${options.strictHostKeyChecking ?? "accept-new"}`
   )
   result.push(...buildFilterArguments(options))
   result.push(...buildOwnershipArguments(options))
@@ -139,6 +149,15 @@ export const rsync = {
    *   delete: true,
    *   exclude: ["*.map"],
    *   owner: "www-data",
+   * })
+   * ```
+   *
+   * @example Enforce strict host-key checking for a host that is already known:
+   * ```ts
+   * rsync.sync({
+   *   src: "./dist/",
+   *   dest: "/var/www/app",
+   *   strictHostKeyChecking: "yes",
    * })
    * ```
    */
