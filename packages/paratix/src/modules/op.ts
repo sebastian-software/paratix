@@ -1,8 +1,47 @@
-import { execFileSync } from "node:child_process"
+import { type ChildProcess, spawn } from "node:child_process"
 
 import type { Environment, Module, ModuleResult } from "../types.js"
 
 import { generateTotpCode } from "../totp.js"
+
+/**
+ * Spawn a command, write `input` to its stdin, and collect stdout.
+ *
+ * @param command - The executable to run.
+ * @param commandArguments - Arguments for the command.
+ * @param input - Data to write to stdin before closing it.
+ * @returns The stdout output as a string.
+ */
+async function spawnWithInput(
+  command: string,
+  commandArguments: string[],
+  input: string
+): Promise<string> {
+  return new Promise<string>((resolve, reject) => {
+    const child: ChildProcess = spawn(command, commandArguments, {
+      stdio: ["pipe", "pipe", "pipe"],
+    })
+    let stdout = ""
+    let stderr = ""
+
+    child.stdout?.on("data", (chunk: Buffer) => {
+      stdout += chunk.toString()
+    })
+    child.stderr?.on("data", (chunk: Buffer) => {
+      stderr += chunk.toString()
+    })
+    child.on("error", reject)
+    child.on("close", (code) => {
+      if (code === 0) {
+        resolve(stdout)
+      } else {
+        reject(new Error(`${command} exited with code ${String(code)}: ${stderr}`))
+      }
+    })
+
+    child.stdin?.end(input)
+  })
+}
 
 const OTP_SUFFIX_PATTERN = /\/(?:one-time-password|otp)$/iv
 
@@ -54,17 +93,27 @@ function splitReferences(
  * @returns Resolved key-value pairs.
  * @throws {Error} If the `op` CLI is not available or the session is not authenticated.
  */
-function resolveRegularReferences(entries: Record<string, string>): Record<string, string> {
+async function resolveRegularReferences(
+  entries: Record<string, string>
+): Promise<Record<string, string>> {
   if (Object.keys(entries).length === 0) return {}
 
-  const injected = execFileSync("op", ["inject"], {
-    encoding: "utf8",
-    input: JSON.stringify(entries),
-  })
+  const stdout = await spawnWithInput("op", ["inject"], JSON.stringify(entries))
 
-  // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment -- op inject returns a JSON object matching the input shape
-  const parsed: Record<string, string> = JSON.parse(injected)
-  return parsed
+  const parsed: unknown = JSON.parse(stdout)
+
+  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+    throw new Error("op inject returned unexpected non-object JSON")
+  }
+
+  // eslint-disable-next-line @typescript-eslint/no-unsafe-type-assertion -- validated: non-null, non-array object
+  const record = parsed as Record<string, unknown>
+  if (!Object.values(record).every((v) => typeof v === "string")) {
+    throw new Error("op inject returned object with non-string values")
+  }
+
+  // eslint-disable-next-line @typescript-eslint/no-unsafe-type-assertion -- all values validated as strings above
+  return record as Record<string, string>
 }
 
 /**
@@ -78,14 +127,14 @@ function resolveRegularReferences(entries: Record<string, string>): Record<strin
  * @returns Map of logical names to lazy functions that compute fresh TOTP codes.
  * @throws {Error} If the `op` CLI is not available or the session is not authenticated.
  */
-function resolveOtpReferences(entries: Record<string, string>): Environment {
+async function resolveOtpReferences(entries: Record<string, string>): Promise<Environment> {
   const result: Environment = {}
 
   for (const [name, reference] of Object.entries(entries)) {
-    const otpauthUri = execFileSync("op", ["read", reference], {
-      encoding: "utf8",
-    }).trim()
+    // eslint-disable-next-line no-await-in-loop
+    const stdout = await spawnWithInput("op", ["read", reference], "")
 
+    const otpauthUri = stdout.trim()
     result[name] = () => generateTotpCode(otpauthUri)
   }
 
@@ -126,12 +175,11 @@ export const op = {
     validateReferences(references)
 
     return {
-      // eslint-disable-next-line @typescript-eslint/require-await
       async apply(): Promise<ModuleResult> {
         try {
           const [regularEntries, otpEntries] = splitReferences(references)
-          const resolvedRegular = resolveRegularReferences(regularEntries)
-          const resolvedOtp = resolveOtpReferences(otpEntries)
+          const resolvedRegular = await resolveRegularReferences(regularEntries)
+          const resolvedOtp = await resolveOtpReferences(otpEntries)
 
           return { meta: { ...resolvedRegular, ...resolvedOtp }, status: "ok" }
         } catch {

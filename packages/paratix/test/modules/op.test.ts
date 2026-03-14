@@ -1,15 +1,62 @@
-import { execFileSync } from "node:child_process"
-import { beforeEach, describe, expect, it, vi } from "vitest"
+import type * as childProcess from "node:child_process"
+
+import { EventEmitter } from "node:events"
+import { beforeEach, describe, expect, it, type Mock, vi } from "vitest"
 
 import { op } from "../../src/modules/op.js"
 
+type MockChildProcess = { stdin: { end: Mock } } & EventEmitter
+
+function createMockChild(stdout: string, exitCode = 0): MockChildProcess {
+  const child = new EventEmitter() as MockChildProcess
+  const stdoutEmitter = new EventEmitter()
+  const stderrEmitter = new EventEmitter()
+  Object.defineProperty(child, "stdout", { value: stdoutEmitter })
+  Object.defineProperty(child, "stderr", { value: stderrEmitter })
+  child.stdin = { end: vi.fn() }
+
+  // Emit data and close asynchronously so listeners are registered first
+  queueMicrotask(() => {
+    stdoutEmitter.emit("data", Buffer.from(stdout))
+    child.emit("close", exitCode)
+  })
+
+  return child
+}
+
+type SpawnCall = { args: string[]; command: string }
+
+let spawnCalls: SpawnCall[] = []
+
+function trackSpawn(command: string, args: readonly string[]): void {
+  spawnCalls.push({ args: [...args], command })
+}
+
+function mockSpawnWith(output: string, exitCode = 0): void {
+  mockedSpawnFn.mockImplementation((command: string, args?: readonly string[]) => {
+    trackSpawn(command, args ?? [])
+    return createMockChild(output, exitCode) as never
+  })
+}
+
+function mockSpawnBySubcommand(outputs: Record<string, string>): void {
+  mockedSpawnFn.mockImplementation((command: string, args?: readonly string[]) => {
+    const argsList = args ?? []
+    trackSpawn(command, argsList)
+    const subcommand = argsList[0] ?? ""
+    const output = outputs[subcommand] ?? ""
+    return createMockChild(output) as never
+  })
+}
+
 vi.mock("node:child_process", () => ({
-  execFileSync: vi.fn(),
+  spawn: vi.fn(),
 }))
 
-const emptyEnv = {}
+const { spawn: mockedSpawn } = await vi.importMock<typeof childProcess>("node:child_process")
+const mockedSpawnFn = vi.mocked(mockedSpawn)
 
-const mockedExecFileSync = vi.mocked(execFileSync)
+const emptyEnv = {}
 
 // ---------------------------------------------------------------------------
 // check
@@ -36,10 +83,12 @@ describe("op.resolve — check", () => {
 describe("op.resolve — apply", () => {
   beforeEach(() => {
     vi.resetAllMocks()
+    spawnCalls = []
+    mockSpawnWith("")
   })
 
   it("resolves regular secrets via op inject and returns them as meta", async () => {
-    mockedExecFileSync.mockReturnValue(JSON.stringify({ password: "secret123" }))
+    mockSpawnWith(JSON.stringify({ password: "secret123" }))
 
     const module_ = op.resolve({ password: "op://vault/item/password" })
     // eslint-disable-next-line prefer-spread
@@ -52,7 +101,7 @@ describe("op.resolve — apply", () => {
   it("resolves OTP fields via op read and returns lazy functions as meta", async () => {
     const otpauthUri =
       "otpauth://totp/Test?secret=GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ&period=30&digits=6"
-    mockedExecFileSync.mockReturnValue(`${otpauthUri}\n`)
+    mockSpawnWith(`${otpauthUri}\n`)
 
     const module_ = op.resolve({ token: "op://vault/item/one-time-password" })
     // eslint-disable-next-line prefer-spread
@@ -65,7 +114,7 @@ describe("op.resolve — apply", () => {
   it("calls the lazy OTP function and returns a 6-digit string", async () => {
     const otpauthUri =
       "otpauth://totp/Test?secret=GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ&period=30&digits=6"
-    mockedExecFileSync.mockReturnValue(`${otpauthUri}\n`)
+    mockSpawnWith(`${otpauthUri}\n`)
 
     const module_ = op.resolve({ token: "op://vault/item/one-time-password" })
     // eslint-disable-next-line prefer-spread
@@ -79,7 +128,7 @@ describe("op.resolve — apply", () => {
   it("recognises OTP fields by /one-time-password suffix", async () => {
     const otpauthUri =
       "otpauth://totp/Test?secret=GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ&period=30&digits=6"
-    mockedExecFileSync.mockReturnValue(`${otpauthUri}\n`)
+    mockSpawnWith(`${otpauthUri}\n`)
 
     const module_ = op.resolve({ token: "op://vault/item/one-time-password" })
     // eslint-disable-next-line prefer-spread
@@ -88,13 +137,14 @@ describe("op.resolve — apply", () => {
     expect(result.status).toBe("ok")
     expect(result.meta?.token).toBeTypeOf("function")
     // op inject must NOT have been called for OTP-only references
-    expect(mockedExecFileSync).not.toHaveBeenCalledWith("op", ["inject"], expect.anything())
+    const injectCalls = spawnCalls.filter((c) => c.args[0] === "inject")
+    expect(injectCalls).toHaveLength(0)
   })
 
   it("recognises OTP fields by /otp suffix", async () => {
     const otpauthUri =
       "otpauth://totp/Test?secret=GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ&period=30&digits=6"
-    mockedExecFileSync.mockReturnValue(`${otpauthUri}\n`)
+    mockSpawnWith(`${otpauthUri}\n`)
 
     const module_ = op.resolve({ token: "op://vault/item/otp" })
     // eslint-disable-next-line prefer-spread
@@ -105,9 +155,7 @@ describe("op.resolve — apply", () => {
   })
 
   it("returns { status: 'failed' } when op inject throws", async () => {
-    mockedExecFileSync.mockImplementation(() => {
-      throw new Error("op inject failed")
-    })
+    mockSpawnWith("", 1)
 
     const module_ = op.resolve({ password: "op://vault/item/password" })
     // eslint-disable-next-line prefer-spread
@@ -117,9 +165,7 @@ describe("op.resolve — apply", () => {
   })
 
   it("returns { status: 'failed' } when op read throws", async () => {
-    mockedExecFileSync.mockImplementation(() => {
-      throw new Error("op read failed")
-    })
+    mockSpawnWith("", 1)
 
     const module_ = op.resolve({ token: "op://vault/item/one-time-password" })
     // eslint-disable-next-line prefer-spread
@@ -129,7 +175,7 @@ describe("op.resolve — apply", () => {
   })
 
   it("calls op inject only once for multiple regular references (batch)", async () => {
-    mockedExecFileSync.mockReturnValue(JSON.stringify({ apiKey: "key123", dbPassword: "db456" }))
+    mockSpawnWith(JSON.stringify({ apiKey: "key123", dbPassword: "db456" }))
 
     const module_ = op.resolve({
       apiKey: "op://vault/item/api-key",
@@ -138,14 +184,14 @@ describe("op.resolve — apply", () => {
     // eslint-disable-next-line prefer-spread
     await module_.apply(null, emptyEnv)
 
-    expect(mockedExecFileSync).toHaveBeenCalledTimes(1)
-    expect(mockedExecFileSync).toHaveBeenCalledWith("op", ["inject"], expect.anything())
+    expect(spawnCalls).toHaveLength(1)
+    expect(spawnCalls[0].args).toStrictEqual(["inject"])
   })
 
   it("does not call op inject when only OTP fields are present", async () => {
     const otpauthUri =
       "otpauth://totp/Test?secret=GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ&period=30&digits=6"
-    mockedExecFileSync.mockReturnValue(`${otpauthUri}\n`)
+    mockSpawnWith(`${otpauthUri}\n`)
 
     const module_ = op.resolve({
       token: "op://vault/item/one-time-password",
@@ -153,7 +199,8 @@ describe("op.resolve — apply", () => {
     // eslint-disable-next-line prefer-spread
     await module_.apply(null, emptyEnv)
 
-    expect(mockedExecFileSync).not.toHaveBeenCalledWith("op", ["inject"], expect.anything())
+    const injectCalls = spawnCalls.filter((c) => c.args[0] === "inject")
+    expect(injectCalls).toHaveLength(0)
   })
 
   it("works with an empty references object", async () => {
@@ -163,16 +210,17 @@ describe("op.resolve — apply", () => {
 
     expect(result.status).toBe("ok")
     expect(result.meta).toStrictEqual({})
-    expect(mockedExecFileSync).not.toHaveBeenCalled()
+    expect(spawnCalls).toHaveLength(0)
   })
 
   it("merges regular and OTP meta into a single result", async () => {
     const otpauthUri =
       "otpauth://totp/Test?secret=GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ&period=30&digits=6"
 
-    // op inject is called first (regular secrets), then op read (OTP)
-    mockedExecFileSync.mockReturnValueOnce(JSON.stringify({ password: "secret123" }))
-    mockedExecFileSync.mockReturnValueOnce(`${otpauthUri}\n`)
+    mockSpawnBySubcommand({
+      inject: JSON.stringify({ password: "secret123" }),
+      read: `${otpauthUri}\n`,
+    })
 
     const module_ = op.resolve({
       password: "op://vault/item/password",
@@ -184,6 +232,37 @@ describe("op.resolve — apply", () => {
     expect(result.status).toBe("ok")
     expect(result.meta?.password).toBe("secret123")
     expect(result.meta?.token).toBeTypeOf("function")
+  })
+})
+
+// ---------------------------------------------------------------------------
+// JSON validation
+// ---------------------------------------------------------------------------
+
+describe("op.resolve — JSON validation", () => {
+  beforeEach(() => {
+    vi.resetAllMocks()
+    spawnCalls = []
+  })
+
+  it("returns failed when op inject returns an array", async () => {
+    mockSpawnWith(JSON.stringify(["not", "an", "object"]))
+
+    const module_ = op.resolve({ password: "op://vault/item/password" })
+    // eslint-disable-next-line prefer-spread
+    const result = await module_.apply(null, emptyEnv)
+
+    expect(result.status).toBe("failed")
+  })
+
+  it("returns failed when op inject returns non-string values", async () => {
+    mockSpawnWith(JSON.stringify({ password: 42 }))
+
+    const module_ = op.resolve({ password: "op://vault/item/password" })
+    // eslint-disable-next-line prefer-spread
+    const result = await module_.apply(null, emptyEnv)
+
+    expect(result.status).toBe("failed")
   })
 })
 
