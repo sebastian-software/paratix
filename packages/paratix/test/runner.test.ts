@@ -351,6 +351,215 @@ describe("runPlaybook recipe exception handling", () => {
   })
 })
 
+// Signal handling: graceful shutdown on SIGINT / SIGTERM
+describe("runPlaybook signal handling", () => {
+  let capturedConfigs: unknown[]
+  let disconnectFn: ReturnType<typeof vi.fn>
+
+  function makeMockSshClassWithDisconnectCapture(
+    configs: unknown[],
+    disconnectMock: ReturnType<typeof vi.fn>
+  ) {
+    return class MockSshConnectionWithDisconnectCapture {
+      public addPort = vi.fn()
+      public connect = vi.fn().mockResolvedValue(null)
+      public disconnect = disconnectMock
+      public downloadFile = vi.fn().mockResolvedValue(null)
+      public exec = vi.fn().mockResolvedValue({ code: 0, stderr: "", stdout: "" })
+      public exists = vi.fn().mockResolvedValue(true)
+      public getConnectionInfo = vi
+        .fn()
+        .mockReturnValue({ host: "1.2.3.4", port: 22, privateKeyPath: "~/.ssh/id", user: "root" })
+      public lines = vi.fn().mockResolvedValue([])
+      public output = vi.fn().mockResolvedValue("")
+      public probeSudo = vi.fn().mockResolvedValue(null)
+      public readFile = vi.fn().mockResolvedValue("")
+      public reconnect = vi.fn().mockResolvedValue(null)
+      public sha256 = vi.fn().mockResolvedValue(null)
+      public test = vi.fn().mockResolvedValue(true)
+      public updateHost = vi.fn()
+      public uploadFile = vi.fn().mockResolvedValue(null)
+      public writeFile = vi.fn().mockResolvedValue(null)
+
+      public constructor(_host: string, config: unknown) {
+        configs.push(config)
+      }
+    }
+  }
+
+  beforeEach(() => {
+    capturedConfigs = []
+    disconnectFn = vi.fn()
+    vi.spyOn(console, "log").mockImplementation(() => {
+      /* noop */
+    })
+    vi.spyOn(console, "error").mockImplementation(() => {
+      /* noop */
+    })
+    vi.resetModules()
+  })
+
+  afterEach(() => {
+    vi.restoreAllMocks()
+    vi.resetModules()
+    process.exitCode = 0
+  })
+
+  it("registers SIGINT and SIGTERM listeners during runPlaybook and removes them after completion", async () => {
+    vi.doMock("../src/ssh.js", () => ({
+      shellQuote: (s: string) => `'${s}'`,
+      SshConnectionImpl: makeMockSshClassWithDisconnectCapture(capturedConfigs, disconnectFn),
+    }))
+
+    const { runPlaybook } = await import("../src/runner.js")
+
+    const interruptListenersBefore = process.listenerCount("SIGINT")
+    const terminateListenersBefore = process.listenerCount("SIGTERM")
+
+    const definition: ServerDefinition = {
+      host: "1.2.3.4",
+      name: "test-server",
+      run: [],
+      ssh: { ports: [22], privateKey: "~/.ssh/id", user: "root" },
+    }
+
+    await runPlaybook(definition)
+
+    expect(process.listenerCount("SIGINT")).toBe(interruptListenersBefore)
+    expect(process.listenerCount("SIGTERM")).toBe(terminateListenersBefore)
+  })
+
+  it("calls ssh.disconnect() and sets exitCode to 130 when SIGINT is received during runPlaybook", async () => {
+    vi.doMock("../src/ssh.js", () => ({
+      shellQuote: (s: string) => `'${s}'`,
+      SshConnectionImpl: makeMockSshClassWithDisconnectCapture(capturedConfigs, disconnectFn),
+    }))
+
+    const { runPlaybook } = await import("../src/runner.js")
+
+    const slowModule: Module = {
+      apply: vi.fn().mockResolvedValue({ status: "changed" } satisfies ModuleResult),
+      check: vi
+        .fn()
+        .mockImplementationOnce(async () => {
+          await Promise.resolve()
+          process.emit("SIGINT", "SIGINT")
+          return "needs-apply" as const
+        })
+        .mockResolvedValue("needs-apply"),
+      name: "slow-module",
+    }
+
+    const definition: ServerDefinition = {
+      host: "1.2.3.4",
+      name: "test-server",
+      run: [slowModule],
+      ssh: { ports: [22], privateKey: "~/.ssh/id", user: "root" },
+    }
+
+    await runPlaybook(definition)
+
+    expect(process.exitCode).toBe(130)
+    // disconnect is called by the signal handler and again in the finally block
+    expect(disconnectFn).toHaveBeenCalled()
+  })
+
+  it("sets exitCode to 143 when SIGTERM is received during runPlaybook", async () => {
+    vi.doMock("../src/ssh.js", () => ({
+      shellQuote: (s: string) => `'${s}'`,
+      SshConnectionImpl: makeMockSshClassWithDisconnectCapture(capturedConfigs, disconnectFn),
+    }))
+
+    const { runPlaybook } = await import("../src/runner.js")
+
+    const slowModule: Module = {
+      apply: vi.fn().mockResolvedValue({ status: "changed" } satisfies ModuleResult),
+      check: vi
+        .fn()
+        .mockImplementationOnce(async () => {
+          await Promise.resolve()
+          process.emit("SIGTERM", "SIGTERM")
+          return "needs-apply" as const
+        })
+        .mockResolvedValue("needs-apply"),
+      name: "slow-module",
+    }
+
+    const definition: ServerDefinition = {
+      host: "1.2.3.4",
+      name: "test-server",
+      run: [slowModule],
+      ssh: { ports: [22], privateKey: "~/.ssh/id", user: "root" },
+    }
+
+    await runPlaybook(definition)
+
+    expect(process.exitCode).toBe(143)
+  })
+
+  it("does not run signals when a shutdown signal was received before signal execution", async () => {
+    vi.doMock("../src/ssh.js", () => ({
+      shellQuote: (s: string) => `'${s}'`,
+      SshConnectionImpl: makeMockSshClassWithDisconnectCapture(capturedConfigs, disconnectFn),
+    }))
+
+    const { runPlaybook } = await import("../src/runner.js")
+
+    const changingModule: Module = {
+      apply: vi
+        .fn()
+        .mockImplementationOnce(async () => {
+          await Promise.resolve()
+          process.emit("SIGINT", "SIGINT")
+          return { status: "changed" } satisfies ModuleResult
+        })
+        .mockResolvedValue({ status: "changed" } satisfies ModuleResult),
+      check: vi.fn().mockResolvedValue("needs-apply"),
+      name: "changing-module",
+    }
+
+    const signalModule: Module = {
+      apply: vi.fn().mockResolvedValue({ status: "changed" } satisfies ModuleResult),
+      check: vi.fn().mockResolvedValue("needs-apply"),
+      name: "signal-module",
+    }
+
+    const definition: ServerDefinition = {
+      host: "1.2.3.4",
+      name: "test-server",
+      run: [changingModule],
+      signals: [signalModule],
+      ssh: { ports: [22], privateKey: "~/.ssh/id", user: "root" },
+    }
+
+    await runPlaybook(definition)
+
+    expect(signalModule.apply).not.toHaveBeenCalled()
+    expect(process.exitCode).toBe(130)
+  })
+
+  it("does not set signal exitCode when runPlaybook completes normally without any signal", async () => {
+    vi.doMock("../src/ssh.js", () => ({
+      shellQuote: (s: string) => `'${s}'`,
+      SshConnectionImpl: makeMockSshClassWithDisconnectCapture(capturedConfigs, disconnectFn),
+    }))
+
+    const { runPlaybook } = await import("../src/runner.js")
+
+    const definition: ServerDefinition = {
+      host: "1.2.3.4",
+      name: "test-server",
+      run: [],
+      ssh: { ports: [22], privateKey: "~/.ssh/id", user: "root" },
+    }
+
+    await runPlaybook(definition)
+
+    // no signal received — exitCode should not be set to a signal exit code
+    expect(process.exitCode).toBe(0)
+  })
+})
+
 // Bug #12 regression: runPlaybook must pass reconnectTimeout from RunOptions into SshConfig
 describe("runPlaybook reconnectTimeout", () => {
   beforeEach(() => {

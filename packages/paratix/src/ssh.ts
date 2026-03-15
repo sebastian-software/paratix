@@ -36,6 +36,7 @@ export class SshConnectionImpl implements SshConnection {
   private readonly config: SshConfig
   private connectedPort = 0
   private host: string
+  private readonly pendingRejects = new Set<(reason: Error) => void>()
 
   public constructor(host: string, config: SshConfig) {
     this.host = host
@@ -68,6 +69,7 @@ export class SshConnectionImpl implements SshConnection {
       this.client.end()
       this.client = null
     }
+    this.pendingRejects.clear()
   }
 
   public async downloadFile(remotePath: string, localPath: string): Promise<void> {
@@ -88,16 +90,31 @@ export class SshConnectionImpl implements SshConnection {
     const client = this.ensureClient()
     const cmd = this.buildEnvPrefix(options.env) + this.sudoCommand(command)
     return new Promise((resolve, reject) => {
+      let settled = false
+      const wrappedResolve = (value: ExecResult): void => {
+        if (settled) return
+        settled = true
+        this.pendingRejects.delete(wrappedReject)
+        resolve(value)
+      }
+      const wrappedReject = (reason: Error): void => {
+        if (settled) return
+        settled = true
+        this.pendingRejects.delete(wrappedReject)
+        reject(reason)
+      }
+      this.pendingRejects.add(wrappedReject)
+
       const timeout = options.timeout ?? COMMAND_TIMEOUT
       let activeStream: ClientChannel | null = null
       const timer = setTimeout(() => {
         activeStream?.close()
-        reject(new Error(`Command timed out after ${timeout}ms: ${command}`))
+        wrappedReject(new Error(`Command timed out after ${timeout}ms: ${command}`))
       }, timeout)
       client.exec(cmd, (error: Error | undefined, stream: ClientChannel) => {
         if (error) {
           clearTimeout(timer)
-          reject(error)
+          wrappedReject(error)
           return
         }
         activeStream = stream
@@ -109,7 +126,15 @@ export class SshConnectionImpl implements SshConnection {
           ...(this.cachedSudoPassword == null ? [] : [this.cachedSudoPassword]),
           ...(options.secrets ?? []),
         ]
-        collectStreamOutput({ command, options, reject, resolve, secrets, stream, timer })
+        collectStreamOutput({
+          command,
+          options,
+          reject: wrappedReject,
+          resolve: wrappedResolve,
+          secrets,
+          stream,
+          timer,
+        })
       })
     })
   }
@@ -289,6 +314,13 @@ export class SshConnectionImpl implements SshConnection {
           port,
           privateKey,
           username: this.config.user,
+        })
+        client.on("close", () => {
+          const error = new Error("SSH connection closed unexpectedly")
+          for (const rejectFunction of this.pendingRejects) {
+            rejectFunction(error)
+          }
+          this.pendingRejects.clear()
         })
         this.client = client
         this.connectedPort = port

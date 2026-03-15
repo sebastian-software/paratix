@@ -177,7 +177,7 @@ program
       // eslint-disable-next-line @typescript-eslint/no-unsafe-type-assertion -- Commander options typed as Record<string, unknown>
       printError(error, options.verbose as boolean)
       // eslint-disable-next-line node/no-process-exit
-      process.exit(2)
+      process.exit(process.exitCode ?? 2)
     }
   })
 

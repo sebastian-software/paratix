@@ -5,6 +5,73 @@ import { loadDotEnvironment, mergeEnvironment } from "./environment.js"
 import { printError, printModuleResult, printRecipeHeader, printSummary } from "./output.js"
 import { SshConnectionImpl } from "./ssh.js"
 
+const SIGNAL_EXIT_BASE = 128
+const SIGTERM_NUMBER = 15
+const SIGINT_NUMBER = 2
+
+/**
+ * Returns the conventional exit code for a termination signal.
+ * Follows the POSIX convention of 128 + signal number.
+ *
+ * @param signal - The received signal (`SIGTERM` or `SIGINT`).
+ * @returns The exit code to use when the process is terminated by `signal`.
+ */
+function signalExitCode(signal: NodeJS.Signals): number {
+  return SIGNAL_EXIT_BASE + (signal === "SIGTERM" ? SIGTERM_NUMBER : SIGINT_NUMBER)
+}
+
+/**
+ * Holds the shutdown handler and a getter for the signal that triggered it.
+ *
+ * - `handleShutdownSignal` — the listener registered on `SIGINT`/`SIGTERM`.
+ *   A second signal while shutdown is already in progress causes an immediate exit.
+ * - `shutdownSignal` — returns the first signal received, or `null` if no signal
+ *   has been received yet.
+ */
+type ShutdownState = {
+  handleShutdownSignal: (signal: NodeJS.Signals) => void
+  setSsh: (connection: SshConnectionImpl) => void
+  shutdownSignal: () => NodeJS.Signals | null
+}
+
+/**
+ * Registers `SIGINT` and `SIGTERM` handlers that perform a graceful SSH
+ * shutdown on the first signal. A second signal triggers an immediate exit
+ * with the appropriate signal exit code.
+ *
+ * The SSH connection is not required at registration time — call `setSsh`
+ * once the connection is established so the handler can disconnect it.
+ *
+ * @returns A {@link ShutdownState} containing the registered handler, a
+ *   `setSsh` setter for the SSH connection, and a getter that returns the
+ *   first received signal.
+ */
+function setupShutdownHandlers(): ShutdownState {
+  let receivedSignal: NodeJS.Signals | null = null
+  let ssh: null | SshConnectionImpl = null
+
+  const handleShutdownSignal = (signal: NodeJS.Signals): void => {
+    if (receivedSignal != null) {
+      // eslint-disable-next-line node/no-process-exit
+      process.exit(signalExitCode(signal))
+    }
+    receivedSignal = signal
+    console.error(`\nReceived ${signal}, shutting down…`)
+    ssh?.disconnect()
+  }
+
+  process.on("SIGINT", handleShutdownSignal)
+  process.on("SIGTERM", handleShutdownSignal)
+
+  return {
+    handleShutdownSignal,
+    setSsh: (connection: SshConnectionImpl) => {
+      ssh = connection
+    },
+    shutdownSignal: () => receivedSignal,
+  }
+}
+
 export type RunOptions = {
   dryRun?: boolean
   envFile?: string
@@ -231,11 +298,19 @@ async function runSignals(parameters: SignalArguments): Promise<void> {
   }
 }
 
-export async function runPlaybook(
+/**
+ * Creates an SSH connection for the given server definition, applies any
+ * `reconnectTimeout` override from `options`, and probes for sudo access.
+ *
+ * @param definition - The server definition containing host and SSH config.
+ * @param options - Run options; `reconnectTimeout` overrides the value in
+ *   `definition.ssh` when provided.
+ * @returns A connected and sudo-probed {@link SshConnectionImpl}.
+ */
+async function createSshConnection(
   definition: ServerDefinition,
-  options: RunOptions = {}
-): Promise<void> {
-  const environment = initializeEnvironment(options, definition)
+  options: RunOptions
+): Promise<SshConnectionImpl> {
   const sshConfig =
     options.reconnectTimeout == null
       ? definition.ssh
@@ -243,7 +318,33 @@ export async function runPlaybook(
   const ssh = new SshConnectionImpl(definition.host, sshConfig)
   await ssh.connect()
   await ssh.probeSudo()
+  return ssh
+}
 
+/**
+ * Sets `process.exitCode` based on the run outcome.
+ * A received shutdown signal takes precedence over module failures.
+ *
+ * @param shutdownSignal - The signal that interrupted the run, or `null` if the
+ *   run completed normally.
+ * @param stats - Accumulated run statistics used to detect module failures.
+ */
+function resolveExitCode(shutdownSignal: NodeJS.Signals | null, stats: RunStats): void {
+  if (shutdownSignal != null) {
+    process.exitCode = signalExitCode(shutdownSignal)
+  } else if (stats.failed > 0) {
+    process.exitCode = 1
+  }
+}
+
+export async function runPlaybook(
+  definition: ServerDefinition,
+  options: RunOptions = {}
+): Promise<void> {
+  const environment = initializeEnvironment(options, definition)
+  const { handleShutdownSignal, setSsh, shutdownSignal } = setupShutdownHandlers()
+  const ssh = await createSshConnection(definition, options)
+  setSsh(ssh)
   const stats = new RunStats()
 
   try {
@@ -256,16 +357,17 @@ export async function runPlaybook(
       stats,
     })
 
-    if (stats.changed > 0 && definition.signals != null) {
+    if (shutdownSignal() == null && stats.changed > 0 && definition.signals != null) {
       await runSignals({ env: finalEnvironment, signals: definition.signals, ssh, stats })
     }
 
     printSummary(stats)
   } finally {
+    process.removeListener("SIGINT", handleShutdownSignal)
+    process.removeListener("SIGTERM", handleShutdownSignal)
+    // Idempotent: may already have been called by the shutdown signal handler
     ssh.disconnect()
   }
 
-  if (stats.failed > 0) {
-    process.exitCode = 1
-  }
+  resolveExitCode(shutdownSignal(), stats)
 }
