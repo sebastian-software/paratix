@@ -164,6 +164,11 @@ Edit server.ts with your server details, then:
 }
 
 // Only run when executed directly, not when imported (e.g. in tests)
-if (import.meta.url.endsWith(process.argv[1].replaceAll("\\", "/"))) {
+// Exported for testing: verifies the guard is safe when argv[1] is undefined.
+export function isDirectExecution(moduleUrl: string, argv1: null | string | undefined): boolean {
+  return argv1 != null && moduleUrl.endsWith(argv1.replaceAll("\\", "/"))
+}
+
+if (isDirectExecution(import.meta.url, process.argv[1])) {
   main()
 }

@@ -2,7 +2,28 @@ import { existsSync, mkdirSync, readFileSync, rmSync } from "node:fs"
 import { join, resolve } from "node:path"
 import { afterEach, beforeEach, describe, expect, it } from "vitest"
 
-import { writeProjectFiles } from "../src/index.js"
+import { isDirectExecution, writeProjectFiles } from "../src/index.js"
+
+describe("isDirectExecution (process.argv[1] regression)", () => {
+  it("returns false when argv1 is null without throwing", () => {
+    // Regression: previously index.ts called process.argv[1].replaceAll() without a null-check,
+    // causing a TypeError when argv[1] is undefined (e.g. in a REPL or certain test runners).
+    // null and undefined are both guarded by the != null check.
+    expect(isDirectExecution("file:///some/module.js", null)).toBe(false)
+  })
+
+  it("returns false when the module URL does not match argv1", () => {
+    expect(isDirectExecution("file:///project/src/index.js", "/other/script.js")).toBe(false)
+  })
+
+  it("returns true when the module URL ends with the normalised argv1 path", () => {
+    expect(isDirectExecution("file:///project/src/index.js", "/project/src/index.js")).toBe(true)
+  })
+
+  it("normalises Windows backslashes in argv1 before comparing", () => {
+    expect(isDirectExecution("file:///project/src/index.js", "\\project\\src\\index.js")).toBe(true)
+  })
+})
 
 const TEST_DIR = resolve("/tmp/create-paratix-test")
 
