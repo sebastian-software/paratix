@@ -127,14 +127,31 @@ function installDependencies(
   }
 }
 
-function main(): void {
-  const projectName = process.argv[2]
+export function isValidProjectName(name: string): boolean {
+  const trimmed = name.trim()
+  return /^[a-z0-9][a-z0-9\x2d]*$/v.test(trimmed)
+}
 
-  if (!projectName) {
+function validateProjectName(name: string | undefined): asserts name is string {
+  if (name == null || name === "") {
     console.error("Usage: create-paratix <project-name>")
     // eslint-disable-next-line node/no-process-exit
     process.exit(1)
   }
+
+  if (!isValidProjectName(name)) {
+    console.error(
+      `Error: Invalid project name "${name}" — use only lowercase letters, numbers, and hyphens.`
+    )
+    // eslint-disable-next-line node/no-process-exit
+    process.exit(1)
+  }
+}
+
+function main(): void {
+  const projectName = process.argv[2]
+
+  validateProjectName(projectName)
 
   const projectDirectory = resolve(projectName)
 
