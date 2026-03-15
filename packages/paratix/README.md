@@ -337,6 +337,10 @@ Import these from `"paratix"`:
 | `shellQuote(value)`            | Safely quote a string for shell interpolation.                                                    |
 | `NEEDS_APPLY`                  | Constant to return from `check` when work is needed.                                              |
 
+## LLM Guide
+
+This package includes an `llm-guide.md` file that provides detailed information for writing Paratix modules and playbooks. It covers the complete API reference, code patterns, and common mistakes to avoid. When using an LLM to generate Paratix code, point it at this file for best results.
+
 ## License
 
 MIT
