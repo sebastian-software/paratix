@@ -103,7 +103,10 @@ export class SshConnectionImpl implements SshConnection {
         if (this.cachedSudoPassword != null && this.config.user !== "root") {
           stream.write(`${this.cachedSudoPassword}\n`)
         }
-        const secrets = this.cachedSudoPassword == null ? [] : [this.cachedSudoPassword]
+        const secrets = [
+          ...(this.cachedSudoPassword == null ? [] : [this.cachedSudoPassword]),
+          ...(options.secrets ?? []),
+        ]
         collectStreamOutput({ command, options, reject, resolve, secrets, stream, timer })
       })
     })

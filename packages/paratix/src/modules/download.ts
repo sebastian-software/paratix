@@ -26,9 +26,31 @@ type DownloadParameters = {
   destination: string
   /** Additional HTTP headers sent with the curl request. */
   headers?: Record<string, string>
+  /** Strings to mask in error messages (e.g. tokens). */
+  secrets?: string[]
   /** The URL to download from. */
   url: string
 } & BaseDownloadOptions
+
+/** Last ASCII control character (U+001F). */
+const LAST_CONTROL_CHAR = 0x1f
+/** ASCII DEL character (U+007F). */
+const DEL_CHAR = 0x7f
+
+/**
+ * Check whether a string is a valid HTTP header name per RFC 7230 (token chars).
+ * Rejects control characters, DEL, colons, and any non-printable ASCII.
+ *
+ * @param name - The header name to validate.
+ * @returns `true` if the name contains only valid token characters, `false` otherwise.
+ */
+function isValidHeaderName(name: string): boolean {
+  for (let index = 0; index < name.length; index++) {
+    const code = name.charCodeAt(index)
+    if (code <= LAST_CONTROL_CHAR || code >= DEL_CHAR || name[index] === ":") return false
+  }
+  return name.length > 0
+}
 
 /**
  * Build the curl command string including optional headers.
@@ -39,6 +61,9 @@ type DownloadParameters = {
 function buildCurlCommand(parameters: DownloadParameters): string {
   const headerFlags = Object.entries(parameters.headers ?? {})
     .map(([name, value]) => {
+      if (!isValidHeaderName(name)) {
+        throw new Error(`Invalid HTTP header name: ${name}`)
+      }
       const header = `${name}: ${value}`
       return `-H ${shellQuote(header)}`
     })
@@ -103,7 +128,7 @@ async function performDownload(
   if (!conn) return { status: "failed" }
 
   await conn.exec(`mkdir -p "$(dirname ${shellQuote(parameters.destination)})"`, { silent: true })
-  await conn.exec(buildCurlCommand(parameters), { silent: true })
+  await conn.exec(buildCurlCommand(parameters), { secrets: parameters.secrets, silent: true })
 
   if (!(await verifyChecksum(conn, parameters))) return { status: "failed" }
   await applyFileAttributes(conn, parameters)
@@ -207,6 +232,7 @@ export const download = {
       headers,
       mode,
       owner,
+      secrets: options.token == null ? undefined : [options.token],
       sha256,
       url,
     }

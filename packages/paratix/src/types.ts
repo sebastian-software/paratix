@@ -62,6 +62,8 @@ export type ExecOptions = {
   env?: Record<string, string>
   /** Return a result even when the exit code is non-zero instead of throwing. */
   ignoreExitCode?: boolean
+  /** Strings to mask in error messages (e.g. tokens, passwords). */
+  secrets?: string[]
   /** Suppress stdout/stderr from the console while running. */
   silent?: boolean
   /** Abort the command after this many milliseconds. */

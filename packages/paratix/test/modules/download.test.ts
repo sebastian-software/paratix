@@ -1,9 +1,38 @@
 import { describe, expect, it } from "vitest"
 
+import type { ExecOptions } from "../../src/types.js"
+
 import { download } from "../../src/modules/download.js"
 import { createMockSsh } from "../helpers/mockSsh.js"
 
 const emptyEnv = {}
+
+type MockSshWithOptions = {
+  exec: (
+    command: string,
+    options?: ExecOptions
+  ) => Promise<{ code: number; stderr: string; stdout: string }>
+  execCalls: Array<{ command: string; options?: ExecOptions }>
+} & ReturnType<typeof createMockSsh>
+
+/**
+ * Extended mock that records exec options (e.g. secrets) alongside commands.
+ *
+ * @returns A mock SSH connection that stores each exec call with its options.
+ */
+function createMockSshWithOptions(): MockSshWithOptions {
+  const base = createMockSsh()
+  const execCalls: Array<{ command: string; options?: ExecOptions }> = []
+  const mock: MockSshWithOptions = {
+    ...base,
+    exec: async (command: string, options?: ExecOptions) => {
+      execCalls.push({ command, options })
+      return base.exec(command, options)
+    },
+    execCalls,
+  }
+  return mock
+}
 
 describe("download.url", () => {
   const destination = "/usr/local/bin/mytool"
@@ -363,5 +392,104 @@ describe("download.large", () => {
       const mod = download.large(destination, url)
       expect(mod.name).toBe(`download.large: ${destination}`)
     })
+  })
+})
+
+// ─── Header-Name-Validierung (Regressionstests) ───────────────────────────────
+
+describe("buildCurlCommand — header name validation", () => {
+  const destination = "/tmp/file"
+  const url = "https://example.com/file"
+
+  it("throws when header name contains \\r\\n (CRLF injection)", async () => {
+    const mockSsh = createMockSsh()
+    const mod = download.url(destination, url, {
+      headers: { "X-Evil\r\nX-Injected": "value" },
+    })
+    await expect(mod.apply(mockSsh, emptyEnv)).rejects.toThrow("Invalid HTTP header name")
+  })
+
+  it("throws when header name contains a bare \\n", async () => {
+    const mockSsh = createMockSsh()
+    const mod = download.url(destination, url, {
+      headers: { "X-Evil\nInjected": "value" },
+    })
+    await expect(mod.apply(mockSsh, emptyEnv)).rejects.toThrow("Invalid HTTP header name")
+  })
+
+  it("throws when header name contains a bare \\r", async () => {
+    const mockSsh = createMockSsh()
+    const mod = download.url(destination, url, {
+      headers: { "X-Evil\rInjected": "value" },
+    })
+    await expect(mod.apply(mockSsh, emptyEnv)).rejects.toThrow("Invalid HTTP header name")
+  })
+
+  it("throws when header name contains a control character (\\x01)", async () => {
+    const mockSsh = createMockSsh()
+    const mod = download.url(destination, url, {
+      headers: { "X-Bad\x01Name": "value" },
+    })
+    await expect(mod.apply(mockSsh, emptyEnv)).rejects.toThrow("Invalid HTTP header name")
+  })
+
+  it("throws when header name contains a colon", async () => {
+    const mockSsh = createMockSsh()
+    const mod = download.url(destination, url, {
+      headers: { "X-Bad:Name": "value" },
+    })
+    await expect(mod.apply(mockSsh, emptyEnv)).rejects.toThrow("Invalid HTTP header name")
+  })
+
+  it("accepts a valid single-word header name", async () => {
+    const mockSsh = createMockSsh()
+    const mod = download.url(destination, url, {
+      headers: { Authorization: "Bearer token123" },
+    })
+    const result = await mod.apply(mockSsh, emptyEnv)
+    expect(result.status).toBe("changed")
+    const curlCall = mockSsh.calls.find((c) => c.startsWith("curl"))
+    expect(curlCall).toContain("-H 'Authorization: Bearer token123'")
+  })
+
+  it("accepts a valid hyphenated header name", async () => {
+    const mockSsh = createMockSsh()
+    const mod = download.url(destination, url, {
+      headers: { "X-Custom-Header": "some-value" },
+    })
+    const result = await mod.apply(mockSsh, emptyEnv)
+    expect(result.status).toBe("changed")
+    const curlCall = mockSsh.calls.find((c) => c.startsWith("curl"))
+    expect(curlCall).toContain("-H 'X-Custom-Header: some-value'")
+  })
+})
+
+// ─── download.github — secrets-Weitergabe (Regressionstests) ─────────────────
+
+describe("download.github — secrets propagation", () => {
+  const destination = "/usr/local/bin/terraform"
+  const repo = "hashicorp/terraform"
+  const tag = "v1.5.0"
+  const asset = "terraform_1.5.0_linux_amd64.zip"
+
+  it("passes token as secrets when exec is called for curl", async () => {
+    const token = "ghp_supersecrettoken"
+    const mock = createMockSshWithOptions()
+    const mod = download.github(destination, { asset, repo, tag, token })
+    await mod.apply(mock, emptyEnv)
+
+    const curlCall = mock.execCalls.find(({ command }) => command.startsWith("curl"))
+    expect(curlCall).toBeDefined()
+    expect(curlCall?.options?.secrets).toContain(token)
+  })
+
+  it("does not set secrets when no token is provided", async () => {
+    const mock = createMockSshWithOptions()
+    const mod = download.github(destination, { asset, repo, tag })
+    await mod.apply(mock, emptyEnv)
+
+    const curlCall = mock.execCalls.find(({ command }) => command.startsWith("curl"))
+    expect(curlCall).toBeDefined()
+    expect(curlCall?.options?.secrets).toBeUndefined()
   })
 })
