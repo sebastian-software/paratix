@@ -72,6 +72,53 @@ function validateServerDefinition(value: unknown, file: string): asserts value i
   process.exit(2)
 }
 
+/**
+ * Returns a human-readable string for any caught value.
+ * Uses `.message` for `Error` instances and falls back to the string
+ * representation for primitives.  For plain objects that have no meaningful
+ * `toString`, the JSON representation is used instead of `[object Object]`.
+ *
+ * @param value - The value to convert to a string.
+ * @returns A human-readable string representation of `value`.
+ */
+function errorToString(value: unknown): string {
+  if (value instanceof Error) return value.message
+  if (typeof value === "object" && value !== null) return JSON.stringify(value)
+  return String(value)
+}
+
+/**
+ * Walks the cause chain of `error` and prints each cause to stderr.
+ *
+ * @param error - The root `Error` whose `.cause` chain should be printed.
+ */
+function printCauseChain(error: Error): void {
+  let cause = error.cause
+  while (cause != null) {
+    console.error(`  Caused by: ${errorToString(cause)}`)
+    cause = cause instanceof Error ? cause.cause : undefined
+  }
+}
+
+/**
+ * Prints a structured error message to stderr, including the cause chain and
+ * optionally the full stack trace when `verbose` is `true`.
+ *
+ * @param error - The caught value (may be any type).
+ * @param verbose - When `true`, the stack trace of `error` is printed.
+ */
+export function printError(error: unknown, verbose: boolean): void {
+  console.error(`Error: ${errorToString(error)}`)
+
+  if (error instanceof Error) {
+    printCauseChain(error)
+
+    if (verbose && error.stack != null) {
+      console.error(`\n${error.stack}`)
+    }
+  }
+}
+
 const program = new Command()
 
 program.name("paratix").description("Idempotent VPS setup tool in TypeScript").version("0.1.0")
@@ -83,6 +130,7 @@ program
   .option("--env <key=value...>", "Set env values", collectEnvironment, {})
   .option("--env-file <path>", "Load dotenv file")
   .option("--reconnect-timeout <seconds>", "SSH reconnect timeout", "300")
+  .option("--verbose", "Show full stack traces on error", false)
   .action(async (file: string, options: Record<string, unknown>) => {
     try {
       const filePath = resolve(file)
@@ -114,7 +162,8 @@ program
         reconnectTimeout: Number(options.reconnectTimeout) * SECONDS_TO_MS,
       })
     } catch (error) {
-      console.error(`Error: ${String(error)}`)
+      // eslint-disable-next-line @typescript-eslint/no-unsafe-type-assertion -- Commander options typed as Record<string, unknown>
+      printError(error, options.verbose as boolean)
       // eslint-disable-next-line node/no-process-exit
       process.exit(2)
     }
