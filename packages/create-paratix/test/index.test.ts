@@ -79,6 +79,31 @@ describe("writeProjectFiles", () => {
     expect(existsSync(join(TEST_DIR, "server.ts"))).toBe(true)
   })
 
+  it("generated server.ts uses pkg.upgrade and pkg.installed (not apt.*)", () => {
+    // Regression: SERVER_TEMPLATE previously used the deprecated apt module
+    // (apt.upgrade / apt.installed). After Plan-0013 refactoring the correct
+    // module is `package as pkg` with pkg.upgrade / pkg.installed.
+    // TypeScript cannot catch this because the template is a plain string.
+    writeProjectFiles(TEST_DIR)
+
+    const content = readFileSync(join(TEST_DIR, "server.ts"), "utf8")
+
+    expect(content).toContain("pkg.upgrade(")
+    expect(content).toContain("pkg.installed(")
+    expect(content).not.toContain("apt.upgrade(")
+    expect(content).not.toContain("apt.installed(")
+  })
+
+  it("generated server.ts imports package as pkg from paratix/modules", () => {
+    // Regression: import must use `package as pkg`, not the old `apt` import.
+    writeProjectFiles(TEST_DIR)
+
+    const content = readFileSync(join(TEST_DIR, "server.ts"), "utf8")
+
+    expect(content).toContain("package as pkg")
+    expect(content).not.toMatch(/\bapt\b/)
+  })
+
   it("creates a files subdirectory", () => {
     writeProjectFiles(TEST_DIR)
 

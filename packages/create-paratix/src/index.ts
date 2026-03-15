@@ -3,7 +3,7 @@ import { existsSync, mkdirSync, writeFileSync } from "node:fs"
 import { join, resolve } from "node:path"
 
 const SERVER_TEMPLATE = `import { server, recipe } from "paratix";
-import { apt, hostname, sshd, ufw, file, service, user } from "paratix/modules";
+import { package as pkg, hostname, sshd, ufw, file, service, user } from "paratix/modules";
 
 export default server({
   name: "my-server",
@@ -19,8 +19,8 @@ export default server({
   },
   run: [
     hostname.set("my-server"),
-    apt.upgrade("2026-03-01"),
-    apt.installed("nginx", "curl", "htop"),
+    pkg.upgrade("2026-03-01"),
+    pkg.installed("nginx", "curl", "htop"),
 
     recipe("ssh-hardening", [
       sshd.port(2222),
