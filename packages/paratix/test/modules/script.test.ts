@@ -73,7 +73,7 @@ describe("script.once — apply", () => {
 
     // flag set
     expect(mockSsh.calls).toContain(
-      `rm -f ${FLAGS_DIRECTORY}/script-setup-* && touch ${FLAGS_DIRECTORY}/'script-setup-1'`
+      `rm -f ${FLAGS_DIRECTORY}/'script-setup-'* && touch ${FLAGS_DIRECTORY}/'script-setup-1'`
     )
   })
 
@@ -86,7 +86,7 @@ describe("script.once — apply", () => {
     const chmodIdx = mockSsh.calls.indexOf("chmod +x '/tmp/paratix-script-setup'")
     const execIdx = mockSsh.calls.indexOf("'/tmp/paratix-script-setup'")
     const flagIdx = mockSsh.calls.indexOf(
-      `rm -f ${FLAGS_DIRECTORY}/script-setup-* && touch ${FLAGS_DIRECTORY}/'script-setup-1'`
+      `rm -f ${FLAGS_DIRECTORY}/'script-setup-'* && touch ${FLAGS_DIRECTORY}/'script-setup-1'`
     )
     const rmIdx = mockSsh.calls.indexOf("rm -f '/tmp/paratix-script-setup'")
 
@@ -151,7 +151,7 @@ describe("script.once — apply", () => {
     const mod = script.once("setup", "/local/setup.sh", { version: "2" })
     await mod.apply(mockSsh, emptyEnv)
     expect(mockSsh.calls).toContain(
-      `rm -f ${FLAGS_DIRECTORY}/script-setup-* && touch ${FLAGS_DIRECTORY}/'script-setup-2'`
+      `rm -f ${FLAGS_DIRECTORY}/'script-setup-'* && touch ${FLAGS_DIRECTORY}/'script-setup-2'`
     )
   })
 
@@ -160,7 +160,7 @@ describe("script.once — apply", () => {
     const mod = script.once("setup", "/local/setup.sh", { version: "3" })
     await mod.apply(mockSsh, emptyEnv)
     const flagCall = mockSsh.calls.find((c) => c.includes("touch"))
-    expect(flagCall).toContain(`rm -f ${FLAGS_DIRECTORY}/script-setup-*`)
+    expect(flagCall).toContain(`rm -f ${FLAGS_DIRECTORY}/'script-setup-'*`)
     expect(flagCall).toContain(`touch ${FLAGS_DIRECTORY}/'script-setup-3'`)
   })
 })
@@ -190,19 +190,17 @@ describe("script.once — name", () => {
 // flagPrefix shell-globbing (regression test for shellQuote bug)
 // ---------------------------------------------------------------------------
 
-describe("script.once — flagPrefix must not contain single-quotes", () => {
-  it("rm command uses unquoted flagPrefix so shell glob expands correctly", async () => {
+describe("script.once — flagPrefix is shell-quoted to prevent injection", () => {
+  it("rm command uses shellQuote on flagPrefix to prevent command injection", async () => {
     const mockSsh = createMockSsh()
     const mod = script.once("my-script", "/local/setup.sh")
     await mod.apply(mockSsh, emptyEnv)
 
-    // The rm command that clears old version flags must use a bare glob prefix
-    // without single-quotes around the script name, e.g.:
-    //   rm -f /var/lib/paratix/flags/script-my-script-*
-    // A flagPrefix produced via shellQuote would instead generate:
-    //   rm -f /var/lib/paratix/flags/script-'my-script'-*
-    // which prevents glob expansion from matching any existing flag file.
-    const expectedRmCmd = `rm -f ${FLAGS_DIRECTORY}/script-my-script-* && touch ${FLAGS_DIRECTORY}/'script-my-script-1'`
+    // The rm command that clears old version flags must shell-quote the prefix
+    // to prevent command injection via crafted flag names. The glob star stays
+    // outside the quotes so it still expands:
+    //   rm -f /var/lib/paratix/flags/'script-my-script-'*
+    const expectedRmCmd = `rm -f ${FLAGS_DIRECTORY}/'script-my-script-'* && touch ${FLAGS_DIRECTORY}/'script-my-script-1'`
     expect(mockSsh.calls).toContain(expectedRmCmd)
   })
 })

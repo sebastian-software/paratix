@@ -258,7 +258,7 @@ describe("pkg.update", () => {
       ...APT_FOUND,
       "apt-get update": { code: 0 },
       "mkdir -p /var/lib/paratix/flags": { code: 0 },
-      "rm -f /var/lib/paratix/flags/package-update-* && touch /var/lib/paratix/flags/'package-update-2024-01-15'":
+      "rm -f /var/lib/paratix/flags/'package-update-'* && touch /var/lib/paratix/flags/'package-update-2024-01-15'":
         { code: 0 },
     })
     const mod = pkg.update("2024-01-15")
@@ -266,7 +266,7 @@ describe("pkg.update", () => {
     expect(result).toStrictEqual({ status: "changed" })
     expect(ssh.calls).toContain("apt-get update")
     expect(ssh.calls).toContain(
-      "rm -f /var/lib/paratix/flags/package-update-* && touch /var/lib/paratix/flags/'package-update-2024-01-15'"
+      "rm -f /var/lib/paratix/flags/'package-update-'* && touch /var/lib/paratix/flags/'package-update-2024-01-15'"
     )
   })
 
@@ -328,7 +328,7 @@ describe("pkg.upgrade", () => {
       "DEBIAN_FRONTEND=noninteractive apt-get update && DEBIAN_FRONTEND=noninteractive apt-get upgrade -y":
         { code: 0 },
       "mkdir -p /var/lib/paratix/flags": { code: 0 },
-      "rm -f /var/lib/paratix/flags/package-upgrade-* && touch /var/lib/paratix/flags/'package-upgrade-2024-01-15'":
+      "rm -f /var/lib/paratix/flags/'package-upgrade-'* && touch /var/lib/paratix/flags/'package-upgrade-2024-01-15'":
         { code: 0 },
     })
     const mod = pkg.upgrade("2024-01-15")
@@ -338,7 +338,7 @@ describe("pkg.upgrade", () => {
       "DEBIAN_FRONTEND=noninteractive apt-get update && DEBIAN_FRONTEND=noninteractive apt-get upgrade -y"
     )
     expect(ssh.calls).toContain(
-      "rm -f /var/lib/paratix/flags/package-upgrade-* && touch /var/lib/paratix/flags/'package-upgrade-2024-01-15'"
+      "rm -f /var/lib/paratix/flags/'package-upgrade-'* && touch /var/lib/paratix/flags/'package-upgrade-2024-01-15'"
     )
   })
 
@@ -426,7 +426,7 @@ describe("package manager detection", () => {
       ...DNF_FOUND,
       "dnf makecache": { code: 0 },
       "mkdir -p /var/lib/paratix/flags": { code: 0 },
-      "rm -f /var/lib/paratix/flags/package-update-* && touch /var/lib/paratix/flags/'package-update-2024-01-15'":
+      "rm -f /var/lib/paratix/flags/'package-update-'* && touch /var/lib/paratix/flags/'package-update-2024-01-15'":
         { code: 0 },
     })
     const mod = pkg.update("2024-01-15")
@@ -439,7 +439,7 @@ describe("package manager detection", () => {
       ...APK_FOUND,
       "apk update": { code: 0 },
       "mkdir -p /var/lib/paratix/flags": { code: 0 },
-      "rm -f /var/lib/paratix/flags/package-update-* && touch /var/lib/paratix/flags/'package-update-2024-01-15'":
+      "rm -f /var/lib/paratix/flags/'package-update-'* && touch /var/lib/paratix/flags/'package-update-2024-01-15'":
         { code: 0 },
     })
     const mod = pkg.update("2024-01-15")
@@ -452,7 +452,7 @@ describe("package manager detection", () => {
       ...APK_FOUND,
       "apk update && apk upgrade": { code: 0 },
       "mkdir -p /var/lib/paratix/flags": { code: 0 },
-      "rm -f /var/lib/paratix/flags/package-upgrade-* && touch /var/lib/paratix/flags/'package-upgrade-2024-01-15'":
+      "rm -f /var/lib/paratix/flags/'package-upgrade-'* && touch /var/lib/paratix/flags/'package-upgrade-2024-01-15'":
         { code: 0 },
     })
     const mod = pkg.upgrade("2024-01-15")

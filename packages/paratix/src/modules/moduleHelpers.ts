@@ -19,7 +19,7 @@ export async function setVersionedFlag(
 ): Promise<void> {
   await ensureFlagsDirectory(ssh)
   await ssh.exec(
-    `rm -f ${FLAGS_DIRECTORY}/${flagPrefix}* && touch ${FLAGS_DIRECTORY}/${shellQuote(flagName)}`,
+    `rm -f ${FLAGS_DIRECTORY}/${shellQuote(flagPrefix)}* && touch ${FLAGS_DIRECTORY}/${shellQuote(flagName)}`,
     { silent: true }
   )
 }
