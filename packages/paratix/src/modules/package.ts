@@ -1,7 +1,7 @@
 import { shellQuote } from "../ssh.js"
 import { type Module, type ModuleResult, NEEDS_APPLY, type SshConnection } from "../types.js"
+import { hasFlag, setVersionedFlag } from "./moduleHelpers.js"
 
-const FLAGS_DIRECTORY = "/var/lib/paratix/flags"
 const EXEC_OPTS = { ignoreExitCode: true, silent: true } as const
 
 /** Supported system package managers. */
@@ -90,15 +90,6 @@ async function isPackageInstalled(
       return ssh.test(`rpm -q ${quoted}`)
     }
   }
-}
-
-/**
- * Ensure the flags directory exists on the remote host.
- *
- * @param ssh - Active SSH connection to the remote host.
- */
-async function ensureFlagsDirectory(ssh: SshConnection): Promise<void> {
-  await ssh.exec(`mkdir -p ${FLAGS_DIRECTORY}`, { silent: true })
 }
 
 /**
@@ -222,23 +213,16 @@ export const pkg = {
         if (!ssh) return { status: "failed" }
         const pm = await detectPackageManager(ssh)
         if (!pm) return { status: "failed" }
-        await ensureFlagsDirectory(ssh)
-
         const result = await ssh.exec(UPDATE_COMMANDS[pm], EXEC_OPTS)
         if (result.code !== 0) return { status: "failed" }
 
-        await ssh.exec(
-          `rm -f ${FLAGS_DIRECTORY}/package-update-* && touch ${FLAGS_DIRECTORY}/${shellQuote(flagName)}`,
-          { silent: true }
-        )
+        await setVersionedFlag(ssh, flagName, "package-update-")
 
         return { status: "changed" }
       },
       async check(ssh: null | SshConnection): Promise<"needs-apply" | "ok"> {
         if (!ssh) return NEEDS_APPLY
-        return (await ssh.test(`[ -f ${FLAGS_DIRECTORY}/${shellQuote(flagName)} ]`))
-          ? "ok"
-          : NEEDS_APPLY
+        return (await hasFlag(ssh, flagName)) ? "ok" : NEEDS_APPLY
       },
       name: `package.update: ${date}`,
     }
@@ -270,23 +254,16 @@ export const pkg = {
         if (!ssh) return { status: "failed" }
         const pm = await detectPackageManager(ssh)
         if (!pm) return { status: "failed" }
-        await ensureFlagsDirectory(ssh)
-
         const result = await ssh.exec(UPGRADE_COMMANDS[pm], EXEC_OPTS)
         if (result.code !== 0) return { status: "failed" }
 
-        await ssh.exec(
-          `rm -f ${FLAGS_DIRECTORY}/package-upgrade-* && touch ${FLAGS_DIRECTORY}/${shellQuote(flagName)}`,
-          { silent: true }
-        )
+        await setVersionedFlag(ssh, flagName, "package-upgrade-")
 
         return { status: "changed" }
       },
       async check(ssh: null | SshConnection): Promise<"needs-apply" | "ok"> {
         if (!ssh) return NEEDS_APPLY
-        return (await ssh.test(`[ -f ${FLAGS_DIRECTORY}/${shellQuote(flagName)} ]`))
-          ? "ok"
-          : NEEDS_APPLY
+        return (await hasFlag(ssh, flagName)) ? "ok" : NEEDS_APPLY
       },
       name: `package.upgrade: ${date}`,
     }

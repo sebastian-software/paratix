@@ -90,9 +90,9 @@ describe("script.once — apply", () => {
     )
     const rmIdx = mockSsh.calls.indexOf("rm -f '/tmp/paratix-script-setup'")
 
-    expect(mkdirIdx).toBeLessThan(chmodIdx)
     expect(chmodIdx).toBeLessThan(execIdx)
-    expect(execIdx).toBeLessThan(flagIdx)
+    expect(execIdx).toBeLessThan(mkdirIdx)
+    expect(mkdirIdx).toBeLessThan(flagIdx)
     // cleanup happens last (in finally block, after flag is set)
     expect(flagIdx).toBeLessThan(rmIdx)
   })

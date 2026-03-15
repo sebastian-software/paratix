@@ -194,8 +194,8 @@ describe("ssh.authorizedKeys", () => {
   it("regression: home path with spaces is correctly shell-quoted in check", async () => {
     const spaceyHome = "/home/my user"
     const mockSsh = createMockSsh({
-      "getent passwd 'alice' | cut -d: -f6": { stdout: spaceyHome },
       [`grep -qF -- '${testKey}' '/home/my user/.ssh/authorized_keys'`]: { code: 0 },
+      "getent passwd 'alice' | cut -d: -f6": { stdout: spaceyHome },
     })
     const mod = ssh.authorizedKeys("alice", testKey)
     const result = await mod.check(mockSsh, emptyEnv)

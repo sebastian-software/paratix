@@ -2,6 +2,7 @@ import { createHash } from "node:crypto"
 
 import { shellQuote } from "../ssh.js"
 import { type Module, type ModuleResult, NEEDS_APPLY, type SshConnection } from "../types.js"
+import { hasFlag, setFlag } from "./moduleHelpers.js"
 
 /**
  * Options shared by all download methods.
@@ -162,17 +163,6 @@ async function checkDownload(
   return fileExists ? "ok" : NEEDS_APPLY
 }
 
-const FLAGS_DIRECTORY = "/var/lib/paratix/flags"
-
-/**
- * Ensure the flags directory exists on the remote host.
- *
- * @param ssh - Active SSH connection.
- */
-async function ensureFlagsDirectory(ssh: SshConnection): Promise<void> {
-  await ssh.exec(`mkdir -p ${FLAGS_DIRECTORY}`, { silent: true })
-}
-
 /**
  * Modules for downloading files to remote servers via `curl`.
  */
@@ -297,8 +287,7 @@ export const download = {
         const result = await performDownload(conn, downloadParameters)
 
         if (result.status === "changed") {
-          await ensureFlagsDirectory(conn)
-          await conn.exec(`touch ${FLAGS_DIRECTORY}/${shellQuote(flagName)}`, { silent: true })
+          await setFlag(conn, flagName)
         }
 
         return result
@@ -306,7 +295,7 @@ export const download = {
       async check(conn: null | SshConnection): Promise<"needs-apply" | "ok"> {
         if (!conn) return NEEDS_APPLY
 
-        const flagExists = await conn.test(`[ -f ${FLAGS_DIRECTORY}/${shellQuote(flagName)} ]`)
+        const flagExists = await hasFlag(conn, flagName)
         return flagExists ? "ok" : NEEDS_APPLY
       },
       name: `download.large: ${destination}`,

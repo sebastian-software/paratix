@@ -1,13 +1,9 @@
 import { shellQuote } from "../ssh.js"
 import { type Module, type ModuleResult, NEEDS_APPLY, type SshConnection } from "../types.js"
+import { hasFlag, setVersionedFlag } from "./moduleHelpers.js"
 
-const FLAGS_DIRECTORY = "/var/lib/paratix/flags"
 const EXEC_OPTS = { ignoreExitCode: true, silent: true } as const
 const NAME_PATTERN = /^[\w.\-]+$/iv
-
-async function ensureFlagsDirectory(ssh: SshConnection): Promise<void> {
-  await ssh.exec(`mkdir -p ${FLAGS_DIRECTORY}`, { silent: true })
-}
 
 /**
  * Modules for executing scripts on the remote host.
@@ -40,7 +36,6 @@ export const script = {
       async apply(ssh: null | SshConnection): Promise<ModuleResult> {
         if (!ssh) return { status: "failed" }
 
-        await ensureFlagsDirectory(ssh)
         await ssh.uploadFile(localPath, remotePath)
 
         try {
@@ -54,10 +49,7 @@ export const script = {
 
           if (result.code !== 0) return { status: "failed" }
 
-          await ssh.exec(
-            `rm -f ${FLAGS_DIRECTORY}/${flagPrefix}* && touch ${FLAGS_DIRECTORY}/${shellQuote(flagName)}`,
-            { silent: true }
-          )
+          await setVersionedFlag(ssh, flagName, flagPrefix)
 
           return { status: "changed" }
         } finally {
@@ -66,9 +58,7 @@ export const script = {
       },
       async check(ssh: null | SshConnection): Promise<"needs-apply" | "ok"> {
         if (!ssh) return NEEDS_APPLY
-        return (await ssh.test(`[ -f ${FLAGS_DIRECTORY}/${shellQuote(flagName)} ]`))
-          ? "ok"
-          : NEEDS_APPLY
+        return (await hasFlag(ssh, flagName)) ? "ok" : NEEDS_APPLY
       },
       name: `script.once: ${name} (v${version})`,
     }
