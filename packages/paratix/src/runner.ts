@@ -1,5 +1,5 @@
 import type { RecipeModule } from "./recipe.js"
-import type { Environment, Module, ServerDefinition } from "./types.js"
+import type { Environment, Module, ModuleResult, ServerDefinition } from "./types.js"
 
 import { loadDotEnvironment, mergeEnvironment } from "./environment.js"
 import { printError, printModuleResult, printRecipeHeader, printSummary } from "./output.js"
@@ -105,12 +105,11 @@ async function handleReboot(ssh: SshConnectionImpl, meta: Environment): Promise<
   }
 }
 
-async function runRecipeModule(
-  recipeModule: RecipeModule,
+async function handleMetaAndBuildResult(
+  ssh: SshConnectionImpl,
   environment: Environment,
-  ssh: SshConnectionImpl
+  result: ModuleResult
 ): Promise<StepResult> {
-  const result = await recipeModule.apply(ssh, environment)
   let currentEnvironment = environment
 
   if (result.meta != null) {
@@ -126,27 +125,23 @@ async function runRecipeModule(
   }
 }
 
+async function runRecipeModule(
+  recipeModule: RecipeModule,
+  environment: Environment,
+  ssh: SshConnectionImpl
+): Promise<StepResult> {
+  const result = await recipeModule.apply(ssh, environment)
+  return handleMetaAndBuildResult(ssh, environment, result)
+}
+
 async function applyModule(
   targetModule: Module,
   currentEnvironment: Environment,
   ssh: SshConnectionImpl
 ): Promise<StepResult> {
   const result = await targetModule.apply(ssh, currentEnvironment)
-  let environment = currentEnvironment
-
   printModuleResult(targetModule.name, result.status)
-
-  if (result.meta != null) {
-    environment = mergeEnvironment(environment, result.meta)
-    await handlePortChange(ssh, result.meta)
-    await handleReboot(ssh, result.meta)
-  }
-
-  return {
-    env: environment,
-    shouldBreak: result.status === "failed",
-    status: result.status,
-  }
+  return handleMetaAndBuildResult(ssh, currentEnvironment, result)
 }
 
 type RegularModuleArguments = {
