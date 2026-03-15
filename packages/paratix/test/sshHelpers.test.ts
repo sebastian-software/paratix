@@ -1,5 +1,5 @@
 import { EventEmitter } from "node:events"
-import { describe, expect, it } from "vitest"
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 
 import { collectStreamOutput, type StreamOutputParameters } from "../src/sshHelpers.js"
 
@@ -262,5 +262,148 @@ describe("collectStreamOutput", () => {
     )
 
     await expect(promise).rejects.toThrow("ECONNRESET")
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Live-output masking (regression: maskSecrets must be applied to process.std{out,err}.write)
+// ---------------------------------------------------------------------------
+
+describe("live-output masking via process.stdout/stderr.write", () => {
+  let stdoutWriteSpy: ReturnType<typeof vi.spyOn>
+  let stderrWriteSpy: ReturnType<typeof vi.spyOn>
+
+  beforeEach(() => {
+    stdoutWriteSpy = vi.spyOn(process.stdout, "write").mockImplementation(() => true)
+    stderrWriteSpy = vi.spyOn(process.stderr, "write").mockImplementation(() => true)
+  })
+
+  afterEach(() => {
+    stdoutWriteSpy.mockRestore()
+    stderrWriteSpy.mockRestore()
+  })
+
+  it("masks secrets in process.stdout.write when silent is false", async () => {
+    const secret = "supersecret"
+    const { stderr, stream } = createMockChannel()
+
+    await new Promise<void>((resolve, reject) => {
+      const timer = setTimeout(() => {
+        /* intentionally never fires in tests */
+      }, 60_000)
+
+      collectStreamOutput({
+        command: "echo something",
+        options: { silent: false },
+        reject,
+        resolve: () => resolve(),
+        stream: stream as unknown as StreamOutputParameters["stream"],
+        secrets: [secret],
+        timer,
+      })
+
+      stream.emit("data", Buffer.from(`output contains ${secret} here`))
+      stderr.emit("data", Buffer.from("no secret here"))
+      stream.emit("close", 0)
+      clearTimeout(timer)
+    })
+
+    const stdoutCalls = stdoutWriteSpy.mock.calls.map((args) => String(args[0]))
+    expect(stdoutCalls.join("")).not.toContain(secret)
+    expect(stdoutCalls.join("")).toContain("***")
+  })
+
+  it("masks secrets in process.stderr.write when silent is false", async () => {
+    const secret = "topsecrettoken"
+    const { stderr, stream } = createMockChannel()
+
+    await new Promise<void>((resolve, reject) => {
+      const timer = setTimeout(() => {
+        /* intentionally never fires in tests */
+      }, 60_000)
+
+      collectStreamOutput({
+        command: "deploy",
+        options: { silent: false },
+        reject,
+        resolve: () => resolve(),
+        stream: stream as unknown as StreamOutputParameters["stream"],
+        secrets: [secret],
+        timer,
+      })
+
+      stream.emit("data", Buffer.from("stdout without secret"))
+      stderr.emit("data", Buffer.from(`error: ${secret} is invalid`))
+      stream.emit("close", 0)
+      clearTimeout(timer)
+    })
+
+    const stderrCalls = stderrWriteSpy.mock.calls.map((args) => String(args[0]))
+    expect(stderrCalls.join("")).not.toContain(secret)
+    expect(stderrCalls.join("")).toContain("***")
+  })
+
+  it("masks secrets in both stdout and stderr live-output simultaneously", async () => {
+    const password = "mypassword"
+    const token = "mytoken"
+    const { stderr, stream } = createMockChannel()
+
+    await new Promise<void>((resolve, reject) => {
+      const timer = setTimeout(() => {
+        /* intentionally never fires in tests */
+      }, 60_000)
+
+      collectStreamOutput({
+        command: "run",
+        options: { silent: false },
+        reject,
+        resolve: () => resolve(),
+        stream: stream as unknown as StreamOutputParameters["stream"],
+        secrets: [password, token],
+        timer,
+      })
+
+      stream.emit("data", Buffer.from(`using password ${password} done`))
+      stderr.emit("data", Buffer.from(`token ${token} rejected`))
+      stream.emit("close", 0)
+      clearTimeout(timer)
+    })
+
+    const stdoutOutput = stdoutWriteSpy.mock.calls.map((args) => String(args[0])).join("")
+    const stderrOutput = stderrWriteSpy.mock.calls.map((args) => String(args[0])).join("")
+
+    expect(stdoutOutput).not.toContain(password)
+    expect(stdoutOutput).toContain("***")
+    expect(stderrOutput).not.toContain(token)
+    expect(stderrOutput).toContain("***")
+  })
+
+  it("does not call process.stdout.write or process.stderr.write when silent is true", async () => {
+    const secret = "silentsecret"
+    const { stderr, stream } = createMockChannel()
+
+    await new Promise<void>((resolve, reject) => {
+      const timer = setTimeout(() => {
+        /* intentionally never fires in tests */
+      }, 60_000)
+
+      collectStreamOutput({
+        command: "run",
+        options: { silent: true },
+        reject,
+        resolve: () => resolve(),
+        stream: stream as unknown as StreamOutputParameters["stream"],
+        secrets: [secret],
+        timer,
+      })
+
+      stream.emit("data", Buffer.from(`contains ${secret}`))
+      stderr.emit("data", Buffer.from(`also ${secret}`))
+      stream.emit("close", 0)
+      clearTimeout(timer)
+    })
+
+    expect(stdoutWriteSpy).not.toHaveBeenCalled()
+    expect(stderrWriteSpy).not.toHaveBeenCalled()
   })
 })

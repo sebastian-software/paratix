@@ -38,12 +38,12 @@ export function collectStreamOutput(parameters: StreamOutputParameters): void {
   stream.on("data", (data: Buffer) => {
     const text = data.toString()
     stdout += text
-    if (!options.silent) process.stdout.write(text)
+    if (!options.silent) process.stdout.write(maskSecrets(text, parameters.secrets ?? []))
   })
   stream.stderr.on("data", (data: Buffer) => {
     const text = data.toString()
     stderr += text
-    if (!options.silent) process.stderr.write(text)
+    if (!options.silent) process.stderr.write(maskSecrets(text, parameters.secrets ?? []))
   })
   stream.on("error", (error: Error) => {
     clearTimeout(timer)
