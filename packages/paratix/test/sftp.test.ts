@@ -17,10 +17,14 @@ vi.mock("node:fs", () => ({
 // Helpers
 // ---------------------------------------------------------------------------
 
-/** Minimal stream mock that supports piping and emitting error events. */
-type SftpMockStream = { pipe: ReturnType<typeof vi.fn> } & EventEmitter
+/** Minimal stream mock that supports piping, destroy, and emitting error events. */
+type SftpMockStream = {
+  destroy: ReturnType<typeof vi.fn>
+  pipe: ReturnType<typeof vi.fn>
+} & EventEmitter
 
 class MockReadableStream extends EventEmitter {
+  public destroy = vi.fn()
   public pipe = vi.fn()
 }
 
@@ -30,7 +34,7 @@ function makeMockStream(): SftpMockStream {
 
 function makeSftpSession() {
   const sftpReadStream = makeMockStream()
-  const sftpWriteStream = new EventEmitter()
+  const sftpWriteStream = Object.assign(new EventEmitter(), { destroy: vi.fn() })
   const sftpEnd = vi.fn()
 
   const sftp = {
@@ -165,6 +169,72 @@ describe("sftpDownload", () => {
     // Assert — promise must resolve on successful transfer
     await expect(promise).resolves.toBeUndefined()
   })
+
+  // ---------------------------------------------------------------------------
+  // BUG DOCUMENTATION: missing destroy() on counterpart stream
+  // ---------------------------------------------------------------------------
+
+  it("BUG: destroys the local writeStream when the readStream emits an error", async () => {
+    // Arrange
+    const { sftp, sftpReadStream } = makeSftpSession()
+    const client = makeClientMock(sftp)
+
+    const localWriteStream = Object.assign(new EventEmitter(), { destroy: vi.fn() })
+    vi.mocked(createWriteStream).mockReturnValue(localWriteStream as unknown as WriteStream)
+
+    // Act
+    const promise = sftpDownload(client, "/remote/file.txt", "/local/file.txt")
+    sftpReadStream.emit("error", new Error("remote read error"))
+    await promise.catch(() => {
+      /* expected rejection */
+    })
+
+    // Assert — writeStream.destroy() must be called to prevent a resource leak.
+    // BUG: Currently NOT called → this test fails intentionally to document the bug.
+    expect(localWriteStream.destroy).toHaveBeenCalledOnce()
+  })
+
+  it("BUG: destroys the readStream when the local writeStream emits an error", async () => {
+    // Arrange
+    const { sftp, sftpReadStream } = makeSftpSession()
+    const client = makeClientMock(sftp)
+
+    const localWriteStream = Object.assign(new EventEmitter(), { destroy: vi.fn() })
+    vi.mocked(createWriteStream).mockReturnValue(localWriteStream as unknown as WriteStream)
+
+    // Act
+    const promise = sftpDownload(client, "/remote/file.txt", "/local/file.txt")
+    localWriteStream.emit("error", new Error("local write error"))
+    await promise.catch(() => {
+      /* expected rejection */
+    })
+
+    // Assert — readStream.destroy() must be called to prevent a resource leak.
+    // BUG: Currently NOT called → this test fails intentionally to document the bug.
+    expect(sftpReadStream.destroy).toHaveBeenCalledOnce()
+  })
+
+  it("BUG: settled-flag prevents double reject and double sftp.end() when both streams error", async () => {
+    // Arrange
+    const { sftp, sftpEnd, sftpReadStream } = makeSftpSession()
+    const client = makeClientMock(sftp)
+
+    const localWriteStream = Object.assign(new EventEmitter(), { destroy: vi.fn() })
+    vi.mocked(createWriteStream).mockReturnValue(localWriteStream as unknown as WriteStream)
+
+    // Act — emit errors on both streams back-to-back
+    const promise = sftpDownload(client, "/remote/file.txt", "/local/file.txt")
+    sftpReadStream.emit("error", new Error("read error"))
+    localWriteStream.emit("error", new Error("write error"))
+    await promise.catch(() => {
+      /* expected rejection */
+    })
+
+    // Assert — sftp.end() must be called exactly once despite two error events.
+    // BUG: No settled-flag exists → sftp.end() is called twice → this test fails
+    // intentionally to document the bug.
+    expect(sftpEnd).toHaveBeenCalledOnce()
+  })
 })
 
 // ---------------------------------------------------------------------------
@@ -277,5 +347,71 @@ describe("sftpUpload", () => {
 
     // Assert — promise must resolve on successful transfer
     await expect(promise).resolves.toBeUndefined()
+  })
+
+  // ---------------------------------------------------------------------------
+  // BUG DOCUMENTATION: missing destroy() on counterpart stream
+  // ---------------------------------------------------------------------------
+
+  it("BUG: destroys the remote writeStream when the local readStream emits an error", async () => {
+    // Arrange
+    const { sftp, sftpWriteStream } = makeSftpSession()
+    const client = makeClientMock(sftp)
+
+    const localReadStream = makeMockStream()
+    vi.mocked(createReadStream).mockReturnValue(localReadStream as unknown as ReadStream)
+
+    // Act
+    const promise = sftpUpload(client, "/local/file.txt", "/remote/file.txt")
+    localReadStream.emit("error", new Error("local read error"))
+    await promise.catch(() => {
+      /* expected rejection */
+    })
+
+    // Assert — writeStream.destroy() must be called to prevent a resource leak.
+    // BUG: Currently NOT called → this test fails intentionally to document the bug.
+    expect(sftpWriteStream.destroy).toHaveBeenCalledOnce()
+  })
+
+  it("BUG: destroys the local readStream when the remote writeStream emits an error", async () => {
+    // Arrange
+    const { sftp, sftpWriteStream } = makeSftpSession()
+    const client = makeClientMock(sftp)
+
+    const localReadStream = makeMockStream()
+    vi.mocked(createReadStream).mockReturnValue(localReadStream as unknown as ReadStream)
+
+    // Act
+    const promise = sftpUpload(client, "/local/file.txt", "/remote/file.txt")
+    sftpWriteStream.emit("error", new Error("remote write error"))
+    await promise.catch(() => {
+      /* expected rejection */
+    })
+
+    // Assert — readStream.destroy() must be called to prevent a resource leak.
+    // BUG: Currently NOT called → this test fails intentionally to document the bug.
+    expect(localReadStream.destroy).toHaveBeenCalledOnce()
+  })
+
+  it("BUG: settled-flag prevents double reject and double sftp.end() when both streams error", async () => {
+    // Arrange
+    const { sftp, sftpEnd, sftpWriteStream } = makeSftpSession()
+    const client = makeClientMock(sftp)
+
+    const localReadStream = makeMockStream()
+    vi.mocked(createReadStream).mockReturnValue(localReadStream as unknown as ReadStream)
+
+    // Act — emit errors on both streams back-to-back
+    const promise = sftpUpload(client, "/local/file.txt", "/remote/file.txt")
+    localReadStream.emit("error", new Error("read error"))
+    sftpWriteStream.emit("error", new Error("write error"))
+    await promise.catch(() => {
+      /* expected rejection */
+    })
+
+    // Assert — sftp.end() must be called exactly once despite two error events.
+    // BUG: No settled-flag exists → sftp.end() is called twice → this test fails
+    // intentionally to document the bug.
+    expect(sftpEnd).toHaveBeenCalledOnce()
   })
 })

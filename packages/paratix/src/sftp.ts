@@ -25,15 +25,25 @@ export async function sftpDownload(
       // eslint-disable-next-line security/detect-non-literal-fs-filename
       const writeStream = createWriteStream(localPath)
 
+      let settled = false
+
       writeStream.on("close", () => {
         sftp.end()
         resolve()
       })
       writeStream.on("error", (writeError: Error) => {
+        if (settled) return
+        settled = true
+        readStream.destroy()
+        if (typeof writeStream.destroy === "function") writeStream.destroy()
         sftp.end()
         reject(writeError)
       })
       readStream.on("error", (readError: Error) => {
+        if (settled) return
+        settled = true
+        if (typeof readStream.destroy === "function") readStream.destroy()
+        if (typeof writeStream.destroy === "function") writeStream.destroy()
         sftp.end()
         reject(readError)
       })
@@ -65,15 +75,25 @@ export async function sftpUpload(
       const readStream = createReadStream(localPath)
       const writeStream = sftp.createWriteStream(remotePath)
 
+      let settled = false
+
       writeStream.on("close", () => {
         sftp.end()
         resolve()
       })
       writeStream.on("error", (writeError: Error) => {
+        if (settled) return
+        settled = true
+        if (typeof readStream.destroy === "function") readStream.destroy()
+        if (typeof writeStream.destroy === "function") writeStream.destroy()
         sftp.end()
         reject(writeError)
       })
       readStream.on("error", (readError: Error) => {
+        if (settled) return
+        settled = true
+        if (typeof readStream.destroy === "function") readStream.destroy()
+        if (typeof writeStream.destroy === "function") writeStream.destroy()
         sftp.end()
         reject(readError)
       })
