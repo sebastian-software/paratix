@@ -76,24 +76,39 @@ describe("ssh.knownHosts", () => {
 describe("ssh.authorizedKeys", () => {
   const testKey = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAI test-key"
 
-  // The home directory is resolved dynamically via getent passwd
-  const aliceHome = "$(getent passwd 'alice' | cut -d: -f6)"
-  const aliceDir = `${aliceHome}/.ssh`
-  const aliceKeys = `${aliceDir}/authorized_keys`
+  // resolveHome calls conn.output() which returns the home path
+  const getentAlice = "getent passwd 'alice' | cut -d: -f6"
+  const aliceHome = "/home/alice"
+  const aliceDir = `'/home/alice/.ssh'`
+  const aliceKeys = `'/home/alice/.ssh/authorized_keys'`
+  const aliceKeysTmp = `'/home/alice/.ssh/authorized_keys.tmp'`
+
+  function aliceResponses(
+    extra?: Record<string, Partial<{ code: number; stderr: string; stdout: string }>>
+  ) {
+    return {
+      [getentAlice]: { stdout: aliceHome },
+      ...extra,
+    }
+  }
 
   it("check returns ok when key exists in authorized_keys (state: present)", async () => {
-    const mockSsh = createMockSsh({
-      [`grep -qF -- '${testKey}' ${aliceKeys}`]: { code: 0 },
-    })
+    const mockSsh = createMockSsh(
+      aliceResponses({
+        [`grep -qF -- '${testKey}' ${aliceKeys}`]: { code: 0 },
+      })
+    )
     const mod = ssh.authorizedKeys("alice", testKey)
     const result = await mod.check(mockSsh, emptyEnv)
     expect(result).toBe("ok")
   })
 
   it("check returns needs-apply when key is missing (state: present)", async () => {
-    const mockSsh = createMockSsh({
-      [`grep -qF -- '${testKey}' ${aliceKeys}`]: { code: 1 },
-    })
+    const mockSsh = createMockSsh(
+      aliceResponses({
+        [`grep -qF -- '${testKey}' ${aliceKeys}`]: { code: 1 },
+      })
+    )
     const mod = ssh.authorizedKeys("alice", testKey)
     const result = await mod.check(mockSsh, emptyEnv)
     expect(result).toBe("needs-apply")
@@ -106,25 +121,29 @@ describe("ssh.authorizedKeys", () => {
   })
 
   it("check returns ok when key is missing (state: absent)", async () => {
-    const mockSsh = createMockSsh({
-      [`grep -qF -- '${testKey}' ${aliceKeys}`]: { code: 1 },
-    })
+    const mockSsh = createMockSsh(
+      aliceResponses({
+        [`grep -qF -- '${testKey}' ${aliceKeys}`]: { code: 1 },
+      })
+    )
     const mod = ssh.authorizedKeys("alice", testKey, { state: "absent" })
     const result = await mod.check(mockSsh, emptyEnv)
     expect(result).toBe("ok")
   })
 
   it("check returns needs-apply when key exists (state: absent)", async () => {
-    const mockSsh = createMockSsh({
-      [`grep -qF -- '${testKey}' ${aliceKeys}`]: { code: 0 },
-    })
+    const mockSsh = createMockSsh(
+      aliceResponses({
+        [`grep -qF -- '${testKey}' ${aliceKeys}`]: { code: 0 },
+      })
+    )
     const mod = ssh.authorizedKeys("alice", testKey, { state: "absent" })
     const result = await mod.check(mockSsh, emptyEnv)
     expect(result).toBe("needs-apply")
   })
 
   it("apply creates directory, adds key with correct permissions (state: present)", async () => {
-    const mockSsh = createMockSsh()
+    const mockSsh = createMockSsh(aliceResponses())
     const mod = ssh.authorizedKeys("alice", testKey)
     const result = await mod.apply(mockSsh, emptyEnv)
     expect(result.status).toBe("changed")
@@ -136,12 +155,12 @@ describe("ssh.authorizedKeys", () => {
   })
 
   it("apply removes key with grep -vF || true pattern (state: absent)", async () => {
-    const mockSsh = createMockSsh()
+    const mockSsh = createMockSsh(aliceResponses())
     const mod = ssh.authorizedKeys("alice", testKey, { state: "absent" })
     const result = await mod.apply(mockSsh, emptyEnv)
     expect(result.status).toBe("changed")
     expect(mockSsh.calls).toContain(
-      `{ grep -vF -- '${testKey}' ${aliceKeys} || true; } > ${aliceKeys}.tmp && mv ${aliceKeys}.tmp ${aliceKeys}`
+      `{ grep -vF -- '${testKey}' ${aliceKeys} || true; } > ${aliceKeysTmp} && mv ${aliceKeysTmp} ${aliceKeys}`
     )
   })
 
@@ -153,10 +172,9 @@ describe("ssh.authorizedKeys", () => {
   })
 
   it("resolves home directory dynamically for root user", async () => {
-    const rootHome = "$(getent passwd 'root' | cut -d: -f6)"
-    const rootKeys = `${rootHome}/.ssh/authorized_keys`
     const mockSsh = createMockSsh({
-      [`grep -qF -- '${testKey}' ${rootKeys}`]: { code: 0 },
+      [`grep -qF -- '${testKey}' '/root/.ssh/authorized_keys'`]: { code: 0 },
+      "getent passwd 'root' | cut -d: -f6": { stdout: "/root" },
     })
     const mod = ssh.authorizedKeys("root", testKey)
     const result = await mod.check(mockSsh, emptyEnv)
@@ -164,13 +182,49 @@ describe("ssh.authorizedKeys", () => {
   })
 
   it("resolves home directory dynamically for non-root user", async () => {
-    const deployHome = "$(getent passwd 'deploy' | cut -d: -f6)"
-    const deployKeys = `${deployHome}/.ssh/authorized_keys`
     const mockSsh = createMockSsh({
-      [`grep -qF -- '${testKey}' ${deployKeys}`]: { code: 0 },
+      [`grep -qF -- '${testKey}' '/home/deploy/.ssh/authorized_keys'`]: { code: 0 },
+      "getent passwd 'deploy' | cut -d: -f6": { stdout: "/home/deploy" },
     })
     const mod = ssh.authorizedKeys("deploy", testKey)
     const result = await mod.check(mockSsh, emptyEnv)
     expect(result).toBe("ok")
+  })
+
+  it("regression: home path with spaces is correctly shell-quoted in check", async () => {
+    const spaceyHome = "/home/my user"
+    const mockSsh = createMockSsh({
+      "getent passwd 'alice' | cut -d: -f6": { stdout: spaceyHome },
+      [`grep -qF -- '${testKey}' '/home/my user/.ssh/authorized_keys'`]: { code: 0 },
+    })
+    const mod = ssh.authorizedKeys("alice", testKey)
+    const result = await mod.check(mockSsh, emptyEnv)
+    expect(result).toBe("ok")
+    // Verify that the path containing a space was passed as a quoted argument
+    expect(mockSsh.calls).toContain(
+      `grep -qF -- '${testKey}' '/home/my user/.ssh/authorized_keys'`
+    )
+  })
+
+  it("regression: home path with spaces is correctly shell-quoted in apply", async () => {
+    const spaceyHome = "/home/my user"
+    const mockSsh = createMockSsh({
+      "getent passwd 'alice' | cut -d: -f6": { stdout: spaceyHome },
+    })
+    const mod = ssh.authorizedKeys("alice", testKey)
+    const result = await mod.apply(mockSsh, emptyEnv)
+    expect(result.status).toBe("changed")
+    // Directory creation must quote the space-containing path
+    expect(mockSsh.calls).toContain(
+      `mkdir -p '/home/my user/.ssh' && chmod 700 '/home/my user/.ssh' && chown 'alice':'alice' '/home/my user/.ssh'`
+    )
+    // Key append must quote the space-containing path
+    expect(mockSsh.calls).toContain(
+      `printf '%s\\n' '${testKey}' >> '/home/my user/.ssh/authorized_keys'`
+    )
+    // Chmod must quote the space-containing path
+    expect(mockSsh.calls).toContain(
+      `chmod 600 '/home/my user/.ssh/authorized_keys' && chown 'alice':'alice' '/home/my user/.ssh/authorized_keys'`
+    )
   })
 })

@@ -2,13 +2,14 @@ import { shellQuote } from "../ssh.js"
 import { type Module, type ModuleResult, NEEDS_APPLY, type SshConnection } from "../types.js"
 
 /**
- * Build the shell command to resolve a user's home directory via `getent passwd`.
+ * Resolve a user's home directory by executing `getent passwd` on the remote host.
  *
+ * @param conn - The SSH connection to use for the lookup.
  * @param user - The username to look up.
- * @returns A shell expression that evaluates to the user's home directory path.
+ * @returns The absolute path to the user's home directory.
  */
-function homeOf(user: string): string {
-  return `$(getent passwd ${shellQuote(user)} | cut -d: -f6)`
+async function resolveHome(conn: SshConnection, user: string): Promise<string> {
+  return conn.output(`getent passwd ${shellQuote(user)} | cut -d: -f6`)
 }
 
 /**
@@ -31,14 +32,15 @@ export const ssh = {
    */
   authorizedKeys(user: string, key: string, options?: { state?: "absent" | "present" }): Module {
     const state = options?.state ?? "present"
-    const home = homeOf(user)
-    const directory = `${home}/.ssh`
-    const authKeysPath = `${directory}/authorized_keys`
-    const temporaryPath = `${authKeysPath}.tmp`
 
     return {
       async apply(conn: null | SshConnection): Promise<ModuleResult> {
         if (!conn) return { status: "failed" }
+
+        const home = await resolveHome(conn, user)
+        const directory = shellQuote(`${home}/.ssh`)
+        const authKeysPath = shellQuote(`${home}/.ssh/authorized_keys`)
+        const temporaryPath = shellQuote(`${home}/.ssh/authorized_keys.tmp`)
 
         if (state === "present") {
           await conn.exec(
@@ -63,6 +65,9 @@ export const ssh = {
       },
       async check(conn: null | SshConnection): Promise<"needs-apply" | "ok"> {
         if (!conn) return NEEDS_APPLY
+
+        const home = await resolveHome(conn, user)
+        const authKeysPath = shellQuote(`${home}/.ssh/authorized_keys`)
 
         const keyExists = await conn.test(`grep -qF -- ${shellQuote(key)} ${authKeysPath}`)
 
