@@ -1,0 +1,544 @@
+# Paratix -- LLM Code Guide
+
+> This file helps LLMs write correct Paratix code. Read this before generating playbooks or modules.
+
+## Overview
+
+Paratix is a CLI tool for idempotent VPS configuration via SSH using TypeScript playbooks. Each playbook exports a `server()` definition containing an ordered list of modules that are checked and applied over SSH. Modules follow a check/apply pattern: `check` determines if work is needed, `apply` enforces the desired state.
+
+## Imports
+
+Paratix has exactly two import paths:
+
+```typescript
+// Core API
+import { server, recipe, assert, debug, fail, pause, when, shellQuote, NEEDS_APPLY } from "paratix"
+
+// Types (only when needed)
+import type {
+  Module,
+  ModuleResult,
+  ServerDefinition,
+  SshConnection,
+  SshConfig,
+  Environment,
+  EnvironmentValue,
+  ExecResult,
+  ExecOptions,
+} from "paratix"
+
+// Built-in modules
+import {
+  apt,
+  archive,
+  command,
+  cron,
+  download,
+  file,
+  git,
+  group,
+  hostname,
+  mount,
+  op,
+  package as pkg,
+  releaseUpgrade,
+  rsync,
+  service,
+  ssh,
+  sshd,
+  sysctl,
+  system,
+  systemd,
+  ufw,
+  user,
+} from "paratix/modules"
+```
+
+## Playbook Structure
+
+A playbook is a TypeScript file with a default export of `server()`:
+
+```typescript
+import { server, recipe, when, shellQuote } from "paratix"
+import { package as pkg, file, service, ufw, hostname } from "paratix/modules"
+
+export default server({
+  // Required fields
+  name: "web-01",
+  host: "10.0.0.1",
+  ssh: {
+    user: "root",
+    ports: [22], // Array -- runner tries each port in order
+    privateKey: "~/.ssh/id_ed25519",
+    // Optional:
+    // passwordFallback: false,
+    // sudoPassword: "...",
+    // reconnectTimeout: 30000,
+  },
+
+  // Optional: env values available in templates and conditions
+  env: {
+    DOMAIN: "example.com",
+    APP_PORT: 3000,
+    SECRET: async () => fetchFromVault("secret"), // Lazy async values supported
+  },
+
+  // Required: ordered list of modules to apply
+  run: [
+    hostname.set("web-01"),
+    pkg.update("2025-03-01"),
+    pkg.installed("nginx", "curl"),
+    file.template("/etc/nginx/sites-available/default", "./files/nginx.conf.tmpl"),
+    service.enabled("nginx"),
+    service.running("nginx"),
+    ufw.enabled(),
+    ufw.rule("allow", 80),
+    ufw.rule("allow", 443),
+
+    // Conditional module
+    when((env) => env["DEPLOY_ENV"] === "production", service.enabled("fail2ban")),
+  ],
+
+  // Optional: signals fire when ANY module in run reported "changed"
+  signals: [service.reload("nginx")],
+})
+```
+
+## Module Reference
+
+### `apt`
+
+| Method            | Signature                                                                                | Idempotent           |
+| ----------------- | ---------------------------------------------------------------------------------------- | -------------------- |
+| `apt.debconf`     | `(packageName: string, selections: Record<string, string>): Module`                      | Yes                  |
+| `apt.distUpgrade` | `(date: string): Module`                                                                 | Yes (versioned flag) |
+| `apt.key`         | `(name: string, url: string): Module`                                                    | Yes                  |
+| `apt.repository`  | `(nameOrPpa: string, source?: string, options?: { signedBy?: false \| string }): Module` | Yes                  |
+
+### `archive`
+
+| Method            | Signature                                                                                       | Idempotent        |
+| ----------------- | ----------------------------------------------------------------------------------------------- | ----------------- |
+| `archive.extract` | `(source: string, destination: string, options?: { owner?: string; upload?: boolean }): Module` | Yes (SHA256 flag) |
+
+### `command`
+
+| Method          | Signature                                                            | Idempotent        |
+| --------------- | -------------------------------------------------------------------- | ----------------- |
+| `command.shell` | `(cmd: string, options?: { check?: string; name?: string }): Module` | Only with `check` |
+
+### `cron`
+
+| Method     | Signature                                                                                       | Idempotent |
+| ---------- | ----------------------------------------------------------------------------------------------- | ---------- |
+| `cron.job` | `(user: string, name: string, options: { job: string; state?: "absent" \| "present" }): Module` | Yes        |
+
+### `download`
+
+| Method            | Signature                                                                                                                                                                     | Idempotent |
+| ----------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------- |
+| `download.url`    | `(destination: string, url: string, options?: { force?: boolean; headers?: Record<string, string>; sha256?: string; mode?: string; owner?: string; group?: string }): Module` | Yes        |
+| `download.github` | `(destination: string, options: { repo: string; tag: string; asset: string; token?: string; sha256?: string; mode?: string; owner?: string; group?: string }): Module`        | Yes        |
+| `download.large`  | `(destination: string, url: string, options?: { group?: string; headers?: Record<string, string>; mode?: string; owner?: string }): Module`                                   | Yes (flag) |
+
+### `file`
+
+| Method            | Signature                                                                                         | Idempotent          |
+| ----------------- | ------------------------------------------------------------------------------------------------- | ------------------- |
+| `file.absent`     | `(remotePath: string): Module`                                                                    | Yes                 |
+| `file.assemble`   | `(remotePath: string, fragments: string[], options?: { mode?: string; owner?: string }): Module`  | Yes                 |
+| `file.block`      | `(remotePath: string, options: { content: string; name: string; prefix?: string }): Module`       | Yes                 |
+| `file.copy`       | `(remotePath: string, localPath: string, options?: { mode?: string; owner?: string }): Module`    | Yes                 |
+| `file.directory`  | `(remotePath: string, options?: { mode?: string; owner?: string }): Module`                       | Yes                 |
+| `file.line`       | `(remotePath: string, line: string, options?: { match?: string }): Module`                        | Yes                 |
+| `file.properties` | `(remotePath: string, options: { group?: string; mode?: string; owner?: string }): Module`        | Yes                 |
+| `file.replace`    | `(remotePath: string, pattern: string, replacement: string): Module`                              | Yes                 |
+| `file.stat`       | `(remotePath: string): Module`                                                                    | No (always-applies) |
+| `file.template`   | `(remotePath: string, templatePath: string, options?: { mode?: string; owner?: string }): Module` | Yes                 |
+
+### `git`
+
+| Method      | Signature                                                                 | Idempotent |
+| ----------- | ------------------------------------------------------------------------- | ---------- |
+| `git.clone` | `(repo: string, destination: string, options?: { ref?: string }): Module` | Yes        |
+
+### `group`
+
+| Method          | Signature                                            | Idempotent |
+| --------------- | ---------------------------------------------------- | ---------- |
+| `group.present` | `(name: string, options?: { gid?: number }): Module` | Yes        |
+| `group.absent`  | `(name: string): Module`                             | Yes        |
+
+### `hostname`
+
+| Method         | Signature                | Idempotent |
+| -------------- | ------------------------ | ---------- |
+| `hostname.set` | `(name: string): Module` | Yes        |
+
+### `mount`
+
+| Method          | Signature                                                                                           | Idempotent |
+| --------------- | --------------------------------------------------------------------------------------------------- | ---------- |
+| `mount.present` | `(options: { fstype: string; opts: string; path: string; persist?: boolean; src: string }): Module` | Yes        |
+| `mount.absent`  | `(options: { path: string; persist?: boolean }): Module`                                            | Yes        |
+
+### `op`
+
+| Method       | Signature                                      | Idempotent                        |
+| ------------ | ---------------------------------------------- | --------------------------------- |
+| `op.resolve` | `(references: Record<string, string>): Module` | No (always-applies, runs locally) |
+
+### `package`
+
+Import with renaming: `import { package as pkg } from "paratix/modules"`. The word `package` is reserved in JavaScript, so you must alias it.
+
+| Method              | Signature                         | Idempotent           |
+| ------------------- | --------------------------------- | -------------------- |
+| `package.installed` | `(...packages: string[]): Module` | Yes                  |
+| `package.absent`    | `(...packages: string[]): Module` | Yes                  |
+| `package.update`    | `(date: string): Module`          | Yes (versioned flag) |
+| `package.upgrade`   | `(date: string): Module`          | Yes (versioned flag) |
+
+### `releaseUpgrade`
+
+| Method                   | Signature                                                                       | Idempotent |
+| ------------------------ | ------------------------------------------------------------------------------- | ---------- |
+| `releaseUpgrade.upgrade` | `(options?: { dryRun?: boolean; resolveHost?: () => Promise<string> }): Module` | Yes        |
+
+### `rsync`
+
+| Method       | Signature                                                                                                                                                                                                                    | Idempotent |
+| ------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------- |
+| `rsync.sync` | `(options: { src: string; dest: string; chmod?: string; delete?: boolean; exclude?: string[]; group?: string; include?: string[]; owner?: string; strictHostKeyChecking?: "accept-new" \| "no" \| "off" \| "yes" }): Module` | Yes        |
+
+### `service`
+
+| Method             | Signature                | Idempotent                                                             |
+| ------------------ | ------------------------ | ---------------------------------------------------------------------- |
+| `service.running`  | `(name: string): Module` | Yes                                                                    |
+| `service.stopped`  | `(name: string): Module` | Yes                                                                    |
+| `service.enabled`  | `(name: string): Module` | Yes                                                                    |
+| `service.disabled` | `(name: string): Module` | Yes                                                                    |
+| `service.restart`  | `(name: string): Module` | No (always-applies, use as signal)                                     |
+| `service.reload`   | `(name: string): Module` | No (always-applies, use as signal)                                     |
+| `service.facts`    | `(): Module`             | Yes (check returns `"ok"`, apply collects facts into `service.*` meta) |
+
+### `ssh`
+
+| Method               | Signature                                                                          | Idempotent |
+| -------------------- | ---------------------------------------------------------------------------------- | ---------- |
+| `ssh.authorizedKeys` | `(user: string, key: string, options?: { state?: "absent" \| "present" }): Module` | Yes        |
+| `ssh.knownHosts`     | `(host: string, options?: { state?: "absent" \| "present" }): Module`              | Yes        |
+
+### `sshd`
+
+| Method        | Signature                                    | Idempotent                   |
+| ------------- | -------------------------------------------- | ---------------------------- |
+| `sshd.config` | `(settings: Record<string, string>): Module` | Yes                          |
+| `sshd.port`   | `(targetPort: number): Module`               | Yes (emits `sshd.port` meta) |
+
+### `sysctl`
+
+| Method       | Signature                                                                           | Idempotent |
+| ------------ | ----------------------------------------------------------------------------------- | ---------- |
+| `sysctl.set` | `(key: string, value: string, options?: { state?: "absent" \| "present" }): Module` | Yes        |
+
+### `system`
+
+| Method          | Signature                                                     | Idempotent                                      |
+| --------------- | ------------------------------------------------------------- | ----------------------------------------------- |
+| `system.facts`  | `(): Module`                                                  | No (always-applies, emits `system.*` meta)      |
+| `system.reboot` | `(options?: { resolveHost?: () => Promise<string> }): Module` | No (always-applies)                             |
+| `system.uptime` | `(): Module`                                                  | No (always-applies, emits `system.uptime` meta) |
+
+### `systemd`
+
+| Method                 | Signature                                 | Idempotent                         |
+| ---------------------- | ----------------------------------------- | ---------------------------------- |
+| `systemd.unit`         | `(name: string, content: string): Module` | Yes                                |
+| `systemd.daemonReload` | `(): Module`                              | No (always-applies, use as signal) |
+| `systemd.masked`       | `(name: string): Module`                  | Yes                                |
+| `systemd.unmasked`     | `(name: string): Module`                  | Yes                                |
+
+### `ufw`
+
+| Method        | Signature                                                        | Idempotent |
+| ------------- | ---------------------------------------------------------------- | ---------- |
+| `ufw.enabled` | `(): Module`                                                     | Yes        |
+| `ufw.rule`    | `(action: "allow" \| "deny", ports: number \| number[]): Module` | Yes        |
+
+### `user`
+
+| Method         | Signature                                                                                                                 | Idempotent |
+| -------------- | ------------------------------------------------------------------------------------------------------------------------- | ---------- |
+| `user.present` | `(name: string, options?: { uid?: number; shell?: string; home?: string; groups?: string[]; password?: string }): Module` | Yes        |
+| `user.absent`  | `(name: string, options?: { removeHome?: boolean }): Module`                                                              | Yes        |
+
+## Custom Modules
+
+A custom module must implement `check` and `apply`, both async:
+
+```typescript
+import type { Module, ModuleResult, SshConnection, Environment } from "paratix"
+import { NEEDS_APPLY } from "paratix"
+
+function myCustomModule(configPath: string, content: string): Module {
+  return {
+    name: `my-module: ${configPath}`,
+
+    async check(ssh: SshConnection | null, env: Environment): Promise<"needs-apply" | "ok"> {
+      if (!ssh) return NEEDS_APPLY
+      const exists = await ssh.exists(configPath)
+      if (!exists) return NEEDS_APPLY
+      const current = await ssh.readFile(configPath)
+      return current === content ? "ok" : NEEDS_APPLY
+    },
+
+    async apply(ssh: SshConnection | null, env: Environment): Promise<ModuleResult> {
+      if (!ssh) return { status: "failed" }
+      await ssh.writeFile(configPath, content)
+      return { status: "changed" }
+    },
+  }
+}
+```
+
+### Key rules for custom modules
+
+- Always check `if (!ssh) return NEEDS_APPLY` in check and `if (!ssh) return { status: "failed" }` in apply.
+- Return `NEEDS_APPLY` (the exported constant), never the string literal `"needs-apply"`.
+- `ModuleResult.status` must be one of: `"changed"`, `"failed"`, `"ok"`, `"skipped"`.
+- Use `meta` in the return value to pass data to subsequent modules via the environment.
+- Set `local: true` on the module object if it runs on the local machine (ssh will be `null`).
+
+### SshConnection API
+
+Methods available on the `ssh` parameter:
+
+| Method                            | Return type                            | Description                                                                                    |
+| --------------------------------- | -------------------------------------- | ---------------------------------------------------------------------------------------------- |
+| `ssh.exec(cmd, options?)`         | `Promise<ExecResult>`                  | Run command, get `{ code, stdout, stderr }`. Throws on non-zero unless `ignoreExitCode: true`. |
+| `ssh.test(cmd)`                   | `Promise<boolean>`                     | Run command, return `true` if exit code is 0.                                                  |
+| `ssh.output(cmd)`                 | `Promise<string>`                      | Run command, return trimmed stdout.                                                            |
+| `ssh.lines(cmd)`                  | `Promise<string[]>`                    | Run command, return stdout split into lines.                                                   |
+| `ssh.exists(path)`                | `Promise<boolean>`                     | Check if remote path exists.                                                                   |
+| `ssh.readFile(path)`              | `Promise<string>`                      | Read remote file content.                                                                      |
+| `ssh.writeFile(path, content)`    | `Promise<void>`                        | Write content to remote file.                                                                  |
+| `ssh.uploadFile(local, remote)`   | `Promise<void>`                        | Upload local file via SFTP.                                                                    |
+| `ssh.downloadFile(remote, local)` | `Promise<void>`                        | Download remote file.                                                                          |
+| `ssh.sha256(path)`                | `Promise<string \| null>`              | Get SHA-256 hex digest, or null if not found.                                                  |
+| `ssh.addPort(port)`               | `void`                                 | Register an additional port opened on the remote host (advanced).                              |
+| `ssh.disconnect()`                | `void`                                 | Close the SSH connection.                                                                      |
+| `ssh.getConnectionInfo()`         | `{ host, port, privateKeyPath, user }` | Return current connection parameters.                                                          |
+| `ssh.probeSudo()`                 | `Promise<void>`                        | Probe/cache sudo access; prompts interactively if needed.                                      |
+| `ssh.updateHost(host)`            | `void`                                 | Update the target host address (e.g., after IP change).                                        |
+
+### ExecOptions
+
+```typescript
+{
+  env?: Record<string, string>       // Extra environment variables
+  ignoreExitCode?: boolean           // Don't throw on non-zero exit
+  secrets?: string[]                 // Strings to mask in error output
+  silent?: boolean                   // Suppress stdout/stderr
+  timeout?: number                   // Abort after N milliseconds
+}
+```
+
+## Template System
+
+Files deployed via `file.template(remotePath, localTemplatePath)` can contain `{{KEY}}` placeholders.
+
+- Placeholders are resolved at runtime from the `env` object of `server()` and from `meta` returned by previous modules.
+- Environment values can be strings, numbers, or (async) functions.
+- Escaping: `\{{` produces a literal `{{` in the output.
+- Unknown keys throw an error at runtime.
+
+Example template file (`nginx.conf.tmpl`):
+
+```
+server {
+    listen 80;
+    server_name {{DOMAIN}};
+    proxy_pass http://127.0.0.1:{{APP_PORT}};
+}
+```
+
+With `env: { DOMAIN: "example.com", APP_PORT: 3000 }` in the server definition.
+
+## Recipes
+
+A recipe groups modules into a named, reusable unit with optional signals:
+
+```typescript
+import { recipe } from "paratix"
+import { package as pkg, file, service } from "paratix/modules"
+
+export const nginxRecipe = recipe(
+  "nginx",
+  [
+    pkg.installed("nginx"),
+    file.template("/etc/nginx/nginx.conf", "./files/nginx.conf.tmpl"),
+    service.enabled("nginx"),
+    service.running("nginx"),
+  ],
+  {
+    signals: [service.reload("nginx")],
+  }
+)
+```
+
+**How recipes work:**
+
+- Modules run in order; execution stops on first `"failed"` status.
+- `meta` env values propagate from one module to all subsequent ones within the recipe.
+- If any module reports `"changed"`, the `signals` array fires after all modules complete.
+- Recipes can be nested: include a recipe in another recipe's module list.
+
+**When to use recipes:**
+
+- Group related modules that form a logical unit (e.g., "install and configure nginx").
+- When you need signals to fire only if that specific group changed (not the entire server run).
+
+## Built-in Functions
+
+### `assert(condition, message)`
+
+Fail the run if a condition is not met.
+
+```typescript
+assert((env) => !!env["APP_SECRET"], "APP_SECRET must be set")
+```
+
+### `when(condition, ...modules)`
+
+Conditionally run modules. Skipped modules report `"skipped"`, not `"failed"`.
+
+```typescript
+when((env) => env["DEPLOY_ENV"] === "production", service.enabled("fail2ban"), ufw.enabled())
+```
+
+### `debug(message)`
+
+Print a debug message during apply. Always runs.
+
+```typescript
+debug("Starting database setup")
+```
+
+### `fail(message)`
+
+Unconditionally abort the run with a failure.
+
+```typescript
+fail("This branch should be unreachable")
+```
+
+### `pause(message?)`
+
+Wait for operator to press Enter. Useful for interactive confirmation.
+
+```typescript
+pause("Review changes above, then press Enter to continue")
+```
+
+### `shellQuote(value)`
+
+Safely quote a string for shell interpolation. Use this when building shell commands with dynamic values.
+
+```typescript
+await ssh.exec(`cat ${shellQuote(filePath)}`)
+```
+
+### `NEEDS_APPLY`
+
+Constant for the check return value indicating work is needed. Always use this instead of the string `"needs-apply"`.
+
+```typescript
+import { NEEDS_APPLY } from "paratix"
+
+async check(ssh) {
+  if (!ssh) return NEEDS_APPLY
+  // ...
+}
+```
+
+## Do's and Don'ts
+
+### DO
+
+1. Always use `export default server({...})` as the default export of a playbook.
+2. Import modules from `"paratix/modules"`, not from `"paratix"`.
+3. `package` must be aliased on import: `import { package as pkg } from "paratix/modules"` -- `package` is a reserved word in JavaScript.
+4. For idempotency with `command.shell()`, always provide a `check` command.
+5. Use `{{KEY}}` placeholders in `.tmpl` files; provide values via `env` in `server()`.
+6. Use `service.restart()` and `service.reload()` as `signals` in recipes, not directly in `run`.
+7. Always pass a date string to `package.upgrade()` and `package.update()` -- it is the idempotency key.
+8. Specify `ssh.ports` as an array -- the runner tries each port in order.
+9. Custom modules must implement both `check` and `apply`, both async.
+10. Use `shellQuote()` when interpolating dynamic values into shell commands.
+
+### DON'T
+
+1. Do NOT `import { package } from "paratix"` -- modules come from `"paratix/modules"`.
+2. Do NOT use `service.restart()` directly in `run` -- it runs EVERY time. Use it as a signal in a `recipe()`.
+3. Do NOT use the string literal `"needs-apply"` -- always use the exported constant `NEEDS_APPLY`.
+4. Do NOT assume `ssh` is non-null in custom modules -- always check `if (!ssh) return { status: "failed" }`.
+5. Do NOT forget that `package.upgrade("2025-01-15")` needs a date as IDEMPOTENCY KEY -- the date controls when the upgrade re-runs.
+6. Do NOT interpolate `env` values directly in shell commands -- use `shellQuote()` for safe quoting.
+7. Do NOT store module methods as variables and call them later -- modules are configured at creation time, not at call time.
+8. Do NOT use `ssh.exec()` without `ignoreExitCode: true` when you need to inspect the exit code -- without it, a non-zero exit throws an exception.
+9. Do NOT use template syntax `{{key}}` in TypeScript code -- templates are only for files rendered via `file.template()`.
+10. Do NOT use `signals` on the top-level `server()` when you mean a recipe signal -- `server.signals` fire when ANY module in `run` changed.
+11. Do NOT call `server()` without all required fields (`name`, `host`, `ssh`, `run`) -- it throws at construction time. `name` and `host` must not be empty strings.
+12. Do NOT use empty arrays for `ssh.ports` or empty strings for `ssh.user`/`ssh.privateKey` -- validation rejects these.
+
+## Testing Patterns
+
+Tests use vitest with a `createMockSsh` helper:
+
+```typescript
+import { describe, expect, it } from "vitest"
+import { createMockSsh } from "./helpers/mockSsh.js"
+import { NEEDS_APPLY } from "../src/types.js"
+
+describe("myModule", () => {
+  it("should detect needs-apply when file is missing", async () => {
+    const ssh = createMockSsh({
+      // Map command strings to partial ExecResult { code?, stdout?, stderr? }
+      "[ -e '/etc/myconfig' ]": { code: 1 },
+    })
+
+    const mod = myCustomModule("/etc/myconfig", "desired content")
+    const result = await mod.check(ssh, {})
+    expect(result).toBe(NEEDS_APPLY)
+  })
+
+  it("should apply changes", async () => {
+    const ssh = createMockSsh({})
+
+    const mod = myCustomModule("/etc/myconfig", "desired content")
+    const result = await mod.apply(ssh, {})
+    expect(result.status).toBe("changed")
+  })
+
+  it("should track executed commands", async () => {
+    const ssh = createMockSsh({})
+
+    const mod = myCustomModule("/etc/myconfig", "content")
+    await mod.apply(ssh, {})
+
+    // ssh.calls contains all commands executed in order
+    expect(ssh.calls).toContain("some-expected-command")
+  })
+})
+```
+
+### `createMockSsh` behavior
+
+- Accepts `Record<string, Partial<ExecResult>>` mapping command strings to responses.
+- Default response: `{ code: 0, stdout: "", stderr: "" }`.
+- `ssh.test(cmd)` returns `code === 0`.
+- `ssh.exists(path)` delegates to `ssh.test("[ -e '<path>' ]")`.
+- `ssh.readFile(path)` delegates to `ssh.output("cat '<path>'")`.
+- Returns a `{ calls: string[] } & SshConnection` object -- `calls` records all commands in execution order.
