@@ -53,6 +53,9 @@
     "url": "git+https://github.com/sebastian-software/paratix.git",
     "directory": "packages/paratix"
   },
+  "bugs": {
+    "url": "https://github.com/sebastian-software/paratix/issues"
+  },
   "author": "Sebastian Fastner <s.fastner@sebastian-software.de>",
   "license": "MIT"
 }
