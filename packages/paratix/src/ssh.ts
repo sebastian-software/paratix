@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto"
 import { readFileSync, unlinkSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
@@ -227,7 +228,7 @@ export class SshConnectionImpl implements SshConnection {
 
     // Large content: write to local tmp file, SFTP upload, then move into place
     const client = this.ensureClient()
-    const localTemporary = join(tmpdir(), `paratix-write-${Date.now()}`)
+    const localTemporary = join(tmpdir(), `paratix-write-${randomUUID()}`)
     const remoteTemporary = await this.output("mktemp /tmp/paratix-write.XXXXXX")
     try {
       // eslint-disable-next-line security/detect-non-literal-fs-filename

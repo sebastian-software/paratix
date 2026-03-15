@@ -226,4 +226,57 @@ describe("SshConnectionImpl.writeFile — large content (> 64 KB)", () => {
     // Cleanup must still happen despite the error
     expect(vi.mocked(unlinkSync)).toHaveBeenCalledOnce()
   })
+
+  // ---------------------------------------------------------------------------
+  // Security: local tmp filename must not be predictable (Date.now()-based)
+  //
+  // BUG: ssh.ts line 230 uses `paratix-write-${Date.now()}` which produces a
+  // predictable, timestamp-based filename. An attacker who knows the approximate
+  // time a file operation will occur can pre-create the path as a symlink and
+  // redirect the write to an arbitrary location (symlink attack / TOCTOU).
+  //
+  // This test MUST FAIL until the bug is fixed by replacing Date.now() with a
+  // cryptographically random suffix (e.g. crypto.randomUUID()).
+  // ---------------------------------------------------------------------------
+
+  it("uses a cryptographically random suffix (not a timestamp) for the local tmp filename", async () => {
+    // Arrange — freeze time so that Date.now() always returns the same value.
+    // If the implementation uses Date.now(), two consecutive writeFile calls will
+    // produce the exact same filename, proving the name is predictable (symlink
+    // attack / TOCTOU vulnerability).
+    vi.useFakeTimers()
+    vi.setSystemTime(new Date("2026-01-01T00:00:00.000Z"))
+
+    const content = makeLargeContent()
+
+    // First call — capture the generated local tmp path immediately afterwards.
+    const client1 = makeClientWithExecSpy(execSpy)
+    const ssh1 = makeConnectedSsh(client1)
+    await ssh1.writeFile("/etc/large-config", content)
+    const [firstPath] = vi.mocked(writeFileSync).mock.calls[0] as [string, ...unknown[]]
+
+    // Reset only the call history (not the mock implementations) so the second
+    // call can be observed independently without reconstructing the entire spy.
+    vi.mocked(writeFileSync).mockClear()
+    vi.mocked(sftpUpload).mockClear()
+    vi.mocked(sftpUpload).mockResolvedValue()
+
+    // Second call — time is still frozen at the same millisecond.
+    const execSpy2 = makeExecSpy("/tmp/paratix-write.ABCDEF")
+    const client2 = makeClientWithExecSpy(execSpy2)
+    const ssh2 = makeConnectedSsh(client2)
+    await ssh2.writeFile("/etc/large-config", content)
+    const [secondPath] = vi.mocked(writeFileSync).mock.calls[0] as [string, ...unknown[]]
+
+    // The suffix after "paratix-write-" must be a UUID, not a decimal timestamp.
+    // UUID format: xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx (RFC 4122)
+    const uuidSuffixPattern =
+      /paratix-write-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/iv
+
+    expect(firstPath).toMatch(uuidSuffixPattern)
+    expect(secondPath).toMatch(uuidSuffixPattern)
+
+    // Even with time frozen, two calls must produce distinct names.
+    expect(firstPath).not.toBe(secondPath)
+  })
 })

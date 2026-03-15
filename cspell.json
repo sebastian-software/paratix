@@ -43,6 +43,7 @@
     "sshd",
     "systemctl",
     "tmpl",
+    "toctou",
     "totp",
     "userdel",
     "usermod"
