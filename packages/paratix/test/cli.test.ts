@@ -1,3 +1,5 @@
+import { readFileSync } from "node:fs"
+import { resolve } from "node:path"
 import { afterEach, beforeEach, describe, expect, it, type MockInstance, vi } from "vitest"
 
 import {
@@ -6,6 +8,16 @@ import {
   isServerDefinitionLike,
   printError,
 } from "../src/cli.js"
+
+declare const PACKAGE_VERSION: string
+
+describe("PACKAGE_VERSION", () => {
+  it("matches the version in package.json", () => {
+    const packageJsonPath = resolve(new URL("../package.json", import.meta.url).pathname)
+    const packageJson = JSON.parse(readFileSync(packageJsonPath, "utf8")) as { version: string }
+    expect(PACKAGE_VERSION).toBe(packageJson.version)
+  })
+})
 
 describe("collectEnvironment", () => {
   let exitSpy: MockInstance<typeof process.exit>

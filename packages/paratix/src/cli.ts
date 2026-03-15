@@ -6,6 +6,8 @@ import type { Environment, ServerDefinition } from "./types.js"
 
 import { runPlaybook } from "./runner.js"
 
+declare const PACKAGE_VERSION: string
+
 const SECONDS_TO_MS = 1000
 
 /**
@@ -121,7 +123,10 @@ export function printError(error: unknown, verbose: boolean): void {
 
 const program = new Command()
 
-program.name("paratix").description("Idempotent VPS setup tool in TypeScript").version("0.1.0")
+program
+  .name("paratix")
+  .description("Idempotent VPS setup tool in TypeScript")
+  .version(PACKAGE_VERSION)
 
 program
   .command("apply <file>")

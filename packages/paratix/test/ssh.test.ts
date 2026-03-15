@@ -313,36 +313,36 @@ describe("SshConnectionImpl", () => {
         const client = makeClientWithEnd(vi.fn())
         const ssh = makeConnectedSsh(client)
 
-        await expect(
-          ssh.exec("whoami", { env: { "FOO;rm -rf /": "val" } })
-        ).rejects.toThrow("Invalid environment variable name: FOO;rm -rf /")
+        await expect(ssh.exec("whoami", { env: { "FOO;rm -rf /": "val" } })).rejects.toThrow(
+          "Invalid environment variable name: FOO;rm -rf /"
+        )
       })
 
       it("throws for an env key that starts with a digit", async () => {
         const client = makeClientWithEnd(vi.fn())
         const ssh = makeConnectedSsh(client)
 
-        await expect(
-          ssh.exec("whoami", { env: { "1INVALID": "val" } })
-        ).rejects.toThrow("Invalid environment variable name: 1INVALID")
+        await expect(ssh.exec("whoami", { env: { "1INVALID": "val" } })).rejects.toThrow(
+          "Invalid environment variable name: 1INVALID"
+        )
       })
 
       it("throws for an env key containing a space", async () => {
         const client = makeClientWithEnd(vi.fn())
         const ssh = makeConnectedSsh(client)
 
-        await expect(
-          ssh.exec("whoami", { env: { "MY VAR": "val" } })
-        ).rejects.toThrow("Invalid environment variable name: MY VAR")
+        await expect(ssh.exec("whoami", { env: { "MY VAR": "val" } })).rejects.toThrow(
+          "Invalid environment variable name: MY VAR"
+        )
       })
 
       it("throws for an env key containing a dollar sign", async () => {
         const client = makeClientWithEnd(vi.fn())
         const ssh = makeConnectedSsh(client)
 
-        await expect(
-          ssh.exec("whoami", { env: { "$SECRET": "val" } })
-        ).rejects.toThrow("Invalid environment variable name: $SECRET")
+        await expect(ssh.exec("whoami", { env: { $SECRET: "val" } })).rejects.toThrow(
+          "Invalid environment variable name: $SECRET"
+        )
       })
 
       it("accepts a simple uppercase key (MY_VAR)", async () => {

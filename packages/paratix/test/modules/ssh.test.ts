@@ -201,9 +201,7 @@ describe("ssh.authorizedKeys", () => {
     const result = await mod.check(mockSsh, emptyEnv)
     expect(result).toBe("ok")
     // Verify that the path containing a space was passed as a quoted argument
-    expect(mockSsh.calls).toContain(
-      `grep -qF -- '${testKey}' '/home/my user/.ssh/authorized_keys'`
-    )
+    expect(mockSsh.calls).toContain(`grep -qF -- '${testKey}' '/home/my user/.ssh/authorized_keys'`)
   })
 
   it("regression: home path with spaces is correctly shell-quoted in apply", async () => {
