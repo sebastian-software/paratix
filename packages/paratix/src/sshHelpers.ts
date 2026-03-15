@@ -45,6 +45,10 @@ export function collectStreamOutput(parameters: StreamOutputParameters): void {
     stderr += text
     if (!options.silent) process.stderr.write(text)
   })
+  stream.on("error", (error: Error) => {
+    clearTimeout(timer)
+    reject(error)
+  })
   stream.on("close", (code: number) => {
     clearTimeout(timer)
     // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition -- ssh2 may pass undefined despite type signature

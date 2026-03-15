@@ -239,4 +239,28 @@ describe("collectStreamOutput", () => {
     expect(result.code).toBe(127)
     expect(result.stderr).toBe("fail")
   })
+
+  it("rejects immediately with the stream error (regression: missing error handler)", async () => {
+    const { stream } = createMockChannel()
+    const streamError = new Error("ECONNRESET")
+
+    const promise = new Promise<{ code: number; stderr: string; stdout: string }>(
+      (resolve, reject) => {
+        const timer = setTimeout(() => {
+          reject(new Error("Timed out — stream error was not forwarded"))
+        }, 5_000)
+        collectStreamOutput({
+          command: "cat /etc/hosts",
+          options: { silent: true },
+          reject,
+          resolve,
+          stream: stream as unknown as StreamOutputParameters["stream"],
+          timer,
+        })
+        stream.emit("error", streamError)
+      }
+    )
+
+    await expect(promise).rejects.toThrow("ECONNRESET")
+  })
 })
