@@ -19,6 +19,22 @@
   "engines": {
     "node": ">=24.0.0"
   },
+  "keywords": [
+    "scaffold",
+    "cli",
+    "create",
+    "paratix",
+    "project-generator",
+    "template",
+    "vps",
+    "server"
+  ],
+  "homepage": "https://paratix.oss.sebastian-software.de",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/sebastian-software/paratix.git",
+    "directory": "packages/create-paratix"
+  },
   "author": "Sebastian Fastner <s.fastner@sebastian-software.de>",
   "license": "MIT"
 }

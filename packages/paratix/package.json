@@ -31,6 +31,24 @@
   "engines": {
     "node": ">=24.0.0"
   },
+  "keywords": [
+    "paratix",
+    "vps",
+    "server",
+    "ssh",
+    "deployment",
+    "idempotent",
+    "typescript",
+    "devops",
+    "infrastructure",
+    "automation"
+  ],
+  "homepage": "https://paratix.oss.sebastian-software.de",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/sebastian-software/paratix.git",
+    "directory": "packages/paratix"
+  },
   "author": "Sebastian Fastner <s.fastner@sebastian-software.de>",
   "license": "MIT"
 }
