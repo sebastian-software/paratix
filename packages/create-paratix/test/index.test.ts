@@ -101,7 +101,7 @@ describe("writeProjectFiles", () => {
     const content = readFileSync(join(TEST_DIR, "server.ts"), "utf8")
 
     expect(content).toContain("package as pkg")
-    expect(content).not.toMatch(/\bapt\b/)
+    expect(content).not.toMatch(/\bapt\b/v)
   })
 
   it("creates a files subdirectory", () => {
