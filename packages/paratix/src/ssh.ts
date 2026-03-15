@@ -246,6 +246,11 @@ export class SshConnectionImpl implements SshConnection {
 
   private buildEnvPrefix(environment?: Record<string, string>): string {
     if (environment == null) return ""
+    for (const key of Object.keys(environment)) {
+      if (!/^[A-Za-z_]\w*$/v.test(key)) {
+        throw new Error(`Invalid environment variable name: ${key}`)
+      }
+    }
     const pairs = Object.entries(environment).map(([k, v]) => `${k}=${shellQuote(v)}`)
     return `${pairs.join(" ")} `
   }

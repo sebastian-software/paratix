@@ -248,7 +248,7 @@ describe("collectStreamOutput", () => {
       (resolve, reject) => {
         const timer = setTimeout(() => {
           reject(new Error("Timed out — stream error was not forwarded"))
-        }, 5_000)
+        }, 5000)
         collectStreamOutput({
           command: "cat /etc/hosts",
           options: { silent: true },

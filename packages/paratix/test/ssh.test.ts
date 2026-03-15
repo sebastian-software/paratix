@@ -303,6 +303,111 @@ describe("SshConnectionImpl", () => {
 
       await expect(ssh.exec("whoami")).rejects.toThrow("SSH channel open failed")
     })
+
+    // -------------------------------------------------------------------------
+    // env option — buildEnvPrefix validation
+    // -------------------------------------------------------------------------
+
+    describe("env option", () => {
+      it("throws synchronously for an env key containing a semicolon (injection attempt)", async () => {
+        const client = makeClientWithEnd(vi.fn())
+        const ssh = makeConnectedSsh(client)
+
+        await expect(
+          ssh.exec("whoami", { env: { "FOO;rm -rf /": "val" } })
+        ).rejects.toThrow("Invalid environment variable name: FOO;rm -rf /")
+      })
+
+      it("throws for an env key that starts with a digit", async () => {
+        const client = makeClientWithEnd(vi.fn())
+        const ssh = makeConnectedSsh(client)
+
+        await expect(
+          ssh.exec("whoami", { env: { "1INVALID": "val" } })
+        ).rejects.toThrow("Invalid environment variable name: 1INVALID")
+      })
+
+      it("throws for an env key containing a space", async () => {
+        const client = makeClientWithEnd(vi.fn())
+        const ssh = makeConnectedSsh(client)
+
+        await expect(
+          ssh.exec("whoami", { env: { "MY VAR": "val" } })
+        ).rejects.toThrow("Invalid environment variable name: MY VAR")
+      })
+
+      it("throws for an env key containing a dollar sign", async () => {
+        const client = makeClientWithEnd(vi.fn())
+        const ssh = makeConnectedSsh(client)
+
+        await expect(
+          ssh.exec("whoami", { env: { "$SECRET": "val" } })
+        ).rejects.toThrow("Invalid environment variable name: $SECRET")
+      })
+
+      it("accepts a simple uppercase key (MY_VAR)", async () => {
+        const execSpy = vi.fn().mockImplementation((_command: string, callback: ExecCallback) => {
+          const stream = makeStream()
+          callback(undefined, stream)
+          stream.emit("close", 0)
+        })
+        const client = makeClientWithExecSpy(execSpy)
+        const ssh = makeConnectedSsh(client)
+
+        await expect(ssh.exec("whoami", { env: { MY_VAR: "hello" } })).resolves.toBeDefined()
+
+        const [executedCommand] = execSpy.mock.calls[0] as [string, ...unknown[]]
+        expect(executedCommand).toContain("MY_VAR=")
+      })
+
+      it("accepts an underscore-prefixed key (_foo)", async () => {
+        const execSpy = vi.fn().mockImplementation((_command: string, callback: ExecCallback) => {
+          const stream = makeStream()
+          callback(undefined, stream)
+          stream.emit("close", 0)
+        })
+        const client = makeClientWithExecSpy(execSpy)
+        const ssh = makeConnectedSsh(client)
+
+        await expect(ssh.exec("whoami", { env: { _foo: "bar" } })).resolves.toBeDefined()
+
+        const [executedCommand] = execSpy.mock.calls[0] as [string, ...unknown[]]
+        expect(executedCommand).toContain("_foo=")
+      })
+
+      it("accepts the conventional PATH key", async () => {
+        const execSpy = vi.fn().mockImplementation((_command: string, callback: ExecCallback) => {
+          const stream = makeStream()
+          callback(undefined, stream)
+          stream.emit("close", 0)
+        })
+        const client = makeClientWithExecSpy(execSpy)
+        const ssh = makeConnectedSsh(client)
+
+        await expect(
+          ssh.exec("whoami", { env: { PATH: "/usr/local/bin:/usr/bin" } })
+        ).resolves.toBeDefined()
+
+        const [executedCommand] = execSpy.mock.calls[0] as [string, ...unknown[]]
+        expect(executedCommand).toContain("PATH=")
+      })
+
+      it("shell-quotes the env value to prevent injection", async () => {
+        const execSpy = vi.fn().mockImplementation((_command: string, callback: ExecCallback) => {
+          const stream = makeStream()
+          callback(undefined, stream)
+          stream.emit("close", 0)
+        })
+        const client = makeClientWithExecSpy(execSpy)
+        const ssh = makeConnectedSsh(client)
+
+        await ssh.exec("whoami", { env: { GREETING: "hello world; rm -rf /" } })
+
+        const [executedCommand] = execSpy.mock.calls[0] as [string, ...unknown[]]
+        // Value must be wrapped in single quotes, not interpolated raw
+        expect(executedCommand).toContain("GREETING='hello world; rm -rf /'")
+      })
+    })
   })
 
   // -------------------------------------------------------------------------
