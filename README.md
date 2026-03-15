@@ -1,6 +1,17 @@
 # Paratix
 
-Paratix is a CLI tool that configures VPS servers over SSH using TypeScript playbooks. Each step checks its target state before acting — running a playbook twice does nothing on a already-configured server.
+[Homepage](https://paratix.oss.sebastian-software.com) · [GitHub](https://github.com/sebastian-software/paratix)
+
+Paratix is a CLI tool that configures VPS servers over SSH using TypeScript playbooks. Each step checks its target state before acting — running a playbook twice does nothing on an already-configured server.
+
+## Packages
+
+This monorepo contains two packages:
+
+| Package                                     | Description                             |
+| ------------------------------------------- | --------------------------------------- |
+| [paratix](./packages/paratix)               | Idempotent VPS setup tool in TypeScript |
+| [create-paratix](./packages/create-paratix) | Scaffold a new Paratix server project   |
 
 ## Quickstart
 
@@ -100,4 +111,4 @@ Additional scripts: `pnpm lint`, `pnpm format`, `pnpm agent:check` (lint + forma
 
 ## License
 
-MIT
+MIT — Copyright 2026 [Sebastian Software GmbH](https://sebastian-software.com)
