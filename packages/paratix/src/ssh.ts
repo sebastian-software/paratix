@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto"
-import { readFileSync, unlinkSync, writeFileSync } from "node:fs"
+import { unlinkSync, writeFileSync } from "node:fs"
+import { readFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { Client, type ClientChannel } from "ssh2"
@@ -48,7 +49,7 @@ export class SshConnectionImpl implements SshConnection {
 
   public async connect(): Promise<void> {
     // eslint-disable-next-line security/detect-non-literal-fs-filename
-    const privateKey = readFileSync(this.config.privateKey, "utf8")
+    const privateKey = await readFile(this.config.privateKey, "utf8")
 
     // Attempt 1: Key-based authentication on all ports
     if (await this.tryConnectOnPorts(privateKey)) return

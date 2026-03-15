@@ -12,9 +12,12 @@ import { tryConnectOnPort } from "../src/sshHelpers.js"
 // ---------------------------------------------------------------------------
 
 vi.mock("node:fs", () => ({
-  readFileSync: vi.fn().mockReturnValue("fake-private-key"),
   unlinkSync: vi.fn(),
   writeFileSync: vi.fn(),
+}))
+
+vi.mock("node:fs/promises", () => ({
+  readFile: vi.fn().mockResolvedValue("fake-private-key"),
 }))
 
 vi.mock("../src/sftp.js", () => ({
