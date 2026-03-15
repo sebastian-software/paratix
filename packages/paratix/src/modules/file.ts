@@ -197,12 +197,13 @@ export const file = {
     templatePath: string,
     options?: { mode?: string; owner?: string }
   ): Module {
+    // eslint-disable-next-line security/detect-non-literal-fs-filename
+    const templateContent = readFileSync(templatePath, "utf8")
+
     return {
       async apply(ssh: null | SshConnection, environment: Environment): Promise<ModuleResult> {
         if (!ssh) return { status: "failed" }
 
-        // eslint-disable-next-line security/detect-non-literal-fs-filename
-        const templateContent = readFileSync(templatePath, "utf8")
         const rendered = await renderTemplate(templateContent, environment)
         await ssh.writeFile(remotePath, rendered)
 
@@ -227,8 +228,6 @@ export const file = {
         const exists = await ssh.exists(remotePath)
         if (!exists) return NEEDS_APPLY
 
-        // eslint-disable-next-line security/detect-non-literal-fs-filename
-        const templateContent = readFileSync(templatePath, "utf8")
         const rendered = await renderTemplate(templateContent, environment)
         const localHash = sha256String(rendered)
         const remoteHash = await ssh.sha256(remotePath)
