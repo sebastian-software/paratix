@@ -1,4 +1,3 @@
-import { shellQuote } from "../ssh.js"
 import { type Module, type ModuleResult, NEEDS_APPLY, type SshConnection } from "../types.js"
 
 const DEFAULT_SSH_PORT = 22
@@ -89,21 +88,7 @@ export const sshd = {
       async apply(ssh: null | SshConnection): Promise<ModuleResult> {
         if (!ssh) return { status: "failed" }
 
-        // Check if Port line exists
-        const hasPort = await ssh.test(`grep -qE '^Port\\s' ${SSHD_CONFIG_PATH}`)
-
-        if (hasPort) {
-          await ssh.exec(`sed -i 's/^Port\\s.*/Port ${String(targetPort)}/' ${SSHD_CONFIG_PATH}`, {
-            silent: true,
-          })
-        } else {
-          const portLine = `Port ${String(targetPort)}`
-          await ssh.exec(`printf '%s\\n' ${shellQuote(portLine)} >> ${SSHD_CONFIG_PATH}`, {
-            silent: true,
-          })
-        }
-
-        // Restart sshd
+        await applySshdSetting(ssh, "Port", String(targetPort))
         await ssh.exec("systemctl restart sshd", { silent: true })
 
         return {
@@ -113,11 +98,14 @@ export const sshd = {
       },
       async check(ssh: null | SshConnection): Promise<"needs-apply" | "ok"> {
         if (!ssh) return NEEDS_APPLY
-        const currentPort = await ssh.output(
-          `grep -E '^Port\\s' ${SSHD_CONFIG_PATH} || echo 'Port 22'`
-        )
-        const port = Number(currentPort.replace(/^Port\s+/v, "").trim()) || DEFAULT_SSH_PORT
-        return port === targetPort ? "ok" : NEEDS_APPLY
+
+        const content = await ssh.readFile(SSHD_CONFIG_PATH)
+        // eslint-disable-next-line security/detect-non-literal-regexp
+        const pattern = new RegExp(`^Port\\s+${String(targetPort)}$`, "mv")
+        if (pattern.test(content)) return "ok"
+        // When no Port directive exists, sshd defaults to port 22
+        if (targetPort === DEFAULT_SSH_PORT && !/^Port\s/mv.test(content)) return "ok"
+        return NEEDS_APPLY
       },
       name: `sshd.port: ${targetPort}`,
     }

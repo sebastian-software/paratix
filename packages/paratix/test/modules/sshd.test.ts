@@ -228,7 +228,7 @@ describe("sshd.port — check", () => {
 
   it("returns ok when the configured port matches", async () => {
     const mockSsh = createMockSsh({
-      [`grep -E '^Port\\s' ${SSHD_CONFIG} || echo 'Port 22'`]: { stdout: "Port 2222" },
+      [CAT_SSHD]: { stdout: "Port 2222\n" },
     })
     const mod = sshd.port(2222)
     const result = await mod.check(mockSsh, emptyEnv)
@@ -237,7 +237,7 @@ describe("sshd.port — check", () => {
 
   it("returns needs-apply when the configured port does not match", async () => {
     const mockSsh = createMockSsh({
-      [`grep -E '^Port\\s' ${SSHD_CONFIG} || echo 'Port 22'`]: { stdout: "Port 22" },
+      [CAT_SSHD]: { stdout: "Port 22\n" },
     })
     const mod = sshd.port(2222)
     const result = await mod.check(mockSsh, emptyEnv)
@@ -246,7 +246,7 @@ describe("sshd.port — check", () => {
 
   it("returns ok for default port 22 when no Port directive exists", async () => {
     const mockSsh = createMockSsh({
-      [`grep -E '^Port\\s' ${SSHD_CONFIG} || echo 'Port 22'`]: { stdout: "Port 22" },
+      [CAT_SSHD]: { stdout: "# sshd config\n" },
     })
     const mod = sshd.port(22)
     const result = await mod.check(mockSsh, emptyEnv)
