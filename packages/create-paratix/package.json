@@ -3,6 +3,9 @@
   "version": "0.1.0",
   "description": "Scaffold a new Paratix server project",
   "type": "module",
+  "files": [
+    "dist"
+  ],
   "bin": {
     "create-paratix": "./dist/index.js"
   },
