@@ -130,8 +130,13 @@ async function runRecipeModule(
   environment: Environment,
   ssh: SshConnectionImpl
 ): Promise<StepResult> {
-  const result = await recipeModule.apply(ssh, environment)
-  return handleMetaAndBuildResult(ssh, environment, result)
+  try {
+    const result = await recipeModule.apply(ssh, environment)
+    return await handleMetaAndBuildResult(ssh, environment, result)
+  } catch (error) {
+    printError("", String(error))
+    return { env: environment, shouldBreak: true, status: "failed" }
+  }
 }
 
 async function applyModule(

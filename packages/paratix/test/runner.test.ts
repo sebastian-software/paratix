@@ -214,6 +214,143 @@ describe("runPlaybook reconnect failure propagation", () => {
   })
 })
 
+// Bug regression: exceptions thrown by recipeModule.apply() must not crash the playbook run
+describe("runPlaybook recipe exception handling", () => {
+  beforeEach(() => {
+    vi.spyOn(console, "log").mockImplementation(() => {
+      /* noop */
+    })
+    vi.spyOn(console, "error").mockImplementation(() => {
+      /* noop */
+    })
+    vi.resetModules()
+  })
+
+  afterEach(() => {
+    vi.restoreAllMocks()
+    vi.resetModules()
+  })
+
+  it("does not crash when recipe apply() throws, records status as failed and sets exitCode to 1", async () => {
+    const capturedConfigs: unknown[] = []
+
+    vi.doMock("../src/ssh.js", () => ({
+      shellQuote: (s: string) => `'${s}'`,
+      SshConnectionImpl: makeMockSshClass(capturedConfigs),
+    }))
+
+    const { runPlaybook } = await import("../src/runner.js")
+
+    const throwingRecipe = {
+      _isRecipe: true as const,
+      _modules: [],
+      apply: vi.fn().mockRejectedValue(new Error("recipe internal failure")),
+      check: vi.fn().mockResolvedValue("needs-apply"),
+      name: "throwing-recipe",
+    }
+
+    const definition: ServerDefinition = {
+      host: "1.2.3.4",
+      name: "test-server",
+      run: [throwingRecipe],
+      ssh: {
+        ports: [22],
+        privateKey: "~/.ssh/id",
+        user: "root",
+      },
+    }
+
+    await expect(runPlaybook(definition)).resolves.toBeUndefined()
+
+    expect(process.exitCode).toBe(1)
+    process.exitCode = 0
+  })
+
+  it("calls printError (outputs to console.log) when recipe apply() throws with a non-empty error message", async () => {
+    const capturedConfigs: unknown[] = []
+
+    vi.doMock("../src/ssh.js", () => ({
+      shellQuote: (s: string) => `'${s}'`,
+      SshConnectionImpl: makeMockSshClass(capturedConfigs),
+    }))
+
+    const consoleLogs: unknown[][] = []
+    vi.spyOn(console, "log").mockImplementation((...args) => {
+      consoleLogs.push(args)
+    })
+
+    const { runPlaybook } = await import("../src/runner.js")
+
+    const recipeError = new Error("recipe internal failure")
+    const throwingRecipe = {
+      _isRecipe: true as const,
+      _modules: [],
+      apply: vi.fn().mockRejectedValue(recipeError),
+      check: vi.fn().mockResolvedValue("needs-apply"),
+      name: "throwing-recipe",
+    }
+
+    const definition: ServerDefinition = {
+      host: "1.2.3.4",
+      name: "test-server",
+      run: [throwingRecipe],
+      ssh: {
+        ports: [22],
+        privateKey: "~/.ssh/id",
+        user: "root",
+      },
+    }
+
+    await runPlaybook(definition)
+
+    // printError uses console.log to output the error message
+    const allLogOutput = consoleLogs.flat().join(" ")
+    expect(allLogOutput).toContain("recipe internal failure")
+    process.exitCode = 0
+  })
+
+  it("stops processing subsequent modules when recipe apply() throws", async () => {
+    const capturedConfigs: unknown[] = []
+
+    vi.doMock("../src/ssh.js", () => ({
+      shellQuote: (s: string) => `'${s}'`,
+      SshConnectionImpl: makeMockSshClass(capturedConfigs),
+    }))
+
+    const { runPlaybook } = await import("../src/runner.js")
+
+    const throwingRecipe = {
+      _isRecipe: true as const,
+      _modules: [],
+      apply: vi.fn().mockRejectedValue(new Error("recipe boom")),
+      check: vi.fn().mockResolvedValue("needs-apply"),
+      name: "throwing-recipe",
+    }
+
+    const subsequentModule: Module = {
+      apply: vi.fn().mockResolvedValue({ status: "ok" } satisfies ModuleResult),
+      check: vi.fn().mockResolvedValue("needs-apply"),
+      name: "should-not-run",
+    }
+
+    const definition: ServerDefinition = {
+      host: "1.2.3.4",
+      name: "test-server",
+      run: [throwingRecipe, subsequentModule],
+      ssh: {
+        ports: [22],
+        privateKey: "~/.ssh/id",
+        user: "root",
+      },
+    }
+
+    await runPlaybook(definition)
+
+    expect(subsequentModule.check).not.toHaveBeenCalled()
+    process.exitCode = 0
+  })
+})
+
 // Bug #12 regression: runPlaybook must pass reconnectTimeout from RunOptions into SshConfig
 describe("runPlaybook reconnectTimeout", () => {
   beforeEach(() => {
