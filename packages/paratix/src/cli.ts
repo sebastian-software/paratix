@@ -9,6 +9,7 @@ import { runPlaybook } from "./runner.js"
 declare const PACKAGE_VERSION: string
 
 const SECONDS_TO_MS = 1000
+const DEFAULT_RECONNECT_TIMEOUT_SECONDS = 300
 
 /**
  * Type guard that checks whether `value` has the minimal shape of a
@@ -134,7 +135,12 @@ program
   .option("--dry-run", "Only check, do not apply", false)
   .option("--env <key=value...>", "Set env values", collectEnvironment, {})
   .option("--env-file <path>", "Load dotenv file")
-  .option("--reconnect-timeout <seconds>", "SSH reconnect timeout", "300")
+  .option(
+    "--reconnect-timeout <seconds>",
+    "SSH reconnect timeout",
+    parsePositiveNumber,
+    DEFAULT_RECONNECT_TIMEOUT_SECONDS
+  )
   .option("--verbose", "Show full stack traces on error", false)
   .action(async (file: string, options: Record<string, unknown>) => {
     try {
@@ -164,7 +170,8 @@ program
         envFile: options.envFile as string | undefined,
         // eslint-disable-next-line @typescript-eslint/no-unsafe-type-assertion -- Commander options typed as Record<string, unknown>
         envOverrides: options.env as Environment,
-        reconnectTimeout: Number(options.reconnectTimeout) * SECONDS_TO_MS,
+        // eslint-disable-next-line @typescript-eslint/no-unsafe-type-assertion -- Commander options typed as Record<string, unknown>
+        reconnectTimeout: (options.reconnectTimeout as number) * SECONDS_TO_MS,
       })
     } catch (error) {
       // eslint-disable-next-line @typescript-eslint/no-unsafe-type-assertion -- Commander options typed as Record<string, unknown>
@@ -173,6 +180,16 @@ program
       process.exit(2)
     }
   })
+
+export function parsePositiveNumber(value: string): number {
+  const parsed = Number(value)
+  if (!Number.isFinite(parsed) || parsed <= 0) {
+    console.error(`Invalid --reconnect-timeout value: ${value} (expected a positive number)`)
+    // eslint-disable-next-line node/no-process-exit
+    process.exit(2)
+  }
+  return parsed
+}
 
 export function collectEnvironment(
   value: string,

@@ -6,6 +6,7 @@ import {
   collectDefinitionErrors,
   collectEnvironment,
   isServerDefinitionLike,
+  parsePositiveNumber,
   printError,
 } from "../src/cli.js"
 
@@ -181,6 +182,127 @@ describe("collectDefinitionErrors", () => {
   it("returns an empty array for a valid ServerDefinition shape", () => {
     const errors = collectDefinitionErrors({ host: "example.com", run: ["echo hello"] })
     expect(errors).toStrictEqual([])
+  })
+})
+
+describe("parsePositiveNumber", () => {
+  // Tests for parsePositiveNumber which validates --reconnect-timeout
+  // (and any future option that needs a positive finite number).
+
+  let exitSpy: MockInstance<typeof process.exit>
+  let errorSpy: MockInstance<typeof console.error>
+
+  beforeEach(() => {
+    exitSpy = vi.spyOn(process, "exit").mockImplementation(() => {
+      throw new Error("process.exit")
+    })
+    errorSpy = vi.spyOn(console, "error").mockImplementation(() => {
+      // noop: suppress console.error output during tests
+    })
+  })
+
+  afterEach(() => {
+    vi.restoreAllMocks()
+  })
+
+  it("returns the numeric value for a valid positive integer string", () => {
+    const result = parsePositiveNumber("300")
+    expect(result).toBe(300)
+    expect(exitSpy).not.toHaveBeenCalled()
+  })
+
+  it("returns the numeric value for a positive decimal string", () => {
+    const result = parsePositiveNumber("1.5")
+    expect(result).toBe(1.5)
+    expect(exitSpy).not.toHaveBeenCalled()
+  })
+
+  it("returns the numeric value for the minimum accepted value '1'", () => {
+    const result = parsePositiveNumber("1")
+    expect(result).toBe(1)
+    expect(exitSpy).not.toHaveBeenCalled()
+  })
+
+  it("calls process.exit(2) and prints an error for a non-numeric string", () => {
+    let exitCalled = false
+    try {
+      parsePositiveNumber("foo")
+    } catch {
+      exitCalled = true
+    }
+    expect(exitCalled).toBe(true)
+    expect(exitSpy).toHaveBeenCalledWith(2)
+    expect(errorSpy).toHaveBeenCalledOnce()
+  })
+
+  it("calls process.exit(2) and prints an error for a negative number string", () => {
+    let exitCalled = false
+    try {
+      parsePositiveNumber("-5")
+    } catch {
+      exitCalled = true
+    }
+    expect(exitCalled).toBe(true)
+    expect(exitSpy).toHaveBeenCalledWith(2)
+    expect(errorSpy).toHaveBeenCalledOnce()
+  })
+
+  it("calls process.exit(2) and prints an error for zero", () => {
+    let exitCalled = false
+    try {
+      parsePositiveNumber("0")
+    } catch {
+      exitCalled = true
+    }
+    expect(exitCalled).toBe(true)
+    expect(exitSpy).toHaveBeenCalledWith(2)
+    expect(errorSpy).toHaveBeenCalledOnce()
+  })
+
+  it("calls process.exit(2) and prints an error for an empty string", () => {
+    let exitCalled = false
+    try {
+      parsePositiveNumber("")
+    } catch {
+      exitCalled = true
+    }
+    expect(exitCalled).toBe(true)
+    expect(exitSpy).toHaveBeenCalledWith(2)
+    expect(errorSpy).toHaveBeenCalledOnce()
+  })
+
+  it("calls process.exit(2) and prints an error for a string that is only whitespace", () => {
+    let exitCalled = false
+    try {
+      parsePositiveNumber("   ")
+    } catch {
+      exitCalled = true
+    }
+    expect(exitCalled).toBe(true)
+    expect(exitSpy).toHaveBeenCalledWith(2)
+    expect(errorSpy).toHaveBeenCalledOnce()
+  })
+
+  it("calls process.exit(2) and prints an error for 'Infinity'", () => {
+    let exitCalled = false
+    try {
+      parsePositiveNumber("Infinity")
+    } catch {
+      exitCalled = true
+    }
+    expect(exitCalled).toBe(true)
+    expect(exitSpy).toHaveBeenCalledWith(2)
+    expect(errorSpy).toHaveBeenCalledOnce()
+  })
+
+  it("includes the invalid value in the error message so users know what was rejected", () => {
+    try {
+      parsePositiveNumber("notanumber")
+    } catch {
+      // expected
+    }
+    const errorMessage = errorSpy.mock.calls[0]?.[0] as string
+    expect(errorMessage).toContain("notanumber")
   })
 })
 
