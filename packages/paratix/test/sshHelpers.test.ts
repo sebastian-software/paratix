@@ -296,9 +296,11 @@ describe("live-output masking via process.stdout/stderr.write", () => {
         command: "echo something",
         options: { silent: false },
         reject,
-        resolve: () => resolve(),
-        stream: stream as unknown as StreamOutputParameters["stream"],
+        resolve: () => {
+          resolve()
+        },
         secrets: [secret],
+        stream: stream as unknown as StreamOutputParameters["stream"],
         timer,
       })
 
@@ -326,9 +328,11 @@ describe("live-output masking via process.stdout/stderr.write", () => {
         command: "deploy",
         options: { silent: false },
         reject,
-        resolve: () => resolve(),
-        stream: stream as unknown as StreamOutputParameters["stream"],
+        resolve: () => {
+          resolve()
+        },
         secrets: [secret],
+        stream: stream as unknown as StreamOutputParameters["stream"],
         timer,
       })
 
@@ -357,9 +361,11 @@ describe("live-output masking via process.stdout/stderr.write", () => {
         command: "run",
         options: { silent: false },
         reject,
-        resolve: () => resolve(),
-        stream: stream as unknown as StreamOutputParameters["stream"],
+        resolve: () => {
+          resolve()
+        },
         secrets: [password, token],
+        stream: stream as unknown as StreamOutputParameters["stream"],
         timer,
       })
 
@@ -391,9 +397,11 @@ describe("live-output masking via process.stdout/stderr.write", () => {
         command: "run",
         options: { silent: true },
         reject,
-        resolve: () => resolve(),
-        stream: stream as unknown as StreamOutputParameters["stream"],
+        resolve: () => {
+          resolve()
+        },
         secrets: [secret],
+        stream: stream as unknown as StreamOutputParameters["stream"],
         timer,
       })
 
