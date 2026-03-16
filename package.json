@@ -6,7 +6,9 @@
     "build": "pnpm -r build",
     "test": "pnpm -r test",
     "typecheck": "pnpm -r --filter './packages/*' exec tsc --noEmit",
-    "lint": "oxlint -c oxlint.config.ts && eslint",
+    "lint": "run-p --race --print-label lint:*",
+    "lint:oxlint": "oxlint -c oxlint.config.ts",
+    "lint:eslint": "eslint",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
     "agent:check": "pnpm lint && pnpm format:check && pnpm typecheck && pnpm test"
@@ -37,6 +39,7 @@
     "eslint": "^10.0.3",
     "eslint-config-setup": "^0.3.3",
     "jiti": "^2.6.1",
+    "npm-run-all2": "^8.0.4",
     "oxlint": "^1.55.0",
     "prettier": "^3.8.1"
   }
