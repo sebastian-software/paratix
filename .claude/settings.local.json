@@ -12,7 +12,9 @@
       "Bash(pnpm format:check)",
       "Bash(pnpm lint*)",
       "Bash(git commit:*)",
-      "Bash(echo \"Exit code: $?\")"
+      "Bash(echo \"Exit code: $?\")",
+      "Bash(npx eslint:*)",
+      "Bash(echo \"EXIT: $?\")"
     ]
   }
 }
