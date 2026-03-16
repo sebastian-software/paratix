@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, type MockInstance, vi } fr
 import {
   collectDefinitionErrors,
   collectEnvironment,
+  handleTsxLoadFailure,
   isServerDefinitionLike,
   parsePositiveNumber,
   printError,
@@ -474,6 +475,89 @@ describe("parsePositiveNumber", () => {
     }
     const errorMessage = errorSpy.mock.calls[0]?.[0] as string
     expect(errorMessage).toContain("notanumber")
+  })
+})
+
+describe("handleTsxLoadFailure", () => {
+  let exitSpy: MockInstance<typeof process.exit>
+  let errorSpy: MockInstance<typeof console.error>
+
+  beforeEach(() => {
+    exitSpy = vi.spyOn(process, "exit").mockImplementation(() => {
+      throw new Error("process.exit")
+    })
+    errorSpy = vi.spyOn(console, "error").mockImplementation(() => {
+      // noop: suppress console.error output during tests
+    })
+  })
+
+  afterEach(() => {
+    vi.restoreAllMocks()
+  })
+
+  it("calls process.exit(2) when the file has a .ts extension", () => {
+    let exitCalled = false
+    try {
+      handleTsxLoadFailure("/home/user/playbook.ts")
+    } catch {
+      exitCalled = true
+    }
+    expect(exitCalled).toBe(true)
+    expect(exitSpy).toHaveBeenCalledWith(2)
+  })
+
+  it("calls process.exit(2) when the file has a .mts extension", () => {
+    let exitCalled = false
+    try {
+      handleTsxLoadFailure("/home/user/playbook.mts")
+    } catch {
+      exitCalled = true
+    }
+    expect(exitCalled).toBe(true)
+    expect(exitSpy).toHaveBeenCalledWith(2)
+  })
+
+  it("calls process.exit(2) when the file has a .cts extension", () => {
+    let exitCalled = false
+    try {
+      handleTsxLoadFailure("/home/user/playbook.cts")
+    } catch {
+      exitCalled = true
+    }
+    expect(exitCalled).toBe(true)
+    expect(exitSpy).toHaveBeenCalledWith(2)
+  })
+
+  it("prints an error mentioning tsx to stderr for a TypeScript file", () => {
+    try {
+      handleTsxLoadFailure("/home/user/playbook.ts")
+    } catch {
+      // expected: process.exit throws in test environment
+    }
+    expect(errorSpy).toHaveBeenCalledOnce()
+    const message = errorSpy.mock.calls[0]?.[0] as string
+    expect(message).toContain("tsx")
+  })
+
+  it("does not call process.exit for a .js file", () => {
+    handleTsxLoadFailure("/home/user/playbook.js")
+    expect(exitSpy).not.toHaveBeenCalled()
+    expect(errorSpy).not.toHaveBeenCalled()
+  })
+
+  it("does not call process.exit for a .mjs file", () => {
+    handleTsxLoadFailure("/home/user/playbook.mjs")
+    expect(exitSpy).not.toHaveBeenCalled()
+  })
+
+  it("does not call process.exit for a .cjs file", () => {
+    handleTsxLoadFailure("/home/user/playbook.cjs")
+    expect(exitSpy).not.toHaveBeenCalled()
+  })
+
+  it("does not call process.exit for a file with no extension", () => {
+    handleTsxLoadFailure("/home/user/playbook")
+    expect(exitSpy).not.toHaveBeenCalled()
   })
 })
 

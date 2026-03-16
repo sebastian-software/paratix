@@ -1,6 +1,7 @@
 import { Command } from "commander"
 import { resolve } from "node:path"
 import { pathToFileURL } from "node:url"
+import pc from "picocolors"
 
 import type { Environment, ServerDefinition } from "./types.js"
 
@@ -201,6 +202,27 @@ export function printError(error: unknown, verbose: boolean): void {
   }
 }
 
+/**
+ * Handles a failed attempt to load the `tsx` runtime.
+ *
+ * When the failed import is for a TypeScript file (`.ts`, `.mts`, `.cts`), a
+ * clear error message is printed to stderr and the process exits with code 2.
+ * For JavaScript files the failure is silently ignored because `tsx` is not
+ * required there.
+ *
+ * @param filePath - The resolved path of the playbook file being loaded.
+ */
+export function handleTsxLoadFailure(filePath: string): void {
+  if (/\.[cm]?ts$/v.test(filePath)) {
+    console.error(
+      `${pc.red("Error:")} tsx is required to run TypeScript playbooks but could not be loaded.\n` +
+        `  Install it with: ${pc.bold("npm install -g tsx")} or add it as a devDependency.`
+    )
+    // eslint-disable-next-line node/no-process-exit
+    process.exit(2)
+  }
+}
+
 const program = new Command()
 
 program
@@ -232,7 +254,7 @@ program
           tsx.register()
         })
         .catch(() => {
-          // noop
+          handleTsxLoadFailure(filePath)
         })
 
       // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment -- Dynamic import has unknown shape
