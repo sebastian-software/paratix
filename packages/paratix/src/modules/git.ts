@@ -96,33 +96,41 @@ async function updateRepo(conn: SshConnection, parameters: GitCloneParameters): 
 }
 
 /**
- * Resolve a reference to a commit SHA, trying branch first then tag/commit fallback.
+ * Resolve a reference to a commit SHA by querying the remote via `git ls-remote`.
+ *
+ * For tags, the dereferenced line (`refs/tags/<ref>^{}`) is preferred because it
+ * contains the commit SHA rather than the tag object SHA. When `ls-remote`
+ * returns no output (e.g. because the reference is already a bare commit SHA),
+ * the reference string is returned as-is.
  *
  * @param conn - The SSH connection to the remote host.
  * @param destination - The repository path on the remote host.
  * @param reference - The branch, tag, or commit SHA to resolve.
  * @returns The resolved commit SHA.
  */
-async function resolveReference(
+async function resolveRemoteReference(
   conn: SshConnection,
   destination: string,
   reference: string
 ): Promise<string> {
-  const branchResult = await conn.exec(
-    `git -C ${shellQuote(destination)} rev-parse origin/${shellQuote(reference)}`,
+  const result = await conn.exec(
+    `git -C ${shellQuote(destination)} ls-remote origin ${shellQuote(reference)}`,
     EXEC_OPTS
   )
 
-  if (branchResult.code === 0) {
-    return branchResult.stdout.trim()
+  const output = result.stdout.trim()
+  if (output === "") return reference
+
+  const lines = output.split("\n")
+
+  // Prefer the dereferenced tag line (^{}) when present.
+  for (const line of lines) {
+    if (line.includes("^{}")) {
+      return line.split("\t")[0]
+    }
   }
 
-  const commitReference = `${reference}^{commit}`
-  const fallbackResult = await conn.exec(
-    `git -C ${shellQuote(destination)} rev-parse ${shellQuote(commitReference)}`,
-    EXEC_OPTS
-  )
-  return fallbackResult.stdout.trim()
+  return lines[0].split("\t")[0]
 }
 
 /**
@@ -174,9 +182,7 @@ export const git = {
         )
         const head = headResult.stdout.trim()
 
-        await conn.exec(`git -C ${shellQuote(destination)} fetch origin --tags --force`, SILENT)
-
-        const resolved = await resolveReference(conn, destination, reference)
+        const resolved = await resolveRemoteReference(conn, destination, reference)
 
         return head === resolved ? "ok" : NEEDS_APPLY
       },
