@@ -121,10 +121,11 @@ export function writeProjectFiles(projectDirectory: string): void {
 function installDependencies(
   projectDirectory: string,
   pm: { command: string; name: string }
-): void {
+): boolean {
   console.log(`Installing dependencies with ${pm.name}...`)
   try {
     execSync(pm.command, { cwd: projectDirectory, stdio: "inherit", timeout: INSTALL_TIMEOUT_MS })
+    return true
   } catch (error) {
     if (error instanceof Error && "signal" in error && error.signal === "SIGTERM") {
       console.error(`Installation timed out after ${INSTALL_TIMEOUT_MS / MS_PER_MINUTE} minutes.`)
@@ -133,6 +134,7 @@ function installDependencies(
       console.error(`Failed to install dependencies: ${message}`)
     }
     console.error("Run install manually.")
+    return false
   }
 }
 
@@ -176,7 +178,9 @@ function main(): void {
   console.log(`Creating Paratix project in ${projectDirectory}...`)
 
   writeProjectFiles(projectDirectory)
-  installDependencies(projectDirectory, pm)
+  if (!installDependencies(projectDirectory, pm)) {
+    process.exitCode = 1
+  }
 
   console.log(`
 Project created successfully!
