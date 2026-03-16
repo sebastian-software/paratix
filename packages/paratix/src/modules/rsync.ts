@@ -1,6 +1,7 @@
 import { execFile } from "node:child_process"
 import { promisify } from "node:util"
 
+import { shellQuote } from "../ssh.js"
 import { type Module, type ModuleResult, NEEDS_APPLY, type SshConnection } from "../types.js"
 
 // eslint-disable-next-line @typescript-eslint/strict-void-return -- promisify requires the callback-based overload
@@ -117,7 +118,7 @@ function buildArguments(
 
   result.push(
     "-e",
-    `ssh -p ${connectionInfo.port} -i "${connectionInfo.privateKeyPath}" -o StrictHostKeyChecking=${options.strictHostKeyChecking ?? "accept-new"}`
+    `ssh -p ${connectionInfo.port} -i ${shellQuote(connectionInfo.privateKeyPath)} -o StrictHostKeyChecking=${options.strictHostKeyChecking ?? "accept-new"}`
   )
   result.push(...buildFilterArguments(options))
   result.push(...buildOwnershipArguments(options))

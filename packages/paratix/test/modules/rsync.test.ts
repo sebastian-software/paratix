@@ -207,8 +207,27 @@ describe("rsync.sync — argument building", () => {
     const transportArg = args[eIdx + 1]
     expect(transportArg).toContain("ssh")
     expect(transportArg).toContain("-p 22")
-    expect(transportArg).toContain('-i "~/.ssh/id"')
+    expect(transportArg).toContain("-i '~/.ssh/id'")
     expect(transportArg).toContain("-o StrictHostKeyChecking=accept-new")
+  })
+
+  it("wraps privateKeyPath with single quotes to prevent shell expansion of special characters", async () => {
+    const mockSsh = createMockSsh()
+    vi.spyOn(mockSsh, "getConnectionInfo").mockReturnValue({
+      host: "1.2.3.4",
+      port: 22,
+      privateKeyPath: "$HOME/.ssh/deploy key",
+      user: "root",
+    })
+    const mod = rsync.sync({ dest: "/remote/dest", src: "/local/src" })
+    await mod.apply(mockSsh, emptyEnv)
+
+    const args = getArgs()
+    const eIdx = args.indexOf("-e")
+    expect(eIdx).toBeGreaterThanOrEqual(0)
+    const transportArg = args[eIdx + 1]
+    expect(transportArg).toContain("-i '$HOME/.ssh/deploy key'")
+    expect(transportArg).not.toContain('-i "$HOME/.ssh/deploy key"')
   })
 
   it("uses custom StrictHostKeyChecking value when provided", async () => {
