@@ -484,6 +484,58 @@ describe("SshConnectionImpl", () => {
         // Value must be wrapped in single quotes, not interpolated raw
         expect(executedCommand).toContain("GREETING='hello world; rm -rf /'")
       })
+
+      it("places env vars INSIDE the bash -c argument for non-root user with sudo (regression: env before sudo)", async () => {
+        // Regression test: env vars must appear inside `bash -c '...'`, not before
+        // the sudo call. Previously, the command was:
+        //   MY_VAR='val' SUDO_PROMPT='' sudo -S bash -c 'whoami'
+        // which is wrong because sudo strips env vars by default.
+        // The correct form is:
+        //   SUDO_PROMPT='' sudo -S bash -c 'MY_VAR='\''val'\'' whoami'
+        const execSpy = vi.fn().mockImplementation((_command: string, callback: ExecCallback) => {
+          const stream = makeStream()
+          callback(undefined, stream)
+          stream.emit("close", 0)
+        })
+        const client = makeClientWithExecSpy(execSpy)
+        const ssh = makeConnectedSsh(client, { sudoPassword: "secret", user: "deploy" })
+
+        await ssh.exec("whoami", { env: { MY_VAR: "val" } })
+
+        const [executedCommand] = execSpy.mock.calls[0] as [string, ...unknown[]]
+
+        // The outer command must NOT start with env vars — sudo must come first
+        expect(executedCommand).toMatch(/^SUDO_PROMPT='' sudo -S bash -c /v)
+
+        // MY_VAR must appear inside the quoted bash -c argument (i.e. after `bash -c '`)
+        const bashCArgument = executedCommand.replace(/^SUDO_PROMPT='' sudo -S bash -c /v, "")
+        expect(bashCArgument).toContain("MY_VAR=")
+      })
+
+      it("places env vars INSIDE the bash -c argument for non-root user without sudo password (passwordless sudo)", async () => {
+        // Same regression test for the passwordless-sudo branch (no cachedSudoPassword).
+        // The correct form is:
+        //   sudo bash -c 'MY_VAR='\''val'\'' whoami'
+        const execSpy = vi.fn().mockImplementation((_command: string, callback: ExecCallback) => {
+          const stream = makeStream()
+          callback(undefined, stream)
+          stream.emit("close", 0)
+        })
+        const client = makeClientWithExecSpy(execSpy)
+        // No sudoPassword — triggers the `sudo bash -c` branch
+        const ssh = makeConnectedSsh(client, { user: "deploy" })
+
+        await ssh.exec("whoami", { env: { MY_VAR: "val" } })
+
+        const [executedCommand] = execSpy.mock.calls[0] as [string, ...unknown[]]
+
+        // The outer command must NOT start with env vars — sudo must come first
+        expect(executedCommand).toMatch(/^sudo bash -c /v)
+
+        // MY_VAR must appear inside the quoted bash -c argument
+        const bashCArgument = executedCommand.replace(/^sudo bash -c /v, "")
+        expect(bashCArgument).toContain("MY_VAR=")
+      })
     })
   })
 

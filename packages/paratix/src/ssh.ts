@@ -88,7 +88,7 @@ export class SshConnectionImpl implements SshConnection {
 
   public async exec(command: string, options: ExecOptions = {}): Promise<ExecResult> {
     const client = this.ensureClient()
-    const cmd = this.buildEnvPrefix(options.env) + this.sudoCommand(command)
+    const cmd = this.sudoCommand(command, this.buildEnvPrefix(options.env))
     return new Promise((resolve, reject) => {
       let settled = false
       const wrappedResolve = (value: ExecResult): void => {
@@ -245,10 +245,9 @@ export class SshConnectionImpl implements SshConnection {
   public async writeFile(remotePath: string, content: string): Promise<void> {
     if (Buffer.byteLength(content) <= SFTP_WRITE_THRESHOLD) {
       const escaped = shellQuote(content)
-      await this.exec(
-        `printf '%s' ${escaped} | tee ${shellQuote(remotePath)} > /dev/null`,
-        { silent: true }
-      )
+      await this.exec(`printf '%s' ${escaped} | tee ${shellQuote(remotePath)} > /dev/null`, {
+        silent: true,
+      })
       return
     }
 
@@ -260,10 +259,9 @@ export class SshConnectionImpl implements SshConnection {
       // eslint-disable-next-line security/detect-non-literal-fs-filename
       writeFileSync(localTemporary, content)
       await sftpUpload(client, localTemporary, remoteTemporary)
-      await this.exec(
-        `mv ${shellQuote(remoteTemporary)} ${shellQuote(remotePath)}`,
-        { silent: true }
-      )
+      await this.exec(`mv ${shellQuote(remoteTemporary)} ${shellQuote(remotePath)}`, {
+        silent: true,
+      })
     } finally {
       try {
         // eslint-disable-next-line security/detect-non-literal-fs-filename
@@ -290,12 +288,13 @@ export class SshConnectionImpl implements SshConnection {
     return this.client
   }
 
-  private sudoCommand(command: string): string {
-    if (this.config.user === "root") return command
+  private sudoCommand(command: string, environmentPrefix = ""): string {
+    if (this.config.user === "root") return `${environmentPrefix}${command}`
+    const quoted = shellQuote(`${environmentPrefix}${command}`)
     if (this.cachedSudoPassword != null) {
-      return `SUDO_PROMPT='' sudo -S bash -c ${shellQuote(command)}`
+      return `SUDO_PROMPT='' sudo -S bash -c ${quoted}`
     }
-    return `sudo bash -c ${shellQuote(command)}`
+    return `sudo bash -c ${quoted}`
   }
 
   private async tryConnectOnPorts(privateKey: string, password?: string): Promise<boolean> {

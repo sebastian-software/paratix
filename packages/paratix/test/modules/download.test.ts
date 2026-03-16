@@ -315,27 +315,27 @@ describe("download.github", () => {
     })
 
     it("throws on tag with path traversal", () => {
-      expect(() =>
-        download.github(destination, { asset, repo, tag: "../../evil" })
-      ).toThrow("Invalid GitHub release tag")
+      expect(() => download.github(destination, { asset, repo, tag: "../../evil" })).toThrow(
+        "Invalid GitHub release tag"
+      )
     })
 
     it("throws on empty tag", () => {
-      expect(() =>
-        download.github(destination, { asset, repo, tag: "" })
-      ).toThrow("Invalid GitHub release tag")
+      expect(() => download.github(destination, { asset, repo, tag: "" })).toThrow(
+        "Invalid GitHub release tag"
+      )
     })
 
     it("throws on asset with path traversal", () => {
-      expect(() =>
-        download.github(destination, { asset: "../../etc/passwd", repo, tag })
-      ).toThrow("Invalid GitHub release asset")
+      expect(() => download.github(destination, { asset: "../../etc/passwd", repo, tag })).toThrow(
+        "Invalid GitHub release asset"
+      )
     })
 
     it("throws on empty asset", () => {
-      expect(() =>
-        download.github(destination, { asset: "", repo, tag })
-      ).toThrow("Invalid GitHub release asset")
+      expect(() => download.github(destination, { asset: "", repo, tag })).toThrow(
+        "Invalid GitHub release asset"
+      )
     })
   })
 
