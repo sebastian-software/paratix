@@ -1,105 +1,80 @@
 import { describe, expect, it } from "vitest"
 
-import { FLAGS_DIRECTORY, setVersionedFlag } from "../../src/modules/moduleHelpers.js"
+import { FLAGS_DIRECTORY, hasFlag, setVersionedFlag } from "../../src/modules/moduleHelpers.js"
 import { createMockSsh } from "../helpers/mockSsh.js"
 
-describe("setVersionedFlag", () => {
-  it("shell-quotes flagPrefix in the rm -f command to prevent glob injection", async () => {
-    // A flagPrefix containing shell-special characters (spaces, parentheses).
-    // Without quoting this would break or be exploitable via glob injection.
-    const flagPrefix = "my prefix (v2)"
-    const flagName = "my prefix (v2)1.0"
+describe("hasFlag – empty string validation", () => {
+  it("throws when flagName is an empty string", async () => {
+    // An empty flagName produces shellQuote("") === "''" which expands the
+    // glob pattern to match all flags, causing silent data-loss or wrong results.
+    const ssh = createMockSsh()
+    await expect(hasFlag(ssh, "")).rejects.toThrow(/flagName must match/v)
+  })
 
+  it("does not throw for a valid flagName", async () => {
+    const ssh = createMockSsh()
+    await expect(hasFlag(ssh, "valid-flag")).resolves.not.toThrow()
+  })
+})
+
+describe("setVersionedFlag – empty string validation", () => {
+  it("throws when flagName is an empty string", async () => {
+    // shellQuote("") === "''" – touch would create a file literally named "''"
+    // instead of the intended versioned flag.
     const ssh = createMockSsh({
-      // The command the implementation now generates (quoted prefix):
+      "mkdir -p /var/lib/paratix/flags": { code: 0 },
+    })
+    await expect(setVersionedFlag(ssh, "", "valid-prefix-")).rejects.toThrow(/flagName must match/v)
+  })
+
+  it("throws when flagPrefix is an empty string", async () => {
+    // shellQuote("") === "''" – the rm -f glob becomes "''"* which in bash
+    // expands to * and would delete ALL flags on the target system.
+    const ssh = createMockSsh({
+      "mkdir -p /var/lib/paratix/flags": { code: 0 },
+    })
+    await expect(setVersionedFlag(ssh, "valid-flag-1.0", "")).rejects.toThrow(
+      /flagPrefix must match/v
+    )
+  })
+
+  it("does not throw for valid flagName and flagPrefix", async () => {
+    const flagPrefix = "valid-prefix-"
+    const flagName = "valid-prefix-1.0"
+    const ssh = createMockSsh({
       [`rm -f ${FLAGS_DIRECTORY}/'${flagPrefix}'* && touch ${FLAGS_DIRECTORY}/'${flagName}'`]: {
         code: 0,
       },
       "mkdir -p /var/lib/paratix/flags": { code: 0 },
     })
+    await expect(setVersionedFlag(ssh, flagName, flagPrefix)).resolves.not.toThrow()
+  })
+})
 
-    await setVersionedFlag(ssh, flagName, flagPrefix)
-
-    // The rm -f glob must quote the prefix so that shell-special characters
-    // in flagPrefix are not interpreted by the shell.
-    // Expected safe form: rm -f /var/lib/paratix/flags/'my prefix (v2)'*
-    const expectedSafeCommand = `rm -f ${FLAGS_DIRECTORY}/'${flagPrefix}'* && touch ${FLAGS_DIRECTORY}/'${flagName}'`
-    expect(ssh.calls).toContain(expectedSafeCommand)
+describe("setVersionedFlag – rejects shell-special characters", () => {
+  it("rejects flagPrefix containing spaces and parentheses", async () => {
+    const ssh = createMockSsh()
+    await expect(setVersionedFlag(ssh, "valid-flag", "my prefix (v2)")).rejects.toThrow(
+      /flagPrefix must match/v
+    )
   })
 
-  it("prevents command injection via semicolon in flagPrefix", async () => {
-    // An attacker-controlled flagPrefix that tries to inject a second command.
-    // Without quoting: rm -f /var/lib/paratix/flags/safe; rm -rf /; #*
-    // With quoting:    rm -f /var/lib/paratix/flags/'safe; rm -rf /; #'*
-    const flagPrefix = "safe; rm -rf /; #"
-    const flagName = "safe; rm -rf /; #1.0"
-
-    const ssh = createMockSsh({
-      "mkdir -p /var/lib/paratix/flags": { code: 0 },
-    })
-
-    await setVersionedFlag(ssh, flagName, flagPrefix)
-
-    const execCall = ssh.calls.find((c) => c.startsWith("rm -f"))
-    expect(execCall).toBeDefined()
-
-    // The safe quoted form must wrap the entire injection attempt in single quotes.
-    // Expected: rm -f /var/lib/paratix/flags/'safe; rm -rf /; #'*
-    const safePrefix = `'safe; rm -rf /; #'`
-    expect(execCall).toContain(safePrefix)
-
-    // The injected rm -rf must NOT appear as a standalone bare command outside quotes.
-    // If injection succeeded the string would contain literal "; rm -rf " unquoted.
-    // We verify this by checking the command does NOT match the unquoted injection pattern.
-    expect(execCall).not.toContain(`${FLAGS_DIRECTORY}/safe; rm -rf`)
+  it("rejects flagName containing semicolons (command injection attempt)", async () => {
+    const ssh = createMockSsh()
+    await expect(setVersionedFlag(ssh, "safe; rm -rf /; #1.0", "safe-")).rejects.toThrow(
+      /flagName must match/v
+    )
   })
 
-  it("prevents command substitution injection via backticks in flagPrefix", async () => {
-    // An attacker-controlled flagPrefix that tries to use backtick command substitution.
-    // Without quoting: rm -f /var/lib/paratix/flags/`id`*  (executes `id`)
-    // With quoting:    rm -f /var/lib/paratix/flags/'`id`'*
-    const flagPrefix = "`id`"
-    const flagName = "`id`1.0"
-
-    const ssh = createMockSsh({
-      "mkdir -p /var/lib/paratix/flags": { code: 0 },
-    })
-
-    await setVersionedFlag(ssh, flagName, flagPrefix)
-
-    const execCall = ssh.calls.find((c) => c.startsWith("rm -f"))
-    expect(execCall).toBeDefined()
-
-    // Backticks must not appear outside of single quotes.
-    // Replace all content inside single quotes, then check no backticks remain.
-    const outsideQuotes = execCall!.replaceAll(/'[^']*'/gv, "")
-    expect(outsideQuotes).not.toContain("`")
-
-    // The safe quoted form must be present.
-    expect(execCall).toContain(`'\`id\`'`)
+  it("rejects flagName containing backticks (command substitution attempt)", async () => {
+    const ssh = createMockSsh()
+    await expect(setVersionedFlag(ssh, "`id`1.0", "valid-")).rejects.toThrow(/flagName must match/v)
   })
 
-  it("prevents command substitution injection via $() in flagPrefix", async () => {
-    // An attacker-controlled flagPrefix using $() command substitution.
-    // Without quoting: rm -f /var/lib/paratix/flags/$(id)*  (executes `id`)
-    // With quoting:    rm -f /var/lib/paratix/flags/'$(id)'*
-    const flagPrefix = "$(id)"
-    const flagName = "$(id)1.0"
-
-    const ssh = createMockSsh({
-      "mkdir -p /var/lib/paratix/flags": { code: 0 },
-    })
-
-    await setVersionedFlag(ssh, flagName, flagPrefix)
-
-    const execCall = ssh.calls.find((c) => c.startsWith("rm -f"))
-    expect(execCall).toBeDefined()
-
-    // $() must not appear outside of single quotes.
-    const outsideQuotes = execCall!.replaceAll(/'[^']*'/gv, "")
-    expect(outsideQuotes).not.toContain("$(")
-
-    // The safe quoted form must be present.
-    expect(execCall).toContain(`'$(id)'`)
+  it("rejects flagName containing $() (command substitution attempt)", async () => {
+    const ssh = createMockSsh()
+    await expect(setVersionedFlag(ssh, "$(id)1.0", "valid-")).rejects.toThrow(
+      /flagName must match/v
+    )
   })
 })

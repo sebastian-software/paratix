@@ -4,11 +4,22 @@ import { shellQuote } from "../ssh.js"
 
 export const FLAGS_DIRECTORY = "/var/lib/paratix/flags"
 
+const FLAG_NAME_PATTERN = /^[\w.\-]+$/v
+
+function validateFlagName(value: string, label: string): void {
+  if (!FLAG_NAME_PATTERN.test(value)) {
+    throw new Error(
+      `${label} must match ${String(FLAG_NAME_PATTERN)}, got: ${JSON.stringify(value)}`
+    )
+  }
+}
+
 export async function ensureFlagsDirectory(ssh: SshConnection): Promise<void> {
   await ssh.exec(`mkdir -p ${FLAGS_DIRECTORY}`, { silent: true })
 }
 
 export async function hasFlag(ssh: SshConnection, flagName: string): Promise<boolean> {
+  validateFlagName(flagName, "flagName")
   return ssh.test(`[ -f ${FLAGS_DIRECTORY}/${shellQuote(flagName)} ]`)
 }
 
@@ -17,6 +28,8 @@ export async function setVersionedFlag(
   flagName: string,
   flagPrefix: string
 ): Promise<void> {
+  validateFlagName(flagName, "flagName")
+  validateFlagName(flagPrefix, "flagPrefix")
   await ensureFlagsDirectory(ssh)
   await ssh.exec(
     `rm -f ${FLAGS_DIRECTORY}/${shellQuote(flagPrefix)}* && touch ${FLAGS_DIRECTORY}/${shellQuote(flagName)}`,
