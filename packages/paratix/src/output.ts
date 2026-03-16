@@ -1,5 +1,7 @@
 import pc from "picocolors"
 
+import { CommandError } from "./sshHelpers.js"
+
 const MODULE_NAME_WIDTH = 36
 
 const STATUS_ICONS: Record<string, string> = {
@@ -74,6 +76,46 @@ export function printError(stdout: string, stderr: string): void {
     for (const line of lines) {
       console.log(pc.red(`  \u2502 ${line}`))
     }
+  }
+}
+
+/**
+ * Print the full (untruncated) stdout and stderr of a failed command.
+ * Used in verbose mode to show the complete output that was truncated in the error message.
+ *
+ * @param stdout - Full standard output of the failed command.
+ * @param stderr - Full standard error of the failed command.
+ */
+export function printVerboseCommandError(stdout: string, stderr: string): void {
+  if (stderr.trim()) {
+    console.log(pc.red("  │ Full stderr:"))
+    for (const line of stderr.trim().split("\n")) {
+      console.log(pc.red(`  │ ${line}`))
+    }
+  }
+  if (stdout.trim()) {
+    console.log(pc.red("  │ Full stdout:"))
+    for (const line of stdout.trim().split("\n")) {
+      console.log(pc.red(`  │ ${line}`))
+    }
+  }
+}
+
+/**
+ * Print the error message of a failed command and, when verbose mode is active
+ * and the error is a {@link CommandError}, the full untruncated output.
+ *
+ * @param error - The caught error value.
+ * @param verbose - Whether to show full stdout/stderr.
+ */
+export function printCommandFailure(error: unknown, verbose: boolean): void {
+  if (verbose && error instanceof CommandError) {
+    // Print only the exit-code line, skip the truncated output and hint
+    const summaryLine = error.message.split("\n")[0]
+    printError("", summaryLine)
+    printVerboseCommandError(error.fullStdout, error.fullStderr)
+  } else {
+    printError("", String(error))
   }
 }
 

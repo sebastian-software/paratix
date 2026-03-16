@@ -2,7 +2,12 @@ import type { RecipeModule } from "./recipe.js"
 import type { Environment, Module, ModuleResult, ServerDefinition } from "./types.js"
 
 import { loadDotEnvironment, mergeEnvironment } from "./environment.js"
-import { printError, printModuleResult, printRecipeHeader, printSummary } from "./output.js"
+import {
+  printCommandFailure,
+  printModuleResult,
+  printRecipeHeader,
+  printSummary,
+} from "./output.js"
 import { SshConnectionImpl } from "./ssh.js"
 
 const SIGNAL_EXIT_BASE = 128
@@ -72,11 +77,30 @@ function setupShutdownHandlers(): ShutdownState {
   }
 }
 
+/**
+ * Options controlling the behavior of a {@link runPlaybook} run.
+ */
 export type RunOptions = {
+  /**
+   * When `true`, modules report what would change without applying anything.
+   * Defaults to `false`.
+   */
   dryRun?: boolean
+  /** Path to a `.env` file whose variables are merged into the run environment. */
   envFile?: string
+  /** Additional environment variables that override values from `envFile` and the server definition. */
   envOverrides?: Environment
+  /**
+   * Custom reconnect timeout in milliseconds passed to the SSH connection.
+   * Falls back to the default defined in the SSH configuration when omitted.
+   */
   reconnectTimeout?: number
+  /**
+   * When `true`, the full (untruncated) stdout and stderr of a failed command
+   * are printed in addition to the summary error message.
+   * Defaults to `false`.
+   */
+  verbose?: boolean
 }
 
 class RunStats {
@@ -192,16 +216,19 @@ async function handleMetaAndBuildResult(
   }
 }
 
+// eslint-disable-next-line max-params -- verbose flag needs to be threaded through
 async function runRecipeModule(
   recipeModule: RecipeModule,
   environment: Environment,
-  ssh: SshConnectionImpl
+  ssh: SshConnectionImpl,
+  verbose: boolean
 ): Promise<StepResult> {
   try {
     const result = await recipeModule.apply(ssh, environment)
     return await handleMetaAndBuildResult(ssh, environment, result)
   } catch (error) {
-    printError("", String(error))
+    printModuleResult(recipeModule.name, "failed")
+    printCommandFailure(error, verbose)
     return { env: environment, shouldBreak: true, status: "failed" }
   }
 }
@@ -221,10 +248,11 @@ type RegularModuleArguments = {
   env: Environment
   ssh: SshConnectionImpl
   targetModule: Module
+  verbose: boolean
 }
 
 async function runRegularModule(parameters: RegularModuleArguments): Promise<StepResult> {
-  const { dryRun, env, ssh, targetModule } = parameters
+  const { dryRun, env, ssh, targetModule, verbose } = parameters
 
   try {
     const checkResult = await targetModule.check(ssh, env)
@@ -242,7 +270,7 @@ async function runRegularModule(parameters: RegularModuleArguments): Promise<Ste
     return await applyModule(targetModule, env, ssh)
   } catch (error) {
     printModuleResult(targetModule.name, "failed")
-    printError("", String(error))
+    printCommandFailure(error, verbose)
     return { env, shouldBreak: true, status: "failed" }
   }
 }
@@ -253,16 +281,23 @@ type LoopArguments = {
   modules: Module[]
   ssh: SshConnectionImpl
   stats: RunStats
+  verbose: boolean
 }
 
 async function runModuleLoop(parameters: LoopArguments): Promise<Environment> {
-  const { dryRun, modules, ssh, stats } = parameters
+  const { dryRun, modules, ssh, stats, verbose } = parameters
   let currentEnvironment = parameters.env
 
   for (const currentModule of modules) {
     const stepPromise = isRecipe(currentModule)
-      ? runRecipeModule(currentModule, currentEnvironment, ssh)
-      : runRegularModule({ dryRun, env: currentEnvironment, ssh, targetModule: currentModule })
+      ? runRecipeModule(currentModule, currentEnvironment, ssh, verbose)
+      : runRegularModule({
+          dryRun,
+          env: currentEnvironment,
+          ssh,
+          targetModule: currentModule,
+          verbose,
+        })
 
     // eslint-disable-next-line no-await-in-loop
     const result = await stepPromise
@@ -280,10 +315,11 @@ type SignalArguments = {
   signals: Module[]
   ssh: SshConnectionImpl
   stats: RunStats
+  verbose: boolean
 }
 
 async function runSignals(parameters: SignalArguments): Promise<void> {
-  const { env, signals, ssh, stats } = parameters
+  const { env, signals, ssh, stats, verbose } = parameters
 
   for (const signal of signals) {
     try {
@@ -293,32 +329,9 @@ async function runSignals(parameters: SignalArguments): Promise<void> {
       stats.incrementSignals()
     } catch (error) {
       printModuleResult(`signal: ${signal.name}`, "failed")
-      printError("", String(error))
+      printCommandFailure(error, verbose)
     }
   }
-}
-
-/**
- * Creates an SSH connection for the given server definition, applies any
- * `reconnectTimeout` override from `options`, and probes for sudo access.
- *
- * @param definition - The server definition containing host and SSH config.
- * @param options - Run options; `reconnectTimeout` overrides the value in
- *   `definition.ssh` when provided.
- * @returns A connected and sudo-probed {@link SshConnectionImpl}.
- */
-async function createSshConnection(
-  definition: ServerDefinition,
-  options: RunOptions
-): Promise<SshConnectionImpl> {
-  const sshConfig =
-    options.reconnectTimeout == null
-      ? definition.ssh
-      : { ...definition.ssh, reconnectTimeout: options.reconnectTimeout }
-  const ssh = new SshConnectionImpl(definition.host, sshConfig)
-  await ssh.connect()
-  await ssh.probeSudo()
-  return ssh
 }
 
 /**
@@ -337,12 +350,18 @@ function resolveExitCode(shutdownSignal: NodeJS.Signals | null, stats: RunStats)
   }
 }
 
-async function connectSsh(
+async function connectAndRegister(
   definition: ServerDefinition,
   options: RunOptions,
-  setSsh: (connection: SshConnectionImpl) => void
+  setSsh: (c: SshConnectionImpl) => void
 ): Promise<SshConnectionImpl> {
-  const ssh = await createSshConnection(definition, options)
+  const sshConfig =
+    options.reconnectTimeout == null
+      ? definition.ssh
+      : { ...definition.ssh, reconnectTimeout: options.reconnectTimeout }
+  const ssh = new SshConnectionImpl(definition.host, sshConfig)
+  await ssh.connect()
+  await ssh.probeSudo()
   setSsh(ssh)
   return ssh
 }
@@ -351,31 +370,34 @@ export async function runPlaybook(
   definition: ServerDefinition,
   options: RunOptions = {}
 ): Promise<void> {
+  const { dryRun = false, verbose = false } = options
   const environment = initializeEnvironment(options, definition)
   const { handleShutdownSignal, setSsh, shutdownSignal } = setupShutdownHandlers()
-  let ssh: SshConnectionImpl | undefined
   const stats = new RunStats()
+  let ssh: SshConnectionImpl | undefined
 
+  // No catch block — connect errors propagate to the CLI handler in cli.ts
+  // which prints the error and exits with code 2.
   try {
-    ssh = await connectSsh(definition, options, setSsh)
+    ssh = await connectAndRegister(definition, options, setSsh)
     printRecipeHeader(definition.name)
     const finalEnvironment = await runModuleLoop({
-      dryRun: options.dryRun ?? false,
+      dryRun,
       env: environment,
       modules: definition.run,
       ssh,
       stats,
+      verbose,
     })
 
     if (shutdownSignal() == null && stats.changed > 0 && definition.signals != null) {
-      await runSignals({ env: finalEnvironment, signals: definition.signals, ssh, stats })
+      await runSignals({ env: finalEnvironment, signals: definition.signals, ssh, stats, verbose })
     }
 
     printSummary(stats)
   } finally {
-    process.removeListener("SIGINT", handleShutdownSignal)
-    process.removeListener("SIGTERM", handleShutdownSignal)
-    // Idempotent: may already have been called by the shutdown signal handler
+    for (const signal of ["SIGINT", "SIGTERM"] as const)
+      process.removeListener(signal, handleShutdownSignal)
     ssh?.disconnect()
   }
 

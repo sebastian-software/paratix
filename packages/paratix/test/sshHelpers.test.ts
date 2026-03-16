@@ -1,7 +1,12 @@
 import { EventEmitter } from "node:events"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 
-import { collectStreamOutput, type StreamOutputParameters } from "../src/sshHelpers.js"
+import {
+  collectStreamOutput,
+  CommandError,
+  MAX_OUTPUT_LENGTH,
+  type StreamOutputParameters,
+} from "../src/sshHelpers.js"
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -413,5 +418,199 @@ describe("live-output masking via process.stdout/stderr.write", () => {
 
     expect(stdoutWriteSpy).not.toHaveBeenCalled()
     expect(stderrWriteSpy).not.toHaveBeenCalled()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// CommandError and stdout/stderr truncation
+// ---------------------------------------------------------------------------
+
+async function getCommandError(promise: Promise<unknown>): Promise<CommandError> {
+  try {
+    await promise
+    throw new Error("Expected promise to reject")
+  } catch (error) {
+    return error as CommandError
+  }
+}
+
+describe("CommandError and truncation", () => {
+  it("rejected error is instanceof CommandError when exit code is non-zero", async () => {
+    const promise = runCollect({
+      command: "false",
+      emitClose: { code: 1 },
+      emitStderr: "some error",
+      emitStdout: "some output",
+    })
+
+    const error = await getCommandError(promise)
+    expect(error).toBeInstanceOf(CommandError)
+  })
+
+  it("CommandError has name 'CommandError'", async () => {
+    const promise = runCollect({
+      command: "false",
+      emitClose: { code: 1 },
+      emitStderr: "error",
+      emitStdout: "output",
+    })
+
+    const error = await getCommandError(promise)
+    expect(error.name).toBe("CommandError")
+  })
+
+  it("stdout longer than MAX_OUTPUT_LENGTH is truncated in the error message", async () => {
+    const longStdout = "a".repeat(MAX_OUTPUT_LENGTH + 1)
+    const promise = runCollect({
+      command: "false",
+      emitClose: { code: 1 },
+      emitStderr: "",
+      emitStdout: longStdout,
+    })
+
+    const msg = await getErrorMessage(promise)
+    expect(msg).toContain("…(truncated)")
+    expect(msg).not.toContain(longStdout)
+  })
+
+  it("stderr longer than MAX_OUTPUT_LENGTH is truncated in the error message", async () => {
+    const longStderr = "b".repeat(MAX_OUTPUT_LENGTH + 1)
+    const promise = runCollect({
+      command: "false",
+      emitClose: { code: 1 },
+      emitStderr: longStderr,
+      emitStdout: "",
+    })
+
+    const msg = await getErrorMessage(promise)
+    expect(msg).toContain("…(truncated)")
+    expect(msg).not.toContain(longStderr)
+  })
+
+  it("stdout exactly at MAX_OUTPUT_LENGTH is not truncated and has no hint", async () => {
+    const exactStdout = "c".repeat(MAX_OUTPUT_LENGTH)
+    const promise = runCollect({
+      command: "false",
+      emitClose: { code: 1 },
+      emitStderr: "",
+      emitStdout: exactStdout,
+    })
+
+    const msg = await getErrorMessage(promise)
+    expect(msg).not.toContain("…(truncated)")
+    expect(msg).not.toContain("(use --verbose for full output)")
+  })
+
+  it("stderr exactly at MAX_OUTPUT_LENGTH is not truncated and has no hint", async () => {
+    const exactStderr = "d".repeat(MAX_OUTPUT_LENGTH)
+    const promise = runCollect({
+      command: "false",
+      emitClose: { code: 1 },
+      emitStderr: exactStderr,
+      emitStdout: "",
+    })
+
+    const msg = await getErrorMessage(promise)
+    expect(msg).not.toContain("…(truncated)")
+    expect(msg).not.toContain("(use --verbose for full output)")
+  })
+
+  it("hint '(use --verbose for full output)' is appended when stdout is truncated", async () => {
+    const longStdout = "e".repeat(MAX_OUTPUT_LENGTH + 1)
+    const promise = runCollect({
+      command: "false",
+      emitClose: { code: 1 },
+      emitStderr: "",
+      emitStdout: longStdout,
+    })
+
+    const msg = await getErrorMessage(promise)
+    expect(msg).toContain("(use --verbose for full output)")
+  })
+
+  it("hint '(use --verbose for full output)' is appended when stderr is truncated", async () => {
+    const longStderr = "f".repeat(MAX_OUTPUT_LENGTH + 1)
+    const promise = runCollect({
+      command: "false",
+      emitClose: { code: 1 },
+      emitStderr: longStderr,
+      emitStdout: "",
+    })
+
+    const msg = await getErrorMessage(promise)
+    expect(msg).toContain("(use --verbose for full output)")
+  })
+
+  it("hint is absent when stdout and stderr are both within MAX_OUTPUT_LENGTH", async () => {
+    const promise = runCollect({
+      command: "false",
+      emitClose: { code: 1 },
+      emitStderr: "short error",
+      emitStdout: "short output",
+    })
+
+    const msg = await getErrorMessage(promise)
+    expect(msg).not.toContain("(use --verbose for full output)")
+  })
+
+  it("fullStdout contains the complete (untruncated) masked stdout", async () => {
+    const longStdout = "g".repeat(MAX_OUTPUT_LENGTH + 50)
+    const promise = runCollect({
+      command: "false",
+      emitClose: { code: 1 },
+      emitStderr: "",
+      emitStdout: longStdout,
+    })
+
+    const error = await getCommandError(promise)
+    expect(error.fullStdout).toBe(longStdout)
+    expect(error.fullStdout).toHaveLength(MAX_OUTPUT_LENGTH + 50)
+  })
+
+  it("fullStderr contains the complete (untruncated) masked stderr", async () => {
+    const longStderr = "h".repeat(MAX_OUTPUT_LENGTH + 50)
+    const promise = runCollect({
+      command: "false",
+      emitClose: { code: 1 },
+      emitStderr: longStderr,
+      emitStdout: "",
+    })
+
+    const error = await getCommandError(promise)
+    expect(error.fullStderr).toBe(longStderr)
+    expect(error.fullStderr).toHaveLength(MAX_OUTPUT_LENGTH + 50)
+  })
+
+  it("secrets are masked in fullStdout and fullStderr before truncation check", async () => {
+    const secret = "mysecretvalue"
+    const longStdout = `${secret} ${"x".repeat(MAX_OUTPUT_LENGTH)}`
+    const longStderr = `${secret} ${"y".repeat(MAX_OUTPUT_LENGTH)}`
+    const promise = runCollect({
+      command: "false",
+      emitClose: { code: 1 },
+      emitStderr: longStderr,
+      emitStdout: longStdout,
+      secrets: [secret],
+    })
+
+    const error = await getCommandError(promise)
+    expect(error.fullStdout).not.toContain(secret)
+    expect(error.fullStdout).toContain("***")
+    expect(error.fullStderr).not.toContain(secret)
+    expect(error.fullStderr).toContain("***")
+  })
+
+  it("truncated error message contains first MAX_OUTPUT_LENGTH characters of stdout", async () => {
+    const prefix = "IMPORTANT"
+    const longStdout = prefix + "z".repeat(MAX_OUTPUT_LENGTH)
+    const promise = runCollect({
+      command: "false",
+      emitClose: { code: 1 },
+      emitStderr: "",
+      emitStdout: longStdout,
+    })
+
+    const msg = await getErrorMessage(promise)
+    expect(msg).toContain(prefix)
   })
 })

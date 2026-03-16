@@ -273,6 +273,8 @@ program
         envOverrides: options.env as Environment,
         // eslint-disable-next-line @typescript-eslint/no-unsafe-type-assertion -- Commander options typed as Record<string, unknown>
         reconnectTimeout: (options.reconnectTimeout as number) * SECONDS_TO_MS,
+        // eslint-disable-next-line @typescript-eslint/no-unsafe-type-assertion -- Commander options typed as Record<string, unknown>
+        verbose: options.verbose as boolean,
       })
     } catch (error) {
       // eslint-disable-next-line @typescript-eslint/no-unsafe-type-assertion -- Commander options typed as Record<string, unknown>

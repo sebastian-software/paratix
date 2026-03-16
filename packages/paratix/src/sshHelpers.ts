@@ -4,6 +4,54 @@ import type { ExecOptions, ExecResult } from "./types.js"
 
 const CONNECTION_TIMEOUT = 10_000
 
+/**
+ * Maximum number of characters included in a {@link CommandError} message
+ * before the output is truncated. Output beyond this limit is still available
+ * on {@link CommandError.fullStdout} and {@link CommandError.fullStderr}.
+ */
+export const MAX_OUTPUT_LENGTH = 500
+
+function truncateOutput(text: string): string {
+  // eslint-disable-next-line @typescript-eslint/no-misused-spread -- SSH output; codepoint-level split is intentional
+  const codepoints = [...text]
+  if (codepoints.length <= MAX_OUTPUT_LENGTH) return text
+  return `${codepoints.slice(0, MAX_OUTPUT_LENGTH).join("")}…(truncated)`
+}
+
+/**
+ * Error thrown when a remote command exits with a non-zero exit code.
+ *
+ * The `message` contains a truncated summary of stdout and stderr
+ * (up to {@link MAX_OUTPUT_LENGTH} characters each). The full, untruncated
+ * output is available on {@link CommandError.fullStdout} and {@link CommandError.fullStderr} for use
+ * in verbose error reporting.
+ *
+ * @example
+ * ```ts
+ * try {
+ *   await ssh.exec("exit 1")
+ * } catch (error) {
+ *   if (error instanceof CommandError) {
+ *     console.error(error.fullStderr)
+ *   }
+ * }
+ * ```
+ */
+export class CommandError extends Error {
+  /** Full, untruncated standard error of the failed command. */
+  public readonly fullStderr: string
+  /** Full, untruncated standard output of the failed command. */
+  public readonly fullStdout: string
+
+  public constructor(message: string, fullStdout: string, fullStderr: string) {
+    super(message)
+    this.name = "CommandError"
+    this.fullStdout = fullStdout
+    this.fullStderr = fullStderr
+    Error.captureStackTrace(this, CommandError)
+  }
+}
+
 export type StreamOutputParameters = {
   command: string
   options: ExecOptions
@@ -55,9 +103,17 @@ export function collectStreamOutput(parameters: StreamOutputParameters): void {
     const exitCode = code ?? 0
     if (exitCode !== 0 && options.ignoreExitCode !== true) {
       const mask = (text: string): string => maskSecrets(text, parameters.secrets ?? [])
+      const maskedStdout = mask(stdout)
+      const maskedStderr = mask(stderr)
+      const wasTruncated =
+        // eslint-disable-next-line @typescript-eslint/no-misused-spread -- SSH output; codepoint-level length check is intentional
+        [...maskedStdout].length > MAX_OUTPUT_LENGTH || [...maskedStderr].length > MAX_OUTPUT_LENGTH
+      const hint = wasTruncated ? "\n(use --verbose for full output)" : ""
       reject(
-        new Error(
-          `Command failed with exit code ${exitCode}: ${mask(command)}\nstdout: ${mask(stdout)}\nstderr: ${mask(stderr)}`
+        new CommandError(
+          `Command failed with exit code ${exitCode}: ${mask(command)}\nstdout: ${truncateOutput(maskedStdout)}\nstderr: ${truncateOutput(maskedStderr)}${hint}`,
+          maskedStdout,
+          maskedStderr
         )
       )
       return
