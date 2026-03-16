@@ -548,6 +548,49 @@ describe("runPlaybook signal handling", () => {
     expect(subsequentModule.check).not.toHaveBeenCalled()
     expect(disconnectFn).toHaveBeenCalled()
   })
+
+  it("skips remaining modules when shutdown signal was received during a successful module", async () => {
+    vi.doMock("../src/ssh.js", () => ({
+      shellQuote: (s: string) => `'${s}'`,
+      SshConnectionImpl: makeMockSshClass(capturedConfigs, { disconnect: disconnectFn }),
+    }))
+
+    const { runPlaybook } = await import("../src/runner.js")
+
+    const module1: Module = {
+      apply: vi.fn().mockImplementationOnce(async () => {
+        await Promise.resolve()
+        process.emit("SIGINT", "SIGINT")
+        return { status: "changed" } satisfies ModuleResult
+      }),
+      check: vi.fn().mockResolvedValue("needs-apply"),
+      name: "successful-module",
+    }
+
+    const module2: Module = {
+      apply: vi.fn(),
+      check: vi.fn(),
+      name: "should-not-run",
+    }
+
+    const definition: ServerDefinition = {
+      host: "1.2.3.4",
+      name: "test-server",
+      run: [module1, module2],
+      ssh: { ports: [22], privateKey: "~/.ssh/id", user: "root" },
+    }
+
+    await runPlaybook(definition)
+
+    // Module 1 ran to completion (apply returned successfully)
+    expect(module1.apply).toHaveBeenCalledOnce()
+    // Module 2 was never started — shutdownSignal() check at loop start prevented it
+    expect(module2.check).not.toHaveBeenCalled()
+    // Signal exit code is set
+    expect(process.exitCode).toBe(130)
+    // SSH connection was disconnected
+    expect(disconnectFn).toHaveBeenCalled()
+  })
 })
 
 // Bug #12 regression: runPlaybook must pass reconnectTimeout from RunOptions into SshConfig
