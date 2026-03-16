@@ -269,6 +269,11 @@ export class SshConnectionImpl implements SshConnection {
       } catch {
         // local cleanup is best-effort
       }
+      try {
+        await this.exec(`rm -f ${shellQuote(remoteTemporary)}`, { silent: true })
+      } catch {
+        // remote cleanup is best-effort
+      }
     }
   }
 

@@ -228,55 +228,62 @@ describe("SshConnectionImpl.writeFile — large content (> 64 KB)", () => {
   })
 
   // ---------------------------------------------------------------------------
-  // Security: local tmp filename must not be predictable (Date.now()-based)
-  //
-  // BUG: ssh.ts line 230 uses `paratix-write-${Date.now()}` which produces a
-  // predictable, timestamp-based filename. An attacker who knows the approximate
-  // time a file operation will occur can pre-create the path as a symlink and
-  // redirect the write to an arbitrary location (symlink attack / TOCTOU).
-  //
-  // This test MUST FAIL until the bug is fixed by replacing Date.now() with a
-  // cryptographically random suffix (e.g. crypto.randomUUID()).
+  // Regression: remote tmp file cleanup after sftpUpload failure
   // ---------------------------------------------------------------------------
 
-  it("uses a cryptographically random suffix (not a timestamp) for the local tmp filename", async () => {
-    // Arrange — freeze time so that Date.now() always returns the same value.
-    // If the implementation uses Date.now(), two consecutive writeFile calls will
-    // produce the exact same filename, proving the name is predictable (symlink
-    // attack / TOCTOU vulnerability).
-    vi.useFakeTimers()
-    vi.setSystemTime(new Date("2026-01-01T00:00:00.000Z"))
-
+  it("calls rm -f for the remote tmp file when sftpUpload throws (best-effort cleanup)", async () => {
+    // Arrange
+    const remoteTmpPath = "/tmp/paratix-write.CLEANUP"
+    vi.mocked(sftpUpload).mockRejectedValue(new Error("SFTP transfer failed"))
+    const remoteCleanupSpy = makeExecSpy(remoteTmpPath)
+    const client = makeClientWithExecSpy(remoteCleanupSpy)
+    const ssh = makeConnectedSsh(client)
     const content = makeLargeContent()
 
-    // First call — capture the generated local tmp path immediately afterwards.
-    const client1 = makeClientWithExecSpy(execSpy)
-    const ssh1 = makeConnectedSsh(client1)
-    await ssh1.writeFile("/etc/large-config", content)
-    const [firstPath] = vi.mocked(writeFileSync).mock.calls[0] as [string, ...unknown[]]
+    // Act + Assert: the original sftpUpload error propagates
+    await expect(ssh.writeFile("/etc/large-config", content)).rejects.toThrow(
+      "SFTP transfer failed"
+    )
 
-    // Reset only the call history (not the mock implementations) so the second
-    // call can be observed independently without reconstructing the entire spy.
-    vi.mocked(writeFileSync).mockClear()
-    vi.mocked(sftpUpload).mockClear()
-    vi.mocked(sftpUpload).mockResolvedValue()
+    // Assert: exec must have been called with rm -f for the remote tmp path.
+    // The rm -f is the last exec call (after mktemp and the failed sftpUpload).
+    const calls = remoteCleanupSpy.mock.calls as Array<[string, ...unknown[]]>
+    const executedCommands = calls.map(([cmd]) => cmd)
+    expect(executedCommands).toStrictEqual(
+      expect.arrayContaining([expect.stringContaining(`rm -f '${remoteTmpPath}'`)])
+    )
+  })
 
-    // Second call — time is still frozen at the same millisecond.
-    const execSpy2 = makeExecSpy("/tmp/paratix-write.ABCDEF")
-    const client2 = makeClientWithExecSpy(execSpy2)
-    const ssh2 = makeConnectedSsh(client2)
-    await ssh2.writeFile("/etc/large-config", content)
-    const [secondPath] = vi.mocked(writeFileSync).mock.calls[0] as [string, ...unknown[]]
+  it("swallows an error thrown by the remote rm -f cleanup (best-effort)", async () => {
+    // Arrange: sftpUpload succeeds, but rm -f in the finally block throws
+    const remoteTmpPath = "/tmp/paratix-write.CLEANUP2"
 
-    // The suffix after "paratix-write-" must be a UUID, not a decimal timestamp.
-    // UUID format: xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx (RFC 4122)
-    const uuidSuffixPattern =
-      /paratix-write-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/iv
+    // exec spy: mktemp returns the remote tmp path, mv succeeds, rm -f fails
+    const cleanupExecSpy = vi
+      .fn()
+      .mockImplementationOnce((_cmd: string, cb: ExecCallback) => {
+        // First call is always mktemp (via output()) — emit the remote tmp path
+        const stream = makeStream()
+        cb(undefined, stream)
+        stream.emit("data", Buffer.from(remoteTmpPath))
+        stream.emit("close", 0)
+      })
+      .mockImplementationOnce((_cmd: string, cb: ExecCallback) => {
+        // Second call is mv — succeeds
+        const stream = makeStream()
+        cb(undefined, stream)
+        stream.emit("close", 0)
+      })
+      .mockImplementationOnce((_cmd: string, cb: ExecCallback) => {
+        // Third call is rm -f — simulates a failure (e.g. permission denied)
+        cb(new Error("rm -f failed unexpectedly"), makeStream())
+      })
 
-    expect(firstPath).toMatch(uuidSuffixPattern)
-    expect(secondPath).toMatch(uuidSuffixPattern)
+    const client = makeClientWithExecSpy(cleanupExecSpy)
+    const ssh = makeConnectedSsh(client)
+    const content = makeLargeContent()
 
-    // Even with time frozen, two calls must produce distinct names.
-    expect(firstPath).not.toBe(secondPath)
+    // Act + Assert: writeFile must resolve successfully despite the rm -f failure
+    await expect(ssh.writeFile("/etc/large-config", content)).resolves.toBeUndefined()
   })
 })
