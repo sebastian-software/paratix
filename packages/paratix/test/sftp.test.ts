@@ -235,6 +235,51 @@ describe("sftpDownload", () => {
     // intentionally to document the bug.
     expect(sftpEnd).toHaveBeenCalledOnce()
   })
+
+  // ---------------------------------------------------------------------------
+  // REGRESSION: settled-guard in close handler
+  // ---------------------------------------------------------------------------
+
+  it("regression: close event after readStream error does not resolve the already-rejected promise", async () => {
+    // Arrange
+    const { sftp, sftpReadStream } = makeSftpSession()
+    const client = makeClientMock(sftp)
+
+    const localWriteStream = Object.assign(new EventEmitter(), { destroy: vi.fn() })
+    vi.mocked(createWriteStream).mockReturnValue(localWriteStream as unknown as WriteStream)
+
+    const readError = new Error("remote read stream error before close")
+
+    // Act — emit error first, then close (simulates the real-world race condition
+    // where the stream emits error and then close in sequence)
+    const promise = sftpDownload(client, "/remote/file.txt", "/local/file.txt")
+    sftpReadStream.emit("error", readError)
+    // Simulate close firing after the error (the previously missing settled-guard
+    // would have caused this to call resolve() and swallow the rejection)
+    localWriteStream.emit("close")
+
+    // Assert — promise must still reject with the original error, not resolve
+    await expect(promise).rejects.toThrow("remote read stream error before close")
+  })
+
+  it("regression: close event after writeStream error does not resolve the already-rejected promise", async () => {
+    // Arrange
+    const { sftp } = makeSftpSession()
+    const client = makeClientMock(sftp)
+
+    const localWriteStream = Object.assign(new EventEmitter(), { destroy: vi.fn() })
+    vi.mocked(createWriteStream).mockReturnValue(localWriteStream as unknown as WriteStream)
+
+    const writeError = new Error("local write stream error before close")
+
+    // Act — emit error first, then close
+    const promise = sftpDownload(client, "/remote/file.txt", "/local/file.txt")
+    localWriteStream.emit("error", writeError)
+    localWriteStream.emit("close")
+
+    // Assert — promise must still reject with the original error, not resolve
+    await expect(promise).rejects.toThrow("local write stream error before close")
+  })
 })
 
 // ---------------------------------------------------------------------------
@@ -413,5 +458,50 @@ describe("sftpUpload", () => {
     // BUG: No settled-flag exists → sftp.end() is called twice → this test fails
     // intentionally to document the bug.
     expect(sftpEnd).toHaveBeenCalledOnce()
+  })
+
+  // ---------------------------------------------------------------------------
+  // REGRESSION: settled-guard in close handler
+  // ---------------------------------------------------------------------------
+
+  it("regression: close event after localReadStream error does not resolve the already-rejected promise", async () => {
+    // Arrange
+    const { sftp, sftpWriteStream } = makeSftpSession()
+    const client = makeClientMock(sftp)
+
+    const localReadStream = makeMockStream()
+    vi.mocked(createReadStream).mockReturnValue(localReadStream as unknown as ReadStream)
+
+    const readError = new Error("local read stream error before close")
+
+    // Act — emit error on the local readStream first, then close on the writeStream
+    // (simulates the real-world race condition where the stream emits error and
+    // then close in sequence; the missing settled-guard in close would have caused
+    // resolve() to fire and swallow the rejection)
+    const promise = sftpUpload(client, "/local/file.txt", "/remote/file.txt")
+    localReadStream.emit("error", readError)
+    sftpWriteStream.emit("close")
+
+    // Assert — promise must still reject with the original error, not resolve
+    await expect(promise).rejects.toThrow("local read stream error before close")
+  })
+
+  it("regression: close event after remoteWriteStream error does not resolve the already-rejected promise", async () => {
+    // Arrange
+    const { sftp, sftpWriteStream } = makeSftpSession()
+    const client = makeClientMock(sftp)
+
+    const localReadStream = makeMockStream()
+    vi.mocked(createReadStream).mockReturnValue(localReadStream as unknown as ReadStream)
+
+    const writeError = new Error("remote write stream error before close")
+
+    // Act — emit error on the remote writeStream first, then close on the same stream
+    const promise = sftpUpload(client, "/local/file.txt", "/remote/file.txt")
+    sftpWriteStream.emit("error", writeError)
+    sftpWriteStream.emit("close")
+
+    // Assert — promise must still reject with the original error, not resolve
+    await expect(promise).rejects.toThrow("remote write stream error before close")
   })
 })

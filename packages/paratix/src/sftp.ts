@@ -28,6 +28,8 @@ export async function sftpDownload(
       let settled = false
 
       writeStream.on("close", () => {
+        if (settled) return
+        settled = true
         sftp.end()
         resolve()
       })
@@ -78,6 +80,8 @@ export async function sftpUpload(
       let settled = false
 
       writeStream.on("close", () => {
+        if (settled) return
+        settled = true
         sftp.end()
         resolve()
       })
