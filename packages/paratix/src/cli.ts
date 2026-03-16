@@ -190,7 +190,7 @@ function printCauseChain(error: Error): void {
  * @param error - The caught value (may be any type).
  * @param verbose - When `true`, the stack trace of `error` is printed.
  */
-export function printError(error: unknown, verbose: boolean): void {
+export function printExceptionError(error: unknown, verbose: boolean): void {
   console.error(`Error: ${errorToString(error)}`)
 
   if (error instanceof Error) {
@@ -278,7 +278,7 @@ program
       })
     } catch (error) {
       // eslint-disable-next-line @typescript-eslint/no-unsafe-type-assertion -- Commander options typed as Record<string, unknown>
-      printError(error, options.verbose as boolean)
+      printExceptionError(error, options.verbose as boolean)
       // eslint-disable-next-line node/no-process-exit
       process.exit(process.exitCode ?? 2)
     }

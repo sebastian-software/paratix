@@ -33,7 +33,7 @@ cli.ts (options.verbose)
 
 Neue zentrale Funktion in `output.ts`:
 
-1. Ruft `printError("", String(error))` auf (truncated Message)
+1. Ruft `printCommandError("", String(error))` auf (truncated Message)
 2. Bei `verbose && error instanceof CommandError`: ruft `printVerboseCommandError()` auf (voller Output)
 
 ## Betroffene Dateien

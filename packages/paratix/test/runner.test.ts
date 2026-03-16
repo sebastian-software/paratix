@@ -249,7 +249,7 @@ describe("runPlaybook recipe exception handling", () => {
     process.exitCode = 0
   })
 
-  it("calls printError (outputs to console.log) when recipe apply() throws with a non-empty error message", async () => {
+  it("calls printCommandError (outputs to console.log) when recipe apply() throws with a non-empty error message", async () => {
     const capturedConfigs: unknown[] = []
 
     vi.doMock("../src/ssh.js", () => ({
@@ -286,7 +286,7 @@ describe("runPlaybook recipe exception handling", () => {
 
     await runPlaybook(definition)
 
-    // printError uses console.log to output the error message
+    // printCommandError uses console.log to output the error message
     const allLogOutput = consoleLogs.flat().join(" ")
     expect(allLogOutput).toContain("recipe internal failure")
     process.exitCode = 0

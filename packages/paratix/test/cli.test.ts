@@ -8,7 +8,7 @@ import {
   handleTsxLoadFailure,
   isServerDefinitionLike,
   parsePositiveNumber,
-  printError,
+  printExceptionError,
 } from "../src/cli.js"
 
 declare const PACKAGE_VERSION: string
@@ -561,7 +561,7 @@ describe("handleTsxLoadFailure", () => {
   })
 })
 
-describe("printError", () => {
+describe("printExceptionError", () => {
   let errorSpy: MockInstance<typeof console.error>
 
   beforeEach(() => {
@@ -575,29 +575,29 @@ describe("printError", () => {
   })
 
   it("prints the error message for a plain Error", () => {
-    printError(new Error("something went wrong"), false)
+    printExceptionError(new Error("something went wrong"), false)
     expect(errorSpy).toHaveBeenCalledWith("Error: something went wrong")
   })
 
   it("prints the string representation for a non-Error string value", () => {
-    printError("oops", false)
+    printExceptionError("oops", false)
     expect(errorSpy).toHaveBeenCalledWith("Error: oops")
   })
 
   it("prints the string representation for a non-Error number value", () => {
-    printError(42, false)
+    printExceptionError(42, false)
     expect(errorSpy).toHaveBeenCalledWith("Error: 42")
   })
 
   it("prints the JSON representation for a plain object to avoid [object Object]", () => {
-    printError({ code: 404 }, false)
+    printExceptionError({ code: 404 }, false)
     expect(errorSpy).toHaveBeenCalledWith('Error: {"code":404}')
   })
 
   it("prints a single cause when the error has one cause", () => {
     const cause = new Error("root cause")
     const error = new Error("top-level error", { cause })
-    printError(error, false)
+    printExceptionError(error, false)
     expect(errorSpy).toHaveBeenCalledWith("Error: top-level error")
     expect(errorSpy).toHaveBeenCalledWith("  Caused by: root cause")
   })
@@ -606,7 +606,7 @@ describe("printError", () => {
     const root = new Error("database unavailable")
     const mid = new Error("query failed", { cause: root })
     const top = new Error("request failed", { cause: mid })
-    printError(top, false)
+    printExceptionError(top, false)
     expect(errorSpy).toHaveBeenCalledWith("Error: request failed")
     expect(errorSpy).toHaveBeenCalledWith("  Caused by: query failed")
     expect(errorSpy).toHaveBeenCalledWith("  Caused by: database unavailable")
@@ -615,13 +615,13 @@ describe("printError", () => {
   it("prints a non-Error cause using its string representation", () => {
     const error = new Error("top-level error")
     error.cause = "string cause"
-    printError(error, false)
+    printExceptionError(error, false)
     expect(errorSpy).toHaveBeenCalledWith("  Caused by: string cause")
   })
 
   it("does not print a stack trace without --verbose", () => {
     const error = new Error("something went wrong")
-    printError(error, false)
+    printExceptionError(error, false)
     const calls = errorSpy.mock.calls.map((args) => String(args[0]))
     expect(calls.some((msg) => msg.includes("at "))).toBe(false)
   })
@@ -630,7 +630,7 @@ describe("printError", () => {
     const error = new Error("something went wrong")
     // Ensure the stack is defined so the assertion is meaningful
     expect(error.stack).toBeDefined()
-    printError(error, true)
+    printExceptionError(error, true)
     // The stack is printed as the second console.error call (after "Error: …")
     const stackCall = errorSpy.mock.calls[1]?.[0] as string
     expect(stackCall).toContain("something went wrong")
@@ -638,13 +638,13 @@ describe("printError", () => {
   })
 
   it("does not print cause output when there is no cause", () => {
-    printError(new Error("lone error"), false)
+    printExceptionError(new Error("lone error"), false)
     expect(errorSpy).toHaveBeenCalledTimes(1)
     expect(errorSpy).toHaveBeenCalledWith("Error: lone error")
   })
 
   it("does not attempt to walk the cause chain for non-Error values", () => {
-    printError("plain string error", true)
+    printExceptionError("plain string error", true)
     expect(errorSpy).toHaveBeenCalledTimes(1)
   })
 })

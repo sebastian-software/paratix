@@ -63,7 +63,7 @@ export function printModuleResult(name: string, status: string, detail?: string)
  * @param stdout - Captured standard output of the failed command.
  * @param stderr - Captured standard error of the failed command.
  */
-export function printError(stdout: string, stderr: string): void {
+export function printCommandError(stdout: string, stderr: string): void {
   const lines: string[] = []
   if (stderr.trim()) {
     lines.push(...stderr.trim().split("\n"))
@@ -112,10 +112,10 @@ export function printCommandFailure(error: unknown, verbose: boolean): void {
   if (verbose && error instanceof CommandError) {
     // Print only the exit-code line, skip the truncated output and hint
     const summaryLine = error.message.split("\n")[0]
-    printError("", summaryLine)
+    printCommandError("", summaryLine)
     printVerboseCommandError(error.fullStdout, error.fullStderr)
   } else {
-    printError("", String(error))
+    printCommandError("", String(error))
   }
 }
 
