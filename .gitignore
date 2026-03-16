@@ -4,3 +4,4 @@ dist/
 *.tgz
 .wisdom-accumulation-*.tmp.md
 TODO.md
+review-report-*.md
