@@ -589,6 +589,7 @@ describe("runPlaybook signal handling", () => {
     expect(module1.apply).toHaveBeenCalledOnce()
     // Module 2 was never started — shutdownSignal() check at loop start prevented it
     expect(module2.check).not.toHaveBeenCalled()
+    expect(module2.apply).not.toHaveBeenCalled()
     // Signal exit code is set
     expect(process.exitCode).toBe(130)
     // SSH connection was disconnected
