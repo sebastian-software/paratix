@@ -177,8 +177,9 @@ export function when(
       if (!condition(environment)) {
         return "ok"
       }
+      // Defensive copy so inner modules can mutate the env without affecting
+      // the caller's object (see Bug #13 regression tests).
       const currentEnvironment = { ...environment }
-      // Check each child module
       for (const currentModule of modules) {
         // eslint-disable-next-line no-await-in-loop
         const result = await currentModule.check(ssh, currentEnvironment)
