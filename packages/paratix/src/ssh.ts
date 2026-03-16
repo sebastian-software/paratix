@@ -188,7 +188,7 @@ export class SshConnectionImpl implements SshConnection {
   }
 
   public async readFile(remotePath: string): Promise<string> {
-    return this.output(`${this.sudoPrefix()}cat ${shellQuote(remotePath)}`)
+    return this.output(`cat ${shellQuote(remotePath)}`)
   }
 
   public async reconnect(): Promise<void> {
@@ -218,7 +218,7 @@ export class SshConnectionImpl implements SshConnection {
   public async sha256(remotePath: string): Promise<null | string> {
     const exists = await this.test(`[ -f ${shellQuote(remotePath)} ]`)
     if (!exists) return null
-    const out = await this.output(`${this.sudoPrefix()}sha256sum ${shellQuote(remotePath)}`)
+    const out = await this.output(`sha256sum ${shellQuote(remotePath)}`)
     return out.split(/\s+/v)[0] ?? null
   }
 
@@ -246,7 +246,7 @@ export class SshConnectionImpl implements SshConnection {
     if (Buffer.byteLength(content) <= SFTP_WRITE_THRESHOLD) {
       const escaped = shellQuote(content)
       await this.exec(
-        `printf '%s' ${escaped} | ${this.sudoPrefix()}tee ${shellQuote(remotePath)} > /dev/null`,
+        `printf '%s' ${escaped} | tee ${shellQuote(remotePath)} > /dev/null`,
         { silent: true }
       )
       return
@@ -261,7 +261,7 @@ export class SshConnectionImpl implements SshConnection {
       writeFileSync(localTemporary, content)
       await sftpUpload(client, localTemporary, remoteTemporary)
       await this.exec(
-        `${this.sudoPrefix()}mv ${shellQuote(remoteTemporary)} ${shellQuote(remotePath)}`,
+        `mv ${shellQuote(remoteTemporary)} ${shellQuote(remotePath)}`,
         { silent: true }
       )
     } finally {
@@ -296,10 +296,6 @@ export class SshConnectionImpl implements SshConnection {
       return `SUDO_PROMPT='' sudo -S bash -c ${shellQuote(command)}`
     }
     return `sudo bash -c ${shellQuote(command)}`
-  }
-
-  private sudoPrefix(): string {
-    return this.config.user === "root" ? "" : "sudo "
   }
 
   private async tryConnectOnPorts(privateKey: string, password?: string): Promise<boolean> {
