@@ -14,7 +14,9 @@
       "Bash(git commit:*)",
       "Bash(echo \"Exit code: $?\")",
       "Bash(npx eslint:*)",
-      "Bash(echo \"EXIT: $?\")"
+      "Bash(echo \"EXIT: $?\")",
+      "Bash(echo \"EXIT_CODE: $?\")",
+      "Bash(pnpm run:*)"
     ]
   }
 }
