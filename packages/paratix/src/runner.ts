@@ -242,7 +242,8 @@ async function applyModule(
   currentEnvironment: Environment,
   ssh: SshConnectionImpl
 ): Promise<StepResult> {
-  const result = await targetModule.apply(ssh, currentEnvironment)
+  const connection = targetModule.local === true ? null : ssh
+  const result = await targetModule.apply(connection, currentEnvironment)
   printModuleResult(targetModule.name, result.status)
   return handleMetaAndBuildResult(ssh, currentEnvironment, result)
 }
@@ -259,7 +260,8 @@ async function runRegularModule(parameters: RegularModuleArguments): Promise<Ste
   const { dryRun, env, ssh, targetModule, verbose } = parameters
 
   try {
-    const checkResult = await targetModule.check(ssh, env)
+    const connection = targetModule.local === true ? null : ssh
+    const checkResult = await targetModule.check(connection, env)
 
     if (checkResult === "ok") {
       printModuleResult(targetModule.name, "ok")
@@ -327,8 +329,9 @@ async function runSignals(parameters: SignalArguments): Promise<void> {
 
   for (const signal of signals) {
     try {
+      const connection = signal.local === true ? null : ssh
       // eslint-disable-next-line no-await-in-loop
-      const result = await signal.apply(ssh, env)
+      const result = await signal.apply(connection, env)
       printModuleResult(`signal: ${signal.name}`, result.status)
       stats.incrementSignals()
     } catch (error) {

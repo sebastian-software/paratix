@@ -854,6 +854,219 @@ describe("runPlaybook dry-run recipe behaviour", () => {
   })
 })
 
+// Bug: modules with local: true receive an SSH connection instead of null
+describe("runPlaybook local module behaviour", () => {
+  beforeEach(() => {
+    vi.spyOn(console, "log").mockImplementation(() => {
+      /* noop */
+    })
+    vi.spyOn(console, "error").mockImplementation(() => {
+      /* noop */
+    })
+    vi.resetModules()
+  })
+
+  afterEach(() => {
+    vi.restoreAllMocks()
+    vi.resetModules()
+    process.exitCode = 0
+  })
+
+  it("calls check() with null as ssh parameter when module has local: true", async () => {
+    const capturedConfigs: unknown[] = []
+
+    vi.doMock("../src/ssh.js", () => ({
+      shellQuote: (s: string) => `'${s}'`,
+      SshConnectionImpl: makeMockSshClass(capturedConfigs),
+    }))
+
+    const { runPlaybook } = await import("../src/runner.js")
+
+    let capturedSshInCheck: unknown = "NOT_SET"
+    const localModule: Module = {
+      apply: vi.fn().mockResolvedValue({ status: "ok" } satisfies ModuleResult),
+      check: vi.fn().mockImplementation(async (ssh: unknown) => {
+        await Promise.resolve()
+        capturedSshInCheck = ssh
+        return "ok" as const
+      }),
+      local: true,
+      name: "local-module",
+    }
+
+    const definition: ServerDefinition = {
+      host: "1.2.3.4",
+      name: "test-server",
+      run: [localModule],
+      ssh: { ports: [22], privateKey: "~/.ssh/id", user: "root" },
+    }
+
+    await runPlaybook(definition)
+
+    // A local module must receive null instead of an SSH connection
+    expect(capturedSshInCheck).toBeNull()
+  })
+
+  it("calls apply() with null as ssh parameter when module has local: true", async () => {
+    const capturedConfigs: unknown[] = []
+
+    vi.doMock("../src/ssh.js", () => ({
+      shellQuote: (s: string) => `'${s}'`,
+      SshConnectionImpl: makeMockSshClass(capturedConfigs),
+    }))
+
+    const { runPlaybook } = await import("../src/runner.js")
+
+    let capturedSshInApply: unknown = "NOT_SET"
+    const localModule: Module = {
+      apply: vi.fn().mockImplementation(async (ssh: unknown) => {
+        await Promise.resolve()
+        capturedSshInApply = ssh
+        return { status: "changed" } satisfies ModuleResult
+      }),
+      check: vi.fn().mockResolvedValue("needs-apply" as const),
+      local: true,
+      name: "local-module",
+    }
+
+    const definition: ServerDefinition = {
+      host: "1.2.3.4",
+      name: "test-server",
+      run: [localModule],
+      ssh: { ports: [22], privateKey: "~/.ssh/id", user: "root" },
+    }
+
+    await runPlaybook(definition)
+
+    // A local module must receive null instead of an SSH connection
+    expect(capturedSshInApply).toBeNull()
+  })
+})
+
+// Bug regression: local: true in signal modules must receive null instead of ssh
+describe("runPlaybook local signal module behaviour", () => {
+  beforeEach(() => {
+    vi.spyOn(console, "log").mockImplementation(() => {
+      /* noop */
+    })
+    vi.spyOn(console, "error").mockImplementation(() => {
+      /* noop */
+    })
+    vi.resetModules()
+  })
+
+  afterEach(() => {
+    vi.restoreAllMocks()
+    vi.resetModules()
+    process.exitCode = 0
+  })
+
+  it("calls signal apply() with null as ssh parameter when signal module has local: true", async () => {
+    const capturedConfigs: unknown[] = []
+
+    vi.doMock("../src/ssh.js", () => ({
+      shellQuote: (s: string) => `'${s}'`,
+      SshConnectionImpl: makeMockSshClass(capturedConfigs),
+    }))
+
+    const { runPlaybook } = await import("../src/runner.js")
+
+    let capturedSshInSignalApply: unknown = "NOT_SET"
+    const localSignal: Module = {
+      apply: vi.fn().mockImplementation(async (ssh: unknown) => {
+        await Promise.resolve()
+        capturedSshInSignalApply = ssh
+        return { status: "ok" } satisfies ModuleResult
+      }),
+      check: vi.fn().mockResolvedValue("ok" as const),
+      local: true,
+      name: "local-signal",
+    }
+
+    // A module that produces a change triggers signals execution
+    const changingModule: Module = {
+      apply: vi.fn().mockResolvedValue({ status: "changed" } satisfies ModuleResult),
+      check: vi.fn().mockResolvedValue("needs-apply" as const),
+      name: "changing-module",
+    }
+
+    const definition: ServerDefinition = {
+      host: "1.2.3.4",
+      name: "test-server",
+      run: [changingModule],
+      signals: [localSignal],
+      ssh: { ports: [22], privateKey: "~/.ssh/id", user: "root" },
+    }
+
+    await runPlaybook(definition)
+
+    // A local signal module must receive null instead of an SSH connection
+    expect(capturedSshInSignalApply).toBeNull()
+  })
+})
+
+// Bug regression: local: true in dry-run recipe child modules must receive null instead of ssh
+describe("runPlaybook local module in dry-run recipe behaviour", () => {
+  beforeEach(() => {
+    vi.spyOn(console, "log").mockImplementation(() => {
+      /* noop */
+    })
+    vi.spyOn(console, "error").mockImplementation(() => {
+      /* noop */
+    })
+    vi.resetModules()
+  })
+
+  afterEach(() => {
+    vi.restoreAllMocks()
+    vi.resetModules()
+    process.exitCode = 0
+  })
+
+  it("calls check() with null as ssh parameter when a dry-run recipe child module has local: true", async () => {
+    const capturedConfigs: unknown[] = []
+
+    vi.doMock("../src/ssh.js", () => ({
+      shellQuote: (s: string) => `'${s}'`,
+      SshConnectionImpl: makeMockSshClass(capturedConfigs),
+    }))
+
+    const { runPlaybook } = await import("../src/runner.js")
+
+    let capturedSshInCheck: unknown = "NOT_SET"
+    const localChildModule: Module = {
+      apply: vi.fn().mockResolvedValue({ status: "changed" } satisfies ModuleResult),
+      check: vi.fn().mockImplementation(async (ssh: unknown) => {
+        await Promise.resolve()
+        capturedSshInCheck = ssh
+        return "needs-apply" as const
+      }),
+      local: true,
+      name: "local-child-module",
+    }
+
+    const recipeModule = {
+      _isRecipe: true as const,
+      _modules: [localChildModule],
+      apply: vi.fn().mockResolvedValue({ status: "changed" } satisfies ModuleResult),
+      check: vi.fn().mockResolvedValue("needs-apply" as const),
+      name: "test-recipe",
+    }
+
+    const definition: ServerDefinition = {
+      host: "1.2.3.4",
+      name: "test-server",
+      run: [recipeModule],
+      ssh: { ports: [22], privateKey: "~/.ssh/id", user: "root" },
+    }
+
+    await runPlaybook(definition, { dryRun: true })
+
+    // A local child module in a dry-run recipe must receive null instead of an SSH connection
+    expect(capturedSshInCheck).toBeNull()
+  })
+})
+
 // Bug regression: CLI --env overrides (options.envOverrides) must take priority over definition.env
 describe("runPlaybook environment merge priority", () => {
   beforeEach(() => {
