@@ -122,8 +122,10 @@ function installDependencies(
   console.log(`Installing dependencies with ${pm.name}...`)
   try {
     execSync(pm.command, { cwd: projectDirectory, stdio: "inherit" })
-  } catch {
-    console.log("Could not install dependencies automatically. Run install manually.")
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error)
+    console.error(`Failed to install dependencies: ${message}`)
+    console.error("Run install manually.")
   }
 }
 
