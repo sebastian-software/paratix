@@ -1,6 +1,7 @@
 import type { RecipeModule } from "./recipe.js"
 import type { Environment, Module, ModuleResult, ServerDefinition } from "./types.js"
 
+import { dryRunRecipeModule } from "./dryRunRecipe.js"
 import { loadDotEnvironment, mergeEnvironment } from "./environment.js"
 import {
   printCommandFailure,
@@ -216,14 +217,17 @@ async function handleMetaAndBuildResult(
   }
 }
 
-// eslint-disable-next-line max-params -- verbose flag needs to be threaded through
+// eslint-disable-next-line max-params -- verbose and dryRun flags need to be threaded through
 async function runRecipeModule(
   recipeModule: RecipeModule,
   environment: Environment,
   ssh: SshConnectionImpl,
-  verbose: boolean
+  verbose: boolean,
+  dryRun: boolean
 ): Promise<StepResult> {
   try {
+    if (dryRun) return await dryRunRecipeModule(recipeModule, environment, ssh)
+
     const result = await recipeModule.apply(ssh, environment)
     return await handleMetaAndBuildResult(ssh, environment, result)
   } catch (error) {
@@ -290,7 +294,7 @@ async function runModuleLoop(parameters: LoopArguments): Promise<Environment> {
 
   for (const currentModule of modules) {
     const stepPromise = isRecipe(currentModule)
-      ? runRecipeModule(currentModule, currentEnvironment, ssh, verbose)
+      ? runRecipeModule(currentModule, currentEnvironment, ssh, verbose, dryRun)
       : runRegularModule({
           dryRun,
           env: currentEnvironment,

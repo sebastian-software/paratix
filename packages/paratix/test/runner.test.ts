@@ -709,6 +709,151 @@ describe("runPlaybook shutdown handler leak on SSH connection failure", () => {
   })
 })
 
+// Bug regression: recipes must NOT apply() child modules in dry-run mode, only check()
+describe("runPlaybook dry-run recipe behaviour", () => {
+  beforeEach(() => {
+    vi.spyOn(console, "log").mockImplementation(() => {
+      /* noop */
+    })
+    vi.spyOn(console, "error").mockImplementation(() => {
+      /* noop */
+    })
+    vi.resetModules()
+  })
+
+  afterEach(() => {
+    vi.restoreAllMocks()
+    vi.resetModules()
+    process.exitCode = 0
+  })
+
+  it("does not call apply() on any child module when a recipe runs in dry-run mode", async () => {
+    const capturedConfigs: unknown[] = []
+
+    vi.doMock("../src/ssh.js", () => ({
+      shellQuote: (s: string) => `'${s}'`,
+      SshConnectionImpl: makeMockSshClass(capturedConfigs),
+    }))
+
+    const { runPlaybook } = await import("../src/runner.js")
+
+    const childModule1: Module = {
+      apply: vi.fn().mockResolvedValue({ status: "changed" } satisfies ModuleResult),
+      check: vi.fn().mockResolvedValue("needs-apply"),
+      name: "child-module-1",
+    }
+    const childModule2: Module = {
+      apply: vi.fn().mockResolvedValue({ status: "changed" } satisfies ModuleResult),
+      check: vi.fn().mockResolvedValue("needs-apply"),
+      name: "child-module-2",
+    }
+
+    const recipeModule = {
+      _isRecipe: true as const,
+      _modules: [childModule1, childModule2],
+      apply: vi.fn().mockResolvedValue({ status: "changed" } satisfies ModuleResult),
+      check: vi.fn().mockResolvedValue("needs-apply"),
+      name: "test-recipe",
+    }
+
+    const definition: ServerDefinition = {
+      host: "1.2.3.4",
+      name: "test-server",
+      run: [recipeModule],
+      ssh: { ports: [22], privateKey: "~/.ssh/id", user: "root" },
+    }
+
+    await runPlaybook(definition, { dryRun: true })
+
+    expect(childModule1.apply).not.toHaveBeenCalled()
+    expect(childModule2.apply).not.toHaveBeenCalled()
+  })
+
+  it("calls check() on every child module when a recipe runs in dry-run mode", async () => {
+    const capturedConfigs: unknown[] = []
+
+    vi.doMock("../src/ssh.js", () => ({
+      shellQuote: (s: string) => `'${s}'`,
+      SshConnectionImpl: makeMockSshClass(capturedConfigs),
+    }))
+
+    const { runPlaybook } = await import("../src/runner.js")
+
+    const childModule1: Module = {
+      apply: vi.fn().mockResolvedValue({ status: "changed" } satisfies ModuleResult),
+      check: vi.fn().mockResolvedValue("needs-apply"),
+      name: "child-module-1",
+    }
+    const childModule2: Module = {
+      apply: vi.fn().mockResolvedValue({ status: "changed" } satisfies ModuleResult),
+      check: vi.fn().mockResolvedValue("needs-apply"),
+      name: "child-module-2",
+    }
+
+    const recipeModule = {
+      _isRecipe: true as const,
+      _modules: [childModule1, childModule2],
+      apply: vi.fn().mockResolvedValue({ status: "changed" } satisfies ModuleResult),
+      check: vi.fn().mockResolvedValue("needs-apply"),
+      name: "test-recipe",
+    }
+
+    const definition: ServerDefinition = {
+      host: "1.2.3.4",
+      name: "test-server",
+      run: [recipeModule],
+      ssh: { ports: [22], privateKey: "~/.ssh/id", user: "root" },
+    }
+
+    await runPlaybook(definition, { dryRun: true })
+
+    expect(childModule1.check).toHaveBeenCalledOnce()
+    expect(childModule2.check).toHaveBeenCalledOnce()
+  })
+
+  it("outputs (dry-run) suffix in console log when a child module needs-apply in dry-run mode", async () => {
+    const capturedConfigs: unknown[] = []
+
+    vi.doMock("../src/ssh.js", () => ({
+      shellQuote: (s: string) => `'${s}'`,
+      SshConnectionImpl: makeMockSshClass(capturedConfigs),
+    }))
+
+    const consoleLogs: unknown[][] = []
+    vi.spyOn(console, "log").mockImplementation((...args) => {
+      consoleLogs.push(args)
+    })
+
+    const { runPlaybook } = await import("../src/runner.js")
+
+    const childModule: Module = {
+      apply: vi.fn().mockResolvedValue({ status: "changed" } satisfies ModuleResult),
+      check: vi.fn().mockResolvedValue("needs-apply"),
+      name: "pending-child-module",
+    }
+
+    const recipeModule = {
+      _isRecipe: true as const,
+      _modules: [childModule],
+      apply: vi.fn().mockResolvedValue({ status: "changed" } satisfies ModuleResult),
+      check: vi.fn().mockResolvedValue("needs-apply"),
+      name: "test-recipe",
+    }
+
+    const definition: ServerDefinition = {
+      host: "1.2.3.4",
+      name: "test-server",
+      run: [recipeModule],
+      ssh: { ports: [22], privateKey: "~/.ssh/id", user: "root" },
+    }
+
+    await runPlaybook(definition, { dryRun: true })
+
+    const allLogOutput = consoleLogs.flat().join(" ")
+    expect(allLogOutput).toContain("(dry-run)")
+  })
+})
+
 // Bug regression: CLI --env overrides (options.envOverrides) must take priority over definition.env
 describe("runPlaybook environment merge priority", () => {
   beforeEach(() => {
