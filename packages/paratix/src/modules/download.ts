@@ -206,6 +206,12 @@ export const download = {
     if (parts.length !== 2 || parts.some((p) => p.length === 0 || p.includes(".."))) {
       throw new Error(`Invalid GitHub repo format: ${options.repo} (expected "owner/repo")`)
     }
+    if (options.tag.length === 0 || options.tag.includes("..")) {
+      throw new Error(`Invalid GitHub release tag: ${options.tag}`)
+    }
+    if (options.asset.length === 0 || options.asset.includes("..")) {
+      throw new Error(`Invalid GitHub release asset: ${options.asset}`)
+    }
 
     const url = `https://github.com/${options.repo}/releases/download/${options.tag}/${options.asset}`
     const headers: Record<string, string> = {}
