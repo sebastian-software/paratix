@@ -2,6 +2,9 @@ import { execSync } from "node:child_process"
 import { existsSync, mkdirSync, writeFileSync } from "node:fs"
 import { join, resolve } from "node:path"
 
+const MS_PER_MINUTE = 60_000
+const INSTALL_TIMEOUT_MS = 120_000
+
 const SERVER_TEMPLATE = `import { server, recipe } from "paratix";
 import { package as pkg, hostname, sshd, ufw, file, service, user } from "paratix/modules";
 
@@ -121,10 +124,10 @@ function installDependencies(
 ): void {
   console.log(`Installing dependencies with ${pm.name}...`)
   try {
-    execSync(pm.command, { cwd: projectDirectory, stdio: "inherit", timeout: 120_000 })
+    execSync(pm.command, { cwd: projectDirectory, stdio: "inherit", timeout: INSTALL_TIMEOUT_MS })
   } catch (error) {
     if (error instanceof Error && "signal" in error && error.signal === "SIGTERM") {
-      console.error("Installation timed out after 2 minutes.")
+      console.error(`Installation timed out after ${INSTALL_TIMEOUT_MS / MS_PER_MINUTE} minutes.`)
     } else {
       const message = error instanceof Error ? error.message : String(error)
       console.error(`Failed to install dependencies: ${message}`)
