@@ -191,6 +191,43 @@ describe("SshConnectionImpl", () => {
 
       expect(endSpy).toHaveBeenCalledOnce()
     })
+
+    it("rejects pending exec() Promises when disconnect() is called while they are still pending", async () => {
+      // BUG: disconnect() calls pendingRejects.clear() without iterating and
+      // invoking the stored reject functions first. As a result, pending exec()
+      // Promises are silently dropped and never settled, which causes callers to
+      // hang indefinitely.
+      //
+      // The correct behavior (already implemented in the 'close' event handler
+      // in tryConnectOnPorts) is to iterate over pendingRejects, call each
+      // function with an Error, and then clear the set.
+      const execSpy = vi.fn().mockImplementation((_command: string, callback: ExecCallback) => {
+        const stream = makeStream()
+        callback(undefined, stream)
+        // Stream intentionally never emits 'close' — the exec() Promise stays pending
+      })
+
+      const client = {
+        end: vi.fn(),
+        exec: execSpy,
+        sftp: vi.fn(),
+      } as unknown as Client
+
+      const ssh = makeConnectedSsh(client)
+
+      const execPromise = ssh.exec("sleep infinity")
+
+      // Attach a no-op rejection handler so the unhandled-rejection detector
+      // does not fire before we assert below.
+      execPromise.catch(() => {
+        /* handled below */
+      })
+
+      // Calling disconnect() while the exec Promise is pending should reject it.
+      ssh.disconnect()
+
+      await expect(execPromise).rejects.toThrow("SSH connection closed")
+    })
   })
 
   // -------------------------------------------------------------------------

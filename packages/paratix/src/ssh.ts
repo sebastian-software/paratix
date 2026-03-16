@@ -69,6 +69,10 @@ export class SshConnectionImpl implements SshConnection {
       this.client.end()
       this.client = null
     }
+    const error = new Error("SSH connection closed")
+    for (const rejectFunction of this.pendingRejects) {
+      rejectFunction(error)
+    }
     this.pendingRejects.clear()
   }
 
