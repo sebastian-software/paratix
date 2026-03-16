@@ -195,6 +195,30 @@ describe("when", () => {
     expect(callerEnv).not.toHaveProperty("injected")
   })
 
+  // Bug: applyConditionalModules returns { status: aggregatedStatus } without a meta field,
+  // so meta values produced by inner modules are silently dropped.
+  it("apply returns meta values from inner modules in the result", async () => {
+    const metaModule: Module = {
+      // eslint-disable-next-line @typescript-eslint/require-await -- Interface requires async
+      async apply() {
+        return { meta: { RESOLVED_IP: "1.2.3.4" }, status: "changed" as const }
+      },
+      // eslint-disable-next-line @typescript-eslint/require-await -- Interface requires async
+      async check() {
+        return "needs-apply"
+      },
+      name: "meta-producing-module",
+    }
+
+    const mod = when(() => true, metaModule)
+    // eslint-disable-next-line prefer-spread
+    const result = await mod.apply(null, emptyEnv)
+
+    expect(result.status).toBe("changed")
+    expect(result.meta).toBeDefined()
+    expect(result.meta).toMatchObject({ RESOLVED_IP: "1.2.3.4" })
+  })
+
   it("check passes the same copied environment to all inner modules", async () => {
     const envsSeenBySecond: Environment[] = []
     const firstModule: Module = {

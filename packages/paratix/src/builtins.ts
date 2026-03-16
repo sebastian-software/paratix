@@ -112,6 +112,18 @@ export function pause(message?: string): Module {
   }
 }
 
+function computeMetaDiff(original: Environment, current: Environment): Environment | undefined {
+  const meta: Environment = {}
+  let hasMeta = false
+  for (const key of Object.keys(current)) {
+    if (!(key in original) || current[key] !== original[key]) {
+      meta[key] = current[key]
+      hasMeta = true
+    }
+  }
+  return hasMeta ? meta : undefined
+}
+
 async function applyConditionalModules(
   ssh: null | SshConnection,
   environment: Environment,
@@ -132,7 +144,7 @@ async function applyConditionalModules(
     if (result.status === "changed") aggregatedStatus = "changed"
   }
 
-  return { status: aggregatedStatus }
+  return { meta: computeMetaDiff(environment, currentEnvironment), status: aggregatedStatus }
 }
 
 /**
