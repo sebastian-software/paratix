@@ -123,8 +123,12 @@ function installDependencies(
   try {
     execSync(pm.command, { cwd: projectDirectory, stdio: "inherit", timeout: 120_000 })
   } catch (error) {
-    const message = error instanceof Error ? error.message : String(error)
-    console.error(`Failed to install dependencies: ${message}`)
+    if (error instanceof Error && "signal" in error && error.signal === "SIGTERM") {
+      console.error("Installation timed out after 2 minutes.")
+    } else {
+      const message = error instanceof Error ? error.message : String(error)
+      console.error(`Failed to install dependencies: ${message}`)
+    }
     console.error("Run install manually.")
   }
 }
