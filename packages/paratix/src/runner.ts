@@ -128,11 +128,11 @@ function initializeEnvironment(options: RunOptions, definition: ServerDefinition
   if (options.envFile != null) {
     environment = mergeEnvironment(environment, loadDotEnvironment(options.envFile))
   }
-  if (options.envOverrides != null) {
-    environment = mergeEnvironment(environment, options.envOverrides)
-  }
   if (definition.env != null) {
     environment = mergeEnvironment(environment, definition.env)
+  }
+  if (options.envOverrides != null) {
+    environment = mergeEnvironment(environment, options.envOverrides)
   }
 
   return environment

@@ -623,3 +623,54 @@ describe("runPlaybook reconnectTimeout", () => {
     expect(capturedConfigs[0]).toBe(sshConfig)
   })
 })
+
+// Bug regression: CLI --env overrides (options.envOverrides) must take priority over definition.env
+describe("runPlaybook environment merge priority", () => {
+  beforeEach(() => {
+    vi.spyOn(console, "log").mockImplementation(() => {
+      /* noop */
+    })
+    vi.spyOn(console, "error").mockImplementation(() => {
+      /* noop */
+    })
+    vi.resetModules()
+  })
+
+  afterEach(() => {
+    vi.restoreAllMocks()
+    vi.resetModules()
+    process.exitCode = 0
+  })
+
+  it("envOverrides (CLI --env) wins over definition.env when both set the same key", async () => {
+    const capturedConfigs: unknown[] = []
+
+    vi.doMock("../src/ssh.js", () => ({
+      shellQuote: (s: string) => `'${s}'`,
+      SshConnectionImpl: makeMockSshClass(capturedConfigs),
+    }))
+
+    const { runPlaybook } = await import("../src/runner.js")
+
+    let capturedEnv: Record<string, unknown> = {}
+    const probeModule: Module = {
+      apply: vi.fn().mockResolvedValue({ status: "ok" } satisfies ModuleResult),
+      check: vi.fn().mockImplementation((_ssh: unknown, env: Record<string, unknown>) => {
+        capturedEnv = env
+      }),
+      name: "env-probe",
+    }
+
+    const definition: ServerDefinition = {
+      env: { APP_ENV: "from-definition" },
+      host: "1.2.3.4",
+      name: "test-server",
+      run: [probeModule],
+      ssh: { ports: [22], privateKey: "~/.ssh/id", user: "root" },
+    }
+
+    await runPlaybook(definition, { envOverrides: { APP_ENV: "from-cli-override" } })
+
+    expect(capturedEnv.APP_ENV).toBe("from-cli-override")
+  })
+})
