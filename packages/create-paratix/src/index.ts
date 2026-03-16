@@ -128,7 +128,9 @@ function installDependencies(
     return true
   } catch (error) {
     if (error instanceof Error && "signal" in error && error.signal === "SIGTERM") {
-      console.error(`Installation timed out after ${INSTALL_TIMEOUT_MS / MS_PER_MINUTE} minutes.`)
+      console.error(
+        `Installation timed out after ${Math.round(INSTALL_TIMEOUT_MS / MS_PER_MINUTE)} minutes.`
+      )
     } else {
       const message = error instanceof Error ? error.message : String(error)
       console.error(`Failed to install dependencies: ${message}`)
