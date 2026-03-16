@@ -337,17 +337,27 @@ function resolveExitCode(shutdownSignal: NodeJS.Signals | null, stats: RunStats)
   }
 }
 
+async function connectSsh(
+  definition: ServerDefinition,
+  options: RunOptions,
+  setSsh: (connection: SshConnectionImpl) => void
+): Promise<SshConnectionImpl> {
+  const ssh = await createSshConnection(definition, options)
+  setSsh(ssh)
+  return ssh
+}
+
 export async function runPlaybook(
   definition: ServerDefinition,
   options: RunOptions = {}
 ): Promise<void> {
   const environment = initializeEnvironment(options, definition)
   const { handleShutdownSignal, setSsh, shutdownSignal } = setupShutdownHandlers()
-  const ssh = await createSshConnection(definition, options)
-  setSsh(ssh)
+  let ssh: SshConnectionImpl | undefined
   const stats = new RunStats()
 
   try {
+    ssh = await connectSsh(definition, options, setSsh)
     printRecipeHeader(definition.name)
     const finalEnvironment = await runModuleLoop({
       dryRun: options.dryRun ?? false,
@@ -366,7 +376,7 @@ export async function runPlaybook(
     process.removeListener("SIGINT", handleShutdownSignal)
     process.removeListener("SIGTERM", handleShutdownSignal)
     // Idempotent: may already have been called by the shutdown signal handler
-    ssh.disconnect()
+    ssh?.disconnect()
   }
 
   resolveExitCode(shutdownSignal(), stats)

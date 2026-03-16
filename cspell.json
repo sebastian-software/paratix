@@ -40,6 +40,8 @@
     "passwordless",
     "recognised",
     "resolv",
+    "sigint",
+    "sigterm",
     "sshd",
     "systemctl",
     "tmpl",

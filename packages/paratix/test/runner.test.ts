@@ -624,6 +624,91 @@ describe("runPlaybook reconnectTimeout", () => {
   })
 })
 
+// Bug regression: SIGINT/SIGTERM handlers must be cleaned up even when createSshConnection() throws
+describe("runPlaybook shutdown handler leak on SSH connection failure", () => {
+  beforeEach(() => {
+    vi.spyOn(console, "log").mockImplementation(() => {
+      /* noop */
+    })
+    vi.spyOn(console, "error").mockImplementation(() => {
+      /* noop */
+    })
+    vi.resetModules()
+  })
+
+  afterEach(() => {
+    vi.restoreAllMocks()
+    vi.resetModules()
+    process.exitCode = 0
+  })
+
+  it("does not leak SIGINT/SIGTERM listeners when createSshConnection throws (connect fails)", async () => {
+    // createSshConnection() is called BEFORE the try block in runPlaybook().
+    // When ssh.connect() throws, the finally block (which removes the listeners)
+    // is never reached. This test documents the handler leak bug.
+    vi.doMock("../src/ssh.js", () => ({
+      shellQuote: (s: string) => `'${s}'`,
+      SshConnectionImpl: class MockFailingConnection {
+        public connect = vi.fn().mockRejectedValue(new Error("Connection refused"))
+        public disconnect = vi.fn()
+        public probeSudo = vi.fn().mockResolvedValue(null)
+      },
+    }))
+
+    const { runPlaybook } = await import("../src/runner.js")
+
+    const sigintBefore = process.listenerCount("SIGINT")
+    const sigtermBefore = process.listenerCount("SIGTERM")
+
+    const definition: ServerDefinition = {
+      host: "1.2.3.4",
+      name: "test-server",
+      run: [],
+      ssh: { ports: [22], privateKey: "~/.ssh/id", user: "root" },
+    }
+
+    // runPlaybook throws because createSshConnection throws
+    await expect(runPlaybook(definition)).rejects.toThrow("Connection refused")
+
+    // The SIGINT/SIGTERM listeners registered by setupShutdownHandlers() must be
+    // removed even when createSshConnection() fails. Currently this does NOT happen
+    // because createSshConnection() is outside the try block, so the finally block
+    // with process.removeListener() is never reached.
+    expect(process.listenerCount("SIGINT")).toBe(sigintBefore)
+    expect(process.listenerCount("SIGTERM")).toBe(sigtermBefore)
+  })
+
+  it("does not leak SIGINT/SIGTERM listeners when probeSudo throws after connect succeeds", async () => {
+    // Same bug: probeSudo() is also called inside createSshConnection(), still
+    // before the try block. A failure there equally bypasses the finally cleanup.
+    vi.doMock("../src/ssh.js", () => ({
+      shellQuote: (s: string) => `'${s}'`,
+      SshConnectionImpl: class MockProbeSudoFailing {
+        public connect = vi.fn().mockResolvedValue(null)
+        public disconnect = vi.fn()
+        public probeSudo = vi.fn().mockRejectedValue(new Error("sudo probe failed"))
+      },
+    }))
+
+    const { runPlaybook } = await import("../src/runner.js")
+
+    const sigintBefore = process.listenerCount("SIGINT")
+    const sigtermBefore = process.listenerCount("SIGTERM")
+
+    const definition: ServerDefinition = {
+      host: "1.2.3.4",
+      name: "test-server",
+      run: [],
+      ssh: { ports: [22], privateKey: "~/.ssh/id", user: "root" },
+    }
+
+    await expect(runPlaybook(definition)).rejects.toThrow("sudo probe failed")
+
+    expect(process.listenerCount("SIGINT")).toBe(sigintBefore)
+    expect(process.listenerCount("SIGTERM")).toBe(sigtermBefore)
+  })
+})
+
 // Bug regression: CLI --env overrides (options.envOverrides) must take priority over definition.env
 describe("runPlaybook environment merge priority", () => {
   beforeEach(() => {
