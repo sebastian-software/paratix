@@ -197,12 +197,19 @@ export const file = {
     templatePath: string,
     options?: { mode?: string; owner?: string }
   ): Module {
+    let cachedContent: string | undefined
+
+    async function getTemplateContent(): Promise<string> {
+      // eslint-disable-next-line security/detect-non-literal-fs-filename, require-atomic-updates -- single-threaded; runner calls check() then apply() sequentially
+      cachedContent ??= await readFile(templatePath, "utf8")
+      return cachedContent
+    }
+
     return {
       async apply(ssh: null | SshConnection, environment: Environment): Promise<ModuleResult> {
         if (!ssh) return { status: "failed" }
 
-        // eslint-disable-next-line security/detect-non-literal-fs-filename
-        const templateContent = await readFile(templatePath, "utf8")
+        const templateContent = await getTemplateContent()
         const rendered = await renderTemplate(templateContent, environment)
         await ssh.writeFile(remotePath, rendered)
 
@@ -227,8 +234,7 @@ export const file = {
         const exists = await ssh.exists(remotePath)
         if (!exists) return NEEDS_APPLY
 
-        // eslint-disable-next-line security/detect-non-literal-fs-filename
-        const templateContent = await readFile(templatePath, "utf8")
+        const templateContent = await getTemplateContent()
         const rendered = await renderTemplate(templateContent, environment)
         const localHash = sha256String(rendered)
         const remoteHash = await ssh.sha256(remotePath)
