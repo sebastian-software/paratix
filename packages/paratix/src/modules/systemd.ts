@@ -2,6 +2,7 @@ import { shellQuote } from "../ssh.js"
 import { type Module, type ModuleResult, NEEDS_APPLY, type SshConnection } from "../types.js"
 
 const SYSTEMCTL = "systemctl"
+const UNIT_NAME_PATTERN = /^[\w@.\-]+$/v
 
 /**
  * Modules for managing systemd unit files and unit masking.
@@ -74,6 +75,9 @@ export const systemd = {
    * @returns A Module that ensures the unit file is present with the given content.
    */
   unit(name: string, content: string): Module {
+    if (!UNIT_NAME_PATTERN.test(name)) {
+      throw new Error(`systemd.unit: name must match ${String(UNIT_NAME_PATTERN)}, got: ${name}`)
+    }
     const filePath = `/etc/systemd/system/${name}`
     return {
       async apply(ssh: null | SshConnection): Promise<ModuleResult> {

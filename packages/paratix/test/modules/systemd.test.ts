@@ -175,6 +175,36 @@ describe("systemd.unit", () => {
   })
 })
 
+describe("systemd.unit — input validation", () => {
+  it("throws when name contains path traversal (../../etc/passwd)", () => {
+    expect(() => systemd.unit("../../etc/passwd", "[Unit]")).toThrow(/name must match/v)
+  })
+
+  it("throws when name contains a forward slash (foo/bar.service)", () => {
+    expect(() => systemd.unit("foo/bar.service", "[Unit]")).toThrow(/name must match/v)
+  })
+
+  it("throws when name contains a space", () => {
+    expect(() => systemd.unit("my service.service", "[Unit]")).toThrow(/name must match/v)
+  })
+
+  it("throws when name contains shell metacharacters (semicolon)", () => {
+    expect(() => systemd.unit("app;rm.service", "[Unit]")).toThrow(/name must match/v)
+  })
+
+  it("allows valid service names with letters, digits, dots, hyphens, and underscores", () => {
+    expect(() => systemd.unit("my-app.service", "[Unit]")).not.toThrow()
+  })
+
+  it("allows valid timer names", () => {
+    expect(() => systemd.unit("backup.timer", "[Unit]")).not.toThrow()
+  })
+
+  it("allows names with the @ instance specifier", () => {
+    expect(() => systemd.unit("app@instance.service", "[Unit]")).not.toThrow()
+  })
+})
+
 describe("systemd.unmasked", () => {
   it("check returns ok when unit is not masked", async () => {
     const ssh = createMockSsh({

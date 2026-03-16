@@ -5,6 +5,7 @@ import { shellQuote } from "../ssh.js"
 import { type Module, type ModuleResult, NEEDS_APPLY, type SshConnection } from "../types.js"
 
 const EXEC_OPTS = { ignoreExitCode: true, silent: true } as const
+const UNIT_NAME_PATTERN = /^[\w@.\-]+$/v
 
 // cspell:ignore podman
 type ComposeRuntime = "docker" | "podman"
@@ -346,6 +347,11 @@ export const compose = {
   systemd(options: { name?: string; projectDirectory: string; runtime?: ComposeRuntime }): Module {
     const { projectDirectory, runtime: explicitRuntime } = options
     const serviceName = options.name ?? `compose-${basename(projectDirectory)}`
+    if (!UNIT_NAME_PATTERN.test(serviceName)) {
+      throw new Error(
+        `compose.systemd: name must match ${String(UNIT_NAME_PATTERN)}, got: ${serviceName}`
+      )
+    }
     const unitFileName = `${serviceName}.service`
     const filePath = `/etc/systemd/system/${unitFileName}`
 
