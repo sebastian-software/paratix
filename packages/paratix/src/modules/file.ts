@@ -1,4 +1,4 @@
-import { readFileSync } from "node:fs"
+import { readFile } from "node:fs/promises"
 
 import { shellQuote } from "../ssh.js"
 import { renderTemplate } from "../template.js"
@@ -202,7 +202,7 @@ export const file = {
         if (!ssh) return { status: "failed" }
 
         // eslint-disable-next-line security/detect-non-literal-fs-filename
-        const templateContent = readFileSync(templatePath, "utf8")
+        const templateContent = await readFile(templatePath, "utf8")
         const rendered = await renderTemplate(templateContent, environment)
         await ssh.writeFile(remotePath, rendered)
 
@@ -228,7 +228,7 @@ export const file = {
         if (!exists) return NEEDS_APPLY
 
         // eslint-disable-next-line security/detect-non-literal-fs-filename
-        const templateContent = readFileSync(templatePath, "utf8")
+        const templateContent = await readFile(templatePath, "utf8")
         const rendered = await renderTemplate(templateContent, environment)
         const localHash = sha256String(rendered)
         const remoteHash = await ssh.sha256(remotePath)

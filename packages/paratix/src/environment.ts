@@ -1,4 +1,4 @@
-import { readFileSync } from "node:fs"
+import { readFile } from "node:fs/promises"
 
 import type { Environment } from "./types.js"
 
@@ -34,9 +34,9 @@ export async function resolveEnvironment(
  * @param filePath - Absolute path to the `.env` file.
  * @returns The parsed env map.
  */
-export function loadDotEnvironment(filePath: string): Environment {
+export async function loadDotEnvironment(filePath: string): Promise<Environment> {
   // eslint-disable-next-line security/detect-non-literal-fs-filename
-  const content = readFileSync(filePath, "utf8")
+  const content = await readFile(filePath, "utf8")
   const environment: Environment = {}
 
   for (const line of content.split("\n")) {

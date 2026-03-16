@@ -147,20 +147,13 @@ function isRecipe(target: Module): target is RecipeModule {
   return "_isRecipe" in target && (target as RecipeModule)._isRecipe
 }
 
-function initializeEnvironment(options: RunOptions, definition: ServerDefinition): Environment {
-  let environment: Environment = {}
-
-  if (options.envFile != null) {
-    environment = mergeEnvironment(environment, loadDotEnvironment(options.envFile))
-  }
-  if (definition.env != null) {
-    environment = mergeEnvironment(environment, definition.env)
-  }
-  if (options.envOverrides != null) {
-    environment = mergeEnvironment(environment, options.envOverrides)
-  }
-
-  return environment
+async function initializeEnvironment(
+  options: RunOptions,
+  definition: ServerDefinition
+): Promise<Environment> {
+  const dotEnvironment =
+    options.envFile == null ? undefined : await loadDotEnvironment(options.envFile)
+  return mergeEnvironment({}, dotEnvironment, definition.env, options.envOverrides)
 }
 
 async function handlePortChange(ssh: SshConnectionImpl, meta: Environment): Promise<void> {
@@ -378,7 +371,7 @@ export async function runPlaybook(
   options: RunOptions = {}
 ): Promise<void> {
   const { dryRun = false, verbose = false } = options
-  const environment = initializeEnvironment(options, definition)
+  const environment = await initializeEnvironment(options, definition)
   const { handleShutdownSignal, setSsh, shutdownSignal } = setupShutdownHandlers()
   const stats = new RunStats()
   let ssh: SshConnectionImpl | undefined

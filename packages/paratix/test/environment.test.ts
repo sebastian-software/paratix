@@ -56,36 +56,36 @@ describe("loadDotEnvironment", () => {
     }
   })
 
-  it("parses KEY=value lines into an Environment object", () => {
+  it("parses KEY=value lines into an Environment object", async () => {
     writeFileSync(tmpFile, "HOST=example.com\nPORT=3000\n")
-    const env = loadDotEnvironment(tmpFile)
+    const env = await loadDotEnvironment(tmpFile)
     expect(env.HOST).toBe("example.com")
     expect(env.PORT).toBe("3000")
   })
 
-  it("ignores comment lines starting with #", () => {
+  it("ignores comment lines starting with #", async () => {
     writeFileSync(tmpFile, "# This is a comment\nHOST=example.com\n")
-    const env = loadDotEnvironment(tmpFile)
+    const env = await loadDotEnvironment(tmpFile)
     expect(Object.keys(env)).toHaveLength(1)
     expect(env.HOST).toBe("example.com")
   })
 
-  it("ignores empty lines", () => {
+  it("ignores empty lines", async () => {
     writeFileSync(tmpFile, "\n\nHOST=example.com\n\n")
-    const env = loadDotEnvironment(tmpFile)
+    const env = await loadDotEnvironment(tmpFile)
     expect(Object.keys(env)).toHaveLength(1)
     expect(env.HOST).toBe("example.com")
   })
 
-  it("strips surrounding double quotes from values", () => {
+  it("strips surrounding double quotes from values", async () => {
     writeFileSync(tmpFile, 'TOKEN="my-secret-token"\n')
-    const env = loadDotEnvironment(tmpFile)
+    const env = await loadDotEnvironment(tmpFile)
     expect(env.TOKEN).toBe("my-secret-token")
   })
 
-  it("strips surrounding single quotes from values", () => {
+  it("strips surrounding single quotes from values", async () => {
     writeFileSync(tmpFile, "TOKEN='my-secret-token'\n")
-    const env = loadDotEnvironment(tmpFile)
+    const env = await loadDotEnvironment(tmpFile)
     expect(env.TOKEN).toBe("my-secret-token")
   })
 })
