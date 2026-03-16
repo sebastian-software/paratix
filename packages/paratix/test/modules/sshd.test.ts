@@ -118,6 +118,26 @@ describe("sshd.config — apply", () => {
     expect(calls[0][1]).toContain("AllowUsers admin*")
   })
 
+  it("bug — replaces ALL occurrences of a duplicate directive, not only the first", async () => {
+    // sshd_config with the same directive appearing twice (e.g. after a manual edit or
+    // a partial previous run).  Both lines must be replaced, not just the first one.
+    const mockSsh = createMockSsh({
+      [CAT_SSHD]: {
+        stdout: "PasswordAuthentication yes\nPasswordAuthentication yes\n",
+      },
+    })
+    const writtenFiles = trackWriteFile(mockSsh)
+
+    const mod = sshd.config({ PasswordAuthentication: "no" })
+    await mod.apply(mockSsh, emptyEnv)
+
+    const written = writtenFiles.find((f) => f.path === SSHD_CONFIG)
+    expect(written).toBeDefined()
+    // After apply the old value must be gone entirely — both duplicates replaced.
+    expect(written?.content).not.toContain("PasswordAuthentication yes")
+    expect(written?.content).toContain("PasswordAuthentication no")
+  })
+
   it("regression — value with forward slash does not break file path or pattern", async () => {
     const mockSsh = createMockSsh({
       [CAT_SSHD]: { stdout: "AuthorizedKeysFile .ssh/authorized_keys\n" },

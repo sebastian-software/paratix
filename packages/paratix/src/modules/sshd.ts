@@ -17,7 +17,7 @@ function escapeRegExp(s: string): string {
 async function applySshdSetting(ssh: SshConnection, key: string, value: string): Promise<void> {
   const content = await ssh.readFile(SSHD_CONFIG_PATH)
   // eslint-disable-next-line security/detect-non-literal-regexp
-  const pattern = new RegExp(`^${escapeRegExp(key)}\\s.*`, "mv")
+  const pattern = new RegExp(`^${escapeRegExp(key)}\\s.*`, "gmv")
   let newContent: string
 
   if (pattern.test(content)) {
