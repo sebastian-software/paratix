@@ -293,7 +293,7 @@ export class SshConnectionImpl implements SshConnection {
   private sudoCommand(command: string): string {
     if (this.config.user === "root") return command
     if (this.cachedSudoPassword != null) {
-      return `sudo -S bash -c ${shellQuote(command)}`
+      return `SUDO_PROMPT='' sudo -S bash -c ${shellQuote(command)}`
     }
     return `sudo bash -c ${shellQuote(command)}`
   }

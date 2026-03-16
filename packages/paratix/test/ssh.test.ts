@@ -107,6 +107,12 @@ function makeConnectedSsh(
  * Creates an SSH instance with a mock client that also has the 'close' listener
  * registered — exactly as tryConnectOnPorts() would do it. This allows tests to
  * simulate an unexpected connection drop by emitting 'close' on the client.
+ *
+ * @param client - Mock SSH2 Client that also extends EventEmitter so 'close' can be emitted.
+ * @param options - Optional connection options.
+ * @param options.sudoPassword - Optional sudo password for the connection.
+ * @param options.user - Optional SSH user (defaults to "root").
+ * @returns A connected SshConnectionImpl with the 'close' listener attached.
  */
 function makeConnectedSshWithCloseListener(
   client: Client & EventEmitter,
@@ -304,6 +310,22 @@ describe("SshConnectionImpl", () => {
       await expect(execPromise).rejects.toThrow(/Command timed out after 5000ms/v)
     })
 
+    it("prefixes sudo command with SUDO_PROMPT='' to suppress username disclosure in stderr", async () => {
+      const execSpy = vi.fn().mockImplementation((_command: string, callback: ExecCallback) => {
+        const stream = makeStream()
+        callback(undefined, stream)
+        stream.emit("close", 0)
+      })
+      const client = makeClientWithExecSpy(execSpy)
+      const ssh = makeConnectedSsh(client, { sudoPassword: "my-sudo-pass", user: "deploy" })
+
+      await ssh.exec("whoami")
+
+      const [executedCommand] = execSpy.mock.calls[0] as [string, ...unknown[]]
+      expect(executedCommand).toContain("SUDO_PROMPT=''")
+      expect(executedCommand).toMatch(/^SUDO_PROMPT='' sudo -S bash -c /v)
+    })
+
     it("writes sudo password to stdin for non-root user with cachedSudoPassword", async () => {
       const execSpy = vi.fn().mockImplementation((_command: string, callback: ExecCallback) => {
         const stream = makeStream()
@@ -321,7 +343,7 @@ describe("SshConnectionImpl", () => {
     })
 
     it("rejects pending exec() immediately when client emits 'close'", async () => {
-      let capturedStream: StreamWithStderr | null = null
+      let capturedStream: null | StreamWithStderr = null
       const execSpy = vi.fn().mockImplementation((_command: string, callback: ExecCallback) => {
         const stream = makeStream()
         capturedStream = stream
