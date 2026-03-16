@@ -289,6 +289,8 @@ async function runModuleLoop(parameters: LoopArguments): Promise<Environment> {
   let currentEnvironment = parameters.env
 
   for (const currentModule of modules) {
+    // A module already running when the signal arrived completes normally
+    // and its result is still counted in stats before the loop exits here.
     if (shutdownSignal() != null) break
     const stepPromise = isRecipe(currentModule)
       ? runRecipeModule(currentModule, currentEnvironment, ssh, verbose, dryRun)
