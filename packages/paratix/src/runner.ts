@@ -278,16 +278,18 @@ type LoopArguments = {
   dryRun: boolean
   env: Environment
   modules: Module[]
+  shutdownSignal: () => NodeJS.Signals | null
   ssh: SshConnectionImpl
   stats: RunStats
   verbose: boolean
 }
 
 async function runModuleLoop(parameters: LoopArguments): Promise<Environment> {
-  const { dryRun, modules, ssh, stats, verbose } = parameters
+  const { dryRun, modules, shutdownSignal, ssh, stats, verbose } = parameters
   let currentEnvironment = parameters.env
 
   for (const currentModule of modules) {
+    if (shutdownSignal() != null) break
     const stepPromise = isRecipe(currentModule)
       ? runRecipeModule(currentModule, currentEnvironment, ssh, verbose, dryRun)
       : runRegularModule({
@@ -385,6 +387,7 @@ export async function runPlaybook(
       dryRun,
       env: environment,
       modules: definition.run,
+      shutdownSignal,
       ssh,
       stats,
       verbose,
