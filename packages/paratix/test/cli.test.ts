@@ -94,6 +94,8 @@ describe("isServerDefinitionLike", () => {
     expect(isServerDefinitionLike({})).toBe(false)
   })
 
+  const validSsh = { ports: [22], privateKey: "/home/user/.ssh/id_ed25519", user: "root" }
+
   it("returns false for an object with only host", () => {
     expect(isServerDefinitionLike({ host: "example.com" })).toBe(false)
   })
@@ -106,8 +108,15 @@ describe("isServerDefinitionLike", () => {
     expect(isServerDefinitionLike({ host: "example.com", run: [] })).toBe(false)
   })
 
-  it("returns true for an object with string host and non-empty array run", () => {
-    expect(isServerDefinitionLike({ host: "example.com", run: [["echo", "hello"]] })).toBe(true)
+  it("returns true for a complete valid definition", () => {
+    expect(
+      isServerDefinitionLike({
+        host: "example.com",
+        name: "test",
+        run: [["echo", "hello"]],
+        ssh: validSsh,
+      })
+    ).toBe(true)
   })
 
   it("returns false when host is not a string", () => {
@@ -131,57 +140,219 @@ describe("collectDefinitionErrors", () => {
     expect(errors).toStrictEqual(["Export is not an object"])
   })
 
-  it("returns errors for both missing host and run on an empty object", () => {
+  const validSsh = { ports: [22], privateKey: "/home/user/.ssh/id_ed25519", user: "root" }
+
+  it("returns errors for all missing properties on an empty object", () => {
     const errors = collectDefinitionErrors({})
+    expect(errors).toContain("Missing property 'name' (expected string)")
     expect(errors).toContain("Missing property 'host' (expected string)")
+    expect(errors).toContain("Missing property 'ssh' (expected object)")
     expect(errors).toContain("Missing property 'run' (expected array)")
-    expect(errors).toHaveLength(2)
+    expect(errors).toHaveLength(4)
   })
 
-  it("returns an error for missing run when only host is present", () => {
+  it("returns errors for missing properties when only host is present", () => {
     const errors = collectDefinitionErrors({ host: "example.com" })
-    expect(errors).toStrictEqual(["Missing property 'run' (expected array)"])
+    expect(errors).toContain("Missing property 'name' (expected string)")
+    expect(errors).toContain("Missing property 'ssh' (expected object)")
+    expect(errors).toContain("Missing property 'run' (expected array)")
+    expect(errors).toHaveLength(3)
   })
 
-  it("returns errors for missing host and empty run when only an empty run is present", () => {
+  it("returns errors for missing properties when only an empty run is present", () => {
     const errors = collectDefinitionErrors({ run: [] })
+    expect(errors).toContain("Missing property 'name' (expected string)")
     expect(errors).toContain("Missing property 'host' (expected string)")
+    expect(errors).toContain("Missing property 'ssh' (expected object)")
     expect(errors).toContain("Property 'run' must not be empty")
-    expect(errors).toHaveLength(2)
+    expect(errors).toHaveLength(4)
   })
 
   it("returns errors when host has the wrong type and run is empty", () => {
-    const errors = collectDefinitionErrors({ host: 123, run: [] })
+    const errors = collectDefinitionErrors({ host: 123, name: "test", run: [], ssh: validSsh })
     expect(errors).toContain("Invalid property 'host' (expected string, got number)")
     expect(errors).toContain("Property 'run' must not be empty")
     expect(errors).toHaveLength(2)
   })
 
   it("returns an error mentioning the actual type when run is not an array", () => {
-    const errors = collectDefinitionErrors({ host: "example.com", run: "not-an-array" })
+    const errors = collectDefinitionErrors({
+      host: "example.com",
+      name: "test",
+      run: "not-an-array",
+      ssh: validSsh,
+    })
     expect(errors).toStrictEqual(["Invalid property 'run' (expected array, got string)"])
   })
 
   it("returns an error when run is an empty array", () => {
-    const errors = collectDefinitionErrors({ host: "example.com", run: [] })
+    const errors = collectDefinitionErrors({
+      host: "example.com",
+      name: "test",
+      run: [],
+      ssh: validSsh,
+    })
     expect(errors).toStrictEqual(["Property 'run' must not be empty"])
   })
 
   it("returns an error when host is an empty string", () => {
-    const errors = collectDefinitionErrors({ host: "", run: ["echo hello"] })
+    const errors = collectDefinitionErrors({
+      host: "",
+      name: "test",
+      run: ["echo hello"],
+      ssh: validSsh,
+    })
     expect(errors).toStrictEqual(["Property 'host' must not be empty"])
   })
 
   it("returns errors for both empty host and empty run", () => {
-    const errors = collectDefinitionErrors({ host: "", run: [] })
+    const errors = collectDefinitionErrors({ host: "", name: "test", run: [], ssh: validSsh })
     expect(errors).toContain("Property 'host' must not be empty")
     expect(errors).toContain("Property 'run' must not be empty")
     expect(errors).toHaveLength(2)
   })
 
   it("returns an empty array for a valid ServerDefinition shape", () => {
-    const errors = collectDefinitionErrors({ host: "example.com", run: ["echo hello"] })
+    const errors = collectDefinitionErrors({
+      host: "example.com",
+      name: "test",
+      run: ["echo hello"],
+      ssh: validSsh,
+    })
     expect(errors).toStrictEqual([])
+  })
+
+  it("returns an error when name is missing", () => {
+    const errors = collectDefinitionErrors({
+      host: "example.com",
+      run: ["echo hello"],
+      ssh: validSsh,
+    })
+    expect(errors).toStrictEqual(["Missing property 'name' (expected string)"])
+  })
+
+  it("returns an error when name has the wrong type", () => {
+    const errors = collectDefinitionErrors({
+      host: "example.com",
+      name: 42,
+      run: ["echo hello"],
+      ssh: validSsh,
+    })
+    expect(errors).toStrictEqual(["Invalid property 'name' (expected string, got number)"])
+  })
+
+  it("returns an error when name is an empty string", () => {
+    const errors = collectDefinitionErrors({
+      host: "example.com",
+      name: "",
+      run: ["echo hello"],
+      ssh: validSsh,
+    })
+    expect(errors).toStrictEqual(["Property 'name' must not be empty"])
+  })
+
+  it("returns an error when ssh is missing", () => {
+    const errors = collectDefinitionErrors({
+      host: "example.com",
+      name: "test",
+      run: ["echo hello"],
+    })
+    expect(errors).toStrictEqual(["Missing property 'ssh' (expected object)"])
+  })
+
+  it("returns an error when ssh has the wrong type", () => {
+    const errors = collectDefinitionErrors({
+      host: "example.com",
+      name: "test",
+      run: ["echo hello"],
+      ssh: "not-an-object",
+    })
+    expect(errors).toStrictEqual(["Invalid property 'ssh' (expected object, got string)"])
+  })
+
+  it("returns an error when ssh is null", () => {
+    const errors = collectDefinitionErrors({
+      host: "example.com",
+      name: "test",
+      run: ["echo hello"],
+      ssh: null,
+    })
+    expect(errors).toStrictEqual(["Invalid property 'ssh' (expected object, got null)"])
+  })
+
+  it("returns errors for all missing ssh subfields when ssh is an empty object", () => {
+    const errors = collectDefinitionErrors({
+      host: "example.com",
+      name: "test",
+      run: ["echo hello"],
+      ssh: {},
+    })
+    expect(errors).toContain("Missing property 'ssh.ports' (expected array)")
+    expect(errors).toContain("Missing property 'ssh.privateKey' (expected string)")
+    expect(errors).toContain("Missing property 'ssh.user' (expected string)")
+    expect(errors).toHaveLength(3)
+  })
+
+  it("returns an error when ssh.ports has the wrong type", () => {
+    const errors = collectDefinitionErrors({
+      host: "example.com",
+      name: "test",
+      run: ["echo hello"],
+      ssh: { ports: "not-an-array", privateKey: "/key", user: "root" },
+    })
+    expect(errors).toStrictEqual(["Invalid property 'ssh.ports' (expected array, got string)"])
+  })
+
+  it("returns an error when ssh.ports is an empty array", () => {
+    const errors = collectDefinitionErrors({
+      host: "example.com",
+      name: "test",
+      run: ["echo hello"],
+      ssh: { ports: [], privateKey: "/key", user: "root" },
+    })
+    expect(errors).toStrictEqual(["Property 'ssh.ports' must not be empty"])
+  })
+
+  it("returns an error when ssh.privateKey has the wrong type", () => {
+    const errors = collectDefinitionErrors({
+      host: "example.com",
+      name: "test",
+      run: ["echo hello"],
+      ssh: { ports: [22], privateKey: 123, user: "root" },
+    })
+    expect(errors).toStrictEqual([
+      "Invalid property 'ssh.privateKey' (expected string, got number)",
+    ])
+  })
+
+  it("returns an error when ssh.privateKey is an empty string", () => {
+    const errors = collectDefinitionErrors({
+      host: "example.com",
+      name: "test",
+      run: ["echo hello"],
+      ssh: { ports: [22], privateKey: "", user: "root" },
+    })
+    expect(errors).toStrictEqual(["Property 'ssh.privateKey' must not be empty"])
+  })
+
+  it("returns an error when ssh.user has the wrong type", () => {
+    const errors = collectDefinitionErrors({
+      host: "example.com",
+      name: "test",
+      run: ["echo hello"],
+      ssh: { ports: [22], privateKey: "/key", user: 42 },
+    })
+    expect(errors).toStrictEqual(["Invalid property 'ssh.user' (expected string, got number)"])
+  })
+
+  it("returns an error when ssh.user is an empty string", () => {
+    const errors = collectDefinitionErrors({
+      host: "example.com",
+      name: "test",
+      run: ["echo hello"],
+      ssh: { ports: [22], privateKey: "/key", user: "" },
+    })
+    expect(errors).toStrictEqual(["Property 'ssh.user' must not be empty"])
   })
 })
 

@@ -12,14 +12,101 @@ const SECONDS_TO_MS = 1000
 const DEFAULT_RECONNECT_TIMEOUT_SECONDS = 300
 
 /**
- * Type guard that checks whether `value` has the minimal shape of a
- * {@link ServerDefinition} (an object with a string `host` and an array `run`).
+ * Type guard that checks whether `value` has the shape of a
+ * {@link ServerDefinition} — an object with a non-empty string `name`,
+ * a non-empty string `host`, a valid `ssh` config, and a non-empty `run` array.
  *
  * @param value - The value to inspect.
  * @returns `true` when `value` satisfies the structural requirements of `ServerDefinition`.
  */
 export function isServerDefinitionLike(value: unknown): value is ServerDefinition {
   return collectDefinitionErrors(value).length === 0
+}
+
+/** Descriptor for a property validation check. */
+type PropertyCheck = {
+  /** The key to look up in the object. */
+  key: string
+  /** The label to use in error messages (defaults to `key`). */
+  label?: string
+}
+
+/**
+ * Validates that a required string property exists, has the correct type, and
+ * is not empty.  Pushes a human-readable error into `errors` when any check
+ * fails.
+ *
+ * @param object - The object to inspect.
+ * @param check - Property key and optional display label.
+ * @param errors - Accumulator for error messages.
+ */
+function collectStringErrors(
+  object: Record<string, unknown>,
+  check: PropertyCheck,
+  errors: string[]
+): void {
+  const name = check.label ?? check.key
+  if (!(check.key in object)) {
+    errors.push(`Missing property '${name}' (expected string)`)
+  } else if (typeof object[check.key] !== "string") {
+    errors.push(`Invalid property '${name}' (expected string, got ${typeof object[check.key]})`)
+    // eslint-disable-next-line @typescript-eslint/no-unsafe-type-assertion -- narrowed by typeof check above
+  } else if ((object[check.key] as string).length === 0) {
+    errors.push(`Property '${name}' must not be empty`)
+  }
+}
+
+/**
+ * Validates that a required array property exists, has the correct type, and
+ * is not empty.  Pushes a human-readable error into `errors` when any check
+ * fails.
+ *
+ * @param object - The object to inspect.
+ * @param check - Property key and optional display label.
+ * @param errors - Accumulator for error messages.
+ */
+function collectArrayErrors(
+  object: Record<string, unknown>,
+  check: PropertyCheck,
+  errors: string[]
+): void {
+  const name = check.label ?? check.key
+  if (!(check.key in object)) {
+    errors.push(`Missing property '${name}' (expected array)`)
+  } else if (!Array.isArray(object[check.key])) {
+    errors.push(`Invalid property '${name}' (expected array, got ${typeof object[check.key]})`)
+    // eslint-disable-next-line @typescript-eslint/no-unsafe-type-assertion -- narrowed by Array.isArray check above
+  } else if ((object[check.key] as unknown[]).length === 0) {
+    errors.push(`Property '${name}' must not be empty`)
+  }
+}
+
+/**
+ * Validates the `ssh` property of a server definition candidate.
+ * Pushes errors for a missing / wrong-typed `ssh` object as well as for its
+ * required sub-fields (`ports`, `privateKey`, `user`).
+ *
+ * @param value - The top-level object containing the `ssh` property.
+ * @param errors - Accumulator for error messages.
+ */
+function collectSshErrors(value: Record<string, unknown>, errors: string[]): void {
+  if (!("ssh" in value)) {
+    errors.push("Missing property 'ssh' (expected object)")
+    return
+  }
+  if (value.ssh === null) {
+    errors.push("Invalid property 'ssh' (expected object, got null)")
+    return
+  }
+  if (typeof value.ssh !== "object") {
+    errors.push(`Invalid property 'ssh' (expected object, got ${typeof value.ssh})`)
+    return
+  }
+  // eslint-disable-next-line @typescript-eslint/no-unsafe-type-assertion -- narrowed by typeof/null checks above
+  const ssh = value.ssh as Record<string, unknown>
+  collectArrayErrors(ssh, { key: "ports", label: "ssh.ports" }, errors)
+  collectStringErrors(ssh, { key: "privateKey", label: "ssh.privateKey" }, errors)
+  collectStringErrors(ssh, { key: "user", label: "ssh.user" }, errors)
 }
 
 /**
@@ -35,20 +122,12 @@ export function collectDefinitionErrors(value: unknown): string[] {
     errors.push("Export is not an object")
     return errors
   }
-  if (!("host" in value)) {
-    errors.push("Missing property 'host' (expected string)")
-  } else if (typeof value.host !== "string") {
-    errors.push(`Invalid property 'host' (expected string, got ${typeof value.host})`)
-  } else if (value.host.length === 0) {
-    errors.push("Property 'host' must not be empty")
-  }
-  if (!("run" in value)) {
-    errors.push("Missing property 'run' (expected array)")
-  } else if (!Array.isArray(value.run)) {
-    errors.push(`Invalid property 'run' (expected array, got ${typeof value.run})`)
-  } else if (value.run.length === 0) {
-    errors.push("Property 'run' must not be empty")
-  }
+  // eslint-disable-next-line @typescript-eslint/no-unsafe-type-assertion -- narrowed by typeof/null checks above
+  const object = value as Record<string, unknown>
+  collectStringErrors(object, { key: "name" }, errors)
+  collectStringErrors(object, { key: "host" }, errors)
+  collectSshErrors(object, errors)
+  collectArrayErrors(object, { key: "run" }, errors)
   return errors
 }
 
