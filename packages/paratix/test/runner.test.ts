@@ -4,7 +4,7 @@ import type { Module, ModuleResult, ServerDefinition } from "../src/types.js"
 
 function makeMockSshClass(
   capturedConfigs: unknown[],
-  overrides?: { reconnect?: ReturnType<typeof vi.fn>; disconnect?: ReturnType<typeof vi.fn> }
+  overrides?: { disconnect?: ReturnType<typeof vi.fn>; reconnect?: ReturnType<typeof vi.fn> }
 ) {
   return class MockSshConnectionImpl {
     public addPort = vi.fn()

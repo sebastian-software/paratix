@@ -342,7 +342,7 @@ describe("op.resolve — error logging on failure", () => {
     expect(result.status).toBe("failed")
     expect(consoleSpy).toHaveBeenCalled()
     const errorOutput = consoleSpy.mock.calls.flat().map(String).join(" ")
-    expect(errorOutput).toMatch(/op|exited|code/)
+    expect(errorOutput).toMatch(/op|exited|code/v)
   })
 
   it("logs the error before returning { status: 'failed' } when op read throws", async () => {
@@ -360,6 +360,6 @@ describe("op.resolve — error logging on failure", () => {
     expect(result.status).toBe("failed")
     expect(consoleSpy).toHaveBeenCalled()
     const errorOutput = consoleSpy.mock.calls.flat().map(String).join(" ")
-    expect(errorOutput).toMatch(/op|exited|code/)
+    expect(errorOutput).toMatch(/op|exited|code/v)
   })
 })
