@@ -315,3 +315,51 @@ describe("op.resolve — local", () => {
     expect(module_.local).toBe(true)
   })
 })
+
+// ---------------------------------------------------------------------------
+// error logging (bug: catch ohne Logging)
+// ---------------------------------------------------------------------------
+
+describe("op.resolve — error logging on failure", () => {
+  beforeEach(() => {
+    vi.resetAllMocks()
+    spawnCalls = []
+  })
+
+  it("logs the error before returning { status: 'failed' } when op inject throws", async () => {
+    // Arrange: op inject schlaegt fehl (exit code 1)
+    mockSpawnWith("", 1)
+    const consoleSpy = vi.spyOn(console, "error")
+
+    const module_ = op.resolve({ password: "op://vault/item/password" })
+
+    // Act
+    // eslint-disable-next-line prefer-spread
+    const result = await module_.apply(null, emptyEnv)
+
+    // Assert: Fehler muss geloggt werden BEVOR { status: 'failed' } zurueckgegeben wird.
+    // Bug: Der catch-Block (op.ts:185) bindet den Fehler nicht und loggt ihn nicht.
+    expect(result.status).toBe("failed")
+    expect(consoleSpy).toHaveBeenCalled()
+    const errorOutput = consoleSpy.mock.calls.flat().map(String).join(" ")
+    expect(errorOutput).toMatch(/op|exited|code/)
+  })
+
+  it("logs the error before returning { status: 'failed' } when op read throws", async () => {
+    // Arrange: op read schlaegt fehl (exit code 1)
+    mockSpawnWith("", 1)
+    const consoleSpy = vi.spyOn(console, "error")
+
+    const module_ = op.resolve({ token: "op://vault/item/one-time-password" })
+
+    // Act
+    // eslint-disable-next-line prefer-spread
+    const result = await module_.apply(null, emptyEnv)
+
+    // Assert: Fehler muss geloggt werden.
+    expect(result.status).toBe("failed")
+    expect(consoleSpy).toHaveBeenCalled()
+    const errorOutput = consoleSpy.mock.calls.flat().map(String).join(" ")
+    expect(errorOutput).toMatch(/op|exited|code/)
+  })
+})

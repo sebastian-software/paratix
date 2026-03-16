@@ -182,7 +182,8 @@ export const op = {
           const resolvedOtp = await resolveOtpReferences(otpEntries)
 
           return { meta: { ...resolvedRegular, ...resolvedOtp }, status: "ok" }
-        } catch {
+        } catch (error) {
+          console.error(String(error))
           return { status: "failed" }
         }
       },
