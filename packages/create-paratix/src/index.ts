@@ -121,7 +121,7 @@ function installDependencies(
 ): void {
   console.log(`Installing dependencies with ${pm.name}...`)
   try {
-    execSync(pm.command, { cwd: projectDirectory, stdio: "inherit" })
+    execSync(pm.command, { cwd: projectDirectory, stdio: "inherit", timeout: 120_000 })
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error)
     console.error(`Failed to install dependencies: ${message}`)
