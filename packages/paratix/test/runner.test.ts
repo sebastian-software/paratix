@@ -549,6 +549,9 @@ describe("runPlaybook signal handling", () => {
     expect(disconnectFn).toHaveBeenCalled()
   })
 
+  // Unlike "does not run signals" above which tests the shutdownSignal() guard
+  // before runSignals (runner.ts L393), this tests the guard at the TOP of the
+  // module for-loop (runner.ts L292) — ensuring the next run[] module is never started.
   it("skips remaining modules when shutdown signal was received during a successful module", async () => {
     vi.doMock("../src/ssh.js", () => ({
       shellQuote: (s: string) => `'${s}'`,
