@@ -10,7 +10,7 @@
       "Bash(pnpm --filter paratix test)",
       "Bash(npx prettier:*)",
       "Bash(pnpm format:check)",
-      "Bash(pnpm lint:*)",
+      "Bash(pnpm lint*)",
       "Bash(git commit:*)"
     ]
   }
