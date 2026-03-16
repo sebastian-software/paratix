@@ -345,6 +345,49 @@ describe("download.github", () => {
       expect(mod.name).toBe(`download.github: ${repo}@${tag}/${asset}`)
     })
   })
+
+  describe("URL encoding", () => {
+    it("percent-encodes special characters in tag when building the download URL", async () => {
+      // Tags like "v1.5.0+build.1" or "release 2024" contain characters that
+      // must be percent-encoded in a URL. The current implementation uses a
+      // plain template literal without encodeURIComponent, so the raw characters
+      // end up in the curl command instead of their encoded equivalents.
+      const tagWithSpecialChars = "v1.5.0+build.1"
+      const mockSsh = createMockSsh()
+      const mod = download.github(destination, {
+        asset,
+        repo,
+        tag: tagWithSpecialChars,
+      })
+      await mod.apply(mockSsh, emptyEnv)
+
+      const curlCall = mockSsh.calls.find((call) => call.startsWith("curl -fsSL"))
+      expect(curlCall).toBeDefined()
+      // The "+" must appear as "%2B" in the URL, not as a literal "+"
+      expect(curlCall).toContain(encodeURIComponent(tagWithSpecialChars))
+      expect(curlCall).not.toContain(`/${tagWithSpecialChars}/`)
+    })
+
+    it("percent-encodes special characters in asset when building the download URL", async () => {
+      // Asset names like "my tool 1.0.zip" contain spaces that must be
+      // percent-encoded. Without encodeURIComponent the space is passed raw,
+      // which produces an invalid URL in the curl command.
+      const assetWithSpace = "my tool 1.0.zip"
+      const mockSsh = createMockSsh()
+      const mod = download.github(destination, {
+        asset: assetWithSpace,
+        repo,
+        tag,
+      })
+      await mod.apply(mockSsh, emptyEnv)
+
+      const curlCall = mockSsh.calls.find((call) => call.startsWith("curl -fsSL"))
+      expect(curlCall).toBeDefined()
+      // The space must appear as "%20" in the URL, not as a literal space
+      expect(curlCall).toContain(encodeURIComponent(assetWithSpace))
+      expect(curlCall).not.toContain(` ${assetWithSpace}'`)
+    })
+  })
 })
 
 // ─── download.large ───────────────────────────────────────────────────────────
