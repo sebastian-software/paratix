@@ -1291,3 +1291,129 @@ describe("runPlaybook environment merge priority", () => {
     expect(capturedEnv.APP_ENV).toBe("from-cli-override")
   })
 })
+
+describe("runPlaybook happy-path lifecycle (check → apply → signals)", () => {
+  let capturedConfigs: unknown[]
+
+  beforeEach(() => {
+    capturedConfigs = []
+    vi.spyOn(console, "log").mockImplementation(() => {
+      /* noop */
+    })
+    vi.spyOn(console, "error").mockImplementation(() => {
+      /* noop */
+    })
+    vi.resetModules()
+  })
+
+  afterEach(() => {
+    vi.restoreAllMocks()
+    vi.resetModules()
+    process.exitCode = 0
+  })
+
+  it("calls check on every module, applies only needs-apply modules, triggers signals, and exits cleanly", async () => {
+    vi.doMock("../src/ssh.js", () => ({
+      shellQuote: (s: string) => `'${s}'`,
+      SshConnectionImpl: makeMockSshClass(capturedConfigs),
+    }))
+
+    const { runPlaybook } = await import("../src/runner.js")
+
+    const alreadyOkModule: Module = {
+      apply: vi.fn().mockResolvedValue({ status: "changed" } satisfies ModuleResult),
+      check: vi.fn().mockResolvedValue("ok"),
+      name: "already-ok",
+    }
+
+    const needsApplyModule1: Module = {
+      apply: vi.fn().mockResolvedValue({ status: "changed" } satisfies ModuleResult),
+      check: vi.fn().mockResolvedValue("needs-apply"),
+      name: "needs-apply-1",
+    }
+
+    const needsApplyModule2: Module = {
+      apply: vi.fn().mockResolvedValue({ status: "changed" } satisfies ModuleResult),
+      check: vi.fn().mockResolvedValue("needs-apply"),
+      name: "needs-apply-2",
+    }
+
+    const signalModule: Module = {
+      apply: vi.fn().mockResolvedValue({ status: "changed" } satisfies ModuleResult),
+      check: vi.fn().mockResolvedValue("needs-apply"),
+      name: "restart-service",
+    }
+
+    const definition: ServerDefinition = {
+      host: "1.2.3.4",
+      name: "test-server",
+      run: [alreadyOkModule, needsApplyModule1, needsApplyModule2],
+      signals: [signalModule],
+      ssh: { ports: [22], privateKey: "~/.ssh/id", user: "root" },
+    }
+
+    await runPlaybook(definition)
+
+    // check() called on every run[] module
+    expect(alreadyOkModule.check).toHaveBeenCalledOnce()
+    expect(needsApplyModule1.check).toHaveBeenCalledOnce()
+    expect(needsApplyModule2.check).toHaveBeenCalledOnce()
+
+    // apply() skipped for "ok" module, called for "needs-apply" modules
+    expect(alreadyOkModule.apply).not.toHaveBeenCalled()
+    expect(needsApplyModule1.apply).toHaveBeenCalledOnce()
+    expect(needsApplyModule2.apply).toHaveBeenCalledOnce()
+
+    // signals triggered because stats.changed > 0
+    expect(signalModule.apply).toHaveBeenCalledOnce()
+
+    // exitCode stays 0 — no failures
+    expect(process.exitCode).toBe(0)
+  })
+
+  it("does not trigger signals when all modules return ok from check", async () => {
+    vi.doMock("../src/ssh.js", () => ({
+      shellQuote: (s: string) => `'${s}'`,
+      SshConnectionImpl: makeMockSshClass(capturedConfigs),
+    }))
+
+    const { runPlaybook } = await import("../src/runner.js")
+
+    const okModule1: Module = {
+      apply: vi.fn().mockResolvedValue({ status: "changed" } satisfies ModuleResult),
+      check: vi.fn().mockResolvedValue("ok"),
+      name: "ok-1",
+    }
+
+    const okModule2: Module = {
+      apply: vi.fn().mockResolvedValue({ status: "changed" } satisfies ModuleResult),
+      check: vi.fn().mockResolvedValue("ok"),
+      name: "ok-2",
+    }
+
+    const signalModule: Module = {
+      apply: vi.fn().mockResolvedValue({ status: "changed" } satisfies ModuleResult),
+      check: vi.fn().mockResolvedValue("needs-apply"),
+      name: "should-not-run",
+    }
+
+    const definition: ServerDefinition = {
+      host: "1.2.3.4",
+      name: "test-server",
+      run: [okModule1, okModule2],
+      signals: [signalModule],
+      ssh: { ports: [22], privateKey: "~/.ssh/id", user: "root" },
+    }
+
+    await runPlaybook(definition)
+
+    // No apply calls since everything is ok
+    expect(okModule1.apply).not.toHaveBeenCalled()
+    expect(okModule2.apply).not.toHaveBeenCalled()
+
+    // Signals NOT triggered because stats.changed === 0
+    expect(signalModule.apply).not.toHaveBeenCalled()
+
+    expect(process.exitCode).toBe(0)
+  })
+})
