@@ -45,6 +45,21 @@ describe("sshd.config — apply", () => {
     expect(written?.content).not.toContain("PasswordAuthentication yes")
   })
 
+  it("does not duplicate a directive when the desired value is already set", async () => {
+    const mockSsh = createMockSsh({
+      [CAT_SSHD]: { stdout: "PasswordAuthentication no\n" },
+    })
+    const writtenFiles = trackWriteFile(mockSsh)
+
+    const mod = sshd.config({ PasswordAuthentication: "no" })
+    await mod.apply(mockSsh, emptyEnv)
+
+    const written = writtenFiles.find((f) => f.path === SSHD_CONFIG)
+    expect(written).toBeDefined()
+    const matches = written?.content.match(/PasswordAuthentication/gv)
+    expect(matches).toHaveLength(1)
+  })
+
   it("appends a new key when it does not yet exist in sshd_config", async () => {
     const mockSsh = createMockSsh({
       [CAT_SSHD]: { stdout: "# sshd config\n" },

@@ -18,10 +18,14 @@ async function applySshdSetting(ssh: SshConnection, key: string, value: string):
   const content = await ssh.readFile(SSHD_CONFIG_PATH)
   // eslint-disable-next-line security/detect-non-literal-regexp
   const pattern = new RegExp(`^${escapeRegExp(key)}\\s.*`, "gmv")
-  let newContent: string
+  const replaced = content.replace(pattern, `${key} ${value}`)
 
-  if (pattern.test(content)) {
-    newContent = content.replace(pattern, `${key} ${value}`)
+  let newContent: string
+  if (replaced !== content) {
+    newContent = replaced
+    // eslint-disable-next-line security/detect-non-literal-regexp
+  } else if (new RegExp(`^${escapeRegExp(key)}\\s`, "mv").test(content)) {
+    newContent = content
   } else {
     newContent = content.endsWith("\n")
       ? `${content}${key} ${value}\n`
