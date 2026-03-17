@@ -6,7 +6,7 @@
     "build": "pnpm -r build",
     "test": "pnpm -r test",
     "typecheck": "pnpm -r --filter './packages/*' exec tsc --noEmit",
-    "lint": "run-p --race --print-label lint:*",
+    "lint": "run-p --print-label lint:*",
     "lint:oxlint": "oxlint -c oxlint.config.ts",
     "lint:eslint": "eslint",
     "format": "prettier --write .",
