@@ -7,6 +7,7 @@ import {
   createStreamMasker,
   MAX_OUTPUT_LENGTH,
   type StreamOutputParameters,
+  validateMode,
 } from "../src/sshHelpers.js"
 
 // ---------------------------------------------------------------------------
@@ -779,5 +780,71 @@ describe("CommandError and truncation", () => {
 
     const msg = await getErrorMessage(promise)
     expect(msg).toContain(prefix)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// validateMode
+// ---------------------------------------------------------------------------
+
+describe("validateMode", () => {
+  it("accepts valid 3-digit octal mode (644)", () => {
+    expect(() => {
+      validateMode("644")
+    }).not.toThrow()
+  })
+
+  it("accepts valid 4-digit octal mode (0755)", () => {
+    expect(() => {
+      validateMode("0755")
+    }).not.toThrow()
+  })
+
+  it("accepts mode with all zeros (000)", () => {
+    expect(() => {
+      validateMode("000")
+    }).not.toThrow()
+  })
+
+  it("accepts mode 0777", () => {
+    expect(() => {
+      validateMode("0777")
+    }).not.toThrow()
+  })
+
+  it("throws for mode with digit 8 (888)", () => {
+    expect(() => {
+      validateMode("888")
+    }).toThrow(/mode/v)
+  })
+
+  it("throws for mode with digit 9 (799)", () => {
+    expect(() => {
+      validateMode("799")
+    }).toThrow(/mode/v)
+  })
+
+  it("throws for 2-digit mode (77)", () => {
+    expect(() => {
+      validateMode("77")
+    }).toThrow(/mode/v)
+  })
+
+  it("throws for 5-digit mode (07550)", () => {
+    expect(() => {
+      validateMode("07550")
+    }).toThrow(/mode/v)
+  })
+
+  it("throws for non-numeric mode (abc)", () => {
+    expect(() => {
+      validateMode("abc")
+    }).toThrow(/mode/v)
+  })
+
+  it("throws for empty string", () => {
+    expect(() => {
+      validateMode("")
+    }).toThrow(/mode/v)
   })
 })

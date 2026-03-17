@@ -53,6 +53,7 @@ vi.mock("../src/sshHelpers.js", async () => {
     maskSecrets: actual.maskSecrets,
     shellQuote: actual.shellQuote,
     tryConnectOnPort: vi.fn(),
+    validateMode: actual.validateMode,
   }
 })
 

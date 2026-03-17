@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto"
 
-import { shellQuote } from "../ssh.js"
+import { shellQuote, validateMode } from "../ssh.js"
 import { type Module, type ModuleResult, NEEDS_APPLY, type SshConnection } from "../types.js"
 import { hasFlag, setFlag } from "./moduleHelpers.js"
 import { isValidHeaderName, isValidHeaderValue } from "./netHelpers.js"
@@ -86,6 +86,7 @@ async function applyFileAttributes(
   parameters: DownloadParameters
 ): Promise<void> {
   if (parameters.mode != null) {
+    validateMode(parameters.mode)
     await conn.exec(`chmod ${shellQuote(parameters.mode)} ${shellQuote(parameters.destination)}`, {
       silent: true,
     })

@@ -1,6 +1,6 @@
 import { readFile } from "node:fs/promises"
 
-import { shellQuote } from "../ssh.js"
+import { shellQuote, validateMode } from "../ssh.js"
 import { renderTemplate } from "../template.js"
 import {
   type Environment,
@@ -64,6 +64,7 @@ export const file = {
         await ssh.uploadFile(localPath, remotePath)
 
         if (options?.mode != null) {
+          validateMode(options.mode)
           await ssh.exec(`chmod ${shellQuote(options.mode)} ${shellQuote(remotePath)}`, {
             silent: true,
           })
@@ -105,6 +106,7 @@ export const file = {
         await ssh.exec(`mkdir -p ${shellQuote(remotePath)}`, { silent: true })
 
         if (options?.mode != null) {
+          validateMode(options.mode)
           await ssh.exec(`chmod ${shellQuote(options.mode)} ${shellQuote(remotePath)}`, {
             silent: true,
           })
@@ -214,6 +216,7 @@ export const file = {
         await ssh.writeFile(remotePath, rendered)
 
         if (options?.mode != null) {
+          validateMode(options.mode)
           await ssh.exec(`chmod ${shellQuote(options.mode)} ${shellQuote(remotePath)}`, {
             silent: true,
           })

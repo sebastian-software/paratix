@@ -10,10 +10,16 @@ import type { ExecOptions, ExecResult, SshConfig, SshConnection } from "./types.
 
 import { buildHostVerifier } from "./knownHosts.js"
 import { sftpDownload, sftpUpload } from "./sftp.js"
-import { collectStreamOutput, maskSecrets, shellQuote, tryConnectOnPort } from "./sshHelpers.js"
+import {
+  collectStreamOutput,
+  maskSecrets,
+  shellQuote,
+  tryConnectOnPort,
+  validateMode,
+} from "./sshHelpers.js"
 import { promptTerminal } from "./terminal.js"
 
-export { shellQuote }
+export { shellQuote, validateMode }
 
 const COMMAND_TIMEOUT = 120_000
 const RECONNECT_BASE_DELAY = 1000
@@ -256,6 +262,7 @@ export class SshConnectionImpl implements SshConnection {
       await sftpUpload(client, localPath, temporaryPath)
       await this.exec(`mv ${shellQuote(temporaryPath)} ${shellQuote(remotePath)}`, { silent: true })
       if (options?.mode != null) {
+        validateMode(options.mode)
         await this.exec(`chmod ${shellQuote(options.mode)} ${shellQuote(remotePath)}`, {
           silent: true,
         })
@@ -300,6 +307,7 @@ export class SshConnectionImpl implements SshConnection {
         silent: true,
       })
       if (options?.mode != null) {
+        validateMode(options.mode)
         await this.exec(`chmod ${shellQuote(options.mode)} ${shellQuote(remotePath)}`, {
           silent: true,
         })
@@ -314,9 +322,8 @@ export class SshConnectionImpl implements SshConnection {
       try {
         await this.exec(`rm -f ${shellQuote(remoteTemporary)}`, { silent: true })
       } catch (cleanupError) {
-        const secrets = this.cachedSudoPassword == null ? [] : [this.cachedSudoPassword]
         process.stderr.write(
-          `Warning: failed to remove temp file ${remoteTemporary}: ${maskSecrets(String(cleanupError), secrets)}\n`
+          `Warning: failed to remove temp file ${remoteTemporary}: ${maskSecrets(String(cleanupError), this.cachedSudoPassword == null ? [] : [this.cachedSudoPassword])}\n`
         )
       }
     }

@@ -3,6 +3,20 @@ import type { Client, ClientChannel, ConnectConfig } from "ssh2"
 import type { ExecOptions, ExecResult } from "./types.js"
 
 /**
+ * Validate that a file mode string is a valid octal permission (e.g. "644", "0755").
+ *
+ * @param mode - The mode string to validate.
+ * @throws {Error} If the mode is not a 3- or 4-digit octal string.
+ */
+export function validateMode(mode: string): void {
+  if (!/^[0-7]{3,4}$/v.test(mode)) {
+    throw new Error(
+      `Invalid file mode '${mode}': expected a 3- or 4-digit octal string (e.g. "644", "0755")`
+    )
+  }
+}
+
+/**
  * Safely quote a string for use in a POSIX shell command.
  * Wraps the value in single quotes and escapes any embedded single quotes.
  *
