@@ -8,6 +8,7 @@ import type * as SshHelpers from "../src/sshHelpers.js"
 import { sftpDownload } from "../src/sftp.js"
 import { SshConnectionImpl } from "../src/ssh.js"
 import { collectStreamOutput, tryConnectOnPort } from "../src/sshHelpers.js"
+import { promptTerminal } from "../src/terminal.js"
 
 // ---------------------------------------------------------------------------
 // Mocks
@@ -152,6 +153,7 @@ function makeSshInstanceWithAgent(
   overrides: {
     agentForward?: boolean
     host?: string
+    passwordFallback?: boolean
     ports?: number[]
     reconnectTimeout?: number
     user?: string
@@ -159,6 +161,7 @@ function makeSshInstanceWithAgent(
 ): SshConnectionImpl {
   const config = {
     agentForward: overrides.agentForward,
+    passwordFallback: overrides.passwordFallback,
     ports: overrides.ports ?? [22],
     reconnectTimeout: overrides.reconnectTimeout,
     user: overrides.user ?? "root",
@@ -425,6 +428,65 @@ describe("SshConnectionImpl", () => {
         Parameters<typeof tryConnectOnPort>[0],
       ]
       expect(callArgsKeyAuth.agentForward).toBeUndefined()
+    })
+
+    it("connects on second attempt when agent-only fails and passwordFallback is true", async () => {
+      // Arrange: first call (agent-only) rejects, second call (agent + password) resolves
+      vi.mocked(tryConnectOnPort)
+        .mockRejectedValueOnce(new Error("Agent auth failed"))
+        .mockResolvedValueOnce()
+      vi.mocked(promptTerminal).mockResolvedValueOnce("secret-password")
+      process.env.SSH_AUTH_SOCK = AGENT_SOCKET
+
+      const ssh = makeSshInstanceWithAgent({ passwordFallback: true })
+
+      // Act
+      await ssh.connect()
+
+      // Assert: tryConnectOnPort called twice — once without password, once with
+      expect(tryConnectOnPort).toHaveBeenCalledTimes(2)
+      const [, secondCallArgs] = vi.mocked(tryConnectOnPort).mock.calls as [
+        Parameters<typeof tryConnectOnPort>,
+        Parameters<typeof tryConnectOnPort>,
+      ]
+      expect(secondCallArgs[0].password).toBe("secret-password")
+      expect(secondCallArgs[0].agent).toBe(AGENT_SOCKET)
+      expect(promptTerminal).toHaveBeenCalledOnce()
+    })
+
+    it("throws when agent-only fails and passwordFallback second attempt also fails", async () => {
+      // Arrange: both attempts fail
+      vi.mocked(tryConnectOnPort).mockRejectedValue(new Error("Connection refused"))
+      vi.mocked(promptTerminal).mockResolvedValueOnce("wrong-password")
+      process.env.SSH_AUTH_SOCK = AGENT_SOCKET
+
+      const ssh = makeSshInstanceWithAgent({ passwordFallback: true })
+
+      // Act & Assert
+      await expect(ssh.connect()).rejects.toThrow(
+        /Could not connect to 1\.2\.3\.4 via SSH agent on ports 22/v
+      )
+      // Prompt must have been shown once (fallback was attempted)
+      expect(promptTerminal).toHaveBeenCalledOnce()
+      // Both agent-only and agent+password attempts must have been made
+      expect(tryConnectOnPort).toHaveBeenCalledTimes(2)
+    })
+
+    it("throws immediately without prompting when agent-only fails and passwordFallback is disabled", async () => {
+      // Arrange: agent-only attempt fails, passwordFallback not set
+      vi.mocked(tryConnectOnPort).mockRejectedValueOnce(new Error("Permission denied"))
+      process.env.SSH_AUTH_SOCK = AGENT_SOCKET
+
+      const ssh = makeSshInstanceWithAgent({ passwordFallback: false })
+
+      // Act & Assert
+      await expect(ssh.connect()).rejects.toThrow(
+        /Could not connect to 1\.2\.3\.4 via SSH agent on ports 22/v
+      )
+      // No prompt must have been shown
+      expect(promptTerminal).not.toHaveBeenCalled()
+      // Only one attempt (no fallback)
+      expect(tryConnectOnPort).toHaveBeenCalledTimes(1)
     })
   })
 

@@ -48,23 +48,16 @@ export class SshConnectionImpl implements SshConnection {
    * 1. If `privateKey` is set: connect with the key, optionally falling back to
    *    password authentication when `passwordFallback` is enabled.
    * 2. If `privateKey` is omitted: connect via the SSH agent identified by
-   *    `SSH_AUTH_SOCK`. Throws if the environment variable is not set.
+   *    `SSH_AUTH_SOCK`, optionally falling back to password authentication
+   *    when `passwordFallback` is enabled. Throws if the environment variable
+   *    is not set.
    *
    * @throws {Error} When no port in `config.ports` accepts the connection.
    */
   public async connect(): Promise<void> {
     if (this.config.privateKey == null) {
-      const agent = process.env.SSH_AUTH_SOCK
-      if (agent == null || agent.length === 0) {
-        throw new Error("No privateKey configured and SSH_AUTH_SOCK is not set")
-      }
-      if (await this.tryConnectOnPorts(undefined, undefined, agent)) {
-        this.agentSocket = agent
-        return
-      }
-      throw new Error(
-        `Could not connect to ${this.host} via SSH agent on ports ${this.config.ports.join(", ")}`
-      )
+      await this.connectViaAgent()
+      return
     }
     // eslint-disable-next-line security/detect-non-literal-fs-filename
     const privateKey = await readFile(this.config.privateKey, "utf8")
@@ -288,6 +281,27 @@ export class SshConnectionImpl implements SshConnection {
     }
     const pairs = Object.entries(environment).map(([k, v]) => `${k}=${shellQuote(v)}`)
     return `${pairs.join(" ")} `
+  }
+
+  private async connectViaAgent(): Promise<void> {
+    const agent = process.env.SSH_AUTH_SOCK
+    if (agent == null || agent.length === 0) {
+      throw new Error("No privateKey configured and SSH_AUTH_SOCK is not set")
+    }
+    if (await this.tryConnectOnPorts(undefined, undefined, agent)) {
+      this.agentSocket = agent
+      return
+    }
+    if (this.config.passwordFallback) {
+      const password = await promptTerminal(`Password for ${this.config.user}@${this.host}: `, true)
+      if (await this.tryConnectOnPorts(undefined, password, agent)) {
+        this.agentSocket = agent
+        return
+      }
+    }
+    throw new Error(
+      `Could not connect to ${this.host} via SSH agent on ports ${this.config.ports.join(", ")}`
+    )
   }
 
   private ensureClient(): Client {
