@@ -70,4 +70,34 @@ describe("renderTemplate", () => {
     expect(view).toBe("val and val")
     expect(lazy).toHaveBeenCalledTimes(2)
   })
+
+  it("applies the shell modifier to wrap the value in single quotes", async () => {
+    const env: Environment = { CMD: "hello world" }
+    const view = await renderTemplate("run {{CMD|shell}}", env)
+    expect(view).toBe("run 'hello world'")
+  })
+
+  it("escapes single quotes inside a shell-modified value", async () => {
+    const env: Environment = { MSG: "it's done" }
+    const view = await renderTemplate("echo {{MSG|shell}}", env)
+    expect(view).toBe("echo 'it'\\''s done'")
+  })
+
+  it("throws on an unknown template modifier", async () => {
+    const env: Environment = { A: "x" }
+    await expect(renderTemplate("{{A|unknown}}", env)).rejects.toThrow(
+      'Unknown template modifier "unknown"'
+    )
+  })
+
+  it("throws on an empty modifier (trailing pipe)", async () => {
+    const env: Environment = { A: "x" }
+    await expect(renderTemplate("{{A|}}", env)).rejects.toThrow('Unknown template modifier ""')
+  })
+
+  it("leaves value unchanged when no modifier is used", async () => {
+    const env: Environment = { VAL: "raw" }
+    const view = await renderTemplate("{{VAL}}", env)
+    expect(view).toBe("raw")
+  })
 })
