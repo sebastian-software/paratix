@@ -6,7 +6,7 @@
     "build": "pnpm -r build",
     "test": "pnpm -r test",
     "typecheck": "pnpm -r --filter './packages/*' exec tsc --noEmit",
-    "lint": "run-p --print-label lint:*",
+    "lint": "concurrently --kill-others-on-fail --passthrough-arguments --names lint:oxlint,lint:eslint 'pnpm lint:oxlint' 'pnpm lint:eslint'",
     "lint:oxlint": "oxlint -c oxlint.config.ts",
     "lint:eslint": "eslint",
     "format": "prettier --write .",
@@ -39,7 +39,7 @@
     "eslint": "^10.0.3",
     "eslint-config-setup": "^0.3.3",
     "jiti": "^2.6.1",
-    "npm-run-all2": "^8.0.4",
+    "concurrently": "^9.1.2",
     "oxlint": "^1.55.0",
     "prettier": "^3.8.1"
   }
