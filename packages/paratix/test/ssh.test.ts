@@ -32,6 +32,7 @@ vi.mock("../src/sshHelpers.js", async () => {
   return {
     collectStreamOutput: vi.fn(actual.collectStreamOutput),
     maskSecrets: actual.maskSecrets,
+    shellQuote: actual.shellQuote,
     tryConnectOnPort: vi.fn(),
   }
 })
@@ -143,6 +144,25 @@ function makeSshInstance(
     privateKey: "/dev/null",
     reconnectTimeout: overrides.reconnectTimeout,
     user: overrides.user ?? "root",
+  }
+  return new SshConnectionImpl(overrides.host ?? "1.2.3.4", config)
+}
+
+function makeSshInstanceWithAgent(
+  overrides: {
+    agentForward?: boolean
+    host?: string
+    ports?: number[]
+    reconnectTimeout?: number
+    user?: string
+  } = {}
+): SshConnectionImpl {
+  const config = {
+    agentForward: overrides.agentForward,
+    ports: overrides.ports ?? [22],
+    reconnectTimeout: overrides.reconnectTimeout,
+    user: overrides.user ?? "root",
+    // privateKey intentionally omitted to trigger agent-auth path
   }
   return new SshConnectionImpl(overrides.host ?? "1.2.3.4", config)
 }
@@ -319,6 +339,92 @@ describe("SshConnectionImpl", () => {
       await expect(reconnectPromise).rejects.toThrow(
         /Failed to reconnect to 1\.2\.3\.4 after 5000ms/v
       )
+    })
+  })
+
+  // -------------------------------------------------------------------------
+  // connect — SSH agent auth
+  // -------------------------------------------------------------------------
+
+  describe("connect (agent auth)", () => {
+    const AGENT_SOCKET = "/run/user/1000/ssh-agent.sock"
+
+    afterEach(() => {
+      delete process.env.SSH_AUTH_SOCK
+    })
+
+    it("connects via SSH agent when privateKey is omitted and SSH_AUTH_SOCK is set", async () => {
+      vi.mocked(tryConnectOnPort).mockResolvedValueOnce()
+      process.env.SSH_AUTH_SOCK = AGENT_SOCKET
+
+      const ssh = makeSshInstanceWithAgent()
+      await ssh.connect()
+
+      expect(tryConnectOnPort).toHaveBeenCalledOnce()
+      const [callArgs] = vi.mocked(tryConnectOnPort).mock.calls[0] as [
+        Parameters<typeof tryConnectOnPort>[0],
+      ]
+      expect(callArgs.agent).toBe(AGENT_SOCKET)
+      expect(callArgs.privateKey).toBeUndefined()
+    })
+
+    it("throws when privateKey is omitted and SSH_AUTH_SOCK is not set", async () => {
+      // SSH_AUTH_SOCK is absent (deleted in afterEach, not set here)
+      const ssh = makeSshInstanceWithAgent()
+
+      await expect(ssh.connect()).rejects.toThrow(
+        "No privateKey configured and SSH_AUTH_SOCK is not set"
+      )
+      expect(tryConnectOnPort).not.toHaveBeenCalled()
+    })
+
+    it("throws when SSH_AUTH_SOCK is set to an empty string", async () => {
+      process.env.SSH_AUTH_SOCK = ""
+
+      const ssh = makeSshInstanceWithAgent()
+
+      await expect(ssh.connect()).rejects.toThrow(
+        "No privateKey configured and SSH_AUTH_SOCK is not set"
+      )
+      expect(tryConnectOnPort).not.toHaveBeenCalled()
+    })
+
+    it("throws when SSH_AUTH_SOCK is set but all port connections fail", async () => {
+      vi.mocked(tryConnectOnPort).mockRejectedValue(new Error("Connection refused"))
+      process.env.SSH_AUTH_SOCK = AGENT_SOCKET
+
+      const ssh = makeSshInstanceWithAgent({ ports: [22, 2222] })
+
+      await expect(ssh.connect()).rejects.toThrow(
+        /Could not connect to 1\.2\.3\.4 via SSH agent on ports 22, 2222/v
+      )
+      // Must have tried each configured port
+      expect(tryConnectOnPort).toHaveBeenCalledTimes(2)
+    })
+
+    it("passes agentForward: true to tryConnectOnPort when configured", async () => {
+      vi.mocked(tryConnectOnPort).mockResolvedValueOnce()
+      process.env.SSH_AUTH_SOCK = AGENT_SOCKET
+
+      const ssh = makeSshInstanceWithAgent({ agentForward: true })
+      await ssh.connect()
+
+      const [callArgsForward] = vi.mocked(tryConnectOnPort).mock.calls[0] as [
+        Parameters<typeof tryConnectOnPort>[0],
+      ]
+      expect(callArgsForward.agentForward).toBe(true)
+    })
+
+    it("passes agentForward: undefined to tryConnectOnPort on key-auth path (backwards compatibility)", async () => {
+      vi.mocked(tryConnectOnPort).mockResolvedValueOnce()
+
+      const ssh = makeSshInstance()
+      await ssh.connect()
+
+      const [callArgsKeyAuth] = vi.mocked(tryConnectOnPort).mock.calls[0] as [
+        Parameters<typeof tryConnectOnPort>[0],
+      ]
+      expect(callArgsKeyAuth.agentForward).toBeUndefined()
     })
   })
 

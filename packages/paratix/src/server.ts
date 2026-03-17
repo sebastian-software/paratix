@@ -29,8 +29,8 @@ export function server(config: ServerDefinition): ServerDefinition {
   if (config.ssh.ports.length === 0) {
     throw new Error("ServerDefinition: ssh.ports must not be empty")
   }
-  if (config.ssh.privateKey.length === 0) {
-    throw new Error("ServerDefinition: ssh.privateKey is required")
+  if (config.ssh.privateKey?.length === 0) {
+    throw new Error("ServerDefinition: ssh.privateKey must not be an empty string")
   }
   if (config.ssh.user.length === 0) {
     throw new Error("ServerDefinition: ssh.user is required")

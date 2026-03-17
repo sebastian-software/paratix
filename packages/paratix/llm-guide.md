@@ -69,8 +69,9 @@ export default server({
   ssh: {
     user: "root",
     ports: [22], // Array -- runner tries each port in order
-    privateKey: "~/.ssh/id_ed25519",
+    privateKey: "~/.ssh/id_ed25519", // Optional -- omit to use SSH agent
     // Optional:
+    // agentForward: false,          // Forward SSH agent to remote
     // passwordFallback: false,
     // sudoPassword: "...",
     // reconnectTimeout: 30000,
@@ -315,23 +316,23 @@ function myCustomModule(configPath: string, content: string): Module {
 
 Methods available on the `ssh` parameter:
 
-| Method                            | Return type                            | Description                                                                                    |
-| --------------------------------- | -------------------------------------- | ---------------------------------------------------------------------------------------------- |
-| `ssh.exec(cmd, options?)`         | `Promise<ExecResult>`                  | Run command, get `{ code, stdout, stderr }`. Throws on non-zero unless `ignoreExitCode: true`. |
-| `ssh.test(cmd)`                   | `Promise<boolean>`                     | Run command, return `true` if exit code is 0.                                                  |
-| `ssh.output(cmd)`                 | `Promise<string>`                      | Run command, return trimmed stdout.                                                            |
-| `ssh.lines(cmd)`                  | `Promise<string[]>`                    | Run command, return stdout split into lines.                                                   |
-| `ssh.exists(path)`                | `Promise<boolean>`                     | Check if remote path exists.                                                                   |
-| `ssh.readFile(path)`              | `Promise<string>`                      | Read remote file content.                                                                      |
-| `ssh.writeFile(path, content)`    | `Promise<void>`                        | Write content to remote file.                                                                  |
-| `ssh.uploadFile(local, remote)`   | `Promise<void>`                        | Upload local file via SFTP.                                                                    |
-| `ssh.downloadFile(remote, local)` | `Promise<void>`                        | Download remote file.                                                                          |
-| `ssh.sha256(path)`                | `Promise<string \| null>`              | Get SHA-256 hex digest, or null if not found.                                                  |
-| `ssh.addPort(port)`               | `void`                                 | Register an additional port opened on the remote host (advanced).                              |
-| `ssh.disconnect()`                | `void`                                 | Close the SSH connection.                                                                      |
-| `ssh.getConnectionInfo()`         | `{ host, port, privateKeyPath, user }` | Return current connection parameters.                                                          |
-| `ssh.probeSudo()`                 | `Promise<void>`                        | Probe/cache sudo access; prompts interactively if needed.                                      |
-| `ssh.updateHost(host)`            | `void`                                 | Update the target host address (e.g., after IP change).                                        |
+| Method                            | Return type                             | Description                                                                                    |
+| --------------------------------- | --------------------------------------- | ---------------------------------------------------------------------------------------------- |
+| `ssh.exec(cmd, options?)`         | `Promise<ExecResult>`                   | Run command, get `{ code, stdout, stderr }`. Throws on non-zero unless `ignoreExitCode: true`. |
+| `ssh.test(cmd)`                   | `Promise<boolean>`                      | Run command, return `true` if exit code is 0.                                                  |
+| `ssh.output(cmd)`                 | `Promise<string>`                       | Run command, return trimmed stdout.                                                            |
+| `ssh.lines(cmd)`                  | `Promise<string[]>`                     | Run command, return stdout split into lines.                                                   |
+| `ssh.exists(path)`                | `Promise<boolean>`                      | Check if remote path exists.                                                                   |
+| `ssh.readFile(path)`              | `Promise<string>`                       | Read remote file content.                                                                      |
+| `ssh.writeFile(path, content)`    | `Promise<void>`                         | Write content to remote file.                                                                  |
+| `ssh.uploadFile(local, remote)`   | `Promise<void>`                         | Upload local file via SFTP.                                                                    |
+| `ssh.downloadFile(remote, local)` | `Promise<void>`                         | Download remote file.                                                                          |
+| `ssh.sha256(path)`                | `Promise<string \| null>`               | Get SHA-256 hex digest, or null if not found.                                                  |
+| `ssh.addPort(port)`               | `void`                                  | Register an additional port opened on the remote host (advanced).                              |
+| `ssh.disconnect()`                | `void`                                  | Close the SSH connection.                                                                      |
+| `ssh.getConnectionInfo()`         | `{ host, port, privateKeyPath?, user }` | Return current connection parameters.                                                          |
+| `ssh.probeSudo()`                 | `Promise<void>`                         | Probe/cache sudo access; prompts interactively if needed.                                      |
+| `ssh.updateHost(host)`            | `void`                                  | Update the target host address (e.g., after IP change).                                        |
 
 ### ExecOptions
 
@@ -491,7 +492,7 @@ async check(ssh) {
 9. Do NOT use template syntax `{{key}}` in TypeScript code -- templates are only for files rendered via `file.template()`.
 10. Do NOT use `signals` on the top-level `server()` when you mean a recipe signal -- `server.signals` fire when ANY module in `run` changed.
 11. Do NOT call `server()` without all required fields (`name`, `host`, `ssh`, `run`) -- it throws at construction time. `name` and `host` must not be empty strings.
-12. Do NOT use empty arrays for `ssh.ports` or empty strings for `ssh.user`/`ssh.privateKey` -- validation rejects these.
+12. Do NOT use empty arrays for `ssh.ports` or empty strings for `ssh.user`/`ssh.privateKey` -- validation rejects these. `ssh.privateKey` may be omitted entirely to use the SSH agent instead.
 
 ## Testing Patterns
 

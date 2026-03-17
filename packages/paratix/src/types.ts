@@ -85,8 +85,11 @@ export type SshConnection = {
   exec: (command: string, options?: ExecOptions) => Promise<ExecResult>
   /** Return `true` if the remote path exists. */
   exists: (remotePath: string) => Promise<boolean>
-  /** Return the low-level connection parameters for this session. */
-  getConnectionInfo: () => { host: string; port: number; privateKeyPath: string; user: string }
+  /**
+   * Return the low-level connection parameters for this session.
+   * `privateKeyPath` is `undefined` when the connection was established via the SSH agent.
+   */
+  getConnectionInfo: () => { host: string; port: number; privateKeyPath?: string; user: string }
   /** Run a command and return stdout split into lines. */
   lines: (command: string) => Promise<string[]>
   /** Run a command and return trimmed stdout. */
@@ -109,12 +112,18 @@ export type SshConnection = {
 
 /** SSH connection parameters for a server. */
 export type SshConfig = {
+  /** Forward the local SSH agent to the remote host. */
+  agentForward?: boolean
   /** Fall back to password authentication if key auth fails. */
   passwordFallback?: boolean
   /** Ordered list of candidate ports -- the runner tries each until one connects. */
   ports: number[]
-  /** Absolute path to the private key file used for authentication. */
-  privateKey: string
+  /**
+   * Absolute path to the private key file used for authentication.
+   * When omitted, the SSH agent referenced by `SSH_AUTH_SOCK` is used instead.
+   * Exactly one of `privateKey` or a running SSH agent must be available.
+   */
+  privateKey?: string
   /** Maximum time in milliseconds to spend attempting reconnection before giving up. */
   reconnectTimeout?: number
   /** Password used for `sudo` escalation on the remote host. */

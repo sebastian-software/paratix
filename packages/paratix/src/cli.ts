@@ -106,7 +106,9 @@ function collectSshErrors(value: Record<string, unknown>, errors: string[]): voi
   // eslint-disable-next-line @typescript-eslint/no-unsafe-type-assertion -- narrowed by typeof/null checks above
   const ssh = value.ssh as Record<string, unknown>
   collectArrayErrors(ssh, { key: "ports", label: "ssh.ports" }, errors)
-  collectStringErrors(ssh, { key: "privateKey", label: "ssh.privateKey" }, errors)
+  if ("privateKey" in ssh && ssh.privateKey !== undefined) {
+    collectStringErrors(ssh, { key: "privateKey", label: "ssh.privateKey" }, errors)
+  }
   collectStringErrors(ssh, { key: "user", label: "ssh.user" }, errors)
 }
 

@@ -1,3 +1,4 @@
+/* eslint-disable max-lines */
 import { randomUUID } from "node:crypto"
 import { unlinkSync, writeFileSync } from "node:fs"
 import { readFile } from "node:fs/promises"
@@ -8,19 +9,10 @@ import { Client, type ClientChannel } from "ssh2"
 import type { ExecOptions, ExecResult, SshConfig, SshConnection } from "./types.js"
 
 import { sftpDownload, sftpUpload } from "./sftp.js"
-import { collectStreamOutput, maskSecrets, tryConnectOnPort } from "./sshHelpers.js"
+import { collectStreamOutput, maskSecrets, shellQuote, tryConnectOnPort } from "./sshHelpers.js"
 import { promptTerminal } from "./terminal.js"
 
-/**
- * Safely quote a string for use in a POSIX shell command.
- * Wraps the value in single quotes and escapes any embedded single quotes.
- *
- * @param s - The string to quote.
- * @returns The shell-safe quoted string.
- */
-export function shellQuote(s: string): string {
-  return `'${s.replaceAll("'", "'\\''")}'`
-}
+export { shellQuote }
 
 const SFTP_WRITE_THRESHOLD = 65_536
 const COMMAND_TIMEOUT = 120_000
@@ -48,19 +40,35 @@ export class SshConnectionImpl implements SshConnection {
     if (!this.config.ports.includes(port)) this.config.ports.push(port)
   }
 
+  /**
+   * Establish the SSH connection using the configured credentials.
+   *
+   * Authentication strategy (in order):
+   * 1. If `privateKey` is set: connect with the key, optionally falling back to
+   *    password authentication when `passwordFallback` is enabled.
+   * 2. If `privateKey` is omitted: connect via the SSH agent identified by
+   *    `SSH_AUTH_SOCK`. Throws if the environment variable is not set.
+   *
+   * @throws {Error} When no port in `config.ports` accepts the connection.
+   */
   public async connect(): Promise<void> {
+    if (this.config.privateKey == null) {
+      const agent = process.env.SSH_AUTH_SOCK
+      if (agent == null || agent.length === 0) {
+        throw new Error("No privateKey configured and SSH_AUTH_SOCK is not set")
+      }
+      if (await this.tryConnectOnPorts(undefined, undefined, agent)) return
+      throw new Error(
+        `Could not connect to ${this.host} via SSH agent on ports ${this.config.ports.join(", ")}`
+      )
+    }
     // eslint-disable-next-line security/detect-non-literal-fs-filename
     const privateKey = await readFile(this.config.privateKey, "utf8")
-
-    // Attempt 1: Key-based authentication on all ports
     if (await this.tryConnectOnPorts(privateKey)) return
-
-    // Attempt 2: Interactive password fallback (if enabled)
     if (this.config.passwordFallback) {
       const password = await promptTerminal(`Password for ${this.config.user}@${this.host}: `, true)
       if (await this.tryConnectOnPorts(privateKey, password)) return
     }
-
     throw new Error(`Failed to connect to ${this.host} on ports: ${this.config.ports.join(", ")}`)
   }
 
@@ -146,7 +154,7 @@ export class SshConnectionImpl implements SshConnection {
     return this.test(`[ -e ${shellQuote(remotePath)} ]`)
   }
 
-  public getConnectionInfo(): { host: string; port: number; privateKeyPath: string; user: string } {
+  public getConnectionInfo(): ReturnType<SshConnection["getConnectionInfo"]> {
     return {
       host: this.host,
       port: this.connectedPort,
@@ -291,12 +299,26 @@ export class SshConnectionImpl implements SshConnection {
     return `sudo bash -c ${quoted}`
   }
 
-  private async tryConnectOnPorts(privateKey: string, password?: string): Promise<boolean> {
+  /**
+   * Iterate over `config.ports` and attempt a connection on each one.
+   *
+   * @param privateKey - PEM-encoded private key content, or `undefined` when using agent auth.
+   * @param password - Optional password for keyboard-interactive fallback.
+   * @param agent - SSH agent socket path (e.g. `SSH_AUTH_SOCK`). Used when `privateKey` is absent.
+   * @returns `true` if a port connected successfully, `false` if all ports failed.
+   */
+  private async tryConnectOnPorts(
+    privateKey?: string,
+    password?: string,
+    agent?: string
+  ): Promise<boolean> {
     for (const port of this.config.ports) {
       try {
         const client = new Client()
         // eslint-disable-next-line no-await-in-loop
         await tryConnectOnPort({
+          agent,
+          agentForward: this.config.agentForward,
           client,
           host: this.host,
           password,

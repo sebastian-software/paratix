@@ -2,6 +2,17 @@ import type { Client, ClientChannel } from "ssh2"
 
 import type { ExecOptions, ExecResult } from "./types.js"
 
+/**
+ * Safely quote a string for use in a POSIX shell command.
+ * Wraps the value in single quotes and escapes any embedded single quotes.
+ *
+ * @param s - The string to quote.
+ * @returns The shell-safe quoted string.
+ */
+export function shellQuote(s: string): string {
+  return `'${s.replaceAll("'", "'\\''")}'`
+}
+
 const CONNECTION_TIMEOUT = 10_000
 
 /**
@@ -204,12 +215,23 @@ export function collectStreamOutput(parameters: StreamOutputParameters): void {
   })
 }
 
+/** Parameters for a single SSH connection attempt on one port. */
 export type ConnectParameters = {
+  /** Path to the SSH agent socket (e.g. `SSH_AUTH_SOCK`). Used when no `privateKey` is provided. */
+  agent?: string
+  /** Forward the local SSH agent to the remote host during this session. */
+  agentForward?: boolean
+  /** The ssh2 `Client` instance to connect with. */
   client: Client
+  /** Hostname or IP address of the remote host. */
   host: string
+  /** Password for keyboard-interactive or password authentication. */
   password?: string
+  /** Port to connect on. */
   port: number
-  privateKey: string
+  /** PEM-encoded private key content. Mutually exclusive with `agent`. */
+  privateKey?: string
+  /** Username to authenticate as. */
   username: string
 }
 
@@ -219,7 +241,7 @@ export type ConnectParameters = {
  * @param parameters - Connection parameters.
  */
 export async function tryConnectOnPort(parameters: ConnectParameters): Promise<void> {
-  const { client, host, password, port, privateKey, username } = parameters
+  const { agent, agentForward, client, host, password, port, privateKey, username } = parameters
   return new Promise((resolve, reject) => {
     const timeout = setTimeout(() => {
       client.end()
@@ -238,9 +260,17 @@ export async function tryConnectOnPort(parameters: ConnectParameters): Promise<v
     const connectConfig: Record<string, unknown> = {
       host,
       port,
-      privateKey,
       readyTimeout: CONNECTION_TIMEOUT,
       username,
+    }
+    if (privateKey != null) {
+      connectConfig.privateKey = privateKey
+    }
+    if (agent != null) {
+      connectConfig.agent = agent
+    }
+    if (agentForward === true) {
+      connectConfig.agentForward = true
     }
     if (typeof password === "string") {
       connectConfig.password = password

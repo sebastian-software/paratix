@@ -289,9 +289,8 @@ describe("collectDefinitionErrors", () => {
       ssh: {},
     })
     expect(errors).toContain("Missing property 'ssh.ports' (expected array)")
-    expect(errors).toContain("Missing property 'ssh.privateKey' (expected string)")
     expect(errors).toContain("Missing property 'ssh.user' (expected string)")
-    expect(errors).toHaveLength(3)
+    expect(errors).toHaveLength(2)
   })
 
   it("returns an error when ssh.ports has the wrong type", () => {

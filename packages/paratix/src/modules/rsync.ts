@@ -107,7 +107,7 @@ function buildOwnershipArguments(options: SyncOptions): string[] {
  */
 function buildArguments(
   options: SyncOptions,
-  connectionInfo: { host: string; port: number; privateKeyPath: string; user: string },
+  connectionInfo: { host: string; port: number; privateKeyPath?: string; user: string },
   dryRun: boolean
 ): string[] {
   const result: string[] = ["-az", "--itemize-changes"]
@@ -116,9 +116,11 @@ function buildArguments(
     result.push("--dry-run")
   }
 
+  const identityFlag =
+    connectionInfo.privateKeyPath == null ? "" : ` -i ${shellQuote(connectionInfo.privateKeyPath)}`
   result.push(
     "-e",
-    `ssh -p ${connectionInfo.port} -i ${shellQuote(connectionInfo.privateKeyPath)} -o StrictHostKeyChecking=${options.strictHostKeyChecking ?? "accept-new"}`
+    `ssh -p ${connectionInfo.port}${identityFlag} -o StrictHostKeyChecking=${options.strictHostKeyChecking ?? "accept-new"}`
   )
   result.push(...buildFilterArguments(options))
   result.push(...buildOwnershipArguments(options))
