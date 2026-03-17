@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import type { Environment, Module } from "../src/types.js"
 
 import { recipe } from "../src/recipe.js"
+import { createMockSsh } from "./helpers/mockSsh.js"
 
 const emptyEnv: Environment = {}
 
@@ -197,5 +198,31 @@ describe("recipe", () => {
     const r = recipe("test-recipe", [mod1, mod2])
     await r.check(null, emptyEnv)
     expect(mod2.check).not.toHaveBeenCalled()
+  })
+
+  it("passes null to local child module in check()", async () => {
+    const localMod: Module = {
+      apply: vi.fn().mockResolvedValue({ status: "changed" }),
+      check: vi.fn().mockResolvedValue("ok"),
+      local: true,
+      name: "local-mod",
+    }
+    const mockSsh = createMockSsh()
+    const r = recipe("test-recipe", [localMod])
+    await r.check(mockSsh, emptyEnv)
+    expect(localMod.check).toHaveBeenCalledWith(null, emptyEnv)
+  })
+
+  it("passes null to local child module in apply()", async () => {
+    const localMod: Module = {
+      apply: vi.fn().mockResolvedValue({ status: "changed" }),
+      check: vi.fn().mockResolvedValue("needs-apply"),
+      local: true,
+      name: "local-mod",
+    }
+    const mockSsh = createMockSsh()
+    const r = recipe("test-recipe", [localMod])
+    await r.apply(mockSsh, emptyEnv)
+    expect(localMod.apply).toHaveBeenCalledWith(null, emptyEnv)
   })
 })

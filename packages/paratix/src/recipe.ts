@@ -37,14 +37,15 @@ async function executeOneModule(
   ssh: null | SshConnection,
   currentEnvironment: Environment
 ): Promise<{ env: Environment; status: string } | null> {
-  const checkResult = await targetModule.check(ssh, currentEnvironment)
+  const connection = targetModule.local === true ? null : ssh
+  const checkResult = await targetModule.check(connection, currentEnvironment)
 
   if (checkResult === "ok") {
     printModuleResult(targetModule.name, "ok")
     return null
   }
 
-  const result = await targetModule.apply(ssh, currentEnvironment)
+  const result = await targetModule.apply(connection, currentEnvironment)
   printModuleResult(targetModule.name, result.status)
 
   const environment =
@@ -147,8 +148,9 @@ export function recipe(
       // Each child receives the original environment — no meta propagation,
       // because check() never calls apply() and therefore produces no meta.
       for (const childModule of modules) {
+        const connection = childModule.local === true ? null : ssh
         // eslint-disable-next-line no-await-in-loop
-        const result = await childModule.check(ssh, environment)
+        const result = await childModule.check(connection, environment)
         if (result === NEEDS_APPLY) return NEEDS_APPLY
       }
       return "ok"
