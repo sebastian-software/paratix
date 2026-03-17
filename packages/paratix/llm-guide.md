@@ -75,6 +75,7 @@ export default server({
     // passwordFallback: false,
     // sudoPassword: "...",
     // reconnectTimeout: 30000,
+    // strictHostKeyChecking: "accept-new", // "accept-new" (default), "yes", or "no"
   },
 
   // Optional: env values available in templates and conditions

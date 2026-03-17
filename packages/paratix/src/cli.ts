@@ -90,6 +90,7 @@ function collectArrayErrors(
  * @param value - The top-level object containing the `ssh` property.
  * @param errors - Accumulator for error messages.
  */
+// eslint-disable-next-line max-statements
 function collectSshErrors(value: Record<string, unknown>, errors: string[]): void {
   if (!("ssh" in value)) {
     errors.push("Missing property 'ssh' (expected object)")
@@ -110,6 +111,17 @@ function collectSshErrors(value: Record<string, unknown>, errors: string[]): voi
     collectStringErrors(ssh, { key: "privateKey", label: "ssh.privateKey" }, errors)
   }
   collectStringErrors(ssh, { key: "user", label: "ssh.user" }, errors)
+  if ("strictHostKeyChecking" in ssh && ssh.strictHostKeyChecking != null) {
+    const valid = ["accept-new", "no", "yes"]
+    if (
+      typeof ssh.strictHostKeyChecking !== "string" ||
+      !valid.includes(ssh.strictHostKeyChecking)
+    ) {
+      errors.push(
+        `Invalid property 'ssh.strictHostKeyChecking' (expected "accept-new", "no", or "yes")`
+      )
+    }
+  }
 }
 
 /**

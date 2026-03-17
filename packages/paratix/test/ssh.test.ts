@@ -2,8 +2,9 @@ import type { Client, SFTPWrapper } from "ssh2"
 
 import { EventEmitter } from "node:events"
 import { stat } from "node:fs/promises"
-import { afterEach, describe, expect, it, vi } from "vitest"
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 
+import type * as KnownHosts from "../src/knownHosts.js"
 import type * as SshHelpers from "../src/sshHelpers.js"
 
 import { sftpDownload } from "../src/sftp.js"
@@ -16,14 +17,29 @@ import { promptTerminal } from "../src/terminal.js"
 // ---------------------------------------------------------------------------
 
 vi.mock("node:fs", () => ({
+  readFileSync: vi.fn().mockReturnValue(""),
   unlinkSync: vi.fn(),
   writeFileSync: vi.fn(),
 }))
 
 vi.mock("node:fs/promises", () => ({
+  appendFile: vi.fn().mockResolvedValue(null),
+  mkdir: vi.fn().mockResolvedValue(null),
   readFile: vi.fn().mockResolvedValue("fake-private-key"),
   stat: vi.fn().mockResolvedValue({}),
 }))
+
+vi.mock("../src/knownHosts.js", async () => {
+  const actual = await vi.importActual<typeof KnownHosts>("../src/knownHosts.js")
+  return {
+    appendHostKey: vi.fn().mockResolvedValue(null),
+    // Default: return empty object (no hostVerifier) so ssh.ts can safely destructure after resetAllMocks.
+    buildHostVerifier: vi.fn().mockReturnValue({}),
+    extractAlgoFromKey: actual.extractAlgoFromKey,
+    lookupHostKey: actual.lookupHostKey,
+    parseKnownHosts: actual.parseKnownHosts,
+  }
+})
 
 vi.mock("../src/sftp.js", () => ({
   sftpDownload: vi.fn().mockResolvedValue(null),
@@ -177,6 +193,14 @@ function makeSshInstanceWithAgent(
 // ---------------------------------------------------------------------------
 
 describe("SshConnectionImpl", () => {
+  beforeEach(async () => {
+    // Re-establish buildHostVerifier mock after vi.resetAllMocks() wipes it.
+    // Without this, the destructuring `const { hostVerifier } = buildHostVerifier(...)` in
+    // tryConnectOnPorts() would throw a TypeError because the mock returns undefined.
+    const knownHosts = await import("../src/knownHosts.js")
+    vi.mocked(knownHosts.buildHostVerifier).mockReturnValue({})
+  })
+
   afterEach(() => {
     vi.resetAllMocks()
     vi.useRealTimers()
@@ -1170,6 +1194,111 @@ describe("SshConnectionImpl", () => {
         "/tmp/local-secure"
       )
       expect(executedCommands.some((cmd) => cmd.includes("rm -f"))).toBe(true)
+    })
+  })
+
+  // -------------------------------------------------------------------------
+  // tryConnectOnPorts — hostVerifier and strictHostKeyChecking propagation
+  // -------------------------------------------------------------------------
+
+  describe("tryConnectOnPorts (hostVerifier + strictHostKeyChecking)", () => {
+    // Re-establish the buildHostVerifier mock return value after each resetAllMocks() call.
+    // vi.resetAllMocks() wipes mockReturnValue, causing destructuring of the result to throw.
+    beforeEach(async () => {
+      const knownHosts = await import("../src/knownHosts.js")
+      vi.mocked(knownHosts.buildHostVerifier).mockReturnValue({})
+      vi.mocked(tryConnectOnPort).mockResolvedValue()
+    })
+
+    it("calls buildHostVerifier with default mode 'accept-new' when strictHostKeyChecking is not set", async () => {
+      const { buildHostVerifier } = await import("../src/knownHosts.js")
+      const ssh = makeSshInstance({ host: "1.2.3.4", ports: [22] })
+
+      await ssh.connect()
+
+      expect(buildHostVerifier).toHaveBeenCalledWith("accept-new", "1.2.3.4", 22)
+    })
+
+    it("calls buildHostVerifier with mode 'no' when strictHostKeyChecking is 'no'", async () => {
+      const { buildHostVerifier } = await import("../src/knownHosts.js")
+      const config = {
+        ports: [22],
+        privateKey: "/dev/null",
+        strictHostKeyChecking: "no" as const,
+        user: "root",
+      }
+      const ssh = new SshConnectionImpl("1.2.3.4", config)
+
+      await ssh.connect()
+
+      expect(buildHostVerifier).toHaveBeenCalledWith("no", "1.2.3.4", 22)
+    })
+
+    it("calls buildHostVerifier with mode 'yes' when strictHostKeyChecking is 'yes'", async () => {
+      const { buildHostVerifier } = await import("../src/knownHosts.js")
+      const config = {
+        ports: [22],
+        privateKey: "/dev/null",
+        strictHostKeyChecking: "yes" as const,
+        user: "root",
+      }
+      const ssh = new SshConnectionImpl("1.2.3.4", config)
+
+      await ssh.connect()
+
+      expect(buildHostVerifier).toHaveBeenCalledWith("yes", "1.2.3.4", 22)
+    })
+
+    it("passes the hostVerifier from buildHostVerifier to tryConnectOnPort", async () => {
+      const fakeVerifier = vi.fn().mockReturnValue(true)
+      const { buildHostVerifier } = await import("../src/knownHosts.js")
+      vi.mocked(buildHostVerifier).mockReturnValue({ hostVerifier: fakeVerifier })
+
+      const ssh = makeSshInstance({ host: "1.2.3.4", ports: [22] })
+
+      await ssh.connect()
+
+      const [callArgs] = vi.mocked(tryConnectOnPort).mock.calls[0] as [
+        Parameters<typeof tryConnectOnPort>[0],
+      ]
+      expect(callArgs.hostVerifier).toBe(fakeVerifier)
+    })
+
+    it("calls buildHostVerifier once per port when connecting across multiple ports", async () => {
+      vi.mocked(tryConnectOnPort)
+        .mockRejectedValueOnce(new Error("Connection refused on port 22"))
+        .mockResolvedValueOnce()
+
+      const { buildHostVerifier } = await import("../src/knownHosts.js")
+      const ssh = makeSshInstance({ host: "1.2.3.4", ports: [22, 2222] })
+
+      await ssh.connect()
+
+      // One call per port attempted (22 failed, 2222 succeeded)
+      expect(buildHostVerifier).toHaveBeenCalledTimes(2)
+      expect(buildHostVerifier).toHaveBeenNthCalledWith(1, "accept-new", "1.2.3.4", 22)
+      expect(buildHostVerifier).toHaveBeenNthCalledWith(2, "accept-new", "1.2.3.4", 2222)
+    })
+
+    it("passes undefined hostVerifier to tryConnectOnPort when mode is 'no'", async () => {
+      const { buildHostVerifier } = await import("../src/knownHosts.js")
+      // mode "no" returns empty object — no hostVerifier
+      vi.mocked(buildHostVerifier).mockReturnValue({})
+
+      const config = {
+        ports: [22],
+        privateKey: "/dev/null",
+        strictHostKeyChecking: "no" as const,
+        user: "root",
+      }
+      const ssh = new SshConnectionImpl("1.2.3.4", config)
+
+      await ssh.connect()
+
+      const [callArgs] = vi.mocked(tryConnectOnPort).mock.calls[0] as [
+        Parameters<typeof tryConnectOnPort>[0],
+      ]
+      expect(callArgs.hostVerifier).toBeUndefined()
     })
   })
 })

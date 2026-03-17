@@ -8,6 +8,7 @@ import { Client, type ClientChannel } from "ssh2"
 
 import type { ExecOptions, ExecResult, SshConfig, SshConnection } from "./types.js"
 
+import { buildHostVerifier } from "./knownHosts.js"
 import { sftpDownload, sftpUpload } from "./sftp.js"
 import { collectStreamOutput, maskSecrets, shellQuote, tryConnectOnPort } from "./sshHelpers.js"
 import { promptTerminal } from "./terminal.js"
@@ -336,15 +337,18 @@ export class SshConnectionImpl implements SshConnection {
     password?: string,
     agent?: string
   ): Promise<boolean> {
+    const mode = this.config.strictHostKeyChecking ?? "accept-new"
     for (const port of this.config.ports) {
       try {
         const client = new Client()
+        const { hostVerifier } = buildHostVerifier(mode, this.host, port)
         // eslint-disable-next-line no-await-in-loop
         await tryConnectOnPort({
           agent,
           agentForward: this.config.agentForward,
           client,
           host: this.host,
+          hostVerifier,
           password,
           port,
           privateKey,

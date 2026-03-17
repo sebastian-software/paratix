@@ -1,4 +1,31 @@
-import type { ServerDefinition } from "./types.js"
+import type { ServerDefinition, SshConfig } from "./types.js"
+
+const VALID_HOST_KEY_MODES = ["accept-new", "no", "yes"]
+
+/**
+ * Validate SSH-specific fields of a server definition.
+ *
+ * @param ssh - The SSH config to validate.
+ */
+function validateSshConfig(ssh: SshConfig): void {
+  if (ssh.ports.length === 0) {
+    throw new Error("ServerDefinition: ssh.ports must not be empty")
+  }
+  if (ssh.privateKey?.length === 0) {
+    throw new Error("ServerDefinition: ssh.privateKey must not be an empty string")
+  }
+  if (ssh.user.length === 0) {
+    throw new Error("ServerDefinition: ssh.user is required")
+  }
+  if (
+    ssh.strictHostKeyChecking != null &&
+    !VALID_HOST_KEY_MODES.includes(ssh.strictHostKeyChecking)
+  ) {
+    throw new Error(
+      `ServerDefinition: ssh.strictHostKeyChecking must be one of ${VALID_HOST_KEY_MODES.join(", ")}`
+    )
+  }
+}
 
 /**
  * Define a server and validate its configuration at construction time.
@@ -26,15 +53,7 @@ export function server(config: ServerDefinition): ServerDefinition {
   if (config.name.length === 0) {
     throw new Error("ServerDefinition: name is required")
   }
-  if (config.ssh.ports.length === 0) {
-    throw new Error("ServerDefinition: ssh.ports must not be empty")
-  }
-  if (config.ssh.privateKey?.length === 0) {
-    throw new Error("ServerDefinition: ssh.privateKey must not be an empty string")
-  }
-  if (config.ssh.user.length === 0) {
-    throw new Error("ServerDefinition: ssh.user is required")
-  }
+  validateSshConfig(config.ssh)
   if (config.run.length === 0) {
     throw new Error("ServerDefinition: run must contain at least one module")
   }

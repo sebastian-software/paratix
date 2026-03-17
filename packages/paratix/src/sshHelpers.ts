@@ -225,6 +225,8 @@ export type ConnectParameters = {
   client: Client
   /** Hostname or IP address of the remote host. */
   host: string
+  /** Optional host key verifier callback for known_hosts checking. */
+  hostVerifier?: (key: Buffer) => boolean
   /** Password for keyboard-interactive or password authentication. */
   password?: string
   /** Port to connect on. */
@@ -236,12 +238,47 @@ export type ConnectParameters = {
 }
 
 /**
+ * Build the ssh2 `ConnectConfig` from the connection parameters.
+ *
+ * @param parameters - Connection parameters.
+ * @returns The populated config object.
+ */
+function buildConnectConfig(parameters: ConnectParameters): ConnectConfig {
+  const { agent, agentForward, host, hostVerifier, password, port, privateKey, username } =
+    parameters
+  const connectConfig: ConnectConfig = {
+    host,
+    port,
+    readyTimeout: CONNECTION_TIMEOUT,
+    username,
+  }
+  if (privateKey != null) {
+    connectConfig.privateKey = privateKey
+  }
+  if (agent != null) {
+    connectConfig.agent = agent
+  }
+  if (agentForward === true) {
+    connectConfig.agentForward = true
+  }
+  if (typeof password === "string") {
+    connectConfig.password = password
+    connectConfig.tryKeyboard = true
+  }
+  if (hostVerifier != null) {
+    connectConfig.hostVerifier = hostVerifier
+  }
+  return connectConfig
+}
+
+/**
  * Attempt a single SSH connection on a specific port.
  *
  * @param parameters - Connection parameters.
  */
 export async function tryConnectOnPort(parameters: ConnectParameters): Promise<void> {
-  const { agent, agentForward, client, host, password, port, privateKey, username } = parameters
+  const { client, port } = parameters
+  const connectConfig = buildConnectConfig(parameters)
   return new Promise((resolve, reject) => {
     const timeout = setTimeout(() => {
       client.end()
@@ -257,25 +294,6 @@ export async function tryConnectOnPort(parameters: ConnectParameters): Promise<v
       reject(error)
     })
 
-    const connectConfig: ConnectConfig = {
-      host,
-      port,
-      readyTimeout: CONNECTION_TIMEOUT,
-      username,
-    }
-    if (privateKey != null) {
-      connectConfig.privateKey = privateKey
-    }
-    if (agent != null) {
-      connectConfig.agent = agent
-    }
-    if (agentForward === true) {
-      connectConfig.agentForward = true
-    }
-    if (typeof password === "string") {
-      connectConfig.password = password
-      connectConfig.tryKeyboard = true
-    }
     client.connect(connectConfig)
   })
 }

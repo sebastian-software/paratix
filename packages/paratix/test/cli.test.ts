@@ -354,6 +354,85 @@ describe("collectDefinitionErrors", () => {
     })
     expect(errors).toStrictEqual(["Property 'ssh.user' must not be empty"])
   })
+
+  it("returns no error when ssh.strictHostKeyChecking is 'accept-new'", () => {
+    const errors = collectDefinitionErrors({
+      host: "example.com",
+      name: "test",
+      run: ["echo hello"],
+      ssh: { ports: [22], privateKey: "/key", strictHostKeyChecking: "accept-new", user: "root" },
+    })
+    expect(errors).toStrictEqual([])
+  })
+
+  it("returns no error when ssh.strictHostKeyChecking is 'no'", () => {
+    const errors = collectDefinitionErrors({
+      host: "example.com",
+      name: "test",
+      run: ["echo hello"],
+      ssh: { ports: [22], privateKey: "/key", strictHostKeyChecking: "no", user: "root" },
+    })
+    expect(errors).toStrictEqual([])
+  })
+
+  it("returns no error when ssh.strictHostKeyChecking is 'yes'", () => {
+    const errors = collectDefinitionErrors({
+      host: "example.com",
+      name: "test",
+      run: ["echo hello"],
+      ssh: { ports: [22], privateKey: "/key", strictHostKeyChecking: "yes", user: "root" },
+    })
+    expect(errors).toStrictEqual([])
+  })
+
+  it("returns an error when ssh.strictHostKeyChecking has an invalid value", () => {
+    const errors = collectDefinitionErrors({
+      host: "example.com",
+      name: "test",
+      run: ["echo hello"],
+      ssh: {
+        ports: [22],
+        privateKey: "/key",
+        strictHostKeyChecking: "invalid-value",
+        user: "root",
+      },
+    })
+    expect(errors).toStrictEqual([
+      `Invalid property 'ssh.strictHostKeyChecking' (expected "accept-new", "no", or "yes")`,
+    ])
+  })
+
+  it("returns an error when ssh.strictHostKeyChecking is a non-string value", () => {
+    const errors = collectDefinitionErrors({
+      host: "example.com",
+      name: "test",
+      run: ["echo hello"],
+      ssh: { ports: [22], privateKey: "/key", strictHostKeyChecking: 42, user: "root" },
+    })
+    expect(errors).toStrictEqual([
+      `Invalid property 'ssh.strictHostKeyChecking' (expected "accept-new", "no", or "yes")`,
+    ])
+  })
+
+  it("returns no error when ssh.strictHostKeyChecking is undefined (optional field)", () => {
+    const errors = collectDefinitionErrors({
+      host: "example.com",
+      name: "test",
+      run: ["echo hello"],
+      ssh: { ports: [22], privateKey: "/key", user: "root" },
+    })
+    expect(errors).toStrictEqual([])
+  })
+
+  it("returns no error when ssh.strictHostKeyChecking is null (treated as absent)", () => {
+    const errors = collectDefinitionErrors({
+      host: "example.com",
+      name: "test",
+      run: ["echo hello"],
+      ssh: { ports: [22], privateKey: "/key", strictHostKeyChecking: null, user: "root" },
+    })
+    expect(errors).toStrictEqual([])
+  })
 })
 
 describe("parsePositiveNumber", () => {

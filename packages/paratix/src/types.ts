@@ -132,6 +132,13 @@ export type SshConfig = {
   privateKey?: string
   /** Maximum time in milliseconds to spend attempting reconnection before giving up. */
   reconnectTimeout?: number
+  /**
+   * Host key verification strategy.
+   * - `"accept-new"` — accept unknown keys and append them to `~/.ssh/known_hosts` (default).
+   * - `"yes"` — reject unknown keys; only connect when the key is already in `known_hosts`.
+   * - `"no"` — skip host key verification entirely.
+   */
+  strictHostKeyChecking?: "accept-new" | "no" | "yes"
   /** Password used for `sudo` escalation on the remote host. */
   sudoPassword?: string
   /** Username to authenticate as. */
