@@ -5,3 +5,4 @@ dist/
 .wisdom-accumulation-*.tmp.md
 TODO.md
 review-report-*.md
+.claude/settings.local.json
