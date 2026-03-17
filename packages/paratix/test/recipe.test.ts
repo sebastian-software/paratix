@@ -225,4 +225,14 @@ describe("recipe", () => {
     await r.apply(mockSsh, emptyEnv)
     expect(localMod.apply).toHaveBeenCalledWith(null, emptyEnv)
   })
+
+  it("check propagates exceptions from child module check()", async () => {
+    const failing: Module = {
+      apply: vi.fn().mockResolvedValue({ status: "ok" }),
+      check: vi.fn().mockRejectedValue(new Error("check failed")),
+      name: "failing-mod",
+    }
+    const r = recipe("test-recipe", [failing])
+    await expect(r.check(null, emptyEnv)).rejects.toThrow("check failed")
+  })
 })
