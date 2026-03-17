@@ -3,9 +3,11 @@ import type { Client, SFTPWrapper } from "ssh2"
 import { EventEmitter } from "node:events"
 import { afterEach, describe, expect, it, vi } from "vitest"
 
+import type * as SshHelpers from "../src/sshHelpers.js"
+
 import { sftpDownload } from "../src/sftp.js"
 import { SshConnectionImpl } from "../src/ssh.js"
-import { tryConnectOnPort } from "../src/sshHelpers.js"
+import { collectStreamOutput, tryConnectOnPort } from "../src/sshHelpers.js"
 
 // ---------------------------------------------------------------------------
 // Mocks
@@ -26,10 +28,10 @@ vi.mock("../src/sftp.js", () => ({
 }))
 
 vi.mock("../src/sshHelpers.js", async () => {
-  const { collectStreamOutput, maskSecrets } = await vi.importActual("../src/sshHelpers.js")
+  const actual = await vi.importActual<typeof SshHelpers>("../src/sshHelpers.js")
   return {
-    collectStreamOutput,
-    maskSecrets,
+    collectStreamOutput: vi.fn(actual.collectStreamOutput),
+    maskSecrets: actual.maskSecrets,
     tryConnectOnPort: vi.fn(),
   }
 })
@@ -405,6 +407,38 @@ describe("SshConnectionImpl", () => {
       await ssh.exec("whoami")
 
       expect(execSpy).toHaveBeenCalledOnce()
+    })
+
+    it("registers stream listeners (collectStreamOutput) before writing sudo password to stdin (regression: race condition)", async () => {
+      // Root cause: stream.write(sudoPassword) was called before collectStreamOutput,
+      // so listeners were registered after the password was already written.
+      // Fix: collectStreamOutput must be called first to register listeners,
+      // then stream.write sends the password.
+      let capturedStream: null | StreamWithStderr = null
+
+      const execSpy = vi.fn().mockImplementation((_command: string, callback: ExecCallback) => {
+        const stream = makeStream()
+        capturedStream = stream
+        callback(undefined, stream)
+        stream.emit("close", 0)
+      })
+
+      const client = makeClientWithExecSpy(execSpy)
+      const ssh = makeConnectedSsh(client, { sudoPassword: "my-sudo-pass", user: "deploy" })
+
+      await ssh.exec("whoami")
+
+      expect(capturedStream).not.toBeNull()
+      expect(vi.mocked(collectStreamOutput)).toHaveBeenCalledOnce()
+      expect(vi.mocked(capturedStream!.write)).toHaveBeenCalledWith("my-sudo-pass\n")
+
+      // collectStreamOutput must be invoked before stream.write so that all
+      // stream event listeners are registered before the sudo password is sent
+      const collectOrder = vi.mocked(collectStreamOutput).mock.invocationCallOrder[0]
+      const writeOrder = vi.mocked(capturedStream?.write).mock.invocationCallOrder[0]
+      expect(collectOrder).toBeDefined()
+      expect(writeOrder).toBeDefined()
+      expect(collectOrder).toBeLessThan(writeOrder)
     })
 
     it("rejects pending exec() immediately when client emits 'close'", async () => {

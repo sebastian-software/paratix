@@ -125,10 +125,6 @@ export class SshConnectionImpl implements SshConnection {
           return
         }
         activeStream = stream
-        // Write sudo password to stdin instead of embedding in command
-        if (this.cachedSudoPassword != null && this.config.user !== "root") {
-          stream.write(`${this.cachedSudoPassword}\n`)
-        }
         collectStreamOutput({
           command,
           options,
@@ -138,6 +134,10 @@ export class SshConnectionImpl implements SshConnection {
           stream,
           timer,
         })
+        // Write sudo password to stdin after listeners are registered
+        if (this.cachedSudoPassword != null && this.config.user !== "root") {
+          stream.write(`${this.cachedSudoPassword}\n`)
+        }
       })
     })
   }
