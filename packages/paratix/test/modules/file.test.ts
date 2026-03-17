@@ -501,6 +501,21 @@ describe("file.assemble", () => {
     }
   })
 
+  it("apply rejects invalid mode string", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "paratix-test-"))
+    try {
+      const frag1 = join(dir, "frag1.txt")
+      writeFileSync(frag1, "Hello")
+
+      const ssh = createMockSsh()
+      const mod = file.assemble("/remote/assembled.txt", [frag1], { mode: "999" })
+
+      await expect(mod.apply(ssh, emptyEnv)).rejects.toThrow(/mode/v)
+    } finally {
+      rmSync(dir, { recursive: true })
+    }
+  })
+
   it("apply writes concatenated fragments", async () => {
     const dir = mkdtempSync(join(tmpdir(), "paratix-test-"))
     try {

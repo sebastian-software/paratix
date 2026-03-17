@@ -1,6 +1,6 @@
 import { readFile } from "node:fs/promises"
 
-import { shellQuote } from "../ssh.js"
+import { shellQuote, validateMode } from "../ssh.js"
 import { type Module, type ModuleResult, NEEDS_APPLY, type SshConnection } from "../types.js"
 import { sha256String } from "./fileHelpers.js"
 
@@ -82,6 +82,7 @@ export function assemble(
       await ssh.writeFile(remotePath, await concatFragments(fragments))
 
       if (options?.mode != null) {
+        validateMode(options.mode)
         await ssh.exec(`chmod ${shellQuote(options.mode)} ${shellQuote(remotePath)}`, {
           silent: true,
         })
