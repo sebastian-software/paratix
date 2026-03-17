@@ -1,3 +1,4 @@
+import { printCommandError } from "../output.js"
 import { type Module, type ModuleResult, NEEDS_APPLY, type SshConnection } from "../types.js"
 
 const MAX_NAME_LENGTH = 50
@@ -32,7 +33,11 @@ export const command = {
       async apply(ssh: null | SshConnection): Promise<ModuleResult> {
         if (!ssh) return { status: "failed" }
         const result = await ssh.exec(cmd, { ignoreExitCode: true, silent: true })
-        return result.code === 0 ? { status: "changed" } : { status: "failed" }
+        if (result.code !== 0) {
+          printCommandError(result.stdout, result.stderr)
+          return { status: "failed" }
+        }
+        return { status: "changed" }
       },
       async check(ssh: null | SshConnection): Promise<"needs-apply" | "ok"> {
         if (!ssh) return NEEDS_APPLY
