@@ -84,7 +84,7 @@ describe("createStreamMasker", () => {
     masker.flush()
 
     expect(output.join("")).not.toContain("hunter2")
-    expect(output.join("")).toContain("***")
+    expect(output.join("")).toContain("[REDACTED]")
   })
 
   it("masks a secret split across two chunks ('hun' + 'ter2')", () => {
@@ -101,7 +101,7 @@ describe("createStreamMasker", () => {
     masker.flush()
 
     expect(output.join("")).not.toContain("hunter2")
-    expect(output.join("")).toContain("***")
+    expect(output.join("")).toContain("[REDACTED]")
   })
 
   it("masks a secret split at chunk-end and chunk-start ('hunte' + 'r2')", () => {
@@ -118,7 +118,7 @@ describe("createStreamMasker", () => {
     masker.flush()
 
     expect(output.join("")).not.toContain("hunter2")
-    expect(output.join("")).toContain("***")
+    expect(output.join("")).toContain("[REDACTED]")
   })
 
   it("masks multiple distinct secrets appearing in a single chunk", () => {
@@ -136,7 +136,7 @@ describe("createStreamMasker", () => {
     const combined = output.join("")
     expect(combined).not.toContain("alpha")
     expect(combined).not.toContain("beta")
-    expect(combined).toContain("***")
+    expect(combined).toContain("[REDACTED]")
   })
 
   it("produces no output when chunk is smaller than overlap, then flushes on flush()", () => {
@@ -219,7 +219,7 @@ describe("maskSecrets (via collectStreamOutput error messages)", () => {
 
     const msg = await getErrorMessage(promise)
     expect(msg).not.toContain(secret)
-    expect(msg).toContain("***")
+    expect(msg).toContain("[REDACTED]")
   })
 
   it("masks multiple distinct secrets", async () => {
@@ -277,8 +277,8 @@ describe("maskSecrets (via collectStreamOutput error messages)", () => {
 
     const msg = await getErrorMessage(promise)
     expect(msg).not.toContain(secret)
-    // Each occurrence was replaced with *** so at least three *** groups exist
-    const occurrences = msg.match(/\*\*\*/gv)
+    // Each occurrence was replaced with [REDACTED] so at least five [REDACTED] groups exist
+    const occurrences = msg.match(/\[REDACTED\]/gv)
     expect(occurrences).not.toBeNull()
     expect(occurrences).toHaveLength(5)
   })
@@ -302,7 +302,7 @@ describe("collectStreamOutput", () => {
     const msg = await getErrorMessage(promise)
     expect(msg).toMatch(/Command failed with exit code 1/v)
     expect(msg).not.toContain(secret)
-    expect(msg).toContain("***")
+    expect(msg).toContain("[REDACTED]")
   })
 
   it("resolves with stdout and stderr when exit code is 0", async () => {
@@ -380,9 +380,9 @@ describe("collectStreamOutput", () => {
     })
 
     expect(result.stdout).not.toContain(secret)
-    expect(result.stdout).toContain("***")
+    expect(result.stdout).toContain("[REDACTED]")
     expect(result.stderr).not.toContain(secret)
-    expect(result.stderr).toContain("***")
+    expect(result.stderr).toContain("[REDACTED]")
   })
 
   it("does not reject when ignoreExitCode is true even on non-zero exit", async () => {
@@ -470,7 +470,7 @@ describe("live-output masking via process.stdout/stderr.write", () => {
 
     const stdoutCalls = stdoutWriteSpy.mock.calls.map((args) => String(args[0]))
     expect(stdoutCalls.join("")).not.toContain(secret)
-    expect(stdoutCalls.join("")).toContain("***")
+    expect(stdoutCalls.join("")).toContain("[REDACTED]")
   })
 
   it("masks secrets in process.stderr.write when silent is false", async () => {
@@ -502,7 +502,7 @@ describe("live-output masking via process.stdout/stderr.write", () => {
 
     const stderrCalls = stderrWriteSpy.mock.calls.map((args) => String(args[0]))
     expect(stderrCalls.join("")).not.toContain(secret)
-    expect(stderrCalls.join("")).toContain("***")
+    expect(stderrCalls.join("")).toContain("[REDACTED]")
   })
 
   it("masks secrets in both stdout and stderr live-output simultaneously", async () => {
@@ -537,9 +537,9 @@ describe("live-output masking via process.stdout/stderr.write", () => {
     const stderrOutput = stderrWriteSpy.mock.calls.map((args) => String(args[0])).join("")
 
     expect(stdoutOutput).not.toContain(password)
-    expect(stdoutOutput).toContain("***")
+    expect(stdoutOutput).toContain("[REDACTED]")
     expect(stderrOutput).not.toContain(token)
-    expect(stderrOutput).toContain("***")
+    expect(stderrOutput).toContain("[REDACTED]")
   })
 
   it("does not call process.stdout.write or process.stderr.write when silent is true", async () => {
@@ -748,9 +748,9 @@ describe("CommandError and truncation", () => {
 
     const error = await getCommandError(promise)
     expect(error.fullStdout).not.toContain(secret)
-    expect(error.fullStdout).toContain("***")
+    expect(error.fullStdout).toContain("[REDACTED]")
     expect(error.fullStderr).not.toContain(secret)
-    expect(error.fullStderr).toContain("***")
+    expect(error.fullStderr).toContain("[REDACTED]")
   })
 
   it("truncated error message contains first MAX_OUTPUT_LENGTH characters of stdout", async () => {

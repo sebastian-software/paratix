@@ -90,7 +90,7 @@ export function maskSecrets(text: string, secrets: string[]): string {
   let masked = text
   for (const secret of secrets) {
     if (secret.length > 0) {
-      masked = masked.replaceAll(secret, "***")
+      masked = masked.replaceAll(secret, "[REDACTED]")
     }
   }
   return masked
@@ -138,7 +138,7 @@ export function createStreamMasker(
       // Mask the whole buffer first so secrets fully contained in
       // pending are replaced before the split.  The overlap is then
       // taken from the *masked* result — this is correct as long as
-      // no secret literally contains the replacement string "***".
+      // no secret literally contains the replacement string "[REDACTED]".
       const masked = maskSecrets(pending, secrets)
       if (masked.length <= overlap) {
         pending = masked

@@ -580,7 +580,7 @@ describe("SshConnectionImpl", () => {
 
       const error = await execPromise.catch((error: unknown) => error as Error)
       expect(error.message).not.toContain(secret)
-      expect(error.message).toContain("***")
+      expect(error.message).toContain("[REDACTED]")
     })
 
     it("prefixes sudo command with SUDO_PROMPT='' to suppress username disclosure in stderr", async () => {
@@ -1236,7 +1236,7 @@ describe("SshConnectionImpl", () => {
       // The plain-text password must NOT appear in the error message
       expect(error.message).not.toContain(password)
       // The password must be replaced with the mask token
-      expect(error.message).toContain("***")
+      expect(error.message).toContain("[REDACTED]")
     })
   })
 
