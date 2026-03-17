@@ -327,7 +327,7 @@ export class SshConnectionImpl implements SshConnection {
     const remoteTemporary = await this.output("mktemp /tmp/paratix-write.XXXXXX")
     try {
       // eslint-disable-next-line security/detect-non-literal-fs-filename
-      writeFileSync(localTemporary, content)
+      writeFileSync(localTemporary, content, { mode: 0o600 })
       await sftpUpload(client, localTemporary, remoteTemporary)
       await this.exec(`mv ${shellQuote(remoteTemporary)} ${shellQuote(remotePath)}`, {
         silent: true,

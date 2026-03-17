@@ -157,6 +157,29 @@ describe("SshConnectionImpl.writeFile — large content (> 64 KB)", () => {
     expect(writtenContent).toBe(content)
   })
 
+  // ---------------------------------------------------------------------------
+  // Regression: local temp file must be created with mode 0o600 (not world-readable)
+  // ---------------------------------------------------------------------------
+
+  it("creates the local tmp file with mode 0o600 (regression: was world-readable without mode option)", async () => {
+    // Root cause: writeFileSync(localTemporary, content) was called without a
+    // mode option, resulting in the default 0o666 (world-readable after umask).
+    // Fix: writeFileSync(localTemporary, content, { mode: 0o600 }) ensures the
+    // temp file is owner-only, protecting sensitive content during the upload.
+    const client = makeClientWithExecSpy(execSpy)
+    const ssh = makeConnectedSsh(client)
+    const content = makeLargeContent()
+
+    // Act
+    await ssh.writeFile("/etc/large-config", content)
+
+    // Assert: third argument to writeFileSync must include mode 0o600
+    expect(vi.mocked(writeFileSync)).toHaveBeenCalledOnce()
+    const writeCall = vi.mocked(writeFileSync).mock.calls[0] as [string, string, { mode: number }]
+    const options = writeCall[2]
+    expect(options).toMatchObject({ mode: 0o600 })
+  })
+
   it("calls sftpUpload with the local tmp file and the remote tmp path", async () => {
     // Arrange
     const client = makeClientWithExecSpy(execSpy)
