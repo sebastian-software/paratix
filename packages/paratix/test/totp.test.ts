@@ -143,4 +143,41 @@ describe("generateTotpCode — error handling", () => {
     const uri = "otpauth://totp/Test?secret="
     expect(() => generateTotpCode(uri)).toThrow(/secret/v)
   })
+
+  // period validation
+  it("throws when period=0", () => {
+    const uri = `otpauth://totp/Test?secret=${RFC_SECRET_BASE32}&period=0`
+    expect(() => generateTotpCode(uri)).toThrow(/period/v)
+  })
+
+  it("throws when period=-1", () => {
+    const uri = `otpauth://totp/Test?secret=${RFC_SECRET_BASE32}&period=-1`
+    expect(() => generateTotpCode(uri)).toThrow(/period/v)
+  })
+
+  it("throws when period is non-numeric (NaN)", () => {
+    const uri = `otpauth://totp/Test?secret=${RFC_SECRET_BASE32}&period=abc`
+    expect(() => generateTotpCode(uri)).toThrow(/period/v)
+  })
+
+  // digits validation
+  it("throws when digits=0", () => {
+    const uri = `otpauth://totp/Test?secret=${RFC_SECRET_BASE32}&digits=0`
+    expect(() => generateTotpCode(uri)).toThrow(/digits/v)
+  })
+
+  it("throws when digits=-1", () => {
+    const uri = `otpauth://totp/Test?secret=${RFC_SECRET_BASE32}&digits=-1`
+    expect(() => generateTotpCode(uri)).toThrow(/digits/v)
+  })
+
+  it("throws when digits=11 (exceeds maximum of 10)", () => {
+    const uri = `otpauth://totp/Test?secret=${RFC_SECRET_BASE32}&digits=11`
+    expect(() => generateTotpCode(uri)).toThrow(/digits/v)
+  })
+
+  it("throws when digits is non-numeric (NaN)", () => {
+    const uri = `otpauth://totp/Test?secret=${RFC_SECRET_BASE32}&digits=abc`
+    expect(() => generateTotpCode(uri)).toThrow(/digits/v)
+  })
 })

@@ -41,6 +41,9 @@ const DEFAULT_PERIOD = 30
 /** Default number of TOTP digits. */
 const DEFAULT_DIGITS = 6
 
+/** Maximum allowed number of TOTP digits (prevents integer overflow in 10^digits). */
+const MAX_DIGITS = 10
+
 /**
  * Decode a Base32-encoded string (RFC 4648) into a Buffer.
  *
@@ -92,20 +95,16 @@ function truncateHmac(hmacDigest: Buffer, digits: number): string {
 }
 
 /**
- * Generate a TOTP code from an `otpauth://totp/...` URI according to RFC 6238.
+ * Parse and validate TOTP parameters from an otpauth URI.
  *
- * The URI is parsed for `secret`, `period` (default 30), and `digits` (default 6).
- * Uses HMAC-SHA1 with dynamic truncation to produce a numeric one-time password.
- *
- * @param otpauthUri - A fully-qualified `otpauth://totp/...` URI containing at
- *   least a `secret` query parameter with a Base32-encoded shared secret.
- * @returns The zero-padded TOTP code as a string (length determined by `digits`).
- * @throws {Error} If the URI is missing the `secret` parameter.
- * @throws {Error} If the `secret` contains characters outside the Base32 alphabet.
- * @see {@link https://datatracker.ietf.org/doc/html/rfc6238 RFC 6238 – TOTP}
- * @see {@link https://datatracker.ietf.org/doc/html/rfc4226 RFC 4226 – HOTP}
+ * @param otpauthUri - The otpauth URI to parse.
+ * @returns The parsed secret, period, and digits.
  */
-export function generateTotpCode(otpauthUri: string): string {
+function parseTotpParameters(otpauthUri: string): {
+  digits: number
+  period: number
+  secret: string
+} {
   const url = new URL(otpauthUri)
 
   const secret = url.searchParams.get("secret")
@@ -121,6 +120,35 @@ export function generateTotpCode(otpauthUri: string): string {
     url.searchParams.get("digits") ?? String(DEFAULT_DIGITS),
     DECIMAL_BASE
   )
+
+  if (!Number.isFinite(period) || period <= 0) {
+    throw new Error("TOTP 'period' must be a positive integer")
+  }
+  if (!Number.isFinite(digits) || digits < 1 || digits > MAX_DIGITS) {
+    throw new Error("TOTP 'digits' must be an integer between 1 and 10")
+  }
+
+  return { digits, period, secret }
+}
+
+/**
+ * Generate a TOTP code from an `otpauth://totp/...` URI according to RFC 6238.
+ *
+ * The URI is parsed for `secret`, `period` (default 30), and `digits` (default 6).
+ * Uses HMAC-SHA1 with dynamic truncation to produce a numeric one-time password.
+ *
+ * @param otpauthUri - A fully-qualified `otpauth://totp/...` URI containing at
+ *   least a `secret` query parameter with a Base32-encoded shared secret.
+ * @returns The zero-padded TOTP code as a string (length determined by `digits`).
+ * @throws {Error} If the URI is missing the `secret` parameter.
+ * @throws {Error} If the `secret` contains characters outside the Base32 alphabet.
+ * @throws {Error} If `period` is not a positive integer.
+ * @throws {Error} If `digits` is not an integer between 1 and 10.
+ * @see {@link https://datatracker.ietf.org/doc/html/rfc6238 RFC 6238 – TOTP}
+ * @see {@link https://datatracker.ietf.org/doc/html/rfc4226 RFC 4226 – HOTP}
+ */
+export function generateTotpCode(otpauthUri: string): string {
+  const { digits, period, secret } = parseTotpParameters(otpauthUri)
 
   const key = decodeBase32(secret)
 
