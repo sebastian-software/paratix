@@ -56,12 +56,24 @@ async function passwdAttributesMatch(
   return true
 }
 
+async function shadowHashMatches(
+  ssh: SshConnection,
+  name: string,
+  password: string
+): Promise<boolean> {
+  const shadowEntry = await ssh.output(`getent shadow ${shellQuote(name)}`)
+  const currentHash = shadowEntry.split(":")[1] ?? ""
+  return currentHash === password
+}
+
 async function attributesMatch(
   ssh: SshConnection,
   name: string,
   options: UserOptions
 ): Promise<boolean> {
-  if (options.password != null) return false
+  if (options.password != null && !(await shadowHashMatches(ssh, name, options.password))) {
+    return false
+  }
 
   const needsPasswdCheck = options.uid != null || options.shell != null || options.home != null
   if (needsPasswdCheck && !(await passwdAttributesMatch(ssh, name, options))) return false

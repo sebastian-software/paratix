@@ -114,14 +114,24 @@ describe("user.present check", () => {
     expect(result).toBe("ok")
   })
 
-  // Bug #7 regression: password option always triggers needs-apply
-  it("returns needs-apply when password is set (always re-apply)", async () => {
+  it("returns needs-apply when shadow hash does not match password", async () => {
     const ssh = createMockSsh({
+      "getent shadow 'alice'": { code: 0, stdout: "alice:$6$oldhash:19000:0:99999:7:::" },
+      "id 'alice'": { code: 0 },
+    })
+    const mod = user.present("alice", { password: "$6$newhash" })
+    const result = await mod.check(ssh, emptyEnv)
+    expect(result).toBe("needs-apply")
+  })
+
+  it("returns ok when shadow hash matches password", async () => {
+    const ssh = createMockSsh({
+      "getent shadow 'alice'": { code: 0, stdout: "alice:$6$hash:19000:0:99999:7:::" },
       "id 'alice'": { code: 0 },
     })
     const mod = user.present("alice", { password: "$6$hash" })
     const result = await mod.check(ssh, emptyEnv)
-    expect(result).toBe("needs-apply")
+    expect(result).toBe("ok")
   })
 })
 
