@@ -192,8 +192,9 @@ export class SshConnectionImpl implements SshConnection {
     try {
       await this.exec("true", { silent: true, timeout: 10_000 })
     } catch (error) {
+      const masked = maskSecrets(String(error), [password])
       this.cachedSudoPassword = null
-      throw new Error(`Sudo authentication failed: ${String(error)}`, { cause: error })
+      throw new Error(`Sudo authentication failed: ${masked}`, { cause: error })
     }
   }
 

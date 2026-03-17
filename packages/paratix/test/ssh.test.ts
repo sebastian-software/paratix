@@ -1198,6 +1198,49 @@ describe("SshConnectionImpl", () => {
   })
 
   // -------------------------------------------------------------------------
+  // probeSudo
+  // -------------------------------------------------------------------------
+
+  describe("probeSudo", () => {
+    it("masks the sudo password in the error message when authentication fails (regression)", async () => {
+      // Arrange
+      const password = "s3cret-pw"
+      vi.mocked(promptTerminal).mockResolvedValueOnce(password)
+
+      const execSpy = vi
+        .fn()
+        // First call: passwordless sudo probe — fails (sudo requires a password)
+        .mockImplementationOnce((_command: string, callback: ExecCallback) => {
+          const stream = makeStream()
+          callback(undefined, stream)
+          stream.emit("close", 1)
+        })
+        // Second call: sudo with password — fails with the password in stderr
+        .mockImplementationOnce((_command: string, callback: ExecCallback) => {
+          const stream = makeStream()
+          callback(undefined, stream)
+          stream.stderr.emit("data", Buffer.from(`Authentication failed: ${password} invalid`))
+          stream.emit("close", 1)
+        })
+
+      const client = makeClientWithExecSpy(execSpy)
+      const ssh = makeConnectedSsh(client, { user: "deploy" })
+
+      // Act
+      const error = await ssh.probeSudo().catch((error: unknown) => error as Error)
+
+      // Assert: error is thrown
+      expect(error).toBeInstanceOf(Error)
+      // The error message must start with the expected prefix
+      expect(error.message).toContain("Sudo authentication failed")
+      // The plain-text password must NOT appear in the error message
+      expect(error.message).not.toContain(password)
+      // The password must be replaced with the mask token
+      expect(error.message).toContain("***")
+    })
+  })
+
+  // -------------------------------------------------------------------------
   // tryConnectOnPorts — hostVerifier and strictHostKeyChecking propagation
   // -------------------------------------------------------------------------
 
