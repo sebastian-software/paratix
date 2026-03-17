@@ -165,10 +165,31 @@ describe("recipe", () => {
     expect(signalApplied.count).toBe(1)
   })
 
-  it("recipe check always returns needs-apply", async () => {
-    const mod = makeModule("ok", "ok")
-    const r = recipe("test-recipe", [mod])
+  it("check returns ok when all child modules report ok", async () => {
+    const mod1 = makeModule("ok", "ok", "mod-1")
+    const mod2 = makeModule("ok", "ok", "mod-2")
+    const r = recipe("test-recipe", [mod1, mod2])
+    const result = await r.check(null, emptyEnv)
+    expect(result).toBe("ok")
+  })
+
+  it("check returns needs-apply when any child module reports needs-apply", async () => {
+    const mod1 = makeModule("ok", "ok", "mod-1")
+    const mod2 = makeModule("needs-apply", "changed", "mod-2")
+    const r = recipe("test-recipe", [mod1, mod2])
     const result = await r.check(null, emptyEnv)
     expect(result).toBe("needs-apply")
+  })
+
+  it("check short-circuits on first needs-apply", async () => {
+    const mod1 = makeModule("needs-apply", "changed", "mod-1")
+    const mod2: Module = {
+      apply: vi.fn().mockResolvedValue({ status: "ok" }),
+      check: vi.fn().mockResolvedValue("ok"),
+      name: "mod-2",
+    }
+    const r = recipe("test-recipe", [mod1, mod2])
+    await r.check(null, emptyEnv)
+    expect(mod2.check).not.toHaveBeenCalled()
   })
 })

@@ -140,9 +140,16 @@ export function recipe(
       return { meta: hasMeta ? meta : undefined, status: state.status }
     },
 
-    // eslint-disable-next-line @typescript-eslint/require-await -- Interface requires async
-    async check(): Promise<"needs-apply" | "ok"> {
-      return NEEDS_APPLY
+    async check(
+      ssh: null | SshConnection,
+      environment: Environment
+    ): Promise<"needs-apply" | "ok"> {
+      for (const childModule of modules) {
+        // eslint-disable-next-line no-await-in-loop
+        const result = await childModule.check(ssh, environment)
+        if (result === NEEDS_APPLY) return NEEDS_APPLY
+      }
+      return "ok"
     },
 
     name,

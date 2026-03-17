@@ -221,6 +221,12 @@ async function runRecipeModule(
   try {
     if (dryRun) return await dryRunRecipeModule(recipeModule, environment, ssh)
 
+    const checkResult = await recipeModule.check(ssh, environment)
+    if (checkResult === "ok") {
+      printModuleResult(recipeModule.name, "ok")
+      return { env: environment, shouldBreak: false, status: "ok" }
+    }
+
     const result = await recipeModule.apply(ssh, environment)
     return await handleMetaAndBuildResult(ssh, environment, result)
   } catch (error) {
