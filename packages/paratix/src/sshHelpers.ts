@@ -101,8 +101,8 @@ export function collectStreamOutput(parameters: StreamOutputParameters): void {
     clearTimeout(timer)
     // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition -- ssh2 may pass undefined despite type signature
     const exitCode = code ?? 0
+    const mask = (text: string): string => maskSecrets(text, parameters.secrets ?? [])
     if (exitCode !== 0 && options.ignoreExitCode !== true) {
-      const mask = (text: string): string => maskSecrets(text, parameters.secrets ?? [])
       const maskedStdout = mask(stdout)
       const maskedStderr = mask(stderr)
       const wasTruncated =
@@ -118,7 +118,7 @@ export function collectStreamOutput(parameters: StreamOutputParameters): void {
       )
       return
     }
-    resolve({ code: exitCode, stderr, stdout })
+    resolve({ code: exitCode, stderr: mask(stderr), stdout: mask(stdout) })
   })
 }
 

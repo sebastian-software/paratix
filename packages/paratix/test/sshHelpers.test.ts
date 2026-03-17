@@ -232,6 +232,22 @@ describe("collectStreamOutput", () => {
     expect(result.code).toBe(0)
   })
 
+  it("masks secrets in resolved stdout and stderr on successful exit (exit code 0)", async () => {
+    const secret = "s3cr3tpassword"
+    const result = await runCollect({
+      command: "echo something",
+      emitClose: { code: 0 },
+      emitStderr: `warning: ${secret} detected`,
+      emitStdout: `output: ${secret} here`,
+      secrets: [secret],
+    })
+
+    expect(result.stdout).not.toContain(secret)
+    expect(result.stdout).toContain("***")
+    expect(result.stderr).not.toContain(secret)
+    expect(result.stderr).toContain("***")
+  })
+
   it("does not reject when ignoreExitCode is true even on non-zero exit", async () => {
     const result = await runCollect({
       command: "false",
