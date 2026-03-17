@@ -757,6 +757,53 @@ describe("SshConnectionImpl", () => {
       expect(execSpy).not.toHaveBeenCalled()
     })
 
+    it("sets chmod 600 (owner-only) on the temporary copy for non-root user", async () => {
+      const executedCommands: string[] = []
+      const mktempOutput = "/tmp/paratix-download.ABCDEF"
+
+      const execSpy = vi
+        .fn()
+        // First call: mktemp (via output())
+        .mockImplementationOnce((cmd: string, callback: ExecCallback) => {
+          executedCommands.push(cmd)
+          const stream = makeStream()
+          callback(undefined, stream)
+          stream.emit("data", Buffer.from(mktempOutput))
+          stream.emit("close", 0)
+        })
+        // Second call: cp
+        .mockImplementationOnce((cmd: string, callback: ExecCallback) => {
+          executedCommands.push(cmd)
+          const stream = makeStream()
+          callback(undefined, stream)
+          stream.emit("close", 0)
+        })
+        // Third call: chmod
+        .mockImplementationOnce((cmd: string, callback: ExecCallback) => {
+          executedCommands.push(cmd)
+          const stream = makeStream()
+          callback(undefined, stream)
+          stream.emit("close", 0)
+        })
+        // Fourth call: rm -f
+        .mockImplementationOnce((cmd: string, callback: ExecCallback) => {
+          executedCommands.push(cmd)
+          const stream = makeStream()
+          callback(undefined, stream)
+          stream.emit("close", 0)
+        })
+
+      const client = makeClientWithExecSpy(execSpy)
+      const ssh = makeConnectedSsh(client, { user: "deploy" })
+
+      await ssh.downloadFile("/var/log/secure", "/tmp/local-secure")
+
+      const chmodCommand = executedCommands.find((cmd) => cmd.includes("chmod"))
+      expect(chmodCommand).toBeDefined()
+      // Temp copy must be owner-only (600), not world-readable (644)
+      expect(chmodCommand).toContain("chmod 600")
+    })
+
     it("uses mktemp, cp, chmod, sftp, rm for non-root user", async () => {
       const executedCommands: string[] = []
       const mktempOutput = "/tmp/paratix-download.ABCDEF"
@@ -790,7 +837,7 @@ describe("SshConnectionImpl", () => {
       // Verify the sequence: mktemp, cp, chmod, then sftpDownload, then rm
       expect(executedCommands.some((cmd) => cmd.includes("mktemp"))).toBe(true)
       expect(executedCommands.some((cmd) => cmd.includes("cp"))).toBe(true)
-      expect(executedCommands.some((cmd) => cmd.includes("chmod 644"))).toBe(true)
+      expect(executedCommands.some((cmd) => cmd.includes("chmod 600"))).toBe(true)
       expect(vi.mocked(sftpDownload)).toHaveBeenCalledWith(
         client,
         mktempOutput,

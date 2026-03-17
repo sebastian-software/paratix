@@ -82,7 +82,7 @@ export class SshConnectionImpl implements SshConnection {
     if (this.config.user !== "root") {
       sourcePath = await this.output("mktemp /tmp/paratix-download.XXXXXX")
       await this.exec(`cp ${shellQuote(remotePath)} ${shellQuote(sourcePath)}`, { silent: true })
-      await this.exec(`chmod 644 ${shellQuote(sourcePath)}`, { silent: true })
+      await this.exec(`chmod 600 ${shellQuote(sourcePath)}`, { silent: true })
     }
     await sftpDownload(client, sourcePath, localPath)
     if (sourcePath !== remotePath) {
