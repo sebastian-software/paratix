@@ -197,7 +197,7 @@ export const download = {
       throw new Error(`Invalid GitHub release asset: ${options.asset}`)
     }
 
-    const url = `https://github.com/${options.repo}/releases/download/${encodeURIComponent(options.tag)}/${encodeURIComponent(options.asset)}`
+    const url = `https://github.com/${encodeURIComponent(parts[0])}/${encodeURIComponent(parts[1])}/releases/download/${encodeURIComponent(options.tag)}/${encodeURIComponent(options.asset)}`
     const headers: Record<string, string> = {}
 
     if (options.token != null) {

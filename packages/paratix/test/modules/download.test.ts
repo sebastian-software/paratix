@@ -387,6 +387,32 @@ describe("download.github", () => {
       expect(curlCall).toContain(encodeURIComponent(assetWithSpace))
       expect(curlCall).not.toContain(` ${assetWithSpace}'`)
     })
+
+    it("percent-encodes special characters in owner and repo when building the download URL", async () => {
+      // Regression test: owner and repo parts of the GitHub URL must be
+      // individually encoded via encodeURIComponent. A repo like "my+org/my%repo"
+      // contains "+" (encoded as "%2B") and "%" (encoded as "%25") which must
+      // not appear raw in the curl command.
+      const repoWithSpecialChars = "my+org/my%repo"
+      const [encodedOwner, encodedRepo] = repoWithSpecialChars
+        .split("/")
+        .map((part) => encodeURIComponent(part))
+      const mockSsh = createMockSsh()
+      const mod = download.github(destination, {
+        asset,
+        repo: repoWithSpecialChars,
+        tag,
+      })
+      await mod.apply(mockSsh, emptyEnv)
+
+      const curlCall = mockSsh.calls.find((call) => call.startsWith("curl -fsSL"))
+      expect(curlCall).toBeDefined()
+      // Both owner and repo must appear percent-encoded in the URL
+      expect(curlCall).toContain(`https://github.com/${encodedOwner}/${encodedRepo}/`)
+      // The raw "+" and "%" must not appear in the path segments
+      expect(curlCall).not.toContain("/my+org/")
+      expect(curlCall).not.toContain("/my%repo/")
+    })
   })
 })
 
