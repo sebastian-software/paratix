@@ -338,11 +338,9 @@ describe("op.resolve — error logging on failure", () => {
     const result = await module_.apply(null, emptyEnv)
 
     // Assert: Fehler muss geloggt werden BEVOR { status: 'failed' } zurueckgegeben wird.
-    // Bug: Der catch-Block (op.ts:185) bindet den Fehler nicht und loggt ihn nicht.
+    // Generische Meldung ohne sensitive Details aus stderr.
     expect(result.status).toBe("failed")
-    expect(consoleSpy).toHaveBeenCalled()
-    const errorOutput = consoleSpy.mock.calls.flat().map(String).join(" ")
-    expect(errorOutput).toMatch(/op|exited|code/v)
+    expect(consoleSpy).toHaveBeenCalledWith("Failed to resolve 1Password references")
   })
 
   it("logs the error before returning { status: 'failed' } when op read throws", async () => {
@@ -357,9 +355,8 @@ describe("op.resolve — error logging on failure", () => {
     const result = await module_.apply(null, emptyEnv)
 
     // Assert: Fehler muss geloggt werden.
+    // Generische Meldung ohne sensitive Details aus stderr.
     expect(result.status).toBe("failed")
-    expect(consoleSpy).toHaveBeenCalled()
-    const errorOutput = consoleSpy.mock.calls.flat().map(String).join(" ")
-    expect(errorOutput).toMatch(/op|exited|code/v)
+    expect(consoleSpy).toHaveBeenCalledWith("Failed to resolve 1Password references")
   })
 })

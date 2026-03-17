@@ -182,8 +182,8 @@ export const op = {
           const resolvedOtp = await resolveOtpReferences(otpEntries)
 
           return { meta: { ...resolvedRegular, ...resolvedOtp }, status: "ok" }
-        } catch (error) {
-          console.error(String(error))
+        } catch {
+          console.error("Failed to resolve 1Password references")
           return { status: "failed" }
         }
       },
