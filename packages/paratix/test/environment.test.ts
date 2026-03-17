@@ -88,6 +88,75 @@ describe("loadDotEnvironment", () => {
     const env = await loadDotEnvironment(tmpFile)
     expect(env.TOKEN).toBe("my-secret-token")
   })
+
+  // Escape sequences in double-quoted values
+  it("expands \\n escape to a real newline in double-quoted value", async () => {
+    writeFileSync(tmpFile, 'KEY="hello\\nworld"\n')
+    const env = await loadDotEnvironment(tmpFile)
+    expect(env.KEY).toBe("hello\nworld")
+  })
+
+  it('expands \\" escape to a double quote in double-quoted value', async () => {
+    writeFileSync(tmpFile, 'KEY="escaped\\"quote"\n')
+    const env = await loadDotEnvironment(tmpFile)
+    expect(env.KEY).toBe('escaped"quote')
+  })
+
+  it("expands \\\\ escape to a single backslash in double-quoted value", async () => {
+    writeFileSync(tmpFile, 'KEY="back\\\\slash"\n')
+    const env = await loadDotEnvironment(tmpFile)
+    expect(env.KEY).toBe("back\\slash")
+  })
+
+  it('handles mixed escape sequences \\n, \\" and \\\\ in double-quoted value', async () => {
+    writeFileSync(tmpFile, 'KEY="mixed\\n\\"\\\\"\n')
+    const env = await loadDotEnvironment(tmpFile)
+    expect(env.KEY).toBe('mixed\n"\\')
+  })
+
+  it("treats \\\\ followed by n as literal backslash+n, not a newline", async () => {
+    writeFileSync(tmpFile, 'KEY="literal\\\\n"\n')
+    const env = await loadDotEnvironment(tmpFile)
+    expect(env.KEY).toBe("literal\\n")
+  })
+
+  // Inline comments in unquoted values
+  it("strips inline comment (space + #) from unquoted value", async () => {
+    writeFileSync(tmpFile, "KEY=value # this is a comment\n")
+    const env = await loadDotEnvironment(tmpFile)
+    expect(env.KEY).toBe("value")
+  })
+
+  it("keeps # without preceding space as part of an unquoted value", async () => {
+    writeFileSync(tmpFile, "KEY=value#no-space\n")
+    const env = await loadDotEnvironment(tmpFile)
+    expect(env.KEY).toBe("value#no-space")
+  })
+
+  it("strips inline comment with multiple spaces before # from unquoted value", async () => {
+    writeFileSync(tmpFile, "KEY=value  # comment with extra space\n")
+    const env = await loadDotEnvironment(tmpFile)
+    expect(env.KEY).toBe("value")
+  })
+
+  // No comment stripping or escape processing in quoted values
+  it("keeps # and surrounding text as literal content in double-quoted value", async () => {
+    writeFileSync(tmpFile, 'KEY="value # not a comment"\n')
+    const env = await loadDotEnvironment(tmpFile)
+    expect(env.KEY).toBe("value # not a comment")
+  })
+
+  it("keeps # and surrounding text as literal content in single-quoted value", async () => {
+    writeFileSync(tmpFile, "KEY='value # not a comment'\n")
+    const env = await loadDotEnvironment(tmpFile)
+    expect(env.KEY).toBe("value # not a comment")
+  })
+
+  it("treats backslash sequences literally in single-quoted value", async () => {
+    writeFileSync(tmpFile, "KEY='no\\\\nescapes'\n")
+    const env = await loadDotEnvironment(tmpFile)
+    expect(env.KEY).toBe("no\\\\nescapes")
+  })
 })
 
 describe("mergeEnvironment", () => {

@@ -30,6 +30,8 @@ export async function resolveEnvironment(
  * Parse a `.env` file and return its contents as an {@link Environment} map.
  * Blank lines and lines starting with `#` are ignored.
  * Surrounding single or double quotes are stripped from values.
+ * Double-quoted values support escape sequences (`\\n`, `\\"`, `\\\\`).
+ * Unquoted values support inline comments (`value # comment`).
  *
  * @param filePath - Absolute path to the `.env` file.
  * @returns The parsed env map.
@@ -41,28 +43,35 @@ export async function loadDotEnvironment(filePath: string): Promise<Environment>
 
   for (const line of content.split("\n")) {
     const trimmed = line.trim()
-    if (trimmed === "" || trimmed.startsWith("#")) {
-      continue
-    }
+    if (trimmed === "" || trimmed.startsWith("#")) continue
     const eqIndex = trimmed.indexOf("=")
-    if (eqIndex === -1) {
-      continue
-    }
+    if (eqIndex === -1) continue
+
     const key = trimmed.slice(0, eqIndex).trim()
-    let value = trimmed.slice(eqIndex + 1).trim()
-
-    // Remove surrounding quotes
-    if (
-      (value.startsWith('"') && value.endsWith('"')) ||
-      (value.startsWith("'") && value.endsWith("'"))
-    ) {
-      value = value.slice(1, -1)
-    }
-
-    environment[key] = value
+    environment[key] = processValue(trimmed.slice(eqIndex + 1).trim())
   }
 
   return environment
+}
+
+function processValue(raw: string): string {
+  if (raw.length >= 2 && raw.startsWith('"') && raw.endsWith('"')) {
+    // Double-quoted: strip quotes and process escape sequences.
+    // Use \0 as sentinel for escaped backslashes — safe because .env files never contain null bytes.
+    return raw
+      .slice(1, -1)
+      .replaceAll("\\\\", "\0")
+      .replaceAll("\\n", "\n")
+      .replaceAll('\\"', '"')
+      .replaceAll("\0", "\\")
+  }
+  if (raw.length >= 2 && raw.startsWith("'") && raw.endsWith("'")) {
+    // Single-quoted: strip quotes, keep value literal
+    return raw.slice(1, -1)
+  }
+  // Unquoted: strip inline comments (space + #)
+  const commentIndex = raw.indexOf(" #")
+  return commentIndex === -1 ? raw : raw.slice(0, commentIndex).trimEnd()
 }
 
 /**
