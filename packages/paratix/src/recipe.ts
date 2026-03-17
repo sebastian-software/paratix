@@ -144,6 +144,8 @@ export function recipe(
       ssh: null | SshConnection,
       environment: Environment
     ): Promise<"needs-apply" | "ok"> {
+      // Each child receives the original environment — no meta propagation,
+      // because check() never calls apply() and therefore produces no meta.
       for (const childModule of modules) {
         // eslint-disable-next-line no-await-in-loop
         const result = await childModule.check(ssh, environment)

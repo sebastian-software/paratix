@@ -165,6 +165,12 @@ describe("recipe", () => {
     expect(signalApplied.count).toBe(1)
   })
 
+  it("check returns ok for a recipe with no child modules", async () => {
+    const r = recipe("empty", [])
+    const result = await r.check(null, emptyEnv)
+    expect(result).toBe("ok")
+  })
+
   it("check returns ok when all child modules report ok", async () => {
     const mod1 = makeModule("ok", "ok", "mod-1")
     const mod2 = makeModule("ok", "ok", "mod-2")

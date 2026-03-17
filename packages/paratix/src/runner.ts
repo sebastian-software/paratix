@@ -221,8 +221,12 @@ async function runRecipeModule(
   try {
     if (dryRun) return await dryRunRecipeModule(recipeModule, environment, ssh)
 
+    // check() iterates all child modules; apply() checks them again
+    // internally via executeModules(). This trades duplicate checks for
+    // simpler code. Optimize if recipe check() becomes a bottleneck.
     const checkResult = await recipeModule.check(ssh, environment)
     if (checkResult === "ok") {
+      printRecipeHeader(recipeModule.name)
       printModuleResult(recipeModule.name, "ok")
       return { env: environment, shouldBreak: false, status: "ok" }
     }
