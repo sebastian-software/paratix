@@ -246,12 +246,21 @@ export class SshConnectionImpl implements SshConnection {
     this.host = host
   }
 
-  public async uploadFile(localPath: string, remotePath: string): Promise<void> {
+  public async uploadFile(
+    localPath: string,
+    remotePath: string,
+    options?: { mode?: string }
+  ): Promise<void> {
     const client = this.ensureClient()
     const temporaryPath = await this.output("mktemp /tmp/paratix-upload.XXXXXX")
     try {
       await sftpUpload(client, localPath, temporaryPath)
       await this.exec(`mv ${shellQuote(temporaryPath)} ${shellQuote(remotePath)}`, { silent: true })
+      if (options?.mode != null) {
+        await this.exec(`chmod ${shellQuote(options.mode)} ${shellQuote(remotePath)}`, {
+          silent: true,
+        })
+      }
     } finally {
       try {
         await this.exec(`rm -f ${shellQuote(temporaryPath)}`, { silent: true })
@@ -263,15 +272,24 @@ export class SshConnectionImpl implements SshConnection {
     }
   }
 
-  public async writeFile(remotePath: string, content: string): Promise<void> {
+  public async writeFile(
+    remotePath: string,
+    content: string,
+    options?: { mode?: string }
+  ): Promise<void> {
     if (Buffer.byteLength(content) <= SFTP_WRITE_THRESHOLD && !content.includes("\0")) {
       const escaped = shellQuote(content)
       await this.exec(`printf '%s' ${escaped} | tee ${shellQuote(remotePath)} > /dev/null`, {
         silent: true,
       })
+      if (options?.mode != null) {
+        await this.exec(`chmod ${shellQuote(options.mode)} ${shellQuote(remotePath)}`, {
+          silent: true,
+        })
+      }
       return
     }
-    await this.writeFileLarge(remotePath, content)
+    await this.writeFileLarge(remotePath, content, options)
   }
 
   private buildEnvPrefix(environment?: Record<string, string>): string {
@@ -372,7 +390,11 @@ export class SshConnectionImpl implements SshConnection {
     return false
   }
 
-  private async writeFileLarge(remotePath: string, content: string): Promise<void> {
+  private async writeFileLarge(
+    remotePath: string,
+    content: string,
+    options?: { mode?: string }
+  ): Promise<void> {
     const client = this.ensureClient()
     const localTemporary = join(tmpdir(), `paratix-write-${randomUUID()}`)
     const remoteTemporary = await this.output("mktemp /tmp/paratix-write.XXXXXX")
@@ -383,6 +405,11 @@ export class SshConnectionImpl implements SshConnection {
       await this.exec(`mv ${shellQuote(remoteTemporary)} ${shellQuote(remotePath)}`, {
         silent: true,
       })
+      if (options?.mode != null) {
+        await this.exec(`chmod ${shellQuote(options.mode)} ${shellQuote(remotePath)}`, {
+          silent: true,
+        })
+      }
     } finally {
       try {
         // eslint-disable-next-line security/detect-non-literal-fs-filename

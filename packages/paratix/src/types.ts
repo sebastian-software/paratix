@@ -111,9 +111,9 @@ export type SshConnection = {
   /** Update the target host address (e.g. after a reboot with new IP). */
   updateHost: (host: string) => void
   /** Upload a local file to the remote host via SFTP. */
-  uploadFile: (localPath: string, remotePath: string) => Promise<void>
+  uploadFile: (localPath: string, remotePath: string, options?: { mode?: string }) => Promise<void>
   /** Write a string to a remote file, creating or overwriting it. */
-  writeFile: (remotePath: string, content: string) => Promise<void>
+  writeFile: (remotePath: string, content: string, options?: { mode?: string }) => Promise<void>
 }
 
 /** SSH connection parameters for a server. */

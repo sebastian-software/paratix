@@ -955,6 +955,100 @@ describe("SshConnectionImpl", () => {
   // -------------------------------------------------------------------------
 
   describe("uploadFile", () => {
+    it("runs chmod after mv when mode option is provided", async () => {
+      const { sftpUpload } = await import("../src/sftp.js")
+      vi.mocked(sftpUpload).mockResolvedValue()
+
+      const tempPath = "/tmp/paratix-upload.ABCDEF"
+      const executedCommands: string[] = []
+
+      const execSpy = vi
+        .fn()
+        // First call: mktemp (via output())
+        .mockImplementationOnce((_command: string, callback: ExecCallback) => {
+          const stream = makeStream()
+          executedCommands.push(_command)
+          callback(undefined, stream)
+          stream.emit("data", Buffer.from(tempPath))
+          stream.emit("close", 0)
+        })
+        // Second call: mv
+        .mockImplementationOnce((_command: string, callback: ExecCallback) => {
+          const stream = makeStream()
+          executedCommands.push(_command)
+          callback(undefined, stream)
+          stream.emit("close", 0)
+        })
+        // Third call: chmod
+        .mockImplementationOnce((_command: string, callback: ExecCallback) => {
+          const stream = makeStream()
+          executedCommands.push(_command)
+          callback(undefined, stream)
+          stream.emit("close", 0)
+        })
+        // Fourth call: rm -f (cleanup in finally)
+        .mockImplementationOnce((_command: string, callback: ExecCallback) => {
+          const stream = makeStream()
+          executedCommands.push(_command)
+          callback(undefined, stream)
+          stream.emit("close", 0)
+        })
+
+      const client = makeClientWithExecSpy(execSpy)
+      const ssh = makeConnectedSsh(client)
+
+      await ssh.uploadFile("/local/file.txt", "/remote/path", { mode: "0644" })
+
+      const chmodCommand = executedCommands.find((cmd) => cmd.includes("chmod"))
+      expect(chmodCommand).toBeDefined()
+      expect(chmodCommand).toContain("0644")
+      expect(chmodCommand).toContain("/remote/path")
+      // chmod must come after mv
+      const mvIndex = executedCommands.findIndex((cmd) => cmd.includes(" mv "))
+      const chmodIndex = executedCommands.findIndex((cmd) => cmd.includes("chmod"))
+      expect(chmodIndex).toBeGreaterThan(mvIndex)
+    })
+
+    it("does not run chmod when no mode option is provided", async () => {
+      const { sftpUpload } = await import("../src/sftp.js")
+      vi.mocked(sftpUpload).mockResolvedValue()
+
+      const tempPath = "/tmp/paratix-upload.ABCDEF"
+      const executedCommands: string[] = []
+
+      const execSpy = vi
+        .fn()
+        // First call: mktemp
+        .mockImplementationOnce((_command: string, callback: ExecCallback) => {
+          const stream = makeStream()
+          executedCommands.push(_command)
+          callback(undefined, stream)
+          stream.emit("data", Buffer.from(tempPath))
+          stream.emit("close", 0)
+        })
+        // Second call: mv
+        .mockImplementationOnce((_command: string, callback: ExecCallback) => {
+          const stream = makeStream()
+          executedCommands.push(_command)
+          callback(undefined, stream)
+          stream.emit("close", 0)
+        })
+        // Third call: rm -f (cleanup in finally)
+        .mockImplementationOnce((_command: string, callback: ExecCallback) => {
+          const stream = makeStream()
+          executedCommands.push(_command)
+          callback(undefined, stream)
+          stream.emit("close", 0)
+        })
+
+      const client = makeClientWithExecSpy(execSpy)
+      const ssh = makeConnectedSsh(client)
+
+      await ssh.uploadFile("/local/file.txt", "/remote/path")
+
+      expect(executedCommands.some((cmd) => cmd.includes("chmod"))).toBe(false)
+    })
+
     it("cleans up the temporary remote file when mv fails", async () => {
       // This test documents a bug: uploadFile has no try/finally, so the
       // temporary remote file created by mktemp is not removed when mv fails.
@@ -1083,6 +1177,92 @@ describe("SshConnectionImpl", () => {
       // SFTP upload must NOT have been called
       const { sftpUpload } = await import("../src/sftp.js")
       expect(vi.mocked(sftpUpload)).not.toHaveBeenCalled()
+    })
+
+    it("runs chmod after tee when mode option is provided for small content (printf path)", async () => {
+      const executedCommands: string[] = []
+
+      const execSpy = vi.fn().mockImplementation((_command: string, callback: ExecCallback) => {
+        const stream = makeStream()
+        executedCommands.push(_command)
+        callback(undefined, stream)
+        stream.emit("close", 0)
+      })
+
+      const client = makeClientWithExecSpy(execSpy)
+      const ssh = makeConnectedSsh(client)
+
+      await ssh.writeFile("/remote/path", "hello world", { mode: "0755" })
+
+      const chmodCommand = executedCommands.find((cmd) => cmd.includes("chmod"))
+      expect(chmodCommand).toBeDefined()
+      expect(chmodCommand).toContain("0755")
+      expect(chmodCommand).toContain("/remote/path")
+      // chmod must come after the tee command
+      const teeIndex = executedCommands.findIndex((cmd) => cmd.includes("tee"))
+      const chmodIndex = executedCommands.findIndex((cmd) => cmd.includes("chmod"))
+      expect(chmodIndex).toBeGreaterThan(teeIndex)
+      // Must have used printf path (small content)
+      expect(executedCommands.some((cmd) => cmd.includes("printf"))).toBe(true)
+    })
+
+    it("runs chmod after mv when mode option is provided for large content (writeFileLarge path)", async () => {
+      const { sftpUpload } = await import("../src/sftp.js")
+      vi.mocked(sftpUpload).mockResolvedValue()
+
+      const tempPath = "/tmp/paratix-write.ABCDEF"
+      const executedCommands: string[] = []
+
+      const execSpy = vi
+        .fn()
+        // First call: mktemp (via output()) inside writeFileLarge
+        .mockImplementationOnce((_command: string, callback: ExecCallback) => {
+          const stream = makeStream()
+          executedCommands.push(_command)
+          callback(undefined, stream)
+          stream.emit("data", Buffer.from(tempPath))
+          stream.emit("close", 0)
+        })
+        // Second call: mv
+        .mockImplementationOnce((_command: string, callback: ExecCallback) => {
+          const stream = makeStream()
+          executedCommands.push(_command)
+          callback(undefined, stream)
+          stream.emit("close", 0)
+        })
+        // Third call: chmod
+        .mockImplementationOnce((_command: string, callback: ExecCallback) => {
+          const stream = makeStream()
+          executedCommands.push(_command)
+          callback(undefined, stream)
+          stream.emit("close", 0)
+        })
+        // Fourth call: rm -f (cleanup in finally)
+        .mockImplementationOnce((_command: string, callback: ExecCallback) => {
+          const stream = makeStream()
+          executedCommands.push(_command)
+          callback(undefined, stream)
+          stream.emit("close", 0)
+        })
+
+      const client = makeClientWithExecSpy(execSpy)
+      const ssh = makeConnectedSsh(client)
+
+      // Content with NUL bytes forces writeFileLarge path regardless of size
+      const largeContent = "hello\0world"
+      await ssh.writeFile("/remote/path", largeContent, { mode: "0600" })
+
+      // Must have gone through SFTP (writeFileLarge path)
+      expect(vi.mocked(sftpUpload)).toHaveBeenCalledOnce()
+
+      const chmodCommand = executedCommands.find((cmd) => cmd.includes("chmod"))
+      expect(chmodCommand).toBeDefined()
+      expect(chmodCommand).toContain("0600")
+      expect(chmodCommand).toContain("/remote/path")
+      // chmod must come after mv
+      const mvIndex = executedCommands.findIndex((cmd) => cmd.includes(" mv "))
+      const chmodIndex = executedCommands.findIndex((cmd) => cmd.includes("chmod"))
+      expect(chmodIndex).toBeGreaterThan(mvIndex)
     })
   })
 
