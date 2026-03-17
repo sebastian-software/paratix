@@ -12,10 +12,23 @@ const CONNECTION_TIMEOUT = 10_000
 export const MAX_OUTPUT_LENGTH = 500
 
 function truncateOutput(text: string): string {
-  // eslint-disable-next-line @typescript-eslint/no-misused-spread -- SSH output; codepoint-level split is intentional
-  const codepoints = [...text]
-  if (codepoints.length <= MAX_OUTPUT_LENGTH) return text
-  return `${codepoints.slice(0, MAX_OUTPUT_LENGTH).join("")}…(truncated)`
+  let count = 0
+  let sliceEnd = 0
+  for (const char of text) {
+    if (count >= MAX_OUTPUT_LENGTH) return `${text.slice(0, sliceEnd)}…(truncated)`
+    sliceEnd += char.length
+    count++
+  }
+  return text
+}
+
+function codepointLengthExceeds(text: string, limit: number): boolean {
+  let count = 0
+  for (const _char of text) {
+    count++
+    if (count > limit) return true
+  }
+  return false
 }
 
 /**
@@ -106,8 +119,8 @@ export function collectStreamOutput(parameters: StreamOutputParameters): void {
       const maskedStdout = mask(stdout)
       const maskedStderr = mask(stderr)
       const wasTruncated =
-        // eslint-disable-next-line @typescript-eslint/no-misused-spread -- SSH output; codepoint-level length check is intentional
-        [...maskedStdout].length > MAX_OUTPUT_LENGTH || [...maskedStderr].length > MAX_OUTPUT_LENGTH
+        codepointLengthExceeds(maskedStdout, MAX_OUTPUT_LENGTH) ||
+        codepointLengthExceeds(maskedStderr, MAX_OUTPUT_LENGTH)
       const hint = wasTruncated ? "\n(use --verbose for full output)" : ""
       reject(
         new CommandError(
