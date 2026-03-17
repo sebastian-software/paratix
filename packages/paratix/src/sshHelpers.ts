@@ -75,7 +75,7 @@ export type StreamOutputParameters = {
   timer: ReturnType<typeof setTimeout>
 }
 
-function maskSecrets(text: string, secrets: string[]): string {
+export function maskSecrets(text: string, secrets: string[]): string {
   let masked = text
   for (const secret of secrets) {
     if (secret.length > 0) {

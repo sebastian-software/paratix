@@ -8,7 +8,7 @@ import { Client, type ClientChannel } from "ssh2"
 import type { ExecOptions, ExecResult, SshConfig, SshConnection } from "./types.js"
 
 import { sftpDownload, sftpUpload } from "./sftp.js"
-import { collectStreamOutput, tryConnectOnPort } from "./sshHelpers.js"
+import { collectStreamOutput, maskSecrets, tryConnectOnPort } from "./sshHelpers.js"
 import { promptTerminal } from "./terminal.js"
 
 /**
@@ -108,12 +108,15 @@ export class SshConnectionImpl implements SshConnection {
         reject(reason)
       }
       this.pendingRejects.add(wrappedReject)
-
       const timeout = options.timeout ?? COMMAND_TIMEOUT
+      const sudoPw = this.cachedSudoPassword
+      const secrets = [...(sudoPw == null ? [] : [sudoPw]), ...(options.secrets ?? [])]
       let activeStream: ClientChannel | null = null
       const timer = setTimeout(() => {
         activeStream?.close()
-        wrappedReject(new Error(`Command timed out after ${timeout}ms: ${command}`))
+        wrappedReject(
+          new Error(`Command timed out after ${timeout}ms: ${maskSecrets(command, secrets)}`)
+        )
       }, timeout)
       client.exec(cmd, (error: Error | undefined, stream: ClientChannel) => {
         if (error) {
@@ -126,10 +129,6 @@ export class SshConnectionImpl implements SshConnection {
         if (this.cachedSudoPassword != null && this.config.user !== "root") {
           stream.write(`${this.cachedSudoPassword}\n`)
         }
-        const secrets = [
-          ...(this.cachedSudoPassword == null ? [] : [this.cachedSudoPassword]),
-          ...(options.secrets ?? []),
-        ]
         collectStreamOutput({
           command,
           options,

@@ -26,9 +26,10 @@ vi.mock("../src/sftp.js", () => ({
 }))
 
 vi.mock("../src/sshHelpers.js", async () => {
-  const { collectStreamOutput } = await vi.importActual("../src/sshHelpers.js")
+  const { collectStreamOutput, maskSecrets } = await vi.importActual("../src/sshHelpers.js")
   return {
     collectStreamOutput,
+    maskSecrets,
     tryConnectOnPort: vi.fn(),
   }
 })
@@ -345,6 +346,33 @@ describe("SshConnectionImpl", () => {
       await vi.advanceTimersByTimeAsync(5001)
 
       await expect(execPromise).rejects.toThrow(/Command timed out after 5000ms/v)
+    })
+
+    it("masks secrets in the timeout error message (regression: raw command was interpolated)", async () => {
+      // Regression: before the fix, the timeout error interpolated `command`
+      // directly without calling maskSecrets, leaking secrets into error messages.
+      vi.useFakeTimers()
+
+      const execSpy = vi.fn().mockImplementation((_command: string, callback: ExecCallback) => {
+        const stream = makeStream()
+        callback(undefined, stream)
+        // Stream never emits 'close' — simulates a hanging command
+      })
+      const client = makeClientWithExecSpy(execSpy)
+      const ssh = makeConnectedSsh(client)
+
+      const secret = "super-secret-token"
+      const execPromise = ssh.exec(`echo ${secret}`, { secrets: [secret], timeout: 5000 })
+
+      execPromise.catch(() => {
+        /* handled below */
+      })
+
+      await vi.advanceTimersByTimeAsync(5001)
+
+      const error = await execPromise.catch((error: unknown) => error as Error)
+      expect(error.message).not.toContain(secret)
+      expect(error.message).toContain("***")
     })
 
     it("prefixes sudo command with SUDO_PROMPT='' to suppress username disclosure in stderr", async () => {
