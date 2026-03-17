@@ -312,6 +312,6 @@ export function collectEnvironment(
 // Only parse when executed directly, not when imported (e.g. in tests)
 const entryScript = process.argv[1]
 // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition -- argv[1] can be undefined at runtime despite string[] type
-if (entryScript != null && import.meta.url.endsWith(entryScript.replaceAll("\\", "/"))) {
+if (entryScript != null && import.meta.url === pathToFileURL(entryScript).href) {
   program.parse()
 }
