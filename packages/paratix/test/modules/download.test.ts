@@ -204,6 +204,31 @@ describe("download.url", () => {
       expect(mod.name).toBe(`download.url: ${destination}`)
     })
   })
+
+  describe("secrets propagation", () => {
+    it("passes header values as secrets when exec is called for curl", async () => {
+      const token = "supersecret-bearer-token"
+      const mock = createMockSshWithOptions()
+      const mod = download.url(destination, url, {
+        headers: { Authorization: `Bearer ${token}` },
+      })
+      await mod.apply(mock, emptyEnv)
+
+      const curlCall = mock.execCalls.find(({ command }) => command.startsWith("curl"))
+      expect(curlCall).toBeDefined()
+      expect(curlCall?.options?.secrets).toContain(`Bearer ${token}`)
+    })
+
+    it("passes an empty secrets array when no headers are provided", async () => {
+      const mock = createMockSshWithOptions()
+      const mod = download.url(destination, url)
+      await mod.apply(mock, emptyEnv)
+
+      const curlCall = mock.execCalls.find(({ command }) => command.startsWith("curl"))
+      expect(curlCall).toBeDefined()
+      expect(curlCall?.options?.secrets).toStrictEqual([])
+    })
+  })
 })
 
 describe("download.github", () => {
@@ -484,6 +509,31 @@ describe("download.large", () => {
     it("has correct format: download.large: <destination>", async () => {
       const mod = download.large(destination, url)
       expect(mod.name).toBe(`download.large: ${destination}`)
+    })
+  })
+
+  describe("secrets propagation", () => {
+    it("passes header values as secrets when exec is called for curl", async () => {
+      const token = "supersecret-bearer-token"
+      const mock = createMockSshWithOptions()
+      const mod = download.large(destination, url, {
+        headers: { Authorization: `Bearer ${token}` },
+      })
+      await mod.apply(mock, emptyEnv)
+
+      const curlCall = mock.execCalls.find(({ command }) => command.startsWith("curl"))
+      expect(curlCall).toBeDefined()
+      expect(curlCall?.options?.secrets).toContain(`Bearer ${token}`)
+    })
+
+    it("passes an empty secrets array when no headers are provided", async () => {
+      const mock = createMockSshWithOptions()
+      const mod = download.large(destination, url)
+      await mod.apply(mock, emptyEnv)
+
+      const curlCall = mock.execCalls.find(({ command }) => command.startsWith("curl"))
+      expect(curlCall).toBeDefined()
+      expect(curlCall?.options?.secrets).toStrictEqual([])
     })
   })
 })

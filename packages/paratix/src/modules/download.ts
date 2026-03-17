@@ -268,6 +268,7 @@ export const download = {
       headers: options?.headers,
       mode: options?.mode,
       owner: options?.owner,
+      secrets: Object.values(options?.headers ?? {}),
       url,
     }
 
@@ -316,7 +317,12 @@ export const download = {
     } & BaseDownloadOptions
   ): Module {
     const resolvedOptions = options ?? {}
-    const downloadParameters: DownloadParameters = { ...resolvedOptions, destination, url }
+    const downloadParameters: DownloadParameters = {
+      ...resolvedOptions,
+      destination,
+      secrets: Object.values(resolvedOptions.headers ?? {}),
+      url,
+    }
 
     return {
       async apply(conn: null | SshConnection): Promise<ModuleResult> {
