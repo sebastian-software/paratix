@@ -294,6 +294,105 @@ describe("sshd.port — check", () => {
   })
 })
 
+// ─── sshd.config — apply: validateSshdConfig rollback ────────────────────────
+
+describe("sshd.config — apply: validation and rollback", () => {
+  it("rolls back to original config and throws when sshd -t fails", async () => {
+    // readFile internally calls output() which trims whitespace — use a value without trailing newline
+    const originalConfig = "PasswordAuthentication yes"
+    const mockSsh = createMockSsh({
+      [CAT_SSHD]: { stdout: originalConfig },
+    })
+    const writtenFiles = trackWriteFile(mockSsh)
+
+    // sshd -t is the only exec call during sshd.config.apply
+    vi.spyOn(mockSsh, "exec").mockResolvedValueOnce({
+      code: 1,
+      stderr: "sshd: bad config",
+      stdout: "",
+    })
+
+    const mod = sshd.config({ PasswordAuthentication: "no" })
+    await expect(mod.apply(mockSsh, emptyEnv)).rejects.toThrow("sshd config validation failed")
+
+    // After failed validation the last write must restore the original config
+    const lastWrite = writtenFiles.at(-1)
+    expect(lastWrite?.path).toBe(SSHD_CONFIG)
+    expect(lastWrite?.content).toBe(originalConfig)
+  })
+
+  it("writes new config without rollback when sshd -t succeeds", async () => {
+    const originalConfig = "PasswordAuthentication yes"
+    const mockSsh = createMockSsh({
+      [CAT_SSHD]: { stdout: originalConfig },
+    })
+    const writtenFiles = trackWriteFile(mockSsh)
+
+    // sshd -t is the only exec call during sshd.config.apply
+    vi.spyOn(mockSsh, "exec").mockResolvedValueOnce({ code: 0, stderr: "", stdout: "" })
+
+    const mod = sshd.config({ PasswordAuthentication: "no" })
+    const result = await mod.apply(mockSsh, emptyEnv)
+
+    expect(result.status).toBe("changed")
+    // Only one write: the new config — no rollback write
+    expect(writtenFiles).toHaveLength(1)
+    expect(writtenFiles[0]?.content).toContain("PasswordAuthentication no")
+  })
+})
+
+// ─── sshd.port — apply ────────────────────────────────────────────────────────
+
+describe("sshd.port — apply: validation and rollback", () => {
+  it("rolls back config and does NOT restart sshd when sshd -t fails", async () => {
+    // readFile internally calls output() which trims whitespace — use a value without trailing newline
+    const originalConfig = "Port 22"
+    const mockSsh = createMockSsh({
+      [CAT_SSHD]: { stdout: originalConfig },
+    })
+    const writtenFiles = trackWriteFile(mockSsh)
+    const execSpy = vi.spyOn(mockSsh, "exec")
+
+    // First exec call is sshd -t — return failure so apply throws before systemctl restart
+    execSpy.mockResolvedValueOnce({ code: 1, stderr: "sshd: invalid port", stdout: "" })
+
+    const mod = sshd.port(2222)
+    await expect(mod.apply(mockSsh, emptyEnv)).rejects.toThrow("sshd config validation failed")
+
+    // Last write must restore the original config
+    const lastWrite = writtenFiles.at(-1)
+    expect(lastWrite?.path).toBe(SSHD_CONFIG)
+    expect(lastWrite?.content).toBe(originalConfig)
+
+    // systemctl restart must NOT have been called
+    const execCommands = execSpy.mock.calls.map((args) => args[0])
+    expect(execCommands).not.toContain("systemctl restart sshd")
+  })
+
+  it("writes new port config and restarts sshd when sshd -t succeeds", async () => {
+    const originalConfig = "Port 22"
+    const mockSsh = createMockSsh({
+      [CAT_SSHD]: { stdout: originalConfig },
+    })
+    const writtenFiles = trackWriteFile(mockSsh)
+    const execSpy = vi.spyOn(mockSsh, "exec")
+
+    // All exec calls succeed: sshd -t passes, systemctl restart runs
+    execSpy.mockResolvedValue({ code: 0, stderr: "", stdout: "" })
+
+    const mod = sshd.port(2222)
+    const result = await mod.apply(mockSsh, emptyEnv)
+
+    expect(result.status).toBe("changed")
+    // Only one write: the new port config — no rollback
+    expect(writtenFiles).toHaveLength(1)
+    expect(writtenFiles[0]?.content).toContain("Port 2222")
+
+    const execCommands = execSpy.mock.calls.map((args) => args[0])
+    expect(execCommands).toContain("systemctl restart sshd")
+  })
+})
+
 // ─── sshd.config — module name ────────────────────────────────────────────────
 
 describe("sshd.config — module name", () => {

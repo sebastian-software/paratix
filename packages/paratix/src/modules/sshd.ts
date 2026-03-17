@@ -14,6 +14,16 @@ function escapeRegExp(s: string): string {
   return result
 }
 
+async function validateSshdConfig(ssh: SshConnection, originalConfig: string): Promise<void> {
+  const result = await ssh.exec("sshd -t", { ignoreExitCode: true, silent: true })
+  if (result.code !== 0) {
+    await ssh.writeFile(SSHD_CONFIG_PATH, originalConfig)
+    throw new Error(
+      `sshd config validation failed (sshd -t), rolled back to previous config:\n${result.stderr}`
+    )
+  }
+}
+
 async function applySshdSetting(ssh: SshConnection, key: string, value: string): Promise<void> {
   const content = await ssh.readFile(SSHD_CONFIG_PATH)
   // eslint-disable-next-line security/detect-non-literal-regexp
@@ -54,10 +64,14 @@ export const sshd = {
       async apply(ssh: null | SshConnection): Promise<ModuleResult> {
         if (!ssh) return { status: "failed" }
 
+        const originalConfig = await ssh.readFile(SSHD_CONFIG_PATH)
+
         for (const [key, value] of Object.entries(settings)) {
           // eslint-disable-next-line no-await-in-loop
           await applySshdSetting(ssh, key, value)
         }
+
+        await validateSshdConfig(ssh, originalConfig)
 
         return { status: "changed" }
       },
@@ -92,7 +106,9 @@ export const sshd = {
       async apply(ssh: null | SshConnection): Promise<ModuleResult> {
         if (!ssh) return { status: "failed" }
 
+        const originalConfig = await ssh.readFile(SSHD_CONFIG_PATH)
         await applySshdSetting(ssh, "Port", String(targetPort))
+        await validateSshdConfig(ssh, originalConfig)
         await ssh.exec("systemctl restart sshd", { silent: true })
 
         return {
