@@ -282,6 +282,20 @@ describe("maskSecrets (via collectStreamOutput error messages)", () => {
     expect(occurrences).not.toBeNull()
     expect(occurrences).toHaveLength(5)
   })
+
+  it("masks longer secrets first when a shorter secret is a substring of a longer one (regression)", async () => {
+    // Bug: if "pass" is replaced before "password", "password" becomes "[REDACTED]word"
+    const promise = runCollect({
+      command: "echo test",
+      emitClose: { code: 1 },
+      emitStderr: "",
+      emitStdout: "my password is pass",
+      secrets: ["pass", "password"],
+    })
+    const msg = await getErrorMessage(promise)
+    expect(msg).not.toContain("pass")
+    expect(msg).not.toContain("word")
+  })
 })
 
 // ---------------------------------------------------------------------------

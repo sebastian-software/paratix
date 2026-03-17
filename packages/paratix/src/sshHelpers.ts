@@ -88,7 +88,8 @@ export type StreamOutputParameters = {
 
 export function maskSecrets(text: string, secrets: string[]): string {
   let masked = text
-  for (const secret of secrets) {
+  const sorted = [...secrets].sort((a, b) => b.length - a.length)
+  for (const secret of sorted) {
     if (secret.length > 0) {
       masked = masked.replaceAll(secret, "[REDACTED]")
     }
