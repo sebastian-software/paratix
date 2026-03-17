@@ -242,8 +242,16 @@ export class SshConnectionImpl implements SshConnection {
   public async uploadFile(localPath: string, remotePath: string): Promise<void> {
     const client = this.ensureClient()
     const temporaryPath = await this.output("mktemp /tmp/paratix-upload.XXXXXX")
-    await sftpUpload(client, localPath, temporaryPath)
-    await this.exec(`mv ${shellQuote(temporaryPath)} ${shellQuote(remotePath)}`, { silent: true })
+    try {
+      await sftpUpload(client, localPath, temporaryPath)
+      await this.exec(`mv ${shellQuote(temporaryPath)} ${shellQuote(remotePath)}`, { silent: true })
+    } finally {
+      try {
+        await this.exec(`rm -f ${shellQuote(temporaryPath)}`, { silent: true })
+      } catch {
+        // remote cleanup is best-effort
+      }
+    }
   }
 
   public async writeFile(remotePath: string, content: string): Promise<void> {

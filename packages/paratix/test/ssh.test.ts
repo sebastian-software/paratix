@@ -683,6 +683,60 @@ describe("SshConnectionImpl", () => {
   })
 
   // -------------------------------------------------------------------------
+  // uploadFile
+  // -------------------------------------------------------------------------
+
+  describe("uploadFile", () => {
+    it("cleans up the temporary remote file when mv fails", async () => {
+      // This test documents a bug: uploadFile has no try/finally, so the
+      // temporary remote file created by mktemp is not removed when mv fails.
+      // After the fix, exec must be called with `rm -f` on the temp path.
+      const { sftpUpload } = await import("../src/sftp.js")
+      vi.mocked(sftpUpload).mockResolvedValue()
+
+      const tempPath = "/tmp/paratix-upload.ABCDEF"
+      const executedCommands: string[] = []
+
+      const execSpy = vi
+        .fn()
+        // First call: mktemp (via output()) — returns temp path
+        .mockImplementationOnce((_command: string, callback: ExecCallback) => {
+          const stream = makeStream()
+          executedCommands.push(_command)
+          callback(undefined, stream)
+          stream.emit("data", Buffer.from(tempPath))
+          stream.emit("close", 0)
+        })
+        // Second call: mv — fails with non-zero exit code
+        .mockImplementationOnce((_command: string, callback: ExecCallback) => {
+          const stream = makeStream()
+          executedCommands.push(_command)
+          callback(undefined, stream)
+          stream.emit("close", 1)
+        })
+        // Third call: rm -f — the cleanup that should happen in a fixed implementation
+        .mockImplementationOnce((_command: string, callback: ExecCallback) => {
+          const stream = makeStream()
+          executedCommands.push(_command)
+          callback(undefined, stream)
+          stream.emit("close", 0)
+        })
+
+      const client = makeClientWithExecSpy(execSpy)
+      const ssh = makeConnectedSsh(client)
+
+      await expect(ssh.uploadFile("/local/file.txt", "/remote/file.txt")).rejects.toThrow(
+        "Command failed"
+      )
+
+      // After the fix: rm -f must be called on the temporary path
+      const cleanupCommand = executedCommands.find((cmd) => cmd.includes("rm -f"))
+      expect(cleanupCommand).toBeDefined()
+      expect(cleanupCommand).toContain(tempPath)
+    })
+  })
+
+  // -------------------------------------------------------------------------
   // downloadFile
   // -------------------------------------------------------------------------
 
