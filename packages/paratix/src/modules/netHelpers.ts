@@ -161,7 +161,7 @@ export function validateHttpUrl(url: string): void {
   try {
     parsed = new URL(url)
   } catch {
-    throw new Error(`Invalid URL '${url}'`)
+    throw new Error(`Invalid URL '${url}': expected an http or https URL`)
   }
   if (parsed.protocol !== "https:" && parsed.protocol !== "http:") {
     throw new Error(
