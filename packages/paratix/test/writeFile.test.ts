@@ -23,14 +23,12 @@ vi.mock("../src/sftp.js", () => ({
 // Helpers
 // ---------------------------------------------------------------------------
 
-const SFTP_WRITE_THRESHOLD = 65_536
-
 function makeSmallContent(): string {
-  return "a".repeat(SFTP_WRITE_THRESHOLD)
+  return "hello world"
 }
 
 function makeLargeContent(): string {
-  return "a".repeat(SFTP_WRITE_THRESHOLD + 1)
+  return "a".repeat(100_000)
 }
 
 type StreamWithStderr = { stderr: EventEmitter } & EventEmitter
@@ -89,21 +87,23 @@ function makeConnectedSsh(client: Client): SshConnectionImpl {
 }
 
 // ---------------------------------------------------------------------------
-// Tests — small content (≤ 64 KB)
+// Tests — small content (atomic write via SFTP, same as large content)
 // ---------------------------------------------------------------------------
 
-describe("SshConnectionImpl.writeFile — small content (≤ 64 KB)", () => {
+describe("SshConnectionImpl.writeFile — small content", () => {
+  let execSpy: ReturnType<typeof vi.fn>
+
+  beforeEach(() => {
+    execSpy = makeExecSpy("/tmp/paratix-write.SMALL")
+    vi.mocked(sftpUpload).mockResolvedValue()
+  })
+
   afterEach(() => {
     vi.resetAllMocks()
   })
 
-  it("uses printf/tee via exec and never calls sftpUpload", async () => {
+  it("uses atomic SFTP path (write-to-temp + mv) even for small content", async () => {
     // Arrange
-    const execSpy = vi.fn().mockImplementation((_cmd: string, cb: ExecCallback) => {
-      const stream = makeStream()
-      cb(undefined, stream)
-      stream.emit("close", 0)
-    })
     const client = makeClientWithExecSpy(execSpy)
     const ssh = makeConnectedSsh(client)
     const content = makeSmallContent()
@@ -111,17 +111,19 @@ describe("SshConnectionImpl.writeFile — small content (≤ 64 KB)", () => {
     // Act
     await ssh.writeFile("/etc/config", content)
 
-    // Assert: exec was called once with printf/tee pattern
-    expect(execSpy).toHaveBeenCalledOnce()
-    const [cmd] = execSpy.mock.calls[0] as [string, ...unknown[]]
-    expect(cmd).toContain("printf '%s'")
-    expect(cmd).toContain("tee")
-    expect(cmd).toContain("/etc/config")
+    // Assert: SFTP path was used — writeFileSync creates local temp, sftpUpload transfers
+    expect(vi.mocked(sftpUpload)).toHaveBeenCalledOnce()
+    expect(vi.mocked(writeFileSync)).toHaveBeenCalledOnce()
 
-    // SFTP path must not be used
-    expect(vi.mocked(sftpUpload)).not.toHaveBeenCalled()
-    expect(vi.mocked(writeFileSync)).not.toHaveBeenCalled()
-    expect(vi.mocked(unlinkSync)).not.toHaveBeenCalled()
+    // exec calls: mktemp, mv, rm -f
+    const calls = execSpy.mock.calls as Array<[string, ...unknown[]]>
+    const executedCommands = calls.map(([cmd]) => cmd)
+    expect(executedCommands.some((cmd) => cmd.includes("mktemp"))).toBe(true)
+    expect(executedCommands.some((cmd) => cmd.includes("mv"))).toBe(true)
+
+    // printf/tee must NOT be used
+    expect(executedCommands.some((cmd) => cmd.includes("printf"))).toBe(false)
+    expect(executedCommands.some((cmd) => cmd.includes("tee"))).toBe(false)
   })
 })
 

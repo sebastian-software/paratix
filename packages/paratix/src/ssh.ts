@@ -15,7 +15,6 @@ import { promptTerminal } from "./terminal.js"
 
 export { shellQuote }
 
-const SFTP_WRITE_THRESHOLD = 65_536
 const COMMAND_TIMEOUT = 120_000
 const RECONNECT_BASE_DELAY = 1000
 const RECONNECT_MAX_DELAY = 30_000
@@ -272,14 +271,31 @@ export class SshConnectionImpl implements SshConnection {
     }
   }
 
+  /**
+   * Write a string to a remote file atomically via write-to-temp + mv.
+   *
+   * The content is first written to a local temporary file, uploaded via SFTP
+   * to a remote temporary file, then moved to the final destination with `mv`.
+   * This ensures the target file is never left in a half-written state.
+   *
+   * @param remotePath - Destination path on the remote host.
+   * @param content - The string content to write.
+   * @param options - Optional settings.
+   * @param options.mode - File mode to set via `chmod` after writing (e.g. `"0644"`).
+   */
   public async writeFile(
     remotePath: string,
     content: string,
     options?: { mode?: string }
   ): Promise<void> {
-    if (Buffer.byteLength(content) <= SFTP_WRITE_THRESHOLD && !content.includes("\0")) {
-      const escaped = shellQuote(content)
-      await this.exec(`printf '%s' ${escaped} | tee ${shellQuote(remotePath)} > /dev/null`, {
+    const client = this.ensureClient()
+    const localTemporary = join(tmpdir(), `paratix-write-${randomUUID()}`)
+    const remoteTemporary = await this.output("mktemp /tmp/paratix-write.XXXXXX")
+    try {
+      // eslint-disable-next-line security/detect-non-literal-fs-filename
+      writeFileSync(localTemporary, content, { mode: 0o600 })
+      await sftpUpload(client, localTemporary, remoteTemporary)
+      await this.exec(`mv ${shellQuote(remoteTemporary)} ${shellQuote(remotePath)}`, {
         silent: true,
       })
       if (options?.mode != null) {
@@ -287,9 +303,21 @@ export class SshConnectionImpl implements SshConnection {
           silent: true,
         })
       }
-      return
+    } finally {
+      try {
+        // eslint-disable-next-line security/detect-non-literal-fs-filename
+        unlinkSync(localTemporary)
+      } catch {
+        // local cleanup is best-effort
+      }
+      try {
+        await this.exec(`rm -f ${shellQuote(remoteTemporary)}`, { silent: true })
+      } catch (cleanupError) {
+        process.stderr.write(
+          `Warning: failed to remove temp file ${remoteTemporary}: ${String(cleanupError)}\n`
+        )
+      }
     }
-    await this.writeFileLarge(remotePath, content, options)
   }
 
   private buildEnvPrefix(environment?: Record<string, string>): string {
@@ -388,42 +416,5 @@ export class SshConnectionImpl implements SshConnection {
       }
     }
     return false
-  }
-
-  private async writeFileLarge(
-    remotePath: string,
-    content: string,
-    options?: { mode?: string }
-  ): Promise<void> {
-    const client = this.ensureClient()
-    const localTemporary = join(tmpdir(), `paratix-write-${randomUUID()}`)
-    const remoteTemporary = await this.output("mktemp /tmp/paratix-write.XXXXXX")
-    try {
-      // eslint-disable-next-line security/detect-non-literal-fs-filename
-      writeFileSync(localTemporary, content, { mode: 0o600 })
-      await sftpUpload(client, localTemporary, remoteTemporary)
-      await this.exec(`mv ${shellQuote(remoteTemporary)} ${shellQuote(remotePath)}`, {
-        silent: true,
-      })
-      if (options?.mode != null) {
-        await this.exec(`chmod ${shellQuote(options.mode)} ${shellQuote(remotePath)}`, {
-          silent: true,
-        })
-      }
-    } finally {
-      try {
-        // eslint-disable-next-line security/detect-non-literal-fs-filename
-        unlinkSync(localTemporary)
-      } catch {
-        // local cleanup is best-effort
-      }
-      try {
-        await this.exec(`rm -f ${shellQuote(remoteTemporary)}`, { silent: true })
-      } catch (cleanupError) {
-        process.stderr.write(
-          `Warning: failed to remove temp file ${remoteTemporary}: ${String(cleanupError)}\n`
-        )
-      }
-    }
   }
 }

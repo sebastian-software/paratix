@@ -1103,11 +1103,7 @@ describe("SshConnectionImpl", () => {
   // -------------------------------------------------------------------------
 
   describe("writeFile", () => {
-    it("uses SFTP path (writeFileLarge) when content contains NUL bytes — not printf (regression)", async () => {
-      // Root cause: writeFile dispatched only on size. Content below SFTP_WRITE_THRESHOLD
-      // (65536 bytes) always went through `printf`, which silently truncates NUL bytes (\0).
-      // Fix: condition extended to `Buffer.byteLength(content) <= SFTP_WRITE_THRESHOLD &&
-      // !content.includes("\0")` — content with NUL bytes now goes through writeFileLarge (SFTP).
+    it("always uses atomic SFTP path (write-to-temp + mv) for all content", async () => {
       const { sftpUpload } = await import("../src/sftp.js")
       vi.mocked(sftpUpload).mockResolvedValue()
 
@@ -1116,7 +1112,6 @@ describe("SshConnectionImpl", () => {
 
       const execSpy = vi
         .fn()
-        // First call: mktemp (via output()) inside writeFileLarge
         .mockImplementationOnce((_command: string, callback: ExecCallback) => {
           const stream = makeStream()
           executedCommands.push(_command)
@@ -1124,89 +1119,37 @@ describe("SshConnectionImpl", () => {
           stream.emit("data", Buffer.from(tempPath))
           stream.emit("close", 0)
         })
-        // Second call: mv
         .mockImplementationOnce((_command: string, callback: ExecCallback) => {
           const stream = makeStream()
           executedCommands.push(_command)
           callback(undefined, stream)
           stream.emit("close", 0)
         })
-        // Third call: rm -f (cleanup in finally)
         .mockImplementationOnce((_command: string, callback: ExecCallback) => {
           const stream = makeStream()
           executedCommands.push(_command)
           callback(undefined, stream)
           stream.emit("close", 0)
         })
-
-      const client = makeClientWithExecSpy(execSpy)
-      const ssh = makeConnectedSsh(client)
-
-      const contentWithNul = "hello\0world"
-      await ssh.writeFile("/remote/binary.dat", contentWithNul)
-
-      // SFTP upload must have been called — that is the SFTP path
-      expect(vi.mocked(sftpUpload)).toHaveBeenCalledOnce()
-
-      // printf must NOT have been used — it silently truncates NUL bytes
-      const usedPrintf = executedCommands.some((cmd) => cmd.includes("printf"))
-      expect(usedPrintf).toBe(false)
-
-      // mktemp and mv confirm writeFileLarge was taken
-      expect(executedCommands.some((cmd) => cmd.includes("mktemp"))).toBe(true)
-      expect(executedCommands.some((cmd) => cmd.includes("mv"))).toBe(true)
-    })
-
-    it("uses printf path for small content without NUL bytes", async () => {
-      const executedCommands: string[] = []
-
-      const execSpy = vi.fn().mockImplementation((_command: string, callback: ExecCallback) => {
-        const stream = makeStream()
-        executedCommands.push(_command)
-        callback(undefined, stream)
-        stream.emit("close", 0)
-      })
 
       const client = makeClientWithExecSpy(execSpy)
       const ssh = makeConnectedSsh(client)
 
       await ssh.writeFile("/remote/plain.txt", "hello world")
 
-      // printf must be used for small, NUL-free content
-      expect(executedCommands.some((cmd) => cmd.includes("printf"))).toBe(true)
-      // SFTP upload must NOT have been called
-      const { sftpUpload } = await import("../src/sftp.js")
-      expect(vi.mocked(sftpUpload)).not.toHaveBeenCalled()
+      // SFTP upload must have been called — atomic path
+      expect(vi.mocked(sftpUpload)).toHaveBeenCalledOnce()
+
+      // printf must NOT have been used
+      const usedPrintf = executedCommands.some((cmd) => cmd.includes("printf"))
+      expect(usedPrintf).toBe(false)
+
+      // mktemp and mv confirm atomic write path
+      expect(executedCommands.some((cmd) => cmd.includes("mktemp"))).toBe(true)
+      expect(executedCommands.some((cmd) => cmd.includes("mv"))).toBe(true)
     })
 
-    it("runs chmod after tee when mode option is provided for small content (printf path)", async () => {
-      const executedCommands: string[] = []
-
-      const execSpy = vi.fn().mockImplementation((_command: string, callback: ExecCallback) => {
-        const stream = makeStream()
-        executedCommands.push(_command)
-        callback(undefined, stream)
-        stream.emit("close", 0)
-      })
-
-      const client = makeClientWithExecSpy(execSpy)
-      const ssh = makeConnectedSsh(client)
-
-      await ssh.writeFile("/remote/path", "hello world", { mode: "0755" })
-
-      const chmodCommand = executedCommands.find((cmd) => cmd.includes("chmod"))
-      expect(chmodCommand).toBeDefined()
-      expect(chmodCommand).toContain("0755")
-      expect(chmodCommand).toContain("/remote/path")
-      // chmod must come after the tee command
-      const teeIndex = executedCommands.findIndex((cmd) => cmd.includes("tee"))
-      const chmodIndex = executedCommands.findIndex((cmd) => cmd.includes("chmod"))
-      expect(chmodIndex).toBeGreaterThan(teeIndex)
-      // Must have used printf path (small content)
-      expect(executedCommands.some((cmd) => cmd.includes("printf"))).toBe(true)
-    })
-
-    it("runs chmod after mv when mode option is provided for large content (writeFileLarge path)", async () => {
+    it("runs chmod after mv when mode option is provided", async () => {
       const { sftpUpload } = await import("../src/sftp.js")
       vi.mocked(sftpUpload).mockResolvedValue()
 
@@ -1215,7 +1158,6 @@ describe("SshConnectionImpl", () => {
 
       const execSpy = vi
         .fn()
-        // First call: mktemp (via output()) inside writeFileLarge
         .mockImplementationOnce((_command: string, callback: ExecCallback) => {
           const stream = makeStream()
           executedCommands.push(_command)
@@ -1223,21 +1165,18 @@ describe("SshConnectionImpl", () => {
           stream.emit("data", Buffer.from(tempPath))
           stream.emit("close", 0)
         })
-        // Second call: mv
         .mockImplementationOnce((_command: string, callback: ExecCallback) => {
           const stream = makeStream()
           executedCommands.push(_command)
           callback(undefined, stream)
           stream.emit("close", 0)
         })
-        // Third call: chmod
         .mockImplementationOnce((_command: string, callback: ExecCallback) => {
           const stream = makeStream()
           executedCommands.push(_command)
           callback(undefined, stream)
           stream.emit("close", 0)
         })
-        // Fourth call: rm -f (cleanup in finally)
         .mockImplementationOnce((_command: string, callback: ExecCallback) => {
           const stream = makeStream()
           executedCommands.push(_command)
@@ -1248,16 +1187,13 @@ describe("SshConnectionImpl", () => {
       const client = makeClientWithExecSpy(execSpy)
       const ssh = makeConnectedSsh(client)
 
-      // Content with NUL bytes forces writeFileLarge path regardless of size
-      const largeContent = "hello\0world"
-      await ssh.writeFile("/remote/path", largeContent, { mode: "0600" })
+      await ssh.writeFile("/remote/path", "hello world", { mode: "0755" })
 
-      // Must have gone through SFTP (writeFileLarge path)
       expect(vi.mocked(sftpUpload)).toHaveBeenCalledOnce()
 
       const chmodCommand = executedCommands.find((cmd) => cmd.includes("chmod"))
       expect(chmodCommand).toBeDefined()
-      expect(chmodCommand).toContain("0600")
+      expect(chmodCommand).toContain("0755")
       expect(chmodCommand).toContain("/remote/path")
       // chmod must come after mv
       const mvIndex = executedCommands.findIndex((cmd) => cmd.includes(" mv "))
