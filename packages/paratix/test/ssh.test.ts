@@ -1,6 +1,7 @@
 import type { Client, SFTPWrapper } from "ssh2"
 
 import { EventEmitter } from "node:events"
+import { stat } from "node:fs/promises"
 import { afterEach, describe, expect, it, vi } from "vitest"
 
 import type * as SshHelpers from "../src/sshHelpers.js"
@@ -21,6 +22,7 @@ vi.mock("node:fs", () => ({
 
 vi.mock("node:fs/promises", () => ({
   readFile: vi.fn().mockResolvedValue("fake-private-key"),
+  stat: vi.fn().mockResolvedValue({}),
 }))
 
 vi.mock("../src/sftp.js", () => ({
@@ -388,6 +390,18 @@ describe("SshConnectionImpl", () => {
 
       await expect(ssh.connect()).rejects.toThrow(
         "No privateKey configured and SSH_AUTH_SOCK is not set"
+      )
+      expect(tryConnectOnPort).not.toHaveBeenCalled()
+    })
+
+    it("throws when SSH_AUTH_SOCK points to a non-existent path", async () => {
+      vi.mocked(stat).mockRejectedValueOnce(new Error("ENOENT"))
+      process.env.SSH_AUTH_SOCK = "/no/such/socket"
+
+      const ssh = makeSshInstanceWithAgent()
+
+      await expect(ssh.connect()).rejects.toThrow(
+        "SSH_AUTH_SOCK points to non-existent path: /no/such/socket"
       )
       expect(tryConnectOnPort).not.toHaveBeenCalled()
     })

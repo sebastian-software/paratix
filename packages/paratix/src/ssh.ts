@@ -1,7 +1,7 @@
 /* eslint-disable max-lines */
 import { randomUUID } from "node:crypto"
 import { unlinkSync, writeFileSync } from "node:fs"
-import { readFile } from "node:fs/promises"
+import { readFile, stat } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { Client, type ClientChannel } from "ssh2"
@@ -287,6 +287,11 @@ export class SshConnectionImpl implements SshConnection {
     const agent = process.env.SSH_AUTH_SOCK
     if (agent == null || agent.length === 0) {
       throw new Error("No privateKey configured and SSH_AUTH_SOCK is not set")
+    }
+    try {
+      await stat(agent)
+    } catch {
+      throw new Error(`SSH_AUTH_SOCK points to non-existent path: ${agent}`)
     }
     if (await this.tryConnectOnPorts(undefined, undefined, agent)) {
       this.agentSocket = agent
