@@ -89,7 +89,13 @@ export type SshConnection = {
    * Return the low-level connection parameters for this session.
    * `privateKeyPath` is `undefined` when the connection was established via the SSH agent.
    */
-  getConnectionInfo: () => { host: string; port: number; privateKeyPath?: string; user: string }
+  getConnectionInfo: () => {
+    agentSocket?: string
+    host: string
+    port: number
+    privateKeyPath?: string
+    user: string
+  }
   /** Run a command and return stdout split into lines. */
   lines: (command: string) => Promise<string[]>
   /** Run a command and return trimmed stdout. */

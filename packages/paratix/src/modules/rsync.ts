@@ -98,6 +98,7 @@ function buildOwnershipArguments(options: SyncOptions): string[] {
  *
  * @param options - Sync options describing source, destination, and filters.
  * @param connectionInfo - SSH connection details obtained from `SshConnection.getConnectionInfo`.
+ * @param connectionInfo.agentSocket - SSH agent socket path (`SSH_AUTH_SOCK`), used when no private key is configured.
  * @param connectionInfo.host - The remote host address.
  * @param connectionInfo.port - The SSH port number.
  * @param connectionInfo.privateKeyPath - Absolute path to the SSH private key.
@@ -107,7 +108,13 @@ function buildOwnershipArguments(options: SyncOptions): string[] {
  */
 function buildArguments(
   options: SyncOptions,
-  connectionInfo: { host: string; port: number; privateKeyPath?: string; user: string },
+  connectionInfo: {
+    agentSocket?: string
+    host: string
+    port: number
+    privateKeyPath?: string
+    user: string
+  },
   dryRun: boolean
 ): string[] {
   const result: string[] = ["-az", "--itemize-changes"]
@@ -116,11 +123,15 @@ function buildArguments(
     result.push("--dry-run")
   }
 
-  const identityFlag =
-    connectionInfo.privateKeyPath == null ? "" : ` -i ${shellQuote(connectionInfo.privateKeyPath)}`
+  let sshFlags = ""
+  if (connectionInfo.privateKeyPath != null) {
+    sshFlags = ` -i ${shellQuote(connectionInfo.privateKeyPath)}`
+  } else if (connectionInfo.agentSocket != null) {
+    sshFlags = ` -o IdentityAgent=${shellQuote(connectionInfo.agentSocket)}`
+  }
   result.push(
     "-e",
-    `ssh -p ${connectionInfo.port}${identityFlag} -o StrictHostKeyChecking=${options.strictHostKeyChecking ?? "accept-new"}`
+    `ssh -p ${connectionInfo.port}${sshFlags} -o StrictHostKeyChecking=${options.strictHostKeyChecking ?? "accept-new"}`
   )
   result.push(...buildFilterArguments(options))
   result.push(...buildOwnershipArguments(options))

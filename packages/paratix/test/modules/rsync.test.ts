@@ -345,3 +345,105 @@ describe("rsync.sync — argument building", () => {
     expect(getArgs()).toContain("root@1.2.3.4:/var/www/html")
   })
 })
+
+// ---------------------------------------------------------------------------
+// SSH auth — agent socket vs private key vs none
+// ---------------------------------------------------------------------------
+
+describe("rsync.sync — SSH auth method in transport flag", () => {
+  beforeEach(() => {
+    mockExecFile.mockReset()
+    mockSuccess()
+  })
+
+  it("sets -o IdentityAgent=<socket> when agentSocket is provided", async () => {
+    const mockSsh = createMockSsh()
+    vi.spyOn(mockSsh, "getConnectionInfo").mockReturnValue({
+      agentSocket: "/run/user/1000/gnupg/S.gpg-agent.ssh",
+      host: "1.2.3.4",
+      port: 22,
+      user: "root",
+    })
+    const mod = rsync.sync({ dest: "/remote/dest", src: "/local/src" })
+    await mod.apply(mockSsh, emptyEnv)
+
+    const args = getArgs()
+    const eIdx = args.indexOf("-e")
+    expect(eIdx).toBeGreaterThanOrEqual(0)
+    const transportArg = args[eIdx + 1]
+    expect(transportArg).toContain("-o IdentityAgent='/run/user/1000/gnupg/S.gpg-agent.ssh'")
+    expect(transportArg).not.toContain("-i ")
+  })
+
+  it("wraps agentSocket with single quotes to prevent shell expansion", async () => {
+    const mockSsh = createMockSsh()
+    vi.spyOn(mockSsh, "getConnectionInfo").mockReturnValue({
+      agentSocket: "/tmp/ssh-agent $USER.sock",
+      host: "1.2.3.4",
+      port: 22,
+      user: "root",
+    })
+    const mod = rsync.sync({ dest: "/remote/dest", src: "/local/src" })
+    await mod.apply(mockSsh, emptyEnv)
+
+    const args = getArgs()
+    const eIdx = args.indexOf("-e")
+    const transportArg = args[eIdx + 1]
+    expect(transportArg).toContain("-o IdentityAgent='/tmp/ssh-agent $USER.sock'")
+    expect(transportArg).not.toContain('-o IdentityAgent="/tmp/ssh-agent $USER.sock"')
+  })
+
+  it("prefers privateKeyPath over agentSocket when both are present", async () => {
+    const mockSsh = createMockSsh()
+    vi.spyOn(mockSsh, "getConnectionInfo").mockReturnValue({
+      agentSocket: "/run/user/1000/gnupg/S.gpg-agent.ssh",
+      host: "1.2.3.4",
+      port: 22,
+      privateKeyPath: "~/.ssh/deploy_key",
+      user: "root",
+    })
+    const mod = rsync.sync({ dest: "/remote/dest", src: "/local/src" })
+    await mod.apply(mockSsh, emptyEnv)
+
+    const args = getArgs()
+    const eIdx = args.indexOf("-e")
+    const transportArg = args[eIdx + 1]
+    expect(transportArg).toContain("-i '~/.ssh/deploy_key'")
+    expect(transportArg).not.toContain("-o IdentityAgent=")
+  })
+
+  it("sets -i <keypath> when only privateKeyPath is provided (backwards compatibility)", async () => {
+    const mockSsh = createMockSsh()
+    vi.spyOn(mockSsh, "getConnectionInfo").mockReturnValue({
+      host: "1.2.3.4",
+      port: 22,
+      privateKeyPath: "~/.ssh/id",
+      user: "root",
+    })
+    const mod = rsync.sync({ dest: "/remote/dest", src: "/local/src" })
+    await mod.apply(mockSsh, emptyEnv)
+
+    const args = getArgs()
+    const eIdx = args.indexOf("-e")
+    const transportArg = args[eIdx + 1]
+    expect(transportArg).toContain("-i '~/.ssh/id'")
+    expect(transportArg).not.toContain("-o IdentityAgent=")
+  })
+
+  it("includes no identity flag when neither privateKeyPath nor agentSocket is provided", async () => {
+    const mockSsh = createMockSsh()
+    vi.spyOn(mockSsh, "getConnectionInfo").mockReturnValue({
+      host: "1.2.3.4",
+      port: 22,
+      user: "root",
+    })
+    const mod = rsync.sync({ dest: "/remote/dest", src: "/local/src" })
+    await mod.apply(mockSsh, emptyEnv)
+
+    const args = getArgs()
+    const eIdx = args.indexOf("-e")
+    const transportArg = args[eIdx + 1]
+    expect(transportArg).not.toContain("-i ")
+    expect(transportArg).not.toContain("-o IdentityAgent=")
+  })
+})

@@ -23,6 +23,7 @@ const JITTER_BASE = 0.75
 const JITTER_RANGE = 0.5
 
 export class SshConnectionImpl implements SshConnection {
+  private agentSocket: null | string = null
   private cachedSudoPassword: null | string = null
   private client: Client | null = null
   private readonly config: SshConfig
@@ -57,7 +58,10 @@ export class SshConnectionImpl implements SshConnection {
       if (agent == null || agent.length === 0) {
         throw new Error("No privateKey configured and SSH_AUTH_SOCK is not set")
       }
-      if (await this.tryConnectOnPorts(undefined, undefined, agent)) return
+      if (await this.tryConnectOnPorts(undefined, undefined, agent)) {
+        this.agentSocket = agent
+        return
+      }
       throw new Error(
         `Could not connect to ${this.host} via SSH agent on ports ${this.config.ports.join(", ")}`
       )
@@ -156,6 +160,7 @@ export class SshConnectionImpl implements SshConnection {
 
   public getConnectionInfo(): ReturnType<SshConnection["getConnectionInfo"]> {
     return {
+      agentSocket: this.agentSocket ?? undefined,
       host: this.host,
       port: this.connectedPort,
       privateKeyPath: this.config.privateKey,
