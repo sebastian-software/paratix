@@ -98,6 +98,7 @@ export function pause(message?: string): Module {
 
       await new Promise<void>((resolve) => {
         process.stdin.once("data", () => {
+          process.stdin.pause()
           resolve()
         })
       })

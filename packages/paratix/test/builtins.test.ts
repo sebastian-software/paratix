@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from "vitest"
 
 import type { Environment, Module } from "../src/types.js"
 
-import { assert, debug, fail, when } from "../src/builtins.js"
+import { assert, debug, fail, pause, when } from "../src/builtins.js"
 
 const emptyEnv: Environment = {}
 
@@ -106,6 +106,43 @@ describe("fail", () => {
     const result = await mod.apply(null, emptyEnv)
     expect(result.status).toBe("failed")
     consoleSpy.mockRestore()
+  })
+})
+
+describe("pause", () => {
+  it("check always returns needs-apply", async () => {
+    const mod = pause()
+    const result = await mod.check(null, emptyEnv)
+    expect(result).toBe("needs-apply")
+  })
+
+  it("apply calls process.stdin.pause() after the data event resolves the promise", async () => {
+    const stdoutSpy = vi.spyOn(process.stdout, "write").mockImplementation(() => true)
+
+    let capturedCallback: (() => void) | undefined
+    const onceSpy = vi
+      .spyOn(process.stdin, "once")
+      .mockImplementation((_event: string | symbol, callback: (...args: unknown[]) => void) => {
+        capturedCallback = callback as () => void
+        return process.stdin
+      })
+    const stdinPauseSpy = vi.spyOn(process.stdin, "pause").mockImplementation(() => process.stdin)
+
+    const mod = pause()
+    // eslint-disable-next-line prefer-spread
+    const applyPromise = mod.apply(null, emptyEnv)
+
+    // Emit the data event so the promise can resolve
+    expect(capturedCallback).toBeDefined()
+    capturedCallback!()
+
+    await applyPromise
+
+    expect(stdinPauseSpy).toHaveBeenCalledOnce()
+
+    stdoutSpy.mockRestore()
+    onceSpy.mockRestore()
+    stdinPauseSpy.mockRestore()
   })
 })
 
