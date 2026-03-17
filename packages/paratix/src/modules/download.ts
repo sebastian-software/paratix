@@ -3,7 +3,7 @@ import { createHash } from "node:crypto"
 import { shellQuote, validateMode } from "../ssh.js"
 import { type Module, type ModuleResult, NEEDS_APPLY, type SshConnection } from "../types.js"
 import { hasFlag, setFlag } from "./moduleHelpers.js"
-import { isValidHeaderName, isValidHeaderValue } from "./netHelpers.js"
+import { isValidHeaderName, isValidHeaderValue, validateHttpUrl } from "./netHelpers.js"
 
 /**
  * Options shared by all download methods.
@@ -260,6 +260,7 @@ export const download = {
       owner?: string
     }
   ): Module {
+    validateHttpUrl(url)
     const urlHash = createHash("sha256").update(url).digest("hex")
     const flagName = `download-${urlHash}`
     const downloadParameters: DownloadParameters = {
@@ -316,6 +317,7 @@ export const download = {
       headers?: Record<string, string>
     } & BaseDownloadOptions
   ): Module {
+    validateHttpUrl(url)
     const resolvedOptions = options ?? {}
     const downloadParameters: DownloadParameters = {
       ...resolvedOptions,

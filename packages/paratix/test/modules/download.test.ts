@@ -205,6 +205,34 @@ describe("download.url", () => {
     })
   })
 
+  describe("validation", () => {
+    it("throws on file:// URL with message containing scheme", () => {
+      expect(() => download.url(destination, "file:///etc/passwd")).toThrow("file")
+    })
+
+    it("throws on ftp:// URL", () => {
+      expect(() => download.url(destination, "ftp://example.com/file")).toThrow(
+        "Unsupported URL scheme"
+      )
+    })
+
+    it("throws on gopher:// URL", () => {
+      expect(() => download.url(destination, "gopher://evil.com")).toThrow("Unsupported URL scheme")
+    })
+
+    it("throws on invalid URL syntax", () => {
+      expect(() => download.url(destination, "not-a-url")).toThrow("Invalid URL")
+    })
+
+    it("accepts https:// URL without throwing", () => {
+      expect(() => download.url(destination, "https://example.com/file")).not.toThrow()
+    })
+
+    it("accepts http:// URL without throwing", () => {
+      expect(() => download.url(destination, "http://example.com/file")).not.toThrow()
+    })
+  })
+
   describe("secrets propagation", () => {
     it("passes header values as secrets when exec is called for curl", async () => {
       const token = "supersecret-bearer-token"
@@ -509,6 +537,36 @@ describe("download.large", () => {
     it("has correct format: download.large: <destination>", async () => {
       const mod = download.large(destination, url)
       expect(mod.name).toBe(`download.large: ${destination}`)
+    })
+  })
+
+  describe("validation", () => {
+    it("throws on file:// URL with message containing scheme", () => {
+      expect(() => download.large(destination, "file:///etc/passwd")).toThrow("file")
+    })
+
+    it("throws on ftp:// URL", () => {
+      expect(() => download.large(destination, "ftp://example.com/file")).toThrow(
+        "Unsupported URL scheme"
+      )
+    })
+
+    it("throws on gopher:// URL", () => {
+      expect(() => download.large(destination, "gopher://evil.com")).toThrow(
+        "Unsupported URL scheme"
+      )
+    })
+
+    it("throws on invalid URL syntax", () => {
+      expect(() => download.large(destination, "not-a-url")).toThrow("Invalid URL")
+    })
+
+    it("accepts https:// URL without throwing", () => {
+      expect(() => download.large(destination, "https://example.com/file")).not.toThrow()
+    })
+
+    it("accepts http:// URL without throwing", () => {
+      expect(() => download.large(destination, "http://example.com/file")).not.toThrow()
     })
   })
 

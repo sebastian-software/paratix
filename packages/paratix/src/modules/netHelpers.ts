@@ -150,6 +150,27 @@ export async function checkHttpCondition(
 }
 
 /**
+ * Validate that a URL string is a well-formed HTTP or HTTPS URL.
+ * Throws if the URL is malformed or uses an unsupported scheme.
+ *
+ * @param url - The URL string to validate.
+ * @throws {Error} If the URL is malformed or the scheme is not `http` or `https`.
+ */
+export function validateHttpUrl(url: string): void {
+  let parsed: URL
+  try {
+    parsed = new URL(url)
+  } catch {
+    throw new Error(`Invalid URL '${url}'`)
+  }
+  if (parsed.protocol !== "https:" && parsed.protocol !== "http:") {
+    throw new Error(
+      `Unsupported URL scheme '${parsed.protocol.replace(/:$/v, "")}' in '${url}': only http and https are allowed`
+    )
+  }
+}
+
+/**
  * Create a delay promise for use in polling loops.
  *
  * @param ms - The delay duration in milliseconds.
