@@ -196,7 +196,10 @@ export function buildHostVerifier(
       }
       // mode === "accept-new": accept and persist
       appendHostKey(host, port, key).catch((error: unknown) => {
-        process.stderr.write(`Warning: could not persist host key for ${host}: ${String(error)}\n`)
+        process.stderr.write(
+          `WARNING: Could not persist host key for ${host} — ` +
+            `future connections to this host cannot be verified. ${String(error)}\n`
+        )
       })
       return true
     },

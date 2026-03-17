@@ -424,6 +424,36 @@ describe("buildHostVerifier", () => {
     expect(() => hostVerifier!(differentKey)).toThrow(/HOST KEY VERIFICATION FAILED/v)
   })
 
+  it("mode 'accept-new': writes WARNING to stderr when appendHostKey fails", async () => {
+    // No known hosts so the key is treated as new
+    readFileSyncMock.mockReturnValue("")
+    const accessError = Object.assign(new Error("Permission denied"), { code: "EACCES" })
+    appendFileMock.mockRejectedValue(accessError)
+
+    // Install the spy BEFORE calling hostVerifier so it captures the async .catch() write
+    const stderrSpy = vi.spyOn(process.stderr, "write").mockImplementation(() => true)
+
+    try {
+      const { hostVerifier } = buildHostVerifier("accept-new", "newhost.com", 22)
+      expect(hostVerifier).toBeDefined()
+
+      // hostVerifier itself returns true — the appendHostKey failure is fire-and-forget
+      const result = hostVerifier!(ed25519Key)
+      expect(result).toBe(true)
+
+      // Flush the full async chain: mkdir resolves → appendFile rejects → .catch() runs
+      await vi.waitFor(() => {
+        expect(stderrSpy).toHaveBeenCalledOnce()
+      })
+      const written = (stderrSpy.mock.calls[0] as [string])[0]
+      expect(written).toContain("WARNING")
+      expect(written).toContain("future connections")
+      expect(written).toContain("newhost.com")
+    } finally {
+      stderrSpy.mockRestore()
+    }
+  })
+
   it("mode 'accept-new' with unknown host on non-standard port: appends [host]:port entry", async () => {
     readFileSyncMock.mockReturnValue("")
 
