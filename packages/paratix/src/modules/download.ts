@@ -3,6 +3,7 @@ import { createHash } from "node:crypto"
 import { shellQuote } from "../ssh.js"
 import { type Module, type ModuleResult, NEEDS_APPLY, type SshConnection } from "../types.js"
 import { hasFlag, setFlag } from "./moduleHelpers.js"
+import { isValidHeaderName, isValidHeaderValue } from "./netHelpers.js"
 
 /**
  * Options shared by all download methods.
@@ -32,37 +33,6 @@ type DownloadParameters = {
   /** The URL to download from. */
   url: string
 } & BaseDownloadOptions
-
-/** Last ASCII control character (U+001F). */
-const LAST_CONTROL_CHAR = 0x1f
-/** ASCII DEL character (U+007F). */
-const DEL_CHAR = 0x7f
-
-/**
- * Check whether a string is a valid HTTP header name per RFC 7230 (token chars).
- * Rejects control characters, DEL, colons, and any non-printable ASCII.
- *
- * @param name - The header name to validate.
- * @returns `true` if the name contains only valid token characters, `false` otherwise.
- */
-function isValidHeaderName(name: string): boolean {
-  for (let index = 0; index < name.length; index++) {
-    const code = name.charCodeAt(index)
-    if (code <= LAST_CONTROL_CHAR || code >= DEL_CHAR || name[index] === ":") return false
-  }
-  return name.length > 0
-}
-
-/**
- * Check whether a string is safe to use as an HTTP header value.
- * Rejects values containing CR or LF to prevent HTTP header injection.
- *
- * @param value - The header value to validate.
- * @returns `true` if the value contains no newline characters, `false` otherwise.
- */
-function isValidHeaderValue(value: string): boolean {
-  return !value.includes("\r") && !value.includes("\n")
-}
 
 /**
  * Build the curl command string including optional headers.

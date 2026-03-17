@@ -67,8 +67,40 @@ export function buildWaitForName(options: WaitForOptions): string {
   return "net.waitFor"
 }
 
+/** Last ASCII control character (U+001F). */
+const LAST_CONTROL_CHAR = 0x1f
+/** ASCII DEL character (U+007F). */
+const DEL_CHAR = 0x7f
+
+/**
+ * Check whether a string is a valid HTTP header name per RFC 7230 (token chars).
+ * Rejects control characters, DEL, colons, and any non-printable ASCII.
+ *
+ * @param name - The header name to validate.
+ * @returns `true` if the name contains only valid token characters, `false` otherwise.
+ */
+export function isValidHeaderName(name: string): boolean {
+  for (let index = 0; index < name.length; index++) {
+    const code = name.charCodeAt(index)
+    if (code <= LAST_CONTROL_CHAR || code >= DEL_CHAR || name[index] === ":") return false
+  }
+  return name.length > 0
+}
+
+/**
+ * Check whether a string is safe to use as an HTTP header value.
+ * Rejects values containing CR or LF to prevent HTTP header injection.
+ *
+ * @param value - The header value to validate.
+ * @returns `true` if the value contains no newline characters, `false` otherwise.
+ */
+export function isValidHeaderValue(value: string): boolean {
+  return !value.includes("\r") && !value.includes("\n")
+}
+
 /**
  * Build curl `-H` flags from a headers record for use in shell commands.
+ * Validates header names and values to prevent HTTP header injection.
  *
  * @param headers - The HTTP headers to convert into curl flags.
  * @returns The formatted curl header flags string with trailing space, or empty string.
@@ -76,6 +108,12 @@ export function buildWaitForName(options: WaitForOptions): string {
 export function buildCurlHeaderFlags(headers: Record<string, string>): string {
   const flags = Object.entries(headers)
     .map(([name, value]) => {
+      if (!isValidHeaderName(name)) {
+        throw new Error(`Invalid HTTP header name: ${name}`)
+      }
+      if (!isValidHeaderValue(value)) {
+        throw new Error(`Invalid HTTP header value for ${name}: value contains newline characters`)
+      }
       const header = `${name}: ${value}`
       return `-H ${shellQuote(header)}`
     })
