@@ -4,6 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import {
   collectStreamOutput,
   CommandError,
+  createStreamMasker,
   MAX_OUTPUT_LENGTH,
   type StreamOutputParameters,
 } from "../src/sshHelpers.js"
@@ -64,6 +65,142 @@ async function getErrorMessage(promise: Promise<unknown>): Promise<string> {
     return (error as Error).message
   }
 }
+
+// ---------------------------------------------------------------------------
+// createStreamMasker
+// ---------------------------------------------------------------------------
+
+describe("createStreamMasker", () => {
+  it("masks a secret that is fully contained in a single chunk after flush", () => {
+    const output: string[] = []
+    const masker = createStreamMasker(
+      (t) => {
+        output.push(t)
+      },
+      ["hunter2"]
+    )
+
+    masker.push("hunter2")
+    masker.flush()
+
+    expect(output.join("")).not.toContain("hunter2")
+    expect(output.join("")).toContain("***")
+  })
+
+  it("masks a secret split across two chunks ('hun' + 'ter2')", () => {
+    const output: string[] = []
+    const masker = createStreamMasker(
+      (t) => {
+        output.push(t)
+      },
+      ["hunter2"]
+    )
+
+    masker.push("hun")
+    masker.push("ter2")
+    masker.flush()
+
+    expect(output.join("")).not.toContain("hunter2")
+    expect(output.join("")).toContain("***")
+  })
+
+  it("masks a secret split at chunk-end and chunk-start ('hunte' + 'r2')", () => {
+    const output: string[] = []
+    const masker = createStreamMasker(
+      (t) => {
+        output.push(t)
+      },
+      ["hunter2"]
+    )
+
+    masker.push("hunte")
+    masker.push("r2")
+    masker.flush()
+
+    expect(output.join("")).not.toContain("hunter2")
+    expect(output.join("")).toContain("***")
+  })
+
+  it("masks multiple distinct secrets appearing in a single chunk", () => {
+    const output: string[] = []
+    const masker = createStreamMasker(
+      (t) => {
+        output.push(t)
+      },
+      ["alpha", "beta"]
+    )
+
+    masker.push("prefix alpha and beta suffix")
+    masker.flush()
+
+    const combined = output.join("")
+    expect(combined).not.toContain("alpha")
+    expect(combined).not.toContain("beta")
+    expect(combined).toContain("***")
+  })
+
+  it("produces no output when chunk is smaller than overlap, then flushes on flush()", () => {
+    const output: string[] = []
+    // Secret "hunter2" has length 7, so overlap = 6
+    const masker = createStreamMasker(
+      (t) => {
+        output.push(t)
+      },
+      ["hunter2"]
+    )
+
+    // A chunk shorter than overlap (6 chars) must not produce output yet
+    masker.push("hello")
+
+    expect(output).toHaveLength(0)
+
+    masker.flush()
+
+    // After flush the buffered text comes out unchanged (no secret present)
+    expect(output.join("")).toBe("hello")
+  })
+
+  it("passes all text through unchanged when secrets array is empty", () => {
+    const output: string[] = []
+    const masker = createStreamMasker((t) => {
+      output.push(t)
+    }, [])
+
+    masker.push("plain text")
+    masker.flush()
+
+    expect(output.join("")).toBe("plain text")
+  })
+
+  it("produces no output when flush() is called without any prior push", () => {
+    const output: string[] = []
+    const masker = createStreamMasker(
+      (t) => {
+        output.push(t)
+      },
+      ["secret"]
+    )
+
+    masker.flush()
+
+    expect(output).toHaveLength(0)
+  })
+
+  it("passes text unmodified when no secret matches any chunk", () => {
+    const output: string[] = []
+    const masker = createStreamMasker(
+      (t) => {
+        output.push(t)
+      },
+      ["hunter2"]
+    )
+
+    masker.push("hello world, nothing to see here")
+    masker.flush()
+
+    expect(output.join("")).toBe("hello world, nothing to see here")
+  })
+})
 
 // ---------------------------------------------------------------------------
 // maskSecrets (tested indirectly through collectStreamOutput error messages)

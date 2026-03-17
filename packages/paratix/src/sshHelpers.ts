@@ -86,6 +86,67 @@ export function maskSecrets(text: string, secrets: string[]): string {
 }
 
 /**
+ * Create a sliding-window masker that buffers up to `maxSecretLength - 1`
+ * characters so that secrets split across chunk boundaries are still masked
+ * in live output.
+ *
+ * @param write - Callback that receives masked text for live output.
+ * @param secrets - List of secret strings to mask.
+ * @returns An object with `push` (feed new data) and `flush` (emit remaining buffer).
+ */
+export function createStreamMasker(
+  write: (text: string) => void,
+  secrets: string[]
+): { flush: () => void; push: (chunk: string) => void } {
+  const maxLength = Math.max(0, ...secrets.map((s) => s.length))
+  const overlap = Math.max(0, maxLength - 1)
+
+  if (overlap === 0) {
+    return {
+      flush(): void {
+        /* nothing buffered */
+      },
+      push(chunk: string): void {
+        write(maskSecrets(chunk, secrets))
+      },
+    }
+  }
+
+  let pending = ""
+
+  return {
+    flush(): void {
+      if (pending.length > 0) {
+        write(maskSecrets(pending, secrets))
+        pending = ""
+      }
+    },
+    push(chunk: string): void {
+      pending += chunk
+      if (pending.length <= overlap) return
+      // Mask the whole buffer first so secrets fully contained in
+      // pending are replaced before the split.  The overlap is then
+      // taken from the *masked* result — this is correct as long as
+      // no secret literally contains the replacement string "***".
+      const masked = maskSecrets(pending, secrets)
+      if (masked.length <= overlap) {
+        pending = masked
+        return
+      }
+      write(masked.slice(0, -overlap))
+      pending = masked.slice(-overlap)
+    },
+  }
+}
+
+function writeStdout(t: string): void {
+  process.stdout.write(t)
+}
+function writeStderr(t: string): void {
+  process.stderr.write(t)
+}
+
+/**
  * Wire up event listeners on an ssh2 stream to collect stdout/stderr
  * and resolve or reject the promise when the stream closes.
  *
@@ -96,22 +157,30 @@ export function collectStreamOutput(parameters: StreamOutputParameters): void {
   let stdout = ""
   let stderr = ""
 
+  const secrets = parameters.secrets ?? []
+  const stdoutMasker = options.silent ? null : createStreamMasker(writeStdout, secrets)
+  const stderrMasker = options.silent ? null : createStreamMasker(writeStderr, secrets)
+
   stream.on("data", (data: Buffer) => {
     const text = data.toString()
     stdout += text
-    if (!options.silent) process.stdout.write(maskSecrets(text, parameters.secrets ?? []))
+    stdoutMasker?.push(text)
   })
   stream.stderr.on("data", (data: Buffer) => {
     const text = data.toString()
     stderr += text
-    if (!options.silent) process.stderr.write(maskSecrets(text, parameters.secrets ?? []))
+    stderrMasker?.push(text)
   })
   stream.on("error", (error: Error) => {
     clearTimeout(timer)
+    stdoutMasker?.flush()
+    stderrMasker?.flush()
     reject(error)
   })
   stream.on("close", (code: number) => {
     clearTimeout(timer)
+    stdoutMasker?.flush()
+    stderrMasker?.flush()
     // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition -- ssh2 may pass undefined despite type signature
     const exitCode = code ?? 0
     const mask = (text: string): string => maskSecrets(text, parameters.secrets ?? [])
