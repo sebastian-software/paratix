@@ -157,9 +157,16 @@ function makeConnectedSshWithCloseListener(
 }
 
 function makeSshInstance(
-  overrides: { host?: string; ports?: number[]; reconnectTimeout?: number; user?: string } = {}
+  overrides: {
+    host?: string
+    maxReconnectAttempts?: number
+    ports?: number[]
+    reconnectTimeout?: number
+    user?: string
+  } = {}
 ): SshConnectionImpl {
   const config = {
+    maxReconnectAttempts: overrides.maxReconnectAttempts,
     ports: overrides.ports ?? [22],
     privateKey: "/dev/null",
     reconnectTimeout: overrides.reconnectTimeout,
@@ -369,6 +376,62 @@ describe("SshConnectionImpl", () => {
       await expect(reconnectPromise).rejects.toThrow(
         /Failed to reconnect to 1\.2\.3\.4 after 5000ms/v
       )
+    })
+
+    it("throws after maxReconnectAttempts when all attempts fail before timeout", async () => {
+      vi.useFakeTimers()
+
+      vi.mocked(tryConnectOnPort).mockRejectedValue(new Error("Connection refused"))
+
+      // Use a high timeout so it never triggers — only the attempt limit should fire
+      const ssh = makeSshInstance({ maxReconnectAttempts: 3, reconnectTimeout: 300_000 })
+
+      const reconnectPromise = ssh.reconnect()
+
+      // Register rejection handler before advancing timers to prevent unhandled rejection
+      reconnectPromise.catch(() => {
+        /* handled below */
+      })
+
+      // Advance timers so that all backoff delays between attempts can pass
+      for (let elapsed = 0; elapsed < 60_000; elapsed += 1000) {
+        // eslint-disable-next-line no-await-in-loop
+        await vi.advanceTimersByTimeAsync(1000)
+      }
+
+      await expect(reconnectPromise).rejects.toThrow(
+        /Failed to reconnect to 1\.2\.3\.4 after 3 attempts/v
+      )
+      expect(tryConnectOnPort).toHaveBeenCalledTimes(3)
+    })
+
+    it("uses default maxReconnectAttempts (10) when not specified", async () => {
+      vi.useFakeTimers()
+
+      vi.mocked(tryConnectOnPort).mockRejectedValue(new Error("Connection refused"))
+
+      // Use a high timeout so it never triggers — only the default attempt limit should fire
+      const ssh = makeSshInstance({ reconnectTimeout: 600_000 })
+
+      const reconnectPromise = ssh.reconnect()
+
+      // Register rejection handler before advancing timers to prevent unhandled rejection
+      reconnectPromise.catch(() => {
+        /* handled below */
+      })
+
+      // Advance timers in large steps so all backoff delays (up to ~250 s total) pass.
+      // Using 10 000 ms per step keeps microtask interleaving intact without exceeding
+      // the default vitest test timeout.
+      for (let elapsed = 0; elapsed < 300_000; elapsed += 10_000) {
+        // eslint-disable-next-line no-await-in-loop
+        await vi.advanceTimersByTimeAsync(10_000)
+      }
+
+      await expect(reconnectPromise).rejects.toThrow(
+        /Failed to reconnect to 1\.2\.3\.4 after 10 attempts/v
+      )
+      expect(tryConnectOnPort).toHaveBeenCalledTimes(10)
     })
   })
 

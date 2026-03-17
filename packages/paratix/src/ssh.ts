@@ -22,11 +22,12 @@ import { promptTerminal } from "./terminal.js"
 export { shellQuote, validateMode }
 
 const COMMAND_TIMEOUT = 120_000
-const RECONNECT_BASE_DELAY = 1000
-const RECONNECT_MAX_DELAY = 30_000
+const DEFAULT_MAX_RECONNECT_ATTEMPTS = 10
 const DEFAULT_RECONNECT_TIMEOUT = 120_000
 const JITTER_BASE = 0.75
 const JITTER_RANGE = 0.5
+const RECONNECT_BASE_DELAY = 1000
+const RECONNECT_MAX_DELAY = 30_000
 
 export class SshConnectionImpl implements SshConnection {
   private agentSocket: null | string = null
@@ -209,10 +210,11 @@ export class SshConnectionImpl implements SshConnection {
 
   public async reconnect(): Promise<void> {
     const timeout = this.config.reconnectTimeout ?? DEFAULT_RECONNECT_TIMEOUT
+    const maxAttempts = this.config.maxReconnectAttempts ?? DEFAULT_MAX_RECONNECT_ATTEMPTS
     const deadline = Date.now() + timeout
     let attempt = 0
 
-    while (Date.now() < deadline) {
+    while (Date.now() < deadline && attempt < maxAttempts) {
       try {
         this.disconnect()
         // eslint-disable-next-line no-await-in-loop
@@ -228,7 +230,8 @@ export class SshConnectionImpl implements SshConnection {
         attempt++
       }
     }
-    throw new Error(`Failed to reconnect to ${this.host} after ${timeout}ms`)
+    const reason = attempt >= maxAttempts ? `${attempt} attempts` : `${timeout}ms`
+    throw new Error(`Failed to reconnect to ${this.host} after ${reason}`)
   }
 
   public async sha256(remotePath: string): Promise<null | string> {

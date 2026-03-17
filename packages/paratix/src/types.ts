@@ -120,6 +120,8 @@ export type SshConnection = {
 export type SshConfig = {
   /** Forward the local SSH agent to the remote host. */
   agentForward?: boolean
+  /** Maximum number of reconnection attempts before giving up. */
+  maxReconnectAttempts?: number
   /** Fall back to password authentication if key auth fails. */
   passwordFallback?: boolean
   /** Ordered list of candidate ports -- the runner tries each until one connects. */
