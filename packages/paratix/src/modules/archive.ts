@@ -188,7 +188,7 @@ export const archive = {
 
         if (upload) {
           // Compute local SHA256 without uploading.
-          const localHash = localSha256(source)
+          const localHash = await localSha256(source)
           return localHash === markerContent ? "ok" : NEEDS_APPLY
         }
 

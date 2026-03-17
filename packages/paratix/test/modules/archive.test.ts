@@ -78,7 +78,7 @@ describe("archive.extract — check", () => {
     })
 
     const fileHelpers = await import("../../src/modules/fileHelpers.js")
-    vi.spyOn(fileHelpers, "localSha256").mockReturnValue(localFileHash)
+    vi.spyOn(fileHelpers, "localSha256").mockResolvedValue(localFileHash)
 
     const mod = archive.extract(localFile, destination, { upload: true })
     const result = await mod.check(mockSsh, emptyEnv)

@@ -1,9 +1,9 @@
 import { createHash } from "node:crypto"
-import { readFileSync } from "node:fs"
+import { readFile } from "node:fs/promises"
 
-export function localSha256(filePath: string): string {
+export async function localSha256(filePath: string): Promise<string> {
   // eslint-disable-next-line security/detect-non-literal-fs-filename
-  const content = readFileSync(filePath)
+  const content = await readFile(filePath)
   return createHash("sha256").update(content).digest("hex")
 }
 

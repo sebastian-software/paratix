@@ -82,7 +82,7 @@ export const file = {
         if (!exists) return NEEDS_APPLY
 
         const remoteHash = await ssh.sha256(remotePath)
-        const localHash = localSha256(localPath)
+        const localHash = await localSha256(localPath)
         return remoteHash === localHash ? "ok" : NEEDS_APPLY
       },
       name: `file.copy: ${remotePath}`,

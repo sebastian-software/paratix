@@ -1,4 +1,4 @@
-import { readFileSync } from "node:fs"
+import { readFile } from "node:fs/promises"
 
 import { shellQuote } from "../ssh.js"
 import { type Module, type ModuleResult, NEEDS_APPLY, type SshConnection } from "../types.js"
@@ -7,9 +7,10 @@ import { sha256String } from "./fileHelpers.js"
 /** Index where the file-type field starts in `stat -c '%s %a %U %G %F %Y'` output. */
 const STAT_TYPE_START_INDEX = 4
 
-function concatFragments(fragments: string[]): string {
+async function concatFragments(fragments: string[]): Promise<string> {
   // eslint-disable-next-line security/detect-non-literal-fs-filename -- paths from module config, not user input
-  return fragments.map((f) => readFileSync(f, "utf8")).join("")
+  const contents = await Promise.all(fragments.map((f) => readFile(f, "utf8")))
+  return contents.join("")
 }
 
 type BlockMarkers = { begin: string; end: string; full: string }
@@ -78,7 +79,7 @@ export function assemble(
     async apply(ssh: null | SshConnection): Promise<ModuleResult> {
       if (!ssh) return { status: "failed" }
 
-      await ssh.writeFile(remotePath, concatFragments(fragments))
+      await ssh.writeFile(remotePath, await concatFragments(fragments))
 
       if (options?.mode != null) {
         await ssh.exec(`chmod ${shellQuote(options.mode)} ${shellQuote(remotePath)}`, {
@@ -98,7 +99,7 @@ export function assemble(
       const exists = await ssh.exists(remotePath)
       if (!exists) return NEEDS_APPLY
 
-      const localHash = sha256String(concatFragments(fragments))
+      const localHash = sha256String(await concatFragments(fragments))
       const remoteHash = await ssh.sha256(remotePath)
       return remoteHash === localHash ? "ok" : NEEDS_APPLY
     },
