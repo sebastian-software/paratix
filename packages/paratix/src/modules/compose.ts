@@ -1,4 +1,4 @@
-import { readFileSync } from "node:fs"
+import { readFile } from "node:fs/promises"
 import { basename } from "node:path"
 
 import { shellQuote } from "../ssh.js"
@@ -199,7 +199,7 @@ export const compose = {
         let desiredContent: string
         if (options.src !== undefined && options.src !== "") {
           // eslint-disable-next-line security/detect-non-literal-fs-filename -- path from module config, not user input
-          desiredContent = readFileSync(options.src, "utf8")
+          desiredContent = await readFile(options.src, "utf8")
         } else if (options.content !== undefined && options.content !== "") {
           desiredContent = options.content
         } else {

@@ -1,13 +1,13 @@
-import type * as NodeFs from "node:fs"
+import type * as NodeFsPromises from "node:fs/promises"
 
 import { describe, expect, it, vi } from "vitest"
 
 import { compose } from "../../src/modules/compose.js"
 import { createMockSsh } from "../helpers/mockSsh.js"
 
-vi.mock("node:fs", async (importOriginal) => {
-  const actual = await importOriginal<typeof NodeFs>()
-  return { ...actual, readFileSync: vi.fn(actual.readFileSync) }
+vi.mock("node:fs/promises", async (importOriginal) => {
+  const actual = await importOriginal<typeof NodeFsPromises>()
+  return { ...actual, readFile: vi.fn(actual.readFile) }
 })
 
 const emptyEnv = {}
@@ -413,8 +413,8 @@ describe("compose.config — check", () => {
 
   it("reads local src file to compare content", async () => {
     const localContent = "services:\n  web:\n    image: nginx\n"
-    const { readFileSync } = await import("node:fs")
-    vi.mocked(readFileSync).mockReturnValue(localContent)
+    const { readFile } = await import("node:fs/promises")
+    vi.mocked(readFile).mockResolvedValue(localContent)
 
     const mockSsh = createMockSsh({
       [`[ -e '${remotePath}' ]`]: { code: 0 },
@@ -424,7 +424,7 @@ describe("compose.config — check", () => {
     const result = await mod.check(mockSsh, emptyEnv)
     expect(result).toBe("ok")
 
-    vi.mocked(readFileSync).mockRestore()
+    vi.mocked(readFile).mockRestore()
   })
 })
 
