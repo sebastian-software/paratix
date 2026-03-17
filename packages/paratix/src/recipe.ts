@@ -24,6 +24,14 @@ type RecipeState = {
   status: "changed" | "failed" | "ok"
 }
 
+/**
+ * Recipes run their own check→apply loop, separate from the runner's
+ * `runModuleLoop` in runner.ts.  This is intentional: recipes execute as a
+ * single nested module inside the runner, so SSH-lifecycle concerns
+ * (port-change reconnects, reboot handling), shutdown-signal guards,
+ * dry-run mode and stats tracking are the runner's responsibility and
+ * must not be duplicated here.
+ */
 async function executeOneModule(
   targetModule: Module,
   ssh: null | SshConnection,
