@@ -1,4 +1,4 @@
-import type { Client, ClientChannel } from "ssh2"
+import type { Client, ClientChannel, ConnectConfig } from "ssh2"
 
 import type { ExecOptions, ExecResult } from "./types.js"
 
@@ -257,7 +257,7 @@ export async function tryConnectOnPort(parameters: ConnectParameters): Promise<v
       reject(error)
     })
 
-    const connectConfig: Record<string, unknown> = {
+    const connectConfig: ConnectConfig = {
       host,
       port,
       readyTimeout: CONNECTION_TIMEOUT,
@@ -276,6 +276,6 @@ export async function tryConnectOnPort(parameters: ConnectParameters): Promise<v
       connectConfig.password = password
       connectConfig.tryKeyboard = true
     }
-    client.connect(connectConfig as Parameters<Client["connect"]>[0])
+    client.connect(connectConfig)
   })
 }
