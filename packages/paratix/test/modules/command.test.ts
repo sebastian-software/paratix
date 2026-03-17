@@ -52,7 +52,7 @@ describe("command.shell — apply with non-zero exit code", () => {
     vi.mocked(printCommandError).mockClear()
 
     const mockSsh = createMockSsh({
-      "exit 1": { code: 1, stdout: "some output", stderr: "some error" },
+      "exit 1": { code: 1, stderr: "some error", stdout: "some output" },
     })
     const mod = command.shell("exit 1")
     await mod.apply(mockSsh, emptyEnv)

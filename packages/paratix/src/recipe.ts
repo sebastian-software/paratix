@@ -31,6 +31,11 @@ type RecipeState = {
  * (port-change reconnects, reboot handling), shutdown-signal guards,
  * dry-run mode and stats tracking are the runner's responsibility and
  * must not be duplicated here.
+ *
+ * @param targetModule - The module to check and conditionally apply.
+ * @param ssh - Active SSH connection, or `null` for local modules.
+ * @param currentEnvironment - Environment values available to the module.
+ * @returns The updated environment and status, or `null` if the module was already ok.
  */
 async function executeOneModule(
   targetModule: Module,

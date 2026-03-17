@@ -9,7 +9,7 @@ const STAT_TYPE_START_INDEX = 4
 
 async function concatFragments(fragments: string[]): Promise<string> {
   // eslint-disable-next-line security/detect-non-literal-fs-filename -- paths from module config, not user input
-  const contents = await Promise.all(fragments.map((f) => readFile(f, "utf8")))
+  const contents = await Promise.all(fragments.map(async (f) => readFile(f, "utf8")))
   return contents.join("")
 }
 

@@ -257,9 +257,9 @@ describe("pkg.update", () => {
     const ssh = createMockSsh({
       ...APT_FOUND,
       "apt-get update": { code: 0 },
-      "mkdir -p /var/lib/paratix/flags": { code: 0 },
       "find /var/lib/paratix/flags -maxdepth 1 -name 'package-update-*' -delete && touch /var/lib/paratix/flags/'package-update-2024-01-15'":
         { code: 0 },
+      "mkdir -p /var/lib/paratix/flags": { code: 0 },
     })
     const mod = pkg.update("2024-01-15")
     const result = await mod.apply(ssh, emptyEnv)
@@ -327,9 +327,9 @@ describe("pkg.upgrade", () => {
       ...APT_FOUND,
       "DEBIAN_FRONTEND=noninteractive apt-get update && DEBIAN_FRONTEND=noninteractive apt-get upgrade -y":
         { code: 0 },
-      "mkdir -p /var/lib/paratix/flags": { code: 0 },
       "find /var/lib/paratix/flags -maxdepth 1 -name 'package-upgrade-*' -delete && touch /var/lib/paratix/flags/'package-upgrade-2024-01-15'":
         { code: 0 },
+      "mkdir -p /var/lib/paratix/flags": { code: 0 },
     })
     const mod = pkg.upgrade("2024-01-15")
     const result = await mod.apply(ssh, emptyEnv)
@@ -425,9 +425,9 @@ describe("package manager detection", () => {
     const ssh = createMockSsh({
       ...DNF_FOUND,
       "dnf makecache": { code: 0 },
-      "mkdir -p /var/lib/paratix/flags": { code: 0 },
       "find /var/lib/paratix/flags -maxdepth 1 -name 'package-update-*' -delete && touch /var/lib/paratix/flags/'package-update-2024-01-15'":
         { code: 0 },
+      "mkdir -p /var/lib/paratix/flags": { code: 0 },
     })
     const mod = pkg.update("2024-01-15")
     await mod.apply(ssh, emptyEnv)
@@ -438,9 +438,9 @@ describe("package manager detection", () => {
     const ssh = createMockSsh({
       ...APK_FOUND,
       "apk update": { code: 0 },
-      "mkdir -p /var/lib/paratix/flags": { code: 0 },
       "find /var/lib/paratix/flags -maxdepth 1 -name 'package-update-*' -delete && touch /var/lib/paratix/flags/'package-update-2024-01-15'":
         { code: 0 },
+      "mkdir -p /var/lib/paratix/flags": { code: 0 },
     })
     const mod = pkg.update("2024-01-15")
     await mod.apply(ssh, emptyEnv)
@@ -451,9 +451,9 @@ describe("package manager detection", () => {
     const ssh = createMockSsh({
       ...APK_FOUND,
       "apk update && apk upgrade": { code: 0 },
-      "mkdir -p /var/lib/paratix/flags": { code: 0 },
       "find /var/lib/paratix/flags -maxdepth 1 -name 'package-upgrade-*' -delete && touch /var/lib/paratix/flags/'package-upgrade-2024-01-15'":
         { code: 0 },
+      "mkdir -p /var/lib/paratix/flags": { code: 0 },
     })
     const mod = pkg.upgrade("2024-01-15")
     await mod.apply(ssh, emptyEnv)

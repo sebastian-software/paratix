@@ -31,8 +31,9 @@ export async function setVersionedFlag(
   validateFlagName(flagName, "flagName")
   validateFlagName(flagPrefix, "flagPrefix")
   await ensureFlagsDirectory(ssh)
+  const glob = shellQuote(`${flagPrefix}*`)
   await ssh.exec(
-    `find ${FLAGS_DIRECTORY} -maxdepth 1 -name ${shellQuote(flagPrefix + "*")} -delete && touch ${FLAGS_DIRECTORY}/${shellQuote(flagName)}`,
+    `find ${FLAGS_DIRECTORY} -maxdepth 1 -name ${glob} -delete && touch ${FLAGS_DIRECTORY}/${shellQuote(flagName)}`,
     { silent: true }
   )
 }

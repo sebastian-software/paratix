@@ -9,22 +9,8 @@ import {
   printRecipeHeader,
   printSummary,
 } from "./output.js"
+import { resolveExitCode, signalExitCode } from "./runnerHelpers.js"
 import { SshConnectionImpl } from "./ssh.js"
-
-const SIGNAL_EXIT_BASE = 128
-const SIGTERM_NUMBER = 15
-const SIGINT_NUMBER = 2
-
-/**
- * Returns the conventional exit code for a termination signal.
- * Follows the POSIX convention of 128 + signal number.
- *
- * @param signal - The received signal (`SIGTERM` or `SIGINT`).
- * @returns The exit code to use when the process is terminated by `signal`.
- */
-function signalExitCode(signal: NodeJS.Signals): number {
-  return SIGNAL_EXIT_BASE + (signal === "SIGTERM" ? SIGTERM_NUMBER : SIGINT_NUMBER)
-}
 
 /**
  * Holds the shutdown handler and a getter for the signal that triggered it.
@@ -347,22 +333,6 @@ async function runSignals(parameters: SignalArguments): Promise<void> {
       printCommandFailure(error, verbose)
       stats.update("failed")
     }
-  }
-}
-
-/**
- * Sets `process.exitCode` based on the run outcome.
- * A received shutdown signal takes precedence over module failures.
- *
- * @param shutdownSignal - The signal that interrupted the run, or `null` if the
- *   run completed normally.
- * @param stats - Accumulated run statistics used to detect module failures.
- */
-function resolveExitCode(shutdownSignal: NodeJS.Signals | null, stats: RunStats): void {
-  if (shutdownSignal != null) {
-    process.exitCode = signalExitCode(shutdownSignal)
-  } else if (stats.failed > 0) {
-    process.exitCode = 1
   }
 }
 

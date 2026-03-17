@@ -249,7 +249,9 @@ export class SshConnectionImpl implements SshConnection {
       try {
         await this.exec(`rm -f ${shellQuote(temporaryPath)}`, { silent: true })
       } catch (cleanupError) {
-        process.stderr.write(`Warning: failed to remove temp file ${temporaryPath}: ${String(cleanupError)}\n`)
+        process.stderr.write(
+          `Warning: failed to remove temp file ${temporaryPath}: ${String(cleanupError)}\n`
+        )
       }
     }
   }
@@ -262,31 +264,7 @@ export class SshConnectionImpl implements SshConnection {
       })
       return
     }
-
-    // Large content: write to local tmp file, SFTP upload, then move into place
-    const client = this.ensureClient()
-    const localTemporary = join(tmpdir(), `paratix-write-${randomUUID()}`)
-    const remoteTemporary = await this.output("mktemp /tmp/paratix-write.XXXXXX")
-    try {
-      // eslint-disable-next-line security/detect-non-literal-fs-filename
-      writeFileSync(localTemporary, content)
-      await sftpUpload(client, localTemporary, remoteTemporary)
-      await this.exec(`mv ${shellQuote(remoteTemporary)} ${shellQuote(remotePath)}`, {
-        silent: true,
-      })
-    } finally {
-      try {
-        // eslint-disable-next-line security/detect-non-literal-fs-filename
-        unlinkSync(localTemporary)
-      } catch {
-        // local cleanup is best-effort
-      }
-      try {
-        await this.exec(`rm -f ${shellQuote(remoteTemporary)}`, { silent: true })
-      } catch (cleanupError) {
-        process.stderr.write(`Warning: failed to remove temp file ${remoteTemporary}: ${String(cleanupError)}\n`)
-      }
-    }
+    await this.writeFileLarge(remotePath, content)
   }
 
   private buildEnvPrefix(environment?: Record<string, string>): string {
@@ -342,5 +320,33 @@ export class SshConnectionImpl implements SshConnection {
       }
     }
     return false
+  }
+
+  private async writeFileLarge(remotePath: string, content: string): Promise<void> {
+    const client = this.ensureClient()
+    const localTemporary = join(tmpdir(), `paratix-write-${randomUUID()}`)
+    const remoteTemporary = await this.output("mktemp /tmp/paratix-write.XXXXXX")
+    try {
+      // eslint-disable-next-line security/detect-non-literal-fs-filename
+      writeFileSync(localTemporary, content)
+      await sftpUpload(client, localTemporary, remoteTemporary)
+      await this.exec(`mv ${shellQuote(remoteTemporary)} ${shellQuote(remotePath)}`, {
+        silent: true,
+      })
+    } finally {
+      try {
+        // eslint-disable-next-line security/detect-non-literal-fs-filename
+        unlinkSync(localTemporary)
+      } catch {
+        // local cleanup is best-effort
+      }
+      try {
+        await this.exec(`rm -f ${shellQuote(remoteTemporary)}`, { silent: true })
+      } catch (cleanupError) {
+        process.stderr.write(
+          `Warning: failed to remove temp file ${remoteTemporary}: ${String(cleanupError)}\n`
+        )
+      }
+    }
   }
 }
