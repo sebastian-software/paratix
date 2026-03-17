@@ -1114,6 +1114,133 @@ describe("runPlaybook local module in dry-run recipe behaviour", () => {
   })
 })
 
+// Bug regression: runSignals() must update stats.failed on exception and { status: "failed" } returns
+describe("runSignals stats tracking", () => {
+  let capturedConfigs: unknown[]
+
+  beforeEach(() => {
+    capturedConfigs = []
+    vi.spyOn(console, "log").mockImplementation(() => {
+      /* noop */
+    })
+    vi.spyOn(console, "error").mockImplementation(() => {
+      /* noop */
+    })
+    vi.resetModules()
+  })
+
+  afterEach(() => {
+    vi.restoreAllMocks()
+    vi.resetModules()
+    process.exitCode = 0
+  })
+
+  it("increments stats.failed and sets exitCode to 1 when a signal module throws an exception", async () => {
+    vi.doMock("../src/ssh.js", () => ({
+      shellQuote: (s: string) => `'${s}'`,
+      SshConnectionImpl: makeMockSshClass(capturedConfigs),
+    }))
+
+    const { runPlaybook } = await import("../src/runner.js")
+
+    // A run[] module that returns "changed" is required to trigger runSignals()
+    const changingModule: Module = {
+      apply: vi.fn().mockResolvedValue({ status: "changed" } satisfies ModuleResult),
+      check: vi.fn().mockResolvedValue("needs-apply"),
+      name: "changing-module",
+    }
+
+    const throwingSignal: Module = {
+      apply: vi.fn().mockRejectedValue(new Error("signal module crashed")),
+      check: vi.fn().mockResolvedValue("needs-apply"),
+      name: "throwing-signal",
+    }
+
+    const definition: ServerDefinition = {
+      host: "1.2.3.4",
+      name: "test-server",
+      run: [changingModule],
+      signals: [throwingSignal],
+      ssh: { ports: [22], privateKey: "~/.ssh/id", user: "root" },
+    }
+
+    await runPlaybook(definition)
+
+    expect(process.exitCode).toBe(1)
+  })
+
+  it("increments stats.failed and sets exitCode to 1 when a signal module returns { status: 'failed' }", async () => {
+    vi.doMock("../src/ssh.js", () => ({
+      shellQuote: (s: string) => `'${s}'`,
+      SshConnectionImpl: makeMockSshClass(capturedConfigs),
+    }))
+
+    const { runPlaybook } = await import("../src/runner.js")
+
+    // A run[] module that returns "changed" is required to trigger runSignals()
+    const changingModule: Module = {
+      apply: vi.fn().mockResolvedValue({ status: "changed" } satisfies ModuleResult),
+      check: vi.fn().mockResolvedValue("needs-apply"),
+      name: "changing-module",
+    }
+
+    const failingSignal: Module = {
+      apply: vi.fn().mockResolvedValue({ status: "failed" } satisfies ModuleResult),
+      check: vi.fn().mockResolvedValue("needs-apply"),
+      name: "failing-signal",
+    }
+
+    const definition: ServerDefinition = {
+      host: "1.2.3.4",
+      name: "test-server",
+      run: [changingModule],
+      signals: [failingSignal],
+      ssh: { ports: [22], privateKey: "~/.ssh/id", user: "root" },
+    }
+
+    await runPlaybook(definition)
+
+    expect(process.exitCode).toBe(1)
+  })
+
+  it("increments stats.changed and does not set exitCode to 1 when a signal module returns { status: 'changed' }", async () => {
+    vi.doMock("../src/ssh.js", () => ({
+      shellQuote: (s: string) => `'${s}'`,
+      SshConnectionImpl: makeMockSshClass(capturedConfigs),
+    }))
+
+    const { runPlaybook } = await import("../src/runner.js")
+
+    // A run[] module that returns "changed" is required to trigger runSignals()
+    const changingModule: Module = {
+      apply: vi.fn().mockResolvedValue({ status: "changed" } satisfies ModuleResult),
+      check: vi.fn().mockResolvedValue("needs-apply"),
+      name: "changing-module",
+    }
+
+    const successSignal: Module = {
+      apply: vi.fn().mockResolvedValue({ status: "changed" } satisfies ModuleResult),
+      check: vi.fn().mockResolvedValue("needs-apply"),
+      name: "success-signal",
+    }
+
+    const definition: ServerDefinition = {
+      host: "1.2.3.4",
+      name: "test-server",
+      run: [changingModule],
+      signals: [successSignal],
+      ssh: { ports: [22], privateKey: "~/.ssh/id", user: "root" },
+    }
+
+    await runPlaybook(definition)
+
+    // No failure — exitCode must not be set to 1
+    expect(process.exitCode).toBe(0)
+    // The signal module result "changed" must be reflected in the summary stats
+    expect(successSignal.apply).toHaveBeenCalledOnce()
+  })
+})
+
 // Bug regression: CLI --env overrides (options.envOverrides) must take priority over definition.env
 describe("runPlaybook environment merge priority", () => {
   beforeEach(() => {

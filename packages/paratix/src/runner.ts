@@ -340,10 +340,12 @@ async function runSignals(parameters: SignalArguments): Promise<void> {
       // eslint-disable-next-line no-await-in-loop
       const result = await signal.apply(connection, env)
       printModuleResult(`signal: ${signal.name}`, result.status)
+      stats.update(result.status)
       stats.incrementSignals()
     } catch (error) {
       printModuleResult(`signal: ${signal.name}`, "failed")
       printCommandFailure(error, verbose)
+      stats.update("failed")
     }
   }
 }
