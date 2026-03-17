@@ -28,7 +28,7 @@ describe("setVersionedFlag – empty string validation", () => {
   })
 
   it("throws when flagPrefix is an empty string", async () => {
-    // shellQuote("") === "''" – the rm -f glob becomes "''"* which in bash
+    // shellQuote("") === "''" – the find -name glob becomes "''"* which in bash
     // expands to * and would delete ALL flags on the target system.
     const ssh = createMockSsh({
       "mkdir -p /var/lib/paratix/flags": { code: 0 },
@@ -42,12 +42,25 @@ describe("setVersionedFlag – empty string validation", () => {
     const flagPrefix = "valid-prefix-"
     const flagName = "valid-prefix-1.0"
     const ssh = createMockSsh({
-      [`rm -f ${FLAGS_DIRECTORY}/'${flagPrefix}'* && touch ${FLAGS_DIRECTORY}/'${flagName}'`]: {
-        code: 0,
-      },
+      [`find ${FLAGS_DIRECTORY} -maxdepth 1 -name '${flagPrefix}*' -delete && touch ${FLAGS_DIRECTORY}/'${flagName}'`]:
+        {
+          code: 0,
+        },
       "mkdir -p /var/lib/paratix/flags": { code: 0 },
     })
     await expect(setVersionedFlag(ssh, flagName, flagPrefix)).resolves.not.toThrow()
+  })
+
+  it("calls find with the correct prefix glob to replace old versioned flags", async () => {
+    const flagPrefix = "myapp-"
+    const flagName = "myapp-2.0"
+    const expectedCommand = `find ${FLAGS_DIRECTORY} -maxdepth 1 -name '${flagPrefix}*' -delete && touch ${FLAGS_DIRECTORY}/'${flagName}'`
+    const ssh = createMockSsh({
+      [expectedCommand]: { code: 0 },
+      "mkdir -p /var/lib/paratix/flags": { code: 0 },
+    })
+    await setVersionedFlag(ssh, flagName, flagPrefix)
+    expect(ssh.calls).toContain(expectedCommand)
   })
 })
 
