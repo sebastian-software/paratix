@@ -256,7 +256,7 @@ export class SshConnectionImpl implements SshConnection {
   }
 
   public async writeFile(remotePath: string, content: string): Promise<void> {
-    if (Buffer.byteLength(content) <= SFTP_WRITE_THRESHOLD) {
+    if (Buffer.byteLength(content) <= SFTP_WRITE_THRESHOLD && !content.includes("\0")) {
       const escaped = shellQuote(content)
       await this.exec(`printf '%s' ${escaped} | tee ${shellQuote(remotePath)} > /dev/null`, {
         silent: true,

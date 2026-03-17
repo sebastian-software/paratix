@@ -799,6 +799,88 @@ describe("SshConnectionImpl", () => {
   })
 
   // -------------------------------------------------------------------------
+  // writeFile
+  // -------------------------------------------------------------------------
+
+  describe("writeFile", () => {
+    it("uses SFTP path (writeFileLarge) when content contains NUL bytes — not printf (regression)", async () => {
+      // Root cause: writeFile dispatched only on size. Content below SFTP_WRITE_THRESHOLD
+      // (65536 bytes) always went through `printf`, which silently truncates NUL bytes (\0).
+      // Fix: condition extended to `Buffer.byteLength(content) <= SFTP_WRITE_THRESHOLD &&
+      // !content.includes("\0")` — content with NUL bytes now goes through writeFileLarge (SFTP).
+      const { sftpUpload } = await import("../src/sftp.js")
+      vi.mocked(sftpUpload).mockResolvedValue()
+
+      const tempPath = "/tmp/paratix-write.ABCDEF"
+      const executedCommands: string[] = []
+
+      const execSpy = vi
+        .fn()
+        // First call: mktemp (via output()) inside writeFileLarge
+        .mockImplementationOnce((_command: string, callback: ExecCallback) => {
+          const stream = makeStream()
+          executedCommands.push(_command)
+          callback(undefined, stream)
+          stream.emit("data", Buffer.from(tempPath))
+          stream.emit("close", 0)
+        })
+        // Second call: mv
+        .mockImplementationOnce((_command: string, callback: ExecCallback) => {
+          const stream = makeStream()
+          executedCommands.push(_command)
+          callback(undefined, stream)
+          stream.emit("close", 0)
+        })
+        // Third call: rm -f (cleanup in finally)
+        .mockImplementationOnce((_command: string, callback: ExecCallback) => {
+          const stream = makeStream()
+          executedCommands.push(_command)
+          callback(undefined, stream)
+          stream.emit("close", 0)
+        })
+
+      const client = makeClientWithExecSpy(execSpy)
+      const ssh = makeConnectedSsh(client)
+
+      const contentWithNul = "hello\0world"
+      await ssh.writeFile("/remote/binary.dat", contentWithNul)
+
+      // SFTP upload must have been called — that is the SFTP path
+      expect(vi.mocked(sftpUpload)).toHaveBeenCalledOnce()
+
+      // printf must NOT have been used — it silently truncates NUL bytes
+      const usedPrintf = executedCommands.some((cmd) => cmd.includes("printf"))
+      expect(usedPrintf).toBe(false)
+
+      // mktemp and mv confirm writeFileLarge was taken
+      expect(executedCommands.some((cmd) => cmd.includes("mktemp"))).toBe(true)
+      expect(executedCommands.some((cmd) => cmd.includes("mv"))).toBe(true)
+    })
+
+    it("uses printf path for small content without NUL bytes", async () => {
+      const executedCommands: string[] = []
+
+      const execSpy = vi.fn().mockImplementation((_command: string, callback: ExecCallback) => {
+        const stream = makeStream()
+        executedCommands.push(_command)
+        callback(undefined, stream)
+        stream.emit("close", 0)
+      })
+
+      const client = makeClientWithExecSpy(execSpy)
+      const ssh = makeConnectedSsh(client)
+
+      await ssh.writeFile("/remote/plain.txt", "hello world")
+
+      // printf must be used for small, NUL-free content
+      expect(executedCommands.some((cmd) => cmd.includes("printf"))).toBe(true)
+      // SFTP upload must NOT have been called
+      const { sftpUpload } = await import("../src/sftp.js")
+      expect(vi.mocked(sftpUpload)).not.toHaveBeenCalled()
+    })
+  })
+
+  // -------------------------------------------------------------------------
   // downloadFile
   // -------------------------------------------------------------------------
 
