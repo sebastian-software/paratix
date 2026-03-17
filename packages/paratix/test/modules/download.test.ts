@@ -531,6 +531,44 @@ describe("buildCurlCommand — header name validation", () => {
   })
 })
 
+// ─── Header-Value-Validierung (Regressionstests) ──────────────────────────────
+
+describe("buildCurlCommand — header value validation", () => {
+  const destination = "/tmp/file"
+  const url = "https://example.com/file"
+
+  it("throws when header value contains \\r (CR injection)", async () => {
+    const mockSsh = createMockSsh()
+    const mod = download.url(destination, url, {
+      headers: { "X-Custom": "value\rX-Injected: injected" },
+    })
+    await expect(mod.apply(mockSsh, emptyEnv)).rejects.toThrow(
+      "Invalid HTTP header value for X-Custom: value contains newline characters"
+    )
+  })
+
+  it("throws when header value contains \\n (LF injection)", async () => {
+    const mockSsh = createMockSsh()
+    const mod = download.url(destination, url, {
+      headers: { "X-Custom": "value\nX-Injected: injected" },
+    })
+    await expect(mod.apply(mockSsh, emptyEnv)).rejects.toThrow(
+      "Invalid HTTP header value for X-Custom: value contains newline characters"
+    )
+  })
+
+  it("accepts a normal header value without newline characters", async () => {
+    const mockSsh = createMockSsh()
+    const mod = download.url(destination, url, {
+      headers: { "X-Custom": "safe-value" },
+    })
+    const result = await mod.apply(mockSsh, emptyEnv)
+    expect(result.status).toBe("changed")
+    const curlCall = mockSsh.calls.find((c) => c.startsWith("curl"))
+    expect(curlCall).toContain("-H 'X-Custom: safe-value'")
+  })
+})
+
 // ─── download.github — secrets-Weitergabe (Regressionstests) ─────────────────
 
 describe("download.github — secrets propagation", () => {

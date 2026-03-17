@@ -54,6 +54,17 @@ function isValidHeaderName(name: string): boolean {
 }
 
 /**
+ * Check whether a string is safe to use as an HTTP header value.
+ * Rejects values containing CR or LF to prevent HTTP header injection.
+ *
+ * @param value - The header value to validate.
+ * @returns `true` if the value contains no newline characters, `false` otherwise.
+ */
+function isValidHeaderValue(value: string): boolean {
+  return !value.includes("\r") && !value.includes("\n")
+}
+
+/**
  * Build the curl command string including optional headers.
  *
  * @param parameters - Download parameters containing destination, url, and optional headers.
@@ -64,6 +75,9 @@ function buildCurlCommand(parameters: DownloadParameters): string {
     .map(([name, value]) => {
       if (!isValidHeaderName(name)) {
         throw new Error(`Invalid HTTP header name: ${name}`)
+      }
+      if (!isValidHeaderValue(value)) {
+        throw new Error(`Invalid HTTP header value for ${name}: value contains newline characters`)
       }
       const header = `${name}: ${value}`
       return `-H ${shellQuote(header)}`
