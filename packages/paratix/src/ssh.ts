@@ -264,8 +264,9 @@ export class SshConnectionImpl implements SshConnection {
       try {
         await this.exec(`rm -f ${shellQuote(temporaryPath)}`, { silent: true })
       } catch (cleanupError) {
+        const secrets = this.cachedSudoPassword == null ? [] : [this.cachedSudoPassword]
         process.stderr.write(
-          `Warning: failed to remove temp file ${temporaryPath}: ${String(cleanupError)}\n`
+          `Warning: failed to remove temp file ${temporaryPath}: ${maskSecrets(String(cleanupError), secrets)}\n`
         )
       }
     }
@@ -313,8 +314,9 @@ export class SshConnectionImpl implements SshConnection {
       try {
         await this.exec(`rm -f ${shellQuote(remoteTemporary)}`, { silent: true })
       } catch (cleanupError) {
+        const secrets = this.cachedSudoPassword == null ? [] : [this.cachedSudoPassword]
         process.stderr.write(
-          `Warning: failed to remove temp file ${remoteTemporary}: ${String(cleanupError)}\n`
+          `Warning: failed to remove temp file ${remoteTemporary}: ${maskSecrets(String(cleanupError), secrets)}\n`
         )
       }
     }

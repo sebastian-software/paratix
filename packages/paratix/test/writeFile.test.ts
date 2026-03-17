@@ -311,4 +311,115 @@ describe("SshConnectionImpl.writeFile — large content (> 64 KB)", () => {
     // Act + Assert: writeFile must resolve successfully despite the rm -f failure
     await expect(ssh.writeFile("/etc/large-config", content)).resolves.toBeUndefined()
   })
+
+  // ---------------------------------------------------------------------------
+  // Regression: cleanup error messages must not expose sudo passwords
+  // ---------------------------------------------------------------------------
+
+  it("masks sudo password in cleanup error message for writeFile", async () => {
+    // Arrange
+    const sudoPassword = "mysecretpass"
+    const remoteTmpPath = "/tmp/paratix-write.MASKSECRET"
+
+    // exec spy: mktemp succeeds, mv succeeds, rm -f fails with an error that
+    // contains the sudo password in plain text (simulates a verbose error message)
+    const cleanupExecSpy = vi
+      .fn()
+      .mockImplementationOnce((_cmd: string, cb: ExecCallback) => {
+        // First call: mktemp — returns the remote tmp path
+        const stream = makeStream()
+        cb(undefined, stream)
+        stream.emit("data", Buffer.from(remoteTmpPath))
+        stream.emit("close", 0)
+      })
+      .mockImplementationOnce((_cmd: string, cb: ExecCallback) => {
+        // Second call: mv — succeeds
+        const stream = makeStream()
+        cb(undefined, stream)
+        stream.emit("close", 0)
+      })
+      .mockImplementationOnce((_cmd: string, cb: ExecCallback) => {
+        // Third call: rm -f — fails with an error whose message contains the password
+        cb(
+          new Error(`permission denied: echo ${sudoPassword} | sudo rm -f ${remoteTmpPath}`),
+          makeStream()
+        )
+      })
+
+    const client = makeClientWithExecSpy(cleanupExecSpy)
+    const ssh = makeConnectedSsh(client)
+    ;(ssh as unknown as Record<string, unknown>).cachedSudoPassword = sudoPassword
+    const content = makeLargeContent()
+
+    const stderrSpy = vi.spyOn(process.stderr, "write").mockImplementation(() => true)
+
+    // Act: writeFile must resolve despite the rm -f failure
+    await expect(ssh.writeFile("/etc/large-config", content)).resolves.toBeUndefined()
+
+    // Assert: stderr must not contain the plain-text password
+    const stderrOutput = stderrSpy.mock.calls.map((args) => String(args[0])).join("")
+    expect(stderrOutput).not.toContain(sudoPassword)
+    expect(stderrOutput).toContain("[REDACTED]")
+
+    stderrSpy.mockRestore()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Tests — uploadFile cleanup error secret masking
+// ---------------------------------------------------------------------------
+
+describe("SshConnectionImpl.uploadFile — cleanup error secret masking", () => {
+  afterEach(() => {
+    vi.resetAllMocks()
+  })
+
+  it("masks sudo password in cleanup error message for uploadFile", async () => {
+    // Arrange
+    const sudoPassword = "upload-secret-pw"
+    const remoteTmpPath = "/tmp/paratix-upload.MASKSECRET"
+
+    // exec spy: mktemp succeeds, mv succeeds, rm -f fails with an error that
+    // contains the sudo password in plain text (simulates a verbose error message)
+    const cleanupExecSpy = vi
+      .fn()
+      .mockImplementationOnce((_cmd: string, cb: ExecCallback) => {
+        // First call: mktemp — returns the remote tmp path
+        const stream = makeStream()
+        cb(undefined, stream)
+        stream.emit("data", Buffer.from(remoteTmpPath))
+        stream.emit("close", 0)
+      })
+      .mockImplementationOnce((_cmd: string, cb: ExecCallback) => {
+        // Second call: mv — succeeds
+        const stream = makeStream()
+        cb(undefined, stream)
+        stream.emit("close", 0)
+      })
+      .mockImplementationOnce((_cmd: string, cb: ExecCallback) => {
+        // Third call: rm -f — fails with an error whose message contains the password
+        cb(
+          new Error(`permission denied: echo ${sudoPassword} | sudo rm -f ${remoteTmpPath}`),
+          makeStream()
+        )
+      })
+
+    vi.mocked(sftpUpload).mockResolvedValue()
+
+    const client = makeClientWithExecSpy(cleanupExecSpy)
+    const ssh = makeConnectedSsh(client)
+    ;(ssh as unknown as Record<string, unknown>).cachedSudoPassword = sudoPassword
+
+    const stderrSpy = vi.spyOn(process.stderr, "write").mockImplementation(() => true)
+
+    // Act: uploadFile must resolve despite the rm -f failure
+    await expect(ssh.uploadFile("/local/path/file.txt", "/etc/file.txt")).resolves.toBeUndefined()
+
+    // Assert: stderr must not contain the plain-text password
+    const stderrOutput = stderrSpy.mock.calls.map((args) => String(args[0])).join("")
+    expect(stderrOutput).not.toContain(sudoPassword)
+    expect(stderrOutput).toContain("[REDACTED]")
+
+    stderrSpy.mockRestore()
+  })
 })
