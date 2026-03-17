@@ -44,6 +44,13 @@ const DEFAULT_DIGITS = 6
 /** Maximum allowed number of TOTP digits (prevents integer overflow in 10^digits). */
 const MAX_DIGITS = 10
 
+/** Mapping from otpauth URI algorithm names to Node.js crypto hash names. */
+const SUPPORTED_ALGORITHMS: Record<string, string> = {
+  SHA1: "sha1",
+  SHA256: "sha256",
+  SHA512: "sha512",
+}
+
 /**
  * Decode a Base32-encoded string (RFC 4648) into a Buffer.
  *
@@ -76,9 +83,9 @@ function decodeBase32(encoded: string): Buffer {
 }
 
 /**
- * Perform HMAC-SHA1 dynamic truncation on the digest to produce a numeric code.
+ * Perform HMAC dynamic truncation on the digest to produce a numeric code.
  *
- * @param hmacDigest - The raw HMAC-SHA1 digest buffer.
+ * @param hmacDigest - The raw HMAC digest buffer.
  * @param digits - Number of digits for the output code.
  * @returns The zero-padded TOTP code string.
  */
@@ -95,12 +102,30 @@ function truncateHmac(hmacDigest: Buffer, digits: number): string {
 }
 
 /**
+ * Parse and validate the TOTP algorithm parameter from a URL.
+ *
+ * @param url - The parsed otpauth URL.
+ * @returns The Node.js crypto hash name (e.g. "sha1", "sha256", "sha512").
+ * @throws {Error} If the algorithm is not one of SHA1, SHA256, or SHA512.
+ */
+function parseAlgorithm(url: URL): string {
+  const algorithmParameter = (url.searchParams.get("algorithm") ?? "SHA1").toUpperCase()
+  if (!(algorithmParameter in SUPPORTED_ALGORITHMS)) {
+    throw new Error(
+      `Unsupported TOTP algorithm '${algorithmParameter}'. Supported: ${Object.keys(SUPPORTED_ALGORITHMS).join(", ")}`
+    )
+  }
+  return SUPPORTED_ALGORITHMS[algorithmParameter]
+}
+
+/**
  * Parse and validate TOTP parameters from an otpauth URI.
  *
  * @param otpauthUri - The otpauth URI to parse.
- * @returns The parsed secret, period, and digits.
+ * @returns The parsed secret, period, digits, and algorithm.
  */
 function parseTotpParameters(otpauthUri: string): {
+  algorithm: string
   digits: number
   period: number
   secret: string
@@ -128,14 +153,18 @@ function parseTotpParameters(otpauthUri: string): {
     throw new Error("TOTP 'digits' must be an integer between 1 and 10")
   }
 
-  return { digits, period, secret }
+  const algorithm = parseAlgorithm(url)
+
+  return { algorithm, digits, period, secret }
 }
 
 /**
  * Generate a TOTP code from an `otpauth://totp/...` URI according to RFC 6238.
  *
- * The URI is parsed for `secret`, `period` (default 30), and `digits` (default 6).
- * Uses HMAC-SHA1 with dynamic truncation to produce a numeric one-time password.
+ * The URI is parsed for `secret`, `period` (default 30), `digits` (default 6),
+ * and `algorithm` (default SHA1).
+ * Uses HMAC with the algorithm specified in the URI (default SHA1) and dynamic
+ * truncation to produce a numeric one-time password.
  *
  * @param otpauthUri - A fully-qualified `otpauth://totp/...` URI containing at
  *   least a `secret` query parameter with a Base32-encoded shared secret.
@@ -144,11 +173,12 @@ function parseTotpParameters(otpauthUri: string): {
  * @throws {Error} If the `secret` contains characters outside the Base32 alphabet.
  * @throws {Error} If `period` is not a positive integer.
  * @throws {Error} If `digits` is not an integer between 1 and 10.
+ * @throws {Error} If `algorithm` is not one of SHA1, SHA256, or SHA512.
  * @see {@link https://datatracker.ietf.org/doc/html/rfc6238 RFC 6238 – TOTP}
  * @see {@link https://datatracker.ietf.org/doc/html/rfc4226 RFC 4226 – HOTP}
  */
 export function generateTotpCode(otpauthUri: string): string {
-  const { digits, period, secret } = parseTotpParameters(otpauthUri)
+  const { algorithm, digits, period, secret } = parseTotpParameters(otpauthUri)
 
   const key = decodeBase32(secret)
 
@@ -159,7 +189,7 @@ export function generateTotpCode(otpauthUri: string): string {
   const counterBuffer = Buffer.alloc(COUNTER_BUFFER_SIZE)
   counterBuffer.writeBigUInt64BE(BigInt(counter))
 
-  // Compute HMAC-SHA1 and apply dynamic truncation
-  const hmacDigest = createHmac("sha1", key).update(counterBuffer).digest()
+  // Compute HMAC and apply dynamic truncation
+  const hmacDigest = createHmac(algorithm, key).update(counterBuffer).digest()
   return truncateHmac(hmacDigest, digits)
 }

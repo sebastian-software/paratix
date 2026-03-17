@@ -130,6 +130,56 @@ describe("generateTotpCode — Base32 decoding", () => {
 })
 
 // ---------------------------------------------------------------------------
+// algorithm parameter
+// ---------------------------------------------------------------------------
+
+describe("generateTotpCode — algorithm parameter", () => {
+  beforeEach(() => {
+    vi.useFakeTimers()
+    vi.setSystemTime(59 * 1000)
+  })
+
+  afterEach(() => {
+    vi.useRealTimers()
+  })
+
+  it("defaults to SHA1 when algorithm is not specified", () => {
+    const uri = `otpauth://totp/Test?secret=${RFC_SECRET_BASE32}`
+    // RFC 6238 Appendix B vector: t=59, SHA1, 6 digits → 287082
+    expect(generateTotpCode(uri)).toBe("287082")
+  })
+
+  it("produces a different code with algorithm=SHA256 than with SHA1", () => {
+    const uriSha1 = `otpauth://totp/Test?secret=${RFC_SECRET_BASE32}`
+    const uriSha256 = `otpauth://totp/Test?secret=${RFC_SECRET_BASE32}&algorithm=SHA256`
+    expect(generateTotpCode(uriSha1)).not.toBe(generateTotpCode(uriSha256))
+  })
+
+  it("produces a different code with algorithm=SHA512 than with SHA1 and SHA256", () => {
+    const uriSha1 = `otpauth://totp/Test?secret=${RFC_SECRET_BASE32}`
+    const uriSha256 = `otpauth://totp/Test?secret=${RFC_SECRET_BASE32}&algorithm=SHA256`
+    const uriSha512 = `otpauth://totp/Test?secret=${RFC_SECRET_BASE32}&algorithm=SHA512`
+    const codeSha1 = generateTotpCode(uriSha1)
+    const codeSha256 = generateTotpCode(uriSha256)
+    const codeSha512 = generateTotpCode(uriSha512)
+    expect(codeSha512).not.toBe(codeSha1)
+    expect(codeSha512).not.toBe(codeSha256)
+  })
+
+  it("is case-insensitive (sha256 works like SHA256)", () => {
+    const uriLower = `otpauth://totp/Test?secret=${RFC_SECRET_BASE32}&algorithm=sha256`
+    const uriUpper = `otpauth://totp/Test?secret=${RFC_SECRET_BASE32}&algorithm=SHA256`
+    expect(generateTotpCode(uriLower)).toBe(generateTotpCode(uriUpper))
+  })
+
+  it("accepts mixed case (Sha256)", () => {
+    const uriMixed = `otpauth://totp/Test?secret=${RFC_SECRET_BASE32}&algorithm=Sha256`
+    const uriUpper = `otpauth://totp/Test?secret=${RFC_SECRET_BASE32}&algorithm=SHA256`
+    expect(generateTotpCode(uriMixed)).toBe(generateTotpCode(uriUpper))
+  })
+})
+
+// ---------------------------------------------------------------------------
 // Error handling
 // ---------------------------------------------------------------------------
 
@@ -179,5 +229,16 @@ describe("generateTotpCode — error handling", () => {
   it("throws when digits is non-numeric (NaN)", () => {
     const uri = `otpauth://totp/Test?secret=${RFC_SECRET_BASE32}&digits=abc`
     expect(() => generateTotpCode(uri)).toThrow(/digits/v)
+  })
+
+  // algorithm validation
+  it("throws when algorithm is unsupported", () => {
+    const uri = `otpauth://totp/Test?secret=${RFC_SECRET_BASE32}&algorithm=MD5`
+    expect(() => generateTotpCode(uri)).toThrow(/algorithm/v)
+  })
+
+  it("throws when algorithm is empty string", () => {
+    const uri = `otpauth://totp/Test?secret=${RFC_SECRET_BASE32}&algorithm=`
+    expect(() => generateTotpCode(uri)).toThrow(/algorithm/v)
   })
 })
