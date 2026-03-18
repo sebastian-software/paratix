@@ -152,7 +152,10 @@ async function handlePortChange(ssh: SshConnectionImpl, meta: Environment): Prom
   try {
     await ssh.reconnect()
   } catch (error) {
-    console.error(`Failed to reconnect after port change: ${String(error)}`)
+    console.error(
+      `Failed to reconnect on port ${newPort} after port change: ${String(error)}. ` +
+        `Verify that port ${newPort} is allowed by the server's firewall rules.`
+    )
     throw error
   }
 }
