@@ -104,15 +104,7 @@ export class SshConnectionImpl implements SshConnection {
       this.cachedSudoPassword.fill(0)
       this.cachedSudoPassword = null
     }
-    if (this.client) {
-      this.client.end()
-      this.client = null
-    }
-    const error = new Error("SSH connection closed")
-    for (const rejectFunction of this.pendingRejects) {
-      rejectFunction(error)
-    }
-    this.pendingRejects.clear()
+    this.disconnectTransport()
   }
 
   public async downloadFile(remotePath: string, localPath: string): Promise<void> {
@@ -246,7 +238,7 @@ export class SshConnectionImpl implements SshConnection {
 
     while (Date.now() < deadline && attempt < maxAttempts) {
       try {
-        this.disconnect()
+        this.disconnectTransport()
         // eslint-disable-next-line no-await-in-loop
         await this.connect()
         return
@@ -401,6 +393,19 @@ export class SshConnectionImpl implements SshConnection {
     throw new Error(
       `Could not connect to ${this.host} via SSH agent on ports ${this.config.ports.join(", ")}`
     )
+  }
+
+  /** Tear down the SSH transport without touching the cached sudo password. */
+  private disconnectTransport(): void {
+    if (this.client) {
+      this.client.end()
+      this.client = null
+    }
+    const error = new Error("SSH connection closed")
+    for (const rejectFunction of this.pendingRejects) {
+      rejectFunction(error)
+    }
+    this.pendingRejects.clear()
   }
 
   private ensureClient(): Client {
