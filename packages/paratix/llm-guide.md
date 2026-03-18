@@ -141,7 +141,7 @@ export default server({
 | ----------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------- |
 | `download.url`    | `(destination: string, url: string, options?: { force?: boolean; headers?: Record<string, string>; sha256?: string; mode?: string; owner?: string; group?: string }): Module` | Yes        |
 | `download.github` | `(destination: string, options: { repo: string; tag: string; asset: string; token?: string; sha256?: string; mode?: string; owner?: string; group?: string }): Module`        | Yes        |
-| `download.large`  | `(destination: string, url: string, options?: { group?: string; headers?: Record<string, string>; mode?: string; owner?: string }): Module`                                   | Yes (flag) |
+| `download.large`  | `(destination: string, url: string, options?: { group?: string; headers?: Record<string, string>; mode?: string; owner?: string; sha256?: string }): Module`                  | Yes (flag) |
 
 ### `file`
 

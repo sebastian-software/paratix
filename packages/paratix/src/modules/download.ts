@@ -70,11 +70,7 @@ async function verifyChecksum(
 ): Promise<boolean> {
   if (parameters.sha256 == null) return true
   const actualHash = await conn.sha256(parameters.destination)
-  if (actualHash?.length === parameters.sha256.length) {
-    const actual = Buffer.from(actualHash, "hex")
-    const expected = Buffer.from(parameters.sha256, "hex")
-    if (actual.length === expected.length && timingSafeEqual(actual, expected)) return true
-  }
+  if (hashMatches(actualHash, parameters.sha256)) return true
   await conn.exec(`rm -f ${shellQuote(parameters.destination)}`, { silent: true })
   return false
 }
@@ -145,16 +141,68 @@ async function checkDownload(
 
   if (options.sha256 != null) {
     const actualHash = await conn.sha256(destination)
-    if (actualHash?.length === options.sha256.length) {
-      const actual = Buffer.from(actualHash, "hex")
-      const expected = Buffer.from(options.sha256, "hex")
-      if (actual.length === expected.length && timingSafeEqual(actual, expected)) return "ok"
-    }
-    return NEEDS_APPLY
+    return hashMatches(actualHash, options.sha256) ? "ok" : NEEDS_APPLY
   }
 
   const fileExists = await conn.exists(destination)
   return fileExists ? "ok" : NEEDS_APPLY
+}
+
+/**
+ * Compare an actual remote SHA-256 hash against an expected digest using
+ * timing-safe comparison.
+ *
+ * @param actualHash - The hex digest returned by the remote `sha256` command, or `undefined`.
+ * @param expectedHash - The expected hex digest.
+ * @returns `true` when hashes match, `false` otherwise.
+ */
+function hashMatches(actualHash: null | string | undefined, expectedHash: string): boolean {
+  if (actualHash?.length !== expectedHash.length) return false
+  const actual = Buffer.from(actualHash, "hex")
+  const expected = Buffer.from(expectedHash, "hex")
+  return actual.length === expected.length && timingSafeEqual(actual, expected)
+}
+
+/**
+ * Validate that a string is a 64-character lowercase hex SHA-256 digest.
+ *
+ * @param value - The string to validate.
+ * @throws {Error} If the value is not a valid SHA-256 hex digest.
+ */
+function validateSha256(value: string): void {
+  if (!/^[\da-f]{64}$/v.test(value)) {
+    throw new Error(
+      `Invalid SHA-256 hex digest: expected 64 lowercase hex characters, got "${value}"`
+    )
+  }
+}
+
+/**
+ * Validate GitHub download options and return the parsed `[owner, repo]` parts.
+ *
+ * @param options - The GitHub download options to validate.
+ * @param options.asset - GitHub release asset filename.
+ * @param options.repo - GitHub repository in `owner/repo` format.
+ * @param options.tag - Release tag.
+ * @returns A two-element array `[owner, repo]`.
+ * @throws {Error} If repo, tag, or asset are invalid.
+ */
+function validateGithubOptions(options: {
+  asset: string
+  repo: string
+  tag: string
+}): [string, string] {
+  const parts = options.repo.split("/")
+  if (parts.length !== 2 || parts.some((p) => p.length === 0 || p.includes(".."))) {
+    throw new Error(`Invalid GitHub repo format: ${options.repo} (expected "owner/repo")`)
+  }
+  if (options.tag.length === 0 || options.tag.includes("..")) {
+    throw new Error(`Invalid GitHub release tag: ${options.tag}`)
+  }
+  if (options.asset.length === 0 || options.asset.includes("..")) {
+    throw new Error(`Invalid GitHub release asset: ${options.asset}`)
+  }
+  return [parts[0], parts[1]]
 }
 
 /**
@@ -196,16 +244,8 @@ export const download = {
       token?: string
     } & BaseDownloadOptions
   ): Module {
-    const parts = options.repo.split("/")
-    if (parts.length !== 2 || parts.some((p) => p.length === 0 || p.includes(".."))) {
-      throw new Error(`Invalid GitHub repo format: ${options.repo} (expected "owner/repo")`)
-    }
-    if (options.tag.length === 0 || options.tag.includes("..")) {
-      throw new Error(`Invalid GitHub release tag: ${options.tag}`)
-    }
-    if (options.asset.length === 0 || options.asset.includes("..")) {
-      throw new Error(`Invalid GitHub release asset: ${options.asset}`)
-    }
+    const parts = validateGithubOptions(options)
+    if (options.sha256 != null) validateSha256(options.sha256)
 
     const url = `https://github.com/${encodeURIComponent(parts[0])}/${encodeURIComponent(parts[1])}/releases/download/${encodeURIComponent(options.tag)}/${encodeURIComponent(options.asset)}`
     const headers: Record<string, string> = {}
@@ -241,10 +281,10 @@ export const download = {
   /**
    * Download a large file that should only be fetched once.
    *
-   * Unlike {@link download.url}, this method does not use SHA-256 verification
-   * or a `force` flag. Instead it tracks whether the download has been performed
-   * by writing a flag file under `/var/lib/paratix/flags/`. The flag name is
-   * derived from a SHA-256 hash of the URL.
+   * Tracks whether the download has been performed by writing a flag file
+   * under `/var/lib/paratix/flags/`. The flag name is derived from a SHA-256
+   * hash of the URL. When `sha256` is provided, the check additionally verifies
+   * the remote file's digest, and the downloaded file is verified after transfer.
    *
    * @param destination - Absolute path on the remote server where the file is saved.
    * @param url - The URL to download from.
@@ -252,6 +292,7 @@ export const download = {
    * @param options.group - Group owner to set on the downloaded file via `chown`.
    * @param options.mode - File mode to set via `chmod` (e.g. `"0755"`).
    * @param options.owner - User owner to set on the downloaded file via `chown`.
+   * @param options.sha256 - Expected SHA-256 hex digest for integrity verification.
    * @param options.headers - Additional HTTP headers sent with the curl request.
    * @returns A Module that manages the large file download.
    */
@@ -267,9 +308,12 @@ export const download = {
       mode?: string
       /** User owner to set on the downloaded file via `chown`. */
       owner?: string
+      /** Expected SHA-256 hex digest for integrity verification. */
+      sha256?: string
     }
   ): Module {
     validateHttpUrl(url)
+    if (options?.sha256 != null) validateSha256(options.sha256)
     const urlHash = createHash("sha256").update(url).digest("hex")
     const flagName = `download-${urlHash}`
     const downloadParameters: DownloadParameters = {
@@ -279,6 +323,7 @@ export const download = {
       mode: options?.mode,
       owner: options?.owner,
       secrets: Object.values(options?.headers ?? {}),
+      sha256: options?.sha256,
       url,
     }
 
@@ -298,7 +343,14 @@ export const download = {
         if (!conn) return NEEDS_APPLY
 
         const flagExists = await hasFlag(conn, flagName)
-        return flagExists ? "ok" : NEEDS_APPLY
+        if (!flagExists) return NEEDS_APPLY
+
+        if (options?.sha256 != null) {
+          const actualHash = await conn.sha256(destination)
+          if (!hashMatches(actualHash, options.sha256)) return NEEDS_APPLY
+        }
+
+        return "ok"
       },
       name: `download.large: ${destination}`,
     }
@@ -327,6 +379,7 @@ export const download = {
     } & BaseDownloadOptions
   ): Module {
     validateHttpUrl(url)
+    if (options?.sha256 != null) validateSha256(options.sha256)
     const resolvedOptions = options ?? {}
     const downloadParameters: DownloadParameters = {
       ...resolvedOptions,
