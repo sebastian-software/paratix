@@ -129,8 +129,8 @@ export const sshd = {
           remotePath: SSHD_CONFIG_PATH,
         })
         await validateSshdConfig(ssh, originalConfig)
-        ssh.addPort(targetPort)
         await ssh.exec("systemctl restart sshd", { silent: true })
+        ssh.addPort(targetPort)
 
         return {
           meta: { "sshd.port": targetPort },

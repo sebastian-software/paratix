@@ -413,9 +413,10 @@ describe("sshd.port — apply: validation and rollback", () => {
     expect(addPortSpy).not.toHaveBeenCalled()
   })
 
-  it("regression — addPort is called before systemctl restart sshd", async () => {
-    // Bug: ssh.addPort(targetPort) was missing before "systemctl restart sshd".
-    // This test ensures the call order is: addPort → exec("systemctl restart sshd").
+  it("regression — addPort is called after systemctl restart sshd", async () => {
+    // Fix: ssh.addPort(targetPort) must be called AFTER "systemctl restart sshd".
+    // Before the fix the order was reversed: addPort → restart, which caused reconnect issues.
+    // This test ensures the corrected order: exec("systemctl restart sshd") → addPort.
     const mockSsh = createMockSsh({
       [CAT_SSHD]: { stdout: "Port 22" },
     })
@@ -436,7 +437,61 @@ describe("sshd.port — apply: validation and rollback", () => {
 
     expect(addPortOrder).toBeDefined()
     expect(restartOrder).toBeDefined()
-    expect(addPortOrder).toBeLessThan(restartOrder)
+    expect(restartOrder).toBeLessThan(addPortOrder)
+  })
+
+  it("regression — does not call addPort when systemctl restart sshd fails", async () => {
+    // Regression: addPort must NOT be called when systemctl restart sshd fails.
+    // Before the fix, addPort was called before the restart, so it was invoked even on error.
+    const mockSsh = createMockSsh({
+      [CAT_SSHD]: { stdout: "Port 22" },
+    })
+    trackWriteFile(mockSsh)
+    const execSpy = vi.spyOn(mockSsh, "exec")
+    const addPortSpy = vi.spyOn(mockSsh, "addPort")
+
+    // sshd -t succeeds, then systemctl restart sshd fails
+    execSpy
+      .mockResolvedValueOnce({ code: 0, stderr: "", stdout: "" }) // sshd -t
+      .mockRejectedValueOnce(new Error("systemctl restart sshd failed")) // systemctl restart
+
+    const mod = sshd.port(2222)
+    await expect(mod.apply(mockSsh, emptyEnv)).rejects.toThrow("systemctl restart sshd failed")
+
+    expect(addPortSpy).not.toHaveBeenCalled()
+  })
+
+  it("regression — calls addPort only after successful systemctl restart sshd", async () => {
+    // Regression: addPort must be called AFTER a successful systemctl restart sshd, not before.
+    // Before the fix, addPort was called before the restart which broke the reconnect order.
+    const mockSsh = createMockSsh({
+      [CAT_SSHD]: { stdout: "Port 22" },
+    })
+    trackWriteFile(mockSsh)
+    const execSpy = vi.spyOn(mockSsh, "exec")
+    const addPortSpy = vi.spyOn(mockSsh, "addPort")
+
+    // Track invocation order using a shared call log
+    const callLog: string[] = []
+    // eslint-disable-next-line @typescript-eslint/promise-function-async -- vi.mockImplementation requires matching return type
+    execSpy.mockImplementation((command: string) => {
+      callLog.push(`exec:${command}`)
+      return Promise.resolve({ code: 0, stderr: "", stdout: "" })
+    })
+    addPortSpy.mockImplementation(() => {
+      callLog.push("addPort")
+    })
+
+    const mod = sshd.port(2222)
+    await mod.apply(mockSsh, emptyEnv)
+
+    const restartIndex = callLog.indexOf("exec:systemctl restart sshd")
+    const addPortIndex = callLog.indexOf("addPort")
+
+    expect(restartIndex).toBeGreaterThanOrEqual(0)
+    expect(addPortIndex).toBeGreaterThanOrEqual(0)
+    // addPort must come strictly after the restart
+    expect(addPortIndex).toBeGreaterThan(restartIndex)
   })
 })
 
