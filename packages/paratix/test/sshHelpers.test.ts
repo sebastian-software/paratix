@@ -5,6 +5,7 @@ import {
   collectStreamOutput,
   CommandError,
   createStreamMasker,
+  maskSecrets,
   MAX_OUTPUT_LENGTH,
   type StreamOutputParameters,
   validateMode,
@@ -296,6 +297,20 @@ describe("maskSecrets (via collectStreamOutput error messages)", () => {
     const msg = await getErrorMessage(promise)
     expect(msg).not.toContain("pass")
     expect(msg).not.toContain("word")
+  })
+})
+
+// ---------------------------------------------------------------------------
+// maskSecrets — direct tests
+// ---------------------------------------------------------------------------
+
+describe("maskSecrets", () => {
+  it("throws when a secret contains the redaction placeholder", () => {
+    expect(() => maskSecrets("some text", ["my[REDACTED]secret"])).toThrow(/redaction placeholder/v)
+  })
+
+  it("does not throw for normal secrets", () => {
+    expect(maskSecrets("the password is hunter2", ["hunter2"])).toBe("the password is [REDACTED]")
   })
 })
 

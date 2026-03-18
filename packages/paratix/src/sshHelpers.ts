@@ -100,11 +100,17 @@ export type StreamOutputParameters = {
   timer: ReturnType<typeof setTimeout>
 }
 
+/** Placeholder used when redacting secrets from output. */
+const REDACTED = "[REDACTED]"
+
 export function maskSecrets(text: string, secrets: string[]): string {
   let masked = text
   const variants: string[] = []
   for (const secret of secrets) {
     if (secret.length > 0) {
+      if (secret.includes(REDACTED)) {
+        throw new Error(`Secret must not contain the redaction placeholder "${REDACTED}"`)
+      }
       variants.push(secret)
       const encoded = encodeURIComponent(secret)
       if (encoded !== secret) variants.push(encoded)
@@ -112,7 +118,7 @@ export function maskSecrets(text: string, secrets: string[]): string {
   }
   variants.sort((a, b) => b.length - a.length)
   for (const variant of variants) {
-    masked = masked.replaceAll(variant, "[REDACTED]")
+    masked = masked.replaceAll(variant, REDACTED)
   }
   return masked
 }
@@ -158,8 +164,8 @@ export function createStreamMasker(
       if (pending.length <= overlap) return
       // Mask the whole buffer first so secrets fully contained in
       // pending are replaced before the split.  The overlap is then
-      // taken from the *masked* result — this is correct as long as
-      // no secret literally contains the replacement string "[REDACTED]".
+      // taken from the *masked* result — safe because maskSecrets()
+      // rejects any secret that contains the redaction placeholder.
       const masked = maskSecrets(pending, secrets)
       if (masked.length <= overlap) {
         pending = masked
