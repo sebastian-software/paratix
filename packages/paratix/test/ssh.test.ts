@@ -535,6 +535,41 @@ describe("SshConnectionImpl", () => {
 
       expect((ssh as any).pinnedHostKey).toStrictEqual(hostKey)
     })
+
+    it("backoff sleep does not exceed remaining time before deadline — R-004 regression", async () => {
+      // Regression: without the fix, the last backoff sleep could be up to
+      // RECONNECT_MAX_DELAY (30 000 ms) even when only a few milliseconds remain
+      // before the deadline.  With the fix, the delay is capped to
+      // `Math.max(0, deadline - Date.now())`, so the reconnect() promise must
+      // reject very close to the reconnectTimeout, not at reconnectTimeout + 30 000.
+      vi.useFakeTimers()
+
+      vi.mocked(tryConnectOnPort).mockRejectedValue(new Error("Connection refused"))
+
+      const reconnectTimeout = 3000
+      const ssh = makeSshInstance({ reconnectTimeout })
+
+      const reconnectPromise = ssh.reconnect()
+
+      // Register rejection handler early to prevent unhandled rejection warnings
+      reconnectPromise.catch(() => {
+        /* handled below */
+      })
+
+      // Advance time in 500 ms increments up to reconnectTimeout + a small
+      // overhead (1 000 ms) that covers the cost of the connect() calls
+      // themselves.  Without the fix this would need ~33 000 ms to settle.
+      const tolerance = 1000
+      for (let elapsed = 0; elapsed <= reconnectTimeout + tolerance; elapsed += 500) {
+        // eslint-disable-next-line no-await-in-loop
+        await vi.advanceTimersByTimeAsync(500)
+      }
+
+      // The promise must already be settled (rejected) within the deadline + tolerance
+      await expect(reconnectPromise).rejects.toThrow(
+        /Failed to reconnect to 1\.2\.3\.4 after \d+ attempts \(timeout: 3000ms\)/v
+      )
+    })
   })
 
   // -------------------------------------------------------------------------

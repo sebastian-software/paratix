@@ -263,9 +263,10 @@ export class SshConnectionImpl implements SshConnection {
         const jitter =
           Math.min(RECONNECT_BASE_DELAY * 2 ** attempt, RECONNECT_MAX_DELAY) *
           (JITTER_BASE + Math.random() * JITTER_RANGE)
+        const delay = Math.min(jitter, Math.max(0, deadline - Date.now()))
         // eslint-disable-next-line no-await-in-loop
         await new Promise<void>((resolve) => {
-          setTimeout(resolve, jitter)
+          setTimeout(resolve, delay)
         })
         attempt++
       }
