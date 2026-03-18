@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto"
+import { createHash, timingSafeEqual } from "node:crypto"
 import { readFileSync } from "node:fs"
 import { appendFile, mkdir } from "node:fs/promises"
 import { homedir } from "node:os"
@@ -246,7 +246,7 @@ export function buildHostVerifier(
     hostVerifier(key: Buffer): boolean {
       const existingKey = fileKey ?? inMemoryHostKeys.get(formatHostNeedle(host, port)) ?? null
       if (existingKey != null) {
-        if (existingKey.equals(key)) return true
+        if (existingKey.length === key.length && timingSafeEqual(existingKey, key)) return true
         const presentedAlgo = extractAlgoFromKey(key)
         const existingAlgo = extractAlgoFromKey(existingKey)
         throw new Error(
