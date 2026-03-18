@@ -89,13 +89,13 @@ export function isValidHeaderName(name: string): boolean {
 
 /**
  * Check whether a string is safe to use as an HTTP header value.
- * Rejects values containing CR or LF to prevent HTTP header injection.
+ * Rejects values containing CR, LF, or null bytes to prevent HTTP header injection.
  *
  * @param value - The header value to validate.
  * @returns `true` if the value contains no newline characters, `false` otherwise.
  */
 export function isValidHeaderValue(value: string): boolean {
-  return !value.includes("\r") && !value.includes("\n")
+  return !value.includes("\r") && !value.includes("\n") && !value.includes("\0")
 }
 
 /**
