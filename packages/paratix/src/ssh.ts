@@ -455,16 +455,24 @@ export class SshConnectionImpl implements SshConnection {
   private async execRaw(command: string): Promise<{ exitCode: number; stdout: string }> {
     const client = this.ensureClient()
     return new Promise((resolve, reject) => {
+      let activeStream: ClientChannel | null = null
+      const timer = setTimeout(() => {
+        activeStream?.close()
+        reject(new Error(`Command timed out after ${COMMAND_TIMEOUT}ms: ${command}`))
+      }, COMMAND_TIMEOUT)
       client.exec(command, (error: Error | undefined, stream: ClientChannel) => {
         if (error) {
+          clearTimeout(timer)
           reject(error)
           return
         }
+        activeStream = stream
         const chunks: Buffer[] = []
         stream.on("data", (chunk: Buffer) => {
           chunks.push(chunk)
         })
         stream.on("close", (code: number) => {
+          clearTimeout(timer)
           resolve({ exitCode: code, stdout: Buffer.concat(chunks).toString("utf8") })
         })
         stream.stderr.on("data", () => {

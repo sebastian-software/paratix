@@ -408,12 +408,14 @@ describe("sshd.port — apply: validation and rollback", () => {
     await mod.apply(mockSsh, emptyEnv)
 
     const addPortOrder = addPortSpy.mock.invocationCallOrder[0]
-    const restartCallIndex = execSpy.mock.calls.findIndex((args) => args[0] === "systemctl restart sshd")
+    const restartCallIndex = execSpy.mock.calls.findIndex(
+      (args) => args[0] === "systemctl restart sshd"
+    )
     const restartOrder = execSpy.mock.invocationCallOrder[restartCallIndex]
 
     expect(addPortOrder).toBeDefined()
     expect(restartOrder).toBeDefined()
-    expect(addPortOrder).toBeLessThan(restartOrder!)
+    expect(addPortOrder).toBeLessThan(restartOrder)
   })
 })
 

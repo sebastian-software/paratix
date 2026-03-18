@@ -1764,6 +1764,35 @@ describe("SshConnectionImpl", () => {
       // Verify exactly one exec call was made (command -v sudo only, no further probing)
       expect(execSpy).toHaveBeenCalledOnce()
     })
+
+    it("rejects with timeout error when execRaw stream never closes (regression)", async () => {
+      // Arrange
+      vi.useFakeTimers()
+
+      // The stream is created but close is never emitted — simulating a hanging command
+      const execSpy = vi.fn().mockImplementation((_command: string, callback: ExecCallback) => {
+        const stream = makeStream()
+        callback(undefined, stream)
+        // Intentionally omit stream.emit("close", ...) to simulate a hang
+      })
+
+      const client = makeClientWithExecSpy(execSpy)
+      const ssh = makeConnectedSsh(client, { user: "deploy" })
+
+      // Act
+      const probePromise = ssh.probeSudo()
+
+      // Register rejection handler before advancing timers to prevent unhandled rejection
+      probePromise.catch(() => {
+        /* handled below */
+      })
+
+      // Trigger the COMMAND_TIMEOUT (120 000 ms) in execRaw
+      await vi.advanceTimersByTimeAsync(120_001)
+
+      // Assert
+      await expect(probePromise).rejects.toThrow(/Command timed out after 120000ms/v)
+    })
   })
 
   // -------------------------------------------------------------------------
