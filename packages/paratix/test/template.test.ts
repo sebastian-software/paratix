@@ -7,13 +7,13 @@ import { renderTemplate } from "../src/template.js"
 describe("renderTemplate", () => {
   it("replaces {{key}} with the corresponding env value", async () => {
     const env: Environment = { HOST: "example.com" }
-    const view = await renderTemplate("Server: {{HOST}}", env)
+    const view = await renderTemplate("Server: {{HOST}}", env, { strict: false })
     expect(view).toBe("Server: example.com")
   })
 
   it("throws an error when the key is not present in env", async () => {
     const env: Environment = {}
-    await expect(renderTemplate("Value: {{MISSING}}", env)).rejects.toThrow(
+    await expect(renderTemplate("Value: {{MISSING}}", env, { strict: false })).rejects.toThrow(
       'Env key "MISSING" is not defined'
     )
   })
@@ -26,7 +26,7 @@ describe("renderTemplate", () => {
 
   it("replaces multiple different keys in a single template", async () => {
     const env: Environment = { FIRST: "hello", SECOND: "world" }
-    const view = await renderTemplate("{{FIRST}} {{SECOND}}!", env)
+    const view = await renderTemplate("{{FIRST}} {{SECOND}}!", env, { strict: false })
     expect(view).toBe("hello world!")
   })
 
@@ -38,19 +38,19 @@ describe("renderTemplate", () => {
 
   it("supports number values in env", async () => {
     const env: Environment = { PORT: 8080 }
-    const view = await renderTemplate("Port: {{PORT}}", env)
+    const view = await renderTemplate("Port: {{PORT}}", env, { strict: false })
     expect(view).toBe("Port: 8080")
   })
 
   it("replaces the same placeholder used twice", async () => {
     const env: Environment = { A: "x" }
-    const view = await renderTemplate("{{A}} and {{A}}", env)
+    const view = await renderTemplate("{{A}} and {{A}}", env, { strict: false })
     expect(view).toBe("x and x")
   })
 
   it("inserts a value containing placeholder syntax verbatim (single-pass)", async () => {
     const env: Environment = { A: "{{B}}", B: "SHOULD_NOT_APPEAR" }
-    const view = await renderTemplate("result: {{A}}", env)
+    const view = await renderTemplate("result: {{A}}", env, { strict: false })
     expect(view).toBe("result: {{B}}")
   })
 
@@ -59,14 +59,14 @@ describe("renderTemplate", () => {
   // renderTemplate avoids this pitfall so dollar signs pass through verbatim.
   it("preserves dollar signs in resolved values", async () => {
     const env: Environment = { PRICE: "$100" }
-    const view = await renderTemplate("Cost: {{PRICE}}", env)
+    const view = await renderTemplate("Cost: {{PRICE}}", env, { strict: false })
     expect(view).toBe("Cost: $100")
   })
 
   it("calls a lazy function value once per placeholder occurrence", async () => {
     const lazy = vi.fn(() => "val")
     const env: Environment = { A: lazy }
-    const view = await renderTemplate("{{A}} and {{A}}", env)
+    const view = await renderTemplate("{{A}} and {{A}}", env, { strict: false })
     expect(view).toBe("val and val")
     expect(lazy).toHaveBeenCalledTimes(2)
   })
@@ -97,7 +97,7 @@ describe("renderTemplate", () => {
 
   it("leaves value unchanged when no modifier is used", async () => {
     const env: Environment = { VAL: "raw" }
-    const view = await renderTemplate("{{VAL}}", env)
+    const view = await renderTemplate("{{VAL}}", env, { strict: false })
     expect(view).toBe("raw")
   })
 
@@ -132,10 +132,9 @@ describe("renderTemplate", () => {
     expect(view).toBe("hello")
   })
 
-  it("works without strict option (backwards compatibility)", async () => {
+  it("defaults to strict mode when no strict option is provided", async () => {
     const env: Environment = { A: "x" }
-    const view = await renderTemplate("{{A}}", env)
-    expect(view).toBe("x")
+    await expect(renderTemplate("{{A}}", env)).rejects.toThrow(/Strict mode.*explicit modifier/v)
   })
 
   it("works with strict explicitly set to false", async () => {

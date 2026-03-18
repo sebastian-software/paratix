@@ -145,18 +145,18 @@ export default server({
 
 ### `file`
 
-| Method            | Signature                                                                                         | Idempotent          |
-| ----------------- | ------------------------------------------------------------------------------------------------- | ------------------- |
-| `file.absent`     | `(remotePath: string): Module`                                                                    | Yes                 |
-| `file.assemble`   | `(remotePath: string, fragments: string[], options?: { mode?: string; owner?: string }): Module`  | Yes                 |
-| `file.block`      | `(remotePath: string, options: { content: string; name: string; prefix?: string }): Module`       | Yes                 |
-| `file.copy`       | `(remotePath: string, localPath: string, options?: { mode?: string; owner?: string }): Module`    | Yes                 |
-| `file.directory`  | `(remotePath: string, options?: { mode?: string; owner?: string }): Module`                       | Yes                 |
-| `file.line`       | `(remotePath: string, line: string, options?: { match?: string }): Module`                        | Yes                 |
-| `file.properties` | `(remotePath: string, options: { group?: string; mode?: string; owner?: string }): Module`        | Yes                 |
-| `file.replace`    | `(remotePath: string, pattern: string, replacement: string): Module`                              | Yes                 |
-| `file.stat`       | `(remotePath: string): Module`                                                                    | No (always-applies) |
-| `file.template`   | `(remotePath: string, templatePath: string, options?: { mode?: string; owner?: string }): Module` | Yes                 |
+| Method            | Signature                                                                                                           | Idempotent          |
+| ----------------- | ------------------------------------------------------------------------------------------------------------------- | ------------------- |
+| `file.absent`     | `(remotePath: string): Module`                                                                                      | Yes                 |
+| `file.assemble`   | `(remotePath: string, fragments: string[], options?: { mode?: string; owner?: string }): Module`                    | Yes                 |
+| `file.block`      | `(remotePath: string, options: { content: string; name: string; prefix?: string }): Module`                         | Yes                 |
+| `file.copy`       | `(remotePath: string, localPath: string, options?: { mode?: string; owner?: string }): Module`                      | Yes                 |
+| `file.directory`  | `(remotePath: string, options?: { mode?: string; owner?: string }): Module`                                         | Yes                 |
+| `file.line`       | `(remotePath: string, line: string, options?: { match?: string }): Module`                                          | Yes                 |
+| `file.properties` | `(remotePath: string, options: { group?: string; mode?: string; owner?: string }): Module`                          | Yes                 |
+| `file.replace`    | `(remotePath: string, pattern: string, replacement: string): Module`                                                | Yes                 |
+| `file.stat`       | `(remotePath: string): Module`                                                                                      | No (always-applies) |
+| `file.template`   | `(remotePath: string, templatePath: string, options?: { mode?: string; owner?: string; strict?: boolean }): Module` | Yes                 |
 
 ### `git`
 
@@ -356,6 +356,7 @@ Files deployed via `file.template(remotePath, localTemplatePath)` can contain `{
 - Escaping: `\{{` produces a literal `{{` in the output.
 - Unknown keys throw an error at runtime.
 - **Modifiers:** `{{KEY|shell}}` applies `shellQuote()` to the value. This is the only built-in modifier.
+- **Strict mode (default: on).** Every placeholder must have an explicit modifier (`|shell` or `|raw`). Bare `{{KEY}}` placeholders throw at render time. Pass `strict: false` in the options to disable this check.
 - **Security: No default escaping.** Values are inserted verbatim. If the template produces a shell script or shell config, **always** use `{{KEY|shell}}` for every variable — omitting `|shell` can lead to shell injection.
 
 Example template file (`nginx.conf.tmpl`):
@@ -363,8 +364,8 @@ Example template file (`nginx.conf.tmpl`):
 ```
 server {
     listen 80;
-    server_name {{DOMAIN}};
-    proxy_pass http://127.0.0.1:{{APP_PORT}};
+    server_name {{DOMAIN|raw}};
+    proxy_pass http://127.0.0.1:{{APP_PORT|raw}};
 }
 ```
 
@@ -475,7 +476,7 @@ async check(ssh) {
 2. Import modules from `"paratix/modules"`, not from `"paratix"`.
 3. `package` must be aliased on import: `import { package as pkg } from "paratix/modules"` -- `package` is a reserved word in JavaScript.
 4. For idempotency with `command.shell()`, always provide a `check` command.
-5. Use `{{KEY}}` placeholders in `.tmpl` files; provide values via `env` in `server()`.
+5. Use `{{KEY|shell}}` or `{{KEY|raw}}` placeholders in `.tmpl` files — strict mode is on by default and bare `{{KEY}}` will throw. Provide values via `env` in `server()`.
 6. Use `service.restart()` and `service.reload()` as `signals` in recipes, not directly in `run`.
 7. Always pass a date string to `package.upgrade()` and `package.update()` -- it is the idempotency key.
 8. Specify `ssh.ports` as an array -- the runner tries each port in order.

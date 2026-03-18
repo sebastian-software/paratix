@@ -57,8 +57,9 @@ function enforceStrictModifiers(matches: RegExpExecArray[]): void {
  * - `shell` — wraps the resolved value with {@link shellQuote} for safe shell interpolation.
  * - `raw` — passes the value through unchanged (explicit verbatim insertion).
  *
- * When `options.strict` is `true`, every placeholder **must** specify a modifier;
- * bare `\{\{KEY\}\}` placeholders will throw an error.
+ * When `options.strict` is `true` (the default), every placeholder **must** specify
+ * a modifier; bare `\{\{KEY\}\}` placeholders will throw an error. Pass `strict: false`
+ * to disable this check.
  *
  * Placeholders are resolved concurrently via Promise.all; insertion order is preserved.
  *
@@ -84,7 +85,7 @@ export async function renderTemplate(
   const matches = [...result.matchAll(pattern)]
 
   // In strict mode, validate that all placeholders have explicit modifiers before resolving values
-  if (options?.strict) enforceStrictModifiers(matches)
+  if (options?.strict ?? true) enforceStrictModifiers(matches)
 
   const resolvedValues = await Promise.all(
     matches.map(async (match) => resolveEnvironment(environment, match.groups?.varName ?? ""))

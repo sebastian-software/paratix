@@ -401,6 +401,22 @@ describe("file.template", () => {
     }
   })
 
+  it("defaults to strict mode and rejects bare placeholders", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "paratix-test-"))
+    try {
+      const templatePath = join(dir, "template.txt")
+      writeFileSync(templatePath, "Hello {{name}}")
+      const ssh = createMockSsh({
+        "[ -e '/remote/out.txt' ]": { code: 0 },
+      })
+
+      const mod = file.template("/remote/out.txt", templatePath)
+      await expect(mod.check(ssh, { name: "World" })).rejects.toThrow(/Strict mode/v)
+    } finally {
+      rmSync(dir, { recursive: true })
+    }
+  })
+
   it("apply writes rendered content", async () => {
     const dir = mkdtempSync(join(tmpdir(), "paratix-test-"))
     try {
@@ -414,7 +430,7 @@ describe("file.template", () => {
         writtenFiles.push({ content, path })
       }
 
-      const mod = file.template("/remote/out.txt", templatePath)
+      const mod = file.template("/remote/out.txt", templatePath, { strict: false })
       const result = await mod.apply(ssh, { name: "World" })
 
       expect(result.status).toBe("changed")
