@@ -8,7 +8,7 @@ import { Client, type ClientChannel } from "ssh2"
 
 import type { ExecOptions, ExecResult, SshConfig, SshConnection } from "./types.js"
 
-import { buildHostVerifier } from "./knownHosts.js"
+import { buildHostVerifier, HostKeyVerificationError } from "./knownHosts.js"
 import { sftpDownload, sftpUpload } from "./sftp.js"
 import {
   collectStreamOutput,
@@ -462,7 +462,8 @@ export class SshConnectionImpl implements SshConnection {
         this.client = client
         this.connectedPort = port
         return true
-      } catch {
+      } catch (error) {
+        if (error instanceof HostKeyVerificationError) throw error
         // Try next port
       }
     }

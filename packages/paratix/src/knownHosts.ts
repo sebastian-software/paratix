@@ -4,6 +4,15 @@ import { appendFile, mkdir } from "node:fs/promises"
 import { homedir } from "node:os"
 import { join } from "node:path"
 
+/** Thrown when a remote host key does not match the expected key in known_hosts. */
+export class HostKeyVerificationError extends Error {
+  public constructor(message: string) {
+    super(message)
+    this.name = "HostKeyVerificationError"
+    Error.captureStackTrace(this, HostKeyVerificationError)
+  }
+}
+
 /** A parsed entry from a known_hosts file. */
 export type KnownHostEntry = {
   /** Algorithm name as stored in the file (e.g. `"ssh-ed25519"`). */
@@ -249,14 +258,14 @@ export function buildHostVerifier(
         if (existingKey.length === key.length && timingSafeEqual(existingKey, key)) return true
         const presentedAlgo = extractAlgoFromKey(key)
         const existingAlgo = extractAlgoFromKey(existingKey)
-        throw new Error(
+        throw new HostKeyVerificationError(
           `HOST KEY VERIFICATION FAILED for ${host}: ` +
             `remote host key (${presentedAlgo}) does not match the key in known_hosts (${existingAlgo}). ` +
             "This could indicate a man-in-the-middle attack."
         )
       }
       if (mode === "yes") {
-        throw new Error(
+        throw new HostKeyVerificationError(
           `Host key for ${host} not found in known_hosts. ` +
             'Set strictHostKeyChecking to "accept-new" to auto-accept new keys.'
         )

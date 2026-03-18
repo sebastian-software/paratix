@@ -38,6 +38,7 @@ vi.mock("../src/knownHosts.js", async () => {
     // Default: return empty object (no hostVerifier) so ssh.ts can safely destructure after resetAllMocks.
     buildHostVerifier: vi.fn().mockReturnValue({}),
     extractAlgoFromKey: actual.extractAlgoFromKey,
+    HostKeyVerificationError: actual.HostKeyVerificationError,
     lookupHostKey: actual.lookupHostKey,
     parseKnownHosts: actual.parseKnownHosts,
   }
