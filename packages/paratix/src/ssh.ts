@@ -31,7 +31,17 @@ const RECONNECT_MAX_DELAY = 30_000
 
 export class SshConnectionImpl implements SshConnection {
   private agentSocket: null | string = null
-  private cachedSudoPassword: null | string = null
+  /**
+   * Cached sudo password stored as a Buffer so it can be actively zeroed
+   * after use via `buffer.fill(0)`.
+   *
+   * **Limitations:** Buffer zeroing in JavaScript/V8 only reduces the window
+   * for potential memory leaks — it cannot eliminate them entirely. The GC may
+   * create internal copies, and unavoidable `.toString()` calls (e.g. for
+   * `maskSecrets`) produce temporary immutable strings on the heap. This is a
+   * best-effort mitigation, not a guarantee.
+   */
+  private cachedSudoPassword: Buffer | null = null
   private client: Client | null = null
   private readonly config: SshConfig
   private connectedPort = 0
@@ -41,7 +51,7 @@ export class SshConnectionImpl implements SshConnection {
   public constructor(host: string, config: SshConfig) {
     this.host = host
     this.config = config
-    this.cachedSudoPassword = config.sudoPassword ?? null
+    this.cachedSudoPassword = config.sudoPassword == null ? null : Buffer.from(config.sudoPassword)
   }
 
   public addPort(port: number): void {
@@ -77,6 +87,10 @@ export class SshConnectionImpl implements SshConnection {
   }
 
   public disconnect(): void {
+    if (this.cachedSudoPassword != null) {
+      this.cachedSudoPassword.fill(0)
+      this.cachedSudoPassword = null
+    }
     if (this.client) {
       this.client.end()
       this.client = null
@@ -121,8 +135,7 @@ export class SshConnectionImpl implements SshConnection {
       }
       this.pendingRejects.add(wrappedReject)
       const timeout = options.timeout ?? COMMAND_TIMEOUT
-      const sudoPw = this.cachedSudoPassword
-      const secrets = [...(sudoPw == null ? [] : [sudoPw]), ...(options.secrets ?? [])]
+      const secrets = this.buildSecrets(options.secrets)
       let activeStream: ClientChannel | null = null
       const timer = setTimeout(() => {
         activeStream?.close()
@@ -148,7 +161,7 @@ export class SshConnectionImpl implements SshConnection {
         })
         // Write sudo password to stdin after listeners are registered
         if (this.cachedSudoPassword != null && this.config.user !== "root") {
-          stream.write(`${this.cachedSudoPassword}\n`)
+          stream.write(Buffer.concat([this.cachedSudoPassword, Buffer.from("\n")]))
         }
       })
     })
@@ -194,11 +207,12 @@ export class SshConnectionImpl implements SshConnection {
       `[sudo] password for ${this.config.user}@${this.host}: `,
       true
     )
-    this.cachedSudoPassword = password
+    this.cachedSudoPassword = Buffer.from(password)
     try {
       await this.exec("true", { silent: true, timeout: 10_000 })
     } catch (error) {
       const masked = maskSecrets(String(error), [password])
+      this.cachedSudoPassword.fill(0)
       this.cachedSudoPassword = null
       throw new Error(`Sudo authentication failed: ${masked}`, { cause: error })
     }
@@ -274,9 +288,8 @@ export class SshConnectionImpl implements SshConnection {
       try {
         await this.exec(`rm -f ${shellQuote(temporaryPath)}`, { silent: true })
       } catch (cleanupError) {
-        const secrets = this.cachedSudoPassword == null ? [] : [this.cachedSudoPassword]
         process.stderr.write(
-          `Warning: failed to remove temp file ${temporaryPath}: ${maskSecrets(String(cleanupError), secrets)}\n`
+          `Warning: failed to remove temp file ${temporaryPath}: ${maskSecrets(String(cleanupError), this.buildSecrets())}\n`
         )
       }
     }
@@ -326,7 +339,7 @@ export class SshConnectionImpl implements SshConnection {
         await this.exec(`rm -f ${shellQuote(remoteTemporary)}`, { silent: true })
       } catch (cleanupError) {
         process.stderr.write(
-          `Warning: failed to remove temp file ${remoteTemporary}: ${maskSecrets(String(cleanupError), this.cachedSudoPassword == null ? [] : [this.cachedSudoPassword])}\n`
+          `Warning: failed to remove temp file ${remoteTemporary}: ${maskSecrets(String(cleanupError), this.buildSecrets())}\n`
         )
       }
     }
@@ -341,6 +354,11 @@ export class SshConnectionImpl implements SshConnection {
     }
     const pairs = Object.entries(environment).map(([k, v]) => `${k}=${shellQuote(v)}`)
     return `${pairs.join(" ")} `
+  }
+
+  private buildSecrets(extra?: string[]): string[] {
+    const pw = this.cachedSudoPassword
+    return [...(pw == null ? [] : [pw.toString("utf8")]), ...(extra ?? [])]
   }
 
   private async connectViaAgent(): Promise<void> {
