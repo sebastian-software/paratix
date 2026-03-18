@@ -149,6 +149,12 @@ async function handlePortChange(ssh: SshConnectionImpl, meta: Environment): Prom
 
   const newPort = Number(portValue)
   ssh.addPort(newPort)
+
+  // Skip reconnect when a reboot is pending — the reboot handler will
+  // reconnect on all registered ports (including the newly added one).
+  // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition -- meta values may be undefined at runtime
+  if (meta["system.reboot"] != null) return
+
   try {
     await ssh.reconnect()
   } catch (error) {

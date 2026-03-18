@@ -197,6 +197,81 @@ describe("runPlaybook reconnect failure propagation", () => {
   })
 })
 
+// Bug regression: when sshd.port and system.reboot are both set, reconnect must only be called once
+describe("runPlaybook handlePortChange + handleReboot interaction", () => {
+  beforeEach(() => {
+    vi.spyOn(console, "log").mockImplementation(() => {
+      /* noop */
+    })
+    vi.spyOn(console, "error").mockImplementation(() => {
+      /* noop */
+    })
+    vi.resetModules()
+  })
+
+  afterEach(() => {
+    vi.restoreAllMocks()
+    vi.resetModules()
+  })
+
+  it("calls addPort but skips port-change reconnect when system.reboot is also set, resulting in exactly one reconnect", async () => {
+    const capturedConfigs: unknown[] = []
+    const reconnect = vi.fn().mockResolvedValue(null)
+
+    vi.doMock("../src/ssh.js", () => ({
+      shellQuote: (s: string) => `'${s}'`,
+      SshConnectionImpl: makeMockSshClass(capturedConfigs, { reconnect }),
+    }))
+
+    const { runPlaybook } = await import("../src/runner.js")
+
+    const moduleWithPortAndReboot = makeModuleWithMeta({
+      "sshd.port": "2222",
+      "system.reboot": "1",
+    })
+
+    const definition: ServerDefinition = {
+      host: "1.2.3.4",
+      name: "test-server",
+      run: [moduleWithPortAndReboot],
+      ssh: { ports: [22], privateKey: "~/.ssh/id", user: "root" },
+    }
+
+    await runPlaybook(definition)
+
+    // reconnect is called exactly once (by the reboot handler, not the port-change handler)
+    expect(reconnect).toHaveBeenCalledTimes(1)
+    process.exitCode = 0
+  })
+
+  it("calls reconnect exactly once when only sshd.port is set (no reboot)", async () => {
+    const capturedConfigs: unknown[] = []
+    const reconnect = vi.fn().mockResolvedValue(null)
+
+    vi.doMock("../src/ssh.js", () => ({
+      shellQuote: (s: string) => `'${s}'`,
+      SshConnectionImpl: makeMockSshClass(capturedConfigs, { reconnect }),
+    }))
+
+    const { runPlaybook } = await import("../src/runner.js")
+
+    const moduleWithPortOnly = makeModuleWithMeta({ "sshd.port": "2222" })
+
+    const definition: ServerDefinition = {
+      host: "1.2.3.4",
+      name: "test-server",
+      run: [moduleWithPortOnly],
+      ssh: { ports: [22], privateKey: "~/.ssh/id", user: "root" },
+    }
+
+    await runPlaybook(definition)
+
+    // reconnect is called exactly once by the port-change handler
+    expect(reconnect).toHaveBeenCalledTimes(1)
+    process.exitCode = 0
+  })
+})
+
 // Bug regression: exceptions thrown by recipeModule.apply() must not crash the playbook run
 describe("runPlaybook recipe exception handling", () => {
   beforeEach(() => {
