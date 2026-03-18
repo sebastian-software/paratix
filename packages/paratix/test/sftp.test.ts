@@ -280,6 +280,101 @@ describe("sftpDownload", () => {
     // Assert — promise must still reject with the original error, not resolve
     await expect(promise).rejects.toThrow("local write stream error before close")
   })
+
+  // ---------------------------------------------------------------------------
+  // Timeout tests
+  // ---------------------------------------------------------------------------
+
+  it("rejects when transfer times out", async () => {
+    // Arrange
+    vi.useFakeTimers()
+    const { sftp } = makeSftpSession()
+    const client = makeClientMock(sftp)
+
+    const localWriteStream = Object.assign(new EventEmitter(), { destroy: vi.fn() })
+    vi.mocked(createWriteStream).mockReturnValue(localWriteStream as unknown as WriteStream)
+
+    // Act — start download with a short timeout, then advance the timer past it
+    const promise = sftpDownload(client, "/remote/file.txt", "/local/file.txt", 5000)
+    vi.advanceTimersByTime(5001)
+
+    // Assert — promise must reject with a descriptive timeout message
+    await expect(promise).rejects.toThrow("SFTP download timed out after 5000ms: /remote/file.txt")
+
+    vi.useRealTimers()
+  })
+
+  it("destroys both streams and ends sftp session on timeout", async () => {
+    // Arrange
+    vi.useFakeTimers()
+    const { sftp, sftpEnd, sftpReadStream } = makeSftpSession()
+    const client = makeClientMock(sftp)
+
+    const localWriteStream = Object.assign(new EventEmitter(), { destroy: vi.fn() })
+    vi.mocked(createWriteStream).mockReturnValue(localWriteStream as unknown as WriteStream)
+
+    // Act — trigger the timeout
+    const promise = sftpDownload(client, "/remote/file.txt", "/local/file.txt", 5000)
+    vi.advanceTimersByTime(5001)
+    await promise.catch(() => {
+      /* expected rejection */
+    })
+
+    // Assert — all resources must be cleaned up
+    expect(sftpReadStream.destroy).toHaveBeenCalledOnce()
+    expect(localWriteStream.destroy).toHaveBeenCalledOnce()
+    expect(sftpEnd).toHaveBeenCalledOnce()
+
+    vi.useRealTimers()
+  })
+
+  it("clears timeout on successful transfer", async () => {
+    // Arrange
+    vi.useFakeTimers()
+    const { sftp } = makeSftpSession()
+    const client = makeClientMock(sftp)
+
+    const localWriteStream = Object.assign(new EventEmitter(), { destroy: vi.fn() })
+    vi.mocked(createWriteStream).mockReturnValue(localWriteStream as unknown as WriteStream)
+
+    // Act — complete the transfer successfully before the timeout fires
+    const promise = sftpDownload(client, "/remote/file.txt", "/local/file.txt", 5000)
+    localWriteStream.emit("close")
+    await promise
+
+    // Advance well past the timeout — must not cause additional effects
+    vi.advanceTimersByTime(10_000)
+
+    // Assert — promise already resolved; no extra sftp.end() from a late timeout
+    await expect(promise).resolves.toBeUndefined()
+
+    vi.useRealTimers()
+  })
+
+  it("clears timeout on stream error", async () => {
+    // Arrange
+    vi.useFakeTimers()
+    const { sftp, sftpEnd, sftpReadStream } = makeSftpSession()
+    const client = makeClientMock(sftp)
+
+    const localWriteStream = Object.assign(new EventEmitter(), { destroy: vi.fn() })
+    vi.mocked(createWriteStream).mockReturnValue(localWriteStream as unknown as WriteStream)
+
+    // Act — reject via stream error before the timeout fires
+    const promise = sftpDownload(client, "/remote/file.txt", "/local/file.txt", 5000)
+    sftpReadStream.emit("error", new Error("stream error before timeout"))
+    await promise.catch(() => {
+      /* expected rejection */
+    })
+
+    // Advance well past the timeout — must not cause any additional cleanup calls
+    vi.advanceTimersByTime(10_000)
+
+    // Assert — sftp.end() was called exactly once (from the error handler, not the timeout)
+    expect(sftpEnd).toHaveBeenCalledOnce()
+
+    vi.useRealTimers()
+  })
 })
 
 // ---------------------------------------------------------------------------
@@ -503,5 +598,100 @@ describe("sftpUpload", () => {
 
     // Assert — promise must still reject with the original error, not resolve
     await expect(promise).rejects.toThrow("remote write stream error before close")
+  })
+
+  // ---------------------------------------------------------------------------
+  // Timeout tests
+  // ---------------------------------------------------------------------------
+
+  it("rejects when transfer times out", async () => {
+    // Arrange
+    vi.useFakeTimers()
+    const { sftp } = makeSftpSession()
+    const client = makeClientMock(sftp)
+
+    const localReadStream = makeMockStream()
+    vi.mocked(createReadStream).mockReturnValue(localReadStream as unknown as ReadStream)
+
+    // Act — start upload with a short timeout, then advance the timer past it
+    const promise = sftpUpload(client, "/local/file.txt", "/remote/file.txt", 5000)
+    vi.advanceTimersByTime(5001)
+
+    // Assert — promise must reject with a descriptive timeout message
+    await expect(promise).rejects.toThrow("SFTP upload timed out after 5000ms: /remote/file.txt")
+
+    vi.useRealTimers()
+  })
+
+  it("destroys both streams and ends sftp session on timeout", async () => {
+    // Arrange
+    vi.useFakeTimers()
+    const { sftp, sftpEnd, sftpWriteStream } = makeSftpSession()
+    const client = makeClientMock(sftp)
+
+    const localReadStream = makeMockStream()
+    vi.mocked(createReadStream).mockReturnValue(localReadStream as unknown as ReadStream)
+
+    // Act — trigger the timeout
+    const promise = sftpUpload(client, "/local/file.txt", "/remote/file.txt", 5000)
+    vi.advanceTimersByTime(5001)
+    await promise.catch(() => {
+      /* expected rejection */
+    })
+
+    // Assert — all resources must be cleaned up
+    expect(localReadStream.destroy).toHaveBeenCalledOnce()
+    expect(sftpWriteStream.destroy).toHaveBeenCalledOnce()
+    expect(sftpEnd).toHaveBeenCalledOnce()
+
+    vi.useRealTimers()
+  })
+
+  it("clears timeout on successful transfer", async () => {
+    // Arrange
+    vi.useFakeTimers()
+    const { sftp, sftpWriteStream } = makeSftpSession()
+    const client = makeClientMock(sftp)
+
+    const localReadStream = makeMockStream()
+    vi.mocked(createReadStream).mockReturnValue(localReadStream as unknown as ReadStream)
+
+    // Act — complete the transfer successfully before the timeout fires
+    const promise = sftpUpload(client, "/local/file.txt", "/remote/file.txt", 5000)
+    sftpWriteStream.emit("close")
+    await promise
+
+    // Advance well past the timeout — must not cause additional effects
+    vi.advanceTimersByTime(10_000)
+
+    // Assert — promise already resolved; no extra sftp.end() from a late timeout
+    await expect(promise).resolves.toBeUndefined()
+
+    vi.useRealTimers()
+  })
+
+  it("clears timeout on stream error", async () => {
+    // Arrange
+    vi.useFakeTimers()
+    const { sftp, sftpEnd, sftpWriteStream } = makeSftpSession()
+    const client = makeClientMock(sftp)
+
+    const localReadStream = makeMockStream()
+    vi.mocked(createReadStream).mockReturnValue(localReadStream as unknown as ReadStream)
+
+    // Act — reject via stream error before the timeout fires
+    const promise = sftpUpload(client, "/local/file.txt", "/remote/file.txt", 5000)
+    sftpWriteStream.emit("error", new Error("stream error before timeout"))
+    await promise.catch(() => {
+      /* expected rejection */
+    })
+
+    // Advance well past the timeout — must not cause any additional cleanup calls
+    vi.advanceTimersByTime(10_000)
+
+    // Assert — sftp.end() was called exactly once (from the error handler, not the timeout)
+    expect(sftpEnd).toHaveBeenCalledOnce()
+
+    vi.useRealTimers()
   })
 })
