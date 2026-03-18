@@ -21,6 +21,20 @@ import { promptTerminal } from "./terminal.js"
 
 export { shellQuote, validateMode }
 
+/**
+ * Validate that a path returned by `mktemp` matches the expected paratix pattern.
+ *
+ * @param path - The raw `mktemp` output to validate.
+ * @returns The validated path.
+ * @throws {Error} When the path does not match the expected pattern.
+ */
+function validateMktempPath(path: string): string {
+  if (!/^\/tmp\/paratix-[\w.\-]+$/v.test(path)) {
+    throw new Error(`Unexpected mktemp output: ${path}`)
+  }
+  return path
+}
+
 const COMMAND_TIMEOUT = 120_000
 const DEFAULT_MAX_RECONNECT_ATTEMPTS = 10
 const DEFAULT_RECONNECT_TIMEOUT = 120_000
@@ -108,7 +122,7 @@ export class SshConnectionImpl implements SshConnection {
     const client = this.ensureClient()
     let sourcePath = remotePath
     if (this.config.user !== "root") {
-      sourcePath = await this.output("mktemp /tmp/paratix-download.XXXXXX")
+      sourcePath = validateMktempPath(await this.output("mktemp /tmp/paratix-download.XXXXXX"))
       await this.exec(`cp ${shellQuote(remotePath)} ${shellQuote(sourcePath)}`, { silent: true })
       await this.exec(`chmod 600 ${shellQuote(sourcePath)}`, { silent: true })
     }
@@ -280,7 +294,7 @@ export class SshConnectionImpl implements SshConnection {
     options?: { mode?: string }
   ): Promise<void> {
     const client = this.ensureClient()
-    const temporaryPath = await this.output("mktemp /tmp/paratix-upload.XXXXXX")
+    const temporaryPath = validateMktempPath(await this.output("mktemp /tmp/paratix-upload.XXXXXX"))
     try {
       await sftpUpload(client, localPath, temporaryPath)
       if (options?.mode != null) {
@@ -320,7 +334,9 @@ export class SshConnectionImpl implements SshConnection {
   ): Promise<void> {
     const client = this.ensureClient()
     const localTemporary = join(tmpdir(), `paratix-write-${randomUUID()}`)
-    const remoteTemporary = await this.output("mktemp /tmp/paratix-write.XXXXXX")
+    const remoteTemporary = validateMktempPath(
+      await this.output("mktemp /tmp/paratix-write.XXXXXX")
+    )
     try {
       // eslint-disable-next-line security/detect-non-literal-fs-filename
       writeFileSync(localTemporary, content, { mode: 0o600 })

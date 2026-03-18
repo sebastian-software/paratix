@@ -63,9 +63,12 @@ function makeClientWithExecSpy(execSpy: ReturnType<typeof vi.fn>): Client {
 
 function makeSimpleClient(): Client {
   return {
-    exec: vi.fn().mockImplementation((_cmd: string, cb: ExecCallback) => {
+    exec: vi.fn().mockImplementation((cmd: string, cb: ExecCallback) => {
       const stream = makeStream()
       cb(undefined, stream)
+      if (cmd.includes("mktemp")) {
+        stream.emit("data", Buffer.from("/tmp/paratix-write.SIMPLE"))
+      }
       stream.emit("close", 0)
     }),
     sftp: vi.fn().mockImplementation((cb: Parameters<Client["sftp"]>[0]) => {
