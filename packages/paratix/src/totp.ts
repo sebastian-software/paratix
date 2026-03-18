@@ -42,7 +42,7 @@ const DEFAULT_PERIOD = 30
 const DEFAULT_DIGITS = 6
 
 /** Maximum allowed number of TOTP digits (prevents integer overflow in 10^digits). */
-const MAX_DIGITS = 10
+const MAX_DIGITS = 8
 
 /** Mapping from otpauth URI algorithm names to Node.js crypto hash names. */
 const SUPPORTED_ALGORITHMS: Record<string, string> = {
@@ -150,7 +150,7 @@ function parseTotpParameters(otpauthUri: string): {
     throw new Error("TOTP 'period' must be a positive integer")
   }
   if (!Number.isFinite(digits) || digits < 1 || digits > MAX_DIGITS) {
-    throw new Error("TOTP 'digits' must be an integer between 1 and 10")
+    throw new Error("TOTP 'digits' must be an integer between 1 and 8")
   }
 
   const algorithm = parseAlgorithm(url)
@@ -172,7 +172,7 @@ function parseTotpParameters(otpauthUri: string): {
  * @throws {Error} If the URI is missing the `secret` parameter.
  * @throws {Error} If the `secret` contains characters outside the Base32 alphabet.
  * @throws {Error} If `period` is not a positive integer.
- * @throws {Error} If `digits` is not an integer between 1 and 10.
+ * @throws {Error} If `digits` is not an integer between 1 and 8.
  * @throws {Error} If `algorithm` is not one of SHA1, SHA256, or SHA512.
  * @see {@link https://datatracker.ietf.org/doc/html/rfc6238 RFC 6238 – TOTP}
  * @see {@link https://datatracker.ietf.org/doc/html/rfc4226 RFC 4226 – HOTP}

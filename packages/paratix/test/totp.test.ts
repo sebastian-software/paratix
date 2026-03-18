@@ -221,8 +221,8 @@ describe("generateTotpCode — error handling", () => {
     expect(() => generateTotpCode(uri)).toThrow(/digits/v)
   })
 
-  it("throws when digits=11 (exceeds maximum of 10)", () => {
-    const uri = `otpauth://totp/Test?secret=${RFC_SECRET_BASE32}&digits=11`
+  it("throws when digits=9 (exceeds maximum of 8)", () => {
+    const uri = `otpauth://totp/Test?secret=${RFC_SECRET_BASE32}&digits=9`
     expect(() => generateTotpCode(uri)).toThrow(/digits/v)
   })
 
