@@ -355,6 +355,8 @@ Files deployed via `file.template(remotePath, localTemplatePath)` can contain `{
 - Environment values can be strings, numbers, or (async) functions.
 - Escaping: `\{{` produces a literal `{{` in the output.
 - Unknown keys throw an error at runtime.
+- **Modifiers:** `{{KEY|shell}}` applies `shellQuote()` to the value. This is the only built-in modifier.
+- **Security: No default escaping.** Values are inserted verbatim. If the template produces a shell script or shell config, **always** use `{{KEY|shell}}` for every variable — omitting `|shell` can lead to shell injection.
 
 Example template file (`nginx.conf.tmpl`):
 

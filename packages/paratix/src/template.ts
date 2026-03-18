@@ -26,6 +26,11 @@ function applyModifier(value: string, modifier: string | undefined): string {
  * Render a template string by replacing all `\{\{key\}\}` (or `\{\{key|modifier\}\}`)
  * placeholders with the corresponding resolved env values.
  *
+ * **Security: No default escaping.** Values are inserted verbatim unless a modifier
+ * is applied. When the rendered output is used in a shell context (e.g. a script or
+ * shell config file), always use the `|shell` modifier on every user-controlled
+ * placeholder to prevent shell injection: `\{\{VALUE|shell\}\}`.
+ *
  * Supported modifiers:
  * - `shell` — wraps the resolved value with {@link shellQuote} for safe shell interpolation.
  *
