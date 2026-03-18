@@ -757,7 +757,8 @@ describe("SshConnectionImpl", () => {
         const stream = makeStream()
         callback(undefined, stream)
         // Verify write was called before close
-        expect(stream.write).toHaveBeenCalledWith(Buffer.from("my-sudo-pass\n"))
+        expect(stream.write).toHaveBeenCalledWith(Buffer.from("my-sudo-pass"))
+        expect(stream.write).toHaveBeenCalledWith("\n")
         stream.emit("close", 0)
       })
       const client = makeClientWithExecSpy(execSpy)
@@ -789,7 +790,8 @@ describe("SshConnectionImpl", () => {
 
       expect(capturedStream).not.toBeNull()
       expect(vi.mocked(collectStreamOutput)).toHaveBeenCalledOnce()
-      expect(vi.mocked(capturedStream!.write)).toHaveBeenCalledWith(Buffer.from("my-sudo-pass\n"))
+      expect(vi.mocked(capturedStream!.write)).toHaveBeenCalledWith(Buffer.from("my-sudo-pass"))
+      expect(vi.mocked(capturedStream!.write)).toHaveBeenCalledWith("\n")
 
       // collectStreamOutput must be invoked before stream.write so that all
       // stream event listeners are registered before the sudo password is sent
