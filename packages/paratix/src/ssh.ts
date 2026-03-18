@@ -263,13 +263,13 @@ export class SshConnectionImpl implements SshConnection {
     const temporaryPath = await this.output("mktemp /tmp/paratix-upload.XXXXXX")
     try {
       await sftpUpload(client, localPath, temporaryPath)
-      await this.exec(`mv ${shellQuote(temporaryPath)} ${shellQuote(remotePath)}`, { silent: true })
       if (options?.mode != null) {
         validateMode(options.mode)
-        await this.exec(`chmod ${shellQuote(options.mode)} ${shellQuote(remotePath)}`, {
+        await this.exec(`chmod ${shellQuote(options.mode)} ${shellQuote(temporaryPath)}`, {
           silent: true,
         })
       }
+      await this.exec(`mv ${shellQuote(temporaryPath)} ${shellQuote(remotePath)}`, { silent: true })
     } finally {
       try {
         await this.exec(`rm -f ${shellQuote(temporaryPath)}`, { silent: true })
@@ -292,7 +292,7 @@ export class SshConnectionImpl implements SshConnection {
    * @param remotePath - Destination path on the remote host.
    * @param content - The string content to write.
    * @param options - Optional settings.
-   * @param options.mode - File mode to set via `chmod` after writing (e.g. `"0644"`).
+   * @param options.mode - File mode to set via `chmod` on the temp file before moving (e.g. `"0644"`).
    */
   public async writeFile(
     remotePath: string,
@@ -306,15 +306,15 @@ export class SshConnectionImpl implements SshConnection {
       // eslint-disable-next-line security/detect-non-literal-fs-filename
       writeFileSync(localTemporary, content, { mode: 0o600 })
       await sftpUpload(client, localTemporary, remoteTemporary)
-      await this.exec(`mv ${shellQuote(remoteTemporary)} ${shellQuote(remotePath)}`, {
-        silent: true,
-      })
       if (options?.mode != null) {
         validateMode(options.mode)
-        await this.exec(`chmod ${shellQuote(options.mode)} ${shellQuote(remotePath)}`, {
+        await this.exec(`chmod ${shellQuote(options.mode)} ${shellQuote(remoteTemporary)}`, {
           silent: true,
         })
       }
+      await this.exec(`mv ${shellQuote(remoteTemporary)} ${shellQuote(remotePath)}`, {
+        silent: true,
+      })
     } finally {
       try {
         // eslint-disable-next-line security/detect-non-literal-fs-filename

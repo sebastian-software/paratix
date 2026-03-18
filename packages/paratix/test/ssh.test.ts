@@ -1019,7 +1019,7 @@ describe("SshConnectionImpl", () => {
   // -------------------------------------------------------------------------
 
   describe("uploadFile", () => {
-    it("runs chmod after mv when mode option is provided", async () => {
+    it("runs chmod on temp file before mv when mode option is provided", async () => {
       const { sftpUpload } = await import("../src/sftp.js")
       vi.mocked(sftpUpload).mockResolvedValue()
 
@@ -1036,14 +1036,14 @@ describe("SshConnectionImpl", () => {
           stream.emit("data", Buffer.from(tempPath))
           stream.emit("close", 0)
         })
-        // Second call: mv
+        // Second call: chmod (on temp file)
         .mockImplementationOnce((_command: string, callback: ExecCallback) => {
           const stream = makeStream()
           executedCommands.push(_command)
           callback(undefined, stream)
           stream.emit("close", 0)
         })
-        // Third call: chmod
+        // Third call: mv
         .mockImplementationOnce((_command: string, callback: ExecCallback) => {
           const stream = makeStream()
           executedCommands.push(_command)
@@ -1066,11 +1066,11 @@ describe("SshConnectionImpl", () => {
       const chmodCommand = executedCommands.find((cmd) => cmd.includes("chmod"))
       expect(chmodCommand).toBeDefined()
       expect(chmodCommand).toContain("0644")
-      expect(chmodCommand).toContain("/remote/path")
-      // chmod must come after mv
-      const mvIndex = executedCommands.findIndex((cmd) => cmd.includes(" mv "))
+      expect(chmodCommand).toContain(tempPath)
+      // chmod must come before mv
+      const mvIndex = executedCommands.findIndex((cmd) => /(?:^| )mv /v.test(cmd))
       const chmodIndex = executedCommands.findIndex((cmd) => cmd.includes("chmod"))
-      expect(chmodIndex).toBeGreaterThan(mvIndex)
+      expect(chmodIndex).toBeLessThan(mvIndex)
     })
 
     it("does not run chmod when no mode option is provided", async () => {
@@ -1213,7 +1213,7 @@ describe("SshConnectionImpl", () => {
       expect(executedCommands.some((cmd) => cmd.includes("mv"))).toBe(true)
     })
 
-    it("runs chmod after mv when mode option is provided", async () => {
+    it("runs chmod on temp file before mv when mode option is provided", async () => {
       const { sftpUpload } = await import("../src/sftp.js")
       vi.mocked(sftpUpload).mockResolvedValue()
 
@@ -1258,11 +1258,11 @@ describe("SshConnectionImpl", () => {
       const chmodCommand = executedCommands.find((cmd) => cmd.includes("chmod"))
       expect(chmodCommand).toBeDefined()
       expect(chmodCommand).toContain("0755")
-      expect(chmodCommand).toContain("/remote/path")
-      // chmod must come after mv
-      const mvIndex = executedCommands.findIndex((cmd) => cmd.includes(" mv "))
+      expect(chmodCommand).toContain(tempPath)
+      // chmod must come before mv
+      const mvIndex = executedCommands.findIndex((cmd) => /(?:^| )mv /v.test(cmd))
       const chmodIndex = executedCommands.findIndex((cmd) => cmd.includes("chmod"))
-      expect(chmodIndex).toBeGreaterThan(mvIndex)
+      expect(chmodIndex).toBeLessThan(mvIndex)
     })
   })
 
