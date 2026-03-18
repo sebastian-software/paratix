@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto"
 import { readFileSync } from "node:fs"
 import { appendFile, mkdir } from "node:fs/promises"
 import { homedir } from "node:os"
@@ -109,6 +110,22 @@ export function extractAlgoFromKey(keyBuffer: Buffer): string {
 }
 
 /**
+ * Compute the SHA256 fingerprint of an SSH public key in OpenSSH format.
+ *
+ * The result matches the fingerprint shown by `ssh-keygen -l`, e.g.
+ * `SHA256:AbCdEf...`. Trailing `=` padding characters are stripped from the
+ * base64 digest to conform to the OpenSSH fingerprint representation.
+ *
+ * @param key - The raw public key buffer (SSH wire format).
+ * @returns The fingerprint string prefixed with `SHA256:`.
+ */
+export function computeFingerprint(key: Buffer): string {
+  const hash = createHash("sha256").update(key).digest("base64")
+  // Remove trailing '=' padding to match OpenSSH format
+  return `SHA256:${hash.replaceAll("=", "")}`
+}
+
+/**
  * Append a new host key entry to `~/.ssh/known_hosts`.
  *
  * Creates the `~/.ssh` directory (mode `0o700`) and the file itself if they
@@ -195,6 +212,16 @@ export function buildHostVerifier(
         )
       }
       // mode === "accept-new": accept and persist
+      try {
+        const algo = extractAlgoFromKey(key)
+        const fingerprint = computeFingerprint(key)
+        process.stderr.write(
+          `WARNING: Permanently added '${host}' (${algo}) to the list of known hosts. ` +
+            `Fingerprint: ${fingerprint}\n`
+        )
+      } catch {
+        process.stderr.write(`WARNING: Permanently added '${host}' to the list of known hosts.\n`)
+      }
       appendHostKey(host, port, key).catch((error: unknown) => {
         process.stderr.write(
           `WARNING: Could not persist host key for ${host} — ` +

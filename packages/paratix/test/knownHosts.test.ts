@@ -1,8 +1,10 @@
+import { createHash } from "node:crypto"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 
 import {
   appendHostKey,
   buildHostVerifier,
+  computeFingerprint,
   extractAlgoFromKey,
   lookupHostKey,
   parseKnownHosts,
@@ -242,6 +244,52 @@ describe("extractAlgoFromKey", () => {
 })
 
 // ---------------------------------------------------------------------------
+// computeFingerprint
+// ---------------------------------------------------------------------------
+
+describe("computeFingerprint", () => {
+  it("returns SHA256:<base64> format", () => {
+    const key = makeKeyBuffer("ssh-ed25519", Buffer.from("some-key-material"))
+    const expectedHash = createHash("sha256").update(key).digest("base64").replaceAll("=", "")
+    const fingerprint = computeFingerprint(key)
+    expect(fingerprint).toBe(`SHA256:${expectedHash}`)
+  })
+
+  it("does not include trailing padding characters", () => {
+    const key = makeKeyBuffer("ssh-ed25519", Buffer.from("another-key-material"))
+    const fingerprint = computeFingerprint(key)
+    expect(fingerprint).not.toMatch(/=$/v)
+  })
+
+  it("matches ssh-keygen fingerprint for a real RSA public key", () => {
+    // Key and expected fingerprint verified with: ssh-keygen -lf test-key.pub
+    // 4096 SHA256:+RNNX58XMUIvS6ccvCfIuIPuOcPgorJ9P+2CtmrRbxM test-key (RSA)
+    const realKeyBase64 =
+      "AAAAB3NzaC1yc2EAAAADAQABAAACAQCcKn9oaPBEX5MPGQ23ucwsy4ii6f5zzktrIaHz" +
+      "MknBTempDzTuT2dVfiLz1f/eToE0ezwQ+OuqVZlXrAi/dOv4mZnupsY1xKvG6INzbD5z" +
+      "K4VN4asMKvAwpPYHwY5x0NCJDwNJrm2fzP3lQyj7lTbvZQwPezGxVFfwp/c+yM3CnSX" +
+      "hyMBkBawQo4VnB9HT7mhiCsy46WqDuG/zGb5f1YxoS1wnbHsHKKi/ZdH1ttdQwI6lPo" +
+      "FLZNWYhPVm4Heyy8p6EAku0t1EKmZRZh4qKkUlIKZwBYLGm0irNlH7Z2SWnuFEDjWSN" +
+      "jUl5y5jLqZTJ8hpSh0YJfPcHEVp63+MshFCzlq6snHEgFxidoFbxQ03j70aT8yWbLzf" +
+      "qjYt+kSLwzdSOAdqsOXxC2H7WchUI7nyjKpUyEsibLbJ9okBcLRmU3xAnQtYz7U9XHa" +
+      "aHqlX7Ll2Uz8mxUsG/BZUnOMLtOnu4ZU5l3oJBXOB6N4QVW5Sj1GWfAlL4I8fZpyZXiM" +
+      "kbJNOb0YqNLr4NYqEXKB1YXSoYBsw5tZBpPa66blrh4BnBOqbqrzgfW9ais+CIg2MeD" +
+      "qwMe39toei1oZKKKySHwvCMNmTI8mdQdMR/8VaM9qh8/O/19CHwRzXUEnuoygii1mLwR" +
+      "F/DhNI6dWaZjp/XPNXn6VSr0kIL/ZTcDgprPFxPw=="
+    const key = Buffer.from(realKeyBase64, "base64")
+    expect(computeFingerprint(key)).toBe("SHA256:+RNNX58XMUIvS6ccvCfIuIPuOcPgorJ9P+2CtmrRbxM")
+  })
+
+  it("returns different fingerprints for different keys", () => {
+    const keyA = makeKeyBuffer("ssh-ed25519", Buffer.from("key-material-alpha"))
+    const keyB = makeKeyBuffer("ssh-ed25519", Buffer.from("key-material-beta"))
+    const fingerprintA = computeFingerprint(keyA)
+    const fingerprintB = computeFingerprint(keyB)
+    expect(fingerprintA).not.toBe(fingerprintB)
+  })
+})
+
+// ---------------------------------------------------------------------------
 // appendHostKey
 // ---------------------------------------------------------------------------
 
@@ -373,6 +421,28 @@ describe("buildHostVerifier", () => {
     expect(appendFileMock).toHaveBeenCalled()
   })
 
+  it("mode 'accept-new' with unknown host: writes fingerprint warning to stderr", async () => {
+    readFileSyncMock.mockReturnValue("")
+
+    const stderrSpy = vi.spyOn(process.stderr, "write").mockImplementation(() => true)
+
+    try {
+      const { hostVerifier } = buildHostVerifier("accept-new", "newhost.com", 22)
+      expect(hostVerifier).toBeDefined()
+
+      hostVerifier!(ed25519Key)
+
+      expect(stderrSpy).toHaveBeenCalledTimes(1)
+      const warning = (stderrSpy.mock.calls[0] as [string])[0]
+      expect(warning).toContain("SHA256:")
+      expect(warning).toContain("ssh-ed25519")
+
+      await Promise.resolve()
+    } finally {
+      stderrSpy.mockRestore()
+    }
+  })
+
   it("mode 'accept-new' with known host and correct key: hostVerifier returns true", () => {
     readFileSyncMock.mockReturnValue(makeKnownHostsContent("example.com", 22, ed25519Key))
 
@@ -441,14 +511,21 @@ describe("buildHostVerifier", () => {
       const result = hostVerifier!(ed25519Key)
       expect(result).toBe(true)
 
+      // The first stderr.write is the "Permanently added" warning (synchronous)
+      expect(stderrSpy).toHaveBeenCalledTimes(1)
+      const addedWarning = (stderrSpy.mock.calls[0] as [string])[0]
+      expect(addedWarning).toContain("WARNING")
+      expect(addedWarning).toContain("Permanently added")
+      expect(addedWarning).toContain("newhost.com")
+
       // Flush the full async chain: mkdir resolves → appendFile rejects → .catch() runs
       await vi.waitFor(() => {
-        expect(stderrSpy).toHaveBeenCalledOnce()
+        expect(stderrSpy).toHaveBeenCalledTimes(2)
       })
-      const written = (stderrSpy.mock.calls[0] as [string])[0]
-      expect(written).toContain("WARNING")
-      expect(written).toContain("future connections")
-      expect(written).toContain("newhost.com")
+      const persistWarning = (stderrSpy.mock.calls[1] as [string])[0]
+      expect(persistWarning).toContain("WARNING")
+      expect(persistWarning).toContain("future connections")
+      expect(persistWarning).toContain("newhost.com")
     } finally {
       stderrSpy.mockRestore()
     }
