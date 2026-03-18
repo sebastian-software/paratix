@@ -439,7 +439,7 @@ export class SshConnectionImpl implements SshConnection {
     for (const port of this.config.ports) {
       try {
         const client = new Client()
-        const { hostVerifier } = buildHostVerifier(mode, this.host, port)
+        const { hostVerifier, pendingPersist } = buildHostVerifier(mode, this.host, port)
         // eslint-disable-next-line no-await-in-loop
         await tryConnectOnPort({
           agent,
@@ -452,6 +452,9 @@ export class SshConnectionImpl implements SshConnection {
           privateKey,
           username: this.config.user,
         })
+        // Ensure the host key is persisted to disk before returning
+        // eslint-disable-next-line no-await-in-loop
+        if (pendingPersist) await pendingPersist
         client.on("close", () => {
           const error = new Error("SSH connection closed unexpectedly")
           for (const rejectFunction of this.pendingRejects) {

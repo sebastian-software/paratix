@@ -200,8 +200,9 @@ function loadKnownHostEntries(): KnownHostEntry[] {
  * @param host - The hostname or IP of the remote host.
  * @param port - The SSH port of the remote host.
  * @param key - The raw public key buffer presented by the remote host.
+ * @returns A promise that resolves once the key has been written to disk (or the write error has been handled).
  */
-function acceptAndPersistHostKey(host: string, port: number, key: Buffer): void {
+async function acceptAndPersistHostKey(host: string, port: number, key: Buffer): Promise<void> {
   try {
     const algo = extractAlgoFromKey(key)
     const fingerprint = computeFingerprint(key)
@@ -213,7 +214,9 @@ function acceptAndPersistHostKey(host: string, port: number, key: Buffer): void 
     process.stderr.write(`WARNING: Permanently added '${host}' to the list of known hosts.\n`)
   }
   inMemoryHostKeys.set(formatHostNeedle(host, port), key)
-  appendHostKey(host, port, key).catch((error: unknown) => {
+  try {
+    await appendHostKey(host, port, key)
+  } catch (error: unknown) {
     const keyscanArguments = port === DEFAULT_SSH_PORT ? host : `-p ${port} ${host}`
     process.stderr.write(
       `WARNING: Could not persist host key for ${host} — ` +
@@ -222,7 +225,7 @@ function acceptAndPersistHostKey(host: string, port: number, key: Buffer): void 
         `ssh-keyscan ${keyscanArguments} >> ~/.ssh/known_hosts. ` +
         `${String(error)}\n`
     )
-  })
+  }
 }
 
 /**
@@ -245,13 +248,13 @@ export function buildHostVerifier(
   mode: "accept-new" | "no" | "yes",
   host: string,
   port: number
-): { hostVerifier?: (key: Buffer) => boolean } {
+): { hostVerifier?: (key: Buffer) => boolean; pendingPersist?: Promise<void> } {
   if (mode === "no") return {}
 
   const entries = loadKnownHostEntries()
   const fileKey = lookupHostKey(entries, host, port)
 
-  return {
+  const result: { hostVerifier: (key: Buffer) => boolean; pendingPersist?: Promise<void> } = {
     hostVerifier(key: Buffer): boolean {
       const existingKey = fileKey ?? inMemoryHostKeys.get(formatHostNeedle(host, port)) ?? null
       if (existingKey != null) {
@@ -271,8 +274,9 @@ export function buildHostVerifier(
         )
       }
       // mode === "accept-new": accept and persist
-      acceptAndPersistHostKey(host, port, key)
+      result.pendingPersist = acceptAndPersistHostKey(host, port, key)
       return true
     },
   }
+  return result
 }
