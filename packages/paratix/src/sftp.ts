@@ -23,7 +23,7 @@ export async function sftpDownload(
 
       const readStream = sftp.createReadStream(remotePath)
       // eslint-disable-next-line security/detect-non-literal-fs-filename
-      const writeStream = createWriteStream(localPath)
+      const writeStream = createWriteStream(localPath, { mode: 0o600 })
 
       let settled = false
 
