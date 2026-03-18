@@ -1,5 +1,5 @@
 import { mergeEnvironment } from "./environment.js"
-import { printModuleResult, printRecipeHeader } from "./output.js"
+import { printCommandFailure, printModuleResult, printRecipeHeader } from "./output.js"
 import {
   type Environment,
   type Module,
@@ -87,9 +87,14 @@ async function triggerSignals(
   environment: Environment
 ): Promise<void> {
   for (const signal of signals) {
-    // eslint-disable-next-line no-await-in-loop
-    const result = await signal.apply(ssh, environment)
-    printModuleResult(`signal: ${signal.name}`, result.status)
+    try {
+      // eslint-disable-next-line no-await-in-loop
+      const result = await signal.apply(ssh, environment)
+      printModuleResult(`signal: ${signal.name}`, result.status)
+    } catch (error) {
+      printModuleResult(`signal: ${signal.name}`, "failed")
+      printCommandFailure(error, false)
+    }
   }
 }
 
