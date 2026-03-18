@@ -145,7 +145,12 @@ async function checkDownload(
 
   if (options.sha256 != null) {
     const actualHash = await conn.sha256(destination)
-    return actualHash === options.sha256 ? "ok" : NEEDS_APPLY
+    if (actualHash?.length === options.sha256.length) {
+      const actual = Buffer.from(actualHash, "hex")
+      const expected = Buffer.from(options.sha256, "hex")
+      if (actual.length === expected.length && timingSafeEqual(actual, expected)) return "ok"
+    }
+    return NEEDS_APPLY
   }
 
   const fileExists = await conn.exists(destination)
