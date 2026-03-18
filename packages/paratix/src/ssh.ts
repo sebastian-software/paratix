@@ -138,20 +138,10 @@ export class SshConnectionImpl implements SshConnection {
     const environmentPrefix = this.buildEnvPrefix(options.env)
     const { command: cmd, needsPassword } = this.sudoCommand(command, environmentPrefix)
     return new Promise((resolve, reject) => {
-      let settled = false
-      const wrappedResolve = (value: ExecResult): void => {
-        if (settled) return
-        settled = true
-        this.pendingRejects.delete(wrappedReject)
-        resolve(value)
-      }
-      const wrappedReject = (reason: Error): void => {
-        if (settled) return
-        settled = true
-        this.pendingRejects.delete(wrappedReject)
-        reject(reason)
-      }
-      this.pendingRejects.add(wrappedReject)
+      const { wrappedReject, wrappedResolve } = this.createSettledCallbacks<ExecResult>(
+        resolve,
+        reject
+      )
       const timeout = options.timeout ?? COMMAND_TIMEOUT
       const secrets = this.buildSecrets(options.secrets)
       let activeStream: ClientChannel | null = null
@@ -425,6 +415,27 @@ export class SshConnectionImpl implements SshConnection {
     )
   }
 
+  private createSettledCallbacks<T>(
+    resolve: (value: T) => void,
+    reject: (reason: Error) => void
+  ): { wrappedReject: (reason: Error) => void; wrappedResolve: (value: T) => void } {
+    let settled = false
+    const wrappedReject = (reason: Error): void => {
+      if (settled) return
+      settled = true
+      this.pendingRejects.delete(wrappedReject)
+      reject(reason)
+    }
+    const wrappedResolve = (value: T): void => {
+      if (settled) return
+      settled = true
+      this.pendingRejects.delete(wrappedReject)
+      resolve(value)
+    }
+    this.pendingRejects.add(wrappedReject)
+    return { wrappedReject, wrappedResolve }
+  }
+
   /** Tear down the SSH transport without touching the cached sudo password. */
   private disconnectTransport(): void {
     if (this.client) {
@@ -461,15 +472,19 @@ export class SshConnectionImpl implements SshConnection {
   private async execRaw(command: string): Promise<{ exitCode: number; stdout: string }> {
     const client = this.ensureClient()
     return new Promise((resolve, reject) => {
+      const { wrappedReject, wrappedResolve } = this.createSettledCallbacks<{
+        exitCode: number
+        stdout: string
+      }>(resolve, reject)
       let activeStream: ClientChannel | null = null
       const timer = setTimeout(() => {
         activeStream?.close()
-        reject(new Error(`Command timed out after ${COMMAND_TIMEOUT}ms: ${command}`))
+        wrappedReject(new Error(`Command timed out after ${COMMAND_TIMEOUT}ms: ${command}`))
       }, COMMAND_TIMEOUT)
       client.exec(command, (error: Error | undefined, stream: ClientChannel) => {
         if (error) {
           clearTimeout(timer)
-          reject(error)
+          wrappedReject(error)
           return
         }
         activeStream = stream
@@ -479,7 +494,7 @@ export class SshConnectionImpl implements SshConnection {
         })
         stream.on("close", (code: number) => {
           clearTimeout(timer)
-          resolve({ exitCode: code, stdout: Buffer.concat(chunks).toString("utf8") })
+          wrappedResolve({ exitCode: code, stdout: Buffer.concat(chunks).toString("utf8") })
         })
         stream.stderr.on("data", () => {
           // discard stderr

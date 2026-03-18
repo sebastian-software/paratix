@@ -1843,6 +1843,56 @@ describe("SshConnectionImpl", () => {
       // Assert
       await expect(probePromise).rejects.toThrow(/Command timed out after 120000ms/v)
     })
+
+    it("rejects immediately when disconnectTransport() is called while execRaw is pending — R-005 regression", async () => {
+      // Regression: execRaw did not register its wrappedReject in pendingRejects,
+      // so a disconnect during an ongoing execRaw call would never settle the
+      // Promise. The caller (ensureSudoInstalled / probeSudo) would hang until the
+      // 120-second COMMAND_TIMEOUT expired instead of failing fast.
+      //
+      // Fix: execRaw now registers wrappedReject in pendingRejects, exactly as
+      // exec() does. disconnectTransport() iterates pendingRejects and rejects all
+      // of them, so the Promise settles immediately.
+
+      // Arrange: exec callback receives the stream but the stream never emits 'close'
+      // — the execRaw Promise stays pending until something externally rejects it.
+      const execSpy = vi.fn().mockImplementation((_command: string, callback: ExecCallback) => {
+        const stream = makeStream()
+        callback(undefined, stream)
+        // Intentionally omit stream.emit("close", ...) to keep execRaw pending
+      })
+
+      const client = makeClientWithExecSpy(execSpy)
+      const ssh = makeConnectedSsh(client, { user: "deploy" })
+
+      // Act: start probeSudo (which internally calls ensureSudoInstalled → execRaw)
+      const probePromise = ssh.probeSudo()
+
+      // Attach rejection handler early so the unhandled-rejection detector does not
+      // fire before the assertion below.
+      probePromise.catch(() => {
+        /* handled below */
+      })
+
+      // Assert precondition: execRaw must have been called and pendingRejects must
+      // contain the registered wrappedReject — if the set is empty the bug is present.
+      const pendingRejects = (ssh as unknown as Record<string, unknown>).pendingRejects as Set<
+        (reason: Error) => void
+      >
+      expect(pendingRejects.size).toBe(1)
+
+      // Simulate a disconnect while execRaw is waiting for the stream to close.
+      // disconnectTransport() is private — call it via the public disconnect() API.
+      ssh.disconnect()
+
+      // The Promise must reject immediately with "SSH connection closed", not after
+      // 120 000 ms (COMMAND_TIMEOUT).  No fake timers needed — if pendingRejects was
+      // empty the Promise would never settle here and the test would time out.
+      await expect(probePromise).rejects.toThrow("SSH connection closed")
+
+      // After disconnect the pendingRejects set must have been cleared.
+      expect(pendingRejects.size).toBe(0)
+    })
   })
 
   // -------------------------------------------------------------------------
