@@ -191,5 +191,12 @@ export function generateTotpCode(otpauthUri: string): string {
 
   // Compute HMAC and apply dynamic truncation
   const hmacDigest = createHmac(algorithm, key).update(counterBuffer).digest()
-  return truncateHmac(hmacDigest, digits)
+  const code = truncateHmac(hmacDigest, digits)
+
+  // Zero-fill sensitive buffers to reduce exposure window in memory
+  key.fill(0)
+  counterBuffer.fill(0)
+  hmacDigest.fill(0)
+
+  return code
 }
