@@ -4,6 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import {
   appendHostKey,
   buildHostVerifier,
+  clearHostKeyCache,
   computeFingerprint,
   extractAlgoFromKey,
   lookupHostKey,
@@ -386,6 +387,7 @@ describe("buildHostVerifier", () => {
   const ed25519Key = makeKeyBuffer("ssh-ed25519", Buffer.from("real-key-material-here"))
 
   beforeEach(async () => {
+    clearHostKeyCache()
     const fs = await import("node:fs")
     const fsp = await import("node:fs/promises")
     readFileSyncMock = vi.mocked(fs.readFileSync)
@@ -524,7 +526,7 @@ describe("buildHostVerifier", () => {
       })
       const persistWarning = (stderrSpy.mock.calls[1] as [string])[0]
       expect(persistWarning).toContain("WARNING")
-      expect(persistWarning).toContain("future connections")
+      expect(persistWarning).toContain("cached in memory")
       expect(persistWarning).toContain("newhost.com")
     } finally {
       stderrSpy.mockRestore()
@@ -571,5 +573,133 @@ describe("buildHostVerifier", () => {
     const { hostVerifier } = buildHostVerifier("yes", "newhost.com", 22)
 
     expect(() => hostVerifier!(ed25519Key)).toThrow(/accept-new/v)
+  })
+
+  it("mode 'accept-new': caches key in memory after accepting unknown host", async () => {
+    // Arrange: empty known_hosts, appendFile succeeds
+    readFileSyncMock.mockReturnValue("")
+
+    const { hostVerifier: firstVerifier } = buildHostVerifier("accept-new", "newhost.com", 22)
+    expect(firstVerifier).toBeDefined()
+
+    // Act: accept the key — it gets cached in memory
+    const firstResult = firstVerifier!(ed25519Key)
+    expect(firstResult).toBe(true)
+
+    await Promise.resolve()
+
+    // Arrange: second verifier with empty known_hosts but in-memory cache still populated
+    // (clearHostKeyCache NOT called)
+    readFileSyncMock.mockReturnValue("")
+    const { hostVerifier: secondVerifier } = buildHostVerifier("accept-new", "newhost.com", 22)
+    expect(secondVerifier).toBeDefined()
+
+    // Act: second verifier should recognise the cached key
+    const secondResult = secondVerifier!(ed25519Key)
+
+    // Assert: returns true and appendFile was called only once (for the first verifier)
+    expect(secondResult).toBe(true)
+    expect(appendFileMock).toHaveBeenCalledTimes(1)
+  })
+
+  it("mode 'accept-new': cached key mismatch throws verification error", async () => {
+    // Arrange: empty known_hosts, accept key A
+    readFileSyncMock.mockReturnValue("")
+
+    const { hostVerifier: firstVerifier } = buildHostVerifier("accept-new", "newhost.com", 22)
+    expect(firstVerifier).toBeDefined()
+    firstVerifier!(ed25519Key)
+
+    await Promise.resolve()
+
+    // Arrange: second verifier with empty known_hosts but cached key A still in memory
+    readFileSyncMock.mockReturnValue("")
+    const { hostVerifier: secondVerifier } = buildHostVerifier("accept-new", "newhost.com", 22)
+    expect(secondVerifier).toBeDefined()
+
+    // Act & Assert: presenting a different key B should throw
+    const keyB = makeKeyBuffer("ssh-ed25519", Buffer.from("different-key-material-B"))
+    expect(() => secondVerifier!(keyB)).toThrow(/HOST KEY VERIFICATION FAILED/v)
+  })
+
+  it("mode 'accept-new': persist failure warning includes ssh-keyscan hint", async () => {
+    // Arrange: empty known_hosts, appendFile rejects
+    readFileSyncMock.mockReturnValue("")
+    const accessError = Object.assign(new Error("Permission denied"), { code: "EACCES" })
+    appendFileMock.mockRejectedValue(accessError)
+
+    const stderrSpy = vi.spyOn(process.stderr, "write").mockImplementation(() => true)
+
+    try {
+      const { hostVerifier } = buildHostVerifier("accept-new", "newhost.com", 22)
+      expect(hostVerifier).toBeDefined()
+
+      hostVerifier!(ed25519Key)
+
+      // Wait for the async .catch() to fire
+      await vi.waitFor(() => {
+        expect(stderrSpy).toHaveBeenCalledTimes(2)
+      })
+
+      const persistWarning = (stderrSpy.mock.calls[1] as [string])[0]
+      expect(persistWarning).toContain("ssh-keyscan")
+    } finally {
+      stderrSpy.mockRestore()
+    }
+  })
+
+  it("mode 'accept-new': persist failure warning includes port flag for non-standard port", async () => {
+    // Arrange: empty known_hosts, appendFile rejects, non-standard port
+    readFileSyncMock.mockReturnValue("")
+    const accessError = Object.assign(new Error("Permission denied"), { code: "EACCES" })
+    appendFileMock.mockRejectedValue(accessError)
+
+    const stderrSpy = vi.spyOn(process.stderr, "write").mockImplementation(() => true)
+
+    try {
+      const { hostVerifier } = buildHostVerifier("accept-new", "newhost.com", 2222)
+      expect(hostVerifier).toBeDefined()
+
+      hostVerifier!(ed25519Key)
+
+      // Wait for the async .catch() to fire
+      await vi.waitFor(() => {
+        expect(stderrSpy).toHaveBeenCalledTimes(2)
+      })
+
+      const persistWarning = (stderrSpy.mock.calls[1] as [string])[0]
+      expect(persistWarning).toContain("-p 2222")
+    } finally {
+      stderrSpy.mockRestore()
+    }
+  })
+
+  it("clearHostKeyCache removes cached keys", async () => {
+    // Arrange: accept a key so it gets cached
+    readFileSyncMock.mockReturnValue("")
+
+    const { hostVerifier: firstVerifier } = buildHostVerifier("accept-new", "newhost.com", 22)
+    expect(firstVerifier).toBeDefined()
+    firstVerifier!(ed25519Key)
+
+    await Promise.resolve()
+
+    // Act: clear the cache
+    clearHostKeyCache()
+
+    // Arrange: new verifier with empty known_hosts and empty cache
+    readFileSyncMock.mockReturnValue("")
+    appendFileMock.mockClear()
+    const { hostVerifier: secondVerifier } = buildHostVerifier("accept-new", "newhost.com", 22)
+    expect(secondVerifier).toBeDefined()
+
+    // Act: second verifier should treat the key as unknown again
+    const result = secondVerifier!(ed25519Key)
+    expect(result).toBe(true)
+
+    await Promise.resolve()
+
+    // Assert: appendFile called again (key was unknown, not from cache)
+    expect(appendFileMock).toHaveBeenCalledTimes(1)
   })
 })

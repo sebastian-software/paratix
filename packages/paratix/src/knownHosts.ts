@@ -24,6 +24,19 @@ const DEFAULT_SSH_PORT = 22
 const UINT32_SIZE = 4
 
 /**
+ * In-memory cache for accepted host keys that could not be persisted to disk.
+ * Keyed by the formatted host needle (e.g. `"example.com"` or `"[example.com]:2222"`).
+ */
+const inMemoryHostKeys = new Map<string, Buffer>()
+
+/**
+ * Clear the in-memory host key cache. Intended for use in tests.
+ */
+export function clearHostKeyCache(): void {
+  inMemoryHostKeys.clear()
+}
+
+/**
  * Parse the contents of an OpenSSH `known_hosts` file into structured entries.
  *
  * - Blank lines and comment lines (starting with `#`) are skipped.
@@ -168,6 +181,42 @@ function loadKnownHostEntries(): KnownHostEntry[] {
 }
 
 /**
+ * Accept an unknown host key, warn to stderr, and persist it to `~/.ssh/known_hosts`.
+ *
+ * The key is immediately stored in the in-memory cache so subsequent connections
+ * within the same process succeed even if the disk write fails. If writing to
+ * disk fails, a recovery hint with the equivalent `ssh-keyscan` command is
+ * printed to stderr.
+ *
+ * @param host - The hostname or IP of the remote host.
+ * @param port - The SSH port of the remote host.
+ * @param key - The raw public key buffer presented by the remote host.
+ */
+function acceptAndPersistHostKey(host: string, port: number, key: Buffer): void {
+  try {
+    const algo = extractAlgoFromKey(key)
+    const fingerprint = computeFingerprint(key)
+    process.stderr.write(
+      `WARNING: Permanently added '${host}' (${algo}) to the list of known hosts. ` +
+        `Fingerprint: ${fingerprint}\n`
+    )
+  } catch {
+    process.stderr.write(`WARNING: Permanently added '${host}' to the list of known hosts.\n`)
+  }
+  inMemoryHostKeys.set(formatHostNeedle(host, port), key)
+  appendHostKey(host, port, key).catch((error: unknown) => {
+    const keyscanArguments = port === DEFAULT_SSH_PORT ? host : `-p ${port} ${host}`
+    process.stderr.write(
+      `WARNING: Could not persist host key for ${host} — ` +
+        `the key is cached in memory for this session. ` +
+        `To persist it, ensure ~/.ssh/ is writable or run: ` +
+        `ssh-keyscan ${keyscanArguments} >> ~/.ssh/known_hosts. ` +
+        `${String(error)}\n`
+    )
+  })
+}
+
+/**
  * Build the `hostVerifier` callback for an ssh2 `ConnectConfig`.
  *
  * Behaviour by mode:
@@ -191,10 +240,11 @@ export function buildHostVerifier(
   if (mode === "no") return {}
 
   const entries = loadKnownHostEntries()
-  const existingKey = lookupHostKey(entries, host, port)
+  const fileKey = lookupHostKey(entries, host, port)
 
   return {
     hostVerifier(key: Buffer): boolean {
+      const existingKey = fileKey ?? inMemoryHostKeys.get(formatHostNeedle(host, port)) ?? null
       if (existingKey != null) {
         if (existingKey.equals(key)) return true
         const presentedAlgo = extractAlgoFromKey(key)
@@ -212,22 +262,7 @@ export function buildHostVerifier(
         )
       }
       // mode === "accept-new": accept and persist
-      try {
-        const algo = extractAlgoFromKey(key)
-        const fingerprint = computeFingerprint(key)
-        process.stderr.write(
-          `WARNING: Permanently added '${host}' (${algo}) to the list of known hosts. ` +
-            `Fingerprint: ${fingerprint}\n`
-        )
-      } catch {
-        process.stderr.write(`WARNING: Permanently added '${host}' to the list of known hosts.\n`)
-      }
-      appendHostKey(host, port, key).catch((error: unknown) => {
-        process.stderr.write(
-          `WARNING: Could not persist host key for ${host} — ` +
-            `future connections to this host cannot be verified. ${String(error)}\n`
-        )
-      })
+      acceptAndPersistHostKey(host, port, key)
       return true
     },
   }
