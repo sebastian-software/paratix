@@ -119,6 +119,7 @@ export const sshd = {
         const originalConfig = await ssh.readFile(SSHD_CONFIG_PATH)
         await applySshdSetting(ssh, "Port", String(targetPort))
         await validateSshdConfig(ssh, originalConfig)
+        ssh.addPort(targetPort)
         await ssh.exec("systemctl restart sshd", { silent: true })
 
         return {

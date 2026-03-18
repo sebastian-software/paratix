@@ -391,6 +391,30 @@ describe("sshd.port — apply: validation and rollback", () => {
     const execCommands = execSpy.mock.calls.map((args) => args[0])
     expect(execCommands).toContain("systemctl restart sshd")
   })
+
+  it("regression — addPort is called before systemctl restart sshd", async () => {
+    // Bug: ssh.addPort(targetPort) was missing before "systemctl restart sshd".
+    // This test ensures the call order is: addPort → exec("systemctl restart sshd").
+    const mockSsh = createMockSsh({
+      [CAT_SSHD]: { stdout: "Port 22" },
+    })
+    trackWriteFile(mockSsh)
+    const execSpy = vi.spyOn(mockSsh, "exec")
+    const addPortSpy = vi.spyOn(mockSsh, "addPort")
+
+    execSpy.mockResolvedValue({ code: 0, stderr: "", stdout: "" })
+
+    const mod = sshd.port(2222)
+    await mod.apply(mockSsh, emptyEnv)
+
+    const addPortOrder = addPortSpy.mock.invocationCallOrder[0]
+    const restartCallIndex = execSpy.mock.calls.findIndex((args) => args[0] === "systemctl restart sshd")
+    const restartOrder = execSpy.mock.invocationCallOrder[restartCallIndex]
+
+    expect(addPortOrder).toBeDefined()
+    expect(restartOrder).toBeDefined()
+    expect(addPortOrder).toBeLessThan(restartOrder!)
+  })
 })
 
 // ─── sshd.config — module name ────────────────────────────────────────────────
