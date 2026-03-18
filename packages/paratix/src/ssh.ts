@@ -83,13 +83,20 @@ export class SshConnectionImpl implements SshConnection {
       return
     }
     // eslint-disable-next-line security/detect-non-literal-fs-filename
-    const privateKey = await readFile(this.config.privateKey, "utf8")
-    if (await this.tryConnectOnPorts(privateKey)) return
-    if (this.config.passwordFallback) {
-      const password = await promptTerminal(`Password for ${this.config.user}@${this.host}: `, true)
-      if (await this.tryConnectOnPorts(privateKey, password)) return
+    const privateKey = await readFile(this.config.privateKey)
+    try {
+      if (await this.tryConnectOnPorts(privateKey)) return
+      if (this.config.passwordFallback) {
+        const password = await promptTerminal(
+          `Password for ${this.config.user}@${this.host}: `,
+          true
+        )
+        if (await this.tryConnectOnPorts(privateKey, password)) return
+      }
+      throw new Error(`Failed to connect to ${this.host} on ports: ${this.config.ports.join(", ")}`)
+    } finally {
+      privateKey.fill(0)
     }
-    throw new Error(`Failed to connect to ${this.host} on ports: ${this.config.ports.join(", ")}`)
   }
 
   public disconnect(): void {
@@ -419,7 +426,7 @@ export class SshConnectionImpl implements SshConnection {
    * @returns `true` if a port connected successfully, `false` if all ports failed.
    */
   private async tryConnectOnPorts(
-    privateKey?: string,
+    privateKey?: Buffer | string,
     password?: string,
     agent?: string
   ): Promise<boolean> {

@@ -25,7 +25,9 @@ vi.mock("node:fs", () => ({
 vi.mock("node:fs/promises", () => ({
   appendFile: vi.fn().mockResolvedValue(null),
   mkdir: vi.fn().mockResolvedValue(null),
-  readFile: vi.fn().mockResolvedValue("fake-private-key"),
+  // readFile must return a Buffer (not a string) because connect() calls readFile(path)
+  // without an encoding argument and then calls privateKey.fill(0) on the result.
+  readFile: vi.fn().mockResolvedValue(Buffer.from("fake-private-key")),
   stat: vi.fn().mockResolvedValue({}),
 }))
 
@@ -207,6 +209,12 @@ describe("SshConnectionImpl", () => {
     // tryConnectOnPorts() would throw a TypeError because the mock returns undefined.
     const knownHosts = await import("../src/knownHosts.js")
     vi.mocked(knownHosts.buildHostVerifier).mockReturnValue({})
+
+    // Re-establish readFile mock after vi.resetAllMocks() wipes it.
+    // connect() calls readFile(path) without encoding — the result must be a Buffer
+    // so that privateKey.fill(0) in the finally-block does not throw a TypeError.
+    const fsp = await import("node:fs/promises")
+    vi.mocked(fsp.readFile).mockResolvedValue(Buffer.from("fake-private-key") as never)
   })
 
   afterEach(() => {
@@ -589,6 +597,86 @@ describe("SshConnectionImpl", () => {
       expect(promptTerminal).not.toHaveBeenCalled()
       // Only one attempt (no fallback)
       expect(tryConnectOnPort).toHaveBeenCalledTimes(1)
+    })
+  })
+
+  // -------------------------------------------------------------------------
+  // connect — private key auth and memory sanitisation
+  // -------------------------------------------------------------------------
+
+  describe("connect (private key auth)", () => {
+    it("reads the private key as a Buffer (no utf8 encoding)", async () => {
+      // Arrange: readFile mock returns a Buffer to simulate binary-safe read
+      const { readFile } = await import("node:fs/promises")
+      const fakeKeyBuffer = Buffer.from("fake-pem-key-content")
+      vi.mocked(readFile).mockResolvedValueOnce(fakeKeyBuffer as never)
+      vi.mocked(tryConnectOnPort).mockResolvedValueOnce()
+
+      const ssh = makeSshInstance()
+
+      // Act
+      await ssh.connect()
+
+      // Assert: readFile was called with just the path — no "utf8" encoding option
+      expect(readFile).toHaveBeenCalledOnce()
+      const [calledPath, calledOptions] = vi.mocked(readFile).mock.calls[0] as [string, unknown]
+      expect(calledPath).toBe("/dev/null")
+      // Must NOT pass an encoding so the result is a Buffer, not a string
+      expect(calledOptions).toBeUndefined()
+    })
+
+    it("zeroes the private key Buffer after a successful connection (finally-block)", async () => {
+      // Arrange
+      const { readFile } = await import("node:fs/promises")
+      const fakeKeyBuffer = Buffer.from("sensitive-private-key")
+      vi.mocked(readFile).mockResolvedValueOnce(fakeKeyBuffer as never)
+      vi.mocked(tryConnectOnPort).mockResolvedValueOnce()
+
+      const ssh = makeSshInstance()
+
+      // Act
+      await ssh.connect()
+
+      // Assert: every byte of the buffer must be 0 after connect() resolves
+      expect(fakeKeyBuffer.every((byte) => byte === 0)).toBe(true)
+    })
+
+    it("zeroes the private key Buffer even when the connection fails (finally-block on error)", async () => {
+      // Arrange
+      const { readFile } = await import("node:fs/promises")
+      const fakeKeyBuffer = Buffer.from("sensitive-private-key")
+      vi.mocked(readFile).mockResolvedValueOnce(fakeKeyBuffer as never)
+      // All ports fail — tryConnectOnPorts returns false, connect() throws
+      vi.mocked(tryConnectOnPort).mockRejectedValue(new Error("Connection refused"))
+
+      const ssh = makeSshInstance({ ports: [22] })
+
+      // Act: expect the connect to fail
+      await expect(ssh.connect()).rejects.toThrow(/Failed to connect/v)
+
+      // Assert: buffer must still be zeroed despite the error
+      expect(fakeKeyBuffer.every((byte) => byte === 0)).toBe(true)
+    })
+
+    it("passes the Buffer directly to tryConnectOnPort as privateKey", async () => {
+      // Arrange
+      const { readFile } = await import("node:fs/promises")
+      const fakeKeyBuffer = Buffer.from("my-rsa-key")
+      vi.mocked(readFile).mockResolvedValueOnce(fakeKeyBuffer as never)
+      vi.mocked(tryConnectOnPort).mockResolvedValueOnce()
+
+      const ssh = makeSshInstance()
+
+      // Act
+      await ssh.connect()
+
+      // Assert: the Buffer was forwarded unchanged to tryConnectOnPort
+      expect(tryConnectOnPort).toHaveBeenCalledOnce()
+      const [callArgs] = vi.mocked(tryConnectOnPort).mock.calls[0] as [
+        Parameters<typeof tryConnectOnPort>[0],
+      ]
+      expect(callArgs.privateKey).toBe(fakeKeyBuffer)
+      expect(Buffer.isBuffer(callArgs.privateKey)).toBe(true)
     })
   })
 
@@ -1523,6 +1611,8 @@ describe("SshConnectionImpl", () => {
       const knownHosts = await import("../src/knownHosts.js")
       vi.mocked(knownHosts.buildHostVerifier).mockReturnValue({})
       vi.mocked(tryConnectOnPort).mockResolvedValue()
+      const fsp = await import("node:fs/promises")
+      vi.mocked(fsp.readFile).mockResolvedValue(Buffer.from("fake-private-key") as never)
     })
 
     it("calls buildHostVerifier with default mode 'accept-new' when strictHostKeyChecking is not set", async () => {

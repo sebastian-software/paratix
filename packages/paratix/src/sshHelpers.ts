@@ -253,7 +253,7 @@ export type ConnectParameters = {
   /** Port to connect on. */
   port: number
   /** PEM-encoded private key content. Mutually exclusive with `agent`. */
-  privateKey?: string
+  privateKey?: Buffer | string
   /** Username to authenticate as. */
   username: string
 }
