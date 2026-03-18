@@ -196,49 +196,48 @@ export function collectStreamOutput(parameters: StreamOutputParameters): void {
   let stderr = ""
 
   const secrets = parameters.secrets ?? []
-  const stdoutMasker = options.silent ? null : createStreamMasker(writeStdout, secrets)
-  const stderrMasker = options.silent ? null : createStreamMasker(writeStderr, secrets)
+  const stdoutMasker = createStreamMasker((text) => {
+    stdout += text
+    if (!options.silent) writeStdout(text)
+  }, secrets)
+  const stderrMasker = createStreamMasker((text) => {
+    stderr += text
+    if (!options.silent) writeStderr(text)
+  }, secrets)
 
   stream.on("data", (data: Buffer) => {
-    const text = data.toString()
-    stdout += text
-    stdoutMasker?.push(text)
+    stdoutMasker.push(data.toString())
   })
   stream.stderr.on("data", (data: Buffer) => {
-    const text = data.toString()
-    stderr += text
-    stderrMasker?.push(text)
+    stderrMasker.push(data.toString())
   })
   stream.on("error", (error: Error) => {
     clearTimeout(timer)
-    stdoutMasker?.flush()
-    stderrMasker?.flush()
+    stdoutMasker.flush()
+    stderrMasker.flush()
     reject(error)
   })
   stream.on("close", (code: number) => {
     clearTimeout(timer)
-    stdoutMasker?.flush()
-    stderrMasker?.flush()
+    stdoutMasker.flush()
+    stderrMasker.flush()
     // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition -- ssh2 may pass undefined despite type signature
     const exitCode = code ?? 0
-    const mask = (text: string): string => maskSecrets(text, parameters.secrets ?? [])
     if (exitCode !== 0 && options.ignoreExitCode !== true) {
-      const maskedStdout = mask(stdout)
-      const maskedStderr = mask(stderr)
       const wasTruncated =
-        codepointLengthExceeds(maskedStdout, MAX_OUTPUT_LENGTH) ||
-        codepointLengthExceeds(maskedStderr, MAX_OUTPUT_LENGTH)
+        codepointLengthExceeds(stdout, MAX_OUTPUT_LENGTH) ||
+        codepointLengthExceeds(stderr, MAX_OUTPUT_LENGTH)
       const hint = wasTruncated ? "\n(use --verbose for full output)" : ""
       reject(
         new CommandError(
-          `Command failed with exit code ${exitCode}: ${mask(command)}\nstdout: ${truncateOutput(maskedStdout)}\nstderr: ${truncateOutput(maskedStderr)}${hint}`,
-          maskedStdout,
-          maskedStderr
+          `Command failed with exit code ${exitCode}: ${maskSecrets(command, secrets)}\nstdout: ${truncateOutput(stdout)}\nstderr: ${truncateOutput(stderr)}${hint}`,
+          stdout,
+          stderr
         )
       )
       return
     }
-    resolve({ code: exitCode, stderr: mask(stderr), stdout: mask(stdout) })
+    resolve({ code: exitCode, stderr, stdout })
   })
 }
 
