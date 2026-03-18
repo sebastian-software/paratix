@@ -23,6 +23,8 @@ function escapeRegExp(s: string): string {
 async function validateSshdConfig(ssh: SshConnection, originalConfig: string): Promise<void> {
   const result = await ssh.exec("sshd -t", { ignoreExitCode: true, silent: true })
   if (result.code !== 0) {
+    // Intentional: unguarded write — restoring the original config is more
+    // important than concurrency safety during a failed validation rollback.
     await ssh.writeFile(SSHD_CONFIG_PATH, originalConfig)
     throw new Error(
       `sshd config validation failed (sshd -t), rolled back to previous config:\n${result.stderr}`
@@ -30,29 +32,19 @@ async function validateSshdConfig(ssh: SshConnection, originalConfig: string): P
   }
 }
 
-async function applySshdSetting(ssh: SshConnection, key: string, value: string): Promise<void> {
-  const content = await ssh.readFile(SSHD_CONFIG_PATH)
+function applySshdSettingToContent(content: string, key: string, value: string): string {
   // eslint-disable-next-line security/detect-non-literal-regexp
   const pattern = new RegExp(`^${escapeRegExp(key)}\\s.*`, "gmv")
   const replaced = content.replace(pattern, `${key} ${value}`)
 
-  let newContent: string
   if (replaced !== content) {
-    newContent = replaced
-    // eslint-disable-next-line security/detect-non-literal-regexp
-  } else if (new RegExp(`^${escapeRegExp(key)}\\s`, "mv").test(content)) {
-    newContent = content
-  } else {
-    newContent = content.endsWith("\n")
-      ? `${content}${key} ${value}\n`
-      : `${content}\n${key} ${value}\n`
+    return replaced
   }
-
-  await guardedWriteFile(ssh, {
-    newContent,
-    originalContent: content,
-    remotePath: SSHD_CONFIG_PATH,
-  })
+  // eslint-disable-next-line security/detect-non-literal-regexp
+  if (new RegExp(`^${escapeRegExp(key)}\\s`, "mv").test(content)) {
+    return content
+  }
+  return content.endsWith("\n") ? `${content}${key} ${value}\n` : `${content}\n${key} ${value}\n`
 }
 
 /**
@@ -76,14 +68,23 @@ export const sshd = {
 
         const originalConfig = await ssh.readFile(SSHD_CONFIG_PATH)
 
+        let newContent = originalConfig
         for (const [key, value] of Object.entries(settings)) {
-          // eslint-disable-next-line no-await-in-loop
-          await applySshdSetting(ssh, key, value)
+          newContent = applySshdSettingToContent(newContent, key, value)
+        }
+
+        const didChange = newContent !== originalConfig
+        if (didChange) {
+          await guardedWriteFile(ssh, {
+            newContent,
+            originalContent: originalConfig,
+            remotePath: SSHD_CONFIG_PATH,
+          })
         }
 
         await validateSshdConfig(ssh, originalConfig)
 
-        return { status: "changed" }
+        return { status: didChange ? "changed" : "ok" }
       },
       async check(ssh: null | SshConnection): Promise<"needs-apply" | "ok"> {
         if (!ssh) return NEEDS_APPLY
@@ -117,7 +118,16 @@ export const sshd = {
         if (!ssh) return { status: "failed" }
 
         const originalConfig = await ssh.readFile(SSHD_CONFIG_PATH)
-        await applySshdSetting(ssh, "Port", String(targetPort))
+        const newContent = applySshdSettingToContent(originalConfig, "Port", String(targetPort))
+        if (newContent === originalConfig) {
+          return { status: "ok" }
+        }
+
+        await guardedWriteFile(ssh, {
+          newContent,
+          originalContent: originalConfig,
+          remotePath: SSHD_CONFIG_PATH,
+        })
         await validateSshdConfig(ssh, originalConfig)
         ssh.addPort(targetPort)
         await ssh.exec("systemctl restart sshd", { silent: true })

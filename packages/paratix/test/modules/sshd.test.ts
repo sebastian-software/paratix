@@ -52,12 +52,11 @@ describe("sshd.config — apply", () => {
     const writtenFiles = trackWriteFile(mockSsh)
 
     const mod = sshd.config({ PasswordAuthentication: "no" })
-    await mod.apply(mockSsh, emptyEnv)
+    const result = await mod.apply(mockSsh, emptyEnv)
 
-    const written = writtenFiles.find((f) => f.path === SSHD_CONFIG)
-    expect(written).toBeDefined()
-    const matches = written?.content.match(/PasswordAuthentication/gv)
-    expect(matches).toHaveLength(1)
+    // No write needed when content is already correct
+    expect(writtenFiles).toHaveLength(0)
+    expect(result.status).toBe("ok")
   })
 
   it("appends a new key when it does not yet exist in sshd_config", async () => {
@@ -100,8 +99,10 @@ describe("sshd.config — apply", () => {
     const result = await mod.apply(mockSsh, emptyEnv)
 
     expect(result.status).toBe("changed")
-    // writeFile must have been called for each setting
-    expect(writtenFiles).toHaveLength(2)
+    // All settings are applied in one write (single readFile + single guardedWriteFile)
+    expect(writtenFiles).toHaveLength(1)
+    expect(writtenFiles[0]?.content).toContain("PasswordAuthentication no")
+    expect(writtenFiles[0]?.content).toContain("PermitRootLogin no")
   })
 
   it("regression — key with RegExp special chars is handled safely (no injection)", async () => {
@@ -390,6 +391,26 @@ describe("sshd.port — apply: validation and rollback", () => {
 
     const execCommands = execSpy.mock.calls.map((args) => args[0])
     expect(execCommands).toContain("systemctl restart sshd")
+  })
+
+  it("returns ok and does not write when the desired port is already configured", async () => {
+    const mockSsh = createMockSsh({
+      [CAT_SSHD]: { stdout: "Port 2222\n" },
+    })
+    const writtenFiles = trackWriteFile(mockSsh)
+    const execSpy = vi.spyOn(mockSsh, "exec")
+    const addPortSpy = vi.spyOn(mockSsh, "addPort")
+
+    const mod = sshd.port(2222)
+    const result = await mod.apply(mockSsh, emptyEnv)
+
+    // No write, no restart, no addPort — early return when config is already correct
+    expect(writtenFiles).toHaveLength(0)
+    expect(result.status).toBe("ok")
+    expect(result).not.toHaveProperty("meta")
+    const execCommands = execSpy.mock.calls.map((args) => args[0])
+    expect(execCommands).not.toContain("systemctl restart sshd")
+    expect(addPortSpy).not.toHaveBeenCalled()
   })
 
   it("regression — addPort is called before systemctl restart sshd", async () => {
