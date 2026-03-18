@@ -59,7 +59,7 @@ describe("guardedWriteFile", () => {
     // Act + Assert
     await expect(
       guardedWriteFile(ssh, { newContent, originalContent, remotePath })
-    ).rejects.toThrow()
+    ).rejects.toThrow(/Concurrent modification/v)
   })
 
   it("includes the file path in the error message on concurrent modification", async () => {
@@ -108,7 +108,7 @@ describe("guardedWriteFile", () => {
     // Act
     await expect(
       guardedWriteFile(ssh, { newContent, originalContent, remotePath })
-    ).rejects.toThrow()
+    ).rejects.toThrow(/Concurrent modification/v)
 
     // Assert: writeFile must never be called when the guard triggers
     expect(writeFileSpy).not.toHaveBeenCalled()

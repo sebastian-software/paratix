@@ -51,6 +51,12 @@ export class SshConnectionImpl implements SshConnection {
   public constructor(host: string, config: SshConfig) {
     this.host = host
     this.config = config
+    if (
+      config.sudoPassword != null &&
+      (config.sudoPassword.includes("\n") || config.sudoPassword.includes("\r"))
+    ) {
+      throw new Error("Sudo password must not contain newline characters")
+    }
     this.cachedSudoPassword = config.sudoPassword == null ? null : Buffer.from(config.sudoPassword)
   }
 
@@ -207,6 +213,9 @@ export class SshConnectionImpl implements SshConnection {
       `[sudo] password for ${this.config.user}@${this.host}: `,
       true
     )
+    if (password.includes("\n") || password.includes("\r")) {
+      throw new Error("Sudo password must not contain newline characters")
+    }
     this.cachedSudoPassword = Buffer.from(password)
     try {
       await this.exec("true", { silent: true, timeout: 10_000 })

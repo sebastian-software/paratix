@@ -1378,6 +1378,63 @@ describe("SshConnectionImpl", () => {
   })
 
   // -------------------------------------------------------------------------
+  // constructor — sudoPassword newline validation
+  // -------------------------------------------------------------------------
+
+  describe("constructor sudoPassword newline validation", () => {
+    it("throws when sudoPassword contains \\n", () => {
+      // Arrange & Act & Assert
+      expect(
+        () =>
+          new SshConnectionImpl("1.2.3.4", {
+            ports: [22],
+            privateKey: "/dev/null",
+            sudoPassword: "pass\nword",
+            user: "deploy",
+          })
+      ).toThrow("newline")
+    })
+
+    it("throws when sudoPassword contains \\r", () => {
+      // Arrange & Act & Assert
+      expect(
+        () =>
+          new SshConnectionImpl("1.2.3.4", {
+            ports: [22],
+            privateKey: "/dev/null",
+            sudoPassword: "pass\rword",
+            user: "deploy",
+          })
+      ).toThrow("newline")
+    })
+
+    it("does not throw when sudoPassword contains no newline characters", () => {
+      // Arrange & Act & Assert
+      expect(
+        () =>
+          new SshConnectionImpl("1.2.3.4", {
+            ports: [22],
+            privateKey: "/dev/null",
+            sudoPassword: "s3cret-password!",
+            user: "deploy",
+          })
+      ).not.toThrow()
+    })
+
+    it("does not throw when sudoPassword is undefined", () => {
+      // Arrange & Act & Assert
+      expect(
+        () =>
+          new SshConnectionImpl("1.2.3.4", {
+            ports: [22],
+            privateKey: "/dev/null",
+            user: "deploy",
+          })
+      ).not.toThrow()
+    })
+  })
+
+  // -------------------------------------------------------------------------
   // probeSudo
   // -------------------------------------------------------------------------
 
@@ -1417,6 +1474,41 @@ describe("SshConnectionImpl", () => {
       expect(error.message).not.toContain(password)
       // The password must be replaced with the mask token
       expect(error.message).toContain("[REDACTED]")
+    })
+
+    it("throws when the interactively entered sudo password contains \\n (regression)", async () => {
+      // Arrange
+      vi.mocked(promptTerminal).mockResolvedValueOnce("pass\nword")
+
+      const execSpy = vi.fn().mockImplementationOnce((_command: string, callback: ExecCallback) => {
+        const stream = makeStream()
+        callback(undefined, stream)
+        // First exec call: passwordless sudo probe fails so probeSudo prompts for a password
+        stream.emit("close", 1)
+      })
+
+      const client = makeClientWithExecSpy(execSpy)
+      const ssh = makeConnectedSsh(client, { user: "deploy" })
+
+      // Act & Assert
+      await expect(ssh.probeSudo()).rejects.toThrow("newline")
+    })
+
+    it("throws when the interactively entered sudo password contains \\r (regression)", async () => {
+      // Arrange
+      vi.mocked(promptTerminal).mockResolvedValueOnce("pass\rword")
+
+      const execSpy = vi.fn().mockImplementationOnce((_command: string, callback: ExecCallback) => {
+        const stream = makeStream()
+        callback(undefined, stream)
+        stream.emit("close", 1)
+      })
+
+      const client = makeClientWithExecSpy(execSpy)
+      const ssh = makeConnectedSsh(client, { user: "deploy" })
+
+      // Act & Assert
+      await expect(ssh.probeSudo()).rejects.toThrow("newline")
     })
   })
 
