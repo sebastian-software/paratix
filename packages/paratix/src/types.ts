@@ -116,6 +116,38 @@ export type SshConnection = {
   writeFile: (remotePath: string, content: string, options?: { mode?: string }) => Promise<void>
 }
 
+/**
+ * Write a file only if its content has not changed since it was read.
+ * Re-reads the file before writing and throws if the current content
+ * differs from `originalContent`, preventing lost updates from concurrent modifications.
+ *
+ * @param ssh - The SSH connection to the remote host.
+ * @param parameters - Parameters for the guarded write operation.
+ * @param parameters.mode - Optional chmod mode string for the written file.
+ * @param parameters.newContent - The transformed content to write.
+ * @param parameters.originalContent - The content that was read before the transformation.
+ * @param parameters.remotePath - Path to the file on the remote host.
+ */
+export async function guardedWriteFile(
+  ssh: SshConnection,
+  parameters: {
+    mode?: string
+    newContent: string
+    originalContent: string
+    remotePath: string
+  }
+): Promise<void> {
+  const currentContent = await ssh.readFile(parameters.remotePath)
+  if (currentContent !== parameters.originalContent) {
+    throw new Error(
+      `Concurrent modification detected on ${parameters.remotePath}: ` +
+        "file content changed between read and write. Aborting to prevent data loss."
+    )
+  }
+  const writeOptions = parameters.mode == null ? undefined : { mode: parameters.mode }
+  await ssh.writeFile(parameters.remotePath, parameters.newContent, writeOptions)
+}
+
 /** SSH connection parameters for a server. */
 export type SshConfig = {
   /** Forward the local SSH agent to the remote host. */

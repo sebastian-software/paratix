@@ -1,4 +1,10 @@
-import { type Module, type ModuleResult, NEEDS_APPLY, type SshConnection } from "../types.js"
+import {
+  guardedWriteFile,
+  type Module,
+  type ModuleResult,
+  NEEDS_APPLY,
+  type SshConnection,
+} from "../types.js"
 
 const NONINTERACTIVE = "DEBIAN_FRONTEND=noninteractive"
 const CODENAME_RE = /^[a-z]{3,20}$/v
@@ -103,7 +109,11 @@ async function replaceCodenameInSourcesList(
 ): Promise<void> {
   const sourcesContent = await ssh.readFile("/etc/apt/sources.list")
   const updatedContent = sourcesContent.replaceAll(currentCodename, targetCodename)
-  await ssh.writeFile("/etc/apt/sources.list", updatedContent)
+  await guardedWriteFile(ssh, {
+    newContent: updatedContent,
+    originalContent: sourcesContent,
+    remotePath: "/etc/apt/sources.list",
+  })
 
   const listFilesResult = await ssh.exec(
     "find /etc/apt/sources.list.d/ \\( -name '*.list' -o -name '*.sources' \\) -type f",
@@ -118,7 +128,11 @@ async function replaceCodenameInSourcesList(
       const updated = content.replaceAll(currentCodename, targetCodename)
       if (updated !== content) {
         // eslint-disable-next-line no-await-in-loop
-        await ssh.writeFile(trimmedPath, updated)
+        await guardedWriteFile(ssh, {
+          newContent: updated,
+          originalContent: content,
+          remotePath: trimmedPath,
+        })
       }
     }
   }

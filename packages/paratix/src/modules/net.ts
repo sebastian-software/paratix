@@ -1,5 +1,12 @@
+/* eslint-disable max-lines */
 import { shellQuote } from "../ssh.js"
-import { type Module, type ModuleResult, NEEDS_APPLY, type SshConnection } from "../types.js"
+import {
+  guardedWriteFile,
+  type Module,
+  type ModuleResult,
+  NEEDS_APPLY,
+  type SshConnection,
+} from "../types.js"
 import {
   buildCurlHeaderFlags,
   buildWaitForName,
@@ -211,13 +218,20 @@ export const net = {
         if (state === "present") {
           const alreadyPresent = lines.some((line) => line.trim() === expectedLine)
           if (alreadyPresent) return { status: "ok" }
-          const newContent = content.endsWith("\n")
-            ? `${content}${expectedLine}\n`
-            : `${content}\n${expectedLine}\n`
-          await conn.writeFile(HOSTS_FILE, newContent)
+          const suffix = content.endsWith("\n") ? "" : "\n"
+          const newContent = `${content}${suffix}${expectedLine}\n`
+          await guardedWriteFile(conn, {
+            newContent,
+            originalContent: content,
+            remotePath: HOSTS_FILE,
+          })
         } else {
-          const filtered = lines.filter((line) => line.trim() !== expectedLine)
-          await conn.writeFile(HOSTS_FILE, filtered.join("\n"))
+          const newContent = lines.filter((line) => line.trim() !== expectedLine).join("\n")
+          await guardedWriteFile(conn, {
+            newContent,
+            originalContent: content,
+            remotePath: HOSTS_FILE,
+          })
         }
 
         return { status: "changed" }

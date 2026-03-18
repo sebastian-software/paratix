@@ -4,6 +4,7 @@ import { shellQuote, validateMode } from "../ssh.js"
 import { renderTemplate } from "../template.js"
 import {
   type Environment,
+  guardedWriteFile,
   type Module,
   type ModuleResult,
   NEEDS_APPLY,
@@ -154,7 +155,7 @@ export const file = {
           // eslint-disable-next-line security/detect-non-literal-regexp
           const pattern = new RegExp(options.match, "mu")
           const newContent = content.replace(pattern, line)
-          await ssh.writeFile(remotePath, newContent)
+          await guardedWriteFile(ssh, { newContent, originalContent: content, remotePath })
         }
 
         return { status: "changed" }

@@ -1,4 +1,10 @@
-import { type Module, type ModuleResult, NEEDS_APPLY, type SshConnection } from "../types.js"
+import {
+  guardedWriteFile,
+  type Module,
+  type ModuleResult,
+  NEEDS_APPLY,
+  type SshConnection,
+} from "../types.js"
 
 const DEFAULT_SSH_PORT = 22
 const SSHD_CONFIG_PATH = "/etc/ssh/sshd_config"
@@ -42,7 +48,11 @@ async function applySshdSetting(ssh: SshConnection, key: string, value: string):
       : `${content}\n${key} ${value}\n`
   }
 
-  await ssh.writeFile(SSHD_CONFIG_PATH, newContent)
+  await guardedWriteFile(ssh, {
+    newContent,
+    originalContent: content,
+    remotePath: SSHD_CONFIG_PATH,
+  })
 }
 
 /**

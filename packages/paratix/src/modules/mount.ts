@@ -1,5 +1,11 @@
 import { shellQuote } from "../ssh.js"
-import { type Module, type ModuleResult, NEEDS_APPLY, type SshConnection } from "../types.js"
+import {
+  guardedWriteFile,
+  type Module,
+  type ModuleResult,
+  NEEDS_APPLY,
+  type SshConnection,
+} from "../types.js"
 
 const EXEC_OPTS = { ignoreExitCode: true, silent: true } as const
 const FSTAB_PATH = "/etc/fstab"
@@ -107,7 +113,11 @@ async function ensureFstabEntry(
   const existingEntry = findFstabEntry(fstabContent, path)
   if (existingEntry === desiredLine) return false
   const newContent = upsertFstabEntry(fstabContent, path, desiredLine)
-  await ssh.writeFile(FSTAB_PATH, newContent)
+  await guardedWriteFile(ssh, {
+    newContent,
+    originalContent: fstabContent,
+    remotePath: FSTAB_PATH,
+  })
   return true
 }
 
@@ -149,7 +159,11 @@ export const mount = {
           const entry = findFstabEntry(fstabContent, path)
           if (entry !== null) {
             const newContent = removeFstabEntry(fstabContent, path)
-            await ssh.writeFile(FSTAB_PATH, newContent)
+            await guardedWriteFile(ssh, {
+              newContent,
+              originalContent: fstabContent,
+              remotePath: FSTAB_PATH,
+            })
             changed = true
           }
         }

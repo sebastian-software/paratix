@@ -1,7 +1,13 @@
 import { readFile } from "node:fs/promises"
 
 import { shellQuote, validateMode } from "../ssh.js"
-import { type Module, type ModuleResult, NEEDS_APPLY, type SshConnection } from "../types.js"
+import {
+  guardedWriteFile,
+  type Module,
+  type ModuleResult,
+  NEEDS_APPLY,
+  type SshConnection,
+} from "../types.js"
 import { sha256String } from "./fileHelpers.js"
 
 /** Index where the file-type field starts in `stat -c '%s %a %U %G %F %Y'` output. */
@@ -140,10 +146,18 @@ export function block(remotePath: string, options: BlockOptions): Module {
 
         if (hasMarker) {
           const markers: BlockMarkers = { begin: beginMarker, end: endMarker, full: fullBlock }
-          await ssh.writeFile(remotePath, replaceBlock(existing, markers))
+          await guardedWriteFile(ssh, {
+            newContent: replaceBlock(existing, markers),
+            originalContent: existing,
+            remotePath,
+          })
         } else {
           const separator = existing.endsWith("\n") ? "" : "\n"
-          await ssh.writeFile(remotePath, `${existing}${separator}${fullBlock}\n`)
+          await guardedWriteFile(ssh, {
+            newContent: `${existing}${separator}${fullBlock}\n`,
+            originalContent: existing,
+            remotePath,
+          })
         }
       } else {
         await ssh.writeFile(remotePath, `${fullBlock}\n`)
@@ -249,7 +263,11 @@ export function replace(remotePath: string, pattern: string, replacement: string
       const content = await ssh.readFile(remotePath)
       // eslint-disable-next-line security/detect-non-literal-regexp -- pattern from module config, not user input
       const updated = content.replaceAll(new RegExp(pattern, "gu"), replacement)
-      await ssh.writeFile(remotePath, updated)
+      await guardedWriteFile(ssh, {
+        newContent: updated,
+        originalContent: content,
+        remotePath,
+      })
 
       return { status: "changed" }
     },
