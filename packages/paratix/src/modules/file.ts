@@ -193,12 +193,13 @@ export const file = {
    * @param options - Optional file attributes.
    * @param options.mode - Optional chmod mode string.
    * @param options.owner - Optional chown owner string.
+   * @param options.strict - When `true`, every template placeholder must use an explicit modifier.
    * @returns A Module that renders and writes the template.
    */
   template(
     remotePath: string,
     templatePath: string,
-    options?: { mode?: string; owner?: string }
+    options?: { mode?: string; owner?: string; strict?: boolean }
   ): Module {
     let cachedContent: string | undefined
 
@@ -213,7 +214,9 @@ export const file = {
         if (!ssh) return { status: "failed" }
 
         const templateContent = await getTemplateContent()
-        const rendered = await renderTemplate(templateContent, environment)
+        const rendered = await renderTemplate(templateContent, environment, {
+          strict: options?.strict,
+        })
         await ssh.writeFile(remotePath, rendered)
 
         if (options?.mode != null) {
@@ -239,7 +242,9 @@ export const file = {
         if (!exists) return NEEDS_APPLY
 
         const templateContent = await getTemplateContent()
-        const rendered = await renderTemplate(templateContent, environment)
+        const rendered = await renderTemplate(templateContent, environment, {
+          strict: options?.strict,
+        })
         const localHash = sha256String(rendered)
         const remoteHash = await ssh.sha256(remotePath)
         return remoteHash === localHash ? "ok" : NEEDS_APPLY

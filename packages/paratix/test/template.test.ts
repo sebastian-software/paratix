@@ -100,4 +100,54 @@ describe("renderTemplate", () => {
     const view = await renderTemplate("{{VAL}}", env)
     expect(view).toBe("raw")
   })
+
+  it("applies the raw modifier as an identity function", async () => {
+    const env: Environment = { VAL: "hello" }
+    const view = await renderTemplate("{{VAL|raw}}", env)
+    expect(view).toBe("hello")
+  })
+
+  it("passes special characters through unchanged with raw modifier", async () => {
+    const env: Environment = { VAL: "it's $100" }
+    const view = await renderTemplate("{{VAL|raw}}", env)
+    expect(view).toBe("it's $100")
+  })
+
+  it("throws in strict mode when placeholder has no modifier", async () => {
+    const env: Environment = { A: "x" }
+    await expect(renderTemplate("{{A}}", env, { strict: true })).rejects.toThrow(
+      /Strict mode.*explicit modifier/v
+    )
+  })
+
+  it("allows |shell modifier in strict mode", async () => {
+    const env: Environment = { A: "hello world" }
+    const view = await renderTemplate("{{A|shell}}", env, { strict: true })
+    expect(view).toBe("'hello world'")
+  })
+
+  it("allows |raw modifier in strict mode", async () => {
+    const env: Environment = { A: "hello" }
+    const view = await renderTemplate("{{A|raw}}", env, { strict: true })
+    expect(view).toBe("hello")
+  })
+
+  it("works without strict option (backwards compatibility)", async () => {
+    const env: Environment = { A: "x" }
+    const view = await renderTemplate("{{A}}", env)
+    expect(view).toBe("x")
+  })
+
+  it("works with strict explicitly set to false", async () => {
+    const env: Environment = { A: "x" }
+    const view = await renderTemplate("{{A}}", env, { strict: false })
+    expect(view).toBe("x")
+  })
+
+  it("throws in strict mode when one of multiple placeholders lacks a modifier", async () => {
+    const env: Environment = { A: "x", B: "y" }
+    await expect(renderTemplate("{{A|shell}} {{B}}", env, { strict: true })).rejects.toThrow(
+      /Strict mode.*"\{\{B\}\}"/v
+    )
+  })
 })
