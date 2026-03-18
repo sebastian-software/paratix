@@ -255,7 +255,11 @@ export class SshConnectionImpl implements SshConnection {
         await this.connect()
         return
       } catch (error) {
-        if (error instanceof HostKeyVerificationError) throw error
+        if (
+          error instanceof HostKeyVerificationError ||
+          (error instanceof Error && error.message === "SSH connection closed")
+        )
+          throw error
         const jitter =
           Math.min(RECONNECT_BASE_DELAY * 2 ** attempt, RECONNECT_MAX_DELAY) *
           (JITTER_BASE + Math.random() * JITTER_RANGE)

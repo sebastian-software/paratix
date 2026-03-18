@@ -506,6 +506,21 @@ describe("SshConnectionImpl", () => {
       expect(tryConnectOnPort).toHaveBeenCalledTimes(1)
     })
 
+    it("aborts immediately without retry when connect throws SSH connection closed — R-003 regression", async () => {
+      const ssh = makeSshInstance({ reconnectTimeout: 300_000 })
+
+      // Spy on the public connect() method so the error is thrown directly from
+      // reconnect()'s `await this.connect()` call, bypassing tryConnectOnPorts().
+      const connectSpy = vi
+        .spyOn(ssh, "connect")
+        .mockRejectedValue(new Error("SSH connection closed"))
+
+      await expect(ssh.reconnect()).rejects.toThrow("SSH connection closed")
+
+      // Must not retry — connect() is called exactly once
+      expect(connectSpy).toHaveBeenCalledTimes(1)
+    })
+
     it("pins host key on initial connection", async () => {
       const hostKey = Buffer.from("new-host-key")
 
