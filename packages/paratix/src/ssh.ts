@@ -55,7 +55,6 @@ export class SshConnectionImpl implements SshConnection {
    * `maskSecrets`) produce temporary immutable strings on the heap. This is a
    * best-effort mitigation, not a guarantee.
    */
-  private cachedPasswordString: null | string = null
   private cachedSudoPassword: Buffer | null = null
   private client: Client | null = null
   private readonly config: SshConfig
@@ -74,7 +73,6 @@ export class SshConnectionImpl implements SshConnection {
       throw new Error("Sudo password must not contain newline characters")
     }
     this.cachedSudoPassword = config.sudoPassword == null ? null : Buffer.from(config.sudoPassword)
-    this.cachedPasswordString = config.sudoPassword ?? null
   }
 
   public addPort(port: number): void {
@@ -231,7 +229,6 @@ export class SshConnectionImpl implements SshConnection {
       throw new Error("Sudo password must not contain newline characters")
     }
     this.cachedSudoPassword = Buffer.from(password)
-    this.cachedPasswordString = password
     try {
       await this.exec("true", { silent: true, timeout: 10_000 })
     } catch (error) {
@@ -384,7 +381,7 @@ export class SshConnectionImpl implements SshConnection {
   }
 
   private buildSecrets(extra?: string[]): string[] {
-    const pw = this.cachedPasswordString
+    const pw = this.cachedSudoPassword?.toString("utf8") ?? null
     return [...(pw == null ? [] : [pw]), ...(extra ?? [])]
   }
 
@@ -392,7 +389,6 @@ export class SshConnectionImpl implements SshConnection {
     if (this.cachedSudoPassword != null) {
       this.cachedSudoPassword.fill(0)
       this.cachedSudoPassword = null
-      this.cachedPasswordString = null
     }
   }
 

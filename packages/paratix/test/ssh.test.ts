@@ -459,13 +459,33 @@ describe("SshConnectionImpl", () => {
       // Simulate an already-pinned key from a previous connection
       ;(ssh as any).pinnedHostKey = initialKey
       ;(ssh as any).cachedSudoPassword = Buffer.from("secret")
-      ;(ssh as any).cachedPasswordString = "secret"
-
       await expect(ssh.reconnect()).rejects.toThrow(HostKeyVerificationError)
 
       // Password should have been cleared before the error was thrown
       expect((ssh as any).cachedSudoPassword).toBeNull()
-      expect((ssh as any).cachedPasswordString).toBeNull()
+    })
+
+    it("zeroes the password buffer before setting cachedSudoPassword to null — R-002 regression", async () => {
+      // Arrange: capture a reference to the buffer before clearCachedPassword runs
+      const passwordBuffer = Buffer.from("secret-password")
+      const initialKey = Buffer.from("initial-host-key")
+      const differentKey = Buffer.from("different-key!!")
+
+      vi.mocked(tryConnectOnPort).mockImplementation(async (parameters) => {
+        await Promise.resolve()
+        parameters.hostVerifier?.(differentKey)
+      })
+
+      const ssh = makeSshInstance({ reconnectTimeout: 300_000 })
+      ;(ssh as any).pinnedHostKey = initialKey
+      ;(ssh as any).cachedSudoPassword = passwordBuffer
+
+      await expect(ssh.reconnect()).rejects.toThrow(HostKeyVerificationError)
+
+      // The buffer that was held by cachedSudoPassword must have been zeroed out
+      expect(passwordBuffer.every((byte) => byte === 0)).toBe(true)
+      // And the field must be null
+      expect((ssh as any).cachedSudoPassword).toBeNull()
     })
 
     it("reconnects successfully when host key matches pinned key", async () => {
