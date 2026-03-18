@@ -7,6 +7,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import type * as KnownHosts from "../src/knownHosts.js"
 import type * as SshHelpers from "../src/sshHelpers.js"
 
+import { HostKeyVerificationError } from "../src/knownHosts.js"
 import { sftpDownload } from "../src/sftp.js"
 import { SshConnectionImpl } from "../src/ssh.js"
 import { collectStreamOutput, tryConnectOnPort } from "../src/sshHelpers.js"
@@ -441,6 +442,63 @@ describe("SshConnectionImpl", () => {
         /Failed to reconnect to 1\.2\.3\.4 after 10 attempts/v
       )
       expect(tryConnectOnPort).toHaveBeenCalledTimes(10)
+    })
+
+    it("clears cached password and throws when host key changes on reconnect", async () => {
+      const initialKey = Buffer.from("initial-host-key")
+      const differentKey = Buffer.from("different-key!!")
+
+      // Mock tryConnectOnPort to invoke hostVerifier with the provided key
+      vi.mocked(tryConnectOnPort).mockImplementation(async (parameters) => {
+        await Promise.resolve()
+        parameters.hostVerifier?.(differentKey)
+      })
+
+      const ssh = makeSshInstance({ reconnectTimeout: 300_000 })
+
+      // Simulate an already-pinned key from a previous connection
+      ;(ssh as any).pinnedHostKey = initialKey
+      ;(ssh as any).cachedSudoPassword = Buffer.from("secret")
+      ;(ssh as any).cachedPasswordString = "secret"
+
+      await expect(ssh.reconnect()).rejects.toThrow(HostKeyVerificationError)
+
+      // Password should have been cleared before the error was thrown
+      expect((ssh as any).cachedSudoPassword).toBeNull()
+      expect((ssh as any).cachedPasswordString).toBeNull()
+    })
+
+    it("reconnects successfully when host key matches pinned key", async () => {
+      const hostKey = Buffer.from("stable-host-key")
+
+      vi.mocked(tryConnectOnPort).mockImplementation(async (parameters) => {
+        await Promise.resolve()
+        parameters.hostVerifier?.(hostKey)
+      })
+
+      const ssh = makeSshInstance({ reconnectTimeout: 300_000 })
+
+      // Simulate an already-pinned key from a previous connection
+      ;(ssh as any).pinnedHostKey = Buffer.from(hostKey)
+
+      await ssh.reconnect()
+
+      expect(tryConnectOnPort).toHaveBeenCalledTimes(1)
+    })
+
+    it("pins host key on initial connection", async () => {
+      const hostKey = Buffer.from("new-host-key")
+
+      vi.mocked(tryConnectOnPort).mockImplementation(async (parameters) => {
+        await Promise.resolve()
+        parameters.hostVerifier?.(hostKey)
+      })
+
+      const ssh = makeSshInstance()
+
+      await ssh.connect()
+
+      expect((ssh as any).pinnedHostKey).toStrictEqual(hostKey)
     })
   })
 
@@ -1742,7 +1800,7 @@ describe("SshConnectionImpl", () => {
       expect(buildHostVerifier).toHaveBeenCalledWith("yes", "1.2.3.4", 22)
     })
 
-    it("passes the hostVerifier from buildHostVerifier to tryConnectOnPort", async () => {
+    it("passes a wrapped hostVerifier that delegates to buildHostVerifier's verifier", async () => {
       const fakeVerifier = vi.fn().mockReturnValue(true)
       const { buildHostVerifier } = await import("../src/knownHosts.js")
       vi.mocked(buildHostVerifier).mockReturnValue({ hostVerifier: fakeVerifier })
@@ -1754,7 +1812,13 @@ describe("SshConnectionImpl", () => {
       const [callArgs] = vi.mocked(tryConnectOnPort).mock.calls[0] as [
         Parameters<typeof tryConnectOnPort>[0],
       ]
-      expect(callArgs.hostVerifier).toBe(fakeVerifier)
+      // The hostVerifier is now a wrapper that delegates to the original
+      expect(callArgs.hostVerifier).not.toBe(fakeVerifier)
+      expect(callArgs.hostVerifier).toBeTypeOf("function")
+      // Calling the wrapper should invoke the original verifier
+      const testKey = Buffer.from("test-key")
+      callArgs.hostVerifier!(testKey)
+      expect(fakeVerifier).toHaveBeenCalledWith(testKey)
     })
 
     it("calls buildHostVerifier once per port when connecting across multiple ports", async () => {
@@ -1773,9 +1837,9 @@ describe("SshConnectionImpl", () => {
       expect(buildHostVerifier).toHaveBeenNthCalledWith(2, "accept-new", "1.2.3.4", 2222)
     })
 
-    it("passes undefined hostVerifier to tryConnectOnPort when mode is 'no'", async () => {
+    it("passes a wrapper hostVerifier even when mode is 'no' (for host-key pinning)", async () => {
       const { buildHostVerifier } = await import("../src/knownHosts.js")
-      // mode "no" returns empty object — no hostVerifier
+      // mode "no" returns empty object — no hostVerifier from buildHostVerifier
       vi.mocked(buildHostVerifier).mockReturnValue({})
 
       const config = {
@@ -1791,7 +1855,8 @@ describe("SshConnectionImpl", () => {
       const [callArgs] = vi.mocked(tryConnectOnPort).mock.calls[0] as [
         Parameters<typeof tryConnectOnPort>[0],
       ]
-      expect(callArgs.hostVerifier).toBeUndefined()
+      // The wrapper is always present for host-key pinning, even without an original verifier
+      expect(callArgs.hostVerifier).toBeTypeOf("function")
     })
   })
 })

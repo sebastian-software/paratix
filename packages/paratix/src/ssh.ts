@@ -1,5 +1,5 @@
 /* eslint-disable max-lines */
-import { randomUUID } from "node:crypto"
+import { randomUUID, timingSafeEqual } from "node:crypto"
 import { unlinkSync, writeFileSync } from "node:fs"
 import { readFile, stat } from "node:fs/promises"
 import { tmpdir } from "node:os"
@@ -62,6 +62,7 @@ export class SshConnectionImpl implements SshConnection {
   private connectedPort = 0
   private host: string
   private readonly pendingRejects = new Set<(reason: Error) => void>()
+  private pinnedHostKey: Buffer | null = null
 
   public constructor(host: string, config: SshConfig) {
     this.host = host
@@ -256,9 +257,11 @@ export class SshConnectionImpl implements SshConnection {
         // eslint-disable-next-line no-await-in-loop
         await this.connect()
         return
-      } catch {
-        const delay = Math.min(RECONNECT_BASE_DELAY * 2 ** attempt, RECONNECT_MAX_DELAY)
-        const jitter = delay * (JITTER_BASE + Math.random() * JITTER_RANGE)
+      } catch (error) {
+        if (error instanceof HostKeyVerificationError) throw error
+        const jitter =
+          Math.min(RECONNECT_BASE_DELAY * 2 ** attempt, RECONNECT_MAX_DELAY) *
+          (JITTER_BASE + Math.random() * JITTER_RANGE)
         // eslint-disable-next-line no-await-in-loop
         await new Promise<void>((resolve) => {
           setTimeout(resolve, jitter)
@@ -513,13 +516,14 @@ export class SshConnectionImpl implements SshConnection {
       try {
         const client = new Client()
         const { hostVerifier, pendingPersist } = buildHostVerifier(mode, this.host, port)
+        const wrappedVerifier = this.wrapHostVerifier(hostVerifier)
         // eslint-disable-next-line no-await-in-loop
         await tryConnectOnPort({
           agent,
           agentForward: this.config.agentForward,
           client,
           host: this.host,
-          hostVerifier,
+          hostVerifier: wrappedVerifier,
           password,
           port,
           privateKey,
@@ -544,6 +548,35 @@ export class SshConnectionImpl implements SshConnection {
       }
     }
     return false
+  }
+
+  /**
+   * Wrap a host-key verifier to pin the accepted key on first connection and
+   * reject key changes on subsequent connections (reconnects).
+   *
+   * @param original - The original verifier from `buildHostVerifier`, if any.
+   * @returns A verifier that enforces host-key pinning.
+   */
+  private wrapHostVerifier(original?: (key: Buffer) => boolean): (key: Buffer) => boolean {
+    return (key: Buffer): boolean => {
+      if (
+        this.pinnedHostKey != null &&
+        (this.pinnedHostKey.length !== key.length || !timingSafeEqual(this.pinnedHostKey, key))
+      ) {
+        this.clearCachedPassword()
+        throw new HostKeyVerificationError(
+          `HOST KEY CHANGED on reconnect to ${this.host}: ` +
+            "the remote host key does not match the key from the initial connection. " +
+            "This could indicate a man-in-the-middle attack."
+        )
+      }
+      if (original != null) {
+        const accepted = original(key)
+        if (!accepted) return false
+      }
+      this.pinnedHostKey ??= Buffer.from(key)
+      return true
+    }
   }
 
   /**
