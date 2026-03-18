@@ -349,7 +349,6 @@ describe("SshConnectionImpl.writeFile — large content (> 64 KB)", () => {
     const client = makeClientWithExecSpy(cleanupExecSpy)
     const ssh = makeConnectedSsh(client)
     ;(ssh as unknown as Record<string, unknown>).cachedSudoPassword = Buffer.from(sudoPassword)
-    ;(ssh as unknown as Record<string, unknown>).cachedSudoPasswordString = sudoPassword
     const content = makeLargeContent()
 
     const stderrSpy = vi.spyOn(process.stderr, "write").mockImplementation(() => true)
@@ -410,7 +409,6 @@ describe("SshConnectionImpl.uploadFile — cleanup error secret masking", () => 
     const client = makeClientWithExecSpy(cleanupExecSpy)
     const ssh = makeConnectedSsh(client)
     ;(ssh as unknown as Record<string, unknown>).cachedSudoPassword = Buffer.from(sudoPassword)
-    ;(ssh as unknown as Record<string, unknown>).cachedSudoPasswordString = sudoPassword
 
     const stderrSpy = vi.spyOn(process.stderr, "write").mockImplementation(() => true)
 

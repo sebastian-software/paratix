@@ -42,7 +42,6 @@ export class SshConnectionImpl implements SshConnection {
    * best-effort mitigation, not a guarantee.
    */
   private cachedSudoPassword: Buffer | null = null
-  private cachedSudoPasswordString: null | string = null
   private client: Client | null = null
   private readonly config: SshConfig
   private connectedPort = 0
@@ -59,7 +58,6 @@ export class SshConnectionImpl implements SshConnection {
       throw new Error("Sudo password must not contain newline characters")
     }
     this.cachedSudoPassword = config.sudoPassword == null ? null : Buffer.from(config.sudoPassword)
-    this.cachedSudoPasswordString = config.sudoPassword ?? null
   }
 
   public addPort(port: number): void {
@@ -217,7 +215,6 @@ export class SshConnectionImpl implements SshConnection {
       throw new Error("Sudo password must not contain newline characters")
     }
     this.cachedSudoPassword = Buffer.from(password)
-    this.cachedSudoPasswordString = password
     try {
       await this.exec("true", { silent: true, timeout: 10_000 })
     } catch (error) {
@@ -366,7 +363,7 @@ export class SshConnectionImpl implements SshConnection {
   }
 
   private buildSecrets(extra?: string[]): string[] {
-    const pw = this.cachedSudoPasswordString
+    const pw = this.cachedSudoPassword?.toString()
     return [...(pw == null ? [] : [pw]), ...(extra ?? [])]
   }
 
@@ -375,7 +372,6 @@ export class SshConnectionImpl implements SshConnection {
       this.cachedSudoPassword.fill(0)
       this.cachedSudoPassword = null
     }
-    this.cachedSudoPasswordString = null
   }
 
   private async connectViaAgent(): Promise<void> {
