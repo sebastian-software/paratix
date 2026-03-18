@@ -122,7 +122,8 @@ export class SshConnectionImpl implements SshConnection {
 
   public async exec(command: string, options: ExecOptions = {}): Promise<ExecResult> {
     const client = this.ensureClient()
-    const cmd = this.sudoCommand(command, this.buildEnvPrefix(options.env))
+    const environmentPrefix = this.buildEnvPrefix(options.env)
+    const { command: cmd, needsPassword } = this.sudoCommand(command, environmentPrefix)
     return new Promise((resolve, reject) => {
       let settled = false
       const wrappedResolve = (value: ExecResult): void => {
@@ -164,7 +165,7 @@ export class SshConnectionImpl implements SshConnection {
           timer,
         })
         // Write sudo password to stdin after listeners are registered
-        if (this.cachedSudoPassword != null && this.config.user !== "root") {
+        if (needsPassword && this.cachedSudoPassword != null) {
           stream.write(Buffer.concat([this.cachedSudoPassword, Buffer.from("\n")]))
         }
       })
@@ -201,6 +202,7 @@ export class SshConnectionImpl implements SshConnection {
    */
   public async probeSudo(): Promise<void> {
     if (this.config.user === "root" || this.cachedSudoPassword != null) return
+    await this.ensureSudoInstalled()
     try {
       await this.exec("true", { silent: true, timeout: 10_000 })
       return
@@ -420,13 +422,62 @@ export class SshConnectionImpl implements SshConnection {
     return this.client
   }
 
-  private sudoCommand(command: string, environmentPrefix = ""): string {
-    if (this.config.user === "root") return `${environmentPrefix}${command}`
+  /** Verify that `sudo` is available on the remote host. */
+  private async ensureSudoInstalled(): Promise<void> {
+    const result = await this.execRaw("command -v sudo")
+    if (result.exitCode !== 0) {
+      throw new Error("sudo is not installed on the remote host")
+    }
+  }
+
+  /**
+   * Execute a command directly over the SSH transport without sudo wrapping.
+   * Used only by {@link probeSudo} to check whether `sudo` is installed.
+   *
+   * @param command - The raw shell command to run.
+   * @returns The exit code and captured stdout.
+   */
+  private async execRaw(command: string): Promise<{ exitCode: number; stdout: string }> {
+    const client = this.ensureClient()
+    return new Promise((resolve, reject) => {
+      client.exec(command, (error: Error | undefined, stream: ClientChannel) => {
+        if (error) {
+          reject(error)
+          return
+        }
+        const chunks: Buffer[] = []
+        stream.on("data", (chunk: Buffer) => {
+          chunks.push(chunk)
+        })
+        stream.on("close", (code: number) => {
+          resolve({ exitCode: code, stdout: Buffer.concat(chunks).toString("utf8") })
+        })
+        stream.stderr.on("data", () => {
+          // discard stderr
+        })
+      })
+    })
+  }
+
+  /**
+   * Build the sudo-wrapped command string for execution.
+   *
+   * @param command - The raw command to execute.
+   * @param environmentPrefix - Optional env var prefix string.
+   * @returns An object with the final command and whether a password must be written to stdin.
+   */
+  private sudoCommand(
+    command: string,
+    environmentPrefix = ""
+  ): { command: string; needsPassword: boolean } {
+    if (this.config.user === "root") {
+      return { command: `${environmentPrefix}${command}`, needsPassword: false }
+    }
     const quoted = shellQuote(`${environmentPrefix}${command}`)
     if (this.cachedSudoPassword != null) {
-      return `SUDO_PROMPT='' sudo -S bash -c ${quoted}`
+      return { command: `SUDO_PROMPT='' sudo -S bash -c ${quoted}`, needsPassword: true }
     }
-    return `sudo bash -c ${quoted}`
+    return { command: `sudo bash -c ${quoted}`, needsPassword: false }
   }
 
   /**

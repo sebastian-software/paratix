@@ -800,6 +800,48 @@ describe("SshConnectionImpl", () => {
       expect(collectOrder).toBeLessThan(writeOrder)
     })
 
+    it("does not write sudo password to stdin when user is root (needsPassword: false)", async () => {
+      // Arrange: root user with a sudoPassword set — sudoCommand() returns needsPassword: false
+      let capturedStream: null | StreamWithStderr = null
+      const execSpy = vi.fn().mockImplementation((_command: string, callback: ExecCallback) => {
+        const stream = makeStream()
+        capturedStream = stream
+        callback(undefined, stream)
+        stream.emit("close", 0)
+      })
+      const client = makeClientWithExecSpy(execSpy)
+      // sudoPassword is set but user is root → needsPassword must be false
+      const ssh = makeConnectedSsh(client, { sudoPassword: "my-sudo-pass", user: "root" })
+
+      // Act
+      await ssh.exec("whoami")
+
+      // Assert: stream.write must never have been called with the password
+      expect(capturedStream).not.toBeNull()
+      expect(capturedStream!.write).not.toHaveBeenCalled()
+    })
+
+    it("does not write sudo password to stdin when cachedSudoPassword is null (non-root, no password)", async () => {
+      // Arrange: non-root user without a sudoPassword — cachedSudoPassword is null
+      let capturedStream: null | StreamWithStderr = null
+      const execSpy = vi.fn().mockImplementation((_command: string, callback: ExecCallback) => {
+        const stream = makeStream()
+        capturedStream = stream
+        callback(undefined, stream)
+        stream.emit("close", 0)
+      })
+      const client = makeClientWithExecSpy(execSpy)
+      // No sudoPassword → cachedSudoPassword is null → needsPassword is false
+      const ssh = makeConnectedSsh(client, { user: "deploy" })
+
+      // Act
+      await ssh.exec("whoami")
+
+      // Assert: stream.write must never have been called
+      expect(capturedStream).not.toBeNull()
+      expect(capturedStream!.write).not.toHaveBeenCalled()
+    })
+
     it("rejects pending exec() immediately when client emits 'close'", async () => {
       let capturedStream: null | StreamWithStderr = null
       const execSpy = vi.fn().mockImplementation((_command: string, callback: ExecCallback) => {
@@ -1535,13 +1577,19 @@ describe("SshConnectionImpl", () => {
 
       const execSpy = vi
         .fn()
-        // First call: passwordless sudo probe — fails (sudo requires a password)
+        // First call: execRaw "command -v sudo" — sudo is installed
+        .mockImplementationOnce((_command: string, callback: ExecCallback) => {
+          const stream = makeStream()
+          callback(undefined, stream)
+          stream.emit("close", 0)
+        })
+        // Second call: passwordless sudo probe — fails (sudo requires a password)
         .mockImplementationOnce((_command: string, callback: ExecCallback) => {
           const stream = makeStream()
           callback(undefined, stream)
           stream.emit("close", 1)
         })
-        // Second call: sudo with password — fails with the password in stderr
+        // Third call: sudo with password — fails with the password in stderr
         .mockImplementationOnce((_command: string, callback: ExecCallback) => {
           const stream = makeStream()
           callback(undefined, stream)
@@ -1569,12 +1617,20 @@ describe("SshConnectionImpl", () => {
       // Arrange
       vi.mocked(promptTerminal).mockResolvedValueOnce("pass\nword")
 
-      const execSpy = vi.fn().mockImplementationOnce((_command: string, callback: ExecCallback) => {
-        const stream = makeStream()
-        callback(undefined, stream)
-        // First exec call: passwordless sudo probe fails so probeSudo prompts for a password
-        stream.emit("close", 1)
-      })
+      const execSpy = vi
+        .fn()
+        // First call: execRaw "command -v sudo" — sudo is installed
+        .mockImplementationOnce((_command: string, callback: ExecCallback) => {
+          const stream = makeStream()
+          callback(undefined, stream)
+          stream.emit("close", 0)
+        })
+        // Second call: passwordless sudo probe fails so probeSudo prompts for a password
+        .mockImplementationOnce((_command: string, callback: ExecCallback) => {
+          const stream = makeStream()
+          callback(undefined, stream)
+          stream.emit("close", 1)
+        })
 
       const client = makeClientWithExecSpy(execSpy)
       const ssh = makeConnectedSsh(client, { user: "deploy" })
@@ -1587,17 +1643,46 @@ describe("SshConnectionImpl", () => {
       // Arrange
       vi.mocked(promptTerminal).mockResolvedValueOnce("pass\rword")
 
-      const execSpy = vi.fn().mockImplementationOnce((_command: string, callback: ExecCallback) => {
-        const stream = makeStream()
-        callback(undefined, stream)
-        stream.emit("close", 1)
-      })
+      const execSpy = vi
+        .fn()
+        // First call: execRaw "command -v sudo" — sudo is installed
+        .mockImplementationOnce((_command: string, callback: ExecCallback) => {
+          const stream = makeStream()
+          callback(undefined, stream)
+          stream.emit("close", 0)
+        })
+        // Second call: passwordless sudo probe fails so probeSudo prompts for a password
+        .mockImplementationOnce((_command: string, callback: ExecCallback) => {
+          const stream = makeStream()
+          callback(undefined, stream)
+          stream.emit("close", 1)
+        })
 
       const client = makeClientWithExecSpy(execSpy)
       const ssh = makeConnectedSsh(client, { user: "deploy" })
 
       // Act & Assert
       await expect(ssh.probeSudo()).rejects.toThrow("newline")
+    })
+
+    it("throws 'sudo is not installed' when command -v sudo exits with non-zero code (regression)", async () => {
+      // Arrange: execRaw("command -v sudo") returns exit code 1 — sudo is absent
+      const execSpy = vi
+        .fn()
+        // Only call: execRaw "command -v sudo" — sudo is NOT installed
+        .mockImplementationOnce((_command: string, callback: ExecCallback) => {
+          const stream = makeStream()
+          callback(undefined, stream)
+          stream.emit("close", 1)
+        })
+
+      const client = makeClientWithExecSpy(execSpy)
+      const ssh = makeConnectedSsh(client, { user: "deploy" })
+
+      // Act & Assert
+      await expect(ssh.probeSudo()).rejects.toThrow("sudo is not installed")
+      // Verify exactly one exec call was made (command -v sudo only, no further probing)
+      expect(execSpy).toHaveBeenCalledOnce()
     })
   })
 
