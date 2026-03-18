@@ -270,8 +270,9 @@ export class SshConnectionImpl implements SshConnection {
         attempt++
       }
     }
-    const reason = attempt >= maxAttempts ? `${attempt} attempts` : `${timeout}ms`
-    throw new Error(`Failed to reconnect to ${this.host} after ${reason}`)
+    throw new Error(
+      `Failed to reconnect to ${this.host} after ${attempt} attempts (timeout: ${timeout}ms)`
+    )
   }
 
   public async sha256(remotePath: string): Promise<null | string> {

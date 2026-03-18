@@ -384,7 +384,7 @@ describe("SshConnectionImpl", () => {
       }
 
       await expect(reconnectPromise).rejects.toThrow(
-        /Failed to reconnect to 1\.2\.3\.4 after 5000ms/v
+        /Failed to reconnect to 1\.2\.3\.4 after \d+ attempts \(timeout: 5000ms\)/v
       )
     })
 
