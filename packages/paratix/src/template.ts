@@ -3,7 +3,7 @@ import type { Environment } from "./types.js"
 import { resolveEnvironment } from "./environment.js"
 import { shellQuote } from "./sshHelpers.js"
 
-/** Options for controlling template rendering behaviour. */
+/** Options for controlling template rendering behavior. */
 export type RenderOptions = {
   /** When `true`, every placeholder must use an explicit modifier (e.g. `|shell` or `|raw`). */
   strict?: boolean
@@ -80,7 +80,7 @@ export async function renderTemplate(
   const result = template.replaceAll("\\{{", escapedBraceMarker)
 
   // Find all {{key}} or {{key|modifier}} patterns and resolve values in parallel
-  // eslint-disable-next-line security/detect-unsafe-regex, regexp/no-unused-capturing-group -- modifier group is consumed via match.groups
+  // eslint-disable-next-line security/detect-unsafe-regex -- modifier group is consumed via match.groups
   const pattern = /\{\{(?<varName>\w+)(?:\|(?<modifier>\w*))?\}\}/gv
   const matches = [...result.matchAll(pattern)]
 

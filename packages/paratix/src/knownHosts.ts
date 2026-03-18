@@ -234,7 +234,7 @@ async function acceptAndPersistHostKey(host: string, port: number, key: Buffer):
 /**
  * Build the `hostVerifier` callback for an ssh2 `ConnectConfig`.
  *
- * Behaviour by mode:
+ * Behavior by mode:
  * - `"no"` — returns an empty object (no verification, ssh2 default).
  * - `"accept-new"` — accepts unknown keys and appends them to `~/.ssh/known_hosts`;
  *   throws if a known key does not match.

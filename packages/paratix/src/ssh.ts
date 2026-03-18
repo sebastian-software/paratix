@@ -398,6 +398,7 @@ export class SshConnectionImpl implements SshConnection {
       throw new Error("No privateKey configured and SSH_AUTH_SOCK is not set")
     }
     try {
+      // eslint-disable-next-line security/detect-non-literal-fs-filename -- agent is validated from SSH_AUTH_SOCK env var
       await stat(agent)
     } catch {
       throw new Error(`SSH_AUTH_SOCK points to non-existent path: ${agent}`)

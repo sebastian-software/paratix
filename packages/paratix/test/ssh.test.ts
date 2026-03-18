@@ -680,7 +680,7 @@ describe("SshConnectionImpl", () => {
   })
 
   // -------------------------------------------------------------------------
-  // connect — private key auth and memory sanitisation
+  // connect — private key auth and memory sanitization
   // -------------------------------------------------------------------------
 
   describe("connect (private key auth)", () => {

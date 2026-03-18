@@ -113,6 +113,7 @@ export function maskSecrets(text: string, secrets: string[]): string {
       }
       variants.push(secret)
       const encoded = encodeURIComponent(secret)
+      // eslint-disable-next-line security/detect-possible-timing-attacks -- not a secret comparison, just checking if URL encoding changed the string
       if (encoded !== secret) variants.push(encoded)
     }
   }

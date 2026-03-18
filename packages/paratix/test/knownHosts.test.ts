@@ -594,7 +594,7 @@ describe("buildHostVerifier", () => {
     const { hostVerifier: secondVerifier } = buildHostVerifier("accept-new", "newhost.com", 22)
     expect(secondVerifier).toBeDefined()
 
-    // Act: second verifier should recognise the cached key
+    // Act: second verifier should recognize the cached key
     const secondResult = secondVerifier!(ed25519Key)
 
     // Assert: returns true and appendFile was called only once (for the first verifier)
