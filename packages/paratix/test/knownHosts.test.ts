@@ -674,6 +674,42 @@ describe("buildHostVerifier", () => {
     }
   })
 
+  it("mode 'accept-new': persist failure ssh-keyscan hint shell-quotes hostname with special chars", async () => {
+    // Regression test: the ssh-keyscan command suggestion in the persist failure warning
+    // must shell-quote the hostname to prevent shell injection when the user copies it.
+    // e.g. "evil'host; rm -rf /" must appear as 'evil'\''host; rm -rf /' in the hint.
+    const maliciousHost = "evil'host; rm -rf /"
+    readFileSyncMock.mockReturnValue("")
+    const accessError = Object.assign(new Error("Permission denied"), { code: "EACCES" })
+    appendFileMock.mockRejectedValue(accessError)
+
+    const stderrSpy = vi.spyOn(process.stderr, "write").mockImplementation(() => true)
+
+    try {
+      const { hostVerifier } = buildHostVerifier("accept-new", maliciousHost, 22)
+      expect(hostVerifier).toBeDefined()
+
+      hostVerifier!(ed25519Key)
+
+      // Wait for the async .catch() to fire and write the second warning
+      await vi.waitFor(() => {
+        expect(stderrSpy).toHaveBeenCalledTimes(2)
+      })
+
+      const persistWarning = (stderrSpy.mock.calls[1] as [string])[0]
+
+      // The ssh-keyscan command must contain the hostname in single-quotes
+      // shellQuote("evil'host; rm -rf /") => 'evil'\''host; rm -rf /'
+      expect(persistWarning).toContain("ssh-keyscan")
+      // The hostname must be wrapped in single quotes (shell-quoted)
+      expect(persistWarning).toContain("'evil'")
+      // The raw unquoted form must NOT appear as a standalone shell-injectable sequence
+      expect(persistWarning).not.toContain("ssh-keyscan evil'host; rm -rf /")
+    } finally {
+      stderrSpy.mockRestore()
+    }
+  })
+
   it("clearHostKeyCache removes cached keys", async () => {
     // Arrange: accept a key so it gets cached
     readFileSyncMock.mockReturnValue("")

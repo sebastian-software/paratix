@@ -4,6 +4,8 @@ import { appendFile, mkdir } from "node:fs/promises"
 import { homedir } from "node:os"
 import { join } from "node:path"
 
+import { shellQuote } from "./sshHelpers.js"
+
 /** Thrown when a remote host key does not match the expected key in known_hosts. */
 export class HostKeyVerificationError extends Error {
   public constructor(message: string) {
@@ -217,7 +219,8 @@ async function acceptAndPersistHostKey(host: string, port: number, key: Buffer):
   try {
     await appendHostKey(host, port, key)
   } catch (error: unknown) {
-    const keyscanArguments = port === DEFAULT_SSH_PORT ? host : `-p ${port} ${host}`
+    const keyscanArguments =
+      port === DEFAULT_SSH_PORT ? shellQuote(host) : `-p ${port} ${shellQuote(host)}`
     process.stderr.write(
       `WARNING: Could not persist host key for ${host} — ` +
         `the key is cached in memory for this session. ` +
