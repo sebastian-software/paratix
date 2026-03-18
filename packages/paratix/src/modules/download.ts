@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto"
+import { createHash, timingSafeEqual } from "node:crypto"
 
 import { shellQuote, validateMode } from "../ssh.js"
 import { type Module, type ModuleResult, NEEDS_APPLY, type SshConnection } from "../types.js"
@@ -70,7 +70,11 @@ async function verifyChecksum(
 ): Promise<boolean> {
   if (parameters.sha256 == null) return true
   const actualHash = await conn.sha256(parameters.destination)
-  if (actualHash === parameters.sha256) return true
+  if (actualHash?.length === parameters.sha256.length) {
+    const actual = Buffer.from(actualHash, "hex")
+    const expected = Buffer.from(parameters.sha256, "hex")
+    if (actual.length === expected.length && timingSafeEqual(actual, expected)) return true
+  }
   await conn.exec(`rm -f ${shellQuote(parameters.destination)}`, { silent: true })
   return false
 }
