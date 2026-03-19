@@ -124,6 +124,30 @@ async function ensureAuthorizedKeysIsNotSymlink(
   )
 }
 
+async function authorizedKeysSecurityStateIsValid(
+  conn: SshConnection,
+  parameters: {
+    authorizedKeysPath: string
+    sshDirectoryPath: string
+    user: string
+  }
+): Promise<boolean> {
+  const { authorizedKeysPath, sshDirectoryPath, user } = parameters
+
+  const isAuthorizedKeysSymlink = await conn.test(`[ -L ${shellQuote(authorizedKeysPath)} ]`)
+  if (isAuthorizedKeysSymlink) return false
+
+  const sshDirectoryState = await conn.output(
+    `stat -c '%a %U %G %F' ${shellQuote(sshDirectoryPath)}`
+  )
+  if (sshDirectoryState.trim() !== `700 ${user} ${user} directory`) return false
+
+  const authorizedKeysState = await conn.output(
+    `stat -c '%a %U %G %F' ${shellQuote(authorizedKeysPath)}`
+  )
+  return authorizedKeysState.trim() === `600 ${user} ${user} regular file`
+}
+
 async function rewriteAuthorizedKeys(
   conn: SshConnection,
   parameters: {
@@ -200,14 +224,21 @@ export const ssh = {
         if (!conn) return NEEDS_APPLY
 
         const home = await resolveHome(conn, user)
-        const authKeysPath = shellQuote(`${home}/.ssh/authorized_keys`)
+        const sshDirectoryPath = `${home}/.ssh`
+        const authorizedKeysPath = `${home}/.ssh/authorized_keys`
+        const authKeysPath = shellQuote(authorizedKeysPath)
 
         const keyExists = await conn.test(`grep -qF -- ${shellQuote(key)} ${authKeysPath}`)
+        const securityStateIsValid = await authorizedKeysSecurityStateIsValid(conn, {
+          authorizedKeysPath,
+          sshDirectoryPath,
+          user,
+        })
 
         if (state === "present") {
-          return keyExists ? "ok" : NEEDS_APPLY
+          return keyExists && securityStateIsValid ? "ok" : NEEDS_APPLY
         }
-        return keyExists ? NEEDS_APPLY : "ok"
+        return keyExists || !securityStateIsValid ? NEEDS_APPLY : "ok"
       },
       name: `ssh.authorizedKeys: ${user} (${state})`,
     }

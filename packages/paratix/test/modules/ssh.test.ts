@@ -215,7 +215,12 @@ describe("ssh.authorizedKeys", () => {
   it("check returns ok when key exists in authorized_keys (state: present)", async () => {
     const mockSsh = createMockSsh(
       aliceResponses({
+        "[ -L '/home/alice/.ssh/authorized_keys' ]": { code: 1 },
         [`grep -qF -- '${testKey}' ${aliceKeys}`]: { code: 0 },
+        "stat -c '%a %U %G %F' '/home/alice/.ssh'": { stdout: "700 alice alice directory" },
+        "stat -c '%a %U %G %F' '/home/alice/.ssh/authorized_keys'": {
+          stdout: "600 alice alice regular file",
+        },
       })
     )
     const mod = ssh.authorizedKeys("alice", testKey)
@@ -226,7 +231,12 @@ describe("ssh.authorizedKeys", () => {
   it("check returns needs-apply when key is missing (state: present)", async () => {
     const mockSsh = createMockSsh(
       aliceResponses({
+        "[ -L '/home/alice/.ssh/authorized_keys' ]": { code: 1 },
         [`grep -qF -- '${testKey}' ${aliceKeys}`]: { code: 1 },
+        "stat -c '%a %U %G %F' '/home/alice/.ssh'": { stdout: "700 alice alice directory" },
+        "stat -c '%a %U %G %F' '/home/alice/.ssh/authorized_keys'": {
+          stdout: "600 alice alice regular file",
+        },
       })
     )
     const mod = ssh.authorizedKeys("alice", testKey)
@@ -243,7 +253,12 @@ describe("ssh.authorizedKeys", () => {
   it("check returns ok when key is missing (state: absent)", async () => {
     const mockSsh = createMockSsh(
       aliceResponses({
+        "[ -L '/home/alice/.ssh/authorized_keys' ]": { code: 1 },
         [`grep -qF -- '${testKey}' ${aliceKeys}`]: { code: 1 },
+        "stat -c '%a %U %G %F' '/home/alice/.ssh'": { stdout: "700 alice alice directory" },
+        "stat -c '%a %U %G %F' '/home/alice/.ssh/authorized_keys'": {
+          stdout: "600 alice alice regular file",
+        },
       })
     )
     const mod = ssh.authorizedKeys("alice", testKey, { state: "absent" })
@@ -254,11 +269,63 @@ describe("ssh.authorizedKeys", () => {
   it("check returns needs-apply when key exists (state: absent)", async () => {
     const mockSsh = createMockSsh(
       aliceResponses({
+        "[ -L '/home/alice/.ssh/authorized_keys' ]": { code: 1 },
         [`grep -qF -- '${testKey}' ${aliceKeys}`]: { code: 0 },
+        "stat -c '%a %U %G %F' '/home/alice/.ssh'": { stdout: "700 alice alice directory" },
+        "stat -c '%a %U %G %F' '/home/alice/.ssh/authorized_keys'": {
+          stdout: "600 alice alice regular file",
+        },
       })
     )
     const mod = ssh.authorizedKeys("alice", testKey, { state: "absent" })
     const result = await mod.check(mockSsh, emptyEnv)
+    expect(result).toBe("needs-apply")
+  })
+
+  it("check returns needs-apply when authorized_keys is a symlink", async () => {
+    const mockSsh = createMockSsh(
+      aliceResponses({
+        "[ -L '/home/alice/.ssh/authorized_keys' ]": { code: 0 },
+        [`grep -qF -- '${testKey}' ${aliceKeys}`]: { code: 0 },
+      })
+    )
+    const mod = ssh.authorizedKeys("alice", testKey)
+
+    const result = await mod.check(mockSsh, emptyEnv)
+
+    expect(result).toBe("needs-apply")
+  })
+
+  it("check returns needs-apply when .ssh ownership or mode has drifted", async () => {
+    const mockSsh = createMockSsh(
+      aliceResponses({
+        "[ -L '/home/alice/.ssh/authorized_keys' ]": { code: 1 },
+        [`grep -qF -- '${testKey}' ${aliceKeys}`]: { code: 0 },
+        "stat -c '%a %U %G %F' '/home/alice/.ssh'": { stdout: "755 root root directory" },
+      })
+    )
+    const mod = ssh.authorizedKeys("alice", testKey)
+
+    const result = await mod.check(mockSsh, emptyEnv)
+
+    expect(result).toBe("needs-apply")
+  })
+
+  it("check returns needs-apply when authorized_keys ownership or mode has drifted", async () => {
+    const mockSsh = createMockSsh(
+      aliceResponses({
+        "[ -L '/home/alice/.ssh/authorized_keys' ]": { code: 1 },
+        [`grep -qF -- '${testKey}' ${aliceKeys}`]: { code: 0 },
+        "stat -c '%a %U %G %F' '/home/alice/.ssh'": { stdout: "700 alice alice directory" },
+        "stat -c '%a %U %G %F' '/home/alice/.ssh/authorized_keys'": {
+          stdout: "644 root root regular file",
+        },
+      })
+    )
+    const mod = ssh.authorizedKeys("alice", testKey)
+
+    const result = await mod.check(mockSsh, emptyEnv)
+
     expect(result).toBe("needs-apply")
   })
 
@@ -390,8 +457,13 @@ describe("ssh.authorizedKeys", () => {
 
   it("resolves home directory dynamically for root user", async () => {
     const mockSsh = createMockSsh({
+      "[ -L '/root/.ssh/authorized_keys' ]": { code: 1 },
       [`grep -qF -- '${testKey}' '/root/.ssh/authorized_keys'`]: { code: 0 },
       "getent passwd 'root' | cut -d: -f6": { stdout: "/root" },
+      "stat -c '%a %U %G %F' '/root/.ssh'": { stdout: "700 root root directory" },
+      "stat -c '%a %U %G %F' '/root/.ssh/authorized_keys'": {
+        stdout: "600 root root regular file",
+      },
     })
     const mod = ssh.authorizedKeys("root", testKey)
     const result = await mod.check(mockSsh, emptyEnv)
@@ -400,8 +472,13 @@ describe("ssh.authorizedKeys", () => {
 
   it("resolves home directory dynamically for non-root user", async () => {
     const mockSsh = createMockSsh({
+      "[ -L '/home/deploy/.ssh/authorized_keys' ]": { code: 1 },
       [`grep -qF -- '${testKey}' '/home/deploy/.ssh/authorized_keys'`]: { code: 0 },
       "getent passwd 'deploy' | cut -d: -f6": { stdout: "/home/deploy" },
+      "stat -c '%a %U %G %F' '/home/deploy/.ssh'": { stdout: "700 deploy deploy directory" },
+      "stat -c '%a %U %G %F' '/home/deploy/.ssh/authorized_keys'": {
+        stdout: "600 deploy deploy regular file",
+      },
     })
     const mod = ssh.authorizedKeys("deploy", testKey)
     const result = await mod.check(mockSsh, emptyEnv)
@@ -411,8 +488,13 @@ describe("ssh.authorizedKeys", () => {
   it("regression: home path with spaces is correctly shell-quoted in check", async () => {
     const spaceyHome = "/home/my user"
     const mockSsh = createMockSsh({
+      "[ -L '/home/my user/.ssh/authorized_keys' ]": { code: 1 },
       [`grep -qF -- '${testKey}' '/home/my user/.ssh/authorized_keys'`]: { code: 0 },
       "getent passwd 'alice' | cut -d: -f6": { stdout: spaceyHome },
+      "stat -c '%a %U %G %F' '/home/my user/.ssh'": { stdout: "700 alice alice directory" },
+      "stat -c '%a %U %G %F' '/home/my user/.ssh/authorized_keys'": {
+        stdout: "600 alice alice regular file",
+      },
     })
     const mod = ssh.authorizedKeys("alice", testKey)
     const result = await mod.check(mockSsh, emptyEnv)
