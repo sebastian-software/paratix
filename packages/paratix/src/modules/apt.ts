@@ -200,6 +200,12 @@ export const apt = {
         })
         if (update.code !== 0) return { status: "failed" }
 
+        const configure = await ssh.exec(`${NONINTERACTIVE} dpkg --configure -a`, {
+          ignoreExitCode: true,
+          silent: true,
+        })
+        if (configure.code !== 0) return { status: "failed" }
+
         const upgrade = await ssh.exec(`${NONINTERACTIVE} apt-get dist-upgrade -y`, {
           ignoreExitCode: true,
           silent: true,
