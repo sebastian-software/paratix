@@ -881,6 +881,68 @@ describe("runPlaybook shutdown handler leak on SSH connection failure", () => {
     expect(process.listenerCount("SIGINT")).toBe(sigintBefore)
     expect(process.listenerCount("SIGTERM")).toBe(sigtermBefore)
   })
+
+  it("disconnects and sets signal exitCode when SIGINT arrives during connect", async () => {
+    const disconnect = vi.fn()
+
+    vi.doMock("../src/ssh.js", () => ({
+      shellQuote: (s: string) => `'${s}'`,
+      SshConnectionImpl: class MockConnectInterrupted {
+        public connect = vi.fn().mockImplementation(async () => {
+          await Promise.resolve()
+          process.emit("SIGINT", "SIGINT")
+          throw new Error("connect interrupted")
+        })
+        public disconnect = disconnect
+        public probeSudo = vi.fn().mockResolvedValue(null)
+      },
+    }))
+
+    const { runPlaybook } = await import("../src/runner.js")
+
+    const definition: ServerDefinition = {
+      host: "1.2.3.4",
+      name: "test-server",
+      run: [],
+      ssh: { ports: [22], privateKey: "~/.ssh/id", user: "root" },
+    }
+
+    await expect(runPlaybook(definition)).resolves.toBeUndefined()
+
+    expect(disconnect).toHaveBeenCalled()
+    expect(process.exitCode).toBe(130)
+  })
+
+  it("disconnects and sets signal exitCode when SIGTERM arrives during probeSudo", async () => {
+    const disconnect = vi.fn()
+
+    vi.doMock("../src/ssh.js", () => ({
+      shellQuote: (s: string) => `'${s}'`,
+      SshConnectionImpl: class MockProbeInterrupted {
+        public connect = vi.fn().mockResolvedValue(null)
+        public disconnect = disconnect
+        public probeSudo = vi.fn().mockImplementation(async () => {
+          await Promise.resolve()
+          process.emit("SIGTERM", "SIGTERM")
+          throw new Error("probe interrupted")
+        })
+      },
+    }))
+
+    const { runPlaybook } = await import("../src/runner.js")
+
+    const definition: ServerDefinition = {
+      host: "1.2.3.4",
+      name: "test-server",
+      run: [],
+      ssh: { ports: [22], privateKey: "~/.ssh/id", user: "root" },
+    }
+
+    await expect(runPlaybook(definition)).resolves.toBeUndefined()
+
+    expect(disconnect).toHaveBeenCalled()
+    expect(process.exitCode).toBe(143)
+  })
 })
 
 // Bug regression: recipes must NOT apply() child modules in dry-run mode, only check()

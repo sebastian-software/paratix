@@ -325,10 +325,51 @@ async function connectAndRegister(
       ? definition.ssh
       : { ...definition.ssh, reconnectTimeout: options.reconnectTimeout }
   const ssh = new SshConnectionImpl(definition.host, sshConfig)
+  setSsh(ssh)
   await ssh.connect()
   await ssh.probeSudo()
-  setSsh(ssh)
   return ssh
+}
+
+type ExecuteRunArguments = {
+  definition: ServerDefinition
+  dryRun: boolean
+  environment: Environment
+  shutdownSignal: () => NodeJS.Signals | null
+  ssh: SshConnectionImpl
+  stats: RunStats
+  verbose: boolean
+}
+
+async function executeRun(parameters: ExecuteRunArguments): Promise<void> {
+  const { definition, dryRun, environment, shutdownSignal, ssh, stats, verbose } = parameters
+
+  printRecipeHeader(definition.name)
+  const finalEnvironment = await runModuleLoop({
+    dryRun,
+    env: environment,
+    modules: definition.run,
+    shutdownSignal,
+    ssh,
+    stats,
+    verbose,
+  })
+
+  if (shutdownSignal() == null && stats.changed > 0 && definition.signals != null)
+    await runSignals({
+      env: finalEnvironment,
+      shutdownSignal,
+      signals: definition.signals,
+      ssh,
+      stats,
+      verbose,
+    })
+
+  printSummary(stats)
+}
+
+function rethrowIfNotShutdown(error: unknown, shutdownSignal: () => NodeJS.Signals | null): void {
+  if (shutdownSignal() == null) throw error
 }
 
 export async function runPlaybook(
@@ -344,28 +385,9 @@ export async function runPlaybook(
   // No catch block: connect errors propagate to cli.ts, which prints them and exits with code 2.
   try {
     ssh = await connectAndRegister(definition, options, setSsh)
-    printRecipeHeader(definition.name)
-    const finalEnvironment = await runModuleLoop({
-      dryRun,
-      env: environment,
-      modules: definition.run,
-      shutdownSignal,
-      ssh,
-      stats,
-      verbose,
-    })
-
-    if (shutdownSignal() == null && stats.changed > 0 && definition.signals != null)
-      await runSignals({
-        env: finalEnvironment,
-        shutdownSignal,
-        signals: definition.signals,
-        ssh,
-        stats,
-        verbose,
-      })
-
-    printSummary(stats)
+    await executeRun({ definition, dryRun, environment, shutdownSignal, ssh, stats, verbose })
+  } catch (error) {
+    rethrowIfNotShutdown(error, shutdownSignal)
   } finally {
     for (const signal of ["SIGINT", "SIGTERM"] as const)
       process.removeListener(signal, handleShutdownSignal)
