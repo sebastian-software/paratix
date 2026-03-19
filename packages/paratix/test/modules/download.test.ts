@@ -8,6 +8,8 @@ import { createMockSsh } from "../helpers/mockSsh.js"
 
 const emptyEnv = {}
 const allowUnverifiedDownload = { allowUnverifiedDownload: true } as const
+const httpsOnlyCurlProtocolFlags = "--proto '=https' --proto-redir '=https'"
+const insecureHttpCurlProtocolFlags = "--proto '=http,https' --proto-redir '=http,https'"
 
 function buildLargeDownloadFlagName(parameters: {
   destination: string
@@ -126,7 +128,9 @@ describe("download.url", () => {
       const mod = download.url(destination, url, allowUnverifiedDownload)
       const result = await mod.apply(mockSsh, emptyEnv)
       expect(result.status).toBe("changed")
-      expect(mockSsh.calls).toContain(`curl -fsSL -o '${temporaryDestination}' '${url}'`)
+      expect(mockSsh.calls).toContain(
+        `curl -fsSL -o '${temporaryDestination}' ${httpsOnlyCurlProtocolFlags} '${url}'`
+      )
       expect(mockSsh.calls).toContain(`mv '${temporaryDestination}' '${destination}'`)
     })
 
@@ -202,7 +206,7 @@ describe("download.url", () => {
       const result = await mod.apply(mockSsh, emptyEnv)
       expect(result.status).toBe("changed")
       expect(mockSsh.calls).toContain(
-        `curl -fsSL -o '${temporaryDestination}' -H 'Authorization: Bearer mytoken' '${url}'`
+        `curl -fsSL -o '${temporaryDestination}' ${httpsOnlyCurlProtocolFlags} -H 'Authorization: Bearer mytoken' '${url}'`
       )
     })
 
@@ -395,7 +399,9 @@ describe("download.github", () => {
       const mod = download.github(destination, { ...allowUnverifiedDownload, asset, repo, tag })
       const result = await mod.apply(mockSsh, emptyEnv)
       expect(result.status).toBe("changed")
-      expect(mockSsh.calls).toContain(`curl -fsSL -o '${temporaryDestination}' '${expectedUrl}'`)
+      expect(mockSsh.calls).toContain(
+        `curl -fsSL -o '${temporaryDestination}' ${httpsOnlyCurlProtocolFlags} '${expectedUrl}'`
+      )
       expect(mockSsh.calls).toContain(`mv '${temporaryDestination}' '${destination}'`)
     })
 
@@ -715,7 +721,9 @@ describe("download.large", () => {
       const mod = download.large(destination, url, allowUnverifiedDownload)
       const result = await mod.apply(mockSsh, emptyEnv)
       expect(result.status).toBe("changed")
-      expect(mockSsh.calls).toContain(`curl -fsSL -o '${temporaryDestination}' '${url}'`)
+      expect(mockSsh.calls).toContain(
+        `curl -fsSL -o '${temporaryDestination}' ${httpsOnlyCurlProtocolFlags} '${url}'`
+      )
       expect(mockSsh.calls).toContain(`mv '${temporaryDestination}' '${destination}'`)
       expect(mockSsh.calls).toContain(`touch /var/lib/paratix/flags/'${flagName}'`)
     })
@@ -977,6 +985,62 @@ describe("buildCurlCommand — header value validation", () => {
     expect(result.status).toBe("changed")
     const curlCall = mockSsh.calls.find((c) => c.startsWith("curl"))
     expect(curlCall).toContain("-H 'X-Custom: safe-value'")
+  })
+})
+
+describe("buildCurlCommand — redirect protocol policy", () => {
+  const destination = "/tmp/file"
+  const httpsUrl = "https://example.com/file"
+
+  it("restricts initial URL and redirects to https by default", async () => {
+    const mockSsh = createMockSsh()
+    const mod = download.url(destination, httpsUrl, allowUnverifiedDownload)
+    const result = await mod.apply(mockSsh, emptyEnv)
+
+    expect(result.status).toBe("changed")
+    const curlCall = mockSsh.calls.find((call) => call.startsWith("curl -fsSL"))
+    expect(curlCall).toContain(httpsOnlyCurlProtocolFlags)
+  })
+
+  it("allows http and https for initial URL and redirects when allowInsecureHttp is true", async () => {
+    const mockSsh = createMockSsh()
+    const mod = download.url(destination, "http://example.com/file", {
+      ...allowUnverifiedDownload,
+      allowInsecureHttp: true,
+    })
+    const result = await mod.apply(mockSsh, emptyEnv)
+
+    expect(result.status).toBe("changed")
+    const curlCall = mockSsh.calls.find((call) => call.startsWith("curl -fsSL"))
+    expect(curlCall).toContain(insecureHttpCurlProtocolFlags)
+  })
+
+  it("uses https-only redirect policy for github downloads by default", async () => {
+    const mockSsh = createMockSsh()
+    const mod = download.github("/usr/local/bin/terraform", {
+      ...allowUnverifiedDownload,
+      asset: "terraform_1.5.0_linux_amd64.zip",
+      repo: "hashicorp/terraform",
+      tag: "v1.5.0",
+    })
+    const result = await mod.apply(mockSsh, emptyEnv)
+
+    expect(result.status).toBe("changed")
+    const curlCall = mockSsh.calls.find((call) => call.startsWith("curl -fsSL"))
+    expect(curlCall).toContain(httpsOnlyCurlProtocolFlags)
+  })
+
+  it("propagates insecure http redirect opt-in for large downloads", async () => {
+    const mockSsh = createMockSsh()
+    const mod = download.large("/var/cache/big.iso", "http://example.com/big.iso", {
+      ...allowUnverifiedDownload,
+      allowInsecureHttp: true,
+    })
+    const result = await mod.apply(mockSsh, emptyEnv)
+
+    expect(result.status).toBe("changed")
+    const curlCall = mockSsh.calls.find((call) => call.startsWith("curl -fsSL"))
+    expect(curlCall).toContain(insecureHttpCurlProtocolFlags)
   })
 })
 

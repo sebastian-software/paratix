@@ -86,6 +86,12 @@ function buildTemporaryDownloadPathCommand(destination: string): string {
   return `mktemp "$(dirname ${shellQuote(destination)})/.paratix-download.XXXXXX"`
 }
 
+// cspell:ignore redir
+function buildCurlProtocolFlags(parameters: Pick<DownloadParameters, "allowInsecureHttp">): string {
+  const allowedProtocols = parameters.allowInsecureHttp === true ? "http,https" : "https"
+  return `--proto '=${allowedProtocols}' --proto-redir '=${allowedProtocols}'`
+}
+
 /**
  * Build the curl command string including optional headers.
  *
@@ -106,7 +112,8 @@ function buildCurlCommand(parameters: DownloadParameters): string {
     })
     .join(" ")
   const headerPart = headerFlags.length > 0 ? `${headerFlags} ` : ""
-  return `curl -fsSL -o ${shellQuote(parameters.destination)} ${headerPart}${shellQuote(parameters.url)}`
+  const protocolFlags = buildCurlProtocolFlags(parameters)
+  return `curl -fsSL -o ${shellQuote(parameters.destination)} ${protocolFlags} ${headerPart}${shellQuote(parameters.url)}`
 }
 
 /**
