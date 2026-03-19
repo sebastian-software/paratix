@@ -8,6 +8,9 @@ import { file } from "../../src/modules/file.js"
 import { createMockSsh } from "../helpers/mockSsh.js"
 
 const emptyEnv = {}
+const unicodeContent = "Grüße aus Köln – こんにちは мир\n"
+const unicodeName = "über datei.txt"
+const unicodeRemotePath = "/remote/über ordner/äöü.txt"
 
 describe("file.directory", () => {
   it("check returns ok when the directory exists", async () => {
@@ -234,6 +237,29 @@ describe("file.copy", () => {
 
       expect(result.status).toBe("changed")
       expect(uploadedFiles).toStrictEqual([{ local: localPath, remote: "/remote/file.txt" }])
+    } finally {
+      rmSync(dir, { recursive: true })
+    }
+  })
+
+  it("apply preserves unicode content and paths", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "paratix-test-"))
+    try {
+      const localPath = join(dir, unicodeName)
+      writeFileSync(localPath, unicodeContent, "utf8")
+
+      const uploadedFiles: Array<{ local: string; remote: string }> = []
+      const ssh = createMockSsh()
+      // eslint-disable-next-line @typescript-eslint/require-await -- Mock
+      ssh.uploadFile = async (local: string, remote: string) => {
+        uploadedFiles.push({ local, remote })
+      }
+
+      const mod = file.copy(unicodeRemotePath, localPath)
+      const result = await mod.apply(ssh, emptyEnv)
+
+      expect(result.status).toBe("changed")
+      expect(uploadedFiles).toStrictEqual([{ local: localPath, remote: unicodeRemotePath }])
     } finally {
       rmSync(dir, { recursive: true })
     }
@@ -505,6 +531,31 @@ describe("file.template", () => {
       rmSync(dir, { recursive: true })
     }
   })
+
+  it("apply renders unicode template content and values", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "paratix-test-"))
+    try {
+      const templatePath = join(dir, "grüße-テンプレート.tmpl")
+      writeFileSync(templatePath, "Hallo {{name|raw}} aus {{city|raw}}", "utf8")
+
+      const writtenFiles: Array<{ content: string; path: string }> = []
+      const ssh = createMockSsh()
+      // eslint-disable-next-line @typescript-eslint/require-await -- Mock
+      ssh.writeFile = async (path: string, content: string) => {
+        writtenFiles.push({ content, path })
+      }
+
+      const mod = file.template("/remote/über-vorlage.txt", templatePath)
+      const result = await mod.apply(ssh, { city: "München", name: "Jörg" })
+
+      expect(result.status).toBe("changed")
+      expect(writtenFiles).toStrictEqual([
+        { content: "Hallo Jörg aus München", path: "/remote/über-vorlage.txt" },
+      ])
+    } finally {
+      rmSync(dir, { recursive: true })
+    }
+  })
 })
 
 describe("file.assemble", () => {
@@ -716,6 +767,32 @@ describe("file.block", () => {
     expect(result.status).toBe("changed")
     expect(writtenFiles[0]?.content).toContain("new content")
     expect(writtenFiles[0]?.content).not.toContain("old content")
+  })
+
+  it("apply preserves unicode block content and unicode paths", async () => {
+    const unicodeBlockPath = "/etc/über hosts"
+    const writtenFiles: Array<{ content: string; path: string }> = []
+    const ssh = createMockSsh({
+      [`cat '${unicodeBlockPath}'`]: { stdout: "bestehend\n" },
+      [`grep -qF '# BEGIN paratix: grüße-block' '${unicodeBlockPath}'`]: { code: 1 },
+    })
+    // eslint-disable-next-line @typescript-eslint/require-await -- Mock
+    ssh.writeFile = async (path: string, content: string) => {
+      writtenFiles.push({ content, path })
+    }
+
+    const mod = file.block(unicodeBlockPath, {
+      content: "Привет\nこんにちは\nGrüße",
+      name: "grüße-block",
+    })
+    const result = await mod.apply(ssh, emptyEnv)
+
+    expect(result.status).toBe("changed")
+    expect(writtenFiles[0]?.path).toBe(unicodeBlockPath)
+    expect(writtenFiles[0]?.content).toContain("# BEGIN paratix: grüße-block")
+    expect(writtenFiles[0]?.content).toContain("Привет")
+    expect(writtenFiles[0]?.content).toContain("こんにちは")
+    expect(writtenFiles[0]?.content).toContain("Grüße")
   })
 })
 

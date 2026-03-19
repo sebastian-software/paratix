@@ -125,6 +125,29 @@ describe("sftpDownload", () => {
     expect(vi.mocked(renameSync)).toHaveBeenCalledWith(tempPath, "/local/file.txt")
   })
 
+  it("preserves unicode remote and local paths for downloads", async () => {
+    const { sftp } = makeSftpSession()
+    const client = makeClientMock(sftp)
+
+    const localWriteStream = new EventEmitter()
+    vi.mocked(createWriteStream).mockReturnValue(localWriteStream as unknown as WriteStream)
+
+    const remotePath = "/remote/über ordner/こんにちは.txt"
+    const localPath = "/local/über ordner/ß-datei.txt"
+    const promise = sftpDownload(client, remotePath, localPath)
+    const [tempPath] = vi.mocked(createWriteStream).mock.calls[0] as [string]
+    localWriteStream.emit("close")
+
+    await expect(promise).resolves.toBeUndefined()
+    const createReadStreamCalls = (
+      sftp.createReadStream as unknown as { mock: { calls: unknown[][] } }
+    ).mock.calls
+    expect(createReadStreamCalls[0]?.[0]).toBe(remotePath)
+    expect(tempPath).toContain("/local/")
+    expect(tempPath).toContain(".paratix-download-")
+    expect(vi.mocked(renameSync)).toHaveBeenCalledWith(tempPath, localPath)
+  })
+
   it("rejects when the readStream emits an error (regression: missing error handler)", async () => {
     // Arrange
     const { sftp, sftpReadStream } = makeSftpSession()
@@ -515,6 +538,26 @@ describe("sftpUpload", () => {
     ).mock.calls
     expect(createWriteStreamCalls).toHaveLength(1)
     expect(createWriteStreamCalls[0]).toStrictEqual(["/remote/file.txt", { mode: 0o600 }])
+  })
+
+  it("preserves unicode local and remote paths for uploads", async () => {
+    const { sftp, sftpWriteStream } = makeSftpSession()
+    const client = makeClientMock(sftp)
+
+    const localReadStream = makeMockStream()
+    vi.mocked(createReadStream).mockReturnValue(localReadStream as unknown as ReadStream)
+
+    const localPath = "/local/über ordner/ß-datei.txt"
+    const remotePath = "/remote/über ordner/こんにちは.txt"
+    const promise = sftpUpload(client, localPath, remotePath)
+    sftpWriteStream.emit("close")
+
+    await expect(promise).resolves.toBeUndefined()
+    expect(vi.mocked(createReadStream)).toHaveBeenCalledWith(localPath)
+    const createWriteStreamCalls = (
+      sftp.createWriteStream as unknown as { mock: { calls: unknown[][] } }
+    ).mock.calls
+    expect(createWriteStreamCalls[0]).toStrictEqual([remotePath, { mode: 0o600 }])
   })
 
   it("rejects when the local readStream emits an error (regression: missing error handler)", async () => {

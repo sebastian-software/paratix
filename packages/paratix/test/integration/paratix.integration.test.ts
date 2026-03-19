@@ -17,6 +17,11 @@ import { createIntegrationEnvironment, type IntegrationEnvironment } from "./har
 const emptyEnv = {}
 const HTTP_SERVER_READY_DELAY_MS = 250
 const HTTP_SERVER_READY_RETRIES = 20
+// cspell:ignore ordner konfiguration
+const unicodeFileName = "über datei こんにちは.txt"
+const unicodeTemplateName = "grüße-vorlage.tmpl"
+const unicodeContent = "Grüße aus Köln – こんにちは мир\n"
+const unicodeBlockContent = "Block Grüße\nこんにちは\nПривет"
 
 let integrationEnvironment: IntegrationEnvironment | undefined
 let originalHome: string | undefined
@@ -214,6 +219,29 @@ describe("Paratix integration", () => {
     await rm(localDirectory, { force: true, recursive: true })
   })
 
+  it("uploads and downloads unicode filenames and content over real SFTP", async () => {
+    const environment = getEnvironment()
+    const ssh = await connectSsh([environment.primaryPort], {}, "root")
+    const localDirectory = mkdtempSync(join(tmpdir(), "paratix-sftp-unicode-"))
+    const localUploadPath = join(localDirectory, unicodeFileName)
+    const localDownloadPath = join(localDirectory, `download-${unicodeFileName}`)
+    const remoteDirectory = "/home/paratix/über ordner"
+    const remoteUploadPath = `${remoteDirectory}/${unicodeFileName}`
+    const remoteDownloadPath = `${remoteDirectory}/下載-ß.txt`
+
+    writeFileSync(localUploadPath, unicodeContent, "utf8")
+    await ssh.exec(`mkdir -p ${shellQuote(remoteDirectory)}`, { silent: true })
+    await ssh.uploadFile(localUploadPath, remoteUploadPath)
+    expect(await ssh.readFile(remoteUploadPath)).toBe(unicodeContent.trimEnd())
+
+    await ssh.writeFile(remoteDownloadPath, unicodeBlockContent)
+    await ssh.downloadFile(remoteDownloadPath, localDownloadPath)
+    expect(await readFile(localDownloadPath, "utf8")).toBe(unicodeBlockContent)
+
+    ssh.disconnect()
+    await rm(localDirectory, { force: true, recursive: true })
+  })
+
   it("reconnects successfully on a different configured port", async () => {
     const environment = getEnvironment()
     const ssh = await connectSsh([environment.primaryPort])
@@ -320,6 +348,73 @@ describe("Paratix integration", () => {
       await expectModuleCheckOk(copyModule, ssh)
       await expectModuleCheckOk(templateModule, ssh, { NAME: "integration" })
       await expectModuleCheckOk(commandModule, ssh)
+    } finally {
+      await ssh.exec(`rm -rf ${shellQuote(remoteBase)}`, { silent: true })
+      ssh.disconnect()
+      await rm(localDirectory, { force: true, recursive: true })
+    }
+  })
+
+  it("converges unicode file, template, and block modules to verifiable remote state", async () => {
+    const ssh = await connectSsh([getEnvironment().primaryPort], {}, "root")
+    const localDirectory = mkdtempSync(join(tmpdir(), "paratix-unicode-modules-"))
+    const remoteBase = `/root/integration-${randomUUID()}-äöü`
+    const remoteDirectory = `${remoteBase}/über ordner`
+    const remoteCopyPath = `${remoteDirectory}/${unicodeFileName}`
+    const remoteTemplatePath = `${remoteDirectory}/結果-template.txt`
+    const remoteBlockPath = `${remoteDirectory}/konfiguration ü.txt`
+    const localSourcePath = join(localDirectory, unicodeFileName)
+    const localTemplatePath = join(localDirectory, unicodeTemplateName)
+
+    writeFileSync(localSourcePath, unicodeContent, "utf8")
+    writeFileSync(localTemplatePath, "Hallo {{name|raw}} aus {{city|raw}}", "utf8")
+    await ssh.exec(`mkdir -p ${shellQuote(remoteDirectory)}`, { silent: true })
+    await ssh.writeFile(remoteBlockPath, "vorher\n")
+
+    const directoryModule = file.directory(remoteDirectory, {
+      mode: "0750",
+      owner: "root:root",
+    })
+    const copyModule = file.copy(remoteCopyPath, localSourcePath, {
+      mode: "0640",
+      owner: "root:root",
+    })
+    const templateModule = file.template(remoteTemplatePath, localTemplatePath, {
+      mode: "0644",
+      owner: "root:root",
+    })
+    const blockModule = file.block(remoteBlockPath, {
+      content: unicodeBlockContent,
+      name: "grüße-block",
+    })
+
+    try {
+      await expect(directoryModule.apply(ssh, emptyEnv)).resolves.toMatchObject({
+        status: "changed",
+      })
+      await expect(copyModule.apply(ssh, emptyEnv)).resolves.toMatchObject({ status: "changed" })
+      await expect(
+        templateModule.apply(ssh, { city: "München", name: "Jörg" })
+      ).resolves.toMatchObject({
+        status: "changed",
+      })
+      await expect(blockModule.apply(ssh, emptyEnv)).resolves.toMatchObject({ status: "changed" })
+
+      expect(await ssh.readFile(remoteCopyPath)).toBe(unicodeContent.trimEnd())
+      expect(await readRemoteStat(ssh, remoteCopyPath)).toStrictEqual({
+        group: "root",
+        mode: "640",
+        owner: "root",
+      })
+      expect(await ssh.readFile(remoteTemplatePath)).toBe("Hallo Jörg aus München")
+      expect(await ssh.readFile(remoteBlockPath)).toContain("こんにちは")
+      expect(await ssh.readFile(remoteBlockPath)).toContain("Привет")
+      expect(await ssh.readFile(remoteBlockPath)).toContain("# BEGIN paratix: grüße-block")
+
+      await expectModuleCheckOk(directoryModule, ssh)
+      await expectModuleCheckOk(copyModule, ssh)
+      await expectModuleCheckOk(templateModule, ssh, { city: "München", name: "Jörg" })
+      await expectModuleCheckOk(blockModule, ssh)
     } finally {
       await ssh.exec(`rm -rf ${shellQuote(remoteBase)}`, { silent: true })
       ssh.disconnect()
