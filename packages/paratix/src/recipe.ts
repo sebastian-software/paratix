@@ -103,8 +103,9 @@ async function triggerSignals(parameters: {
   for (const signal of parameters.signals) {
     if (getShutdownSignal() != null) break
     try {
+      const connection = signal.local === true ? null : parameters.ssh
       // eslint-disable-next-line no-await-in-loop
-      const result = await signal.apply(parameters.ssh, parameters.environment)
+      const result = await signal.apply(connection, parameters.environment)
       printModuleResult(`signal: ${signal.name}`, result.status)
       if (result.status === "failed") status = "failed"
     } catch (error) {

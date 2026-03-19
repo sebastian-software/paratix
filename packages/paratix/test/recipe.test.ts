@@ -293,6 +293,22 @@ describe("recipe", () => {
     expect(localMod.apply).toHaveBeenCalledWith(null, emptyEnv)
   })
 
+  it("passes null to local recipe signal in apply()", async () => {
+    const localSignal: Module = {
+      apply: vi.fn().mockResolvedValue({ status: "changed" }),
+      check: vi.fn().mockResolvedValue("needs-apply"),
+      local: true,
+      name: "local-signal",
+    }
+    const mod = makeModule("needs-apply", "changed")
+    const mockSsh = createMockSsh()
+    const r = recipe("test-recipe", [mod], { signals: [localSignal] })
+
+    await r.apply(mockSsh, emptyEnv)
+
+    expect(localSignal.apply).toHaveBeenCalledWith(null, emptyEnv)
+  })
+
   it("stops before the next child module when shutdown was requested during recipe execution", async () => {
     let receivedSignal: NodeJS.Signals | null = null
     const firstModule: Module = {
