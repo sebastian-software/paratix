@@ -6,6 +6,7 @@ import { download } from "../../src/modules/download.js"
 import { createMockSsh } from "../helpers/mockSsh.js"
 
 const emptyEnv = {}
+const allowUnverifiedDownload = { allowUnverifiedDownload: true } as const
 
 type MockSshWithOptions = {
   exec: (
@@ -67,7 +68,7 @@ describe("download.url", () => {
       const mockSsh = createMockSsh({
         [`[ -e '${destination}' ]`]: { code: 0 },
       })
-      const mod = download.url(destination, url)
+      const mod = download.url(destination, url, allowUnverifiedDownload)
       const result = await mod.check(mockSsh, emptyEnv)
       expect(result).toBe("ok")
     })
@@ -76,7 +77,7 @@ describe("download.url", () => {
       const mockSsh = createMockSsh({
         [`[ -e '${destination}' ]`]: { code: 1 },
       })
-      const mod = download.url(destination, url)
+      const mod = download.url(destination, url, allowUnverifiedDownload)
       const result = await mod.check(mockSsh, emptyEnv)
       expect(result).toBe("needs-apply")
     })
@@ -85,13 +86,13 @@ describe("download.url", () => {
       const mockSsh = createMockSsh({
         [`[ -e '${destination}' ]`]: { code: 0 },
       })
-      const mod = download.url(destination, url, { force: true })
+      const mod = download.url(destination, url, { ...allowUnverifiedDownload, force: true })
       const result = await mod.check(mockSsh, emptyEnv)
       expect(result).toBe("needs-apply")
     })
 
     it("returns needs-apply when ssh is null", async () => {
-      const mod = download.url(destination, url)
+      const mod = download.url(destination, url, allowUnverifiedDownload)
       const result = await mod.check(null, emptyEnv)
       expect(result).toBe("needs-apply")
     })
@@ -104,7 +105,7 @@ describe("download.url", () => {
           stdout: `${temporaryDestination}\n`,
         },
       })
-      const mod = download.url(destination, url)
+      const mod = download.url(destination, url, allowUnverifiedDownload)
       const result = await mod.apply(mockSsh, emptyEnv)
       expect(result.status).toBe("changed")
       expect(mockSsh.calls).toContain(`curl -fsSL -o '${temporaryDestination}' '${url}'`)
@@ -113,7 +114,7 @@ describe("download.url", () => {
 
     it("creates target directory via mkdir -p", async () => {
       const mockSsh = createMockSsh()
-      const mod = download.url(destination, url)
+      const mod = download.url(destination, url, allowUnverifiedDownload)
       await mod.apply(mockSsh, emptyEnv)
       expect(mockSsh.calls).toContain(`mkdir -p "$(dirname '${destination}')"`)
     })
@@ -124,7 +125,7 @@ describe("download.url", () => {
           stdout: `${temporaryDestination}\n`,
         },
       })
-      const mod = download.url(destination, url, { mode: "0755" })
+      const mod = download.url(destination, url, { ...allowUnverifiedDownload, mode: "0755" })
       const result = await mod.apply(mockSsh, emptyEnv)
       expect(result.status).toBe("changed")
       expect(mockSsh.calls).toContain(`chmod '0755' '${temporaryDestination}'`)
@@ -136,7 +137,11 @@ describe("download.url", () => {
           stdout: `${temporaryDestination}\n`,
         },
       })
-      const mod = download.url(destination, url, { group: "wheel", owner: "root" })
+      const mod = download.url(destination, url, {
+        ...allowUnverifiedDownload,
+        group: "wheel",
+        owner: "root",
+      })
       const result = await mod.apply(mockSsh, emptyEnv)
       expect(result.status).toBe("changed")
       expect(mockSsh.calls).toContain(`chown 'root:wheel' '${temporaryDestination}'`)
@@ -148,7 +153,7 @@ describe("download.url", () => {
           stdout: `${temporaryDestination}\n`,
         },
       })
-      const mod = download.url(destination, url, { owner: "deploy" })
+      const mod = download.url(destination, url, { ...allowUnverifiedDownload, owner: "deploy" })
       const result = await mod.apply(mockSsh, emptyEnv)
       expect(result.status).toBe("changed")
       expect(mockSsh.calls).toContain(`chown 'deploy:' '${temporaryDestination}'`)
@@ -160,7 +165,7 @@ describe("download.url", () => {
           stdout: `${temporaryDestination}\n`,
         },
       })
-      const mod = download.url(destination, url, { group: "staff" })
+      const mod = download.url(destination, url, { ...allowUnverifiedDownload, group: "staff" })
       const result = await mod.apply(mockSsh, emptyEnv)
       expect(result.status).toBe("changed")
       expect(mockSsh.calls).toContain(`chown ':staff' '${temporaryDestination}'`)
@@ -173,6 +178,7 @@ describe("download.url", () => {
         },
       })
       const mod = download.url(destination, url, {
+        ...allowUnverifiedDownload,
         headers: { Authorization: "Bearer mytoken" },
       })
       const result = await mod.apply(mockSsh, emptyEnv)
@@ -228,7 +234,7 @@ describe("download.url", () => {
     })
 
     it("returns failed when ssh is null", async () => {
-      const mod = download.url(destination, url)
+      const mod = download.url(destination, url, allowUnverifiedDownload)
       const conn = null
       const result = await mod.apply(conn, emptyEnv)
       expect(result.status).toBe("failed")
@@ -237,7 +243,7 @@ describe("download.url", () => {
 
   describe("name", () => {
     it("has correct format containing destination path", () => {
-      const mod = download.url(destination, url)
+      const mod = download.url(destination, url, allowUnverifiedDownload)
       expect(mod.name).toBe(`download.url: ${destination}`)
     })
   })
@@ -261,8 +267,16 @@ describe("download.url", () => {
       expect(() => download.url(destination, "not-a-url")).toThrow("Invalid URL")
     })
 
-    it("accepts https:// URL without throwing", () => {
-      expect(() => download.url(destination, "https://example.com/file")).not.toThrow()
+    it("throws for https:// URLs without sha256 or explicit opt-out", () => {
+      expect(() => download.url(destination, "https://example.com/file")).toThrow(
+        "requires options.sha256"
+      )
+    })
+
+    it("accepts https:// URL with explicit opt-out", () => {
+      expect(() =>
+        download.url(destination, "https://example.com/file", allowUnverifiedDownload)
+      ).not.toThrow()
     })
 
     it("rejects http:// URL without explicit opt-in", () => {
@@ -273,7 +287,10 @@ describe("download.url", () => {
 
     it("accepts http:// URL when allowInsecureHttp is true", () => {
       expect(() =>
-        download.url(destination, "http://example.com/file", { allowInsecureHttp: true })
+        download.url(destination, "http://example.com/file", {
+          ...allowUnverifiedDownload,
+          allowInsecureHttp: true,
+        })
       ).not.toThrow()
     })
   })
@@ -283,6 +300,7 @@ describe("download.url", () => {
       const token = "supersecret-bearer-token"
       const mock = createMockSshWithOptions()
       const mod = download.url(destination, url, {
+        ...allowUnverifiedDownload,
         headers: { Authorization: `Bearer ${token}` },
       })
       await mod.apply(mock, emptyEnv)
@@ -294,7 +312,7 @@ describe("download.url", () => {
 
     it("passes an empty secrets array when no headers are provided", async () => {
       const mock = createMockSshWithOptions()
-      const mod = download.url(destination, url)
+      const mod = download.url(destination, url, allowUnverifiedDownload)
       await mod.apply(mock, emptyEnv)
 
       const curlCall = mock.execCalls.find(({ command }) => command.startsWith("curl"))
@@ -318,7 +336,7 @@ describe("download.github", () => {
       const mockSsh = createMockSsh({
         [`[ -e '${destination}' ]`]: { code: 0 },
       })
-      const mod = download.github(destination, { asset, repo, tag })
+      const mod = download.github(destination, { ...allowUnverifiedDownload, asset, repo, tag })
       const result = await mod.check(mockSsh, emptyEnv)
       expect(result).toBe("ok")
     })
@@ -327,7 +345,7 @@ describe("download.github", () => {
       const mockSsh = createMockSsh({
         [`[ -e '${destination}' ]`]: { code: 1 },
       })
-      const mod = download.github(destination, { asset, repo, tag })
+      const mod = download.github(destination, { ...allowUnverifiedDownload, asset, repo, tag })
       const result = await mod.check(mockSsh, emptyEnv)
       expect(result).toBe("needs-apply")
     })
@@ -343,7 +361,7 @@ describe("download.github", () => {
     })
 
     it("returns needs-apply when ssh is null", async () => {
-      const mod = download.github(destination, { asset, repo, tag })
+      const mod = download.github(destination, { ...allowUnverifiedDownload, asset, repo, tag })
       const result = await mod.check(null, emptyEnv)
       expect(result).toBe("needs-apply")
     })
@@ -356,7 +374,7 @@ describe("download.github", () => {
           stdout: `${temporaryDestination}\n`,
         },
       })
-      const mod = download.github(destination, { asset, repo, tag })
+      const mod = download.github(destination, { ...allowUnverifiedDownload, asset, repo, tag })
       const result = await mod.apply(mockSsh, emptyEnv)
       expect(result.status).toBe("changed")
       expect(mockSsh.calls).toContain(`curl -fsSL -o '${temporaryDestination}' '${expectedUrl}'`)
@@ -366,7 +384,13 @@ describe("download.github", () => {
     it("sends Authorization and Accept headers when token is provided", async () => {
       const token = "ghp_supersecrettoken"
       const mockSsh = createMockSsh()
-      const mod = download.github(destination, { asset, repo, tag, token })
+      const mod = download.github(destination, {
+        ...allowUnverifiedDownload,
+        asset,
+        repo,
+        tag,
+        token,
+      })
       const result = await mod.apply(mockSsh, emptyEnv)
       expect(result.status).toBe("changed")
       const authHeader = `-H 'Authorization: token ${token}'`
@@ -379,7 +403,7 @@ describe("download.github", () => {
 
     it("does not send Authorization header when no token is provided", async () => {
       const mockSsh = createMockSsh()
-      const mod = download.github(destination, { asset, repo, tag })
+      const mod = download.github(destination, { ...allowUnverifiedDownload, asset, repo, tag })
       await mod.apply(mockSsh, emptyEnv)
       const curlCall = mockSsh.calls.find((call) => call.startsWith("curl -fsSL"))
       expect(curlCall).toBeDefined()
@@ -387,7 +411,7 @@ describe("download.github", () => {
     })
 
     it("returns failed when ssh is null", async () => {
-      const mod = download.github(destination, { asset, repo, tag })
+      const mod = download.github(destination, { ...allowUnverifiedDownload, asset, repo, tag })
       const conn = null
       const result = await mod.apply(conn, emptyEnv)
       expect(result.status).toBe("failed")
@@ -399,7 +423,7 @@ describe("download.github", () => {
           stdout: `${temporaryDestination}\n`,
         },
       })
-      const mod = download.github(destination, { asset, repo, tag })
+      const mod = download.github(destination, { ...allowUnverifiedDownload, asset, repo, tag })
       await mod.apply(mockSsh, emptyEnv)
       expect(mockSsh.calls).toContain(`mkdir -p "$(dirname '${destination}')"`)
     })
@@ -425,6 +449,12 @@ describe("download.github", () => {
   })
 
   describe("validation", () => {
+    it("throws without sha256 or explicit opt-out", () => {
+      expect(() => download.github(destination, { asset, repo, tag })).toThrow(
+        "requires options.sha256"
+      )
+    })
+
     it("throws on invalid repo format with path traversal", () => {
       expect(() =>
         download.github(destination, { asset, repo: "foo/bar/../../evil.com/x", tag })
@@ -438,7 +468,9 @@ describe("download.github", () => {
     })
 
     it("accepts valid repo format", () => {
-      expect(() => download.github(destination, { asset, repo, tag })).not.toThrow()
+      expect(() =>
+        download.github(destination, { ...allowUnverifiedDownload, asset, repo, tag })
+      ).not.toThrow()
     })
 
     it("throws on tag with path traversal", () => {
@@ -468,7 +500,7 @@ describe("download.github", () => {
 
   describe("name", () => {
     it("has correct format repo@tag/asset", () => {
-      const mod = download.github(destination, { asset, repo, tag })
+      const mod = download.github(destination, { ...allowUnverifiedDownload, asset, repo, tag })
       expect(mod.name).toBe(`download.github: ${repo}@${tag}/${asset}`)
     })
   })
@@ -482,6 +514,7 @@ describe("download.github", () => {
       const tagWithSpecialChars = "v1.5.0+build.1"
       const mockSsh = createMockSsh()
       const mod = download.github(destination, {
+        ...allowUnverifiedDownload,
         asset,
         repo,
         tag: tagWithSpecialChars,
@@ -502,6 +535,7 @@ describe("download.github", () => {
       const assetWithSpace = "my tool 1.0.zip"
       const mockSsh = createMockSsh()
       const mod = download.github(destination, {
+        ...allowUnverifiedDownload,
         asset: assetWithSpace,
         repo,
         tag,
@@ -526,6 +560,7 @@ describe("download.github", () => {
         .map((part) => encodeURIComponent(part))
       const mockSsh = createMockSsh()
       const mod = download.github(destination, {
+        ...allowUnverifiedDownload,
         asset,
         repo: repoWithSpecialChars,
         tag,
@@ -555,7 +590,7 @@ describe("download.large", () => {
 
   describe("check", () => {
     it("returns needs-apply when conn is null", async () => {
-      const mod = download.large(destination, url)
+      const mod = download.large(destination, url, allowUnverifiedDownload)
       const result = await mod.check(null, emptyEnv)
       expect(result).toBe("needs-apply")
     })
@@ -564,7 +599,7 @@ describe("download.large", () => {
       const mockSsh = createMockSsh({
         [`[ -f /var/lib/paratix/flags/'${flagName}' ]`]: { code: 0 },
       })
-      const mod = download.large(destination, url)
+      const mod = download.large(destination, url, allowUnverifiedDownload)
       const result = await mod.check(mockSsh, emptyEnv)
       expect(result).toBe("ok")
     })
@@ -573,7 +608,7 @@ describe("download.large", () => {
       const mockSsh = createMockSsh({
         [`[ -f /var/lib/paratix/flags/'${flagName}' ]`]: { code: 1 },
       })
-      const mod = download.large(destination, url)
+      const mod = download.large(destination, url, allowUnverifiedDownload)
       const result = await mod.check(mockSsh, emptyEnv)
       expect(result).toBe("needs-apply")
     })
@@ -616,6 +651,10 @@ describe("download.large", () => {
   })
 
   describe("insecure HTTP opt-in", () => {
+    it("throws without sha256 or explicit opt-out", () => {
+      expect(() => download.large(destination, url)).toThrow("requires options.sha256")
+    })
+
     it("rejects http:// URL without explicit opt-in", () => {
       expect(() => download.large(destination, "http://example.com/large-file.iso")).toThrow(
         "Insecure URL scheme"
@@ -625,6 +664,7 @@ describe("download.large", () => {
     it("accepts http:// URL when allowInsecureHttp is true", () => {
       expect(() =>
         download.large(destination, "http://example.com/large-file.iso", {
+          ...allowUnverifiedDownload,
           allowInsecureHttp: true,
         })
       ).not.toThrow()
@@ -633,7 +673,7 @@ describe("download.large", () => {
 
   describe("apply", () => {
     it("returns failed when conn is null", async () => {
-      const mod = download.large(destination, url)
+      const mod = download.large(destination, url, allowUnverifiedDownload)
       // eslint-disable-next-line prefer-spread
       const result = await mod.apply(null, emptyEnv)
       expect(result.status).toBe("failed")
@@ -645,7 +685,7 @@ describe("download.large", () => {
           stdout: `${temporaryDestination}\n`,
         },
       })
-      const mod = download.large(destination, url)
+      const mod = download.large(destination, url, allowUnverifiedDownload)
       const result = await mod.apply(mockSsh, emptyEnv)
       expect(result.status).toBe("changed")
       expect(mockSsh.calls).toContain(`curl -fsSL -o '${temporaryDestination}' '${url}'`)
@@ -659,7 +699,7 @@ describe("download.large", () => {
           stdout: `${temporaryDestination}\n`,
         },
       })
-      const mod = download.large(destination, url)
+      const mod = download.large(destination, url, allowUnverifiedDownload)
       await mod.apply(mockSsh, emptyEnv)
       expect(mockSsh.calls).toContain("mkdir -p /var/lib/paratix/flags")
       const mkdirIndex = mockSsh.calls.indexOf("mkdir -p /var/lib/paratix/flags")
@@ -706,7 +746,7 @@ describe("download.large", () => {
   describe("name", () => {
     // eslint-disable-next-line @typescript-eslint/require-await
     it("has correct format: download.large: <destination>", async () => {
-      const mod = download.large(destination, url)
+      const mod = download.large(destination, url, allowUnverifiedDownload)
       expect(mod.name).toBe(`download.large: ${destination}`)
     })
   })
@@ -732,8 +772,10 @@ describe("download.large", () => {
       expect(() => download.large(destination, "not-a-url")).toThrow("Invalid URL")
     })
 
-    it("accepts https:// URL without throwing", () => {
-      expect(() => download.large(destination, "https://example.com/file")).not.toThrow()
+    it("accepts https:// URL with explicit opt-out", () => {
+      expect(() =>
+        download.large(destination, "https://example.com/file", allowUnverifiedDownload)
+      ).not.toThrow()
     })
 
     it("rejects http:// URL without explicit opt-in", () => {
@@ -748,6 +790,7 @@ describe("download.large", () => {
       const token = "supersecret-bearer-token"
       const mock = createMockSshWithOptions()
       const mod = download.large(destination, url, {
+        ...allowUnverifiedDownload,
         headers: { Authorization: `Bearer ${token}` },
       })
       await mod.apply(mock, emptyEnv)
@@ -759,7 +802,7 @@ describe("download.large", () => {
 
     it("passes an empty secrets array when no headers are provided", async () => {
       const mock = createMockSshWithOptions()
-      const mod = download.large(destination, url)
+      const mod = download.large(destination, url, allowUnverifiedDownload)
       await mod.apply(mock, emptyEnv)
 
       const curlCall = mock.execCalls.find(({ command }) => command.startsWith("curl"))
@@ -778,6 +821,7 @@ describe("buildCurlCommand — header name validation", () => {
   it("throws when header name contains \\r\\n (CRLF injection)", async () => {
     const mockSsh = createMockSsh()
     const mod = download.url(destination, url, {
+      ...allowUnverifiedDownload,
       headers: { "X-Evil\r\nX-Injected": "value" },
     })
     await expect(mod.apply(mockSsh, emptyEnv)).rejects.toThrow("Invalid HTTP header name")
@@ -786,6 +830,7 @@ describe("buildCurlCommand — header name validation", () => {
   it("throws when header name contains a bare \\n", async () => {
     const mockSsh = createMockSsh()
     const mod = download.url(destination, url, {
+      ...allowUnverifiedDownload,
       headers: { "X-Evil\nInjected": "value" },
     })
     await expect(mod.apply(mockSsh, emptyEnv)).rejects.toThrow("Invalid HTTP header name")
@@ -794,6 +839,7 @@ describe("buildCurlCommand — header name validation", () => {
   it("throws when header name contains a bare \\r", async () => {
     const mockSsh = createMockSsh()
     const mod = download.url(destination, url, {
+      ...allowUnverifiedDownload,
       headers: { "X-Evil\rInjected": "value" },
     })
     await expect(mod.apply(mockSsh, emptyEnv)).rejects.toThrow("Invalid HTTP header name")
@@ -802,6 +848,7 @@ describe("buildCurlCommand — header name validation", () => {
   it("throws when header name contains a control character (\\x01)", async () => {
     const mockSsh = createMockSsh()
     const mod = download.url(destination, url, {
+      ...allowUnverifiedDownload,
       headers: { "X-Bad\x01Name": "value" },
     })
     await expect(mod.apply(mockSsh, emptyEnv)).rejects.toThrow("Invalid HTTP header name")
@@ -810,6 +857,7 @@ describe("buildCurlCommand — header name validation", () => {
   it("throws when header name contains a colon", async () => {
     const mockSsh = createMockSsh()
     const mod = download.url(destination, url, {
+      ...allowUnverifiedDownload,
       headers: { "X-Bad:Name": "value" },
     })
     await expect(mod.apply(mockSsh, emptyEnv)).rejects.toThrow("Invalid HTTP header name")
@@ -818,6 +866,7 @@ describe("buildCurlCommand — header name validation", () => {
   it("accepts a valid single-word header name", async () => {
     const mockSsh = createMockSsh()
     const mod = download.url(destination, url, {
+      ...allowUnverifiedDownload,
       headers: { Authorization: "Bearer token123" },
     })
     const result = await mod.apply(mockSsh, emptyEnv)
@@ -829,6 +878,7 @@ describe("buildCurlCommand — header name validation", () => {
   it("accepts a valid hyphenated header name", async () => {
     const mockSsh = createMockSsh()
     const mod = download.url(destination, url, {
+      ...allowUnverifiedDownload,
       headers: { "X-Custom-Header": "some-value" },
     })
     const result = await mod.apply(mockSsh, emptyEnv)
@@ -847,6 +897,7 @@ describe("buildCurlCommand — header value validation", () => {
   it("throws when header value contains \\r (CR injection)", async () => {
     const mockSsh = createMockSsh()
     const mod = download.url(destination, url, {
+      ...allowUnverifiedDownload,
       headers: { "X-Custom": "value\rX-Injected: injected" },
     })
     await expect(mod.apply(mockSsh, emptyEnv)).rejects.toThrow(
@@ -857,6 +908,7 @@ describe("buildCurlCommand — header value validation", () => {
   it("throws when header value contains \\n (LF injection)", async () => {
     const mockSsh = createMockSsh()
     const mod = download.url(destination, url, {
+      ...allowUnverifiedDownload,
       headers: { "X-Custom": "value\nX-Injected: injected" },
     })
     await expect(mod.apply(mockSsh, emptyEnv)).rejects.toThrow(
@@ -867,6 +919,7 @@ describe("buildCurlCommand — header value validation", () => {
   it("accepts a normal header value without newline characters", async () => {
     const mockSsh = createMockSsh()
     const mod = download.url(destination, url, {
+      ...allowUnverifiedDownload,
       headers: { "X-Custom": "safe-value" },
     })
     const result = await mod.apply(mockSsh, emptyEnv)
@@ -887,7 +940,13 @@ describe("download.github — secrets propagation", () => {
   it("passes token as secrets when exec is called for curl", async () => {
     const token = "ghp_supersecrettoken"
     const mock = createMockSshWithOptions()
-    const mod = download.github(destination, { asset, repo, tag, token })
+    const mod = download.github(destination, {
+      ...allowUnverifiedDownload,
+      asset,
+      repo,
+      tag,
+      token,
+    })
     await mod.apply(mock, emptyEnv)
 
     const curlCall = mock.execCalls.find(({ command }) => command.startsWith("curl"))
@@ -897,7 +956,7 @@ describe("download.github — secrets propagation", () => {
 
   it("does not set secrets when no token is provided", async () => {
     const mock = createMockSshWithOptions()
-    const mod = download.github(destination, { asset, repo, tag })
+    const mod = download.github(destination, { ...allowUnverifiedDownload, asset, repo, tag })
     await mod.apply(mock, emptyEnv)
 
     const curlCall = mock.execCalls.find(({ command }) => command.startsWith("curl"))

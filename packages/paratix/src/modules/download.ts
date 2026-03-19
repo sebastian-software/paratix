@@ -11,6 +11,8 @@ import { isValidHeaderName, isValidHeaderValue, validateHttpUrl } from "./netHel
 type BaseDownloadOptions = {
   /** Allow unencrypted `http://` downloads explicitly. */
   allowInsecureHttp?: boolean
+  /** Explicitly opt out of integrity verification for trusted sources. */
+  allowUnverifiedDownload?: boolean
   /** Group owner to set on the downloaded file via `chown`. */
   group?: string
   /** File mode to set via `chmod` (e.g. `"0755"`). */
@@ -35,6 +37,35 @@ type DownloadParameters = {
   /** The URL to download from. */
   url: string
 } & BaseDownloadOptions
+
+function buildDownloadParameters(
+  destination: string,
+  options: { headers?: Record<string, string> } & BaseDownloadOptions,
+  url: string
+): DownloadParameters {
+  return {
+    ...options,
+    destination,
+    secrets: Object.values(options.headers ?? {}),
+    url,
+  }
+}
+
+function buildLargeDownloadFlagName(url: string): string {
+  const urlHash = createHash("sha256").update(url).digest("hex")
+  return `download-${urlHash}`
+}
+
+function validateIntegrityConfiguration(
+  moduleName: "download.github" | "download.large" | "download.url",
+  options: BaseDownloadOptions
+): void {
+  if (options.sha256 != null || options.allowUnverifiedDownload === true) return
+  throw new Error(
+    `${moduleName} requires options.sha256 for integrity verification. ` +
+      "If you intentionally trust the remote artifact, set allowUnverifiedDownload: true explicitly."
+  )
+}
 
 function buildTemporaryDownloadPathCommand(destination: string): string {
   return `mktemp "$(dirname ${shellQuote(destination)})/.paratix-download.XXXXXX"`
@@ -251,6 +282,7 @@ export const download = {
    * @param options.asset - GitHub release asset filename (e.g. `"terraform_1.5.0_linux_amd64.zip"`).
    * @param options.token - GitHub Personal Access Token for private repositories.
    * @param options.sha256 - Expected SHA-256 hex digest for integrity verification.
+   * @param options.allowUnverifiedDownload - Explicitly opt out of integrity verification.
    * @param options.mode - File mode to set via `chmod` (e.g. `"0755"`).
    * @param options.owner - User owner to set on the downloaded file via `chown`.
    * @param options.group - Group owner to set on the downloaded file via `chown`.
@@ -271,6 +303,7 @@ export const download = {
   ): Module {
     const parts = validateGithubOptions(options)
     if (options.sha256 != null) validateSha256(options.sha256)
+    validateIntegrityConfiguration("download.github", options)
 
     const url = `https://github.com/${encodeURIComponent(parts[0])}/${encodeURIComponent(parts[1])}/releases/download/${encodeURIComponent(options.tag)}/${encodeURIComponent(options.asset)}`
     const headers: Record<string, string> = {}
@@ -282,14 +315,8 @@ export const download = {
 
     const { group, mode, owner, sha256 } = options
     const downloadParameters: DownloadParameters = {
-      destination,
-      group,
-      headers,
-      mode,
-      owner,
+      ...buildDownloadParameters(destination, { group, headers, mode, owner, sha256 }, url),
       secrets: options.token == null ? undefined : [options.token],
-      sha256,
-      url,
     }
 
     return {
@@ -319,6 +346,7 @@ export const download = {
    * @param options.mode - File mode to set via `chmod` (e.g. `"0755"`).
    * @param options.owner - User owner to set on the downloaded file via `chown`.
    * @param options.sha256 - Expected SHA-256 hex digest for integrity verification.
+   * @param options.allowUnverifiedDownload - Explicitly opt out of integrity verification.
    * @param options.headers - Additional HTTP headers sent with the curl request.
    * @returns A Module that manages the large file download.
    */
@@ -328,6 +356,8 @@ export const download = {
     options?: {
       /** Allow unencrypted `http://` downloads explicitly. */
       allowInsecureHttp?: boolean
+      /** Explicitly opt out of integrity verification for trusted sources. */
+      allowUnverifiedDownload?: boolean
       /** Group owner to set on the downloaded file via `chown`. */
       group?: string
       /** Additional HTTP headers sent with the curl request. */
@@ -343,18 +373,9 @@ export const download = {
     const resolvedOptions = options ?? {}
     validateHttpUrl(url, { allowHttp: resolvedOptions.allowInsecureHttp })
     if (resolvedOptions.sha256 != null) validateSha256(resolvedOptions.sha256)
-    const urlHash = createHash("sha256").update(url).digest("hex")
-    const flagName = `download-${urlHash}`
-    const downloadParameters: DownloadParameters = {
-      destination,
-      group: resolvedOptions.group,
-      headers: resolvedOptions.headers,
-      mode: resolvedOptions.mode,
-      owner: resolvedOptions.owner,
-      secrets: Object.values(resolvedOptions.headers ?? {}),
-      sha256: resolvedOptions.sha256,
-      url,
-    }
+    validateIntegrityConfiguration("download.large", resolvedOptions)
+    const flagName = buildLargeDownloadFlagName(url)
+    const downloadParameters = buildDownloadParameters(destination, resolvedOptions, url)
 
     return {
       async apply(conn: null | SshConnection): Promise<ModuleResult> {
@@ -395,6 +416,7 @@ export const download = {
    * @param destination - Absolute path on the remote server where the file is saved.
    * @param url - The URL to download from.
    * @param options - Optional settings for integrity, ownership, and headers.
+   * @param options.allowUnverifiedDownload - Explicitly opt out of integrity verification.
    * @returns A Module that manages the file download.
    */
   url(
@@ -403,6 +425,8 @@ export const download = {
     options?: {
       /** Allow unencrypted `http://` downloads explicitly. */
       allowInsecureHttp?: boolean
+      /** Explicitly opt out of integrity verification for trusted sources. */
+      allowUnverifiedDownload?: boolean
       /** Force re-download even if the file already exists. */
       force?: boolean
       /** Additional HTTP headers sent with the curl request. */
@@ -412,12 +436,8 @@ export const download = {
     validateHttpUrl(url, { allowHttp: options?.allowInsecureHttp })
     if (options?.sha256 != null) validateSha256(options.sha256)
     const resolvedOptions = options ?? {}
-    const downloadParameters: DownloadParameters = {
-      ...resolvedOptions,
-      destination,
-      secrets: Object.values(resolvedOptions.headers ?? {}),
-      url,
-    }
+    validateIntegrityConfiguration("download.url", resolvedOptions)
+    const downloadParameters = buildDownloadParameters(destination, resolvedOptions, url)
 
     return {
       async apply(conn: null | SshConnection): Promise<ModuleResult> {
