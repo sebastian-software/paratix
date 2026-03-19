@@ -330,13 +330,13 @@ async function runSignals(parameters: SignalArguments): Promise<void> {
   const { env, signals, ssh, stats, verbose } = parameters
 
   for (const signal of signals) {
+    stats.incrementSignals()
     try {
       const connection = signal.local === true ? null : ssh
       // eslint-disable-next-line no-await-in-loop
       const result = await signal.apply(connection, env)
       printModuleResult(`signal: ${signal.name}`, result.status)
       stats.update(result.status)
-      stats.incrementSignals()
     } catch (error) {
       printModuleResult(`signal: ${signal.name}`, "failed")
       printCommandFailure(error, verbose)

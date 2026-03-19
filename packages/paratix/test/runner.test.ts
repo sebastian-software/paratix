@@ -1127,6 +1127,69 @@ describe("runPlaybook local signal module behaviour", () => {
   })
 })
 
+// Bug regression: stats.incrementSignals() must be called even when signal apply() throws,
+// so that failed signals are counted in the summary (not only successful ones)
+describe("runPlaybook runSignals stats.incrementSignals on failure", () => {
+  beforeEach(() => {
+    vi.spyOn(console, "log").mockImplementation(() => {
+      /* noop */
+    })
+    vi.spyOn(console, "error").mockImplementation(() => {
+      /* noop */
+    })
+    vi.resetModules()
+  })
+
+  afterEach(() => {
+    vi.restoreAllMocks()
+    vi.resetModules()
+    process.exitCode = 0
+  })
+
+  it("increments stats.signals even when signal apply() throws an exception", async () => {
+    const capturedConfigs: unknown[] = []
+
+    vi.doMock("../src/ssh.js", () => ({
+      shellQuote: (s: string) => `'${s}'`,
+      SshConnectionImpl: makeMockSshClass(capturedConfigs),
+    }))
+
+    const consoleLogs: unknown[][] = []
+    vi.spyOn(console, "log").mockImplementation((...args) => {
+      consoleLogs.push(args)
+    })
+
+    const { runPlaybook } = await import("../src/runner.js")
+
+    const failingSignal: Module = {
+      apply: vi.fn().mockRejectedValue(new Error("signal apply failure")),
+      check: vi.fn().mockResolvedValue("needs-apply" as const),
+      name: "failing-signal",
+    }
+
+    // A module that produces a change so that signals are executed
+    const changingModule: Module = {
+      apply: vi.fn().mockResolvedValue({ status: "changed" } satisfies ModuleResult),
+      check: vi.fn().mockResolvedValue("needs-apply" as const),
+      name: "changing-module",
+    }
+
+    const definition: ServerDefinition = {
+      host: "1.2.3.4",
+      name: "test-server",
+      run: [changingModule],
+      signals: [failingSignal],
+      ssh: { ports: [22], privateKey: "~/.ssh/id", user: "root" },
+    }
+
+    await runPlaybook(definition)
+
+    // printSummary outputs "N signals triggered" — verify the count is 1, not 0
+    const allLogOutput = consoleLogs.flat().join(" ")
+    expect(allLogOutput).toContain("1 signals triggered")
+  })
+})
+
 // Bug regression: local: true in dry-run recipe child modules must receive null instead of ssh
 describe("runPlaybook local module in dry-run recipe behaviour", () => {
   beforeEach(() => {
