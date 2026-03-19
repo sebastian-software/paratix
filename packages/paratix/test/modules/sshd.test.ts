@@ -377,6 +377,7 @@ describe("sshd.port — apply: validation and rollback", () => {
     })
     const writtenFiles = trackWriteFile(mockSsh)
     const execSpy = vi.spyOn(mockSsh, "exec")
+    const addPortSpy = vi.spyOn(mockSsh, "addPort")
 
     // All exec calls succeed: sshd -t passes, systemctl restart runs
     execSpy.mockResolvedValue({ code: 0, stderr: "", stdout: "" })
@@ -391,6 +392,7 @@ describe("sshd.port — apply: validation and rollback", () => {
 
     const execCommands = execSpy.mock.calls.map((args) => args[0])
     expect(execCommands).toContain("systemctl restart sshd")
+    expect(addPortSpy).toHaveBeenCalledWith(2222)
   })
 
   it("returns ok and does not write when the desired port is already configured", async () => {
@@ -413,10 +415,7 @@ describe("sshd.port — apply: validation and rollback", () => {
     expect(addPortSpy).not.toHaveBeenCalled()
   })
 
-  it("regression — addPort is called after systemctl restart sshd", async () => {
-    // Fix: ssh.addPort(targetPort) must be called AFTER "systemctl restart sshd".
-    // Before the fix the order was reversed: addPort → restart, which caused reconnect issues.
-    // This test ensures the corrected order: exec("systemctl restart sshd") → addPort.
+  it("regression — addPort is called before systemctl restart sshd", async () => {
     const mockSsh = createMockSsh({
       [CAT_SSHD]: { stdout: "Port 22" },
     })
@@ -437,18 +436,17 @@ describe("sshd.port — apply: validation and rollback", () => {
 
     expect(addPortOrder).toBeDefined()
     expect(restartOrder).toBeDefined()
-    expect(restartOrder).toBeLessThan(addPortOrder)
+    expect(addPortOrder).toBeLessThan(restartOrder)
   })
 
-  it("regression — does not call addPort when systemctl restart sshd fails", async () => {
-    // Regression: addPort must NOT be called when systemctl restart sshd fails.
-    // Before the fix, addPort was called before the restart, so it was invoked even on error.
+  it("regression — removes added port again when systemctl restart sshd fails with a real error", async () => {
     const mockSsh = createMockSsh({
       [CAT_SSHD]: { stdout: "Port 22" },
     })
     trackWriteFile(mockSsh)
     const execSpy = vi.spyOn(mockSsh, "exec")
     const addPortSpy = vi.spyOn(mockSsh, "addPort")
+    const removePortSpy = vi.spyOn(mockSsh, "removePort")
 
     // sshd -t succeeds, then systemctl restart sshd fails
     execSpy
@@ -458,40 +456,28 @@ describe("sshd.port — apply: validation and rollback", () => {
     const mod = sshd.port(2222)
     await expect(mod.apply(mockSsh, emptyEnv)).rejects.toThrow("systemctl restart sshd failed")
 
-    expect(addPortSpy).not.toHaveBeenCalled()
+    expect(addPortSpy).toHaveBeenCalledWith(2222)
+    expect(removePortSpy).toHaveBeenCalledWith(2222)
   })
 
-  it("regression — calls addPort only after successful systemctl restart sshd", async () => {
-    // Regression: addPort must be called AFTER a successful systemctl restart sshd, not before.
-    // Before the fix, addPort was called before the restart which broke the reconnect order.
+  it("regression — keeps added port when restart aborts the SSH session", async () => {
     const mockSsh = createMockSsh({
       [CAT_SSHD]: { stdout: "Port 22" },
     })
     trackWriteFile(mockSsh)
     const execSpy = vi.spyOn(mockSsh, "exec")
     const addPortSpy = vi.spyOn(mockSsh, "addPort")
+    const removePortSpy = vi.spyOn(mockSsh, "removePort")
 
-    // Track invocation order using a shared call log
-    const callLog: string[] = []
-    // eslint-disable-next-line @typescript-eslint/promise-function-async -- vi.mockImplementation requires matching return type
-    execSpy.mockImplementation((command: string) => {
-      callLog.push(`exec:${command}`)
-      return Promise.resolve({ code: 0, stderr: "", stdout: "" })
-    })
-    addPortSpy.mockImplementation(() => {
-      callLog.push("addPort")
-    })
+    execSpy
+      .mockResolvedValueOnce({ code: 0, stderr: "", stdout: "" })
+      .mockRejectedValueOnce(new Error("SSH connection closed unexpectedly"))
 
     const mod = sshd.port(2222)
-    await mod.apply(mockSsh, emptyEnv)
+    await expect(mod.apply(mockSsh, emptyEnv)).rejects.toThrow("SSH connection closed unexpectedly")
 
-    const restartIndex = callLog.indexOf("exec:systemctl restart sshd")
-    const addPortIndex = callLog.indexOf("addPort")
-
-    expect(restartIndex).toBeGreaterThanOrEqual(0)
-    expect(addPortIndex).toBeGreaterThanOrEqual(0)
-    // addPort must come strictly after the restart
-    expect(addPortIndex).toBeGreaterThan(restartIndex)
+    expect(addPortSpy).toHaveBeenCalledWith(2222)
+    expect(removePortSpy).not.toHaveBeenCalled()
   })
 })
 

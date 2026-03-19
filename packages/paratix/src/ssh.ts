@@ -275,6 +275,10 @@ export class SshConnectionImpl implements SshConnection {
     )
   }
 
+  public removePort(port: number): void {
+    this.config.ports = this.config.ports.filter((candidate) => candidate !== port)
+  }
+
   public async sha256(remotePath: string): Promise<null | string> {
     const exists = await this.test(`[ -f ${shellQuote(remotePath)} ]`)
     if (!exists) return null

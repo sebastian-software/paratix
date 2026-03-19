@@ -5,19 +5,18 @@ import { shellQuote } from "../../src/ssh.js"
 const noop = async (): Promise<void> => {
   /* mock noop */
 }
+const noopMethod = (): void => {
+  /* mock noop */
+}
 
 export function createMockSsh(
   responses?: Record<string, Partial<ExecResult>>
 ): { calls: string[] } & SshConnection {
   const calls: string[] = []
   return {
-    addPort() {
-      /* noop */
-    },
+    addPort: noopMethod,
     calls,
-    disconnect() {
-      /* noop */
-    },
+    disconnect: noopMethod,
     downloadFile: noop,
     // eslint-disable-next-line @typescript-eslint/require-await -- Mock implementation
     async exec(command, _options) {
@@ -44,6 +43,7 @@ export function createMockSsh(
     async readFile(path) {
       return this.output(`cat ${shellQuote(path)}`)
     },
+    removePort: noopMethod,
     async sha256(path) {
       const exists = await this.test(`[ -f ${shellQuote(path)} ]`)
       if (!exists) return null
@@ -55,9 +55,7 @@ export function createMockSsh(
       const match = responses?.[command]
       return match ? match.code === 0 : true
     },
-    updateHost() {
-      /* noop */
-    },
+    updateHost: noopMethod,
     uploadFile: noop,
     writeFile: noop,
   }

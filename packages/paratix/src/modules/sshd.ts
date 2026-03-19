@@ -47,6 +47,15 @@ function applySshdSettingToContent(content: string, key: string, value: string):
   return content.endsWith("\n") ? `${content}${key} ${value}\n` : `${content}\n${key} ${value}\n`
 }
 
+function isRestartDisconnect(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error)
+  return (
+    message.includes("SSH connection closed") ||
+    message.includes("ECONNRESET") ||
+    message.includes("Connection reset")
+  )
+}
+
 /**
  * Modules for managing the OpenSSH daemon configuration (`/etc/ssh/sshd_config`).
  * All methods restart or reload `sshd` after applying changes.
@@ -129,8 +138,15 @@ export const sshd = {
           remotePath: SSHD_CONFIG_PATH,
         })
         await validateSshdConfig(ssh, originalConfig)
-        await ssh.exec("systemctl restart sshd", { silent: true })
         ssh.addPort(targetPort)
+        try {
+          await ssh.exec("systemctl restart sshd", { silent: true })
+        } catch (error) {
+          if (!isRestartDisconnect(error)) {
+            ssh.removePort(targetPort)
+          }
+          throw error
+        }
 
         return {
           meta: { "sshd.port": targetPort },
