@@ -228,8 +228,16 @@ describe("download.url", () => {
       expect(() => download.url(destination, "https://example.com/file")).not.toThrow()
     })
 
-    it("accepts http:// URL without throwing", () => {
-      expect(() => download.url(destination, "http://example.com/file")).not.toThrow()
+    it("rejects http:// URL without explicit opt-in", () => {
+      expect(() => download.url(destination, "http://example.com/file")).toThrow(
+        "Insecure URL scheme"
+      )
+    })
+
+    it("accepts http:// URL when allowInsecureHttp is true", () => {
+      expect(() =>
+        download.url(destination, "http://example.com/file", { allowInsecureHttp: true })
+      ).not.toThrow()
     })
   })
 
@@ -540,6 +548,22 @@ describe("download.large", () => {
     })
   })
 
+  describe("insecure HTTP opt-in", () => {
+    it("rejects http:// URL without explicit opt-in", () => {
+      expect(() => download.large(destination, "http://example.com/large-file.iso")).toThrow(
+        "Insecure URL scheme"
+      )
+    })
+
+    it("accepts http:// URL when allowInsecureHttp is true", () => {
+      expect(() =>
+        download.large(destination, "http://example.com/large-file.iso", {
+          allowInsecureHttp: true,
+        })
+      ).not.toThrow()
+    })
+  })
+
   describe("apply", () => {
     it("returns failed when conn is null", async () => {
       const mod = download.large(destination, url)
@@ -627,8 +651,10 @@ describe("download.large", () => {
       expect(() => download.large(destination, "https://example.com/file")).not.toThrow()
     })
 
-    it("accepts http:// URL without throwing", () => {
-      expect(() => download.large(destination, "http://example.com/file")).not.toThrow()
+    it("rejects http:// URL without explicit opt-in", () => {
+      expect(() => download.large(destination, "http://example.com/file")).toThrow(
+        "Insecure URL scheme"
+      )
     })
   })
 

@@ -9,6 +9,8 @@ import { isValidHeaderName, isValidHeaderValue, validateHttpUrl } from "./netHel
  * Options shared by all download methods.
  */
 type BaseDownloadOptions = {
+  /** Allow unencrypted `http://` downloads explicitly. */
+  allowInsecureHttp?: boolean
   /** Group owner to set on the downloaded file via `chown`. */
   group?: string
   /** File mode to set via `chmod` (e.g. `"0755"`). */
@@ -289,6 +291,7 @@ export const download = {
    * @param destination - Absolute path on the remote server where the file is saved.
    * @param url - The URL to download from.
    * @param options - Optional settings for ownership, permissions, and headers.
+   * @param options.allowInsecureHttp - Allow unencrypted `http://` downloads explicitly.
    * @param options.group - Group owner to set on the downloaded file via `chown`.
    * @param options.mode - File mode to set via `chmod` (e.g. `"0755"`).
    * @param options.owner - User owner to set on the downloaded file via `chown`.
@@ -300,6 +303,8 @@ export const download = {
     destination: string,
     url: string,
     options?: {
+      /** Allow unencrypted `http://` downloads explicitly. */
+      allowInsecureHttp?: boolean
       /** Group owner to set on the downloaded file via `chown`. */
       group?: string
       /** Additional HTTP headers sent with the curl request. */
@@ -312,18 +317,19 @@ export const download = {
       sha256?: string
     }
   ): Module {
-    validateHttpUrl(url)
-    if (options?.sha256 != null) validateSha256(options.sha256)
+    const resolvedOptions = options ?? {}
+    validateHttpUrl(url, { allowHttp: resolvedOptions.allowInsecureHttp })
+    if (resolvedOptions.sha256 != null) validateSha256(resolvedOptions.sha256)
     const urlHash = createHash("sha256").update(url).digest("hex")
     const flagName = `download-${urlHash}`
     const downloadParameters: DownloadParameters = {
       destination,
-      group: options?.group,
-      headers: options?.headers,
-      mode: options?.mode,
-      owner: options?.owner,
-      secrets: Object.values(options?.headers ?? {}),
-      sha256: options?.sha256,
+      group: resolvedOptions.group,
+      headers: resolvedOptions.headers,
+      mode: resolvedOptions.mode,
+      owner: resolvedOptions.owner,
+      secrets: Object.values(resolvedOptions.headers ?? {}),
+      sha256: resolvedOptions.sha256,
       url,
     }
 
@@ -345,9 +351,9 @@ export const download = {
         const flagExists = await hasFlag(conn, flagName)
         if (!flagExists) return NEEDS_APPLY
 
-        if (options?.sha256 != null) {
+        if (resolvedOptions.sha256 != null) {
           const actualHash = await conn.sha256(destination)
-          if (!hashMatches(actualHash, options.sha256)) return NEEDS_APPLY
+          if (!hashMatches(actualHash, resolvedOptions.sha256)) return NEEDS_APPLY
         }
 
         return "ok"
@@ -372,13 +378,15 @@ export const download = {
     destination: string,
     url: string,
     options?: {
+      /** Allow unencrypted `http://` downloads explicitly. */
+      allowInsecureHttp?: boolean
       /** Force re-download even if the file already exists. */
       force?: boolean
       /** Additional HTTP headers sent with the curl request. */
       headers?: Record<string, string>
     } & BaseDownloadOptions
   ): Module {
-    validateHttpUrl(url)
+    validateHttpUrl(url, { allowHttp: options?.allowInsecureHttp })
     if (options?.sha256 != null) validateSha256(options.sha256)
     const resolvedOptions = options ?? {}
     const downloadParameters: DownloadParameters = {

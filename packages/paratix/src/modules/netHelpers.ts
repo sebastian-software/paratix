@@ -150,20 +150,27 @@ export async function checkHttpCondition(
 }
 
 /**
- * Validate that a URL string is a well-formed HTTP or HTTPS URL.
- * Throws if the URL is malformed or uses an unsupported scheme.
+ * Validate that a URL string is a well-formed HTTPS URL by default.
+ * HTTP can be allowed explicitly via `allowHttp`.
  *
  * @param url - The URL string to validate.
- * @throws {Error} If the URL is malformed or the scheme is not `http` or `https`.
+ * @param options - Validation options.
+ * @param options.allowHttp - When `true`, also allow `http://` URLs.
+ * @throws {Error} If the URL is malformed or the scheme is not allowed.
  */
-export function validateHttpUrl(url: string): void {
+export function validateHttpUrl(url: string, options?: { allowHttp?: boolean }): void {
   let parsed: URL
   try {
     parsed = new URL(url)
   } catch {
     throw new Error(`Invalid URL '${url}': expected an http or https URL`)
   }
-  if (parsed.protocol !== "https:" && parsed.protocol !== "http:") {
+  if (parsed.protocol === "https:") return
+  if (parsed.protocol === "http:" && options?.allowHttp === true) return
+  if (parsed.protocol === "http:") {
+    throw new Error(`Insecure URL scheme 'http' in '${url}': only https is allowed by default`)
+  }
+  if (parsed.protocol !== "https:") {
     throw new Error(
       `Unsupported URL scheme '${parsed.protocol.replace(/:$/v, "")}' in '${url}': only http and https are allowed`
     )
