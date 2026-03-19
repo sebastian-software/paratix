@@ -315,6 +315,12 @@ describe("download.url", () => {
         })
       ).not.toThrow()
     })
+
+    it("rejects URLs with embedded credentials", () => {
+      expect(() =>
+        download.url(destination, "https://user:secret@example.com/file", allowUnverifiedDownload)
+      ).toThrow("must not embed credentials")
+    })
   })
 
   describe("secrets propagation", () => {
@@ -340,6 +346,18 @@ describe("download.url", () => {
       const curlCall = mock.execCalls.find(({ command }) => command.startsWith("curl"))
       expect(curlCall).toBeDefined()
       expect(curlCall?.options?.secrets).toStrictEqual([])
+    })
+
+    it("passes presigned URLs as secrets when query parameters look sensitive", async () => {
+      const presignedUrl =
+        "https://example.com/file?X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Signature=super-secret-signature"
+      const mock = createMockSshWithOptions()
+      const mod = download.url(destination, presignedUrl, allowUnverifiedDownload)
+      await mod.apply(mock, emptyEnv)
+
+      const curlCall = mock.execCalls.find(({ command }) => command.startsWith("curl"))
+      expect(curlCall).toBeDefined()
+      expect(curlCall?.options?.secrets).toContain(presignedUrl)
     })
   })
 })
@@ -843,6 +861,18 @@ describe("download.large", () => {
       const curlCall = mock.execCalls.find(({ command }) => command.startsWith("curl"))
       expect(curlCall).toBeDefined()
       expect(curlCall?.options?.secrets).toStrictEqual([])
+    })
+
+    it("passes presigned URLs as secrets when query parameters look sensitive", async () => {
+      const presignedUrl =
+        "https://example.com/large-file.iso?token=opaque-download-token&expires=123"
+      const mock = createMockSshWithOptions()
+      const mod = download.large(destination, presignedUrl, allowUnverifiedDownload)
+      await mod.apply(mock, emptyEnv)
+
+      const curlCall = mock.execCalls.find(({ command }) => command.startsWith("curl"))
+      expect(curlCall).toBeDefined()
+      expect(curlCall?.options?.secrets).toContain(presignedUrl)
     })
 
     it("uses distinct flag names for the same URL with different destinations", () => {

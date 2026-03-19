@@ -1,5 +1,6 @@
 import { createHash, timingSafeEqual } from "node:crypto"
 
+/* eslint-disable max-lines */
 import { shellQuote, validateMode } from "../ssh.js"
 import { type Module, type ModuleResult, NEEDS_APPLY, type SshConnection } from "../types.js"
 import { hasFlag, setFlag } from "./moduleHelpers.js"
@@ -38,15 +39,50 @@ type DownloadParameters = {
   url: string
 } & BaseDownloadOptions
 
+function hasSensitiveQueryParameters(url: URL): boolean {
+  const sensitiveTokens = new Set([
+    "auth",
+    "credential",
+    "key",
+    "passwd",
+    "password",
+    "secret",
+    "sig",
+    "signature",
+    "token",
+  ])
+  for (const [name] of url.searchParams) {
+    const parts = name
+      .toLowerCase()
+      .replaceAll(".", " ")
+      .replaceAll("_", " ")
+      .replaceAll("-", " ")
+      .split(" ")
+    if (parts.some((part) => sensitiveTokens.has(part))) return true
+  }
+  return false
+}
+
+function extractUrlSecrets(url: string): string[] {
+  const parsed = new URL(url)
+  if (parsed.username.length > 0 || parsed.password.length > 0) {
+    throw new Error(
+      "Download URLs must not embed credentials. Pass credentials via headers instead."
+    )
+  }
+  return hasSensitiveQueryParameters(parsed) ? [url] : []
+}
+
 function buildDownloadParameters(
   destination: string,
   options: { headers?: Record<string, string> } & BaseDownloadOptions,
   url: string
 ): DownloadParameters {
+  const urlSecrets = extractUrlSecrets(url)
   return {
     ...options,
     destination,
-    secrets: Object.values(options.headers ?? {}),
+    secrets: [...Object.values(options.headers ?? {}), ...urlSecrets],
     url,
   }
 }
@@ -338,7 +374,7 @@ export const download = {
     const { group, mode, owner, sha256 } = options
     const downloadParameters: DownloadParameters = {
       ...buildDownloadParameters(destination, { group, headers, mode, owner, sha256 }, url),
-      secrets: options.token == null ? undefined : [options.token],
+      secrets: options.token == null ? undefined : [options.token, ...extractUrlSecrets(url)],
     }
 
     return {
