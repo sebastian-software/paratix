@@ -17,6 +17,11 @@ export type RecipeModule = {
   _isRecipe: true
   _modules: Module[]
   _signals?: Module[]
+  apply: (
+    ssh: null | SshConnection,
+    environment: Environment,
+    shutdownSignal?: () => NodeJS.Signals | null
+  ) => Promise<ModuleResult>
 } & Module
 
 type RecipeState = {
@@ -61,12 +66,17 @@ async function executeOneModule(
 async function executeModules(
   modules: Module[],
   ssh: null | SshConnection,
-  environment: Environment
+  parameters: {
+    environment: Environment
+    shutdownSignal?: () => NodeJS.Signals | null
+  }
 ): Promise<RecipeState> {
+  const shutdownSignal = parameters.shutdownSignal ?? (() => null)
   let aggregatedStatus: "changed" | "failed" | "ok" = "ok"
-  let currentEnvironment = { ...environment }
+  let currentEnvironment = { ...parameters.environment }
 
   for (const currentModule of modules) {
+    if (shutdownSignal() != null) break
     // eslint-disable-next-line no-await-in-loop
     const step = await executeOneModule(currentModule, ssh, currentEnvironment)
     if (step == null) continue
@@ -130,9 +140,13 @@ export function recipe(
     _isRecipe: true,
     _modules: modules,
     _signals: options?.signals,
-    async apply(ssh: null | SshConnection, environment: Environment): Promise<ModuleResult> {
+    async apply(
+      ssh: null | SshConnection,
+      environment: Environment,
+      shutdownSignal?: () => NodeJS.Signals | null
+    ): Promise<ModuleResult> {
       printRecipeHeader(name)
-      const state = await executeModules(modules, ssh, environment)
+      const state = await executeModules(modules, ssh, { environment, shutdownSignal })
 
       if (state.status === "changed" && options?.signals) {
         await triggerSignals(options.signals, ssh, state.env)

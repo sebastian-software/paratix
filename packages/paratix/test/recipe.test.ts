@@ -226,6 +226,34 @@ describe("recipe", () => {
     expect(localMod.apply).toHaveBeenCalledWith(null, emptyEnv)
   })
 
+  it("stops before the next child module when shutdown was requested during recipe execution", async () => {
+    let receivedSignal: NodeJS.Signals | null = null
+    const firstModule: Module = {
+      // eslint-disable-next-line @typescript-eslint/require-await -- Interface requires async
+      async apply() {
+        receivedSignal = "SIGINT"
+        return { status: "changed" }
+      },
+      // eslint-disable-next-line @typescript-eslint/require-await -- Interface requires async
+      async check() {
+        return "needs-apply"
+      },
+      name: "first-mod",
+    }
+    const secondModule: Module = {
+      apply: vi.fn().mockResolvedValue({ status: "changed" }),
+      check: vi.fn().mockResolvedValue("needs-apply"),
+      name: "second-mod",
+    }
+
+    const r = recipe("test-recipe", [firstModule, secondModule])
+    const result = await r.apply(null, emptyEnv, () => receivedSignal)
+
+    expect(result.status).toBe("changed")
+    expect(secondModule.check).not.toHaveBeenCalled()
+    expect(secondModule.apply).not.toHaveBeenCalled()
+  })
+
   it("check propagates exceptions from child module check()", async () => {
     const failing: Module = {
       apply: vi.fn().mockResolvedValue({ status: "ok" }),

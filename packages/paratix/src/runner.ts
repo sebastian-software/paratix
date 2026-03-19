@@ -211,7 +211,8 @@ async function runRecipeModule(
   environment: Environment,
   ssh: SshConnectionImpl,
   verbose: boolean,
-  dryRun: boolean
+  dryRun: boolean,
+  shutdownSignal: () => NodeJS.Signals | null
 ): Promise<StepResult> {
   try {
     if (dryRun) return await dryRunRecipeModule(recipeModule, environment, ssh)
@@ -226,7 +227,7 @@ async function runRecipeModule(
       return { env: environment, shouldBreak: false, status: "ok" }
     }
 
-    const result = await recipeModule.apply(ssh, environment)
+    const result = await recipeModule.apply(ssh, environment, shutdownSignal)
     return await handleMetaAndBuildResult(ssh, environment, result)
   } catch (error) {
     printModuleResult(recipeModule.name, "failed")
@@ -298,7 +299,7 @@ async function runModuleLoop(parameters: LoopArguments): Promise<Environment> {
     // and its result is still counted in stats before the loop exits here.
     if (shutdownSignal() != null) break
     const stepPromise = isRecipe(currentModule)
-      ? runRecipeModule(currentModule, currentEnvironment, ssh, verbose, dryRun)
+      ? runRecipeModule(currentModule, currentEnvironment, ssh, verbose, dryRun, shutdownSignal)
       : runRegularModule({
           dryRun,
           env: currentEnvironment,
