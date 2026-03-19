@@ -43,11 +43,23 @@ function scannedLineFingerprint(line: string): string {
   return computeFingerprint(Buffer.from(key, "base64"))
 }
 
-function verifyScannedHostKeys(
+function lineMatchesTrustAnchor(line: string, options: KnownHostsOptions): boolean {
+  const normalizedExpectedKey =
+    options.publicKey == null ? null : normalizePublicKey(options.publicKey)
+  const expectedFingerprint = options.expectedFingerprint
+
+  const publicKeyMatches =
+    normalizedExpectedKey != null && scannedLinePublicKey(line) === normalizedExpectedKey
+  const fingerprintMatches =
+    expectedFingerprint != null && scannedLineFingerprint(line) === expectedFingerprint
+  return publicKeyMatches || fingerprintMatches
+}
+
+function getVerifiedScannedHostKeyLines(
   host: string,
   scannedLines: string[],
   options: KnownHostsOptions
-): void {
+): string[] {
   const normalizedExpectedKey =
     options.publicKey == null ? null : normalizePublicKey(options.publicKey)
   const expectedFingerprint = options.expectedFingerprint
@@ -58,19 +70,15 @@ function verifyScannedHostKeys(
     )
   }
 
-  const matched = scannedLines.some((line) => {
-    const publicKeyMatches =
-      normalizedExpectedKey != null && scannedLinePublicKey(line) === normalizedExpectedKey
-    const fingerprintMatches =
-      expectedFingerprint != null && scannedLineFingerprint(line) === expectedFingerprint
-    return publicKeyMatches || fingerprintMatches
-  })
+  const verifiedLines = scannedLines.filter((line) => lineMatchesTrustAnchor(line, options))
 
-  if (!matched) {
+  if (verifiedLines.length === 0) {
     throw new Error(
       `ssh.knownHosts(${host}) could not verify the scanned host key against the provided trust anchor`
     )
   }
+
+  return verifiedLines
 }
 
 function hasKnownHostsTrustAnchor(options?: KnownHostsOptions): boolean {
@@ -87,12 +95,7 @@ async function hasMatchingKnownHostTrustAnchor(
 
   if (knownHostLines.length === 0) return false
 
-  try {
-    verifyScannedHostKeys(host, knownHostLines, options)
-    return true
-  } catch {
-    return false
-  }
+  return knownHostLines.every((line) => lineMatchesTrustAnchor(line, options))
 }
 
 /**
@@ -232,10 +235,10 @@ export const ssh = {
         if (state === "present") {
           const scannedOutput = await conn.output(`ssh-keyscan -H ${shellQuote(host)} 2>/dev/null`)
           const scannedLines = parseHostKeyLines(scannedOutput)
-          verifyScannedHostKeys(host, scannedLines, options ?? {})
+          const verifiedLines = getVerifiedScannedHostKeyLines(host, scannedLines, options ?? {})
           await conn.exec("mkdir -p ~/.ssh && chmod 700 ~/.ssh", { silent: true })
           await conn.exec(
-            `printf '%s\\n' ${scannedLines.map((line) => shellQuote(line)).join(" ")} >> ~/.ssh/known_hosts`,
+            `printf '%s\\n' ${verifiedLines.map((line) => shellQuote(line)).join(" ")} >> ~/.ssh/known_hosts`,
             { silent: true }
           )
         } else {
