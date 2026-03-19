@@ -10,7 +10,7 @@ import type * as SshHelpers from "../src/sshHelpers.js"
 import { HostKeyVerificationError } from "../src/knownHosts.js"
 import { sftpDownload } from "../src/sftp.js"
 import { SshConnectionImpl } from "../src/ssh.js"
-import { collectStreamOutput, tryConnectOnPort } from "../src/sshHelpers.js"
+import { collectStreamOutput, shellQuote, tryConnectOnPort } from "../src/sshHelpers.js"
 import { promptTerminal } from "../src/terminal.js"
 
 // ---------------------------------------------------------------------------
@@ -823,7 +823,7 @@ describe("SshConnectionImpl", () => {
         // Stream never emits 'close' — simulates a hanging command
       })
       const client = makeClientWithExecSpy(execSpy)
-      const ssh = makeConnectedSsh(client)
+      const ssh = makeConnectedSsh(client, { user: "deploy" })
 
       const execPromise = ssh.exec("sleep infinity", { timeout: 5000 })
 
@@ -848,7 +848,7 @@ describe("SshConnectionImpl", () => {
         // Stream never emits 'close' — simulates a hanging command
       })
       const client = makeClientWithExecSpy(execSpy)
-      const ssh = makeConnectedSsh(client)
+      const ssh = makeConnectedSsh(client, { user: "deploy" })
 
       const secret = "super-secret-token"
       const execPromise = ssh.exec(`echo ${secret}`, { secrets: [secret], timeout: 5000 })
@@ -861,6 +861,35 @@ describe("SshConnectionImpl", () => {
 
       const error = await execPromise.catch((error: unknown) => error as Error)
       expect(error.message).not.toContain(secret)
+      expect(error.message).toContain("[REDACTED]")
+    })
+
+    it("masks shell-quoted secrets in timeout error messages", async () => {
+      vi.useFakeTimers()
+
+      const execSpy = vi.fn().mockImplementation((_command: string, callback: ExecCallback) => {
+        const stream = makeStream()
+        callback(undefined, stream)
+      })
+      const client = makeClientWithExecSpy(execSpy)
+      const ssh = makeConnectedSsh(client, { user: "deploy" })
+
+      const secret = "don't-print-this"
+      const escapedSecret = shellQuote(secret)
+      const execPromise = ssh.exec(`printf %s ${escapedSecret}`, {
+        secrets: [secret],
+        timeout: 5000,
+      })
+
+      execPromise.catch(() => {
+        /* handled below */
+      })
+
+      await vi.advanceTimersByTimeAsync(5001)
+
+      const error = await execPromise.catch((error: unknown) => error as Error)
+      expect(error.message).not.toContain(secret)
+      expect(error.message).not.toContain(escapedSecret)
       expect(error.message).toContain("[REDACTED]")
     })
 
@@ -1778,6 +1807,43 @@ describe("SshConnectionImpl", () => {
       const rmCommand = executedCommands.find((cmd) => cmd.includes("rm -f"))
       expect(rmCommand).toBeDefined()
       expect(rmCommand).toContain(mktempOutput)
+    })
+
+    it("masks shell-quoted sudo passwords in download cleanup warnings", async () => {
+      const sudoPassword = "down'load-secret"
+      const escapedPassword = shellQuote(sudoPassword)
+      const mktempOutput = "/tmp/paratix-download.MASKSECRET"
+
+      const execSpy = vi
+        .fn()
+        .mockImplementationOnce(makeExecHandler([], mktempOutput))
+        .mockImplementationOnce(makeExecHandler([], ""))
+        .mockImplementationOnce(makeExecHandler([], ""))
+        .mockImplementationOnce((_cmd: string, callback: ExecCallback) => {
+          callback(
+            new Error(`permission denied: echo ${escapedPassword} | sudo rm -f ${mktempOutput}`),
+            makeStream()
+          )
+        })
+
+      const client = makeClientWithExecSpy(execSpy)
+      const ssh = makeConnectedSsh(client, { user: "deploy" })
+      ;(ssh as unknown as Record<string, unknown>).cachedSudoPassword = Buffer.from(sudoPassword)
+
+      const stderrSpy = vi.spyOn(process.stderr, "write").mockImplementation(() => true)
+
+      await ssh.downloadFile("/var/log/secure", "/tmp/local-secure")
+
+      await vi.waitFor(() => {
+        expect(stderrSpy).toHaveBeenCalled()
+      })
+
+      const stderrOutput = stderrSpy.mock.calls.map((args) => String(args[0])).join("")
+      expect(stderrOutput).not.toContain(sudoPassword)
+      expect(stderrOutput).not.toContain(escapedPassword)
+      expect(stderrOutput).toContain("[REDACTED]")
+
+      stderrSpy.mockRestore()
     })
   })
 

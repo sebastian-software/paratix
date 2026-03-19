@@ -103,21 +103,30 @@ export type StreamOutputParameters = {
 /** Placeholder used when redacting secrets from output. */
 const REDACTED = "[REDACTED]"
 
+function getSecretVariants(secrets: string[]): string[] {
+  const variants = new Set<string>()
+  for (const secret of secrets) {
+    if (secret.length === 0) continue
+    if (secret.includes(REDACTED)) {
+      throw new Error(`Secret must not contain the redaction placeholder "${REDACTED}"`)
+    }
+
+    variants.add(secret)
+
+    const encoded = encodeURIComponent(secret)
+    // eslint-disable-next-line security/detect-possible-timing-attacks -- not a secret comparison, just checking if URL encoding changed the string
+    if (encoded !== secret) variants.add(encoded)
+
+    const quoted = shellQuote(secret)
+    // eslint-disable-next-line security/detect-possible-timing-attacks -- not a secret comparison, just checking if shell quoting changed the string
+    if (quoted !== secret) variants.add(quoted)
+  }
+  return [...variants].sort((a, b) => b.length - a.length)
+}
+
 export function maskSecrets(text: string, secrets: string[]): string {
   let masked = text
-  const variants: string[] = []
-  for (const secret of secrets) {
-    if (secret.length > 0) {
-      if (secret.includes(REDACTED)) {
-        throw new Error(`Secret must not contain the redaction placeholder "${REDACTED}"`)
-      }
-      variants.push(secret)
-      const encoded = encodeURIComponent(secret)
-      // eslint-disable-next-line security/detect-possible-timing-attacks -- not a secret comparison, just checking if URL encoding changed the string
-      if (encoded !== secret) variants.push(encoded)
-    }
-  }
-  variants.sort((a, b) => b.length - a.length)
+  const variants = getSecretVariants(secrets)
   for (const variant of variants) {
     masked = masked.replaceAll(variant, REDACTED)
   }
@@ -137,7 +146,8 @@ export function createStreamMasker(
   write: (text: string) => void,
   secrets: string[]
 ): { flush: () => void; push: (chunk: string) => void } {
-  const maxLength = Math.max(0, ...secrets.map((s) => s.length))
+  const variants = getSecretVariants(secrets)
+  const maxLength = Math.max(0, ...variants.map((variant) => variant.length))
   const overlap = Math.max(0, maxLength - 1)
 
   if (overlap === 0) {

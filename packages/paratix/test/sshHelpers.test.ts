@@ -7,6 +7,7 @@ import {
   createStreamMasker,
   maskSecrets,
   MAX_OUTPUT_LENGTH,
+  shellQuote,
   type StreamOutputParameters,
   validateMode,
 } from "../src/sshHelpers.js"
@@ -312,6 +313,12 @@ describe("maskSecrets", () => {
   it("does not throw for normal secrets", () => {
     expect(maskSecrets("the password is hunter2", ["hunter2"])).toBe("the password is [REDACTED]")
   })
+
+  it("masks shell-quoted secret variants with apostrophes", () => {
+    const secret = "it's complicated"
+    const escapedSecret = shellQuote(secret)
+    expect(maskSecrets(`command uses ${escapedSecret}`, [secret])).toBe("command uses [REDACTED]")
+  })
 })
 
 // ---------------------------------------------------------------------------
@@ -332,6 +339,23 @@ describe("collectStreamOutput", () => {
     const msg = await getErrorMessage(promise)
     expect(msg).toMatch(/Command failed with exit code 1/v)
     expect(msg).not.toContain(secret)
+    expect(msg).toContain("[REDACTED]")
+  })
+
+  it("rejects with exit code and masks shell-quoted secrets in command/stdout/stderr", async () => {
+    const secret = "don't leak me"
+    const escapedSecret = shellQuote(secret)
+    const promise = runCollect({
+      command: `printf %s ${escapedSecret}`,
+      emitClose: { code: 1 },
+      emitStderr: `stderr ${escapedSecret}`,
+      emitStdout: `stdout ${escapedSecret}`,
+      secrets: [secret],
+    })
+
+    const msg = await getErrorMessage(promise)
+    expect(msg).not.toContain(secret)
+    expect(msg).not.toContain(escapedSecret)
     expect(msg).toContain("[REDACTED]")
   })
 
@@ -501,6 +525,41 @@ describe("live-output masking via process.stdout/stderr.write", () => {
     const stdoutCalls = stdoutWriteSpy.mock.calls.map((args) => String(args[0]))
     expect(stdoutCalls.join("")).not.toContain(secret)
     expect(stdoutCalls.join("")).toContain("[REDACTED]")
+  })
+
+  it("masks shell-quoted secrets split across stdout chunks when silent is false", async () => {
+    const secret = "don't split me"
+    const escapedSecret = shellQuote(secret)
+    const { stderr, stream } = createMockChannel()
+
+    await new Promise<void>((resolve, reject) => {
+      const timer = setTimeout(() => {
+        /* intentionally never fires in tests */
+      }, 60_000)
+
+      collectStreamOutput({
+        command: "echo something",
+        options: { silent: false },
+        reject,
+        resolve: () => {
+          resolve()
+        },
+        secrets: [secret],
+        stream: stream as unknown as StreamOutputParameters["stream"],
+        timer,
+      })
+
+      stream.emit("data", Buffer.from(escapedSecret.slice(0, 8)))
+      stream.emit("data", Buffer.from(escapedSecret.slice(8)))
+      stderr.emit("data", Buffer.from(""))
+      stream.emit("close", 0)
+      clearTimeout(timer)
+    })
+
+    const stdoutOutput = stdoutWriteSpy.mock.calls.map((args) => String(args[0])).join("")
+    expect(stdoutOutput).not.toContain(secret)
+    expect(stdoutOutput).not.toContain(escapedSecret)
+    expect(stdoutOutput).toContain("[REDACTED]")
   })
 
   it("masks secrets in process.stderr.write when silent is false", async () => {
