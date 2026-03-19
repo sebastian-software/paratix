@@ -29,6 +29,43 @@ describe("ssh.knownHosts", () => {
     expect(result).toBe("ok")
   })
 
+  it("check returns ok when the known_hosts entry matches the expected fingerprint", async () => {
+    const mockSsh = createMockSsh({
+      "ssh-keygen -F 'github.com'": { code: 0, stdout: `${scannedLine}\n` },
+    })
+    const mod = ssh.knownHosts("github.com", { expectedFingerprint: hostFingerprint })
+
+    const result = await mod.check(mockSsh, emptyEnv)
+
+    expect(result).toBe("ok")
+  })
+
+  it("check returns needs-apply when the known_hosts entry mismatches the expected public key", async () => {
+    const mismatchedKey = makeHostKeyBuffer("ssh-ed25519", Buffer.from("different-host-key"))
+    const mismatchedLine = `|1|hashed-host|hashed-value ssh-ed25519 ${mismatchedKey.toString("base64")}`
+    const mockSsh = createMockSsh({
+      "ssh-keygen -F 'github.com'": { code: 0, stdout: `${mismatchedLine}\n` },
+    })
+    const mod = ssh.knownHosts("github.com", { publicKey: hostPublicKey })
+
+    const result = await mod.check(mockSsh, emptyEnv)
+
+    expect(result).toBe("needs-apply")
+  })
+
+  it("check returns needs-apply when the known_hosts entry has drifted from the expected fingerprint", async () => {
+    const driftedKey = makeHostKeyBuffer("ssh-ed25519", Buffer.from("drifted-host-key"))
+    const driftedLine = `|1|hashed-host|hashed-value ssh-ed25519 ${driftedKey.toString("base64")}`
+    const mockSsh = createMockSsh({
+      "ssh-keygen -F 'github.com'": { code: 0, stdout: `${driftedLine}\n` },
+    })
+    const mod = ssh.knownHosts("github.com", { expectedFingerprint: hostFingerprint })
+
+    const result = await mod.check(mockSsh, emptyEnv)
+
+    expect(result).toBe("needs-apply")
+  })
+
   it("check returns needs-apply when host is not known (state: present)", async () => {
     const mockSsh = createMockSsh({
       "ssh-keygen -F 'github.com'": { code: 1 },

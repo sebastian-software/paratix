@@ -21,11 +21,11 @@ function normalizePublicKey(publicKey: string): string {
   return `${algorithm} ${key}`
 }
 
-function parseScannedHostKeys(scannedOutput: string): string[] {
-  return scannedOutput
+function parseHostKeyLines(output: string): string[] {
+  return output
     .split("\n")
     .map((line) => line.trim())
-    .filter((line) => line.length > 0)
+    .filter((line) => line.length > 0 && !line.startsWith("#"))
 }
 
 function scannedLinePublicKey(line: string): string {
@@ -70,6 +70,28 @@ function verifyScannedHostKeys(
     throw new Error(
       `ssh.knownHosts(${host}) could not verify the scanned host key against the provided trust anchor`
     )
+  }
+}
+
+function hasKnownHostsTrustAnchor(options?: KnownHostsOptions): boolean {
+  return options?.expectedFingerprint != null || options?.publicKey != null
+}
+
+async function hasMatchingKnownHostTrustAnchor(
+  conn: SshConnection,
+  host: string,
+  options: KnownHostsOptions
+): Promise<boolean> {
+  const knownHostOutput = await conn.output(`ssh-keygen -F ${shellQuote(host)}`)
+  const knownHostLines = parseHostKeyLines(knownHostOutput)
+
+  if (knownHostLines.length === 0) return false
+
+  try {
+    verifyScannedHostKeys(host, knownHostLines, options)
+    return true
+  } catch {
+    return false
   }
 }
 
@@ -209,7 +231,7 @@ export const ssh = {
 
         if (state === "present") {
           const scannedOutput = await conn.output(`ssh-keyscan -H ${shellQuote(host)} 2>/dev/null`)
-          const scannedLines = parseScannedHostKeys(scannedOutput)
+          const scannedLines = parseHostKeyLines(scannedOutput)
           verifyScannedHostKeys(host, scannedLines, options ?? {})
           await conn.exec("mkdir -p ~/.ssh && chmod 700 ~/.ssh", { silent: true })
           await conn.exec(
@@ -224,6 +246,12 @@ export const ssh = {
       },
       async check(conn: null | SshConnection): Promise<"needs-apply" | "ok"> {
         if (!conn) return NEEDS_APPLY
+
+        if (state === "present" && hasKnownHostsTrustAnchor(options)) {
+          return (await hasMatchingKnownHostTrustAnchor(conn, host, options ?? {}))
+            ? "ok"
+            : NEEDS_APPLY
+        }
 
         const hostKnown = await conn.test(`ssh-keygen -F ${shellQuote(host)}`)
 
