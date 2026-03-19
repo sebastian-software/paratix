@@ -1,11 +1,25 @@
 import { describe, expect, it } from "vitest"
 
+import { computeFingerprint } from "../../src/knownHosts.js"
 import { ssh } from "../../src/modules/ssh.js"
 import { createMockSsh } from "../helpers/mockSsh.js"
 
 const emptyEnv = {}
 
+function makeHostKeyBuffer(algo: string, keyData = Buffer.from("fake-host-key-data")): Buffer {
+  const algoBytes = Buffer.from(algo)
+  const lengthBuffer = Buffer.alloc(4)
+  lengthBuffer.writeUInt32BE(algoBytes.length)
+  return Buffer.concat([lengthBuffer, algoBytes, keyData])
+}
+
 describe("ssh.knownHosts", () => {
+  const hostKeyBuffer = makeHostKeyBuffer("ssh-ed25519")
+  const hostKeyBase64 = hostKeyBuffer.toString("base64")
+  const hostPublicKey = `ssh-ed25519 ${hostKeyBase64}`
+  const hostFingerprint = computeFingerprint(hostKeyBuffer)
+  const scannedLine = `|1|hashed-host|hashed-value ssh-ed25519 ${hostKeyBase64}`
+
   it("check returns ok when host is already known (state: present)", async () => {
     const mockSsh = createMockSsh({
       "ssh-keygen -F 'github.com'": { code: 0 },
@@ -48,13 +62,52 @@ describe("ssh.knownHosts", () => {
     expect(result).toBe("needs-apply")
   })
 
-  it("apply ensures ~/.ssh exists and adds host via ssh-keyscan (state: present)", async () => {
-    const mockSsh = createMockSsh()
-    const mod = ssh.knownHosts("github.com")
+  it("apply verifies a scanned host key against the expected fingerprint before appending it", async () => {
+    const mockSsh = createMockSsh({
+      "ssh-keyscan -H 'github.com' 2>/dev/null": { stdout: `${scannedLine}\n` },
+    })
+    const mod = ssh.knownHosts("github.com", { expectedFingerprint: hostFingerprint })
     const result = await mod.apply(mockSsh, emptyEnv)
+
     expect(result.status).toBe("changed")
     expect(mockSsh.calls).toContain("mkdir -p ~/.ssh && chmod 700 ~/.ssh")
-    expect(mockSsh.calls).toContain("ssh-keyscan -H 'github.com' >> ~/.ssh/known_hosts 2>/dev/null")
+    expect(mockSsh.calls).toContain("ssh-keyscan -H 'github.com' 2>/dev/null")
+    expect(mockSsh.calls).toContain(`printf '%s\\n' '${scannedLine}' >> ~/.ssh/known_hosts`)
+  })
+
+  it("apply verifies a scanned host key against the expected public key before appending it", async () => {
+    const mockSsh = createMockSsh({
+      "ssh-keyscan -H 'github.com' 2>/dev/null": { stdout: `${scannedLine}\n` },
+    })
+    const mod = ssh.knownHosts("github.com", { publicKey: `${hostPublicKey} github.com` })
+    const result = await mod.apply(mockSsh, emptyEnv)
+
+    expect(result.status).toBe("changed")
+    expect(mockSsh.calls).toContain(`printf '%s\\n' '${scannedLine}' >> ~/.ssh/known_hosts`)
+  })
+
+  it("apply rejects scanned keys that do not match the expected fingerprint", async () => {
+    const mockSsh = createMockSsh({
+      "ssh-keyscan -H 'github.com' 2>/dev/null": { stdout: `${scannedLine}\n` },
+    })
+    const mod = ssh.knownHosts("github.com", {
+      expectedFingerprint: "SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+    })
+
+    await expect(mod.apply(mockSsh, emptyEnv)).rejects.toThrow(
+      "could not verify the scanned host key"
+    )
+  })
+
+  it("apply rejects present state without a fingerprint or public key trust anchor", async () => {
+    const mockSsh = createMockSsh({
+      "ssh-keyscan -H 'github.com' 2>/dev/null": { stdout: `${scannedLine}\n` },
+    })
+    const mod = ssh.knownHosts("github.com")
+
+    await expect(mod.apply(mockSsh, emptyEnv)).rejects.toThrow(
+      "requires expectedFingerprint or publicKey"
+    )
   })
 
   it("apply removes host via ssh-keygen -R (state: absent)", async () => {

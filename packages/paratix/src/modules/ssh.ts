@@ -1,5 +1,77 @@
+import { computeFingerprint } from "../knownHosts.js"
 import { shellQuote } from "../ssh.js"
 import { type Module, type ModuleResult, NEEDS_APPLY, type SshConnection } from "../types.js"
+
+type KnownHostsOptions = {
+  expectedFingerprint?: string
+  publicKey?: string
+  state?: "absent" | "present"
+}
+
+const SSH_KEYSCAN_MIN_FIELDS = 3
+
+function normalizePublicKey(publicKey: string): string {
+  const parts = publicKey.trim().split(/\s+/v)
+  if (parts.length < 2) {
+    throw new Error(
+      "ssh.knownHosts requires a full public key in the format '<algorithm> <base64>'"
+    )
+  }
+  const [algorithm, key] = parts
+  return `${algorithm} ${key}`
+}
+
+function parseScannedHostKeys(scannedOutput: string): string[] {
+  return scannedOutput
+    .split("\n")
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0)
+}
+
+function scannedLinePublicKey(line: string): string {
+  const parts = line.split(/\s+/v)
+  if (parts.length < SSH_KEYSCAN_MIN_FIELDS) {
+    throw new Error(`ssh.knownHosts received invalid ssh-keyscan output: ${line}`)
+  }
+  const [, algorithm, key] = parts
+  return `${algorithm} ${key}`
+}
+
+function scannedLineFingerprint(line: string): string {
+  const publicKey = scannedLinePublicKey(line)
+  const [, key] = publicKey.split(" ")
+  return computeFingerprint(Buffer.from(key, "base64"))
+}
+
+function verifyScannedHostKeys(
+  host: string,
+  scannedLines: string[],
+  options: KnownHostsOptions
+): void {
+  const normalizedExpectedKey =
+    options.publicKey == null ? null : normalizePublicKey(options.publicKey)
+  const expectedFingerprint = options.expectedFingerprint
+
+  if (normalizedExpectedKey == null && expectedFingerprint == null) {
+    throw new Error(
+      `ssh.knownHosts(${host}) requires expectedFingerprint or publicKey before accepting ssh-keyscan output`
+    )
+  }
+
+  const matched = scannedLines.some((line) => {
+    const publicKeyMatches =
+      normalizedExpectedKey != null && scannedLinePublicKey(line) === normalizedExpectedKey
+    const fingerprintMatches =
+      expectedFingerprint != null && scannedLineFingerprint(line) === expectedFingerprint
+    return publicKeyMatches || fingerprintMatches
+  })
+
+  if (!matched) {
+    throw new Error(
+      `ssh.knownHosts(${host}) could not verify the scanned host key against the provided trust anchor`
+    )
+  }
+}
 
 /**
  * Resolve a user's home directory by executing `getent passwd` on the remote host.
@@ -96,7 +168,7 @@ export const ssh = {
    * @param options.state - Whether the host should be `"present"` or `"absent"`. Defaults to `"present"`.
    * @returns A Module that manages the known hosts entry.
    */
-  knownHosts(host: string, options?: { state?: "absent" | "present" }): Module {
+  knownHosts(host: string, options?: KnownHostsOptions): Module {
     const state = options?.state ?? "present"
 
     return {
@@ -104,10 +176,14 @@ export const ssh = {
         if (!conn) return { status: "failed" }
 
         if (state === "present") {
+          const scannedOutput = await conn.output(`ssh-keyscan -H ${shellQuote(host)} 2>/dev/null`)
+          const scannedLines = parseScannedHostKeys(scannedOutput)
+          verifyScannedHostKeys(host, scannedLines, options ?? {})
           await conn.exec("mkdir -p ~/.ssh && chmod 700 ~/.ssh", { silent: true })
-          await conn.exec(`ssh-keyscan -H ${shellQuote(host)} >> ~/.ssh/known_hosts 2>/dev/null`, {
-            silent: true,
-          })
+          await conn.exec(
+            `printf '%s\\n' ${scannedLines.map((line) => shellQuote(line)).join(" ")} >> ~/.ssh/known_hosts`,
+            { silent: true }
+          )
         } else {
           await conn.exec(`ssh-keygen -R ${shellQuote(host)}`, { silent: true })
         }
