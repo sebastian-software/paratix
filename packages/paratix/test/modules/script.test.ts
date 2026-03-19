@@ -1,11 +1,35 @@
 import { describe, expect, it } from "vitest"
 
 import { script } from "../../src/index.js"
-import { createMockSsh } from "../helpers/mockSsh.js"
+import { createStrictMockSsh } from "../helpers/mockSsh.js"
 
 const emptyEnv = {}
 
 const FLAGS_DIRECTORY = "/var/lib/paratix/flags"
+
+function createScriptMockSsh(options?: {
+  args?: string[]
+  name?: string
+  responses?: Record<string, { code?: number; stderr?: string; stdout?: string }>
+  version?: string
+}) {
+  const name = options?.name ?? "setup"
+  const version = options?.version ?? "1"
+  const remotePath = `/tmp/paratix-script-${name}`
+  const quotedArgs = options?.args?.map((arg) => `'${arg}'`).join(" ") ?? ""
+  const args = quotedArgs === "" ? "" : ` ${quotedArgs}`
+  const scriptCommand = `'${remotePath}'${args}`
+  const flagCommand = `find ${FLAGS_DIRECTORY} -maxdepth 1 -name 'script-${name}-*' -delete && touch ${FLAGS_DIRECTORY}/'script-${name}-${version}'`
+
+  return createStrictMockSsh({
+    [`chmod +x '${remotePath}'`]: { code: 0 },
+    [`mkdir -p ${FLAGS_DIRECTORY}`]: { code: 0 },
+    [`rm -f '${remotePath}'`]: { code: 0 },
+    [flagCommand]: { code: 0 },
+    [scriptCommand]: { code: 0 },
+    ...options?.responses,
+  })
+}
 
 // ---------------------------------------------------------------------------
 // check
@@ -13,7 +37,7 @@ const FLAGS_DIRECTORY = "/var/lib/paratix/flags"
 
 describe("script.once — check", () => {
   it("returns needs-apply when flag does not exist", async () => {
-    const mockSsh = createMockSsh({
+    const mockSsh = createStrictMockSsh({
       [`[ -f ${FLAGS_DIRECTORY}/'script-setup-1' ]`]: { code: 1 },
     })
     const mod = script.once("setup", "/local/setup.sh")
@@ -22,7 +46,7 @@ describe("script.once — check", () => {
   })
 
   it("returns ok when flag exists", async () => {
-    const mockSsh = createMockSsh({
+    const mockSsh = createStrictMockSsh({
       [`[ -f ${FLAGS_DIRECTORY}/'script-setup-1' ]`]: { code: 0 },
     })
     const mod = script.once("setup", "/local/setup.sh")
@@ -37,7 +61,7 @@ describe("script.once — check", () => {
   })
 
   it("uses correct flag path with custom version", async () => {
-    const mockSsh = createMockSsh({
+    const mockSsh = createStrictMockSsh({
       [`[ -f ${FLAGS_DIRECTORY}/'script-setup-2' ]`]: { code: 0 },
     })
     const mod = script.once("setup", "/local/setup.sh", { version: "2" })
@@ -53,7 +77,7 @@ describe("script.once — check", () => {
 
 describe("script.once — apply", () => {
   it("uploads script, makes it executable, runs it, cleans up, and sets flag", async () => {
-    const mockSsh = createMockSsh()
+    const mockSsh = createScriptMockSsh()
     const mod = script.once("setup", "/local/setup.sh")
     const result = await mod.apply(mockSsh, emptyEnv)
 
@@ -78,7 +102,7 @@ describe("script.once — apply", () => {
   })
 
   it("executes calls in correct order", async () => {
-    const mockSsh = createMockSsh()
+    const mockSsh = createScriptMockSsh()
     const mod = script.once("setup", "/local/setup.sh")
     await mod.apply(mockSsh, emptyEnv)
 
@@ -105,8 +129,10 @@ describe("script.once — apply", () => {
   })
 
   it("returns failed when script exits non-zero", async () => {
-    const mockSsh = createMockSsh({
-      "'/tmp/paratix-script-setup'": { code: 1 },
+    const mockSsh = createScriptMockSsh({
+      responses: {
+        "'/tmp/paratix-script-setup'": { code: 1 },
+      },
     })
     const mod = script.once("setup", "/local/setup.sh")
     const result = await mod.apply(mockSsh, emptyEnv)
@@ -114,8 +140,10 @@ describe("script.once — apply", () => {
   })
 
   it("still cleans up temp file when script exits non-zero", async () => {
-    const mockSsh = createMockSsh({
-      "'/tmp/paratix-script-setup'": { code: 1 },
+    const mockSsh = createScriptMockSsh({
+      responses: {
+        "'/tmp/paratix-script-setup'": { code: 1 },
+      },
     })
     const mod = script.once("setup", "/local/setup.sh")
     await mod.apply(mockSsh, emptyEnv)
@@ -123,8 +151,10 @@ describe("script.once — apply", () => {
   })
 
   it("does not set flag when script exits non-zero", async () => {
-    const mockSsh = createMockSsh({
-      "'/tmp/paratix-script-setup'": { code: 1 },
+    const mockSsh = createScriptMockSsh({
+      responses: {
+        "'/tmp/paratix-script-setup'": { code: 1 },
+      },
     })
     const mod = script.once("setup", "/local/setup.sh")
     await mod.apply(mockSsh, emptyEnv)
@@ -133,21 +163,21 @@ describe("script.once — apply", () => {
   })
 
   it("passes shell-quoted arguments to script", async () => {
-    const mockSsh = createMockSsh()
+    const mockSsh = createScriptMockSsh({ args: ["--env", "production"] })
     const mod = script.once("setup", "/local/setup.sh", { args: ["--env", "production"] })
     await mod.apply(mockSsh, emptyEnv)
     expect(mockSsh.calls).toContain("'/tmp/paratix-script-setup' '--env' 'production'")
   })
 
   it("does not append arguments when args is an empty array", async () => {
-    const mockSsh = createMockSsh()
+    const mockSsh = createScriptMockSsh()
     const mod = script.once("setup", "/local/setup.sh", { args: [] })
     await mod.apply(mockSsh, emptyEnv)
     expect(mockSsh.calls).toContain("'/tmp/paratix-script-setup'")
   })
 
   it("uses correct flag name with custom version", async () => {
-    const mockSsh = createMockSsh()
+    const mockSsh = createScriptMockSsh({ version: "2" })
     const mod = script.once("setup", "/local/setup.sh", { version: "2" })
     await mod.apply(mockSsh, emptyEnv)
     expect(mockSsh.calls).toContain(
@@ -156,7 +186,7 @@ describe("script.once — apply", () => {
   })
 
   it("removes old version flags before setting new flag", async () => {
-    const mockSsh = createMockSsh()
+    const mockSsh = createScriptMockSsh({ version: "3" })
     const mod = script.once("setup", "/local/setup.sh", { version: "3" })
     await mod.apply(mockSsh, emptyEnv)
     const flagCall = mockSsh.calls.find((c) => c.includes("touch"))
@@ -192,7 +222,7 @@ describe("script.once — name", () => {
 
 describe("script.once — flagPrefix is shell-quoted to prevent injection", () => {
   it("find command uses shellQuote on flagPrefix to prevent command injection", async () => {
-    const mockSsh = createMockSsh()
+    const mockSsh = createScriptMockSsh({ name: "my-script" })
     const mod = script.once("my-script", "/local/setup.sh")
     await mod.apply(mockSsh, emptyEnv)
 

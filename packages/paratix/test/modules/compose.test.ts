@@ -3,7 +3,7 @@ import type * as NodeFsPromises from "node:fs/promises"
 import { describe, expect, it, vi } from "vitest"
 
 import { compose } from "../../src/index.js"
-import { createMockSsh } from "../helpers/mockSsh.js"
+import { createStrictMockSsh } from "../helpers/mockSsh.js"
 
 vi.mock("node:fs/promises", async (importOriginal) => {
   const actual = await importOriginal<typeof NodeFsPromises>()
@@ -21,6 +21,15 @@ function composeCmd(runtime: "docker" | "podman"): string {
   return `${runtime} compose --project-directory '${projectDirectory}'`
 }
 
+function createComposeMockSsh(
+  responses?: Record<string, { code?: number; stderr?: string; stdout?: string }>
+) {
+  return createStrictMockSsh({
+    "command -v podman": { code: 0 },
+    ...responses,
+  })
+}
+
 // ─── compose.up ──────────────────────────────────────────────────────────────
 
 describe("compose.up — check", () => {
@@ -31,7 +40,7 @@ describe("compose.up — check", () => {
   })
 
   it("returns needs-apply when no runtime is found", async () => {
-    const mockSsh = createMockSsh({
+    const mockSsh = createComposeMockSsh({
       "command -v docker": { code: 1 },
       "command -v podman": { code: 1 },
     })
@@ -41,7 +50,7 @@ describe("compose.up — check", () => {
   })
 
   it("returns needs-apply when ps returns empty stdout", async () => {
-    const mockSsh = createMockSsh({
+    const mockSsh = createComposeMockSsh({
       [`${composeCmd("podman")} ps --format json`]: { code: 0, stdout: "" },
     })
     const mod = compose.up({ projectDirectory })
@@ -50,7 +59,7 @@ describe("compose.up — check", () => {
   })
 
   it("returns ok when all containers are running (array JSON)", async () => {
-    const mockSsh = createMockSsh({
+    const mockSsh = createComposeMockSsh({
       [`${composeCmd("podman")} ps --format json`]: {
         code: 0,
         stdout: JSON.stringify([{ State: "running" }, { State: "running" }]),
@@ -62,7 +71,7 @@ describe("compose.up — check", () => {
   })
 
   it("returns ok when all containers are running (newline-delimited JSON)", async () => {
-    const mockSsh = createMockSsh({
+    const mockSsh = createComposeMockSsh({
       [`${composeCmd("podman")} ps --format json`]: {
         code: 0,
         stdout: `{"State":"running"}\n{"State":"running"}`,
@@ -74,7 +83,7 @@ describe("compose.up — check", () => {
   })
 
   it("returns needs-apply when some containers are not running", async () => {
-    const mockSsh = createMockSsh({
+    const mockSsh = createComposeMockSsh({
       [`${composeCmd("podman")} ps --format json`]: {
         code: 0,
         stdout: JSON.stringify([{ State: "running" }, { State: "exited" }]),
@@ -86,7 +95,7 @@ describe("compose.up — check", () => {
   })
 
   it("returns needs-apply when ps command fails (non-zero exit code)", async () => {
-    const mockSsh = createMockSsh({
+    const mockSsh = createComposeMockSsh({
       [`${composeCmd("podman")} ps --format json`]: { code: 1 },
     })
     const mod = compose.up({ projectDirectory })
@@ -104,7 +113,7 @@ describe("compose.up — apply", () => {
   })
 
   it("returns failed when no runtime is found", async () => {
-    const mockSsh = createMockSsh({
+    const mockSsh = createComposeMockSsh({
       "command -v docker": { code: 1 },
       "command -v podman": { code: 1 },
     })
@@ -114,7 +123,7 @@ describe("compose.up — apply", () => {
   })
 
   it("returns changed on successful up", async () => {
-    const mockSsh = createMockSsh({
+    const mockSsh = createComposeMockSsh({
       [`${composeCmd("podman")} up -d`]: { code: 0 },
     })
     const mod = compose.up({ projectDirectory })
@@ -123,7 +132,7 @@ describe("compose.up — apply", () => {
   })
 
   it("includes services in command when services list is provided", async () => {
-    const mockSsh = createMockSsh({
+    const mockSsh = createComposeMockSsh({
       [`${composeCmd("podman")} up -d 'web' 'db'`]: { code: 0 },
     })
     const mod = compose.up({ projectDirectory, services: ["web", "db"] })
@@ -133,8 +142,9 @@ describe("compose.up — apply", () => {
   })
 
   it("uses docker when only docker is available", async () => {
-    const mockSsh = createMockSsh({
+    const mockSsh = createComposeMockSsh({
       [`${composeCmd("docker")} up -d`]: { code: 0 },
+      "command -v docker": { code: 0 },
       "command -v podman": { code: 1 },
     })
     const mod = compose.up({ projectDirectory })
@@ -144,7 +154,7 @@ describe("compose.up — apply", () => {
   })
 
   it("returns failed when up command fails", async () => {
-    const mockSsh = createMockSsh({
+    const mockSsh = createComposeMockSsh({
       [`${composeCmd("podman")} up -d`]: { code: 1 },
     })
     const mod = compose.up({ projectDirectory })
@@ -170,7 +180,7 @@ describe("compose.pull — check", () => {
   })
 
   it("always returns needs-apply even with a valid connection", async () => {
-    const mockSsh = createMockSsh({})
+    const mockSsh = createComposeMockSsh({})
     const mod = compose.pull({ projectDirectory })
     const result = await mod.check(mockSsh, emptyEnv)
     expect(result).toBe("needs-apply")
@@ -186,7 +196,7 @@ describe("compose.pull — apply", () => {
   })
 
   it("returns failed when no runtime is found", async () => {
-    const mockSsh = createMockSsh({
+    const mockSsh = createComposeMockSsh({
       "command -v docker": { code: 1 },
       "command -v podman": { code: 1 },
     })
@@ -196,7 +206,7 @@ describe("compose.pull — apply", () => {
   })
 
   it("returns changed when output contains Pulling", async () => {
-    const mockSsh = createMockSsh({
+    const mockSsh = createComposeMockSsh({
       [`${composeCmd("podman")} pull 2>&1`]: {
         code: 0,
         stdout: "Pulling from registry...",
@@ -208,7 +218,7 @@ describe("compose.pull — apply", () => {
   })
 
   it("returns changed when output contains Downloaded", async () => {
-    const mockSsh = createMockSsh({
+    const mockSsh = createComposeMockSsh({
       [`${composeCmd("podman")} pull 2>&1`]: {
         code: 0,
         stdout: "Downloaded newer image for nginx:latest",
@@ -220,7 +230,7 @@ describe("compose.pull — apply", () => {
   })
 
   it("returns ok when output contains no change indicators", async () => {
-    const mockSsh = createMockSsh({
+    const mockSsh = createComposeMockSsh({
       [`${composeCmd("podman")} pull 2>&1`]: {
         code: 0,
         stdout: "Image is up to date",
@@ -232,7 +242,7 @@ describe("compose.pull — apply", () => {
   })
 
   it("returns failed when pull command fails", async () => {
-    const mockSsh = createMockSsh({
+    const mockSsh = createComposeMockSsh({
       [`${composeCmd("podman")} pull 2>&1`]: { code: 1 },
     })
     const mod = compose.pull({ projectDirectory })
@@ -258,7 +268,7 @@ describe("compose.down — check", () => {
   })
 
   it("returns ok when ps returns empty stdout (no containers running)", async () => {
-    const mockSsh = createMockSsh({
+    const mockSsh = createComposeMockSsh({
       [`${composeCmd("podman")} ps --format json`]: { code: 0, stdout: "" },
     })
     const mod = compose.down({ projectDirectory })
@@ -267,7 +277,7 @@ describe("compose.down — check", () => {
   })
 
   it("returns ok when ps command fails (treats as already down)", async () => {
-    const mockSsh = createMockSsh({
+    const mockSsh = createComposeMockSsh({
       [`${composeCmd("podman")} ps --format json`]: { code: 1 },
     })
     const mod = compose.down({ projectDirectory })
@@ -276,7 +286,7 @@ describe("compose.down — check", () => {
   })
 
   it("returns needs-apply when containers are running", async () => {
-    const mockSsh = createMockSsh({
+    const mockSsh = createComposeMockSsh({
       [`${composeCmd("podman")} ps --format json`]: {
         code: 0,
         stdout: JSON.stringify([{ State: "running" }]),
@@ -288,7 +298,7 @@ describe("compose.down — check", () => {
   })
 
   it("returns needs-apply when no runtime is found", async () => {
-    const mockSsh = createMockSsh({
+    const mockSsh = createComposeMockSsh({
       "command -v docker": { code: 1 },
       "command -v podman": { code: 1 },
     })
@@ -307,7 +317,7 @@ describe("compose.down — apply", () => {
   })
 
   it("returns changed on successful down", async () => {
-    const mockSsh = createMockSsh({
+    const mockSsh = createComposeMockSsh({
       [`${composeCmd("podman")} down`]: { code: 0 },
     })
     const mod = compose.down({ projectDirectory })
@@ -316,7 +326,7 @@ describe("compose.down — apply", () => {
   })
 
   it("includes --volumes flag when volumes option is true", async () => {
-    const mockSsh = createMockSsh({
+    const mockSsh = createComposeMockSsh({
       [`${composeCmd("podman")} down --volumes`]: { code: 0 },
     })
     const mod = compose.down({ projectDirectory, volumes: true })
@@ -326,7 +336,7 @@ describe("compose.down — apply", () => {
   })
 
   it("does not include --volumes flag when volumes option is false", async () => {
-    const mockSsh = createMockSsh({
+    const mockSsh = createComposeMockSsh({
       [`${composeCmd("podman")} down`]: { code: 0 },
     })
     const mod = compose.down({ projectDirectory, volumes: false })
@@ -335,7 +345,7 @@ describe("compose.down — apply", () => {
   })
 
   it("returns failed when down command fails", async () => {
-    const mockSsh = createMockSsh({
+    const mockSsh = createComposeMockSsh({
       [`${composeCmd("podman")} down`]: { code: 1 },
     })
     const mod = compose.down({ projectDirectory })
@@ -344,7 +354,7 @@ describe("compose.down — apply", () => {
   })
 
   it("returns failed when no runtime is found", async () => {
-    const mockSsh = createMockSsh({
+    const mockSsh = createComposeMockSsh({
       "command -v docker": { code: 1 },
       "command -v podman": { code: 1 },
     })
@@ -374,7 +384,7 @@ describe("compose.config — check", () => {
   })
 
   it("returns needs-apply when the remote file does not exist", async () => {
-    const mockSsh = createMockSsh({
+    const mockSsh = createComposeMockSsh({
       [`[ -e '${remotePath}' ]`]: { code: 1 },
     })
     const mod = compose.config({ content: sampleContent, projectDirectory })
@@ -383,7 +393,7 @@ describe("compose.config — check", () => {
   })
 
   it("returns ok when remote content matches desired content", async () => {
-    const mockSsh = createMockSsh({
+    const mockSsh = createComposeMockSsh({
       [`[ -e '${remotePath}' ]`]: { code: 0 },
       [`cat '${remotePath}'`]: { code: 0, stdout: sampleContent },
     })
@@ -393,7 +403,7 @@ describe("compose.config — check", () => {
   })
 
   it("returns needs-apply when remote content differs", async () => {
-    const mockSsh = createMockSsh({
+    const mockSsh = createComposeMockSsh({
       [`[ -e '${remotePath}' ]`]: { code: 0 },
       [`cat '${remotePath}'`]: { code: 0, stdout: "different content" },
     })
@@ -403,7 +413,7 @@ describe("compose.config — check", () => {
   })
 
   it("returns needs-apply when neither src nor content is provided", async () => {
-    const mockSsh = createMockSsh({
+    const mockSsh = createComposeMockSsh({
       [`[ -e '${remotePath}' ]`]: { code: 0 },
     })
     const mod = compose.config({ projectDirectory })
@@ -416,7 +426,7 @@ describe("compose.config — check", () => {
     const { readFile } = await import("node:fs/promises")
     vi.mocked(readFile).mockResolvedValue(localContent)
 
-    const mockSsh = createMockSsh({
+    const mockSsh = createComposeMockSsh({
       [`[ -e '${remotePath}' ]`]: { code: 0 },
       [`cat '${remotePath}'`]: { code: 0, stdout: localContent },
     })
@@ -437,7 +447,7 @@ describe("compose.config — apply", () => {
   })
 
   it("returns failed when no runtime is found", async () => {
-    const mockSsh = createMockSsh({
+    const mockSsh = createComposeMockSsh({
       "command -v docker": { code: 1 },
       "command -v podman": { code: 1 },
     })
@@ -448,7 +458,7 @@ describe("compose.config — apply", () => {
 
   it("writes content and validates with config --quiet", async () => {
     const writtenFiles: Array<{ content: string; path: string }> = []
-    const mockSsh = createMockSsh({
+    const mockSsh = createComposeMockSsh({
       [`${composeCmd("podman")} config --quiet`]: { code: 0 },
     })
     // eslint-disable-next-line @typescript-eslint/require-await -- Mock implementation
@@ -466,7 +476,7 @@ describe("compose.config — apply", () => {
 
   it("uploads src file and validates", async () => {
     const uploadedFiles: Array<{ dest: string; src: string }> = []
-    const mockSsh = createMockSsh({
+    const mockSsh = createComposeMockSsh({
       [`${composeCmd("podman")} config --quiet`]: { code: 0 },
     })
     // eslint-disable-next-line @typescript-eslint/require-await -- Mock implementation
@@ -483,7 +493,7 @@ describe("compose.config — apply", () => {
   })
 
   it("returns failed when validation fails", async () => {
-    const mockSsh = createMockSsh({
+    const mockSsh = createComposeMockSsh({
       [`${composeCmd("podman")} config --quiet`]: { code: 1 },
     })
     const mod = compose.config({ content: sampleContent, projectDirectory })
@@ -492,7 +502,7 @@ describe("compose.config — apply", () => {
   })
 
   it("returns failed when neither src nor content is provided", async () => {
-    const mockSsh = createMockSsh({})
+    const mockSsh = createComposeMockSsh({})
     const mod = compose.config({ projectDirectory })
     const result = await mod.apply(mockSsh, emptyEnv)
     expect(result.status).toBe("failed")
@@ -516,7 +526,7 @@ describe("compose.restart — check", () => {
   })
 
   it("always returns needs-apply even with a valid connection", async () => {
-    const mockSsh = createMockSsh({})
+    const mockSsh = createComposeMockSsh({})
     const mod = compose.restart({ projectDirectory })
     const result = await mod.check(mockSsh, emptyEnv)
     expect(result).toBe("needs-apply")
@@ -532,7 +542,7 @@ describe("compose.restart — apply", () => {
   })
 
   it("returns failed when no runtime is found", async () => {
-    const mockSsh = createMockSsh({
+    const mockSsh = createComposeMockSsh({
       "command -v docker": { code: 1 },
       "command -v podman": { code: 1 },
     })
@@ -543,7 +553,7 @@ describe("compose.restart — apply", () => {
 
   it("returns changed on successful restart and runs down && up -d", async () => {
     const cmd = composeCmd("podman")
-    const mockSsh = createMockSsh({
+    const mockSsh = createComposeMockSsh({
       [`${cmd} down && ${cmd} up -d`]: { code: 0 },
     })
     const mod = compose.restart({ projectDirectory })
@@ -554,7 +564,7 @@ describe("compose.restart — apply", () => {
 
   it("returns failed when restart command fails", async () => {
     const cmd = composeCmd("podman")
-    const mockSsh = createMockSsh({
+    const mockSsh = createComposeMockSsh({
       [`${cmd} down && ${cmd} up -d`]: { code: 1 },
     })
     const mod = compose.restart({ projectDirectory })
@@ -622,7 +632,7 @@ describe("compose.systemd — check", () => {
   })
 
   it("returns needs-apply when no runtime is found", async () => {
-    const mockSsh = createMockSsh({
+    const mockSsh = createComposeMockSsh({
       "command -v docker": { code: 1 },
       "command -v podman": { code: 1 },
     })
@@ -632,7 +642,7 @@ describe("compose.systemd — check", () => {
   })
 
   it("returns needs-apply when unit file does not exist", async () => {
-    const mockSsh = createMockSsh({
+    const mockSsh = createComposeMockSsh({
       [`[ -e '${unitFilePath}' ]`]: { code: 1 },
     })
     const mod = compose.systemd({ projectDirectory })
@@ -642,7 +652,7 @@ describe("compose.systemd — check", () => {
 
   it("returns ok when unit file content matches expected content (podman)", async () => {
     const content = expectedPodmanUnit(projectDirectory, defaultServiceName)
-    const mockSsh = createMockSsh({
+    const mockSsh = createComposeMockSsh({
       [`[ -e '${unitFilePath}' ]`]: { code: 0 },
       [`cat '${unitFilePath}'`]: { code: 0, stdout: content },
     })
@@ -653,9 +663,10 @@ describe("compose.systemd — check", () => {
 
   it("returns ok when unit file content matches expected content (docker)", async () => {
     const content = expectedDockerUnit(projectDirectory, defaultServiceName)
-    const mockSsh = createMockSsh({
+    const mockSsh = createComposeMockSsh({
       [`[ -e '${unitFilePath}' ]`]: { code: 0 },
       [`cat '${unitFilePath}'`]: { code: 0, stdout: content },
+      "command -v docker": { code: 0 },
       "command -v podman": { code: 1 },
     })
     const mod = compose.systemd({ projectDirectory })
@@ -664,7 +675,7 @@ describe("compose.systemd — check", () => {
   })
 
   it("returns needs-apply when unit file content differs", async () => {
-    const mockSsh = createMockSsh({
+    const mockSsh = createComposeMockSsh({
       [`[ -e '${unitFilePath}' ]`]: { code: 0 },
       [`cat '${unitFilePath}'`]: { code: 0, stdout: "outdated content" },
     })
@@ -683,7 +694,7 @@ describe("compose.systemd — apply", () => {
   })
 
   it("returns failed when no runtime is found", async () => {
-    const mockSsh = createMockSsh({
+    const mockSsh = createComposeMockSsh({
       "command -v docker": { code: 1 },
       "command -v podman": { code: 1 },
     })
@@ -694,7 +705,7 @@ describe("compose.systemd — apply", () => {
 
   it("writes unit file and runs daemon-reload", async () => {
     const writtenFiles: Array<{ content: string; path: string }> = []
-    const mockSsh = createMockSsh({
+    const mockSsh = createComposeMockSsh({
       "systemctl daemon-reload": { code: 0 },
     })
     // eslint-disable-next-line @typescript-eslint/require-await -- Mock implementation
@@ -710,7 +721,7 @@ describe("compose.systemd — apply", () => {
   })
 
   it("returns failed when daemon-reload fails", async () => {
-    const mockSsh = createMockSsh({
+    const mockSsh = createComposeMockSsh({
       "systemctl daemon-reload": { code: 1 },
     })
     const mod = compose.systemd({ projectDirectory })
@@ -720,7 +731,7 @@ describe("compose.systemd — apply", () => {
 
   it("generates unit without docker.service dependency for podman runtime", async () => {
     const writtenFiles: Array<{ content: string; path: string }> = []
-    const mockSsh = createMockSsh({
+    const mockSsh = createComposeMockSsh({
       "systemctl daemon-reload": { code: 0 },
     })
     // eslint-disable-next-line @typescript-eslint/require-await -- Mock implementation
@@ -737,7 +748,8 @@ describe("compose.systemd — apply", () => {
 
   it("generates unit with docker.service dependency for docker runtime", async () => {
     const writtenFiles: Array<{ content: string; path: string }> = []
-    const mockSsh = createMockSsh({
+    const mockSsh = createComposeMockSsh({
+      "command -v docker": { code: 0 },
       "command -v podman": { code: 1 },
       "systemctl daemon-reload": { code: 0 },
     })
@@ -766,7 +778,7 @@ describe("compose.systemd — naming", () => {
 
   it("explicit name is used as unit file name", async () => {
     const writtenFiles: Array<{ content: string; path: string }> = []
-    const mockSsh = createMockSsh({
+    const mockSsh = createComposeMockSsh({
       "systemctl daemon-reload": { code: 0 },
     })
     // eslint-disable-next-line @typescript-eslint/require-await -- Mock implementation
@@ -785,7 +797,7 @@ describe("compose.systemd — naming", () => {
 
 describe("Runtime detection", () => {
   it("prefers podman over docker when both are available", async () => {
-    const mockSsh = createMockSsh({
+    const mockSsh = createComposeMockSsh({
       [`${composeCmd("podman")} up -d`]: { code: 0 },
     })
     const mod = compose.up({ projectDirectory })
@@ -795,7 +807,7 @@ describe("Runtime detection", () => {
   })
 
   it("uses explicit runtime override without detection", async () => {
-    const mockSsh = createMockSsh({
+    const mockSsh = createComposeMockSsh({
       [`${composeCmd("docker")} up -d`]: { code: 0 },
     })
     const mod = compose.up({ projectDirectory, runtime: "docker" })

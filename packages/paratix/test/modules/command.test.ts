@@ -4,7 +4,7 @@ import type { ExecOptions } from "../../src/types.js"
 
 import { command } from "../../src/modules/command.js"
 import { printCommandError } from "../../src/output.js"
-import { createMockSsh } from "../helpers/mockSsh.js"
+import { createStrictMockSsh } from "../helpers/mockSsh.js"
 
 const emptyEnv = {}
 
@@ -18,12 +18,12 @@ type MockSshWithOptions = {
     options?: ExecOptions
   ) => Promise<{ code: number; stderr: string; stdout: string }>
   execCalls: Array<{ command: string; options?: ExecOptions }>
-} & ReturnType<typeof createMockSsh>
+} & ReturnType<typeof createStrictMockSsh>
 
 function createMockSshWithOptions(
   responses?: Record<string, { code?: number; stderr?: string; stdout?: string }>
 ): MockSshWithOptions {
-  const base = createMockSsh(responses)
+  const base = createStrictMockSsh(responses)
   const execCalls: Array<{ command: string; options?: ExecOptions }> = []
   return {
     ...base,
@@ -54,7 +54,7 @@ describe("command.shell — apply with null ssh", () => {
 
 describe("command.shell — apply with exit code 0", () => {
   it("returns changed when command exits with code 0", async () => {
-    const mockSsh = createMockSsh({ "echo hello": { code: 0 } })
+    const mockSsh = createStrictMockSsh({ "echo hello": { code: 0 } })
     const mod = command.shell("echo hello")
     const result = await mod.apply(mockSsh, emptyEnv)
     expect(result.status).toBe("changed")
@@ -67,7 +67,7 @@ describe("command.shell — apply with exit code 0", () => {
 
 describe("command.shell — apply with non-zero exit code", () => {
   it("returns failed when command exits with non-zero code", async () => {
-    const mockSsh = createMockSsh({ "exit 1": { code: 1 } })
+    const mockSsh = createStrictMockSsh({ "exit 1": { code: 1 } })
     const mod = command.shell("exit 1")
     const result = await mod.apply(mockSsh, emptyEnv)
     expect(result.status).toBe("failed")
@@ -76,7 +76,7 @@ describe("command.shell — apply with non-zero exit code", () => {
   it("calls printCommandError with stdout and stderr when command exits non-zero", async () => {
     vi.mocked(printCommandError).mockClear()
 
-    const mockSsh = createMockSsh({
+    const mockSsh = createStrictMockSsh({
       "exit 1": { code: 1, stderr: "some error", stdout: "some output" },
     })
     const mod = command.shell("exit 1")
@@ -116,7 +116,7 @@ describe("command.shell — apply with non-zero exit code", () => {
 
 describe("command.shell — check", () => {
   it("returns needs-apply when no check option is provided", async () => {
-    const mockSsh = createMockSsh()
+    const mockSsh = createStrictMockSsh()
     const mod = command.shell("echo hello")
     const result = await mod.check(mockSsh, emptyEnv)
     expect(result).toBe("needs-apply")
@@ -129,14 +129,14 @@ describe("command.shell — check", () => {
   })
 
   it("returns ok when check command exits with code 0", async () => {
-    const mockSsh = createMockSsh({ "which tool": { code: 0 } })
+    const mockSsh = createStrictMockSsh({ "which tool": { code: 0 } })
     const mod = command.shell("install-tool", { check: "which tool" })
     const result = await mod.check(mockSsh, emptyEnv)
     expect(result).toBe("ok")
   })
 
   it("returns needs-apply when check command exits with non-zero code", async () => {
-    const mockSsh = createMockSsh({ "which tool": { code: 1 } })
+    const mockSsh = createStrictMockSsh({ "which tool": { code: 1 } })
     const mod = command.shell("install-tool", { check: "which tool" })
     const result = await mod.check(mockSsh, emptyEnv)
     expect(result).toBe("needs-apply")
