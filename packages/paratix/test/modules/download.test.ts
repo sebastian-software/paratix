@@ -111,6 +111,31 @@ describe("download.url", () => {
       expect(result).toBe("needs-apply")
     })
 
+    it("returns needs-apply when mode drifts despite matching SHA-256", async () => {
+      const mockSsh = createMockSsh({
+        [`[ -f '${destination}' ]`]: { code: 0 },
+        [`sha256sum '${destination}'`]: { stdout: `${sha256}  ${destination}` },
+        [`stat -c '%a %U %G' '${destination}'`]: { stdout: "644 root root" },
+      })
+      const mod = download.url(destination, url, { mode: "0755", sha256 })
+      const result = await mod.check(mockSsh, emptyEnv)
+      expect(result).toBe("needs-apply")
+    })
+
+    it("returns needs-apply when owner and group drift without sha256", async () => {
+      const mockSsh = createMockSsh({
+        [`[ -e '${destination}' ]`]: { code: 0 },
+        [`stat -c '%a %U %G' '${destination}'`]: { stdout: "755 root wheel" },
+      })
+      const mod = download.url(destination, url, {
+        ...allowUnverifiedDownload,
+        group: "staff",
+        owner: "deploy",
+      })
+      const result = await mod.check(mockSsh, emptyEnv)
+      expect(result).toBe("needs-apply")
+    })
+
     it("returns needs-apply when ssh is null", async () => {
       const mod = download.url(destination, url, allowUnverifiedDownload)
       const result = await mod.check(null, emptyEnv)
@@ -400,6 +425,23 @@ describe("download.github", () => {
       expect(result).toBe("ok")
     })
 
+    it("returns needs-apply when owner or group drift", async () => {
+      const mockSsh = createMockSsh({
+        [`[ -e '${destination}' ]`]: { code: 0 },
+        [`stat -c '%a %U %G' '${destination}'`]: { stdout: "755 root wheel" },
+      })
+      const mod = download.github(destination, {
+        ...allowUnverifiedDownload,
+        asset,
+        group: "staff",
+        owner: "deploy",
+        repo,
+        tag,
+      })
+      const result = await mod.check(mockSsh, emptyEnv)
+      expect(result).toBe("needs-apply")
+    })
+
     it("returns needs-apply when ssh is null", async () => {
       const mod = download.github(destination, { ...allowUnverifiedDownload, asset, repo, tag })
       const result = await mod.check(null, emptyEnv)
@@ -686,6 +728,33 @@ describe("download.large", () => {
         },
       })
       const mod = download.large(destination, url, { sha256 })
+      const result = await mod.check(mockSsh, emptyEnv)
+      expect(result).toBe("needs-apply")
+    })
+
+    it("returns needs-apply when mode drifts despite flag and matching SHA-256", async () => {
+      const sha256 = "aabbccddaabbccddaabbccddaabbccddaabbccddaabbccddaabbccddaabbccdd"
+      const mockSsh = createMockSsh({
+        [`[ -f '${destination}' ]`]: { code: 0 },
+        [`[ -f /var/lib/paratix/flags/'${flagName}' ]`]: { code: 0 },
+        [`sha256sum '${destination}'`]: { stdout: `${sha256}  ${destination}` },
+        [`stat -c '%a %U %G' '${destination}'`]: { stdout: "644 root root" },
+      })
+      const mod = download.large(destination, url, { mode: "0600", sha256 })
+      const result = await mod.check(mockSsh, emptyEnv)
+      expect(result).toBe("needs-apply")
+    })
+
+    it("returns needs-apply when group drifts despite flag and existing destination", async () => {
+      const mockSsh = createMockSsh({
+        [`[ -e '${destination}' ]`]: { code: 0 },
+        [`[ -f /var/lib/paratix/flags/'${flagName}' ]`]: { code: 0 },
+        [`stat -c '%a %U %G' '${destination}'`]: { stdout: "644 root wheel" },
+      })
+      const mod = download.large(destination, url, {
+        ...allowUnverifiedDownload,
+        group: "staff",
+      })
       const result = await mod.check(mockSsh, emptyEnv)
       expect(result).toBe("needs-apply")
     })

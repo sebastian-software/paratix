@@ -39,6 +39,12 @@ type DownloadParameters = {
   url: string
 } & BaseDownloadOptions
 
+type DownloadOwnership = {
+  group: string
+  mode: string
+  owner: string
+}
+
 function hasSensitiveQueryParameters(url: URL): boolean {
   const sensitiveTokens = new Set([
     "auth",
@@ -116,6 +122,35 @@ function validateIntegrityConfiguration(
     `${moduleName} requires options.sha256 for integrity verification. ` +
       "If you intentionally trust the remote artifact, set allowUnverifiedDownload: true explicitly."
   )
+}
+
+async function readDownloadOwnership(
+  conn: SshConnection,
+  destination: string
+): Promise<DownloadOwnership> {
+  const raw = await conn.output(`stat -c '%a %U %G' ${shellQuote(destination)}`)
+  const [mode = "", owner = "", group = ""] = raw.trim().split(" ")
+  return { group, mode, owner }
+}
+
+function downloadOwnershipMatches(
+  current: DownloadOwnership,
+  options: BaseDownloadOptions
+): boolean {
+  if (options.mode != null && current.mode !== options.mode.replace(/^0+/v, "")) return false
+  if (options.owner != null && current.owner !== options.owner) return false
+  if (options.group != null && current.group !== options.group) return false
+  return true
+}
+
+async function metadataMatches(
+  conn: SshConnection,
+  destination: string,
+  options: BaseDownloadOptions
+): Promise<boolean> {
+  if (options.mode == null && options.owner == null && options.group == null) return true
+  const ownership = await readDownloadOwnership(conn, destination)
+  return downloadOwnershipMatches(ownership, options)
 }
 
 function buildTemporaryDownloadPathCommand(destination: string): string {
@@ -255,11 +290,13 @@ async function checkDownload(
 
   if (options.sha256 != null) {
     const actualHash = await conn.sha256(destination)
-    return hashMatches(actualHash, options.sha256) ? "ok" : NEEDS_APPLY
+    if (!hashMatches(actualHash, options.sha256)) return NEEDS_APPLY
+    return (await metadataMatches(conn, destination, options)) ? "ok" : NEEDS_APPLY
   }
 
   const fileExists = await conn.exists(destination)
-  return fileExists ? "ok" : NEEDS_APPLY
+  if (!fileExists) return NEEDS_APPLY
+  return (await metadataMatches(conn, destination, options)) ? "ok" : NEEDS_APPLY
 }
 
 /**
@@ -461,7 +498,7 @@ export const download = {
           if (!hashMatches(actualHash, resolvedOptions.sha256)) return NEEDS_APPLY
         }
 
-        return "ok"
+        return (await metadataMatches(conn, destination, resolvedOptions)) ? "ok" : NEEDS_APPLY
       },
       name: `download.large: ${destination}`,
     }
