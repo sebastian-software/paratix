@@ -7,6 +7,8 @@ import { type Module, type ModuleResult, NEEDS_APPLY, type SshConnection } from 
 // eslint-disable-next-line @typescript-eslint/strict-void-return -- promisify requires the callback-based overload
 const execFileAsync = promisify(execFile)
 
+type RsyncPhase = "apply" | "check"
+
 type SyncOptions = {
   /** Permission mode applied via `--chmod`, e.g. `"Du=rwx,go=rx,Fu=rw,go=r"`. */
   chmod?: string
@@ -139,6 +141,25 @@ function buildArguments(
   return result
 }
 
+function createRsyncError(options: SyncOptions, phase: RsyncPhase, error: unknown): Error {
+  const prefix =
+    phase === "check"
+      ? `[rsync.sync] check failed for ${options.src} -> ${options.dest}`
+      : `[rsync.sync] ${options.src} -> ${options.dest}`
+  return new Error(`${prefix}: ${String(error)}`)
+}
+
+async function executeRsync(
+  options: SyncOptions,
+  ssh: SshConnection,
+  dryRun: boolean
+): Promise<string> {
+  const connectionInfo = ssh.getConnectionInfo()
+  const rsyncArguments = buildArguments(options, connectionInfo, dryRun)
+  const { stdout } = await execFileAsync("rsync", rsyncArguments)
+  return stdout
+}
+
 /**
  * Modules for synchronizing files to a remote host using rsync.
  */
@@ -179,31 +200,22 @@ export const rsync = {
       async apply(ssh: null | SshConnection): Promise<ModuleResult> {
         if (!ssh) return { status: "failed" }
 
-        const connectionInfo = ssh.getConnectionInfo()
-        const rsyncArguments = buildArguments(options, connectionInfo, false)
-
         try {
-          const { stdout } = await execFileAsync("rsync", rsyncArguments)
+          const stdout = await executeRsync(options, ssh, false)
           return { status: stdout.trim().length > 0 ? "changed" : "ok" }
         } catch (error) {
-          console.error(`[rsync.sync] ${options.src} -> ${options.dest}: ${String(error)}`)
+          console.error(createRsyncError(options, "apply", error).message)
           return { status: "failed" }
         }
       },
       async check(ssh: null | SshConnection): Promise<"needs-apply" | "ok"> {
         if (!ssh) return NEEDS_APPLY
 
-        const connectionInfo = ssh.getConnectionInfo()
-        const rsyncArguments = buildArguments(options, connectionInfo, true)
-
         try {
-          const { stdout } = await execFileAsync("rsync", rsyncArguments)
+          const stdout = await executeRsync(options, ssh, true)
           return stdout.trim().length > 0 ? NEEDS_APPLY : "ok"
         } catch (error) {
-          console.error(
-            `[rsync.sync] check failed for ${options.src} -> ${options.dest}: ${String(error)}`
-          )
-          return NEEDS_APPLY
+          throw createRsyncError(options, "check", error)
         }
       },
       name: `rsync.sync: ${options.src} -> ${options.dest}`,

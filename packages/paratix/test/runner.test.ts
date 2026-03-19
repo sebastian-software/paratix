@@ -1320,6 +1320,63 @@ describe("runPlaybook op.resolve integration", () => {
   })
 })
 
+describe("runPlaybook rsync check error handling", () => {
+  beforeEach(() => {
+    vi.spyOn(console, "log").mockImplementation(() => {
+      /* noop */
+    })
+    vi.spyOn(console, "error").mockImplementation(() => {
+      /* noop */
+    })
+    vi.resetModules()
+  })
+
+  afterEach(() => {
+    vi.restoreAllMocks()
+    vi.resetModules()
+    process.exitCode = 0
+  })
+
+  it("marks the run as failed when rsync check throws instead of masking it as needs-apply", async () => {
+    const capturedConfigs: unknown[] = []
+
+    vi.doMock("node:child_process", () => ({
+      execFile: vi.fn(
+        (_file: string, _args: readonly string[], callback: (error: Error) => void) => {
+          callback(new Error("rsync failed"))
+        }
+      ),
+    }))
+    vi.doMock("../src/ssh.js", () => ({
+      shellQuote: (s: string) => `'${s}'`,
+      SshConnectionImpl: makeMockSshClass(capturedConfigs),
+    }))
+
+    const [{ runPlaybook }, { rsync }] = await Promise.all([
+      import("../src/runner.js"),
+      import("../src/modules/rsync.js"),
+    ])
+
+    const subsequentModule: Module = {
+      apply: vi.fn().mockResolvedValue({ status: "ok" } satisfies ModuleResult),
+      check: vi.fn().mockResolvedValue("ok" as const),
+      name: "should-not-run",
+    }
+
+    const definition: ServerDefinition = {
+      host: "1.2.3.4",
+      name: "test-server",
+      run: [rsync.sync({ dest: "/remote/dest", src: "/local/src" }), subsequentModule],
+      ssh: { ports: [22], privateKey: "~/.ssh/id", user: "root" },
+    }
+
+    await runPlaybook(definition)
+
+    expect(subsequentModule.check).not.toHaveBeenCalled()
+    expect(process.exitCode).toBe(1)
+  })
+})
+
 // Bug regression: stats.incrementSignals() must be called even when signal apply() throws,
 // so that failed signals are counted in the summary (not only successful ones)
 describe("runPlaybook runSignals stats.incrementSignals on failure", () => {

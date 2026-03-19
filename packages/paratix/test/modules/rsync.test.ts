@@ -73,8 +73,9 @@ describe("rsync.sync — check", () => {
     mockFailure()
     const mockSsh = createMockSsh()
     const mod = rsync.sync({ dest: "/remote/dest", src: "/local/src" })
-    const result = await mod.check(mockSsh, emptyEnv)
-    expect(result).toBe("needs-apply")
+    await expect(mod.check(mockSsh, emptyEnv)).rejects.toThrow(
+      "[rsync.sync] check failed for /local/src -> /remote/dest: Error: rsync failed"
+    )
   })
 
   it("passes correct args to rsync", async () => {
@@ -135,10 +136,16 @@ describe("rsync.sync — apply", () => {
 
   it("returns failed when rsync command fails", async () => {
     mockFailure()
+    const consoleSpy = vi.spyOn(console, "error").mockImplementation(() => {
+      /* noop */
+    })
     const mockSsh = createMockSsh()
     const mod = rsync.sync({ dest: "/remote/dest", src: "/local/src" })
     const result = await mod.apply(mockSsh, emptyEnv)
     expect(result.status).toBe("failed")
+    expect(consoleSpy).toHaveBeenCalledWith(
+      "[rsync.sync] /local/src -> /remote/dest: Error: rsync failed"
+    )
   })
 
   it("does NOT include --dry-run flag", async () => {
