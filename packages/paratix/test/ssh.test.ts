@@ -1309,6 +1309,55 @@ describe("SshConnectionImpl", () => {
   // -------------------------------------------------------------------------
 
   describe("uploadFile", () => {
+    it("creates and cleans up the temp file without sudo for non-root users", async () => {
+      const { sftpUpload } = await import("../src/sftp.js")
+      vi.mocked(sftpUpload).mockResolvedValue()
+
+      const tempPath = "/tmp/paratix-upload.ABCDEF"
+      const executedCommands: string[] = []
+
+      const execSpy = vi
+        .fn()
+        .mockImplementationOnce((_command: string, callback: ExecCallback) => {
+          const stream = makeStream()
+          executedCommands.push(_command)
+          callback(undefined, stream)
+          stream.emit("data", Buffer.from(tempPath))
+          stream.emit("close", 0)
+        })
+        .mockImplementationOnce((_command: string, callback: ExecCallback) => {
+          const stream = makeStream()
+          executedCommands.push(_command)
+          callback(undefined, stream)
+          stream.emit("close", 0)
+        })
+        .mockImplementationOnce((_command: string, callback: ExecCallback) => {
+          const stream = makeStream()
+          executedCommands.push(_command)
+          callback(undefined, stream)
+          stream.emit("close", 0)
+        })
+        .mockImplementationOnce((_command: string, callback: ExecCallback) => {
+          const stream = makeStream()
+          executedCommands.push(_command)
+          callback(undefined, stream)
+          stream.emit("close", 0)
+        })
+
+      const client = makeClientWithExecSpy(execSpy)
+      const ssh = makeConnectedSsh(client, { user: "deploy" })
+
+      await ssh.uploadFile("/local/file.txt", "/remote/path")
+
+      expect(executedCommands[0]).toBe("mktemp /tmp/paratix-upload.XXXXXX")
+      expect(executedCommands[1]).toBe(`chmod '0600' '${tempPath}'`)
+      expect(executedCommands[2]).toMatch(/^sudo bash -c /v)
+      expect(executedCommands[2]).toContain(tempPath)
+      expect(executedCommands[2]).toContain("/remote/path")
+      expect(executedCommands[3]).toBe(`rm -f '${tempPath}'`)
+      expect(vi.mocked(sftpUpload)).toHaveBeenCalledWith(client, "/local/file.txt", tempPath)
+    })
+
     it("applies restrictive mode 0600 to the temp file before mv when no mode option is provided", async () => {
       const { sftpUpload } = await import("../src/sftp.js")
       vi.mocked(sftpUpload).mockResolvedValue()
@@ -1511,6 +1560,55 @@ describe("SshConnectionImpl", () => {
   // -------------------------------------------------------------------------
 
   describe("writeFile", () => {
+    it("creates and cleans up the temp file without sudo for non-root users", async () => {
+      const { sftpUpload } = await import("../src/sftp.js")
+      vi.mocked(sftpUpload).mockResolvedValue()
+
+      const tempPath = "/tmp/paratix-write.ABCDEF"
+      const executedCommands: string[] = []
+
+      const execSpy = vi
+        .fn()
+        .mockImplementationOnce((_command: string, callback: ExecCallback) => {
+          const stream = makeStream()
+          executedCommands.push(_command)
+          callback(undefined, stream)
+          stream.emit("data", Buffer.from(tempPath))
+          stream.emit("close", 0)
+        })
+        .mockImplementationOnce((_command: string, callback: ExecCallback) => {
+          const stream = makeStream()
+          executedCommands.push(_command)
+          callback(undefined, stream)
+          stream.emit("close", 0)
+        })
+        .mockImplementationOnce((_command: string, callback: ExecCallback) => {
+          const stream = makeStream()
+          executedCommands.push(_command)
+          callback(undefined, stream)
+          stream.emit("close", 0)
+        })
+        .mockImplementationOnce((_command: string, callback: ExecCallback) => {
+          const stream = makeStream()
+          executedCommands.push(_command)
+          callback(undefined, stream)
+          stream.emit("close", 0)
+        })
+
+      const client = makeClientWithExecSpy(execSpy)
+      const ssh = makeConnectedSsh(client, { user: "deploy" })
+
+      await ssh.writeFile("/remote/plain.txt", "hello world")
+
+      expect(executedCommands[0]).toBe("mktemp /tmp/paratix-write.XXXXXX")
+      expect(executedCommands[1]).toBe(`chmod '0600' '${tempPath}'`)
+      expect(executedCommands[2]).toMatch(/^sudo bash -c /v)
+      expect(executedCommands[2]).toContain(tempPath)
+      expect(executedCommands[2]).toContain("/remote/plain.txt")
+      expect(executedCommands[3]).toBe(`rm -f '${tempPath}'`)
+      expect(vi.mocked(sftpUpload)).toHaveBeenCalledOnce()
+    })
+
     it("applies restrictive mode 0600 to the remote temp file before mv when no mode option is provided", async () => {
       const { sftpUpload } = await import("../src/sftp.js")
       vi.mocked(sftpUpload).mockResolvedValue()
@@ -1698,7 +1796,7 @@ describe("SshConnectionImpl", () => {
       expect(execSpy).not.toHaveBeenCalled()
     })
 
-    it("sets chmod 600 (owner-only) on the temporary copy for non-root user", async () => {
+    it("creates the temporary copy without sudo and copies into it via sudo for non-root user", async () => {
       const executedCommands: string[] = []
       const mktempOutput = "/tmp/paratix-download.ABCDEF"
 
@@ -1712,21 +1810,14 @@ describe("SshConnectionImpl", () => {
           stream.emit("data", Buffer.from(mktempOutput))
           stream.emit("close", 0)
         })
-        // Second call: cp
+        // Second call: sudo cat into the existing user-owned temp file
         .mockImplementationOnce((cmd: string, callback: ExecCallback) => {
           executedCommands.push(cmd)
           const stream = makeStream()
           callback(undefined, stream)
           stream.emit("close", 0)
         })
-        // Third call: chmod
-        .mockImplementationOnce((cmd: string, callback: ExecCallback) => {
-          executedCommands.push(cmd)
-          const stream = makeStream()
-          callback(undefined, stream)
-          stream.emit("close", 0)
-        })
-        // Fourth call: rm -f
+        // Third call: rm -f
         .mockImplementationOnce((cmd: string, callback: ExecCallback) => {
           executedCommands.push(cmd)
           const stream = makeStream()
@@ -1739,13 +1830,15 @@ describe("SshConnectionImpl", () => {
 
       await ssh.downloadFile("/var/log/secure", "/tmp/local-secure")
 
-      const chmodCommand = executedCommands.find((cmd) => cmd.includes("chmod"))
-      expect(chmodCommand).toBeDefined()
-      // Temp copy must be owner-only (600), not world-readable (644)
-      expect(chmodCommand).toContain("chmod 600")
+      expect(executedCommands[0]).toBe("mktemp /tmp/paratix-download.XXXXXX")
+      expect(executedCommands[1]).toMatch(/^sudo bash -c /v)
+      expect(executedCommands[1]).toContain("cat ")
+      expect(executedCommands[1]).toContain("/var/log/secure")
+      expect(executedCommands[1]).toContain(mktempOutput)
+      expect(executedCommands[2]).toBe(`rm -f '${mktempOutput}'`)
     })
 
-    it("uses mktemp, cp, chmod, sftp, rm for non-root user", async () => {
+    it("uses user-owned temp file plus sudo copy, sftp, and user cleanup for non-root user", async () => {
       const executedCommands: string[] = []
       const mktempOutput = "/tmp/paratix-download.ABCDEF"
 
@@ -1753,11 +1846,9 @@ describe("SshConnectionImpl", () => {
         .fn()
         // First call: mktemp (via output()) — returns temp path
         .mockImplementationOnce(makeExecHandler(executedCommands, mktempOutput))
-        // Second call: cp
+        // Second call: sudo cat into temp file
         .mockImplementationOnce(makeExecHandler(executedCommands, ""))
-        // Third call: chmod
-        .mockImplementationOnce(makeExecHandler(executedCommands, ""))
-        // Fourth call: rm -f
+        // Third call: rm -f
         .mockImplementationOnce(makeExecHandler(executedCommands, ""))
 
       const client = makeClientWithExecSpy(execSpy)
@@ -1765,16 +1856,15 @@ describe("SshConnectionImpl", () => {
 
       await ssh.downloadFile("/var/log/secure", "/tmp/local-secure")
 
-      // Verify the sequence: mktemp, cp, chmod, then sftpDownload, then rm
-      expect(executedCommands.some((cmd) => cmd.includes("mktemp"))).toBe(true)
-      expect(executedCommands.some((cmd) => cmd.includes("cp"))).toBe(true)
-      expect(executedCommands.some((cmd) => cmd.includes("chmod 600"))).toBe(true)
+      expect(executedCommands[0]).toBe("mktemp /tmp/paratix-download.XXXXXX")
+      expect(executedCommands[1]).toMatch(/^sudo bash -c /v)
+      expect(executedCommands[1]).toContain("cat ")
       expect(vi.mocked(sftpDownload)).toHaveBeenCalledWith(
         client,
         mktempOutput,
         "/tmp/local-secure"
       )
-      expect(executedCommands.some((cmd) => cmd.includes("rm -f"))).toBe(true)
+      expect(executedCommands[2]).toBe(`rm -f '${mktempOutput}'`)
     })
 
     it("cleans up the remote temp file even when sftpDownload rejects (regression)", async () => {
@@ -1786,11 +1876,9 @@ describe("SshConnectionImpl", () => {
         .fn()
         // First call: mktemp (via output()) — returns temp path
         .mockImplementationOnce(makeExecHandler(executedCommands, mktempOutput))
-        // Second call: cp
+        // Second call: sudo cat into temp file
         .mockImplementationOnce(makeExecHandler(executedCommands, ""))
-        // Third call: chmod
-        .mockImplementationOnce(makeExecHandler(executedCommands, ""))
-        // Fourth call: rm -f (cleanup in finally)
+        // Third call: rm -f (cleanup in finally)
         .mockImplementationOnce(makeExecHandler(executedCommands, ""))
 
       vi.mocked(sftpDownload).mockRejectedValueOnce(new Error("SFTP transfer failed"))
@@ -1809,26 +1897,21 @@ describe("SshConnectionImpl", () => {
       expect(rmCommand).toContain(mktempOutput)
     })
 
-    it("masks shell-quoted sudo passwords in download cleanup warnings", async () => {
-      const sudoPassword = "down'load-secret"
-      const escapedPassword = shellQuote(sudoPassword)
+    it("uses raw non-sudo cleanup for non-root download temp files", async () => {
       const mktempOutput = "/tmp/paratix-download.MASKSECRET"
+      const executedCommands: string[] = []
 
       const execSpy = vi
         .fn()
-        .mockImplementationOnce(makeExecHandler([], mktempOutput))
-        .mockImplementationOnce(makeExecHandler([], ""))
-        .mockImplementationOnce(makeExecHandler([], ""))
+        .mockImplementationOnce(makeExecHandler(executedCommands, mktempOutput))
+        .mockImplementationOnce(makeExecHandler(executedCommands, ""))
         .mockImplementationOnce((_cmd: string, callback: ExecCallback) => {
-          callback(
-            new Error(`permission denied: echo ${escapedPassword} | sudo rm -f ${mktempOutput}`),
-            makeStream()
-          )
+          executedCommands.push(_cmd)
+          callback(new Error(`permission denied: rm -f ${mktempOutput}`), makeStream())
         })
 
       const client = makeClientWithExecSpy(execSpy)
       const ssh = makeConnectedSsh(client, { user: "deploy" })
-      ;(ssh as unknown as Record<string, unknown>).cachedSudoPassword = Buffer.from(sudoPassword)
 
       const stderrSpy = vi.spyOn(process.stderr, "write").mockImplementation(() => true)
 
@@ -1839,9 +1922,9 @@ describe("SshConnectionImpl", () => {
       })
 
       const stderrOutput = stderrSpy.mock.calls.map((args) => String(args[0])).join("")
-      expect(stderrOutput).not.toContain(sudoPassword)
-      expect(stderrOutput).not.toContain(escapedPassword)
-      expect(stderrOutput).toContain("[REDACTED]")
+      expect(executedCommands[2]).toBe(`rm -f '${mktempOutput}'`)
+      expect(stderrOutput).toContain(`failed to remove temp file ${mktempOutput}`)
+      expect(stderrOutput).not.toContain("sudo")
 
       stderrSpy.mockRestore()
     })
