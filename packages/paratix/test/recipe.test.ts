@@ -202,6 +202,37 @@ describe("recipe", () => {
     expect(result.status).toBe("failed")
   })
 
+  it.each(["SIGINT", "SIGTERM"] as const)(
+    "stops before the next recipe signal when shutdown was requested during %s",
+    async (signalName) => {
+      let receivedSignal: NodeJS.Signals | null = null
+      const firstSignal: Module = {
+        // eslint-disable-next-line @typescript-eslint/require-await -- Interface requires async
+        async apply() {
+          receivedSignal = signalName
+          return { status: "changed" }
+        },
+        // eslint-disable-next-line @typescript-eslint/require-await -- Interface requires async
+        async check() {
+          return "needs-apply"
+        },
+        name: "first-signal",
+      }
+      const secondSignal: Module = {
+        apply: vi.fn().mockResolvedValue({ status: "changed" }),
+        check: vi.fn().mockResolvedValue("needs-apply"),
+        name: "second-signal",
+      }
+
+      const mod = makeModule("needs-apply", "changed")
+      const r = recipe("test-recipe", [mod], { signals: [firstSignal, secondSignal] })
+      const result = await r.apply(null, emptyEnv, () => receivedSignal)
+
+      expect(result.status).toBe("changed")
+      expect(secondSignal.apply).not.toHaveBeenCalled()
+    }
+  )
+
   it("check returns ok for a recipe with no child modules", async () => {
     const r = recipe("empty", [])
     const result = await r.check(null, emptyEnv)
