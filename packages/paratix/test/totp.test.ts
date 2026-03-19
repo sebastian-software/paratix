@@ -4,6 +4,9 @@ import { generateTotpCode } from "../src/totp.js"
 
 // RFC 6238 Appendix B test secret (ASCII "12345678901234567890") encoded as Base32
 const RFC_SECRET_BASE32 = "GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ"
+const RFC_SHA256_SECRET_BASE32 = "GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQGEZA"
+const RFC_SHA512_SECRET_BASE32 =
+  "GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQGEZDGNA"
 
 // ---------------------------------------------------------------------------
 // RFC 6238 test vectors
@@ -40,6 +43,32 @@ describe("generateTotpCode — RFC 6238 test vectors", () => {
     vi.setSystemTime(1_234_567_890 * 1000)
     const uri = `otpauth://totp/Test?secret=${RFC_SECRET_BASE32}`
     expect(generateTotpCode(uri)).toBe("005924")
+  })
+
+  it.each([
+    { code: "46119246", timestamp: 59 },
+    { code: "68084774", timestamp: 1_111_111_109 },
+    { code: "67062674", timestamp: 1_111_111_111 },
+    { code: "91819424", timestamp: 1_234_567_890 },
+    { code: "90698825", timestamp: 2_000_000_000 },
+    { code: "77737706", timestamp: 20_000_000_000 },
+  ])("produces $code at unix time $timestamp (SHA256, 8 digits)", ({ code, timestamp }) => {
+    vi.setSystemTime(timestamp * 1000)
+    const uri = `otpauth://totp/Test?secret=${RFC_SHA256_SECRET_BASE32}&algorithm=SHA256&digits=8`
+    expect(generateTotpCode(uri)).toBe(code)
+  })
+
+  it.each([
+    { code: "90693936", timestamp: 59 },
+    { code: "25091201", timestamp: 1_111_111_109 },
+    { code: "99943326", timestamp: 1_111_111_111 },
+    { code: "93441116", timestamp: 1_234_567_890 },
+    { code: "38618901", timestamp: 2_000_000_000 },
+    { code: "47863826", timestamp: 20_000_000_000 },
+  ])("produces $code at unix time $timestamp (SHA512, 8 digits)", ({ code, timestamp }) => {
+    vi.setSystemTime(timestamp * 1000)
+    const uri = `otpauth://totp/Test?secret=${RFC_SHA512_SECRET_BASE32}&algorithm=SHA512&digits=8`
+    expect(generateTotpCode(uri)).toBe(code)
   })
 })
 
