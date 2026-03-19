@@ -565,6 +565,58 @@ describe("runPlaybook signal handling", () => {
     expect(process.exitCode).toBe(130)
   })
 
+  it.each([
+    ["SIGINT", 130],
+    ["SIGTERM", 143],
+  ] as const)(
+    "does not start further signal modules when %s is received during signal execution",
+    async (signalName, expectedExitCode) => {
+      vi.doMock("../src/ssh.js", () => ({
+        shellQuote: (s: string) => `'${s}'`,
+        SshConnectionImpl: makeMockSshClass(capturedConfigs, { disconnect: disconnectFn }),
+      }))
+
+      const { runPlaybook } = await import("../src/runner.js")
+
+      const changingModule: Module = {
+        apply: vi.fn().mockResolvedValue({ status: "changed" } satisfies ModuleResult),
+        check: vi.fn().mockResolvedValue("needs-apply"),
+        name: "changing-module",
+      }
+
+      const firstSignal: Module = {
+        apply: vi.fn().mockImplementationOnce(async () => {
+          await Promise.resolve()
+          process.emit(signalName, signalName)
+          return { status: "changed" } satisfies ModuleResult
+        }),
+        check: vi.fn().mockResolvedValue("needs-apply"),
+        name: "first-signal",
+      }
+
+      const secondSignal: Module = {
+        apply: vi.fn(),
+        check: vi.fn(),
+        name: "second-signal",
+      }
+
+      const definition: ServerDefinition = {
+        host: "1.2.3.4",
+        name: "test-server",
+        run: [changingModule],
+        signals: [firstSignal, secondSignal],
+        ssh: { ports: [22], privateKey: "~/.ssh/id", user: "root" },
+      }
+
+      await runPlaybook(definition)
+
+      expect(firstSignal.apply).toHaveBeenCalledOnce()
+      expect(secondSignal.apply).not.toHaveBeenCalled()
+      expect(process.exitCode).toBe(expectedExitCode)
+      expect(disconnectFn).toHaveBeenCalled()
+    }
+  )
+
   it("does not set signal exitCode when runPlaybook completes normally without any signal", async () => {
     vi.doMock("../src/ssh.js", () => ({
       shellQuote: (s: string) => `'${s}'`,

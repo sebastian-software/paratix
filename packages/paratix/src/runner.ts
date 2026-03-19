@@ -1,3 +1,4 @@
+/* eslint-disable max-lines -- central runner orchestration stays intentionally co-located */
 import type { RecipeModule } from "./recipe.js"
 import type { Environment, Module, ModuleResult, ServerDefinition } from "./types.js"
 
@@ -12,14 +13,7 @@ import {
 import { resolveExitCode, signalExitCode } from "./runnerHelpers.js"
 import { SshConnectionImpl } from "./ssh.js"
 
-/**
- * Holds the shutdown handler and a getter for the signal that triggered it.
- *
- * - `handleShutdownSignal` — the listener registered on `SIGINT`/`SIGTERM`.
- *   A second signal while shutdown is already in progress causes an immediate exit.
- * - `shutdownSignal` — returns the first signal received, or `null` if no signal
- *   has been received yet.
- */
+/** Holds the shutdown listener, SSH setter, and getter for the first received signal. */
 type ShutdownState = {
   handleShutdownSignal: (signal: NodeJS.Signals) => void
   setSsh: (connection: SshConnectionImpl) => void
@@ -27,16 +21,8 @@ type ShutdownState = {
 }
 
 /**
- * Registers `SIGINT` and `SIGTERM` handlers that perform a graceful SSH
- * shutdown on the first signal. A second signal triggers an immediate exit
- * with the appropriate signal exit code.
- *
- * The SSH connection is not required at registration time — call `setSsh`
- * once the connection is established so the handler can disconnect it.
- *
- * @returns A {@link ShutdownState} containing the registered handler, a
- *   `setSsh` setter for the SSH connection, and a getter that returns the
- *   first received signal.
+ * Registers shutdown handlers.
+ * @returns The listener state and first-signal getter.
  */
 function setupShutdownHandlers(): ShutdownState {
   let receivedSignal: NodeJS.Signals | null = null
@@ -64,29 +50,16 @@ function setupShutdownHandlers(): ShutdownState {
   }
 }
 
-/**
- * Options controlling the behavior of a {@link runPlaybook} run.
- */
 export type RunOptions = {
-  /**
-   * When `true`, modules report what would change without applying anything.
-   * Defaults to `false`.
-   */
+  /** When `true`, modules report what would change without applying anything. Defaults to `false`. */
   dryRun?: boolean
   /** Path to a `.env` file whose variables are merged into the run environment. */
   envFile?: string
   /** Additional environment variables that override values from `envFile` and the server definition. */
   envOverrides?: Environment
-  /**
-   * Custom reconnect timeout in milliseconds passed to the SSH connection.
-   * Falls back to the default defined in the SSH configuration when omitted.
-   */
+  /** Custom reconnect timeout in milliseconds passed to SSH, overriding the config default. */
   reconnectTimeout?: number
-  /**
-   * When `true`, the full (untruncated) stdout and stderr of a failed command
-   * are printed in addition to the summary error message.
-   * Defaults to `false`.
-   */
+  /** When `true`, failed commands print full stdout/stderr in addition to the summary error. */
   verbose?: boolean
 }
 
@@ -198,11 +171,7 @@ async function handleMetaAndBuildResult(
     await handleReboot(ssh, result.meta)
   }
 
-  return {
-    env: currentEnvironment,
-    shouldBreak: result.status === "failed",
-    status: result.status,
-  }
+  return { env: currentEnvironment, shouldBreak: result.status === "failed", status: result.status }
 }
 
 // eslint-disable-next-line max-params -- verbose and dryRun flags need to be threaded through
@@ -217,9 +186,7 @@ async function runRecipeModule(
   try {
     if (dryRun) return await dryRunRecipeModule(recipeModule, environment, ssh)
 
-    // check() iterates all child modules; apply() checks them again
-    // internally via executeModules(). This trades duplicate checks for
-    // simpler code. Optimize if recipe check() becomes a bottleneck.
+    // check() iterates all child modules; apply() checks them again internally via executeModules().
     const checkResult = await recipeModule.check(ssh, environment)
     if (checkResult === "ok") {
       printRecipeHeader(recipeModule.name)
@@ -321,6 +288,7 @@ async function runModuleLoop(parameters: LoopArguments): Promise<Environment> {
 
 type SignalArguments = {
   env: Environment
+  shutdownSignal: () => NodeJS.Signals | null
   signals: Module[]
   ssh: SshConnectionImpl
   stats: RunStats
@@ -328,9 +296,10 @@ type SignalArguments = {
 }
 
 async function runSignals(parameters: SignalArguments): Promise<void> {
-  const { env, signals, ssh, stats, verbose } = parameters
+  const { env, shutdownSignal, signals, ssh, stats, verbose } = parameters
 
   for (const signal of signals) {
+    if (shutdownSignal() != null) break
     stats.incrementSignals()
     try {
       const connection = signal.local === true ? null : ssh
@@ -372,8 +341,7 @@ export async function runPlaybook(
   const stats = new RunStats()
   let ssh: SshConnectionImpl | undefined
 
-  // No catch block — connect errors propagate to the CLI handler in cli.ts
-  // which prints the error and exits with code 2.
+  // No catch block: connect errors propagate to cli.ts, which prints them and exits with code 2.
   try {
     ssh = await connectAndRegister(definition, options, setSsh)
     printRecipeHeader(definition.name)
@@ -387,9 +355,15 @@ export async function runPlaybook(
       verbose,
     })
 
-    if (shutdownSignal() == null && stats.changed > 0 && definition.signals != null) {
-      await runSignals({ env: finalEnvironment, signals: definition.signals, ssh, stats, verbose })
-    }
+    if (shutdownSignal() == null && stats.changed > 0 && definition.signals != null)
+      await runSignals({
+        env: finalEnvironment,
+        shutdownSignal,
+        signals: definition.signals,
+        ssh,
+        stats,
+        verbose,
+      })
 
     printSummary(stats)
   } finally {
