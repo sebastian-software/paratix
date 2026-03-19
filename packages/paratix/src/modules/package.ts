@@ -33,7 +33,7 @@ const UPDATE_COMMANDS = {
 
 const UPGRADE_COMMANDS = {
   apk: "apk update && apk upgrade",
-  apt: "DEBIAN_FRONTEND=noninteractive apt-get update && DEBIAN_FRONTEND=noninteractive apt-get upgrade -y",
+  apt: "DEBIAN_FRONTEND=noninteractive dpkg --configure -a && DEBIAN_FRONTEND=noninteractive apt-get update && DEBIAN_FRONTEND=noninteractive apt-get upgrade -y",
   dnf: "dnf upgrade -y",
   yum: "yum update -y",
 } as const

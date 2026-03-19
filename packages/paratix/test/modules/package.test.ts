@@ -325,7 +325,7 @@ describe("pkg.upgrade", () => {
   it("apply returns changed and sets flag after upgrade (apt)", async () => {
     const ssh = createMockSsh({
       ...APT_FOUND,
-      "DEBIAN_FRONTEND=noninteractive apt-get update && DEBIAN_FRONTEND=noninteractive apt-get upgrade -y":
+      "DEBIAN_FRONTEND=noninteractive dpkg --configure -a && DEBIAN_FRONTEND=noninteractive apt-get update && DEBIAN_FRONTEND=noninteractive apt-get upgrade -y":
         { code: 0 },
       "find /var/lib/paratix/flags -maxdepth 1 -name 'package-upgrade-*' -delete && touch /var/lib/paratix/flags/'package-upgrade-2024-01-15'":
         { code: 0 },
@@ -335,7 +335,7 @@ describe("pkg.upgrade", () => {
     const result = await mod.apply(ssh, emptyEnv)
     expect(result).toStrictEqual({ status: "changed" })
     expect(ssh.calls).toContain(
-      "DEBIAN_FRONTEND=noninteractive apt-get update && DEBIAN_FRONTEND=noninteractive apt-get upgrade -y"
+      "DEBIAN_FRONTEND=noninteractive dpkg --configure -a && DEBIAN_FRONTEND=noninteractive apt-get update && DEBIAN_FRONTEND=noninteractive apt-get upgrade -y"
     )
     expect(ssh.calls).toContain(
       "find /var/lib/paratix/flags -maxdepth 1 -name 'package-upgrade-*' -delete && touch /var/lib/paratix/flags/'package-upgrade-2024-01-15'"
