@@ -212,9 +212,10 @@ async function applyUbuntu(
  * `apt-get full-upgrade`.
  *
  * Determines the current and target (stable) codenames, rewrites all
- * apt sources to point at the new suite, then executes the three-step
- * upgrade sequence: `apt-get update`, `apt-get full-upgrade`, and
- * `apt-get autoremove`. When `dryRun` is set, the upgrade is skipped
+ * apt sources to point at the new suite, then executes the four-step
+ * upgrade sequence: `apt-get update`, `dpkg --configure -a` (to resolve
+ * any previously interrupted package configurations), `apt-get full-upgrade`,
+ * and `apt-get autoremove`. When `dryRun` is set, the upgrade is skipped
  * entirely and `"ok"` is returned.
  *
  * On success, returns `status: "changed"` with reboot meta so the runner
@@ -244,6 +245,12 @@ async function applyDebian(
     silent: true,
   })
   if (updateResult.code !== 0) return { status: "failed" }
+
+  const configureResult = await ssh.exec(`${NONINTERACTIVE} dpkg --configure -a`, {
+    ignoreExitCode: true,
+    silent: true,
+  })
+  if (configureResult.code !== 0) return { status: "failed" }
 
   const upgradeResult = await ssh.exec(`${NONINTERACTIVE} apt-get full-upgrade -y`, {
     ignoreExitCode: true,

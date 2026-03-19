@@ -57,6 +57,7 @@ function debianApplyResponses(
     "DEBIAN_FRONTEND=noninteractive apt-get autoremove -y": { code: 0 },
     "DEBIAN_FRONTEND=noninteractive apt-get full-upgrade -y": { code: 0 },
     "DEBIAN_FRONTEND=noninteractive apt-get update": { code: 0 },
+    "DEBIAN_FRONTEND=noninteractive dpkg --configure -a": { code: 0 },
     "find /etc/apt/sources.list.d/ \\( -name '*.list' -o -name '*.sources' \\) -type f":
       FIND_SOURCES_EMPTY,
     "lsb_release -cs": { code: 0, stdout: `${currentCodename}\n` },
@@ -226,6 +227,35 @@ describe("releaseUpgrade.upgrade — apply (Debian)", () => {
     const mod = releaseUpgrade.upgrade()
     const result = await mod.apply(ssh, emptyEnv)
     expect(result.status).toBe("failed")
+  })
+
+  it("Debian: returns failed when dpkg --configure -a fails", async () => {
+    const ssh = createMockSsh(
+      debianApplyResponses("bookworm", "trixie", {
+        "DEBIAN_FRONTEND=noninteractive dpkg --configure -a": { code: 1 },
+      })
+    )
+    const mod = releaseUpgrade.upgrade()
+    const result = await mod.apply(ssh, emptyEnv)
+    expect(result.status).toBe("failed")
+  })
+
+  it("Debian: runs dpkg --configure -a after apt-get update and before apt-get full-upgrade", async () => {
+    const ssh = createMockSsh(debianApplyResponses("bookworm", "trixie"))
+    const mod = releaseUpgrade.upgrade()
+    await mod.apply(ssh, emptyEnv)
+
+    const updateIndex = ssh.calls.indexOf("DEBIAN_FRONTEND=noninteractive apt-get update")
+    const dpkgIndex = ssh.calls.indexOf("DEBIAN_FRONTEND=noninteractive dpkg --configure -a")
+    const fullUpgradeIndex = ssh.calls.indexOf(
+      "DEBIAN_FRONTEND=noninteractive apt-get full-upgrade -y"
+    )
+
+    expect(updateIndex).toBeGreaterThan(-1)
+    expect(dpkgIndex).toBeGreaterThan(-1)
+    expect(fullUpgradeIndex).toBeGreaterThan(-1)
+    expect(dpkgIndex).toBeGreaterThan(updateIndex)
+    expect(dpkgIndex).toBeLessThan(fullUpgradeIndex)
   })
 })
 
