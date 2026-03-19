@@ -33,6 +33,28 @@ describe("file.directory", () => {
     const result = await mod.check(null, emptyEnv)
     expect(result).toBe("needs-apply")
   })
+
+  it("check returns needs-apply when directory mode differs", async () => {
+    const ssh = createMockSsh({
+      "[ -d '/var/app' ]": { code: 0 },
+      "stat -c '%a %U %G' '/var/app'": { stdout: "755 root root" },
+    })
+
+    const mod = file.directory("/var/app", { mode: "0700" })
+    const result = await mod.check(ssh, emptyEnv)
+    expect(result).toBe("needs-apply")
+  })
+
+  it("check returns needs-apply when directory owner differs", async () => {
+    const ssh = createMockSsh({
+      "[ -d '/var/app' ]": { code: 0 },
+      "stat -c '%a %U %G' '/var/app'": { stdout: "700 root root" },
+    })
+
+    const mod = file.directory("/var/app", { owner: "www-data:www-data" })
+    const result = await mod.check(ssh, emptyEnv)
+    expect(result).toBe("needs-apply")
+  })
 })
 
 describe("file.absent", () => {
@@ -144,6 +166,50 @@ describe("file.copy", () => {
 
       const mod = file.copy("/remote/file.txt", localPath)
       const result = await mod.check(null, emptyEnv)
+      expect(result).toBe("needs-apply")
+    } finally {
+      rmSync(dir, { recursive: true })
+    }
+  })
+
+  it("check returns needs-apply when mode differs despite matching SHA-256", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "paratix-test-"))
+    try {
+      const localPath = join(dir, "source.txt")
+      writeFileSync(localPath, "hello world")
+      const localHash = sha256HexBuffer(Buffer.from("hello world"))
+
+      const ssh = createMockSsh({
+        "[ -e '/remote/file.txt' ]": { code: 0 },
+        "[ -f '/remote/file.txt' ]": { code: 0 },
+        "sha256sum '/remote/file.txt'": { stdout: `${localHash}  /remote/file.txt` },
+        "stat -c '%a %U %G' '/remote/file.txt'": { stdout: "644 www-data www-data" },
+      })
+
+      const mod = file.copy("/remote/file.txt", localPath, { mode: "0600" })
+      const result = await mod.check(ssh, emptyEnv)
+      expect(result).toBe("needs-apply")
+    } finally {
+      rmSync(dir, { recursive: true })
+    }
+  })
+
+  it("check returns needs-apply when owner differs despite matching SHA-256", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "paratix-test-"))
+    try {
+      const localPath = join(dir, "source.txt")
+      writeFileSync(localPath, "hello world")
+      const localHash = sha256HexBuffer(Buffer.from("hello world"))
+
+      const ssh = createMockSsh({
+        "[ -e '/remote/file.txt' ]": { code: 0 },
+        "[ -f '/remote/file.txt' ]": { code: 0 },
+        "sha256sum '/remote/file.txt'": { stdout: `${localHash}  /remote/file.txt` },
+        "stat -c '%a %U %G' '/remote/file.txt'": { stdout: "600 root root" },
+      })
+
+      const mod = file.copy("/remote/file.txt", localPath, { owner: "www-data:www-data" })
+      const result = await mod.check(ssh, emptyEnv)
       expect(result).toBe("needs-apply")
     } finally {
       rmSync(dir, { recursive: true })

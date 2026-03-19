@@ -15,6 +15,32 @@ import { hexHashesEqual, localSha256, sha256String } from "./fileHelpers.js"
 
 export type { BlockOptions } from "./fileExtra.js"
 
+type FileOwnership = {
+  group: string
+  mode: string
+  owner: string
+}
+
+async function readOwnership(ssh: SshConnection, remotePath: string): Promise<FileOwnership> {
+  const raw = await ssh.output(`stat -c '%a %U %G' ${shellQuote(remotePath)}`)
+  const [mode = "", owner = "", group = ""] = raw.trim().split(" ")
+  return { group, mode, owner }
+}
+
+function ownershipMatches(
+  current: FileOwnership,
+  options?: { mode?: string; owner?: string }
+): boolean {
+  if (options?.mode != null && current.mode !== options.mode.replace(/^0+/v, "")) return false
+  if (options?.owner == null) return true
+
+  const expectsGroup = options.owner.includes(":")
+  const [expectedOwner, expectedGroup = ""] = options.owner.split(":", 2)
+  if (current.owner !== expectedOwner) return false
+  if (expectsGroup && current.group !== expectedGroup) return false
+  return true
+}
+
 /**
  * Modules for managing remote files and directories.
  *
@@ -85,7 +111,10 @@ export const file = {
 
         const remoteHash = await ssh.sha256(remotePath)
         const localHash = await localSha256(localPath)
-        return hexHashesEqual(remoteHash, localHash) ? "ok" : NEEDS_APPLY
+        if (!hexHashesEqual(remoteHash, localHash)) return NEEDS_APPLY
+
+        const metadataMatches = ownershipMatches(await readOwnership(ssh, remotePath), options)
+        return metadataMatches ? "ok" : NEEDS_APPLY
       },
       name: `file.copy: ${remotePath}`,
     }
@@ -122,7 +151,11 @@ export const file = {
       },
       async check(ssh: null | SshConnection): Promise<"needs-apply" | "ok"> {
         if (!ssh) return NEEDS_APPLY
-        return (await ssh.test(`[ -d ${shellQuote(remotePath)} ]`)) ? "ok" : NEEDS_APPLY
+        const exists = await ssh.test(`[ -d ${shellQuote(remotePath)} ]`)
+        if (!exists) return NEEDS_APPLY
+
+        const metadataMatches = ownershipMatches(await readOwnership(ssh, remotePath), options)
+        return metadataMatches ? "ok" : NEEDS_APPLY
       },
       name: `file.directory: ${remotePath}`,
     }
