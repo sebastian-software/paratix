@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto"
+import { createHash, createHmac } from "node:crypto"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 
 import {
@@ -45,6 +45,16 @@ function makeKeyBuffer(algo: string, keyData: Buffer = Buffer.from("fake-key-dat
   const lengthBuf = Buffer.alloc(4)
   lengthBuf.writeUInt32BE(algoBytes.length)
   return Buffer.concat([lengthBuf, algoBytes, keyData])
+}
+
+function makeHashedHostPattern(
+  host: string,
+  port = 22,
+  salt = Buffer.from("known-hosts-salt")
+): string {
+  const hostLabel = port === 22 ? host : `[${host}]:${port}`
+  const hostHash = createHmac("sha1", salt).update(hostLabel).digest("base64")
+  return `|1|${salt.toString("base64")}|${hostHash}`
 }
 
 // ---------------------------------------------------------------------------
@@ -96,14 +106,30 @@ describe("parseKnownHosts", () => {
     expect(entries).toHaveLength(1)
   })
 
-  it("skips hashed hostnames starting with |1|", () => {
+  it("parses hashed hostnames starting with |1|", () => {
     const key = makeKeyBuffer("ssh-ed25519")
     const base64Key = key.toString("base64")
-    const content = `|1|abc123|def456xyz ssh-ed25519 ${base64Key}`
+    const content = `${makeHashedHostPattern("example.com")} ssh-ed25519 ${base64Key}`
 
     const entries = parseKnownHosts(content)
 
-    expect(entries).toHaveLength(0)
+    expect(entries).toHaveLength(1)
+    expect(entries[0]?.host).toMatch(/^\|1\|/v)
+  })
+
+  it("parses @revoked entries instead of skipping them", () => {
+    const key = makeKeyBuffer("ssh-ed25519")
+    const base64Key = key.toString("base64")
+    const content = `@revoked example.com ssh-ed25519 ${base64Key}`
+
+    const entries = parseKnownHosts(content)
+
+    expect(entries).toHaveLength(1)
+    expect(entries[0]).toMatchObject({
+      algo: "ssh-ed25519",
+      host: "example.com",
+      marker: "@revoked",
+    })
   })
 
   it("splits comma-separated hosts into separate entries", () => {
@@ -159,15 +185,17 @@ describe("parseKnownHosts", () => {
     const content = [
       "# Known hosts file",
       "",
-      `|1|abc123|def456 ssh-ed25519 AAAA`,
+      `${makeHashedHostPattern("hashed.example")} ssh-ed25519 ${base64Key}`,
       `github.com ssh-ed25519 ${base64Key}`,
+      `@revoked revoked.example ssh-ed25519 ${base64Key}`,
       "",
     ].join("\n")
 
     const entries = parseKnownHosts(content)
 
-    expect(entries).toHaveLength(1)
-    expect(entries[0]?.host).toBe("github.com")
+    expect(entries).toHaveLength(3)
+    expect(entries[1]?.host).toBe("github.com")
+    expect(entries[2]?.marker).toBe("@revoked")
   })
 })
 
@@ -192,6 +220,14 @@ describe("lookupHostKey", () => {
   it("finds key for [host]:port format on non-standard port", () => {
     const result = lookupHostKey(entries, "example.com", 2222)
     expect(result).toStrictEqual(rsaKey)
+  })
+
+  it("finds key for a hashed host entry", () => {
+    const hashedEntries = [
+      { algo: "ssh-ed25519", host: makeHashedHostPattern("example.com"), key: edKey },
+    ]
+    const result = lookupHostKey(hashedEntries, "example.com", 22)
+    expect(result).toStrictEqual(edKey)
   })
 
   it("returns null when host is not found", () => {
@@ -455,6 +491,18 @@ describe("buildHostVerifier", () => {
     expect(result).toBe(true)
   })
 
+  it("mode 'accept-new' with hashed known host and correct key: returns true without appending", () => {
+    readFileSyncMock.mockReturnValue(
+      `${makeHashedHostPattern("example.com")} ssh-ed25519 ${ed25519Key.toString("base64")}\n`
+    )
+
+    const { hostVerifier } = buildHostVerifier("accept-new", "example.com", 22)
+    expect(hostVerifier).toBeDefined()
+
+    expect(hostVerifier!(ed25519Key)).toBe(true)
+    expect(appendFileMock).not.toHaveBeenCalled()
+  })
+
   it("mode 'accept-new' with known host and wrong key: hostVerifier throws Error", () => {
     readFileSyncMock.mockReturnValue(makeKnownHostsContent("example.com", 22, ed25519Key))
 
@@ -464,6 +512,18 @@ describe("buildHostVerifier", () => {
     const differentKey = makeKeyBuffer("ssh-ed25519", Buffer.from("different-key-material"))
     expect(() => hostVerifier!(differentKey)).toThrow(/HOST KEY VERIFICATION FAILED/v)
     expect(() => hostVerifier!(differentKey)).toThrow("example.com")
+  })
+
+  it("mode 'accept-new' with hashed known host and changed key: throws verification error", () => {
+    readFileSyncMock.mockReturnValue(
+      `${makeHashedHostPattern("example.com")} ssh-ed25519 ${ed25519Key.toString("base64")}\n`
+    )
+
+    const { hostVerifier } = buildHostVerifier("accept-new", "example.com", 22)
+    expect(hostVerifier).toBeDefined()
+
+    const differentKey = makeKeyBuffer("ssh-ed25519", Buffer.from("different-key-material"))
+    expect(() => hostVerifier!(differentKey)).toThrow(/HOST KEY VERIFICATION FAILED/v)
   })
 
   it("mode 'yes' with known host and correct key: hostVerifier returns true", () => {
@@ -494,6 +554,29 @@ describe("buildHostVerifier", () => {
 
     const differentKey = makeKeyBuffer("ssh-ed25519", Buffer.from("wrong-key-material"))
     expect(() => hostVerifier!(differentKey)).toThrow(/HOST KEY VERIFICATION FAILED/v)
+  })
+
+  it("mode 'yes' with @revoked host key: throws revoked error", () => {
+    readFileSyncMock.mockReturnValue(
+      `@revoked example.com ssh-ed25519 ${ed25519Key.toString("base64")}\n`
+    )
+
+    const { hostVerifier } = buildHostVerifier("yes", "example.com", 22)
+    expect(hostVerifier).toBeDefined()
+
+    expect(() => hostVerifier!(ed25519Key)).toThrow(/revoked/v)
+  })
+
+  it("mode 'accept-new' with @revoked host key: throws revoked error instead of accepting", () => {
+    readFileSyncMock.mockReturnValue(
+      `@revoked example.com ssh-ed25519 ${ed25519Key.toString("base64")}\n`
+    )
+
+    const { hostVerifier } = buildHostVerifier("accept-new", "example.com", 22)
+    expect(hostVerifier).toBeDefined()
+
+    expect(() => hostVerifier!(ed25519Key)).toThrow(/revoked/v)
+    expect(appendFileMock).not.toHaveBeenCalled()
   })
 
   it("mode 'accept-new': writes WARNING to stderr when appendHostKey fails", async () => {

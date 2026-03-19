@@ -1,4 +1,4 @@
-import { createHash, timingSafeEqual } from "node:crypto"
+import { createHash, createHmac, timingSafeEqual } from "node:crypto"
 import { readFileSync } from "node:fs"
 import { appendFile, mkdir } from "node:fs/promises"
 import { homedir } from "node:os"
@@ -23,6 +23,8 @@ export type KnownHostEntry = {
   host: string
   /** Raw public key bytes decoded from the Base64 field. */
   key: Buffer
+  /** Optional OpenSSH marker such as `@revoked`. */
+  marker?: string
 }
 
 /** Minimum number of whitespace-separated fields in a valid known_hosts line. */
@@ -33,6 +35,7 @@ const DEFAULT_SSH_PORT = 22
 
 /** Byte size of the uint32 length prefix in SSH wire format. */
 const UINT32_SIZE = 4
+const HASHED_HOST_PARTS = 4
 
 /**
  * In-memory cache for accepted host keys that could not be persisted to disk.
@@ -47,12 +50,24 @@ export function clearHostKeyCache(): void {
   inMemoryHostKeys.clear()
 }
 
+function parseKnownHostsLine(line: string): KnownHostEntry[] {
+  const parts = line.split(/\s+/v)
+  const offset = parts[0]?.startsWith("@") ? 1 : 0
+  if (parts.length < MIN_KNOWN_HOSTS_FIELDS + offset) return []
+
+  const marker = offset === 1 ? parts[0] : undefined
+  const hostsPart = parts[offset]
+  const algo = parts[offset + 1]
+  const base64Key = parts[offset + 2]
+
+  const key = Buffer.from(base64Key, "base64")
+  return hostsPart.split(",").map((host) => ({ algo, host, key, marker }))
+}
+
 /**
  * Parse the contents of an OpenSSH `known_hosts` file into structured entries.
  *
  * - Blank lines and comment lines (starting with `#`) are skipped.
- * - Hashed hostnames (starting with `|1|`) are skipped because they cannot be
- *   matched without the original hostname.
  * - Hosts separated by commas produce one entry per hostname.
  *
  * @param content - The raw file content.
@@ -62,19 +77,8 @@ export function parseKnownHosts(content: string): KnownHostEntry[] {
   const entries: KnownHostEntry[] = []
   for (const raw of content.split("\n")) {
     const line = raw.trim()
-    if (line.length === 0 || line.startsWith("#") || line.startsWith("|1|") || line.startsWith("@"))
-      continue
-
-    const parts = line.split(/\s+/v)
-    if (parts.length < MIN_KNOWN_HOSTS_FIELDS) continue
-
-    // eslint-disable-next-line @typescript-eslint/no-unsafe-type-assertion -- length checked above
-    const [hostsPart, algo, base64Key] = parts as [string, string, string]
-    const key = Buffer.from(base64Key, "base64")
-
-    for (const host of hostsPart.split(",")) {
-      entries.push({ algo, host, key })
-    }
+    if (line.length === 0 || line.startsWith("#")) continue
+    entries.push(...parseKnownHostsLine(line))
   }
   return entries
 }
@@ -96,21 +100,94 @@ function formatHostNeedle(host: string, port: number): string {
 /**
  * Look up a host key in the parsed known_hosts entries.
  *
- * @param entries - Parsed known_hosts entries.
- * @param host - The hostname or IP to look up.
- * @param port - The SSH port.
- * @returns The key buffer if found, otherwise `null`.
+ * @param pattern - The stored OpenSSH hashed host pattern.
+ * @param needle - The formatted host lookup needle.
+ * @returns Whether the hashed entry matches the target host.
  */
+function matchesHashedHost(pattern: string, needle: string): boolean {
+  if (!pattern.startsWith("|1|")) return false
+
+  const parts = pattern.split("|")
+  if (parts.length !== HASHED_HOST_PARTS || parts[1] !== "1") return false
+
+  const salt = Buffer.from(parts[2] ?? "", "base64")
+  const expectedHash = Buffer.from(parts[3] ?? "", "base64")
+  if (salt.length === 0 || expectedHash.length === 0) return false
+
+  const actualHash = createHmac("sha1", salt).update(needle).digest()
+  return actualHash.length === expectedHash.length && timingSafeEqual(actualHash, expectedHash)
+}
+
+function findMatchingEntries(
+  entries: KnownHostEntry[],
+  host: string,
+  port: number
+): KnownHostEntry[] {
+  const needle = formatHostNeedle(host, port)
+  return entries.filter((entry) => entry.host === needle || matchesHashedHost(entry.host, needle))
+}
+
+function lookupHostEntry(
+  entries: KnownHostEntry[],
+  host: string,
+  port: number
+): KnownHostEntry | null {
+  const match = findMatchingEntries(entries, host, port).find(
+    (entry) => entry.marker !== "@revoked"
+  )
+  return match ?? null
+}
+
+function findRevokedEntry(entries: KnownHostEntry[], key: Buffer): KnownHostEntry | undefined {
+  return entries.find(
+    (entry) =>
+      entry.marker === "@revoked" &&
+      entry.key.length === key.length &&
+      timingSafeEqual(entry.key, key)
+  )
+}
+
+function throwHostKeyMismatch(host: string, presentedKey: Buffer, existingKey?: Buffer): never {
+  const presentedAlgo = extractAlgoFromKey(presentedKey)
+  const knownHostsDetails =
+    existingKey == null
+      ? "remote host key does not match the key in known_hosts. "
+      : `remote host key (${presentedAlgo}) does not match the key in known_hosts (${extractAlgoFromKey(existingKey)}). `
+  throw new HostKeyVerificationError(
+    `HOST KEY VERIFICATION FAILED for ${host}: ${knownHostsDetails}` +
+      "This could indicate a man-in-the-middle attack."
+  )
+}
+
+function verifyHostKeyAgainstKnownEntries(parameters: {
+  cachedKey: Buffer | null
+  fileEntries: KnownHostEntry[]
+  host: string
+  key: Buffer
+}): boolean {
+  const { cachedKey, fileEntries, host, key } = parameters
+  const revokedKey = findRevokedEntry(fileEntries, key)
+  if (revokedKey != null) {
+    throw new HostKeyVerificationError(
+      `HOST KEY VERIFICATION FAILED for ${host}: remote host key (${extractAlgoFromKey(revokedKey.key)}) is marked as revoked in known_hosts.`
+    )
+  }
+
+  const existingKey = fileEntries.find((entry) => entry.marker !== "@revoked")?.key ?? cachedKey
+  if (existingKey != null) {
+    if (existingKey.length === key.length && timingSafeEqual(existingKey, key)) return true
+    throwHostKeyMismatch(host, key, existingKey)
+  }
+  if (fileEntries.length > 0) throwHostKeyMismatch(host, key)
+  return false
+}
+
 export function lookupHostKey(
   entries: KnownHostEntry[],
   host: string,
   port: number
 ): Buffer | null {
-  const needle = formatHostNeedle(host, port)
-  for (const entry of entries) {
-    if (entry.host === needle) return entry.key
-  }
-  return null
+  return lookupHostEntry(entries, host, port)?.key ?? null
 }
 
 /**
@@ -255,21 +332,12 @@ export function buildHostVerifier(
   if (mode === "no") return {}
 
   const entries = loadKnownHostEntries()
-  const fileKey = lookupHostKey(entries, host, port)
+  const fileEntries = findMatchingEntries(entries, host, port)
+  const cachedKey = inMemoryHostKeys.get(formatHostNeedle(host, port)) ?? null
 
   const result: { hostVerifier: (key: Buffer) => boolean; pendingPersist?: Promise<void> } = {
     hostVerifier(key: Buffer): boolean {
-      const existingKey = fileKey ?? inMemoryHostKeys.get(formatHostNeedle(host, port)) ?? null
-      if (existingKey != null) {
-        if (existingKey.length === key.length && timingSafeEqual(existingKey, key)) return true
-        const presentedAlgo = extractAlgoFromKey(key)
-        const existingAlgo = extractAlgoFromKey(existingKey)
-        throw new HostKeyVerificationError(
-          `HOST KEY VERIFICATION FAILED for ${host}: ` +
-            `remote host key (${presentedAlgo}) does not match the key in known_hosts (${existingAlgo}). ` +
-            "This could indicate a man-in-the-middle attack."
-        )
-      }
+      if (verifyHostKeyAgainstKnownEntries({ cachedKey, fileEntries, host, key })) return true
       if (mode === "yes") {
         throw new HostKeyVerificationError(
           `Host key for ${host} not found in known_hosts. ` +
