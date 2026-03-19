@@ -31,7 +31,7 @@ export async function resolveEnvironment(
  * Blank lines and lines starting with `#` are ignored.
  * Surrounding single or double quotes are stripped from values.
  * Double-quoted values support escape sequences (`\\n`, `\\"`, `\\\\`).
- * Unquoted values support inline comments (`value # comment`).
+ * Unquoted values support inline comments (`value # comment`, `value\t# comment`).
  *
  * @param filePath - Absolute path to the `.env` file.
  * @returns The parsed env map.
@@ -69,8 +69,8 @@ function processValue(raw: string): string {
     // Single-quoted: strip quotes, keep value literal
     return raw.slice(1, -1)
   }
-  // Unquoted: strip inline comments (space + #)
-  const commentIndex = raw.indexOf(" #")
+  // Unquoted: strip inline comments after any whitespace before #
+  const commentIndex = raw.search(/\s#/v)
   return commentIndex === -1 ? raw : raw.slice(0, commentIndex).trimEnd()
 }
 

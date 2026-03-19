@@ -139,6 +139,12 @@ describe("loadDotEnvironment", () => {
     expect(env.KEY).toBe("value")
   })
 
+  it("strips inline comment with tab whitespace before # from unquoted secret value", async () => {
+    writeFileSync(tmpFile, "SECRET=tabbed-secret\t# inline comment\n")
+    const env = await loadDotEnvironment(tmpFile)
+    expect(env.SECRET).toBe("tabbed-secret")
+  })
+
   // No comment stripping or escape processing in quoted values
   it("keeps # and surrounding text as literal content in double-quoted value", async () => {
     writeFileSync(tmpFile, 'KEY="value # not a comment"\n')
