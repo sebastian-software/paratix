@@ -254,6 +254,11 @@ describe("generateTotpCode — error handling", () => {
     expect(() => generateTotpCode(uri)).toThrow(/period/v)
   })
 
+  it("throws when period contains trailing non-digits", () => {
+    const uri = `otpauth://totp/Test?secret=${RFC_SECRET_BASE32}&period=30abc`
+    expect(() => generateTotpCode(uri)).toThrow(/period/v)
+  })
+
   // digits validation
   it("throws when digits=0", () => {
     const uri = `otpauth://totp/Test?secret=${RFC_SECRET_BASE32}&digits=0`
@@ -272,6 +277,11 @@ describe("generateTotpCode — error handling", () => {
 
   it("throws when digits is non-numeric (NaN)", () => {
     const uri = `otpauth://totp/Test?secret=${RFC_SECRET_BASE32}&digits=abc`
+    expect(() => generateTotpCode(uri)).toThrow(/digits/v)
+  })
+
+  it("throws when digits contains trailing non-digits", () => {
+    const uri = `otpauth://totp/Test?secret=${RFC_SECRET_BASE32}&digits=6xyz`
     expect(() => generateTotpCode(uri)).toThrow(/digits/v)
   })
 

@@ -119,6 +119,25 @@ function parseAlgorithm(url: URL): string {
 }
 
 /**
+ * Parse a decimal integer parameter from the otpauth URI without accepting trailing junk.
+ *
+ * @param rawValue - Raw query parameter value.
+ * @param parameterName - Parameter name used in validation errors.
+ * @returns The parsed integer.
+ * @throws {Error} If the value is not a decimal integer.
+ */
+function parseDecimalInteger(rawValue: string, parameterName: "digits" | "period"): number {
+  if (!/^\d+$/v.test(rawValue)) {
+    if (parameterName === "period") {
+      throw new Error("TOTP 'period' must be a positive integer")
+    }
+    throw new Error("TOTP 'digits' must be an integer between 1 and 8")
+  }
+
+  return Number.parseInt(rawValue, DECIMAL_BASE)
+}
+
+/**
  * Validate that a URI is an otpauth TOTP URI.
  *
  * @param url - The parsed URI to validate.
@@ -153,13 +172,13 @@ function parseTotpParameters(otpauthUri: string): {
     throw new Error("TOTP URI is missing the 'secret' parameter")
   }
 
-  const period = Number.parseInt(
+  const period = parseDecimalInteger(
     url.searchParams.get("period") ?? String(DEFAULT_PERIOD),
-    DECIMAL_BASE
+    "period"
   )
-  const digits = Number.parseInt(
+  const digits = parseDecimalInteger(
     url.searchParams.get("digits") ?? String(DEFAULT_DIGITS),
-    DECIMAL_BASE
+    "digits"
   )
 
   if (!Number.isFinite(period) || period <= 0) {
