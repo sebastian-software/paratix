@@ -184,6 +184,21 @@ describe("generateTotpCode — algorithm parameter", () => {
 // ---------------------------------------------------------------------------
 
 describe("generateTotpCode — error handling", () => {
+  it("throws when the URI uses otpauth://hotp instead of otpauth://totp", () => {
+    const uri = `otpauth://hotp/Test?secret=${RFC_SECRET_BASE32}`
+    expect(() => generateTotpCode(uri)).toThrow(/totp/v)
+  })
+
+  it("throws when the URI uses a non-otpauth scheme", () => {
+    const uri = `https://totp/Test?secret=${RFC_SECRET_BASE32}`
+    expect(() => generateTotpCode(uri)).toThrow(/otpauth/v)
+  })
+
+  it("throws when the URI uses a foreign custom scheme", () => {
+    const uri = `steam://totp/Test?secret=${RFC_SECRET_BASE32}`
+    expect(() => generateTotpCode(uri)).toThrow(/otpauth/v)
+  })
+
   it("throws when the secret parameter is missing", () => {
     const uri = "otpauth://totp/Test"
     expect(() => generateTotpCode(uri)).toThrow(/secret/v)

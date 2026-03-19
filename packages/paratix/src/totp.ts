@@ -119,6 +119,21 @@ function parseAlgorithm(url: URL): string {
 }
 
 /**
+ * Validate that a URI is an otpauth TOTP URI.
+ *
+ * @param url - The parsed URI to validate.
+ * @throws {Error} If the scheme is not `otpauth://` or the type is not `totp`.
+ */
+function validateTotpUri(url: URL): void {
+  if (url.protocol !== "otpauth:") {
+    throw new Error("TOTP URI must use the otpauth:// scheme")
+  }
+  if (url.hostname !== "totp") {
+    throw new Error("TOTP URI must use the otpauth://totp/... type")
+  }
+}
+
+/**
  * Parse and validate TOTP parameters from an otpauth URI.
  *
  * @param otpauthUri - The otpauth URI to parse.
@@ -131,6 +146,7 @@ function parseTotpParameters(otpauthUri: string): {
   secret: string
 } {
   const url = new URL(otpauthUri)
+  validateTotpUri(url)
 
   const secret = url.searchParams.get("secret")
   if (secret == null || secret === "") {
