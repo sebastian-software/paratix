@@ -95,17 +95,24 @@ export type StreamOutputParameters = {
   options: ExecOptions
   reject: (reason: Error) => void
   resolve: (value: ExecResult) => void
-  secrets?: string[]
+  secrets?: SecretSource[]
   stream: ClientChannel
   timer: ReturnType<typeof setTimeout>
 }
 
+export type SecretSource = (() => string) | string
+
 /** Placeholder used when redacting secrets from output. */
 const REDACTED = "[REDACTED]"
 
-function getSecretVariants(secrets: string[]): string[] {
+function resolveSecret(secret: SecretSource): string {
+  return typeof secret === "function" ? secret() : secret
+}
+
+function getSecretVariants(secrets: SecretSource[]): string[] {
   const variants = new Set<string>()
-  for (const secret of secrets) {
+  for (const source of secrets) {
+    const secret = resolveSecret(source)
     if (secret.length === 0) continue
     if (secret.includes(REDACTED)) {
       throw new Error(`Secret must not contain the redaction placeholder "${REDACTED}"`)
@@ -124,7 +131,32 @@ function getSecretVariants(secrets: string[]): string[] {
   return [...variants].sort((a, b) => b.length - a.length)
 }
 
-export function maskSecrets(text: string, secrets: string[]): string {
+function createLazyVariantResolver(secrets: SecretSource[]): {
+  getMaxLength: () => number
+  mask: (text: string) => string
+} {
+  let variants: null | string[] = null
+
+  const getVariants = (): string[] => {
+    variants ??= getSecretVariants(secrets)
+    return variants
+  }
+
+  return {
+    getMaxLength(): number {
+      return Math.max(0, ...getVariants().map((variant) => variant.length))
+    },
+    mask(text: string): string {
+      let masked = text
+      for (const variant of getVariants()) {
+        masked = masked.replaceAll(variant, REDACTED)
+      }
+      return masked
+    },
+  }
+}
+
+export function maskSecrets(text: string, secrets: SecretSource[]): string {
   let masked = text
   const variants = getSecretVariants(secrets)
   for (const variant of variants) {
@@ -144,21 +176,13 @@ export function maskSecrets(text: string, secrets: string[]): string {
  */
 export function createStreamMasker(
   write: (text: string) => void,
-  secrets: string[]
+  secrets: SecretSource[]
 ): { flush: () => void; push: (chunk: string) => void } {
-  const variants = getSecretVariants(secrets)
-  const maxLength = Math.max(0, ...variants.map((variant) => variant.length))
-  const overlap = Math.max(0, maxLength - 1)
-
-  if (overlap === 0) {
-    return {
-      flush(): void {
-        /* nothing buffered */
-      },
-      push(chunk: string): void {
-        write(maskSecrets(chunk, secrets))
-      },
-    }
+  const resolver = createLazyVariantResolver(secrets)
+  let overlap: null | number = null
+  const getOverlap = (): number => {
+    overlap ??= Math.max(0, resolver.getMaxLength() - 1)
+    return overlap
   }
 
   let pending = ""
@@ -166,24 +190,29 @@ export function createStreamMasker(
   return {
     flush(): void {
       if (pending.length > 0) {
-        write(maskSecrets(pending, secrets))
+        write(resolver.mask(pending))
         pending = ""
       }
     },
     push(chunk: string): void {
+      const currentOverlap = getOverlap()
+      if (currentOverlap === 0) {
+        write(resolver.mask(chunk))
+        return
+      }
       pending += chunk
-      if (pending.length <= overlap) return
+      if (pending.length <= currentOverlap) return
       // Mask the whole buffer first so secrets fully contained in
       // pending are replaced before the split.  The overlap is then
       // taken from the *masked* result — safe because maskSecrets()
       // rejects any secret that contains the redaction placeholder.
-      const masked = maskSecrets(pending, secrets)
-      if (masked.length <= overlap) {
+      const masked = resolver.mask(pending)
+      if (masked.length <= currentOverlap) {
         pending = masked
         return
       }
-      write(masked.slice(0, -overlap))
-      pending = masked.slice(-overlap)
+      write(masked.slice(0, -currentOverlap))
+      pending = masked.slice(-currentOverlap)
     },
   }
 }

@@ -319,6 +319,20 @@ describe("maskSecrets", () => {
     const escapedSecret = shellQuote(secret)
     expect(maskSecrets(`command uses ${escapedSecret}`, [secret])).toBe("command uses [REDACTED]")
   })
+
+  it("resolves lazy secret sources only when masking is needed", () => {
+    const resolveSecret = vi.fn(() => "hunter2")
+
+    const masker = createStreamMasker(() => {
+      /* noop */
+    }, [resolveSecret])
+
+    expect(resolveSecret).not.toHaveBeenCalled()
+
+    masker.push("plain text")
+
+    expect(resolveSecret).toHaveBeenCalledOnce()
+  })
 })
 
 // ---------------------------------------------------------------------------

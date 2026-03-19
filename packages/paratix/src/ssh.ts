@@ -13,6 +13,7 @@ import { sftpDownload, sftpUpload } from "./sftp.js"
 import {
   collectStreamOutput,
   maskSecrets,
+  type SecretSource,
   shellQuote,
   tryConnectOnPort,
   validateMode,
@@ -51,9 +52,9 @@ export class SshConnectionImpl implements SshConnection {
    *
    * **Limitations:** Buffer zeroing in JavaScript/V8 only reduces the window
    * for potential memory leaks — it cannot eliminate them entirely. The GC may
-   * create internal copies, and unavoidable `.toString()` calls (e.g. for
-   * `maskSecrets`) produce temporary immutable strings on the heap. This is a
-   * best-effort mitigation, not a guarantee.
+   * create internal copies. The masking pipeline only materializes a string
+   * from this buffer on actual output/error paths. This is a best-effort
+   * mitigation, not a guarantee.
    */
   private cachedSudoPassword: Buffer | null = null
   private client: Client | null = null
@@ -380,9 +381,10 @@ export class SshConnectionImpl implements SshConnection {
     return `${pairs.join(" ")} `
   }
 
-  private buildSecrets(extra?: string[]): string[] {
-    const pw = this.cachedSudoPassword?.toString("utf8") ?? null
-    return [...(pw == null ? [] : [pw]), ...(extra ?? [])]
+  private buildSecrets(extra?: string[]): SecretSource[] {
+    const cachedPasswordSecret =
+      this.cachedSudoPassword == null ? [] : [() => this.cachedSudoPassword?.toString("utf8") ?? ""]
+    return [...cachedPasswordSecret, ...(extra ?? [])]
   }
 
   private async cleanupRemoteTempFile(remotePath: string): Promise<void> {

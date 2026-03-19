@@ -926,6 +926,52 @@ describe("SshConnectionImpl", () => {
       expect(execSpy).toHaveBeenCalledOnce()
     })
 
+    it("does not materialize cached sudo passwords on successful exec calls without output", async () => {
+      const passwordBuffer = Buffer.from("my-sudo-pass")
+      const toStringSpy = vi.spyOn(passwordBuffer, "toString")
+
+      const execSpy = vi.fn().mockImplementation((_command: string, callback: ExecCallback) => {
+        const stream = makeStream()
+        callback(undefined, stream)
+        stream.emit("close", 0)
+      })
+      const client = makeClientWithExecSpy(execSpy)
+      const ssh = makeConnectedSsh(client, { user: "deploy" })
+      ;(ssh as unknown as Record<string, unknown>).cachedSudoPassword = passwordBuffer
+
+      await ssh.exec("whoami")
+
+      expect(toStringSpy).not.toHaveBeenCalled()
+    })
+
+    it("materializes cached sudo passwords lazily on timeout masking paths only", async () => {
+      vi.useFakeTimers()
+
+      const passwordBuffer = Buffer.from("my-sudo-pass")
+      const toStringSpy = vi.spyOn(passwordBuffer, "toString")
+
+      const execSpy = vi.fn().mockImplementation((_command: string, callback: ExecCallback) => {
+        const stream = makeStream()
+        callback(undefined, stream)
+      })
+      const client = makeClientWithExecSpy(execSpy)
+      const ssh = makeConnectedSsh(client, { user: "deploy" })
+      ;(ssh as unknown as Record<string, unknown>).cachedSudoPassword = passwordBuffer
+
+      const execPromise = ssh.exec("printf %s 'my-sudo-pass'", { timeout: 5000 })
+      execPromise.catch(() => {
+        /* handled below */
+      })
+
+      expect(toStringSpy).not.toHaveBeenCalled()
+
+      await vi.advanceTimersByTimeAsync(5001)
+
+      const error = await execPromise.catch((error: unknown) => error as Error)
+      expect(error.message).toContain("[REDACTED]")
+      expect(toStringSpy).toHaveBeenCalledOnce()
+    })
+
     it("registers stream listeners (collectStreamOutput) before writing sudo password to stdin (regression: race condition)", async () => {
       // Root cause: stream.write(sudoPassword) was called before collectStreamOutput,
       // so listeners were registered after the password was already written.
