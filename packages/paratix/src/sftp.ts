@@ -1,7 +1,7 @@
 import type { Readable, Writable } from "node:stream"
 import type { Client, SFTPWrapper } from "ssh2"
 
-import { createReadStream, createWriteStream } from "node:fs"
+import { createReadStream, createWriteStream, unlinkSync } from "node:fs"
 
 /** Default timeout for SFTP transfers in milliseconds (2 minutes). */
 export const SFTP_TIMEOUT = 120_000
@@ -84,9 +84,19 @@ export async function sftpDownload(
   timeout = SFTP_TIMEOUT
 ): Promise<void> {
   return new Promise((resolve, reject) => {
+    const rejectWithCleanup = (reason: Error): void => {
+      try {
+        // eslint-disable-next-line security/detect-non-literal-fs-filename
+        unlinkSync(localPath)
+      } catch {
+        // Best effort cleanup: preserve the original transfer error.
+      }
+      reject(reason)
+    }
+
     client.sftp((error, sftp) => {
       if (error) {
-        reject(error)
+        rejectWithCleanup(error)
         return
       }
 
@@ -96,7 +106,7 @@ export async function sftpDownload(
 
       wireStreams({
         readStream,
-        reject,
+        reject: rejectWithCleanup,
         resolve,
         sftp,
         timeout,

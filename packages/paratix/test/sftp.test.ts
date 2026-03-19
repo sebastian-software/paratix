@@ -1,7 +1,13 @@
 import type { Client, SFTPWrapper } from "ssh2"
 
 import { EventEmitter } from "node:events"
-import { createReadStream, createWriteStream, type ReadStream, type WriteStream } from "node:fs"
+import {
+  createReadStream,
+  createWriteStream,
+  type ReadStream,
+  unlinkSync,
+  type WriteStream,
+} from "node:fs"
 import { afterEach, describe, expect, it, vi } from "vitest"
 
 import { sftpDownload, sftpUpload } from "../src/sftp.js"
@@ -11,6 +17,7 @@ import { sftpDownload, sftpUpload } from "../src/sftp.js"
 vi.mock("node:fs", () => ({
   createReadStream: vi.fn(),
   createWriteStream: vi.fn(),
+  unlinkSync: vi.fn(),
 }))
 
 // ---------------------------------------------------------------------------
@@ -133,6 +140,21 @@ describe("sftpDownload", () => {
 
     // Assert — promise must reject, not hang
     await expect(promise).rejects.toThrow("local write stream broke")
+  })
+
+  it("removes the incomplete local file when the download fails", async () => {
+    const { sftp } = makeSftpSession()
+    const client = makeClientMock(sftp)
+
+    const localWriteStream = new EventEmitter()
+    vi.mocked(createWriteStream).mockReturnValue(localWriteStream as unknown as WriteStream)
+
+    const promise = sftpDownload(client, "/remote/file.txt", "/local/file.txt")
+    localWriteStream.emit("error", new Error("local write stream broke"))
+
+    await expect(promise).rejects.toThrow("local write stream broke")
+    expect(vi.mocked(unlinkSync)).toHaveBeenCalledOnce()
+    expect(vi.mocked(unlinkSync)).toHaveBeenCalledWith("/local/file.txt")
   })
 
   it("closes the sftp session when the local writeStream emits an error", async () => {
