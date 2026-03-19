@@ -109,6 +109,30 @@ describe("server", () => {
     expect(() => server(validConfig() as Parameters<typeof server>[0])).not.toThrow()
   })
 
+  it("accepts expectedHostFingerprint and expectedHostPublicKey", () => {
+    expect(() =>
+      server(
+        validConfig({
+          ssh: {
+            ...validSsh,
+            expectedHostFingerprint: "SHA256:trusted-fingerprint",
+            expectedHostPublicKey: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAItrusted",
+          },
+        }) as Parameters<typeof server>[0]
+      )
+    ).not.toThrow()
+  })
+
+  it("throws when expectedHostFingerprint is an empty string", () => {
+    expect(() =>
+      server(
+        validConfig({
+          ssh: { ...validSsh, expectedHostFingerprint: "" },
+        }) as Parameters<typeof server>[0]
+      )
+    ).toThrow("ServerDefinition: ssh.expectedHostFingerprint must not be an empty string")
+  })
+
   it("accepts null strictHostKeyChecking (treated as absent)", () => {
     expect(() =>
       server(

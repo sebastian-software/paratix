@@ -90,6 +90,25 @@ function collectArrayErrors(
  * @param value - The top-level object containing the `ssh` property.
  * @param errors - Accumulator for error messages.
  */
+/**
+ * Collect string validation errors for an optional SSH field when present.
+ *
+ * @param ssh - The narrowed `ssh` object to validate.
+ * @param errors - Accumulator for human-readable validation errors.
+ * @param parameters - The field metadata passed through to `collectStringErrors`.
+ * @param parameters.key - The SSH property name on the config object.
+ * @param parameters.label - The human-readable property label for error messages.
+ */
+function collectOptionalSshStringErrors(
+  ssh: Record<string, unknown>,
+  errors: string[],
+  parameters: { key: string; label: string }
+): void {
+  if (parameters.key in ssh && ssh[parameters.key] !== undefined) {
+    collectStringErrors(ssh, parameters, errors)
+  }
+}
+
 // eslint-disable-next-line max-statements
 function collectSshErrors(value: Record<string, unknown>, errors: string[]): void {
   if (!("ssh" in value)) {
@@ -111,6 +130,14 @@ function collectSshErrors(value: Record<string, unknown>, errors: string[]): voi
     collectStringErrors(ssh, { key: "privateKey", label: "ssh.privateKey" }, errors)
   }
   collectStringErrors(ssh, { key: "user", label: "ssh.user" }, errors)
+  collectOptionalSshStringErrors(ssh, errors, {
+    key: "expectedHostFingerprint",
+    label: "ssh.expectedHostFingerprint",
+  })
+  collectOptionalSshStringErrors(ssh, errors, {
+    key: "expectedHostPublicKey",
+    label: "ssh.expectedHostPublicKey",
+  })
   if ("strictHostKeyChecking" in ssh && ssh.strictHostKeyChecking != null) {
     const valid = ["accept-new", "no", "yes"]
     if (

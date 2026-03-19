@@ -424,6 +424,34 @@ describe("collectDefinitionErrors", () => {
     expect(errors).toStrictEqual([])
   })
 
+  it("returns no error when ssh.expectedHostFingerprint and ssh.expectedHostPublicKey are strings", () => {
+    const errors = collectDefinitionErrors({
+      host: "example.com",
+      name: "test",
+      run: ["echo hello"],
+      ssh: {
+        expectedHostFingerprint: "SHA256:trusted-fingerprint",
+        expectedHostPublicKey: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAItrusted",
+        ports: [22],
+        privateKey: "/key",
+        user: "root",
+      },
+    })
+    expect(errors).toStrictEqual([])
+  })
+
+  it("returns an error when ssh.expectedHostFingerprint is a non-string value", () => {
+    const errors = collectDefinitionErrors({
+      host: "example.com",
+      name: "test",
+      run: ["echo hello"],
+      ssh: { expectedHostFingerprint: 42, ports: [22], privateKey: "/key", user: "root" },
+    })
+    expect(errors).toStrictEqual([
+      "Invalid property 'ssh.expectedHostFingerprint' (expected string, got number)",
+    ])
+  })
+
   it("returns no error when ssh.strictHostKeyChecking is null (treated as absent)", () => {
     const errors = collectDefinitionErrors({
       host: "example.com",

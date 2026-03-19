@@ -154,6 +154,10 @@ export async function guardedWriteFile(
 export type SshConfig = {
   /** Forward the local SSH agent to the remote host. */
   agentForward?: boolean
+  /** Expected SHA256 host fingerprint used as a pinned trust anchor. */
+  expectedHostFingerprint?: string
+  /** Expected OpenSSH public key (`"<algorithm> <base64>"`) used as a pinned trust anchor. */
+  expectedHostPublicKey?: string
   /** Maximum number of reconnection attempts before giving up. */
   maxReconnectAttempts?: number
   /** Fall back to password authentication if key auth fails. */
@@ -170,9 +174,12 @@ export type SshConfig = {
   reconnectTimeout?: number
   /**
    * Host key verification strategy.
-   * - `"accept-new"` — accept unknown keys and append them to `~/.ssh/known_hosts` (default).
+   * - `"accept-new"` — explicit TOFU opt-in: accept unknown keys and append them to `~/.ssh/known_hosts`.
    * - `"yes"` — reject unknown keys; only connect when the key is already in `known_hosts`.
    * - `"no"` — skip host key verification entirely.
+   *
+   * When omitted, Paratix now defaults to `"yes"`. To connect to a new host
+   * safely without TOFU, set `expectedHostFingerprint` or `expectedHostPublicKey`.
    */
   strictHostKeyChecking?: "accept-new" | "no" | "yes"
   /** Password used for `sudo` escalation on the remote host. */

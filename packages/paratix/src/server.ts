@@ -2,6 +2,12 @@ import type { ServerDefinition, SshConfig } from "./types.js"
 
 const VALID_HOST_KEY_MODES = ["accept-new", "no", "yes"]
 
+function ensureOptionalSshStringIsNotEmpty(value: string | undefined, label: string): void {
+  if (value?.length === 0) {
+    throw new Error(`ServerDefinition: ${label} must not be an empty string`)
+  }
+}
+
 /**
  * Validate SSH-specific fields of a server definition.
  *
@@ -17,6 +23,8 @@ function validateSshConfig(ssh: SshConfig): void {
   if (ssh.user.length === 0) {
     throw new Error("ServerDefinition: ssh.user is required")
   }
+  ensureOptionalSshStringIsNotEmpty(ssh.expectedHostFingerprint, "ssh.expectedHostFingerprint")
+  ensureOptionalSshStringIsNotEmpty(ssh.expectedHostPublicKey, "ssh.expectedHostPublicKey")
   if (
     ssh.strictHostKeyChecking != null &&
     !VALID_HOST_KEY_MODES.includes(ssh.strictHostKeyChecking)

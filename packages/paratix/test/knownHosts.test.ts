@@ -437,17 +437,64 @@ describe("buildHostVerifier", () => {
     vi.clearAllMocks()
   })
 
-  it("returns an empty object (no hostVerifier) for mode 'no'", () => {
-    const result = buildHostVerifier("no", "example.com", 22)
+  it("returns an empty object (no hostVerifier) for mode 'no' without pinned trust anchors", () => {
+    const result = buildHostVerifier("no", { host: "example.com", port: 22 })
     expect(result).toStrictEqual({})
     expect(result.hostVerifier).toBeUndefined()
+  })
+
+  it("mode 'yes' with unknown host and matching expected fingerprint: hostVerifier returns true", () => {
+    readFileSyncMock.mockReturnValue("")
+
+    const { hostVerifier } = buildHostVerifier(
+      "yes",
+      { host: "newhost.com", port: 22 },
+      {
+        expectedHostFingerprint: computeFingerprint(ed25519Key),
+      }
+    )
+
+    expect(hostVerifier).toBeDefined()
+    expect(hostVerifier!(ed25519Key)).toBe(true)
+    expect(appendFileMock).not.toHaveBeenCalled()
+  })
+
+  it("mode 'yes' with unknown host and matching expected public key: hostVerifier returns true", () => {
+    readFileSyncMock.mockReturnValue("")
+
+    const { hostVerifier } = buildHostVerifier(
+      "yes",
+      { host: "newhost.com", port: 22 },
+      {
+        expectedHostPublicKey: `ssh-ed25519 ${ed25519Key.toString("base64")} comment`,
+      }
+    )
+
+    expect(hostVerifier).toBeDefined()
+    expect(hostVerifier!(ed25519Key)).toBe(true)
+    expect(appendFileMock).not.toHaveBeenCalled()
+  })
+
+  it("mode 'yes' with unknown host and mismatching expected fingerprint: hostVerifier throws verification error", () => {
+    readFileSyncMock.mockReturnValue("")
+
+    const { hostVerifier } = buildHostVerifier(
+      "yes",
+      { host: "newhost.com", port: 22 },
+      {
+        expectedHostFingerprint: "SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+      }
+    )
+
+    expect(hostVerifier).toBeDefined()
+    expect(() => hostVerifier!(ed25519Key)).toThrow(/configured trust anchor/v)
   })
 
   it("mode 'accept-new' with unknown host: hostVerifier returns true and calls appendHostKey", async () => {
     // No known hosts
     readFileSyncMock.mockReturnValue("")
 
-    const { hostVerifier } = buildHostVerifier("accept-new", "newhost.com", 22)
+    const { hostVerifier } = buildHostVerifier("accept-new", { host: "newhost.com", port: 22 })
     expect(hostVerifier).toBeDefined()
 
     const result = hostVerifier!(ed25519Key)
@@ -465,7 +512,7 @@ describe("buildHostVerifier", () => {
     const stderrSpy = vi.spyOn(process.stderr, "write").mockImplementation(() => true)
 
     try {
-      const { hostVerifier } = buildHostVerifier("accept-new", "newhost.com", 22)
+      const { hostVerifier } = buildHostVerifier("accept-new", { host: "newhost.com", port: 22 })
       expect(hostVerifier).toBeDefined()
 
       hostVerifier!(ed25519Key)
@@ -484,7 +531,7 @@ describe("buildHostVerifier", () => {
   it("mode 'accept-new' with known host and correct key: hostVerifier returns true", () => {
     readFileSyncMock.mockReturnValue(makeKnownHostsContent("example.com", 22, ed25519Key))
 
-    const { hostVerifier } = buildHostVerifier("accept-new", "example.com", 22)
+    const { hostVerifier } = buildHostVerifier("accept-new", { host: "example.com", port: 22 })
     expect(hostVerifier).toBeDefined()
 
     const result = hostVerifier!(ed25519Key)
@@ -496,7 +543,7 @@ describe("buildHostVerifier", () => {
       `${makeHashedHostPattern("example.com")} ssh-ed25519 ${ed25519Key.toString("base64")}\n`
     )
 
-    const { hostVerifier } = buildHostVerifier("accept-new", "example.com", 22)
+    const { hostVerifier } = buildHostVerifier("accept-new", { host: "example.com", port: 22 })
     expect(hostVerifier).toBeDefined()
 
     expect(hostVerifier!(ed25519Key)).toBe(true)
@@ -506,7 +553,7 @@ describe("buildHostVerifier", () => {
   it("mode 'accept-new' with known host and wrong key: hostVerifier throws Error", () => {
     readFileSyncMock.mockReturnValue(makeKnownHostsContent("example.com", 22, ed25519Key))
 
-    const { hostVerifier } = buildHostVerifier("accept-new", "example.com", 22)
+    const { hostVerifier } = buildHostVerifier("accept-new", { host: "example.com", port: 22 })
     expect(hostVerifier).toBeDefined()
 
     const differentKey = makeKeyBuffer("ssh-ed25519", Buffer.from("different-key-material"))
@@ -519,7 +566,7 @@ describe("buildHostVerifier", () => {
       `${makeHashedHostPattern("example.com")} ssh-ed25519 ${ed25519Key.toString("base64")}\n`
     )
 
-    const { hostVerifier } = buildHostVerifier("accept-new", "example.com", 22)
+    const { hostVerifier } = buildHostVerifier("accept-new", { host: "example.com", port: 22 })
     expect(hostVerifier).toBeDefined()
 
     const differentKey = makeKeyBuffer("ssh-ed25519", Buffer.from("different-key-material"))
@@ -529,7 +576,7 @@ describe("buildHostVerifier", () => {
   it("mode 'yes' with known host and correct key: hostVerifier returns true", () => {
     readFileSyncMock.mockReturnValue(makeKnownHostsContent("example.com", 22, ed25519Key))
 
-    const { hostVerifier } = buildHostVerifier("yes", "example.com", 22)
+    const { hostVerifier } = buildHostVerifier("yes", { host: "example.com", port: 22 })
     expect(hostVerifier).toBeDefined()
 
     const result = hostVerifier!(ed25519Key)
@@ -539,7 +586,7 @@ describe("buildHostVerifier", () => {
   it("mode 'yes' with unknown host: hostVerifier throws Error", () => {
     readFileSyncMock.mockReturnValue("")
 
-    const { hostVerifier } = buildHostVerifier("yes", "unknownhost.com", 22)
+    const { hostVerifier } = buildHostVerifier("yes", { host: "unknownhost.com", port: 22 })
     expect(hostVerifier).toBeDefined()
 
     expect(() => hostVerifier!(ed25519Key)).toThrow(/not found in known_hosts/v)
@@ -549,7 +596,7 @@ describe("buildHostVerifier", () => {
   it("mode 'yes' with known host and wrong key: hostVerifier throws Error", () => {
     readFileSyncMock.mockReturnValue(makeKnownHostsContent("example.com", 22, ed25519Key))
 
-    const { hostVerifier } = buildHostVerifier("yes", "example.com", 22)
+    const { hostVerifier } = buildHostVerifier("yes", { host: "example.com", port: 22 })
     expect(hostVerifier).toBeDefined()
 
     const differentKey = makeKeyBuffer("ssh-ed25519", Buffer.from("wrong-key-material"))
@@ -561,7 +608,7 @@ describe("buildHostVerifier", () => {
       `@revoked example.com ssh-ed25519 ${ed25519Key.toString("base64")}\n`
     )
 
-    const { hostVerifier } = buildHostVerifier("yes", "example.com", 22)
+    const { hostVerifier } = buildHostVerifier("yes", { host: "example.com", port: 22 })
     expect(hostVerifier).toBeDefined()
 
     expect(() => hostVerifier!(ed25519Key)).toThrow(/revoked/v)
@@ -572,7 +619,7 @@ describe("buildHostVerifier", () => {
       `@revoked example.com ssh-ed25519 ${ed25519Key.toString("base64")}\n`
     )
 
-    const { hostVerifier } = buildHostVerifier("accept-new", "example.com", 22)
+    const { hostVerifier } = buildHostVerifier("accept-new", { host: "example.com", port: 22 })
     expect(hostVerifier).toBeDefined()
 
     expect(() => hostVerifier!(ed25519Key)).toThrow(/revoked/v)
@@ -589,7 +636,7 @@ describe("buildHostVerifier", () => {
     const stderrSpy = vi.spyOn(process.stderr, "write").mockImplementation(() => true)
 
     try {
-      const { hostVerifier } = buildHostVerifier("accept-new", "newhost.com", 22)
+      const { hostVerifier } = buildHostVerifier("accept-new", { host: "newhost.com", port: 22 })
       expect(hostVerifier).toBeDefined()
 
       // hostVerifier itself returns true — the appendHostKey failure is fire-and-forget
@@ -619,7 +666,7 @@ describe("buildHostVerifier", () => {
   it("mode 'accept-new' with unknown host on non-standard port: appends [host]:port entry", async () => {
     readFileSyncMock.mockReturnValue("")
 
-    const { hostVerifier } = buildHostVerifier("accept-new", "example.com", 2222)
+    const { hostVerifier } = buildHostVerifier("accept-new", { host: "example.com", port: 2222 })
     expect(hostVerifier).toBeDefined()
 
     const result = hostVerifier!(ed25519Key)
@@ -635,7 +682,7 @@ describe("buildHostVerifier", () => {
   it("mode 'accept-new' with known host on non-standard port and correct key: returns true", () => {
     readFileSyncMock.mockReturnValue(makeKnownHostsContent("example.com", 2222, ed25519Key))
 
-    const { hostVerifier } = buildHostVerifier("accept-new", "example.com", 2222)
+    const { hostVerifier } = buildHostVerifier("accept-new", { host: "example.com", port: 2222 })
     expect(hostVerifier).toBeDefined()
 
     expect(hostVerifier!(ed25519Key)).toBe(true)
@@ -644,25 +691,29 @@ describe("buildHostVerifier", () => {
   it("error message for key mismatch mentions man-in-the-middle attack", () => {
     readFileSyncMock.mockReturnValue(makeKnownHostsContent("example.com", 22, ed25519Key))
 
-    const { hostVerifier } = buildHostVerifier("accept-new", "example.com", 22)
+    const { hostVerifier } = buildHostVerifier("accept-new", { host: "example.com", port: 22 })
     const differentKey = makeKeyBuffer("ssh-ed25519", Buffer.from("attacker-key"))
 
     expect(() => hostVerifier!(differentKey)).toThrow(/man-in-the-middle/v)
   })
 
-  it("error message for 'yes' with missing host suggests 'accept-new'", () => {
+  it("error message for 'yes' with missing host suggests explicit TOFU or pinned trust anchors", () => {
     readFileSyncMock.mockReturnValue("")
 
-    const { hostVerifier } = buildHostVerifier("yes", "newhost.com", 22)
+    const { hostVerifier } = buildHostVerifier("yes", { host: "newhost.com", port: 22 })
 
     expect(() => hostVerifier!(ed25519Key)).toThrow(/accept-new/v)
+    expect(() => hostVerifier!(ed25519Key)).toThrow(/expectedHostFingerprint/v)
   })
 
   it("mode 'accept-new': caches key in memory after accepting unknown host", async () => {
     // Arrange: empty known_hosts, appendFile succeeds
     readFileSyncMock.mockReturnValue("")
 
-    const { hostVerifier: firstVerifier } = buildHostVerifier("accept-new", "newhost.com", 22)
+    const { hostVerifier: firstVerifier } = buildHostVerifier("accept-new", {
+      host: "newhost.com",
+      port: 22,
+    })
     expect(firstVerifier).toBeDefined()
 
     // Act: accept the key — it gets cached in memory
@@ -674,7 +725,10 @@ describe("buildHostVerifier", () => {
     // Arrange: second verifier with empty known_hosts but in-memory cache still populated
     // (clearHostKeyCache NOT called)
     readFileSyncMock.mockReturnValue("")
-    const { hostVerifier: secondVerifier } = buildHostVerifier("accept-new", "newhost.com", 22)
+    const { hostVerifier: secondVerifier } = buildHostVerifier("accept-new", {
+      host: "newhost.com",
+      port: 22,
+    })
     expect(secondVerifier).toBeDefined()
 
     // Act: second verifier should recognize the cached key
@@ -689,7 +743,10 @@ describe("buildHostVerifier", () => {
     // Arrange: empty known_hosts, accept key A
     readFileSyncMock.mockReturnValue("")
 
-    const { hostVerifier: firstVerifier } = buildHostVerifier("accept-new", "newhost.com", 22)
+    const { hostVerifier: firstVerifier } = buildHostVerifier("accept-new", {
+      host: "newhost.com",
+      port: 22,
+    })
     expect(firstVerifier).toBeDefined()
     firstVerifier!(ed25519Key)
 
@@ -697,7 +754,10 @@ describe("buildHostVerifier", () => {
 
     // Arrange: second verifier with empty known_hosts but cached key A still in memory
     readFileSyncMock.mockReturnValue("")
-    const { hostVerifier: secondVerifier } = buildHostVerifier("accept-new", "newhost.com", 22)
+    const { hostVerifier: secondVerifier } = buildHostVerifier("accept-new", {
+      host: "newhost.com",
+      port: 22,
+    })
     expect(secondVerifier).toBeDefined()
 
     // Act & Assert: presenting a different key B should throw
@@ -714,7 +774,7 @@ describe("buildHostVerifier", () => {
     const stderrSpy = vi.spyOn(process.stderr, "write").mockImplementation(() => true)
 
     try {
-      const { hostVerifier } = buildHostVerifier("accept-new", "newhost.com", 22)
+      const { hostVerifier } = buildHostVerifier("accept-new", { host: "newhost.com", port: 22 })
       expect(hostVerifier).toBeDefined()
 
       hostVerifier!(ed25519Key)
@@ -740,7 +800,7 @@ describe("buildHostVerifier", () => {
     const stderrSpy = vi.spyOn(process.stderr, "write").mockImplementation(() => true)
 
     try {
-      const { hostVerifier } = buildHostVerifier("accept-new", "newhost.com", 2222)
+      const { hostVerifier } = buildHostVerifier("accept-new", { host: "newhost.com", port: 2222 })
       expect(hostVerifier).toBeDefined()
 
       hostVerifier!(ed25519Key)
@@ -769,7 +829,7 @@ describe("buildHostVerifier", () => {
     const stderrSpy = vi.spyOn(process.stderr, "write").mockImplementation(() => true)
 
     try {
-      const { hostVerifier } = buildHostVerifier("accept-new", maliciousHost, 22)
+      const { hostVerifier } = buildHostVerifier("accept-new", { host: maliciousHost, port: 22 })
       expect(hostVerifier).toBeDefined()
 
       hostVerifier!(ed25519Key)
@@ -797,7 +857,10 @@ describe("buildHostVerifier", () => {
     // Arrange: accept a key so it gets cached
     readFileSyncMock.mockReturnValue("")
 
-    const { hostVerifier: firstVerifier } = buildHostVerifier("accept-new", "newhost.com", 22)
+    const { hostVerifier: firstVerifier } = buildHostVerifier("accept-new", {
+      host: "newhost.com",
+      port: 22,
+    })
     expect(firstVerifier).toBeDefined()
     firstVerifier!(ed25519Key)
 
@@ -809,7 +872,10 @@ describe("buildHostVerifier", () => {
     // Arrange: new verifier with empty known_hosts and empty cache
     readFileSyncMock.mockReturnValue("")
     appendFileMock.mockClear()
-    const { hostVerifier: secondVerifier } = buildHostVerifier("accept-new", "newhost.com", 22)
+    const { hostVerifier: secondVerifier } = buildHostVerifier("accept-new", {
+      host: "newhost.com",
+      port: 22,
+    })
     expect(secondVerifier).toBeDefined()
 
     // Act: second verifier should treat the key as unknown again

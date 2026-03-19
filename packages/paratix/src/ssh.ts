@@ -584,11 +584,18 @@ export class SshConnectionImpl implements SshConnection {
     password?: string,
     agent?: string
   ): Promise<boolean> {
-    const mode = this.config.strictHostKeyChecking ?? "accept-new"
+    const mode = this.config.strictHostKeyChecking ?? "yes"
     for (const port of this.config.ports) {
       try {
         const client = new Client()
-        const { hostVerifier, pendingPersist } = buildHostVerifier(mode, this.host, port)
+        const { hostVerifier, pendingPersist } = buildHostVerifier(
+          mode,
+          { host: this.host, port },
+          {
+            expectedHostFingerprint: this.config.expectedHostFingerprint,
+            expectedHostPublicKey: this.config.expectedHostPublicKey,
+          }
+        )
         const wrappedVerifier = this.wrapHostVerifier(hostVerifier)
         // eslint-disable-next-line no-await-in-loop
         await tryConnectOnPort({

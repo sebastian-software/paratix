@@ -63,6 +63,33 @@ Preview changes without applying them:
 npx paratix apply server.ts --dry-run
 ```
 
+## SSH host key migration
+
+Paratix now defaults to strict host-key checking (`ssh.strictHostKeyChecking: "yes"`).
+Existing playbooks that relied on implicit TOFU must now opt in explicitly:
+
+```typescript
+ssh: {
+  user: "root",
+  ports: [22],
+  privateKey: "~/.ssh/id_ed25519",
+  strictHostKeyChecking: "accept-new", // explicit TOFU opt-in
+}
+```
+
+For a safer bootstrap of brand-new hosts, pin the expected host key instead of using TOFU:
+
+```typescript
+ssh: {
+  user: "root",
+  ports: [22],
+  privateKey: "~/.ssh/id_ed25519",
+  expectedHostFingerprint: "SHA256:your-known-fingerprint",
+}
+```
+
+You can also pin the full OpenSSH public key with `expectedHostPublicKey`.
+
 ## Core concepts
 
 ### Playbook
@@ -75,7 +102,12 @@ import { server } from "paratix"
 export default server({
   name: "web-01",
   host: "10.0.0.1",
-  ssh: { user: "root", ports: [22], privateKey: "~/.ssh/id_ed25519" },
+  ssh: {
+    user: "root",
+    ports: [22],
+    privateKey: "~/.ssh/id_ed25519",
+    expectedHostFingerprint: "SHA256:your-known-fingerprint",
+  },
   env: {
     DOMAIN: "example.com",
     APP_PORT: 3000,

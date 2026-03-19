@@ -6,6 +6,16 @@ import { join } from "node:path"
 
 import { shellQuote } from "./sshHelpers.js"
 
+type HostVerifierOptions = {
+  expectedHostFingerprint?: string
+  expectedHostPublicKey?: string
+}
+
+type HostLocation = {
+  host: string
+  port: number
+}
+
 /** Thrown when a remote host key does not match the expected key in known_hosts. */
 export class HostKeyVerificationError extends Error {
   public constructor(message: string) {
@@ -308,6 +318,44 @@ async function acceptAndPersistHostKey(host: string, port: number, key: Buffer):
   }
 }
 
+function normalizePinnedPublicKey(publicKey: string): string {
+  const parts = publicKey.trim().split(/\s+/v)
+  if (parts.length < 2) {
+    throw new Error("Expected host public key must use the format '<algorithm> <base64>'")
+  }
+  const [algorithm, key] = parts
+  return `${algorithm} ${key}`
+}
+
+function formatPresentedPublicKey(key: Buffer): string {
+  return `${extractAlgoFromKey(key)} ${key.toString("base64")}`
+}
+
+function hasPinnedHostTrustAnchor(options?: HostVerifierOptions): boolean {
+  return options?.expectedHostFingerprint != null || options?.expectedHostPublicKey != null
+}
+
+function verifyPinnedHostKey(host: string, key: Buffer, options: HostVerifierOptions): void {
+  const normalizedExpectedPublicKey =
+    options.expectedHostPublicKey == null
+      ? null
+      : normalizePinnedPublicKey(options.expectedHostPublicKey)
+  const expectedFingerprint = options.expectedHostFingerprint ?? null
+  const presentedPublicKey = formatPresentedPublicKey(key)
+  const presentedFingerprint = computeFingerprint(key)
+
+  if (
+    normalizedExpectedPublicKey === presentedPublicKey ||
+    expectedFingerprint === presentedFingerprint
+  ) {
+    return
+  }
+
+  throw new HostKeyVerificationError(
+    `HOST KEY VERIFICATION FAILED for ${host}: the remote host key does not match the configured trust anchor.`
+  )
+}
+
 /**
  * Build the `hostVerifier` callback for an ssh2 `ConnectConfig`.
  *
@@ -318,18 +366,19 @@ async function acceptAndPersistHostKey(host: string, port: number, key: Buffer):
  * - `"yes"` — throws for both unknown keys and mismatched keys.
  *
  * @param mode - The host key verification strategy.
- * @param host - The target hostname or IP.
- * @param port - The target SSH port.
+ * @param location - The target host and SSH port.
+ * @param options - Optional pinned trust anchors for the remote host.
  * @returns An object with `hostVerifier` set (or empty for mode `"no"`).
  * @throws {Error} When a known host key does not match the presented key (all modes except `"no"`).
  * @throws {Error} When no known_hosts entry exists for the host and mode is `"yes"`.
  */
 export function buildHostVerifier(
   mode: "accept-new" | "no" | "yes",
-  host: string,
-  port: number
+  location: HostLocation,
+  options: HostVerifierOptions = {}
 ): { hostVerifier?: (key: Buffer) => boolean; pendingPersist?: Promise<void> } {
-  if (mode === "no") return {}
+  const { host, port } = location
+  if (mode === "no" && !hasPinnedHostTrustAnchor(options)) return {}
 
   const entries = loadKnownHostEntries()
   const fileEntries = findMatchingEntries(entries, host, port)
@@ -337,13 +386,24 @@ export function buildHostVerifier(
 
   const result: { hostVerifier: (key: Buffer) => boolean; pendingPersist?: Promise<void> } = {
     hostVerifier(key: Buffer): boolean {
-      if (verifyHostKeyAgainstKnownEntries({ cachedKey, fileEntries, host, key })) return true
+      if (
+        mode !== "no" &&
+        verifyHostKeyAgainstKnownEntries({ cachedKey, fileEntries, host, key })
+      ) {
+        if (hasPinnedHostTrustAnchor(options)) verifyPinnedHostKey(host, key, options)
+        return true
+      }
+      if (hasPinnedHostTrustAnchor(options)) {
+        verifyPinnedHostKey(host, key, options)
+        return true
+      }
       if (mode === "yes") {
         throw new HostKeyVerificationError(
           `Host key for ${host} not found in known_hosts. ` +
-            'Set strictHostKeyChecking to "accept-new" to auto-accept new keys.'
+            'Set strictHostKeyChecking to "accept-new" for explicit TOFU or configure ssh.expectedHostFingerprint / ssh.expectedHostPublicKey.'
         )
       }
+      if (mode === "no") return true
       // mode === "accept-new": accept and persist
       result.pendingPersist = acceptAndPersistHostKey(host, port, key)
       return true

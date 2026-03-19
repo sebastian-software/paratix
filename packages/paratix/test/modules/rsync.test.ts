@@ -196,7 +196,7 @@ describe("rsync.sync — argument building", () => {
     expect(args).toContain("--itemize-changes")
   })
 
-  it("includes SSH transport with correct port, key, and StrictHostKeyChecking=accept-new", async () => {
+  it("includes SSH transport with correct port, key, and StrictHostKeyChecking=yes", async () => {
     const mockSsh = createMockSsh()
     const mod = rsync.sync({ dest: "/remote/dest", src: "/local/src" })
     await mod.apply(mockSsh, emptyEnv)
@@ -208,7 +208,7 @@ describe("rsync.sync — argument building", () => {
     expect(transportArg).toContain("ssh")
     expect(transportArg).toContain("-p 22")
     expect(transportArg).toContain("-i '~/.ssh/id'")
-    expect(transportArg).toContain("-o StrictHostKeyChecking=accept-new")
+    expect(transportArg).toContain("-o StrictHostKeyChecking=yes")
   })
 
   it("wraps privateKeyPath with single quotes to prevent shell expansion of special characters", async () => {

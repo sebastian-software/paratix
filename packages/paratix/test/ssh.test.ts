@@ -2248,13 +2248,20 @@ describe("SshConnectionImpl", () => {
       vi.mocked(fsp.readFile).mockResolvedValue(Buffer.from("fake-private-key") as never)
     })
 
-    it("calls buildHostVerifier with default mode 'accept-new' when strictHostKeyChecking is not set", async () => {
+    it("calls buildHostVerifier with default mode 'yes' when strictHostKeyChecking is not set", async () => {
       const { buildHostVerifier } = await import("../src/knownHosts.js")
       const ssh = makeSshInstance({ host: "1.2.3.4", ports: [22] })
 
       await ssh.connect()
 
-      expect(buildHostVerifier).toHaveBeenCalledWith("accept-new", "1.2.3.4", 22)
+      expect(buildHostVerifier).toHaveBeenCalledWith(
+        "yes",
+        { host: "1.2.3.4", port: 22 },
+        {
+          expectedHostFingerprint: undefined,
+          expectedHostPublicKey: undefined,
+        }
+      )
     })
 
     it("calls buildHostVerifier with mode 'no' when strictHostKeyChecking is 'no'", async () => {
@@ -2269,7 +2276,14 @@ describe("SshConnectionImpl", () => {
 
       await ssh.connect()
 
-      expect(buildHostVerifier).toHaveBeenCalledWith("no", "1.2.3.4", 22)
+      expect(buildHostVerifier).toHaveBeenCalledWith(
+        "no",
+        { host: "1.2.3.4", port: 22 },
+        {
+          expectedHostFingerprint: undefined,
+          expectedHostPublicKey: undefined,
+        }
+      )
     })
 
     it("calls buildHostVerifier with mode 'yes' when strictHostKeyChecking is 'yes'", async () => {
@@ -2284,7 +2298,36 @@ describe("SshConnectionImpl", () => {
 
       await ssh.connect()
 
-      expect(buildHostVerifier).toHaveBeenCalledWith("yes", "1.2.3.4", 22)
+      expect(buildHostVerifier).toHaveBeenCalledWith(
+        "yes",
+        { host: "1.2.3.4", port: 22 },
+        {
+          expectedHostFingerprint: undefined,
+          expectedHostPublicKey: undefined,
+        }
+      )
+    })
+
+    it("passes expected host trust anchors to buildHostVerifier", async () => {
+      const { buildHostVerifier } = await import("../src/knownHosts.js")
+      const ssh = new SshConnectionImpl("1.2.3.4", {
+        expectedHostFingerprint: "SHA256:trusted-fingerprint",
+        expectedHostPublicKey: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAItrusted",
+        ports: [22],
+        privateKey: "/dev/null",
+        user: "root",
+      })
+
+      await ssh.connect()
+
+      expect(buildHostVerifier).toHaveBeenCalledWith(
+        "yes",
+        { host: "1.2.3.4", port: 22 },
+        {
+          expectedHostFingerprint: "SHA256:trusted-fingerprint",
+          expectedHostPublicKey: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAItrusted",
+        }
+      )
     })
 
     it("passes a wrapped hostVerifier that delegates to buildHostVerifier's verifier", async () => {
@@ -2320,8 +2363,24 @@ describe("SshConnectionImpl", () => {
 
       // One call per port attempted (22 failed, 2222 succeeded)
       expect(buildHostVerifier).toHaveBeenCalledTimes(2)
-      expect(buildHostVerifier).toHaveBeenNthCalledWith(1, "accept-new", "1.2.3.4", 22)
-      expect(buildHostVerifier).toHaveBeenNthCalledWith(2, "accept-new", "1.2.3.4", 2222)
+      expect(buildHostVerifier).toHaveBeenNthCalledWith(
+        1,
+        "yes",
+        { host: "1.2.3.4", port: 22 },
+        {
+          expectedHostFingerprint: undefined,
+          expectedHostPublicKey: undefined,
+        }
+      )
+      expect(buildHostVerifier).toHaveBeenNthCalledWith(
+        2,
+        "yes",
+        { host: "1.2.3.4", port: 2222 },
+        {
+          expectedHostFingerprint: undefined,
+          expectedHostPublicKey: undefined,
+        }
+      )
     })
 
     it("passes a wrapper hostVerifier even when mode is 'no' (for host-key pinning)", async () => {

@@ -75,7 +75,9 @@ export default server({
     // passwordFallback: false,
     // sudoPassword: "...",
     // reconnectTimeout: 30000,
-    // strictHostKeyChecking: "accept-new", // "accept-new" (default), "yes", or "no"
+    // strictHostKeyChecking: "yes", // default; set "accept-new" only for explicit TOFU
+    // expectedHostFingerprint: "SHA256:...",
+    // expectedHostPublicKey: "ssh-ed25519 AAAA...",
   },
 
   // Optional: env values available in templates and conditions

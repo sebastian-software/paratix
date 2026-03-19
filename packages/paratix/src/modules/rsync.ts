@@ -27,9 +27,8 @@ type SyncOptions = {
   /**
    * SSH `StrictHostKeyChecking` option passed to the `-o` flag.
    *
-   * Defaults to `"accept-new"`, which accepts unknown host keys on first
-   * connection but rejects changed keys. Use `"yes"` to enforce strict
-   * checking for already-known hosts, or `"no"` to disable checking entirely
+   * Defaults to `"yes"`. Use `"accept-new"` for explicit TOFU when first-time
+   * connections must be auto-accepted, or `"no"` to disable checking entirely
    * (not recommended for production).
    */
   strictHostKeyChecking?: "accept-new" | "no" | "off" | "yes"
@@ -92,9 +91,9 @@ function buildOwnershipArguments(options: SyncOptions): string[] {
  *
  * Always enables archive mode (`-a`), compression (`-z`), and itemized
  * output (`--itemize-changes`). The SSH transport is configured from
- * the connection info with host-key checking set to `accept-new` by
- * default so that first-time connections succeed while changed keys
- * are still rejected.
+ * the connection info with host-key checking set to `yes` by default.
+ * Use `strictHostKeyChecking: "accept-new"` for explicit TOFU when
+ * first-time connections must be auto-accepted.
  *
  * @param options - Sync options describing source, destination, and filters.
  * @param connectionInfo - SSH connection details obtained from `SshConnection.getConnectionInfo`.
@@ -131,7 +130,7 @@ function buildArguments(
   }
   result.push(
     "-e",
-    `ssh -p ${connectionInfo.port}${sshFlags} -o StrictHostKeyChecking=${options.strictHostKeyChecking ?? "accept-new"}`
+    `ssh -p ${connectionInfo.port}${sshFlags} -o StrictHostKeyChecking=${options.strictHostKeyChecking ?? "yes"}`
   )
   result.push(...buildFilterArguments(options))
   result.push(...buildOwnershipArguments(options))
