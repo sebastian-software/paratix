@@ -87,6 +87,21 @@ describe("sftpDownload", () => {
     )
   })
 
+  it("does not remove the local path when the sftp session fails before creating the writeStream", async () => {
+    const connectionError = new Error("sftp session failed")
+    const client = {
+      sftp: vi.fn().mockImplementation((cb: Parameters<Client["sftp"]>[0]) => {
+        cb(connectionError, undefined as unknown as SFTPWrapper)
+      }),
+    } as unknown as Client
+
+    await expect(sftpDownload(client, "/remote/file.txt", "/local/file.txt")).rejects.toThrow(
+      "sftp session failed"
+    )
+    expect(vi.mocked(unlinkSync)).not.toHaveBeenCalled()
+    expect(vi.mocked(createWriteStream)).not.toHaveBeenCalled()
+  })
+
   it("rejects when the readStream emits an error (regression: missing error handler)", async () => {
     // Arrange
     const { sftp, sftpReadStream } = makeSftpSession()

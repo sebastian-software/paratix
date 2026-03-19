@@ -84,12 +84,16 @@ export async function sftpDownload(
   timeout = SFTP_TIMEOUT
 ): Promise<void> {
   return new Promise((resolve, reject) => {
+    let shouldCleanupLocalFile = false
+
     const rejectWithCleanup = (reason: Error): void => {
-      try {
-        // eslint-disable-next-line security/detect-non-literal-fs-filename
-        unlinkSync(localPath)
-      } catch {
-        // Best effort cleanup: preserve the original transfer error.
+      if (shouldCleanupLocalFile) {
+        try {
+          // eslint-disable-next-line security/detect-non-literal-fs-filename
+          unlinkSync(localPath)
+        } catch {
+          // Best effort cleanup: preserve the original transfer error.
+        }
       }
       reject(reason)
     }
@@ -103,6 +107,7 @@ export async function sftpDownload(
       const readStream = sftp.createReadStream(remotePath)
       // eslint-disable-next-line security/detect-non-literal-fs-filename
       const writeStream = createWriteStream(localPath, { mode: 0o600 })
+      shouldCleanupLocalFile = true
 
       wireStreams({
         readStream,
