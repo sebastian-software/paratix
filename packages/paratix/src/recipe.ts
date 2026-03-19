@@ -95,17 +95,23 @@ async function triggerSignals(
   signals: Module[],
   ssh: null | SshConnection,
   environment: Environment
-): Promise<void> {
+): Promise<"changed" | "failed"> {
+  let status: "changed" | "failed" = "changed"
+
   for (const signal of signals) {
     try {
       // eslint-disable-next-line no-await-in-loop
       const result = await signal.apply(ssh, environment)
       printModuleResult(`signal: ${signal.name}`, result.status)
+      if (result.status === "failed") status = "failed"
     } catch (error) {
       printModuleResult(`signal: ${signal.name}`, "failed")
       printCommandFailure(error, false)
+      status = "failed"
     }
   }
+
+  return status
 }
 
 /**
@@ -149,7 +155,7 @@ export function recipe(
       const state = await executeModules(modules, ssh, { environment, shutdownSignal })
 
       if (state.status === "changed" && options?.signals) {
-        await triggerSignals(options.signals, ssh, state.env)
+        state.status = await triggerSignals(options.signals, ssh, state.env)
       }
 
       // Only return new/changed meta keys, not the entire environment

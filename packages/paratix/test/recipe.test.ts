@@ -166,6 +166,42 @@ describe("recipe", () => {
     expect(signalApplied.count).toBe(1)
   })
 
+  it("sets the recipe status to failed when a signal returns failed", async () => {
+    const signal: Module = {
+      // eslint-disable-next-line @typescript-eslint/require-await -- Interface requires async
+      async apply() {
+        return { status: "failed" }
+      },
+      // eslint-disable-next-line @typescript-eslint/require-await -- Interface requires async
+      async check() {
+        return "needs-apply"
+      },
+      name: "signal-module",
+    }
+
+    const mod = makeModule("needs-apply", "changed")
+    const r = recipe("test-recipe", [mod], { signals: [signal] })
+    // eslint-disable-next-line prefer-spread
+    const result = await r.apply(null, emptyEnv)
+
+    expect(result.status).toBe("failed")
+  })
+
+  it("sets the recipe status to failed when a signal throws", async () => {
+    const signal: Module = {
+      apply: vi.fn().mockRejectedValue(new Error("signal failed")),
+      check: vi.fn().mockResolvedValue("needs-apply"),
+      name: "signal-module",
+    }
+
+    const mod = makeModule("needs-apply", "changed")
+    const r = recipe("test-recipe", [mod], { signals: [signal] })
+    // eslint-disable-next-line prefer-spread
+    const result = await r.apply(null, emptyEnv)
+
+    expect(result.status).toBe("failed")
+  })
+
   it("check returns ok for a recipe with no child modules", async () => {
     const r = recipe("empty", [])
     const result = await r.check(null, emptyEnv)
