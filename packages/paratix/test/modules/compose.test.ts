@@ -2,7 +2,7 @@ import type * as NodeFsPromises from "node:fs/promises"
 
 import { describe, expect, it, vi } from "vitest"
 
-import { compose } from "../../src/modules/compose.js"
+import { compose } from "../../src/index.js"
 import { createMockSsh } from "../helpers/mockSsh.js"
 
 vi.mock("node:fs/promises", async (importOriginal) => {

@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest"
 
-import { script } from "../../src/modules/script.js"
+import { script } from "../../src/index.js"
 import { createMockSsh } from "../helpers/mockSsh.js"
 
 const emptyEnv = {}

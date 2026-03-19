@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest"
 
-import { net } from "../../src/modules/net.js"
+import { net } from "../../src/index.js"
 import { createMockSsh } from "../helpers/mockSsh.js"
 
 const emptyEnv = {}
