@@ -1359,7 +1359,7 @@ describe("SshConnectionImpl", () => {
       const { sftpUpload } = await import("../src/sftp.js")
       vi.mocked(sftpUpload).mockResolvedValue()
 
-      const tempPath = "/tmp/paratix-upload.ABCDEF"
+      const tempPath = "/remote/paratix-upload.ABCDEF"
       const executedCommands: string[] = []
 
       const execSpy = vi
@@ -1395,7 +1395,7 @@ describe("SshConnectionImpl", () => {
 
       await ssh.uploadFile("/local/file.txt", "/remote/path")
 
-      expect(executedCommands[0]).toBe("mktemp /tmp/paratix-upload.XXXXXX")
+      expect(executedCommands[0]).toBe("mktemp '/remote/paratix-upload.XXXXXX'")
       expect(executedCommands[1]).toBe(`chmod '0600' '${tempPath}'`)
       expect(executedCommands[2]).toMatch(/^sudo bash -c /v)
       expect(executedCommands[2]).toContain(tempPath)
@@ -1408,7 +1408,7 @@ describe("SshConnectionImpl", () => {
       const { sftpUpload } = await import("../src/sftp.js")
       vi.mocked(sftpUpload).mockResolvedValue()
 
-      const tempPath = "/tmp/paratix-upload.ABCDEF"
+      const tempPath = "/remote/paratix-upload.ABCDEF"
       const executedCommands: string[] = []
 
       const execSpy = vi
@@ -1455,7 +1455,7 @@ describe("SshConnectionImpl", () => {
       const { sftpUpload } = await import("../src/sftp.js")
       vi.mocked(sftpUpload).mockResolvedValue()
 
-      const tempPath = "/tmp/paratix-upload.ABCDEF"
+      const tempPath = "/remote/paratix-upload.ABCDEF"
       const executedCommands: string[] = []
 
       const execSpy = vi
@@ -1509,7 +1509,7 @@ describe("SshConnectionImpl", () => {
       const { sftpUpload } = await import("../src/sftp.js")
       vi.mocked(sftpUpload).mockResolvedValue()
 
-      const tempPath = "/tmp/paratix-upload.ABCDEF"
+      const tempPath = "/remote/paratix-upload.ABCDEF"
       const executedCommands: string[] = []
 
       const execSpy = vi
@@ -1559,7 +1559,7 @@ describe("SshConnectionImpl", () => {
       const { sftpUpload } = await import("../src/sftp.js")
       vi.mocked(sftpUpload).mockResolvedValue()
 
-      const tempPath = "/tmp/paratix-upload.ABCDEF"
+      const tempPath = "/remote/paratix-upload.ABCDEF"
       const executedCommands: string[] = []
 
       const execSpy = vi
@@ -1610,7 +1610,7 @@ describe("SshConnectionImpl", () => {
       const { sftpUpload } = await import("../src/sftp.js")
       vi.mocked(sftpUpload).mockResolvedValue()
 
-      const tempPath = "/tmp/paratix-write.ABCDEF"
+      const tempPath = "/remote/paratix-write.ABCDEF"
       const executedCommands: string[] = []
 
       const execSpy = vi
@@ -1646,7 +1646,7 @@ describe("SshConnectionImpl", () => {
 
       await ssh.writeFile("/remote/plain.txt", "hello world")
 
-      expect(executedCommands[0]).toBe("mktemp /tmp/paratix-write.XXXXXX")
+      expect(executedCommands[0]).toBe("mktemp '/remote/paratix-write.XXXXXX'")
       expect(executedCommands[1]).toBe(`chmod '0600' '${tempPath}'`)
       expect(executedCommands[2]).toMatch(/^sudo bash -c /v)
       expect(executedCommands[2]).toContain(tempPath)
@@ -1659,7 +1659,7 @@ describe("SshConnectionImpl", () => {
       const { sftpUpload } = await import("../src/sftp.js")
       vi.mocked(sftpUpload).mockResolvedValue()
 
-      const tempPath = "/tmp/paratix-write.ABCDEF"
+      const tempPath = "/remote/paratix-write.ABCDEF"
       const executedCommands: string[] = []
 
       const execSpy = vi
@@ -1706,7 +1706,7 @@ describe("SshConnectionImpl", () => {
       const { sftpUpload } = await import("../src/sftp.js")
       vi.mocked(sftpUpload).mockResolvedValue()
 
-      const tempPath = "/tmp/paratix-write.ABCDEF"
+      const tempPath = "/remote/paratix-write.ABCDEF"
       const executedCommands: string[] = []
 
       const execSpy = vi
@@ -1759,7 +1759,7 @@ describe("SshConnectionImpl", () => {
       const { sftpUpload } = await import("../src/sftp.js")
       vi.mocked(sftpUpload).mockResolvedValue()
 
-      const tempPath = "/tmp/paratix-write.ABCDEF"
+      const tempPath = "/remote/paratix-write.ABCDEF"
       const executedCommands: string[] = []
 
       const execSpy = vi

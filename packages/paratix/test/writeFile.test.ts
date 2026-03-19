@@ -67,7 +67,7 @@ function makeSimpleClient(): Client {
       const stream = makeStream()
       cb(undefined, stream)
       if (cmd.includes("mktemp")) {
-        stream.emit("data", Buffer.from("/tmp/paratix-write.SIMPLE"))
+        stream.emit("data", Buffer.from("/etc/paratix-write.SIMPLE"))
       }
       stream.emit("close", 0)
     }),
@@ -97,7 +97,7 @@ describe("SshConnectionImpl.writeFile — small content", () => {
   let execSpy: ReturnType<typeof vi.fn>
 
   beforeEach(() => {
-    execSpy = makeExecSpy("/tmp/paratix-write.SMALL")
+    execSpy = makeExecSpy("/etc/paratix-write.SMALL")
     vi.mocked(sftpUpload).mockResolvedValue()
   })
 
@@ -138,7 +138,7 @@ describe("SshConnectionImpl.writeFile — large content (> 64 KB)", () => {
   let execSpy: ReturnType<typeof vi.fn>
 
   beforeEach(() => {
-    execSpy = makeExecSpy("/tmp/paratix-write.ABCDEF")
+    execSpy = makeExecSpy("/etc/paratix-write.ABCDEF")
     vi.mocked(sftpUpload).mockResolvedValue()
   })
 
@@ -202,7 +202,7 @@ describe("SshConnectionImpl.writeFile — large content (> 64 KB)", () => {
       string,
     ]
     expect(localPath).toMatch(/paratix-write-/v)
-    expect(remoteTmpPath).toBe("/tmp/paratix-write.ABCDEF")
+    expect(remoteTmpPath).toBe("/etc/paratix-write.ABCDEF")
   })
 
   it("moves the remote tmp file to the final destination via mv", async () => {
@@ -219,7 +219,7 @@ describe("SshConnectionImpl.writeFile — large content (> 64 KB)", () => {
     const mvCall = calls.find(([cmd]) => cmd.includes("mv"))
     expect(mvCall).toBeDefined()
     const [mvCmd] = mvCall!
-    expect(mvCmd).toContain("/tmp/paratix-write.ABCDEF")
+    expect(mvCmd).toContain("/etc/paratix-write.ABCDEF")
     expect(mvCmd).toContain("/etc/large-config")
   })
 
@@ -261,7 +261,7 @@ describe("SshConnectionImpl.writeFile — large content (> 64 KB)", () => {
 
   it("calls rm -f for the remote tmp file when sftpUpload throws (best-effort cleanup)", async () => {
     // Arrange
-    const remoteTmpPath = "/tmp/paratix-write.CLEANUP"
+    const remoteTmpPath = "/etc/paratix-write.CLEANUP"
     vi.mocked(sftpUpload).mockRejectedValue(new Error("SFTP transfer failed"))
     const remoteCleanupSpy = makeExecSpy(remoteTmpPath)
     const client = makeClientWithExecSpy(remoteCleanupSpy)
@@ -284,7 +284,7 @@ describe("SshConnectionImpl.writeFile — large content (> 64 KB)", () => {
 
   it("swallows an error thrown by the remote rm -f cleanup (best-effort)", async () => {
     // Arrange: sftpUpload succeeds, but rm -f in the finally block throws
-    const remoteTmpPath = "/tmp/paratix-write.CLEANUP2"
+    const remoteTmpPath = "/etc/paratix-write.CLEANUP2"
 
     // exec spy: mktemp returns the remote tmp path, mv succeeds, rm -f fails
     const cleanupExecSpy = vi
@@ -328,7 +328,7 @@ describe("SshConnectionImpl.writeFile — large content (> 64 KB)", () => {
   it("masks sudo password in cleanup error message for writeFile", async () => {
     // Arrange
     const sudoPassword = "mysecretpass"
-    const remoteTmpPath = "/tmp/paratix-write.MASKSECRET"
+    const remoteTmpPath = "/etc/paratix-write.MASKSECRET"
 
     // exec spy: mktemp succeeds, mv succeeds, rm -f fails with an error that
     // contains the sudo password in plain text (simulates a verbose error message)
@@ -393,7 +393,7 @@ describe("SshConnectionImpl.uploadFile — cleanup error secret masking", () => 
   it("masks sudo password in cleanup error message for uploadFile", async () => {
     // Arrange
     const sudoPassword = "upload-secret-pw"
-    const remoteTmpPath = "/tmp/paratix-upload.MASKSECRET"
+    const remoteTmpPath = "/etc/paratix-upload.MASKSECRET"
 
     // exec spy: mktemp succeeds, mv succeeds, rm -f fails with an error that
     // contains the sudo password in plain text (simulates a verbose error message)

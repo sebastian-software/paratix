@@ -3,7 +3,7 @@ import { randomUUID, timingSafeEqual } from "node:crypto"
 import { unlinkSync, writeFileSync } from "node:fs"
 import { readFile, stat } from "node:fs/promises"
 import { tmpdir } from "node:os"
-import { join } from "node:path"
+import { join, posix } from "node:path"
 import { Client, type ClientChannel } from "ssh2"
 
 import type { ExecOptions, ExecResult, SshConfig, SshConnection } from "./types.js"
@@ -25,12 +25,16 @@ export { shellQuote, validateMode }
 /**
  * Validate that a path returned by `mktemp` matches the expected paratix pattern.
  *
+ * @param directory - The target directory in which the temp file must be created.
  * @param path - The raw `mktemp` output to validate.
+ * @param prefix - The expected Paratix temp-file prefix.
  * @returns The validated path.
  * @throws {Error} When the path does not match the expected pattern.
  */
-function validateMktempPath(path: string): string {
-  if (!/^\/tmp\/paratix-[\w.\-]+$/v.test(path)) {
+function validateMktempPath(directory: string, path: string, prefix: string): string {
+  const normalizedDirectory = directory === "/" ? "" : directory
+  const expectedPrefix = `${normalizedDirectory}/${prefix}.`
+  if (!path.startsWith(expectedPrefix) || path.includes("\n") || path.endsWith("/")) {
     throw new Error(`Unexpected mktemp output: ${path}`)
   }
   return path
@@ -125,7 +129,10 @@ export class SshConnectionImpl implements SshConnection {
     let sourcePath = remotePath
     try {
       if (this.config.user !== "root") {
-        sourcePath = await this.createRemoteTempPath("mktemp /tmp/paratix-download.XXXXXX")
+        sourcePath = await this.createRemoteTempPath(
+          "mktemp /tmp/paratix-download.XXXXXX",
+          "paratix-download"
+        )
         await this.exec(`cat ${shellQuote(remotePath)} > ${shellQuote(sourcePath)}`, {
           silent: true,
         })
@@ -307,7 +314,7 @@ export class SshConnectionImpl implements SshConnection {
     options?: { mode?: string }
   ): Promise<void> {
     const client = this.ensureClient()
-    const temporaryPath = await this.createRemoteTempPath("mktemp /tmp/paratix-upload.XXXXXX")
+    const temporaryPath = await this.createRemoteTempPathInDestination(remotePath, "paratix-upload")
     const temporaryMode = options?.mode ?? "0600"
     try {
       await sftpUpload(client, localPath, temporaryPath)
@@ -343,7 +350,10 @@ export class SshConnectionImpl implements SshConnection {
   ): Promise<void> {
     const client = this.ensureClient()
     const localTemporary = join(tmpdir(), `paratix-write-${randomUUID()}`)
-    const remoteTemporary = await this.createRemoteTempPath("mktemp /tmp/paratix-write.XXXXXX")
+    const remoteTemporary = await this.createRemoteTempPathInDestination(
+      remotePath,
+      "paratix-write"
+    )
     const temporaryMode = options?.mode ?? "0600"
     try {
       // eslint-disable-next-line security/detect-non-literal-fs-filename
@@ -429,12 +439,26 @@ export class SshConnectionImpl implements SshConnection {
     )
   }
 
-  private async createRemoteTempPath(command: string): Promise<string> {
+  private async createRemoteTempPath(command: string, prefix: string): Promise<string> {
     const path =
       this.config.user === "root"
         ? await this.output(command)
         : await this.outputWithoutSudo(command)
-    return validateMktempPath(path)
+    return validateMktempPath("/tmp", path, prefix)
+  }
+
+  private async createRemoteTempPathInDestination(
+    remotePath: string,
+    prefix: string
+  ): Promise<string> {
+    const directory = posix.dirname(remotePath)
+    const template = `${directory}/${prefix}.XXXXXX`
+    const command = `mktemp ${shellQuote(template)}`
+    const path =
+      this.config.user === "root"
+        ? await this.output(command)
+        : await this.outputWithoutSudo(command)
+    return validateMktempPath(directory, path, prefix)
   }
 
   private createSettledCallbacks<T>(
