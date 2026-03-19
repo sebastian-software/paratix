@@ -164,6 +164,14 @@ describe("ssh.authorizedKeys", () => {
     )
   })
 
+  it("regression: apply resets ownership and mode after removing a key (state: absent)", async () => {
+    const mockSsh = createMockSsh(aliceResponses())
+    const mod = ssh.authorizedKeys("alice", testKey, { state: "absent" })
+    const result = await mod.apply(mockSsh, emptyEnv)
+    expect(result.status).toBe("changed")
+    expect(mockSsh.calls).toContain(`chmod 600 ${aliceKeys} && chown 'alice':'alice' ${aliceKeys}`)
+  })
+
   it("apply returns failed when ssh is null", async () => {
     const mod = ssh.authorizedKeys("alice", testKey)
     const conn = null

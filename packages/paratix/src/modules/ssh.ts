@@ -59,6 +59,10 @@ export const ssh = {
             `{ grep -vF -- ${shellQuote(key)} ${authKeysPath} || true; } > ${temporaryPath} && mv ${temporaryPath} ${authKeysPath}`,
             { silent: true }
           )
+          await conn.exec(
+            `chmod 600 ${authKeysPath} && chown ${shellQuote(user)}:${shellQuote(user)} ${authKeysPath}`,
+            { silent: true }
+          )
         }
 
         return { status: "changed" }
