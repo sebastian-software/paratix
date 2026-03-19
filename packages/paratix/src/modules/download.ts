@@ -51,9 +51,24 @@ function buildDownloadParameters(
   }
 }
 
-function buildLargeDownloadFlagName(url: string): string {
-  const urlHash = createHash("sha256").update(url).digest("hex")
-  return `download-${urlHash}`
+function canonicalizeHeaders(headers?: Record<string, string>): string {
+  return JSON.stringify(
+    Object.entries(headers ?? {}).sort(([leftName], [rightName]) =>
+      leftName.localeCompare(rightName)
+    )
+  )
+}
+
+function buildLargeDownloadFlagName(
+  parameters: Pick<DownloadParameters, "destination" | "headers" | "url">
+): string {
+  const flagKey = JSON.stringify({
+    destination: parameters.destination,
+    headers: canonicalizeHeaders(parameters.headers),
+    url: parameters.url,
+  })
+  const flagHash = createHash("sha256").update(flagKey).digest("hex")
+  return `download-${flagHash}`
 }
 
 function validateIntegrityConfiguration(
@@ -374,8 +389,8 @@ export const download = {
     validateHttpUrl(url, { allowHttp: resolvedOptions.allowInsecureHttp })
     if (resolvedOptions.sha256 != null) validateSha256(resolvedOptions.sha256)
     validateIntegrityConfiguration("download.large", resolvedOptions)
-    const flagName = buildLargeDownloadFlagName(url)
     const downloadParameters = buildDownloadParameters(destination, resolvedOptions, url)
+    const flagName = buildLargeDownloadFlagName(downloadParameters)
 
     return {
       async apply(conn: null | SshConnection): Promise<ModuleResult> {
@@ -394,6 +409,9 @@ export const download = {
 
         const flagExists = await hasFlag(conn, flagName)
         if (!flagExists) return NEEDS_APPLY
+
+        const destinationExists = await conn.exists(destination)
+        if (!destinationExists) return NEEDS_APPLY
 
         if (resolvedOptions.sha256 != null) {
           const actualHash = await conn.sha256(destination)

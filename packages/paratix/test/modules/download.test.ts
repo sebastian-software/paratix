@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto"
 import { describe, expect, it } from "vitest"
 
 import type { ExecOptions } from "../../src/types.js"
@@ -7,6 +8,23 @@ import { createMockSsh } from "../helpers/mockSsh.js"
 
 const emptyEnv = {}
 const allowUnverifiedDownload = { allowUnverifiedDownload: true } as const
+
+function buildLargeDownloadFlagName(parameters: {
+  destination: string
+  headers?: Record<string, string>
+  url: string
+}): string {
+  const flagKey = JSON.stringify({
+    destination: parameters.destination,
+    headers: JSON.stringify(
+      Object.entries(parameters.headers ?? {}).sort(([leftName], [rightName]) =>
+        leftName.localeCompare(rightName)
+      )
+    ),
+    url: parameters.url,
+  })
+  return `download-${createHash("sha256").update(flagKey).digest("hex")}`
+}
 
 type MockSshWithOptions = {
   exec: (
@@ -584,9 +602,7 @@ describe("download.large", () => {
   const destination = "/opt/data/large-file.iso"
   const temporaryDestination = "/opt/data/.paratix-download.LARGE1"
   const url = "https://example.com/large-file.iso"
-  // SHA-256 of the URL, matching the flag name computed in the implementation
-  const urlHash = "b7c3ff8df8e2258a442ec7d03db1667124ea34ff39bd3197136e4238fab27fb3"
-  const flagName = `download-${urlHash}`
+  const flagName = buildLargeDownloadFlagName({ destination, url })
 
   describe("check", () => {
     it("returns needs-apply when conn is null", async () => {
@@ -597,6 +613,7 @@ describe("download.large", () => {
 
     it("returns ok when flag file exists", async () => {
       const mockSsh = createMockSsh({
+        [`[ -e '${destination}' ]`]: { code: 0 },
         [`[ -f /var/lib/paratix/flags/'${flagName}' ]`]: { code: 0 },
       })
       const mod = download.large(destination, url, allowUnverifiedDownload)
@@ -607,6 +624,16 @@ describe("download.large", () => {
     it("returns needs-apply when flag file does not exist", async () => {
       const mockSsh = createMockSsh({
         [`[ -f /var/lib/paratix/flags/'${flagName}' ]`]: { code: 1 },
+      })
+      const mod = download.large(destination, url, allowUnverifiedDownload)
+      const result = await mod.check(mockSsh, emptyEnv)
+      expect(result).toBe("needs-apply")
+    })
+
+    it("returns needs-apply when flag exists but destination file is missing", async () => {
+      const mockSsh = createMockSsh({
+        [`[ -e '${destination}' ]`]: { code: 1 },
+        [`[ -f /var/lib/paratix/flags/'${flagName}' ]`]: { code: 0 },
       })
       const mod = download.large(destination, url, allowUnverifiedDownload)
       const result = await mod.check(mockSsh, emptyEnv)
@@ -808,6 +835,30 @@ describe("download.large", () => {
       const curlCall = mock.execCalls.find(({ command }) => command.startsWith("curl"))
       expect(curlCall).toBeDefined()
       expect(curlCall?.options?.secrets).toStrictEqual([])
+    })
+
+    it("uses distinct flag names for the same URL with different destinations", () => {
+      const otherDestination = "/srv/cache/large-file.iso"
+
+      expect(buildLargeDownloadFlagName({ destination, url })).not.toBe(
+        buildLargeDownloadFlagName({ destination: otherDestination, url })
+      )
+    })
+
+    it("uses distinct flag names for the same URL and destination with different headers", () => {
+      expect(
+        buildLargeDownloadFlagName({
+          destination,
+          headers: { Authorization: "Bearer token-a" },
+          url,
+        })
+      ).not.toBe(
+        buildLargeDownloadFlagName({
+          destination,
+          headers: { Authorization: "Bearer token-b" },
+          url,
+        })
+      )
     })
   })
 })
