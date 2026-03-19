@@ -2404,5 +2404,41 @@ describe("SshConnectionImpl", () => {
       // The wrapper is always present for host-key pinning, even without an original verifier
       expect(callArgs.hostVerifier).toBeTypeOf("function")
     })
+
+    it("awaits pendingPersist when accept-new sets it during host verification", async () => {
+      const { buildHostVerifier } = await import("../src/knownHosts.js")
+      let resolvePersist: (() => void) | undefined
+      const pendingPersist = new Promise<void>((resolve) => {
+        resolvePersist = resolve
+      })
+      const verifierResult: {
+        hostVerifier: (key: Buffer) => boolean
+        pendingPersist?: Promise<void>
+      } = {
+        hostVerifier: vi.fn((key: Buffer) => {
+          verifierResult.pendingPersist = pendingPersist
+          return key.length > 0
+        }),
+      }
+      vi.mocked(buildHostVerifier).mockReturnValue(verifierResult)
+      vi.mocked(tryConnectOnPort).mockImplementationOnce(async ({ hostVerifier }) => {
+        hostVerifier?.(Buffer.from("accepted-host-key"))
+        await Promise.resolve()
+      })
+
+      const ssh = makeSshInstance({ host: "1.2.3.4", ports: [22] })
+      let connected = false
+      const connectPromise = ssh.connect().then(() => {
+        connected = true
+      })
+
+      await Promise.resolve()
+      await Promise.resolve()
+      expect(connected).toBe(false)
+
+      resolvePersist?.()
+      await connectPromise
+      expect(connected).toBe(true)
+    })
   })
 })

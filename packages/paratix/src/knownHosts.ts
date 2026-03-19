@@ -11,6 +11,11 @@ type HostVerifierOptions = {
   expectedHostPublicKey?: string
 }
 
+export type HostVerifierResult = {
+  hostVerifier?: (key: Buffer) => boolean
+  pendingPersist?: Promise<void>
+}
+
 type HostLocation = {
   host: string
   port: number
@@ -376,7 +381,7 @@ export function buildHostVerifier(
   mode: "accept-new" | "no" | "yes",
   location: HostLocation,
   options: HostVerifierOptions = {}
-): { hostVerifier?: (key: Buffer) => boolean; pendingPersist?: Promise<void> } {
+): HostVerifierResult {
   const { host, port } = location
   if (mode === "no" && !hasPinnedHostTrustAnchor(options)) return {}
 
@@ -384,7 +389,7 @@ export function buildHostVerifier(
   const fileEntries = findMatchingEntries(entries, host, port)
   const cachedKey = inMemoryHostKeys.get(formatHostNeedle(host, port)) ?? null
 
-  const result: { hostVerifier: (key: Buffer) => boolean; pendingPersist?: Promise<void> } = {
+  const result: { hostVerifier: (key: Buffer) => boolean } & HostVerifierResult = {
     hostVerifier(key: Buffer): boolean {
       if (
         mode !== "no" &&
