@@ -11,7 +11,8 @@ const { version } = packageJson as { version: string }
 export default defineConfig({
   define: { PACKAGE_VERSION: JSON.stringify(version) },
   test: {
-    exclude: ["test/integration/**/*.test.ts"],
-    include: ["test/**/*.test.ts"],
+    hookTimeout: 180_000,
+    include: ["test/integration/**/*.test.ts"],
+    testTimeout: 180_000,
   },
 })

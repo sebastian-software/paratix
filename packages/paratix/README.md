@@ -373,6 +373,21 @@ Import these from `"paratix"`:
 
 This package includes an `llm-guide.md` file that provides detailed information for writing Paratix modules and playbooks. It covers the complete API reference, code patterns, and common mistakes to avoid. When using an LLM to generate Paratix code, point it at this file for best results.
 
+## Integration tests
+
+Paratix ships a separate integration test entry point for real SSH/SFTP checks:
+
+```bash
+pnpm --filter paratix test:integration
+```
+
+These tests are intentionally not part of the default unit test run. They require:
+
+- `colima` to be installed and running
+- a working Docker CLI connected to the active Colima runtime
+
+The integration suite starts a temporary SSH test container, runs the tests against it and removes the container again afterwards. If `colima` is missing, the suite aborts with a clear error message instead of hanging or silently skipping coverage.
+
 ## License
 
 MIT

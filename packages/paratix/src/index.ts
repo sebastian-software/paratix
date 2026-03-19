@@ -1,4 +1,28 @@
 export { assert, debug, fail, pause, when } from "./builtins.js"
+export {
+  apt,
+  archive,
+  command,
+  cron,
+  download,
+  file,
+  git,
+  group,
+  hostname,
+  mount,
+  op,
+  package,
+  releaseUpgrade,
+  rsync,
+  service,
+  ssh,
+  sshd,
+  sysctl,
+  system,
+  systemd,
+  ufw,
+  user,
+} from "./modules/index.js"
 export { recipe } from "./recipe.js"
 /**
  * Paratix — public API entry point.

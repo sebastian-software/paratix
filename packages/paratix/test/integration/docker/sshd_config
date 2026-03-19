@@ -1,0 +1,17 @@
+Port 22
+Port 2222
+ListenAddress 0.0.0.0
+HostKey /etc/ssh/ssh_host_ed25519_key
+HostKey /etc/ssh/ssh_host_rsa_key
+AuthorizedKeysFile .ssh/authorized_keys
+PubkeyAuthentication yes
+PasswordAuthentication no
+KbdInteractiveAuthentication no
+ChallengeResponseAuthentication no
+UsePAM no
+PermitRootLogin prohibit-password
+AllowUsers paratix root
+PermitUserEnvironment no
+PidFile /run/sshd.pid
+Subsystem sftp internal-sftp
+LogLevel VERBOSE
