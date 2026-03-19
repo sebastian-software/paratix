@@ -122,14 +122,23 @@ export class SshConnectionImpl implements SshConnection {
   public async downloadFile(remotePath: string, localPath: string): Promise<void> {
     const client = this.ensureClient()
     let sourcePath = remotePath
-    if (this.config.user !== "root") {
-      sourcePath = validateMktempPath(await this.output("mktemp /tmp/paratix-download.XXXXXX"))
-      await this.exec(`cp ${shellQuote(remotePath)} ${shellQuote(sourcePath)}`, { silent: true })
-      await this.exec(`chmod 600 ${shellQuote(sourcePath)}`, { silent: true })
-    }
-    await sftpDownload(client, sourcePath, localPath)
-    if (sourcePath !== remotePath) {
-      await this.exec(`rm -f ${shellQuote(sourcePath)}`, { silent: true })
+    try {
+      if (this.config.user !== "root") {
+        sourcePath = validateMktempPath(await this.output("mktemp /tmp/paratix-download.XXXXXX"))
+        await this.exec(`cp ${shellQuote(remotePath)} ${shellQuote(sourcePath)}`, { silent: true })
+        await this.exec(`chmod 600 ${shellQuote(sourcePath)}`, { silent: true })
+      }
+      await sftpDownload(client, sourcePath, localPath)
+    } finally {
+      if (sourcePath !== remotePath) {
+        try {
+          await this.exec(`rm -f ${shellQuote(sourcePath)}`, { silent: true })
+        } catch (cleanupError) {
+          process.stderr.write(
+            `Warning: failed to remove temp file ${sourcePath}: ${maskSecrets(String(cleanupError), this.buildSecrets())}\n`
+          )
+        }
+      }
     }
   }
 

@@ -1532,6 +1532,19 @@ describe("SshConnectionImpl", () => {
   // -------------------------------------------------------------------------
 
   describe("downloadFile", () => {
+    function makeExecHandler(
+      executedCommands: string[],
+      output: string
+    ): (_command: string, callback: ExecCallback) => void {
+      return (cmd: string, callback: ExecCallback) => {
+        executedCommands.push(cmd)
+        const stream = makeStream()
+        callback(undefined, stream)
+        stream.emit("data", Buffer.from(output))
+        stream.emit("close", 0)
+      }
+    }
+
     it("downloads directly via SFTP for root user", async () => {
       const execSpy = vi.fn()
       const client = makeClientWithExecSpy(execSpy)
@@ -1599,26 +1612,16 @@ describe("SshConnectionImpl", () => {
       const executedCommands: string[] = []
       const mktempOutput = "/tmp/paratix-download.ABCDEF"
 
-      function makeExecHandler(output: string): (_command: string, callback: ExecCallback) => void {
-        return (cmd: string, callback: ExecCallback) => {
-          executedCommands.push(cmd)
-          const stream = makeStream()
-          callback(undefined, stream)
-          stream.emit("data", Buffer.from(output))
-          stream.emit("close", 0)
-        }
-      }
-
       const execSpy = vi
         .fn()
         // First call: mktemp (via output()) — returns temp path
-        .mockImplementationOnce(makeExecHandler(mktempOutput))
+        .mockImplementationOnce(makeExecHandler(executedCommands, mktempOutput))
         // Second call: cp
-        .mockImplementationOnce(makeExecHandler(""))
+        .mockImplementationOnce(makeExecHandler(executedCommands, ""))
         // Third call: chmod
-        .mockImplementationOnce(makeExecHandler(""))
+        .mockImplementationOnce(makeExecHandler(executedCommands, ""))
         // Fourth call: rm -f
-        .mockImplementationOnce(makeExecHandler(""))
+        .mockImplementationOnce(makeExecHandler(executedCommands, ""))
 
       const client = makeClientWithExecSpy(execSpy)
       const ssh = makeConnectedSsh(client, { user: "deploy" })
@@ -1635,6 +1638,38 @@ describe("SshConnectionImpl", () => {
         "/tmp/local-secure"
       )
       expect(executedCommands.some((cmd) => cmd.includes("rm -f"))).toBe(true)
+    })
+
+    it("cleans up the remote temp file even when sftpDownload rejects (regression)", async () => {
+      // Arrange
+      const mktempOutput = "/tmp/paratix-download.CLEANUP"
+      const executedCommands: string[] = []
+
+      const execSpy = vi
+        .fn()
+        // First call: mktemp (via output()) — returns temp path
+        .mockImplementationOnce(makeExecHandler(executedCommands, mktempOutput))
+        // Second call: cp
+        .mockImplementationOnce(makeExecHandler(executedCommands, ""))
+        // Third call: chmod
+        .mockImplementationOnce(makeExecHandler(executedCommands, ""))
+        // Fourth call: rm -f (cleanup in finally)
+        .mockImplementationOnce(makeExecHandler(executedCommands, ""))
+
+      vi.mocked(sftpDownload).mockRejectedValueOnce(new Error("SFTP transfer failed"))
+
+      const client = makeClientWithExecSpy(execSpy)
+      const ssh = makeConnectedSsh(client, { user: "nonroot" })
+
+      // Act
+      await expect(ssh.downloadFile("/var/log/secure", "/tmp/local-secure")).rejects.toThrow(
+        "SFTP transfer failed"
+      )
+
+      // Assert: rm -f must have been called for the temp file despite the SFTP error
+      const rmCommand = executedCommands.find((cmd) => cmd.includes("rm -f"))
+      expect(rmCommand).toBeDefined()
+      expect(rmCommand).toContain(mktempOutput)
     })
   })
 
