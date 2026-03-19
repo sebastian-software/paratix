@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest"
+import { describe, expect, it, vi } from "vitest"
 
 import { computeFingerprint } from "../../src/knownHosts.js"
 import { ssh } from "../../src/modules/ssh.js"
@@ -134,7 +134,7 @@ describe("ssh.authorizedKeys", () => {
   const aliceHome = "/home/alice"
   const aliceDir = `'/home/alice/.ssh'`
   const aliceKeys = `'/home/alice/.ssh/authorized_keys'`
-  const aliceKeysTmp = `'/home/alice/.ssh/authorized_keys.tmp'`
+  const tempPath = "/run/paratix/authorized-keys.ABCDEF"
 
   function aliceResponses(
     extra?: Record<string, Partial<{ code: number; stderr: string; stdout: string }>>
@@ -196,33 +196,122 @@ describe("ssh.authorizedKeys", () => {
   })
 
   it("apply creates directory, adds key with correct permissions (state: present)", async () => {
-    const mockSsh = createMockSsh(aliceResponses())
+    const mockSsh = createMockSsh(
+      aliceResponses({
+        "mktemp /run/paratix/authorized-keys.XXXXXX": { stdout: tempPath },
+      })
+    )
     const mod = ssh.authorizedKeys("alice", testKey)
     const result = await mod.apply(mockSsh, emptyEnv)
     expect(result.status).toBe("changed")
     expect(mockSsh.calls).toContain(
       `mkdir -p ${aliceDir} && chmod 700 ${aliceDir} && chown 'alice':'alice' ${aliceDir}`
     )
-    expect(mockSsh.calls).toContain(`printf '%s\\n' '${testKey}' >> ${aliceKeys}`)
-    expect(mockSsh.calls).toContain(`chmod 600 ${aliceKeys} && chown 'alice':'alice' ${aliceKeys}`)
+    expect(mockSsh.calls).toContain("install -d -m 700 /run/paratix")
+    expect(mockSsh.calls).toContain(
+      `[ ! -L ${aliceKeys} ] || { echo 'authorized_keys must not be a symlink' >&2; exit 1; }`
+    )
+    expect(mockSsh.calls).toContain("mktemp /run/paratix/authorized-keys.XXXXXX")
+    expect(mockSsh.calls).toContain(
+      `{ if [ -f ${aliceKeys} ]; then cat ${aliceKeys}; fi; printf '%s\\n' '${testKey}'; } > '${tempPath}'`
+    )
+    expect(mockSsh.calls).not.toContain(`printf '%s\\n' '${testKey}' >> ${aliceKeys}`)
+    expect(mockSsh.calls).toContain(
+      `chmod 600 '${tempPath}' && chown 'alice':'alice' '${tempPath}' && mv '${tempPath}' ${aliceKeys} && chmod 600 ${aliceKeys} && chown 'alice':'alice' ${aliceKeys}`
+    )
+    expect(mockSsh.calls).toContain(`rm -f '${tempPath}'`)
   })
 
   it("apply removes key with grep -vF || true pattern (state: absent)", async () => {
-    const mockSsh = createMockSsh(aliceResponses())
+    const mockSsh = createMockSsh(
+      aliceResponses({
+        "mktemp /run/paratix/authorized-keys.XXXXXX": { stdout: tempPath },
+      })
+    )
     const mod = ssh.authorizedKeys("alice", testKey, { state: "absent" })
     const result = await mod.apply(mockSsh, emptyEnv)
     expect(result.status).toBe("changed")
     expect(mockSsh.calls).toContain(
-      `{ grep -vF -- '${testKey}' ${aliceKeys} || true; } > ${aliceKeysTmp} && mv ${aliceKeysTmp} ${aliceKeys}`
+      `{ if [ -f ${aliceKeys} ]; then grep -vF -- '${testKey}' ${aliceKeys} || true; fi; } > '${tempPath}'`
     )
   })
 
   it("regression: apply resets ownership and mode after removing a key (state: absent)", async () => {
-    const mockSsh = createMockSsh(aliceResponses())
+    const mockSsh = createMockSsh(
+      aliceResponses({
+        "mktemp /run/paratix/authorized-keys.XXXXXX": { stdout: tempPath },
+      })
+    )
     const mod = ssh.authorizedKeys("alice", testKey, { state: "absent" })
     const result = await mod.apply(mockSsh, emptyEnv)
     expect(result.status).toBe("changed")
-    expect(mockSsh.calls).toContain(`chmod 600 ${aliceKeys} && chown 'alice':'alice' ${aliceKeys}`)
+    expect(mockSsh.calls).toContain(
+      `chmod 600 '${tempPath}' && chown 'alice':'alice' '${tempPath}' && mv '${tempPath}' ${aliceKeys} && chmod 600 ${aliceKeys} && chown 'alice':'alice' ${aliceKeys}`
+    )
+  })
+
+  it("rejects when authorized_keys is a symlink", async () => {
+    const base = createMockSsh(
+      aliceResponses({
+        [`[ ! -L ${aliceKeys} ] || { echo 'authorized_keys must not be a symlink' >&2; exit 1; }`]:
+          {
+            code: 1,
+            stderr: "authorized_keys must not be a symlink",
+          },
+      })
+    )
+    const mockSsh = {
+      ...base,
+      exec: vi
+        .fn()
+        .mockImplementationOnce(async (command: string) => {
+          base.calls.push(command)
+          await Promise.resolve()
+          return { code: 0, stderr: "", stdout: "" }
+        })
+        .mockImplementationOnce(async (command: string) => {
+          base.calls.push(command)
+          await Promise.resolve()
+          throw new Error("Command failed")
+        }),
+    }
+    const mod = ssh.authorizedKeys("alice", testKey)
+
+    await expect(mod.apply(mockSsh, emptyEnv)).rejects.toThrow("Command failed")
+    expect(mockSsh.calls).not.toContain("mktemp /run/paratix/authorized-keys.XXXXXX")
+  })
+
+  it("uses a root-controlled mktemp path instead of a fixed authorized_keys.tmp file", async () => {
+    const mockSsh = createMockSsh(
+      aliceResponses({
+        "mktemp /run/paratix/authorized-keys.XXXXXX": { stdout: tempPath },
+      })
+    )
+    const mod = ssh.authorizedKeys("alice", testKey)
+
+    const result = await mod.apply(mockSsh, emptyEnv)
+
+    expect(result.status).toBe("changed")
+    expect(mockSsh.calls).not.toContain(`mktemp ${aliceHome}/.ssh/authorized_keys.XXXXXX`)
+    expect(mockSsh.calls).not.toContain(`mktemp ${aliceHome}/.ssh/authorized_keys.tmp.XXXXXX`)
+    expect(mockSsh.calls).not.toContain(`${aliceHome}/.ssh/authorized_keys.tmp`)
+    expect(mockSsh.calls).toContain("install -d -m 700 /run/paratix")
+    expect(mockSsh.calls).toContain("mktemp /run/paratix/authorized-keys.XXXXXX")
+  })
+
+  it("keeps temporary authorized_keys rewrites out of the user-controlled .ssh directory", async () => {
+    const mockSsh = createMockSsh(
+      aliceResponses({
+        "mktemp /run/paratix/authorized-keys.XXXXXX": { stdout: tempPath },
+      })
+    )
+    const mod = ssh.authorizedKeys("alice", testKey, { state: "absent" })
+
+    const result = await mod.apply(mockSsh, emptyEnv)
+
+    expect(result.status).toBe("changed")
+    expect(mockSsh.calls).not.toContain(`mktemp ${aliceHome}/.ssh/authorized_keys.XXXXXX`)
+    expect(mockSsh.calls).not.toContain(`mktemp ${aliceHome}/.ssh/authorized_keys.tmp.XXXXXX`)
   })
 
   it("apply returns failed when ssh is null", async () => {
@@ -269,6 +358,7 @@ describe("ssh.authorizedKeys", () => {
     const spaceyHome = "/home/my user"
     const mockSsh = createMockSsh({
       "getent passwd 'alice' | cut -d: -f6": { stdout: spaceyHome },
+      "mktemp /run/paratix/authorized-keys.XXXXXX": { stdout: tempPath },
     })
     const mod = ssh.authorizedKeys("alice", testKey)
     const result = await mod.apply(mockSsh, emptyEnv)
@@ -277,13 +367,13 @@ describe("ssh.authorizedKeys", () => {
     expect(mockSsh.calls).toContain(
       `mkdir -p '/home/my user/.ssh' && chmod 700 '/home/my user/.ssh' && chown 'alice':'alice' '/home/my user/.ssh'`
     )
-    // Key append must quote the space-containing path
+    // Temp rewrite command must quote the space-containing path
     expect(mockSsh.calls).toContain(
-      `printf '%s\\n' '${testKey}' >> '/home/my user/.ssh/authorized_keys'`
+      `{ if [ -f '/home/my user/.ssh/authorized_keys' ]; then cat '/home/my user/.ssh/authorized_keys'; fi; printf '%s\\n' '${testKey}'; } > '${tempPath}'`
     )
     // Chmod must quote the space-containing path
     expect(mockSsh.calls).toContain(
-      `chmod 600 '/home/my user/.ssh/authorized_keys' && chown 'alice':'alice' '/home/my user/.ssh/authorized_keys'`
+      `chmod 600 '${tempPath}' && chown 'alice':'alice' '${tempPath}' && mv '${tempPath}' '/home/my user/.ssh/authorized_keys' && chmod 600 '/home/my user/.ssh/authorized_keys' && chown 'alice':'alice' '/home/my user/.ssh/authorized_keys'`
     )
   })
 })
