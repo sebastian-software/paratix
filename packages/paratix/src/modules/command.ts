@@ -1,7 +1,6 @@
 import { printCommandError } from "../output.js"
+import { maskSecrets } from "../sshHelpers.js"
 import { type Module, type ModuleResult, NEEDS_APPLY, type SshConnection } from "../types.js"
-
-const MAX_NAME_LENGTH = 50
 
 /**
  * Modules for running arbitrary shell commands on the remote host.
@@ -18,8 +17,8 @@ export const command = {
    * @param options - Optional configuration for the command.
    * @param options.check - An optional shell expression used as the idempotency guard.
    *   If it exits `0`, the command is considered already done.
-   * @param options.name - An optional display name shown in the run output instead of
-   *   the truncated command string.
+   * @param options.name - An optional display name shown in the run output.
+   * @param options.secrets - Secret values that must be redacted from command output.
    * @returns A Module that executes the shell command.
    *
    * @example
@@ -28,13 +27,21 @@ export const command = {
    *   name: "install my-tool",
    * })
    */
-  shell(cmd: string, options?: { check?: string; name?: string }): Module {
+  shell(cmd: string, options?: { check?: string; name?: string; secrets?: string[] }): Module {
     return {
       async apply(ssh: null | SshConnection): Promise<ModuleResult> {
         if (!ssh) return { status: "failed" }
-        const result = await ssh.exec(cmd, { ignoreExitCode: true, silent: true })
+        const secrets = options?.secrets ?? []
+        const result = await ssh.exec(cmd, {
+          ignoreExitCode: true,
+          secrets,
+          silent: true,
+        })
         if (result.code !== 0) {
-          printCommandError(result.stdout, result.stderr)
+          printCommandError(
+            maskSecrets(result.stdout, secrets),
+            maskSecrets(result.stderr, secrets)
+          )
           return { status: "failed" }
         }
         return { status: "changed" }
@@ -44,7 +51,7 @@ export const command = {
         if (options?.check == null) return NEEDS_APPLY
         return (await ssh.test(options.check)) ? "ok" : NEEDS_APPLY
       },
-      name: options?.name ?? `command.shell: ${cmd.slice(0, MAX_NAME_LENGTH)}`,
+      name: options?.name ?? "command.shell",
     }
   },
 }

@@ -1,5 +1,7 @@
 import { describe, expect, it, vi } from "vitest"
 
+import type { ExecOptions } from "../../src/types.js"
+
 import { command } from "../../src/modules/command.js"
 import { printCommandError } from "../../src/output.js"
 import { createMockSsh } from "../helpers/mockSsh.js"
@@ -9,6 +11,29 @@ const emptyEnv = {}
 vi.mock("../../src/output.js", () => ({
   printCommandError: vi.fn(),
 }))
+
+type MockSshWithOptions = {
+  exec: (
+    command: string,
+    options?: ExecOptions
+  ) => Promise<{ code: number; stderr: string; stdout: string }>
+  execCalls: Array<{ command: string; options?: ExecOptions }>
+} & ReturnType<typeof createMockSsh>
+
+function createMockSshWithOptions(
+  responses?: Record<string, { code?: number; stderr?: string; stdout?: string }>
+): MockSshWithOptions {
+  const base = createMockSsh(responses)
+  const execCalls: Array<{ command: string; options?: ExecOptions }> = []
+  return {
+    ...base,
+    exec: async (remoteCommand: string, options?: ExecOptions) => {
+      execCalls.push({ command: remoteCommand, options })
+      return base.exec(remoteCommand, options)
+    },
+    execCalls,
+  }
+}
 
 // ---------------------------------------------------------------------------
 // apply — null ssh
@@ -60,6 +85,29 @@ describe("command.shell — apply with non-zero exit code", () => {
     expect(printCommandError).toHaveBeenCalledOnce()
     expect(printCommandError).toHaveBeenCalledWith("some output", "some error")
   })
+
+  it("passes secrets to ssh.exec and masks leaked stdout/stderr before printing", async () => {
+    vi.mocked(printCommandError).mockClear()
+
+    const secret = "super-secret-token"
+    const mockSsh = createMockSshWithOptions({
+      [`deploy --token ${secret}`]: {
+        code: 1,
+        stderr: `stderr leaked ${secret}`,
+        stdout: `stdout leaked ${secret}`,
+      },
+    })
+    const mod = command.shell(`deploy --token ${secret}`, { secrets: [secret] })
+    await mod.apply(mockSsh, emptyEnv)
+
+    expect(mockSsh.execCalls).toHaveLength(1)
+    expect(mockSsh.execCalls[0]?.options?.secrets).toStrictEqual([secret])
+    expect(printCommandError).toHaveBeenCalledOnce()
+    expect(printCommandError).toHaveBeenCalledWith(
+      "stdout leaked [REDACTED]",
+      "stderr leaked [REDACTED]"
+    )
+  })
 })
 
 // ---------------------------------------------------------------------------
@@ -105,14 +153,14 @@ describe("command.shell — name", () => {
     expect(mod.name).toBe("greet")
   })
 
-  it("uses truncated command as default name", () => {
+  it("uses a generic default name instead of the raw command", () => {
     const mod = command.shell("echo hello")
-    expect(mod.name).toBe("command.shell: echo hello")
+    expect(mod.name).toBe("command.shell")
   })
 
-  it("truncates long commands to 50 characters in default name", () => {
-    const longCmd = "a".repeat(60)
-    const mod = command.shell(longCmd)
-    expect(mod.name).toBe(`command.shell: ${"a".repeat(50)}`)
+  it("does not expose secrets from the command line in the default name", () => {
+    const mod = command.shell("deploy --token super-secret-token")
+    expect(mod.name).toBe("command.shell")
+    expect(mod.name).not.toContain("super-secret-token")
   })
 })
