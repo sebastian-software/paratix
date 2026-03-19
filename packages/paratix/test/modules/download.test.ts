@@ -36,6 +36,7 @@ function createMockSshWithOptions(): MockSshWithOptions {
 
 describe("download.url", () => {
   const destination = "/usr/local/bin/mytool"
+  const temporaryDestination = "/usr/local/bin/.paratix-download.ABC123"
   const url = "https://example.com/mytool"
   const sha256 = "deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef"
 
@@ -98,11 +99,16 @@ describe("download.url", () => {
 
   describe("apply", () => {
     it("downloads file via curl and returns changed", async () => {
-      const mockSsh = createMockSsh()
+      const mockSsh = createMockSsh({
+        [`mktemp "$(dirname '${destination}')/.paratix-download.XXXXXX"`]: {
+          stdout: `${temporaryDestination}\n`,
+        },
+      })
       const mod = download.url(destination, url)
       const result = await mod.apply(mockSsh, emptyEnv)
       expect(result.status).toBe("changed")
-      expect(mockSsh.calls).toContain(`curl -fsSL -o '${destination}' '${url}'`)
+      expect(mockSsh.calls).toContain(`curl -fsSL -o '${temporaryDestination}' '${url}'`)
+      expect(mockSsh.calls).toContain(`mv '${temporaryDestination}' '${destination}'`)
     })
 
     it("creates target directory via mkdir -p", async () => {
@@ -113,53 +119,76 @@ describe("download.url", () => {
     })
 
     it("sets mode via chmod when mode is specified", async () => {
-      const mockSsh = createMockSsh()
+      const mockSsh = createMockSsh({
+        [`mktemp "$(dirname '${destination}')/.paratix-download.XXXXXX"`]: {
+          stdout: `${temporaryDestination}\n`,
+        },
+      })
       const mod = download.url(destination, url, { mode: "0755" })
       const result = await mod.apply(mockSsh, emptyEnv)
       expect(result.status).toBe("changed")
-      expect(mockSsh.calls).toContain(`chmod '0755' '${destination}'`)
+      expect(mockSsh.calls).toContain(`chmod '0755' '${temporaryDestination}'`)
     })
 
     it("sets owner and group via chown when both are specified", async () => {
-      const mockSsh = createMockSsh()
+      const mockSsh = createMockSsh({
+        [`mktemp "$(dirname '${destination}')/.paratix-download.XXXXXX"`]: {
+          stdout: `${temporaryDestination}\n`,
+        },
+      })
       const mod = download.url(destination, url, { group: "wheel", owner: "root" })
       const result = await mod.apply(mockSsh, emptyEnv)
       expect(result.status).toBe("changed")
-      expect(mockSsh.calls).toContain(`chown 'root:wheel' '${destination}'`)
+      expect(mockSsh.calls).toContain(`chown 'root:wheel' '${temporaryDestination}'`)
     })
 
     it("sets only owner via chown when owner is specified without group", async () => {
-      const mockSsh = createMockSsh()
+      const mockSsh = createMockSsh({
+        [`mktemp "$(dirname '${destination}')/.paratix-download.XXXXXX"`]: {
+          stdout: `${temporaryDestination}\n`,
+        },
+      })
       const mod = download.url(destination, url, { owner: "deploy" })
       const result = await mod.apply(mockSsh, emptyEnv)
       expect(result.status).toBe("changed")
-      expect(mockSsh.calls).toContain(`chown 'deploy:' '${destination}'`)
+      expect(mockSsh.calls).toContain(`chown 'deploy:' '${temporaryDestination}'`)
     })
 
     it("sets only group via chown when group is specified without owner", async () => {
-      const mockSsh = createMockSsh()
+      const mockSsh = createMockSsh({
+        [`mktemp "$(dirname '${destination}')/.paratix-download.XXXXXX"`]: {
+          stdout: `${temporaryDestination}\n`,
+        },
+      })
       const mod = download.url(destination, url, { group: "staff" })
       const result = await mod.apply(mockSsh, emptyEnv)
       expect(result.status).toBe("changed")
-      expect(mockSsh.calls).toContain(`chown ':staff' '${destination}'`)
+      expect(mockSsh.calls).toContain(`chown ':staff' '${temporaryDestination}'`)
     })
 
     it("sends headers via -H when headers are specified", async () => {
-      const mockSsh = createMockSsh()
+      const mockSsh = createMockSsh({
+        [`mktemp "$(dirname '${destination}')/.paratix-download.XXXXXX"`]: {
+          stdout: `${temporaryDestination}\n`,
+        },
+      })
       const mod = download.url(destination, url, {
         headers: { Authorization: "Bearer mytoken" },
       })
       const result = await mod.apply(mockSsh, emptyEnv)
       expect(result.status).toBe("changed")
       expect(mockSsh.calls).toContain(
-        `curl -fsSL -o '${destination}' -H 'Authorization: Bearer mytoken' '${url}'`
+        `curl -fsSL -o '${temporaryDestination}' -H 'Authorization: Bearer mytoken' '${url}'`
       )
     })
 
     it("verifies SHA-256 after download and returns changed on match", async () => {
       const mockSsh = createMockSsh({
-        [`[ -f '${destination}' ]`]: { code: 0 },
-        [`sha256sum '${destination}'`]: { stdout: `${sha256}  ${destination}` },
+        [`[ -f '${temporaryDestination}' ]`]: { code: 0 },
+        [`mktemp "$(dirname '${destination}')/.paratix-download.XXXXXX"`]: {
+          stdout: `${temporaryDestination}\n`,
+        },
+        [`sha256sum '${temporaryDestination}'`]: { stdout: `${sha256}  ${temporaryDestination}` },
       })
       const mod = download.url(destination, url, { sha256 })
       const result = await mod.apply(mockSsh, emptyEnv)
@@ -168,9 +197,12 @@ describe("download.url", () => {
 
     it("returns failed when SHA-256 does not match after download", async () => {
       const mockSsh = createMockSsh({
-        [`[ -f '${destination}' ]`]: { code: 0 },
-        [`sha256sum '${destination}'`]: {
-          stdout: `0000000000000000000000000000000000000000000000000000000000000000  ${destination}`,
+        [`[ -f '${temporaryDestination}' ]`]: { code: 0 },
+        [`mktemp "$(dirname '${destination}')/.paratix-download.XXXXXX"`]: {
+          stdout: `${temporaryDestination}\n`,
+        },
+        [`sha256sum '${temporaryDestination}'`]: {
+          stdout: `0000000000000000000000000000000000000000000000000000000000000000  ${temporaryDestination}`,
         },
       })
       const mod = download.url(destination, url, { sha256 })
@@ -178,16 +210,21 @@ describe("download.url", () => {
       expect(result.status).toBe("failed")
     })
 
-    it("removes file when SHA-256 verification fails", async () => {
+    it("cleans up only the temporary file when SHA-256 verification fails", async () => {
       const mockSsh = createMockSsh({
-        [`[ -f '${destination}' ]`]: { code: 0 },
-        [`sha256sum '${destination}'`]: {
-          stdout: `0000000000000000000000000000000000000000000000000000000000000000  ${destination}`,
+        [`[ -f '${temporaryDestination}' ]`]: { code: 0 },
+        [`mktemp "$(dirname '${destination}')/.paratix-download.XXXXXX"`]: {
+          stdout: `${temporaryDestination}\n`,
+        },
+        [`sha256sum '${temporaryDestination}'`]: {
+          stdout: `0000000000000000000000000000000000000000000000000000000000000000  ${temporaryDestination}`,
         },
       })
       const mod = download.url(destination, url, { sha256 })
       await mod.apply(mockSsh, emptyEnv)
-      expect(mockSsh.calls).toContain(`rm -f '${destination}'`)
+      expect(mockSsh.calls).toContain(`rm -f '${temporaryDestination}'`)
+      expect(mockSsh.calls).not.toContain(`rm -f '${destination}'`)
+      expect(mockSsh.calls).not.toContain(`mv '${temporaryDestination}' '${destination}'`)
     })
 
     it("returns failed when ssh is null", async () => {
@@ -269,6 +306,7 @@ describe("download.url", () => {
 
 describe("download.github", () => {
   const destination = "/usr/local/bin/terraform"
+  const temporaryDestination = "/usr/local/bin/.paratix-download.GH1234"
   const repo = "hashicorp/terraform"
   const tag = "v1.5.0"
   const asset = "terraform_1.5.0_linux_amd64.zip"
@@ -313,11 +351,16 @@ describe("download.github", () => {
 
   describe("apply", () => {
     it("builds correct GitHub release URL in curl command", async () => {
-      const mockSsh = createMockSsh()
+      const mockSsh = createMockSsh({
+        [`mktemp "$(dirname '${destination}')/.paratix-download.XXXXXX"`]: {
+          stdout: `${temporaryDestination}\n`,
+        },
+      })
       const mod = download.github(destination, { asset, repo, tag })
       const result = await mod.apply(mockSsh, emptyEnv)
       expect(result.status).toBe("changed")
-      expect(mockSsh.calls).toContain(`curl -fsSL -o '${destination}' '${expectedUrl}'`)
+      expect(mockSsh.calls).toContain(`curl -fsSL -o '${temporaryDestination}' '${expectedUrl}'`)
+      expect(mockSsh.calls).toContain(`mv '${temporaryDestination}' '${destination}'`)
     })
 
     it("sends Authorization and Accept headers when token is provided", async () => {
@@ -351,10 +394,33 @@ describe("download.github", () => {
     })
 
     it("creates target directory via mkdir -p", async () => {
-      const mockSsh = createMockSsh()
+      const mockSsh = createMockSsh({
+        [`mktemp "$(dirname '${destination}')/.paratix-download.XXXXXX"`]: {
+          stdout: `${temporaryDestination}\n`,
+        },
+      })
       const mod = download.github(destination, { asset, repo, tag })
       await mod.apply(mockSsh, emptyEnv)
       expect(mockSsh.calls).toContain(`mkdir -p "$(dirname '${destination}')"`)
+    })
+
+    it("keeps the destination untouched when SHA-256 verification fails", async () => {
+      const mockSsh = createMockSsh({
+        [`[ -f '${temporaryDestination}' ]`]: { code: 0 },
+        [`mktemp "$(dirname '${destination}')/.paratix-download.XXXXXX"`]: {
+          stdout: `${temporaryDestination}\n`,
+        },
+        [`sha256sum '${temporaryDestination}'`]: {
+          stdout: `0000000000000000000000000000000000000000000000000000000000000000  ${temporaryDestination}`,
+        },
+      })
+      const mod = download.github(destination, { asset, repo, sha256, tag })
+      const result = await mod.apply(mockSsh, emptyEnv)
+
+      expect(result.status).toBe("failed")
+      expect(mockSsh.calls).toContain(`rm -f '${temporaryDestination}'`)
+      expect(mockSsh.calls).not.toContain(`rm -f '${destination}'`)
+      expect(mockSsh.calls).not.toContain(`mv '${temporaryDestination}' '${destination}'`)
     })
   })
 
@@ -481,6 +547,7 @@ describe("download.github", () => {
 
 describe("download.large", () => {
   const destination = "/opt/data/large-file.iso"
+  const temporaryDestination = "/opt/data/.paratix-download.LARGE1"
   const url = "https://example.com/large-file.iso"
   // SHA-256 of the URL, matching the flag name computed in the implementation
   const urlHash = "b7c3ff8df8e2258a442ec7d03db1667124ea34ff39bd3197136e4238fab27fb3"
@@ -573,16 +640,25 @@ describe("download.large", () => {
     })
 
     it("downloads file and sets flag on success", async () => {
-      const mockSsh = createMockSsh()
+      const mockSsh = createMockSsh({
+        [`mktemp "$(dirname '${destination}')/.paratix-download.XXXXXX"`]: {
+          stdout: `${temporaryDestination}\n`,
+        },
+      })
       const mod = download.large(destination, url)
       const result = await mod.apply(mockSsh, emptyEnv)
       expect(result.status).toBe("changed")
-      expect(mockSsh.calls).toContain(`curl -fsSL -o '${destination}' '${url}'`)
+      expect(mockSsh.calls).toContain(`curl -fsSL -o '${temporaryDestination}' '${url}'`)
+      expect(mockSsh.calls).toContain(`mv '${temporaryDestination}' '${destination}'`)
       expect(mockSsh.calls).toContain(`touch /var/lib/paratix/flags/'${flagName}'`)
     })
 
     it("creates flags directory before setting flag", async () => {
-      const mockSsh = createMockSsh()
+      const mockSsh = createMockSsh({
+        [`mktemp "$(dirname '${destination}')/.paratix-download.XXXXXX"`]: {
+          stdout: `${temporaryDestination}\n`,
+        },
+      })
       const mod = download.large(destination, url)
       await mod.apply(mockSsh, emptyEnv)
       expect(mockSsh.calls).toContain("mkdir -p /var/lib/paratix/flags")
@@ -594,8 +670,11 @@ describe("download.large", () => {
     it("returns changed and sets flag when sha256 matches after download", async () => {
       const sha256 = "aabbccddaabbccddaabbccddaabbccddaabbccddaabbccddaabbccddaabbccdd"
       const mockSsh = createMockSsh({
-        [`[ -f '${destination}' ]`]: { code: 0 },
-        [`sha256sum '${destination}'`]: { stdout: `${sha256}  ${destination}` },
+        [`[ -f '${temporaryDestination}' ]`]: { code: 0 },
+        [`mktemp "$(dirname '${destination}')/.paratix-download.XXXXXX"`]: {
+          stdout: `${temporaryDestination}\n`,
+        },
+        [`sha256sum '${temporaryDestination}'`]: { stdout: `${sha256}  ${temporaryDestination}` },
       })
       const mod = download.large(destination, url, { sha256 })
       const result = await mod.apply(mockSsh, emptyEnv)
@@ -606,15 +685,21 @@ describe("download.large", () => {
     it("returns failed and does not set flag when sha256 does not match after download", async () => {
       const sha256 = "aabbccddaabbccddaabbccddaabbccddaabbccddaabbccddaabbccddaabbccdd"
       const mockSsh = createMockSsh({
-        [`[ -f '${destination}' ]`]: { code: 0 },
-        [`sha256sum '${destination}'`]: {
-          stdout: `0000000000000000000000000000000000000000000000000000000000000000  ${destination}`,
+        [`[ -f '${temporaryDestination}' ]`]: { code: 0 },
+        [`mktemp "$(dirname '${destination}')/.paratix-download.XXXXXX"`]: {
+          stdout: `${temporaryDestination}\n`,
+        },
+        [`sha256sum '${temporaryDestination}'`]: {
+          stdout: `0000000000000000000000000000000000000000000000000000000000000000  ${temporaryDestination}`,
         },
       })
       const mod = download.large(destination, url, { sha256 })
       const result = await mod.apply(mockSsh, emptyEnv)
       expect(result.status).toBe("failed")
       expect(mockSsh.calls).not.toContain(`touch /var/lib/paratix/flags/'${flagName}'`)
+      expect(mockSsh.calls).toContain(`rm -f '${temporaryDestination}'`)
+      expect(mockSsh.calls).not.toContain(`rm -f '${destination}'`)
+      expect(mockSsh.calls).not.toContain(`mv '${temporaryDestination}' '${destination}'`)
     })
   })
 

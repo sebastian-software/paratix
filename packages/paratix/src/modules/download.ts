@@ -36,6 +36,10 @@ type DownloadParameters = {
   url: string
 } & BaseDownloadOptions
 
+function buildTemporaryDownloadPathCommand(destination: string): string {
+  return `mktemp "$(dirname ${shellQuote(destination)})/.paratix-download.XXXXXX"`
+}
+
 /**
  * Build the curl command string including optional headers.
  *
@@ -60,7 +64,7 @@ function buildCurlCommand(parameters: DownloadParameters): string {
 }
 
 /**
- * Verify the SHA-256 digest of a downloaded file, deleting it on mismatch.
+ * Verify the SHA-256 digest of a downloaded file.
  *
  * @param conn - Active SSH connection.
  * @param parameters - Download parameters containing destination and expected sha256.
@@ -73,7 +77,6 @@ async function verifyChecksum(
   if (parameters.sha256 == null) return true
   const actualHash = await conn.sha256(parameters.destination)
   if (hashMatches(actualHash, parameters.sha256)) return true
-  await conn.exec(`rm -f ${shellQuote(parameters.destination)}`, { silent: true })
   return false
 }
 
@@ -116,12 +119,32 @@ async function performDownload(
   if (!conn) return { status: "failed" }
 
   await conn.exec(`mkdir -p "$(dirname ${shellQuote(parameters.destination)})"`, { silent: true })
-  await conn.exec(buildCurlCommand(parameters), { secrets: parameters.secrets, silent: true })
+  const temporaryDestination = await conn.output(
+    buildTemporaryDownloadPathCommand(parameters.destination)
+  )
+  const downloadParameters = { ...parameters, destination: temporaryDestination }
+  let shouldCleanupTemporaryFile = true
 
-  if (!(await verifyChecksum(conn, parameters))) return { status: "failed" }
-  await applyFileAttributes(conn, parameters)
+  try {
+    await conn.exec(buildCurlCommand(downloadParameters), {
+      secrets: downloadParameters.secrets,
+      silent: true,
+    })
 
-  return { status: "changed" }
+    if (!(await verifyChecksum(conn, downloadParameters))) return { status: "failed" }
+    await applyFileAttributes(conn, downloadParameters)
+    await conn.exec(
+      `mv ${shellQuote(downloadParameters.destination)} ${shellQuote(parameters.destination)}`,
+      { silent: true }
+    )
+    shouldCleanupTemporaryFile = false
+
+    return { status: "changed" }
+  } finally {
+    if (shouldCleanupTemporaryFile) {
+      await conn.exec(`rm -f ${shellQuote(downloadParameters.destination)}`, { silent: true })
+    }
+  }
 }
 
 /**
