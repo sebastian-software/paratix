@@ -17,19 +17,23 @@ const mockExecFile = vi.mocked(execFile)
 
 function mockSuccess(stdout = ""): void {
   mockExecFile.mockImplementation((...args: unknown[]) => {
-    const callback = args.at(-1) as (
-      error: null,
-      result: { stderr: string; stdout: string }
-    ) => void
-    callback(null, { stderr: "", stdout })
+    const callback = args.at(-1) as (error: null, stdout: string, stderr: string) => void
+    callback(null, stdout, "")
     return undefined as never
   })
 }
 
-function mockFailure(): void {
+function mockFailureWithStderr(
+  parameters: { code?: number | string; stderr?: string; stdout?: string } = {}
+): void {
   mockExecFile.mockImplementation((...args: unknown[]) => {
-    const callback = args.at(-1) as (error: Error) => void
-    callback(new Error("rsync failed"))
+    const callback = args.at(-1) as (error: Error, stdout: string, stderr: string) => void
+    const error = Object.assign(new Error("rsync failed"), {
+      code: parameters.code,
+      stderr: parameters.stderr ?? "",
+      stdout: parameters.stdout ?? "",
+    })
+    callback(error, parameters.stdout ?? "", parameters.stderr ?? "")
     return undefined as never
   })
 }
@@ -69,12 +73,12 @@ describe("rsync.sync — check", () => {
     expect(result).toBe("ok")
   })
 
-  it("returns needs-apply when rsync command fails", async () => {
-    mockFailure()
+  it("throws a descriptive error when the rsync dry-run command fails", async () => {
+    mockFailureWithStderr({ code: 23, stderr: "Permission denied (publickey)." })
     const mockSsh = createMockSsh()
     const mod = rsync.sync({ dest: "/remote/dest", src: "/local/src" })
     await expect(mod.check(mockSsh, emptyEnv)).rejects.toThrow(
-      "[rsync.sync] check failed for /local/src -> /remote/dest: Error: rsync failed"
+      "[rsync.sync] check failed for /local/src -> /remote/dest (exit code 23)\nPermission denied (publickey)."
     )
   })
 
@@ -135,16 +139,22 @@ describe("rsync.sync — apply", () => {
   })
 
   it("returns failed when rsync command fails", async () => {
-    mockFailure()
-    const consoleSpy = vi.spyOn(console, "error").mockImplementation(() => {
+    mockFailureWithStderr({ code: 12, stderr: "rsync: connection unexpectedly closed" })
+    const consoleSpy = vi.spyOn(console, "log").mockImplementation(() => {
       /* noop */
     })
     const mockSsh = createMockSsh()
     const mod = rsync.sync({ dest: "/remote/dest", src: "/local/src" })
     const result = await mod.apply(mockSsh, emptyEnv)
     expect(result.status).toBe("failed")
+    expect(consoleSpy).toHaveBeenCalledWith(expect.stringContaining("Error output:"))
     expect(consoleSpy).toHaveBeenCalledWith(
-      "[rsync.sync] /local/src -> /remote/dest: Error: rsync failed"
+      expect.stringContaining(
+        "[rsync.sync] apply failed for /local/src -> /remote/dest (exit code 12)"
+      )
+    )
+    expect(consoleSpy).toHaveBeenCalledWith(
+      expect.stringContaining("rsync: connection unexpectedly closed")
     )
   })
 

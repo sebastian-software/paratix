@@ -1339,11 +1339,23 @@ describe("runPlaybook rsync check error handling", () => {
 
   it("marks the run as failed when rsync check throws instead of masking it as needs-apply", async () => {
     const capturedConfigs: unknown[] = []
+    const consoleLog = vi.spyOn(console, "log").mockImplementation(() => {
+      /* noop */
+    })
 
     vi.doMock("node:child_process", () => ({
       execFile: vi.fn(
-        (_file: string, _args: readonly string[], callback: (error: Error) => void) => {
-          callback(new Error("rsync failed"))
+        (
+          _file: string,
+          _args: readonly string[],
+          callback: (error: Error, stdout: string, stderr: string) => void
+        ) => {
+          const error = Object.assign(new Error("rsync failed"), {
+            code: 23,
+            stderr: "Permission denied (publickey).",
+            stdout: "",
+          })
+          callback(error, "", "Permission denied (publickey).")
         }
       ),
     }))
@@ -1374,6 +1386,14 @@ describe("runPlaybook rsync check error handling", () => {
 
     expect(subsequentModule.check).not.toHaveBeenCalled()
     expect(process.exitCode).toBe(1)
+    expect(consoleLog).toHaveBeenCalledWith(
+      expect.stringContaining(
+        "[rsync.sync] check failed for /local/src -> /remote/dest (exit code 23)"
+      )
+    )
+    expect(consoleLog).toHaveBeenCalledWith(
+      expect.stringContaining("Permission denied (publickey).")
+    )
   })
 })
 

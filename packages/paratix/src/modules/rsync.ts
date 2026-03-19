@@ -1,11 +1,9 @@
-import { execFile } from "node:child_process"
-import { promisify } from "node:util"
+import { execFile, type ExecFileException } from "node:child_process"
 
+import { printCommandFailure } from "../output.js"
 import { shellQuote } from "../ssh.js"
+import { CommandError } from "../sshHelpers.js"
 import { type Module, type ModuleResult, NEEDS_APPLY, type SshConnection } from "../types.js"
-
-// eslint-disable-next-line @typescript-eslint/strict-void-return -- promisify requires the callback-based overload
-const execFileAsync = promisify(execFile)
 
 type RsyncPhase = "apply" | "check"
 
@@ -141,23 +139,65 @@ function buildArguments(
   return result
 }
 
-function createRsyncError(options: SyncOptions, phase: RsyncPhase, error: unknown): Error {
-  const prefix =
-    phase === "check"
-      ? `[rsync.sync] check failed for ${options.src} -> ${options.dest}`
-      : `[rsync.sync] ${options.src} -> ${options.dest}`
-  return new Error(`${prefix}: ${String(error)}`)
+type RsyncFailureDetails = {
+  code?: number | string
+  error: unknown
+  stderr: string
+  stdout: string
 }
 
-async function executeRsync(
+function firstNonEmptyLine(text: string): null | string {
+  for (const line of text.split("\n")) {
+    const trimmed = line.trim()
+    if (trimmed.length > 0) return trimmed
+  }
+  return null
+}
+
+function createRsyncError(
   options: SyncOptions,
-  ssh: SshConnection,
+  phase: RsyncPhase,
+  details: RsyncFailureDetails
+): Error {
+  const exitCodeSuffix = details.code == null ? "" : ` (exit code ${String(details.code)})`
+  const messageDetails =
+    firstNonEmptyLine(details.stderr) ??
+    firstNonEmptyLine(details.stdout) ??
+    (details.error instanceof Error ? details.error.message : String(details.error))
+
+  return new CommandError(
+    `[rsync.sync] ${phase} failed for ${options.src} -> ${options.dest}${exitCodeSuffix}\n${messageDetails}`,
+    details.stdout,
+    details.stderr
+  )
+}
+
+async function executeRsync(parameters: {
   dryRun: boolean
-): Promise<string> {
+  options: SyncOptions
+  phase: RsyncPhase
+  ssh: SshConnection
+}): Promise<string> {
+  const { dryRun, options, phase, ssh } = parameters
   const connectionInfo = ssh.getConnectionInfo()
   const rsyncArguments = buildArguments(options, connectionInfo, dryRun)
-  const { stdout } = await execFileAsync("rsync", rsyncArguments)
-  return stdout
+
+  return new Promise((resolve, reject) => {
+    execFile("rsync", rsyncArguments, (error: ExecFileException | null, stdout, stderr) => {
+      if (error != null) {
+        reject(
+          createRsyncError(options, phase, {
+            code: error.code ?? undefined,
+            error,
+            stderr,
+            stdout,
+          })
+        )
+        return
+      }
+      resolve(stdout)
+    })
+  })
 }
 
 /**
@@ -201,22 +241,18 @@ export const rsync = {
         if (!ssh) return { status: "failed" }
 
         try {
-          const stdout = await executeRsync(options, ssh, false)
+          const stdout = await executeRsync({ dryRun: false, options, phase: "apply", ssh })
           return { status: stdout.trim().length > 0 ? "changed" : "ok" }
         } catch (error) {
-          console.error(createRsyncError(options, "apply", error).message)
+          printCommandFailure(error, false)
           return { status: "failed" }
         }
       },
       async check(ssh: null | SshConnection): Promise<"needs-apply" | "ok"> {
         if (!ssh) return NEEDS_APPLY
 
-        try {
-          const stdout = await executeRsync(options, ssh, true)
-          return stdout.trim().length > 0 ? NEEDS_APPLY : "ok"
-        } catch (error) {
-          throw createRsyncError(options, "check", error)
-        }
+        const stdout = await executeRsync({ dryRun: true, options, phase: "check", ssh })
+        return stdout.trim().length > 0 ? NEEDS_APPLY : "ok"
       },
       name: `rsync.sync: ${options.src} -> ${options.dest}`,
     }
