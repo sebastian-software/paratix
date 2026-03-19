@@ -5,6 +5,7 @@ import {
   createReadStream,
   createWriteStream,
   type ReadStream,
+  renameSync,
   unlinkSync,
   type WriteStream,
 } from "node:fs"
@@ -17,6 +18,7 @@ import { sftpDownload, sftpUpload } from "../src/sftp.js"
 vi.mock("node:fs", () => ({
   createReadStream: vi.fn(),
   createWriteStream: vi.fn(),
+  renameSync: vi.fn(),
   unlinkSync: vi.fn(),
 }))
 
@@ -102,6 +104,27 @@ describe("sftpDownload", () => {
     expect(vi.mocked(createWriteStream)).not.toHaveBeenCalled()
   })
 
+  it("writes downloads to a temp file in the destination directory and renames on success", async () => {
+    const { sftp } = makeSftpSession()
+    const client = makeClientMock(sftp)
+
+    const localWriteStream = new EventEmitter()
+    vi.mocked(createWriteStream).mockReturnValue(localWriteStream as unknown as WriteStream)
+
+    const promise = sftpDownload(client, "/remote/file.txt", "/local/file.txt")
+    const [tempPath, options] = vi.mocked(createWriteStream).mock.calls[0] as [
+      string,
+      { mode: number },
+    ]
+    localWriteStream.emit("close")
+
+    await expect(promise).resolves.toBeUndefined()
+    expect(tempPath).not.toBe("/local/file.txt")
+    expect(tempPath).toMatch(/^\/local\/\.paratix-download-.+\.tmp$/v)
+    expect(options).toStrictEqual({ mode: 0o600 })
+    expect(vi.mocked(renameSync)).toHaveBeenCalledWith(tempPath, "/local/file.txt")
+  })
+
   it("rejects when the readStream emits an error (regression: missing error handler)", async () => {
     // Arrange
     const { sftp, sftpReadStream } = makeSftpSession()
@@ -157,7 +180,7 @@ describe("sftpDownload", () => {
     await expect(promise).rejects.toThrow("local write stream broke")
   })
 
-  it("removes the incomplete local file when the download fails", async () => {
+  it("removes only the temp file when the download fails", async () => {
     const { sftp } = makeSftpSession()
     const client = makeClientMock(sftp)
 
@@ -165,11 +188,14 @@ describe("sftpDownload", () => {
     vi.mocked(createWriteStream).mockReturnValue(localWriteStream as unknown as WriteStream)
 
     const promise = sftpDownload(client, "/remote/file.txt", "/local/file.txt")
+    const [tempPath] = vi.mocked(createWriteStream).mock.calls[0] as [string]
     localWriteStream.emit("error", new Error("local write stream broke"))
 
     await expect(promise).rejects.toThrow("local write stream broke")
     expect(vi.mocked(unlinkSync)).toHaveBeenCalledOnce()
-    expect(vi.mocked(unlinkSync)).toHaveBeenCalledWith("/local/file.txt")
+    expect(vi.mocked(unlinkSync)).toHaveBeenCalledWith(tempPath)
+    expect(vi.mocked(unlinkSync)).not.toHaveBeenCalledWith("/local/file.txt")
+    expect(vi.mocked(renameSync)).not.toHaveBeenCalled()
   })
 
   it("closes the sftp session when the local writeStream emits an error", async () => {
@@ -339,6 +365,43 @@ describe("sftpDownload", () => {
     await expect(promise).rejects.toThrow("SFTP download timed out after 5000ms: /remote/file.txt")
 
     vi.useRealTimers()
+  })
+
+  it("leaves the destination path untouched on timeout", async () => {
+    vi.useFakeTimers()
+    const { sftp } = makeSftpSession()
+    const client = makeClientMock(sftp)
+
+    const localWriteStream = Object.assign(new EventEmitter(), { destroy: vi.fn() })
+    vi.mocked(createWriteStream).mockReturnValue(localWriteStream as unknown as WriteStream)
+
+    const promise = sftpDownload(client, "/remote/file.txt", "/local/file.txt", 5000)
+    const [tempPath] = vi.mocked(createWriteStream).mock.calls[0] as [string]
+    vi.advanceTimersByTime(5001)
+
+    await expect(promise).rejects.toThrow("SFTP download timed out after 5000ms: /remote/file.txt")
+    expect(vi.mocked(renameSync)).not.toHaveBeenCalled()
+    expect(vi.mocked(unlinkSync)).toHaveBeenCalledWith(tempPath)
+    expect(vi.mocked(unlinkSync)).not.toHaveBeenCalledWith("/local/file.txt")
+
+    vi.useRealTimers()
+  })
+
+  it("leaves the destination path untouched on stream errors", async () => {
+    const { sftp } = makeSftpSession()
+    const client = makeClientMock(sftp)
+
+    const localWriteStream = new EventEmitter()
+    vi.mocked(createWriteStream).mockReturnValue(localWriteStream as unknown as WriteStream)
+
+    const promise = sftpDownload(client, "/remote/file.txt", "/local/file.txt")
+    const [tempPath] = vi.mocked(createWriteStream).mock.calls[0] as [string]
+    localWriteStream.emit("error", new Error("local write stream broke"))
+
+    await expect(promise).rejects.toThrow("local write stream broke")
+    expect(vi.mocked(renameSync)).not.toHaveBeenCalled()
+    expect(vi.mocked(unlinkSync)).toHaveBeenCalledWith(tempPath)
+    expect(vi.mocked(unlinkSync)).not.toHaveBeenCalledWith("/local/file.txt")
   })
 
   it("destroys both streams and ends sftp session on timeout", async () => {

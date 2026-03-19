@@ -1,7 +1,9 @@
 import type { Readable, Writable } from "node:stream"
 import type { Client, SFTPWrapper } from "ssh2"
 
-import { createReadStream, createWriteStream, unlinkSync } from "node:fs"
+import { randomUUID } from "node:crypto"
+import { createReadStream, createWriteStream, renameSync, unlinkSync } from "node:fs"
+import { dirname, join } from "node:path"
 
 /** Default timeout for SFTP transfers in milliseconds (2 minutes). */
 export const SFTP_TIMEOUT = 120_000
@@ -84,13 +86,14 @@ export async function sftpDownload(
   timeout = SFTP_TIMEOUT
 ): Promise<void> {
   return new Promise((resolve, reject) => {
-    let shouldCleanupLocalFile = false
+    const temporaryPath = join(dirname(localPath), `.paratix-download-${randomUUID()}.tmp`)
+    let shouldCleanupTemporaryFile = false
 
     const rejectWithCleanup = (reason: Error): void => {
-      if (shouldCleanupLocalFile) {
+      if (shouldCleanupTemporaryFile) {
         try {
           // eslint-disable-next-line security/detect-non-literal-fs-filename
-          unlinkSync(localPath)
+          unlinkSync(temporaryPath)
         } catch {
           // Best effort cleanup: preserve the original transfer error.
         }
@@ -106,13 +109,17 @@ export async function sftpDownload(
 
       const readStream = sftp.createReadStream(remotePath)
       // eslint-disable-next-line security/detect-non-literal-fs-filename
-      const writeStream = createWriteStream(localPath, { mode: 0o600 })
-      shouldCleanupLocalFile = true
+      const writeStream = createWriteStream(temporaryPath, { mode: 0o600 })
+      shouldCleanupTemporaryFile = true
 
       wireStreams({
         readStream,
         reject: rejectWithCleanup,
-        resolve,
+        resolve: () => {
+          // eslint-disable-next-line security/detect-non-literal-fs-filename
+          renameSync(temporaryPath, localPath)
+          resolve()
+        },
         sftp,
         timeout,
         timeoutMessage: `SFTP download timed out after ${timeout}ms: ${remotePath}`,
