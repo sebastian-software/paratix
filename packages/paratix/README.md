@@ -381,12 +381,27 @@ Paratix ships a separate integration test entry point for real SSH/SFTP checks:
 pnpm --filter paratix test:integration
 ```
 
+For the full workspace review path including integration coverage, use:
+
+```bash
+pnpm agent:check:integration
+```
+
 These tests are intentionally not part of the default unit test run. They require:
 
-- `colima` to be installed and running
-- a working Docker CLI connected to the active Colima runtime
+- on macOS: `colima` plus a working Docker CLI connected to the active Colima runtime
+- on Linux/CI: a reachable Docker runtime
 
 The integration suite starts a temporary SSH test container, runs the tests against it and removes the container again afterwards. If `colima` is missing, the suite aborts with a clear error message instead of hanging or silently skipping coverage.
+
+The suite now verifies real remote end state for core modules such as
+`file.directory`, `file.copy`, `file.template`, `command.shell`, `download.url`,
+and `download.large`, including ownership, mode, content, large-download flags,
+and idempotent `check()` behavior against a live server.
+
+An example GitHub Actions workflow is included as a disabled template in
+`.github/workflows/integration-check.yml.disabled`. Rename it to `.yml` when
+you want the integration path to run on GitHub.
 
 ## License
 

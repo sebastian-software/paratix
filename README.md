@@ -109,6 +109,9 @@ pnpm test
 
 Additional scripts: `pnpm lint`, `pnpm format`, `pnpm agent:check` (lint + format check + typecheck + test).
 
+For the full review path including real SSH integration tests, use
+`pnpm agent:check:integration`.
+
 ## License
 
 MIT — Copyright 2026 [Sebastian Software GmbH](https://sebastian-software.com)

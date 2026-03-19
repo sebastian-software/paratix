@@ -5,13 +5,15 @@
   "scripts": {
     "build": "pnpm -r build",
     "test": "pnpm -r test",
+    "test:integration": "pnpm --filter paratix test:integration",
     "typecheck": "pnpm -r --filter './packages/*' exec tsc --noEmit",
     "lint": "concurrently --kill-others-on-fail --passthrough-arguments --names lint:oxlint,lint:eslint 'pnpm lint:oxlint' 'pnpm lint:eslint'",
     "lint:oxlint": "oxlint -c oxlint.config.ts",
     "lint:eslint": "eslint",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
-    "agent:check": "pnpm lint && pnpm format:check && pnpm typecheck && pnpm test"
+    "agent:check": "pnpm lint && pnpm format:check && pnpm typecheck && pnpm test",
+    "agent:check:integration": "pnpm agent:check && pnpm test:integration"
   },
   "repository": {
     "type": "git",

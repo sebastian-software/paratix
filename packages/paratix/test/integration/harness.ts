@@ -112,6 +112,14 @@ async function startColima(): Promise<void> {
   }
 }
 
+async function ensureDockerIsAvailable(): Promise<void> {
+  try {
+    await runCommand("docker", ["info"])
+  } catch (error) {
+    throw new Error("Integration tests require a reachable Docker runtime.", { cause: error })
+  }
+}
+
 async function ensureColimaIsAvailable(): Promise<void> {
   try {
     await runCommand("which", ["colima"])
@@ -130,6 +138,16 @@ async function ensureColimaIsAvailable(): Promise<void> {
   } catch {
     await startColima()
   }
+}
+
+async function ensureIntegrationRuntimeIsAvailable(): Promise<void> {
+  const isCiRuntime = process.env.CI === "true"
+  if (isCiRuntime || process.platform !== "darwin") {
+    await ensureDockerIsAvailable()
+    return
+  }
+
+  await ensureColimaIsAvailable()
 
   try {
     await runCommand("docker", ["info"])
@@ -276,7 +294,7 @@ async function readHostPublicKey(containerName: string): Promise<string> {
 export async function createIntegrationEnvironment(
   packageDirectory: string
 ): Promise<IntegrationEnvironment> {
-  await ensureColimaIsAvailable()
+  await ensureIntegrationRuntimeIsAvailable()
   const { cleanup, clientPrivateKeyPath, containerName, workspaceHome } =
     await createEnvironmentResources(packageDirectory)
 
