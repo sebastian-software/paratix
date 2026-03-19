@@ -1,6 +1,7 @@
+import { EventEmitter } from "node:events"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 
-import type { Module, ModuleResult, ServerDefinition } from "../src/types.js"
+import type { Environment, Module, ModuleResult, ServerDefinition } from "../src/types.js"
 
 function makeMockSshClass(
   capturedConfigs: unknown[],
@@ -39,6 +40,26 @@ function makeModuleWithMeta(meta: Record<string, string>): Module {
     check: vi.fn().mockResolvedValue("needs-apply"),
     name: "test-module",
   }
+}
+
+type MockChildProcess = {
+  stderr?: EventEmitter
+  stdin?: { end: ReturnType<typeof vi.fn> }
+  stdout?: EventEmitter
+} & EventEmitter
+
+function createMockSpawnChild(stdout: string, exitCode = 0): MockChildProcess {
+  const child = new EventEmitter() as MockChildProcess
+  child.stdout = new EventEmitter()
+  child.stderr = new EventEmitter()
+  child.stdin = { end: vi.fn() }
+
+  queueMicrotask(() => {
+    child.stdout?.emit("data", Buffer.from(stdout))
+    child.emit("close", exitCode)
+  })
+
+  return child
 }
 
 // Bug regression: failed reconnect after port change or reboot must propagate and abort playbook
@@ -1238,6 +1259,64 @@ describe("runPlaybook local signal module behaviour", () => {
 
     // A local signal module must receive null instead of an SSH connection
     expect(capturedSshInSignalApply).toBeNull()
+  })
+})
+
+describe("runPlaybook op.resolve integration", () => {
+  beforeEach(() => {
+    vi.spyOn(console, "log").mockImplementation(() => {
+      /* noop */
+    })
+    vi.spyOn(console, "error").mockImplementation(() => {
+      /* noop */
+    })
+    vi.resetModules()
+  })
+
+  afterEach(() => {
+    vi.restoreAllMocks()
+    vi.resetModules()
+    process.exitCode = 0
+  })
+
+  it("executes op.resolve and propagates its meta values to following modules", async () => {
+    const capturedConfigs: unknown[] = []
+
+    vi.doMock("node:child_process", () => ({
+      spawn: vi.fn(() => createMockSpawnChild(JSON.stringify({ SECRET: "resolved-secret" }))),
+    }))
+    vi.doMock("../src/ssh.js", () => ({
+      shellQuote: (s: string) => `'${s}'`,
+      SshConnectionImpl: makeMockSshClass(capturedConfigs),
+    }))
+
+    const [{ runPlaybook }, { op }] = await Promise.all([
+      import("../src/runner.js"),
+      import("../src/modules/op.js"),
+    ])
+
+    let receivedEnvInCheck: Environment | undefined
+    const dependentModule: Module = {
+      apply: vi.fn().mockResolvedValue({ status: "ok" } satisfies ModuleResult),
+      check: vi.fn().mockImplementation(async (_ssh, env: Environment) => {
+        await Promise.resolve()
+        receivedEnvInCheck = env
+        return "ok" as const
+      }),
+      name: "dependent-module",
+    }
+
+    const definition: ServerDefinition = {
+      host: "1.2.3.4",
+      name: "test-server",
+      run: [op.resolve({ SECRET: "op://vault/item/password" }), dependentModule],
+      ssh: { ports: [22], privateKey: "~/.ssh/id", user: "root" },
+    }
+
+    await runPlaybook(definition)
+
+    expect(receivedEnvInCheck?.SECRET).toBe("resolved-secret")
+    expect(dependentModule.apply).not.toHaveBeenCalled()
   })
 })
 

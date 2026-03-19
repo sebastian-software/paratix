@@ -63,16 +63,16 @@ const emptyEnv = {}
 // ---------------------------------------------------------------------------
 
 describe("op.resolve — check", () => {
-  it("always returns ok", async () => {
+  it("always returns needs-apply", async () => {
     const module_ = op.resolve({})
     const result = await module_.check(null, emptyEnv)
-    expect(result).toBe("ok")
+    expect(result).toBe("needs-apply")
   })
 
-  it("returns ok regardless of references", async () => {
+  it("returns needs-apply regardless of references", async () => {
     const module_ = op.resolve({ password: "op://vault/item/password" })
     const result = await module_.check(null, emptyEnv)
-    expect(result).toBe("ok")
+    expect(result).toBe("needs-apply")
   })
 })
 

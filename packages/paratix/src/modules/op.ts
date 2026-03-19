@@ -154,7 +154,8 @@ export const op = {
    * on each call.
    *
    * This module runs locally (`local: true`) and never touches the remote host.
-   * `check` always returns `"ok"` — secrets are resolved unconditionally in `apply`.
+   * `check` always returns `"needs-apply"` so the runner executes `apply`
+   * unconditionally and propagates the resolved meta values.
    * If any CLI call fails the module returns `{ status: "failed" }`.
    *
    * @param references - A map of logical names to 1Password secret references
@@ -189,7 +190,7 @@ export const op = {
       },
       // eslint-disable-next-line @typescript-eslint/require-await
       async check(): Promise<"needs-apply" | "ok"> {
-        return "ok"
+        return "needs-apply"
       },
       local: true,
       name: `op.resolve: ${Object.keys(references).join(", ")}`,
