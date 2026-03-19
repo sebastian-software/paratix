@@ -436,6 +436,24 @@ describe("sftpUpload", () => {
     )
   })
 
+  it("creates the remote writeStream with restrictive mode 0600", async () => {
+    const { sftp, sftpWriteStream } = makeSftpSession()
+    const client = makeClientMock(sftp)
+
+    const localReadStream = makeMockStream()
+    vi.mocked(createReadStream).mockReturnValue(localReadStream as unknown as ReadStream)
+
+    const promise = sftpUpload(client, "/local/file.txt", "/remote/file.txt")
+    sftpWriteStream.emit("close")
+
+    await expect(promise).resolves.toBeUndefined()
+    const createWriteStreamCalls = (
+      sftp.createWriteStream as unknown as { mock: { calls: unknown[][] } }
+    ).mock.calls
+    expect(createWriteStreamCalls).toHaveLength(1)
+    expect(createWriteStreamCalls[0]).toStrictEqual(["/remote/file.txt", { mode: 0o600 }])
+  })
+
   it("rejects when the local readStream emits an error (regression: missing error handler)", async () => {
     // Arrange
     const { sftp } = makeSftpSession()

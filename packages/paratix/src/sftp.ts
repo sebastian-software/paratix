@@ -146,7 +146,7 @@ export async function sftpUpload(
 
       // eslint-disable-next-line security/detect-non-literal-fs-filename
       const readStream = createReadStream(localPath)
-      const writeStream = sftp.createWriteStream(remotePath)
+      const writeStream = sftp.createWriteStream(remotePath, { mode: 0o600 })
 
       wireStreams({
         readStream,

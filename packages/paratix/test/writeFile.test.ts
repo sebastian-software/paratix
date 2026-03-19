@@ -297,13 +297,19 @@ describe("SshConnectionImpl.writeFile — large content (> 64 KB)", () => {
         stream.emit("close", 0)
       })
       .mockImplementationOnce((_cmd: string, cb: ExecCallback) => {
-        // Second call is mv — succeeds
+        // Second call is chmod 0600 — succeeds
         const stream = makeStream()
         cb(undefined, stream)
         stream.emit("close", 0)
       })
       .mockImplementationOnce((_cmd: string, cb: ExecCallback) => {
-        // Third call is rm -f — simulates a failure (e.g. permission denied)
+        // Third call is mv — succeeds
+        const stream = makeStream()
+        cb(undefined, stream)
+        stream.emit("close", 0)
+      })
+      .mockImplementationOnce((_cmd: string, cb: ExecCallback) => {
+        // Fourth call is rm -f — simulates a failure (e.g. permission denied)
         cb(new Error("rm -f failed unexpectedly"), makeStream())
       })
 
@@ -336,13 +342,19 @@ describe("SshConnectionImpl.writeFile — large content (> 64 KB)", () => {
         stream.emit("close", 0)
       })
       .mockImplementationOnce((_cmd: string, cb: ExecCallback) => {
-        // Second call: mv — succeeds
+        // Second call: chmod 0600 — succeeds
         const stream = makeStream()
         cb(undefined, stream)
         stream.emit("close", 0)
       })
       .mockImplementationOnce((_cmd: string, cb: ExecCallback) => {
-        // Third call: rm -f — fails with an error whose message contains the password
+        // Third call: mv — succeeds
+        const stream = makeStream()
+        cb(undefined, stream)
+        stream.emit("close", 0)
+      })
+      .mockImplementationOnce((_cmd: string, cb: ExecCallback) => {
+        // Fourth call: rm -f — fails with an error whose message contains the password
         cb(
           new Error(`permission denied: echo ${sudoPassword} | sudo rm -f ${remoteTmpPath}`),
           makeStream()
@@ -395,13 +407,19 @@ describe("SshConnectionImpl.uploadFile — cleanup error secret masking", () => 
         stream.emit("close", 0)
       })
       .mockImplementationOnce((_cmd: string, cb: ExecCallback) => {
-        // Second call: mv — succeeds
+        // Second call: chmod 0600 — succeeds
         const stream = makeStream()
         cb(undefined, stream)
         stream.emit("close", 0)
       })
       .mockImplementationOnce((_cmd: string, cb: ExecCallback) => {
-        // Third call: rm -f — fails with an error whose message contains the password
+        // Third call: mv — succeeds
+        const stream = makeStream()
+        cb(undefined, stream)
+        stream.emit("close", 0)
+      })
+      .mockImplementationOnce((_cmd: string, cb: ExecCallback) => {
+        // Fourth call: rm -f — fails with an error whose message contains the password
         cb(
           new Error(`permission denied: echo ${sudoPassword} | sudo rm -f ${remoteTmpPath}`),
           makeStream()

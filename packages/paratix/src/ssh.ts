@@ -306,14 +306,13 @@ export class SshConnectionImpl implements SshConnection {
   ): Promise<void> {
     const client = this.ensureClient()
     const temporaryPath = validateMktempPath(await this.output("mktemp /tmp/paratix-upload.XXXXXX"))
+    const temporaryMode = options?.mode ?? "0600"
     try {
       await sftpUpload(client, localPath, temporaryPath)
-      if (options?.mode != null) {
-        validateMode(options.mode)
-        await this.exec(`chmod ${shellQuote(options.mode)} ${shellQuote(temporaryPath)}`, {
-          silent: true,
-        })
-      }
+      validateMode(temporaryMode)
+      await this.exec(`chmod ${shellQuote(temporaryMode)} ${shellQuote(temporaryPath)}`, {
+        silent: true,
+      })
       await this.exec(`mv ${shellQuote(temporaryPath)} ${shellQuote(remotePath)}`, { silent: true })
     } finally {
       try {
@@ -348,16 +347,15 @@ export class SshConnectionImpl implements SshConnection {
     const remoteTemporary = validateMktempPath(
       await this.output("mktemp /tmp/paratix-write.XXXXXX")
     )
+    const temporaryMode = options?.mode ?? "0600"
     try {
       // eslint-disable-next-line security/detect-non-literal-fs-filename
       writeFileSync(localTemporary, content, { mode: 0o600 })
       await sftpUpload(client, localTemporary, remoteTemporary)
-      if (options?.mode != null) {
-        validateMode(options.mode)
-        await this.exec(`chmod ${shellQuote(options.mode)} ${shellQuote(remoteTemporary)}`, {
-          silent: true,
-        })
-      }
+      validateMode(temporaryMode)
+      await this.exec(`chmod ${shellQuote(temporaryMode)} ${shellQuote(remoteTemporary)}`, {
+        silent: true,
+      })
       await this.exec(`mv ${shellQuote(remoteTemporary)} ${shellQuote(remotePath)}`, {
         silent: true,
       })

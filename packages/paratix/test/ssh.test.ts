@@ -1280,6 +1280,53 @@ describe("SshConnectionImpl", () => {
   // -------------------------------------------------------------------------
 
   describe("uploadFile", () => {
+    it("applies restrictive mode 0600 to the temp file before mv when no mode option is provided", async () => {
+      const { sftpUpload } = await import("../src/sftp.js")
+      vi.mocked(sftpUpload).mockResolvedValue()
+
+      const tempPath = "/tmp/paratix-upload.ABCDEF"
+      const executedCommands: string[] = []
+
+      const execSpy = vi
+        .fn()
+        .mockImplementationOnce((_command: string, callback: ExecCallback) => {
+          const stream = makeStream()
+          executedCommands.push(_command)
+          callback(undefined, stream)
+          stream.emit("data", Buffer.from(tempPath))
+          stream.emit("close", 0)
+        })
+        .mockImplementationOnce((_command: string, callback: ExecCallback) => {
+          const stream = makeStream()
+          executedCommands.push(_command)
+          callback(undefined, stream)
+          stream.emit("close", 0)
+        })
+        .mockImplementationOnce((_command: string, callback: ExecCallback) => {
+          const stream = makeStream()
+          executedCommands.push(_command)
+          callback(undefined, stream)
+          stream.emit("close", 0)
+        })
+        .mockImplementationOnce((_command: string, callback: ExecCallback) => {
+          const stream = makeStream()
+          executedCommands.push(_command)
+          callback(undefined, stream)
+          stream.emit("close", 0)
+        })
+
+      const client = makeClientWithExecSpy(execSpy)
+      const ssh = makeConnectedSsh(client)
+
+      await ssh.uploadFile("/local/file.txt", "/remote/path")
+
+      expect(executedCommands).toContain(`chmod '0600' '${tempPath}'`)
+      const chmodIndex = executedCommands.indexOf(`chmod '0600' '${tempPath}'`)
+      const mvIndex = executedCommands.indexOf(`mv '${tempPath}' '/remote/path'`)
+      expect(chmodIndex).toBeGreaterThan(-1)
+      expect(chmodIndex).toBeLessThan(mvIndex)
+    })
+
     it("runs chmod on temp file before mv when mode option is provided", async () => {
       const { sftpUpload } = await import("../src/sftp.js")
       vi.mocked(sftpUpload).mockResolvedValue()
@@ -1334,7 +1381,7 @@ describe("SshConnectionImpl", () => {
       expect(chmodIndex).toBeLessThan(mvIndex)
     })
 
-    it("does not run chmod when no mode option is provided", async () => {
+    it("uses restrictive chmod 0600 when no mode option is provided", async () => {
       const { sftpUpload } = await import("../src/sftp.js")
       vi.mocked(sftpUpload).mockResolvedValue()
 
@@ -1351,14 +1398,21 @@ describe("SshConnectionImpl", () => {
           stream.emit("data", Buffer.from(tempPath))
           stream.emit("close", 0)
         })
-        // Second call: mv
+        // Second call: default chmod 0600
         .mockImplementationOnce((_command: string, callback: ExecCallback) => {
           const stream = makeStream()
           executedCommands.push(_command)
           callback(undefined, stream)
           stream.emit("close", 0)
         })
-        // Third call: rm -f (cleanup in finally)
+        // Third call: mv
+        .mockImplementationOnce((_command: string, callback: ExecCallback) => {
+          const stream = makeStream()
+          executedCommands.push(_command)
+          callback(undefined, stream)
+          stream.emit("close", 0)
+        })
+        // Fourth call: rm -f (cleanup in finally)
         .mockImplementationOnce((_command: string, callback: ExecCallback) => {
           const stream = makeStream()
           executedCommands.push(_command)
@@ -1371,7 +1425,7 @@ describe("SshConnectionImpl", () => {
 
       await ssh.uploadFile("/local/file.txt", "/remote/path")
 
-      expect(executedCommands.some((cmd) => cmd.includes("chmod"))).toBe(false)
+      expect(executedCommands).toContain(`chmod '0600' '${tempPath}'`)
     })
 
     it("cleans up the temporary remote file when mv fails", async () => {
@@ -1428,6 +1482,53 @@ describe("SshConnectionImpl", () => {
   // -------------------------------------------------------------------------
 
   describe("writeFile", () => {
+    it("applies restrictive mode 0600 to the remote temp file before mv when no mode option is provided", async () => {
+      const { sftpUpload } = await import("../src/sftp.js")
+      vi.mocked(sftpUpload).mockResolvedValue()
+
+      const tempPath = "/tmp/paratix-write.ABCDEF"
+      const executedCommands: string[] = []
+
+      const execSpy = vi
+        .fn()
+        .mockImplementationOnce((_command: string, callback: ExecCallback) => {
+          const stream = makeStream()
+          executedCommands.push(_command)
+          callback(undefined, stream)
+          stream.emit("data", Buffer.from(tempPath))
+          stream.emit("close", 0)
+        })
+        .mockImplementationOnce((_command: string, callback: ExecCallback) => {
+          const stream = makeStream()
+          executedCommands.push(_command)
+          callback(undefined, stream)
+          stream.emit("close", 0)
+        })
+        .mockImplementationOnce((_command: string, callback: ExecCallback) => {
+          const stream = makeStream()
+          executedCommands.push(_command)
+          callback(undefined, stream)
+          stream.emit("close", 0)
+        })
+        .mockImplementationOnce((_command: string, callback: ExecCallback) => {
+          const stream = makeStream()
+          executedCommands.push(_command)
+          callback(undefined, stream)
+          stream.emit("close", 0)
+        })
+
+      const client = makeClientWithExecSpy(execSpy)
+      const ssh = makeConnectedSsh(client)
+
+      await ssh.writeFile("/remote/plain.txt", "hello world")
+
+      expect(executedCommands).toContain(`chmod '0600' '${tempPath}'`)
+      const chmodIndex = executedCommands.indexOf(`chmod '0600' '${tempPath}'`)
+      const mvIndex = executedCommands.indexOf(`mv '${tempPath}' '/remote/plain.txt'`)
+      expect(chmodIndex).toBeGreaterThan(-1)
+      expect(chmodIndex).toBeLessThan(mvIndex)
+    })
+
     it("always uses atomic SFTP path (write-to-temp + mv) for all content", async () => {
       const { sftpUpload } = await import("../src/sftp.js")
       vi.mocked(sftpUpload).mockResolvedValue()
@@ -1442,6 +1543,12 @@ describe("SshConnectionImpl", () => {
           executedCommands.push(_command)
           callback(undefined, stream)
           stream.emit("data", Buffer.from(tempPath))
+          stream.emit("close", 0)
+        })
+        .mockImplementationOnce((_command: string, callback: ExecCallback) => {
+          const stream = makeStream()
+          executedCommands.push(_command)
+          callback(undefined, stream)
           stream.emit("close", 0)
         })
         .mockImplementationOnce((_command: string, callback: ExecCallback) => {
@@ -1471,6 +1578,7 @@ describe("SshConnectionImpl", () => {
 
       // mktemp and mv confirm atomic write path
       expect(executedCommands.some((cmd) => cmd.includes("mktemp"))).toBe(true)
+      expect(executedCommands.some((cmd) => cmd === `chmod '0600' '${tempPath}'`)).toBe(true)
       expect(executedCommands.some((cmd) => cmd.includes("mv"))).toBe(true)
     })
 
