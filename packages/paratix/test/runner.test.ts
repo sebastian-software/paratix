@@ -2066,6 +2066,41 @@ describe("runPlaybook dry-run recipe behaviour", () => {
     expect(process.exitCode).toBe(1)
   })
 
+  it("does not run top-level definition.signals in dry-run mode", async () => {
+    const capturedConfigs: unknown[] = []
+
+    vi.doMock("../src/ssh.js", () => ({
+      shellQuote: (s: string) => `'${s}'`,
+      SshConnectionImpl: makeMockSshClass(capturedConfigs),
+    }))
+
+    const { runPlaybook } = await import("../src/runner.js")
+
+    const changedModule: Module = {
+      apply: vi.fn().mockResolvedValue({ status: "changed" } satisfies ModuleResult),
+      check: vi.fn().mockResolvedValue("needs-apply"),
+      name: "changed-module",
+    }
+    const signalModule: Module = {
+      apply: vi.fn().mockResolvedValue({ status: "changed" } satisfies ModuleResult),
+      check: vi.fn().mockResolvedValue("needs-apply"),
+      name: "signal-module",
+    }
+
+    const definition: ServerDefinition = {
+      host: "1.2.3.4",
+      name: "test-server",
+      run: [changedModule],
+      signals: [signalModule],
+      ssh: { ports: [22], privateKey: "~/.ssh/id", user: "root" },
+    }
+
+    await runPlaybook(definition, { dryRun: true })
+
+    expect(signalModule.apply).not.toHaveBeenCalled()
+    expect(signalModule.check).not.toHaveBeenCalled()
+  })
+
   it("does not start dry-run blocker apply() when SIGTERM arrives after check()", async () => {
     const capturedConfigs: unknown[] = []
 
