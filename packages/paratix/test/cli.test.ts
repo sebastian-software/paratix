@@ -23,10 +23,14 @@ describe("PACKAGE_VERSION", () => {
 
 describe("collectEnvironment", () => {
   let exitSpy: MockInstance<typeof process.exit>
+  let errorSpy: MockInstance<typeof console.error>
 
   beforeEach(() => {
     exitSpy = vi.spyOn(process, "exit").mockImplementation(() => {
       throw new Error("process.exit")
+    })
+    errorSpy = vi.spyOn(console, "error").mockImplementation(() => {
+      /* noop */
     })
   })
 
@@ -58,6 +62,62 @@ describe("collectEnvironment", () => {
     }
     expect(exitCalled).toBe(true)
     expect(exitSpy).toHaveBeenCalledWith(2)
+  })
+
+  it("calls process.exit(2) when the env name is empty", () => {
+    let exitCalled = false
+    try {
+      collectEnvironment("=value", {})
+    } catch {
+      exitCalled = true
+    }
+    expect(exitCalled).toBe(true)
+    expect(exitSpy).toHaveBeenCalledWith(2)
+    expect(errorSpy).toHaveBeenCalledWith(
+      "Invalid --env name: (empty) (expected [A-Za-z_][A-Za-z0-9_]*)"
+    )
+  })
+
+  it("calls process.exit(2) when the env name contains invalid characters", () => {
+    let exitCalled = false
+    try {
+      collectEnvironment("BAD-NAME=value", {})
+    } catch {
+      exitCalled = true
+    }
+    expect(exitCalled).toBe(true)
+    expect(exitSpy).toHaveBeenCalledWith(2)
+    expect(errorSpy).toHaveBeenCalledWith(
+      "Invalid --env name: BAD-NAME (expected [A-Za-z_][A-Za-z0-9_]*)"
+    )
+  })
+
+  it("calls process.exit(2) when the env name contains leading whitespace", () => {
+    let exitCalled = false
+    try {
+      collectEnvironment(" BAD=value", {})
+    } catch {
+      exitCalled = true
+    }
+    expect(exitCalled).toBe(true)
+    expect(exitSpy).toHaveBeenCalledWith(2)
+    expect(errorSpy).toHaveBeenCalledWith(
+      "Invalid --env name:  BAD (expected [A-Za-z_][A-Za-z0-9_]*)"
+    )
+  })
+
+  it("calls process.exit(2) when the env name contains internal whitespace", () => {
+    let exitCalled = false
+    try {
+      collectEnvironment("BAD NAME=value", {})
+    } catch {
+      exitCalled = true
+    }
+    expect(exitCalled).toBe(true)
+    expect(exitSpy).toHaveBeenCalledWith(2)
+    expect(errorSpy).toHaveBeenCalledWith(
+      "Invalid --env name: BAD NAME (expected [A-Za-z_][A-Za-z0-9_]*)"
+    )
   })
 
   it("accumulates multiple entries into the previous object", () => {

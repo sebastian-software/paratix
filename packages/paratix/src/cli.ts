@@ -12,6 +12,7 @@ declare const PACKAGE_VERSION: string
 
 const SECONDS_TO_MS = 1000
 const DEFAULT_RECONNECT_TIMEOUT_SECONDS = 300
+const ENVIRONMENT_KEY_PATTERN = /^[A-Za-z_]\w*$/v
 
 /**
  * Type guard that checks whether `value` has the shape of a
@@ -287,6 +288,13 @@ export function collectEnvironment(
   }
   const key = value.slice(0, eqIndex)
   const value_ = value.slice(eqIndex + 1)
+  if (!ENVIRONMENT_KEY_PATTERN.test(key)) {
+    console.error(
+      `Invalid --env name: ${key === "" ? "(empty)" : key} (expected [A-Za-z_][A-Za-z0-9_]*)`
+    )
+    // eslint-disable-next-line node/no-process-exit
+    process.exit(2)
+  }
   return { ...previous, [key]: value_ }
 }
 
