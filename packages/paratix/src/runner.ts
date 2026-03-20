@@ -131,6 +131,7 @@ function interruptedBeforeApply(
 
 async function applyCheckedModule(parameters: {
   currentEnvironment: Environment
+  dryRun?: boolean
   shutdownSignal: () => NodeJS.Signals | null
   ssh: SshConnectionImpl
   targetModule: Module
@@ -144,6 +145,7 @@ async function applyCheckedModule(parameters: {
 
   return applyModule({
     currentEnvironment: parameters.currentEnvironment,
+    dryRun: parameters.dryRun,
     ssh: parameters.ssh,
     targetModule: parameters.targetModule,
     verbose: parameters.verbose,
@@ -151,7 +153,11 @@ async function applyCheckedModule(parameters: {
 }
 
 function shouldExecuteApplyDuringDryRun(module: Module): boolean {
-  return module._dryRunBlocker === true || module._dryRunMetaProducer === true
+  return (
+    module._applyDryRun != null ||
+    module._dryRunBlocker === true ||
+    module._dryRunMetaProducer === true
+  )
 }
 
 function handleCaughtStepError(parameters: {
@@ -305,13 +311,17 @@ async function runRecipeModule(
 
 async function applyModule(parameters: {
   currentEnvironment: Environment
+  dryRun?: boolean
   ssh: SshConnectionImpl
   targetModule: Module
   verbose: boolean
 }): Promise<StepResult> {
-  const { currentEnvironment, ssh, targetModule, verbose } = parameters
+  const { currentEnvironment, dryRun = false, ssh, targetModule, verbose } = parameters
   const connection = targetModule.local === true ? null : ssh
-  const result = await targetModule.apply(connection, currentEnvironment)
+  const result =
+    dryRun && targetModule._applyDryRun != null
+      ? await targetModule._applyDryRun(connection, currentEnvironment)
+      : await targetModule.apply(connection, currentEnvironment)
   const stepResult = await handleMetaAndBuildResult(ssh, currentEnvironment, result)
   printModuleResult(targetModule.name, result.status)
   if (result.status === "failed" && result.error != null) {
@@ -346,6 +356,7 @@ async function runRegularModule(parameters: RegularModuleArguments): Promise<Ste
       if (shouldExecuteApplyDuringDryRun(targetModule)) {
         return await applyCheckedModule({
           currentEnvironment: env,
+          dryRun: true,
           shutdownSignal,
           ssh,
           targetModule,
@@ -358,6 +369,7 @@ async function runRegularModule(parameters: RegularModuleArguments): Promise<Ste
 
     return await applyCheckedModule({
       currentEnvironment: env,
+      dryRun: false,
       shutdownSignal,
       ssh,
       targetModule,

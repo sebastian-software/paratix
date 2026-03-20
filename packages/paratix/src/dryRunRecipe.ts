@@ -8,7 +8,11 @@ import { printCommandFailure, printModuleResult, printRecipeHeader } from "./out
 type StepResult = { env: Environment; shouldBreak: boolean; status?: ModuleStatus }
 
 function shouldExecuteApplyDuringDryRun(module: RecipeModule["_modules"][number]): boolean {
-  return module._dryRunBlocker === true || module._dryRunMetaProducer === true
+  return (
+    module._applyDryRun != null ||
+    module._dryRunBlocker === true ||
+    module._dryRunMetaProducer === true
+  )
 }
 
 async function executeDryRunBlockingModule(
@@ -16,7 +20,10 @@ async function executeDryRunBlockingModule(
   connection: null | SshConnectionImpl,
   environment: Environment
 ): Promise<StepResult> {
-  const result = await childModule.apply(connection, environment)
+  const result =
+    childModule._applyDryRun == null
+      ? await childModule.apply(connection, environment)
+      : await childModule._applyDryRun(connection, environment)
   const nextEnvironment =
     result.meta == null ? environment : await mergeEnvironmentFromMeta(environment, result.meta)
   printModuleResult(childModule.name, result.status)

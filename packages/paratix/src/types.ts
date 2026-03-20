@@ -80,6 +80,12 @@ export type OrchestrationStep = {
  */
 export type Module = {
   /**
+   * Optional internal dry-run apply hook for modules that need custom dry-run
+   * execution semantics beyond the generic blocker/meta-producer markers.
+   * @internal
+   */
+  _applyDryRun?: (ssh: null | SshConnection, environment: Environment) => Promise<ModuleResult>
+  /**
    * Internal marker for modules that must still execute their apply step in dry-run mode
    * because they act as run blockers rather than mutating state.
    * @internal

@@ -2335,6 +2335,120 @@ describe("runPlaybook dry-run recipe behaviour", () => {
     await expect(resolveEnvironment(receivedEnvInCheck!, "TOKEN")).resolves.toBe("recipe-secret")
     expect(dependentChild.apply).not.toHaveBeenCalled()
   })
+
+  it("treats when(assert()) as a dry-run blocker and stops later modules", async () => {
+    const capturedConfigs: unknown[] = []
+
+    vi.doMock("../src/ssh.js", () => ({
+      shellQuote: (s: string) => `'${s}'`,
+      SshConnectionImpl: makeMockSshClass(capturedConfigs),
+    }))
+
+    const [{ runPlaybook }, { assert, when }] = await Promise.all([
+      import("../src/runner.js"),
+      import("../src/builtins.js"),
+    ])
+
+    const laterModule: Module = {
+      apply: vi.fn().mockResolvedValue({ status: "changed" } satisfies ModuleResult),
+      check: vi.fn().mockResolvedValue("needs-apply"),
+      name: "later-module",
+    }
+
+    const definition: ServerDefinition = {
+      host: "1.2.3.4",
+      name: "test-server",
+      run: [
+        when(
+          () => true,
+          assert(() => false, "must pass")
+        ),
+        laterModule,
+      ],
+      ssh: { ports: [22], privateKey: "~/.ssh/id", user: "root" },
+    }
+
+    await runPlaybook(definition, { dryRun: true })
+
+    expect(laterModule.check).not.toHaveBeenCalled()
+    expect(laterModule.apply).not.toHaveBeenCalled()
+    expect(process.exitCode).toBe(1)
+  })
+
+  it("treats when(fail()) as a dry-run blocker and stops later modules", async () => {
+    const capturedConfigs: unknown[] = []
+
+    vi.doMock("../src/ssh.js", () => ({
+      shellQuote: (s: string) => `'${s}'`,
+      SshConnectionImpl: makeMockSshClass(capturedConfigs),
+    }))
+
+    const [{ runPlaybook }, { fail, when }] = await Promise.all([
+      import("../src/runner.js"),
+      import("../src/builtins.js"),
+    ])
+
+    const laterModule: Module = {
+      apply: vi.fn().mockResolvedValue({ status: "changed" } satisfies ModuleResult),
+      check: vi.fn().mockResolvedValue("needs-apply"),
+      name: "later-module",
+    }
+
+    const definition: ServerDefinition = {
+      host: "1.2.3.4",
+      name: "test-server",
+      run: [when(() => true, fail("stop here")), laterModule],
+      ssh: { ports: [22], privateKey: "~/.ssh/id", user: "root" },
+    }
+
+    await runPlaybook(definition, { dryRun: true })
+
+    expect(laterModule.check).not.toHaveBeenCalled()
+    expect(laterModule.apply).not.toHaveBeenCalled()
+    expect(process.exitCode).toBe(1)
+  })
+
+  it("propagates when(op.resolve()) meta to following modules in dry-run mode", async () => {
+    const capturedConfigs: unknown[] = []
+
+    vi.doMock("node:child_process", () => ({
+      spawn: vi.fn(() => createMockSpawnChild(JSON.stringify({ SECRET: "wrapped-secret" }))),
+    }))
+    vi.doMock("../src/ssh.js", () => ({
+      shellQuote: (s: string) => `'${s}'`,
+      SshConnectionImpl: makeMockSshClass(capturedConfigs),
+    }))
+
+    const [{ runPlaybook }, { when }, { op }] = await Promise.all([
+      import("../src/runner.js"),
+      import("../src/builtins.js"),
+      import("../src/modules/op.js"),
+    ])
+
+    let receivedEnvInCheck: Environment | undefined
+    const dependentModule: Module = {
+      apply: vi.fn().mockResolvedValue({ status: "ok" } satisfies ModuleResult),
+      check: vi.fn().mockImplementation(async (_ssh, env: Environment) => {
+        await Promise.resolve()
+        receivedEnvInCheck = env
+        return "ok" as const
+      }),
+      name: "dependent-module",
+    }
+
+    const definition: ServerDefinition = {
+      host: "1.2.3.4",
+      name: "test-server",
+      run: [when(() => true, op.resolve({ SECRET: "op://vault/item/password" })), dependentModule],
+      ssh: { ports: [22], privateKey: "~/.ssh/id", user: "root" },
+    }
+
+    await runPlaybook(definition, { dryRun: true })
+
+    expect(receivedEnvInCheck).toBeDefined()
+    await expect(resolveEnvironment(receivedEnvInCheck!, "SECRET")).resolves.toBe("wrapped-secret")
+    expect(dependentModule.apply).not.toHaveBeenCalled()
+  })
 })
 
 // Bug: modules with local: true receive an SSH connection instead of null
