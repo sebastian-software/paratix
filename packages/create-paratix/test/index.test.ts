@@ -118,6 +118,21 @@ describe("writeProjectFiles", () => {
     })
   })
 
+  it("generated package.json includes tsx so apply scripts can run server.ts immediately", () => {
+    writeProjectFiles(TEST_DIR)
+
+    const raw = readFileSync(join(TEST_DIR, "package.json"), "utf8")
+    const parsed: unknown = JSON.parse(raw)
+
+    expect(parsed).toMatchObject({
+      devDependencies: { tsx: expect.stringMatching(/^\^/v) },
+      scripts: {
+        apply: "paratix apply server.ts",
+        "apply:dry": "paratix apply server.ts --dry-run",
+      },
+    })
+  })
+
   it("creates a server.ts file", () => {
     writeProjectFiles(TEST_DIR)
 

@@ -92,6 +92,9 @@ export function writeProjectFiles(projectDirectory: string): void {
     dependencies: {
       paratix: "^0.1.0",
     },
+    devDependencies: {
+      tsx: "^4.20.6",
+    },
     engines: {
       node: ">=24.0.0",
     },
