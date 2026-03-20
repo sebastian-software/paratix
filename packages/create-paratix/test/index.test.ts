@@ -175,6 +175,15 @@ describe("writeProjectFiles", () => {
     expect(content).toContain('PasswordAuthentication: "no"')
   })
 
+  it("generated server.ts does not leave SSH port 22 open in the final firewall default", () => {
+    writeProjectFiles(TEST_DIR)
+
+    const content = readFileSync(join(TEST_DIR, "server.ts"), "utf8")
+
+    expect(content).toContain('ufw.rule("allow", [2222, 80, 443])')
+    expect(content).not.toContain('ufw.rule("allow", [22, 2222, 80, 443])')
+  })
+
   it("creates a files subdirectory", () => {
     writeProjectFiles(TEST_DIR)
 

@@ -92,7 +92,7 @@ export default server({
       }
     ),
 
-    recipe("firewall", [ufw.rule("allow", [22, 2222, 80, 443]), ufw.enabled()]),
+    recipe("firewall", [ufw.rule("allow", [2222, 80, 443]), ufw.enabled()]),
   ],
 })
 ```
