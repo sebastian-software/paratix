@@ -417,11 +417,19 @@ async function runSignals(parameters: SignalArguments): Promise<void> {
   })
 }
 
-async function connectAndRegister(
-  definition: ServerDefinition,
-  options: RunOptions,
+function throwIfShutdownRequested(shutdownSignal: () => NodeJS.Signals | null): void {
+  const signal = shutdownSignal()
+  if (signal == null) return
+  throw new Error(`Bootstrap interrupted by ${signal}`)
+}
+
+async function connectAndRegister(parameters: {
+  definition: ServerDefinition
+  options: RunOptions
   setSsh: (c: SshConnectionImpl) => void
-): Promise<SshConnectionImpl> {
+  shutdownSignal: () => NodeJS.Signals | null
+}): Promise<SshConnectionImpl> {
+  const { definition, options, setSsh, shutdownSignal } = parameters
   const sshConfig = {
     ...definition.ssh,
     ports: [...definition.ssh.ports],
@@ -429,7 +437,10 @@ async function connectAndRegister(
   }
   const ssh = new SshConnectionImpl(definition.host, sshConfig)
   setSsh(ssh)
+  throwIfShutdownRequested(shutdownSignal)
   await ssh.connect()
+  throwIfShutdownRequested(shutdownSignal)
+  throwIfShutdownRequested(shutdownSignal)
   await ssh.probeSudo()
   return ssh
 }
@@ -492,7 +503,7 @@ export async function runPlaybook(
 
   // No catch block: connect errors propagate to cli.ts, which prints them and exits with code 2.
   try {
-    ssh = await connectAndRegister(definition, options, setSsh)
+    ssh = await connectAndRegister({ definition, options, setSsh, shutdownSignal })
     await executeRun({ definition, dryRun, environment, shutdownSignal, ssh, stats, verbose })
   } catch (error) {
     rethrowIfNotShutdown(error, shutdownSignal)

@@ -1586,6 +1586,72 @@ describe("runPlaybook shutdown handler leak on SSH connection failure", () => {
     expect(disconnect).toHaveBeenCalled()
     expect(process.exitCode).toBe(143)
   })
+
+  it("does not call probeSudo when SIGINT arrives after connect resolves", async () => {
+    const disconnect = vi.fn()
+    const probeSudo = vi.fn().mockResolvedValue(null)
+
+    vi.doMock("../src/ssh.js", () => ({
+      shellQuote: (s: string) => `'${s}'`,
+      SshConnectionImpl: class MockConnectResolvedThenInterrupted {
+        public connect = vi.fn().mockImplementation(async () => {
+          await Promise.resolve()
+          process.emit("SIGINT", "SIGINT")
+        })
+        public disconnect = disconnect
+        public probeSudo = probeSudo
+      },
+    }))
+
+    const { runPlaybook } = await import("../src/runner.js")
+
+    const definition: ServerDefinition = {
+      host: "1.2.3.4",
+      name: "test-server",
+      run: [],
+      ssh: { ports: [22], privateKey: "~/.ssh/id", user: "root" },
+    }
+
+    await expect(runPlaybook(definition)).resolves.toBeUndefined()
+
+    expect(probeSudo).not.toHaveBeenCalled()
+    expect(disconnect).toHaveBeenCalled()
+    expect(process.exitCode).toBe(130)
+  })
+
+  it("does not start prompt-capable bootstrap work when SIGTERM arrives after connect resolves", async () => {
+    const disconnect = vi.fn()
+    const probeSudo = vi.fn().mockImplementation(() => {
+      throw new Error("probeSudo should not have been called")
+    })
+
+    vi.doMock("../src/ssh.js", () => ({
+      shellQuote: (s: string) => `'${s}'`,
+      SshConnectionImpl: class MockPromptBootstrapInterrupted {
+        public connect = vi.fn().mockImplementation(async () => {
+          await Promise.resolve()
+          process.emit("SIGTERM", "SIGTERM")
+        })
+        public disconnect = disconnect
+        public probeSudo = probeSudo
+      },
+    }))
+
+    const { runPlaybook } = await import("../src/runner.js")
+
+    const definition: ServerDefinition = {
+      host: "1.2.3.4",
+      name: "test-server",
+      run: [],
+      ssh: { ports: [22], privateKey: "~/.ssh/id", user: "root" },
+    }
+
+    await expect(runPlaybook(definition)).resolves.toBeUndefined()
+
+    expect(probeSudo).not.toHaveBeenCalled()
+    expect(disconnect).toHaveBeenCalled()
+    expect(process.exitCode).toBe(143)
+  })
 })
 
 // Bug regression: recipes must NOT apply() child modules in dry-run mode, only check()
