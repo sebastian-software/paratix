@@ -24,8 +24,10 @@ function makeMockSshClass(
     disconnect?: ReturnType<typeof vi.fn>
     exec?: ReturnType<typeof vi.fn>
     output?: ReturnType<typeof vi.fn>
+    readFile?: ReturnType<typeof vi.fn>
     reconnect?: ReturnType<typeof vi.fn>
     updateHost?: ReturnType<typeof vi.fn>
+    writeFile?: ReturnType<typeof vi.fn>
   }
 ) {
   return class MockSshConnectionImpl {
@@ -41,13 +43,13 @@ function makeMockSshClass(
     public lines = vi.fn().mockResolvedValue([])
     public output = overrides?.output ?? vi.fn().mockResolvedValue("")
     public probeSudo = vi.fn().mockResolvedValue(null)
-    public readFile = vi.fn().mockResolvedValue("")
+    public readFile = overrides?.readFile ?? vi.fn().mockResolvedValue("")
     public reconnect = overrides?.reconnect ?? vi.fn().mockResolvedValue(null)
     public sha256 = vi.fn().mockResolvedValue(null)
     public test = vi.fn().mockResolvedValue(true)
     public updateHost = overrides?.updateHost ?? vi.fn()
     public uploadFile = vi.fn().mockResolvedValue(null)
-    public writeFile = vi.fn().mockResolvedValue(null)
+    public writeFile = overrides?.writeFile ?? vi.fn().mockResolvedValue(null)
 
     public constructor(_host: string, config: unknown) {
       capturedConfigs.push(config)
@@ -83,6 +85,10 @@ function createMockSpawnChild(stdout: string, exitCode = 0): MockChildProcess {
   })
 
   return child
+}
+
+function createSuccessfulSshdDryRunExecMock() {
+  return vi.fn().mockResolvedValue({ code: 0, stderr: "", stdout: "" })
 }
 
 // Bug regression: failed reconnect after port change or reboot must propagate and abort playbook
@@ -2282,6 +2288,41 @@ describe("runPlaybook dry-run recipe behaviour", () => {
     expect(allLogOutput).toContain("(dry-run)")
   })
 
+  it("prints validated dry-run detail for sshd.config", async () => {
+    const capturedConfigs: unknown[] = []
+    const consoleLogs: string[] = []
+    const exec = createSuccessfulSshdDryRunExecMock()
+
+    vi.doMock("../src/ssh.js", () => ({
+      shellQuote: (s: string) => `'${s}'`,
+      SshConnectionImpl: makeMockSshClass(capturedConfigs, {
+        exec,
+        readFile: vi.fn().mockResolvedValue("PasswordAuthentication yes\n"),
+        writeFile: vi.fn().mockResolvedValue(null),
+      }),
+    }))
+    vi.spyOn(console, "log").mockImplementation((...args) => {
+      consoleLogs.push(args.join(" "))
+    })
+
+    const [{ runPlaybook }, { sshd }] = await Promise.all([
+      import("../src/runner.js"),
+      import("../src/modules/sshd.js"),
+    ])
+
+    const definition: ServerDefinition = {
+      host: "1.2.3.4",
+      name: "test-server",
+      run: [sshd.config({ PasswordAuthentication: "no" })],
+      ssh: { ports: [22], privateKey: "~/.ssh/id", user: "root" },
+    }
+
+    await runPlaybook(definition, { dryRun: true })
+
+    const output = consoleLogs.join("\n")
+    expect(output).toContain("(dry-run, sshd -t ok; reload not executed)")
+  })
+
   it("prints verbose diagnostics for failed dry-run recipe children when --verbose is enabled", async () => {
     const capturedConfigs: unknown[] = []
     const consoleLogs: string[] = []
@@ -2394,6 +2435,49 @@ describe("runPlaybook dry-run recipe behaviour", () => {
 
     expect(signalModule.apply).not.toHaveBeenCalled()
     expect(signalModule.check).not.toHaveBeenCalled()
+  })
+
+  it("prints limited verification detail for sshd.port dry-run without reconnect side effects", async () => {
+    const capturedConfigs: unknown[] = []
+    const consoleLogs: string[] = []
+    const addPort = vi.fn()
+    const exec = createSuccessfulSshdDryRunExecMock()
+    const reconnect = vi.fn()
+
+    vi.doMock("../src/ssh.js", () => ({
+      shellQuote: (s: string) => `'${s}'`,
+      SshConnectionImpl: makeMockSshClass(capturedConfigs, {
+        addPort,
+        exec,
+        readFile: vi.fn().mockResolvedValue("Port 22\n"),
+        reconnect,
+        writeFile: vi.fn().mockResolvedValue(null),
+      }),
+    }))
+    vi.spyOn(console, "log").mockImplementation((...args) => {
+      consoleLogs.push(args.join(" "))
+    })
+
+    const [{ runPlaybook }, { sshd }] = await Promise.all([
+      import("../src/runner.js"),
+      import("../src/modules/sshd.js"),
+    ])
+
+    const definition: ServerDefinition = {
+      host: "1.2.3.4",
+      name: "test-server",
+      run: [sshd.port(2222)],
+      ssh: { ports: [22], privateKey: "~/.ssh/id", user: "root" },
+    }
+
+    await runPlaybook(definition, { dryRun: true })
+
+    const output = consoleLogs.join("\n")
+    expect(output).toContain(
+      "(dry-run, sshd -t ok; restart, port switch, firewall and reconnect not verified)"
+    )
+    expect(addPort).not.toHaveBeenCalled()
+    expect(reconnect).not.toHaveBeenCalled()
   })
 
   it("does not start dry-run blocker apply() when SIGTERM arrives after check()", async () => {

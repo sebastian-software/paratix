@@ -55,6 +55,12 @@ export type ModuleStatus = "changed" | "failed" | "ok" | "skipped"
 
 /** The outcome of a module's apply step. */
 export type ModuleResult = {
+  /**
+   * Optional internal dry-run detail shown instead of the generic `(dry-run)`
+   * suffix when a module performed custom dry-run verification.
+   * @internal
+   */
+  _dryRunDetail?: string
   /** Optional error details consumed by the runner for centralized CLI output. */
   error?: Error
   /** Optional typed meta entries for env propagation and runner control-plane updates. */

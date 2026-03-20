@@ -20,6 +20,22 @@ function trackWriteFile(
   return writtenFiles
 }
 
+function mockSshdDryRunExecSuccess(mockSsh: ReturnType<typeof createMockSsh>) {
+  return vi.spyOn(mockSsh, "exec").mockImplementation(async (command) => {
+    mockSsh.calls.push(command)
+    await Promise.resolve()
+    return { code: 0, stderr: "", stdout: "" }
+  })
+}
+
+function mockSshdDryRunExecValidationFailure(mockSsh: ReturnType<typeof createMockSsh>) {
+  return vi.spyOn(mockSsh, "exec").mockImplementationOnce(async (command) => {
+    mockSsh.calls.push(command)
+    await Promise.resolve()
+    return { code: 1, stderr: "Bad configuration option", stdout: "" }
+  })
+}
+
 // ─── sshd.config — apply ──────────────────────────────────────────────────────
 
 describe("sshd.config — apply", () => {
@@ -255,6 +271,47 @@ describe("sshd.config — check", () => {
     const mod = sshd.config({ AllowUsers: "admin*" })
     const result = await mod.check(mockSsh, emptyEnv)
     expect(result).toBe("ok")
+  })
+})
+
+// ─── sshd.config — dry-run ───────────────────────────────────────────────────
+
+describe("sshd.config — dry-run", () => {
+  it("validates the prospective config via sshd -t without reloading sshd", async () => {
+    const mockSsh = createMockSsh({
+      [CAT_SSHD]: { stdout: "PasswordAuthentication yes\n" },
+    })
+    const writtenFiles = trackWriteFile(mockSsh)
+    const execSpy = mockSshdDryRunExecSuccess(mockSsh)
+
+    const mod = sshd.config({ PasswordAuthentication: "no" })
+    const result = await mod._applyDryRun?.(mockSsh, emptyEnv)
+
+    expect(result).toStrictEqual({
+      _dryRunDetail: "(dry-run, sshd -t ok; reload not executed)",
+      status: "changed",
+    })
+    expect(writtenFiles).toHaveLength(1)
+    expect(writtenFiles[0]?.path).toMatch(/^\/tmp\/paratix-sshd-dry-run-.+\.conf$/v)
+    expect(writtenFiles[0]?.content).toContain("PasswordAuthentication no")
+    const execCommands = execSpy.mock.calls.map((args) => args[0])
+    expect(execCommands.some((command) => command.startsWith("sshd -t -f "))).toBe(true)
+    expect(execCommands.some((command) => command.startsWith("rm -f "))).toBe(true)
+    expect(execCommands).not.toContain("systemctl reload sshd")
+  })
+
+  it("returns failed when sshd -t rejects the prospective config in dry-run", async () => {
+    const mockSsh = createMockSsh({
+      [CAT_SSHD]: { stdout: "# empty config\n" },
+    })
+    mockSshdDryRunExecValidationFailure(mockSsh)
+
+    const mod = sshd.config({ PermitRootLogin: "maybe" })
+    const result = await mod._applyDryRun?.(mockSsh, emptyEnv)
+
+    expect(result?.status).toBe("failed")
+    expect(result?.error).toBeInstanceOf(Error)
+    expect(String(result?.error)).toContain("sshd -t failed for prospective config")
   })
 })
 
@@ -514,6 +571,35 @@ describe("sshd.port — apply: validation and rollback", () => {
 
     expect(addPortSpy).toHaveBeenCalledWith(2222)
     expect(removePortSpy).not.toHaveBeenCalled()
+  })
+})
+
+// ─── sshd.port — dry-run ─────────────────────────────────────────────────────
+
+describe("sshd.port — dry-run", () => {
+  it("validates the prospective port config without restart, reconnect, or meta", async () => {
+    const mockSsh = createMockSsh({
+      [CAT_SSHD]: { stdout: "Port 22\n" },
+    })
+    const writtenFiles = trackWriteFile(mockSsh)
+    const execSpy = mockSshdDryRunExecSuccess(mockSsh)
+    const addPortSpy = vi.spyOn(mockSsh, "addPort")
+
+    const mod = sshd.port(2222)
+    const result = await mod._applyDryRun?.(mockSsh, emptyEnv)
+
+    expect(result).toStrictEqual({
+      _dryRunDetail:
+        "(dry-run, sshd -t ok; restart, port switch, firewall and reconnect not verified)",
+      status: "changed",
+    })
+    expect(result).not.toHaveProperty("meta")
+    expect(writtenFiles).toHaveLength(1)
+    expect(writtenFiles[0]?.content).toContain("Port 2222")
+    const execCommands = execSpy.mock.calls.map((args) => args[0])
+    expect(execCommands.some((command) => command.startsWith("sshd -t -f "))).toBe(true)
+    expect(execCommands).not.toContain("systemctl restart sshd")
+    expect(addPortSpy).not.toHaveBeenCalled()
   })
 })
 

@@ -215,7 +215,11 @@ program
 program
   .command("apply <file>")
   .description("Apply a server definition")
-  .option("--dry-run", "Only check, do not apply", false)
+  .option(
+    "--dry-run",
+    "Only check, do not apply. Some modules validate prospective config but cannot verify runtime restarts.",
+    false
+  )
   .option("--env <key=value...>", "Set env values", collectEnvironment, {})
   .option("--env-file <path>", "Load dotenv file")
   .option(

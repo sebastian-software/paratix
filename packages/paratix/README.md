@@ -63,6 +63,16 @@ Preview changes without applying them:
 npx paratix apply server.ts --dry-run
 ```
 
+For most modules, `--dry-run` reports whether Paratix would change remote state without mutating it.
+For SSH hardening modules, Paratix now goes one step further:
+
+- `sshd.config` validates the prospective config with `sshd -t`
+- `sshd.port` validates the prospective config with `sshd -t`
+
+Runtime effects are still intentionally not executed during `--dry-run`. In particular, reloads,
+restarts, port switches, firewall reachability, and reconnect behavior are reported as limited
+verification in the run output instead of being performed.
+
 ## SSH host key migration
 
 Paratix now defaults to strict host-key checking (`ssh.strictHostKeyChecking: "yes"`).
@@ -224,7 +234,7 @@ Use `\{{` to produce a literal `{{` in the output. Unknown keys throw an error a
 paratix apply <file>
 
 Options:
-  --dry-run                Check only, don't apply
+  --dry-run                Check only, don't apply. Some modules validate prospective config but cannot verify runtime restarts.
   --env <key=value>        Set environment variable (repeatable)
   --env-file <path>        Load .env file
   --reconnect-timeout <s>  SSH reconnect timeout in seconds (default: 300)

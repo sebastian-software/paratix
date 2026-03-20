@@ -28,7 +28,7 @@ async function executeDryRunBlockingModule(parameters: {
       : await childModule._applyDryRun(connection, environment)
   const nextEnvironment =
     result.meta == null ? environment : await mergeEnvironmentFromMeta(environment, result.meta)
-  printModuleResult(childModule.name, result.status)
+  printModuleResult(childModule.name, result.status, result._dryRunDetail ?? "(dry-run)")
   if (result.status === "failed" && result.error != null) {
     printCommandFailure(result.error, verbose)
   }
