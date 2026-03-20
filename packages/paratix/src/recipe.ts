@@ -1,6 +1,7 @@
 import { isEnvironmentMetaEntry, mergeEnvironmentFromMeta } from "./meta.js"
 import { printCommandFailure, printModuleResult, printRecipeHeader } from "./output.js"
 import { runSignalModules, type SignalHooks } from "./signalOrchestration.js"
+import { CommandError } from "./sshHelpers.js"
 import {
   type Environment,
   type Module,
@@ -134,6 +135,51 @@ async function applyExecutedRecipeStep(parameters: {
   )
 }
 
+function failedRecipeState(environment: Environment): RecipeState {
+  return {
+    env: environment,
+    meta: undefined,
+    status: "failed",
+  }
+}
+
+function annotateRecipeChildError(moduleName: string, error: unknown): Error {
+  const prefix = `[${moduleName}] `
+  if (error instanceof CommandError) {
+    return new CommandError(`${prefix}${error.message}`, error.fullStdout, error.fullStderr)
+  }
+  if (error instanceof Error) {
+    return new Error(`${prefix}${error.message}`)
+  }
+  return new Error(`${prefix}${String(error)}`)
+}
+
+type RecipeChildExecution =
+  | { kind: "failed"; state: RecipeState }
+  | {
+      kind: "step"
+      step: null | OrchestrationStep | typeof INTERRUPTED_BEFORE_APPLY
+    }
+
+async function executeRecipeChildStep(parameters: {
+  currentEnvironment: Environment
+  shutdownSignal: () => NodeJS.Signals | null
+  ssh: null | SshConnection
+  targetModule: Module
+  verbose: boolean
+}): Promise<RecipeChildExecution> {
+  try {
+    return { kind: "step", step: await executeOneModule(parameters) }
+  } catch (error) {
+    if (parameters.shutdownSignal() != null) {
+      return { kind: "step", step: INTERRUPTED_BEFORE_APPLY }
+    }
+    printModuleResult(parameters.targetModule.name, "failed")
+    printCommandFailure(error, parameters.verbose)
+    return { kind: "failed", state: failedRecipeState(parameters.currentEnvironment) }
+  }
+}
+
 async function executeModules(
   modules: Module[],
   ssh: null | SshConnection,
@@ -157,19 +203,20 @@ async function executeModules(
   for (const currentModule of modules) {
     if (shutdownSignal() != null) break
     // eslint-disable-next-line no-await-in-loop
-    const step = await executeOneModule({
+    const step = await executeRecipeChildStep({
       currentEnvironment: state.env,
       shutdownSignal,
       ssh,
       targetModule: currentModule,
       verbose,
     })
+    if (step.kind === "failed") return step.state
     // eslint-disable-next-line no-await-in-loop
     const nextState = await applyExecutedRecipeStep({
       onChildStep,
       preserveControlPlaneMeta,
       state,
-      step,
+      step: step.step,
     })
     if (nextState == null) break
 
@@ -303,8 +350,13 @@ export function recipe(
       // because check() never calls apply() and therefore produces no meta.
       for (const childModule of modules) {
         const connection = childModule.local === true ? null : ssh
-        // eslint-disable-next-line no-await-in-loop
-        const result = await childModule.check(connection, environment)
+        let result: "needs-apply" | "ok"
+        try {
+          // eslint-disable-next-line no-await-in-loop
+          result = await childModule.check(connection, environment)
+        } catch (error) {
+          throw annotateRecipeChildError(childModule.name, error)
+        }
         if (result === NEEDS_APPLY) return NEEDS_APPLY
       }
       return "ok"

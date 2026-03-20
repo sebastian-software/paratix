@@ -663,6 +663,92 @@ describe("runPlaybook recipe exception handling", () => {
     expect(subsequentModule.check).not.toHaveBeenCalled()
     process.exitCode = 0
   })
+
+  it("logs the concrete recipe child module name when child check() throws during runPlaybook", async () => {
+    const capturedConfigs: unknown[] = []
+    const consoleLogs: string[] = []
+
+    vi.doMock("../src/ssh.js", () => ({
+      shellQuote: (s: string) => `'${s}'`,
+      SshConnectionImpl: makeMockSshClass(capturedConfigs),
+    }))
+    vi.spyOn(console, "log").mockImplementation((...args) => {
+      consoleLogs.push(args.join(" "))
+    })
+
+    const [{ runPlaybook }, { recipe }] = await Promise.all([
+      import("../src/runner.js"),
+      import("../src/recipe.js"),
+    ])
+
+    const throwingChild: Module = {
+      apply: vi.fn().mockResolvedValue({ status: "changed" } satisfies ModuleResult),
+      check: vi.fn().mockRejectedValue(new Error("recipe child check exploded")),
+      name: "throwing-child-check",
+    }
+
+    const definition: ServerDefinition = {
+      host: "1.2.3.4",
+      name: "test-server",
+      run: [recipe("test-recipe", [throwingChild])],
+      ssh: {
+        ports: [22],
+        privateKey: "~/.ssh/id",
+        user: "root",
+      },
+    }
+
+    await runPlaybook(definition)
+
+    const output = consoleLogs.join("\n")
+    expect(output).toContain("throwing-child-check")
+    expect(output).toContain("recipe child check exploded")
+    expect(process.exitCode).toBe(1)
+    process.exitCode = 0
+  })
+
+  it("logs the concrete recipe child module name when child apply() throws during runPlaybook", async () => {
+    const capturedConfigs: unknown[] = []
+    const consoleLogs: string[] = []
+
+    vi.doMock("../src/ssh.js", () => ({
+      shellQuote: (s: string) => `'${s}'`,
+      SshConnectionImpl: makeMockSshClass(capturedConfigs),
+    }))
+    vi.spyOn(console, "log").mockImplementation((...args) => {
+      consoleLogs.push(args.join(" "))
+    })
+
+    const [{ runPlaybook }, { recipe }] = await Promise.all([
+      import("../src/runner.js"),
+      import("../src/recipe.js"),
+    ])
+
+    const throwingChild: Module = {
+      apply: vi.fn().mockRejectedValue(new Error("recipe child apply exploded")),
+      check: vi.fn().mockResolvedValue("needs-apply"),
+      name: "throwing-child-apply",
+    }
+
+    const definition: ServerDefinition = {
+      host: "1.2.3.4",
+      name: "test-server",
+      run: [recipe("test-recipe", [throwingChild])],
+      ssh: {
+        ports: [22],
+        privateKey: "~/.ssh/id",
+        user: "root",
+      },
+    }
+
+    await runPlaybook(definition)
+
+    const output = consoleLogs.join("\n")
+    expect(output).toContain("throwing-child-apply")
+    expect(output).toContain("recipe child apply exploded")
+    expect(process.exitCode).toBe(1)
+    process.exitCode = 0
+  })
 })
 
 // Signal handling: graceful shutdown on SIGINT / SIGTERM

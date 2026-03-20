@@ -154,6 +154,50 @@ describe("recipe", () => {
     expect(output).toContain("child stdout")
   })
 
+  it("logs the concrete child module name when child check() throws", async () => {
+    const consoleLogs: string[] = []
+    vi.spyOn(console, "log").mockImplementation((...args) => {
+      consoleLogs.push(args.join(" "))
+    })
+
+    const throwingChild: Module = {
+      apply: vi.fn().mockResolvedValue({ status: "changed" }),
+      check: vi.fn().mockRejectedValue(new Error("child check exploded")),
+      name: "throwing-check-child",
+    }
+
+    const r = recipe("test-recipe", [throwingChild])
+    // eslint-disable-next-line prefer-spread
+    const result = await r.apply(null, emptyEnv)
+
+    expect(result.status).toBe("failed")
+    const output = consoleLogs.join("\n")
+    expect(output).toContain("throwing-check-child")
+    expect(output).toContain("child check exploded")
+  })
+
+  it("logs the concrete child module name when child apply() throws", async () => {
+    const consoleLogs: string[] = []
+    vi.spyOn(console, "log").mockImplementation((...args) => {
+      consoleLogs.push(args.join(" "))
+    })
+
+    const throwingChild: Module = {
+      apply: vi.fn().mockRejectedValue(new Error("child apply exploded")),
+      check: vi.fn().mockResolvedValue("needs-apply"),
+      name: "throwing-apply-child",
+    }
+
+    const r = recipe("test-recipe", [throwingChild])
+    // eslint-disable-next-line prefer-spread
+    const result = await r.apply(null, emptyEnv)
+
+    expect(result.status).toBe("failed")
+    const output = consoleLogs.join("\n")
+    expect(output).toContain("throwing-apply-child")
+    expect(output).toContain("child apply exploded")
+  })
+
   it("does not trigger signals when status is ok", async () => {
     const signalApplied = { count: 0 }
     const signal: Module = {
@@ -436,6 +480,6 @@ describe("recipe", () => {
       name: "failing-mod",
     }
     const r = recipe("test-recipe", [failing])
-    await expect(r.check(null, emptyEnv)).rejects.toThrow("check failed")
+    await expect(r.check(null, emptyEnv)).rejects.toThrow("[failing-mod] check failed")
   })
 })
