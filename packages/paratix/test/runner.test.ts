@@ -1490,6 +1490,73 @@ describe("runPlaybook dry-run recipe behaviour", () => {
     const allLogOutput = consoleLogs.flat().join(" ")
     expect(allLogOutput).toContain("(dry-run)")
   })
+
+  it("treats top-level fail() as a blocker in dry-run mode and stops the remaining run modules", async () => {
+    const capturedConfigs: unknown[] = []
+
+    vi.doMock("../src/ssh.js", () => ({
+      shellQuote: (s: string) => `'${s}'`,
+      SshConnectionImpl: makeMockSshClass(capturedConfigs),
+    }))
+
+    const [{ runPlaybook }, { fail }] = await Promise.all([
+      import("../src/runner.js"),
+      import("../src/builtins.js"),
+    ])
+
+    const laterModule: Module = {
+      apply: vi.fn().mockResolvedValue({ status: "changed" } satisfies ModuleResult),
+      check: vi.fn().mockResolvedValue("needs-apply"),
+      name: "later-module",
+    }
+
+    const definition: ServerDefinition = {
+      host: "1.2.3.4",
+      name: "test-server",
+      run: [fail("stop here"), laterModule],
+      ssh: { ports: [22], privateKey: "~/.ssh/id", user: "root" },
+    }
+
+    await runPlaybook(definition, { dryRun: true })
+
+    expect(laterModule.check).not.toHaveBeenCalled()
+    expect(laterModule.apply).not.toHaveBeenCalled()
+    expect(process.exitCode).toBe(1)
+  })
+
+  it("treats recipe child assert() as a blocker in dry-run mode and stops later recipe children", async () => {
+    const capturedConfigs: unknown[] = []
+
+    vi.doMock("../src/ssh.js", () => ({
+      shellQuote: (s: string) => `'${s}'`,
+      SshConnectionImpl: makeMockSshClass(capturedConfigs),
+    }))
+
+    const [{ runPlaybook }, { assert }, { recipe }] = await Promise.all([
+      import("../src/runner.js"),
+      import("../src/builtins.js"),
+      import("../src/recipe.js"),
+    ])
+
+    const laterChild: Module = {
+      apply: vi.fn().mockResolvedValue({ status: "changed" } satisfies ModuleResult),
+      check: vi.fn().mockResolvedValue("needs-apply"),
+      name: "later-child",
+    }
+
+    const definition: ServerDefinition = {
+      host: "1.2.3.4",
+      name: "test-server",
+      run: [recipe("test-recipe", [assert(() => false, "must pass"), laterChild])],
+      ssh: { ports: [22], privateKey: "~/.ssh/id", user: "root" },
+    }
+
+    await runPlaybook(definition, { dryRun: true })
+
+    expect(laterChild.check).not.toHaveBeenCalled()
+    expect(laterChild.apply).not.toHaveBeenCalled()
+    expect(process.exitCode).toBe(1)
+  })
 })
 
 // Bug: modules with local: true receive an SSH connection instead of null

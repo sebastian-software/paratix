@@ -110,6 +110,10 @@ function interruptedStepResult(environment: Environment): StepResult {
   return { env: environment, shouldBreak: true }
 }
 
+function isDryRunBlockingModule(module: Module): boolean {
+  return module._dryRunBlocker === true
+}
+
 function handleCaughtStepError(parameters: {
   environment: Environment
   error: unknown
@@ -282,6 +286,14 @@ async function runRegularModule(parameters: RegularModuleArguments): Promise<Ste
     }
 
     if (dryRun) {
+      if (isDryRunBlockingModule(targetModule)) {
+        return await applyModule({
+          currentEnvironment: env,
+          ssh,
+          targetModule,
+          verbose,
+        })
+      }
       printModuleResult(targetModule.name, "changed", "(dry-run)")
       return { env, shouldBreak: false, status: "changed" }
     }

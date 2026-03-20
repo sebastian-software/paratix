@@ -23,6 +23,7 @@ import {
  */
 export function assert(condition: (environment: Environment) => boolean, message: string): Module {
   return {
+    _dryRunBlocker: true,
     // eslint-disable-next-line @typescript-eslint/require-await -- Interface requires async
     async apply(_ssh: null | SshConnection, environment: Environment): Promise<ModuleResult> {
       if (condition(environment)) {
@@ -72,6 +73,7 @@ export function debug(message: string): Module {
  */
 export function fail(message: string): Module {
   return {
+    _dryRunBlocker: true,
     // eslint-disable-next-line @typescript-eslint/require-await -- Interface requires async
     async apply(): Promise<ModuleResult> {
       console.error(`  [fail] ${message}`)

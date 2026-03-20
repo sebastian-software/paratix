@@ -69,6 +69,12 @@ export type ModuleResult = {
  */
 export type Module = {
   /**
+   * Internal marker for modules that must still execute their apply step in dry-run mode
+   * because they act as run blockers rather than mutating state.
+   * @internal
+   */
+  _dryRunBlocker?: true
+  /**
    * Enforce the desired state.
    * @returns A {@link ModuleResult} describing what happened.
    */
