@@ -505,8 +505,6 @@ async function connectAndRegister(parameters: {
   throwIfShutdownRequested(shutdownSignal)
   await ssh.connect({ abortSignal: promptAbortSignal })
   throwIfShutdownRequested(shutdownSignal)
-  throwIfShutdownRequested(shutdownSignal)
-  await ssh.probeSudo({ abortSignal: promptAbortSignal })
   return ssh
 }
 

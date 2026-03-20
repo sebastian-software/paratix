@@ -76,7 +76,10 @@ export class SshConnectionImpl implements SshConnection {
   private connectedPort = 0
   private readonly pendingRejects = new Set<(reason: Error) => void>()
   private pinnedHostKey: Buffer | null = null
+  private promptAbortSignal: AbortSignal | undefined
   private readonly runtime: SshRuntimeState
+  private sudoProbePromise: null | Promise<void> = null
+  private sudoReady = false
 
   public constructor(host: string, config: SshConfig) {
     this.runtime = {
@@ -115,34 +118,12 @@ export class SshConnectionImpl implements SshConnection {
    * @throws {Error} When no port in `config.ports` accepts the connection.
    */
   public async connect(options?: PromptOptions): Promise<void> {
+    this.promptAbortSignal = options?.abortSignal
     if (this.config.privateKey == null) {
       await this.connectViaAgent(options)
       return
     }
-    // eslint-disable-next-line security/detect-non-literal-fs-filename
-    const privateKey = await readFile(this.config.privateKey)
-    try {
-      if (await this.tryConnectOnPorts(privateKey)) {
-        this.authMethod = "privateKey"
-        return
-      }
-      if (this.config.passwordFallback) {
-        const password = await promptTerminal(
-          `Password for ${this.config.user}@${this.runtime.host}: `,
-          true,
-          options
-        )
-        if (await this.tryConnectOnPorts(privateKey, password)) {
-          this.authMethod = "password"
-          return
-        }
-      }
-      throw new Error(
-        `Failed to connect to ${this.runtime.host} on ports: ${this.runtime.ports.join(", ")}`
-      )
-    } finally {
-      privateKey.fill(0)
-    }
+    await this.connectViaPrivateKey(options)
   }
 
   public disconnect(): void {
@@ -178,44 +159,8 @@ export class SshConnectionImpl implements SshConnection {
   }
 
   public async exec(command: string, options: ExecOptions = {}): Promise<ExecResult> {
-    const client = this.ensureClient()
-    const environmentPrefix = this.buildEnvPrefix(options.env)
-    const { command: cmd, needsPassword } = this.sudoCommand(command, environmentPrefix)
-    return new Promise((resolve, reject) => {
-      const { wrappedReject, wrappedResolve } = this.createSettledCallbacks<ExecResult>(
-        resolve,
-        reject
-      )
-      const timeout = options.timeout ?? COMMAND_TIMEOUT
-      const secrets = this.buildSecrets(options.secrets)
-      let activeStream: ClientChannel | null = null
-      const timer = setTimeout(() => {
-        activeStream?.close()
-        wrappedReject(
-          new Error(`Command timed out after ${timeout}ms: ${maskSecrets(command, secrets)}`)
-        )
-      }, timeout)
-      client.exec(cmd, (error: Error | undefined, stream: ClientChannel) => {
-        if (error) {
-          clearTimeout(timer)
-          wrappedReject(error)
-          return
-        }
-        activeStream = stream
-        collectStreamOutput({
-          command,
-          options,
-          reject: wrappedReject,
-          resolve: wrappedResolve,
-          secrets,
-          stream,
-          timer,
-        })
-        if (needsPassword && this.cachedSudoPassword != null) {
-          this.writeSudoPassword(stream)
-        }
-      })
-    })
+    await this.ensureSudoReady()
+    return this.execPrepared(command, options)
   }
 
   public async exists(remotePath: string): Promise<boolean> {
@@ -249,30 +194,17 @@ export class SshConnectionImpl implements SshConnection {
    * @param options - Optional prompt behavior for the interactive sudo password prompt.
    */
   public async probeSudo(options?: PromptOptions): Promise<void> {
-    if (this.config.user === "root" || this.cachedSudoPassword != null) return
-    await this.ensureSudoInstalled()
-    try {
-      await this.exec("true", { silent: true, timeout: 10_000 })
+    this.promptAbortSignal = options?.abortSignal ?? this.promptAbortSignal
+    if (this.isSudoReadyWithoutProbe()) {
+      this.sudoReady = true
       return
-    } catch {
-      // sudo requires a password — prompt interactively
     }
-    const password = await promptTerminal(
-      `[sudo] password for ${this.config.user}@${this.runtime.host}: `,
-      true,
-      options
-    )
-    if (password.includes("\n") || password.includes("\r")) {
-      throw new Error("Sudo password must not contain newline characters")
+    await this.ensureSudoInstalled()
+    if (await this.hasPasswordlessSudo()) {
+      this.sudoReady = true
+      return
     }
-    this.cachedSudoPassword = Buffer.from(password)
-    try {
-      await this.exec("true", { silent: true, timeout: 10_000 })
-    } catch (error) {
-      const masked = maskSecrets(String(error), [password])
-      this.clearCachedPassword()
-      throw new Error(`Sudo authentication failed: ${masked}`, { cause: error })
-    }
+    await this.promptAndCacheSudoPassword()
   }
 
   public async readFile(remotePath: string): Promise<string> {
@@ -426,6 +358,21 @@ export class SshConnectionImpl implements SshConnection {
     return [...cachedPasswordSecret, ...(extra ?? [])]
   }
 
+  private async cacheAndValidateSudoPassword(password: string): Promise<void> {
+    if (password.includes("\n") || password.includes("\r")) {
+      throw new Error("Sudo password must not contain newline characters")
+    }
+    this.cachedSudoPassword = Buffer.from(password)
+    try {
+      await this.execPrepared("true", { silent: true, timeout: 10_000 })
+      this.sudoReady = true
+    } catch (error) {
+      const masked = maskSecrets(String(error), [password])
+      this.clearCachedPassword()
+      throw new Error(`Sudo authentication failed: ${masked}`, { cause: error })
+    }
+  }
+
   private async cleanupRemoteTempFile(remotePath: string): Promise<void> {
     const cleanup =
       this.config.user === "root"
@@ -461,6 +408,37 @@ export class SshConnectionImpl implements SshConnection {
     throw new Error(
       `Could not connect to ${this.runtime.host} via SSH agent on ports ${this.runtime.ports.join(", ")}`
     )
+  }
+
+  private async connectViaPrivateKey(options?: PromptOptions): Promise<void> {
+    const privateKeyPath = this.config.privateKey
+    if (privateKeyPath == null) {
+      throw new Error("connectViaPrivateKey requires config.privateKey")
+    }
+    // eslint-disable-next-line security/detect-non-literal-fs-filename
+    const privateKey = await readFile(privateKeyPath)
+    try {
+      if (await this.tryConnectOnPorts(privateKey)) {
+        this.authMethod = "privateKey"
+        return
+      }
+      if (this.config.passwordFallback) {
+        const password = await promptTerminal(
+          `Password for ${this.config.user}@${this.runtime.host}: `,
+          true,
+          options
+        )
+        if (await this.tryConnectOnPorts(privateKey, password)) {
+          this.authMethod = "password"
+          return
+        }
+      }
+      throw new Error(
+        `Failed to connect to ${this.runtime.host} on ports: ${this.runtime.ports.join(", ")}`
+      )
+    } finally {
+      privateKey.fill(0)
+    }
   }
 
   private async createRemoteTempPath(command: string, prefix: string): Promise<string> {
@@ -532,6 +510,63 @@ export class SshConnectionImpl implements SshConnection {
     }
   }
 
+  private async ensureSudoReady(): Promise<void> {
+    if (this.config.user === "root" || this.sudoReady) return
+    if (this.cachedSudoPassword != null) {
+      this.sudoReady = true
+      return
+    }
+    if (this.sudoProbePromise != null) {
+      await this.sudoProbePromise
+      return
+    }
+    this.sudoProbePromise = this.probeSudo({ abortSignal: this.promptAbortSignal }).finally(() => {
+      this.sudoProbePromise = null
+    })
+    await this.sudoProbePromise
+  }
+
+  private async execPrepared(command: string, options: ExecOptions = {}): Promise<ExecResult> {
+    const client = this.ensureClient()
+    const environmentPrefix = this.buildEnvPrefix(options.env)
+    const { command: cmd, needsPassword } = this.sudoCommand(command, environmentPrefix)
+    return new Promise((resolve, reject) => {
+      const { wrappedReject, wrappedResolve } = this.createSettledCallbacks<ExecResult>(
+        resolve,
+        reject
+      )
+      const timeout = options.timeout ?? COMMAND_TIMEOUT
+      const secrets = this.buildSecrets(options.secrets)
+      let activeStream: ClientChannel | null = null
+      const timer = setTimeout(() => {
+        activeStream?.close()
+        wrappedReject(
+          new Error(`Command timed out after ${timeout}ms: ${maskSecrets(command, secrets)}`)
+        )
+      }, timeout)
+      client.exec(cmd, (error: Error | undefined, stream: ClientChannel) => {
+        if (error) {
+          clearTimeout(timer)
+          wrappedReject(error)
+          return
+        }
+        activeStream = stream
+        collectStreamOutput({
+          command,
+          options,
+          reject: wrappedReject,
+          resolve: wrappedResolve,
+          secrets,
+          stream,
+          timer,
+        })
+        if (needsPassword && this.cachedSudoPassword != null) {
+          this.writeSudoPassword(stream)
+        }
+      })
+    })
+  }
+
   /**
    * Execute a command directly over the SSH transport without sudo wrapping.
    * Used only by {@link probeSudo} to check whether `sudo` is installed.
@@ -583,12 +618,34 @@ export class SshConnectionImpl implements SshConnection {
     }
   }
 
+  private async hasPasswordlessSudo(): Promise<boolean> {
+    try {
+      await this.execPrepared("true", { silent: true, timeout: 10_000 })
+      return true
+    } catch {
+      return false
+    }
+  }
+
+  private isSudoReadyWithoutProbe(): boolean {
+    return this.config.user === "root" || this.cachedSudoPassword != null
+  }
+
   private async outputWithoutSudo(command: string): Promise<string> {
     const result = await this.execRaw(command)
     if (result.exitCode !== 0) {
       throw new Error(`Command failed (exit code ${result.exitCode}): ${command}`)
     }
     return result.stdout.trim()
+  }
+
+  private async promptAndCacheSudoPassword(): Promise<void> {
+    const password = await promptTerminal(
+      `[sudo] password for ${this.config.user}@${this.runtime.host}: `,
+      true,
+      { abortSignal: this.promptAbortSignal }
+    )
+    await this.cacheAndValidateSudoPassword(password)
   }
 
   private async setRemoteTempMode(remotePath: string, mode: string): Promise<void> {

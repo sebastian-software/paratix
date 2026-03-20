@@ -10,6 +10,7 @@ import type {
   ModuleMetaEntry,
   ModuleResult,
   ServerDefinition,
+  SshConnection,
 } from "../src/types.js"
 
 import { resolveEnvironment } from "../src/environment.js"
@@ -1745,15 +1746,14 @@ describe("runPlaybook shutdown handler leak on SSH connection failure", () => {
     expect(output).toContain("mode apply")
   })
 
-  it("does not leak SIGINT/SIGTERM listeners when probeSudo throws after connect succeeds", async () => {
-    // Same bug: probeSudo() is also called inside createSshConnection(), still
-    // before the try block. A failure there equally bypasses the finally cleanup.
+  it("does not leak SIGINT/SIGTERM listeners when the first lazy sudo-required module step fails", async () => {
     vi.doMock("../src/ssh.js", () => ({
       shellQuote: (s: string) => `'${s}'`,
-      SshConnectionImpl: class MockProbeSudoFailing {
+      SshConnectionImpl: class MockLazySudoFailing {
         public connect = vi.fn().mockResolvedValue(null)
         public disconnect = vi.fn()
-        public probeSudo = vi.fn().mockRejectedValue(new Error("sudo probe failed"))
+        public exec = vi.fn().mockRejectedValue(new Error("sudo probe failed"))
+        public probeSudo = vi.fn().mockResolvedValue(null)
       },
     }))
 
@@ -1765,25 +1765,36 @@ describe("runPlaybook shutdown handler leak on SSH connection failure", () => {
     const definition: ServerDefinition = {
       host: "1.2.3.4",
       name: "test-server",
-      run: [],
+      run: [
+        {
+          apply: vi.fn(),
+          check: vi.fn(async (ssh: null | SshConnection) => {
+            await ssh?.exec("true")
+            return "ok"
+          }),
+          name: "needs-sudo",
+        },
+      ],
       ssh: { ports: [22], privateKey: "~/.ssh/id", user: "root" },
     }
 
-    await expect(runPlaybook(definition)).rejects.toThrow("sudo probe failed")
+    await expect(runPlaybook(definition)).resolves.toBeUndefined()
 
     expect(process.listenerCount("SIGINT")).toBe(sigintBefore)
     expect(process.listenerCount("SIGTERM")).toBe(sigtermBefore)
+    expect(process.exitCode).toBe(1)
   })
 
-  it("prints run context before probeSudo failures", async () => {
+  it("prints run context before lazy sudo failures in the first module step", async () => {
     const consoleLogs: string[] = []
 
     vi.doMock("../src/ssh.js", () => ({
       shellQuote: (s: string) => `'${s}'`,
-      SshConnectionImpl: class MockProbeSudoFailing {
+      SshConnectionImpl: class MockLazySudoFailing {
         public connect = vi.fn().mockResolvedValue(null)
         public disconnect = vi.fn()
-        public probeSudo = vi.fn().mockRejectedValue(new Error("sudo probe failed"))
+        public exec = vi.fn().mockRejectedValue(new Error("sudo probe failed"))
+        public probeSudo = vi.fn().mockResolvedValue(null)
       },
     }))
     vi.spyOn(console, "log").mockImplementation((...args) => {
@@ -1795,17 +1806,28 @@ describe("runPlaybook shutdown handler leak on SSH connection failure", () => {
     const definition: ServerDefinition = {
       host: "10.0.0.6",
       name: "sudo-server",
-      run: [],
+      run: [
+        {
+          apply: vi.fn(),
+          check: vi.fn(async (ssh: null | SshConnection) => {
+            await ssh?.exec("true")
+            return "ok"
+          }),
+          name: "needs-sudo",
+        },
+      ],
       ssh: { ports: [2222], privateKey: "~/.ssh/id", user: "root" },
     }
 
-    await expect(runPlaybook(definition)).rejects.toThrow("sudo probe failed")
+    await expect(runPlaybook(definition)).resolves.toBeUndefined()
 
     const output = consoleLogs.join("\n")
     expect(output).toContain("Run sudo-server")
     expect(output).toContain("host 10.0.0.6")
     expect(output).toContain("ports 2222")
     expect(output).toContain("mode apply")
+    expect(output).toContain("needs-sudo")
+    expect(process.exitCode).toBe(1)
   })
 
   it("prints dry-run in the run context before bootstrap begins", async () => {
@@ -1869,19 +1891,20 @@ describe("runPlaybook shutdown handler leak on SSH connection failure", () => {
     expect(process.exitCode).toBe(130)
   })
 
-  it("disconnects and sets signal exitCode when SIGTERM arrives during probeSudo", async () => {
+  it("disconnects and sets signal exitCode when SIGTERM arrives during the first lazy sudo-required module step", async () => {
     const disconnect = vi.fn()
 
     vi.doMock("../src/ssh.js", () => ({
       shellQuote: (s: string) => `'${s}'`,
-      SshConnectionImpl: class MockProbeInterrupted {
+      SshConnectionImpl: class MockLazySudoInterrupted {
         public connect = vi.fn().mockResolvedValue(null)
         public disconnect = disconnect
-        public probeSudo = vi.fn().mockImplementation(async () => {
+        public exec = vi.fn().mockImplementation(async () => {
           await Promise.resolve()
           process.emit("SIGTERM", "SIGTERM")
           throw new Error("probe interrupted")
         })
+        public probeSudo = vi.fn().mockResolvedValue(null)
       },
     }))
 
@@ -1890,7 +1913,16 @@ describe("runPlaybook shutdown handler leak on SSH connection failure", () => {
     const definition: ServerDefinition = {
       host: "1.2.3.4",
       name: "test-server",
-      run: [],
+      run: [
+        {
+          apply: vi.fn(),
+          check: vi.fn(async (ssh: null | SshConnection) => {
+            await ssh?.exec("true")
+            return "ok"
+          }),
+          name: "needs-sudo",
+        },
+      ],
       ssh: { ports: [22], privateKey: "~/.ssh/id", user: "root" },
     }
 
@@ -1932,6 +1964,62 @@ describe("runPlaybook shutdown handler leak on SSH connection failure", () => {
     expect(process.exitCode).toBe(130)
   })
 
+  it("does not eagerly probe sudo during bootstrap for dry-run without sudo-needing modules", async () => {
+    const probeSudo = vi.fn().mockImplementation(() => {
+      throw new Error("probeSudo should not have been called")
+    })
+
+    vi.doMock("../src/ssh.js", () => ({
+      shellQuote: (s: string) => `'${s}'`,
+      SshConnectionImpl: class MockDryRunNoSudoNeed {
+        public connect = vi.fn().mockResolvedValue(null)
+        public disconnect = vi.fn()
+        public probeSudo = probeSudo
+      },
+    }))
+
+    const { runPlaybook } = await import("../src/runner.js")
+
+    const definition: ServerDefinition = {
+      host: "1.2.3.4",
+      name: "test-server",
+      run: [],
+      ssh: { ports: [22], privateKey: "~/.ssh/id", user: "deploy" },
+    }
+
+    await expect(runPlaybook(definition, { dryRun: true })).resolves.toBeUndefined()
+
+    expect(probeSudo).not.toHaveBeenCalled()
+  })
+
+  it("does not eagerly probe sudo during non-interactive bootstrap when no module runs", async () => {
+    const probeSudo = vi.fn().mockImplementation(() => {
+      throw new Error("probeSudo should not have been called")
+    })
+
+    vi.doMock("../src/ssh.js", () => ({
+      shellQuote: (s: string) => `'${s}'`,
+      SshConnectionImpl: class MockNonInteractiveNoSudoNeed {
+        public connect = vi.fn().mockResolvedValue(null)
+        public disconnect = vi.fn()
+        public probeSudo = probeSudo
+      },
+    }))
+
+    const { runPlaybook } = await import("../src/runner.js")
+
+    const definition: ServerDefinition = {
+      host: "1.2.3.4",
+      name: "test-server",
+      run: [],
+      ssh: { ports: [22], privateKey: "~/.ssh/id", user: "deploy" },
+    }
+
+    await expect(runPlaybook(definition)).resolves.toBeUndefined()
+
+    expect(probeSudo).not.toHaveBeenCalled()
+  })
+
   it("does not start prompt-capable bootstrap work when SIGTERM arrives after connect resolves", async () => {
     const disconnect = vi.fn()
     const probeSudo = vi.fn().mockImplementation(() => {
@@ -1966,27 +2054,24 @@ describe("runPlaybook shutdown handler leak on SSH connection failure", () => {
     expect(process.exitCode).toBe(143)
   })
 
-  it("aborts an active sudo prompt on the first SIGINT instead of waiting for a second signal", async () => {
+  it("aborts an active lazy sudo prompt on the first SIGINT instead of waiting for a second signal", async () => {
     const disconnect = vi.fn()
 
     vi.doMock("../src/ssh.js", () => ({
       shellQuote: (s: string) => `'${s}'`,
-      SshConnectionImpl: class MockPromptAbortable {
+      SshConnectionImpl: class MockLazyPromptAbortable {
         public connect = vi.fn().mockResolvedValue(null)
         public disconnect = disconnect
-        public probeSudo = vi.fn().mockImplementation(
-          async ({ abortSignal }: { abortSignal?: AbortSignal } = {}) =>
+        public exec = vi.fn().mockImplementation(
+          async () =>
             new Promise((_, reject) => {
-              abortSignal?.addEventListener(
-                "abort",
-                () => {
-                  reject(abortSignal.reason as Error)
-                },
-                { once: true }
-              )
-              process.emit("SIGINT", "SIGINT")
+              queueMicrotask(() => {
+                process.emit("SIGINT", "SIGINT")
+                reject(new Error("prompt interrupted"))
+              })
             })
         )
+        public probeSudo = vi.fn().mockResolvedValue(null)
       },
     }))
 
@@ -1995,7 +2080,16 @@ describe("runPlaybook shutdown handler leak on SSH connection failure", () => {
     const definition: ServerDefinition = {
       host: "1.2.3.4",
       name: "test-server",
-      run: [],
+      run: [
+        {
+          apply: vi.fn(),
+          check: vi.fn(async (ssh: null | SshConnection) => {
+            await ssh?.exec("true")
+            return "ok"
+          }),
+          name: "needs-sudo",
+        },
+      ],
       ssh: { ports: [22], privateKey: "~/.ssh/id", user: "root" },
     }
 

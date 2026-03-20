@@ -125,13 +125,17 @@ function makeClientWithExecSpy(execSpy: ReturnType<typeof vi.fn>): Client {
 
 function makeConnectedSsh(
   client: Client,
-  options: { sudoPassword?: string; user?: string } = {}
+  options: { sudoPassword?: null | string; user?: string } = {}
 ): SshConnectionImpl {
+  const user = options.user ?? "root"
   const config = {
     ports: [22],
     privateKey: "/dev/null",
-    sudoPassword: options.sudoPassword,
-    user: options.user ?? "root",
+    sudoPassword:
+      options.sudoPassword === null
+        ? undefined
+        : (options.sudoPassword ?? (user === "root" ? undefined : "cached-sudo-password")),
+    user,
   }
   const ssh = new SshConnectionImpl("1.2.3.4", config)
   ;(ssh as unknown as Record<string, unknown>).client = client
@@ -151,7 +155,7 @@ function makeConnectedSsh(
  */
 function makeConnectedSshWithCloseListener(
   client: Client & EventEmitter,
-  options: { sudoPassword?: string; user?: string } = {}
+  options: { sudoPassword?: null | string; user?: string } = {}
 ): SshConnectionImpl {
   const ssh = makeConnectedSsh(client, options)
   const pendingRejects = (ssh as unknown as Record<string, unknown>).pendingRejects as Set<
@@ -302,6 +306,7 @@ describe("SshConnectionImpl", () => {
       execPromise.catch(() => {
         /* handled below */
       })
+      await Promise.resolve()
 
       // Calling disconnect() while the exec Promise is pending should reject it.
       ssh.disconnect()
@@ -886,6 +891,8 @@ describe("SshConnectionImpl", () => {
       })
       const client = makeClientWithExecSpy(execSpy)
       const ssh = makeConnectedSsh(client, { user: "deploy" })
+      ;(ssh as unknown as Record<string, unknown>).cachedSudoPassword = null
+      ;(ssh as unknown as Record<string, unknown>).sudoReady = true
 
       const execPromise = ssh.exec("sleep infinity", { timeout: 5000 })
 
@@ -893,6 +900,7 @@ describe("SshConnectionImpl", () => {
       execPromise.catch(() => {
         /* handled below */
       })
+      await Promise.resolve()
 
       await vi.advanceTimersByTimeAsync(5001)
 
@@ -918,6 +926,7 @@ describe("SshConnectionImpl", () => {
       execPromise.catch(() => {
         /* handled below */
       })
+      await Promise.resolve()
 
       await vi.advanceTimersByTimeAsync(5001)
 
@@ -946,6 +955,7 @@ describe("SshConnectionImpl", () => {
       execPromise.catch(() => {
         /* handled below */
       })
+      await Promise.resolve()
 
       await vi.advanceTimersByTimeAsync(5001)
 
@@ -1100,6 +1110,8 @@ describe("SshConnectionImpl", () => {
       const client = makeClientWithExecSpy(execSpy)
       // No sudoPassword → cachedSudoPassword is null → needsPassword is false
       const ssh = makeConnectedSsh(client, { user: "deploy" })
+      ;(ssh as unknown as Record<string, unknown>).cachedSudoPassword = null
+      ;(ssh as unknown as Record<string, unknown>).sudoReady = true
 
       // Act
       await ssh.exec("whoami")
@@ -1128,6 +1140,7 @@ describe("SshConnectionImpl", () => {
       const ssh = makeConnectedSshWithCloseListener(client, {})
 
       const execPromise = ssh.exec("sleep infinity")
+      await Promise.resolve()
 
       // Ensure the stream was handed to exec() before we emit 'close'
       expect(capturedStream).not.toBeNull()
@@ -1290,11 +1303,11 @@ describe("SshConnectionImpl", () => {
         })
         const client = makeClientWithExecSpy(execSpy)
         // No sudoPassword — triggers the `sudo bash -c` branch
-        const ssh = makeConnectedSsh(client, { user: "deploy" })
+        const ssh = makeConnectedSsh(client, { sudoPassword: null, user: "deploy" })
 
         await ssh.exec("whoami", { env: { MY_VAR: "val" } })
 
-        const [executedCommand] = execSpy.mock.calls[0] as [string, ...unknown[]]
+        const [executedCommand] = execSpy.mock.calls.at(-1) as [string, ...unknown[]]
 
         // The outer command must NOT start with env vars — sudo must come first
         expect(executedCommand).toMatch(/^sudo bash -c /v)
@@ -1454,6 +1467,8 @@ describe("SshConnectionImpl", () => {
 
       const client = makeClientWithExecSpy(execSpy)
       const ssh = makeConnectedSsh(client, { user: "deploy" })
+      ;(ssh as unknown as Record<string, unknown>).cachedSudoPassword = null
+      ;(ssh as unknown as Record<string, unknown>).sudoReady = true
 
       await ssh.uploadFile("/local/file.txt", "/remote/path")
 
@@ -1705,6 +1720,8 @@ describe("SshConnectionImpl", () => {
 
       const client = makeClientWithExecSpy(execSpy)
       const ssh = makeConnectedSsh(client, { user: "deploy" })
+      ;(ssh as unknown as Record<string, unknown>).cachedSudoPassword = null
+      ;(ssh as unknown as Record<string, unknown>).sudoReady = true
 
       await ssh.writeFile("/remote/plain.txt", "hello world")
 
@@ -1939,7 +1956,7 @@ describe("SshConnectionImpl", () => {
       await ssh.downloadFile("/var/log/secure", "/tmp/local-secure")
 
       expect(executedCommands[0]).toBe("mktemp /tmp/paratix-download.XXXXXX")
-      expect(executedCommands[1]).toMatch(/^sudo bash -c /v)
+      expect(executedCommands[1]).toMatch(/^(?:SUDO_PROMPT='' sudo -S|sudo) bash -c /v)
       expect(executedCommands[1]).toContain("cat ")
       expect(executedCommands[1]).toContain("/var/log/secure")
       expect(executedCommands[1]).toContain(mktempOutput)
@@ -1965,7 +1982,7 @@ describe("SshConnectionImpl", () => {
       await ssh.downloadFile("/var/log/secure", "/tmp/local-secure")
 
       expect(executedCommands[0]).toBe("mktemp /tmp/paratix-download.XXXXXX")
-      expect(executedCommands[1]).toMatch(/^sudo bash -c /v)
+      expect(executedCommands[1]).toMatch(/^(?:SUDO_PROMPT='' sudo -S|sudo) bash -c /v)
       expect(executedCommands[1]).toContain("cat ")
       expect(vi.mocked(sftpDownload)).toHaveBeenCalledWith(
         client,
@@ -2100,6 +2117,48 @@ describe("SshConnectionImpl", () => {
   // -------------------------------------------------------------------------
 
   describe("probeSudo", () => {
+    it("lazily probes sudo on the first privileged exec instead of requiring bootstrap probing", async () => {
+      const execSpy = vi
+        .fn()
+        .mockImplementationOnce((_command: string, callback: ExecCallback) => {
+          const stream = makeStream()
+          callback(undefined, stream)
+          stream.emit("close", 0)
+        })
+        .mockImplementationOnce((_command: string, callback: ExecCallback) => {
+          const stream = makeStream()
+          callback(undefined, stream)
+          stream.emit("close", 0)
+        })
+        .mockImplementationOnce((_command: string, callback: ExecCallback) => {
+          const stream = makeStream()
+          callback(undefined, stream)
+          stream.emit("data", Buffer.from("ok\n"))
+          stream.emit("close", 0)
+        })
+
+      const client = makeClientWithExecSpy(execSpy)
+      const ssh = makeConnectedSsh(client, { sudoPassword: null, user: "deploy" })
+
+      await expect(ssh.exec("echo ok", { silent: true })).resolves.toMatchObject({
+        code: 0,
+        stdout: "ok\n",
+      })
+
+      expect(execSpy).toHaveBeenNthCalledWith(1, "command -v sudo", expect.any(Function))
+      expect(execSpy).toHaveBeenNthCalledWith(
+        2,
+        expect.stringContaining("sudo bash -c"),
+        expect.any(Function)
+      )
+      expect(execSpy).toHaveBeenNthCalledWith(
+        3,
+        expect.stringContaining("sudo bash -c"),
+        expect.any(Function)
+      )
+      expect(promptTerminal).not.toHaveBeenCalled()
+    })
+
     it("aborts an interactive sudo prompt via abortSignal on the first shutdown signal (regression)", async () => {
       const abortError = new Error("Terminal prompt interrupted by SIGINT")
 
@@ -2132,7 +2191,7 @@ describe("SshConnectionImpl", () => {
         })
 
       const client = makeClientWithExecSpy(execSpy)
-      const ssh = makeConnectedSsh(client, { user: "deploy" })
+      const ssh = makeConnectedSsh(client, { sudoPassword: null, user: "deploy" })
       const abortController = new AbortController()
       const probePromise = ssh.probeSudo({ abortSignal: abortController.signal })
 
@@ -2150,7 +2209,7 @@ describe("SshConnectionImpl", () => {
       })
 
       const client = makeClientWithExecSpy(execSpy)
-      const ssh = makeConnectedSsh(client, { user: "deploy" })
+      const ssh = makeConnectedSsh(client, { sudoPassword: null, user: "deploy" })
 
       await expect(
         (ssh as unknown as Record<string, unknown>).execWithoutSudo("true")
@@ -2166,7 +2225,7 @@ describe("SshConnectionImpl", () => {
       })
 
       const client = makeClientWithExecSpy(execSpy)
-      const ssh = makeConnectedSsh(client, { user: "deploy" })
+      const ssh = makeConnectedSsh(client, { sudoPassword: null, user: "deploy" })
 
       await expect(
         (ssh as unknown as Record<string, unknown>).outputWithoutSudo("echo hello")
@@ -2188,7 +2247,7 @@ describe("SshConnectionImpl", () => {
         })
 
       const client = makeClientWithExecSpy(execSpy)
-      const ssh = makeConnectedSsh(client, { user: "deploy" })
+      const ssh = makeConnectedSsh(client, { sudoPassword: null, user: "deploy" })
 
       await expect(ssh.probeSudo()).resolves.toBeUndefined()
       expect(promptTerminal).not.toHaveBeenCalled()
@@ -2222,7 +2281,7 @@ describe("SshConnectionImpl", () => {
         })
 
       const client = makeClientWithExecSpy(execSpy)
-      const ssh = makeConnectedSsh(client, { user: "deploy" })
+      const ssh = makeConnectedSsh(client, { sudoPassword: null, user: "deploy" })
 
       // Act
       const error = await ssh.probeSudo().catch((error: unknown) => error as Error)
@@ -2257,7 +2316,7 @@ describe("SshConnectionImpl", () => {
         })
 
       const client = makeClientWithExecSpy(execSpy)
-      const ssh = makeConnectedSsh(client, { user: "deploy" })
+      const ssh = makeConnectedSsh(client, { sudoPassword: null, user: "deploy" })
 
       // Act & Assert
       await expect(ssh.probeSudo()).rejects.toThrow("newline")
@@ -2283,7 +2342,7 @@ describe("SshConnectionImpl", () => {
         })
 
       const client = makeClientWithExecSpy(execSpy)
-      const ssh = makeConnectedSsh(client, { user: "deploy" })
+      const ssh = makeConnectedSsh(client, { sudoPassword: null, user: "deploy" })
 
       // Act & Assert
       await expect(ssh.probeSudo()).rejects.toThrow("newline")
@@ -2301,7 +2360,7 @@ describe("SshConnectionImpl", () => {
         })
 
       const client = makeClientWithExecSpy(execSpy)
-      const ssh = makeConnectedSsh(client, { user: "deploy" })
+      const ssh = makeConnectedSsh(client, { sudoPassword: null, user: "deploy" })
 
       // Act & Assert
       await expect(ssh.probeSudo()).rejects.toThrow("sudo is not installed")
@@ -2321,7 +2380,7 @@ describe("SshConnectionImpl", () => {
       })
 
       const client = makeClientWithExecSpy(execSpy)
-      const ssh = makeConnectedSsh(client, { user: "deploy" })
+      const ssh = makeConnectedSsh(client, { sudoPassword: null, user: "deploy" })
 
       // Act
       const probePromise = ssh.probeSudo()
@@ -2357,7 +2416,7 @@ describe("SshConnectionImpl", () => {
       })
 
       const client = makeClientWithExecSpy(execSpy)
-      const ssh = makeConnectedSsh(client, { user: "deploy" })
+      const ssh = makeConnectedSsh(client, { sudoPassword: null, user: "deploy" })
 
       // Act: start probeSudo (which internally calls ensureSudoInstalled → execRaw)
       const probePromise = ssh.probeSudo()
