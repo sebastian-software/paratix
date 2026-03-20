@@ -22,6 +22,7 @@ import {
   printCommandFailure,
   printModuleResult,
   printRecipeHeader,
+  printRunContext,
   printSummary,
 } from "./output.js"
 import { resolveExitCode, signalExitCode } from "./runnerHelpers.js"
@@ -566,6 +567,13 @@ export async function runPlaybook(
     setupShutdownHandlers()
   const stats = new RunStats()
   let ssh: SshConnectionImpl | undefined
+
+  printRunContext({
+    dryRun,
+    host: definition.host,
+    name: definition.name,
+    ports: definition.ssh.ports,
+  })
 
   // No catch block: connect errors propagate to cli.ts, which prints them and exits with code 2.
   try {

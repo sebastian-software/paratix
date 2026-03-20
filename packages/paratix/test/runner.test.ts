@@ -1712,6 +1712,39 @@ describe("runPlaybook shutdown handler leak on SSH connection failure", () => {
     expect(process.listenerCount("SIGTERM")).toBe(sigtermBefore)
   })
 
+  it("prints run context before connect failures", async () => {
+    const consoleLogs: string[] = []
+
+    vi.doMock("../src/ssh.js", () => ({
+      shellQuote: (s: string) => `'${s}'`,
+      SshConnectionImpl: class MockFailingConnection {
+        public connect = vi.fn().mockRejectedValue(new Error("Connection refused"))
+        public disconnect = vi.fn()
+        public probeSudo = vi.fn().mockResolvedValue(null)
+      },
+    }))
+    vi.spyOn(console, "log").mockImplementation((...args) => {
+      consoleLogs.push(args.join(" "))
+    })
+
+    const { runPlaybook } = await import("../src/runner.js")
+
+    const definition: ServerDefinition = {
+      host: "10.0.0.5",
+      name: "bootstrap-server",
+      run: [],
+      ssh: { ports: [22, 2222], privateKey: "~/.ssh/id", user: "root" },
+    }
+
+    await expect(runPlaybook(definition)).rejects.toThrow("Connection refused")
+
+    const output = consoleLogs.join("\n")
+    expect(output).toContain("Run bootstrap-server")
+    expect(output).toContain("host 10.0.0.5")
+    expect(output).toContain("ports 22, 2222")
+    expect(output).toContain("mode apply")
+  })
+
   it("does not leak SIGINT/SIGTERM listeners when probeSudo throws after connect succeeds", async () => {
     // Same bug: probeSudo() is also called inside createSshConnection(), still
     // before the try block. A failure there equally bypasses the finally cleanup.
@@ -1740,6 +1773,69 @@ describe("runPlaybook shutdown handler leak on SSH connection failure", () => {
 
     expect(process.listenerCount("SIGINT")).toBe(sigintBefore)
     expect(process.listenerCount("SIGTERM")).toBe(sigtermBefore)
+  })
+
+  it("prints run context before probeSudo failures", async () => {
+    const consoleLogs: string[] = []
+
+    vi.doMock("../src/ssh.js", () => ({
+      shellQuote: (s: string) => `'${s}'`,
+      SshConnectionImpl: class MockProbeSudoFailing {
+        public connect = vi.fn().mockResolvedValue(null)
+        public disconnect = vi.fn()
+        public probeSudo = vi.fn().mockRejectedValue(new Error("sudo probe failed"))
+      },
+    }))
+    vi.spyOn(console, "log").mockImplementation((...args) => {
+      consoleLogs.push(args.join(" "))
+    })
+
+    const { runPlaybook } = await import("../src/runner.js")
+
+    const definition: ServerDefinition = {
+      host: "10.0.0.6",
+      name: "sudo-server",
+      run: [],
+      ssh: { ports: [2222], privateKey: "~/.ssh/id", user: "root" },
+    }
+
+    await expect(runPlaybook(definition)).rejects.toThrow("sudo probe failed")
+
+    const output = consoleLogs.join("\n")
+    expect(output).toContain("Run sudo-server")
+    expect(output).toContain("host 10.0.0.6")
+    expect(output).toContain("ports 2222")
+    expect(output).toContain("mode apply")
+  })
+
+  it("prints dry-run in the run context before bootstrap begins", async () => {
+    const capturedConfigs: unknown[] = []
+    const consoleLogs: string[] = []
+
+    vi.doMock("../src/ssh.js", () => ({
+      shellQuote: (s: string) => `'${s}'`,
+      SshConnectionImpl: makeMockSshClass(capturedConfigs),
+    }))
+    vi.spyOn(console, "log").mockImplementation((...args) => {
+      consoleLogs.push(args.join(" "))
+    })
+
+    const { runPlaybook } = await import("../src/runner.js")
+
+    const definition: ServerDefinition = {
+      host: "10.0.0.7",
+      name: "dry-run-server",
+      run: [],
+      ssh: { ports: [2022], privateKey: "~/.ssh/id", user: "root" },
+    }
+
+    await runPlaybook(definition, { dryRun: true })
+
+    const output = consoleLogs.join("\n")
+    expect(output).toContain("Run dry-run-server")
+    expect(output).toContain("host 10.0.0.7")
+    expect(output).toContain("ports 2022")
+    expect(output).toContain("mode dry-run")
   })
 
   it("disconnects and sets signal exitCode when SIGINT arrives during connect", async () => {

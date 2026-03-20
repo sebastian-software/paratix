@@ -24,6 +24,19 @@ export function printRecipeHeader(name: string): void {
   console.log(`\n${header}`)
 }
 
+export function printRunContext(parameters: {
+  dryRun: boolean
+  host: string
+  name: string
+  ports: number[]
+}): void {
+  const mode = parameters.dryRun ? pc.yellow("dry-run") : pc.green("apply")
+  const ports = parameters.ports.join(", ")
+  console.log(
+    pc.dim(`Run ${parameters.name} · host ${parameters.host} · ports ${ports} · mode ${mode}`)
+  )
+}
+
 /**
  * Print a single module result row with a status icon, name, and colored status label.
  *
