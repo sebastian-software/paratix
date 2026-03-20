@@ -251,6 +251,10 @@ export function isValidProjectName(name: string): boolean {
   return /^[a-z0-9][a-z0-9\x2d]*$/v.test(trimmed)
 }
 
+export function normalizeProjectName(name: string): string {
+  return name.trim()
+}
+
 export function parseCliArguments(argv: string[]): {
   mode: ScaffoldMode
   projectName: string | undefined
@@ -283,20 +287,24 @@ export function parseCliArguments(argv: string[]): {
   return { mode, projectName }
 }
 
-function validateProjectName(name: string | undefined): asserts name is string {
+function validateProjectName(name: string | undefined): string {
   if (name == null || name === "") {
     console.error("Usage: create-paratix <project-name>")
     // eslint-disable-next-line node/no-process-exit
     process.exit(1)
   }
 
-  if (!isValidProjectName(name)) {
+  const normalizedName = normalizeProjectName(name)
+
+  if (!isValidProjectName(normalizedName)) {
     console.error(
       `Error: Invalid project name "${name}" — use only lowercase letters, numbers, and hyphens.`
     )
     // eslint-disable-next-line node/no-process-exit
     process.exit(1)
   }
+
+  return normalizedName
 }
 
 export function scaffoldProject(
@@ -304,10 +312,11 @@ export function scaffoldProject(
   pm: PackageManager,
   options?: ScaffoldOptions
 ): boolean {
-  const projectDirectory = resolve(projectName)
+  const normalizedProjectName = normalizeProjectName(projectName)
+  const projectDirectory = resolve(normalizedProjectName)
   // eslint-disable-next-line security/detect-non-literal-fs-filename
   if (existsSync(projectDirectory)) {
-    console.error(`Error: Directory "${projectName}" already exists.`)
+    console.error(`Error: Directory "${normalizedProjectName}" already exists.`)
     // eslint-disable-next-line node/no-process-exit
     process.exit(1)
   }
@@ -319,21 +328,21 @@ export function scaffoldProject(
   const installed = installer(projectDirectory, pm)
   if (!installed) {
     process.exitCode = 1
-    printPartialSuccessMessage(projectName, pm)
+    printPartialSuccessMessage(normalizedProjectName, pm)
     return false
   }
 
-  printSuccessMessage(projectName, pm)
+  printSuccessMessage(normalizedProjectName, pm)
   return true
 }
 
 function main(): void {
   const { mode, projectName } = parseCliArguments(process.argv.slice(2))
 
-  validateProjectName(projectName)
+  const normalizedProjectName = validateProjectName(projectName)
 
   const pm = detectPackageManager()
-  scaffoldProject(projectName, pm, { mode })
+  scaffoldProject(normalizedProjectName, pm, { mode })
 }
 
 // Only run when executed directly, not when imported (e.g. in tests)

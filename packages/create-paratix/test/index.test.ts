@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import {
   isDirectExecution,
   isValidProjectName,
+  normalizeProjectName,
   parseCliArguments,
   scaffoldProject,
   writeProjectFiles,
@@ -52,6 +53,12 @@ describe("isValidProjectName", () => {
     // A name consisting only of whitespace passes the current falsy-check
     // in main() and would create a directory with a whitespace name.
     expect(isValidProjectName("   ")).toBe(false)
+  })
+})
+
+describe("normalizeProjectName", () => {
+  it("trims padded input before scaffolding uses it", () => {
+    expect(normalizeProjectName(" my-server ")).toBe("my-server")
   })
 })
 
@@ -231,9 +238,15 @@ describe("writeProjectFiles", () => {
 describe("scaffoldProject", () => {
   const projectName = "create-paratix-scaffold-test"
   const projectDirectory = resolve(projectName)
+  const paddedProjectName = " create-paratix-trim-test "
+  const trimmedProjectName = "create-paratix-trim-test"
+  const paddedProjectDirectory = resolve(paddedProjectName)
+  const trimmedProjectDirectory = resolve(trimmedProjectName)
 
   beforeEach(() => {
     rmSync(projectDirectory, { force: true, recursive: true })
+    rmSync(paddedProjectDirectory, { force: true, recursive: true })
+    rmSync(trimmedProjectDirectory, { force: true, recursive: true })
     vi.spyOn(console, "log").mockImplementation((...args) => {
       void args
     })
@@ -246,6 +259,8 @@ describe("scaffoldProject", () => {
   afterEach(() => {
     vi.restoreAllMocks()
     rmSync(projectDirectory, { force: true, recursive: true })
+    rmSync(paddedProjectDirectory, { force: true, recursive: true })
+    rmSync(trimmedProjectDirectory, { force: true, recursive: true })
     process.exitCode = undefined
   })
 
@@ -303,5 +318,25 @@ describe("scaffoldProject", () => {
 
     expect(console.log).toHaveBeenCalledWith(expect.stringContaining("npm run apply:dry"))
     expect(console.log).toHaveBeenCalledWith(expect.stringContaining("npm run apply"))
+  })
+
+  it("normalizes padded project names before creating the project directory and package name", () => {
+    const installer = vi.fn().mockReturnValue(true)
+
+    const result = scaffoldProject(
+      paddedProjectName,
+      { command: "pnpm install", name: "pnpm" },
+      { installer }
+    )
+
+    expect(result).toBe(true)
+    expect(existsSync(trimmedProjectDirectory)).toBe(true)
+    expect(existsSync(paddedProjectDirectory)).toBe(false)
+
+    const raw = readFileSync(join(trimmedProjectDirectory, "package.json"), "utf8")
+    const parsed = JSON.parse(raw) as { name: string }
+
+    expect(parsed.name).toBe(trimmedProjectName)
+    expect(console.log).toHaveBeenCalledWith(expect.stringContaining(`cd ${trimmedProjectName}`))
   })
 })
