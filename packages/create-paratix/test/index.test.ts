@@ -162,6 +162,26 @@ describe("writeProjectFiles", () => {
     })
   })
 
+  it("derives package.json name correctly from a Windows-style absolute path", () => {
+    const windowsPath = join(TEST_DIR, "windows", "C:\\tmp\\windows-project")
+    writeProjectFiles(windowsPath)
+
+    const raw = readFileSync(join(windowsPath, "package.json"), "utf8")
+    const parsed = JSON.parse(raw) as { name: string }
+
+    expect(parsed.name).toBe("windows-project")
+  })
+
+  it("derives package.json name correctly from a backslash-separated relative path", () => {
+    const windowsRelativePath = join(TEST_DIR, "windows", "tmp\\nested\\mixed-project")
+    writeProjectFiles(windowsRelativePath)
+
+    const raw = readFileSync(join(windowsRelativePath, "package.json"), "utf8")
+    const parsed = JSON.parse(raw) as { name: string }
+
+    expect(parsed.name).toBe("mixed-project")
+  })
+
   it("creates a server.ts file", () => {
     writeProjectFiles(TEST_DIR)
 

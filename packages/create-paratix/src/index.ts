@@ -1,6 +1,6 @@
 import { execSync } from "node:child_process"
 import { existsSync, mkdirSync, writeFileSync } from "node:fs"
-import { join, resolve } from "node:path"
+import { basename, join, resolve } from "node:path"
 
 const MS_PER_MINUTE = 60_000
 const INSTALL_TIMEOUT_MS = 120_000
@@ -176,7 +176,7 @@ export function writeProjectFiles(projectDirectory: string, options?: ScaffoldOp
     engines: {
       node: ">=24.0.0",
     },
-    name: projectDirectory.split("/").pop(),
+    name: derivePackageName(projectDirectory),
     private: true,
     scripts: {
       apply: "paratix apply server.ts",
@@ -253,6 +253,10 @@ export function isValidProjectName(name: string): boolean {
 
 export function normalizeProjectName(name: string): string {
   return name.trim()
+}
+
+function derivePackageName(projectDirectory: string): string {
+  return basename(projectDirectory.replaceAll("\\", "/"))
 }
 
 export function parseCliArguments(argv: string[]): {
