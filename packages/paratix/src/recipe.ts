@@ -1,5 +1,6 @@
 import { mergeEnvironmentFromMeta } from "./meta.js"
 import { printCommandFailure, printModuleResult, printRecipeHeader } from "./output.js"
+import { runSignalModules, type SignalHooks } from "./signalOrchestration.js"
 import {
   type Environment,
   type Module,
@@ -24,6 +25,7 @@ export type RecipeModule = {
     environment: Environment,
     options?: {
       shutdownSignal?: () => NodeJS.Signals | null
+      signalHooks?: SignalHooks
       verbose?: boolean
     }
   ) => Promise<ModuleResult>
@@ -127,45 +129,22 @@ async function executeModules(
   return state
 }
 
-function handleSignalResultWithVerbosity(
-  name: string,
-  result: ModuleResult,
-  verbose: boolean
-): Extract<ModuleStatus, "changed" | "failed" | "ok" | "skipped"> {
-  printModuleResult(`signal: ${name}`, result.status)
-  if (result.status === "failed" && result.error != null) {
-    printCommandFailure(result.error, verbose)
-  }
-  return result.status
-}
-
 async function triggerSignals(parameters: {
   environment: Environment
   shutdownSignal?: () => NodeJS.Signals | null
+  signalHooks?: SignalHooks
   signals: Module[]
   ssh: null | SshConnection
   verbose?: boolean
 }): Promise<"changed" | "failed"> {
-  const getShutdownSignal = parameters.shutdownSignal ?? (() => null)
-  const verbose = parameters.verbose ?? false
-  let status: "changed" | "failed" = "changed"
-
-  for (const signal of parameters.signals) {
-    if (getShutdownSignal() != null) break
-    try {
-      const connection = signal.local === true ? null : parameters.ssh
-      // eslint-disable-next-line no-await-in-loop
-      const result = await signal.apply(connection, parameters.environment)
-      const signalStatus = handleSignalResultWithVerbosity(signal.name, result, verbose)
-      if (signalStatus === "failed") status = "failed"
-    } catch (error) {
-      printModuleResult(`signal: ${signal.name}`, "failed")
-      printCommandFailure(error, verbose)
-      status = "failed"
-    }
-  }
-
-  return status
+  return runSignalModules({
+    environment: parameters.environment,
+    hooks: parameters.signalHooks,
+    shutdownSignal: parameters.shutdownSignal,
+    signals: parameters.signals,
+    ssh: parameters.ssh,
+    verbose: parameters.verbose,
+  })
 }
 
 async function applyRecipe(parameters: {
@@ -174,6 +153,7 @@ async function applyRecipe(parameters: {
   name: string
   options?: {
     shutdownSignal?: () => NodeJS.Signals | null
+    signalHooks?: SignalHooks
     verbose?: boolean
   }
   signals?: Module[]
@@ -192,6 +172,7 @@ async function applyRecipe(parameters: {
     state.status = await triggerSignals({
       environment: state.env,
       shutdownSignal,
+      signalHooks: parameters.options?.signalHooks,
       signals: parameters.signals,
       ssh: parameters.ssh,
       verbose,
@@ -241,6 +222,7 @@ export function recipe(
       environment: Environment,
       parameters?: {
         shutdownSignal?: () => NodeJS.Signals | null
+        signalHooks?: SignalHooks
         verbose?: boolean
       }
     ): Promise<ModuleResult> {

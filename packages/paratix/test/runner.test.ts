@@ -964,6 +964,46 @@ describe("runPlaybook failed result diagnostics", () => {
     expect(output).toContain("recipe signal stdout")
     expect(process.exitCode).toBe(1)
   })
+
+  it("counts recipe signals in the summary with the same semantics as top-level signals", async () => {
+    const capturedConfigs: unknown[] = []
+    const consoleLogs: string[] = []
+
+    vi.doMock("../src/ssh.js", () => ({
+      shellQuote: (s: string) => `'${s}'`,
+      SshConnectionImpl: makeMockSshClass(capturedConfigs),
+    }))
+    vi.spyOn(console, "log").mockImplementation((...args) => {
+      consoleLogs.push(args.join(" "))
+    })
+
+    const [{ runPlaybook }, { recipe }] = await Promise.all([
+      import("../src/runner.js"),
+      import("../src/recipe.js"),
+    ])
+
+    const changedModule: Module = {
+      apply: vi.fn().mockResolvedValue({ status: "changed" } satisfies ModuleResult),
+      check: vi.fn().mockResolvedValue("needs-apply"),
+      name: "changed-module",
+    }
+    const changedSignal: Module = {
+      apply: vi.fn().mockResolvedValue({ status: "changed" } satisfies ModuleResult),
+      check: vi.fn().mockResolvedValue("needs-apply"),
+      name: "changed-recipe-signal",
+    }
+
+    const definition: ServerDefinition = {
+      host: "1.2.3.4",
+      name: "test-server",
+      run: [recipe("test-recipe", [changedModule], { signals: [changedSignal] })],
+      ssh: { ports: [22], privateKey: "~/.ssh/id", user: "root" },
+    }
+
+    await runPlaybook(definition)
+
+    expect(consoleLogs.join("\n")).toContain("1 signals triggered")
+  })
 })
 
 // Bug #12 regression: runPlaybook must pass reconnectTimeout from RunOptions into SshConfig

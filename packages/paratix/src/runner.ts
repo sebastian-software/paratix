@@ -18,6 +18,7 @@ import {
   printSummary,
 } from "./output.js"
 import { resolveExitCode, signalExitCode } from "./runnerHelpers.js"
+import { runSignalModules } from "./signalOrchestration.js"
 import { SshConnectionImpl } from "./ssh.js"
 
 /** Holds the shutdown listener, SSH setter, and getter for the first received signal. */
@@ -183,6 +184,7 @@ async function runRecipeModule(
   recipeModule: RecipeModule,
   environment: Environment,
   ssh: SshConnectionImpl,
+  stats: RunStats,
   verbose: boolean,
   dryRun: boolean,
   shutdownSignal: () => NodeJS.Signals | null
@@ -198,7 +200,18 @@ async function runRecipeModule(
       return { env: environment, shouldBreak: false, status: "ok" }
     }
 
-    const result = await recipeModule.apply(ssh, environment, { shutdownSignal, verbose })
+    const result = await recipeModule.apply(ssh, environment, {
+      shutdownSignal,
+      signalHooks: {
+        onSignalFinished: (status: ModuleStatus) => {
+          stats.update(status)
+        },
+        onSignalStarted: () => {
+          stats.incrementSignals()
+        },
+      },
+      verbose,
+    })
     return await handleMetaAndBuildResult(ssh, environment, result)
   } catch (error) {
     printModuleResult(recipeModule.name, "failed")
@@ -280,7 +293,15 @@ async function runModuleLoop(parameters: LoopArguments): Promise<Environment> {
     // and its result is still counted in stats before the loop exits here.
     if (shutdownSignal() != null) break
     const stepPromise = isRecipe(currentModule)
-      ? runRecipeModule(currentModule, currentEnvironment, ssh, verbose, dryRun, shutdownSignal)
+      ? runRecipeModule(
+          currentModule,
+          currentEnvironment,
+          ssh,
+          stats,
+          verbose,
+          dryRun,
+          shutdownSignal
+        )
       : runRegularModule({
           dryRun,
           env: currentEnvironment,
@@ -311,25 +332,21 @@ type SignalArguments = {
 
 async function runSignals(parameters: SignalArguments): Promise<void> {
   const { env, shutdownSignal, signals, ssh, stats, verbose } = parameters
-
-  for (const signal of signals) {
-    if (shutdownSignal() != null) break
-    stats.incrementSignals()
-    try {
-      const connection = signal.local === true ? null : ssh
-      // eslint-disable-next-line no-await-in-loop
-      const result = await signal.apply(connection, env)
-      printModuleResult(`signal: ${signal.name}`, result.status)
-      if (result.status === "failed" && result.error != null) {
-        printCommandFailure(result.error, verbose)
-      }
-      stats.update(result.status)
-    } catch (error) {
-      printModuleResult(`signal: ${signal.name}`, "failed")
-      printCommandFailure(error, verbose)
-      stats.update("failed")
-    }
-  }
+  await runSignalModules({
+    environment: env,
+    hooks: {
+      onSignalFinished: (status: ModuleStatus) => {
+        stats.update(status)
+      },
+      onSignalStarted: () => {
+        stats.incrementSignals()
+      },
+    },
+    shutdownSignal,
+    signals,
+    ssh,
+    verbose,
+  })
 }
 
 async function connectAndRegister(
