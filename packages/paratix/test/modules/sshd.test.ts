@@ -34,6 +34,7 @@ describe("sshd.config — apply", () => {
       [CAT_SSHD]: { stdout: "PasswordAuthentication yes\n" },
     })
     const writtenFiles = trackWriteFile(mockSsh)
+    const execSpy = vi.spyOn(mockSsh, "exec")
 
     const mod = sshd.config({ PasswordAuthentication: "no" })
     const result = await mod.apply(mockSsh, emptyEnv)
@@ -43,6 +44,7 @@ describe("sshd.config — apply", () => {
     expect(written).toBeDefined()
     expect(written?.content).toContain("PasswordAuthentication no")
     expect(written?.content).not.toContain("PasswordAuthentication yes")
+    expect(execSpy.mock.calls.map((args) => args[0])).toContain("systemctl reload sshd")
   })
 
   it("does not duplicate a directive when the desired value is already set", async () => {
@@ -50,6 +52,7 @@ describe("sshd.config — apply", () => {
       [CAT_SSHD]: { stdout: "PasswordAuthentication no\n" },
     })
     const writtenFiles = trackWriteFile(mockSsh)
+    const execSpy = vi.spyOn(mockSsh, "exec")
 
     const mod = sshd.config({ PasswordAuthentication: "no" })
     const result = await mod.apply(mockSsh, emptyEnv)
@@ -57,6 +60,7 @@ describe("sshd.config — apply", () => {
     // No write needed when content is already correct
     expect(writtenFiles).toHaveLength(0)
     expect(result.status).toBe("ok")
+    expect(execSpy.mock.calls.map((args) => args[0])).not.toContain("systemctl reload sshd")
   })
 
   it("appends a new key when it does not yet exist in sshd_config", async () => {
@@ -305,6 +309,7 @@ describe("sshd.config — apply: validation and rollback", () => {
       [CAT_SSHD]: { stdout: originalConfig },
     })
     const writtenFiles = trackWriteFile(mockSsh)
+    const execSpy = vi.spyOn(mockSsh, "exec")
 
     // sshd -t is the only exec call during sshd.config.apply
     vi.spyOn(mockSsh, "exec").mockResolvedValueOnce({
@@ -320,17 +325,20 @@ describe("sshd.config — apply: validation and rollback", () => {
     const lastWrite = writtenFiles.at(-1)
     expect(lastWrite?.path).toBe(SSHD_CONFIG)
     expect(lastWrite?.content).toBe(originalConfig)
+    expect(execSpy.mock.calls.map((args) => args[0])).not.toContain("systemctl reload sshd")
   })
 
-  it("writes new config without rollback when sshd -t succeeds", async () => {
+  it("writes new config and reloads sshd without rollback when validation succeeds", async () => {
     const originalConfig = "PasswordAuthentication yes"
     const mockSsh = createMockSsh({
       [CAT_SSHD]: { stdout: originalConfig },
     })
     const writtenFiles = trackWriteFile(mockSsh)
+    const execSpy = vi.spyOn(mockSsh, "exec")
 
-    // sshd -t is the only exec call during sshd.config.apply
-    vi.spyOn(mockSsh, "exec").mockResolvedValueOnce({ code: 0, stderr: "", stdout: "" })
+    execSpy
+      .mockResolvedValueOnce({ code: 0, stderr: "", stdout: "" })
+      .mockResolvedValueOnce({ code: 0, stderr: "", stdout: "" })
 
     const mod = sshd.config({ PasswordAuthentication: "no" })
     const result = await mod.apply(mockSsh, emptyEnv)
@@ -339,6 +347,32 @@ describe("sshd.config — apply: validation and rollback", () => {
     // Only one write: the new config — no rollback write
     expect(writtenFiles).toHaveLength(1)
     expect(writtenFiles[0]?.content).toContain("PasswordAuthentication no")
+    expect(execSpy.mock.calls.map((args) => args[0])).toStrictEqual([
+      "sshd -t",
+      "systemctl reload sshd",
+    ])
+  })
+
+  it("returns failed when sshd reload fails after successful validation", async () => {
+    const originalConfig = "PasswordAuthentication yes"
+    const mockSsh = createMockSsh({
+      [CAT_SSHD]: { stdout: originalConfig },
+    })
+    trackWriteFile(mockSsh)
+    const execSpy = vi.spyOn(mockSsh, "exec")
+
+    execSpy
+      .mockResolvedValueOnce({ code: 0, stderr: "", stdout: "" })
+      .mockResolvedValueOnce({ code: 1, stderr: "reload failed", stdout: "" })
+
+    const mod = sshd.config({ PasswordAuthentication: "no" })
+    const result = await mod.apply(mockSsh, emptyEnv)
+
+    expect(result.status).toBe("failed")
+    expect(execSpy.mock.calls.map((args) => args[0])).toStrictEqual([
+      "sshd -t",
+      "systemctl reload sshd",
+    ])
   })
 })
 

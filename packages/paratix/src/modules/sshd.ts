@@ -8,6 +8,7 @@ import {
 
 const DEFAULT_SSH_PORT = 22
 const SSHD_CONFIG_PATH = "/etc/ssh/sshd_config"
+const SYSTEMCTL = "systemctl"
 
 // prettier-ignore
 const REGEXP_SPECIAL = new Set(["?", ".", "(", ")", "[", "]", "{", "}", "*", "\\", "^", "+", "|", "$"])
@@ -30,6 +31,14 @@ async function validateSshdConfig(ssh: SshConnection, originalConfig: string): P
       `sshd config validation failed (sshd -t), rolled back to previous config:\n${result.stderr}`
     )
   }
+}
+
+async function reloadSshd(ssh: SshConnection): Promise<ModuleResult> {
+  const result = await ssh.exec(`${SYSTEMCTL} reload sshd`, {
+    ignoreExitCode: true,
+    silent: true,
+  })
+  return result.code === 0 ? { status: "changed" } : { status: "failed" }
 }
 
 function applySshdSettingToContent(content: string, key: string, value: string): string {
@@ -93,7 +102,11 @@ export const sshd = {
 
         await validateSshdConfig(ssh, originalConfig)
 
-        return { status: didChange ? "changed" : "ok" }
+        if (!didChange) {
+          return { status: "ok" }
+        }
+
+        return reloadSshd(ssh)
       },
       async check(ssh: null | SshConnection): Promise<"needs-apply" | "ok"> {
         if (!ssh) return NEEDS_APPLY
