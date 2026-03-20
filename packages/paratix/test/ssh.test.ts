@@ -61,6 +61,7 @@ vi.mock("../src/sshHelpers.js", async () => {
   return {
     collectStreamOutput: vi.fn(actual.collectStreamOutput),
     maskSecrets: actual.maskSecrets,
+    normalizeSshCloseCode: actual.normalizeSshCloseCode,
     shellQuote: actual.shellQuote,
     tryConnectOnPort: vi.fn(),
     validateMode: actual.validateMode,
@@ -2099,6 +2100,58 @@ describe("SshConnectionImpl", () => {
   // -------------------------------------------------------------------------
 
   describe("probeSudo", () => {
+    it("treats undefined ssh2 close code as exit code 0 in execWithoutSudo (regression)", async () => {
+      const execSpy = vi.fn().mockImplementation((_command: string, callback: ExecCallback) => {
+        const stream = makeStream()
+        callback(undefined, stream)
+        stream.emit("close", undefined as unknown as number)
+      })
+
+      const client = makeClientWithExecSpy(execSpy)
+      const ssh = makeConnectedSsh(client, { user: "deploy" })
+
+      await expect(
+        (ssh as unknown as Record<string, unknown>).execWithoutSudo("true")
+      ).resolves.toBeUndefined()
+    })
+
+    it("treats undefined ssh2 close code as exit code 0 in outputWithoutSudo (regression)", async () => {
+      const execSpy = vi.fn().mockImplementation((_command: string, callback: ExecCallback) => {
+        const stream = makeStream()
+        callback(undefined, stream)
+        stream.emit("data", Buffer.from(" hello \n"))
+        stream.emit("close", undefined as unknown as number)
+      })
+
+      const client = makeClientWithExecSpy(execSpy)
+      const ssh = makeConnectedSsh(client, { user: "deploy" })
+
+      await expect(
+        (ssh as unknown as Record<string, unknown>).outputWithoutSudo("echo hello")
+      ).resolves.toBe("hello")
+    })
+
+    it("treats undefined ssh2 close code as exit code 0 in probeSudo (regression)", async () => {
+      const execSpy = vi
+        .fn()
+        .mockImplementationOnce((_command: string, callback: ExecCallback) => {
+          const stream = makeStream()
+          callback(undefined, stream)
+          stream.emit("close", undefined as unknown as number)
+        })
+        .mockImplementationOnce((_command: string, callback: ExecCallback) => {
+          const stream = makeStream()
+          callback(undefined, stream)
+          stream.emit("close", undefined as unknown as number)
+        })
+
+      const client = makeClientWithExecSpy(execSpy)
+      const ssh = makeConnectedSsh(client, { user: "deploy" })
+
+      await expect(ssh.probeSudo()).resolves.toBeUndefined()
+      expect(promptTerminal).not.toHaveBeenCalled()
+    })
+
     it("masks the sudo password in the error message when authentication fails (regression)", async () => {
       // Arrange
       const password = "s3cret-pw"

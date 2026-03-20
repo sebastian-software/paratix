@@ -225,6 +225,17 @@ function writeStderr(t: string): void {
 }
 
 /**
+ * Normalize ssh2 close-event exit codes. ssh2 may pass `undefined` even though
+ * its TypeScript type says `number`; treat that as a successful zero exit code.
+ *
+ * @param code - Exit code from the ssh2 `close` event.
+ * @returns A normalized numeric exit code.
+ */
+export function normalizeSshCloseCode(code: number | undefined): number {
+  return code ?? 0
+}
+
+/**
  * Wire up event listeners on an ssh2 stream to collect stdout/stderr
  * and resolve or reject the promise when the stream closes.
  *
@@ -261,8 +272,7 @@ export function collectStreamOutput(parameters: StreamOutputParameters): void {
     clearTimeout(timer)
     stdoutMasker.flush()
     stderrMasker.flush()
-    // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition -- ssh2 may pass undefined despite type signature
-    const exitCode = code ?? 0
+    const exitCode = normalizeSshCloseCode(code)
     if (exitCode !== 0 && options.ignoreExitCode !== true) {
       const wasTruncated =
         codepointLengthExceeds(stdout, MAX_OUTPUT_LENGTH) ||

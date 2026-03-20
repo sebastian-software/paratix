@@ -13,6 +13,7 @@ import { sftpDownload, sftpUpload } from "./sftp.js"
 import {
   collectStreamOutput,
   maskSecrets,
+  normalizeSshCloseCode,
   type SecretSource,
   shellQuote,
   tryConnectOnPort,
@@ -557,7 +558,10 @@ export class SshConnectionImpl implements SshConnection {
         })
         stream.on("close", (code: number) => {
           clearTimeout(timer)
-          wrappedResolve({ exitCode: code, stdout: Buffer.concat(chunks).toString("utf8") })
+          wrappedResolve({
+            exitCode: normalizeSshCloseCode(code),
+            stdout: Buffer.concat(chunks).toString("utf8"),
+          })
         })
         stream.stderr.on("data", () => {
           // discard stderr
