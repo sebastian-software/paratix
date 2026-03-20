@@ -143,6 +143,32 @@ function installDependencies(
   }
 }
 
+type PackageManager = ReturnType<typeof detectPackageManager>
+
+function printSuccessMessage(projectName: string, pm: PackageManager): void {
+  console.log(`
+Project created successfully!
+
+  cd ${projectName}
+
+Edit server.ts with your server details, then:
+
+  ${pm.name === "npm" ? "npm run" : pm.name} apply
+`)
+}
+
+function printPartialSuccessMessage(projectName: string, pm: PackageManager): void {
+  console.log(`
+Project files created, but dependency installation failed.
+
+  cd ${projectName}
+
+Install dependencies manually, then run:
+
+  ${pm.name === "npm" ? "npm run" : pm.name} apply
+`)
+}
+
 export function isValidProjectName(name: string): boolean {
   const trimmed = name.trim()
   return /^[a-z0-9][a-z0-9\x2d]*$/v.test(trimmed)
@@ -164,13 +190,15 @@ function validateProjectName(name: string | undefined): asserts name is string {
   }
 }
 
-function main(): void {
-  const projectName = process.argv[2]
-
-  validateProjectName(projectName)
-
+export function scaffoldProject(
+  projectName: string,
+  pm: PackageManager,
+  installer: (
+    projectDirectory: string,
+    packageManager: PackageManager
+  ) => boolean = installDependencies
+): boolean {
   const projectDirectory = resolve(projectName)
-
   // eslint-disable-next-line security/detect-non-literal-fs-filename
   if (existsSync(projectDirectory)) {
     console.error(`Error: Directory "${projectName}" already exists.`)
@@ -178,24 +206,27 @@ function main(): void {
     process.exit(1)
   }
 
-  const pm = detectPackageManager()
-
   console.log(`Creating Paratix project in ${projectDirectory}...`)
 
   writeProjectFiles(projectDirectory)
-  if (!installDependencies(projectDirectory, pm)) {
+  const installed = installer(projectDirectory, pm)
+  if (!installed) {
     process.exitCode = 1
+    printPartialSuccessMessage(projectName, pm)
+    return false
   }
 
-  console.log(`
-Project created successfully!
+  printSuccessMessage(projectName, pm)
+  return true
+}
 
-  cd ${projectName}
+function main(): void {
+  const projectName = process.argv[2]
 
-Edit server.ts with your server details, then:
+  validateProjectName(projectName)
 
-  ${pm.name === "npm" ? "npm run" : pm.name} apply
-`)
+  const pm = detectPackageManager()
+  scaffoldProject(projectName, pm)
 }
 
 // Only run when executed directly, not when imported (e.g. in tests)

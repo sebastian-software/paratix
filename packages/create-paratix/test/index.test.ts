@@ -1,8 +1,13 @@
 import { existsSync, mkdirSync, readFileSync, rmSync } from "node:fs"
 import { join, resolve } from "node:path"
-import { afterEach, beforeEach, describe, expect, it } from "vitest"
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 
-import { isDirectExecution, isValidProjectName, writeProjectFiles } from "../src/index.js"
+import {
+  isDirectExecution,
+  isValidProjectName,
+  scaffoldProject,
+  writeProjectFiles,
+} from "../src/index.js"
 
 describe("isValidProjectName", () => {
   // These tests document that invalid project names must be rejected.
@@ -188,5 +193,70 @@ describe("writeProjectFiles", () => {
     writeProjectFiles(TEST_DIR)
 
     expect(existsSync(join(TEST_DIR, "files"))).toBe(true)
+  })
+})
+
+describe("scaffoldProject", () => {
+  const projectName = "create-paratix-scaffold-test"
+  const projectDirectory = resolve(projectName)
+
+  beforeEach(() => {
+    rmSync(projectDirectory, { force: true, recursive: true })
+    vi.spyOn(console, "log").mockImplementation((...args) => {
+      void args
+    })
+    vi.spyOn(console, "error").mockImplementation((...args) => {
+      void args
+    })
+    process.exitCode = undefined
+  })
+
+  afterEach(() => {
+    vi.restoreAllMocks()
+    rmSync(projectDirectory, { force: true, recursive: true })
+    process.exitCode = undefined
+  })
+
+  it("prints the success message when dependency installation succeeds", () => {
+    const installer = vi.fn().mockReturnValue(true)
+
+    const result = scaffoldProject(
+      projectName,
+      { command: "pnpm install", name: "pnpm" },
+      installer
+    )
+
+    expect(result).toBe(true)
+    expect(installer).toHaveBeenCalledWith(projectDirectory, {
+      command: "pnpm install",
+      name: "pnpm",
+    })
+    expect(console.log).toHaveBeenCalledWith(`Creating Paratix project in ${projectDirectory}...`)
+    expect(console.log).toHaveBeenCalledWith(
+      expect.stringContaining("Project created successfully!")
+    )
+    expect(console.log).not.toHaveBeenCalledWith(
+      expect.stringContaining("dependency installation failed")
+    )
+    expect(process.exitCode).toBeUndefined()
+  })
+
+  it("prints a partial-success message and keeps a non-zero exit code when dependency installation fails", () => {
+    const installer = vi.fn().mockReturnValue(false)
+
+    const result = scaffoldProject(
+      projectName,
+      { command: "pnpm install", name: "pnpm" },
+      installer
+    )
+
+    expect(result).toBe(false)
+    expect(console.log).toHaveBeenCalledWith(
+      expect.stringContaining("Project files created, but dependency installation failed.")
+    )
+    expect(console.log).not.toHaveBeenCalledWith(
+      expect.stringContaining("Project created successfully!")
+    )
+    expect(process.exitCode).toBe(1)
   })
 })
