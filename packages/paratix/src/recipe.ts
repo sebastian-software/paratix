@@ -126,7 +126,8 @@ async function triggerSignals(parameters: {
       const connection = signal.local === true ? null : parameters.ssh
       // eslint-disable-next-line no-await-in-loop
       const result = await signal.apply(connection, parameters.environment)
-      status = handleSignalResultWithVerbosity(signal.name, result, verbose)
+      const signalStatus = handleSignalResultWithVerbosity(signal.name, result, verbose)
+      if (signalStatus === "failed") status = "failed"
     } catch (error) {
       printModuleResult(`signal: ${signal.name}`, "failed")
       printCommandFailure(error, verbose)

@@ -187,6 +187,38 @@ describe("recipe", () => {
     expect(result.status).toBe("failed")
   })
 
+  it("keeps the recipe status failed when a later signal succeeds", async () => {
+    const firstSignal: Module = {
+      // eslint-disable-next-line @typescript-eslint/require-await -- Interface requires async
+      async apply() {
+        return { status: "failed" }
+      },
+      // eslint-disable-next-line @typescript-eslint/require-await -- Interface requires async
+      async check() {
+        return "needs-apply"
+      },
+      name: "first-signal",
+    }
+    const secondSignal: Module = {
+      // eslint-disable-next-line @typescript-eslint/require-await -- Interface requires async
+      async apply() {
+        return { status: "changed" }
+      },
+      // eslint-disable-next-line @typescript-eslint/require-await -- Interface requires async
+      async check() {
+        return "needs-apply"
+      },
+      name: "second-signal",
+    }
+
+    const mod = makeModule("needs-apply", "changed")
+    const r = recipe("test-recipe", [mod], { signals: [firstSignal, secondSignal] })
+    // eslint-disable-next-line prefer-spread
+    const result = await r.apply(null, emptyEnv)
+
+    expect(result.status).toBe("failed")
+  })
+
   it("sets the recipe status to failed when a signal throws", async () => {
     const signal: Module = {
       apply: vi.fn().mockRejectedValue(new Error("signal failed")),
