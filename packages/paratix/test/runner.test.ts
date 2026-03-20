@@ -649,6 +649,48 @@ describe("runPlaybook signal handling", () => {
     expect(process.exitCode).toBe(130)
   })
 
+  it("does not run top-level signals when the module loop ended with both changed and failed results", async () => {
+    vi.doMock("../src/ssh.js", () => ({
+      shellQuote: (s: string) => `'${s}'`,
+      SshConnectionImpl: makeMockSshClass(capturedConfigs),
+    }))
+
+    const { runPlaybook } = await import("../src/runner.js")
+
+    const changingModule: Module = {
+      apply: vi.fn().mockResolvedValue({ status: "changed" } satisfies ModuleResult),
+      check: vi.fn().mockResolvedValue("needs-apply"),
+      name: "changing-module",
+    }
+
+    const failingModule: Module = {
+      apply: vi.fn().mockResolvedValue({ status: "failed" } satisfies ModuleResult),
+      check: vi.fn().mockResolvedValue("needs-apply"),
+      name: "failing-module",
+    }
+
+    const signalModule: Module = {
+      apply: vi.fn().mockResolvedValue({ status: "changed" } satisfies ModuleResult),
+      check: vi.fn().mockResolvedValue("needs-apply"),
+      name: "signal-module",
+    }
+
+    const definition: ServerDefinition = {
+      host: "1.2.3.4",
+      name: "test-server",
+      run: [changingModule, failingModule],
+      signals: [signalModule],
+      ssh: { ports: [22], privateKey: "~/.ssh/id", user: "root" },
+    }
+
+    await runPlaybook(definition)
+
+    expect(changingModule.apply).toHaveBeenCalledOnce()
+    expect(failingModule.apply).toHaveBeenCalledOnce()
+    expect(signalModule.apply).not.toHaveBeenCalled()
+    expect(process.exitCode).toBe(1)
+  })
+
   it.each([
     ["SIGINT", 130],
     ["SIGTERM", 143],

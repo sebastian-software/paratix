@@ -389,7 +389,12 @@ async function executeRun(parameters: ExecuteRunArguments): Promise<void> {
     verbose,
   })
 
-  if (shutdownSignal() == null && stats.changed > 0 && definition.signals != null)
+  if (
+    shutdownSignal() == null &&
+    stats.changed > 0 &&
+    stats.failed === 0 &&
+    definition.signals != null
+  )
     await runSignals({
       env: finalEnvironment,
       shutdownSignal,
