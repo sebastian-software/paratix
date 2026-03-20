@@ -1,4 +1,11 @@
-import { type Module, type ModuleResult, NEEDS_APPLY, type SshConnection } from "../types.js"
+import { environmentToMetaEntries, meta } from "../meta.js"
+import {
+  type Module,
+  type ModuleMetaEntry,
+  type ModuleResult,
+  NEEDS_APPLY,
+  type SshConnection,
+} from "../types.js"
 
 /**
  * Options for the reboot module.
@@ -174,7 +181,7 @@ export const system = {
         const outputs = await runFactCommands(ssh)
         if (outputs === null) return { status: "failed" }
 
-        return { meta: parseFacts(outputs), status: "ok" }
+        return { meta: environmentToMetaEntries(parseFacts(outputs)), status: "ok" }
       },
       // eslint-disable-next-line @typescript-eslint/require-await
       async check(): Promise<"needs-apply" | "ok"> {
@@ -206,18 +213,18 @@ export const system = {
           // Connection will drop during reboot — this is expected
         }
 
-        const meta: Record<string, string> = { "system.reboot": "true" }
+        const entries: ModuleMetaEntry[] = [meta.systemReboot()]
 
         if (options.resolveHost != null) {
           try {
             const newHost = await options.resolveHost()
-            meta["system.host"] = newHost
+            entries.push(meta.systemHost(newHost))
           } catch {
             // resolveHost failed — reconnect will use current host
           }
         }
 
-        return { meta, status: "changed" }
+        return { meta: entries, status: "changed" }
       },
       // eslint-disable-next-line @typescript-eslint/require-await
       async check(): Promise<"needs-apply" | "ok"> {
@@ -242,7 +249,7 @@ export const system = {
 
         const seconds = await ssh.output("awk '{print int($1)}' /proc/uptime")
 
-        return { meta: { "system.uptime": seconds }, status: "ok" }
+        return { meta: [meta.env("system.uptime", seconds)], status: "ok" }
       },
       // eslint-disable-next-line @typescript-eslint/require-await
       async check(): Promise<"needs-apply" | "ok"> {

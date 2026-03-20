@@ -1,8 +1,9 @@
-import { mergeEnvironment } from "./environment.js"
+import { mergeEnvironmentFromMeta } from "./meta.js"
 import { printCommandFailure, printModuleResult, printRecipeHeader } from "./output.js"
 import {
   type Environment,
   type Module,
+  type ModuleMetaEntry,
   type ModuleResult,
   NEEDS_APPLY,
   type SshConnection,
@@ -29,7 +30,24 @@ export type RecipeModule = {
 
 type RecipeState = {
   env: Environment
+  meta?: ModuleMetaEntry[]
   status: "changed" | "failed" | "ok"
+}
+
+function applyRecipeStepToState(
+  state: RecipeState,
+  step: { env: Environment; meta?: ModuleMetaEntry[]; status: string }
+): RecipeState {
+  const nextMeta = step.meta == null ? (state.meta ?? []) : [...(state.meta ?? []), ...step.meta]
+  let nextStatus = state.status
+  if (step.status === "failed") nextStatus = "failed"
+  else if (step.status === "changed") nextStatus = "changed"
+
+  return {
+    env: step.env,
+    meta: nextMeta,
+    status: nextStatus,
+  }
 }
 
 /**
@@ -52,7 +70,7 @@ async function executeOneModule(parameters: {
   ssh: null | SshConnection
   targetModule: Module
   verbose?: boolean
-}): Promise<{ env: Environment; status: string } | null> {
+}): Promise<{ env: Environment; meta?: ModuleMetaEntry[]; status: string } | null> {
   const { currentEnvironment, ssh, targetModule } = parameters
   const verbose = parameters.verbose ?? false
   const connection = targetModule.local === true ? null : ssh
@@ -69,9 +87,8 @@ async function executeOneModule(parameters: {
     printCommandFailure(result.error, verbose)
   }
 
-  const environment =
-    result.meta == null ? currentEnvironment : mergeEnvironment(currentEnvironment, result.meta)
-  return { env: environment, status: result.status }
+  const environment = await mergeEnvironmentFromMeta(currentEnvironment, result.meta)
+  return { env: environment, meta: result.meta, status: result.status }
 }
 
 async function executeModules(
@@ -85,28 +102,28 @@ async function executeModules(
 ): Promise<RecipeState> {
   const shutdownSignal = parameters.shutdownSignal ?? (() => null)
   const verbose = parameters.verbose ?? false
-  let aggregatedStatus: "changed" | "failed" | "ok" = "ok"
-  let currentEnvironment = { ...parameters.environment }
+  let state: RecipeState = {
+    env: { ...parameters.environment },
+    meta: undefined,
+    status: "ok",
+  }
 
   for (const currentModule of modules) {
     if (shutdownSignal() != null) break
     // eslint-disable-next-line no-await-in-loop
     const step = await executeOneModule({
-      currentEnvironment,
+      currentEnvironment: state.env,
       ssh,
       targetModule: currentModule,
       verbose,
     })
     if (step == null) continue
 
-    if (step.status === "failed") {
-      return { env: step.env, status: "failed" }
-    }
-    currentEnvironment = step.env
-    if (step.status === "changed") aggregatedStatus = "changed"
+    state = applyRecipeStepToState(state, step)
+    if (state.status === "failed") return state
   }
 
-  return { env: currentEnvironment, status: aggregatedStatus }
+  return state
 }
 
 function handleSignalResultWithVerbosity(
@@ -150,21 +167,6 @@ async function triggerSignals(parameters: {
   return status
 }
 
-function extractMeta(
-  environment: Environment,
-  nextEnvironment: Environment
-): Environment | undefined {
-  const meta: Environment = {}
-  let hasMeta = false
-  for (const key of Object.keys(nextEnvironment)) {
-    if (!(key in environment) || nextEnvironment[key] !== environment[key]) {
-      meta[key] = nextEnvironment[key]
-      hasMeta = true
-    }
-  }
-  return hasMeta ? meta : undefined
-}
-
 async function applyRecipe(parameters: {
   environment: Environment
   modules: Module[]
@@ -196,7 +198,7 @@ async function applyRecipe(parameters: {
   }
 
   return {
-    meta: extractMeta(parameters.environment, state.env),
+    meta: state.meta,
     status: state.status,
   }
 }

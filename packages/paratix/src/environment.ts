@@ -4,17 +4,17 @@ import type { Environment } from "./types.js"
 
 /**
  * Resolve a single env key to its concrete value.
- * Lazy function values are awaited; plain strings and numbers are returned as-is.
+ * Lazy function values are awaited; plain primitive values are returned as-is.
  *
  * @param environment - The env map to look up the key in.
  * @param key - The key to resolve.
- * @returns The resolved string or number value.
+ * @returns The resolved primitive value.
  * @throws {Error} When the key is not present in `environment`.
  */
 export async function resolveEnvironment(
   environment: Environment,
   key: string
-): Promise<number | string> {
+): Promise<boolean | number | string> {
   const value = environment[key]
   // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition -- Record index may be undefined at runtime
   if (value === undefined) {

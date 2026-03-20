@@ -1,3 +1,4 @@
+import { environmentToMetaEntries } from "../meta.js"
 import { failed, failedCommand } from "../moduleFailure.js"
 import { shellQuote } from "../ssh.js"
 import { type Module, type ModuleResult, NEEDS_APPLY, type SshConnection } from "../types.js"
@@ -80,7 +81,7 @@ export const service = {
         if (result.code !== 0) {
           return failedCommand("[service.facts] systemctl list-units failed", result)
         }
-        const meta: Record<string, string> = {}
+        const facts: Record<string, string> = {}
         for (const line of result.stdout.split("\n")) {
           // Strip leading Unicode bullet (● or ○) that systemd prepends to failed units
           const trimmed = line.trim().replace(/^[\u25CF\u25CB]\s*/v, "")
@@ -90,9 +91,9 @@ export const service = {
           const active = parts[2]
           if (!unit || !active) continue
           const name = unit.replace(/\.service$/v, "")
-          meta[`service.${name}`] = active
+          facts[`service.${name}`] = active
         }
-        return { meta, status: "ok" }
+        return { meta: environmentToMetaEntries(facts), status: "ok" }
       },
       // eslint-disable-next-line @typescript-eslint/require-await -- Interface requires async
       async check(): Promise<"needs-apply" | "ok"> {

@@ -1,3 +1,4 @@
+import { sshdPortMeta } from "../meta.js"
 import {
   guardedWriteFile,
   type Module,
@@ -162,7 +163,7 @@ export const sshd = {
         }
 
         return {
-          meta: { "sshd.port": targetPort },
+          meta: [sshdPortMeta(targetPort)],
           status: "changed",
         }
       },

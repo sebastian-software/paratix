@@ -3,6 +3,8 @@ import type * as childProcess from "node:child_process"
 import { EventEmitter } from "node:events"
 import { beforeEach, describe, expect, it, type Mock, vi } from "vitest"
 
+import { resolveEnvironment } from "../../src/environment.js"
+import { mergeEnvironmentFromMeta } from "../../src/meta.js"
 import { op } from "../../src/modules/op.js"
 
 type MockChildProcess = { stdin: { end: Mock } } & EventEmitter
@@ -95,7 +97,8 @@ describe("op.resolve — apply", () => {
     const result = await module_.apply(null, emptyEnv)
 
     expect(result.status).toBe("ok")
-    expect(result.meta).toStrictEqual({ password: "secret123" })
+    const metaEnvironment = await mergeEnvironmentFromMeta({}, result.meta)
+    await expect(resolveEnvironment(metaEnvironment, "password")).resolves.toBe("secret123")
   })
 
   it("resolves OTP fields via op read and returns lazy functions as meta", async () => {
@@ -108,7 +111,8 @@ describe("op.resolve — apply", () => {
     const result = await module_.apply(null, emptyEnv)
 
     expect(result.status).toBe("ok")
-    expect(typeof result.meta?.token).toBe("function")
+    const metaEnvironment = await mergeEnvironmentFromMeta({}, result.meta)
+    await expect(resolveEnvironment(metaEnvironment, "token")).resolves.toMatch(/^\d{6}$/v)
   })
 
   it("calls the lazy OTP function and returns a 6-digit string", async () => {
@@ -120,8 +124,8 @@ describe("op.resolve — apply", () => {
     // eslint-disable-next-line prefer-spread
     const result = await module_.apply(null, emptyEnv)
 
-    const lazyFunction = result.meta?.token as () => string
-    const code = lazyFunction()
+    const metaEnvironment = await mergeEnvironmentFromMeta({}, result.meta)
+    const code = await resolveEnvironment(metaEnvironment, "token")
     expect(code).toMatch(/^\d{6}$/v)
   })
 
@@ -135,7 +139,8 @@ describe("op.resolve — apply", () => {
     const result = await module_.apply(null, emptyEnv)
 
     expect(result.status).toBe("ok")
-    expect(result.meta?.token).toBeTypeOf("function")
+    const metaEnvironment = await mergeEnvironmentFromMeta({}, result.meta)
+    await expect(resolveEnvironment(metaEnvironment, "token")).resolves.toMatch(/^\d{6}$/v)
     // op inject must NOT have been called for OTP-only references
     const injectCalls = spawnCalls.filter((c) => c.args[0] === "inject")
     expect(injectCalls).toHaveLength(0)
@@ -151,7 +156,8 @@ describe("op.resolve — apply", () => {
     const result = await module_.apply(null, emptyEnv)
 
     expect(result.status).toBe("ok")
-    expect(result.meta?.token).toBeTypeOf("function")
+    const metaEnvironment = await mergeEnvironmentFromMeta({}, result.meta)
+    await expect(resolveEnvironment(metaEnvironment, "token")).resolves.toMatch(/^\d{6}$/v)
   })
 
   it("returns { status: 'failed' } when op inject throws", async () => {
@@ -211,7 +217,7 @@ describe("op.resolve — apply", () => {
     const result = await module_.apply(null, emptyEnv)
 
     expect(result.status).toBe("ok")
-    expect(result.meta).toStrictEqual({})
+    expect(await mergeEnvironmentFromMeta({}, result.meta)).toStrictEqual({})
     expect(spawnCalls).toHaveLength(0)
   })
 
@@ -232,8 +238,9 @@ describe("op.resolve — apply", () => {
     const result = await module_.apply(null, emptyEnv)
 
     expect(result.status).toBe("ok")
-    expect(result.meta?.password).toBe("secret123")
-    expect(result.meta?.token).toBeTypeOf("function")
+    const metaEnvironment = await mergeEnvironmentFromMeta({}, result.meta)
+    await expect(resolveEnvironment(metaEnvironment, "password")).resolves.toBe("secret123")
+    await expect(resolveEnvironment(metaEnvironment, "token")).resolves.toMatch(/^\d{6}$/v)
   })
 })
 

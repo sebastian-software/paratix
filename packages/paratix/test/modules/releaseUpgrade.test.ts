@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest"
 
+import { isSystemHostMetaEntry, isSystemRebootMetaEntry } from "../../src/meta.js"
 import { releaseUpgrade } from "../../src/modules/releaseUpgrade.js"
 import { createMockSsh } from "../helpers/mockSsh.js"
 
@@ -128,7 +129,7 @@ describe("releaseUpgrade.upgrade — apply (Ubuntu)", () => {
     const mod = releaseUpgrade.upgrade()
     const result = await mod.apply(ssh, emptyEnv)
     expect(result.status).toBe("changed")
-    expect(result.meta?.["system.reboot"]).toBe("true")
+    expect(result.meta?.some(isSystemRebootMetaEntry)).toBe(true)
     expect(ssh.calls).toContain("DEBIAN_FRONTEND=noninteractive apt-get update")
     expect(ssh.calls).toContain("do-release-upgrade -f DistUpgradeViewNonInteractive")
   })
@@ -174,7 +175,7 @@ describe("releaseUpgrade.upgrade — apply (Debian)", () => {
     const mod = releaseUpgrade.upgrade()
     const result = await mod.apply(ssh, emptyEnv)
     expect(result.status).toBe("changed")
-    expect(result.meta?.["system.reboot"]).toBe("true")
+    expect(result.meta?.some(isSystemRebootMetaEntry)).toBe(true)
     expect(ssh.calls).toContain("DEBIAN_FRONTEND=noninteractive apt-get update")
     expect(ssh.calls).toContain("DEBIAN_FRONTEND=noninteractive apt-get full-upgrade -y")
     expect(ssh.calls).toContain("DEBIAN_FRONTEND=noninteractive apt-get autoremove -y")
@@ -286,8 +287,8 @@ describe("releaseUpgrade.upgrade — apply (general)", () => {
     const mod = releaseUpgrade.upgrade({ resolveHost })
     const result = await mod.apply(ssh, emptyEnv)
     expect(resolveHost).toHaveBeenCalledOnce()
-    expect(result.meta?.["system.host"]).toBe("10.0.0.99")
-    expect(result.meta?.["system.reboot"]).toBe("true")
+    expect(result.meta?.find(isSystemHostMetaEntry)?.host).toBe("10.0.0.99")
+    expect(result.meta?.some(isSystemRebootMetaEntry)).toBe(true)
   })
 
   it("resolveHost fails → meta without system.host, upgrade still succeeds", async () => {
@@ -300,7 +301,7 @@ describe("releaseUpgrade.upgrade — apply (general)", () => {
     const mod = releaseUpgrade.upgrade({ resolveHost })
     const result = await mod.apply(ssh, emptyEnv)
     expect(result.status).toBe("changed")
-    expect(result.meta?.["system.reboot"]).toBe("true")
-    expect(result.meta).not.toHaveProperty("system.host")
+    expect(result.meta?.some(isSystemRebootMetaEntry)).toBe(true)
+    expect(result.meta?.some(isSystemHostMetaEntry)).toBe(false)
   })
 })

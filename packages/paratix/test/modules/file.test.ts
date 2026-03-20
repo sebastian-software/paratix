@@ -4,6 +4,8 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { describe, expect, it } from "vitest"
 
+import { resolveEnvironment } from "../../src/environment.js"
+import { mergeEnvironmentFromMeta } from "../../src/meta.js"
 import { file } from "../../src/modules/file.js"
 import { createMockSsh } from "../helpers/mockSsh.js"
 
@@ -914,14 +916,13 @@ describe("file.stat", () => {
     const result = await mod.apply(ssh, emptyEnv)
 
     expect(result.status).toBe("ok")
-    expect(result.meta).toMatchObject({
-      "file.stat.group": "www-data",
-      "file.stat.mode": "644",
-      "file.stat.mtime": "1700000000",
-      "file.stat.owner": "www-data",
-      "file.stat.size": "1234",
-      "file.stat.type": "regular file",
-    })
+    const environment = await mergeEnvironmentFromMeta({}, result.meta)
+    await expect(resolveEnvironment(environment, "file.stat.group")).resolves.toBe("www-data")
+    await expect(resolveEnvironment(environment, "file.stat.mode")).resolves.toBe("644")
+    await expect(resolveEnvironment(environment, "file.stat.mtime")).resolves.toBe("1700000000")
+    await expect(resolveEnvironment(environment, "file.stat.owner")).resolves.toBe("www-data")
+    await expect(resolveEnvironment(environment, "file.stat.size")).resolves.toBe("1234")
+    await expect(resolveEnvironment(environment, "file.stat.type")).resolves.toBe("regular file")
   })
 
   it("apply returns failed when ssh is null", async () => {

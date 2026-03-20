@@ -1,5 +1,6 @@
 import { readFile } from "node:fs/promises"
 
+import { environmentToMetaEntries } from "../meta.js"
 import { shellQuote, validateMode } from "../ssh.js"
 import {
   guardedWriteFile,
@@ -307,14 +308,14 @@ export function stat(remotePath: string): Module {
       const type = parts.slice(STAT_TYPE_START_INDEX, -1).join(" ")
 
       return {
-        meta: {
+        meta: environmentToMetaEntries({
           "file.stat.group": group,
           "file.stat.mode": mode,
           "file.stat.mtime": mtime ?? "",
           "file.stat.owner": owner,
           "file.stat.size": size,
           "file.stat.type": type,
-        },
+        }),
         status: "ok",
       }
     },

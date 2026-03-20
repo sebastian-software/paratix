@@ -5,6 +5,13 @@ import type { Environment, Module, ModuleResult, ServerDefinition } from "./type
 import { dryRunRecipeModule } from "./dryRunRecipe.js"
 import { loadDotEnvironment, mergeEnvironment } from "./environment.js"
 import {
+  assertValidModuleMetaEntries,
+  isSshdPortMetaEntry,
+  isSystemHostMetaEntry,
+  isSystemRebootMetaEntry,
+  mergeEnvironmentFromMeta,
+} from "./meta.js"
+import {
   printCommandFailure,
   printModuleResult,
   printRecipeHeader,
@@ -115,18 +122,20 @@ async function initializeEnvironment(
   return mergeEnvironment({}, dotEnvironment, definition.env, options.envOverrides)
 }
 
-async function handlePortChange(ssh: SshConnectionImpl, meta: Environment): Promise<void> {
-  const portValue = meta["sshd.port"]
-  // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition -- portValue may be undefined at runtime
-  if (portValue == null) return
+function hasRebootMeta(result: ModuleResult): boolean {
+  return result.meta?.some(isSystemRebootMetaEntry) ?? false
+}
 
-  const newPort = Number(portValue)
+async function handlePortChange(ssh: SshConnectionImpl, result: ModuleResult): Promise<void> {
+  const portEntry = result.meta?.find(isSshdPortMetaEntry)
+  if (portEntry == null) return
+
+  const newPort = portEntry.port
   ssh.addPort(newPort)
 
   // Skip reconnect when a reboot is pending — the reboot handler will
   // reconnect on all registered ports (including the newly added one).
-  // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition -- meta values may be undefined at runtime
-  if (meta["system.reboot"] != null) return
+  if (hasRebootMeta(result)) return
 
   try {
     await ssh.reconnect()
@@ -139,15 +148,12 @@ async function handlePortChange(ssh: SshConnectionImpl, meta: Environment): Prom
   }
 }
 
-async function handleReboot(ssh: SshConnectionImpl, meta: Environment): Promise<void> {
-  const reboot = meta["system.reboot"]
-  // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition -- meta values may be undefined at runtime
-  if (reboot == null) return
+async function handleReboot(ssh: SshConnectionImpl, result: ModuleResult): Promise<void> {
+  if (!hasRebootMeta(result)) return
 
-  const newHost = meta["system.host"]
-  // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition -- meta values may be undefined at runtime
-  if (newHost != null) {
-    ssh.updateHost(String(newHost))
+  const hostEntry = result.meta?.find(isSystemHostMetaEntry)
+  if (hostEntry != null) {
+    ssh.updateHost(hostEntry.host)
   }
 
   try {
@@ -166,9 +172,10 @@ async function handleMetaAndBuildResult(
   let currentEnvironment = environment
 
   if (result.meta != null) {
-    currentEnvironment = mergeEnvironment(currentEnvironment, result.meta)
-    await handlePortChange(ssh, result.meta)
-    await handleReboot(ssh, result.meta)
+    assertValidModuleMetaEntries(result.meta)
+    currentEnvironment = await mergeEnvironmentFromMeta(currentEnvironment, result.meta)
+    await handlePortChange(ssh, result)
+    await handleReboot(ssh, result)
   }
 
   return { env: currentEnvironment, shouldBreak: result.status === "failed", status: result.status }

@@ -1,4 +1,24 @@
 export { assert, debug, fail, pause, when } from "./builtins.js"
+export {
+  assertValidModuleMetaEntries,
+  assertValidModuleMetaEntry,
+  diffEnvironmentToMetaEntries,
+  environmentMeta,
+  environmentToMetaEntries,
+  isBooleanEnvironmentMetaEntry,
+  isEnvironmentMetaEntry,
+  isLazyEnvironmentMetaEntry,
+  isNumberEnvironmentMetaEntry,
+  isSshdPortMetaEntry,
+  isStringEnvironmentMetaEntry,
+  isSystemHostMetaEntry,
+  isSystemRebootMetaEntry,
+  mergeEnvironmentFromMeta,
+  meta,
+  sshdPortMeta,
+  systemHostMeta,
+  systemRebootMeta,
+} from "./meta.js"
 export { failed, failedCommand } from "./moduleFailure.js"
 export {
   apt,
@@ -42,12 +62,18 @@ export { shellQuote } from "./ssh.js"
 export { NEEDS_APPLY } from "./types.js"
 export type {
   Environment,
+  EnvironmentMetaEntry,
   EnvironmentValue,
   ExecOptions,
   ExecResult,
+  MetaEnvironmentValue,
   Module,
+  ModuleMetaEntry,
   ModuleResult,
   ServerDefinition,
   SshConfig,
   SshConnection,
+  SshdPortMetaEntry,
+  SystemHostMetaEntry,
+  SystemRebootMetaEntry,
 } from "./types.js"

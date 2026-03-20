@@ -12,11 +12,26 @@ Paratix has exactly two import paths:
 
 ```typescript
 // Core API
-import { server, recipe, assert, debug, fail, pause, when, shellQuote, NEEDS_APPLY } from "paratix"
+import {
+  server,
+  recipe,
+  assert,
+  debug,
+  fail,
+  pause,
+  resolveEnvironment,
+  when,
+  shellQuote,
+  NEEDS_APPLY,
+  failed,
+  meta,
+} from "paratix"
 
 // Types (only when needed)
 import type {
   Module,
+  EnvironmentMetaEntry,
+  ModuleMetaEntry,
   ModuleResult,
   ServerDefinition,
   SshConnection,
@@ -236,10 +251,10 @@ Import with renaming: `import { package as pkg } from "paratix/modules"`. The wo
 
 ### `sshd`
 
-| Method        | Signature                                    | Idempotent                   |
-| ------------- | -------------------------------------------- | ---------------------------- |
-| `sshd.config` | `(settings: Record<string, string>): Module` | Yes                          |
-| `sshd.port`   | `(targetPort: number): Module`               | Yes (emits `sshd.port` meta) |
+| Method        | Signature                                    | Idempotent                         |
+| ------------- | -------------------------------------------- | ---------------------------------- |
+| `sshd.config` | `(settings: Record<string, string>): Module` | Yes                                |
+| `sshd.port`   | `(targetPort: number): Module`               | Yes (emits typed `sshd.port` meta) |
 
 ### `sysctl`
 
@@ -249,11 +264,11 @@ Import with renaming: `import { package as pkg } from "paratix/modules"`. The wo
 
 ### `system`
 
-| Method          | Signature                                                     | Idempotent                                      |
-| --------------- | ------------------------------------------------------------- | ----------------------------------------------- |
-| `system.facts`  | `(): Module`                                                  | No (always-applies, emits `system.*` meta)      |
-| `system.reboot` | `(options?: { resolveHost?: () => Promise<string> }): Module` | No (always-applies)                             |
-| `system.uptime` | `(): Module`                                                  | No (always-applies, emits `system.uptime` meta) |
+| Method          | Signature                                                     | Idempotent                                          |
+| --------------- | ------------------------------------------------------------- | --------------------------------------------------- |
+| `system.facts`  | `(): Module`                                                  | No (always-applies, emits typed `env` meta entries) |
+| `system.reboot` | `(options?: { resolveHost?: () => Promise<string> }): Module` | No (always-applies)                                 |
+| `system.uptime` | `(): Module`                                                  | No (always-applies, emits typed `env` meta entries) |
 
 ### `systemd`
 
@@ -284,7 +299,7 @@ A custom module must implement `check` and `apply`, both async:
 
 ```typescript
 import type { Module, ModuleResult, SshConnection, Environment } from "paratix"
-import { NEEDS_APPLY, failed } from "paratix"
+import { NEEDS_APPLY, failed, meta } from "paratix"
 
 function myCustomModule(configPath: string, content: string): Module {
   return {
@@ -301,7 +316,10 @@ function myCustomModule(configPath: string, content: string): Module {
     async apply(ssh: SshConnection | null, env: Environment): Promise<ModuleResult> {
       if (!ssh) return failed(`[my-module: ${configPath}] SSH connection is required`)
       await ssh.writeFile(configPath, content)
-      return { status: "changed" }
+      return {
+        meta: [meta.env("MY_MODULE_PATH", configPath)],
+        status: "changed",
+      }
     },
   }
 }
@@ -313,7 +331,12 @@ function myCustomModule(configPath: string, content: string): Module {
 - Prefer `failedCommand("...", result)` when you used `ssh.exec(..., { ignoreExitCode: true })` and want stdout/stderr preserved for central runner output.
 - Return `NEEDS_APPLY` (the exported constant), never the string literal `"needs-apply"`.
 - `ModuleResult.status` must be one of: `"changed"`, `"failed"`, `"ok"`, `"skipped"`.
-- Use `meta` in the return value to pass data to subsequent modules via the environment.
+- Use typed `meta` entries in the return value, not loose objects.
+- For normal downstream environment propagation, use `meta.env(name, value)`.
+- `meta.env(...)` accepts strings, numbers, booleans, sync lazy functions, and async lazy functions.
+- `meta.env(...)` is normalized internally to an async resolver, so downstream code should treat propagated environment values as lazily async and resolve them via `resolveEnvironment(...)` when it needs the concrete primitive.
+- Use dedicated built-in meta entries only for runner control-plane effects, for example `meta.sshdPort(...)`, `meta.systemHost(...)`, and `meta.systemReboot()`.
+- Use the exported guards such as `isEnvironmentMetaEntry(...)`, `isStringEnvironmentMetaEntry(...)`, `isNumberEnvironmentMetaEntry(...)`, `isBooleanEnvironmentMetaEntry(...)`, `isLazyEnvironmentMetaEntry(...)`, `isSshdPortMetaEntry(...)`, `isSystemHostMetaEntry(...)`, and `isSystemRebootMetaEntry(...)` when you need to inspect meta entries safely.
 - Set `local: true` on the module object if it runs on the local machine (ssh will be `null`).
 
 ### SshConnection API
@@ -354,8 +377,9 @@ Methods available on the `ssh` parameter:
 
 Files deployed via `file.template(remotePath, localTemplatePath)` can contain `{{KEY}}` placeholders.
 
-- Placeholders are resolved at runtime from the `env` object of `server()` and from `meta` returned by previous modules.
-- Environment values can be strings, numbers, or (async) functions.
+- Placeholders are resolved at runtime from the `env` object of `server()` and from typed `meta.env(...)` entries returned by previous modules.
+- Environment values can be strings, numbers, booleans, sync lazy functions, or async lazy functions.
+- Values propagated through `meta.env(...)` are normalized to async resolution before downstream modules or templates consume them.
 - Escaping: `\{{` produces a literal `{{` in the output.
 - Unknown keys throw an error at runtime.
 - **Modifiers:** `{{KEY|shell}}` applies `shellQuote()` to the value. This is the only built-in modifier.
@@ -399,7 +423,7 @@ export const nginxRecipe = recipe(
 **How recipes work:**
 
 - Modules run in order; execution stops on first `"failed"` status.
-- `meta` env values propagate from one module to all subsequent ones within the recipe.
+- `meta.env(...)` values propagate from one module to all subsequent ones within the recipe and resolve lazily when later modules or templates consume them.
 - If any module reports `"changed"`, the `signals` array fires after all modules complete.
 - Recipes can be nested: include a recipe in another recipe's module list.
 
@@ -485,6 +509,8 @@ async check(ssh) {
 8. Specify `ssh.ports` as an array -- the runner tries each port in order.
 9. Custom modules must implement both `check` and `apply`, both async.
 10. Use `shellQuote()` when interpolating dynamic values into shell commands.
+11. Emit downstream values via `meta.env(...)` and use dedicated built-in meta entries only for runner control-plane behavior.
+12. When you need a concrete propagated value inside custom code, use `await resolveEnvironment(env, "KEY")` instead of assuming `env["KEY"]` is already a plain primitive.
 
 ### DON'T
 
@@ -500,6 +526,7 @@ async check(ssh) {
 10. Do NOT use `signals` on the top-level `server()` when you mean a recipe signal -- `server.signals` fire when ANY module in `run` changed.
 11. Do NOT call `server()` without all required fields (`name`, `host`, `ssh`, `run`) -- it throws at construction time. `name` and `host` must not be empty strings.
 12. Do NOT use empty arrays for `ssh.ports` or empty strings for `ssh.user`/`ssh.privateKey` -- validation rejects these. `ssh.privateKey` may be omitted entirely to use the SSH agent instead.
+13. Do NOT return loose `meta: { ... }` maps from custom modules -- always use typed meta entries.
 
 ## Testing Patterns
 

@@ -2,6 +2,7 @@ import { type ChildProcess, spawn } from "node:child_process"
 
 import type { Environment, Module, ModuleResult } from "../types.js"
 
+import { environmentToMetaEntries } from "../meta.js"
 import { failed } from "../moduleFailure.js"
 import { generateTotpCode } from "../totp.js"
 
@@ -183,7 +184,10 @@ export const op = {
           const resolvedRegular = await resolveRegularReferences(regularEntries)
           const resolvedOtp = await resolveOtpReferences(otpEntries)
 
-          return { meta: { ...resolvedRegular, ...resolvedOtp }, status: "ok" }
+          return {
+            meta: environmentToMetaEntries({ ...resolvedRegular, ...resolvedOtp }),
+            status: "ok",
+          }
         } catch (error) {
           const detail = error instanceof Error ? error.message : String(error)
           return failed(`Failed to resolve 1Password references: ${detail}`)

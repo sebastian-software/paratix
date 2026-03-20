@@ -1,6 +1,8 @@
+import { mergeEnvironmentFromMeta } from "./meta.js"
 import {
   type Environment,
   type Module,
+  type ModuleMetaEntry,
   type ModuleResult,
   NEEDS_APPLY,
   type SshConnection,
@@ -113,25 +115,14 @@ export function pause(message?: string): Module {
   }
 }
 
-function computeMetaDiff(original: Environment, current: Environment): Environment | undefined {
-  const meta: Environment = {}
-  let hasMeta = false
-  for (const key of Object.keys(current)) {
-    if (!(key in original) || current[key] !== original[key]) {
-      meta[key] = current[key]
-      hasMeta = true
-    }
-  }
-  return hasMeta ? meta : undefined
-}
-
 async function applyConditionalModules(
   ssh: null | SshConnection,
   environment: Environment,
   modules: Module[]
 ): Promise<ModuleResult> {
   let aggregatedStatus: "changed" | "ok" | "skipped" = "ok"
-  const currentEnvironment = { ...environment }
+  let currentEnvironment = { ...environment }
+  const aggregatedMeta: ModuleMetaEntry[] = []
 
   for (const currentModule of modules) {
     // eslint-disable-next-line no-await-in-loop
@@ -141,11 +132,16 @@ async function applyConditionalModules(
     // eslint-disable-next-line no-await-in-loop
     const result = await currentModule.apply(ssh, currentEnvironment)
     if (result.status === "failed") return { status: "failed" }
-    if (result.meta != null) Object.assign(currentEnvironment, result.meta)
+    if (result.meta != null) aggregatedMeta.push(...result.meta)
+    // eslint-disable-next-line no-await-in-loop -- downstream env must see each module's meta in order
+    currentEnvironment = await mergeEnvironmentFromMeta(currentEnvironment, result.meta)
     if (result.status === "changed") aggregatedStatus = "changed"
   }
 
-  return { meta: computeMetaDiff(environment, currentEnvironment), status: aggregatedStatus }
+  return {
+    meta: aggregatedMeta.length === 0 ? undefined : aggregatedMeta,
+    status: aggregatedStatus,
+  }
 }
 
 /**

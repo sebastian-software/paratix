@@ -1,5 +1,7 @@
 import { describe, expect, it } from "vitest"
 
+import { resolveEnvironment } from "../../src/environment.js"
+import { mergeEnvironmentFromMeta } from "../../src/meta.js"
 import { service } from "../../src/modules/service.js"
 import { createMockSsh } from "../helpers/mockSsh.js"
 
@@ -295,10 +297,9 @@ describe("service.facts", () => {
     const mod = service.facts()
     const result = await mod.apply(ssh, emptyEnv)
     expect(result.status).toBe("ok")
-    expect(result.meta).toStrictEqual({
-      "service.nginx": "active",
-      "service.sshd": "active",
-    })
+    const environment = await mergeEnvironmentFromMeta({}, result.meta)
+    await expect(resolveEnvironment(environment, "service.nginx")).resolves.toBe("active")
+    await expect(resolveEnvironment(environment, "service.sshd")).resolves.toBe("active")
   })
 
   it("apply handles inactive services correctly", async () => {
@@ -311,9 +312,8 @@ describe("service.facts", () => {
     const mod = service.facts()
     const result = await mod.apply(ssh, emptyEnv)
     expect(result.status).toBe("ok")
-    expect(result.meta).toStrictEqual({
-      "service.nginx": "inactive",
-    })
+    const environment = await mergeEnvironmentFromMeta({}, result.meta)
+    await expect(resolveEnvironment(environment, "service.nginx")).resolves.toBe("inactive")
   })
 
   it("apply returns empty meta when no services are listed", async () => {
@@ -326,7 +326,7 @@ describe("service.facts", () => {
     const mod = service.facts()
     const result = await mod.apply(ssh, emptyEnv)
     expect(result.status).toBe("ok")
-    expect(result.meta).toStrictEqual({})
+    expect(await mergeEnvironmentFromMeta({}, result.meta)).toStrictEqual({})
   })
 
   it("apply returns failed when systemctl exits with non-zero code", async () => {
@@ -352,10 +352,9 @@ describe("service.facts", () => {
     const mod = service.facts()
     const result = await mod.apply(ssh, emptyEnv)
     expect(result.status).toBe("ok")
-    expect(result.meta).toStrictEqual({
-      "service.nginx": "failed",
-      "service.sshd": "active",
-    })
+    const environment = await mergeEnvironmentFromMeta({}, result.meta)
+    await expect(resolveEnvironment(environment, "service.nginx")).resolves.toBe("failed")
+    await expect(resolveEnvironment(environment, "service.sshd")).resolves.toBe("active")
   })
 
   it("apply returns failed when ssh is null", async () => {

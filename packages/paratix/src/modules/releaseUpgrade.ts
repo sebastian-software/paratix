@@ -1,6 +1,8 @@
+import { meta } from "../meta.js"
 import {
   guardedWriteFile,
   type Module,
+  type ModuleMetaEntry,
   type ModuleResult,
   NEEDS_APPLY,
   type SshConnection,
@@ -150,17 +152,17 @@ async function replaceCodenameInSourcesList(
  * @param options - Upgrade options containing an optional `resolveHost` callback.
  * @returns A meta map suitable for inclusion in a `ModuleResult`.
  */
-async function buildRebootMeta(options: ReleaseUpgradeOptions): Promise<Record<string, string>> {
-  const meta: Record<string, string> = { "system.reboot": "true" }
+async function buildRebootMeta(options: ReleaseUpgradeOptions): Promise<ModuleMetaEntry[]> {
+  const entries: ModuleMetaEntry[] = [meta.systemReboot()]
   if (options.resolveHost != null) {
     try {
       const newHost = await options.resolveHost()
-      meta["system.host"] = newHost
+      entries.push(meta.systemHost(newHost))
     } catch {
       // resolveHost failed — reconnect will use current host
     }
   }
-  return meta
+  return entries
 }
 
 /**
@@ -203,8 +205,8 @@ async function applyUbuntu(
   })
   if (upgradeResult.code !== 0) return { status: "failed" }
 
-  const meta = await buildRebootMeta(options)
-  return { meta, status: "changed" }
+  const entries = await buildRebootMeta(options)
+  return { meta: entries, status: "changed" }
 }
 
 /**
@@ -264,8 +266,8 @@ async function applyDebian(
   })
   if (autoremoveResult.code !== 0) return { status: "failed" }
 
-  const meta = await buildRebootMeta(options)
-  return { meta, status: "changed" }
+  const entries = await buildRebootMeta(options)
+  return { meta: entries, status: "changed" }
 }
 
 /**

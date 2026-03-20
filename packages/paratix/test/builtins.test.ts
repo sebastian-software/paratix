@@ -3,6 +3,8 @@ import { describe, expect, it, vi } from "vitest"
 import type { Environment, Module } from "../src/types.js"
 
 import { assert, debug, fail, pause, when } from "../src/builtins.js"
+import { resolveEnvironment } from "../src/environment.js"
+import { mergeEnvironmentFromMeta, meta } from "../src/meta.js"
 
 const emptyEnv: Environment = {}
 
@@ -238,7 +240,7 @@ describe("when", () => {
     const metaModule: Module = {
       // eslint-disable-next-line @typescript-eslint/require-await -- Interface requires async
       async apply() {
-        return { meta: { RESOLVED_IP: "1.2.3.4" }, status: "changed" as const }
+        return { meta: [meta.env("RESOLVED_IP", "1.2.3.4")], status: "changed" as const }
       },
       // eslint-disable-next-line @typescript-eslint/require-await -- Interface requires async
       async check() {
@@ -253,7 +255,8 @@ describe("when", () => {
 
     expect(result.status).toBe("changed")
     expect(result.meta).toBeDefined()
-    expect(result.meta).toMatchObject({ RESOLVED_IP: "1.2.3.4" })
+    const environment = await mergeEnvironmentFromMeta({}, result.meta)
+    await expect(resolveEnvironment(environment, "RESOLVED_IP")).resolves.toBe("1.2.3.4")
   })
 
   it("check passes the same copied environment to all inner modules", async () => {

@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest"
 
+import { isSshdPortMetaEntry } from "../../src/meta.js"
 import { sshd } from "../../src/modules/sshd.js"
 import { createMockSsh } from "../helpers/mockSsh.js"
 
@@ -420,6 +421,7 @@ describe("sshd.port — apply: validation and rollback", () => {
     const result = await mod.apply(mockSsh, emptyEnv)
 
     expect(result.status).toBe("changed")
+    expect(result.meta?.find(isSshdPortMetaEntry)?.port).toBe(2222)
     // Only one write: the new port config — no rollback
     expect(writtenFiles).toHaveLength(1)
     expect(writtenFiles[0]?.content).toContain("Port 2222")

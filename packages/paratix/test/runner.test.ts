@@ -1,7 +1,16 @@
 import { EventEmitter } from "node:events"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 
-import type { Environment, Module, ModuleResult, ServerDefinition } from "../src/types.js"
+import type {
+  Environment,
+  Module,
+  ModuleMetaEntry,
+  ModuleResult,
+  ServerDefinition,
+} from "../src/types.js"
+
+import { resolveEnvironment } from "../src/environment.js"
+import { meta } from "../src/meta.js"
 
 function makeMockSshClass(
   capturedConfigs: unknown[],
@@ -34,9 +43,11 @@ function makeMockSshClass(
   }
 }
 
-function makeModuleWithMeta(meta: Record<string, string>): Module {
+function makeModuleWithMeta(metaEntries: ModuleMetaEntry[]): Module {
   return {
-    apply: vi.fn().mockResolvedValue({ meta, status: "changed" } satisfies ModuleResult),
+    apply: vi
+      .fn()
+      .mockResolvedValue({ meta: metaEntries, status: "changed" } satisfies ModuleResult),
     check: vi.fn().mockResolvedValue("needs-apply"),
     name: "test-module",
   }
@@ -92,7 +103,7 @@ describe("runPlaybook reconnect failure propagation", () => {
 
     const { runPlaybook } = await import("../src/runner.js")
 
-    const moduleWithPortChange = makeModuleWithMeta({ "sshd.port": "2222" })
+    const moduleWithPortChange = makeModuleWithMeta([meta.sshdPort(2222)])
 
     const definition: ServerDefinition = {
       host: "1.2.3.4",
@@ -124,7 +135,7 @@ describe("runPlaybook reconnect failure propagation", () => {
 
     const { runPlaybook } = await import("../src/runner.js")
 
-    const moduleWithReboot = makeModuleWithMeta({ "system.reboot": "true" })
+    const moduleWithReboot = makeModuleWithMeta([meta.systemReboot()])
 
     const definition: ServerDefinition = {
       host: "1.2.3.4",
@@ -156,7 +167,7 @@ describe("runPlaybook reconnect failure propagation", () => {
 
     const { runPlaybook } = await import("../src/runner.js")
 
-    const moduleWithPortChange = makeModuleWithMeta({ "sshd.port": "2222" })
+    const moduleWithPortChange = makeModuleWithMeta([meta.sshdPort(2222)])
     const subsequentModule: Module = {
       apply: vi.fn().mockResolvedValue({ status: "ok" } satisfies ModuleResult),
       check: vi.fn().mockResolvedValue("needs-apply"),
@@ -193,7 +204,7 @@ describe("runPlaybook reconnect failure propagation", () => {
 
     const { runPlaybook } = await import("../src/runner.js")
 
-    const moduleWithReboot = makeModuleWithMeta({ "system.reboot": "true" })
+    const moduleWithReboot = makeModuleWithMeta([meta.systemReboot()])
     const subsequentModule: Module = {
       apply: vi.fn().mockResolvedValue({ status: "ok" } satisfies ModuleResult),
       check: vi.fn().mockResolvedValue("needs-apply"),
@@ -213,6 +224,61 @@ describe("runPlaybook reconnect failure propagation", () => {
 
     await runPlaybook(definition)
 
+    expect(subsequentModule.check).not.toHaveBeenCalled()
+    process.exitCode = 0
+  })
+})
+
+describe("runPlaybook meta validation", () => {
+  beforeEach(() => {
+    vi.spyOn(console, "log").mockImplementation(() => {
+      /* noop */
+    })
+    vi.spyOn(console, "error").mockImplementation(() => {
+      /* noop */
+    })
+    vi.resetModules()
+  })
+
+  afterEach(() => {
+    vi.restoreAllMocks()
+    vi.resetModules()
+  })
+
+  it("fails the run when a module returns malformed meta entries", async () => {
+    const capturedConfigs: unknown[] = []
+
+    vi.doMock("../src/ssh.js", () => ({
+      shellQuote: (s: string) => `'${s}'`,
+      SshConnectionImpl: makeMockSshClass(capturedConfigs),
+    }))
+
+    const { runPlaybook } = await import("../src/runner.js")
+
+    const malformedMetaModule: Module = {
+      apply: vi
+        .fn()
+        .mockResolvedValue({ meta: [{ kind: "sshd.port", port: "2222" }], status: "changed" }),
+      check: vi.fn().mockResolvedValue("needs-apply"),
+      name: "malformed-meta",
+    }
+
+    const subsequentModule: Module = {
+      apply: vi.fn().mockResolvedValue({ status: "ok" } satisfies ModuleResult),
+      check: vi.fn().mockResolvedValue("needs-apply"),
+      name: "should-not-run",
+    }
+
+    const definition: ServerDefinition = {
+      host: "1.2.3.4",
+      name: "test-server",
+      run: [malformedMetaModule, subsequentModule],
+      ssh: { ports: [22], privateKey: "~/.ssh/id", user: "root" },
+    }
+
+    await runPlaybook(definition)
+
+    expect(process.exitCode).toBe(1)
     expect(subsequentModule.check).not.toHaveBeenCalled()
     process.exitCode = 0
   })
@@ -246,10 +312,7 @@ describe("runPlaybook handlePortChange + handleReboot interaction", () => {
 
     const { runPlaybook } = await import("../src/runner.js")
 
-    const moduleWithPortAndReboot = makeModuleWithMeta({
-      "sshd.port": "2222",
-      "system.reboot": "1",
-    })
+    const moduleWithPortAndReboot = makeModuleWithMeta([meta.sshdPort(2222), meta.systemReboot()])
 
     const definition: ServerDefinition = {
       host: "1.2.3.4",
@@ -276,7 +339,7 @@ describe("runPlaybook handlePortChange + handleReboot interaction", () => {
 
     const { runPlaybook } = await import("../src/runner.js")
 
-    const moduleWithPortOnly = makeModuleWithMeta({ "sshd.port": "2222" })
+    const moduleWithPortOnly = makeModuleWithMeta([meta.sshdPort(2222)])
 
     const definition: ServerDefinition = {
       host: "1.2.3.4",
@@ -674,7 +737,7 @@ describe("runPlaybook signal handling", () => {
 
     const { runPlaybook } = await import("../src/runner.js")
 
-    const moduleWithPortChange = makeModuleWithMeta({ "sshd.port": "2222" })
+    const moduleWithPortChange = makeModuleWithMeta([meta.sshdPort(2222)])
     const subsequentModule: Module = {
       apply: vi.fn().mockResolvedValue({ status: "ok" } satisfies ModuleResult),
       check: vi.fn().mockResolvedValue("needs-apply"),
@@ -1473,7 +1536,8 @@ describe("runPlaybook op.resolve integration", () => {
 
     await runPlaybook(definition)
 
-    expect(receivedEnvInCheck?.SECRET).toBe("resolved-secret")
+    expect(receivedEnvInCheck).toBeDefined()
+    await expect(resolveEnvironment(receivedEnvInCheck!, "SECRET")).resolves.toBe("resolved-secret")
     expect(dependentModule.apply).not.toHaveBeenCalled()
   })
 })

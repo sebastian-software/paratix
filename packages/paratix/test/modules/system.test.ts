@@ -1,5 +1,11 @@
 import { describe, expect, it, vi } from "vitest"
 
+import { resolveEnvironment } from "../../src/environment.js"
+import {
+  isSystemHostMetaEntry,
+  isSystemRebootMetaEntry,
+  mergeEnvironmentFromMeta,
+} from "../../src/meta.js"
 import { system } from "../../src/modules/system.js"
 import { createMockSsh } from "../helpers/mockSsh.js"
 
@@ -34,14 +40,14 @@ describe("system.reboot — apply", () => {
     const result = await mod.apply(ssh, emptyEnv)
     expect(result.status).toBe("changed")
     expect(ssh.calls).toContain("shutdown -r now")
-    expect(result.meta?.["system.reboot"]).toBe("true")
+    expect(result.meta?.some(isSystemRebootMetaEntry)).toBe(true)
   })
 
   it("does not set system.host in meta when no resolveHost option is given", async () => {
     const ssh = createMockSsh()
     const mod = system.reboot()
     const result = await mod.apply(ssh, emptyEnv)
-    expect(result.meta).not.toHaveProperty("system.host")
+    expect(result.meta?.some(isSystemHostMetaEntry)).toBe(false)
   })
 
   it("calls resolveHost and sets system.host in meta when resolveHost is provided", async () => {
@@ -50,7 +56,7 @@ describe("system.reboot — apply", () => {
     const mod = system.reboot({ resolveHost })
     const result = await mod.apply(ssh, emptyEnv)
     expect(resolveHost).toHaveBeenCalledOnce()
-    expect(result.meta?.["system.host"]).toBe("10.0.0.42")
+    expect(result.meta?.find(isSystemHostMetaEntry)?.host).toBe("10.0.0.42")
   })
 
   it("catches connection-drop errors from exec and still returns changed", async () => {
@@ -59,7 +65,7 @@ describe("system.reboot — apply", () => {
     const mod = system.reboot()
     const result = await mod.apply(ssh, emptyEnv)
     expect(result.status).toBe("changed")
-    expect(result.meta?.["system.reboot"]).toBe("true")
+    expect(result.meta?.some(isSystemRebootMetaEntry)).toBe(true)
   })
 
   it("falls back to current host when resolveHost throws", async () => {
@@ -68,8 +74,8 @@ describe("system.reboot — apply", () => {
     const mod = system.reboot({ resolveHost })
     const result = await mod.apply(ssh, emptyEnv)
     expect(result.status).toBe("changed")
-    expect(result.meta?.["system.reboot"]).toBe("true")
-    expect(result.meta).not.toHaveProperty("system.host")
+    expect(result.meta?.some(isSystemRebootMetaEntry)).toBe(true)
+    expect(result.meta?.some(isSystemHostMetaEntry)).toBe(false)
   })
 })
 
@@ -103,7 +109,8 @@ describe("system.uptime — apply", () => {
     const mod = system.uptime()
     const result = await mod.apply(ssh, emptyEnv)
     expect(result.status).toBe("ok")
-    expect(result.meta?.["system.uptime"]).toBe("12345")
+    const metaEnvironment = await mergeEnvironmentFromMeta({}, result.meta)
+    await expect(resolveEnvironment(metaEnvironment, "system.uptime")).resolves.toBe("12345")
   })
 })
 
@@ -166,8 +173,7 @@ describe("system.facts — apply", () => {
     const mod = system.facts()
     const result = await mod.apply(ssh, emptyEnv)
     expect(result.status).toBe("ok")
-    expect(result.meta).toBeDefined()
-    const meta = result.meta!
+    const meta = await mergeEnvironmentFromMeta({}, result.meta)
     expect(meta).toHaveProperty("system.os")
     expect(meta).toHaveProperty("system.os.version")
     expect(meta).toHaveProperty("system.os.codename")
@@ -195,36 +201,43 @@ describe("system.facts — apply", () => {
     const ssh = createMockSsh(FACTS_RESPONSES)
     const mod = system.facts()
     const result = await mod.apply(ssh, emptyEnv)
-    expect(result.meta?.["system.os"]).toBe("ubuntu")
-    expect(result.meta?.["system.os.version"]).toBe("22.04")
-    expect(result.meta?.["system.os.codename"]).toBe("jammy")
+    const meta = await mergeEnvironmentFromMeta({}, result.meta)
+    await expect(resolveEnvironment(meta, "system.os")).resolves.toBe("ubuntu")
+    await expect(resolveEnvironment(meta, "system.os.version")).resolves.toBe("22.04")
+    await expect(resolveEnvironment(meta, "system.os.codename")).resolves.toBe("jammy")
   })
 
   it("correctly extracts RAM from free -m output", async () => {
     const ssh = createMockSsh(FACTS_RESPONSES)
     const mod = system.facts()
     const result = await mod.apply(ssh, emptyEnv)
-    expect(result.meta?.["system.ram.total"]).toBe("7981")
+    const metaEnvironment = await mergeEnvironmentFromMeta({}, result.meta)
+    await expect(resolveEnvironment(metaEnvironment, "system.ram.total")).resolves.toBe("7981")
   })
 
   it("correctly extracts public IP from ip route output", async () => {
     const ssh = createMockSsh(FACTS_RESPONSES)
     const mod = system.facts()
     const result = await mod.apply(ssh, emptyEnv)
-    expect(result.meta?.["system.ip.public"]).toBe("93.184.216.34")
+    const metaEnvironment = await mergeEnvironmentFromMeta({}, result.meta)
+    await expect(resolveEnvironment(metaEnvironment, "system.ip.public")).resolves.toBe(
+      "93.184.216.34"
+    )
   })
 
   it("correctly extracts private IP from ip addr output (RFC-1918)", async () => {
     const ssh = createMockSsh(FACTS_RESPONSES)
     const mod = system.facts()
     const result = await mod.apply(ssh, emptyEnv)
-    expect(result.meta?.["system.ip.private"]).toBe("10.0.1.5")
+    const metaEnvironment = await mergeEnvironmentFromMeta({}, result.meta)
+    await expect(resolveEnvironment(metaEnvironment, "system.ip.private")).resolves.toBe("10.0.1.5")
   })
 
   it("correctly extracts disk root from df output", async () => {
     const ssh = createMockSsh(FACTS_RESPONSES)
     const mod = system.facts()
     const result = await mod.apply(ssh, emptyEnv)
-    expect(result.meta?.["system.disk.root"]).toBe("49000")
+    const metaEnvironment = await mergeEnvironmentFromMeta({}, result.meta)
+    await expect(resolveEnvironment(metaEnvironment, "system.disk.root")).resolves.toBe("49000")
   })
 })

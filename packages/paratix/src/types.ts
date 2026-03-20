@@ -3,13 +3,49 @@
  * Functions may be async, allowing secrets to be fetched on demand.
  */
 export type EnvironmentValue =
-  | (() => number | string)
-  | (() => Promise<number | string>)
+  | (() => boolean | number | string)
+  | (() => Promise<boolean | number | string>)
+  | boolean
   | number
   | string
 
 /** A key-value map of environment values available to modules and templates. */
 export type Environment = Record<string, EnvironmentValue>
+
+/** Environment values that can be emitted through the typed meta system. */
+export type MetaEnvironmentValue = EnvironmentValue
+
+/** Generic meta entry that propagates a value into the downstream environment. */
+export type EnvironmentMetaEntry = {
+  kind: "env"
+  name: string
+  resolve: () => Promise<boolean | number | string>
+  valueType: "boolean" | "number" | "string"
+}
+
+/** Runner control-plane meta entry emitted when sshd changed its listen port. */
+export type SshdPortMetaEntry = {
+  kind: "sshd.port"
+  port: number
+}
+
+/** Runner control-plane meta entry emitted when the target host changed. */
+export type SystemHostMetaEntry = {
+  host: string
+  kind: "system.host"
+}
+
+/** Runner control-plane meta entry emitted when a reboot should trigger reconnect logic. */
+export type SystemRebootMetaEntry = {
+  kind: "system.reboot"
+}
+
+/** Any meta entry that modules may emit. */
+export type ModuleMetaEntry =
+  | EnvironmentMetaEntry
+  | SshdPortMetaEntry
+  | SystemHostMetaEntry
+  | SystemRebootMetaEntry
 
 /** Check result indicating the module's desired state is not yet present. */
 export const NEEDS_APPLY = "needs-apply" as const
@@ -18,8 +54,8 @@ export const NEEDS_APPLY = "needs-apply" as const
 export type ModuleResult = {
   /** Optional error details consumed by the runner for centralized CLI output. */
   error?: Error
-  /** Optional key-value pairs to merge into the env for subsequent modules. */
-  meta?: Environment
+  /** Optional typed meta entries for env propagation and runner control-plane updates. */
+  meta?: ModuleMetaEntry[]
   /** Execution status of the module. */
   status: "changed" | "failed" | "ok" | "skipped"
 }
