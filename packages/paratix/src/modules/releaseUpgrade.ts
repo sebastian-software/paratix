@@ -1,4 +1,5 @@
 import { meta } from "../meta.js"
+import { failed, failedCommand } from "../moduleFailure.js"
 import {
   guardedWriteFile,
   type Module,
@@ -165,6 +166,18 @@ async function buildRebootMeta(options: ReleaseUpgradeOptions): Promise<ModuleMe
   return entries
 }
 
+async function runReleaseUpgradeCommand(
+  ssh: SshConnection,
+  command: string,
+  failureMessage: string
+): Promise<ModuleResult | null> {
+  const result = await ssh.exec(command, {
+    ignoreExitCode: true,
+    silent: true,
+  })
+  return result.code === 0 ? null : failedCommand(failureMessage, result)
+}
+
 /**
  * Run the Ubuntu release upgrade via `do-release-upgrade`.
  *
@@ -185,11 +198,12 @@ async function applyUbuntu(
   ssh: SshConnection,
   options: ReleaseUpgradeOptions
 ): Promise<ModuleResult> {
-  const updateResult = await ssh.exec(`${NONINTERACTIVE} apt-get update`, {
-    ignoreExitCode: true,
-    silent: true,
-  })
-  if (updateResult.code !== 0) return { status: "failed" }
+  const updateFailure = await runReleaseUpgradeCommand(
+    ssh,
+    `${NONINTERACTIVE} apt-get update`,
+    "[releaseUpgrade.upgrade] apt-get update failed"
+  )
+  if (updateFailure != null) return updateFailure
 
   if (options.dryRun === true) {
     await ssh.exec("do-release-upgrade -c", {
@@ -199,11 +213,12 @@ async function applyUbuntu(
     return { status: "ok" }
   }
 
-  const upgradeResult = await ssh.exec("do-release-upgrade -f DistUpgradeViewNonInteractive", {
-    ignoreExitCode: true,
-    silent: true,
-  })
-  if (upgradeResult.code !== 0) return { status: "failed" }
+  const upgradeFailure = await runReleaseUpgradeCommand(
+    ssh,
+    "do-release-upgrade -f DistUpgradeViewNonInteractive",
+    "[releaseUpgrade.upgrade] do-release-upgrade failed"
+  )
+  if (upgradeFailure != null) return upgradeFailure
 
   const entries = await buildRebootMeta(options)
   return { meta: entries, status: "changed" }
@@ -242,29 +257,33 @@ async function applyDebian(
 
   await replaceCodenameInSourcesList(ssh, currentCodename, targetCodename)
 
-  const updateResult = await ssh.exec(`${NONINTERACTIVE} apt-get update`, {
-    ignoreExitCode: true,
-    silent: true,
-  })
-  if (updateResult.code !== 0) return { status: "failed" }
+  const updateFailure = await runReleaseUpgradeCommand(
+    ssh,
+    `${NONINTERACTIVE} apt-get update`,
+    "[releaseUpgrade.upgrade] apt-get update failed"
+  )
+  if (updateFailure != null) return updateFailure
 
-  const configureResult = await ssh.exec(`${NONINTERACTIVE} dpkg --configure -a`, {
-    ignoreExitCode: true,
-    silent: true,
-  })
-  if (configureResult.code !== 0) return { status: "failed" }
+  const configureFailure = await runReleaseUpgradeCommand(
+    ssh,
+    `${NONINTERACTIVE} dpkg --configure -a`,
+    "[releaseUpgrade.upgrade] dpkg --configure -a failed"
+  )
+  if (configureFailure != null) return configureFailure
 
-  const upgradeResult = await ssh.exec(`${NONINTERACTIVE} apt-get full-upgrade -y`, {
-    ignoreExitCode: true,
-    silent: true,
-  })
-  if (upgradeResult.code !== 0) return { status: "failed" }
+  const upgradeFailure = await runReleaseUpgradeCommand(
+    ssh,
+    `${NONINTERACTIVE} apt-get full-upgrade -y`,
+    "[releaseUpgrade.upgrade] apt-get full-upgrade failed"
+  )
+  if (upgradeFailure != null) return upgradeFailure
 
-  const autoremoveResult = await ssh.exec(`${NONINTERACTIVE} apt-get autoremove -y`, {
-    ignoreExitCode: true,
-    silent: true,
-  })
-  if (autoremoveResult.code !== 0) return { status: "failed" }
+  const autoremoveFailure = await runReleaseUpgradeCommand(
+    ssh,
+    `${NONINTERACTIVE} apt-get autoremove -y`,
+    "[releaseUpgrade.upgrade] apt-get autoremove failed"
+  )
+  if (autoremoveFailure != null) return autoremoveFailure
 
   const entries = await buildRebootMeta(options)
   return { meta: entries, status: "changed" }
@@ -318,10 +337,10 @@ export const releaseUpgrade = {
   upgrade(options: ReleaseUpgradeOptions = {}): Module {
     return {
       async apply(ssh: null | SshConnection): Promise<ModuleResult> {
-        if (!ssh) return { status: "failed" }
+        if (!ssh) return failed("[releaseUpgrade.upgrade] SSH connection is required")
 
         const distro = await detectDistro(ssh)
-        if (distro == null) return { status: "failed" }
+        if (distro == null) return failed("[releaseUpgrade.upgrade] Unsupported distribution")
 
         if (distro === "ubuntu") return applyUbuntu(ssh, options)
         return applyDebian(ssh, options)

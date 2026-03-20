@@ -1,5 +1,6 @@
 import { readFile } from "node:fs/promises"
 
+import { failed } from "../moduleFailure.js"
 import { shellQuote, validateMode } from "../ssh.js"
 import { renderTemplate } from "../template.js"
 import {
@@ -57,7 +58,7 @@ export const file = {
   absent(remotePath: string): Module {
     return {
       async apply(ssh: null | SshConnection): Promise<ModuleResult> {
-        if (!ssh) return { status: "failed" }
+        if (!ssh) return failed(`[file.absent: ${remotePath}] SSH connection is required`)
         await ssh.exec(`rm -rf ${shellQuote(remotePath)}`, { silent: true })
         return { status: "changed" }
       },
@@ -87,7 +88,7 @@ export const file = {
   copy(remotePath: string, localPath: string, options?: { mode?: string; owner?: string }): Module {
     return {
       async apply(ssh: null | SshConnection): Promise<ModuleResult> {
-        if (!ssh) return { status: "failed" }
+        if (!ssh) return failed(`[file.copy: ${remotePath}] SSH connection is required`)
         await ssh.uploadFile(localPath, remotePath)
 
         if (options?.mode != null) {
@@ -132,7 +133,7 @@ export const file = {
   directory(remotePath: string, options?: { mode?: string; owner?: string }): Module {
     return {
       async apply(ssh: null | SshConnection): Promise<ModuleResult> {
-        if (!ssh) return { status: "failed" }
+        if (!ssh) return failed(`[file.directory: ${remotePath}] SSH connection is required`)
         await ssh.exec(`mkdir -p ${shellQuote(remotePath)}`, { silent: true })
 
         if (options?.mode != null) {
@@ -175,7 +176,7 @@ export const file = {
   line(remotePath: string, line: string, options?: { match?: string }): Module {
     return {
       async apply(ssh: null | SshConnection): Promise<ModuleResult> {
-        if (!ssh) return { status: "failed" }
+        if (!ssh) return failed(`[file.line: ${remotePath}] SSH connection is required`)
 
         if (options?.match == null) {
           // Append line using printf to avoid shell interpretation
@@ -244,7 +245,7 @@ export const file = {
 
     return {
       async apply(ssh: null | SshConnection, environment: Environment): Promise<ModuleResult> {
-        if (!ssh) return { status: "failed" }
+        if (!ssh) return failed(`[file.template: ${remotePath}] SSH connection is required`)
 
         const templateContent = await getTemplateContent()
         const rendered = await renderTemplate(templateContent, environment, {

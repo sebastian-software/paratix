@@ -1,3 +1,4 @@
+import { failed, failedCommand } from "../moduleFailure.js"
 import { shellQuote } from "../ssh.js"
 import { type Module, type ModuleResult, NEEDS_APPLY, type SshConnection } from "../types.js"
 import { hasFlag, setVersionedFlag } from "./moduleHelpers.js"
@@ -34,7 +35,7 @@ export const script = {
 
     return {
       async apply(ssh: null | SshConnection): Promise<ModuleResult> {
-        if (!ssh) return { status: "failed" }
+        if (!ssh) return failed(`[script.once: ${name}] SSH connection is required`)
 
         await ssh.uploadFile(localPath, remotePath)
 
@@ -47,7 +48,9 @@ export const script = {
               : shellQuote(remotePath)
           const result = await ssh.exec(cmd, EXEC_OPTS)
 
-          if (result.code !== 0) return { status: "failed" }
+          if (result.code !== 0) {
+            return failedCommand(`[script.once: ${name}] script execution failed`, result)
+          }
 
           await setVersionedFlag(ssh, flagName, flagPrefix)
 

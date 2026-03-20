@@ -1,4 +1,5 @@
 import { sshdPortMeta } from "../meta.js"
+import { failed, failedCommand } from "../moduleFailure.js"
 import {
   guardedWriteFile,
   type Module,
@@ -39,7 +40,9 @@ async function reloadSshd(ssh: SshConnection): Promise<ModuleResult> {
     ignoreExitCode: true,
     silent: true,
   })
-  return result.code === 0 ? { status: "changed" } : { status: "failed" }
+  return result.code === 0
+    ? { status: "changed" }
+    : failedCommand("[sshd.config] systemctl reload sshd failed", result)
 }
 
 function applySshdSettingToContent(content: string, key: string, value: string): string {
@@ -83,7 +86,7 @@ export const sshd = {
     const settingNames = Object.keys(settings).join(", ")
     return {
       async apply(ssh: null | SshConnection): Promise<ModuleResult> {
-        if (!ssh) return { status: "failed" }
+        if (!ssh) return failed(`[sshd.config: ${settingNames}] SSH connection is required`)
 
         const originalConfig = await ssh.readFile(SSHD_CONFIG_PATH)
 
@@ -138,7 +141,7 @@ export const sshd = {
   port(targetPort: number): Module {
     return {
       async apply(ssh: null | SshConnection): Promise<ModuleResult> {
-        if (!ssh) return { status: "failed" }
+        if (!ssh) return failed(`[sshd.port: ${targetPort}] SSH connection is required`)
 
         const originalConfig = await ssh.readFile(SSHD_CONFIG_PATH)
         const newContent = applySshdSettingToContent(originalConfig, "Port", String(targetPort))

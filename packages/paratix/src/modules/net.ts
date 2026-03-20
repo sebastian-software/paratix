@@ -1,4 +1,5 @@
 /* eslint-disable max-lines */
+import { failed } from "../moduleFailure.js"
 import { shellQuote } from "../ssh.js"
 import {
   guardedWriteFile,
@@ -210,7 +211,9 @@ export const net = {
 
     return {
       async apply(conn: null | SshConnection): Promise<ModuleResult> {
-        if (!conn) return { status: "failed" }
+        if (!conn) {
+          return failed(`[net.hosts: ${ip} ${hostnames.join(" ")}] SSH connection is required`)
+        }
 
         const content = await conn.readFile(HOSTS_FILE)
         const lines = content.split("\n")
@@ -265,7 +268,7 @@ export const net = {
 
     return {
       async apply(conn: null | SshConnection): Promise<ModuleResult> {
-        if (!conn) return { status: "failed" }
+        if (!conn) return failed(`[net.interface: ${name}] SSH connection is required`)
 
         const useNetplan = await conn.test("test -d '/etc/netplan'")
 
@@ -326,10 +329,12 @@ export const net = {
 
     return {
       async apply(conn: null | SshConnection): Promise<ModuleResult> {
-        if (!conn) return { status: "failed" }
+        if (!conn) return failed(`[net.request: ${method} ${url}] SSH connection is required`)
 
         const ok = await checkHttpCondition(conn, parameters)
-        return ok ? { status: "ok" } : { status: "failed" }
+        return ok
+          ? { status: "ok" }
+          : failed(`[net.request: ${method} ${url}] HTTP request did not match expectations`)
       },
       async check(conn: null | SshConnection): Promise<"needs-apply" | "ok"> {
         if (!conn) return NEEDS_APPLY
@@ -354,7 +359,7 @@ export const net = {
 
     return {
       async apply(conn: null | SshConnection): Promise<ModuleResult> {
-        if (!conn) return { status: "failed" }
+        if (!conn) return failed("[net.resolv] SSH connection is required")
 
         await conn.exec("rm -f /etc/resolv.conf", EXEC_OPTS)
         await conn.writeFile("/etc/resolv.conf", expectedContent)
@@ -393,7 +398,11 @@ export const net = {
 
     return {
       async apply(conn: null | SshConnection): Promise<ModuleResult> {
-        if (!conn) return { status: "failed" }
+        if (!conn) {
+          return failed(
+            `[net.route: ${state} ${destination} via ${gateway}] SSH connection is required`
+          )
+        }
 
         if (state === "present") {
           const devicePart =
@@ -443,7 +452,7 @@ export const net = {
 
     return {
       async apply(conn: null | SshConnection): Promise<ModuleResult> {
-        if (!conn) return { status: "failed" }
+        if (!conn) return failed(`[${buildWaitForName(options)}] SSH connection is required`)
 
         const start = Date.now()
         while (Date.now() - start < timeout) {
@@ -454,7 +463,7 @@ export const net = {
           await delay(interval)
         }
 
-        return { status: "failed" }
+        return failed(`[${buildWaitForName(options)}] condition was not met within ${timeout}ms`)
       },
       async check(conn: null | SshConnection): Promise<"needs-apply" | "ok"> {
         if (!conn) return NEEDS_APPLY

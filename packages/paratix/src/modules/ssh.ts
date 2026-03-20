@@ -1,4 +1,5 @@
 import { computeFingerprint } from "../knownHosts.js"
+import { failed } from "../moduleFailure.js"
 import { shellQuote } from "../ssh.js"
 import { type Module, type ModuleResult, NEEDS_APPLY, type SshConnection } from "../types.js"
 
@@ -205,7 +206,9 @@ export const ssh = {
 
     return {
       async apply(conn: null | SshConnection): Promise<ModuleResult> {
-        if (!conn) return { status: "failed" }
+        if (!conn) {
+          return failed(`[ssh.authorizedKeys: ${user} (${state})] SSH connection is required`)
+        }
 
         const home = await resolveHome(conn, user)
         const directory = shellQuote(`${home}/.ssh`)
@@ -261,7 +264,7 @@ export const ssh = {
 
     return {
       async apply(conn: null | SshConnection): Promise<ModuleResult> {
-        if (!conn) return { status: "failed" }
+        if (!conn) return failed(`[ssh.knownHosts: ${host} (${state})] SSH connection is required`)
 
         if (state === "present") {
           const scannedOutput = await conn.output(`ssh-keyscan -H ${shellQuote(host)} 2>/dev/null`)

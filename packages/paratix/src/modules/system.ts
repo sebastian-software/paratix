@@ -177,10 +177,10 @@ export const system = {
   facts(): Module {
     return {
       async apply(ssh: null | SshConnection): Promise<ModuleResult> {
-        if (!ssh) return { status: "failed" }
+        if (!ssh) return failed("[system.facts] SSH connection is required")
 
         const outputs = await runFactCommands(ssh)
-        if (outputs === null) return { status: "failed" }
+        if (outputs === null) return failed("[system.facts] failed to collect system facts")
 
         return { meta: environmentToMetaEntries(parseFacts(outputs)), status: "ok" }
       },
@@ -250,7 +250,7 @@ export const system = {
   uptime(): Module {
     return {
       async apply(ssh: null | SshConnection): Promise<ModuleResult> {
-        if (!ssh) return { status: "failed" }
+        if (!ssh) return failed("[system.uptime] SSH connection is required")
 
         const seconds = await ssh.output("awk '{print int($1)}' /proc/uptime")
 

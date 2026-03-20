@@ -1,3 +1,4 @@
+import { failed, failedCommand } from "../moduleFailure.js"
 import { shellQuote } from "../ssh.js"
 import { type Module, type ModuleResult, NEEDS_APPLY, type SshConnection } from "../types.js"
 
@@ -55,12 +56,14 @@ export const sysctl = {
 
     return {
       async apply(conn: null | SshConnection): Promise<ModuleResult> {
-        if (!conn) return { status: "failed" }
+        if (!conn) return failed(`[sysctl.set: ${key}] SSH connection is required`)
 
         if (state === "present") {
           const assignment = `${key}=${value}`
           const result = await conn.exec(`sysctl -w ${shellQuote(assignment)}`, EXEC_OPTS)
-          if (result.code !== 0) return { status: "failed" }
+          if (result.code !== 0) {
+            return failedCommand(`[sysctl.set: ${key}] sysctl -w failed`, result)
+          }
           await conn.writeFile(configPath, expectedContent)
         } else {
           await conn.exec(`rm -f ${shellQuote(configPath)}`, EXEC_OPTS)

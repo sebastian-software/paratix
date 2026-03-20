@@ -1,3 +1,4 @@
+import { failed } from "../moduleFailure.js"
 import { shellQuote } from "../ssh.js"
 import { type Module, type ModuleResult, NEEDS_APPLY, type SshConnection } from "../types.js"
 
@@ -92,7 +93,7 @@ export const cron = {
 
     return {
       async apply(ssh: null | SshConnection): Promise<ModuleResult> {
-        if (!ssh) return { status: "failed" }
+        if (!ssh) return failed(`[cron.job: ${name} (${user})] SSH connection is required`)
 
         const lines = await readCrontab(ssh, user)
         const markerIndex = lines.indexOf(marker)

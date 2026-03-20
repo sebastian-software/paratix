@@ -1,3 +1,4 @@
+import { failed, failedCommand } from "../moduleFailure.js"
 import { shellQuote } from "../ssh.js"
 import {
   guardedWriteFile,
@@ -95,6 +96,30 @@ function removeFstabEntry(fstabContent: string, path: string): string {
   return `${result.join("\n")}\n`
 }
 
+async function removePersistedMountIfPresent(ssh: SshConnection, path: string): Promise<boolean> {
+  const fstabContent = await ssh.readFile(FSTAB_PATH)
+  const entry = findFstabEntry(fstabContent, path)
+  if (entry === null) return false
+  const newContent = removeFstabEntry(fstabContent, path)
+  await guardedWriteFile(ssh, {
+    newContent,
+    originalContent: fstabContent,
+    remotePath: FSTAB_PATH,
+  })
+  return true
+}
+
+async function unmountIfNeeded(ssh: SshConnection, path: string): Promise<boolean | ModuleResult> {
+  const isMounted = await ssh.test(`findmnt --noheadings ${shellQuote(path)}`)
+  if (!isMounted) return false
+
+  const umountResult = await ssh.exec(`umount ${shellQuote(path)}`, EXEC_OPTS)
+  if (umountResult.code !== 0) {
+    return failedCommand(`[mount.absent: ${path}] umount failed`, umountResult)
+  }
+  return true
+}
+
 /**
  * Ensure the fstab entry for a mount matches the desired line.
  * Reads, compares, and writes back only when a change is needed.
@@ -143,29 +168,20 @@ export const mount = {
 
     return {
       async apply(ssh: null | SshConnection): Promise<ModuleResult> {
-        if (!ssh) return { status: "failed" }
+        if (!ssh) return failed(`[mount.absent: ${path}] SSH connection is required`)
 
         let changed = false
 
-        const isMounted = await ssh.test(`findmnt --noheadings ${shellQuote(path)}`)
-        if (isMounted) {
-          const umountResult = await ssh.exec(`umount ${shellQuote(path)}`, EXEC_OPTS)
-          if (umountResult.code !== 0) return { status: "failed" }
+        const unmountResult = await unmountIfNeeded(ssh, path)
+        if (typeof unmountResult !== "boolean") {
+          return unmountResult
+        }
+        if (unmountResult) {
           changed = true
         }
 
-        if (persist) {
-          const fstabContent = await ssh.readFile(FSTAB_PATH)
-          const entry = findFstabEntry(fstabContent, path)
-          if (entry !== null) {
-            const newContent = removeFstabEntry(fstabContent, path)
-            await guardedWriteFile(ssh, {
-              newContent,
-              originalContent: fstabContent,
-              remotePath: FSTAB_PATH,
-            })
-            changed = true
-          }
+        if (persist && (await removePersistedMountIfPresent(ssh, path))) {
+          changed = true
         }
 
         return { status: changed ? "changed" : "ok" }
@@ -217,7 +233,7 @@ export const mount = {
 
     return {
       async apply(ssh: null | SshConnection): Promise<ModuleResult> {
-        if (!ssh) return { status: "failed" }
+        if (!ssh) return failed(`[mount.present: ${path}] SSH connection is required`)
 
         let changed = false
 
@@ -234,7 +250,9 @@ export const mount = {
             `mount -t ${shellQuote(fstype)} -o ${shellQuote(opts)} ${shellQuote(src)} ${shellQuote(path)}`,
             EXEC_OPTS
           )
-          if (mountResult.code !== 0) return { status: "failed" }
+          if (mountResult.code !== 0) {
+            return failedCommand(`[mount.present: ${path}] mount failed`, mountResult)
+          }
           changed = true
         }
 

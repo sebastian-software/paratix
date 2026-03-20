@@ -41,10 +41,15 @@ describe("hostname.set", () => {
 
   it("apply returns failed when hostnamectl fails", async () => {
     const ssh = createMockSsh({
-      "hostnamectl set-hostname 'my-server'": { code: 1 },
+      "hostnamectl set-hostname 'my-server'": { code: 1, stderr: "permission denied" },
     })
     const mod = hostname.set("my-server")
     const result = await mod.apply(ssh, emptyEnv)
     expect(result.status).toBe("failed")
+    expect(result.error).toBeInstanceOf(Error)
+    expect(result.error?.message).toContain(
+      "[hostname.set: my-server] hostnamectl set-hostname failed"
+    )
+    expect(result.error?.message).toContain("permission denied")
   })
 })

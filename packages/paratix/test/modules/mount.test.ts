@@ -134,6 +134,7 @@ describe("mount.present — apply", () => {
     // eslint-disable-next-line prefer-spread
     const result = await mod.apply(null, emptyEnv)
     expect(result.status).toBe("failed")
+    expect(result.error).toBeInstanceOf(Error)
   })
 
   it("creates mountpoint with mkdir -p", async () => {
@@ -235,7 +236,7 @@ describe("mount.present — apply", () => {
     const mockSsh = createMockSsh({
       "cat '/etc/fstab'": { stdout: `${fstabLine}\n` },
       [findmntTestCmd]: { code: 1 },
-      [mountCmd]: { code: 1 },
+      [mountCmd]: { code: 1, stderr: "mount failed" },
     })
     const mod = mount.present({
       fstype: mountFstype,
@@ -245,6 +246,8 @@ describe("mount.present — apply", () => {
     })
     const result = await mod.apply(mockSsh, emptyEnv)
     expect(result.status).toBe("failed")
+    expect(result.error).toBeInstanceOf(Error)
+    expect(result.error?.message).toContain("[mount.present: /mnt/data] mount failed")
   })
 
   it("updates existing fstab entry when options differ", async () => {
@@ -340,6 +343,7 @@ describe("mount.absent — apply", () => {
     // eslint-disable-next-line prefer-spread
     const result = await mod.apply(null, emptyEnv)
     expect(result.status).toBe("failed")
+    expect(result.error).toBeInstanceOf(Error)
   })
 
   it("runs umount when mounted", async () => {
@@ -355,11 +359,13 @@ describe("mount.absent — apply", () => {
   it("returns failed when umount fails", async () => {
     const mockSsh = createMockSsh({
       [findmntTestCmd]: { code: 0 },
-      [umountCmd]: { code: 1 },
+      [umountCmd]: { code: 1, stderr: "umount failed" },
     })
     const mod = mount.absent({ path: mountPath })
     const result = await mod.apply(mockSsh, emptyEnv)
     expect(result.status).toBe("failed")
+    expect(result.error).toBeInstanceOf(Error)
+    expect(result.error?.message).toContain("[mount.absent: /mnt/data] umount failed")
   })
 
   it("removes fstab entry when persist is true", async () => {

@@ -18,6 +18,7 @@ function makeMockSshClass(
   overrides?: {
     addPort?: ReturnType<typeof vi.fn>
     disconnect?: ReturnType<typeof vi.fn>
+    exec?: ReturnType<typeof vi.fn>
     reconnect?: ReturnType<typeof vi.fn>
     updateHost?: ReturnType<typeof vi.fn>
   }
@@ -27,7 +28,7 @@ function makeMockSshClass(
     public connect = vi.fn().mockResolvedValue(null)
     public disconnect = overrides?.disconnect ?? vi.fn()
     public downloadFile = vi.fn().mockResolvedValue(null)
-    public exec = vi.fn().mockResolvedValue({ code: 0, stderr: "", stdout: "" })
+    public exec = overrides?.exec ?? vi.fn().mockResolvedValue({ code: 0, stderr: "", stdout: "" })
     public exists = vi.fn().mockResolvedValue(true)
     public getConnectionInfo = vi
       .fn()
@@ -1149,6 +1150,75 @@ describe("runPlaybook failed result diagnostics", () => {
     await runPlaybook(definition)
 
     expect(consoleLogs.join("\n")).toContain("module failed summary")
+    expect(process.exitCode).toBe(1)
+  })
+
+  it("prints centralized diagnostics for a top-level module that now returns ModuleResult.error", async () => {
+    const capturedConfigs: unknown[] = []
+    const consoleLogs: string[] = []
+
+    vi.doMock("../src/ssh.js", () => ({
+      shellQuote: (s: string) => `'${s}'`,
+      SshConnectionImpl: makeMockSshClass(capturedConfigs, {
+        exec: vi.fn().mockResolvedValue({ code: 1, stderr: "permission denied", stdout: "" }),
+      }),
+    }))
+    vi.spyOn(console, "log").mockImplementation((...args) => {
+      consoleLogs.push(args.join(" "))
+    })
+
+    const [{ runPlaybook }, { hostname }] = await Promise.all([
+      import("../src/runner.js"),
+      import("../src/modules/hostname.js"),
+    ])
+
+    const definition: ServerDefinition = {
+      host: "1.2.3.4",
+      name: "test-server",
+      run: [hostname.set("new-hostname")],
+      ssh: { ports: [22], privateKey: "~/.ssh/id", user: "root" },
+    }
+
+    await runPlaybook(definition)
+
+    const output = consoleLogs.join("\n")
+    expect(output).toContain("[hostname.set: new-hostname] hostnamectl set-hostname failed")
+    expect(output).toContain("permission denied")
+    expect(process.exitCode).toBe(1)
+  })
+
+  it("prints centralized diagnostics for a failed recipe child module with ModuleResult.error", async () => {
+    const capturedConfigs: unknown[] = []
+    const consoleLogs: string[] = []
+
+    vi.doMock("../src/ssh.js", () => ({
+      shellQuote: (s: string) => `'${s}'`,
+      SshConnectionImpl: makeMockSshClass(capturedConfigs, {
+        exec: vi.fn().mockResolvedValue({ code: 1, stderr: "permission denied", stdout: "" }),
+      }),
+    }))
+    vi.spyOn(console, "log").mockImplementation((...args) => {
+      consoleLogs.push(args.join(" "))
+    })
+
+    const [{ runPlaybook }, { hostname }, { recipe }] = await Promise.all([
+      import("../src/runner.js"),
+      import("../src/modules/hostname.js"),
+      import("../src/recipe.js"),
+    ])
+
+    const definition: ServerDefinition = {
+      host: "1.2.3.4",
+      name: "test-server",
+      run: [recipe("set-hostname", [hostname.set("recipe-hostname")])],
+      ssh: { ports: [22], privateKey: "~/.ssh/id", user: "root" },
+    }
+
+    await runPlaybook(definition)
+
+    const output = consoleLogs.join("\n")
+    expect(output).toContain("[hostname.set: recipe-hostname] hostnamectl set-hostname failed")
+    expect(output).toContain("permission denied")
     expect(process.exitCode).toBe(1)
   })
 

@@ -1,3 +1,4 @@
+import { failed } from "../moduleFailure.js"
 import { shellQuote } from "../ssh.js"
 import { type Module, type ModuleResult, NEEDS_APPLY, type SshConnection } from "../types.js"
 
@@ -159,14 +160,16 @@ export const git = {
 
     return {
       async apply(conn: null | SshConnection): Promise<ModuleResult> {
-        if (!conn) return { status: "failed" }
+        if (!conn) return failed(`[git.clone: ${destination}] SSH connection is required`)
 
         const directoryExists = await conn.test(`test -d ${shellQuote(gitDirectory)}`)
         const success = await (directoryExists
           ? updateRepo(conn, parameters)
           : cloneRepo(conn, parameters))
 
-        return { status: success ? "changed" : "failed" }
+        return success
+          ? { status: "changed" }
+          : failed(`[git.clone: ${destination}] git clone or update failed`)
       },
       async check(conn: null | SshConnection): Promise<"needs-apply" | "ok"> {
         if (!conn) return NEEDS_APPLY

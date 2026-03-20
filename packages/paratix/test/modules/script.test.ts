@@ -126,17 +126,21 @@ describe("script.once — apply", () => {
     // eslint-disable-next-line prefer-spread
     const result = await mod.apply(null, emptyEnv)
     expect(result.status).toBe("failed")
+    expect(result.error).toBeInstanceOf(Error)
   })
 
   it("returns failed when script exits non-zero", async () => {
     const mockSsh = createScriptMockSsh({
       responses: {
-        "'/tmp/paratix-script-setup'": { code: 1 },
+        "'/tmp/paratix-script-setup'": { code: 1, stderr: "boom" },
       },
     })
     const mod = script.once("setup", "/local/setup.sh")
     const result = await mod.apply(mockSsh, emptyEnv)
     expect(result.status).toBe("failed")
+    expect(result.error).toBeInstanceOf(Error)
+    expect(result.error?.message).toContain("[script.once: setup] script execution failed")
+    expect(result.error?.message).toContain("boom")
   })
 
   it("still cleans up temp file when script exits non-zero", async () => {

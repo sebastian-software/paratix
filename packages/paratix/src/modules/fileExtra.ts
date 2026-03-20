@@ -1,6 +1,7 @@
 import { readFile } from "node:fs/promises"
 
 import { environmentToMetaEntries } from "../meta.js"
+import { failed } from "../moduleFailure.js"
 import { shellQuote, validateMode } from "../ssh.js"
 import {
   guardedWriteFile,
@@ -84,7 +85,7 @@ export function assemble(
 ): Module {
   return {
     async apply(ssh: null | SshConnection): Promise<ModuleResult> {
-      if (!ssh) return { status: "failed" }
+      if (!ssh) return failed(`[file.assemble: ${remotePath}] SSH connection is required`)
 
       await ssh.writeFile(remotePath, await concatFragments(fragments))
 
@@ -136,7 +137,8 @@ export function block(remotePath: string, options: BlockOptions): Module {
 
   return {
     async apply(ssh: null | SshConnection): Promise<ModuleResult> {
-      if (!ssh) return { status: "failed" }
+      if (!ssh)
+        return failed(`[file.block: ${remotePath} (${options.name})] SSH connection is required`)
 
       const fullBlock = `${beginMarker}\n${options.content}\n${endMarker}`
       const exists = await ssh.exists(remotePath)
@@ -199,7 +201,7 @@ export function properties(
 ): Module {
   return {
     async apply(ssh: null | SshConnection): Promise<ModuleResult> {
-      if (!ssh) return { status: "failed" }
+      if (!ssh) return failed(`[file.properties: ${remotePath}] SSH connection is required`)
 
       let changed = false
 
@@ -259,7 +261,7 @@ export function properties(
 export function replace(remotePath: string, pattern: string, replacement: string): Module {
   return {
     async apply(ssh: null | SshConnection): Promise<ModuleResult> {
-      if (!ssh) return { status: "failed" }
+      if (!ssh) return failed(`[file.replace: ${remotePath}] SSH connection is required`)
 
       const content = await ssh.readFile(remotePath)
       // eslint-disable-next-line security/detect-non-literal-regexp -- pattern from module config, not user input
@@ -299,7 +301,7 @@ export function replace(remotePath: string, pattern: string, replacement: string
 export function stat(remotePath: string): Module {
   return {
     async apply(ssh: null | SshConnection): Promise<ModuleResult> {
-      if (!ssh) return { status: "failed" }
+      if (!ssh) return failed(`[file.stat: ${remotePath}] SSH connection is required`)
 
       const raw = await ssh.output(`stat -c '%s %a %U %G %F %Y' ${shellQuote(remotePath)}`)
       const parts = raw.trim().split(" ")

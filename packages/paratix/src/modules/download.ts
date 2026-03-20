@@ -1,6 +1,7 @@
 import { createHash, timingSafeEqual } from "node:crypto"
 
 /* eslint-disable max-lines */
+import { failed } from "../moduleFailure.js"
 import { shellQuote, validateMode } from "../ssh.js"
 import { type Module, type ModuleResult, NEEDS_APPLY, type SshConnection } from "../types.js"
 import { hasFlag, setFlag } from "./moduleHelpers.js"
@@ -240,7 +241,7 @@ async function performDownload(
   conn: null | SshConnection,
   parameters: DownloadParameters
 ): Promise<ModuleResult> {
-  if (!conn) return { status: "failed" }
+  if (!conn) return failed(`[download] SSH connection is required for ${parameters.destination}`)
 
   await conn.exec(`mkdir -p "$(dirname ${shellQuote(parameters.destination)})"`, { silent: true })
   const temporaryDestination = await conn.output(
@@ -255,7 +256,9 @@ async function performDownload(
       silent: true,
     })
 
-    if (!(await verifyChecksum(conn, downloadParameters))) return { status: "failed" }
+    if (!(await verifyChecksum(conn, downloadParameters))) {
+      return failed(`[download] checksum verification failed for ${parameters.destination}`)
+    }
     await applyFileAttributes(conn, downloadParameters)
     await conn.exec(
       `mv ${shellQuote(downloadParameters.destination)} ${shellQuote(parameters.destination)}`,
@@ -474,7 +477,7 @@ export const download = {
 
     return {
       async apply(conn: null | SshConnection): Promise<ModuleResult> {
-        if (!conn) return { status: "failed" }
+        if (!conn) return failed(`[download.large: ${destination}] SSH connection is required`)
 
         const result = await performDownload(conn, downloadParameters)
 
