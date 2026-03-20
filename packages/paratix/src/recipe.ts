@@ -40,16 +40,21 @@ type RecipeState = {
  * dry-run mode and stats tracking are the runner's responsibility and
  * must not be duplicated here.
  *
- * @param targetModule - The module to check and conditionally apply.
- * @param ssh - Active SSH connection, or `null` for local modules.
- * @param currentEnvironment - Environment values available to the module.
+ * @param parameters - Parameters for executing one child module.
+ * @param parameters.targetModule - The module to check and conditionally apply.
+ * @param parameters.ssh - Active SSH connection, or `null` for local modules.
+ * @param parameters.currentEnvironment - Environment values available to the module.
+ * @param parameters.verbose - Whether verbose command diagnostics should be printed.
  * @returns The updated environment and status, or `null` if the module was already ok.
  */
-async function executeOneModule(
-  targetModule: Module,
-  ssh: null | SshConnection,
+async function executeOneModule(parameters: {
   currentEnvironment: Environment
-): Promise<{ env: Environment; status: string } | null> {
+  ssh: null | SshConnection
+  targetModule: Module
+  verbose?: boolean
+}): Promise<{ env: Environment; status: string } | null> {
+  const { currentEnvironment, ssh, targetModule } = parameters
+  const verbose = parameters.verbose ?? false
   const connection = targetModule.local === true ? null : ssh
   const checkResult = await targetModule.check(connection, currentEnvironment)
 
@@ -61,7 +66,7 @@ async function executeOneModule(
   const result = await targetModule.apply(connection, currentEnvironment)
   printModuleResult(targetModule.name, result.status)
   if (result.status === "failed" && result.error != null) {
-    printCommandFailure(result.error, false)
+    printCommandFailure(result.error, verbose)
   }
 
   const environment =
@@ -75,16 +80,23 @@ async function executeModules(
   parameters: {
     environment: Environment
     shutdownSignal?: () => NodeJS.Signals | null
+    verbose?: boolean
   }
 ): Promise<RecipeState> {
   const shutdownSignal = parameters.shutdownSignal ?? (() => null)
+  const verbose = parameters.verbose ?? false
   let aggregatedStatus: "changed" | "failed" | "ok" = "ok"
   let currentEnvironment = { ...parameters.environment }
 
   for (const currentModule of modules) {
     if (shutdownSignal() != null) break
     // eslint-disable-next-line no-await-in-loop
-    const step = await executeOneModule(currentModule, ssh, currentEnvironment)
+    const step = await executeOneModule({
+      currentEnvironment,
+      ssh,
+      targetModule: currentModule,
+      verbose,
+    })
     if (step == null) continue
 
     if (step.status === "failed") {
@@ -170,6 +182,7 @@ async function applyRecipe(parameters: {
   const state = await executeModules(parameters.modules, parameters.ssh, {
     environment: parameters.environment,
     shutdownSignal,
+    verbose,
   })
 
   if (state.status === "changed" && parameters.signals) {

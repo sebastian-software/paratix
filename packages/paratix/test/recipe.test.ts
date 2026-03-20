@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import type { Environment, Module } from "../src/types.js"
 
 import { recipe } from "../src/recipe.js"
+import { CommandError } from "../src/sshHelpers.js"
 import { createMockSsh } from "./helpers/mockSsh.js"
 
 const emptyEnv: Environment = {}
@@ -118,6 +119,39 @@ describe("recipe", () => {
     expect(result.status).toBe("failed")
     // mod2 should not have been applied because mod1 failed
     expect(applyCount.count).toBe(0)
+  })
+
+  it("prints verbose diagnostics for failed child modules when recipe apply runs with verbose", async () => {
+    const consoleLogs: string[] = []
+    vi.spyOn(console, "log").mockImplementation((...args) => {
+      consoleLogs.push(args.join(" "))
+    })
+
+    const failingModule: Module = {
+      // eslint-disable-next-line @typescript-eslint/require-await -- Interface requires async
+      async apply() {
+        return {
+          error: new CommandError("child failed summary", "child stdout", "child stderr"),
+          status: "failed",
+        }
+      },
+      // eslint-disable-next-line @typescript-eslint/require-await -- Interface requires async
+      async check() {
+        return "needs-apply"
+      },
+      name: "child-module",
+    }
+
+    const r = recipe("test-recipe", [failingModule])
+    const result = await r.apply(null, emptyEnv, { verbose: true })
+
+    expect(result.status).toBe("failed")
+    const output = consoleLogs.join("\n")
+    expect(output).toContain("child failed summary")
+    expect(output).toContain("Full stderr:")
+    expect(output).toContain("child stderr")
+    expect(output).toContain("Full stdout:")
+    expect(output).toContain("child stdout")
   })
 
   it("does not trigger signals when status is ok", async () => {
