@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest"
 
 import { user } from "../../src/modules/user.js"
+import { CommandError } from "../../src/sshHelpers.js"
 import { createMockSsh } from "../helpers/mockSsh.js"
 
 const emptyEnv = {}
@@ -157,6 +158,8 @@ describe("user.present apply", () => {
     const mod = user.present("alice", { password: "$6$hash" })
     const result = await mod.apply(ssh, emptyEnv)
     expect(result.status).toBe("failed")
+    expect(result.error).toBeInstanceOf(CommandError)
+    expect(result.error?.message).toContain("chpasswd -e failed")
   })
 
   it("does not call chpasswd when no password is set", async () => {
@@ -185,6 +188,7 @@ describe("user.present apply", () => {
     // eslint-disable-next-line prefer-spread
     const result = await mod.apply(null, emptyEnv)
     expect(result.status).toBe("failed")
+    expect(result.error?.message).toContain("[user.present: alice] SSH connection is required")
   })
 })
 

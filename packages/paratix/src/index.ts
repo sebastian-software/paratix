@@ -1,4 +1,5 @@
 export { assert, debug, fail, pause, when } from "./builtins.js"
+export { failed, failedCommand } from "./moduleFailure.js"
 export {
   apt,
   archive,

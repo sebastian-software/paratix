@@ -1,3 +1,4 @@
+import { failed, failedCommand } from "../moduleFailure.js"
 import { shellQuote } from "../ssh.js"
 import { type Module, type ModuleResult, NEEDS_APPLY, type SshConnection } from "../types.js"
 import { hasFlag, setVersionedFlag } from "./moduleHelpers.js"
@@ -37,6 +38,10 @@ const UPGRADE_COMMANDS = {
   dnf: "dnf upgrade -y",
   yum: "yum update -y",
 } as const
+
+function missingPackageManager(moduleName: string): ModuleResult {
+  return failed(`[${moduleName}] No supported package manager found (apt, dnf, yum, apk)`)
+}
 
 /**
  * Detect the system package manager by probing for known binaries.
@@ -130,12 +135,18 @@ export const pkg = {
     }
     return {
       async apply(ssh: null | SshConnection): Promise<ModuleResult> {
-        if (!ssh) return { status: "failed" }
+        if (!ssh)
+          return failed(`[package.absent: ${packages.join(", ")}] SSH connection is required`)
         const pm = await detectPackageManager(ssh)
-        if (!pm) return { status: "failed" }
+        if (!pm) return missingPackageManager(`package.absent: ${packages.join(", ")}`)
         const quoted = packages.map((p) => shellQuote(p)).join(" ")
         const result = await ssh.exec(REMOVE_COMMANDS[pm](quoted), EXEC_OPTS)
-        if (result.code !== 0) return { status: "failed" }
+        if (result.code !== 0) {
+          return failedCommand(
+            `[package.absent: ${packages.join(", ")}] package removal failed`,
+            result
+          )
+        }
         return { status: "changed" }
       },
       async check(ssh: null | SshConnection): Promise<"needs-apply" | "ok"> {
@@ -170,12 +181,19 @@ export const pkg = {
     }
     return {
       async apply(ssh: null | SshConnection): Promise<ModuleResult> {
-        if (!ssh) return { status: "failed" }
+        if (!ssh) {
+          return failed(`[package.installed: ${packages.join(", ")}] SSH connection is required`)
+        }
         const pm = await detectPackageManager(ssh)
-        if (!pm) return { status: "failed" }
+        if (!pm) return missingPackageManager(`package.installed: ${packages.join(", ")}`)
         const quoted = packages.map((p) => shellQuote(p)).join(" ")
         const result = await ssh.exec(INSTALL_COMMANDS[pm](quoted), EXEC_OPTS)
-        if (result.code !== 0) return { status: "failed" }
+        if (result.code !== 0) {
+          return failedCommand(
+            `[package.installed: ${packages.join(", ")}] package installation failed`,
+            result
+          )
+        }
         return { status: "changed" }
       },
       async check(ssh: null | SshConnection): Promise<"needs-apply" | "ok"> {
@@ -210,11 +228,13 @@ export const pkg = {
     const flagName = `package-update-${date}`
     return {
       async apply(ssh: null | SshConnection): Promise<ModuleResult> {
-        if (!ssh) return { status: "failed" }
+        if (!ssh) return failed(`[package.update: ${date}] SSH connection is required`)
         const pm = await detectPackageManager(ssh)
-        if (!pm) return { status: "failed" }
+        if (!pm) return missingPackageManager(`package.update: ${date}`)
         const result = await ssh.exec(UPDATE_COMMANDS[pm], EXEC_OPTS)
-        if (result.code !== 0) return { status: "failed" }
+        if (result.code !== 0) {
+          return failedCommand(`[package.update: ${date}] package index refresh failed`, result)
+        }
 
         await setVersionedFlag(ssh, flagName, "package-update-")
 
@@ -251,11 +271,13 @@ export const pkg = {
     const flagName = `package-upgrade-${date}`
     return {
       async apply(ssh: null | SshConnection): Promise<ModuleResult> {
-        if (!ssh) return { status: "failed" }
+        if (!ssh) return failed(`[package.upgrade: ${date}] SSH connection is required`)
         const pm = await detectPackageManager(ssh)
-        if (!pm) return { status: "failed" }
+        if (!pm) return missingPackageManager(`package.upgrade: ${date}`)
         const result = await ssh.exec(UPGRADE_COMMANDS[pm], EXEC_OPTS)
-        if (result.code !== 0) return { status: "failed" }
+        if (result.code !== 0) {
+          return failedCommand(`[package.upgrade: ${date}] package upgrade failed`, result)
+        }
 
         await setVersionedFlag(ssh, flagName, "package-upgrade-")
 

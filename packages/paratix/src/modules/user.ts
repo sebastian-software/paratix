@@ -1,3 +1,4 @@
+import { failed, failedCommand } from "../moduleFailure.js"
 import { shellQuote } from "../ssh.js"
 import { type Module, type ModuleResult, NEEDS_APPLY, type SshConnection } from "../types.js"
 
@@ -30,7 +31,9 @@ async function setPassword(
     ignoreExitCode: true,
     silent: true,
   })
-  if (pwResult.code !== 0) return { status: "failed" }
+  if (pwResult.code !== 0) {
+    return failedCommand(`[user.present: ${name}] chpasswd -e failed`, pwResult)
+  }
   return null
 }
 
@@ -102,13 +105,15 @@ export const user = {
   absent(name: string, options?: { removeHome?: boolean }): Module {
     return {
       async apply(ssh: null | SshConnection): Promise<ModuleResult> {
-        if (!ssh) return { status: "failed" }
+        if (!ssh) return failed(`[user.absent: ${name}] SSH connection is required`)
         const removeFlag = options?.removeHome ? "--remove" : ""
         const result = await ssh.exec(`userdel ${removeFlag} ${shellQuote(name)}`, {
           ignoreExitCode: true,
           silent: true,
         })
-        return result.code === 0 ? { status: "changed" } : { status: "failed" }
+        return result.code === 0
+          ? { status: "changed" }
+          : failedCommand(`[user.absent: ${name}] userdel failed`, result)
       },
       async check(ssh: null | SshConnection): Promise<"needs-apply" | "ok"> {
         if (!ssh) return NEEDS_APPLY
@@ -134,7 +139,7 @@ export const user = {
   present(name: string, options?: UserOptions): Module {
     return {
       async apply(ssh: null | SshConnection): Promise<ModuleResult> {
-        if (!ssh) return { status: "failed" }
+        if (!ssh) return failed(`[user.present: ${name}] SSH connection is required`)
 
         const flags = buildUserArguments(options)
         const exists = await ssh.test(`${ID_CMD} ${shellQuote(name)}`)
@@ -143,7 +148,12 @@ export const user = {
           : `useradd ${flags.join(" ")} --create-home ${shellQuote(name)}`
 
         const result = await ssh.exec(cmd, { ignoreExitCode: true, silent: true })
-        if (result.code !== 0) return { status: "failed" }
+        if (result.code !== 0) {
+          return failedCommand(
+            `[user.present: ${name}] ${exists ? "usermod" : "useradd"} failed`,
+            result
+          )
+        }
 
         if (options?.password != null) {
           const failure = await setPassword(ssh, name, options.password)

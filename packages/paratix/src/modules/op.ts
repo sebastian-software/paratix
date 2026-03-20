@@ -2,6 +2,7 @@ import { type ChildProcess, spawn } from "node:child_process"
 
 import type { Environment, Module, ModuleResult } from "../types.js"
 
+import { failed } from "../moduleFailure.js"
 import { generateTotpCode } from "../totp.js"
 
 /**
@@ -156,7 +157,7 @@ export const op = {
    * This module runs locally (`local: true`) and never touches the remote host.
    * `check` always returns `"needs-apply"` so the runner executes `apply`
    * unconditionally and propagates the resolved meta values.
-   * If any CLI call fails the module returns `{ status: "failed" }`.
+   * If any CLI call fails the module returns `{ status: "failed", error }`.
    *
    * @param references - A map of logical names to 1Password secret references
    *   (e.g. `op://vault/item/field`). References ending in `/one-time-password`
@@ -183,9 +184,9 @@ export const op = {
           const resolvedOtp = await resolveOtpReferences(otpEntries)
 
           return { meta: { ...resolvedRegular, ...resolvedOtp }, status: "ok" }
-        } catch {
-          console.error("Failed to resolve 1Password references")
-          return { status: "failed" }
+        } catch (error) {
+          const detail = error instanceof Error ? error.message : String(error)
+          return failed(`Failed to resolve 1Password references: ${detail}`)
         }
       },
       // eslint-disable-next-line @typescript-eslint/require-await

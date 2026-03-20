@@ -2,6 +2,7 @@
 import { describe, expect, it } from "vitest"
 
 import { pkg } from "../../src/modules/package.js"
+import { CommandError } from "../../src/sshHelpers.js"
 import { createMockSsh } from "../helpers/mockSsh.js"
 
 const emptyEnv = {}
@@ -124,13 +125,17 @@ describe("pkg.installed", () => {
   it("apply returns failed when ssh is null", async () => {
     const mod = pkg.installed("nginx")
     // eslint-disable-next-line prefer-spread
-    expect(await mod.apply(null, emptyEnv)).toStrictEqual({ status: "failed" })
+    const result = await mod.apply(null, emptyEnv)
+    expect(result.status).toBe("failed")
+    expect(result.error?.message).toContain("[package.installed: nginx] SSH connection is required")
   })
 
   it("apply returns failed when no package manager is found", async () => {
     const ssh = createMockSsh({ ...NO_PM })
     const mod = pkg.installed("nginx")
-    expect(await mod.apply(ssh, emptyEnv)).toStrictEqual({ status: "failed" })
+    const result = await mod.apply(ssh, emptyEnv)
+    expect(result.status).toBe("failed")
+    expect(result.error?.message).toContain("No supported package manager found")
   })
 
   it("apply returns failed when install command fails", async () => {
@@ -139,7 +144,10 @@ describe("pkg.installed", () => {
       "DEBIAN_FRONTEND=noninteractive apt-get install -y 'nginx'": { code: 1 },
     })
     const mod = pkg.installed("nginx")
-    expect(await mod.apply(ssh, emptyEnv)).toStrictEqual({ status: "failed" })
+    const result = await mod.apply(ssh, emptyEnv)
+    expect(result.status).toBe("failed")
+    expect(result.error).toBeInstanceOf(CommandError)
+    expect(result.error?.message).toContain("package installation failed")
   })
 
   // name
@@ -204,7 +212,9 @@ describe("pkg.absent", () => {
   it("apply returns failed when ssh is null", async () => {
     const mod = pkg.absent("nginx")
     // eslint-disable-next-line prefer-spread
-    expect(await mod.apply(null, emptyEnv)).toStrictEqual({ status: "failed" })
+    const result = await mod.apply(null, emptyEnv)
+    expect(result.status).toBe("failed")
+    expect(result.error?.message).toContain("[package.absent: nginx] SSH connection is required")
   })
 
   // name
@@ -273,13 +283,19 @@ describe("pkg.update", () => {
   it("apply returns failed when ssh is null", async () => {
     const mod = pkg.update("2024-01-15")
     // eslint-disable-next-line prefer-spread
-    expect(await mod.apply(null, emptyEnv)).toStrictEqual({ status: "failed" })
+    const result = await mod.apply(null, emptyEnv)
+    expect(result.status).toBe("failed")
+    expect(result.error?.message).toContain(
+      "[package.update: 2024-01-15] SSH connection is required"
+    )
   })
 
   it("apply returns failed when no package manager is found", async () => {
     const ssh = createMockSsh({ ...NO_PM })
     const mod = pkg.update("2024-01-15")
-    expect(await mod.apply(ssh, emptyEnv)).toStrictEqual({ status: "failed" })
+    const result = await mod.apply(ssh, emptyEnv)
+    expect(result.status).toBe("failed")
+    expect(result.error?.message).toContain("No supported package manager found")
   })
 
   // name
@@ -345,7 +361,11 @@ describe("pkg.upgrade", () => {
   it("apply returns failed when ssh is null", async () => {
     const mod = pkg.upgrade("2024-01-15")
     // eslint-disable-next-line prefer-spread
-    expect(await mod.apply(null, emptyEnv)).toStrictEqual({ status: "failed" })
+    const result = await mod.apply(null, emptyEnv)
+    expect(result.status).toBe("failed")
+    expect(result.error?.message).toContain(
+      "[package.upgrade: 2024-01-15] SSH connection is required"
+    )
   })
 
   // name

@@ -284,7 +284,7 @@ A custom module must implement `check` and `apply`, both async:
 
 ```typescript
 import type { Module, ModuleResult, SshConnection, Environment } from "paratix"
-import { NEEDS_APPLY } from "paratix"
+import { NEEDS_APPLY, failed } from "paratix"
 
 function myCustomModule(configPath: string, content: string): Module {
   return {
@@ -299,7 +299,7 @@ function myCustomModule(configPath: string, content: string): Module {
     },
 
     async apply(ssh: SshConnection | null, env: Environment): Promise<ModuleResult> {
-      if (!ssh) return { status: "failed" }
+      if (!ssh) return failed(`[my-module: ${configPath}] SSH connection is required`)
       await ssh.writeFile(configPath, content)
       return { status: "changed" }
     },
@@ -309,7 +309,8 @@ function myCustomModule(configPath: string, content: string): Module {
 
 ### Key rules for custom modules
 
-- Always check `if (!ssh) return NEEDS_APPLY` in check and `if (!ssh) return { status: "failed" }` in apply.
+- Always check `if (!ssh) return NEEDS_APPLY` in check and return `failed("...")` with a useful message in apply.
+- Prefer `failedCommand("...", result)` when you used `ssh.exec(..., { ignoreExitCode: true })` and want stdout/stderr preserved for central runner output.
 - Return `NEEDS_APPLY` (the exported constant), never the string literal `"needs-apply"`.
 - `ModuleResult.status` must be one of: `"changed"`, `"failed"`, `"ok"`, `"skipped"`.
 - Use `meta` in the return value to pass data to subsequent modules via the environment.
@@ -490,7 +491,7 @@ async check(ssh) {
 1. Do NOT `import { package } from "paratix"` -- modules come from `"paratix/modules"`.
 2. Do NOT use `service.restart()` directly in `run` -- it runs EVERY time. Use it as a signal in a `recipe()`.
 3. Do NOT use the string literal `"needs-apply"` -- always use the exported constant `NEEDS_APPLY`.
-4. Do NOT assume `ssh` is non-null in custom modules -- always check `if (!ssh) return { status: "failed" }`.
+4. Do NOT assume `ssh` is non-null in custom modules -- always check it and return `failed("...")` with context.
 5. Do NOT forget that `package.upgrade("2025-01-15")` needs a date as IDEMPOTENCY KEY -- the date controls when the upgrade re-runs.
 6. Do NOT interpolate `env` values directly in shell commands -- use `shellQuote()` for safe quoting.
 7. Do NOT store module methods as variables and call them later -- modules are configured at creation time, not at call time.
