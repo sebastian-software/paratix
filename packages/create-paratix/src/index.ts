@@ -219,6 +219,7 @@ function installDependencies(projectDirectory: string, pm: PackageManager): bool
 }
 
 function printSuccessMessage(projectName: string, pm: PackageManager): void {
+  const prefix = pm.name === "npm" ? "npm run" : pm.name
   console.log(`
 Project created successfully!
 
@@ -226,11 +227,13 @@ Project created successfully!
 
 Edit server.ts with your server details, then:
 
-  ${pm.name === "npm" ? "npm run" : pm.name} apply
+  ${prefix} apply:dry
+  ${prefix} apply
 `)
 }
 
 function printPartialSuccessMessage(projectName: string, pm: PackageManager): void {
+  const prefix = pm.name === "npm" ? "npm run" : pm.name
   console.log(`
 Project files created, but dependency installation failed.
 
@@ -238,7 +241,8 @@ Project files created, but dependency installation failed.
 
 Install dependencies manually, then run:
 
-  ${pm.name === "npm" ? "npm run" : pm.name} apply
+  ${prefix} apply:dry
+  ${prefix} apply
 `)
 }
 

@@ -267,6 +267,8 @@ describe("scaffoldProject", () => {
     expect(console.log).toHaveBeenCalledWith(
       expect.stringContaining("Project created successfully!")
     )
+    expect(console.log).toHaveBeenCalledWith(expect.stringContaining("pnpm apply:dry"))
+    expect(console.log).toHaveBeenCalledWith(expect.stringContaining("pnpm apply"))
     expect(console.log).not.toHaveBeenCalledWith(
       expect.stringContaining("dependency installation failed")
     )
@@ -286,9 +288,20 @@ describe("scaffoldProject", () => {
     expect(console.log).toHaveBeenCalledWith(
       expect.stringContaining("Project files created, but dependency installation failed.")
     )
+    expect(console.log).toHaveBeenCalledWith(expect.stringContaining("pnpm apply:dry"))
+    expect(console.log).toHaveBeenCalledWith(expect.stringContaining("pnpm apply"))
     expect(console.log).not.toHaveBeenCalledWith(
       expect.stringContaining("Project created successfully!")
     )
     expect(process.exitCode).toBe(1)
+  })
+
+  it("prints npm completion commands with apply:dry before apply", () => {
+    const installer = vi.fn().mockReturnValue(true)
+
+    scaffoldProject(projectName, { command: "npm install", name: "npm" }, { installer })
+
+    expect(console.log).toHaveBeenCalledWith(expect.stringContaining("npm run apply:dry"))
+    expect(console.log).toHaveBeenCalledWith(expect.stringContaining("npm run apply"))
   })
 })
