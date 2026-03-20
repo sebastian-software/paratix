@@ -6,6 +6,7 @@ import pc from "picocolors"
 import type { Environment, ServerDefinition } from "./types.js"
 
 import { runPlaybook } from "./runner.js"
+import { collectSshConfigErrors } from "./serverDefinitionValidation.js"
 
 declare const PACKAGE_VERSION: string
 
@@ -82,73 +83,12 @@ function collectArrayErrors(
   }
 }
 
-/**
- * Validates the `ssh` property of a server definition candidate.
- * Pushes errors for a missing / wrong-typed `ssh` object as well as for its
- * required sub-fields (`ports`, `privateKey`, `user`).
- *
- * @param value - The top-level object containing the `ssh` property.
- * @param errors - Accumulator for error messages.
- */
-/**
- * Collect string validation errors for an optional SSH field when present.
- *
- * @param ssh - The narrowed `ssh` object to validate.
- * @param errors - Accumulator for human-readable validation errors.
- * @param parameters - The field metadata passed through to `collectStringErrors`.
- * @param parameters.key - The SSH property name on the config object.
- * @param parameters.label - The human-readable property label for error messages.
- */
-function collectOptionalSshStringErrors(
-  ssh: Record<string, unknown>,
-  errors: string[],
-  parameters: { key: string; label: string }
-): void {
-  if (parameters.key in ssh && ssh[parameters.key] !== undefined) {
-    collectStringErrors(ssh, parameters, errors)
-  }
-}
-
-// eslint-disable-next-line max-statements
 function collectSshErrors(value: Record<string, unknown>, errors: string[]): void {
   if (!("ssh" in value)) {
     errors.push("Missing property 'ssh' (expected object)")
     return
   }
-  if (value.ssh === null) {
-    errors.push("Invalid property 'ssh' (expected object, got null)")
-    return
-  }
-  if (typeof value.ssh !== "object") {
-    errors.push(`Invalid property 'ssh' (expected object, got ${typeof value.ssh})`)
-    return
-  }
-  // eslint-disable-next-line @typescript-eslint/no-unsafe-type-assertion -- narrowed by typeof/null checks above
-  const ssh = value.ssh as Record<string, unknown>
-  collectArrayErrors(ssh, { key: "ports", label: "ssh.ports" }, errors)
-  if ("privateKey" in ssh && ssh.privateKey !== undefined) {
-    collectStringErrors(ssh, { key: "privateKey", label: "ssh.privateKey" }, errors)
-  }
-  collectStringErrors(ssh, { key: "user", label: "ssh.user" }, errors)
-  collectOptionalSshStringErrors(ssh, errors, {
-    key: "expectedHostFingerprint",
-    label: "ssh.expectedHostFingerprint",
-  })
-  collectOptionalSshStringErrors(ssh, errors, {
-    key: "expectedHostPublicKey",
-    label: "ssh.expectedHostPublicKey",
-  })
-  if ("strictHostKeyChecking" in ssh && ssh.strictHostKeyChecking != null) {
-    const valid = ["accept-new", "no", "yes"]
-    if (
-      typeof ssh.strictHostKeyChecking !== "string" ||
-      !valid.includes(ssh.strictHostKeyChecking)
-    ) {
-      errors.push(
-        `Invalid property 'ssh.strictHostKeyChecking' (expected "accept-new", "no", or "yes")`
-      )
-    }
-  }
+  errors.push(...collectSshConfigErrors(value.ssh))
 }
 
 /**

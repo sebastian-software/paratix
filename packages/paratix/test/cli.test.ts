@@ -313,6 +313,26 @@ describe("collectDefinitionErrors", () => {
     expect(errors).toStrictEqual(["Property 'ssh.ports' must not be empty"])
   })
 
+  it("returns an error when ssh.ports contains zero in an untyped JS definition", () => {
+    const errors = collectDefinitionErrors({
+      host: "example.com",
+      name: "test",
+      run: ["echo hello"],
+      ssh: { ports: [0], privateKey: "/key", user: "root" },
+    })
+    expect(errors).toStrictEqual(["Property 'ssh.ports[0]' must be a positive integer"])
+  })
+
+  it("returns an error when ssh.ports contains a string in an untyped JS definition", () => {
+    const errors = collectDefinitionErrors({
+      host: "example.com",
+      name: "test",
+      run: ["echo hello"],
+      ssh: { ports: ["22"], privateKey: "/key", user: "root" },
+    })
+    expect(errors).toStrictEqual(["Property 'ssh.ports[0]' must be a positive integer"])
+  })
+
   it("returns an error when ssh.privateKey has the wrong type", () => {
     const errors = collectDefinitionErrors({
       host: "example.com",
@@ -332,7 +352,7 @@ describe("collectDefinitionErrors", () => {
       run: ["echo hello"],
       ssh: { ports: [22], privateKey: "", user: "root" },
     })
-    expect(errors).toStrictEqual(["Property 'ssh.privateKey' must not be empty"])
+    expect(errors).toStrictEqual(["Property 'ssh.privateKey' must not be an empty string"])
   })
 
   it("returns an error when ssh.user has the wrong type", () => {
@@ -352,7 +372,7 @@ describe("collectDefinitionErrors", () => {
       run: ["echo hello"],
       ssh: { ports: [22], privateKey: "/key", user: "" },
     })
-    expect(errors).toStrictEqual(["Property 'ssh.user' must not be empty"])
+    expect(errors).toStrictEqual(["Property 'ssh.user' must not be an empty string"])
   })
 
   it("returns no error when ssh.strictHostKeyChecking is 'accept-new'", () => {
@@ -450,6 +470,52 @@ describe("collectDefinitionErrors", () => {
     expect(errors).toStrictEqual([
       "Invalid property 'ssh.expectedHostFingerprint' (expected string, got number)",
     ])
+  })
+
+  it("returns an error when ssh.agentForward is not a boolean", () => {
+    const errors = collectDefinitionErrors({
+      host: "example.com",
+      name: "test",
+      run: ["echo hello"],
+      ssh: { agentForward: "yes", ports: [22], privateKey: "/key", user: "root" },
+    })
+    expect(errors).toStrictEqual([
+      "Invalid property 'ssh.agentForward' (expected boolean, got string)",
+    ])
+  })
+
+  it("returns an error when ssh.passwordFallback is not a boolean", () => {
+    const errors = collectDefinitionErrors({
+      host: "example.com",
+      name: "test",
+      run: ["echo hello"],
+      ssh: { passwordFallback: "no", ports: [22], privateKey: "/key", user: "root" },
+    })
+    expect(errors).toStrictEqual([
+      "Invalid property 'ssh.passwordFallback' (expected boolean, got string)",
+    ])
+  })
+
+  it("returns an error when ssh.reconnectTimeout is not a number", () => {
+    const errors = collectDefinitionErrors({
+      host: "example.com",
+      name: "test",
+      run: ["echo hello"],
+      ssh: { ports: [22], privateKey: "/key", reconnectTimeout: "5000", user: "root" },
+    })
+    expect(errors).toStrictEqual([
+      "Invalid property 'ssh.reconnectTimeout' (expected number, got string)",
+    ])
+  })
+
+  it("returns an error when ssh.maxReconnectAttempts is not an integer", () => {
+    const errors = collectDefinitionErrors({
+      host: "example.com",
+      name: "test",
+      run: ["echo hello"],
+      ssh: { maxReconnectAttempts: 1.5, ports: [22], privateKey: "/key", user: "root" },
+    })
+    expect(errors).toStrictEqual(["Property 'ssh.maxReconnectAttempts' must be an integer"])
   })
 
   it("returns no error when ssh.strictHostKeyChecking is null (treated as absent)", () => {

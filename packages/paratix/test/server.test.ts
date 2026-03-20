@@ -59,6 +59,26 @@ describe("server", () => {
     ).toThrow("ServerDefinition: ssh.ports must not be empty")
   })
 
+  it("throws when ssh.ports contains zero in an untyped JS playbook", () => {
+    expect(() =>
+      server(
+        validConfig({
+          ssh: { ...validSsh, ports: [0] },
+        }) as Parameters<typeof server>[0]
+      )
+    ).toThrow("ServerDefinition: Property 'ssh.ports[0]' must be a positive integer")
+  })
+
+  it("throws when ssh.ports contains a string in an untyped JS playbook", () => {
+    expect(() =>
+      server(
+        validConfig({
+          ssh: { ...validSsh, ports: ["22"] },
+        }) as unknown as Parameters<typeof server>[0]
+      )
+    ).toThrow("ServerDefinition: Property 'ssh.ports[0]' must be a positive integer")
+  })
+
   it("throws when ssh.user is empty", () => {
     expect(() =>
       server(validConfig({ ssh: { ...validSsh, user: "" } }) as Parameters<typeof server>[0])
@@ -69,6 +89,52 @@ describe("server", () => {
     expect(() =>
       server(validConfig({ ssh: { ...validSsh, privateKey: "" } }) as Parameters<typeof server>[0])
     ).toThrow("ServerDefinition: ssh.privateKey must not be an empty string")
+  })
+
+  it("throws when ssh.agentForward is not a boolean in an untyped JS playbook", () => {
+    expect(() =>
+      server(
+        validConfig({
+          ssh: { ...validSsh, agentForward: "yes" },
+        }) as unknown as Parameters<typeof server>[0]
+      )
+    ).toThrow(
+      "ServerDefinition: Invalid property 'ssh.agentForward' (expected boolean, got string)"
+    )
+  })
+
+  it("throws when ssh.passwordFallback is not a boolean in an untyped JS playbook", () => {
+    expect(() =>
+      server(
+        validConfig({
+          ssh: { ...validSsh, passwordFallback: "no" },
+        }) as unknown as Parameters<typeof server>[0]
+      )
+    ).toThrow(
+      "ServerDefinition: Invalid property 'ssh.passwordFallback' (expected boolean, got string)"
+    )
+  })
+
+  it("throws when ssh.reconnectTimeout is not a number in an untyped JS playbook", () => {
+    expect(() =>
+      server(
+        validConfig({
+          ssh: { ...validSsh, reconnectTimeout: "5000" },
+        }) as unknown as Parameters<typeof server>[0]
+      )
+    ).toThrow(
+      "ServerDefinition: Invalid property 'ssh.reconnectTimeout' (expected number, got string)"
+    )
+  })
+
+  it("throws when ssh.maxReconnectAttempts is not an integer in an untyped JS playbook", () => {
+    expect(() =>
+      server(
+        validConfig({
+          ssh: { ...validSsh, maxReconnectAttempts: 1.5 },
+        }) as unknown as Parameters<typeof server>[0]
+      )
+    ).toThrow("ServerDefinition: Property 'ssh.maxReconnectAttempts' must be an integer")
   })
 
   // ---------------------------------------------------------------------------

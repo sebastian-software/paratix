@@ -1,39 +1,6 @@
-import type { ServerDefinition, SshConfig } from "./types.js"
+import type { ServerDefinition } from "./types.js"
 
-const VALID_HOST_KEY_MODES = ["accept-new", "no", "yes"]
-
-function ensureOptionalSshStringIsNotEmpty(value: string | undefined, label: string): void {
-  if (value?.length === 0) {
-    throw new Error(`ServerDefinition: ${label} must not be an empty string`)
-  }
-}
-
-/**
- * Validate SSH-specific fields of a server definition.
- *
- * @param ssh - The SSH config to validate.
- */
-function validateSshConfig(ssh: SshConfig): void {
-  if (ssh.ports.length === 0) {
-    throw new Error("ServerDefinition: ssh.ports must not be empty")
-  }
-  if (ssh.privateKey?.length === 0) {
-    throw new Error("ServerDefinition: ssh.privateKey must not be an empty string")
-  }
-  if (ssh.user.length === 0) {
-    throw new Error("ServerDefinition: ssh.user is required")
-  }
-  ensureOptionalSshStringIsNotEmpty(ssh.expectedHostFingerprint, "ssh.expectedHostFingerprint")
-  ensureOptionalSshStringIsNotEmpty(ssh.expectedHostPublicKey, "ssh.expectedHostPublicKey")
-  if (
-    ssh.strictHostKeyChecking != null &&
-    !VALID_HOST_KEY_MODES.includes(ssh.strictHostKeyChecking)
-  ) {
-    throw new Error(
-      `ServerDefinition: ssh.strictHostKeyChecking must be one of ${VALID_HOST_KEY_MODES.join(", ")}`
-    )
-  }
-}
+import { validateSshConfig } from "./serverDefinitionValidation.js"
 
 /**
  * Define a server and validate its configuration at construction time.
