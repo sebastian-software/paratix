@@ -117,6 +117,35 @@ function interruptedStepResult(environment: Environment): StepResult {
   return { env: environment, shouldBreak: true }
 }
 
+function interruptedBeforeApply(
+  environment: Environment,
+  shutdownSignal: () => NodeJS.Signals | null
+): StepResult | undefined {
+  if (shutdownSignal() == null) return undefined
+  return interruptedStepResult(environment)
+}
+
+async function applyCheckedModule(parameters: {
+  currentEnvironment: Environment
+  shutdownSignal: () => NodeJS.Signals | null
+  ssh: SshConnectionImpl
+  targetModule: Module
+  verbose: boolean
+}): Promise<StepResult> {
+  const interrupted = interruptedBeforeApply(
+    parameters.currentEnvironment,
+    parameters.shutdownSignal
+  )
+  if (interrupted != null) return interrupted
+
+  return applyModule({
+    currentEnvironment: parameters.currentEnvironment,
+    ssh: parameters.ssh,
+    targetModule: parameters.targetModule,
+    verbose: parameters.verbose,
+  })
+}
+
 function isDryRunBlockingModule(module: Module): boolean {
   return module._dryRunBlocker === true
 }
@@ -310,8 +339,9 @@ async function runRegularModule(parameters: RegularModuleArguments): Promise<Ste
 
     if (dryRun) {
       if (isDryRunBlockingModule(targetModule)) {
-        return await applyModule({
+        return await applyCheckedModule({
           currentEnvironment: env,
+          shutdownSignal,
           ssh,
           targetModule,
           verbose,
@@ -321,8 +351,9 @@ async function runRegularModule(parameters: RegularModuleArguments): Promise<Ste
       return { env, shouldBreak: false, status: "changed" }
     }
 
-    return await applyModule({
+    return await applyCheckedModule({
       currentEnvironment: env,
+      shutdownSignal,
       ssh,
       targetModule,
       verbose,

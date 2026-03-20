@@ -40,6 +40,8 @@ type RecipeState = {
   status: Exclude<ModuleStatus, "skipped">
 }
 
+const INTERRUPTED_BEFORE_APPLY = Symbol("recipe-interrupted-before-apply")
+
 function applyRecipeStepToState(
   state: RecipeState,
   step: OrchestrationStep,
@@ -77,15 +79,17 @@ function applyRecipeStepToState(
  * @param parameters.targetModule - The module to check and conditionally apply.
  * @param parameters.ssh - Active SSH connection, or `null` for local modules.
  * @param parameters.currentEnvironment - Environment values available to the module.
+ * @param parameters.shutdownSignal - Optional shutdown getter used to suppress new apply steps.
  * @param parameters.verbose - Whether verbose command diagnostics should be printed.
  * @returns The updated environment and status, or `null` if the module was already ok.
  */
 async function executeOneModule(parameters: {
   currentEnvironment: Environment
+  shutdownSignal?: () => NodeJS.Signals | null
   ssh: null | SshConnection
   targetModule: Module
   verbose?: boolean
-}): Promise<null | OrchestrationStep> {
+}): Promise<null | OrchestrationStep | typeof INTERRUPTED_BEFORE_APPLY> {
   const { currentEnvironment, ssh, targetModule } = parameters
   const verbose = parameters.verbose ?? false
   const connection = targetModule.local === true ? null : ssh
@@ -96,6 +100,10 @@ async function executeOneModule(parameters: {
     return null
   }
 
+  if ((parameters.shutdownSignal?.() ?? null) != null) {
+    return INTERRUPTED_BEFORE_APPLY
+  }
+
   const result = await targetModule.apply(connection, currentEnvironment)
   printModuleResult(targetModule.name, result.status)
   if (result.status === "failed" && result.error != null) {
@@ -104,6 +112,26 @@ async function executeOneModule(parameters: {
 
   const environment = await mergeEnvironmentFromMeta(currentEnvironment, result.meta)
   return { env: environment, meta: result.meta, status: result.status }
+}
+
+async function applyExecutedRecipeStep(parameters: {
+  onChildStep?: (step: OrchestrationStep) => Promise<void>
+  preserveControlPlaneMeta: boolean
+  state: RecipeState
+  step: null | OrchestrationStep | typeof INTERRUPTED_BEFORE_APPLY
+}): Promise<null | RecipeState> {
+  if (parameters.step == null) return parameters.state
+  if (parameters.step === INTERRUPTED_BEFORE_APPLY) return null
+
+  if (parameters.onChildStep != null) {
+    await parameters.onChildStep(parameters.step)
+  }
+
+  return applyRecipeStepToState(
+    parameters.state,
+    parameters.step,
+    parameters.preserveControlPlaneMeta
+  )
 }
 
 async function executeModules(
@@ -131,18 +159,21 @@ async function executeModules(
     // eslint-disable-next-line no-await-in-loop
     const step = await executeOneModule({
       currentEnvironment: state.env,
+      shutdownSignal,
       ssh,
       targetModule: currentModule,
       verbose,
     })
-    if (step == null) continue
+    // eslint-disable-next-line no-await-in-loop
+    const nextState = await applyExecutedRecipeStep({
+      onChildStep,
+      preserveControlPlaneMeta,
+      state,
+      step,
+    })
+    if (nextState == null) break
 
-    if (onChildStep != null) {
-      // eslint-disable-next-line no-await-in-loop
-      await onChildStep(step)
-    }
-
-    state = applyRecipeStepToState(state, step, preserveControlPlaneMeta)
+    state = nextState
     if (state.status === "failed") return state
   }
 

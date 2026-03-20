@@ -403,6 +403,32 @@ describe("recipe", () => {
     expect(secondModule.apply).not.toHaveBeenCalled()
   })
 
+  it("does not start child apply() when shutdown was requested after check()", async () => {
+    let receivedSignal: NodeJS.Signals | null = null
+    const firstModule: Module = {
+      apply: vi.fn().mockResolvedValue({ status: "changed" }),
+      // eslint-disable-next-line @typescript-eslint/require-await -- Interface requires async
+      async check() {
+        receivedSignal = "SIGTERM"
+        return "needs-apply"
+      },
+      name: "first-mod",
+    }
+    const secondModule: Module = {
+      apply: vi.fn().mockResolvedValue({ status: "changed" }),
+      check: vi.fn().mockResolvedValue("needs-apply"),
+      name: "second-mod",
+    }
+
+    const r = recipe("test-recipe", [firstModule, secondModule])
+    const result = await r.apply(null, emptyEnv, { shutdownSignal: () => receivedSignal })
+
+    expect(result.status).toBe("ok")
+    expect(firstModule.apply).not.toHaveBeenCalled()
+    expect(secondModule.check).not.toHaveBeenCalled()
+    expect(secondModule.apply).not.toHaveBeenCalled()
+  })
+
   it("check propagates exceptions from child module check()", async () => {
     const failing: Module = {
       apply: vi.fn().mockResolvedValue({ status: "ok" }),

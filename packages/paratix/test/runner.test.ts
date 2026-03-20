@@ -1652,6 +1652,44 @@ describe("runPlaybook shutdown handler leak on SSH connection failure", () => {
     expect(disconnect).toHaveBeenCalled()
     expect(process.exitCode).toBe(143)
   })
+
+  it("does not start apply() for a regular module when SIGINT arrives after check()", async () => {
+    const capturedConfigs: unknown[] = []
+
+    vi.doMock("../src/ssh.js", () => ({
+      shellQuote: (s: string) => `'${s}'`,
+      SshConnectionImpl: makeMockSshClass(capturedConfigs),
+    }))
+
+    const { runPlaybook } = await import("../src/runner.js")
+
+    const interruptedModule: Module = {
+      apply: vi.fn().mockResolvedValue({ status: "changed" } satisfies ModuleResult),
+      check: vi.fn().mockImplementation(() => {
+        process.emit("SIGINT", "SIGINT")
+        return "needs-apply"
+      }),
+      name: "interrupt-between-check-and-apply",
+    }
+    const laterModule: Module = {
+      apply: vi.fn().mockResolvedValue({ status: "changed" } satisfies ModuleResult),
+      check: vi.fn().mockResolvedValue("needs-apply"),
+      name: "later-module",
+    }
+
+    const definition: ServerDefinition = {
+      host: "1.2.3.4",
+      name: "test-server",
+      run: [interruptedModule, laterModule],
+      ssh: { ports: [22], privateKey: "~/.ssh/id", user: "root" },
+    }
+
+    await expect(runPlaybook(definition)).resolves.toBeUndefined()
+
+    expect(interruptedModule.apply).not.toHaveBeenCalled()
+    expect(laterModule.check).not.toHaveBeenCalled()
+    expect(process.exitCode).toBe(130)
+  })
 })
 
 // Bug regression: recipes must NOT apply() child modules in dry-run mode, only check()
@@ -1829,6 +1867,45 @@ describe("runPlaybook dry-run recipe behaviour", () => {
     expect(laterModule.check).not.toHaveBeenCalled()
     expect(laterModule.apply).not.toHaveBeenCalled()
     expect(process.exitCode).toBe(1)
+  })
+
+  it("does not start dry-run blocker apply() when SIGTERM arrives after check()", async () => {
+    const capturedConfigs: unknown[] = []
+
+    vi.doMock("../src/ssh.js", () => ({
+      shellQuote: (s: string) => `'${s}'`,
+      SshConnectionImpl: makeMockSshClass(capturedConfigs),
+    }))
+
+    const { runPlaybook } = await import("../src/runner.js")
+
+    const dryRunBlocker: Module = {
+      _dryRunBlocker: true,
+      apply: vi.fn().mockResolvedValue({ status: "failed" } satisfies ModuleResult),
+      check: vi.fn().mockImplementation(() => {
+        process.emit("SIGTERM", "SIGTERM")
+        return "needs-apply"
+      }),
+      name: "dry-run-blocker",
+    }
+    const laterModule: Module = {
+      apply: vi.fn().mockResolvedValue({ status: "changed" } satisfies ModuleResult),
+      check: vi.fn().mockResolvedValue("needs-apply"),
+      name: "later-module",
+    }
+
+    const definition: ServerDefinition = {
+      host: "1.2.3.4",
+      name: "test-server",
+      run: [dryRunBlocker, laterModule],
+      ssh: { ports: [22], privateKey: "~/.ssh/id", user: "root" },
+    }
+
+    await runPlaybook(definition, { dryRun: true })
+
+    expect(dryRunBlocker.apply).not.toHaveBeenCalled()
+    expect(laterModule.check).not.toHaveBeenCalled()
+    expect(process.exitCode).toBe(143)
   })
 
   it("treats recipe child assert() as a blocker in dry-run mode and stops later recipe children", async () => {
