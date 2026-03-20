@@ -1,10 +1,10 @@
 import type { RecipeModule } from "./recipe.js"
 import type { SshConnectionImpl } from "./ssh.js"
-import type { Environment } from "./types.js"
+import type { Environment, ModuleStatus } from "./types.js"
 
 import { printModuleResult, printRecipeHeader } from "./output.js"
 
-type StepResult = { env: Environment; shouldBreak: boolean; status?: string }
+type StepResult = { env: Environment; shouldBreak: boolean; status?: ModuleStatus }
 
 export async function dryRunRecipeModule(
   recipeModule: RecipeModule,

@@ -50,6 +50,9 @@ export type ModuleMetaEntry =
 /** Check result indicating the module's desired state is not yet present. */
 export const NEEDS_APPLY = "needs-apply" as const
 
+/** Execution status emitted by a module apply step. */
+export type ModuleStatus = "changed" | "failed" | "ok" | "skipped"
+
 /** The outcome of a module's apply step. */
 export type ModuleResult = {
   /** Optional error details consumed by the runner for centralized CLI output. */
@@ -57,7 +60,7 @@ export type ModuleResult = {
   /** Optional typed meta entries for env propagation and runner control-plane updates. */
   meta?: ModuleMetaEntry[]
   /** Execution status of the module. */
-  status: "changed" | "failed" | "ok" | "skipped"
+  status: ModuleStatus
 }
 
 /**

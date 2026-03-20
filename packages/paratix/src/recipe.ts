@@ -5,6 +5,7 @@ import {
   type Module,
   type ModuleMetaEntry,
   type ModuleResult,
+  type ModuleStatus,
   NEEDS_APPLY,
   type SshConnection,
 } from "./types.js"
@@ -31,12 +32,12 @@ export type RecipeModule = {
 type RecipeState = {
   env: Environment
   meta?: ModuleMetaEntry[]
-  status: "changed" | "failed" | "ok"
+  status: Exclude<ModuleStatus, "skipped">
 }
 
 function applyRecipeStepToState(
   state: RecipeState,
-  step: { env: Environment; meta?: ModuleMetaEntry[]; status: string }
+  step: { env: Environment; meta?: ModuleMetaEntry[]; status: ModuleStatus }
 ): RecipeState {
   const nextMeta = step.meta == null ? (state.meta ?? []) : [...(state.meta ?? []), ...step.meta]
   let nextStatus = state.status
@@ -70,7 +71,7 @@ async function executeOneModule(parameters: {
   ssh: null | SshConnection
   targetModule: Module
   verbose?: boolean
-}): Promise<{ env: Environment; meta?: ModuleMetaEntry[]; status: string } | null> {
+}): Promise<{ env: Environment; meta?: ModuleMetaEntry[]; status: ModuleStatus } | null> {
   const { currentEnvironment, ssh, targetModule } = parameters
   const verbose = parameters.verbose ?? false
   const connection = targetModule.local === true ? null : ssh
@@ -130,12 +131,12 @@ function handleSignalResultWithVerbosity(
   name: string,
   result: ModuleResult,
   verbose: boolean
-): "changed" | "failed" {
+): Extract<ModuleStatus, "changed" | "failed" | "ok" | "skipped"> {
   printModuleResult(`signal: ${name}`, result.status)
   if (result.status === "failed" && result.error != null) {
     printCommandFailure(result.error, verbose)
   }
-  return result.status === "failed" ? "failed" : "changed"
+  return result.status
 }
 
 async function triggerSignals(parameters: {

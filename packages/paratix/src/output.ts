@@ -1,10 +1,13 @@
 import pc from "picocolors"
 
+import type { ModuleStatus } from "./types.js"
+
 import { CommandError } from "./sshHelpers.js"
 
 const MODULE_NAME_WIDTH = 36
+type DisplayStatus = "waiting" | ModuleStatus
 
-const STATUS_ICONS: Record<string, string> = {
+const STATUS_ICONS: Record<DisplayStatus, string> = {
   changed: pc.yellow("\u21ba"),
   failed: pc.red("\u2717"),
   ok: pc.green("\u2713"),
@@ -28,27 +31,26 @@ export function printRecipeHeader(name: string): void {
  * @param status - One of the known status strings (`ok`, `changed`, `skipped`, `failed`).
  * @param detail - Optional short detail appended in dim text after the status.
  */
-export function printModuleResult(name: string, status: string, detail?: string): void {
-  const icon = STATUS_ICONS[status] ?? " "
+export function printModuleResult(name: string, status: DisplayStatus, detail?: string): void {
+  const icon = STATUS_ICONS[status]
   let statusText: string
   switch (status) {
     case "changed": {
       statusText = pc.yellow(status)
-
       break
     }
     case "failed": {
       statusText = pc.red(status)
-
       break
     }
     case "ok": {
       statusText = pc.green(status)
-
       break
     }
-    default: {
+    case "skipped":
+    case "waiting": {
       statusText = pc.dim(status)
+      break
     }
   }
 

@@ -1,6 +1,6 @@
 /* eslint-disable max-lines -- central runner orchestration stays intentionally co-located */
 import type { RecipeModule } from "./recipe.js"
-import type { Environment, Module, ModuleResult, ServerDefinition } from "./types.js"
+import type { Environment, Module, ModuleResult, ModuleStatus, ServerDefinition } from "./types.js"
 
 import { dryRunRecipeModule } from "./dryRunRecipe.js"
 import { loadDotEnvironment, mergeEnvironment } from "./environment.js"
@@ -81,7 +81,7 @@ class RunStats {
     this.signals++
   }
 
-  public update(status: string): void {
+  public update(status: ModuleStatus): void {
     switch (status) {
       case "changed": {
         this.changed++
@@ -99,14 +99,11 @@ class RunStats {
         this.skipped++
         break
       }
-      default: {
-        break
-      }
     }
   }
 }
 
-type StepResult = { env: Environment; shouldBreak: boolean; status?: string }
+type StepResult = { env: Environment; shouldBreak: boolean; status?: ModuleStatus }
 
 function isRecipe(target: Module): target is RecipeModule {
   // eslint-disable-next-line @typescript-eslint/no-unsafe-type-assertion -- RecipeModule uses _isRecipe as discriminator
