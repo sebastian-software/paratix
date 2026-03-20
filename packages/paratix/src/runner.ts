@@ -1,6 +1,13 @@
 /* eslint-disable max-lines -- central runner orchestration stays intentionally co-located */
 import type { RecipeModule } from "./recipe.js"
-import type { Environment, Module, ModuleResult, ModuleStatus, ServerDefinition } from "./types.js"
+import type {
+  Environment,
+  Module,
+  ModuleResult,
+  ModuleStatus,
+  OrchestrationStep,
+  ServerDefinition,
+} from "./types.js"
 
 import { dryRunRecipeModule } from "./dryRunRecipe.js"
 import { loadDotEnvironment, mergeEnvironment } from "./environment.js"
@@ -143,12 +150,11 @@ async function initializeEnvironment(
   return mergeEnvironment({}, dotEnvironment, definition.env, options.envOverrides)
 }
 
-function hasRebootMeta(result: ModuleResult): boolean {
-  return result.meta?.some(isSystemRebootMetaEntry) ?? false
-}
-
-async function handlePortChange(ssh: SshConnectionImpl, result: ModuleResult): Promise<void> {
-  const portEntry = result.meta?.find(isSshdPortMetaEntry)
+async function handlePortChange(
+  ssh: SshConnectionImpl,
+  metaEntries: ModuleResult["meta"]
+): Promise<void> {
+  const portEntry = metaEntries?.find((entry) => isSshdPortMetaEntry(entry))
   if (portEntry == null) return
 
   const newPort = portEntry.port
@@ -156,7 +162,7 @@ async function handlePortChange(ssh: SshConnectionImpl, result: ModuleResult): P
 
   // Skip reconnect when a reboot is pending — the reboot handler will
   // reconnect on all registered ports (including the newly added one).
-  if (hasRebootMeta(result)) return
+  if (metaEntries?.some((entry) => isSystemRebootMetaEntry(entry)) ?? false) return
 
   try {
     await ssh.reconnect()
@@ -169,10 +175,13 @@ async function handlePortChange(ssh: SshConnectionImpl, result: ModuleResult): P
   }
 }
 
-async function handleReboot(ssh: SshConnectionImpl, result: ModuleResult): Promise<void> {
-  if (!hasRebootMeta(result)) return
+async function handleReboot(
+  ssh: SshConnectionImpl,
+  metaEntries: ModuleResult["meta"]
+): Promise<void> {
+  if (!(metaEntries?.some((entry) => isSystemRebootMetaEntry(entry)) ?? false)) return
 
-  const hostEntry = result.meta?.find(isSystemHostMetaEntry)
+  const hostEntry = metaEntries?.find((entry) => isSystemHostMetaEntry(entry))
   if (hostEntry != null) {
     ssh.updateHost(hostEntry.host)
   }
@@ -185,6 +194,16 @@ async function handleReboot(ssh: SshConnectionImpl, result: ModuleResult): Promi
   }
 }
 
+async function applyRunnerControlPlaneMeta(
+  ssh: SshConnectionImpl,
+  step: Pick<OrchestrationStep, "meta">
+): Promise<void> {
+  if (step.meta == null) return
+  assertValidModuleMetaEntries(step.meta)
+  await handlePortChange(ssh, step.meta)
+  await handleReboot(ssh, step.meta)
+}
+
 async function handleMetaAndBuildResult(
   ssh: SshConnectionImpl,
   environment: Environment,
@@ -193,10 +212,8 @@ async function handleMetaAndBuildResult(
   let currentEnvironment = environment
 
   if (result.meta != null) {
-    assertValidModuleMetaEntries(result.meta)
     currentEnvironment = await mergeEnvironmentFromMeta(currentEnvironment, result.meta)
-    await handlePortChange(ssh, result)
-    await handleReboot(ssh, result)
+    await applyRunnerControlPlaneMeta(ssh, { meta: result.meta })
   }
 
   return { env: currentEnvironment, shouldBreak: result.status === "failed", status: result.status }
@@ -224,6 +241,9 @@ async function runRecipeModule(
     }
 
     const result = await recipeModule.apply(ssh, environment, {
+      onChildStep: async (step) => {
+        await applyRunnerControlPlaneMeta(ssh, step)
+      },
       shutdownSignal,
       signalHooks: {
         onSignalFinished: (status: ModuleStatus) => {

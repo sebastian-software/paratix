@@ -64,6 +64,17 @@ export type ModuleResult = {
 }
 
 /**
+ * Internal orchestration step shape shared between runner and recipe execution.
+ * Contains the merged downstream environment after a single apply step.
+ * @internal
+ */
+export type OrchestrationStep = {
+  env: Environment
+  meta?: ModuleMetaEntry[]
+  status: ModuleStatus
+}
+
+/**
  * A single idempotent unit of work that can be checked and applied.
  * Modules form the building blocks of a server recipe.
  */

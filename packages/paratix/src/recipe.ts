@@ -1,4 +1,4 @@
-import { mergeEnvironmentFromMeta } from "./meta.js"
+import { isEnvironmentMetaEntry, mergeEnvironmentFromMeta } from "./meta.js"
 import { printCommandFailure, printModuleResult, printRecipeHeader } from "./output.js"
 import { runSignalModules, type SignalHooks } from "./signalOrchestration.js"
 import {
@@ -8,6 +8,7 @@ import {
   type ModuleResult,
   type ModuleStatus,
   NEEDS_APPLY,
+  type OrchestrationStep,
   type SshConnection,
 } from "./types.js"
 
@@ -24,6 +25,7 @@ export type RecipeModule = {
     ssh: null | SshConnection,
     environment: Environment,
     options?: {
+      onChildStep?: (step: OrchestrationStep) => Promise<void>
       shutdownSignal?: () => NodeJS.Signals | null
       signalHooks?: SignalHooks
       verbose?: boolean
@@ -39,9 +41,18 @@ type RecipeState = {
 
 function applyRecipeStepToState(
   state: RecipeState,
-  step: { env: Environment; meta?: ModuleMetaEntry[]; status: ModuleStatus }
+  step: OrchestrationStep,
+  preserveControlPlaneMeta: boolean
 ): RecipeState {
-  const nextMeta = step.meta == null ? (state.meta ?? []) : [...(state.meta ?? []), ...step.meta]
+  let stepMeta: ModuleMetaEntry[] | undefined
+  if (step.meta == null) {
+    stepMeta = undefined
+  } else if (preserveControlPlaneMeta) {
+    stepMeta = step.meta
+  } else {
+    stepMeta = step.meta.filter(isEnvironmentMetaEntry)
+  }
+  const nextMeta = stepMeta == null ? (state.meta ?? []) : [...(state.meta ?? []), ...stepMeta]
   let nextStatus = state.status
   if (step.status === "failed") nextStatus = "failed"
   else if (step.status === "changed") nextStatus = "changed"
@@ -73,7 +84,7 @@ async function executeOneModule(parameters: {
   ssh: null | SshConnection
   targetModule: Module
   verbose?: boolean
-}): Promise<{ env: Environment; meta?: ModuleMetaEntry[]; status: ModuleStatus } | null> {
+}): Promise<null | OrchestrationStep> {
   const { currentEnvironment, ssh, targetModule } = parameters
   const verbose = parameters.verbose ?? false
   const connection = targetModule.local === true ? null : ssh
@@ -99,10 +110,13 @@ async function executeModules(
   ssh: null | SshConnection,
   parameters: {
     environment: Environment
+    onChildStep?: (step: OrchestrationStep) => Promise<void>
     shutdownSignal?: () => NodeJS.Signals | null
     verbose?: boolean
   }
 ): Promise<RecipeState> {
+  const onChildStep = parameters.onChildStep
+  const preserveControlPlaneMeta = onChildStep == null
   const shutdownSignal = parameters.shutdownSignal ?? (() => null)
   const verbose = parameters.verbose ?? false
   let state: RecipeState = {
@@ -122,7 +136,12 @@ async function executeModules(
     })
     if (step == null) continue
 
-    state = applyRecipeStepToState(state, step)
+    if (onChildStep != null) {
+      // eslint-disable-next-line no-await-in-loop
+      await onChildStep(step)
+    }
+
+    state = applyRecipeStepToState(state, step, preserveControlPlaneMeta)
     if (state.status === "failed") return state
   }
 
@@ -152,6 +171,7 @@ async function applyRecipe(parameters: {
   modules: Module[]
   name: string
   options?: {
+    onChildStep?: (step: OrchestrationStep) => Promise<void>
     shutdownSignal?: () => NodeJS.Signals | null
     signalHooks?: SignalHooks
     verbose?: boolean
@@ -164,6 +184,7 @@ async function applyRecipe(parameters: {
   printRecipeHeader(parameters.name)
   const state = await executeModules(parameters.modules, parameters.ssh, {
     environment: parameters.environment,
+    onChildStep: parameters.options?.onChildStep,
     shutdownSignal,
     verbose,
   })
@@ -221,6 +242,7 @@ export function recipe(
       ssh: null | SshConnection,
       environment: Environment,
       parameters?: {
+        onChildStep?: (step: OrchestrationStep) => Promise<void>
         shutdownSignal?: () => NodeJS.Signals | null
         signalHooks?: SignalHooks
         verbose?: boolean
