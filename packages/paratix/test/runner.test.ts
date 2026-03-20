@@ -649,6 +649,84 @@ describe("runPlaybook signal handling", () => {
     expect(process.exitCode).toBe(130)
   })
 
+  it("does not count an interrupt during a running module as a regular failure in stats or summary", async () => {
+    const consoleLogs: string[] = []
+
+    vi.doMock("../src/ssh.js", () => ({
+      shellQuote: (s: string) => `'${s}'`,
+      SshConnectionImpl: makeMockSshClass(capturedConfigs, { disconnect: disconnectFn }),
+    }))
+    vi.spyOn(console, "log").mockImplementation((...args) => {
+      consoleLogs.push(args.join(" "))
+    })
+
+    const { runPlaybook } = await import("../src/runner.js")
+
+    const interruptedModule: Module = {
+      apply: vi.fn().mockImplementationOnce(async () => {
+        await Promise.resolve()
+        process.emit("SIGINT", "SIGINT")
+        throw new Error("socket closed during shutdown")
+      }),
+      check: vi.fn().mockResolvedValue("needs-apply"),
+      name: "interrupted-module",
+    }
+
+    const definition: ServerDefinition = {
+      host: "1.2.3.4",
+      name: "test-server",
+      run: [interruptedModule],
+      ssh: { ports: [22], privateKey: "~/.ssh/id", user: "root" },
+    }
+
+    await runPlaybook(definition)
+
+    const output = consoleLogs.join("\n")
+    expect(output).toContain("0 failed")
+    expect(output).not.toContain("interrupted-module")
+    expect(process.exitCode).toBe(130)
+  })
+
+  it("does not count an interrupt during a running recipe as a regular failure in stats or summary", async () => {
+    const consoleLogs: string[] = []
+
+    vi.doMock("../src/ssh.js", () => ({
+      shellQuote: (s: string) => `'${s}'`,
+      SshConnectionImpl: makeMockSshClass(capturedConfigs, { disconnect: disconnectFn }),
+    }))
+    vi.spyOn(console, "log").mockImplementation((...args) => {
+      consoleLogs.push(args.join(" "))
+    })
+
+    const { runPlaybook } = await import("../src/runner.js")
+
+    const interruptedRecipe = {
+      _isRecipe: true as const,
+      _modules: [],
+      apply: vi.fn().mockImplementationOnce(async () => {
+        await Promise.resolve()
+        process.emit("SIGTERM", "SIGTERM")
+        throw new Error("recipe transport closed during shutdown")
+      }),
+      check: vi.fn().mockResolvedValue("needs-apply" as const),
+      name: "interrupted-recipe",
+    }
+
+    const definition: ServerDefinition = {
+      host: "1.2.3.4",
+      name: "test-server",
+      run: [interruptedRecipe],
+      ssh: { ports: [22], privateKey: "~/.ssh/id", user: "root" },
+    }
+
+    await runPlaybook(definition)
+
+    const output = consoleLogs.join("\n")
+    expect(output).toContain("0 failed")
+    expect(output).not.toContain("interrupted-recipe")
+    expect(process.exitCode).toBe(143)
+  })
+
   it("does not run top-level signals when the module loop ended with both changed and failed results", async () => {
     vi.doMock("../src/ssh.js", () => ({
       shellQuote: (s: string) => `'${s}'`,

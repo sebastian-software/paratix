@@ -106,6 +106,25 @@ class RunStats {
 
 type StepResult = { env: Environment; shouldBreak: boolean; status?: ModuleStatus }
 
+function interruptedStepResult(environment: Environment): StepResult {
+  return { env: environment, shouldBreak: true }
+}
+
+function handleCaughtStepError(parameters: {
+  environment: Environment
+  error: unknown
+  moduleName: string
+  shutdownSignal: () => NodeJS.Signals | null
+  verbose: boolean
+}): StepResult {
+  if (parameters.shutdownSignal() != null) {
+    return interruptedStepResult(parameters.environment)
+  }
+  printModuleResult(parameters.moduleName, "failed")
+  printCommandFailure(parameters.error, parameters.verbose)
+  return { env: parameters.environment, shouldBreak: true, status: "failed" }
+}
+
 function isRecipe(target: Module): target is RecipeModule {
   // eslint-disable-next-line @typescript-eslint/no-unsafe-type-assertion -- RecipeModule uses _isRecipe as discriminator
   return "_isRecipe" in target && (target as RecipeModule)._isRecipe
@@ -214,9 +233,13 @@ async function runRecipeModule(
     })
     return await handleMetaAndBuildResult(ssh, environment, result)
   } catch (error) {
-    printModuleResult(recipeModule.name, "failed")
-    printCommandFailure(error, verbose)
-    return { env: environment, shouldBreak: true, status: "failed" }
+    return handleCaughtStepError({
+      environment,
+      error,
+      moduleName: recipeModule.name,
+      shutdownSignal,
+      verbose,
+    })
   }
 }
 
@@ -239,6 +262,7 @@ async function applyModule(parameters: {
 type RegularModuleArguments = {
   dryRun: boolean
   env: Environment
+  shutdownSignal: () => NodeJS.Signals | null
   ssh: SshConnectionImpl
   targetModule: Module
   verbose: boolean
@@ -246,6 +270,7 @@ type RegularModuleArguments = {
 
 async function runRegularModule(parameters: RegularModuleArguments): Promise<StepResult> {
   const { dryRun, env, ssh, targetModule, verbose } = parameters
+  const shutdownSignal = parameters.shutdownSignal
 
   try {
     const connection = targetModule.local === true ? null : ssh
@@ -268,9 +293,13 @@ async function runRegularModule(parameters: RegularModuleArguments): Promise<Ste
       verbose,
     })
   } catch (error) {
-    printModuleResult(targetModule.name, "failed")
-    printCommandFailure(error, verbose)
-    return { env, shouldBreak: true, status: "failed" }
+    return handleCaughtStepError({
+      environment: env,
+      error,
+      moduleName: targetModule.name,
+      shutdownSignal,
+      verbose,
+    })
   }
 }
 
@@ -305,6 +334,7 @@ async function runModuleLoop(parameters: LoopArguments): Promise<Environment> {
       : runRegularModule({
           dryRun,
           env: currentEnvironment,
+          shutdownSignal,
           ssh,
           targetModule: currentModule,
           verbose,
