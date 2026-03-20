@@ -36,6 +36,20 @@ function makeNeedsApplyModule(applyStatus: "changed" | "failed" | "ok" = "change
   }
 }
 
+function makeFailedModule(errorMessage: string): Module {
+  return {
+    // eslint-disable-next-line @typescript-eslint/require-await -- Interface requires async
+    async apply() {
+      return { error: new Error(errorMessage), status: "failed" as const }
+    },
+    // eslint-disable-next-line @typescript-eslint/require-await -- Interface requires async
+    async check() {
+      return "needs-apply"
+    },
+    name: `failed-module: ${errorMessage}`,
+  }
+}
+
 describe("assert", () => {
   it("check returns ok when condition is true", async () => {
     const mod = assert(() => true, "condition must be true")
@@ -61,6 +75,8 @@ describe("assert", () => {
     // eslint-disable-next-line prefer-spread
     const result = await mod.apply(null, emptyEnv)
     expect(result.status).toBe("failed")
+    expect(result.error).toBeInstanceOf(Error)
+    expect(result.error?.message).toBe("[assert] condition must be true")
   })
 
   it("passes env to the condition function", async () => {
@@ -100,14 +116,12 @@ describe("fail", () => {
   })
 
   it("apply always returns failed", async () => {
-    const consoleSpy = vi.spyOn(console, "error").mockImplementation(() => {
-      /* noop */
-    })
     const mod = fail("something went wrong")
     // eslint-disable-next-line prefer-spread
     const result = await mod.apply(null, emptyEnv)
     expect(result.status).toBe("failed")
-    consoleSpy.mockRestore()
+    expect(result.error).toBeInstanceOf(Error)
+    expect(result.error?.message).toBe("[fail] something went wrong")
   })
 })
 
@@ -194,16 +208,27 @@ describe("when", () => {
     expect(result.status).toBe("ok")
   })
 
-  it("apply returns failed when an inner module returns failed", async () => {
-    const consoleSpy = vi.spyOn(console, "error").mockImplementation(() => {
-      /* noop */
-    })
-    const innerModule = makeNeedsApplyModule("failed")
+  it("apply propagates error details when an inner module returns failed", async () => {
+    const innerModule = makeFailedModule("inner module exploded")
     const mod = when(() => true, innerModule)
     // eslint-disable-next-line prefer-spread
     const result = await mod.apply(null, emptyEnv)
     expect(result.status).toBe("failed")
-    consoleSpy.mockRestore()
+    expect(result.error).toBeInstanceOf(Error)
+    expect(result.error?.message).toBe("inner module exploded")
+  })
+
+  it("apply propagates nested when child errors without overwriting them", async () => {
+    const nestedFailingModule = makeFailedModule("nested child failure")
+    const nestedWhen = when(() => true, nestedFailingModule)
+    const mod = when(() => true, nestedWhen)
+
+    // eslint-disable-next-line prefer-spread
+    const result = await mod.apply(null, emptyEnv)
+
+    expect(result.status).toBe("failed")
+    expect(result.error).toBeInstanceOf(Error)
+    expect(result.error?.message).toBe("nested child failure")
   })
 
   // Bug #13 regression: when().check() must copy the environment before passing it to inner modules

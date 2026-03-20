@@ -1,4 +1,5 @@
 import { mergeEnvironmentFromMeta } from "./meta.js"
+import { failed } from "./moduleFailure.js"
 import {
   type Environment,
   type Module,
@@ -29,7 +30,7 @@ export function assert(condition: (environment: Environment) => boolean, message
       if (condition(environment)) {
         return { status: "ok" }
       }
-      return { status: "failed" }
+      return failed(`[assert] ${message}`)
     },
     // eslint-disable-next-line @typescript-eslint/require-await -- Interface requires async
     async check(
@@ -76,8 +77,7 @@ export function fail(message: string): Module {
     _dryRunBlocker: true,
     // eslint-disable-next-line @typescript-eslint/require-await -- Interface requires async
     async apply(): Promise<ModuleResult> {
-      console.error(`  [fail] ${message}`)
-      return { status: "failed" }
+      return failed(`[fail] ${message}`)
     },
     // eslint-disable-next-line @typescript-eslint/require-await -- Interface requires async
     async check(): Promise<"needs-apply" | "ok"> {
@@ -133,7 +133,7 @@ async function applyConditionalModules(
 
     // eslint-disable-next-line no-await-in-loop
     const result = await currentModule.apply(ssh, currentEnvironment)
-    if (result.status === "failed") return { status: "failed" }
+    if (result.status === "failed") return result
     if (result.meta != null) aggregatedMeta.push(...result.meta)
     // eslint-disable-next-line no-await-in-loop -- downstream env must see each module's meta in order
     currentEnvironment = await mergeEnvironmentFromMeta(currentEnvironment, result.meta)
