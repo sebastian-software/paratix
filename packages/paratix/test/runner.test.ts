@@ -1739,6 +1739,45 @@ describe("runPlaybook shutdown handler leak on SSH connection failure", () => {
     expect(process.exitCode).toBe(143)
   })
 
+  it("aborts an active sudo prompt on the first SIGINT instead of waiting for a second signal", async () => {
+    const disconnect = vi.fn()
+
+    vi.doMock("../src/ssh.js", () => ({
+      shellQuote: (s: string) => `'${s}'`,
+      SshConnectionImpl: class MockPromptAbortable {
+        public connect = vi.fn().mockResolvedValue(null)
+        public disconnect = disconnect
+        public probeSudo = vi.fn().mockImplementation(
+          async ({ abortSignal }: { abortSignal?: AbortSignal } = {}) =>
+            new Promise((_, reject) => {
+              abortSignal?.addEventListener(
+                "abort",
+                () => {
+                  reject(abortSignal.reason as Error)
+                },
+                { once: true }
+              )
+              process.emit("SIGINT", "SIGINT")
+            })
+        )
+      },
+    }))
+
+    const { runPlaybook } = await import("../src/runner.js")
+
+    const definition: ServerDefinition = {
+      host: "1.2.3.4",
+      name: "test-server",
+      run: [],
+      ssh: { ports: [22], privateKey: "~/.ssh/id", user: "root" },
+    }
+
+    await expect(runPlaybook(definition)).resolves.toBeUndefined()
+
+    expect(disconnect).toHaveBeenCalled()
+    expect(process.exitCode).toBe(130)
+  })
+
   it("does not start apply() for a regular module when SIGINT arrives after check()", async () => {
     const capturedConfigs: unknown[] = []
 

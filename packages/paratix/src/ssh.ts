@@ -50,6 +50,7 @@ const RECONNECT_BASE_DELAY = 1000
 const RECONNECT_MAX_DELAY = 30_000
 
 type AuthMethod = "agent" | "password" | "privateKey" | null
+type PromptOptions = { abortSignal?: AbortSignal }
 
 type SshRuntimeState = {
   host: string
@@ -110,11 +111,12 @@ export class SshConnectionImpl implements SshConnection {
    *    when `passwordFallback` is enabled. Throws if the environment variable
    *    is not set.
    *
+   * @param options - Optional prompt behavior for interactive password fallback.
    * @throws {Error} When no port in `config.ports` accepts the connection.
    */
-  public async connect(): Promise<void> {
+  public async connect(options?: PromptOptions): Promise<void> {
     if (this.config.privateKey == null) {
-      await this.connectViaAgent()
+      await this.connectViaAgent(options)
       return
     }
     // eslint-disable-next-line security/detect-non-literal-fs-filename
@@ -127,7 +129,8 @@ export class SshConnectionImpl implements SshConnection {
       if (this.config.passwordFallback) {
         const password = await promptTerminal(
           `Password for ${this.config.user}@${this.runtime.host}: `,
-          true
+          true,
+          options
         )
         if (await this.tryConnectOnPorts(privateKey, password)) {
           this.authMethod = "password"
@@ -242,8 +245,10 @@ export class SshConnectionImpl implements SshConnection {
   /**
    * Probe whether passwordless sudo is available. If not, prompt the user
    * for a password and cache it for the remainder of the run.
+   *
+   * @param options - Optional prompt behavior for the interactive sudo password prompt.
    */
-  public async probeSudo(): Promise<void> {
+  public async probeSudo(options?: PromptOptions): Promise<void> {
     if (this.config.user === "root" || this.cachedSudoPassword != null) return
     await this.ensureSudoInstalled()
     try {
@@ -254,7 +259,8 @@ export class SshConnectionImpl implements SshConnection {
     }
     const password = await promptTerminal(
       `[sudo] password for ${this.config.user}@${this.runtime.host}: `,
-      true
+      true,
+      options
     )
     if (password.includes("\n") || password.includes("\r")) {
       throw new Error("Sudo password must not contain newline characters")
@@ -435,7 +441,7 @@ export class SshConnectionImpl implements SshConnection {
     }
   }
 
-  private async connectViaAgent(): Promise<void> {
+  private async connectViaAgent(options?: PromptOptions): Promise<void> {
     const agent = process.env.SSH_AUTH_SOCK
     if (agent == null || agent.length === 0) {
       throw new Error("No privateKey configured and SSH_AUTH_SOCK is not set")
@@ -451,7 +457,7 @@ export class SshConnectionImpl implements SshConnection {
       this.authMethod = "agent"
       return
     }
-    if (await this.tryAgentPasswordFallback(agent)) return
+    if (await this.tryAgentPasswordFallback(agent, options)) return
     throw new Error(
       `Could not connect to ${this.runtime.host} via SSH agent on ports ${this.runtime.ports.join(", ")}`
     )
@@ -616,11 +622,12 @@ export class SshConnectionImpl implements SshConnection {
     return { command: `sudo bash -c ${quoted}`, needsPassword: false }
   }
 
-  private async tryAgentPasswordFallback(agent: string): Promise<boolean> {
+  private async tryAgentPasswordFallback(agent: string, options?: PromptOptions): Promise<boolean> {
     if (!this.config.passwordFallback) return false
     const password = await promptTerminal(
       `Password for ${this.config.user}@${this.runtime.host}: `,
-      true
+      true,
+      options
     )
     if (!(await this.tryConnectOnPorts(undefined, password, agent))) return false
     this.authMethod = "password"

@@ -2100,6 +2100,48 @@ describe("SshConnectionImpl", () => {
   // -------------------------------------------------------------------------
 
   describe("probeSudo", () => {
+    it("aborts an interactive sudo prompt via abortSignal on the first shutdown signal (regression)", async () => {
+      const abortError = new Error("Terminal prompt interrupted by SIGINT")
+
+      vi.mocked(promptTerminal).mockImplementationOnce(
+        async (_question: string, _hidden = false, options?: { abortSignal?: AbortSignal }) =>
+          new Promise((_, reject) => {
+            const abortSignal = options?.abortSignal
+            abortSignal?.throwIfAborted()
+            abortSignal?.addEventListener(
+              "abort",
+              () => {
+                reject(abortError)
+              },
+              { once: true }
+            )
+          })
+      )
+
+      const execSpy = vi
+        .fn()
+        .mockImplementationOnce((_command: string, callback: ExecCallback) => {
+          const stream = makeStream()
+          callback(undefined, stream)
+          stream.emit("close", 0)
+        })
+        .mockImplementationOnce((_command: string, callback: ExecCallback) => {
+          const stream = makeStream()
+          callback(undefined, stream)
+          stream.emit("close", 1)
+        })
+
+      const client = makeClientWithExecSpy(execSpy)
+      const ssh = makeConnectedSsh(client, { user: "deploy" })
+      const abortController = new AbortController()
+      const probePromise = ssh.probeSudo({ abortSignal: abortController.signal })
+
+      abortController.abort(abortError)
+
+      await expect(probePromise).rejects.toThrow("Terminal prompt interrupted by SIGINT")
+      expect(promptTerminal).toHaveBeenCalledOnce()
+    })
+
     it("treats undefined ssh2 close code as exit code 0 in execWithoutSudo (regression)", async () => {
       const execSpy = vi.fn().mockImplementation((_command: string, callback: ExecCallback) => {
         const stream = makeStream()

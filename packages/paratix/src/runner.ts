@@ -31,6 +31,7 @@ import { SshConnectionImpl } from "./ssh.js"
 /** Holds the shutdown listener, SSH setter, and getter for the first received signal. */
 type ShutdownState = {
   handleShutdownSignal: (signal: NodeJS.Signals) => void
+  promptAbortSignal: AbortSignal
   setSsh: (connection: SshConnectionImpl) => void
   shutdownSignal: () => NodeJS.Signals | null
 }
@@ -42,6 +43,7 @@ type ShutdownState = {
 function setupShutdownHandlers(): ShutdownState {
   let receivedSignal: NodeJS.Signals | null = null
   let ssh: null | SshConnectionImpl = null
+  const promptAbortController = new AbortController()
 
   const handleShutdownSignal = (signal: NodeJS.Signals): void => {
     if (receivedSignal != null) {
@@ -49,6 +51,7 @@ function setupShutdownHandlers(): ShutdownState {
       process.exit(signalExitCode(signal))
     }
     receivedSignal = signal
+    promptAbortController.abort(new Error(`Terminal prompt interrupted by ${signal}`))
     console.error(`\nReceived ${signal}, shutting down…`)
     ssh?.disconnect()
   }
@@ -58,6 +61,7 @@ function setupShutdownHandlers(): ShutdownState {
 
   return {
     handleShutdownSignal,
+    promptAbortSignal: promptAbortController.signal,
     setSsh: (connection: SshConnectionImpl) => {
       ssh = connection
     },
@@ -457,10 +461,11 @@ function throwIfShutdownRequested(shutdownSignal: () => NodeJS.Signals | null): 
 async function connectAndRegister(parameters: {
   definition: ServerDefinition
   options: RunOptions
+  promptAbortSignal: AbortSignal
   setSsh: (c: SshConnectionImpl) => void
   shutdownSignal: () => NodeJS.Signals | null
 }): Promise<SshConnectionImpl> {
-  const { definition, options, setSsh, shutdownSignal } = parameters
+  const { definition, options, promptAbortSignal, setSsh, shutdownSignal } = parameters
   const sshConfig = {
     ...definition.ssh,
     ports: [...definition.ssh.ports],
@@ -469,10 +474,10 @@ async function connectAndRegister(parameters: {
   const ssh = new SshConnectionImpl(definition.host, sshConfig)
   setSsh(ssh)
   throwIfShutdownRequested(shutdownSignal)
-  await ssh.connect()
+  await ssh.connect({ abortSignal: promptAbortSignal })
   throwIfShutdownRequested(shutdownSignal)
   throwIfShutdownRequested(shutdownSignal)
-  await ssh.probeSudo()
+  await ssh.probeSudo({ abortSignal: promptAbortSignal })
   return ssh
 }
 
@@ -528,13 +533,20 @@ export async function runPlaybook(
 ): Promise<void> {
   const { dryRun = false, verbose = false } = options
   const environment = await initializeEnvironment(options, definition)
-  const { handleShutdownSignal, setSsh, shutdownSignal } = setupShutdownHandlers()
+  const { handleShutdownSignal, promptAbortSignal, setSsh, shutdownSignal } =
+    setupShutdownHandlers()
   const stats = new RunStats()
   let ssh: SshConnectionImpl | undefined
 
   // No catch block: connect errors propagate to cli.ts, which prints them and exits with code 2.
   try {
-    ssh = await connectAndRegister({ definition, options, setSsh, shutdownSignal })
+    ssh = await connectAndRegister({
+      definition,
+      options,
+      promptAbortSignal,
+      setSsh,
+      shutdownSignal,
+    })
     await executeRun({ definition, dryRun, environment, shutdownSignal, ssh, stats, verbose })
   } catch (error) {
     rethrowIfNotShutdown(error, shutdownSignal)
