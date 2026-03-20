@@ -192,10 +192,10 @@ The example contains:
 Env values come from three sources, merged in this order (last wins):
 
 1. `--env-file <path>`
-2. `--env <key=value>` flags
-3. The `env` field in `server()` -- this has the highest priority
+2. The `env` field in `server()`
+3. `--env <key=value>` flags -- these have the highest priority
 
-> **Note:** Because `server({ env })` has the highest priority, values defined there cannot be overridden from the CLI. Do not put secrets (passwords, tokens) or values you need to change per run in `server({ env })` -- use `.env` files or `--env` flags for those. Reserve the `env` field in `server()` for static defaults that are the same across every run.
+> **Note:** CLI `--env` flags override both `.env` files and `server({ env })`. Put stable project defaults in `server({ env })`, environment-specific values in `.env` files, and one-off overrides on the CLI.
 
 ### Template files
 

@@ -192,6 +192,12 @@ export default server({
 
 Modules can return `meta` in their result, which merges into the environment for subsequent modules.
 
+When environment values come from multiple sources, Paratix merges them in this order, with later values winning:
+
+1. `--env-file <path>`
+2. `server({ env })`
+3. `--env <key=value>`
+
 ### Templates
 
 `file.template()` deploys a file with `{{KEY}}` placeholders resolved from the environment.

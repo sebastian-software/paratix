@@ -1,4 +1,7 @@
 import { EventEmitter } from "node:events"
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs"
+import { tmpdir } from "node:os"
+import { join } from "node:path"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 
 import type {
@@ -3208,7 +3211,10 @@ describe("runSignals stats tracking", () => {
 
 // Bug regression: CLI --env overrides (options.envOverrides) must take priority over definition.env
 describe("runPlaybook environment merge priority", () => {
+  let tempDirectory: string
+
   beforeEach(() => {
+    tempDirectory = mkdtempSync(join(tmpdir(), "paratix-runner-env-"))
     vi.spyOn(console, "log").mockImplementation(() => {
       /* noop */
     })
@@ -3221,6 +3227,7 @@ describe("runPlaybook environment merge priority", () => {
   afterEach(() => {
     vi.restoreAllMocks()
     vi.resetModules()
+    rmSync(tempDirectory, { force: true, recursive: true })
     process.exitCode = 0
   })
 
@@ -3254,6 +3261,49 @@ describe("runPlaybook environment merge priority", () => {
     await runPlaybook(definition, { envOverrides: { APP_ENV: "from-cli-override" } })
 
     expect(capturedEnv.APP_ENV).toBe("from-cli-override")
+  })
+
+  it("merges env-file, server env, and CLI --env with CLI taking final precedence", async () => {
+    const capturedConfigs: unknown[] = []
+    const envFilePath = join(tempDirectory, ".env")
+    writeFileSync(envFilePath, "APP_ENV=from-env-file\nFROM_FILE=file-value\n")
+
+    vi.doMock("../src/ssh.js", () => ({
+      shellQuote: (s: string) => `'${s}'`,
+      SshConnectionImpl: makeMockSshClass(capturedConfigs),
+    }))
+
+    const { runPlaybook } = await import("../src/runner.js")
+
+    let capturedEnv: Record<string, unknown> = {}
+    const probeModule: Module = {
+      apply: vi.fn().mockResolvedValue({ status: "ok" } satisfies ModuleResult),
+      check: vi.fn().mockImplementation((_ssh: unknown, env: Record<string, unknown>) => {
+        capturedEnv = env
+      }),
+      name: "env-probe",
+    }
+
+    const definition: ServerDefinition = {
+      env: {
+        APP_ENV: "from-definition",
+        FROM_DEFINITION: "definition-value",
+      },
+      host: "1.2.3.4",
+      name: "test-server",
+      run: [probeModule],
+      ssh: { ports: [22], privateKey: "~/.ssh/id", user: "root" },
+    }
+
+    await runPlaybook(definition, {
+      envFile: envFilePath,
+      envOverrides: { APP_ENV: "from-cli-override", FROM_CLI: "cli-value" },
+    })
+
+    expect(capturedEnv.APP_ENV).toBe("from-cli-override")
+    expect(capturedEnv.FROM_FILE).toBe("file-value")
+    expect(capturedEnv.FROM_DEFINITION).toBe("definition-value")
+    expect(capturedEnv.FROM_CLI).toBe("cli-value")
   })
 })
 
