@@ -226,7 +226,7 @@ describe("recipe", () => {
 
       const mod = makeModule("needs-apply", "changed")
       const r = recipe("test-recipe", [mod], { signals: [firstSignal, secondSignal] })
-      const result = await r.apply(null, emptyEnv, () => receivedSignal)
+      const result = await r.apply(null, emptyEnv, { shutdownSignal: () => receivedSignal })
 
       expect(result.status).toBe("changed")
       expect(secondSignal.apply).not.toHaveBeenCalled()
@@ -330,7 +330,7 @@ describe("recipe", () => {
     }
 
     const r = recipe("test-recipe", [firstModule, secondModule])
-    const result = await r.apply(null, emptyEnv, () => receivedSignal)
+    const result = await r.apply(null, emptyEnv, { shutdownSignal: () => receivedSignal })
 
     expect(result.status).toBe("changed")
     expect(secondModule.check).not.toHaveBeenCalled()

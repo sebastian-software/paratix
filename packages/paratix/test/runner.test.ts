@@ -847,6 +847,60 @@ describe("runPlaybook failed result diagnostics", () => {
     expect(output).toContain("signal stdout")
     expect(process.exitCode).toBe(1)
   })
+
+  it("prints verbose diagnostics for failed recipe signals with the same output path as top-level signals", async () => {
+    const capturedConfigs: unknown[] = []
+    const consoleLogs: string[] = []
+
+    vi.doMock("../src/ssh.js", () => ({
+      shellQuote: (s: string) => `'${s}'`,
+      SshConnectionImpl: makeMockSshClass(capturedConfigs),
+    }))
+    vi.spyOn(console, "log").mockImplementation((...args) => {
+      consoleLogs.push(args.join(" "))
+    })
+
+    const [{ runPlaybook }, { recipe }, { CommandError }] = await Promise.all([
+      import("../src/runner.js"),
+      import("../src/recipe.js"),
+      import("../src/sshHelpers.js"),
+    ])
+
+    const changedModule: Module = {
+      apply: vi.fn().mockResolvedValue({ status: "changed" } satisfies ModuleResult),
+      check: vi.fn().mockResolvedValue("needs-apply"),
+      name: "changed-module",
+    }
+    const failingSignal: Module = {
+      apply: vi.fn().mockResolvedValue({
+        error: new CommandError(
+          "recipe signal failed summary",
+          "recipe signal stdout",
+          "recipe signal stderr"
+        ),
+        status: "failed",
+      } satisfies ModuleResult),
+      check: vi.fn().mockResolvedValue("needs-apply"),
+      name: "failing-recipe-signal",
+    }
+
+    const definition: ServerDefinition = {
+      host: "1.2.3.4",
+      name: "test-server",
+      run: [recipe("test-recipe", [changedModule], { signals: [failingSignal] })],
+      ssh: { ports: [22], privateKey: "~/.ssh/id", user: "root" },
+    }
+
+    await runPlaybook(definition, { verbose: true })
+
+    const output = consoleLogs.join("\n")
+    expect(output).toContain("recipe signal failed summary")
+    expect(output).toContain("Full stderr:")
+    expect(output).toContain("recipe signal stderr")
+    expect(output).toContain("Full stdout:")
+    expect(output).toContain("recipe signal stdout")
+    expect(process.exitCode).toBe(1)
+  })
 })
 
 // Bug #12 regression: runPlaybook must pass reconnectTimeout from RunOptions into SshConfig

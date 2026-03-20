@@ -20,7 +20,10 @@ export type RecipeModule = {
   apply: (
     ssh: null | SshConnection,
     environment: Environment,
-    shutdownSignal?: () => NodeJS.Signals | null
+    options?: {
+      shutdownSignal?: () => NodeJS.Signals | null
+      verbose?: boolean
+    }
   ) => Promise<ModuleResult>
 } & Module
 
@@ -94,10 +97,14 @@ async function executeModules(
   return { env: currentEnvironment, status: aggregatedStatus }
 }
 
-function handleSignalResult(name: string, result: ModuleResult): "changed" | "failed" {
+function handleSignalResultWithVerbosity(
+  name: string,
+  result: ModuleResult,
+  verbose: boolean
+): "changed" | "failed" {
   printModuleResult(`signal: ${name}`, result.status)
   if (result.status === "failed" && result.error != null) {
-    printCommandFailure(result.error, false)
+    printCommandFailure(result.error, verbose)
   }
   return result.status === "failed" ? "failed" : "changed"
 }
@@ -107,8 +114,10 @@ async function triggerSignals(parameters: {
   shutdownSignal?: () => NodeJS.Signals | null
   signals: Module[]
   ssh: null | SshConnection
+  verbose?: boolean
 }): Promise<"changed" | "failed"> {
   const getShutdownSignal = parameters.shutdownSignal ?? (() => null)
+  const verbose = parameters.verbose ?? false
   let status: "changed" | "failed" = "changed"
 
   for (const signal of parameters.signals) {
@@ -117,15 +126,65 @@ async function triggerSignals(parameters: {
       const connection = signal.local === true ? null : parameters.ssh
       // eslint-disable-next-line no-await-in-loop
       const result = await signal.apply(connection, parameters.environment)
-      status = handleSignalResult(signal.name, result)
+      status = handleSignalResultWithVerbosity(signal.name, result, verbose)
     } catch (error) {
       printModuleResult(`signal: ${signal.name}`, "failed")
-      printCommandFailure(error, false)
+      printCommandFailure(error, verbose)
       status = "failed"
     }
   }
 
   return status
+}
+
+function extractMeta(
+  environment: Environment,
+  nextEnvironment: Environment
+): Environment | undefined {
+  const meta: Environment = {}
+  let hasMeta = false
+  for (const key of Object.keys(nextEnvironment)) {
+    if (!(key in environment) || nextEnvironment[key] !== environment[key]) {
+      meta[key] = nextEnvironment[key]
+      hasMeta = true
+    }
+  }
+  return hasMeta ? meta : undefined
+}
+
+async function applyRecipe(parameters: {
+  environment: Environment
+  modules: Module[]
+  name: string
+  options?: {
+    shutdownSignal?: () => NodeJS.Signals | null
+    verbose?: boolean
+  }
+  signals?: Module[]
+  ssh: null | SshConnection
+}): Promise<ModuleResult> {
+  const shutdownSignal = parameters.options?.shutdownSignal
+  const verbose = parameters.options?.verbose ?? false
+  printRecipeHeader(parameters.name)
+  const state = await executeModules(parameters.modules, parameters.ssh, {
+    environment: parameters.environment,
+    shutdownSignal,
+  })
+
+  if (state.status === "changed" && parameters.signals) {
+    state.status = await triggerSignals({
+      environment: state.env,
+      shutdownSignal,
+      signals: parameters.signals,
+      ssh: parameters.ssh,
+      verbose,
+    })
+  }
+
+  return {
+    meta: extractMeta(parameters.environment, state.env),
+    status: state.status,
+  }
 }
 
 /**
@@ -163,31 +222,19 @@ export function recipe(
     async apply(
       ssh: null | SshConnection,
       environment: Environment,
-      shutdownSignal?: () => NodeJS.Signals | null
+      parameters?: {
+        shutdownSignal?: () => NodeJS.Signals | null
+        verbose?: boolean
+      }
     ): Promise<ModuleResult> {
-      printRecipeHeader(name)
-      const state = await executeModules(modules, ssh, { environment, shutdownSignal })
-
-      if (state.status === "changed" && options?.signals) {
-        state.status = await triggerSignals({
-          environment: state.env,
-          shutdownSignal,
-          signals: options.signals,
-          ssh,
-        })
-      }
-
-      // Only return new/changed meta keys, not the entire environment
-      const meta: Environment = {}
-      let hasMeta = false
-      for (const key of Object.keys(state.env)) {
-        if (!(key in environment) || state.env[key] !== environment[key]) {
-          meta[key] = state.env[key]
-          hasMeta = true
-        }
-      }
-
-      return { meta: hasMeta ? meta : undefined, status: state.status }
+      return applyRecipe({
+        environment,
+        modules,
+        name,
+        options: parameters,
+        signals: options?.signals,
+        ssh,
+      })
     },
 
     async check(

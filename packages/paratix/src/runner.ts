@@ -194,7 +194,7 @@ async function runRecipeModule(
       return { env: environment, shouldBreak: false, status: "ok" }
     }
 
-    const result = await recipeModule.apply(ssh, environment, shutdownSignal)
+    const result = await recipeModule.apply(ssh, environment, { shutdownSignal, verbose })
     return await handleMetaAndBuildResult(ssh, environment, result)
   } catch (error) {
     printModuleResult(recipeModule.name, "failed")
