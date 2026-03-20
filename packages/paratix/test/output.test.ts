@@ -8,12 +8,12 @@ import { CommandError } from "../src/sshHelpers.js"
 // ---------------------------------------------------------------------------
 
 describe("printVerboseCommandError", () => {
-  let consoleLogs: string[]
+  let consoleErrors: string[]
 
   beforeEach(() => {
-    consoleLogs = []
-    vi.spyOn(console, "log").mockImplementation((...args: unknown[]) => {
-      consoleLogs.push(args.map(String).join(" "))
+    consoleErrors = []
+    vi.spyOn(console, "error").mockImplementation((...args: unknown[]) => {
+      consoleErrors.push(args.map(String).join(" "))
     })
   })
 
@@ -24,35 +24,35 @@ describe("printVerboseCommandError", () => {
   it("prints 'Full stderr:' label when stderr is non-empty", () => {
     printVerboseCommandError("", "error line one")
 
-    const output = consoleLogs.join("\n")
+    const output = consoleErrors.join("\n")
     expect(output).toContain("Full stderr:")
   })
 
   it("prints 'Full stdout:' label when stdout is non-empty", () => {
     printVerboseCommandError("output line one", "")
 
-    const output = consoleLogs.join("\n")
+    const output = consoleErrors.join("\n")
     expect(output).toContain("Full stdout:")
   })
 
   it("prints stderr content lines after the 'Full stderr:' label", () => {
     printVerboseCommandError("", "the full error message")
 
-    const output = consoleLogs.join("\n")
+    const output = consoleErrors.join("\n")
     expect(output).toContain("the full error message")
   })
 
   it("prints stdout content lines after the 'Full stdout:' label", () => {
     printVerboseCommandError("the full output message", "")
 
-    const output = consoleLogs.join("\n")
+    const output = consoleErrors.join("\n")
     expect(output).toContain("the full output message")
   })
 
   it("prints both 'Full stderr:' and 'Full stdout:' labels when both streams are non-empty", () => {
     printVerboseCommandError("full output", "full error")
 
-    const output = consoleLogs.join("\n")
+    const output = consoleErrors.join("\n")
     expect(output).toContain("Full stderr:")
     expect(output).toContain("Full stdout:")
   })
@@ -60,19 +60,19 @@ describe("printVerboseCommandError", () => {
   it("prints nothing when both stdout and stderr are empty strings", () => {
     printVerboseCommandError("", "")
 
-    expect(consoleLogs).toHaveLength(0)
+    expect(consoleErrors).toHaveLength(0)
   })
 
   it("prints nothing when both stdout and stderr contain only whitespace", () => {
     printVerboseCommandError("   ", "\n\t")
 
-    expect(consoleLogs).toHaveLength(0)
+    expect(consoleErrors).toHaveLength(0)
   })
 
   it("prints each line of multiline stderr as a separate log call", () => {
     printVerboseCommandError("", "line one\nline two\nline three")
 
-    const output = consoleLogs.join("\n")
+    const output = consoleErrors.join("\n")
     expect(output).toContain("line one")
     expect(output).toContain("line two")
     expect(output).toContain("line three")
@@ -84,12 +84,12 @@ describe("printVerboseCommandError", () => {
 // ---------------------------------------------------------------------------
 
 describe("printCommandFailure", () => {
-  let consoleLogs: string[]
+  let consoleErrors: string[]
 
   beforeEach(() => {
-    consoleLogs = []
-    vi.spyOn(console, "log").mockImplementation((...args: unknown[]) => {
-      consoleLogs.push(args.map(String).join(" "))
+    consoleErrors = []
+    vi.spyOn(console, "error").mockImplementation((...args: unknown[]) => {
+      consoleErrors.push(args.map(String).join(" "))
     })
   })
 
@@ -102,7 +102,7 @@ describe("printCommandFailure", () => {
 
     printCommandFailure(error, false)
 
-    const output = consoleLogs.join("\n")
+    const output = consoleErrors.join("\n")
     expect(output).toContain("command failed badly")
   })
 
@@ -111,7 +111,7 @@ describe("printCommandFailure", () => {
 
     printCommandFailure(error, false)
 
-    const output = consoleLogs.join("\n")
+    const output = consoleErrors.join("\n")
     expect(output).not.toContain("Full stderr:")
     expect(output).not.toContain("Full stdout:")
   })
@@ -125,7 +125,7 @@ describe("printCommandFailure", () => {
 
     printCommandFailure(error, false)
 
-    const output = consoleLogs.join("\n")
+    const output = consoleErrors.join("\n")
     expect(output).not.toContain("full stdout content")
     expect(output).not.toContain("full stderr content")
     expect(output).not.toContain("Full stderr:")
@@ -138,7 +138,7 @@ describe("printCommandFailure", () => {
 
     printCommandFailure(error, true)
 
-    const output = consoleLogs.join("\n")
+    const output = consoleErrors.join("\n")
     expect(output).toContain("verbose error message")
   })
 
@@ -148,7 +148,7 @@ describe("printCommandFailure", () => {
 
     printCommandFailure(error, true)
 
-    const output = consoleLogs.join("\n")
+    const output = consoleErrors.join("\n")
     expect(output).toContain("Full stack:")
     expect(output).toContain("at output.test.ts:2:2")
     expect(output).not.toContain("Full stderr:")
@@ -165,7 +165,7 @@ describe("printCommandFailure", () => {
 
     printCommandFailure(error, true)
 
-    const output = consoleLogs.join("\n")
+    const output = consoleErrors.join("\n")
     expect(output).toContain("Full stack:")
     expect(output).toContain("outer failure")
     expect(output).toContain("Cause 1:")
@@ -183,7 +183,7 @@ describe("printCommandFailure", () => {
 
     printCommandFailure(error, true)
 
-    const output = consoleLogs.join("\n")
+    const output = consoleErrors.join("\n")
     expect(output).toContain("the complete stdout output")
     expect(output).toContain("the complete stderr output")
   })
@@ -197,7 +197,7 @@ describe("printCommandFailure", () => {
 
     printCommandFailure(error, true)
 
-    const output = consoleLogs.join("\n")
+    const output = consoleErrors.join("\n")
     expect(output).toContain("Full stderr:")
     expect(output).toContain("Full stdout:")
   })
@@ -211,7 +211,7 @@ describe("printCommandFailure", () => {
 
     printCommandFailure(error, true)
 
-    const output = consoleLogs.join("\n")
+    const output = consoleErrors.join("\n")
     expect(output).not.toContain("Full stderr:")
     expect(output).not.toContain("Full stdout:")
   })
@@ -219,7 +219,7 @@ describe("printCommandFailure", () => {
   it("handles a non-Error thrown value (string) without crashing", () => {
     printCommandFailure("something went wrong", false)
 
-    const output = consoleLogs.join("\n")
+    const output = consoleErrors.join("\n")
     expect(output).toContain("something went wrong")
   })
 })

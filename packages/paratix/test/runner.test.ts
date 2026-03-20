@@ -663,7 +663,7 @@ describe("runPlaybook recipe exception handling", () => {
     process.exitCode = 0
   })
 
-  it("calls printCommandError (outputs to console.log) when recipe apply() throws with a non-empty error message", async () => {
+  it("writes recipe apply() throw diagnostics to stderr when the error message is non-empty", async () => {
     const capturedConfigs: unknown[] = []
 
     vi.doMock("../src/ssh.js", () => ({
@@ -671,9 +671,9 @@ describe("runPlaybook recipe exception handling", () => {
       SshConnectionImpl: makeMockSshClass(capturedConfigs),
     }))
 
-    const consoleLogs: unknown[][] = []
-    vi.spyOn(console, "log").mockImplementation((...args) => {
-      consoleLogs.push(args)
+    const consoleErrors: unknown[][] = []
+    vi.spyOn(console, "error").mockImplementation((...args) => {
+      consoleErrors.push(args)
     })
 
     const { runPlaybook } = await import("../src/runner.js")
@@ -700,9 +700,8 @@ describe("runPlaybook recipe exception handling", () => {
 
     await runPlaybook(definition)
 
-    // printCommandError uses console.log to output the error message
-    const allLogOutput = consoleLogs.flat().join(" ")
-    expect(allLogOutput).toContain("recipe internal failure")
+    const allErrorOutput = consoleErrors.flat().join(" ")
+    expect(allErrorOutput).toContain("recipe internal failure")
     process.exitCode = 0
   })
 
@@ -750,6 +749,7 @@ describe("runPlaybook recipe exception handling", () => {
   it("logs the concrete recipe child module name when child check() throws during runPlaybook", async () => {
     const capturedConfigs: unknown[] = []
     const consoleLogs: string[] = []
+    const consoleErrors: string[] = []
 
     vi.doMock("../src/ssh.js", () => ({
       shellQuote: (s: string) => `'${s}'`,
@@ -757,6 +757,9 @@ describe("runPlaybook recipe exception handling", () => {
     }))
     vi.spyOn(console, "log").mockImplementation((...args) => {
       consoleLogs.push(args.join(" "))
+    })
+    vi.spyOn(console, "error").mockImplementation((...args) => {
+      consoleErrors.push(args.join(" "))
     })
 
     const [{ runPlaybook }, { recipe }] = await Promise.all([
@@ -783,9 +786,9 @@ describe("runPlaybook recipe exception handling", () => {
 
     await runPlaybook(definition)
 
-    const output = consoleLogs.join("\n")
-    expect(output).toContain("throwing-child-check")
-    expect(output).toContain("recipe child check exploded")
+    expect(consoleLogs.join("\n")).toContain("test-recipe")
+    expect(consoleErrors.join("\n")).toContain("throwing-child-check")
+    expect(consoleErrors.join("\n")).toContain("recipe child check exploded")
     expect(process.exitCode).toBe(1)
     process.exitCode = 0
   })
@@ -793,6 +796,7 @@ describe("runPlaybook recipe exception handling", () => {
   it("logs the concrete recipe child module name when child apply() throws during runPlaybook", async () => {
     const capturedConfigs: unknown[] = []
     const consoleLogs: string[] = []
+    const consoleErrors: string[] = []
 
     vi.doMock("../src/ssh.js", () => ({
       shellQuote: (s: string) => `'${s}'`,
@@ -800,6 +804,9 @@ describe("runPlaybook recipe exception handling", () => {
     }))
     vi.spyOn(console, "log").mockImplementation((...args) => {
       consoleLogs.push(args.join(" "))
+    })
+    vi.spyOn(console, "error").mockImplementation((...args) => {
+      consoleErrors.push(args.join(" "))
     })
 
     const [{ runPlaybook }, { recipe }] = await Promise.all([
@@ -826,9 +833,8 @@ describe("runPlaybook recipe exception handling", () => {
 
     await runPlaybook(definition)
 
-    const output = consoleLogs.join("\n")
-    expect(output).toContain("throwing-child-apply")
-    expect(output).toContain("recipe child apply exploded")
+    expect(consoleLogs.join("\n")).toContain("throwing-child-apply")
+    expect(consoleErrors.join("\n")).toContain("recipe child apply exploded")
     expect(process.exitCode).toBe(1)
     process.exitCode = 0
   })
@@ -1285,14 +1291,17 @@ describe("runPlaybook failed result diagnostics", () => {
 
   it("prints centralized diagnostics for a module that returns failed with an error payload", async () => {
     const capturedConfigs: unknown[] = []
-    const consoleLogs: string[] = []
+    const consoleErrors: string[] = []
 
     vi.doMock("../src/ssh.js", () => ({
       shellQuote: (s: string) => `'${s}'`,
       SshConnectionImpl: makeMockSshClass(capturedConfigs),
     }))
-    vi.spyOn(console, "log").mockImplementation((...args) => {
-      consoleLogs.push(args.join(" "))
+    vi.spyOn(console, "log").mockImplementation(() => {
+      /* noop */
+    })
+    vi.spyOn(console, "error").mockImplementation((...args) => {
+      consoleErrors.push(args.join(" "))
     })
 
     const [{ runPlaybook }, { CommandError }] = await Promise.all([
@@ -1318,13 +1327,13 @@ describe("runPlaybook failed result diagnostics", () => {
 
     await runPlaybook(definition)
 
-    expect(consoleLogs.join("\n")).toContain("module failed summary")
+    expect(consoleErrors.join("\n")).toContain("module failed summary")
     expect(process.exitCode).toBe(1)
   })
 
   it("prints centralized diagnostics for a top-level module that now returns ModuleResult.error", async () => {
     const capturedConfigs: unknown[] = []
-    const consoleLogs: string[] = []
+    const consoleErrors: string[] = []
 
     vi.doMock("../src/ssh.js", () => ({
       shellQuote: (s: string) => `'${s}'`,
@@ -1332,8 +1341,8 @@ describe("runPlaybook failed result diagnostics", () => {
         exec: vi.fn().mockResolvedValue({ code: 1, stderr: "permission denied", stdout: "" }),
       }),
     }))
-    vi.spyOn(console, "log").mockImplementation((...args) => {
-      consoleLogs.push(args.join(" "))
+    vi.spyOn(console, "error").mockImplementation((...args) => {
+      consoleErrors.push(args.join(" "))
     })
 
     const [{ runPlaybook }, { hostname }] = await Promise.all([
@@ -1350,7 +1359,7 @@ describe("runPlaybook failed result diagnostics", () => {
 
     await runPlaybook(definition)
 
-    const output = consoleLogs.join("\n")
+    const output = consoleErrors.join("\n")
     expect(output).toContain("[hostname.set: new-hostname] hostnamectl set-hostname failed")
     expect(output).toContain("permission denied")
     expect(process.exitCode).toBe(1)
@@ -1358,7 +1367,7 @@ describe("runPlaybook failed result diagnostics", () => {
 
   it("prints centralized diagnostics for a failed recipe child module with ModuleResult.error", async () => {
     const capturedConfigs: unknown[] = []
-    const consoleLogs: string[] = []
+    const consoleErrors: string[] = []
 
     vi.doMock("../src/ssh.js", () => ({
       shellQuote: (s: string) => `'${s}'`,
@@ -1366,8 +1375,8 @@ describe("runPlaybook failed result diagnostics", () => {
         exec: vi.fn().mockResolvedValue({ code: 1, stderr: "permission denied", stdout: "" }),
       }),
     }))
-    vi.spyOn(console, "log").mockImplementation((...args) => {
-      consoleLogs.push(args.join(" "))
+    vi.spyOn(console, "error").mockImplementation((...args) => {
+      consoleErrors.push(args.join(" "))
     })
 
     const [{ runPlaybook }, { hostname }, { recipe }] = await Promise.all([
@@ -1385,7 +1394,7 @@ describe("runPlaybook failed result diagnostics", () => {
 
     await runPlaybook(definition)
 
-    const output = consoleLogs.join("\n")
+    const output = consoleErrors.join("\n")
     expect(output).toContain("[hostname.set: recipe-hostname] hostnamectl set-hostname failed")
     expect(output).toContain("permission denied")
     expect(process.exitCode).toBe(1)
@@ -1393,14 +1402,14 @@ describe("runPlaybook failed result diagnostics", () => {
 
   it("prints centralized diagnostics for failed signals and shows verbose output when requested", async () => {
     const capturedConfigs: unknown[] = []
-    const consoleLogs: string[] = []
+    const consoleErrors: string[] = []
 
     vi.doMock("../src/ssh.js", () => ({
       shellQuote: (s: string) => `'${s}'`,
       SshConnectionImpl: makeMockSshClass(capturedConfigs),
     }))
-    vi.spyOn(console, "log").mockImplementation((...args) => {
-      consoleLogs.push(args.join(" "))
+    vi.spyOn(console, "error").mockImplementation((...args) => {
+      consoleErrors.push(args.join(" "))
     })
 
     const [{ runPlaybook }, { CommandError }] = await Promise.all([
@@ -1432,7 +1441,7 @@ describe("runPlaybook failed result diagnostics", () => {
 
     await runPlaybook(definition, { verbose: true })
 
-    const output = consoleLogs.join("\n")
+    const output = consoleErrors.join("\n")
     expect(output).toContain("signal failed summary")
     expect(output).toContain("Full stderr:")
     expect(output).toContain("signal stderr")
@@ -1443,14 +1452,14 @@ describe("runPlaybook failed result diagnostics", () => {
 
   it("prints full stack traces and causes for failed signals with plain Errors in verbose mode", async () => {
     const capturedConfigs: unknown[] = []
-    const consoleLogs: string[] = []
+    const consoleErrors: string[] = []
 
     vi.doMock("../src/ssh.js", () => ({
       shellQuote: (s: string) => `'${s}'`,
       SshConnectionImpl: makeMockSshClass(capturedConfigs),
     }))
-    vi.spyOn(console, "log").mockImplementation((...args) => {
-      consoleLogs.push(args.join(" "))
+    vi.spyOn(console, "error").mockImplementation((...args) => {
+      consoleErrors.push(args.join(" "))
     })
 
     const [{ runPlaybook }] = await Promise.all([import("../src/runner.js")])
@@ -1485,7 +1494,7 @@ describe("runPlaybook failed result diagnostics", () => {
 
     await runPlaybook(definition, { verbose: true })
 
-    const output = consoleLogs.join("\n")
+    const output = consoleErrors.join("\n")
     expect(output).toContain("plain signal failure")
     expect(output).toContain("Full stack:")
     expect(output).toContain("at outer.ts:1:1")
@@ -1498,14 +1507,14 @@ describe("runPlaybook failed result diagnostics", () => {
 
   it("prints verbose diagnostics for failed recipe signals with the same output path as top-level signals", async () => {
     const capturedConfigs: unknown[] = []
-    const consoleLogs: string[] = []
+    const consoleErrors: string[] = []
 
     vi.doMock("../src/ssh.js", () => ({
       shellQuote: (s: string) => `'${s}'`,
       SshConnectionImpl: makeMockSshClass(capturedConfigs),
     }))
-    vi.spyOn(console, "log").mockImplementation((...args) => {
-      consoleLogs.push(args.join(" "))
+    vi.spyOn(console, "error").mockImplementation((...args) => {
+      consoleErrors.push(args.join(" "))
     })
 
     const [{ runPlaybook }, { recipe }, { CommandError }] = await Promise.all([
@@ -1541,7 +1550,7 @@ describe("runPlaybook failed result diagnostics", () => {
 
     await runPlaybook(definition, { verbose: true })
 
-    const output = consoleLogs.join("\n")
+    const output = consoleErrors.join("\n")
     expect(output).toContain("recipe signal failed summary")
     expect(output).toContain("Full stderr:")
     expect(output).toContain("recipe signal stderr")
@@ -2325,14 +2334,14 @@ describe("runPlaybook dry-run recipe behaviour", () => {
 
   it("prints verbose diagnostics for failed dry-run recipe children when --verbose is enabled", async () => {
     const capturedConfigs: unknown[] = []
-    const consoleLogs: string[] = []
+    const consoleErrors: string[] = []
 
     vi.doMock("../src/ssh.js", () => ({
       shellQuote: (s: string) => `'${s}'`,
       SshConnectionImpl: makeMockSshClass(capturedConfigs),
     }))
-    vi.spyOn(console, "log").mockImplementation((...args) => {
-      consoleLogs.push(args.join(" "))
+    vi.spyOn(console, "error").mockImplementation((...args) => {
+      consoleErrors.push(args.join(" "))
     })
 
     const [{ runPlaybook }, { recipe }, { CommandError }] = await Promise.all([
@@ -2360,7 +2369,7 @@ describe("runPlaybook dry-run recipe behaviour", () => {
 
     await runPlaybook(definition, { dryRun: true, verbose: true })
 
-    const output = consoleLogs.join("\n")
+    const output = consoleErrors.join("\n")
     expect(output).toContain("dry-run child failed")
     expect(output).toContain("Full stderr:")
     expect(output).toContain("dry-run stderr")
@@ -3058,7 +3067,7 @@ describe("runPlaybook rsync check error handling", () => {
 
   it("marks the run as failed when rsync check throws instead of masking it as needs-apply", async () => {
     const capturedConfigs: unknown[] = []
-    const consoleLog = vi.spyOn(console, "log").mockImplementation(() => {
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => {
       /* noop */
     })
 
@@ -3105,12 +3114,12 @@ describe("runPlaybook rsync check error handling", () => {
 
     expect(subsequentModule.check).not.toHaveBeenCalled()
     expect(process.exitCode).toBe(1)
-    expect(consoleLog).toHaveBeenCalledWith(
+    expect(consoleError).toHaveBeenCalledWith(
       expect.stringContaining(
         "[rsync.sync] check failed for /local/src -> /remote/dest (exit code 23)"
       )
     )
-    expect(consoleLog).toHaveBeenCalledWith(
+    expect(consoleError).toHaveBeenCalledWith(
       expect.stringContaining("Permission denied (publickey).")
     )
   })

@@ -87,9 +87,9 @@ export function printCommandError(stdout: string, stderr: string): void {
     lines.push(...stdout.trim().split("\n"))
   }
   if (lines.length > 0) {
-    console.log(pc.red("  \u2502 Error output:"))
+    console.error(pc.red("  \u2502 Error output:"))
     for (const line of lines) {
-      console.log(pc.red(`  \u2502 ${line}`))
+      console.error(pc.red(`  \u2502 ${line}`))
     }
   }
 }
@@ -103,15 +103,15 @@ export function printCommandError(stdout: string, stderr: string): void {
  */
 export function printVerboseCommandError(stdout: string, stderr: string): void {
   if (stderr.trim()) {
-    console.log(pc.red("  │ Full stderr:"))
+    console.error(pc.red("  │ Full stderr:"))
     for (const line of stderr.trim().split("\n")) {
-      console.log(pc.red(`  │ ${line}`))
+      console.error(pc.red(`  │ ${line}`))
     }
   }
   if (stdout.trim()) {
-    console.log(pc.red("  │ Full stdout:"))
+    console.error(pc.red("  │ Full stdout:"))
     for (const line of stdout.trim().split("\n")) {
-      console.log(pc.red(`  │ ${line}`))
+      console.error(pc.red(`  │ ${line}`))
     }
   }
 }
@@ -121,9 +121,9 @@ function printVerboseErrorBlock(label: string, content: string): void {
     return
   }
 
-  console.log(pc.red(`  │ ${label}`))
+  console.error(pc.red(`  │ ${label}`))
   for (const line of content.trim().split("\n")) {
-    console.log(pc.red(`  │ ${line}`))
+    console.error(pc.red(`  │ ${line}`))
   }
 }
 

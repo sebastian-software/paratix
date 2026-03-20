@@ -122,9 +122,9 @@ describe("recipe", () => {
   })
 
   it("prints verbose diagnostics for failed child modules when recipe apply runs with verbose", async () => {
-    const consoleLogs: string[] = []
-    vi.spyOn(console, "log").mockImplementation((...args) => {
-      consoleLogs.push(args.join(" "))
+    const consoleErrors: string[] = []
+    vi.spyOn(console, "error").mockImplementation((...args) => {
+      consoleErrors.push(args.join(" "))
     })
 
     const failingModule: Module = {
@@ -146,7 +146,7 @@ describe("recipe", () => {
     const result = await r.apply(null, emptyEnv, { verbose: true })
 
     expect(result.status).toBe("failed")
-    const output = consoleLogs.join("\n")
+    const output = consoleErrors.join("\n")
     expect(output).toContain("child failed summary")
     expect(output).toContain("Full stderr:")
     expect(output).toContain("child stderr")
@@ -156,8 +156,12 @@ describe("recipe", () => {
 
   it("logs the concrete child module name when child check() throws", async () => {
     const consoleLogs: string[] = []
+    const consoleErrors: string[] = []
     vi.spyOn(console, "log").mockImplementation((...args) => {
       consoleLogs.push(args.join(" "))
+    })
+    vi.spyOn(console, "error").mockImplementation((...args) => {
+      consoleErrors.push(args.join(" "))
     })
 
     const throwingChild: Module = {
@@ -171,15 +175,18 @@ describe("recipe", () => {
     const result = await r.apply(null, emptyEnv)
 
     expect(result.status).toBe("failed")
-    const output = consoleLogs.join("\n")
-    expect(output).toContain("throwing-check-child")
-    expect(output).toContain("child check exploded")
+    expect(consoleLogs.join("\n")).toContain("throwing-check-child")
+    expect(consoleErrors.join("\n")).toContain("child check exploded")
   })
 
   it("logs the concrete child module name when child apply() throws", async () => {
     const consoleLogs: string[] = []
+    const consoleErrors: string[] = []
     vi.spyOn(console, "log").mockImplementation((...args) => {
       consoleLogs.push(args.join(" "))
+    })
+    vi.spyOn(console, "error").mockImplementation((...args) => {
+      consoleErrors.push(args.join(" "))
     })
 
     const throwingChild: Module = {
@@ -193,9 +200,8 @@ describe("recipe", () => {
     const result = await r.apply(null, emptyEnv)
 
     expect(result.status).toBe("failed")
-    const output = consoleLogs.join("\n")
-    expect(output).toContain("throwing-apply-child")
-    expect(output).toContain("child apply exploded")
+    expect(consoleLogs.join("\n")).toContain("throwing-apply-child")
+    expect(consoleErrors.join("\n")).toContain("child apply exploded")
   })
 
   it("does not trigger signals when status is ok", async () => {
