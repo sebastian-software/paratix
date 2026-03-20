@@ -150,8 +150,8 @@ async function applyCheckedModule(parameters: {
   })
 }
 
-function isDryRunBlockingModule(module: Module): boolean {
-  return module._dryRunBlocker === true
+function shouldExecuteApplyDuringDryRun(module: Module): boolean {
+  return module._dryRunBlocker === true || module._dryRunMetaProducer === true
 }
 
 function handleCaughtStepError(parameters: {
@@ -343,7 +343,7 @@ async function runRegularModule(parameters: RegularModuleArguments): Promise<Ste
     }
 
     if (dryRun) {
-      if (isDryRunBlockingModule(targetModule)) {
+      if (shouldExecuteApplyDuringDryRun(targetModule)) {
         return await applyCheckedModule({
           currentEnvironment: env,
           shutdownSignal,

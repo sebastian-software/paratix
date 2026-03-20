@@ -300,6 +300,7 @@ export function replace(remotePath: string, pattern: string, replacement: string
  */
 export function stat(remotePath: string): Module {
   return {
+    _dryRunMetaProducer: true,
     async apply(ssh: null | SshConnection): Promise<ModuleResult> {
       if (!ssh) return failed(`[file.stat: ${remotePath}] SSH connection is required`)
 

@@ -176,6 +176,7 @@ export const system = {
    */
   facts(): Module {
     return {
+      _dryRunMetaProducer: true,
       async apply(ssh: null | SshConnection): Promise<ModuleResult> {
         if (!ssh) return failed("[system.facts] SSH connection is required")
 
@@ -249,6 +250,7 @@ export const system = {
    */
   uptime(): Module {
     return {
+      _dryRunMetaProducer: true,
       async apply(ssh: null | SshConnection): Promise<ModuleResult> {
         if (!ssh) return failed("[system.uptime] SSH connection is required")
 

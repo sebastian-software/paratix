@@ -178,6 +178,7 @@ export const op = {
     validateReferences(references)
 
     return {
+      _dryRunMetaProducer: true,
       async apply(): Promise<ModuleResult> {
         try {
           const [regularEntries, otpEntries] = splitReferences(references)

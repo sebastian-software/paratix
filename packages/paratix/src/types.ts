@@ -86,6 +86,12 @@ export type Module = {
    */
   _dryRunBlocker?: true
   /**
+   * Internal marker for non-mutating modules whose apply step emits meta that must
+   * still be materialized during dry-run so downstream modules see the same environment.
+   * @internal
+   */
+  _dryRunMetaProducer?: true
+  /**
    * Enforce the desired state.
    * @returns A {@link ModuleResult} describing what happened.
    */

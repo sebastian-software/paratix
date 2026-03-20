@@ -19,6 +19,7 @@ function makeMockSshClass(
     addPort?: ReturnType<typeof vi.fn>
     disconnect?: ReturnType<typeof vi.fn>
     exec?: ReturnType<typeof vi.fn>
+    output?: ReturnType<typeof vi.fn>
     reconnect?: ReturnType<typeof vi.fn>
     updateHost?: ReturnType<typeof vi.fn>
   }
@@ -34,7 +35,7 @@ function makeMockSshClass(
       .fn()
       .mockReturnValue({ host: "1.2.3.4", port: 22, privateKeyPath: "~/.ssh/id", user: "root" })
     public lines = vi.fn().mockResolvedValue([])
-    public output = vi.fn().mockResolvedValue("")
+    public output = overrides?.output ?? vi.fn().mockResolvedValue("")
     public probeSudo = vi.fn().mockResolvedValue(null)
     public readFile = vi.fn().mockResolvedValue("")
     public reconnect = overrides?.reconnect ?? vi.fn().mockResolvedValue(null)
@@ -2172,6 +2173,167 @@ describe("runPlaybook dry-run recipe behaviour", () => {
     expect(laterChild.check).not.toHaveBeenCalled()
     expect(laterChild.apply).not.toHaveBeenCalled()
     expect(process.exitCode).toBe(1)
+  })
+
+  it("propagates op.resolve meta to following modules in dry-run mode", async () => {
+    const capturedConfigs: unknown[] = []
+
+    vi.doMock("node:child_process", () => ({
+      spawn: vi.fn(() => createMockSpawnChild(JSON.stringify({ SECRET: "resolved-secret" }))),
+    }))
+    vi.doMock("../src/ssh.js", () => ({
+      shellQuote: (s: string) => `'${s}'`,
+      SshConnectionImpl: makeMockSshClass(capturedConfigs),
+    }))
+
+    const [{ runPlaybook }, { op }] = await Promise.all([
+      import("../src/runner.js"),
+      import("../src/modules/op.js"),
+    ])
+
+    let receivedEnvInCheck: Environment | undefined
+    const dependentModule: Module = {
+      apply: vi.fn().mockResolvedValue({ status: "ok" } satisfies ModuleResult),
+      check: vi.fn().mockImplementation(async (_ssh, env: Environment) => {
+        await Promise.resolve()
+        receivedEnvInCheck = env
+        return "ok" as const
+      }),
+      name: "dependent-module",
+    }
+
+    const definition: ServerDefinition = {
+      host: "1.2.3.4",
+      name: "test-server",
+      run: [op.resolve({ SECRET: "op://vault/item/password" }), dependentModule],
+      ssh: { ports: [22], privateKey: "~/.ssh/id", user: "root" },
+    }
+
+    await runPlaybook(definition, { dryRun: true })
+
+    expect(receivedEnvInCheck).toBeDefined()
+    await expect(resolveEnvironment(receivedEnvInCheck!, "SECRET")).resolves.toBe("resolved-secret")
+    expect(dependentModule.apply).not.toHaveBeenCalled()
+  })
+
+  it("propagates system facts and uptime meta to following modules in dry-run mode", async () => {
+    const capturedConfigs: unknown[] = []
+    const factOutputs: Record<string, string> = {
+      "cat /etc/os-release": 'ID=ubuntu\nVERSION_ID="24.04"\nVERSION_CODENAME=noble\n',
+      "df -m /":
+        "Filesystem 1M-blocks Used Available Use% Mounted on\n/dev/sda1 10240 2048 8192 20% /\n",
+      "free -m": "Mem: 2048 1024 1024\n",
+      hostname: "test-host\n",
+      "ip -4 addr": "inet 10.0.0.5/24 brd 10.0.0.255 scope global eth0\n",
+      "ip -4 route get 1.1.1.1": "1.1.1.1 via 10.0.0.1 dev eth0 src 203.0.113.5 uid 0\n",
+      nproc: "4\n",
+      "uname -m": "x86_64\n",
+      "uname -r": "6.8.0\n",
+    }
+    const uptimeOutputs: Record<string, string> = {
+      "awk '{print int($1)}' /proc/uptime": "12345",
+    }
+
+    vi.doMock("../src/ssh.js", () => ({
+      shellQuote: (s: string) => `'${s}'`,
+      SshConnectionImpl: makeMockSshClass(capturedConfigs, {
+        exec: vi.fn().mockImplementation((command: keyof typeof factOutputs) => ({
+          code: 0,
+          stderr: "",
+          stdout: factOutputs[command],
+        })),
+        output: vi
+          .fn()
+          .mockImplementation((command: keyof typeof uptimeOutputs) => uptimeOutputs[command]),
+      }),
+    }))
+
+    const [{ runPlaybook }, { system }] = await Promise.all([
+      import("../src/runner.js"),
+      import("../src/modules/system.js"),
+    ])
+
+    let factsEnvInCheck: Environment | undefined
+    let uptimeEnvInCheck: Environment | undefined
+    const factsDependentModule: Module = {
+      apply: vi.fn().mockResolvedValue({ status: "ok" } satisfies ModuleResult),
+      check: vi.fn().mockImplementation(async (_ssh, env: Environment) => {
+        await Promise.resolve()
+        factsEnvInCheck = env
+        return "ok" as const
+      }),
+      name: "facts-dependent-module",
+    }
+    const uptimeDependentModule: Module = {
+      apply: vi.fn().mockResolvedValue({ status: "ok" } satisfies ModuleResult),
+      check: vi.fn().mockImplementation(async (_ssh, env: Environment) => {
+        await Promise.resolve()
+        uptimeEnvInCheck = env
+        return "ok" as const
+      }),
+      name: "uptime-dependent-module",
+    }
+
+    const definition: ServerDefinition = {
+      host: "1.2.3.4",
+      name: "test-server",
+      run: [system.facts(), factsDependentModule, system.uptime(), uptimeDependentModule],
+      ssh: { ports: [22], privateKey: "~/.ssh/id", user: "root" },
+    }
+
+    await runPlaybook(definition, { dryRun: true })
+
+    expect(factsEnvInCheck).toBeDefined()
+    await expect(resolveEnvironment(factsEnvInCheck!, "system.hostname")).resolves.toBe("test-host")
+    await expect(resolveEnvironment(factsEnvInCheck!, "system.os")).resolves.toBe("ubuntu")
+    expect(uptimeEnvInCheck).toBeDefined()
+    await expect(resolveEnvironment(uptimeEnvInCheck!, "system.uptime")).resolves.toBe("12345")
+    expect(factsDependentModule.apply).not.toHaveBeenCalled()
+    expect(uptimeDependentModule.apply).not.toHaveBeenCalled()
+  })
+
+  it("propagates apply-only recipe child meta to following recipe children in dry-run mode", async () => {
+    const capturedConfigs: unknown[] = []
+
+    vi.doMock("node:child_process", () => ({
+      spawn: vi.fn(() => createMockSpawnChild(JSON.stringify({ TOKEN: "recipe-secret" }))),
+    }))
+    vi.doMock("../src/ssh.js", () => ({
+      shellQuote: (s: string) => `'${s}'`,
+      SshConnectionImpl: makeMockSshClass(capturedConfigs),
+    }))
+
+    const [{ runPlaybook }, { op }, { recipe }] = await Promise.all([
+      import("../src/runner.js"),
+      import("../src/modules/op.js"),
+      import("../src/recipe.js"),
+    ])
+
+    let receivedEnvInCheck: Environment | undefined
+    const dependentChild: Module = {
+      apply: vi.fn().mockResolvedValue({ status: "ok" } satisfies ModuleResult),
+      check: vi.fn().mockImplementation(async (_ssh, env: Environment) => {
+        await Promise.resolve()
+        receivedEnvInCheck = env
+        return "ok" as const
+      }),
+      name: "dependent-child",
+    }
+
+    const definition: ServerDefinition = {
+      host: "1.2.3.4",
+      name: "test-server",
+      run: [
+        recipe("dry-run-meta", [op.resolve({ TOKEN: "op://vault/item/password" }), dependentChild]),
+      ],
+      ssh: { ports: [22], privateKey: "~/.ssh/id", user: "root" },
+    }
+
+    await runPlaybook(definition, { dryRun: true })
+
+    expect(receivedEnvInCheck).toBeDefined()
+    await expect(resolveEnvironment(receivedEnvInCheck!, "TOKEN")).resolves.toBe("recipe-secret")
+    expect(dependentChild.apply).not.toHaveBeenCalled()
   })
 })
 

@@ -2,12 +2,13 @@ import type { RecipeModule } from "./recipe.js"
 import type { SshConnectionImpl } from "./ssh.js"
 import type { Environment, ModuleStatus } from "./types.js"
 
+import { mergeEnvironmentFromMeta } from "./meta.js"
 import { printCommandFailure, printModuleResult, printRecipeHeader } from "./output.js"
 
 type StepResult = { env: Environment; shouldBreak: boolean; status?: ModuleStatus }
 
-function isDryRunBlockingModule(module: RecipeModule["_modules"][number]): boolean {
-  return module._dryRunBlocker === true
+function shouldExecuteApplyDuringDryRun(module: RecipeModule["_modules"][number]): boolean {
+  return module._dryRunBlocker === true || module._dryRunMetaProducer === true
 }
 
 async function executeDryRunBlockingModule(
@@ -16,11 +17,13 @@ async function executeDryRunBlockingModule(
   environment: Environment
 ): Promise<StepResult> {
   const result = await childModule.apply(connection, environment)
+  const nextEnvironment =
+    result.meta == null ? environment : await mergeEnvironmentFromMeta(environment, result.meta)
   printModuleResult(childModule.name, result.status)
   if (result.status === "failed" && result.error != null) {
     printCommandFailure(result.error, false)
   }
-  return { env: environment, shouldBreak: result.status === "failed", status: result.status }
+  return { env: nextEnvironment, shouldBreak: result.status === "failed", status: result.status }
 }
 
 async function executeDryRunChildModule(
@@ -30,7 +33,7 @@ async function executeDryRunChildModule(
 ): Promise<StepResult> {
   const connection = childModule.local === true ? null : ssh
   const checkResult = await childModule.check(connection, environment)
-  if (checkResult !== "ok" && isDryRunBlockingModule(childModule)) {
+  if (checkResult !== "ok" && shouldExecuteApplyDuringDryRun(childModule)) {
     return executeDryRunBlockingModule(childModule, connection, environment)
   }
   const status = checkResult === "ok" ? "ok" : "changed"
@@ -46,13 +49,15 @@ export async function dryRunRecipeModule(
 ): Promise<StepResult> {
   printRecipeHeader(recipeModule.name)
   let aggregatedStatus: "changed" | "ok" = "ok"
+  let currentEnvironment = environment
 
   for (const childModule of recipeModule._modules) {
     // eslint-disable-next-line no-await-in-loop
-    const result = await executeDryRunChildModule(childModule, environment, ssh)
+    const result = await executeDryRunChildModule(childModule, currentEnvironment, ssh)
     if (result.shouldBreak) return result
+    currentEnvironment = result.env
     if (result.status === "changed") aggregatedStatus = "changed"
   }
 
-  return { env: environment, shouldBreak: false, status: aggregatedStatus }
+  return { env: currentEnvironment, shouldBreak: false, status: aggregatedStatus }
 }
