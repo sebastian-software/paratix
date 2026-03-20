@@ -2092,6 +2092,52 @@ describe("runPlaybook dry-run recipe behaviour", () => {
     expect(allLogOutput).toContain("(dry-run)")
   })
 
+  it("prints verbose diagnostics for failed dry-run recipe children when --verbose is enabled", async () => {
+    const capturedConfigs: unknown[] = []
+    const consoleLogs: string[] = []
+
+    vi.doMock("../src/ssh.js", () => ({
+      shellQuote: (s: string) => `'${s}'`,
+      SshConnectionImpl: makeMockSshClass(capturedConfigs),
+    }))
+    vi.spyOn(console, "log").mockImplementation((...args) => {
+      consoleLogs.push(args.join(" "))
+    })
+
+    const [{ runPlaybook }, { recipe }, { CommandError }] = await Promise.all([
+      import("../src/runner.js"),
+      import("../src/recipe.js"),
+      import("../src/sshHelpers.js"),
+    ])
+
+    const failingChild: Module = {
+      _dryRunBlocker: true,
+      apply: vi.fn().mockResolvedValue({
+        error: new CommandError("dry-run child failed", "dry-run stdout", "dry-run stderr"),
+        status: "failed",
+      } satisfies ModuleResult),
+      check: vi.fn().mockResolvedValue("needs-apply"),
+      name: "failing-child",
+    }
+
+    const definition: ServerDefinition = {
+      host: "1.2.3.4",
+      name: "test-server",
+      run: [recipe("test-recipe", [failingChild])],
+      ssh: { ports: [22], privateKey: "~/.ssh/id", user: "root" },
+    }
+
+    await runPlaybook(definition, { dryRun: true, verbose: true })
+
+    const output = consoleLogs.join("\n")
+    expect(output).toContain("dry-run child failed")
+    expect(output).toContain("Full stderr:")
+    expect(output).toContain("dry-run stderr")
+    expect(output).toContain("Full stdout:")
+    expect(output).toContain("dry-run stdout")
+    expect(process.exitCode).toBe(1)
+  })
+
   it("treats top-level fail() as a blocker in dry-run mode and stops the remaining run modules", async () => {
     const capturedConfigs: unknown[] = []
 

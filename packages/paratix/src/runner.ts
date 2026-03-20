@@ -259,6 +259,21 @@ async function handleMetaAndBuildResult(
 }
 
 // eslint-disable-next-line max-params -- verbose and dryRun flags need to be threaded through
+async function runDryRunRecipeModule(
+  recipeModule: RecipeModule,
+  environment: Environment,
+  ssh: SshConnectionImpl,
+  verbose: boolean
+): Promise<StepResult> {
+  return dryRunRecipeModule({
+    environment,
+    options: { verbose },
+    recipeModule,
+    ssh,
+  })
+}
+
+// eslint-disable-next-line max-params -- verbose and dryRun flags need to be threaded through
 async function runRecipeModule(
   recipeModule: RecipeModule,
   environment: Environment,
@@ -269,7 +284,7 @@ async function runRecipeModule(
   shutdownSignal: () => NodeJS.Signals | null
 ): Promise<StepResult> {
   try {
-    if (dryRun) return await dryRunRecipeModule(recipeModule, environment, ssh)
+    if (dryRun) return await runDryRunRecipeModule(recipeModule, environment, ssh, verbose)
 
     // check() iterates all child modules; apply() checks them again internally via executeModules().
     const checkResult = await recipeModule.check(ssh, environment)

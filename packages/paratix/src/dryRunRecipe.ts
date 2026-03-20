@@ -15,11 +15,13 @@ function shouldExecuteApplyDuringDryRun(module: RecipeModule["_modules"][number]
   )
 }
 
-async function executeDryRunBlockingModule(
-  childModule: RecipeModule["_modules"][number],
-  connection: null | SshConnectionImpl,
+async function executeDryRunBlockingModule(parameters: {
+  childModule: RecipeModule["_modules"][number]
+  connection: null | SshConnectionImpl
   environment: Environment
-): Promise<StepResult> {
+  verbose: boolean
+}): Promise<StepResult> {
+  const { childModule, connection, environment, verbose } = parameters
   const result =
     childModule._applyDryRun == null
       ? await childModule.apply(connection, environment)
@@ -28,20 +30,22 @@ async function executeDryRunBlockingModule(
     result.meta == null ? environment : await mergeEnvironmentFromMeta(environment, result.meta)
   printModuleResult(childModule.name, result.status)
   if (result.status === "failed" && result.error != null) {
-    printCommandFailure(result.error, false)
+    printCommandFailure(result.error, verbose)
   }
   return { env: nextEnvironment, shouldBreak: result.status === "failed", status: result.status }
 }
 
-async function executeDryRunChildModule(
-  childModule: RecipeModule["_modules"][number],
-  environment: Environment,
+async function executeDryRunChildModule(parameters: {
+  childModule: RecipeModule["_modules"][number]
+  environment: Environment
   ssh: SshConnectionImpl
-): Promise<StepResult> {
+  verbose: boolean
+}): Promise<StepResult> {
+  const { childModule, environment, ssh, verbose } = parameters
   const connection = childModule.local === true ? null : ssh
   const checkResult = await childModule.check(connection, environment)
   if (checkResult !== "ok" && shouldExecuteApplyDuringDryRun(childModule)) {
-    return executeDryRunBlockingModule(childModule, connection, environment)
+    return executeDryRunBlockingModule({ childModule, connection, environment, verbose })
   }
   const status = checkResult === "ok" ? "ok" : "changed"
   const suffix = checkResult === "ok" ? undefined : "(dry-run)"
@@ -49,18 +53,28 @@ async function executeDryRunChildModule(
   return { env: environment, shouldBreak: false, status }
 }
 
-export async function dryRunRecipeModule(
-  recipeModule: RecipeModule,
-  environment: Environment,
+export async function dryRunRecipeModule(parameters: {
+  environment: Environment
+  options?: {
+    verbose?: boolean
+  }
+  recipeModule: RecipeModule
   ssh: SshConnectionImpl
-): Promise<StepResult> {
+}): Promise<StepResult> {
+  const { environment, recipeModule, ssh } = parameters
   printRecipeHeader(recipeModule.name)
   let aggregatedStatus: "changed" | "ok" = "ok"
   let currentEnvironment = environment
+  const verbose = parameters.options?.verbose ?? false
 
   for (const childModule of recipeModule._modules) {
     // eslint-disable-next-line no-await-in-loop
-    const result = await executeDryRunChildModule(childModule, currentEnvironment, ssh)
+    const result = await executeDryRunChildModule({
+      childModule,
+      environment: currentEnvironment,
+      ssh,
+      verbose,
+    })
     if (result.shouldBreak) return result
     currentEnvironment = result.env
     if (result.status === "changed") aggregatedStatus = "changed"
