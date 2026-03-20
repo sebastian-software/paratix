@@ -1431,6 +1431,61 @@ describe("runPlaybook failed result diagnostics", () => {
     expect(process.exitCode).toBe(1)
   })
 
+  it("prints full stack traces and causes for failed signals with plain Errors in verbose mode", async () => {
+    const capturedConfigs: unknown[] = []
+    const consoleLogs: string[] = []
+
+    vi.doMock("../src/ssh.js", () => ({
+      shellQuote: (s: string) => `'${s}'`,
+      SshConnectionImpl: makeMockSshClass(capturedConfigs),
+    }))
+    vi.spyOn(console, "log").mockImplementation((...args) => {
+      consoleLogs.push(args.join(" "))
+    })
+
+    const [{ runPlaybook }] = await Promise.all([import("../src/runner.js")])
+
+    const changedModule: Module = {
+      apply: vi.fn().mockResolvedValue({ status: "changed" } satisfies ModuleResult),
+      check: vi.fn().mockResolvedValue("needs-apply"),
+      name: "changed-module",
+    }
+    const rootCause = new Error("root cause")
+    rootCause.stack = "Error: root cause\n    at root.ts:3:3"
+    const cause = new Error("inner cause", { cause: rootCause })
+    cause.stack = "Error: inner cause\n    at inner.ts:2:2"
+    const failingSignal: Module = {
+      apply: vi.fn().mockResolvedValue({
+        error: Object.assign(new Error("plain signal failure", { cause }), {
+          stack: "Error: plain signal failure\n    at outer.ts:1:1",
+        }),
+        status: "failed",
+      } satisfies ModuleResult),
+      check: vi.fn().mockResolvedValue("needs-apply"),
+      name: "failing-signal",
+    }
+
+    const definition: ServerDefinition = {
+      host: "1.2.3.4",
+      name: "test-server",
+      run: [changedModule],
+      signals: [failingSignal],
+      ssh: { ports: [22], privateKey: "~/.ssh/id", user: "root" },
+    }
+
+    await runPlaybook(definition, { verbose: true })
+
+    const output = consoleLogs.join("\n")
+    expect(output).toContain("plain signal failure")
+    expect(output).toContain("Full stack:")
+    expect(output).toContain("at outer.ts:1:1")
+    expect(output).toContain("Cause 1:")
+    expect(output).toContain("inner cause")
+    expect(output).toContain("Cause 2:")
+    expect(output).toContain("root cause")
+    expect(process.exitCode).toBe(1)
+  })
+
   it("prints verbose diagnostics for failed recipe signals with the same output path as top-level signals", async () => {
     const capturedConfigs: unknown[] = []
     const consoleLogs: string[] = []

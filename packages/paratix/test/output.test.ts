@@ -134,6 +134,7 @@ describe("printCommandFailure", () => {
 
   it("prints the error message in verbose mode", () => {
     const error = new Error("verbose error message")
+    error.stack = "Error: verbose error message\n    at output.test.ts:1:1"
 
     printCommandFailure(error, true)
 
@@ -141,14 +142,36 @@ describe("printCommandFailure", () => {
     expect(output).toContain("verbose error message")
   })
 
-  it("does not print verbose output for a plain (non-CommandError) Error even in verbose mode", () => {
+  it("prints the full stack for a plain Error in verbose mode", () => {
     const error = new Error("just a regular error")
+    error.stack = "Error: just a regular error\n    at output.test.ts:2:2"
 
     printCommandFailure(error, true)
 
     const output = consoleLogs.join("\n")
+    expect(output).toContain("Full stack:")
+    expect(output).toContain("at output.test.ts:2:2")
     expect(output).not.toContain("Full stderr:")
     expect(output).not.toContain("Full stdout:")
+  })
+
+  it("prints the full cause chain for a plain Error in verbose mode", () => {
+    const rootCause = new Error("root cause")
+    rootCause.stack = "Error: root cause\n    at root.ts:3:3"
+    const cause = new Error("inner cause", { cause: rootCause })
+    cause.stack = "Error: inner cause\n    at inner.ts:2:2"
+    const error = new Error("outer failure", { cause })
+    error.stack = "Error: outer failure\n    at outer.ts:1:1"
+
+    printCommandFailure(error, true)
+
+    const output = consoleLogs.join("\n")
+    expect(output).toContain("Full stack:")
+    expect(output).toContain("outer failure")
+    expect(output).toContain("Cause 1:")
+    expect(output).toContain("inner cause")
+    expect(output).toContain("Cause 2:")
+    expect(output).toContain("root cause")
   })
 
   it("prints full stdout and stderr via verbose output when verbose is true and error is a CommandError", () => {

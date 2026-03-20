@@ -103,6 +103,47 @@ export function printVerboseCommandError(stdout: string, stderr: string): void {
   }
 }
 
+function printVerboseErrorBlock(label: string, content: string): void {
+  if (!content.trim()) {
+    return
+  }
+
+  console.log(pc.red(`  │ ${label}`))
+  for (const line of content.trim().split("\n")) {
+    console.log(pc.red(`  │ ${line}`))
+  }
+}
+
+function getErrorCause(error: Error): unknown {
+  return (error as { cause?: unknown } & Error).cause
+}
+
+function printVerboseErrorCause(cause: unknown, depth: number): void {
+  const label = `Cause ${depth}:`
+  if (cause instanceof Error) {
+    const stack = cause.stack?.trim() ?? ""
+    const stackOrMessage = stack.length > 0 ? stack : String(cause)
+    printVerboseErrorBlock(label, stackOrMessage)
+    const nestedCause = getErrorCause(cause)
+    if (nestedCause !== undefined) {
+      printVerboseErrorCause(nestedCause, depth + 1)
+    }
+    return
+  }
+
+  printVerboseErrorBlock(label, String(cause))
+}
+
+function printVerboseGenericError(error: Error): void {
+  const stack = error.stack?.trim() ?? ""
+  const stackOrMessage = stack.length > 0 ? stack : String(error)
+  printVerboseErrorBlock("Full stack:", stackOrMessage)
+  const cause = getErrorCause(error)
+  if (cause !== undefined) {
+    printVerboseErrorCause(cause, 1)
+  }
+}
+
 /**
  * Print the error message of a failed command and, when verbose mode is active
  * and the error is a {@link CommandError}, the full untruncated output.
@@ -116,8 +157,12 @@ export function printCommandFailure(error: unknown, verbose: boolean): void {
     const summaryLine = error.message.split("\n")[0]
     printCommandError("", summaryLine)
     printVerboseCommandError(error.fullStdout, error.fullStderr)
-  } else {
-    printCommandError("", String(error))
+    return
+  }
+
+  printCommandError("", String(error))
+  if (verbose && error instanceof Error) {
+    printVerboseGenericError(error)
   }
 }
 
