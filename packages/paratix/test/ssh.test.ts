@@ -3,6 +3,8 @@ import type { Client, SFTPWrapper } from "ssh2"
 import { execFile } from "node:child_process"
 import { EventEmitter } from "node:events"
 import { stat } from "node:fs/promises"
+import { homedir } from "node:os"
+import { join } from "node:path"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 
 import type * as KnownHosts from "../src/knownHosts.js"
@@ -873,6 +875,28 @@ describe("SshConnectionImpl", () => {
       ]
       expect(callArgs.privateKey).toBe(fakeKeyBuffer)
       expect(Buffer.isBuffer(callArgs.privateKey)).toBe(true)
+    })
+
+    it("expands ~/ privateKey paths for connect() and getConnectionInfo()", async () => {
+      const { readFile } = await import("node:fs/promises")
+      const expandedPrivateKeyPath = join(homedir(), ".ssh", "id_ed25519")
+      vi.mocked(tryConnectOnPort).mockResolvedValueOnce()
+
+      const ssh = new SshConnectionImpl("1.2.3.4", {
+        ports: [22],
+        privateKey: "~/.ssh/id_ed25519",
+        user: "root",
+      })
+
+      await ssh.connect()
+
+      expect(readFile).toHaveBeenCalledWith(expandedPrivateKeyPath)
+      expect(ssh.getConnectionInfo()).toMatchObject({
+        host: "1.2.3.4",
+        port: 22,
+        privateKeyPath: expandedPrivateKeyPath,
+        user: "root",
+      })
     })
   })
 

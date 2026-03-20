@@ -227,6 +227,15 @@ describe("writeProjectFiles", () => {
     expect(content).toContain('PasswordAuthentication: "no"')
   })
 
+  it("generated server.ts keeps the ~/.ssh privateKey default that Paratix expands at runtime", () => {
+    writeProjectFiles(TEST_DIR)
+
+    const content = readFileSync(join(TEST_DIR, "server.ts"), "utf8")
+
+    expect(content).toContain('privateKey: "~/.ssh/id_ed25519"')
+    expect(content).toContain('"~" is expanded by Paratix')
+  })
+
   it("generated server.ts does not leave SSH port 22 open in the final firewall default", () => {
     writeProjectFiles(TEST_DIR)
 

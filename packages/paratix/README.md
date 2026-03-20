@@ -45,7 +45,7 @@ export default server({
   ssh: {
     user: "root",
     ports: [22],
-    privateKey: "~/.ssh/id_ed25519",
+    privateKey: "~/.ssh/id_ed25519", // "~" is expanded by Paratix
   },
   run: [hostname.set("web-01"), pkg.update("2025-03-01"), pkg.installed("nginx", "curl", "git")],
 })
@@ -72,7 +72,7 @@ Existing playbooks that relied on implicit TOFU must now opt in explicitly:
 ssh: {
   user: "root",
   ports: [22],
-  privateKey: "~/.ssh/id_ed25519",
+  privateKey: "~/.ssh/id_ed25519", // "~" is expanded by Paratix
   strictHostKeyChecking: "accept-new", // explicit TOFU opt-in
 }
 ```
@@ -83,7 +83,7 @@ For a safer bootstrap of brand-new hosts, pin the expected host key instead of u
 ssh: {
   user: "root",
   ports: [22],
-  privateKey: "~/.ssh/id_ed25519",
+  privateKey: "~/.ssh/id_ed25519", // "~" is expanded by Paratix
   expectedHostFingerprint: "SHA256:your-known-fingerprint",
 }
 ```
@@ -105,7 +105,7 @@ export default server({
   ssh: {
     user: "root",
     ports: [22],
-    privateKey: "~/.ssh/id_ed25519",
+    privateKey: "~/.ssh/id_ed25519", // "~" is expanded by Paratix
     expectedHostFingerprint: "SHA256:your-known-fingerprint",
   },
   env: {

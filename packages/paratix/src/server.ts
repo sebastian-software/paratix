@@ -17,7 +17,7 @@ import { validateSshConfig } from "./serverDefinitionValidation.js"
  * export default server({
  *   name: "web-01",
  *   host: "10.0.0.1",
- *   ssh: { user: "root", ports: [22], privateKey: "~/.ssh/id_ed25519" },
+ *   ssh: { user: "root", ports: [22], privateKey: "~/.ssh/id_ed25519" }, // "~" is expanded
  *   run: [apt.installed("nginx")],
  * });
  */

@@ -158,7 +158,8 @@ export type SshConnection = {
   /**
    * Return the low-level connection parameters for this session.
    * `privateKeyPath` and `agentSocket` reflect the authentication method that
-   * was actually used for the current session.
+   * was actually used for the current session. `privateKeyPath` is returned as
+   * an expanded filesystem path.
    */
   getConnectionInfo: () => {
     agentSocket?: string

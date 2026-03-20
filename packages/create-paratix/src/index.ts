@@ -19,7 +19,7 @@ export default server({
   ssh: {
     user: adminUser,
     ports: [22],
-    privateKey: "~/.ssh/id_ed25519",
+    privateKey: "~/.ssh/id_ed25519", // "~" is expanded by Paratix
   },
   env: {
     SERVER_NAME: "my-server",
@@ -68,7 +68,7 @@ export default server({
   ssh: {
     user: "root",
     ports: [22],
-    privateKey: "~/.ssh/id_ed25519",
+    privateKey: "~/.ssh/id_ed25519", // "~" is expanded by Paratix
   },
   env: {
     SERVER_NAME: "my-server",

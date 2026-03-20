@@ -84,7 +84,7 @@ export default server({
   ssh: {
     user: "root",
     ports: [22], // Array -- runner tries each port in order
-    privateKey: "~/.ssh/id_ed25519", // Optional -- omit to use SSH agent
+    privateKey: "~/.ssh/id_ed25519", // Optional -- "~" is expanded; omit to use SSH agent
     // Optional:
     // agentForward: false,          // Forward SSH agent to remote
     // passwordFallback: false,

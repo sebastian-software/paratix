@@ -2,7 +2,7 @@
 import { randomUUID, timingSafeEqual } from "node:crypto"
 import { unlinkSync, writeFileSync } from "node:fs"
 import { readFile, stat } from "node:fs/promises"
-import { tmpdir } from "node:os"
+import { homedir, tmpdir } from "node:os"
 import { join, posix } from "node:path"
 import { Client, type ClientChannel } from "ssh2"
 
@@ -38,6 +38,12 @@ function validateMktempPath(directory: string, path: string, prefix: string): st
   if (!path.startsWith(expectedPrefix) || path.includes("\n") || path.endsWith("/")) {
     throw new Error(`Unexpected mktemp output: ${path}`)
   }
+  return path
+}
+
+function expandHomePath(path: string): string {
+  if (path === "~") return homedir()
+  if (path.startsWith("~/")) return join(homedir(), path.slice(2))
   return path
 }
 
@@ -172,7 +178,10 @@ export class SshConnectionImpl implements SshConnection {
       agentSocket: this.authMethod === "agent" ? (this.agentSocket ?? undefined) : undefined,
       host: this.runtime.host,
       port: this.connectedPort,
-      privateKeyPath: this.authMethod === "privateKey" ? this.config.privateKey : undefined,
+      privateKeyPath:
+        this.authMethod === "privateKey" && this.config.privateKey != null
+          ? expandHomePath(this.config.privateKey)
+          : undefined,
       user: this.config.user,
     }
   }
@@ -416,7 +425,7 @@ export class SshConnectionImpl implements SshConnection {
       throw new Error("connectViaPrivateKey requires config.privateKey")
     }
     // eslint-disable-next-line security/detect-non-literal-fs-filename
-    const privateKey = await readFile(privateKeyPath)
+    const privateKey = await readFile(expandHomePath(privateKeyPath))
     try {
       if (await this.tryConnectOnPorts(privateKey)) {
         this.authMethod = "privateKey"
