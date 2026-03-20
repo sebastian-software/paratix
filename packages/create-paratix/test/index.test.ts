@@ -164,6 +164,17 @@ describe("writeProjectFiles", () => {
     expect(content).not.toMatch(/\bapt\b/v)
   })
 
+  it("generated server.ts does not disable root login while the scaffold still connects as root", () => {
+    writeProjectFiles(TEST_DIR)
+
+    const content = readFileSync(join(TEST_DIR, "server.ts"), "utf8")
+
+    expect(content).toContain('user: "root"')
+    expect(content).toContain('PermitRootLogin: "prohibit-password"')
+    expect(content).not.toContain('PermitRootLogin: "no"')
+    expect(content).toContain('PasswordAuthentication: "no"')
+  })
+
   it("creates a files subdirectory", () => {
     writeProjectFiles(TEST_DIR)
 

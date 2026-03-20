@@ -28,7 +28,7 @@ export default server({
     recipe("ssh-hardening", [
       sshd.port(2222),
       sshd.config({
-        PermitRootLogin: "no",
+        PermitRootLogin: "prohibit-password",
         PasswordAuthentication: "no",
       }),
     ], {
