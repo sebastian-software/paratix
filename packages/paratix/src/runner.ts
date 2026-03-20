@@ -312,11 +312,12 @@ async function applyModule(parameters: {
   const { currentEnvironment, ssh, targetModule, verbose } = parameters
   const connection = targetModule.local === true ? null : ssh
   const result = await targetModule.apply(connection, currentEnvironment)
+  const stepResult = await handleMetaAndBuildResult(ssh, currentEnvironment, result)
   printModuleResult(targetModule.name, result.status)
   if (result.status === "failed" && result.error != null) {
     printCommandFailure(result.error, verbose)
   }
-  return handleMetaAndBuildResult(ssh, currentEnvironment, result)
+  return stepResult
 }
 
 type RegularModuleArguments = {

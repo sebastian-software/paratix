@@ -129,6 +129,40 @@ describe("runPlaybook reconnect failure propagation", () => {
     process.exitCode = 0
   })
 
+  it("prints exactly one final failed status when reconnect after port change fails", async () => {
+    const capturedConfigs: unknown[] = []
+    const consoleLogs: string[] = []
+    const reconnectError = new Error("Connection timed out after port change")
+
+    vi.doMock("../src/ssh.js", () => ({
+      shellQuote: (s: string) => `'${s}'`,
+      SshConnectionImpl: makeMockSshClass(capturedConfigs, {
+        reconnect: vi.fn().mockRejectedValue(reconnectError),
+      }),
+    }))
+    vi.spyOn(console, "log").mockImplementation((...args) => {
+      consoleLogs.push(args.join(" "))
+    })
+
+    const { runPlaybook } = await import("../src/runner.js")
+    const moduleWithPortChange = makeModuleWithMeta([meta.sshdPort(2222)])
+
+    const definition: ServerDefinition = {
+      host: "1.2.3.4",
+      name: "test-server",
+      run: [moduleWithPortChange],
+      ssh: { ports: [22], privateKey: "~/.ssh/id", user: "root" },
+    }
+
+    await runPlaybook(definition)
+
+    const statusLines = consoleLogs.filter((line) => line.includes("test-module"))
+    expect(statusLines).toHaveLength(1)
+    expect(statusLines[0]).toContain("failed")
+    expect(statusLines[0]).not.toContain("changed")
+    process.exitCode = 0
+  })
+
   it("propagates reconnect failure after reboot (meta system.reboot) and records status failed", async () => {
     const capturedConfigs: unknown[] = []
     const reconnectError = new Error("Host unreachable after reboot")
@@ -287,6 +321,44 @@ describe("runPlaybook meta validation", () => {
 
     expect(process.exitCode).toBe(1)
     expect(subsequentModule.check).not.toHaveBeenCalled()
+    process.exitCode = 0
+  })
+
+  it("prints exactly one final failed status when a module returns malformed meta", async () => {
+    const capturedConfigs: unknown[] = []
+    const consoleLogs: string[] = []
+
+    vi.doMock("../src/ssh.js", () => ({
+      shellQuote: (s: string) => `'${s}'`,
+      SshConnectionImpl: makeMockSshClass(capturedConfigs),
+    }))
+    vi.spyOn(console, "log").mockImplementation((...args) => {
+      consoleLogs.push(args.join(" "))
+    })
+
+    const { runPlaybook } = await import("../src/runner.js")
+
+    const malformedMetaModule: Module = {
+      apply: vi
+        .fn()
+        .mockResolvedValue({ meta: [{ kind: "sshd.port", port: "2222" }], status: "changed" }),
+      check: vi.fn().mockResolvedValue("needs-apply"),
+      name: "malformed-meta",
+    }
+
+    const definition: ServerDefinition = {
+      host: "1.2.3.4",
+      name: "test-server",
+      run: [malformedMetaModule],
+      ssh: { ports: [22], privateKey: "~/.ssh/id", user: "root" },
+    }
+
+    await runPlaybook(definition)
+
+    const statusLines = consoleLogs.filter((line) => line.includes("malformed-meta"))
+    expect(statusLines).toHaveLength(1)
+    expect(statusLines[0]).toContain("failed")
+    expect(statusLines[0]).not.toContain("changed")
     process.exitCode = 0
   })
 })
