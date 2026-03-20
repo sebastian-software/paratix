@@ -110,6 +110,7 @@ describe("compose.up — apply", () => {
     const mod = compose.up({ projectDirectory })
     const result = await mod.apply(conn, emptyEnv)
     expect(result.status).toBe("failed")
+    expect(result.error).toBeInstanceOf(Error)
   })
 
   it("returns failed when no runtime is found", async () => {
@@ -120,6 +121,8 @@ describe("compose.up — apply", () => {
     const mod = compose.up({ projectDirectory })
     const result = await mod.apply(mockSsh, emptyEnv)
     expect(result.status).toBe("failed")
+    expect(result.error).toBeInstanceOf(Error)
+    expect(String(result.error)).toContain("no container runtime found")
   })
 
   it("returns changed on successful up", async () => {
@@ -155,11 +158,13 @@ describe("compose.up — apply", () => {
 
   it("returns failed when up command fails", async () => {
     const mockSsh = createComposeMockSsh({
-      [`${composeCmd("podman")} up -d`]: { code: 1 },
+      [`${composeCmd("podman")} up -d`]: { code: 1, stderr: "compose up failed" },
     })
     const mod = compose.up({ projectDirectory })
     const result = await mod.apply(mockSsh, emptyEnv)
     expect(result.status).toBe("failed")
+    expect(result.error).toBeInstanceOf(Error)
+    expect(String(result.error)).toContain("[compose.up] failed")
   })
 })
 
@@ -193,6 +198,7 @@ describe("compose.pull — apply", () => {
     const mod = compose.pull({ projectDirectory })
     const result = await mod.apply(conn, emptyEnv)
     expect(result.status).toBe("failed")
+    expect(result.error).toBeInstanceOf(Error)
   })
 
   it("returns failed when no runtime is found", async () => {
@@ -243,11 +249,12 @@ describe("compose.pull — apply", () => {
 
   it("returns failed when pull command fails", async () => {
     const mockSsh = createComposeMockSsh({
-      [`${composeCmd("podman")} pull 2>&1`]: { code: 1 },
+      [`${composeCmd("podman")} pull 2>&1`]: { code: 1, stderr: "pull failed" },
     })
     const mod = compose.pull({ projectDirectory })
     const result = await mod.apply(mockSsh, emptyEnv)
     expect(result.status).toBe("failed")
+    expect(result.error).toBeInstanceOf(Error)
   })
 })
 

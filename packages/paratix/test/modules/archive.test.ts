@@ -96,6 +96,7 @@ describe("archive.extract — apply", () => {
     const conn = null
     const result = await mod.apply(conn, emptyEnv)
     expect(result.status).toBe("failed")
+    expect(result.error).toBeInstanceOf(Error)
   })
 
   it("extracts tar.gz archive and writes marker", async () => {
@@ -225,13 +226,15 @@ describe("archive.extract — apply", () => {
 
   it("returns failed when extraction fails", async () => {
     const mockSsh = createMockSsh({
-      [`tar xzf '${src}' -C '${destination}'`]: { code: 1 },
+      [`tar xzf '${src}' -C '${destination}'`]: { code: 1, stderr: "tar: unexpected EOF" },
     })
 
     const mod = archive.extract(src, destination)
     const result = await mod.apply(mockSsh, emptyEnv)
 
     expect(result.status).toBe("failed")
+    expect(result.error).toBeInstanceOf(Error)
+    expect(String(result.error)).toContain("[archive.extract] failed to extract")
   })
 
   it("returns failed for unsupported archive format", async () => {
@@ -242,6 +245,8 @@ describe("archive.extract — apply", () => {
     const result = await mod.apply(mockSsh, emptyEnv)
 
     expect(result.status).toBe("failed")
+    expect(result.error).toBeInstanceOf(Error)
+    expect(String(result.error)).toContain("unsupported archive format")
   })
 
   it("cleans up uploaded file when extraction fails", async () => {

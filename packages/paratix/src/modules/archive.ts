@@ -1,3 +1,4 @@
+import { failed, failedCommand } from "../moduleFailure.js"
 import { shellQuote } from "../ssh.js"
 import { type Module, type ModuleResult, NEEDS_APPLY, type SshConnection } from "../types.js"
 import { localSha256, sha256String } from "./fileHelpers.js"
@@ -123,12 +124,12 @@ async function applyExtract(
   const cmd = extractCommand(source, remoteSource, destination)
   if (cmd === null) {
     if (upload) await conn.exec(`rm -f ${shellQuote(remoteSource)}`, SILENT)
-    return { status: "failed" }
+    return failed(`[archive.extract] unsupported archive format for ${source}`)
   }
   const result = await conn.exec(cmd, EXEC_OPTS)
   if (result.code !== 0) {
     if (upload) await conn.exec(`rm -f ${shellQuote(remoteSource)}`, SILENT)
-    return { status: "failed" }
+    return failedCommand(`[archive.extract] failed to extract ${source}`, result)
   }
 
   if (owner !== undefined && owner !== "") {
@@ -136,7 +137,9 @@ async function applyExtract(
   }
 
   const markerWritten = await writeMarkerAndCleanup(conn, remoteSource, { marker, upload })
-  return { status: markerWritten ? "changed" : "failed" }
+  return markerWritten
+    ? { status: "changed" }
+    : failed(`[archive.extract] failed to write marker for ${source}`)
 }
 
 /**
@@ -168,7 +171,7 @@ export const archive = {
 
     return {
       async apply(conn: null | SshConnection): Promise<ModuleResult> {
-        if (!conn) return { status: "failed" }
+        if (!conn) return failed(`[archive.extract] SSH connection is required for ${destination}`)
         return applyExtract(conn, parameters)
       },
       async check(conn: null | SshConnection): Promise<"needs-apply" | "ok"> {

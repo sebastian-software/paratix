@@ -44,6 +44,19 @@ describe("apt.key", () => {
       "curl -fsSL 'https://download.docker.com/linux/ubuntu/gpg' | gpg --dearmor --yes -o /etc/apt/keyrings/'docker'.gpg"
     )
   })
+
+  it("returns a failed result with error details when key import fails", async () => {
+    const ssh = createMockSsh({
+      "curl -fsSL 'https://download.docker.com/linux/ubuntu/gpg' | gpg --dearmor --yes -o /etc/apt/keyrings/'docker'.gpg":
+        { code: 2, stderr: "gpg: dearmor failed: No such file or directory" },
+      "mkdir -p /etc/apt/keyrings": { code: 0 },
+    })
+    const mod = apt.key("docker", "https://download.docker.com/linux/ubuntu/gpg")
+    const result = await mod.apply(ssh, emptyEnv)
+    expect(result.status).toBe("failed")
+    expect(result.error).toBeInstanceOf(Error)
+    expect(String(result.error)).toContain("[apt.key] failed to import docker")
+  })
 })
 
 describe("apt.repository (PPA form)", () => {
@@ -186,5 +199,14 @@ describe("apt.debconf", () => {
     const mod = apt.debconf("postfix", selections)
     const result = await mod.check(ssh, emptyEnv)
     expect(result).toBe("needs-apply")
+  })
+
+  it("returns a failed result with error details when selections contain newlines", async () => {
+    const mod = apt.debconf("postfix", { "postfix/main_mailer_type": "Internet\nSite" })
+    const ssh = createMockSsh({})
+    const result = await mod.apply(ssh, emptyEnv)
+    expect(result.status).toBe("failed")
+    expect(result.error).toBeInstanceOf(Error)
+    expect(String(result.error)).toContain("must not contain newline characters")
   })
 })

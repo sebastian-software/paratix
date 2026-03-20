@@ -1,3 +1,4 @@
+import { failed, failedCommand } from "../moduleFailure.js"
 import { shellQuote } from "../ssh.js"
 import { type Module, type ModuleResult, NEEDS_APPLY, type SshConnection } from "../types.js"
 import { hasFlag, setVersionedFlag } from "./moduleHelpers.js"
@@ -42,12 +43,12 @@ function buildPpaRepository(ppa: string): Module {
   const ppaPath = ppa.slice(PPA_PREFIX.length)
   return {
     async apply(ssh: null | SshConnection): Promise<ModuleResult> {
-      if (!ssh) return { status: "failed" }
+      if (!ssh) return failed(`[apt.repository] SSH connection is required for ${ppa}`)
       const result = await ssh.exec(`add-apt-repository -y ${shellQuote(ppa)}`, {
         ignoreExitCode: true,
         silent: true,
       })
-      if (result.code !== 0) return { status: "failed" }
+      if (result.code !== 0) return failedCommand(`[apt.repository] failed to add ${ppa}`, result)
       return { status: "changed" }
     },
     async check(ssh: null | SshConnection): Promise<"needs-apply" | "ok"> {
@@ -143,12 +144,14 @@ export const apt = {
   debconf(packageName: string, selections: Record<string, string>): Module {
     return {
       async apply(ssh: null | SshConnection): Promise<ModuleResult> {
-        if (!ssh) return { status: "failed" }
+        if (!ssh) return failed(`[apt.debconf] SSH connection is required for ${packageName}`)
 
         const lines: string[] = []
         for (const [question, value] of Object.entries(selections)) {
           if (question.includes("\n") || value.includes("\n")) {
-            return { status: "failed" }
+            return failed(
+              `[apt.debconf] selections for ${packageName} must not contain newline characters`
+            )
           }
           // eslint-disable-next-line no-await-in-loop
           const type = await resolveDebconfType(ssh, question)
@@ -160,7 +163,8 @@ export const apt = {
           `echo ${shellQuote(selectionsText)} | debconf-set-selections`,
           { ignoreExitCode: true, silent: true }
         )
-        if (result.code !== 0) return { status: "failed" }
+        if (result.code !== 0)
+          return failedCommand(`[apt.debconf] failed to set selections for ${packageName}`, result)
         return { status: "changed" }
       },
       async check(ssh: null | SshConnection): Promise<"needs-apply" | "ok"> {
@@ -193,24 +197,27 @@ export const apt = {
     const flagName = `apt-dist-upgrade-${date}`
     return {
       async apply(ssh: null | SshConnection): Promise<ModuleResult> {
-        if (!ssh) return { status: "failed" }
+        if (!ssh) return failed(`[apt.distUpgrade] SSH connection is required for ${date}`)
         const update = await ssh.exec(`${NONINTERACTIVE} apt-get update`, {
           ignoreExitCode: true,
           silent: true,
         })
-        if (update.code !== 0) return { status: "failed" }
+        if (update.code !== 0)
+          return failedCommand("[apt.distUpgrade] apt-get update failed", update)
 
         const configure = await ssh.exec(`${NONINTERACTIVE} dpkg --configure -a`, {
           ignoreExitCode: true,
           silent: true,
         })
-        if (configure.code !== 0) return { status: "failed" }
+        if (configure.code !== 0)
+          return failedCommand("[apt.distUpgrade] dpkg --configure -a failed", configure)
 
         const upgrade = await ssh.exec(`${NONINTERACTIVE} apt-get dist-upgrade -y`, {
           ignoreExitCode: true,
           silent: true,
         })
-        if (upgrade.code !== 0) return { status: "failed" }
+        if (upgrade.code !== 0)
+          return failedCommand("[apt.distUpgrade] apt-get dist-upgrade failed", upgrade)
 
         await setVersionedFlag(ssh, flagName, "apt-dist-upgrade-")
 
@@ -233,19 +240,20 @@ export const apt = {
   key(name: string, url: string): Module {
     return {
       async apply(ssh: null | SshConnection): Promise<ModuleResult> {
-        if (!ssh) return { status: "failed" }
+        if (!ssh) return failed(`[apt.key] SSH connection is required for ${name}`)
 
         const mkdirResult = await ssh.exec("mkdir -p /etc/apt/keyrings", {
           ignoreExitCode: true,
           silent: true,
         })
-        if (mkdirResult.code !== 0) return { status: "failed" }
+        if (mkdirResult.code !== 0)
+          return failedCommand("[apt.key] failed to create /etc/apt/keyrings", mkdirResult)
 
         const result = await ssh.exec(
           `curl -fsSL ${shellQuote(url)} | gpg --dearmor --yes -o /etc/apt/keyrings/${shellQuote(name)}.gpg`,
           { ignoreExitCode: true, silent: true }
         )
-        if (result.code !== 0) return { status: "failed" }
+        if (result.code !== 0) return failedCommand(`[apt.key] failed to import ${name}`, result)
         return { status: "changed" }
       },
       async check(ssh: null | SshConnection): Promise<"needs-apply" | "ok"> {
@@ -317,13 +325,14 @@ export const apt = {
 
     return {
       async apply(ssh: null | SshConnection): Promise<ModuleResult> {
-        if (!ssh) return { status: "failed" }
+        if (!ssh) return failed(`[apt.repository] SSH connection is required for ${name}`)
         await ssh.writeFile(filePath, `${expectedContent}\n`)
         const result = await ssh.exec(`${NONINTERACTIVE} apt-get update`, {
           ignoreExitCode: true,
           silent: true,
         })
-        if (result.code !== 0) return { status: "failed" }
+        if (result.code !== 0)
+          return failedCommand(`[apt.repository] apt-get update failed for ${name}`, result)
         return { status: "changed" }
       },
       async check(ssh: null | SshConnection): Promise<"needs-apply" | "ok"> {

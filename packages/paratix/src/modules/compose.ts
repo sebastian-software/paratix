@@ -1,6 +1,8 @@
+/* eslint-disable max-lines -- compose module intentionally keeps related lifecycle helpers together */
 import { readFile } from "node:fs/promises"
 import { basename } from "node:path"
 
+import { failed, failedCommand } from "../moduleFailure.js"
 import { shellQuote } from "../ssh.js"
 import { type Module, type ModuleResult, NEEDS_APPLY, type SshConnection } from "../types.js"
 
@@ -9,6 +11,29 @@ const UNIT_NAME_PATTERN = /^[\w@.\-]+$/v
 
 // cspell:ignore podman
 type ComposeRuntime = "docker" | "podman"
+
+function requireComposeSsh(
+  ssh: null | SshConnection,
+  action: string,
+  projectDirectory: string
+): ModuleResult | SshConnection {
+  return ssh ?? failed(`[compose.${action}] SSH connection is required for ${projectDirectory}`)
+}
+
+async function requireComposeRuntime(parameters: {
+  action: string
+  explicitRuntime?: ComposeRuntime
+  projectDirectory: string
+  ssh: SshConnection
+}): Promise<ComposeRuntime | ModuleResult> {
+  const runtime = await getRuntime(parameters.ssh, parameters.explicitRuntime)
+  return (
+    runtime ??
+    failed(
+      `[compose.${parameters.action}] no container runtime found for ${parameters.projectDirectory}`
+    )
+  )
+}
 
 /**
  * Detect whether `podman` or `docker` is available on the remote host.
@@ -47,6 +72,20 @@ async function getRuntime(
  */
 function composeCommand(runtime: ComposeRuntime, projectDirectory: string): string {
   return `${runtime} compose --project-directory ${shellQuote(projectDirectory)}`
+}
+
+async function resolveDesiredComposeContent(options: {
+  content?: string
+  src?: string
+}): Promise<null | string> {
+  if (options.src !== undefined && options.src !== "") {
+    // eslint-disable-next-line security/detect-non-literal-fs-filename -- path from module config, not user input
+    return readFile(options.src, "utf8")
+  }
+  if (options.content !== undefined && options.content !== "") {
+    return options.content
+  }
+  return null
 }
 
 /**
@@ -169,24 +208,34 @@ export const compose = {
 
     return {
       async apply(ssh: null | SshConnection): Promise<ModuleResult> {
-        if (!ssh) return { status: "failed" }
+        const connection = requireComposeSsh(ssh, "config", projectDirectory)
+        if ("status" in connection) return connection
 
-        const rt = await getRuntime(ssh, explicitRuntime)
-        if (!rt) return { status: "failed" }
+        const runtime = await requireComposeRuntime({
+          action: "config",
+          explicitRuntime,
+          projectDirectory,
+          ssh: connection,
+        })
+        if (typeof runtime !== "string") return runtime
 
         if (options.src !== undefined && options.src !== "") {
-          await ssh.uploadFile(options.src, remotePath)
+          await connection.uploadFile(options.src, remotePath)
         } else if (options.content !== undefined && options.content !== "") {
-          await ssh.writeFile(remotePath, options.content)
+          await connection.writeFile(remotePath, options.content)
         } else {
-          return { status: "failed" }
+          return failed(`[compose.config] content or src is required for ${projectDirectory}`)
         }
 
-        const validate = await ssh.exec(
-          `${composeCommand(rt, projectDirectory)} config --quiet`,
+        const validate = await connection.exec(
+          `${composeCommand(runtime, projectDirectory)} config --quiet`,
           EXEC_OPTS
         )
-        if (validate.code !== 0) return { status: "failed" }
+        if (validate.code !== 0)
+          return failedCommand(
+            `[compose.config] validation failed for ${projectDirectory}`,
+            validate
+          )
 
         return { status: "changed" }
       },
@@ -196,15 +245,8 @@ export const compose = {
         const exists = await ssh.exists(remotePath)
         if (!exists) return NEEDS_APPLY
 
-        let desiredContent: string
-        if (options.src !== undefined && options.src !== "") {
-          // eslint-disable-next-line security/detect-non-literal-fs-filename -- path from module config, not user input
-          desiredContent = await readFile(options.src, "utf8")
-        } else if (options.content !== undefined && options.content !== "") {
-          desiredContent = options.content
-        } else {
-          return NEEDS_APPLY
-        }
+        const desiredContent = await resolveDesiredComposeContent(options)
+        if (desiredContent == null) return NEEDS_APPLY
 
         const remoteContent = await ssh.readFile(remotePath)
         return remoteContent.trim() === desiredContent.trim() ? "ok" : NEEDS_APPLY
@@ -227,17 +269,25 @@ export const compose = {
 
     return {
       async apply(ssh: null | SshConnection): Promise<ModuleResult> {
-        if (!ssh) return { status: "failed" }
+        const connection = requireComposeSsh(ssh, "down", projectDirectory)
+        if ("status" in connection) return connection
 
-        const rt = await getRuntime(ssh, explicitRuntime)
-        if (!rt) return { status: "failed" }
+        const runtime = await requireComposeRuntime({
+          action: "down",
+          explicitRuntime,
+          projectDirectory,
+          ssh: connection,
+        })
+        if (typeof runtime !== "string") return runtime
 
         const volumesFlag = volumes === true ? " --volumes" : ""
-        const result = await ssh.exec(
-          `${composeCommand(rt, projectDirectory)} down${volumesFlag}`,
+        const result = await connection.exec(
+          `${composeCommand(runtime, projectDirectory)} down${volumesFlag}`,
           EXEC_OPTS
         )
-        return result.code === 0 ? { status: "changed" } : { status: "failed" }
+        return result.code === 0
+          ? { status: "changed" }
+          : failedCommand(`[compose.down] failed for ${projectDirectory}`, result)
       },
       async check(ssh: null | SshConnection): Promise<"needs-apply" | "ok"> {
         if (!ssh) return NEEDS_APPLY
@@ -275,16 +325,23 @@ export const compose = {
 
     return {
       async apply(ssh: null | SshConnection): Promise<ModuleResult> {
-        if (!ssh) return { status: "failed" }
+        const connection = requireComposeSsh(ssh, "pull", projectDirectory)
+        if ("status" in connection) return connection
 
-        const rt = await getRuntime(ssh, explicitRuntime)
-        if (!rt) return { status: "failed" }
+        const runtime = await requireComposeRuntime({
+          action: "pull",
+          explicitRuntime,
+          projectDirectory,
+          ssh: connection,
+        })
+        if (typeof runtime !== "string") return runtime
 
-        const result = await ssh.exec(
-          `${composeCommand(rt, projectDirectory)} pull 2>&1`,
+        const result = await connection.exec(
+          `${composeCommand(runtime, projectDirectory)} pull 2>&1`,
           EXEC_OPTS
         )
-        if (result.code !== 0) return { status: "failed" }
+        if (result.code !== 0)
+          return failedCommand(`[compose.pull] failed for ${projectDirectory}`, result)
 
         const output = result.stdout
         if (output.includes("Pulling") || output.includes("Downloaded")) {
@@ -314,14 +371,22 @@ export const compose = {
 
     return {
       async apply(ssh: null | SshConnection): Promise<ModuleResult> {
-        if (!ssh) return { status: "failed" }
+        const connection = requireComposeSsh(ssh, "restart", projectDirectory)
+        if ("status" in connection) return connection
 
-        const rt = await getRuntime(ssh, explicitRuntime)
-        if (!rt) return { status: "failed" }
+        const runtime = await requireComposeRuntime({
+          action: "restart",
+          explicitRuntime,
+          projectDirectory,
+          ssh: connection,
+        })
+        if (typeof runtime !== "string") return runtime
 
-        const cmd = composeCommand(rt, projectDirectory)
-        const result = await ssh.exec(`${cmd} down && ${cmd} up -d`, EXEC_OPTS)
-        return result.code === 0 ? { status: "changed" } : { status: "failed" }
+        const cmd = composeCommand(runtime, projectDirectory)
+        const result = await connection.exec(`${cmd} down && ${cmd} up -d`, EXEC_OPTS)
+        return result.code === 0
+          ? { status: "changed" }
+          : failedCommand(`[compose.restart] failed for ${projectDirectory}`, result)
       },
       // eslint-disable-next-line @typescript-eslint/require-await -- Interface requires async
       async check(): Promise<"needs-apply" | "ok"> {
@@ -357,16 +422,24 @@ export const compose = {
 
     return {
       async apply(ssh: null | SshConnection): Promise<ModuleResult> {
-        if (!ssh) return { status: "failed" }
+        const connection = requireComposeSsh(ssh, "systemd", projectDirectory)
+        if ("status" in connection) return connection
 
-        const rt = await getRuntime(ssh, explicitRuntime)
-        if (!rt) return { status: "failed" }
+        const runtime = await requireComposeRuntime({
+          action: "systemd",
+          explicitRuntime,
+          projectDirectory,
+          ssh: connection,
+        })
+        if (typeof runtime !== "string") return runtime
 
-        const content = generateSystemdUnit(projectDirectory, serviceName, rt)
-        await ssh.writeFile(filePath, content)
+        const content = generateSystemdUnit(projectDirectory, serviceName, runtime)
+        await connection.writeFile(filePath, content)
 
-        const result = await ssh.exec("systemctl daemon-reload", EXEC_OPTS)
-        return result.code === 0 ? { status: "changed" } : { status: "failed" }
+        const result = await connection.exec("systemctl daemon-reload", EXEC_OPTS)
+        return result.code === 0
+          ? { status: "changed" }
+          : failedCommand(`[compose.systemd] daemon-reload failed for ${unitFileName}`, result)
       },
       async check(ssh: null | SshConnection): Promise<"needs-apply" | "ok"> {
         if (!ssh) return NEEDS_APPLY
@@ -402,18 +475,26 @@ export const compose = {
 
     return {
       async apply(ssh: null | SshConnection): Promise<ModuleResult> {
-        if (!ssh) return { status: "failed" }
+        const connection = requireComposeSsh(ssh, "up", projectDirectory)
+        if ("status" in connection) return connection
 
-        const rt = await getRuntime(ssh, explicitRuntime)
-        if (!rt) return { status: "failed" }
+        const runtime = await requireComposeRuntime({
+          action: "up",
+          explicitRuntime,
+          projectDirectory,
+          ssh: connection,
+        })
+        if (typeof runtime !== "string") return runtime
 
         const serviceArguments = services?.map((s) => shellQuote(s)).join(" ") ?? ""
         const suffix = serviceArguments === "" ? "" : ` ${serviceArguments}`
-        const result = await ssh.exec(
-          `${composeCommand(rt, projectDirectory)} up -d${suffix}`,
+        const result = await connection.exec(
+          `${composeCommand(runtime, projectDirectory)} up -d${suffix}`,
           EXEC_OPTS
         )
-        return result.code === 0 ? { status: "changed" } : { status: "failed" }
+        return result.code === 0
+          ? { status: "changed" }
+          : failedCommand(`[compose.up] failed for ${projectDirectory}`, result)
       },
       async check(ssh: null | SshConnection): Promise<"needs-apply" | "ok"> {
         if (!ssh) return NEEDS_APPLY
