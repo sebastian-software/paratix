@@ -422,10 +422,11 @@ async function connectAndRegister(
   options: RunOptions,
   setSsh: (c: SshConnectionImpl) => void
 ): Promise<SshConnectionImpl> {
-  const sshConfig =
-    options.reconnectTimeout == null
-      ? definition.ssh
-      : { ...definition.ssh, reconnectTimeout: options.reconnectTimeout }
+  const sshConfig = {
+    ...definition.ssh,
+    ports: [...definition.ssh.ports],
+    ...(options.reconnectTimeout == null ? {} : { reconnectTimeout: options.reconnectTimeout }),
+  }
   const ssh = new SshConnectionImpl(definition.host, sshConfig)
   setSsh(ssh)
   await ssh.connect()

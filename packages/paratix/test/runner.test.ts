@@ -290,6 +290,66 @@ describe("runPlaybook meta validation", () => {
   })
 })
 
+describe("runPlaybook SSH config immutability", () => {
+  beforeEach(() => {
+    vi.spyOn(console, "log").mockImplementation(() => {
+      /* noop */
+    })
+    vi.spyOn(console, "error").mockImplementation(() => {
+      /* noop */
+    })
+    vi.resetModules()
+  })
+
+  afterEach(() => {
+    vi.restoreAllMocks()
+    vi.resetModules()
+    process.exitCode = 0
+  })
+
+  it("does not mutate definition.ssh during runtime port and host updates", async () => {
+    const capturedConfigs: unknown[] = []
+
+    vi.doMock("../src/ssh.js", () => ({
+      shellQuote: (s: string) => `'${s}'`,
+      SshConnectionImpl: makeMockSshClass(capturedConfigs),
+    }))
+
+    const { runPlaybook } = await import("../src/runner.js")
+
+    const sshConfig = {
+      expectedHostFingerprint: "SHA256:trusted-fingerprint",
+      ports: [22],
+      privateKey: "~/.ssh/id",
+      reconnectTimeout: 30_000,
+      strictHostKeyChecking: "yes" as const,
+      user: "root",
+    }
+    const definition: ServerDefinition = {
+      host: "1.2.3.4",
+      name: "test-server",
+      run: [
+        makeModuleWithMeta([meta.sshdPort(2222)]),
+        makeModuleWithMeta([meta.systemHost("10.0.0.42"), meta.systemReboot()]),
+      ],
+      ssh: sshConfig,
+    }
+
+    await runPlaybook(definition)
+
+    expect(definition.host).toBe("1.2.3.4")
+    expect(definition.ssh).toStrictEqual({
+      expectedHostFingerprint: "SHA256:trusted-fingerprint",
+      ports: [22],
+      privateKey: "~/.ssh/id",
+      reconnectTimeout: 30_000,
+      strictHostKeyChecking: "yes",
+      user: "root",
+    })
+    expect(definition.ssh.ports).toStrictEqual([22])
+  })
+})
+
 // Bug regression: when sshd.port and system.reboot are both set, reconnect must only be called once
 describe("runPlaybook handlePortChange + handleReboot interaction", () => {
   beforeEach(() => {
@@ -1281,7 +1341,7 @@ describe("runPlaybook reconnectTimeout", () => {
     expect(capturedConfigs[0]).toMatchObject({ reconnectTimeout: 42_000 })
   })
 
-  it("uses definition.ssh as-is when reconnectTimeout is not provided in RunOptions", async () => {
+  it("passes a defensive copy of definition.ssh when reconnectTimeout is not provided in RunOptions", async () => {
     const capturedConfigs: unknown[] = []
 
     vi.doMock("../src/ssh.js", () => ({
@@ -1306,8 +1366,8 @@ describe("runPlaybook reconnectTimeout", () => {
     await runPlaybook(definition)
 
     expect(capturedConfigs).toHaveLength(1)
-    // When no reconnectTimeout in options, the original sshConfig object is passed unchanged
-    expect(capturedConfigs[0]).toBe(sshConfig)
+    expect(capturedConfigs[0]).toStrictEqual(sshConfig)
+    expect(capturedConfigs[0]).not.toBe(sshConfig)
   })
 })
 

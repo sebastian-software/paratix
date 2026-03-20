@@ -48,6 +48,11 @@ const JITTER_RANGE = 0.5
 const RECONNECT_BASE_DELAY = 1000
 const RECONNECT_MAX_DELAY = 30_000
 
+type SshRuntimeState = {
+  host: string
+  ports: number[]
+}
+
 export class SshConnectionImpl implements SshConnection {
   private agentSocket: null | string = null
   /**
@@ -64,13 +69,19 @@ export class SshConnectionImpl implements SshConnection {
   private client: Client | null = null
   private readonly config: SshConfig
   private connectedPort = 0
-  private host: string
   private readonly pendingRejects = new Set<(reason: Error) => void>()
   private pinnedHostKey: Buffer | null = null
+  private readonly runtime: SshRuntimeState
 
   public constructor(host: string, config: SshConfig) {
-    this.host = host
-    this.config = config
+    this.runtime = {
+      host,
+      ports: [...config.ports],
+    }
+    this.config = {
+      ...config,
+      ports: [...config.ports],
+    }
     if (
       config.sudoPassword != null &&
       (config.sudoPassword.includes("\n") || config.sudoPassword.includes("\r"))
@@ -81,7 +92,7 @@ export class SshConnectionImpl implements SshConnection {
   }
 
   public addPort(port: number): void {
-    if (!this.config.ports.includes(port)) this.config.ports.push(port)
+    if (!this.runtime.ports.includes(port)) this.runtime.ports.push(port)
   }
 
   /**
@@ -108,12 +119,14 @@ export class SshConnectionImpl implements SshConnection {
       if (await this.tryConnectOnPorts(privateKey)) return
       if (this.config.passwordFallback) {
         const password = await promptTerminal(
-          `Password for ${this.config.user}@${this.host}: `,
+          `Password for ${this.config.user}@${this.runtime.host}: `,
           true
         )
         if (await this.tryConnectOnPorts(privateKey, password)) return
       }
-      throw new Error(`Failed to connect to ${this.host} on ports: ${this.config.ports.join(", ")}`)
+      throw new Error(
+        `Failed to connect to ${this.runtime.host} on ports: ${this.runtime.ports.join(", ")}`
+      )
     } finally {
       privateKey.fill(0)
     }
@@ -199,7 +212,7 @@ export class SshConnectionImpl implements SshConnection {
   public getConnectionInfo(): ReturnType<SshConnection["getConnectionInfo"]> {
     return {
       agentSocket: this.agentSocket ?? undefined,
-      host: this.host,
+      host: this.runtime.host,
       port: this.connectedPort,
       privateKeyPath: this.config.privateKey,
       user: this.config.user,
@@ -230,7 +243,7 @@ export class SshConnectionImpl implements SshConnection {
       // sudo requires a password — prompt interactively
     }
     const password = await promptTerminal(
-      `[sudo] password for ${this.config.user}@${this.host}: `,
+      `[sudo] password for ${this.config.user}@${this.runtime.host}: `,
       true
     )
     if (password.includes("\n") || password.includes("\r")) {
@@ -280,12 +293,12 @@ export class SshConnectionImpl implements SshConnection {
       }
     }
     throw new Error(
-      `Failed to reconnect to ${this.host} after ${attempt} attempts (timeout: ${timeout}ms)`
+      `Failed to reconnect to ${this.runtime.host} after ${attempt} attempts (timeout: ${timeout}ms)`
     )
   }
 
   public removePort(port: number): void {
-    this.config.ports = this.config.ports.filter((candidate) => candidate !== port)
+    this.runtime.ports = this.runtime.ports.filter((candidate) => candidate !== port)
   }
 
   public async sha256(remotePath: string): Promise<null | string> {
@@ -305,7 +318,7 @@ export class SshConnectionImpl implements SshConnection {
   }
 
   public updateHost(host: string): void {
-    this.host = host
+    this.runtime.host = host
   }
 
   public async uploadFile(
@@ -428,14 +441,17 @@ export class SshConnectionImpl implements SshConnection {
       return
     }
     if (this.config.passwordFallback) {
-      const password = await promptTerminal(`Password for ${this.config.user}@${this.host}: `, true)
+      const password = await promptTerminal(
+        `Password for ${this.config.user}@${this.runtime.host}: `,
+        true
+      )
       if (await this.tryConnectOnPorts(undefined, password, agent)) {
         this.agentSocket = agent
         return
       }
     }
     throw new Error(
-      `Could not connect to ${this.host} via SSH agent on ports ${this.config.ports.join(", ")}`
+      `Could not connect to ${this.runtime.host} via SSH agent on ports ${this.runtime.ports.join(", ")}`
     )
   }
 
@@ -609,12 +625,12 @@ export class SshConnectionImpl implements SshConnection {
     agent?: string
   ): Promise<boolean> {
     const mode = this.config.strictHostKeyChecking ?? "yes"
-    for (const port of this.config.ports) {
+    for (const port of this.runtime.ports) {
       try {
         const client = new Client()
         const verifier = buildHostVerifier(
           mode,
-          { host: this.host, port },
+          { host: this.runtime.host, port },
           {
             expectedHostFingerprint: this.config.expectedHostFingerprint,
             expectedHostPublicKey: this.config.expectedHostPublicKey,
@@ -626,7 +642,7 @@ export class SshConnectionImpl implements SshConnection {
           agent,
           agentForward: this.config.agentForward,
           client,
-          host: this.host,
+          host: this.runtime.host,
           hostVerifier: wrappedVerifier,
           password,
           port,
@@ -669,7 +685,7 @@ export class SshConnectionImpl implements SshConnection {
       ) {
         this.clearCachedPassword()
         throw new HostKeyVerificationError(
-          `HOST KEY CHANGED on reconnect to ${this.host}: ` +
+          `HOST KEY CHANGED on reconnect to ${this.runtime.host}: ` +
             "the remote host key does not match the key from the initial connection. " +
             "This could indicate a man-in-the-middle attack."
         )
