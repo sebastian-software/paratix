@@ -1,3 +1,4 @@
+import { failed, failedCommand } from "../moduleFailure.js"
 import { shellQuote } from "../ssh.js"
 import { type Module, type ModuleResult, NEEDS_APPLY, type SshConnection } from "../types.js"
 
@@ -20,12 +21,14 @@ export const systemd = {
   daemonReload(): Module {
     return {
       async apply(ssh: null | SshConnection): Promise<ModuleResult> {
-        if (!ssh) return { status: "failed" }
+        if (!ssh) return failed("[systemd.daemonReload] SSH connection is required")
         const result = await ssh.exec(`${SYSTEMCTL} daemon-reload`, {
           ignoreExitCode: true,
           silent: true,
         })
-        return result.code === 0 ? { status: "changed" } : { status: "failed" }
+        return result.code === 0
+          ? { status: "changed" }
+          : failedCommand("[systemd.daemonReload] systemctl daemon-reload failed", result)
       },
       // eslint-disable-next-line @typescript-eslint/require-await -- Interface requires async
       async check(): Promise<"needs-apply" | "ok"> {
@@ -44,12 +47,14 @@ export const systemd = {
   masked(name: string): Module {
     return {
       async apply(ssh: null | SshConnection): Promise<ModuleResult> {
-        if (!ssh) return { status: "failed" }
+        if (!ssh) return failed(`[systemd.masked: ${name}] SSH connection is required`)
         const result = await ssh.exec(`${SYSTEMCTL} mask ${shellQuote(name)}`, {
           ignoreExitCode: true,
           silent: true,
         })
-        return result.code === 0 ? { status: "changed" } : { status: "failed" }
+        return result.code === 0
+          ? { status: "changed" }
+          : failedCommand(`[systemd.masked: ${name}] systemctl mask failed`, result)
       },
       async check(ssh: null | SshConnection): Promise<"needs-apply" | "ok"> {
         if (!ssh) return NEEDS_APPLY
@@ -81,13 +86,15 @@ export const systemd = {
     const filePath = `/etc/systemd/system/${name}`
     return {
       async apply(ssh: null | SshConnection): Promise<ModuleResult> {
-        if (!ssh) return { status: "failed" }
+        if (!ssh) return failed(`[systemd.unit: ${name}] SSH connection is required`)
         await ssh.writeFile(filePath, content)
         const result = await ssh.exec(`${SYSTEMCTL} daemon-reload`, {
           ignoreExitCode: true,
           silent: true,
         })
-        return result.code === 0 ? { status: "changed" } : { status: "failed" }
+        return result.code === 0
+          ? { status: "changed" }
+          : failedCommand(`[systemd.unit: ${name}] systemctl daemon-reload failed`, result)
       },
       async check(ssh: null | SshConnection): Promise<"needs-apply" | "ok"> {
         if (!ssh) return NEEDS_APPLY
@@ -108,12 +115,14 @@ export const systemd = {
   unmasked(name: string): Module {
     return {
       async apply(ssh: null | SshConnection): Promise<ModuleResult> {
-        if (!ssh) return { status: "failed" }
+        if (!ssh) return failed(`[systemd.unmasked: ${name}] SSH connection is required`)
         const result = await ssh.exec(`${SYSTEMCTL} unmask ${shellQuote(name)}`, {
           ignoreExitCode: true,
           silent: true,
         })
-        return result.code === 0 ? { status: "changed" } : { status: "failed" }
+        return result.code === 0
+          ? { status: "changed" }
+          : failedCommand(`[systemd.unmasked: ${name}] systemctl unmask failed`, result)
       },
       async check(ssh: null | SshConnection): Promise<"needs-apply" | "ok"> {
         if (!ssh) return NEEDS_APPLY

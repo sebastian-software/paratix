@@ -745,6 +745,110 @@ describe("runPlaybook signal handling", () => {
   })
 })
 
+describe("runPlaybook failed result diagnostics", () => {
+  beforeEach(() => {
+    vi.spyOn(console, "error").mockImplementation(() => {
+      /* noop */
+    })
+    vi.resetModules()
+  })
+
+  afterEach(() => {
+    vi.restoreAllMocks()
+    vi.resetModules()
+    process.exitCode = 0
+  })
+
+  it("prints centralized diagnostics for a module that returns failed with an error payload", async () => {
+    const capturedConfigs: unknown[] = []
+    const consoleLogs: string[] = []
+
+    vi.doMock("../src/ssh.js", () => ({
+      shellQuote: (s: string) => `'${s}'`,
+      SshConnectionImpl: makeMockSshClass(capturedConfigs),
+    }))
+    vi.spyOn(console, "log").mockImplementation((...args) => {
+      consoleLogs.push(args.join(" "))
+    })
+
+    const [{ runPlaybook }, { CommandError }] = await Promise.all([
+      import("../src/runner.js"),
+      import("../src/sshHelpers.js"),
+    ])
+
+    const failingModule: Module = {
+      apply: vi.fn().mockResolvedValue({
+        error: new CommandError("module failed summary", "full stdout", "full stderr"),
+        status: "failed",
+      } satisfies ModuleResult),
+      check: vi.fn().mockResolvedValue("needs-apply"),
+      name: "failing-module",
+    }
+
+    const definition: ServerDefinition = {
+      host: "1.2.3.4",
+      name: "test-server",
+      run: [failingModule],
+      ssh: { ports: [22], privateKey: "~/.ssh/id", user: "root" },
+    }
+
+    await runPlaybook(definition)
+
+    expect(consoleLogs.join("\n")).toContain("module failed summary")
+    expect(process.exitCode).toBe(1)
+  })
+
+  it("prints centralized diagnostics for failed signals and shows verbose output when requested", async () => {
+    const capturedConfigs: unknown[] = []
+    const consoleLogs: string[] = []
+
+    vi.doMock("../src/ssh.js", () => ({
+      shellQuote: (s: string) => `'${s}'`,
+      SshConnectionImpl: makeMockSshClass(capturedConfigs),
+    }))
+    vi.spyOn(console, "log").mockImplementation((...args) => {
+      consoleLogs.push(args.join(" "))
+    })
+
+    const [{ runPlaybook }, { CommandError }] = await Promise.all([
+      import("../src/runner.js"),
+      import("../src/sshHelpers.js"),
+    ])
+
+    const changedModule: Module = {
+      apply: vi.fn().mockResolvedValue({ status: "changed" } satisfies ModuleResult),
+      check: vi.fn().mockResolvedValue("needs-apply"),
+      name: "changed-module",
+    }
+    const failingSignal: Module = {
+      apply: vi.fn().mockResolvedValue({
+        error: new CommandError("signal failed summary", "signal stdout", "signal stderr"),
+        status: "failed",
+      } satisfies ModuleResult),
+      check: vi.fn().mockResolvedValue("needs-apply"),
+      name: "failing-signal",
+    }
+
+    const definition: ServerDefinition = {
+      host: "1.2.3.4",
+      name: "test-server",
+      run: [changedModule],
+      signals: [failingSignal],
+      ssh: { ports: [22], privateKey: "~/.ssh/id", user: "root" },
+    }
+
+    await runPlaybook(definition, { verbose: true })
+
+    const output = consoleLogs.join("\n")
+    expect(output).toContain("signal failed summary")
+    expect(output).toContain("Full stderr:")
+    expect(output).toContain("signal stderr")
+    expect(output).toContain("Full stdout:")
+    expect(output).toContain("signal stdout")
+    expect(process.exitCode).toBe(1)
+  })
+})
+
 // Bug #12 regression: runPlaybook must pass reconnectTimeout from RunOptions into SshConfig
 describe("runPlaybook reconnectTimeout", () => {
   beforeEach(() => {

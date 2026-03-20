@@ -1,16 +1,12 @@
-import { describe, expect, it, vi } from "vitest"
+import { describe, expect, it } from "vitest"
 
 import type { ExecOptions } from "../../src/types.js"
 
 import { command } from "../../src/modules/command.js"
-import { printCommandError } from "../../src/output.js"
+import { CommandError } from "../../src/sshHelpers.js"
 import { createStrictMockSsh } from "../helpers/mockSsh.js"
 
 const emptyEnv = {}
-
-vi.mock("../../src/output.js", () => ({
-  printCommandError: vi.fn(),
-}))
 
 type MockSshWithOptions = {
   exec: (
@@ -71,24 +67,25 @@ describe("command.shell — apply with non-zero exit code", () => {
     const mod = command.shell("exit 1")
     const result = await mod.apply(mockSsh, emptyEnv)
     expect(result.status).toBe("failed")
+    expect(result.error).toBeInstanceOf(CommandError)
   })
 
-  it("calls printCommandError with stdout and stderr when command exits non-zero", async () => {
-    vi.mocked(printCommandError).mockClear()
-
+  it("returns a centralized CommandError payload when command exits non-zero", async () => {
     const mockSsh = createStrictMockSsh({
       "exit 1": { code: 1, stderr: "some error", stdout: "some output" },
     })
     const mod = command.shell("exit 1")
-    await mod.apply(mockSsh, emptyEnv)
+    const result = await mod.apply(mockSsh, emptyEnv)
 
-    expect(printCommandError).toHaveBeenCalledOnce()
-    expect(printCommandError).toHaveBeenCalledWith("some output", "some error")
+    expect(result.error).toBeInstanceOf(CommandError)
+    expect(result.error?.message).toContain("[command.shell] command failed (exit code 1)")
+    expect(result.error).toMatchObject({
+      fullStderr: "some error",
+      fullStdout: "some output",
+    })
   })
 
-  it("passes secrets to ssh.exec and masks leaked stdout/stderr before printing", async () => {
-    vi.mocked(printCommandError).mockClear()
-
+  it("passes secrets to ssh.exec and masks leaked stdout/stderr in the error payload", async () => {
     const secret = "super-secret-token"
     const mockSsh = createMockSshWithOptions({
       [`deploy --token ${secret}`]: {
@@ -98,15 +95,15 @@ describe("command.shell — apply with non-zero exit code", () => {
       },
     })
     const mod = command.shell(`deploy --token ${secret}`, { secrets: [secret] })
-    await mod.apply(mockSsh, emptyEnv)
+    const result = await mod.apply(mockSsh, emptyEnv)
 
     expect(mockSsh.execCalls).toHaveLength(1)
     expect(mockSsh.execCalls[0]?.options?.secrets).toStrictEqual([secret])
-    expect(printCommandError).toHaveBeenCalledOnce()
-    expect(printCommandError).toHaveBeenCalledWith(
-      "stdout leaked [REDACTED]",
-      "stderr leaked [REDACTED]"
-    )
+    expect(result.error).toBeInstanceOf(CommandError)
+    expect(result.error).toMatchObject({
+      fullStderr: "stderr leaked [REDACTED]",
+      fullStdout: "stdout leaked [REDACTED]",
+    })
   })
 })
 

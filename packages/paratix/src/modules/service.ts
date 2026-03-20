@@ -1,3 +1,4 @@
+import { failed, failedCommand } from "../moduleFailure.js"
 import { shellQuote } from "../ssh.js"
 import { type Module, type ModuleResult, NEEDS_APPLY, type SshConnection } from "../types.js"
 
@@ -18,12 +19,14 @@ export const service = {
   disabled(name: string): Module {
     return {
       async apply(ssh: null | SshConnection): Promise<ModuleResult> {
-        if (!ssh) return { status: "failed" }
+        if (!ssh) return failed(`[service.disabled: ${name}] SSH connection is required`)
         const result = await ssh.exec(`${SYSTEMCTL} disable ${shellQuote(name)}`, {
           ignoreExitCode: true,
           silent: true,
         })
-        return result.code === 0 ? { status: "changed" } : { status: "failed" }
+        return result.code === 0
+          ? { status: "changed" }
+          : failedCommand(`[service.disabled: ${name}] systemctl disable failed`, result)
       },
       async check(ssh: null | SshConnection): Promise<"needs-apply" | "ok"> {
         if (!ssh) return NEEDS_APPLY
@@ -42,12 +45,14 @@ export const service = {
   enabled(name: string): Module {
     return {
       async apply(ssh: null | SshConnection): Promise<ModuleResult> {
-        if (!ssh) return { status: "failed" }
+        if (!ssh) return failed(`[service.enabled: ${name}] SSH connection is required`)
         const result = await ssh.exec(`${SYSTEMCTL} enable ${shellQuote(name)}`, {
           ignoreExitCode: true,
           silent: true,
         })
-        return result.code === 0 ? { status: "changed" } : { status: "failed" }
+        return result.code === 0
+          ? { status: "changed" }
+          : failedCommand(`[service.enabled: ${name}] systemctl enable failed`, result)
       },
       async check(ssh: null | SshConnection): Promise<"needs-apply" | "ok"> {
         if (!ssh) return NEEDS_APPLY
@@ -67,12 +72,14 @@ export const service = {
   facts(): Module {
     return {
       async apply(ssh: null | SshConnection): Promise<ModuleResult> {
-        if (!ssh) return { status: "failed" }
+        if (!ssh) return failed("[service.facts] SSH connection is required")
         const result = await ssh.exec(
           `${SYSTEMCTL} list-units --type=service --all --no-pager --no-legend`,
           { ignoreExitCode: true, silent: true }
         )
-        if (result.code !== 0) return { status: "failed" }
+        if (result.code !== 0) {
+          return failedCommand("[service.facts] systemctl list-units failed", result)
+        }
         const meta: Record<string, string> = {}
         for (const line of result.stdout.split("\n")) {
           // Strip leading Unicode bullet (● or ○) that systemd prepends to failed units
@@ -103,12 +110,14 @@ export const service = {
   reload(name: string): Module {
     return {
       async apply(ssh: null | SshConnection): Promise<ModuleResult> {
-        if (!ssh) return { status: "failed" }
+        if (!ssh) return failed(`[service.reload: ${name}] SSH connection is required`)
         const result = await ssh.exec(`${SYSTEMCTL} reload ${shellQuote(name)}`, {
           ignoreExitCode: true,
           silent: true,
         })
-        return result.code === 0 ? { status: "changed" } : { status: "failed" }
+        return result.code === 0
+          ? { status: "changed" }
+          : failedCommand(`[service.reload: ${name}] systemctl reload failed`, result)
       },
       // eslint-disable-next-line @typescript-eslint/require-await -- Interface requires async
       async check(): Promise<"needs-apply" | "ok"> {
@@ -127,12 +136,14 @@ export const service = {
   restart(name: string): Module {
     return {
       async apply(ssh: null | SshConnection): Promise<ModuleResult> {
-        if (!ssh) return { status: "failed" }
+        if (!ssh) return failed(`[service.restart: ${name}] SSH connection is required`)
         const result = await ssh.exec(`${SYSTEMCTL} restart ${shellQuote(name)}`, {
           ignoreExitCode: true,
           silent: true,
         })
-        return result.code === 0 ? { status: "changed" } : { status: "failed" }
+        return result.code === 0
+          ? { status: "changed" }
+          : failedCommand(`[service.restart: ${name}] systemctl restart failed`, result)
       },
       // eslint-disable-next-line @typescript-eslint/require-await -- Interface requires async
       async check(): Promise<"needs-apply" | "ok"> {
@@ -151,12 +162,14 @@ export const service = {
   running(name: string): Module {
     return {
       async apply(ssh: null | SshConnection): Promise<ModuleResult> {
-        if (!ssh) return { status: "failed" }
+        if (!ssh) return failed(`[service.running: ${name}] SSH connection is required`)
         const result = await ssh.exec(`${SYSTEMCTL} start ${shellQuote(name)}`, {
           ignoreExitCode: true,
           silent: true,
         })
-        return result.code === 0 ? { status: "changed" } : { status: "failed" }
+        return result.code === 0
+          ? { status: "changed" }
+          : failedCommand(`[service.running: ${name}] systemctl start failed`, result)
       },
       async check(ssh: null | SshConnection): Promise<"needs-apply" | "ok"> {
         if (!ssh) return NEEDS_APPLY
@@ -176,12 +189,14 @@ export const service = {
   stopped(name: string): Module {
     return {
       async apply(ssh: null | SshConnection): Promise<ModuleResult> {
-        if (!ssh) return { status: "failed" }
+        if (!ssh) return failed(`[service.stopped: ${name}] SSH connection is required`)
         const result = await ssh.exec(`${SYSTEMCTL} stop ${shellQuote(name)}`, {
           ignoreExitCode: true,
           silent: true,
         })
-        return result.code === 0 ? { status: "changed" } : { status: "failed" }
+        return result.code === 0
+          ? { status: "changed" }
+          : failedCommand(`[service.stopped: ${name}] systemctl stop failed`, result)
       },
       async check(ssh: null | SshConnection): Promise<"needs-apply" | "ok"> {
         if (!ssh) return NEEDS_APPLY

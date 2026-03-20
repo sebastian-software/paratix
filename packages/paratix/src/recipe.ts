@@ -57,6 +57,9 @@ async function executeOneModule(
 
   const result = await targetModule.apply(connection, currentEnvironment)
   printModuleResult(targetModule.name, result.status)
+  if (result.status === "failed" && result.error != null) {
+    printCommandFailure(result.error, false)
+  }
 
   const environment =
     result.meta == null ? currentEnvironment : mergeEnvironment(currentEnvironment, result.meta)
@@ -91,6 +94,14 @@ async function executeModules(
   return { env: currentEnvironment, status: aggregatedStatus }
 }
 
+function handleSignalResult(name: string, result: ModuleResult): "changed" | "failed" {
+  printModuleResult(`signal: ${name}`, result.status)
+  if (result.status === "failed" && result.error != null) {
+    printCommandFailure(result.error, false)
+  }
+  return result.status === "failed" ? "failed" : "changed"
+}
+
 async function triggerSignals(parameters: {
   environment: Environment
   shutdownSignal?: () => NodeJS.Signals | null
@@ -106,8 +117,7 @@ async function triggerSignals(parameters: {
       const connection = signal.local === true ? null : parameters.ssh
       // eslint-disable-next-line no-await-in-loop
       const result = await signal.apply(connection, parameters.environment)
-      printModuleResult(`signal: ${signal.name}`, result.status)
-      if (result.status === "failed") status = "failed"
+      status = handleSignalResult(signal.name, result)
     } catch (error) {
       printModuleResult(`signal: ${signal.name}`, "failed")
       printCommandFailure(error, false)

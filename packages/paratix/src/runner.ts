@@ -203,14 +203,19 @@ async function runRecipeModule(
   }
 }
 
-async function applyModule(
-  targetModule: Module,
-  currentEnvironment: Environment,
+async function applyModule(parameters: {
+  currentEnvironment: Environment
   ssh: SshConnectionImpl
-): Promise<StepResult> {
+  targetModule: Module
+  verbose: boolean
+}): Promise<StepResult> {
+  const { currentEnvironment, ssh, targetModule, verbose } = parameters
   const connection = targetModule.local === true ? null : ssh
   const result = await targetModule.apply(connection, currentEnvironment)
   printModuleResult(targetModule.name, result.status)
+  if (result.status === "failed" && result.error != null) {
+    printCommandFailure(result.error, verbose)
+  }
   return handleMetaAndBuildResult(ssh, currentEnvironment, result)
 }
 
@@ -239,7 +244,12 @@ async function runRegularModule(parameters: RegularModuleArguments): Promise<Ste
       return { env, shouldBreak: false, status: "changed" }
     }
 
-    return await applyModule(targetModule, env, ssh)
+    return await applyModule({
+      currentEnvironment: env,
+      ssh,
+      targetModule,
+      verbose,
+    })
   } catch (error) {
     printModuleResult(targetModule.name, "failed")
     printCommandFailure(error, verbose)
@@ -306,6 +316,9 @@ async function runSignals(parameters: SignalArguments): Promise<void> {
       // eslint-disable-next-line no-await-in-loop
       const result = await signal.apply(connection, env)
       printModuleResult(`signal: ${signal.name}`, result.status)
+      if (result.status === "failed" && result.error != null) {
+        printCommandFailure(result.error, verbose)
+      }
       stats.update(result.status)
     } catch (error) {
       printModuleResult(`signal: ${signal.name}`, "failed")

@@ -1,6 +1,6 @@
 import { execFile, type ExecFileException } from "node:child_process"
 
-import { printCommandFailure } from "../output.js"
+import { failed } from "../moduleFailure.js"
 import { shellQuote } from "../ssh.js"
 import { CommandError } from "../sshHelpers.js"
 import { type Module, type ModuleResult, NEEDS_APPLY, type SshConnection } from "../types.js"
@@ -238,14 +238,16 @@ export const rsync = {
   sync(options: SyncOptions): Module {
     return {
       async apply(ssh: null | SshConnection): Promise<ModuleResult> {
-        if (!ssh) return { status: "failed" }
+        if (!ssh) return failed("[rsync.sync] SSH connection is required")
 
         try {
           const stdout = await executeRsync({ dryRun: false, options, phase: "apply", ssh })
           return { status: stdout.trim().length > 0 ? "changed" : "ok" }
         } catch (error) {
-          printCommandFailure(error, false)
-          return { status: "failed" }
+          return {
+            error: error instanceof Error ? error : new Error(String(error)),
+            status: "failed",
+          }
         }
       },
       async check(ssh: null | SshConnection): Promise<"needs-apply" | "ok"> {

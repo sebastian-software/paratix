@@ -1,4 +1,4 @@
-import { printCommandError } from "../output.js"
+import { failed, failedCommand } from "../moduleFailure.js"
 import { maskSecrets } from "../sshHelpers.js"
 import { type Module, type ModuleResult, NEEDS_APPLY, type SshConnection } from "../types.js"
 
@@ -30,7 +30,8 @@ export const command = {
   shell(cmd: string, options?: { check?: string; name?: string; secrets?: string[] }): Module {
     return {
       async apply(ssh: null | SshConnection): Promise<ModuleResult> {
-        if (!ssh) return { status: "failed" }
+        const moduleName = options?.name ?? "command.shell"
+        if (!ssh) return failed(`[${moduleName}] SSH connection is required`)
         const secrets = options?.secrets ?? []
         const result = await ssh.exec(cmd, {
           ignoreExitCode: true,
@@ -38,11 +39,11 @@ export const command = {
           silent: true,
         })
         if (result.code !== 0) {
-          printCommandError(
-            maskSecrets(result.stdout, secrets),
-            maskSecrets(result.stderr, secrets)
-          )
-          return { status: "failed" }
+          return failedCommand(`[${moduleName}] command failed`, {
+            ...result,
+            stderr: maskSecrets(result.stderr, secrets),
+            stdout: maskSecrets(result.stdout, secrets),
+          })
         }
         return { status: "changed" }
       },

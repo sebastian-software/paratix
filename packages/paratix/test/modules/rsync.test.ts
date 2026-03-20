@@ -2,6 +2,7 @@ import { execFile } from "node:child_process"
 import { beforeEach, describe, expect, it, vi } from "vitest"
 
 import { rsync } from "../../src/modules/rsync.js"
+import { CommandError } from "../../src/sshHelpers.js"
 import { createMockSsh } from "../helpers/mockSsh.js"
 
 vi.mock("node:child_process", () => ({
@@ -140,22 +141,18 @@ describe("rsync.sync — apply", () => {
 
   it("returns failed when rsync command fails", async () => {
     mockFailureWithStderr({ code: 12, stderr: "rsync: connection unexpectedly closed" })
-    const consoleSpy = vi.spyOn(console, "log").mockImplementation(() => {
-      /* noop */
-    })
     const mockSsh = createMockSsh()
     const mod = rsync.sync({ dest: "/remote/dest", src: "/local/src" })
     const result = await mod.apply(mockSsh, emptyEnv)
     expect(result.status).toBe("failed")
-    expect(consoleSpy).toHaveBeenCalledWith(expect.stringContaining("Error output:"))
-    expect(consoleSpy).toHaveBeenCalledWith(
-      expect.stringContaining(
-        "[rsync.sync] apply failed for /local/src -> /remote/dest (exit code 12)"
-      )
+    expect(result.error).toBeInstanceOf(CommandError)
+    expect(result.error?.message).toContain(
+      "[rsync.sync] apply failed for /local/src -> /remote/dest (exit code 12)"
     )
-    expect(consoleSpy).toHaveBeenCalledWith(
-      expect.stringContaining("rsync: connection unexpectedly closed")
-    )
+    expect(result.error).toMatchObject({
+      fullStderr: "rsync: connection unexpectedly closed",
+      fullStdout: "",
+    })
   })
 
   it("does NOT include --dry-run flag", async () => {

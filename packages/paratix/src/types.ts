@@ -16,6 +16,8 @@ export const NEEDS_APPLY = "needs-apply" as const
 
 /** The outcome of a module's apply step. */
 export type ModuleResult = {
+  /** Optional error details consumed by the runner for centralized CLI output. */
+  error?: Error
   /** Optional key-value pairs to merge into the env for subsequent modules. */
   meta?: Environment
   /** Execution status of the module. */
