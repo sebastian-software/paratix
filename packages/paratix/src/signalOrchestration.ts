@@ -1,5 +1,12 @@
-import type { Environment, Module, ModuleStatus, SshConnection } from "./types.js"
+import type {
+  Environment,
+  Module,
+  ModuleStatus,
+  OrchestrationStep,
+  SshConnection,
+} from "./types.js"
 
+import { assertValidModuleMetaEntries, mergeEnvironmentFromMeta } from "./meta.js"
 import { printCommandFailure, printModuleResult } from "./output.js"
 
 export type SignalHooks = {
@@ -12,6 +19,7 @@ export type SignalRunStatus = "changed" | "failed"
 type SignalRunParameters = {
   environment: Environment
   hooks?: SignalHooks
+  onSignalStep?: (step: OrchestrationStep) => Promise<void>
   shutdownSignal?: () => NodeJS.Signals | null
   signals: Module[]
   ssh: null | SshConnection
@@ -46,25 +54,71 @@ function handleSignalFailure(parameters: {
   return "failed"
 }
 
+async function applySignalMeta(parameters: {
+  currentEnvironment: Environment
+  onSignalStep?: (step: OrchestrationStep) => Promise<void>
+  result: Awaited<ReturnType<Module["apply"]>>
+}): Promise<Environment> {
+  assertValidModuleMetaEntries(parameters.result.meta)
+  const nextEnvironment = await mergeEnvironmentFromMeta(
+    parameters.currentEnvironment,
+    parameters.result.meta
+  )
+  await parameters.onSignalStep?.({
+    env: nextEnvironment,
+    meta: parameters.result.meta,
+    status: parameters.result.status,
+  })
+  return nextEnvironment
+}
+
+async function runOneSignal(parameters: {
+  currentEnvironment: Environment
+  hooks?: SignalHooks
+  onSignalStep?: (step: OrchestrationStep) => Promise<void>
+  signal: Module
+  ssh: null | SshConnection
+  verbose: boolean
+}): Promise<{ nextEnvironment: Environment; status: SignalRunStatus }> {
+  const connection = parameters.signal.local === true ? null : parameters.ssh
+  const result = await parameters.signal.apply(connection, parameters.currentEnvironment)
+  const nextEnvironment = await applySignalMeta({
+    currentEnvironment: parameters.currentEnvironment,
+    onSignalStep: parameters.onSignalStep,
+    result,
+  })
+  return {
+    nextEnvironment,
+    status: handleSignalResult({
+      hooks: parameters.hooks,
+      result,
+      signalName: parameters.signal.name,
+      verbose: parameters.verbose,
+    }),
+  }
+}
+
 export async function runSignalModules(parameters: SignalRunParameters): Promise<SignalRunStatus> {
   const getShutdownSignal = parameters.shutdownSignal ?? (() => null)
   const verbose = parameters.verbose ?? false
+  let currentEnvironment = parameters.environment
   let status: SignalRunStatus = "changed"
 
   for (const signal of parameters.signals) {
     if (getShutdownSignal() != null) break
     parameters.hooks?.onSignalStarted?.()
     try {
-      const connection = signal.local === true ? null : parameters.ssh
       // eslint-disable-next-line no-await-in-loop
-      const result = await signal.apply(connection, parameters.environment)
-      const signalStatus = handleSignalResult({
+      const signalStep = await runOneSignal({
+        currentEnvironment,
         hooks: parameters.hooks,
-        result,
-        signalName: signal.name,
+        onSignalStep: parameters.onSignalStep,
+        signal,
+        ssh: parameters.ssh,
         verbose,
       })
-      if (signalStatus === "failed") status = "failed"
+      currentEnvironment = signalStep.nextEnvironment
+      if (signalStep.status === "failed") status = "failed"
     } catch (error) {
       status = handleSignalFailure({
         error,

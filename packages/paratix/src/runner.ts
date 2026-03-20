@@ -244,6 +244,9 @@ async function runRecipeModule(
       onChildStep: async (step) => {
         await applyRunnerControlPlaneMeta(ssh, step)
       },
+      onSignalStep: async (step) => {
+        await applyRunnerControlPlaneMeta(ssh, step)
+      },
       shutdownSignal,
       signalHooks: {
         onSignalFinished: (status: ModuleStatus) => {
@@ -403,6 +406,9 @@ async function runSignals(parameters: SignalArguments): Promise<void> {
       onSignalStarted: () => {
         stats.incrementSignals()
       },
+    },
+    onSignalStep: async (step) => {
+      await applyRunnerControlPlaneMeta(ssh, step)
     },
     shutdownSignal,
     signals,

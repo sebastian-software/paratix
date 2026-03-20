@@ -26,6 +26,7 @@ export type RecipeModule = {
     environment: Environment,
     options?: {
       onChildStep?: (step: OrchestrationStep) => Promise<void>
+      onSignalStep?: (step: OrchestrationStep) => Promise<void>
       shutdownSignal?: () => NodeJS.Signals | null
       signalHooks?: SignalHooks
       verbose?: boolean
@@ -150,6 +151,7 @@ async function executeModules(
 
 async function triggerSignals(parameters: {
   environment: Environment
+  onSignalStep?: (step: OrchestrationStep) => Promise<void>
   shutdownSignal?: () => NodeJS.Signals | null
   signalHooks?: SignalHooks
   signals: Module[]
@@ -159,6 +161,7 @@ async function triggerSignals(parameters: {
   return runSignalModules({
     environment: parameters.environment,
     hooks: parameters.signalHooks,
+    onSignalStep: parameters.onSignalStep,
     shutdownSignal: parameters.shutdownSignal,
     signals: parameters.signals,
     ssh: parameters.ssh,
@@ -172,6 +175,7 @@ async function applyRecipe(parameters: {
   name: string
   options?: {
     onChildStep?: (step: OrchestrationStep) => Promise<void>
+    onSignalStep?: (step: OrchestrationStep) => Promise<void>
     shutdownSignal?: () => NodeJS.Signals | null
     signalHooks?: SignalHooks
     verbose?: boolean
@@ -192,6 +196,7 @@ async function applyRecipe(parameters: {
   if (state.status === "changed" && parameters.signals) {
     state.status = await triggerSignals({
       environment: state.env,
+      onSignalStep: parameters.options?.onSignalStep,
       shutdownSignal,
       signalHooks: parameters.options?.signalHooks,
       signals: parameters.signals,
@@ -243,6 +248,7 @@ export function recipe(
       environment: Environment,
       parameters?: {
         onChildStep?: (step: OrchestrationStep) => Promise<void>
+        onSignalStep?: (step: OrchestrationStep) => Promise<void>
         shutdownSignal?: () => NodeJS.Signals | null
         signalHooks?: SignalHooks
         verbose?: boolean
