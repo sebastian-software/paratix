@@ -5,8 +5,62 @@ import { join, resolve } from "node:path"
 const MS_PER_MINUTE = 60_000
 const INSTALL_TIMEOUT_MS = 120_000
 
-const SERVER_TEMPLATE = `import { server, recipe } from "paratix";
-import { package as pkg, hostname, sshd, ufw, file, service, user } from "paratix/modules";
+export type ScaffoldMode = "bootstrap-root" | "hardened-admin"
+
+const HARDENED_ADMIN_SERVER_TEMPLATE = `import { server, recipe } from "paratix";
+import { package as pkg, hostname, sshd, ssh, ufw, service, user } from "paratix/modules";
+
+const adminUser = "admin";
+const adminPublicKey = "ssh-ed25519 REPLACE_ME_WITH_YOUR_PUBLIC_KEY";
+
+export default server({
+  name: "my-server",
+  host: "1.2.3.4",
+  ssh: {
+    user: adminUser,
+    ports: [22],
+    privateKey: "~/.ssh/id_ed25519",
+  },
+  env: {
+    SERVER_NAME: "my-server",
+    SSH_PORT: 2222,
+  },
+  run: [
+    hostname.set("my-server"),
+    pkg.upgrade("2026-03-01"),
+    pkg.installed("nginx", "curl", "htop"),
+
+    recipe("admin-access", [
+      user.present(adminUser, {
+        groups: ["sudo"],
+        shell: "/bin/bash",
+      }),
+      ssh.authorizedKeys(adminUser, adminPublicKey),
+    ]),
+
+    recipe("ssh-hardening", [
+      sshd.port(2222),
+      sshd.config({
+        PermitRootLogin: "no",
+        PasswordAuthentication: "no",
+      }),
+    ], {
+      signals: [service.restart("sshd")],
+    }),
+
+    recipe("firewall", [
+      ufw.rule("allow", [2222, 80, 443]),
+      ufw.enabled(),
+    ]),
+  ],
+});
+`
+
+const BOOTSTRAP_ROOT_SERVER_TEMPLATE = `import { server, recipe } from "paratix";
+import { package as pkg, hostname, sshd, ssh, ufw, service, user } from "paratix/modules";
+
+const adminUser = "admin";
+const adminPublicKey = "ssh-ed25519 REPLACE_ME_WITH_YOUR_PUBLIC_KEY";
 
 export default server({
   name: "my-server",
@@ -25,7 +79,19 @@ export default server({
     pkg.upgrade("2026-03-01"),
     pkg.installed("nginx", "curl", "htop"),
 
-    recipe("ssh-hardening", [
+    recipe("bootstrap-admin-user", [
+      user.present(adminUser, {
+        groups: ["sudo"],
+        shell: "/bin/bash",
+      }),
+      ssh.authorizedKeys(adminUser, adminPublicKey),
+    ]),
+
+    // Transitional bootstrap mode:
+    // 1. Run this once as root to create the dedicated admin user.
+    // 2. Switch ssh.user to admin.
+    // 3. Replace PermitRootLogin with "no" or regenerate without --bootstrap-root.
+    recipe("ssh-hardening-transition", [
       sshd.port(2222),
       sshd.config({
         PermitRootLogin: "prohibit-password",
@@ -67,7 +133,17 @@ const ENV_EXAMPLE_TEMPLATE = `# Server configuration
 # SSH_KEY_PATH=~/.ssh/id_ed25519
 `
 
-function detectPackageManager(): { command: string; name: string } {
+type PackageManager = { command: string; name: string }
+type ScaffoldOptions = {
+  installer?: (projectDirectory: string, packageManager: PackageManager) => boolean
+  mode?: ScaffoldMode
+}
+
+function createServerTemplate(mode: ScaffoldMode): string {
+  return mode === "bootstrap-root" ? BOOTSTRAP_ROOT_SERVER_TEMPLATE : HARDENED_ADMIN_SERVER_TEMPLATE
+}
+
+function detectPackageManager(): PackageManager {
   const agent = process.env.npm_config_user_agent ?? ""
 
   if (agent.startsWith("pnpm")) {
@@ -82,11 +158,13 @@ function detectPackageManager(): { command: string; name: string } {
   return { command: "npm install", name: "npm" }
 }
 
-export function writeProjectFiles(projectDirectory: string): void {
+export function writeProjectFiles(projectDirectory: string, options?: ScaffoldOptions): void {
   // eslint-disable-next-line security/detect-non-literal-fs-filename
   mkdirSync(projectDirectory, { recursive: true })
   // eslint-disable-next-line security/detect-non-literal-fs-filename
   mkdirSync(join(projectDirectory, "files"), { recursive: true })
+
+  const mode = options?.mode ?? "hardened-admin"
 
   const packageJson = {
     dependencies: {
@@ -110,7 +188,7 @@ export function writeProjectFiles(projectDirectory: string): void {
   // eslint-disable-next-line security/detect-non-literal-fs-filename
   writeFileSync(join(projectDirectory, "package.json"), `${JSON.stringify(packageJson, null, 2)}\n`)
   // eslint-disable-next-line security/detect-non-literal-fs-filename
-  writeFileSync(join(projectDirectory, "server.ts"), SERVER_TEMPLATE)
+  writeFileSync(join(projectDirectory, "server.ts"), createServerTemplate(mode))
   // eslint-disable-next-line security/detect-non-literal-fs-filename
   writeFileSync(join(projectDirectory, "tsconfig.json"), TSCONFIG_TEMPLATE)
   // eslint-disable-next-line security/detect-non-literal-fs-filename
@@ -121,10 +199,7 @@ export function writeProjectFiles(projectDirectory: string): void {
   writeFileSync(join(projectDirectory, "files", ".gitkeep"), "")
 }
 
-function installDependencies(
-  projectDirectory: string,
-  pm: { command: string; name: string }
-): boolean {
+function installDependencies(projectDirectory: string, pm: PackageManager): boolean {
   console.log(`Installing dependencies with ${pm.name}...`)
   try {
     execSync(pm.command, { cwd: projectDirectory, stdio: "inherit", timeout: INSTALL_TIMEOUT_MS })
@@ -142,8 +217,6 @@ function installDependencies(
     return false
   }
 }
-
-type PackageManager = ReturnType<typeof detectPackageManager>
 
 function printSuccessMessage(projectName: string, pm: PackageManager): void {
   console.log(`
@@ -174,6 +247,38 @@ export function isValidProjectName(name: string): boolean {
   return /^[a-z0-9][a-z0-9\x2d]*$/v.test(trimmed)
 }
 
+export function parseCliArguments(argv: string[]): {
+  mode: ScaffoldMode
+  projectName: string | undefined
+} {
+  let mode: ScaffoldMode = "hardened-admin"
+  let projectName: string | undefined
+
+  for (const argument of argv) {
+    if (argument === "--bootstrap-root") {
+      mode = "bootstrap-root"
+      continue
+    }
+
+    if (argument.startsWith("--")) {
+      console.error(`Error: Unknown option "${argument}".`)
+      // eslint-disable-next-line node/no-process-exit
+      process.exit(1)
+    }
+
+    if (projectName == null) {
+      projectName = argument
+      continue
+    }
+
+    console.error("Usage: create-paratix <project-name> [--bootstrap-root]")
+    // eslint-disable-next-line node/no-process-exit
+    process.exit(1)
+  }
+
+  return { mode, projectName }
+}
+
 function validateProjectName(name: string | undefined): asserts name is string {
   if (name == null || name === "") {
     console.error("Usage: create-paratix <project-name>")
@@ -193,10 +298,7 @@ function validateProjectName(name: string | undefined): asserts name is string {
 export function scaffoldProject(
   projectName: string,
   pm: PackageManager,
-  installer: (
-    projectDirectory: string,
-    packageManager: PackageManager
-  ) => boolean = installDependencies
+  options?: ScaffoldOptions
 ): boolean {
   const projectDirectory = resolve(projectName)
   // eslint-disable-next-line security/detect-non-literal-fs-filename
@@ -208,7 +310,8 @@ export function scaffoldProject(
 
   console.log(`Creating Paratix project in ${projectDirectory}...`)
 
-  writeProjectFiles(projectDirectory)
+  writeProjectFiles(projectDirectory, options)
+  const installer = options?.installer ?? installDependencies
   const installed = installer(projectDirectory, pm)
   if (!installed) {
     process.exitCode = 1
@@ -221,12 +324,12 @@ export function scaffoldProject(
 }
 
 function main(): void {
-  const projectName = process.argv[2]
+  const { mode, projectName } = parseCliArguments(process.argv.slice(2))
 
   validateProjectName(projectName)
 
   const pm = detectPackageManager()
-  scaffoldProject(projectName, pm)
+  scaffoldProject(projectName, pm, { mode })
 }
 
 // Only run when executed directly, not when imported (e.g. in tests)

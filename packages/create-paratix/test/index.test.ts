@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import {
   isDirectExecution,
   isValidProjectName,
+  parseCliArguments,
   scaffoldProject,
   writeProjectFiles,
 } from "../src/index.js"
@@ -72,6 +73,22 @@ describe("isDirectExecution (process.argv[1] regression)", () => {
 
   it("normalises Windows backslashes in argv1 before comparing", () => {
     expect(isDirectExecution("file:///project/src/index.js", "\\project\\src\\index.js")).toBe(true)
+  })
+})
+
+describe("parseCliArguments", () => {
+  it("uses the hardened admin mode by default", () => {
+    expect(parseCliArguments(["my-server"])).toStrictEqual({
+      mode: "hardened-admin",
+      projectName: "my-server",
+    })
+  })
+
+  it("supports the explicit bootstrap-root mode", () => {
+    expect(parseCliArguments(["my-server", "--bootstrap-root"])).toStrictEqual({
+      mode: "bootstrap-root",
+      projectName: "my-server",
+    })
   })
 })
 
@@ -169,14 +186,17 @@ describe("writeProjectFiles", () => {
     expect(content).not.toMatch(/\bapt\b/v)
   })
 
-  it("generated server.ts does not disable root login while the scaffold still connects as root", () => {
+  it("generated server.ts uses the hardened admin mode by default", () => {
     writeProjectFiles(TEST_DIR)
 
     const content = readFileSync(join(TEST_DIR, "server.ts"), "utf8")
 
-    expect(content).toContain('user: "root"')
-    expect(content).toContain('PermitRootLogin: "prohibit-password"')
-    expect(content).not.toContain('PermitRootLogin: "no"')
+    expect(content).toContain('const adminUser = "admin";')
+    expect(content).toContain("user: adminUser")
+    expect(content).toContain("ssh.authorizedKeys(adminUser, adminPublicKey)")
+    expect(content).toContain('PermitRootLogin: "no"')
+    expect(content).not.toContain('user: "root"')
+    expect(content).not.toContain('PermitRootLogin: "prohibit-password"')
     expect(content).toContain('PasswordAuthentication: "no"')
   })
 
@@ -187,6 +207,18 @@ describe("writeProjectFiles", () => {
 
     expect(content).toContain('ufw.rule("allow", [2222, 80, 443])')
     expect(content).not.toContain('ufw.rule("allow", [22, 2222, 80, 443])')
+  })
+
+  it("generated server.ts supports an explicit bootstrap-root transition mode", () => {
+    writeProjectFiles(TEST_DIR, { mode: "bootstrap-root" })
+
+    const content = readFileSync(join(TEST_DIR, "server.ts"), "utf8")
+
+    expect(content).toContain('user: "root"')
+    expect(content).toContain('const adminUser = "admin";')
+    expect(content).toContain("Transitional bootstrap mode:")
+    expect(content).toContain('PermitRootLogin: "prohibit-password"')
+    expect(content).not.toContain('PermitRootLogin: "no"')
   })
 
   it("creates a files subdirectory", () => {
@@ -223,7 +255,7 @@ describe("scaffoldProject", () => {
     const result = scaffoldProject(
       projectName,
       { command: "pnpm install", name: "pnpm" },
-      installer
+      { installer, mode: "bootstrap-root" }
     )
 
     expect(result).toBe(true)
@@ -247,7 +279,7 @@ describe("scaffoldProject", () => {
     const result = scaffoldProject(
       projectName,
       { command: "pnpm install", name: "pnpm" },
-      installer
+      { installer, mode: "hardened-admin" }
     )
 
     expect(result).toBe(false)

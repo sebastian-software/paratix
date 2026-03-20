@@ -1,6 +1,6 @@
 # create-paratix
 
-Scaffolds a new [Paratix](https://github.com/sebastian-software/paratix) server project. Run it once to get a working directory structure with a TypeScript playbook, then edit and apply.
+Scaffolds a new [Paratix](https://github.com/sebastian-software/paratix) server project. The default template assumes a dedicated admin user and a final hardened SSH setup. If you must bootstrap from `root`, that mode is available explicitly via `--bootstrap-root`.
 
 ## Quick Start
 
@@ -20,6 +20,22 @@ yarn create paratix my-server
 bunx create-paratix my-server
 ```
 
+Optional transitional root bootstrap mode:
+
+```sh
+# npm
+npm create paratix my-server -- --bootstrap-root
+
+# pnpm
+pnpm create paratix my-server --bootstrap-root
+
+# yarn
+yarn create paratix my-server --bootstrap-root
+
+# bun
+bunx create-paratix my-server --bootstrap-root
+```
+
 **Step 2 -- Enter the directory**
 
 Dependencies are installed automatically. If installation fails, run your package manager's install command manually.
@@ -28,7 +44,7 @@ Dependencies are installed automatically. If installation fails, run your packag
 cd my-server
 ```
 
-**Step 3 -- Edit `server.ts`** with your actual server address, SSH user, and the modules you want to apply.
+**Step 3 -- Edit `server.ts`** with your actual server address, admin username, public key, and the modules you want to apply.
 
 **Step 4 -- Apply**
 
@@ -55,17 +71,20 @@ npm run apply
 
 ## Writing Your Playbook
 
-`server.ts` exports a server definition. The scaffolded file looks like this:
+`server.ts` exports a server definition. The default scaffolded file uses the hardened admin mode:
 
 ```typescript
 import { server, recipe } from "paratix"
-import { package as pkg, hostname, sshd, ufw, file, service, user } from "paratix/modules"
+import { package as pkg, hostname, sshd, ssh, ufw, service, user } from "paratix/modules"
+
+const adminUser = "admin"
+const adminPublicKey = "ssh-ed25519 REPLACE_ME_WITH_YOUR_PUBLIC_KEY"
 
 export default server({
   name: "my-server",
   host: "1.2.3.4",
   ssh: {
-    user: "root",
+    user: adminUser,
     ports: [22],
     privateKey: "~/.ssh/id_ed25519",
   },
@@ -78,12 +97,20 @@ export default server({
     pkg.upgrade("2026-03-01"),
     pkg.installed("nginx", "curl", "htop"),
 
+    recipe("admin-access", [
+      user.present(adminUser, {
+        groups: ["sudo"],
+        shell: "/bin/bash",
+      }),
+      ssh.authorizedKeys(adminUser, adminPublicKey),
+    ]),
+
     recipe(
       "ssh-hardening",
       [
         sshd.port(2222),
         sshd.config({
-          PermitRootLogin: "prohibit-password",
+          PermitRootLogin: "no",
           PasswordAuthentication: "no",
         }),
       ],
@@ -96,6 +123,8 @@ export default server({
   ],
 })
 ```
+
+Wenn du mit einem frischen Server startest, auf dem nur `root` per SSH erreichbar ist, verwende den expliziten Übergangsmodus `--bootstrap-root`. Dieses Template bleibt bewusst als temporärer Bootstrap markiert, erstellt den dedizierten Admin-User und lässt Root-Login nur vorübergehend auf `prohibit-password`, bis du `ssh.user` auf den Admin-User umgestellt hast.
 
 Key concepts:
 
