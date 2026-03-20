@@ -48,6 +48,8 @@ const JITTER_RANGE = 0.5
 const RECONNECT_BASE_DELAY = 1000
 const RECONNECT_MAX_DELAY = 30_000
 
+type AuthMethod = "agent" | "password" | "privateKey" | null
+
 type SshRuntimeState = {
   host: string
   ports: number[]
@@ -55,6 +57,7 @@ type SshRuntimeState = {
 
 export class SshConnectionImpl implements SshConnection {
   private agentSocket: null | string = null
+  private authMethod: AuthMethod = null
   /**
    * Cached sudo password stored as a Buffer so it can be actively zeroed
    * after use via `buffer.fill(0)`.
@@ -116,13 +119,19 @@ export class SshConnectionImpl implements SshConnection {
     // eslint-disable-next-line security/detect-non-literal-fs-filename
     const privateKey = await readFile(this.config.privateKey)
     try {
-      if (await this.tryConnectOnPorts(privateKey)) return
+      if (await this.tryConnectOnPorts(privateKey)) {
+        this.authMethod = "privateKey"
+        return
+      }
       if (this.config.passwordFallback) {
         const password = await promptTerminal(
           `Password for ${this.config.user}@${this.runtime.host}: `,
           true
         )
-        if (await this.tryConnectOnPorts(privateKey, password)) return
+        if (await this.tryConnectOnPorts(privateKey, password)) {
+          this.authMethod = "password"
+          return
+        }
       }
       throw new Error(
         `Failed to connect to ${this.runtime.host} on ports: ${this.runtime.ports.join(", ")}`
@@ -211,10 +220,10 @@ export class SshConnectionImpl implements SshConnection {
 
   public getConnectionInfo(): ReturnType<SshConnection["getConnectionInfo"]> {
     return {
-      agentSocket: this.agentSocket ?? undefined,
+      agentSocket: this.authMethod === "agent" ? (this.agentSocket ?? undefined) : undefined,
       host: this.runtime.host,
       port: this.connectedPort,
-      privateKeyPath: this.config.privateKey,
+      privateKeyPath: this.authMethod === "privateKey" ? this.config.privateKey : undefined,
       user: this.config.user,
     }
   }
@@ -438,18 +447,10 @@ export class SshConnectionImpl implements SshConnection {
     }
     if (await this.tryConnectOnPorts(undefined, undefined, agent)) {
       this.agentSocket = agent
+      this.authMethod = "agent"
       return
     }
-    if (this.config.passwordFallback) {
-      const password = await promptTerminal(
-        `Password for ${this.config.user}@${this.runtime.host}: `,
-        true
-      )
-      if (await this.tryConnectOnPorts(undefined, password, agent)) {
-        this.agentSocket = agent
-        return
-      }
-    }
+    if (await this.tryAgentPasswordFallback(agent)) return
     throw new Error(
       `Could not connect to ${this.runtime.host} via SSH agent on ports ${this.runtime.ports.join(", ")}`
     )
@@ -609,6 +610,17 @@ export class SshConnectionImpl implements SshConnection {
       return { command: `SUDO_PROMPT='' sudo -S bash -c ${quoted}`, needsPassword: true }
     }
     return { command: `sudo bash -c ${quoted}`, needsPassword: false }
+  }
+
+  private async tryAgentPasswordFallback(agent: string): Promise<boolean> {
+    if (!this.config.passwordFallback) return false
+    const password = await promptTerminal(
+      `Password for ${this.config.user}@${this.runtime.host}: `,
+      true
+    )
+    if (!(await this.tryConnectOnPorts(undefined, password, agent))) return false
+    this.authMethod = "password"
+    return true
   }
 
   /**

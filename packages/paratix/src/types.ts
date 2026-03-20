@@ -145,7 +145,8 @@ export type SshConnection = {
   exists: (remotePath: string) => Promise<boolean>
   /**
    * Return the low-level connection parameters for this session.
-   * `privateKeyPath` is `undefined` when the connection was established via the SSH agent.
+   * `privateKeyPath` and `agentSocket` reflect the authentication method that
+   * was actually used for the current session.
    */
   getConnectionInfo: () => {
     agentSocket?: string

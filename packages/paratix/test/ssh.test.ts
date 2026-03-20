@@ -1,5 +1,6 @@
 import type { Client, SFTPWrapper } from "ssh2"
 
+import { execFile } from "node:child_process"
 import { EventEmitter } from "node:events"
 import { stat } from "node:fs/promises"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
@@ -8,6 +9,7 @@ import type * as KnownHosts from "../src/knownHosts.js"
 import type * as SshHelpers from "../src/sshHelpers.js"
 
 import { HostKeyVerificationError } from "../src/knownHosts.js"
+import { rsync } from "../src/modules/rsync.js"
 import { sftpDownload } from "../src/sftp.js"
 import { SshConnectionImpl } from "../src/ssh.js"
 import { collectStreamOutput, shellQuote, tryConnectOnPort } from "../src/sshHelpers.js"
@@ -16,6 +18,10 @@ import { promptTerminal } from "../src/terminal.js"
 // ---------------------------------------------------------------------------
 // Mocks
 // ---------------------------------------------------------------------------
+
+vi.mock("node:child_process", () => ({
+  execFile: vi.fn(),
+}))
 
 vi.mock("node:fs", () => ({
   readFileSync: vi.fn().mockReturnValue(""),
@@ -199,6 +205,9 @@ function makeSshInstanceWithAgent(
   }
   return new SshConnectionImpl(overrides.host ?? "1.2.3.4", config)
 }
+
+const emptyEnv = {}
+const mockExecFile = vi.mocked(execFile)
 
 // ---------------------------------------------------------------------------
 // Tests
@@ -691,6 +700,58 @@ describe("SshConnectionImpl", () => {
       expect(secondCallArgs[0].password).toBe("secret-password")
       expect(secondCallArgs[0].agent).toBe(AGENT_SOCKET)
       expect(promptTerminal).toHaveBeenCalledOnce()
+    })
+
+    it("does not expose agentSocket after agent failure and password fallback", async () => {
+      vi.mocked(tryConnectOnPort)
+        .mockRejectedValueOnce(new Error("Agent auth failed"))
+        .mockResolvedValueOnce()
+      vi.mocked(promptTerminal).mockResolvedValueOnce("secret-password")
+      process.env.SSH_AUTH_SOCK = AGENT_SOCKET
+
+      const ssh = makeSshInstanceWithAgent({ passwordFallback: true })
+
+      await ssh.connect()
+
+      expect(ssh.getConnectionInfo()).toMatchObject({
+        host: "1.2.3.4",
+        port: 22,
+        user: "root",
+      })
+      expect(ssh.getConnectionInfo().agentSocket).toBeUndefined()
+      expect(ssh.getConnectionInfo().privateKeyPath).toBeUndefined()
+    })
+
+    it("omits IdentityAgent in rsync after agent failure and password fallback", async () => {
+      vi.mocked(tryConnectOnPort)
+        .mockRejectedValueOnce(new Error("Agent auth failed"))
+        .mockResolvedValueOnce()
+      vi.mocked(promptTerminal).mockResolvedValueOnce("secret-password")
+      mockExecFile.mockImplementation((...callArguments: unknown[]) => {
+        const callback = callArguments.at(-1) as (
+          error: null,
+          stdout: string,
+          stderr: string
+        ) => void
+        callback(null, "", "")
+        return undefined as never
+      })
+      process.env.SSH_AUTH_SOCK = AGENT_SOCKET
+
+      const ssh = makeSshInstanceWithAgent({ passwordFallback: true })
+
+      await ssh.connect()
+      const result = await rsync
+        .sync({ dest: "/remote/dest", src: "/local/src" })
+        .apply(ssh, emptyEnv)
+
+      expect(result.status).toBe("ok")
+      const [, rsyncArguments] = mockExecFile.mock.calls[0] as [string, string[]]
+      const eIndex = rsyncArguments.indexOf("-e")
+      expect(eIndex).toBeGreaterThanOrEqual(0)
+      const transportArg = rsyncArguments[eIndex + 1]
+      expect(transportArg).not.toContain("IdentityAgent=")
+      expect(transportArg).not.toContain("-i ")
     })
 
     it("throws when agent-only fails and passwordFallback second attempt also fails", async () => {
