@@ -32,6 +32,7 @@ describe("system.reboot — apply", () => {
     // eslint-disable-next-line prefer-spread
     const result = await mod.apply(null, emptyEnv)
     expect(result.status).toBe("failed")
+    expect(result.error).toBeInstanceOf(Error)
   })
 
   it("sends shutdown -r now and returns meta with system.reboot set to true", async () => {
@@ -59,13 +60,30 @@ describe("system.reboot — apply", () => {
     expect(result.meta?.find(isSystemHostMetaEntry)?.host).toBe("10.0.0.42")
   })
 
-  it("catches connection-drop errors from exec and still returns changed", async () => {
-    const ssh = createMockSsh()
-    vi.spyOn(ssh, "exec").mockRejectedValueOnce(new Error("Connection reset by peer"))
+  it("returns failed with error details when shutdown exits with permission denied", async () => {
+    const ssh = createMockSsh({
+      "shutdown -r now": { code: 1, stderr: "shutdown: Permission denied", stdout: "" },
+    })
     const mod = system.reboot()
     const result = await mod.apply(ssh, emptyEnv)
-    expect(result.status).toBe("changed")
-    expect(result.meta?.some(isSystemRebootMetaEntry)).toBe(true)
+    expect(result.status).toBe("failed")
+    expect(result.error).toBeInstanceOf(Error)
+    expect(result.error?.message).toContain("[system.reboot] shutdown -r now failed")
+    expect(result.error?.message).toContain("Permission denied")
+    expect(result.meta).toBeUndefined()
+  })
+
+  it("returns failed with error details when shutdown is missing", async () => {
+    const ssh = createMockSsh({
+      "shutdown -r now": { code: 127, stderr: "shutdown: command not found", stdout: "" },
+    })
+    const mod = system.reboot()
+    const result = await mod.apply(ssh, emptyEnv)
+    expect(result.status).toBe("failed")
+    expect(result.error).toBeInstanceOf(Error)
+    expect(result.error?.message).toContain("[system.reboot] shutdown -r now failed")
+    expect(result.error?.message).toContain("command not found")
+    expect(result.meta).toBeUndefined()
   })
 
   it("falls back to current host when resolveHost throws", async () => {

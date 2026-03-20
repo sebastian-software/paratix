@@ -1,4 +1,5 @@
 import { environmentToMetaEntries, meta } from "../meta.js"
+import { failed, failedCommand } from "../moduleFailure.js"
 import {
   type Module,
   type ModuleMetaEntry,
@@ -205,12 +206,16 @@ export const system = {
   reboot(options: RebootOptions = {}): Module {
     return {
       async apply(ssh: null | SshConnection): Promise<ModuleResult> {
-        if (!ssh) return { status: "failed" }
+        if (!ssh) return failed("[system.reboot] SSH connection is required")
 
         try {
-          await ssh.exec("shutdown -r now", { ignoreExitCode: true, silent: true })
-        } catch {
-          // Connection will drop during reboot — this is expected
+          const result = await ssh.exec("shutdown -r now", { ignoreExitCode: true, silent: true })
+          if (result.code !== 0) {
+            return failedCommand("[system.reboot] shutdown -r now failed", result)
+          }
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error)
+          return failed(`[system.reboot] shutdown -r now failed\n${message}`)
         }
 
         const entries: ModuleMetaEntry[] = [meta.systemReboot()]
