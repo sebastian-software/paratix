@@ -6,11 +6,17 @@ import { createMockSsh } from "../helpers/mockSsh.js"
 const emptyEnv = {}
 
 describe("apt.key", () => {
+  const fingerprint = "1234567890ABCDEF1234567890ABCDEF12345678"
+
   it("check returns ok when key file exists", async () => {
     const ssh = createMockSsh({
       "[ -f /etc/apt/keyrings/'docker'.gpg ]": { code: 0 },
+      "gpg --show-keys --with-colons '/etc/apt/keyrings/docker.gpg'": {
+        code: 0,
+        stdout: "pub:-:255:22:::\nfpr:::::::::1234567890ABCDEF1234567890ABCDEF12345678:\n",
+      },
     })
-    const mod = apt.key("docker", "https://download.docker.com/linux/ubuntu/gpg")
+    const mod = apt.key("docker", "https://download.docker.com/linux/ubuntu/gpg", { fingerprint })
     const result = await mod.check(ssh, emptyEnv)
     expect(result).toBe("ok")
   })
@@ -19,43 +25,114 @@ describe("apt.key", () => {
     const ssh = createMockSsh({
       "[ -f /etc/apt/keyrings/'docker'.gpg ]": { code: 1 },
     })
-    const mod = apt.key("docker", "https://download.docker.com/linux/ubuntu/gpg")
+    const mod = apt.key("docker", "https://download.docker.com/linux/ubuntu/gpg", { fingerprint })
     const result = await mod.check(ssh, emptyEnv)
     expect(result).toBe("needs-apply")
   })
 
   it("check returns needs-apply when ssh is null", async () => {
-    const mod = apt.key("docker", "https://download.docker.com/linux/ubuntu/gpg")
+    const mod = apt.key("docker", "https://download.docker.com/linux/ubuntu/gpg", { fingerprint })
     const result = await mod.check(null, emptyEnv)
     expect(result).toBe("needs-apply")
   })
 
-  it("apply calls curl and gpg with the correct commands", async () => {
+  it("check returns needs-apply when the installed key fingerprint mismatches", async () => {
     const ssh = createMockSsh({
-      "curl -fsSL 'https://download.docker.com/linux/ubuntu/gpg' | gpg --dearmor --yes -o /etc/apt/keyrings/'docker'.gpg":
-        { code: 0 },
-      "mkdir -p /etc/apt/keyrings": { code: 0 },
+      "[ -f /etc/apt/keyrings/'docker'.gpg ]": { code: 0 },
+      "gpg --show-keys --with-colons '/etc/apt/keyrings/docker.gpg'": {
+        code: 0,
+        stdout: "pub:-:255:22:::\nfpr:::::::::AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA:\n",
+      },
     })
-    const mod = apt.key("docker", "https://download.docker.com/linux/ubuntu/gpg")
+    const mod = apt.key("docker", "https://download.docker.com/linux/ubuntu/gpg", { fingerprint })
+    const result = await mod.check(ssh, emptyEnv)
+    expect(result).toBe("needs-apply")
+  })
+
+  it("apply downloads, verifies fingerprint, and then imports the key", async () => {
+    const ssh = createMockSsh({
+      "curl -fsSL 'https://download.docker.com/linux/ubuntu/gpg' -o '/tmp/apt-key-docker.ABCDEF'": {
+        code: 0,
+      },
+      "gpg --dearmor --yes -o '/etc/apt/keyrings/docker.gpg' '/tmp/apt-key-docker.ABCDEF'": {
+        code: 0,
+      },
+      "gpg --show-keys --with-colons '/tmp/apt-key-docker.ABCDEF'": {
+        code: 0,
+        stdout: "pub:-:255:22:::\nfpr:::::::::1234567890ABCDEF1234567890ABCDEF12345678:\n",
+      },
+      "mkdir -p /etc/apt/keyrings": { code: 0 },
+      "mktemp '/tmp/apt-key-docker.XXXXXX'": { stdout: "/tmp/apt-key-docker.ABCDEF\n" },
+      "rm -f '/tmp/apt-key-docker.ABCDEF'": { code: 0 },
+    })
+    const mod = apt.key("docker", "https://download.docker.com/linux/ubuntu/gpg", { fingerprint })
     const result = await mod.apply(ssh, emptyEnv)
     expect(result).toStrictEqual({ status: "changed" })
     expect(ssh.calls).toContain("mkdir -p /etc/apt/keyrings")
+    expect(ssh.calls).toContain("mktemp '/tmp/apt-key-docker.XXXXXX'")
     expect(ssh.calls).toContain(
-      "curl -fsSL 'https://download.docker.com/linux/ubuntu/gpg' | gpg --dearmor --yes -o /etc/apt/keyrings/'docker'.gpg"
+      "curl -fsSL 'https://download.docker.com/linux/ubuntu/gpg' -o '/tmp/apt-key-docker.ABCDEF'"
     )
+    expect(ssh.calls).toContain("gpg --show-keys --with-colons '/tmp/apt-key-docker.ABCDEF'")
+    expect(ssh.calls).toContain(
+      "gpg --dearmor --yes -o '/etc/apt/keyrings/docker.gpg' '/tmp/apt-key-docker.ABCDEF'"
+    )
+  })
+
+  it("returns a failed result when the downloaded key fingerprint mismatches", async () => {
+    const ssh = createMockSsh({
+      "curl -fsSL 'https://download.docker.com/linux/ubuntu/gpg' -o '/tmp/apt-key-docker.ABCDEF'": {
+        code: 0,
+      },
+      "gpg --show-keys --with-colons '/tmp/apt-key-docker.ABCDEF'": {
+        code: 0,
+        stdout: "pub:-:255:22:::\nfpr:::::::::AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA:\n",
+      },
+      "mkdir -p /etc/apt/keyrings": { code: 0 },
+      "mktemp '/tmp/apt-key-docker.XXXXXX'": { stdout: "/tmp/apt-key-docker.ABCDEF\n" },
+      "rm -f '/tmp/apt-key-docker.ABCDEF'": { code: 0 },
+    })
+    const mod = apt.key("docker", "https://download.docker.com/linux/ubuntu/gpg", { fingerprint })
+    const result = await mod.apply(ssh, emptyEnv)
+    expect(result.status).toBe("failed")
+    expect(result.error).toBeInstanceOf(Error)
+    expect(String(result.error)).toContain("[apt.key] fingerprint mismatch for docker")
   })
 
   it("returns a failed result with error details when key import fails", async () => {
     const ssh = createMockSsh({
-      "curl -fsSL 'https://download.docker.com/linux/ubuntu/gpg' | gpg --dearmor --yes -o /etc/apt/keyrings/'docker'.gpg":
-        { code: 2, stderr: "gpg: dearmor failed: No such file or directory" },
+      "curl -fsSL 'https://download.docker.com/linux/ubuntu/gpg' -o '/tmp/apt-key-docker.ABCDEF'": {
+        code: 0,
+      },
+      "gpg --dearmor --yes -o '/etc/apt/keyrings/docker.gpg' '/tmp/apt-key-docker.ABCDEF'": {
+        code: 2,
+        stderr: "gpg: dearmor failed: No such file or directory",
+      },
+      "gpg --show-keys --with-colons '/tmp/apt-key-docker.ABCDEF'": {
+        code: 0,
+        stdout: "pub:-:255:22:::\nfpr:::::::::1234567890ABCDEF1234567890ABCDEF12345678:\n",
+      },
       "mkdir -p /etc/apt/keyrings": { code: 0 },
+      "mktemp '/tmp/apt-key-docker.XXXXXX'": { stdout: "/tmp/apt-key-docker.ABCDEF\n" },
+      "rm -f '/tmp/apt-key-docker.ABCDEF'": { code: 0 },
     })
-    const mod = apt.key("docker", "https://download.docker.com/linux/ubuntu/gpg")
+    const mod = apt.key("docker", "https://download.docker.com/linux/ubuntu/gpg", { fingerprint })
     const result = await mod.apply(ssh, emptyEnv)
     expect(result.status).toBe("failed")
     expect(result.error).toBeInstanceOf(Error)
     expect(String(result.error)).toContain("[apt.key] failed to import docker")
+  })
+
+  it("throws for non-https URLs", () => {
+    expect(() =>
+      apt.key("docker", "http://download.docker.com/linux/ubuntu/gpg", { fingerprint })
+    ).toThrow(/requires an https URL/v)
+  })
+
+  it("throws when fingerprint is invalid", () => {
+    expect(() =>
+      apt.key("docker", "https://download.docker.com/linux/ubuntu/gpg", { fingerprint: "abc" })
+    ).toThrow(/requires an OpenPGP fingerprint/v)
   })
 })
 

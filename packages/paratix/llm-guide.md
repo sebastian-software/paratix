@@ -131,7 +131,7 @@ export default server({
 | ----------------- | ---------------------------------------------------------------------------------------- | -------------------- |
 | `apt.debconf`     | `(packageName: string, selections: Record<string, string>): Module`                      | Yes                  |
 | `apt.distUpgrade` | `(date: string): Module`                                                                 | Yes (versioned flag) |
-| `apt.key`         | `(name: string, url: string): Module`                                                    | Yes                  |
+| `apt.key`         | `(name: string, url: string, options: { fingerprint: string }): Module`                  | Yes                  |
 | `apt.repository`  | `(nameOrPpa: string, source?: string, options?: { signedBy?: false \| string }): Module` | Yes                  |
 
 ### `archive`

@@ -1,12 +1,17 @@
 import { failed, failedCommand } from "../moduleFailure.js"
 import { shellQuote } from "../ssh.js"
 import { type Module, type ModuleResult, NEEDS_APPLY, type SshConnection } from "../types.js"
+import {
+  applyAptKey,
+  normalizeOpenPgpFingerprint,
+  validateAptKeyUrl,
+  verifyAptKeyFingerprint,
+} from "./aptKeyHelpers.js"
 import { hasFlag, setVersionedFlag } from "./moduleHelpers.js"
 
 const NONINTERACTIVE = "DEBIAN_FRONTEND=noninteractive"
 
 const PPA_PREFIX = "ppa:"
-
 /**
  * Parse the output of `debconf-show` into a question-to-value map.
  *
@@ -235,9 +240,14 @@ export const apt = {
    * Import a GPG key into `/etc/apt/keyrings/` for use with signed repositories.
    * @param name - Key file name (without `.gpg` extension).
    * @param url - URL to download the key from.
+   * @param options - Required trust anchor for the downloaded key.
+   * @param options.fingerprint - Expected OpenPGP fingerprint of the repository key.
    * @returns A Module that imports the GPG key.
    */
-  key(name: string, url: string): Module {
+  key(name: string, url: string, options: { fingerprint: string }): Module {
+    validateAptKeyUrl(url)
+    const expectedFingerprint = normalizeOpenPgpFingerprint(options.fingerprint)
+    const keyringPath = `/etc/apt/keyrings/${name}.gpg`
     return {
       async apply(ssh: null | SshConnection): Promise<ModuleResult> {
         if (!ssh) return failed(`[apt.key] SSH connection is required for ${name}`)
@@ -249,16 +259,19 @@ export const apt = {
         if (mkdirResult.code !== 0)
           return failedCommand("[apt.key] failed to create /etc/apt/keyrings", mkdirResult)
 
-        const result = await ssh.exec(
-          `curl -fsSL ${shellQuote(url)} | gpg --dearmor --yes -o /etc/apt/keyrings/${shellQuote(name)}.gpg`,
-          { ignoreExitCode: true, silent: true }
-        )
-        if (result.code !== 0) return failedCommand(`[apt.key] failed to import ${name}`, result)
-        return { status: "changed" }
+        return applyAptKey(ssh, { expectedFingerprint, keyringPath, name, url })
       },
       async check(ssh: null | SshConnection): Promise<"needs-apply" | "ok"> {
         if (!ssh) return NEEDS_APPLY
-        return (await ssh.test(`[ -f /etc/apt/keyrings/${shellQuote(name)}.gpg ]`))
+        const keyExists = await ssh.test(`[ -f ${shellQuote(keyringPath)} ]`)
+        if (!keyExists) return NEEDS_APPLY
+
+        return (await verifyAptKeyFingerprint({
+          expectedFingerprint,
+          name,
+          path: keyringPath,
+          ssh,
+        })) === "ok"
           ? "ok"
           : NEEDS_APPLY
       },
