@@ -116,9 +116,17 @@ export async function sftpDownload(
         readStream,
         reject: rejectWithCleanup,
         resolve: () => {
-          // eslint-disable-next-line security/detect-non-literal-fs-filename
-          renameSync(temporaryPath, localPath)
-          resolve()
+          try {
+            // eslint-disable-next-line security/detect-non-literal-fs-filename
+            renameSync(temporaryPath, localPath)
+            resolve()
+          } catch (finalizeError) {
+            rejectWithCleanup(
+              finalizeError instanceof Error
+                ? finalizeError
+                : new Error(`Failed to finalize SFTP download: ${String(finalizeError)}`)
+            )
+          }
         },
         sftp,
         timeout,

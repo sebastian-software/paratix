@@ -256,6 +256,25 @@ describe("sftpDownload", () => {
     await expect(promise).resolves.toBeUndefined()
   })
 
+  it("rejects and removes the temp file when renameSync fails during local finalization", async () => {
+    const { sftp } = makeSftpSession()
+    const client = makeClientMock(sftp)
+
+    const localWriteStream = new EventEmitter()
+    vi.mocked(createWriteStream).mockReturnValue(localWriteStream as unknown as WriteStream)
+    vi.mocked(renameSync).mockImplementation(() => {
+      throw new Error("rename failed")
+    })
+
+    const promise = sftpDownload(client, "/remote/file.txt", "/local/file.txt")
+    const [tempPath] = vi.mocked(createWriteStream).mock.calls[0] as [string]
+    localWriteStream.emit("close")
+
+    await expect(promise).rejects.toThrow("rename failed")
+    expect(vi.mocked(unlinkSync)).toHaveBeenCalledWith(tempPath)
+    expect(vi.mocked(unlinkSync)).not.toHaveBeenCalledWith("/local/file.txt")
+  })
+
   // ---------------------------------------------------------------------------
   // BUG DOCUMENTATION: missing destroy() on counterpart stream
   // ---------------------------------------------------------------------------
