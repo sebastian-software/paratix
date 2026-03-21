@@ -231,6 +231,8 @@ describe("ssh.authorizedKeys", () => {
   it("check returns needs-apply when key is missing (state: present)", async () => {
     const mockSsh = createMockSsh(
       aliceResponses({
+        "[ -e '/home/alice/.ssh' ]": { code: 0 },
+        "[ -e '/home/alice/.ssh/authorized_keys' ]": { code: 0 },
         "[ -L '/home/alice/.ssh/authorized_keys' ]": { code: 1 },
         [`grep -qF -- '${testKey}' ${aliceKeys}`]: { code: 1 },
         "stat -c '%a %U %G %F' '/home/alice/.ssh'": { stdout: "700 alice alice directory" },
@@ -244,6 +246,22 @@ describe("ssh.authorizedKeys", () => {
     expect(result).toBe("needs-apply")
   })
 
+  it("regression — check returns needs-apply when authorized_keys does not exist for a fresh user", async () => {
+    const mockSsh = createMockSsh(
+      aliceResponses({
+        "[ -e '/home/alice/.ssh' ]": { code: 0 },
+        "[ -e '/home/alice/.ssh/authorized_keys' ]": { code: 1 },
+      })
+    )
+    const mod = ssh.authorizedKeys("alice", testKey)
+
+    const result = await mod.check(mockSsh, emptyEnv)
+
+    expect(result).toBe("needs-apply")
+    expect(mockSsh.calls).not.toContain(`grep -qF -- '${testKey}' ${aliceKeys}`)
+    expect(mockSsh.calls).not.toContain("stat -c '%a %U %G %F' '/home/alice/.ssh/authorized_keys'")
+  })
+
   it("check returns needs-apply when ssh is null", async () => {
     const mod = ssh.authorizedKeys("alice", testKey)
     const result = await mod.check(null, emptyEnv)
@@ -253,6 +271,8 @@ describe("ssh.authorizedKeys", () => {
   it("check returns ok when key is missing (state: absent)", async () => {
     const mockSsh = createMockSsh(
       aliceResponses({
+        "[ -e '/home/alice/.ssh' ]": { code: 0 },
+        "[ -e '/home/alice/.ssh/authorized_keys' ]": { code: 0 },
         "[ -L '/home/alice/.ssh/authorized_keys' ]": { code: 1 },
         [`grep -qF -- '${testKey}' ${aliceKeys}`]: { code: 1 },
         "stat -c '%a %U %G %F' '/home/alice/.ssh'": { stdout: "700 alice alice directory" },
@@ -269,6 +289,8 @@ describe("ssh.authorizedKeys", () => {
   it("check returns needs-apply when key exists (state: absent)", async () => {
     const mockSsh = createMockSsh(
       aliceResponses({
+        "[ -e '/home/alice/.ssh' ]": { code: 0 },
+        "[ -e '/home/alice/.ssh/authorized_keys' ]": { code: 0 },
         "[ -L '/home/alice/.ssh/authorized_keys' ]": { code: 1 },
         [`grep -qF -- '${testKey}' ${aliceKeys}`]: { code: 0 },
         "stat -c '%a %U %G %F' '/home/alice/.ssh'": { stdout: "700 alice alice directory" },
@@ -285,6 +307,8 @@ describe("ssh.authorizedKeys", () => {
   it("check returns needs-apply when authorized_keys is a symlink", async () => {
     const mockSsh = createMockSsh(
       aliceResponses({
+        "[ -e '/home/alice/.ssh' ]": { code: 0 },
+        "[ -e '/home/alice/.ssh/authorized_keys' ]": { code: 0 },
         "[ -L '/home/alice/.ssh/authorized_keys' ]": { code: 0 },
         [`grep -qF -- '${testKey}' ${aliceKeys}`]: { code: 0 },
       })
@@ -299,6 +323,8 @@ describe("ssh.authorizedKeys", () => {
   it("check returns needs-apply when .ssh ownership or mode has drifted", async () => {
     const mockSsh = createMockSsh(
       aliceResponses({
+        "[ -e '/home/alice/.ssh' ]": { code: 0 },
+        "[ -e '/home/alice/.ssh/authorized_keys' ]": { code: 0 },
         "[ -L '/home/alice/.ssh/authorized_keys' ]": { code: 1 },
         [`grep -qF -- '${testKey}' ${aliceKeys}`]: { code: 0 },
         "stat -c '%a %U %G %F' '/home/alice/.ssh'": { stdout: "755 root root directory" },
@@ -314,6 +340,8 @@ describe("ssh.authorizedKeys", () => {
   it("check returns needs-apply when authorized_keys ownership or mode has drifted", async () => {
     const mockSsh = createMockSsh(
       aliceResponses({
+        "[ -e '/home/alice/.ssh' ]": { code: 0 },
+        "[ -e '/home/alice/.ssh/authorized_keys' ]": { code: 0 },
         "[ -L '/home/alice/.ssh/authorized_keys' ]": { code: 1 },
         [`grep -qF -- '${testKey}' ${aliceKeys}`]: { code: 0 },
         "stat -c '%a %U %G %F' '/home/alice/.ssh'": { stdout: "700 alice alice directory" },

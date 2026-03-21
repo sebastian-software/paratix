@@ -230,6 +230,12 @@ export const ssh = {
         const sshDirectoryPath = `${home}/.ssh`
         const authorizedKeysPath = `${home}/.ssh/authorized_keys`
         const authKeysPath = shellQuote(authorizedKeysPath)
+        const sshDirectoryExists = await conn.exists(sshDirectoryPath)
+        const authorizedKeysExists = await conn.exists(authorizedKeysPath)
+
+        if (!sshDirectoryExists || !authorizedKeysExists) {
+          return state === "present" ? NEEDS_APPLY : "ok"
+        }
 
         const keyExists = await conn.test(`grep -qF -- ${shellQuote(key)} ${authKeysPath}`)
         const securityStateIsValid = await authorizedKeysSecurityStateIsValid(conn, {
