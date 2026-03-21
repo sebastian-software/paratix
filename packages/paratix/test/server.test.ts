@@ -66,7 +66,17 @@ describe("server", () => {
           ssh: { ...validSsh, ports: [0] },
         }) as Parameters<typeof server>[0]
       )
-    ).toThrow("ServerDefinition: Property 'ssh.ports[0]' must be a positive integer")
+    ).toThrow("ServerDefinition: Property 'ssh.ports[0]' must be an integer between 1 and 65535")
+  })
+
+  it("throws when ssh.ports contains 65536 in an untyped JS playbook", () => {
+    expect(() =>
+      server(
+        validConfig({
+          ssh: { ...validSsh, ports: [65_536] },
+        }) as Parameters<typeof server>[0]
+      )
+    ).toThrow("ServerDefinition: Property 'ssh.ports[0]' must be an integer between 1 and 65535")
   })
 
   it("throws when ssh.ports contains a string in an untyped JS playbook", () => {
@@ -76,7 +86,7 @@ describe("server", () => {
           ssh: { ...validSsh, ports: ["22"] },
         }) as unknown as Parameters<typeof server>[0]
       )
-    ).toThrow("ServerDefinition: Property 'ssh.ports[0]' must be a positive integer")
+    ).toThrow("ServerDefinition: Property 'ssh.ports[0]' must be an integer between 1 and 65535")
   })
 
   it("throws when ssh.user is empty", () => {

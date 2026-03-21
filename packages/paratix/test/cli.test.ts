@@ -380,7 +380,17 @@ describe("collectDefinitionErrors", () => {
       run: ["echo hello"],
       ssh: { ports: [0], privateKey: "/key", user: "root" },
     })
-    expect(errors).toStrictEqual(["Property 'ssh.ports[0]' must be a positive integer"])
+    expect(errors).toStrictEqual(["Property 'ssh.ports[0]' must be an integer between 1 and 65535"])
+  })
+
+  it("returns an error when ssh.ports contains 65536 in an untyped JS definition", () => {
+    const errors = collectDefinitionErrors({
+      host: "example.com",
+      name: "test",
+      run: ["echo hello"],
+      ssh: { ports: [65_536], privateKey: "/key", user: "root" },
+    })
+    expect(errors).toStrictEqual(["Property 'ssh.ports[0]' must be an integer between 1 and 65535"])
   })
 
   it("returns an error when ssh.ports contains a string in an untyped JS definition", () => {
@@ -390,7 +400,7 @@ describe("collectDefinitionErrors", () => {
       run: ["echo hello"],
       ssh: { ports: ["22"], privateKey: "/key", user: "root" },
     })
-    expect(errors).toStrictEqual(["Property 'ssh.ports[0]' must be a positive integer"])
+    expect(errors).toStrictEqual(["Property 'ssh.ports[0]' must be an integer between 1 and 65535"])
   })
 
   it("returns an error when ssh.privateKey has the wrong type", () => {

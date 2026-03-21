@@ -8,6 +8,8 @@ import type {
   SystemRebootMetaEntry,
 } from "./types.js"
 
+import { isValidTcpPort } from "./serverDefinitionValidation.js"
+
 const SYSTEM_HOST_KIND = "system.host"
 const SYSTEM_REBOOT_KIND = "system.reboot"
 
@@ -68,8 +70,8 @@ function assertValidEnvironmentMetaEntry(candidate: Record<string, unknown>): vo
 }
 
 function assertValidSshdPortMetaEntry(candidate: Record<string, unknown>): void {
-  if (!Number.isInteger(candidate.port) || Number(candidate.port) <= 0) {
-    throw new TypeError("Invalid sshd.port meta entry: port must be a positive integer")
+  if (!isValidTcpPort(candidate.port)) {
+    throw new TypeError("Invalid sshd.port meta entry: port must be an integer between 1 and 65535")
   }
 }
 
@@ -96,8 +98,8 @@ export function environmentMeta(
 }
 
 export function sshdPortMeta(port: number): SshdPortMetaEntry {
-  if (!Number.isInteger(port) || port <= 0) {
-    throw new TypeError("Meta entry sshd.port requires a positive integer port")
+  if (!isValidTcpPort(port)) {
+    throw new TypeError("Meta entry sshd.port requires an integer port between 1 and 65535")
   }
   return { kind: "sshd.port", port }
 }

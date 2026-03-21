@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto"
 
 import { sshdPortMeta } from "../meta.js"
 import { failed, failedCommand } from "../moduleFailure.js"
+import { isValidTcpPort } from "../serverDefinitionValidation.js"
 import {
   guardedWriteFile,
   type Module,
@@ -232,6 +233,12 @@ export const sshd = {
    * @returns A Module that sets the sshd listen port.
    */
   port(targetPort: number): Module {
+    if (!isValidTcpPort(targetPort)) {
+      throw new Error(
+        `sshd.port requires an integer port between 1 and 65535, got ${String(targetPort)}`
+      )
+    }
+
     return {
       async _applyDryRun(ssh: null | SshConnection): Promise<ModuleResult> {
         if (!ssh) return failed(`[sshd.port: ${targetPort}] SSH connection is required`)

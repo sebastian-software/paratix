@@ -1,6 +1,7 @@
 import type { SshConfig } from "./types.js"
 
 const STRICT_HOST_KEY_ERROR = `Invalid property 'ssh.strictHostKeyChecking' (expected "accept-new", "no", or "yes")`
+const MAX_TCP_PORT = 65_535
 
 type NumberValidationOptions = {
   integer?: boolean
@@ -59,6 +60,10 @@ function validateNumberValue(value: unknown): null | number {
   return typeof value === "number" && Number.isFinite(value) ? value : null
 }
 
+export function isValidTcpPort(value: unknown): value is number {
+  return typeof value === "number" && Number.isInteger(value) && value >= 1 && value <= MAX_TCP_PORT
+}
+
 function collectOptionalStringErrors(
   object: Record<string, unknown>,
   key: string,
@@ -88,8 +93,8 @@ function collectPortsErrors(ssh: Record<string, unknown>, errors: string[]): voi
     return
   }
   for (const [index, port] of ssh.ports.entries()) {
-    if (typeof port !== "number" || !Number.isInteger(port) || port <= 0) {
-      errors.push(`Property 'ssh.ports[${index}]' must be a positive integer`)
+    if (!isValidTcpPort(port)) {
+      errors.push(`Property 'ssh.ports[${index}]' must be an integer between 1 and 65535`)
     }
   }
 }

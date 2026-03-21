@@ -318,6 +318,18 @@ describe("sshd.config — dry-run", () => {
 // ─── sshd.port — check ────────────────────────────────────────────────────────
 
 describe("sshd.port — check", () => {
+  it("throws when the port is greater than 65535", () => {
+    expect(() => sshd.port(65_536)).toThrow(
+      "sshd.port requires an integer port between 1 and 65535, got 65536"
+    )
+  })
+
+  it("throws when the port is less than 1", () => {
+    expect(() => sshd.port(0)).toThrow(
+      "sshd.port requires an integer port between 1 and 65535, got 0"
+    )
+  })
+
   it("returns needs-apply when conn is null", async () => {
     const mod = sshd.port(2222)
     const result = await mod.check(null, emptyEnv)
