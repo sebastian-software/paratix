@@ -8,13 +8,14 @@ const SILENT = { silent: true } as const
 const FLAGS_DIR = "/var/lib/paratix/flags"
 
 /**
- * Derive the marker file path from the source path.
+ * Derive the marker file path from the source and destination paths.
  *
- * @param source - The source archive path used as a stable key.
+ * @param source - The source archive path used as part of the stable key.
+ * @param destination - The extraction target path used as part of the stable key.
  * @returns The absolute path to the marker file.
  */
-function markerPath(source: string): string {
-  const hash = sha256String(source)
+function markerPath(source: string, destination: string): string {
+  const hash = sha256String(`${source}\n${destination}`)
   return `${FLAGS_DIR}/archive-${hash}.sha256`
 }
 
@@ -164,7 +165,7 @@ export const archive = {
     destination: string,
     options?: { owner?: string; upload?: boolean }
   ): Module {
-    const marker = markerPath(source)
+    const marker = markerPath(source, destination)
     const upload = options?.upload === true
     const owner = options?.owner
     const parameters: ApplyParameters = { destination, marker, owner, source, upload }

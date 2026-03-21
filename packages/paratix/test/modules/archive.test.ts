@@ -7,10 +7,10 @@ const emptyEnv = {}
 
 const src = "/tmp/app.tar.gz"
 const destination = "/opt/app"
+const alternateDestination = "/opt/app-alt"
 
-// Stable hash of the src path for marker file naming.
-// sha256String("/tmp/app.tar.gz") — precomputed for test assertions.
-const srcHash = "3634fc364d4f64a0fd3cebdbdd9ba568cb0c4955e5224c3445224979024b3158"
+// Stable hash of `${src}\n${destination}` for marker file naming.
+const srcHash = "2889be4b654d6b7f7922971e7fb3fdf1c5ebd92b9c52462be2683a735c7562ef"
 const marker = `/var/lib/paratix/flags/archive-${srcHash}.sha256`
 const archiveSha = "abc123def456"
 
@@ -64,11 +64,26 @@ describe("archive.extract — check", () => {
     expect(result).toBe("needs-apply")
   })
 
+  it("uses a distinct marker for a second destination with the same archive", async () => {
+    const alternateMarkerHash = "cde8e7e8eb1b5af4f516117a5a2ed09a67b8a0fbbcc792d793901f00f15bc9a0"
+    const alternateMarker = `/var/lib/paratix/flags/archive-${alternateMarkerHash}.sha256`
+    const mockSsh = createMockSsh({
+      [`test -d '${alternateDestination}'`]: { code: 0 },
+      [`test -f '${alternateMarker}'`]: { code: 1 },
+    })
+
+    const mod = archive.extract(src, alternateDestination)
+    const result = await mod.check(mockSsh, emptyEnv)
+
+    expect(result).toBe("needs-apply")
+    expect(mockSsh.calls).not.toContain(`test -f '${marker}'`)
+  })
+
   it("computes local sha256 when upload is true without uploading", async () => {
     const localFile = "/local/app.tar.gz"
     const localFileHash = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
-    // sha256String of the local file path for marker name
-    const localSrcHash = "113329b21446a20ca2e8304294da20dc3aa7668c5cc4a803ffb59e377bb80f4f"
+    // sha256String of `${localFile}\n${destination}` for marker name
+    const localSrcHash = "edd161527d28e0daec8363c041e405c2b17a6fabc2b74d3b5e956652b98a3520"
     const localMarker = `/var/lib/paratix/flags/archive-${localSrcHash}.sha256`
 
     const mockSsh = createMockSsh({
