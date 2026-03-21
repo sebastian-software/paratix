@@ -318,6 +318,16 @@ describe("file.line", () => {
     expect(result).toBe("needs-apply")
   })
 
+  it("check returns needs-apply when the file does not exist (without match)", async () => {
+    const ssh = createMockSsh({
+      "[ -e '/etc/config' ]": { code: 1 },
+    })
+    const mod = file.line("/etc/config", "my-line")
+    const result = await mod.check(ssh, emptyEnv)
+    expect(result).toBe("needs-apply")
+    expect(ssh.calls).not.toContain("cat '/etc/config'")
+  })
+
   it("regression — check returns needs-apply for a substring match without an exact target line", async () => {
     const ssh = createMockSsh({
       "cat '/etc/config'": { stdout: "some-line\nprefix-my-line-suffix\nother-line" },
@@ -352,6 +362,16 @@ describe("file.line", () => {
     const mod = file.line("/etc/config", "KEY=value", { match: "KEY=.*" })
     const result = await mod.check(ssh, emptyEnv)
     expect(result).toBe("needs-apply")
+  })
+
+  it("check returns needs-apply when the file does not exist (with match)", async () => {
+    const ssh = createMockSsh({
+      "[ -e '/etc/config' ]": { code: 1 },
+    })
+    const mod = file.line("/etc/config", "KEY=value", { match: "KEY=.*" })
+    const result = await mod.check(ssh, emptyEnv)
+    expect(result).toBe("needs-apply")
+    expect(ssh.calls).not.toContain("cat '/etc/config'")
   })
 
   it("regression — check returns needs-apply when the matched target line differs even if the desired line exists elsewhere", async () => {

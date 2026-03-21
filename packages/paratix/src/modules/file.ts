@@ -232,6 +232,8 @@ export const file = {
       },
       async check(ssh: null | SshConnection): Promise<"needs-apply" | "ok"> {
         if (!ssh) return NEEDS_APPLY
+        const exists = await ssh.exists(remotePath)
+        if (!exists) return NEEDS_APPLY
 
         const content = await ssh.readFile(remotePath)
         const lines = splitLines(content)
