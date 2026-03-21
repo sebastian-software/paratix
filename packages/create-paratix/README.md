@@ -46,6 +46,11 @@ cd my-server
 
 **Step 3 -- Edit `server.ts`** with your actual server address, admin username, public key, and the modules you want to apply.
 
+The scaffold also includes an explicit host-key bootstrap:
+
+- first run: `strictHostKeyChecking: "accept-new"` so a fresh host can complete `apply:dry`
+- after you have verified the host key out of band: replace that transition mode with `expectedHostFingerprint` or `expectedHostPublicKey`
+
 **Step 4 -- Apply**
 
 ```sh
@@ -87,6 +92,12 @@ export default server({
     user: adminUser,
     ports: [22],
     privateKey: "~/.ssh/id_ed25519", // "~" is expanded by Paratix
+    // Initial host-key bootstrap for fresh servers:
+    // - keep this explicit accept-new mode only for the first verified connection
+    // - then pin the host key and switch strictHostKeyChecking back to "yes"
+    strictHostKeyChecking: "accept-new",
+    // expectedHostFingerprint: "SHA256:REPLACE_ME_WITH_YOUR_HOST_FINGERPRINT",
+    // expectedHostPublicKey: "ssh-ed25519 REPLACE_ME_WITH_YOUR_HOST_PUBLIC_KEY",
   },
   env: {
     SERVER_NAME: "my-server",
@@ -125,6 +136,26 @@ export default server({
 ```
 
 Wenn du mit einem frischen Server startest, auf dem nur `root` per SSH erreichbar ist, verwende den expliziten Übergangsmodus `--bootstrap-root`. Dieses Template bleibt bewusst als temporärer Bootstrap markiert, erstellt den dedizierten Admin-User und lässt Root-Login nur vorübergehend auf `prohibit-password`, bis du `ssh.user` auf den Admin-User umgestellt hast.
+
+### Host-key bootstrap
+
+Paratix verwendet standardmäßig striktes Host-Key-Checking. Ein frisch erzeugtes `create-paratix`-Projekt setzt deshalb im Scaffold explizit:
+
+```ts
+strictHostKeyChecking: "accept-new"
+```
+
+Das ist ein bewusst markierter Übergangsmodus für den ersten verifizierten Kontakt mit einem frischen Host. Direkt daneben enthält das generierte `server.ts` kommentierte Platzhalter für:
+
+- `expectedHostFingerprint`
+- `expectedHostPublicKey`
+
+Empfohlener Ablauf:
+
+1. Verifiziere den Host-Key deines Servers out of band.
+2. Führe den ersten `apply:dry` mit dem expliziten `accept-new`-Bootstrap aus.
+3. Ersetze danach `accept-new` durch `expectedHostFingerprint` oder `expectedHostPublicKey`.
+4. Setze `strictHostKeyChecking` wieder auf `"yes"` oder lasse die Option weg.
 
 Key concepts:
 

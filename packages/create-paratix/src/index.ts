@@ -20,6 +20,12 @@ export default server({
     user: adminUser,
     ports: [22],
     privateKey: "~/.ssh/id_ed25519", // "~" is expanded by Paratix
+    // Initial host-key bootstrap for fresh servers:
+    // - keep this explicit accept-new mode only for the first verified connection
+    // - then pin the host key and switch strictHostKeyChecking back to "yes"
+    strictHostKeyChecking: "accept-new",
+    // expectedHostFingerprint: "SHA256:REPLACE_ME_WITH_YOUR_HOST_FINGERPRINT",
+    // expectedHostPublicKey: "ssh-ed25519 REPLACE_ME_WITH_YOUR_HOST_PUBLIC_KEY",
   },
   env: {
     SERVER_NAME: "my-server",
@@ -69,6 +75,12 @@ export default server({
     user: "root",
     ports: [22],
     privateKey: "~/.ssh/id_ed25519", // "~" is expanded by Paratix
+    // Initial host-key bootstrap for fresh servers:
+    // - keep this explicit accept-new mode only for the first verified connection
+    // - then pin the host key and switch strictHostKeyChecking back to "yes"
+    strictHostKeyChecking: "accept-new",
+    // expectedHostFingerprint: "SHA256:REPLACE_ME_WITH_YOUR_HOST_FINGERPRINT",
+    // expectedHostPublicKey: "ssh-ed25519 REPLACE_ME_WITH_YOUR_HOST_PUBLIC_KEY",
   },
   env: {
     SERVER_NAME: "my-server",

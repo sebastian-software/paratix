@@ -227,6 +227,21 @@ describe("writeProjectFiles", () => {
     expect(content).toContain('PasswordAuthentication: "no"')
   })
 
+  it("generated server.ts includes an explicit host-key bootstrap for the first apply:dry", () => {
+    writeProjectFiles(TEST_DIR)
+
+    const content = readFileSync(join(TEST_DIR, "server.ts"), "utf8")
+
+    expect(content).toContain('strictHostKeyChecking: "accept-new"')
+    expect(content).toContain("Initial host-key bootstrap for fresh servers:")
+    expect(content).toContain(
+      'expectedHostFingerprint: "SHA256:REPLACE_ME_WITH_YOUR_HOST_FINGERPRINT"'
+    )
+    expect(content).toContain(
+      'expectedHostPublicKey: "ssh-ed25519 REPLACE_ME_WITH_YOUR_HOST_PUBLIC_KEY"'
+    )
+  })
+
   it("generated server.ts keeps the ~/.ssh privateKey default that Paratix expands at runtime", () => {
     writeProjectFiles(TEST_DIR)
 
@@ -255,6 +270,10 @@ describe("writeProjectFiles", () => {
     expect(content).toContain("Transitional bootstrap mode:")
     expect(content).toContain('PermitRootLogin: "prohibit-password"')
     expect(content).not.toContain('PermitRootLogin: "no"')
+    expect(content).toContain('strictHostKeyChecking: "accept-new"')
+    expect(content).toContain(
+      'expectedHostFingerprint: "SHA256:REPLACE_ME_WITH_YOUR_HOST_FINGERPRINT"'
+    )
   })
 
   it("creates a files subdirectory", () => {
