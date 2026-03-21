@@ -3,6 +3,7 @@ import { createHash, timingSafeEqual } from "node:crypto"
 /* eslint-disable max-lines */
 import { failed } from "../moduleFailure.js"
 import { shellQuote, validateMode } from "../ssh.js"
+import { maskSecrets } from "../sshHelpers.js"
 import { type Module, type ModuleResult, NEEDS_APPLY, type SshConnection } from "../types.js"
 import { hasFlag, setFlag } from "./moduleHelpers.js"
 import { isValidHeaderName, isValidHeaderValue, validateHttpUrl } from "./netHelpers.js"
@@ -229,6 +230,19 @@ async function applyFileAttributes(
   }
 }
 
+async function cleanupTemporaryDownloadFile(
+  conn: SshConnection,
+  parameters: Pick<DownloadParameters, "destination" | "secrets">
+): Promise<void> {
+  try {
+    await conn.exec(`rm -f ${shellQuote(parameters.destination)}`, { silent: true })
+  } catch (cleanupError) {
+    process.stderr.write(
+      `Warning: failed to remove temp file ${parameters.destination}: ${maskSecrets(String(cleanupError), parameters.secrets ?? [])}\n`
+    )
+  }
+}
+
 /**
  * Execute the download, verify integrity, and set ownership/permissions.
  * Shared implementation behind both `download.url()` and `download.github()`.
@@ -269,7 +283,7 @@ async function performDownload(
     return { status: "changed" }
   } finally {
     if (shouldCleanupTemporaryFile) {
-      await conn.exec(`rm -f ${shellQuote(downloadParameters.destination)}`, { silent: true })
+      await cleanupTemporaryDownloadFile(conn, downloadParameters)
     }
   }
 }

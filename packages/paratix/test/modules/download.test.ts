@@ -1,7 +1,5 @@
 import { createHash } from "node:crypto"
-import { describe, expect, it } from "vitest"
-
-import type { ExecOptions } from "../../src/types.js"
+import { describe, expect, it, vi } from "vitest"
 
 import { download } from "../../src/modules/download.js"
 import { createMockSsh } from "../helpers/mockSsh.js"
@@ -285,6 +283,48 @@ describe("download.url", () => {
       const conn = null
       const result = await mod.apply(conn, emptyEnv)
       expect(result.status).toBe("failed")
+    })
+
+    it("preserves the primary download error when cleanup also fails", async () => {
+      const primaryError = new Error("curl failed")
+      const cleanupError = new Error("cleanup failed")
+      const stderrSpy = vi.spyOn(process.stderr, "write").mockImplementation(() => true)
+      try {
+        const base = createMockSsh({
+          [`mktemp "$(dirname '${destination}')/.paratix-download.XXXXXX"`]: {
+            stdout: `${temporaryDestination}\n`,
+          },
+        })
+        const curlCommand = `curl -fsSL -o '${temporaryDestination}' ${httpsOnlyCurlProtocolFlags} '${url}'`
+        const cleanupCommand = `rm -f '${temporaryDestination}'`
+        const execMock = vi
+          .fn<(command: string) => Promise<{ code: number; stderr: string; stdout: string }>>()
+          .mockResolvedValueOnce({ code: 0, stderr: "", stdout: "" })
+          .mockRejectedValueOnce(primaryError)
+          .mockRejectedValueOnce(cleanupError)
+        const mockSsh = {
+          ...base,
+          async exec(command: string) {
+            base.calls.push(command)
+            return execMock(command)
+          },
+        }
+
+        const mod = download.url(destination, url, allowUnverifiedDownload)
+        await expect(mod.apply(mockSsh, emptyEnv)).rejects.toBe(primaryError)
+        expect(execMock).toHaveBeenCalledTimes(3)
+        expect(base.calls).toStrictEqual([
+          `mkdir -p "$(dirname '${destination}')"`,
+          `mktemp "$(dirname '${destination}')/.paratix-download.XXXXXX"`,
+          curlCommand,
+          cleanupCommand,
+        ])
+        expect(stderrSpy).toHaveBeenCalledWith(
+          `Warning: failed to remove temp file ${temporaryDestination}: Error: cleanup failed\n`
+        )
+      } finally {
+        stderrSpy.mockRestore()
+      }
     })
   })
 
