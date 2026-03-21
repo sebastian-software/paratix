@@ -358,6 +358,20 @@ describe("rsync.sync — argument building", () => {
 
     expect(getArgs()).toContain("root@1.2.3.4:/var/www/html")
   })
+
+  it("builds IPv6 remote destination in bracketed form", async () => {
+    const mockSsh = createMockSsh()
+    vi.spyOn(mockSsh, "getConnectionInfo").mockReturnValue({
+      host: "2001:db8::10",
+      port: 22,
+      privateKeyPath: "~/.ssh/id",
+      user: "root",
+    })
+    const mod = rsync.sync({ dest: "/var/www/html", src: "/local/src" })
+    await mod.apply(mockSsh, emptyEnv)
+
+    expect(getArgs()).toContain("root@[2001:db8::10]:/var/www/html")
+  })
 })
 
 // ---------------------------------------------------------------------------

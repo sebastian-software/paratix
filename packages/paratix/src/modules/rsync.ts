@@ -86,6 +86,19 @@ function buildOwnershipArguments(options: SyncOptions): string[] {
   return result
 }
 
+function buildRemoteSpec(
+  connectionInfo: {
+    host: string
+    user: string
+  },
+  destination: string
+): string {
+  const remoteHost = connectionInfo.host.includes(":")
+    ? `[${connectionInfo.host}]`
+    : connectionInfo.host
+  return `${connectionInfo.user}@${remoteHost}:${destination}`
+}
+
 /**
  * Assemble the full rsync argument list for a transfer.
  *
@@ -136,7 +149,7 @@ function buildArguments(
   )
   result.push(...buildFilterArguments(options))
   result.push(...buildOwnershipArguments(options))
-  result.push("--", options.src, `${connectionInfo.user}@${connectionInfo.host}:${options.dest}`)
+  result.push("--", options.src, buildRemoteSpec(connectionInfo, options.dest))
 
   return result
 }
