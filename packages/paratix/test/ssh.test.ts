@@ -1454,11 +1454,12 @@ describe("SshConnectionImpl", () => {
   // -------------------------------------------------------------------------
 
   describe("uploadFile", () => {
-    it("creates and cleans up the temp file without sudo for non-root users", async () => {
+    it("stages upload temp files in /tmp for non-root users before privileged finalization", async () => {
       const { sftpUpload } = await import("../src/sftp.js")
       vi.mocked(sftpUpload).mockResolvedValue()
 
-      const tempPath = "/remote/paratix-upload.ABCDEF"
+      const tempPath = "/tmp/paratix-upload.ABCDEF"
+      const remotePath = "/etc/my-app/config.yml"
       const executedCommands: string[] = []
 
       const execSpy = vi
@@ -1494,13 +1495,21 @@ describe("SshConnectionImpl", () => {
       ;(ssh as unknown as Record<string, unknown>).cachedSudoPassword = null
       ;(ssh as unknown as Record<string, unknown>).sudoReady = true
 
-      await ssh.uploadFile("/local/file.txt", "/remote/path")
+      await ssh.uploadFile("/local/file.txt", remotePath)
 
-      expect(executedCommands[0]).toBe("mktemp '/remote/paratix-upload.XXXXXX'")
+      expect(executedCommands[0]).toBe("mktemp '/tmp/paratix-upload.XXXXXX'")
       expect(executedCommands[1]).toBe(`chmod '0600' '${tempPath}'`)
       expect(executedCommands[2]).toMatch(/^sudo bash -c /v)
       expect(executedCommands[2]).toContain(tempPath)
-      expect(executedCommands[2]).toContain("/remote/path")
+      expect(executedCommands[2]).toContain("target_temp=$(mktemp")
+      expect(executedCommands[2]).toContain("/etc/my-app/.config.yml.paratix.XXXXXX")
+      expect(executedCommands[2]).toContain("mv ")
+      expect(executedCommands[2]).toContain(`'${tempPath}'`)
+      expect(executedCommands[2]).toContain('"$target_temp"')
+      expect(executedCommands[2]).toContain("chmod ")
+      expect(executedCommands[2]).toContain("'0600'")
+      expect(executedCommands[2]).toContain('chown "$target_owner" "$target_temp"')
+      expect(executedCommands[2]).toContain(`'${remotePath}'`)
       expect(executedCommands[3]).toBe(`rm -f '${tempPath}'`)
       expect(vi.mocked(sftpUpload)).toHaveBeenCalledWith(client, "/local/file.txt", tempPath)
     })
@@ -1707,11 +1716,12 @@ describe("SshConnectionImpl", () => {
   // -------------------------------------------------------------------------
 
   describe("writeFile", () => {
-    it("creates and cleans up the temp file without sudo for non-root users", async () => {
+    it("stages write temp files in /tmp for non-root users before privileged finalization", async () => {
       const { sftpUpload } = await import("../src/sftp.js")
       vi.mocked(sftpUpload).mockResolvedValue()
 
-      const tempPath = "/remote/paratix-write.ABCDEF"
+      const tempPath = "/tmp/paratix-write.ABCDEF"
+      const remotePath = "/etc/systemd/system/my-app.service"
       const executedCommands: string[] = []
 
       const execSpy = vi
@@ -1747,13 +1757,21 @@ describe("SshConnectionImpl", () => {
       ;(ssh as unknown as Record<string, unknown>).cachedSudoPassword = null
       ;(ssh as unknown as Record<string, unknown>).sudoReady = true
 
-      await ssh.writeFile("/remote/plain.txt", "hello world")
+      await ssh.writeFile(remotePath, "hello world")
 
-      expect(executedCommands[0]).toBe("mktemp '/remote/paratix-write.XXXXXX'")
+      expect(executedCommands[0]).toBe("mktemp '/tmp/paratix-write.XXXXXX'")
       expect(executedCommands[1]).toBe(`chmod '0600' '${tempPath}'`)
       expect(executedCommands[2]).toMatch(/^sudo bash -c /v)
       expect(executedCommands[2]).toContain(tempPath)
-      expect(executedCommands[2]).toContain("/remote/plain.txt")
+      expect(executedCommands[2]).toContain("target_temp=$(mktemp")
+      expect(executedCommands[2]).toContain("/etc/systemd/system/.my-app.service.paratix.XXXXXX")
+      expect(executedCommands[2]).toContain("mv ")
+      expect(executedCommands[2]).toContain(`'${tempPath}'`)
+      expect(executedCommands[2]).toContain('"$target_temp"')
+      expect(executedCommands[2]).toContain("chmod ")
+      expect(executedCommands[2]).toContain("'0600'")
+      expect(executedCommands[2]).toContain('chown "$target_owner" "$target_temp"')
+      expect(executedCommands[2]).toContain(`'${remotePath}'`)
       expect(executedCommands[3]).toBe(`rm -f '${tempPath}'`)
       expect(vi.mocked(sftpUpload)).toHaveBeenCalledOnce()
     })

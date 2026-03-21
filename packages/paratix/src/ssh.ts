@@ -284,12 +284,12 @@ export class SshConnectionImpl implements SshConnection {
     options?: { mode?: string }
   ): Promise<void> {
     const client = this.ensureClient()
-    const temporaryPath = await this.createRemoteTempPathInDestination(remotePath, "paratix-upload")
+    const temporaryPath = await this.createRemoteWritableTempPath(remotePath, "paratix-upload")
     const temporaryMode = options?.mode ?? "0600"
     try {
       await sftpUpload(client, localPath, temporaryPath)
       await this.setRemoteTempMode(temporaryPath, temporaryMode)
-      await this.exec(`mv ${shellQuote(temporaryPath)} ${shellQuote(remotePath)}`, { silent: true })
+      await this.finalizeRemoteTempFile(temporaryPath, remotePath, temporaryMode)
     } finally {
       try {
         await this.cleanupRemoteTempFile(temporaryPath)
@@ -320,19 +320,14 @@ export class SshConnectionImpl implements SshConnection {
   ): Promise<void> {
     const client = this.ensureClient()
     const localTemporary = join(tmpdir(), `paratix-write-${randomUUID()}`)
-    const remoteTemporary = await this.createRemoteTempPathInDestination(
-      remotePath,
-      "paratix-write"
-    )
+    const remoteTemporary = await this.createRemoteWritableTempPath(remotePath, "paratix-write")
     const temporaryMode = options?.mode ?? "0600"
     try {
       // eslint-disable-next-line security/detect-non-literal-fs-filename
       writeFileSync(localTemporary, content, { mode: 0o600 })
       await sftpUpload(client, localTemporary, remoteTemporary)
       await this.setRemoteTempMode(remoteTemporary, temporaryMode)
-      await this.exec(`mv ${shellQuote(remoteTemporary)} ${shellQuote(remotePath)}`, {
-        silent: true,
-      })
+      await this.finalizeRemoteTempFile(remoteTemporary, remotePath, temporaryMode)
     } finally {
       try {
         // eslint-disable-next-line security/detect-non-literal-fs-filename
@@ -470,6 +465,13 @@ export class SshConnectionImpl implements SshConnection {
         ? await this.output(command)
         : await this.outputWithoutSudo(command)
     return validateMktempPath(directory, path, prefix)
+  }
+
+  private async createRemoteWritableTempPath(remotePath: string, prefix: string): Promise<string> {
+    if (this.config.user === "root") {
+      return this.createRemoteTempPathInDestination(remotePath, prefix)
+    }
+    return this.createRemoteTempPath(`mktemp '/tmp/${prefix}.XXXXXX'`, prefix)
   }
 
   private createSettledCallbacks<T>(
@@ -625,6 +627,41 @@ export class SshConnectionImpl implements SshConnection {
     if (result.exitCode !== 0) {
       throw new Error(`Command failed (exit code ${result.exitCode}): ${command}`)
     }
+  }
+
+  private async finalizeRemoteTempFile(
+    temporaryPath: string,
+    remotePath: string,
+    mode: string
+  ): Promise<void> {
+    validateMode(mode)
+    if (this.config.user === "root") {
+      await this.exec(`mv ${shellQuote(temporaryPath)} ${shellQuote(remotePath)}`, {
+        silent: true,
+      })
+      return
+    }
+
+    const directory = posix.dirname(remotePath)
+    const basename = posix.basename(remotePath)
+    const finalTemplate = `${directory}/.${basename}.paratix.XXXXXX`
+    const finalizeScript = `
+target_owner=$(stat -c '%u:%g' ${shellQuote(remotePath)} 2>/dev/null || printf '0:0')
+target_temp=''
+cleanup() {
+  if [ -n "$target_temp" ]; then
+    rm -f "$target_temp"
+  fi
+}
+trap cleanup EXIT
+target_temp=$(mktemp ${shellQuote(finalTemplate)})
+mv ${shellQuote(temporaryPath)} "$target_temp"
+chmod ${shellQuote(mode)} "$target_temp"
+chown "$target_owner" "$target_temp"
+mv "$target_temp" ${shellQuote(remotePath)}
+trap - EXIT
+`
+    await this.exec(finalizeScript, { silent: true })
   }
 
   private async hasPasswordlessSudo(): Promise<boolean> {
