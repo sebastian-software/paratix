@@ -625,6 +625,26 @@ describe("SshConnectionImpl", () => {
       expect(tryConnectOnPort).not.toHaveBeenCalled()
     })
 
+    it("falls back directly to interactive password auth when privateKey is omitted, SSH_AUTH_SOCK is not set and passwordFallback is enabled", async () => {
+      vi.mocked(tryConnectOnPort).mockResolvedValueOnce()
+      vi.mocked(promptTerminal).mockResolvedValueOnce("secret-password")
+
+      const ssh = makeSshInstanceWithAgent({ passwordFallback: true })
+
+      await ssh.connect()
+
+      expect(promptTerminal).toHaveBeenCalledOnce()
+      expect(tryConnectOnPort).toHaveBeenCalledOnce()
+      const [callArgs] = vi.mocked(tryConnectOnPort).mock.calls[0] as [
+        Parameters<typeof tryConnectOnPort>[0],
+      ]
+      expect(callArgs.agent).toBeUndefined()
+      expect(callArgs.password).toBe("secret-password")
+      expect(callArgs.privateKey).toBeUndefined()
+      expect(ssh.getConnectionInfo().authMethod).toBe("password")
+      expect(ssh.getConnectionInfo().agentSocket).toBeUndefined()
+    })
+
     it("throws when SSH_AUTH_SOCK is set to an empty string", async () => {
       process.env.SSH_AUTH_SOCK = ""
 
@@ -634,6 +654,23 @@ describe("SshConnectionImpl", () => {
         "No privateKey configured and SSH_AUTH_SOCK is not set"
       )
       expect(tryConnectOnPort).not.toHaveBeenCalled()
+    })
+
+    it("falls back directly to interactive password auth when SSH_AUTH_SOCK is empty and passwordFallback is enabled", async () => {
+      process.env.SSH_AUTH_SOCK = ""
+      vi.mocked(tryConnectOnPort).mockResolvedValueOnce()
+      vi.mocked(promptTerminal).mockResolvedValueOnce("secret-password")
+
+      const ssh = makeSshInstanceWithAgent({ passwordFallback: true })
+
+      await ssh.connect()
+
+      expect(promptTerminal).toHaveBeenCalledOnce()
+      const [callArgs] = vi.mocked(tryConnectOnPort).mock.calls[0] as [
+        Parameters<typeof tryConnectOnPort>[0],
+      ]
+      expect(callArgs.agent).toBeUndefined()
+      expect(callArgs.password).toBe("secret-password")
     })
 
     it("throws when SSH_AUTH_SOCK points to a non-existent path", async () => {

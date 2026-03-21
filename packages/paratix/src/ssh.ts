@@ -396,6 +396,12 @@ export class SshConnectionImpl implements SshConnection {
   private async connectViaAgent(options?: PromptOptions): Promise<void> {
     const agent = process.env.SSH_AUTH_SOCK
     if (agent == null || agent.length === 0) {
+      if (await this.tryPasswordFallback(options)) return
+      if (this.config.passwordFallback) {
+        throw new Error(
+          `Failed to connect to ${this.runtime.host} on ports: ${this.runtime.ports.join(", ")}`
+        )
+      }
       throw new Error("No privateKey configured and SSH_AUTH_SOCK is not set")
     }
     try {
@@ -409,7 +415,7 @@ export class SshConnectionImpl implements SshConnection {
       this.authMethod = "agent"
       return
     }
-    if (await this.tryAgentPasswordFallback(agent, options)) return
+    if (await this.tryPasswordFallback(options, agent)) return
     throw new Error(
       `Could not connect to ${this.runtime.host} via SSH agent on ports ${this.runtime.ports.join(", ")}`
     )
@@ -726,18 +732,6 @@ trap - EXIT
     return { command: `sudo bash -c ${quoted}`, needsPassword: false }
   }
 
-  private async tryAgentPasswordFallback(agent: string, options?: PromptOptions): Promise<boolean> {
-    if (!this.config.passwordFallback) return false
-    const password = await promptTerminal(
-      `Password for ${this.config.user}@${this.runtime.host}: `,
-      true,
-      options
-    )
-    if (!(await this.tryConnectOnPorts(undefined, password, agent))) return false
-    this.authMethod = "password"
-    return true
-  }
-
   /**
    * Iterate over `config.ports` and attempt a connection on each one.
    *
@@ -795,6 +789,18 @@ trap - EXIT
       }
     }
     return false
+  }
+
+  private async tryPasswordFallback(options?: PromptOptions, agent?: string): Promise<boolean> {
+    if (!this.config.passwordFallback) return false
+    const password = await promptTerminal(
+      `Password for ${this.config.user}@${this.runtime.host}: `,
+      true,
+      options
+    )
+    if (!(await this.tryConnectOnPorts(undefined, password, agent))) return false
+    this.authMethod = "password"
+    return true
   }
 
   /**
