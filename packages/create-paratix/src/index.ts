@@ -44,6 +44,11 @@ export default server({
       ssh.authorizedKeys(adminUser, adminPublicKey),
     ]),
 
+    recipe("firewall", [
+      ufw.rule("allow", [2222, 80, 443]),
+      ufw.enabled(),
+    ]),
+
     recipe("ssh-hardening", [
       sshd.port(2222),
       sshd.config({
@@ -53,11 +58,6 @@ export default server({
     ], {
       signals: [service.restart("sshd")],
     }),
-
-    recipe("firewall", [
-      ufw.rule("allow", [2222, 80, 443]),
-      ufw.enabled(),
-    ]),
   ],
 });
 `
@@ -99,6 +99,11 @@ export default server({
       ssh.authorizedKeys(adminUser, adminPublicKey),
     ]),
 
+    recipe("firewall", [
+      ufw.rule("allow", [2222, 80, 443]),
+      ufw.enabled(),
+    ]),
+
     // Transitional bootstrap mode:
     // 1. Run this once as root to create the dedicated admin user.
     // 2. Switch ssh.user to admin.
@@ -112,11 +117,6 @@ export default server({
     ], {
       signals: [service.restart("sshd")],
     }),
-
-    recipe("firewall", [
-      ufw.rule("allow", [2222, 80, 443]),
-      ufw.enabled(),
-    ]),
   ],
 });
 `

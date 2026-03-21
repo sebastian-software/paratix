@@ -50,6 +50,7 @@ The scaffold also includes an explicit host-key bootstrap:
 
 - first run: `strictHostKeyChecking: "accept-new"` so a fresh host can complete `apply:dry`
 - after you have verified the host key out of band: replace that transition mode with `expectedHostFingerprint` or `expectedHostPublicKey`
+- the generated playbook opens firewall port `2222` before `sshd.port(2222)` runs, so the first real apply can reconnect safely
 
 **Step 4 -- Apply**
 
@@ -116,6 +117,8 @@ export default server({
       ssh.authorizedKeys(adminUser, adminPublicKey),
     ]),
 
+    recipe("firewall", [ufw.rule("allow", [2222, 80, 443]), ufw.enabled()]),
+
     recipe(
       "ssh-hardening",
       [
@@ -129,13 +132,13 @@ export default server({
         signals: [service.restart("sshd")],
       }
     ),
-
-    recipe("firewall", [ufw.rule("allow", [2222, 80, 443]), ufw.enabled()]),
   ],
 })
 ```
 
 Wenn du mit einem frischen Server startest, auf dem nur `root` per SSH erreichbar ist, verwende den expliziten Übergangsmodus `--bootstrap-root`. Dieses Template bleibt bewusst als temporärer Bootstrap markiert, erstellt den dedizierten Admin-User und lässt Root-Login nur vorübergehend auf `prohibit-password`, bis du `ssh.user` auf den Admin-User umgestellt hast.
+
+Wichtig für den ersten echten Lauf: Das Scaffold setzt die Firewall-Freigabe für `2222` bewusst vor den eigentlichen SSH-Portwechsel. Paratix reconnectet nach `sshd.port(...)` sofort auf den neuen Port; ohne diese Reihenfolge würde der erste Apply leicht an einer noch geschlossenen Firewall scheitern.
 
 ### Host-key bootstrap
 

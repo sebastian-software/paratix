@@ -260,6 +260,18 @@ describe("writeProjectFiles", () => {
     expect(content).not.toContain('ufw.rule("allow", [22, 2222, 80, 443])')
   })
 
+  it("generated server.ts opens firewall port 2222 before applying sshd.port(2222)", () => {
+    writeProjectFiles(TEST_DIR)
+
+    const content = readFileSync(join(TEST_DIR, "server.ts"), "utf8")
+    const firewallIndex = content.indexOf('recipe("firewall"')
+    const sshHardeningIndex = content.indexOf('recipe("ssh-hardening"')
+
+    expect(firewallIndex).toBeGreaterThanOrEqual(0)
+    expect(sshHardeningIndex).toBeGreaterThanOrEqual(0)
+    expect(firewallIndex).toBeLessThan(sshHardeningIndex)
+  })
+
   it("generated server.ts supports an explicit bootstrap-root transition mode", () => {
     writeProjectFiles(TEST_DIR, { mode: "bootstrap-root" })
 
@@ -274,6 +286,18 @@ describe("writeProjectFiles", () => {
     expect(content).toContain(
       'expectedHostFingerprint: "SHA256:REPLACE_ME_WITH_YOUR_HOST_FINGERPRINT"'
     )
+  })
+
+  it("generated bootstrap-root server.ts also opens firewall port 2222 before ssh-hardening-transition", () => {
+    writeProjectFiles(TEST_DIR, { mode: "bootstrap-root" })
+
+    const content = readFileSync(join(TEST_DIR, "server.ts"), "utf8")
+    const firewallIndex = content.indexOf('recipe("firewall"')
+    const sshHardeningIndex = content.indexOf('recipe("ssh-hardening-transition"')
+
+    expect(firewallIndex).toBeGreaterThanOrEqual(0)
+    expect(sshHardeningIndex).toBeGreaterThanOrEqual(0)
+    expect(firewallIndex).toBeLessThan(sshHardeningIndex)
   })
 
   it("creates a files subdirectory", () => {
