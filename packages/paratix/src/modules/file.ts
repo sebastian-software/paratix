@@ -1,4 +1,5 @@
 import { readFile } from "node:fs/promises"
+import { posix } from "node:path"
 
 import { failed } from "../moduleFailure.js"
 import { shellQuote, validateMode } from "../ssh.js"
@@ -46,6 +47,17 @@ function splitLines(content: string): string[] {
   return content.split(/\r?\n/v)
 }
 
+function validateAbsentPath(remotePath: string): void {
+  const trimmedPath = remotePath.trim()
+  if (trimmedPath.length === 0) {
+    throw new Error("file.absent: remotePath must not be empty")
+  }
+
+  if (posix.normalize(trimmedPath) === "/") {
+    throw new Error(`file.absent: refusing to remove destructive path: ${remotePath}`)
+  }
+}
+
 async function templateStateMatches(input: {
   options?: { mode?: string; owner?: string }
   remotePath: string
@@ -73,6 +85,8 @@ export const file = {
    * @returns A Module that ensures the path is absent.
    */
   absent(remotePath: string): Module {
+    validateAbsentPath(remotePath)
+
     return {
       async apply(ssh: null | SshConnection): Promise<ModuleResult> {
         if (!ssh) return failed(`[file.absent: ${remotePath}] SSH connection is required`)

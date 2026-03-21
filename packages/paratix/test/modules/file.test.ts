@@ -63,6 +63,20 @@ describe("file.directory", () => {
 })
 
 describe("file.absent", () => {
+  it("rejects an empty remote path", () => {
+    expect(() => file.absent("")).toThrow("file.absent: remotePath must not be empty")
+  })
+
+  it("rejects the root path", () => {
+    expect(() => file.absent("/")).toThrow("file.absent: refusing to remove destructive path: /")
+  })
+
+  it("rejects paths that normalize to root", () => {
+    expect(() => file.absent("/var/..")).toThrow(
+      "file.absent: refusing to remove destructive path: /var/.."
+    )
+  })
+
   it("check returns ok when the path does not exist", async () => {
     const ssh = createMockSsh({
       "[ -e '/tmp/old-file' ]": { code: 1 },
