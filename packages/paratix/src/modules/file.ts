@@ -42,6 +42,10 @@ function ownershipMatches(
   return true
 }
 
+function splitLines(content: string): string[] {
+  return content.split(/\r?\n/v)
+}
+
 /**
  * Modules for managing remote files and directories.
  *
@@ -198,15 +202,16 @@ export const file = {
         if (!ssh) return NEEDS_APPLY
 
         const content = await ssh.readFile(remotePath)
+        const lines = splitLines(content)
 
         if (options?.match != null) {
           // eslint-disable-next-line security/detect-non-literal-regexp
           const matchPattern = new RegExp(options.match, "mu")
-          if (!matchPattern.test(content)) return NEEDS_APPLY
-          return content.includes(line) ? "ok" : NEEDS_APPLY
+          const matchedLine = lines.find((candidateLine) => matchPattern.test(candidateLine))
+          return matchedLine === line ? "ok" : NEEDS_APPLY
         }
 
-        return content.includes(line) ? "ok" : NEEDS_APPLY
+        return lines.includes(line) ? "ok" : NEEDS_APPLY
       },
       name: `file.line: ${remotePath}`,
     }

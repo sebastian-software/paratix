@@ -304,6 +304,15 @@ describe("file.line", () => {
     expect(result).toBe("needs-apply")
   })
 
+  it("regression — check returns needs-apply for a substring match without an exact target line", async () => {
+    const ssh = createMockSsh({
+      "cat '/etc/config'": { stdout: "some-line\nprefix-my-line-suffix\nother-line" },
+    })
+    const mod = file.line("/etc/config", "my-line")
+    const result = await mod.check(ssh, emptyEnv)
+    expect(result).toBe("needs-apply")
+  })
+
   it("check returns ok when exact line exists (with match)", async () => {
     const ssh = createMockSsh({
       "cat '/etc/config'": { stdout: "OTHER=foo\nKEY=value\nMORE=bar" },
@@ -325,6 +334,15 @@ describe("file.line", () => {
   it("check returns needs-apply when match not found", async () => {
     const ssh = createMockSsh({
       "cat '/etc/config'": { stdout: "OTHER=foo\nMORE=bar" },
+    })
+    const mod = file.line("/etc/config", "KEY=value", { match: "KEY=.*" })
+    const result = await mod.check(ssh, emptyEnv)
+    expect(result).toBe("needs-apply")
+  })
+
+  it("regression — check returns needs-apply when the matched target line differs even if the desired line exists elsewhere", async () => {
+    const ssh = createMockSsh({
+      "cat '/etc/config'": { stdout: "KEY=old\nOTHER=foo\nKEY=value" },
     })
     const mod = file.line("/etc/config", "KEY=value", { match: "KEY=.*" })
     const result = await mod.check(ssh, emptyEnv)
