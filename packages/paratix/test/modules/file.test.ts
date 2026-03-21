@@ -413,6 +413,24 @@ describe("file.line — sed-Escaping Regression (apply with options.match)", () 
 
     expect(writtenFiles[0]?.content).toContain("include /etc/nginx/conf.d/*.conf;")
   })
+
+  it("regression — apply fails instead of writing unchanged content when no match is found", async () => {
+    const writtenFiles: Array<{ content: string; path: string }> = []
+    const ssh = createMockSsh({
+      "cat '/etc/config'": { stdout: "OTHER=foo\nMORE=bar\n" },
+    })
+    // eslint-disable-next-line @typescript-eslint/require-await -- Mock
+    ssh.writeFile = async (path: string, content: string) => {
+      writtenFiles.push({ content, path })
+    }
+
+    const mod = file.line("/etc/config", "KEY=value", { match: "KEY=.*" })
+    const result = await mod.apply(ssh, emptyEnv)
+
+    expect(result.status).toBe("failed")
+    expect(result.error?.message).toContain("No line matching KEY=.* found for replacement")
+    expect(writtenFiles).toStrictEqual([])
+  })
 })
 
 describe("file.line — clientseitiges Matching (check with options.match)", () => {

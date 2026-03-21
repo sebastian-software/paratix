@@ -192,6 +192,11 @@ export const file = {
           const content = await ssh.readFile(remotePath)
           // eslint-disable-next-line security/detect-non-literal-regexp
           const pattern = new RegExp(options.match, "mu")
+          if (!pattern.test(content)) {
+            return failed(
+              `[file.line: ${remotePath}] No line matching ${options.match} found for replacement`
+            )
+          }
           const newContent = content.replace(pattern, line)
           await guardedWriteFile(ssh, { newContent, originalContent: content, remotePath })
         }
