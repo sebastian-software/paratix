@@ -176,6 +176,7 @@ export class SshConnectionImpl implements SshConnection {
   public getConnectionInfo(): ReturnType<SshConnection["getConnectionInfo"]> {
     return {
       agentSocket: this.authMethod === "agent" ? (this.agentSocket ?? undefined) : undefined,
+      authMethod: this.authMethod ?? undefined,
       host: this.runtime.host,
       port: this.connectedPort,
       privateKeyPath:

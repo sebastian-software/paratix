@@ -730,7 +730,7 @@ describe("SshConnectionImpl", () => {
       expect(ssh.getConnectionInfo().privateKeyPath).toBeUndefined()
     })
 
-    it("omits IdentityAgent in rsync after agent failure and password fallback", async () => {
+    it("returns a failed result with a clear error in rsync after agent failure and password fallback", async () => {
       vi.mocked(tryConnectOnPort)
         .mockRejectedValueOnce(new Error("Agent auth failed"))
         .mockResolvedValueOnce()
@@ -753,13 +753,11 @@ describe("SshConnectionImpl", () => {
         .sync({ dest: "/remote/dest", src: "/local/src" })
         .apply(ssh, emptyEnv)
 
-      expect(result.status).toBe("ok")
-      const [, rsyncArguments] = mockExecFile.mock.calls[0] as [string, string[]]
-      const eIndex = rsyncArguments.indexOf("-e")
-      expect(eIndex).toBeGreaterThanOrEqual(0)
-      const transportArg = rsyncArguments[eIndex + 1]
-      expect(transportArg).not.toContain("IdentityAgent=")
-      expect(transportArg).not.toContain("-i ")
+      expect(result.status).toBe("failed")
+      expect(String(result.error)).toContain(
+        "[rsync.sync] apply requires agent or private-key SSH authentication; password fallback sessions are not supported"
+      )
+      expect(mockExecFile).not.toHaveBeenCalled()
     })
 
     it("throws when agent-only fails and passwordFallback second attempt also fails", async () => {

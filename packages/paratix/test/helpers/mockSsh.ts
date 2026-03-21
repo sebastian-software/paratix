@@ -117,7 +117,13 @@ export function createMockSsh(responses?: MockResponses, options?: MockSshOption
       return this.test(`[ -e ${shellQuote(path)} ]`)
     },
     getConnectionInfo() {
-      return { host: "1.2.3.4", port: 22, privateKeyPath: "~/.ssh/id", user: "root" }
+      return {
+        authMethod: "privateKey",
+        host: "1.2.3.4",
+        port: 22,
+        privateKeyPath: "~/.ssh/id",
+        user: "root",
+      }
     },
     async lines(command) {
       const out = await this.output(command)

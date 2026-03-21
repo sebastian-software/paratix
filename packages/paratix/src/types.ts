@@ -169,6 +169,7 @@ export type SshConnection = {
    */
   getConnectionInfo: () => {
     agentSocket?: string
+    authMethod?: "agent" | "password" | "privateKey"
     host: string
     port: number
     privateKeyPath?: string

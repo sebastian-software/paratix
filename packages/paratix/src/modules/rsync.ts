@@ -98,6 +98,7 @@ function buildOwnershipArguments(options: SyncOptions): string[] {
  * @param options - Sync options describing source, destination, and filters.
  * @param connectionInfo - SSH connection details obtained from `SshConnection.getConnectionInfo`.
  * @param connectionInfo.agentSocket - SSH agent socket path (`SSH_AUTH_SOCK`), used when no private key is configured.
+ * @param connectionInfo.authMethod - Authentication method that established the current SSH session.
  * @param connectionInfo.host - The remote host address.
  * @param connectionInfo.port - The SSH port number.
  * @param connectionInfo.privateKeyPath - Absolute path to the SSH private key.
@@ -109,6 +110,7 @@ function buildArguments(
   options: SyncOptions,
   connectionInfo: {
     agentSocket?: string
+    authMethod?: "agent" | "password" | "privateKey"
     host: string
     port: number
     privateKeyPath?: string
@@ -180,6 +182,11 @@ async function executeRsync(parameters: {
 }): Promise<string> {
   const { dryRun, options, phase, ssh } = parameters
   const connectionInfo = ssh.getConnectionInfo()
+  if (connectionInfo.authMethod === "password") {
+    throw new Error(
+      `[rsync.sync] ${phase} requires agent or private-key SSH authentication; password fallback sessions are not supported`
+    )
+  }
   const rsyncArguments = buildArguments(options, connectionInfo, dryRun)
 
   return new Promise((resolve, reject) => {

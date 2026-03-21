@@ -460,4 +460,21 @@ describe("rsync.sync — SSH auth method in transport flag", () => {
     expect(transportArg).not.toContain("-i ")
     expect(transportArg).not.toContain("-o IdentityAgent=")
   })
+
+  it("throws a clear error for password-authenticated sessions", async () => {
+    const mockSsh = createMockSsh()
+    vi.spyOn(mockSsh, "getConnectionInfo").mockReturnValue({
+      authMethod: "password",
+      host: "1.2.3.4",
+      port: 22,
+      user: "root",
+    })
+    const mod = rsync.sync({ dest: "/remote/dest", src: "/local/src" })
+
+    await expect(mod.check(mockSsh, emptyEnv)).rejects.toThrow(
+      "[rsync.sync] check requires agent or private-key SSH authentication; password fallback sessions are not supported"
+    )
+
+    expect(mockExecFile).not.toHaveBeenCalled()
+  })
 })
