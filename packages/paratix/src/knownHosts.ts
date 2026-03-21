@@ -188,12 +188,18 @@ function verifyHostKeyAgainstKnownEntries(parameters: {
     )
   }
 
-  const existingKey = fileEntries.find((entry) => entry.marker !== "@revoked")?.key ?? cachedKey
-  if (existingKey != null) {
-    if (existingKey.length === key.length && timingSafeEqual(existingKey, key)) return true
-    throwHostKeyMismatch(host, key, existingKey)
+  const nonRevokedEntries = fileEntries.filter((entry) => entry.marker !== "@revoked")
+  const matchingEntry = nonRevokedEntries.find(
+    (entry) => entry.key.length === key.length && timingSafeEqual(entry.key, key)
+  )
+  if (matchingEntry != null) return true
+  if (cachedKey?.length === key.length && timingSafeEqual(cachedKey, key)) {
+    return true
   }
-  if (fileEntries.length > 0) throwHostKeyMismatch(host, key)
+
+  const firstNonRevokedKey = nonRevokedEntries.at(0)?.key
+  if (firstNonRevokedKey != null) throwHostKeyMismatch(host, key, firstNonRevokedKey)
+  if (cachedKey != null) throwHostKeyMismatch(host, key, cachedKey)
   return false
 }
 

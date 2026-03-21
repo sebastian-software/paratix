@@ -421,6 +421,7 @@ describe("buildHostVerifier", () => {
   let mkdirMock: ReturnType<typeof vi.fn>
 
   const ed25519Key = makeKeyBuffer("ssh-ed25519", Buffer.from("real-key-material-here"))
+  const rsaKey = makeKeyBuffer("ssh-rsa", Buffer.from("real-rsa-key-material"))
 
   beforeEach(async () => {
     clearHostKeyCache()
@@ -581,6 +582,29 @@ describe("buildHostVerifier", () => {
 
     const result = hostVerifier!(ed25519Key)
     expect(result).toBe(true)
+  })
+
+  it("regression — mode 'yes' accepts a matching key when known_hosts contains multiple algorithms for the same host", () => {
+    readFileSyncMock.mockReturnValue(
+      `example.com ssh-rsa ${rsaKey.toString("base64")}\nexample.com ssh-ed25519 ${ed25519Key.toString("base64")}\n`
+    )
+
+    const { hostVerifier } = buildHostVerifier("yes", { host: "example.com", port: 22 })
+    expect(hostVerifier).toBeDefined()
+
+    expect(hostVerifier!(ed25519Key)).toBe(true)
+  })
+
+  it("regression — mode 'accept-new' does not reject a matching key when a different algorithm entry appears first", () => {
+    readFileSyncMock.mockReturnValue(
+      `example.com ssh-rsa ${rsaKey.toString("base64")}\nexample.com ssh-ed25519 ${ed25519Key.toString("base64")}\n`
+    )
+
+    const { hostVerifier } = buildHostVerifier("accept-new", { host: "example.com", port: 22 })
+    expect(hostVerifier).toBeDefined()
+
+    expect(hostVerifier!(ed25519Key)).toBe(true)
+    expect(appendFileMock).not.toHaveBeenCalled()
   })
 
   it("mode 'yes' with unknown host: hostVerifier throws Error", () => {
