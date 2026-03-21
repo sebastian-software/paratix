@@ -280,10 +280,10 @@ describe("service.reload", () => {
 })
 
 describe("service.facts", () => {
-  it("check always returns ok", async () => {
+  it("check always returns needs-apply", async () => {
     const mod = service.facts()
     const result = await mod.check(null, emptyEnv)
-    expect(result).toBe("ok")
+    expect(result).toBe("needs-apply")
   })
 
   it("apply parses systemctl list-units output and returns meta with service states", async () => {

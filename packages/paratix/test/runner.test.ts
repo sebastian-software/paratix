@@ -2679,6 +2679,60 @@ describe("runPlaybook dry-run recipe behaviour", () => {
     expect(uptimeDependentModule.apply).not.toHaveBeenCalled()
   })
 
+  it("propagates service facts meta to following modules in dry-run mode", async () => {
+    const capturedConfigs: unknown[] = []
+    const execOutputs: Record<string, string> = {
+      "systemctl list-units --type=service --all --no-pager --no-legend":
+        "  nginx.service  loaded  active  running  A high performance web server\n" +
+        "  sshd.service   loaded  active  running  OpenBSD Secure Shell server\n",
+    }
+
+    vi.doMock("../src/ssh.js", () => ({
+      shellQuote: (s: string) => `'${s}'`,
+      SshConnectionImpl: makeMockSshClass(capturedConfigs, {
+        exec: vi
+          .fn()
+          .mockImplementation(
+            (command: "systemctl list-units --type=service --all --no-pager --no-legend") => ({
+              code: 0,
+              stderr: "",
+              stdout: execOutputs[command],
+            })
+          ),
+      }),
+    }))
+
+    const [{ runPlaybook }, { service }] = await Promise.all([
+      import("../src/runner.js"),
+      import("../src/modules/service.js"),
+    ])
+
+    let receivedEnvInCheck: Environment | undefined
+    const dependentModule: Module = {
+      apply: vi.fn().mockResolvedValue({ status: "ok" } satisfies ModuleResult),
+      check: vi.fn().mockImplementation(async (_ssh, env: Environment) => {
+        await Promise.resolve()
+        receivedEnvInCheck = env
+        return "ok" as const
+      }),
+      name: "service-facts-dependent-module",
+    }
+
+    const definition: ServerDefinition = {
+      host: "1.2.3.4",
+      name: "test-server",
+      run: [service.facts(), dependentModule],
+      ssh: { ports: [22], privateKey: "~/.ssh/id", user: "root" },
+    }
+
+    await runPlaybook(definition, { dryRun: true })
+
+    expect(receivedEnvInCheck).toBeDefined()
+    await expect(resolveEnvironment(receivedEnvInCheck!, "service.nginx")).resolves.toBe("active")
+    await expect(resolveEnvironment(receivedEnvInCheck!, "service.sshd")).resolves.toBe("active")
+    expect(dependentModule.apply).not.toHaveBeenCalled()
+  })
+
   it("propagates apply-only recipe child meta to following recipe children in dry-run mode", async () => {
     const capturedConfigs: unknown[] = []
 

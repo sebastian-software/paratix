@@ -72,6 +72,7 @@ export const service = {
    */
   facts(): Module {
     return {
+      _dryRunMetaProducer: true,
       async apply(ssh: null | SshConnection): Promise<ModuleResult> {
         if (!ssh) return failed("[service.facts] SSH connection is required")
         const result = await ssh.exec(
@@ -97,7 +98,7 @@ export const service = {
       },
       // eslint-disable-next-line @typescript-eslint/require-await -- Interface requires async
       async check(): Promise<"needs-apply" | "ok"> {
-        return "ok"
+        return NEEDS_APPLY
       },
       name: "service.facts",
     }
