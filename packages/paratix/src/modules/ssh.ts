@@ -5,11 +5,13 @@ import { type Module, type ModuleResult, NEEDS_APPLY, type SshConnection } from 
 
 type KnownHostsOptions = {
   expectedFingerprint?: string
+  port?: number
   publicKey?: string
   state?: "absent" | "present"
 }
 
 const SSH_KEYSCAN_MIN_FIELDS = 3
+const DEFAULT_SSH_PORT = 22
 
 function normalizePublicKey(publicKey: string): string {
   const parts = publicKey.trim().split(/\s+/v)
@@ -86,12 +88,28 @@ function hasKnownHostsTrustAnchor(options?: KnownHostsOptions): boolean {
   return options?.expectedFingerprint != null || options?.publicKey != null
 }
 
+function knownHostsLookupTarget(host: string, options?: KnownHostsOptions): string {
+  const port = options?.port
+  if (port == null || port === DEFAULT_SSH_PORT) return host
+  return `[${host}]:${port}`
+}
+
+function sshKeyscanCommand(host: string, options?: KnownHostsOptions): string {
+  const port = options?.port
+  if (port == null || port === DEFAULT_SSH_PORT) {
+    return `ssh-keyscan -H ${shellQuote(host)} 2>/dev/null`
+  }
+  return `ssh-keyscan -p ${port} -H ${shellQuote(host)} 2>/dev/null`
+}
+
 async function hasMatchingKnownHostTrustAnchor(
   conn: SshConnection,
   host: string,
   options: KnownHostsOptions
 ): Promise<boolean> {
-  const knownHostOutput = await conn.output(`ssh-keygen -F ${shellQuote(host)}`)
+  const knownHostOutput = await conn.output(
+    `ssh-keygen -F ${shellQuote(knownHostsLookupTarget(host, options))}`
+  )
   const knownHostLines = parseHostKeyLines(knownHostOutput)
 
   if (knownHostLines.length === 0) return false
@@ -267,13 +285,14 @@ export const ssh = {
    */
   knownHosts(host: string, options?: KnownHostsOptions): Module {
     const state = options?.state ?? "present"
+    const lookupTarget = knownHostsLookupTarget(host, options)
 
     return {
       async apply(conn: null | SshConnection): Promise<ModuleResult> {
         if (!conn) return failed(`[ssh.knownHosts: ${host} (${state})] SSH connection is required`)
 
         if (state === "present") {
-          const scannedOutput = await conn.output(`ssh-keyscan -H ${shellQuote(host)} 2>/dev/null`)
+          const scannedOutput = await conn.output(sshKeyscanCommand(host, options))
           const scannedLines = parseHostKeyLines(scannedOutput)
           const verifiedLines = getVerifiedScannedHostKeyLines(host, scannedLines, options ?? {})
           await conn.exec("mkdir -p ~/.ssh && chmod 700 ~/.ssh", { silent: true })
@@ -282,7 +301,7 @@ export const ssh = {
             { silent: true }
           )
         } else {
-          await conn.exec(`ssh-keygen -R ${shellQuote(host)}`, { silent: true })
+          await conn.exec(`ssh-keygen -R ${shellQuote(lookupTarget)}`, { silent: true })
         }
 
         return { status: "changed" }
@@ -296,7 +315,7 @@ export const ssh = {
             : NEEDS_APPLY
         }
 
-        const hostKnown = await conn.test(`ssh-keygen -F ${shellQuote(host)}`)
+        const hostKnown = await conn.test(`ssh-keygen -F ${shellQuote(lookupTarget)}`)
 
         if (state === "present") {
           return hostKnown ? "ok" : NEEDS_APPLY

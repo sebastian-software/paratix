@@ -105,6 +105,20 @@ describe("ssh.knownHosts", () => {
     expect(result).toBe("ok")
   })
 
+  it("check uses a bracketed known_hosts lookup target for non-standard ports", async () => {
+    const mockSsh = createMockSsh({
+      "ssh-keygen -F '[github.com]:2222'": { code: 0, stdout: `${scannedLine}\n` },
+    })
+    const mod = ssh.knownHosts("github.com", {
+      expectedFingerprint: hostFingerprint,
+      port: 2222,
+    })
+
+    const result = await mod.check(mockSsh, emptyEnv)
+
+    expect(result).toBe("ok")
+  })
+
   it("check returns needs-apply when host is not known (state: present)", async () => {
     const mockSsh = createMockSsh({
       "ssh-keygen -F 'github.com'": { code: 1 },
@@ -162,6 +176,22 @@ describe("ssh.knownHosts", () => {
     expect(mockSsh.calls).toContain(`printf '%s\\n' '${scannedLine}' >> ~/.ssh/known_hosts`)
   })
 
+  it("apply scans the configured non-standard port before appending a verified host key", async () => {
+    const mockSsh = createMockSsh({
+      "ssh-keyscan -p 2222 -H 'github.com' 2>/dev/null": { stdout: `${scannedLine}\n` },
+    })
+    const mod = ssh.knownHosts("github.com", {
+      expectedFingerprint: hostFingerprint,
+      port: 2222,
+    })
+
+    const result = await mod.apply(mockSsh, emptyEnv)
+
+    expect(result.status).toBe("changed")
+    expect(mockSsh.calls).toContain("ssh-keyscan -p 2222 -H 'github.com' 2>/dev/null")
+    expect(mockSsh.calls).toContain(`printf '%s\\n' '${scannedLine}' >> ~/.ssh/known_hosts`)
+  })
+
   it("apply persists only the scanned line that matches the configured trust anchor", async () => {
     const extraKey = makeHostKeyBuffer("ssh-rsa", Buffer.from("extra-host-key"))
     const extraLine = `|1|hashed-host|hashed-extra ssh-rsa ${extraKey.toString("base64")}`
@@ -209,6 +239,16 @@ describe("ssh.knownHosts", () => {
     const result = await mod.apply(mockSsh, emptyEnv)
     expect(result.status).toBe("changed")
     expect(mockSsh.calls).toContain("ssh-keygen -R 'github.com'")
+  })
+
+  it("apply removes a non-standard-port host entry via a bracketed ssh-keygen -R target", async () => {
+    const mockSsh = createMockSsh()
+    const mod = ssh.knownHosts("github.com", { port: 2222, state: "absent" })
+
+    const result = await mod.apply(mockSsh, emptyEnv)
+
+    expect(result.status).toBe("changed")
+    expect(mockSsh.calls).toContain("ssh-keygen -R '[github.com]:2222'")
   })
 
   it("apply returns failed when ssh is null", async () => {

@@ -244,10 +244,10 @@ Import with renaming: `import { package as pkg } from "paratix/modules"`. The wo
 
 ### `ssh`
 
-| Method               | Signature                                                                          | Idempotent |
-| -------------------- | ---------------------------------------------------------------------------------- | ---------- |
-| `ssh.authorizedKeys` | `(user: string, key: string, options?: { state?: "absent" \| "present" }): Module` | Yes        |
-| `ssh.knownHosts`     | `(host: string, options?: { state?: "absent" \| "present" }): Module`              | Yes        |
+| Method               | Signature                                                                                                                              | Idempotent |
+| -------------------- | -------------------------------------------------------------------------------------------------------------------------------------- | ---------- |
+| `ssh.authorizedKeys` | `(user: string, key: string, options?: { state?: "absent" \| "present" }): Module`                                                     | Yes        |
+| `ssh.knownHosts`     | `(host: string, options?: { expectedFingerprint?: string; port?: number; publicKey?: string; state?: "absent" \| "present" }): Module` | Yes        |
 
 ### `sshd`
 
