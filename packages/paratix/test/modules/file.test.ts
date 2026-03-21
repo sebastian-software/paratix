@@ -517,6 +517,53 @@ describe("file.template", () => {
     }
   })
 
+  it("check returns needs-apply when template mode differs despite identical rendered content", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "paratix-test-"))
+    try {
+      const templatePath = join(dir, "template.txt")
+      writeFileSync(templatePath, "Hello World")
+      const renderedHash = sha256Hex("Hello World")
+
+      const ssh = createMockSsh({
+        "[ -e '/remote/out.txt' ]": { code: 0 },
+        "[ -f '/remote/out.txt' ]": { code: 0 },
+        "sha256sum '/remote/out.txt'": { stdout: `${renderedHash}  /remote/out.txt` },
+        "stat -c '%a %U %G' '/remote/out.txt'": { stdout: "644 root root" },
+      })
+
+      const mod = file.template("/remote/out.txt", templatePath, { mode: "0600" })
+      const result = await mod.check(ssh, emptyEnv)
+      expect(result).toBe("needs-apply")
+    } finally {
+      rmSync(dir, { recursive: true })
+    }
+  })
+
+  it("check returns needs-apply when template owner differs despite identical rendered content", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "paratix-test-"))
+    try {
+      const templatePath = join(dir, "template.txt")
+      writeFileSync(templatePath, "Hello World")
+      const renderedHash = sha256Hex("Hello World")
+
+      const ssh = createMockSsh({
+        "[ -e '/remote/out.txt' ]": { code: 0 },
+        "[ -f '/remote/out.txt' ]": { code: 0 },
+        "sha256sum '/remote/out.txt'": { stdout: `${renderedHash}  /remote/out.txt` },
+        "stat -c '%a %U %G' '/remote/out.txt'": { stdout: "600 root root" },
+      })
+
+      const mod = file.template("/remote/out.txt", templatePath, {
+        mode: "0600",
+        owner: "www-data:www-data",
+      })
+      const result = await mod.check(ssh, emptyEnv)
+      expect(result).toBe("needs-apply")
+    } finally {
+      rmSync(dir, { recursive: true })
+    }
+  })
+
   it("check returns needs-apply when ssh is null", async () => {
     const dir = mkdtempSync(join(tmpdir(), "paratix-test-"))
     try {

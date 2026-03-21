@@ -46,6 +46,19 @@ function splitLines(content: string): string[] {
   return content.split(/\r?\n/v)
 }
 
+async function templateStateMatches(input: {
+  options?: { mode?: string; owner?: string }
+  remotePath: string
+  rendered: string
+  ssh: SshConnection
+}): Promise<boolean> {
+  const remoteHash = await input.ssh.sha256(input.remotePath)
+  const localHash = sha256String(input.rendered)
+  if (!hexHashesEqual(remoteHash, localHash)) return false
+
+  return ownershipMatches(await readOwnership(input.ssh, input.remotePath), input.options)
+}
+
 /**
  * Modules for managing remote files and directories.
  *
@@ -289,9 +302,9 @@ export const file = {
         const rendered = await renderTemplate(templateContent, environment, {
           strict: options?.strict,
         })
-        const localHash = sha256String(rendered)
-        const remoteHash = await ssh.sha256(remotePath)
-        return hexHashesEqual(remoteHash, localHash) ? "ok" : NEEDS_APPLY
+        return (await templateStateMatches({ options, remotePath, rendered, ssh }))
+          ? "ok"
+          : NEEDS_APPLY
       },
       name: `file.template: ${remotePath}`,
     }
