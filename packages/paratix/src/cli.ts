@@ -1,6 +1,7 @@
 import { Command } from "commander"
 import { resolve } from "node:path"
 import { pathToFileURL } from "node:url"
+import { inspect } from "node:util"
 import pc from "picocolors"
 
 import type { Environment, ServerDefinition } from "./types.js"
@@ -148,7 +149,13 @@ function validateServerDefinition(value: unknown, file: string): asserts value i
  */
 function errorToString(value: unknown): string {
   if (value instanceof Error) return value.message
-  if (typeof value === "object" && value !== null) return JSON.stringify(value)
+  if (typeof value === "object" && value !== null) {
+    try {
+      return JSON.stringify(value)
+    } catch {
+      return inspect(value, { breakLength: Infinity, depth: 5 })
+    }
+  }
   return String(value)
 }
 

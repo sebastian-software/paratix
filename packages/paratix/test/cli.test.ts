@@ -826,6 +826,31 @@ describe("printExceptionError", () => {
     expect(errorSpy).toHaveBeenCalledWith('Error: {"code":404}')
   })
 
+  it("does not crash on circular non-Error objects and falls back to a safe representation", () => {
+    const circular = { label: "loop" } as { label: string; self?: unknown }
+    circular.self = circular
+
+    expect(() => {
+      printExceptionError(circular, false)
+    }).not.toThrow()
+
+    const output = errorSpy.mock.calls.map((args) => String(args[0])).join("\n")
+    expect(output).toContain("Error:")
+    expect(output).toContain("loop")
+    expect(output).toContain("Circular")
+  })
+
+  it("does not crash on non-Error objects containing BigInt and falls back to a safe representation", () => {
+    expect(() => {
+      printExceptionError({ count: 1n }, false)
+    }).not.toThrow()
+
+    const output = errorSpy.mock.calls.map((args) => String(args[0])).join("\n")
+    expect(output).toContain("Error:")
+    expect(output).toContain("count")
+    expect(output).toContain("1n")
+  })
+
   it("prints a single cause when the error has one cause", () => {
     const cause = new Error("root cause")
     const error = new Error("top-level error", { cause })
@@ -849,6 +874,22 @@ describe("printExceptionError", () => {
     error.cause = "string cause"
     printExceptionError(error, false)
     expect(errorSpy).toHaveBeenCalledWith("  Caused by: string cause")
+  })
+
+  it("does not crash on circular object causes and prints a safe fallback", () => {
+    const cause = { kind: "cycle" } as { kind: string; self?: unknown }
+    cause.self = cause
+    const error = new Error("top-level error")
+    error.cause = cause
+
+    expect(() => {
+      printExceptionError(error, false)
+    }).not.toThrow()
+
+    const output = errorSpy.mock.calls.map((args) => String(args[0])).join("\n")
+    expect(output).toContain("  Caused by:")
+    expect(output).toContain("cycle")
+    expect(output).toContain("Circular")
   })
 
   it("does not print a stack trace without --verbose", () => {
