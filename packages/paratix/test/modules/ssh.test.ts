@@ -401,13 +401,42 @@ describe("ssh.authorizedKeys", () => {
     )
     expect(mockSsh.calls).toContain("mktemp /run/paratix/authorized-keys.XXXXXX")
     expect(mockSsh.calls).toContain(
-      `{ if [ -f ${aliceKeys} ]; then cat ${aliceKeys}; fi; printf '%s\\n' '${testKey}'; } > '${tempPath}'`
+      `{ if [ -f ${aliceKeys} ]; then cat ${aliceKeys}; grep -qxF -- '${testKey}' ${aliceKeys} || printf '%s\\n' '${testKey}'; else printf '%s\\n' '${testKey}'; fi; } > '${tempPath}'`
     )
     expect(mockSsh.calls).not.toContain(`printf '%s\\n' '${testKey}' >> ${aliceKeys}`)
     expect(mockSsh.calls).toContain(
       `chmod 600 '${tempPath}' && chown 'alice':'alice' '${tempPath}' && mv '${tempPath}' ${aliceKeys} && chmod 600 ${aliceKeys} && chown 'alice':'alice' ${aliceKeys}`
     )
     expect(mockSsh.calls).toContain(`rm -f '${tempPath}'`)
+  })
+
+  it("regression: apply does not append a duplicate key when only permissions have drifted", async () => {
+    const mockSsh = createMockSsh(
+      aliceResponses({
+        "[ -e '/home/alice/.ssh' ]": { code: 0 },
+        "[ -e '/home/alice/.ssh/authorized_keys' ]": { code: 0 },
+        "[ -L '/home/alice/.ssh/authorized_keys' ]": { code: 1 },
+        [`grep -qF -- '${testKey}' ${aliceKeys}`]: { code: 0 },
+        "mktemp /run/paratix/authorized-keys.XXXXXX": { stdout: tempPath },
+        "stat -c '%a %U %G %F' '/home/alice/.ssh'": { stdout: "700 alice alice directory" },
+        "stat -c '%a %U %G %F' '/home/alice/.ssh/authorized_keys'": {
+          stdout: "644 alice alice regular file",
+        },
+      })
+    )
+    const mod = ssh.authorizedKeys("alice", testKey)
+
+    const checkResult = await mod.check(mockSsh, emptyEnv)
+    expect(checkResult).toBe("needs-apply")
+
+    const applyResult = await mod.apply(mockSsh, emptyEnv)
+    expect(applyResult.status).toBe("changed")
+    expect(mockSsh.calls).toContain(
+      `{ if [ -f ${aliceKeys} ]; then cat ${aliceKeys}; grep -qxF -- '${testKey}' ${aliceKeys} || printf '%s\\n' '${testKey}'; else printf '%s\\n' '${testKey}'; fi; } > '${tempPath}'`
+    )
+    expect(mockSsh.calls).not.toContain(
+      `{ if [ -f ${aliceKeys} ]; then cat ${aliceKeys}; fi; printf '%s\\n' '${testKey}'; } > '${tempPath}'`
+    )
   })
 
   it("apply removes key with grep -vF || true pattern (state: absent)", async () => {
@@ -572,7 +601,7 @@ describe("ssh.authorizedKeys", () => {
     )
     // Temp rewrite command must quote the space-containing path
     expect(mockSsh.calls).toContain(
-      `{ if [ -f '/home/my user/.ssh/authorized_keys' ]; then cat '/home/my user/.ssh/authorized_keys'; fi; printf '%s\\n' '${testKey}'; } > '${tempPath}'`
+      `{ if [ -f '/home/my user/.ssh/authorized_keys' ]; then cat '/home/my user/.ssh/authorized_keys'; grep -qxF -- '${testKey}' '/home/my user/.ssh/authorized_keys' || printf '%s\\n' '${testKey}'; else printf '%s\\n' '${testKey}'; fi; } > '${tempPath}'`
     )
     // Chmod must quote the space-containing path
     expect(mockSsh.calls).toContain(
