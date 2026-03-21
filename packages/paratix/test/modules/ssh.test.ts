@@ -66,7 +66,7 @@ describe("ssh.knownHosts", () => {
     expect(result).toBe("needs-apply")
   })
 
-  it("check returns needs-apply when known_hosts also contains an unpinned key for the same host", async () => {
+  it("check returns ok when known_hosts contains the pinned key plus additional keys for the same host", async () => {
     const extraKey = makeHostKeyBuffer("ssh-rsa", Buffer.from("extra-host-key"))
     const extraLine = `|1|hashed-host|hashed-extra ssh-rsa ${extraKey.toString("base64")}`
     const mockSsh = createMockSsh({
@@ -76,7 +76,33 @@ describe("ssh.knownHosts", () => {
 
     const result = await mod.check(mockSsh, emptyEnv)
 
-    expect(result).toBe("needs-apply")
+    expect(result).toBe("ok")
+  })
+
+  it("check returns ok when an older entry exists as long as one line matches the expected fingerprint", async () => {
+    const driftedKey = makeHostKeyBuffer("ssh-ed25519", Buffer.from("drifted-host-key"))
+    const driftedLine = `|1|hashed-host|hashed-old ssh-ed25519 ${driftedKey.toString("base64")}`
+    const mockSsh = createMockSsh({
+      "ssh-keygen -F 'github.com'": { code: 0, stdout: `${driftedLine}\n${scannedLine}\n` },
+    })
+    const mod = ssh.knownHosts("github.com", { expectedFingerprint: hostFingerprint })
+
+    const result = await mod.check(mockSsh, emptyEnv)
+
+    expect(result).toBe("ok")
+  })
+
+  it("check returns ok when another algorithm exists as long as one line matches the expected public key", async () => {
+    const extraKey = makeHostKeyBuffer("ssh-rsa", Buffer.from("legacy-rsa-key"))
+    const extraLine = `|1|hashed-host|hashed-rsa ssh-rsa ${extraKey.toString("base64")}`
+    const mockSsh = createMockSsh({
+      "ssh-keygen -F 'github.com'": { code: 0, stdout: `${extraLine}\n${scannedLine}\n` },
+    })
+    const mod = ssh.knownHosts("github.com", { publicKey: hostPublicKey })
+
+    const result = await mod.check(mockSsh, emptyEnv)
+
+    expect(result).toBe("ok")
   })
 
   it("check returns needs-apply when host is not known (state: present)", async () => {

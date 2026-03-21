@@ -96,7 +96,7 @@ async function hasMatchingKnownHostTrustAnchor(
 
   if (knownHostLines.length === 0) return false
 
-  return knownHostLines.every((line) => lineMatchesTrustAnchor(line, options))
+  return knownHostLines.some((line) => lineMatchesTrustAnchor(line, options))
 }
 
 /**
