@@ -8,7 +8,7 @@ import { Client, type ClientChannel } from "ssh2"
 
 import type { ExecOptions, ExecResult, SshConfig, SshConnection } from "./types.js"
 
-import { buildHostVerifier, HostKeyVerificationError } from "./knownHosts.js"
+import { buildHostVerifier, extractAlgoFromKey, HostKeyVerificationError } from "./knownHosts.js"
 import { sftpDownload, sftpUpload } from "./sftp.js"
 import {
   collectStreamOutput,
@@ -86,6 +86,7 @@ export class SshConnectionImpl implements SshConnection {
   private readonly runtime: SshRuntimeState
   private sudoProbePromise: null | Promise<void> = null
   private sudoReady = false
+  private verifiedHostKey: Buffer | null = null
 
   public constructor(host: string, config: SshConfig) {
     this.runtime = {
@@ -184,6 +185,10 @@ export class SshConnectionImpl implements SshConnection {
           ? expandHomePath(this.config.privateKey)
           : undefined,
       user: this.config.user,
+      verifiedHostPublicKey:
+        this.verifiedHostKey == null
+          ? undefined
+          : `${extractAlgoFromKey(this.verifiedHostKey)} ${this.verifiedHostKey.toString("base64")}`,
     }
   }
 
@@ -826,6 +831,7 @@ trap - EXIT
       if (original != null) {
         const accepted = original(key)
         if (!accepted) return false
+        this.verifiedHostKey ??= Buffer.from(key)
       }
       this.pinnedHostKey ??= Buffer.from(key)
       return true

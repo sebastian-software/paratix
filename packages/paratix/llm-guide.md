@@ -230,17 +230,21 @@ Import with renaming: `import { package as pkg } from "paratix/modules"`. The wo
 | ------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------- |
 | `rsync.sync` | `(options: { src: string; dest: string; chmod?: string; delete?: boolean; exclude?: string[]; group?: string; include?: string[]; owner?: string; strictHostKeyChecking?: "accept-new" \| "no" \| "off" \| "yes" }): Module` | Yes        |
 
+When the active Paratix SSH session already verified the host via `ssh.expectedHostFingerprint`
+or `ssh.expectedHostPublicKey`, `rsync.sync()` reuses that verified host key for the external
+rsync SSH process and does not depend on a local `known_hosts` entry.
+
 ### `service`
 
-| Method             | Signature                | Idempotent                                                             |
-| ------------------ | ------------------------ | ---------------------------------------------------------------------- |
-| `service.running`  | `(name: string): Module` | Yes                                                                    |
-| `service.stopped`  | `(name: string): Module` | Yes                                                                    |
-| `service.enabled`  | `(name: string): Module` | Yes                                                                    |
-| `service.disabled` | `(name: string): Module` | Yes                                                                    |
-| `service.restart`  | `(name: string): Module` | No (always-applies, use as signal)                                     |
-| `service.reload`   | `(name: string): Module` | No (always-applies, use as signal)                                     |
-| `service.facts`    | `(): Module`             | Yes (check returns `"ok"`, apply collects facts into `service.*` meta) |
+| Method             | Signature                | Idempotent                                                |
+| ------------------ | ------------------------ | --------------------------------------------------------- |
+| `service.running`  | `(name: string): Module` | Yes                                                       |
+| `service.stopped`  | `(name: string): Module` | Yes                                                       |
+| `service.enabled`  | `(name: string): Module` | Yes                                                       |
+| `service.disabled` | `(name: string): Module` | Yes                                                       |
+| `service.restart`  | `(name: string): Module` | No (always-applies, use as signal)                        |
+| `service.reload`   | `(name: string): Module` | No (always-applies, use as signal)                        |
+| `service.facts`    | `(): Module`             | No (always-applies, collects facts into `service.*` meta) |
 
 ### `ssh`
 

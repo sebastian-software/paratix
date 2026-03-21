@@ -174,6 +174,7 @@ export type SshConnection = {
     port: number
     privateKeyPath?: string
     user: string
+    verifiedHostPublicKey?: string
   }
   /** Run a command and return stdout split into lines. */
   lines: (command: string) => Promise<string[]>

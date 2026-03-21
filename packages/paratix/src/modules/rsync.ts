@@ -1,4 +1,8 @@
 import { execFile, type ExecFileException } from "node:child_process"
+import { randomUUID } from "node:crypto"
+import { unlinkSync, writeFileSync } from "node:fs"
+import { tmpdir } from "node:os"
+import { join } from "node:path"
 
 import { failed } from "../moduleFailure.js"
 import { shellQuote } from "../ssh.js"
@@ -6,6 +10,7 @@ import { CommandError } from "../sshHelpers.js"
 import { type Module, type ModuleResult, NEEDS_APPLY, type SshConnection } from "../types.js"
 
 type RsyncPhase = "apply" | "check"
+const DEFAULT_SSH_PORT = 22
 
 type SyncOptions = {
   /** Permission mode applied via `--chmod`, e.g. `"Du=rwx,go=rx,Fu=rw,go=r"`. */
@@ -99,6 +104,34 @@ function buildRemoteSpec(
   return `${connectionInfo.user}@${remoteHost}:${destination}`
 }
 
+function formatKnownHostsLabel(host: string, port: number): string {
+  return port === DEFAULT_SSH_PORT ? host : `[${host}]:${port}`
+}
+
+function createVerifiedKnownHostsFile(connectionInfo: {
+  host: string
+  port: number
+  verifiedHostPublicKey?: string
+}): null | string {
+  if (connectionInfo.verifiedHostPublicKey == null) return null
+
+  const filePath = join(tmpdir(), `paratix-rsync-known-hosts-${randomUUID()}`)
+  const content = `${formatKnownHostsLabel(connectionInfo.host, connectionInfo.port)} ${connectionInfo.verifiedHostPublicKey}\n`
+  // eslint-disable-next-line security/detect-non-literal-fs-filename
+  writeFileSync(filePath, content, { mode: 0o600 })
+  return filePath
+}
+
+function cleanupVerifiedKnownHostsFile(path: null | string): void {
+  if (path == null) return
+  try {
+    // eslint-disable-next-line security/detect-non-literal-fs-filename
+    unlinkSync(path)
+  } catch {
+    // local cleanup is best-effort
+  }
+}
+
 /**
  * Assemble the full rsync argument list for a transfer.
  *
@@ -108,19 +141,20 @@ function buildRemoteSpec(
  * Use `strictHostKeyChecking: "accept-new"` for explicit TOFU when
  * first-time connections must be auto-accepted.
  *
- * @param options - Sync options describing source, destination, and filters.
- * @param connectionInfo - SSH connection details obtained from `SshConnection.getConnectionInfo`.
- * @param connectionInfo.agentSocket - SSH agent socket path (`SSH_AUTH_SOCK`), used when no private key is configured.
- * @param connectionInfo.authMethod - Authentication method that established the current SSH session.
- * @param connectionInfo.host - The remote host address.
- * @param connectionInfo.port - The SSH port number.
- * @param connectionInfo.privateKeyPath - Absolute path to the SSH private key.
- * @param connectionInfo.user - The SSH username.
- * @param dryRun - When `true`, adds `--dry-run` so no files are transferred.
+ * @param parameters - Argument bundle for the rsync command construction.
+ * @param parameters.options - Sync options describing source, destination, and filters.
+ * @param parameters.connectionInfo - SSH connection details obtained from `SshConnection.getConnectionInfo`.
+ * @param parameters.connectionInfo.agentSocket - SSH agent socket path (`SSH_AUTH_SOCK`), used when no private key is configured.
+ * @param parameters.connectionInfo.authMethod - Authentication method that established the current SSH session.
+ * @param parameters.connectionInfo.host - The remote host address.
+ * @param parameters.connectionInfo.port - The SSH port number.
+ * @param parameters.connectionInfo.privateKeyPath - Absolute path to the SSH private key.
+ * @param parameters.connectionInfo.user - The SSH username.
+ * @param parameters.dryRun - When `true`, adds `--dry-run` so no files are transferred.
+ * @param parameters.verifiedKnownHostsPath - Optional temporary known_hosts file containing the verified session host key.
  * @returns The complete list of arguments to pass to the `rsync` binary.
  */
-function buildArguments(
-  options: SyncOptions,
+function buildArguments(parameters: {
   connectionInfo: {
     agentSocket?: string
     authMethod?: "agent" | "password" | "privateKey"
@@ -128,9 +162,12 @@ function buildArguments(
     port: number
     privateKeyPath?: string
     user: string
-  },
+  }
   dryRun: boolean
-): string[] {
+  options: SyncOptions
+  verifiedKnownHostsPath?: string
+}): string[] {
+  const { connectionInfo, dryRun, options, verifiedKnownHostsPath } = parameters
   const result: string[] = ["-az", "--itemize-changes"]
 
   if (dryRun) {
@@ -143,9 +180,15 @@ function buildArguments(
   } else if (connectionInfo.agentSocket != null) {
     sshFlags = ` -o IdentityAgent=${shellQuote(connectionInfo.agentSocket)}`
   }
+  const strictHostKeyChecking =
+    verifiedKnownHostsPath == null ? (options.strictHostKeyChecking ?? "yes") : "yes"
+  const knownHostsFlags =
+    verifiedKnownHostsPath == null
+      ? ""
+      : ` -o UserKnownHostsFile=${shellQuote(verifiedKnownHostsPath)} -o GlobalKnownHostsFile=/dev/null`
   result.push(
     "-e",
-    `ssh -p ${connectionInfo.port}${sshFlags} -o StrictHostKeyChecking=${options.strictHostKeyChecking ?? "yes"}`
+    `ssh -p ${connectionInfo.port}${sshFlags}${knownHostsFlags} -o StrictHostKeyChecking=${strictHostKeyChecking}`
   )
   result.push(...buildFilterArguments(options))
   result.push(...buildOwnershipArguments(options))
@@ -200,24 +243,34 @@ async function executeRsync(parameters: {
       `[rsync.sync] ${phase} requires agent or private-key SSH authentication; password fallback sessions are not supported`
     )
   }
-  const rsyncArguments = buildArguments(options, connectionInfo, dryRun)
-
-  return new Promise((resolve, reject) => {
-    execFile("rsync", rsyncArguments, (error: ExecFileException | null, stdout, stderr) => {
-      if (error != null) {
-        reject(
-          createRsyncError(options, phase, {
-            code: error.code ?? undefined,
-            error,
-            stderr,
-            stdout,
-          })
-        )
-        return
-      }
-      resolve(stdout)
-    })
+  const verifiedKnownHostsPath = createVerifiedKnownHostsFile(connectionInfo)
+  const rsyncArguments = buildArguments({
+    connectionInfo,
+    dryRun,
+    options,
+    verifiedKnownHostsPath: verifiedKnownHostsPath ?? undefined,
   })
+
+  try {
+    return await new Promise((resolve, reject) => {
+      execFile("rsync", rsyncArguments, (error: ExecFileException | null, stdout, stderr) => {
+        if (error != null) {
+          reject(
+            createRsyncError(options, phase, {
+              code: error.code ?? undefined,
+              error,
+              stderr,
+              stdout,
+            })
+          )
+          return
+        }
+        resolve(stdout)
+      })
+    })
+  } finally {
+    cleanupVerifiedKnownHostsFile(verifiedKnownHostsPath)
+  }
 }
 
 /**

@@ -2622,6 +2622,38 @@ describe("SshConnectionImpl", () => {
       )
     })
 
+    it("exposes the verified host public key when a verifier-backed session accepts the host key", async () => {
+      const algorithm = Buffer.from("ssh-ed25519")
+      const algorithmLength = Buffer.alloc(4)
+      algorithmLength.writeUInt32BE(algorithm.length)
+      const acceptedHostKey = Buffer.concat([
+        algorithmLength,
+        algorithm,
+        Buffer.from("accepted-host-key"),
+      ])
+      const { buildHostVerifier } = await import("../src/knownHosts.js")
+      vi.mocked(buildHostVerifier).mockReturnValue({
+        hostVerifier: vi.fn().mockReturnValue(true),
+      })
+      vi.mocked(tryConnectOnPort).mockImplementationOnce(async ({ hostVerifier }) => {
+        hostVerifier?.(acceptedHostKey)
+        await Promise.resolve()
+      })
+
+      const ssh = new SshConnectionImpl("1.2.3.4", {
+        expectedHostFingerprint: "SHA256:trusted-fingerprint",
+        ports: [22],
+        privateKey: "/dev/null",
+        user: "root",
+      })
+
+      await ssh.connect()
+
+      expect(ssh.getConnectionInfo().verifiedHostPublicKey).toBe(
+        `ssh-ed25519 ${acceptedHostKey.toString("base64")}`
+      )
+    })
+
     it("passes a wrapped hostVerifier that delegates to buildHostVerifier's verifier", async () => {
       const fakeVerifier = vi.fn().mockReturnValue(true)
       const { buildHostVerifier } = await import("../src/knownHosts.js")
@@ -2695,6 +2727,27 @@ describe("SshConnectionImpl", () => {
       ]
       // The wrapper is always present for host-key pinning, even without an original verifier
       expect(callArgs.hostVerifier).toBeTypeOf("function")
+    })
+
+    it("does not expose a verified host public key when no verifier-backed trust check ran", async () => {
+      const hostKey = Buffer.from("accepted-without-verifier")
+      const { buildHostVerifier } = await import("../src/knownHosts.js")
+      vi.mocked(buildHostVerifier).mockReturnValue({})
+      vi.mocked(tryConnectOnPort).mockImplementationOnce(async ({ hostVerifier }) => {
+        hostVerifier?.(hostKey)
+        await Promise.resolve()
+      })
+
+      const ssh = new SshConnectionImpl("1.2.3.4", {
+        ports: [22],
+        privateKey: "/dev/null",
+        strictHostKeyChecking: "no",
+        user: "root",
+      })
+
+      await ssh.connect()
+
+      expect(ssh.getConnectionInfo().verifiedHostPublicKey).toBeUndefined()
     })
 
     it("awaits pendingPersist when accept-new sets it during host verification", async () => {

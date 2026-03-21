@@ -1,16 +1,30 @@
 import { execFile } from "node:child_process"
+import { randomUUID } from "node:crypto"
+import { unlinkSync, writeFileSync } from "node:fs"
 import { beforeEach, describe, expect, it, vi } from "vitest"
 
 import { rsync } from "../../src/modules/rsync.js"
 import { CommandError } from "../../src/sshHelpers.js"
 import { createMockSsh } from "../helpers/mockSsh.js"
 
+vi.mock("node:crypto", () => ({
+  randomUUID: vi.fn().mockReturnValue("known-hosts-test"),
+}))
+
 vi.mock("node:child_process", () => ({
   execFile: vi.fn(),
 }))
 
+vi.mock("node:fs", () => ({
+  unlinkSync: vi.fn(),
+  writeFileSync: vi.fn(),
+}))
+
 const emptyEnv = {}
 const mockExecFile = vi.mocked(execFile)
+const mockRandomUUID = vi.mocked(randomUUID)
+const mockUnlinkSync = vi.mocked(unlinkSync)
+const mockWriteFileSync = vi.mocked(writeFileSync)
 
 // ---------------------------------------------------------------------------
 // Helpers — centralize mock setup to avoid repetitive eslint-disable lines
@@ -198,6 +212,9 @@ describe("rsync.sync — argument building", () => {
   beforeEach(() => {
     mockExecFile.mockReset()
     mockSuccess()
+    mockRandomUUID.mockReturnValue("known-hosts-test")
+    mockUnlinkSync.mockReset()
+    mockWriteFileSync.mockReset()
   })
 
   it("includes -az and --itemize-changes as base flags", async () => {
@@ -223,6 +240,36 @@ describe("rsync.sync — argument building", () => {
     expect(transportArg).toContain("-p 22")
     expect(transportArg).toContain("-i '~/.ssh/id'")
     expect(transportArg).toContain("-o StrictHostKeyChecking=yes")
+  })
+
+  it("uses a temporary verified known_hosts file for a pinned session host key", async () => {
+    const mockSsh = createMockSsh()
+    vi.spyOn(mockSsh, "getConnectionInfo").mockReturnValue({
+      host: "1.2.3.4",
+      port: 22,
+      privateKeyPath: "~/.ssh/id",
+      user: "root",
+      verifiedHostPublicKey: "ssh-ed25519 AAAAPINNEDKEY",
+    })
+    const mod = rsync.sync({ dest: "/remote/dest", src: "/local/src", strictHostKeyChecking: "no" })
+
+    await mod.apply(mockSsh, emptyEnv)
+
+    expect(mockWriteFileSync).toHaveBeenCalledWith(
+      expect.stringContaining("/paratix-rsync-known-hosts-known-hosts-test"),
+      "1.2.3.4 ssh-ed25519 AAAAPINNEDKEY\n",
+      { mode: 0o600 }
+    )
+    const args = getArgs()
+    const eIdx = args.indexOf("-e")
+    const transportArg = args[eIdx + 1]
+    expect(transportArg).toContain("UserKnownHostsFile='")
+    expect(transportArg).toContain("paratix-rsync-known-hosts-known-hosts-test")
+    expect(transportArg).toContain("-o GlobalKnownHostsFile=/dev/null")
+    expect(transportArg).toContain("-o StrictHostKeyChecking=yes")
+    expect(mockUnlinkSync).toHaveBeenCalledWith(
+      expect.stringContaining("/paratix-rsync-known-hosts-known-hosts-test")
+    )
   })
 
   it("wraps privateKeyPath with single quotes to prevent shell expansion of special characters", async () => {
@@ -253,6 +300,32 @@ describe("rsync.sync — argument building", () => {
     const eIdx = args.indexOf("-e")
     const transportArg = args[eIdx + 1]
     expect(transportArg).toContain("-o StrictHostKeyChecking=no")
+  })
+
+  it("does not rely on a local known_hosts entry when the session exports a verified host key", async () => {
+    const mockSsh = createMockSsh()
+    vi.spyOn(mockSsh, "getConnectionInfo").mockReturnValue({
+      host: "fresh-host.example",
+      port: 22,
+      privateKeyPath: "~/.ssh/id",
+      user: "root",
+      verifiedHostPublicKey: "ssh-ed25519 AAAAFRESHKEY",
+    })
+    const mod = rsync.sync({ dest: "/remote/dest", src: "/local/src" })
+
+    await mod.check(mockSsh, emptyEnv)
+
+    expect(mockWriteFileSync).toHaveBeenCalledWith(
+      expect.stringContaining("/paratix-rsync-known-hosts-known-hosts-test"),
+      "fresh-host.example ssh-ed25519 AAAAFRESHKEY\n",
+      { mode: 0o600 }
+    )
+    const args = getArgs()
+    const eIdx = args.indexOf("-e")
+    const transportArg = args[eIdx + 1]
+    expect(transportArg).toContain("UserKnownHostsFile='")
+    expect(transportArg).toContain("paratix-rsync-known-hosts-known-hosts-test")
+    expect(transportArg).toContain("-o GlobalKnownHostsFile=/dev/null")
   })
 
   it("passes StrictHostKeyChecking=yes to ssh transport when set to yes", async () => {
