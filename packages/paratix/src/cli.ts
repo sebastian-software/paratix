@@ -15,6 +15,7 @@ declare const PACKAGE_VERSION: string
 const SECONDS_TO_MS = 1000
 const DEFAULT_RECONNECT_TIMEOUT_SECONDS = 300
 const ENVIRONMENT_KEY_PATTERN = /^[A-Za-z_]\w*$/v
+const FIRST_RUN_ENV_NAME = "PARATIX_FIRST_RUN"
 
 /**
  * Type guard that checks whether `value` has the shape of a
@@ -231,6 +232,46 @@ export function isDirectCliExecution(moduleUrl: string, candidateEntryScript?: s
   return realpathSync(fileURLToPath(moduleUrl)) === realpathSync(candidateEntryScript)
 }
 
+export function applyCliEnvironmentOverrides(
+  environment: Environment,
+  options: { firstRun: boolean }
+): Environment {
+  if (!options.firstRun) return environment
+  return { ...environment, [FIRST_RUN_ENV_NAME]: "true" }
+}
+
+export function applyCliProcessEnvironment(options: { firstRun: boolean }): void {
+  if (!options.firstRun) return
+  process.env[FIRST_RUN_ENV_NAME] = "true"
+}
+
+export async function loadServerDefinitionFromFile(
+  file: string,
+  options: { firstRun: boolean }
+): Promise<ServerDefinition> {
+  const filePath = resolve(file)
+  const fileUrl = pathToFileURL(filePath).href
+
+  applyCliProcessEnvironment(options)
+
+  // Register tsx for TypeScript imports
+  await import("tsx/esm/api")
+    .then((tsx: { register: () => void }) => {
+      tsx.register()
+    })
+    .catch(() => {
+      handleTsxLoadFailure(filePath)
+    })
+
+  // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment -- Dynamic import has unknown shape
+  const imported = await import(fileUrl)
+  // eslint-disable-next-line @typescript-eslint/no-unsafe-member-access, @typescript-eslint/no-unsafe-type-assertion -- Accessing .default on dynamic import
+  const definition = (imported.default ?? imported) as ServerDefinition
+
+  validateServerDefinition(definition, filePath)
+  return definition
+}
+
 const program = new Command()
 
 program
@@ -248,6 +289,7 @@ program
   )
   .option("--env <key=value...>", "Set env values", collectEnvironment, {})
   .option("--env-file <path>", "Load dotenv file")
+  .option("--first-run", "Set PARATIX_FIRST_RUN=true before loading the playbook", false)
   .option(
     "--reconnect-timeout <seconds>",
     "SSH reconnect timeout",
@@ -257,32 +299,25 @@ program
   .option("--verbose", "Show full stack traces on error", false)
   .action(async (file: string, options: Record<string, unknown>) => {
     try {
-      const filePath = resolve(file)
-      const fileUrl = pathToFileURL(filePath).href
-
-      // Register tsx for TypeScript imports
-      await import("tsx/esm/api")
-        .then((tsx: { register: () => void }) => {
-          tsx.register()
-        })
-        .catch(() => {
-          handleTsxLoadFailure(filePath)
-        })
-
-      // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment -- Dynamic import has unknown shape
-      const imported = await import(fileUrl)
-      // eslint-disable-next-line @typescript-eslint/no-unsafe-member-access, @typescript-eslint/no-unsafe-type-assertion -- Accessing .default on dynamic import
-      const definition = (imported.default ?? imported) as ServerDefinition
-
-      validateServerDefinition(definition, filePath)
+      const environmentOverrides = applyCliEnvironmentOverrides(
+        // eslint-disable-next-line @typescript-eslint/no-unsafe-type-assertion -- Commander options typed as Record<string, unknown>
+        options.env as Environment,
+        {
+          // eslint-disable-next-line @typescript-eslint/no-unsafe-type-assertion -- Commander options typed as Record<string, unknown>
+          firstRun: options.firstRun as boolean,
+        }
+      )
+      const definition = await loadServerDefinitionFromFile(file, {
+        // eslint-disable-next-line @typescript-eslint/no-unsafe-type-assertion -- Commander options typed as Record<string, unknown>
+        firstRun: options.firstRun as boolean,
+      })
 
       await runPlaybook(definition, {
         // eslint-disable-next-line @typescript-eslint/no-unsafe-type-assertion -- Commander options typed as Record<string, unknown>
         dryRun: options.dryRun as boolean,
         // eslint-disable-next-line @typescript-eslint/no-unsafe-type-assertion -- Commander options typed as Record<string, unknown>
         envFile: options.envFile as string | undefined,
-        // eslint-disable-next-line @typescript-eslint/no-unsafe-type-assertion -- Commander options typed as Record<string, unknown>
-        envOverrides: options.env as Environment,
+        envOverrides: environmentOverrides,
         // eslint-disable-next-line @typescript-eslint/no-unsafe-type-assertion -- Commander options typed as Record<string, unknown>
         reconnectTimeout: (options.reconnectTimeout as number) * SECONDS_TO_MS,
         // eslint-disable-next-line @typescript-eslint/no-unsafe-type-assertion -- Commander options typed as Record<string, unknown>

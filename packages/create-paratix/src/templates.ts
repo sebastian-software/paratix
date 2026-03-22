@@ -30,7 +30,7 @@ import { hostname, package as packages, service, ssh, sshd, ufw, user } from "pa
 
 ${adminUserDeclaration}
 const adminPublicKey = "ssh-ed25519 REPLACE_ME_WITH_YOUR_PUBLIC_KEY";
-const FIRST_RUN = true;
+const FIRST_RUN = process.env["PARATIX_FIRST_RUN"] === "true";
 const sshPorts = FIRST_RUN ? [22] : [2222];
 const firewallTcpPorts = FIRST_RUN ? [22, 2222, 80, 443] : [2222, 80, 443];
 const strictHostKeyChecking = FIRST_RUN ? "accept-new" : "yes";
@@ -42,8 +42,8 @@ export default server({
     ports: sshPorts,
     privateKey: "~/.ssh/id_ed25519", // "~" is expanded by Paratix
     // FIRST_RUN keeps the bootstrap path explicit:
-    // - true: connect on port 22 and allow explicit TOFU via "accept-new"
-    // - false: connect on port 2222 with strict host-key checking again
+    // - pass "paratix apply ... --first-run" for the bootstrap run
+    // - later runs omit that flag and go through port 2222 with strict host-key checking again
     strictHostKeyChecking,
     user: ${sshUser},
     // expectedHostFingerprint: "SHA256:REPLACE_ME_WITH_YOUR_HOST_FINGERPRINT",
@@ -109,8 +109,8 @@ function createBootstrapRootServerTemplate(): string {
 ${createAdminRecipe("bootstrap-admin-user")}
 ${createFirewallRecipe()}
     // Transitional bootstrap mode:
-    // 1. Run this once as root to create the dedicated admin user.
-    // 2. Set FIRST_RUN = false and switch ssh.user to admin.
+    // 1. Run this once as root with "--first-run" to create the dedicated admin user.
+    // 2. Later runs omit "--first-run" and switch ssh.user to admin.
     // 3. Replace PermitRootLogin with "no".
     recipe("ssh-hardening-transition", [
       sshd.port(2222),

@@ -6,11 +6,14 @@ import { pathToFileURL } from "node:url"
 import { afterEach, beforeEach, describe, expect, it, type MockInstance, vi } from "vitest"
 
 import {
+  applyCliEnvironmentOverrides,
+  applyCliProcessEnvironment,
   collectDefinitionErrors,
   collectEnvironment,
   handleTsxLoadFailure,
   isDirectCliExecution,
   isServerDefinitionLike,
+  loadServerDefinitionFromFile,
   parsePositiveNumber,
   printExceptionError,
 } from "../src/cli.js"
@@ -185,6 +188,39 @@ describe("collectEnvironment", () => {
     const first = collectEnvironment("KEY=original", {})
     const second = collectEnvironment("KEY=updated", first)
     expect(second).toStrictEqual({ KEY: "updated" })
+  })
+})
+
+describe("applyCliEnvironmentOverrides", () => {
+  it("returns the existing environment unchanged without --first-run", () => {
+    expect(applyCliEnvironmentOverrides({ EXISTING: "value" }, { firstRun: false })).toStrictEqual({
+      EXISTING: "value",
+    })
+  })
+
+  it("adds PARATIX_FIRST_RUN=true when --first-run is enabled", () => {
+    expect(applyCliEnvironmentOverrides({ EXISTING: "value" }, { firstRun: true })).toStrictEqual({
+      EXISTING: "value",
+      PARATIX_FIRST_RUN: "true",
+    })
+  })
+})
+
+describe("applyCliProcessEnvironment", () => {
+  afterEach(() => {
+    delete process.env.PARATIX_FIRST_RUN
+  })
+
+  it("leaves process.env unchanged without --first-run", () => {
+    applyCliProcessEnvironment({ firstRun: false })
+
+    expect(process.env.PARATIX_FIRST_RUN).toBeUndefined()
+  })
+
+  it("sets process.env.PARATIX_FIRST_RUN before playbook loading when --first-run is enabled", () => {
+    applyCliProcessEnvironment({ firstRun: true })
+
+    expect(process.env.PARATIX_FIRST_RUN).toBe("true")
   })
 })
 
@@ -1009,6 +1045,32 @@ describe("CLI entrypoint", () => {
       expect(String(error.stderr)).toContain("Missing property 'name'")
     } finally {
       rmSync(tempDirectory, { force: true, recursive: true })
+    }
+  })
+
+  it("sets PARATIX_FIRST_RUN before importing the playbook when --first-run is passed", async () => {
+    const tempDirectory = mkdtempSync(join(tmpdir(), "paratix-cli-first-run-"))
+    const playbookPath = join(tempDirectory, "capture-first-run.mjs")
+
+    try {
+      writeFileSync(
+        playbookPath,
+        [
+          "export default {",
+          "  name: 'test-server',",
+          "  host: '1.2.3.4',",
+          "  ssh: { user: 'root', ports: [22] },",
+          "  run: [process.env['PARATIX_FIRST_RUN'] ?? 'missing'],",
+          "}",
+        ].join("\n")
+      )
+
+      const definition = await loadServerDefinitionFromFile(playbookPath, { firstRun: true })
+
+      expect(definition.run).toStrictEqual(["true"])
+    } finally {
+      rmSync(tempDirectory, { force: true, recursive: true })
+      delete process.env.PARATIX_FIRST_RUN
     }
   })
 })

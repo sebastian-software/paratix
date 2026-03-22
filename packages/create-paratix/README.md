@@ -46,10 +46,10 @@ cd my-server
 
 **Step 3 -- Edit `server.ts`** with your actual server address, admin username, public key, and the modules you want to apply.
 
-The scaffold also includes an explicit `FIRST_RUN` bootstrap switch:
+The scaffold also includes an explicit bootstrap switch driven by `PARATIX_FIRST_RUN`:
 
-- first run: `FIRST_RUN = true` keeps SSH on port `22`, opens firewall port `22`, and uses `strictHostKeyChecking: "accept-new"`
-- later runs: set `FIRST_RUN = false` to switch the generated playbook to port `2222`, close SSH port `22` in the firewall, and return to strict host-key checking
+- first run: call `paratix apply ... --first-run`, which sets `PARATIX_FIRST_RUN=true`, keeps SSH on port `22`, opens firewall port `22`, and uses `strictHostKeyChecking: "accept-new"`
+- later runs: call `paratix apply ...` without `--first-run`, so the generated playbook switches to port `2222`, closes SSH port `22` in the firewall, and returns to strict host-key checking
 - the generated playbook still opens port `2222` before `sshd.port(2222)` runs, so the first real apply can reconnect safely
 
 **Step 4 -- Apply**
@@ -90,7 +90,7 @@ import { hostname, package as packages, service, ssh, sshd, ufw, user } from "pa
 
 const adminUser = "admin"
 const adminPublicKey = "ssh-ed25519 REPLACE_ME_WITH_YOUR_PUBLIC_KEY"
-const FIRST_RUN = true
+const FIRST_RUN = process.env["PARATIX_FIRST_RUN"] === "true"
 const sshPorts = FIRST_RUN ? [22] : [2222]
 const firewallTcpPorts = FIRST_RUN ? [22, 2222, 80, 443] : [2222, 80, 443]
 const strictHostKeyChecking = FIRST_RUN ? "accept-new" : "yes"
@@ -108,8 +108,8 @@ export default server({
     privateKey: "~/.ssh/id_ed25519", // "~" is expanded by Paratix
     user: adminUser,
     // FIRST_RUN keeps the bootstrap path explicit:
-    // - true: connect on port 22 and allow explicit TOFU via "accept-new"
-    // - false: connect on port 2222 with strict host-key checking again
+    // - pass `paratix apply ... --first-run` for the bootstrap run
+    // - later runs omit that flag and go through port 2222 with strict host-key checking again
     strictHostKeyChecking,
     // expectedHostFingerprint: "SHA256:REPLACE_ME_WITH_YOUR_HOST_FINGERPRINT",
     // expectedHostPublicKey: "ssh-ed25519 REPLACE_ME_WITH_YOUR_HOST_PUBLIC_KEY",
@@ -167,13 +167,14 @@ pnpm create paratix my-server --initial-user root
 pnpm create paratix my-server --initial-user deploy
 ```
 
-Wichtig für den ersten echten Lauf: Das Scaffold hält `FIRST_RUN` standardmäßig auf `true`. Dadurch bleibt der Bootstrap über Port `22` und `accept-new` explizit sichtbar. Nach dem ersten erfolgreichen Bootstrap setzt du `FIRST_RUN = false`; dann verwendet dasselbe Playbook Port `2222`, entfernt Port `22` aus der Firewall und kehrt zu strengem Host-Key-Checking zurück. Die Firewall-Freigabe für `2222` bleibt bewusst vor dem eigentlichen SSH-Portwechsel, damit Paratix nach `sshd.port(...)` sofort sicher reconnecten kann.
+Wichtig für den ersten echten Lauf: Das Scaffold liest `FIRST_RUN` aus `process.env.PARATIX_FIRST_RUN`. Für den Bootstrap rufst du Paratix explizit mit `--first-run` auf. Danach lässt du den Flag bei normalen Läufen weg; dann verwendet dasselbe Playbook Port `2222`, entfernt Port `22` aus der Firewall und kehrt zu strengem Host-Key-Checking zurück. Die Firewall-Freigabe für `2222` bleibt bewusst vor dem eigentlichen SSH-Portwechsel, damit Paratix nach `sshd.port(...)` sofort sicher reconnecten kann.
 
 ### Host-key bootstrap
 
-Paratix verwendet standardmäßig striktes Host-Key-Checking. Ein frisch erzeugtes `create-paratix`-Projekt koppelt das deshalb an `FIRST_RUN`:
+Paratix verwendet standardmäßig striktes Host-Key-Checking. Ein frisch erzeugtes `create-paratix`-Projekt koppelt das deshalb an `PARATIX_FIRST_RUN`:
 
 ```ts
+const FIRST_RUN = process.env["PARATIX_FIRST_RUN"] === "true"
 const strictHostKeyChecking = FIRST_RUN ? "accept-new" : "yes"
 ```
 
@@ -185,8 +186,8 @@ Das ist ein bewusst markierter Übergangsmodus für den ersten verifizierten Kon
 Empfohlener Ablauf:
 
 1. Verifiziere den Host-Key deines Servers out of band.
-2. Führe den ersten `apply:dry` und `apply` mit `FIRST_RUN = true` aus.
-3. Setze danach `FIRST_RUN = false`.
+2. Führe den ersten `apply:dry` und `apply` mit `--first-run` aus.
+3. Führe spätere Runs ohne `--first-run` aus.
 4. Optional: pinne zusätzlich `expectedHostFingerprint` oder `expectedHostPublicKey`.
 
 Key concepts:

@@ -309,7 +309,7 @@ describe("writeProjectFiles", () => {
     const content = readFileSync(join(TEST_DIR, "server.ts"), "utf8")
 
     expect(content).toContain('const adminUser = "admin";')
-    expect(content).toContain("const FIRST_RUN = true;")
+    expect(content).toContain('const FIRST_RUN = process.env["PARATIX_FIRST_RUN"] === "true";')
     expect(content).toContain("user: adminUser")
     expect(content).toContain("ssh.authorizedKeys(adminUser, adminPublicKey)")
     expect(content).toContain('PasswordAuthentication: "no"')
@@ -335,7 +335,7 @@ describe("writeProjectFiles", () => {
     const content = readFileSync(join(TEST_DIR, "server.ts"), "utf8")
 
     expect(content).toContain('const strictHostKeyChecking = FIRST_RUN ? "accept-new" : "yes";')
-    expect(content).toContain("FIRST_RUN keeps the bootstrap path explicit:")
+    expect(content).toContain('pass "paratix apply ... --first-run" for the bootstrap run')
     expect(content).toContain(
       'expectedHostFingerprint: "SHA256:REPLACE_ME_WITH_YOUR_HOST_FINGERPRINT"'
     )
@@ -358,6 +358,7 @@ describe("writeProjectFiles", () => {
 
     const content = readFileSync(join(TEST_DIR, "server.ts"), "utf8")
 
+    expect(content).toContain('const FIRST_RUN = process.env["PARATIX_FIRST_RUN"] === "true";')
     expect(content).toContain("const sshPorts = FIRST_RUN ? [22] : [2222];")
     expect(content).toContain(
       "const firewallTcpPorts = FIRST_RUN ? [22, 2222, 80, 443] : [2222, 80, 443];"
@@ -385,7 +386,7 @@ describe("writeProjectFiles", () => {
 
     expect(content).toContain('user: "root"')
     expect(content).toContain('const adminUser = "admin";')
-    expect(content).toContain("const FIRST_RUN = true;")
+    expect(content).toContain('const FIRST_RUN = process.env["PARATIX_FIRST_RUN"] === "true";')
     expect(content).toContain("Transitional bootstrap mode:")
     expect(content).toContain('PasswordAuthentication: "no"')
     expect(content).toContain('PermitRootLogin: "prohibit-password"')
