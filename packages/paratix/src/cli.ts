@@ -1,6 +1,7 @@
 import { Command } from "commander"
+import { realpathSync } from "node:fs"
 import { resolve } from "node:path"
-import { pathToFileURL } from "node:url"
+import { fileURLToPath, pathToFileURL } from "node:url"
 import { inspect } from "node:util"
 import pc from "picocolors"
 
@@ -212,6 +213,24 @@ export function handleTsxLoadFailure(filePath: string): void {
   }
 }
 
+/**
+ * Returns whether the current CLI module is the direct process entrypoint.
+ *
+ * This resolves symlinks on both sides so pnpm-style executable shims and
+ * symlinked `node_modules` entries still count as direct execution.
+ *
+ * @param moduleUrl - The current module URL, usually `import.meta.url`.
+ * @param candidateEntryScript - The process entry script path, usually `process.argv[1]`.
+ * @returns `true` when both paths resolve to the same file on disk.
+ */
+export function isDirectCliExecution(moduleUrl: string, candidateEntryScript?: string): boolean {
+  if (candidateEntryScript == null) {
+    return false
+  }
+
+  return realpathSync(fileURLToPath(moduleUrl)) === realpathSync(candidateEntryScript)
+}
+
 const program = new Command()
 
 program
@@ -311,7 +330,6 @@ export function collectEnvironment(
 
 // Only parse when executed directly, not when imported (e.g. in tests)
 const entryScript = process.argv[1]
-// eslint-disable-next-line @typescript-eslint/no-unnecessary-condition -- argv[1] can be undefined at runtime despite string[] type
-if (entryScript != null && import.meta.url === pathToFileURL(entryScript).href) {
+if (isDirectCliExecution(import.meta.url, entryScript)) {
   await program.parseAsync()
 }

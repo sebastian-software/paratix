@@ -1,13 +1,15 @@
 import { execFileSync } from "node:child_process"
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
+import { mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join, resolve } from "node:path"
+import { pathToFileURL } from "node:url"
 import { afterEach, beforeEach, describe, expect, it, type MockInstance, vi } from "vitest"
 
 import {
   collectDefinitionErrors,
   collectEnvironment,
   handleTsxLoadFailure,
+  isDirectCliExecution,
   isServerDefinitionLike,
   parsePositiveNumber,
   printExceptionError,
@@ -35,6 +37,42 @@ describe("PACKAGE_VERSION", () => {
     const packageJsonPath = resolve(new URL("../package.json", import.meta.url).pathname)
     const packageJson = JSON.parse(readFileSync(packageJsonPath, "utf8")) as { version: string }
     expect(PACKAGE_VERSION).toBe(packageJson.version)
+  })
+})
+
+describe("isDirectCliExecution", () => {
+  it("returns false when no entry script exists", () => {
+    expect(isDirectCliExecution(import.meta.url)).toBe(false)
+  })
+
+  it("returns true when entry script points to the same file through a symlink", () => {
+    const tempDirectory = mkdtempSync(join(tmpdir(), "paratix-cli-entry-"))
+    const targetPath = join(tempDirectory, "cli-target.mjs")
+    const symlinkPath = join(tempDirectory, "cli-link.mjs")
+
+    try {
+      writeFileSync(targetPath, "export {}\n")
+      symlinkSync(targetPath, symlinkPath)
+
+      expect(isDirectCliExecution(pathToFileURL(targetPath).href, symlinkPath)).toBe(true)
+    } finally {
+      rmSync(tempDirectory, { force: true, recursive: true })
+    }
+  })
+
+  it("returns false when entry script points to a different file", () => {
+    const tempDirectory = mkdtempSync(join(tmpdir(), "paratix-cli-entry-"))
+    const firstPath = join(tempDirectory, "first.mjs")
+    const secondPath = join(tempDirectory, "second.mjs")
+
+    try {
+      writeFileSync(firstPath, "export {}\n")
+      writeFileSync(secondPath, "export {}\n")
+
+      expect(isDirectCliExecution(pathToFileURL(firstPath).href, secondPath)).toBe(false)
+    } finally {
+      rmSync(tempDirectory, { force: true, recursive: true })
+    }
   })
 })
 
