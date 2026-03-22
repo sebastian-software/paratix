@@ -1,5 +1,7 @@
-import { readFileSync } from "node:fs"
-import { resolve } from "node:path"
+import { execFileSync } from "node:child_process"
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
+import { tmpdir } from "node:os"
+import { join, resolve } from "node:path"
 import { afterEach, beforeEach, describe, expect, it, type MockInstance, vi } from "vitest"
 
 import {
@@ -12,6 +14,21 @@ import {
 } from "../src/cli.js"
 
 declare const PACKAGE_VERSION: string
+
+type ExecFailure = {
+  status?: null | number
+  stderr?: Buffer | string
+} & Error
+
+function captureExecFailure(callback: () => void): ExecFailure {
+  try {
+    callback()
+  } catch (error) {
+    return error as ExecFailure
+  }
+
+  throw new Error("Expected command to fail")
+}
 
 describe("PACKAGE_VERSION", () => {
   it("matches the version in package.json", () => {
@@ -929,5 +946,31 @@ describe("printExceptionError", () => {
   it("does not attempt to walk the cause chain for non-Error values", () => {
     printExceptionError("plain string error", true)
     expect(errorSpy).toHaveBeenCalledTimes(1)
+  })
+})
+
+describe("CLI entrypoint", () => {
+  it("awaits the async apply action and prints validation errors for invalid playbooks", () => {
+    const tempDirectory = mkdtempSync(join(tmpdir(), "paratix-cli-"))
+    const playbookPath = join(tempDirectory, "invalid-server.mjs")
+    const cliPath = resolve(new URL("../dist/cli.js", import.meta.url).pathname)
+
+    try {
+      writeFileSync(playbookPath, "export default {}\n")
+
+      const error = captureExecFailure(() => {
+        execFileSync(process.execPath, [cliPath, "apply", playbookPath, "--dry-run"], {
+          encoding: "utf8",
+          stdio: "pipe",
+        })
+      })
+
+      expect(error).toBeInstanceOf(Error)
+      expect(error.status).toBe(2)
+      expect(String(error.stderr)).toContain("does not export a valid ServerDefinition")
+      expect(String(error.stderr)).toContain("Missing property 'name'")
+    } finally {
+      rmSync(tempDirectory, { force: true, recursive: true })
+    }
   })
 })
