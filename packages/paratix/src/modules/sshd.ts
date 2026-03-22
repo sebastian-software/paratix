@@ -12,6 +12,7 @@ import {
 } from "../types.js"
 
 const DEFAULT_SSH_PORT = 22
+const PRIVILEGE_SEPARATION_DIRECTORY = "/run/sshd"
 const SSHD_CONFIG_PATH = "/etc/ssh/sshd_config"
 const SYSTEMCTL = "systemctl"
 
@@ -27,6 +28,7 @@ function escapeRegExp(s: string): string {
 }
 
 async function validateSshdConfig(ssh: SshConnection, originalConfig: string): Promise<void> {
+  await ensurePrivilegeSeparationDirectory(ssh)
   const result = await ssh.exec("sshd -t", { ignoreExitCode: true, silent: true })
   if (result.code !== 0) {
     // Intentional: unguarded write — restoring the original config is more
@@ -36,6 +38,13 @@ async function validateSshdConfig(ssh: SshConnection, originalConfig: string): P
       `sshd config validation failed (sshd -t), rolled back to previous config:\n${result.stderr}`
     )
   }
+}
+
+async function ensurePrivilegeSeparationDirectory(ssh: SshConnection): Promise<void> {
+  await ssh.exec(`mkdir -p '${PRIVILEGE_SEPARATION_DIRECTORY}'`, {
+    ignoreExitCode: false,
+    silent: true,
+  })
 }
 
 async function reloadSshd(ssh: SshConnection): Promise<ModuleResult> {
@@ -55,6 +64,7 @@ async function validateProspectiveSshdConfig(
   const temporaryConfigPath = `/tmp/paratix-sshd-dry-run-${randomUUID()}.conf`
   try {
     await ssh.writeFile(temporaryConfigPath, content)
+    await ensurePrivilegeSeparationDirectory(ssh)
     const result = await ssh.exec(`sshd -t -f '${temporaryConfigPath}'`, {
       ignoreExitCode: true,
       silent: true,

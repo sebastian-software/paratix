@@ -29,11 +29,18 @@ function mockSshdDryRunExecSuccess(mockSsh: ReturnType<typeof createMockSsh>) {
 }
 
 function mockSshdDryRunExecValidationFailure(mockSsh: ReturnType<typeof createMockSsh>) {
-  return vi.spyOn(mockSsh, "exec").mockImplementationOnce(async (command) => {
-    mockSsh.calls.push(command)
-    await Promise.resolve()
-    return { code: 1, stderr: "Bad configuration option", stdout: "" }
-  })
+  return vi
+    .spyOn(mockSsh, "exec")
+    .mockImplementationOnce(async (command) => {
+      mockSsh.calls.push(command)
+      await Promise.resolve()
+      return { code: 0, stderr: "", stdout: "" }
+    })
+    .mockImplementationOnce(async (command) => {
+      mockSsh.calls.push(command)
+      await Promise.resolve()
+      return { code: 1, stderr: "Bad configuration option", stdout: "" }
+    })
 }
 
 // ─── sshd.config — apply ──────────────────────────────────────────────────────
@@ -381,12 +388,18 @@ describe("sshd.config — apply: validation and rollback", () => {
     const writtenFiles = trackWriteFile(mockSsh)
     const execSpy = vi.spyOn(mockSsh, "exec")
 
-    // sshd -t is the only exec call during sshd.config.apply
-    vi.spyOn(mockSsh, "exec").mockResolvedValueOnce({
-      code: 1,
-      stderr: "sshd: bad config",
-      stdout: "",
-    })
+    // mkdir -p /run/sshd succeeds, then sshd -t fails
+    vi.spyOn(mockSsh, "exec")
+      .mockResolvedValueOnce({
+        code: 0,
+        stderr: "",
+        stdout: "",
+      })
+      .mockResolvedValueOnce({
+        code: 1,
+        stderr: "sshd: bad config",
+        stdout: "",
+      })
 
     const mod = sshd.config({ PasswordAuthentication: "no" })
     await expect(mod.apply(mockSsh, emptyEnv)).rejects.toThrow("sshd config validation failed")
@@ -418,6 +431,7 @@ describe("sshd.config — apply: validation and rollback", () => {
     expect(writtenFiles).toHaveLength(1)
     expect(writtenFiles[0]?.content).toContain("PasswordAuthentication no")
     expect(execSpy.mock.calls.map((args) => args[0])).toStrictEqual([
+      "mkdir -p '/run/sshd'",
       "sshd -t",
       "systemctl reload sshd",
     ])
@@ -433,6 +447,7 @@ describe("sshd.config — apply: validation and rollback", () => {
 
     execSpy
       .mockResolvedValueOnce({ code: 0, stderr: "", stdout: "" })
+      .mockResolvedValueOnce({ code: 0, stderr: "", stdout: "" })
       .mockResolvedValueOnce({ code: 1, stderr: "reload failed", stdout: "" })
 
     const mod = sshd.config({ PasswordAuthentication: "no" })
@@ -440,6 +455,7 @@ describe("sshd.config — apply: validation and rollback", () => {
 
     expect(result.status).toBe("failed")
     expect(execSpy.mock.calls.map((args) => args[0])).toStrictEqual([
+      "mkdir -p '/run/sshd'",
       "sshd -t",
       "systemctl reload sshd",
     ])
@@ -458,8 +474,10 @@ describe("sshd.port — apply: validation and rollback", () => {
     const writtenFiles = trackWriteFile(mockSsh)
     const execSpy = vi.spyOn(mockSsh, "exec")
 
-    // First exec call is sshd -t — return failure so apply throws before systemctl restart
-    execSpy.mockResolvedValueOnce({ code: 1, stderr: "sshd: invalid port", stdout: "" })
+    // mkdir -p /run/sshd succeeds, then sshd -t fails before restart
+    execSpy
+      .mockResolvedValueOnce({ code: 0, stderr: "", stdout: "" })
+      .mockResolvedValueOnce({ code: 1, stderr: "sshd: invalid port", stdout: "" })
 
     const mod = sshd.port(2222)
     await expect(mod.apply(mockSsh, emptyEnv)).rejects.toThrow("sshd config validation failed")
@@ -496,8 +514,26 @@ describe("sshd.port — apply: validation and rollback", () => {
     expect(writtenFiles[0]?.content).toContain("Port 2222")
 
     const execCommands = execSpy.mock.calls.map((args) => args[0])
+    expect(execCommands).toContain("mkdir -p '/run/sshd'")
     expect(execCommands).toContain("systemctl restart sshd")
     expect(addPortSpy).toHaveBeenCalledWith(2222)
+  })
+
+  it("creates /run/sshd before sshd -t during first port bootstrap validation", async () => {
+    const originalConfig = "Port 22"
+    const mockSsh = createMockSsh({
+      [CAT_SSHD]: { stdout: originalConfig },
+    })
+    trackWriteFile(mockSsh)
+    const execSpy = vi.spyOn(mockSsh, "exec")
+
+    execSpy.mockResolvedValue({ code: 0, stderr: "", stdout: "" })
+
+    const mod = sshd.port(2222)
+    await mod.apply(mockSsh, emptyEnv)
+
+    const execCommands = execSpy.mock.calls.map((args) => args[0])
+    expect(execCommands.slice(0, 2)).toStrictEqual(["mkdir -p '/run/sshd'", "sshd -t"])
   })
 
   it("returns ok and does not write when the desired port is already configured", async () => {
@@ -555,6 +591,7 @@ describe("sshd.port — apply: validation and rollback", () => {
 
     // sshd -t succeeds, then systemctl restart sshd fails
     execSpy
+      .mockResolvedValueOnce({ code: 0, stderr: "", stdout: "" }) // mkdir -p /run/sshd
       .mockResolvedValueOnce({ code: 0, stderr: "", stdout: "" }) // sshd -t
       .mockRejectedValueOnce(new Error("systemctl restart sshd failed")) // systemctl restart
 
@@ -575,7 +612,8 @@ describe("sshd.port — apply: validation and rollback", () => {
     const removePortSpy = vi.spyOn(mockSsh, "removePort")
 
     execSpy
-      .mockResolvedValueOnce({ code: 0, stderr: "", stdout: "" })
+      .mockResolvedValueOnce({ code: 0, stderr: "", stdout: "" }) // mkdir -p /run/sshd
+      .mockResolvedValueOnce({ code: 0, stderr: "", stdout: "" }) // sshd -t
       .mockRejectedValueOnce(new Error("SSH connection closed unexpectedly"))
 
     const mod = sshd.port(2222)
