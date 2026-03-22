@@ -2,6 +2,7 @@ import { computeFingerprint } from "../knownHosts.js"
 import { failed } from "../moduleFailure.js"
 import { shellQuote } from "../ssh.js"
 import { type Module, type ModuleResult, NEEDS_APPLY, type SshConnection } from "../types.js"
+import { applyAuthorizedKeys, checkAuthorizedKeys } from "./sshAuthorizedKeysHelpers.js"
 
 type KnownHostsOptions = {
   expectedFingerprint?: string
@@ -118,94 +119,6 @@ async function hasMatchingKnownHostTrustAnchor(
 }
 
 /**
- * Resolve a user's home directory by executing `getent passwd` on the remote host.
- *
- * @param conn - The SSH connection to use for the lookup.
- * @param user - The username to look up.
- * @returns The absolute path to the user's home directory.
- */
-async function resolveHome(conn: SshConnection, user: string): Promise<string> {
-  const home = await conn.output(`getent passwd ${shellQuote(user)} | cut -d: -f6`)
-  if (home.length === 0 || home === "/") {
-    throw new Error(`[ssh.authorizedKeys: ${user}] failed to resolve a safe home directory`)
-  }
-  return home
-}
-
-async function createAuthorizedKeysTemporaryPath(conn: SshConnection): Promise<string> {
-  await conn.exec("install -d -m 700 /run/paratix", { silent: true })
-  return conn.output("mktemp /run/paratix/authorized-keys.XXXXXX")
-}
-
-async function ensureAuthorizedKeysIsNotSymlink(
-  conn: SshConnection,
-  authorizedKeysPath: string
-): Promise<void> {
-  await conn.exec(
-    `[ ! -L ${shellQuote(authorizedKeysPath)} ] || { echo 'authorized_keys must not be a symlink' >&2; exit 1; }`,
-    { silent: true }
-  )
-}
-
-async function authorizedKeysSecurityStateIsValid(
-  conn: SshConnection,
-  parameters: {
-    authorizedKeysPath: string
-    sshDirectoryPath: string
-    user: string
-  }
-): Promise<boolean> {
-  const { authorizedKeysPath, sshDirectoryPath, user } = parameters
-
-  const isAuthorizedKeysSymlink = await conn.test(`[ -L ${shellQuote(authorizedKeysPath)} ]`)
-  if (isAuthorizedKeysSymlink) return false
-
-  const sshDirectoryState = await conn.output(
-    `stat -c '%a %U %G %F' ${shellQuote(sshDirectoryPath)}`
-  )
-  if (sshDirectoryState.trim() !== `700 ${user} ${user} directory`) return false
-
-  const authorizedKeysState = await conn.output(
-    `stat -c '%a %U %G %F' ${shellQuote(authorizedKeysPath)}`
-  )
-  return authorizedKeysState.trim() === `600 ${user} ${user} regular file`
-}
-
-async function rewriteAuthorizedKeys(
-  conn: SshConnection,
-  parameters: {
-    authorizedKeysPath: string
-    key: string
-    state: "absent" | "present"
-    user: string
-  }
-): Promise<void> {
-  const { authorizedKeysPath, key, state, user } = parameters
-  const temporaryPath = await createAuthorizedKeysTemporaryPath(conn)
-
-  try {
-    if (state === "present") {
-      await conn.exec(
-        `{ if [ -f ${shellQuote(authorizedKeysPath)} ]; then cat ${shellQuote(authorizedKeysPath)}; grep -qxF -- ${shellQuote(key)} ${shellQuote(authorizedKeysPath)} || printf '%s\\n' ${shellQuote(key)}; else printf '%s\\n' ${shellQuote(key)}; fi; } > ${shellQuote(temporaryPath)}`,
-        { silent: true }
-      )
-    } else {
-      await conn.exec(
-        `{ if [ -f ${shellQuote(authorizedKeysPath)} ]; then grep -vF -- ${shellQuote(key)} ${shellQuote(authorizedKeysPath)} || true; fi; } > ${shellQuote(temporaryPath)}`,
-        { silent: true }
-      )
-    }
-
-    await conn.exec(
-      `chmod 600 ${shellQuote(temporaryPath)} && chown ${shellQuote(user)}:${shellQuote(user)} ${shellQuote(temporaryPath)} && mv ${shellQuote(temporaryPath)} ${shellQuote(authorizedKeysPath)} && chmod 600 ${shellQuote(authorizedKeysPath)} && chown ${shellQuote(user)}:${shellQuote(user)} ${shellQuote(authorizedKeysPath)}`,
-      { silent: true }
-    )
-  } finally {
-    await conn.exec(`rm -f ${shellQuote(temporaryPath)}`, { silent: true })
-  }
-}
-
-/**
  * Modules for managing SSH client-side resources such as known hosts
  * and authorized keys.
  */
@@ -228,48 +141,10 @@ export const ssh = {
 
     return {
       async apply(conn: null | SshConnection): Promise<ModuleResult> {
-        if (!conn) {
-          return failed(`[ssh.authorizedKeys: ${user} (${state})] SSH connection is required`)
-        }
-
-        const home = await resolveHome(conn, user)
-        const directory = shellQuote(`${home}/.ssh`)
-        const authorizedKeysPath = `${home}/.ssh/authorized_keys`
-
-        await conn.exec(
-          `mkdir -p ${directory} && chmod 700 ${directory} && chown ${shellQuote(user)}:${shellQuote(user)} ${directory}`,
-          { silent: true }
-        )
-        await ensureAuthorizedKeysIsNotSymlink(conn, authorizedKeysPath)
-        await rewriteAuthorizedKeys(conn, { authorizedKeysPath, key, state, user })
-
-        return { status: "changed" }
+        return applyAuthorizedKeys(conn, { key, state, user })
       },
       async check(conn: null | SshConnection): Promise<"needs-apply" | "ok"> {
-        if (!conn) return NEEDS_APPLY
-
-        const home = await resolveHome(conn, user)
-        const sshDirectoryPath = `${home}/.ssh`
-        const authorizedKeysPath = `${home}/.ssh/authorized_keys`
-        const authKeysPath = shellQuote(authorizedKeysPath)
-        const sshDirectoryExists = await conn.exists(sshDirectoryPath)
-        const authorizedKeysExists = await conn.exists(authorizedKeysPath)
-
-        if (!sshDirectoryExists || !authorizedKeysExists) {
-          return state === "present" ? NEEDS_APPLY : "ok"
-        }
-
-        const keyExists = await conn.test(`grep -qF -- ${shellQuote(key)} ${authKeysPath}`)
-        const securityStateIsValid = await authorizedKeysSecurityStateIsValid(conn, {
-          authorizedKeysPath,
-          sshDirectoryPath,
-          user,
-        })
-
-        if (state === "present") {
-          return keyExists && securityStateIsValid ? "ok" : NEEDS_APPLY
-        }
-        return keyExists || !securityStateIsValid ? NEEDS_APPLY : "ok"
+        return checkAuthorizedKeys(conn, { key, state, user })
       },
       name: `ssh.authorizedKeys: ${user} (${state})`,
     }

@@ -328,15 +328,24 @@ describe("ssh.authorizedKeys", () => {
     expect(mockSsh.calls).not.toContain("stat -c '%a %U %G %F' '/home/alice/.ssh/authorized_keys'")
   })
 
-  it("fails closed in check when the user does not exist and resolveHome returns an empty string", async () => {
+  it("returns needs-apply in check when the target user does not exist yet", async () => {
     const mockSsh = createMockSsh({
       "getent passwd 'ghost' | cut -d: -f6": { stdout: "" },
     })
     const mod = ssh.authorizedKeys("ghost", testKey)
 
-    await expect(mod.check(mockSsh, emptyEnv)).rejects.toThrow(
-      "[ssh.authorizedKeys: ghost] failed to resolve a safe home directory"
-    )
+    await expect(mod.check(mockSsh, emptyEnv)).resolves.toBe("needs-apply")
+    expect(mockSsh.calls).not.toContain("[ -e '/.ssh' ]")
+    expect(mockSsh.calls).not.toContain("[ -e '/.ssh/authorized_keys' ]")
+  })
+
+  it("returns ok in check for absent state when the target user does not exist", async () => {
+    const mockSsh = createMockSsh({
+      "getent passwd 'ghost' | cut -d: -f6": { stdout: "" },
+    })
+    const mod = ssh.authorizedKeys("ghost", testKey, { state: "absent" })
+
+    await expect(mod.check(mockSsh, emptyEnv)).resolves.toBe("ok")
     expect(mockSsh.calls).not.toContain("[ -e '/.ssh' ]")
     expect(mockSsh.calls).not.toContain("[ -e '/.ssh/authorized_keys' ]")
   })
