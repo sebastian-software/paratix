@@ -2,6 +2,7 @@ import { createInterface } from "node:readline/promises"
 
 import type { InitialUserConfig } from "./templates.js"
 
+import { readHostFingerprintViaSsh2 } from "./hostFingerprintBootstrap.js"
 import { createTerminalSelect, type SelectFunction, type SelectOption } from "./promptUi.js"
 import { promptForAdminPublicKey as promptForScaffoldAdminPublicKey } from "./publicKeySelection.js"
 import {
@@ -13,8 +14,9 @@ import {
 type PromptFunction = (question: string) => Promise<string>
 
 const NOOP = (): void => undefined
+const INTERACTIVE_SELECTION_UNAVAILABLE = "Interactive selection is unavailable."
 const UNAVAILABLE_SELECT = (() => {
-  throw new Error("Interactive selection is unavailable.")
+  throw new Error(INTERACTIVE_SELECTION_UNAVAILABLE)
 }) as SelectFunction<"admin" | "root">
 
 const INITIAL_USER_OPTIONS: Array<SelectOption<"admin" | "root">> = [
@@ -29,6 +31,21 @@ const INITIAL_USER_OPTIONS: Array<SelectOption<"admin" | "root">> = [
       "A named admin user already exists. Paratix connects directly as that user and skips root bootstrap.",
     label: "Admin user",
     value: "admin",
+  },
+]
+
+const HOST_FINGERPRINT_OPTIONS: Array<SelectOption<"placeholder" | "scan">> = [
+  {
+    description:
+      "Read the currently presented host key from SSH port 22 via ssh2 and pin its fingerprint in server.ts.",
+    label: "Scan host key",
+    value: "scan",
+  },
+  {
+    description:
+      "Keep the expectedHostFingerprint placeholder in server.ts and verify the host key manually later.",
+    label: "Keep placeholder",
+    value: "placeholder",
   },
 ]
 
@@ -142,11 +159,45 @@ export async function promptForAdminPublicKey(
   const choose = select ?? terminalSelect?.select
 
   if (choose == null) {
-    throw new Error("Interactive selection is unavailable.")
+    throw new Error(INTERACTIVE_SELECTION_UNAVAILABLE)
   }
 
   try {
     return await promptForScaffoldAdminPublicKey(choose, publicKeys)
+  } finally {
+    terminalSelect?.close()
+  }
+}
+
+export async function promptForHostFingerprint(
+  host: string,
+  select?: SelectFunction<"placeholder" | "scan">,
+  scanner: (host: string) => Promise<string> = readHostFingerprintViaSsh2
+): Promise<string | undefined> {
+  const terminalSelect = select == null ? createTerminalSelect() : null
+  const choose = select ?? terminalSelect?.select
+
+  if (choose == null) {
+    throw new Error(INTERACTIVE_SELECTION_UNAVAILABLE)
+  }
+
+  try {
+    const hostKeyMode = await choose(
+      `How should create-paratix bootstrap the SSH host key for ${host}?`,
+      HOST_FINGERPRINT_OPTIONS
+    )
+    if (hostKeyMode !== "scan") {
+      return undefined
+    }
+
+    try {
+      return await scanner(host)
+    } catch (error) {
+      console.error(
+        `${error instanceof Error ? error.message : String(error)} Keeping the expectedHostFingerprint placeholder in server.ts.`
+      )
+      return undefined
+    }
   } finally {
     terminalSelect?.close()
   }

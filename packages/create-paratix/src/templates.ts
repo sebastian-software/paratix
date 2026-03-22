@@ -2,6 +2,7 @@ export type InitialUserConfig = { kind: "admin"; user: string } | { kind: "root"
 
 type ServerTemplateOptions = {
   adminPublicKey?: string
+  expectedHostFingerprint?: string
   host: string
   initialUser: InitialUserConfig
 }
@@ -33,6 +34,7 @@ export const ENV_EXAMPLE_TEMPLATE = `# Server configuration
 type BaseServerHeaderOptions = {
   adminPublicKey?: string
   adminUserDeclaration: string
+  expectedHostFingerprint?: string
   host: string
   sshUser: string
 }
@@ -40,9 +42,19 @@ type BaseServerHeaderOptions = {
 function createBaseServerHeader({
   adminPublicKey,
   adminUserDeclaration,
+  expectedHostFingerprint,
   host,
   sshUser,
 }: BaseServerHeaderOptions): string {
+  const strictHostKeyCheckingDeclaration =
+    expectedHostFingerprint == null
+      ? 'const strictHostKeyChecking = FIRST_RUN ? "accept-new" : "yes";'
+      : 'const strictHostKeyChecking = "yes";'
+  const expectedHostFingerprintLine =
+    expectedHostFingerprint == null
+      ? '    // expectedHostFingerprint: "SHA256:REPLACE_ME_WITH_YOUR_HOST_FINGERPRINT",'
+      : `    expectedHostFingerprint: ${JSON.stringify(expectedHostFingerprint)}, // captured from port 22 during scaffolding`
+
   return `import { recipe, server } from "paratix";
 import { hostname, package as packages, service, ssh, sshd, ufw, user } from "paratix/modules";
 
@@ -51,7 +63,7 @@ const adminPublicKey = ${JSON.stringify(adminPublicKey ?? "ssh-ed25519 REPLACE_M
 const FIRST_RUN = process.env["PARATIX_FIRST_RUN"] === "true";
 const sshPorts = FIRST_RUN ? [22] : [2222];
 const firewallTcpPorts = FIRST_RUN ? [22, 2222, 80, 443] : [2222, 80, 443];
-const strictHostKeyChecking = FIRST_RUN ? "accept-new" : "yes";
+${strictHostKeyCheckingDeclaration}
 
 export default server({
   name: "my-server",
@@ -64,7 +76,7 @@ export default server({
     // - later runs omit that flag and go through port 2222 with strict host-key checking again
     strictHostKeyChecking,
     user: ${sshUser},
-    // expectedHostFingerprint: "SHA256:REPLACE_ME_WITH_YOUR_HOST_FINGERPRINT",
+${expectedHostFingerprintLine}
     // expectedHostPublicKey: "ssh-ed25519 REPLACE_ME_WITH_YOUR_HOST_PUBLIC_KEY",
   },
   env: {
@@ -100,14 +112,22 @@ function createAdminRecipe(recipeName: string): string {
 `
 }
 
-function createHardenedAdminServerTemplate(
-  host: string,
-  initialAdminUser: string,
+function createHardenedAdminServerTemplate(parameters: {
   adminPublicKey?: string
-): string {
+  expectedHostFingerprint?: string
+  host: string
+  initialAdminUser: string
+}): string {
+  const { adminPublicKey, expectedHostFingerprint, host, initialAdminUser } = parameters
   const adminUserDeclaration = `const adminUser = "${initialAdminUser}";`
 
-  return `${createBaseServerHeader({ adminPublicKey, adminUserDeclaration, host, sshUser: "adminUser" })}
+  return `${createBaseServerHeader({
+    adminPublicKey,
+    adminUserDeclaration,
+    expectedHostFingerprint,
+    host,
+    sshUser: "adminUser",
+  })}
 ${createAdminRecipe("admin-access")}
 ${createFirewallRecipe()}
     recipe("ssh-hardening", [
@@ -124,12 +144,17 @@ ${createFirewallRecipe()}
 `
 }
 
-function createBootstrapRootServerTemplate(host: string, adminPublicKey?: string): string {
+function createBootstrapRootServerTemplate(
+  host: string,
+  adminPublicKey?: string,
+  expectedHostFingerprint?: string
+): string {
   const adminUserDeclaration = 'const adminUser = "admin";'
 
   return `${createBaseServerHeader({
     adminPublicKey,
     adminUserDeclaration,
+    expectedHostFingerprint,
     host,
     sshUser: 'FIRST_RUN ? "root" : adminUser',
   })}
@@ -155,10 +180,15 @@ ${createFirewallRecipe()}
 
 export function createServerTemplate(options: ServerTemplateOptions): string {
   return options.initialUser.kind === "root"
-    ? createBootstrapRootServerTemplate(options.host, options.adminPublicKey)
-    : createHardenedAdminServerTemplate(
+    ? createBootstrapRootServerTemplate(
         options.host,
-        options.initialUser.user,
-        options.adminPublicKey
+        options.adminPublicKey,
+        options.expectedHostFingerprint
       )
+    : createHardenedAdminServerTemplate({
+        adminPublicKey: options.adminPublicKey,
+        expectedHostFingerprint: options.expectedHostFingerprint,
+        host: options.host,
+        initialAdminUser: options.initialUser.user,
+      })
 }

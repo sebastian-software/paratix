@@ -4,6 +4,7 @@ import { basename, join, resolve } from "node:path"
 import {
   promptForAdminPublicKey,
   promptForHost,
+  promptForHostFingerprint,
   promptForInitialUserConfig,
 } from "./interactivePrompts.js"
 import { readAdminPublicKeyFile, validateAdminPublicKey } from "./publicKeySelection.js"
@@ -30,6 +31,7 @@ import {
 export {
   promptForAdminPublicKey,
   promptForHost,
+  promptForHostFingerprint,
   promptForInitialUserConfig,
 } from "./interactivePrompts.js"
 export {
@@ -41,6 +43,7 @@ export {
 export type { InitialUserConfig } from "./templates.js"
 type ScaffoldOptions = {
   adminPublicKey?: string
+  expectedHostFingerprint?: string
   host?: string
   initialUser?: InitialUserConfig
   installer?: (projectDirectory: string, packageManager: PackageManager) => boolean
@@ -55,6 +58,7 @@ export function writeProjectFiles(projectDirectory: string, options?: ScaffoldOp
   const host = options?.host ?? "1.2.3.4"
   const initialUser = options?.initialUser ?? { kind: "admin", user: "admin" }
   const adminPublicKey = options?.adminPublicKey
+  const expectedHostFingerprint = options?.expectedHostFingerprint
 
   const packageJson = {
     dependencies: {
@@ -80,7 +84,7 @@ export function writeProjectFiles(projectDirectory: string, options?: ScaffoldOp
   // eslint-disable-next-line security/detect-non-literal-fs-filename
   writeFileSync(
     join(projectDirectory, "server.ts"),
-    createServerTemplate({ adminPublicKey, host, initialUser })
+    createServerTemplate({ adminPublicKey, expectedHostFingerprint, host, initialUser })
   )
   // eslint-disable-next-line security/detect-non-literal-fs-filename
   writeFileSync(join(projectDirectory, "tsconfig.json"), TSCONFIG_TEMPLATE)
@@ -203,6 +207,10 @@ function main(): void {
   const pm = detectPackageManager()
   void (async () => {
     const validatedHost = host == null ? await promptForHost() : validateHost(host)
+    const resolvedExpectedHostFingerprint =
+      process.stdin.isTTY && process.stdout.isTTY
+        ? await promptForHostFingerprint(validatedHost)
+        : undefined
     const initialUserConfig =
       initialUser == null ? await promptForInitialUserConfig() : parseInitialUserConfig(initialUser)
     const resolvedAdminPublicKey = await resolveCliOrPromptAdminPublicKey({
@@ -211,6 +219,7 @@ function main(): void {
     })
     scaffoldProject(normalizedProjectName, pm, {
       adminPublicKey: resolvedAdminPublicKey,
+      expectedHostFingerprint: resolvedExpectedHostFingerprint,
       host: validatedHost,
       initialUser: initialUserConfig,
     })

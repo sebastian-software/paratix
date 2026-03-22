@@ -31,10 +31,17 @@ importers:
         version: 3.8.1
 
   packages/create-paratix:
+    dependencies:
+      ssh2:
+        specifier: ^1.16.0
+        version: 1.17.0
     devDependencies:
       '@types/node':
         specifier: ^25.5.0
         version: 25.5.0
+      '@types/ssh2':
+        specifier: ^1.15.4
+        version: 1.15.5
       tsup:
         specifier: ^8.4.0
         version: 8.5.1(jiti@2.6.1)(postcss@8.5.8)(tsx@4.21.0)(typescript@5.9.3)(yaml@2.8.2)

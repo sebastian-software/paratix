@@ -2,6 +2,7 @@ import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node
 import { join, resolve } from "node:path"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 
+import { readHostFingerprintViaSsh2 } from "../src/hostFingerprintBootstrap.js"
 import {
   isDirectExecution,
   isValidHost,
@@ -13,6 +14,7 @@ import {
   parseInitialUserConfig,
   promptForAdminPublicKey,
   promptForHost,
+  promptForHostFingerprint,
   promptForInitialUserConfig,
   scaffoldProject,
   validateHost,
@@ -505,6 +507,128 @@ describe("promptForAdminPublicKey", () => {
   })
 })
 
+describe("promptForHostFingerprint", () => {
+  beforeEach(() => {
+    vi.spyOn(console, "error").mockImplementation((...args) => {
+      void args
+    })
+  })
+
+  afterEach(() => {
+    vi.restoreAllMocks()
+  })
+
+  it("keeps the placeholder when the user declines host-key scanning", async () => {
+    const select = vi.fn().mockResolvedValueOnce("placeholder")
+    const scanner = vi.fn()
+
+    await expect(promptForHostFingerprint("example.com", select, scanner)).resolves.toBeUndefined()
+    expect(scanner).not.toHaveBeenCalled()
+    expect(select).toHaveBeenCalledWith(
+      "How should create-paratix bootstrap the SSH host key for example.com?",
+      [
+        {
+          description:
+            "Read the currently presented host key from SSH port 22 via ssh2 and pin its fingerprint in server.ts.",
+          label: "Scan host key",
+          value: "scan",
+        },
+        {
+          description:
+            "Keep the expectedHostFingerprint placeholder in server.ts and verify the host key manually later.",
+          label: "Keep placeholder",
+          value: "placeholder",
+        },
+      ]
+    )
+  })
+
+  it("stores the scanned host fingerprint when the user accepts the TOFU step", async () => {
+    const select = vi.fn().mockResolvedValueOnce("scan")
+    const scanner = vi.fn().mockResolvedValueOnce("SHA256:scanned-fingerprint")
+
+    await expect(promptForHostFingerprint("example.com", select, scanner)).resolves.toBe(
+      "SHA256:scanned-fingerprint"
+    )
+    expect(scanner).toHaveBeenCalledWith("example.com")
+  })
+
+  it("falls back to the placeholder when host-key scanning fails", async () => {
+    const select = vi.fn().mockResolvedValueOnce("scan")
+    const scanner = vi.fn().mockRejectedValueOnce(new Error("network timeout"))
+
+    await expect(promptForHostFingerprint("example.com", select, scanner)).resolves.toBeUndefined()
+    expect(console.error).toHaveBeenCalledWith(
+      "network timeout Keeping the expectedHostFingerprint placeholder in server.ts."
+    )
+  })
+})
+
+describe("readHostFingerprintViaSsh2", () => {
+  it("derives the OpenSSH fingerprint from the ssh2 hostVerifier key", async () => {
+    const hostKey = Buffer.from(
+      "0000000b7373682d6564323535313900000020e04a2a8d2c1b47d9c6b4d114e9d2a1ea4ad8eb49c1a14851771ab0ef0457f12",
+      "hex"
+    )
+    const connect = vi.fn((config: { hostVerifier?: (key: Buffer) => boolean }) => {
+      config.hostVerifier?.(hostKey)
+      setImmediate(() => {
+        fakeClient.handlers.error(new Error("Host denied"))
+      })
+    })
+
+    const fakeClient = {
+      connect,
+      end: vi.fn(),
+      handlers: {} as Record<string, (error?: Error) => void>,
+      on: vi.fn((event: string, handler: (error?: Error) => void) => {
+        fakeClient.handlers[event] = handler
+        return fakeClient
+      }),
+      removeAllListeners: vi.fn(),
+    }
+
+    await expect(
+      readHostFingerprintViaSsh2("example.com", {
+        clientFactory: () => fakeClient,
+      })
+    ).resolves.toBe("SHA256:MYVLAwRUnY5x4jwQ1SPUJoYXVb/fB/L3kFjCi5WxfYA")
+
+    expect(connect).toHaveBeenCalledWith(
+      expect.objectContaining({
+        host: "example.com",
+        port: 22,
+        readyTimeout: 10_000,
+        username: "paratix-hostkey-scan",
+      })
+    )
+  })
+
+  it("fails clearly when ssh2 cannot obtain a host key", async () => {
+    const fakeClient = {
+      connect: vi.fn((config: { hostVerifier?: (key: Buffer) => boolean }) => {
+        void config
+        setImmediate(() => {
+          fakeClient.handlers.error(new Error("connect ECONNREFUSED"))
+        })
+      }),
+      end: vi.fn(),
+      handlers: {} as Record<string, (error?: Error) => void>,
+      on: vi.fn((event: string, handler: (error?: Error) => void) => {
+        fakeClient.handlers[event] = handler
+        return fakeClient
+      }),
+      removeAllListeners: vi.fn(),
+    }
+
+    await expect(
+      readHostFingerprintViaSsh2("example.com", {
+        clientFactory: () => fakeClient,
+      })
+    ).rejects.toThrow("Failed to read the host key from example.com:22: connect ECONNREFUSED")
+  })
+})
+
 const TEST_DIR = resolve("/tmp/create-paratix-test")
 
 describe("writeProjectFiles", () => {
@@ -730,6 +854,23 @@ describe("writeProjectFiles", () => {
     expect(content).toContain(
       'expectedHostPublicKey: "ssh-ed25519 REPLACE_ME_WITH_YOUR_HOST_PUBLIC_KEY"'
     )
+  })
+
+  it("generated server.ts embeds a scanned expectedHostFingerprint and keeps strict host-key checking enabled", () => {
+    writeProjectFiles(TEST_DIR, {
+      expectedHostFingerprint: "SHA256:scanned-fingerprint",
+      host: "deploy.example.com",
+      initialUser: { kind: "root" },
+    })
+
+    const content = readFileSync(join(TEST_DIR, "server.ts"), "utf8")
+
+    expect(content).toContain('const strictHostKeyChecking = "yes";')
+    expect(content).toContain('expectedHostFingerprint: "SHA256:scanned-fingerprint"')
+    expect(content).not.toContain(
+      'expectedHostFingerprint: "SHA256:REPLACE_ME_WITH_YOUR_HOST_FINGERPRINT"'
+    )
+    expect(content).not.toContain('const strictHostKeyChecking = FIRST_RUN ? "accept-new" : "yes";')
   })
 
   it("generated server.ts keeps the ~/.ssh privateKey default that Paratix expands at runtime", () => {

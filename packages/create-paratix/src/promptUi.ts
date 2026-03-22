@@ -19,7 +19,7 @@ function createSelectLines<TValue extends string>(
   return [
     prompt,
     "",
-    "Use the arrow keys to choose how Paratix should connect on the very first run:",
+    "Use the arrow keys to choose an option:",
     ...options.flatMap((option, index) => {
       const prefix = index === selectedIndex ? ">" : " "
       return [`${prefix} ${option.label}`, `   ${option.description}`]

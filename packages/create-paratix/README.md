@@ -192,14 +192,26 @@ Im interaktiven Modus bietet `create-paratix` zusätzlich an, einen vorhandenen 
 
 ### Host-key bootstrap
 
-Paratix verwendet standardmäßig striktes Host-Key-Checking. Ein frisch erzeugtes `create-paratix`-Projekt koppelt das deshalb an `PARATIX_FIRST_RUN`:
+Paratix verwendet standardmäßig striktes Host-Key-Checking. `create-paratix` bietet deshalb interaktiv an, den aktuell auf SSH-Port `22` präsentierten Host-Key direkt per `ssh2` auszulesen und als `expectedHostFingerprint` in `server.ts` zu pinnen.
+
+Wenn du diesen Schritt bestätigst, erzeugt das Scaffold direkt einen expliziten Trust Anchor:
+
+```ts
+const strictHostKeyChecking = "yes"
+// ...
+expectedHostFingerprint: "SHA256:..."
+```
+
+Das ist ein bewusster TOFU-Schritt beim Scaffold-Zeitpunkt: Der Fingerprint stammt von dem Host-Key, den der Server im Moment des Scaffoldings auf Port `22` präsentiert. Du kannst ihn später jederzeit manuell prüfen oder ersetzen.
+
+Wenn du den Abruf ablehnst oder er fehlschlägt, bleibt der bisherige Fallback erhalten:
 
 ```ts
 const FIRST_RUN = process.env["PARATIX_FIRST_RUN"] === "true"
 const strictHostKeyChecking = FIRST_RUN ? "accept-new" : "yes"
 ```
 
-Das ist ein bewusst markierter Übergangsmodus für den ersten verifizierten Kontakt mit einem frischen Host. Direkt daneben enthält das generierte `server.ts` kommentierte Platzhalter für:
+Das ist ein bewusst markierter Übergangsmodus für den ersten verifizierten Kontakt mit einem frischen Host. Direkt daneben enthält das generierte `server.ts` weiterhin kommentierte Platzhalter für:
 
 - `expectedHostFingerprint`
 - `expectedHostPublicKey`
