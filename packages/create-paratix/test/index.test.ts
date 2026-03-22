@@ -250,6 +250,11 @@ describe("host parsing", () => {
     expect(validateHost(" example.com ")).toBe("example.com")
   })
 
+  it("keeps string-literal special characters for later safe serialization", () => {
+    expect(validateHost('example".com')).toBe('example".com')
+    expect(validateHost(String.raw`example\host`)).toBe(String.raw`example\host`)
+  })
+
   it("exits for invalid hosts", async () => {
     vi.spyOn(console, "error").mockImplementation((...args) => {
       void args
@@ -561,6 +566,43 @@ describe("writeProjectFiles", () => {
     expect(content).toContain("user: adminUser")
     expect(content).toContain('recipe("admin-access"')
     expect(content).not.toContain('user: "root"')
+  })
+
+  it("generated server.ts safely serializes quote characters in the host", () => {
+    const host = 'dangerous"host.example'
+    writeProjectFiles(TEST_DIR, {
+      host,
+      initialUser: { kind: "admin", user: "deploy" },
+    })
+
+    const content = readFileSync(join(TEST_DIR, "server.ts"), "utf8")
+
+    expect(content).toContain(`host: ${JSON.stringify(host)}`)
+    expect(content).not.toContain(`host: "${host}"`)
+  })
+
+  it("generated server.ts safely serializes backslashes in the host", () => {
+    const host = String.raw`example\host`
+    writeProjectFiles(TEST_DIR, {
+      host,
+      initialUser: { kind: "admin", user: "deploy" },
+    })
+
+    const content = readFileSync(join(TEST_DIR, "server.ts"), "utf8")
+
+    expect(content).toContain(`host: ${JSON.stringify(host)}`)
+  })
+
+  it("generated server.ts safely serializes other string-literal escape sequences in the host", () => {
+    const host = String.raw`example\${template}\path`
+    writeProjectFiles(TEST_DIR, {
+      host,
+      initialUser: { kind: "admin", user: "deploy" },
+    })
+
+    const content = readFileSync(join(TEST_DIR, "server.ts"), "utf8")
+
+    expect(content).toContain(`host: ${JSON.stringify(host)}`)
   })
 
   it("generated server.ts embeds a selected local public key directly", () => {

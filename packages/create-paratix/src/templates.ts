@@ -55,7 +55,7 @@ const strictHostKeyChecking = FIRST_RUN ? "accept-new" : "yes";
 
 export default server({
   name: "my-server",
-  host: "${host}",
+  host: ${JSON.stringify(host)},
   ssh: {
     ports: sshPorts,
     privateKey: "~/.ssh/id_ed25519", // "~" is expanded by Paratix
