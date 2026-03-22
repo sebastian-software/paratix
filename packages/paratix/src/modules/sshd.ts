@@ -47,6 +47,19 @@ async function ensurePrivilegeSeparationDirectory(ssh: SshConnection): Promise<v
   })
 }
 
+async function disableSocketActivatedSsh(ssh: SshConnection): Promise<void> {
+  const socketExists = await ssh.exec("systemctl cat ssh.socket >/dev/null 2>&1", {
+    ignoreExitCode: true,
+    silent: true,
+  })
+  if (socketExists.code !== 0) return
+
+  await ssh.exec("systemctl disable --now ssh.socket", {
+    ignoreExitCode: false,
+    silent: true,
+  })
+}
+
 async function reloadSshd(ssh: SshConnection): Promise<ModuleResult> {
   const result = await ssh.exec(`${SYSTEMCTL} reload sshd`, {
     ignoreExitCode: true,
@@ -154,6 +167,7 @@ async function applySshdPort(ssh: SshConnection, targetPort: number): Promise<Mo
   await validateSshdConfig(ssh, originalConfig)
   ssh.addPort(targetPort)
   try {
+    await disableSocketActivatedSsh(ssh)
     await ssh.exec("systemctl restart sshd", { silent: true })
   } catch (error) {
     if (!isRestartDisconnect(error)) {

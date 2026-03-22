@@ -515,8 +515,55 @@ describe("sshd.port — apply: validation and rollback", () => {
 
     const execCommands = execSpy.mock.calls.map((args) => args[0])
     expect(execCommands).toContain("mkdir -p '/run/sshd'")
+    expect(execCommands).toContain("systemctl cat ssh.socket >/dev/null 2>&1")
+    expect(execCommands).toContain("systemctl disable --now ssh.socket")
     expect(execCommands).toContain("systemctl restart sshd")
     expect(addPortSpy).toHaveBeenCalledWith(2222)
+  })
+
+  it("disables ssh.socket before restarting sshd on socket-activated hosts", async () => {
+    const mockSsh = createMockSsh({
+      [CAT_SSHD]: { stdout: "Port 22" },
+    })
+    trackWriteFile(mockSsh)
+    const execSpy = vi.spyOn(mockSsh, "exec")
+
+    execSpy.mockResolvedValue({ code: 0, stderr: "", stdout: "" })
+
+    const mod = sshd.port(2222)
+    await mod.apply(mockSsh, emptyEnv)
+
+    const socketDisableIndex = execSpy.mock.calls.findIndex(
+      (args) => args[0] === "systemctl disable --now ssh.socket"
+    )
+    const restartIndex = execSpy.mock.calls.findIndex(
+      (args) => args[0] === "systemctl restart sshd"
+    )
+
+    expect(socketDisableIndex).toBeGreaterThanOrEqual(0)
+    expect(restartIndex).toBeGreaterThan(socketDisableIndex)
+  })
+
+  it("keeps the previous restart path when ssh.socket does not exist", async () => {
+    const mockSsh = createMockSsh({
+      [CAT_SSHD]: { stdout: "Port 22" },
+    })
+    trackWriteFile(mockSsh)
+    const execSpy = vi.spyOn(mockSsh, "exec")
+
+    execSpy
+      .mockResolvedValueOnce({ code: 0, stderr: "", stdout: "" }) // mkdir -p /run/sshd
+      .mockResolvedValueOnce({ code: 0, stderr: "", stdout: "" }) // sshd -t
+      .mockResolvedValueOnce({ code: 1, stderr: "", stdout: "" }) // ssh.socket missing
+      .mockResolvedValueOnce({ code: 0, stderr: "", stdout: "" }) // restart sshd
+
+    const mod = sshd.port(2222)
+    await mod.apply(mockSsh, emptyEnv)
+
+    const execCommands = execSpy.mock.calls.map((args) => args[0])
+    expect(execCommands).toContain("systemctl cat ssh.socket >/dev/null 2>&1")
+    expect(execCommands).not.toContain("systemctl disable --now ssh.socket")
+    expect(execCommands).toContain("systemctl restart sshd")
   })
 
   it("creates /run/sshd before sshd -t during first port bootstrap validation", async () => {
