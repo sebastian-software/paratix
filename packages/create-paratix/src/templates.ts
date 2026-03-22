@@ -25,8 +25,8 @@ export const ENV_EXAMPLE_TEMPLATE = `# Server configuration
 `
 
 function createBaseServerHeader(adminUserDeclaration: string, sshUser: string): string {
-  return `import { server, recipe } from "paratix";
-import { package as pkg, hostname, sshd, ssh, ufw, service, user } from "paratix/modules";
+  return `import { recipe, server } from "paratix";
+import { hostname, package as packages, service, ssh, sshd, ufw, user } from "paratix/modules";
 
 ${adminUserDeclaration}
 const adminPublicKey = "ssh-ed25519 REPLACE_ME_WITH_YOUR_PUBLIC_KEY";
@@ -35,13 +35,13 @@ export default server({
   name: "my-server",
   host: "1.2.3.4",
   ssh: {
-    user: ${sshUser},
     ports: [22],
     privateKey: "~/.ssh/id_ed25519", // "~" is expanded by Paratix
     // Initial host-key bootstrap for fresh servers:
     // - keep this explicit accept-new mode only for the first verified connection
     // - then pin the host key and switch strictHostKeyChecking back to "yes"
     strictHostKeyChecking: "accept-new",
+    user: ${sshUser},
     // expectedHostFingerprint: "SHA256:REPLACE_ME_WITH_YOUR_HOST_FINGERPRINT",
     // expectedHostPublicKey: "ssh-ed25519 REPLACE_ME_WITH_YOUR_HOST_PUBLIC_KEY",
   },
@@ -51,8 +51,8 @@ export default server({
   },
   run: [
     hostname.set("my-server"),
-    pkg.upgrade("2026-03-01"),
-    pkg.installed("nginx", "curl", "htop"),
+    packages.upgrade("2026-03-01"),
+    packages.installed("nginx", "curl", "htop"),
 `
 }
 
@@ -86,8 +86,8 @@ ${createFirewallRecipe()}
     recipe("ssh-hardening", [
       sshd.port(2222),
       sshd.config({
-        PermitRootLogin: "no",
         PasswordAuthentication: "no",
+        PermitRootLogin: "no",
       }),
     ], {
       signals: [service.restart("sshd")],
@@ -110,8 +110,8 @@ ${createFirewallRecipe()}
     recipe("ssh-hardening-transition", [
       sshd.port(2222),
       sshd.config({
-        PermitRootLogin: "prohibit-password",
         PasswordAuthentication: "no",
+        PermitRootLogin: "prohibit-password",
       }),
     ], {
       signals: [service.restart("sshd")],
