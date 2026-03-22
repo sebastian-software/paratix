@@ -127,18 +127,23 @@ ${createFirewallRecipe()}
 function createBootstrapRootServerTemplate(host: string, adminPublicKey?: string): string {
   const adminUserDeclaration = 'const adminUser = "admin";'
 
-  return `${createBaseServerHeader({ adminPublicKey, adminUserDeclaration, host, sshUser: '"root"' })}
+  return `${createBaseServerHeader({
+    adminPublicKey,
+    adminUserDeclaration,
+    host,
+    sshUser: 'FIRST_RUN ? "root" : adminUser',
+  })}
 ${createAdminRecipe("bootstrap-admin-user")}
 ${createFirewallRecipe()}
     // Transitional bootstrap mode:
     // 1. Run this once as root with "--first-run" to create the dedicated admin user.
-    // 2. Later runs omit "--first-run" and switch ssh.user to admin.
-    // 3. Replace PermitRootLogin with "no".
+    // 2. Later runs omit "--first-run" and connect as the dedicated admin user on port 2222.
+    // 3. The next regular run disables root login completely.
     recipe("ssh-hardening-transition", [
       sshd.port(2222),
       sshd.config({
         PasswordAuthentication: "no",
-        PermitRootLogin: "prohibit-password",
+        PermitRootLogin: FIRST_RUN ? "prohibit-password" : "no",
       }),
     ], {
       signals: [service.restart("sshd")],

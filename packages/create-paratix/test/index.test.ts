@@ -773,18 +773,28 @@ describe("writeProjectFiles", () => {
     const content = readFileSync(join(TEST_DIR, "server.ts"), "utf8")
 
     expect(content).toContain('host: "203.0.113.10"')
-    expect(content).toContain('user: "root"')
+    expect(content).toContain('user: FIRST_RUN ? "root" : adminUser')
     expect(content).toContain('const adminUser = "admin";')
     expect(content).toContain('const FIRST_RUN = process.env["PARATIX_FIRST_RUN"] === "true";')
     expect(content).toContain("Transitional bootstrap mode:")
     expect(content).toContain('PasswordAuthentication: "no"')
-    expect(content).toContain('PermitRootLogin: "prohibit-password"')
-    expect(content).not.toContain('PermitRootLogin: "no"')
+    expect(content).toContain('PermitRootLogin: FIRST_RUN ? "prohibit-password" : "no"')
     expect(content).toContain('const strictHostKeyChecking = FIRST_RUN ? "accept-new" : "yes";')
     expect(content).toContain(
       'expectedHostFingerprint: "SHA256:REPLACE_ME_WITH_YOUR_HOST_FINGERPRINT"'
     )
     expect(content).not.toContain("--bootstrap-root")
+  })
+
+  it("generated root-bootstrap server.ts switches to the admin user after FIRST_RUN", () => {
+    writeProjectFiles(TEST_DIR, { initialUser: { kind: "root" } })
+
+    const content = readFileSync(join(TEST_DIR, "server.ts"), "utf8")
+
+    expect(content).toContain('user: FIRST_RUN ? "root" : adminUser')
+    expect(content).toContain('PermitRootLogin: FIRST_RUN ? "prohibit-password" : "no"')
+    expect(content).not.toContain('user: "root"')
+    expect(content).not.toContain('PermitRootLogin: "prohibit-password"')
   })
 
   it("generated server.ts exposes FIRST_RUN through env for template logic and operator visibility", () => {
