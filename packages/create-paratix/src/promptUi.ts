@@ -184,13 +184,16 @@ async function runTerminalSelect<TValue extends string>(
  */
 export function createTerminalSelect(): {
   close: () => void
-  select: SelectFunction<"admin" | "root">
+  select: <TValue extends string>(
+    prompt: string,
+    options: Array<SelectOption<TValue>>
+  ) => Promise<TValue>
 } {
   return {
     close: (): void => undefined,
-    select: async (
+    select: async <TValue extends string>(
       prompt: string,
-      options: Array<SelectOption<"admin" | "root">>
-    ): Promise<"admin" | "root"> => runTerminalSelect(prompt, options),
+      options: Array<SelectOption<TValue>>
+    ): Promise<TValue> => runTerminalSelect(prompt, options),
   }
 }

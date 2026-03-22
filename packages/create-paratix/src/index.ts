@@ -3,6 +3,7 @@ import { basename, join, resolve } from "node:path"
 import { createInterface } from "node:readline/promises"
 
 import { createTerminalSelect, type SelectFunction, type SelectOption } from "./promptUi.js"
+import { promptForAdminPublicKey as promptForScaffoldAdminPublicKey } from "./publicKeySelection.js"
 import {
   isValidInitialUserName,
   normalizeInitialUserName,
@@ -34,6 +35,7 @@ export {
 } from "./scaffoldConfig.js"
 export type { InitialUserConfig } from "./templates.js"
 type ScaffoldOptions = {
+  adminPublicKey?: string
   host?: string
   initialUser?: InitialUserConfig
   installer?: (projectDirectory: string, packageManager: PackageManager) => boolean
@@ -67,6 +69,7 @@ export function writeProjectFiles(projectDirectory: string, options?: ScaffoldOp
 
   const host = options?.host ?? "1.2.3.4"
   const initialUser = options?.initialUser ?? { kind: "admin", user: "admin" }
+  const adminPublicKey = options?.adminPublicKey
 
   const packageJson = {
     dependencies: {
@@ -90,7 +93,10 @@ export function writeProjectFiles(projectDirectory: string, options?: ScaffoldOp
   // eslint-disable-next-line security/detect-non-literal-fs-filename
   writeFileSync(join(projectDirectory, "package.json"), `${JSON.stringify(packageJson, null, 2)}\n`)
   // eslint-disable-next-line security/detect-non-literal-fs-filename
-  writeFileSync(join(projectDirectory, "server.ts"), createServerTemplate({ host, initialUser }))
+  writeFileSync(
+    join(projectDirectory, "server.ts"),
+    createServerTemplate({ adminPublicKey, host, initialUser })
+  )
   // eslint-disable-next-line security/detect-non-literal-fs-filename
   writeFileSync(join(projectDirectory, "tsconfig.json"), TSCONFIG_TEMPLATE)
   // eslint-disable-next-line security/detect-non-literal-fs-filename
@@ -220,6 +226,24 @@ export async function promptForInitialUserConfig(
   }
 }
 
+export async function promptForAdminPublicKey(
+  select?: SelectFunction<string>,
+  publicKeys?: Array<{ key: string; label: string; path: string }>
+): Promise<string | undefined> {
+  const terminalSelect = select == null ? createTerminalSelect() : null
+  const choose = select ?? terminalSelect?.select
+
+  if (choose == null) {
+    throw new Error("Interactive selection is unavailable.")
+  }
+
+  try {
+    return await promptForScaffoldAdminPublicKey(choose, publicKeys)
+  } finally {
+    terminalSelect?.close()
+  }
+}
+
 function validateProjectName(name: string | undefined): string {
   if (name == null || name === "") {
     exitWithMessage("Usage: create-paratix <project-name>")
@@ -273,7 +297,10 @@ function main(): void {
     const validatedHost = host == null ? await promptForHost() : validateHost(host)
     const initialUserConfig =
       initialUser == null ? await promptForInitialUserConfig() : parseInitialUserConfig(initialUser)
+    const adminPublicKey =
+      process.stdin.isTTY && process.stdout.isTTY ? await promptForAdminPublicKey() : undefined
     scaffoldProject(normalizedProjectName, pm, {
+      adminPublicKey,
       host: validatedHost,
       initialUser: initialUserConfig,
     })

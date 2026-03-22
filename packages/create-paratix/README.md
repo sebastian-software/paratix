@@ -44,7 +44,7 @@ Dependencies are installed automatically. If installation fails, run your packag
 cd my-server
 ```
 
-**Step 3 -- Edit `server.ts`** with your final hostname, admin username, public key, and the modules you want to apply.
+**Step 3 -- Review `server.ts`** with your final hostname, admin username, selected public key or placeholder, and the modules you want to apply.
 
 The scaffold also includes an explicit bootstrap switch driven by `PARATIX_FIRST_RUN`:
 
@@ -157,6 +157,7 @@ Standardmäßig fragt `create-paratix` interaktiv:
 1. Welche Domain oder IP soll als Zielhost in `server.ts` stehen?
 2. Ist der initiale SSH-User `root` oder ein Admin-User?
 3. Falls Admin-User: Wie heißt dieser User konkret?
+4. Soll ein vorhandener Public Key aus `~/.ssh` direkt übernommen werden?
 
 Im interaktiven Modus zeigt `create-paratix` dafür eine kurze Erklärung und eine Auswahl per Pfeiltasten:
 
@@ -174,6 +175,18 @@ pnpm create paratix my-server --host deploy.example.com --initial-user deploy
 ```
 
 Wichtig für den ersten echten Lauf: Das Scaffold liest `FIRST_RUN` aus `process.env.PARATIX_FIRST_RUN`. Für den Bootstrap rufst du Paratix explizit mit `--first-run` auf. Danach lässt du den Flag bei normalen Läufen weg; dann verwendet dasselbe Playbook Port `2222`, entfernt Port `22` aus der Firewall und kehrt zu strengem Host-Key-Checking zurück. Die Firewall-Freigabe für `2222` bleibt bewusst vor dem eigentlichen SSH-Portwechsel, damit Paratix nach `sshd.port(...)` sofort sicher reconnecten kann.
+
+### Public key bootstrap
+
+Im interaktiven Modus bietet `create-paratix` zusätzlich an, einen vorhandenen Public Key aus
+`~/.ssh` direkt in `server.ts` zu übernehmen.
+
+- Wenn du zustimmst und mehrere `.pub`-Dateien existieren, kannst du den gewünschten Key per
+  Pfeiltasten auswählen.
+- Wenn keine lesbaren `.pub`-Dateien gefunden werden, bleibt das bestehende Placeholder-Template
+  erhalten.
+- In nicht-interaktiven Aufrufen bleibt der Placeholder bewusst erhalten, damit der CLI-Vertrag
+  schlank bleibt.
 
 ### Host-key bootstrap
 

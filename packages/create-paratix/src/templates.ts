@@ -1,6 +1,7 @@
 export type InitialUserConfig = { kind: "admin"; user: string } | { kind: "root" }
 
 type ServerTemplateOptions = {
+  adminPublicKey?: string
   host: string
   initialUser: InitialUserConfig
 }
@@ -29,16 +30,24 @@ export const ENV_EXAMPLE_TEMPLATE = `# Server configuration
 # SSH_KEY_PATH=~/.ssh/id_ed25519
 `
 
-function createBaseServerHeader(
-  adminUserDeclaration: string,
-  host: string,
+type BaseServerHeaderOptions = {
+  adminPublicKey?: string
+  adminUserDeclaration: string
+  host: string
   sshUser: string
-): string {
+}
+
+function createBaseServerHeader({
+  adminPublicKey,
+  adminUserDeclaration,
+  host,
+  sshUser,
+}: BaseServerHeaderOptions): string {
   return `import { recipe, server } from "paratix";
 import { hostname, package as packages, service, ssh, sshd, ufw, user } from "paratix/modules";
 
 ${adminUserDeclaration}
-const adminPublicKey = "ssh-ed25519 REPLACE_ME_WITH_YOUR_PUBLIC_KEY";
+const adminPublicKey = ${JSON.stringify(adminPublicKey ?? "ssh-ed25519 REPLACE_ME_WITH_YOUR_PUBLIC_KEY")};
 const FIRST_RUN = process.env["PARATIX_FIRST_RUN"] === "true";
 const sshPorts = FIRST_RUN ? [22] : [2222];
 const firewallTcpPorts = FIRST_RUN ? [22, 2222, 80, 443] : [2222, 80, 443];
@@ -91,10 +100,14 @@ function createAdminRecipe(recipeName: string): string {
 `
 }
 
-function createHardenedAdminServerTemplate(host: string, initialAdminUser: string): string {
+function createHardenedAdminServerTemplate(
+  host: string,
+  initialAdminUser: string,
+  adminPublicKey?: string
+): string {
   const adminUserDeclaration = `const adminUser = "${initialAdminUser}";`
 
-  return `${createBaseServerHeader(adminUserDeclaration, host, "adminUser")}
+  return `${createBaseServerHeader({ adminPublicKey, adminUserDeclaration, host, sshUser: "adminUser" })}
 ${createAdminRecipe("admin-access")}
 ${createFirewallRecipe()}
     recipe("ssh-hardening", [
@@ -111,10 +124,10 @@ ${createFirewallRecipe()}
 `
 }
 
-function createBootstrapRootServerTemplate(host: string): string {
+function createBootstrapRootServerTemplate(host: string, adminPublicKey?: string): string {
   const adminUserDeclaration = 'const adminUser = "admin";'
 
-  return `${createBaseServerHeader(adminUserDeclaration, host, '"root"')}
+  return `${createBaseServerHeader({ adminPublicKey, adminUserDeclaration, host, sshUser: '"root"' })}
 ${createAdminRecipe("bootstrap-admin-user")}
 ${createFirewallRecipe()}
     // Transitional bootstrap mode:
@@ -137,6 +150,10 @@ ${createFirewallRecipe()}
 
 export function createServerTemplate(options: ServerTemplateOptions): string {
   return options.initialUser.kind === "root"
-    ? createBootstrapRootServerTemplate(options.host)
-    : createHardenedAdminServerTemplate(options.host, options.initialUser.user)
+    ? createBootstrapRootServerTemplate(options.host, options.adminPublicKey)
+    : createHardenedAdminServerTemplate(
+        options.host,
+        options.initialUser.user,
+        options.adminPublicKey
+      )
 }

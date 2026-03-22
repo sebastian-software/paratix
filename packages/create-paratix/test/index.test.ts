@@ -11,6 +11,7 @@ import {
   normalizeProjectName,
   parseCliArguments,
   parseInitialUserConfig,
+  promptForAdminPublicKey,
   promptForHost,
   promptForInitialUserConfig,
   scaffoldProject,
@@ -289,6 +290,75 @@ describe("promptForHost", () => {
   })
 })
 
+describe("promptForAdminPublicKey", () => {
+  beforeEach(() => {
+    vi.spyOn(console, "error").mockImplementation((...args) => {
+      void args
+    })
+  })
+
+  afterEach(() => {
+    vi.restoreAllMocks()
+  })
+
+  it("keeps the placeholder when the user declines local key reuse", async () => {
+    const select = vi.fn().mockResolvedValueOnce("placeholder")
+
+    await expect(promptForAdminPublicKey(select)).resolves.toBeUndefined()
+    expect(select).toHaveBeenCalledTimes(1)
+    expect(select).toHaveBeenNthCalledWith(
+      1,
+      "How should create-paratix configure the admin SSH public key?",
+      [
+        {
+          description:
+            "Read a public key from ~/.ssh and embed it directly into server.ts for the bootstrap admin user.",
+          label: "Use local public key",
+          value: "local",
+        },
+        {
+          description:
+            "Keep the placeholder in server.ts and paste your public key manually before the first apply.",
+          label: "Keep placeholder",
+          value: "placeholder",
+        },
+      ]
+    )
+  })
+
+  it("selects from multiple local public keys via the cursor flow", async () => {
+    const select = vi
+      .fn()
+      .mockResolvedValueOnce("local")
+      .mockResolvedValueOnce("/tmp/id_ed25519.pub")
+
+    await expect(
+      promptForAdminPublicKey(select, [
+        {
+          key: "ssh-rsa AAAA example-rsa",
+          label: "id_rsa.pub",
+          path: "/tmp/id_rsa.pub",
+        },
+        {
+          key: "ssh-ed25519 AAAA example-ed25519",
+          label: "id_ed25519.pub",
+          path: "/tmp/id_ed25519.pub",
+        },
+      ])
+    ).resolves.toBe("ssh-ed25519 AAAA example-ed25519")
+    expect(select).toHaveBeenCalledTimes(2)
+  })
+
+  it("falls back to the placeholder when no readable local public keys exist", async () => {
+    const select = vi.fn().mockResolvedValueOnce("local")
+
+    await expect(promptForAdminPublicKey(select, [])).resolves.toBeUndefined()
+    expect(console.error).toHaveBeenCalledWith(
+      "No readable public keys were found in ~/.ssh. Keeping the placeholder in server.ts."
+    )
+  })
+})
+
 const TEST_DIR = resolve("/tmp/create-paratix-test")
 
 describe("writeProjectFiles", () => {
@@ -409,6 +479,9 @@ describe("writeProjectFiles", () => {
     const content = readFileSync(join(TEST_DIR, "server.ts"), "utf8")
 
     expect(content).toContain('const adminUser = "admin";')
+    expect(content).toContain(
+      'const adminPublicKey = "ssh-ed25519 REPLACE_ME_WITH_YOUR_PUBLIC_KEY";'
+    )
     expect(content).toContain('const FIRST_RUN = process.env["PARATIX_FIRST_RUN"] === "true";')
     expect(content).toContain('host: "1.2.3.4"')
     expect(content).toContain("user: adminUser")
@@ -432,6 +505,21 @@ describe("writeProjectFiles", () => {
     expect(content).toContain("user: adminUser")
     expect(content).toContain('recipe("admin-access"')
     expect(content).not.toContain('user: "root"')
+  })
+
+  it("generated server.ts embeds a selected local public key directly", () => {
+    writeProjectFiles(TEST_DIR, {
+      adminPublicKey: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIBExample generated@test",
+      host: "deploy.example.com",
+      initialUser: { kind: "admin", user: "deploy" },
+    })
+
+    const content = readFileSync(join(TEST_DIR, "server.ts"), "utf8")
+
+    expect(content).toContain(
+      'const adminPublicKey = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIBExample generated@test";'
+    )
+    expect(content).not.toContain("REPLACE_ME_WITH_YOUR_PUBLIC_KEY")
   })
 
   it("generated server.ts includes an explicit host-key bootstrap for the first apply:dry", () => {
