@@ -4,12 +4,28 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 
 import {
   isDirectExecution,
+  isValidInitialUserName,
   isValidProjectName,
   normalizeProjectName,
   parseCliArguments,
+  parseInitialUserConfig,
+  promptForInitialUserConfig,
   scaffoldProject,
   writeProjectFiles,
 } from "../src/index.js"
+
+async function expectProcessExit(
+  callback: () => Promise<void> | void,
+  expectedCode = 1
+): Promise<void> {
+  const exitError = new Error(`process.exit:${expectedCode}`)
+  const exitSpy = vi.spyOn(process, "exit").mockImplementation(((code?: number) => {
+    throw code === expectedCode ? exitError : new Error(`process.exit:${String(code)}`)
+  }) as typeof process.exit)
+
+  await expect(Promise.resolve().then(callback)).rejects.toThrow(exitError.message)
+  expect(exitSpy).toHaveBeenCalledWith(expectedCode)
+}
 
 describe("isValidProjectName", () => {
   // These tests document that invalid project names must be rejected.
@@ -84,18 +100,92 @@ describe("isDirectExecution (process.argv[1] regression)", () => {
 })
 
 describe("parseCliArguments", () => {
-  it("uses the hardened admin mode by default", () => {
+  it("uses interactive initial-user selection by default", () => {
     expect(parseCliArguments(["my-server"])).toStrictEqual({
-      mode: "hardened-admin",
+      initialUser: undefined,
       projectName: "my-server",
     })
   })
 
-  it("supports the explicit bootstrap-root mode", () => {
-    expect(parseCliArguments(["my-server", "--bootstrap-root"])).toStrictEqual({
-      mode: "bootstrap-root",
+  it("supports an explicit root initial user", () => {
+    expect(parseCliArguments(["my-server", "--initial-user", "root"])).toStrictEqual({
+      initialUser: "root",
       projectName: "my-server",
     })
+  })
+
+  it("supports an explicit admin initial user", () => {
+    expect(parseCliArguments(["my-server", "--initial-user", "deploy"])).toStrictEqual({
+      initialUser: "deploy",
+      projectName: "my-server",
+    })
+  })
+
+  it("rejects the removed bootstrap-root flag with a migration hint", async () => {
+    vi.spyOn(console, "error").mockImplementation((...args) => {
+      void args
+    })
+
+    await expectProcessExit(() => {
+      parseCliArguments(["my-server", "--bootstrap-root"])
+    })
+
+    expect(console.error).toHaveBeenCalledWith(
+      'Error: "--bootstrap-root" was removed. Use "--initial-user root" instead.'
+    )
+  })
+})
+
+describe("initial user parsing", () => {
+  it("accepts valid lowercase Linux usernames", () => {
+    expect(isValidInitialUserName("deploy")).toBe(true)
+    expect(isValidInitialUserName("admin_user")).toBe(true)
+    expect(isValidInitialUserName("root")).toBe(true)
+  })
+
+  it("rejects invalid initial usernames", () => {
+    expect(isValidInitialUserName("Admin")).toBe(false)
+    expect(isValidInitialUserName("bad name")).toBe(false)
+    expect(isValidInitialUserName("")).toBe(false)
+  })
+
+  it("maps root to the explicit root config", () => {
+    expect(parseInitialUserConfig(" root ")).toStrictEqual({ kind: "root" })
+  })
+
+  it("maps other valid users to the admin config", () => {
+    expect(parseInitialUserConfig(" deploy ")).toStrictEqual({ kind: "admin", user: "deploy" })
+  })
+})
+
+describe("promptForInitialUserConfig", () => {
+  beforeEach(() => {
+    vi.spyOn(console, "error").mockImplementation((...args) => {
+      void args
+    })
+  })
+
+  afterEach(() => {
+    vi.restoreAllMocks()
+  })
+
+  it("supports the interactive root flow", async () => {
+    const prompt = vi.fn().mockResolvedValueOnce("root")
+
+    await expect(promptForInitialUserConfig(prompt)).resolves.toStrictEqual({ kind: "root" })
+    expect(prompt).toHaveBeenCalledTimes(1)
+    expect(prompt).toHaveBeenCalledWith("Initial SSH user? [root/admin]: ")
+  })
+
+  it("supports the interactive admin flow with a concrete username", async () => {
+    const prompt = vi.fn().mockResolvedValueOnce("admin").mockResolvedValueOnce("deploy")
+
+    await expect(promptForInitialUserConfig(prompt)).resolves.toStrictEqual({
+      kind: "admin",
+      user: "deploy",
+    })
+    expect(prompt).toHaveBeenNthCalledWith(1, "Initial SSH user? [root/admin]: ")
+    expect(prompt).toHaveBeenNthCalledWith(2, "Admin username: ")
   })
 })
 
@@ -227,6 +317,17 @@ describe("writeProjectFiles", () => {
     expect(content).toContain('PasswordAuthentication: "no"')
   })
 
+  it("generated server.ts uses an explicitly provided admin username", () => {
+    writeProjectFiles(TEST_DIR, { initialUser: { kind: "admin", user: "deploy" } })
+
+    const content = readFileSync(join(TEST_DIR, "server.ts"), "utf8")
+
+    expect(content).toContain('const adminUser = "deploy";')
+    expect(content).toContain("user: adminUser")
+    expect(content).toContain('recipe("admin-access"')
+    expect(content).not.toContain('user: "root"')
+  })
+
   it("generated server.ts includes an explicit host-key bootstrap for the first apply:dry", () => {
     writeProjectFiles(TEST_DIR)
 
@@ -272,8 +373,8 @@ describe("writeProjectFiles", () => {
     expect(firewallIndex).toBeLessThan(sshHardeningIndex)
   })
 
-  it("generated server.ts supports an explicit bootstrap-root transition mode", () => {
-    writeProjectFiles(TEST_DIR, { mode: "bootstrap-root" })
+  it("generated server.ts supports an explicit root bootstrap transition mode", () => {
+    writeProjectFiles(TEST_DIR, { initialUser: { kind: "root" } })
 
     const content = readFileSync(join(TEST_DIR, "server.ts"), "utf8")
 
@@ -286,10 +387,11 @@ describe("writeProjectFiles", () => {
     expect(content).toContain(
       'expectedHostFingerprint: "SHA256:REPLACE_ME_WITH_YOUR_HOST_FINGERPRINT"'
     )
+    expect(content).not.toContain("--bootstrap-root")
   })
 
-  it("generated bootstrap-root server.ts also opens firewall port 2222 before ssh-hardening-transition", () => {
-    writeProjectFiles(TEST_DIR, { mode: "bootstrap-root" })
+  it("generated root-bootstrap server.ts also opens firewall port 2222 before ssh-hardening-transition", () => {
+    writeProjectFiles(TEST_DIR, { initialUser: { kind: "root" } })
 
     const content = readFileSync(join(TEST_DIR, "server.ts"), "utf8")
     const firewallIndex = content.indexOf('recipe("firewall"')
@@ -342,7 +444,7 @@ describe("scaffoldProject", () => {
     const result = scaffoldProject(
       projectName,
       { command: "pnpm install", name: "pnpm" },
-      { installer, mode: "bootstrap-root" }
+      { initialUser: { kind: "root" }, installer }
     )
 
     expect(result).toBe(true)
@@ -368,7 +470,7 @@ describe("scaffoldProject", () => {
     const result = scaffoldProject(
       projectName,
       { command: "pnpm install", name: "pnpm" },
-      { installer, mode: "hardened-admin" }
+      { initialUser: { kind: "admin", user: "deploy" }, installer }
     )
 
     expect(result).toBe(false)

@@ -1,6 +1,6 @@
 # create-paratix
 
-Scaffolds a new [Paratix](https://github.com/sebastian-software/paratix) server project. The default template assumes a dedicated admin user and a final hardened SSH setup. If you must bootstrap from `root`, that mode is available explicitly via `--bootstrap-root`.
+Scaffolds a new [Paratix](https://github.com/sebastian-software/paratix) server project. The CLI now asks which SSH user exists initially on the target server and generates the matching bootstrap path: explicit `root` bootstrap or direct admin-user hardening.
 
 ## Quick Start
 
@@ -20,20 +20,20 @@ yarn create paratix my-server
 bunx create-paratix my-server
 ```
 
-Optional transitional root bootstrap mode:
+Optional non-interactive initial-user selection:
 
 ```sh
 # npm
-npm create paratix my-server -- --bootstrap-root
+npm create paratix my-server -- --initial-user root
 
 # pnpm
-pnpm create paratix my-server --bootstrap-root
+pnpm create paratix my-server --initial-user root
 
 # yarn
-yarn create paratix my-server --bootstrap-root
+yarn create paratix my-server --initial-user deploy
 
 # bun
-bunx create-paratix my-server --bootstrap-root
+bunx create-paratix my-server --initial-user deploy
 ```
 
 **Step 2 -- Enter the directory**
@@ -77,7 +77,12 @@ npm run apply
 
 ## Writing Your Playbook
 
-`server.ts` exports a server definition. The default scaffolded file uses the hardened admin mode:
+`server.ts` exports a server definition. The generated file depends on the initial SSH user you choose:
+
+- `root`: Bootstrap once via `root`, create a dedicated admin user, then switch `ssh.user` to that admin user and disable root login.
+- `admin`: Connect directly as the named admin user and scaffold the hardened end state immediately.
+
+The direct admin-user path looks like this:
 
 ```typescript
 import { server, recipe } from "paratix"
@@ -136,7 +141,26 @@ export default server({
 })
 ```
 
-Wenn du mit einem frischen Server startest, auf dem nur `root` per SSH erreichbar ist, verwende den expliziten Übergangsmodus `--bootstrap-root`. Dieses Template bleibt bewusst als temporärer Bootstrap markiert, erstellt den dedizierten Admin-User und lässt Root-Login nur vorübergehend auf `prohibit-password`, bis du `ssh.user` auf den Admin-User umgestellt hast.
+Wenn dein Server initial nur `root` per SSH anbietet, wähle im Prompt `root` oder rufe das Scaffold nicht-interaktiv mit `--initial-user root` auf. Dieses Template bleibt bewusst als temporärer Bootstrap markiert, erstellt den dedizierten Admin-User und lässt Root-Login nur vorübergehend auf `prohibit-password`, bis du `ssh.user` auf den Admin-User umgestellt hast.
+
+Wenn bereits ein Admin-User wie `deploy`, `ubuntu` oder `admin` existiert, wähle diesen Namen direkt. Dann erzeugt `create-paratix` keinen Root-Bootstrap-Pfad, sondern scaffoldet sofort den gehärteten Zielzustand für genau diesen User.
+
+### Initial user selection
+
+Standardmäßig fragt `create-paratix` interaktiv:
+
+1. Ist der initiale SSH-User `root` oder ein Admin-User?
+2. Falls Admin-User: Wie heißt dieser User konkret?
+
+Nicht-interaktiv funktioniert derselbe Vertrag über `--initial-user`:
+
+```sh
+# Root bootstrap
+pnpm create paratix my-server --initial-user root
+
+# Existing admin user
+pnpm create paratix my-server --initial-user deploy
+```
 
 Wichtig für den ersten echten Lauf: Das Scaffold setzt die Firewall-Freigabe für `2222` bewusst vor den eigentlichen SSH-Portwechsel. Paratix reconnectet nach `sshd.port(...)` sofort auf den neuen Port; ohne diese Reihenfolge würde der erste Apply leicht an einer noch geschlossenen Firewall scheitern.
 

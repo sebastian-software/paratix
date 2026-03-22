@@ -1,174 +1,31 @@
-import { execSync } from "node:child_process"
 import { existsSync, mkdirSync, writeFileSync } from "node:fs"
 import { basename, join, resolve } from "node:path"
+import { createInterface } from "node:readline/promises"
 
-const MS_PER_MINUTE = 60_000
-const INSTALL_TIMEOUT_MS = 120_000
+import {
+  detectPackageManager,
+  installDependencies,
+  type PackageManager,
+  printPartialSuccessMessage,
+  printSuccessMessage,
+} from "./scaffoldRuntime.js"
+import {
+  createServerTemplate,
+  ENV_EXAMPLE_TEMPLATE,
+  GITIGNORE_TEMPLATE,
+  type InitialUserConfig,
+  TSCONFIG_TEMPLATE,
+} from "./templates.js"
 
-export type ScaffoldMode = "bootstrap-root" | "hardened-admin"
-
-const HARDENED_ADMIN_SERVER_TEMPLATE = `import { server, recipe } from "paratix";
-import { package as pkg, hostname, sshd, ssh, ufw, service, user } from "paratix/modules";
-
-const adminUser = "admin";
-const adminPublicKey = "ssh-ed25519 REPLACE_ME_WITH_YOUR_PUBLIC_KEY";
-
-export default server({
-  name: "my-server",
-  host: "1.2.3.4",
-  ssh: {
-    user: adminUser,
-    ports: [22],
-    privateKey: "~/.ssh/id_ed25519", // "~" is expanded by Paratix
-    // Initial host-key bootstrap for fresh servers:
-    // - keep this explicit accept-new mode only for the first verified connection
-    // - then pin the host key and switch strictHostKeyChecking back to "yes"
-    strictHostKeyChecking: "accept-new",
-    // expectedHostFingerprint: "SHA256:REPLACE_ME_WITH_YOUR_HOST_FINGERPRINT",
-    // expectedHostPublicKey: "ssh-ed25519 REPLACE_ME_WITH_YOUR_HOST_PUBLIC_KEY",
-  },
-  env: {
-    SERVER_NAME: "my-server",
-    SSH_PORT: 2222,
-  },
-  run: [
-    hostname.set("my-server"),
-    pkg.upgrade("2026-03-01"),
-    pkg.installed("nginx", "curl", "htop"),
-
-    recipe("admin-access", [
-      user.present(adminUser, {
-        groups: ["sudo"],
-        shell: "/bin/bash",
-      }),
-      ssh.authorizedKeys(adminUser, adminPublicKey),
-    ]),
-
-    recipe("firewall", [
-      ufw.rule("allow", [2222, 80, 443]),
-      ufw.enabled(),
-    ]),
-
-    recipe("ssh-hardening", [
-      sshd.port(2222),
-      sshd.config({
-        PermitRootLogin: "no",
-        PasswordAuthentication: "no",
-      }),
-    ], {
-      signals: [service.restart("sshd")],
-    }),
-  ],
-});
-`
-
-const BOOTSTRAP_ROOT_SERVER_TEMPLATE = `import { server, recipe } from "paratix";
-import { package as pkg, hostname, sshd, ssh, ufw, service, user } from "paratix/modules";
-
-const adminUser = "admin";
-const adminPublicKey = "ssh-ed25519 REPLACE_ME_WITH_YOUR_PUBLIC_KEY";
-
-export default server({
-  name: "my-server",
-  host: "1.2.3.4",
-  ssh: {
-    user: "root",
-    ports: [22],
-    privateKey: "~/.ssh/id_ed25519", // "~" is expanded by Paratix
-    // Initial host-key bootstrap for fresh servers:
-    // - keep this explicit accept-new mode only for the first verified connection
-    // - then pin the host key and switch strictHostKeyChecking back to "yes"
-    strictHostKeyChecking: "accept-new",
-    // expectedHostFingerprint: "SHA256:REPLACE_ME_WITH_YOUR_HOST_FINGERPRINT",
-    // expectedHostPublicKey: "ssh-ed25519 REPLACE_ME_WITH_YOUR_HOST_PUBLIC_KEY",
-  },
-  env: {
-    SERVER_NAME: "my-server",
-    SSH_PORT: 2222,
-  },
-  run: [
-    hostname.set("my-server"),
-    pkg.upgrade("2026-03-01"),
-    pkg.installed("nginx", "curl", "htop"),
-
-    recipe("bootstrap-admin-user", [
-      user.present(adminUser, {
-        groups: ["sudo"],
-        shell: "/bin/bash",
-      }),
-      ssh.authorizedKeys(adminUser, adminPublicKey),
-    ]),
-
-    recipe("firewall", [
-      ufw.rule("allow", [2222, 80, 443]),
-      ufw.enabled(),
-    ]),
-
-    // Transitional bootstrap mode:
-    // 1. Run this once as root to create the dedicated admin user.
-    // 2. Switch ssh.user to admin.
-    // 3. Replace PermitRootLogin with "no" or regenerate without --bootstrap-root.
-    recipe("ssh-hardening-transition", [
-      sshd.port(2222),
-      sshd.config({
-        PermitRootLogin: "prohibit-password",
-        PasswordAuthentication: "no",
-      }),
-    ], {
-      signals: [service.restart("sshd")],
-    }),
-  ],
-});
-`
-
-const TSCONFIG_TEMPLATE = `{
-  "compilerOptions": {
-    "target": "ES2024",
-    "module": "NodeNext",
-    "moduleResolution": "NodeNext",
-    "strict": true,
-    "esModuleInterop": true,
-    "skipLibCheck": true
-  },
-  "include": ["*.ts"]
-}
-`
-
-const GITIGNORE_TEMPLATE = `node_modules/
-dist/
-.env
-*.log
-`
-
-const ENV_EXAMPLE_TEMPLATE = `# Server configuration
-# SUDO_PASSWORD=your-sudo-password
-# SSH_KEY_PATH=~/.ssh/id_ed25519
-`
-
-type PackageManager = { command: string; name: string }
+export type { InitialUserConfig } from "./templates.js"
 type ScaffoldOptions = {
+  initialUser?: InitialUserConfig
   installer?: (projectDirectory: string, packageManager: PackageManager) => boolean
-  mode?: ScaffoldMode
 }
 
-function createServerTemplate(mode: ScaffoldMode): string {
-  return mode === "bootstrap-root" ? BOOTSTRAP_ROOT_SERVER_TEMPLATE : HARDENED_ADMIN_SERVER_TEMPLATE
-}
-
-function detectPackageManager(): PackageManager {
-  const agent = process.env.npm_config_user_agent ?? ""
-
-  if (agent.startsWith("pnpm")) {
-    return { command: "pnpm install", name: "pnpm" }
-  }
-  if (agent.startsWith("yarn")) {
-    return { command: "yarn install", name: "yarn" }
-  }
-  if (agent.startsWith("bun")) {
-    return { command: "bun install", name: "bun" }
-  }
-  return { command: "npm install", name: "npm" }
-}
+type PromptFunction = (question: string) => Promise<string>
+const NOOP = (): void => undefined
+const CLI_USAGE = "Usage: create-paratix <project-name> [--initial-user <root|name>]"
 
 export function writeProjectFiles(projectDirectory: string, options?: ScaffoldOptions): void {
   // eslint-disable-next-line security/detect-non-literal-fs-filename
@@ -176,7 +33,7 @@ export function writeProjectFiles(projectDirectory: string, options?: ScaffoldOp
   // eslint-disable-next-line security/detect-non-literal-fs-filename
   mkdirSync(join(projectDirectory, "files"), { recursive: true })
 
-  const mode = options?.mode ?? "hardened-admin"
+  const initialUser = options?.initialUser ?? { kind: "admin", user: "admin" }
 
   const packageJson = {
     dependencies: {
@@ -200,7 +57,7 @@ export function writeProjectFiles(projectDirectory: string, options?: ScaffoldOp
   // eslint-disable-next-line security/detect-non-literal-fs-filename
   writeFileSync(join(projectDirectory, "package.json"), `${JSON.stringify(packageJson, null, 2)}\n`)
   // eslint-disable-next-line security/detect-non-literal-fs-filename
-  writeFileSync(join(projectDirectory, "server.ts"), createServerTemplate(mode))
+  writeFileSync(join(projectDirectory, "server.ts"), createServerTemplate(initialUser))
   // eslint-disable-next-line security/detect-non-literal-fs-filename
   writeFileSync(join(projectDirectory, "tsconfig.json"), TSCONFIG_TEMPLATE)
   // eslint-disable-next-line security/detect-non-literal-fs-filename
@@ -209,53 +66,6 @@ export function writeProjectFiles(projectDirectory: string, options?: ScaffoldOp
   writeFileSync(join(projectDirectory, ".env.example"), ENV_EXAMPLE_TEMPLATE)
   // eslint-disable-next-line security/detect-non-literal-fs-filename
   writeFileSync(join(projectDirectory, "files", ".gitkeep"), "")
-}
-
-function installDependencies(projectDirectory: string, pm: PackageManager): boolean {
-  console.log(`Installing dependencies with ${pm.name}...`)
-  try {
-    execSync(pm.command, { cwd: projectDirectory, stdio: "inherit", timeout: INSTALL_TIMEOUT_MS })
-    return true
-  } catch (error) {
-    if (error instanceof Error && "signal" in error && error.signal === "SIGTERM") {
-      console.error(
-        `Installation timed out after ${Math.round(INSTALL_TIMEOUT_MS / MS_PER_MINUTE)} minutes.`
-      )
-    } else {
-      const message = error instanceof Error ? error.message : String(error)
-      console.error(`Failed to install dependencies: ${message}`)
-    }
-    console.error("Run install manually.")
-    return false
-  }
-}
-
-function printSuccessMessage(projectName: string, pm: PackageManager): void {
-  const prefix = pm.name === "npm" ? "npm run" : pm.name
-  console.log(`
-Project created successfully!
-
-  cd ${projectName}
-
-Edit server.ts with your server details, then:
-
-  ${prefix} apply:dry
-  ${prefix} apply
-`)
-}
-
-function printPartialSuccessMessage(projectName: string, pm: PackageManager): void {
-  const prefix = pm.name === "npm" ? "npm run" : pm.name
-  console.log(`
-Project files created, but dependency installation failed.
-
-  cd ${projectName}
-
-Install dependencies manually, then run:
-
-  ${prefix} apply:dry
-  ${prefix} apply
-`)
 }
 
 export function isValidProjectName(name: string): boolean {
@@ -267,27 +77,59 @@ export function normalizeProjectName(name: string): string {
   return name.trim()
 }
 
+export function isValidInitialUserName(name: string): boolean {
+  return /^(?:root|[a-z_][a-z0-9_\x2d]*\$?)$/v.test(name)
+}
+
+function normalizeInitialUserName(name: string): string {
+  return name.trim()
+}
+
 function derivePackageName(projectDirectory: string): string {
   return basename(projectDirectory.replaceAll("\\", "/"))
 }
 
+function exitWithMessage(message: string): never {
+  console.error(message)
+  // eslint-disable-next-line node/no-process-exit
+  process.exit(1)
+}
+
+function parseInitialUserArgument(argv: string[], index: number): string {
+  const value = argv.at(index + 1)
+  if (value == null) {
+    exitWithMessage('Error: Missing value for "--initial-user".')
+  }
+  if (value.startsWith("--")) {
+    exitWithMessage('Error: Missing value for "--initial-user".')
+  }
+  return value
+}
+
+function handleUnknownOption(argument: string): never {
+  if (argument === "--bootstrap-root") {
+    exitWithMessage('Error: "--bootstrap-root" was removed. Use "--initial-user root" instead.')
+  }
+  exitWithMessage(`Error: Unknown option "${argument}".`)
+}
+
 export function parseCliArguments(argv: string[]): {
-  mode: ScaffoldMode
+  initialUser: string | undefined
   projectName: string | undefined
 } {
-  let mode: ScaffoldMode = "hardened-admin"
+  let initialUser: string | undefined
   let projectName: string | undefined
 
-  for (const argument of argv) {
-    if (argument === "--bootstrap-root") {
-      mode = "bootstrap-root"
+  for (let index = 0; index < argv.length; index++) {
+    const argument = argv[index]
+    if (argument === "--initial-user") {
+      initialUser = parseInitialUserArgument(argv, index)
+      index++
       continue
     }
 
     if (argument.startsWith("--")) {
-      console.error(`Error: Unknown option "${argument}".`)
-      // eslint-disable-next-line node/no-process-exit
-      process.exit(1)
+      handleUnknownOption(argument)
     }
 
     if (projectName == null) {
@@ -295,29 +137,101 @@ export function parseCliArguments(argv: string[]): {
       continue
     }
 
-    console.error("Usage: create-paratix <project-name> [--bootstrap-root]")
-    // eslint-disable-next-line node/no-process-exit
-    process.exit(1)
+    exitWithMessage(CLI_USAGE)
   }
 
-  return { mode, projectName }
+  return { initialUser, projectName }
+}
+
+export function parseInitialUserConfig(value: string): InitialUserConfig {
+  const normalizedValue = normalizeInitialUserName(value)
+  if (!isValidInitialUserName(normalizedValue)) {
+    exitWithMessage(
+      `Error: Invalid initial user "${value}" — use "root" or a valid lowercase Linux username.`
+    )
+  }
+
+  return normalizedValue === "root" ? { kind: "root" } : { kind: "admin", user: normalizedValue }
+}
+
+function createTerminalPrompt(): { close: () => void; prompt: PromptFunction } {
+  const readline = createInterface({ input: process.stdin, output: process.stdout })
+  return {
+    close: (): void => {
+      readline.close()
+    },
+    prompt: async (question: string): Promise<string> => readline.question(question),
+  }
+}
+
+function createPromptSession(prompt?: PromptFunction): {
+  ask: PromptFunction
+  closePrompt: () => void
+} {
+  const terminalPrompt = prompt == null ? createTerminalPrompt() : null
+  if (terminalPrompt != null) {
+    return { ask: terminalPrompt.prompt, closePrompt: terminalPrompt.close }
+  }
+  if (prompt == null) {
+    throw new Error("Interactive prompt is unavailable.")
+  }
+  return { ask: prompt, closePrompt: NOOP }
+}
+
+async function promptForAdminUser(
+  ask: PromptFunction,
+  closePrompt: () => void
+): Promise<InitialUserConfig> {
+  // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition
+  while (true) {
+    // eslint-disable-next-line no-await-in-loop
+    const adminUser = normalizeInitialUserName(await ask("Admin username: "))
+    if (isValidInitialUserName(adminUser) && adminUser !== "root") {
+      closePrompt()
+      return { kind: "admin", user: adminUser }
+    }
+    console.error(
+      'Error: Invalid admin username. Use a valid lowercase Linux username other than "root".'
+    )
+  }
+}
+
+export async function promptForInitialUserConfig(
+  prompt?: PromptFunction
+): Promise<InitialUserConfig> {
+  const { ask, closePrompt } = createPromptSession(prompt)
+
+  /* eslint-disable no-await-in-loop */
+  // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition
+  while (true) {
+    const initialUserType = normalizeInitialUserName(
+      await ask("Initial SSH user? [root/admin]: ")
+    ).toLowerCase()
+
+    if (initialUserType === "root") {
+      closePrompt()
+      return { kind: "root" }
+    }
+    if (initialUserType === "admin") {
+      return promptForAdminUser(ask, closePrompt)
+    }
+
+    console.error('Error: Please answer "root" or "admin".')
+  }
+  /* eslint-enable no-await-in-loop */
 }
 
 function validateProjectName(name: string | undefined): string {
   if (name == null || name === "") {
-    console.error("Usage: create-paratix <project-name>")
-    // eslint-disable-next-line node/no-process-exit
-    process.exit(1)
+    exitWithMessage("Usage: create-paratix <project-name>")
   }
 
   const normalizedName = normalizeProjectName(name)
 
   if (!isValidProjectName(normalizedName)) {
-    console.error(
+    exitWithMessage(
       `Error: Invalid project name "${name}" — use only lowercase letters, numbers, and hyphens.`
     )
-    // eslint-disable-next-line node/no-process-exit
-    process.exit(1)
   }
 
   return normalizedName
@@ -332,9 +246,7 @@ export function scaffoldProject(
   const projectDirectory = resolve(normalizedProjectName)
   // eslint-disable-next-line security/detect-non-literal-fs-filename
   if (existsSync(projectDirectory)) {
-    console.error(`Error: Directory "${normalizedProjectName}" already exists.`)
-    // eslint-disable-next-line node/no-process-exit
-    process.exit(1)
+    exitWithMessage(`Error: Directory "${normalizedProjectName}" already exists.`)
   }
 
   console.log(`Creating Paratix project in ${projectDirectory}...`)
@@ -353,12 +265,19 @@ export function scaffoldProject(
 }
 
 function main(): void {
-  const { mode, projectName } = parseCliArguments(process.argv.slice(2))
+  const { initialUser, projectName } = parseCliArguments(process.argv.slice(2))
 
   const normalizedProjectName = validateProjectName(projectName)
 
   const pm = detectPackageManager()
-  scaffoldProject(normalizedProjectName, pm, { mode })
+  void (async () => {
+    const initialUserConfig =
+      initialUser == null ? await promptForInitialUserConfig() : parseInitialUserConfig(initialUser)
+    scaffoldProject(normalizedProjectName, pm, { initialUser: initialUserConfig })
+  })().catch((error: unknown) => {
+    console.error(error instanceof Error ? error.message : String(error))
+    process.exitCode = 1
+  })
 }
 
 // Only run when executed directly, not when imported (e.g. in tests)
