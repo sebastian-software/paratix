@@ -107,6 +107,8 @@ describe("isDirectExecution (process.argv[1] regression)", () => {
 describe("parseCliArguments", () => {
   it("uses interactive initial-user selection by default", () => {
     expect(parseCliArguments(["my-server"])).toStrictEqual({
+      adminPublicKey: undefined,
+      adminPublicKeyFile: undefined,
       host: undefined,
       initialUser: undefined,
       projectName: "my-server",
@@ -115,6 +117,8 @@ describe("parseCliArguments", () => {
 
   it("supports an explicit host value", () => {
     expect(parseCliArguments(["my-server", "--host", "example.com"])).toStrictEqual({
+      adminPublicKey: undefined,
+      adminPublicKeyFile: undefined,
       host: "example.com",
       initialUser: undefined,
       projectName: "my-server",
@@ -123,6 +127,8 @@ describe("parseCliArguments", () => {
 
   it("supports an explicit root initial user", () => {
     expect(parseCliArguments(["my-server", "--initial-user", "root"])).toStrictEqual({
+      adminPublicKey: undefined,
+      adminPublicKeyFile: undefined,
       host: undefined,
       initialUser: "root",
       projectName: "my-server",
@@ -131,10 +137,60 @@ describe("parseCliArguments", () => {
 
   it("supports an explicit admin initial user", () => {
     expect(parseCliArguments(["my-server", "--initial-user", "deploy"])).toStrictEqual({
+      adminPublicKey: undefined,
+      adminPublicKeyFile: undefined,
       host: undefined,
       initialUser: "deploy",
       projectName: "my-server",
     })
+  })
+
+  it("supports an explicit admin public key", () => {
+    expect(
+      parseCliArguments([
+        "my-server",
+        "--admin-public-key",
+        "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAITest generated@test",
+      ])
+    ).toStrictEqual({
+      adminPublicKey: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAITest generated@test",
+      adminPublicKeyFile: undefined,
+      host: undefined,
+      initialUser: undefined,
+      projectName: "my-server",
+    })
+  })
+
+  it("supports an explicit admin public key file", () => {
+    expect(
+      parseCliArguments(["my-server", "--admin-public-key-file", "/tmp/admin.pub"])
+    ).toStrictEqual({
+      adminPublicKey: undefined,
+      adminPublicKeyFile: "/tmp/admin.pub",
+      host: undefined,
+      initialUser: undefined,
+      projectName: "my-server",
+    })
+  })
+
+  it("rejects passing both admin public key flags together", async () => {
+    vi.spyOn(console, "error").mockImplementation((...args) => {
+      void args
+    })
+
+    await expectProcessExit(() => {
+      parseCliArguments([
+        "my-server",
+        "--admin-public-key",
+        "ssh-ed25519 AAAA test",
+        "--admin-public-key-file",
+        "/tmp/admin.pub",
+      ])
+    })
+
+    expect(console.error).toHaveBeenCalledWith(
+      'Error: Use either "--admin-public-key" or "--admin-public-key-file", not both.'
+    )
   })
 
   it("rejects the removed bootstrap-root flag with a migration hint", async () => {
@@ -520,6 +576,18 @@ describe("writeProjectFiles", () => {
       'const adminPublicKey = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIBExample generated@test";'
     )
     expect(content).not.toContain("REPLACE_ME_WITH_YOUR_PUBLIC_KEY")
+  })
+
+  it("generated server.ts also embeds a CLI-supplied public key directly", () => {
+    writeProjectFiles(TEST_DIR, {
+      adminPublicKey: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAICli supplied@test",
+    })
+
+    const content = readFileSync(join(TEST_DIR, "server.ts"), "utf8")
+
+    expect(content).toContain(
+      'const adminPublicKey = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAICli supplied@test";'
+    )
   })
 
   it("generated server.ts includes an explicit host-key bootstrap for the first apply:dry", () => {

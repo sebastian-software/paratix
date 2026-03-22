@@ -10,6 +10,8 @@ export type LocalPublicKey = {
   path: string
 }
 
+type ExitWithMessage = (message: string) => never
+
 type PublicKeyChoice = "local" | "placeholder"
 
 const PUBLIC_KEY_PROMPT_OPTIONS: Array<SelectOption<PublicKeyChoice>> = [
@@ -29,6 +31,35 @@ const PUBLIC_KEY_PROMPT_OPTIONS: Array<SelectOption<PublicKeyChoice>> = [
 
 function isLikelyPublicKey(value: string): boolean {
   return value.length > 0 && !value.includes("\n")
+}
+
+export function isValidAdminPublicKey(value: string): boolean {
+  return isLikelyPublicKey(value.trim())
+}
+
+export function validateAdminPublicKey(
+  exitWithMessage: ExitWithMessage,
+  value: string,
+  optionName = "--admin-public-key"
+): string {
+  const normalizedValue = value.trim()
+  if (!isValidAdminPublicKey(normalizedValue)) {
+    exitWithMessage(
+      `Error: Invalid value for "${optionName}" — provide a single-line SSH public key.`
+    )
+  }
+  return normalizedValue
+}
+
+export function readAdminPublicKeyFile(exitWithMessage: ExitWithMessage, path: string): string {
+  try {
+    // eslint-disable-next-line security/detect-non-literal-fs-filename
+    const value = readFileSync(path, "utf8")
+    return validateAdminPublicKey(exitWithMessage, value, "--admin-public-key-file")
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error)
+    exitWithMessage(`Error: Failed to read "--admin-public-key-file" from "${path}": ${message}`)
+  }
 }
 
 export function discoverLocalPublicKeys(sshDirectory = join(homedir(), ".ssh")): LocalPublicKey[] {

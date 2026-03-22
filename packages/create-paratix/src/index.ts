@@ -3,7 +3,11 @@ import { basename, join, resolve } from "node:path"
 import { createInterface } from "node:readline/promises"
 
 import { createTerminalSelect, type SelectFunction, type SelectOption } from "./promptUi.js"
-import { promptForAdminPublicKey as promptForScaffoldAdminPublicKey } from "./publicKeySelection.js"
+import {
+  promptForAdminPublicKey as promptForScaffoldAdminPublicKey,
+  readAdminPublicKeyFile,
+  validateAdminPublicKey,
+} from "./publicKeySelection.js"
 import {
   isValidInitialUserName,
   normalizeInitialUserName,
@@ -127,6 +131,8 @@ function exitWithMessage(message: string): never {
 }
 
 export function parseCliArguments(argv: string[]): {
+  adminPublicKey: string | undefined
+  adminPublicKeyFile: string | undefined
   host: string | undefined
   initialUser: string | undefined
   projectName: string | undefined
@@ -287,8 +293,31 @@ export function scaffoldProject(
   return true
 }
 
+async function resolveCliOrPromptAdminPublicKey(parameters: {
+  adminPublicKey: string | undefined
+  adminPublicKeyFile: string | undefined
+}): Promise<string | undefined> {
+  const { adminPublicKey, adminPublicKeyFile } = parameters
+
+  if (adminPublicKey !== undefined) {
+    return validateAdminPublicKey(exitWithMessage, adminPublicKey)
+  }
+
+  if (adminPublicKeyFile !== undefined) {
+    return readAdminPublicKeyFile(exitWithMessage, adminPublicKeyFile)
+  }
+
+  if (process.stdin.isTTY && process.stdout.isTTY) {
+    return promptForAdminPublicKey()
+  }
+
+  return undefined
+}
+
 function main(): void {
-  const { host, initialUser, projectName } = parseCliArguments(process.argv.slice(2))
+  const { adminPublicKey, adminPublicKeyFile, host, initialUser, projectName } = parseCliArguments(
+    process.argv.slice(2)
+  )
 
   const normalizedProjectName = validateProjectName(projectName)
 
@@ -297,10 +326,12 @@ function main(): void {
     const validatedHost = host == null ? await promptForHost() : validateHost(host)
     const initialUserConfig =
       initialUser == null ? await promptForInitialUserConfig() : parseInitialUserConfig(initialUser)
-    const adminPublicKey =
-      process.stdin.isTTY && process.stdout.isTTY ? await promptForAdminPublicKey() : undefined
-    scaffoldProject(normalizedProjectName, pm, {
+    const resolvedAdminPublicKey = await resolveCliOrPromptAdminPublicKey({
       adminPublicKey,
+      adminPublicKeyFile,
+    })
+    scaffoldProject(normalizedProjectName, pm, {
+      adminPublicKey: resolvedAdminPublicKey,
       host: validatedHost,
       initialUser: initialUserConfig,
     })

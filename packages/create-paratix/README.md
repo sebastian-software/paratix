@@ -24,16 +24,16 @@ Optional non-interactive bootstrap values:
 
 ```sh
 # npm
-npm create paratix my-server -- --host example.com --initial-user root
+npm create paratix my-server -- --host example.com --initial-user root --admin-public-key-file ~/.ssh/id_ed25519.pub
 
 # pnpm
-pnpm create paratix my-server --host example.com --initial-user root
+pnpm create paratix my-server --host example.com --initial-user root --admin-public-key-file ~/.ssh/id_ed25519.pub
 
 # yarn
-yarn create paratix my-server --host deploy.example.com --initial-user deploy
+yarn create paratix my-server --host deploy.example.com --initial-user deploy --admin-public-key "ssh-ed25519 AAAA... you@example.com"
 
 # bun
-bunx create-paratix my-server --host deploy.example.com --initial-user deploy
+bunx create-paratix my-server --host deploy.example.com --initial-user deploy --admin-public-key-file ~/.ssh/id_ed25519.pub
 ```
 
 **Step 2 -- Enter the directory**
@@ -164,14 +164,14 @@ Im interaktiven Modus zeigt `create-paratix` dafür eine kurze Erklärung und ei
 - `Root user`: frischer Server mit SSH nur als `root`; Paratix bootstrapt zuerst einen dedizierten Admin-User
 - `Admin user`: ein konkreter Admin-User existiert bereits; Paratix verbindet sich direkt als dieser User
 
-Nicht-interaktiv funktioniert derselbe Vertrag über `--host` und `--initial-user`:
+Nicht-interaktiv funktioniert derselbe Vertrag über `--host`, `--initial-user` und optional einen Admin-Public-Key:
 
 ```sh
 # Root bootstrap
-pnpm create paratix my-server --host example.com --initial-user root
+pnpm create paratix my-server --host example.com --initial-user root --admin-public-key-file ~/.ssh/id_ed25519.pub
 
 # Existing admin user
-pnpm create paratix my-server --host deploy.example.com --initial-user deploy
+pnpm create paratix my-server --host deploy.example.com --initial-user deploy --admin-public-key "ssh-ed25519 AAAA... you@example.com"
 ```
 
 Wichtig für den ersten echten Lauf: Das Scaffold liest `FIRST_RUN` aus `process.env.PARATIX_FIRST_RUN`. Für den Bootstrap rufst du Paratix explizit mit `--first-run` auf. Danach lässt du den Flag bei normalen Läufen weg; dann verwendet dasselbe Playbook Port `2222`, entfernt Port `22` aus der Firewall und kehrt zu strengem Host-Key-Checking zurück. Die Firewall-Freigabe für `2222` bleibt bewusst vor dem eigentlichen SSH-Portwechsel, damit Paratix nach `sshd.port(...)` sofort sicher reconnecten kann.
@@ -185,8 +185,10 @@ Im interaktiven Modus bietet `create-paratix` zusätzlich an, einen vorhandenen 
   Pfeiltasten auswählen.
 - Wenn keine lesbaren `.pub`-Dateien gefunden werden, bleibt das bestehende Placeholder-Template
   erhalten.
-- In nicht-interaktiven Aufrufen bleibt der Placeholder bewusst erhalten, damit der CLI-Vertrag
-  schlank bleibt.
+- Nicht-interaktiv kannst du denselben Wert über `--admin-public-key` oder
+  `--admin-public-key-file` setzen.
+- Wenn kein CLI-Key gesetzt ist, bleibt in nicht-interaktiven Aufrufen weiter der Placeholder
+  erhalten.
 
 ### Host-key bootstrap
 

@@ -4,7 +4,7 @@ type ExitWithMessage = (message: string) => never
 type PromptFunction = (question: string) => Promise<string>
 
 const CLI_USAGE =
-  "Usage: create-paratix <project-name> [--host <domain-or-ip>] [--initial-user <root|name>]"
+  "Usage: create-paratix <project-name> [--host <domain-or-ip>] [--initial-user <root|name>] [--admin-public-key <ssh-public-key>] [--admin-public-key-file <path>]"
 
 export function getCliUsage(): string {
   return CLI_USAGE
@@ -67,7 +67,7 @@ function parseArgumentValue(
   index: number,
   parameters: {
     exitWithMessage: ExitWithMessage
-    optionName: "--host" | "--initial-user"
+    optionName: "--admin-public-key-file" | "--admin-public-key" | "--host" | "--initial-user"
   }
 ): string {
   const value = argv.at(index + 1)
@@ -85,6 +85,8 @@ function handleUnknownOption(argument: string, exitWithMessage: ExitWithMessage)
 }
 
 type ParsedCliArguments = {
+  adminPublicKey: string | undefined
+  adminPublicKeyFile: string | undefined
   host: string | undefined
   initialUser: string | undefined
   projectName: string | undefined
@@ -114,6 +116,24 @@ function parseOptionAssignment(parameters: {
     }
   }
 
+  if (parameters.argument === "--admin-public-key") {
+    return {
+      adminPublicKey: parseArgumentValue(parameters.argv, parameters.index, {
+        exitWithMessage: parameters.exitWithMessage,
+        optionName: "--admin-public-key",
+      }),
+    }
+  }
+
+  if (parameters.argument === "--admin-public-key-file") {
+    return {
+      adminPublicKeyFile: parseArgumentValue(parameters.argv, parameters.index, {
+        exitWithMessage: parameters.exitWithMessage,
+        optionName: "--admin-public-key-file",
+      }),
+    }
+  }
+
   return null
 }
 
@@ -121,7 +141,9 @@ export function parseCliArguments(
   argv: string[],
   exitWithMessage: ExitWithMessage
 ): ParsedCliArguments {
-  let parsed: ParsedCliArguments = {
+  const parsed: ParsedCliArguments = {
+    adminPublicKey: undefined,
+    adminPublicKeyFile: undefined,
     host: undefined,
     initialUser: undefined,
     projectName: undefined,
@@ -131,22 +153,46 @@ export function parseCliArguments(
     const argument = argv[index]
     const optionAssignment = parseOptionAssignment({ argument, argv, exitWithMessage, index })
     if (optionAssignment != null) {
-      parsed = { ...parsed, ...optionAssignment }
+      Object.assign(parsed, optionAssignment)
       index++
       continue
     }
 
-    if (argument.startsWith("--")) {
-      handleUnknownOption(argument, exitWithMessage)
-    }
-
-    if (parsed.projectName == null) {
-      parsed.projectName = argument
-      continue
-    }
-
-    exitWithMessage(CLI_USAGE)
+    parsed.projectName = handlePositionalOrUnknownArgument(
+      parsed.projectName,
+      argument,
+      exitWithMessage
+    )
   }
 
+  validatePublicKeyOptions(parsed, exitWithMessage)
+
   return parsed
+}
+
+function handlePositionalOrUnknownArgument(
+  projectName: string | undefined,
+  argument: string,
+  exitWithMessage: ExitWithMessage
+): string {
+  if (argument.startsWith("--")) {
+    handleUnknownOption(argument, exitWithMessage)
+  }
+
+  if (projectName == null) {
+    return argument
+  }
+
+  exitWithMessage(CLI_USAGE)
+}
+
+function validatePublicKeyOptions(
+  parsed: ParsedCliArguments,
+  exitWithMessage: ExitWithMessage
+): void {
+  if (parsed.adminPublicKey == null || parsed.adminPublicKeyFile == null) {
+    return
+  }
+
+  exitWithMessage('Error: Use either "--admin-public-key" or "--admin-public-key-file", not both.')
 }
