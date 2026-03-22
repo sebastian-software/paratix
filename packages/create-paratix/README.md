@@ -85,19 +85,23 @@ npm run apply
 The direct admin-user path looks like this:
 
 ```typescript
-import { server, recipe } from "paratix"
-import { package as pkg, hostname, sshd, ssh, ufw, service, user } from "paratix/modules"
+import { recipe, server } from "paratix"
+import { hostname, package as packages, service, ssh, sshd, ufw, user } from "paratix/modules"
 
 const adminUser = "admin"
 const adminPublicKey = "ssh-ed25519 REPLACE_ME_WITH_YOUR_PUBLIC_KEY"
 
 export default server({
-  name: "my-server",
   host: "1.2.3.4",
+  name: "my-server",
+  env: {
+    SERVER_NAME: "my-server",
+    SSH_PORT: 2222,
+  },
   ssh: {
-    user: adminUser,
     ports: [22],
     privateKey: "~/.ssh/id_ed25519", // "~" is expanded by Paratix
+    user: adminUser,
     // Initial host-key bootstrap for fresh servers:
     // - keep this explicit accept-new mode only for the first verified connection
     // - then pin the host key and switch strictHostKeyChecking back to "yes"
@@ -105,14 +109,10 @@ export default server({
     // expectedHostFingerprint: "SHA256:REPLACE_ME_WITH_YOUR_HOST_FINGERPRINT",
     // expectedHostPublicKey: "ssh-ed25519 REPLACE_ME_WITH_YOUR_HOST_PUBLIC_KEY",
   },
-  env: {
-    SERVER_NAME: "my-server",
-    SSH_PORT: 2222,
-  },
   run: [
     hostname.set("my-server"),
-    pkg.upgrade("2026-03-01"),
-    pkg.installed("nginx", "curl", "htop"),
+    packages.upgrade("2026-03-01"),
+    packages.installed("nginx", "curl", "htop"),
 
     recipe("admin-access", [
       user.present(adminUser, {
@@ -129,8 +129,8 @@ export default server({
       [
         sshd.port(2222),
         sshd.config({
-          PermitRootLogin: "no",
           PasswordAuthentication: "no",
+          PermitRootLogin: "no",
         }),
       ],
       {
