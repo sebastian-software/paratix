@@ -328,6 +328,19 @@ describe("ssh.authorizedKeys", () => {
     expect(mockSsh.calls).not.toContain("stat -c '%a %U %G %F' '/home/alice/.ssh/authorized_keys'")
   })
 
+  it("fails closed in check when the user does not exist and resolveHome returns an empty string", async () => {
+    const mockSsh = createMockSsh({
+      "getent passwd 'ghost' | cut -d: -f6": { stdout: "" },
+    })
+    const mod = ssh.authorizedKeys("ghost", testKey)
+
+    await expect(mod.check(mockSsh, emptyEnv)).rejects.toThrow(
+      "[ssh.authorizedKeys: ghost] failed to resolve a safe home directory"
+    )
+    expect(mockSsh.calls).not.toContain("[ -e '/.ssh' ]")
+    expect(mockSsh.calls).not.toContain("[ -e '/.ssh/authorized_keys' ]")
+  })
+
   it("check returns needs-apply when ssh is null", async () => {
     const mod = ssh.authorizedKeys("alice", testKey)
     const result = await mod.check(null, emptyEnv)
@@ -576,6 +589,23 @@ describe("ssh.authorizedKeys", () => {
     const conn = null
     const result = await mod.apply(conn, emptyEnv)
     expect(result.status).toBe("failed")
+  })
+
+  it("fails closed in apply when the user does not exist and resolveHome returns an empty string", async () => {
+    const mockSsh = createMockSsh({
+      "getent passwd 'ghost' | cut -d: -f6": { stdout: "" },
+    })
+    const mod = ssh.authorizedKeys("ghost", testKey)
+
+    await expect(mod.apply(mockSsh, emptyEnv)).rejects.toThrow(
+      "[ssh.authorizedKeys: ghost] failed to resolve a safe home directory"
+    )
+    expect(mockSsh.calls).not.toContain(
+      "mkdir -p '/.ssh' && chmod 700 '/.ssh' && chown 'ghost':'ghost' '/.ssh'"
+    )
+    expect(mockSsh.calls).not.toContain(
+      "[ ! -L '/.ssh/authorized_keys' ] || { echo 'authorized_keys must not be a symlink' >&2; exit 1; }"
+    )
   })
 
   it("resolves home directory dynamically for root user", async () => {

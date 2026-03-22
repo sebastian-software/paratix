@@ -125,7 +125,11 @@ async function hasMatchingKnownHostTrustAnchor(
  * @returns The absolute path to the user's home directory.
  */
 async function resolveHome(conn: SshConnection, user: string): Promise<string> {
-  return conn.output(`getent passwd ${shellQuote(user)} | cut -d: -f6`)
+  const home = await conn.output(`getent passwd ${shellQuote(user)} | cut -d: -f6`)
+  if (home.length === 0 || home === "/") {
+    throw new Error(`[ssh.authorizedKeys: ${user}] failed to resolve a safe home directory`)
+  }
+  return home
 }
 
 async function createAuthorizedKeysTemporaryPath(conn: SshConnection): Promise<string> {
