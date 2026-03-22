@@ -46,11 +46,11 @@ cd my-server
 
 **Step 3 -- Edit `server.ts`** with your actual server address, admin username, public key, and the modules you want to apply.
 
-The scaffold also includes an explicit host-key bootstrap:
+The scaffold also includes an explicit `FIRST_RUN` bootstrap switch:
 
-- first run: `strictHostKeyChecking: "accept-new"` so a fresh host can complete `apply:dry`
-- after you have verified the host key out of band: replace that transition mode with `expectedHostFingerprint` or `expectedHostPublicKey`
-- the generated playbook opens firewall port `2222` before `sshd.port(2222)` runs, so the first real apply can reconnect safely
+- first run: `FIRST_RUN = true` keeps SSH on port `22`, opens firewall port `22`, and uses `strictHostKeyChecking: "accept-new"`
+- later runs: set `FIRST_RUN = false` to switch the generated playbook to port `2222`, close SSH port `22` in the firewall, and return to strict host-key checking
+- the generated playbook still opens port `2222` before `sshd.port(2222)` runs, so the first real apply can reconnect safely
 
 **Step 4 -- Apply**
 
@@ -90,22 +90,27 @@ import { hostname, package as packages, service, ssh, sshd, ufw, user } from "pa
 
 const adminUser = "admin"
 const adminPublicKey = "ssh-ed25519 REPLACE_ME_WITH_YOUR_PUBLIC_KEY"
+const FIRST_RUN = true
+const sshPorts = FIRST_RUN ? [22] : [2222]
+const firewallTcpPorts = FIRST_RUN ? [22, 2222, 80, 443] : [2222, 80, 443]
+const strictHostKeyChecking = FIRST_RUN ? "accept-new" : "yes"
 
 export default server({
   host: "1.2.3.4",
   name: "my-server",
   env: {
+    FIRST_RUN,
     SERVER_NAME: "my-server",
     SSH_PORT: 2222,
   },
   ssh: {
-    ports: [22],
+    ports: sshPorts,
     privateKey: "~/.ssh/id_ed25519", // "~" is expanded by Paratix
     user: adminUser,
-    // Initial host-key bootstrap for fresh servers:
-    // - keep this explicit accept-new mode only for the first verified connection
-    // - then pin the host key and switch strictHostKeyChecking back to "yes"
-    strictHostKeyChecking: "accept-new",
+    // FIRST_RUN keeps the bootstrap path explicit:
+    // - true: connect on port 22 and allow explicit TOFU via "accept-new"
+    // - false: connect on port 2222 with strict host-key checking again
+    strictHostKeyChecking,
     // expectedHostFingerprint: "SHA256:REPLACE_ME_WITH_YOUR_HOST_FINGERPRINT",
     // expectedHostPublicKey: "ssh-ed25519 REPLACE_ME_WITH_YOUR_HOST_PUBLIC_KEY",
   },
@@ -122,7 +127,7 @@ export default server({
       ssh.authorizedKeys(adminUser, adminPublicKey),
     ]),
 
-    recipe("firewall", [ufw.rule("allow", [2222, 80, 443]), ufw.enabled()]),
+    recipe("firewall", [ufw.rule("allow", firewallTcpPorts), ufw.enabled()]),
 
     recipe(
       "ssh-hardening",
@@ -162,14 +167,14 @@ pnpm create paratix my-server --initial-user root
 pnpm create paratix my-server --initial-user deploy
 ```
 
-Wichtig für den ersten echten Lauf: Das Scaffold setzt die Firewall-Freigabe für `2222` bewusst vor den eigentlichen SSH-Portwechsel. Paratix reconnectet nach `sshd.port(...)` sofort auf den neuen Port; ohne diese Reihenfolge würde der erste Apply leicht an einer noch geschlossenen Firewall scheitern.
+Wichtig für den ersten echten Lauf: Das Scaffold hält `FIRST_RUN` standardmäßig auf `true`. Dadurch bleibt der Bootstrap über Port `22` und `accept-new` explizit sichtbar. Nach dem ersten erfolgreichen Bootstrap setzt du `FIRST_RUN = false`; dann verwendet dasselbe Playbook Port `2222`, entfernt Port `22` aus der Firewall und kehrt zu strengem Host-Key-Checking zurück. Die Firewall-Freigabe für `2222` bleibt bewusst vor dem eigentlichen SSH-Portwechsel, damit Paratix nach `sshd.port(...)` sofort sicher reconnecten kann.
 
 ### Host-key bootstrap
 
-Paratix verwendet standardmäßig striktes Host-Key-Checking. Ein frisch erzeugtes `create-paratix`-Projekt setzt deshalb im Scaffold explizit:
+Paratix verwendet standardmäßig striktes Host-Key-Checking. Ein frisch erzeugtes `create-paratix`-Projekt koppelt das deshalb an `FIRST_RUN`:
 
 ```ts
-strictHostKeyChecking: "accept-new"
+const strictHostKeyChecking = FIRST_RUN ? "accept-new" : "yes"
 ```
 
 Das ist ein bewusst markierter Übergangsmodus für den ersten verifizierten Kontakt mit einem frischen Host. Direkt daneben enthält das generierte `server.ts` kommentierte Platzhalter für:
@@ -180,9 +185,9 @@ Das ist ein bewusst markierter Übergangsmodus für den ersten verifizierten Kon
 Empfohlener Ablauf:
 
 1. Verifiziere den Host-Key deines Servers out of band.
-2. Führe den ersten `apply:dry` mit dem expliziten `accept-new`-Bootstrap aus.
-3. Ersetze danach `accept-new` durch `expectedHostFingerprint` oder `expectedHostPublicKey`.
-4. Setze `strictHostKeyChecking` wieder auf `"yes"` oder lasse die Option weg.
+2. Führe den ersten `apply:dry` und `apply` mit `FIRST_RUN = true` aus.
+3. Setze danach `FIRST_RUN = false`.
+4. Optional: pinne zusätzlich `expectedHostFingerprint` oder `expectedHostPublicKey`.
 
 Key concepts:
 

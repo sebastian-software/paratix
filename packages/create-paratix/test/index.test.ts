@@ -309,6 +309,7 @@ describe("writeProjectFiles", () => {
     const content = readFileSync(join(TEST_DIR, "server.ts"), "utf8")
 
     expect(content).toContain('const adminUser = "admin";')
+    expect(content).toContain("const FIRST_RUN = true;")
     expect(content).toContain("user: adminUser")
     expect(content).toContain("ssh.authorizedKeys(adminUser, adminPublicKey)")
     expect(content).toContain('PasswordAuthentication: "no"')
@@ -333,8 +334,8 @@ describe("writeProjectFiles", () => {
 
     const content = readFileSync(join(TEST_DIR, "server.ts"), "utf8")
 
-    expect(content).toContain('strictHostKeyChecking: "accept-new"')
-    expect(content).toContain("Initial host-key bootstrap for fresh servers:")
+    expect(content).toContain('const strictHostKeyChecking = FIRST_RUN ? "accept-new" : "yes";')
+    expect(content).toContain("FIRST_RUN keeps the bootstrap path explicit:")
     expect(content).toContain(
       'expectedHostFingerprint: "SHA256:REPLACE_ME_WITH_YOUR_HOST_FINGERPRINT"'
     )
@@ -352,13 +353,17 @@ describe("writeProjectFiles", () => {
     expect(content).toContain('"~" is expanded by Paratix')
   })
 
-  it("generated server.ts does not leave SSH port 22 open in the final firewall default", () => {
+  it("generated server.ts gates firewall and ssh ports behind FIRST_RUN", () => {
     writeProjectFiles(TEST_DIR)
 
     const content = readFileSync(join(TEST_DIR, "server.ts"), "utf8")
 
-    expect(content).toContain('ufw.rule("allow", [2222, 80, 443])')
-    expect(content).not.toContain('ufw.rule("allow", [22, 2222, 80, 443])')
+    expect(content).toContain("const sshPorts = FIRST_RUN ? [22] : [2222];")
+    expect(content).toContain(
+      "const firewallTcpPorts = FIRST_RUN ? [22, 2222, 80, 443] : [2222, 80, 443];"
+    )
+    expect(content).toContain("ports: sshPorts")
+    expect(content).toContain('ufw.rule("allow", firewallTcpPorts)')
   })
 
   it("generated server.ts opens firewall port 2222 before applying sshd.port(2222)", () => {
@@ -380,15 +385,26 @@ describe("writeProjectFiles", () => {
 
     expect(content).toContain('user: "root"')
     expect(content).toContain('const adminUser = "admin";')
+    expect(content).toContain("const FIRST_RUN = true;")
     expect(content).toContain("Transitional bootstrap mode:")
     expect(content).toContain('PasswordAuthentication: "no"')
     expect(content).toContain('PermitRootLogin: "prohibit-password"')
     expect(content).not.toContain('PermitRootLogin: "no"')
-    expect(content).toContain('strictHostKeyChecking: "accept-new"')
+    expect(content).toContain('const strictHostKeyChecking = FIRST_RUN ? "accept-new" : "yes";')
     expect(content).toContain(
       'expectedHostFingerprint: "SHA256:REPLACE_ME_WITH_YOUR_HOST_FINGERPRINT"'
     )
     expect(content).not.toContain("--bootstrap-root")
+  })
+
+  it("generated server.ts exposes FIRST_RUN through env for template logic and operator visibility", () => {
+    writeProjectFiles(TEST_DIR)
+
+    const content = readFileSync(join(TEST_DIR, "server.ts"), "utf8")
+
+    expect(content).toContain("env: {")
+    expect(content).toContain("FIRST_RUN,")
+    expect(content).toContain("SSH_PORT: 2222,")
   })
 
   it("generated root-bootstrap server.ts also opens firewall port 2222 before ssh-hardening-transition", () => {
