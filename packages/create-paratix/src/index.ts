@@ -4,6 +4,14 @@ import { createInterface } from "node:readline/promises"
 
 import { createTerminalSelect, type SelectFunction, type SelectOption } from "./promptUi.js"
 import {
+  isValidInitialUserName,
+  normalizeInitialUserName,
+  parseCliArguments as parseScaffoldCliArguments,
+  parseInitialUserConfig as parseScaffoldInitialUserConfig,
+  promptForHost as promptForScaffoldHost,
+  validateHost as validateScaffoldHost,
+} from "./scaffoldConfig.js"
+import {
   detectPackageManager,
   installDependencies,
   type PackageManager,
@@ -18,8 +26,15 @@ import {
   TSCONFIG_TEMPLATE,
 } from "./templates.js"
 
+export {
+  isValidHost,
+  isValidInitialUserName,
+  normalizeHost,
+  normalizeInitialUserName,
+} from "./scaffoldConfig.js"
 export type { InitialUserConfig } from "./templates.js"
 type ScaffoldOptions = {
+  host?: string
   initialUser?: InitialUserConfig
   installer?: (projectDirectory: string, packageManager: PackageManager) => boolean
 }
@@ -29,7 +44,6 @@ const NOOP = (): void => undefined
 const UNAVAILABLE_SELECT = (() => {
   throw new Error("Interactive selection is unavailable.")
 }) as SelectFunction<"admin" | "root">
-const CLI_USAGE = "Usage: create-paratix <project-name> [--initial-user <root|name>]"
 const INITIAL_USER_OPTIONS: Array<SelectOption<"admin" | "root">> = [
   {
     description:
@@ -51,6 +65,7 @@ export function writeProjectFiles(projectDirectory: string, options?: ScaffoldOp
   // eslint-disable-next-line security/detect-non-literal-fs-filename
   mkdirSync(join(projectDirectory, "files"), { recursive: true })
 
+  const host = options?.host ?? "1.2.3.4"
   const initialUser = options?.initialUser ?? { kind: "admin", user: "admin" }
 
   const packageJson = {
@@ -75,7 +90,7 @@ export function writeProjectFiles(projectDirectory: string, options?: ScaffoldOp
   // eslint-disable-next-line security/detect-non-literal-fs-filename
   writeFileSync(join(projectDirectory, "package.json"), `${JSON.stringify(packageJson, null, 2)}\n`)
   // eslint-disable-next-line security/detect-non-literal-fs-filename
-  writeFileSync(join(projectDirectory, "server.ts"), createServerTemplate(initialUser))
+  writeFileSync(join(projectDirectory, "server.ts"), createServerTemplate({ host, initialUser }))
   // eslint-disable-next-line security/detect-non-literal-fs-filename
   writeFileSync(join(projectDirectory, "tsconfig.json"), TSCONFIG_TEMPLATE)
   // eslint-disable-next-line security/detect-non-literal-fs-filename
@@ -95,14 +110,6 @@ export function normalizeProjectName(name: string): string {
   return name.trim()
 }
 
-export function isValidInitialUserName(name: string): boolean {
-  return /^(?:root|[a-z_][a-z0-9_\x2d]*\$?)$/v.test(name)
-}
-
-function normalizeInitialUserName(name: string): string {
-  return name.trim()
-}
-
 function derivePackageName(projectDirectory: string): string {
   return basename(projectDirectory.replaceAll("\\", "/"))
 }
@@ -113,63 +120,16 @@ function exitWithMessage(message: string): never {
   process.exit(1)
 }
 
-function parseInitialUserArgument(argv: string[], index: number): string {
-  const value = argv.at(index + 1)
-  if (value == null) {
-    exitWithMessage('Error: Missing value for "--initial-user".')
-  }
-  if (value.startsWith("--")) {
-    exitWithMessage('Error: Missing value for "--initial-user".')
-  }
-  return value
-}
-
-function handleUnknownOption(argument: string): never {
-  if (argument === "--bootstrap-root") {
-    exitWithMessage('Error: "--bootstrap-root" was removed. Use "--initial-user root" instead.')
-  }
-  exitWithMessage(`Error: Unknown option "${argument}".`)
-}
-
 export function parseCliArguments(argv: string[]): {
+  host: string | undefined
   initialUser: string | undefined
   projectName: string | undefined
 } {
-  let initialUser: string | undefined
-  let projectName: string | undefined
-
-  for (let index = 0; index < argv.length; index++) {
-    const argument = argv[index]
-    if (argument === "--initial-user") {
-      initialUser = parseInitialUserArgument(argv, index)
-      index++
-      continue
-    }
-
-    if (argument.startsWith("--")) {
-      handleUnknownOption(argument)
-    }
-
-    if (projectName == null) {
-      projectName = argument
-      continue
-    }
-
-    exitWithMessage(CLI_USAGE)
-  }
-
-  return { initialUser, projectName }
+  return parseScaffoldCliArguments(argv, exitWithMessage)
 }
 
 export function parseInitialUserConfig(value: string): InitialUserConfig {
-  const normalizedValue = normalizeInitialUserName(value)
-  if (!isValidInitialUserName(normalizedValue)) {
-    exitWithMessage(
-      `Error: Invalid initial user "${value}" — use "root" or a valid lowercase Linux username.`
-    )
-  }
-
-  return normalizedValue === "root" ? { kind: "root" } : { kind: "admin", user: normalizedValue }
+  return parseScaffoldInitialUserConfig(exitWithMessage, value)
 }
 
 function createTerminalPrompt(): { close: () => void; prompt: PromptFunction } {
@@ -180,6 +140,10 @@ function createTerminalPrompt(): { close: () => void; prompt: PromptFunction } {
     },
     prompt: async (question: string): Promise<string> => readline.question(question),
   }
+}
+
+export function validateHost(value: string): string {
+  return validateScaffoldHost(exitWithMessage, value)
 }
 
 function createPromptSession(prompt?: PromptFunction): {
@@ -225,6 +189,10 @@ async function promptForAdminUser(
       'Error: Invalid admin username. Use a valid lowercase Linux username other than "root".'
     )
   }
+}
+
+export async function promptForHost(prompt?: PromptFunction): Promise<string> {
+  return promptForScaffoldHost(prompt ?? createTerminalPrompt().prompt)
 }
 
 export async function promptForInitialUserConfig(
@@ -296,15 +264,19 @@ export function scaffoldProject(
 }
 
 function main(): void {
-  const { initialUser, projectName } = parseCliArguments(process.argv.slice(2))
+  const { host, initialUser, projectName } = parseCliArguments(process.argv.slice(2))
 
   const normalizedProjectName = validateProjectName(projectName)
 
   const pm = detectPackageManager()
   void (async () => {
+    const validatedHost = host == null ? await promptForHost() : validateHost(host)
     const initialUserConfig =
       initialUser == null ? await promptForInitialUserConfig() : parseInitialUserConfig(initialUser)
-    scaffoldProject(normalizedProjectName, pm, { initialUser: initialUserConfig })
+    scaffoldProject(normalizedProjectName, pm, {
+      host: validatedHost,
+      initialUser: initialUserConfig,
+    })
   })().catch((error: unknown) => {
     console.error(error instanceof Error ? error.message : String(error))
     process.exitCode = 1

@@ -1,5 +1,10 @@
 export type InitialUserConfig = { kind: "admin"; user: string } | { kind: "root" }
 
+type ServerTemplateOptions = {
+  host: string
+  initialUser: InitialUserConfig
+}
+
 export const TSCONFIG_TEMPLATE = `{
   "compilerOptions": {
     "target": "ES2024",
@@ -24,7 +29,11 @@ export const ENV_EXAMPLE_TEMPLATE = `# Server configuration
 # SSH_KEY_PATH=~/.ssh/id_ed25519
 `
 
-function createBaseServerHeader(adminUserDeclaration: string, sshUser: string): string {
+function createBaseServerHeader(
+  adminUserDeclaration: string,
+  host: string,
+  sshUser: string
+): string {
   return `import { recipe, server } from "paratix";
 import { hostname, package as packages, service, ssh, sshd, ufw, user } from "paratix/modules";
 
@@ -37,7 +46,7 @@ const strictHostKeyChecking = FIRST_RUN ? "accept-new" : "yes";
 
 export default server({
   name: "my-server",
-  host: "1.2.3.4",
+  host: "${host}",
   ssh: {
     ports: sshPorts,
     privateKey: "~/.ssh/id_ed25519", // "~" is expanded by Paratix
@@ -82,10 +91,10 @@ function createAdminRecipe(recipeName: string): string {
 `
 }
 
-function createHardenedAdminServerTemplate(initialAdminUser: string): string {
+function createHardenedAdminServerTemplate(host: string, initialAdminUser: string): string {
   const adminUserDeclaration = `const adminUser = "${initialAdminUser}";`
 
-  return `${createBaseServerHeader(adminUserDeclaration, "adminUser")}
+  return `${createBaseServerHeader(adminUserDeclaration, host, "adminUser")}
 ${createAdminRecipe("admin-access")}
 ${createFirewallRecipe()}
     recipe("ssh-hardening", [
@@ -102,10 +111,10 @@ ${createFirewallRecipe()}
 `
 }
 
-function createBootstrapRootServerTemplate(): string {
+function createBootstrapRootServerTemplate(host: string): string {
   const adminUserDeclaration = 'const adminUser = "admin";'
 
-  return `${createBaseServerHeader(adminUserDeclaration, '"root"')}
+  return `${createBaseServerHeader(adminUserDeclaration, host, '"root"')}
 ${createAdminRecipe("bootstrap-admin-user")}
 ${createFirewallRecipe()}
     // Transitional bootstrap mode:
@@ -126,8 +135,8 @@ ${createFirewallRecipe()}
 `
 }
 
-export function createServerTemplate(initialUser: InitialUserConfig): string {
-  return initialUser.kind === "root"
-    ? createBootstrapRootServerTemplate()
-    : createHardenedAdminServerTemplate(initialUser.user)
+export function createServerTemplate(options: ServerTemplateOptions): string {
+  return options.initialUser.kind === "root"
+    ? createBootstrapRootServerTemplate(options.host)
+    : createHardenedAdminServerTemplate(options.host, options.initialUser.user)
 }

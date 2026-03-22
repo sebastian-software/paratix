@@ -4,13 +4,17 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 
 import {
   isDirectExecution,
+  isValidHost,
   isValidInitialUserName,
   isValidProjectName,
+  normalizeHost,
   normalizeProjectName,
   parseCliArguments,
   parseInitialUserConfig,
+  promptForHost,
   promptForInitialUserConfig,
   scaffoldProject,
+  validateHost,
   writeProjectFiles,
 } from "../src/index.js"
 
@@ -102,6 +106,15 @@ describe("isDirectExecution (process.argv[1] regression)", () => {
 describe("parseCliArguments", () => {
   it("uses interactive initial-user selection by default", () => {
     expect(parseCliArguments(["my-server"])).toStrictEqual({
+      host: undefined,
+      initialUser: undefined,
+      projectName: "my-server",
+    })
+  })
+
+  it("supports an explicit host value", () => {
+    expect(parseCliArguments(["my-server", "--host", "example.com"])).toStrictEqual({
+      host: "example.com",
       initialUser: undefined,
       projectName: "my-server",
     })
@@ -109,6 +122,7 @@ describe("parseCliArguments", () => {
 
   it("supports an explicit root initial user", () => {
     expect(parseCliArguments(["my-server", "--initial-user", "root"])).toStrictEqual({
+      host: undefined,
       initialUser: "root",
       projectName: "my-server",
     })
@@ -116,6 +130,7 @@ describe("parseCliArguments", () => {
 
   it("supports an explicit admin initial user", () => {
     expect(parseCliArguments(["my-server", "--initial-user", "deploy"])).toStrictEqual({
+      host: undefined,
       initialUser: "deploy",
       projectName: "my-server",
     })
@@ -155,6 +170,41 @@ describe("initial user parsing", () => {
 
   it("maps other valid users to the admin config", () => {
     expect(parseInitialUserConfig(" deploy ")).toStrictEqual({ kind: "admin", user: "deploy" })
+  })
+})
+
+describe("host parsing", () => {
+  it("trims padded hosts", () => {
+    expect(normalizeHost(" example.com ")).toBe("example.com")
+  })
+
+  it("accepts a domain, IPv4, and IPv6 literal", () => {
+    expect(isValidHost("example.com")).toBe(true)
+    expect(isValidHost("203.0.113.10")).toBe(true)
+    expect(isValidHost("2001:db8::10")).toBe(true)
+  })
+
+  it("rejects empty or whitespace-containing hosts", () => {
+    expect(isValidHost("")).toBe(false)
+    expect(isValidHost("bad host")).toBe(false)
+  })
+
+  it("validates a trimmed host", () => {
+    expect(validateHost(" example.com ")).toBe("example.com")
+  })
+
+  it("exits for invalid hosts", async () => {
+    vi.spyOn(console, "error").mockImplementation((...args) => {
+      void args
+    })
+
+    await expectProcessExit(() => {
+      validateHost("bad host")
+    })
+
+    expect(console.error).toHaveBeenCalledWith(
+      'Error: Invalid host "bad host" — use a domain name, IPv4, or IPv6 address without spaces.'
+    )
   })
 })
 
@@ -208,6 +258,34 @@ describe("promptForInitialUserConfig", () => {
     expect(select).toHaveBeenCalledTimes(1)
     expect(prompt).toHaveBeenCalledTimes(1)
     expect(prompt).toHaveBeenNthCalledWith(1, "Admin username: ")
+  })
+})
+
+describe("promptForHost", () => {
+  beforeEach(() => {
+    vi.spyOn(console, "error").mockImplementation((...args) => {
+      void args
+    })
+  })
+
+  afterEach(() => {
+    vi.restoreAllMocks()
+  })
+
+  it("accepts a valid interactive host", async () => {
+    const prompt = vi.fn().mockResolvedValueOnce("example.com")
+
+    await expect(promptForHost(prompt)).resolves.toBe("example.com")
+    expect(prompt).toHaveBeenCalledWith("Server host (domain or IP): ")
+  })
+
+  it("retries until a valid host is entered", async () => {
+    const prompt = vi.fn().mockResolvedValueOnce("bad host").mockResolvedValueOnce("203.0.113.10")
+
+    await expect(promptForHost(prompt)).resolves.toBe("203.0.113.10")
+    expect(console.error).toHaveBeenCalledWith(
+      "Error: Please enter a domain name, IPv4, or IPv6 address without spaces."
+    )
   })
 })
 
@@ -332,6 +410,7 @@ describe("writeProjectFiles", () => {
 
     expect(content).toContain('const adminUser = "admin";')
     expect(content).toContain('const FIRST_RUN = process.env["PARATIX_FIRST_RUN"] === "true";')
+    expect(content).toContain('host: "1.2.3.4"')
     expect(content).toContain("user: adminUser")
     expect(content).toContain("ssh.authorizedKeys(adminUser, adminPublicKey)")
     expect(content).toContain('PasswordAuthentication: "no"')
@@ -341,11 +420,15 @@ describe("writeProjectFiles", () => {
   })
 
   it("generated server.ts uses an explicitly provided admin username", () => {
-    writeProjectFiles(TEST_DIR, { initialUser: { kind: "admin", user: "deploy" } })
+    writeProjectFiles(TEST_DIR, {
+      host: "deploy.example.com",
+      initialUser: { kind: "admin", user: "deploy" },
+    })
 
     const content = readFileSync(join(TEST_DIR, "server.ts"), "utf8")
 
     expect(content).toContain('const adminUser = "deploy";')
+    expect(content).toContain('host: "deploy.example.com"')
     expect(content).toContain("user: adminUser")
     expect(content).toContain('recipe("admin-access"')
     expect(content).not.toContain('user: "root"')
@@ -402,10 +485,11 @@ describe("writeProjectFiles", () => {
   })
 
   it("generated server.ts supports an explicit root bootstrap transition mode", () => {
-    writeProjectFiles(TEST_DIR, { initialUser: { kind: "root" } })
+    writeProjectFiles(TEST_DIR, { host: "203.0.113.10", initialUser: { kind: "root" } })
 
     const content = readFileSync(join(TEST_DIR, "server.ts"), "utf8")
 
+    expect(content).toContain('host: "203.0.113.10"')
     expect(content).toContain('user: "root"')
     expect(content).toContain('const adminUser = "admin";')
     expect(content).toContain('const FIRST_RUN = process.env["PARATIX_FIRST_RUN"] === "true";')
@@ -484,7 +568,7 @@ describe("scaffoldProject", () => {
     const result = scaffoldProject(
       projectName,
       { command: "pnpm install", name: "pnpm" },
-      { initialUser: { kind: "root" }, installer }
+      { host: "example.com", initialUser: { kind: "root" }, installer }
     )
 
     expect(result).toBe(true)
@@ -510,7 +594,7 @@ describe("scaffoldProject", () => {
     const result = scaffoldProject(
       projectName,
       { command: "pnpm install", name: "pnpm" },
-      { initialUser: { kind: "admin", user: "deploy" }, installer }
+      { host: "deploy.example.com", initialUser: { kind: "admin", user: "deploy" }, installer }
     )
 
     expect(result).toBe(false)
@@ -528,7 +612,14 @@ describe("scaffoldProject", () => {
   it("prints npm completion commands with apply:dry before apply", () => {
     const installer = vi.fn().mockReturnValue(true)
 
-    scaffoldProject(projectName, { command: "npm install", name: "npm" }, { installer })
+    scaffoldProject(
+      projectName,
+      { command: "npm install", name: "npm" },
+      {
+        host: "example.com",
+        installer,
+      }
+    )
 
     expect(console.log).toHaveBeenCalledWith(expect.stringContaining("npm run apply:dry"))
     expect(console.log).toHaveBeenCalledWith(expect.stringContaining("npm run apply"))
@@ -540,7 +631,7 @@ describe("scaffoldProject", () => {
     const result = scaffoldProject(
       paddedProjectName,
       { command: "pnpm install", name: "pnpm" },
-      { installer }
+      { host: "example.com", installer }
     )
 
     expect(result).toBe(true)

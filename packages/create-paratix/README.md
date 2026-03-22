@@ -20,20 +20,20 @@ yarn create paratix my-server
 bunx create-paratix my-server
 ```
 
-Optional non-interactive initial-user selection:
+Optional non-interactive bootstrap values:
 
 ```sh
 # npm
-npm create paratix my-server -- --initial-user root
+npm create paratix my-server -- --host example.com --initial-user root
 
 # pnpm
-pnpm create paratix my-server --initial-user root
+pnpm create paratix my-server --host example.com --initial-user root
 
 # yarn
-yarn create paratix my-server --initial-user deploy
+yarn create paratix my-server --host deploy.example.com --initial-user deploy
 
 # bun
-bunx create-paratix my-server --initial-user deploy
+bunx create-paratix my-server --host deploy.example.com --initial-user deploy
 ```
 
 **Step 2 -- Enter the directory**
@@ -44,7 +44,7 @@ Dependencies are installed automatically. If installation fails, run your packag
 cd my-server
 ```
 
-**Step 3 -- Edit `server.ts`** with your actual server address, admin username, public key, and the modules you want to apply.
+**Step 3 -- Edit `server.ts`** with your final hostname, admin username, public key, and the modules you want to apply.
 
 The scaffold also includes an explicit bootstrap switch driven by `PARATIX_FIRST_RUN`:
 
@@ -154,22 +154,23 @@ Wenn bereits ein Admin-User wie `deploy`, `ubuntu` oder `admin` existiert, wähl
 
 Standardmäßig fragt `create-paratix` interaktiv:
 
-1. Ist der initiale SSH-User `root` oder ein Admin-User?
-2. Falls Admin-User: Wie heißt dieser User konkret?
+1. Welche Domain oder IP soll als Zielhost in `server.ts` stehen?
+2. Ist der initiale SSH-User `root` oder ein Admin-User?
+3. Falls Admin-User: Wie heißt dieser User konkret?
 
 Im interaktiven Modus zeigt `create-paratix` dafür eine kurze Erklärung und eine Auswahl per Pfeiltasten:
 
 - `Root user`: frischer Server mit SSH nur als `root`; Paratix bootstrapt zuerst einen dedizierten Admin-User
 - `Admin user`: ein konkreter Admin-User existiert bereits; Paratix verbindet sich direkt als dieser User
 
-Nicht-interaktiv funktioniert derselbe Vertrag über `--initial-user`:
+Nicht-interaktiv funktioniert derselbe Vertrag über `--host` und `--initial-user`:
 
 ```sh
 # Root bootstrap
-pnpm create paratix my-server --initial-user root
+pnpm create paratix my-server --host example.com --initial-user root
 
 # Existing admin user
-pnpm create paratix my-server --initial-user deploy
+pnpm create paratix my-server --host deploy.example.com --initial-user deploy
 ```
 
 Wichtig für den ersten echten Lauf: Das Scaffold liest `FIRST_RUN` aus `process.env.PARATIX_FIRST_RUN`. Für den Bootstrap rufst du Paratix explizit mit `--first-run` auf. Danach lässt du den Flag bei normalen Läufen weg; dann verwendet dasselbe Playbook Port `2222`, entfernt Port `22` aus der Firewall und kehrt zu strengem Host-Key-Checking zurück. Die Firewall-Freigabe für `2222` bleibt bewusst vor dem eigentlichen SSH-Portwechsel, damit Paratix nach `sshd.port(...)` sofort sicher reconnecten kann.
