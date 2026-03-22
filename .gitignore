@@ -6,3 +6,4 @@ dist/
 TODO.md
 review-report-*.md
 .claude/settings.local.json
+tmp/
