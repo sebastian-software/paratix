@@ -170,22 +170,44 @@ describe("promptForInitialUserConfig", () => {
   })
 
   it("supports the interactive root flow", async () => {
-    const prompt = vi.fn().mockResolvedValueOnce("root")
+    const prompt = vi.fn()
+    const select = vi.fn().mockResolvedValueOnce("root")
 
-    await expect(promptForInitialUserConfig(prompt)).resolves.toStrictEqual({ kind: "root" })
-    expect(prompt).toHaveBeenCalledTimes(1)
-    expect(prompt).toHaveBeenCalledWith("Initial SSH user? [root/admin]: ")
+    await expect(promptForInitialUserConfig(prompt, select)).resolves.toStrictEqual({
+      kind: "root",
+    })
+    expect(prompt).not.toHaveBeenCalled()
+    expect(select).toHaveBeenCalledTimes(1)
+    expect(select).toHaveBeenCalledWith(
+      "Which SSH user already works for the first connection to this server?",
+      [
+        {
+          description:
+            "Fresh server with SSH access only as root. Paratix bootstraps a dedicated admin user first.",
+          label: "Root user",
+          value: "root",
+        },
+        {
+          description:
+            "A named admin user already exists. Paratix connects directly as that user and skips root bootstrap.",
+          label: "Admin user",
+          value: "admin",
+        },
+      ]
+    )
   })
 
   it("supports the interactive admin flow with a concrete username", async () => {
-    const prompt = vi.fn().mockResolvedValueOnce("admin").mockResolvedValueOnce("deploy")
+    const prompt = vi.fn().mockResolvedValueOnce("deploy")
+    const select = vi.fn().mockResolvedValueOnce("admin")
 
-    await expect(promptForInitialUserConfig(prompt)).resolves.toStrictEqual({
+    await expect(promptForInitialUserConfig(prompt, select)).resolves.toStrictEqual({
       kind: "admin",
       user: "deploy",
     })
-    expect(prompt).toHaveBeenNthCalledWith(1, "Initial SSH user? [root/admin]: ")
-    expect(prompt).toHaveBeenNthCalledWith(2, "Admin username: ")
+    expect(select).toHaveBeenCalledTimes(1)
+    expect(prompt).toHaveBeenCalledTimes(1)
+    expect(prompt).toHaveBeenNthCalledWith(1, "Admin username: ")
   })
 })
 

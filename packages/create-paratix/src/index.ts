@@ -2,6 +2,7 @@ import { existsSync, mkdirSync, writeFileSync } from "node:fs"
 import { basename, join, resolve } from "node:path"
 import { createInterface } from "node:readline/promises"
 
+import { createTerminalSelect, type SelectFunction, type SelectOption } from "./promptUi.js"
 import {
   detectPackageManager,
   installDependencies,
@@ -25,7 +26,24 @@ type ScaffoldOptions = {
 
 type PromptFunction = (question: string) => Promise<string>
 const NOOP = (): void => undefined
+const UNAVAILABLE_SELECT = (() => {
+  throw new Error("Interactive selection is unavailable.")
+}) as SelectFunction<"admin" | "root">
 const CLI_USAGE = "Usage: create-paratix <project-name> [--initial-user <root|name>]"
+const INITIAL_USER_OPTIONS: Array<SelectOption<"admin" | "root">> = [
+  {
+    description:
+      "Fresh server with SSH access only as root. Paratix bootstraps a dedicated admin user first.",
+    label: "Root user",
+    value: "root",
+  },
+  {
+    description:
+      "A named admin user already exists. Paratix connects directly as that user and skips root bootstrap.",
+    label: "Admin user",
+    value: "admin",
+  },
+]
 
 export function writeProjectFiles(projectDirectory: string, options?: ScaffoldOptions): void {
   // eslint-disable-next-line security/detect-non-literal-fs-filename
@@ -166,16 +184,29 @@ function createTerminalPrompt(): { close: () => void; prompt: PromptFunction } {
 
 function createPromptSession(prompt?: PromptFunction): {
   ask: PromptFunction
+  chooseInitialUser: SelectFunction<"admin" | "root">
   closePrompt: () => void
+  closeSelect: () => void
 } {
   const terminalPrompt = prompt == null ? createTerminalPrompt() : null
-  if (terminalPrompt != null) {
-    return { ask: terminalPrompt.prompt, closePrompt: terminalPrompt.close }
+  const terminalSelect = prompt == null ? createTerminalSelect() : null
+  if (terminalPrompt != null && terminalSelect != null) {
+    return {
+      ask: terminalPrompt.prompt,
+      chooseInitialUser: terminalSelect.select,
+      closePrompt: terminalPrompt.close,
+      closeSelect: terminalSelect.close,
+    }
   }
   if (prompt == null) {
     throw new Error("Interactive prompt is unavailable.")
   }
-  return { ask: prompt, closePrompt: NOOP }
+  return {
+    ask: prompt,
+    chooseInitialUser: UNAVAILABLE_SELECT,
+    closePrompt: NOOP,
+    closeSelect: NOOP,
+  }
 }
 
 async function promptForAdminUser(
@@ -197,28 +228,28 @@ async function promptForAdminUser(
 }
 
 export async function promptForInitialUserConfig(
-  prompt?: PromptFunction
+  prompt?: PromptFunction,
+  select?: SelectFunction<"admin" | "root">
 ): Promise<InitialUserConfig> {
-  const { ask, closePrompt } = createPromptSession(prompt)
+  const promptSession = createPromptSession(prompt)
+  const chooseInitialUser = select ?? promptSession.chooseInitialUser
 
-  /* eslint-disable no-await-in-loop */
-  // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition
-  while (true) {
-    const initialUserType = normalizeInitialUserName(
-      await ask("Initial SSH user? [root/admin]: ")
-    ).toLowerCase()
+  try {
+    const initialUserType = await chooseInitialUser(
+      "Which SSH user already works for the first connection to this server?",
+      INITIAL_USER_OPTIONS
+    )
 
     if (initialUserType === "root") {
-      closePrompt()
+      promptSession.closeSelect()
+      promptSession.closePrompt()
       return { kind: "root" }
     }
-    if (initialUserType === "admin") {
-      return promptForAdminUser(ask, closePrompt)
-    }
 
-    console.error('Error: Please answer "root" or "admin".')
+    return await promptForAdminUser(promptSession.ask, promptSession.closePrompt)
+  } finally {
+    promptSession.closeSelect()
   }
-  /* eslint-enable no-await-in-loop */
 }
 
 function validateProjectName(name: string | undefined): string {

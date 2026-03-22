@@ -1,6 +1,6 @@
 # create-paratix
 
-Scaffolds a new [Paratix](https://github.com/sebastian-software/paratix) server project. The CLI now asks which SSH user exists initially on the target server and generates the matching bootstrap path: explicit `root` bootstrap or direct admin-user hardening.
+Scaffolds a new [Paratix](https://github.com/sebastian-software/paratix) server project. The CLI now explains which initial SSH user Paratix needs for the very first connection and lets you choose the matching bootstrap path via arrow-key selection: explicit `root` bootstrap or direct admin-user hardening.
 
 ## Quick Start
 
@@ -156,6 +156,11 @@ Standardmäßig fragt `create-paratix` interaktiv:
 
 1. Ist der initiale SSH-User `root` oder ein Admin-User?
 2. Falls Admin-User: Wie heißt dieser User konkret?
+
+Im interaktiven Modus zeigt `create-paratix` dafür eine kurze Erklärung und eine Auswahl per Pfeiltasten:
+
+- `Root user`: frischer Server mit SSH nur als `root`; Paratix bootstrapt zuerst einen dedizierten Admin-User
+- `Admin user`: ein konkreter Admin-User existiert bereits; Paratix verbindet sich direkt als dieser User
 
 Nicht-interaktiv funktioniert derselbe Vertrag über `--initial-user`:
 
