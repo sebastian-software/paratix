@@ -410,6 +410,14 @@ describe("promptForHost", () => {
     expect(prompt).toHaveBeenCalledWith("Server host (domain or IP): ")
   })
 
+  it("closes the host prompt session after a successful prompt run", async () => {
+    const prompt = vi.fn().mockResolvedValueOnce("example.com")
+    const closePrompt = vi.fn()
+
+    await expect(promptForHost(prompt, () => void closePrompt())).resolves.toBe("example.com")
+    expect(closePrompt).toHaveBeenCalledTimes(1)
+  })
+
   it("retries until a valid host is entered", async () => {
     const prompt = vi.fn().mockResolvedValueOnce("bad host").mockResolvedValueOnce("203.0.113.10")
 
@@ -417,6 +425,14 @@ describe("promptForHost", () => {
     expect(console.error).toHaveBeenCalledWith(
       "Error: Please enter a domain name, IPv4, or IPv6 address without spaces."
     )
+  })
+
+  it("also closes the host prompt session after retries", async () => {
+    const prompt = vi.fn().mockResolvedValueOnce("bad host").mockResolvedValueOnce("203.0.113.10")
+    const closePrompt = vi.fn()
+
+    await expect(promptForHost(prompt, () => void closePrompt())).resolves.toBe("203.0.113.10")
+    expect(closePrompt).toHaveBeenCalledTimes(1)
   })
 })
 

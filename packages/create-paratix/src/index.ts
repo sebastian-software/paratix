@@ -1,19 +1,15 @@
 import { existsSync, mkdirSync, writeFileSync } from "node:fs"
 import { basename, join, resolve } from "node:path"
-import { createInterface } from "node:readline/promises"
 
-import { createTerminalSelect, type SelectFunction, type SelectOption } from "./promptUi.js"
 import {
-  promptForAdminPublicKey as promptForScaffoldAdminPublicKey,
-  readAdminPublicKeyFile,
-  validateAdminPublicKey,
-} from "./publicKeySelection.js"
+  promptForAdminPublicKey,
+  promptForHost,
+  promptForInitialUserConfig,
+} from "./interactivePrompts.js"
+import { readAdminPublicKeyFile, validateAdminPublicKey } from "./publicKeySelection.js"
 import {
-  isValidInitialUserName,
-  normalizeInitialUserName,
   parseCliArguments as parseScaffoldCliArguments,
   parseInitialUserConfig as parseScaffoldInitialUserConfig,
-  promptForHost as promptForScaffoldHost,
   validateHost as validateScaffoldHost,
 } from "./scaffoldConfig.js"
 import {
@@ -32,6 +28,11 @@ import {
 } from "./templates.js"
 
 export {
+  promptForAdminPublicKey,
+  promptForHost,
+  promptForInitialUserConfig,
+} from "./interactivePrompts.js"
+export {
   isValidHost,
   isValidInitialUserName,
   normalizeHost,
@@ -44,26 +45,6 @@ type ScaffoldOptions = {
   initialUser?: InitialUserConfig
   installer?: (projectDirectory: string, packageManager: PackageManager) => boolean
 }
-
-type PromptFunction = (question: string) => Promise<string>
-const NOOP = (): void => undefined
-const UNAVAILABLE_SELECT = (() => {
-  throw new Error("Interactive selection is unavailable.")
-}) as SelectFunction<"admin" | "root">
-const INITIAL_USER_OPTIONS: Array<SelectOption<"admin" | "root">> = [
-  {
-    description:
-      "Fresh server with SSH access only as root. Paratix bootstraps a dedicated admin user first.",
-    label: "Root user",
-    value: "root",
-  },
-  {
-    description:
-      "A named admin user already exists. Paratix connects directly as that user and skips root bootstrap.",
-    label: "Admin user",
-    value: "admin",
-  },
-]
 
 export function writeProjectFiles(projectDirectory: string, options?: ScaffoldOptions): void {
   // eslint-disable-next-line security/detect-non-literal-fs-filename
@@ -144,110 +125,8 @@ export function parseInitialUserConfig(value: string): InitialUserConfig {
   return parseScaffoldInitialUserConfig(exitWithMessage, value)
 }
 
-function createTerminalPrompt(): { close: () => void; prompt: PromptFunction } {
-  const readline = createInterface({ input: process.stdin, output: process.stdout })
-  return {
-    close: (): void => {
-      readline.close()
-    },
-    prompt: async (question: string): Promise<string> => readline.question(question),
-  }
-}
-
 export function validateHost(value: string): string {
   return validateScaffoldHost(exitWithMessage, value)
-}
-
-function createPromptSession(prompt?: PromptFunction): {
-  ask: PromptFunction
-  chooseInitialUser: SelectFunction<"admin" | "root">
-  closePrompt: () => void
-  closeSelect: () => void
-} {
-  const terminalPrompt = prompt == null ? createTerminalPrompt() : null
-  const terminalSelect = prompt == null ? createTerminalSelect() : null
-  if (terminalPrompt != null && terminalSelect != null) {
-    return {
-      ask: terminalPrompt.prompt,
-      chooseInitialUser: terminalSelect.select,
-      closePrompt: terminalPrompt.close,
-      closeSelect: terminalSelect.close,
-    }
-  }
-  if (prompt == null) {
-    throw new Error("Interactive prompt is unavailable.")
-  }
-  return {
-    ask: prompt,
-    chooseInitialUser: UNAVAILABLE_SELECT,
-    closePrompt: NOOP,
-    closeSelect: NOOP,
-  }
-}
-
-async function promptForAdminUser(
-  ask: PromptFunction,
-  closePrompt: () => void
-): Promise<InitialUserConfig> {
-  // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition
-  while (true) {
-    // eslint-disable-next-line no-await-in-loop
-    const adminUser = normalizeInitialUserName(await ask("Admin username: "))
-    if (isValidInitialUserName(adminUser) && adminUser !== "root") {
-      closePrompt()
-      return { kind: "admin", user: adminUser }
-    }
-    console.error(
-      'Error: Invalid admin username. Use a valid lowercase Linux username other than "root".'
-    )
-  }
-}
-
-export async function promptForHost(prompt?: PromptFunction): Promise<string> {
-  return promptForScaffoldHost(prompt ?? createTerminalPrompt().prompt)
-}
-
-export async function promptForInitialUserConfig(
-  prompt?: PromptFunction,
-  select?: SelectFunction<"admin" | "root">
-): Promise<InitialUserConfig> {
-  const promptSession = createPromptSession(prompt)
-  const chooseInitialUser = select ?? promptSession.chooseInitialUser
-
-  try {
-    const initialUserType = await chooseInitialUser(
-      "Which SSH user already works for the first connection to this server?",
-      INITIAL_USER_OPTIONS
-    )
-
-    if (initialUserType === "root") {
-      promptSession.closeSelect()
-      promptSession.closePrompt()
-      return { kind: "root" }
-    }
-
-    return await promptForAdminUser(promptSession.ask, promptSession.closePrompt)
-  } finally {
-    promptSession.closeSelect()
-  }
-}
-
-export async function promptForAdminPublicKey(
-  select?: SelectFunction<string>,
-  publicKeys?: Array<{ key: string; label: string; path: string }>
-): Promise<string | undefined> {
-  const terminalSelect = select == null ? createTerminalSelect() : null
-  const choose = select ?? terminalSelect?.select
-
-  if (choose == null) {
-    throw new Error("Interactive selection is unavailable.")
-  }
-
-  try {
-    return await promptForScaffoldAdminPublicKey(choose, publicKeys)
-  } finally {
-    terminalSelect?.close()
-  }
 }
 
 function validateProjectName(name: string | undefined): string {
