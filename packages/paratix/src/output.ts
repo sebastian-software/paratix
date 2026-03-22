@@ -68,7 +68,7 @@ export function printModuleResult(name: string, status: DisplayStatus, detail?: 
   }
 
   const detailSuffix = detail == null ? "" : `  ${pc.dim(detail)}`
-  console.log(`  ${icon}  ${name.padEnd(MODULE_NAME_WIDTH)}${statusText}${detailSuffix}`)
+  console.log(`  ${icon}  ${name.padEnd(MODULE_NAME_WIDTH)}  ${statusText}${detailSuffix}`)
 }
 
 /**

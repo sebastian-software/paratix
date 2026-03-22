@@ -1,7 +1,29 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 
-import { printCommandFailure, printVerboseCommandError } from "../src/output.js"
+import { printCommandFailure, printModuleResult, printVerboseCommandError } from "../src/output.js"
 import { CommandError } from "../src/sshHelpers.js"
+
+describe("printModuleResult", () => {
+  let consoleLogs: string[]
+
+  beforeEach(() => {
+    consoleLogs = []
+    vi.spyOn(console, "log").mockImplementation((...args: unknown[]) => {
+      consoleLogs.push(args.map(String).join(" "))
+    })
+  })
+
+  afterEach(() => {
+    vi.restoreAllMocks()
+  })
+
+  it("keeps a separator between exact-width names and the status", () => {
+    printModuleResult("package.installed: nginx, curl, htop", "changed", "(dry-run)")
+
+    expect(consoleLogs).toHaveLength(1)
+    expect(consoleLogs[0]).toContain("htop  changed  (dry-run)")
+  })
+})
 
 // ---------------------------------------------------------------------------
 // printVerboseCommandError
