@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, readFileSync, rmSync } from "node:fs"
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs"
 import { join, resolve } from "node:path"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 
@@ -18,6 +18,11 @@ import {
   validateHost,
   writeProjectFiles,
 } from "../src/index.js"
+import {
+  isValidAdminPublicKey,
+  readAdminPublicKeyFile,
+  validateAdminPublicKey,
+} from "../src/publicKeySelection.js"
 
 async function expectProcessExit(
   callback: () => Promise<void> | void,
@@ -204,6 +209,70 @@ describe("parseCliArguments", () => {
 
     expect(console.error).toHaveBeenCalledWith(
       'Error: "--bootstrap-root" was removed. Use "--initial-user root" instead.'
+    )
+  })
+})
+
+describe("admin public key validation", () => {
+  beforeEach(() => {
+    vi.spyOn(console, "error").mockImplementation((...args) => {
+      void args
+    })
+  })
+
+  afterEach(() => {
+    vi.restoreAllMocks()
+  })
+
+  it("accepts a valid OpenSSH public key", () => {
+    expect(
+      isValidAdminPublicKey(
+        "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIBxv2sz0YF80J6V1rP4Y9l8n8A6oQ2V9m3YbQdK6Yz4Z user@example"
+      )
+    ).toBe(true)
+  })
+
+  it("rejects values without a supported OpenSSH algorithm prefix", () => {
+    expect(isValidAdminPublicKey("not-a-key")).toBe(false)
+    expect(isValidAdminPublicKey("ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIBxv2sz0YF80")).toBe(false)
+  })
+
+  it("rejects invalid base64 payloads", () => {
+    expect(isValidAdminPublicKey("ssh-ed25519 not-base64!! user@example")).toBe(false)
+  })
+
+  it("rejects syntactically broken single-line values", () => {
+    expect(isValidAdminPublicKey("ssh-ed25519")).toBe(false)
+    expect(isValidAdminPublicKey("ssh-ed25519 ")).toBe(false)
+  })
+
+  it("fails closed for invalid direct admin public keys", async () => {
+    await expectProcessExit(() => {
+      validateAdminPublicKey((message: string) => {
+        console.error(message)
+        process.exit(1)
+      }, "invalid-key")
+    })
+
+    expect(console.error).toHaveBeenCalledWith(
+      'Error: Invalid value for "--admin-public-key" — provide a valid single-line OpenSSH public key.'
+    )
+  })
+
+  it("fails closed for invalid admin public key files", async () => {
+    const invalidKeyFile = join(TEST_DIR, "invalid-admin.pub")
+    mkdirSync(TEST_DIR, { recursive: true })
+    writeFileSync(invalidKeyFile, "invalid-key\n")
+
+    await expectProcessExit(() => {
+      readAdminPublicKeyFile((message: string) => {
+        console.error(message)
+        process.exit(1)
+      }, invalidKeyFile)
+    })
+
+    expect(console.error).toHaveBeenCalledWith(
+      'Error: Invalid value for "--admin-public-key-file" — provide a valid single-line OpenSSH public key.'
     )
   })
 })

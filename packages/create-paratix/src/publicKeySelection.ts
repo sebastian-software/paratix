@@ -13,6 +13,7 @@ export type LocalPublicKey = {
 type ExitWithMessage = (message: string) => never
 
 type PublicKeyChoice = "local" | "placeholder"
+type ParsedPublicKey = { algorithm: string; encodedKey: string }
 
 const PUBLIC_KEY_PROMPT_OPTIONS: Array<SelectOption<PublicKeyChoice>> = [
   {
@@ -29,12 +30,125 @@ const PUBLIC_KEY_PROMPT_OPTIONS: Array<SelectOption<PublicKeyChoice>> = [
   },
 ]
 
-function isLikelyPublicKey(value: string): boolean {
-  return value.length > 0 && !value.includes("\n")
+const supportedOpenSshAlgorithms = new Set([
+  "ecdsa-sha2-nistp256",
+  "ecdsa-sha2-nistp384",
+  "ecdsa-sha2-nistp521",
+  "sk-ecdsa-sha2-nistp256@openssh.com",
+  "sk-ssh-ed25519@openssh.com",
+  "ssh-ed25519",
+  "ssh-rsa",
+])
+
+function parseOpenSshPublicKey(value: string): null | ParsedPublicKey {
+  if (value.length === 0 || value.includes("\n")) {
+    return null
+  }
+
+  const parts = value.split(/\s+/v)
+  if (parts.length < 2) {
+    return null
+  }
+
+  const algorithm = parts[0]
+  const encodedKey = parts[1]
+
+  if (!supportedOpenSshAlgorithms.has(algorithm)) {
+    return null
+  }
+
+  return {
+    algorithm,
+    encodedKey,
+  }
+}
+
+function trimBase64Padding(value: string): string {
+  let endIndex = value.length
+  while (endIndex > 0 && value[endIndex - 1] === "=") {
+    endIndex--
+  }
+  return value.slice(0, endIndex)
+}
+
+function isBase64AlphaNumeric(character: string): boolean {
+  return (
+    (character >= "A" && character <= "Z") ||
+    (character >= "a" && character <= "z") ||
+    (character >= "0" && character <= "9")
+  )
+}
+
+function isBase64DataCharacter(character: string): boolean {
+  return isBase64AlphaNumeric(character) || character === "+" || character === "/"
+}
+
+function updatePaddingState(
+  character: string,
+  state: { paddingCount: number; sawPadding: boolean }
+): { paddingCount: number; sawPadding: boolean } | null {
+  if (character !== "=") {
+    return null
+  }
+
+  const nextState = {
+    paddingCount: state.paddingCount + 1,
+    sawPadding: true,
+  }
+
+  return nextState.paddingCount <= 2 ? nextState : null
+}
+
+function hasValidBase64Alphabet(value: string): boolean {
+  if (value.length === 0) {
+    return false
+  }
+
+  const state = { paddingCount: 0, sawPadding: false }
+
+  for (const character of value) {
+    if (isBase64DataCharacter(character)) {
+      if (state.sawPadding) {
+        return false
+      }
+      continue
+    }
+
+    const nextState = updatePaddingState(character, state)
+    if (nextState != null) {
+      state.paddingCount = nextState.paddingCount
+      state.sawPadding = nextState.sawPadding
+      continue
+    }
+
+    return false
+  }
+
+  return true
+}
+
+function isCanonicalBase64(value: string): boolean {
+  if (!hasValidBase64Alphabet(value)) {
+    return false
+  }
+
+  try {
+    const decoded = Buffer.from(value, "base64")
+    if (decoded.length === 0) {
+      return false
+    }
+
+    const normalizedValue = trimBase64Padding(value)
+    const encodedAgain = trimBase64Padding(decoded.toString("base64"))
+    return encodedAgain === normalizedValue
+  } catch {
+    return false
+  }
 }
 
 export function isValidAdminPublicKey(value: string): boolean {
-  return isLikelyPublicKey(value.trim())
+  const parsedKey = parseOpenSshPublicKey(value.trim())
+  return parsedKey != null && isCanonicalBase64(parsedKey.encodedKey)
 }
 
 export function validateAdminPublicKey(
@@ -45,21 +159,24 @@ export function validateAdminPublicKey(
   const normalizedValue = value.trim()
   if (!isValidAdminPublicKey(normalizedValue)) {
     exitWithMessage(
-      `Error: Invalid value for "${optionName}" — provide a single-line SSH public key.`
+      `Error: Invalid value for "${optionName}" — provide a valid single-line OpenSSH public key.`
     )
   }
   return normalizedValue
 }
 
 export function readAdminPublicKeyFile(exitWithMessage: ExitWithMessage, path: string): string {
+  let value: string
+
   try {
     // eslint-disable-next-line security/detect-non-literal-fs-filename
-    const value = readFileSync(path, "utf8")
-    return validateAdminPublicKey(exitWithMessage, value, "--admin-public-key-file")
+    value = readFileSync(path, "utf8")
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error)
     exitWithMessage(`Error: Failed to read "--admin-public-key-file" from "${path}": ${message}`)
   }
+
+  return validateAdminPublicKey(exitWithMessage, value, "--admin-public-key-file")
 }
 
 export function discoverLocalPublicKeys(sshDirectory = join(homedir(), ".ssh")): LocalPublicKey[] {
@@ -74,7 +191,7 @@ export function discoverLocalPublicKeys(sshDirectory = join(homedir(), ".ssh")):
         try {
           // eslint-disable-next-line security/detect-non-literal-fs-filename
           const key = readFileSync(path, "utf8").trim()
-          if (!isLikelyPublicKey(key)) {
+          if (!isValidAdminPublicKey(key)) {
             return []
           }
 
