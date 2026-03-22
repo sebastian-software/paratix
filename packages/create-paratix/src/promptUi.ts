@@ -58,6 +58,7 @@ function prepareSelectInput(): { previousRawMode: boolean | undefined } {
 
 function cleanupSelectInput(previousRawMode: boolean | undefined): void {
   process.stdin.setRawMode(previousRawMode ?? false)
+  process.stdin.pause()
   process.stdout.write("\x1B[?25h")
 }
 
