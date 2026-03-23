@@ -87,10 +87,11 @@ The direct admin-user path looks like this:
 
 ```typescript
 import { recipe, server } from "paratix"
-import { hostname, package as packages, service, ssh, sshd, ufw, user } from "paratix/modules"
+import { hostname, net, package as packages, service, ssh, sshd, ufw, user } from "paratix/modules"
 
 const adminUser = "paratix"
 const adminPublicKey = "ssh-ed25519 REPLACE_ME_WITH_YOUR_PUBLIC_KEY"
+const serverName = "my-server"
 const FIRST_RUN = process.env["PARATIX_FIRST_RUN"] === "true"
 const sshPorts = FIRST_RUN ? [22] : [2222]
 const firewallTcpPorts = FIRST_RUN ? [22, 2222, 80, 443] : [2222, 80, 443]
@@ -98,10 +99,10 @@ const strictHostKeyChecking = FIRST_RUN ? "accept-new" : "yes"
 
 export default server({
   host: "1.2.3.4",
-  name: "my-server",
+  name: serverName,
   env: {
     FIRST_RUN,
-    SERVER_NAME: "my-server",
+    SERVER_NAME: serverName,
     SSH_PORT: 2222,
   },
   ssh: {
@@ -116,7 +117,8 @@ export default server({
     // expectedHostPublicKey: "ssh-ed25519 REPLACE_ME_WITH_YOUR_HOST_PUBLIC_KEY",
   },
   run: [
-    hostname.set("my-server"),
+    net.hosts("127.0.1.1", [serverName]),
+    hostname.set(serverName),
     packages.upgrade("2026-03-01"),
     packages.installed("nginx", "curl", "htop"),
 

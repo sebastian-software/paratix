@@ -678,14 +678,17 @@ describe("writeProjectFiles", () => {
     })
   })
 
-  it("generated package.json includes tsx so apply scripts can run server.ts immediately", () => {
+  it("generated package.json includes tsx and @types/node so apply scripts can run server.ts immediately", () => {
     writeProjectFiles(TEST_DIR)
 
     const raw = readFileSync(join(TEST_DIR, "package.json"), "utf8")
     const parsed: unknown = JSON.parse(raw)
 
     expect(parsed).toMatchObject({
-      devDependencies: { tsx: expect.stringMatching(/^\^/v) },
+      devDependencies: {
+        "@types/node": expect.stringMatching(/^\^/v),
+        tsx: expect.stringMatching(/^\^/v),
+      },
       scripts: {
         apply: "paratix apply server.ts",
         "apply:dry": "paratix apply server.ts --dry-run",
@@ -741,6 +744,7 @@ describe("writeProjectFiles", () => {
     const content = readFileSync(join(TEST_DIR, "server.ts"), "utf8")
 
     expect(content).toContain("package as packages")
+    expect(content).toContain("net, package as packages")
     expect(content).not.toMatch(/\bapt\b/v)
   })
 
@@ -983,6 +987,18 @@ describe("writeProjectFiles", () => {
     expect(content).toContain("SERVER_NAME: serverName,")
     expect(content).toContain("SSH_PORT: 2222,")
     expect(content).toContain("hostname.set(serverName)")
+  })
+
+  it("generated server.ts adds /etc/hosts before setting the hostname", () => {
+    writeProjectFiles(TEST_DIR)
+
+    const content = readFileSync(join(TEST_DIR, "server.ts"), "utf8")
+    const hostsIndex = content.indexOf('net.hosts("127.0.1.1", [serverName])')
+    const hostnameIndex = content.indexOf("hostname.set(serverName)")
+
+    expect(hostsIndex).toBeGreaterThanOrEqual(0)
+    expect(hostnameIndex).toBeGreaterThanOrEqual(0)
+    expect(hostsIndex).toBeLessThan(hostnameIndex)
   })
 
   it("generated root-bootstrap server.ts also opens firewall port 2222 before ssh-hardening-transition", () => {

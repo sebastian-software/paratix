@@ -66,7 +66,7 @@ function createBaseServerHeader({
       : `    expectedHostFingerprint: ${JSON.stringify(expectedHostFingerprint)}, // captured from port 22 during scaffolding`
 
   return `import { recipe, server } from "paratix";
-import { file, hostname, package as packages, service, ssh, sshd, ufw, user } from "paratix/modules";
+import { file, hostname, net, package as packages, service, ssh, sshd, ufw, user } from "paratix/modules";
 
 ${adminUserDeclaration}
 const adminPublicKey = ${JSON.stringify(adminPublicKey ?? "ssh-ed25519 REPLACE_ME_WITH_YOUR_PUBLIC_KEY")};
@@ -96,6 +96,7 @@ ${expectedHostFingerprintLine}
     SSH_PORT: 2222,
   },
   run: [
+    net.hosts("127.0.1.1", [serverName]),
     hostname.set(serverName),
     packages.upgrade("2026-03-01"),
     packages.installed("nginx", "curl", "htop"),
