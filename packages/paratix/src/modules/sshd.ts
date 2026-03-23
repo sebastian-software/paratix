@@ -14,6 +14,7 @@ import {
 const DEFAULT_SSH_PORT = 22
 const PRIVILEGE_SEPARATION_DIRECTORY = "/run/sshd"
 const SSHD_CONFIG_PATH = "/etc/ssh/sshd_config"
+const SSHD_CONFIG_MODE = "0644"
 const SYSTEMCTL = "systemctl"
 
 // prettier-ignore
@@ -33,7 +34,7 @@ async function validateSshdConfig(ssh: SshConnection, originalConfig: string): P
   if (result.code !== 0) {
     // Intentional: unguarded write — restoring the original config is more
     // important than concurrency safety during a failed validation rollback.
-    await ssh.writeFile(SSHD_CONFIG_PATH, originalConfig)
+    await ssh.writeFile(SSHD_CONFIG_PATH, originalConfig, { mode: SSHD_CONFIG_MODE })
     throw new Error(
       `sshd config validation failed (sshd -t), rolled back to previous config:\n${result.stderr}`
     )
@@ -76,7 +77,7 @@ async function validateProspectiveSshdConfig(
 ): Promise<ModuleResult | undefined> {
   const temporaryConfigPath = `/tmp/paratix-sshd-dry-run-${randomUUID()}.conf`
   try {
-    await ssh.writeFile(temporaryConfigPath, content)
+    await ssh.writeFile(temporaryConfigPath, content, { mode: SSHD_CONFIG_MODE })
     await ensurePrivilegeSeparationDirectory(ssh)
     const result = await ssh.exec(`sshd -t -f '${temporaryConfigPath}'`, {
       ignoreExitCode: true,
@@ -160,6 +161,7 @@ async function applySshdPort(ssh: SshConnection, targetPort: number): Promise<Mo
   }
 
   await guardedWriteFile(ssh, {
+    mode: SSHD_CONFIG_MODE,
     newContent,
     originalContent: originalConfig,
     remotePath: SSHD_CONFIG_PATH,
@@ -216,6 +218,7 @@ export const sshd = {
         const { didChange, newContent } = buildSshdConfigContent(originalConfig, settings)
         if (didChange) {
           await guardedWriteFile(ssh, {
+            mode: SSHD_CONFIG_MODE,
             newContent,
             originalContent: originalConfig,
             remotePath: SSHD_CONFIG_PATH,

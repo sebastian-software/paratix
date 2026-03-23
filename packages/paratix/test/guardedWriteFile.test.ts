@@ -7,6 +7,7 @@ describe("guardedWriteFile", () => {
   it("writes the file when originalContent matches the current file content", async () => {
     // Arrange
     const remotePath = "/etc/app.conf"
+    const mode = "0644"
     const originalContent = "key=value"
     const newContent = "key=updated"
 
@@ -17,11 +18,11 @@ describe("guardedWriteFile", () => {
     const writeFileSpy = vi.spyOn(ssh, "writeFile")
 
     // Act
-    await guardedWriteFile(ssh, { newContent, originalContent, remotePath })
+    await guardedWriteFile(ssh, { mode, newContent, originalContent, remotePath })
 
     // Assert
     expect(writeFileSpy).toHaveBeenCalledOnce()
-    expect(writeFileSpy).toHaveBeenCalledWith(remotePath, newContent, undefined)
+    expect(writeFileSpy).toHaveBeenCalledWith(remotePath, newContent, { mode })
   })
 
   it("passes the mode option to writeFile when provided", async () => {
@@ -47,6 +48,7 @@ describe("guardedWriteFile", () => {
     // Arrange: simulate a concurrent modification — the file on disk now
     // contains different content than what was originally read.
     const remotePath = "/etc/app.conf"
+    const mode = "0644"
     const originalContent = "key=value\n"
     const concurrentlyModifiedContent = "key=modified-by-another-process\n"
     const newContent = "key=updated\n"
@@ -58,13 +60,14 @@ describe("guardedWriteFile", () => {
 
     // Act + Assert
     await expect(
-      guardedWriteFile(ssh, { newContent, originalContent, remotePath })
+      guardedWriteFile(ssh, { mode, newContent, originalContent, remotePath })
     ).rejects.toThrow(/Concurrent modification/v)
   })
 
   it("includes the file path in the error message on concurrent modification", async () => {
     // Arrange
     const remotePath = "/etc/nginx/nginx.conf"
+    const mode = "0644"
     const originalContent = "worker_processes 1;\n"
     const concurrentlyModifiedContent = "worker_processes 4;\n"
     const newContent = "worker_processes 2;\n"
@@ -74,13 +77,14 @@ describe("guardedWriteFile", () => {
 
     // Act + Assert
     await expect(
-      guardedWriteFile(ssh, { newContent, originalContent, remotePath })
+      guardedWriteFile(ssh, { mode, newContent, originalContent, remotePath })
     ).rejects.toThrow(remotePath)
   })
 
   it("includes 'Concurrent modification' in the error message", async () => {
     // Arrange
     const remotePath = "/etc/app.conf"
+    const mode = "0644"
     const originalContent = "v1\n"
     const concurrentlyModifiedContent = "v2\n"
     const newContent = "v3\n"
@@ -90,13 +94,14 @@ describe("guardedWriteFile", () => {
 
     // Act + Assert
     await expect(
-      guardedWriteFile(ssh, { newContent, originalContent, remotePath })
+      guardedWriteFile(ssh, { mode, newContent, originalContent, remotePath })
     ).rejects.toThrow("Concurrent modification")
   })
 
   it("does not call writeFile when concurrent modification is detected", async () => {
     // Arrange
     const remotePath = "/etc/app.conf"
+    const mode = "0644"
     const originalContent = "original\n"
     const concurrentlyModifiedContent = "changed\n"
     const newContent = "new\n"
@@ -107,7 +112,7 @@ describe("guardedWriteFile", () => {
 
     // Act
     await expect(
-      guardedWriteFile(ssh, { newContent, originalContent, remotePath })
+      guardedWriteFile(ssh, { mode, newContent, originalContent, remotePath })
     ).rejects.toThrow(/Concurrent modification/v)
 
     // Assert: writeFile must never be called when the guard triggers

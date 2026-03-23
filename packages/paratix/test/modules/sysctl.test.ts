@@ -93,7 +93,7 @@ describe("sysctl.set — apply", () => {
     const result = await mod.apply(mockSsh, emptyEnv)
     expect(result.status).toBe("changed")
     expect(mockSsh.calls).toContain(`sysctl -w '${KEY}=${VALUE}'`)
-    expect(writeFileSpy).toHaveBeenCalledWith(CONF_PATH, CONF_CONTENT)
+    expect(writeFileSpy).toHaveBeenCalledWith(CONF_PATH, CONF_CONTENT, { mode: "0644" })
   })
 
   it("returns failed when sysctl -w fails (state: present)", async () => {

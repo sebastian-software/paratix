@@ -211,7 +211,7 @@ describe("Paratix integration", () => {
     await ssh.uploadFile(localUploadPath, remoteUploadPath)
     expect(await ssh.readFile(remoteUploadPath)).toBe("upload-content")
 
-    await ssh.writeFile(remoteDownloadPath, "download-content\n")
+    await ssh.writeFile(remoteDownloadPath, "download-content\n", { mode: "0644" })
     await ssh.downloadFile(remoteDownloadPath, localDownloadPath)
     expect(await readFile(localDownloadPath, "utf8")).toBe("download-content\n")
 
@@ -234,7 +234,7 @@ describe("Paratix integration", () => {
     await ssh.uploadFile(localUploadPath, remoteUploadPath)
     expect(await ssh.readFile(remoteUploadPath)).toBe(unicodeContent.trimEnd())
 
-    await ssh.writeFile(remoteDownloadPath, unicodeBlockContent)
+    await ssh.writeFile(remoteDownloadPath, unicodeBlockContent, { mode: "0644" })
     await ssh.downloadFile(remoteDownloadPath, localDownloadPath)
     expect(await readFile(localDownloadPath, "utf8")).toBe(unicodeBlockContent)
 
@@ -369,7 +369,7 @@ describe("Paratix integration", () => {
     writeFileSync(localSourcePath, unicodeContent, "utf8")
     writeFileSync(localTemplatePath, "Hallo {{name|raw}} aus {{city|raw}}", "utf8")
     await ssh.exec(`mkdir -p ${shellQuote(remoteDirectory)}`, { silent: true })
-    await ssh.writeFile(remoteBlockPath, "vorher\n")
+    await ssh.writeFile(remoteBlockPath, "vorher\n", { mode: "0644" })
 
     const directoryModule = file.directory(remoteDirectory, {
       mode: "0750",
@@ -459,8 +459,10 @@ describe("Paratix integration", () => {
       await ssh.exec(`mkdir -p ${shellQuote(httpDirectory)} ${shellQuote(downloadsDirectory)}`, {
         silent: true,
       })
-      await ssh.writeFile(`${httpDirectory}/artifact-url.txt`, urlArtifactContent)
-      await ssh.writeFile(`${httpDirectory}/artifact-large.txt`, largeArtifactContent)
+      await ssh.writeFile(`${httpDirectory}/artifact-url.txt`, urlArtifactContent, { mode: "0644" })
+      await ssh.writeFile(`${httpDirectory}/artifact-large.txt`, largeArtifactContent, {
+        mode: "0644",
+      })
       await startRemoteHttpServer(ssh, httpDirectory, port)
       await waitForRemoteHttpServer(ssh, urlArtifactUrl)
 

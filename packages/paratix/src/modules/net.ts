@@ -21,6 +21,7 @@ import {
 const EXEC_OPTS = { ignoreExitCode: true, silent: true } as const
 const HOSTS_FILE = "/etc/hosts"
 const HOSTS_FILE_MODE = "0644"
+const NET_CONFIG_FILE_MODE = "0644"
 const NETWORKCTL_RELOAD = "networkctl reload"
 const DEFAULT_POLL_INTERVAL_MS = 2000
 const DEFAULT_POLL_TIMEOUT_MS = 60_000
@@ -277,11 +278,11 @@ export const net = {
 
         if (useNetplan) {
           const content = buildNetplanYaml(name, options)
-          await conn.writeFile(netplanPath, content)
+          await conn.writeFile(netplanPath, content, { mode: NET_CONFIG_FILE_MODE })
           await conn.exec("netplan apply", EXEC_OPTS)
         } else {
           const content = buildNetworkdConfig(name, options)
-          await conn.writeFile(networkdPath, content)
+          await conn.writeFile(networkdPath, content, { mode: NET_CONFIG_FILE_MODE })
           await conn.exec(NETWORKCTL_RELOAD, EXEC_OPTS)
         }
 
@@ -365,7 +366,7 @@ export const net = {
         if (!conn) return failed("[net.resolv] SSH connection is required")
 
         await conn.exec("rm -f /etc/resolv.conf", EXEC_OPTS)
-        await conn.writeFile("/etc/resolv.conf", expectedContent)
+        await conn.writeFile("/etc/resolv.conf", expectedContent, { mode: NET_CONFIG_FILE_MODE })
 
         return { status: "changed" }
       },
@@ -415,7 +416,7 @@ export const net = {
             EXEC_OPTS
           )
           const dropinContent = buildRouteDropin(destination, gateway, device)
-          await conn.writeFile(dropinPath, dropinContent)
+          await conn.writeFile(dropinPath, dropinContent, { mode: NET_CONFIG_FILE_MODE })
           await conn.exec(NETWORKCTL_RELOAD, EXEC_OPTS)
         } else {
           await conn.exec(`ip route del ${shellQuote(destination)}`, EXEC_OPTS)

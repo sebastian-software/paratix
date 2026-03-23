@@ -4,6 +4,7 @@ import { type Module, type ModuleResult, NEEDS_APPLY, type SshConnection } from 
 
 const EXEC_OPTS = { ignoreExitCode: true, silent: true } as const
 const SYSCTL_DIR = "/etc/sysctl.d"
+const SYSCTL_CONFIG_MODE = "0644"
 
 /**
  * Sanitize a sysctl key for safe use in a filesystem path.
@@ -64,7 +65,7 @@ export const sysctl = {
           if (result.code !== 0) {
             return failedCommand(`[sysctl.set: ${key}] sysctl -w failed`, result)
           }
-          await conn.writeFile(configPath, expectedContent)
+          await conn.writeFile(configPath, expectedContent, { mode: SYSCTL_CONFIG_MODE })
         } else {
           await conn.exec(`rm -f ${shellQuote(configPath)}`, EXEC_OPTS)
         }

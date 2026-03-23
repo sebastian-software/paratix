@@ -1792,7 +1792,7 @@ describe("SshConnectionImpl", () => {
       ;(ssh as unknown as Record<string, unknown>).cachedSudoPassword = null
       ;(ssh as unknown as Record<string, unknown>).sudoReady = true
 
-      await ssh.writeFile(remotePath, "hello world")
+      await ssh.writeFile(remotePath, "hello world", { mode: "0600" })
 
       expect(executedCommands[0]).toBe("mktemp '/tmp/paratix-write.XXXXXX'")
       expect(executedCommands[1]).toBe(`chmod '0600' '${tempPath}'`)
@@ -1849,7 +1849,7 @@ describe("SshConnectionImpl", () => {
       const client = makeClientWithExecSpy(execSpy)
       const ssh = makeConnectedSsh(client)
 
-      await ssh.writeFile("/remote/plain.txt", "hello world")
+      await ssh.writeFile("/remote/plain.txt", "hello world", { mode: "0600" })
 
       expect(executedCommands).toContain(`chmod '0600' '${tempPath}'`)
       const chmodIndex = executedCommands.indexOf(`chmod '0600' '${tempPath}'`)
@@ -1896,7 +1896,7 @@ describe("SshConnectionImpl", () => {
       const client = makeClientWithExecSpy(execSpy)
       const ssh = makeConnectedSsh(client)
 
-      await ssh.writeFile("/remote/plain.txt", "hello world")
+      await ssh.writeFile("/remote/plain.txt", "hello world", { mode: "0600" })
 
       // SFTP upload must have been called — atomic path
       expect(vi.mocked(sftpUpload)).toHaveBeenCalledOnce()

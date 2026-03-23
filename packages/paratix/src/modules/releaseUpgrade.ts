@@ -11,6 +11,7 @@ import {
 
 const NONINTERACTIVE = "DEBIAN_FRONTEND=noninteractive"
 const CODENAME_RE = /^[a-z]{3,20}$/v
+const APT_SOURCES_MODE = "0644"
 
 /**
  * Options for the {@link releaseUpgrade.upgrade} module.
@@ -113,6 +114,7 @@ async function replaceCodenameInSourcesList(
   const sourcesContent = await ssh.readFile("/etc/apt/sources.list")
   const updatedContent = sourcesContent.replaceAll(currentCodename, targetCodename)
   await guardedWriteFile(ssh, {
+    mode: APT_SOURCES_MODE,
     newContent: updatedContent,
     originalContent: sourcesContent,
     remotePath: "/etc/apt/sources.list",
@@ -132,6 +134,7 @@ async function replaceCodenameInSourcesList(
       if (updated !== content) {
         // eslint-disable-next-line no-await-in-loop
         await guardedWriteFile(ssh, {
+          mode: APT_SOURCES_MODE,
           newContent: updated,
           originalContent: content,
           remotePath: trimmedPath,

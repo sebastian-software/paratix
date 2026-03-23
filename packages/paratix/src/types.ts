@@ -195,7 +195,7 @@ export type SshConnection = {
   /** Upload a local file to the remote host via SFTP. */
   uploadFile: (localPath: string, remotePath: string, options?: { mode?: string }) => Promise<void>
   /** Write a string to a remote file, creating or overwriting it. */
-  writeFile: (remotePath: string, content: string, options?: { mode?: string }) => Promise<void>
+  writeFile: (remotePath: string, content: string, options: { mode: string }) => Promise<void>
 }
 
 /**
@@ -205,7 +205,7 @@ export type SshConnection = {
  *
  * @param ssh - The SSH connection to the remote host.
  * @param parameters - Parameters for the guarded write operation.
- * @param parameters.mode - Optional chmod mode string for the written file.
+ * @param parameters.mode - Chmod mode string for the written file.
  * @param parameters.newContent - The transformed content to write.
  * @param parameters.originalContent - The content that was read before the transformation.
  * @param parameters.remotePath - Path to the file on the remote host.
@@ -213,7 +213,7 @@ export type SshConnection = {
 export async function guardedWriteFile(
   ssh: SshConnection,
   parameters: {
-    mode?: string
+    mode: string
     newContent: string
     originalContent: string
     remotePath: string
@@ -226,8 +226,7 @@ export async function guardedWriteFile(
         "file content changed between read and write. Aborting to prevent data loss."
     )
   }
-  const writeOptions = parameters.mode == null ? undefined : { mode: parameters.mode }
-  await ssh.writeFile(parameters.remotePath, parameters.newContent, writeOptions)
+  await ssh.writeFile(parameters.remotePath, parameters.newContent, { mode: parameters.mode })
 }
 
 /** SSH connection parameters for a server. */

@@ -10,6 +10,7 @@ import {
 
 const EXEC_OPTS = { ignoreExitCode: true, silent: true } as const
 const FSTAB_PATH = "/etc/fstab"
+const FSTAB_MODE = "0644"
 // cspell:ignore fstype mountpoint noheadings noexec nosuid nodev tmpfs umount findmnt
 
 /**
@@ -102,6 +103,7 @@ async function removePersistedMountIfPresent(ssh: SshConnection, path: string): 
   if (entry === null) return false
   const newContent = removeFstabEntry(fstabContent, path)
   await guardedWriteFile(ssh, {
+    mode: FSTAB_MODE,
     newContent,
     originalContent: fstabContent,
     remotePath: FSTAB_PATH,
@@ -139,6 +141,7 @@ async function ensureFstabEntry(
   if (existingEntry === desiredLine) return false
   const newContent = upsertFstabEntry(fstabContent, path, desiredLine)
   await guardedWriteFile(ssh, {
+    mode: FSTAB_MODE,
     newContent,
     originalContent: fstabContent,
     remotePath: FSTAB_PATH,

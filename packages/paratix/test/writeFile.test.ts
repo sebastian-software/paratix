@@ -112,7 +112,7 @@ describe("SshConnectionImpl.writeFile — small content", () => {
     const content = makeSmallContent()
 
     // Act
-    await ssh.writeFile("/etc/config", content)
+    await ssh.writeFile("/etc/config", content, { mode: "0600" })
 
     // Assert: SFTP path was used — writeFileSync creates local temp, sftpUpload transfers
     expect(vi.mocked(sftpUpload)).toHaveBeenCalledOnce()
@@ -153,7 +153,7 @@ describe("SshConnectionImpl.writeFile — large content (> 64 KB)", () => {
     const content = makeLargeContent()
 
     // Act
-    await ssh.writeFile("/etc/large-config", content)
+    await ssh.writeFile("/etc/large-config", content, { mode: "0600" })
 
     // Assert
     expect(vi.mocked(writeFileSync)).toHaveBeenCalledOnce()
@@ -176,7 +176,7 @@ describe("SshConnectionImpl.writeFile — large content (> 64 KB)", () => {
     const content = makeLargeContent()
 
     // Act
-    await ssh.writeFile("/etc/large-config", content)
+    await ssh.writeFile("/etc/large-config", content, { mode: "0600" })
 
     // Assert: third argument to writeFileSync must include mode 0o600
     expect(vi.mocked(writeFileSync)).toHaveBeenCalledOnce()
@@ -192,7 +192,7 @@ describe("SshConnectionImpl.writeFile — large content (> 64 KB)", () => {
     const content = makeLargeContent()
 
     // Act
-    await ssh.writeFile("/etc/large-config", content)
+    await ssh.writeFile("/etc/large-config", content, { mode: "0600" })
 
     // Assert
     expect(vi.mocked(sftpUpload)).toHaveBeenCalledOnce()
@@ -212,7 +212,7 @@ describe("SshConnectionImpl.writeFile — large content (> 64 KB)", () => {
     const content = makeLargeContent()
 
     // Act
-    await ssh.writeFile("/etc/large-config", content)
+    await ssh.writeFile("/etc/large-config", content, { mode: "0600" })
 
     // Assert: one of the exec calls must be the mv command
     const calls = execSpy.mock.calls as Array<[string, ...unknown[]]>
@@ -230,7 +230,7 @@ describe("SshConnectionImpl.writeFile — large content (> 64 KB)", () => {
     const content = makeLargeContent()
 
     // Act
-    await ssh.writeFile("/etc/large-config", content)
+    await ssh.writeFile("/etc/large-config", content, { mode: "0600" })
 
     // Assert: unlinkSync was called with the same path written by writeFileSync
     expect(vi.mocked(unlinkSync)).toHaveBeenCalledOnce()
@@ -247,7 +247,7 @@ describe("SshConnectionImpl.writeFile — large content (> 64 KB)", () => {
     const content = makeLargeContent()
 
     // Act + Assert: the error propagates
-    await expect(ssh.writeFile("/etc/large-config", content)).rejects.toThrow(
+    await expect(ssh.writeFile("/etc/large-config", content, { mode: "0600" })).rejects.toThrow(
       "SFTP transfer failed"
     )
 
@@ -269,7 +269,7 @@ describe("SshConnectionImpl.writeFile — large content (> 64 KB)", () => {
     const content = makeLargeContent()
 
     // Act + Assert: the original sftpUpload error propagates
-    await expect(ssh.writeFile("/etc/large-config", content)).rejects.toThrow(
+    await expect(ssh.writeFile("/etc/large-config", content, { mode: "0600" })).rejects.toThrow(
       "SFTP transfer failed"
     )
 
@@ -318,7 +318,9 @@ describe("SshConnectionImpl.writeFile — large content (> 64 KB)", () => {
     const content = makeLargeContent()
 
     // Act + Assert: writeFile must resolve successfully despite the rm -f failure
-    await expect(ssh.writeFile("/etc/large-config", content)).resolves.toBeUndefined()
+    await expect(
+      ssh.writeFile("/etc/large-config", content, { mode: "0600" })
+    ).resolves.toBeUndefined()
   })
 
   // ---------------------------------------------------------------------------
@@ -370,7 +372,9 @@ describe("SshConnectionImpl.writeFile — large content (> 64 KB)", () => {
     const stderrSpy = vi.spyOn(process.stderr, "write").mockImplementation(() => true)
 
     // Act: writeFile must resolve despite the rm -f failure
-    await expect(ssh.writeFile("/etc/large-config", content)).resolves.toBeUndefined()
+    await expect(
+      ssh.writeFile("/etc/large-config", content, { mode: "0600" })
+    ).resolves.toBeUndefined()
 
     // Assert: stderr must not contain the plain-text password
     const stderrOutput = stderrSpy.mock.calls.map((args) => String(args[0])).join("")

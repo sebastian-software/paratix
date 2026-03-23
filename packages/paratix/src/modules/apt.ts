@@ -10,6 +10,7 @@ import {
 import { hasFlag, setVersionedFlag } from "./moduleHelpers.js"
 
 const NONINTERACTIVE = "DEBIAN_FRONTEND=noninteractive"
+const APT_REPOSITORY_MODE = "0644"
 
 const PPA_PREFIX = "ppa:"
 /**
@@ -339,7 +340,7 @@ export const apt = {
     return {
       async apply(ssh: null | SshConnection): Promise<ModuleResult> {
         if (!ssh) return failed(`[apt.repository] SSH connection is required for ${name}`)
-        await ssh.writeFile(filePath, `${expectedContent}\n`)
+        await ssh.writeFile(filePath, `${expectedContent}\n`, { mode: APT_REPOSITORY_MODE })
         const result = await ssh.exec(`${NONINTERACTIVE} apt-get update`, {
           ignoreExitCode: true,
           silent: true,

@@ -8,6 +8,8 @@ import { type Module, type ModuleResult, NEEDS_APPLY, type SshConnection } from 
 
 const EXEC_OPTS = { ignoreExitCode: true, silent: true } as const
 const UNIT_NAME_PATTERN = /^[\w@.\-]+$/v
+const COMPOSE_CONFIG_MODE = "0600"
+const SYSTEMD_UNIT_MODE = "0644"
 
 // cspell:ignore podman
 type ComposeRuntime = "docker" | "podman"
@@ -222,7 +224,7 @@ export const compose = {
         if (options.src !== undefined && options.src !== "") {
           await connection.uploadFile(options.src, remotePath)
         } else if (options.content !== undefined && options.content !== "") {
-          await connection.writeFile(remotePath, options.content)
+          await connection.writeFile(remotePath, options.content, { mode: COMPOSE_CONFIG_MODE })
         } else {
           return failed(`[compose.config] content or src is required for ${projectDirectory}`)
         }
@@ -434,7 +436,7 @@ export const compose = {
         if (typeof runtime !== "string") return runtime
 
         const content = generateSystemdUnit(projectDirectory, serviceName, runtime)
-        await connection.writeFile(filePath, content)
+        await connection.writeFile(filePath, content, { mode: SYSTEMD_UNIT_MODE })
 
         const result = await connection.exec("systemctl daemon-reload", EXEC_OPTS)
         return result.code === 0

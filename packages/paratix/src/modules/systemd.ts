@@ -4,6 +4,7 @@ import { type Module, type ModuleResult, NEEDS_APPLY, type SshConnection } from 
 
 const SYSTEMCTL = "systemctl"
 const UNIT_NAME_PATTERN = /^[\w@.\-]+$/v
+const SYSTEMD_UNIT_MODE = "0644"
 
 /**
  * Modules for managing systemd unit files and unit masking.
@@ -87,7 +88,7 @@ export const systemd = {
     return {
       async apply(ssh: null | SshConnection): Promise<ModuleResult> {
         if (!ssh) return failed(`[systemd.unit: ${name}] SSH connection is required`)
-        await ssh.writeFile(filePath, content)
+        await ssh.writeFile(filePath, content, { mode: SYSTEMD_UNIT_MODE })
         const result = await ssh.exec(`${SYSTEMCTL} daemon-reload`, {
           ignoreExitCode: true,
           silent: true,

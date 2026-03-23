@@ -316,18 +316,18 @@ export class SshConnectionImpl implements SshConnection {
    *
    * @param remotePath - Destination path on the remote host.
    * @param content - The string content to write.
-   * @param options - Optional settings.
+   * @param options - Settings for the remote write.
    * @param options.mode - File mode to set via `chmod` on the temp file before moving (e.g. `"0644"`).
    */
   public async writeFile(
     remotePath: string,
     content: string,
-    options?: { mode?: string }
+    options: { mode: string }
   ): Promise<void> {
     const client = this.ensureClient()
     const localTemporary = join(tmpdir(), `paratix-write-${randomUUID()}`)
     const remoteTemporary = await this.createRemoteWritableTempPath(remotePath, "paratix-write")
-    const temporaryMode = options?.mode ?? "0600"
+    const temporaryMode = options.mode
     try {
       // eslint-disable-next-line security/detect-non-literal-fs-filename
       writeFileSync(localTemporary, content, { mode: 0o600 })

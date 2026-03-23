@@ -6,6 +6,7 @@ import { localSha256, sha256String } from "./fileHelpers.js"
 const EXEC_OPTS = { ignoreExitCode: true, silent: true } as const
 const SILENT = { silent: true } as const
 const FLAGS_DIR = "/var/lib/paratix/flags"
+const ARCHIVE_MARKER_MODE = "0644"
 
 /**
  * Derive the marker file path from the source and destination paths.
@@ -85,7 +86,7 @@ async function writeMarkerAndCleanup(
   const sha = await conn.sha256(remoteSource)
   if (sha === null) return false
   await conn.exec(`mkdir -p ${shellQuote(FLAGS_DIR)}`, SILENT)
-  await conn.writeFile(options.marker, sha)
+  await conn.writeFile(options.marker, sha, { mode: ARCHIVE_MARKER_MODE })
   if (options.upload) {
     await conn.exec(`rm -f ${shellQuote(remoteSource)}`, SILENT)
   }

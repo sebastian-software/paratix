@@ -23,10 +23,46 @@ type FileOwnership = {
   owner: string
 }
 
+const DEFAULT_FILE_WRITE_MODE = "0644"
+
 async function readOwnership(ssh: SshConnection, remotePath: string): Promise<FileOwnership> {
   const raw = await ssh.output(`stat -c '%a %U %G' ${shellQuote(remotePath)}`)
   const [mode = "", owner = "", group = ""] = raw.trim().split(" ")
   return { group, mode, owner }
+}
+
+function normalizeMode(mode: string): string {
+  return mode.startsWith("0") ? mode : `0${mode}`
+}
+
+async function resolveWriteMode(
+  ssh: SshConnection,
+  remotePath: string,
+  explicitMode?: string
+): Promise<string> {
+  if (explicitMode != null) return explicitMode
+  const exists = await ssh.exists(remotePath)
+  if (!exists) return DEFAULT_FILE_WRITE_MODE
+  const ownership = await readOwnership(ssh, remotePath)
+  return normalizeMode(ownership.mode)
+}
+
+async function applyFileMetadata(
+  ssh: SshConnection,
+  remotePath: string,
+  options?: { mode?: string; owner?: string }
+): Promise<void> {
+  if (options?.mode != null) {
+    validateMode(options.mode)
+    await ssh.exec(`chmod ${shellQuote(options.mode)} ${shellQuote(remotePath)}`, {
+      silent: true,
+    })
+  }
+  if (options?.owner != null) {
+    await ssh.exec(`chown ${shellQuote(options.owner)} ${shellQuote(remotePath)}`, {
+      silent: true,
+    })
+  }
 }
 
 function ownershipMatches(
@@ -225,7 +261,13 @@ export const file = {
             )
           }
           const newContent = content.replace(pattern, line)
-          await guardedWriteFile(ssh, { newContent, originalContent: content, remotePath })
+          const ownership = await readOwnership(ssh, remotePath)
+          await guardedWriteFile(ssh, {
+            mode: normalizeMode(ownership.mode),
+            newContent,
+            originalContent: content,
+            remotePath,
+          })
         }
 
         return { status: "changed" }
@@ -290,19 +332,10 @@ export const file = {
         const rendered = await renderTemplate(templateContent, environment, {
           strict: options?.strict,
         })
-        await ssh.writeFile(remotePath, rendered)
-
-        if (options?.mode != null) {
-          validateMode(options.mode)
-          await ssh.exec(`chmod ${shellQuote(options.mode)} ${shellQuote(remotePath)}`, {
-            silent: true,
-          })
-        }
-        if (options?.owner != null) {
-          await ssh.exec(`chown ${shellQuote(options.owner)} ${shellQuote(remotePath)}`, {
-            silent: true,
-          })
-        }
+        await ssh.writeFile(remotePath, rendered, {
+          mode: await resolveWriteMode(ssh, remotePath, options?.mode),
+        })
+        await applyFileMetadata(ssh, remotePath, options)
 
         return { status: "changed" }
       },

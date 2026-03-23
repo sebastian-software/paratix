@@ -14,11 +14,28 @@ import { hexHashesEqual, sha256String } from "./fileHelpers.js"
 
 /** Index where the file-type field starts in `stat -c '%s %a %U %G %F %Y'` output. */
 const STAT_TYPE_START_INDEX = 4
+const DEFAULT_FILE_WRITE_MODE = "0644"
 
 async function concatFragments(fragments: string[]): Promise<string> {
   // eslint-disable-next-line security/detect-non-literal-fs-filename -- paths from module config, not user input
   const contents = await Promise.all(fragments.map(async (f) => readFile(f, "utf8")))
   return contents.join("")
+}
+
+function normalizeMode(mode: string): string {
+  return mode.startsWith("0") ? mode : `0${mode}`
+}
+
+async function resolveWriteMode(
+  ssh: SshConnection,
+  remotePath: string,
+  explicitMode?: string
+): Promise<string> {
+  if (explicitMode != null) return explicitMode
+  const exists = await ssh.exists(remotePath)
+  if (!exists) return DEFAULT_FILE_WRITE_MODE
+  const mode = await ssh.output(`stat -c '%a' ${shellQuote(remotePath)}`)
+  return normalizeMode(mode.trim())
 }
 
 type BlockMarkers = { begin: string; end: string; full: string }
@@ -87,7 +104,9 @@ export function assemble(
     async apply(ssh: null | SshConnection): Promise<ModuleResult> {
       if (!ssh) return failed(`[file.assemble: ${remotePath}] SSH connection is required`)
 
-      await ssh.writeFile(remotePath, await concatFragments(fragments))
+      await ssh.writeFile(remotePath, await concatFragments(fragments), {
+        mode: await resolveWriteMode(ssh, remotePath, options?.mode),
+      })
 
       if (options?.mode != null) {
         validateMode(options.mode)
@@ -150,6 +169,7 @@ export function block(remotePath: string, options: BlockOptions): Module {
         if (hasMarker) {
           const markers: BlockMarkers = { begin: beginMarker, end: endMarker, full: fullBlock }
           await guardedWriteFile(ssh, {
+            mode: await resolveWriteMode(ssh, remotePath),
             newContent: replaceBlock(existing, markers),
             originalContent: existing,
             remotePath,
@@ -157,13 +177,16 @@ export function block(remotePath: string, options: BlockOptions): Module {
         } else {
           const separator = existing.endsWith("\n") ? "" : "\n"
           await guardedWriteFile(ssh, {
+            mode: await resolveWriteMode(ssh, remotePath),
             newContent: `${existing}${separator}${fullBlock}\n`,
             originalContent: existing,
             remotePath,
           })
         }
       } else {
-        await ssh.writeFile(remotePath, `${fullBlock}\n`)
+        await ssh.writeFile(remotePath, `${fullBlock}\n`, {
+          mode: await resolveWriteMode(ssh, remotePath),
+        })
       }
 
       return { status: "changed" }
@@ -267,6 +290,7 @@ export function replace(remotePath: string, pattern: string, replacement: string
       // eslint-disable-next-line security/detect-non-literal-regexp -- pattern from module config, not user input
       const updated = content.replaceAll(new RegExp(pattern, "gu"), replacement)
       await guardedWriteFile(ssh, {
+        mode: await resolveWriteMode(ssh, remotePath),
         newContent: updated,
         originalContent: content,
         remotePath,

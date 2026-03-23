@@ -144,9 +144,9 @@ describe("net.hosts — apply", () => {
     const mockSsh = createMockSsh({
       "cat '/etc/hosts'": { stdout: "127.0.0.1 localhost\n" },
     })
-    const writes: Array<{ content: string; mode?: string; path: string }> = []
+    const writes: Array<{ content: string; mode: string; path: string }> = []
     mockSsh.writeFile = async (path, content, options) => {
-      writes.push({ content, mode: options?.mode, path })
+      writes.push({ content, mode: options.mode, path })
       await Promise.resolve()
     }
 
