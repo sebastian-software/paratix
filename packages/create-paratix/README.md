@@ -89,7 +89,7 @@ The direct admin-user path looks like this:
 import { recipe, server } from "paratix"
 import { hostname, package as packages, service, ssh, sshd, ufw, user } from "paratix/modules"
 
-const adminUser = "admin"
+const adminUser = "paratix"
 const adminPublicKey = "ssh-ed25519 REPLACE_ME_WITH_YOUR_PUBLIC_KEY"
 const FIRST_RUN = process.env["PARATIX_FIRST_RUN"] === "true"
 const sshPorts = FIRST_RUN ? [22] : [2222]

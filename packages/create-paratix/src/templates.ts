@@ -159,7 +159,7 @@ function createBootstrapRootServerTemplate(
   adminPublicKey?: string,
   expectedHostFingerprint?: string
 ): string {
-  const adminUserDeclaration = 'const adminUser = "admin";'
+  const adminUserDeclaration = 'const adminUser = "paratix";'
 
   return `${createBaseServerHeader({
     adminPublicKey,

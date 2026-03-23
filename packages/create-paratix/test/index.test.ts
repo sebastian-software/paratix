@@ -749,7 +749,7 @@ describe("writeProjectFiles", () => {
 
     const content = readFileSync(join(TEST_DIR, "server.ts"), "utf8")
 
-    expect(content).toContain('const adminUser = "admin";')
+    expect(content).toContain('const adminUser = "paratix";')
     expect(content).toContain(
       'const adminPublicKey = "ssh-ed25519 REPLACE_ME_WITH_YOUR_PUBLIC_KEY";'
     )
@@ -916,7 +916,7 @@ describe("writeProjectFiles", () => {
 
     expect(content).toContain('host: "203.0.113.10"')
     expect(content).toContain('user: FIRST_RUN ? "root" : adminUser')
-    expect(content).toContain('const adminUser = "admin";')
+    expect(content).toContain('const adminUser = "paratix";')
     expect(content).toContain('const FIRST_RUN = process.env["PARATIX_FIRST_RUN"] === "true";')
     expect(content).toContain("Transitional bootstrap mode:")
     expect(content).toContain('PasswordAuthentication: "no"')
@@ -959,7 +959,7 @@ describe("writeProjectFiles", () => {
     const sudoersPath = join(TEST_DIR, "files", "admin-nopasswd-sudoers")
 
     expect(existsSync(sudoersPath)).toBe(true)
-    expect(readFileSync(sudoersPath, "utf8")).toBe(createAdminNopasswdSudoersContent("admin"))
+    expect(readFileSync(sudoersPath, "utf8")).toBe(createAdminNopasswdSudoersContent("paratix"))
   })
 
   it("generated direct-admin project does not add a bootstrap sudoers drop-in", () => {

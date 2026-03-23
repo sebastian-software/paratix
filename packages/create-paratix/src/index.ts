@@ -57,7 +57,7 @@ export function writeProjectFiles(projectDirectory: string, options?: ScaffoldOp
   mkdirSync(join(projectDirectory, "files"), { recursive: true })
 
   const host = options?.host ?? "1.2.3.4"
-  const initialUser = options?.initialUser ?? { kind: "admin", user: "admin" }
+  const initialUser = options?.initialUser ?? { kind: "admin", user: "paratix" }
   const adminPublicKey = options?.adminPublicKey
   const expectedHostFingerprint = options?.expectedHostFingerprint
 
@@ -99,7 +99,7 @@ export function writeProjectFiles(projectDirectory: string, options?: ScaffoldOp
     // eslint-disable-next-line security/detect-non-literal-fs-filename
     writeFileSync(
       join(projectDirectory, "files", "admin-nopasswd-sudoers"),
-      createAdminNopasswdSudoersContent("admin")
+      createAdminNopasswdSudoersContent("paratix")
     )
   }
 }
