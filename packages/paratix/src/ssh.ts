@@ -47,6 +47,29 @@ function expandHomePath(path: string): string {
   return path
 }
 
+function resolveWriteFileMode(
+  remotePath: string,
+  options: { mode?: string } | null | undefined
+): string {
+  if (options?.mode == null) {
+    throw new Error(
+      `[ssh.writeFile: ${remotePath}] missing options.mode; pass { mode: "0644" } or another explicit file mode`
+    )
+  }
+
+  try {
+    validateMode(options.mode)
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : String(error)
+    throw new Error(
+      `[ssh.writeFile: ${remotePath}] invalid options.mode "${options.mode}": ${reason}`,
+      { cause: error }
+    )
+  }
+
+  return options.mode
+}
+
 const COMMAND_TIMEOUT = 120_000
 const DEFAULT_MAX_RECONNECT_ATTEMPTS = 10
 const DEFAULT_RECONNECT_TIMEOUT = 120_000
@@ -327,7 +350,10 @@ export class SshConnectionImpl implements SshConnection {
     const client = this.ensureClient()
     const localTemporary = join(tmpdir(), `paratix-write-${randomUUID()}`)
     const remoteTemporary = await this.createRemoteWritableTempPath(remotePath, "paratix-write")
-    const temporaryMode = options.mode
+    const temporaryMode = resolveWriteFileMode(
+      remotePath,
+      options as { mode?: string } | null | undefined
+    )
     try {
       // eslint-disable-next-line security/detect-non-literal-fs-filename
       writeFileSync(localTemporary, content, { mode: 0o600 })

@@ -128,6 +128,25 @@ describe("SshConnectionImpl.writeFile — small content", () => {
     expect(executedCommands.some((cmd) => cmd.includes("printf"))).toBe(false)
     expect(executedCommands.some((cmd) => cmd.includes("tee"))).toBe(false)
   })
+
+  it("throws a clear validation error when options.mode is missing instead of crashing with a TypeError", async () => {
+    const client = makeClientWithExecSpy(execSpy)
+    const ssh = makeConnectedSsh(client)
+    const content = makeSmallContent()
+    const unsafeSsh = ssh as unknown as {
+      writeFile: (
+        remotePath: string,
+        fileContent: string,
+        options?: { mode?: string }
+      ) => Promise<void>
+    }
+
+    await expect(unsafeSsh.writeFile("/etc/config", content)).rejects.toThrow(
+      '[ssh.writeFile: /etc/config] missing options.mode; pass { mode: "0644" } or another explicit file mode'
+    )
+    expect(vi.mocked(writeFileSync)).not.toHaveBeenCalled()
+    expect(vi.mocked(sftpUpload)).not.toHaveBeenCalled()
+  })
 })
 
 // ---------------------------------------------------------------------------

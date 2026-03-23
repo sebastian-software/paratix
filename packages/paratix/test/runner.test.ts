@@ -1365,6 +1365,54 @@ describe("runPlaybook failed result diagnostics", () => {
     expect(process.exitCode).toBe(1)
   })
 
+  it("prints module name and a clear ssh.writeFile validation error for custom modules", async () => {
+    const capturedConfigs: unknown[] = []
+    const consoleLogs: string[] = []
+    const consoleErrors: string[] = []
+
+    vi.doMock("../src/ssh.js", () => ({
+      shellQuote: (s: string) => `'${s}'`,
+      SshConnectionImpl: makeMockSshClass(capturedConfigs),
+    }))
+    vi.spyOn(console, "log").mockImplementation((...args) => {
+      consoleLogs.push(args.join(" "))
+    })
+    vi.spyOn(console, "error").mockImplementation((...args) => {
+      consoleErrors.push(args.join(" "))
+    })
+
+    const [{ runPlaybook }] = await Promise.all([import("../src/runner.js")])
+
+    const failingModule: Module = {
+      apply: vi
+        .fn()
+        .mockRejectedValue(
+          new Error(
+            '[ssh.writeFile: /etc/custom.conf] missing options.mode; pass { mode: "0644" } or another explicit file mode'
+          )
+        ),
+      check: vi.fn().mockResolvedValue("needs-apply"),
+      name: "custom-config-module",
+    }
+
+    const definition: ServerDefinition = {
+      host: "1.2.3.4",
+      name: "test-server",
+      run: [failingModule],
+      ssh: { ports: [22], privateKey: "~/.ssh/id", user: "root" },
+    }
+
+    await runPlaybook(definition)
+
+    const output = [...consoleLogs, ...consoleErrors].join("\n")
+    expect(output).toContain("custom-config-module")
+    expect(output).toContain(
+      '[ssh.writeFile: /etc/custom.conf] missing options.mode; pass { mode: "0644" } or another explicit file mode'
+    )
+    expect(output).not.toContain("Cannot read properties of undefined")
+    expect(process.exitCode).toBe(1)
+  })
+
   it("prints centralized diagnostics for a failed recipe child module with ModuleResult.error", async () => {
     const capturedConfigs: unknown[] = []
     const consoleErrors: string[] = []
