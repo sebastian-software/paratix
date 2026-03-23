@@ -47,6 +47,22 @@ function groupsEqual(actual: Set<string>, desired: string[]): boolean {
   return actual.size === expected.size && [...expected].every((g) => actual.has(g))
 }
 
+async function supplementaryGroupsMatch(
+  ssh: SshConnection,
+  name: string,
+  desiredGroups: string[]
+): Promise<boolean> {
+  const groupOutput = await ssh.output(`${ID_CMD} -Gn ${shellQuote(name)}`)
+  const primaryGroup = await ssh.output(`${ID_CMD} -gn ${shellQuote(name)}`)
+  const actualSupplementaryGroups = new Set(
+    groupOutput
+      .split(/\s+/v)
+      .filter(Boolean)
+      .filter((group) => group !== primaryGroup)
+  )
+  return groupsEqual(actualSupplementaryGroups, desiredGroups)
+}
+
 async function passwdAttributesMatch(
   ssh: SshConnection,
   name: string,
@@ -81,10 +97,8 @@ async function attributesMatch(
   const needsPasswdCheck = options.uid != null || options.shell != null || options.home != null
   if (needsPasswdCheck && !(await passwdAttributesMatch(ssh, name, options))) return false
 
-  if (options.groups != null) {
-    const groupOutput = await ssh.output(`${ID_CMD} -Gn ${shellQuote(name)}`)
-    const actual = new Set(groupOutput.split(/\s+/v).filter(Boolean))
-    if (!groupsEqual(actual, options.groups)) return false
+  if (options.groups != null && !(await supplementaryGroupsMatch(ssh, name, options.groups))) {
+    return false
   }
 
   return true

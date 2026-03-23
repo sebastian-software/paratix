@@ -94,10 +94,11 @@ describe("user.present check", () => {
     expect(result).toBe("ok")
   })
 
-  // Bug #7 regression: check must compare groups via id -Gn
+  // Bug #7 regression: check must compare supplementary groups via id -Gn/id -gn
   it("returns needs-apply when groups do not match", async () => {
     const ssh = createMockSsh({
       "id -Gn 'alice'": { code: 0, stdout: "alice sudo" },
+      "id -gn 'alice'": { code: 0, stdout: "alice" },
       "id 'alice'": { code: 0 },
     })
     const mod = user.present("alice", { groups: ["alice", "docker"] })
@@ -105,14 +106,26 @@ describe("user.present check", () => {
     expect(result).toBe("needs-apply")
   })
 
-  it("returns ok when groups match", async () => {
+  it("returns ok when supplementary groups match even though the primary group is present in id -Gn", async () => {
     const ssh = createMockSsh({
       "id -Gn 'alice'": { code: 0, stdout: "alice sudo" },
+      "id -gn 'alice'": { code: 0, stdout: "alice" },
       "id 'alice'": { code: 0 },
     })
-    const mod = user.present("alice", { groups: ["alice", "sudo"] })
+    const mod = user.present("alice", { groups: ["sudo"] })
     const result = await mod.check(ssh, emptyEnv)
     expect(result).toBe("ok")
+  })
+
+  it("returns needs-apply when there are extra supplementary groups beyond the desired set", async () => {
+    const ssh = createMockSsh({
+      "id -Gn 'alice'": { code: 0, stdout: "alice sudo docker" },
+      "id -gn 'alice'": { code: 0, stdout: "alice" },
+      "id 'alice'": { code: 0 },
+    })
+    const mod = user.present("alice", { groups: ["sudo"] })
+    const result = await mod.check(ssh, emptyEnv)
+    expect(result).toBe("needs-apply")
   })
 
   it("returns needs-apply when shadow hash does not match password", async () => {
