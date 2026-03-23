@@ -49,6 +49,7 @@ cd my-server
 The scaffold also includes an explicit bootstrap switch driven by `PARATIX_FIRST_RUN`:
 
 - first run: call `paratix apply ... --first-run`, which sets `PARATIX_FIRST_RUN=true`, keeps SSH on port `22`, opens firewall port `22`, and uses `strictHostKeyChecking: "accept-new"`
+- root bootstrap path: the generated playbook also writes a dedicated `/etc/sudoers.d` drop-in so the new admin user can continue with `NOPASSWD sudo` after the first run
 - later runs: call `paratix apply ...` without `--first-run`, so the generated playbook switches to port `2222`, closes SSH port `22` in the firewall, and returns to strict host-key checking
 - the generated playbook still opens port `2222` before `sshd.port(2222)` runs, so the first real apply can reconnect safely
 
@@ -146,7 +147,7 @@ export default server({
 })
 ```
 
-Wenn dein Server initial nur `root` per SSH anbietet, wähle im Prompt `root` oder rufe das Scaffold nicht-interaktiv mit `--initial-user root` auf. Dieses Template bleibt bewusst als temporärer Bootstrap markiert, erstellt den dedizierten Admin-User und lässt Root-Login nur vorübergehend auf `prohibit-password`, bis du `ssh.user` auf den Admin-User umgestellt hast.
+Wenn dein Server initial nur `root` per SSH anbietet, wähle im Prompt `root` oder rufe das Scaffold nicht-interaktiv mit `--initial-user root` auf. Dieses Template bleibt bewusst als temporärer Bootstrap markiert, erstellt den dedizierten Admin-User, legt einen `NOPASSWD sudo`-Eintrag für ihn unter `/etc/sudoers.d/` an und lässt Root-Login nur vorübergehend auf `prohibit-password`, bis du `ssh.user` auf den Admin-User umgestellt hast.
 
 Wenn bereits ein Admin-User wie `deploy`, `ubuntu` oder `admin` existiert, wähle diesen Namen direkt. Dann erzeugt `create-paratix` keinen Root-Bootstrap-Pfad, sondern scaffoldet sofort den gehärteten Zielzustand für genau diesen User.
 

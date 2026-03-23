@@ -21,6 +21,7 @@ import {
   printSuccessMessage,
 } from "./scaffoldRuntime.js"
 import {
+  createAdminNopasswdSudoersContent,
   createServerTemplate,
   ENV_EXAMPLE_TEMPLATE,
   GITIGNORE_TEMPLATE,
@@ -94,6 +95,13 @@ export function writeProjectFiles(projectDirectory: string, options?: ScaffoldOp
   writeFileSync(join(projectDirectory, ".env.example"), ENV_EXAMPLE_TEMPLATE)
   // eslint-disable-next-line security/detect-non-literal-fs-filename
   writeFileSync(join(projectDirectory, "files", ".gitkeep"), "")
+  if (initialUser.kind === "root") {
+    // eslint-disable-next-line security/detect-non-literal-fs-filename
+    writeFileSync(
+      join(projectDirectory, "files", "admin-nopasswd-sudoers"),
+      createAdminNopasswdSudoersContent("admin")
+    )
+  }
 }
 
 export function isValidProjectName(name: string): boolean {

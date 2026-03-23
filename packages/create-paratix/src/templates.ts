@@ -31,6 +31,16 @@ export const ENV_EXAMPLE_TEMPLATE = `# Server configuration
 # SSH_KEY_PATH=~/.ssh/id_ed25519
 `
 
+// cspell:ignore nopasswd NOPASSWD
+export function createAdminNopasswdSudoersContent(adminUser: string): string {
+  return `# Bootstrap default: dedicated admin user with passwordless sudo.
+# This keeps the post-bootstrap Paratix workflow non-interactive after the
+# initial root run. If you prefer password-protected sudo later, replace this
+# with a stricter policy after the bootstrap is complete.
+${adminUser} ALL=(ALL:ALL) NOPASSWD:ALL
+`
+}
+
 type BaseServerHeaderOptions = {
   adminPublicKey?: string
   adminUserDeclaration: string
@@ -56,7 +66,7 @@ function createBaseServerHeader({
       : `    expectedHostFingerprint: ${JSON.stringify(expectedHostFingerprint)}, // captured from port 22 during scaffolding`
 
   return `import { recipe, server } from "paratix";
-import { hostname, package as packages, service, ssh, sshd, ufw, user } from "paratix/modules";
+import { file, hostname, package as packages, service, ssh, sshd, ufw, user } from "paratix/modules";
 
 ${adminUserDeclaration}
 const adminPublicKey = ${JSON.stringify(adminPublicKey ?? "ssh-ed25519 REPLACE_ME_WITH_YOUR_PUBLIC_KEY")};
@@ -159,11 +169,22 @@ function createBootstrapRootServerTemplate(
     sshUser: 'FIRST_RUN ? "root" : adminUser',
   })}
 ${createAdminRecipe("bootstrap-admin-user")}
+    recipe("bootstrap-admin-sudo", [
+      file.copy(
+        "/etc/sudoers.d/90-paratix-admin-nopasswd",
+        "./files/admin-nopasswd-sudoers",
+        {
+          mode: "0440",
+          owner: "root:root",
+        }
+      ),
+    ]),
 ${createFirewallRecipe()}
     // Transitional bootstrap mode:
     // 1. Run this once as root with "--first-run" to create the dedicated admin user.
-    // 2. Later runs omit "--first-run" and connect as the dedicated admin user on port 2222.
-    // 3. The next regular run disables root login completely.
+    // 2. The generated sudoers drop-in keeps the new admin path non-interactive via NOPASSWD sudo.
+    // 3. Later runs omit "--first-run" and connect as the dedicated admin user on port 2222.
+    // 4. The next regular run disables root login completely.
     recipe("ssh-hardening-transition", [
       sshd.port(2222),
       sshd.config({

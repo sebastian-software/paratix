@@ -25,6 +25,7 @@ import {
   readAdminPublicKeyFile,
   validateAdminPublicKey,
 } from "../src/publicKeySelection.js"
+import { createAdminNopasswdSudoersContent } from "../src/templates.js"
 
 async function expectProcessExit(
   callback: () => Promise<void> | void,
@@ -936,6 +937,38 @@ describe("writeProjectFiles", () => {
     expect(content).toContain('PermitRootLogin: FIRST_RUN ? "prohibit-password" : "no"')
     expect(content).not.toContain('user: "root"')
     expect(content).not.toContain('PermitRootLogin: "prohibit-password"')
+  })
+
+  it("generated root-bootstrap server.ts provisions passwordless sudo for the bootstrap admin user", () => {
+    writeProjectFiles(TEST_DIR, { initialUser: { kind: "root" } })
+
+    const content = readFileSync(join(TEST_DIR, "server.ts"), "utf8")
+
+    expect(content).toContain('recipe("bootstrap-admin-sudo"')
+    expect(content).toContain("file.copy(")
+    expect(content).toContain('"/etc/sudoers.d/90-paratix-admin-nopasswd"')
+    expect(content).toContain('"./files/admin-nopasswd-sudoers"')
+    expect(content).toContain('mode: "0440"')
+    expect(content).toContain('owner: "root:root"')
+    expect(content).toContain("NOPASSWD sudo")
+  })
+
+  it("generated root-bootstrap project writes the sudoers drop-in for the admin user", () => {
+    writeProjectFiles(TEST_DIR, { initialUser: { kind: "root" } })
+
+    const sudoersPath = join(TEST_DIR, "files", "admin-nopasswd-sudoers")
+
+    expect(existsSync(sudoersPath)).toBe(true)
+    expect(readFileSync(sudoersPath, "utf8")).toBe(createAdminNopasswdSudoersContent("admin"))
+  })
+
+  it("generated direct-admin project does not add a bootstrap sudoers drop-in", () => {
+    writeProjectFiles(TEST_DIR, { initialUser: { kind: "admin", user: "deploy" } })
+
+    const content = readFileSync(join(TEST_DIR, "server.ts"), "utf8")
+
+    expect(content).not.toContain('recipe("bootstrap-admin-sudo"')
+    expect(existsSync(join(TEST_DIR, "files", "admin-nopasswd-sudoers"))).toBe(false)
   })
 
   it("generated server.ts exposes FIRST_RUN through env for template logic and operator visibility", () => {
