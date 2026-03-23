@@ -16,6 +16,7 @@ const eslintConfig: Linter.Config[] = [
       "**/*.json",
       "**/*.yaml",
       "**/*.yml",
+      "sebastian-gmbh-paratix-test/**",
     ],
   },
   {

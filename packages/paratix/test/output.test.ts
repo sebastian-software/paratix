@@ -5,8 +5,15 @@ import {
   printModuleResult,
   printVerboseCommandError,
   renderCliHeader,
+  resetLiveOutputForTests,
+  startModuleSpinner,
 } from "../src/output.js"
 import { CommandError } from "../src/sshHelpers.js"
+
+function bindOptionalStdoutMethod(name: "clearLine" | "cursorTo") {
+  const method = process.stdout[name] as ((...args: never[]) => unknown) | undefined
+  return method == null ? undefined : method.bind(process.stdout)
+}
 
 describe("renderCliHeader", () => {
   it("includes the paratix name and version", () => {
@@ -26,6 +33,7 @@ describe("printModuleResult", () => {
   })
 
   afterEach(() => {
+    resetLiveOutputForTests()
     vi.restoreAllMocks()
   })
 
@@ -34,6 +42,49 @@ describe("printModuleResult", () => {
 
     expect(consoleLogs).toHaveLength(1)
     expect(consoleLogs[0]).toContain("htop  changed  (dry-run)")
+  })
+
+  it("renders a live running line on TTY and replaces it with the final result", () => {
+    const writes: string[] = []
+    vi.spyOn(process.stdout, "write").mockImplementation(((chunk: string | Uint8Array) => {
+      writes.push(String(chunk))
+      return true
+    }) as typeof process.stdout.write)
+    const originalIsTTY = process.stdout.isTTY
+    const originalClearLine = bindOptionalStdoutMethod("clearLine")
+    const originalCursorTo = bindOptionalStdoutMethod("cursorTo")
+
+    Object.defineProperty(process.stdout, "isTTY", { configurable: true, value: true })
+    Object.defineProperty(process.stdout, "clearLine", {
+      configurable: true,
+      value: vi.fn(() => true),
+    })
+    Object.defineProperty(process.stdout, "cursorTo", {
+      configurable: true,
+      value: vi.fn(() => true),
+    })
+
+    try {
+      startModuleSpinner("hostname.set: my-server")
+      printModuleResult("hostname.set: my-server", "changed")
+
+      expect(consoleLogs).toHaveLength(0)
+      expect(writes.some((entry) => entry.includes("running"))).toBe(true)
+      expect(writes.some((entry) => entry.includes("changed"))).toBe(true)
+    } finally {
+      Object.defineProperty(process.stdout, "isTTY", {
+        configurable: true,
+        value: originalIsTTY,
+      })
+      Object.defineProperty(process.stdout, "clearLine", {
+        configurable: true,
+        value: originalClearLine,
+      })
+      Object.defineProperty(process.stdout, "cursorTo", {
+        configurable: true,
+        value: originalCursorTo,
+      })
+    }
   })
 })
 

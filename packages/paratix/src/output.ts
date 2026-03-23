@@ -5,6 +5,8 @@ import type { ModuleStatus } from "./types.js"
 import { CommandError } from "./sshHelpers.js"
 
 const MODULE_NAME_WIDTH = 36
+const SPINNER_FRAME_INTERVAL_MS = 80
+const SPINNER_FRAMES = ["|", "/", "-", "\\"]
 type DisplayStatus = "waiting" | ModuleStatus
 
 const STATUS_ICONS: Record<DisplayStatus, string> = {
@@ -26,6 +28,15 @@ const CLI_HEADER_LINES = [
   " |_|                               ",
 ]
 
+type ActiveSpinner = {
+  detail?: string
+  frameIndex: number
+  interval: NodeJS.Timeout
+  moduleName: string
+}
+
+let activeSpinner: ActiveSpinner | null = null
+
 export function renderCliHeader(version: string): string {
   const versionText = pc.dim(`v${version}`)
   return `${pc.cyan(CLI_HEADER_LINES.join("\n"))}\n${versionText}`
@@ -33,6 +44,96 @@ export function renderCliHeader(version: string): string {
 
 export function printCliHeader(version: string): void {
   console.log(renderCliHeader(version))
+}
+
+function supportsAnimatedModuleOutput(): boolean {
+  return (
+    process.stdout.isTTY &&
+    typeof process.stdout.clearLine === "function" &&
+    typeof process.stdout.cursorTo === "function"
+  )
+}
+
+function getModuleIcon(status: DisplayStatus, waitingFrame?: string): string {
+  return status === "waiting" ? pc.cyan(waitingFrame ?? "|") : STATUS_ICONS[status]
+}
+
+function getModuleStatusText(status: DisplayStatus): string {
+  switch (status) {
+    case "changed": {
+      return pc.yellow(status)
+    }
+    case "failed": {
+      return pc.red(status)
+    }
+    case "ok": {
+      return pc.green(status)
+    }
+    case "skipped": {
+      return pc.dim(status)
+    }
+    case "waiting": {
+      return pc.cyan("running")
+    }
+  }
+}
+
+function renderModuleLine(parameters: {
+  detail?: string
+  name: string
+  status: DisplayStatus
+  waitingFrame?: string
+}): string {
+  const { detail, name, status, waitingFrame } = parameters
+  const icon = getModuleIcon(status, waitingFrame)
+  const statusText = getModuleStatusText(status)
+  const detailSuffix = detail == null ? "" : `  ${pc.dim(detail)}`
+  return `  ${icon}  ${name.padEnd(MODULE_NAME_WIDTH)}  ${statusText}${detailSuffix}`
+}
+
+function writeAnimatedModuleLine(line: string): void {
+  process.stdout.clearLine(0)
+  process.stdout.cursorTo(0)
+  process.stdout.write(line)
+}
+
+function stopAnimatedModuleLine(): void {
+  if (activeSpinner == null) return
+
+  clearInterval(activeSpinner.interval)
+  activeSpinner = null
+}
+
+export function startModuleSpinner(name: string, detail?: string): void {
+  if (!supportsAnimatedModuleOutput()) return
+
+  stopAnimatedModuleLine()
+
+  const spinner: ActiveSpinner = {
+    detail,
+    frameIndex: 0,
+    interval: setInterval(() => {
+      spinner.frameIndex = (spinner.frameIndex + 1) % SPINNER_FRAMES.length
+      writeAnimatedModuleLine(
+        renderModuleLine({
+          detail: spinner.detail,
+          name: spinner.moduleName,
+          status: "waiting",
+          waitingFrame: SPINNER_FRAMES[spinner.frameIndex],
+        })
+      )
+    }, SPINNER_FRAME_INTERVAL_MS),
+    moduleName: name,
+  }
+
+  activeSpinner = spinner
+  writeAnimatedModuleLine(
+    renderModuleLine({ detail, name, status: "waiting", waitingFrame: SPINNER_FRAMES[0] })
+  )
+}
+
+export function resetLiveOutputForTests(): void {
+  stopAnimatedModuleLine()
 }
 
 /**
@@ -65,30 +166,15 @@ export function printRunContext(parameters: {
  * @param detail - Optional short detail appended in dim text after the status.
  */
 export function printModuleResult(name: string, status: DisplayStatus, detail?: string): void {
-  const icon = STATUS_ICONS[status]
-  let statusText: string
-  switch (status) {
-    case "changed": {
-      statusText = pc.yellow(status)
-      break
-    }
-    case "failed": {
-      statusText = pc.red(status)
-      break
-    }
-    case "ok": {
-      statusText = pc.green(status)
-      break
-    }
-    case "skipped":
-    case "waiting": {
-      statusText = pc.dim(status)
-      break
-    }
+  const line = renderModuleLine({ detail, name, status })
+  if (supportsAnimatedModuleOutput() && activeSpinner != null) {
+    stopAnimatedModuleLine()
+    writeAnimatedModuleLine(line)
+    process.stdout.write("\n")
+    return
   }
 
-  const detailSuffix = detail == null ? "" : `  ${pc.dim(detail)}`
-  console.log(`  ${icon}  ${name.padEnd(MODULE_NAME_WIDTH)}  ${statusText}${detailSuffix}`)
+  console.log(line)
 }
 
 /**

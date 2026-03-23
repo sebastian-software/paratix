@@ -1,5 +1,11 @@
+/* eslint-disable max-lines -- recipe orchestration intentionally stays co-located */
 import { isEnvironmentMetaEntry, mergeEnvironmentFromMeta } from "./meta.js"
-import { printCommandFailure, printModuleResult, printRecipeHeader } from "./output.js"
+import {
+  printCommandFailure,
+  printModuleResult,
+  printRecipeHeader,
+  startModuleSpinner,
+} from "./output.js"
 import { runSignalModules, type SignalHooks } from "./signalOrchestration.js"
 import { CommandError } from "./sshHelpers.js"
 import {
@@ -94,7 +100,7 @@ async function executeOneModule(parameters: {
   const { currentEnvironment, ssh, targetModule } = parameters
   const verbose = parameters.verbose ?? false
   const connection = targetModule.local === true ? null : ssh
-  const checkResult = await targetModule.check(connection, currentEnvironment)
+  const checkResult = await checkRecipeChild(targetModule, connection, currentEnvironment)
 
   if (checkResult === "ok") {
     printModuleResult(targetModule.name, "ok")
@@ -113,6 +119,15 @@ async function executeOneModule(parameters: {
 
   const environment = await mergeEnvironmentFromMeta(currentEnvironment, result.meta)
   return { env: environment, meta: result.meta, status: result.status }
+}
+
+async function checkRecipeChild(
+  targetModule: Module,
+  connection: null | SshConnection,
+  currentEnvironment: Environment
+): Promise<"needs-apply" | "ok"> {
+  startModuleSpinner(targetModule.name)
+  return targetModule.check(connection, currentEnvironment)
 }
 
 async function applyExecutedRecipeStep(parameters: {

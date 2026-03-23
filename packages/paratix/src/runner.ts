@@ -24,6 +24,7 @@ import {
   printRecipeHeader,
   printRunContext,
   printSummary,
+  startModuleSpinner,
 } from "./output.js"
 import { resolveExitCode, signalExitCode } from "./runnerHelpers.js"
 import { runSignalModules } from "./signalOrchestration.js"
@@ -347,6 +348,21 @@ async function applyModule(parameters: {
   return stepResult
 }
 
+async function checkRegularModule(parameters: {
+  env: Environment
+  ssh: SshConnectionImpl
+  targetModule: Module
+}): Promise<"needs-apply" | "ok"> {
+  const { env, ssh, targetModule } = parameters
+  const connection = targetModule.local === true ? null : ssh
+  startModuleSpinner(targetModule.name)
+  return targetModule.check(connection, env)
+}
+
+function buildDryRunChangedResult(environment: Environment): StepResult {
+  return { env: environment, shouldBreak: false, status: "changed" }
+}
+
 type RegularModuleArguments = {
   dryRun: boolean
   env: Environment
@@ -361,8 +377,7 @@ async function runRegularModule(parameters: RegularModuleArguments): Promise<Ste
   const shutdownSignal = parameters.shutdownSignal
 
   try {
-    const connection = targetModule.local === true ? null : ssh
-    const checkResult = await targetModule.check(connection, env)
+    const checkResult = await checkRegularModule({ env, ssh, targetModule })
 
     if (checkResult === "ok") {
       printModuleResult(targetModule.name, "ok")
@@ -381,7 +396,7 @@ async function runRegularModule(parameters: RegularModuleArguments): Promise<Ste
         })
       }
       printModuleResult(targetModule.name, "changed", "(dry-run)")
-      return { env, shouldBreak: false, status: "changed" }
+      return buildDryRunChangedResult(env)
     }
 
     return await applyCheckedModule({

@@ -7,7 +7,7 @@ import type {
 } from "./types.js"
 
 import { assertValidModuleMetaEntries, mergeEnvironmentFromMeta } from "./meta.js"
-import { printCommandFailure, printModuleResult } from "./output.js"
+import { printCommandFailure, printModuleResult, startModuleSpinner } from "./output.js"
 
 export type SignalHooks = {
   onSignalFinished?: (status: ModuleStatus) => void
@@ -81,6 +81,7 @@ async function runOneSignal(parameters: {
   verbose: boolean
 }): Promise<{ nextEnvironment: Environment; status: SignalRunStatus }> {
   const connection = parameters.signal.local === true ? null : parameters.ssh
+  startModuleSpinner(`signal: ${parameters.signal.name}`)
   const result = await parameters.signal.apply(connection, parameters.currentEnvironment)
   const nextEnvironment = await applySignalMeta({
     currentEnvironment: parameters.currentEnvironment,

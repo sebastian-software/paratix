@@ -3,7 +3,12 @@ import type { SshConnectionImpl } from "./ssh.js"
 import type { Environment, ModuleStatus } from "./types.js"
 
 import { mergeEnvironmentFromMeta } from "./meta.js"
-import { printCommandFailure, printModuleResult, printRecipeHeader } from "./output.js"
+import {
+  printCommandFailure,
+  printModuleResult,
+  printRecipeHeader,
+  startModuleSpinner,
+} from "./output.js"
 
 type StepResult = { env: Environment; shouldBreak: boolean; status?: ModuleStatus }
 
@@ -22,6 +27,7 @@ async function executeDryRunBlockingModule(parameters: {
   verbose: boolean
 }): Promise<StepResult> {
   const { childModule, connection, environment, verbose } = parameters
+  startModuleSpinner(childModule.name)
   const result =
     childModule._applyDryRun == null
       ? await childModule.apply(connection, environment)
@@ -43,6 +49,7 @@ async function executeDryRunChildModule(parameters: {
 }): Promise<StepResult> {
   const { childModule, environment, ssh, verbose } = parameters
   const connection = childModule.local === true ? null : ssh
+  startModuleSpinner(childModule.name)
   const checkResult = await childModule.check(connection, environment)
   if (checkResult !== "ok" && shouldExecuteApplyDuringDryRun(childModule)) {
     return executeDryRunBlockingModule({ childModule, connection, environment, verbose })
