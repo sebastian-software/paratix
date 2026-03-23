@@ -6,18 +6,7 @@ import { CommandError } from "./sshHelpers.js"
 
 const MODULE_NAME_WIDTH = 36
 const SPINNER_FRAME_INTERVAL_MS = 80
-const SPINNER_FRAMES = [
-  "⠋",
-  "⠙",
-  "⠹",
-  "⠸",
-  "⠼",
-  "⠴",
-  "⠦",
-  "⠧",
-  "⠇",
-  "⠏",
-]
+const SPINNER_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
 type DisplayStatus = "waiting" | ModuleStatus
 
 const STATUS_ICONS: Record<DisplayStatus, string> = {
@@ -36,7 +25,7 @@ const CLI_HEADER_LINES = [
   " | |_) | (_| | | | (_| | |_| |>  < ",
   " | .__/ \\__,_|_|  \\__,_|\\__|_/_/\\_\\",
   " | |                               ",
-  " |_|                               ",
+  " |_|  ",
 ]
 
 type ActiveSpinner = {
@@ -50,7 +39,7 @@ let activeSpinner: ActiveSpinner | null = null
 
 export function renderCliHeader(version: string): string {
   const versionText = pc.dim(`v${version}`)
-  return `${pc.cyan(CLI_HEADER_LINES.join("\n"))}\n${versionText}`
+  return `${pc.cyan(CLI_HEADER_LINES.join("\n"))}${versionText}\n`
 }
 
 export function printCliHeader(version: string): void {
