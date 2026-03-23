@@ -7,3 +7,6 @@ TODO.md
 review-report-*.md
 .claude/settings.local.json
 tmp/
+sebastian-gmbh-paratix-test
+packages/paratix/src/output.ts
+init-test.sh
