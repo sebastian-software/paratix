@@ -70,13 +70,14 @@ import { file, hostname, package as packages, service, ssh, sshd, ufw, user } fr
 
 ${adminUserDeclaration}
 const adminPublicKey = ${JSON.stringify(adminPublicKey ?? "ssh-ed25519 REPLACE_ME_WITH_YOUR_PUBLIC_KEY")};
+const serverName = "my-server";
 const FIRST_RUN = process.env["PARATIX_FIRST_RUN"] === "true";
 const sshPorts = FIRST_RUN ? [22] : [2222];
 const firewallTcpPorts = FIRST_RUN ? [22, 2222, 80, 443] : [2222, 80, 443];
 ${strictHostKeyCheckingDeclaration}
 
 export default server({
-  name: "my-server",
+  name: serverName,
   host: ${JSON.stringify(host)},
   ssh: {
     ports: sshPorts,
@@ -91,11 +92,11 @@ ${expectedHostFingerprintLine}
   },
   env: {
     FIRST_RUN,
-    SERVER_NAME: "my-server",
+    SERVER_NAME: serverName,
     SSH_PORT: 2222,
   },
   run: [
-    hostname.set("my-server"),
+    hostname.set(serverName),
     packages.upgrade("2026-03-01"),
     packages.installed("nginx", "curl", "htop"),
 `

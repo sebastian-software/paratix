@@ -17,6 +17,7 @@ const eslintConfig: Linter.Config[] = [
       "**/*.yaml",
       "**/*.yml",
       "sebastian-gmbh-paratix-test/**",
+      "packages/create-paratix/create-paratix-scaffold-test/**",
     ],
   },
   {

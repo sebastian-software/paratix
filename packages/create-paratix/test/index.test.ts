@@ -976,9 +976,13 @@ describe("writeProjectFiles", () => {
 
     const content = readFileSync(join(TEST_DIR, "server.ts"), "utf8")
 
+    expect(content).toContain('const serverName = "my-server";')
+    expect(content).toContain("name: serverName")
     expect(content).toContain("env: {")
     expect(content).toContain("FIRST_RUN,")
+    expect(content).toContain("SERVER_NAME: serverName,")
     expect(content).toContain("SSH_PORT: 2222,")
+    expect(content).toContain("hostname.set(serverName)")
   })
 
   it("generated root-bootstrap server.ts also opens firewall port 2222 before ssh-hardening-transition", () => {
