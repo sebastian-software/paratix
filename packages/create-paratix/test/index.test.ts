@@ -732,7 +732,7 @@ describe("writeProjectFiles", () => {
     const content = readFileSync(join(TEST_DIR, "server.ts"), "utf8")
 
     expect(content).toContain("packages.upgrade(")
-    expect(content).toContain("packages.installed(")
+    expect(content).toContain('packages.installed("curl", "htop", "ufw")')
     expect(content).not.toContain("apt.upgrade(")
     expect(content).not.toContain("apt.installed(")
   })

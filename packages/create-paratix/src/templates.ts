@@ -99,7 +99,7 @@ ${expectedHostFingerprintLine}
     net.hosts("127.0.1.1", [serverName]),
     hostname.set(serverName),
     packages.upgrade("2026-03-01"),
-    packages.installed("nginx", "curl", "htop"),
+    packages.installed("curl", "htop", "ufw"),
 `
 }
 
