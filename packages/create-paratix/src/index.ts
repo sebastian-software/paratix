@@ -66,6 +66,7 @@ export function writeProjectFiles(projectDirectory: string, options?: ScaffoldOp
       paratix: "^0.1.0",
     },
     devDependencies: {
+      "@types/node": "^24.5.2",
       tsx: "^4.20.6",
     },
     engines: {
