@@ -21,12 +21,14 @@ import {
   printSuccessMessage,
 } from "./scaffoldRuntime.js"
 import {
+  AUTO_UPGRADES_20_TEMPLATE,
   createAdminNopasswdSudoersContent,
   createServerTemplate,
   ENV_EXAMPLE_TEMPLATE,
   GITIGNORE_TEMPLATE,
   type InitialUserConfig,
   TSCONFIG_TEMPLATE,
+  UNATTENDED_UPGRADES_50_TEMPLATE,
 } from "./templates.js"
 
 export {
@@ -48,6 +50,33 @@ type ScaffoldOptions = {
   host?: string
   initialUser?: InitialUserConfig
   installer?: (projectDirectory: string, packageManager: PackageManager) => boolean
+}
+
+function writeSharedScaffoldFiles(projectDirectory: string): void {
+  // eslint-disable-next-line security/detect-non-literal-fs-filename
+  writeFileSync(join(projectDirectory, "tsconfig.json"), TSCONFIG_TEMPLATE)
+  // eslint-disable-next-line security/detect-non-literal-fs-filename
+  writeFileSync(join(projectDirectory, ".gitignore"), GITIGNORE_TEMPLATE)
+  // eslint-disable-next-line security/detect-non-literal-fs-filename
+  writeFileSync(join(projectDirectory, ".env.example"), ENV_EXAMPLE_TEMPLATE)
+}
+
+function writeScaffoldSupportFiles(projectDirectory: string, initialUser: InitialUserConfig): void {
+  // eslint-disable-next-line security/detect-non-literal-fs-filename
+  writeFileSync(join(projectDirectory, "files", ".gitkeep"), "")
+  // eslint-disable-next-line security/detect-non-literal-fs-filename
+  writeFileSync(join(projectDirectory, "files", "20auto-upgrades"), AUTO_UPGRADES_20_TEMPLATE)
+  // eslint-disable-next-line security/detect-non-literal-fs-filename
+  writeFileSync(
+    join(projectDirectory, "files", "50unattended-upgrades"),
+    UNATTENDED_UPGRADES_50_TEMPLATE
+  )
+  if (initialUser.kind !== "root") return
+  // eslint-disable-next-line security/detect-non-literal-fs-filename
+  writeFileSync(
+    join(projectDirectory, "files", "admin-nopasswd-sudoers"),
+    createAdminNopasswdSudoersContent("paratix")
+  )
 }
 
 export function writeProjectFiles(projectDirectory: string, options?: ScaffoldOptions): void {
@@ -88,21 +117,8 @@ export function writeProjectFiles(projectDirectory: string, options?: ScaffoldOp
     join(projectDirectory, "server.ts"),
     createServerTemplate({ adminPublicKey, expectedHostFingerprint, host, initialUser })
   )
-  // eslint-disable-next-line security/detect-non-literal-fs-filename
-  writeFileSync(join(projectDirectory, "tsconfig.json"), TSCONFIG_TEMPLATE)
-  // eslint-disable-next-line security/detect-non-literal-fs-filename
-  writeFileSync(join(projectDirectory, ".gitignore"), GITIGNORE_TEMPLATE)
-  // eslint-disable-next-line security/detect-non-literal-fs-filename
-  writeFileSync(join(projectDirectory, ".env.example"), ENV_EXAMPLE_TEMPLATE)
-  // eslint-disable-next-line security/detect-non-literal-fs-filename
-  writeFileSync(join(projectDirectory, "files", ".gitkeep"), "")
-  if (initialUser.kind === "root") {
-    // eslint-disable-next-line security/detect-non-literal-fs-filename
-    writeFileSync(
-      join(projectDirectory, "files", "admin-nopasswd-sudoers"),
-      createAdminNopasswdSudoersContent("paratix")
-    )
-  }
+  writeSharedScaffoldFiles(projectDirectory)
+  writeScaffoldSupportFiles(projectDirectory, initialUser)
 }
 
 export function isValidProjectName(name: string): boolean {

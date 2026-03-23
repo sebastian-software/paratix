@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from "vitest"
 
 import type { Environment, Module } from "../src/types.js"
 
-import { assert, debug, fail, pause, when } from "../src/builtins.js"
+import { assert, debug, fail, firstRun, pause, when } from "../src/builtins.js"
 import { resolveEnvironment } from "../src/environment.js"
 import { mergeEnvironmentFromMeta, meta } from "../src/meta.js"
 
@@ -159,6 +159,36 @@ describe("pause", () => {
     stdoutSpy.mockRestore()
     onceSpy.mockRestore()
     stdinPauseSpy.mockRestore()
+  })
+})
+
+describe("firstRun.stop", () => {
+  it("check returns needs-apply when PARATIX_FIRST_RUN=true", async () => {
+    const mod = firstRun.stop("stop after bootstrap")
+    const result = await mod.check(null, { PARATIX_FIRST_RUN: "true" })
+    expect(result).toBe("needs-apply")
+  })
+
+  it("check returns ok outside first-run", async () => {
+    const mod = firstRun.stop("stop after bootstrap")
+    const result = await mod.check(null, emptyEnv)
+    expect(result).toBe("ok")
+  })
+
+  it("apply returns a successful stop marker during first-run", async () => {
+    const mod = firstRun.stop("stop after bootstrap")
+    const applyModule = mod.apply
+    const result = await applyModule(null, { PARATIX_FIRST_RUN: "true" })
+    expect(result.status).toBe("ok")
+    expect(result._stopRun).toBe(true)
+    expect(result._dryRunDetail).toBe("(first-run stop)")
+  })
+
+  it("apply is a no-op outside first-run", async () => {
+    const mod = firstRun.stop("stop after bootstrap")
+    const applyModule = mod.apply
+    const result = await applyModule(null, emptyEnv)
+    expect(result).toStrictEqual({ status: "ok" })
   })
 })
 

@@ -45,6 +45,7 @@ type RecipeState = {
   env: Environment
   meta?: ModuleMetaEntry[]
   status: Exclude<ModuleStatus, "skipped">
+  stopRun?: true
 }
 
 const INTERRUPTED_BEFORE_APPLY = Symbol("recipe-interrupted-before-apply")
@@ -71,6 +72,7 @@ function applyRecipeStepToState(
     env: step.env,
     meta: nextMeta,
     status: nextStatus,
+    stopRun: step._stopRun === true ? true : state.stopRun,
   }
 }
 
@@ -118,7 +120,12 @@ async function executeOneModule(parameters: {
   }
 
   const environment = await mergeEnvironmentFromMeta(currentEnvironment, result.meta)
-  return { env: environment, meta: result.meta, status: result.status }
+  return {
+    _stopRun: result._stopRun,
+    env: environment,
+    meta: result.meta,
+    status: result.status,
+  }
 }
 
 async function checkRecipeChild(
@@ -236,7 +243,7 @@ async function executeModules(
     if (nextState == null) break
 
     state = nextState
-    if (state.status === "failed") return state
+    if (state.status === "failed" || state.stopRun === true) return state
   }
 
   return state
@@ -286,7 +293,7 @@ async function applyRecipe(parameters: {
     verbose,
   })
 
-  if (state.status === "changed" && parameters.signals) {
+  if (state.stopRun !== true && state.status === "changed" && parameters.signals) {
     state.status = await triggerSignals({
       environment: state.env,
       onSignalStep: parameters.options?.onSignalStep,
@@ -299,6 +306,7 @@ async function applyRecipe(parameters: {
   }
 
   return {
+    _stopRun: state.stopRun,
     meta: state.meta,
     status: state.status,
   }

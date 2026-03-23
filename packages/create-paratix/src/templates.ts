@@ -31,6 +31,18 @@ export const ENV_EXAMPLE_TEMPLATE = `# Server configuration
 # SSH_KEY_PATH=~/.ssh/id_ed25519
 `
 
+export const AUTO_UPGRADES_20_TEMPLATE = `APT::Periodic::Update-Package-Lists "1";
+APT::Periodic::Unattended-Upgrade "1";
+`
+
+export const UNATTENDED_UPGRADES_50_TEMPLATE = `Unattended-Upgrade::Origins-Pattern {
+        "origin=\${distro_id},archive=\${distro_codename}-security";
+};
+
+Unattended-Upgrade::Automatic-Reboot "true";
+Unattended-Upgrade::Automatic-Reboot-Time "03:30";
+`
+
 // cspell:ignore nopasswd NOPASSWD
 export function createAdminNopasswdSudoersContent(adminUser: string): string {
   return `# Bootstrap default: dedicated admin user with passwordless sudo.
@@ -65,8 +77,8 @@ function createBaseServerHeader({
       ? '    // expectedHostFingerprint: "SHA256:REPLACE_ME_WITH_YOUR_HOST_FINGERPRINT",'
       : `    expectedHostFingerprint: ${JSON.stringify(expectedHostFingerprint)}, // captured from port 22 during scaffolding`
 
-  return `import { recipe, server } from "paratix";
-import { file, hostname, net, package as packages, service, ssh, sshd, ufw, user } from "paratix/modules";
+  return `import { firstRun, recipe, server } from "paratix";
+import { file, hostname, net, package as packages, service, ssh, sshd, sysctl, ufw, user } from "paratix/modules";
 
 ${adminUserDeclaration}
 const adminPublicKey = ${JSON.stringify(adminPublicKey ?? "ssh-ed25519 REPLACE_ME_WITH_YOUR_PUBLIC_KEY")};
@@ -112,6 +124,45 @@ function createFirewallRecipe(): string {
 `
 }
 
+// cspell:ignore hardlinks kptr syncookies
+function createKernelHardeningRecipe(): string {
+  return `
+    recipe("kernel-hardening", [
+      sysctl.set("fs.protected_hardlinks", "1"),
+      sysctl.set("fs.protected_symlinks", "1"),
+      sysctl.set("kernel.dmesg_restrict", "1"),
+      sysctl.set("kernel.kptr_restrict", "2"),
+      sysctl.set("net.ipv4.conf.all.rp_filter", "1"),
+      sysctl.set("net.ipv4.conf.default.rp_filter", "1"),
+      sysctl.set("net.ipv4.tcp_syncookies", "1"),
+    ]),
+`
+}
+
+function createAutomaticSecurityUpgradesRecipe(): string {
+  return `
+    recipe("automatic-security-upgrades", [
+      packages.installed("unattended-upgrades"),
+      file.copy("/etc/apt/apt.conf.d/20auto-upgrades", "./files/20auto-upgrades", {
+        mode: "0644",
+        owner: "root:root",
+      }),
+      file.copy("/etc/apt/apt.conf.d/50unattended-upgrades", "./files/50unattended-upgrades", {
+        mode: "0644",
+        owner: "root:root",
+      }),
+    ]),
+`
+}
+
+function createFirstRunStopModule(): string {
+  return `
+    firstRun.stop("Bootstrap foundation complete; rerun without --first-run to continue."),
+
+    // Add application and user-facing services below this line.
+`
+}
+
 function createAdminRecipe(recipeName: string): string {
   return `
     recipe("${recipeName}", [
@@ -151,6 +202,9 @@ ${createFirewallRecipe()}
     ], {
       signals: [service.restart("sshd")],
     }),
+${createKernelHardeningRecipe()}
+${createAutomaticSecurityUpgradesRecipe()}
+${createFirstRunStopModule()}
   ],
 });
 `
@@ -196,6 +250,9 @@ ${createFirewallRecipe()}
     ], {
       signals: [service.restart("sshd")],
     }),
+${createKernelHardeningRecipe()}
+${createAutomaticSecurityUpgradesRecipe()}
+${createFirstRunStopModule()}
   ],
 });
 `

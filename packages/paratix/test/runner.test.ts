@@ -2459,6 +2459,87 @@ describe("runPlaybook dry-run recipe behaviour", () => {
     expect(process.exitCode).toBe(1)
   })
 
+  it("stops the run successfully on firstRun.stop during dry-run and skips later modules", async () => {
+    const capturedConfigs: unknown[] = []
+
+    vi.doMock("../src/ssh.js", () => ({
+      shellQuote: (s: string) => `'${s}'`,
+      SshConnectionImpl: makeMockSshClass(capturedConfigs),
+    }))
+
+    const [{ runPlaybook }, { firstRun }] = await Promise.all([
+      import("../src/runner.js"),
+      import("../src/builtins.js"),
+    ])
+
+    const laterModule: Module = {
+      apply: vi.fn().mockResolvedValue({ status: "changed" } satisfies ModuleResult),
+      check: vi.fn().mockResolvedValue("needs-apply"),
+      name: "later-module",
+    }
+
+    const definition: ServerDefinition = {
+      env: { PARATIX_FIRST_RUN: "true" },
+      host: "1.2.3.4",
+      name: "test-server",
+      run: [firstRun.stop("bootstrap boundary"), laterModule],
+      ssh: { ports: [22], privateKey: "~/.ssh/id", user: "root" },
+    }
+
+    await runPlaybook(definition, { dryRun: true })
+
+    expect(laterModule.check).not.toHaveBeenCalled()
+    expect(laterModule.apply).not.toHaveBeenCalled()
+    expect(process.exitCode).toBe(0)
+  })
+
+  it("stops the run successfully on firstRun.stop in apply mode and skips later modules and signals", async () => {
+    const capturedConfigs: unknown[] = []
+
+    vi.doMock("../src/ssh.js", () => ({
+      shellQuote: (s: string) => `'${s}'`,
+      SshConnectionImpl: makeMockSshClass(capturedConfigs),
+    }))
+
+    const [{ runPlaybook }, { firstRun }] = await Promise.all([
+      import("../src/runner.js"),
+      import("../src/builtins.js"),
+    ])
+
+    const changedModule: Module = {
+      apply: vi.fn().mockResolvedValue({ status: "changed" } satisfies ModuleResult),
+      check: vi.fn().mockResolvedValue("needs-apply"),
+      name: "changed-before-stop",
+    }
+    const laterModule: Module = {
+      apply: vi.fn().mockResolvedValue({ status: "changed" } satisfies ModuleResult),
+      check: vi.fn().mockResolvedValue("needs-apply"),
+      name: "later-module",
+    }
+    const signalModule: Module = {
+      apply: vi.fn().mockResolvedValue({ status: "changed" } satisfies ModuleResult),
+      check: vi.fn().mockResolvedValue("needs-apply"),
+      name: "signal-module",
+    }
+
+    const definition: ServerDefinition = {
+      env: { PARATIX_FIRST_RUN: "true" },
+      host: "1.2.3.4",
+      name: "test-server",
+      run: [changedModule, firstRun.stop("bootstrap boundary"), laterModule],
+      signals: [signalModule],
+      ssh: { ports: [22], privateKey: "~/.ssh/id", user: "root" },
+    }
+
+    await runPlaybook(definition)
+
+    expect(changedModule.apply).toHaveBeenCalledOnce()
+    expect(laterModule.check).not.toHaveBeenCalled()
+    expect(laterModule.apply).not.toHaveBeenCalled()
+    expect(signalModule.apply).not.toHaveBeenCalled()
+    expect(process.exitCode).toBe(0)
+  })
+
   it("does not run top-level definition.signals in dry-run mode", async () => {
     const capturedConfigs: unknown[] = []
 

@@ -52,6 +52,7 @@ The scaffold also includes an explicit bootstrap switch driven by `PARATIX_FIRST
 - root bootstrap path: the generated playbook also writes a dedicated `/etc/sudoers.d` drop-in so the new admin user can continue with `NOPASSWD sudo` after the first run
 - later runs: call `paratix apply ...` without `--first-run`, so the generated playbook switches to port `2222`, closes SSH port `22` in the firewall, and returns to strict host-key checking
 - the generated playbook still opens port `2222` before `sshd.port(2222)` runs, so the first real apply can reconnect safely
+- the generated playbook now stops the explicit first run after SSH hardening, kernel hardening, and automatic security upgrades, so later application services run only on the hardened baseline
 
 **Step 4 -- Apply**
 
@@ -145,6 +146,32 @@ export default server({
         signals: [service.restart("sshd")],
       }
     ),
+
+    recipe("kernel-hardening", [
+      sysctl.set("fs.protected_hardlinks", "1"),
+      sysctl.set("fs.protected_symlinks", "1"),
+      sysctl.set("kernel.dmesg_restrict", "1"),
+      sysctl.set("kernel.kptr_restrict", "2"),
+      sysctl.set("net.ipv4.conf.all.rp_filter", "1"),
+      sysctl.set("net.ipv4.conf.default.rp_filter", "1"),
+      sysctl.set("net.ipv4.tcp_syncookies", "1"),
+    ]),
+
+    recipe("automatic-security-upgrades", [
+      packages.installed("unattended-upgrades"),
+      file.copy("/etc/apt/apt.conf.d/20auto-upgrades", "./files/20auto-upgrades", {
+        mode: "0644",
+        owner: "root:root",
+      }),
+      file.copy("/etc/apt/apt.conf.d/50unattended-upgrades", "./files/50unattended-upgrades", {
+        mode: "0644",
+        owner: "root:root",
+      }),
+    ]),
+
+    firstRun.stop("Bootstrap foundation complete; rerun without --first-run to continue."),
+
+    // Add application and user-facing services below this line.
   ],
 })
 ```

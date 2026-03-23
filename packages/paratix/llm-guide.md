@@ -18,6 +18,7 @@ import {
   assert,
   debug,
   fail,
+  firstRun,
   pause,
   resolveEnvironment,
   when,
@@ -468,6 +469,14 @@ Unconditionally abort the run with a failure.
 
 ```typescript
 fail("This branch should be unreachable")
+```
+
+### `firstRun.stop(message?)`
+
+Stoppt den aktuellen Lauf kontrolliert, wenn Paratix mit `--first-run` gestartet wurde. Nützlich als explizite Staging-Grenze in Bootstrap-Playbooks.
+
+```typescript
+firstRun.stop("Bootstrap foundation complete; rerun without --first-run to continue.")
 ```
 
 ### `pause(message?)`

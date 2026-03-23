@@ -25,7 +25,11 @@ import {
   readAdminPublicKeyFile,
   validateAdminPublicKey,
 } from "../src/publicKeySelection.js"
-import { createAdminNopasswdSudoersContent } from "../src/templates.js"
+import {
+  AUTO_UPGRADES_20_TEMPLATE,
+  createAdminNopasswdSudoersContent,
+  UNATTENDED_UPGRADES_50_TEMPLATE,
+} from "../src/templates.js"
 
 async function expectProcessExit(
   callback: () => Promise<void> | void,
@@ -745,7 +749,7 @@ describe("writeProjectFiles", () => {
 
     expect(content).toContain("package as packages")
     expect(content).toContain("net, package as packages")
-    expect(content).not.toMatch(/\bapt\b/v)
+    expect(content).not.toContain("import { apt")
   })
 
   it("generated server.ts uses the hardened admin mode by default", () => {
@@ -1011,6 +1015,50 @@ describe("writeProjectFiles", () => {
     expect(firewallIndex).toBeGreaterThanOrEqual(0)
     expect(sshHardeningIndex).toBeGreaterThanOrEqual(0)
     expect(firewallIndex).toBeLessThan(sshHardeningIndex)
+  })
+
+  it("generated server.ts includes the first-run stop after ssh hardening, kernel hardening and automatic security upgrades", () => {
+    writeProjectFiles(TEST_DIR, { initialUser: { kind: "root" } })
+
+    const content = readFileSync(join(TEST_DIR, "server.ts"), "utf8")
+    const sshHardeningIndex = content.indexOf('recipe("ssh-hardening-transition"')
+    const kernelHardeningIndex = content.indexOf('recipe("kernel-hardening"')
+    const automaticUpgradesIndex = content.indexOf('recipe("automatic-security-upgrades"')
+    const firstRunStopIndex = content.indexOf(
+      'firstRun.stop("Bootstrap foundation complete; rerun without --first-run to continue.")'
+    )
+
+    expect(sshHardeningIndex).toBeGreaterThanOrEqual(0)
+    expect(kernelHardeningIndex).toBeGreaterThanOrEqual(0)
+    expect(automaticUpgradesIndex).toBeGreaterThanOrEqual(0)
+    expect(firstRunStopIndex).toBeGreaterThanOrEqual(0)
+    expect(sshHardeningIndex).toBeLessThan(kernelHardeningIndex)
+    expect(kernelHardeningIndex).toBeLessThan(automaticUpgradesIndex)
+    expect(automaticUpgradesIndex).toBeLessThan(firstRunStopIndex)
+    expect(content).toContain('import { firstRun, recipe, server } from "paratix";')
+    expect(content).toContain("// Add application and user-facing services below this line.")
+  })
+
+  it("generated server.ts configures unattended-upgrades via scaffolded files", () => {
+    writeProjectFiles(TEST_DIR)
+
+    const content = readFileSync(join(TEST_DIR, "server.ts"), "utf8")
+
+    expect(content).toContain('recipe("automatic-security-upgrades"')
+    expect(content).toContain('packages.installed("unattended-upgrades")')
+    expect(content).toContain('"/etc/apt/apt.conf.d/20auto-upgrades"')
+    expect(content).toContain('"/etc/apt/apt.conf.d/50unattended-upgrades"')
+  })
+
+  it("generated project writes unattended-upgrades scaffold files", () => {
+    writeProjectFiles(TEST_DIR)
+
+    expect(readFileSync(join(TEST_DIR, "files", "20auto-upgrades"), "utf8")).toBe(
+      AUTO_UPGRADES_20_TEMPLATE
+    )
+    expect(readFileSync(join(TEST_DIR, "files", "50unattended-upgrades"), "utf8")).toBe(
+      UNATTENDED_UPGRADES_50_TEMPLATE
+    )
   })
 
   it("creates a files subdirectory", () => {

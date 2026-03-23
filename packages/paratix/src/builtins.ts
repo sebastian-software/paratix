@@ -117,6 +117,51 @@ export function pause(message?: string): Module {
   }
 }
 
+function isFirstRunEnabled(environment: Environment): boolean {
+  return environment.PARATIX_FIRST_RUN === "true" || environment.FIRST_RUN === true
+}
+
+/**
+ * Built-ins related to the explicit first-run bootstrap stage.
+ */
+export const firstRun = {
+  /**
+   * Stop the current run successfully when Paratix was invoked with `--first-run`.
+   * Useful as an explicit stage boundary in scaffolded playbooks.
+   *
+   * @param message - Optional note shown in the module name.
+   * @returns A local module that stops the run only during first-run execution.
+   */
+  stop(message?: string): Module {
+    const moduleName = message == null ? "firstRun.stop" : `firstRun.stop: ${message}`
+
+    return {
+      _dryRunBlocker: true,
+      // eslint-disable-next-line @typescript-eslint/require-await -- Interface requires async
+      async apply(_ssh: null | SshConnection, environment: Environment): Promise<ModuleResult> {
+        if (!isFirstRunEnabled(environment)) {
+          return { status: "ok" }
+        }
+
+        return {
+          _dryRunDetail: "(first-run stop)",
+          _stopRun: true,
+          status: "ok",
+        }
+      },
+      // eslint-disable-next-line @typescript-eslint/require-await -- Interface requires async
+      async check(
+        _ssh: null | SshConnection,
+        environment: Environment
+      ): Promise<"needs-apply" | "ok"> {
+        return isFirstRunEnabled(environment) ? NEEDS_APPLY : "ok"
+      },
+      local: true,
+      name: moduleName,
+    }
+  },
+}
+
 async function applyConditionalModules(parameters: {
   dryRun?: boolean
   environment: Environment
@@ -146,9 +191,11 @@ async function applyConditionalModules(parameters: {
     if (result.status === "failed") return result
     // eslint-disable-next-line no-await-in-loop -- downstream env must see each module's meta in order
     state = await mergeConditionalApplyState(state, result)
+    if (state.stopRun === true) break
   }
 
   return {
+    _stopRun: state.stopRun,
     meta: state.meta.length === 0 ? undefined : state.meta,
     status: state.status,
   }
@@ -167,6 +214,7 @@ type ConditionalApplyState = {
   environment: Environment
   meta: ModuleMetaEntry[]
   status: "changed" | "ok" | "skipped"
+  stopRun?: true
 }
 
 function createConditionalApplyState(environment: Environment): ConditionalApplyState {
@@ -211,6 +259,7 @@ async function mergeConditionalApplyState(
     environment,
     meta: result.meta == null ? state.meta : [...state.meta, ...result.meta],
     status: result.status === "changed" ? "changed" : state.status,
+    stopRun: result._stopRun === true ? true : state.stopRun,
   }
 }
 

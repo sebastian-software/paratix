@@ -117,10 +117,19 @@ class RunStats {
   }
 }
 
-type StepResult = { env: Environment; shouldBreak: boolean; status?: ModuleStatus }
+type StepResult = {
+  env: Environment
+  shouldBreak: boolean
+  status?: ModuleStatus
+  stopRun?: true
+}
 
 function interruptedStepResult(environment: Environment): StepResult {
   return { env: environment, shouldBreak: true }
+}
+
+function shouldBreakAfterResult(result: Pick<ModuleResult, "_stopRun" | "status">): boolean {
+  return result.status === "failed" || result._stopRun === true
 }
 
 function interruptedBeforeApply(
@@ -257,7 +266,12 @@ async function handleMetaAndBuildResult(
     await applyRunnerControlPlaneMeta(ssh, { meta: result.meta })
   }
 
-  return { env: currentEnvironment, shouldBreak: result.status === "failed", status: result.status }
+  return {
+    env: currentEnvironment,
+    shouldBreak: shouldBreakAfterResult(result),
+    status: result.status,
+    stopRun: result._stopRun,
+  }
 }
 
 // eslint-disable-next-line max-params -- verbose and dryRun flags need to be threaded through
@@ -428,42 +442,70 @@ type LoopArguments = {
   verbose: boolean
 }
 
-async function runModuleLoop(parameters: LoopArguments): Promise<Environment> {
+async function createModuleStepPromise(parameters: {
+  currentEnvironment: Environment
+  currentModule: Module
+  dryRun: boolean
+  shutdownSignal: () => NodeJS.Signals | null
+  ssh: SshConnectionImpl
+  stats: RunStats
+  verbose: boolean
+}): Promise<StepResult> {
+  const { currentEnvironment, currentModule, dryRun, shutdownSignal, ssh, stats, verbose } =
+    parameters
+
+  return isRecipe(currentModule)
+    ? runRecipeModule(
+        currentModule,
+        currentEnvironment,
+        ssh,
+        stats,
+        verbose,
+        dryRun,
+        shutdownSignal
+      )
+    : runRegularModule({
+        dryRun,
+        env: currentEnvironment,
+        shutdownSignal,
+        ssh,
+        targetModule: currentModule,
+        verbose,
+      })
+}
+
+async function runModuleLoop(parameters: LoopArguments): Promise<{
+  env: Environment
+  stopRun?: true
+}> {
   const { dryRun, modules, shutdownSignal, ssh, stats, verbose } = parameters
   let currentEnvironment = parameters.env
+  let stopRun: true | undefined
 
   for (const currentModule of modules) {
     // A module already running when the signal arrived completes normally
     // and its result is still counted in stats before the loop exits here.
     if (shutdownSignal() != null) break
-    const stepPromise = isRecipe(currentModule)
-      ? runRecipeModule(
-          currentModule,
-          currentEnvironment,
-          ssh,
-          stats,
-          verbose,
-          dryRun,
-          shutdownSignal
-        )
-      : runRegularModule({
-          dryRun,
-          env: currentEnvironment,
-          shutdownSignal,
-          ssh,
-          targetModule: currentModule,
-          verbose,
-        })
+    const stepPromise = createModuleStepPromise({
+      currentEnvironment,
+      currentModule,
+      dryRun,
+      shutdownSignal,
+      ssh,
+      stats,
+      verbose,
+    })
 
     // eslint-disable-next-line no-await-in-loop
     const result = await stepPromise
 
     currentEnvironment = result.env
     if (result.status != null) stats.update(result.status)
+    if (result.stopRun === true) stopRun = true
     if (result.shouldBreak) break
   }
 
-  return currentEnvironment
+  return { env: currentEnvironment, stopRun }
 }
 
 type SignalArguments = {
@@ -538,7 +580,7 @@ async function executeRun(parameters: ExecuteRunArguments): Promise<void> {
   const { definition, dryRun, environment, shutdownSignal, ssh, stats, verbose } = parameters
 
   printRecipeHeader(definition.name)
-  const finalEnvironment = await runModuleLoop({
+  const loopResult = await runModuleLoop({
     dryRun,
     env: environment,
     modules: definition.run,
@@ -547,10 +589,12 @@ async function executeRun(parameters: ExecuteRunArguments): Promise<void> {
     stats,
     verbose,
   })
+  const finalEnvironment = loopResult.env
 
   if (
     !dryRun &&
     shutdownSignal() == null &&
+    loopResult.stopRun !== true &&
     stats.changed > 0 &&
     stats.failed === 0 &&
     definition.signals != null

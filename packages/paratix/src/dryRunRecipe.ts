@@ -10,7 +10,7 @@ import {
   startModuleSpinner,
 } from "./output.js"
 
-type StepResult = { env: Environment; shouldBreak: boolean; status?: ModuleStatus }
+type StepResult = { env: Environment; shouldBreak: boolean; status?: ModuleStatus; stopRun?: true }
 
 function shouldExecuteApplyDuringDryRun(module: RecipeModule["_modules"][number]): boolean {
   return (
@@ -38,7 +38,12 @@ async function executeDryRunBlockingModule(parameters: {
   if (result.status === "failed" && result.error != null) {
     printCommandFailure(result.error, verbose)
   }
-  return { env: nextEnvironment, shouldBreak: result.status === "failed", status: result.status }
+  return {
+    env: nextEnvironment,
+    shouldBreak: result.status === "failed" || result._stopRun === true,
+    status: result.status,
+    stopRun: result._stopRun,
+  }
 }
 
 async function executeDryRunChildModule(parameters: {

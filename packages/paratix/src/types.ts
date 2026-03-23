@@ -61,6 +61,12 @@ export type ModuleResult = {
    * @internal
    */
   _dryRunDetail?: string
+  /**
+   * Optional internal control-plane marker that tells the runner to stop the
+   * current run successfully after this module completed.
+   * @internal
+   */
+  _stopRun?: true
   /** Optional error details consumed by the runner for centralized CLI output. */
   error?: Error
   /** Optional typed meta entries for env propagation and runner control-plane updates. */
@@ -75,6 +81,7 @@ export type ModuleResult = {
  * @internal
  */
 export type OrchestrationStep = {
+  _stopRun?: true
   env: Environment
   meta?: ModuleMetaEntry[]
   status: ModuleStatus
