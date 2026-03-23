@@ -20,6 +20,7 @@ import {
 
 const EXEC_OPTS = { ignoreExitCode: true, silent: true } as const
 const HOSTS_FILE = "/etc/hosts"
+const HOSTS_FILE_MODE = "0644"
 const NETWORKCTL_RELOAD = "networkctl reload"
 const DEFAULT_POLL_INTERVAL_MS = 2000
 const DEFAULT_POLL_TIMEOUT_MS = 60_000
@@ -224,6 +225,7 @@ export const net = {
           const suffix = content.endsWith("\n") ? "" : "\n"
           const newContent = `${content}${suffix}${expectedLine}\n`
           await guardedWriteFile(conn, {
+            mode: HOSTS_FILE_MODE,
             newContent,
             originalContent: content,
             remotePath: HOSTS_FILE,
@@ -231,6 +233,7 @@ export const net = {
         } else {
           const newContent = lines.filter((line) => line.trim() !== expectedLine).join("\n")
           await guardedWriteFile(conn, {
+            mode: HOSTS_FILE_MODE,
             newContent,
             originalContent: content,
             remotePath: HOSTS_FILE,

@@ -139,6 +139,28 @@ describe("net.hosts — apply", () => {
     await mod.apply(mockSsh, emptyEnv)
     expect(mockSsh.calls).toContain("cat '/etc/hosts'")
   })
+
+  it("writes /etc/hosts back with mode 0644 instead of the generic 0600 default", async () => {
+    const mockSsh = createMockSsh({
+      "cat '/etc/hosts'": { stdout: "127.0.0.1 localhost\n" },
+    })
+    const writes: Array<{ content: string; mode?: string; path: string }> = []
+    mockSsh.writeFile = async (path, content, options) => {
+      writes.push({ content, mode: options?.mode, path })
+      await Promise.resolve()
+    }
+
+    const mod = net.hosts("1.2.3.4", ["myhost"])
+    const result = await mod.apply(mockSsh, emptyEnv)
+
+    expect(result.status).toBe("changed")
+    expect(writes).toHaveLength(1)
+    expect(writes[0]).toStrictEqual({
+      content: "127.0.0.1 localhost\n1.2.3.4 myhost\n",
+      mode: "0644",
+      path: "/etc/hosts",
+    })
+  })
 })
 
 // ─── net.resolv ───────────────────────────────────────────────────────────────
