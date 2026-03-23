@@ -61,14 +61,37 @@ async function disableSocketActivatedSsh(ssh: SshConnection): Promise<void> {
   })
 }
 
+async function resolveSshServiceUnit(ssh: SshConnection): Promise<"ssh" | "sshd"> {
+  const sshdExists = await ssh.exec(`${SYSTEMCTL} cat sshd.service >/dev/null 2>&1`, {
+    ignoreExitCode: true,
+    silent: true,
+  })
+  if (sshdExists.code === 0) {
+    return "sshd"
+  }
+
+  const sshExists = await ssh.exec(`${SYSTEMCTL} cat ssh.service >/dev/null 2>&1`, {
+    ignoreExitCode: true,
+    silent: true,
+  })
+  if (sshExists.code === 0) {
+    return "ssh"
+  }
+
+  throw new Error(
+    "[sshd] could not find a systemd SSH service unit (tried sshd.service and ssh.service)"
+  )
+}
+
 async function reloadSshd(ssh: SshConnection): Promise<ModuleResult> {
-  const result = await ssh.exec(`${SYSTEMCTL} reload sshd`, {
+  const serviceUnit = await resolveSshServiceUnit(ssh)
+  const result = await ssh.exec(`${SYSTEMCTL} reload ${serviceUnit}`, {
     ignoreExitCode: true,
     silent: true,
   })
   return result.code === 0
     ? { status: "changed" }
-    : failedCommand("[sshd.config] systemctl reload sshd failed", result)
+    : failedCommand(`[sshd.config] systemctl reload ${serviceUnit} failed`, result)
 }
 
 async function validateProspectiveSshdConfig(
@@ -170,7 +193,8 @@ async function applySshdPort(ssh: SshConnection, targetPort: number): Promise<Mo
   ssh.addPort(targetPort)
   try {
     await disableSocketActivatedSsh(ssh)
-    await ssh.exec("systemctl restart sshd", { silent: true })
+    const serviceUnit = await resolveSshServiceUnit(ssh)
+    await ssh.exec(`${SYSTEMCTL} restart ${serviceUnit}`, { silent: true })
   } catch (error) {
     if (!isRestartDisconnect(error)) {
       ssh.removePort(targetPort)

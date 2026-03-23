@@ -7,6 +7,8 @@ import { createMockSsh } from "../helpers/mockSsh.js"
 const emptyEnv = {}
 const SSHD_CONFIG = "/etc/ssh/sshd_config"
 const CAT_SSHD = `cat '${SSHD_CONFIG}'`
+const SYSTEMCTL_CAT_SSH = "systemctl cat ssh.service >/dev/null 2>&1"
+const SYSTEMCTL_CAT_SSHD = "systemctl cat sshd.service >/dev/null 2>&1"
 
 function trackWriteFile(
   mockSsh: ReturnType<typeof createMockSsh>
@@ -433,6 +435,7 @@ describe("sshd.config — apply: validation and rollback", () => {
     expect(execSpy.mock.calls.map((args) => args[0])).toStrictEqual([
       "mkdir -p '/run/sshd'",
       "sshd -t",
+      SYSTEMCTL_CAT_SSHD,
       "systemctl reload sshd",
     ])
   })
@@ -448,6 +451,7 @@ describe("sshd.config — apply: validation and rollback", () => {
     execSpy
       .mockResolvedValueOnce({ code: 0, stderr: "", stdout: "" })
       .mockResolvedValueOnce({ code: 0, stderr: "", stdout: "" })
+      .mockResolvedValueOnce({ code: 0, stderr: "", stdout: "" })
       .mockResolvedValueOnce({ code: 1, stderr: "reload failed", stdout: "" })
 
     const mod = sshd.config({ PasswordAuthentication: "no" })
@@ -457,7 +461,63 @@ describe("sshd.config — apply: validation and rollback", () => {
     expect(execSpy.mock.calls.map((args) => args[0])).toStrictEqual([
       "mkdir -p '/run/sshd'",
       "sshd -t",
+      SYSTEMCTL_CAT_SSHD,
       "systemctl reload sshd",
+    ])
+  })
+
+  it("falls back to ssh.service for reload on Ubuntu-style systems", async () => {
+    const originalConfig = "PasswordAuthentication yes"
+    const mockSsh = createMockSsh({
+      [CAT_SSHD]: { stdout: originalConfig },
+    })
+    trackWriteFile(mockSsh)
+    const execSpy = vi.spyOn(mockSsh, "exec")
+
+    execSpy
+      .mockResolvedValueOnce({ code: 0, stderr: "", stdout: "" })
+      .mockResolvedValueOnce({ code: 0, stderr: "", stdout: "" })
+      .mockResolvedValueOnce({ code: 1, stderr: "", stdout: "" })
+      .mockResolvedValueOnce({ code: 0, stderr: "", stdout: "" })
+      .mockResolvedValueOnce({ code: 0, stderr: "", stdout: "" })
+
+    const mod = sshd.config({ PasswordAuthentication: "no" })
+    const result = await mod.apply(mockSsh, emptyEnv)
+
+    expect(result.status).toBe("changed")
+    expect(execSpy.mock.calls.map((args) => args[0])).toStrictEqual([
+      "mkdir -p '/run/sshd'",
+      "sshd -t",
+      SYSTEMCTL_CAT_SSHD,
+      SYSTEMCTL_CAT_SSH,
+      "systemctl reload ssh",
+    ])
+  })
+
+  it("returns a clear failure when neither sshd.service nor ssh.service exists", async () => {
+    const originalConfig = "PasswordAuthentication yes"
+    const mockSsh = createMockSsh({
+      [CAT_SSHD]: { stdout: originalConfig },
+    })
+    trackWriteFile(mockSsh)
+    const execSpy = vi.spyOn(mockSsh, "exec")
+
+    execSpy
+      .mockResolvedValueOnce({ code: 0, stderr: "", stdout: "" })
+      .mockResolvedValueOnce({ code: 0, stderr: "", stdout: "" })
+      .mockResolvedValueOnce({ code: 1, stderr: "", stdout: "" })
+      .mockResolvedValueOnce({ code: 1, stderr: "", stdout: "" })
+
+    const mod = sshd.config({ PasswordAuthentication: "no" })
+    await expect(mod.apply(mockSsh, emptyEnv)).rejects.toThrow(
+      "[sshd] could not find a systemd SSH service unit"
+    )
+
+    expect(execSpy.mock.calls.map((args) => args[0])).toStrictEqual([
+      "mkdir -p '/run/sshd'",
+      "sshd -t",
+      SYSTEMCTL_CAT_SSHD,
+      SYSTEMCTL_CAT_SSH,
     ])
   })
 })
@@ -640,6 +700,8 @@ describe("sshd.port — apply: validation and rollback", () => {
     execSpy
       .mockResolvedValueOnce({ code: 0, stderr: "", stdout: "" }) // mkdir -p /run/sshd
       .mockResolvedValueOnce({ code: 0, stderr: "", stdout: "" }) // sshd -t
+      .mockResolvedValueOnce({ code: 1, stderr: "", stdout: "" }) // ssh.socket missing
+      .mockResolvedValueOnce({ code: 0, stderr: "", stdout: "" }) // sshd.service exists
       .mockRejectedValueOnce(new Error("systemctl restart sshd failed")) // systemctl restart
 
     const mod = sshd.port(2222)
@@ -661,6 +723,8 @@ describe("sshd.port — apply: validation and rollback", () => {
     execSpy
       .mockResolvedValueOnce({ code: 0, stderr: "", stdout: "" }) // mkdir -p /run/sshd
       .mockResolvedValueOnce({ code: 0, stderr: "", stdout: "" }) // sshd -t
+      .mockResolvedValueOnce({ code: 1, stderr: "", stdout: "" }) // ssh.socket missing
+      .mockResolvedValueOnce({ code: 0, stderr: "", stdout: "" }) // sshd.service exists
       .mockRejectedValueOnce(new Error("SSH connection closed unexpectedly"))
 
     const mod = sshd.port(2222)
@@ -668,6 +732,28 @@ describe("sshd.port — apply: validation and rollback", () => {
 
     expect(addPortSpy).toHaveBeenCalledWith(2222)
     expect(removePortSpy).not.toHaveBeenCalled()
+  })
+
+  it("falls back to ssh.service for restart on Ubuntu-style systems", async () => {
+    const mockSsh = createMockSsh({
+      [CAT_SSHD]: { stdout: "Port 22" },
+    })
+    trackWriteFile(mockSsh)
+    const execSpy = vi.spyOn(mockSsh, "exec")
+
+    execSpy
+      .mockResolvedValueOnce({ code: 0, stderr: "", stdout: "" })
+      .mockResolvedValueOnce({ code: 0, stderr: "", stdout: "" })
+      .mockResolvedValueOnce({ code: 1, stderr: "", stdout: "" })
+      .mockResolvedValueOnce({ code: 1, stderr: "", stdout: "" })
+      .mockResolvedValueOnce({ code: 0, stderr: "", stdout: "" })
+      .mockResolvedValueOnce({ code: 0, stderr: "", stdout: "" })
+
+    const mod = sshd.port(2222)
+    const result = await mod.apply(mockSsh, emptyEnv)
+
+    expect(result.status).toBe("changed")
+    expect(execSpy.mock.calls.map((args) => args[0])).toContain("systemctl restart ssh")
   })
 })
 
