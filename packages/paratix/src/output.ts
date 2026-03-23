@@ -6,7 +6,18 @@ import { CommandError } from "./sshHelpers.js"
 
 const MODULE_NAME_WIDTH = 36
 const SPINNER_FRAME_INTERVAL_MS = 80
-const SPINNER_FRAMES = ["|", "/", "-", "\\"]
+const SPINNER_FRAMES = [
+  "⠋",
+  "⠙",
+  "⠹",
+  "⠸",
+  "⠼",
+  "⠴",
+  "⠦",
+  "⠧",
+  "⠇",
+  "⠏",
+]
 type DisplayStatus = "waiting" | ModuleStatus
 
 const STATUS_ICONS: Record<DisplayStatus, string> = {
