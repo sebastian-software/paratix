@@ -1041,7 +1041,7 @@ describe("CLI entrypoint", () => {
 
       expect(error.status).toBe(2)
       expect(String((error as { stdout?: Buffer | string } & ExecFailure).stdout)).toContain(
-        "____  ____ _/ /_(_)  __"
+        "_ __   __ _ _ __ __ _| |_ ___  __"
       )
       expect(String((error as { stdout?: Buffer | string } & ExecFailure).stdout)).toContain(
         PACKAGE_VERSION
