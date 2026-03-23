@@ -1024,6 +1024,33 @@ describe("printExceptionError", () => {
 })
 
 describe("CLI entrypoint", () => {
+  it("prints the ASCII header with the current version before running the apply action", () => {
+    const tempDirectory = mkdtempSync(join(tmpdir(), "paratix-cli-banner-"))
+    const playbookPath = join(tempDirectory, "invalid-server.mjs")
+    const cliPath = resolve(new URL("../dist/cli.js", import.meta.url).pathname)
+
+    try {
+      writeFileSync(playbookPath, "export default {}\n")
+
+      const error = captureExecFailure(() => {
+        execFileSync(process.execPath, [cliPath, "apply", playbookPath, "--dry-run"], {
+          encoding: "utf8",
+          stdio: "pipe",
+        })
+      })
+
+      expect(error.status).toBe(2)
+      expect(String((error as { stdout?: Buffer | string } & ExecFailure).stdout)).toContain(
+        "____  ____ _/ /_(_)  __"
+      )
+      expect(String((error as { stdout?: Buffer | string } & ExecFailure).stdout)).toContain(
+        PACKAGE_VERSION
+      )
+    } finally {
+      rmSync(tempDirectory, { force: true, recursive: true })
+    }
+  })
+
   it("awaits the async apply action and prints validation errors for invalid playbooks", () => {
     const tempDirectory = mkdtempSync(join(tmpdir(), "paratix-cli-"))
     const playbookPath = join(tempDirectory, "invalid-server.mjs")

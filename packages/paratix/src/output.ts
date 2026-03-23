@@ -15,6 +15,24 @@ const STATUS_ICONS: Record<DisplayStatus, string> = {
   waiting: pc.cyan("\u23f8"),
 }
 
+const CLI_HEADER_LINES = [
+  "                 __  _      ",
+  "   ____  ____ _/ /_(_)  __ ",
+  "  / __ \\/ __ `/ __/ / |/_/ ",
+  " / /_/ / /_/ / /_/ />  <   ",
+  "/ .___/\\__,_/\\__/_/_/|_|   ",
+  "/_/                        ",
+]
+
+export function renderCliHeader(version: string): string {
+  const versionText = pc.dim(`v${version}`)
+  return `${pc.cyan(CLI_HEADER_LINES.join("\n"))}\n${versionText}`
+}
+
+export function printCliHeader(version: string): void {
+  console.log(renderCliHeader(version))
+}
+
 /**
  * Print a bold, colored header line marking the start of a recipe run.
  * @param name - The recipe or server name to display.

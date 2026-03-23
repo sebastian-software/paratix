@@ -7,6 +7,7 @@ import pc from "picocolors"
 
 import type { Environment, ServerDefinition } from "./types.js"
 
+import { printCliHeader } from "./output.js"
 import { runPlaybook } from "./runner.js"
 import { collectSshConfigErrors } from "./serverDefinitionValidation.js"
 
@@ -299,6 +300,7 @@ program
   .option("--verbose", "Show full stack traces on error", false)
   .action(async (file: string, options: Record<string, unknown>) => {
     try {
+      printCliHeader(PACKAGE_VERSION)
       const environmentOverrides = applyCliEnvironmentOverrides(
         // eslint-disable-next-line @typescript-eslint/no-unsafe-type-assertion -- Commander options typed as Record<string, unknown>
         options.env as Environment,
