@@ -594,7 +594,6 @@ async function executeRun(parameters: ExecuteRunArguments): Promise<void> {
   if (
     !dryRun &&
     shutdownSignal() == null &&
-    loopResult.stopRun !== true &&
     stats.changed > 0 &&
     stats.failed === 0 &&
     definition.signals != null

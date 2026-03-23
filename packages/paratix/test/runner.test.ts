@@ -2493,7 +2493,7 @@ describe("runPlaybook dry-run recipe behaviour", () => {
     expect(process.exitCode).toBe(0)
   })
 
-  it("stops the run successfully on firstRun.stop in apply mode and skips later modules and signals", async () => {
+  it("stops the run successfully on firstRun.stop in apply mode, skips later modules, and still runs pending signals", async () => {
     const capturedConfigs: unknown[] = []
 
     vi.doMock("../src/ssh.js", () => ({
@@ -2536,7 +2536,7 @@ describe("runPlaybook dry-run recipe behaviour", () => {
     expect(changedModule.apply).toHaveBeenCalledOnce()
     expect(laterModule.check).not.toHaveBeenCalled()
     expect(laterModule.apply).not.toHaveBeenCalled()
-    expect(signalModule.apply).not.toHaveBeenCalled()
+    expect(signalModule.apply).toHaveBeenCalledOnce()
     expect(process.exitCode).toBe(0)
   })
 

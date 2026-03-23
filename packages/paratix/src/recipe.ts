@@ -293,7 +293,7 @@ async function applyRecipe(parameters: {
     verbose,
   })
 
-  if (state.stopRun !== true && state.status === "changed" && parameters.signals) {
+  if (state.status === "changed" && parameters.signals) {
     state.status = await triggerSignals({
       environment: state.env,
       onSignalStep: parameters.options?.onSignalStep,

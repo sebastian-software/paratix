@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 
 import type { Environment, Module } from "../src/types.js"
 
+import { firstRun } from "../src/builtins.js"
 import { recipe } from "../src/recipe.js"
 import { CommandError } from "../src/sshHelpers.js"
 import { createMockSsh } from "./helpers/mockSsh.js"
@@ -247,6 +248,33 @@ describe("recipe", () => {
     // eslint-disable-next-line prefer-spread
     await r.apply(null, emptyEnv)
 
+    expect(signalApplied.count).toBe(1)
+  })
+
+  it("still triggers signals after firstRun.stop when an earlier child changed", async () => {
+    const signalApplied = { count: 0 }
+    const signal: Module = {
+      // eslint-disable-next-line @typescript-eslint/require-await -- Interface requires async
+      async apply() {
+        signalApplied.count++
+        return { status: "changed" }
+      },
+      // eslint-disable-next-line @typescript-eslint/require-await -- Interface requires async
+      async check() {
+        return "needs-apply"
+      },
+      name: "signal-module",
+    }
+
+    const changedModule = makeModule("needs-apply", "changed")
+    const r = recipe("test-recipe", [changedModule, firstRun.stop("bootstrap boundary")], {
+      signals: [signal],
+    })
+    const applyRecipe = r.apply
+    const result = await applyRecipe(null, { PARATIX_FIRST_RUN: "true" })
+
+    expect(result.status).toBe("changed")
+    expect(result._stopRun).toBe(true)
     expect(signalApplied.count).toBe(1)
   })
 
