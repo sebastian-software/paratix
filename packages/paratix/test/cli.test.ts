@@ -19,6 +19,7 @@ import {
 } from "../src/cli.js"
 
 declare const PACKAGE_VERSION: string
+declare const PACKAGE_DISPLAY_VERSION: string
 
 type ExecFailure = {
   status?: null | number
@@ -40,6 +41,18 @@ describe("PACKAGE_VERSION", () => {
     const packageJsonPath = resolve(new URL("../package.json", import.meta.url).pathname)
     const packageJson = JSON.parse(readFileSync(packageJsonPath, "utf8")) as { version: string }
     expect(PACKAGE_VERSION).toBe(packageJson.version)
+  })
+})
+
+describe("PACKAGE_DISPLAY_VERSION", () => {
+  it("starts with the package version and may append the short git hash", () => {
+    const versionParts = PACKAGE_DISPLAY_VERSION.split("-")
+    const hashPart = [...versionParts, "0"][1]
+
+    expect(versionParts[0]).toBe(PACKAGE_VERSION)
+    expect(versionParts.length).toBeGreaterThanOrEqual(1)
+    expect(versionParts.length).toBeLessThanOrEqual(2)
+    expect(hashPart).toMatch(/^[0-9a-f]+$/v)
   })
 })
 
@@ -1044,7 +1057,7 @@ describe("CLI entrypoint", () => {
         "_ __   __ _ _ __ __ _| |_ ___  __"
       )
       expect(String((error as { stdout?: Buffer | string } & ExecFailure).stdout)).toContain(
-        PACKAGE_VERSION
+        PACKAGE_DISPLAY_VERSION
       )
     } finally {
       rmSync(tempDirectory, { force: true, recursive: true })
