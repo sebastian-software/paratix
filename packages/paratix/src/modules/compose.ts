@@ -133,6 +133,36 @@ function sanitizeUnitValue(value: string): string {
   return value.replaceAll(/[\n\r]/gv, "")
 }
 
+function validateGeneratedSystemdUnitContent(
+  content: string,
+  unitFileName: string
+): ModuleResult | null {
+  if (content.trim() === "") {
+    return failed(`[compose.systemd] generated empty unit content for ${unitFileName}`)
+  }
+
+  if (!content.includes("[Unit]") || !content.includes("[Service]")) {
+    return failed(`[compose.systemd] generated invalid unit content for ${unitFileName}`)
+  }
+
+  return null
+}
+
+async function verifyNonEmptySystemdUnit(parameters: {
+  connection: SshConnection
+  filePath: string
+  unitFileName: string
+}): Promise<ModuleResult | null> {
+  const writtenContent = await parameters.connection.readFile(parameters.filePath)
+  if (writtenContent.trim() !== "") return null
+
+  await parameters.connection.exec(`rm -f ${shellQuote(parameters.filePath)}`, {
+    ignoreExitCode: true,
+    silent: true,
+  })
+  return failed(`[compose.systemd] wrote empty unit file for ${parameters.unitFileName}`)
+}
+
 /**
  * Generate the content of a systemd service unit file that manages a compose
  * stack via `ExecStart` / `ExecStop`.
@@ -436,7 +466,15 @@ export const compose = {
         if (typeof runtime !== "string") return runtime
 
         const content = generateSystemdUnit(projectDirectory, serviceName, runtime)
+        const validationFailure = validateGeneratedSystemdUnitContent(content, unitFileName)
+        if (validationFailure != null) return validationFailure
         await connection.writeFile(filePath, content, { mode: SYSTEMD_UNIT_MODE })
+        const emptyUnitFailure = await verifyNonEmptySystemdUnit({
+          connection,
+          filePath,
+          unitFileName,
+        })
+        if (emptyUnitFailure != null) return emptyUnitFailure
 
         const result = await connection.exec("systemctl daemon-reload", EXEC_OPTS)
         return result.code === 0
