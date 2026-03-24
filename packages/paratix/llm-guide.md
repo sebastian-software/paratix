@@ -287,10 +287,11 @@ rsync SSH process and does not depend on a local `known_hosts` entry.
 
 ### `ufw`
 
-| Method        | Signature                                                        | Idempotent |
-| ------------- | ---------------------------------------------------------------- | ---------- |
-| `ufw.enabled` | `(): Module`                                                     | Yes        |
-| `ufw.rule`    | `(action: "allow" \| "deny", ports: number \| number[]): Module` | Yes        |
+| Method         | Signature                                                        | Idempotent |
+| -------------- | ---------------------------------------------------------------- | ---------- |
+| `ufw.disabled` | `(): Module`                                                     | Yes        |
+| `ufw.enabled`  | `(): Module`                                                     | Yes        |
+| `ufw.rule`     | `(action: "allow" \| "deny", ports: number \| number[]): Module` | Yes        |
 
 ### `user`
 
@@ -455,6 +456,40 @@ Conditionally run modules. Skipped modules report `"skipped"`, not `"failed"`.
 
 ```typescript
 when((env) => env["DEPLOY_ENV"] === "production", service.enabled("fail2ban"), ufw.enabled())
+```
+
+### `when.packageInstalled(name, ...modules)` / `when.packageAbsent(name, ...modules)`
+
+Conditionally run modules based on package state on the remote host.
+
+```typescript
+when.packageInstalled("ufw", ufw.disabled())
+when.packageAbsent("docker-ce", package.installed("docker-ce"))
+```
+
+### `when.commandExists(name, ...modules)` / `when.commandMissing(name, ...modules)`
+
+Conditionally run modules based on whether a command exists on the remote host.
+
+```typescript
+when.commandExists("docker", service.running("docker"))
+when.commandMissing("docker", package.installed("docker-ce"))
+```
+
+### Filesystem guard variants
+
+Use explicit filesystem-type guards when a module or recipe should only run for a specific entry type:
+
+- `when.fileExists(path, ...modules)` / `when.fileMissing(path, ...modules)` for regular files
+- `when.pathExists(path, ...modules)` / `when.pathMissing(path, ...modules)` for directories
+- `when.symlinkExists(path, ...modules)` / `when.symlinkMissing(path, ...modules)` for symlinks
+- `when.socketExists(path, ...modules)` / `when.socketMissing(path, ...modules)` for Unix sockets
+
+```typescript
+when.fileExists("/etc/myapp/config.yml", service.reload("myapp"))
+when.pathMissing("/etc/traefik", file.directory("/etc/traefik"))
+when.symlinkExists("/etc/myapp/current", service.restart("myapp"))
+when.socketExists("/run/docker.sock", service.running("docker"))
 ```
 
 ### `debug(message)`

@@ -1,6 +1,7 @@
 import { failed, failedCommand } from "../moduleFailure.js"
 import { shellQuote } from "../ssh.js"
 import { type Module, type ModuleResult, NEEDS_APPLY, type SshConnection } from "../types.js"
+import { detectPackageManager, isPackageInstalled } from "./package.js"
 
 const UFW = "ufw"
 
@@ -8,6 +9,42 @@ const UFW = "ufw"
  * Modules for managing the UFW (Uncomplicated Firewall) on Debian/Ubuntu hosts.
  */
 export const ufw = {
+  /**
+   * Ensure UFW is inactive. If UFW is not installed, this is treated as already satisfied.
+   *
+   * @returns A Module that ensures UFW is disabled.
+   */
+  disabled(): Module {
+    return {
+      async apply(ssh: null | SshConnection): Promise<ModuleResult> {
+        if (!ssh) return failed("[ufw.disabled] SSH connection is required")
+        const pm = await detectPackageManager(ssh)
+        if (pm == null || !(await isPackageInstalled(ssh, pm, UFW))) {
+          return { status: "ok" }
+        }
+
+        const result = await ssh.exec(`${UFW} --force disable`, {
+          ignoreExitCode: true,
+          silent: true,
+        })
+        return result.code === 0
+          ? { status: "changed" }
+          : failedCommand("[ufw.disabled] ufw disable failed", result)
+      },
+      async check(ssh: null | SshConnection): Promise<"needs-apply" | "ok"> {
+        if (!ssh) return NEEDS_APPLY
+        const pm = await detectPackageManager(ssh)
+        if (pm == null || !(await isPackageInstalled(ssh, pm, UFW))) {
+          return "ok"
+        }
+
+        const status = await ssh.output(`${UFW} status`)
+        return status.includes("Status: inactive") ? "ok" : NEEDS_APPLY
+      },
+      name: "ufw.disabled",
+    }
+  },
+
   /**
    * Ensure UFW is active. Enables the firewall non-interactively if not already running.
    *

@@ -1,3 +1,4 @@
+/* eslint-disable max-lines -- CLI output rendering is intentionally kept together */
 import pc from "picocolors"
 
 import type { ModuleStatus } from "./types.js"
@@ -86,7 +87,11 @@ function getCurrentOutputDepth(): number {
 }
 
 function getModuleIndent(): string {
-  return OUTPUT_INDENT_UNIT.repeat(getCurrentOutputDepth() + 1)
+  if (recipeOutputDepth < 0) {
+    return OUTPUT_INDENT_UNIT
+  }
+
+  return OUTPUT_INDENT_UNIT.repeat(getCurrentOutputDepth() + 2)
 }
 
 function getRecipeHeaderIndent(): string {

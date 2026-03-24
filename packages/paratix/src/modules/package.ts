@@ -52,7 +52,7 @@ function missingPackageManager(moduleName: string): ModuleResult {
  * @param ssh - Active SSH connection to the remote host.
  * @returns The detected package manager, or `null` when none is found.
  */
-async function detectPackageManager(ssh: SshConnection): Promise<null | PackageManager> {
+export async function detectPackageManager(ssh: SshConnection): Promise<null | PackageManager> {
   const cached = pmCache.get(ssh)
   if (cached !== undefined) return cached
 
@@ -75,7 +75,7 @@ async function detectPackageManager(ssh: SshConnection): Promise<null | PackageM
  * @param packageName - Name of the package to check.
  * @returns `true` if the package is installed.
  */
-async function isPackageInstalled(
+export async function isPackageInstalled(
   ssh: SshConnection,
   pm: PackageManager,
   packageName: string

@@ -5,8 +5,11 @@ import type { Environment, Module } from "../src/types.js"
 import { assert, debug, fail, firstRun, pause, signals, when } from "../src/builtins.js"
 import { resolveEnvironment } from "../src/environment.js"
 import { mergeEnvironmentFromMeta, meta } from "../src/meta.js"
+import { createMockSsh } from "./helpers/mockSsh.js"
 
 const emptyEnv: Environment = {}
+const DPKG_STATUS_LITERAL = ["${", "Status}"].join("")
+const DPKG_UFW_INSTALLED = `dpkg-query -W -f='${DPKG_STATUS_LITERAL}' 'ufw' 2>/dev/null | grep -q 'install ok installed'`
 
 function makeAlwaysOkModule(): Module {
   return {
@@ -365,5 +368,128 @@ describe("when", () => {
     // The second module's env should reflect the first module's mutation
     // because the inner copy is shared between inner modules
     expect(envsSeenBySecond[0]).toHaveProperty("fromFirst", "mutated")
+  })
+
+  it("packageInstalled runs inner modules when the package is present", async () => {
+    const ssh = createMockSsh({
+      [DPKG_UFW_INSTALLED]: { code: 0 },
+      "which apt-get": { code: 0 },
+    })
+    const mod = when.packageInstalled("ufw", makeNeedsApplyModule())
+    const result = await mod.check(ssh, emptyEnv)
+    expect(result).toBe("needs-apply")
+  })
+
+  it("packageAbsent skips inner modules when the package is present", async () => {
+    const ssh = createMockSsh({
+      [DPKG_UFW_INSTALLED]: { code: 0 },
+      "which apt-get": { code: 0 },
+    })
+    // eslint-disable-next-line @typescript-eslint/require-await -- Promise-returning mock function
+    const innerCheck = vi.fn(async () => "needs-apply" as const)
+    const innerModule: Module = {
+      // eslint-disable-next-line @typescript-eslint/require-await -- Promise-returning module method
+      async apply() {
+        return { status: "changed" as const }
+      },
+      check: async () => innerCheck(),
+      name: "inner",
+    }
+
+    const mod = when.packageAbsent("ufw", innerModule)
+    const result = await mod.check(ssh, emptyEnv)
+
+    expect(result).toBe("ok")
+    expect(innerCheck).not.toHaveBeenCalled()
+  })
+
+  it("commandExists checks command presence on the host", async () => {
+    const ssh = createMockSsh({
+      "command -v 'docker' >/dev/null 2>&1": { code: 0 },
+    })
+    const mod = when.commandExists("docker", makeNeedsApplyModule())
+    const result = await mod.check(ssh, emptyEnv)
+    expect(result).toBe("needs-apply")
+  })
+
+  it("commandMissing skips apply when the command exists", async () => {
+    const ssh = createMockSsh({
+      "command -v 'docker' >/dev/null 2>&1": { code: 0 },
+    })
+    const mod = when.commandMissing("docker", makeNeedsApplyModule())
+    const result = await mod.apply(ssh, emptyEnv)
+    expect(result.status).toBe("skipped")
+  })
+
+  it("fileExists checks for regular files only", async () => {
+    const ssh = createMockSsh({
+      "test -f '/etc/app.conf'": { code: 0 },
+    })
+    const mod = when.fileExists("/etc/app.conf", makeNeedsApplyModule())
+    const result = await mod.check(ssh, emptyEnv)
+    expect(result).toBe("needs-apply")
+  })
+
+  it("fileMissing skips when a regular file exists", async () => {
+    const ssh = createMockSsh({
+      "test -f '/etc/app.conf'": { code: 0 },
+    })
+    const mod = when.fileMissing("/etc/app.conf", makeNeedsApplyModule())
+    const result = await mod.check(ssh, emptyEnv)
+    expect(result).toBe("ok")
+  })
+
+  it("pathExists checks for directories only", async () => {
+    const ssh = createMockSsh({
+      "test -d '/etc/myapp'": { code: 0 },
+    })
+    const mod = when.pathExists("/etc/myapp", makeNeedsApplyModule())
+    const result = await mod.check(ssh, emptyEnv)
+    expect(result).toBe("needs-apply")
+  })
+
+  it("pathMissing skips when a directory exists", async () => {
+    const ssh = createMockSsh({
+      "test -d '/etc/myapp'": { code: 0 },
+    })
+    const mod = when.pathMissing("/etc/myapp", makeNeedsApplyModule())
+    const result = await mod.apply(ssh, emptyEnv)
+    expect(result.status).toBe("skipped")
+  })
+
+  it("symlinkExists checks for symlinks only", async () => {
+    const ssh = createMockSsh({
+      "test -L '/etc/myapp/current'": { code: 0 },
+    })
+    const mod = when.symlinkExists("/etc/myapp/current", makeNeedsApplyModule())
+    const result = await mod.check(ssh, emptyEnv)
+    expect(result).toBe("needs-apply")
+  })
+
+  it("symlinkMissing skips when a symlink exists", async () => {
+    const ssh = createMockSsh({
+      "test -L '/etc/myapp/current'": { code: 0 },
+    })
+    const mod = when.symlinkMissing("/etc/myapp/current", makeNeedsApplyModule())
+    const result = await mod.apply(ssh, emptyEnv)
+    expect(result.status).toBe("skipped")
+  })
+
+  it("socketExists checks for unix sockets only", async () => {
+    const ssh = createMockSsh({
+      "test -S '/run/docker.sock'": { code: 0 },
+    })
+    const mod = when.socketExists("/run/docker.sock", makeNeedsApplyModule())
+    const result = await mod.check(ssh, emptyEnv)
+    expect(result).toBe("needs-apply")
+  })
+
+  it("socketMissing skips when a unix socket exists", async () => {
+    const ssh = createMockSsh({
+      "test -S '/run/docker.sock'": { code: 0 },
+    })
+    const mod = when.socketMissing("/run/docker.sock", makeNeedsApplyModule())
+    const result = await mod.apply(ssh, emptyEnv)
+    expect(result.status).toBe("skipped")
   })
 })
