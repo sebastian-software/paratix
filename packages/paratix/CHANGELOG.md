@@ -1,5 +1,29 @@
 # Changelog
 
+## [0.5.0](https://github.com/sebastian-software/paratix/compare/paratix-v0.4.0...paratix-v0.5.0) (2026-03-24)
+
+
+### Features
+
+* **paratix:** add chmod and chown file modules ([b45cc59](https://github.com/sebastian-software/paratix/commit/b45cc5974500f5c671d1b8dd905ac904838b6a44))
+* **paratix:** add file-backed swap module ([b9b2fbc](https://github.com/sebastian-software/paratix/commit/b9b2fbc80e17362b94bd8aacb0d854affccaff36))
+* **paratix:** add guide dots to nested recipe output ([d9d6530](https://github.com/sebastian-software/paratix/commit/d9d6530d319d826917d60e44936a51f401e36a26))
+* **paratix:** add podman quadlet container module ([401c869](https://github.com/sebastian-software/paratix/commit/401c869a7e9d13e19ed00a7b2e755e62b36cb44a))
+* **paratix:** append git hash to cli display version ([563a8cf](https://github.com/sebastian-software/paratix/commit/563a8cfbf9e2841b2492e7052bfc7dcc2f60690b))
+* **paratix:** improve compose systemd unit generation ([256fbf3](https://github.com/sebastian-software/paratix/commit/256fbf3c60a3d264d74ebed05eb924e25374b5d2))
+
+
+### Bug Fixes
+
+* **paratix:** increase contrast for recipe guide dots ([427a315](https://github.com/sebastian-software/paratix/commit/427a3153b928ef9df82f77c82916c12f9b79e464))
+* **paratix:** recover compose units after empty atomic writes ([58d2e73](https://github.com/sebastian-software/paratix/commit/58d2e7308aa86e48dd71998a91f5a0d380b1cf6b))
+* **paratix:** refine recipe guide dot rendering ([7ebfdb2](https://github.com/sebastian-software/paratix/commit/7ebfdb28ba1e32854fb72271b67105487c1a9d0e))
+* **paratix:** reject empty remote files after sftp writes ([ae5ac6d](https://github.com/sebastian-software/paratix/commit/ae5ac6daa6a0f95a040ed95d4b84852b538dcddd))
+* **paratix:** replace full matched lines in file.line ([f9d240b](https://github.com/sebastian-software/paratix/commit/f9d240b2e0971a98e26afd833898ae5675bdf8fb))
+* **paratix:** reset compose systemd targets before rewrite ([af172d6](https://github.com/sebastian-software/paratix/commit/af172d65ee18fd2f4169665792edb9f5c2bfd029))
+* **paratix:** validate generated compose systemd units ([0706be3](https://github.com/sebastian-software/paratix/commit/0706be30634cbfc1fc6d6e62dd347f896109d682))
+* **paratix:** verify remote write sizes and recover via shell ([83ca524](https://github.com/sebastian-software/paratix/commit/83ca5248a7281fc9fed5042c50140879c13633e6))
+
 ## [0.4.0](https://github.com/sebastian-software/paratix/compare/paratix-v0.3.0...paratix-v0.4.0) (2026-03-24)
 
 
