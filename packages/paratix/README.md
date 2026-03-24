@@ -86,6 +86,8 @@ A playbook is a TypeScript file that default-exports `server(...)`. It defines t
 
 Modules are the smallest units of work. Each module checks whether its target state already exists and only applies changes when needed.
 
+For filesystem metadata, you can now also use dedicated modules such as `file.chmod(...)` and `file.chown(...)` when you want to manage permissions or ownership without coupling that change to a file upload or template render.
+
 ### Recipes
 
 Recipes group related modules into a named unit. They help structure larger playbooks and keep the CLI output readable.

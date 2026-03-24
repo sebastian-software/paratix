@@ -102,6 +102,92 @@ describe("file.absent", () => {
   })
 })
 
+describe("file.chmod", () => {
+  it("check returns ok when the mode already matches", async () => {
+    const ssh = createMockSsh({
+      "[ -e '/var/app/config.yml' ]": { code: 0 },
+      "stat -c '%a %U %G' '/var/app/config.yml'": { stdout: "644 root root" },
+    })
+
+    const mod = file.chmod("/var/app/config.yml", "0644")
+    const result = await mod.check(ssh, emptyEnv)
+    expect(result).toBe("ok")
+  })
+
+  it("check returns needs-apply when the path does not exist", async () => {
+    const ssh = createMockSsh({
+      "[ -e '/var/app/config.yml' ]": { code: 1 },
+    })
+
+    const mod = file.chmod("/var/app/config.yml", "0644")
+    const result = await mod.check(ssh, emptyEnv)
+    expect(result).toBe("needs-apply")
+  })
+
+  it("check returns needs-apply when the mode differs", async () => {
+    const ssh = createMockSsh({
+      "[ -e '/var/app/config.yml' ]": { code: 0 },
+      "stat -c '%a %U %G' '/var/app/config.yml'": { stdout: "600 root root" },
+    })
+
+    const mod = file.chmod("/var/app/config.yml", "0644")
+    const result = await mod.check(ssh, emptyEnv)
+    expect(result).toBe("needs-apply")
+  })
+
+  it("apply runs chmod", async () => {
+    const ssh = createMockSsh()
+    const mod = file.chmod("/var/app/config.yml", "0644")
+    const result = await mod.apply(ssh, emptyEnv)
+
+    expect(result.status).toBe("changed")
+    expect(ssh.calls).toContain("chmod '0644' '/var/app/config.yml'")
+  })
+})
+
+describe("file.chown", () => {
+  it("check returns ok when the owner already matches", async () => {
+    const ssh = createMockSsh({
+      "[ -e '/var/app/config.yml' ]": { code: 0 },
+      "stat -c '%a %U %G' '/var/app/config.yml'": { stdout: "644 www-data www-data" },
+    })
+
+    const mod = file.chown("/var/app/config.yml", "www-data:www-data")
+    const result = await mod.check(ssh, emptyEnv)
+    expect(result).toBe("ok")
+  })
+
+  it("check returns needs-apply when the path does not exist", async () => {
+    const ssh = createMockSsh({
+      "[ -e '/var/app/config.yml' ]": { code: 1 },
+    })
+
+    const mod = file.chown("/var/app/config.yml", "www-data:www-data")
+    const result = await mod.check(ssh, emptyEnv)
+    expect(result).toBe("needs-apply")
+  })
+
+  it("check returns needs-apply when the owner differs", async () => {
+    const ssh = createMockSsh({
+      "[ -e '/var/app/config.yml' ]": { code: 0 },
+      "stat -c '%a %U %G' '/var/app/config.yml'": { stdout: "644 root root" },
+    })
+
+    const mod = file.chown("/var/app/config.yml", "www-data:www-data")
+    const result = await mod.check(ssh, emptyEnv)
+    expect(result).toBe("needs-apply")
+  })
+
+  it("apply runs chown", async () => {
+    const ssh = createMockSsh()
+    const mod = file.chown("/var/app/config.yml", "www-data:www-data")
+    const result = await mod.apply(ssh, emptyEnv)
+
+    expect(result.status).toBe("changed")
+    expect(ssh.calls).toContain("chown 'www-data:www-data' '/var/app/config.yml'")
+  })
+})
+
 // Helper: compute sha256 hex of a string
 function sha256Hex(content: string): string {
   return createHash("sha256").update(content, "utf8").digest("hex")
