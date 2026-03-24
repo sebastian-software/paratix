@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.3.0](https://github.com/sebastian-software/paratix/compare/paratix-v0.2.0...paratix-v0.3.0) (2026-03-24)
+
+
+### Features
+
+* **repo:** trigger release-please minor release ([013cd08](https://github.com/sebastian-software/paratix/commit/013cd08cefe4adc24c6a4234ad23cd9581b5bbaf))
+
 ## [0.2.0](https://github.com/sebastian-software/paratix/compare/paratix-v0.1.0...paratix-v0.2.0) (2026-03-24)
 
 
