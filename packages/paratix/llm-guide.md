@@ -232,6 +232,12 @@ Import with renaming: `import { package as pkg } from "paratix/modules"`. The wo
 | `package.update`    | `(date: string): Module`          | Yes (versioned flag) |
 | `package.upgrade`   | `(date: string): Module`          | Yes (versioned flag) |
 
+### `quadlet`
+
+| Method              | Signature                                                                                                                                                                                                                                                                                                                   | Idempotent |
+| ------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------- |
+| `quadlet.container` | `(options: { autoUpdate?: "local" \| "registry"; containerName?: string; description?: string; environment?: Record<string, string>; exec?: string[]; image: string; name: string; networks?: string[]; podmanArgs?: string[]; publishPorts?: string[]; restart?: string; volumes?: string[]; wantedBy?: string }): Module` | Yes        |
+
 ### `releaseUpgrade`
 
 | Method                   | Signature                                                                       | Idempotent |

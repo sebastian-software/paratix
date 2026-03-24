@@ -35,6 +35,7 @@ export {
   net,
   op,
   package,
+  quadlet,
   releaseUpgrade,
   rsync,
   script,
