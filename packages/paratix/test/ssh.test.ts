@@ -1506,7 +1506,7 @@ describe("SshConnectionImpl", () => {
           stream.emit("data", Buffer.from(tempPath))
           stream.emit("close", 0)
         })
-        .mockImplementationOnce((_command: string, callback: ExecCallback) => {
+        .mockImplementation((_command: string, callback: ExecCallback) => {
           const stream = makeStream()
           executedCommands.push(_command)
           callback(undefined, stream)
@@ -1518,7 +1518,7 @@ describe("SshConnectionImpl", () => {
           callback(undefined, stream)
           stream.emit("close", 0)
         })
-        .mockImplementationOnce((_command: string, callback: ExecCallback) => {
+        .mockImplementation((_command: string, callback: ExecCallback) => {
           const stream = makeStream()
           executedCommands.push(_command)
           callback(undefined, stream)
@@ -1565,7 +1565,7 @@ describe("SshConnectionImpl", () => {
           stream.emit("data", Buffer.from(tempPath))
           stream.emit("close", 0)
         })
-        .mockImplementationOnce((_command: string, callback: ExecCallback) => {
+        .mockImplementation((_command: string, callback: ExecCallback) => {
           const stream = makeStream()
           executedCommands.push(_command)
           callback(undefined, stream)
@@ -1578,6 +1578,18 @@ describe("SshConnectionImpl", () => {
           stream.emit("close", 0)
         })
         .mockImplementationOnce((_command: string, callback: ExecCallback) => {
+          const stream = makeStream()
+          executedCommands.push(_command)
+          callback(undefined, stream)
+          stream.emit("close", 0)
+        })
+        .mockImplementationOnce((_command: string, callback: ExecCallback) => {
+          const stream = makeStream()
+          executedCommands.push(_command)
+          callback(undefined, stream)
+          stream.emit("close", 0)
+        })
+        .mockImplementation((_command: string, callback: ExecCallback) => {
           const stream = makeStream()
           executedCommands.push(_command)
           callback(undefined, stream)
@@ -1768,19 +1780,7 @@ describe("SshConnectionImpl", () => {
           stream.emit("data", Buffer.from(tempPath))
           stream.emit("close", 0)
         })
-        .mockImplementationOnce((_command: string, callback: ExecCallback) => {
-          const stream = makeStream()
-          executedCommands.push(_command)
-          callback(undefined, stream)
-          stream.emit("close", 0)
-        })
-        .mockImplementationOnce((_command: string, callback: ExecCallback) => {
-          const stream = makeStream()
-          executedCommands.push(_command)
-          callback(undefined, stream)
-          stream.emit("close", 0)
-        })
-        .mockImplementationOnce((_command: string, callback: ExecCallback) => {
+        .mockImplementation((_command: string, callback: ExecCallback) => {
           const stream = makeStream()
           executedCommands.push(_command)
           callback(undefined, stream)
@@ -1807,7 +1807,10 @@ describe("SshConnectionImpl", () => {
       expect(executedCommands[2]).toContain("'0600'")
       expect(executedCommands[2]).toContain('chown "$target_owner" "$target_temp"')
       expect(executedCommands[2]).toContain(`'${remotePath}'`)
-      expect(executedCommands[3]).toBe(`rm -f '${tempPath}'`)
+      expect(executedCommands[3]).toMatch(/^sudo bash -c /v)
+      expect(executedCommands[3]).toContain("[ -s ")
+      expect(executedCommands[3]).toContain(remotePath)
+      expect(executedCommands[4]).toBe(`rm -f '${tempPath}'`)
       expect(vi.mocked(sftpUpload)).toHaveBeenCalledOnce()
     })
 
@@ -1827,19 +1830,7 @@ describe("SshConnectionImpl", () => {
           stream.emit("data", Buffer.from(tempPath))
           stream.emit("close", 0)
         })
-        .mockImplementationOnce((_command: string, callback: ExecCallback) => {
-          const stream = makeStream()
-          executedCommands.push(_command)
-          callback(undefined, stream)
-          stream.emit("close", 0)
-        })
-        .mockImplementationOnce((_command: string, callback: ExecCallback) => {
-          const stream = makeStream()
-          executedCommands.push(_command)
-          callback(undefined, stream)
-          stream.emit("close", 0)
-        })
-        .mockImplementationOnce((_command: string, callback: ExecCallback) => {
+        .mockImplementation((_command: string, callback: ExecCallback) => {
           const stream = makeStream()
           executedCommands.push(_command)
           callback(undefined, stream)
@@ -1874,19 +1865,7 @@ describe("SshConnectionImpl", () => {
           stream.emit("data", Buffer.from(tempPath))
           stream.emit("close", 0)
         })
-        .mockImplementationOnce((_command: string, callback: ExecCallback) => {
-          const stream = makeStream()
-          executedCommands.push(_command)
-          callback(undefined, stream)
-          stream.emit("close", 0)
-        })
-        .mockImplementationOnce((_command: string, callback: ExecCallback) => {
-          const stream = makeStream()
-          executedCommands.push(_command)
-          callback(undefined, stream)
-          stream.emit("close", 0)
-        })
-        .mockImplementationOnce((_command: string, callback: ExecCallback) => {
+        .mockImplementation((_command: string, callback: ExecCallback) => {
           const stream = makeStream()
           executedCommands.push(_command)
           callback(undefined, stream)
@@ -1927,19 +1906,7 @@ describe("SshConnectionImpl", () => {
           stream.emit("data", Buffer.from(tempPath))
           stream.emit("close", 0)
         })
-        .mockImplementationOnce((_command: string, callback: ExecCallback) => {
-          const stream = makeStream()
-          executedCommands.push(_command)
-          callback(undefined, stream)
-          stream.emit("close", 0)
-        })
-        .mockImplementationOnce((_command: string, callback: ExecCallback) => {
-          const stream = makeStream()
-          executedCommands.push(_command)
-          callback(undefined, stream)
-          stream.emit("close", 0)
-        })
-        .mockImplementationOnce((_command: string, callback: ExecCallback) => {
+        .mockImplementation((_command: string, callback: ExecCallback) => {
           const stream = makeStream()
           executedCommands.push(_command)
           callback(undefined, stream)
