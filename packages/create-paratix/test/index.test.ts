@@ -737,13 +737,14 @@ describe("writeProjectFiles", () => {
 
     const raw = readFileSync(join(TEST_DIR, "tsconfig.json"), "utf8")
     const parsed = JSON.parse(raw) as {
-      compilerOptions: { module: string; moduleResolution: string }
+      compilerOptions: { module: string; moduleResolution: string; types: string[] }
       include: string[]
     }
 
     expect(parsed.compilerOptions).toMatchObject({
       module: "ESNext",
       moduleResolution: "Bundler",
+      types: ["node"],
     })
     expect(parsed.include).toStrictEqual(["**/*.ts"])
   })

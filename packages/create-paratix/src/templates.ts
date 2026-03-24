@@ -12,6 +12,7 @@ export const TSCONFIG_TEMPLATE = `{
     "target": "ES2024",
     "module": "ESNext",
     "moduleResolution": "Bundler",
+    "types": ["node"],
     "strict": true,
     "esModuleInterop": true,
     "skipLibCheck": true
