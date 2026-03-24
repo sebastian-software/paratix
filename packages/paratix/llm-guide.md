@@ -181,6 +181,8 @@ export default server({
 | `file.absent`     | `(remotePath: string): Module`                                                                                      | Yes                 |
 | `file.assemble`   | `(remotePath: string, fragments: string[], options?: { mode?: string; owner?: string }): Module`                    | Yes                 |
 | `file.block`      | `(remotePath: string, options: { content: string; name: string; prefix?: string }): Module`                         | Yes                 |
+| `file.chmod`      | `(remotePath: string, mode: string): Module`                                                                        | Yes                 |
+| `file.chown`      | `(remotePath: string, owner: string): Module`                                                                       | Yes                 |
 | `file.copy`       | `(remotePath: string, localPath: string, options?: { mode?: string; owner?: string }): Module`                      | Yes                 |
 | `file.directory`  | `(remotePath: string, options?: { mode?: string; owner?: string }): Module`                                         | Yes                 |
 | `file.line`       | `(remotePath: string, line: string, options?: { match?: string }): Module`                                          | Yes                 |
