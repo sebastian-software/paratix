@@ -113,8 +113,9 @@ describe("recipe", () => {
     const output = consoleLogs.join("\n")
 
     expect(output).toContain("[outer-recipe]")
-    expect(output).toContain("\n    [nested-recipe]")
-    expect(output).toMatch(/\n {6}.*nested-child/v)
+    expect(output).toContain("\n  · [nested-recipe]")
+    expect(output).toContain("\n  · · ✓  nested-child")
+    expect(output).toContain("\n  · ✓  nested-recipe")
   })
 
   it("aggregates status as failed and stops when a module fails", async () => {
