@@ -163,6 +163,21 @@ async function verifyNonEmptySystemdUnit(parameters: {
   return failed(`[compose.systemd] wrote empty unit file for ${parameters.unitFileName}`)
 }
 
+async function prepareComposeSystemdTarget(parameters: {
+  connection: SshConnection
+  filePath: string
+  unitFileName: string
+}): Promise<void> {
+  await parameters.connection.exec(`systemctl unmask ${shellQuote(parameters.unitFileName)}`, {
+    ignoreExitCode: true,
+    silent: true,
+  })
+  await parameters.connection.exec(`rm -f ${shellQuote(parameters.filePath)}`, {
+    ignoreExitCode: true,
+    silent: true,
+  })
+}
+
 /**
  * Generate the content of a systemd service unit file that manages a compose
  * stack via `ExecStart` / `ExecStop`.
@@ -468,6 +483,7 @@ export const compose = {
         const content = generateSystemdUnit(projectDirectory, serviceName, runtime)
         const validationFailure = validateGeneratedSystemdUnitContent(content, unitFileName)
         if (validationFailure != null) return validationFailure
+        await prepareComposeSystemdTarget({ connection, filePath, unitFileName })
         await connection.writeFile(filePath, content, { mode: SYSTEMD_UNIT_MODE })
         const emptyUnitFailure = await verifyNonEmptySystemdUnit({
           connection,
