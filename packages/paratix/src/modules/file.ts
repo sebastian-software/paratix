@@ -83,6 +83,20 @@ function splitLines(content: string): string[] {
   return content.split(/\r?\n/v)
 }
 
+function findFirstMatchingLineIndex(lines: string[], pattern: RegExp): number {
+  return lines.findIndex((candidateLine) => pattern.test(candidateLine))
+}
+
+function splitLinesPreservingTrailingNewline(content: string): {
+  hasTrailingNewline: boolean
+  lines: string[]
+} {
+  const hasTrailingNewline = /\r?\n$/v.test(content)
+  const lines = splitLines(content)
+  if (hasTrailingNewline && lines.at(-1) === "") lines.pop()
+  return { hasTrailingNewline, lines }
+}
+
 function validateAbsentPath(remotePath: string): void {
   const trimmedPath = remotePath.trim()
   if (trimmedPath.length === 0) {
@@ -251,16 +265,20 @@ export const file = {
             silent: true,
           })
         } else {
-          // Replace matching line with the new line (client-side to avoid sed escaping issues)
+          // Replace the first matching full line (client-side to avoid sed escaping issues)
           const content = await ssh.readFile(remotePath)
+          const { hasTrailingNewline, lines } = splitLinesPreservingTrailingNewline(content)
           // eslint-disable-next-line security/detect-non-literal-regexp
           const pattern = new RegExp(options.match, "mu")
-          if (!pattern.test(content)) {
+          const matchingLineIndex = findFirstMatchingLineIndex(lines, pattern)
+          if (matchingLineIndex === -1) {
             return failed(
               `[file.line: ${remotePath}] No line matching ${options.match} found for replacement`
             )
           }
-          const newContent = content.replace(pattern, line)
+          lines[matchingLineIndex] = line
+          let newContent = lines.join("\n")
+          if (hasTrailingNewline) newContent += "\n"
           const ownership = await readOwnership(ssh, remotePath)
           await guardedWriteFile(ssh, {
             mode: normalizeMode(ownership.mode),
@@ -283,7 +301,8 @@ export const file = {
         if (options?.match != null) {
           // eslint-disable-next-line security/detect-non-literal-regexp
           const matchPattern = new RegExp(options.match, "mu")
-          const matchedLine = lines.find((candidateLine) => matchPattern.test(candidateLine))
+          const matchedLineIndex = findFirstMatchingLineIndex(lines, matchPattern)
+          const matchedLine = matchedLineIndex === -1 ? undefined : lines[matchedLineIndex]
           return matchedLine === line ? "ok" : NEEDS_APPLY
         }
 

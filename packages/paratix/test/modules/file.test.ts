@@ -391,6 +391,22 @@ describe("file.line", () => {
 })
 
 describe("file.line — sed-Escaping Regression (apply with options.match)", () => {
+  it("regression — apply replaces the full matching line, not only the matched substring", async () => {
+    const writtenFiles: Array<{ content: string; path: string }> = []
+    const ssh = createMockSsh({
+      "cat '/etc/config'": { stdout: "prefix KEY=old suffix\nSECOND=line\n" },
+    })
+    // eslint-disable-next-line @typescript-eslint/require-await -- Mock
+    ssh.writeFile = async (path: string, content: string) => {
+      writtenFiles.push({ content, path })
+    }
+
+    const mod = file.line("/etc/config", "KEY=value", { match: "KEY=.*" })
+    await mod.apply(ssh, emptyEnv)
+
+    expect(writtenFiles[0]?.content).toBe("KEY=value\nSECOND=line")
+  })
+
   it("apply replaces line containing & without treating it as a backreference", async () => {
     // JS String.replace with a RegExp treats $& as "insert matched substring".
     // The implementation must escape the replacement string so that & is literal.
