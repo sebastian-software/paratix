@@ -18,6 +18,7 @@ The result is a practical server automation tool with a compact mental model: mo
 - **TypeScript authoring**: use regular `.ts` files with imports, conditions, and editor tooling.
 - **Resilient SSH flow**: reconnects after reboots and SSH port changes when modules require it.
 - **Structured orchestration**: recipes and signals keep service reloads and grouped changes explicit.
+- **Declarative host guards**: gate modules on package, command, file, directory, symlink, or socket state without embedding shell checks in strings.
 - **Strong bootstrap story**: supports explicit first-run flows and strict host-key handling.
 - **Practical built-in modules**: packages, files, services, users, SSH, firewall, systemd, sysctl, mount, rsync, and more.
 
@@ -92,6 +93,10 @@ Recipes group related modules into a named unit. They help structure larger play
 ### Signals
 
 Signals are deferred side effects such as `service.reload(...)` or `service.restart(...)`. They run when the surrounding scope actually changed, and can also be flushed explicitly with `signals.flush()` when you need a checkpoint inside a larger flow.
+
+### Guards
+
+Paratix also supports declarative host-state guards. Use `when.packageInstalled(...)`, `when.commandExists(...)`, `when.fileExists(...)`, `when.pathExists(...)`, `when.symlinkExists(...)`, or `when.socketExists(...)` and their inverted forms to gate modules or recipes on remote host state without shell-heavy playbooks.
 
 ## CLI
 

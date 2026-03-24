@@ -1,9 +1,13 @@
-import { mergeEnvironmentFromMeta } from "./meta.js"
+import {
+  createCommandGuard,
+  createConditionalModule,
+  createFilesystemGuard,
+  createPackageGuard,
+} from "./conditionalModules.js"
 import { failed } from "./moduleFailure.js"
 import {
   type Environment,
   type Module,
-  type ModuleMetaEntry,
   type ModuleResult,
   NEEDS_APPLY,
   type SshConnection,
@@ -198,124 +202,6 @@ export const signals = {
   },
 }
 
-async function applyConditionalModules(parameters: {
-  dryRun?: boolean
-  environment: Environment
-  modules: Module[]
-  ssh: null | SshConnection
-}): Promise<ModuleResult> {
-  const { dryRun = false, modules, ssh } = parameters
-  let state = createConditionalApplyState(parameters.environment)
-
-  for (const currentModule of modules) {
-    // eslint-disable-next-line no-await-in-loop
-    const checkResult = await currentModule.check(ssh, state.environment)
-    if (checkResult === "ok") continue
-
-    if (!shouldExecuteConditionalApply(currentModule, dryRun)) {
-      state = markConditionalApplyChanged(state)
-      continue
-    }
-
-    // eslint-disable-next-line no-await-in-loop -- conditional modules must preserve ordered env propagation
-    const result = await executeConditionalApply({
-      dryRun,
-      environment: state.environment,
-      module: currentModule,
-      ssh,
-    })
-    if (result.status === "failed") return result
-    // eslint-disable-next-line no-await-in-loop -- downstream env must see each module's meta in order
-    state = await mergeConditionalApplyState(state, result)
-    if (state.stopRun === true) break
-  }
-
-  return {
-    _flushSignals: state.flushSignals,
-    _stopRun: state.stopRun,
-    meta: state.meta.length === 0 ? undefined : state.meta,
-    status: state.status,
-  }
-}
-
-function shouldExecuteConditionalApply(module: Module, dryRun: boolean): boolean {
-  if (!dryRun) return true
-  return (
-    module._applyDryRun != null ||
-    module._dryRunBlocker === true ||
-    module._dryRunMetaProducer === true
-  )
-}
-
-type ConditionalApplyState = {
-  environment: Environment
-  flushSignals?: true
-  meta: ModuleMetaEntry[]
-  status: "changed" | "ok" | "skipped"
-  stopRun?: true
-}
-
-function createConditionalApplyState(environment: Environment): ConditionalApplyState {
-  return { environment: { ...environment }, meta: [], status: "ok" }
-}
-
-function markConditionalApplyChanged(state: ConditionalApplyState): ConditionalApplyState {
-  return { ...state, status: "changed" }
-}
-
-async function executeConditionalApply(parameters: {
-  dryRun: boolean
-  environment: Environment
-  module: Module
-  ssh: null | SshConnection
-}): Promise<ModuleResult> {
-  const { dryRun, environment, module, ssh } = parameters
-  if (dryRun && module._applyDryRun != null) {
-    return module._applyDryRun(ssh, environment)
-  }
-  return module.apply(ssh, environment)
-}
-
-function whenNeedsDryRunApply(modules: Module[]): boolean {
-  return modules.some((module) => shouldExecuteConditionalDryRun(module))
-}
-
-function shouldExecuteConditionalDryRun(module: Module): boolean {
-  return (
-    module._applyDryRun != null ||
-    module._dryRunBlocker === true ||
-    module._dryRunMetaProducer === true
-  )
-}
-
-async function mergeConditionalApplyState(
-  state: ConditionalApplyState,
-  result: ModuleResult
-): Promise<ConditionalApplyState> {
-  const environment = await mergeEnvironmentFromMeta(state.environment, result.meta)
-  return {
-    environment,
-    flushSignals: result._flushSignals === true ? true : state.flushSignals,
-    meta: result.meta == null ? state.meta : [...state.meta, ...result.meta],
-    status: result.status === "changed" ? "changed" : state.status,
-    stopRun: result._stopRun === true ? true : state.stopRun,
-  }
-}
-
-function createWhenDryRunApply(
-  condition: (environment: Environment) => boolean,
-  modules: Module[],
-  needsDryRunApply: boolean
-): ((ssh: null | SshConnection, environment: Environment) => Promise<ModuleResult>) | undefined {
-  if (!needsDryRunApply) return undefined
-  return async (ssh: null | SshConnection, environment: Environment) => {
-    if (!condition(environment)) {
-      return { status: "skipped" as const }
-    }
-    return applyConditionalModules({ dryRun: true, environment, modules, ssh })
-  }
-}
-
 /**
  * Run one or more modules only when a runtime condition is met.
  * When the condition is `false`, the whole group is skipped without running
@@ -328,45 +214,52 @@ function createWhenDryRunApply(
  * @example
  * when(env => env["DEPLOY_ENV"] === "production", service.enabled("fail2ban"))
  */
-export function when(
-  condition: (environment: Environment) => boolean,
-  ...modules: Module[]
-): Module {
-  const needsDryRunApply = whenNeedsDryRunApply(modules)
-  const applyDryRun = createWhenDryRunApply(condition, modules, needsDryRunApply)
-  return {
-    ...(modules.some((module) => module._dryRunBlocker === true)
-      ? { _dryRunBlocker: true as const }
-      : {}),
-    ...(modules.some((module) => module._dryRunMetaProducer === true)
-      ? { _dryRunMetaProducer: true as const }
-      : {}),
-    ...(applyDryRun == null ? {} : { _applyDryRun: applyDryRun }),
-    async apply(ssh: null | SshConnection, environment: Environment): Promise<ModuleResult> {
-      if (!condition(environment)) {
-        return { status: "skipped" }
-      }
-      return applyConditionalModules({ environment, modules, ssh })
-    },
-    async check(
-      ssh: null | SshConnection,
-      environment: Environment
-    ): Promise<"needs-apply" | "ok"> {
-      if (!condition(environment)) {
-        return "ok"
-      }
-      // Defensive copy so inner modules can mutate the env without affecting
-      // the caller's object (see Bug #13 regression tests).
-      const currentEnvironment = { ...environment }
-      for (const currentModule of modules) {
-        // eslint-disable-next-line no-await-in-loop
-        const result = await currentModule.check(ssh, currentEnvironment)
-        if (result === NEEDS_APPLY) {
-          return NEEDS_APPLY
-        }
-      }
-      return "ok"
-    },
+function baseWhen(condition: (environment: Environment) => boolean, ...modules: Module[]): Module {
+  return createConditionalModule({
+    condition: (_ssh, environment) => condition(environment),
+    modules,
     name: `when: conditional (${modules.length} modules)`,
-  }
+  })
 }
+
+type WhenFunction = {
+  commandExists: (commandName: string, ...modules: Module[]) => Module
+  commandMissing: (commandName: string, ...modules: Module[]) => Module
+  fileExists: (path: string, ...modules: Module[]) => Module
+  fileMissing: (path: string, ...modules: Module[]) => Module
+  packageAbsent: (packageName: string, ...modules: Module[]) => Module
+  packageInstalled: (packageName: string, ...modules: Module[]) => Module
+  pathExists: (path: string, ...modules: Module[]) => Module
+  pathMissing: (path: string, ...modules: Module[]) => Module
+  socketExists: (path: string, ...modules: Module[]) => Module
+  socketMissing: (path: string, ...modules: Module[]) => Module
+  symlinkExists: (path: string, ...modules: Module[]) => Module
+  symlinkMissing: (path: string, ...modules: Module[]) => Module
+} & typeof baseWhen
+
+export const when: WhenFunction = Object.assign(baseWhen, {
+  commandExists: (commandName: string, ...modules: Module[]) =>
+    createCommandGuard(commandName, false, modules),
+  commandMissing: (commandName: string, ...modules: Module[]) =>
+    createCommandGuard(commandName, true, modules),
+  fileExists: (path: string, ...modules: Module[]) =>
+    createFilesystemGuard({ invert: false, modules, path, testFlag: "-f" }),
+  fileMissing: (path: string, ...modules: Module[]) =>
+    createFilesystemGuard({ invert: true, modules, path, testFlag: "-f" }),
+  packageAbsent: (packageName: string, ...modules: Module[]) =>
+    createPackageGuard(packageName, true, modules),
+  packageInstalled: (packageName: string, ...modules: Module[]) =>
+    createPackageGuard(packageName, false, modules),
+  pathExists: (path: string, ...modules: Module[]) =>
+    createFilesystemGuard({ invert: false, modules, path, testFlag: "-d" }),
+  pathMissing: (path: string, ...modules: Module[]) =>
+    createFilesystemGuard({ invert: true, modules, path, testFlag: "-d" }),
+  socketExists: (path: string, ...modules: Module[]) =>
+    createFilesystemGuard({ invert: false, modules, path, testFlag: "-S" }),
+  socketMissing: (path: string, ...modules: Module[]) =>
+    createFilesystemGuard({ invert: true, modules, path, testFlag: "-S" }),
+  symlinkExists: (path: string, ...modules: Module[]) =>
+    createFilesystemGuard({ invert: false, modules, path, testFlag: "-L" }),
+  symlinkMissing: (path: string, ...modules: Module[]) =>
+    createFilesystemGuard({ invert: true, modules, path, testFlag: "-L" }),
+})

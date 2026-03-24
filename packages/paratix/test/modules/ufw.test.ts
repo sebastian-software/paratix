@@ -4,6 +4,8 @@ import { ufw } from "../../src/modules/ufw.js"
 import { createMockSsh } from "../helpers/mockSsh.js"
 
 const emptyEnv = {}
+const DPKG_STATUS_LITERAL = ["${", "Status}"].join("")
+const DPKG_UFW_INSTALLED = `dpkg-query -W -f='${DPKG_STATUS_LITERAL}' 'ufw' 2>/dev/null | grep -q 'install ok installed'`
 
 describe("ufw.enabled", () => {
   it("check returns ok when ufw is active", async () => {
@@ -53,6 +55,74 @@ describe("ufw.enabled", () => {
     const mod = ufw.enabled()
     // eslint-disable-next-line prefer-spread
     const result = await mod.apply(null, emptyEnv)
+    expect(result.status).toBe("failed")
+  })
+})
+
+describe("ufw.disabled", () => {
+  it("check returns ok when ufw is not installed", async () => {
+    const ssh = createMockSsh({
+      [DPKG_UFW_INSTALLED]: { code: 1 },
+      "which apt-get": { code: 0 },
+    })
+    const mod = ufw.disabled()
+    const result = await mod.check(ssh, emptyEnv)
+    expect(result).toBe("ok")
+  })
+
+  it("check returns ok when ufw is inactive", async () => {
+    const ssh = createMockSsh({
+      [DPKG_UFW_INSTALLED]: { code: 0 },
+      "ufw status": { stdout: "Status: inactive" },
+      "which apt-get": { code: 0 },
+    })
+    const mod = ufw.disabled()
+    const result = await mod.check(ssh, emptyEnv)
+    expect(result).toBe("ok")
+  })
+
+  it("check returns needs-apply when ufw is active", async () => {
+    const ssh = createMockSsh({
+      [DPKG_UFW_INSTALLED]: { code: 0 },
+      "ufw status": { stdout: "Status: active" },
+      "which apt-get": { code: 0 },
+    })
+    const mod = ufw.disabled()
+    const result = await mod.check(ssh, emptyEnv)
+    expect(result).toBe("needs-apply")
+  })
+
+  it("apply returns ok when ufw is not installed", async () => {
+    const ssh = createMockSsh({
+      [DPKG_UFW_INSTALLED]: { code: 1 },
+      "which apt-get": { code: 0 },
+    })
+    const mod = ufw.disabled()
+    const result = await mod.apply(ssh, emptyEnv)
+    expect(result.status).toBe("ok")
+    expect(ssh.calls).not.toContain("ufw --force disable")
+  })
+
+  it("apply returns changed when ufw disable succeeds", async () => {
+    const ssh = createMockSsh({
+      [DPKG_UFW_INSTALLED]: { code: 0 },
+      "ufw --force disable": { code: 0 },
+      "which apt-get": { code: 0 },
+    })
+    const mod = ufw.disabled()
+    const result = await mod.apply(ssh, emptyEnv)
+    expect(result.status).toBe("changed")
+    expect(ssh.calls).toContain("ufw --force disable")
+  })
+
+  it("apply returns failed when ufw disable exits with non-zero code", async () => {
+    const ssh = createMockSsh({
+      [DPKG_UFW_INSTALLED]: { code: 0 },
+      "ufw --force disable": { code: 1 },
+      "which apt-get": { code: 0 },
+    })
+    const mod = ufw.disabled()
+    const result = await mod.apply(ssh, emptyEnv)
     expect(result.status).toBe("failed")
   })
 })
