@@ -98,6 +98,10 @@ Signals are deferred side effects such as `service.reload(...)` or `service.rest
 
 `compose.systemd(...)` can generate a native systemd unit for Docker Compose or Podman Compose projects. By default it now starts the stack with `compose up --remove-orphans`; set `detached: true` if you explicitly want the old `-d` behaviour in the generated `ExecStart`.
 
+### Podman Quadlets
+
+For Podman-native services, Paratix now also includes `quadlet.container(...)`. It writes a `.container` file under `/etc/containers/systemd`, reloads systemd when the content changes, and works cleanly with `service.enabled(...)` and `service.running(...)` for the generated service.
+
 ### Guards
 
 Paratix also supports declarative host-state guards. Use `when.packageInstalled(...)`, `when.commandExists(...)`, `when.fileExists(...)`, `when.pathExists(...)`, `when.symlinkExists(...)`, or `when.socketExists(...)` and their inverted forms to gate modules or recipes on remote host state without shell-heavy playbooks.
