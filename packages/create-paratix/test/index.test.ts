@@ -934,6 +934,16 @@ describe("writeProjectFiles", () => {
       'expectedHostFingerprint: "SHA256:REPLACE_ME_WITH_YOUR_HOST_FINGERPRINT"'
     )
     expect(content).not.toContain("--bootstrap-root")
+    expect(content).not.toContain('service.restart("sshd")')
+  })
+
+  it("generated server.ts does not scaffold a hardcoded sshd restart signal", () => {
+    writeProjectFiles(TEST_DIR, { initialUser: { kind: "root" } })
+
+    const content = readFileSync(join(TEST_DIR, "server.ts"), "utf8")
+
+    expect(content).not.toContain('service.restart("sshd")')
+    expect(content).not.toContain('signals: [service.restart("sshd")]')
   })
 
   it("generated root-bootstrap server.ts switches to the admin user after FIRST_RUN", () => {

@@ -78,7 +78,7 @@ function createBaseServerHeader({
       : `    expectedHostFingerprint: ${JSON.stringify(expectedHostFingerprint)}, // captured from port 22 during scaffolding`
 
   return `import { firstRun, recipe, server } from "paratix";
-import { file, hostname, net, package as packages, service, ssh, sshd, sysctl, ufw, user } from "paratix/modules";
+import { file, hostname, net, package as packages, ssh, sshd, sysctl, ufw, user } from "paratix/modules";
 
 ${adminUserDeclaration}
 const adminPublicKey = ${JSON.stringify(adminPublicKey ?? "ssh-ed25519 REPLACE_ME_WITH_YOUR_PUBLIC_KEY")};
@@ -199,9 +199,7 @@ ${createFirewallRecipe()}
         PasswordAuthentication: "no",
         PermitRootLogin: "no",
       }),
-    ], {
-      signals: [service.restart("sshd")],
-    }),
+    ]),
 ${createKernelHardeningRecipe()}
 ${createAutomaticSecurityUpgradesRecipe()}
 ${createFirstRunStopModule()}
@@ -247,9 +245,7 @@ ${createFirewallRecipe()}
         PasswordAuthentication: "no",
         PermitRootLogin: FIRST_RUN ? "prohibit-password" : "no",
       }),
-    ], {
-      signals: [service.restart("sshd")],
-    }),
+    ]),
 ${createKernelHardeningRecipe()}
 ${createAutomaticSecurityUpgradesRecipe()}
 ${createFirstRunStopModule()}

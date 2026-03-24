@@ -88,7 +88,7 @@ The direct admin-user path looks like this:
 
 ```typescript
 import { recipe, server } from "paratix"
-import { hostname, net, package as packages, service, ssh, sshd, ufw, user } from "paratix/modules"
+import { hostname, net, package as packages, ssh, sshd, ufw, user } from "paratix/modules"
 
 const adminUser = "paratix"
 const adminPublicKey = "ssh-ed25519 REPLACE_ME_WITH_YOUR_PUBLIC_KEY"
@@ -133,19 +133,13 @@ export default server({
 
     recipe("firewall", [ufw.rule("allow", firewallTcpPorts), ufw.enabled()]),
 
-    recipe(
-      "ssh-hardening",
-      [
-        sshd.port(2222),
-        sshd.config({
-          PasswordAuthentication: "no",
-          PermitRootLogin: "no",
-        }),
-      ],
-      {
-        signals: [service.restart("sshd")],
-      }
-    ),
+    recipe("ssh-hardening", [
+      sshd.port(2222),
+      sshd.config({
+        PasswordAuthentication: "no",
+        PermitRootLogin: "no",
+      }),
+    ]),
 
     recipe("kernel-hardening", [
       sysctl.set("fs.protected_hardlinks", "1"),
@@ -256,7 +250,7 @@ Empfohlener Ablauf:
 Key concepts:
 
 - **Modules** -- each item in `run` is a module. A module checks the current server state and applies changes only when needed (idempotent).
-- **Recipes** -- `recipe()` groups related modules under a name. If any module in the group changes something, signals fire after the group completes (e.g. `service.restart("sshd")`).
+- **Recipes** -- `recipe()` groups related modules under a name. If any module in the group changes something, signals fire after the group completes.
 - **Signals** -- actions that run after a recipe when at least one module in it made a change. Useful for reloading services.
 - **Env** -- values in the `env` field are available in template files as `{{KEY}}`. See [Environment Variables](#environment-variables) below.
 
