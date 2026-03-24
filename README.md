@@ -2,115 +2,92 @@
 
 [Homepage](https://paratix.oss.sebastian-software.com) · [GitHub](https://github.com/sebastian-software/paratix)
 
-Paratix is a CLI tool that configures VPS servers over SSH using TypeScript playbooks. Each step checks its target state before acting — running a playbook twice does nothing on an already-configured server.
+Paratix is an idempotent server automation tool for people who want the control of code without the overhead of a larger infrastructure platform. You describe the desired state of a VPS in TypeScript, run it over SSH, and Paratix makes only the changes that are actually needed.
 
-## Packages
+It is designed for operators, developers, and small teams who want reliable server setup with a modern developer experience. Playbooks are regular `.ts` files, so you get type safety, refactoring support, editor tooling, and a workflow that fits naturally into a JavaScript or TypeScript stack.
 
-This monorepo contains two packages:
+If you already know tools like Ansible, the core idea will feel familiar. The difference is that Paratix focuses on a compact TypeScript-first workflow for SSH-based VPS management, with explicit bootstrap support, resilient reconnect handling, and readable run output.
 
-| Package                                     | Description                             |
-| ------------------------------------------- | --------------------------------------- |
-| [paratix](./packages/paratix)               | Idempotent VPS setup tool in TypeScript |
-| [create-paratix](./packages/create-paratix) | Scaffold a new Paratix server project   |
+## Features
 
-## Quickstart
+- **Idempotent by default**: every module checks current state before it changes anything.
+- **TypeScript-native workflow**: write real `.ts` playbooks with types, imports, conditions, and editor support.
+- **SSH-aware orchestration**: Paratix reconnects across SSH port changes and reboots when modules require it.
+- **Practical server hardening**: firewall, SSH, sysctl, service, package, file, and user management are built in.
+- **Readable execution model**: recipes, signals, and checkpoints keep larger playbooks structured and predictable.
+- **Bootstrap support for real servers**: scaffold a hardened first-run flow and continue from a dedicated admin user.
+
+## Usage
+
+For most users, the fastest way to start is the scaffold:
 
 ```bash
-# Scaffold a new server config
 pnpm create paratix my-server
-
-# Apply it
-paratix apply ./my-server.ts
+cd my-server
+pnpm apply:dry
+pnpm apply --first-run
+pnpm apply
 ```
 
-## Example playbook
+The scaffold gives you a ready-to-edit `server.ts`, a `files/` directory for templates, and a project setup that runs directly with `tsx`. The first run is designed for bootstrapping and hardening a fresh server; later runs continue on the hardened baseline.
+
+If you want to start from the package directly, install `paratix` and write a playbook like this:
 
 ```typescript
 import { server } from "paratix"
-import { file, hostname, package, service } from "paratix/modules"
+import { hostname, package as pkg, service } from "paratix/modules"
 
 export default server({
-  name: "vps-01",
-  host: "1.2.3.4",
-  ssh: { user: "root", ports: [22], privateKey: "~/.ssh/id_ed25519" },
+  name: "web-01",
+  host: "10.0.0.1",
+  ssh: {
+    user: "root",
+    ports: [22],
+    privateKey: "~/.ssh/id_ed25519",
+  },
   run: [
-    hostname.set("vps-01"),
-    package.installed("nginx", "fail2ban"),
-    package.upgrade("2024-03-10"),
-    file.template("/etc/nginx/nginx.conf", "./files/nginx.tmpl.conf"),
+    hostname.set("web-01"),
+    pkg.update("2026-03-01"),
+    pkg.installed("nginx", "curl"),
+    service.enabled("nginx"),
     service.running("nginx"),
   ],
 })
 ```
 
-## Features
+Apply it with:
 
-- **Idempotent** — every module checks current state before making changes
-- **SSH-resilient** — reconnects automatically when a step changes the SSH port or triggers a reboot
-- **TypeScript-native** — playbooks are plain `.ts` files with full type checking and editor support
-- **Template system** — deploy config files with `{{key}}` variable substitution from the env
-- **Recipes** — group modules with optional signals (e.g. restart a service only when its config changed)
-
-## Modules
-
-| Module     | What it does                                                                        |
-| ---------- | ----------------------------------------------------------------------------------- |
-| `apt`      | Debian-specific: add repositories, import GPG keys, pre-seed debconf, dist-upgrade  |
-| `archive`  | Extract tar and zip archives, optionally upload from local                          |
-| `command`  | Run a shell command (with optional idempotency check)                               |
-| `cron`     | Add, update, or remove crontab entries                                              |
-| `download` | Download files from HTTP/HTTPS URLs with checksum verification                      |
-| `file`     | Copy files, render templates, manage lines/blocks, set permissions                  |
-| `git`      | Clone or update a Git repository to a specific ref                                  |
-| `group`    | Create and remove system groups                                                     |
-| `hostname` | Set the server hostname                                                             |
-| `package`  | Install/remove packages, refresh lists, run upgrades (auto-detects apt/dnf/yum/apk) |
-| `service`  | Start, stop, enable, disable systemd services                                       |
-| `ssh`      | Manage `authorized_keys` and `known_hosts`                                          |
-| `sshd`     | Change SSH port, set `sshd_config` options                                          |
-| `system`   | Reboot the server with automatic reconnect, read system uptime                      |
-| `systemd`  | Deploy systemd unit files and reload the daemon                                     |
-| `ufw`      | Add firewall rules, enable UFW                                                      |
-| `user`     | Create and remove user accounts                                                     |
-
-Additional modules in the spec (not yet implemented): `compose`, `sysctl`, `mount`, `rsync`, `op`, `net`, `script`.
-
-## CLI options
-
+```bash
+paratix apply server.ts
 ```
+
+Useful flags:
+
+```text
 paratix apply <file> [options]
 
 Options:
-  --dry-run                     Check state only, do not apply changes
-  --env <key=value>             Set an env variable (repeatable)
-  --env-file <path>             Load env variables from a dotenv file
-  --reconnect-timeout <seconds> SSH reconnect timeout in seconds (default: 300)
+  --dry-run
+  --env <key=value>
+  --env-file <path>
+  --first-run
+  --reconnect-timeout <seconds>
+  --verbose
 ```
 
-## Built-in functions
+## Packages
 
-These are imported from `paratix` alongside `server` and `recipe`:
+This repository contains two user-facing packages:
 
-| Function                      | Description                                        |
-| ----------------------------- | -------------------------------------------------- |
-| `assert(condition, message)`  | Abort if a condition on the env is false           |
-| `debug(message)`              | Print a message during execution                   |
-| `fail(message)`               | Unconditionally abort with a message               |
-| `pause(message?)`             | Wait for user confirmation before continuing       |
-| `when(condition, ...modules)` | Run modules only if a condition on the env is true |
+| Package                                     | Purpose                                                          |
+| ------------------------------------------- | ---------------------------------------------------------------- |
+| [paratix](./packages/paratix)               | The CLI and TypeScript API for writing and applying playbooks    |
+| [create-paratix](./packages/create-paratix) | The project scaffold for bootstrapping a new Paratix server repo |
 
-## Development
+If you are starting on GitHub, use this README as the overview and then jump into the package README that matches your entry point:
 
-```bash
-pnpm install
-pnpm build
-pnpm test
-```
-
-Additional scripts: `pnpm lint`, `pnpm format`, `pnpm agent:check` (lint + format check + typecheck + test).
-
-For the full review path including real SSH integration tests, use
-`pnpm agent:check:integration`.
+- [packages/paratix/README.md](./packages/paratix/README.md)
+- [packages/create-paratix/README.md](./packages/create-paratix/README.md)
 
 ## License
 
