@@ -20,7 +20,7 @@ The result is a practical server automation tool with a compact mental model: mo
 - **Structured orchestration**: recipes and signals keep service reloads and grouped changes explicit.
 - **Declarative host guards**: gate modules on package, command, file, directory, symlink, or socket state without embedding shell checks in strings.
 - **Strong bootstrap story**: supports explicit first-run flows and strict host-key handling.
-- **Practical built-in modules**: packages, files, services, users, SSH, firewall, systemd, sysctl, mount, rsync, and more.
+- **Practical built-in modules**: packages, files, services, users, SSH, firewall, systemd, sysctl, swap, mount, rsync, and more.
 
 ## Getting Started
 
@@ -97,6 +97,10 @@ Signals are deferred side effects such as `service.reload(...)` or `service.rest
 ### Guards
 
 Paratix also supports declarative host-state guards. Use `when.packageInstalled(...)`, `when.commandExists(...)`, `when.fileExists(...)`, `when.pathExists(...)`, `when.symlinkExists(...)`, or `when.socketExists(...)` and their inverted forms to gate modules or recipes on remote host state without shell-heavy playbooks.
+
+### Swap
+
+Paratix can also manage file-backed swap directly. Use `swap.file(...)` to provision and persist a swap file, then tune common memory behaviour with `swap.swappiness(...)` or `swap.vfsCachePressure(...)`.
 
 ## CLI
 
