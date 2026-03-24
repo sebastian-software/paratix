@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.4.0](https://github.com/sebastian-software/paratix/compare/paratix-v0.3.0...paratix-v0.4.0) (2026-03-24)
+
+
+### Features
+
+* **paratix:** add host-state guards and ufw disable module ([29e27d0](https://github.com/sebastian-software/paratix/commit/29e27d06a233d8757d9a028e0e8fb0d8c8fc5391))
+
 ## [0.3.0](https://github.com/sebastian-software/paratix/compare/paratix-v0.2.0...paratix-v0.3.0) (2026-03-24)
 
 
