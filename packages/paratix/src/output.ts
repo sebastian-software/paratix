@@ -171,6 +171,7 @@ export function resetLiveOutputForTests(): void {
  * @param name - The recipe or server name to display.
  */
 export function printRecipeHeader(name: string): void {
+  stopAnimatedModuleLine()
   const header = pc.bold(pc.blue(`[${name}]`))
   console.log(`\n${getRecipeHeaderIndent()}${header}`)
 }

@@ -305,6 +305,7 @@ async function runRecipeModule(
     if (dryRun) return await runDryRunRecipeModule(recipeModule, environment, ssh, verbose)
 
     // check() iterates all child modules; apply() checks them again internally via executeModules().
+    startModuleSpinner(recipeModule.name)
     const checkResult = await recipeModule.check(ssh, environment)
     if (checkResult === "ok") {
       printRecipeHeader(recipeModule.name)

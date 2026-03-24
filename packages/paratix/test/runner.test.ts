@@ -279,6 +279,43 @@ describe("runPlaybook reconnect failure propagation", () => {
     expect(subsequentModule.check).not.toHaveBeenCalled()
     process.exitCode = 0
   })
+
+  it("starts a spinner for a top-level recipe before running its check", async () => {
+    const capturedConfigs: unknown[] = []
+    const outputModule = await import("../src/output.js")
+    const startModuleSpinner = vi
+      .spyOn(outputModule, "startModuleSpinner")
+      .mockImplementation(() => {
+        void 0
+      })
+
+    vi.doMock("../src/ssh.js", () => ({
+      shellQuote: (value: string) => `'${value}'`,
+      SshConnectionImpl: makeMockSshClass(capturedConfigs),
+    }))
+
+    const { runPlaybook } = await import("../src/runner.js")
+    const childModule: Module = {
+      apply: vi.fn().mockResolvedValue({ status: "ok" }),
+      check: vi.fn().mockResolvedValue("ok"),
+      name: "first-child",
+    }
+
+    const definition: ServerDefinition = {
+      host: "1.2.3.4",
+      name: "test-server",
+      run: [createRecipe("bootstrap", [childModule])],
+      ssh: {
+        ports: [22],
+        privateKey: "~/.ssh/id",
+        user: "root",
+      },
+    }
+
+    await runPlaybook(definition)
+
+    expect(startModuleSpinner).toHaveBeenCalledWith("bootstrap")
+  })
 })
 
 describe("runPlaybook meta validation", () => {

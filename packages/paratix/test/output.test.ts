@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import {
   printCommandFailure,
   printModuleResult,
+  printRecipeHeader,
   printVerboseCommandError,
   renderCliHeader,
   resetLiveOutputForTests,
@@ -71,6 +72,66 @@ describe("printModuleResult", () => {
       expect(consoleLogs).toHaveLength(0)
       expect(writes.some((entry) => entry.includes("running"))).toBe(true)
       expect(writes.some((entry) => entry.includes("changed"))).toBe(true)
+    } finally {
+      Object.defineProperty(process.stdout, "isTTY", {
+        configurable: true,
+        value: originalIsTTY,
+      })
+      Object.defineProperty(process.stdout, "clearLine", {
+        configurable: true,
+        value: originalClearLine,
+      })
+      Object.defineProperty(process.stdout, "cursorTo", {
+        configurable: true,
+        value: originalCursorTo,
+      })
+    }
+  })
+})
+
+describe("printRecipeHeader", () => {
+  let consoleLogs: string[]
+
+  beforeEach(() => {
+    consoleLogs = []
+    vi.spyOn(console, "log").mockImplementation((...args: unknown[]) => {
+      consoleLogs.push(args.map(String).join(" "))
+    })
+  })
+
+  afterEach(() => {
+    resetLiveOutputForTests()
+    vi.restoreAllMocks()
+  })
+
+  it("stops an active spinner before printing the recipe header", () => {
+    const writes: string[] = []
+    vi.spyOn(process.stdout, "write").mockImplementation(((chunk: string | Uint8Array) => {
+      writes.push(String(chunk))
+      return true
+    }) as typeof process.stdout.write)
+    const originalIsTTY = process.stdout.isTTY
+    const originalClearLine = bindOptionalStdoutMethod("clearLine")
+    const originalCursorTo = bindOptionalStdoutMethod("cursorTo")
+
+    Object.defineProperty(process.stdout, "isTTY", { configurable: true, value: true })
+    Object.defineProperty(process.stdout, "clearLine", {
+      configurable: true,
+      value: vi.fn(() => true),
+    })
+    Object.defineProperty(process.stdout, "cursorTo", {
+      configurable: true,
+      value: vi.fn(() => true),
+    })
+
+    try {
+      startModuleSpinner("firewall")
+      printRecipeHeader("firewall")
+      printModuleResult("firewall", "ok")
+
+      expect(consoleLogs.join("\n")).toContain("[firewall]")
+      expect(writes.some((entry) => entry.includes("running"))).toBe(true)
+      expect(writes.some((entry) => entry.includes("ok"))).toBe(false)
     } finally {
       Object.defineProperty(process.stdout, "isTTY", {
         configurable: true,
