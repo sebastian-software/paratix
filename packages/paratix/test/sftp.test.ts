@@ -669,25 +669,17 @@ describe("sftpUpload", () => {
     await expect(promise).resolves.toBeUndefined()
   })
 
-  it("does not resolve early when the remote writeStream emits close before finish", async () => {
+  it("resolves when the remote writeStream emits close without finish", async () => {
     const { sftp, sftpWriteStream } = makeSftpSession()
     const client = makeClientMock(sftp)
 
     const localReadStream = makeMockStream()
     vi.mocked(createReadStream).mockReturnValue(localReadStream as unknown as ReadStream)
 
-    let settled = false
-    const promise = sftpUpload(client, "/local/file.txt", "/remote/file.txt").then(() => {
-      settled = true
-    })
+    const promise = sftpUpload(client, "/local/file.txt", "/remote/file.txt")
 
     sftpWriteStream.emit("close")
-    await Promise.resolve()
-    expect(settled).toBe(false)
-
-    sftpWriteStream.emit("finish")
     await expect(promise).resolves.toBeUndefined()
-    expect(settled).toBe(true)
   })
 
   // ---------------------------------------------------------------------------

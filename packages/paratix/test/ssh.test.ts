@@ -192,6 +192,46 @@ function makeSshInstance(
   return new SshConnectionImpl(overrides.host ?? "1.2.3.4", config)
 }
 
+function makeWriteFileExecSpy(
+  executedCommands: string[],
+  tempPath: string
+): ReturnType<typeof vi.fn> {
+  return vi
+    .fn()
+    .mockImplementationOnce((_command: string, callback: ExecCallback) => {
+      const stream = makeStream()
+      executedCommands.push(_command)
+      callback(undefined, stream)
+      stream.emit("data", Buffer.from(tempPath))
+      stream.emit("close", 0)
+    })
+    .mockImplementationOnce((_command: string, callback: ExecCallback) => {
+      const stream = makeStream()
+      executedCommands.push(_command)
+      callback(undefined, stream)
+      stream.emit("close", 0)
+    })
+    .mockImplementationOnce((_command: string, callback: ExecCallback) => {
+      const stream = makeStream()
+      executedCommands.push(_command)
+      callback(undefined, stream)
+      stream.emit("close", 0)
+    })
+    .mockImplementationOnce((_command: string, callback: ExecCallback) => {
+      const stream = makeStream()
+      executedCommands.push(_command)
+      callback(undefined, stream)
+      stream.emit("data", Buffer.from("11"))
+      stream.emit("close", 0)
+    })
+    .mockImplementationOnce((_command: string, callback: ExecCallback) => {
+      const stream = makeStream()
+      executedCommands.push(_command)
+      callback(undefined, stream)
+      stream.emit("close", 0)
+    })
+}
+
 function makeSshInstanceWithAgent(
   overrides: {
     agentForward?: boolean
@@ -233,6 +273,7 @@ describe("SshConnectionImpl", () => {
     // so that privateKey.fill(0) in the finally-block does not throw a TypeError.
     const fsp = await import("node:fs/promises")
     vi.mocked(fsp.readFile).mockResolvedValue(Buffer.from("fake-private-key") as never)
+    vi.mocked(fsp.stat).mockResolvedValue({ size: 11 } as never)
   })
 
   afterEach(() => {
@@ -1506,7 +1547,7 @@ describe("SshConnectionImpl", () => {
           stream.emit("data", Buffer.from(tempPath))
           stream.emit("close", 0)
         })
-        .mockImplementation((_command: string, callback: ExecCallback) => {
+        .mockImplementationOnce((_command: string, callback: ExecCallback) => {
           const stream = makeStream()
           executedCommands.push(_command)
           callback(undefined, stream)
@@ -1518,7 +1559,14 @@ describe("SshConnectionImpl", () => {
           callback(undefined, stream)
           stream.emit("close", 0)
         })
-        .mockImplementation((_command: string, callback: ExecCallback) => {
+        .mockImplementationOnce((_command: string, callback: ExecCallback) => {
+          const stream = makeStream()
+          executedCommands.push(_command)
+          callback(undefined, stream)
+          stream.emit("data", Buffer.from("11"))
+          stream.emit("close", 0)
+        })
+        .mockImplementationOnce((_command: string, callback: ExecCallback) => {
           const stream = makeStream()
           executedCommands.push(_command)
           callback(undefined, stream)
@@ -1545,7 +1593,9 @@ describe("SshConnectionImpl", () => {
       expect(executedCommands[2]).toContain("'0600'")
       expect(executedCommands[2]).toContain('chown "$target_owner" "$target_temp"')
       expect(executedCommands[2]).toContain(`'${remotePath}'`)
-      expect(executedCommands[3]).toBe(`rm -f '${tempPath}'`)
+      expect(executedCommands[3]).toContain("%s")
+      expect(executedCommands[3]).toContain(remotePath)
+      expect(executedCommands[4]).toBe(`rm -f '${tempPath}'`)
       expect(vi.mocked(sftpUpload)).toHaveBeenCalledWith(client, "/local/file.txt", tempPath)
     })
 
@@ -1565,12 +1615,6 @@ describe("SshConnectionImpl", () => {
           stream.emit("data", Buffer.from(tempPath))
           stream.emit("close", 0)
         })
-        .mockImplementation((_command: string, callback: ExecCallback) => {
-          const stream = makeStream()
-          executedCommands.push(_command)
-          callback(undefined, stream)
-          stream.emit("close", 0)
-        })
         .mockImplementationOnce((_command: string, callback: ExecCallback) => {
           const stream = makeStream()
           executedCommands.push(_command)
@@ -1587,9 +1631,10 @@ describe("SshConnectionImpl", () => {
           const stream = makeStream()
           executedCommands.push(_command)
           callback(undefined, stream)
+          stream.emit("data", Buffer.from("11"))
           stream.emit("close", 0)
         })
-        .mockImplementation((_command: string, callback: ExecCallback) => {
+        .mockImplementationOnce((_command: string, callback: ExecCallback) => {
           const stream = makeStream()
           executedCommands.push(_command)
           callback(undefined, stream)
@@ -1639,7 +1684,15 @@ describe("SshConnectionImpl", () => {
           callback(undefined, stream)
           stream.emit("close", 0)
         })
-        // Fourth call: rm -f (cleanup in finally)
+        // Fourth call: stat size verification
+        .mockImplementationOnce((_command: string, callback: ExecCallback) => {
+          const stream = makeStream()
+          executedCommands.push(_command)
+          callback(undefined, stream)
+          stream.emit("data", Buffer.from("11"))
+          stream.emit("close", 0)
+        })
+        // Fifth call: rm -f (cleanup in finally)
         .mockImplementationOnce((_command: string, callback: ExecCallback) => {
           const stream = makeStream()
           executedCommands.push(_command)
@@ -1693,7 +1746,15 @@ describe("SshConnectionImpl", () => {
           callback(undefined, stream)
           stream.emit("close", 0)
         })
-        // Fourth call: rm -f (cleanup in finally)
+        // Fourth call: stat size verification
+        .mockImplementationOnce((_command: string, callback: ExecCallback) => {
+          const stream = makeStream()
+          executedCommands.push(_command)
+          callback(undefined, stream)
+          stream.emit("data", Buffer.from("11"))
+          stream.emit("close", 0)
+        })
+        // Fifth call: rm -f (cleanup in finally)
         .mockImplementationOnce((_command: string, callback: ExecCallback) => {
           const stream = makeStream()
           executedCommands.push(_command)
@@ -1756,6 +1817,60 @@ describe("SshConnectionImpl", () => {
       expect(cleanupCommand).toBeDefined()
       expect(cleanupCommand).toContain(tempPath)
     })
+
+    it("fails when the finalized remote file size does not match the local source", async () => {
+      const { sftpUpload } = await import("../src/sftp.js")
+      vi.mocked(sftpUpload).mockResolvedValue()
+      vi.mocked(stat).mockResolvedValueOnce({ size: 42 } as never)
+
+      const tempPath = "/remote/paratix-upload.ABCDEF"
+      const executedCommands: string[] = []
+
+      const execSpy = vi
+        .fn()
+        .mockImplementationOnce((_command: string, callback: ExecCallback) => {
+          const stream = makeStream()
+          executedCommands.push(_command)
+          callback(undefined, stream)
+          stream.emit("data", Buffer.from(tempPath))
+          stream.emit("close", 0)
+        })
+        .mockImplementationOnce((_command: string, callback: ExecCallback) => {
+          const stream = makeStream()
+          executedCommands.push(_command)
+          callback(undefined, stream)
+          stream.emit("close", 0)
+        })
+        .mockImplementationOnce((_command: string, callback: ExecCallback) => {
+          const stream = makeStream()
+          executedCommands.push(_command)
+          callback(undefined, stream)
+          stream.emit("close", 0)
+        })
+        .mockImplementationOnce((_command: string, callback: ExecCallback) => {
+          const stream = makeStream()
+          executedCommands.push(_command)
+          callback(undefined, stream)
+          stream.emit("data", Buffer.from("0"))
+          stream.emit("close", 0)
+        })
+        .mockImplementationOnce((_command: string, callback: ExecCallback) => {
+          const stream = makeStream()
+          executedCommands.push(_command)
+          callback(undefined, stream)
+          stream.emit("close", 0)
+        })
+
+      const client = makeClientWithExecSpy(execSpy)
+      const ssh = makeConnectedSsh(client)
+
+      await expect(ssh.uploadFile("/local/file.txt", "/remote/file.txt")).rejects.toThrow(
+        "remote file size mismatch after upload/finalize"
+      )
+
+      expect(executedCommands[3]).toContain("stat -c '%s'")
+      expect(executedCommands[4]).toContain("rm -f")
+    })
   })
 
   // -------------------------------------------------------------------------
@@ -1771,21 +1886,7 @@ describe("SshConnectionImpl", () => {
       const remotePath = "/etc/systemd/system/my-app.service"
       const executedCommands: string[] = []
 
-      const execSpy = vi
-        .fn()
-        .mockImplementationOnce((_command: string, callback: ExecCallback) => {
-          const stream = makeStream()
-          executedCommands.push(_command)
-          callback(undefined, stream)
-          stream.emit("data", Buffer.from(tempPath))
-          stream.emit("close", 0)
-        })
-        .mockImplementation((_command: string, callback: ExecCallback) => {
-          const stream = makeStream()
-          executedCommands.push(_command)
-          callback(undefined, stream)
-          stream.emit("close", 0)
-        })
+      const execSpy = makeWriteFileExecSpy(executedCommands, tempPath)
 
       const client = makeClientWithExecSpy(execSpy)
       const ssh = makeConnectedSsh(client, { user: "deploy" })
@@ -1807,8 +1908,7 @@ describe("SshConnectionImpl", () => {
       expect(executedCommands[2]).toContain("'0600'")
       expect(executedCommands[2]).toContain('chown "$target_owner" "$target_temp"')
       expect(executedCommands[2]).toContain(`'${remotePath}'`)
-      expect(executedCommands[3]).toMatch(/^sudo bash -c /v)
-      expect(executedCommands[3]).toContain("[ -s ")
+      expect(executedCommands[3]).toContain("stat -c")
       expect(executedCommands[3]).toContain(remotePath)
       expect(executedCommands[4]).toBe(`rm -f '${tempPath}'`)
       expect(vi.mocked(sftpUpload)).toHaveBeenCalledOnce()
@@ -1821,21 +1921,7 @@ describe("SshConnectionImpl", () => {
       const tempPath = "/remote/paratix-write.ABCDEF"
       const executedCommands: string[] = []
 
-      const execSpy = vi
-        .fn()
-        .mockImplementationOnce((_command: string, callback: ExecCallback) => {
-          const stream = makeStream()
-          executedCommands.push(_command)
-          callback(undefined, stream)
-          stream.emit("data", Buffer.from(tempPath))
-          stream.emit("close", 0)
-        })
-        .mockImplementation((_command: string, callback: ExecCallback) => {
-          const stream = makeStream()
-          executedCommands.push(_command)
-          callback(undefined, stream)
-          stream.emit("close", 0)
-        })
+      const execSpy = makeWriteFileExecSpy(executedCommands, tempPath)
 
       const client = makeClientWithExecSpy(execSpy)
       const ssh = makeConnectedSsh(client)
@@ -1856,21 +1942,7 @@ describe("SshConnectionImpl", () => {
       const tempPath = "/remote/paratix-write.ABCDEF"
       const executedCommands: string[] = []
 
-      const execSpy = vi
-        .fn()
-        .mockImplementationOnce((_command: string, callback: ExecCallback) => {
-          const stream = makeStream()
-          executedCommands.push(_command)
-          callback(undefined, stream)
-          stream.emit("data", Buffer.from(tempPath))
-          stream.emit("close", 0)
-        })
-        .mockImplementation((_command: string, callback: ExecCallback) => {
-          const stream = makeStream()
-          executedCommands.push(_command)
-          callback(undefined, stream)
-          stream.emit("close", 0)
-        })
+      const execSpy = makeWriteFileExecSpy(executedCommands, tempPath)
 
       const client = makeClientWithExecSpy(execSpy)
       const ssh = makeConnectedSsh(client)
@@ -1897,21 +1969,7 @@ describe("SshConnectionImpl", () => {
       const tempPath = "/remote/paratix-write.ABCDEF"
       const executedCommands: string[] = []
 
-      const execSpy = vi
-        .fn()
-        .mockImplementationOnce((_command: string, callback: ExecCallback) => {
-          const stream = makeStream()
-          executedCommands.push(_command)
-          callback(undefined, stream)
-          stream.emit("data", Buffer.from(tempPath))
-          stream.emit("close", 0)
-        })
-        .mockImplementation((_command: string, callback: ExecCallback) => {
-          const stream = makeStream()
-          executedCommands.push(_command)
-          callback(undefined, stream)
-          stream.emit("close", 0)
-        })
+      const execSpy = makeWriteFileExecSpy(executedCommands, tempPath)
 
       const client = makeClientWithExecSpy(execSpy)
       const ssh = makeConnectedSsh(client)
@@ -1928,6 +1986,104 @@ describe("SshConnectionImpl", () => {
       const mvIndex = executedCommands.findIndex((cmd) => /(?:^| )mv /v.test(cmd))
       const chmodIndex = executedCommands.findIndex((cmd) => cmd.includes("chmod"))
       expect(chmodIndex).toBeLessThan(mvIndex)
+    })
+
+    it("uses a privileged destination temp path for the shell fallback instead of /tmp for non-root users", async () => {
+      const { sftpUpload } = await import("../src/sftp.js")
+      vi.mocked(sftpUpload).mockResolvedValue()
+
+      const initialTempPath = "/tmp/paratix-write.ABCDEF"
+      const fallbackTempPath = "/etc/apt/sources.list.d/paratix-write.FALLBACK"
+      const remotePath = "/etc/apt/sources.list.d/docker.list"
+      const executedCommands: string[] = []
+
+      const execSpy = vi
+        .fn()
+        .mockImplementationOnce((_command: string, callback: ExecCallback) => {
+          const stream = makeStream()
+          executedCommands.push(_command)
+          callback(undefined, stream)
+          stream.emit("data", Buffer.from(initialTempPath))
+          stream.emit("close", 0)
+        })
+        .mockImplementationOnce((_command: string, callback: ExecCallback) => {
+          const stream = makeStream()
+          executedCommands.push(_command)
+          callback(undefined, stream)
+          stream.emit("close", 0)
+        })
+        .mockImplementationOnce((_command: string, callback: ExecCallback) => {
+          const stream = makeStream()
+          executedCommands.push(_command)
+          callback(undefined, stream)
+          stream.emit("close", 0)
+        })
+        .mockImplementationOnce((_command: string, callback: ExecCallback) => {
+          const stream = makeStream()
+          executedCommands.push(_command)
+          callback(undefined, stream)
+          stream.emit("data", Buffer.from("0"))
+          stream.emit("close", 0)
+        })
+        .mockImplementationOnce((_command: string, callback: ExecCallback) => {
+          const stream = makeStream()
+          executedCommands.push(_command)
+          callback(undefined, stream)
+          stream.emit("data", Buffer.from(fallbackTempPath))
+          stream.emit("close", 0)
+        })
+        .mockImplementationOnce((_command: string, callback: ExecCallback) => {
+          const stream = makeStream()
+          executedCommands.push(_command)
+          callback(undefined, stream)
+          stream.emit("close", 0)
+        })
+        .mockImplementationOnce((_command: string, callback: ExecCallback) => {
+          const stream = makeStream()
+          executedCommands.push(_command)
+          callback(undefined, stream)
+          stream.emit("close", 0)
+        })
+        .mockImplementationOnce((_command: string, callback: ExecCallback) => {
+          const stream = makeStream()
+          executedCommands.push(_command)
+          callback(undefined, stream)
+          stream.emit("close", 0)
+        })
+        .mockImplementationOnce((_command: string, callback: ExecCallback) => {
+          const stream = makeStream()
+          executedCommands.push(_command)
+          callback(undefined, stream)
+          stream.emit("close", 0)
+        })
+        .mockImplementationOnce((_command: string, callback: ExecCallback) => {
+          const stream = makeStream()
+          executedCommands.push(_command)
+          callback(undefined, stream)
+          stream.emit("data", Buffer.from("11"))
+          stream.emit("close", 0)
+        })
+        .mockImplementationOnce((_command: string, callback: ExecCallback) => {
+          const stream = makeStream()
+          executedCommands.push(_command)
+          callback(undefined, stream)
+          stream.emit("close", 0)
+        })
+
+      const client = makeClientWithExecSpy(execSpy)
+      const ssh = makeConnectedSsh(client, { user: "deploy" })
+      ;(ssh as unknown as Record<string, unknown>).cachedSudoPassword = null
+      ;(ssh as unknown as Record<string, unknown>).sudoReady = true
+
+      await expect(
+        ssh.writeFile(remotePath, "hello world", { mode: "0644" })
+      ).resolves.toBeUndefined()
+
+      expect(executedCommands[4]).toMatch(/^sudo bash -c /v)
+      expect(executedCommands[4]).toContain("/etc/apt/sources.list.d/paratix-write.XXXXXX")
+      expect(executedCommands[5]).toContain(fallbackTempPath)
+      expect(executedCommands[5]).not.toContain(initialTempPath)
+      expect(executedCommands[10]).toBe(`rm -f '${initialTempPath}'`)
     })
   })
 

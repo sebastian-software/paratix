@@ -43,7 +43,7 @@ function createTransferSettlement(options: {
  * Wire up stream event handlers with a timeout guard, then pipe.
  *
  * @param options - Stream piping options including timeout configuration.
- * @param options.completionEvent - Stream event that marks a successful transfer.
+ * @param options.completionEvents - Stream events that mark a successful transfer.
  * @param options.readStream - The source stream to read from.
  * @param options.reject - Promise reject callback.
  * @param options.resolve - Promise resolve callback.
@@ -53,7 +53,7 @@ function createTransferSettlement(options: {
  * @param options.writeStream - The destination stream to write to.
  */
 function wireStreams(options: {
-  completionEvent?: "close" | "finish"
+  completionEvents?: Array<"close" | "finish">
   readStream: Readable
   reject: (reason: Error) => void
   resolve: () => void
@@ -63,7 +63,7 @@ function wireStreams(options: {
   writeStream: Writable
 }): void {
   const {
-    completionEvent = "finish",
+    completionEvents = ["finish"],
     readStream,
     reject,
     resolve,
@@ -87,9 +87,11 @@ function wireStreams(options: {
     sftp,
   })
 
-  writeStream.on(completionEvent, () => {
-    settlement.resolveOnce()
-  })
+  for (const completionEvent of completionEvents) {
+    writeStream.on(completionEvent, () => {
+      settlement.resolveOnce()
+    })
+  }
   writeStream.on("error", (writeError: Error) => {
     readStream.destroy()
     if (typeof writeStream.destroy === "function") writeStream.destroy()
@@ -146,7 +148,7 @@ export async function sftpDownload(
       shouldCleanupTemporaryFile = true
 
       wireStreams({
-        completionEvent: "finish",
+        completionEvents: ["finish"],
         readStream,
         reject: rejectWithCleanup,
         resolve: () => {
@@ -198,7 +200,7 @@ export async function sftpUpload(
       const writeStream = sftp.createWriteStream(remotePath, { mode: 0o600 })
 
       wireStreams({
-        completionEvent: "finish",
+        completionEvents: ["close", "finish"],
         readStream,
         reject,
         resolve,

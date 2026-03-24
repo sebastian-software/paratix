@@ -313,12 +313,15 @@ export class SshConnectionImpl implements SshConnection {
     options?: { mode?: string }
   ): Promise<void> {
     const client = this.ensureClient()
+    const localFileStats = await stat(localPath)
+    const localFileSize = localFileStats.size
     const temporaryPath = await this.createRemoteWritableTempPath(remotePath, "paratix-upload")
     const temporaryMode = options?.mode ?? "0600"
     try {
       await sftpUpload(client, localPath, temporaryPath)
       await this.setRemoteTempMode(temporaryPath, temporaryMode)
       await this.finalizeRemoteTempFile(temporaryPath, remotePath, temporaryMode)
+      await this.assertRemoteFileSize(remotePath, localFileSize)
     } finally {
       try {
         await this.cleanupRemoteTempFile(temporaryPath)
@@ -354,38 +357,101 @@ export class SshConnectionImpl implements SshConnection {
       remotePath,
       options as { mode?: string } | null | undefined
     )
+    const expectedSize = Buffer.byteLength(content, "utf8")
     try {
       // eslint-disable-next-line security/detect-non-literal-fs-filename
       writeFileSync(localTemporary, content, { mode: 0o600 })
       await sftpUpload(client, localTemporary, remoteTemporary)
       await this.setRemoteTempMode(remoteTemporary, temporaryMode)
       await this.finalizeRemoteTempFile(remoteTemporary, remotePath, temporaryMode)
-      await this.assertNonEmptyRemoteWrite(remotePath, content)
+      await this.ensureRemoteWriteFile({
+        content,
+        expectedSize,
+        mode: temporaryMode,
+        remotePath,
+      })
     } finally {
-      try {
-        // eslint-disable-next-line security/detect-non-literal-fs-filename
-        unlinkSync(localTemporary)
-      } catch {
-        // local cleanup is best-effort
-      }
-      try {
-        await this.cleanupRemoteTempFile(remoteTemporary)
-      } catch (cleanupError) {
-        process.stderr.write(
-          `Warning: failed to remove temp file ${remoteTemporary}: ${maskSecrets(String(cleanupError), this.buildSecrets())}\n`
-        )
-      }
+      await this.cleanupWriteFileTemporaryPaths(localTemporary, remoteTemporary)
     }
   }
 
-  private async assertNonEmptyRemoteWrite(remotePath: string, content: string): Promise<void> {
-    if (content.length === 0) return
-    const nonEmpty = await this.test(`[ -s ${shellQuote(remotePath)} ]`)
-    if (!nonEmpty) {
-      throw new Error(
-        `[ssh.writeFile: ${remotePath}] remote file is empty after upload/finalize; refusing successful write result`
+  private async assertRemoteFileSize(remotePath: string, expectedSize: number): Promise<void> {
+    const rawSize = await this.output(`stat -c '%s' ${shellQuote(remotePath)}`)
+    const actualSize = Number(rawSize.trim())
+
+    if (!Number.isFinite(actualSize)) {
+      throw new TypeError(
+        `[ssh.uploadFile: ${remotePath}] could not determine remote file size after upload`
       )
     }
+
+    if (actualSize !== expectedSize) {
+      throw new Error(
+        `[ssh.uploadFile: ${remotePath}] remote file size mismatch after upload/finalize; expected ${expectedSize} bytes, got ${actualSize}`
+      )
+    }
+  }
+
+  /* eslint-disable perfectionist/sort-classes -- writeFile recovery helpers stay grouped for this fix */
+  private async cleanupWriteFileTemporaryPaths(
+    localTemporary: string,
+    remoteTemporary: string
+  ): Promise<void> {
+    try {
+      // eslint-disable-next-line security/detect-non-literal-fs-filename
+      unlinkSync(localTemporary)
+    } catch {
+      // local cleanup is best-effort
+    }
+    try {
+      await this.cleanupRemoteTempFile(remoteTemporary)
+    } catch (cleanupError) {
+      process.stderr.write(
+        `Warning: failed to remove temp file ${remoteTemporary}: ${maskSecrets(String(cleanupError), this.buildSecrets())}\n`
+      )
+    }
+  }
+
+  private async cleanupPrivilegedRemoteTempFile(remotePath: string): Promise<void> {
+    await this.exec(`rm -f ${shellQuote(remotePath)}`, {
+      ignoreExitCode: true,
+      silent: true,
+    })
+  }
+
+  private async createRemotePrivilegedTempPathInDestination(
+    remotePath: string,
+    prefix: string
+  ): Promise<string> {
+    const directory = posix.dirname(remotePath)
+    const template = `${directory}/${prefix}.XXXXXX`
+    const path = await this.output(`mktemp ${shellQuote(template)}`)
+    return validateMktempPath(directory, path, prefix)
+  }
+
+  private async ensureRemoteWriteFile(options: {
+    content: string
+    expectedSize: number
+    mode: string
+    remotePath: string
+  }): Promise<void> {
+    const verification = await this.verifyRemoteWriteFile(options.remotePath, options.expectedSize)
+    if (verification === "matches") return
+
+    await this.rewriteRemoteFileViaShell(options.remotePath, options.content, options.mode)
+    const fallbackVerification = await this.verifyRemoteWriteFile(
+      options.remotePath,
+      options.expectedSize
+    )
+    if (fallbackVerification === "matches") return
+    if (fallbackVerification === "empty") {
+      throw new Error(
+        `[ssh.writeFile: ${options.remotePath}] remote file is empty after upload/finalize and shell fallback; refusing successful write result`
+      )
+    }
+    throw new Error(
+      `[ssh.writeFile: ${options.remotePath}] remote file size mismatch after upload/finalize and shell fallback; expected ${options.expectedSize} bytes`
+    )
   }
 
   private buildEnvPrefix(environment?: Record<string, string>): string {
@@ -844,6 +910,59 @@ trap - EXIT
     this.authMethod = "password"
     return true
   }
+
+  private async rewriteRemoteFileViaShell(
+    remotePath: string,
+    content: string,
+    mode: string
+  ): Promise<void> {
+    const remoteTemporary = await this.createRemotePrivilegedTempPathInDestination(
+      remotePath,
+      "paratix-write"
+    )
+    const encodedContent = Buffer.from(content, "utf8").toString("base64")
+
+    try {
+      await this.exec(
+        `printf '%s' ${shellQuote(encodedContent)} | base64 -d > ${shellQuote(remoteTemporary)}`,
+        { silent: true }
+      )
+      await this.exec(`chmod ${shellQuote(mode)} ${shellQuote(remoteTemporary)}`, { silent: true })
+      await this.finalizeRemoteTempFile(remoteTemporary, remotePath, mode)
+    } catch (error) {
+      const reason = error instanceof Error ? error.message : String(error)
+      throw new Error(`[ssh.writeFile: ${remotePath}] shell fallback write failed: ${reason}`, {
+        cause: error,
+      })
+    } finally {
+      try {
+        await this.cleanupPrivilegedRemoteTempFile(remoteTemporary)
+      } catch (cleanupError) {
+        process.stderr.write(
+          `Warning: failed to remove temp file ${remoteTemporary}: ${maskSecrets(String(cleanupError), this.buildSecrets())}\n`
+        )
+      }
+    }
+  }
+
+  private async verifyRemoteWriteFile(
+    remotePath: string,
+    expectedSize: number
+  ): Promise<"empty" | "matches" | "size-mismatch"> {
+    const rawSize = await this.output(`stat -c '%s' ${shellQuote(remotePath)}`)
+    const actualSize = Number(rawSize.trim())
+
+    if (!Number.isFinite(actualSize)) {
+      throw new TypeError(
+        `[ssh.writeFile: ${remotePath}] could not determine remote file size after upload/finalize`
+      )
+    }
+
+    if (expectedSize === 0 && actualSize === 0) return "matches"
+    if (actualSize === 0) return "empty"
+    return actualSize === expectedSize ? "matches" : "size-mismatch"
+  }
+  /* eslint-enable perfectionist/sort-classes */
 
   /**
    * Wrap a host-key verifier to pin the accepted key on first connection and
