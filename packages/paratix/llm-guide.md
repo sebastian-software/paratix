@@ -155,6 +155,17 @@ export default server({
 | ---------- | ----------------------------------------------------------------------------------------------- | ---------- |
 | `cron.job` | `(user: string, name: string, options: { job: string; state?: "absent" \| "present" }): Module` | Yes        |
 
+### `compose`
+
+| Method            | Signature                                                                                                            | Idempotent |
+| ----------------- | -------------------------------------------------------------------------------------------------------------------- | ---------- |
+| `compose.config`  | `(options: { content?: string; projectDirectory: string; runtime?: "docker" \| "podman"; src?: string }): Module`    | Yes        |
+| `compose.up`      | `(options: { projectDirectory: string; runtime?: "docker" \| "podman"; services?: string[] }): Module`               | Yes        |
+| `compose.down`    | `(options: { projectDirectory: string; runtime?: "docker" \| "podman" }): Module`                                    | Yes        |
+| `compose.pull`    | `(options: { projectDirectory: string; runtime?: "docker" \| "podman" }): Module`                                    | Partial    |
+| `compose.restart` | `(options: { projectDirectory: string; runtime?: "docker" \| "podman" }): Module`                                    | No         |
+| `compose.systemd` | `(options: { detached?: boolean; name?: string; projectDirectory: string; runtime?: "docker" \| "podman" }): Module` | Yes        |
+
 ### `download`
 
 | Method            | Signature                                                                                                                                                                     | Idempotent |

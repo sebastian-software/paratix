@@ -593,6 +593,7 @@ function expectedDockerUnit(dir: string, name: string): string {
   return [
     "[Unit]",
     `Description=Compose stack: ${name}`,
+    "Wants=network-online.target",
     "After=network-online.target docker.service",
     "Requires=docker.service",
     "",
@@ -600,8 +601,11 @@ function expectedDockerUnit(dir: string, name: string): string {
     "Type=oneshot",
     "RemainAfterExit=yes",
     `WorkingDirectory=${dir}`,
-    "ExecStart=/usr/bin/env docker compose up -d",
+    "ExecStart=/usr/bin/env docker compose up --remove-orphans",
     "ExecStop=/usr/bin/env docker compose down",
+    "TimeoutStartSec=0",
+    "StandardOutput=journal",
+    "StandardError=journal",
     "",
     "[Install]",
     "WantedBy=multi-user.target",
@@ -613,19 +617,37 @@ function expectedPodmanUnit(dir: string, name: string): string {
   return [
     "[Unit]",
     `Description=Compose stack: ${name}`,
+    "Wants=network-online.target",
     "After=network-online.target",
     "",
     "[Service]",
     "Type=oneshot",
     "RemainAfterExit=yes",
     `WorkingDirectory=${dir}`,
-    "ExecStart=/usr/bin/env podman compose up -d",
+    "ExecStart=/usr/bin/env podman compose up --remove-orphans",
     "ExecStop=/usr/bin/env podman compose down",
+    "TimeoutStartSec=0",
+    "StandardOutput=journal",
+    "StandardError=journal",
     "",
     "[Install]",
     "WantedBy=multi-user.target",
     "",
   ].join("\n")
+}
+
+function expectedDetachedDockerUnit(dir: string, name: string): string {
+  return expectedDockerUnit(dir, name).replace(
+    "ExecStart=/usr/bin/env docker compose up --remove-orphans",
+    "ExecStart=/usr/bin/env docker compose up -d --remove-orphans"
+  )
+}
+
+function expectedDetachedPodmanUnit(dir: string, name: string): string {
+  return expectedPodmanUnit(dir, name).replace(
+    "ExecStart=/usr/bin/env podman compose up --remove-orphans",
+    "ExecStart=/usr/bin/env podman compose up -d --remove-orphans"
+  )
 }
 
 const defaultServiceName = "compose-app"
@@ -809,6 +831,27 @@ describe("compose.systemd — apply", () => {
     expect(writtenFiles[0]?.content).toContain("After=network-online.target docker.service")
   })
 
+  it("uses detached compose up when detached is enabled", async () => {
+    const writtenFiles: Array<{ content: string; path: string }> = []
+    const mockSsh = createComposeMockSsh({
+      ...composeSystemdRecoveryResponses(),
+      [`cat '${unitFilePath}'`]: {
+        code: 0,
+        stdout: expectedDetachedPodmanUnit(projectDirectory, defaultServiceName),
+      },
+      "systemctl daemon-reload": { code: 0 },
+    })
+    // eslint-disable-next-line @typescript-eslint/require-await -- Mock implementation
+    mockSsh.writeFile = async (path: string, content: string): Promise<void> => {
+      writtenFiles.push({ content, path })
+    }
+
+    const mod = compose.systemd({ detached: true, projectDirectory })
+    await mod.apply(mockSsh, emptyEnv)
+
+    expect(writtenFiles[0]?.content).toContain("compose up -d --remove-orphans")
+  })
+
   it("recovers with a shell fallback when the atomic write leaves an empty unit file", async () => {
     const expectedUnit = expectedPodmanUnit(projectDirectory, defaultServiceName)
     const mockSsh = createComposeMockSsh({
@@ -855,7 +898,7 @@ describe("compose.systemd — apply", () => {
       ...composeSystemdRecoveryResponses(serviceName, serviceUnitPath),
       [`cat '${serviceUnitPath}'`]: {
         code: 0,
-        stdout: expectedDockerUnit("/opt/mailcow-dockerized", serviceName),
+        stdout: expectedDetachedDockerUnit("/opt/mailcow-dockerized", serviceName),
       },
       "command -v docker": { code: 0 },
       "command -v podman": { code: 1 },
@@ -867,6 +910,7 @@ describe("compose.systemd — apply", () => {
     }
 
     const mod = compose.systemd({
+      detached: true,
       name: serviceName,
       projectDirectory: "/opt/mailcow-dockerized",
       runtime: "docker",
@@ -876,7 +920,7 @@ describe("compose.systemd — apply", () => {
     expect(result.status).toBe("changed")
     expect(writtenFiles).toStrictEqual([
       {
-        content: expectedDockerUnit("/opt/mailcow-dockerized", serviceName),
+        content: expectedDetachedDockerUnit("/opt/mailcow-dockerized", serviceName),
         path: serviceUnitPath,
       },
     ])

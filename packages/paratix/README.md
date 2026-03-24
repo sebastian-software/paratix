@@ -94,6 +94,10 @@ Recipes group related modules into a named unit. They help structure larger play
 
 Signals are deferred side effects such as `service.reload(...)` or `service.restart(...)`. They run when the surrounding scope actually changed, and can also be flushed explicitly with `signals.flush()` when you need a checkpoint inside a larger flow.
 
+### Compose + systemd
+
+`compose.systemd(...)` can generate a native systemd unit for Docker Compose or Podman Compose projects. By default it now starts the stack with `compose up --remove-orphans`; set `detached: true` if you explicitly want the old `-d` behaviour in the generated `ExecStart`.
+
 ### Guards
 
 Paratix also supports declarative host-state guards. Use `when.packageInstalled(...)`, `when.commandExists(...)`, `when.fileExists(...)`, `when.pathExists(...)`, `when.symlinkExists(...)`, or `when.socketExists(...)` and their inverted forms to gate modules or recipes on remote host state without shell-heavy playbooks.

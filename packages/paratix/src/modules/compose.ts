@@ -231,6 +231,7 @@ async function applyComposeSystemdUnit(parameters: {
 }
 
 async function checkComposeSystemdUnit(parameters: {
+  detached: boolean
   explicitRuntime?: ComposeRuntime
   filePath: string
   projectDirectory: string
@@ -243,9 +244,32 @@ async function checkComposeSystemdUnit(parameters: {
   const exists = await parameters.ssh.exists(parameters.filePath)
   if (!exists) return NEEDS_APPLY
 
-  const content = generateSystemdUnit(parameters.projectDirectory, parameters.serviceName, runtime)
+  const content = generateSystemdUnit(parameters.projectDirectory, parameters.serviceName, {
+    detached: parameters.detached,
+    runtime,
+  })
   const remoteContent = await parameters.ssh.readFile(parameters.filePath)
   return remoteContent.trim() === content.trim() ? "ok" : NEEDS_APPLY
+}
+
+function resolveComposeSystemdIdentity(options: { name?: string; projectDirectory: string }): {
+  filePath: string
+  serviceName: string
+  unitFileName: string
+} {
+  const serviceName = options.name ?? `compose-${basename(options.projectDirectory)}`
+  if (!UNIT_NAME_PATTERN.test(serviceName)) {
+    throw new Error(
+      `compose.systemd: name must match ${String(UNIT_NAME_PATTERN)}, got: ${serviceName}`
+    )
+  }
+
+  const unitFileName = `${serviceName}.service`
+  return {
+    filePath: `/etc/systemd/system/${unitFileName}`,
+    serviceName,
+    unitFileName,
+  }
 }
 
 async function prepareComposeSystemdTarget(parameters: {
@@ -272,19 +296,24 @@ async function prepareComposeSystemdTarget(parameters: {
  *
  * @param projectDirectory - The working directory for the compose commands.
  * @param name - The human-readable service description and unit name.
- * @param runtime - The container runtime (`docker` or `podman`).
+ * @param options - Unit generation parameters.
+ * @param options.runtime - The container runtime (`docker` or `podman`).
+ * @param options.detached - Whether `compose up` should run with `-d`.
  * @returns The full systemd unit file content as a string.
  */
 function generateSystemdUnit(
   projectDirectory: string,
   name: string,
-  runtime: ComposeRuntime
+  options: { detached: boolean; runtime: ComposeRuntime }
 ): string {
   const safeName = sanitizeUnitValue(name)
   const safeDirectory = sanitizeUnitValue(projectDirectory)
-  const lines = ["[Unit]", `Description=Compose stack: ${safeName}`]
+  const composeUpCommand = options.detached
+    ? `/usr/bin/env ${options.runtime} compose up -d --remove-orphans`
+    : `/usr/bin/env ${options.runtime} compose up --remove-orphans`
+  const lines = ["[Unit]", `Description=Compose stack: ${safeName}`, "Wants=network-online.target"]
 
-  if (runtime === "docker") {
+  if (options.runtime === "docker") {
     lines.push("After=network-online.target docker.service")
     lines.push("Requires=docker.service")
   } else {
@@ -297,8 +326,11 @@ function generateSystemdUnit(
     "Type=oneshot",
     "RemainAfterExit=yes",
     `WorkingDirectory=${safeDirectory}`,
-    `ExecStart=/usr/bin/env ${runtime} compose up -d`,
-    `ExecStop=/usr/bin/env ${runtime} compose down`,
+    `ExecStart=${composeUpCommand}`,
+    `ExecStop=/usr/bin/env ${options.runtime} compose down`,
+    "TimeoutStartSec=0",
+    "StandardOutput=journal",
+    "StandardError=journal",
     "",
     "[Install]",
     "WantedBy=multi-user.target",
@@ -536,21 +568,24 @@ export const compose = {
    * explicitly provided.
    *
    * @param options - Configuration for the systemd unit.
+   * @param options.detached - When true, use `compose up -d`; otherwise start attached.
    * @param options.projectDirectory - The project directory on the remote host.
    * @param options.name - Optional service name (without `.service` suffix).
    * @param options.runtime - Explicit container runtime override.
    * @returns A Module that ensures the systemd unit file is present and up-to-date.
    */
-  systemd(options: { name?: string; projectDirectory: string; runtime?: ComposeRuntime }): Module {
+  systemd(options: {
+    detached?: boolean
+    name?: string
+    projectDirectory: string
+    runtime?: ComposeRuntime
+  }): Module {
     const { projectDirectory, runtime: explicitRuntime } = options
-    const serviceName = options.name ?? `compose-${basename(projectDirectory)}`
-    if (!UNIT_NAME_PATTERN.test(serviceName)) {
-      throw new Error(
-        `compose.systemd: name must match ${String(UNIT_NAME_PATTERN)}, got: ${serviceName}`
-      )
-    }
-    const unitFileName = `${serviceName}.service`
-    const filePath = `/etc/systemd/system/${unitFileName}`
+    const detached = options.detached ?? false
+    const { filePath, serviceName, unitFileName } = resolveComposeSystemdIdentity({
+      name: options.name,
+      projectDirectory,
+    })
 
     return {
       async apply(ssh: null | SshConnection): Promise<ModuleResult> {
@@ -565,7 +600,7 @@ export const compose = {
         })
         if (typeof runtime !== "string") return runtime
 
-        const content = generateSystemdUnit(projectDirectory, serviceName, runtime)
+        const content = generateSystemdUnit(projectDirectory, serviceName, { detached, runtime })
         const validationFailure = validateGeneratedSystemdUnitContent(content, unitFileName)
         if (validationFailure != null) return validationFailure
         return applyComposeSystemdUnit({
@@ -578,6 +613,7 @@ export const compose = {
       async check(ssh: null | SshConnection): Promise<"needs-apply" | "ok"> {
         if (!ssh) return NEEDS_APPLY
         return checkComposeSystemdUnit({
+          detached,
           explicitRuntime,
           filePath,
           projectDirectory,
