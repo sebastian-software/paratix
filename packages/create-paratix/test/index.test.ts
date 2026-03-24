@@ -691,11 +691,14 @@ describe("writeProjectFiles", () => {
     expect(parsed).toMatchObject({
       devDependencies: {
         "@types/node": expect.stringMatching(/^\^/v),
+        prettier: expect.stringMatching(/^\^/v),
         tsx: expect.stringMatching(/^\^/v),
       },
       scripts: {
         apply: "paratix apply server.ts",
         "apply:dry": "paratix apply server.ts --dry-run",
+        "format:check": "prettier --check .",
+        "format:fix": "prettier --write .",
       },
     })
   })
@@ -740,6 +743,34 @@ describe("writeProjectFiles", () => {
       moduleResolution: "Bundler",
     })
     expect(parsed.include).toStrictEqual(["**/*.ts"])
+  })
+
+  it("writes a Prettier config matching the scaffold default", () => {
+    writeProjectFiles(TEST_DIR)
+
+    const raw = readFileSync(join(TEST_DIR, ".prettierrc"), "utf8")
+    const parsed = JSON.parse(raw) as Record<string, boolean | number | string>
+
+    expect(parsed).toStrictEqual({
+      arrowParens: "always",
+      bracketSpacing: true,
+      printWidth: 100,
+      semi: false,
+      singleQuote: false,
+      tabWidth: 2,
+      trailingComma: "es5",
+    })
+  })
+
+  it("writes a .prettierignore that excludes package-manager lockfiles", () => {
+    writeProjectFiles(TEST_DIR)
+
+    const content = readFileSync(join(TEST_DIR, ".prettierignore"), "utf8")
+
+    expect(content).toContain("pnpm-lock.yaml")
+    expect(content).toContain("package-lock.json")
+    expect(content).toContain("yarn.lock")
+    expect(content).toContain("bun.lockb")
   })
 
   it("generated server.ts uses packages.upgrade and packages.installed (not apt.*)", () => {

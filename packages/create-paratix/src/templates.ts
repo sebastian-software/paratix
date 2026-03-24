@@ -26,6 +26,23 @@ dist/
 *.log
 `
 
+export const PRETTIER_RC_TEMPLATE = `{
+  "semi": false,
+  "singleQuote": false,
+  "bracketSpacing": true,
+  "arrowParens": "always",
+  "tabWidth": 2,
+  "trailingComma": "es5",
+  "printWidth": 100
+}
+`
+
+export const PRETTIER_IGNORE_TEMPLATE = `pnpm-lock.yaml
+package-lock.json
+yarn.lock
+bun.lockb
+`
+
 export const ENV_EXAMPLE_TEMPLATE = `# Server configuration
 # SUDO_PASSWORD=your-sudo-password
 # SSH_KEY_PATH=~/.ssh/id_ed25519

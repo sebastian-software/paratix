@@ -27,6 +27,8 @@ import {
   ENV_EXAMPLE_TEMPLATE,
   GITIGNORE_TEMPLATE,
   type InitialUserConfig,
+  PRETTIER_IGNORE_TEMPLATE,
+  PRETTIER_RC_TEMPLATE,
   TSCONFIG_TEMPLATE,
   UNATTENDED_UPGRADES_50_TEMPLATE,
 } from "./templates.js"
@@ -57,6 +59,10 @@ function writeSharedScaffoldFiles(projectDirectory: string): void {
   writeFileSync(join(projectDirectory, "tsconfig.json"), TSCONFIG_TEMPLATE)
   // eslint-disable-next-line security/detect-non-literal-fs-filename
   writeFileSync(join(projectDirectory, ".gitignore"), GITIGNORE_TEMPLATE)
+  // eslint-disable-next-line security/detect-non-literal-fs-filename
+  writeFileSync(join(projectDirectory, ".prettierrc"), PRETTIER_RC_TEMPLATE)
+  // eslint-disable-next-line security/detect-non-literal-fs-filename
+  writeFileSync(join(projectDirectory, ".prettierignore"), PRETTIER_IGNORE_TEMPLATE)
   // eslint-disable-next-line security/detect-non-literal-fs-filename
   writeFileSync(join(projectDirectory, ".env.example"), ENV_EXAMPLE_TEMPLATE)
 }
@@ -96,6 +102,7 @@ export function writeProjectFiles(projectDirectory: string, options?: ScaffoldOp
     },
     devDependencies: {
       "@types/node": "^24.5.2",
+      prettier: "^3.6.2",
       tsx: "^4.20.6",
     },
     engines: {
@@ -106,6 +113,8 @@ export function writeProjectFiles(projectDirectory: string, options?: ScaffoldOp
     scripts: {
       apply: "paratix apply server.ts",
       "apply:dry": "paratix apply server.ts --dry-run",
+      "format:check": "prettier --check .",
+      "format:fix": "prettier --write .",
     },
     type: "module",
   }
