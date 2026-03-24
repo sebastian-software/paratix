@@ -25,6 +25,7 @@ import {
   createAdminNopasswdSudoersContent,
   createServerTemplate,
   ENV_EXAMPLE_TEMPLATE,
+  ESLINT_CONFIG_TEMPLATE,
   GITIGNORE_TEMPLATE,
   type InitialUserConfig,
   PRETTIER_IGNORE_TEMPLATE,
@@ -64,6 +65,8 @@ function writeSharedScaffoldFiles(projectDirectory: string): void {
   // eslint-disable-next-line security/detect-non-literal-fs-filename
   writeFileSync(join(projectDirectory, ".prettierignore"), PRETTIER_IGNORE_TEMPLATE)
   // eslint-disable-next-line security/detect-non-literal-fs-filename
+  writeFileSync(join(projectDirectory, "eslint.config.ts"), ESLINT_CONFIG_TEMPLATE)
+  // eslint-disable-next-line security/detect-non-literal-fs-filename
   writeFileSync(join(projectDirectory, ".env.example"), ENV_EXAMPLE_TEMPLATE)
 }
 
@@ -102,6 +105,8 @@ export function writeProjectFiles(projectDirectory: string, options?: ScaffoldOp
     },
     devDependencies: {
       "@types/node": "^24.5.2",
+      eslint: "^10.0.3",
+      "eslint-config-setup": "^0.3.3",
       prettier: "^3.6.2",
       tsx: "^4.20.6",
     },
@@ -115,6 +120,7 @@ export function writeProjectFiles(projectDirectory: string, options?: ScaffoldOp
       "apply:dry": "paratix apply server.ts --dry-run",
       "format:check": "prettier --check .",
       "format:fix": "prettier --write .",
+      lint: "eslint .",
     },
     type: "module",
   }

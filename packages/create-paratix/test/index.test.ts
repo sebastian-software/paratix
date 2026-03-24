@@ -691,6 +691,8 @@ describe("writeProjectFiles", () => {
     expect(parsed).toMatchObject({
       devDependencies: {
         "@types/node": expect.stringMatching(/^\^/v),
+        eslint: expect.stringMatching(/^\^/v),
+        "eslint-config-setup": expect.stringMatching(/^\^/v),
         prettier: expect.stringMatching(/^\^/v),
         tsx: expect.stringMatching(/^\^/v),
       },
@@ -699,6 +701,7 @@ describe("writeProjectFiles", () => {
         "apply:dry": "paratix apply server.ts --dry-run",
         "format:check": "prettier --check .",
         "format:fix": "prettier --write .",
+        lint: "eslint .",
       },
     })
   })
@@ -771,6 +774,15 @@ describe("writeProjectFiles", () => {
     expect(content).toContain("package-lock.json")
     expect(content).toContain("yarn.lock")
     expect(content).toContain("bun.lockb")
+  })
+
+  it("writes an eslint.config.ts using eslint-config-setup for node projects", () => {
+    writeProjectFiles(TEST_DIR)
+
+    const content = readFileSync(join(TEST_DIR, "eslint.config.ts"), "utf8")
+
+    expect(content).toContain('import { getEslintConfig } from "eslint-config-setup"')
+    expect(content).toContain("export default await getEslintConfig({ node: true })")
   })
 
   it("generated server.ts uses packages.upgrade and packages.installed (not apt.*)", () => {

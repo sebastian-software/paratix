@@ -64,22 +64,24 @@ pnpm apply       # apply to the server
 # npm
 npm run apply:dry
 npm run apply
+npm run lint
 npm run format:check
 npm run format:fix
 ```
 
 ## Project Structure
 
-| File / Directory  | Purpose                                                                   |
-| ----------------- | ------------------------------------------------------------------------- |
-| `server.ts`       | Your playbook. Edit this file.                                            |
-| `package.json`    | Includes `apply`, `apply:dry`, `format:check`, and `format:fix` scripts.  |
-| `tsconfig.json`   | TypeScript config (ES2024, ESNext/Bundler, strict) for direct `tsx` use.  |
-| `.prettierrc`     | Prettier defaults for the scaffolded project.                             |
-| `.prettierignore` | Excludes lockfiles from Prettier runs.                                    |
-| `.gitignore`      | Excludes `node_modules/`, `dist/`, `.env`, and log files.                 |
-| `.env.example`    | Template for secrets. Copy to `.env` and fill in values.                  |
-| `files/`          | Place template files here. They get uploaded to the server at apply time. |
+| File / Directory   | Purpose                                                                          |
+| ------------------ | -------------------------------------------------------------------------------- |
+| `server.ts`        | Your playbook. Edit this file.                                                   |
+| `package.json`     | Includes `apply`, `apply:dry`, `lint`, `format:check`, and `format:fix` scripts. |
+| `tsconfig.json`    | TypeScript config (ES2024, ESNext/Bundler, strict) for direct `tsx` use.         |
+| `eslint.config.ts` | ESLint config via `eslint-config-setup` for Node-based scaffold projects.        |
+| `.prettierrc`      | Prettier defaults for the scaffolded project.                                    |
+| `.prettierignore`  | Excludes lockfiles from Prettier runs.                                           |
+| `.gitignore`       | Excludes `node_modules/`, `dist/`, `.env`, and log files.                        |
+| `.env.example`     | Template for secrets. Copy to `.env` and fill in values.                         |
+| `files/`           | Place template files here. They get uploaded to the server at apply time.        |
 
 ## Writing Your Playbook
 
@@ -187,6 +189,11 @@ The scaffold also includes Prettier out of the box:
 - `format:check` runs `prettier --check .`
 - `format:fix` runs `prettier --write .`
 - `.prettierignore` excludes lockfiles such as `pnpm-lock.yaml`
+
+The scaffold also includes ESLint:
+
+- `lint` runs `eslint .`
+- `eslint.config.ts` uses `await getEslintConfig({ node: true })`
 
 Wenn dein Server initial nur `root` per SSH anbietet, wähle im Prompt `root` oder rufe das Scaffold nicht-interaktiv mit `--initial-user root` auf. Dieses Template bleibt bewusst als temporärer Bootstrap markiert, erstellt den dedizierten Admin-User, legt einen `NOPASSWD sudo`-Eintrag für ihn unter `/etc/sudoers.d/` an und lässt Root-Login nur vorübergehend auf `prohibit-password`, bis du `ssh.user` auf den Admin-User umgestellt hast.
 

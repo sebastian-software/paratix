@@ -43,6 +43,11 @@ yarn.lock
 bun.lockb
 `
 
+export const ESLINT_CONFIG_TEMPLATE = `import { getEslintConfig } from "eslint-config-setup"
+
+export default await getEslintConfig({ node: true })
+`
+
 export const ENV_EXAMPLE_TEMPLATE = `# Server configuration
 # SUDO_PASSWORD=your-sudo-password
 # SSH_KEY_PATH=~/.ssh/id_ed25519
