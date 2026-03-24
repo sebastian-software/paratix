@@ -2,6 +2,7 @@ import type { Client, SFTPWrapper } from "ssh2"
 
 import { EventEmitter } from "node:events"
 import { unlinkSync, writeFileSync } from "node:fs"
+import { stat } from "node:fs/promises"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 
 import { sftpUpload } from "../src/sftp.js"
@@ -13,6 +14,10 @@ vi.mock("node:fs", () => ({
   readFileSync: vi.fn().mockReturnValue(""),
   unlinkSync: vi.fn(),
   writeFileSync: vi.fn(),
+}))
+
+vi.mock("node:fs/promises", () => ({
+  stat: vi.fn().mockResolvedValue({ size: 11 }),
 }))
 
 vi.mock("../src/sftp.js", () => ({
@@ -41,12 +46,15 @@ function makeStream(): StreamWithStderr {
   return stream
 }
 
-function makeExecSpy(mktempResult: string): ReturnType<typeof vi.fn> {
+function makeExecSpy(mktempResult: string, verifiedSize = 100_000): ReturnType<typeof vi.fn> {
   return vi.fn().mockImplementation((cmd: string, cb: ExecCallback) => {
     const stream = makeStream()
     cb(undefined, stream)
     if (cmd.includes("mktemp")) {
       stream.emit("data", Buffer.from(mktempResult))
+    }
+    if (cmd.includes("stat -c '%s'")) {
+      stream.emit("data", Buffer.from(String(verifiedSize)))
     }
     stream.emit("close", 0)
   })
@@ -97,7 +105,7 @@ describe("SshConnectionImpl.writeFile — small content", () => {
   let execSpy: ReturnType<typeof vi.fn>
 
   beforeEach(() => {
-    execSpy = makeExecSpy("/etc/paratix-write.SMALL")
+    execSpy = makeExecSpy("/etc/paratix-write.SMALL", 11)
     vi.mocked(sftpUpload).mockResolvedValue()
   })
 
@@ -157,7 +165,7 @@ describe("SshConnectionImpl.writeFile — large content (> 64 KB)", () => {
   let execSpy: ReturnType<typeof vi.fn>
 
   beforeEach(() => {
-    execSpy = makeExecSpy("/etc/paratix-write.ABCDEF")
+    execSpy = makeExecSpy("/etc/paratix-write.ABCDEF", 100_000)
     vi.mocked(sftpUpload).mockResolvedValue()
   })
 
@@ -282,7 +290,7 @@ describe("SshConnectionImpl.writeFile — large content (> 64 KB)", () => {
     // Arrange
     const remoteTmpPath = "/etc/paratix-write.CLEANUP"
     vi.mocked(sftpUpload).mockRejectedValue(new Error("SFTP transfer failed"))
-    const remoteCleanupSpy = makeExecSpy(remoteTmpPath)
+    const remoteCleanupSpy = makeExecSpy(remoteTmpPath, 100_000)
     const client = makeClientWithExecSpy(remoteCleanupSpy)
     const ssh = makeConnectedSsh(client)
     const content = makeLargeContent()
@@ -328,9 +336,10 @@ describe("SshConnectionImpl.writeFile — large content (> 64 KB)", () => {
         stream.emit("close", 0)
       })
       .mockImplementationOnce((_cmd: string, cb: ExecCallback) => {
-        // Fourth call is the non-empty verification — succeeds
+        // Fourth call is the size verification — succeeds
         const stream = makeStream()
         cb(undefined, stream)
+        stream.emit("data", Buffer.from("100000"))
         stream.emit("close", 0)
       })
       .mockImplementationOnce((_cmd: string, cb: ExecCallback) => {
@@ -348,10 +357,10 @@ describe("SshConnectionImpl.writeFile — large content (> 64 KB)", () => {
     ).resolves.toBeUndefined()
   })
 
-  it("rejects when a non-empty write leaves an empty remote file after finalization", async () => {
+  it("rewrites the target via shell fallback when the atomic SFTP write leaves an empty file", async () => {
     const remoteTmpPath = "/etc/systemd/system/paratix-write.EMPTY"
+    const fallbackTmpPath = "/etc/systemd/system/paratix-write.FALLBACK"
     const remotePath = "/etc/systemd/system/example.service"
-
     const emptyFileExecSpy = vi
       .fn()
       .mockImplementationOnce((_cmd: string, cb: ExecCallback) => {
@@ -373,7 +382,40 @@ describe("SshConnectionImpl.writeFile — large content (> 64 KB)", () => {
       .mockImplementationOnce((_cmd: string, cb: ExecCallback) => {
         const stream = makeStream()
         cb(undefined, stream)
-        stream.emit("close", 1)
+        stream.emit("data", Buffer.from("0"))
+        stream.emit("close", 0)
+      })
+      .mockImplementationOnce((_cmd: string, cb: ExecCallback) => {
+        const stream = makeStream()
+        cb(undefined, stream)
+        stream.emit("data", Buffer.from(fallbackTmpPath))
+        stream.emit("close", 0)
+      })
+      .mockImplementationOnce((_cmd: string, cb: ExecCallback) => {
+        const stream = makeStream()
+        cb(undefined, stream)
+        stream.emit("close", 0)
+      })
+      .mockImplementationOnce((_cmd: string, cb: ExecCallback) => {
+        const stream = makeStream()
+        cb(undefined, stream)
+        stream.emit("close", 0)
+      })
+      .mockImplementationOnce((_cmd: string, cb: ExecCallback) => {
+        const stream = makeStream()
+        cb(undefined, stream)
+        stream.emit("close", 0)
+      })
+      .mockImplementationOnce((_cmd: string, cb: ExecCallback) => {
+        const stream = makeStream()
+        cb(undefined, stream)
+        stream.emit("close", 0)
+      })
+      .mockImplementationOnce((_cmd: string, cb: ExecCallback) => {
+        const stream = makeStream()
+        cb(undefined, stream)
+        stream.emit("data", Buffer.from("12"))
+        stream.emit("close", 0)
       })
       .mockImplementationOnce((_cmd: string, cb: ExecCallback) => {
         const stream = makeStream()
@@ -385,14 +427,16 @@ describe("SshConnectionImpl.writeFile — large content (> 64 KB)", () => {
     const ssh = makeConnectedSsh(client)
     vi.mocked(sftpUpload).mockResolvedValue()
 
-    await expect(ssh.writeFile(remotePath, "unit-content", { mode: "0644" })).rejects.toThrow(
-      `[ssh.writeFile: ${remotePath}] remote file is empty after upload/finalize; refusing successful write result`
-    )
+    await expect(
+      ssh.writeFile(remotePath, "unit-content", { mode: "0644" })
+    ).resolves.toBeUndefined()
 
     const executedCommands = (emptyFileExecSpy.mock.calls as Array<[string, ...unknown[]]>).map(
       ([command]) => command
     )
+    expect(executedCommands.some((command) => command.includes("base64 -d"))).toBe(true)
     expect(executedCommands).toContain(`rm -f '${remoteTmpPath}'`)
+    expect(executedCommands).toContain(`rm -f '${fallbackTmpPath}'`)
   })
 
   // ---------------------------------------------------------------------------
@@ -428,9 +472,10 @@ describe("SshConnectionImpl.writeFile — large content (> 64 KB)", () => {
         stream.emit("close", 0)
       })
       .mockImplementationOnce((_cmd: string, cb: ExecCallback) => {
-        // Fourth call: the non-empty verification — succeeds
+        // Fourth call: the size verification — succeeds
         const stream = makeStream()
         cb(undefined, stream)
+        stream.emit("data", Buffer.from("100000"))
         stream.emit("close", 0)
       })
       .mockImplementationOnce((_cmd: string, cb: ExecCallback) => {
@@ -476,6 +521,7 @@ describe("SshConnectionImpl.uploadFile — cleanup error secret masking", () => 
     // Arrange
     const sudoPassword = "upload-secret-pw"
     const remoteTmpPath = "/etc/paratix-upload.MASKSECRET"
+    vi.mocked(stat).mockResolvedValueOnce({ size: 11 } as never)
 
     // exec spy: mktemp succeeds, mv succeeds, rm -f fails with an error that
     // contains the sudo password in plain text (simulates a verbose error message)
@@ -501,7 +547,14 @@ describe("SshConnectionImpl.uploadFile — cleanup error secret masking", () => 
         stream.emit("close", 0)
       })
       .mockImplementationOnce((_cmd: string, cb: ExecCallback) => {
-        // Fourth call: rm -f — fails with an error whose message contains the password
+        // Fourth call: stat -c '%s' — succeeds
+        const stream = makeStream()
+        cb(undefined, stream)
+        stream.emit("data", Buffer.from("11"))
+        stream.emit("close", 0)
+      })
+      .mockImplementationOnce((_cmd: string, cb: ExecCallback) => {
+        // Fifth call: rm -f — fails with an error whose message contains the password
         cb(
           new Error(`permission denied: echo ${sudoPassword} | sudo rm -f ${remoteTmpPath}`),
           makeStream()
