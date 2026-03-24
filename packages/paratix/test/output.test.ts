@@ -8,6 +8,7 @@ import {
   renderCliHeader,
   resetLiveOutputForTests,
   startModuleSpinner,
+  withRecipeOutputScope,
 } from "../src/output.js"
 import { CommandError } from "../src/sshHelpers.js"
 
@@ -94,6 +95,19 @@ describe("printModuleResult", () => {
     }
   })
 
+  it("keeps the status column aligned across nested recipe depths", async () => {
+    printModuleResult("top-level", "ok")
+
+    await withRecipeOutputScope(() => {
+      printModuleResult("nested-child", "changed")
+    })
+
+    expect(consoleLogs).toHaveLength(2)
+    const topLevelStatusColumn = consoleLogs[0].indexOf("ok")
+    const nestedStatusColumn = consoleLogs[1].indexOf("changed")
+    expect(topLevelStatusColumn).toBe(nestedStatusColumn)
+  })
+
   it("renders package modules compactly while the spinner is active", () => {
     const writes: string[] = []
     vi.spyOn(process.stdout, "write").mockImplementation(((chunk: string | Uint8Array) => {
@@ -170,6 +184,8 @@ describe("printRecipeHeader", () => {
 
   it("stops an active spinner before printing the recipe header", () => {
     const writes: string[] = []
+    const clearLine = vi.fn(() => true)
+    const cursorTo = vi.fn(() => true)
     vi.spyOn(process.stdout, "write").mockImplementation(((chunk: string | Uint8Array) => {
       writes.push(String(chunk))
       return true
@@ -181,11 +197,11 @@ describe("printRecipeHeader", () => {
     Object.defineProperty(process.stdout, "isTTY", { configurable: true, value: true })
     Object.defineProperty(process.stdout, "clearLine", {
       configurable: true,
-      value: vi.fn(() => true),
+      value: clearLine,
     })
     Object.defineProperty(process.stdout, "cursorTo", {
       configurable: true,
-      value: vi.fn(() => true),
+      value: cursorTo,
     })
 
     try {
@@ -196,6 +212,8 @@ describe("printRecipeHeader", () => {
       expect(consoleLogs.join("\n")).toContain("[firewall]")
       expect(writes.some((entry) => entry.includes("running"))).toBe(true)
       expect(writes.some((entry) => entry.includes("ok"))).toBe(false)
+      expect(clearLine).toHaveBeenCalledTimes(2)
+      expect(cursorTo).toHaveBeenCalledTimes(2)
     } finally {
       Object.defineProperty(process.stdout, "isTTY", {
         configurable: true,
@@ -210,6 +228,15 @@ describe("printRecipeHeader", () => {
         value: originalCursorTo,
       })
     }
+  })
+
+  it("indents nested recipe headers one level deeper than the parent scope", async () => {
+    await withRecipeOutputScope(() => {
+      printRecipeHeader("service-layer")
+    })
+
+    expect(consoleLogs).toHaveLength(1)
+    expect(consoleLogs[0]).toContain("  [service-layer]")
   })
 })
 

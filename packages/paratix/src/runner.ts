@@ -308,7 +308,6 @@ async function runRecipeModule(
     startModuleSpinner(recipeModule.name)
     const checkResult = await recipeModule.check(ssh, environment)
     if (checkResult === "ok") {
-      printRecipeHeader(recipeModule.name)
       printModuleResult(recipeModule.name, "ok")
       return { env: environment, shouldBreak: false, status: "ok" }
     }

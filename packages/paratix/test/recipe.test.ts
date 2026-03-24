@@ -113,7 +113,7 @@ describe("recipe", () => {
     const output = consoleLogs.join("\n")
 
     expect(output).toContain("[outer-recipe]")
-    expect(output).toContain("\n  [nested-recipe]")
+    expect(output).toContain("\n    [nested-recipe]")
     expect(output).toMatch(/\n {4}.*nested-child/v)
   })
 

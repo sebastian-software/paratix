@@ -316,6 +316,39 @@ describe("runPlaybook reconnect failure propagation", () => {
 
     expect(startModuleSpinner).toHaveBeenCalledWith("bootstrap")
   })
+
+  it("does not print a recipe header when a top-level recipe is already ok", async () => {
+    const capturedConfigs: unknown[] = []
+    const outputModule = await import("../src/output.js")
+    const printRecipeHeader = vi.spyOn(outputModule, "printRecipeHeader")
+
+    vi.doMock("../src/ssh.js", () => ({
+      shellQuote: (value: string) => `'${value}'`,
+      SshConnectionImpl: makeMockSshClass(capturedConfigs),
+    }))
+
+    const { runPlaybook } = await import("../src/runner.js")
+    const childModule: Module = {
+      apply: vi.fn().mockResolvedValue({ status: "ok" }),
+      check: vi.fn().mockResolvedValue("ok"),
+      name: "first-child",
+    }
+
+    const definition: ServerDefinition = {
+      host: "1.2.3.4",
+      name: "test-server",
+      run: [createRecipe("base-setup", [childModule])],
+      ssh: {
+        ports: [22],
+        privateKey: "~/.ssh/id",
+        user: "root",
+      },
+    }
+
+    await runPlaybook(definition)
+
+    expect(printRecipeHeader).not.toHaveBeenCalledWith("base-setup")
+  })
 })
 
 describe("runPlaybook meta validation", () => {

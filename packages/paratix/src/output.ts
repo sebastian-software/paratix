@@ -5,7 +5,8 @@ import type { ModuleStatus } from "./types.js"
 import { fitAnimatedModuleLine, formatDisplayModule } from "./outputFormatting.js"
 import { CommandError } from "./sshHelpers.js"
 
-const MODULE_NAME_WIDTH = 36
+const MODULE_NAME_WIDTH = 56
+const MIN_MODULE_NAME_WIDTH = 12
 const OUTPUT_INDENT_UNIT = "  "
 const SPINNER_FRAME_INTERVAL_MS = 80
 const SPINNER_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
@@ -89,7 +90,7 @@ function getModuleIndent(): string {
 }
 
 function getRecipeHeaderIndent(): string {
-  return OUTPUT_INDENT_UNIT.repeat(getCurrentOutputDepth())
+  return recipeOutputDepth < 0 ? "" : OUTPUT_INDENT_UNIT.repeat(getCurrentOutputDepth() + 1)
 }
 
 function getErrorIndent(): string {
@@ -118,10 +119,12 @@ function renderModuleLine(parameters: {
   waitingFrame?: string
 }): string {
   const { detail, name, status, waitingFrame } = parameters
+  const indent = getModuleIndent()
   const icon = getModuleIcon(status, waitingFrame)
   const statusText = getModuleStatusText(status)
   const detailSuffix = detail == null ? "" : `  ${pc.dim(detail)}`
-  return `${getModuleIndent()}${icon}  ${name.padEnd(MODULE_NAME_WIDTH)}  ${statusText}${detailSuffix}`
+  const alignedNameWidth = Math.max(MODULE_NAME_WIDTH - indent.length, MIN_MODULE_NAME_WIDTH)
+  return `${indent}${icon}  ${name.padEnd(alignedNameWidth)}  ${statusText}${detailSuffix}`
 }
 
 function writeAnimatedModuleLine(line: string): void {
@@ -130,11 +133,16 @@ function writeAnimatedModuleLine(line: string): void {
   process.stdout.write(fitAnimatedModuleLine(line, process.stdout.columns))
 }
 
-function stopAnimatedModuleLine(): void {
+function stopAnimatedModuleLine(clearCurrentLine = false): void {
   if (activeSpinner == null) return
 
   clearInterval(activeSpinner.interval)
   activeSpinner = null
+
+  if (clearCurrentLine && supportsAnimatedModuleOutput()) {
+    process.stdout.clearLine(0)
+    process.stdout.cursorTo(0)
+  }
 }
 
 export function startModuleSpinner(name: string, detail?: string): void {
@@ -186,9 +194,9 @@ export function resetLiveOutputForTests(): void {
  * @param name - The recipe or server name to display.
  */
 export function printRecipeHeader(name: string): void {
-  stopAnimatedModuleLine()
+  stopAnimatedModuleLine(true)
   const header = pc.bold(pc.blue(`[${name}]`))
-  console.log(`\n${getRecipeHeaderIndent()}${header}`)
+  console.log(`${getRecipeHeaderIndent()}${header}`)
 }
 
 export function printRunContext(parameters: {
