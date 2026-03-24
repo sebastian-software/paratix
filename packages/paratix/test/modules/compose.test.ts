@@ -631,6 +631,16 @@ function expectedPodmanUnit(dir: string, name: string): string {
 const defaultServiceName = "compose-app"
 const unitFilePath = `/etc/systemd/system/${defaultServiceName}.service`
 
+function composeSystemdRecoveryResponses(
+  serviceName = defaultServiceName,
+  filePath = unitFilePath
+): Record<string, { code: number; stdout?: string }> {
+  return {
+    [`rm -f '${filePath}'`]: { code: 0 },
+    [`systemctl unmask '${serviceName}.service'`]: { code: 0 },
+  }
+}
+
 describe("compose.systemd — check", () => {
   it("returns needs-apply when conn is null", async () => {
     const mod = compose.systemd({ projectDirectory })
@@ -713,6 +723,7 @@ describe("compose.systemd — apply", () => {
   it("writes unit file and runs daemon-reload", async () => {
     const writtenFiles: Array<{ content: string; path: string }> = []
     const mockSsh = createComposeMockSsh({
+      ...composeSystemdRecoveryResponses(),
       [`cat '${unitFilePath}'`]: {
         code: 0,
         stdout: expectedPodmanUnit(projectDirectory, defaultServiceName),
@@ -736,6 +747,7 @@ describe("compose.systemd — apply", () => {
 
   it("returns failed when daemon-reload fails", async () => {
     const mockSsh = createComposeMockSsh({
+      ...composeSystemdRecoveryResponses(),
       [`cat '${unitFilePath}'`]: {
         code: 0,
         stdout: expectedPodmanUnit(projectDirectory, defaultServiceName),
@@ -750,6 +762,7 @@ describe("compose.systemd — apply", () => {
   it("generates unit without docker.service dependency for podman runtime", async () => {
     const writtenFiles: Array<{ content: string; path: string }> = []
     const mockSsh = createComposeMockSsh({
+      ...composeSystemdRecoveryResponses(),
       [`cat '${unitFilePath}'`]: {
         code: 0,
         stdout: expectedPodmanUnit(projectDirectory, defaultServiceName),
@@ -771,6 +784,7 @@ describe("compose.systemd — apply", () => {
   it("generates unit with docker.service dependency for docker runtime", async () => {
     const writtenFiles: Array<{ content: string; path: string }> = []
     const mockSsh = createComposeMockSsh({
+      ...composeSystemdRecoveryResponses(),
       [`cat '${unitFilePath}'`]: {
         code: 0,
         stdout: expectedDockerUnit(projectDirectory, defaultServiceName),
@@ -792,6 +806,7 @@ describe("compose.systemd — apply", () => {
 
   it("returns failed and removes the unit file when the written target unit is empty", async () => {
     const mockSsh = createComposeMockSsh({
+      ...composeSystemdRecoveryResponses(),
       [`cat '${unitFilePath}'`]: { code: 0, stdout: "" },
       "rm -f '/etc/systemd/system/compose-app.service'": { code: 0 },
     })
@@ -803,6 +818,48 @@ describe("compose.systemd — apply", () => {
     expect(String(result.error)).toContain("wrote empty unit file")
     expect(mockSsh.calls).toContain("rm -f '/etc/systemd/system/compose-app.service'")
     expect(mockSsh.calls).not.toContain("systemctl daemon-reload")
+  })
+
+  it("clears stale masked unit state before rewriting the compose systemd unit", async () => {
+    const writtenFiles: Array<{ content: string; path: string }> = []
+    const serviceName = "mailcow"
+    const serviceUnitPath = "/etc/systemd/system/mailcow.service"
+    const mockSsh = createComposeMockSsh({
+      ...composeSystemdRecoveryResponses(serviceName, serviceUnitPath),
+      [`cat '${serviceUnitPath}'`]: {
+        code: 0,
+        stdout: expectedDockerUnit("/opt/mailcow-dockerized", serviceName),
+      },
+      "command -v docker": { code: 0 },
+      "command -v podman": { code: 1 },
+      "systemctl daemon-reload": { code: 0 },
+    })
+    // eslint-disable-next-line @typescript-eslint/require-await -- Mock implementation
+    mockSsh.writeFile = async (path: string, content: string): Promise<void> => {
+      writtenFiles.push({ content, path })
+    }
+
+    const mod = compose.systemd({
+      name: serviceName,
+      projectDirectory: "/opt/mailcow-dockerized",
+      runtime: "docker",
+    })
+    const result = await mod.apply(mockSsh, emptyEnv)
+
+    expect(result.status).toBe("changed")
+    expect(writtenFiles).toStrictEqual([
+      {
+        content: expectedDockerUnit("/opt/mailcow-dockerized", serviceName),
+        path: serviceUnitPath,
+      },
+    ])
+    expect(mockSsh.calls.indexOf("systemctl unmask 'mailcow.service'")).toBeLessThan(
+      mockSsh.calls.indexOf("cat '/etc/systemd/system/mailcow.service'")
+    )
+    expect(mockSsh.calls.indexOf("rm -f '/etc/systemd/system/mailcow.service'")).toBeLessThan(
+      mockSsh.calls.indexOf("cat '/etc/systemd/system/mailcow.service'")
+    )
+    expect(mockSsh.calls).toContain("systemctl daemon-reload")
   })
 })
 
@@ -820,6 +877,7 @@ describe("compose.systemd — naming", () => {
   it("explicit name is used as unit file name", async () => {
     const writtenFiles: Array<{ content: string; path: string }> = []
     const mockSsh = createComposeMockSsh({
+      ...composeSystemdRecoveryResponses("my-stack", "/etc/systemd/system/my-stack.service"),
       "cat '/etc/systemd/system/my-stack.service'": {
         code: 0,
         stdout: expectedPodmanUnit(projectDirectory, "my-stack"),
