@@ -18,9 +18,9 @@ function bindOptionalStdoutMethod(name: "clearLine" | "cursorTo") {
 }
 
 describe("renderCliHeader", () => {
-  it("includes the paratix name and version", () => {
-    expect(renderCliHeader("0.1.0")).toContain("_ __   __ _ _ __ __ _| |_ ___  __")
-    expect(renderCliHeader("0.1.0")).toContain("v0.1.0")
+  it("includes the paratix name and display version", () => {
+    expect(renderCliHeader("0.1.0-af172d6")).toContain("_ __   __ _ _ __ __ _| |_ ___  __")
+    expect(renderCliHeader("0.1.0-af172d6")).toContain("v0.1.0-af172d6")
   })
 })
 

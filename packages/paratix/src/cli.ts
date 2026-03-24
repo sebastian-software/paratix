@@ -11,7 +11,7 @@ import { printCliHeader } from "./output.js"
 import { runPlaybook } from "./runner.js"
 import { collectSshConfigErrors } from "./serverDefinitionValidation.js"
 
-declare const PACKAGE_VERSION: string
+declare const PACKAGE_DISPLAY_VERSION: string
 
 const SECONDS_TO_MS = 1000
 const DEFAULT_RECONNECT_TIMEOUT_SECONDS = 300
@@ -278,7 +278,7 @@ const program = new Command()
 program
   .name("paratix")
   .description("Idempotent VPS setup tool in TypeScript")
-  .version(PACKAGE_VERSION)
+  .version(PACKAGE_DISPLAY_VERSION)
 
 program
   .command("apply <file>")
@@ -300,7 +300,7 @@ program
   .option("--verbose", "Show full stack traces on error", false)
   .action(async (file: string, options: Record<string, unknown>) => {
     try {
-      printCliHeader(PACKAGE_VERSION)
+      printCliHeader(PACKAGE_DISPLAY_VERSION)
       const environmentOverrides = applyCliEnvironmentOverrides(
         // eslint-disable-next-line @typescript-eslint/no-unsafe-type-assertion -- Commander options typed as Record<string, unknown>
         options.env as Environment,
