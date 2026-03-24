@@ -1,0 +1,22 @@
+{
+  "$schema": "https://raw.githubusercontent.com/googleapis/release-please/main/schemas/config.json",
+  "plugins": [
+    {
+      "type": "linked-versions",
+      "components": ["paratix", "create-paratix"],
+      "groupName": "paratix workspace packages"
+    }
+  ],
+  "packages": {
+    "packages/create-paratix": {
+      "component": "create-paratix",
+      "package-name": "create-paratix",
+      "release-type": "node"
+    },
+    "packages/paratix": {
+      "component": "paratix",
+      "package-name": "paratix",
+      "release-type": "node"
+    }
+  }
+}
