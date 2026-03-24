@@ -63,6 +63,7 @@ import {
   service,
   ssh,
   sshd,
+  swap,
   sysctl,
   system,
   systemd,
@@ -261,6 +262,14 @@ rsync SSH process and does not depend on a local `known_hosts` entry.
 | ------------- | -------------------------------------------- | ---------------------------------- |
 | `sshd.config` | `(settings: Record<string, string>): Module` | Yes                                |
 | `sshd.port`   | `(targetPort: number): Module`               | Yes (emits typed `sshd.port` meta) |
+
+### `swap`
+
+| Method                  | Signature                                                                                                                      | Idempotent |
+| ----------------------- | ------------------------------------------------------------------------------------------------------------------------------ | ---------- |
+| `swap.file`             | `(options: { path: string; size: number \| string; mode?: string; priority?: number; state?: "absent" \| "present" }): Module` | Yes        |
+| `swap.swappiness`       | `(value: number): Module`                                                                                                      | Yes        |
+| `swap.vfsCachePressure` | `(value: number): Module`                                                                                                      | Yes        |
 
 ### `sysctl`
 
@@ -490,6 +499,25 @@ when.fileExists("/etc/myapp/config.yml", service.reload("myapp"))
 when.pathMissing("/etc/traefik", file.directory("/etc/traefik"))
 when.symlinkExists("/etc/myapp/current", service.restart("myapp"))
 when.socketExists("/run/docker.sock", service.running("docker"))
+```
+
+### `swap.file(options)`
+
+Create, activate, and persist a file-backed swap area.
+
+```typescript
+swap.file({ path: "/swapfile", size: "2G" })
+swap.file({ path: "/swapfile", size: "2G", priority: 10 })
+swap.file({ path: "/swapfile", size: "2G", state: "absent" })
+```
+
+### `swap.swappiness(value)` / `swap.vfsCachePressure(value)`
+
+Apply common swap-related sysctl tuning without writing the sysctl keys manually.
+
+```typescript
+swap.swappiness(10)
+swap.vfsCachePressure(50)
 ```
 
 ### `debug(message)`
