@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.0.1](https://github.com/sebastian-software/paratix/compare/v1.0.0...v1.0.1) (2026-03-24)
+
+
+### Bug Fixes
+
+* **repo:** build and publish workspace packages in release workflow ([b141170](https://github.com/sebastian-software/paratix/commit/b141170ffc7c6c0e3466aafcb49e96d05189dc77))
+
 ## 1.0.0 (2026-03-24)
 
 
