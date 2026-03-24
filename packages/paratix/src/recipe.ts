@@ -5,6 +5,7 @@ import {
   printModuleResult,
   printRecipeHeader,
   startModuleSpinner,
+  withRecipeOutputScope,
 } from "./output.js"
 import { runSignalModules, type SignalHooks } from "./signalOrchestration.js"
 import { CommandError } from "./sshHelpers.js"
@@ -384,36 +385,38 @@ async function applyRecipe(parameters: {
   signals?: Module[]
   ssh: null | SshConnection
 }): Promise<ModuleResult> {
-  const shutdownSignal = parameters.options?.shutdownSignal
-  const verbose = parameters.options?.verbose ?? false
-  printRecipeHeader(parameters.name)
-  const state = await executeModules(parameters.modules, parameters.ssh, {
-    environment: parameters.environment,
-    onChildStep: parameters.options?.onChildStep,
-    onSignalStep: parameters.options?.onSignalStep,
-    shutdownSignal,
-    signalHooks: parameters.options?.signalHooks,
-    signals: parameters.signals,
-    verbose,
-  })
-
-  if (shouldRunRecipeSignalsAtEnd(state, parameters.signals)) {
-    state.status = await triggerSignals({
-      environment: state.env,
+  return withRecipeOutputScope(async () => {
+    const shutdownSignal = parameters.options?.shutdownSignal
+    const verbose = parameters.options?.verbose ?? false
+    printRecipeHeader(parameters.name)
+    const state = await executeModules(parameters.modules, parameters.ssh, {
+      environment: parameters.environment,
+      onChildStep: parameters.options?.onChildStep,
       onSignalStep: parameters.options?.onSignalStep,
       shutdownSignal,
       signalHooks: parameters.options?.signalHooks,
       signals: parameters.signals,
-      ssh: parameters.ssh,
       verbose,
     })
-  }
 
-  return {
-    _stopRun: state.stopRun,
-    meta: state.meta,
-    status: state.status,
-  }
+    if (shouldRunRecipeSignalsAtEnd(state, parameters.signals)) {
+      state.status = await triggerSignals({
+        environment: state.env,
+        onSignalStep: parameters.options?.onSignalStep,
+        shutdownSignal,
+        signalHooks: parameters.options?.signalHooks,
+        signals: parameters.signals,
+        ssh: parameters.ssh,
+        verbose,
+      })
+    }
+
+    return {
+      _stopRun: state.stopRun,
+      meta: state.meta,
+      status: state.status,
+    }
+  })
 }
 
 function shouldRunRecipeSignalsAtEnd(state: RecipeState, signals?: Module[]): signals is Module[] {

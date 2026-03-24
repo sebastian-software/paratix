@@ -8,6 +8,7 @@ import {
   printModuleResult,
   printRecipeHeader,
   startModuleSpinner,
+  withRecipeOutputScope,
 } from "./output.js"
 
 type StepResult = { env: Environment; shouldBreak: boolean; status?: ModuleStatus; stopRun?: true }
@@ -73,24 +74,26 @@ export async function dryRunRecipeModule(parameters: {
   recipeModule: RecipeModule
   ssh: SshConnectionImpl
 }): Promise<StepResult> {
-  const { environment, recipeModule, ssh } = parameters
-  printRecipeHeader(recipeModule.name)
-  let aggregatedStatus: "changed" | "ok" = "ok"
-  let currentEnvironment = environment
-  const verbose = parameters.options?.verbose ?? false
+  return withRecipeOutputScope(async () => {
+    const { environment, recipeModule, ssh } = parameters
+    printRecipeHeader(recipeModule.name)
+    let aggregatedStatus: "changed" | "ok" = "ok"
+    let currentEnvironment = environment
+    const verbose = parameters.options?.verbose ?? false
 
-  for (const childModule of recipeModule._modules) {
-    // eslint-disable-next-line no-await-in-loop
-    const result = await executeDryRunChildModule({
-      childModule,
-      environment: currentEnvironment,
-      ssh,
-      verbose,
-    })
-    if (result.shouldBreak) return result
-    currentEnvironment = result.env
-    if (result.status === "changed") aggregatedStatus = "changed"
-  }
+    for (const childModule of recipeModule._modules) {
+      // eslint-disable-next-line no-await-in-loop
+      const result = await executeDryRunChildModule({
+        childModule,
+        environment: currentEnvironment,
+        ssh,
+        verbose,
+      })
+      if (result.shouldBreak) return result
+      currentEnvironment = result.env
+      if (result.status === "changed") aggregatedStatus = "changed"
+    }
 
-  return { env: currentEnvironment, shouldBreak: false, status: aggregatedStatus }
+    return { env: currentEnvironment, shouldBreak: false, status: aggregatedStatus }
+  })
 }

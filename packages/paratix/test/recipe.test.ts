@@ -97,6 +97,26 @@ describe("recipe", () => {
     expect(result.status).toBe("changed")
   })
 
+  it("indents nested recipes and their child modules in CLI output", async () => {
+    const consoleLogs: string[] = []
+    vi.spyOn(console, "log").mockImplementation((...args: unknown[]) => {
+      consoleLogs.push(args.map(String).join(" "))
+    })
+
+    const nestedChild = makeModule("needs-apply", "ok", "nested-child")
+    const nestedRecipe = recipe("nested-recipe", [nestedChild])
+    const outerRecipe = recipe("outer-recipe", [nestedRecipe])
+    const applyRecipe = outerRecipe.apply
+
+    await applyRecipe(null, emptyEnv)
+
+    const output = consoleLogs.join("\n")
+
+    expect(output).toContain("[outer-recipe]")
+    expect(output).toContain("\n  [nested-recipe]")
+    expect(output).toMatch(/\n {4}.*nested-child/v)
+  })
+
   it("aggregates status as failed and stops when a module fails", async () => {
     const applyCount = { count: 0 }
     const mod1 = makeModule("needs-apply", "failed", "mod-1")

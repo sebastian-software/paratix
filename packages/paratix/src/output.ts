@@ -5,6 +5,7 @@ import type { ModuleStatus } from "./types.js"
 import { CommandError } from "./sshHelpers.js"
 
 const MODULE_NAME_WIDTH = 36
+const OUTPUT_INDENT_UNIT = "  "
 const SPINNER_FRAME_INTERVAL_MS = 80
 const SPINNER_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
 type DisplayStatus = "waiting" | ModuleStatus
@@ -36,6 +37,7 @@ type ActiveSpinner = {
 }
 
 let activeSpinner: ActiveSpinner | null = null
+let recipeOutputDepth = -1
 
 export function renderCliHeader(version: string): string {
   const versionText = pc.dim(`v${version}`)
@@ -78,6 +80,33 @@ function getModuleStatusText(status: DisplayStatus): string {
   }
 }
 
+function getCurrentOutputDepth(): number {
+  return Math.max(recipeOutputDepth, 0)
+}
+
+function getModuleIndent(): string {
+  return OUTPUT_INDENT_UNIT.repeat(getCurrentOutputDepth() + 1)
+}
+
+function getRecipeHeaderIndent(): string {
+  return OUTPUT_INDENT_UNIT.repeat(getCurrentOutputDepth())
+}
+
+function getErrorIndent(): string {
+  return `${getModuleIndent()}│ `
+}
+
+export async function withRecipeOutputScope<T>(
+  scopedOperation: () => Promise<T> | T
+): Promise<T> {
+  recipeOutputDepth += 1
+  try {
+    return await scopedOperation()
+  } finally {
+    recipeOutputDepth -= 1
+  }
+}
+
 function renderModuleLine(parameters: {
   detail?: string
   name: string
@@ -88,7 +117,7 @@ function renderModuleLine(parameters: {
   const icon = getModuleIcon(status, waitingFrame)
   const statusText = getModuleStatusText(status)
   const detailSuffix = detail == null ? "" : `  ${pc.dim(detail)}`
-  return `  ${icon}  ${name.padEnd(MODULE_NAME_WIDTH)}  ${statusText}${detailSuffix}`
+  return `${getModuleIndent()}${icon}  ${name.padEnd(MODULE_NAME_WIDTH)}  ${statusText}${detailSuffix}`
 }
 
 function writeAnimatedModuleLine(line: string): void {
@@ -134,6 +163,7 @@ export function startModuleSpinner(name: string, detail?: string): void {
 
 export function resetLiveOutputForTests(): void {
   stopAnimatedModuleLine()
+  recipeOutputDepth = -1
 }
 
 /**
@@ -142,7 +172,7 @@ export function resetLiveOutputForTests(): void {
  */
 export function printRecipeHeader(name: string): void {
   const header = pc.bold(pc.blue(`[${name}]`))
-  console.log(`\n${header}`)
+  console.log(`\n${getRecipeHeaderIndent()}${header}`)
 }
 
 export function printRunContext(parameters: {
@@ -193,9 +223,9 @@ export function printCommandError(stdout: string, stderr: string): void {
     lines.push(...stdout.trim().split("\n"))
   }
   if (lines.length > 0) {
-    console.error(pc.red("  \u2502 Error output:"))
+    console.error(pc.red(`${getErrorIndent()}Error output:`))
     for (const line of lines) {
-      console.error(pc.red(`  \u2502 ${line}`))
+      console.error(pc.red(`${getErrorIndent()}${line}`))
     }
   }
 }
@@ -209,15 +239,15 @@ export function printCommandError(stdout: string, stderr: string): void {
  */
 export function printVerboseCommandError(stdout: string, stderr: string): void {
   if (stderr.trim()) {
-    console.error(pc.red("  │ Full stderr:"))
+    console.error(pc.red(`${getErrorIndent()}Full stderr:`))
     for (const line of stderr.trim().split("\n")) {
-      console.error(pc.red(`  │ ${line}`))
+      console.error(pc.red(`${getErrorIndent()}${line}`))
     }
   }
   if (stdout.trim()) {
-    console.error(pc.red("  │ Full stdout:"))
+    console.error(pc.red(`${getErrorIndent()}Full stdout:`))
     for (const line of stdout.trim().split("\n")) {
-      console.error(pc.red(`  │ ${line}`))
+      console.error(pc.red(`${getErrorIndent()}${line}`))
     }
   }
 }
@@ -227,9 +257,9 @@ function printVerboseErrorBlock(label: string, content: string): void {
     return
   }
 
-  console.error(pc.red(`  │ ${label}`))
+  console.error(pc.red(`${getErrorIndent()}${label}`))
   for (const line of content.trim().split("\n")) {
-    console.error(pc.red(`  │ ${line}`))
+    console.error(pc.red(`${getErrorIndent()}${line}`))
   }
 }
 
