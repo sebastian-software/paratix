@@ -21,6 +21,7 @@ import {
   firstRun,
   pause,
   resolveEnvironment,
+  signals,
   when,
   shellQuote,
   NEEDS_APPLY,
@@ -430,6 +431,7 @@ export const nginxRecipe = recipe(
 - Modules run in order; execution stops on first `"failed"` status.
 - `meta.env(...)` values propagate from one module to all subsequent ones within the recipe and resolve lazily when later modules or templates consume them.
 - If any module reports `"changed"`, the `signals` array fires after all modules complete.
+- `signals.flush()` can be used inside the same scope to execute currently pending signals early.
 - Recipes can be nested: include a recipe in another recipe's module list.
 
 **When to use recipes:**
@@ -479,6 +481,14 @@ Stoppt den aktuellen Lauf kontrolliert, wenn Paratix mit `--first-run` gestartet
 firstRun.stop("Bootstrap foundation complete; rerun without --first-run to continue.")
 ```
 
+### `signals.flush(message?)`
+
+Führt alle aktuell offenen Signale des aktiven Scopes sofort aus und setzt deren Pending-Zustand zurück.
+
+```typescript
+signals.flush("Reload services before the next bootstrap stage")
+```
+
 ### `pause(message?)`
 
 Wait for operator to press Enter. Useful for interactive confirmation.
@@ -518,12 +528,13 @@ async check(ssh) {
 4. For idempotency with `command.shell()`, always provide a `check` command.
 5. Use `{{KEY|shell}}` or `{{KEY|raw}}` placeholders in `.tmpl` files — strict mode is on by default and bare `{{KEY}}` will throw. Provide values via `env` in `server()`.
 6. Use `service.restart()` and `service.reload()` as `signals` in recipes, not directly in `run`.
-7. Always pass a date string to `package.upgrade()` and `package.update()` -- it is the idempotency key.
-8. Specify `ssh.ports` as an array -- the runner tries each port in order.
-9. Custom modules must implement both `check` and `apply`, both async.
-10. Use `shellQuote()` when interpolating dynamic values into shell commands.
-11. Emit downstream values via `meta.env(...)` and use dedicated built-in meta entries only for runner control-plane behavior.
-12. When you need a concrete propagated value inside custom code, use `await resolveEnvironment(env, "KEY")` instead of assuming `env["KEY"]` is already a plain primitive.
+7. Use `signals.flush()` only als expliziten Checkpoint, wenn gestufte Flows einen vorgezogenen Signal-Flush brauchen.
+8. Always pass a date string to `package.upgrade()` and `package.update()` -- it is the idempotency key.
+9. Specify `ssh.ports` as an array -- the runner tries each port in order.
+10. Custom modules must implement both `check` and `apply`, both async.
+11. Use `shellQuote()` when interpolating dynamic values into shell commands.
+12. Emit downstream values via `meta.env(...)` and use dedicated built-in meta entries only for runner control-plane behavior.
+13. When you need a concrete propagated value inside custom code, use `await resolveEnvironment(env, "KEY")` instead of assuming `env["KEY"]` is already a plain primitive.
 
 ### DON'T
 
@@ -537,9 +548,13 @@ async check(ssh) {
 8. Do NOT use `ssh.exec()` without `ignoreExitCode: true` when you need to inspect the exit code -- without it, a non-zero exit throws an exception.
 9. Do NOT use template syntax `{{key}}` in TypeScript code -- templates are only for files rendered via `file.template()`.
 10. Do NOT use `signals` on the top-level `server()` when you mean a recipe signal -- `server.signals` fire when ANY module in `run` changed.
-11. Do NOT call `server()` without all required fields (`name`, `host`, `ssh`, `run`) -- it throws at construction time. `name` and `host` must not be empty strings.
-12. Do NOT use empty arrays for `ssh.ports` or empty strings for `ssh.user`/`ssh.privateKey` -- validation rejects these. `ssh.privateKey` may be omitted entirely to use the SSH agent instead.
-13. Do NOT return loose `meta: { ... }` maps from custom modules -- always use typed meta entries.
+11. Do NOT treat `signals.flush()` as a global queue flush -- it only affects the current scope.
+12. `signals.flush()` flusht immer nur den aktuellen Scope:
+    - in einer Recipe deren Recipe-Signale
+    - auf Top-Level `server(...).signals`
+13. Do NOT call `server()` without all required fields (`name`, `host`, `ssh`, `run`) -- it throws at construction time. `name` and `host` must not be empty strings.
+14. Do NOT use empty arrays for `ssh.ports` or empty strings for `ssh.user`/`ssh.privateKey` -- validation rejects these. `ssh.privateKey` may be omitted entirely to use the SSH agent instead.
+15. Do NOT return loose `meta: { ... }` maps from custom modules -- always use typed meta entries.
 
 ## Testing Patterns
 

@@ -1,4 +1,4 @@
-export { assert, debug, fail, firstRun, pause, when } from "./builtins.js"
+export { assert, debug, fail, firstRun, pause, signals, when } from "./builtins.js"
 export {
   assertValidModuleMetaEntries,
   assertValidModuleMetaEntry,

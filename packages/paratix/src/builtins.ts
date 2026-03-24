@@ -162,6 +162,42 @@ export const firstRun = {
   },
 }
 
+/**
+ * Built-ins for explicit signal checkpoints.
+ */
+export const signals = {
+  /**
+   * Flush all currently pending signals for the active scope.
+   * Signals remain scope-local:
+   * - in a recipe, this flushes that recipe's signals
+   * - at top level, this flushes `server(...).signals`
+   *
+   * @param message - Optional note shown in the module name.
+   * @returns A local control module that requests an immediate signal flush.
+   */
+  flush(message?: string): Module {
+    const moduleName = message == null ? "signals.flush" : `signals.flush: ${message}`
+
+    return {
+      _dryRunBlocker: true,
+      // eslint-disable-next-line @typescript-eslint/require-await -- Interface requires async
+      async apply(): Promise<ModuleResult> {
+        return {
+          _dryRunDetail: "(dry-run, pending signals not executed)",
+          _flushSignals: true,
+          status: "ok",
+        }
+      },
+      // eslint-disable-next-line @typescript-eslint/require-await -- Interface requires async
+      async check(): Promise<"needs-apply" | "ok"> {
+        return NEEDS_APPLY
+      },
+      local: true,
+      name: moduleName,
+    }
+  },
+}
+
 async function applyConditionalModules(parameters: {
   dryRun?: boolean
   environment: Environment
@@ -195,6 +231,7 @@ async function applyConditionalModules(parameters: {
   }
 
   return {
+    _flushSignals: state.flushSignals,
     _stopRun: state.stopRun,
     meta: state.meta.length === 0 ? undefined : state.meta,
     status: state.status,
@@ -212,6 +249,7 @@ function shouldExecuteConditionalApply(module: Module, dryRun: boolean): boolean
 
 type ConditionalApplyState = {
   environment: Environment
+  flushSignals?: true
   meta: ModuleMetaEntry[]
   status: "changed" | "ok" | "skipped"
   stopRun?: true
@@ -257,6 +295,7 @@ async function mergeConditionalApplyState(
   const environment = await mergeEnvironmentFromMeta(state.environment, result.meta)
   return {
     environment,
+    flushSignals: result._flushSignals === true ? true : state.flushSignals,
     meta: result.meta == null ? state.meta : [...state.meta, ...result.meta],
     status: result.status === "changed" ? "changed" : state.status,
     stopRun: result._stopRun === true ? true : state.stopRun,

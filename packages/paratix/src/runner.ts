@@ -27,7 +27,7 @@ import {
   startModuleSpinner,
 } from "./output.js"
 import { resolveExitCode, signalExitCode } from "./runnerHelpers.js"
-import { runSignalModules } from "./signalOrchestration.js"
+import { runSignalModules, type SignalRunStatus } from "./signalOrchestration.js"
 import { SshConnectionImpl } from "./ssh.js"
 
 /** Holds the shutdown listener, SSH setter, and getter for the first received signal. */
@@ -119,6 +119,7 @@ class RunStats {
 
 type StepResult = {
   env: Environment
+  flushSignals?: true
   shouldBreak: boolean
   status?: ModuleStatus
   stopRun?: true
@@ -268,6 +269,7 @@ async function handleMetaAndBuildResult(
 
   return {
     env: currentEnvironment,
+    flushSignals: result._flushSignals,
     shouldBreak: shouldBreakAfterResult(result),
     status: result.status,
     stopRun: result._stopRun,
@@ -433,6 +435,7 @@ async function runRegularModule(parameters: RegularModuleArguments): Promise<Ste
 }
 
 type LoopArguments = {
+  definitionSignals?: Module[]
   dryRun: boolean
   env: Environment
   modules: Module[]
@@ -440,6 +443,122 @@ type LoopArguments = {
   ssh: SshConnectionImpl
   stats: RunStats
   verbose: boolean
+}
+
+type ModuleLoopState = {
+  currentEnvironment: Environment
+  signalsPending: boolean
+  stopRun?: true
+}
+
+function updateLoopSignalState(input: {
+  currentSignalsPending: boolean
+  result: StepResult
+  stats: RunStats
+}): boolean {
+  if (input.result.status == null) return input.currentSignalsPending
+  input.stats.update(input.result.status)
+  return input.result.status === "changed" ? true : input.currentSignalsPending
+}
+
+function shouldFlushTopLevelSignals(input: {
+  definitionSignals?: Module[]
+  dryRun: boolean
+  shutdownSignal: () => NodeJS.Signals | null
+  signalsPending: boolean
+  stats: RunStats
+  stepResult: StepResult
+}): input is {
+  definitionSignals: Module[]
+  dryRun: boolean
+  shutdownSignal: () => NodeJS.Signals | null
+  signalsPending: boolean
+  stats: RunStats
+  stepResult: { flushSignals: true } & StepResult
+} {
+  return (
+    input.stepResult.flushSignals === true &&
+    !input.dryRun &&
+    input.shutdownSignal() == null &&
+    input.signalsPending &&
+    input.stats.failed === 0 &&
+    input.definitionSignals != null
+  )
+}
+
+async function flushPendingTopLevelSignals(input: {
+  currentEnvironment: Environment
+  definitionSignals: Module[]
+  shutdownSignal: () => NodeJS.Signals | null
+  ssh: SshConnectionImpl
+  stats: RunStats
+  verbose: boolean
+}): Promise<SignalRunStatus> {
+  return runSignals({
+    env: input.currentEnvironment,
+    shutdownSignal: input.shutdownSignal,
+    signals: input.definitionSignals,
+    ssh: input.ssh,
+    stats: input.stats,
+    verbose: input.verbose,
+  })
+}
+
+function applyLoopResultToState(
+  state: ModuleLoopState,
+  result: StepResult,
+  stats: RunStats
+): ModuleLoopState {
+  return {
+    currentEnvironment: result.env,
+    signalsPending: updateLoopSignalState({
+      currentSignalsPending: state.signalsPending,
+      result,
+      stats,
+    }),
+    stopRun: result.stopRun === true ? true : state.stopRun,
+  }
+}
+
+async function flushTopLevelSignalsIfRequested(parameters: {
+  definitionSignals?: Module[]
+  dryRun: boolean
+  loopState: ModuleLoopState
+  result: StepResult
+  shutdownSignal: () => NodeJS.Signals | null
+  ssh: SshConnectionImpl
+  stats: RunStats
+  verbose: boolean
+}): Promise<{ nextSignalsPending: boolean; outcome: "break" | "continue" }> {
+  if (
+    !shouldFlushTopLevelSignals({
+      definitionSignals: parameters.definitionSignals,
+      dryRun: parameters.dryRun,
+      shutdownSignal: parameters.shutdownSignal,
+      signalsPending: parameters.loopState.signalsPending,
+      stats: parameters.stats,
+      stepResult: parameters.result,
+    })
+  ) {
+    return { nextSignalsPending: parameters.loopState.signalsPending, outcome: "continue" }
+  }
+  const definitionSignals = parameters.definitionSignals
+  if (definitionSignals == null) {
+    return { nextSignalsPending: parameters.loopState.signalsPending, outcome: "continue" }
+  }
+
+  const signalStatus = await flushPendingTopLevelSignals({
+    currentEnvironment: parameters.loopState.currentEnvironment,
+    definitionSignals,
+    shutdownSignal: parameters.shutdownSignal,
+    ssh: parameters.ssh,
+    stats: parameters.stats,
+    verbose: parameters.verbose,
+  })
+  return {
+    nextSignalsPending: false,
+    outcome: signalStatus === "failed" ? "break" : "continue",
+  }
 }
 
 async function createModuleStepPromise(parameters: {
@@ -476,18 +595,22 @@ async function createModuleStepPromise(parameters: {
 
 async function runModuleLoop(parameters: LoopArguments): Promise<{
   env: Environment
+  signalsPending: boolean
   stopRun?: true
 }> {
-  const { dryRun, modules, shutdownSignal, ssh, stats, verbose } = parameters
-  let currentEnvironment = parameters.env
-  let stopRun: true | undefined
+  const { definitionSignals, dryRun, modules, shutdownSignal, ssh, stats, verbose } = parameters
+  const loopState: ModuleLoopState = {
+    currentEnvironment: parameters.env,
+    signalsPending: false,
+    stopRun: undefined,
+  }
 
   for (const currentModule of modules) {
     // A module already running when the signal arrived completes normally
     // and its result is still counted in stats before the loop exits here.
     if (shutdownSignal() != null) break
     const stepPromise = createModuleStepPromise({
-      currentEnvironment,
+      currentEnvironment: loopState.currentEnvironment,
       currentModule,
       dryRun,
       shutdownSignal,
@@ -499,13 +622,28 @@ async function runModuleLoop(parameters: LoopArguments): Promise<{
     // eslint-disable-next-line no-await-in-loop
     const result = await stepPromise
 
-    currentEnvironment = result.env
-    if (result.status != null) stats.update(result.status)
-    if (result.stopRun === true) stopRun = true
+    Object.assign(loopState, applyLoopResultToState(loopState, result, stats))
+    // eslint-disable-next-line no-await-in-loop
+    const flushResult = await flushTopLevelSignalsIfRequested({
+      definitionSignals,
+      dryRun,
+      loopState,
+      result,
+      shutdownSignal,
+      ssh,
+      stats,
+      verbose,
+    })
+    loopState.signalsPending = flushResult.nextSignalsPending
+    if (flushResult.outcome === "break") break
     if (result.shouldBreak) break
   }
 
-  return { env: currentEnvironment, stopRun }
+  return {
+    env: loopState.currentEnvironment,
+    signalsPending: loopState.signalsPending,
+    stopRun: loopState.stopRun,
+  }
 }
 
 type SignalArguments = {
@@ -517,9 +655,9 @@ type SignalArguments = {
   verbose: boolean
 }
 
-async function runSignals(parameters: SignalArguments): Promise<void> {
+async function runSignals(parameters: SignalArguments): Promise<SignalRunStatus> {
   const { env, shutdownSignal, signals, ssh, stats, verbose } = parameters
-  await runSignalModules({
+  return runSignalModules({
     environment: env,
     hooks: {
       onSignalFinished: (status: ModuleStatus) => {
@@ -581,6 +719,7 @@ async function executeRun(parameters: ExecuteRunArguments): Promise<void> {
 
   printRecipeHeader(definition.name)
   const loopResult = await runModuleLoop({
+    definitionSignals: definition.signals,
     dryRun,
     env: environment,
     modules: definition.run,
@@ -594,7 +733,7 @@ async function executeRun(parameters: ExecuteRunArguments): Promise<void> {
   if (
     !dryRun &&
     shutdownSignal() == null &&
-    stats.changed > 0 &&
+    loopResult.signalsPending &&
     stats.failed === 0 &&
     definition.signals != null
   )

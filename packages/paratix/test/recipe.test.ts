@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 
 import type { Environment, Module } from "../src/types.js"
 
-import { firstRun } from "../src/builtins.js"
+import { firstRun, signals } from "../src/builtins.js"
 import { recipe } from "../src/recipe.js"
 import { CommandError } from "../src/sshHelpers.js"
 import { createMockSsh } from "./helpers/mockSsh.js"
@@ -276,6 +276,59 @@ describe("recipe", () => {
     expect(result.status).toBe("changed")
     expect(result._stopRun).toBe(true)
     expect(signalApplied.count).toBe(1)
+  })
+
+  it("flushes pending recipe signals immediately and does not rerun them at recipe end", async () => {
+    const signalApplied = { count: 0 }
+    const signal: Module = {
+      // eslint-disable-next-line @typescript-eslint/require-await -- Interface requires async
+      async apply() {
+        signalApplied.count++
+        return { status: "changed" }
+      },
+      // eslint-disable-next-line @typescript-eslint/require-await -- Interface requires async
+      async check() {
+        return "needs-apply"
+      },
+      name: "signal-module",
+    }
+
+    const changedModule = makeModule("needs-apply", "changed")
+    const applyRecipe = recipe(
+      "test-recipe",
+      [changedModule, signals.flush("after changed module")],
+      { signals: [signal] }
+    ).apply
+    const result = await applyRecipe(null, emptyEnv)
+
+    expect(result.status).toBe("changed")
+    expect(signalApplied.count).toBe(1)
+  })
+
+  it("can flush recipe signals multiple times when new changes happen after a checkpoint", async () => {
+    const signalApplied = { count: 0 }
+    const signal: Module = {
+      // eslint-disable-next-line @typescript-eslint/require-await -- Interface requires async
+      async apply() {
+        signalApplied.count++
+        return { status: "changed" }
+      },
+      // eslint-disable-next-line @typescript-eslint/require-await -- Interface requires async
+      async check() {
+        return "needs-apply"
+      },
+      name: "signal-module",
+    }
+
+    const changedModule = makeModule("needs-apply", "changed")
+    const applyRecipe = recipe(
+      "test-recipe",
+      [changedModule, signals.flush("checkpoint"), changedModule],
+      { signals: [signal] }
+    ).apply
+    await applyRecipe(null, emptyEnv)
+
+    expect(signalApplied.count).toBe(2)
   })
 
   it("sets the recipe status to failed when a signal returns failed", async () => {

@@ -44,9 +44,24 @@ export type RecipeModule = {
 type RecipeState = {
   env: Environment
   meta?: ModuleMetaEntry[]
+  signalsPending: boolean
   status: Exclude<ModuleStatus, "skipped">
   stopRun?: true
 }
+
+type ExecuteModulesParameters = {
+  environment: Environment
+  onChildStep?: (step: OrchestrationStep) => Promise<void>
+  onSignalStep?: (step: OrchestrationStep) => Promise<void>
+  shutdownSignal?: () => NodeJS.Signals | null
+  signalHooks?: SignalHooks
+  signals?: Module[]
+  verbose?: boolean
+}
+
+type RecipeLoopStepResult =
+  | { kind: "break"; state: RecipeState }
+  | { kind: "continue"; state: RecipeState }
 
 const INTERRUPTED_BEFORE_APPLY = Symbol("recipe-interrupted-before-apply")
 
@@ -71,6 +86,7 @@ function applyRecipeStepToState(
   return {
     env: step.env,
     meta: nextMeta,
+    signalsPending: step.status === "changed" ? true : state.signalsPending,
     status: nextStatus,
     stopRun: step._stopRun === true ? true : state.stopRun,
   }
@@ -121,6 +137,7 @@ async function executeOneModule(parameters: {
 
   const environment = await mergeEnvironmentFromMeta(currentEnvironment, result.meta)
   return {
+    _flushSignals: result._flushSignals,
     _stopRun: result._stopRun,
     env: environment,
     meta: result.meta,
@@ -161,6 +178,7 @@ function failedRecipeState(environment: Environment): RecipeState {
   return {
     env: environment,
     meta: undefined,
+    signalsPending: false,
     status: "failed",
   }
 }
@@ -202,15 +220,57 @@ async function executeRecipeChildStep(parameters: {
   }
 }
 
+async function processRecipeStep(parameters: {
+  onChildStep?: (step: OrchestrationStep) => Promise<void>
+  onSignalStep?: (step: OrchestrationStep) => Promise<void>
+  preserveControlPlaneMeta: boolean
+  shutdownSignal: () => NodeJS.Signals | null
+  signalHooks?: SignalHooks
+  signals?: Module[]
+  ssh: null | SshConnection
+  state: RecipeState
+  step: RecipeChildExecution
+  verbose: boolean
+}): Promise<RecipeLoopStepResult> {
+  if (parameters.step.kind === "failed") {
+    return { kind: "break", state: parameters.step.state }
+  }
+
+  const nextState = await applyExecutedRecipeStep({
+    onChildStep: parameters.onChildStep,
+    preserveControlPlaneMeta: parameters.preserveControlPlaneMeta,
+    state: parameters.state,
+    step: parameters.step.step,
+  })
+  if (nextState == null) {
+    return { kind: "break", state: parameters.state }
+  }
+
+  let state = nextState
+  if (shouldFlushRecipeSignals(parameters.step.step, state, parameters.signals)) {
+    const signalStatus = await flushPendingRecipeSignals({
+      environment: state.env,
+      onSignalStep: parameters.onSignalStep,
+      shutdownSignal: parameters.shutdownSignal,
+      signalHooks: parameters.signalHooks,
+      signals: parameters.signals,
+      ssh: parameters.ssh,
+      verbose: parameters.verbose,
+    })
+    state = applyRecipeSignalStatus(state, signalStatus)
+  }
+
+  if (state.status === "failed" || state.stopRun === true) {
+    return { kind: "break", state }
+  }
+
+  return { kind: "continue", state }
+}
+
 async function executeModules(
   modules: Module[],
   ssh: null | SshConnection,
-  parameters: {
-    environment: Environment
-    onChildStep?: (step: OrchestrationStep) => Promise<void>
-    shutdownSignal?: () => NodeJS.Signals | null
-    verbose?: boolean
-  }
+  parameters: ExecuteModulesParameters
 ): Promise<RecipeState> {
   const onChildStep = parameters.onChildStep
   const preserveControlPlaneMeta = onChildStep == null
@@ -219,6 +279,7 @@ async function executeModules(
   let state: RecipeState = {
     env: { ...parameters.environment },
     meta: undefined,
+    signalsPending: false,
     status: "ok",
   }
 
@@ -232,18 +293,21 @@ async function executeModules(
       targetModule: currentModule,
       verbose,
     })
-    if (step.kind === "failed") return step.state
     // eslint-disable-next-line no-await-in-loop
-    const nextState = await applyExecutedRecipeStep({
+    const processedStep = await processRecipeStep({
       onChildStep,
+      onSignalStep: parameters.onSignalStep,
       preserveControlPlaneMeta,
+      shutdownSignal,
+      signalHooks: parameters.signalHooks,
+      signals: parameters.signals,
+      ssh,
       state,
-      step: step.step,
+      step,
+      verbose,
     })
-    if (nextState == null) break
-
-    state = nextState
-    if (state.status === "failed" || state.stopRun === true) return state
+    state = processedStep.state
+    if (processedStep.kind === "break") return state
   }
 
   return state
@@ -269,6 +333,43 @@ async function triggerSignals(parameters: {
   })
 }
 
+function shouldFlushRecipeSignals(
+  step: null | OrchestrationStep | typeof INTERRUPTED_BEFORE_APPLY,
+  state: RecipeState,
+  signals?: Module[]
+): signals is Module[] {
+  return (
+    step != null &&
+    step !== INTERRUPTED_BEFORE_APPLY &&
+    step._flushSignals === true &&
+    state.signalsPending &&
+    signals != null
+  )
+}
+
+function applyRecipeSignalStatus(
+  state: RecipeState,
+  signalStatus: "changed" | "failed"
+): RecipeState {
+  return {
+    ...state,
+    signalsPending: false,
+    status: signalStatus === "failed" ? "failed" : state.status,
+  }
+}
+
+async function flushPendingRecipeSignals(parameters: {
+  environment: Environment
+  onSignalStep?: (step: OrchestrationStep) => Promise<void>
+  shutdownSignal?: () => NodeJS.Signals | null
+  signalHooks?: SignalHooks
+  signals: Module[]
+  ssh: null | SshConnection
+  verbose?: boolean
+}): Promise<"changed" | "failed"> {
+  return triggerSignals(parameters)
+}
+
 async function applyRecipe(parameters: {
   environment: Environment
   modules: Module[]
@@ -289,11 +390,14 @@ async function applyRecipe(parameters: {
   const state = await executeModules(parameters.modules, parameters.ssh, {
     environment: parameters.environment,
     onChildStep: parameters.options?.onChildStep,
+    onSignalStep: parameters.options?.onSignalStep,
     shutdownSignal,
+    signalHooks: parameters.options?.signalHooks,
+    signals: parameters.signals,
     verbose,
   })
 
-  if (state.status === "changed" && parameters.signals) {
+  if (shouldRunRecipeSignalsAtEnd(state, parameters.signals)) {
     state.status = await triggerSignals({
       environment: state.env,
       onSignalStep: parameters.options?.onSignalStep,
@@ -310,6 +414,10 @@ async function applyRecipe(parameters: {
     meta: state.meta,
     status: state.status,
   }
+}
+
+function shouldRunRecipeSignalsAtEnd(state: RecipeState, signals?: Module[]): signals is Module[] {
+  return state.signalsPending && state.status === "changed" && signals != null
 }
 
 /**

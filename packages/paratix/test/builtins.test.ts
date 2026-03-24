@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from "vitest"
 
 import type { Environment, Module } from "../src/types.js"
 
-import { assert, debug, fail, firstRun, pause, when } from "../src/builtins.js"
+import { assert, debug, fail, firstRun, pause, signals, when } from "../src/builtins.js"
 import { resolveEnvironment } from "../src/environment.js"
 import { mergeEnvironmentFromMeta, meta } from "../src/meta.js"
 
@@ -189,6 +189,23 @@ describe("firstRun.stop", () => {
     const applyModule = mod.apply
     const result = await applyModule(null, emptyEnv)
     expect(result).toStrictEqual({ status: "ok" })
+  })
+})
+
+describe("signals.flush", () => {
+  it("check always returns needs-apply", async () => {
+    const mod = signals.flush("before hardening boundary")
+    const result = await mod.check(null, emptyEnv)
+    expect(result).toBe("needs-apply")
+  })
+
+  it("apply returns a successful flush marker", async () => {
+    const mod = signals.flush("before hardening boundary")
+    const applyModule = mod.apply
+    const result = await applyModule(null, emptyEnv)
+    expect(result.status).toBe("ok")
+    expect(result._flushSignals).toBe(true)
+    expect(result._dryRunDetail).toBe("(dry-run, pending signals not executed)")
   })
 })
 

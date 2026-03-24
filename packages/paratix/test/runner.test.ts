@@ -2540,6 +2540,120 @@ describe("runPlaybook dry-run recipe behaviour", () => {
     expect(process.exitCode).toBe(0)
   })
 
+  it("flushes top-level pending signals immediately and does not rerun them at run end", async () => {
+    const capturedConfigs: unknown[] = []
+
+    vi.doMock("../src/ssh.js", () => ({
+      shellQuote: (s: string) => `'${s}'`,
+      SshConnectionImpl: makeMockSshClass(capturedConfigs),
+    }))
+
+    const [{ runPlaybook }, { signals }] = await Promise.all([
+      import("../src/runner.js"),
+      import("../src/builtins.js"),
+    ])
+
+    const changedModule: Module = {
+      apply: vi.fn().mockResolvedValue({ status: "changed" } satisfies ModuleResult),
+      check: vi.fn().mockResolvedValue("needs-apply"),
+      name: "changed-before-flush",
+    }
+    const signalModule: Module = {
+      apply: vi.fn().mockResolvedValue({ status: "changed" } satisfies ModuleResult),
+      check: vi.fn().mockResolvedValue("needs-apply"),
+      name: "signal-module",
+    }
+
+    const definition: ServerDefinition = {
+      host: "1.2.3.4",
+      name: "test-server",
+      run: [changedModule, signals.flush("checkpoint")],
+      signals: [signalModule],
+      ssh: { ports: [22], privateKey: "~/.ssh/id", user: "root" },
+    }
+
+    await runPlaybook(definition)
+
+    expect(signalModule.apply).toHaveBeenCalledOnce()
+    expect(process.exitCode).toBe(0)
+  })
+
+  it("can flush top-level pending signals multiple times when new changes happen after a checkpoint", async () => {
+    const capturedConfigs: unknown[] = []
+
+    vi.doMock("../src/ssh.js", () => ({
+      shellQuote: (s: string) => `'${s}'`,
+      SshConnectionImpl: makeMockSshClass(capturedConfigs),
+    }))
+
+    const [{ runPlaybook }, { signals }] = await Promise.all([
+      import("../src/runner.js"),
+      import("../src/builtins.js"),
+    ])
+
+    const changedModule: Module = {
+      apply: vi.fn().mockResolvedValue({ status: "changed" } satisfies ModuleResult),
+      check: vi.fn().mockResolvedValue("needs-apply"),
+      name: "changed-module",
+    }
+    const signalModule: Module = {
+      apply: vi.fn().mockResolvedValue({ status: "changed" } satisfies ModuleResult),
+      check: vi.fn().mockResolvedValue("needs-apply"),
+      name: "signal-module",
+    }
+
+    const definition: ServerDefinition = {
+      host: "1.2.3.4",
+      name: "test-server",
+      run: [changedModule, signals.flush("checkpoint"), changedModule],
+      signals: [signalModule],
+      ssh: { ports: [22], privateKey: "~/.ssh/id", user: "root" },
+    }
+
+    await runPlaybook(definition)
+
+    expect(signalModule.apply).toHaveBeenCalledTimes(2)
+    expect(process.exitCode).toBe(0)
+  })
+
+  it("does not execute top-level signals on signals.flush during dry-run", async () => {
+    const capturedConfigs: unknown[] = []
+
+    vi.doMock("../src/ssh.js", () => ({
+      shellQuote: (s: string) => `'${s}'`,
+      SshConnectionImpl: makeMockSshClass(capturedConfigs),
+    }))
+
+    const [{ runPlaybook }, { signals }] = await Promise.all([
+      import("../src/runner.js"),
+      import("../src/builtins.js"),
+    ])
+
+    const changedModule: Module = {
+      apply: vi.fn().mockResolvedValue({ status: "changed" } satisfies ModuleResult),
+      check: vi.fn().mockResolvedValue("needs-apply"),
+      name: "changed-before-flush",
+    }
+    const signalModule: Module = {
+      apply: vi.fn().mockResolvedValue({ status: "changed" } satisfies ModuleResult),
+      check: vi.fn().mockResolvedValue("needs-apply"),
+      name: "signal-module",
+    }
+
+    const definition: ServerDefinition = {
+      host: "1.2.3.4",
+      name: "test-server",
+      run: [changedModule, signals.flush("checkpoint")],
+      signals: [signalModule],
+      ssh: { ports: [22], privateKey: "~/.ssh/id", user: "root" },
+    }
+
+    await runPlaybook(definition, { dryRun: true })
+
+    expect(signalModule.apply).not.toHaveBeenCalled()
+    expect(process.exitCode).toBe(0)
+  })
+
   it("does not run top-level definition.signals in dry-run mode", async () => {
     const capturedConfigs: unknown[] = []
 

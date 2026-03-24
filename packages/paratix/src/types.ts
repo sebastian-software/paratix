@@ -62,6 +62,12 @@ export type ModuleResult = {
    */
   _dryRunDetail?: string
   /**
+   * Optional internal control-plane marker that tells the current scope to
+   * execute all pending signals immediately at this point in the run.
+   * @internal
+   */
+  _flushSignals?: true
+  /**
    * Optional internal control-plane marker that tells the runner to stop the
    * current run successfully after this module completed.
    * @internal
@@ -81,6 +87,9 @@ export type ModuleResult = {
  * @internal
  */
 export type OrchestrationStep = {
+  /** @internal */
+  _flushSignals?: true
+  /** @internal */
   _stopRun?: true
   env: Environment
   meta?: ModuleMetaEntry[]
