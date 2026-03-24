@@ -89,7 +89,7 @@ function getCurrentOutputDepth(): number {
 }
 
 function getGuideDot(depth: number): string {
-  return depth % 2 === 0 ? pc.gray("·") : pc.dim("·")
+  return depth % 2 === 0 ? pc.gray("·") : pc.cyan("·")
 }
 
 function buildGuideIndent(
