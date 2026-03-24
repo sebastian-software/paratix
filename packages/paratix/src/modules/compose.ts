@@ -150,17 +150,102 @@ function validateGeneratedSystemdUnitContent(
 
 async function verifyNonEmptySystemdUnit(parameters: {
   connection: SshConnection
+  content: string
   filePath: string
   unitFileName: string
-}): Promise<ModuleResult | null> {
+}): Promise<"empty" | "matches" | "unexpected"> {
   const writtenContent = await parameters.connection.readFile(parameters.filePath)
-  if (writtenContent.trim() !== "") return null
+  if (writtenContent.trim() === "") return "empty"
+  return writtenContent.trim() === parameters.content.trim() ? "matches" : "unexpected"
+}
 
+async function cleanupComposeSystemdTarget(parameters: {
+  connection: SshConnection
+  filePath: string
+}): Promise<void> {
   await parameters.connection.exec(`rm -f ${shellQuote(parameters.filePath)}`, {
     ignoreExitCode: true,
     silent: true,
   })
-  return failed(`[compose.systemd] wrote empty unit file for ${parameters.unitFileName}`)
+}
+
+async function rewriteComposeSystemdUnitViaShell(parameters: {
+  connection: SshConnection
+  content: string
+  filePath: string
+  unitFileName: string
+}): Promise<ModuleResult | null> {
+  const encodedContent = Buffer.from(parameters.content, "utf8").toString("base64")
+  await cleanupComposeSystemdTarget(parameters)
+  const result = await parameters.connection.exec(
+    `printf '%s' ${shellQuote(encodedContent)} | base64 -d > ${shellQuote(parameters.filePath)} && chmod ${shellQuote(SYSTEMD_UNIT_MODE)} ${shellQuote(parameters.filePath)} && chown ${shellQuote("root:root")} ${shellQuote(parameters.filePath)}`,
+    EXEC_OPTS
+  )
+  if (result.code !== 0) {
+    return failedCommand(
+      `[compose.systemd] shell fallback write failed for ${parameters.unitFileName}`,
+      result
+    )
+  }
+
+  const fallbackVerification = await verifyNonEmptySystemdUnit(parameters)
+  if (fallbackVerification === "matches") return null
+
+  await cleanupComposeSystemdTarget(parameters)
+  if (fallbackVerification === "empty") {
+    return failed(
+      `[compose.systemd] wrote empty unit file for ${parameters.unitFileName} even after shell fallback`
+    )
+  }
+  return failed(
+    `[compose.systemd] wrote unexpected unit content for ${parameters.unitFileName} even after shell fallback`
+  )
+}
+
+async function applyComposeSystemdUnit(parameters: {
+  connection: SshConnection
+  content: string
+  filePath: string
+  unitFileName: string
+}): Promise<ModuleResult> {
+  await prepareComposeSystemdTarget(parameters)
+  try {
+    await parameters.connection.writeFile(parameters.filePath, parameters.content, {
+      mode: SYSTEMD_UNIT_MODE,
+    })
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : String(error)
+    return failed(`[compose.systemd] atomic write failed for ${parameters.unitFileName}: ${reason}`)
+  }
+
+  const writeVerification = await verifyNonEmptySystemdUnit(parameters)
+  if (writeVerification !== "matches") {
+    const fallbackFailure = await rewriteComposeSystemdUnitViaShell(parameters)
+    if (fallbackFailure != null) return fallbackFailure
+  }
+
+  const result = await parameters.connection.exec("systemctl daemon-reload", EXEC_OPTS)
+  return result.code === 0
+    ? { status: "changed" }
+    : failedCommand(`[compose.systemd] daemon-reload failed for ${parameters.unitFileName}`, result)
+}
+
+async function checkComposeSystemdUnit(parameters: {
+  explicitRuntime?: ComposeRuntime
+  filePath: string
+  projectDirectory: string
+  serviceName: string
+  ssh: SshConnection
+}): Promise<"needs-apply" | "ok"> {
+  const runtime = await getRuntime(parameters.ssh, parameters.explicitRuntime)
+  if (!runtime) return NEEDS_APPLY
+
+  const exists = await parameters.ssh.exists(parameters.filePath)
+  if (!exists) return NEEDS_APPLY
+
+  const content = generateSystemdUnit(parameters.projectDirectory, parameters.serviceName, runtime)
+  const remoteContent = await parameters.ssh.readFile(parameters.filePath)
+  return remoteContent.trim() === content.trim() ? "ok" : NEEDS_APPLY
 }
 
 async function prepareComposeSystemdTarget(parameters: {
@@ -483,32 +568,22 @@ export const compose = {
         const content = generateSystemdUnit(projectDirectory, serviceName, runtime)
         const validationFailure = validateGeneratedSystemdUnitContent(content, unitFileName)
         if (validationFailure != null) return validationFailure
-        await prepareComposeSystemdTarget({ connection, filePath, unitFileName })
-        await connection.writeFile(filePath, content, { mode: SYSTEMD_UNIT_MODE })
-        const emptyUnitFailure = await verifyNonEmptySystemdUnit({
+        return applyComposeSystemdUnit({
           connection,
+          content,
           filePath,
           unitFileName,
         })
-        if (emptyUnitFailure != null) return emptyUnitFailure
-
-        const result = await connection.exec("systemctl daemon-reload", EXEC_OPTS)
-        return result.code === 0
-          ? { status: "changed" }
-          : failedCommand(`[compose.systemd] daemon-reload failed for ${unitFileName}`, result)
       },
       async check(ssh: null | SshConnection): Promise<"needs-apply" | "ok"> {
         if (!ssh) return NEEDS_APPLY
-
-        const rt = await getRuntime(ssh, explicitRuntime)
-        if (!rt) return NEEDS_APPLY
-
-        const exists = await ssh.exists(filePath)
-        if (!exists) return NEEDS_APPLY
-
-        const content = generateSystemdUnit(projectDirectory, serviceName, rt)
-        const remoteContent = await ssh.readFile(filePath)
-        return remoteContent.trim() === content.trim() ? "ok" : NEEDS_APPLY
+        return checkComposeSystemdUnit({
+          explicitRuntime,
+          filePath,
+          projectDirectory,
+          serviceName,
+          ssh,
+        })
       },
       name: `compose.systemd: ${unitFileName}`,
     }
