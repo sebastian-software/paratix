@@ -641,6 +641,11 @@ function composeSystemdRecoveryResponses(
   }
 }
 
+function buildComposeSystemdShellFallbackCommand(filePath: string, content: string): string {
+  const encodedContent = Buffer.from(content, "utf8").toString("base64")
+  return `printf '%s' '${encodedContent}' | base64 -d > '${filePath}' && chmod '0644' '${filePath}' && chown 'root:root' '${filePath}'`
+}
+
 describe("compose.systemd — check", () => {
   it("returns needs-apply when conn is null", async () => {
     const mod = compose.systemd({ projectDirectory })
@@ -804,19 +809,41 @@ describe("compose.systemd — apply", () => {
     expect(writtenFiles[0]?.content).toContain("After=network-online.target docker.service")
   })
 
-  it("returns failed and removes the unit file when the written target unit is empty", async () => {
+  it("recovers with a shell fallback when the atomic write leaves an empty unit file", async () => {
+    const expectedUnit = expectedPodmanUnit(projectDirectory, defaultServiceName)
     const mockSsh = createComposeMockSsh({
       ...composeSystemdRecoveryResponses(),
-      [`cat '${unitFilePath}'`]: { code: 0, stdout: "" },
+      [buildComposeSystemdShellFallbackCommand(unitFilePath, expectedUnit)]: { code: 0 },
+      "rm -f '/etc/systemd/system/compose-app.service'": { code: 0 },
+      "systemctl daemon-reload": { code: 0 },
+    })
+    vi.spyOn(mockSsh, "readFile").mockResolvedValueOnce("").mockResolvedValueOnce(expectedUnit)
+
+    const mod = compose.systemd({ projectDirectory })
+    const result = await mod.apply(mockSsh, emptyEnv)
+
+    expect(result.status).toBe("changed")
+    expect(mockSsh.calls).toContain("rm -f '/etc/systemd/system/compose-app.service'")
+    expect(mockSsh.calls).toContain(
+      buildComposeSystemdShellFallbackCommand(unitFilePath, expectedUnit)
+    )
+    expect(mockSsh.calls).toContain("systemctl daemon-reload")
+  })
+
+  it("returns failed when the unit is still empty after the shell fallback", async () => {
+    const expectedUnit = expectedPodmanUnit(projectDirectory, defaultServiceName)
+    const mockSsh = createComposeMockSsh({
+      ...composeSystemdRecoveryResponses(),
+      [buildComposeSystemdShellFallbackCommand(unitFilePath, expectedUnit)]: { code: 0 },
       "rm -f '/etc/systemd/system/compose-app.service'": { code: 0 },
     })
+    vi.spyOn(mockSsh, "readFile").mockResolvedValue("")
 
     const mod = compose.systemd({ projectDirectory })
     const result = await mod.apply(mockSsh, emptyEnv)
 
     expect(result.status).toBe("failed")
-    expect(String(result.error)).toContain("wrote empty unit file")
-    expect(mockSsh.calls).toContain("rm -f '/etc/systemd/system/compose-app.service'")
+    expect(String(result.error)).toContain("even after shell fallback")
     expect(mockSsh.calls).not.toContain("systemctl daemon-reload")
   })
 

@@ -1057,7 +1057,7 @@ describe("CLI entrypoint", () => {
         "_ __   __ _ _ __ __ _| |_ ___  __"
       )
       expect(String((error as { stdout?: Buffer | string } & ExecFailure).stdout)).toContain(
-        PACKAGE_DISPLAY_VERSION
+        PACKAGE_VERSION
       )
     } finally {
       rmSync(tempDirectory, { force: true, recursive: true })
