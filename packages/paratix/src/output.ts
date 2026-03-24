@@ -39,6 +39,8 @@ type ActiveSpinner = {
 }
 
 let activeSpinner: ActiveSpinner | null = null
+let activeRecipeGuideDepths: number[] = []
+let pendingRecipeClosureGuideDepths: number[] = []
 let recipeOutputDepth = -1
 
 export function renderCliHeader(version: string): string {
@@ -86,6 +88,27 @@ function getCurrentOutputDepth(): number {
   return Math.max(recipeOutputDepth, 0)
 }
 
+function buildGuideIndent(
+  baseIndent: string,
+  extraGuideDepths: number[] = [],
+  activeGuideDepths: number[] = activeRecipeGuideDepths
+): string {
+  const indentCharacters = Array.from(baseIndent)
+  const guideDepths = [...activeGuideDepths, ...extraGuideDepths]
+
+  for (const guideDepth of guideDepths) {
+    const guideCharacterIndex = OUTPUT_INDENT_UNIT.length * (guideDepth + 1)
+    if (guideCharacterIndex >= indentCharacters.length) continue
+    indentCharacters[guideCharacterIndex] = "·"
+  }
+
+  return indentCharacters.join("")
+}
+
+function clearPendingRecipeClosureGuides(): void {
+  pendingRecipeClosureGuideDepths = []
+}
+
 function getModuleIndent(): string {
   if (recipeOutputDepth < 0) {
     return OUTPUT_INDENT_UNIT
@@ -95,7 +118,8 @@ function getModuleIndent(): string {
 }
 
 function getRecipeHeaderIndent(): string {
-  return recipeOutputDepth < 0 ? "" : OUTPUT_INDENT_UNIT.repeat(getCurrentOutputDepth() + 1)
+  if (recipeOutputDepth < 0) return ""
+  return OUTPUT_INDENT_UNIT.repeat(getCurrentOutputDepth() + 1)
 }
 
 function getErrorIndent(): string {
@@ -113,18 +137,21 @@ export async function withRecipeOutputScope<T>(
   try {
     return await scopedOperation()
   } finally {
+    activeRecipeGuideDepths = activeRecipeGuideDepths.filter((depth) => depth !== recipeOutputDepth)
+    pendingRecipeClosureGuideDepths = [recipeOutputDepth]
     recipeOutputDepth -= 1
   }
 }
 
 function renderModuleLine(parameters: {
   detail?: string
+  extraGuideDepths?: number[]
   name: string
   status: DisplayStatus
   waitingFrame?: string
 }): string {
-  const { detail, name, status, waitingFrame } = parameters
-  const indent = getModuleIndent()
+  const { detail, extraGuideDepths = [], name, status, waitingFrame } = parameters
+  const indent = buildGuideIndent(getModuleIndent(), extraGuideDepths)
   const icon = getModuleIcon(status, waitingFrame)
   const statusText = getModuleStatusText(status)
   const detailSuffix = detail == null ? "" : `  ${pc.dim(detail)}`
@@ -153,6 +180,7 @@ function stopAnimatedModuleLine(clearCurrentLine = false): void {
 export function startModuleSpinner(name: string, detail?: string): void {
   if (!supportsAnimatedModuleOutput()) return
 
+  clearPendingRecipeClosureGuides()
   stopAnimatedModuleLine()
   const displayModule = formatDisplayModule({
     continuationIndentWidth: getContinuationIndent().length,
@@ -191,6 +219,8 @@ export function startModuleSpinner(name: string, detail?: string): void {
 
 export function resetLiveOutputForTests(): void {
   stopAnimatedModuleLine()
+  activeRecipeGuideDepths = []
+  clearPendingRecipeClosureGuides()
   recipeOutputDepth = -1
 }
 
@@ -200,8 +230,12 @@ export function resetLiveOutputForTests(): void {
  */
 export function printRecipeHeader(name: string): void {
   stopAnimatedModuleLine(true)
+  clearPendingRecipeClosureGuides()
   const header = pc.bold(pc.blue(`[${name}]`))
-  console.log(`${getRecipeHeaderIndent()}${header}`)
+  console.log(`${buildGuideIndent(getRecipeHeaderIndent())}${header}`)
+  if (recipeOutputDepth >= 0) {
+    activeRecipeGuideDepths = [...activeRecipeGuideDepths, recipeOutputDepth]
+  }
 }
 
 export function printRunContext(parameters: {
@@ -217,6 +251,48 @@ export function printRunContext(parameters: {
   )
 }
 
+function printRenderedModuleResult(parameters: {
+  detail?: string
+  extraGuideDepths?: number[]
+  name: string
+  status: DisplayStatus
+}): void {
+  const extraGuideDepths = parameters.extraGuideDepths ?? []
+  const displayModule = formatDisplayModule({
+    continuationIndentWidth: `${buildGuideIndent(
+      OUTPUT_INDENT_UNIT.repeat(Math.max(getCurrentOutputDepth() + 2, 1)),
+      extraGuideDepths
+    )}   `.length,
+    detail: parameters.detail,
+    name: parameters.name,
+    status: parameters.status,
+    terminalColumns: process.stdout.columns,
+  })
+  const line = renderModuleLine({
+    detail: displayModule.detail,
+    extraGuideDepths,
+    name: displayModule.name,
+    status: parameters.status,
+  })
+
+  if (supportsAnimatedModuleOutput() && activeSpinner != null) {
+    stopAnimatedModuleLine()
+    writeAnimatedModuleLine(line)
+    process.stdout.write("\n")
+    for (const detailLine of displayModule.detailLines) {
+      process.stdout.write(
+        `${buildGuideIndent(getContinuationIndent(), extraGuideDepths)}${pc.dim(detailLine)}\n`
+      )
+    }
+    return
+  }
+
+  console.log(line)
+  for (const detailLine of displayModule.detailLines) {
+    console.log(`${buildGuideIndent(getContinuationIndent(), extraGuideDepths)}${pc.dim(detailLine)}`)
+  }
+}
+
 /**
  * Print a single module result row with a status icon, name, and colored status label.
  *
@@ -225,32 +301,18 @@ export function printRunContext(parameters: {
  * @param detail - Optional short detail appended in dim text after the status.
  */
 export function printModuleResult(name: string, status: DisplayStatus, detail?: string): void {
-  const displayModule = formatDisplayModule({
-    continuationIndentWidth: getContinuationIndent().length,
+  clearPendingRecipeClosureGuides()
+  printRenderedModuleResult({ detail, name, status })
+}
+
+export function printRecipeModuleResult(name: string, status: DisplayStatus, detail?: string): void {
+  printRenderedModuleResult({
     detail,
+    extraGuideDepths: pendingRecipeClosureGuideDepths,
     name,
     status,
-    terminalColumns: process.stdout.columns,
   })
-  const line = renderModuleLine({
-    detail: displayModule.detail,
-    name: displayModule.name,
-    status,
-  })
-  if (supportsAnimatedModuleOutput() && activeSpinner != null) {
-    stopAnimatedModuleLine()
-    writeAnimatedModuleLine(line)
-    process.stdout.write("\n")
-    for (const detailLine of displayModule.detailLines) {
-      process.stdout.write(`${getContinuationIndent()}${pc.dim(detailLine)}\n`)
-    }
-    return
-  }
-
-  console.log(line)
-  for (const detailLine of displayModule.detailLines) {
-    console.log(`${getContinuationIndent()}${pc.dim(detailLine)}`)
-  }
+  clearPendingRecipeClosureGuides()
 }
 
 /**

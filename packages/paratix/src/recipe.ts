@@ -4,6 +4,7 @@ import {
   printCommandFailure,
   printModuleResult,
   printRecipeHeader,
+  printRecipeModuleResult,
   startModuleSpinner,
   withRecipeOutputScope,
 } from "./output.js"
@@ -65,6 +66,19 @@ type RecipeLoopStepResult =
   | { kind: "continue"; state: RecipeState }
 
 const INTERRUPTED_BEFORE_APPLY = Symbol("recipe-interrupted-before-apply")
+
+function isRecipeModuleLike(module: Module): boolean {
+  return (module as { _isRecipe?: boolean } & Module)._isRecipe === true
+}
+
+function printRecipeChildResult(module: Module, result: ModuleResult): void {
+  if (isRecipeModuleLike(module)) {
+    printRecipeModuleResult(module.name, result.status)
+    return
+  }
+
+  printModuleResult(module.name, result.status)
+}
 
 function applyRecipeStepToState(
   state: RecipeState,
@@ -131,7 +145,7 @@ async function executeOneModule(parameters: {
   }
 
   const result = await targetModule.apply(connection, currentEnvironment)
-  printModuleResult(targetModule.name, result.status)
+  printRecipeChildResult(targetModule, result)
   if (result.status === "failed" && result.error != null) {
     printCommandFailure(result.error, verbose)
   }
