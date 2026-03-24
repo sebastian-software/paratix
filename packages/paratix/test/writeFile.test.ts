@@ -328,7 +328,13 @@ describe("SshConnectionImpl.writeFile — large content (> 64 KB)", () => {
         stream.emit("close", 0)
       })
       .mockImplementationOnce((_cmd: string, cb: ExecCallback) => {
-        // Fourth call is rm -f — simulates a failure (e.g. permission denied)
+        // Fourth call is the non-empty verification — succeeds
+        const stream = makeStream()
+        cb(undefined, stream)
+        stream.emit("close", 0)
+      })
+      .mockImplementationOnce((_cmd: string, cb: ExecCallback) => {
+        // Fifth call is rm -f — simulates a failure (e.g. permission denied)
         cb(new Error("rm -f failed unexpectedly"), makeStream())
       })
 
@@ -340,6 +346,53 @@ describe("SshConnectionImpl.writeFile — large content (> 64 KB)", () => {
     await expect(
       ssh.writeFile("/etc/large-config", content, { mode: "0600" })
     ).resolves.toBeUndefined()
+  })
+
+  it("rejects when a non-empty write leaves an empty remote file after finalization", async () => {
+    const remoteTmpPath = "/etc/systemd/system/paratix-write.EMPTY"
+    const remotePath = "/etc/systemd/system/example.service"
+
+    const emptyFileExecSpy = vi
+      .fn()
+      .mockImplementationOnce((_cmd: string, cb: ExecCallback) => {
+        const stream = makeStream()
+        cb(undefined, stream)
+        stream.emit("data", Buffer.from(remoteTmpPath))
+        stream.emit("close", 0)
+      })
+      .mockImplementationOnce((_cmd: string, cb: ExecCallback) => {
+        const stream = makeStream()
+        cb(undefined, stream)
+        stream.emit("close", 0)
+      })
+      .mockImplementationOnce((_cmd: string, cb: ExecCallback) => {
+        const stream = makeStream()
+        cb(undefined, stream)
+        stream.emit("close", 0)
+      })
+      .mockImplementationOnce((_cmd: string, cb: ExecCallback) => {
+        const stream = makeStream()
+        cb(undefined, stream)
+        stream.emit("close", 1)
+      })
+      .mockImplementationOnce((_cmd: string, cb: ExecCallback) => {
+        const stream = makeStream()
+        cb(undefined, stream)
+        stream.emit("close", 0)
+      })
+
+    const client = makeClientWithExecSpy(emptyFileExecSpy)
+    const ssh = makeConnectedSsh(client)
+    vi.mocked(sftpUpload).mockResolvedValue()
+
+    await expect(ssh.writeFile(remotePath, "unit-content", { mode: "0644" })).rejects.toThrow(
+      `[ssh.writeFile: ${remotePath}] remote file is empty after upload/finalize; refusing successful write result`
+    )
+
+    const executedCommands = (emptyFileExecSpy.mock.calls as Array<[string, ...unknown[]]>).map(
+      ([command]) => command
+    )
+    expect(executedCommands).toContain(`rm -f '${remoteTmpPath}'`)
   })
 
   // ---------------------------------------------------------------------------
@@ -375,7 +428,13 @@ describe("SshConnectionImpl.writeFile — large content (> 64 KB)", () => {
         stream.emit("close", 0)
       })
       .mockImplementationOnce((_cmd: string, cb: ExecCallback) => {
-        // Fourth call: rm -f — fails with an error whose message contains the password
+        // Fourth call: the non-empty verification — succeeds
+        const stream = makeStream()
+        cb(undefined, stream)
+        stream.emit("close", 0)
+      })
+      .mockImplementationOnce((_cmd: string, cb: ExecCallback) => {
+        // Fifth call: rm -f — fails with an error whose message contains the password
         cb(
           new Error(`permission denied: echo ${sudoPassword} | sudo rm -f ${remoteTmpPath}`),
           makeStream()

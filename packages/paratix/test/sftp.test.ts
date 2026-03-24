@@ -116,7 +116,7 @@ describe("sftpDownload", () => {
       string,
       { mode: number },
     ]
-    localWriteStream.emit("close")
+    localWriteStream.emit("finish")
 
     await expect(promise).resolves.toBeUndefined()
     expect(tempPath).not.toBe("/local/file.txt")
@@ -136,7 +136,7 @@ describe("sftpDownload", () => {
     const localPath = "/local/über ordner/ß-datei.txt"
     const promise = sftpDownload(client, remotePath, localPath)
     const [tempPath] = vi.mocked(createWriteStream).mock.calls[0] as [string]
-    localWriteStream.emit("close")
+    localWriteStream.emit("finish")
 
     await expect(promise).resolves.toBeUndefined()
     const createReadStreamCalls = (
@@ -240,7 +240,7 @@ describe("sftpDownload", () => {
     expect(sftpEnd).toHaveBeenCalledOnce()
   })
 
-  it("resolves when the local writeStream emits close", async () => {
+  it("resolves when the local writeStream emits finish", async () => {
     // Arrange
     const { sftp } = makeSftpSession()
     const client = makeClientMock(sftp)
@@ -250,7 +250,7 @@ describe("sftpDownload", () => {
 
     // Act — start the promise, then simulate a successful transfer completion
     const promise = sftpDownload(client, "/remote/file.txt", "/local/file.txt")
-    localWriteStream.emit("close")
+    localWriteStream.emit("finish")
 
     // Assert — promise must resolve on successful transfer
     await expect(promise).resolves.toBeUndefined()
@@ -268,7 +268,7 @@ describe("sftpDownload", () => {
 
     const promise = sftpDownload(client, "/remote/file.txt", "/local/file.txt")
     const [tempPath] = vi.mocked(createWriteStream).mock.calls[0] as [string]
-    localWriteStream.emit("close")
+    localWriteStream.emit("finish")
 
     await expect(promise).rejects.toThrow("rename failed")
     expect(vi.mocked(unlinkSync)).toHaveBeenCalledWith(tempPath)
@@ -481,7 +481,7 @@ describe("sftpDownload", () => {
 
     // Act — complete the transfer successfully before the timeout fires
     const promise = sftpDownload(client, "/remote/file.txt", "/local/file.txt", 5000)
-    localWriteStream.emit("close")
+    localWriteStream.emit("finish")
     await promise
 
     // Advance well past the timeout — must not cause additional effects
@@ -549,7 +549,7 @@ describe("sftpUpload", () => {
     vi.mocked(createReadStream).mockReturnValue(localReadStream as unknown as ReadStream)
 
     const promise = sftpUpload(client, "/local/file.txt", "/remote/file.txt")
-    sftpWriteStream.emit("close")
+    sftpWriteStream.emit("finish")
 
     await expect(promise).resolves.toBeUndefined()
     const createWriteStreamCalls = (
@@ -569,7 +569,7 @@ describe("sftpUpload", () => {
     const localPath = "/local/über ordner/ß-datei.txt"
     const remotePath = "/remote/über ordner/こんにちは.txt"
     const promise = sftpUpload(client, localPath, remotePath)
-    sftpWriteStream.emit("close")
+    sftpWriteStream.emit("finish")
 
     await expect(promise).resolves.toBeUndefined()
     expect(vi.mocked(createReadStream)).toHaveBeenCalledWith(localPath)
@@ -653,7 +653,7 @@ describe("sftpUpload", () => {
     expect(sftpEnd).toHaveBeenCalledOnce()
   })
 
-  it("resolves when the remote writeStream emits close", async () => {
+  it("resolves when the remote writeStream emits finish", async () => {
     // Arrange
     const { sftp, sftpWriteStream } = makeSftpSession()
     const client = makeClientMock(sftp)
@@ -663,10 +663,31 @@ describe("sftpUpload", () => {
 
     // Act — start the promise, then simulate a successful transfer completion
     const promise = sftpUpload(client, "/local/file.txt", "/remote/file.txt")
-    sftpWriteStream.emit("close")
+    sftpWriteStream.emit("finish")
 
     // Assert — promise must resolve on successful transfer
     await expect(promise).resolves.toBeUndefined()
+  })
+
+  it("does not resolve early when the remote writeStream emits close before finish", async () => {
+    const { sftp, sftpWriteStream } = makeSftpSession()
+    const client = makeClientMock(sftp)
+
+    const localReadStream = makeMockStream()
+    vi.mocked(createReadStream).mockReturnValue(localReadStream as unknown as ReadStream)
+
+    let settled = false
+    const promise = sftpUpload(client, "/local/file.txt", "/remote/file.txt").then(() => {
+      settled = true
+    })
+
+    sftpWriteStream.emit("close")
+    await Promise.resolve()
+    expect(settled).toBe(false)
+
+    sftpWriteStream.emit("finish")
+    await expect(promise).resolves.toBeUndefined()
+    expect(settled).toBe(true)
   })
 
   // ---------------------------------------------------------------------------
@@ -838,7 +859,7 @@ describe("sftpUpload", () => {
 
     // Act — complete the transfer successfully before the timeout fires
     const promise = sftpUpload(client, "/local/file.txt", "/remote/file.txt", 5000)
-    sftpWriteStream.emit("close")
+    sftpWriteStream.emit("finish")
     await promise
 
     // Advance well past the timeout — must not cause additional effects

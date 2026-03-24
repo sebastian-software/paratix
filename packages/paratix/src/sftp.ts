@@ -8,10 +8,42 @@ import { dirname, join } from "node:path"
 /** Default timeout for SFTP transfers in milliseconds (2 minutes). */
 export const SFTP_TIMEOUT = 120_000
 
+type TransferSettlement = {
+  rejectOnce: (reason: Error) => void
+  resolveOnce: () => void
+}
+
+function createTransferSettlement(options: {
+  clearTimer: () => void
+  reject: (reason: Error) => void
+  resolve: () => void
+  sftp: SFTPWrapper
+}): TransferSettlement {
+  let settled = false
+
+  return {
+    rejectOnce(reason: Error) {
+      options.clearTimer()
+      if (settled) return
+      settled = true
+      options.sftp.end()
+      options.reject(reason)
+    },
+    resolveOnce() {
+      options.clearTimer()
+      if (settled) return
+      settled = true
+      options.sftp.end()
+      options.resolve()
+    },
+  }
+}
+
 /**
  * Wire up stream event handlers with a timeout guard, then pipe.
  *
  * @param options - Stream piping options including timeout configuration.
+ * @param options.completionEvent - Stream event that marks a successful transfer.
  * @param options.readStream - The source stream to read from.
  * @param options.reject - Promise reject callback.
  * @param options.resolve - Promise resolve callback.
@@ -21,6 +53,7 @@ export const SFTP_TIMEOUT = 120_000
  * @param options.writeStream - The destination stream to write to.
  */
 function wireStreams(options: {
+  completionEvent?: "close" | "finish"
   readStream: Readable
   reject: (reason: Error) => void
   resolve: () => void
@@ -29,43 +62,43 @@ function wireStreams(options: {
   timeoutMessage: string
   writeStream: Writable
 }): void {
-  const { readStream, reject, resolve, sftp, timeout, timeoutMessage, writeStream } = options
-
-  let settled = false
+  const {
+    completionEvent = "finish",
+    readStream,
+    reject,
+    resolve,
+    sftp,
+    timeout,
+    timeoutMessage,
+    writeStream,
+  } = options
 
   const timer = setTimeout(() => {
-    if (settled) return
-    settled = true
     readStream.destroy()
     writeStream.destroy()
-    sftp.end()
-    reject(new Error(timeoutMessage))
+    settlement.rejectOnce(new Error(timeoutMessage))
   }, timeout)
+  const settlement = createTransferSettlement({
+    clearTimer: () => {
+      clearTimeout(timer)
+    },
+    reject,
+    resolve,
+    sftp,
+  })
 
-  writeStream.on("close", () => {
-    clearTimeout(timer)
-    if (settled) return
-    settled = true
-    sftp.end()
-    resolve()
+  writeStream.on(completionEvent, () => {
+    settlement.resolveOnce()
   })
   writeStream.on("error", (writeError: Error) => {
-    clearTimeout(timer)
-    if (settled) return
-    settled = true
     readStream.destroy()
     if (typeof writeStream.destroy === "function") writeStream.destroy()
-    sftp.end()
-    reject(writeError)
+    settlement.rejectOnce(writeError)
   })
   readStream.on("error", (readError: Error) => {
-    clearTimeout(timer)
-    if (settled) return
-    settled = true
     if (typeof readStream.destroy === "function") readStream.destroy()
     if (typeof writeStream.destroy === "function") writeStream.destroy()
-    sftp.end()
-    reject(readError)
+    settlement.rejectOnce(readError)
   })
   readStream.pipe(writeStream)
 }
@@ -113,6 +146,7 @@ export async function sftpDownload(
       shouldCleanupTemporaryFile = true
 
       wireStreams({
+        completionEvent: "finish",
         readStream,
         reject: rejectWithCleanup,
         resolve: () => {
@@ -164,6 +198,7 @@ export async function sftpUpload(
       const writeStream = sftp.createWriteStream(remotePath, { mode: 0o600 })
 
       wireStreams({
+        completionEvent: "finish",
         readStream,
         reject,
         resolve,

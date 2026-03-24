@@ -360,6 +360,7 @@ export class SshConnectionImpl implements SshConnection {
       await sftpUpload(client, localTemporary, remoteTemporary)
       await this.setRemoteTempMode(remoteTemporary, temporaryMode)
       await this.finalizeRemoteTempFile(remoteTemporary, remotePath, temporaryMode)
+      await this.assertNonEmptyRemoteWrite(remotePath, content)
     } finally {
       try {
         // eslint-disable-next-line security/detect-non-literal-fs-filename
@@ -374,6 +375,16 @@ export class SshConnectionImpl implements SshConnection {
           `Warning: failed to remove temp file ${remoteTemporary}: ${maskSecrets(String(cleanupError), this.buildSecrets())}\n`
         )
       }
+    }
+  }
+
+  private async assertNonEmptyRemoteWrite(remotePath: string, content: string): Promise<void> {
+    if (content.length === 0) return
+    const nonEmpty = await this.test(`[ -s ${shellQuote(remotePath)} ]`)
+    if (!nonEmpty) {
+      throw new Error(
+        `[ssh.writeFile: ${remotePath}] remote file is empty after upload/finalize; refusing successful write result`
+      )
     }
   }
 
