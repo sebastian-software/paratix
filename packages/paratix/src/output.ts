@@ -88,18 +88,29 @@ function getCurrentOutputDepth(): number {
   return Math.max(recipeOutputDepth, 0)
 }
 
+function getGuideDot(depth: number): string {
+  return depth % 2 === 0 ? pc.gray("·") : pc.dim("·")
+}
+
 function buildGuideIndent(
   baseIndent: string,
-  extraGuideDepths: number[] = [],
-  activeGuideDepths: number[] = activeRecipeGuideDepths
+  options?: {
+    activeGuideDepths?: number[]
+    colorize?: boolean
+    extraGuideDepths?: number[]
+  }
 ): string {
   const indentCharacters = Array.from(baseIndent)
-  const guideDepths = [...activeGuideDepths, ...extraGuideDepths]
+  const guideDepths = [
+    ...(options?.activeGuideDepths ?? activeRecipeGuideDepths),
+    ...(options?.extraGuideDepths ?? []),
+  ]
 
   for (const guideDepth of guideDepths) {
     const guideCharacterIndex = OUTPUT_INDENT_UNIT.length * (guideDepth + 1)
     if (guideCharacterIndex >= indentCharacters.length) continue
-    indentCharacters[guideCharacterIndex] = "·"
+    indentCharacters[guideCharacterIndex] =
+      options?.colorize === false ? "·" : getGuideDot(guideDepth)
   }
 
   return indentCharacters.join("")
@@ -151,11 +162,12 @@ function renderModuleLine(parameters: {
   waitingFrame?: string
 }): string {
   const { detail, extraGuideDepths = [], name, status, waitingFrame } = parameters
-  const indent = buildGuideIndent(getModuleIndent(), extraGuideDepths)
+  const baseIndent = getModuleIndent()
+  const indent = buildGuideIndent(baseIndent, { extraGuideDepths })
   const icon = getModuleIcon(status, waitingFrame)
   const statusText = getModuleStatusText(status)
   const detailSuffix = detail == null ? "" : `  ${pc.dim(detail)}`
-  const alignedNameWidth = Math.max(MODULE_NAME_WIDTH - indent.length, MIN_MODULE_NAME_WIDTH)
+  const alignedNameWidth = Math.max(MODULE_NAME_WIDTH - baseIndent.length, MIN_MODULE_NAME_WIDTH)
   return `${indent}${icon}  ${name.padEnd(alignedNameWidth)}  ${statusText}${detailSuffix}`
 }
 
@@ -261,7 +273,7 @@ function printRenderedModuleResult(parameters: {
   const displayModule = formatDisplayModule({
     continuationIndentWidth: `${buildGuideIndent(
       OUTPUT_INDENT_UNIT.repeat(Math.max(getCurrentOutputDepth() + 2, 1)),
-      extraGuideDepths
+      { extraGuideDepths }
     )}   `.length,
     detail: parameters.detail,
     name: parameters.name,
@@ -281,7 +293,7 @@ function printRenderedModuleResult(parameters: {
     process.stdout.write("\n")
     for (const detailLine of displayModule.detailLines) {
       process.stdout.write(
-        `${buildGuideIndent(getContinuationIndent(), extraGuideDepths)}${pc.dim(detailLine)}\n`
+        `${buildGuideIndent(getContinuationIndent(), { extraGuideDepths })}${pc.dim(detailLine)}\n`
       )
     }
     return
@@ -289,7 +301,9 @@ function printRenderedModuleResult(parameters: {
 
   console.log(line)
   for (const detailLine of displayModule.detailLines) {
-    console.log(`${buildGuideIndent(getContinuationIndent(), extraGuideDepths)}${pc.dim(detailLine)}`)
+    console.log(
+      `${buildGuideIndent(getContinuationIndent(), { extraGuideDepths })}${pc.dim(detailLine)}`
+    )
   }
 }
 
