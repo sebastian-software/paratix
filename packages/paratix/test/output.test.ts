@@ -41,8 +41,14 @@ describe("printModuleResult", () => {
   it("keeps a separator between exact-width names and the status", () => {
     printModuleResult("package.installed: nginx, curl, htop", "changed", "(dry-run)")
 
-    expect(consoleLogs).toHaveLength(1)
-    expect(consoleLogs[0]).toContain("htop  changed  (dry-run)")
+    expect(consoleLogs).toHaveLength(2)
+    expect(consoleLogs[0]).toContain("package.installed")
+    expect(consoleLogs[0]).toContain("changed")
+    expect(consoleLogs[0]).toContain("3 packages")
+    expect(consoleLogs[0]).toContain("(dry-run)")
+    expect(consoleLogs[1]).toContain("nginx")
+    expect(consoleLogs[1]).toContain("curl")
+    expect(consoleLogs[1]).toContain("htop")
   })
 
   it("renders a live running line on TTY and replaces it with the final result", () => {
@@ -84,6 +90,64 @@ describe("printModuleResult", () => {
       Object.defineProperty(process.stdout, "cursorTo", {
         configurable: true,
         value: originalCursorTo,
+      })
+    }
+  })
+
+  it("renders package modules compactly while the spinner is active", () => {
+    const writes: string[] = []
+    vi.spyOn(process.stdout, "write").mockImplementation(((chunk: string | Uint8Array) => {
+      writes.push(String(chunk))
+      return true
+    }) as typeof process.stdout.write)
+    const originalIsTTY = process.stdout.isTTY
+    const originalClearLine = bindOptionalStdoutMethod("clearLine")
+    const originalCursorTo = bindOptionalStdoutMethod("cursorTo")
+    const originalColumns = process.stdout.columns
+
+    Object.defineProperty(process.stdout, "isTTY", { configurable: true, value: true })
+    Object.defineProperty(process.stdout, "clearLine", {
+      configurable: true,
+      value: vi.fn(() => true),
+    })
+    Object.defineProperty(process.stdout, "cursorTo", {
+      configurable: true,
+      value: vi.fn(() => true),
+    })
+    Object.defineProperty(process.stdout, "columns", {
+      configurable: true,
+      value: 120,
+    })
+
+    try {
+      startModuleSpinner(
+        "package.installed: ca-certificates, podman, podman-compose, docker-ce, docker-ce-cli"
+      )
+      printModuleResult(
+        "package.installed: ca-certificates, podman, podman-compose, docker-ce, docker-ce-cli",
+        "ok"
+      )
+
+      expect(writes.some((entry) => entry.includes("package.installed"))).toBe(true)
+      expect(writes.some((entry) => entry.includes("5 packages"))).toBe(true)
+      expect(writes.some((entry) => entry.includes("docker-compose-plugin"))).toBe(false)
+      expect(writes.some((entry) => entry.includes("ca-certificates, podman"))).toBe(false)
+    } finally {
+      Object.defineProperty(process.stdout, "isTTY", {
+        configurable: true,
+        value: originalIsTTY,
+      })
+      Object.defineProperty(process.stdout, "clearLine", {
+        configurable: true,
+        value: originalClearLine,
+      })
+      Object.defineProperty(process.stdout, "cursorTo", {
+        configurable: true,
+        value: originalCursorTo,
+      })
+      Object.defineProperty(process.stdout, "columns", {
+        configurable: true,
+        value: originalColumns,
       })
     }
   })

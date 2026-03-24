@@ -2,6 +2,7 @@ import pc from "picocolors"
 
 import type { ModuleStatus } from "./types.js"
 
+import { fitAnimatedModuleLine, formatDisplayModule } from "./outputFormatting.js"
 import { CommandError } from "./sshHelpers.js"
 
 const MODULE_NAME_WIDTH = 36
@@ -33,7 +34,6 @@ type ActiveSpinner = {
   detail?: string
   frameIndex: number
   interval: NodeJS.Timeout
-  moduleName: string
 }
 
 let activeSpinner: ActiveSpinner | null = null
@@ -96,6 +96,10 @@ function getErrorIndent(): string {
   return `${getModuleIndent()}│ `
 }
 
+function getContinuationIndent(): string {
+  return `${getModuleIndent()}   `
+}
+
 export async function withRecipeOutputScope<T>(
   scopedOperation: () => Promise<T> | T
 ): Promise<T> {
@@ -123,7 +127,7 @@ function renderModuleLine(parameters: {
 function writeAnimatedModuleLine(line: string): void {
   process.stdout.clearLine(0)
   process.stdout.cursorTo(0)
-  process.stdout.write(line)
+  process.stdout.write(fitAnimatedModuleLine(line, process.stdout.columns))
 }
 
 function stopAnimatedModuleLine(): void {
@@ -137,27 +141,38 @@ export function startModuleSpinner(name: string, detail?: string): void {
   if (!supportsAnimatedModuleOutput()) return
 
   stopAnimatedModuleLine()
+  const displayModule = formatDisplayModule({
+    continuationIndentWidth: getContinuationIndent().length,
+    detail,
+    name,
+    status: "waiting",
+    terminalColumns: process.stdout.columns,
+  })
 
   const spinner: ActiveSpinner = {
-    detail,
+    detail: displayModule.detail,
     frameIndex: 0,
     interval: setInterval(() => {
       spinner.frameIndex = (spinner.frameIndex + 1) % SPINNER_FRAMES.length
       writeAnimatedModuleLine(
         renderModuleLine({
           detail: spinner.detail,
-          name: spinner.moduleName,
+          name: displayModule.name,
           status: "waiting",
           waitingFrame: SPINNER_FRAMES[spinner.frameIndex],
         })
       )
     }, SPINNER_FRAME_INTERVAL_MS),
-    moduleName: name,
   }
 
   activeSpinner = spinner
   writeAnimatedModuleLine(
-    renderModuleLine({ detail, name, status: "waiting", waitingFrame: SPINNER_FRAMES[0] })
+    renderModuleLine({
+      detail: displayModule.detail,
+      name: displayModule.name,
+      status: "waiting",
+      waitingFrame: SPINNER_FRAMES[0],
+    })
   )
 }
 
@@ -197,15 +212,32 @@ export function printRunContext(parameters: {
  * @param detail - Optional short detail appended in dim text after the status.
  */
 export function printModuleResult(name: string, status: DisplayStatus, detail?: string): void {
-  const line = renderModuleLine({ detail, name, status })
+  const displayModule = formatDisplayModule({
+    continuationIndentWidth: getContinuationIndent().length,
+    detail,
+    name,
+    status,
+    terminalColumns: process.stdout.columns,
+  })
+  const line = renderModuleLine({
+    detail: displayModule.detail,
+    name: displayModule.name,
+    status,
+  })
   if (supportsAnimatedModuleOutput() && activeSpinner != null) {
     stopAnimatedModuleLine()
     writeAnimatedModuleLine(line)
     process.stdout.write("\n")
+    for (const detailLine of displayModule.detailLines) {
+      process.stdout.write(`${getContinuationIndent()}${pc.dim(detailLine)}\n`)
+    }
     return
   }
 
   console.log(line)
+  for (const detailLine of displayModule.detailLines) {
+    console.log(`${getContinuationIndent()}${pc.dim(detailLine)}`)
+  }
 }
 
 /**
