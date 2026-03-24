@@ -72,7 +72,7 @@ npm run apply
 | ---------------- | ------------------------------------------------------------------------- |
 | `server.ts`      | Your playbook. Edit this file.                                            |
 | `package.json`   | Includes `apply` and `apply:dry` scripts.                                 |
-| `tsconfig.json`  | TypeScript config (ES2024, NodeNext, strict).                             |
+| `tsconfig.json`  | TypeScript config (ES2024, ESNext/Bundler, strict) for direct `tsx` use.  |
 | `.gitignore`     | Excludes `node_modules/`, `dist/`, `.env`, and log files.                 |
 | `.env.example`   | Template for secrets. Copy to `.env` and fill in values.                  |
 | `files/`         | Place template files here. They get uploaded to the server at apply time. |
@@ -169,6 +169,14 @@ export default server({
   ],
 })
 ```
+
+The generated `tsconfig.json` is intentionally DX-oriented for `tsx`-executed TypeScript projects:
+
+- `module: "ESNext"`
+- `moduleResolution: "Bundler"`
+- `include: ["**/*.ts"]`
+
+That means extensionless relative imports in your `.ts` sources work without NodeNext-style `.js` suffixes. This is a deliberate trade-off in favor of authoring ergonomics over strict Node-ESM path checking.
 
 Wenn dein Server initial nur `root` per SSH anbietet, wähle im Prompt `root` oder rufe das Scaffold nicht-interaktiv mit `--initial-user root` auf. Dieses Template bleibt bewusst als temporärer Bootstrap markiert, erstellt den dedizierten Admin-User, legt einen `NOPASSWD sudo`-Eintrag für ihn unter `/etc/sudoers.d/` an und lässt Root-Login nur vorübergehend auf `prohibit-password`, bis du `ssh.user` auf den Admin-User umgestellt hast.
 

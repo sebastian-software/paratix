@@ -726,6 +726,22 @@ describe("writeProjectFiles", () => {
     expect(existsSync(join(TEST_DIR, "server.ts"))).toBe(true)
   })
 
+  it("generated tsconfig.json uses the DX-oriented ESNext/Bundler defaults", () => {
+    writeProjectFiles(TEST_DIR)
+
+    const raw = readFileSync(join(TEST_DIR, "tsconfig.json"), "utf8")
+    const parsed = JSON.parse(raw) as {
+      compilerOptions: { module: string; moduleResolution: string }
+      include: string[]
+    }
+
+    expect(parsed.compilerOptions).toMatchObject({
+      module: "ESNext",
+      moduleResolution: "Bundler",
+    })
+    expect(parsed.include).toStrictEqual(["**/*.ts"])
+  })
+
   it("generated server.ts uses packages.upgrade and packages.installed (not apt.*)", () => {
     // Regression: SERVER_TEMPLATE previously used the deprecated apt module
     // (apt.upgrade / apt.installed). After Plan-0013 refactoring the correct
