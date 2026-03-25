@@ -19,7 +19,6 @@ function expectedQuadletContent(): string {
     "ContainerName=traefik",
     "AutoUpdate=registry",
     "Exec=--configFile /etc/traefik/traefik.yml",
-    "Restart=always",
     "Network=proxy",
     "PodmanArgs=--log-driver journald",
     "PublishPort=80:80",
@@ -28,6 +27,9 @@ function expectedQuadletContent(): string {
     "Volume=/var/log/traefik:/var/log/traefik:Z",
     "Environment=DOMAIN=example.com",
     "Environment=TZ=Europe/Berlin",
+    "",
+    "[Service]",
+    "Restart=always",
     "",
     "[Install]",
     "WantedBy=multi-user.target",
@@ -220,5 +222,191 @@ describe("quadlet.container", () => {
         name: "../mailcow",
       })
     }).toThrow(/name must match/v)
+  })
+
+  it("generates all container section fields in correct order", async () => {
+    const mod = quadlet.container({
+      addCapability: ["NET_ADMIN"],
+      addDevice: ["/dev/net/tun"],
+      annotation: { "io.containers.autoupdate": "registry" },
+      dns: ["1.1.1.1"],
+      dnsOption: ["ndots:5"],
+      dnsSearch: ["example.com"],
+      dropCapability: ["ALL"],
+      entrypoint: ["/entrypoint.sh"],
+      environment: { APP: "test" },
+      exposeHostPort: ["9090"],
+      groupAdd: ["audio"],
+      hostName: "myhost",
+      image: "docker.io/library/nginx:latest",
+      ip: "10.88.0.10",
+      ip6: "fd00::10",
+      label: { "app.version": "1.0" },
+      logDriver: "journald",
+      mask: ["/proc/acpi"],
+      mount: ["type=tmpfs,tmpfs-size=512M,destination=/tmp"],
+      name: "full-container",
+      networks: ["backend"],
+      noNewPrivileges: true,
+      notify: true,
+      podmanArgs: ["--cgroups=split"],
+      publishPorts: ["8080:80"],
+      pull: "always",
+      readOnly: true,
+      runInit: true,
+      seccompProfile: "/etc/seccomp.json",
+      secret: ["db-password"],
+      securityLabelDisable: true,
+      securityLabelType: "spc_t",
+      stopTimeout: 30,
+      sysctl: { "net.core.somaxconn": "1024" },
+      timezone: "Europe/Berlin",
+      tmpfs: ["/run"],
+      ulimit: ["nofile=1024:2048"],
+      unmask: ["/proc/latency_stats"],
+      user: "1000:1000",
+      userNs: "keep-id",
+      volumes: ["/data:/data:Z"],
+      workingDir: "/app",
+    })
+
+    const ssh = createMockSsh({
+      "mkdir -p '/etc/containers/systemd'": { code: 0 },
+      "systemctl daemon-reload": { code: 0 },
+    })
+    const writeFile = vi.spyOn(ssh, "writeFile").mockResolvedValue()
+
+    await mod.apply(ssh, emptyEnv)
+
+    const content = writeFile.mock.calls[0][1]
+
+    // Verify all fields are present
+    expect(content).toContain("Image=docker.io/library/nginx:latest")
+    expect(content).toContain("Pull=always")
+    expect(content).toContain("Entrypoint=/entrypoint.sh")
+    expect(content).toContain("WorkingDir=/app")
+    expect(content).toContain("User=1000:1000")
+    expect(content).toContain("UserNS=keep-id")
+    expect(content).toContain("GroupAdd=audio")
+    expect(content).toContain("HostName=myhost")
+    expect(content).toContain("Network=backend")
+    expect(content).toContain("DNS=1.1.1.1")
+    expect(content).toContain("DNSOption=ndots:5")
+    expect(content).toContain("DNSSearch=example.com")
+    expect(content).toContain("IP=10.88.0.10")
+    expect(content).toContain("IP6=fd00::10")
+    expect(content).toContain("AddCapability=NET_ADMIN")
+    expect(content).toContain("DropCapability=ALL")
+    expect(content).toContain("SecurityLabelDisable=true")
+    expect(content).toContain("SecurityLabelType=spc_t")
+    expect(content).toContain("SeccompProfile=/etc/seccomp.json")
+    expect(content).toContain("NoNewPrivileges=true")
+    expect(content).toContain("ReadOnly=true")
+    expect(content).toContain("Notify=true")
+    expect(content).toContain("RunInit=true")
+    expect(content).toContain("LogDriver=journald")
+    expect(content).toContain("Timezone=Europe/Berlin")
+    expect(content).toContain("StopTimeout=30")
+    expect(content).toContain("PodmanArgs=--cgroups=split")
+    expect(content).toContain("PublishPort=8080:80")
+    expect(content).toContain("ExposeHostPort=9090")
+    expect(content).toContain("Volume=/data:/data:Z")
+    expect(content).toContain("Mount=type=tmpfs,tmpfs-size=512M,destination=/tmp")
+    expect(content).toContain("Tmpfs=/run")
+    expect(content).toContain("AddDevice=/dev/net/tun")
+    expect(content).toContain("Secret=db-password")
+    expect(content).toContain("Environment=APP=test")
+    expect(content).toContain("Label=app.version=1.0")
+    expect(content).toContain("Annotation=io.containers.autoupdate=registry")
+    expect(content).toContain("Sysctl=net.core.somaxconn=1024")
+    expect(content).toContain("Ulimit=nofile=1024:2048")
+    expect(content).toContain("Mask=/proc/acpi")
+    expect(content).toContain("Unmask=/proc/latency_stats")
+  })
+
+  it("renders Restart in [Service] section, not [Container]", async () => {
+    const mod = quadlet.container({
+      image: "docker.io/library/nginx:latest",
+      name: "svc-test",
+      restart: "on-failure",
+      timeoutStartSec: 90,
+      timeoutStopSec: 30,
+    })
+
+    const ssh = createMockSsh({
+      "mkdir -p '/etc/containers/systemd'": { code: 0 },
+      "systemctl daemon-reload": { code: 0 },
+    })
+    const writeFile = vi.spyOn(ssh, "writeFile").mockResolvedValue()
+
+    await mod.apply(ssh, emptyEnv)
+
+    const content = writeFile.mock.calls[0][1]
+    const containerSection = content.split("[Service]")[0]
+    const serviceSection = content.split("[Service]")[1]?.split("[Install]")[0]
+
+    expect(containerSection).not.toContain("Restart=")
+    expect(serviceSection).toContain("Restart=on-failure")
+    expect(serviceSection).toContain("TimeoutStartSec=90")
+    expect(serviceSection).toContain("TimeoutStopSec=30")
+  })
+
+  it("omits [Service] section when no service fields are set", async () => {
+    const mod = quadlet.container({
+      image: "docker.io/library/nginx:latest",
+      name: "no-svc",
+    })
+
+    const ssh = createMockSsh({
+      "mkdir -p '/etc/containers/systemd'": { code: 0 },
+      "systemctl daemon-reload": { code: 0 },
+    })
+    const writeFile = vi.spyOn(ssh, "writeFile").mockResolvedValue()
+
+    await mod.apply(ssh, emptyEnv)
+
+    const content = writeFile.mock.calls[0][1]
+    expect(content).not.toContain("[Service]")
+  })
+
+  it("renders HealthOnFailure when healthCmd is set", async () => {
+    const mod = quadlet.container({
+      healthCmd: "curl -f http://localhost",
+      healthOnFailure: "restart",
+      image: "docker.io/library/nginx:latest",
+      name: "health-on-fail",
+    })
+
+    const ssh = createMockSsh({
+      "mkdir -p '/etc/containers/systemd'": { code: 0 },
+      "systemctl daemon-reload": { code: 0 },
+    })
+    const writeFile = vi.spyOn(ssh, "writeFile").mockResolvedValue()
+
+    await mod.apply(ssh, emptyEnv)
+
+    const content = writeFile.mock.calls[0][1]
+    expect(content).toContain("HealthOnFailure=restart")
+  })
+
+  it("renders boolean fields as true/false strings", async () => {
+    const mod = quadlet.container({
+      image: "docker.io/library/nginx:latest",
+      name: "bool-test",
+      noNewPrivileges: false,
+      readOnly: false,
+    })
+
+    const ssh = createMockSsh({
+      "mkdir -p '/etc/containers/systemd'": { code: 0 },
+      "systemctl daemon-reload": { code: 0 },
+    })
+    const writeFile = vi.spyOn(ssh, "writeFile").mockResolvedValue()
+
+    await mod.apply(ssh, emptyEnv)
+
+    const content = writeFile.mock.calls[0][1]
+    expect(content).toContain("NoNewPrivileges=false")
+    expect(content).toContain("ReadOnly=false")
   })
 })

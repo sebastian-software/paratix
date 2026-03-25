@@ -1,0 +1,255 @@
+// cspell:ignore quadlet healthcheck podman seccomp tmpfs
+
+type QuadletAutoUpdate = "local" | "registry"
+type QuadletHealthOnFailure = "kill" | "none" | "restart" | "stop"
+type QuadletPullPolicy = "always" | "missing" | "never" | "newer"
+type QuadletRestartPolicy =
+  | "always"
+  | "no"
+  | "on-abnormal"
+  | "on-abort"
+  | "on-failure"
+  | "on-success"
+  | "on-watchdog"
+
+export type QuadletContainerOptions = {
+  addCapability?: string[]
+  addDevice?: string[]
+  annotation?: Record<string, string>
+  autoUpdate?: QuadletAutoUpdate
+  containerName?: string
+  description?: string
+  dns?: string[]
+  dnsOption?: string[]
+  dnsSearch?: string[]
+  dropCapability?: string[]
+  entrypoint?: string[]
+  environment?: Record<string, string>
+  environmentFiles?: string[]
+  exec?: string[]
+  exposeHostPort?: string[]
+  groupAdd?: string[]
+  healthCmd?: string
+  healthInterval?: string
+  healthOnFailure?: QuadletHealthOnFailure
+  healthRetries?: number
+  healthStartPeriod?: string
+  healthTimeout?: string
+  hostName?: string
+  image: string
+  ip?: string
+  ip6?: string
+  label?: Record<string, string>
+  logDriver?: string
+  mask?: string[]
+  mount?: string[]
+  name: string
+  networks?: string[]
+  noNewPrivileges?: boolean
+  notify?: boolean
+  podmanArgs?: string[]
+  publishPorts?: string[]
+  pull?: QuadletPullPolicy
+  readOnly?: boolean
+  restart?: QuadletRestartPolicy
+  runInit?: boolean
+  seccompProfile?: string
+  secret?: string[]
+  securityLabelDisable?: boolean
+  securityLabelType?: string
+  stopTimeout?: number
+  sysctl?: Record<string, string>
+  timeoutStartSec?: number
+  timeoutStopSec?: number
+  timezone?: string
+  tmpfs?: string[]
+  ulimit?: string[]
+  unmask?: string[]
+  user?: string
+  userNs?: string
+  volumes?: string[]
+  wantedBy?: string
+  workingDir?: string
+}
+
+function sanitizeQuadletValue(value: string): string {
+  return value.replaceAll(/[\n\r]/gv, "")
+}
+
+function renderQuadletLine(key: string, value: string): string {
+  return `${key}=${sanitizeQuadletValue(value)}`
+}
+
+function renderQuadletRepeated(key: string, values: string[]): string[] {
+  return values.map((value) => renderQuadletLine(key, value))
+}
+
+function renderQuadletKeyValue(key: string, record: Record<string, string>): string[] {
+  return Object.entries(record)
+    .sort(([left], [right]) => left.localeCompare(right))
+    .map(([k, v]) => renderQuadletLine(key, `${k}=${v}`))
+}
+
+function maybeRenderQuadletLine(key: string, value: null | string | undefined): null | string {
+  if (value == null || value === "") return null
+  return renderQuadletLine(key, value)
+}
+
+function maybeRenderQuadletBool(key: string, value: boolean | undefined): null | string {
+  if (value == null) return null
+  return renderQuadletLine(key, String(value))
+}
+
+function maybeRenderQuadletNumber(key: string, value: number | undefined): null | string {
+  if (value == null) return null
+  return renderQuadletLine(key, String(value))
+}
+
+function compactQuadletLines(lines: Array<null | string>): string[] {
+  return lines.filter((line): line is string => line != null)
+}
+
+export function renderQuadletSection(name: string, lines: string[]): string {
+  return [`[${name}]`, ...lines, ""].join("\n")
+}
+
+function buildQuadletIdentityLines(options: QuadletContainerOptions): Array<null | string> {
+  return [
+    renderQuadletLine("Image", options.image),
+    maybeRenderQuadletLine("ContainerName", options.containerName),
+    maybeRenderQuadletLine("AutoUpdate", options.autoUpdate),
+    maybeRenderQuadletLine("Pull", options.pull),
+    maybeRenderQuadletLine("Entrypoint", options.entrypoint?.join(" ")),
+    maybeRenderQuadletLine("Exec", options.exec?.join(" ")),
+    maybeRenderQuadletLine("WorkingDir", options.workingDir),
+    maybeRenderQuadletLine("User", options.user),
+    maybeRenderQuadletLine("UserNS", options.userNs),
+  ]
+}
+
+function buildQuadletNetworkLines(options: QuadletContainerOptions): Array<null | string> {
+  return [
+    maybeRenderQuadletLine("HostName", options.hostName),
+    ...renderQuadletRepeated("Network", options.networks ?? []),
+    ...renderQuadletRepeated("DNS", options.dns ?? []),
+    ...renderQuadletRepeated("DNSOption", options.dnsOption ?? []),
+    ...renderQuadletRepeated("DNSSearch", options.dnsSearch ?? []),
+    maybeRenderQuadletLine("IP", options.ip),
+    maybeRenderQuadletLine("IP6", options.ip6),
+  ]
+}
+
+function buildQuadletSecurityLines(options: QuadletContainerOptions): Array<null | string> {
+  return [
+    ...renderQuadletRepeated("AddCapability", options.addCapability ?? []),
+    ...renderQuadletRepeated("DropCapability", options.dropCapability ?? []),
+    maybeRenderQuadletBool("SecurityLabelDisable", options.securityLabelDisable),
+    maybeRenderQuadletLine("SecurityLabelType", options.securityLabelType),
+    maybeRenderQuadletLine("SeccompProfile", options.seccompProfile),
+    maybeRenderQuadletBool("NoNewPrivileges", options.noNewPrivileges),
+    maybeRenderQuadletBool("ReadOnly", options.readOnly),
+  ]
+}
+
+function buildQuadletRuntimeLines(options: QuadletContainerOptions): Array<null | string> {
+  return [
+    maybeRenderQuadletBool("Notify", options.notify),
+    maybeRenderQuadletBool("RunInit", options.runInit),
+    maybeRenderQuadletLine("LogDriver", options.logDriver),
+    maybeRenderQuadletLine("Timezone", options.timezone),
+    maybeRenderQuadletNumber("StopTimeout", options.stopTimeout),
+  ]
+}
+
+function buildQuadletStorageLines(options: QuadletContainerOptions): string[] {
+  return [
+    ...renderQuadletRepeated("PublishPort", options.publishPorts ?? []),
+    ...renderQuadletRepeated("ExposeHostPort", options.exposeHostPort ?? []),
+    ...renderQuadletRepeated("Volume", options.volumes ?? []),
+    ...renderQuadletRepeated("Mount", options.mount ?? []),
+    ...renderQuadletRepeated("Tmpfs", options.tmpfs ?? []),
+    ...renderQuadletRepeated("AddDevice", options.addDevice ?? []),
+  ]
+}
+
+function buildQuadletMetadataLines(options: QuadletContainerOptions): string[] {
+  return [
+    ...renderQuadletRepeated("Secret", options.secret ?? []),
+    ...renderQuadletEnvironment(options.environment ?? {}),
+    ...renderQuadletRepeated("EnvironmentFile", options.environmentFiles ?? []),
+    ...renderQuadletKeyValue("Label", options.label ?? {}),
+    ...renderQuadletKeyValue("Annotation", options.annotation ?? {}),
+  ]
+}
+
+function renderQuadletEnvironment(environment: Record<string, string>): string[] {
+  return Object.entries(environment)
+    .sort(([left], [right]) => left.localeCompare(right))
+    .map(([key, value]) => renderQuadletLine("Environment", `${key}=${value}`))
+}
+
+function buildQuadletTuningLines(options: QuadletContainerOptions): string[] {
+  return [
+    ...renderQuadletKeyValue("Sysctl", options.sysctl ?? {}),
+    ...renderQuadletRepeated("Ulimit", options.ulimit ?? []),
+    ...renderQuadletRepeated("GroupAdd", options.groupAdd ?? []),
+    ...renderQuadletRepeated("Mask", options.mask ?? []),
+    ...renderQuadletRepeated("Unmask", options.unmask ?? []),
+  ]
+}
+
+function buildQuadletHealthcheckLines(options: QuadletContainerOptions): string[] {
+  if (options.healthCmd == null) return []
+  return compactQuadletLines([
+    renderQuadletLine("HealthCmd", options.healthCmd),
+    maybeRenderQuadletLine("HealthInterval", options.healthInterval),
+    maybeRenderQuadletLine("HealthTimeout", options.healthTimeout),
+    maybeRenderQuadletNumber("HealthRetries", options.healthRetries),
+    maybeRenderQuadletLine("HealthStartPeriod", options.healthStartPeriod),
+    maybeRenderQuadletLine("HealthOnFailure", options.healthOnFailure),
+  ])
+}
+
+export function buildQuadletContainerLines(options: QuadletContainerOptions): string[] {
+  return compactQuadletLines([
+    ...buildQuadletIdentityLines(options),
+    ...buildQuadletNetworkLines(options),
+    ...buildQuadletSecurityLines(options),
+    ...buildQuadletRuntimeLines(options),
+    ...renderQuadletRepeated("PodmanArgs", options.podmanArgs ?? []),
+    ...buildQuadletStorageLines(options),
+    ...buildQuadletMetadataLines(options),
+    ...buildQuadletTuningLines(options),
+    ...buildQuadletHealthcheckLines(options),
+  ])
+}
+
+export function buildQuadletServiceLines(options: QuadletContainerOptions): string[] {
+  return compactQuadletLines([
+    maybeRenderQuadletLine("Restart", options.restart),
+    maybeRenderQuadletNumber("TimeoutStartSec", options.timeoutStartSec),
+    maybeRenderQuadletNumber("TimeoutStopSec", options.timeoutStopSec),
+  ])
+}
+
+export function buildQuadletUnitSection(options: QuadletContainerOptions): string {
+  return renderQuadletSection("Unit", [
+    renderQuadletLine("Description", options.description ?? `Podman container: ${options.name}`),
+    "Wants=network-online.target",
+    "After=network-online.target",
+  ])
+}
+
+export function buildQuadletInstallSection(options: QuadletContainerOptions): string {
+  return renderQuadletSection("Install", [
+    renderQuadletLine("WantedBy", options.wantedBy ?? "multi-user.target"),
+  ])
+}
+
+const UNIT_NAME_PATTERN = /^[\w@.\-]+$/v
+
+export function validateQuadletName(name: string): void {
+  if (!UNIT_NAME_PATTERN.test(name)) {
+    throw new Error(`quadlet.container: name must match ${String(UNIT_NAME_PATTERN)}, got: ${name}`)
+  }
+}
