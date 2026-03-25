@@ -25,6 +25,7 @@
     "keyrings",
     "metaget",
     "mktemp",
+    "mountpoint",
     "myblock",
     "mytoken",
     "nameserver",
