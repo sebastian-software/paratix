@@ -46,6 +46,23 @@ function makeStream(): StreamWithStderr {
   return stream
 }
 
+function makeDiskCheckExecSpy(prefix: string, dfOutput: string): ReturnType<typeof vi.fn> {
+  let counter = 0
+  return vi.fn().mockImplementation((cmd: string, cb: ExecCallback) => {
+    const stream = makeStream()
+    cb(undefined, stream)
+    if (cmd.includes("mktemp")) {
+      counter++
+      stream.emit("data", Buffer.from(`/etc/systemd/system/paratix-write.${prefix}${counter}`))
+    } else if (cmd.includes("stat -c '%s'")) {
+      stream.emit("data", Buffer.from("0"))
+    } else if (cmd.includes("df -P")) {
+      stream.emit("data", Buffer.from(dfOutput))
+    }
+    stream.emit("close", 0)
+  })
+}
+
 function makeExecSpy(mktempResult: string, verifiedSize = 100_000): ReturnType<typeof vi.fn> {
   return vi.fn().mockImplementation((cmd: string, cb: ExecCallback) => {
     const stream = makeStream()
@@ -437,6 +454,38 @@ describe("SshConnectionImpl.writeFile — large content (> 64 KB)", () => {
     expect(executedCommands.some((command) => command.includes("base64 -d"))).toBe(true)
     expect(executedCommands).toContain(`rm -f '${remoteTmpPath}'`)
     expect(executedCommands).toContain(`rm -f '${fallbackTmpPath}'`)
+  })
+
+  // ---------------------------------------------------------------------------
+  // Disk-full detection when file is written as 0 bytes
+  // ---------------------------------------------------------------------------
+
+  it("throws a disk-full error when the file is empty and df reports no space", async () => {
+    const remotePath = "/etc/systemd/system/diskfull.service"
+    const dfOutput =
+      "Filesystem     1024-blocks    Used Available Capacity Mounted on\n/dev/sda1        10000000 10000000         0     100% /"
+
+    const client = makeClientWithExecSpy(makeDiskCheckExecSpy("DISK", dfOutput))
+    const ssh = makeConnectedSsh(client)
+    vi.mocked(sftpUpload).mockResolvedValue()
+
+    await expect(ssh.writeFile(remotePath, "unit-content", { mode: "0644" })).rejects.toThrow(
+      /disk full/v
+    )
+  })
+
+  it("throws the generic empty-file error when df reports space available", async () => {
+    const remotePath = "/etc/systemd/system/notdisk.service"
+    const dfOutput =
+      "Filesystem     1024-blocks    Used Available Capacity Mounted on\n/dev/sda1        10000000  5000000   5000000      50% /"
+
+    const client = makeClientWithExecSpy(makeDiskCheckExecSpy("NODISK", dfOutput))
+    const ssh = makeConnectedSsh(client)
+    vi.mocked(sftpUpload).mockResolvedValue()
+
+    await expect(ssh.writeFile(remotePath, "unit-content", { mode: "0644" })).rejects.toThrow(
+      /remote file is empty/v
+    )
   })
 
   // ---------------------------------------------------------------------------

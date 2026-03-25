@@ -1854,6 +1854,19 @@ describe("SshConnectionImpl", () => {
           stream.emit("data", Buffer.from("0"))
           stream.emit("close", 0)
         })
+        // df -P (disk space check triggered by 0-byte detection)
+        .mockImplementationOnce((_command: string, callback: ExecCallback) => {
+          const stream = makeStream()
+          executedCommands.push(_command)
+          callback(undefined, stream)
+          stream.emit(
+            "data",
+            Buffer.from(
+              "Filesystem     1024-blocks    Used Available Capacity Mounted on\n/dev/sda1        10000000  5000000   5000000      50% /"
+            )
+          )
+          stream.emit("close", 0)
+        })
         .mockImplementationOnce((_command: string, callback: ExecCallback) => {
           const stream = makeStream()
           executedCommands.push(_command)
@@ -1869,7 +1882,8 @@ describe("SshConnectionImpl", () => {
       )
 
       expect(executedCommands[3]).toContain("stat -c '%s'")
-      expect(executedCommands[4]).toContain("rm -f")
+      expect(executedCommands[4]).toContain("df -P")
+      expect(executedCommands[5]).toContain("rm -f")
     })
   })
 

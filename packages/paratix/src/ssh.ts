@@ -385,10 +385,43 @@ export class SshConnectionImpl implements SshConnection {
       )
     }
 
+    if (actualSize === 0 && expectedSize > 0) {
+      const diskInfo = await this.checkRemoteDiskSpace(remotePath)
+      if (diskInfo != null && diskInfo.availableBytes < expectedSize) {
+        throw new Error(
+          `[ssh.uploadFile: ${remotePath}] disk full – ${diskInfo.availableBytes} bytes available on ${diskInfo.mountpoint}; the file was written as 0 bytes because there is no space left on the device`
+        )
+      }
+    }
+
     if (actualSize !== expectedSize) {
       throw new Error(
         `[ssh.uploadFile: ${remotePath}] remote file size mismatch after upload/finalize; expected ${expectedSize} bytes, got ${actualSize}`
       )
+    }
+  }
+
+  private async checkRemoteDiskSpace(
+    remotePath: string
+  ): Promise<{ availableBytes: number; mountpoint: string } | null> {
+    const DF_MIN_COLUMNS = 6
+    const DF_AVAILABLE_INDEX = 3
+    const DF_MOUNTPOINT_INDEX = 5
+    const KB_TO_BYTES = 1024
+    try {
+      const directory = remotePath.includes("/")
+        ? remotePath.slice(0, remotePath.lastIndexOf("/")) || "/"
+        : "."
+      const dfOutput = await this.output(`df -P ${shellQuote(directory)}`)
+      const lines = dfOutput.trim().split("\n")
+      if (lines.length < 2) return null
+      const columns = lines[1].split(/\s+/v)
+      if (columns.length < DF_MIN_COLUMNS) return null
+      const availableKb = Number(columns[DF_AVAILABLE_INDEX])
+      if (!Number.isFinite(availableKb)) return null
+      return { availableBytes: availableKb * KB_TO_BYTES, mountpoint: columns[DF_MOUNTPOINT_INDEX] }
+    } catch {
+      return null
     }
   }
 
@@ -445,6 +478,12 @@ export class SshConnectionImpl implements SshConnection {
     )
     if (fallbackVerification === "matches") return
     if (fallbackVerification === "empty") {
+      const diskInfo = await this.checkRemoteDiskSpace(options.remotePath)
+      if (diskInfo != null && diskInfo.availableBytes < options.expectedSize) {
+        throw new Error(
+          `[ssh.writeFile: ${options.remotePath}] disk full – ${diskInfo.availableBytes} bytes available on ${diskInfo.mountpoint}; the file was written as 0 bytes because there is no space left on the device`
+        )
+      }
       throw new Error(
         `[ssh.writeFile: ${options.remotePath}] remote file is empty after upload/finalize and shell fallback; refusing successful write result`
       )
