@@ -7,7 +7,7 @@ const QUADLET_FILE_MODE = "0644"
 const SYSTEMCTL = "systemctl"
 const UNIT_NAME_PATTERN = /^[\w@.\-]+$/v
 
-// cspell:ignore quadlet
+// cspell:ignore quadlet healthcheck
 
 type QuadletAutoUpdate = "local" | "registry"
 type QuadletRestartPolicy =
@@ -24,7 +24,13 @@ type QuadletContainerOptions = {
   containerName?: string
   description?: string
   environment?: Record<string, string>
+  environmentFiles?: string[]
   exec?: string[]
+  healthCmd?: string
+  healthInterval?: string
+  healthRetries?: number
+  healthStartPeriod?: string
+  healthTimeout?: string
   image: string
   name: string
   networks?: string[]
@@ -84,6 +90,19 @@ function buildQuadletUnitSection(options: QuadletContainerOptions): string {
   ])
 }
 
+function buildQuadletHealthcheckLines(options: QuadletContainerOptions): string[] {
+  if (options.healthCmd == null) return []
+  return compactQuadletLines([
+    renderQuadletLine("HealthCmd", options.healthCmd),
+    maybeRenderQuadletLine("HealthInterval", options.healthInterval),
+    maybeRenderQuadletLine("HealthTimeout", options.healthTimeout),
+    options.healthRetries == null
+      ? null
+      : renderQuadletLine("HealthRetries", String(options.healthRetries)),
+    maybeRenderQuadletLine("HealthStartPeriod", options.healthStartPeriod),
+  ])
+}
+
 function buildQuadletContainerLines(options: QuadletContainerOptions): string[] {
   return compactQuadletLines([
     renderQuadletLine("Image", options.image),
@@ -96,6 +115,8 @@ function buildQuadletContainerLines(options: QuadletContainerOptions): string[] 
     ...renderQuadletRepeated("PublishPort", options.publishPorts ?? []),
     ...renderQuadletRepeated("Volume", options.volumes ?? []),
     ...renderQuadletEnvironment(options.environment ?? {}),
+    ...renderQuadletRepeated("EnvironmentFile", options.environmentFiles ?? []),
+    ...buildQuadletHealthcheckLines(options),
   ])
 }
 
@@ -186,7 +207,13 @@ export const quadlet = {
    * @param options.containerName - Optional explicit Podman container name.
    * @param options.autoUpdate - Optional Podman auto-update policy.
    * @param options.environment - Optional environment variables.
+   * @param options.environmentFiles - Optional `EnvironmentFile=` entries.
    * @param options.exec - Optional command and arguments for `Exec=`.
+   * @param options.healthCmd - Optional `HealthCmd=` directive. Enables the healthcheck block.
+   * @param options.healthInterval - Optional `HealthInterval=` (e.g. `"1m30s"`). Requires `healthCmd`.
+   * @param options.healthRetries - Optional `HealthRetries=` count. Requires `healthCmd`.
+   * @param options.healthStartPeriod - Optional `HealthStartPeriod=` (e.g. `"10s"`). Requires `healthCmd`.
+   * @param options.healthTimeout - Optional `HealthTimeout=` (e.g. `"5s"`). Requires `healthCmd`.
    * @param options.networks - Optional `Network=` entries.
    * @param options.podmanArgs - Optional `PodmanArgs=` entries.
    * @param options.publishPorts - Optional `PublishPort=` entries.
