@@ -360,6 +360,43 @@ export default server({
 
 ---
 
+## quadlet — Podman-Quadlet-Container
+
+Verwaltet Podman-Quadlet-Definitionen unter `/etc/containers/systemd/` und
+unterstuetzt ausserdem gezielte Image-Updates fuer genau einen Quadlet-Service.
+
+| Modul                 | Beschreibung                                                                                                                                       | Check-Strategie                                                       | Aufwand |
+| --------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------- | ------- |
+| `quadlet.container`   | Schreibt eine deklarative `.container`-Datei fuer einen Podman-Service und fuehrt bei Aenderungen `systemctl daemon-reload` aus.                   | Remote-Datei mit gerendertem Soll-Inhalt vergleichen                  | mittel  |
+| `quadlet.updateImage` | Zieht genau ein Container-Image via `podman pull` und startet den zugehoerigen systemd-Service nur dann neu, wenn ein neueres Image geladen wurde. | Signal-artig: Pull ausfuehren, Ausgabe auf Download-Indikator pruefen | einfach |
+
+**Beispiel im Playbook:**
+
+```typescript
+const managerQuadlet = {
+  authFile: "/run/containers/auth.json",
+  image: "ghcr.io/acme/convex-manager:latest",
+  name: "convex-manager",
+  publishPorts: ["127.0.0.1:3210:3210"],
+  restart: "always",
+}
+
+recipe("convex-manager", [
+  quadlet.container(managerQuadlet),
+  service.enabled("convex-manager"),
+  service.running("convex-manager"),
+])
+
+recipe("convex-manager image update", [quadlet.updateImage(managerQuadlet)])
+```
+
+**Hinweis:** `quadlet.updateImage(...)` akzeptiert dieselben `name`- und
+`image`-Felder wie `quadlet.container(...)`. Damit kann dieselbe
+Konfigurationsquelle fuer Deployment und spaetere Image-Refreshes verwendet
+werden, ohne `command.shell("podman pull ...")` in Projekt-Code einzubauen.
+
+---
+
 ## compose — Container-Compose-Verwaltung (Docker & Podman)
 
 Verwaltet Container-Stacks ueber `docker compose` oder `podman compose`.

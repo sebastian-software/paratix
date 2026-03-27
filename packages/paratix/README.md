@@ -104,6 +104,8 @@ Signals are deferred side effects such as `service.reload(...)` or `service.rest
 
 For Podman-native services, Paratix now also includes `quadlet.container(...)`. It writes a `.container` file under `/etc/containers/systemd`, reloads systemd when the content changes, and works cleanly with `service.enabled(...)` and `service.running(...)` for the generated service.
 
+When you need a targeted image refresh outside the normal deploy flow, `quadlet.updateImage(...)` pulls exactly one image, reuses existing Podman registry auth on the host, optionally supports `authFile`, and only restarts the generated service when the pull actually downloaded a newer image.
+
 ### Guards
 
 Paratix also supports declarative host-state guards. Use `when.packageInstalled(...)`, `when.commandExists(...)`, `when.fileExists(...)`, `when.pathExists(...)`, `when.symlinkExists(...)`, or `when.socketExists(...)` and their inverted forms to gate modules or recipes on remote host state without shell-heavy playbooks.

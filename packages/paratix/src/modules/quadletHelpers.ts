@@ -1,5 +1,3 @@
-// cspell:ignore quadlet healthcheck podman seccomp tmpfs
-
 type QuadletAutoUpdate = "local" | "registry"
 type QuadletHealthOnFailure = "kill" | "none" | "restart" | "stop"
 type QuadletPullPolicy = "always" | "missing" | "never" | "newer"
@@ -71,6 +69,23 @@ export type QuadletContainerOptions = {
   wantedBy?: string
   workingDir?: string
 }
+
+export type QuadletImageUpdateOptions = {
+  authFile?: string
+  image: string
+  name: string
+  serviceName?: string
+}
+
+const CONTAINERS_SYSTEMD_DIRECTORY = "/etc/containers/systemd"
+const QUADLET_PULL_CHANGED_OUTPUT_PATTERNS = [
+  "Copying blob",
+  "Copying config",
+  "Downloaded newer image",
+  "Pulling fs layer",
+  "Storing signatures",
+  "Writing manifest",
+] as const
 
 function sanitizeQuadletValue(value: string): string {
   return value.replaceAll(/[\n\r]/gv, "")
@@ -246,10 +261,33 @@ export function buildQuadletInstallSection(options: QuadletContainerOptions): st
   ])
 }
 
+export function buildQuadletImagePullCommand(options: QuadletImageUpdateOptions): string {
+  const authFileFlag =
+    options.authFile == null ? "" : ` --authfile ${shellQuoteForQuadlet(options.authFile)}`
+  return `podman pull${authFileFlag} ${shellQuoteForQuadlet(options.image)} 2>&1`
+}
+
+export function getQuadletContainerFilePath(name: string): string {
+  return `${CONTAINERS_SYSTEMD_DIRECTORY}/${name}.container`
+}
+
+export function getQuadletContainerServiceName(options: QuadletImageUpdateOptions): string {
+  return options.serviceName ?? options.name
+}
+
+export function quadletPullOutputIndicatesChange(output: string): boolean {
+  return QUADLET_PULL_CHANGED_OUTPUT_PATTERNS.some((pattern) => output.includes(pattern))
+}
+
 const UNIT_NAME_PATTERN = /^[\w@.\-]+$/v
 
 export function validateQuadletName(name: string): void {
   if (!UNIT_NAME_PATTERN.test(name)) {
-    throw new Error(`quadlet.container: name must match ${String(UNIT_NAME_PATTERN)}, got: ${name}`)
+    throw new Error(`quadlet: name must match ${String(UNIT_NAME_PATTERN)}, got: ${name}`)
   }
+}
+
+function shellQuoteForQuadlet(value: string): string {
+  const escapedQuote = "'\\''"
+  return `'${value.replaceAll("'", escapedQuote)}'`
 }
