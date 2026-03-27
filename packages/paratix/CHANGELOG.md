@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.6.0](https://github.com/sebastian-software/paratix/compare/paratix-v0.5.0...paratix-v0.6.0) (2026-03-27)
+
+
+### Features
+
+* **paratix:** add environmentFiles and healthcheck support to quadlet.container ([31b9fdf](https://github.com/sebastian-software/paratix/commit/31b9fdf9675035cbd712860ebeffdd1775a29bda))
+* **paratix:** add quadlet.updateImage module for targeted container image pulls ([508cb3e](https://github.com/sebastian-software/paratix/commit/508cb3e1e56b6e9c251f6f8d08b97d4373df414c))
+* **paratix:** detect disk-full condition on zero-byte write failures ([4e24c99](https://github.com/sebastian-software/paratix/commit/4e24c991089fb06846ace61459361acfe9cbe95f))
+* **paratix:** extend quadlet.container with complete field coverage and extract helpers ([2c7e807](https://github.com/sebastian-software/paratix/commit/2c7e8075a142e36791ec56191a55997324d0c3e3))
+
 ## [0.5.0](https://github.com/sebastian-software/paratix/compare/paratix-v0.4.0...paratix-v0.5.0) (2026-03-24)
 
 
