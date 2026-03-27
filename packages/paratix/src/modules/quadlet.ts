@@ -3,17 +3,20 @@ import { shellQuote } from "../ssh.js"
 import { type Module, type ModuleResult, NEEDS_APPLY, type SshConnection } from "../types.js"
 import {
   buildQuadletContainerLines,
+  buildQuadletImagePullCommand,
   buildQuadletInstallSection,
   buildQuadletServiceLines,
   buildQuadletUnitSection,
+  getQuadletContainerFilePath,
+  getQuadletContainerServiceName,
   type QuadletContainerOptions,
+  type QuadletImageUpdateOptions,
+  quadletPullOutputIndicatesChange,
   renderQuadletSection,
   validateQuadletName,
 } from "./quadletHelpers.js"
 
-// cspell:ignore quadlet
-
-const CONTAINERS_SYSTEMD_DIRECTORY = "/etc/containers/systemd"
+const CONTAINERS_SYSTEMD_DIRECTORY_COMMAND = "mkdir -p '/etc/containers/systemd'"
 const QUADLET_FILE_MODE = "0644"
 const SYSTEMCTL = "systemctl"
 
@@ -31,7 +34,7 @@ function generateContainerQuadlet(options: QuadletContainerOptions): string {
 type ExecResultLike = Awaited<ReturnType<SshConnection["exec"]>>
 
 async function createQuadletDirectory(ssh: SshConnection): Promise<ExecResultLike> {
-  return ssh.exec(`mkdir -p ${shellQuote(CONTAINERS_SYSTEMD_DIRECTORY)}`, {
+  return ssh.exec(CONTAINERS_SYSTEMD_DIRECTORY_COMMAND, {
     ignoreExitCode: true,
     silent: true,
   })
@@ -97,7 +100,7 @@ export const quadlet = {
    */
   container(options: QuadletContainerOptions): Module {
     validateQuadletName(options.name)
-    const filePath = `${CONTAINERS_SYSTEMD_DIRECTORY}/${options.name}.container`
+    const filePath = getQuadletContainerFilePath(options.name)
     const content = generateContainerQuadlet(options)
 
     return {
@@ -110,6 +113,61 @@ export const quadlet = {
         return checkQuadletFile({ content, filePath, ssh })
       },
       name: `quadlet.container: ${options.name}`,
+    }
+  },
+
+  /**
+   * Pull the latest image for a Quadlet-managed container and restart the service
+   * only when the image changed.
+   *
+   * Accepts the same `name` and `image` fields as `quadlet.container(...)`, so a
+   * shared config object can drive both deployment and targeted image refreshes.
+   *
+   * @param options - Image pull and restart configuration for the Quadlet service.
+   * @returns A Module that updates the image and conditionally restarts the service.
+   */
+  updateImage(options: QuadletImageUpdateOptions): Module {
+    validateQuadletName(options.name)
+    if (options.serviceName != null) validateQuadletName(options.serviceName)
+
+    const pullCommand = buildQuadletImagePullCommand(options)
+    const serviceName = getQuadletContainerServiceName(options)
+
+    return {
+      async apply(ssh: null | SshConnection): Promise<ModuleResult> {
+        if (!ssh) return failed(`[quadlet.updateImage: ${options.name}] SSH connection is required`)
+
+        const pullResult = await ssh.exec(pullCommand, {
+          ignoreExitCode: true,
+          silent: true,
+        })
+        if (pullResult.code !== 0) {
+          return failedCommand(
+            `[quadlet.updateImage: ${options.name}] podman pull failed`,
+            pullResult
+          )
+        }
+
+        if (!quadletPullOutputIndicatesChange(pullResult.stdout)) {
+          return { status: "ok" }
+        }
+
+        const restartResult = await ssh.exec(`${SYSTEMCTL} restart ${shellQuote(serviceName)}`, {
+          ignoreExitCode: true,
+          silent: true,
+        })
+        return restartResult.code === 0
+          ? { status: "changed" }
+          : failedCommand(
+              `[quadlet.updateImage: ${options.name}] systemctl restart failed`,
+              restartResult
+            )
+      },
+      // eslint-disable-next-line @typescript-eslint/require-await -- Signal-style module
+      async check(): Promise<"needs-apply" | "ok"> {
+        return NEEDS_APPLY
+      },
+      name: `quadlet.updateImage: ${options.name}`,
     }
   },
 }
