@@ -118,6 +118,32 @@ describe("recipe", () => {
     expect(output).toContain("\n  · ✓  nested-recipe")
   })
 
+  it("prints child module detail text in recipe output", async () => {
+    const consoleLogs: string[] = []
+    vi.spyOn(console, "log").mockImplementation((...args: unknown[]) => {
+      consoleLogs.push(args.map(String).join(" "))
+    })
+
+    const childModule: Module = {
+      // eslint-disable-next-line @typescript-eslint/require-await -- Interface requires async
+      async apply() {
+        return { detail: "(sha256:new-traefik-id)", status: "changed" }
+      },
+      // eslint-disable-next-line @typescript-eslint/require-await -- Interface requires async
+      async check() {
+        return "needs-apply"
+      },
+      name: "quadlet.updateImage: traefik",
+    }
+
+    const applyRecipe = recipe("image-update", [childModule]).apply
+    await applyRecipe(null, emptyEnv)
+
+    const output = consoleLogs.join("\n")
+    expect(output).toContain("quadlet.updateImage: traefik")
+    expect(output).toContain("(sha256:new-traefik-id)")
+  })
+
   it("aggregates status as failed and stops when a module fails", async () => {
     const applyCount = { count: 0 }
     const mod1 = makeModule("needs-apply", "failed", "mod-1")

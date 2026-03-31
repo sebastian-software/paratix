@@ -356,7 +356,7 @@ async function applyModule(parameters: {
       ? await targetModule._applyDryRun(connection, currentEnvironment)
       : await targetModule.apply(connection, currentEnvironment)
   const stepResult = await handleMetaAndBuildResult(ssh, currentEnvironment, result)
-  const detail = dryRun ? (result._dryRunDetail ?? "(dry-run)") : undefined
+  const detail = dryRun ? (result._dryRunDetail ?? "(dry-run)") : result.detail
   printModuleResult(targetModule.name, result.status, detail)
   if (result.status === "failed" && result.error != null) {
     printCommandFailure(result.error, verbose)

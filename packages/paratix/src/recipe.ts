@@ -73,11 +73,11 @@ function isRecipeModuleLike(module: Module): boolean {
 
 function printRecipeChildResult(module: Module, result: ModuleResult): void {
   if (isRecipeModuleLike(module)) {
-    printRecipeModuleResult(module.name, result.status)
+    printRecipeModuleResult(module.name, result.status, result.detail)
     return
   }
 
-  printModuleResult(module.name, result.status)
+  printModuleResult(module.name, result.status, result.detail)
 }
 
 function applyRecipeStepToState(

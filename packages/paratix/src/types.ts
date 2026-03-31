@@ -73,6 +73,8 @@ export type ModuleResult = {
    * @internal
    */
   _stopRun?: true
+  /** Optional short detail appended to the printed module status line. */
+  detail?: string
   /** Optional error details consumed by the runner for centralized CLI output. */
   error?: Error
   /** Optional typed meta entries for env propagation and runner control-plane updates. */

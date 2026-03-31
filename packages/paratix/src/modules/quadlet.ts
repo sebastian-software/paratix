@@ -3,15 +3,18 @@ import { shellQuote } from "../ssh.js"
 import { type Module, type ModuleResult, NEEDS_APPLY, type SshConnection } from "../types.js"
 import {
   buildQuadletContainerLines,
+  buildQuadletImageInspectCommand,
   buildQuadletImagePullCommand,
   buildQuadletInstallSection,
   buildQuadletServiceLines,
   buildQuadletUnitSection,
+  formatQuadletImageIdDetail,
   getQuadletContainerFilePath,
   getQuadletContainerServiceName,
   type QuadletContainerOptions,
   type QuadletImageUpdateOptions,
   quadletPullOutputIndicatesChange,
+  readQuadletImageIdFromInspectOutput,
   renderQuadletSection,
   validateQuadletName,
 } from "./quadletHelpers.js"
@@ -32,6 +35,14 @@ function generateContainerQuadlet(options: QuadletContainerOptions): string {
 }
 
 type ExecResultLike = Awaited<ReturnType<SshConnection["exec"]>>
+
+type QuadletImageUpdateParameters = {
+  inspectCommand: string
+  name: string
+  pullCommand: string
+  serviceName: string
+  ssh: SshConnection
+}
 
 async function createQuadletDirectory(ssh: SshConnection): Promise<ExecResultLike> {
   return ssh.exec(CONTAINERS_SYSTEMD_DIRECTORY_COMMAND, {
@@ -79,6 +90,78 @@ async function checkQuadletFile(parameters: {
   if (!exists) return NEEDS_APPLY
   const remoteContent = await parameters.ssh.readFile(parameters.filePath)
   return remoteContent.trim() === parameters.content.trim() ? "ok" : NEEDS_APPLY
+}
+
+async function inspectQuadletImageId(parameters: {
+  inspectCommand: string
+  name: string
+  ssh: SshConnection
+}): Promise<ModuleResult | string> {
+  const inspectResult = await parameters.ssh.exec(parameters.inspectCommand, {
+    ignoreExitCode: true,
+    silent: true,
+  })
+  if (inspectResult.code !== 0) {
+    return failedCommand(
+      `[quadlet.updateImage: ${parameters.name}] podman image inspect failed`,
+      inspectResult
+    )
+  }
+
+  const imageId = readQuadletImageIdFromInspectOutput(inspectResult.stdout)
+  if (imageId == null) {
+    return failed(
+      `[quadlet.updateImage: ${parameters.name}] podman image inspect returned no image ID`
+    )
+  }
+  return imageId
+}
+
+async function restartQuadletService(parameters: {
+  imageId: string
+  name: string
+  serviceName: string
+  ssh: SshConnection
+}): Promise<ModuleResult> {
+  const restartResult = await parameters.ssh.exec(
+    `${SYSTEMCTL} restart ${shellQuote(parameters.serviceName)}`,
+    {
+      ignoreExitCode: true,
+      silent: true,
+    }
+  )
+  return restartResult.code === 0
+    ? { detail: formatQuadletImageIdDetail(parameters.imageId), status: "changed" }
+    : failedCommand(
+        `[quadlet.updateImage: ${parameters.name}] systemctl restart failed`,
+        restartResult
+      )
+}
+
+async function applyQuadletImageUpdate(
+  parameters: QuadletImageUpdateParameters
+): Promise<ModuleResult> {
+  const pullResult = await parameters.ssh.exec(parameters.pullCommand, {
+    ignoreExitCode: true,
+    silent: true,
+  })
+  if (pullResult.code !== 0) {
+    return failedCommand(`[quadlet.updateImage: ${parameters.name}] podman pull failed`, pullResult)
+  }
+
+  if (!quadletPullOutputIndicatesChange(pullResult.stdout)) {
+    return { status: "ok" }
+  }
+
+  const imageId = await inspectQuadletImageId(parameters)
+  if (typeof imageId !== "string") return imageId
+
+  return restartQuadletService({
+    imageId,
+    name: parameters.name,
+    serviceName: parameters.serviceName,
+    ssh: parameters.ssh,
+  })
 }
 
 /**
@@ -131,37 +214,19 @@ export const quadlet = {
     if (options.serviceName != null) validateQuadletName(options.serviceName)
 
     const pullCommand = buildQuadletImagePullCommand(options)
+    const inspectCommand = buildQuadletImageInspectCommand(options.image)
     const serviceName = getQuadletContainerServiceName(options)
 
     return {
       async apply(ssh: null | SshConnection): Promise<ModuleResult> {
         if (!ssh) return failed(`[quadlet.updateImage: ${options.name}] SSH connection is required`)
-
-        const pullResult = await ssh.exec(pullCommand, {
-          ignoreExitCode: true,
-          silent: true,
+        return applyQuadletImageUpdate({
+          inspectCommand,
+          name: options.name,
+          pullCommand,
+          serviceName,
+          ssh,
         })
-        if (pullResult.code !== 0) {
-          return failedCommand(
-            `[quadlet.updateImage: ${options.name}] podman pull failed`,
-            pullResult
-          )
-        }
-
-        if (!quadletPullOutputIndicatesChange(pullResult.stdout)) {
-          return { status: "ok" }
-        }
-
-        const restartResult = await ssh.exec(`${SYSTEMCTL} restart ${shellQuote(serviceName)}`, {
-          ignoreExitCode: true,
-          silent: true,
-        })
-        return restartResult.code === 0
-          ? { status: "changed" }
-          : failedCommand(
-              `[quadlet.updateImage: ${options.name}] systemctl restart failed`,
-              restartResult
-            )
       },
       // eslint-disable-next-line @typescript-eslint/require-await -- Signal-style module
       async check(): Promise<"needs-apply" | "ok"> {

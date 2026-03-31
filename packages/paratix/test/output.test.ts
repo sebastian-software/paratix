@@ -52,6 +52,14 @@ describe("printModuleResult", () => {
     expect(consoleLogs[1]).toContain("htop")
   })
 
+  it("renders detail text for regular changed results", () => {
+    printModuleResult("quadlet.updateImage: traefik", "changed", "(sha256:new-traefik-id)")
+
+    expect(consoleLogs).toHaveLength(1)
+    expect(consoleLogs[0]).toContain("changed")
+    expect(consoleLogs[0]).toContain("(sha256:new-traefik-id)")
+  })
+
   it("renders a live running line on TTY and replaces it with the final result", () => {
     const writes: string[] = []
     vi.spyOn(process.stdout, "write").mockImplementation(((chunk: string | Uint8Array) => {
