@@ -267,14 +267,6 @@ export function buildQuadletImagePullCommand(options: QuadletImageUpdateOptions)
   return `podman pull${authFileFlag} ${shellQuoteForQuadlet(options.image)} 2>&1`
 }
 
-export function buildQuadletImageInspectCommand(image: string): string {
-  return `podman image inspect --format '{{.Id}}' ${shellQuoteForQuadlet(image)}`
-}
-
-export function formatQuadletImageIdDetail(imageId: string): string {
-  return `(${imageId})`
-}
-
 export function getQuadletContainerFilePath(name: string): string {
   return `${CONTAINERS_SYSTEMD_DIRECTORY}/${name}.container`
 }
@@ -285,14 +277,6 @@ export function getQuadletContainerServiceName(options: QuadletImageUpdateOption
 
 export function quadletPullOutputIndicatesChange(output: string): boolean {
   return QUADLET_PULL_CHANGED_OUTPUT_PATTERNS.some((pattern) => output.includes(pattern))
-}
-
-export function readQuadletImageIdFromInspectOutput(output: string): null | string {
-  for (const line of output.split("\n")) {
-    const trimmed = line.trim()
-    if (trimmed.length > 0) return trimmed
-  }
-  return null
 }
 
 const UNIT_NAME_PATTERN = /^[\w@.\-]+$/v
