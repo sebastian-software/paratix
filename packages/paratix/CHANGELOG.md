@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.8.0](https://github.com/sebastian-software/paratix/compare/paratix-v0.7.0...paratix-v0.8.0) (2026-03-31)
+
+
+### Features
+
+* **paratix:** prefer registry digest over local image ID in quadlet.updateImage detail ([8cd91af](https://github.com/sebastian-software/paratix/commit/8cd91af816037edcde29320286d311e28938d098))
+
 ## [0.7.0](https://github.com/sebastian-software/paratix/compare/paratix-v0.6.0...paratix-v0.7.0) (2026-03-31)
 
 
