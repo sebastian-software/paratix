@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.7.0](https://github.com/sebastian-software/paratix/compare/paratix-v0.6.0...paratix-v0.7.0) (2026-03-31)
+
+
+### Features
+
+* **paratix:** show new image ID in quadlet.updateImage output ([0161488](https://github.com/sebastian-software/paratix/commit/01614889965a7f066fa4be3f9fee3be8420ee751))
+
 ## [0.6.0](https://github.com/sebastian-software/paratix/compare/paratix-v0.5.0...paratix-v0.6.0) (2026-03-27)
 
 
