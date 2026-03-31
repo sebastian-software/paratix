@@ -436,6 +436,10 @@ describe("quadlet.updateImage", () => {
 
   it("pulls the image and restarts the service when a newer image was downloaded", async () => {
     const ssh = createMockSsh({
+      "podman image inspect --format '{{.Id}}' 'docker.io/library/traefik:v3.3'": {
+        code: 0,
+        stdout: "sha256:new-traefik-id\n",
+      },
       "podman pull 'docker.io/library/traefik:v3.3' 2>&1": {
         code: 0,
         stdout: "Copying blob sha256:123\nWriting manifest to image destination\n",
@@ -450,7 +454,13 @@ describe("quadlet.updateImage", () => {
       })
       .apply(ssh, emptyEnv)
 
-    expect(result.status).toBe("changed")
+    expect(result).toMatchObject({
+      detail: "(sha256:new-traefik-id)",
+      status: "changed",
+    })
+    expect(ssh.calls).toContain(
+      "podman image inspect --format '{{.Id}}' 'docker.io/library/traefik:v3.3'"
+    )
     expect(ssh.calls).toContain("podman pull 'docker.io/library/traefik:v3.3' 2>&1")
     expect(ssh.calls).toContain("systemctl restart 'traefik'")
   })
@@ -476,6 +486,10 @@ describe("quadlet.updateImage", () => {
 
   it("passes authFile to podman pull for private registries", async () => {
     const ssh = createMockSsh({
+      "podman image inspect --format '{{.Id}}' 'ghcr.io/acme/private-app:latest'": {
+        code: 0,
+        stdout: "sha256:private-app-id\n",
+      },
       "podman pull --authfile '/run/containers/auth.json' 'ghcr.io/acme/private-app:latest' 2>&1": {
         code: 0,
         stdout: "Downloaded newer image for ghcr.io/acme/private-app:latest",
@@ -491,7 +505,10 @@ describe("quadlet.updateImage", () => {
       })
       .apply(ssh, emptyEnv)
 
-    expect(result.status).toBe("changed")
+    expect(result).toMatchObject({
+      detail: "(sha256:private-app-id)",
+      status: "changed",
+    })
     expect(ssh.calls).toContain(
       "podman pull --authfile '/run/containers/auth.json' 'ghcr.io/acme/private-app:latest' 2>&1"
     )
@@ -499,6 +516,10 @@ describe("quadlet.updateImage", () => {
 
   it("restarts the overridden service name when provided", async () => {
     const ssh = createMockSsh({
+      "podman image inspect --format '{{.Id}}' 'ghcr.io/acme/private-app:latest'": {
+        code: 0,
+        stdout: "sha256:canary-id\n",
+      },
       "podman pull 'ghcr.io/acme/private-app:latest' 2>&1": {
         code: 0,
         stdout: "Storing signatures\n",
@@ -516,6 +537,51 @@ describe("quadlet.updateImage", () => {
 
     expect(result.status).toBe("changed")
     expect(ssh.calls).toContain("systemctl restart 'private-app-canary'")
+  })
+
+  it("returns failed when image inspection fails after a changed pull", async () => {
+    const ssh = createMockSsh({
+      "podman image inspect --format '{{.Id}}' 'docker.io/library/traefik:v3.3'": {
+        code: 125,
+        stderr: "inspect failed",
+      },
+      "podman pull 'docker.io/library/traefik:v3.3' 2>&1": {
+        code: 0,
+        stdout: "Copying config sha256:abc\n",
+      },
+    })
+
+    const result = await quadlet
+      .updateImage({
+        image: "docker.io/library/traefik:v3.3",
+        name: "traefik",
+      })
+      .apply(ssh, emptyEnv)
+
+    expect(result.status).toBe("failed")
+    expect(ssh.calls).not.toContain("systemctl restart 'traefik'")
+  })
+
+  it("returns failed when image inspection returns no ID", async () => {
+    const ssh = createMockSsh({
+      "podman image inspect --format '{{.Id}}' 'docker.io/library/traefik:v3.3'": {
+        code: 0,
+        stdout: "\n",
+      },
+      "podman pull 'docker.io/library/traefik:v3.3' 2>&1": {
+        code: 0,
+        stdout: "Copying config sha256:abc\n",
+      },
+    })
+
+    const result = await quadlet
+      .updateImage({
+        image: "docker.io/library/traefik:v3.3",
+        name: "traefik",
+      })
+      .apply(ssh, emptyEnv)
+
+    expect(result.status).toBe("failed")
   })
 
   it("returns failed when podman pull exits non-zero", async () => {
@@ -538,6 +604,10 @@ describe("quadlet.updateImage", () => {
 
   it("returns failed when restarting the service fails after a changed pull", async () => {
     const ssh = createMockSsh({
+      "podman image inspect --format '{{.Id}}' 'docker.io/library/traefik:v3.3'": {
+        code: 0,
+        stdout: "sha256:restart-fail-id\n",
+      },
       "podman pull 'docker.io/library/traefik:v3.3' 2>&1": {
         code: 0,
         stdout: "Copying config sha256:abc\n",

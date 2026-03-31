@@ -365,10 +365,10 @@ export default server({
 Verwaltet Podman-Quadlet-Definitionen unter `/etc/containers/systemd/` und
 unterstuetzt ausserdem gezielte Image-Updates fuer genau einen Quadlet-Service.
 
-| Modul                 | Beschreibung                                                                                                                                       | Check-Strategie                                                       | Aufwand |
-| --------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------- | ------- |
-| `quadlet.container`   | Schreibt eine deklarative `.container`-Datei fuer einen Podman-Service und fuehrt bei Aenderungen `systemctl daemon-reload` aus.                   | Remote-Datei mit gerendertem Soll-Inhalt vergleichen                  | mittel  |
-| `quadlet.updateImage` | Zieht genau ein Container-Image via `podman pull` und startet den zugehoerigen systemd-Service nur dann neu, wenn ein neueres Image geladen wurde. | Signal-artig: Pull ausfuehren, Ausgabe auf Download-Indikator pruefen | einfach |
+| Modul                 | Beschreibung                                                                                                                                                                           | Check-Strategie                                                       | Aufwand |
+| --------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------- | ------- |
+| `quadlet.container`   | Schreibt eine deklarative `.container`-Datei fuer einen Podman-Service und fuehrt bei Aenderungen `systemctl daemon-reload` aus.                                                       | Remote-Datei mit gerendertem Soll-Inhalt vergleichen                  | mittel  |
+| `quadlet.updateImage` | Zieht genau ein Container-Image via `podman pull`, ermittelt danach die neue Image-ID und startet den zugehoerigen systemd-Service nur dann neu, wenn ein neueres Image geladen wurde. | Signal-artig: Pull ausfuehren, Ausgabe auf Download-Indikator pruefen | einfach |
 
 **Beispiel im Playbook:**
 
@@ -394,6 +394,8 @@ recipe("convex-manager image update", [quadlet.updateImage(managerQuadlet)])
 `image`-Felder wie `quadlet.container(...)`. Damit kann dieselbe
 Konfigurationsquelle fuer Deployment und spaetere Image-Refreshes verwendet
 werden, ohne `command.shell("podman pull ...")` in Projekt-Code einzubauen.
+Bei einem tatsaechlich aktualisierten Image erscheint hinter `changed` zudem
+die neue Image-ID in Klammern.
 
 ---
 

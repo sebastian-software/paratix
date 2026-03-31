@@ -2415,6 +2415,45 @@ describe("runPlaybook dry-run recipe behaviour", () => {
     expect(allLogOutput).toContain("(dry-run)")
   })
 
+  it("prints normal module detail text for changed apply results", async () => {
+    const capturedConfigs: unknown[] = []
+
+    vi.doMock("../src/ssh.js", () => ({
+      shellQuote: (s: string) => `'${s}'`,
+      SshConnectionImpl: makeMockSshClass(capturedConfigs),
+    }))
+
+    const consoleLogs: unknown[][] = []
+    vi.spyOn(console, "log").mockImplementation((...args) => {
+      consoleLogs.push(args)
+    })
+
+    const { runPlaybook } = await import("../src/runner.js")
+
+    const detailModule: Module = {
+      apply: vi.fn().mockResolvedValue({
+        detail: "(sha256:new-traefik-id)",
+        status: "changed",
+      } satisfies ModuleResult),
+      check: vi.fn().mockResolvedValue("needs-apply"),
+      name: "quadlet.updateImage: traefik",
+    }
+
+    const definition: ServerDefinition = {
+      host: "1.2.3.4",
+      name: "test-server",
+      run: [detailModule],
+      ssh: { ports: [22], privateKey: "~/.ssh/id", user: "root" },
+    }
+
+    await runPlaybook(definition)
+
+    const allLogOutput = consoleLogs.flat().join(" ")
+    expect(allLogOutput).toContain("quadlet.updateImage: traefik")
+    expect(allLogOutput).toContain("changed")
+    expect(allLogOutput).toContain("(sha256:new-traefik-id)")
+  })
+
   it("prints validated dry-run detail for sshd.config", async () => {
     const capturedConfigs: unknown[] = []
     const consoleLogs: string[] = []
