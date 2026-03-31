@@ -1,6 +1,6 @@
 /* eslint-disable max-lines */
 import { randomUUID, timingSafeEqual } from "node:crypto"
-import { unlinkSync, writeFileSync } from "node:fs"
+import { type Stats, unlinkSync, writeFileSync } from "node:fs"
 import { readFile, stat } from "node:fs/promises"
 import { homedir, tmpdir } from "node:os"
 import { join, posix } from "node:path"
@@ -22,6 +22,11 @@ import {
 import { promptTerminal } from "./terminal.js"
 
 export { shellQuote, validateMode }
+
+async function statLocalFile(path: string): Promise<Stats> {
+  // eslint-disable-next-line security/detect-non-literal-fs-filename -- localPath is an explicit caller-provided upload source that must be stat'ed before transfer
+  return stat(path)
+}
 
 /**
  * Validate that a path returned by `mktemp` matches the expected paratix pattern.
@@ -313,7 +318,7 @@ export class SshConnectionImpl implements SshConnection {
     options?: { mode?: string }
   ): Promise<void> {
     const client = this.ensureClient()
-    const localFileStats = await stat(localPath)
+    const localFileStats = await statLocalFile(localPath)
     const localFileSize = localFileStats.size
     const temporaryPath = await this.createRemoteWritableTempPath(remotePath, "paratix-upload")
     const temporaryMode = options?.mode ?? "0600"

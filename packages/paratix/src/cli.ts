@@ -18,6 +18,11 @@ const DEFAULT_RECONNECT_TIMEOUT_SECONDS = 300
 const ENVIRONMENT_KEY_PATTERN = /^[A-Za-z_]\w*$/v
 const FIRST_RUN_ENV_NAME = "PARATIX_FIRST_RUN"
 
+function resolveRealPath(path: string): string {
+  // eslint-disable-next-line security/detect-non-literal-fs-filename -- path is either import.meta-derived or process argv entrypoint; direct file resolution is the intended check
+  return realpathSync(path)
+}
+
 /**
  * Type guard that checks whether `value` has the shape of a
  * {@link ServerDefinition} — an object with a non-empty string `name`,
@@ -230,7 +235,7 @@ export function isDirectCliExecution(moduleUrl: string, candidateEntryScript?: s
     return false
   }
 
-  return realpathSync(fileURLToPath(moduleUrl)) === realpathSync(candidateEntryScript)
+  return resolveRealPath(fileURLToPath(moduleUrl)) === resolveRealPath(candidateEntryScript)
 }
 
 export function applyCliEnvironmentOverrides(

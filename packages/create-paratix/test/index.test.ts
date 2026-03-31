@@ -44,6 +44,11 @@ async function expectProcessExit(
   expect(exitSpy).toHaveBeenCalledWith(expectedCode)
 }
 
+function throwExitError(message: string): never {
+  console.error(message)
+  throw new Error(message)
+}
+
 describe("isValidProjectName", () => {
   // These tests document that invalid project names must be rejected.
   // Currently no validation exists in main() beyond a falsy-check, so
@@ -253,30 +258,28 @@ describe("admin public key validation", () => {
     expect(isValidAdminPublicKey("ssh-ed25519 ")).toBe(false)
   })
 
-  it("fails closed for invalid direct admin public keys", async () => {
-    await expectProcessExit(() => {
-      validateAdminPublicKey((message: string) => {
-        console.error(message)
-        process.exit(1)
-      }, "invalid-key")
-    })
+  it("fails closed for invalid direct admin public keys", () => {
+    expect(() => {
+      validateAdminPublicKey(throwExitError, "invalid-key")
+    }).toThrow(
+      'Error: Invalid value for "--admin-public-key" — provide a valid single-line OpenSSH public key.'
+    )
 
     expect(console.error).toHaveBeenCalledWith(
       'Error: Invalid value for "--admin-public-key" — provide a valid single-line OpenSSH public key.'
     )
   })
 
-  it("fails closed for invalid admin public key files", async () => {
+  it("fails closed for invalid admin public key files", () => {
     const invalidKeyFile = join(TEST_DIR, "invalid-admin.pub")
     mkdirSync(TEST_DIR, { recursive: true })
     writeFileSync(invalidKeyFile, "invalid-key\n")
 
-    await expectProcessExit(() => {
-      readAdminPublicKeyFile((message: string) => {
-        console.error(message)
-        process.exit(1)
-      }, invalidKeyFile)
-    })
+    expect(() => {
+      readAdminPublicKeyFile(throwExitError, invalidKeyFile)
+    }).toThrow(
+      'Error: Invalid value for "--admin-public-key-file" — provide a valid single-line OpenSSH public key.'
+    )
 
     expect(console.error).toHaveBeenCalledWith(
       'Error: Invalid value for "--admin-public-key-file" — provide a valid single-line OpenSSH public key.'
