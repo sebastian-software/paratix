@@ -3,21 +3,23 @@ import { shellQuote } from "../ssh.js"
 import { type Module, type ModuleResult, NEEDS_APPLY, type SshConnection } from "../types.js"
 import {
   buildQuadletContainerLines,
-  buildQuadletImageInspectCommand,
   buildQuadletImagePullCommand,
   buildQuadletInstallSection,
   buildQuadletServiceLines,
   buildQuadletUnitSection,
-  formatQuadletImageIdDetail,
   getQuadletContainerFilePath,
   getQuadletContainerServiceName,
   type QuadletContainerOptions,
   type QuadletImageUpdateOptions,
   quadletPullOutputIndicatesChange,
-  readQuadletImageIdFromInspectOutput,
   renderQuadletSection,
   validateQuadletName,
 } from "./quadletHelpers.js"
+import {
+  buildQuadletImageInspectCommand,
+  formatQuadletImageIdentifierDetail,
+  readQuadletImageIdentifierFromInspectOutput,
+} from "./quadletImageInspectHelpers.js"
 
 const CONTAINERS_SYSTEMD_DIRECTORY_COMMAND = "mkdir -p '/etc/containers/systemd'"
 const QUADLET_FILE_MODE = "0644"
@@ -37,6 +39,7 @@ function generateContainerQuadlet(options: QuadletContainerOptions): string {
 type ExecResultLike = Awaited<ReturnType<SshConnection["exec"]>>
 
 type QuadletImageUpdateParameters = {
+  image: string
   inspectCommand: string
   name: string
   pullCommand: string
@@ -93,6 +96,7 @@ async function checkQuadletFile(parameters: {
 }
 
 async function inspectQuadletImageId(parameters: {
+  image: string
   inspectCommand: string
   name: string
   ssh: SshConnection
@@ -108,10 +112,13 @@ async function inspectQuadletImageId(parameters: {
     )
   }
 
-  const imageId = readQuadletImageIdFromInspectOutput(inspectResult.stdout)
+  const imageId = readQuadletImageIdentifierFromInspectOutput(
+    parameters.image,
+    inspectResult.stdout
+  )
   if (imageId == null) {
     return failed(
-      `[quadlet.updateImage: ${parameters.name}] podman image inspect returned no image ID`
+      `[quadlet.updateImage: ${parameters.name}] podman image inspect returned no digest or image ID`
     )
   }
   return imageId
@@ -131,7 +138,7 @@ async function restartQuadletService(parameters: {
     }
   )
   return restartResult.code === 0
-    ? { detail: formatQuadletImageIdDetail(parameters.imageId), status: "changed" }
+    ? { detail: formatQuadletImageIdentifierDetail(parameters.imageId), status: "changed" }
     : failedCommand(
         `[quadlet.updateImage: ${parameters.name}] systemctl restart failed`,
         restartResult
@@ -221,6 +228,7 @@ export const quadlet = {
       async apply(ssh: null | SshConnection): Promise<ModuleResult> {
         if (!ssh) return failed(`[quadlet.updateImage: ${options.name}] SSH connection is required`)
         return applyQuadletImageUpdate({
+          image: options.image,
           inspectCommand,
           name: options.name,
           pullCommand,
