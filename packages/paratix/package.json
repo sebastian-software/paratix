@@ -1,6 +1,6 @@
 {
   "name": "paratix",
-  "version": "0.8.0",
+  "version": "0.9.0",
   "description": "Idempotent VPS setup tool in TypeScript",
   "type": "module",
   "files": [
