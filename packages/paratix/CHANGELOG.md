@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.9.0](https://github.com/sebastian-software/paratix/compare/paratix-v0.8.0...paratix-v0.9.0) (2026-05-01)
+
+
+### Features
+
+* **paratix:** add timeout option to package and apt upgrade modules ([3349fd9](https://github.com/sebastian-software/paratix/commit/3349fd9e58ed3379a6e8bcd619b8ccad41610af7))
+
 ## [0.8.0](https://github.com/sebastian-software/paratix/compare/paratix-v0.7.0...paratix-v0.8.0) (2026-03-31)
 
 
