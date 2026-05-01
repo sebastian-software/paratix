@@ -1,4 +1,4 @@
-import type { ExecResult, SshConnection } from "../../src/types.js"
+import type { ExecOptions, ExecResult, SshConnection } from "../../src/types.js"
 
 import { shellQuote } from "../../src/ssh.js"
 
@@ -20,7 +20,10 @@ type MockSshOptions = {
   strict?: boolean
 }
 
-type MockSsh = { calls: string[] } & SshConnection
+/** Recorded `ssh.exec` invocation: the command string plus the options it received. */
+export type ExecCall = { command: string; options: ExecOptions | undefined }
+
+type MockSsh = { calls: string[]; execCalls: ExecCall[] } & SshConnection
 
 function isAllowed(command: string, allowed?: string[]): boolean {
   return allowed?.includes(command) ?? false
@@ -65,14 +68,17 @@ function buildExecResult(match?: Partial<ExecResult>): ExecResult {
   }
 }
 
+type ExecRecorder = { calls: string[]; execCalls: ExecCall[] }
+
 function createExec(
-  calls: string[],
+  recorder: ExecRecorder,
   responses?: MockResponses,
   options?: MockSshOptions
 ): MockSsh["exec"] {
   // eslint-disable-next-line @typescript-eslint/require-await -- Mock implementation
-  return async (command, _options) => {
-    calls.push(command)
+  return async (command, execOptions) => {
+    recorder.calls.push(command)
+    recorder.execCalls.push({ command, options: execOptions })
     return buildExecResult(getMockResponse({ command, kind: "exec", options, responses }))
   }
 }
@@ -104,7 +110,8 @@ function createTest(
 
 export function createMockSsh(responses?: MockResponses, options?: MockSshOptions): MockSsh {
   const calls: string[] = []
-  const exec = createExec(calls, responses, options)
+  const execCalls: ExecCall[] = []
+  const exec = createExec({ calls, execCalls }, responses, options)
   const output = createOutput(calls, responses, options)
   const test = createTest(calls, responses, options)
   return {
@@ -113,6 +120,7 @@ export function createMockSsh(responses?: MockResponses, options?: MockSshOption
     disconnect: noopMethod,
     downloadFile: noop,
     exec,
+    execCalls,
     async exists(path) {
       return this.test(`[ -e ${shellQuote(path)} ]`)
     },

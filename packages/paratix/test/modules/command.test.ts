@@ -98,7 +98,7 @@ describe("command.shell — apply with non-zero exit code", () => {
     const result = await mod.apply(mockSsh, emptyEnv)
 
     expect(mockSsh.execCalls).toHaveLength(1)
-    expect(mockSsh.execCalls[0]?.options?.secrets).toStrictEqual([secret])
+    expect(mockSsh.execCalls[0].options?.secrets).toStrictEqual([secret])
     expect(result.error).toBeInstanceOf(CommandError)
     expect(result.error).toMatchObject({
       fullStderr: "stderr leaked [REDACTED]",

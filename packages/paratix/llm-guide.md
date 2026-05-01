@@ -133,7 +133,7 @@ export default server({
 | Method            | Signature                                                                                | Idempotent           |
 | ----------------- | ---------------------------------------------------------------------------------------- | -------------------- |
 | `apt.debconf`     | `(packageName: string, selections: Record<string, string>): Module`                      | Yes                  |
-| `apt.distUpgrade` | `(date: string): Module`                                                                 | Yes (versioned flag) |
+| `apt.distUpgrade` | `(date: string, options?: UpgradeOptions): Module`                                       | Yes (versioned flag) |
 | `apt.key`         | `(name: string, url: string, options: { fingerprint: string }): Module`                  | Yes                  |
 | `apt.repository`  | `(nameOrPpa: string, source?: string, options?: { signedBy?: false \| string }): Module` | Yes                  |
 
@@ -227,12 +227,32 @@ export default server({
 
 Import with renaming: `import { package as pkg } from "paratix/modules"`. The word `package` is reserved in JavaScript, so you must alias it.
 
-| Method              | Signature                         | Idempotent           |
-| ------------------- | --------------------------------- | -------------------- |
-| `package.installed` | `(...packages: string[]): Module` | Yes                  |
-| `package.absent`    | `(...packages: string[]): Module` | Yes                  |
-| `package.update`    | `(date: string): Module`          | Yes (versioned flag) |
-| `package.upgrade`   | `(date: string): Module`          | Yes (versioned flag) |
+| Method              | Signature                                                          | Idempotent           |
+| ------------------- | ------------------------------------------------------------------ | -------------------- |
+| `package.installed` | `(...packagesAndOptions: Array<string \| UpgradeOptions>): Module` | Yes                  |
+| `package.absent`    | `(...packagesAndOptions: Array<string \| UpgradeOptions>): Module` | Yes                  |
+| `package.update`    | `(date: string, options?: UpgradeOptions): Module`                 | Yes (versioned flag) |
+| `package.upgrade`   | `(date: string, options?: UpgradeOptions): Module`                 | Yes (versioned flag) |
+
+#### `UpgradeOptions`
+
+```typescript
+type UpgradeOptions = {
+  timeout?: number // Override SSH command timeout (ms). Same value applies to every step
+  // of multi-step pipelines (apt upgrade, apk upgrade, apt dist-upgrade).
+}
+```
+
+For `package.installed` / `package.absent`, pass the options object as the **last** argument
+after the package names; existing variadic call sites such as `pkg.installed("git", "curl")`
+keep working unchanged. Use a longer `timeout` for slow operations on production servers
+with large update backlogs:
+
+```typescript
+pkg.upgrade("2026-05-01", { timeout: 900_000 })
+pkg.installed("texlive-full", { timeout: 900_000 })
+apt.distUpgrade("2026-05-01", { timeout: 1_200_000 })
+```
 
 ### `quadlet`
 

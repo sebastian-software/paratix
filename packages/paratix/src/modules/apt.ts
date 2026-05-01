@@ -1,6 +1,14 @@
+import type { UpgradeOptions } from "./package.js"
+
 import { failed, failedCommand } from "../moduleFailure.js"
 import { shellQuote } from "../ssh.js"
-import { type Module, type ModuleResult, NEEDS_APPLY, type SshConnection } from "../types.js"
+import {
+  type ExecOptions,
+  type Module,
+  type ModuleResult,
+  NEEDS_APPLY,
+  type SshConnection,
+} from "../types.js"
 import {
   applyAptKey,
   normalizeOpenPgpFingerprint,
@@ -11,6 +19,13 @@ import { hasFlag, setVersionedFlag } from "./moduleHelpers.js"
 
 const NONINTERACTIVE = "DEBIAN_FRONTEND=noninteractive"
 const APT_REPOSITORY_MODE = "0644"
+
+const APT_BASE_EXEC_OPTS = { ignoreExitCode: true, silent: true } as const
+
+function aptExecOptions(options?: UpgradeOptions): ExecOptions {
+  if (options?.timeout === undefined) return APT_BASE_EXEC_OPTS
+  return { ...APT_BASE_EXEC_OPTS, timeout: options.timeout }
+}
 
 const PPA_PREFIX = "ppa:"
 /**
@@ -196,32 +211,34 @@ export const apt = {
    * Run `apt-get update && apt-get dist-upgrade` once per dated flag.
    * Performs a full distribution upgrade with dependency resolution.
    *
+   * The pipeline is split into three separate SSH commands so that each step
+   * gets its own timeout window and produces a precise failure label.
+   *
    * @param date - A date string used as the idempotency key (e.g. `"2024-01-15"`).
+   * @param options - Optional per-call overrides (e.g. SSH command `timeout`).
+   *   The same `timeout` is applied to every step of the dist-upgrade pipeline.
    * @returns A Module that performs the dist-upgrade.
+   *
+   * @example
+   * apt.distUpgrade("2024-01-15")
+   * apt.distUpgrade("2024-01-15", { timeout: 900_000 })
    */
-  distUpgrade(date: string): Module {
+  distUpgrade(date: string, options?: UpgradeOptions): Module {
     const flagName = `apt-dist-upgrade-${date}`
     return {
       async apply(ssh: null | SshConnection): Promise<ModuleResult> {
         if (!ssh) return failed(`[apt.distUpgrade] SSH connection is required for ${date}`)
-        const update = await ssh.exec(`${NONINTERACTIVE} apt-get update`, {
-          ignoreExitCode: true,
-          silent: true,
-        })
+        const pipelineOptions = aptExecOptions(options)
+
+        const update = await ssh.exec(`${NONINTERACTIVE} apt-get update`, pipelineOptions)
         if (update.code !== 0)
           return failedCommand("[apt.distUpgrade] apt-get update failed", update)
 
-        const configure = await ssh.exec(`${NONINTERACTIVE} dpkg --configure -a`, {
-          ignoreExitCode: true,
-          silent: true,
-        })
+        const configure = await ssh.exec(`${NONINTERACTIVE} dpkg --configure -a`, pipelineOptions)
         if (configure.code !== 0)
           return failedCommand("[apt.distUpgrade] dpkg --configure -a failed", configure)
 
-        const upgrade = await ssh.exec(`${NONINTERACTIVE} apt-get dist-upgrade -y`, {
-          ignoreExitCode: true,
-          silent: true,
-        })
+        const upgrade = await ssh.exec(`${NONINTERACTIVE} apt-get dist-upgrade -y`, pipelineOptions)
         if (upgrade.code !== 0)
           return failedCommand("[apt.distUpgrade] apt-get dist-upgrade failed", upgrade)
 
