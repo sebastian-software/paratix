@@ -136,6 +136,114 @@ describe("apt.key", () => {
   })
 })
 
+describe("apt.distUpgrade", () => {
+  it("check returns ok when flag file exists", async () => {
+    const ssh = createMockSsh({
+      "[ -f /var/lib/paratix/flags/'apt-dist-upgrade-2024-01-15' ]": { code: 0 },
+    })
+    const mod = apt.distUpgrade("2024-01-15")
+    expect(await mod.check(ssh, emptyEnv)).toBe("ok")
+  })
+
+  it("check returns needs-apply when flag is missing", async () => {
+    const ssh = createMockSsh({
+      "[ -f /var/lib/paratix/flags/'apt-dist-upgrade-2024-01-15' ]": { code: 1 },
+    })
+    const mod = apt.distUpgrade("2024-01-15")
+    expect(await mod.check(ssh, emptyEnv)).toBe("needs-apply")
+  })
+
+  it("apply returns changed and runs the three-step pipeline", async () => {
+    const ssh = createMockSsh({
+      "DEBIAN_FRONTEND=noninteractive apt-get dist-upgrade -y": { code: 0 },
+      "DEBIAN_FRONTEND=noninteractive apt-get update": { code: 0 },
+      "DEBIAN_FRONTEND=noninteractive dpkg --configure -a": { code: 0 },
+      "find /var/lib/paratix/flags -maxdepth 1 -name 'apt-dist-upgrade-*' -delete && touch /var/lib/paratix/flags/'apt-dist-upgrade-2024-01-15'":
+        { code: 0 },
+      "mkdir -p /var/lib/paratix/flags": { code: 0 },
+    })
+    const mod = apt.distUpgrade("2024-01-15")
+    const result = await mod.apply(ssh, emptyEnv)
+    expect(result).toStrictEqual({ status: "changed" })
+    expect(ssh.calls).toContain("DEBIAN_FRONTEND=noninteractive apt-get update")
+    expect(ssh.calls).toContain("DEBIAN_FRONTEND=noninteractive dpkg --configure -a")
+    expect(ssh.calls).toContain("DEBIAN_FRONTEND=noninteractive apt-get dist-upgrade -y")
+  })
+
+  it("apply without options does not set a timeout key", async () => {
+    const ssh = createMockSsh({
+      "DEBIAN_FRONTEND=noninteractive apt-get dist-upgrade -y": { code: 0 },
+      "DEBIAN_FRONTEND=noninteractive apt-get update": { code: 0 },
+      "DEBIAN_FRONTEND=noninteractive dpkg --configure -a": { code: 0 },
+      "find /var/lib/paratix/flags -maxdepth 1 -name 'apt-dist-upgrade-*' -delete && touch /var/lib/paratix/flags/'apt-dist-upgrade-2024-01-15'":
+        { code: 0 },
+      "mkdir -p /var/lib/paratix/flags": { code: 0 },
+    })
+    const mod = apt.distUpgrade("2024-01-15")
+    await mod.apply(ssh, emptyEnv)
+    const distUpgradeCall = ssh.execCalls.find(
+      (c) => c.command === "DEBIAN_FRONTEND=noninteractive apt-get dist-upgrade -y"
+    )
+    expect(distUpgradeCall?.options).not.toHaveProperty("timeout")
+  })
+
+  it("apply forwards options.timeout to every step", async () => {
+    const ssh = createMockSsh({
+      "DEBIAN_FRONTEND=noninteractive apt-get dist-upgrade -y": { code: 0 },
+      "DEBIAN_FRONTEND=noninteractive apt-get update": { code: 0 },
+      "DEBIAN_FRONTEND=noninteractive dpkg --configure -a": { code: 0 },
+      "find /var/lib/paratix/flags -maxdepth 1 -name 'apt-dist-upgrade-*' -delete && touch /var/lib/paratix/flags/'apt-dist-upgrade-2024-01-15'":
+        { code: 0 },
+      "mkdir -p /var/lib/paratix/flags": { code: 0 },
+    })
+    const mod = apt.distUpgrade("2024-01-15", { timeout: 1_200_000 })
+    const result = await mod.apply(ssh, emptyEnv)
+    expect(result).toStrictEqual({ status: "changed" })
+
+    for (const command of [
+      "DEBIAN_FRONTEND=noninteractive apt-get update",
+      "DEBIAN_FRONTEND=noninteractive dpkg --configure -a",
+      "DEBIAN_FRONTEND=noninteractive apt-get dist-upgrade -y",
+    ]) {
+      const call = ssh.execCalls.find((c) => c.command === command)
+      expect(call).toBeDefined()
+      expect(call?.options?.timeout).toBe(1_200_000)
+    }
+  })
+
+  it("apply with options.timeout=undefined does not set a timeout key", async () => {
+    const ssh = createMockSsh({
+      "DEBIAN_FRONTEND=noninteractive apt-get dist-upgrade -y": { code: 0 },
+      "DEBIAN_FRONTEND=noninteractive apt-get update": { code: 0 },
+      "DEBIAN_FRONTEND=noninteractive dpkg --configure -a": { code: 0 },
+      "find /var/lib/paratix/flags -maxdepth 1 -name 'apt-dist-upgrade-*' -delete && touch /var/lib/paratix/flags/'apt-dist-upgrade-2024-01-15'":
+        { code: 0 },
+      "mkdir -p /var/lib/paratix/flags": { code: 0 },
+    })
+    const mod = apt.distUpgrade("2024-01-15", { timeout: undefined })
+    await mod.apply(ssh, emptyEnv)
+    const distUpgradeCall = ssh.execCalls.find(
+      (c) => c.command === "DEBIAN_FRONTEND=noninteractive apt-get dist-upgrade -y"
+    )
+    expect(distUpgradeCall?.options).not.toHaveProperty("timeout")
+  })
+
+  it("apply stops at the first failing step and reports it", async () => {
+    const ssh = createMockSsh({
+      "DEBIAN_FRONTEND=noninteractive apt-get update": {
+        code: 100,
+        stderr: "E: Could not get lock /var/lib/dpkg/lock-frontend",
+      },
+    })
+    const mod = apt.distUpgrade("2024-01-15")
+    const result = await mod.apply(ssh, emptyEnv)
+    expect(result.status).toBe("failed")
+    expect(result.error?.message).toContain("[apt.distUpgrade] apt-get update failed")
+    expect(ssh.calls).not.toContain("DEBIAN_FRONTEND=noninteractive dpkg --configure -a")
+    expect(ssh.calls).not.toContain("DEBIAN_FRONTEND=noninteractive apt-get dist-upgrade -y")
+  })
+})
+
 describe("apt.repository (PPA form)", () => {
   it("check returns ok when PPA is found in sources", async () => {
     const ssh = createMockSsh({

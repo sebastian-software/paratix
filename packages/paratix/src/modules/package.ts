@@ -1,9 +1,42 @@
 import { failed, failedCommand } from "../moduleFailure.js"
 import { shellQuote } from "../ssh.js"
-import { type Module, type ModuleResult, NEEDS_APPLY, type SshConnection } from "../types.js"
+import {
+  type ExecOptions,
+  type Module,
+  type ModuleResult,
+  NEEDS_APPLY,
+  type SshConnection,
+} from "../types.js"
 import { hasFlag, setVersionedFlag } from "./moduleHelpers.js"
 
 const EXEC_OPTS = { ignoreExitCode: true, silent: true } as const
+
+/** Per-call overrides for package operations that can take a long time. */
+export type UpgradeOptions = {
+  /** Override the SSH layer's command timeout (milliseconds). */
+  timeout?: number
+}
+
+function execOptions(options?: UpgradeOptions): ExecOptions {
+  if (options?.timeout === undefined) return EXEC_OPTS
+  return { ...EXEC_OPTS, timeout: options.timeout }
+}
+
+function splitPackagesAndOptions(values: ReadonlyArray<string | UpgradeOptions>): {
+  options: undefined | UpgradeOptions
+  packages: string[]
+} {
+  const packages: string[] = []
+  let options: undefined | UpgradeOptions
+  for (const [index, value] of values.entries()) {
+    if (typeof value === "string") {
+      packages.push(value)
+    } else if (index === values.length - 1) {
+      options = value
+    }
+  }
+  return { options, packages }
+}
 
 /** Supported system package managers. */
 type PackageManager = "apk" | "apt" | "dnf" | "yum"
@@ -32,11 +65,22 @@ const UPDATE_COMMANDS = {
   yum: "yum makecache",
 } as const
 
-const UPGRADE_COMMANDS = {
-  apk: "apk update && apk upgrade",
-  apt: "DEBIAN_FRONTEND=noninteractive dpkg --configure -a && DEBIAN_FRONTEND=noninteractive apt-get update && DEBIAN_FRONTEND=noninteractive apt-get upgrade -y",
-  dnf: "dnf upgrade -y",
-  yum: "yum update -y",
+/**
+ * Upgrade pipelines per package manager.
+ *
+ * Multi-step pipelines (apt, apk) are split into individual commands so each
+ * step gets its own SSH timeout window and produces a precise failure label
+ * when a single step times out or fails.
+ */
+const UPGRADE_COMMANDS: Record<PackageManager, readonly string[]> = {
+  apk: ["apk update", "apk upgrade"],
+  apt: [
+    "DEBIAN_FRONTEND=noninteractive dpkg --configure -a",
+    "DEBIAN_FRONTEND=noninteractive apt-get update",
+    "DEBIAN_FRONTEND=noninteractive apt-get upgrade -y",
+  ],
+  dnf: ["dnf upgrade -y"],
+  yum: ["yum update -y"],
 } as const
 
 function missingPackageManager(moduleName: string): ModuleResult {
@@ -123,13 +167,19 @@ export const pkg = {
    * The check phase queries the package database for each package individually;
    * the remove command is only executed when at least one package is present.
    *
-   * @param packages - One or more package names to remove.
+   * Pass an `UpgradeOptions` object as the last argument to override the SSH
+   * timeout for slow remove operations.
+   *
+   * @param packagesAndOptions - One or more package names, optionally followed
+   *   by an `UpgradeOptions` object as the last argument.
    * @returns A Module that removes the packages if any are present.
    *
    * @example
    * pkg.absent("vim", "nano")
+   * pkg.absent("vim", "nano", { timeout: 600_000 })
    */
-  absent(...packages: string[]): Module {
+  absent(...packagesAndOptions: Array<string | UpgradeOptions>): Module {
+    const { options, packages } = splitPackagesAndOptions(packagesAndOptions)
     if (packages.length === 0) {
       throw new Error("package.absent: at least one package name is required")
     }
@@ -140,7 +190,7 @@ export const pkg = {
         const pm = await detectPackageManager(ssh)
         if (!pm) return missingPackageManager(`package.absent: ${packages.join(", ")}`)
         const quoted = packages.map((p) => shellQuote(p)).join(" ")
-        const result = await ssh.exec(REMOVE_COMMANDS[pm](quoted), EXEC_OPTS)
+        const result = await ssh.exec(REMOVE_COMMANDS[pm](quoted), execOptions(options))
         if (result.code !== 0) {
           return failedCommand(
             `[package.absent: ${packages.join(", ")}] package removal failed`,
@@ -169,13 +219,19 @@ export const pkg = {
    * The check phase queries the package database for each package individually;
    * the install command is only executed when at least one package is missing.
    *
-   * @param packages - One or more package names to install.
+   * Pass an `UpgradeOptions` object as the last argument to override the SSH
+   * timeout for slow install operations.
+   *
+   * @param packagesAndOptions - One or more package names, optionally followed
+   *   by an `UpgradeOptions` object as the last argument.
    * @returns A Module that installs missing packages.
    *
    * @example
    * pkg.installed("git", "curl", "unzip")
+   * pkg.installed("texlive-full", { timeout: 900_000 })
    */
-  installed(...packages: string[]): Module {
+  installed(...packagesAndOptions: Array<string | UpgradeOptions>): Module {
+    const { options, packages } = splitPackagesAndOptions(packagesAndOptions)
     if (packages.length === 0) {
       throw new Error("package.installed: at least one package name is required")
     }
@@ -187,7 +243,7 @@ export const pkg = {
         const pm = await detectPackageManager(ssh)
         if (!pm) return missingPackageManager(`package.installed: ${packages.join(", ")}`)
         const quoted = packages.map((p) => shellQuote(p)).join(" ")
-        const result = await ssh.exec(INSTALL_COMMANDS[pm](quoted), EXEC_OPTS)
+        const result = await ssh.exec(INSTALL_COMMANDS[pm](quoted), execOptions(options))
         if (result.code !== 0) {
           return failedCommand(
             `[package.installed: ${packages.join(", ")}] package installation failed`,
@@ -219,19 +275,21 @@ export const pkg = {
    * value invalidates all previous flags for this operation.
    *
    * @param date - A date string used as the idempotency key (e.g. `"2024-01-15"`).
+   * @param options - Optional per-call overrides (e.g. SSH command `timeout`).
    * @returns A Module that refreshes package lists.
    *
    * @example
    * pkg.update("2024-01-15")
+   * pkg.update("2024-01-15", { timeout: 600_000 })
    */
-  update(date: string): Module {
+  update(date: string, options?: UpgradeOptions): Module {
     const flagName = `package-update-${date}`
     return {
       async apply(ssh: null | SshConnection): Promise<ModuleResult> {
         if (!ssh) return failed(`[package.update: ${date}] SSH connection is required`)
         const pm = await detectPackageManager(ssh)
         if (!pm) return missingPackageManager(`package.update: ${date}`)
-        const result = await ssh.exec(UPDATE_COMMANDS[pm], EXEC_OPTS)
+        const result = await ssh.exec(UPDATE_COMMANDS[pm], execOptions(options))
         if (result.code !== 0) {
           return failedCommand(`[package.update: ${date}] package index refresh failed`, result)
         }
@@ -256,27 +314,36 @@ export const pkg = {
    * reports `"ok"` without running the upgrade again. Changing `date` to a new
    * value invalidates all previous flags for this operation.
    *
-   * On apt systems this runs `apt-get update && apt-get upgrade -y` (not
-   * `dist-upgrade`); use `apt.distUpgrade` for full dependency resolution.
+   * On apt systems this runs `dpkg --configure -a`, `apt-get update`, and
+   * `apt-get upgrade -y` as three separate commands (each subject to its own
+   * SSH `timeout`). For full dependency resolution use `apt.distUpgrade`.
    *
    * @param date - A date string used as the idempotency key (e.g. `"2024-01-15"`).
+   * @param options - Optional per-call overrides (e.g. SSH command `timeout`).
+   *   The same `timeout` is applied to every step of the upgrade pipeline.
    * @returns A Module that upgrades all packages.
    *
    * @example
    * pkg.upgrade("2024-01-15")
+   * pkg.upgrade("2024-01-15", { timeout: 900_000 })
    *
    * @see apt.distUpgrade
    */
-  upgrade(date: string): Module {
+  upgrade(date: string, options?: UpgradeOptions): Module {
     const flagName = `package-upgrade-${date}`
     return {
       async apply(ssh: null | SshConnection): Promise<ModuleResult> {
         if (!ssh) return failed(`[package.upgrade: ${date}] SSH connection is required`)
         const pm = await detectPackageManager(ssh)
         if (!pm) return missingPackageManager(`package.upgrade: ${date}`)
-        const result = await ssh.exec(UPGRADE_COMMANDS[pm], EXEC_OPTS)
-        if (result.code !== 0) {
-          return failedCommand(`[package.upgrade: ${date}] package upgrade failed`, result)
+
+        const pipelineOptions = execOptions(options)
+        for (const command of UPGRADE_COMMANDS[pm]) {
+          // eslint-disable-next-line no-await-in-loop -- upgrade steps must run sequentially
+          const result = await ssh.exec(command, pipelineOptions)
+          if (result.code !== 0) {
+            return failedCommand(`[package.upgrade: ${date}] package upgrade failed`, result)
+          }
         }
 
         await setVersionedFlag(ssh, flagName, "package-upgrade-")

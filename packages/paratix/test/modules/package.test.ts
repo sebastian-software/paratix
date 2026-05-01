@@ -122,6 +122,34 @@ describe("pkg.installed", () => {
     expect(await mod.apply(ssh, emptyEnv)).toStrictEqual({ status: "changed" })
   })
 
+  it("apply forwards options.timeout when last argument is an options object", async () => {
+    const ssh = createMockSsh({
+      ...APT_FOUND,
+      "DEBIAN_FRONTEND=noninteractive apt-get install -y 'texlive-full'": { code: 0 },
+    })
+    const mod = pkg.installed("texlive-full", { timeout: 600_000 })
+    const result = await mod.apply(ssh, emptyEnv)
+    expect(result).toStrictEqual({ status: "changed" })
+    expect(mod.name).toBe("package.installed: texlive-full")
+    const installCall = ssh.execCalls.find(
+      (c) => c.command === "DEBIAN_FRONTEND=noninteractive apt-get install -y 'texlive-full'"
+    )
+    expect(installCall?.options?.timeout).toBe(600_000)
+  })
+
+  it("apply without options does not set a timeout key (installed)", async () => {
+    const ssh = createMockSsh({
+      ...APT_FOUND,
+      "DEBIAN_FRONTEND=noninteractive apt-get install -y 'nginx'": { code: 0 },
+    })
+    const mod = pkg.installed("nginx")
+    await mod.apply(ssh, emptyEnv)
+    const installCall = ssh.execCalls.find(
+      (c) => c.command === "DEBIAN_FRONTEND=noninteractive apt-get install -y 'nginx'"
+    )
+    expect(installCall?.options).not.toHaveProperty("timeout")
+  })
+
   it("apply returns failed when ssh is null", async () => {
     const mod = pkg.installed("nginx")
     // eslint-disable-next-line prefer-spread
@@ -209,6 +237,20 @@ describe("pkg.absent", () => {
     expect(await mod.apply(ssh, emptyEnv)).toStrictEqual({ status: "changed" })
   })
 
+  it("apply forwards options.timeout when last argument is an options object", async () => {
+    const ssh = createMockSsh({
+      ...APT_FOUND,
+      "DEBIAN_FRONTEND=noninteractive apt-get remove -y 'nginx'": { code: 0 },
+    })
+    const mod = pkg.absent("nginx", { timeout: 300_000 })
+    expect(await mod.apply(ssh, emptyEnv)).toStrictEqual({ status: "changed" })
+    expect(mod.name).toBe("package.absent: nginx")
+    const removeCall = ssh.execCalls.find(
+      (c) => c.command === "DEBIAN_FRONTEND=noninteractive apt-get remove -y 'nginx'"
+    )
+    expect(removeCall?.options?.timeout).toBe(300_000)
+  })
+
   it("apply returns failed when ssh is null", async () => {
     const mod = pkg.absent("nginx")
     // eslint-disable-next-line prefer-spread
@@ -280,6 +322,20 @@ describe("pkg.update", () => {
     )
   })
 
+  it("apply forwards options.timeout to the update command", async () => {
+    const ssh = createMockSsh({
+      ...APT_FOUND,
+      "apt-get update": { code: 0 },
+      "find /var/lib/paratix/flags -maxdepth 1 -name 'package-update-*' -delete && touch /var/lib/paratix/flags/'package-update-2024-01-15'":
+        { code: 0 },
+      "mkdir -p /var/lib/paratix/flags": { code: 0 },
+    })
+    const mod = pkg.update("2024-01-15", { timeout: 450_000 })
+    await mod.apply(ssh, emptyEnv)
+    const updateCall = ssh.execCalls.find((c) => c.command === "apt-get update")
+    expect(updateCall?.options?.timeout).toBe(450_000)
+  })
+
   it("apply returns failed when ssh is null", async () => {
     const mod = pkg.update("2024-01-15")
     // eslint-disable-next-line prefer-spread
@@ -338,11 +394,12 @@ describe("pkg.upgrade", () => {
 
   // apply
 
-  it("apply returns changed and sets flag after upgrade (apt)", async () => {
+  it("apply returns changed and runs split apt upgrade pipeline", async () => {
     const ssh = createMockSsh({
       ...APT_FOUND,
-      "DEBIAN_FRONTEND=noninteractive dpkg --configure -a && DEBIAN_FRONTEND=noninteractive apt-get update && DEBIAN_FRONTEND=noninteractive apt-get upgrade -y":
-        { code: 0 },
+      "DEBIAN_FRONTEND=noninteractive apt-get update": { code: 0 },
+      "DEBIAN_FRONTEND=noninteractive apt-get upgrade -y": { code: 0 },
+      "DEBIAN_FRONTEND=noninteractive dpkg --configure -a": { code: 0 },
       "find /var/lib/paratix/flags -maxdepth 1 -name 'package-upgrade-*' -delete && touch /var/lib/paratix/flags/'package-upgrade-2024-01-15'":
         { code: 0 },
       "mkdir -p /var/lib/paratix/flags": { code: 0 },
@@ -350,12 +407,79 @@ describe("pkg.upgrade", () => {
     const mod = pkg.upgrade("2024-01-15")
     const result = await mod.apply(ssh, emptyEnv)
     expect(result).toStrictEqual({ status: "changed" })
-    expect(ssh.calls).toContain(
+    expect(ssh.calls).toContain("DEBIAN_FRONTEND=noninteractive dpkg --configure -a")
+    expect(ssh.calls).toContain("DEBIAN_FRONTEND=noninteractive apt-get update")
+    expect(ssh.calls).toContain("DEBIAN_FRONTEND=noninteractive apt-get upgrade -y")
+    expect(ssh.calls).not.toContain(
       "DEBIAN_FRONTEND=noninteractive dpkg --configure -a && DEBIAN_FRONTEND=noninteractive apt-get update && DEBIAN_FRONTEND=noninteractive apt-get upgrade -y"
     )
     expect(ssh.calls).toContain(
       "find /var/lib/paratix/flags -maxdepth 1 -name 'package-upgrade-*' -delete && touch /var/lib/paratix/flags/'package-upgrade-2024-01-15'"
     )
+  })
+
+  it("apply without options does not set a timeout key on exec options (apt)", async () => {
+    const ssh = createMockSsh({
+      ...APT_FOUND,
+      "DEBIAN_FRONTEND=noninteractive apt-get update": { code: 0 },
+      "DEBIAN_FRONTEND=noninteractive apt-get upgrade -y": { code: 0 },
+      "DEBIAN_FRONTEND=noninteractive dpkg --configure -a": { code: 0 },
+      "find /var/lib/paratix/flags -maxdepth 1 -name 'package-upgrade-*' -delete && touch /var/lib/paratix/flags/'package-upgrade-2024-01-15'":
+        { code: 0 },
+      "mkdir -p /var/lib/paratix/flags": { code: 0 },
+    })
+    const mod = pkg.upgrade("2024-01-15")
+    await mod.apply(ssh, emptyEnv)
+    const upgradeCall = ssh.execCalls.find(
+      (c) => c.command === "DEBIAN_FRONTEND=noninteractive apt-get upgrade -y"
+    )
+    expect(upgradeCall).toBeDefined()
+    expect(upgradeCall?.options).toBeDefined()
+    expect(upgradeCall?.options).not.toHaveProperty("timeout")
+  })
+
+  it("apply forwards options.timeout to every step of the upgrade pipeline (apt)", async () => {
+    const ssh = createMockSsh({
+      ...APT_FOUND,
+      "DEBIAN_FRONTEND=noninteractive apt-get update": { code: 0 },
+      "DEBIAN_FRONTEND=noninteractive apt-get upgrade -y": { code: 0 },
+      "DEBIAN_FRONTEND=noninteractive dpkg --configure -a": { code: 0 },
+      "find /var/lib/paratix/flags -maxdepth 1 -name 'package-upgrade-*' -delete && touch /var/lib/paratix/flags/'package-upgrade-2026-05-01'":
+        { code: 0 },
+      "mkdir -p /var/lib/paratix/flags": { code: 0 },
+    })
+    const mod = pkg.upgrade("2026-05-01", { timeout: 900_000 })
+    const result = await mod.apply(ssh, emptyEnv)
+    expect(result).toStrictEqual({ status: "changed" })
+
+    const pipelineCommands = [
+      "DEBIAN_FRONTEND=noninteractive dpkg --configure -a",
+      "DEBIAN_FRONTEND=noninteractive apt-get update",
+      "DEBIAN_FRONTEND=noninteractive apt-get upgrade -y",
+    ]
+    for (const command of pipelineCommands) {
+      const call = ssh.execCalls.find((c) => c.command === command)
+      expect(call).toBeDefined()
+      expect(call?.options?.timeout).toBe(900_000)
+    }
+  })
+
+  it("apply with options.timeout=undefined does not set a timeout key (apt)", async () => {
+    const ssh = createMockSsh({
+      ...APT_FOUND,
+      "DEBIAN_FRONTEND=noninteractive apt-get update": { code: 0 },
+      "DEBIAN_FRONTEND=noninteractive apt-get upgrade -y": { code: 0 },
+      "DEBIAN_FRONTEND=noninteractive dpkg --configure -a": { code: 0 },
+      "find /var/lib/paratix/flags -maxdepth 1 -name 'package-upgrade-*' -delete && touch /var/lib/paratix/flags/'package-upgrade-2024-01-15'":
+        { code: 0 },
+      "mkdir -p /var/lib/paratix/flags": { code: 0 },
+    })
+    const mod = pkg.upgrade("2024-01-15", { timeout: undefined })
+    await mod.apply(ssh, emptyEnv)
+    const upgradeCall = ssh.execCalls.find(
+      (c) => c.command === "DEBIAN_FRONTEND=noninteractive apt-get upgrade -y"
+    )
+    expect(upgradeCall?.options).not.toHaveProperty("timeout")
   })
 
   it("apply returns failed when ssh is null", async () => {
@@ -366,6 +490,22 @@ describe("pkg.upgrade", () => {
     expect(result.error?.message).toContain(
       "[package.upgrade: 2024-01-15] SSH connection is required"
     )
+  })
+
+  it("apply stops at the first failing pipeline step (apt)", async () => {
+    const ssh = createMockSsh({
+      ...APT_FOUND,
+      "DEBIAN_FRONTEND=noninteractive apt-get update": {
+        code: 100,
+        stderr: "E: dpkg was interrupted",
+      },
+      "DEBIAN_FRONTEND=noninteractive dpkg --configure -a": { code: 0 },
+    })
+    const mod = pkg.upgrade("2024-01-15")
+    const result = await mod.apply(ssh, emptyEnv)
+    expect(result.status).toBe("failed")
+    expect(result.error?.message).toContain("[package.upgrade: 2024-01-15] package upgrade failed")
+    expect(ssh.calls).not.toContain("DEBIAN_FRONTEND=noninteractive apt-get upgrade -y")
   })
 
   // name
@@ -467,16 +607,19 @@ describe("package manager detection", () => {
     expect(ssh.calls).toContain("apk update")
   })
 
-  it("uses correct upgrade command for apk", async () => {
+  it("uses split upgrade pipeline for apk", async () => {
     const ssh = createMockSsh({
       ...APK_FOUND,
-      "apk update && apk upgrade": { code: 0 },
+      "apk update": { code: 0 },
+      "apk upgrade": { code: 0 },
       "find /var/lib/paratix/flags -maxdepth 1 -name 'package-upgrade-*' -delete && touch /var/lib/paratix/flags/'package-upgrade-2024-01-15'":
         { code: 0 },
       "mkdir -p /var/lib/paratix/flags": { code: 0 },
     })
     const mod = pkg.upgrade("2024-01-15")
     await mod.apply(ssh, emptyEnv)
-    expect(ssh.calls).toContain("apk update && apk upgrade")
+    expect(ssh.calls).toContain("apk update")
+    expect(ssh.calls).toContain("apk upgrade")
+    expect(ssh.calls).not.toContain("apk update && apk upgrade")
   })
 })
