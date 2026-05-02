@@ -122,6 +122,8 @@ describe("timer.scheduled — check (state: absent)", () => {
 describe("timer.scheduled — apply (state: present)", () => {
   it("writes both unit files, reloads, enables and restarts the timer", async () => {
     const ssh = createMockSsh({
+      [`[ -e '${SERVICE_PATH}' ]`]: { code: 1 },
+      [`[ -e '${TIMER_PATH}' ]`]: { code: 1 },
       "systemctl daemon-reload": { code: 0 },
       "systemctl enable --now 'backup.timer'": { code: 0 },
       "systemctl restart 'backup.timer'": { code: 0 },
@@ -136,6 +138,8 @@ describe("timer.scheduled — apply (state: present)", () => {
 
   it("returns failed when daemon-reload fails", async () => {
     const ssh = createMockSsh({
+      [`[ -e '${SERVICE_PATH}' ]`]: { code: 1 },
+      [`[ -e '${TIMER_PATH}' ]`]: { code: 1 },
       "systemctl daemon-reload": { code: 1, stderr: "boom" },
     })
     const mod = timer.scheduled("backup", baseOptions)
@@ -145,6 +149,8 @@ describe("timer.scheduled — apply (state: present)", () => {
 
   it("returns failed when enable --now fails", async () => {
     const ssh = createMockSsh({
+      [`[ -e '${SERVICE_PATH}' ]`]: { code: 1 },
+      [`[ -e '${TIMER_PATH}' ]`]: { code: 1 },
       "systemctl daemon-reload": { code: 0 },
       "systemctl enable --now 'backup.timer'": { code: 1, stderr: "denied" },
     })
@@ -155,6 +161,8 @@ describe("timer.scheduled — apply (state: present)", () => {
 
   it("returns failed when restart fails", async () => {
     const ssh = createMockSsh({
+      [`[ -e '${SERVICE_PATH}' ]`]: { code: 1 },
+      [`[ -e '${TIMER_PATH}' ]`]: { code: 1 },
       "systemctl daemon-reload": { code: 0 },
       "systemctl enable --now 'backup.timer'": { code: 0 },
       "systemctl restart 'backup.timer'": { code: 1, stderr: "no" },
@@ -240,7 +248,10 @@ describe("timer.scheduled — unit content", () => {
   })
 
   it("includes optional service hardening lines when supplied", async () => {
-    const ssh = createMockSsh()
+    const ssh = createMockSsh({
+      [`[ -e '${SERVICE_PATH}' ]`]: { code: 1 },
+      [`[ -e '${TIMER_PATH}' ]`]: { code: 1 },
+    })
     const writes: Record<string, string> = {}
     // eslint-disable-next-line @typescript-eslint/require-await -- Mock implementation
     ssh.writeFile = async (path: string, content: string) => {
@@ -263,7 +274,10 @@ describe("timer.scheduled — unit content", () => {
   })
 
   it("omits Persistent= when explicitly set to false", async () => {
-    const ssh = createMockSsh()
+    const ssh = createMockSsh({
+      [`[ -e '${SERVICE_PATH}' ]`]: { code: 1 },
+      [`[ -e '${TIMER_PATH}' ]`]: { code: 1 },
+    })
     const writes: Record<string, string> = {}
     // eslint-disable-next-line @typescript-eslint/require-await -- Mock implementation
     ssh.writeFile = async (path: string, content: string) => {
@@ -279,7 +293,10 @@ describe("timer.scheduled — unit content", () => {
   })
 
   it("includes RandomizedDelaySec and AccuracySec when supplied", async () => {
-    const ssh = createMockSsh()
+    const ssh = createMockSsh({
+      [`[ -e '${SERVICE_PATH}' ]`]: { code: 1 },
+      [`[ -e '${TIMER_PATH}' ]`]: { code: 1 },
+    })
     const writes: Record<string, string> = {}
     // eslint-disable-next-line @typescript-eslint/require-await -- Mock implementation
     ssh.writeFile = async (path: string, content: string) => {
@@ -351,7 +368,10 @@ describe("timer.scheduled — apply (state: present, idempotency)", () => {
 
 describe("timer.scheduled — environment quoting", () => {
   it("quotes environment values that contain whitespace", async () => {
-    const ssh = createMockSsh()
+    const ssh = createMockSsh({
+      [`[ -e '${SERVICE_PATH}' ]`]: { code: 1 },
+      [`[ -e '${TIMER_PATH}' ]`]: { code: 1 },
+    })
     const writes: Record<string, string> = {}
     // eslint-disable-next-line @typescript-eslint/require-await -- Mock implementation
     ssh.writeFile = async (path: string, content: string) => {
@@ -367,7 +387,10 @@ describe("timer.scheduled — environment quoting", () => {
   })
 
   it("escapes embedded quotes and backslashes in environment values", async () => {
-    const ssh = createMockSsh()
+    const ssh = createMockSsh({
+      [`[ -e '${SERVICE_PATH}' ]`]: { code: 1 },
+      [`[ -e '${TIMER_PATH}' ]`]: { code: 1 },
+    })
     const writes: Record<string, string> = {}
     // eslint-disable-next-line @typescript-eslint/require-await -- Mock implementation
     ssh.writeFile = async (path: string, content: string) => {
@@ -383,7 +406,10 @@ describe("timer.scheduled — environment quoting", () => {
   })
 
   it("leaves simple environment values unquoted", async () => {
-    const ssh = createMockSsh()
+    const ssh = createMockSsh({
+      [`[ -e '${SERVICE_PATH}' ]`]: { code: 1 },
+      [`[ -e '${TIMER_PATH}' ]`]: { code: 1 },
+    })
     const writes: Record<string, string> = {}
     // eslint-disable-next-line @typescript-eslint/require-await -- Mock implementation
     ssh.writeFile = async (path: string, content: string) => {
