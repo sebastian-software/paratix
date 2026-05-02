@@ -21,18 +21,31 @@ function buildUserArguments(options?: UserOptions): string[] {
   return flags
 }
 
+/**
+ * Apply a pre-hashed password via `chpasswd -e`. The hash is written to the
+ * SSH stream's stdin instead of being inlined into the command argument so it
+ * never appears in `/var/log/auth.log`, `ps -ef`, or `/proc/<pid>/cmdline`.
+ *
+ * @param ssh - The SSH connection to the remote host.
+ * @param name - The username whose password should be set.
+ * @param password - The pre-hashed password value (e.g. SHA-512 `$6$...`).
+ * @returns `null` on success, or a failure result when `chpasswd` rejects the
+ *   hash. The hash is registered as a secret so any failure path masks it.
+ */
 async function setPassword(
   ssh: SshConnection,
   name: string,
   password: string
 ): Promise<ModuleResult | null> {
   const credential = [name, password].join(":")
-  const pwResult = await ssh.exec(`printf '%s\\n' ${shellQuote(credential)} | chpasswd -e`, {
+  const pwResult = await ssh.exec(`chpasswd -e`, {
     ignoreExitCode: true,
+    input: `${credential}\n`,
+    secrets: [password],
     silent: true,
   })
   if (pwResult.code !== 0) {
-    return failedCommand(`[user.present: ${name}] chpasswd -e failed`, pwResult)
+    return failedCommand(`[user.present: ${name}] chpasswd -e failed`, pwResult, [password])
   }
   return null
 }

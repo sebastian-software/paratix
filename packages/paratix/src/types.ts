@@ -156,6 +156,14 @@ export type ExecOptions = {
   env?: Record<string, string>
   /** Return a result even when the exit code is non-zero instead of throwing. */
   ignoreExitCode?: boolean
+  /**
+   * Optional payload written to the remote command's stdin before EOF is
+   * signalled. Used to pass secret material (password hashes, signed URLs,
+   * Authorization headers) to a remote tool without exposing it on the
+   * command line, where it would otherwise leak into `/var/log/auth.log`,
+   * `ps -ef`, or `/proc/<pid>/cmdline`.
+   */
+  input?: string
   /** Strings to mask in error messages (e.g. tokens, passwords). */
   secrets?: string[]
   /** Suppress stdout/stderr from the console while running. */

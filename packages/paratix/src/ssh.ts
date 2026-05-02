@@ -745,6 +745,13 @@ export class SshConnectionImpl implements SshConnection {
         if (needsPassword && this.cachedSudoPassword != null) {
           this.writeSudoPassword(stream)
         }
+        // Forward an optional stdin payload (password hashes, signed URLs,
+        // Authorization headers) so callers can keep secret material out of
+        // the command line. End the stream after writing so the remote tool
+        // sees EOF and exits.
+        if (options.input != null) {
+          stream.end(options.input)
+        }
       })
     })
   }

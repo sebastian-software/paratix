@@ -150,22 +150,35 @@ describe("user.present check", () => {
 })
 
 describe("user.present apply", () => {
-  // Bug #8 regression: setPassword must use chpasswd -e for pre-hashed passwords
-  it("uses chpasswd -e when setting a pre-hashed password", async () => {
+  // Bug #8 regression: setPassword must use chpasswd -e for pre-hashed passwords.
+  // R-0000036 regression: the password hash must be passed via stdin, not as
+  // a command-line argument, so it never appears in /var/log/auth.log,
+  // ps -ef, or /proc/<pid>/cmdline.
+  it("uses chpasswd -e via stdin when setting a pre-hashed password", async () => {
     const ssh = createMockSsh({
+      "chpasswd -e": { code: 0 },
       "id 'alice'": { code: 0 },
-      "printf '%s\\n' 'alice:$6$hash' | chpasswd -e": { code: 0 },
       "usermod  'alice'": { code: 0 },
     })
     const mod = user.present("alice", { password: "$6$hash" })
     await mod.apply(ssh, emptyEnv)
-    expect(ssh.calls).toContain("printf '%s\\n' 'alice:$6$hash' | chpasswd -e")
+
+    // The command itself no longer materialises the hash on argv.
+    expect(ssh.calls).toContain("chpasswd -e")
+    expect(ssh.calls.every((c) => !c.includes("$6$hash"))).toBe(true)
+
+    // The hash is delivered via the input field instead, with the username
+    // prefix matching the chpasswd `<user>:<hash>` format.
+    const chpasswdCall = ssh.execCalls.find((entry) => entry.command === "chpasswd -e")
+    expect(chpasswdCall?.options?.input).toBe("alice:$6$hash\n")
+    // The hash is registered as a secret so any failure message is masked.
+    expect(chpasswdCall?.options?.secrets).toStrictEqual(["$6$hash"])
   })
 
-  it("apply returns failed when chpasswd -e fails", async () => {
+  it("apply returns failed and masks the hash when chpasswd -e fails", async () => {
     const ssh = createMockSsh({
+      "chpasswd -e": { code: 1, stderr: "stderr referencing $6$hash" },
       "id 'alice'": { code: 0 },
-      "printf '%s\\n' 'alice:$6$hash' | chpasswd -e": { code: 1 },
       "usermod  'alice'": { code: 0 },
     })
     const mod = user.present("alice", { password: "$6$hash" })
@@ -173,6 +186,9 @@ describe("user.present apply", () => {
     expect(result.status).toBe("failed")
     expect(result.error).toBeInstanceOf(CommandError)
     expect(result.error?.message).toContain("chpasswd -e failed")
+    // The hash must not appear unredacted in the failure message because
+    // user.setPassword passed it as a secret to ssh.exec.
+    expect(result.error?.message).not.toContain("$6$hash")
   })
 
   it("does not call chpasswd when no password is set", async () => {
