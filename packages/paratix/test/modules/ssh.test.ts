@@ -387,7 +387,7 @@ describe("ssh.authorizedKeys", () => {
     const mockSsh = createMockSsh(
       aliceResponses({
         "[ -L '/home/alice/.ssh/authorized_keys' ]": { code: 1 },
-        [`grep -qF -- '${testKey}' ${aliceKeys}`]: { code: 0 },
+        [`grep -qxF -- '${testKey}' ${aliceKeys}`]: { code: 0 },
         "stat -c '%a %U %G %F' '/home/alice/.ssh'": { stdout: "700 alice alice directory" },
         "stat -c '%a %U %G %F' '/home/alice/.ssh/authorized_keys'": {
           stdout: "600 alice alice regular file",
@@ -405,7 +405,7 @@ describe("ssh.authorizedKeys", () => {
         "[ -e '/home/alice/.ssh' ]": { code: 0 },
         "[ -e '/home/alice/.ssh/authorized_keys' ]": { code: 0 },
         "[ -L '/home/alice/.ssh/authorized_keys' ]": { code: 1 },
-        [`grep -qF -- '${testKey}' ${aliceKeys}`]: { code: 1 },
+        [`grep -qxF -- '${testKey}' ${aliceKeys}`]: { code: 1 },
         "stat -c '%a %U %G %F' '/home/alice/.ssh'": { stdout: "700 alice alice directory" },
         "stat -c '%a %U %G %F' '/home/alice/.ssh/authorized_keys'": {
           stdout: "600 alice alice regular file",
@@ -429,7 +429,7 @@ describe("ssh.authorizedKeys", () => {
     const result = await mod.check(mockSsh, emptyEnv)
 
     expect(result).toBe("needs-apply")
-    expect(mockSsh.calls).not.toContain(`grep -qF -- '${testKey}' ${aliceKeys}`)
+    expect(mockSsh.calls).not.toContain(`grep -qxF -- '${testKey}' ${aliceKeys}`)
     expect(mockSsh.calls).not.toContain("stat -c '%a %U %G %F' '/home/alice/.ssh/authorized_keys'")
   })
 
@@ -467,7 +467,7 @@ describe("ssh.authorizedKeys", () => {
         "[ -e '/home/alice/.ssh' ]": { code: 0 },
         "[ -e '/home/alice/.ssh/authorized_keys' ]": { code: 0 },
         "[ -L '/home/alice/.ssh/authorized_keys' ]": { code: 1 },
-        [`grep -qF -- '${testKey}' ${aliceKeys}`]: { code: 1 },
+        [`grep -qxF -- '${testKey}' ${aliceKeys}`]: { code: 1 },
         "stat -c '%a %U %G %F' '/home/alice/.ssh'": { stdout: "700 alice alice directory" },
         "stat -c '%a %U %G %F' '/home/alice/.ssh/authorized_keys'": {
           stdout: "600 alice alice regular file",
@@ -485,7 +485,7 @@ describe("ssh.authorizedKeys", () => {
         "[ -e '/home/alice/.ssh' ]": { code: 0 },
         "[ -e '/home/alice/.ssh/authorized_keys' ]": { code: 0 },
         "[ -L '/home/alice/.ssh/authorized_keys' ]": { code: 1 },
-        [`grep -qF -- '${testKey}' ${aliceKeys}`]: { code: 0 },
+        [`grep -qxF -- '${testKey}' ${aliceKeys}`]: { code: 0 },
         "stat -c '%a %U %G %F' '/home/alice/.ssh'": { stdout: "700 alice alice directory" },
         "stat -c '%a %U %G %F' '/home/alice/.ssh/authorized_keys'": {
           stdout: "600 alice alice regular file",
@@ -503,7 +503,7 @@ describe("ssh.authorizedKeys", () => {
         "[ -e '/home/alice/.ssh' ]": { code: 0 },
         "[ -e '/home/alice/.ssh/authorized_keys' ]": { code: 0 },
         "[ -L '/home/alice/.ssh/authorized_keys' ]": { code: 0 },
-        [`grep -qF -- '${testKey}' ${aliceKeys}`]: { code: 0 },
+        [`grep -qxF -- '${testKey}' ${aliceKeys}`]: { code: 0 },
       })
     )
     const mod = ssh.authorizedKeys("alice", testKey)
@@ -519,7 +519,7 @@ describe("ssh.authorizedKeys", () => {
         "[ -e '/home/alice/.ssh' ]": { code: 0 },
         "[ -e '/home/alice/.ssh/authorized_keys' ]": { code: 0 },
         "[ -L '/home/alice/.ssh/authorized_keys' ]": { code: 1 },
-        [`grep -qF -- '${testKey}' ${aliceKeys}`]: { code: 0 },
+        [`grep -qxF -- '${testKey}' ${aliceKeys}`]: { code: 0 },
         "stat -c '%a %U %G %F' '/home/alice/.ssh'": { stdout: "755 root root directory" },
       })
     )
@@ -536,7 +536,7 @@ describe("ssh.authorizedKeys", () => {
         "[ -e '/home/alice/.ssh' ]": { code: 0 },
         "[ -e '/home/alice/.ssh/authorized_keys' ]": { code: 0 },
         "[ -L '/home/alice/.ssh/authorized_keys' ]": { code: 1 },
-        [`grep -qF -- '${testKey}' ${aliceKeys}`]: { code: 0 },
+        [`grep -qxF -- '${testKey}' ${aliceKeys}`]: { code: 0 },
         "stat -c '%a %U %G %F' '/home/alice/.ssh'": { stdout: "700 alice alice directory" },
         "stat -c '%a %U %G %F' '/home/alice/.ssh/authorized_keys'": {
           stdout: "644 root root regular file",
@@ -583,7 +583,7 @@ describe("ssh.authorizedKeys", () => {
         "[ -e '/home/alice/.ssh' ]": { code: 0 },
         "[ -e '/home/alice/.ssh/authorized_keys' ]": { code: 0 },
         "[ -L '/home/alice/.ssh/authorized_keys' ]": { code: 1 },
-        [`grep -qF -- '${testKey}' ${aliceKeys}`]: { code: 0 },
+        [`grep -qxF -- '${testKey}' ${aliceKeys}`]: { code: 0 },
         [aliceMktempPattern]: { stdout: tempPath },
         "stat -c '%a %U %G %F' '/home/alice/.ssh'": { stdout: "700 alice alice directory" },
         "stat -c '%a %U %G %F' '/home/alice/.ssh/authorized_keys'": {
@@ -606,7 +606,7 @@ describe("ssh.authorizedKeys", () => {
     )
   })
 
-  it("apply removes key with grep -vF || true pattern (state: absent)", async () => {
+  it("apply removes key with grep -vxF || true pattern (state: absent)", async () => {
     const mockSsh = createMockSsh(
       aliceResponses({
         [aliceMktempPattern]: { stdout: tempPath },
@@ -615,9 +615,44 @@ describe("ssh.authorizedKeys", () => {
     const mod = ssh.authorizedKeys("alice", testKey, { state: "absent" })
     const result = await mod.apply(mockSsh, emptyEnv)
     expect(result.status).toBe("changed")
+    // R-0000044: whole-line match so an entry whose body is a substring of
+    // an unrelated authorized_keys line is not collateral-damage-deleted.
     expect(mockSsh.calls).toContain(
-      `{ if [ -f ${aliceKeys} ]; then grep -vF -- '${testKey}' ${aliceKeys} || true; fi; } > '${tempPath}'`
+      `{ if [ -f ${aliceKeys} ]; then grep -vxF -- '${testKey}' ${aliceKeys} || true; fi; } > '${tempPath}'`
     )
+  })
+
+  // R-0000044: in real life, a `grep -vF -- '<key body>'` filter matches any
+  // line containing the key body as a substring — this is wrong when the same
+  // key body also appears in another entry that has an `options=...` prefix or
+  // a different comment. The fix is `grep -vxF` (whole-line). This regression
+  // test asserts the absent path renders the whole-line filter, never the
+  // substring filter.
+  it("regression: absent apply uses whole-line filter so it cannot delete keys that share a substring", async () => {
+    const sharedKeyBody = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAI shared-body"
+    const exactKeyToRemove = sharedKeyBody
+    const collateralEntry = `command="/usr/bin/restricted" ${sharedKeyBody}`
+
+    // Sanity: in the unfixed implementation, `grep -vF -- '<body>' ...` would
+    // also match the collateral entry because it contains `<body>` as a
+    // substring. The fixed implementation uses `grep -vxF` (whole-line),
+    // which only matches the exact `exactKeyToRemove` line.
+    expect(collateralEntry.includes(sharedKeyBody)).toBe(true)
+    expect(collateralEntry).not.toBe(exactKeyToRemove)
+
+    const mockSsh = createMockSsh(
+      aliceResponses({
+        [aliceMktempPattern]: { stdout: tempPath },
+      })
+    )
+    const mod = ssh.authorizedKeys("alice", exactKeyToRemove, { state: "absent" })
+    const result = await mod.apply(mockSsh, emptyEnv)
+    expect(result.status).toBe("changed")
+    // The rendered command must use `grep -vxF`, never the broader `grep -vF`.
+    const rewriteCall = mockSsh.calls.find((c) => c.includes(" > '") && c.includes("grep"))
+    expect(rewriteCall).toBeDefined()
+    expect(rewriteCall).toContain("grep -vxF")
+    expect(rewriteCall).not.toMatch(/grep -vF\s/v)
   })
 
   it("regression: apply resets ownership and mode after removing a key (state: absent)", async () => {
@@ -732,7 +767,7 @@ describe("ssh.authorizedKeys", () => {
   it("resolves home directory dynamically for root user", async () => {
     const mockSsh = createMockSsh({
       "[ -L '/root/.ssh/authorized_keys' ]": { code: 1 },
-      [`grep -qF -- '${testKey}' '/root/.ssh/authorized_keys'`]: { code: 0 },
+      [`grep -qxF -- '${testKey}' '/root/.ssh/authorized_keys'`]: { code: 0 },
       "getent passwd 'root' | cut -d: -f6": { stdout: "/root" },
       "stat -c '%a %U %G %F' '/root/.ssh'": { stdout: "700 root root directory" },
       "stat -c '%a %U %G %F' '/root/.ssh/authorized_keys'": {
@@ -747,7 +782,7 @@ describe("ssh.authorizedKeys", () => {
   it("resolves home directory dynamically for non-root user", async () => {
     const mockSsh = createMockSsh({
       "[ -L '/home/deploy/.ssh/authorized_keys' ]": { code: 1 },
-      [`grep -qF -- '${testKey}' '/home/deploy/.ssh/authorized_keys'`]: { code: 0 },
+      [`grep -qxF -- '${testKey}' '/home/deploy/.ssh/authorized_keys'`]: { code: 0 },
       "getent passwd 'deploy' | cut -d: -f6": { stdout: "/home/deploy" },
       "stat -c '%a %U %G %F' '/home/deploy/.ssh'": { stdout: "700 deploy deploy directory" },
       "stat -c '%a %U %G %F' '/home/deploy/.ssh/authorized_keys'": {
@@ -763,7 +798,7 @@ describe("ssh.authorizedKeys", () => {
     const spaceyHome = "/home/my user"
     const mockSsh = createMockSsh({
       "[ -L '/home/my user/.ssh/authorized_keys' ]": { code: 1 },
-      [`grep -qF -- '${testKey}' '/home/my user/.ssh/authorized_keys'`]: { code: 0 },
+      [`grep -qxF -- '${testKey}' '/home/my user/.ssh/authorized_keys'`]: { code: 0 },
       "getent passwd 'alice' | cut -d: -f6": { stdout: spaceyHome },
       "stat -c '%a %U %G %F' '/home/my user/.ssh'": { stdout: "700 alice alice directory" },
       "stat -c '%a %U %G %F' '/home/my user/.ssh/authorized_keys'": {
@@ -774,7 +809,9 @@ describe("ssh.authorizedKeys", () => {
     const result = await mod.check(mockSsh, emptyEnv)
     expect(result).toBe("ok")
     // Verify that the path containing a space was passed as a quoted argument
-    expect(mockSsh.calls).toContain(`grep -qF -- '${testKey}' '/home/my user/.ssh/authorized_keys'`)
+    expect(mockSsh.calls).toContain(
+      `grep -qxF -- '${testKey}' '/home/my user/.ssh/authorized_keys'`
+    )
   })
 
   it("regression: home path with spaces is correctly shell-quoted in apply", async () => {

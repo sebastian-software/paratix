@@ -79,8 +79,12 @@ async function rewriteAuthorizedKeys(
         { silent: true }
       )
     } else {
+      // R-0000044: use `grep -vxF` (whole-line match) to mirror the
+      // present branch's `grep -qxF` and avoid removing collateral entries
+      // whose key body is a substring of the key being deleted (e.g. a key
+      // appearing again with options-prefix or a different comment).
       await conn.exec(
-        `{ if [ -f ${shellQuote(authorizedKeysPath)} ]; then grep -vF -- ${shellQuote(key)} ${shellQuote(authorizedKeysPath)} || true; fi; } > ${shellQuote(temporaryPath)}`,
+        `{ if [ -f ${shellQuote(authorizedKeysPath)} ]; then grep -vxF -- ${shellQuote(key)} ${shellQuote(authorizedKeysPath)} || true; fi; } > ${shellQuote(temporaryPath)}`,
         { silent: true }
       )
     }
@@ -218,7 +222,10 @@ export async function checkAuthorizedKeys(
   })
   if (missingPathResult != null) return missingPathResult
 
-  const keyExists = await conn.test(`grep -qF -- ${shellQuote(key)} ${authKeysPath}`)
+  // R-0000044: whole-line match so check stays consistent with the apply
+  // path (which writes/removes whole lines) and never falsely reports a key
+  // as present when only its body appears as a substring of another entry.
+  const keyExists = await conn.test(`grep -qxF -- ${shellQuote(key)} ${authKeysPath}`)
   const securityStateIsValid = await authorizedKeysSecurityStateIsValid(conn, {
     authorizedKeysPath,
     sshDirectoryPath,
