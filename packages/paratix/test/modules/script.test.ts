@@ -7,18 +7,37 @@ const emptyEnv = {}
 
 const FLAGS_DIRECTORY = "/var/lib/paratix/flags"
 
+/**
+ * Build the deterministic stdout that the mock returns for the per-run
+ * `mktemp` invocation. Tests pin this to a known string so the rest of
+ * the apply pipeline (chmod, exec, rm) matches predictable commands.
+ *
+ * @param name - The script name embedded in the temp path.
+ * @param suffix - The 6-character random suffix; default "ABCDEF".
+ * @returns The simulated mktemp path.
+ */
+function makeRemoteScriptPath(name: string, suffix = "ABCDEF"): string {
+  return `/tmp/paratix-script-${name}.${suffix}`
+}
+
+function buildScriptCommand(remotePath: string, args?: string[]): string {
+  const quotedArgs = args?.map((arg) => `'${arg}'`).join(" ") ?? ""
+  if (quotedArgs === "") return `'${remotePath}'`
+  return `'${remotePath}' ${quotedArgs}`
+}
+
 function createScriptMockSsh(options?: {
   args?: string[]
   name?: string
+  remoteSuffix?: string
   responses?: Record<string, { code?: number; stderr?: string; stdout?: string }>
   version?: string
 }) {
   const name = options?.name ?? "setup"
   const version = options?.version ?? "1"
-  const remotePath = `/tmp/paratix-script-${name}`
-  const quotedArgs = options?.args?.map((arg) => `'${arg}'`).join(" ") ?? ""
-  const args = quotedArgs === "" ? "" : ` ${quotedArgs}`
-  const scriptCommand = `'${remotePath}'${args}`
+  const remotePath = makeRemoteScriptPath(name, options?.remoteSuffix)
+  const mktempCmd = `mktemp -p /tmp 'paratix-script-${name}.XXXXXX'`
+  const scriptCommand = buildScriptCommand(remotePath, options?.args)
   const flagCommand = `find ${FLAGS_DIRECTORY} -maxdepth 1 -name 'script-${name}-*' -delete && touch ${FLAGS_DIRECTORY}/'script-${name}-${version}'`
 
   return createStrictMockSsh({
@@ -26,6 +45,7 @@ function createScriptMockSsh(options?: {
     [`mkdir -p ${FLAGS_DIRECTORY}`]: { code: 0 },
     [`rm -f '${remotePath}'`]: { code: 0 },
     [flagCommand]: { code: 0 },
+    [mktempCmd]: { code: 0, stdout: `${remotePath}\n` },
     [scriptCommand]: { code: 0 },
     ...options?.responses,
   })
@@ -78,6 +98,7 @@ describe("script.once — check", () => {
 describe("script.once — apply", () => {
   it("uploads script, makes it executable, runs it, cleans up, and sets flag", async () => {
     const mockSsh = createScriptMockSsh()
+    const remotePath = makeRemoteScriptPath("setup")
     const mod = script.once("setup", "/local/setup.sh")
     const result = await mod.apply(mockSsh, emptyEnv)
 
@@ -87,13 +108,13 @@ describe("script.once — apply", () => {
     expect(mockSsh.calls).toContain(`mkdir -p ${FLAGS_DIRECTORY}`)
 
     // chmod +x on remote path
-    expect(mockSsh.calls).toContain("chmod +x '/tmp/paratix-script-setup'")
+    expect(mockSsh.calls).toContain(`chmod +x '${remotePath}'`)
 
     // script execution
-    expect(mockSsh.calls).toContain("'/tmp/paratix-script-setup'")
+    expect(mockSsh.calls).toContain(`'${remotePath}'`)
 
-    // cleanup of temp file
-    expect(mockSsh.calls).toContain("rm -f '/tmp/paratix-script-setup'")
+    // cleanup of per-run temp file
+    expect(mockSsh.calls).toContain(`rm -f '${remotePath}'`)
 
     // flag set
     expect(mockSsh.calls).toContain(
@@ -103,16 +124,17 @@ describe("script.once — apply", () => {
 
   it("executes calls in correct order", async () => {
     const mockSsh = createScriptMockSsh()
+    const remotePath = makeRemoteScriptPath("setup")
     const mod = script.once("setup", "/local/setup.sh")
     await mod.apply(mockSsh, emptyEnv)
 
     const mkdirIdx = mockSsh.calls.indexOf(`mkdir -p ${FLAGS_DIRECTORY}`)
-    const chmodIdx = mockSsh.calls.indexOf("chmod +x '/tmp/paratix-script-setup'")
-    const execIdx = mockSsh.calls.indexOf("'/tmp/paratix-script-setup'")
+    const chmodIdx = mockSsh.calls.indexOf(`chmod +x '${remotePath}'`)
+    const execIdx = mockSsh.calls.indexOf(`'${remotePath}'`)
     const flagIdx = mockSsh.calls.indexOf(
       `find ${FLAGS_DIRECTORY} -maxdepth 1 -name 'script-setup-*' -delete && touch ${FLAGS_DIRECTORY}/'script-setup-1'`
     )
-    const rmIdx = mockSsh.calls.indexOf("rm -f '/tmp/paratix-script-setup'")
+    const rmIdx = mockSsh.calls.indexOf(`rm -f '${remotePath}'`)
 
     expect(chmodIdx).toBeLessThan(execIdx)
     expect(execIdx).toBeLessThan(mkdirIdx)
@@ -130,9 +152,10 @@ describe("script.once — apply", () => {
   })
 
   it("returns failed when script exits non-zero", async () => {
+    const remotePath = makeRemoteScriptPath("setup")
     const mockSsh = createScriptMockSsh({
       responses: {
-        "'/tmp/paratix-script-setup'": { code: 1, stderr: "boom" },
+        [`'${remotePath}'`]: { code: 1, stderr: "boom" },
       },
     })
     const mod = script.once("setup", "/local/setup.sh")
@@ -144,20 +167,22 @@ describe("script.once — apply", () => {
   })
 
   it("still cleans up temp file when script exits non-zero", async () => {
+    const remotePath = makeRemoteScriptPath("setup")
     const mockSsh = createScriptMockSsh({
       responses: {
-        "'/tmp/paratix-script-setup'": { code: 1 },
+        [`'${remotePath}'`]: { code: 1 },
       },
     })
     const mod = script.once("setup", "/local/setup.sh")
     await mod.apply(mockSsh, emptyEnv)
-    expect(mockSsh.calls).toContain("rm -f '/tmp/paratix-script-setup'")
+    expect(mockSsh.calls).toContain(`rm -f '${remotePath}'`)
   })
 
   it("does not set flag when script exits non-zero", async () => {
+    const remotePath = makeRemoteScriptPath("setup")
     const mockSsh = createScriptMockSsh({
       responses: {
-        "'/tmp/paratix-script-setup'": { code: 1 },
+        [`'${remotePath}'`]: { code: 1 },
       },
     })
     const mod = script.once("setup", "/local/setup.sh")
@@ -167,17 +192,53 @@ describe("script.once — apply", () => {
   })
 
   it("passes shell-quoted arguments to script", async () => {
+    const remotePath = makeRemoteScriptPath("setup")
     const mockSsh = createScriptMockSsh({ args: ["--env", "production"] })
     const mod = script.once("setup", "/local/setup.sh", { args: ["--env", "production"] })
     await mod.apply(mockSsh, emptyEnv)
-    expect(mockSsh.calls).toContain("'/tmp/paratix-script-setup' '--env' 'production'")
+    expect(mockSsh.calls).toContain(`'${remotePath}' '--env' 'production'`)
   })
 
   it("does not append arguments when args is an empty array", async () => {
+    const remotePath = makeRemoteScriptPath("setup")
     const mockSsh = createScriptMockSsh()
     const mod = script.once("setup", "/local/setup.sh", { args: [] })
     await mod.apply(mockSsh, emptyEnv)
-    expect(mockSsh.calls).toContain("'/tmp/paratix-script-setup'")
+    expect(mockSsh.calls).toContain(`'${remotePath}'`)
+  })
+
+  // R-0000050 regression: two parallel applies of the same script must use
+  // distinct per-run remote paths so they cannot race on the legacy
+  // deterministic `/tmp/paratix-script-<name>` path.
+  it("two parallel applies use distinct mktemp-allocated remote paths", async () => {
+    const firstPath = makeRemoteScriptPath("setup", "AAAAAA")
+    const secondPath = makeRemoteScriptPath("setup", "BBBBBB")
+    const mockSshA = createScriptMockSsh({ remoteSuffix: "AAAAAA" })
+    const mockSshB = createScriptMockSsh({ remoteSuffix: "BBBBBB" })
+
+    const modA = script.once("setup", "/local/setup.sh")
+    const modB = script.once("setup", "/local/setup.sh")
+
+    const [resultA, resultB] = await Promise.all([
+      modA.apply(mockSshA, emptyEnv),
+      modB.apply(mockSshB, emptyEnv),
+    ])
+
+    expect(resultA.status).toBe("changed")
+    expect(resultB.status).toBe("changed")
+    expect(firstPath).not.toBe(secondPath)
+    expect(mockSshA.calls).toContain(`'${firstPath}'`)
+    expect(mockSshB.calls).toContain(`'${secondPath}'`)
+    // The two runs must not share the same remote path.
+    expect(mockSshA.calls).not.toContain(`'${secondPath}'`)
+    expect(mockSshB.calls).not.toContain(`'${firstPath}'`)
+  })
+
+  it("creates the remote path via mktemp -p /tmp paratix-script-<name>.XXXXXX", async () => {
+    const mockSsh = createScriptMockSsh()
+    const mod = script.once("setup", "/local/setup.sh")
+    await mod.apply(mockSsh, emptyEnv)
+    expect(mockSsh.calls).toContain("mktemp -p /tmp 'paratix-script-setup.XXXXXX'")
   })
 
   it("uses correct flag name with custom version", async () => {
