@@ -1007,6 +1007,48 @@ describe("SshConnectionImpl", () => {
       await expect(execPromise).rejects.toThrow(/Command timed out after 5000ms/v)
     })
 
+    it("closes the late ssh2 stream when client.exec callback fires after timeout (R-0000025 regression)", async () => {
+      // Regression: the timer can fire before client.exec invokes its callback. When
+      // the stream eventually arrives, the wrapped resolve/reject are no-ops, but
+      // collectStreamOutput would still attach listeners — leaving the stream open
+      // and accumulating data in the ssh2 client. The fix closes the late stream
+      // immediately and skips listener registration.
+      vi.useFakeTimers()
+
+      let pendingCallback: ExecCallback | undefined
+      const execSpy = vi.fn().mockImplementation((_command: string, callback: ExecCallback) => {
+        // Capture the callback so the test can invoke it manually after the timeout fires
+        pendingCallback = callback
+      })
+      const client = makeClientWithExecSpy(execSpy)
+      const ssh = makeConnectedSsh(client, { user: "deploy" })
+      ;(ssh as unknown as Record<string, unknown>).cachedSudoPassword = null
+      ;(ssh as unknown as Record<string, unknown>).sudoReady = true
+
+      const collectMock = vi.mocked(collectStreamOutput)
+      collectMock.mockClear()
+
+      const execPromise = ssh.exec("sleep infinity", { timeout: 5000 })
+      execPromise.catch(() => {
+        /* handled below */
+      })
+      await Promise.resolve()
+
+      // Fire the timeout before ssh2 has invoked its exec callback
+      await vi.advanceTimersByTimeAsync(5001)
+
+      await expect(execPromise).rejects.toThrow(/Command timed out after 5000ms/v)
+
+      // Now the ssh2 client finally hands us a stream — it must be closed
+      // immediately and no listeners must be attached via collectStreamOutput.
+      expect(pendingCallback).toBeDefined()
+      const lateStream = makeStream()
+      pendingCallback!(undefined, lateStream as unknown as Parameters<ExecCallback>[1])
+
+      expect(lateStream.close).toHaveBeenCalledOnce()
+      expect(collectMock).not.toHaveBeenCalled()
+    })
+
     it("masks secrets in the timeout error message (regression: raw command was interpolated)", async () => {
       // Regression: before the fix, the timeout error interpolated `command`
       // directly without calling maskSecrets, leaking secrets into error messages.
@@ -2609,6 +2651,47 @@ describe("SshConnectionImpl", () => {
 
       // Assert
       await expect(probePromise).rejects.toThrow(/Command timed out after 120000ms/v)
+    })
+
+    it("closes the late ssh2 stream when execRaw client.exec callback fires after timeout (R-0000025 regression)", async () => {
+      // Regression: in execRaw the timer can fire before client.exec invokes its
+      // callback. When the stream eventually arrives, the wrapped resolve/reject
+      // are no-ops and listener registration would leave the stream open in ssh2.
+      // The fix closes the late stream immediately and skips listener registration.
+      vi.useFakeTimers()
+
+      let pendingCallback: ExecCallback | undefined
+      const execSpy = vi.fn().mockImplementation((_command: string, callback: ExecCallback) => {
+        // Capture the callback so the test can invoke it manually after the timeout fires
+        pendingCallback = callback
+      })
+
+      const client = makeClientWithExecSpy(execSpy)
+      const ssh = makeConnectedSsh(client, { sudoPassword: null, user: "deploy" })
+
+      // probeSudo -> ensureSudoInstalled -> execRaw is the only execRaw call site,
+      // which has a 120 000 ms COMMAND_TIMEOUT.
+      const probePromise = ssh.probeSudo()
+      probePromise.catch(() => {
+        /* handled below */
+      })
+
+      // Fire the timeout before ssh2 has invoked its exec callback
+      await vi.advanceTimersByTimeAsync(120_001)
+      await expect(probePromise).rejects.toThrow(/Command timed out after 120000ms/v)
+
+      // The ssh2 client now finally hands us a stream — it must be closed
+      // immediately. No data/close listeners may be attached, otherwise the late
+      // stream would accumulate buffered data forever.
+      expect(pendingCallback).toBeDefined()
+      const lateStream = makeStream()
+      const dataListenerSpy = vi.spyOn(lateStream, "on")
+      const stderrListenerSpy = vi.spyOn(lateStream.stderr, "on")
+      pendingCallback!(undefined, lateStream as unknown as Parameters<ExecCallback>[1])
+
+      expect(lateStream.close).toHaveBeenCalledOnce()
+      expect(dataListenerSpy).not.toHaveBeenCalled()
+      expect(stderrListenerSpy).not.toHaveBeenCalled()
     })
 
     it("rejects immediately when disconnectTransport() is called while execRaw is pending — R-005 regression", async () => {

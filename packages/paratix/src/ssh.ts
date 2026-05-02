@@ -636,7 +636,11 @@ export class SshConnectionImpl implements SshConnection {
   private createSettledCallbacks<T>(
     resolve: (value: T) => void,
     reject: (reason: Error) => void
-  ): { wrappedReject: (reason: Error) => void; wrappedResolve: (value: T) => void } {
+  ): {
+    isSettled: () => boolean
+    wrappedReject: (reason: Error) => void
+    wrappedResolve: (value: T) => void
+  } {
     let settled = false
     const wrappedReject = (reason: Error): void => {
       if (settled) return
@@ -651,7 +655,7 @@ export class SshConnectionImpl implements SshConnection {
       resolve(value)
     }
     this.pendingRejects.add(wrappedReject)
-    return { wrappedReject, wrappedResolve }
+    return { isSettled: () => settled, wrappedReject, wrappedResolve }
   }
 
   /** Tear down the SSH transport without touching the cached sudo password. */
@@ -701,7 +705,7 @@ export class SshConnectionImpl implements SshConnection {
     const environmentPrefix = this.buildEnvPrefix(options.env)
     const { command: cmd, needsPassword } = this.sudoCommand(command, environmentPrefix)
     return new Promise((resolve, reject) => {
-      const { wrappedReject, wrappedResolve } = this.createSettledCallbacks<ExecResult>(
+      const { isSettled, wrappedReject, wrappedResolve } = this.createSettledCallbacks<ExecResult>(
         resolve,
         reject
       )
@@ -718,6 +722,14 @@ export class SshConnectionImpl implements SshConnection {
         if (error) {
           clearTimeout(timer)
           wrappedReject(error)
+          return
+        }
+        // If the timer already fired (or the promise was otherwise settled) before
+        // ssh2 invoked this callback, we must not attach listeners that can never
+        // resolve the already-rejected promise. Close the stream immediately so
+        // ssh2 releases the channel and discards any buffered data.
+        if (isSettled()) {
+          stream.close()
           return
         }
         activeStream = stream
@@ -747,7 +759,7 @@ export class SshConnectionImpl implements SshConnection {
   private async execRaw(command: string): Promise<{ exitCode: number; stdout: string }> {
     const client = this.ensureClient()
     return new Promise((resolve, reject) => {
-      const { wrappedReject, wrappedResolve } = this.createSettledCallbacks<{
+      const { isSettled, wrappedReject, wrappedResolve } = this.createSettledCallbacks<{
         exitCode: number
         stdout: string
       }>(resolve, reject)
@@ -760,6 +772,14 @@ export class SshConnectionImpl implements SshConnection {
         if (error) {
           clearTimeout(timer)
           wrappedReject(error)
+          return
+        }
+        // If the timer already fired (or the promise was otherwise settled) before
+        // ssh2 invoked this callback, we must not attach listeners that can never
+        // resolve the already-rejected promise. Close the stream immediately so
+        // ssh2 releases the channel and discards any buffered data.
+        if (isSettled()) {
+          stream.close()
           return
         }
         activeStream = stream
