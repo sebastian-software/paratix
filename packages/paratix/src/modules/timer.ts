@@ -107,11 +107,15 @@ function validateEnvironment(environment: Record<string, string>): void {
   }
 }
 
+function assertNotBlank(field: string, value: string): void {
+  if (value.trim().length === 0) {
+    throw new Error(`timer.scheduled: ${field} must not be empty: ${JSON.stringify(value)}`)
+  }
+}
+
 function validatePresentOptions(options: TimerScheduledOptions): void {
   assertNoNewline("exec", options.exec)
-  if (options.exec.trim().length === 0) {
-    throw new Error("timer.scheduled: exec must not be empty")
-  }
+  assertNotBlank("exec", options.exec)
   const optionalStringFields: ReadonlyArray<readonly [string, string | undefined]> = [
     ["description", options.description],
     ["user", options.user],
@@ -119,7 +123,10 @@ function validatePresentOptions(options: TimerScheduledOptions): void {
     ["workingDirectory", options.workingDirectory],
   ]
   for (const [field, value] of optionalStringFields) {
-    if (value != null) assertNoNewline(field, value)
+    if (value != null) {
+      assertNoNewline(field, value)
+      assertNotBlank(field, value)
+    }
   }
   if (options.randomizedDelaySec != null) {
     assertNoNewline("randomizedDelaySec", String(options.randomizedDelaySec))

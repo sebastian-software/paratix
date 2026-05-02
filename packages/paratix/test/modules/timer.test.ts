@@ -555,6 +555,46 @@ describe("timer.scheduled — module name and validation", () => {
     ).toThrow(/must not contain newlines/v)
   })
 
+  it("throws when description is whitespace-only", () => {
+    expect(() =>
+      timer.scheduled("backup", {
+        description: "   ",
+        exec: "/usr/local/bin/backup",
+        onCalendar: "daily",
+      })
+    ).toThrow(/description must not be empty/v)
+  })
+
+  it("throws when user is whitespace-only", () => {
+    expect(() =>
+      timer.scheduled("backup", {
+        exec: "/usr/local/bin/backup",
+        onCalendar: "daily",
+        user: "   ",
+      })
+    ).toThrow(/user must not be empty/v)
+  })
+
+  it("throws when group is whitespace-only", () => {
+    expect(() =>
+      timer.scheduled("backup", {
+        exec: "/usr/local/bin/backup",
+        group: "\t",
+        onCalendar: "daily",
+      })
+    ).toThrow(/group must not be empty/v)
+  })
+
+  it("throws when workingDirectory is whitespace-only", () => {
+    expect(() =>
+      timer.scheduled("backup", {
+        exec: "/usr/local/bin/backup",
+        onCalendar: "daily",
+        workingDirectory: "   ",
+      })
+    ).toThrow(/workingDirectory must not be empty/v)
+  })
+
   it("does not validate exec or onCalendar when state is absent", () => {
     expect(() =>
       timer.scheduled("backup", {
