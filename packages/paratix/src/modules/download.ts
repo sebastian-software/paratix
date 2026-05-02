@@ -202,27 +202,110 @@ function buildCurlProtocolFlags(parameters: Pick<DownloadParameters, "allowInsec
 }
 
 /**
- * Build the curl command string including optional headers.
+ * Headers whose values are considered sensitive and must therefore be fed to
+ * curl via stdin (`--config -`) instead of being inlined into argv. Matching
+ * is case-insensitive.
+ *
+ * Bearer tokens, GitHub PATs, Basic-Auth credentials, and presigned tokens
+ * land here so they never appear in `/var/log/auth.log` (sudo logging) or in
+ * `/proc/<pid>/cmdline` / `ps -ef` while the download runs.
+ */
+const SENSITIVE_HEADER_NAMES = new Set(["authorization", "proxy-authorization"])
+
+function isSensitiveHeader(name: string): boolean {
+  return SENSITIVE_HEADER_NAMES.has(name.toLowerCase())
+}
+
+/**
+ * Encode a string for use as a quoted value in a curl config file. Curl's
+ * config grammar allows `\\` and `\"` inside double-quoted strings.
+ *
+ * @param value - The value to encode (URL or header value).
+ * @returns The escaped value without surrounding quotes.
+ */
+function escapeCurlConfigValue(value: string): string {
+  return value.replaceAll("\\", String.raw`\\`).replaceAll('"', String.raw`\"`)
+}
+
+/**
+ * Validate a header name/value pair and throw with a helpful message when the
+ * name or value would inject newlines or invalid characters into the request.
+ *
+ * @param name - The HTTP header field name.
+ * @param value - The HTTP header field value.
+ */
+function validateHeaderPair(name: string, value: string): void {
+  if (!isValidHeaderName(name)) {
+    throw new Error(`Invalid HTTP header name: ${name}`)
+  }
+  if (!isValidHeaderValue(value)) {
+    throw new Error(`Invalid HTTP header value for ${name}: value contains newline characters`)
+  }
+}
+
+/**
+ * Build the stdin config payload for `curl --config -`.
+ *
+ * The URL is always passed through stdin. Sensitive headers (Authorization,
+ * Proxy-Authorization) are also routed through stdin so bearer tokens and
+ * presigned URL secrets never leak via `sudo` logging or `ps -ef`. Non-
+ * sensitive headers are returned separately so the caller can place them on
+ * argv where the visibility cost is acceptable.
+ *
+ * @param parameters - Download parameters with the URL and optional headers.
+ * @returns The stdin config text and the headers that should still go to argv.
+ */
+function buildCurlConfigPayload(parameters: DownloadParameters): {
+  argvHeaders: Array<[string, string]>
+  configInput: string
+} {
+  const lines: string[] = [`url = "${escapeCurlConfigValue(parameters.url)}"`]
+  const argvHeaders: Array<[string, string]> = []
+
+  for (const [name, value] of Object.entries(parameters.headers ?? {})) {
+    validateHeaderPair(name, value)
+    if (isSensitiveHeader(name)) {
+      const headerLine = `${name}: ${value}`
+      lines.push(`header = "${escapeCurlConfigValue(headerLine)}"`)
+    } else {
+      argvHeaders.push([name, value])
+    }
+  }
+
+  // Trailing newline so the final config directive is terminated cleanly.
+  return { argvHeaders, configInput: `${lines.join("\n")}\n` }
+}
+
+/**
+ * Build the curl command string and the stdin payload that carries sensitive
+ * material (URL plus Authorization-style headers).
+ *
+ * The URL and any Authorization/Proxy-Authorization headers are no longer
+ * inlined as argv. They flow through `curl --config -` via stdin so they
+ * never leak into `/var/log/auth.log` (sudo logging) or
+ * `/proc/<pid>/cmdline` / `ps -ef` while the download runs. Non-sensitive
+ * headers stay on argv to keep the command readable.
  *
  * @param parameters - Download parameters containing destination, url, and optional headers.
- * @returns The assembled curl shell command.
+ * @returns The assembled curl shell command and the stdin config payload.
  */
-function buildCurlCommand(parameters: DownloadParameters): string {
-  const headerFlags = Object.entries(parameters.headers ?? {})
+function buildCurlCommand(parameters: DownloadParameters): {
+  command: string
+  input: string
+} {
+  const { argvHeaders, configInput } = buildCurlConfigPayload(parameters)
+  const headerFlags = argvHeaders
     .map(([name, value]) => {
-      if (!isValidHeaderName(name)) {
-        throw new Error(`Invalid HTTP header name: ${name}`)
-      }
-      if (!isValidHeaderValue(value)) {
-        throw new Error(`Invalid HTTP header value for ${name}: value contains newline characters`)
-      }
-      const header = `${name}: ${value}`
-      return `-H ${shellQuote(header)}`
+      const headerLine = `${name}: ${value}`
+      return `-H ${shellQuote(headerLine)}`
     })
     .join(" ")
   const headerPart = headerFlags.length > 0 ? `${headerFlags} ` : ""
   const protocolFlags = buildCurlProtocolFlags(parameters)
-  return `curl -fsSL -o ${shellQuote(parameters.destination)} ${protocolFlags} ${headerPart}${shellQuote(parameters.url)}`
+  return {
+    command: `curl -fsSL -o ${shellQuote(parameters.destination)} ${protocolFlags} ${headerPart}--config -`,
+    input: configInput,
+  }
 }
 
 /**
@@ -280,6 +363,27 @@ async function cleanupTemporaryDownloadFile(
 }
 
 /**
+ * Run the curl download with the URL and any sensitive headers passed via
+ * `--config -` from stdin. Stdout/stderr remain masked through `secrets` so
+ * verbose logs do not leak signed URLs or bearer tokens.
+ *
+ * @param conn - The active SSH connection.
+ * @param downloadParameters - Download parameters with destination set to the
+ *   temporary file used during the transfer.
+ */
+async function executeCurlDownload(
+  conn: SshConnection,
+  downloadParameters: DownloadParameters
+): Promise<void> {
+  const { command: curlCommand, input: curlConfig } = buildCurlCommand(downloadParameters)
+  await conn.exec(curlCommand, {
+    input: curlConfig,
+    secrets: downloadParameters.secrets,
+    silent: true,
+  })
+}
+
+/**
  * Execute the download, verify integrity, and set ownership/permissions.
  * Shared implementation behind both `download.url()` and `download.github()`.
  *
@@ -301,10 +405,7 @@ async function performDownload(
   let shouldCleanupTemporaryFile = true
 
   try {
-    await conn.exec(buildCurlCommand(downloadParameters), {
-      secrets: downloadParameters.secrets,
-      silent: true,
-    })
+    await executeCurlDownload(conn, downloadParameters)
 
     if (!(await verifyChecksum(conn, downloadParameters))) {
       return failed(`[download] checksum verification failed for ${parameters.destination}`)

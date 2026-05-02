@@ -142,7 +142,11 @@ describe("download.url", () => {
   })
 
   describe("apply", () => {
-    it("downloads file via curl and returns changed", async () => {
+    it("downloads file via curl --config from stdin and returns changed", async () => {
+      // R-0000037: URLs (including signed/presigned ones) and Authorization
+      // headers must not appear on argv. They are passed to curl via
+      // `--config -` from stdin so they never leak into /var/log/auth.log
+      // (sudo logging) or /proc/<pid>/cmdline / ps -ef.
       const mockSsh = createMockSsh({
         [`mktemp "$(dirname '${destination}')/.paratix-download.XXXXXX"`]: {
           stdout: `${temporaryDestination}\n`,
@@ -152,8 +156,13 @@ describe("download.url", () => {
       const result = await mod.apply(mockSsh, emptyEnv)
       expect(result.status).toBe("changed")
       expect(mockSsh.calls).toContain(
-        `curl -fsSL -o '${temporaryDestination}' ${httpsOnlyCurlProtocolFlags} '${url}'`
+        `curl -fsSL -o '${temporaryDestination}' ${httpsOnlyCurlProtocolFlags} --config -`
       )
+      // The URL must not be on argv any more.
+      expect(mockSsh.calls.every((c) => !c.includes(url))).toBe(true)
+      // The URL must be delivered via stdin instead.
+      const curlCall = mockSsh.execCalls.find((entry) => entry.command.startsWith("curl -fsSL"))
+      expect(curlCall?.options?.input).toBe(`url = "${url}"\n`)
       expect(mockSsh.calls).toContain(`mv '${temporaryDestination}' '${destination}'`)
     })
 
@@ -216,7 +225,10 @@ describe("download.url", () => {
       expect(mockSsh.calls).toContain(`chown ':staff' '${temporaryDestination}'`)
     })
 
-    it("sends headers via -H when headers are specified", async () => {
+    it("sends Authorization header via stdin so the bearer token is not on argv", async () => {
+      // R-0000037: Bearer tokens, GitHub PATs, and Basic-Auth credentials in
+      // Authorization-style headers are routed via curl --config from stdin
+      // and must not appear on argv.
       const mockSsh = createMockSsh({
         [`mktemp "$(dirname '${destination}')/.paratix-download.XXXXXX"`]: {
           stdout: `${temporaryDestination}\n`,
@@ -228,9 +240,37 @@ describe("download.url", () => {
       })
       const result = await mod.apply(mockSsh, emptyEnv)
       expect(result.status).toBe("changed")
-      expect(mockSsh.calls).toContain(
-        `curl -fsSL -o '${temporaryDestination}' ${httpsOnlyCurlProtocolFlags} -H 'Authorization: Bearer mytoken' '${url}'`
+      const curlCall = mockSsh.execCalls.find((entry) => entry.command.startsWith("curl -fsSL"))
+      expect(curlCall?.command).toBe(
+        `curl -fsSL -o '${temporaryDestination}' ${httpsOnlyCurlProtocolFlags} --config -`
       )
+      // Neither the URL nor the Authorization header value may appear on argv.
+      expect(curlCall?.command).not.toContain("Bearer mytoken")
+      expect(curlCall?.command).not.toContain(url)
+      // Both flow through the curl config payload on stdin instead.
+      expect(curlCall?.options?.input).toBe(
+        `url = "${url}"\nheader = "Authorization: Bearer mytoken"\n`
+      )
+    })
+
+    it("sends non-sensitive headers via -H on argv", async () => {
+      const mockSsh = createMockSsh({
+        [`mktemp "$(dirname '${destination}')/.paratix-download.XXXXXX"`]: {
+          stdout: `${temporaryDestination}\n`,
+        },
+      })
+      const mod = download.url(destination, url, {
+        ...allowUnverifiedDownload,
+        headers: { Accept: "application/octet-stream", "User-Agent": "paratix/1.0" },
+      })
+      const result = await mod.apply(mockSsh, emptyEnv)
+      expect(result.status).toBe("changed")
+      const curlCall = mockSsh.execCalls.find((entry) => entry.command.startsWith("curl -fsSL"))
+      expect(curlCall?.command).toContain(`-H 'Accept: application/octet-stream'`)
+      expect(curlCall?.command).toContain(`-H 'User-Agent: paratix/1.0'`)
+      // URL still flows through stdin even when only non-sensitive headers
+      // are present.
+      expect(curlCall?.options?.input).toBe(`url = "${url}"\n`)
     })
 
     it("verifies SHA-256 after download and returns changed on match", async () => {
@@ -295,7 +335,7 @@ describe("download.url", () => {
             stdout: `${temporaryDestination}\n`,
           },
         })
-        const curlCommand = `curl -fsSL -o '${temporaryDestination}' ${httpsOnlyCurlProtocolFlags} '${url}'`
+        const curlCommand = `curl -fsSL -o '${temporaryDestination}' ${httpsOnlyCurlProtocolFlags} --config -`
         const cleanupCommand = `rm -f '${temporaryDestination}'`
         const execMock = vi
           .fn<(command: string) => Promise<{ code: number; stderr: string; stdout: string }>>()
@@ -490,7 +530,7 @@ describe("download.github", () => {
   })
 
   describe("apply", () => {
-    it("builds correct GitHub release URL in curl command", async () => {
+    it("builds correct GitHub release URL via curl --config from stdin", async () => {
       const mockSsh = createMockSsh({
         [`mktemp "$(dirname '${destination}')/.paratix-download.XXXXXX"`]: {
           stdout: `${temporaryDestination}\n`,
@@ -500,12 +540,17 @@ describe("download.github", () => {
       const result = await mod.apply(mockSsh, emptyEnv)
       expect(result.status).toBe("changed")
       expect(mockSsh.calls).toContain(
-        `curl -fsSL -o '${temporaryDestination}' ${httpsOnlyCurlProtocolFlags} '${expectedUrl}'`
+        `curl -fsSL -o '${temporaryDestination}' ${httpsOnlyCurlProtocolFlags} --config -`
       )
+      const curlCall = mockSsh.execCalls.find((entry) => entry.command.startsWith("curl -fsSL"))
+      expect(curlCall?.options?.input).toBe(`url = "${expectedUrl}"\n`)
       expect(mockSsh.calls).toContain(`mv '${temporaryDestination}' '${destination}'`)
     })
 
-    it("sends Authorization and Accept headers when token is provided", async () => {
+    it("sends Authorization via stdin and Accept via -H when a token is provided", async () => {
+      // R-0000037: the GitHub PAT must not be inlined into the curl argv,
+      // because sudo logging would persist it in /var/log/auth.log and
+      // ps -ef / /proc/<pid>/cmdline would expose it during the download.
       const token = "ghp_supersecrettoken"
       const mockSsh = createMockSsh()
       const mod = download.github(destination, {
@@ -517,21 +562,25 @@ describe("download.github", () => {
       })
       const result = await mod.apply(mockSsh, emptyEnv)
       expect(result.status).toBe("changed")
-      const authHeader = `-H 'Authorization: token ${token}'`
       const acceptHeader = `-H 'Accept: application/octet-stream'`
-      const curlCall = mockSsh.calls.find((call) => call.startsWith("curl -fsSL"))
+      const curlCall = mockSsh.execCalls.find((entry) => entry.command.startsWith("curl -fsSL"))
       expect(curlCall).toBeDefined()
-      expect(curlCall).toContain(authHeader)
-      expect(curlCall).toContain(acceptHeader)
+      // Accept stays on argv (not sensitive) but Authorization is hidden.
+      expect(curlCall?.command).toContain(acceptHeader)
+      expect(curlCall?.command).not.toContain("Authorization")
+      expect(curlCall?.command).not.toContain(token)
+      // Authorization header (with the PAT) is delivered via stdin.
+      expect(curlCall?.options?.input).toContain(`header = "Authorization: token ${token}"`)
     })
 
     it("does not send Authorization header when no token is provided", async () => {
       const mockSsh = createMockSsh()
       const mod = download.github(destination, { ...allowUnverifiedDownload, asset, repo, tag })
       await mod.apply(mockSsh, emptyEnv)
-      const curlCall = mockSsh.calls.find((call) => call.startsWith("curl -fsSL"))
+      const curlCall = mockSsh.execCalls.find((entry) => entry.command.startsWith("curl -fsSL"))
       expect(curlCall).toBeDefined()
-      expect(curlCall).not.toContain("Authorization")
+      expect(curlCall?.command).not.toContain("Authorization")
+      expect(curlCall?.options?.input).not.toContain("Authorization")
     })
 
     it("returns failed when ssh is null", async () => {
@@ -645,11 +694,11 @@ describe("download.github", () => {
       })
       await mod.apply(mockSsh, emptyEnv)
 
-      const curlCall = mockSsh.calls.find((call) => call.startsWith("curl -fsSL"))
+      const curlCall = mockSsh.execCalls.find((entry) => entry.command.startsWith("curl -fsSL"))
       expect(curlCall).toBeDefined()
       // The "+" must appear as "%2B" in the URL, not as a literal "+"
-      expect(curlCall).toContain(encodeURIComponent(tagWithSpecialChars))
-      expect(curlCall).not.toContain(`/${tagWithSpecialChars}/`)
+      expect(curlCall?.options?.input).toContain(encodeURIComponent(tagWithSpecialChars))
+      expect(curlCall?.options?.input).not.toContain(`/${tagWithSpecialChars}/`)
     })
 
     it("percent-encodes special characters in asset when building the download URL", async () => {
@@ -666,11 +715,11 @@ describe("download.github", () => {
       })
       await mod.apply(mockSsh, emptyEnv)
 
-      const curlCall = mockSsh.calls.find((call) => call.startsWith("curl -fsSL"))
+      const curlCall = mockSsh.execCalls.find((entry) => entry.command.startsWith("curl -fsSL"))
       expect(curlCall).toBeDefined()
       // The space must appear as "%20" in the URL, not as a literal space
-      expect(curlCall).toContain(encodeURIComponent(assetWithSpace))
-      expect(curlCall).not.toContain(` ${assetWithSpace}'`)
+      expect(curlCall?.options?.input).toContain(encodeURIComponent(assetWithSpace))
+      expect(curlCall?.options?.input).not.toContain(` ${assetWithSpace}"`)
     })
 
     it("percent-encodes special characters in owner and repo when building the download URL", async () => {
@@ -691,13 +740,15 @@ describe("download.github", () => {
       })
       await mod.apply(mockSsh, emptyEnv)
 
-      const curlCall = mockSsh.calls.find((call) => call.startsWith("curl -fsSL"))
+      const curlCall = mockSsh.execCalls.find((entry) => entry.command.startsWith("curl -fsSL"))
       expect(curlCall).toBeDefined()
       // Both owner and repo must appear percent-encoded in the URL
-      expect(curlCall).toContain(`https://github.com/${encodedOwner}/${encodedRepo}/`)
+      expect(curlCall?.options?.input).toContain(
+        `https://github.com/${encodedOwner}/${encodedRepo}/`
+      )
       // The raw "+" and "%" must not appear in the path segments
-      expect(curlCall).not.toContain("/my+org/")
-      expect(curlCall).not.toContain("/my%repo/")
+      expect(curlCall?.options?.input).not.toContain("/my+org/")
+      expect(curlCall?.options?.input).not.toContain("/my%repo/")
     })
   })
 })
@@ -871,7 +922,7 @@ describe("download.large", () => {
       expect(result.status).toBe("failed")
     })
 
-    it("downloads file and sets flag on success", async () => {
+    it("downloads file via curl --config from stdin and sets flag on success", async () => {
       const mockSsh = createMockSsh({
         [`mktemp "$(dirname '${destination}')/.paratix-download.XXXXXX"`]: {
           stdout: `${temporaryDestination}\n`,
@@ -881,8 +932,10 @@ describe("download.large", () => {
       const result = await mod.apply(mockSsh, emptyEnv)
       expect(result.status).toBe("changed")
       expect(mockSsh.calls).toContain(
-        `curl -fsSL -o '${temporaryDestination}' ${httpsOnlyCurlProtocolFlags} '${url}'`
+        `curl -fsSL -o '${temporaryDestination}' ${httpsOnlyCurlProtocolFlags} --config -`
       )
+      const curlCall = mockSsh.execCalls.find((entry) => entry.command.startsWith("curl -fsSL"))
+      expect(curlCall?.options?.input).toBe(`url = "${url}"\n`)
       expect(mockSsh.calls).toContain(`mv '${temporaryDestination}' '${destination}'`)
       expect(mockSsh.calls).toContain(`touch /var/lib/paratix/flags/'${flagName}'`)
     })
@@ -1093,7 +1146,10 @@ describe("buildCurlCommand — header name validation", () => {
     await expect(mod.apply(mockSsh, emptyEnv)).rejects.toThrow("Invalid HTTP header name")
   })
 
-  it("accepts a valid single-word header name", async () => {
+  it("accepts a valid single-word header name (Authorization routed via stdin)", async () => {
+    // R-0000037: Authorization is sensitive and is now passed via curl
+    // --config from stdin. The header name stays accepted by the validator,
+    // but no longer appears on argv.
     const mockSsh = createMockSsh()
     const mod = download.url(destination, url, {
       ...allowUnverifiedDownload,
@@ -1101,8 +1157,9 @@ describe("buildCurlCommand — header name validation", () => {
     })
     const result = await mod.apply(mockSsh, emptyEnv)
     expect(result.status).toBe("changed")
-    const curlCall = mockSsh.calls.find((c) => c.startsWith("curl"))
-    expect(curlCall).toContain("-H 'Authorization: Bearer token123'")
+    const curlCall = mockSsh.execCalls.find((entry) => entry.command.startsWith("curl"))
+    expect(curlCall?.command).not.toContain("-H 'Authorization")
+    expect(curlCall?.options?.input).toContain(`header = "Authorization: Bearer token123"`)
   })
 
   it("accepts a valid hyphenated header name", async () => {
