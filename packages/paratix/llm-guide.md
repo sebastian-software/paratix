@@ -152,9 +152,14 @@ export default server({
 
 ### `cron`
 
-| Method     | Signature                                                                                       | Idempotent |
-| ---------- | ----------------------------------------------------------------------------------------------- | ---------- |
-| `cron.job` | `(user: string, name: string, options: { job: string; state?: "absent" \| "present" }): Module` | Yes        |
+| Method        | Signature                                                                                       | Idempotent |
+| ------------- | ----------------------------------------------------------------------------------------------- | ---------- |
+| `cron.job`    | `(user: string, name: string, options: { job: string; state?: "absent" \| "present" }): Module` | Yes        |
+| `cron.absent` | `(user: string, name: string): Module`                                                          | Yes        |
+
+`cron.absent(user, name)` is the dedicated uninstall variant: it removes a
+managed cron entry without requiring a placeholder `job` argument. Use it as
+the idiomatic way to ensure a previously installed cron job is gone.
 
 ### `compose`
 
@@ -340,6 +345,11 @@ rsync SSH process and does not depend on a local `known_hosts` entry.
 | Method            | Signature                                                                                                                                                                                                                                                                                                                             | Idempotent |
 | ----------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------- |
 | `timer.scheduled` | `(name: string, options: { accuracySec?: number \| string; description?: string; environment?: Record<string, string>; exec: string; group?: string; onCalendar: string \| string[]; persistent?: boolean; randomizedDelaySec?: number \| string; state?: "absent" \| "present"; user?: string; workingDirectory?: string }): Module` | Yes        |
+| `timer.absent`    | `(name: string): Module`                                                                                                                                                                                                                                                                                                              | Yes        |
+
+`timer.absent(name)` is the dedicated uninstall variant: it disables and stops
+the timer, removes both unit files, and reloads systemd, without requiring
+placeholder `exec`/`onCalendar` values.
 
 `timer.scheduled` is the systemd-timer equivalent of `cron.job`. It writes
 `<name>.service` (`Type=oneshot`) and `<name>.timer` to `/etc/systemd/system/`,
@@ -361,11 +371,7 @@ timer.scheduled("cleanup", {
   randomizedDelaySec: 300,
 })
 
-timer.scheduled("legacy-task", {
-  exec: "/usr/local/bin/legacy",
-  onCalendar: "daily",
-  state: "absent",
-})
+timer.absent("legacy-task")
 ```
 
 ### `ufw`
