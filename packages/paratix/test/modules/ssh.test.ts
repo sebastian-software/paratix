@@ -13,6 +13,39 @@ function makeHostKeyBuffer(algo: string, keyData = Buffer.from("fake-host-key-da
   return Buffer.concat([lengthBuffer, algoBytes, keyData])
 }
 
+/**
+ * Wrap a fresh mock SSH connection that reflects a virtual
+ * `~/.ssh/known_hosts` file across two apply runs so the R-0000038
+ * regression test can assert idempotent behaviour without using
+ * conditionals inside the test body. The grep test reflects whether the
+ * tracked line is present; the printf-append exec records the line as added.
+ *
+ * @param line - The verified host-key line that the test simulates.
+ * @param baseResponses - Base responses for unrelated commands (e.g.
+ *   `ssh-keyscan`).
+ * @returns A mock SSH connection whose `test` and `exec` track the virtual
+ *   known_hosts state.
+ */
+function createKnownHostsTrackingMock(
+  line: string,
+  baseResponses: Record<string, { code?: number; stderr?: string; stdout?: string }>
+): ReturnType<typeof createMockSsh> {
+  const grepCommand = `grep -qxF '${line}' ~/.ssh/known_hosts`
+  const printfCommand = `printf '%s\\n' '${line}' >> ~/.ssh/known_hosts`
+  let present = false
+  const base = createMockSsh(baseResponses)
+  return {
+    ...base,
+    exec: async (command: string, options?: Parameters<typeof base.exec>[1]) => {
+      const result = await base.exec(command, options)
+      if (command === printfCommand) present = true
+      return result
+    },
+    test: async (command: string): Promise<boolean> =>
+      command === grepCommand ? present : base.test(command),
+  } as ReturnType<typeof createMockSsh>
+}
+
 describe("ssh.knownHosts", () => {
   const hostKeyBuffer = makeHostKeyBuffer("ssh-ed25519")
   const hostKeyBase64 = hostKeyBuffer.toString("base64")
@@ -154,6 +187,7 @@ describe("ssh.knownHosts", () => {
 
   it("apply verifies a scanned host key against the expected fingerprint before appending it", async () => {
     const mockSsh = createMockSsh({
+      [`grep -qxF '${scannedLine}' ~/.ssh/known_hosts`]: { code: 1 },
       "ssh-keyscan -H 'github.com' 2>/dev/null": { stdout: `${scannedLine}\n` },
     })
     const mod = ssh.knownHosts("github.com", { expectedFingerprint: hostFingerprint })
@@ -167,6 +201,7 @@ describe("ssh.knownHosts", () => {
 
   it("apply verifies a scanned host key against the expected public key before appending it", async () => {
     const mockSsh = createMockSsh({
+      [`grep -qxF '${scannedLine}' ~/.ssh/known_hosts`]: { code: 1 },
       "ssh-keyscan -H 'github.com' 2>/dev/null": { stdout: `${scannedLine}\n` },
     })
     const mod = ssh.knownHosts("github.com", { publicKey: `${hostPublicKey} github.com` })
@@ -178,6 +213,7 @@ describe("ssh.knownHosts", () => {
 
   it("apply scans the configured non-standard port before appending a verified host key", async () => {
     const mockSsh = createMockSsh({
+      [`grep -qxF '${scannedLine}' ~/.ssh/known_hosts`]: { code: 1 },
       "ssh-keyscan -p 2222 -H 'github.com' 2>/dev/null": { stdout: `${scannedLine}\n` },
     })
     const mod = ssh.knownHosts("github.com", {
@@ -196,6 +232,7 @@ describe("ssh.knownHosts", () => {
     const extraKey = makeHostKeyBuffer("ssh-rsa", Buffer.from("extra-host-key"))
     const extraLine = `|1|hashed-host|hashed-extra ssh-rsa ${extraKey.toString("base64")}`
     const mockSsh = createMockSsh({
+      [`grep -qxF '${scannedLine}' ~/.ssh/known_hosts`]: { code: 1 },
       "ssh-keyscan -H 'github.com' 2>/dev/null": { stdout: `${scannedLine}\n${extraLine}\n` },
     })
     const mod = ssh.knownHosts("github.com", { expectedFingerprint: hostFingerprint })
@@ -207,6 +244,48 @@ describe("ssh.knownHosts", () => {
     expect(mockSsh.calls).not.toContain(
       `printf '%s\\n' '${scannedLine}' '${extraLine}' >> ~/.ssh/known_hosts`
     )
+  })
+
+  it("apply skips appending lines already present in known_hosts (R-0000038 idempotency)", async () => {
+    // Regression for R-0000038: when the verified line is already in
+    // ~/.ssh/known_hosts (grep -qxF returns code 0), the apply path must not
+    // append it again. A second consecutive run therefore produces neither
+    // duplicates nor a second `printf >> known_hosts` call, and reports ok.
+    const mockSsh = createMockSsh({
+      [`grep -qxF '${scannedLine}' ~/.ssh/known_hosts`]: { code: 0 },
+      "ssh-keyscan -H 'github.com' 2>/dev/null": { stdout: `${scannedLine}\n` },
+    })
+    const mod = ssh.knownHosts("github.com", { expectedFingerprint: hostFingerprint })
+
+    const result = await mod.apply(mockSsh, emptyEnv)
+
+    expect(result.status).toBe("ok")
+    const printfCalls = mockSsh.calls.filter((c) => c.startsWith("printf '%s\\n'"))
+    expect(printfCalls).toHaveLength(0)
+  })
+
+  it("running apply twice does not duplicate entries in known_hosts (R-0000038 regression)", async () => {
+    // Regression for R-0000038: simulate a known_hosts file that starts empty,
+    // then becomes populated after the first apply. The second apply must
+    // detect the line as already present and skip the append, so each line
+    // appears exactly once across runs.
+    const mockSsh = createKnownHostsTrackingMock(scannedLine, {
+      "ssh-keyscan -H 'github.com' 2>/dev/null": { stdout: `${scannedLine}\n` },
+    })
+
+    const mod = ssh.knownHosts("github.com", { expectedFingerprint: hostFingerprint })
+
+    const firstResult = await mod.apply(mockSsh, emptyEnv)
+    expect(firstResult.status).toBe("changed")
+
+    const secondResult = await mod.apply(mockSsh, emptyEnv)
+    expect(secondResult.status).toBe("ok")
+
+    // Across both runs the printf-append happened exactly once.
+    const printfCalls = mockSsh.calls.filter(
+      (c) => c === `printf '%s\\n' '${scannedLine}' >> ~/.ssh/known_hosts`
+    )
+    expect(printfCalls).toHaveLength(1)
   })
 
   it("apply rejects scanned keys that do not match the expected fingerprint", async () => {

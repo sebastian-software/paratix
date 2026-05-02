@@ -128,6 +128,61 @@ async function hasMatchingKnownHostTrustAnchor(
 }
 
 /**
+ * Filter `verifiedLines` down to those that are not yet present in
+ * `~/.ssh/known_hosts`. Each verified line is compared against the file with
+ * `grep -qxF` (whole-line literal match) so the apply path appends only
+ * missing entries. R-0000038: prevents duplicate entries when a re-run lands
+ * in `needs-apply` (e.g. trust-anchor mismatch on a single algorithm) but
+ * the bulk of the lines are already on disk.
+ *
+ * @param conn - The SSH connection.
+ * @param verifiedLines - Lines that passed trust-anchor verification.
+ * @returns The subset of `verifiedLines` that still need to be appended.
+ */
+async function filterMissingKnownHostLines(
+  conn: SshConnection,
+  verifiedLines: string[]
+): Promise<string[]> {
+  const checks = await Promise.all(
+    verifiedLines.map(async (line) => conn.test(`grep -qxF ${shellQuote(line)} ~/.ssh/known_hosts`))
+  )
+  return verifiedLines.filter((_line, index) => !checks[index])
+}
+
+/**
+ * Apply the `state: "present"` path of `ssh.knownHosts`: scan the host,
+ * verify each line against the trust anchor, and append only the lines that
+ * are not yet in `~/.ssh/known_hosts` (R-0000038 idempotency).
+ *
+ * @param conn - The SSH connection.
+ * @param parameters - Apply context for the present-state branch.
+ * @param parameters.host - The hostname or IP address to scan.
+ * @param parameters.options - Configuration including the trust anchor.
+ * @returns A {@link ModuleResult} describing the outcome.
+ */
+async function applyKnownHostsPresent(
+  conn: SshConnection,
+  parameters: { host: string; options?: KnownHostsOptions }
+): Promise<ModuleResult> {
+  const { host, options } = parameters
+  const scannedOutput = await conn.output(sshKeyscanCommand(host, options))
+  const scannedLines = parseHostKeyLines(scannedOutput)
+  const verifiedLines = getVerifiedScannedHostKeyLines(host, scannedLines, options ?? {})
+  await conn.exec("mkdir -p ~/.ssh && chmod 700 ~/.ssh", { silent: true })
+
+  const missingLines = await filterMissingKnownHostLines(conn, verifiedLines)
+  if (missingLines.length === 0) {
+    return { status: "ok" }
+  }
+
+  await conn.exec(
+    `printf '%s\\n' ${missingLines.map((line) => shellQuote(line)).join(" ")} >> ~/.ssh/known_hosts`,
+    { silent: true }
+  )
+  return { status: "changed" }
+}
+
+/**
  * Modules for managing SSH client-side resources such as known hosts
  * and authorized keys.
  */
@@ -191,15 +246,7 @@ export const ssh = {
         if (!conn) return failed(`[ssh.knownHosts: ${host} (${state})] SSH connection is required`)
 
         if (state === "present") {
-          const scannedOutput = await conn.output(sshKeyscanCommand(host, options))
-          const scannedLines = parseHostKeyLines(scannedOutput)
-          const verifiedLines = getVerifiedScannedHostKeyLines(host, scannedLines, options ?? {})
-          await conn.exec("mkdir -p ~/.ssh && chmod 700 ~/.ssh", { silent: true })
-          await conn.exec(
-            `printf '%s\\n' ${verifiedLines.map((line) => shellQuote(line)).join(" ")} >> ~/.ssh/known_hosts`,
-            { silent: true }
-          )
-          return { status: "changed" }
+          return applyKnownHostsPresent(conn, { host, options })
         }
 
         const hostKnownBefore = await conn.test(`ssh-keygen -F ${shellQuote(lookupTarget)}`)
