@@ -2,9 +2,10 @@ node_modules/
 dist/
 .env
 *.tgz
-.wisdom-accumulation-*.tmp.md
 TODO.md
 review-report-*.md
+.wisdom-accumulation-*.tmp.md
+.sf-memory.json
 .claude/settings.local.json
 tmp/
 sebastian-gmbh-paratix-test
