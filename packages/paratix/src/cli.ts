@@ -18,9 +18,17 @@ const DEFAULT_RECONNECT_TIMEOUT_SECONDS = 300
 const ENVIRONMENT_KEY_PATTERN = /^[A-Za-z_]\w*$/v
 const FIRST_RUN_ENV_NAME = "PARATIX_FIRST_RUN"
 
-function resolveRealPath(path: string): string {
-  // eslint-disable-next-line security/detect-non-literal-fs-filename -- path is either import.meta-derived or process argv entrypoint; direct file resolution is the intended check
-  return realpathSync(path)
+function resolveRealPath(path: string): null | string {
+  try {
+    // eslint-disable-next-line security/detect-non-literal-fs-filename -- path is either import.meta-derived or process argv entrypoint; direct file resolution is the intended check
+    return realpathSync(path)
+  } catch {
+    // Symlink loops, EACCES, ENOENT, or unusual pnpm shim layouts can throw
+    // before any try/catch in apply() can intercept the failure. Returning
+    // null lets callers fall back safely (e.g. treat as "not direct CLI
+    // execution") instead of producing an uncaught Node-internal error.
+    return null
+  }
 }
 
 /**
@@ -235,7 +243,13 @@ export function isDirectCliExecution(moduleUrl: string, candidateEntryScript?: s
     return false
   }
 
-  return resolveRealPath(fileURLToPath(moduleUrl)) === resolveRealPath(candidateEntryScript)
+  const moduleRealPath = resolveRealPath(fileURLToPath(moduleUrl))
+  const entryRealPath = resolveRealPath(candidateEntryScript)
+  if (moduleRealPath == null || entryRealPath == null) {
+    return false
+  }
+
+  return moduleRealPath === entryRealPath
 }
 
 export function applyCliEnvironmentOverrides(

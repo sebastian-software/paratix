@@ -91,6 +91,27 @@ describe("isDirectCliExecution", () => {
       rmSync(tempDirectory, { force: true, recursive: true })
     }
   })
+
+  it("returns false when realpathSync throws (e.g. symlink loop or EACCES)", () => {
+    const tempDirectory = mkdtempSync(join(tmpdir(), "paratix-cli-entry-"))
+    const targetPath = join(tempDirectory, "cli-target.mjs")
+    const loopingSymlink = join(tempDirectory, "cli-loop.mjs")
+    const innerLoopSymlink = join(tempDirectory, "cli-loop-inner.mjs")
+
+    try {
+      writeFileSync(targetPath, "export {}\n")
+      // Create a symlink loop: cli-loop -> cli-loop-inner -> cli-loop
+      symlinkSync(innerLoopSymlink, loopingSymlink)
+      symlinkSync(loopingSymlink, innerLoopSymlink)
+
+      expect(() =>
+        isDirectCliExecution(pathToFileURL(targetPath).href, loopingSymlink)
+      ).not.toThrow()
+      expect(isDirectCliExecution(pathToFileURL(targetPath).href, loopingSymlink)).toBe(false)
+    } finally {
+      rmSync(tempDirectory, { force: true, recursive: true })
+    }
+  })
 })
 
 describe("collectEnvironment", () => {
