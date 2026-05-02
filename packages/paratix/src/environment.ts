@@ -3,6 +3,37 @@ import { readFile } from "node:fs/promises"
 import type { Environment } from "./types.js"
 
 /**
+ * R-0000069: keep this regex in sync with the same pattern used by
+ * `collectEnvironment` in cli.ts so values supplied via `--env` and values
+ * loaded from a `.env` file go through the same allow-list. Lifting the
+ * pattern out of the loader keeps the failure message consistent.
+ */
+const ENVIRONMENT_KEY_PATTERN = /^[A-Za-z_]\w*$/v
+
+/**
+ * Reserved JavaScript identifiers that, when set as a property, can leak
+ * into prototype semantics on a plain object. The loader rejects them
+ * explicitly even though the regex above already excludes some of these
+ * (e.g. those starting with non-word characters); the explicit list is the
+ * defensive failsafe so the behaviour is obvious from the source.
+ */
+const ENVIRONMENT_FORBIDDEN_KEYS = new Set(["__proto__", "constructor", "prototype"])
+
+/**
+ * R-0000069/R-0000070: produce a null-prototype object typed as
+ * {@link Environment}. The wrapper exists because
+ * `Object.create(null) as Environment` is reported as an unsafe-`any`
+ * assertion by the type-aware lint rule; routing through this helper
+ * narrows the cast to a single, documented place.
+ *
+ * @returns A fresh empty {@link Environment} without a prototype chain.
+ */
+function createNullPrototypeEnvironment(): Environment {
+  // eslint-disable-next-line @typescript-eslint/no-unsafe-type-assertion -- intentional: Object.create(null) is the prototype-pollution defense
+  return Object.create(null) as Environment
+}
+
+/**
  * Resolve a single env key to its concrete value.
  * Lazy function values are awaited; plain primitive values are returned as-is.
  *
@@ -36,18 +67,48 @@ export async function resolveEnvironment(
  * @param filePath - Absolute path to the `.env` file.
  * @returns The parsed env map.
  */
+/**
+ * R-0000069: enforce the same key allow-list that `collectEnvironment` in
+ * cli.ts applies, and explicitly reject reserved JavaScript identifiers
+ * that could leak into prototype semantics. Throws an Error that names the
+ * file, the 1-based line number and the offending key.
+ *
+ * @param filePath - Path to the `.env` file (used in the error message).
+ * @param lineNumber - 1-based line number (used in the error message).
+ * @param key - The candidate key from the parsed line.
+ */
+function validateDotEnvironmentKey(filePath: string, lineNumber: number, key: string): void {
+  if (!ENVIRONMENT_KEY_PATTERN.test(key)) {
+    throw new Error(
+      `Invalid env key in ${filePath} line ${lineNumber}: ${key === "" ? "(empty)" : JSON.stringify(key)} (expected [A-Za-z_][A-Za-z0-9_]*)`
+    )
+  }
+  if (ENVIRONMENT_FORBIDDEN_KEYS.has(key)) {
+    throw new Error(
+      `Forbidden env key in ${filePath} line ${lineNumber}: ${JSON.stringify(key)} (reserved JavaScript identifier)`
+    )
+  }
+}
+
 export async function loadDotEnvironment(filePath: string): Promise<Environment> {
   // eslint-disable-next-line security/detect-non-literal-fs-filename
   const content = await readFile(filePath, "utf8")
-  const environment: Environment = {}
+  // R-0000069/R-0000070: use a null-prototype object so a malicious
+  // `__proto__` line cannot pollute the loaded map even before the
+  // explicit reject below catches it. This complements the explicit
+  // ENVIRONMENT_FORBIDDEN_KEYS check and the ENVIRONMENT_KEY_PATTERN
+  // allow-list.
+  const environment: Environment = createNullPrototypeEnvironment()
 
-  for (const line of content.split("\n")) {
+  const lines = content.split("\n")
+  for (const [index, line] of lines.entries()) {
     const trimmed = line.trim()
     if (trimmed === "" || trimmed.startsWith("#")) continue
     const eqIndex = trimmed.indexOf("=")
     if (eqIndex === -1) continue
 
     const key = trimmed.slice(0, eqIndex).trim()
+    validateDotEnvironmentKey(filePath, index + 1, key)
     environment[key] = processValue(trimmed.slice(eqIndex + 1).trim())
   }
 

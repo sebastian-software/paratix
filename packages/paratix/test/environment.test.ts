@@ -163,6 +163,38 @@ describe("loadDotEnvironment", () => {
     const env = await loadDotEnvironment(tmpFile)
     expect(env.KEY).toBe("no\\\\nescapes")
   })
+
+  // R-0000069 regression: loadDotEnvironment must apply the same
+  // ENVIRONMENT_KEY_PATTERN allow-list that cli.ts collectEnvironment uses
+  // and explicitly reject reserved JavaScript identifiers, so malformed or
+  // dangerous keys cannot leak into meta.env.
+  it("rejects keys that start with a digit", async () => {
+    writeFileSync(tmpFile, "1KEY=value\n")
+    await expect(loadDotEnvironment(tmpFile)).rejects.toThrow(/Invalid env key/v)
+  })
+
+  it("rejects keys that contain a space", async () => {
+    writeFileSync(tmpFile, "KEY WITH SPACE=value\n")
+    await expect(loadDotEnvironment(tmpFile)).rejects.toThrow(/Invalid env key/v)
+  })
+
+  it("rejects the reserved __proto__ key", async () => {
+    writeFileSync(tmpFile, "__proto__=evil\n")
+    await expect(loadDotEnvironment(tmpFile)).rejects.toThrow(/Forbidden env key/v)
+  })
+
+  it("includes the file name and line number in the rejection error", async () => {
+    writeFileSync(tmpFile, "VALID=ok\nBAD KEY=oops\n")
+    await expect(loadDotEnvironment(tmpFile)).rejects.toThrow(/line 2/v)
+  })
+
+  it("loads valid keys without rejecting them", async () => {
+    writeFileSync(tmpFile, "HOST=example.com\n_LEADING_UNDERSCORE=ok\nPORT_8080=8080\n")
+    const env = await loadDotEnvironment(tmpFile)
+    expect(env.HOST).toBe("example.com")
+    expect(env._LEADING_UNDERSCORE).toBe("ok")
+    expect(env.PORT_8080).toBe("8080")
+  })
 })
 
 describe("mergeEnvironment", () => {
