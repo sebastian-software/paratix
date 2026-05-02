@@ -229,6 +229,22 @@ describe("timer.scheduled — apply (state: absent)", () => {
 })
 
 describe("timer.scheduled — unit content", () => {
+  it("writes the exact expected service and timer file contents for baseOptions", async () => {
+    const ssh = createMockSsh({
+      [`[ -e '${SERVICE_PATH}' ]`]: { code: 1 },
+      [`[ -e '${TIMER_PATH}' ]`]: { code: 1 },
+    })
+    const writes: Record<string, string> = {}
+    // eslint-disable-next-line @typescript-eslint/require-await -- Mock implementation
+    ssh.writeFile = async (path: string, content: string) => {
+      writes[path] = content
+    }
+    const mod = timer.scheduled("backup", baseOptions)
+    await mod.apply(ssh, emptyEnv)
+    expect(writes[SERVICE_PATH]).toBe(expectedServiceContent)
+    expect(writes[TIMER_PATH]).toBe(expectedTimerContent)
+  })
+
   it("renders multiple OnCalendar lines when an array is supplied", async () => {
     const ssh = createMockSsh({
       [`[ -e '${SERVICE_PATH}' ]`]: { code: 1 },
