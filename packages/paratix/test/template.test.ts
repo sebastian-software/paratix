@@ -149,4 +149,25 @@ describe("renderTemplate", () => {
       /Strict mode.*"\{\{B\}\}"/v
     )
   })
+
+  // Regression for R-0000033: the previous implementation replaced "\{{" with the
+  // sentinel string "\x00ESCAPED_BRACE\x00" and reverted it via replaceAll() over
+  // the merged output. A resolved value that happened to contain the sentinel
+  // would therefore be re-substituted to "{{" after rendering. The tokenizer-based
+  // implementation must emit resolved values verbatim, regardless of their
+  // contents.
+  it("preserves the legacy sentinel string in resolved values verbatim", async () => {
+    const sentinel = "\x00ESCAPED_BRACE\x00"
+    const env: Environment = { SECRET: `prefix${sentinel}suffix` }
+    const view = await renderTemplate("value: {{SECRET|raw}}", env, { strict: true })
+    expect(view).toBe(`value: prefix${sentinel}suffix`)
+    expect(view).not.toContain("{{")
+  })
+
+  it("preserves the legacy sentinel string in resolved values when escapes are also present", async () => {
+    const sentinel = "\x00ESCAPED_BRACE\x00"
+    const env: Environment = { S: `${sentinel}done` }
+    const view = await renderTemplate("\\{{kept}} and {{S|raw}}", env, { strict: true })
+    expect(view).toBe(`{{kept}} and ${sentinel}done`)
+  })
 })

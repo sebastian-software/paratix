@@ -15,6 +15,91 @@ const modifiers: Partial<Record<string, (value: string) => string>> = {
   shell: shellQuote,
 }
 
+/** Token kinds emitted by the template tokenizer. */
+type Token =
+  | { kind: "escaped" }
+  | { kind: "literal"; text: string }
+  | { kind: "placeholder"; modifier: string | undefined; varName: string }
+
+/**
+ * Pattern that matches a single placeholder anchored at a specific position.
+ *
+ * Anchored variant of the legacy template pattern; the sticky `y` flag lets the
+ * tokenizer attempt the match at the current cursor position only.
+ */
+// eslint-disable-next-line security/detect-unsafe-regex -- modifier group is consumed via match.groups
+const placeholderPattern = /\{\{(?<varName>\w+)(?:\|(?<modifier>\w*))?\}\}/vy
+
+/**
+ * Single-pass tokenizer that walks a template string and emits an ordered
+ * list of escaped, placeholder, and literal tokens.
+ */
+class TemplateTokenizer {
+  private cursor = 0
+  private literalBuffer = ""
+  private readonly template: string
+  private readonly tokens: Token[] = []
+
+  public constructor(template: string) {
+    this.template = template
+  }
+
+  public tokenize(): Token[] {
+    while (this.cursor < this.template.length) {
+      if (this.consumeEscapedBrace()) continue
+      if (this.consumePlaceholder()) continue
+      this.literalBuffer += this.template[this.cursor]
+      this.cursor += 1
+    }
+    this.flushLiteral()
+    return this.tokens
+  }
+
+  private consumeEscapedBrace(): boolean {
+    if (!this.template.startsWith("\\{{", this.cursor)) return false
+    this.flushLiteral()
+    this.tokens.push({ kind: "escaped" })
+    this.cursor += "\\{{".length
+    return true
+  }
+
+  private consumePlaceholder(): boolean {
+    if (!this.template.startsWith("{{", this.cursor)) return false
+    placeholderPattern.lastIndex = this.cursor
+    const match = placeholderPattern.exec(this.template)
+    if (match === null) return false
+    this.flushLiteral()
+    this.tokens.push({
+      kind: "placeholder",
+      modifier: match.groups?.modifier,
+      varName: match.groups?.varName ?? "",
+    })
+    this.cursor += match[0].length
+    return true
+  }
+
+  private flushLiteral(): void {
+    if (this.literalBuffer.length > 0) {
+      this.tokens.push({ kind: "literal", text: this.literalBuffer })
+      this.literalBuffer = ""
+    }
+  }
+}
+
+/**
+ * Tokenize a template string into escaped, placeholder, and literal segments.
+ *
+ * The tokenizer walks the template once and emits a flat list of tokens that
+ * preserves the input order. Literal text between placeholders is coalesced
+ * into a single `literal` token to keep the resulting list small.
+ *
+ * @param template - The raw template string to tokenize.
+ * @returns An ordered list of tokens that, when rendered, reproduces the template.
+ */
+function tokenizeTemplate(template: string): Token[] {
+  return new TemplateTokenizer(template).tokenize()
+}
+
 /**
  * Apply a template modifier to a resolved value.
  *
@@ -30,15 +115,15 @@ function applyModifier(value: string, modifier: string | undefined): string {
 }
 
 /**
- * Throw if any placeholder in {@link matches} lacks an explicit modifier.
+ * Throw if any placeholder token lacks an explicit modifier.
  *
- * @param matches - The regex matches to validate.
+ * @param tokens - The full token list produced by {@link tokenizeTemplate}.
  */
-function enforceStrictModifiers(matches: RegExpExecArray[]): void {
-  for (const match of matches) {
-    if (match.groups?.modifier === undefined) {
+function enforceStrictModifiers(tokens: Token[]): void {
+  for (const token of tokens) {
+    if (token.kind === "placeholder" && token.modifier === undefined) {
       throw new Error(
-        `Strict mode: placeholder "{{${match.groups?.varName}}}" requires an explicit modifier (e.g. |shell or |raw)`
+        `Strict mode: placeholder "{{${token.varName}}}" requires an explicit modifier (e.g. |shell or |raw)`
       )
     }
   }
@@ -61,6 +146,11 @@ function enforceStrictModifiers(matches: RegExpExecArray[]): void {
  * a modifier; bare `\{\{KEY\}\}` placeholders will throw an error. Pass `strict: false`
  * to disable this check.
  *
+ * The renderer tokenizes the template once into escaped/placeholder/literal segments
+ * and concatenates the resolved segments without performing a second `replaceAll`
+ * over the merged output. Resolved values that happen to contain template syntax
+ * or any internal sentinel string are therefore preserved verbatim.
+ *
  * Placeholders are resolved concurrently via Promise.all; insertion order is preserved.
  *
  * @param template - The template string containing placeholders.
@@ -75,35 +165,35 @@ export async function renderTemplate(
   environment: Environment,
   options?: RenderOptions
 ): Promise<string> {
-  // Handle escaped \{{ by replacing with a placeholder
-  const escapedBraceMarker = "\x00ESCAPED_BRACE\x00"
-  const result = template.replaceAll("\\{{", escapedBraceMarker)
+  const tokens = tokenizeTemplate(template)
 
-  // Find all {{key}} or {{key|modifier}} patterns and resolve values in parallel
-  // eslint-disable-next-line security/detect-unsafe-regex -- modifier group is consumed via match.groups
-  const pattern = /\{\{(?<varName>\w+)(?:\|(?<modifier>\w*))?\}\}/gv
-  const matches = [...result.matchAll(pattern)]
+  // In strict mode, validate that all placeholders have explicit modifiers
+  // before resolving any values.
+  if (options?.strict ?? true) enforceStrictModifiers(tokens)
 
-  // In strict mode, validate that all placeholders have explicit modifiers before resolving values
-  if (options?.strict ?? true) enforceStrictModifiers(matches)
-
+  // Resolve all placeholder values concurrently, preserving token order.
+  const placeholderTokens = tokens.filter(
+    (token): token is Extract<Token, { kind: "placeholder" }> => token.kind === "placeholder"
+  )
   const resolvedValues = await Promise.all(
-    matches.map(async (match) => resolveEnvironment(environment, match.groups?.varName ?? ""))
+    placeholderTokens.map(async (token) => resolveEnvironment(environment, token.varName))
   )
 
-  // Build result from segments between matches
-  let cursor = 0
+  // Build the output by concatenating segments in order. No second-pass replace
+  // is performed, so resolved values can never collide with sentinel strings.
   let output = ""
-
-  for (const [index, match] of matches.entries()) {
-    const matchIndex = match.index
-    const value = applyModifier(String(resolvedValues[index]), match.groups?.modifier)
-    output += result.slice(cursor, matchIndex) + value
-    cursor = matchIndex + match[0].length
+  let placeholderIndex = 0
+  for (const token of tokens) {
+    if (token.kind === "literal") {
+      output += token.text
+    } else if (token.kind === "escaped") {
+      output += "{{"
+    } else {
+      const resolved = String(resolvedValues[placeholderIndex])
+      output += applyModifier(resolved, token.modifier)
+      placeholderIndex += 1
+    }
   }
 
-  output += result.slice(cursor)
-
-  // Restore escaped braces
-  return output.replaceAll(escapedBraceMarker, "{{")
+  return output
 }
