@@ -1115,6 +1115,56 @@ describe("SshConnectionImpl", () => {
       expect(error.message).toContain("[REDACTED]")
     })
 
+    // R-0000054 regression: when the timer fires between `isSettled()` and
+    // the input write, an EPIPE on the stream must not surface as an
+    // Unhandled error event. The promise carries the timeout reason, and
+    // a subsequent EPIPE on the closed stream is dropped silently.
+    it("does not surface an unhandled error event when stream errors after timeout", async () => {
+      vi.useFakeTimers()
+
+      let capturedStream: StreamWithStderr | undefined
+      const execSpy = vi.fn().mockImplementation((_command: string, callback: ExecCallback) => {
+        const stream = makeStream()
+        capturedStream = stream
+        callback(undefined, stream)
+      })
+      const client = makeClientWithExecSpy(execSpy)
+      const ssh = makeConnectedSsh(client, { user: "deploy" })
+
+      // Track unhandled errors on the process so we can assert none escape.
+      const unhandledErrors: unknown[] = []
+      const errorListener = (error: unknown): void => {
+        unhandledErrors.push(error)
+      }
+      process.on("uncaughtException", errorListener)
+
+      const execPromise = ssh.exec("sleep infinity", {
+        input: "stdin payload\n",
+        timeout: 5000,
+      })
+
+      execPromise.catch(() => {
+        /* handled below */
+      })
+      await Promise.resolve()
+      await vi.advanceTimersByTimeAsync(5001)
+
+      // The timer has already fired and rejected the promise. Now simulate
+      // the stream emitting an EPIPE error after the close. With the fix,
+      // the dedicated `stream.once("error", ...)` listener swallows the
+      // event so it never propagates as Unhandled.
+      expect(capturedStream).toBeDefined()
+      capturedStream?.emit("error", new Error("write EPIPE"))
+
+      await expect(execPromise).rejects.toThrow(/Command timed out after 5000ms/v)
+
+      // Allow the microtask queue to flush so any unhandled error would
+      // have surfaced by now.
+      await Promise.resolve()
+      process.off("uncaughtException", errorListener)
+      expect(unhandledErrors).toHaveLength(0)
+    })
+
     it("masks shell-quoted secrets in timeout error messages", async () => {
       vi.useFakeTimers()
 

@@ -701,6 +701,45 @@ export class SshConnectionImpl implements SshConnection {
     await this.sudoProbePromise
   }
 
+  /**
+   * Forward sudo password / `options.input` to a stream while tolerating
+   * EPIPE errors that may arrive between the `isSettled()` check and the
+   * actual write call (R-0000054). The stream is owned by ssh2 and may
+   * have been closed by the timeout path; emitting an `error` event on a
+   * closed channel without a listener would crash the process.
+   *
+   * @param stream - The ssh2 channel that just became available.
+   * @param needsPassword - Whether the command needs a sudo password.
+   * @param input - Optional stdin payload from the caller.
+   */
+  private writeStreamInput(
+    stream: ClientChannel,
+    needsPassword: boolean,
+    input: ExecOptions["input"]
+  ): void {
+    // R-0000054: attach an EPIPE-safe error handler before any subsequent
+    // write to the stream. The settle path (timeout / remote close)
+    // already owns the rejection reason; later stream errors are dropped.
+    stream.once("error", () => {
+      // Defensive no-op.
+    })
+    if (needsPassword && this.cachedSudoPassword != null) {
+      try {
+        this.writeSudoPassword(stream)
+      } catch {
+        // Defense in depth: a synchronous EPIPE during write must not
+        // propagate — the timer / remote-close path owns the rejection.
+      }
+    }
+    if (input != null) {
+      try {
+        stream.end(input)
+      } catch {
+        // Defense in depth: same as writeSudoPassword above.
+      }
+    }
+  }
+
   private async execPrepared(command: string, options: ExecOptions = {}): Promise<ExecResult> {
     const client = this.ensureClient()
     const environmentPrefix = this.buildEnvPrefix(options.env)
@@ -743,16 +782,7 @@ export class SshConnectionImpl implements SshConnection {
           stream,
           timer,
         })
-        if (needsPassword && this.cachedSudoPassword != null) {
-          this.writeSudoPassword(stream)
-        }
-        // Forward an optional stdin payload (password hashes, signed URLs,
-        // Authorization headers) so callers can keep secret material out of
-        // the command line. End the stream after writing so the remote tool
-        // sees EOF and exits.
-        if (options.input != null) {
-          stream.end(options.input)
-        }
+        this.writeStreamInput(stream, needsPassword, options.input)
       })
     })
   }
