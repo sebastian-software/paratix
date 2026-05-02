@@ -223,6 +223,24 @@ describe("mergeEnvironment", () => {
 
   it("returns an empty object when called with no arguments", () => {
     const merged = mergeEnvironment()
-    expect(merged).toStrictEqual({})
+    expect(Object.keys(merged)).toHaveLength(0)
+  })
+
+  // R-0000070 regression: mergeEnvironment must seed its result with a
+  // null-prototype object so reserved property names like `constructor`
+  // and `__proto__` cannot inherit prototype semantics. Setting
+  // `constructor` to a string must produce that string at lookup time,
+  // never the global Object constructor.
+  it("uses a null-prototype result so the reserved key constructor stores the assigned string", () => {
+    const base: Environment = { HOST: "example.com" }
+    const override: Environment = { constructor: "evil" }
+    const merged = mergeEnvironment(base, override)
+    expect(merged.constructor).toBe("evil")
+    expect(Object.getPrototypeOf(merged)).toBeNull()
+  })
+
+  it("uses a null-prototype result on an empty merge so the prototype chain cannot pollute lookups", () => {
+    const merged = mergeEnvironment()
+    expect(Object.getPrototypeOf(merged)).toBeNull()
   })
 })

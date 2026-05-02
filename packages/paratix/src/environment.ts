@@ -144,7 +144,13 @@ function processValue(raw: string): string {
  * @returns The merged env map.
  */
 export function mergeEnvironment(...environments: Array<Environment | undefined>): Environment {
-  const result: Environment = {}
+  // R-0000070: start from a null-prototype object so reserved property
+  // names like `__proto__` and `constructor` cannot inherit prototype
+  // semantics on the merged result. Downstream consumers
+  // (resolveEnvironment, resolveEnvironmentAsString, template rendering,
+  // meta.env) only access the map via bracket notation and Object.entries,
+  // both of which work on null-prototype objects.
+  const result: Environment = createNullPrototypeEnvironment()
   for (const environment of environments) {
     if (environment != null) {
       Object.assign(result, environment)
