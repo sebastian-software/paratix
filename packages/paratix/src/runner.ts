@@ -218,6 +218,10 @@ async function handlePortChange(
   try {
     await ssh.reconnect()
   } catch (error) {
+    // Roll back the optimistic addPort so the failed port does not stick in
+    // runtime.ports for any subsequent reuse of the connection. Mirrors the
+    // rollback behavior in modules/sshd.ts:applySshdPort.
+    ssh.removePort(newPort)
     console.error(
       `Failed to reconnect on port ${newPort} after port change: ${String(error)}. ` +
         `Verify that port ${newPort} is allowed by the server's firewall rules.`

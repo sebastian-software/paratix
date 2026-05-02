@@ -26,6 +26,7 @@ function makeMockSshClass(
     output?: ReturnType<typeof vi.fn>
     readFile?: ReturnType<typeof vi.fn>
     reconnect?: ReturnType<typeof vi.fn>
+    removePort?: ReturnType<typeof vi.fn>
     updateHost?: ReturnType<typeof vi.fn>
     writeFile?: ReturnType<typeof vi.fn>
   }
@@ -45,6 +46,7 @@ function makeMockSshClass(
     public probeSudo = vi.fn().mockResolvedValue(null)
     public readFile = overrides?.readFile ?? vi.fn().mockResolvedValue("")
     public reconnect = overrides?.reconnect ?? vi.fn().mockResolvedValue(null)
+    public removePort = overrides?.removePort ?? vi.fn()
     public sha256 = vi.fn().mockResolvedValue(null)
     public test = vi.fn().mockResolvedValue(true)
     public updateHost = overrides?.updateHost ?? vi.fn()
@@ -203,6 +205,43 @@ describe("runPlaybook reconnect failure propagation", () => {
     await runPlaybook(definition)
 
     expect(process.exitCode).toBe(1)
+    process.exitCode = 0
+  })
+
+  it("rolls back addPort by calling removePort when reconnect after port change fails", async () => {
+    const capturedConfigs: unknown[] = []
+    const reconnectError = new Error("Connection refused")
+    const addPort = vi.fn()
+    const removePort = vi.fn()
+
+    vi.doMock("../src/ssh.js", () => ({
+      shellQuote: (s: string) => `'${s}'`,
+      SshConnectionImpl: makeMockSshClass(capturedConfigs, {
+        addPort,
+        reconnect: vi.fn().mockRejectedValue(reconnectError),
+        removePort,
+      }),
+    }))
+
+    const { runPlaybook } = await import("../src/runner.js")
+
+    const moduleWithPortChange = makeModuleWithMeta([meta.sshdPort(2222)])
+
+    const definition: ServerDefinition = {
+      host: "1.2.3.4",
+      name: "test-server",
+      run: [moduleWithPortChange],
+      ssh: {
+        ports: [22],
+        privateKey: "~/.ssh/id",
+        user: "root",
+      },
+    }
+
+    await runPlaybook(definition)
+
+    expect(addPort).toHaveBeenCalledWith(2222)
+    expect(removePort).toHaveBeenCalledWith(2222)
     process.exitCode = 0
   })
 
