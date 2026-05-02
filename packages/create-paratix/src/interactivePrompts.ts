@@ -88,15 +88,11 @@ function createPromptSession(prompt?: PromptFunction): {
   }
 }
 
-async function promptForAdminUser(
-  ask: PromptFunction,
-  closePrompt: () => void
-): Promise<InitialUserConfig> {
+async function promptForAdminUser(ask: PromptFunction): Promise<InitialUserConfig> {
   for (;;) {
     // eslint-disable-next-line no-await-in-loop
     const adminUser = normalizeInitialUserName(await ask("Admin username: "))
     if (isValidInitialUserName(adminUser) && adminUser !== "root") {
-      closePrompt()
       return { kind: "admin", user: adminUser }
     }
 
@@ -140,14 +136,17 @@ export async function promptForInitialUserConfig(
     )
 
     if (initialUserType === "root") {
-      promptSession.closeSelect()
-      promptSession.closePrompt()
       return { kind: "root" }
     }
 
-    return await promptForAdminUser(promptSession.ask, promptSession.closePrompt)
+    return await promptForAdminUser(promptSession.ask)
   } finally {
+    // R-0000057: close the readline interface and the terminal-select
+    // helper unconditionally so a thrown error inside the chooser or
+    // promptForAdminUser (closed stdin, EPIPE, SIGINT) cannot leak open
+    // handles. readline.close and terminalSelect.close are idempotent.
     promptSession.closeSelect()
+    promptSession.closePrompt()
   }
 }
 

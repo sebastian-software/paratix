@@ -17,6 +17,8 @@ const DEBIAN_STABLE_RELEASE_CURL = "Origin: Debian\nCodename: trixie\nSuite: sta
 // Default find response for sources.list.d (empty = no extra files)
 const FIND_SOURCES_EMPTY = { code: 0, stdout: "" }
 
+type WriteCapture = { content: string; path: string }
+
 // Helper: build responses for Ubuntu check/apply
 function ubuntuResponses(
   upgradeCheckCode: number
@@ -263,8 +265,8 @@ describe("releaseUpgrade.upgrade — apply (Debian)", () => {
   // sources files back to the original suite so the host never ends up with
   // sources pointing at the new suite while the upgrade itself failed.
   describe("R-0000046: sources rollback on apt failure", () => {
-    function captureWriteFile(ssh: ReturnType<typeof createMockSsh>) {
-      const writes: { content: string; path: string }[] = []
+    const captureWriteFile = (ssh: ReturnType<typeof createMockSsh>): WriteCapture[] => {
+      const writes: WriteCapture[] = []
       // eslint-disable-next-line @typescript-eslint/require-await
       const replacement = async (path: string, content: string): Promise<void> => {
         writes.push({ content, path })

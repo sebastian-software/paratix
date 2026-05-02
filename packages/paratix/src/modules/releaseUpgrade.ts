@@ -326,26 +326,6 @@ async function applyUbuntu(
 }
 
 /**
- * Run the Debian release upgrade by rewriting sources and running
- * `apt-get full-upgrade`.
- *
- * Determines the current and target (stable) codenames, rewrites all
- * apt sources to point at the new suite, then executes the four-step
- * upgrade sequence: `apt-get update`, `dpkg --configure -a` (to resolve
- * any previously interrupted package configurations), `apt-get full-upgrade`,
- * and `apt-get autoremove`. When `dryRun` is set, the upgrade is skipped
- * entirely and `"ok"` is returned.
- *
- * On success, returns `status: "changed"` with reboot meta so the runner
- * can reconnect after the post-upgrade restart.
- *
- * @param ssh - Active SSH connection to the remote host.
- * @param options - Upgrade options (see {@link ReleaseUpgradeOptions}).
- * @returns A `ModuleResult` — `"changed"` with reboot meta on success,
- *   `"ok"` on dry-run, or `"failed"` when any command returns a non-zero
- *   exit code.
- */
-/**
  * Run the four-step Debian apt upgrade pipeline (`apt-get update`,
  * `dpkg --configure -a`, `apt-get full-upgrade -y`, `apt-get autoremove -y`)
  * and return the first failure encountered, or `null` when all four steps
@@ -355,7 +335,8 @@ async function applyUbuntu(
  * stays straightforward and the per-step retry order remains explicit.
  *
  * @param ssh - Active SSH connection to the remote host.
- * @returns The first non-zero apt-step failure, or `null` on success.
+ * @returns The first non-zero apt-step failure as a `ModuleResult`, or
+ *   `null` when all four steps succeeded.
  */
 async function runDebianUpgradePipeline(ssh: SshConnection): Promise<ModuleResult | null> {
   const updateFailure = await runReleaseUpgradeCommand(
@@ -389,6 +370,28 @@ async function runDebianUpgradePipeline(ssh: SshConnection): Promise<ModuleResul
   return null
 }
 
+/**
+ * Run the Debian release upgrade by rewriting sources and running
+ * `apt-get full-upgrade`.
+ *
+ * Determines the current and target (stable) codenames, rewrites all
+ * apt sources to point at the new suite, then executes the four-step
+ * upgrade sequence: `apt-get update`, `dpkg --configure -a` (to resolve
+ * any previously interrupted package configurations), `apt-get full-upgrade`,
+ * and `apt-get autoremove`. When `dryRun` is set, the upgrade is skipped
+ * entirely and `"ok"` is returned.
+ *
+ * On success, returns `status: "changed"` with reboot meta so the runner
+ * can reconnect after the post-upgrade restart. On failure of any apt
+ * step, the rewritten sources files are restored from the snapshots taken
+ * before the rewrite (R-0000046).
+ *
+ * @param ssh - Active SSH connection to the remote host.
+ * @param options - Upgrade options (see {@link ReleaseUpgradeOptions}).
+ * @returns A `ModuleResult` — `"changed"` with reboot meta on success,
+ *   `"ok"` on dry-run, or `"failed"` when any command returns a non-zero
+ *   exit code.
+ */
 async function applyDebian(
   ssh: SshConnection,
   options: ReleaseUpgradeOptions

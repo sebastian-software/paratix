@@ -258,6 +258,11 @@ type LiveMount = {
  * @returns The live attributes when the path is mounted, or `null` when it
  *   is not mounted (findmnt exits non-zero).
  */
+// findmnt --output SOURCE,FSTYPE,OPTIONS prints exactly three columns; the
+// helper below uses this constant when validating that the parsed output
+// has enough fields to populate every LiveMount property.
+const LIVE_MOUNT_FIELD_COUNT = 3
+
 async function readLiveMount(ssh: SshConnection, path: string): Promise<LiveMount | null> {
   const findmntResult = await ssh.exec(
     `findmnt --noheadings --output SOURCE,FSTYPE,OPTIONS ${shellQuote(path)}`,
@@ -267,7 +272,7 @@ async function readLiveMount(ssh: SshConnection, path: string): Promise<LiveMoun
 
   // findmnt prints SOURCE FSTYPE OPTIONS separated by whitespace.
   const fields = findmntResult.stdout.trim().split(/\s+/v)
-  if (fields.length < 3) return null
+  if (fields.length < LIVE_MOUNT_FIELD_COUNT) return null
   return {
     fstype: fields[1] ?? "",
     options: fields[2] ?? "",

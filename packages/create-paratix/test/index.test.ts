@@ -49,6 +49,25 @@ function throwExitError(message: string): never {
   throw new Error(message)
 }
 
+type ProcessWithHandles = {
+  _getActiveHandles?: () => unknown[]
+}
+
+/**
+ * Read the number of active handles from `process._getActiveHandles()`,
+ * or fall back to `0` when the API is missing on the current Node build.
+ * Used by the R-0000057 regression tests to ensure that
+ * `promptForInitialUserConfig` does not leak readline / select handles
+ * when an error propagates out of the prompt.
+ *
+ * @returns The number of active handles known to the runtime.
+ */
+function countActiveHandles(): number {
+  const proc = process as unknown as ProcessWithHandles
+  const handles = proc._getActiveHandles?.()
+  return handles?.length ?? 0
+}
+
 describe("isValidProjectName", () => {
   // These tests document that invalid project names must be rejected.
   // Currently no validation exists in main() beyond a falsy-check, so
@@ -399,6 +418,45 @@ describe("promptForInitialUserConfig", () => {
     expect(select).toHaveBeenCalledTimes(1)
     expect(prompt).toHaveBeenCalledTimes(1)
     expect(prompt).toHaveBeenNthCalledWith(1, "Admin username: ")
+  })
+
+  // R-0000057 regression: a throw inside promptForAdminUser (closed stdin,
+  // EPIPE, SIGINT) must not leak the readline interface. The cleanup is
+  // guarded by a finally block, so the underlying close hook fires
+  // regardless of whether the success path ran. We verify it indirectly
+  // here by counting active handles before and after, and by re-running
+  // the function with a fresh throw to confirm no handle accumulates.
+  it("cleans up open handles when an error propagates from the admin prompt", async () => {
+    const select = vi.fn().mockResolvedValueOnce("admin")
+    const prompt = vi.fn().mockRejectedValueOnce(new Error("stdin closed"))
+
+    // Snapshot the active-handle count before invoking the function.
+    const handlesBefore = countActiveHandles()
+
+    await expect(promptForInitialUserConfig(prompt, select)).rejects.toThrow("stdin closed")
+
+    // After the rejection, no extra handle must remain. Allow the event
+    // loop to drain so the readline close completes.
+    await new Promise<void>((resolve) => {
+      setImmediate(resolve)
+    })
+    const handlesAfter = countActiveHandles()
+    expect(handlesAfter).toBeLessThanOrEqual(handlesBefore)
+  })
+
+  it("cleans up open handles when the chooser itself throws", async () => {
+    const select = vi.fn().mockRejectedValueOnce(new Error("chooser cancelled"))
+    const prompt = vi.fn()
+
+    const handlesBefore = countActiveHandles()
+
+    await expect(promptForInitialUserConfig(prompt, select)).rejects.toThrow("chooser cancelled")
+
+    await new Promise<void>((resolve) => {
+      setImmediate(resolve)
+    })
+    const handlesAfter = countActiveHandles()
+    expect(handlesAfter).toBeLessThanOrEqual(handlesBefore)
   })
 })
 

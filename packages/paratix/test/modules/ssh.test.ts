@@ -6,6 +6,14 @@ import { createMockSsh } from "../helpers/mockSsh.js"
 
 const emptyEnv = {}
 
+// Helper used by R-0000044 regression: locate the authorized_keys rewrite
+// command (the one that pipes grep into the staging path). Lifted out of
+// the test body so eslint-plugin-jest's `no-conditional-in-test` rule
+// does not flag the predicate.
+function includesGrepRewrite(command: string): boolean {
+  return command.includes(" > '") && command.includes("grep")
+}
+
 function makeHostKeyBuffer(algo: string, keyData = Buffer.from("fake-host-key-data")): Buffer {
   const algoBytes = Buffer.from(algo)
   const lengthBuffer = Buffer.alloc(4)
@@ -649,7 +657,7 @@ describe("ssh.authorizedKeys", () => {
     const result = await mod.apply(mockSsh, emptyEnv)
     expect(result.status).toBe("changed")
     // The rendered command must use `grep -vxF`, never the broader `grep -vF`.
-    const rewriteCall = mockSsh.calls.find((c) => c.includes(" > '") && c.includes("grep"))
+    const rewriteCall = mockSsh.calls.find(includesGrepRewrite)
     expect(rewriteCall).toBeDefined()
     expect(rewriteCall).toContain("grep -vxF")
     expect(rewriteCall).not.toMatch(/grep -vF\s/v)
