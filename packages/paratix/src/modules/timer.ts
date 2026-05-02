@@ -38,11 +38,15 @@ async function checkAbsent(
   return "ok"
 }
 
+type SyncOutcome =
+  | { failure: ModuleResult; ok: false }
+  | { ok: true; serviceMatched: boolean; timerMatched: boolean }
+
 async function syncUnitFiles(
   ssh: SshConnection,
   name: string,
   paths: TimerPaths
-): Promise<{ serviceMatched: boolean; timerMatched: boolean } | ModuleResult> {
+): Promise<SyncOutcome> {
   const serviceMatched = await fileMatches(ssh, paths.servicePath, paths.serviceContent)
   const timerMatched = await fileMatches(ssh, paths.timerPath, paths.timerContent)
 
@@ -59,10 +63,16 @@ async function syncUnitFiles(
       silent: true,
     })
     if (reload.code !== 0) {
-      return failedCommand(`[timer.scheduled: ${name}] systemctl daemon-reload failed`, reload)
+      return {
+        failure: failedCommand(
+          `[timer.scheduled: ${name}] systemctl daemon-reload failed`,
+          reload
+        ),
+        ok: false,
+      }
     }
   }
-  return { serviceMatched, timerMatched }
+  return { ok: true, serviceMatched, timerMatched }
 }
 
 async function isTimerFullyActive(ssh: SshConnection, timerUnit: string): Promise<boolean> {
@@ -77,7 +87,7 @@ async function applyPresent(
   paths: TimerPaths
 ): Promise<ModuleResult> {
   const sync = await syncUnitFiles(ssh, name, paths)
-  if ("status" in sync) return sync
+  if (!sync.ok) return sync.failure
 
   // If both files matched and the timer is already enabled and active, nothing
   // needs to change. Reporting `ok` here keeps direct apply calls (e.g. inside
