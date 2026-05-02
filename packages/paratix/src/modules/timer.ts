@@ -236,11 +236,21 @@ async function applyPresent(
   return { status: "changed" }
 }
 
-async function applyAbsent(
-  ssh: SshConnection,
-  name: string,
+type AbsentContext = {
   locations: TimerLocations
-): Promise<ModuleResult> {
+  module: string
+  name: string
+}
+
+async function applyAbsent(ssh: SshConnection, context: AbsentContext): Promise<ModuleResult> {
+  const { locations, module, name } = context
+
+  // Idempotent no-op: if neither unit file exists, there is nothing to clean
+  // up. Skipping the systemctl/rm sequence avoids a spurious daemon-reload.
+  const serviceExists = await ssh.exists(locations.servicePath)
+  const timerExists = await ssh.exists(locations.timerPath)
+  if (!serviceExists && !timerExists) return { status: "ok" }
+
   // Best-effort disable; ignore failure (unit may already be gone). `disable
   // --now` also removes the wants/ symlink, which is why we run it before
   // deleting the unit files.
@@ -254,7 +264,7 @@ async function applyAbsent(
     { ignoreExitCode: true, silent: true }
   )
   if (remove.code !== 0) {
-    return failedCommand(`[timer.scheduled: ${name}] failed to remove unit files`, remove)
+    return failedCommand(`[${module}: ${name}] failed to remove unit files`, remove)
   }
 
   const reload = await ssh.exec(`${SYSTEMCTL} daemon-reload`, {
@@ -262,9 +272,17 @@ async function applyAbsent(
     silent: true,
   })
   if (reload.code !== 0) {
-    return failedCommand(`[timer.scheduled: ${name}] systemctl daemon-reload failed`, reload)
+    return failedCommand(`[${module}: ${name}] systemctl daemon-reload failed`, reload)
   }
   return { status: "changed" }
+}
+
+function assertTimerName(name: string): void {
+  if (!TIMER_NAME_PATTERN.test(name)) {
+    throw new Error(
+      `timer: name must match ${String(TIMER_NAME_PATTERN)}, got: ${JSON.stringify(name)}`
+    )
+  }
 }
 
 /**
@@ -277,6 +295,39 @@ async function applyAbsent(
  * journald logging, and richer scheduling expressions.
  */
 export const timer = {
+  /**
+   * Ensure a systemd timer-driven scheduled task does not exist.
+   *
+   * Disables and stops `<name>.timer`, removes both `<name>.service` and
+   * `<name>.timer` from `/etc/systemd/system/`, and reloads systemd. The
+   * `disable --now` step also removes the timer's `wants/` symlink. Failure
+   * to disable a unit that does not exist is ignored, so this method is
+   * safe to apply repeatedly.
+   *
+   * Equivalent to `timer.scheduled(name, { exec: "<unused>", onCalendar: "<unused>", state: "absent" })`,
+   * but does not require placeholder values for `exec` or `onCalendar`.
+   *
+   * @param name - Base unit name without extension. Must match
+   *   `^[\w\-]+$`.
+   * @returns A Module that ensures the timer-driven scheduled task is absent.
+   */
+  absent(name: string): Module {
+    assertTimerName(name)
+    const locations = buildTimerLocations(name)
+
+    return {
+      async apply(ssh: null | SshConnection): Promise<ModuleResult> {
+        if (!ssh) return failed(`[timer.absent: ${name}] SSH connection is required`)
+        return applyAbsent(ssh, { locations, module: "timer.absent", name })
+      },
+      async check(ssh: null | SshConnection): Promise<"needs-apply" | "ok"> {
+        if (!ssh) return NEEDS_APPLY
+        return checkAbsent(ssh, locations)
+      },
+      name: `timer.absent: ${name}`,
+    }
+  },
+
   /**
    * Ensure a systemd timer-driven scheduled task is present (or absent).
    *
@@ -293,16 +344,12 @@ export const timer = {
    * so callers can pass placeholder values when removing a timer.
    *
    * @param name - Base unit name without extension. Used as `<name>.service`
-   *   and `<name>.timer`. Must match `^[A-Za-z0-9_\-]+$`.
+   *   and `<name>.timer`. Must match `^[\w\-]+$`.
    * @param options - Schedule, command, optional service hardening, and state.
    * @returns A Module that manages the timer-driven scheduled task.
    */
   scheduled(name: string, options: TimerScheduledOptions): Module {
-    if (!TIMER_NAME_PATTERN.test(name)) {
-      throw new Error(
-        `timer.scheduled: name must match ${String(TIMER_NAME_PATTERN)}, got: ${JSON.stringify(name)}`
-      )
-    }
+    assertTimerName(name)
 
     const state = options.state ?? "present"
 
@@ -311,7 +358,7 @@ export const timer = {
       return {
         async apply(ssh: null | SshConnection): Promise<ModuleResult> {
           if (!ssh) return failed(`[timer.scheduled: ${name}] SSH connection is required`)
-          return applyAbsent(ssh, name, locations)
+          return applyAbsent(ssh, { locations, module: "timer.scheduled", name })
         },
         async check(ssh: null | SshConnection): Promise<"needs-apply" | "ok"> {
           if (!ssh) return NEEDS_APPLY

@@ -56,6 +56,12 @@ type CronJobOptions = {
   state?: "absent" | "present"
 }
 
+function assertCronName(name: string): void {
+  if (/[\n\r]/v.test(name)) {
+    throw new Error(`cron: name must not contain newlines: ${JSON.stringify(name)}`)
+  }
+}
+
 /**
  * Modules for managing cron jobs in user crontabs.
  *
@@ -64,6 +70,49 @@ type CronJobOptions = {
  * idempotent and safely repeatable.
  */
 export const cron = {
+  /**
+   * Ensure a cron job is absent from a user's crontab.
+   *
+   * Removes the `# paratix: <name>` marker comment and the crontab line
+   * directly below it. If the marker is not found, the module reports `ok`
+   * without writing the crontab. When the crontab becomes empty after the
+   * removal, it is deleted entirely via `crontab -r`.
+   *
+   * Equivalent to `cron.job(user, name, { job: "<unused>", state: "absent" })`,
+   * but does not require a placeholder `job` argument.
+   *
+   * @param user - The target user whose crontab is managed.
+   * @param name - Unique identifier of the cron job marker to remove.
+   * @returns A Module that ensures the cron job entry is absent.
+   */
+  absent(user: string, name: string): Module {
+    assertCronName(name)
+    const marker = `# paratix: ${name}`
+
+    return {
+      async apply(ssh: null | SshConnection): Promise<ModuleResult> {
+        if (!ssh) return failed(`[cron.absent: ${name} (${user})] SSH connection is required`)
+
+        const lines = await readCrontab(ssh, user)
+        const markerIndex = lines.indexOf(marker)
+        if (markerIndex === -1) return { status: "ok" }
+
+        lines.splice(markerIndex, 2)
+        await writeCrontab(ssh, user, lines)
+        return { status: "changed" }
+      },
+
+      async check(ssh: null | SshConnection): Promise<"needs-apply" | "ok"> {
+        if (!ssh) return NEEDS_APPLY
+
+        const lines = await readCrontab(ssh, user)
+        return lines.includes(marker) ? NEEDS_APPLY : "ok"
+      },
+
+      name: `cron.absent: ${name} (${user})`,
+    }
+  },
+
   /**
    * Ensure a cron job is present in (or absent from) a user's crontab.
    *
@@ -80,9 +129,7 @@ export const cron = {
    * @returns A Module that manages the cron job entry.
    */
   job(user: string, name: string, options: CronJobOptions): Module {
-    if (/[\n\r]/v.test(name)) {
-      throw new Error(`cron.job: name must not contain newlines: ${JSON.stringify(name)}`)
-    }
+    assertCronName(name)
     if (/[\n\r]/v.test(options.job)) {
       throw new Error(`cron.job: job must not contain newlines: ${JSON.stringify(options.job)}`)
     }

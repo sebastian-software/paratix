@@ -268,3 +268,131 @@ describe("cron.job", () => {
     )
   })
 })
+
+describe("cron.absent", () => {
+  it("check returns ok when marker is not in the crontab", async () => {
+    const mockSsh = createMockSsh({
+      "crontab -u 'alice' -l": { code: 0, stdout: "0 5 * * * /other.sh\n" },
+    })
+    const mod = cron.absent("alice", "backup")
+    expect(await mod.check(mockSsh, emptyEnv)).toBe("ok")
+  })
+
+  it("check returns ok when no crontab exists", async () => {
+    const mockSsh = createMockSsh({
+      "crontab -u 'alice' -l": { code: 1, stdout: "" },
+    })
+    const mod = cron.absent("alice", "backup")
+    expect(await mod.check(mockSsh, emptyEnv)).toBe("ok")
+  })
+
+  it("check returns needs-apply when marker is found", async () => {
+    const mockSsh = createMockSsh({
+      "crontab -u 'alice' -l": {
+        code: 0,
+        stdout: "# paratix: backup\n0 3 * * * /backup.sh\n",
+      },
+    })
+    const mod = cron.absent("alice", "backup")
+    expect(await mod.check(mockSsh, emptyEnv)).toBe("needs-apply")
+  })
+
+  it("check returns needs-apply when ssh is null", async () => {
+    const mod = cron.absent("alice", "backup")
+    expect(await mod.check(null, emptyEnv)).toBe("needs-apply")
+  })
+
+  it("apply removes marker and following job line from crontab", async () => {
+    const mockSsh = createMockSsh({
+      "crontab -u 'alice' -l": {
+        code: 0,
+        stdout: "0 5 * * * /other.sh\n# paratix: backup\n0 3 * * * /backup.sh\n",
+      },
+    })
+    const mod = cron.absent("alice", "backup")
+    const result = await mod.apply(mockSsh, emptyEnv)
+    expect(result.status).toBe("changed")
+    const writeCall = mockSsh.calls.find((c) => c.startsWith("printf '%s'"))
+    expect(writeCall).toBeDefined()
+    expect(writeCall).not.toContain("# paratix: backup")
+    expect(writeCall).not.toContain("0 3 * * * /backup.sh")
+    expect(writeCall).toContain("0 5 * * * /other.sh")
+  })
+
+  it("apply removes the crontab entirely when last managed entry is removed", async () => {
+    const mockSsh = createMockSsh({
+      "crontab -u 'alice' -l": {
+        code: 0,
+        stdout: "# paratix: backup\n0 3 * * * /backup.sh\n",
+      },
+    })
+    const mod = cron.absent("alice", "backup")
+    const result = await mod.apply(mockSsh, emptyEnv)
+    expect(result.status).toBe("changed")
+    expect(mockSsh.calls).toContain("crontab -u 'alice' -r")
+  })
+
+  it("apply returns ok when marker is not present (nothing to remove)", async () => {
+    const mockSsh = createMockSsh({
+      "crontab -u 'alice' -l": {
+        code: 0,
+        stdout: "0 5 * * * /other.sh\n",
+      },
+    })
+    const mod = cron.absent("alice", "backup")
+    const result = await mod.apply(mockSsh, emptyEnv)
+    expect(result.status).toBe("ok")
+    const writeCall = mockSsh.calls.find((c) => c.startsWith("printf '%s'"))
+    expect(writeCall).toBeUndefined()
+  })
+
+  it("apply returns failed when ssh is null", async () => {
+    const mod = cron.absent("alice", "backup")
+    const conn = null
+    const result = await mod.apply(conn, emptyEnv)
+    expect(result.status).toBe("failed")
+  })
+
+  it("has correct name format: cron.absent: <name> (<user>)", () => {
+    const mod = cron.absent("alice", "backup")
+    expect(mod.name).toBe("cron.absent: backup (alice)")
+  })
+
+  it("only touches the targeted marker when multiple managed entries exist", async () => {
+    const mockSsh = createMockSsh({
+      "crontab -u 'alice' -l": {
+        code: 0,
+        stdout:
+          "# paratix: cleanup\n0 1 * * * /cleanup.sh\n# paratix: backup\n0 3 * * * /backup.sh\n",
+      },
+    })
+    const mod = cron.absent("alice", "backup")
+    const result = await mod.apply(mockSsh, emptyEnv)
+    expect(result.status).toBe("changed")
+    const writeCall = mockSsh.calls.find((c) => c.startsWith("printf '%s'"))
+    expect(writeCall).toContain("# paratix: cleanup")
+    expect(writeCall).toContain("0 1 * * * /cleanup.sh")
+    expect(writeCall).not.toContain("# paratix: backup")
+    expect(writeCall).not.toContain("0 3 * * * /backup.sh")
+  })
+
+  it("apply removes a trailing marker without a following job line", async () => {
+    const mockSsh = createMockSsh({
+      "crontab -u 'alice' -l": {
+        code: 0,
+        stdout: "0 5 * * * /other.sh\n# paratix: backup\n",
+      },
+    })
+    const mod = cron.absent("alice", "backup")
+    const result = await mod.apply(mockSsh, emptyEnv)
+    expect(result.status).toBe("changed")
+    const writeCall = mockSsh.calls.find((c) => c.startsWith("printf '%s'"))
+    expect(writeCall).toBeDefined()
+    expect(writeCall).not.toContain("# paratix: backup")
+    expect(writeCall).toContain("0 5 * * * /other.sh")
+  })
+
+  it("throws when name contains a newline", () => {
+    expect(() => cron.absent("alice", "bad\nname")).toThrow("must not contain newlines")
+  })
+})
