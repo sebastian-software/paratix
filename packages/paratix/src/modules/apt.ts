@@ -230,13 +230,18 @@ export const apt = {
         if (!ssh) return failed(`[apt.distUpgrade] SSH connection is required for ${date}`)
         const pipelineOptions = aptExecOptions(options)
 
-        const update = await ssh.exec(`${NONINTERACTIVE} apt-get update`, pipelineOptions)
-        if (update.code !== 0)
-          return failedCommand("[apt.distUpgrade] apt-get update failed", update)
-
+        // R-0000055: run `dpkg --configure -a` first so an interrupted
+        // package configuration is healed before the next apt step. The
+        // previous order put `apt-get update` first, which would fail on
+        // dpkg-broken hosts and never give configure -a a chance to run.
+        // Mirrors the order used by package.ts apt-upgrade pipeline.
         const configure = await ssh.exec(`${NONINTERACTIVE} dpkg --configure -a`, pipelineOptions)
         if (configure.code !== 0)
           return failedCommand("[apt.distUpgrade] dpkg --configure -a failed", configure)
+
+        const update = await ssh.exec(`${NONINTERACTIVE} apt-get update`, pipelineOptions)
+        if (update.code !== 0)
+          return failedCommand("[apt.distUpgrade] apt-get update failed", update)
 
         const upgrade = await ssh.exec(`${NONINTERACTIVE} apt-get dist-upgrade -y`, pipelineOptions)
         if (upgrade.code !== 0)

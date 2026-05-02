@@ -170,6 +170,34 @@ describe("apt.distUpgrade", () => {
     expect(ssh.calls).toContain("DEBIAN_FRONTEND=noninteractive apt-get dist-upgrade -y")
   })
 
+  // R-0000055 regression: the pipeline order must be
+  // `dpkg --configure -a` → `apt-get update` → `apt-get dist-upgrade -y`
+  // so a dpkg-broken host gets configure -a a chance to run before the
+  // first apt-get step that would otherwise fail. Mirrors the order used
+  // by the package.ts apt-upgrade pipeline.
+  it("apply runs dpkg --configure -a before apt-get update and apt-get dist-upgrade", async () => {
+    const ssh = createMockSsh({
+      "DEBIAN_FRONTEND=noninteractive apt-get dist-upgrade -y": { code: 0 },
+      "DEBIAN_FRONTEND=noninteractive apt-get update": { code: 0 },
+      "DEBIAN_FRONTEND=noninteractive dpkg --configure -a": { code: 0 },
+      "find /var/lib/paratix/flags -maxdepth 1 -name 'apt-dist-upgrade-*' -delete && touch /var/lib/paratix/flags/'apt-dist-upgrade-2024-01-15'":
+        { code: 0 },
+      "mkdir -p /var/lib/paratix/flags": { code: 0 },
+    })
+    const mod = apt.distUpgrade("2024-01-15")
+    await mod.apply(ssh, emptyEnv)
+
+    const configureIdx = ssh.calls.indexOf("DEBIAN_FRONTEND=noninteractive dpkg --configure -a")
+    const updateIdx = ssh.calls.indexOf("DEBIAN_FRONTEND=noninteractive apt-get update")
+    const upgradeIdx = ssh.calls.indexOf("DEBIAN_FRONTEND=noninteractive apt-get dist-upgrade -y")
+
+    expect(configureIdx).toBeGreaterThan(-1)
+    expect(updateIdx).toBeGreaterThan(-1)
+    expect(upgradeIdx).toBeGreaterThan(-1)
+    expect(configureIdx).toBeLessThan(updateIdx)
+    expect(updateIdx).toBeLessThan(upgradeIdx)
+  })
+
   it("apply without options does not set a timeout key", async () => {
     const ssh = createMockSsh({
       "DEBIAN_FRONTEND=noninteractive apt-get dist-upgrade -y": { code: 0 },
@@ -230,16 +258,20 @@ describe("apt.distUpgrade", () => {
 
   it("apply stops at the first failing step and reports it", async () => {
     const ssh = createMockSsh({
+      // R-0000055: dpkg --configure -a now runs first; an apt-get update
+      // failure must therefore still abort the dist-upgrade step but
+      // dpkg --configure -a is expected to have already run.
       "DEBIAN_FRONTEND=noninteractive apt-get update": {
         code: 100,
         stderr: "E: Could not get lock /var/lib/dpkg/lock-frontend",
       },
+      "DEBIAN_FRONTEND=noninteractive dpkg --configure -a": { code: 0 },
     })
     const mod = apt.distUpgrade("2024-01-15")
     const result = await mod.apply(ssh, emptyEnv)
     expect(result.status).toBe("failed")
     expect(result.error?.message).toContain("[apt.distUpgrade] apt-get update failed")
-    expect(ssh.calls).not.toContain("DEBIAN_FRONTEND=noninteractive dpkg --configure -a")
+    expect(ssh.calls).toContain("DEBIAN_FRONTEND=noninteractive dpkg --configure -a")
     expect(ssh.calls).not.toContain("DEBIAN_FRONTEND=noninteractive apt-get dist-upgrade -y")
   })
 })
