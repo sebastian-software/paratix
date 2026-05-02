@@ -20,11 +20,11 @@ describe("ssh.knownHosts", () => {
   const hostFingerprint = computeFingerprint(hostKeyBuffer)
   const scannedLine = `|1|hashed-host|hashed-value ssh-ed25519 ${hostKeyBase64}`
 
-  it("check returns ok when host is already known (state: present)", async () => {
+  it("check returns ok when host is already known and trust anchor matches (state: present)", async () => {
     const mockSsh = createMockSsh({
-      "ssh-keygen -F 'github.com'": { code: 0 },
+      "ssh-keygen -F 'github.com'": { code: 0, stdout: `${scannedLine}\n` },
     })
-    const mod = ssh.knownHosts("github.com")
+    const mod = ssh.knownHosts("github.com", { expectedFingerprint: hostFingerprint })
     const result = await mod.check(mockSsh, emptyEnv)
     expect(result).toBe("ok")
   })
@@ -123,13 +123,13 @@ describe("ssh.knownHosts", () => {
     const mockSsh = createMockSsh({
       "ssh-keygen -F 'github.com'": { code: 1 },
     })
-    const mod = ssh.knownHosts("github.com")
+    const mod = ssh.knownHosts("github.com", { expectedFingerprint: hostFingerprint })
     const result = await mod.check(mockSsh, emptyEnv)
     expect(result).toBe("needs-apply")
   })
 
   it("check returns needs-apply when ssh is null", async () => {
-    const mod = ssh.knownHosts("github.com")
+    const mod = ssh.knownHosts("github.com", { expectedFingerprint: hostFingerprint })
     const result = await mod.check(null, emptyEnv)
     expect(result).toBe("needs-apply")
   })
@@ -222,15 +222,24 @@ describe("ssh.knownHosts", () => {
     )
   })
 
-  it("apply rejects present state without a fingerprint or public key trust anchor", async () => {
-    const mockSsh = createMockSsh({
-      "ssh-keyscan -H 'github.com' 2>/dev/null": { stdout: `${scannedLine}\n` },
-    })
-    const mod = ssh.knownHosts("github.com")
+  it("rejects present state without a fingerprint or public key trust anchor at construction time", () => {
+    expect(() => ssh.knownHosts("github.com")).toThrow("requires expectedFingerprint or publicKey")
+  })
 
-    await expect(mod.apply(mockSsh, emptyEnv)).rejects.toThrow(
+  it("rejects present state with an empty options object at construction time", () => {
+    expect(() => ssh.knownHosts("github.com", {})).toThrow(
       "requires expectedFingerprint or publicKey"
     )
+  })
+
+  it("rejects present state with only a port option at construction time", () => {
+    expect(() => ssh.knownHosts("github.com", { port: 2222 })).toThrow(
+      "requires expectedFingerprint or publicKey"
+    )
+  })
+
+  it("does not reject the construction-time call when state is absent and no trust anchor is set", () => {
+    expect(() => ssh.knownHosts("github.com", { state: "absent" })).not.toThrow()
   })
 
   it("apply removes host via ssh-keygen -R (state: absent)", async () => {
@@ -268,7 +277,7 @@ describe("ssh.knownHosts", () => {
   })
 
   it("apply returns failed when ssh is null", async () => {
-    const mod = ssh.knownHosts("github.com")
+    const mod = ssh.knownHosts("github.com", { expectedFingerprint: hostFingerprint })
     const conn = null
     const result = await mod.apply(conn, emptyEnv)
     expect(result.status).toBe("failed")

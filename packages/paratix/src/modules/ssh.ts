@@ -176,6 +176,16 @@ export const ssh = {
     const state = options?.state ?? "present"
     const lookupTarget = knownHostsLookupTarget(host, options)
 
+    if (state === "present" && !hasKnownHostsTrustAnchor(options)) {
+      // Mirror the failure message from getVerifiedScannedHostKeyLines so the
+      // construction-time rejection matches the apply-time rejection. Without
+      // a trust anchor `check` could otherwise return "ok" for any pre-existing
+      // entry, including ones from a prior TOFU acceptance — see R-0000029.
+      throw new Error(
+        `ssh.knownHosts(${host}) requires expectedFingerprint or publicKey before accepting ssh-keyscan output`
+      )
+    }
+
     return {
       async apply(conn: null | SshConnection): Promise<ModuleResult> {
         if (!conn) return failed(`[ssh.knownHosts: ${host} (${state})] SSH connection is required`)

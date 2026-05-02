@@ -304,6 +304,8 @@ rsync SSH process and does not depend on a local `known_hosts` entry.
 | `ssh.authorizedKeys` | `(user: string, key: string, options?: { state?: "absent" \| "present" }): Module`                                                     | Yes        |
 | `ssh.knownHosts`     | `(host: string, options?: { expectedFingerprint?: string; port?: number; publicKey?: string; state?: "absent" \| "present" }): Module` | Yes        |
 
+**Trust-Anchor-Pflicht für `ssh.knownHosts` (state `present`):** Im Default-State `present` muss entweder `expectedFingerprint` oder `publicKey` gesetzt sein. Ohne Trust Anchor wirft der Modul-Konstruktor sofort, denn `check` würde sonst jeden vorhandenen `known_hosts`-Eintrag (auch ältere, möglicherweise kompromittierte TOFU-Akzeptanzen) als „ok" werten und den Anchor-Vergleich überspringen. Für `state: "absent"` ist kein Anchor nötig — dort wird der Eintrag ohnehin entfernt.
+
 ### `sshd`
 
 | Method        | Signature                                    | Idempotent                         |
