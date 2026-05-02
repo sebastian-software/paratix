@@ -696,6 +696,22 @@ describe("timer.absent", () => {
     expect(ssh.calls).not.toContain("systemctl disable --now 'backup.timer'")
   })
 
+  it("apply runs full cleanup when only one of the two unit files still exists", async () => {
+    const ssh = createMockSsh({
+      [`[ -e '${SERVICE_PATH}' ]`]: { code: 0 },
+      [`[ -e '${TIMER_PATH}' ]`]: { code: 1 },
+      [`rm -f '${TIMER_PATH}' '${SERVICE_PATH}'`]: { code: 0 },
+      "systemctl daemon-reload": { code: 0 },
+      "systemctl disable --now 'backup.timer'": { code: 0 },
+    })
+    const mod = timer.absent("backup")
+    const result = await mod.apply(ssh, emptyEnv)
+    expect(result.status).toBe("changed")
+    expect(ssh.calls).toContain("systemctl disable --now 'backup.timer'")
+    expect(ssh.calls).toContain(`rm -f '${TIMER_PATH}' '${SERVICE_PATH}'`)
+    expect(ssh.calls).toContain("systemctl daemon-reload")
+  })
+
   it("apply returns failed when ssh is null", async () => {
     const mod = timer.absent("backup")
     const conn = null
