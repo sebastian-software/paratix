@@ -155,6 +155,42 @@ async function metadataMatches(
   return downloadOwnershipMatches(ownership, options)
 }
 
+async function destinationHashMatches(
+  conn: SshConnection,
+  destination: string,
+  options: BaseDownloadOptions
+): Promise<boolean> {
+  if (options.sha256 == null) return true
+  const actualHash = await conn.sha256(destination)
+  return hashMatches(actualHash, options.sha256)
+}
+
+async function checkLargeDownload(
+  conn: SshConnection,
+  parameters: {
+    destination: string
+    flagName: string
+    options: BaseDownloadOptions
+  }
+): Promise<"needs-apply" | "ok"> {
+  const { destination, flagName, options } = parameters
+  const flagExists = await hasFlag(conn, flagName)
+  const destinationExists = await conn.exists(destination)
+
+  if (!destinationExists) return NEEDS_APPLY
+  if (!(await destinationHashMatches(conn, destination, options))) return NEEDS_APPLY
+  if (!(await metadataMatches(conn, destination, options))) return NEEDS_APPLY
+
+  // Recover from a crash between the final mv and setFlag: if the file is
+  // already on disk (and, when configured, the hash matches), restore the
+  // flag instead of triggering a costly re-download.
+  if (!flagExists) {
+    await setFlag(conn, flagName)
+  }
+
+  return "ok"
+}
+
 function buildTemporaryDownloadPathCommand(destination: string): string {
   return `mktemp "$(dirname ${shellQuote(destination)})/.paratix-download.XXXXXX"`
 }
@@ -503,19 +539,7 @@ export const download = {
       },
       async check(conn: null | SshConnection): Promise<"needs-apply" | "ok"> {
         if (!conn) return NEEDS_APPLY
-
-        const flagExists = await hasFlag(conn, flagName)
-        if (!flagExists) return NEEDS_APPLY
-
-        const destinationExists = await conn.exists(destination)
-        if (!destinationExists) return NEEDS_APPLY
-
-        if (resolvedOptions.sha256 != null) {
-          const actualHash = await conn.sha256(destination)
-          if (!hashMatches(actualHash, resolvedOptions.sha256)) return NEEDS_APPLY
-        }
-
-        return (await metadataMatches(conn, destination, resolvedOptions)) ? "ok" : NEEDS_APPLY
+        return checkLargeDownload(conn, { destination, flagName, options: resolvedOptions })
       },
       name: `download.large: ${destination}`,
     }

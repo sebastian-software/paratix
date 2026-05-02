@@ -727,8 +727,9 @@ describe("download.large", () => {
       expect(result).toBe("ok")
     })
 
-    it("returns needs-apply when flag file does not exist", async () => {
+    it("returns needs-apply when flag and destination both do not exist", async () => {
       const mockSsh = createMockSsh({
+        [`[ -e '${destination}' ]`]: { code: 1 },
         [`[ -f /var/lib/paratix/flags/'${flagName}' ]`]: { code: 1 },
       })
       const mod = download.large(destination, url, allowUnverifiedDownload)
@@ -799,14 +800,45 @@ describe("download.large", () => {
       expect(result).toBe("needs-apply")
     })
 
-    it("returns needs-apply when flag does not exist and sha256 is set", async () => {
+    it("returns needs-apply when flag does not exist and destination is missing despite sha256", async () => {
       const sha256 = "aabbccddaabbccddaabbccddaabbccddaabbccddaabbccddaabbccddaabbccdd"
       const mockSsh = createMockSsh({
+        [`[ -e '${destination}' ]`]: { code: 1 },
         [`[ -f /var/lib/paratix/flags/'${flagName}' ]`]: { code: 1 },
       })
       const mod = download.large(destination, url, { sha256 })
       const result = await mod.check(mockSsh, emptyEnv)
       expect(result).toBe("needs-apply")
+    })
+
+    it("recovers a stale crash by setting the flag when destination exists and sha256 matches", async () => {
+      const sha256 = "aabbccddaabbccddaabbccddaabbccddaabbccddaabbccddaabbccddaabbccdd"
+      const mockSsh = createMockSsh({
+        [`[ -e '${destination}' ]`]: { code: 0 },
+        [`[ -f '${destination}' ]`]: { code: 0 },
+        [`[ -f /var/lib/paratix/flags/'${flagName}' ]`]: { code: 1 },
+        [`sha256sum '${destination}'`]: { stdout: `${sha256}  ${destination}` },
+      })
+      const mod = download.large(destination, url, { sha256 })
+      const result = await mod.check(mockSsh, emptyEnv)
+      expect(result).toBe("ok")
+      expect(mockSsh.calls).toContain(`touch /var/lib/paratix/flags/'${flagName}'`)
+    })
+
+    it("does not set the flag during recovery when sha256 mismatches", async () => {
+      const sha256 = "aabbccddaabbccddaabbccddaabbccddaabbccddaabbccddaabbccddaabbccdd"
+      const mockSsh = createMockSsh({
+        [`[ -e '${destination}' ]`]: { code: 0 },
+        [`[ -f '${destination}' ]`]: { code: 0 },
+        [`[ -f /var/lib/paratix/flags/'${flagName}' ]`]: { code: 1 },
+        [`sha256sum '${destination}'`]: {
+          stdout: `0000000000000000000000000000000000000000000000000000000000000000  ${destination}`,
+        },
+      })
+      const mod = download.large(destination, url, { sha256 })
+      const result = await mod.check(mockSsh, emptyEnv)
+      expect(result).toBe("needs-apply")
+      expect(mockSsh.calls).not.toContain(`touch /var/lib/paratix/flags/'${flagName}'`)
     })
   })
 
