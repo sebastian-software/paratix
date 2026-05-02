@@ -384,6 +384,31 @@ async function executeCurlDownload(
 }
 
 /**
+ * R-0000062: skip the curl roundtrip when only metadata (mode/owner/group)
+ * drifted on an otherwise-correct file. Returns `true` when the destination
+ * exists and its sha256 matches the expected digest, so callers can heal
+ * via chmod/chown without re-fetching the payload over the network.
+ *
+ * The check is gated on `parameters.sha256` — without an integrity digest
+ * we cannot prove that the on-disk content is correct, so we keep the slow
+ * path for unverified downloads.
+ *
+ * @param conn - The active SSH connection.
+ * @param parameters - Download parameters with the final destination.
+ * @returns `true` when the existing file matches the expected sha256.
+ */
+async function destinationContentMatchesSha256(
+  conn: SshConnection,
+  parameters: DownloadParameters
+): Promise<boolean> {
+  if (parameters.sha256 == null) return false
+  const exists = await conn.exists(parameters.destination)
+  if (!exists) return false
+  const actualHash = await conn.sha256(parameters.destination)
+  return hashMatches(actualHash, parameters.sha256)
+}
+
+/**
  * Execute the download, verify integrity, and set ownership/permissions.
  * Shared implementation behind both `download.url()` and `download.github()`.
  *
@@ -403,35 +428,60 @@ async function performDownload(
   // not just the CommandError stdout/stderr that ssh.exec already redacts.
   const registeredSecrets = parameters.secrets ?? []
   return withRegisteredSecrets(registeredSecrets, async () => {
-    await conn.exec(`mkdir -p "$(dirname ${shellQuote(parameters.destination)})"`, {
-      silent: true,
-    })
-    const temporaryDestination = await conn.output(
-      buildTemporaryDownloadPathCommand(parameters.destination)
-    )
-    const downloadParameters = { ...parameters, destination: temporaryDestination }
-    let shouldCleanupTemporaryFile = true
-
-    try {
-      await executeCurlDownload(conn, downloadParameters)
-
-      if (!(await verifyChecksum(conn, downloadParameters))) {
-        return failed(`[download] checksum verification failed for ${parameters.destination}`)
-      }
-      await applyFileAttributes(conn, downloadParameters)
-      await conn.exec(
-        `mv ${shellQuote(downloadParameters.destination)} ${shellQuote(parameters.destination)}`,
-        { silent: true }
-      )
-      shouldCleanupTemporaryFile = false
-
+    // R-0000062: metadata-only fast path — when sha256 is known and the
+    // existing destination already matches the digest, we only need to
+    // re-apply ownership/permissions instead of re-downloading the payload.
+    // This honors download.large's "fetched once" contract even when the
+    // operator drifted mode/owner/group out-of-band.
+    if (await destinationContentMatchesSha256(conn, parameters)) {
+      await applyFileAttributes(conn, parameters)
       return { status: "changed" }
-    } finally {
-      if (shouldCleanupTemporaryFile) {
-        await cleanupTemporaryDownloadFile(conn, downloadParameters)
-      }
     }
+
+    return runCurlDownload(conn, parameters)
   })
+}
+
+/**
+ * Slow path of {@link performDownload}: download the payload via curl, verify
+ * its sha256, apply ownership/permissions, and atomically move it into place.
+ *
+ * @param conn - The active SSH connection.
+ * @param parameters - Download parameters including destination and url.
+ * @returns A {@link ModuleResult} indicating the outcome.
+ */
+async function runCurlDownload(
+  conn: SshConnection,
+  parameters: DownloadParameters
+): Promise<ModuleResult> {
+  await conn.exec(`mkdir -p "$(dirname ${shellQuote(parameters.destination)})"`, {
+    silent: true,
+  })
+  const temporaryDestination = await conn.output(
+    buildTemporaryDownloadPathCommand(parameters.destination)
+  )
+  const downloadParameters = { ...parameters, destination: temporaryDestination }
+  let shouldCleanupTemporaryFile = true
+
+  try {
+    await executeCurlDownload(conn, downloadParameters)
+
+    if (!(await verifyChecksum(conn, downloadParameters))) {
+      return failed(`[download] checksum verification failed for ${parameters.destination}`)
+    }
+    await applyFileAttributes(conn, downloadParameters)
+    await conn.exec(
+      `mv ${shellQuote(downloadParameters.destination)} ${shellQuote(parameters.destination)}`,
+      { silent: true }
+    )
+    shouldCleanupTemporaryFile = false
+
+    return { status: "changed" }
+  } finally {
+    if (shouldCleanupTemporaryFile) {
+      await cleanupTemporaryDownloadFile(conn, downloadParameters)
+    }
+  }
 }
 
 /**

@@ -366,6 +366,105 @@ describe("download.url", () => {
         stderrSpy.mockRestore()
       }
     })
+
+    // ─── R-0000062: metadata-only fast path ─────────────────────────────────
+    describe("metadata-only fast path", () => {
+      it("heals mode drift via chmod only when sha256 matches and destination exists", async () => {
+        // Existing destination already matches the expected sha256 — only
+        // mode drifted. Apply must chmod and skip curl entirely.
+        const mockSsh = createMockSsh({
+          [`[ -e '${destination}' ]`]: { code: 0 },
+          [`[ -f '${destination}' ]`]: { code: 0 },
+          [`sha256sum '${destination}'`]: { stdout: `${sha256}  ${destination}` },
+        })
+        const mod = download.url(destination, url, { mode: "0755", sha256 })
+        const result = await mod.apply(mockSsh, emptyEnv)
+        expect(result.status).toBe("changed")
+        expect(mockSsh.calls).toContain(`chmod '0755' '${destination}'`)
+        expect(mockSsh.calls.every((c) => !c.startsWith("curl"))).toBe(true)
+        expect(mockSsh.calls.every((c) => !c.startsWith("mktemp"))).toBe(true)
+        expect(mockSsh.calls.every((c) => !c.startsWith("mv "))).toBe(true)
+      })
+
+      it("heals owner drift via chown only when sha256 matches and destination exists", async () => {
+        // Existing destination already matches the expected sha256 — only
+        // owner drifted. Apply must chown the existing file and skip curl.
+        const mockSsh = createMockSsh({
+          [`[ -e '${destination}' ]`]: { code: 0 },
+          [`[ -f '${destination}' ]`]: { code: 0 },
+          [`sha256sum '${destination}'`]: { stdout: `${sha256}  ${destination}` },
+        })
+        const mod = download.url(destination, url, { owner: "deploy", sha256 })
+        const result = await mod.apply(mockSsh, emptyEnv)
+        expect(result.status).toBe("changed")
+        expect(mockSsh.calls).toContain(`chown 'deploy:' '${destination}'`)
+        expect(mockSsh.calls.every((c) => !c.startsWith("curl"))).toBe(true)
+        expect(mockSsh.calls.every((c) => !c.startsWith("mktemp"))).toBe(true)
+      })
+
+      it("falls back to a full curl download when sha256 does not match", async () => {
+        // Destination exists but its hash is wrong — fast path must bail and
+        // the slow path must run a real curl transfer through a temp file.
+        const mockSsh = createMockSsh({
+          [`[ -e '${destination}' ]`]: { code: 0 },
+          [`[ -f '${destination}' ]`]: { code: 0 },
+          [`[ -f '${temporaryDestination}' ]`]: { code: 0 },
+          [`mktemp "$(dirname '${destination}')/.paratix-download.XXXXXX"`]: {
+            stdout: `${temporaryDestination}\n`,
+          },
+          [`sha256sum '${destination}'`]: {
+            stdout: `0000000000000000000000000000000000000000000000000000000000000000  ${destination}`,
+          },
+          [`sha256sum '${temporaryDestination}'`]: {
+            stdout: `${sha256}  ${temporaryDestination}`,
+          },
+        })
+        const mod = download.url(destination, url, { sha256 })
+        const result = await mod.apply(mockSsh, emptyEnv)
+        expect(result.status).toBe("changed")
+        expect(mockSsh.calls).toContain(
+          `curl -fsSL -o '${temporaryDestination}' ${httpsOnlyCurlProtocolFlags} --config -`
+        )
+        expect(mockSsh.calls).toContain(`mv '${temporaryDestination}' '${destination}'`)
+      })
+
+      it("never enters the fast path when sha256 is not provided", async () => {
+        // Without sha256 the hash check cannot vouch for the on-disk content,
+        // so apply must always run curl through the slow path.
+        const mockSsh = createMockSsh({
+          [`[ -e '${destination}' ]`]: { code: 0 },
+          [`mktemp "$(dirname '${destination}')/.paratix-download.XXXXXX"`]: {
+            stdout: `${temporaryDestination}\n`,
+          },
+        })
+        const mod = download.url(destination, url, allowUnverifiedDownload)
+        const result = await mod.apply(mockSsh, emptyEnv)
+        expect(result.status).toBe("changed")
+        expect(mockSsh.calls).toContain(
+          `curl -fsSL -o '${temporaryDestination}' ${httpsOnlyCurlProtocolFlags} --config -`
+        )
+      })
+
+      it("registers parameters.secrets so secret-sink behavior remains identical on the fast path", async () => {
+        // Authorization-style headers must remain registered with the secret
+        // sink even when curl is skipped, so any error masking still works.
+        const token = "supersecret-bearer-token"
+        const mockSsh = createMockSsh({
+          [`[ -e '${destination}' ]`]: { code: 0 },
+          [`[ -f '${destination}' ]`]: { code: 0 },
+          [`sha256sum '${destination}'`]: { stdout: `${sha256}  ${destination}` },
+        })
+        const mod = download.url(destination, url, {
+          headers: { Authorization: `Bearer ${token}` },
+          mode: "0755",
+          sha256,
+        })
+        const result = await mod.apply(mockSsh, emptyEnv)
+        expect(result.status).toBe("changed")
+        expect(mockSsh.calls.every((c) => !c.startsWith("curl"))).toBe(true)
+        expect(mockSsh.calls).toContain(`chmod '0755' '${destination}'`)
+      })
+    })
   })
 
   describe("name", () => {
@@ -987,6 +1086,25 @@ describe("download.large", () => {
       expect(mockSsh.calls).toContain(`rm -f '${temporaryDestination}'`)
       expect(mockSsh.calls).not.toContain(`rm -f '${destination}'`)
       expect(mockSsh.calls).not.toContain(`mv '${temporaryDestination}' '${destination}'`)
+    })
+
+    // R-0000062: download.large must still invoke setFlag when the metadata-only
+    // fast path returns "changed", because performDownload exits without going
+    // through the curl + mv sequence that historically preceded setFlag.
+    it("sets flag after the fast-path metadata heal when sha256 matches existing destination", async () => {
+      const sha256 = "aabbccddaabbccddaabbccddaabbccddaabbccddaabbccddaabbccddaabbccdd"
+      const mockSsh = createMockSsh({
+        [`[ -e '${destination}' ]`]: { code: 0 },
+        [`[ -f '${destination}' ]`]: { code: 0 },
+        [`sha256sum '${destination}'`]: { stdout: `${sha256}  ${destination}` },
+      })
+      const mod = download.large(destination, url, { mode: "0755", sha256 })
+      const result = await mod.apply(mockSsh, emptyEnv)
+      expect(result.status).toBe("changed")
+      expect(mockSsh.calls).toContain(`chmod '0755' '${destination}'`)
+      expect(mockSsh.calls).toContain(`touch /var/lib/paratix/flags/'${flagName}'`)
+      expect(mockSsh.calls.every((c) => !c.startsWith("curl"))).toBe(true)
+      expect(mockSsh.calls.every((c) => !c.startsWith("mktemp"))).toBe(true)
     })
   })
 
