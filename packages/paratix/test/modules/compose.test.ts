@@ -399,10 +399,11 @@ describe("compose.config — check", () => {
     expect(result).toBe("needs-apply")
   })
 
-  it("returns ok when remote content matches desired content", async () => {
+  it("returns ok when remote content and mode match the desired values", async () => {
     const mockSsh = createComposeMockSsh({
       [`[ -e '${remotePath}' ]`]: { code: 0 },
       [`cat '${remotePath}'`]: { code: 0, stdout: sampleContent },
+      [`stat -c '%a' '${remotePath}'`]: { code: 0, stdout: "600" },
     })
     const mod = compose.config({ content: sampleContent, projectDirectory })
     const result = await mod.check(mockSsh, emptyEnv)
@@ -419,6 +420,18 @@ describe("compose.config — check", () => {
     expect(result).toBe("needs-apply")
   })
 
+  it("regression: returns needs-apply when remote mode has drifted from COMPOSE_CONFIG_MODE", async () => {
+    const mockSsh = createComposeMockSsh({
+      [`[ -e '${remotePath}' ]`]: { code: 0 },
+      [`cat '${remotePath}'`]: { code: 0, stdout: sampleContent },
+      // Operator manually ran `chmod 0644 compose.yml` — content matches, but mode does not.
+      [`stat -c '%a' '${remotePath}'`]: { code: 0, stdout: "644" },
+    })
+    const mod = compose.config({ content: sampleContent, projectDirectory })
+    const result = await mod.check(mockSsh, emptyEnv)
+    expect(result).toBe("needs-apply")
+  })
+
   it("returns needs-apply when neither src nor content is provided", async () => {
     const mockSsh = createComposeMockSsh({
       [`[ -e '${remotePath}' ]`]: { code: 0 },
@@ -428,7 +441,7 @@ describe("compose.config — check", () => {
     expect(result).toBe("needs-apply")
   })
 
-  it("reads local src file to compare content", async () => {
+  it("reads local src file to compare content and mode", async () => {
     const localContent = "services:\n  web:\n    image: nginx\n"
     const { readFile } = await import("node:fs/promises")
     vi.mocked(readFile).mockResolvedValue(localContent)
@@ -436,6 +449,7 @@ describe("compose.config — check", () => {
     const mockSsh = createComposeMockSsh({
       [`[ -e '${remotePath}' ]`]: { code: 0 },
       [`cat '${remotePath}'`]: { code: 0, stdout: localContent },
+      [`stat -c '%a' '${remotePath}'`]: { code: 0, stdout: "600" },
     })
     const mod = compose.config({ projectDirectory, src: "/local/compose.yml" })
     const result = await mod.check(mockSsh, emptyEnv)
@@ -481,14 +495,22 @@ describe("compose.config — apply", () => {
     expect(mockSsh.calls).toContain(`${composeCmd("podman")} config --quiet`)
   })
 
-  it("uploads src file and validates", async () => {
-    const uploadedFiles: Array<{ dest: string; src: string }> = []
+  it("uploads src file with the explicit COMPOSE_CONFIG_MODE and validates", async () => {
+    const uploadedFiles: Array<{
+      dest: string
+      options: { mode?: string } | undefined
+      src: string
+    }> = []
     const mockSsh = createComposeMockSsh({
       [`${composeCmd("podman")} config --quiet`]: { code: 0 },
     })
-    // eslint-disable-next-line @typescript-eslint/require-await -- Mock implementation
-    mockSsh.uploadFile = async (src: string, dest: string): Promise<void> => {
-      uploadedFiles.push({ dest, src })
+    mockSsh.uploadFile = async (
+      src: string,
+      dest: string,
+      options?: { mode?: string }
+    ): Promise<void> => {
+      await Promise.resolve()
+      uploadedFiles.push({ dest, options, src })
     }
 
     const mod = compose.config({ projectDirectory, src: "/local/compose.yml" })
@@ -496,6 +518,9 @@ describe("compose.config — apply", () => {
     expect(result.status).toBe("changed")
     expect(uploadedFiles[0]?.src).toBe("/local/compose.yml")
     expect(uploadedFiles[0]?.dest).toBe(remotePath)
+    // The src branch must forward an explicit mode so the resulting file is not
+    // produced as the silent uploadFile temp-mode default.
+    expect(uploadedFiles[0]?.options).toStrictEqual({ mode: "0600" })
     expect(mockSsh.calls).toContain(`${composeCmd("podman")} config --quiet`)
   })
 

@@ -340,6 +340,51 @@ function generateSystemdUnit(
   return lines.join("\n")
 }
 
+/** Options that {@link createComposeConfigCheck} reads to compute the desired state. */
+type ComposeConfigCheckOptions = {
+  content?: string
+  src?: string
+}
+
+/**
+ * Build the `check` function for `compose.config`.
+ *
+ * Reports `needs-apply` when:
+ * - the connection is missing
+ * - `compose.yml` is missing
+ * - the desired content cannot be resolved
+ * - the remote content differs from the desired content
+ * - the remote mode has drifted from {@link COMPOSE_CONFIG_MODE}
+ *
+ * @param remotePath - Path to the remote `compose.yml`.
+ * @param options - The compose-config options (only `src` and `content` matter here).
+ * @returns A `check` callback for the module's `Module` object.
+ */
+function createComposeConfigCheck(
+  remotePath: string,
+  options: ComposeConfigCheckOptions
+): (ssh: null | SshConnection) => Promise<"needs-apply" | "ok"> {
+  return async (ssh) => {
+    if (!ssh) return NEEDS_APPLY
+
+    const exists = await ssh.exists(remotePath)
+    if (!exists) return NEEDS_APPLY
+
+    const desiredContent = await resolveDesiredComposeContent(options)
+    if (desiredContent == null) return NEEDS_APPLY
+
+    const remoteContent = await ssh.readFile(remotePath)
+    if (remoteContent.trim() !== desiredContent.trim()) return NEEDS_APPLY
+
+    // Detect manual mode drift (e.g. an operator ran `chmod 0644 compose.yml`):
+    // even when the content matches, the apply path would re-set the mode,
+    // so check must report needs-apply to keep the run idempotent.
+    const rawMode = await ssh.output(`stat -c '%a' ${shellQuote(remotePath)}`)
+    const remoteMode = rawMode.trim()
+    return remoteMode === COMPOSE_CONFIG_MODE.replace(/^0+/v, "") ? "ok" : NEEDS_APPLY
+  }
+}
+
 /**
  * Modules for managing Docker Compose / Podman Compose stacks on a remote host.
  *
@@ -384,7 +429,9 @@ export const compose = {
         if (typeof runtime !== "string") return runtime
 
         if (options.src !== undefined && options.src !== "") {
-          await connection.uploadFile(options.src, remotePath)
+          // Always pass an explicit { mode } to uploadFile so the resulting
+          // compose.yml mode is independent of the uploadFile temp default.
+          await connection.uploadFile(options.src, remotePath, { mode: COMPOSE_CONFIG_MODE })
         } else if (options.content !== undefined && options.content !== "") {
           await connection.writeFile(remotePath, options.content, { mode: COMPOSE_CONFIG_MODE })
         } else {
@@ -403,18 +450,7 @@ export const compose = {
 
         return { status: "changed" }
       },
-      async check(ssh: null | SshConnection): Promise<"needs-apply" | "ok"> {
-        if (!ssh) return NEEDS_APPLY
-
-        const exists = await ssh.exists(remotePath)
-        if (!exists) return NEEDS_APPLY
-
-        const desiredContent = await resolveDesiredComposeContent(options)
-        if (desiredContent == null) return NEEDS_APPLY
-
-        const remoteContent = await ssh.readFile(remotePath)
-        return remoteContent.trim() === desiredContent.trim() ? "ok" : NEEDS_APPLY
-      },
+      check: createComposeConfigCheck(remotePath, options),
       name: `compose.config: ${projectDirectory}`,
     }
   },
