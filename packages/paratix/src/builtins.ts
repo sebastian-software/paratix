@@ -14,6 +14,28 @@ import {
 } from "./types.js"
 
 /**
+ * Module-private holder for the runner's prompt abort signal.
+ *
+ * The runner installs the signal via {@link setPauseAbortSignal} during
+ * `runPlaybook` and clears it on shutdown. The {@link pause} builtin reads it
+ * so a SIGINT fired while a step is paused rejects the pause promise instead
+ * of leaving the stdin `data` listener attached.
+ */
+let pauseAbortSignal: AbortSignal | undefined
+
+/**
+ * Register or clear the abort signal that {@link pause} should observe.
+ *
+ * Pass `undefined` to clear. Intended for the runner's shutdown lifecycle —
+ * playbooks should never call this directly.
+ *
+ * @param signal - The abort signal whose `abort` event cancels active pauses.
+ */
+export function setPauseAbortSignal(signal: AbortSignal | undefined): void {
+  pauseAbortSignal = signal
+}
+
+/**
  * Fail the run if a condition on the current env is not satisfied.
  *
  * The check phase evaluates the condition; if it returns `false`, apply
@@ -92,8 +114,74 @@ export function fail(message: string): Module {
 }
 
 /**
+ * Coerce an unknown abort reason into an `Error` instance.
+ *
+ * Falls back to `"pause aborted"` when the reason is `undefined`/`null`,
+ * preserves any thrown `Error`, and wraps anything else with a string
+ * representation that does not depend on `Object.prototype.toString`.
+ *
+ * @param reason - The {@link AbortSignal.reason}, if any.
+ * @returns An `Error` with a meaningful message.
+ */
+function normalizePauseAbortReason(reason: unknown): Error {
+  if (reason instanceof Error) return reason
+  if (reason === undefined || reason === null) return new Error("pause aborted")
+  if (typeof reason === "string") return new Error(reason)
+  return new Error("pause aborted")
+}
+
+/**
+ * Wait for the operator to press Enter, observing an optional abort signal.
+ *
+ * Cleans up the stdin `data` listener and the abort listener regardless of
+ * which one fires first, mirroring the cancellation semantics of
+ * {@link import("./terminal.js").promptTerminal}.
+ *
+ * @param abortSignal - Optional signal that, when aborted, rejects the wait.
+ * @returns A promise that resolves on Enter or rejects on abort.
+ */
+async function waitForEnterOrAbort(abortSignal: AbortSignal | undefined): Promise<void> {
+  return new Promise<void>((resolve, reject) => {
+    let settled = false
+
+    const onData = (): void => {
+      if (settled) return
+      settled = true
+      cleanup()
+      process.stdin.pause()
+      resolve()
+    }
+
+    const onAbort = (): void => {
+      if (settled) return
+      settled = true
+      cleanup()
+      process.stdin.pause()
+      reject(normalizePauseAbortReason(abortSignal?.reason))
+    }
+
+    function cleanup(): void {
+      process.stdin.removeListener("data", onData)
+      abortSignal?.removeEventListener("abort", onAbort)
+    }
+
+    if (abortSignal?.aborted === true) {
+      onAbort()
+      return
+    }
+
+    process.stdin.once("data", onData)
+    abortSignal?.addEventListener("abort", onAbort, { once: true })
+  })
+}
+
+/**
  * Pause execution and wait for the operator to press Enter.
  * Useful for interactive confirmation during a run.
+ *
+ * Honors the runner's prompt abort signal: a SIGINT during the pause cancels
+ * the wait, removes the stdin `data` listener, and rejects the apply promise
+ * with the signal's abort reason.
  *
  * @param message - Prompt shown to the operator. Defaults to `"Press enter to continue..."`.
  * @returns A Module that pauses execution.
@@ -104,12 +192,7 @@ export function pause(message?: string): Module {
       const promptText = message ?? "Press enter to continue..."
       process.stdout.write(`  [pause] ${promptText} `)
 
-      await new Promise<void>((resolve) => {
-        process.stdin.once("data", () => {
-          process.stdin.pause()
-          resolve()
-        })
-      })
+      await waitForEnterOrAbort(pauseAbortSignal)
 
       return { status: "ok" }
     },

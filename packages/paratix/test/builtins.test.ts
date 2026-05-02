@@ -2,7 +2,16 @@ import { describe, expect, it, vi } from "vitest"
 
 import type { Environment, Module } from "../src/types.js"
 
-import { assert, debug, fail, firstRun, pause, signals, when } from "../src/builtins.js"
+import {
+  assert,
+  debug,
+  fail,
+  firstRun,
+  pause,
+  setPauseAbortSignal,
+  signals,
+  when,
+} from "../src/builtins.js"
 import { resolveEnvironment } from "../src/environment.js"
 import { mergeEnvironmentFromMeta, meta } from "../src/meta.js"
 import { createMockSsh } from "./helpers/mockSsh.js"
@@ -145,6 +154,9 @@ describe("pause", () => {
         capturedCallback = callback as () => void
         return process.stdin
       })
+    const removeSpy = vi
+      .spyOn(process.stdin, "removeListener")
+      .mockImplementation(() => process.stdin)
     const stdinPauseSpy = vi.spyOn(process.stdin, "pause").mockImplementation(() => process.stdin)
 
     const mod = pause()
@@ -161,7 +173,78 @@ describe("pause", () => {
 
     stdoutSpy.mockRestore()
     onceSpy.mockRestore()
+    removeSpy.mockRestore()
     stdinPauseSpy.mockRestore()
+  })
+
+  it("rejects the apply promise and removes the stdin data listener when the abort signal fires", async () => {
+    const stdoutSpy = vi.spyOn(process.stdout, "write").mockImplementation(() => true)
+
+    let capturedCallback: ((...args: unknown[]) => void) | undefined
+    const onceSpy = vi
+      .spyOn(process.stdin, "once")
+      .mockImplementation((_event: string | symbol, callback: (...args: unknown[]) => void) => {
+        capturedCallback = callback
+        return process.stdin
+      })
+    const removedListeners: Array<{ callback: unknown; event: string | symbol }> = []
+    const removeListenerSpy = vi
+      .spyOn(process.stdin, "removeListener")
+      .mockImplementation((event: string | symbol, listener: (...args: unknown[]) => void) => {
+        removedListeners.push({ callback: listener, event })
+        return process.stdin
+      })
+    const stdinPauseSpy = vi.spyOn(process.stdin, "pause").mockImplementation(() => process.stdin)
+
+    const controller = new AbortController()
+    setPauseAbortSignal(controller.signal)
+
+    try {
+      const mod = pause()
+      // eslint-disable-next-line prefer-spread
+      const applyPromise = mod.apply(null, emptyEnv)
+
+      // Listener was attached before we abort.
+      expect(capturedCallback).toBeDefined()
+
+      controller.abort(new Error("Terminal prompt interrupted by SIGINT"))
+
+      await expect(applyPromise).rejects.toThrow(/SIGINT/v)
+
+      // The stdin "data" listener was removed; the abort path also pauses stdin.
+      expect(removedListeners).toContainEqual({ callback: capturedCallback, event: "data" })
+      expect(stdinPauseSpy).toHaveBeenCalled()
+    } finally {
+      setPauseAbortSignal(undefined)
+      stdoutSpy.mockRestore()
+      onceSpy.mockRestore()
+      removeListenerSpy.mockRestore()
+      stdinPauseSpy.mockRestore()
+    }
+  })
+
+  it("rejects synchronously when the abort signal is already aborted at the start of pause", async () => {
+    const stdoutSpy = vi.spyOn(process.stdout, "write").mockImplementation(() => true)
+    const onceSpy = vi.spyOn(process.stdin, "once")
+    const stdinPauseSpy = vi.spyOn(process.stdin, "pause").mockImplementation(() => process.stdin)
+
+    const controller = new AbortController()
+    controller.abort(new Error("aborted before pause"))
+    setPauseAbortSignal(controller.signal)
+
+    try {
+      const mod = pause()
+      // eslint-disable-next-line prefer-spread
+      await expect(mod.apply(null, emptyEnv)).rejects.toThrow(/aborted before pause/v)
+
+      // stdin "data" listener is never installed when the signal is already aborted.
+      expect(onceSpy).not.toHaveBeenCalled()
+    } finally {
+      setPauseAbortSignal(undefined)
+      stdoutSpy.mockRestore()
+      onceSpy.mockRestore()
+      stdinPauseSpy.mockRestore()
+    }
   })
 })
 

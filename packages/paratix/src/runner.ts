@@ -9,6 +9,7 @@ import type {
   ServerDefinition,
 } from "./types.js"
 
+import { setPauseAbortSignal } from "./builtins.js"
 import { dryRunRecipeModule } from "./dryRunRecipe.js"
 import { loadDotEnvironment, mergeEnvironment } from "./environment.js"
 import {
@@ -765,6 +766,7 @@ export async function runPlaybook(
   const environment = await initializeEnvironment(options, definition)
   const { handleShutdownSignal, promptAbortSignal, setSsh, shutdownSignal } =
     setupShutdownHandlers()
+  setPauseAbortSignal(promptAbortSignal)
   const stats = new RunStats()
   let ssh: SshConnectionImpl | undefined
 
@@ -790,6 +792,7 @@ export async function runPlaybook(
   } finally {
     for (const signal of ["SIGINT", "SIGTERM"] as const)
       process.removeListener(signal, handleShutdownSignal)
+    setPauseAbortSignal(undefined)
     ssh?.disconnect()
   }
 
