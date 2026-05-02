@@ -123,6 +123,50 @@ describe("apt.key", () => {
     expect(String(result.error)).toContain("[apt.key] failed to import docker")
   })
 
+  // R-0000066 regression: applyAptKey must validate the path returned by
+  // `mktemp` before embedding it in the curl, gpg --dearmor and rm -f
+  // subcommands. Multi-line output or a path that does not match the
+  // expected `/tmp/apt-key-${name}.` prefix must be rejected before any
+  // download or gpg operation runs.
+  it("returns failed without invoking curl or gpg when mktemp produces multi-line output", async () => {
+    const ssh = createMockSsh({
+      "mkdir -p /etc/apt/keyrings": { code: 0 },
+      "mktemp '/tmp/apt-key-docker.XXXXXX'": {
+        stdout: "warning: locale not set\n/tmp/apt-key-docker.ABCDEF\n",
+      },
+    })
+    const mod = apt.key("docker", "https://download.docker.com/linux/ubuntu/gpg", { fingerprint })
+    const result = await mod.apply(ssh, emptyEnv)
+    expect(result.status).toBe("failed")
+    expect(String(result.error)).toContain(
+      "[apt.key] mktemp produced an unexpected path for docker"
+    )
+    expect(ssh.calls).not.toContain(
+      "curl -fsSL 'https://download.docker.com/linux/ubuntu/gpg' -o '/tmp/apt-key-docker.ABCDEF'"
+    )
+    expect(ssh.calls).not.toContain("gpg --show-keys --with-colons '/tmp/apt-key-docker.ABCDEF'")
+    expect(ssh.calls).not.toContain(
+      "gpg --dearmor --yes -o '/etc/apt/keyrings/docker.gpg' '/tmp/apt-key-docker.ABCDEF'"
+    )
+  })
+
+  it("returns failed without invoking curl or gpg when mktemp produces a path outside the expected prefix", async () => {
+    const ssh = createMockSsh({
+      "mkdir -p /etc/apt/keyrings": { code: 0 },
+      "mktemp '/tmp/apt-key-docker.XXXXXX'": { stdout: "/etc/passwd\n" },
+    })
+    const mod = apt.key("docker", "https://download.docker.com/linux/ubuntu/gpg", { fingerprint })
+    const result = await mod.apply(ssh, emptyEnv)
+    expect(result.status).toBe("failed")
+    expect(String(result.error)).toContain(
+      "[apt.key] mktemp produced an unexpected path for docker"
+    )
+    expect(ssh.calls).not.toContain(
+      "curl -fsSL 'https://download.docker.com/linux/ubuntu/gpg' -o '/etc/passwd'"
+    )
+    expect(ssh.calls).not.toContain("gpg --show-keys --with-colons '/etc/passwd'")
+  })
+
   it("throws for non-https URLs", () => {
     expect(() =>
       apt.key("docker", "http://download.docker.com/linux/ubuntu/gpg", { fingerprint })

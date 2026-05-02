@@ -22,7 +22,7 @@ import {
 } from "./sshHelpers.js"
 import { promptTerminal } from "./terminal.js"
 
-export { shellQuote, validateMode }
+export { shellQuote, validateMktempPath, validateMode }
 
 async function statLocalFile(path: string): Promise<Stats> {
   // eslint-disable-next-line security/detect-non-literal-fs-filename -- localPath is an explicit caller-provided upload source that must be stat'ed before transfer
