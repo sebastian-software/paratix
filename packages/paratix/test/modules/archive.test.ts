@@ -114,9 +114,15 @@ describe("archive.extract — apply", () => {
     expect(result.error).toBeInstanceOf(Error)
   })
 
+  // R-0000067: tar invocations now run with `--no-same-owner --no-overwrite-dir`
+  // and a member-validation step. Each apply test stubs the member listing
+  // with a single safe entry so the validation step passes.
+  const safeTarListing = "-rw-r--r-- root/root 0 1970-01-01 00:00 app/file"
+
   it("extracts tar.gz archive and writes marker", async () => {
     const mockSsh = createMockSsh({
-      [`tar xzf '${src}' -C '${destination}'`]: { code: 0 },
+      [`tar --no-same-owner --no-overwrite-dir -xzf '${src}' -C '${destination}'`]: { code: 0 },
+      [`tar -tvzf '${src}'`]: { code: 0, stdout: safeTarListing },
     })
     vi.spyOn(mockSsh, "sha256").mockResolvedValue(archiveSha)
     vi.spyOn(mockSsh, "writeFile").mockResolvedValue()
@@ -126,14 +132,17 @@ describe("archive.extract — apply", () => {
 
     expect(result.status).toBe("changed")
     expect(mockSsh.calls).toContain(`mkdir -p '${destination}'`)
-    expect(mockSsh.calls).toContain(`tar xzf '${src}' -C '${destination}'`)
+    expect(mockSsh.calls).toContain(
+      `tar --no-same-owner --no-overwrite-dir -xzf '${src}' -C '${destination}'`
+    )
     expect(mockSsh.calls).toContain(`mkdir -p '/var/lib/paratix/flags'`)
   })
 
   it("extracts .tar archive", async () => {
     const tarSrc = "/tmp/app.tar"
     const mockSsh = createMockSsh({
-      [`tar xf '${tarSrc}' -C '${destination}'`]: { code: 0 },
+      [`tar --no-same-owner --no-overwrite-dir -xf '${tarSrc}' -C '${destination}'`]: { code: 0 },
+      [`tar -tvf '${tarSrc}'`]: { code: 0, stdout: safeTarListing },
     })
     vi.spyOn(mockSsh, "sha256").mockResolvedValue(archiveSha)
     vi.spyOn(mockSsh, "writeFile").mockResolvedValue()
@@ -142,13 +151,16 @@ describe("archive.extract — apply", () => {
     const result = await mod.apply(mockSsh, emptyEnv)
 
     expect(result.status).toBe("changed")
-    expect(mockSsh.calls).toContain(`tar xf '${tarSrc}' -C '${destination}'`)
+    expect(mockSsh.calls).toContain(
+      `tar --no-same-owner --no-overwrite-dir -xf '${tarSrc}' -C '${destination}'`
+    )
   })
 
   it("extracts .tar.bz2 archive", async () => {
     const bz2Src = "/tmp/app.tar.bz2"
     const mockSsh = createMockSsh({
-      [`tar xjf '${bz2Src}' -C '${destination}'`]: { code: 0 },
+      [`tar --no-same-owner --no-overwrite-dir -xjf '${bz2Src}' -C '${destination}'`]: { code: 0 },
+      [`tar -tvjf '${bz2Src}'`]: { code: 0, stdout: safeTarListing },
     })
     vi.spyOn(mockSsh, "sha256").mockResolvedValue(archiveSha)
     vi.spyOn(mockSsh, "writeFile").mockResolvedValue()
@@ -157,13 +169,16 @@ describe("archive.extract — apply", () => {
     const result = await mod.apply(mockSsh, emptyEnv)
 
     expect(result.status).toBe("changed")
-    expect(mockSsh.calls).toContain(`tar xjf '${bz2Src}' -C '${destination}'`)
+    expect(mockSsh.calls).toContain(
+      `tar --no-same-owner --no-overwrite-dir -xjf '${bz2Src}' -C '${destination}'`
+    )
   })
 
   it("extracts .tar.xz archive", async () => {
     const xzSrc = "/tmp/app.tar.xz"
     const mockSsh = createMockSsh({
-      [`tar xJf '${xzSrc}' -C '${destination}'`]: { code: 0 },
+      [`tar --no-same-owner --no-overwrite-dir -xJf '${xzSrc}' -C '${destination}'`]: { code: 0 },
+      [`tar -tvJf '${xzSrc}'`]: { code: 0, stdout: safeTarListing },
     })
     vi.spyOn(mockSsh, "sha256").mockResolvedValue(archiveSha)
     vi.spyOn(mockSsh, "writeFile").mockResolvedValue()
@@ -172,13 +187,16 @@ describe("archive.extract — apply", () => {
     const result = await mod.apply(mockSsh, emptyEnv)
 
     expect(result.status).toBe("changed")
-    expect(mockSsh.calls).toContain(`tar xJf '${xzSrc}' -C '${destination}'`)
+    expect(mockSsh.calls).toContain(
+      `tar --no-same-owner --no-overwrite-dir -xJf '${xzSrc}' -C '${destination}'`
+    )
   })
 
   it("extracts .zip archive", async () => {
     const zipSrc = "/tmp/app.zip"
     const mockSsh = createMockSsh({
       [`unzip -o '${zipSrc}' -d '${destination}'`]: { code: 0 },
+      [`unzip -Z1 '${zipSrc}'`]: { code: 0, stdout: "app/file\n" },
     })
     vi.spyOn(mockSsh, "sha256").mockResolvedValue(archiveSha)
     vi.spyOn(mockSsh, "writeFile").mockResolvedValue()
@@ -193,7 +211,8 @@ describe("archive.extract — apply", () => {
   it("extracts .tgz archive", async () => {
     const tgzSrc = "/tmp/app.tgz"
     const mockSsh = createMockSsh({
-      [`tar xzf '${tgzSrc}' -C '${destination}'`]: { code: 0 },
+      [`tar --no-same-owner --no-overwrite-dir -xzf '${tgzSrc}' -C '${destination}'`]: { code: 0 },
+      [`tar -tvzf '${tgzSrc}'`]: { code: 0, stdout: safeTarListing },
     })
     vi.spyOn(mockSsh, "sha256").mockResolvedValue(archiveSha)
     vi.spyOn(mockSsh, "writeFile").mockResolvedValue()
@@ -202,12 +221,15 @@ describe("archive.extract — apply", () => {
     const result = await mod.apply(mockSsh, emptyEnv)
 
     expect(result.status).toBe("changed")
-    expect(mockSsh.calls).toContain(`tar xzf '${tgzSrc}' -C '${destination}'`)
+    expect(mockSsh.calls).toContain(
+      `tar --no-same-owner --no-overwrite-dir -xzf '${tgzSrc}' -C '${destination}'`
+    )
   })
 
   it("runs chown when owner is specified", async () => {
     const mockSsh = createMockSsh({
-      [`tar xzf '${src}' -C '${destination}'`]: { code: 0 },
+      [`tar --no-same-owner --no-overwrite-dir -xzf '${src}' -C '${destination}'`]: { code: 0 },
+      [`tar -tvzf '${src}'`]: { code: 0, stdout: safeTarListing },
     })
     vi.spyOn(mockSsh, "sha256").mockResolvedValue(archiveSha)
     vi.spyOn(mockSsh, "writeFile").mockResolvedValue()
@@ -224,7 +246,10 @@ describe("archive.extract — apply", () => {
     const remoteTmp = "/tmp/paratix-upload.AbCdEfGh"
 
     const mockSsh = createMockSsh({
-      [`tar xzf '${remoteTmp}' -C '${destination}'`]: { code: 0 },
+      [`tar --no-same-owner --no-overwrite-dir -xzf '${remoteTmp}' -C '${destination}'`]: {
+        code: 0,
+      },
+      [`tar -tvzf '${remoteTmp}'`]: { code: 0, stdout: safeTarListing },
       "mktemp /tmp/paratix-upload.XXXXXXXX": { code: 0, stdout: remoteTmp },
     })
     vi.spyOn(mockSsh, "sha256").mockResolvedValue(archiveSha)
@@ -246,8 +271,14 @@ describe("archive.extract — apply", () => {
 
     const responses: string[] = [firstRemoteTmp, secondRemoteTmp]
     const mockSsh = createMockSsh({
-      [`tar xzf '${firstRemoteTmp}' -C '${destination}'`]: { code: 0 },
-      [`tar xzf '${secondRemoteTmp}' -C '${destination}'`]: { code: 0 },
+      [`tar --no-same-owner --no-overwrite-dir -xzf '${firstRemoteTmp}' -C '${destination}'`]: {
+        code: 0,
+      },
+      [`tar --no-same-owner --no-overwrite-dir -xzf '${secondRemoteTmp}' -C '${destination}'`]: {
+        code: 0,
+      },
+      [`tar -tvzf '${firstRemoteTmp}'`]: { code: 0, stdout: safeTarListing },
+      [`tar -tvzf '${secondRemoteTmp}'`]: { code: 0, stdout: safeTarListing },
       "mktemp /tmp/paratix-upload.XXXXXXXX": { code: 0, stdout: "ignored-by-spy" },
     })
     // mktemp is queried via conn.output; rotate the response so concurrent
@@ -299,7 +330,11 @@ describe("archive.extract — apply", () => {
 
   it("returns failed when extraction fails", async () => {
     const mockSsh = createMockSsh({
-      [`tar xzf '${src}' -C '${destination}'`]: { code: 1, stderr: "tar: unexpected EOF" },
+      [`tar --no-same-owner --no-overwrite-dir -xzf '${src}' -C '${destination}'`]: {
+        code: 1,
+        stderr: "tar: unexpected EOF",
+      },
+      [`tar -tvzf '${src}'`]: { code: 0, stdout: safeTarListing },
     })
 
     const mod = archive.extract(src, destination)
@@ -327,7 +362,10 @@ describe("archive.extract — apply", () => {
     const remoteTmp = "/tmp/paratix-upload.FAIL1234"
 
     const mockSsh = createMockSsh({
-      [`tar xzf '${remoteTmp}' -C '${destination}'`]: { code: 1 },
+      [`tar --no-same-owner --no-overwrite-dir -xzf '${remoteTmp}' -C '${destination}'`]: {
+        code: 1,
+      },
+      [`tar -tvzf '${remoteTmp}'`]: { code: 0, stdout: safeTarListing },
       "mktemp /tmp/paratix-upload.XXXXXXXX": { code: 0, stdout: remoteTmp },
     })
     vi.spyOn(mockSsh, "uploadFile").mockResolvedValue()
@@ -342,7 +380,8 @@ describe("archive.extract — apply", () => {
 
   it("returns failed when sha256 of remote archive is null", async () => {
     const mockSsh = createMockSsh({
-      [`tar xzf '${src}' -C '${destination}'`]: { code: 0 },
+      [`tar --no-same-owner --no-overwrite-dir -xzf '${src}' -C '${destination}'`]: { code: 0 },
+      [`tar -tvzf '${src}'`]: { code: 0, stdout: safeTarListing },
     })
     vi.spyOn(mockSsh, "sha256").mockResolvedValue(null)
 
@@ -350,6 +389,94 @@ describe("archive.extract — apply", () => {
     const result = await mod.apply(mockSsh, emptyEnv)
 
     expect(result.status).toBe("failed")
+  })
+
+  // R-0000067 regression: archive.extract must list members and reject any
+  // path that escapes the destination via `..` or absolute paths, before
+  // running the actual extract command. This prevents zip-slip / tar-slip
+  // even when the archive's sha256 has been pinned previously but the
+  // archive was crafted before the pin.
+  it("rejects a tar archive that contains a `../escape` member without invoking tar -x", async () => {
+    const tarListing = `-rw-r--r-- root/root 0 1970-01-01 00:00 ../escape\n`
+    const mockSsh = createMockSsh({
+      [`tar -tvzf '${src}'`]: { code: 0, stdout: tarListing },
+    })
+
+    const mod = archive.extract(src, destination)
+    const result = await mod.apply(mockSsh, emptyEnv)
+
+    expect(result.status).toBe("failed")
+    expect(String(result.error)).toContain("would escape destination")
+    // The actual extract must not have been issued.
+    expect(mockSsh.calls).not.toContain(
+      `tar --no-same-owner --no-overwrite-dir -xzf '${src}' -C '${destination}'`
+    )
+    // Nothing was written outside the destination because the extraction
+    // never ran; in particular no marker was written.
+    const writeCalls = mockSsh.calls.filter((c) =>
+      c.startsWith("mkdir -p '/var/lib/paratix/flags'")
+    )
+    expect(writeCalls).toHaveLength(0)
+  })
+
+  it("rejects a tar archive whose member is an absolute path", async () => {
+    const tarListing = `-rw-r--r-- root/root 0 1970-01-01 00:00 /etc/passwd\n`
+    const mockSsh = createMockSsh({
+      [`tar -tvzf '${src}'`]: { code: 0, stdout: tarListing },
+    })
+
+    const mod = archive.extract(src, destination)
+    const result = await mod.apply(mockSsh, emptyEnv)
+
+    expect(result.status).toBe("failed")
+    expect(String(result.error)).toContain("would escape destination")
+    expect(mockSsh.calls).not.toContain(
+      `tar --no-same-owner --no-overwrite-dir -xzf '${src}' -C '${destination}'`
+    )
+  })
+
+  it("rejects a tar archive whose symlink target points outside the destination", async () => {
+    const tarListing = `lrwxrwxrwx root/root 0 1970-01-01 00:00 link -> ../../etc/passwd\n`
+    const mockSsh = createMockSsh({
+      [`tar -tvzf '${src}'`]: { code: 0, stdout: tarListing },
+    })
+
+    const mod = archive.extract(src, destination)
+    const result = await mod.apply(mockSsh, emptyEnv)
+
+    expect(result.status).toBe("failed")
+    expect(String(result.error)).toContain("would escape destination")
+    expect(mockSsh.calls).not.toContain(
+      `tar --no-same-owner --no-overwrite-dir -xzf '${src}' -C '${destination}'`
+    )
+  })
+
+  it("rejects a zip archive that contains a `/etc/passwd` member without invoking unzip -o", async () => {
+    const zipSrc = "/tmp/app.zip"
+    const mockSsh = createMockSsh({
+      [`unzip -Z1 '${zipSrc}'`]: { code: 0, stdout: "/etc/passwd\n" },
+    })
+
+    const mod = archive.extract(zipSrc, destination)
+    const result = await mod.apply(mockSsh, emptyEnv)
+
+    expect(result.status).toBe("failed")
+    expect(String(result.error)).toContain("would escape destination")
+    expect(mockSsh.calls).not.toContain(`unzip -o '${zipSrc}' -d '${destination}'`)
+  })
+
+  it("rejects a zip archive that contains a `..` traversal member", async () => {
+    const zipSrc = "/tmp/app.zip"
+    const mockSsh = createMockSsh({
+      [`unzip -Z1 '${zipSrc}'`]: { code: 0, stdout: "../escape\n" },
+    })
+
+    const mod = archive.extract(zipSrc, destination)
+    const result = await mod.apply(mockSsh, emptyEnv)
+
+    expect(result.status).toBe("failed")
+    expect(String(result.error)).toContain("would escape destination")
+    expect(mockSsh.calls).not.toContain(`unzip -o '${zipSrc}' -d '${destination}'`)
   })
 
   it("has correct module name", () => {

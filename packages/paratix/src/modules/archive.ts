@@ -1,6 +1,11 @@
 import { failed, failedCommand } from "../moduleFailure.js"
 import { shellQuote } from "../ssh.js"
 import { type Module, type ModuleResult, NEEDS_APPLY, type SshConnection } from "../types.js"
+import {
+  type ArchiveMember,
+  listArchiveMembers,
+  memberEscapesDestination,
+} from "./archiveMemberValidation.js"
 import { localSha256, sha256String } from "./fileHelpers.js"
 
 const EXEC_OPTS = { ignoreExitCode: true, silent: true } as const
@@ -28,19 +33,25 @@ function markerPath(source: string, destination: string): string {
  * @param destination - The target directory for extraction.
  * @returns The shell command to extract the archive, or null if unsupported.
  */
+// R-0000067: harden tar invocations with `--no-same-owner` and
+// `--no-overwrite-dir` so an extraction cannot grant ownership of an
+// existing directory to a UID embedded in the archive and cannot replace a
+// pre-existing directory mode wholesale.
+const TAR_HARDEN_FLAGS = "--no-same-owner --no-overwrite-dir"
+
 function extractCommand(source: string, archivePath: string, destination: string): null | string {
   const lower = source.toLowerCase()
   if (lower.endsWith(".tar.gz") || lower.endsWith(".tgz")) {
-    return `tar xzf ${shellQuote(archivePath)} -C ${shellQuote(destination)}`
+    return `tar ${TAR_HARDEN_FLAGS} -xzf ${shellQuote(archivePath)} -C ${shellQuote(destination)}`
   }
   if (lower.endsWith(".tar.bz2")) {
-    return `tar xjf ${shellQuote(archivePath)} -C ${shellQuote(destination)}`
+    return `tar ${TAR_HARDEN_FLAGS} -xjf ${shellQuote(archivePath)} -C ${shellQuote(destination)}`
   }
   if (lower.endsWith(".tar.xz")) {
-    return `tar xJf ${shellQuote(archivePath)} -C ${shellQuote(destination)}`
+    return `tar ${TAR_HARDEN_FLAGS} -xJf ${shellQuote(archivePath)} -C ${shellQuote(destination)}`
   }
   if (lower.endsWith(".tar")) {
-    return `tar xf ${shellQuote(archivePath)} -C ${shellQuote(destination)}`
+    return `tar ${TAR_HARDEN_FLAGS} -xf ${shellQuote(archivePath)} -C ${shellQuote(destination)}`
   }
   if (lower.endsWith(".zip")) {
     return `unzip -o ${shellQuote(archivePath)} -d ${shellQuote(destination)}`
@@ -127,6 +138,40 @@ type ApplyParameters = {
 }
 
 /**
+ * R-0000067: list the archive members and reject any entry whose
+ * normalized path is absolute or escapes the destination via `..`. For
+ * tar entries also reject linkname targets that would point outside the
+ * destination. This is the runtime defense against the classic zip-slip /
+ * tar-slip attack.
+ *
+ * @param conn - The SSH connection.
+ * @param parameters - Listing inputs.
+ * @param parameters.archivePath - The remote path to the archive.
+ * @param parameters.source - The original source path (for format detection).
+ * @returns Either a failure {@link ModuleResult} or null when all members are safe.
+ */
+async function rejectUnsafeArchiveMembers(
+  conn: SshConnection,
+  parameters: { archivePath: string; source: string }
+): Promise<ModuleResult | null> {
+  const listing = await listArchiveMembers(conn, parameters)
+  if ("failureReason" in listing) {
+    return failed(`[archive.extract] ${listing.failureReason}`)
+  }
+  const unsafe = listing.members.find((member: ArchiveMember) => memberEscapesDestination(member))
+  if (unsafe !== undefined) {
+    const detail =
+      unsafe.linkTarget === null
+        ? `member ${JSON.stringify(unsafe.path)}`
+        : `member ${JSON.stringify(unsafe.path)} -> ${JSON.stringify(unsafe.linkTarget)}`
+    return failed(
+      `[archive.extract] refusing to extract ${parameters.source}: ${detail} would escape destination`
+    )
+  }
+  return null
+}
+
+/**
  * Run the extraction proper, after the (possibly uploaded) archive is in place.
  *
  * @param conn - The SSH connection.
@@ -145,6 +190,14 @@ async function runExtraction(
 
   const cmd = extractCommand(source, remoteSource, destination)
   if (cmd === null) return failed(`[archive.extract] unsupported archive format for ${source}`)
+
+  // R-0000067: validate every archive member before we hand the archive to
+  // tar/unzip. This must happen after `mkdir -p` (so the destination
+  // exists) but before the actual extract command runs, otherwise a
+  // malicious archive could already have written a file outside the
+  // destination by the time we notice.
+  const unsafe = await rejectUnsafeArchiveMembers(conn, { archivePath: remoteSource, source })
+  if (unsafe !== null) return unsafe
 
   const result = await conn.exec(cmd, EXEC_OPTS)
   if (result.code !== 0) {
