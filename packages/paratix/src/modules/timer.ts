@@ -212,6 +212,21 @@ async function applyPresent(
   const sync = await syncUnitFiles(ssh, name, paths)
   if ("status" in sync) return sync
 
+  // If both files matched and the timer is already enabled and active, nothing
+  // needs to change. Reporting `ok` here keeps direct apply calls (e.g. inside
+  // recipes) from triggering spurious change signals.
+  if (sync.serviceMatched && sync.timerMatched) {
+    const enabled = await ssh.test(
+      `${SYSTEMCTL} is-enabled --quiet ${shellQuote(paths.timerUnit)}`
+    )
+    if (enabled) {
+      const active = await ssh.test(
+        `${SYSTEMCTL} is-active --quiet ${shellQuote(paths.timerUnit)}`
+      )
+      if (active) return { status: "ok" }
+    }
+  }
+
   const enable = await ssh.exec(`${SYSTEMCTL} enable --now ${shellQuote(paths.timerUnit)}`, {
     ignoreExitCode: true,
     silent: true,

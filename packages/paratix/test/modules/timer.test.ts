@@ -298,20 +298,38 @@ describe("timer.scheduled — unit content", () => {
 })
 
 describe("timer.scheduled — apply (state: present, idempotency)", () => {
-  it("skips daemon-reload and restart when both unit files already match", async () => {
+  it("returns ok without side effects when files match and timer is already enabled and active", async () => {
+    const ssh = createMockSsh({
+      [`[ -e '${SERVICE_PATH}' ]`]: { code: 0 },
+      [`[ -e '${TIMER_PATH}' ]`]: { code: 0 },
+      [`cat '${SERVICE_PATH}'`]: { code: 0, stdout: expectedServiceContent },
+      [`cat '${TIMER_PATH}'`]: { code: 0, stdout: expectedTimerContent },
+      "systemctl is-active --quiet 'backup.timer'": { code: 0 },
+      "systemctl is-enabled --quiet 'backup.timer'": { code: 0 },
+    })
+    const mod = timer.scheduled("backup", baseOptions)
+    const result = await mod.apply(ssh, emptyEnv)
+    expect(result.status).toBe("ok")
+    expect(ssh.calls).not.toContain("systemctl daemon-reload")
+    expect(ssh.calls).not.toContain("systemctl restart 'backup.timer'")
+    expect(ssh.calls).not.toContain("systemctl enable --now 'backup.timer'")
+  })
+
+  it("runs enable --now when files match but timer is not enabled", async () => {
     const ssh = createMockSsh({
       [`[ -e '${SERVICE_PATH}' ]`]: { code: 0 },
       [`[ -e '${TIMER_PATH}' ]`]: { code: 0 },
       [`cat '${SERVICE_PATH}'`]: { code: 0, stdout: expectedServiceContent },
       [`cat '${TIMER_PATH}'`]: { code: 0, stdout: expectedTimerContent },
       "systemctl enable --now 'backup.timer'": { code: 0 },
+      "systemctl is-enabled --quiet 'backup.timer'": { code: 1 },
     })
     const mod = timer.scheduled("backup", baseOptions)
     const result = await mod.apply(ssh, emptyEnv)
     expect(result.status).toBe("changed")
+    expect(ssh.calls).toContain("systemctl enable --now 'backup.timer'")
     expect(ssh.calls).not.toContain("systemctl daemon-reload")
     expect(ssh.calls).not.toContain("systemctl restart 'backup.timer'")
-    expect(ssh.calls).toContain("systemctl enable --now 'backup.timer'")
   })
 
   it("does not restart when only the service file changed", async () => {
