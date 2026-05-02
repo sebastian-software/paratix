@@ -48,6 +48,28 @@ function hasMarkedJob(lines: string[], marker: string, cronJob: string): boolean
   return index !== -1 && index + 1 < lines.length && lines[index + 1] === cronJob
 }
 
+/**
+ * Decide whether the line at `index` looks like a previously managed cron
+ * job that may safely be overwritten.
+ *
+ * "Safely overwritable" means: the line is not a comment (starts with `#`),
+ * not empty, and not another paratix marker. This protects user-authored
+ * lines that ended up between the marker and the original job from being
+ * silently overwritten by `present` apply.
+ *
+ * @param lines - The full crontab line array.
+ * @param index - The index of the line to inspect.
+ * @returns `true` when the line at `index` is a real cron job line.
+ */
+function looksLikeCronJobLine(lines: string[], index: number): boolean {
+  if (index < 0 || index >= lines.length) return false
+  const line = lines[index] ?? ""
+  const trimmed = line.trim()
+  if (trimmed.length === 0) return false
+  if (trimmed.startsWith("#")) return false
+  return true
+}
+
 /** Options for `cron.job`. */
 type CronJobOptions = {
   /** The crontab line to manage (e.g. `"0 * * * * /usr/bin/backup"`). */
@@ -97,7 +119,12 @@ export const cron = {
         const markerIndex = lines.indexOf(marker)
         if (markerIndex === -1) return { status: "ok" }
 
-        lines.splice(markerIndex, 2)
+        // R-0000047: only splice the next line as well when it actually
+        // looks like a cron job. If the marker is the last line, or the
+        // next line is a user comment / blank, only the marker itself is
+        // removed so we cannot accidentally delete unrelated content.
+        const removeCount = looksLikeCronJobLine(lines, markerIndex + 1) ? 2 : 1
+        lines.splice(markerIndex, removeCount)
         await writeCrontab(ssh, user, lines)
         return { status: "changed" }
       },
@@ -147,14 +174,30 @@ export const cron = {
 
         if (state === "present") {
           if (markerIndex === -1) {
+            // No marker yet — append at the end.
             lines.push(marker, cronJob)
-          } else {
+          } else if (looksLikeCronJobLine(lines, markerIndex + 1)) {
+            // R-0000047: only overwrite the next line when it actually
+            // looks like a managed cron job. This prevents user-authored
+            // comments / blanks that ended up between marker and previous
+            // job from being silently destroyed by a re-apply.
             lines[markerIndex + 1] = cronJob
+          } else {
+            // Marker is the last line, or the next line is a comment /
+            // blank that the user inserted — splice the new job in instead
+            // of overwriting unrelated content.
+            lines.splice(markerIndex + 1, 0, cronJob)
           }
         } else if (markerIndex === -1) {
           return { status: "ok" }
         } else {
-          lines.splice(markerIndex, 2)
+          // R-0000047: only remove the line after the marker when it
+          // exactly matches the expected job. If the user has already
+          // deleted the job line, or replaced it with something
+          // different, drop only the marker and keep the surrounding
+          // content untouched.
+          const removeCount = lines[markerIndex + 1] === cronJob ? 2 : 1
+          lines.splice(markerIndex, removeCount)
         }
 
         await writeCrontab(ssh, user, lines)

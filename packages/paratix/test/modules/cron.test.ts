@@ -235,6 +235,69 @@ describe("cron.job", () => {
     expect(await mod.check(mockSsh, emptyEnv)).toBe("needs-apply")
   })
 
+  // R-0000047 regression: a `present` apply must not silently overwrite a
+  // user-authored line that ended up between the marker and the previous
+  // job. The line at marker+1 is only replaced when it actually looks like
+  // a cron job (non-empty, non-comment). Otherwise the new job is spliced
+  // in instead.
+  it("regression — present apply inserts (not overwrites) when marker is followed by a comment", async () => {
+    const mockSsh = createMockSsh({
+      "crontab -u 'alice' -l": {
+        code: 0,
+        stdout: "# paratix: backup\n# user note: do not delete\n0 3 * * * /backup.sh\n",
+      },
+    })
+    const mod = cron.job("alice", "backup", { job: "5 5 * * * /backup.sh" })
+    const result = await mod.apply(mockSsh, emptyEnv)
+    expect(result.status).toBe("changed")
+    const writeCall = mockSsh.calls.find((c) => c.startsWith("printf '%s'"))
+    expect(writeCall).toBeDefined()
+    // The user-authored comment must still be present.
+    expect(writeCall).toContain("# user note: do not delete")
+    // The new job line is added (without overwriting the user comment).
+    expect(writeCall).toContain("5 5 * * * /backup.sh")
+    expect(writeCall).toContain("# paratix: backup")
+  })
+
+  it("regression — present apply appends a job line when the marker is the last line", async () => {
+    const mockSsh = createMockSsh({
+      "crontab -u 'alice' -l": {
+        code: 0,
+        stdout: "0 5 * * * /other.sh\n# paratix: backup",
+      },
+    })
+    const mod = cron.job("alice", "backup", { job: "0 3 * * * /backup.sh" })
+    const result = await mod.apply(mockSsh, emptyEnv)
+    expect(result.status).toBe("changed")
+    const writeCall = mockSsh.calls.find((c) => c.startsWith("printf '%s'"))
+    expect(writeCall).toBeDefined()
+    expect(writeCall).toContain("# paratix: backup")
+    expect(writeCall).toContain("0 3 * * * /backup.sh")
+    expect(writeCall).toContain("0 5 * * * /other.sh")
+  })
+
+  // R-0000047 regression: an `absent` apply must not blindly splice two
+  // lines starting at the marker when the user has already removed the
+  // previous job line. Only the marker is dropped; surrounding content
+  // is preserved.
+  it("regression — absent apply only removes the marker when the next line is unrelated", async () => {
+    const mockSsh = createMockSsh({
+      "crontab -u 'alice' -l": {
+        code: 0,
+        stdout: "# paratix: backup\n0 5 * * * /other.sh\n",
+      },
+    })
+    const mod = cron.job("alice", "backup", { job: "0 3 * * * /backup.sh", state: "absent" })
+    const result = await mod.apply(mockSsh, emptyEnv)
+    expect(result.status).toBe("changed")
+    const writeCall = mockSsh.calls.find((c) => c.startsWith("printf '%s'"))
+    expect(writeCall).toBeDefined()
+    expect(writeCall).not.toContain("# paratix: backup")
+    // The unrelated cron entry that immediately followed the marker must
+    // still be present.
+    expect(writeCall).toContain("0 5 * * * /other.sh")
+  })
+
   it("apply only modifies the targeted marker when multiple exist", async () => {
     const mockSsh = createMockSsh({
       "crontab -u 'alice' -l": {
