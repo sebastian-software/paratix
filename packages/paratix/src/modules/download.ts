@@ -196,7 +196,6 @@ function buildTemporaryDownloadPathCommand(destination: string): string {
   return `mktemp "$(dirname ${shellQuote(destination)})/.paratix-download.XXXXXX"`
 }
 
-// cspell:ignore redir
 function buildCurlProtocolFlags(parameters: Pick<DownloadParameters, "allowInsecureHttp">): string {
   const allowedProtocols = parameters.allowInsecureHttp === true ? "http,https" : "https"
   return `--proto '=${allowedProtocols}' --proto-redir '=${allowedProtocols}'`

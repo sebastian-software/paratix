@@ -11,7 +11,6 @@ import {
 const EXEC_OPTS = { ignoreExitCode: true, silent: true } as const
 const FSTAB_PATH = "/etc/fstab"
 const FSTAB_MODE = "0644"
-// cspell:ignore fstype mountpoint noheadings noexec nosuid nodev tmpfs umount findmnt
 
 /**
  * Build a single fstab line from the given mount parameters.
