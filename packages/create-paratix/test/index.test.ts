@@ -635,6 +635,64 @@ describe("readHostFingerprintViaSsh2", () => {
       })
     ).rejects.toThrow("Failed to read the host key from example.com:22: connect ECONNREFUSED")
   })
+
+  it("rejects with a MITM warning when the presented key uses an unknown algorithm", async () => {
+    // Wire-format buffer with algorithm "ssh-bogus" (length-prefixed ASCII).
+    const algoName = "ssh-bogus"
+    const algoBytes = Buffer.from(algoName, "ascii")
+    const lengthPrefix = Buffer.alloc(4)
+    lengthPrefix.writeUInt32BE(algoBytes.length, 0)
+    const hostKey = Buffer.concat([lengthPrefix, algoBytes, Buffer.from("payload")])
+
+    const verdicts: Array<boolean | undefined> = []
+
+    const fakeClient = {
+      connect: vi.fn((config: { hostVerifier?: (key: Buffer) => boolean }) => {
+        // Let the original hostVerifier rejection propagate through connect()
+        // so readFingerprintFromClient catches and rejects with the algo error.
+        verdicts.push(config.hostVerifier?.(hostKey))
+      }),
+      end: vi.fn(),
+      handlers: {} as Record<string, (error?: Error) => void>,
+      on: vi.fn((event: string, handler: (error?: Error) => void) => {
+        fakeClient.handlers[event] = handler
+        return fakeClient
+      }),
+      removeAllListeners: vi.fn(),
+    }
+
+    await expect(
+      readHostFingerprintViaSsh2("example.com", {
+        clientFactory: () => fakeClient,
+      })
+    ).rejects.toThrow(/unsupported SSH host key algorithm "ssh-bogus"/v)
+
+    // hostVerifier never returns when it throws — the array stays empty.
+    expect(verdicts).toStrictEqual([])
+  })
+
+  it("rejects with a MITM warning when the presented key buffer is too short", async () => {
+    const truncatedKey = Buffer.from([0, 0])
+
+    const fakeClient = {
+      connect: vi.fn((config: { hostVerifier?: (key: Buffer) => boolean }) => {
+        config.hostVerifier?.(truncatedKey)
+      }),
+      end: vi.fn(),
+      handlers: {} as Record<string, (error?: Error) => void>,
+      on: vi.fn((event: string, handler: (error?: Error) => void) => {
+        fakeClient.handlers[event] = handler
+        return fakeClient
+      }),
+      removeAllListeners: vi.fn(),
+    }
+
+    await expect(
+      readHostFingerprintViaSsh2("example.com", {
+        clientFactory: () => fakeClient,
+      })
+    ).rejects.toThrow(/Invalid SSH host key buffer/v)
+  })
 })
 
 const TEST_DIR = resolve("/tmp/create-paratix-test")

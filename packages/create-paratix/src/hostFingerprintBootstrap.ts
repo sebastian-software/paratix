@@ -12,6 +12,39 @@ type HostFingerprintBootstrapOptions = {
 
 const DEFAULT_HOST_FINGERPRINT_PORT = 22
 const DEFAULT_READY_TIMEOUT_MS = 10_000
+const SSH_KEY_ALGO_LENGTH_FIELD_BYTES = 4
+
+const ACCEPTED_HOST_KEY_ALGORITHMS = new Set([
+  "ecdsa-sha2-nistp256",
+  "ecdsa-sha2-nistp384",
+  "ecdsa-sha2-nistp521",
+  "ssh-ed25519",
+  "ssh-rsa",
+])
+
+function extractHostKeyAlgorithm(keyBuffer: Buffer): string {
+  if (keyBuffer.length < SSH_KEY_ALGO_LENGTH_FIELD_BYTES) {
+    throw new Error("Invalid SSH host key buffer: too short to contain an algorithm length field")
+  }
+  const algoLength = keyBuffer.readUInt32BE(0)
+  if (algoLength === 0 || SSH_KEY_ALGO_LENGTH_FIELD_BYTES + algoLength > keyBuffer.length) {
+    throw new Error("Invalid SSH host key buffer: algorithm length exceeds buffer size")
+  }
+  return keyBuffer
+    .subarray(SSH_KEY_ALGO_LENGTH_FIELD_BYTES, SSH_KEY_ALGO_LENGTH_FIELD_BYTES + algoLength)
+    .toString("ascii")
+}
+
+function assertSupportedHostKeyAlgorithm(keyBuffer: Buffer): void {
+  const algorithm = extractHostKeyAlgorithm(keyBuffer)
+  if (!ACCEPTED_HOST_KEY_ALGORITHMS.has(algorithm)) {
+    throw new Error(
+      `Refusing to capture host fingerprint: unsupported SSH host key algorithm "${algorithm}". ` +
+        `This may indicate a man-in-the-middle attack. ` +
+        `Expected one of: ${[...ACCEPTED_HOST_KEY_ALGORITHMS].sort().join(", ")}.`
+    )
+  }
+}
 
 function computeFingerprint(key: Buffer): string {
   const hash = createHash("sha256").update(key).digest("base64")
@@ -33,7 +66,9 @@ function createConnectionConfig(parameters: {
   return {
     host,
     hostVerifier: (key: Buffer): boolean => {
-      captureFingerprint(computeFingerprint(Buffer.from(key)))
+      const buffer = Buffer.from(key)
+      assertSupportedHostKeyAlgorithm(buffer)
+      captureFingerprint(computeFingerprint(buffer))
       return false
     },
     port,
