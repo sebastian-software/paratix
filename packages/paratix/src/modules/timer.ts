@@ -332,8 +332,9 @@ export const timer = {
    * to disable a unit that does not exist is ignored, so this method is
    * safe to apply repeatedly.
    *
-   * Equivalent to `timer.scheduled(name, { exec: "<unused>", onCalendar: "<unused>", state: "absent" })`,
-   * but does not require placeholder values for `exec` or `onCalendar`.
+   * Behaves like `timer.scheduled(name, { exec: "<unused>", onCalendar: "<unused>", state: "absent" })`,
+   * but does not require placeholder values for `exec` or `onCalendar` and
+   * reports failures with a `timer.absent` prefix instead of `timer.scheduled`.
    *
    * @param name - Base unit name without extension. Must match
    *   `^[\w\-]+$`.
