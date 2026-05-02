@@ -11,6 +11,7 @@ import type { ExecOptions, ExecResult, SshConfig, SshConnection } from "./types.
 import { buildHostVerifier, extractAlgoFromKey, HostKeyVerificationError } from "./knownHosts.js"
 import { sftpDownload, sftpUpload } from "./sftp.js"
 import {
+  cleanupFailedSshClient,
   collectStreamOutput,
   maskSecrets,
   normalizeSshCloseCode,
@@ -926,8 +927,13 @@ trap - EXIT
   ): Promise<boolean> {
     const mode = this.config.strictHostKeyChecking ?? "yes"
     for (const port of this.runtime.ports) {
+      // R-0000039: keep the Client reference outside the try-block so the
+      // catch path can close it explicitly. ssh2's Client retains internal
+      // sockets, buffers, and listeners after a failed connect; without an
+      // explicit cleanup, lingering FDs and listeners accumulate across
+      // reconnect attempts.
+      const client = new Client()
       try {
-        const client = new Client()
         const verifier = buildHostVerifier(
           mode,
           { host: this.runtime.host, port },
@@ -963,6 +969,9 @@ trap - EXIT
         this.connectedPort = port
         return true
       } catch (error) {
+        // Always release the failed Client so its sockets, buffers, and
+        // listeners do not leak before the loop tries the next port.
+        cleanupFailedSshClient(client)
         if (error instanceof HostKeyVerificationError) throw error
         // Try next port
       }

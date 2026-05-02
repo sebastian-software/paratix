@@ -348,7 +348,32 @@ function buildConnectConfig(parameters: ConnectParameters): ConnectConfig {
 }
 
 /**
+ * Defensively release a ssh2 `Client` instance after a failed connect
+ * attempt. R-0000039: ssh2 may keep listeners, internal sockets, and buffers
+ * alive even when `connect()` rejected. Calling `removeAllListeners()` and
+ * `end()` ensures the FD and event-listener footprint does not grow across
+ * retry iterations or reconnect storms.
+ *
+ * @param client - The ssh2 client whose resources should be released.
+ */
+export function cleanupFailedSshClient(client: Client): void {
+  try {
+    client.removeAllListeners()
+  } catch {
+    /* removeAllListeners must not throw under any circumstance */
+  }
+  try {
+    client.end()
+  } catch {
+    /* end() may throw when the underlying socket has already been destroyed */
+  }
+}
+
+/**
  * Attempt a single SSH connection on a specific port.
+ *
+ * R-0000039: any error path closes the client so a failed attempt does not
+ * leak sockets or listeners up to the caller.
  *
  * @param parameters - Connection parameters.
  */
@@ -357,7 +382,7 @@ export async function tryConnectOnPort(parameters: ConnectParameters): Promise<v
   const connectConfig = buildConnectConfig(parameters)
   return new Promise((resolve, reject) => {
     const timeout = setTimeout(() => {
-      client.end()
+      cleanupFailedSshClient(client)
       reject(new Error(`Connection timeout on port ${port}`))
     }, CONNECTION_TIMEOUT)
 
@@ -367,6 +392,7 @@ export async function tryConnectOnPort(parameters: ConnectParameters): Promise<v
     })
     client.on("error", (error: Error) => {
       clearTimeout(timeout)
+      cleanupFailedSshClient(client)
       reject(error)
     })
 

@@ -14,7 +14,12 @@ import { HostKeyVerificationError } from "../src/knownHosts.js"
 import { rsync } from "../src/modules/rsync.js"
 import { sftpDownload } from "../src/sftp.js"
 import { SshConnectionImpl } from "../src/ssh.js"
-import { collectStreamOutput, shellQuote, tryConnectOnPort } from "../src/sshHelpers.js"
+import {
+  cleanupFailedSshClient,
+  collectStreamOutput,
+  shellQuote,
+  tryConnectOnPort,
+} from "../src/sshHelpers.js"
 import { promptTerminal } from "../src/terminal.js"
 
 // ---------------------------------------------------------------------------
@@ -61,6 +66,7 @@ vi.mock("../src/sftp.js", () => ({
 vi.mock("../src/sshHelpers.js", async () => {
   const actual = await vi.importActual<typeof SshHelpers>("../src/sshHelpers.js")
   return {
+    cleanupFailedSshClient: vi.fn(actual.cleanupFailedSshClient),
     collectStreamOutput: vi.fn(actual.collectStreamOutput),
     maskSecrets: actual.maskSecrets,
     normalizeSshCloseCode: actual.normalizeSshCloseCode,
@@ -592,6 +598,38 @@ describe("SshConnectionImpl", () => {
       await ssh.connect()
 
       expect((ssh as any).pinnedHostKey).toStrictEqual(hostKey)
+    })
+
+    it("releases ssh2 Client after every failed port connect attempt (R-0000039 regression)", async () => {
+      // R-0000039: tryConnectOnPorts must call cleanupFailedSshClient on each
+      // failed Client so listeners and TCP sockets do not leak across the
+      // reconnect loop. Simulate a connect error on every port and assert the
+      // cleanup helper was invoked once per attempt.
+      vi.useFakeTimers()
+      vi.mocked(tryConnectOnPort).mockRejectedValue(new Error("Connection refused"))
+      vi.mocked(cleanupFailedSshClient).mockClear()
+
+      const ssh = makeSshInstance({
+        maxReconnectAttempts: 2,
+        ports: [22, 2222, 2200],
+        reconnectTimeout: 300_000,
+      })
+
+      const reconnectPromise = ssh.reconnect()
+      reconnectPromise.catch(() => {
+        /* handled below */
+      })
+
+      for (let elapsed = 0; elapsed < 30_000; elapsed += 1000) {
+        // eslint-disable-next-line no-await-in-loop
+        await vi.advanceTimersByTimeAsync(1000)
+      }
+
+      await expect(reconnectPromise).rejects.toThrow(
+        /Failed to reconnect to 1\.2\.3\.4 after 2 attempts/v
+      )
+      // 2 attempts * 3 ports each = 6 cleanup calls (one per failed Client).
+      expect(cleanupFailedSshClient).toHaveBeenCalledTimes(2 * 3)
     })
 
     it("backoff sleep does not exceed remaining time before deadline — R-004 regression", async () => {
