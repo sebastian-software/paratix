@@ -314,6 +314,61 @@ describe("op.resolve — JSON validation", () => {
     expect(result.error?.message).not.toContain("prod-vault/database/password")
   })
 
+  it("masks the resolved regular secret value when it leaks into op stderr", async () => {
+    const resolvedValue = "super-secret-resolved-value-12345"
+    // Two op calls: the first inject succeeds and resolves the secret, the
+    // second op read for the OTP fails with stderr that contains the
+    // already-resolved value (e.g. via a stack trace or echoing).
+    const stderrLeak = `connection failed; last value=${resolvedValue}`
+    mockSpawnBySubcommand({})
+    mockedSpawnFn.mockImplementationOnce(((command: string, args: readonly string[]) => {
+      trackSpawn(command, args)
+      return createMockChild(JSON.stringify({ password: resolvedValue }))
+    }) as never)
+    mockedSpawnFn.mockImplementationOnce(((command: string, args: readonly string[]) => {
+      trackSpawn(command, args)
+      return createMockChild("", 1, stderrLeak)
+    }) as never)
+
+    const module_ = op.resolve({
+      password: "op://vault/item/password",
+      token: "op://vault/item/one-time-password",
+    })
+    // eslint-disable-next-line prefer-spread
+    const result = await module_.apply(null, emptyEnv)
+
+    expect(result.status).toBe("failed")
+    expect(result.error?.message).not.toContain(resolvedValue)
+  })
+
+  it("masks the resolved otpauth URI when it leaks into a later op error message", async () => {
+    const otpauthUri =
+      "otpauth://totp/Test?secret=GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ&period=30&digits=6"
+    const otpStdout = `${otpauthUri}\n`
+    const stderrLeak = `tls error reading ${otpauthUri}`
+    // First reference resolves successfully (returning the otpauth URI);
+    // a second OTP reference fails with stderr containing that URI.
+    mockedSpawnFn.mockImplementationOnce(((command: string, args: readonly string[]) => {
+      trackSpawn(command, args)
+      return createMockChild(otpStdout)
+    }) as never)
+    mockedSpawnFn.mockImplementationOnce(((command: string, args: readonly string[]) => {
+      trackSpawn(command, args)
+      return createMockChild("", 1, stderrLeak)
+    }) as never)
+
+    const module_ = op.resolve({
+      first: "op://vault/item/one-time-password",
+      second: "op://vault/item2/otp",
+    })
+    // eslint-disable-next-line prefer-spread
+    const result = await module_.apply(null, emptyEnv)
+
+    expect(result.status).toBe("failed")
+    expect(result.error?.message).not.toContain(otpauthUri)
+    expect(result.error?.message).not.toContain("GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ")
+  })
+
   it("does not include raw stdout in the failure message when JSON parsing fails", async () => {
     const sneakySecret = "super-secret-resolved-value"
     // Invalid JSON: `op` produced raw secret-like output instead of JSON.

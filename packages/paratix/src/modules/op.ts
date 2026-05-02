@@ -24,6 +24,18 @@ function isAuthFailure(stderr: string): boolean {
   return OP_AUTH_PATTERNS.some((pattern) => pattern.test(stderr))
 }
 
+/**
+ * Build a single-string failure detail from a caught error so a later
+ * `maskSecrets` pass can redact any resolved values that happened to leak
+ * into the error message (typically via captured stderr from the op CLI).
+ *
+ * @param error - The thrown error caught from the op CLI invocation.
+ * @returns The detail string (message or `String(value)` fallback) to mask and surface.
+ */
+function buildOpFailureDetail(error: unknown): string {
+  return error instanceof Error ? error.message : String(error)
+}
+
 function describeSpawnError(command: string, error: unknown): Error {
   if (error instanceof Error && (error as NodeJS.ErrnoException).code === "ENOENT") {
     return new Error(`${command} CLI is not installed or not on PATH. ${OP_INSTALL_HINT}`)
@@ -120,11 +132,15 @@ function splitReferences(
  * Resolve regular (non-OTP) 1Password references in bulk via `op inject`.
  *
  * @param entries - Map of logical names to 1Password references.
+ * @param leakedValues - Mutable sink that captures every resolved value. The
+ *   caller uses it to feed `maskSecrets` on failure paths so any value that
+ *   leaks into stderr or a stack trace is still redacted.
  * @returns Resolved key-value pairs.
  * @throws {Error} If the `op` CLI is not available or the session is not authenticated.
  */
 async function resolveRegularReferences(
-  entries: Record<string, string>
+  entries: Record<string, string>,
+  leakedValues: string[]
 ): Promise<Record<string, string>> {
   if (Object.keys(entries).length === 0) return {}
 
@@ -149,7 +165,11 @@ async function resolveRegularReferences(
   }
 
   // eslint-disable-next-line @typescript-eslint/no-unsafe-type-assertion -- all values validated as strings above
-  return record as Record<string, string>
+  const result = record as Record<string, string>
+  for (const value of Object.values(result)) {
+    if (value.length > 0) leakedValues.push(value)
+  }
+  return result
 }
 
 /**
@@ -160,10 +180,16 @@ async function resolveRegularReferences(
  * code is computed fresh on every access.
  *
  * @param entries - Map of logical names to OTP 1Password references.
+ * @param leakedValues - Mutable sink that captures every resolved otpauth URI.
+ *   The caller uses it to feed `maskSecrets` on failure paths so the
+ *   `secret=` parameter in the URI is redacted from any user-visible output.
  * @returns Map of logical names to lazy functions that compute fresh TOTP codes.
  * @throws {Error} If the `op` CLI is not available or the session is not authenticated.
  */
-async function resolveOtpReferences(entries: Record<string, string>): Promise<Environment> {
+async function resolveOtpReferences(
+  entries: Record<string, string>,
+  leakedValues: string[]
+): Promise<Environment> {
   const result: Environment = {}
 
   for (const [name, reference] of Object.entries(entries)) {
@@ -171,6 +197,7 @@ async function resolveOtpReferences(entries: Record<string, string>): Promise<En
     const stdout = await spawnWithInput("op", ["read", reference], "")
 
     const otpauthUri = stdout.trim()
+    if (otpauthUri.length > 0) leakedValues.push(otpauthUri)
     result[name] = () => generateTotpCode(otpauthUri)
   }
 
@@ -214,18 +241,23 @@ export const op = {
     return {
       _dryRunMetaProducer: true,
       async apply(): Promise<ModuleResult> {
+        // Track every secret we observe locally (resolved values + otpauth
+        // URIs) so the failure path can mask them from stderr and stack
+        // traces, not just the op:// reference strings the caller supplied.
+        const leakedValues: string[] = []
         try {
           const [regularEntries, otpEntries] = splitReferences(references)
-          const resolvedRegular = await resolveRegularReferences(regularEntries)
-          const resolvedOtp = await resolveOtpReferences(otpEntries)
+          const resolvedRegular = await resolveRegularReferences(regularEntries, leakedValues)
+          const resolvedOtp = await resolveOtpReferences(otpEntries, leakedValues)
 
           return {
             meta: environmentToMetaEntries({ ...resolvedRegular, ...resolvedOtp }),
             status: "ok",
           }
         } catch (error) {
-          const rawDetail = error instanceof Error ? error.message : String(error)
-          const detail = maskSecrets(rawDetail, Object.values(references))
+          const rawDetail = buildOpFailureDetail(error)
+          const secrets = [...Object.values(references), ...leakedValues]
+          const detail = maskSecrets(rawDetail, secrets)
           return failed(`Failed to resolve 1Password references: ${detail}`)
         }
       },
