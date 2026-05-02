@@ -134,6 +134,75 @@ async function dryRunSshdConfig(
   }
 }
 
+/**
+ * Parse a single sshd_config line into its directive name and value, or
+ * `null` when the line is empty / a comment / cannot be split into the
+ * `<directive> <value>` shape. Leading whitespace is allowed (Match-block
+ * lines are commonly indented), and inline `# comment` suffixes are
+ * stripped from the value side.
+ *
+ * @param rawLine - A single line from sshd_config.
+ * @returns The parsed directive and trimmed value, or `null` if the line
+ *   carries no active directive.
+ */
+function parseSshdConfigLine(rawLine: string): { directive: string; value: string } | null {
+  const stripped = rawLine.replace(/^\s+/v, "")
+  if (stripped.length === 0 || stripped.startsWith("#")) return null
+
+  const withoutComment = stripped.split("#", 1)[0]
+  // Find the boundary between the directive and its value via the first
+  // whitespace character. This is unambiguous for sshd_config: directive
+  // names never contain whitespace.
+  const firstSpace = withoutComment.search(/\s/v)
+  if (firstSpace <= 0) return null
+
+  const directive = withoutComment.slice(0, firstSpace)
+  const value = withoutComment.slice(firstSpace).trim()
+  if (value.length === 0) return null
+
+  return { directive, value }
+}
+
+/**
+ * Check whether every active occurrence of `key` in the sshd_config `content`
+ * has the given `value`. An "active" occurrence is a non-comment line whose
+ * first token equals `key` (case-insensitive, leading whitespace allowed),
+ * which also covers directives nested inside `Match` blocks.
+ *
+ * Returns `true` when at least one active occurrence exists and all of them
+ * match the desired value. Returns `false` when:
+ * - no active occurrence of `key` exists at all (apply will need to append it), or
+ * - at least one active occurrence has a different value (e.g. a `Match`
+ *   block override of `PasswordAuthentication yes` when the desired value
+ *   is `no`).
+ *
+ * Mirrors the apply path's `applySshdSettingToContent`, which rewrites every
+ * matching line — so a top-level value paired with a `Match` block override
+ * on the same key now correctly reports as drift.
+ *
+ * @param content - The full sshd_config file content.
+ * @param key - The directive name to scan for (case-insensitive).
+ * @param value - The desired value; every active occurrence must match this.
+ * @returns `true` when at least one active occurrence exists and all of them
+ *   match the desired value, `false` otherwise.
+ */
+function sshdSettingMatchesEverywhere(content: string, key: string, value: string): boolean {
+  const desiredValue = value.trim()
+  const expectedKeyLower = key.toLowerCase()
+  let foundAny = false
+
+  for (const rawLine of content.split(/\r?\n/v)) {
+    const parsed = parseSshdConfigLine(rawLine)
+    if (parsed == null) continue
+    if (parsed.directive.toLowerCase() !== expectedKeyLower) continue
+
+    foundAny = true
+    if (parsed.value !== desiredValue) return false
+  }
+
+  return foundAny
+}
+
 function applySshdSettingToContent(content: string, key: string, value: string): string {
   // eslint-disable-next-line security/detect-non-literal-regexp
   const pattern = new RegExp(`^${escapeRegExp(key)}\\s.*`, "gmv")
@@ -262,9 +331,7 @@ export const sshd = {
 
         const content = await ssh.readFile(SSHD_CONFIG_PATH)
         for (const [key, value] of Object.entries(settings)) {
-          // eslint-disable-next-line security/detect-non-literal-regexp
-          const pattern = new RegExp(`^${escapeRegExp(key)}\\s+${escapeRegExp(value)}$`, "mv")
-          if (!pattern.test(content)) {
+          if (!sshdSettingMatchesEverywhere(content, key, value)) {
             return NEEDS_APPLY
           }
         }

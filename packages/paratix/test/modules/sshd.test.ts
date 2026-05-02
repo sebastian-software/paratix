@@ -281,6 +281,61 @@ describe("sshd.config — check", () => {
     const result = await mod.check(mockSsh, emptyEnv)
     expect(result).toBe("ok")
   })
+
+  // R-0000045 regression: a top-level value that matches the desired value
+  // must not mask a later Match-block override that disagrees. The previous
+  // implementation tested the entire content with a single multi-line regex
+  // and returned `ok` as soon as one occurrence matched.
+  it("regression — returns needs-apply when a Match block overrides the desired value", async () => {
+    const mockSsh = createMockSsh({
+      [CAT_SSHD]: {
+        stdout: [
+          "PasswordAuthentication no",
+          "PermitRootLogin no",
+          "",
+          "Match User admin",
+          "    PasswordAuthentication yes",
+        ].join("\n"),
+      },
+    })
+    const mod = sshd.config({ PasswordAuthentication: "no" })
+    const result = await mod.check(mockSsh, emptyEnv)
+    expect(result).toBe("needs-apply")
+  })
+
+  // R-0000045: a Match-block override that agrees with the desired value
+  // must keep the check at "ok".
+  it("returns ok when both top-level and Match-block values agree with the desired value", async () => {
+    const mockSsh = createMockSsh({
+      [CAT_SSHD]: {
+        stdout: [
+          "PasswordAuthentication no",
+          "",
+          "Match User backup",
+          "    PasswordAuthentication no",
+        ].join("\n"),
+      },
+    })
+    const mod = sshd.config({ PasswordAuthentication: "no" })
+    const result = await mod.check(mockSsh, emptyEnv)
+    expect(result).toBe("ok")
+  })
+
+  // R-0000045: commented-out lines do not count as active occurrences.
+  it("ignores commented-out directives when scanning for drift", async () => {
+    const mockSsh = createMockSsh({
+      [CAT_SSHD]: {
+        stdout: [
+          "# PasswordAuthentication yes",
+          "PasswordAuthentication no",
+          "  # PasswordAuthentication yes",
+        ].join("\n"),
+      },
+    })
+    const mod = sshd.config({ PasswordAuthentication: "no" })
+    const result = await mod.check(mockSsh, emptyEnv)
+    expect(result).toBe("ok")
+  })
 })
 
 // ─── sshd.config — dry-run ───────────────────────────────────────────────────
