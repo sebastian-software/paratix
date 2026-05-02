@@ -199,7 +199,7 @@ function sha256HexBuffer(buf: Buffer): string {
 }
 
 describe("file.copy", () => {
-  it("check returns ok when SHA-256 matches", async () => {
+  it("check returns ok when SHA-256 matches and the default mode 0644 is in effect", async () => {
     const dir = mkdtempSync(join(tmpdir(), "paratix-test-"))
     try {
       const localPath = join(dir, "source.txt")
@@ -213,6 +213,8 @@ describe("file.copy", () => {
         "[ -f '/remote/file.txt' ]": { code: 0 },
         // sha256sum returns matching hash
         "sha256sum '/remote/file.txt'": { stdout: `${localHash}  /remote/file.txt` },
+        // remote mode matches the documented default (0644)
+        "stat -c '%a %U %G' '/remote/file.txt'": { stdout: "644 root root" },
       })
 
       const mod = file.copy("/remote/file.txt", localPath)
@@ -321,64 +323,138 @@ describe("file.copy", () => {
     }
   })
 
-  it("apply calls uploadFile", async () => {
+  it("apply calls uploadFile and forwards the default mode 0644", async () => {
     const dir = mkdtempSync(join(tmpdir(), "paratix-test-"))
     try {
       const localPath = join(dir, "source.txt")
       writeFileSync(localPath, "hello world")
 
-      const uploadedFiles: Array<{ local: string; remote: string }> = []
+      const uploadedFiles: Array<{
+        local: string
+        options: { mode?: string } | undefined
+        remote: string
+      }> = []
       const ssh = createMockSsh()
-      // eslint-disable-next-line @typescript-eslint/require-await -- Mock
-      ssh.uploadFile = async (local: string, remote: string) => {
-        uploadedFiles.push({ local, remote })
+      ssh.uploadFile = async (local: string, remote: string, options?: { mode?: string }) => {
+        await Promise.resolve()
+        uploadedFiles.push({ local, options, remote })
       }
 
       const mod = file.copy("/remote/file.txt", localPath)
       const result = await mod.apply(ssh, emptyEnv)
 
       expect(result.status).toBe("changed")
-      expect(uploadedFiles).toStrictEqual([{ local: localPath, remote: "/remote/file.txt" }])
+      expect(uploadedFiles).toStrictEqual([
+        { local: localPath, options: { mode: "0644" }, remote: "/remote/file.txt" },
+      ])
     } finally {
       rmSync(dir, { recursive: true })
     }
   })
 
-  it("apply preserves unicode content and paths", async () => {
+  it("apply preserves unicode content and paths and forwards the default mode", async () => {
     const dir = mkdtempSync(join(tmpdir(), "paratix-test-"))
     try {
       const localPath = join(dir, unicodeName)
       writeFileSync(localPath, unicodeContent, "utf8")
 
-      const uploadedFiles: Array<{ local: string; remote: string }> = []
+      const uploadedFiles: Array<{
+        local: string
+        options: { mode?: string } | undefined
+        remote: string
+      }> = []
       const ssh = createMockSsh()
-      // eslint-disable-next-line @typescript-eslint/require-await -- Mock
-      ssh.uploadFile = async (local: string, remote: string) => {
-        uploadedFiles.push({ local, remote })
+      ssh.uploadFile = async (local: string, remote: string, options?: { mode?: string }) => {
+        await Promise.resolve()
+        uploadedFiles.push({ local, options, remote })
       }
 
       const mod = file.copy(unicodeRemotePath, localPath)
       const result = await mod.apply(ssh, emptyEnv)
 
       expect(result.status).toBe("changed")
-      expect(uploadedFiles).toStrictEqual([{ local: localPath, remote: unicodeRemotePath }])
+      expect(uploadedFiles).toStrictEqual([
+        { local: localPath, options: { mode: "0644" }, remote: unicodeRemotePath },
+      ])
     } finally {
       rmSync(dir, { recursive: true })
     }
   })
 
-  it("apply sets mode and owner when specified", async () => {
+  it("apply forwards an explicit mode to uploadFile and sets owner via chown", async () => {
     const dir = mkdtempSync(join(tmpdir(), "paratix-test-"))
     try {
       const localPath = join(dir, "source.txt")
       writeFileSync(localPath, "hello world")
 
+      const uploadedFiles: Array<{
+        local: string
+        options: { mode?: string } | undefined
+        remote: string
+      }> = []
       const ssh = createMockSsh()
-      const mod = file.copy("/remote/file.txt", localPath, { mode: "0644", owner: "www-data" })
+      ssh.uploadFile = async (local: string, remote: string, options?: { mode?: string }) => {
+        await Promise.resolve()
+        uploadedFiles.push({ local, options, remote })
+      }
+
+      const mod = file.copy("/remote/file.txt", localPath, { mode: "0600", owner: "www-data" })
       await mod.apply(ssh, emptyEnv)
 
-      expect(ssh.calls).toContain("chmod '0644' '/remote/file.txt'")
+      // The mode must be forwarded into uploadFile so the resulting file is
+      // never produced as the silent uploadFile temp default.
+      expect(uploadedFiles).toStrictEqual([
+        { local: localPath, options: { mode: "0600" }, remote: "/remote/file.txt" },
+      ])
+      // file.copy no longer issues a separate chmod after uploadFile.
+      expect(ssh.calls).not.toContain("chmod '0600' '/remote/file.txt'")
       expect(ssh.calls).toContain("chown 'www-data' '/remote/file.txt'")
+    } finally {
+      rmSync(dir, { recursive: true })
+    }
+  })
+
+  it("check returns needs-apply when remote mode drifts from the default 0644", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "paratix-test-"))
+    try {
+      const localPath = join(dir, "source.txt")
+      writeFileSync(localPath, "hello world")
+      const localHash = sha256HexBuffer(Buffer.from("hello world"))
+
+      const ssh = createMockSsh({
+        "[ -e '/remote/file.txt' ]": { code: 0 },
+        "[ -f '/remote/file.txt' ]": { code: 0 },
+        "sha256sum '/remote/file.txt'": { stdout: `${localHash}  /remote/file.txt` },
+        // Server-side drift: remote was chmod'd to 0600 by an operator.
+        "stat -c '%a %U %G' '/remote/file.txt'": { stdout: "600 root root" },
+      })
+
+      // No options.mode → file.copy defaults to 0644 on both apply and check.
+      const mod = file.copy("/remote/file.txt", localPath)
+      const result = await mod.check(ssh, emptyEnv)
+      expect(result).toBe("needs-apply")
+    } finally {
+      rmSync(dir, { recursive: true })
+    }
+  })
+
+  it("check returns ok when remote mode matches an explicit mode option", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "paratix-test-"))
+    try {
+      const localPath = join(dir, "source.txt")
+      writeFileSync(localPath, "hello world")
+      const localHash = sha256HexBuffer(Buffer.from("hello world"))
+
+      const ssh = createMockSsh({
+        "[ -e '/remote/file.txt' ]": { code: 0 },
+        "[ -f '/remote/file.txt' ]": { code: 0 },
+        "sha256sum '/remote/file.txt'": { stdout: `${localHash}  /remote/file.txt` },
+        "stat -c '%a %U %G' '/remote/file.txt'": { stdout: "600 root root" },
+      })
+
+      const mod = file.copy("/remote/file.txt", localPath, { mode: "0600" })
+      const result = await mod.check(ssh, emptyEnv)
+      expect(result).toBe("ok")
     } finally {
       rmSync(dir, { recursive: true })
     }

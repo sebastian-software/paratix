@@ -25,6 +25,13 @@ import {
 
 export type { BlockOptions } from "./fileExtra.js"
 
+/**
+ * Default file mode applied by {@link file.copy} when the caller does not
+ * specify `options.mode`. Both `apply` and `check` use this value, so
+ * subsequent runs detect mode drift even on the implicit-default path.
+ */
+const FILE_COPY_DEFAULT_MODE = "0644"
+
 function splitLines(content: string): string[] {
   return content.split(/\r?\n/v)
 }
@@ -116,22 +123,25 @@ export const file = {
    * @param remotePath - Destination path on the remote host.
    * @param localPath - Source path on the local filesystem.
    * @param options - Optional file attributes.
-   * @param options.mode - Optional chmod mode string (e.g. `"0644"`).
+   * @param options.mode - Optional chmod mode string (e.g. `"0644"`). When omitted,
+   *   the file is created with the documented default {@link FILE_COPY_DEFAULT_MODE}
+   *   (`"0644"`) instead of inheriting whatever default `ssh.uploadFile` happens
+   *   to choose for its temp file.
    * @param options.owner - Optional chown owner string (e.g. `"www-data:www-data"`).
    * @returns A Module that copies the file to the remote host.
    */
   copy(remotePath: string, localPath: string, options?: { mode?: string; owner?: string }): Module {
+    const desiredMode = options?.mode ?? FILE_COPY_DEFAULT_MODE
+    validateMode(desiredMode)
+
     return {
       async apply(ssh: null | SshConnection): Promise<ModuleResult> {
         if (!ssh) return failed(`[file.copy: ${remotePath}] SSH connection is required`)
-        await ssh.uploadFile(localPath, remotePath)
+        // Forward the resolved mode (caller-supplied or default 0644) so the
+        // remote file's permissions are predictable regardless of the
+        // ssh.uploadFile temp-mode default.
+        await ssh.uploadFile(localPath, remotePath, { mode: desiredMode })
 
-        if (options?.mode != null) {
-          validateMode(options.mode)
-          await ssh.exec(`chmod ${shellQuote(options.mode)} ${shellQuote(remotePath)}`, {
-            silent: true,
-          })
-        }
         if (options?.owner != null) {
           await ssh.exec(`chown ${shellQuote(options.owner)} ${shellQuote(remotePath)}`, {
             silent: true,
@@ -149,7 +159,10 @@ export const file = {
         const localHash = await localSha256(localPath)
         if (!hexHashesEqual(remoteHash, localHash)) return NEEDS_APPLY
 
-        const metadataMatches = ownershipMatches(await readOwnership(ssh, remotePath), options)
+        // Always compare the remote mode against the resolved desired mode so
+        // mode drift is detected even when the caller did not pass options.mode.
+        const matchOptions = { ...options, mode: desiredMode }
+        const metadataMatches = ownershipMatches(await readOwnership(ssh, remotePath), matchOptions)
         return metadataMatches ? "ok" : NEEDS_APPLY
       },
       name: `file.copy: ${remotePath}`,

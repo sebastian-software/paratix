@@ -197,6 +197,8 @@ the idiomatic way to ensure a previously installed cron job is gone.
 | `file.stat`       | `(remotePath: string): Module`                                                                                      | No (always-applies) |
 | `file.template`   | `(remotePath: string, templatePath: string, options?: { mode?: string; owner?: string; strict?: boolean }): Module` | Yes                 |
 
+**Hinweis zu `file.copy` und Default-Mode:** Wenn `options.mode` weggelassen wird, setzt `file.copy` den Modus auf den dokumentierten Default `0644`. Der Modus wird sowohl beim Hochladen (`uploadFile` mit `{ mode }`) als auch in `check` gegen den Soll-Wert verglichen, damit nachfolgende Läufe Mode-Drift (z. B. manuelles `chmod 0600`) als `needs-apply` erkennen. Wer ein restriktiveres Recht braucht (z. B. für Secrets), übergibt explizit `{ mode: "0600" }`.
+
 ### `git`
 
 | Method      | Signature                                                                 | Idempotent |
