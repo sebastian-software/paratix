@@ -54,7 +54,12 @@ export const ufw = {
     return {
       async apply(ssh: null | SshConnection): Promise<ModuleResult> {
         if (!ssh) return failed("[ufw.enabled] SSH connection is required")
-        const result = await ssh.exec(`echo 'y' | ${UFW} enable`, {
+        // R-0000064: use the officially supported `--force` flag for
+        // non-interactive enable instead of piping `y` into stdin. Mirrors
+        // the call shape used by ufw.disabled.apply and avoids relying on
+        // the wording of the Y/N prompt or the TTY-detection heuristic in
+        // ufw.
+        const result = await ssh.exec(`${UFW} --force enable`, {
           ignoreExitCode: true,
           silent: true,
         })

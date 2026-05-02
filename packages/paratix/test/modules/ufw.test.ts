@@ -32,19 +32,24 @@ describe("ufw.enabled", () => {
     expect(result).toBe("needs-apply")
   })
 
-  it("apply returns changed when ufw enable succeeds", async () => {
+  // R-0000064 regression: the apply must use the officially supported
+  // `--force` flag rather than the legacy `echo 'y' | ufw enable` pipe so
+  // the call mirrors ufw.disabled and does not rely on the wording of the
+  // interactive Y/N prompt.
+  it("apply returns changed when ufw --force enable succeeds", async () => {
     const ssh = createMockSsh({
-      "echo 'y' | ufw enable": { code: 0 },
+      "ufw --force enable": { code: 0 },
     })
     const mod = ufw.enabled()
     const result = await mod.apply(ssh, emptyEnv)
     expect(result.status).toBe("changed")
-    expect(ssh.calls).toContain("echo 'y' | ufw enable")
+    expect(ssh.calls).toContain("ufw --force enable")
+    expect(ssh.calls).not.toContain("echo 'y' | ufw enable")
   })
 
-  it("apply returns failed when ufw enable exits with non-zero code", async () => {
+  it("apply returns failed when ufw --force enable exits with non-zero code", async () => {
     const ssh = createMockSsh({
-      "echo 'y' | ufw enable": { code: 1 },
+      "ufw --force enable": { code: 1 },
     })
     const mod = ufw.enabled()
     const result = await mod.apply(ssh, emptyEnv)
