@@ -13,12 +13,19 @@ type UserOptions = {
 
 const ID_CMD = "id"
 
-function buildUserArguments(options?: UserOptions): string[] {
+function buildUserArguments(mode: "useradd" | "usermod", options?: UserOptions): string[] {
   const flags: string[] = []
   if (options?.uid != null) flags.push(`--uid ${String(options.uid)}`)
   if (options?.shell != null) flags.push(`--shell ${shellQuote(options.shell)}`)
   if (options?.home != null) flags.push(`--home ${shellQuote(options.home)}`)
-  if (options?.groups != null) flags.push(`--groups ${shellQuote(options.groups.join(","))}`)
+  if (options?.groups != null) {
+    // For `usermod`, emit `--append --groups` so unrelated supplementary group
+    // memberships (sudo, docker, manually added groups) are preserved across
+    // re-applies. `useradd` does not accept `--append` and the new account has
+    // no preexisting supplementary memberships to preserve.
+    if (mode === "usermod") flags.push("--append")
+    flags.push(`--groups ${shellQuote(options.groups.join(","))}`)
+  }
   return flags
 }
 
@@ -65,9 +72,11 @@ function parsePasswdEntry(entry: string): { home: string; shell: string; uid: st
   return { home: fields[5] ?? "", shell: fields[6] ?? "", uid: fields[2] ?? "" }
 }
 
-function groupsEqual(actual: Set<string>, desired: string[]): boolean {
-  const expected = new Set(desired)
-  return actual.size === expected.size && [...expected].every((g) => actual.has(g))
+function groupsContain(actual: Set<string>, desired: string[]): boolean {
+  // Additive (subset) semantics: the user must be a member of every desired
+  // group, but extra unrelated memberships (sudo, docker, manually added
+  // groups) are tolerated. Mirrors the `usermod --append --groups` apply path.
+  return desired.every((g) => actual.has(g))
 }
 
 async function supplementaryGroupsMatch(
@@ -83,7 +92,7 @@ async function supplementaryGroupsMatch(
       .filter(Boolean)
       .filter((group) => group !== primaryGroup)
   )
-  return groupsEqual(actualSupplementaryGroups, desiredGroups)
+  return groupsContain(actualSupplementaryGroups, desiredGroups)
 }
 
 async function passwdAttributesMatch(
@@ -106,6 +115,39 @@ async function shadowHashMatches(
   const shadowEntry = await ssh.output(`getent shadow ${shellQuote(name)}`)
   const currentHash = shadowEntry.split(":")[1] ?? ""
   return currentHash === password
+}
+
+type UserMutationContext = {
+  exists: boolean
+  flags: string[]
+  name: string
+  ssh: SshConnection
+}
+
+/**
+ * Run `useradd` or `usermod` to bring the user account into the desired state.
+ *
+ * When the user already exists and `flags` is empty (e.g. only a password
+ * change has been requested), the call is skipped entirely. `usermod ${name}`
+ * without any flags would otherwise fail with `usermod: no flags given`.
+ *
+ * @param context - The mutation context (ssh handle, username, existence flag, rendered flags).
+ * @returns A failure result when `useradd` / `usermod` exits non-zero, or
+ *   `null` when the mutation succeeded or was skipped.
+ */
+async function applyUserMutation(context: UserMutationContext): Promise<ModuleResult | null> {
+  const { exists, flags, name, ssh } = context
+  if (exists && flags.length === 0) return null
+
+  const cmd = exists
+    ? `usermod ${flags.join(" ")} ${shellQuote(name)}`
+    : `useradd ${flags.join(" ")} --create-home ${shellQuote(name)}`
+
+  const result = await ssh.exec(cmd, { ignoreExitCode: true, silent: true })
+  if (result.code !== 0) {
+    return failedCommand(`[user.present: ${name}] ${exists ? "usermod" : "useradd"} failed`, result)
+  }
+  return null
 }
 
 async function attributesMatch(
@@ -164,12 +206,19 @@ export const user = {
    * Ensure a user account exists. Creates the account if absent, or runs
    * `usermod` to update attributes if the user already exists.
    *
+   * Supplementary group membership is additive: when `options.groups` is set
+   * and the user already exists, `usermod --append --groups <list>` is used so
+   * preexisting memberships not managed by Paratix (e.g. `sudo`, `docker`,
+   * manually added groups) are preserved across re-applies. The `groups`
+   * option therefore expresses "ensure the user is a member of these groups",
+   * not "the user must be a member of exactly these supplementary groups".
+   *
    * @param name - The username.
    * @param options - Optional user account configuration.
    * @param options.uid - Desired numeric UID.
    * @param options.shell - Login shell path (e.g. `"/bin/bash"`).
    * @param options.home - Home directory path.
-   * @param options.groups - Supplementary groups to add the user to.
+   * @param options.groups - Supplementary groups to add the user to (additive).
    * @param options.password - Pre-hashed password (e.g. SHA-512 `$6$...`) set via `chpasswd -e`.
    * @returns A Module that ensures the user account is present.
    */
@@ -178,19 +227,11 @@ export const user = {
       async apply(ssh: null | SshConnection): Promise<ModuleResult> {
         if (!ssh) return failed(`[user.present: ${name}] SSH connection is required`)
 
-        const flags = buildUserArguments(options)
         const exists = await ssh.test(`${ID_CMD} ${shellQuote(name)}`)
-        const cmd = exists
-          ? `usermod ${flags.join(" ")} ${shellQuote(name)}`
-          : `useradd ${flags.join(" ")} --create-home ${shellQuote(name)}`
+        const flags = buildUserArguments(exists ? "usermod" : "useradd", options)
 
-        const result = await ssh.exec(cmd, { ignoreExitCode: true, silent: true })
-        if (result.code !== 0) {
-          return failedCommand(
-            `[user.present: ${name}] ${exists ? "usermod" : "useradd"} failed`,
-            result
-          )
-        }
+        const mutationFailure = await applyUserMutation({ exists, flags, name, ssh })
+        if (mutationFailure != null) return mutationFailure
 
         if (options?.password != null) {
           const failure = await setPassword(ssh, name, options.password)

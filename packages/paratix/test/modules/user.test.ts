@@ -117,13 +117,27 @@ describe("user.present check", () => {
     expect(result).toBe("ok")
   })
 
-  it("returns needs-apply when there are extra supplementary groups beyond the desired set", async () => {
+  // R-0000043: groups are additive — extra unrelated memberships beyond
+  // the desired set are tolerated, mirroring the `usermod --append --groups`
+  // apply path.
+  it("returns ok when extra supplementary groups exist beyond the desired set", async () => {
     const ssh = createMockSsh({
       "id -Gn 'alice'": { code: 0, stdout: "alice sudo docker" },
       "id -gn 'alice'": { code: 0, stdout: "alice" },
       "id 'alice'": { code: 0 },
     })
     const mod = user.present("alice", { groups: ["sudo"] })
+    const result = await mod.check(ssh, emptyEnv)
+    expect(result).toBe("ok")
+  })
+
+  it("returns needs-apply when a desired supplementary group is missing", async () => {
+    const ssh = createMockSsh({
+      "id -Gn 'alice'": { code: 0, stdout: "alice sudo" },
+      "id -gn 'alice'": { code: 0, stdout: "alice" },
+      "id 'alice'": { code: 0 },
+    })
+    const mod = user.present("alice", { groups: ["sudo", "docker"] })
     const result = await mod.check(ssh, emptyEnv)
     expect(result).toBe("needs-apply")
   })
@@ -158,7 +172,6 @@ describe("user.present apply", () => {
     const ssh = createMockSsh({
       "chpasswd -e": { code: 0 },
       "id 'alice'": { code: 0 },
-      "usermod  'alice'": { code: 0 },
     })
     const mod = user.present("alice", { password: "$6$hash" })
     await mod.apply(ssh, emptyEnv)
@@ -179,7 +192,6 @@ describe("user.present apply", () => {
     const ssh = createMockSsh({
       "chpasswd -e": { code: 1, stderr: "stderr referencing $6$hash" },
       "id 'alice'": { code: 0 },
-      "usermod  'alice'": { code: 0 },
     })
     const mod = user.present("alice", { password: "$6$hash" })
     const result = await mod.apply(ssh, emptyEnv)
@@ -194,12 +206,61 @@ describe("user.present apply", () => {
   it("does not call chpasswd when no password is set", async () => {
     const ssh = createMockSsh({
       "id 'alice'": { code: 0 },
-      "usermod  'alice'": { code: 0 },
     })
     const mod = user.present("alice")
     await mod.apply(ssh, emptyEnv)
     const chpasswdCalled = ssh.calls.some((c) => c.includes("chpasswd"))
     expect(chpasswdCalled).toBe(false)
+  })
+
+  // R-0000043 regression: a password-only update must not invoke `usermod`
+  // with no flags, because `usermod ${name}` fails with
+  // `usermod: no flags given`.
+  it("skips the usermod call when only the password changes", async () => {
+    const ssh = createMockSsh({
+      "chpasswd -e": { code: 0 },
+      "id 'alice'": { code: 0 },
+    })
+    const mod = user.present("alice", { password: "$6$hash" })
+    const result = await mod.apply(ssh, emptyEnv)
+    expect(result.status).toBe("changed")
+    // No usermod invocation must be attempted in the password-only case.
+    expect(ssh.calls.some((c) => c.startsWith("usermod"))).toBe(false)
+    expect(ssh.calls).toContain("chpasswd -e")
+  })
+
+  // R-0000043 regression: when re-applying a user with `groups`, the rendered
+  // command must contain `--append` so unrelated supplementary group
+  // memberships (sudo, docker, manually added groups) are preserved.
+  it("emits usermod --append --groups so existing supplementary groups are preserved", async () => {
+    const ssh = createMockSsh({
+      "id 'alice'": { code: 0 },
+      "usermod --append --groups 'docker,wheel' 'alice'": { code: 0 },
+    })
+    const mod = user.present("alice", { groups: ["docker", "wheel"] })
+    const result = await mod.apply(ssh, emptyEnv)
+    expect(result.status).toBe("changed")
+    expect(ssh.calls).toContain("usermod --append --groups 'docker,wheel' 'alice'")
+    // No `usermod --groups ...` without `--append` is rendered.
+    const usermodCall = ssh.calls.find((c) => c.startsWith("usermod"))
+    expect(usermodCall).toContain("--append")
+    expect(usermodCall).toContain("--groups")
+  })
+
+  // R-0000043: useradd path must NOT include `--append` (the flag is only
+  // valid for usermod, and a freshly created account has no preexisting
+  // supplementary memberships to preserve anyway).
+  it("does not emit --append when creating a new account with groups via useradd", async () => {
+    const ssh = createMockSsh({
+      "id 'bob'": { code: 1 },
+      "useradd --groups 'docker' --create-home 'bob'": { code: 0 },
+    })
+    const mod = user.present("bob", { groups: ["docker"] })
+    const result = await mod.apply(ssh, emptyEnv)
+    expect(result.status).toBe("changed")
+    const useraddCall = ssh.calls.find((c) => c.startsWith("useradd"))
+    expect(useraddCall).toBeDefined()
+    expect(useraddCall).not.toContain("--append")
   })
 
   it("apply returns changed when user is created successfully", async () => {
