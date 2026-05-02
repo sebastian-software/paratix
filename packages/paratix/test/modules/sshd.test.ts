@@ -184,6 +184,38 @@ describe("sshd.config — apply", () => {
     expect(written?.content).toContain("PasswordAuthentication no")
   })
 
+  // R-0000058: apply must be case-insensitive (just like check) so a lowercase
+  // directive like `passwordauthentication yes` is overwritten in place rather
+  // than appended at the end of the file. After apply the directive is also
+  // normalized to its canonical casing and a follow-up check returns `ok`.
+  it("regression — overwrites a lowercase directive in place and normalizes the casing", async () => {
+    const mockSsh = createMockSsh({
+      [CAT_SSHD]: { stdout: "passwordauthentication yes\n" },
+    })
+    const writtenFiles = trackWriteFile(mockSsh)
+
+    const mod = sshd.config({ PasswordAuthentication: "no" })
+    const result = await mod.apply(mockSsh, emptyEnv)
+
+    expect(result.status).toBe("changed")
+    const written = writtenFiles.find((f) => f.path === SSHD_CONFIG)
+    expect(written).toBeDefined()
+    // Replacement happened in place; the file must not contain a second,
+    // appended occurrence of the directive at the end.
+    expect(written?.content.match(/PasswordAuthentication/giv)).toHaveLength(1)
+    // Canonical casing is used in the rewritten line; the original lowercase
+    // `yes` value must be entirely gone (replaced in place, not appended).
+    expect(written?.content).toContain("PasswordAuthentication no")
+    expect(written?.content).not.toMatch(/passwordauthentication\s+yes/iv)
+
+    // Follow-up check against the rewritten content reports `ok`.
+    const followUpSsh = createMockSsh({
+      [CAT_SSHD]: { stdout: written!.content },
+    })
+    const followUp = await mod.check(followUpSsh, emptyEnv)
+    expect(followUp).toBe("ok")
+  })
+
   it("regression — value with forward slash does not break file path or pattern", async () => {
     const mockSsh = createMockSsh({
       [CAT_SSHD]: { stdout: "AuthorizedKeysFile .ssh/authorized_keys\n" },

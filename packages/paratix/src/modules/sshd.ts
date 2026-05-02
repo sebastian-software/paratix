@@ -204,15 +204,20 @@ function sshdSettingMatchesEverywhere(content: string, key: string, value: strin
 }
 
 function applySshdSettingToContent(content: string, key: string, value: string): string {
+  // Use the case-insensitive flag so the apply path mirrors the case-insensitive
+  // semantics of `sshdSettingMatchesEverywhere` (and sshd's own parser). When a
+  // replacement happens we also normalize the directive to its canonical
+  // casing, so the file converges on the desired spelling instead of leaving a
+  // mixed-case directive in place.
   // eslint-disable-next-line security/detect-non-literal-regexp
-  const pattern = new RegExp(`^${escapeRegExp(key)}\\s.*`, "gmv")
+  const pattern = new RegExp(`^${escapeRegExp(key)}\\s.*`, "gimv")
   const replaced = content.replace(pattern, `${key} ${value}`)
 
   if (replaced !== content) {
     return replaced
   }
   // eslint-disable-next-line security/detect-non-literal-regexp
-  if (new RegExp(`^${escapeRegExp(key)}\\s`, "mv").test(content)) {
+  if (new RegExp(`^${escapeRegExp(key)}\\s`, "imv").test(content)) {
     return content
   }
   return content.endsWith("\n") ? `${content}${key} ${value}\n` : `${content}\n${key} ${value}\n`
