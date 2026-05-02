@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.10.0](https://github.com/sebastian-software/paratix/compare/paratix-v0.9.0...paratix-v0.10.0) (2026-05-02)
+
+
+### Features
+
+* **paratix:** add cron.absent and timer.absent uninstall methods ([808ce46](https://github.com/sebastian-software/paratix/commit/808ce46f6730071fff5afb72d1499d8fe0f5981c))
+* **paratix:** add timer.scheduled module for systemd timer units ([406bb01](https://github.com/sebastian-software/paratix/commit/406bb01d4a648444f7b9ea00f0fd14da1deae1aa))
+
+
+### Bug Fixes
+
+* [R-0000002] return ok from timer.scheduled apply when already in desired state ([c87c3c2](https://github.com/sebastian-software/paratix/commit/c87c3c2f1a3d87c8fb260aa8bbf05719ac266c2f))
+* [R-0000003] reject newlines in randomizedDelaySec and accuracySec ([dc5eff9](https://github.com/sebastian-software/paratix/commit/dc5eff907f117896fac27f1b5b6dbb7dc7e68f55))
+* [R-0000009] reject blank values for optional timer fields ([983e4bd](https://github.com/sebastian-software/paratix/commit/983e4bd3acf905066205975ccc466e11de99cdbc))
+* [R-0000010] clarify timer.absent JSDoc behavior vs timer.scheduled ([be977ab](https://github.com/sebastian-software/paratix/commit/be977abce9835f0e21d6bbab6915fc6ef6ede3ff))
+
 ## [0.9.0](https://github.com/sebastian-software/paratix/compare/paratix-v0.8.0...paratix-v0.9.0) (2026-05-01)
 
 
