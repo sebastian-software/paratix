@@ -14,6 +14,11 @@ import {
 const SYSTEMCTL = "systemctl"
 const UNIT_FILE_MODE = "0644"
 
+// When `apply` runs after a `check` that already inspected the same paths,
+// this issues another `exists`/`readFile` round-trip. The extra calls are
+// accepted because the check phase only reports `needs-apply`/`ok` and does
+// not propagate read results to apply, and re-reading right before writing
+// avoids acting on stale data when the remote state changes between phases.
 async function fileMatches(ssh: SshConnection, path: string, expected: string): Promise<boolean> {
   if (!(await ssh.exists(path))) return false
   const remote = await ssh.readFile(path)
@@ -64,10 +69,7 @@ async function syncUnitFiles(
     })
     if (reload.code !== 0) {
       return {
-        failure: failedCommand(
-          `[timer.scheduled: ${name}] systemctl daemon-reload failed`,
-          reload
-        ),
+        failure: failedCommand(`[timer.scheduled: ${name}] systemctl daemon-reload failed`, reload),
         ok: false,
       }
     }
