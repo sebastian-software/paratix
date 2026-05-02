@@ -121,6 +121,12 @@ function validatePresentOptions(options: TimerScheduledOptions): void {
   for (const [field, value] of optionalStringFields) {
     if (value != null) assertNoNewline(field, value)
   }
+  if (options.randomizedDelaySec != null) {
+    assertNoNewline("randomizedDelaySec", String(options.randomizedDelaySec))
+  }
+  if (options.accuracySec != null) {
+    assertNoNewline("accuracySec", String(options.accuracySec))
+  }
   if (options.environment) validateEnvironment(options.environment)
   // Also validates onCalendar entries for newlines / empty values.
   normalizeOnCalendar(options.onCalendar)

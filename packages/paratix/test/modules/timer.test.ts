@@ -535,6 +535,26 @@ describe("timer.scheduled — module name and validation", () => {
     ).toThrow(/must not contain newlines/v)
   })
 
+  it("throws when randomizedDelaySec contains a newline", () => {
+    expect(() =>
+      timer.scheduled("backup", {
+        exec: "/usr/local/bin/backup",
+        onCalendar: "daily",
+        randomizedDelaySec: "60\n[Service]\nExecStart=/bin/evil",
+      })
+    ).toThrow(/must not contain newlines/v)
+  })
+
+  it("throws when accuracySec contains a newline", () => {
+    expect(() =>
+      timer.scheduled("backup", {
+        accuracySec: "1min\n[Service]\nExecStart=/bin/evil",
+        exec: "/usr/local/bin/backup",
+        onCalendar: "daily",
+      })
+    ).toThrow(/must not contain newlines/v)
+  })
+
   it("does not validate exec or onCalendar when state is absent", () => {
     expect(() =>
       timer.scheduled("backup", {
