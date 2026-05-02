@@ -49,6 +49,26 @@ function extractCommand(source: string, archivePath: string, destination: string
 }
 
 /**
+ * Allocate a unique remote upload path via `mktemp`.
+ *
+ * Using a process-unique path prevents two paratix runs against the same
+ * host from clobbering each other's uploads when both happen to share the
+ * same local source path. The previous implementation hashed the source
+ * path itself, which produced the same destination across runs and made
+ * concurrent uploads with different content prone to silent corruption.
+ *
+ * @param conn - The SSH connection.
+ * @returns The unique remote temporary path produced by `mktemp`.
+ */
+async function allocateRemoteUploadPath(conn: SshConnection): Promise<string> {
+  const remoteSource = await conn.output("mktemp /tmp/paratix-upload.XXXXXXXX")
+  if (remoteSource.length === 0) {
+    throw new Error("[archive.extract] mktemp did not return a remote path for the upload")
+  }
+  return remoteSource
+}
+
+/**
  * Resolve the remote archive path, uploading a local file if needed.
  *
  * @param conn - The SSH connection.
@@ -62,34 +82,33 @@ async function resolveRemoteSource(
   upload: boolean
 ): Promise<string> {
   if (!upload) return source
-  const uploadHash = sha256String(source)
-  const remoteSource = `/tmp/paratix-upload-${uploadHash}`
+  const remoteSource = await allocateRemoteUploadPath(conn)
   await conn.uploadFile(source, remoteSource)
   return remoteSource
 }
 
 /**
- * Write the marker file and optionally clean up the uploaded archive.
+ * Write the marker file using the SHA256 of the (possibly uploaded) remote archive.
+ *
+ * The cleanup of an uploaded temp file is intentionally **not** part of this
+ * helper — the caller owns the lifecycle of the temp upload via try/finally so
+ * the temp file is removed on every code path, including failures.
  *
  * @param conn - The SSH connection.
  * @param remoteSource - The remote archive path.
- * @param options - Marker path and upload flag.
+ * @param options - Marker path.
  * @param options.marker - The marker file path.
- * @param options.upload - Whether a temporary upload file should be removed.
  * @returns True if the marker was written successfully.
  */
-async function writeMarkerAndCleanup(
+async function writeMarker(
   conn: SshConnection,
   remoteSource: string,
-  options: { marker: string; upload: boolean }
+  options: { marker: string }
 ): Promise<boolean> {
   const sha = await conn.sha256(remoteSource)
   if (sha === null) return false
   await conn.exec(`mkdir -p ${shellQuote(FLAGS_DIR)}`, SILENT)
   await conn.writeFile(options.marker, sha, { mode: ARCHIVE_MARKER_MODE })
-  if (options.upload) {
-    await conn.exec(`rm -f ${shellQuote(remoteSource)}`, SILENT)
-  }
   return true
 }
 
@@ -108,7 +127,47 @@ type ApplyParameters = {
 }
 
 /**
+ * Run the extraction proper, after the (possibly uploaded) archive is in place.
+ *
+ * @param conn - The SSH connection.
+ * @param parameters - Destination, marker, owner, source, upload (see {@link ApplyParameters}).
+ * @param remoteSource - The remote archive path (uploaded temp file or original remote path).
+ * @returns The module result.
+ */
+async function runExtraction(
+  conn: SshConnection,
+  parameters: ApplyParameters,
+  remoteSource: string
+): Promise<ModuleResult> {
+  const { destination, marker, owner, source } = parameters
+
+  await conn.exec(`mkdir -p ${shellQuote(destination)}`, SILENT)
+
+  const cmd = extractCommand(source, remoteSource, destination)
+  if (cmd === null) return failed(`[archive.extract] unsupported archive format for ${source}`)
+
+  const result = await conn.exec(cmd, EXEC_OPTS)
+  if (result.code !== 0) {
+    return failedCommand(`[archive.extract] failed to extract ${source}`, result)
+  }
+
+  if (owner !== undefined && owner !== "") {
+    await conn.exec(`chown -R ${shellQuote(owner)} ${shellQuote(destination)}`, SILENT)
+  }
+
+  const markerWritten = await writeMarker(conn, remoteSource, { marker })
+  return markerWritten
+    ? { status: "changed" }
+    : failed(`[archive.extract] failed to write marker for ${source}`)
+}
+
+/**
  * Execute the archive extraction on the remote host.
+ *
+ * Uploads the archive to a per-run unique remote path (via `mktemp`) when
+ * `upload` is set, then guarantees the temp file is removed in `finally`
+ * regardless of which code path succeeds or fails. This prevents concurrent
+ * paratix runs from clobbering each other's uploads.
  *
  * @param conn - The SSH connection.
  * @param parameters - The extraction parameters.
@@ -118,30 +177,21 @@ async function applyExtract(
   conn: SshConnection,
   parameters: ApplyParameters
 ): Promise<ModuleResult> {
-  const { destination, marker, owner, source, upload } = parameters
+  const { source, upload } = parameters
 
   const remoteSource = await resolveRemoteSource(conn, source, upload)
-  await conn.exec(`mkdir -p ${shellQuote(destination)}`, SILENT)
 
-  const cmd = extractCommand(source, remoteSource, destination)
-  if (cmd === null) {
-    if (upload) await conn.exec(`rm -f ${shellQuote(remoteSource)}`, SILENT)
-    return failed(`[archive.extract] unsupported archive format for ${source}`)
+  try {
+    return await runExtraction(conn, parameters, remoteSource)
+  } finally {
+    if (upload) {
+      try {
+        await conn.exec(`rm -f ${shellQuote(remoteSource)}`, SILENT)
+      } catch {
+        // best effort: cleanup must not mask the original result
+      }
+    }
   }
-  const result = await conn.exec(cmd, EXEC_OPTS)
-  if (result.code !== 0) {
-    if (upload) await conn.exec(`rm -f ${shellQuote(remoteSource)}`, SILENT)
-    return failedCommand(`[archive.extract] failed to extract ${source}`, result)
-  }
-
-  if (owner !== undefined && owner !== "") {
-    await conn.exec(`chown -R ${shellQuote(owner)} ${shellQuote(destination)}`, SILENT)
-  }
-
-  const markerWritten = await writeMarkerAndCleanup(conn, remoteSource, { marker, upload })
-  return markerWritten
-    ? { status: "changed" }
-    : failed(`[archive.extract] failed to write marker for ${source}`)
 }
 
 /**

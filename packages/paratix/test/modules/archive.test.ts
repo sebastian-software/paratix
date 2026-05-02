@@ -219,13 +219,13 @@ describe("archive.extract — apply", () => {
     expect(mockSsh.calls).toContain(`chown -R 'www-data:www-data' '${destination}'`)
   })
 
-  it("uploads file and cleans up when upload is true", async () => {
+  it("uploads file via mktemp-allocated path and cleans up when upload is true", async () => {
     const localFile = "/local/app.tar.gz"
-    const uploadHash = "113329b21446a20ca2e8304294da20dc3aa7668c5cc4a803ffb59e377bb80f4f"
-    const remoteTmp = `/tmp/paratix-upload-${uploadHash}`
+    const remoteTmp = "/tmp/paratix-upload.AbCdEfGh"
 
     const mockSsh = createMockSsh({
       [`tar xzf '${remoteTmp}' -C '${destination}'`]: { code: 0 },
+      "mktemp /tmp/paratix-upload.XXXXXXXX": { code: 0, stdout: remoteTmp },
     })
     vi.spyOn(mockSsh, "sha256").mockResolvedValue(archiveSha)
     vi.spyOn(mockSsh, "writeFile").mockResolvedValue()
@@ -237,6 +237,64 @@ describe("archive.extract — apply", () => {
     expect(result.status).toBe("changed")
     expect(mockSsh.uploadFile).toHaveBeenCalledWith(localFile, remoteTmp)
     expect(mockSsh.calls).toContain(`rm -f '${remoteTmp}'`)
+  })
+
+  it("regression: allocates a fresh remote upload path per invocation, even with identical local sources", async () => {
+    const localFile = "/local/app.tar.gz"
+    const firstRemoteTmp = "/tmp/paratix-upload.FIRST111"
+    const secondRemoteTmp = "/tmp/paratix-upload.SECOND22"
+
+    const responses: string[] = [firstRemoteTmp, secondRemoteTmp]
+    const mockSsh = createMockSsh({
+      [`tar xzf '${firstRemoteTmp}' -C '${destination}'`]: { code: 0 },
+      [`tar xzf '${secondRemoteTmp}' -C '${destination}'`]: { code: 0 },
+      "mktemp /tmp/paratix-upload.XXXXXXXX": { code: 0, stdout: "ignored-by-spy" },
+    })
+    // mktemp is queried via conn.output; rotate the response so concurrent
+    // invocations produce different paths even though the local source is identical.
+    vi.spyOn(mockSsh, "output")
+      .mockImplementationOnce(async (command) => {
+        await Promise.resolve()
+        mockSsh.calls.push(command)
+        return responses[0]
+      })
+      .mockImplementationOnce(async (command) => {
+        await Promise.resolve()
+        mockSsh.calls.push(command)
+        return responses[1]
+      })
+    vi.spyOn(mockSsh, "sha256").mockResolvedValue(archiveSha)
+    vi.spyOn(mockSsh, "writeFile").mockResolvedValue()
+    vi.spyOn(mockSsh, "uploadFile").mockResolvedValue()
+
+    const modA = archive.extract(localFile, destination, { upload: true })
+    const modB = archive.extract(localFile, destination, { upload: true })
+
+    const resultA = await modA.apply(mockSsh, emptyEnv)
+    const resultB = await modB.apply(mockSsh, emptyEnv)
+
+    expect(resultA.status).toBe("changed")
+    expect(resultB.status).toBe("changed")
+    expect(mockSsh.uploadFile).toHaveBeenNthCalledWith(1, localFile, firstRemoteTmp)
+    expect(mockSsh.uploadFile).toHaveBeenNthCalledWith(2, localFile, secondRemoteTmp)
+    expect(firstRemoteTmp).not.toBe(secondRemoteTmp)
+    expect(mockSsh.calls).toContain(`rm -f '${firstRemoteTmp}'`)
+    expect(mockSsh.calls).toContain(`rm -f '${secondRemoteTmp}'`)
+  })
+
+  it("regression: rejects with a clear error when mktemp returns an empty string", async () => {
+    const localFile = "/local/app.tar.gz"
+    const mockSsh = createMockSsh({
+      "mktemp /tmp/paratix-upload.XXXXXXXX": { code: 0, stdout: "" },
+    })
+    vi.spyOn(mockSsh, "uploadFile").mockResolvedValue()
+
+    const mod = archive.extract(localFile, destination, { upload: true })
+
+    await expect(mod.apply(mockSsh, emptyEnv)).rejects.toThrow(
+      /mktemp did not return a remote path/v
+    )
+    expect(mockSsh.uploadFile).not.toHaveBeenCalled()
   })
 
   it("returns failed when extraction fails", async () => {
@@ -266,11 +324,11 @@ describe("archive.extract — apply", () => {
 
   it("cleans up uploaded file when extraction fails", async () => {
     const localFile = "/local/app.tar.gz"
-    const uploadHash = "113329b21446a20ca2e8304294da20dc3aa7668c5cc4a803ffb59e377bb80f4f"
-    const remoteTmp = `/tmp/paratix-upload-${uploadHash}`
+    const remoteTmp = "/tmp/paratix-upload.FAIL1234"
 
     const mockSsh = createMockSsh({
       [`tar xzf '${remoteTmp}' -C '${destination}'`]: { code: 1 },
+      "mktemp /tmp/paratix-upload.XXXXXXXX": { code: 0, stdout: remoteTmp },
     })
     vi.spyOn(mockSsh, "uploadFile").mockResolvedValue()
 
@@ -278,6 +336,7 @@ describe("archive.extract — apply", () => {
     const result = await mod.apply(mockSsh, emptyEnv)
 
     expect(result.status).toBe("failed")
+    // Cleanup must remove the same mktemp-allocated path that was used for the upload.
     expect(mockSsh.calls).toContain(`rm -f '${remoteTmp}'`)
   })
 
