@@ -67,6 +67,7 @@
     "totp",
     "trixie",
     "userdel",
+    "userlist",
     "usermod"
   ]
 }
