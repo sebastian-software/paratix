@@ -4,6 +4,7 @@ import type { Environment, Module, ModuleResult } from "../types.js"
 
 import { environmentToMetaEntries } from "../meta.js"
 import { failed } from "../moduleFailure.js"
+import { maskSecrets } from "../sshHelpers.js"
 import { generateTotpCode } from "../totp.js"
 
 /**
@@ -102,7 +103,13 @@ async function resolveRegularReferences(
 
   const stdout = await spawnWithInput("op", ["inject"], JSON.stringify(entries))
 
-  const parsed: unknown = JSON.parse(stdout)
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(stdout)
+  } catch {
+    // Do not include stdout in the message: it contains resolved secrets.
+    throw new Error("op inject returned invalid JSON")
+  }
 
   if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
     throw new Error("op inject returned unexpected non-object JSON")
@@ -190,7 +197,8 @@ export const op = {
             status: "ok",
           }
         } catch (error) {
-          const detail = error instanceof Error ? error.message : String(error)
+          const rawDetail = error instanceof Error ? error.message : String(error)
+          const detail = maskSecrets(rawDetail, Object.values(references))
           return failed(`Failed to resolve 1Password references: ${detail}`)
         }
       },

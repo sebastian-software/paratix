@@ -9,7 +9,7 @@ import { op } from "../../src/modules/op.js"
 
 type MockChildProcess = { stdin: { end: Mock } } & EventEmitter
 
-function createMockChild(stdout: string, exitCode = 0): MockChildProcess {
+function createMockChild(stdout: string, exitCode = 0, stderr = ""): MockChildProcess {
   const child = new EventEmitter() as MockChildProcess
   const stdoutEmitter = new EventEmitter()
   const stderrEmitter = new EventEmitter()
@@ -20,6 +20,9 @@ function createMockChild(stdout: string, exitCode = 0): MockChildProcess {
   // Emit data and close asynchronously so listeners are registered first
   queueMicrotask(() => {
     stdoutEmitter.emit("data", Buffer.from(stdout))
+    if (stderr.length > 0) {
+      stderrEmitter.emit("data", Buffer.from(stderr))
+    }
     child.emit("close", exitCode)
   })
 
@@ -34,10 +37,10 @@ function trackSpawn(command: string, args: readonly string[]): void {
   spawnCalls.push({ args: [...args], command })
 }
 
-function mockSpawnWith(output: string, exitCode = 0): void {
+function mockSpawnWith(output: string, exitCode = 0, stderr = ""): void {
   mockedSpawnFn.mockImplementation((command: string, args?: readonly string[]) => {
     trackSpawn(command, args ?? [])
-    return createMockChild(output, exitCode) as never
+    return createMockChild(output, exitCode, stderr) as never
   })
 }
 
@@ -274,6 +277,33 @@ describe("op.resolve — JSON validation", () => {
 
     expect(result.status).toBe("failed")
     expect(result.error?.message).toContain("non-string values")
+  })
+
+  it("masks reference strings echoed in op stderr from the failure message", async () => {
+    const reference = "op://prod-vault/database/password"
+    mockSpawnWith("", 1, `error: item ${reference} not found in prod-vault`)
+
+    const module_ = op.resolve({ password: reference })
+    // eslint-disable-next-line prefer-spread
+    const result = await module_.apply(null, emptyEnv)
+
+    expect(result.status).toBe("failed")
+    expect(result.error?.message).not.toContain(reference)
+    expect(result.error?.message).not.toContain("prod-vault/database/password")
+  })
+
+  it("does not include raw stdout in the failure message when JSON parsing fails", async () => {
+    const sneakySecret = "super-secret-resolved-value"
+    // Invalid JSON: `op` produced raw secret-like output instead of JSON.
+    mockSpawnWith(sneakySecret, 0)
+
+    const module_ = op.resolve({ password: "op://vault/item/password" })
+    // eslint-disable-next-line prefer-spread
+    const result = await module_.apply(null, emptyEnv)
+
+    expect(result.status).toBe("failed")
+    expect(result.error?.message).not.toContain(sneakySecret)
+    expect(result.error?.message).toContain("invalid JSON")
   })
 })
 
