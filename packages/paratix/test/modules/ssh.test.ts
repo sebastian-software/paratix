@@ -234,15 +234,31 @@ describe("ssh.knownHosts", () => {
   })
 
   it("apply removes host via ssh-keygen -R (state: absent)", async () => {
-    const mockSsh = createMockSsh()
+    const mockSsh = createMockSsh({
+      "ssh-keygen -F 'github.com'": { code: 0 },
+    })
     const mod = ssh.knownHosts("github.com", { state: "absent" })
     const result = await mod.apply(mockSsh, emptyEnv)
     expect(result.status).toBe("changed")
     expect(mockSsh.calls).toContain("ssh-keygen -R 'github.com'")
   })
 
+  it("apply returns ok and skips ssh-keygen -R when the host is not in known_hosts (state: absent)", async () => {
+    const mockSsh = createMockSsh({
+      "ssh-keygen -F 'github.com'": { code: 1 },
+    })
+    const mod = ssh.knownHosts("github.com", { state: "absent" })
+
+    const result = await mod.apply(mockSsh, emptyEnv)
+
+    expect(result.status).toBe("ok")
+    expect(mockSsh.calls).not.toContain("ssh-keygen -R 'github.com'")
+  })
+
   it("apply removes a non-standard-port host entry via a bracketed ssh-keygen -R target", async () => {
-    const mockSsh = createMockSsh()
+    const mockSsh = createMockSsh({
+      "ssh-keygen -F '[github.com]:2222'": { code: 0 },
+    })
     const mod = ssh.knownHosts("github.com", { port: 2222, state: "absent" })
 
     const result = await mod.apply(mockSsh, emptyEnv)

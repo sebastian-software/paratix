@@ -189,10 +189,15 @@ export const ssh = {
             `printf '%s\\n' ${verifiedLines.map((line) => shellQuote(line)).join(" ")} >> ~/.ssh/known_hosts`,
             { silent: true }
           )
-        } else {
-          await conn.exec(`ssh-keygen -R ${shellQuote(lookupTarget)}`, { silent: true })
+          return { status: "changed" }
         }
 
+        const hostKnownBefore = await conn.test(`ssh-keygen -F ${shellQuote(lookupTarget)}`)
+        if (!hostKnownBefore) {
+          return { status: "ok" }
+        }
+
+        await conn.exec(`ssh-keygen -R ${shellQuote(lookupTarget)}`)
         return { status: "changed" }
       },
       async check(conn: null | SshConnection): Promise<"needs-apply" | "ok"> {
