@@ -67,6 +67,7 @@ import {
   sysctl,
   system,
   systemd,
+  timer,
   ufw,
   user,
 } from "paratix/modules"
@@ -333,6 +334,39 @@ rsync SSH process and does not depend on a local `known_hosts` entry.
 | `systemd.daemonReload` | `(): Module`                              | No (always-applies, use as signal) |
 | `systemd.masked`       | `(name: string): Module`                  | Yes                                |
 | `systemd.unmasked`     | `(name: string): Module`                  | Yes                                |
+
+### `timer`
+
+| Method            | Signature                                                                                                                                                                                                                                                                                                                             | Idempotent |
+| ----------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------- |
+| `timer.scheduled` | `(name: string, options: { accuracySec?: number \| string; description?: string; environment?: Record<string, string>; exec: string; group?: string; onCalendar: string \| string[]; persistent?: boolean; randomizedDelaySec?: number \| string; state?: "absent" \| "present"; user?: string; workingDirectory?: string }): Module` | Yes        |
+
+`timer.scheduled` is the systemd-timer equivalent of `cron.job`. It writes
+`<name>.service` (`Type=oneshot`) and `<name>.timer` to `/etc/systemd/system/`,
+reloads systemd, and runs `systemctl enable --now <name>.timer`. Use it as the
+default for new scheduled tasks: `Persistent=true` is on by default so missed
+runs are caught up after downtime, and logs land in journald (`journalctl -u
+<name>.service`). Cron remains a fit for ad-hoc per-user crontab entries.
+
+```typescript
+timer.scheduled("backup", {
+  exec: "/usr/local/bin/backup",
+  onCalendar: "*-*-* 03:00:00",
+})
+
+timer.scheduled("cleanup", {
+  exec: "/usr/local/bin/cleanup",
+  onCalendar: ["Mon..Fri 02:00", "Sat 04:00"],
+  user: "deploy",
+  randomizedDelaySec: 300,
+})
+
+timer.scheduled("legacy-task", {
+  exec: "/usr/local/bin/legacy",
+  onCalendar: "daily",
+  state: "absent",
+})
+```
 
 ### `ufw`
 
