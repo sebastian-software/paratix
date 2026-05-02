@@ -459,6 +459,55 @@ describe("file.copy", () => {
       rmSync(dir, { recursive: true })
     }
   })
+
+  it("regression R-0000032: detects mode drift on the explicit-mode path even without options.owner", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "paratix-test-"))
+    try {
+      const localPath = join(dir, "nginx.conf")
+      writeFileSync(localPath, "server { listen 80; }")
+      const localHash = sha256HexBuffer(Buffer.from("server { listen 80; }"))
+
+      const ssh = createMockSsh({
+        "[ -e '/etc/nginx/nginx.conf' ]": { code: 0 },
+        "[ -f '/etc/nginx/nginx.conf' ]": { code: 0 },
+        "sha256sum '/etc/nginx/nginx.conf'": { stdout: `${localHash}  /etc/nginx/nginx.conf` },
+        // Operator manually ran `chmod 0600 nginx.conf`.
+        "stat -c '%a %U %G' '/etc/nginx/nginx.conf'": { stdout: "600 root root" },
+      })
+
+      // Explicit mode 0644, no owner — previously the missing-owner path skipped
+      // the mode comparison entirely and returned "ok" despite the drift.
+      const mod = file.copy("/etc/nginx/nginx.conf", localPath, { mode: "0644" })
+      const result = await mod.check(ssh, emptyEnv)
+      expect(result).toBe("needs-apply")
+    } finally {
+      rmSync(dir, { recursive: true })
+    }
+  })
+
+  it("regression R-0000032: detects mode drift on the default-mode path even without options.owner", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "paratix-test-"))
+    try {
+      const localPath = join(dir, "html.htm")
+      writeFileSync(localPath, "<html></html>")
+      const localHash = sha256HexBuffer(Buffer.from("<html></html>"))
+
+      const ssh = createMockSsh({
+        "[ -e '/var/www/index.html' ]": { code: 0 },
+        "[ -f '/var/www/index.html' ]": { code: 0 },
+        "sha256sum '/var/www/index.html'": { stdout: `${localHash}  /var/www/index.html` },
+        // Drift: file is 0600 (e.g. previous uploadFile temp default leaked through).
+        "stat -c '%a %U %G' '/var/www/index.html'": { stdout: "600 www-data www-data" },
+      })
+
+      // No options at all — default mode 0644 must still be enforced via check.
+      const mod = file.copy("/var/www/index.html", localPath)
+      const result = await mod.check(ssh, emptyEnv)
+      expect(result).toBe("needs-apply")
+    } finally {
+      rmSync(dir, { recursive: true })
+    }
+  })
 })
 
 describe("file.line", () => {
