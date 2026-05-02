@@ -95,6 +95,63 @@ describe("system.reboot — apply", () => {
     expect(result.meta?.some(isSystemRebootMetaEntry)).toBe(true)
     expect(result.meta?.some(isSystemHostMetaEntry)).toBe(false)
   })
+
+  it("treats SSH connection closed mid-shutdown as a successful reboot trigger", async () => {
+    const ssh = createMockSsh()
+    vi.spyOn(ssh, "exec").mockImplementation(async (command: string) => {
+      ssh.calls.push(command)
+      await Promise.resolve()
+      throw new Error("SSH connection closed")
+    })
+    const mod = system.reboot()
+    const result = await mod.apply(ssh, emptyEnv)
+    expect(result.status).toBe("changed")
+    expect(ssh.calls).toContain("shutdown -r now")
+    expect(result.meta?.some(isSystemRebootMetaEntry)).toBe(true)
+  })
+
+  it("treats ECONNRESET disconnect during shutdown as a successful reboot trigger", async () => {
+    const ssh = createMockSsh()
+    vi.spyOn(ssh, "exec").mockImplementation(async (command: string) => {
+      ssh.calls.push(command)
+      await Promise.resolve()
+      throw new Error("read ECONNRESET")
+    })
+    const mod = system.reboot()
+    const result = await mod.apply(ssh, emptyEnv)
+    expect(result.status).toBe("changed")
+    expect(result.meta?.some(isSystemRebootMetaEntry)).toBe(true)
+  })
+
+  it("emits system.host meta on disconnect when resolveHost is provided", async () => {
+    const ssh = createMockSsh()
+    vi.spyOn(ssh, "exec").mockImplementation(async (command: string) => {
+      ssh.calls.push(command)
+      await Promise.resolve()
+      throw new Error("Connection reset by peer")
+    })
+    const resolveHost = vi.fn().mockResolvedValue("10.0.0.99")
+    const mod = system.reboot({ resolveHost })
+    const result = await mod.apply(ssh, emptyEnv)
+    expect(result.status).toBe("changed")
+    expect(result.meta?.some(isSystemRebootMetaEntry)).toBe(true)
+    expect(result.meta?.find(isSystemHostMetaEntry)?.host).toBe("10.0.0.99")
+  })
+
+  it("still returns failed when exec throws a non-disconnect error", async () => {
+    const ssh = createMockSsh()
+    vi.spyOn(ssh, "exec").mockImplementation(async (command: string) => {
+      ssh.calls.push(command)
+      await Promise.resolve()
+      throw new Error("Permission denied (publickey)")
+    })
+    const mod = system.reboot()
+    const result = await mod.apply(ssh, emptyEnv)
+    expect(result.status).toBe("failed")
+    expect(result.error?.message).toContain("[system.reboot] shutdown -r now failed")
+    expect(result.error?.message).toContain("Permission denied")
+    expect(result.meta).toBeUndefined()
+  })
 })
 
 describe("system.uptime — check", () => {

@@ -20,6 +20,73 @@ export type RebootOptions = {
 }
 
 /**
+ * Detect SSH transport disconnects that originate from the remote host
+ * tearing down the connection (for example when `shutdown -r now` causes the
+ * sshd process to exit before the exec callback completes). Mirrors the
+ * heuristic used in {@link import("./sshd.js")} so the reboot path treats a
+ * disconnect mid-exec as a successful trigger instead of a hard failure.
+ *
+ * @param error - The error caught from `ssh.exec`.
+ * @returns `true` if the error looks like a reboot-induced disconnect.
+ */
+function isRebootDisconnect(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error)
+  return (
+    message.includes("SSH connection closed") ||
+    message.includes("ECONNRESET") ||
+    message.includes("Connection reset")
+  )
+}
+
+/**
+ * Issue `shutdown -r now` and translate the various error shapes into either
+ * `null` (reboot triggered, with or without disconnect) or a failure result.
+ *
+ * @param ssh - The active SSH connection.
+ * @returns `null` on success, a {@link ModuleResult} with `status: "failed"` otherwise.
+ */
+async function triggerReboot(ssh: SshConnection): Promise<ModuleResult | null> {
+  try {
+    const result = await ssh.exec("shutdown -r now", { ignoreExitCode: true, silent: true })
+    if (result.code !== 0) {
+      return failedCommand("[system.reboot] shutdown -r now failed", result)
+    }
+  } catch (error) {
+    // Many systems tear down the SSH session before the exec callback
+    // returns with exit code 0, surfacing as an SSH disconnect error in
+    // ssh2. Treat such disconnects as a successful reboot trigger so the
+    // runner still receives the system.reboot meta and can reconnect.
+    if (!isRebootDisconnect(error)) {
+      const message = error instanceof Error ? error.message : String(error)
+      return failed(`[system.reboot] shutdown -r now failed\n${message}`)
+    }
+  }
+  return null
+}
+
+/**
+ * Build the meta entries emitted on a successful reboot trigger.
+ *
+ * Always emits `system.reboot`; additionally emits `system.host` if the
+ * caller supplied a `resolveHost` option that resolves successfully.
+ *
+ * @param options - The reboot options (specifically `resolveHost`).
+ * @returns The list of meta entries for the module result.
+ */
+async function buildRebootMetaEntries(options: RebootOptions): Promise<ModuleMetaEntry[]> {
+  const entries: ModuleMetaEntry[] = [meta.systemReboot()]
+  if (options.resolveHost != null) {
+    try {
+      const newHost = await options.resolveHost()
+      entries.push(meta.systemHost(newHost))
+    } catch {
+      // resolveHost failed — reconnect will use current host
+    }
+  }
+  return entries
+}
+
+/**
  * Parse the contents of /etc/os-release into a key-value record.
  *
  * @param content - The raw file content.
@@ -209,27 +276,10 @@ export const system = {
       async apply(ssh: null | SshConnection): Promise<ModuleResult> {
         if (!ssh) return failed("[system.reboot] SSH connection is required")
 
-        try {
-          const result = await ssh.exec("shutdown -r now", { ignoreExitCode: true, silent: true })
-          if (result.code !== 0) {
-            return failedCommand("[system.reboot] shutdown -r now failed", result)
-          }
-        } catch (error) {
-          const message = error instanceof Error ? error.message : String(error)
-          return failed(`[system.reboot] shutdown -r now failed\n${message}`)
-        }
+        const failure = await triggerReboot(ssh)
+        if (failure !== null) return failure
 
-        const entries: ModuleMetaEntry[] = [meta.systemReboot()]
-
-        if (options.resolveHost != null) {
-          try {
-            const newHost = await options.resolveHost()
-            entries.push(meta.systemHost(newHost))
-          } catch {
-            // resolveHost failed — reconnect will use current host
-          }
-        }
-
+        const entries = await buildRebootMetaEntries(options)
         return { meta: entries, status: "changed" }
       },
       // eslint-disable-next-line @typescript-eslint/require-await
