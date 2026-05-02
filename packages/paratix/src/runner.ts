@@ -28,6 +28,7 @@ import {
   startModuleSpinner,
 } from "./output.js"
 import { resolveExitCode, signalExitCode } from "./runnerHelpers.js"
+import { clearRegisteredSecrets } from "./secretSink.js"
 import { runSignalModules, type SignalRunStatus } from "./signalOrchestration.js"
 import { SshConnectionImpl } from "./ssh.js"
 
@@ -758,6 +759,28 @@ function rethrowIfNotShutdown(error: unknown, shutdownSignal: () => NodeJS.Signa
   if (shutdownSignal() == null) throw error
 }
 
+/**
+ * Tear down per-run resources: shutdown signal listeners, the pause abort
+ * signal, the process-scoped secret sink, and the ssh connection. R-0000041:
+ * `clearRegisteredSecrets` ensures op resolved values, sudo/user passwords,
+ * and download URL tokens never bleed into a subsequent invocation that
+ * shares the same Node process (e.g. tests, daemonized CLI).
+ *
+ * @param parameters - Cleanup context.
+ * @param parameters.handleShutdownSignal - Listener installed for SIGINT/SIGTERM.
+ * @param parameters.ssh - The SSH connection that may need disconnecting.
+ */
+function teardownPlaybookResources(parameters: {
+  handleShutdownSignal: NodeJS.SignalsListener
+  ssh: SshConnectionImpl | undefined
+}): void {
+  for (const signal of ["SIGINT", "SIGTERM"] as const)
+    process.removeListener(signal, parameters.handleShutdownSignal)
+  setPauseAbortSignal(undefined)
+  clearRegisteredSecrets()
+  parameters.ssh?.disconnect()
+}
+
 export async function runPlaybook(
   definition: ServerDefinition,
   options: RunOptions = {}
@@ -790,10 +813,7 @@ export async function runPlaybook(
   } catch (error) {
     rethrowIfNotShutdown(error, shutdownSignal)
   } finally {
-    for (const signal of ["SIGINT", "SIGTERM"] as const)
-      process.removeListener(signal, handleShutdownSignal)
-    setPauseAbortSignal(undefined)
-    ssh?.disconnect()
+    teardownPlaybookResources({ handleShutdownSignal, ssh })
   }
 
   resolveExitCode(shutdownSignal(), stats)

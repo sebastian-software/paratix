@@ -1,4 +1,5 @@
 import { failed, failedCommand } from "../moduleFailure.js"
+import { registerSecret, unregisterSecret } from "../secretSink.js"
 import { shellQuote } from "../ssh.js"
 import { type Module, type ModuleResult, NEEDS_APPLY, type SshConnection } from "../types.js"
 
@@ -37,17 +38,26 @@ async function setPassword(
   name: string,
   password: string
 ): Promise<ModuleResult | null> {
-  const credential = [name, password].join(":")
-  const pwResult = await ssh.exec(`chpasswd -e`, {
-    ignoreExitCode: true,
-    input: `${credential}\n`,
-    secrets: [password],
-    silent: true,
-  })
-  if (pwResult.code !== 0) {
-    return failedCommand(`[user.present: ${name}] chpasswd -e failed`, pwResult, [password])
+  // R-0000041: register the hash with the process-scoped secret sink so any
+  // subsequent generic stderr output (printCommandFailure /
+  // printVerboseGenericError) masks it, even when the surfacing error is not
+  // a CommandError emitted by ssh.exec.
+  registerSecret(password)
+  try {
+    const credential = [name, password].join(":")
+    const pwResult = await ssh.exec(`chpasswd -e`, {
+      ignoreExitCode: true,
+      input: `${credential}\n`,
+      secrets: [password],
+      silent: true,
+    })
+    if (pwResult.code !== 0) {
+      return failedCommand(`[user.present: ${name}] chpasswd -e failed`, pwResult, [password])
+    }
+    return null
+  } finally {
+    unregisterSecret(password)
   }
-  return null
 }
 
 function parsePasswdEntry(entry: string): { home: string; shell: string; uid: string } {

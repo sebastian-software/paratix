@@ -4,6 +4,7 @@ import type { Environment, Module, ModuleResult } from "../types.js"
 
 import { environmentToMetaEntries } from "../meta.js"
 import { failed } from "../moduleFailure.js"
+import { registerSecret } from "../secretSink.js"
 import { maskSecrets } from "../sshHelpers.js"
 import { generateTotpCode } from "../totp.js"
 
@@ -250,6 +251,15 @@ export const op = {
           const resolvedRegular = await resolveRegularReferences(regularEntries, leakedValues)
           const resolvedOtp = await resolveOtpReferences(otpEntries, leakedValues)
 
+          // R-0000041: register the resolved values in the process-scoped
+          // secret sink so any subsequent generic Error / stack trace that
+          // reaches printCommandFailure gets the values redacted, even when
+          // the rendering call site is not aware of these secrets.
+          for (const value of leakedValues) registerSecret(value)
+          for (const resolvedValue of Object.values(resolvedRegular)) {
+            if (typeof resolvedValue === "string") registerSecret(resolvedValue)
+          }
+
           return {
             meta: environmentToMetaEntries({ ...resolvedRegular, ...resolvedOtp }),
             status: "ok",
@@ -258,6 +268,10 @@ export const op = {
           const rawDetail = buildOpFailureDetail(error)
           const secrets = [...Object.values(references), ...leakedValues]
           const detail = maskSecrets(rawDetail, secrets)
+          // Register the leaked values for the duration of the run so the
+          // shared stderr renderers redact them if the failure bubbles up
+          // through unrelated catch sites.
+          for (const value of leakedValues) registerSecret(value)
           return failed(`Failed to resolve 1Password references: ${detail}`)
         }
       },

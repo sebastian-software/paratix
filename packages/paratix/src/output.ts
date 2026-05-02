@@ -4,6 +4,7 @@ import pc from "picocolors"
 import type { ModuleStatus } from "./types.js"
 
 import { fitAnimatedModuleLine, formatDisplayModule } from "./outputFormatting.js"
+import { maskRegisteredSecrets } from "./secretSink.js"
 import { CommandError } from "./sshHelpers.js"
 
 const MODULE_NAME_WIDTH = 56
@@ -408,7 +409,10 @@ function printVerboseErrorCause(cause: unknown, depth: number): void {
 function printVerboseGenericError(error: Error): void {
   const stack = error.stack?.trim() ?? ""
   const stackOrMessage = stack.length > 0 ? stack : String(error)
-  printVerboseErrorBlock("Full stack:", stackOrMessage)
+  // R-0000041: redact any registered secrets that may have flowed into the
+  // stack trace through Error wrapping or third-party libraries before it
+  // reaches stderr.
+  printVerboseErrorBlock("Full stack:", maskRegisteredSecrets(stackOrMessage))
   const cause = getErrorCause(error)
   if (cause !== undefined) {
     printVerboseErrorCause(cause, 1)
@@ -419,6 +423,13 @@ function printVerboseGenericError(error: Error): void {
  * Print the error message of a failed command and, when verbose mode is active
  * and the error is a {@link CommandError}, the full untruncated output.
  *
+ * R-0000041: every string written to stderr is passed through
+ * {@link maskRegisteredSecrets} so resolved op values, sudo passwords, user
+ * password hashes, and download URL tokens never leak through generic
+ * `Error.message` or stack-trace paths. Modules register their secrets via
+ * `secretSink.registerSecret` (or `withRegisteredSecrets`) for the duration
+ * of the work that produces them.
+ *
  * @param error - The caught error value.
  * @param verbose - Whether to show full stdout/stderr.
  */
@@ -426,12 +437,15 @@ export function printCommandFailure(error: unknown, verbose: boolean): void {
   if (verbose && error instanceof CommandError) {
     // Print only the exit-code line, skip the truncated output and hint
     const summaryLine = error.message.split("\n")[0]
-    printCommandError("", summaryLine)
-    printVerboseCommandError(error.fullStdout, error.fullStderr)
+    printCommandError("", maskRegisteredSecrets(summaryLine))
+    printVerboseCommandError(
+      maskRegisteredSecrets(error.fullStdout),
+      maskRegisteredSecrets(error.fullStderr)
+    )
     return
   }
 
-  printCommandError("", String(error))
+  printCommandError("", maskRegisteredSecrets(String(error)))
   if (verbose && error instanceof Error) {
     printVerboseGenericError(error)
   }

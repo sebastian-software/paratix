@@ -2,6 +2,7 @@ import { createHash, timingSafeEqual } from "node:crypto"
 
 /* eslint-disable max-lines */
 import { failed } from "../moduleFailure.js"
+import { withRegisteredSecrets } from "../secretSink.js"
 import { shellQuote, validateMode } from "../ssh.js"
 import { maskSecrets } from "../sshHelpers.js"
 import { type Module, type ModuleResult, NEEDS_APPLY, type SshConnection } from "../types.js"
@@ -397,32 +398,41 @@ async function performDownload(
 ): Promise<ModuleResult> {
   if (!conn) return failed(`[download] SSH connection is required for ${parameters.destination}`)
 
-  await conn.exec(`mkdir -p "$(dirname ${shellQuote(parameters.destination)})"`, { silent: true })
-  const temporaryDestination = await conn.output(
-    buildTemporaryDownloadPathCommand(parameters.destination)
-  )
-  const downloadParameters = { ...parameters, destination: temporaryDestination }
-  let shouldCleanupTemporaryFile = true
-
-  try {
-    await executeCurlDownload(conn, downloadParameters)
-
-    if (!(await verifyChecksum(conn, downloadParameters))) {
-      return failed(`[download] checksum verification failed for ${parameters.destination}`)
-    }
-    await applyFileAttributes(conn, downloadParameters)
-    await conn.exec(
-      `mv ${shellQuote(downloadParameters.destination)} ${shellQuote(parameters.destination)}`,
-      { silent: true }
+  // R-0000041: register the URL and any token-bearing headers in the
+  // process-scoped secret sink so generic Error/stack-trace output during
+  // the download (e.g. an unrelated SSH disconnect mid-curl) is masked,
+  // not just the CommandError stdout/stderr that ssh.exec already redacts.
+  const registeredSecrets = parameters.secrets ?? []
+  return withRegisteredSecrets(registeredSecrets, async () => {
+    await conn.exec(`mkdir -p "$(dirname ${shellQuote(parameters.destination)})"`, {
+      silent: true,
+    })
+    const temporaryDestination = await conn.output(
+      buildTemporaryDownloadPathCommand(parameters.destination)
     )
-    shouldCleanupTemporaryFile = false
+    const downloadParameters = { ...parameters, destination: temporaryDestination }
+    let shouldCleanupTemporaryFile = true
 
-    return { status: "changed" }
-  } finally {
-    if (shouldCleanupTemporaryFile) {
-      await cleanupTemporaryDownloadFile(conn, downloadParameters)
+    try {
+      await executeCurlDownload(conn, downloadParameters)
+
+      if (!(await verifyChecksum(conn, downloadParameters))) {
+        return failed(`[download] checksum verification failed for ${parameters.destination}`)
+      }
+      await applyFileAttributes(conn, downloadParameters)
+      await conn.exec(
+        `mv ${shellQuote(downloadParameters.destination)} ${shellQuote(parameters.destination)}`,
+        { silent: true }
+      )
+      shouldCleanupTemporaryFile = false
+
+      return { status: "changed" }
+    } finally {
+      if (shouldCleanupTemporaryFile) {
+        await cleanupTemporaryDownloadFile(conn, downloadParameters)
+      }
     }
-  }
+  })
 }
 
 /**

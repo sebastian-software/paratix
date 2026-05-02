@@ -1309,7 +1309,7 @@ describe("file.replace", () => {
     // Regression for R-0000034: pattern "foo(?!bar)" with replacement "foobar".
     // The old grep-based check reported needs-apply forever because the file
     // still contains "foo" as a substring of "foobar". The new content-based
-    // check correctly recognises that applying the regex on "alpha foobar gamma"
+    // check correctly detects that applying the regex on "alpha foobar gamma"
     // would not change the file (the negative lookahead skips "foo" inside
     // "foobar") and reports ok.
     const ssh = createMockSsh({
