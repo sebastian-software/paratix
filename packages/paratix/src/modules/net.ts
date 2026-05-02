@@ -365,7 +365,10 @@ export const net = {
       async apply(conn: null | SshConnection): Promise<ModuleResult> {
         if (!conn) return failed("[net.resolv] SSH connection is required")
 
-        await conn.exec("rm -f /etc/resolv.conf", EXEC_OPTS)
+        // Atomic mv-replace via writeFile overwrites both regular files and symlinks,
+        // so we never destroy /etc/resolv.conf before the replacement content is in place.
+        // A failed writeFile leaves the previous file (or symlink) intact, which keeps the
+        // host's resolver configuration usable.
         await conn.writeFile("/etc/resolv.conf", expectedContent, { mode: NET_CONFIG_FILE_MODE })
 
         return { status: "changed" }

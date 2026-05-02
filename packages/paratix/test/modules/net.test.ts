@@ -251,19 +251,11 @@ describe("net.resolv — apply", () => {
     expect(result.status).toBe("changed")
   })
 
-  it("removes existing symlink before writing (rm -f)", async () => {
+  it("does not unconditionally rm -f /etc/resolv.conf before writing", async () => {
     const mockSsh = createMockSsh()
     const mod = net.resolv({ nameservers: ["1.1.1.1"] })
     await mod.apply(mockSsh, emptyEnv)
-    expect(mockSsh.calls).toContain("rm -f /etc/resolv.conf")
-  })
-
-  it("runs rm -f before write (order check)", async () => {
-    const mockSsh = createMockSsh()
-    const mod = net.resolv({ nameservers: ["1.1.1.1"] })
-    await mod.apply(mockSsh, emptyEnv)
-    const rmIndex = mockSsh.calls.indexOf("rm -f /etc/resolv.conf")
-    expect(rmIndex).toBeGreaterThanOrEqual(0)
+    expect(mockSsh.calls).not.toContain("rm -f /etc/resolv.conf")
   })
 
   it("returns changed with search domains", async () => {
@@ -273,14 +265,38 @@ describe("net.resolv — apply", () => {
     expect(result.status).toBe("changed")
   })
 
-  it("removes symlink even with multiple nameservers and search domains", async () => {
+  it("does not rm -f /etc/resolv.conf even with multiple nameservers and search domains", async () => {
     const mockSsh = createMockSsh()
     const mod = net.resolv({
       nameservers: ["1.1.1.1", "8.8.4.4"],
       search: ["example.com", "local"],
     })
     await mod.apply(mockSsh, emptyEnv)
-    expect(mockSsh.calls).toContain("rm -f /etc/resolv.conf")
+    expect(mockSsh.calls).not.toContain("rm -f /etc/resolv.conf")
+  })
+
+  it("regression: preserves /etc/resolv.conf when writeFile fails", async () => {
+    // Stub writeFile to simulate a failure (disk full, sudo error, etc.).
+    // The previous implementation removed /etc/resolv.conf before writeFile,
+    // which left the host without resolver configuration on any failure.
+    const writeFileError = new Error("simulated disk full")
+    const mockSsh = createMockSsh()
+    const original = mockSsh.writeFile
+    mockSsh.writeFile = async (): Promise<void> => {
+      await Promise.resolve()
+      throw writeFileError
+    }
+    const mod = net.resolv({ nameservers: ["1.1.1.1"] })
+
+    await expect(mod.apply(mockSsh, emptyEnv)).rejects.toThrow(writeFileError)
+
+    // No destructive action occurred against /etc/resolv.conf before the failed write.
+    expect(mockSsh.calls).not.toContain("rm -f /etc/resolv.conf")
+    expect(mockSsh.calls.some((call: string) => /\brm\b.*\/etc\/resolv\.conf/v.test(call))).toBe(
+      false
+    )
+
+    mockSsh.writeFile = original
   })
 })
 
