@@ -17,9 +17,12 @@ function isUnsafeAuthorizedKeysHomeError(error: unknown, user: string): boolean 
   )
 }
 
-async function createAuthorizedKeysTemporaryPath(conn: SshConnection): Promise<string> {
-  await conn.exec("install -d -m 700 /run/paratix", { silent: true })
-  return conn.output("mktemp /run/paratix/authorized-keys.XXXXXX")
+async function createAuthorizedKeysTemporaryPath(
+  conn: SshConnection,
+  sshDirectoryPath: string
+): Promise<string> {
+  const template = `${sshDirectoryPath}/.authorized-keys.XXXXXX`
+  return conn.output(`mktemp ${shellQuote(template)}`)
 }
 
 async function ensureAuthorizedKeysIsNotSymlink(
@@ -61,12 +64,13 @@ async function rewriteAuthorizedKeys(
   parameters: {
     authorizedKeysPath: string
     key: string
+    sshDirectoryPath: string
     state: "absent" | "present"
     user: string
   }
 ): Promise<void> {
-  const { authorizedKeysPath, key, state, user } = parameters
-  const temporaryPath = await createAuthorizedKeysTemporaryPath(conn)
+  const { authorizedKeysPath, key, sshDirectoryPath, state, user } = parameters
+  const temporaryPath = await createAuthorizedKeysTemporaryPath(conn, sshDirectoryPath)
 
   try {
     if (state === "present") {
@@ -104,7 +108,8 @@ export async function applyAuthorizedKeys(
   }
 
   const home = await resolveHome(conn, user)
-  const directory = shellQuote(`${home}/.ssh`)
+  const sshDirectoryPath = `${home}/.ssh`
+  const directory = shellQuote(sshDirectoryPath)
   const authorizedKeysPath = `${home}/.ssh/authorized_keys`
 
   await conn.exec(
@@ -112,7 +117,13 @@ export async function applyAuthorizedKeys(
     { silent: true }
   )
   await ensureAuthorizedKeysIsNotSymlink(conn, authorizedKeysPath)
-  await rewriteAuthorizedKeys(conn, { authorizedKeysPath, key, state, user })
+  await rewriteAuthorizedKeys(conn, {
+    authorizedKeysPath,
+    key,
+    sshDirectoryPath,
+    state,
+    user,
+  })
 
   return { status: "changed" }
 }
