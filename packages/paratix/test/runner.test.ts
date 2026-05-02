@@ -89,6 +89,10 @@ function createMockSpawnChild(stdout: string, exitCode = 0): MockChildProcess {
   return child
 }
 
+const setEncodingNoop = (): void => {
+  /* setEncoding is a no-op on the simulated streams in runner tests */
+}
+
 function createSuccessfulSshdDryRunExecMock() {
   return vi.fn().mockResolvedValue({ code: 0, stderr: "", stdout: "" })
 }
@@ -3517,20 +3521,23 @@ describe("runPlaybook rsync check error handling", () => {
     })
 
     vi.doMock("node:child_process", () => ({
-      execFile: vi.fn(
-        (
-          _file: string,
-          _args: readonly string[],
-          callback: (error: Error, stdout: string, stderr: string) => void
-        ) => {
-          const error = Object.assign(new Error("rsync failed"), {
-            code: 23,
-            stderr: "Permission denied (publickey).",
-            stdout: "",
-          })
-          callback(error, "", "Permission denied (publickey).")
-        }
-      ),
+      spawn: vi.fn(() => {
+        // Mirror the spawn-based runner contract introduced in R-0000040: a
+        // failed rsync emits stderr lines and closes with a non-zero exit code.
+        const child = new EventEmitter() as {
+          stderr: { on: EventEmitter["on"]; setEncoding: () => void }
+          stdout: { on: EventEmitter["on"]; setEncoding: () => void }
+        } & EventEmitter
+        const stdoutStream = new EventEmitter()
+        const stderrStream = new EventEmitter()
+        child.stdout = Object.assign(stdoutStream, { setEncoding: setEncodingNoop })
+        child.stderr = Object.assign(stderrStream, { setEncoding: setEncodingNoop })
+        queueMicrotask(() => {
+          stderrStream.emit("data", "Permission denied (publickey).\n")
+          child.emit("close", 23)
+        })
+        return child
+      }),
     }))
     vi.doMock("../src/ssh.js", () => ({
       shellQuote: (s: string) => `'${s}'`,

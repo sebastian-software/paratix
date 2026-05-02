@@ -1,4 +1,4 @@
-import { execFile, type ExecFileException } from "node:child_process"
+import { spawn } from "node:child_process"
 import { randomUUID } from "node:crypto"
 import { unlinkSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
@@ -234,6 +234,70 @@ function createRsyncError(
   )
 }
 
+/**
+ * Drain a partial buffer into the line sink and keep any trailing characters
+ * after the last newline for the next chunk. Hoisted to module scope so the
+ * runner does not recreate it for every `data` event.
+ *
+ * @param buffer - The current accumulated chunk text.
+ * @param sink - Callback that receives the completed `\n`-terminated lines.
+ * @returns The remainder of `buffer` that follows the last newline.
+ */
+function flushBufferToLines(buffer: string, sink: (chunk: string) => void): string {
+  const newlineIndex = buffer.lastIndexOf("\n")
+  if (newlineIndex === -1) return buffer
+  sink(buffer.slice(0, newlineIndex + 1))
+  return buffer.slice(newlineIndex + 1)
+}
+
+/**
+ * Run `rsync` and stream stdout/stderr line-by-line. R-0000040: replaces the
+ * previous `execFile` runner whose default 1 MiB stdout buffer could trip
+ * `ERR_CHILD_PROCESS_STDIO_MAXBUFFER` on large `--itemize-changes` outputs.
+ *
+ * @param rsyncArguments - The fully-built argv for the rsync invocation.
+ * @returns The captured stdout, stderr, and exit code.
+ */
+async function runRsyncProcess(
+  rsyncArguments: string[]
+): Promise<{ code: null | number; spawnError?: Error; stderr: string; stdout: string }> {
+  return new Promise((resolve) => {
+    const child = spawn("rsync", rsyncArguments, { stdio: ["ignore", "pipe", "pipe"] })
+    let stdout = ""
+    let stderr = ""
+    let stdoutBuffer = ""
+    let stderrBuffer = ""
+
+    child.stdout.setEncoding("utf8")
+    child.stderr.setEncoding("utf8")
+    child.stdout.on("data", (chunk: string) => {
+      stdoutBuffer += chunk
+      stdoutBuffer = flushBufferToLines(stdoutBuffer, (lines) => {
+        stdout += lines
+      })
+    })
+    child.stderr.on("data", (chunk: string) => {
+      stderrBuffer += chunk
+      stderrBuffer = flushBufferToLines(stderrBuffer, (lines) => {
+        stderr += lines
+      })
+    })
+
+    child.on("error", (error: Error) => {
+      stdout += stdoutBuffer
+      stderr += stderrBuffer
+      stdoutBuffer = ""
+      stderrBuffer = ""
+      resolve({ code: null, spawnError: error, stderr, stdout })
+    })
+    child.on("close", (code: null | number) => {
+      stdout += stdoutBuffer
+      stderr += stderrBuffer
+      resolve({ code, stderr, stdout })
+    })
+  })
+}
+
 async function executeRsync(parameters: {
   dryRun: boolean
   options: SyncOptions
@@ -256,22 +320,24 @@ async function executeRsync(parameters: {
   })
 
   try {
-    return await new Promise((resolve, reject) => {
-      execFile("rsync", rsyncArguments, (error: ExecFileException | null, stdout, stderr) => {
-        if (error != null) {
-          reject(
-            createRsyncError(options, phase, {
-              code: error.code ?? undefined,
-              error,
-              stderr,
-              stdout,
-            })
-          )
-          return
-        }
-        resolve(stdout)
+    const result = await runRsyncProcess(rsyncArguments)
+    if (result.spawnError != null) {
+      throw createRsyncError(options, phase, {
+        code: undefined,
+        error: result.spawnError,
+        stderr: result.stderr,
+        stdout: result.stdout,
       })
-    })
+    }
+    if (result.code !== 0) {
+      throw createRsyncError(options, phase, {
+        code: result.code == null ? undefined : String(result.code),
+        error: new Error(`rsync exited with code ${String(result.code)}`),
+        stderr: result.stderr,
+        stdout: result.stdout,
+      })
+    }
+    return result.stdout
   } finally {
     cleanupVerifiedKnownHostsFile(verifiedKnownHostsPath)
   }

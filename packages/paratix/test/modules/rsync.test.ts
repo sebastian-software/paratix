@@ -1,6 +1,7 @@
-import { execFile } from "node:child_process"
+import { spawn } from "node:child_process"
 import { randomUUID } from "node:crypto"
 import { unlinkSync, writeFileSync } from "node:fs"
+import { EventEmitter, Readable } from "node:stream"
 import { beforeEach, describe, expect, it, vi } from "vitest"
 
 import { rsync } from "../../src/modules/rsync.js"
@@ -12,7 +13,7 @@ vi.mock("node:crypto", () => ({
 }))
 
 vi.mock("node:child_process", () => ({
-  execFile: vi.fn(),
+  spawn: vi.fn(),
 }))
 
 vi.mock("node:fs", () => ({
@@ -21,7 +22,7 @@ vi.mock("node:fs", () => ({
 }))
 
 const emptyEnv = {}
-const mockExecFile = vi.mocked(execFile)
+const mockSpawn = vi.mocked(spawn)
 const mockRandomUUID = vi.mocked(randomUUID)
 const mockUnlinkSync = vi.mocked(unlinkSync)
 const mockWriteFileSync = vi.mocked(writeFileSync)
@@ -30,31 +31,86 @@ const mockWriteFileSync = vi.mocked(writeFileSync)
 // Helpers — centralize mock setup to avoid repetitive eslint-disable lines
 // ---------------------------------------------------------------------------
 
-function mockSuccess(stdout = ""): void {
-  mockExecFile.mockImplementation((...args: unknown[]) => {
-    const callback = args.at(-1) as (error: null, stdout: string, stderr: string) => void
-    callback(null, stdout, "")
-    return undefined as never
+const noopRead = (): void => {
+  /* readable is push-based in this fake; pull is a no-op */
+}
+
+/**
+ * Build a fake child process that emits the configured stdout/stderr chunks
+ * and then closes with the given exit code. R-0000040: tests must drive a
+ * spawn-based runner instead of execFile, and stdout can be arbitrarily
+ * large because the runner streams it line-by-line.
+ *
+ * @param parameters - Configuration for the simulated rsync child.
+ * @param parameters.code - Exit code to emit on close. Defaults to 0.
+ * @param parameters.stderr - Stderr payload split into chunks for emission.
+ * @param parameters.stderrChunks - Optional explicit chunk array overriding stderr.
+ * @param parameters.stdout - Stdout payload split into chunks for emission.
+ * @param parameters.stdoutChunks - Optional explicit chunk array overriding stdout.
+ * @param parameters.spawnError - When provided, the process emits an `error` event.
+ * @returns The fake child-process object compatible with the runner.
+ */
+function makeFakeRsyncChild(parameters: {
+  code?: null | number
+  spawnError?: Error
+  stderr?: string
+  stderrChunks?: string[]
+  stdout?: string
+  stdoutChunks?: string[]
+}): { stderr: Readable; stdout: Readable } & EventEmitter {
+  const child = new EventEmitter() as {
+    stderr: Readable
+    stdout: Readable
+  } & EventEmitter
+  child.stdout = new Readable({ read: noopRead })
+  child.stderr = new Readable({ read: noopRead })
+
+  const stdoutChunks =
+    parameters.stdoutChunks ?? (parameters.stdout == null ? [] : [parameters.stdout])
+  const stderrChunks =
+    parameters.stderrChunks ?? (parameters.stderr == null ? [] : [parameters.stderr])
+
+  setImmediate(() => {
+    for (const chunk of stdoutChunks) child.stdout.push(chunk)
+    child.stdout.push(null)
+    for (const chunk of stderrChunks) child.stderr.push(chunk)
+    child.stderr.push(null)
+    if (parameters.spawnError != null) {
+      child.emit("error", parameters.spawnError)
+      return
+    }
+    child.emit("close", parameters.code ?? 0)
   })
+
+  return child
+}
+
+function mockSuccess(stdout = ""): void {
+  mockSpawn.mockImplementation(() => makeFakeRsyncChild({ code: 0, stdout }) as never)
+}
+
+function resolveFailureCode(rawCode: number | string | undefined): number {
+  if (typeof rawCode === "number") return rawCode
+  if (typeof rawCode === "string") return Number.parseInt(rawCode, 10)
+  return 1
 }
 
 function mockFailureWithStderr(
   parameters: { code?: number | string; stderr?: string; stdout?: string } = {}
 ): void {
-  mockExecFile.mockImplementation((...args: unknown[]) => {
-    const callback = args.at(-1) as (error: Error, stdout: string, stderr: string) => void
-    const error = Object.assign(new Error("rsync failed"), {
-      code: parameters.code,
-      stderr: parameters.stderr ?? "",
-      stdout: parameters.stdout ?? "",
-    })
-    callback(error, parameters.stdout ?? "", parameters.stderr ?? "")
-    return undefined as never
-  })
+  const code = resolveFailureCode(parameters.code)
+  mockSpawn.mockImplementation(
+    () =>
+      makeFakeRsyncChild({
+        code,
+        stderr: parameters.stderr,
+        stdout: parameters.stdout,
+      }) as never
+  )
 }
 
 function getArgs(): string[] {
-  return mockExecFile.mock.calls[0][1] as string[]
+  return mockSpawn.mock.calls[0][1] as string[]
 }
 
 // ---------------------------------------------------------------------------
@@ -63,7 +119,7 @@ function getArgs(): string[] {
 
 describe("rsync.sync — check", () => {
   beforeEach(() => {
-    mockExecFile.mockReset()
+    mockSpawn.mockReset()
   })
 
   it("returns needs-apply when ssh is null", async () => {
@@ -103,8 +159,8 @@ describe("rsync.sync — check", () => {
     const mod = rsync.sync({ dest: "/remote/dest", src: "/local/src" })
     await mod.check(mockSsh, emptyEnv)
 
-    expect(mockExecFile).toHaveBeenCalledOnce()
-    const [cmd] = mockExecFile.mock.calls[0]
+    expect(mockSpawn).toHaveBeenCalledOnce()
+    const [cmd] = mockSpawn.mock.calls[0]
     expect(cmd).toBe("rsync")
     const args = getArgs()
     expect(args).toContain("/local/src")
@@ -127,7 +183,7 @@ describe("rsync.sync — check", () => {
 
 describe("rsync.sync — apply", () => {
   beforeEach(() => {
-    mockExecFile.mockReset()
+    mockSpawn.mockReset()
   })
 
   it("returns failed when ssh is null", async () => {
@@ -184,12 +240,45 @@ describe("rsync.sync — apply", () => {
     const mod = rsync.sync({ dest: "/remote/dest", src: "/local/src" })
     await mod.apply(mockSsh, emptyEnv)
 
-    expect(mockExecFile).toHaveBeenCalledOnce()
-    const [cmd] = mockExecFile.mock.calls[0]
+    expect(mockSpawn).toHaveBeenCalledOnce()
+    const [cmd] = mockSpawn.mock.calls[0]
     expect(cmd).toBe("rsync")
     const args = getArgs()
     expect(args).toContain("/local/src")
     expect(args).toContain("root@1.2.3.4:/remote/dest")
+  })
+
+  it("succeeds even when rsync produces multi-megabyte stdout (R-0000040 regression)", async () => {
+    // R-0000040: the previous execFile-based runner used Node's default
+    // 1 MiB stdout buffer. With --itemize-changes, a sync of tens of
+    // thousands of files easily exceeds that limit and the runner would
+    // surface ERR_CHILD_PROCESS_STDIO_MAXBUFFER even though rsync itself
+    // succeeded. The spawn-based streaming runner handles this case.
+    // 80 KiB-aligned realistic itemize lines * 60 000 lines = ~2.16 MiB,
+    // comfortably above the 1 MiB execFile default that the previous
+    // implementation used.
+    const lineCount = 60_000
+    const itemizeLine = ">f+++++++++ assets/image-XXXXXX.png\n"
+    const totalBytes = itemizeLine.length * lineCount
+    expect(totalBytes).toBeGreaterThan(1024 * 1024)
+
+    // Stream the output in 256 KiB chunks so the runner sees realistic
+    // multi-event delivery rather than a single push.
+    const chunkSize = 256 * 1024
+    const stdoutChunks: string[] = []
+    let assembled = ""
+    for (let i = 0; i < lineCount; i += 1) assembled += itemizeLine
+    for (let offset = 0; offset < assembled.length; offset += chunkSize) {
+      stdoutChunks.push(assembled.slice(offset, offset + chunkSize))
+    }
+
+    mockSpawn.mockImplementation(() => makeFakeRsyncChild({ code: 0, stdoutChunks }) as never)
+
+    const mockSsh = createMockSsh()
+    const mod = rsync.sync({ dest: "/remote/dest", src: "/local/src" })
+    const result = await mod.apply(mockSsh, emptyEnv)
+
+    expect(result.status).toBe("changed")
   })
 })
 
@@ -210,7 +299,7 @@ describe("rsync.sync — name", () => {
 
 describe("rsync.sync — argument building", () => {
   beforeEach(() => {
-    mockExecFile.mockReset()
+    mockSpawn.mockReset()
     mockSuccess()
     mockRandomUUID.mockReturnValue("known-hosts-test")
     mockUnlinkSync.mockReset()
@@ -453,7 +542,7 @@ describe("rsync.sync — argument building", () => {
 
 describe("rsync.sync — SSH auth method in transport flag", () => {
   beforeEach(() => {
-    mockExecFile.mockReset()
+    mockSpawn.mockReset()
     mockSuccess()
   })
 
@@ -602,6 +691,6 @@ describe("rsync.sync — SSH auth method in transport flag", () => {
       "[rsync.sync] check requires agent or private-key SSH authentication; password fallback sessions are not supported"
     )
 
-    expect(mockExecFile).not.toHaveBeenCalled()
+    expect(mockSpawn).not.toHaveBeenCalled()
   })
 })
