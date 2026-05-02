@@ -206,4 +206,90 @@ describe("ufw.rule", () => {
     const mod = ufw.rule("allow", [80, 443])
     expect(mod.name).toBe("ufw.rule: allow 80,443")
   })
+
+  it("check returns needs-apply when only a port with the same suffix is configured (allow)", async () => {
+    const ssh = createMockSsh({
+      "ufw status": {
+        stdout: [
+          "Status: active",
+          "",
+          "To                         Action      From",
+          "--                         ------      ----",
+          "5022                       ALLOW       Anywhere",
+        ].join("\n"),
+      },
+    })
+    const mod = ufw.rule("allow", 22)
+    const result = await mod.check(ssh, emptyEnv)
+    expect(result).toBe("needs-apply")
+  })
+
+  it("check returns needs-apply when only a port with the same suffix is configured (deny)", async () => {
+    const ssh = createMockSsh({
+      "ufw status": {
+        stdout: [
+          "Status: active",
+          "",
+          "To                         Action      From",
+          "--                         ------      ----",
+          "522                        DENY        Anywhere",
+        ].join("\n"),
+      },
+    })
+    const mod = ufw.rule("deny", 22)
+    const result = await mod.check(ssh, emptyEnv)
+    expect(result).toBe("needs-apply")
+  })
+
+  it("check returns needs-apply when an unrelated multi-digit port shares the suffix", async () => {
+    const ssh = createMockSsh({
+      "ufw status": {
+        stdout: [
+          "Status: active",
+          "",
+          "To                         Action      From",
+          "--                         ------      ----",
+          "2222                       ALLOW       Anywhere",
+          "1022                       ALLOW       Anywhere",
+        ].join("\n"),
+      },
+    })
+    const mod = ufw.rule("allow", 22)
+    const result = await mod.check(ssh, emptyEnv)
+    expect(result).toBe("needs-apply")
+  })
+
+  it("check returns ok when the port is configured with a /tcp suffix", async () => {
+    const ssh = createMockSsh({
+      "ufw status": {
+        stdout: [
+          "Status: active",
+          "",
+          "To                         Action      From",
+          "--                         ------      ----",
+          "22/tcp                     ALLOW       Anywhere",
+        ].join("\n"),
+      },
+    })
+    const mod = ufw.rule("allow", 22)
+    const result = await mod.check(ssh, emptyEnv)
+    expect(result).toBe("ok")
+  })
+
+  it("check returns ok when the port is configured with a /udp suffix", async () => {
+    const ssh = createMockSsh({
+      "ufw status": {
+        stdout: [
+          "Status: active",
+          "",
+          "To                         Action      From",
+          "--                         ------      ----",
+          "53/udp                     ALLOW       Anywhere",
+        ].join("\n"),
+      },
+    })
+    const mod = ufw.rule("allow", 53)
+    const result = await mod.check(ssh, emptyEnv)
+    expect(result).toBe("ok")
+  })
 })

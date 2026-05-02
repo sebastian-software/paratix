@@ -108,8 +108,11 @@ export const ufw = {
         const status = await ssh.output(`${UFW} status`)
         for (const port of portList) {
           const expectedAction = action === "allow" ? "ALLOW" : "DENY"
+          // Anchor the port at the line start and require a whitespace boundary
+          // after the optional /tcp or /udp suffix so port 22 does not match
+          // 5022, 1022, 2222 etc.
           // eslint-disable-next-line security/detect-non-literal-regexp
-          const pattern = new RegExp(`${port}\\s+${expectedAction}`, "v")
+          const pattern = new RegExp(`^${port}(?:/(?:tcp|udp))?\\s+${expectedAction}\\b`, "mv")
           if (!pattern.test(status)) {
             return NEEDS_APPLY
           }
