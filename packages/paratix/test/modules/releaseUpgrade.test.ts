@@ -258,6 +258,139 @@ describe("releaseUpgrade.upgrade — apply (Debian)", () => {
     expect(dpkgIndex).toBeGreaterThan(updateIndex)
     expect(dpkgIndex).toBeLessThan(fullUpgradeIndex)
   })
+
+  // R-0000046 regression: a downstream apt failure must roll the rewritten
+  // sources files back to the original suite so the host never ends up with
+  // sources pointing at the new suite while the upgrade itself failed.
+  describe("R-0000046: sources rollback on apt failure", () => {
+    function captureWriteFile(ssh: ReturnType<typeof createMockSsh>) {
+      const writes: { content: string; path: string }[] = []
+      // eslint-disable-next-line @typescript-eslint/require-await
+      const replacement = async (path: string, content: string): Promise<void> => {
+        writes.push({ content, path })
+      }
+      // Override the noop `writeFile` so the test can observe what content
+      // (and in which order) was written to disk.
+      Object.assign(ssh, { writeFile: replacement })
+      return writes
+    }
+
+    it("apt-get update fails → restores the original /etc/apt/sources.list content", async () => {
+      // readFile (output) trims trailing whitespace, so the snapshot is the
+      // trimmed content (no trailing newline).
+      const originalSources = "deb http://deb.debian.org/debian bookworm main"
+      const ssh = createMockSsh(
+        debianApplyResponses("bookworm", "trixie", {
+          "DEBIAN_FRONTEND=noninteractive apt-get update": { code: 1 },
+        })
+      )
+      const writes = captureWriteFile(ssh)
+      const mod = releaseUpgrade.upgrade()
+      const result = await mod.apply(ssh, emptyEnv)
+
+      expect(result.status).toBe("failed")
+      // The last write to sources.list must restore the original content,
+      // not leave the rewritten "trixie" content on disk.
+      const sourcesWrites = writes.filter((w) => w.path === "/etc/apt/sources.list")
+      expect(sourcesWrites.length).toBeGreaterThan(0)
+      expect(sourcesWrites.at(-1)?.content).toBe(originalSources)
+    })
+
+    it("dpkg --configure -a fails → restores the original sources content", async () => {
+      // readFile (output) trims trailing whitespace, so the snapshot is the
+      // trimmed content (no trailing newline).
+      const originalSources = "deb http://deb.debian.org/debian bookworm main"
+      const ssh = createMockSsh(
+        debianApplyResponses("bookworm", "trixie", {
+          "DEBIAN_FRONTEND=noninteractive dpkg --configure -a": { code: 1 },
+        })
+      )
+      const writes = captureWriteFile(ssh)
+      const mod = releaseUpgrade.upgrade()
+      const result = await mod.apply(ssh, emptyEnv)
+
+      expect(result.status).toBe("failed")
+      const sourcesWrites = writes.filter((w) => w.path === "/etc/apt/sources.list")
+      expect(sourcesWrites.at(-1)?.content).toBe(originalSources)
+    })
+
+    it("apt-get full-upgrade fails → restores the original sources content", async () => {
+      // readFile (output) trims trailing whitespace, so the snapshot is the
+      // trimmed content (no trailing newline).
+      const originalSources = "deb http://deb.debian.org/debian bookworm main"
+      const ssh = createMockSsh(
+        debianApplyResponses("bookworm", "trixie", {
+          "DEBIAN_FRONTEND=noninteractive apt-get full-upgrade -y": { code: 1 },
+        })
+      )
+      const writes = captureWriteFile(ssh)
+      const mod = releaseUpgrade.upgrade()
+      const result = await mod.apply(ssh, emptyEnv)
+
+      expect(result.status).toBe("failed")
+      const sourcesWrites = writes.filter((w) => w.path === "/etc/apt/sources.list")
+      expect(sourcesWrites.at(-1)?.content).toBe(originalSources)
+    })
+
+    it("apt-get autoremove fails → restores the original sources content", async () => {
+      // readFile (output) trims trailing whitespace, so the snapshot is the
+      // trimmed content (no trailing newline).
+      const originalSources = "deb http://deb.debian.org/debian bookworm main"
+      const ssh = createMockSsh(
+        debianApplyResponses("bookworm", "trixie", {
+          "DEBIAN_FRONTEND=noninteractive apt-get autoremove -y": { code: 1 },
+        })
+      )
+      const writes = captureWriteFile(ssh)
+      const mod = releaseUpgrade.upgrade()
+      const result = await mod.apply(ssh, emptyEnv)
+
+      expect(result.status).toBe("failed")
+      const sourcesWrites = writes.filter((w) => w.path === "/etc/apt/sources.list")
+      expect(sourcesWrites.at(-1)?.content).toBe(originalSources)
+    })
+
+    it("rolls back additional sources.list.d files alongside sources.list", async () => {
+      // readFile (output) trims trailing whitespace.
+      const originalMainSources = "deb http://deb.debian.org/debian bookworm main"
+      const originalExtraSources = "deb http://example.com/repo bookworm contrib"
+      const extraPath = "/etc/apt/sources.list.d/extra.list"
+      const ssh = createMockSsh(
+        debianApplyResponses("bookworm", "trixie", {
+          [`cat '${extraPath}'`]: { code: 0, stdout: originalExtraSources },
+          "DEBIAN_FRONTEND=noninteractive apt-get update": { code: 1 },
+          "find /etc/apt/sources.list.d/ \\( -name '*.list' -o -name '*.sources' \\) -type f": {
+            code: 0,
+            stdout: `${extraPath}\n`,
+          },
+        })
+      )
+      const writes = captureWriteFile(ssh)
+      const mod = releaseUpgrade.upgrade()
+      const result = await mod.apply(ssh, emptyEnv)
+
+      expect(result.status).toBe("failed")
+
+      const mainWrites = writes.filter((w) => w.path === "/etc/apt/sources.list")
+      const extraWrites = writes.filter((w) => w.path === extraPath)
+      expect(mainWrites.at(-1)?.content).toBe(originalMainSources)
+      expect(extraWrites.at(-1)?.content).toBe(originalExtraSources)
+    })
+
+    it("does not roll back when the upgrade pipeline succeeds", async () => {
+      const ssh = createMockSsh(debianApplyResponses("bookworm", "trixie"))
+      const writes = captureWriteFile(ssh)
+      const mod = releaseUpgrade.upgrade()
+      const result = await mod.apply(ssh, emptyEnv)
+
+      expect(result.status).toBe("changed")
+      // The only write to sources.list is the rewrite to "trixie" — no
+      // rollback restore happens on the success path.
+      const sourcesWrites = writes.filter((w) => w.path === "/etc/apt/sources.list")
+      expect(sourcesWrites).toHaveLength(1)
+      expect(sourcesWrites[0]?.content).toContain("trixie")
+    })
+  })
 })
 
 describe("releaseUpgrade.upgrade — apply (general)", () => {

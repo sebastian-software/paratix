@@ -64,6 +64,7 @@
     "tmpl",
     "toctou",
     "totp",
+    "trixie",
     "userdel",
     "usermod"
   ]

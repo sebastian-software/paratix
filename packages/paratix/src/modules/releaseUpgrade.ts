@@ -94,6 +94,53 @@ async function getDebianStableCodename(ssh: SshConnection): Promise<string> {
   throw new Error("Could not determine Debian stable codename")
 }
 
+const APT_SOURCES_LIST = "/etc/apt/sources.list"
+
+/**
+ * Snapshot of an apt sources file as it was before
+ * {@link replaceCodenameInSourcesList} rewrote it. Used by
+ * {@link restoreSourcesSnapshots} to roll back when a subsequent apt step
+ * fails so the host never ends up with sources pointing at the new suite
+ * while the upgrade itself failed.
+ */
+type SourcesSnapshot = {
+  originalContent: string
+  remotePath: string
+}
+
+type RewriteSourcesParameters = {
+  currentCodename: string
+  originalContent: string
+  remotePath: string
+  ssh: SshConnection
+  targetCodename: string
+}
+
+/**
+ * Apply the codename rewrite to a single sources file when the new content
+ * differs from the original, returning the snapshot needed to roll back.
+ *
+ * @param parameters - The rewrite parameters: ssh handle, remote path,
+ *   original content, current codename and target codename.
+ * @returns The snapshot when the file was modified, or `null` when no
+ *   rewrite was necessary.
+ */
+async function rewriteSourcesFile(
+  parameters: RewriteSourcesParameters
+): Promise<null | SourcesSnapshot> {
+  const { currentCodename, originalContent, remotePath, ssh, targetCodename } = parameters
+  const updatedContent = originalContent.replaceAll(currentCodename, targetCodename)
+  if (updatedContent === originalContent) return null
+
+  await guardedWriteFile(ssh, {
+    mode: APT_SOURCES_MODE,
+    newContent: updatedContent,
+    originalContent,
+    remotePath,
+  })
+  return { originalContent, remotePath }
+}
+
 /**
  * Replace all occurrences of `currentCodename` with `targetCodename` in
  * `/etc/apt/sources.list` and every `.list` and `.sources` file under
@@ -105,41 +152,86 @@ async function getDebianStableCodename(ssh: SshConnection): Promise<string> {
  * @param ssh - Active SSH connection to the remote host.
  * @param currentCodename - The codename that is currently in use (e.g. `"bullseye"`).
  * @param targetCodename - The codename to upgrade to (e.g. `"bookworm"`).
+ * @returns Snapshots of every sources file that was modified, in the order
+ *   they were rewritten. The caller can hand these to
+ *   {@link restoreSourcesSnapshots} to roll back on a downstream apt failure.
  */
 async function replaceCodenameInSourcesList(
   ssh: SshConnection,
   currentCodename: string,
   targetCodename: string
-): Promise<void> {
-  const sourcesContent = await ssh.readFile("/etc/apt/sources.list")
-  const updatedContent = sourcesContent.replaceAll(currentCodename, targetCodename)
-  await guardedWriteFile(ssh, {
-    mode: APT_SOURCES_MODE,
-    newContent: updatedContent,
+): Promise<SourcesSnapshot[]> {
+  const snapshots: SourcesSnapshot[] = []
+
+  const sourcesContent = await ssh.readFile(APT_SOURCES_LIST)
+  const mainSnapshot = await rewriteSourcesFile({
+    currentCodename,
     originalContent: sourcesContent,
-    remotePath: "/etc/apt/sources.list",
+    remotePath: APT_SOURCES_LIST,
+    ssh,
+    targetCodename,
   })
+  if (mainSnapshot != null) snapshots.push(mainSnapshot)
 
   const listFilesResult = await ssh.exec(
     "find /etc/apt/sources.list.d/ \\( -name '*.list' -o -name '*.sources' \\) -type f",
     { ignoreExitCode: true, silent: true }
   )
-  if (listFilesResult.code === 0 && listFilesResult.stdout.trim()) {
-    for (const filePath of listFilesResult.stdout.trim().split("\n")) {
-      const trimmedPath = filePath.trim()
-      if (!trimmedPath) continue
+  if (listFilesResult.code !== 0 || !listFilesResult.stdout.trim()) {
+    return snapshots
+  }
+
+  for (const filePath of listFilesResult.stdout.trim().split("\n")) {
+    const trimmedPath = filePath.trim()
+    if (!trimmedPath) continue
+    // eslint-disable-next-line no-await-in-loop
+    const content = await ssh.readFile(trimmedPath)
+    // eslint-disable-next-line no-await-in-loop
+    const snapshot = await rewriteSourcesFile({
+      currentCodename,
+      originalContent: content,
+      remotePath: trimmedPath,
+      ssh,
+      targetCodename,
+    })
+    if (snapshot != null) snapshots.push(snapshot)
+  }
+
+  return snapshots
+}
+
+/**
+ * Restore every snapshot returned by {@link replaceCodenameInSourcesList} so
+ * the host's apt sources point at the original suite again. Failures during
+ * the rollback are swallowed per file: a single missing or now-protected file
+ * must not prevent the remaining snapshots from being restored.
+ *
+ * Mirrors the rollback strategy used by `sshd.config` (see
+ * `validateSshdConfig` in `packages/paratix/src/modules/sshd.ts`), where a
+ * failed `sshd -t` validation also writes the original content back via
+ * `ssh.writeFile`.
+ *
+ * @param ssh - Active SSH connection to the remote host.
+ * @param snapshots - The snapshots to restore, in any order.
+ */
+async function restoreSourcesSnapshots(
+  ssh: SshConnection,
+  snapshots: SourcesSnapshot[]
+): Promise<void> {
+  for (const snapshot of snapshots) {
+    try {
+      // Intentional: unguarded write — restoring the original sources is
+      // more important than concurrency safety during a failed-upgrade
+      // rollback. An additional guarded write would refuse to roll back if
+      // the file content changed mid-flight.
       // eslint-disable-next-line no-await-in-loop
-      const content = await ssh.readFile(trimmedPath)
-      const updated = content.replaceAll(currentCodename, targetCodename)
-      if (updated !== content) {
-        // eslint-disable-next-line no-await-in-loop
-        await guardedWriteFile(ssh, {
-          mode: APT_SOURCES_MODE,
-          newContent: updated,
-          originalContent: content,
-          remotePath: trimmedPath,
-        })
-      }
+      await ssh.writeFile(snapshot.remotePath, snapshot.originalContent, {
+        mode: APT_SOURCES_MODE,
+      })
+    } catch {
+      // Best-effort: if a single file cannot be restored, keep going so the
+      // remaining snapshots still revert. The original failure is what the
+      // caller surfaces — this rollback only widens the recovery window.
     }
   }
 }
@@ -247,19 +339,19 @@ async function applyUbuntu(
  *   `"ok"` on dry-run, or `"failed"` when any command returns a non-zero
  *   exit code.
  */
-async function applyDebian(
-  ssh: SshConnection,
-  options: ReleaseUpgradeOptions
-): Promise<ModuleResult> {
-  const currentCodename = await getDebianCurrentCodename(ssh)
-  const targetCodename = await getDebianStableCodename(ssh)
-
-  if (options.dryRun === true) {
-    return { status: "ok" }
-  }
-
-  await replaceCodenameInSourcesList(ssh, currentCodename, targetCodename)
-
+/**
+ * Run the four-step Debian apt upgrade pipeline (`apt-get update`,
+ * `dpkg --configure -a`, `apt-get full-upgrade -y`, `apt-get autoremove -y`)
+ * and return the first failure encountered, or `null` when all four steps
+ * succeeded.
+ *
+ * Extracted from `applyDebian` so the failure-path rollback in `applyDebian`
+ * stays straightforward and the per-step retry order remains explicit.
+ *
+ * @param ssh - Active SSH connection to the remote host.
+ * @returns The first non-zero apt-step failure, or `null` on success.
+ */
+async function runDebianUpgradePipeline(ssh: SshConnection): Promise<ModuleResult | null> {
   const updateFailure = await runReleaseUpgradeCommand(
     ssh,
     `${NONINTERACTIVE} apt-get update`,
@@ -287,6 +379,33 @@ async function applyDebian(
     "[releaseUpgrade.upgrade] apt-get autoremove failed"
   )
   if (autoremoveFailure != null) return autoremoveFailure
+
+  return null
+}
+
+async function applyDebian(
+  ssh: SshConnection,
+  options: ReleaseUpgradeOptions
+): Promise<ModuleResult> {
+  const currentCodename = await getDebianCurrentCodename(ssh)
+  const targetCodename = await getDebianStableCodename(ssh)
+
+  if (options.dryRun === true) {
+    return { status: "ok" }
+  }
+
+  // R-0000046: snapshot every sources file before rewriting it so a
+  // downstream apt failure can roll the sources back to the original suite.
+  // Without rollback, a partial failure would leave the host pointing at the
+  // new suite while no upgrade has actually completed — the next apt run
+  // would then operate on a half-migrated system.
+  const snapshots = await replaceCodenameInSourcesList(ssh, currentCodename, targetCodename)
+
+  const pipelineFailure = await runDebianUpgradePipeline(ssh)
+  if (pipelineFailure != null) {
+    await restoreSourcesSnapshots(ssh, snapshots)
+    return pipelineFailure
+  }
 
   const entries = await buildRebootMeta(options)
   return { meta: entries, status: "changed" }
