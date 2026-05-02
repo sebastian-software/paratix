@@ -53,13 +53,39 @@ async function cloneRepo(conn: SshConnection, parameters: GitCloneParameters): P
 }
 
 /**
+ * Probe whether a reference exists as a remote-tracking branch on `origin`.
+ *
+ * Uses `git for-each-ref` against `refs/remotes/origin/<reference>` to detect
+ * a remote-tracking branch deterministically. Returns `true` only when the
+ * probe prints a matching ref name.
+ *
+ * @param conn - The SSH connection to the remote host.
+ * @param destination - The repository path on the remote host.
+ * @param reference - The branch, tag, or commit SHA to probe.
+ * @returns Whether the reference exists as a remote-tracking branch.
+ */
+async function isRemoteTrackingBranch(
+  conn: SshConnection,
+  destination: string,
+  reference: string
+): Promise<boolean> {
+  const probe = await conn.exec(
+    `git -C ${shellQuote(destination)} for-each-ref --format=%(refname) refs/remotes/origin/${shellQuote(reference)}`,
+    EXEC_OPTS
+  )
+  if (probe.code !== 0) return false
+  return probe.stdout.trim() !== ""
+}
+
+/**
  * Update an existing repository to a specific ref, or pull latest if no ref given.
  *
  * When a reference is provided, the function fetches all tags and then checks
- * out the reference. It first attempts `reset --hard origin/<reference>` to
- * handle tracking branches. If that fails (e.g. for tags or bare commit SHAs
- * that have no remote-tracking counterpart), it falls back to
- * `reset --hard <reference>` directly.
+ * out the reference. It then probes whether the reference exists as a
+ * remote-tracking branch on `origin`. If so, it runs
+ * `reset --hard origin/<reference>` to advance to the branch tip. Otherwise it
+ * runs `reset --hard <reference>` directly so that tags and bare commit SHAs
+ * resolve to the correct commit even when a branch with the same name exists.
  *
  * @param conn - The SSH connection to the remote host.
  * @param parameters - Clone parameters including destination and optional reference.
@@ -78,19 +104,13 @@ async function updateRepo(conn: SshConnection, parameters: GitCloneParameters): 
       EXEC_OPTS
     )
     if (checkout.code !== 0) return false
-    const branchReset = await conn.exec(
-      `git -C ${shellQuote(destination)} reset --hard origin/${shellQuote(reference)}`,
+    const isBranch = await isRemoteTrackingBranch(conn, destination, reference)
+    const resetTarget = isBranch ? `origin/${shellQuote(reference)}` : shellQuote(reference)
+    const reset = await conn.exec(
+      `git -C ${shellQuote(destination)} reset --hard ${resetTarget}`,
       EXEC_OPTS
     )
-    // Fallback for tags and bare commit SHAs that have no remote-tracking ref.
-    if (branchReset.code !== 0) {
-      const directReset = await conn.exec(
-        `git -C ${shellQuote(destination)} reset --hard ${shellQuote(reference)}`,
-        EXEC_OPTS
-      )
-      return directReset.code === 0
-    }
-    return true
+    return reset.code === 0
   }
   const pull = await conn.exec(`git -C ${shellQuote(destination)} pull`, EXEC_OPTS)
   return pull.code === 0

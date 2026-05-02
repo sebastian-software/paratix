@@ -174,8 +174,12 @@ describe("git.clone — apply", () => {
     expect(mockSsh.calls).toContain(`git -C '${destination}' pull`)
   })
 
-  it("fetches, checks out, and resets to origin/<ref> when .git exists and ref is given", async () => {
+  it("fetches, checks out, and resets to origin/<ref> when ref is a remote-tracking branch", async () => {
     const mockSsh = createMockSsh({
+      [`git -C '${destination}' for-each-ref --format=%(refname) refs/remotes/origin/'main'`]: {
+        code: 0,
+        stdout: "refs/remotes/origin/main\n",
+      },
       [`git -C '${destination}' reset --hard origin/'main'`]: { code: 0 },
       [`test -d '${gitDir}'`]: { code: 0 },
     })
@@ -185,27 +189,70 @@ describe("git.clone — apply", () => {
     expect(mockSsh.calls).toContain(`git -C '${destination}' fetch origin --tags --force`)
     expect(mockSsh.calls).toContain(`git -C '${destination}' checkout 'main'`)
     expect(mockSsh.calls).toContain(`git -C '${destination}' reset --hard origin/'main'`)
+    expect(mockSsh.calls).not.toContain(`git -C '${destination}' reset --hard 'main'`)
   })
 
-  it("falls back to reset --hard <ref> when origin/<ref> reset fails", async () => {
+  it("resets directly to <ref> when ref is a tag and has no remote-tracking branch", async () => {
+    // The for-each-ref probe returns no match, so the direct reset path
+    // resolves the tag commit (and not a same-named branch tip).
     const mockSsh = createMockSsh({
-      [`git -C '${destination}' reset --hard origin/'v1.0.0'`]: { code: 1 },
+      [`git -C '${destination}' for-each-ref --format=%(refname) refs/remotes/origin/'v1.0.0'`]: {
+        code: 0,
+        stdout: "",
+      },
+      [`git -C '${destination}' reset --hard 'v1.0.0'`]: { code: 0 },
       [`test -d '${gitDir}'`]: { code: 0 },
     })
     const mod = git.clone(repo, destination, { ref: "v1.0.0" })
     const result = await mod.apply(mockSsh, emptyEnv)
     expect(result.status).toBe("changed")
     expect(mockSsh.calls).toContain(`git -C '${destination}' reset --hard 'v1.0.0'`)
+    expect(mockSsh.calls).not.toContain(`git -C '${destination}' reset --hard origin/'v1.0.0'`)
   })
 
-  it("does not run fallback reset when origin/<ref> reset succeeds", async () => {
+  it("resets directly to <ref> when ref is a bare commit SHA", async () => {
+    const sha = "abc123def456"
     const mockSsh = createMockSsh({
-      [`git -C '${destination}' reset --hard origin/'main'`]: { code: 0 },
+      [`git -C '${destination}' for-each-ref --format=%(refname) refs/remotes/origin/'${sha}'`]: {
+        code: 0,
+        stdout: "",
+      },
+      [`git -C '${destination}' reset --hard '${sha}'`]: { code: 0 },
+      [`test -d '${gitDir}'`]: { code: 0 },
+    })
+    const mod = git.clone(repo, destination, { ref: sha })
+    const result = await mod.apply(mockSsh, emptyEnv)
+    expect(result.status).toBe("changed")
+    expect(mockSsh.calls).toContain(`git -C '${destination}' reset --hard '${sha}'`)
+    expect(mockSsh.calls).not.toContain(`git -C '${destination}' reset --hard origin/'${sha}'`)
+  })
+
+  it("returns failed when branch reset fails", async () => {
+    const mockSsh = createMockSsh({
+      [`git -C '${destination}' for-each-ref --format=%(refname) refs/remotes/origin/'main'`]: {
+        code: 0,
+        stdout: "refs/remotes/origin/main\n",
+      },
+      [`git -C '${destination}' reset --hard origin/'main'`]: { code: 1 },
       [`test -d '${gitDir}'`]: { code: 0 },
     })
     const mod = git.clone(repo, destination, { ref: "main" })
-    await mod.apply(mockSsh, emptyEnv)
-    expect(mockSsh.calls).not.toContain(`git -C '${destination}' reset --hard 'main'`)
+    const result = await mod.apply(mockSsh, emptyEnv)
+    expect(result.status).toBe("failed")
+  })
+
+  it("returns failed when direct reset fails for a tag", async () => {
+    const mockSsh = createMockSsh({
+      [`git -C '${destination}' for-each-ref --format=%(refname) refs/remotes/origin/'v1.0.0'`]: {
+        code: 0,
+        stdout: "",
+      },
+      [`git -C '${destination}' reset --hard 'v1.0.0'`]: { code: 1 },
+      [`test -d '${gitDir}'`]: { code: 0 },
+    })
+    const mod = git.clone(repo, destination, { ref: "v1.0.0" })
+    const result = await mod.apply(mockSsh, emptyEnv)
+    expect(result.status).toBe("failed")
   })
 
   it("falls back to clone without --branch when --branch fails (bare SHA)", async () => {
