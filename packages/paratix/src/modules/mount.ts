@@ -111,6 +111,100 @@ async function removePersistedMountIfPresent(ssh: SshConnection, path: string): 
   return true
 }
 
+type MountConvergenceParameters = {
+  fstype: string
+  live: LiveMount
+  opts: string
+  path: string
+  src: string
+}
+
+/**
+ * Converge a drifted live mount to the desired src / fstype / opts.
+ *
+ * When only the options drifted and the source / fstype match, run
+ * `mount -o remount,<opts>` for a non-disruptive in-place adjustment. When
+ * the source or fstype drifted, fall back to `umount` + a fresh `mount`
+ * because remount cannot change those.
+ *
+ * @param ssh - Active SSH connection.
+ * @param parameters - Desired mount values plus the live snapshot.
+ * @returns A failure `ModuleResult` when the convergence command failed,
+ *   or `null` on success.
+ */
+async function applyMountConvergence(
+  ssh: SshConnection,
+  parameters: MountConvergenceParameters
+): Promise<ModuleResult | null> {
+  const { fstype, live, opts, path, src } = parameters
+  const onlyOptionsDrifted = live.source === src && live.fstype === fstype
+
+  if (onlyOptionsDrifted) {
+    const remountResult = await ssh.exec(
+      `mount -o remount,${shellQuote(opts)} ${shellQuote(src)} ${shellQuote(path)}`,
+      EXEC_OPTS
+    )
+    if (remountResult.code === 0) return null
+    return failedCommand(`[mount.present: ${path}] mount -o remount failed`, remountResult)
+  }
+
+  const umountResult = await ssh.exec(`umount ${shellQuote(path)}`, EXEC_OPTS)
+  if (umountResult.code !== 0) {
+    return failedCommand(`[mount.present: ${path}] umount before remount failed`, umountResult)
+  }
+  const mountResult = await ssh.exec(
+    `mount -t ${shellQuote(fstype)} -o ${shellQuote(opts)} ${shellQuote(src)} ${shellQuote(path)}`,
+    EXEC_OPTS
+  )
+  if (mountResult.code !== 0) {
+    return failedCommand(`[mount.present: ${path}] mount after umount failed`, mountResult)
+  }
+  return null
+}
+
+type EnsureLiveMountParameters = {
+  fstype: string
+  opts: string
+  path: string
+  src: string
+}
+
+/**
+ * Ensure the live mount at `path` matches the desired source / fstype /
+ * options. Mounts when nothing is mounted yet, remounts when only options
+ * drifted, or unmounts and remounts when source / fstype drifted.
+ *
+ * @param ssh - Active SSH connection.
+ * @param parameters - Desired mount values.
+ * @returns A failure `ModuleResult` when a command failed, `true` when a
+ *   change was applied, or `false` when the live mount already matched.
+ */
+async function ensureLiveMount(
+  ssh: SshConnection,
+  parameters: EnsureLiveMountParameters
+): Promise<boolean | ModuleResult> {
+  const { fstype, opts, path, src } = parameters
+  const live = await readLiveMount(ssh, path)
+
+  if (live == null) {
+    const mountResult = await ssh.exec(
+      `mount -t ${shellQuote(fstype)} -o ${shellQuote(opts)} ${shellQuote(src)} ${shellQuote(path)}`,
+      EXEC_OPTS
+    )
+    if (mountResult.code !== 0) {
+      return failedCommand(`[mount.present: ${path}] mount failed`, mountResult)
+    }
+    return true
+  }
+
+  if (liveMountMatchesDesired(live, { fstype, opts, src })) return false
+
+  // R-0000049: live mount drifted — converge via remount or umount + mount.
+  const failure = await applyMountConvergence(ssh, { fstype, live, opts, path, src })
+  if (failure != null) return failure
+  return true
+}
+
 async function unmountIfNeeded(ssh: SshConnection, path: string): Promise<boolean | ModuleResult> {
   const isMounted = await ssh.test(`findmnt --noheadings ${shellQuote(path)}`)
   if (!isMounted) return false
@@ -146,6 +240,66 @@ async function ensureFstabEntry(
     originalContent: fstabContent,
     remotePath: FSTAB_PATH,
   })
+  return true
+}
+
+type LiveMount = {
+  fstype: string
+  options: string
+  source: string
+}
+
+/**
+ * Read the live mount attributes for a mountpoint via
+ * `findmnt --noheadings --output SOURCE,FSTYPE,OPTIONS`.
+ *
+ * @param ssh - Active SSH connection to the remote host.
+ * @param path - The mountpoint to inspect.
+ * @returns The live attributes when the path is mounted, or `null` when it
+ *   is not mounted (findmnt exits non-zero).
+ */
+async function readLiveMount(ssh: SshConnection, path: string): Promise<LiveMount | null> {
+  const findmntResult = await ssh.exec(
+    `findmnt --noheadings --output SOURCE,FSTYPE,OPTIONS ${shellQuote(path)}`,
+    EXEC_OPTS
+  )
+  if (findmntResult.code !== 0) return null
+
+  // findmnt prints SOURCE FSTYPE OPTIONS separated by whitespace.
+  const fields = findmntResult.stdout.trim().split(/\s+/v)
+  if (fields.length < 3) return null
+  return {
+    fstype: fields[1] ?? "",
+    options: fields[2] ?? "",
+    source: fields[0] ?? "",
+  }
+}
+
+/**
+ * Decide whether the live mount attributes match the desired source,
+ * filesystem type, and options. The options string is compared as a
+ * normalized comma-separated set so superficial ordering differences (e.g.
+ * `noexec,nosuid` vs. `nosuid,noexec`) do not cause spurious drift.
+ *
+ * @param live - The live mount attributes parsed from findmnt.
+ * @param desired - The desired source, fstype and opts.
+ * @param desired.fstype - Desired filesystem type.
+ * @param desired.opts - Desired mount options string (comma-separated).
+ * @param desired.src - Desired mount source.
+ * @returns `true` when source, fstype and options all match.
+ */
+function liveMountMatchesDesired(
+  live: LiveMount,
+  desired: { fstype: string; opts: string; src: string }
+): boolean {
+  if (live.source !== desired.src) return false
+  if (live.fstype !== desired.fstype) return false
+  const liveOptions = new Set(live.options.split(",").filter(Boolean))
+  const desiredOptions = new Set(desired.opts.split(",").filter(Boolean))
+  if (liveOptions.size !== desiredOptions.size) return false
+  for (const opt of desiredOptions) {
+    if (!liveOptions.has(opt)) return false
+  }
   return true
 }
 
@@ -247,28 +401,20 @@ export const mount = {
           if (await ensureFstabEntry(ssh, path, desiredLine)) changed = true
         }
 
-        const isMounted = await ssh.test(`findmnt --noheadings ${shellQuote(path)}`)
-        if (!isMounted) {
-          const mountResult = await ssh.exec(
-            `mount -t ${shellQuote(fstype)} -o ${shellQuote(opts)} ${shellQuote(src)} ${shellQuote(path)}`,
-            EXEC_OPTS
-          )
-          if (mountResult.code !== 0) {
-            return failedCommand(`[mount.present: ${path}] mount failed`, mountResult)
-          }
-          changed = true
-        }
+        const liveResult = await ensureLiveMount(ssh, { fstype, opts, path, src })
+        if (typeof liveResult !== "boolean") return liveResult
+        if (liveResult) changed = true
 
         return { status: changed ? "changed" : "ok" }
       },
       async check(ssh: null | SshConnection): Promise<"needs-apply" | "ok"> {
         if (!ssh) return NEEDS_APPLY
 
-        const findmntResult = await ssh.exec(
-          `findmnt --noheadings --output SOURCE,FSTYPE,OPTIONS ${shellQuote(path)}`,
-          EXEC_OPTS
-        )
-        if (findmntResult.code !== 0) return NEEDS_APPLY
+        const live = await readLiveMount(ssh, path)
+        if (live == null) return NEEDS_APPLY
+        // R-0000049: compare the live source / fstype / options against
+        // the desired values so a drifted mount triggers needs-apply.
+        if (!liveMountMatchesDesired(live, { fstype, opts, src })) return NEEDS_APPLY
 
         if (persist) {
           const fstabContent = await ssh.readFile(FSTAB_PATH)
