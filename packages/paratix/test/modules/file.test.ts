@@ -1269,7 +1269,8 @@ describe("file.properties", () => {
 describe("file.replace", () => {
   it("check returns ok when pattern not found (nothing to replace)", async () => {
     const ssh = createMockSsh({
-      "grep -qE 'old-value' '/etc/config'": { code: 1 },
+      "[ -e '/etc/config' ]": { code: 0 },
+      "cat '/etc/config'": { stdout: "alpha beta gamma" },
     })
 
     const mod = file.replace("/etc/config", "old-value", "new-value")
@@ -1277,9 +1278,10 @@ describe("file.replace", () => {
     expect(result).toBe("ok")
   })
 
-  it("check returns needs-apply when pattern found", async () => {
+  it("check returns needs-apply when pattern found and replacement would change content", async () => {
     const ssh = createMockSsh({
-      "grep -qE 'old-value' '/etc/config'": { code: 0 },
+      "[ -e '/etc/config' ]": { code: 0 },
+      "cat '/etc/config'": { stdout: "foo old-value bar" },
     })
 
     const mod = file.replace("/etc/config", "old-value", "new-value")
@@ -1291,6 +1293,47 @@ describe("file.replace", () => {
     const mod = file.replace("/etc/config", "old-value", "new-value")
     const result = await mod.check(null, emptyEnv)
     expect(result).toBe("needs-apply")
+  })
+
+  it("check returns needs-apply when remote file does not exist", async () => {
+    const ssh = createMockSsh({
+      "[ -e '/etc/config' ]": { code: 1 },
+    })
+
+    const mod = file.replace("/etc/config", "old-value", "new-value")
+    const result = await mod.check(ssh, emptyEnv)
+    expect(result).toBe("needs-apply")
+  })
+
+  it("check returns ok after apply when replacement uses negative lookahead to prevent re-matching", async () => {
+    // Regression for R-0000034: pattern "foo(?!bar)" with replacement "foobar".
+    // The old grep-based check reported needs-apply forever because the file
+    // still contains "foo" as a substring of "foobar". The new content-based
+    // check correctly recognises that applying the regex on "alpha foobar gamma"
+    // would not change the file (the negative lookahead skips "foo" inside
+    // "foobar") and reports ok.
+    const ssh = createMockSsh({
+      "[ -e '/etc/config' ]": { code: 0 },
+      "cat '/etc/config'": { stdout: "alpha foobar gamma" },
+    })
+
+    const mod = file.replace("/etc/config", "foo(?!bar)", "foobar")
+    const result = await mod.check(ssh, emptyEnv)
+    expect(result).toBe("ok")
+  })
+
+  it("check returns ok after a successful apply (post-replacement state, no remaining matches)", async () => {
+    // Regression for R-0000034 in the common non-overlapping case: pattern
+    // "old-value" replacement "new-value". After apply the file contains only
+    // "new-value" and the pattern no longer matches, so check returns ok.
+    const ssh = createMockSsh({
+      "[ -e '/etc/config' ]": { code: 0 },
+      "cat '/etc/config'": { stdout: "alpha new-value gamma" },
+    })
+
+    const mod = file.replace("/etc/config", "old-value", "new-value")
+    const result = await mod.check(ssh, emptyEnv)
+    expect(result).toBe("ok")
   })
 
   it("apply reads file, replaces content and writes back", async () => {

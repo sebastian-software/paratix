@@ -371,7 +371,11 @@ export function properties(remotePath: string, options: PropertiesOptions): Modu
 
 /**
  * Replace all occurrences of a regex pattern in a remote file.
- * `check` uses `grep -E` to detect whether the pattern still exists in the file.
+ * `check` reads the file, applies the same replacement that `apply` would
+ * perform, and reports `needs-apply` only when the resulting content differs
+ * from the current content. This makes the module idempotent for cases where
+ * the replacement string still matches the pattern (e.g. pattern `"foo"` and
+ * replacement `"foobar"`).
  * `apply` reads the file, performs the replacement in TypeScript and writes it back.
  *
  * @param remotePath - Path to the file on the remote host.
@@ -399,8 +403,13 @@ export function replace(remotePath: string, pattern: string, replacement: string
     async check(ssh: null | SshConnection): Promise<"needs-apply" | "ok"> {
       if (!ssh) return NEEDS_APPLY
 
-      const found = await ssh.test(`grep -qE ${shellQuote(pattern)} ${shellQuote(remotePath)}`)
-      return found ? NEEDS_APPLY : "ok"
+      const exists = await ssh.exists(remotePath)
+      if (!exists) return NEEDS_APPLY
+
+      const content = await ssh.readFile(remotePath)
+      // eslint-disable-next-line security/detect-non-literal-regexp -- pattern from module config, not user input
+      const updated = content.replaceAll(new RegExp(pattern, "gu"), replacement)
+      return updated === content ? "ok" : NEEDS_APPLY
     },
     name: `file.replace: ${remotePath}`,
   }
