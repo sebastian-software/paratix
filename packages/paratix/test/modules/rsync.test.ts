@@ -531,6 +531,46 @@ describe("rsync.sync — SSH auth method in transport flag", () => {
     expect(transportArg).not.toContain("-o IdentityAgent=")
   })
 
+  it("regression: appends -o IdentitiesOnly=yes whenever privateKeyPath is set", async () => {
+    const mockSsh = createMockSsh()
+    vi.spyOn(mockSsh, "getConnectionInfo").mockReturnValue({
+      host: "1.2.3.4",
+      port: 22,
+      privateKeyPath: "~/.ssh/id",
+      user: "root",
+    })
+    const mod = rsync.sync({ dest: "/remote/dest", src: "/local/src" })
+    await mod.apply(mockSsh, emptyEnv)
+
+    const args = getArgs()
+    const eIdx = args.indexOf("-e")
+    const transportArg = args[eIdx + 1]
+    // Both the -i flag and IdentitiesOnly=yes must be present, so rsync only
+    // ever uses the configured key and never silently picks an agent identity.
+    expect(transportArg).toContain("-i '~/.ssh/id'")
+    expect(transportArg).toContain("-o IdentitiesOnly=yes")
+  })
+
+  it("regression: does not append IdentitiesOnly=yes when only agentSocket is provided", async () => {
+    const mockSsh = createMockSsh()
+    vi.spyOn(mockSsh, "getConnectionInfo").mockReturnValue({
+      agentSocket: "/run/user/1000/ssh-agent.sock",
+      host: "1.2.3.4",
+      port: 22,
+      user: "root",
+    })
+    const mod = rsync.sync({ dest: "/remote/dest", src: "/local/src" })
+    await mod.apply(mockSsh, emptyEnv)
+
+    const args = getArgs()
+    const eIdx = args.indexOf("-e")
+    const transportArg = args[eIdx + 1]
+    // IdentitiesOnly=yes is only meaningful in combination with -i; with an
+    // agent-only fallback the option would over-restrict identity selection.
+    expect(transportArg).toContain("-o IdentityAgent='/run/user/1000/ssh-agent.sock'")
+    expect(transportArg).not.toContain("-o IdentitiesOnly=yes")
+  })
+
   it("includes no identity flag when neither privateKeyPath nor agentSocket is provided", async () => {
     const mockSsh = createMockSsh()
     vi.spyOn(mockSsh, "getConnectionInfo").mockReturnValue({

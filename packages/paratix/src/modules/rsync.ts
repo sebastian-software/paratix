@@ -176,7 +176,11 @@ function buildArguments(parameters: {
 
   let sshFlags = ""
   if (connectionInfo.privateKeyPath != null) {
-    sshFlags = ` -i ${shellQuote(connectionInfo.privateKeyPath)}`
+    // -o IdentitiesOnly=yes prevents OpenSSH from also offering identities from
+    // a running ssh-agent (the default `IdentitiesOnly=no` would let rsync pick
+    // an unrelated agent key). With this option rsync only ever uses the key
+    // configured for this Paratix session.
+    sshFlags = ` -i ${shellQuote(connectionInfo.privateKeyPath)} -o IdentitiesOnly=yes`
   } else if (connectionInfo.agentSocket != null) {
     sshFlags = ` -o IdentityAgent=${shellQuote(connectionInfo.agentSocket)}`
   }
