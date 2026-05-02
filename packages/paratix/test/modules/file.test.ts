@@ -1130,14 +1130,90 @@ describe("file.properties", () => {
     expect(result).toBe("needs-apply")
   })
 
-  it("apply runs chmod and chown", async () => {
-    const ssh = createMockSsh()
+  it("apply runs chmod and chown when mode and owner differ from current state", async () => {
+    const ssh = createMockSsh({
+      "stat -c '%a %U %G' '/var/app'": { stdout: "755 root root" },
+    })
     const mod = file.properties("/var/app", { mode: "0644", owner: "www-data" })
     const result = await mod.apply(ssh, emptyEnv)
 
     expect(result.status).toBe("changed")
     expect(ssh.calls).toContain("chmod '0644' '/var/app'")
     expect(ssh.calls).toContain("chown 'www-data' '/var/app'")
+  })
+
+  it("apply returns ok and does not run chmod/chown/chgrp when nothing has drifted", async () => {
+    const ssh = createMockSsh({
+      "stat -c '%a %U %G' '/var/app'": { stdout: "644 www-data www-data" },
+    })
+    const mod = file.properties("/var/app", {
+      group: "www-data",
+      mode: "0644",
+      owner: "www-data",
+    })
+    const result = await mod.apply(ssh, emptyEnv)
+
+    expect(result.status).toBe("ok")
+    expect(ssh.calls).not.toContain("chmod '0644' '/var/app'")
+    expect(ssh.calls).not.toContain("chown 'www-data:www-data' '/var/app'")
+    expect(ssh.calls).not.toContain("chown 'www-data' '/var/app'")
+    expect(ssh.calls).not.toContain("chgrp 'www-data' '/var/app'")
+  })
+
+  it("apply only runs chmod when only mode has drifted", async () => {
+    const ssh = createMockSsh({
+      "stat -c '%a %U %G' '/var/app'": { stdout: "755 www-data www-data" },
+    })
+    const mod = file.properties("/var/app", {
+      group: "www-data",
+      mode: "0644",
+      owner: "www-data",
+    })
+    const result = await mod.apply(ssh, emptyEnv)
+
+    expect(result.status).toBe("changed")
+    expect(ssh.calls).toContain("chmod '0644' '/var/app'")
+    expect(ssh.calls).not.toContain("chown 'www-data:www-data' '/var/app'")
+  })
+
+  it("apply combines chown owner:group when both have drifted", async () => {
+    const ssh = createMockSsh({
+      "stat -c '%a %U %G' '/var/app'": { stdout: "644 root root" },
+    })
+    const mod = file.properties("/var/app", {
+      group: "www-data",
+      mode: "0644",
+      owner: "www-data",
+    })
+    const result = await mod.apply(ssh, emptyEnv)
+
+    expect(result.status).toBe("changed")
+    expect(ssh.calls).not.toContain("chmod '0644' '/var/app'")
+    expect(ssh.calls).toContain("chown 'www-data:www-data' '/var/app'")
+    expect(ssh.calls).not.toContain("chown 'www-data' '/var/app'")
+    expect(ssh.calls).not.toContain("chgrp 'www-data' '/var/app'")
+  })
+
+  it("apply only invokes chgrp when group alone has drifted", async () => {
+    const ssh = createMockSsh({
+      "stat -c '%a %U %G' '/var/app'": { stdout: "644 www-data root" },
+    })
+    const mod = file.properties("/var/app", { group: "www-data" })
+    const result = await mod.apply(ssh, emptyEnv)
+
+    expect(result.status).toBe("changed")
+    expect(ssh.calls).toContain("chgrp 'www-data' '/var/app'")
+  })
+
+  it("apply normalises mode comparisons: 0644 desired matches 644 from stat", async () => {
+    const ssh = createMockSsh({
+      "stat -c '%a %U %G' '/var/app'": { stdout: "644 www-data www-data" },
+    })
+    const mod = file.properties("/var/app", { mode: "0644" })
+    const result = await mod.apply(ssh, emptyEnv)
+
+    expect(result.status).toBe("ok")
+    expect(ssh.calls).not.toContain("chmod '0644' '/var/app'")
   })
 })
 

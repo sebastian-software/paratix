@@ -6,6 +6,7 @@
     "alice",
     "autoremove",
     "authfile",
+    "chgrp",
     "chpasswd",
     "codenames",
     "crontab",

@@ -208,8 +208,131 @@ export function block(remotePath: string, options: BlockOptions): Module {
 }
 
 /**
+ * Read the current mode/owner/group triple from `stat -c '%a %U %G'`.
+ *
+ * @param ssh - The SSH connection.
+ * @param remotePath - Path to the file or directory on the remote host.
+ * @returns The trimmed `mode`, `owner`, `group` fields as parsed from stat.
+ */
+async function readPropertiesState(
+  ssh: SshConnection,
+  remotePath: string
+): Promise<{ group: string; mode: string; owner: string }> {
+  const raw = await ssh.output(`stat -c '%a %U %G' ${shellQuote(remotePath)}`)
+  const [mode = "", owner = "", group = ""] = raw.trim().split(" ")
+  return { group, mode, owner }
+}
+
+/**
+ * Compare the current mode against the desired mode, treating `"0644"` and
+ * `"644"` as equivalent (stat omits the leading zero).
+ *
+ * @param current - The mode reported by stat.
+ * @param desired - The desired mode (with or without leading zeros).
+ * @returns `true` when both modes match.
+ */
+function modeMatches(current: string, desired: string): boolean {
+  return current === desired.replace(/^0+/v, "")
+}
+
+/** State observed by {@link applyOwnershipDrift}. */
+type PropertiesState = { group: string; mode: string; owner: string }
+
+/** Desired settings passed by the caller. */
+type PropertiesOptions = { group?: string; mode?: string; owner?: string }
+
+type DriftContext = {
+  current: PropertiesState
+  options: PropertiesOptions
+  remotePath: string
+  ssh: SshConnection
+}
+
+/**
+ * Apply mode drift via `chmod` only when the desired mode differs from the
+ * current mode reported by stat.
+ *
+ * @param context - The drift context (ssh, remotePath, current, options).
+ * @returns `true` if a `chmod` was issued.
+ */
+async function applyModeDrift(context: DriftContext): Promise<boolean> {
+  const { current, options, remotePath, ssh } = context
+  if (options.mode == null || modeMatches(current.mode, options.mode)) return false
+  await ssh.exec(`chmod ${shellQuote(options.mode)} ${shellQuote(remotePath)}`, {
+    silent: true,
+  })
+  return true
+}
+
+/**
+ * Issue a combined `chown owner:group` when both fields differ.
+ *
+ * @param context - The drift context.
+ * @returns `true` if a combined `chown` was issued.
+ */
+async function maybeApplyCombinedChown(context: DriftContext): Promise<boolean> {
+  const { current, options, remotePath, ssh } = context
+  const ownerNeedsUpdate = options.owner != null && current.owner !== options.owner
+  const groupNeedsUpdate = options.group != null && current.group !== options.group
+  if (!ownerNeedsUpdate || !groupNeedsUpdate || options.owner == null || options.group == null) {
+    return false
+  }
+  const ownerGroup = `${options.owner}:${options.group}`
+  await ssh.exec(`chown ${shellQuote(ownerGroup)} ${shellQuote(remotePath)}`, { silent: true })
+  return true
+}
+
+/**
+ * Issue a `chown owner` when only the owner differs.
+ *
+ * @param context - The drift context.
+ * @returns `true` if a single-field `chown` was issued.
+ */
+async function maybeApplySingleChown(context: DriftContext): Promise<boolean> {
+  const { current, options, remotePath, ssh } = context
+  if (options.owner == null || current.owner === options.owner) return false
+  await ssh.exec(`chown ${shellQuote(options.owner)} ${shellQuote(remotePath)}`, {
+    silent: true,
+  })
+  return true
+}
+
+/**
+ * Issue a `chgrp group` when only the group differs.
+ *
+ * @param context - The drift context.
+ * @returns `true` if a `chgrp` was issued.
+ */
+async function maybeApplySingleChgrp(context: DriftContext): Promise<boolean> {
+  const { current, options, remotePath, ssh } = context
+  if (options.group == null || current.group === options.group) return false
+  await ssh.exec(`chgrp ${shellQuote(options.group)} ${shellQuote(remotePath)}`, {
+    silent: true,
+  })
+  return true
+}
+
+/**
+ * Apply owner/group drift, combining `chown owner:group` when both differ and
+ * falling back to individual `chown` / `chgrp` calls when only one differs.
+ *
+ * @param context - Current state, desired options, ssh handle, and remote path.
+ * @returns `true` if any of `chown` / `chgrp` was issued.
+ */
+async function applyOwnershipDrift(context: DriftContext): Promise<boolean> {
+  if (await maybeApplyCombinedChown(context)) return true
+  const ownerChanged = await maybeApplySingleChown(context)
+  const groupChanged = await maybeApplySingleChgrp(context)
+  return ownerChanged || groupChanged
+}
+
+/**
  * Set file or directory ownership and permissions on the remote host.
- * Only the attributes specified in `options` are checked and applied.
+ * Only the attributes specified in `options` are checked and applied. Drift
+ * is detected via `stat -c '%a %U %G'` so `apply` only invokes the relevant
+ * `chmod`/`chown`/`chgrp` for fields that actually differ from the desired
+ * state. When all desired fields already match, `apply` returns `status: "ok"`
+ * instead of falsely reporting a change.
  *
  * @param remotePath - Path to the file or directory on the remote host.
  * @param options - Attributes to enforce.
@@ -218,50 +341,25 @@ export function block(remotePath: string, options: BlockOptions): Module {
  * @param options.owner - Optional owner name.
  * @returns A Module that ensures the properties match.
  */
-export function properties(
-  remotePath: string,
-  options: { group?: string; mode?: string; owner?: string }
-): Module {
+export function properties(remotePath: string, options: PropertiesOptions): Module {
   return {
     async apply(ssh: null | SshConnection): Promise<ModuleResult> {
       if (!ssh) return failed(`[file.properties: ${remotePath}] SSH connection is required`)
 
-      let changed = false
-
-      if (options.mode != null) {
-        await ssh.exec(`chmod ${shellQuote(options.mode)} ${shellQuote(remotePath)}`, {
-          silent: true,
-        })
-        changed = true
-      }
-      if (options.owner != null && options.group != null) {
-        const ownerGroup = `${options.owner}:${options.group}`
-        await ssh.exec(`chown ${shellQuote(ownerGroup)} ${shellQuote(remotePath)}`, {
-          silent: true,
-        })
-        changed = true
-      } else if (options.owner != null) {
-        await ssh.exec(`chown ${shellQuote(options.owner)} ${shellQuote(remotePath)}`, {
-          silent: true,
-        })
-        changed = true
-      } else if (options.group != null) {
-        // cspell:disable-next-line
-        await ssh.exec(`chgrp ${shellQuote(options.group)} ${shellQuote(remotePath)}`, {
-          silent: true,
-        })
-        changed = true
-      }
+      const current = await readPropertiesState(ssh, remotePath)
+      const context: DriftContext = { current, options, remotePath, ssh }
+      const modeChanged = await applyModeDrift(context)
+      const ownershipChanged = await applyOwnershipDrift(context)
+      const changed = modeChanged || ownershipChanged
 
       return { status: changed ? "changed" : "ok" }
     },
     async check(ssh: null | SshConnection): Promise<"needs-apply" | "ok"> {
       if (!ssh) return NEEDS_APPLY
 
-      const raw = await ssh.output(`stat -c '%a %U %G' ${shellQuote(remotePath)}`)
-      const [mode, owner, group] = raw.trim().split(" ")
+      const { group, mode, owner } = await readPropertiesState(ssh, remotePath)
 
-      if (options.mode != null && mode !== options.mode.replace(/^0+/v, "")) return NEEDS_APPLY
+      if (options.mode != null && !modeMatches(mode, options.mode)) return NEEDS_APPLY
       if (options.owner != null && owner !== options.owner) return NEEDS_APPLY
       if (options.group != null && group !== options.group) return NEEDS_APPLY
 
