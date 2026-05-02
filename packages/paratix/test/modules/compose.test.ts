@@ -480,6 +480,7 @@ describe("compose.config — apply", () => {
   it("writes content and validates with config --quiet", async () => {
     const writtenFiles: Array<{ content: string; path: string }> = []
     const mockSsh = createComposeMockSsh({
+      [`[ -e '${remotePath}' ]`]: { code: 1 },
       [`${composeCmd("podman")} config --quiet`]: { code: 0 },
     })
     // eslint-disable-next-line @typescript-eslint/require-await -- Mock implementation
@@ -502,6 +503,7 @@ describe("compose.config — apply", () => {
       src: string
     }> = []
     const mockSsh = createComposeMockSsh({
+      [`[ -e '${remotePath}' ]`]: { code: 1 },
       [`${composeCmd("podman")} config --quiet`]: { code: 0 },
     })
     mockSsh.uploadFile = async (
@@ -526,7 +528,9 @@ describe("compose.config — apply", () => {
 
   it("returns failed when validation fails", async () => {
     const mockSsh = createComposeMockSsh({
+      [`[ -e '${remotePath}' ]`]: { code: 1 },
       [`${composeCmd("podman")} config --quiet`]: { code: 1 },
+      [`rm -f '${remotePath}'`]: { code: 0 },
     })
     const mod = compose.config({ content: sampleContent, projectDirectory })
     const result = await mod.apply(mockSsh, emptyEnv)
@@ -538,6 +542,119 @@ describe("compose.config — apply", () => {
     const mod = compose.config({ projectDirectory })
     const result = await mod.apply(mockSsh, emptyEnv)
     expect(result.status).toBe("failed")
+  })
+
+  it("rolls back to prior content when validation fails (content path)", async () => {
+    // R-0000035: a failed `compose ... config --quiet` validation must restore
+    // the previous compose.yml so the host is never left with a broken file.
+    const priorContent = "services:\n  web:\n    image: nginx:1.0\n"
+    const writtenFiles: Array<{
+      content: string
+      mode: string | undefined
+      path: string
+    }> = []
+    const mockSsh = createComposeMockSsh({
+      [`[ -e '${remotePath}' ]`]: { code: 0 },
+      [`${composeCmd("podman")} config --quiet`]: { code: 1 },
+      [`cat '${remotePath}'`]: { code: 0, stdout: priorContent },
+      [`stat -c '%a' '${remotePath}'`]: { code: 0, stdout: "600" },
+    })
+    mockSsh.writeFile = async (
+      path: string,
+      content: string,
+      writeOptions: { mode: string }
+    ): Promise<void> => {
+      await Promise.resolve()
+      writtenFiles.push({ content, mode: writeOptions.mode, path })
+    }
+
+    const mod = compose.config({ content: "broken: yaml: [\n", projectDirectory })
+    const result = await mod.apply(mockSsh, emptyEnv)
+
+    expect(result.status).toBe("failed")
+    // First write: the new (broken) content. Second write: rollback restoring
+    // the captured prior content with the captured mode.
+    expect(writtenFiles).toHaveLength(2)
+    expect(writtenFiles[0]?.content).toBe("broken: yaml: [\n")
+    // readFile in production trims trailing newlines (output() trims), and
+    // the mock mirrors that behaviour.
+    expect(writtenFiles[1]?.content).toBe(priorContent.trim())
+    expect(writtenFiles[1]?.mode).toBe("600")
+    expect(writtenFiles[1]?.path).toBe(remotePath)
+  })
+
+  it("rolls back to prior content when validation fails (src path)", async () => {
+    const { readFile: readFileMock } = await import("node:fs/promises")
+    const priorContent = "services:\n  api:\n    image: alpine:3\n"
+    const newContent = "broken-yaml: [\n"
+    vi.mocked(readFileMock).mockImplementationOnce(async () => {
+      await Promise.resolve()
+      return newContent
+    })
+
+    const uploadedFiles: Array<{ dest: string; mode: string | undefined; src: string }> = []
+    const writtenFiles: Array<{
+      content: string
+      mode: string | undefined
+      path: string
+    }> = []
+    const mockSsh = createComposeMockSsh({
+      [`[ -e '${remotePath}' ]`]: { code: 0 },
+      [`${composeCmd("podman")} config --quiet`]: { code: 1 },
+      [`cat '${remotePath}'`]: { code: 0, stdout: priorContent },
+      [`stat -c '%a' '${remotePath}'`]: { code: 0, stdout: "600" },
+    })
+    mockSsh.uploadFile = async (
+      src: string,
+      dest: string,
+      uploadOptions?: { mode?: string }
+    ): Promise<void> => {
+      await Promise.resolve()
+      uploadedFiles.push({ dest, mode: uploadOptions?.mode, src })
+    }
+    mockSsh.writeFile = async (
+      path: string,
+      content: string,
+      writeOptions: { mode: string }
+    ): Promise<void> => {
+      await Promise.resolve()
+      writtenFiles.push({ content, mode: writeOptions.mode, path })
+    }
+
+    const mod = compose.config({ projectDirectory, src: "/local/broken.yml" })
+    const result = await mod.apply(mockSsh, emptyEnv)
+
+    expect(result.status).toBe("failed")
+    // The src path uploaded the broken file, validation failed, then the
+    // rollback writeFile restored the captured prior content.
+    expect(uploadedFiles).toHaveLength(1)
+    expect(uploadedFiles[0]?.src).toBe("/local/broken.yml")
+    expect(writtenFiles).toHaveLength(1)
+    expect(writtenFiles[0]?.content).toBe(priorContent.trim())
+    expect(writtenFiles[0]?.mode).toBe("600")
+    expect(writtenFiles[0]?.path).toBe(remotePath)
+  })
+
+  it("removes the freshly written file on validation failure when no prior file existed", async () => {
+    const writtenFiles: Array<{ content: string; path: string }> = []
+    const mockSsh = createComposeMockSsh({
+      [`[ -e '${remotePath}' ]`]: { code: 1 },
+      [`${composeCmd("podman")} config --quiet`]: { code: 1 },
+      [`rm -f '${remotePath}'`]: { code: 0 },
+    })
+    // eslint-disable-next-line @typescript-eslint/require-await -- Mock implementation
+    mockSsh.writeFile = async (path: string, content: string): Promise<void> => {
+      writtenFiles.push({ content, path })
+    }
+
+    const mod = compose.config({ content: "broken: [", projectDirectory })
+    const result = await mod.apply(mockSsh, emptyEnv)
+
+    expect(result.status).toBe("failed")
+    // Only the failed write happened; rollback removed the freshly written
+    // compose.yml via `rm -f` instead of restoring stale content.
+    expect(writtenFiles).toHaveLength(1)
+    expect(mockSsh.calls).toContain(`rm -f '${remotePath}'`)
   })
 })
 

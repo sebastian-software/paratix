@@ -386,6 +386,83 @@ function createComposeConfigCheck(
 }
 
 /**
+ * Snapshot of a `compose.yml` captured before {@link compose.config} writes a
+ * new revision. When validation of the new revision fails, the snapshot is
+ * used to restore the previous state.
+ */
+type PriorComposeFile = { content: string; existed: true; mode: string } | { existed: false }
+
+/**
+ * Capture the existing `compose.yml` at `remotePath` so a failed validation
+ * can restore it. When the file does not exist yet, the returned state allows
+ * the rollback to remove the freshly written file instead.
+ *
+ * @param ssh - The SSH connection to the remote host.
+ * @param remotePath - Path to `compose.yml` on the remote host.
+ * @returns A snapshot describing whether the file existed and its content/mode.
+ */
+async function capturePriorComposeFile(
+  ssh: SshConnection,
+  remotePath: string
+): Promise<PriorComposeFile> {
+  const existed = await ssh.exists(remotePath)
+  if (!existed) return { existed: false }
+
+  const content = await ssh.readFile(remotePath)
+  const rawMode = await ssh.output(`stat -c '%a' ${shellQuote(remotePath)}`)
+  const trimmedMode = rawMode.trim()
+  const mode = trimmedMode === "" ? COMPOSE_CONFIG_MODE : trimmedMode
+  return { content, existed: true, mode }
+}
+
+/**
+ * Write the new compose.yml content from either `options.src` (uploaded) or
+ * `options.content` (string). Caller has already verified that exactly one is
+ * provided.
+ *
+ * @param ssh - The SSH connection to the remote host.
+ * @param remotePath - Destination path for the compose file.
+ * @param options - Source/content options identical to {@link compose.config}.
+ * @param options.content - Inline string content to write.
+ * @param options.src - Local file path to upload.
+ */
+async function writeComposeFileForValidation(
+  ssh: SshConnection,
+  remotePath: string,
+  options: { content?: string; src?: string }
+): Promise<void> {
+  if (options.src !== undefined && options.src !== "") {
+    // Always pass an explicit { mode } to uploadFile so the resulting
+    // compose.yml mode is independent of the uploadFile temp default.
+    await ssh.uploadFile(options.src, remotePath, { mode: COMPOSE_CONFIG_MODE })
+    return
+  }
+  if (options.content !== undefined && options.content !== "") {
+    await ssh.writeFile(remotePath, options.content, { mode: COMPOSE_CONFIG_MODE })
+  }
+}
+
+/**
+ * Restore the prior `compose.yml` after a failed validation. When the file
+ * did not exist before, remove the freshly-written file instead.
+ *
+ * @param ssh - The SSH connection to the remote host.
+ * @param remotePath - Path to the compose file.
+ * @param prior - The snapshot captured before the new content was written.
+ */
+async function rollbackComposeFile(
+  ssh: SshConnection,
+  remotePath: string,
+  prior: PriorComposeFile
+): Promise<void> {
+  if (prior.existed) {
+    await ssh.writeFile(remotePath, prior.content, { mode: prior.mode })
+    return
+  }
+  await ssh.exec(`rm -f ${shellQuote(remotePath)}`, EXEC_OPTS)
+}
+
+/**
  * Modules for managing Docker Compose / Podman Compose stacks on a remote host.
  *
  * All methods auto-detect the container runtime (`docker` or `podman`) unless
@@ -428,25 +505,32 @@ export const compose = {
         })
         if (typeof runtime !== "string") return runtime
 
-        if (options.src !== undefined && options.src !== "") {
-          // Always pass an explicit { mode } to uploadFile so the resulting
-          // compose.yml mode is independent of the uploadFile temp default.
-          await connection.uploadFile(options.src, remotePath, { mode: COMPOSE_CONFIG_MODE })
-        } else if (options.content !== undefined && options.content !== "") {
-          await connection.writeFile(remotePath, options.content, { mode: COMPOSE_CONFIG_MODE })
-        } else {
+        if (
+          (options.src === undefined || options.src === "") &&
+          (options.content === undefined || options.content === "")
+        ) {
           return failed(`[compose.config] content or src is required for ${projectDirectory}`)
         }
+
+        // R-0000035: capture the prior compose.yml so a failed validation never
+        // leaves the host with a broken file. We restore the original content
+        // (or delete the file if it did not exist before) when
+        // `compose ... config --quiet` rejects the new content.
+        const priorState = await capturePriorComposeFile(connection, remotePath)
+
+        await writeComposeFileForValidation(connection, remotePath, options)
 
         const validate = await connection.exec(
           `${composeCommand(runtime, projectDirectory)} config --quiet`,
           EXEC_OPTS
         )
-        if (validate.code !== 0)
+        if (validate.code !== 0) {
+          await rollbackComposeFile(connection, remotePath, priorState)
           return failedCommand(
             `[compose.config] validation failed for ${projectDirectory}`,
             validate
           )
+        }
 
         return { status: "changed" }
       },
