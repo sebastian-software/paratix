@@ -1100,6 +1100,33 @@ describe("CLI entrypoint", () => {
     }
   })
 
+  // R-0000071 regression: when the dynamic `import("tsx/esm/api")` throws
+  // a non-MODULE_NOT_FOUND error (e.g. an incompatible Node, broken
+  // install, OOM, transitive dep missing), the CLI must NOT silently fall
+  // back to handleTsxLoadFailure (which only exits for .ts files and
+  // would otherwise mask the real cause). Instead the original error must
+  // surface so the operator can act on it.
+  it("rethrows non-MODULE_NOT_FOUND tsx loader errors with the original cause", async () => {
+    const tempDirectory = mkdtempSync(join(tmpdir(), "paratix-cli-tsx-rethrow-"))
+    const playbookPath = join(tempDirectory, "playbook.ts")
+
+    try {
+      writeFileSync(playbookPath, "export default {}")
+
+      const realCause = new Error("incompatible Node version: tsx requires Node >=20")
+      vi.doMock("tsx/esm/api", () => {
+        throw realCause
+      })
+
+      await expect(loadServerDefinitionFromFile(playbookPath, { firstRun: false })).rejects.toThrow(
+        /Failed to load tsx\/esm\/api/v
+      )
+    } finally {
+      vi.doUnmock("tsx/esm/api")
+      rmSync(tempDirectory, { force: true, recursive: true })
+    }
+  })
+
   it("sets PARATIX_FIRST_RUN before importing the playbook when --first-run is passed", async () => {
     const tempDirectory = mkdtempSync(join(tmpdir(), "paratix-cli-first-run-"))
     const playbookPath = join(tempDirectory, "capture-first-run.mjs")

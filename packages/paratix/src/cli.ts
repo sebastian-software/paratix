@@ -265,6 +265,23 @@ export function applyCliProcessEnvironment(options: { firstRun: boolean }): void
   process.env[FIRST_RUN_ENV_NAME] = "true"
 }
 
+/**
+ * R-0000071: detect whether a thrown import error genuinely indicates that
+ * the optional `tsx/esm/api` module is missing, rather than a real loader
+ * failure (incompatible Node, broken install, OOM, transitive dep missing).
+ * Only when the error is a module-not-found error and the failing
+ * specifier references `tsx` do we treat it as „tsx is not installed".
+ *
+ * @param error - The error caught while importing `tsx/esm/api`.
+ * @returns True if the error indicates a missing tsx dependency.
+ */
+function isMissingTsxDependencyError(error: unknown): boolean {
+  if (!(error instanceof Error)) return false
+  const code = "code" in error ? error.code : undefined
+  if (code !== "ERR_MODULE_NOT_FOUND" && code !== "MODULE_NOT_FOUND") return false
+  return error.message.includes("tsx")
+}
+
 export async function loadServerDefinitionFromFile(
   file: string,
   options: { firstRun: boolean }
@@ -274,14 +291,28 @@ export async function loadServerDefinitionFromFile(
 
   applyCliProcessEnvironment(options)
 
-  // Register tsx for TypeScript imports
-  await import("tsx/esm/api")
-    .then((tsx: { register: () => void }) => {
-      tsx.register()
-    })
-    .catch(() => {
+  // Register tsx for TypeScript imports.
+  // R-0000071: narrow the catch so only a genuine missing-tsx error is
+  // routed through handleTsxLoadFailure. Any other error from the dynamic
+  // import (incompatible Node, broken install, OOM, transitive dep
+  // missing) is rethrown with the original cause so the CLI exit handler
+  // surfaces the real loader failure instead of falsely reporting that
+  // tsx is not installed.
+  try {
+    const tsx = (await import("tsx/esm/api")) as { register: () => void }
+    tsx.register()
+  } catch (error) {
+    if (isMissingTsxDependencyError(error)) {
       handleTsxLoadFailure(filePath)
-    })
+    } else {
+      throw new Error(
+        `Failed to load tsx/esm/api: ${error instanceof Error ? error.message : String(error)}`,
+        {
+          cause: error,
+        }
+      )
+    }
+  }
 
   // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment -- Dynamic import has unknown shape
   const imported = await import(fileUrl)
