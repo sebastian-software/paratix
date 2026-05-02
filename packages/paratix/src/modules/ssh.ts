@@ -14,6 +14,15 @@ type KnownHostsOptions = {
 const SSH_KEYSCAN_MIN_FIELDS = 3
 const DEFAULT_SSH_PORT = 22
 
+function assertAuthorizedKeyValue(value: string): void {
+  if (value.length === 0) {
+    throw new Error("ssh.authorizedKeys: key must not be empty")
+  }
+  if (/[\n\r]/v.test(value)) {
+    throw new Error(`ssh.authorizedKeys: key must not contain newlines: ${JSON.stringify(value)}`)
+  }
+}
+
 function normalizePublicKey(publicKey: string): string {
   const parts = publicKey.trim().split(/\s+/v)
   if (parts.length < 2) {
@@ -137,6 +146,7 @@ export const ssh = {
    * @returns A Module that manages the authorized key entry.
    */
   authorizedKeys(user: string, key: string, options?: { state?: "absent" | "present" }): Module {
+    assertAuthorizedKeyValue(key)
     const state = options?.state ?? "present"
 
     return {

@@ -687,4 +687,18 @@ describe("ssh.authorizedKeys", () => {
       `chmod 600 '${tempPath}' && chown 'alice':'alice' '${tempPath}' && mv '${tempPath}' '/home/my user/.ssh/authorized_keys' && chmod 600 '/home/my user/.ssh/authorized_keys' && chown 'alice':'alice' '/home/my user/.ssh/authorized_keys'`
     )
   })
+
+  it("rejects keys containing newlines at construction time", () => {
+    const malicious = `${testKey}\nssh-ed25519 INJECTED extra-key`
+    expect(() => ssh.authorizedKeys("alice", malicious)).toThrow(/must not contain newlines/v)
+  })
+
+  it("rejects keys containing carriage returns at construction time", () => {
+    const malicious = `${testKey}\rssh-ed25519 INJECTED extra-key`
+    expect(() => ssh.authorizedKeys("alice", malicious)).toThrow(/must not contain newlines/v)
+  })
+
+  it("rejects an empty key at construction time", () => {
+    expect(() => ssh.authorizedKeys("alice", "")).toThrow(/must not be empty/v)
+  })
 })
