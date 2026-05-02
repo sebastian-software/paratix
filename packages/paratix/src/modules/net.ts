@@ -195,6 +195,77 @@ function appendNetworkdEntries(lines: string[], options: InterfaceOptions): void
   }
 }
 
+/** Parameters for the net.route check helper. */
+type RouteCheckParameters = {
+  destination: string
+  device?: string
+  dropinPath: string
+  gateway: string
+  state: "absent" | "present"
+}
+
+/**
+ * Run the live-route check against the remote host.
+ *
+ * @param conn - The SSH connection.
+ * @param destination - The route destination CIDR.
+ * @param gateway - The expected gateway address.
+ * @returns `true` when the live route matches the expected gateway.
+ */
+async function hasLiveRoute(
+  conn: SshConnection,
+  destination: string,
+  gateway: string
+): Promise<boolean> {
+  const result = await conn.exec(`ip route show ${shellQuote(destination)}`, EXEC_OPTS)
+  const output = result.stdout.trim()
+  return output.includes(`via ${gateway}`)
+}
+
+/**
+ * Test whether the systemd-networkd drop-in for a route is currently on disk.
+ *
+ * @param conn - The SSH connection.
+ * @param dropinPath - The absolute drop-in file path.
+ * @returns `true` when the drop-in exists.
+ */
+async function routeDropinExists(conn: SshConnection, dropinPath: string): Promise<boolean> {
+  const result = await conn.exec(`test -f ${shellQuote(dropinPath)}`, EXEC_OPTS)
+  return result.code === 0
+}
+
+/**
+ * R-0000061: validate the persistent systemd-networkd drop-in alongside the
+ * live route — analogous to `mount.present.check` after R-0000049 — so that
+ * drift in either layer triggers `needs-apply`.
+ *
+ * @param conn - The SSH connection.
+ * @param parameters - Desired route values plus drop-in path.
+ * @returns `"ok"` when both layers match the desired state, otherwise
+ *   `"needs-apply"`.
+ */
+async function checkRouteState(
+  conn: SshConnection,
+  parameters: RouteCheckParameters
+): Promise<"needs-apply" | "ok"> {
+  const { destination, device, dropinPath, gateway, state } = parameters
+  const live = await hasLiveRoute(conn, destination, gateway)
+  const dropinPresent = await routeDropinExists(conn, dropinPath)
+
+  if (state === "present") {
+    if (!live) return NEEDS_APPLY
+    if (!dropinPresent) return NEEDS_APPLY
+    const expected = buildRouteDropin(destination, gateway, device)
+    const current = await conn.readFile(dropinPath)
+    return current.trim() === expected.trim() ? "ok" : NEEDS_APPLY
+  }
+
+  // absent: neither the live route nor the drop-in may remain — a lingering
+  // drop-in would re-create the route on the next reboot.
+  if (live) return NEEDS_APPLY
+  return dropinPresent ? NEEDS_APPLY : "ok"
+}
+
 /**
  * Modules for managing network configuration on the remote host.
  */
@@ -432,15 +503,7 @@ export const net = {
       },
       async check(conn: null | SshConnection): Promise<"needs-apply" | "ok"> {
         if (!conn) return NEEDS_APPLY
-
-        const result = await conn.exec(`ip route show ${shellQuote(destination)}`, EXEC_OPTS)
-        const output = result.stdout.trim()
-        const hasRoute = output.includes(`via ${gateway}`)
-
-        if (state === "present") {
-          return hasRoute ? "ok" : NEEDS_APPLY
-        }
-        return hasRoute ? NEEDS_APPLY : "ok"
+        return checkRouteState(conn, { destination, device, dropinPath, gateway, state })
       },
       name: `net.route: ${state} ${destination} via ${gateway}`,
     }

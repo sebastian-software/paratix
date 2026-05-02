@@ -311,10 +311,14 @@ describe("net.route — check", () => {
   })
 
   it("returns ok when route is present (state: present)", async () => {
+    const dropinPath = "/etc/systemd/network/50-paratix-route-10.0.0.0-24.network"
+    const expectedDropin = `[Match]\nName=eth0\n\n[Route]\nDestination=10.0.0.0/24\nGateway=192.168.1.1\n`
     const mockSsh = createMockSsh({
+      [`cat '${dropinPath}'`]: { stdout: expectedDropin },
+      [`test -f '${dropinPath}'`]: { code: 0 },
       "ip route show '10.0.0.0/24'": { stdout: "10.0.0.0/24 via 192.168.1.1 dev eth0" },
     })
-    const mod = net.route("10.0.0.0/24", "192.168.1.1")
+    const mod = net.route("10.0.0.0/24", "192.168.1.1", { device: "eth0" })
     const result = await mod.check(mockSsh, emptyEnv)
     expect(result).toBe("ok")
   })
@@ -328,8 +332,10 @@ describe("net.route — check", () => {
     expect(result).toBe("needs-apply")
   })
 
-  it("returns ok when route is absent (state: absent)", async () => {
+  it("returns ok when route is absent (state: absent) and drop-in is gone", async () => {
+    const dropinPath = "/etc/systemd/network/50-paratix-route-10.0.0.0-24.network"
     const mockSsh = createMockSsh({
+      [`test -f '${dropinPath}'`]: { code: 1 },
       "ip route show '10.0.0.0/24'": { stdout: "" },
     })
     const mod = net.route("10.0.0.0/24", "192.168.1.1", { state: "absent" })
@@ -362,6 +368,55 @@ describe("net.route — check", () => {
     const mod = net.route("10.0.0.0/24", "192.168.1.1")
     await mod.check(mockSsh, emptyEnv)
     expect(mockSsh.calls).toContain("ip route show '10.0.0.0/24'")
+  })
+
+  // R-0000061: persistent drop-in must be validated alongside live route.
+  it("returns needs-apply when live route matches but drop-in is missing (state: present)", async () => {
+    const dropinPath = "/etc/systemd/network/50-paratix-route-10.0.0.0-24.network"
+    const mockSsh = createMockSsh({
+      [`test -f '${dropinPath}'`]: { code: 1 },
+      "ip route show '10.0.0.0/24'": { stdout: "10.0.0.0/24 via 192.168.1.1 dev eth0" },
+    })
+    const mod = net.route("10.0.0.0/24", "192.168.1.1", { device: "eth0" })
+    const result = await mod.check(mockSsh, emptyEnv)
+    expect(result).toBe("needs-apply")
+  })
+
+  it("returns needs-apply when drop-in has a stale gateway (state: present)", async () => {
+    const dropinPath = "/etc/systemd/network/50-paratix-route-10.0.0.0-24.network"
+    const staleDropin = `[Match]\nName=eth0\n\n[Route]\nDestination=10.0.0.0/24\nGateway=192.168.1.254\n`
+    const mockSsh = createMockSsh({
+      [`cat '${dropinPath}'`]: { stdout: staleDropin },
+      [`test -f '${dropinPath}'`]: { code: 0 },
+      "ip route show '10.0.0.0/24'": { stdout: "10.0.0.0/24 via 192.168.1.1 dev eth0" },
+    })
+    const mod = net.route("10.0.0.0/24", "192.168.1.1", { device: "eth0" })
+    const result = await mod.check(mockSsh, emptyEnv)
+    expect(result).toBe("needs-apply")
+  })
+
+  it("returns needs-apply when live route is gone but drop-in still exists (state: absent)", async () => {
+    const dropinPath = "/etc/systemd/network/50-paratix-route-10.0.0.0-24.network"
+    const mockSsh = createMockSsh({
+      [`test -f '${dropinPath}'`]: { code: 0 },
+      "ip route show '10.0.0.0/24'": { stdout: "" },
+    })
+    const mod = net.route("10.0.0.0/24", "192.168.1.1", { state: "absent" })
+    const result = await mod.check(mockSsh, emptyEnv)
+    expect(result).toBe("needs-apply")
+  })
+
+  it("returns ok when both live route and drop-in match (state: present)", async () => {
+    const dropinPath = "/etc/systemd/network/50-paratix-route-10.0.0.0-24.network"
+    const expectedDropin = `[Match]\nName=eth0\n\n[Route]\nDestination=10.0.0.0/24\nGateway=192.168.1.1\n`
+    const mockSsh = createMockSsh({
+      [`cat '${dropinPath}'`]: { stdout: expectedDropin },
+      [`test -f '${dropinPath}'`]: { code: 0 },
+      "ip route show '10.0.0.0/24'": { stdout: "10.0.0.0/24 via 192.168.1.1 dev eth0" },
+    })
+    const mod = net.route("10.0.0.0/24", "192.168.1.1", { device: "eth0" })
+    const result = await mod.check(mockSsh, emptyEnv)
+    expect(result).toBe("ok")
   })
 })
 
