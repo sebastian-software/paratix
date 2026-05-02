@@ -59,7 +59,7 @@ function debianApplyResponses(
     "DEBIAN_FRONTEND=noninteractive apt-get full-upgrade -y": { code: 0 },
     "DEBIAN_FRONTEND=noninteractive apt-get update": { code: 0 },
     "DEBIAN_FRONTEND=noninteractive dpkg --configure -a": { code: 0 },
-    "find /etc/apt/sources.list.d/ \\( -name '*.list' -o -name '*.sources' \\) -type f":
+    "find /etc/apt/sources.list.d/ \\( -name '*.list' -o -name '*.sources' \\) -type f -print0":
       FIND_SOURCES_EMPTY,
     "lsb_release -cs": { code: 0, stdout: `${currentCodename}\n` },
     ...overrides,
@@ -359,10 +359,13 @@ describe("releaseUpgrade.upgrade — apply (Debian)", () => {
         debianApplyResponses("bookworm", "trixie", {
           [`cat '${extraPath}'`]: { code: 0, stdout: originalExtraSources },
           "DEBIAN_FRONTEND=noninteractive apt-get update": { code: 1 },
-          "find /etc/apt/sources.list.d/ \\( -name '*.list' -o -name '*.sources' \\) -type f": {
-            code: 0,
-            stdout: `${extraPath}\n`,
-          },
+          // R-0000053: find emits NUL-delimited paths via -print0; the
+          // mock returns the path followed by the NUL terminator.
+          "find /etc/apt/sources.list.d/ \\( -name '*.list' -o -name '*.sources' \\) -type f -print0":
+            {
+              code: 0,
+              stdout: `${extraPath}\0`,
+            },
         })
       )
       const writes = captureWriteFile(ssh)
@@ -375,6 +378,37 @@ describe("releaseUpgrade.upgrade — apply (Debian)", () => {
       const extraWrites = writes.filter((w) => w.path === extraPath)
       expect(mainWrites.at(-1)?.content).toBe(originalMainSources)
       expect(extraWrites.at(-1)?.content).toBe(originalExtraSources)
+    })
+
+    // R-0000053 regression: a filename with embedded whitespace that comes
+    // through find -print0 must be processed end-to-end without splitting
+    // on the embedded space. The previous newline-splitting code would
+    // pass the path verbatim too, but a path containing a literal newline
+    // would be silently truncated. NUL-delimited splitting is robust.
+    it("processes a sources.list.d filename containing whitespace via -print0", async () => {
+      // readFile (mock output()) trims trailing whitespace.
+      const originalExtraSources = "deb http://example.com/repo bookworm main"
+      const extraPath = "/etc/apt/sources.list.d/repo with space.list"
+      const ssh = createMockSsh(
+        debianApplyResponses("bookworm", "trixie", {
+          [`cat '${extraPath}'`]: { code: 0, stdout: originalExtraSources },
+          "find /etc/apt/sources.list.d/ \\( -name '*.list' -o -name '*.sources' \\) -type f -print0":
+            {
+              code: 0,
+              stdout: `${extraPath}\0`,
+            },
+        })
+      )
+      const writes = captureWriteFile(ssh)
+      const mod = releaseUpgrade.upgrade()
+      const result = await mod.apply(ssh, emptyEnv)
+      expect(result.status).toBe("changed")
+      // The file with embedded whitespace must have been rewritten to
+      // point at trixie.
+      const extraWrites = writes.filter((w) => w.path === extraPath)
+      expect(extraWrites).toHaveLength(1)
+      expect(extraWrites[0]?.content).toContain("trixie")
+      expect(extraWrites[0]?.content).not.toContain("bookworm")
     })
 
     it("does not roll back when the upgrade pipeline succeeds", async () => {

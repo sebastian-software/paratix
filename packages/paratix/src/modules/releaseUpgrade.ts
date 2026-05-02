@@ -173,24 +173,30 @@ async function replaceCodenameInSourcesList(
   })
   if (mainSnapshot != null) snapshots.push(mainSnapshot)
 
+  // R-0000053: use `find ... -print0` and split on the NUL byte so the
+  // pipeline stays safe against pathological filenames containing
+  // newlines, leading dashes (which `find` could otherwise treat as
+  // flags), or embedded whitespace. The previous newline-split approach
+  // could miss files or corrupt their paths in those edge cases.
   const listFilesResult = await ssh.exec(
-    "find /etc/apt/sources.list.d/ \\( -name '*.list' -o -name '*.sources' \\) -type f",
+    "find /etc/apt/sources.list.d/ \\( -name '*.list' -o -name '*.sources' \\) -type f -print0",
     { ignoreExitCode: true, silent: true }
   )
-  if (listFilesResult.code !== 0 || !listFilesResult.stdout.trim()) {
+  if (listFilesResult.code !== 0 || listFilesResult.stdout.length === 0) {
     return snapshots
   }
 
-  for (const filePath of listFilesResult.stdout.trim().split("\n")) {
-    const trimmedPath = filePath.trim()
-    if (!trimmedPath) continue
+  // Split on the NUL byte; the trailing empty string (after the last NUL)
+  // is filtered out below.
+  for (const filePath of listFilesResult.stdout.split("\0")) {
+    if (filePath.length === 0) continue
     // eslint-disable-next-line no-await-in-loop
-    const content = await ssh.readFile(trimmedPath)
+    const content = await ssh.readFile(filePath)
     // eslint-disable-next-line no-await-in-loop
     const snapshot = await rewriteSourcesFile({
       currentCodename,
       originalContent: content,
-      remotePath: trimmedPath,
+      remotePath: filePath,
       ssh,
       targetCodename,
     })
