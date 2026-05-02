@@ -5,6 +5,7 @@ import {
   createPackageGuard,
 } from "./conditionalModules.js"
 import { failed } from "./moduleFailure.js"
+import { getRunnerAbortSignal, setRunnerAbortSignal } from "./runnerAbortSignal.js"
 import {
   type Environment,
   type Module,
@@ -14,25 +15,18 @@ import {
 } from "./types.js"
 
 /**
- * Module-private holder for the runner's prompt abort signal.
+ * Backward-compatible wrapper for {@link setRunnerAbortSignal}.
  *
- * The runner installs the signal via {@link setPauseAbortSignal} during
- * `runPlaybook` and clears it on shutdown. The {@link pause} builtin reads it
- * so a SIGINT fired while a step is paused rejects the pause promise instead
- * of leaving the stdin `data` listener attached.
- */
-let pauseAbortSignal: AbortSignal | undefined
-
-/**
- * Register or clear the abort signal that {@link pause} should observe.
+ * R-0000027 introduced this function for the {@link pause} builtin; R-0000052
+ * generalized the underlying holder so polling modules (e.g. `net.waitFor`)
+ * can observe the same abort signal. The export is preserved so external
+ * callers and tests that already imported `setPauseAbortSignal` continue to
+ * work; new code should call {@link setRunnerAbortSignal} directly.
  *
- * Pass `undefined` to clear. Intended for the runner's shutdown lifecycle —
- * playbooks should never call this directly.
- *
- * @param signal - The abort signal whose `abort` event cancels active pauses.
+ * @param signal - The abort signal whose `abort` event cancels active waits.
  */
 export function setPauseAbortSignal(signal: AbortSignal | undefined): void {
-  pauseAbortSignal = signal
+  setRunnerAbortSignal(signal)
 }
 
 /**
@@ -192,7 +186,7 @@ export function pause(message?: string): Module {
       const promptText = message ?? "Press enter to continue..."
       process.stdout.write(`  [pause] ${promptText} `)
 
-      await waitForEnterOrAbort(pauseAbortSignal)
+      await waitForEnterOrAbort(getRunnerAbortSignal())
 
       return { status: "ok" }
     },

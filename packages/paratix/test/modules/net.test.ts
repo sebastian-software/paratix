@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest"
 
 import { net } from "../../src/index.js"
+import { setRunnerAbortSignal } from "../../src/runnerAbortSignal.js"
 import { createMockSsh } from "../helpers/mockSsh.js"
 
 const emptyEnv = {}
@@ -781,6 +782,76 @@ describe("net.waitFor — apply", () => {
     const mod = net.waitFor({ interval: 5, port: 9999, timeout: 10 })
     const result = await mod.apply(mockSsh, emptyEnv)
     expect(result.status).toBe("failed")
+  })
+
+  // R-0000052: net.waitFor must observe the runner abort signal so SIGINT
+  // unblocks the polling loop within the next iteration tick instead of
+  // running until the configured timeout.
+  it("returns failed within the next tick after the runner abort signal fires", async () => {
+    const mockSsh = createMockSsh({
+      // Probe always fails so the loop falls through to the delay.
+      "nc -z '127.0.0.1' '9000'": { code: 1 },
+    })
+    const controller = new AbortController()
+    setRunnerAbortSignal(controller.signal)
+
+    try {
+      const mod = net.waitFor({
+        // Long enough that the test would hang (or fail with a long delta) if
+        // the abort path were missing.
+        interval: 60_000,
+        port: 9000,
+        timeout: 600_000,
+      })
+
+      const start = Date.now()
+      const applyPromise = mod.apply(mockSsh, emptyEnv)
+      // Let the loop reach `delay()` before we abort. A microtask flush via
+      // queueMicrotask is enough because conn.test resolves synchronously
+      // through the mock.
+      await new Promise<void>((resolve) => {
+        queueMicrotask(resolve)
+      })
+      controller.abort(new Error("Terminal prompt interrupted by SIGINT"))
+
+      const result = await applyPromise
+      const elapsed = Date.now() - start
+
+      expect(result.status).toBe("failed")
+      expect(result.error).toBeInstanceOf(Error)
+      expect(result.error?.message).toMatch(/aborted by shutdown signal/v)
+      // The polling loop must return well before the configured timeout.
+      // 5 seconds is generous for test machines while still proving we are
+      // not waiting on the 60s interval or the 600s timeout.
+      expect(elapsed).toBeLessThan(5000)
+    } finally {
+      setRunnerAbortSignal(undefined)
+    }
+  })
+
+  it("returns failed synchronously when the abort signal is already aborted at apply start", async () => {
+    const mockSsh = createMockSsh({
+      "nc -z '127.0.0.1' '9001'": { code: 1 },
+    })
+    const controller = new AbortController()
+    controller.abort(new Error("aborted before apply"))
+    setRunnerAbortSignal(controller.signal)
+
+    try {
+      const mod = net.waitFor({ interval: 60_000, port: 9001, timeout: 600_000 })
+      const start = Date.now()
+      const result = await mod.apply(mockSsh, emptyEnv)
+      const elapsed = Date.now() - start
+
+      expect(result.status).toBe("failed")
+      expect(result.error).toBeInstanceOf(Error)
+      expect(result.error?.message).toMatch(/aborted by shutdown signal/v)
+      expect(elapsed).toBeLessThan(1000)
+      // The probe is never invoked when the signal is already aborted.
+      expect(mockSsh.calls).not.toContain("nc -z '127.0.0.1' '9001'")
+    } finally {
+      setRunnerAbortSignal(undefined)
+    }
   })
 })
 

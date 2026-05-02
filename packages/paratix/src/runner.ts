@@ -9,7 +9,6 @@ import type {
   ServerDefinition,
 } from "./types.js"
 
-import { setPauseAbortSignal } from "./builtins.js"
 import { dryRunRecipeModule } from "./dryRunRecipe.js"
 import { loadDotEnvironment, mergeEnvironment } from "./environment.js"
 import {
@@ -27,6 +26,7 @@ import {
   printSummary,
   startModuleSpinner,
 } from "./output.js"
+import { setRunnerAbortSignal } from "./runnerAbortSignal.js"
 import { resolveExitCode, signalExitCode } from "./runnerHelpers.js"
 import { clearRegisteredSecrets } from "./secretSink.js"
 import { runSignalModules, type SignalRunStatus } from "./signalOrchestration.js"
@@ -760,7 +760,7 @@ function rethrowIfNotShutdown(error: unknown, shutdownSignal: () => NodeJS.Signa
 }
 
 /**
- * Tear down per-run resources: shutdown signal listeners, the pause abort
+ * Tear down per-run resources: shutdown signal listeners, the runner abort
  * signal, the process-scoped secret sink, and the ssh connection. R-0000041:
  * `clearRegisteredSecrets` ensures op resolved values, sudo/user passwords,
  * and download URL tokens never bleed into a subsequent invocation that
@@ -776,7 +776,7 @@ function teardownPlaybookResources(parameters: {
 }): void {
   for (const signal of ["SIGINT", "SIGTERM"] as const)
     process.removeListener(signal, parameters.handleShutdownSignal)
-  setPauseAbortSignal(undefined)
+  setRunnerAbortSignal(undefined)
   clearRegisteredSecrets()
   parameters.ssh?.disconnect()
 }
@@ -789,7 +789,7 @@ export async function runPlaybook(
   const environment = await initializeEnvironment(options, definition)
   const { handleShutdownSignal, promptAbortSignal, setSsh, shutdownSignal } =
     setupShutdownHandlers()
-  setPauseAbortSignal(promptAbortSignal)
+  setRunnerAbortSignal(promptAbortSignal)
   const stats = new RunStats()
   let ssh: SshConnectionImpl | undefined
 

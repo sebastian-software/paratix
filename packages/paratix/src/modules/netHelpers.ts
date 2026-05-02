@@ -180,11 +180,51 @@ export function validateHttpUrl(url: string, options?: { allowHttp?: boolean }):
 /**
  * Create a delay promise for use in polling loops.
  *
+ * When an `AbortSignal` is supplied, the timer is cleared and the returned
+ * promise rejects as soon as the signal fires (or synchronously if the signal
+ * is already aborted). The rejection reason is the signal's `reason` when it
+ * is an `Error`, otherwise a fresh `Error("delay aborted")`. R-0000052: this
+ * lets `net.waitFor` unblock its polling loop within the next iteration tick
+ * after the runner observes SIGINT, instead of running until the configured
+ * timeout.
+ *
  * @param ms - The delay duration in milliseconds.
- * @returns A promise that resolves after the specified delay.
+ * @param abortSignal - Optional signal that, when aborted, rejects the wait.
+ * @returns A promise that resolves after the specified delay or rejects on abort.
  */
-export async function delay(ms: number): Promise<void> {
-  return new Promise((resolve) => {
-    setTimeout(resolve, ms)
+export async function delay(ms: number, abortSignal?: AbortSignal): Promise<void> {
+  return new Promise((resolve, reject) => {
+    if (abortSignal?.aborted === true) {
+      reject(normalizeDelayAbortReason(abortSignal.reason))
+      return
+    }
+
+    const timer = setTimeout(() => {
+      abortSignal?.removeEventListener("abort", onAbort)
+      resolve()
+    }, ms)
+
+    const onAbort = (): void => {
+      clearTimeout(timer)
+      reject(normalizeDelayAbortReason(abortSignal?.reason))
+    }
+
+    abortSignal?.addEventListener("abort", onAbort, { once: true })
   })
+}
+
+/**
+ * Coerce an unknown abort reason into an `Error` instance.
+ *
+ * Mirrors the helper in {@link "../builtins.js"} but stays local to keep the
+ * net-helpers file self-contained.
+ *
+ * @param reason - The {@link AbortSignal.reason}, if any.
+ * @returns An `Error` with a meaningful message.
+ */
+function normalizeDelayAbortReason(reason: unknown): Error {
+  if (reason instanceof Error) return reason
+  if (reason === undefined || reason === null) return new Error("delay aborted")
+  if (typeof reason === "string") return new Error(reason)
+  return new Error("delay aborted")
 }

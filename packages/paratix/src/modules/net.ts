@@ -1,5 +1,6 @@
 /* eslint-disable max-lines */
 import { failed } from "../moduleFailure.js"
+import { getRunnerAbortSignal } from "../runnerAbortSignal.js"
 import { shellQuote } from "../ssh.js"
 import {
   guardedWriteFile,
@@ -461,13 +462,31 @@ export const net = {
       async apply(conn: null | SshConnection): Promise<ModuleResult> {
         if (!conn) return failed(`[${buildWaitForName(options)}] SSH connection is required`)
 
+        // R-0000052: hook into the runner abort signal so SIGINT/SIGTERM
+        // unblocks the polling loop within the next iteration tick instead
+        // of running until the configured timeout. The same abort signal is
+        // observed by the `pause` builtin (R-0000027); both share the
+        // process-scoped holder in runnerAbortSignal.ts.
+        const abortSignal = getRunnerAbortSignal()
+        const isAborted = (): boolean => abortSignal?.aborted === true
+        const abortFailure = (): ModuleResult =>
+          failed(
+            `[${buildWaitForName(options)}] aborted by shutdown signal before condition was met`
+          )
+
         const start = Date.now()
         while (Date.now() - start < timeout) {
+          if (isAborted()) return abortFailure()
           // eslint-disable-next-line no-await-in-loop
           const success = await conn.test(testCommand)
           if (success) return { status: "changed" }
-          // eslint-disable-next-line no-await-in-loop
-          await delay(interval)
+          if (isAborted()) return abortFailure()
+          try {
+            // eslint-disable-next-line no-await-in-loop
+            await delay(interval, abortSignal)
+          } catch {
+            return abortFailure()
+          }
         }
 
         return failed(`[${buildWaitForName(options)}] condition was not met within ${timeout}ms`)

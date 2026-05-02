@@ -6,9 +6,10 @@
  * URL tokens, signed URLs) and unregister them when the work completes.
  *
  * The sink is intentionally process-scoped — analogous to
- * {@link "./builtins".setPauseAbortSignal} — so that {@link "./output"} can
- * observe the registered secrets without having to thread them through every
- * caller. The runner ensures secrets are cleared on shutdown.
+ * {@link "./runnerAbortSignal".setRunnerAbortSignal} — so that
+ * {@link "./output"} can observe the registered secrets without having to
+ * thread them through every caller. The runner ensures secrets are cleared
+ * on shutdown.
  *
  * R-0000041: `printCommandFailure` and `printVerboseGenericError` consult
  * this sink so a thrown {@link Error} whose message or stack trace contains
