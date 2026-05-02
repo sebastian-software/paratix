@@ -1311,3 +1311,16 @@ describe("scaffoldProject", () => {
     expect(console.log).toHaveBeenCalledWith(expect.stringContaining(`cd ${trimmedProjectName}`))
   })
 })
+
+// R-0000056 regression: AGENTS.md forbids inline `cspell:ignore` directives.
+// The two existing directives in `src/templates.ts` were lifted into the
+// project root `cspell.json`. This guard prevents future regressions where
+// new tokens get masked locally instead of being added to the shared
+// dictionary.
+describe("R-0000056: templates.ts must not contain inline cspell:ignore", () => {
+  it("contains no `cspell:ignore` directives in src/templates.ts", () => {
+    const templatesPath = resolve(__dirname, "..", "src", "templates.ts")
+    const content = readFileSync(templatesPath, "utf8")
+    expect(content).not.toMatch(/cspell:ignore/v)
+  })
+})

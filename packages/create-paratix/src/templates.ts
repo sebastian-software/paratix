@@ -66,7 +66,6 @@ Unattended-Upgrade::Automatic-Reboot "true";
 Unattended-Upgrade::Automatic-Reboot-Time "03:30";
 `
 
-// cspell:ignore nopasswd NOPASSWD
 export function createAdminNopasswdSudoersContent(adminUser: string): string {
   return `# Bootstrap default: dedicated admin user with passwordless sudo.
 # This keeps the post-bootstrap Paratix workflow non-interactive after the
@@ -147,7 +146,6 @@ function createFirewallRecipe(): string {
 `
 }
 
-// cspell:ignore hardlinks kptr syncookies
 function createKernelHardeningRecipe(): string {
   return `
     recipe("kernel-hardening", [
