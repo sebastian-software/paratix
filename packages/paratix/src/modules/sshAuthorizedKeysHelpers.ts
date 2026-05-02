@@ -10,6 +10,27 @@ async function resolveHome(conn: SshConnection, user: string): Promise<string> {
   return home
 }
 
+/**
+ * R-0000065: resolve the user's actual primary group via `id -gn` so the
+ * chown calls and the `stat`-based check do not falsely overwrite the group
+ * ownership of `~/.ssh` and `~/.ssh/authorized_keys` for users whose
+ * primary group is not equal to the username (e.g. `deploy:users`,
+ * `www-data:www-data` for nginx, or operator users in `wheel`).
+ *
+ * Falls back to the username when `id -gn` produces no usable output, which
+ * preserves the legacy behaviour for the historically common
+ * user-private-group setup.
+ *
+ * @param conn - The active SSH connection.
+ * @param user - The target user.
+ * @returns The user's primary group name.
+ */
+async function resolvePrimaryGroup(conn: SshConnection, user: string): Promise<string> {
+  const primaryGroup = await conn.output(`id -gn ${shellQuote(user)}`)
+  if (primaryGroup.length === 0) return user
+  return primaryGroup
+}
+
 function isUnsafeAuthorizedKeysHomeError(error: unknown, user: string): boolean {
   return (
     error instanceof Error &&
@@ -39,11 +60,12 @@ async function authorizedKeysSecurityStateIsValid(
   conn: SshConnection,
   parameters: {
     authorizedKeysPath: string
+    primaryGroup: string
     sshDirectoryPath: string
     user: string
   }
 ): Promise<boolean> {
-  const { authorizedKeysPath, sshDirectoryPath, user } = parameters
+  const { authorizedKeysPath, primaryGroup, sshDirectoryPath, user } = parameters
 
   const isAuthorizedKeysSymlink = await conn.test(`[ -L ${shellQuote(authorizedKeysPath)} ]`)
   if (isAuthorizedKeysSymlink) return false
@@ -51,12 +73,15 @@ async function authorizedKeysSecurityStateIsValid(
   const sshDirectoryState = await conn.output(
     `stat -c '%a %U %G %F' ${shellQuote(sshDirectoryPath)}`
   )
-  if (sshDirectoryState.trim() !== `700 ${user} ${user} directory`) return false
+  // R-0000065: compare against the user's resolved primary group (via
+  // `id -gn`) so users whose primary group is not equal to the username do
+  // not flap between `ok` and `needs-apply`.
+  if (sshDirectoryState.trim() !== `700 ${user} ${primaryGroup} directory`) return false
 
   const authorizedKeysState = await conn.output(
     `stat -c '%a %U %G %F' ${shellQuote(authorizedKeysPath)}`
   )
-  return authorizedKeysState.trim() === `600 ${user} ${user} regular file`
+  return authorizedKeysState.trim() === `600 ${user} ${primaryGroup} regular file`
 }
 
 async function rewriteAuthorizedKeys(
@@ -64,12 +89,13 @@ async function rewriteAuthorizedKeys(
   parameters: {
     authorizedKeysPath: string
     key: string
+    primaryGroup: string
     sshDirectoryPath: string
     state: "absent" | "present"
     user: string
   }
 ): Promise<void> {
-  const { authorizedKeysPath, key, sshDirectoryPath, state, user } = parameters
+  const { authorizedKeysPath, key, primaryGroup, sshDirectoryPath, state, user } = parameters
   const temporaryPath = await createAuthorizedKeysTemporaryPath(conn, sshDirectoryPath)
 
   try {
@@ -89,8 +115,14 @@ async function rewriteAuthorizedKeys(
       )
     }
 
+    // R-0000065: chown to the user and the user's resolved primary group
+    // instead of `${user}:${user}`. This preserves the existing primary
+    // group on hosts where it is not equal to the username (e.g.
+    // `deploy:users`, `www-data:www-data`) and prevents a drift loop where
+    // `apply` overwrites the semantically correct group ownership only to
+    // see `check` go green on the next run.
     await conn.exec(
-      `chmod 600 ${shellQuote(temporaryPath)} && chown ${shellQuote(user)}:${shellQuote(user)} ${shellQuote(temporaryPath)} && mv ${shellQuote(temporaryPath)} ${shellQuote(authorizedKeysPath)} && chmod 600 ${shellQuote(authorizedKeysPath)} && chown ${shellQuote(user)}:${shellQuote(user)} ${shellQuote(authorizedKeysPath)}`,
+      `chmod 600 ${shellQuote(temporaryPath)} && chown ${shellQuote(user)}:${shellQuote(primaryGroup)} ${shellQuote(temporaryPath)} && mv ${shellQuote(temporaryPath)} ${shellQuote(authorizedKeysPath)} && chmod 600 ${shellQuote(authorizedKeysPath)} && chown ${shellQuote(user)}:${shellQuote(primaryGroup)} ${shellQuote(authorizedKeysPath)}`,
       { silent: true }
     )
   } finally {
@@ -112,18 +144,23 @@ export async function applyAuthorizedKeys(
   }
 
   const home = await resolveHome(conn, user)
+  // R-0000065: resolve the primary group exactly once for the duration of
+  // this apply so the directory chown, the authorized_keys chown and the
+  // matching `stat` comparison all reference the same group identity.
+  const primaryGroup = await resolvePrimaryGroup(conn, user)
   const sshDirectoryPath = `${home}/.ssh`
   const directory = shellQuote(sshDirectoryPath)
   const authorizedKeysPath = `${home}/.ssh/authorized_keys`
 
   await conn.exec(
-    `mkdir -p ${directory} && chmod 700 ${directory} && chown ${shellQuote(user)}:${shellQuote(user)} ${directory}`,
+    `mkdir -p ${directory} && chmod 700 ${directory} && chown ${shellQuote(user)}:${shellQuote(primaryGroup)} ${directory}`,
     { silent: true }
   )
   await ensureAuthorizedKeysIsNotSymlink(conn, authorizedKeysPath)
   await rewriteAuthorizedKeys(conn, {
     authorizedKeysPath,
     key,
+    primaryGroup,
     sshDirectoryPath,
     state,
     user,
@@ -226,8 +263,13 @@ export async function checkAuthorizedKeys(
   // path (which writes/removes whole lines) and never falsely reports a key
   // as present when only its body appears as a substring of another entry.
   const keyExists = await conn.test(`grep -qxF -- ${shellQuote(key)} ${authKeysPath}`)
+  // R-0000065: resolve the primary group via `id -gn` so the stat-based
+  // ownership comparison matches what apply actually writes and does not
+  // flap for users whose primary group differs from the username.
+  const primaryGroup = await resolvePrimaryGroup(conn, user)
   const securityStateIsValid = await authorizedKeysSecurityStateIsValid(conn, {
     authorizedKeysPath,
+    primaryGroup,
     sshDirectoryPath,
     user,
   })

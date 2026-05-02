@@ -376,6 +376,9 @@ describe("ssh.authorizedKeys", () => {
 
   // resolveHome calls conn.output() which returns the home path
   const getentAlice = "getent passwd 'alice' | cut -d: -f6"
+  // R-0000065: resolvePrimaryGroup runs `id -gn` for both apply and check
+  // to derive the user's actual primary group.
+  const idGroupAlice = "id -gn 'alice'"
   const aliceHome = "/home/alice"
   const aliceDir = `'/home/alice/.ssh'`
   const aliceKeys = `'/home/alice/.ssh/authorized_keys'`
@@ -387,6 +390,7 @@ describe("ssh.authorizedKeys", () => {
   ) {
     return {
       [getentAlice]: { stdout: aliceHome },
+      [idGroupAlice]: { stdout: "alice" },
       ...extra,
     }
   }
@@ -777,6 +781,7 @@ describe("ssh.authorizedKeys", () => {
       "[ -L '/root/.ssh/authorized_keys' ]": { code: 1 },
       [`grep -qxF -- '${testKey}' '/root/.ssh/authorized_keys'`]: { code: 0 },
       "getent passwd 'root' | cut -d: -f6": { stdout: "/root" },
+      "id -gn 'root'": { stdout: "root" },
       "stat -c '%a %U %G %F' '/root/.ssh'": { stdout: "700 root root directory" },
       "stat -c '%a %U %G %F' '/root/.ssh/authorized_keys'": {
         stdout: "600 root root regular file",
@@ -792,6 +797,7 @@ describe("ssh.authorizedKeys", () => {
       "[ -L '/home/deploy/.ssh/authorized_keys' ]": { code: 1 },
       [`grep -qxF -- '${testKey}' '/home/deploy/.ssh/authorized_keys'`]: { code: 0 },
       "getent passwd 'deploy' | cut -d: -f6": { stdout: "/home/deploy" },
+      "id -gn 'deploy'": { stdout: "deploy" },
       "stat -c '%a %U %G %F' '/home/deploy/.ssh'": { stdout: "700 deploy deploy directory" },
       "stat -c '%a %U %G %F' '/home/deploy/.ssh/authorized_keys'": {
         stdout: "600 deploy deploy regular file",
@@ -808,6 +814,7 @@ describe("ssh.authorizedKeys", () => {
       "[ -L '/home/my user/.ssh/authorized_keys' ]": { code: 1 },
       [`grep -qxF -- '${testKey}' '/home/my user/.ssh/authorized_keys'`]: { code: 0 },
       "getent passwd 'alice' | cut -d: -f6": { stdout: spaceyHome },
+      "id -gn 'alice'": { stdout: "alice" },
       "stat -c '%a %U %G %F' '/home/my user/.ssh'": { stdout: "700 alice alice directory" },
       "stat -c '%a %U %G %F' '/home/my user/.ssh/authorized_keys'": {
         stdout: "600 alice alice regular file",
@@ -827,6 +834,7 @@ describe("ssh.authorizedKeys", () => {
     const spaceyTemp = "/home/my user/.ssh/.authorized-keys.ABCDEF"
     const mockSsh = createMockSsh({
       "getent passwd 'alice' | cut -d: -f6": { stdout: spaceyHome },
+      "id -gn 'alice'": { stdout: "alice" },
       "mktemp '/home/my user/.ssh/.authorized-keys.XXXXXX'": { stdout: spaceyTemp },
     })
     const mod = ssh.authorizedKeys("alice", testKey)
@@ -846,6 +854,59 @@ describe("ssh.authorizedKeys", () => {
     expect(mockSsh.calls).toContain(
       `chmod 600 '${spaceyTemp}' && chown 'alice':'alice' '${spaceyTemp}' && mv '${spaceyTemp}' '/home/my user/.ssh/authorized_keys' && chmod 600 '/home/my user/.ssh/authorized_keys' && chown 'alice':'alice' '/home/my user/.ssh/authorized_keys'`
     )
+  })
+
+  // R-0000065 regression: when the user's primary group is not equal to the
+  // username (e.g. `deploy:users`, a service user like `www-data:www-data`,
+  // or an operator in `paratix:wheel`), apply must chown to the user's
+  // actual primary group and check must compare against that same group so
+  // a stable check-ok state is reachable without overwriting the
+  // semantically correct group ownership.
+  it("R-0000065: apply uses the user's resolved primary group for chown when it differs from the username", async () => {
+    const mockSsh = createMockSsh({
+      "getent passwd 'deploy' | cut -d: -f6": { stdout: "/home/deploy" },
+      "id -gn 'deploy'": { stdout: "users" },
+      "mktemp '/home/deploy/.ssh/.authorized-keys.XXXXXX'": {
+        stdout: "/home/deploy/.ssh/.authorized-keys.ABCDEF",
+      },
+    })
+    const mod = ssh.authorizedKeys("deploy", testKey)
+
+    const result = await mod.apply(mockSsh, emptyEnv)
+
+    expect(result.status).toBe("changed")
+    // Directory chown uses the resolved primary group, not the username.
+    expect(mockSsh.calls).toContain(
+      `mkdir -p '/home/deploy/.ssh' && chmod 700 '/home/deploy/.ssh' && chown 'deploy':'users' '/home/deploy/.ssh'`
+    )
+    // The authorized_keys chown must also use the resolved primary group.
+    expect(mockSsh.calls).toContain(
+      `chmod 600 '/home/deploy/.ssh/.authorized-keys.ABCDEF' && chown 'deploy':'users' '/home/deploy/.ssh/.authorized-keys.ABCDEF' && mv '/home/deploy/.ssh/.authorized-keys.ABCDEF' '/home/deploy/.ssh/authorized_keys' && chmod 600 '/home/deploy/.ssh/authorized_keys' && chown 'deploy':'users' '/home/deploy/.ssh/authorized_keys'`
+    )
+    // The legacy `${user}:${user}` chown must not be issued.
+    expect(mockSsh.calls).not.toContain(
+      `mkdir -p '/home/deploy/.ssh' && chmod 700 '/home/deploy/.ssh' && chown 'deploy':'deploy' '/home/deploy/.ssh'`
+    )
+  })
+
+  it("R-0000065: check returns ok when the primary group differs from the username and matches stat output", async () => {
+    const mockSsh = createMockSsh({
+      "[ -L '/home/deploy/.ssh/authorized_keys' ]": { code: 1 },
+      [`grep -qxF -- '${testKey}' '/home/deploy/.ssh/authorized_keys'`]: { code: 0 },
+      "getent passwd 'deploy' | cut -d: -f6": { stdout: "/home/deploy" },
+      "id -gn 'deploy'": { stdout: "users" },
+      "stat -c '%a %U %G %F' '/home/deploy/.ssh'": {
+        stdout: "700 deploy users directory",
+      },
+      "stat -c '%a %U %G %F' '/home/deploy/.ssh/authorized_keys'": {
+        stdout: "600 deploy users regular file",
+      },
+    })
+    const mod = ssh.authorizedKeys("deploy", testKey)
+
+    const result = await mod.check(mockSsh, emptyEnv)
+
+    expect(result).toBe("ok")
   })
 
   it("rejects keys containing newlines at construction time", () => {
