@@ -7,6 +7,30 @@ import { failed } from "../moduleFailure.js"
 import { maskSecrets } from "../sshHelpers.js"
 import { generateTotpCode } from "../totp.js"
 
+const OP_INSTALL_HINT =
+  "Install it from https://1password.com/downloads/command-line/ and ensure it is on PATH."
+
+const OP_SIGNIN_HINT = "Run 'op signin' first to authenticate the current shell session."
+
+const OP_AUTH_PATTERNS = [
+  /not\s+signed\s+in/iv,
+  /not\s+authorized/iv,
+  /authentication\s+required/iv,
+  /session\s+expired/iv,
+  /session\s+invalid/iv,
+]
+
+function isAuthFailure(stderr: string): boolean {
+  return OP_AUTH_PATTERNS.some((pattern) => pattern.test(stderr))
+}
+
+function describeSpawnError(command: string, error: unknown): Error {
+  if (error instanceof Error && (error as NodeJS.ErrnoException).code === "ENOENT") {
+    return new Error(`${command} CLI is not installed or not on PATH. ${OP_INSTALL_HINT}`)
+  }
+  return error instanceof Error ? error : new Error(String(error))
+}
+
 /**
  * Spawn a command, write `input` to its stdin, and collect stdout.
  *
@@ -33,13 +57,16 @@ async function spawnWithInput(
     child.stderr?.on("data", (chunk: Buffer) => {
       stderr += chunk.toString()
     })
-    child.on("error", reject)
+    child.on("error", (error) => {
+      reject(describeSpawnError(command, error))
+    })
     child.on("close", (code) => {
       if (code === 0) {
         resolve(stdout)
-      } else {
-        reject(new Error(`${command} exited with code ${String(code)}: ${stderr}`))
+        return
       }
+      const hint = isAuthFailure(stderr) ? ` ${OP_SIGNIN_HINT}` : ""
+      reject(new Error(`${command} exited with code ${String(code)}: ${stderr}${hint}`))
     })
 
     child.stdin?.end(input)

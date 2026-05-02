@@ -44,6 +44,28 @@ function mockSpawnWith(output: string, exitCode = 0, stderr = ""): void {
   })
 }
 
+function createEnoentMockChild(): MockChildProcess {
+  const child = new EventEmitter() as MockChildProcess
+  const stdoutEmitter = new EventEmitter()
+  const stderrEmitter = new EventEmitter()
+  Object.defineProperty(child, "stdout", { value: stdoutEmitter })
+  Object.defineProperty(child, "stderr", { value: stderrEmitter })
+  child.stdin = { end: vi.fn() }
+
+  queueMicrotask(() => {
+    const enoent = Object.assign(new Error("spawn op ENOENT"), { code: "ENOENT" })
+    child.emit("error", enoent)
+  })
+  return child
+}
+
+function mockSpawnWithSpawnError(): void {
+  mockedSpawnFn.mockImplementation((command: string, args?: readonly string[]) => {
+    trackSpawn(command, args ?? [])
+    return createEnoentMockChild() as never
+  })
+}
+
 function mockSpawnBySubcommand(outputs: Record<string, string>): void {
   mockedSpawnFn.mockImplementation((command: string, args?: readonly string[]) => {
     const argsList = args ?? []
@@ -304,6 +326,40 @@ describe("op.resolve — JSON validation", () => {
     expect(result.status).toBe("failed")
     expect(result.error?.message).not.toContain(sneakySecret)
     expect(result.error?.message).toContain("invalid JSON")
+  })
+
+  it("explains the install path when op is not on PATH (ENOENT)", async () => {
+    mockSpawnWithSpawnError()
+
+    const module_ = op.resolve({ password: "op://vault/item/password" })
+    // eslint-disable-next-line prefer-spread
+    const result = await module_.apply(null, emptyEnv)
+
+    expect(result.status).toBe("failed")
+    expect(result.error?.message).toContain("not installed")
+    expect(result.error?.message).toContain("https://1password.com/downloads/command-line/")
+  })
+
+  it("explains how to sign in when op stderr indicates an auth failure", async () => {
+    mockSpawnWith("", 1, "[ERROR] You are not signed in to a 1Password account.")
+
+    const module_ = op.resolve({ password: "op://vault/item/password" })
+    // eslint-disable-next-line prefer-spread
+    const result = await module_.apply(null, emptyEnv)
+
+    expect(result.status).toBe("failed")
+    expect(result.error?.message).toContain("op signin")
+  })
+
+  it("does not append the signin hint for unrelated op errors", async () => {
+    mockSpawnWith("", 1, "[ERROR] item could not be retrieved due to a transient error.")
+
+    const module_ = op.resolve({ password: "op://vault/item/password" })
+    // eslint-disable-next-line prefer-spread
+    const result = await module_.apply(null, emptyEnv)
+
+    expect(result.status).toBe("failed")
+    expect(result.error?.message).not.toContain("op signin")
   })
 })
 
