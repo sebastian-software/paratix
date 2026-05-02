@@ -11,6 +11,7 @@ import {
   type SshConnection,
 } from "../types.js"
 import { hexHashesEqual, sha256String } from "./fileHelpers.js"
+import { ownershipMatches, readOwnership } from "./fileMetadataHelpers.js"
 
 /** Index where the file-type field starts in `stat -c '%s %a %U %G %F %Y'` output. */
 const STAT_TYPE_START_INDEX = 4
@@ -129,7 +130,15 @@ export function assemble(
 
       const localHash = sha256String(await concatFragments(fragments))
       const remoteHash = await ssh.sha256(remotePath)
-      return hexHashesEqual(remoteHash, localHash) ? "ok" : NEEDS_APPLY
+      if (!hexHashesEqual(remoteHash, localHash)) return NEEDS_APPLY
+
+      // Mirror file.copy.check: also detect mode/owner drift. When the caller
+      // did not specify options.mode, fall back to the same default that
+      // resolveWriteMode produces in apply, so a manual chmod is detected as
+      // drift on subsequent runs.
+      const matchOptions = { ...options, mode: options?.mode ?? DEFAULT_FILE_WRITE_MODE }
+      const metadataMatches = ownershipMatches(await readOwnership(ssh, remotePath), matchOptions)
+      return metadataMatches ? "ok" : NEEDS_APPLY
     },
     name: `file.assemble: ${remotePath}`,
   }

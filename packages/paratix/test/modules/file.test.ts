@@ -918,6 +918,7 @@ describe("file.assemble", () => {
         "[ -e '/remote/assembled.txt' ]": { code: 0 },
         "[ -f '/remote/assembled.txt' ]": { code: 0 },
         "sha256sum '/remote/assembled.txt'": { stdout: `${combinedHash}  /remote/assembled.txt` },
+        "stat -c '%a %U %G' '/remote/assembled.txt'": { stdout: "644 root root" },
       })
 
       const mod = file.assemble("/remote/assembled.txt", [frag1, frag2])
@@ -1017,6 +1018,80 @@ describe("file.assemble", () => {
       expect(writtenFiles).toStrictEqual([
         { content: "Hello World", path: "/remote/assembled.txt" },
       ])
+    } finally {
+      rmSync(dir, { recursive: true })
+    }
+  })
+
+  // R-0000059: file.assemble.check must also detect mode/owner drift, mirroring
+  // file.copy.check. Hash-only comparison previously masked manual chmod/chown
+  // edits and the recipe falsely reported `ok` after operator drift.
+  it("check returns needs-apply when the hash matches but the mode drifted", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "paratix-test-"))
+    try {
+      const frag1 = join(dir, "frag1.txt")
+      writeFileSync(frag1, "Hello")
+      const combinedHash = sha256Hex("Hello")
+
+      const ssh = createMockSsh({
+        "[ -e '/remote/assembled.txt' ]": { code: 0 },
+        "[ -f '/remote/assembled.txt' ]": { code: 0 },
+        "sha256sum '/remote/assembled.txt'": { stdout: `${combinedHash}  /remote/assembled.txt` },
+        // Operator manually chmod'd 0644 even though the recipe pinned 0600.
+        "stat -c '%a %U %G' '/remote/assembled.txt'": { stdout: "644 root root" },
+      })
+
+      const mod = file.assemble("/remote/assembled.txt", [frag1], { mode: "0600" })
+      const result = await mod.check(ssh, emptyEnv)
+      expect(result).toBe("needs-apply")
+    } finally {
+      rmSync(dir, { recursive: true })
+    }
+  })
+
+  it("check returns needs-apply when the hash matches but the owner drifted", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "paratix-test-"))
+    try {
+      const frag1 = join(dir, "frag1.txt")
+      writeFileSync(frag1, "Hello")
+      const combinedHash = sha256Hex("Hello")
+
+      const ssh = createMockSsh({
+        "[ -e '/remote/assembled.txt' ]": { code: 0 },
+        "[ -f '/remote/assembled.txt' ]": { code: 0 },
+        "sha256sum '/remote/assembled.txt'": { stdout: `${combinedHash}  /remote/assembled.txt` },
+        // Recipe pins owner=www-data but the file is currently owned by root.
+        "stat -c '%a %U %G' '/remote/assembled.txt'": { stdout: "644 root root" },
+      })
+
+      const mod = file.assemble("/remote/assembled.txt", [frag1], { owner: "www-data" })
+      const result = await mod.check(ssh, emptyEnv)
+      expect(result).toBe("needs-apply")
+    } finally {
+      rmSync(dir, { recursive: true })
+    }
+  })
+
+  it("check returns ok when hash matches and the explicit mode/owner also match", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "paratix-test-"))
+    try {
+      const frag1 = join(dir, "frag1.txt")
+      writeFileSync(frag1, "Hello")
+      const combinedHash = sha256Hex("Hello")
+
+      const ssh = createMockSsh({
+        "[ -e '/remote/assembled.txt' ]": { code: 0 },
+        "[ -f '/remote/assembled.txt' ]": { code: 0 },
+        "sha256sum '/remote/assembled.txt'": { stdout: `${combinedHash}  /remote/assembled.txt` },
+        "stat -c '%a %U %G' '/remote/assembled.txt'": { stdout: "600 www-data www-data" },
+      })
+
+      const mod = file.assemble("/remote/assembled.txt", [frag1], {
+        mode: "0600",
+        owner: "www-data:www-data",
+      })
+      const result = await mod.check(ssh, emptyEnv)
+      expect(result).toBe("ok")
     } finally {
       rmSync(dir, { recursive: true })
     }
