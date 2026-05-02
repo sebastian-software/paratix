@@ -342,6 +342,56 @@ describe("apt.repository (standard form)", () => {
     const result = await mod.check(ssh, emptyEnv)
     expect(result).toBe("ok")
   })
+
+  // R-0000051 regression: tabs / multiple spaces / trailing whitespace are
+  // semantically equivalent to single-space-separated fields in apt source
+  // lines and must not flap the check between `ok` and `needs-apply`.
+  it("check returns ok when on-disk content uses tabs as separators", async () => {
+    const tabbed =
+      "deb\t[signed-by=/etc/apt/keyrings/docker.gpg]\thttps://download.docker.com/linux/ubuntu\tnoble\tstable"
+    const ssh = createMockSsh({
+      [`[ -f '${filePath}' ]`]: { code: 0 },
+      [`cat '${filePath}'`]: { stdout: tabbed },
+    })
+    const mod = apt.repository("docker", source)
+    const result = await mod.check(ssh, emptyEnv)
+    expect(result).toBe("ok")
+  })
+
+  it("check returns ok when on-disk content uses multiple spaces between fields", async () => {
+    const spaced =
+      "deb   [signed-by=/etc/apt/keyrings/docker.gpg]   https://download.docker.com/linux/ubuntu   noble   stable"
+    const ssh = createMockSsh({
+      [`[ -f '${filePath}' ]`]: { code: 0 },
+      [`cat '${filePath}'`]: { stdout: spaced },
+    })
+    const mod = apt.repository("docker", source)
+    const result = await mod.check(ssh, emptyEnv)
+    expect(result).toBe("ok")
+  })
+
+  it("check returns ok when on-disk content has trailing whitespace", async () => {
+    const trailing = `${expectedContentWithSignedBy}   \t  `
+    const ssh = createMockSsh({
+      [`[ -f '${filePath}' ]`]: { code: 0 },
+      [`cat '${filePath}'`]: { stdout: trailing },
+    })
+    const mod = apt.repository("docker", source)
+    const result = await mod.check(ssh, emptyEnv)
+    expect(result).toBe("ok")
+  })
+
+  it("check returns needs-apply when content semantically differs (different suite)", async () => {
+    const driftedContent =
+      "deb [signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu jammy stable"
+    const ssh = createMockSsh({
+      [`[ -f '${filePath}' ]`]: { code: 0 },
+      [`cat '${filePath}'`]: { stdout: driftedContent },
+    })
+    const mod = apt.repository("docker", source)
+    const result = await mod.check(ssh, emptyEnv)
+    expect(result).toBe("needs-apply")
+  })
 })
 
 describe("apt.debconf", () => {

@@ -371,9 +371,35 @@ export const apt = {
         const exists = await ssh.test(`[ -f ${shellQuote(filePath)} ]`)
         if (!exists) return NEEDS_APPLY
         const content = await ssh.readFile(filePath)
-        return content.trim() === expectedContent.trim() ? "ok" : NEEDS_APPLY
+        // R-0000051: tolerate whitespace-only drift (tabs vs. spaces,
+        // collapsed vs. multiple spaces, trailing whitespace) by
+        // normalizing consecutive whitespace to a single space and
+        // trimming both sides before comparing. The deb source-line
+        // grammar treats any whitespace as a field separator, so
+        // `deb<TAB>https://...` and `deb https://...` are semantically
+        // identical and must not flap between `ok` and `needs-apply`.
+        return normalizeAptSourceContent(content) === normalizeAptSourceContent(expectedContent)
+          ? "ok"
+          : NEEDS_APPLY
       },
       name: `apt.repository: ${name}`,
     }
   },
+}
+
+/**
+ * Normalize an apt source-list file content so superficial whitespace
+ * differences (tabs vs. spaces, collapsed runs, trailing whitespace) do
+ * not cause spurious drift. Each non-empty, non-comment line is collapsed
+ * to a single-space-separated form.
+ *
+ * @param content - The raw file content as read from disk.
+ * @returns The normalized comparison form.
+ */
+function normalizeAptSourceContent(content: string): string {
+  return content
+    .split(/\r?\n/v)
+    .map((line) => line.replaceAll(/\s+/gv, " ").trim())
+    .filter((line) => line.length > 0)
+    .join("\n")
 }
