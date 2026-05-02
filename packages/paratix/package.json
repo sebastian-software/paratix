@@ -21,7 +21,7 @@
     "test:watch": "vitest"
   },
   "dependencies": {
-    "commander": "^13.1.0",
+    "commander": "^14.0.3",
     "picocolors": "^1.1.1",
     "ssh2": "^1.16.0",
     "tsx": "^4.19.0"
@@ -30,8 +30,8 @@
     "@types/node": "^25.5.0",
     "@types/ssh2": "^1.15.4",
     "tsup": "^8.4.0",
-    "typescript": "^5.8.0",
-    "vitest": "^3.1.0"
+    "typescript": "^6.0.3",
+    "vitest": "^4.1.5"
   },
   "engines": {
     "node": ">=24.0.0"
