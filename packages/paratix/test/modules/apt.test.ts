@@ -476,4 +476,47 @@ describe("apt.debconf", () => {
     expect(result.error).toBeInstanceOf(Error)
     expect(String(result.error)).toContain("must not contain newline characters")
   })
+
+  // R-0000063 regression: the apply pipe must use `printf '%s' …` instead of
+  // `echo …` so values that begin with `-` (which some echo implementations
+  // interpret as flags) and values containing backslash sequences (which
+  // POSIX echo may interpret) are forwarded to debconf-set-selections
+  // verbatim regardless of which shell `/bin/sh` resolves to.
+  it("apply uses printf '%s' to pipe selections starting with a dash verbatim", async () => {
+    const ssh = createMockSsh({
+      "echo 'METAGET pkg/dash-value type' | debconf-communicate": {
+        code: 0,
+        stdout: "0 string\n",
+      },
+      "printf '%s' 'pkg pkg/dash-value string -n' | debconf-set-selections": { code: 0 },
+    })
+    const mod = apt.debconf("pkg", { "pkg/dash-value": "-n" })
+    const result = await mod.apply(ssh, emptyEnv)
+    expect(result).toStrictEqual({ status: "changed" })
+    expect(ssh.calls).toContain(
+      "printf '%s' 'pkg pkg/dash-value string -n' | debconf-set-selections"
+    )
+    expect(ssh.calls).not.toContain("echo 'pkg pkg/dash-value string -n' | debconf-set-selections")
+  })
+
+  it("apply uses printf '%s' so backslash sequences reach debconf-set-selections verbatim", async () => {
+    const ssh = createMockSsh({
+      "echo 'METAGET pkg/backslash-value type' | debconf-communicate": {
+        code: 0,
+        stdout: "0 string\n",
+      },
+      "printf '%s' 'pkg pkg/backslash-value string a\\tb\\nc' | debconf-set-selections": {
+        code: 0,
+      },
+    })
+    const mod = apt.debconf("pkg", { "pkg/backslash-value": String.raw`a\tb\nc` })
+    const result = await mod.apply(ssh, emptyEnv)
+    expect(result).toStrictEqual({ status: "changed" })
+    expect(ssh.calls).toContain(
+      "printf '%s' 'pkg pkg/backslash-value string a\\tb\\nc' | debconf-set-selections"
+    )
+    expect(ssh.calls).not.toContain(
+      "echo 'pkg pkg/backslash-value string a\\tb\\nc' | debconf-set-selections"
+    )
+  })
 })

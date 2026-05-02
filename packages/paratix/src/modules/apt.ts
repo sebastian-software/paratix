@@ -180,8 +180,14 @@ export const apt = {
         }
 
         const selectionsText = lines.join("\n")
+        // R-0000063: use `printf '%s' …` instead of `echo …` so selection
+        // values that begin with `-` (interpreted as flags by some echo
+        // implementations) or contain backslash sequences (interpreted by
+        // POSIX echo) are passed through verbatim regardless of which shell
+        // `/bin/sh` resolves to. Mirrors the pattern used by
+        // cron.writeCrontab.
         const result = await ssh.exec(
-          `echo ${shellQuote(selectionsText)} | debconf-set-selections`,
+          `printf '%s' ${shellQuote(selectionsText)} | debconf-set-selections`,
           { ignoreExitCode: true, silent: true }
         )
         if (result.code !== 0)
