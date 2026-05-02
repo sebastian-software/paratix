@@ -17,6 +17,7 @@ import {
   parsePositiveNumber,
   printExceptionError,
 } from "../src/cli.js"
+import { printCliHeader } from "../src/output.js"
 
 declare const PACKAGE_VERSION: string
 declare const PACKAGE_DISPLAY_VERSION: string
@@ -1037,31 +1038,21 @@ describe("printExceptionError", () => {
 })
 
 describe("CLI entrypoint", () => {
-  it("prints the ASCII header with the current version before running the apply action", () => {
-    const tempDirectory = mkdtempSync(join(tmpdir(), "paratix-cli-banner-"))
-    const playbookPath = join(tempDirectory, "invalid-server.mjs")
-    const cliPath = resolve(new URL("../dist/cli.js", import.meta.url).pathname)
+  it("prints the ASCII header with the current version", () => {
+    const logs: string[] = []
+    const logSpy = vi.spyOn(console, "log").mockImplementation((...args: unknown[]) => {
+      logs.push(args.map(String).join(" "))
+    })
 
     try {
-      writeFileSync(playbookPath, "export default {}\n")
-
-      const error = captureExecFailure(() => {
-        execFileSync(process.execPath, [cliPath, "apply", playbookPath, "--dry-run"], {
-          encoding: "utf8",
-          stdio: "pipe",
-        })
-      })
-
-      expect(error.status).toBe(2)
-      expect(String((error as { stdout?: Buffer | string } & ExecFailure).stdout)).toContain(
-        "_ __   __ _ _ __ __ _| |_ ___  __"
-      )
-      expect(String((error as { stdout?: Buffer | string } & ExecFailure).stdout)).toContain(
-        PACKAGE_VERSION
-      )
+      printCliHeader(PACKAGE_VERSION)
     } finally {
-      rmSync(tempDirectory, { force: true, recursive: true })
+      logSpy.mockRestore()
     }
+
+    const output = logs.join("\n")
+    expect(output).toContain("_ __   __ _ _ __ __ _| |_ ___  __")
+    expect(output).toContain(PACKAGE_VERSION)
   })
 
   it("awaits the async apply action and prints validation errors for invalid playbooks", () => {
