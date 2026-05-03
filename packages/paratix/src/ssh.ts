@@ -154,7 +154,14 @@ export class SshConnectionImpl implements SshConnection {
    * @throws {Error} When no port in `config.ports` accepts the connection.
    */
   public async connect(options?: PromptOptions): Promise<void> {
-    this.promptAbortSignal = options?.abortSignal
+    // R-0000090: only overwrite the cached prompt signal when the caller
+    // actually passed one. `reconnect()` calls `connect()` without options;
+    // unconditionally writing `undefined` would silently discard the signal
+    // installed by an earlier `connect()` / `probeSudo()` call and break the
+    // graceful-shutdown path during reconnect attempts.
+    if (options?.abortSignal !== undefined) {
+      this.promptAbortSignal = options.abortSignal
+    }
     if (this.config.privateKey == null) {
       await this.connectViaAgent(options)
       return

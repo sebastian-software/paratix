@@ -585,6 +585,43 @@ describe("SshConnectionImpl", () => {
       expect(connectSpy).toHaveBeenCalledTimes(1)
     })
 
+    it("preserves promptAbortSignal across reconnect (R-0000090 regression)", async () => {
+      // Regression: connect() unconditionally wrote `options?.abortSignal` to
+      // `this.promptAbortSignal`. Because reconnect() invokes connect() without
+      // options, the signal installed by an earlier `connect({ abortSignal })`
+      // call was overwritten with `undefined` and the graceful-shutdown path
+      // could no longer abort interactive prompts after a reconnect.
+      vi.mocked(tryConnectOnPort).mockResolvedValue()
+
+      const abortController = new AbortController()
+      const ssh = makeSshInstance({ reconnectTimeout: 300_000 })
+
+      await ssh.connect({ abortSignal: abortController.signal })
+      expect((ssh as any).promptAbortSignal).toBe(abortController.signal)
+
+      await ssh.reconnect()
+
+      expect((ssh as any).promptAbortSignal).toBe(abortController.signal)
+    })
+
+    it("connect() with explicit undefined options does not clobber promptAbortSignal (R-0000090 regression)", async () => {
+      // The fix uses `options?.abortSignal !== undefined` to gate the
+      // assignment, so calling connect() without an abortSignal property must
+      // leave the previously cached signal in place.
+      vi.mocked(tryConnectOnPort).mockResolvedValue()
+
+      const abortController = new AbortController()
+      const ssh = makeSshInstance({ reconnectTimeout: 300_000 })
+
+      await ssh.connect({ abortSignal: abortController.signal })
+      expect((ssh as any).promptAbortSignal).toBe(abortController.signal)
+
+      // Equivalent to reconnect()'s `connect()` call site
+      await ssh.connect()
+
+      expect((ssh as any).promptAbortSignal).toBe(abortController.signal)
+    })
+
     it("pins host key on initial connection", async () => {
       const hostKey = Buffer.from("new-host-key")
 
