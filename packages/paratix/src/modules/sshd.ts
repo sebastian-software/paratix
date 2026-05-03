@@ -3,6 +3,7 @@ import { randomUUID } from "node:crypto"
 import { sshdPortMeta } from "../meta.js"
 import { failed, failedCommand } from "../moduleFailure.js"
 import { isValidTcpPort } from "../serverDefinitionValidation.js"
+import { shellQuote } from "../sshHelpers.js"
 import {
   guardedWriteFile,
   type Module,
@@ -42,7 +43,7 @@ async function validateSshdConfig(ssh: SshConnection, originalConfig: string): P
 }
 
 async function ensurePrivilegeSeparationDirectory(ssh: SshConnection): Promise<void> {
-  await ssh.exec(`mkdir -p '${PRIVILEGE_SEPARATION_DIRECTORY}'`, {
+  await ssh.exec(`mkdir -p ${shellQuote(PRIVILEGE_SEPARATION_DIRECTORY)}`, {
     ignoreExitCode: false,
     silent: true,
   })
@@ -102,7 +103,7 @@ async function validateProspectiveSshdConfig(
   try {
     await ssh.writeFile(temporaryConfigPath, content, { mode: SSHD_CONFIG_MODE })
     await ensurePrivilegeSeparationDirectory(ssh)
-    const result = await ssh.exec(`sshd -t -f '${temporaryConfigPath}'`, {
+    const result = await ssh.exec(`sshd -t -f ${shellQuote(temporaryConfigPath)}`, {
       ignoreExitCode: true,
       silent: true,
     })
@@ -111,7 +112,7 @@ async function validateProspectiveSshdConfig(
     }
     return failedCommand("[sshd dry-run] sshd -t failed for prospective config", result)
   } finally {
-    await ssh.exec(`rm -f '${temporaryConfigPath}'`, {
+    await ssh.exec(`rm -f ${shellQuote(temporaryConfigPath)}`, {
       ignoreExitCode: true,
       silent: true,
     })
