@@ -288,8 +288,17 @@ export async function appendHostKey(host: string, port: number, keyBuffer: Buffe
   await appendFile(filePath, line, { mode: 0o644 })
 }
 
+function getFileSystemErrorCode(error: unknown): string | undefined {
+  return typeof error === "object" && error !== null && "code" in error
+    ? String((error as { code: unknown }).code)
+    : undefined
+}
+
 /**
- * Read and parse `~/.ssh/known_hosts`, returning an empty array on failure.
+ * Read and parse `~/.ssh/known_hosts`.
+ *
+ * A missing file is treated as an empty trust store. Other read failures fail
+ * closed so `accept-new` cannot bypass an unreadable existing trust anchor.
  *
  * @returns The parsed entries.
  */
@@ -299,8 +308,13 @@ function loadKnownHostEntries(): KnownHostEntry[] {
   try {
     // eslint-disable-next-line security/detect-non-literal-fs-filename
     content = readFileSync(filePath, "utf8")
-  } catch {
-    // File may not exist yet — treat as empty
+  } catch (error) {
+    if (getFileSystemErrorCode(error) === "ENOENT") {
+      return []
+    }
+    throw new HostKeyVerificationError(
+      `Could not read known_hosts at ${filePath}: ${String(error)}`
+    )
   }
   return parseKnownHosts(content)
 }

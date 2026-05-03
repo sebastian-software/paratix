@@ -541,6 +541,34 @@ describe("buildHostVerifier", () => {
     expect(appendFileMock).toHaveBeenCalled()
   })
 
+  it("mode 'accept-new' treats missing known_hosts as an empty trust store", async () => {
+    const missingFileError = Object.assign(new Error("missing"), { code: "ENOENT" })
+    readFileSyncMock.mockImplementation(() => {
+      throw missingFileError
+    })
+
+    const { hostVerifier } = buildHostVerifier("accept-new", { host: "newhost.com", port: 22 })
+    expect(hostVerifier).toBeDefined()
+
+    expect(hostVerifier!(ed25519Key)).toBe(true)
+
+    await Promise.resolve()
+
+    expect(appendFileMock).toHaveBeenCalled()
+  })
+
+  it("mode 'accept-new' fails closed when known_hosts cannot be read", () => {
+    const accessError = Object.assign(new Error("Permission denied"), { code: "EACCES" })
+    readFileSyncMock.mockImplementation(() => {
+      throw accessError
+    })
+
+    expect(() => buildHostVerifier("accept-new", { host: "newhost.com", port: 22 })).toThrow(
+      /Could not read known_hosts/v
+    )
+    expect(appendFileMock).not.toHaveBeenCalled()
+  })
+
   it("mode 'accept-new' with unknown host: writes fingerprint warning to stderr", async () => {
     readFileSyncMock.mockReturnValue("")
 
