@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, writeFileSync } from "node:fs"
+import { mkdirSync, writeFileSync } from "node:fs"
 import { basename, join, resolve } from "node:path"
 
 import {
@@ -189,6 +189,38 @@ function validateProjectName(name: string | undefined): string {
   return normalizedName
 }
 
+function isErrnoException(error: unknown): error is NodeJS.ErrnoException {
+  return error instanceof Error && "code" in error && typeof error.code === "string"
+}
+
+/**
+ * Atomically create the project directory.
+ *
+ * R-0000124: Atomic directory creation — `mkdirSync` without `recursive`
+ * throws EEXIST if the target already exists, closing the TOCTOU window
+ * between an `existsSync` pre-check and the subsequent `writeFileSync`
+ * calls. A racing process that creates the directory between the check
+ * and the create would otherwise let us silently overwrite its files.
+ *
+ * @param projectDirectory The absolute path of the project directory to create.
+ * @param normalizedProjectName The trimmed project name used in the
+ *   user-visible error message when the directory already exists.
+ */
+function createProjectDirectoryAtomically(
+  projectDirectory: string,
+  normalizedProjectName: string
+): void {
+  try {
+    // eslint-disable-next-line security/detect-non-literal-fs-filename
+    mkdirSync(projectDirectory, { recursive: false })
+  } catch (error: unknown) {
+    if (isErrnoException(error) && error.code === "EEXIST") {
+      exitWithMessage(`Error: Directory "${normalizedProjectName}" already exists.`)
+    }
+    throw error
+  }
+}
+
 export function scaffoldProject(
   projectName: string,
   pm: PackageManager,
@@ -196,10 +228,7 @@ export function scaffoldProject(
 ): boolean {
   const normalizedProjectName = normalizeProjectName(projectName)
   const projectDirectory = resolve(normalizedProjectName)
-  // eslint-disable-next-line security/detect-non-literal-fs-filename
-  if (existsSync(projectDirectory)) {
-    exitWithMessage(`Error: Directory "${normalizedProjectName}" already exists.`)
-  }
+  createProjectDirectoryAtomically(projectDirectory, normalizedProjectName)
 
   console.log(`Creating Paratix project in ${projectDirectory}...`)
 

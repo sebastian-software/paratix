@@ -1349,6 +1349,31 @@ describe("scaffoldProject", () => {
     expect(console.log).toHaveBeenCalledWith(expect.stringContaining("npm run apply"))
   })
 
+  // R-0000124 regression: scaffoldProject must fail closed when the target
+  // directory already exists, instead of silently overwriting files inside it.
+  // Previously the function used `existsSync(...) ? exit : mkdirSync(..., { recursive: true })`
+  // which left a TOCTOU window — and `recursive: true` masked any pre-existing
+  // directory created during that window. We now expect an atomic failure with
+  // a clear error message and no overwrite of pre-existing files.
+  it("fails with a clear message and does not overwrite files when the target directory already exists", async () => {
+    const installer = vi.fn().mockReturnValue(true)
+    mkdirSync(projectDirectory, { recursive: true })
+    const sentinelPath = join(projectDirectory, "package.json")
+    writeFileSync(sentinelPath, "PRE_EXISTING_CONTENT")
+
+    await expectProcessExit(() => {
+      scaffoldProject(
+        projectName,
+        { command: "pnpm install", name: "pnpm" },
+        { host: "example.com", initialUser: { kind: "root" }, installer }
+      )
+    })
+
+    expect(console.error).toHaveBeenCalledWith(`Error: Directory "${projectName}" already exists.`)
+    expect(installer).not.toHaveBeenCalled()
+    expect(readFileSync(sentinelPath, "utf8")).toBe("PRE_EXISTING_CONTENT")
+  })
+
   it("normalizes padded project names before creating the project directory and package name", () => {
     const installer = vi.fn().mockReturnValue(true)
 
