@@ -1012,6 +1012,24 @@ describe("compose.systemd — apply", () => {
     expect(result.status).toBe("failed")
   })
 
+  it("keeps an existing unit file when atomic write fails", async () => {
+    const mockSsh = createComposeMockSsh({
+      ...composeSystemdRecoveryResponses(),
+    })
+    mockSsh.writeFile = async (): Promise<void> => {
+      throw new Error("disk full")
+    }
+
+    const mod = compose.systemd({ projectDirectory })
+    const result = await mod.apply(mockSsh, emptyEnv)
+
+    expect(result.status).toBe("failed")
+    expect(String(result.error)).toContain("atomic write failed")
+    expect(mockSsh.calls).toContain("systemctl unmask 'compose-app.service'")
+    expect(mockSsh.calls).not.toContain("rm -f '/etc/systemd/system/compose-app.service'")
+    expect(mockSsh.calls).not.toContain("systemctl daemon-reload")
+  })
+
   it("generates unit without docker.service dependency for podman runtime", async () => {
     const writtenFiles: Array<{ content: string; path: string }> = []
     const mockSsh = createComposeMockSsh({
@@ -1116,7 +1134,7 @@ describe("compose.systemd — apply", () => {
     expect(mockSsh.calls).not.toContain("systemctl daemon-reload")
   })
 
-  it("clears stale masked unit state before rewriting the compose systemd unit", async () => {
+  it("unmasks stale masked unit state before rewriting the compose systemd unit", async () => {
     const writtenFiles: Array<{ content: string; path: string }> = []
     const serviceName = "mailcow"
     const serviceUnitPath = "/etc/systemd/system/mailcow.service"
@@ -1153,9 +1171,7 @@ describe("compose.systemd — apply", () => {
     expect(mockSsh.calls.indexOf("systemctl unmask 'mailcow.service'")).toBeLessThan(
       mockSsh.calls.indexOf("cat '/etc/systemd/system/mailcow.service'")
     )
-    expect(mockSsh.calls.indexOf("rm -f '/etc/systemd/system/mailcow.service'")).toBeLessThan(
-      mockSsh.calls.indexOf("cat '/etc/systemd/system/mailcow.service'")
-    )
+    expect(mockSsh.calls).not.toContain("rm -f '/etc/systemd/system/mailcow.service'")
     expect(mockSsh.calls).toContain("systemctl daemon-reload")
   })
 })

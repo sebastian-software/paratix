@@ -297,14 +297,9 @@ function resolveComposeSystemdIdentity(options: { name?: string; projectDirector
 
 async function prepareComposeSystemdTarget(parameters: {
   connection: SshConnection
-  filePath: string
   unitFileName: string
 }): Promise<void> {
   await parameters.connection.exec(`systemctl unmask ${shellQuote(parameters.unitFileName)}`, {
-    ignoreExitCode: true,
-    silent: true,
-  })
-  await parameters.connection.exec(`rm -f ${shellQuote(parameters.filePath)}`, {
     ignoreExitCode: true,
     silent: true,
   })
