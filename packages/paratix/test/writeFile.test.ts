@@ -456,6 +456,107 @@ describe("SshConnectionImpl.writeFile — large content (> 64 KB)", () => {
     expect(executedCommands).toContain(`rm -f '${fallbackTmpPath}'`)
   })
 
+  it("streams shell-fallback content via stdin instead of argv to avoid ARG_MAX (R-0000093 regression)", async () => {
+    // Regression: rewriteRemoteFileViaShell previously embedded the entire
+    // base64-encoded payload as a shell argument to `printf '%s'`. For files
+    // larger than the kernel ARG_MAX limit (typically 128 KB on Linux) the
+    // remote `bash -c '...'` invocation aborted with E2BIG. The fix passes
+    // the encoded payload via the stream's stdin and runs `base64 -d`
+    // without the argv blob.
+    const remoteTmpPath = "/etc/systemd/system/paratix-write.STDIN1"
+    const fallbackTmpPath = "/etc/systemd/system/paratix-write.STDIN2"
+    const remotePath = "/etc/systemd/system/regression-stdin.service"
+    // Use a 200 KB payload — well above the typical printf argv ceiling.
+    const largeContent = "x".repeat(200_000)
+
+    const stdinFallbackExecSpy = vi
+      .fn()
+      .mockImplementationOnce((_cmd: string, cb: ExecCallback) => {
+        const stream = makeStream()
+        cb(undefined, stream)
+        stream.emit("data", Buffer.from(remoteTmpPath))
+        stream.emit("close", 0)
+      })
+      .mockImplementationOnce((_cmd: string, cb: ExecCallback) => {
+        const stream = makeStream()
+        cb(undefined, stream)
+        stream.emit("close", 0)
+      })
+      .mockImplementationOnce((_cmd: string, cb: ExecCallback) => {
+        const stream = makeStream()
+        cb(undefined, stream)
+        stream.emit("close", 0)
+      })
+      .mockImplementationOnce((_cmd: string, cb: ExecCallback) => {
+        const stream = makeStream()
+        cb(undefined, stream)
+        // Verify the empty-file path so the shell fallback is exercised.
+        stream.emit("data", Buffer.from("0"))
+        stream.emit("close", 0)
+      })
+      .mockImplementationOnce((_cmd: string, cb: ExecCallback) => {
+        const stream = makeStream()
+        cb(undefined, stream)
+        stream.emit("data", Buffer.from(fallbackTmpPath))
+        stream.emit("close", 0)
+      })
+      .mockImplementationOnce((_cmd: string, cb: ExecCallback) => {
+        const stream = makeStream()
+        cb(undefined, stream)
+        stream.emit("close", 0)
+      })
+      .mockImplementationOnce((_cmd: string, cb: ExecCallback) => {
+        const stream = makeStream()
+        cb(undefined, stream)
+        stream.emit("close", 0)
+      })
+      .mockImplementationOnce((_cmd: string, cb: ExecCallback) => {
+        const stream = makeStream()
+        cb(undefined, stream)
+        stream.emit("close", 0)
+      })
+      .mockImplementationOnce((_cmd: string, cb: ExecCallback) => {
+        const stream = makeStream()
+        cb(undefined, stream)
+        stream.emit("close", 0)
+      })
+      .mockImplementationOnce((_cmd: string, cb: ExecCallback) => {
+        const stream = makeStream()
+        cb(undefined, stream)
+        stream.emit("data", Buffer.from(String(largeContent.length)))
+        stream.emit("close", 0)
+      })
+      .mockImplementationOnce((_cmd: string, cb: ExecCallback) => {
+        const stream = makeStream()
+        cb(undefined, stream)
+        stream.emit("close", 0)
+      })
+
+    const client = makeClientWithExecSpy(stdinFallbackExecSpy)
+    const ssh = makeConnectedSsh(client)
+    vi.mocked(sftpUpload).mockResolvedValue()
+
+    await expect(
+      ssh.writeFile(remotePath, largeContent, { mode: "0644" })
+    ).resolves.toBeUndefined()
+
+    const executedCommands = (
+      stdinFallbackExecSpy.mock.calls as Array<[string, ...unknown[]]>
+    ).map(([command]) => command)
+
+    // The shell fallback must use a `base64 -d > <tmp>` redirect — not the
+    // legacy `printf '%s' <encoded>` pipeline that placed the payload on argv.
+    const fallbackCommand = executedCommands.find(
+      (command) => command.includes("base64 -d") && command.includes(fallbackTmpPath)
+    )
+    expect(fallbackCommand).toBeDefined()
+    expect(fallbackCommand).not.toContain("printf '%s'")
+    // The command itself must be short — the payload no longer rides on argv.
+    expect(fallbackCommand!.length).toBeLessThan(1000)
+    // No emitted command should embed the payload.
+    expect(executedCommands.some((command) => command.includes(largeContent))).toBe(false)
+  })
+
   // ---------------------------------------------------------------------------
   // Disk-full detection when file is written as 0 bytes
   // ---------------------------------------------------------------------------

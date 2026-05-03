@@ -1057,13 +1057,19 @@ trap - EXIT
       remotePath,
       "paratix-write"
     )
+    // R-0000093: stream the encoded payload over stdin instead of passing it
+    // as a shell argument. The previous `printf '%s' '<encodedContent>'`
+    // pipeline placed the entire base64 blob on the argv list, where it was
+    // capped by the kernel `ARG_MAX` limit and a real-world write of a few
+    // hundred KB would fail with E2BIG. Reading from stdin removes the cap
+    // and matches the sudo-stdin pattern used elsewhere in this class.
     const encodedContent = Buffer.from(content, "utf8").toString("base64")
 
     try {
-      await this.exec(
-        `printf '%s' ${shellQuote(encodedContent)} | base64 -d > ${shellQuote(remoteTemporary)}`,
-        { silent: true }
-      )
+      await this.exec(`base64 -d > ${shellQuote(remoteTemporary)}`, {
+        input: encodedContent,
+        silent: true,
+      })
       await this.exec(`chmod ${shellQuote(mode)} ${shellQuote(remoteTemporary)}`, { silent: true })
       await this.finalizeRemoteTempFile(remoteTemporary, remotePath, mode)
     } catch (error) {
