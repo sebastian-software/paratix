@@ -804,17 +804,55 @@ describe("promptForHostFingerprint", () => {
     expect(message).toContain("out-of-band")
   })
 
-  it("falls back to the placeholder when host-key scanning fails", async () => {
-    const select = vi.fn().mockResolvedValueOnce("scan")
+  // R-0000128: a scan failure must surface as an explicit MITM-style
+  // warning. The operator confirms how to proceed instead of the function
+  // silently returning undefined.
+  it("emits a MITM warning and prompts the operator after a scan failure", async () => {
+    const select = vi.fn().mockResolvedValueOnce("scan").mockResolvedValueOnce("continue")
     const scanner = vi.fn().mockRejectedValueOnce(new Error("network timeout"))
 
     await expect(promptForHostFingerprint("example.com", select, scanner)).resolves.toBeUndefined()
-    expect(console.error).toHaveBeenCalledWith(
-      "network timeout Keeping the expectedHostFingerprint placeholder in server.ts."
+
+    const warningCalls = vi
+      .mocked(console.error)
+      .mock.calls.map((call) => String(call[0]))
+      .join("\n")
+    expect(warningCalls).toContain("Warning: failed to scan SSH host key for example.com.")
+    expect(warningCalls).toContain("network timeout")
+    expect(warningCalls).toContain("man-in-the-middle")
+    expect(warningCalls).toContain("Verify the host key out of band")
+
+    expect(select).toHaveBeenCalledTimes(2)
+    expect(select).toHaveBeenNthCalledWith(
+      2,
+      "How should create-paratix proceed after the failed host-key scan for example.com?",
+      [
+        {
+          description: expect.stringContaining("Abort scaffolding now"),
+          label: "Abort and investigate",
+          value: "abort",
+        },
+        {
+          description: expect.stringContaining("Keep the expectedHostFingerprint placeholder"),
+          label: "Continue without pinning",
+          value: "continue",
+        },
+      ]
     )
-    // R-0000122: when the scanner fails, the confirmation step must be
-    // skipped — there is no fingerprint to confirm.
-    expect(select).toHaveBeenCalledTimes(1)
+  })
+
+  // R-0000128: aborting after a scan failure must surface a hard failure
+  // so the parent main() exits with a non-zero code (instead of letting
+  // the operator silently scaffold a project against a possibly-MITM'd
+  // host).
+  it("rejects with an actionable error when the operator aborts after a scan failure", async () => {
+    const select = vi.fn().mockResolvedValueOnce("scan").mockResolvedValueOnce("abort")
+    const scanner = vi.fn().mockRejectedValueOnce(new Error("connect ETIMEDOUT"))
+
+    await expect(promptForHostFingerprint("example.com", select, scanner)).rejects.toThrow(
+      /Aborting scaffolding: host-key scan for example.com failed \(connect ETIMEDOUT\)/v
+    )
+    expect(select).toHaveBeenCalledTimes(2)
   })
 })
 

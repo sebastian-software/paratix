@@ -70,6 +70,25 @@ const HOST_FINGERPRINT_CONFIRM_OPTIONS: Array<SelectOption<"discard" | "pin">> =
   },
 ]
 
+// R-0000128: a failed scan can be a real network issue, but it can also be
+// a man-in-the-middle that drops the SSH handshake to force a downgrade.
+// We surface the failure as an explicit warning and require the operator
+// to acknowledge it instead of silently returning undefined.
+const HOST_FINGERPRINT_SCAN_FAILURE_OPTIONS: Array<SelectOption<"abort" | "continue">> = [
+  {
+    description:
+      "Abort scaffolding now. Investigate the network path (TCP reachability, firewall, DNS) before retrying.",
+    label: "Abort and investigate",
+    value: "abort",
+  },
+  {
+    description:
+      "Keep the expectedHostFingerprint placeholder in server.ts and continue. Verify the host key out of band before the first paratix apply.",
+    label: "Continue without pinning",
+    value: "continue",
+  },
+]
+
 // R-0000122: render the scanned host key on isolated lines so an operator
 // can copy it cleanly for an out-of-band comparison.
 function describeScanResult(host: string, result: HostFingerprintScanResult): string {
@@ -204,9 +223,48 @@ export async function promptForAdminPublicKey(
   }
 }
 
+// R-0000128: explicit type for the host-fingerprint prompt so callers and
+// tests can express any combination of select responses while keeping the
+// internal call sites strongly typed.
+type HostFingerprintSelectValue = "abort" | "continue" | "discard" | "pin" | "placeholder" | "scan"
+
+async function confirmAfterScanFailure(
+  choose: SelectFunction<HostFingerprintSelectValue>,
+  host: string,
+  error: unknown
+): Promise<void> {
+  const reason = error instanceof Error ? error.message : String(error)
+  // R-0000128: word the failure as an explicit MITM-warning so an operator
+  // does not dismiss it as a transient network glitch.
+  console.error(
+    [
+      "",
+      `Warning: failed to scan SSH host key for ${host}.`,
+      `  reason: ${reason}`,
+      "  This may indicate a man-in-the-middle attempt or a firewall blocking",
+      "  the SSH handshake. Verify the host key out of band before pinning",
+      "  any fingerprint into server.ts.",
+      "",
+    ].join("\n")
+  )
+
+  const decision = await (choose as SelectFunction<"abort" | "continue">)(
+    `How should create-paratix proceed after the failed host-key scan for ${host}?`,
+    HOST_FINGERPRINT_SCAN_FAILURE_OPTIONS
+  )
+
+  if (decision === "abort") {
+    throw new Error(
+      `Aborting scaffolding: host-key scan for ${host} failed (${reason}). ` +
+        `Re-run create-paratix once the SSH handshake to ${host}:22 succeeds, ` +
+        `or skip the scan by selecting "Keep placeholder".`
+    )
+  }
+}
+
 export async function promptForHostFingerprint(
   host: string,
-  select?: SelectFunction<"discard" | "pin" | "placeholder" | "scan">,
+  select?: SelectFunction<HostFingerprintSelectValue>,
   scanner: (host: string) => Promise<HostFingerprintScanResult> = readHostFingerprintViaSsh2
 ): Promise<string | undefined> {
   const terminalSelect = select == null ? createTerminalSelect() : null
@@ -229,9 +287,12 @@ export async function promptForHostFingerprint(
     try {
       result = await scanner(host)
     } catch (error) {
-      console.error(
-        `${error instanceof Error ? error.message : String(error)} Keeping the expectedHostFingerprint placeholder in server.ts.`
-      )
+      // R-0000128: do not silently swallow scan failures. Surface a
+      // possible-MITM warning and let the operator decide between aborting
+      // and continuing without pinning. confirmAfterScanFailure throws
+      // when the operator chooses to abort so the caller propagates a
+      // non-zero exit instead of a quiet undefined.
+      await confirmAfterScanFailure(choose, host, error)
       return undefined
     }
 
