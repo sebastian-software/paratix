@@ -1,5 +1,5 @@
 import { failed, failedCommand } from "../moduleFailure.js"
-import { shellQuote } from "../ssh.js"
+import { shellQuote, validateMktempPath } from "../ssh.js"
 import { type Module, type ModuleResult, NEEDS_APPLY, type SshConnection } from "../types.js"
 import {
   type ArchiveMember,
@@ -59,6 +59,13 @@ function extractCommand(source: string, archivePath: string, destination: string
   return null
 }
 
+// R-0000106: prefix used by `mktemp` for archive uploads. Reused for both
+// the template and the post-mktemp path validation so a locale-induced
+// warning, multi-line stdout or a tampered `mktemp` cannot smuggle an
+// unexpected path into the subsequent uploadFile / extract / rm pipeline.
+const ARCHIVE_UPLOAD_PREFIX = "paratix-upload"
+const ARCHIVE_UPLOAD_DIRECTORY = "/tmp"
+
 /**
  * Allocate a unique remote upload path via `mktemp`.
  *
@@ -68,15 +75,32 @@ function extractCommand(source: string, archivePath: string, destination: string
  * path itself, which produced the same destination across runs and made
  * concurrent uploads with different content prone to silent corruption.
  *
+ * R-0000106: every byte that comes back from `mktemp` is fed through
+ * {@link validateMktempPath} before any subcommand consumes it. This is
+ * the same defensive pattern used by `aptKeyHelpers.ts` and the generic
+ * `createRemoteTempPath` helper in `ssh.ts`. Without this guard, a
+ * locale warning ("mktemp: Warnung: ...\n/tmp/paratix-upload.AbCdEfGh")
+ * or any other extra line would be silently passed to `uploadFile`,
+ * `tar -xzf` and `rm -f` as if it were the temp path.
+ *
  * @param conn - The SSH connection.
  * @returns The unique remote temporary path produced by `mktemp`.
  */
 async function allocateRemoteUploadPath(conn: SshConnection): Promise<string> {
-  const remoteSource = await conn.output("mktemp /tmp/paratix-upload.XXXXXXXX")
+  const remoteSource = await conn.output(
+    `mktemp ${ARCHIVE_UPLOAD_DIRECTORY}/${ARCHIVE_UPLOAD_PREFIX}.XXXXXXXX`
+  )
   if (remoteSource.length === 0) {
     throw new Error("[archive.extract] mktemp did not return a remote path for the upload")
   }
-  return remoteSource
+  try {
+    return validateMktempPath(ARCHIVE_UPLOAD_DIRECTORY, remoteSource, ARCHIVE_UPLOAD_PREFIX)
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : String(error)
+    throw new Error(`[archive.extract] mktemp produced an unexpected path: ${reason}`, {
+      cause: error,
+    })
+  }
 }
 
 /**

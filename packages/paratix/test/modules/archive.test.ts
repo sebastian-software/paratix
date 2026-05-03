@@ -356,6 +356,51 @@ describe("archive.extract — apply", () => {
     expect(mockSsh.uploadFile).not.toHaveBeenCalled()
   })
 
+  it("R-0000106: rejects a poisoned mktemp output (locale warning) without uploading", async () => {
+    // Older paratix versions handed every byte from `mktemp` straight into
+    // `uploadFile` / `tar -xzf` / `rm -f`. A locale warning prepended by a
+    // hostile or misconfigured shell would turn into a path like
+    //   "mktemp: ungültiges Format ...\n/tmp/paratix-upload.AbCdEfGh"
+    // and silently corrupt the upload pipeline. The validateMktempPath
+    // guard rejects the entire payload instead of using the second line.
+    const localFile = "/local/app.tar.gz"
+    const poisonedOutput =
+      "mktemp: ungültiges Format ...\n/tmp/paratix-upload.AbCdEfGh"
+    const mockSsh = createMockSsh({
+      "mktemp /tmp/paratix-upload.XXXXXXXX": { code: 0, stdout: poisonedOutput },
+    })
+    vi.spyOn(mockSsh, "uploadFile").mockResolvedValue()
+
+    const mod = archive.extract(localFile, destination, { upload: true })
+
+    await expect(mod.apply(mockSsh, emptyEnv)).rejects.toThrow(
+      /mktemp produced an unexpected path/v
+    )
+    expect(mockSsh.uploadFile).not.toHaveBeenCalled()
+  })
+
+  it("R-0000106: rejects a mktemp output with the wrong prefix without uploading", async () => {
+    // A `mktemp` whose stdout escapes /tmp/paratix-upload.* (e.g. the
+    // operator pinned an alternate template via PATH=/usr/local/bin) must
+    // not be used as the upload path — uploadFile and tar would otherwise
+    // touch a file outside the dedicated namespace.
+    const localFile = "/local/app.tar.gz"
+    const mockSsh = createMockSsh({
+      "mktemp /tmp/paratix-upload.XXXXXXXX": {
+        code: 0,
+        stdout: "/tmp/other-prefix.AbCdEfGh",
+      },
+    })
+    vi.spyOn(mockSsh, "uploadFile").mockResolvedValue()
+
+    const mod = archive.extract(localFile, destination, { upload: true })
+
+    await expect(mod.apply(mockSsh, emptyEnv)).rejects.toThrow(
+      /mktemp produced an unexpected path/v
+    )
+    expect(mockSsh.uploadFile).not.toHaveBeenCalled()
+  })
+
   it("returns failed when extraction fails", async () => {
     const mockSsh = createMockSsh({
       [`tar --no-same-owner --no-overwrite-dir -xzf '${src}' -C '${destination}'`]: {
