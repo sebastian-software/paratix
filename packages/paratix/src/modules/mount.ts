@@ -1,3 +1,5 @@
+import { posix } from "node:path"
+
 import { failed, failedCommand } from "../moduleFailure.js"
 import { shellQuote } from "../ssh.js"
 import {
@@ -11,6 +13,35 @@ import {
 const EXEC_OPTS = { ignoreExitCode: true, silent: true } as const
 const FSTAB_PATH = "/etc/fstab"
 const FSTAB_MODE = "0644"
+
+/**
+ * Reject mount paths that would be destructive or are obviously malformed.
+ *
+ * Mirrors `validateAbsentPath` in `file.ts`, but is stricter because mount
+ * commands take a single positional path argument: an empty string, `/`, a
+ * non-normalized path, or a path containing newline / carriage-return
+ * characters could either target the wrong filesystem (e.g. `umount /`) or
+ * smuggle additional shell tokens. Throws synchronously so misuse is caught
+ * at module construction time, before any SSH activity.
+ *
+ * @param caller - The module name used in the error message (e.g.
+ *   `"mount.absent"`).
+ * @param path - The mountpoint path supplied by the caller.
+ */
+function validateMountPath(caller: string, path: string): void {
+  if (path.length === 0) {
+    throw new Error(`${caller}: mount path must not be empty`)
+  }
+  if (path.includes("\n") || path.includes("\r")) {
+    throw new Error(`${caller}: mount path is invalid: ${JSON.stringify(path)}`)
+  }
+  if (path !== posix.normalize(path)) {
+    throw new Error(`${caller}: mount path is invalid: ${path}`)
+  }
+  if (path === "/") {
+    throw new Error(`${caller}: refusing to operate on destructive path: ${path}`)
+  }
+}
 
 /**
  * Build a single fstab line from the given mount parameters.
@@ -326,6 +357,7 @@ export const mount = {
    */
   absent(options: { path: string; persist?: boolean }): Module {
     const { path, persist = true } = options
+    validateMountPath("mount.absent", path)
 
     return {
       async apply(ssh: null | SshConnection): Promise<ModuleResult> {
@@ -391,6 +423,7 @@ export const mount = {
     src: string
   }): Module {
     const { fstype, opts, path, persist = true, src } = options
+    validateMountPath("mount.present", path)
 
     return {
       async apply(ssh: null | SshConnection): Promise<ModuleResult> {

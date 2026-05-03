@@ -24,6 +24,62 @@ const mkdirCmd = `mkdir -p '${mountPath}'`
 // match the desired values exactly.
 const liveMountStdout = `${mountSrc} ${mountFstype} ${mountOpts}`
 
+// ─── path validation ──────────────────────────────────────────────────────────
+
+describe("mount.absent — path validation", () => {
+  it("throws when path is the empty string", () => {
+    expect(() => mount.absent({ path: "" })).toThrow(/mount path must not be empty/v)
+  })
+
+  it("throws when path is '/'", () => {
+    expect(() => mount.absent({ path: "/" })).toThrow(/destructive path/v)
+  })
+
+  it("throws when path contains a newline", () => {
+    expect(() => mount.absent({ path: "/mnt/data\n" })).toThrow(/mount path is invalid/v)
+  })
+
+  it("throws when path contains a carriage return", () => {
+    expect(() => mount.absent({ path: "/mnt/data\r" })).toThrow(/mount path is invalid/v)
+  })
+
+  it("throws when path is not normalized", () => {
+    expect(() => mount.absent({ path: "/mnt//data" })).toThrow(/mount path is invalid/v)
+  })
+})
+
+describe("mount.present — path validation", () => {
+  it("throws when path is the empty string", () => {
+    expect(() =>
+      mount.present({ fstype: mountFstype, opts: mountOpts, path: "", src: mountSrc })
+    ).toThrow(/mount path must not be empty/v)
+  })
+
+  it("throws when path is '/'", () => {
+    expect(() =>
+      mount.present({ fstype: mountFstype, opts: mountOpts, path: "/", src: mountSrc })
+    ).toThrow(/destructive path/v)
+  })
+
+  it("throws when path contains a newline", () => {
+    expect(() =>
+      mount.present({ fstype: mountFstype, opts: mountOpts, path: "/mnt/data\n", src: mountSrc })
+    ).toThrow(/mount path is invalid/v)
+  })
+
+  it("throws when path contains a carriage return", () => {
+    expect(() =>
+      mount.present({ fstype: mountFstype, opts: mountOpts, path: "/mnt/data\r", src: mountSrc })
+    ).toThrow(/mount path is invalid/v)
+  })
+
+  it("throws when path is not normalized", () => {
+    expect(() =>
+      mount.present({ fstype: mountFstype, opts: mountOpts, path: "/mnt//data", src: mountSrc })
+    ).toThrow(/mount path is invalid/v)
+  })
+})
+
 // ─── mount.present ────────────────────────────────────────────────────────────
 
 describe("mount.present — check", () => {
