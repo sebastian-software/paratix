@@ -490,11 +490,13 @@ describe("mount.absent — check", () => {
   })
 
   it("returns needs-apply when mountpoint is mounted", async () => {
-    // test() returns true (code 0) by default when no mock is registered
-    const mockSsh = createMockSsh()
+    const mockSsh = createMockSsh({
+      [findmntTestCmd]: { code: 0 },
+    })
     const mod = mount.absent({ path: mountPath })
     const result = await mod.check(mockSsh, emptyEnv)
     expect(result).toBe("needs-apply")
+    expect(mockSsh.calls).toContain(findmntTestCmd)
   })
 
   it("returns ok when not mounted and no fstab entry (persist: true)", async () => {
@@ -537,12 +539,13 @@ describe("mount.absent — apply", () => {
   })
 
   it("runs umount when mounted", async () => {
-    // test() returns true by default (no response registered = code 0 = mounted)
     const mockSsh = createMockSsh({
       "cat '/etc/fstab'": { stdout: "# /etc/fstab\n" },
+      [findmntTestCmd]: { code: 0 },
     })
     const mod = mount.absent({ path: mountPath })
     await mod.apply(mockSsh, emptyEnv)
+    expect(mockSsh.calls.indexOf(findmntTestCmd)).toBeLessThan(mockSsh.calls.indexOf(umountCmd))
     expect(mockSsh.calls).toContain(umountCmd)
   })
 
@@ -588,6 +591,7 @@ describe("mount.absent — apply", () => {
   it("returns changed when umount was needed", async () => {
     const mockSsh = createMockSsh({
       "cat '/etc/fstab'": { stdout: "# /etc/fstab\n" },
+      [findmntTestCmd]: { code: 0 },
     })
     const mod = mount.absent({ path: mountPath })
     const result = await mod.apply(mockSsh, emptyEnv)
