@@ -334,13 +334,6 @@ async function applyUbuntu(
   ssh: SshConnection,
   options: ReleaseUpgradeOptions
 ): Promise<ModuleResult> {
-  const updateFailure = await runReleaseUpgradeCommand(
-    ssh,
-    `${NONINTERACTIVE} apt-get update`,
-    "[releaseUpgrade.upgrade] apt-get update failed"
-  )
-  if (updateFailure != null) return updateFailure
-
   if (options.dryRun === true) {
     await ssh.exec("do-release-upgrade -c", {
       ignoreExitCode: true,
@@ -348,6 +341,13 @@ async function applyUbuntu(
     })
     return { status: "ok" }
   }
+
+  const updateFailure = await runReleaseUpgradeCommand(
+    ssh,
+    `${NONINTERACTIVE} apt-get update`,
+    "[releaseUpgrade.upgrade] apt-get update failed"
+  )
+  if (updateFailure != null) return updateFailure
 
   const upgradeFailure = await runReleaseUpgradeCommand(
     ssh,

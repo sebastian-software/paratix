@@ -139,13 +139,13 @@ describe("releaseUpgrade.upgrade — apply (Ubuntu)", () => {
   it("dryRun: runs only do-release-upgrade -c and returns ok", async () => {
     const ssh = createMockSsh({
       "cat '/etc/os-release'": { code: 0, stdout: UBUNTU_OS_RELEASE },
-      "DEBIAN_FRONTEND=noninteractive apt-get update": { code: 0 },
       "do-release-upgrade -c": { code: 0 },
     })
     const mod = releaseUpgrade.upgrade({ dryRun: true })
     const result = await mod.apply(ssh, emptyEnv)
     expect(result.status).toBe("ok")
     expect(ssh.calls).toContain("do-release-upgrade -c")
+    expect(ssh.calls).not.toContain("DEBIAN_FRONTEND=noninteractive apt-get update")
     expect(ssh.calls).not.toContain("do-release-upgrade -f DistUpgradeViewNonInteractive")
   })
 
