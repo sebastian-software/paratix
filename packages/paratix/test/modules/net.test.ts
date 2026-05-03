@@ -515,6 +515,9 @@ describe("net.route — check", () => {
 })
 
 describe("net.route — apply", () => {
+  const routeShowCommand = "ip route show '10.0.0.0/24'"
+  const liveRouteOutput = "10.0.0.0/24 via 192.168.1.1 dev eth0"
+
   it("returns failed when conn is null", async () => {
     const conn = null
     const mod = net.route("10.0.0.0/24", "192.168.1.1")
@@ -582,7 +585,9 @@ describe("net.route — apply", () => {
   })
 
   it("runs ip route del (state: absent)", async () => {
-    const mockSsh = createMockSsh()
+    const mockSsh = createMockSsh({
+      [routeShowCommand]: { code: 0, stdout: liveRouteOutput },
+    })
     const mod = net.route("10.0.0.0/24", "192.168.1.1", { state: "absent" })
     await mod.apply(mockSsh, emptyEnv)
     expect(mockSsh.calls).toContain("ip route del '10.0.0.0/24'")
@@ -590,6 +595,7 @@ describe("net.route — apply", () => {
 
   it("returns failed when ip route del fails (state: absent)", async () => {
     const mockSsh = createMockSsh({
+      [routeShowCommand]: { code: 0, stdout: liveRouteOutput },
       "ip route del '10.0.0.0/24'": { code: 2, stderr: "No such process" },
     })
     const mod = net.route("10.0.0.0/24", "192.168.1.1", { state: "absent" })
@@ -597,6 +603,20 @@ describe("net.route — apply", () => {
     expect(result.status).toBe("failed")
     expect(String(result.error)).toContain("ip route del failed")
     expect(mockSsh.calls).not.toContain("networkctl reload")
+  })
+
+  it("removes drop-in when state is absent and the live route is already gone", async () => {
+    const dropinPath = "/etc/systemd/network/50-paratix-route-10.0.0.0-24.network"
+    const mockSsh = createMockSsh({
+      [routeShowCommand]: { code: 0, stdout: "" },
+    })
+    const mod = net.route("10.0.0.0/24", "192.168.1.1", { state: "absent" })
+    const result = await mod.apply(mockSsh, emptyEnv)
+
+    expect(result.status).toBe("changed")
+    expect(mockSsh.calls).not.toContain("ip route del '10.0.0.0/24'")
+    expect(mockSsh.calls).toContain(`rm -f '${dropinPath}'`)
+    expect(mockSsh.calls).toContain("networkctl reload")
   })
 
   it("removes drop-in file when state is absent", async () => {

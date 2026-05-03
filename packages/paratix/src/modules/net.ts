@@ -376,10 +376,12 @@ async function applyAbsentRoute(
   conn: SshConnection,
   parameters: RouteParameters
 ): Promise<ModuleResult | null> {
-  const { destination, dropinPath } = parameters
-  const routeResult = await conn.exec(`ip route del ${shellQuote(destination)}`, EXEC_OPTS)
-  if (routeResult.code !== 0) {
-    return failedCommand(`[net.route: ${destination}] ip route del failed`, routeResult)
+  const { destination, device, dropinPath, gateway } = parameters
+  if (await hasLiveRoute(conn, { destination, device, gateway })) {
+    const routeResult = await conn.exec(`ip route del ${shellQuote(destination)}`, EXEC_OPTS)
+    if (routeResult.code !== 0) {
+      return failedCommand(`[net.route: ${destination}] ip route del failed`, routeResult)
+    }
   }
   const removeResult = await conn.exec(`rm -f ${shellQuote(dropinPath)}`, EXEC_OPTS)
   if (removeResult.code !== 0) {
