@@ -284,16 +284,19 @@ type RouteCheckParameters = {
  * @param conn - The SSH connection.
  * @param destination - The route destination CIDR.
  * @param gateway - The expected gateway address.
- * @returns `true` when the live route matches the expected gateway.
+ * @param device - Optional expected route device.
+ * @returns `true` when the live route matches the expected gateway and device.
  */
 async function hasLiveRoute(
   conn: SshConnection,
   destination: string,
-  gateway: string
+  gateway: string,
+  device?: string
 ): Promise<boolean> {
   const result = await conn.exec(`ip route show ${shellQuote(destination)}`, EXEC_OPTS)
   const output = result.stdout.trim()
-  return output.includes(`via ${gateway}`)
+  if (!output.includes(`via ${gateway}`)) return false
+  return device == null || output.includes(` dev ${device}`)
 }
 
 /**
@@ -323,7 +326,7 @@ async function checkRouteState(
   parameters: RouteCheckParameters
 ): Promise<"needs-apply" | "ok"> {
   const { destination, device, dropinPath, gateway, state } = parameters
-  const live = await hasLiveRoute(conn, destination, gateway)
+  const live = await hasLiveRoute(conn, destination, gateway, device)
   const dropinPresent = await routeDropinExists(conn, dropinPath)
 
   if (state === "present") {

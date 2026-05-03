@@ -476,6 +476,19 @@ describe("net.route — check", () => {
     expect(result).toBe("needs-apply")
   })
 
+  it("returns needs-apply when live route uses the wrong device (state: present)", async () => {
+    const dropinPath = "/etc/systemd/network/50-paratix-route-10.0.0.0-24.network"
+    const expectedDropin = `[Match]\nName=eth0\n\n[Route]\nDestination=10.0.0.0/24\nGateway=192.168.1.1\n`
+    const mockSsh = createMockSsh({
+      [`cat '${dropinPath}'`]: { stdout: expectedDropin },
+      [`test -f '${dropinPath}'`]: { code: 0 },
+      "ip route show '10.0.0.0/24'": { stdout: "10.0.0.0/24 via 192.168.1.1 dev eth1" },
+    })
+    const mod = net.route("10.0.0.0/24", "192.168.1.1", { device: "eth0" })
+    const result = await mod.check(mockSsh, emptyEnv)
+    expect(result).toBe("needs-apply")
+  })
+
   it("returns needs-apply when live route is gone but drop-in still exists (state: absent)", async () => {
     const dropinPath = "/etc/systemd/network/50-paratix-route-10.0.0.0-24.network"
     const mockSsh = createMockSsh({
