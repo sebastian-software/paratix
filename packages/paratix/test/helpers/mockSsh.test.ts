@@ -50,6 +50,39 @@ describe("createMockSsh", () => {
       warnSpy.mockRestore()
     }
   })
+
+  it("returns the configured defaultExecResult for unstubbed exec calls", async () => {
+    const ssh = createMockSsh(
+      {},
+      { defaultExecResult: { code: 1, stderr: "command not found", stdout: "" } }
+    )
+
+    await expect(ssh.exec("rename-me")).resolves.toMatchObject({
+      code: 1,
+      stderr: "command not found",
+      stdout: "",
+    })
+  })
+
+  it("rejects unstubbed exec calls when defaultExecResult is 'throw'", async () => {
+    const ssh = createMockSsh({}, { defaultExecResult: "throw" })
+
+    await expect(ssh.exec("rename-me")).rejects.toThrow(
+      "createMockSsh: unstubbed exec call: rename-me"
+    )
+  })
+
+  it("still honors stubbed responses when defaultExecResult is set", async () => {
+    const ssh = createMockSsh(
+      { "echo ok": { code: 0, stdout: "ok" } },
+      { defaultExecResult: "throw" }
+    )
+
+    await expect(ssh.exec("echo ok")).resolves.toMatchObject({ code: 0, stdout: "ok" })
+    await expect(ssh.exec("rename-me")).rejects.toThrow(
+      "createMockSsh: unstubbed exec call: rename-me"
+    )
+  })
 })
 
 describe("createStrictMockSsh", () => {

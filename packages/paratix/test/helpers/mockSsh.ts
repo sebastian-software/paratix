@@ -18,6 +18,14 @@ type MockSshOptions = {
   allowUnstubbedOutput?: string[]
   allowUnstubbedTest?: string[]
   /**
+   * Result returned by `ssh.exec()` for unstubbed commands.
+   * Defaults to a successful `{ code: 0, stderr: "", stdout: "" }` for
+   * backward compatibility. Set to a partial `ExecResult` (e.g.
+   * `{ code: 1, stderr: "command not found" }`) to surface failures, or to
+   * the literal string `"throw"` to make unstubbed exec calls reject.
+   */
+  defaultExecResult?: "throw" | Partial<ExecResult>
+  /**
    * Result returned by `ssh.test()` for unstubbed commands.
    * Defaults to `true` for backward compatibility — tests that want to opt
    * into a stricter posture can set this to `false` so unstubbed `test`
@@ -98,7 +106,12 @@ function createExec(
   return async (command, execOptions) => {
     recorder.calls.push(command)
     recorder.execCalls.push({ command, options: execOptions })
-    return buildExecResult(getMockResponse({ command, kind: "exec", options, responses }))
+    const match = getMockResponse({ command, kind: "exec", options, responses })
+    if (match) return buildExecResult(match)
+    if (options?.defaultExecResult === "throw") {
+      throw buildUnstubbedCommandError("exec", command)
+    }
+    return buildExecResult(options?.defaultExecResult)
   }
 }
 
