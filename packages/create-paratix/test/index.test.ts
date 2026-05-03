@@ -304,6 +304,102 @@ describe("admin public key validation", () => {
       'Error: Invalid value for "--admin-public-key-file" — provide a valid single-line OpenSSH public key.'
     )
   })
+
+  // R-0000126: validateAdminPublicKey must hard-reject any value containing a
+  // private-key PEM marker so a leaked private key cannot be embedded into
+  // the scaffolded server.ts via either CLI flag.
+  it("rejects an OpenSSH private key embed via --admin-public-key", () => {
+    const privateKey = [
+      "-----BEGIN OPENSSH PRIVATE KEY-----",
+      "b3BlbnNzaC1rZXktdjEAAAAABG5vbmUAAAAEbm9uZQAAAAAAAAABAAAAMwAAAAtzc2gtZW",
+      "-----END OPENSSH PRIVATE KEY-----",
+    ].join("\n")
+
+    expect(() => {
+      validateAdminPublicKey(throwExitError, privateKey)
+    }).toThrow(
+      'Error: "--admin-public-key" contains a private key marker. Provide the matching OpenSSH public key (.pub) instead.'
+    )
+
+    expect(console.error).toHaveBeenCalledWith(
+      'Error: "--admin-public-key" contains a private key marker. Provide the matching OpenSSH public key (.pub) instead.'
+    )
+  })
+
+  it("rejects an RSA private key embed via --admin-public-key", () => {
+    const privateKey = [
+      "-----BEGIN RSA PRIVATE KEY-----",
+      "MIIEpAIBAAKCAQEA1234567890abcdef",
+      "-----END RSA PRIVATE KEY-----",
+    ].join("\n")
+
+    expect(() => {
+      validateAdminPublicKey(throwExitError, privateKey)
+    }).toThrow(/contains a private key marker/v)
+  })
+
+  it("rejects an EC private key embed via --admin-public-key", () => {
+    const privateKey = [
+      "-----BEGIN EC PRIVATE KEY-----",
+      "MHcCAQEEIBexampleeexampleeexampleeexampleeexample",
+      "-----END EC PRIVATE KEY-----",
+    ].join("\n")
+
+    expect(() => {
+      validateAdminPublicKey(throwExitError, privateKey)
+    }).toThrow(/contains a private key marker/v)
+  })
+
+  it("rejects a private key embed loaded from --admin-public-key-file", () => {
+    const privateKeyFile = join(TEST_DIR, "private-admin.pub")
+    mkdirSync(TEST_DIR, { recursive: true })
+    writeFileSync(
+      privateKeyFile,
+      [
+        "-----BEGIN OPENSSH PRIVATE KEY-----",
+        "b3BlbnNzaC1rZXktdjEAAAAABG5vbmUAAAAEbm9uZQ",
+        "-----END OPENSSH PRIVATE KEY-----",
+        "",
+      ].join("\n")
+    )
+
+    expect(() => {
+      readAdminPublicKeyFile(throwExitError, privateKeyFile)
+    }).toThrow(
+      'Error: "--admin-public-key-file" contains a private key marker. Provide the matching OpenSSH public key (.pub) instead.'
+    )
+  })
+
+  // R-0000126: relative paths supplied on the CLI must be resolved against the
+  // current working directory before they are read so that operators can pass
+  // paths like `./id_ed25519.pub` without relying on shell expansion.
+  it("resolves a relative admin public key file path against the current working directory", () => {
+    mkdirSync(TEST_DIR, { recursive: true })
+    const publicKey =
+      "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIBxv2sz0YF80J6V1rP4Y9l8n8A6oQ2V9m3YbQdK6Yz4Z user@example"
+    const absoluteKeyFile = join(TEST_DIR, "relative-admin.pub")
+    writeFileSync(absoluteKeyFile, `${publicKey}\n`)
+
+    const originalCwd = process.cwd()
+    try {
+      process.chdir(TEST_DIR)
+      expect(readAdminPublicKeyFile(throwExitError, "./relative-admin.pub")).toBe(publicKey)
+    } finally {
+      process.chdir(originalCwd)
+    }
+  })
+
+  // R-0000126: read failures must not leak filesystem details — only a
+  // generic message is exposed to the operator.
+  it("emits a neutral error message when the admin public key file cannot be read", () => {
+    const missingPath = join(TEST_DIR, "does-not-exist.pub")
+
+    expect(() => {
+      readAdminPublicKeyFile(throwExitError, missingPath)
+    }).toThrow("Error: Failed to read admin public key file.")
+
+    expect(console.error).toHaveBeenCalledWith("Error: Failed to read admin public key file.")
+  })
 })
 
 describe("initial user parsing", () => {

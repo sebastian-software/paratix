@@ -1,6 +1,6 @@
 import { readdirSync, readFileSync } from "node:fs"
 import { homedir } from "node:os"
-import { basename, join } from "node:path"
+import { basename, join, resolve } from "node:path"
 
 import type { SelectFunction, SelectOption } from "./promptUi.js"
 
@@ -39,6 +39,26 @@ const supportedOpenSshAlgorithms = new Set([
   "ssh-ed25519",
   "ssh-rsa",
 ])
+
+// PEM/OpenSSH markers that unambiguously identify private keys. The check is
+// case-sensitive because real PEM headers are always upper-case; relaxing to
+// case-insensitive would only enable bypasses without catching additional
+// legitimate inputs. R-0000126 requires validateAdminPublicKey to fail hard
+// when any of these markers appears in the value, so a leaked private key
+// cannot be embedded into server.ts even if parseOpenSshPublicKey would
+// otherwise accept the first line.
+const PRIVATE_KEY_MARKERS = [
+  "BEGIN OPENSSH PRIVATE KEY",
+  "BEGIN RSA PRIVATE KEY",
+  "BEGIN DSA PRIVATE KEY",
+  "BEGIN EC PRIVATE KEY",
+  "BEGIN PRIVATE KEY",
+  "BEGIN ENCRYPTED PRIVATE KEY",
+]
+
+function containsPrivateKeyMarker(value: string): boolean {
+  return PRIVATE_KEY_MARKERS.some((marker) => value.includes(marker))
+}
 
 function parseOpenSshPublicKey(value: string): null | ParsedPublicKey {
   if (value.length === 0 || value.includes("\n")) {
@@ -156,6 +176,13 @@ export function validateAdminPublicKey(
   value: string,
   optionName = "--admin-public-key"
 ): string {
+  // R-0000126: detect a private-key embed before any other validation.
+  if (containsPrivateKeyMarker(value)) {
+    exitWithMessage(
+      `Error: "${optionName}" contains a private key marker. Provide the matching OpenSSH public key (.pub) instead.`
+    )
+  }
+
   const normalizedValue = value.trim()
   if (!isValidAdminPublicKey(normalizedValue)) {
     exitWithMessage(
@@ -166,14 +193,16 @@ export function validateAdminPublicKey(
 }
 
 export function readAdminPublicKeyFile(exitWithMessage: ExitWithMessage, path: string): string {
+  // R-0000126: resolve relative paths against cwd; emit neutral errors.
+  const resolvedPath = resolve(path)
+
   let value: string
 
   try {
     // eslint-disable-next-line security/detect-non-literal-fs-filename
-    value = readFileSync(path, "utf8")
-  } catch (error) {
-    const message = error instanceof Error ? error.message : String(error)
-    exitWithMessage(`Error: Failed to read "--admin-public-key-file" from "${path}": ${message}`)
+    value = readFileSync(resolvedPath, "utf8")
+  } catch {
+    exitWithMessage(`Error: Failed to read admin public key file.`)
   }
 
   return validateAdminPublicKey(exitWithMessage, value, "--admin-public-key-file")
