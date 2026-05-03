@@ -147,14 +147,13 @@ describe("sshd.config — apply", () => {
     const mockSsh = createMockSsh({
       [CAT_SSHD]: { stdout: "AllowUsers root\n" },
     })
-    trackWriteFile(mockSsh)
+    const writtenFiles = trackWriteFile(mockSsh)
 
     // Value with a shell glob — previously could cause RegExp errors or injection
     const mod = sshd.config({ AllowUsers: "admin*" })
     await expect(mod.apply(mockSsh, emptyEnv)).resolves.not.toThrow()
-    const calls = vi.mocked(mockSsh.writeFile).mock.calls
-    expect(calls).toHaveLength(1)
-    expect(calls[0][1]).toContain("AllowUsers admin*")
+    expect(writtenFiles).toHaveLength(1)
+    expect(writtenFiles[0]?.content).toContain("AllowUsers admin*")
   })
 
   it("bug — replaces ALL occurrences of a duplicate directive, not only the first", async () => {
