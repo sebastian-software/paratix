@@ -319,13 +319,13 @@ describe("compose.down — check", () => {
     expect(result).toBe("ok")
   })
 
-  it("returns ok when ps command fails (treats as already down)", async () => {
+  it("returns needs-apply when ps command fails", async () => {
     const mockSsh = createComposeMockSsh({
       [`${composeCmd("podman")} ps --format json`]: { code: 1 },
     })
     const mod = compose.down({ projectDirectory })
     const result = await mod.check(mockSsh, emptyEnv)
-    expect(result).toBe("ok")
+    expect(result).toBe("needs-apply")
   })
 
   it("returns needs-apply when containers are running", async () => {

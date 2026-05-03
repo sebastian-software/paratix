@@ -634,7 +634,7 @@ export const compose = {
           `${composeCommand(rt, projectDirectory)} ps --format json`,
           EXEC_OPTS
         )
-        if (result.code !== 0) return "ok"
+        if (result.code !== 0) return NEEDS_APPLY
 
         const stdout = result.stdout.trim()
         if (stdout === "") return "ok"
