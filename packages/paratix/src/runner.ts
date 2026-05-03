@@ -771,7 +771,7 @@ function rethrowIfNotShutdown(error: unknown, shutdownSignal: () => NodeJS.Signa
  * @param parameters.ssh - The SSH connection that may need disconnecting.
  */
 function teardownPlaybookResources(parameters: {
-  handleShutdownSignal: NodeJS.SignalsListener
+  handleShutdownSignal: (signal: NodeJS.Signals) => void
   ssh: SshConnectionImpl | undefined
 }): void {
   for (const signal of ["SIGINT", "SIGTERM"] as const)
