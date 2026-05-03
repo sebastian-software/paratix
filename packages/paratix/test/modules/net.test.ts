@@ -523,6 +523,31 @@ describe("net.route — apply", () => {
 
 // ─── net.interface ────────────────────────────────────────────────────────────
 
+// R-0000100: net.interface must reject names that contain path-traversal
+// payloads or empty strings, because the name is interpolated into the
+// Netplan/networkd file paths and would otherwise allow writing to arbitrary
+// locations under /etc.
+describe("net.interface — R-0000100 name validation", () => {
+  it("throws when the name contains path traversal segments", () => {
+    expect(() => net.interface("../../etc/passwd", {})).toThrow(/invalid interface name/v)
+  })
+
+  it("throws when the name is the empty string", () => {
+    expect(() => net.interface("", {})).toThrow(/invalid interface name/v)
+  })
+
+  it("throws when the name contains a forward slash", () => {
+    expect(() => net.interface("eth0/../foo", {})).toThrow(/invalid interface name/v)
+  })
+
+  it("accepts valid POSIX interface names", () => {
+    expect(() => net.interface("eth0", {})).not.toThrow()
+    expect(() => net.interface("enp3s0", {})).not.toThrow()
+    expect(() => net.interface("br-lan", {})).not.toThrow()
+    expect(() => net.interface("vlan.100", {})).not.toThrow()
+  })
+})
+
 describe("net.interface — check", () => {
   it("returns needs-apply when conn is null", async () => {
     const mod = net.interface("eth0", {})

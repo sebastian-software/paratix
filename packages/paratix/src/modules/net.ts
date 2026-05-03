@@ -342,6 +342,18 @@ export const net = {
    * @returns A Module that manages the interface configuration.
    */
   interface(name: string, options: InterfaceOptions): Module {
+    // R-0000100: validate the interface name against path-traversal payloads.
+    // The name is interpolated into the Netplan/networkd file paths below, so
+    // any value containing `/`, `..`, or shell metacharacters could escape the
+    // intended directory and overwrite arbitrary files. The regex enforces a
+    // POSIX-compatible interface-name shape (alphanumeric start, then word
+    // characters plus dot and dash).
+    if (!/^[A-Za-z0-9][\w.\-]*$/v.test(name)) {
+      throw new Error(
+        `[net.interface] invalid interface name: ${JSON.stringify(name)} ` +
+          `— must match /^[A-Za-z0-9][\\w.\\-]*$/`
+      )
+    }
     const netplanPath = `/etc/netplan/60-paratix-${name}.yaml`
     const networkdPath = `/etc/systemd/network/60-paratix-${name}.network`
 
