@@ -708,6 +708,18 @@ describe("collectDefinitionErrors", () => {
     ])
   })
 
+  it("returns an error when ssh.sudoPassword is not a string", () => {
+    const errors = collectDefinitionErrors({
+      host: "example.com",
+      name: "test",
+      run: ["echo hello"],
+      ssh: { ports: [22], privateKey: "/key", sudoPassword: 123, user: "root" },
+    })
+    expect(errors).toStrictEqual([
+      "Invalid property 'ssh.sudoPassword' (expected string, got number)",
+    ])
+  })
+
   it("returns an error when ssh.reconnectTimeout is not a number", () => {
     const errors = collectDefinitionErrors({
       host: "example.com",

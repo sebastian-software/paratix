@@ -122,6 +122,7 @@ function collectStrictHostKeyCheckingErrors(ssh: Record<string, unknown>, errors
 
 function collectOptionalSshFieldErrors(ssh: Record<string, unknown>, errors: string[]): void {
   collectOptionalStringErrors(ssh, "privateKey", errors)
+  collectOptionalStringErrors(ssh, "sudoPassword", errors)
   collectOptionalStringErrors(ssh, "expectedHostFingerprint", errors)
   collectOptionalStringErrors(ssh, "expectedHostPublicKey", errors)
   collectOptionalBooleanErrors(ssh, "agentForward", errors)

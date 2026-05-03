@@ -125,6 +125,16 @@ describe("server", () => {
     )
   })
 
+  it("throws when ssh.sudoPassword is not a string in an untyped JS playbook", () => {
+    expect(() =>
+      server(
+        validConfig({
+          ssh: { ...validSsh, sudoPassword: 123 },
+        }) as unknown as Parameters<typeof server>[0]
+      )
+    ).toThrow("ServerDefinition: Invalid property 'ssh.sudoPassword' (expected string, got number)")
+  })
+
   it("throws when ssh.reconnectTimeout is not a number in an untyped JS playbook", () => {
     expect(() =>
       server(
