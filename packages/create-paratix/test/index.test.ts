@@ -1796,6 +1796,37 @@ describe("scaffoldProject", () => {
     expect(console.log).toHaveBeenCalledWith(expect.stringContaining("npm run apply"))
   })
 
+  it("prints completion commands in bootstrap order", () => {
+    const installer = vi.fn().mockReturnValue(true)
+
+    scaffoldProject(
+      projectName,
+      { command: "pnpm install", name: "pnpm" },
+      {
+        host: "example.com",
+        installer,
+      }
+    )
+
+    const completionMessage = vi
+      .mocked(console.log)
+      .mock.calls.map((call) => String(call[0]))
+      .find((message) => message.includes("Project created successfully!"))
+
+    expect(completionMessage).toBeDefined()
+    const commandLines = completionMessage
+      ?.split("\n")
+      .map((line) => line.trim())
+      .filter((line) => line.startsWith("pnpm apply"))
+
+    expect(commandLines).toStrictEqual([
+      "pnpm apply:first-run:dry",
+      "pnpm apply:first-run",
+      "pnpm apply:dry",
+      "pnpm apply",
+    ])
+  })
+
   // R-0000124 regression: scaffoldProject must fail closed when the target
   // directory already exists, instead of silently overwriting files inside it.
   // Previously the function used `existsSync(...) ? exit : mkdirSync(..., { recursive: true })`
