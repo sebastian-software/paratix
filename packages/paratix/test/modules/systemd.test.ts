@@ -113,10 +113,11 @@ describe("systemd.unit", () => {
   const unitContent = "[Unit]\nDescription=My App\n\n[Service]\nExecStart=/usr/bin/my-app"
   const filePath = `/etc/systemd/system/${unitName}`
 
-  it("check returns ok when file exists and content matches", async () => {
+  it("check returns ok when file exists, content matches, and mode is 0644", async () => {
     const ssh = createMockSsh({
       [`[ -e '${filePath}' ]`]: { code: 0 },
       [`cat '${filePath}'`]: { code: 0, stdout: unitContent },
+      [`stat -c '%a' '${filePath}'`]: { code: 0, stdout: "644\n" },
     })
     const mod = systemd.unit(unitName, unitContent)
     const result = await mod.check(ssh, emptyEnv)
@@ -136,6 +137,28 @@ describe("systemd.unit", () => {
     const ssh = createMockSsh({
       [`[ -e '${filePath}' ]`]: { code: 0 },
       [`cat '${filePath}'`]: { code: 0, stdout: "[Unit]\nDescription=Old Content\n" },
+    })
+    const mod = systemd.unit(unitName, unitContent)
+    const result = await mod.check(ssh, emptyEnv)
+    expect(result).toBe("needs-apply")
+  })
+
+  it("check returns needs-apply when content matches but mode drifts to 0600", async () => {
+    const ssh = createMockSsh({
+      [`[ -e '${filePath}' ]`]: { code: 0 },
+      [`cat '${filePath}'`]: { code: 0, stdout: unitContent },
+      [`stat -c '%a' '${filePath}'`]: { code: 0, stdout: "600\n" },
+    })
+    const mod = systemd.unit(unitName, unitContent)
+    const result = await mod.check(ssh, emptyEnv)
+    expect(result).toBe("needs-apply")
+  })
+
+  it("check returns needs-apply when stat for the unit file mode fails", async () => {
+    const ssh = createMockSsh({
+      [`[ -e '${filePath}' ]`]: { code: 0 },
+      [`cat '${filePath}'`]: { code: 0, stdout: unitContent },
+      [`stat -c '%a' '${filePath}'`]: { code: 1, stdout: "" },
     })
     const mod = systemd.unit(unitName, unitContent)
     const result = await mod.check(ssh, emptyEnv)

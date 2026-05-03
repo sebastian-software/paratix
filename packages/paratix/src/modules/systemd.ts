@@ -6,6 +6,10 @@ const SYSTEMCTL = "systemctl"
 const UNIT_NAME_PATTERN = /^[\w@.\-]+$/v
 const SYSTEMD_UNIT_MODE = "0644"
 
+function normalizeMode(mode: string): string {
+  return mode.replace(/^0+/v, "")
+}
+
 /**
  * Modules for managing systemd unit files and unit masking.
  *
@@ -102,7 +106,15 @@ export const systemd = {
         const exists = await ssh.exists(filePath)
         if (!exists) return NEEDS_APPLY
         const remoteContent = await ssh.readFile(filePath)
-        return remoteContent.trim() === content.trim() ? "ok" : NEEDS_APPLY
+        if (remoteContent.trim() !== content.trim()) return NEEDS_APPLY
+        const modeResult = await ssh.exec(`stat -c '%a' ${shellQuote(filePath)}`, {
+          ignoreExitCode: true,
+          silent: true,
+        })
+        if (modeResult.code !== 0) return NEEDS_APPLY
+        const currentMode = modeResult.stdout.trim()
+        if (currentMode === "") return NEEDS_APPLY
+        return normalizeMode(currentMode) === normalizeMode(SYSTEMD_UNIT_MODE) ? "ok" : NEEDS_APPLY
       },
       name: `systemd.unit: ${name}`,
     }
