@@ -16,6 +16,7 @@ import {
   loadServerDefinitionFromFile,
   parsePositiveNumber,
   printExceptionError,
+  runApplyCommand,
 } from "../src/cli.js"
 import { printCliHeader } from "../src/output.js"
 
@@ -1176,6 +1177,68 @@ describe("CLI entrypoint", () => {
 
       expect(definition.run).toStrictEqual(["true"])
     } finally {
+      rmSync(tempDirectory, { force: true, recursive: true })
+      delete process.env.PARATIX_FIRST_RUN
+    }
+  })
+
+  it("wires apply options through to runPlaybook on the successful path", async () => {
+    const tempDirectory = mkdtempSync(join(tmpdir(), "paratix-cli-apply-options-"))
+    const playbookPath = join(tempDirectory, "capture-apply-options.mjs")
+    const envFilePath = join(tempDirectory, ".env")
+    const calls: Array<{
+      definition: unknown
+      options: unknown
+    }> = []
+    const logSpy = vi.spyOn(console, "log").mockImplementation(() => {
+      /* suppress CLI header */
+    })
+
+    try {
+      writeFileSync(
+        playbookPath,
+        [
+          "export default {",
+          "  name: 'test-server',",
+          "  host: '1.2.3.4',",
+          "  ssh: { user: 'root', ports: [22] },",
+          "  run: [process.env['PARATIX_FIRST_RUN'] ?? 'missing'],",
+          "}",
+        ].join("\n")
+      )
+      writeFileSync(envFilePath, "FROM_FILE=yes\n")
+
+      await runApplyCommand(
+        playbookPath,
+        {
+          dryRun: true,
+          env: { INLINE_ENV: "inline" },
+          envFile: envFilePath,
+          firstRun: true,
+          reconnectTimeout: 12.5,
+          verbose: true,
+        },
+        async (definition, options) => {
+          await Promise.resolve()
+          calls.push({ definition, options })
+        }
+      )
+
+      expect(calls).toHaveLength(1)
+      expect(calls[0]?.definition).toMatchObject({
+        host: "1.2.3.4",
+        name: "test-server",
+        run: ["true"],
+      })
+      expect(calls[0]?.options).toStrictEqual({
+        dryRun: true,
+        envFile: envFilePath,
+        envOverrides: { INLINE_ENV: "inline", PARATIX_FIRST_RUN: "true" },
+        reconnectTimeout: 12_500,
+        verbose: true,
+      })
+    } finally {
+      logSpy.mockRestore()
       rmSync(tempDirectory, { force: true, recursive: true })
       delete process.env.PARATIX_FIRST_RUN
     }

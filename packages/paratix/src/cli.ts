@@ -8,7 +8,7 @@ import pc from "picocolors"
 import type { Environment, ServerDefinition } from "./types.js"
 
 import { printCliHeader } from "./output.js"
-import { runPlaybook } from "./runner.js"
+import { runPlaybook, type RunOptions } from "./runner.js"
 import { collectSshConfigErrors } from "./serverDefinitionValidation.js"
 
 declare const PACKAGE_DISPLAY_VERSION: string
@@ -323,6 +323,39 @@ export async function loadServerDefinitionFromFile(
   return definition
 }
 
+type ApplyCommandOptions = {
+  dryRun: boolean
+  env: Environment
+  envFile?: string
+  firstRun: boolean
+  reconnectTimeout: number
+  verbose: boolean
+}
+
+type RunPlaybookFunction = (definition: ServerDefinition, options: RunOptions) => Promise<void>
+
+export async function runApplyCommand(
+  file: string,
+  options: ApplyCommandOptions,
+  run: RunPlaybookFunction = runPlaybook
+): Promise<void> {
+  printCliHeader(PACKAGE_DISPLAY_VERSION)
+  const environmentOverrides = applyCliEnvironmentOverrides(options.env, {
+    firstRun: options.firstRun,
+  })
+  const definition = await loadServerDefinitionFromFile(file, {
+    firstRun: options.firstRun,
+  })
+
+  await run(definition, {
+    dryRun: options.dryRun,
+    envFile: options.envFile,
+    envOverrides: environmentOverrides,
+    reconnectTimeout: options.reconnectTimeout * SECONDS_TO_MS,
+    verbose: options.verbose,
+  })
+}
+
 const program = new Command()
 
 program
@@ -350,28 +383,17 @@ program
   .option("--verbose", "Show full stack traces on error", false)
   .action(async (file: string, options: Record<string, unknown>) => {
     try {
-      printCliHeader(PACKAGE_DISPLAY_VERSION)
-      const environmentOverrides = applyCliEnvironmentOverrides(
-        // eslint-disable-next-line @typescript-eslint/no-unsafe-type-assertion -- Commander options typed as Record<string, unknown>
-        options.env as Environment,
-        {
-          // eslint-disable-next-line @typescript-eslint/no-unsafe-type-assertion -- Commander options typed as Record<string, unknown>
-          firstRun: options.firstRun as boolean,
-        }
-      )
-      const definition = await loadServerDefinitionFromFile(file, {
-        // eslint-disable-next-line @typescript-eslint/no-unsafe-type-assertion -- Commander options typed as Record<string, unknown>
-        firstRun: options.firstRun as boolean,
-      })
-
-      await runPlaybook(definition, {
+      await runApplyCommand(file, {
         // eslint-disable-next-line @typescript-eslint/no-unsafe-type-assertion -- Commander options typed as Record<string, unknown>
         dryRun: options.dryRun as boolean,
         // eslint-disable-next-line @typescript-eslint/no-unsafe-type-assertion -- Commander options typed as Record<string, unknown>
-        envFile: options.envFile as string | undefined,
-        envOverrides: environmentOverrides,
+        env: options.env as Environment,
         // eslint-disable-next-line @typescript-eslint/no-unsafe-type-assertion -- Commander options typed as Record<string, unknown>
-        reconnectTimeout: (options.reconnectTimeout as number) * SECONDS_TO_MS,
+        envFile: options.envFile as string | undefined,
+        // eslint-disable-next-line @typescript-eslint/no-unsafe-type-assertion -- Commander options typed as Record<string, unknown>
+        firstRun: options.firstRun as boolean,
+        // eslint-disable-next-line @typescript-eslint/no-unsafe-type-assertion -- Commander options typed as Record<string, unknown>
+        reconnectTimeout: options.reconnectTimeout as number,
         // eslint-disable-next-line @typescript-eslint/no-unsafe-type-assertion -- Commander options typed as Record<string, unknown>
         verbose: options.verbose as boolean,
       })
