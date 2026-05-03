@@ -304,10 +304,9 @@ function getFileSystemErrorCode(error: unknown): string | undefined {
  */
 function loadKnownHostEntries(): KnownHostEntry[] {
   const filePath = join(homedir(), ".ssh", "known_hosts")
-  let content = ""
   try {
     // eslint-disable-next-line security/detect-non-literal-fs-filename
-    content = readFileSync(filePath, "utf8")
+    return parseKnownHosts(readFileSync(filePath, "utf8"))
   } catch (error) {
     if (getFileSystemErrorCode(error) === "ENOENT") {
       return []
@@ -316,7 +315,6 @@ function loadKnownHostEntries(): KnownHostEntry[] {
       `Could not read known_hosts at ${filePath}: ${String(error)}`
     )
   }
-  return parseKnownHosts(content)
 }
 
 /**

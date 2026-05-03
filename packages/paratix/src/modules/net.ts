@@ -244,29 +244,38 @@ async function interfaceLiveStateMatches(
   options: InterfaceOptions
 ): Promise<boolean> {
   if ((options.addresses?.length ?? 0) === 0 && (options.gateway ?? "") === "") return true
+  if (!(await liveInterfaceExists(conn, name))) return false
+  if (!(await interfaceAddressesMatch(conn, name, options.addresses))) return false
+  return interfaceGatewayMatches(conn, name, options.gateway)
+}
 
+async function liveInterfaceExists(conn: SshConnection, name: string): Promise<boolean> {
   const link = await conn.exec(`ip link show dev ${shellQuote(name)}`, EXEC_OPTS)
-  if (link.code !== 0) return false
+  return link.code === 0
+}
 
-  if ((options.addresses?.length ?? 0) > 0) {
-    const addresses = await conn.exec(`ip -o addr show dev ${shellQuote(name)}`, EXEC_OPTS)
-    if (addresses.code !== 0) return false
-    for (const address of options.addresses ?? []) {
-      if (!addresses.stdout.includes(address)) return false
-    }
+async function interfaceAddressesMatch(
+  conn: SshConnection,
+  name: string,
+  expected?: string[]
+): Promise<boolean> {
+  if ((expected?.length ?? 0) === 0) return true
+  const addresses = await conn.exec(`ip -o addr show dev ${shellQuote(name)}`, EXEC_OPTS)
+  if (addresses.code !== 0) return false
+  for (const address of expected ?? []) {
+    if (!addresses.stdout.includes(address)) return false
   }
-
-  if ((options.gateway ?? "") !== "") {
-    const defaultRoute = await conn.exec(
-      `ip route show default dev ${shellQuote(name)}`,
-      EXEC_OPTS
-    )
-    if (defaultRoute.code !== 0 || !defaultRoute.stdout.includes(`via ${options.gateway}`)) {
-      return false
-    }
-  }
-
   return true
+}
+
+async function interfaceGatewayMatches(
+  conn: SshConnection,
+  name: string,
+  gateway?: string
+): Promise<boolean> {
+  if ((gateway ?? "") === "") return true
+  const defaultRoute = await conn.exec(`ip route show default dev ${shellQuote(name)}`, EXEC_OPTS)
+  return defaultRoute.code === 0 && defaultRoute.stdout.includes(`via ${gateway}`)
 }
 
 /** Parameters for the net.route check helper. */
@@ -278,21 +287,23 @@ type RouteCheckParameters = {
   state: "absent" | "present"
 }
 
+type RouteParameters = Omit<RouteCheckParameters, "state">
+
 /**
  * Run the live-route check against the remote host.
  *
  * @param conn - The SSH connection.
- * @param destination - The route destination CIDR.
- * @param gateway - The expected gateway address.
- * @param device - Optional expected route device.
+ * @param parameters - The route destination, gateway and optional device.
+ * @param parameters.destination - The route destination CIDR.
+ * @param parameters.device - Optional expected route device.
+ * @param parameters.gateway - The expected gateway address.
  * @returns `true` when the live route matches the expected gateway and device.
  */
 async function hasLiveRoute(
   conn: SshConnection,
-  destination: string,
-  gateway: string,
-  device?: string
+  parameters: { destination: string; device?: string; gateway: string }
 ): Promise<boolean> {
+  const { destination, device, gateway } = parameters
   const result = await conn.exec(`ip route show ${shellQuote(destination)}`, EXEC_OPTS)
   const output = result.stdout.trim()
   if (!output.includes(`via ${gateway}`)) return false
@@ -326,7 +337,7 @@ async function checkRouteState(
   parameters: RouteCheckParameters
 ): Promise<"needs-apply" | "ok"> {
   const { destination, device, dropinPath, gateway, state } = parameters
-  const live = await hasLiveRoute(conn, destination, gateway, device)
+  const live = await hasLiveRoute(conn, { destination, device, gateway })
   const dropinPresent = await routeDropinExists(conn, dropinPath)
 
   if (state === "present") {
@@ -341,6 +352,59 @@ async function checkRouteState(
   // drop-in would re-create the route on the next reboot.
   if (live) return NEEDS_APPLY
   return dropinPresent ? NEEDS_APPLY : "ok"
+}
+
+async function applyPresentRoute(
+  conn: SshConnection,
+  parameters: RouteParameters
+): Promise<ModuleResult | null> {
+  const { destination, device, dropinPath, gateway } = parameters
+  const devicePart = device !== undefined && device !== "" ? ` dev ${shellQuote(device)}` : ""
+  const routeResult = await conn.exec(
+    `ip route replace ${shellQuote(destination)} via ${shellQuote(gateway)}${devicePart}`,
+    EXEC_OPTS
+  )
+  if (routeResult.code !== 0) {
+    return failedCommand(`[net.route: ${destination}] ip route replace failed`, routeResult)
+  }
+  const dropinContent = buildRouteDropin(destination, gateway, device)
+  await conn.writeFile(dropinPath, dropinContent, { mode: NET_CONFIG_FILE_MODE })
+  return null
+}
+
+async function applyAbsentRoute(
+  conn: SshConnection,
+  parameters: RouteParameters
+): Promise<ModuleResult | null> {
+  const { destination, dropinPath } = parameters
+  const routeResult = await conn.exec(`ip route del ${shellQuote(destination)}`, EXEC_OPTS)
+  if (routeResult.code !== 0) {
+    return failedCommand(`[net.route: ${destination}] ip route del failed`, routeResult)
+  }
+  const removeResult = await conn.exec(`rm -f ${shellQuote(dropinPath)}`, EXEC_OPTS)
+  if (removeResult.code !== 0) {
+    return failedCommand(`[net.route: ${destination}] drop-in removal failed`, removeResult)
+  }
+  return null
+}
+
+async function applyRouteState(
+  conn: SshConnection,
+  parameters: RouteCheckParameters
+): Promise<ModuleResult> {
+  const failure =
+    parameters.state === "present"
+      ? await applyPresentRoute(conn, parameters)
+      : await applyAbsentRoute(conn, parameters)
+  if (failure != null) return failure
+  const reloadResult = await conn.exec(NETWORKCTL_RELOAD, EXEC_OPTS)
+  if (reloadResult.code !== 0) {
+    return failedCommand(
+      `[net.route: ${parameters.destination}] networkctl reload failed`,
+      reloadResult
+    )
+  }
+  return { status: "changed" }
 }
 
 /** Shared parameters for the net.hosts apply/check helpers. */
@@ -706,38 +770,7 @@ export const net = {
           )
         }
 
-        if (state === "present") {
-          const devicePart =
-            device !== undefined && device !== "" ? ` dev ${shellQuote(device)}` : ""
-          const routeResult = await conn.exec(
-            `ip route replace ${shellQuote(destination)} via ${shellQuote(gateway)}${devicePart}`,
-            EXEC_OPTS
-          )
-          if (routeResult.code !== 0) {
-            return failedCommand(`[net.route: ${destination}] ip route replace failed`, routeResult)
-          }
-          const dropinContent = buildRouteDropin(destination, gateway, device)
-          await conn.writeFile(dropinPath, dropinContent, { mode: NET_CONFIG_FILE_MODE })
-          const reloadResult = await conn.exec(NETWORKCTL_RELOAD, EXEC_OPTS)
-          if (reloadResult.code !== 0) {
-            return failedCommand(`[net.route: ${destination}] networkctl reload failed`, reloadResult)
-          }
-        } else {
-          const routeResult = await conn.exec(`ip route del ${shellQuote(destination)}`, EXEC_OPTS)
-          if (routeResult.code !== 0) {
-            return failedCommand(`[net.route: ${destination}] ip route del failed`, routeResult)
-          }
-          const removeResult = await conn.exec(`rm -f ${shellQuote(dropinPath)}`, EXEC_OPTS)
-          if (removeResult.code !== 0) {
-            return failedCommand(`[net.route: ${destination}] drop-in removal failed`, removeResult)
-          }
-          const reloadResult = await conn.exec(NETWORKCTL_RELOAD, EXEC_OPTS)
-          if (reloadResult.code !== 0) {
-            return failedCommand(`[net.route: ${destination}] networkctl reload failed`, reloadResult)
-          }
-        }
-
-        return { status: "changed" }
+        return applyRouteState(conn, { destination, device, dropinPath, gateway, state })
       },
       async check(conn: null | SshConnection): Promise<"needs-apply" | "ok"> {
         if (!conn) return NEEDS_APPLY

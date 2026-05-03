@@ -632,11 +632,7 @@ describe("compose.config — apply", () => {
       [`cat '${remotePath}'`]: { code: 0, stdout: priorContent },
       [`stat -c '%a' '${remotePath}'`]: { code: 0, stdout: "600" },
     })
-    const originalExec = mockSsh.exec
-    mockSsh.exec = async (command, options) => {
-      if (command === `${composeCmd("podman")} config --quiet`) throw validationError
-      return originalExec(command, options)
-    }
+    vi.spyOn(mockSsh, "exec").mockRejectedValueOnce(validationError)
     mockSsh.writeFile = async (
       path: string,
       content: string,

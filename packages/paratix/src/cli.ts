@@ -8,7 +8,7 @@ import pc from "picocolors"
 import type { Environment, ServerDefinition } from "./types.js"
 
 import { printCliHeader } from "./output.js"
-import { runPlaybook, type RunOptions } from "./runner.js"
+import { type RunOptions, runPlaybook } from "./runner.js"
 import { collectSshConfigErrors } from "./serverDefinitionValidation.js"
 
 declare const PACKAGE_DISPLAY_VERSION: string

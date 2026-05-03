@@ -740,9 +740,7 @@ describe("download.github", () => {
       expect(curlCall?.command).not.toContain(token)
       // Headers are delivered via stdin.
       expect(curlCall?.options?.input).toContain(`header = "Authorization: token ${token}"`)
-      expect(curlCall?.options?.input).toContain(
-        `header = "Accept: application/octet-stream"`
-      )
+      expect(curlCall?.options?.input).toContain(`header = "Accept: application/octet-stream"`)
     })
 
     it("does not send Authorization header when no token is provided", async () => {

@@ -77,7 +77,14 @@ export type ArchiveMember = {
  */
 const TAR_LINK_ARROW = " -> "
 const ZIP_INFO_LINE_PATTERN =
+  // eslint-disable-next-line security/detect-unsafe-regex -- Anchored Info-ZIP listing parser with fixed-width mode and bounded column count.
   /^(?<mode>[\-bcdlps][\-rwxStTs]{9})\s+(?:\S+\s+){7}(?<path>\S.*)$/v
+
+function archiveMemberKindFromMode(mode: string): ArchiveMember["kind"] {
+  if (mode.startsWith("l")) return "symlink"
+  if (mode.startsWith("h")) return "hardlink"
+  return "file"
+}
 
 function parseTarVerboseLine(line: string): ArchiveMember | null {
   const trimmed = line.replace(/\r$/v, "")
@@ -88,21 +95,20 @@ function parseTarVerboseLine(line: string): ArchiveMember | null {
   // capture (avoids polynomial backtracking).
   const match = /^(?<mode>\S+)\s+\S+\s+\S+\s+\S+\s+\S+\s+(?<rest>\S.*)$/v.exec(trimmed) ?? null
   if (!match?.groups) return null
-  const isSymlink = match.groups.mode.startsWith("l")
-  const isHardlink = match.groups.mode.startsWith("h")
+  const kind = archiveMemberKindFromMode(match.groups.mode)
   const rest = match.groups.rest
   const arrowIndex = rest.indexOf(TAR_LINK_ARROW)
-  if (arrowIndex !== -1 && (isSymlink || isHardlink)) {
+  if (arrowIndex !== -1 && kind !== "file") {
     return {
       format: "tar",
-      kind: isSymlink ? "symlink" : "hardlink",
+      kind,
       linkTarget: rest.slice(arrowIndex + TAR_LINK_ARROW.length),
       path: rest.slice(0, arrowIndex),
     }
   }
   return {
     format: "tar",
-    kind: isSymlink ? "symlink" : isHardlink ? "hardlink" : "file",
+    kind,
     linkTarget: null,
     path: rest,
   }

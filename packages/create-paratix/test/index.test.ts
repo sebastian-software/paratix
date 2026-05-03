@@ -54,6 +54,29 @@ type ProcessWithHandles = {
   _getActiveHandles?: () => unknown[]
 }
 
+function restorePropertyDescriptor(
+  target: object,
+  property: string,
+  descriptor: PropertyDescriptor | undefined
+): void {
+  if (descriptor === undefined) {
+    Reflect.deleteProperty(target, property)
+    return
+  }
+  Object.defineProperty(target, property, descriptor)
+}
+
+function setProcessTtyForTest(stdinIsTty: boolean, stdoutIsTty: boolean): () => void {
+  const stdinTty = Object.getOwnPropertyDescriptor(process.stdin, "isTTY")
+  const stdoutTty = Object.getOwnPropertyDescriptor(process.stdout, "isTTY")
+  Object.defineProperty(process.stdin, "isTTY", { configurable: true, value: stdinIsTty })
+  Object.defineProperty(process.stdout, "isTTY", { configurable: true, value: stdoutIsTty })
+  return () => {
+    restorePropertyDescriptor(process.stdin, "isTTY", stdinTty)
+    restorePropertyDescriptor(process.stdout, "isTTY", stdoutTty)
+  }
+}
+
 /**
  * Read the number of active handles from `process._getActiveHandles()`,
  * or fall back to `0` when the API is missing on the current Node build.
@@ -721,27 +744,20 @@ describe("resolveCliOrPromptHost", () => {
 
   it("fails fast without --host in non-interactive environments", async () => {
     const prompt = vi.fn().mockResolvedValue("prompted.example.com")
-    const stdinTty = Object.getOwnPropertyDescriptor(process.stdin, "isTTY")
-    const stdoutTty = Object.getOwnPropertyDescriptor(process.stdout, "isTTY")
+    const restoreTty = setProcessTtyForTest(false, false)
     vi.spyOn(console, "error").mockImplementation((...args) => {
       void args
     })
 
     try {
-      Object.defineProperty(process.stdin, "isTTY", { configurable: true, value: false })
-      Object.defineProperty(process.stdout, "isTTY", { configurable: true, value: false })
-
-      await expectProcessExit(() => resolveCliOrPromptHost(undefined, prompt))
+      await expectProcessExit(async () => resolveCliOrPromptHost(undefined, prompt))
 
       expect(console.error).toHaveBeenCalledWith(
         "Missing --host in non-interactive environment. Pass --host <domain-or-ip>."
       )
       expect(prompt).not.toHaveBeenCalled()
     } finally {
-      if (stdinTty) Object.defineProperty(process.stdin, "isTTY", stdinTty)
-      else Reflect.deleteProperty(process.stdin, "isTTY")
-      if (stdoutTty) Object.defineProperty(process.stdout, "isTTY", stdoutTty)
-      else Reflect.deleteProperty(process.stdout, "isTTY")
+      restoreTty()
     }
   })
 })

@@ -38,6 +38,22 @@ function isUnsafeAuthorizedKeysHomeError(error: unknown, user: string): boolean 
   )
 }
 
+async function resolveApplyHome(
+  conn: SshConnection,
+  parameters: {
+    state: "absent" | "present"
+    user: string
+  }
+): Promise<null | string> {
+  const { state, user } = parameters
+  try {
+    return await resolveHome(conn, user)
+  } catch (error) {
+    if (state === "absent" && isUnsafeAuthorizedKeysHomeError(error, user)) return null
+    throw error
+  }
+}
+
 async function createAuthorizedKeysTemporaryPath(
   conn: SshConnection,
   sshDirectoryPath: string
@@ -143,15 +159,9 @@ export async function applyAuthorizedKeys(
     return failed(`[ssh.authorizedKeys: ${user} (${state})] SSH connection is required`)
   }
 
-  let home: string
-  try {
-    home = await resolveHome(conn, user)
-  } catch (error) {
-    if (state === "absent" && isUnsafeAuthorizedKeysHomeError(error, user)) {
-      return { status: "ok" }
-    }
-    throw error
-  }
+  const home = await resolveApplyHome(conn, { state, user })
+  if (home == null) return { status: "ok" }
+
   // R-0000065: resolve the primary group exactly once for the duration of
   // this apply so the directory chown, the authorized_keys chown and the
   // matching `stat` comparison all reference the same group identity.

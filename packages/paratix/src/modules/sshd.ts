@@ -1,3 +1,4 @@
+/* eslint-disable max-lines -- sshd module keeps tightly coupled validation/restart helpers together */
 import { randomUUID } from "node:crypto"
 
 import { sshdPortMeta } from "../meta.js"
@@ -19,9 +20,9 @@ const SSHD_CONFIG_PATH = "/etc/ssh/sshd_config"
 const SSHD_CONFIG_MODE = "0644"
 const SYSTEMCTL = "systemctl"
 
-type SshSocketState =
-  | { active: boolean; enabled: boolean; exists: true }
-  | { exists: false }
+type SshSocketState = { active: boolean; enabled: boolean; exists: true } | { exists: false }
+
+type SshdServiceUnit = "ssh" | "sshd"
 
 // sshd_config(5) directive names are alphabetic ASCII identifiers (the parser
 // is case-insensitive). Constraining keys to this shape prevents callers from
@@ -115,7 +116,7 @@ async function restoreSocketActivatedSsh(
   }
 }
 
-async function resolveSshServiceUnit(ssh: SshConnection): Promise<"ssh" | "sshd"> {
+async function resolveSshServiceUnit(ssh: SshConnection): Promise<SshdServiceUnit> {
   const sshdExists = await ssh.exec(`${SYSTEMCTL} cat sshd.service >/dev/null 2>&1`, {
     ignoreExitCode: true,
     silent: true,
@@ -146,6 +147,50 @@ async function reloadSshd(ssh: SshConnection): Promise<ModuleResult> {
   return result.code === 0
     ? { status: "changed" }
     : failedCommand(`[sshd.config] systemctl reload ${serviceUnit} failed`, result)
+}
+
+async function restoreSshdPortRestartFailure(
+  ssh: SshConnection,
+  parameters: {
+    originalConfig: string
+    serviceUnit?: SshdServiceUnit
+    socketState: SshSocketState
+    targetPort: number
+  }
+): Promise<void> {
+  ssh.removePort(parameters.targetPort)
+  await ssh.writeFile(SSHD_CONFIG_PATH, parameters.originalConfig, { mode: SSHD_CONFIG_MODE })
+  await restoreSocketActivatedSsh(ssh, parameters.socketState)
+  if (parameters.serviceUnit == null) return
+  await ssh.exec(`${SYSTEMCTL} restart ${parameters.serviceUnit}`, {
+    ignoreExitCode: true,
+    silent: true,
+  })
+}
+
+async function restartSshdOnNewPort(
+  ssh: SshConnection,
+  targetPort: number,
+  originalConfig: string
+): Promise<void> {
+  ssh.addPort(targetPort)
+  let socketState: SshSocketState = { exists: false }
+  let serviceUnit: SshdServiceUnit | undefined
+  try {
+    socketState = await disableSocketActivatedSsh(ssh)
+    serviceUnit = await resolveSshServiceUnit(ssh)
+    await ssh.exec(`${SYSTEMCTL} restart ${serviceUnit}`, { silent: true })
+  } catch (error) {
+    if (!isRestartDisconnect(error)) {
+      await restoreSshdPortRestartFailure(ssh, {
+        originalConfig,
+        serviceUnit,
+        socketState,
+        targetPort,
+      })
+    }
+    throw error
+  }
 }
 
 async function validateProspectiveSshdConfig(
@@ -229,27 +274,7 @@ async function applySshdPort(ssh: SshConnection, targetPort: number): Promise<Mo
     remotePath: SSHD_CONFIG_PATH,
   })
   await validateSshdConfig(ssh, originalConfig)
-  ssh.addPort(targetPort)
-  let socketState: SshSocketState = { exists: false }
-  let serviceUnit: "ssh" | "sshd" | undefined
-  try {
-    socketState = await disableSocketActivatedSsh(ssh)
-    serviceUnit = await resolveSshServiceUnit(ssh)
-    await ssh.exec(`${SYSTEMCTL} restart ${serviceUnit}`, { silent: true })
-  } catch (error) {
-    if (!isRestartDisconnect(error)) {
-      ssh.removePort(targetPort)
-      await ssh.writeFile(SSHD_CONFIG_PATH, originalConfig, { mode: SSHD_CONFIG_MODE })
-      await restoreSocketActivatedSsh(ssh, socketState)
-      if (serviceUnit != null) {
-        await ssh.exec(`${SYSTEMCTL} restart ${serviceUnit}`, {
-          ignoreExitCode: true,
-          silent: true,
-        })
-      }
-    }
-    throw error
-  }
+  await restartSshdOnNewPort(ssh, targetPort, originalConfig)
 
   return {
     meta: [sshdPortMeta(targetPort)],

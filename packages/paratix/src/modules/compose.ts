@@ -485,6 +485,48 @@ async function rollbackComposeFile(
   await ssh.exec(`rm -f ${shellQuote(remotePath)}`, EXEC_OPTS)
 }
 
+async function validateWrittenComposeFile(parameters: {
+  projectDirectory: string
+  runtime: ComposeRuntime
+  ssh: SshConnection
+}): Promise<ModuleResult | null> {
+  const { projectDirectory, runtime, ssh } = parameters
+  const validate = await ssh.exec(
+    `${composeCommand(runtime, projectDirectory)} config --quiet`,
+    EXEC_OPTS
+  )
+  if (validate.code === 0) return null
+  return failedCommand(`[compose.config] validation failed for ${projectDirectory}`, validate)
+}
+
+async function applyComposeConfig(parameters: {
+  options: { content?: string; src?: string }
+  projectDirectory: string
+  remotePath: string
+  runtime: ComposeRuntime
+  ssh: SshConnection
+}): Promise<ModuleResult> {
+  const { options, projectDirectory, remotePath, runtime, ssh } = parameters
+  const priorState = await capturePriorComposeFile(ssh, remotePath)
+
+  let rollbackPending = true
+  try {
+    await writeComposeFileForValidation(ssh, remotePath, options)
+    const validationFailure = await validateWrittenComposeFile({ projectDirectory, runtime, ssh })
+    if (validationFailure != null) {
+      rollbackPending = false
+      await rollbackComposeFile(ssh, remotePath, priorState)
+      return validationFailure
+    }
+    rollbackPending = false
+  } catch (error) {
+    if (rollbackPending) await rollbackComposeFile(ssh, remotePath, priorState)
+    throw error
+  }
+
+  return { status: "changed" }
+}
+
 /**
  * Modules for managing Docker Compose / Podman Compose stacks on a remote host.
  *
@@ -535,38 +577,13 @@ export const compose = {
           return failed(`[compose.config] content or src is required for ${projectDirectory}`)
         }
 
-        // R-0000035: capture the prior compose.yml so a failed validation never
-        // leaves the host with a broken file. We restore the original content
-        // (or delete the file if it did not exist before) when
-        // `compose ... config --quiet` rejects the new content.
-        const priorState = await capturePriorComposeFile(connection, remotePath)
-
-        let rollbackPending = true
-        try {
-          await writeComposeFileForValidation(connection, remotePath, options)
-
-          const validate = await connection.exec(
-            `${composeCommand(runtime, projectDirectory)} config --quiet`,
-            EXEC_OPTS
-          )
-          if (validate.code !== 0) {
-            rollbackPending = false
-            await rollbackComposeFile(connection, remotePath, priorState)
-            return failedCommand(
-              `[compose.config] validation failed for ${projectDirectory}`,
-              validate
-            )
-          }
-
-          rollbackPending = false
-        } catch (error) {
-          if (rollbackPending) {
-            await rollbackComposeFile(connection, remotePath, priorState)
-          }
-          throw error
-        }
-
-        return { status: "changed" }
+        return applyComposeConfig({
+          options,
+          projectDirectory,
+          remotePath,
+          runtime,
+          ssh: connection,
+        })
       },
       check: createComposeConfigCheck(remotePath, options),
       name: `compose.config: ${projectDirectory}`,
