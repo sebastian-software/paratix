@@ -280,6 +280,63 @@ describe("user.present apply", () => {
     expect(result.status).toBe("failed")
     expect(result.error?.message).toContain("[user.present: alice] SSH connection is required")
   })
+
+  // R-0000088 regression: when the user already exists and no options are
+  // given, `apply` must return status "ok" (no mutation occurred) instead of
+  // falsely reporting "changed". usermod must not be invoked because there
+  // are no flags to apply, and useradd must not be invoked because the user
+  // exists.
+  it("returns ok and skips usermod when user exists and no options are given", async () => {
+    const ssh = createMockSsh({
+      "id 'alice'": { code: 0 },
+    })
+    const mod = user.present("alice")
+    const result = await mod.apply(ssh, emptyEnv)
+    expect(result.status).toBe("ok")
+    expect(ssh.calls.some((c) => c.startsWith("usermod"))).toBe(false)
+    expect(ssh.calls.some((c) => c.startsWith("useradd"))).toBe(false)
+  })
+
+  // R-0000088 regression: when the user does not exist, useradd must run
+  // and `apply` must return "changed".
+  it("returns changed and invokes useradd when user does not exist", async () => {
+    const ssh = createMockSsh({
+      "id 'alice'": { code: 1 },
+      "useradd  --create-home 'alice'": { code: 0 },
+    })
+    const mod = user.present("alice")
+    const result = await mod.apply(ssh, emptyEnv)
+    expect(result.status).toBe("changed")
+    expect(ssh.calls).toContain("useradd  --create-home 'alice'")
+  })
+
+  // R-0000088 regression: when the user exists and flags differ, usermod
+  // must run and `apply` must return "changed".
+  it("returns changed and invokes usermod when user exists and flags differ", async () => {
+    const ssh = createMockSsh({
+      "id 'alice'": { code: 0 },
+      "usermod --shell '/bin/bash' 'alice'": { code: 0 },
+    })
+    const mod = user.present("alice", { shell: "/bin/bash" })
+    const result = await mod.apply(ssh, emptyEnv)
+    expect(result.status).toBe("changed")
+    expect(ssh.calls).toContain("usermod --shell '/bin/bash' 'alice'")
+  })
+
+  // R-0000088 regression: setPassword has no pre-check, so any password
+  // invocation counts as a mutation. `apply` must return "changed" even when
+  // no usermod/useradd ran.
+  it("returns changed when only the password is set on an existing user", async () => {
+    const ssh = createMockSsh({
+      "chpasswd -e": { code: 0 },
+      "id 'alice'": { code: 0 },
+    })
+    const mod = user.present("alice", { password: "$6$hash" })
+    const result = await mod.apply(ssh, emptyEnv)
+    expect(result.status).toBe("changed")
+    expect(ssh.calls).toContain("chpasswd -e")
+    expect(ssh.calls.some((c) => c.startsWith("usermod"))).toBe(false)
+  })
 })
 
 describe("user.absent check", () => {

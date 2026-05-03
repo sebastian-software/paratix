@@ -124,6 +124,11 @@ type UserMutationContext = {
   ssh: SshConnection
 }
 
+type UserMutationOutcome =
+  | { kind: "changed" }
+  | { kind: "failed"; result: ModuleResult }
+  | { kind: "noop" }
+
 /**
  * Run `useradd` or `usermod` to bring the user account into the desired state.
  *
@@ -132,12 +137,13 @@ type UserMutationContext = {
  * without any flags would otherwise fail with `usermod: no flags given`.
  *
  * @param context - The mutation context (ssh handle, username, existence flag, rendered flags).
- * @returns A failure result when `useradd` / `usermod` exits non-zero, or
- *   `null` when the mutation succeeded or was skipped.
+ * @returns A discriminated outcome: `noop` when no command was executed,
+ *   `changed` when `useradd` / `usermod` ran successfully, or `failed` with the
+ *   failure result when the command exited non-zero.
  */
-async function applyUserMutation(context: UserMutationContext): Promise<ModuleResult | null> {
+async function applyUserMutation(context: UserMutationContext): Promise<UserMutationOutcome> {
   const { exists, flags, name, ssh } = context
-  if (exists && flags.length === 0) return null
+  if (exists && flags.length === 0) return { kind: "noop" }
 
   const cmd = exists
     ? `usermod ${flags.join(" ")} ${shellQuote(name)}`
@@ -145,9 +151,15 @@ async function applyUserMutation(context: UserMutationContext): Promise<ModuleRe
 
   const result = await ssh.exec(cmd, { ignoreExitCode: true, silent: true })
   if (result.code !== 0) {
-    return failedCommand(`[user.present: ${name}] ${exists ? "usermod" : "useradd"} failed`, result)
+    return {
+      kind: "failed",
+      result: failedCommand(
+        `[user.present: ${name}] ${exists ? "usermod" : "useradd"} failed`,
+        result
+      ),
+    }
   }
-  return null
+  return { kind: "changed" }
 }
 
 async function attributesMatch(
@@ -238,15 +250,24 @@ export const user = {
         const exists = await ssh.test(`${ID_CMD} ${shellQuote(name)}`)
         const flags = buildUserArguments(exists ? "usermod" : "useradd", options)
 
-        const mutationFailure = await applyUserMutation({ exists, flags, name, ssh })
-        if (mutationFailure != null) return mutationFailure
+        // R-0000088: track whether a mutating command actually ran so the
+        // no-op path (user exists, no flags differ, no password set) returns
+        // status "ok" instead of falsely reporting "changed".
+        let mutationOccurred = false
+
+        const mutationOutcome = await applyUserMutation({ exists, flags, name, ssh })
+        if (mutationOutcome.kind === "failed") return mutationOutcome.result
+        if (mutationOutcome.kind === "changed") mutationOccurred = true
 
         if (options?.password != null) {
+          // setPassword has no pre-check, so any invocation is treated as a
+          // mutation even when the resulting hash matches the existing one.
           const failure = await setPassword(ssh, name, options.password)
           if (failure != null) return failure
+          mutationOccurred = true
         }
 
-        return { status: "changed" }
+        return mutationOccurred ? { status: "changed" } : { status: "ok" }
       },
       async check(ssh: null | SshConnection): Promise<"needs-apply" | "ok"> {
         if (!ssh) return NEEDS_APPLY
