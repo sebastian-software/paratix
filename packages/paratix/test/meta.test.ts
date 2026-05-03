@@ -73,7 +73,36 @@ describe("mergeEnvironmentFromMeta", () => {
       meta.systemReboot(),
     ])
 
-    expect(environment).toStrictEqual({ EXISTING: "value" })
+    expect({ ...environment }).toStrictEqual({ EXISTING: "value" })
+  })
+
+  it("does not expose Object.prototype methods as lazy resolvers when entry name is toString", async () => {
+    // R-0000074: a meta entry whose name shadows Object.prototype.toString
+    // must override the prototype method only when the entry is explicitly
+    // set. Crucially, accessing other prototype-only keys must not return
+    // an inherited resolver, because the merged environment is
+    // null-prototype.
+    const environment = await mergeEnvironmentFromMeta({}, [meta.env("toString", "shadow")])
+
+    // The explicitly set entry resolves to the user-supplied value, not the
+    // inherited Object.prototype.toString.
+    await expect(resolveEnvironment(environment, "toString")).resolves.toBe("shadow")
+
+    // The merged environment must have a null prototype so prototype-only
+    // keys (e.g. hasOwnProperty, valueOf) are not inherited as resolvers.
+    expect(Object.getPrototypeOf(environment)).toBeNull()
+  })
+
+  it("rejects meta entries whose name is a reserved JavaScript identifier", async () => {
+    await expect(mergeEnvironmentFromMeta({}, [meta.env("__proto__", "evil")])).rejects.toThrow(
+      /Forbidden env meta entry name/v
+    )
+    await expect(mergeEnvironmentFromMeta({}, [meta.env("constructor", "evil")])).rejects.toThrow(
+      /Forbidden env meta entry name/v
+    )
+    await expect(mergeEnvironmentFromMeta({}, [meta.env("prototype", "evil")])).rejects.toThrow(
+      /Forbidden env meta entry name/v
+    )
   })
 })
 

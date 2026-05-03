@@ -17,7 +17,7 @@ const ENVIRONMENT_KEY_PATTERN = /^[A-Za-z_]\w*$/v
  * (e.g. those starting with non-word characters); the explicit list is the
  * defensive failsafe so the behaviour is obvious from the source.
  */
-const ENVIRONMENT_FORBIDDEN_KEYS = new Set(["__proto__", "constructor", "prototype"])
+export const ENVIRONMENT_FORBIDDEN_KEYS = new Set(["__proto__", "constructor", "prototype"])
 
 /**
  * R-0000069/R-0000070: produce a null-prototype object typed as
@@ -28,7 +28,7 @@ const ENVIRONMENT_FORBIDDEN_KEYS = new Set(["__proto__", "constructor", "prototy
  *
  * @returns A fresh empty {@link Environment} without a prototype chain.
  */
-function createNullPrototypeEnvironment(): Environment {
+export function createNullPrototypeEnvironment(): Environment {
   // eslint-disable-next-line @typescript-eslint/no-unsafe-type-assertion -- intentional: Object.create(null) is the prototype-pollution defense
   return Object.create(null) as Environment
 }

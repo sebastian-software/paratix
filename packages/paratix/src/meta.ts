@@ -8,6 +8,7 @@ import type {
   SystemRebootMetaEntry,
 } from "./types.js"
 
+import { createNullPrototypeEnvironment, ENVIRONMENT_FORBIDDEN_KEYS } from "./environment.js"
 import { isValidTcpPort } from "./serverDefinitionValidation.js"
 
 const SYSTEM_HOST_KIND = "system.host"
@@ -205,9 +206,19 @@ export async function mergeEnvironmentFromMeta(
     return environment
   }
 
-  const nextEnvironment = { ...environment }
+  // R-0000074: preserve the null-prototype guarantee that R-0000070
+  // introduced in mergeEnvironment by routing through
+  // createNullPrototypeEnvironment instead of `{ ...environment }`, and
+  // explicitly reject reserved property names that could leak into
+  // prototype semantics on a plain object.
+  const nextEnvironment = Object.assign(createNullPrototypeEnvironment(), environment)
   for (const entry of entries) {
     if (!isEnvironmentMetaEntry(entry)) continue
+    if (ENVIRONMENT_FORBIDDEN_KEYS.has(entry.name)) {
+      throw new Error(
+        `Forbidden env meta entry name: ${JSON.stringify(entry.name)} (reserved JavaScript identifier)`
+      )
+    }
     nextEnvironment[entry.name] = async () => entry.resolve()
   }
   await Promise.resolve()
