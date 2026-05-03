@@ -641,6 +641,61 @@ describe("net.interface — check", () => {
     expect(result).toBe("ok")
   })
 
+  it("returns ok when static config and live interface state match", async () => {
+    const expectedConfig = [
+      "[Match]",
+      "Name=eth0",
+      "",
+      "[Network]",
+      "DHCP=no",
+      "Address=192.168.1.10/24",
+      "",
+      "[Route]",
+      "Gateway=192.168.1.1",
+    ].join("\n")
+    const mockSsh = createMockSsh({
+      "cat '/etc/systemd/network/60-paratix-eth0.network'": { stdout: `${expectedConfig}\n` },
+      "ip -o addr show dev 'eth0'": {
+        stdout: "2: eth0    inet 192.168.1.10/24 brd 192.168.1.255 scope global eth0\n",
+      },
+      "ip link show dev 'eth0'": { code: 0 },
+      "ip route show default dev 'eth0'": {
+        stdout: "default via 192.168.1.1 dev eth0 proto static\n",
+      },
+      "test -d '/etc/netplan'": { code: 1 },
+      "test -f '/etc/systemd/network/60-paratix-eth0.network'": { code: 0 },
+    })
+    const mod = net.interface("eth0", {
+      addresses: ["192.168.1.10/24"],
+      gateway: "192.168.1.1",
+    })
+    const result = await mod.check(mockSsh, emptyEnv)
+    expect(result).toBe("ok")
+  })
+
+  it("returns needs-apply when config matches but live address is missing", async () => {
+    const expectedConfig = [
+      "[Match]",
+      "Name=eth0",
+      "",
+      "[Network]",
+      "DHCP=no",
+      "Address=192.168.1.10/24",
+    ].join("\n")
+    const mockSsh = createMockSsh({
+      "cat '/etc/systemd/network/60-paratix-eth0.network'": { stdout: `${expectedConfig}\n` },
+      "ip -o addr show dev 'eth0'": {
+        stdout: "2: eth0    inet 192.168.1.11/24 brd 192.168.1.255 scope global eth0\n",
+      },
+      "ip link show dev 'eth0'": { code: 0 },
+      "test -d '/etc/netplan'": { code: 1 },
+      "test -f '/etc/systemd/network/60-paratix-eth0.network'": { code: 0 },
+    })
+    const mod = net.interface("eth0", { addresses: ["192.168.1.10/24"] })
+    const result = await mod.check(mockSsh, emptyEnv)
+    expect(result).toBe("needs-apply")
+  })
+
   it("returns needs-apply when Netplan config does not exist", async () => {
     const mockSsh = createMockSsh({
       "test -d '/etc/netplan'": { code: 0 },
@@ -750,6 +805,17 @@ describe("net.interface — apply", () => {
     expect(mockSsh.calls).toContain("netplan apply")
   })
 
+  it("returns failed when netplan apply fails", async () => {
+    const mockSsh = createMockSsh({
+      "netplan apply": { code: 1, stderr: "bad netplan" },
+      "test -d '/etc/netplan'": { code: 0 },
+    })
+    const mod = net.interface("eth0", {})
+    const result = await mod.apply(mockSsh, emptyEnv)
+    expect(result.status).toBe("failed")
+    expect(String(result.error)).toContain("netplan apply failed")
+  })
+
   it("returns changed in networkd mode", async () => {
     const mockSsh = createMockSsh({
       "test -d '/etc/netplan'": { code: 1 },
@@ -766,6 +832,17 @@ describe("net.interface — apply", () => {
     const mod = net.interface("eth0", {})
     await mod.apply(mockSsh, emptyEnv)
     expect(mockSsh.calls).toContain("networkctl reload")
+  })
+
+  it("returns failed when networkctl reload fails", async () => {
+    const mockSsh = createMockSsh({
+      "networkctl reload": { code: 1, stderr: "reload failed" },
+      "test -d '/etc/netplan'": { code: 1 },
+    })
+    const mod = net.interface("eth0", {})
+    const result = await mod.apply(mockSsh, emptyEnv)
+    expect(result.status).toBe("failed")
+    expect(String(result.error)).toContain("networkctl reload failed")
   })
 
   it("does not run netplan apply in networkd mode", async () => {

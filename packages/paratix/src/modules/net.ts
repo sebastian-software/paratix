@@ -1,5 +1,5 @@
 /* eslint-disable max-lines */
-import { failed } from "../moduleFailure.js"
+import { failed, failedCommand } from "../moduleFailure.js"
 import { getRunnerAbortSignal } from "../runnerAbortSignal.js"
 import { withRegisteredSecrets } from "../secretSink.js"
 import { shellQuote } from "../ssh.js"
@@ -236,6 +236,37 @@ function appendNetworkdEntries(lines: string[], options: InterfaceOptions): void
     lines.push("[Route]")
     lines.push(`Gateway=${options.gateway}`)
   }
+}
+
+async function interfaceLiveStateMatches(
+  conn: SshConnection,
+  name: string,
+  options: InterfaceOptions
+): Promise<boolean> {
+  if ((options.addresses?.length ?? 0) === 0 && (options.gateway ?? "") === "") return true
+
+  const link = await conn.exec(`ip link show dev ${shellQuote(name)}`, EXEC_OPTS)
+  if (link.code !== 0) return false
+
+  if ((options.addresses?.length ?? 0) > 0) {
+    const addresses = await conn.exec(`ip -o addr show dev ${shellQuote(name)}`, EXEC_OPTS)
+    if (addresses.code !== 0) return false
+    for (const address of options.addresses ?? []) {
+      if (!addresses.stdout.includes(address)) return false
+    }
+  }
+
+  if ((options.gateway ?? "") !== "") {
+    const defaultRoute = await conn.exec(
+      `ip route show default dev ${shellQuote(name)}`,
+      EXEC_OPTS
+    )
+    if (defaultRoute.code !== 0 || !defaultRoute.stdout.includes(`via ${options.gateway}`)) {
+      return false
+    }
+  }
+
+  return true
 }
 
 /** Parameters for the net.route check helper. */
@@ -525,11 +556,17 @@ export const net = {
         if (useNetplan) {
           const content = buildNetplanYaml(name, options)
           await conn.writeFile(netplanPath, content, { mode: NET_CONFIG_FILE_MODE })
-          await conn.exec("netplan apply", EXEC_OPTS)
+          const result = await conn.exec("netplan apply", EXEC_OPTS)
+          if (result.code !== 0) {
+            return failedCommand(`[net.interface: ${name}] netplan apply failed`, result)
+          }
         } else {
           const content = buildNetworkdConfig(name, options)
           await conn.writeFile(networkdPath, content, { mode: NET_CONFIG_FILE_MODE })
-          await conn.exec(NETWORKCTL_RELOAD, EXEC_OPTS)
+          const result = await conn.exec(NETWORKCTL_RELOAD, EXEC_OPTS)
+          if (result.code !== 0) {
+            return failedCommand(`[net.interface: ${name}] networkctl reload failed`, result)
+          }
         }
 
         return { status: "changed" }
@@ -547,7 +584,9 @@ export const net = {
         if (existsResult.code !== 0) return NEEDS_APPLY
 
         const currentContent = await conn.readFile(configPath)
-        return currentContent.trim() === expectedContent.trim() ? "ok" : NEEDS_APPLY
+        if (currentContent.trim() !== expectedContent.trim()) return NEEDS_APPLY
+
+        return (await interfaceLiveStateMatches(conn, name, options)) ? "ok" : NEEDS_APPLY
       },
       name: `net.interface: ${name}`,
     }
