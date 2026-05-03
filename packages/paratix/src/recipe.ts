@@ -68,7 +68,7 @@ type RecipeLoopStepResult =
 
 const INTERRUPTED_BEFORE_APPLY = Symbol("recipe-interrupted-before-apply")
 
-function isRecipeModuleLike(module: Module): boolean {
+function isRecipeModuleLike(module: Module): module is RecipeModule {
   return (module as { _isRecipe?: boolean } & Module)._isRecipe === true
 }
 
@@ -122,11 +122,20 @@ function applyRecipeStepToState(
  * @param parameters.currentEnvironment - Environment values available to the module.
  * @param parameters.shutdownSignal - Optional shutdown getter used to suppress new apply steps.
  * @param parameters.verbose - Whether verbose command diagnostics should be printed.
+ * @param parameters.onChildStep - Forwarded to nested RecipeModule children so the
+ *   runner observes meta from grand-children. Ignored for leaf modules.
+ * @param parameters.onSignalStep - Forwarded to nested RecipeModule children so
+ *   their signal meta also reaches the runner. Ignored for leaf modules.
+ * @param parameters.signalHooks - Forwarded to nested RecipeModule children so
+ *   stats accounting for signal modules works through the recipe tree.
  * @returns The updated environment and status, or `null` if the module was already ok.
  */
 async function executeOneModule(parameters: {
   currentEnvironment: Environment
+  onChildStep?: (step: OrchestrationStep) => Promise<void>
+  onSignalStep?: (step: OrchestrationStep) => Promise<void>
   shutdownSignal?: () => NodeJS.Signals | null
+  signalHooks?: SignalHooks
   ssh: null | SshConnection
   targetModule: Module
   verbose?: boolean
@@ -145,7 +154,20 @@ async function executeOneModule(parameters: {
     return INTERRUPTED_BEFORE_APPLY
   }
 
-  const result = await targetModule.apply(connection, currentEnvironment)
+  // R-0000091: when the child is a nested RecipeModule, forward the
+  // shutdownSignal (and the other recipe-aware options) so the inner
+  // recipe loop observes SIGINT/SIGTERM and the runner still sees meta
+  // and signal stats from grand-children. Leaf modules use the plain
+  // 2-arg Module.apply contract.
+  const result = isRecipeModuleLike(targetModule)
+    ? await targetModule.apply(connection, currentEnvironment, {
+        onChildStep: parameters.onChildStep,
+        onSignalStep: parameters.onSignalStep,
+        shutdownSignal: parameters.shutdownSignal,
+        signalHooks: parameters.signalHooks,
+        verbose,
+      })
+    : await targetModule.apply(connection, currentEnvironment)
   printRecipeChildResult(targetModule, result)
   if (result.status === "failed" && result.error != null) {
     printCommandFailure(result.error, verbose)
@@ -219,7 +241,10 @@ type RecipeChildExecution =
 
 async function executeRecipeChildStep(parameters: {
   currentEnvironment: Environment
+  onChildStep?: (step: OrchestrationStep) => Promise<void>
+  onSignalStep?: (step: OrchestrationStep) => Promise<void>
   shutdownSignal: () => NodeJS.Signals | null
+  signalHooks?: SignalHooks
   ssh: null | SshConnection
   targetModule: Module
   verbose: boolean
@@ -310,7 +335,10 @@ async function executeModules(
     // eslint-disable-next-line no-await-in-loop
     const step = await executeRecipeChildStep({
       currentEnvironment: state.env,
+      onChildStep,
+      onSignalStep: parameters.onSignalStep,
       shutdownSignal,
+      signalHooks: parameters.signalHooks,
       ssh,
       targetModule: currentModule,
       verbose,

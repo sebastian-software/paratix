@@ -649,4 +649,40 @@ describe("recipe", () => {
     const r = recipe("test-recipe", [failing])
     await expect(r.check(null, emptyEnv)).rejects.toThrow("[failing-mod] check failed")
   })
+
+  it("propagates shutdownSignal into nested recipe loops (R-0000091)", async () => {
+    // R-0000091: when a child of an outer recipe is itself a RecipeModule,
+    // the outer loop must forward its shutdownSignal so the inner recipe
+    // loop also breaks early on SIGINT/SIGTERM. Without the fix, the inner
+    // applyRecipe receives parameters=undefined and defaults to () => null,
+    // so SIGINT does not abort the inner loop.
+    let receivedSignal: NodeJS.Signals | null = null
+    const innerFirst: Module = {
+      // eslint-disable-next-line @typescript-eslint/require-await -- Interface requires async
+      async apply() {
+        receivedSignal = "SIGINT"
+        return { status: "changed" }
+      },
+      // eslint-disable-next-line @typescript-eslint/require-await -- Interface requires async
+      async check() {
+        return "needs-apply"
+      },
+      name: "inner-first",
+    }
+    const innerSecond: Module = {
+      apply: vi.fn().mockResolvedValue({ status: "changed" }),
+      check: vi.fn().mockResolvedValue("needs-apply"),
+      name: "inner-second",
+    }
+    const innerRecipe = recipe("inner-recipe", [innerFirst, innerSecond])
+    const outerRecipe = recipe("outer-recipe", [innerRecipe])
+
+    const result = await outerRecipe.apply(null, emptyEnv, {
+      shutdownSignal: () => receivedSignal,
+    })
+
+    expect(result.status).toBe("changed")
+    expect(innerSecond.check).not.toHaveBeenCalled()
+    expect(innerSecond.apply).not.toHaveBeenCalled()
+  })
 })
