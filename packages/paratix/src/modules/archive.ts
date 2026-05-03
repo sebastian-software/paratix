@@ -3,8 +3,8 @@ import { shellQuote, validateMktempPath } from "../ssh.js"
 import { type Module, type ModuleResult, NEEDS_APPLY, type SshConnection } from "../types.js"
 import {
   type ArchiveMember,
+  archiveMemberUnsafeReason,
   listArchiveMembers,
-  memberEscapesDestination,
 } from "./archiveMemberValidation.js"
 import { localSha256, sha256String } from "./fileHelpers.js"
 
@@ -196,15 +196,11 @@ async function rejectUnsafeArchiveMembers(
   if ("failureReason" in listing) {
     return failed(`[archive.extract] ${listing.failureReason}`)
   }
-  const unsafe = listing.members.find((member: ArchiveMember) => memberEscapesDestination(member))
+  const unsafe = listing.members
+    .map((member: ArchiveMember) => archiveMemberUnsafeReason(member))
+    .find((reason): reason is string => reason !== null)
   if (unsafe !== undefined) {
-    const detail =
-      unsafe.linkTarget === null
-        ? `member ${JSON.stringify(unsafe.path)}`
-        : `member ${JSON.stringify(unsafe.path)} -> ${JSON.stringify(unsafe.linkTarget)}`
-    return failed(
-      `[archive.extract] refusing to extract ${parameters.source}: ${detail} would escape destination`
-    )
+    return failed(`[archive.extract] refusing to extract ${parameters.source}: ${unsafe}`)
   }
   return null
 }

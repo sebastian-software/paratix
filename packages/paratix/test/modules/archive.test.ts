@@ -146,6 +146,7 @@ describe("archive.extract — apply", () => {
   // and a member-validation step. Each apply test stubs the member listing
   // with a single safe entry so the validation step passes.
   const safeTarListing = "-rw-r--r-- root/root 0 1970-01-01 00:00 app/file"
+  const safeZipListing = "-rw-r--r--  2.0 unx        0 b- defN 26-May-04 00:00 app/file\n"
 
   it("extracts tar.gz archive and writes marker", async () => {
     const mockSsh = createMockSsh({
@@ -224,7 +225,7 @@ describe("archive.extract — apply", () => {
     const zipSrc = "/tmp/app.zip"
     const mockSsh = createMockSsh({
       [`unzip -o '${zipSrc}' -d '${destination}'`]: { code: 0 },
-      [`unzip -Z1 '${zipSrc}'`]: { code: 0, stdout: "app/file\n" },
+      [`unzip -Zs '${zipSrc}'`]: { code: 0, stdout: safeZipListing },
     })
     vi.spyOn(mockSsh, "sha256").mockResolvedValue(archiveSha)
     vi.spyOn(mockSsh, "writeFile").mockResolvedValue()
@@ -526,7 +527,10 @@ describe("archive.extract — apply", () => {
   it("rejects a zip archive that contains a `/etc/passwd` member without invoking unzip -o", async () => {
     const zipSrc = "/tmp/app.zip"
     const mockSsh = createMockSsh({
-      [`unzip -Z1 '${zipSrc}'`]: { code: 0, stdout: "/etc/passwd\n" },
+      [`unzip -Zs '${zipSrc}'`]: {
+        code: 0,
+        stdout: "-rw-r--r--  2.0 unx        0 b- defN 26-May-04 00:00 /etc/passwd\n",
+      },
     })
 
     const mod = archive.extract(zipSrc, destination)
@@ -540,7 +544,10 @@ describe("archive.extract — apply", () => {
   it("rejects a zip archive that contains a `..` traversal member", async () => {
     const zipSrc = "/tmp/app.zip"
     const mockSsh = createMockSsh({
-      [`unzip -Z1 '${zipSrc}'`]: { code: 0, stdout: "../escape\n" },
+      [`unzip -Zs '${zipSrc}'`]: {
+        code: 0,
+        stdout: "-rw-r--r--  2.0 unx        0 b- defN 26-May-04 00:00 ../escape\n",
+      },
     })
 
     const mod = archive.extract(zipSrc, destination)
@@ -548,6 +555,23 @@ describe("archive.extract — apply", () => {
 
     expect(result.status).toBe("failed")
     expect(String(result.error)).toContain("would escape destination")
+    expect(mockSsh.calls).not.toContain(`unzip -o '${zipSrc}' -d '${destination}'`)
+  })
+
+  it("rejects a zip archive that contains a symlink member", async () => {
+    const zipSrc = "/tmp/app.zip"
+    const mockSsh = createMockSsh({
+      [`unzip -Zs '${zipSrc}'`]: {
+        code: 0,
+        stdout: "lrwxrwxrwx  2.0 unx       11 b- stor 26-May-04 00:00 app/link\n",
+      },
+    })
+
+    const mod = archive.extract(zipSrc, destination)
+    const result = await mod.apply(mockSsh, emptyEnv)
+
+    expect(result.status).toBe("failed")
+    expect(String(result.error)).toContain("is a symlink")
     expect(mockSsh.calls).not.toContain(`unzip -o '${zipSrc}' -d '${destination}'`)
   })
 

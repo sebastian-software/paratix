@@ -43,15 +43,19 @@ export function listArchiveMembersCommand(source: string, archivePath: string): 
     return `tar ${tarFlags} ${shellQuote(archivePath)}`
   }
   if (isZipSource(lower)) {
-    // `unzip -Z1` writes one member per line and nothing else, which is
-    // robust to locale changes and to varying header formats.
-    return `unzip -Z1 ${shellQuote(archivePath)}`
+    // `unzip -Zs` includes Unix-style mode metadata, which lets us reject
+    // symlinks before `unzip -o` can restore them on disk.
+    return `unzip -Zs ${shellQuote(archivePath)}`
   }
   return null
 }
 
 /** A single archive member extracted from the listing output. */
 export type ArchiveMember = {
+  /** Original archive format used to derive this entry. */
+  format: "tar" | "zip"
+  /** Member kind inferred from listing metadata. */
+  kind: "file" | "hardlink" | "symlink"
   /** Resolved link target (relative or absolute) for symlinks/hardlinks, or null. */
   linkTarget: null | string
   /** Member path as recorded in the archive. */
@@ -72,6 +76,8 @@ export type ArchiveMember = {
  * @returns The parsed member, or null when the line cannot be parsed.
  */
 const TAR_LINK_ARROW = " -> "
+const ZIP_INFO_LINE_PATTERN =
+  /^(?<mode>[\-bcdlps][\-rwxStTs]{9})\s+(?:\S+\s+){7}(?<path>\S.*)$/v
 
 function parseTarVerboseLine(line: string): ArchiveMember | null {
   const trimmed = line.replace(/\r$/v, "")
@@ -88,11 +94,18 @@ function parseTarVerboseLine(line: string): ArchiveMember | null {
   const arrowIndex = rest.indexOf(TAR_LINK_ARROW)
   if (arrowIndex !== -1 && (isSymlink || isHardlink)) {
     return {
+      format: "tar",
+      kind: isSymlink ? "symlink" : "hardlink",
       linkTarget: rest.slice(arrowIndex + TAR_LINK_ARROW.length),
       path: rest.slice(0, arrowIndex),
     }
   }
-  return { linkTarget: null, path: rest }
+  return {
+    format: "tar",
+    kind: isSymlink ? "symlink" : isHardlink ? "hardlink" : "file",
+    linkTarget: null,
+    path: rest,
+  }
 }
 
 /**
@@ -111,19 +124,35 @@ function parseTarListing(stdout: string): ArchiveMember[] {
 }
 
 /**
- * Parse the listing of a zip archive into {@link ArchiveMember}s. Zip
- * archives cannot encode symlinks safely without further analysis, so the
- * `linkTarget` is always null here; path traversal is still rejected.
+ * Parse one Info-ZIP `unzip -Zs` listing line into an {@link ArchiveMember}.
  *
- * @param stdout - The combined stdout of `unzip -Z1`.
+ * @param line - A single line from `unzip -Zs`.
+ * @returns The parsed member, or null for headers/unsupported lines.
+ */
+function parseZipInfoLine(line: string): ArchiveMember | null {
+  const trimmed = line.replace(/\r$/v, "")
+  if (trimmed.length === 0) return null
+  const match = ZIP_INFO_LINE_PATTERN.exec(trimmed) ?? null
+  if (!match?.groups) return null
+  return {
+    format: "zip",
+    kind: match.groups.mode.startsWith("l") ? "symlink" : "file",
+    linkTarget: null,
+    path: match.groups.path,
+  }
+}
+
+/**
+ * Parse the listing of a zip archive into {@link ArchiveMember}s.
+ *
+ * @param stdout - The combined stdout of `unzip -Zs`.
  * @returns The parsed members.
  */
 function parseZipListing(stdout: string): ArchiveMember[] {
   const members: ArchiveMember[] = []
   for (const line of stdout.split("\n")) {
-    const trimmed = line.replace(/\r$/v, "")
-    if (trimmed.length === 0) continue
-    members.push({ linkTarget: null, path: trimmed })
+    const parsed = parseZipInfoLine(line)
+    if (parsed !== null) members.push(parsed)
   }
   return members
 }
@@ -176,6 +205,24 @@ export function memberEscapesDestination(member: ArchiveMember): boolean {
     if (normalizeRelativePath(member.linkTarget) === null) return true
   }
   return false
+}
+
+/**
+ * Return why an archive member is unsafe, or null when it may be extracted.
+ *
+ * @param member - A single parsed archive member.
+ * @returns A human-readable unsafe reason, or null.
+ */
+export function archiveMemberUnsafeReason(member: ArchiveMember): null | string {
+  if (member.format === "zip" && member.kind === "symlink") {
+    return `member ${JSON.stringify(member.path)} is a symlink`
+  }
+  if (!memberEscapesDestination(member)) return null
+  const detail =
+    member.linkTarget === null
+      ? `member ${JSON.stringify(member.path)}`
+      : `member ${JSON.stringify(member.path)} -> ${JSON.stringify(member.linkTarget)}`
+  return `${detail} would escape destination`
 }
 
 /**
