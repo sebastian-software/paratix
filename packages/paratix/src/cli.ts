@@ -356,6 +356,12 @@ export async function runApplyCommand(
   })
 }
 
+export function exitAfterApplyError(error: unknown, verbose: boolean): never {
+  printExceptionError(error, verbose)
+  // eslint-disable-next-line node/no-process-exit
+  process.exit(process.exitCode ?? 2)
+}
+
 const program = new Command()
 
 program
@@ -399,9 +405,7 @@ program
       })
     } catch (error) {
       // eslint-disable-next-line @typescript-eslint/no-unsafe-type-assertion -- Commander options typed as Record<string, unknown>
-      printExceptionError(error, options.verbose as boolean)
-      // eslint-disable-next-line node/no-process-exit
-      process.exit(process.exitCode ?? 2)
+      exitAfterApplyError(error, options.verbose as boolean)
     }
   })
 

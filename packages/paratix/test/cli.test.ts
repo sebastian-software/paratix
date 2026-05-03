@@ -10,6 +10,7 @@ import {
   applyCliProcessEnvironment,
   collectDefinitionErrors,
   collectEnvironment,
+  exitAfterApplyError,
   handleTsxLoadFailure,
   isDirectCliExecution,
   isServerDefinitionLike,
@@ -1241,6 +1242,46 @@ describe("CLI entrypoint", () => {
       logSpy.mockRestore()
       rmSync(tempDirectory, { force: true, recursive: true })
       delete process.env.PARATIX_FIRST_RUN
+    }
+  })
+
+  it("preserves an exit code set by the runner when the apply action fails", () => {
+    const exitSpy = vi.spyOn(process, "exit").mockImplementation(() => {
+      throw new Error("process.exit")
+    })
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {
+      /* suppress expected error */
+    })
+    const previousExitCode = process.exitCode
+
+    try {
+      process.exitCode = 1
+      expect(() => exitAfterApplyError(new Error("module failed"), false)).toThrow("process.exit")
+      expect(exitSpy).toHaveBeenCalledWith(1)
+    } finally {
+      process.exitCode = previousExitCode
+      exitSpy.mockRestore()
+      errorSpy.mockRestore()
+    }
+  })
+
+  it("falls back to exit code 2 when the apply failure did not set an exit code", () => {
+    const exitSpy = vi.spyOn(process, "exit").mockImplementation(() => {
+      throw new Error("process.exit")
+    })
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {
+      /* suppress expected error */
+    })
+    const previousExitCode = process.exitCode
+
+    try {
+      process.exitCode = undefined
+      expect(() => exitAfterApplyError(new Error("loader failed"), false)).toThrow("process.exit")
+      expect(exitSpy).toHaveBeenCalledWith(2)
+    } finally {
+      process.exitCode = previousExitCode
+      exitSpy.mockRestore()
+      errorSpy.mockRestore()
     }
   })
 })
