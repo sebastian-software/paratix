@@ -182,17 +182,25 @@ export const user = {
    * @returns A Module that ensures the user account is absent.
    */
   absent(name: string, options?: { removeHome?: boolean }): Module {
+    // R-0000077: userdel returns exit code 6 ("specified user doesn't
+    // exist") when the account has already been removed. Treat this case
+    // as idempotent success — both by probing `id` first to mirror
+    // cron.absent's early-return pattern, and by mapping exit code 6 to
+    // status ok as a defensive fallback when the user is removed between
+    // the probe and the userdel call.
+    const USERDEL_NOT_FOUND_EXIT_CODE = 6
     return {
       async apply(ssh: null | SshConnection): Promise<ModuleResult> {
         if (!ssh) return failed(`[user.absent: ${name}] SSH connection is required`)
+        if (!(await ssh.test(`${ID_CMD} ${shellQuote(name)}`))) return { status: "ok" }
         const removeFlag = options?.removeHome ? "--remove" : ""
         const result = await ssh.exec(`userdel ${removeFlag} ${shellQuote(name)}`, {
           ignoreExitCode: true,
           silent: true,
         })
-        return result.code === 0
-          ? { status: "changed" }
-          : failedCommand(`[user.absent: ${name}] userdel failed`, result)
+        if (result.code === 0) return { status: "changed" }
+        if (result.code === USERDEL_NOT_FOUND_EXIT_CODE) return { status: "ok" }
+        return failedCommand(`[user.absent: ${name}] userdel failed`, result)
       },
       async check(ssh: null | SshConnection): Promise<"needs-apply" | "ok"> {
         if (!ssh) return NEEDS_APPLY

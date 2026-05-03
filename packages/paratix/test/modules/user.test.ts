@@ -301,3 +301,61 @@ describe("user.absent check", () => {
     expect(result).toBe("ok")
   })
 })
+
+describe("user.absent apply", () => {
+  // R-0000077: when the user is already gone, the id probe must
+  // short-circuit so userdel is never invoked. This mirrors the early
+  // return in cron.absent and prevents apply from reporting
+  // failedCommand for an already-satisfied state.
+  it("returns ok and skips userdel when the user does not exist", async () => {
+    const ssh = createMockSsh({
+      "id 'alice'": { code: 1 },
+    })
+    const mod = user.absent("alice")
+    const result = await mod.apply(ssh, emptyEnv)
+    expect(result.status).toBe("ok")
+    expect(ssh.calls).not.toContain("userdel  'alice'")
+    expect(ssh.calls).not.toContain("userdel --remove 'alice'")
+  })
+
+  it("returns changed when userdel succeeds", async () => {
+    const ssh = createMockSsh({
+      "id 'alice'": { code: 0 },
+      "userdel  'alice'": { code: 0 },
+    })
+    const mod = user.absent("alice")
+    const result = await mod.apply(ssh, emptyEnv)
+    expect(result.status).toBe("changed")
+    expect(ssh.calls).toContain("userdel  'alice'")
+  })
+
+  // R-0000077 defensive fallback: even when the id probe says the user
+  // exists, a concurrent removal can cause userdel to exit with code 6
+  // ("specified user doesn't exist"). Treat that as idempotent success.
+  it("returns ok when userdel exits with code 6 (user already gone)", async () => {
+    const ssh = createMockSsh({
+      "id 'alice'": { code: 0 },
+      "userdel  'alice'": { code: 6 },
+    })
+    const mod = user.absent("alice")
+    const result = await mod.apply(ssh, emptyEnv)
+    expect(result.status).toBe("ok")
+  })
+
+  it("returns failed when userdel exits with a non-6 non-zero code", async () => {
+    const ssh = createMockSsh({
+      "id 'alice'": { code: 0 },
+      "userdel  'alice'": { code: 1 },
+    })
+    const mod = user.absent("alice")
+    const result = await mod.apply(ssh, emptyEnv)
+    expect(result.status).toBe("failed")
+  })
+
+  it("returns failed when ssh is null", async () => {
+    const mod = user.absent("alice")
+    // eslint-disable-next-line prefer-spread
+    const result = await mod.apply(null, emptyEnv)
+    expect(result.status).toBe("failed")
+  })
+})
