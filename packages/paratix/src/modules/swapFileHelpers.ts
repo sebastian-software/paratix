@@ -8,6 +8,7 @@ const EXEC_OPTS = { ignoreExitCode: true, silent: true } as const
 const FSTAB_PATH = "/etc/fstab"
 const FSTAB_MODE = "0644"
 const KIBI = 1024
+const MEBI = 1024 * 1024
 const POWER_0 = 0
 const POWER_1 = 1
 const POWER_2 = 2
@@ -158,6 +159,7 @@ export async function ensureSwapFilePresent(parameters: {
   mode: string
   path: string
   size: string
+  sizeBytes: number
   ssh: SshConnection
 }): Promise<ModuleResult | true> {
   const createDirectoryResult = await parameters.ssh.exec(
@@ -168,8 +170,13 @@ export async function ensureSwapFilePresent(parameters: {
     return failedCommand(`[swap.file: ${parameters.path}] mkdir failed`, createDirectoryResult)
   }
 
+  // Use 1 MiB block size in the dd fallback so we never allocate the full swap
+  // size as a single buffer in RAM (which can OOM tiny VMs that need swap)
+  // and so BusyBox dd, which does not support multi-gigabyte block sizes,
+  // still works.
+  const ddBlockCount = Math.ceil(parameters.sizeBytes / MEBI)
   const createFileResult = await parameters.ssh.exec(
-    `fallocate -l ${shellQuote(parameters.size)} ${shellQuote(parameters.path)} || dd if=/dev/zero of=${shellQuote(parameters.path)} bs=${shellQuote(parameters.size)} count=1 status=none`,
+    `fallocate -l ${shellQuote(parameters.size)} ${shellQuote(parameters.path)} || dd if=/dev/zero of=${shellQuote(parameters.path)} bs=1M count=${String(ddBlockCount)} status=none`,
     EXEC_OPTS
   )
   if (createFileResult.code !== 0) {

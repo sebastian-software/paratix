@@ -138,7 +138,7 @@ describe("swap.file — apply", () => {
       [`cat '/etc/fstab'`]: { stdout: "# fstab\n" },
       [`cat '${swapPath}'`]: { code: 1, stdout: "" },
       [`chmod '0600' '${swapPath}'`]: { code: 0 },
-      [`fallocate -l '${swapSize}' '${swapPath}' || dd if=/dev/zero of='${swapPath}' bs='${swapSize}' count=1 status=none`]:
+      [`fallocate -l '${swapSize}' '${swapPath}' || dd if=/dev/zero of='${swapPath}' bs=1M count=2048 status=none`]:
         { code: 0 },
       [`mkdir -p '/'`]: { code: 0 },
       [`mkswap '${swapPath}'`]: { code: 0 },
@@ -156,7 +156,7 @@ describe("swap.file — apply", () => {
     expect(result.status).toBe("changed")
     expect(ssh.calls).toContain(`mkdir -p '/'`)
     expect(ssh.calls).toContain(
-      `fallocate -l '${swapSize}' '${swapPath}' || dd if=/dev/zero of='${swapPath}' bs='${swapSize}' count=1 status=none`
+      `fallocate -l '${swapSize}' '${swapPath}' || dd if=/dev/zero of='${swapPath}' bs=1M count=2048 status=none`
     )
     expect(ssh.calls).toContain(`chmod '0600' '${swapPath}'`)
     expect(ssh.calls).toContain(`mkswap '${swapPath}'`)
@@ -170,7 +170,7 @@ describe("swap.file — apply", () => {
       [`cat '/etc/fstab'`]: { stdout: `${fstabLine}\n` },
       [`cat '${swapPath}'`]: { stdout: "existing swap bytes" },
       [`chmod '0600' '${swapPath}'`]: { code: 0 },
-      [`fallocate -l '${swapSize}' '${swapPath}' || dd if=/dev/zero of='${swapPath}' bs='${swapSize}' count=1 status=none`]:
+      [`fallocate -l '${swapSize}' '${swapPath}' || dd if=/dev/zero of='${swapPath}' bs=1M count=2048 status=none`]:
         { code: 0 },
       [`mkdir -p '/'`]: { code: 0 },
       [`mkswap '${swapPath}'`]: { code: 0 },
@@ -198,6 +198,34 @@ describe("swap.file — apply", () => {
     expect(ssh.calls).toContain(`mkswap '${swapPath}'`)
     expect(ssh.calls).toContain(`swapon '${swapPath}'`)
     expect(writtenFiles).toStrictEqual([])
+  })
+
+  it("uses 1M block size in dd fallback regardless of swap size", async () => {
+    const smallSize = "512M"
+    const writtenFiles: Array<{ content: string; path: string }> = []
+    const ssh = createMockSsh({
+      [`cat '/etc/fstab'`]: { stdout: "# fstab\n" },
+      [`cat '${swapPath}'`]: { code: 1, stdout: "" },
+      [`chmod '0600' '${swapPath}'`]: { code: 0 },
+      [`fallocate -l '${smallSize}' '${swapPath}' || dd if=/dev/zero of='${swapPath}' bs=1M count=512 status=none`]:
+        { code: 0 },
+      [`mkdir -p '/'`]: { code: 0 },
+      [`mkswap '${swapPath}'`]: { code: 0 },
+      [`swapon '${swapPath}'`]: { code: 0 },
+      "swapon --show=NAME --noheadings": { stdout: "" },
+    })
+    // eslint-disable-next-line @typescript-eslint/require-await -- mock implementation
+    ssh.writeFile = async (path: string, content: string): Promise<void> => {
+      writtenFiles.push({ content, path })
+    }
+
+    const mod = swap.file({ path: swapPath, size: smallSize })
+    const result = await mod.apply(ssh, emptyEnv)
+
+    expect(result.status).toBe("changed")
+    expect(ssh.calls).toContain(
+      `fallocate -l '${smallSize}' '${swapPath}' || dd if=/dev/zero of='${swapPath}' bs=1M count=512 status=none`
+    )
   })
 
   it("removes swap activation, persistence, and file for absent state", async () => {

@@ -42,6 +42,7 @@ async function recreateSwapFile(
     mode: options.mode,
     path: options.path,
     size: options.sizeForCommand,
+    sizeBytes: options.sizeBytes,
     ssh,
   })
   return createResult === true ? "changed" : createResult
