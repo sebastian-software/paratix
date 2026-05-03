@@ -25,6 +25,8 @@
     "fstype",
     "dropin",
     "enoent",
+    "epipe",
+    "EPIPE",
     "getent",
     "groupadd",
     "groupdel",

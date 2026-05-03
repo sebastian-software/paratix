@@ -2831,6 +2831,42 @@ describe("SshConnectionImpl", () => {
       // After disconnect the pendingRejects set must have been cleared.
       expect(pendingRejects.size).toBe(0)
     })
+
+    it("rejects when the execRaw stream emits 'error' (R-0000089 regression)", async () => {
+      // Regression: execRaw did not listen for `error` on the stream, so an
+      // EPIPE during the sudo-probe path would crash the process via an
+      // unhandled `error` event. The fix attaches error listeners on both the
+      // stream and its stderr channel that clear the timer and reject.
+      const epipeError = new Error("write EPIPE")
+      const execSpy = vi.fn().mockImplementation((_command: string, callback: ExecCallback) => {
+        const stream = makeStream()
+        callback(undefined, stream)
+        stream.emit("error", epipeError)
+      })
+
+      const client = makeClientWithExecSpy(execSpy)
+      const ssh = makeConnectedSsh(client, { sudoPassword: null, user: "deploy" })
+
+      await expect(ssh.probeSudo()).rejects.toThrow("write EPIPE")
+    })
+
+    it("rejects when execRaw stream.stderr emits 'error' (R-0000089 regression)", async () => {
+      // Regression: execRaw did not listen for `error` on stream.stderr; ssh2
+      // forwards channel errors there too, so the process would crash. The
+      // fix mirrors collectStreamOutput by attaching an error listener that
+      // rejects via the wrapped reject path.
+      const stderrError = new Error("stderr channel error")
+      const execSpy = vi.fn().mockImplementation((_command: string, callback: ExecCallback) => {
+        const stream = makeStream()
+        callback(undefined, stream)
+        stream.stderr.emit("error", stderrError)
+      })
+
+      const client = makeClientWithExecSpy(execSpy)
+      const ssh = makeConnectedSsh(client, { sudoPassword: null, user: "deploy" })
+
+      await expect(ssh.probeSudo()).rejects.toThrow("stderr channel error")
+    })
   })
 
   // -------------------------------------------------------------------------

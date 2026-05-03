@@ -832,8 +832,20 @@ export class SshConnectionImpl implements SshConnection {
             stdout: Buffer.concat(chunks).toString("utf8"),
           })
         })
+        // R-0000089: attach error listeners on both the stream and its stderr
+        // channel. ssh2 emits `error` (e.g. EPIPE during the sudo probe path)
+        // synchronously and an unhandled `error` on a ClientChannel crashes
+        // the process. Pattern mirrors `collectStreamOutput` in sshHelpers.ts.
+        stream.on("error", (error: Error) => {
+          clearTimeout(timer)
+          wrappedReject(error)
+        })
         stream.stderr.on("data", () => {
           // discard stderr
+        })
+        stream.stderr.on("error", (error: Error) => {
+          clearTimeout(timer)
+          wrappedReject(error)
         })
       })
     })
