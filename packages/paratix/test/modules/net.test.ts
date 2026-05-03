@@ -119,6 +119,26 @@ describe("net.hosts — apply", () => {
     expect(result.status).toBe("changed")
   })
 
+  // R-0000086: when the hosts entry is already missing, apply must short-circuit
+  // to `ok` without rewriting /etc/hosts, mirroring the `present` + alreadyPresent
+  // branch and aligning apply with check (which returns `ok` in this case).
+  it("returns ok without writing when entry is already absent (state: absent)", async () => {
+    const mockSsh = createMockSsh({
+      "cat '/etc/hosts'": { stdout: "127.0.0.1 localhost\n" },
+    })
+    const writes: Array<{ content: string; mode: string; path: string }> = []
+    mockSsh.writeFile = async (path, content, options) => {
+      writes.push({ content, mode: options.mode, path })
+      await Promise.resolve()
+    }
+
+    const mod = net.hosts("1.2.3.4", ["myhost"], { state: "absent" })
+    const result = await mod.apply(mockSsh, emptyEnv)
+
+    expect(result.status).toBe("ok")
+    expect(writes).toHaveLength(0)
+  })
+
   it("reads /etc/hosts before writing (state: present)", async () => {
     const mockSsh = createMockSsh({
       "cat '/etc/hosts'": { stdout: "127.0.0.1 localhost\n" },

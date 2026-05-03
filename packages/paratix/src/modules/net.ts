@@ -305,6 +305,8 @@ export const net = {
             remotePath: HOSTS_FILE,
           })
         } else {
+          const alreadyAbsent = !lines.some((line) => line.trim() === expectedLine)
+          if (alreadyAbsent) return { status: "ok" }
           const newContent = lines.filter((line) => line.trim() !== expectedLine).join("\n")
           await guardedWriteFile(conn, {
             mode: HOSTS_FILE_MODE,
