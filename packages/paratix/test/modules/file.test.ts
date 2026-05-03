@@ -1427,6 +1427,26 @@ describe("file.replace", () => {
     expect(result.status).toBe("changed")
     expect(writtenFiles[0]?.content).toBe("foo new-value bar new-value baz")
   })
+
+  it("apply returns ok and does not write when pattern produces no replacement", async () => {
+    // R-0000075: when the regex does not match anything in the file, apply
+    // must short-circuit, return status ok, and skip the SFTP write so the
+    // run is not flagged as "changed" forever.
+    const writtenFiles: Array<{ content: string; path: string }> = []
+    const ssh = createMockSsh({
+      "cat '/etc/config'": { stdout: "alpha beta gamma" },
+    })
+    // eslint-disable-next-line @typescript-eslint/require-await -- Mock
+    ssh.writeFile = async (path: string, content: string) => {
+      writtenFiles.push({ content, path })
+    }
+
+    const mod = file.replace("/etc/config", "old-value", "new-value")
+    const result = await mod.apply(ssh, emptyEnv)
+
+    expect(result.status).toBe("ok")
+    expect(writtenFiles).toStrictEqual([])
+  })
 })
 
 describe("file.stat", () => {

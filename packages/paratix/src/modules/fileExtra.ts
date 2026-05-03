@@ -400,6 +400,12 @@ export function replace(remotePath: string, pattern: string, replacement: string
       const content = await ssh.readFile(remotePath)
       // eslint-disable-next-line security/detect-non-literal-regexp -- pattern from module config, not user input
       const updated = content.replaceAll(new RegExp(pattern, "gu"), replacement)
+      // R-0000075: short-circuit when the regex produces no replacement so
+      // apply does not flag the run as "changed" or issue an unnecessary
+      // SFTP write. Mirrors the no-op return that R-0000002 / R-0000013 /
+      // R-0000028 added to timer.applyPresent, ssh.knownHosts.absent and
+      // file.properties.apply.
+      if (updated === content) return { status: "ok" }
       await guardedWriteFile(ssh, {
         mode: await resolveWriteMode(ssh, remotePath),
         newContent: updated,
