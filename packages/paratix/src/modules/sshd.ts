@@ -18,6 +18,27 @@ const SSHD_CONFIG_PATH = "/etc/ssh/sshd_config"
 const SSHD_CONFIG_MODE = "0644"
 const SYSTEMCTL = "systemctl"
 
+// sshd_config(5) directive names are alphabetic ASCII identifiers (the parser
+// is case-insensitive). Constraining keys to this shape prevents callers from
+// smuggling regex/shell metacharacters or whitespace into the rewriter.
+const SSHD_DIRECTIVE_NAME_PATTERN = /^[A-Za-z][A-Za-z0-9]*$/v
+
+function validateSshdSettings(settings: Record<string, string>): void {
+  for (const [key, value] of Object.entries(settings)) {
+    if (!SSHD_DIRECTIVE_NAME_PATTERN.test(key)) {
+      throw new Error(
+        `sshd.config: invalid directive name ${JSON.stringify(key)} ` +
+          `(expected an alphabetic ASCII identifier, e.g. "PasswordAuthentication")`
+      )
+    }
+    if (/[\n\r]/v.test(value)) {
+      throw new Error(
+        `sshd.config: value for ${key} must not contain newline characters: ${JSON.stringify(value)}`
+      )
+    }
+  }
+}
+
 async function validateSshdConfig(ssh: SshConnection, originalConfig: string): Promise<void> {
   await ensurePrivilegeSeparationDirectory(ssh)
   const result = await ssh.exec("sshd -t", { ignoreExitCode: true, silent: true })
@@ -325,6 +346,7 @@ export const sshd = {
    * @returns A Module that applies the sshd configuration settings.
    */
   config(settings: Record<string, string>): Module {
+    validateSshdSettings(settings)
     const settingNames = Object.keys(settings).join(", ")
     return {
       async _applyDryRun(ssh: null | SshConnection): Promise<ModuleResult> {

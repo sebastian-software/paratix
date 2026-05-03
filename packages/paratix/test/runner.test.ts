@@ -112,6 +112,7 @@ describe("runPlaybook reconnect failure propagation", () => {
   afterEach(() => {
     vi.restoreAllMocks()
     vi.resetModules()
+    process.exitCode = 0
   })
 
   it("propagates reconnect failure after port change (meta sshd.port) and records status failed", async () => {
@@ -143,7 +144,6 @@ describe("runPlaybook reconnect failure propagation", () => {
     await runPlaybook(definition)
 
     expect(process.exitCode).toBe(1)
-    process.exitCode = 0
   })
 
   it("prints exactly one final failed status when reconnect after port change fails", async () => {
@@ -177,7 +177,6 @@ describe("runPlaybook reconnect failure propagation", () => {
     expect(statusLines).toHaveLength(1)
     expect(statusLines[0]).toContain("failed")
     expect(statusLines[0]).not.toContain("changed")
-    process.exitCode = 0
   })
 
   it("propagates reconnect failure after reboot (meta system.reboot) and records status failed", async () => {
@@ -209,7 +208,6 @@ describe("runPlaybook reconnect failure propagation", () => {
     await runPlaybook(definition)
 
     expect(process.exitCode).toBe(1)
-    process.exitCode = 0
   })
 
   it("rolls back addPort by calling removePort when reconnect after port change fails", async () => {
@@ -246,7 +244,6 @@ describe("runPlaybook reconnect failure propagation", () => {
 
     expect(addPort).toHaveBeenCalledWith(2222)
     expect(removePort).toHaveBeenCalledWith(2222)
-    process.exitCode = 0
   })
 
   it("stops processing subsequent modules when reconnect fails after port change", async () => {
@@ -283,7 +280,6 @@ describe("runPlaybook reconnect failure propagation", () => {
     await runPlaybook(definition)
 
     expect(subsequentModule.check).not.toHaveBeenCalled()
-    process.exitCode = 0
   })
 
   it("stops processing subsequent modules when reconnect fails after reboot", async () => {
@@ -320,7 +316,6 @@ describe("runPlaybook reconnect failure propagation", () => {
     await runPlaybook(definition)
 
     expect(subsequentModule.check).not.toHaveBeenCalled()
-    process.exitCode = 0
   })
 
   it("starts a spinner for a top-level recipe before running its check", async () => {
@@ -408,6 +403,7 @@ describe("runPlaybook meta validation", () => {
   afterEach(() => {
     vi.restoreAllMocks()
     vi.resetModules()
+    process.exitCode = 0
   })
 
   it("fails the run when a module returns malformed meta entries", async () => {
@@ -445,7 +441,6 @@ describe("runPlaybook meta validation", () => {
 
     expect(process.exitCode).toBe(1)
     expect(subsequentModule.check).not.toHaveBeenCalled()
-    process.exitCode = 0
   })
 
   it("prints exactly one final failed status when a module returns malformed meta", async () => {
@@ -483,7 +478,6 @@ describe("runPlaybook meta validation", () => {
     expect(statusLines).toHaveLength(1)
     expect(statusLines[0]).toContain("failed")
     expect(statusLines[0]).not.toContain("changed")
-    process.exitCode = 0
   })
 })
 
@@ -562,6 +556,7 @@ describe("runPlaybook handlePortChange + handleReboot interaction", () => {
   afterEach(() => {
     vi.restoreAllMocks()
     vi.resetModules()
+    process.exitCode = 0
   })
 
   it("calls addPort but skips port-change reconnect when system.reboot is also set, resulting in exactly one reconnect", async () => {
@@ -588,7 +583,6 @@ describe("runPlaybook handlePortChange + handleReboot interaction", () => {
 
     // reconnect is called exactly once (by the reboot handler, not the port-change handler)
     expect(reconnect).toHaveBeenCalledTimes(1)
-    process.exitCode = 0
   })
 
   it("calls reconnect exactly once when only sshd.port is set (no reboot)", async () => {
@@ -615,7 +609,6 @@ describe("runPlaybook handlePortChange + handleReboot interaction", () => {
 
     // reconnect is called exactly once by the port-change handler
     expect(reconnect).toHaveBeenCalledTimes(1)
-    process.exitCode = 0
   })
 
   it("calls addPort for every sshd.port meta entry when a module emits multiple", async () => {
@@ -652,7 +645,6 @@ describe("runPlaybook handlePortChange + handleReboot interaction", () => {
     const [reconnectOrder] = reconnect.mock.invocationCallOrder
     const [, secondAddPortOrder] = addPort.mock.invocationCallOrder
     expect(reconnectOrder).toBeGreaterThan(secondAddPortOrder)
-    process.exitCode = 0
   })
 })
 
@@ -776,6 +768,7 @@ describe("runPlaybook recipe exception handling", () => {
   afterEach(() => {
     vi.restoreAllMocks()
     vi.resetModules()
+    process.exitCode = 0
   })
 
   it("does not crash when recipe apply() throws, records status as failed and sets exitCode to 1", async () => {
@@ -810,7 +803,6 @@ describe("runPlaybook recipe exception handling", () => {
     await expect(runPlaybook(definition)).resolves.toBeUndefined()
 
     expect(process.exitCode).toBe(1)
-    process.exitCode = 0
   })
 
   it("writes recipe apply() throw diagnostics to stderr when the error message is non-empty", async () => {
@@ -852,7 +844,6 @@ describe("runPlaybook recipe exception handling", () => {
 
     const allErrorOutput = consoleErrors.flat().join(" ")
     expect(allErrorOutput).toContain("recipe internal failure")
-    process.exitCode = 0
   })
 
   it("stops processing subsequent modules when recipe apply() throws", async () => {
@@ -893,7 +884,6 @@ describe("runPlaybook recipe exception handling", () => {
     await runPlaybook(definition)
 
     expect(subsequentModule.check).not.toHaveBeenCalled()
-    process.exitCode = 0
   })
 
   it("logs the concrete recipe child module name when child check() throws during runPlaybook", async () => {
@@ -940,7 +930,6 @@ describe("runPlaybook recipe exception handling", () => {
     expect(consoleErrors.join("\n")).toContain("throwing-child-check")
     expect(consoleErrors.join("\n")).toContain("recipe child check exploded")
     expect(process.exitCode).toBe(1)
-    process.exitCode = 0
   })
 
   it("logs the concrete recipe child module name when child apply() throws during runPlaybook", async () => {
@@ -986,7 +975,6 @@ describe("runPlaybook recipe exception handling", () => {
     expect(consoleLogs.join("\n")).toContain("throwing-child-apply")
     expect(consoleErrors.join("\n")).toContain("recipe child apply exploded")
     expect(process.exitCode).toBe(1)
-    process.exitCode = 0
   })
 })
 

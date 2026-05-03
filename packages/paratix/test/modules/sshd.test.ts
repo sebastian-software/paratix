@@ -135,19 +135,12 @@ describe("sshd.config — apply", () => {
     expect(writtenFiles[0]?.content).toContain("PermitRootLogin no")
   })
 
-  it("regression — key with RegExp special chars is handled safely (no injection)", async () => {
-    // Key contains a dot which is a RegExp special char
-    const mockSsh = createMockSsh({
-      [CAT_SSHD]: { stdout: "Match.User root\n" },
-    })
-    const writtenFiles = trackWriteFile(mockSsh)
-
-    const mod = sshd.config({ "Match.User": "admin" })
-    await mod.apply(mockSsh, emptyEnv)
-
-    const written = writtenFiles.find((f) => f.path === SSHD_CONFIG)
-    // The exact key "Match.User" must be replaced, not a wildcard match
-    expect(written?.content).toContain("Match.User admin")
+  // R-0000114: directive names are validated up-front, so no caller can
+  // smuggle a regex/shell metacharacter into the rewriter to begin with.
+  it("regression — rejects directive names with non-alphanumeric characters synchronously", () => {
+    expect(() => sshd.config({ "Match.User": "admin" })).toThrow(
+      /invalid directive name "Match\.User"/v
+    )
   })
 
   it("regression — value with RegExp special chars like * and [ does not throw", async () => {
@@ -337,15 +330,13 @@ describe("sshd.config — check", () => {
     expect(mockSsh.calls).toContain(CAT_SSHD)
   })
 
-  it("regression — key with dot is matched literally, not as RegExp wildcard", async () => {
-    // "Match.User" with a dot must not match "MatchXUser" (dot is RegExp wildcard)
-    const mockSsh = createMockSsh({
-      [CAT_SSHD]: { stdout: "MatchXUser root\n" },
-    })
-    const mod = sshd.config({ "Match.User": "root" })
-    const result = await mod.check(mockSsh, emptyEnv)
-    // Should NOT match because the key is "Match.User" not "MatchXUser"
-    expect(result).toBe("needs-apply")
+  // R-0000114: directive names with non-alphanumeric characters are rejected
+  // up-front, so the check path can rely on the parsed directive being a
+  // bare identifier and never has to defend against regex injection.
+  it("regression — rejects directive names with non-alphanumeric characters during check setup", () => {
+    expect(() => sshd.config({ "Match.User": "root" })).toThrow(
+      /invalid directive name "Match\.User"/v
+    )
   })
 
   it("regression — value with RegExp special chars [ and * is matched literally", async () => {
@@ -939,5 +930,45 @@ describe("sshd.config — module name", () => {
     const mod = sshd.config({ PasswordAuthentication: "no", PermitRootLogin: "no" })
     expect(mod.name).toContain("PasswordAuthentication")
     expect(mod.name).toContain("PermitRootLogin")
+  })
+})
+
+// ─── sshd.config — input validation ───────────────────────────────────────────
+
+// R-0000114: synchronous validation in the module constructor protects the
+// rewriter (regex inputs) and the resulting sshd_config (line-based parser)
+// from caller-supplied keys/values that would otherwise inject extra
+// directives or regex metacharacters.
+describe("sshd.config — input validation", () => {
+  it("rejects directive names containing a newline", () => {
+    expect(() => sshd.config({ "PasswordAuthentication\nPermitRootLogin": "no" })).toThrow(
+      /invalid directive name/v
+    )
+  })
+
+  it("rejects directive names that start with a digit", () => {
+    expect(() => sshd.config({ "1Bad": "no" })).toThrow(/invalid directive name "1Bad"/v)
+  })
+
+  it("rejects directive names with whitespace", () => {
+    expect(() => sshd.config({ "Password Authentication": "no" })).toThrow(
+      /invalid directive name/v
+    )
+  })
+
+  it("rejects values containing a newline (which would inject extra directives)", () => {
+    expect(() => sshd.config({ AllowUsers: "admin\nPermitRootLogin yes" })).toThrow(
+      /value for AllowUsers must not contain newline characters/v
+    )
+  })
+
+  it("rejects values containing a carriage return", () => {
+    expect(() => sshd.config({ AllowUsers: "admin\r" })).toThrow(
+      /value for AllowUsers must not contain newline characters/v
+    )
+  })
+
+  it("accepts a typical alphabetic directive name and a plain value", () => {
+    expect(() => sshd.config({ PasswordAuthentication: "no" })).not.toThrow()
   })
 })
