@@ -102,6 +102,7 @@
     "uids",
     "umount",
     "unredacted",
+    "unstubbed",
     "userdel",
     "userlist",
     "usermod"

@@ -2,7 +2,10 @@ import { createHash } from "node:crypto"
 import { describe, expect, it, vi } from "vitest"
 
 import { download } from "../../src/modules/download.js"
-import { createMockSsh } from "../helpers/mockSsh.js"
+import { createMockSsh as createBaseMockSsh } from "../helpers/mockSsh.js"
+
+const createMockSsh: typeof createBaseMockSsh = (responses, options) =>
+  createBaseMockSsh(responses, { strict: false, ...options })
 
 const emptyEnv = {}
 const allowUnverifiedDownload = { allowUnverifiedDownload: true } as const

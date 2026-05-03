@@ -7,7 +7,10 @@ import { describe, expect, it } from "vitest"
 import { resolveEnvironment } from "../../src/environment.js"
 import { mergeEnvironmentFromMeta } from "../../src/meta.js"
 import { file } from "../../src/modules/file.js"
-import { createMockSsh } from "../helpers/mockSsh.js"
+import { createMockSsh as createBaseMockSsh } from "../helpers/mockSsh.js"
+
+const createMockSsh: typeof createBaseMockSsh = (responses, options) =>
+  createBaseMockSsh(responses, { strict: false, ...options })
 
 const emptyEnv = {}
 const unicodeContent = "Grüße aus Köln – こんにちは мир\n"

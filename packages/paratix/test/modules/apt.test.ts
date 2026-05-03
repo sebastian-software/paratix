@@ -3,7 +3,10 @@ import { describe, expect, it } from "vitest"
 
 import { apt } from "../../src/modules/apt.js"
 import { sha256String } from "../../src/modules/fileHelpers.js"
-import { createMockSsh } from "../helpers/mockSsh.js"
+import { createMockSsh as createBaseMockSsh } from "../helpers/mockSsh.js"
+
+const createMockSsh: typeof createBaseMockSsh = (responses, options) =>
+  createBaseMockSsh(responses, { strict: false, ...options })
 
 const emptyEnv = {}
 

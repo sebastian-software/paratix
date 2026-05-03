@@ -1,7 +1,10 @@
 import { describe, expect, it } from "vitest"
 
 import { FLAGS_DIRECTORY, hasFlag, setVersionedFlag } from "../../src/modules/moduleHelpers.js"
-import { createMockSsh } from "../helpers/mockSsh.js"
+import { createMockSsh as createBaseMockSsh } from "../helpers/mockSsh.js"
+
+const createMockSsh: typeof createBaseMockSsh = (responses, options) =>
+  createBaseMockSsh(responses, { strict: false, ...options })
 
 describe("hasFlag – empty string validation", () => {
   it("throws when flagName is an empty string", async () => {

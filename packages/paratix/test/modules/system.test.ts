@@ -7,7 +7,10 @@ import {
   mergeEnvironmentFromMeta,
 } from "../../src/meta.js"
 import { system } from "../../src/modules/system.js"
-import { createMockSsh } from "../helpers/mockSsh.js"
+import { createMockSsh as createBaseMockSsh } from "../helpers/mockSsh.js"
+
+const createMockSsh: typeof createBaseMockSsh = (responses, options) =>
+  createBaseMockSsh(responses, { strict: false, ...options })
 
 const emptyEnv = {}
 

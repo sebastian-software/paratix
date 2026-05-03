@@ -1,7 +1,10 @@
 import { describe, expect, it } from "vitest"
 
 import { git } from "../../src/modules/git.js"
-import { createMockSsh } from "../helpers/mockSsh.js"
+import { createMockSsh as createBaseMockSsh } from "../helpers/mockSsh.js"
+
+const createMockSsh: typeof createBaseMockSsh = (responses, options) =>
+  createBaseMockSsh(responses, { strict: false, ...options })
 
 const emptyEnv = {}
 

@@ -2,11 +2,21 @@ import { describe, expect, it, vi } from "vitest"
 
 import { createMockSsh, createStrictMockSsh } from "./mockSsh.js"
 
-// cspell:ignore unstubbed
-
 describe("createMockSsh", () => {
-  it("keeps permissive defaults for the legacy helper", async () => {
+  it("fails closed for unstubbed commands by default", async () => {
     const ssh = createMockSsh()
+
+    await expect(ssh.exec("echo ok")).rejects.toThrow("createMockSsh: unstubbed exec call: echo ok")
+    await expect(ssh.output("cat /tmp/file")).rejects.toThrow(
+      "createMockSsh: unstubbed output call: cat /tmp/file"
+    )
+    await expect(ssh.test("test -f /tmp/file")).rejects.toThrow(
+      "createMockSsh: unstubbed test call: test -f /tmp/file"
+    )
+  })
+
+  it("supports explicit permissive legacy behavior", async () => {
+    const ssh = createMockSsh({}, { strict: false })
 
     await expect(ssh.exec("echo ok")).resolves.toMatchObject({ code: 0, stderr: "", stdout: "" })
     await expect(ssh.output("cat /tmp/file")).resolves.toBe("")
@@ -46,7 +56,7 @@ describe("createMockSsh", () => {
       // below verifies that the warning was invoked.
     })
     try {
-      const ssh = createMockSsh({}, { warnOnUnstubbedTest: true })
+      const ssh = createMockSsh({}, { strict: false, warnOnUnstubbedTest: true })
       await ssh.test("test -f /tmp/audit")
       expect(warnSpy).toHaveBeenCalledWith("createMockSsh: unstubbed test call: test -f /tmp/audit")
     } finally {

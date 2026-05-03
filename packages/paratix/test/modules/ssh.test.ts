@@ -2,7 +2,10 @@ import { describe, expect, it, vi } from "vitest"
 
 import { computeFingerprint } from "../../src/knownHosts.js"
 import { ssh } from "../../src/modules/ssh.js"
-import { createMockSsh } from "../helpers/mockSsh.js"
+import { createMockSsh as createBaseMockSsh } from "../helpers/mockSsh.js"
+
+const createMockSsh: typeof createBaseMockSsh = (responses, options) =>
+  createBaseMockSsh(responses, { strict: false, ...options })
 
 const emptyEnv = {}
 

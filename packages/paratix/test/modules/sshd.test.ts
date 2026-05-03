@@ -2,7 +2,10 @@ import { describe, expect, it, vi } from "vitest"
 
 import { isSshdPortMetaEntry } from "../../src/meta.js"
 import { sshd } from "../../src/modules/sshd.js"
-import { createMockSsh } from "../helpers/mockSsh.js"
+import { createMockSsh as createBaseMockSsh } from "../helpers/mockSsh.js"
+
+const createMockSsh: typeof createBaseMockSsh = (responses, options) =>
+  createBaseMockSsh(responses, { strict: false, ...options })
 
 const emptyEnv = {}
 const SSHD_CONFIG = "/etc/ssh/sshd_config"

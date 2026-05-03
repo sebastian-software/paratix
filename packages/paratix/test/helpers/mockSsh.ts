@@ -2,8 +2,6 @@ import type { ExecOptions, ExecResult, SshConnection } from "../../src/types.js"
 
 import { shellQuote } from "../../src/ssh.js"
 
-// cspell:ignore unstubbed
-
 const noop = async (): Promise<void> => {
   /* mock noop */
 }
@@ -19,19 +17,17 @@ type MockSshOptions = {
   allowUnstubbedTest?: string[]
   /**
    * Result returned by `ssh.exec()` for unstubbed commands.
-   * Defaults to a successful `{ code: 0, stderr: "", stdout: "" }` for
-   * backward compatibility. Set to a partial `ExecResult` (e.g.
-   * `{ code: 1, stderr: "command not found" }`) to surface failures, or to
-   * the literal string `"throw"` to make unstubbed exec calls reject.
+   * By default, unstubbed calls reject. Set this to a partial `ExecResult`
+   * when a test intentionally does not care about a specific command.
    */
   defaultExecResult?: "throw" | Partial<ExecResult>
   /**
    * Result returned by `ssh.test()` for unstubbed commands.
-   * Defaults to `true` for backward compatibility — tests that want to opt
-   * into a stricter posture can set this to `false` so unstubbed `test`
-   * calls surface as failed predicates rather than silent positives.
+   * By default, unstubbed calls reject. Set this when a test intentionally
+   * treats unspecified predicates as true or false.
    */
   defaultTestResult?: boolean
+  /** Set to `false` for legacy permissive behavior. */
   strict?: boolean
   /**
    * When `true`, log a `console.warn` for every unstubbed `ssh.test()` call so
@@ -80,7 +76,12 @@ function getMockResponse(input: {
 
   const allowlist = getAllowlistForKind(input.kind, input.options)
 
-  if (input.options?.strict && !isAllowed(input.command, allowlist)) {
+  const strict = input.options?.strict ?? true
+  const hasExplicitDefault =
+    (input.kind === "exec" && input.options?.defaultExecResult !== undefined) ||
+    (input.kind === "test" && input.options?.defaultTestResult !== undefined)
+
+  if (strict && !hasExplicitDefault && !isAllowed(input.command, allowlist)) {
     throw buildUnstubbedCommandError(input.kind, input.command)
   }
 
@@ -147,7 +148,7 @@ function createTest(
 }
 
 type RecordingSpies = {
-  addPort: (port: number) => void
+  addPort: (port: number) => boolean
   addPortCalls: number[]
   removePort: (port: number) => void
   removePortCalls: number[]
@@ -162,6 +163,7 @@ function createRecordingSpies(): RecordingSpies {
   return {
     addPort: (port) => {
       addPortCalls.push(port)
+      return true
     },
     addPortCalls,
     removePort: (port) => {
@@ -218,7 +220,10 @@ export function createMockSsh(responses?: MockResponses, options?: MockSshOption
     async sha256(path) {
       const exists = await this.test(`[ -f ${shellQuote(path)} ]`)
       if (!exists) return null
-      return responses?.[`sha256sum ${shellQuote(path)}`]?.stdout?.split(/\s+/v)[0] ?? "abc123"
+      const command = `sha256sum ${shellQuote(path)}`
+      const match = getMockResponse({ command, kind: "exec", options, responses })
+      if (match == null) return null
+      return match.stdout?.split(/\s+/v)[0] ?? null
     },
     test,
     updateHost: spies.updateHost,
