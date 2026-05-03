@@ -291,7 +291,19 @@ export const archive = {
         if (!markerExists) return NEEDS_APPLY
 
         // 3. Compare SHA256 of the archive with the marker file content.
-        const markerResult = await conn.exec(`cat ${shellQuote(marker)}`, SILENT)
+        // R-0000105: distinguish between "marker is genuinely missing" and
+        // "marker exists but cat could not read it" (e.g. permission denied
+        // after the test -f succeeded for root vs. a downgraded apply step).
+        // Without this differentiation a transient permission error would
+        // collapse markerResult.stdout to "" and force an unnecessary
+        // re-extraction of a potentially very large archive.
+        const markerResult = await conn.exec(`cat ${shellQuote(marker)}`, EXEC_OPTS)
+        if (markerResult.code !== 0) {
+          if (/no such file/iv.test(markerResult.stderr)) return NEEDS_APPLY
+          throw new Error(
+            `[archive.extract] marker file unreadable: ${markerResult.stderr.trim() || `cat exited with code ${markerResult.code}`}`
+          )
+        }
         const markerContent = markerResult.stdout.trim()
 
         if (upload) {

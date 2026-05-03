@@ -2,7 +2,10 @@ import { createInterface } from "node:readline/promises"
 
 import type { InitialUserConfig } from "./templates.js"
 
-import { readHostFingerprintViaSsh2 } from "./hostFingerprintBootstrap.js"
+import {
+  type HostFingerprintScanResult,
+  readHostFingerprintViaSsh2,
+} from "./hostFingerprintBootstrap.js"
 import { createTerminalSelect, type SelectFunction, type SelectOption } from "./promptUi.js"
 import { promptForAdminPublicKey as promptForScaffoldAdminPublicKey } from "./publicKeySelection.js"
 import {
@@ -171,7 +174,7 @@ export async function promptForAdminPublicKey(
 export async function promptForHostFingerprint(
   host: string,
   select?: SelectFunction<"placeholder" | "scan">,
-  scanner: (host: string) => Promise<string> = readHostFingerprintViaSsh2
+  scanner: (host: string) => Promise<HostFingerprintScanResult> = readHostFingerprintViaSsh2
 ): Promise<string | undefined> {
   const terminalSelect = select == null ? createTerminalSelect() : null
   const choose = select ?? terminalSelect?.select
@@ -190,7 +193,8 @@ export async function promptForHostFingerprint(
     }
 
     try {
-      return await scanner(host)
+      const result = await scanner(host)
+      return result.fingerprint
     } catch (error) {
       console.error(
         `${error instanceof Error ? error.message : String(error)} Keeping the expectedHostFingerprint placeholder in server.ts.`

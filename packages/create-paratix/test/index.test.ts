@@ -707,7 +707,10 @@ describe("promptForHostFingerprint", () => {
 
   it("stores the scanned host fingerprint when the user accepts the TOFU step", async () => {
     const select = vi.fn().mockResolvedValueOnce("scan")
-    const scanner = vi.fn().mockResolvedValueOnce("SHA256:scanned-fingerprint")
+    const scanner = vi.fn().mockResolvedValueOnce({
+      algorithm: "ssh-ed25519",
+      fingerprint: "SHA256:scanned-fingerprint",
+    })
 
     await expect(promptForHostFingerprint("example.com", select, scanner)).resolves.toBe(
       "SHA256:scanned-fingerprint"
@@ -754,7 +757,10 @@ describe("readHostFingerprintViaSsh2", () => {
       readHostFingerprintViaSsh2("example.com", {
         clientFactory: () => fakeClient,
       })
-    ).resolves.toBe("SHA256:MYVLAwRUnY5x4jwQ1SPUJoYXVb/fB/L3kFjCi5WxfYA")
+    ).resolves.toStrictEqual({
+      algorithm: "ssh-ed25519",
+      fingerprint: "SHA256:MYVLAwRUnY5x4jwQ1SPUJoYXVb/fB/L3kFjCi5WxfYA",
+    })
 
     expect(connect).toHaveBeenCalledWith(
       expect.objectContaining({

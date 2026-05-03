@@ -10,6 +10,14 @@ type HostFingerprintBootstrapOptions = {
   readyTimeoutMs?: number
 }
 
+// R-0000123: callers need both the algorithm and the fingerprint so an
+// operator can spot a downgrade attack (for example a sudden switch from
+// ssh-ed25519 to ssh-rsa) before pinning the fingerprint into server.ts.
+export type HostFingerprintScanResult = {
+  algorithm: string
+  fingerprint: string
+}
+
 const DEFAULT_HOST_FINGERPRINT_PORT = 22
 const DEFAULT_READY_TIMEOUT_MS = 10_000
 const SSH_KEY_ALGO_LENGTH_FIELD_BYTES = 4
@@ -35,7 +43,7 @@ function extractHostKeyAlgorithm(keyBuffer: Buffer): string {
     .toString("ascii")
 }
 
-function assertSupportedHostKeyAlgorithm(keyBuffer: Buffer): void {
+function assertSupportedHostKeyAlgorithm(keyBuffer: Buffer): string {
   const algorithm = extractHostKeyAlgorithm(keyBuffer)
   if (!ACCEPTED_HOST_KEY_ALGORITHMS.has(algorithm)) {
     throw new Error(
@@ -44,6 +52,7 @@ function assertSupportedHostKeyAlgorithm(keyBuffer: Buffer): void {
         `Expected one of: ${[...ACCEPTED_HOST_KEY_ALGORITHMS].sort().join(", ")}.`
     )
   }
+  return algorithm
 }
 
 function computeFingerprint(key: Buffer): string {
@@ -57,18 +66,20 @@ function toError(error: unknown, host: string, port: number): Error {
 }
 
 function createConnectionConfig(parameters: {
-  captureFingerprint: (fingerprint: string) => void
+  captureScanResult: (result: HostFingerprintScanResult) => void
   host: string
   port: number
   readyTimeoutMs: number
 }): ConnectConfig {
-  const { captureFingerprint, host, port, readyTimeoutMs } = parameters
+  const { captureScanResult, host, port, readyTimeoutMs } = parameters
   return {
     host,
     hostVerifier: (key: Buffer): boolean => {
       const buffer = Buffer.from(key)
-      assertSupportedHostKeyAlgorithm(buffer)
-      captureFingerprint(computeFingerprint(buffer))
+      // R-0000123: capture the algorithm name alongside the fingerprint so
+      // the interactive prompt can show both values to the operator.
+      const algorithm = assertSupportedHostKeyAlgorithm(buffer)
+      captureScanResult({ algorithm, fingerprint: computeFingerprint(buffer) })
       return false
     },
     port,
@@ -104,10 +115,10 @@ function createSettlementHandlers(parameters: {
   host: string
   port: number
   reject: (reason: Error) => void
-  resolve: (fingerprint: string) => void
+  resolve: (result: HostFingerprintScanResult) => void
 }): {
   rejectOnce: (error: unknown) => void
-  resolveOnce: (fingerprint: string) => void
+  resolveOnce: (result: HostFingerprintScanResult) => void
 } {
   const { cleanup, host, port, reject, resolve } = parameters
   let settled = false
@@ -119,34 +130,34 @@ function createSettlementHandlers(parameters: {
       cleanup()
       reject(toError(error, host, port))
     },
-    resolveOnce: (fingerprint: string): void => {
+    resolveOnce: (result: HostFingerprintScanResult): void => {
       if (settled) return
       settled = true
       cleanup()
-      resolve(fingerprint)
+      resolve(result)
     },
   }
 }
 
 function registerFingerprintListeners(parameters: {
   client: HostKeyClient
-  onFingerprint: () => null | string
+  onScanResult: () => HostFingerprintScanResult | null
   rejectOnce: (error: unknown) => void
-  resolveOnce: (fingerprint: string) => void
+  resolveOnce: (result: HostFingerprintScanResult) => void
 }): void {
-  const { client, onFingerprint, rejectOnce, resolveOnce } = parameters
+  const { client, onScanResult, rejectOnce, resolveOnce } = parameters
 
   client.on("close", () => {
-    const capturedFingerprint = onFingerprint()
-    if (capturedFingerprint != null) {
-      resolveOnce(capturedFingerprint)
+    const capturedResult = onScanResult()
+    if (capturedResult != null) {
+      resolveOnce(capturedResult)
     }
   })
 
   client.on("error", (error: unknown) => {
-    const capturedFingerprint = onFingerprint()
-    if (capturedFingerprint != null) {
-      resolveOnce(capturedFingerprint)
+    const capturedResult = onScanResult()
+    if (capturedResult != null) {
+      resolveOnce(capturedResult)
       return
     }
     rejectOnce(error)
@@ -156,9 +167,9 @@ function registerFingerprintListeners(parameters: {
 async function readFingerprintFromClient(
   client: HostKeyClient,
   parameters: { host: string; port: number; readyTimeoutMs: number }
-): Promise<string> {
+): Promise<HostFingerprintScanResult> {
   const { host, port, readyTimeoutMs } = parameters
-  let capturedFingerprint: null | string = null
+  let capturedResult: HostFingerprintScanResult | null = null
 
   return new Promise((resolve, reject) => {
     const cleanup = (): void => {
@@ -173,7 +184,7 @@ async function readFingerprintFromClient(
     })
     registerFingerprintListeners({
       client,
-      onFingerprint: () => capturedFingerprint,
+      onScanResult: () => capturedResult,
       rejectOnce,
       resolveOnce,
     })
@@ -181,8 +192,8 @@ async function readFingerprintFromClient(
     try {
       client.connect(
         createConnectionConfig({
-          captureFingerprint: (fingerprint) => {
-            capturedFingerprint = fingerprint
+          captureScanResult: (result) => {
+            capturedResult = result
           },
           host,
           port,
@@ -198,7 +209,7 @@ async function readFingerprintFromClient(
 export async function readHostFingerprintViaSsh2(
   host: string,
   options: HostFingerprintBootstrapOptions = {}
-): Promise<string> {
+): Promise<HostFingerprintScanResult> {
   const { client, port, readyTimeoutMs } = resolveBootstrapOptions(options)
   return readFingerprintFromClient(client, { host, port, readyTimeoutMs })
 }

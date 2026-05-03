@@ -79,6 +79,34 @@ describe("archive.extract — check", () => {
     expect(mockSsh.calls).not.toContain(`test -f '${marker}'`)
   })
 
+  it("R-0000105: throws when marker cat fails with a non-missing error", async () => {
+    // Permission-denied (or any non "No such file" error) on the marker
+    // must not silently collapse to an empty stdout — that would force a
+    // costly re-extract of the entire archive even though the marker
+    // existed and matched. Surface the real cause instead.
+    const mockSsh = createMockSsh({
+      [`cat '${marker}'`]: { code: 1, stderr: `cat: '${marker}': Permission denied` },
+      [`test -d '${destination}'`]: { code: 0 },
+      [`test -f '${marker}'`]: { code: 0 },
+    })
+    const mod = archive.extract(src, destination)
+    await expect(mod.check(mockSsh, emptyEnv)).rejects.toThrow(/marker file unreadable/v)
+  })
+
+  it("R-0000105: returns needs-apply when marker cat reports 'No such file'", async () => {
+    // Race between test -f and cat (e.g. concurrent cleanup): treat the
+    // missing marker as a regular needs-apply, identical to the case where
+    // test -f already failed.
+    const mockSsh = createMockSsh({
+      [`cat '${marker}'`]: { code: 1, stderr: `cat: '${marker}': No such file or directory` },
+      [`test -d '${destination}'`]: { code: 0 },
+      [`test -f '${marker}'`]: { code: 0 },
+    })
+    const mod = archive.extract(src, destination)
+    const result = await mod.check(mockSsh, emptyEnv)
+    expect(result).toBe("needs-apply")
+  })
+
   it("computes local sha256 when upload is true without uploading", async () => {
     const localFile = "/local/app.tar.gz"
     const localFileHash = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
