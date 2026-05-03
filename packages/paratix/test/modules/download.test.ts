@@ -37,6 +37,7 @@ type MockSshWithOptions = {
 /**
  * Extended mock that records exec options (e.g. secrets) alongside commands.
  *
+ * @param responses - Optional response map forwarded to {@link createMockSsh}.
  * @returns A mock SSH connection that stores each exec call with its options.
  */
 function createMockSshWithOptions(

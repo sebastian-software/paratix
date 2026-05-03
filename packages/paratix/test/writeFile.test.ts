@@ -36,6 +36,10 @@ function makeLargeContent(): string {
   return "a".repeat(100_000)
 }
 
+function isBase64FallbackCommand(command: string, tmpPath: string): boolean {
+  return command.includes("base64 -d") && command.includes(tmpPath)
+}
+
 type StreamWithStderr = { stderr: EventEmitter } & EventEmitter
 
 type ExecCallback = (err: Error | undefined, stream: StreamWithStderr) => void
@@ -536,18 +540,16 @@ describe("SshConnectionImpl.writeFile — large content (> 64 KB)", () => {
     const ssh = makeConnectedSsh(client)
     vi.mocked(sftpUpload).mockResolvedValue()
 
-    await expect(
-      ssh.writeFile(remotePath, largeContent, { mode: "0644" })
-    ).resolves.toBeUndefined()
+    await expect(ssh.writeFile(remotePath, largeContent, { mode: "0644" })).resolves.toBeUndefined()
 
-    const executedCommands = (
-      stdinFallbackExecSpy.mock.calls as Array<[string, ...unknown[]]>
-    ).map(([command]) => command)
+    const executedCommands = (stdinFallbackExecSpy.mock.calls as Array<[string, ...unknown[]]>).map(
+      ([command]) => command
+    )
 
     // The shell fallback must use a `base64 -d > <tmp>` redirect — not the
     // legacy `printf '%s' <encoded>` pipeline that placed the payload on argv.
-    const fallbackCommand = executedCommands.find(
-      (command) => command.includes("base64 -d") && command.includes(fallbackTmpPath)
+    const fallbackCommand = executedCommands.find((command) =>
+      isBase64FallbackCommand(command, fallbackTmpPath)
     )
     expect(fallbackCommand).toBeDefined()
     expect(fallbackCommand).not.toContain("printf '%s'")

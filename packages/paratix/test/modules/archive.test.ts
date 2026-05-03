@@ -364,8 +364,7 @@ describe("archive.extract — apply", () => {
     // and silently corrupt the upload pipeline. The validateMktempPath
     // guard rejects the entire payload instead of using the second line.
     const localFile = "/local/app.tar.gz"
-    const poisonedOutput =
-      "mktemp: ungültiges Format ...\n/tmp/paratix-upload.AbCdEfGh"
+    const poisonedOutput = "mktemp: ungültiges Format ...\n/tmp/paratix-upload.AbCdEfGh"
     const mockSsh = createMockSsh({
       "mktemp /tmp/paratix-upload.XXXXXXXX": { code: 0, stdout: poisonedOutput },
     })

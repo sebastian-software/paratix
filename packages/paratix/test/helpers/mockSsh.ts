@@ -140,7 +140,6 @@ function createTest(
     const match = getMockResponse({ command, kind: "test", options, responses })
     if (match) return match.code === 0
     if (warnOnUnstubbed) {
-      // eslint-disable-next-line no-console -- Opt-in test diagnostics
       console.warn(`createMockSsh: unstubbed test call: ${command}`)
     }
     return defaultResult

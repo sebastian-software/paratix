@@ -41,7 +41,10 @@ describe("createMockSsh", () => {
   })
 
   it("warns about unstubbed test calls when warnOnUnstubbedTest is enabled", async () => {
-    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => undefined)
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {
+      // Silence the warning so it does not pollute test output; the assertion
+      // below verifies that the warning was invoked.
+    })
     try {
       const ssh = createMockSsh({}, { warnOnUnstubbedTest: true })
       await ssh.test("test -f /tmp/audit")

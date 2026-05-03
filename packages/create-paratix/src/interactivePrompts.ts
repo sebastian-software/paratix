@@ -228,6 +228,30 @@ export async function promptForAdminPublicKey(
 // internal call sites strongly typed.
 type HostFingerprintSelectValue = "abort" | "continue" | "discard" | "pin" | "placeholder" | "scan"
 
+/**
+ * Run a typed select on a chooser parameterised over a wider value set.
+ * The chooser is contravariant in `TValue` for the options parameter, so
+ * passing a narrow `Array<SelectOption<TNarrow>>` is sound, but the
+ * returned `TWide` must be narrowed to `TNarrow` at runtime — the runtime
+ * value is guaranteed to be one of the offered options.
+ *
+ * @param choose - The chooser parameterised over a wider value set.
+ * @param prompt - The prompt text to display.
+ * @param options - The options offered to the operator.
+ * @returns The selected value, narrowed to `TNarrow`.
+ */
+async function chooseFrom<TWide extends string, TNarrow extends TWide>(
+  choose: SelectFunction<TWide>,
+  prompt: string,
+  options: Array<SelectOption<TNarrow>>
+): Promise<TNarrow> {
+  const result = await choose(prompt, options)
+  // The runtime value is one of `options`, hence a TNarrow. The static
+  // narrowing cannot be expressed without a cast.
+  // eslint-disable-next-line @typescript-eslint/no-unsafe-type-assertion -- runtime value is one of `options`, hence a TNarrow
+  return result as TNarrow
+}
+
 async function confirmAfterScanFailure(
   choose: SelectFunction<HostFingerprintSelectValue>,
   host: string,
@@ -248,7 +272,8 @@ async function confirmAfterScanFailure(
     ].join("\n")
   )
 
-  const decision = await (choose as SelectFunction<"abort" | "continue">)(
+  const decision = await chooseFrom(
+    choose,
     `How should create-paratix proceed after the failed host-key scan for ${host}?`,
     HOST_FINGERPRINT_SCAN_FAILURE_OPTIONS
   )
@@ -260,6 +285,52 @@ async function confirmAfterScanFailure(
         `or skip the scan by selecting "Keep placeholder".`
     )
   }
+}
+
+/**
+ * Run the scan-and-confirm flow for a host fingerprint.
+ *
+ * @param parameters - Scan flow parameters.
+ * @param parameters.choose - Interactive select function.
+ * @param parameters.host - The remote host to scan.
+ * @param parameters.scanner - Implementation of the SSH host-key scan.
+ * @returns The pinned fingerprint, or `undefined` when the operator
+ *   declines to pin.
+ */
+async function scanAndConfirmFingerprint(parameters: {
+  choose: SelectFunction<HostFingerprintSelectValue>
+  host: string
+  scanner: (host: string) => Promise<HostFingerprintScanResult>
+}): Promise<string | undefined> {
+  const { choose, host, scanner } = parameters
+
+  let result: HostFingerprintScanResult
+  try {
+    result = await scanner(host)
+  } catch (error) {
+    // R-0000128: do not silently swallow scan failures. Surface a
+    // possible-MITM warning and let the operator decide between aborting
+    // and continuing without pinning. confirmAfterScanFailure throws
+    // when the operator chooses to abort so the caller propagates a
+    // non-zero exit instead of a quiet undefined.
+    await confirmAfterScanFailure(choose, host, error)
+    return undefined
+  }
+
+  // R-0000122: surface the scanned material on isolated lines so the
+  // operator can copy and compare it against an out-of-band reference
+  // before pinning it into server.ts.
+  console.log(describeScanResult(host, result))
+
+  const confirmation = await chooseFrom(
+    choose,
+    `Pin the scanned host fingerprint for ${host}?`,
+    HOST_FINGERPRINT_CONFIRM_OPTIONS
+  )
+  if (confirmation !== "pin") {
+    return undefined
+  }
+  return result.fingerprint
 }
 
 export async function promptForHostFingerprint(
@@ -275,7 +346,8 @@ export async function promptForHostFingerprint(
   }
 
   try {
-    const hostKeyMode = await (choose as SelectFunction<"placeholder" | "scan">)(
+    const hostKeyMode = await chooseFrom(
+      choose,
       `How should create-paratix bootstrap the SSH host key for ${host}?`,
       HOST_FINGERPRINT_OPTIONS
     )
@@ -283,32 +355,7 @@ export async function promptForHostFingerprint(
       return undefined
     }
 
-    let result: HostFingerprintScanResult
-    try {
-      result = await scanner(host)
-    } catch (error) {
-      // R-0000128: do not silently swallow scan failures. Surface a
-      // possible-MITM warning and let the operator decide between aborting
-      // and continuing without pinning. confirmAfterScanFailure throws
-      // when the operator chooses to abort so the caller propagates a
-      // non-zero exit instead of a quiet undefined.
-      await confirmAfterScanFailure(choose, host, error)
-      return undefined
-    }
-
-    // R-0000122: surface the scanned material on isolated lines so the
-    // operator can copy and compare it against an out-of-band reference
-    // before pinning it into server.ts.
-    console.log(describeScanResult(host, result))
-
-    const confirmation = await (choose as SelectFunction<"discard" | "pin">)(
-      `Pin the scanned host fingerprint for ${host}?`,
-      HOST_FINGERPRINT_CONFIRM_OPTIONS
-    )
-    if (confirmation !== "pin") {
-      return undefined
-    }
-    return result.fingerprint
+    return await scanAndConfirmFingerprint({ choose, host, scanner })
   } finally {
     terminalSelect?.close()
   }

@@ -623,10 +623,7 @@ describe("runPlaybook handlePortChange + handleReboot interaction", () => {
 
     const { runPlaybook } = await import("../src/runner.js")
 
-    const moduleWithMultiplePorts = makeModuleWithMeta([
-      meta.sshdPort(2222),
-      meta.sshdPort(2223),
-    ])
+    const moduleWithMultiplePorts = makeModuleWithMeta([meta.sshdPort(2222), meta.sshdPort(2223)])
 
     const definition: ServerDefinition = {
       host: "1.2.3.4",

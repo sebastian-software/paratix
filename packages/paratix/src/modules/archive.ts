@@ -26,6 +26,20 @@ function markerPath(source: string, destination: string): string {
 }
 
 /**
+ * Build a descriptive error for a marker file that exists but cannot be
+ * read. The `cat` stderr is preferred over the exit code when available.
+ *
+ * @param result - The result of the marker `cat` invocation.
+ * @param result.code - The exit code from `cat`.
+ * @param result.stderr - The stderr emitted by `cat`.
+ * @returns An Error describing why the marker is unreadable.
+ */
+function buildMarkerUnreadableError(result: { code: number; stderr: string }): Error {
+  const reason = result.stderr.trim() || `cat exited with code ${result.code}`
+  return new Error(`[archive.extract] marker file unreadable: ${reason}`)
+}
+
+/**
  * Build the extract command based on the file extension of the original source.
  *
  * @param source - The original archive path used for format detection.
@@ -324,9 +338,7 @@ export const archive = {
         const markerResult = await conn.exec(`cat ${shellQuote(marker)}`, EXEC_OPTS)
         if (markerResult.code !== 0) {
           if (/no such file/iv.test(markerResult.stderr)) return NEEDS_APPLY
-          throw new Error(
-            `[archive.extract] marker file unreadable: ${markerResult.stderr.trim() || `cat exited with code ${markerResult.code}`}`
-          )
+          throw buildMarkerUnreadableError(markerResult)
         }
         const markerContent = markerResult.stdout.trim()
 

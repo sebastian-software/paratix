@@ -111,9 +111,21 @@ describe("isDirectCliExecution", () => {
     } finally {
       // Unlink the symlink loop before rmSync so that Node/macOS does not
       // encounter ELOOP when recursively deleting the directory.
-      try { unlinkSync(loopingSymlink) } catch { /* already gone */ }
-      try { unlinkSync(innerLoopSymlink) } catch { /* already gone */ }
-      try { rmSync(tempDirectory, { force: true, recursive: true }) } catch { /* best-effort cleanup */ }
+      try {
+        unlinkSync(loopingSymlink)
+      } catch {
+        /* already gone */
+      }
+      try {
+        unlinkSync(innerLoopSymlink)
+      } catch {
+        /* already gone */
+      }
+      try {
+        rmSync(tempDirectory, { force: true, recursive: true })
+      } catch {
+        /* best-effort cleanup */
+      }
     }
   })
 })

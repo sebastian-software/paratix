@@ -203,10 +203,9 @@ function validateTemporaryDownloadPath(destination: string, rawTemporaryPath: st
     return validateMktempPath(directory, rawTemporaryPath, DOWNLOAD_TEMPORARY_PREFIX)
   } catch (error) {
     const reason = error instanceof Error ? error.message : String(error)
-    throw new Error(
-      `[download] mktemp produced an unexpected path for ${destination}: ${reason}`,
-      { cause: error }
-    )
+    throw new Error(`[download] mktemp produced an unexpected path for ${destination}: ${reason}`, {
+      cause: error,
+    })
   }
 }
 

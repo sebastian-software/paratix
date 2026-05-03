@@ -801,7 +801,7 @@ describe("SshConnectionImpl", () => {
 
       const ssh = makeSshInstanceWithAgent({ passwordFallback: true })
 
-      await expect(ssh.connect()).rejects.toThrow()
+      await expect(ssh.connect()).rejects.toThrow(/Failed to connect to/v)
       expect(getRegisteredSecrets()).not.toContain(password)
     })
 

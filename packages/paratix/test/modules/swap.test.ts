@@ -226,6 +226,9 @@ describe("swap.file — apply", () => {
     expect(ssh.calls).toContain(
       `fallocate -l '${smallSize}' '${swapPath}' || dd if=/dev/zero of='${swapPath}' bs=1M count=512 status=none`
     )
+    // The fallback writes the desired fstab line; confirm no other writes
+    // leaked through the writeFile spy.
+    expect(writtenFiles.map((entry) => entry.path)).toStrictEqual(["/etc/fstab"])
   })
 
   it("removes swap activation, persistence, and file for absent state", async () => {

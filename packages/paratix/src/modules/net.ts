@@ -60,12 +60,15 @@ function buildHostsLine(ip: string, hostnames: string[]): string {
  * @returns The parsed IP and hostname tokens, or `undefined` for blanks
  *   and comment lines.
  */
-function parseHostsLine(line: string): undefined | { hostnames: string[]; ip: string } {
+function parseHostsLine(line: string): { hostnames: string[]; ip: string } | undefined {
   const trimmed = line.trim()
   if (trimmed === "" || trimmed.startsWith("#")) return undefined
   const tokens = trimmed.split(/\s+/v)
   const [ip, ...hostnames] = tokens
-  if (ip === undefined || ip === "") return undefined
+  // `tokens` is non-empty here because `trimmed` is non-empty and `split`
+  // always yields at least one element, so `ip` is a string. Empty-string
+  // protection guards against pathological inputs.
+  if (ip === "") return undefined
   return { hostnames, ip }
 }
 
@@ -306,6 +309,133 @@ async function checkRouteState(
   return dropinPresent ? NEEDS_APPLY : "ok"
 }
 
+/** Shared parameters for the net.hosts apply/check helpers. */
+type HostsStateParameters = {
+  expectedLine: string
+  isSameIpLine: (line: string) => boolean
+  matchesAbsentTarget: (line: string) => boolean
+  state: "absent" | "present"
+}
+
+/** Snapshot of /etc/hosts content used by the apply helpers. */
+type HostsFileSnapshot = {
+  content: string
+  lines: string[]
+}
+
+/**
+ * Apply the `state: "present"` reconciliation for /etc/hosts.
+ *
+ * @param conn - The SSH connection.
+ * @param parameters - Cached hosts state context.
+ * @param snapshot - The current /etc/hosts content and its lines.
+ * @returns The module result for the apply operation.
+ */
+async function applyHostsPresent(
+  conn: SshConnection,
+  parameters: HostsStateParameters,
+  snapshot: HostsFileSnapshot
+): Promise<ModuleResult> {
+  const { expectedLine, isSameIpLine } = parameters
+  const { content, lines } = snapshot
+  // The file is already canonical when there is exactly one line for
+  // this IP and it matches the desired byte sequence. Otherwise we
+  // strip every line whose first token equals `ip` and append the
+  // expected line, which collapses duplicates and replaces stale
+  // entries (e.g. `192.168.1.1 host1` -> `192.168.1.1 host2`).
+  const sameIpLines = lines.filter((line) => isSameIpLine(line))
+  const alreadyCanonical = sameIpLines.length === 1 && sameIpLines[0]?.trim() === expectedLine
+  if (alreadyCanonical) return { status: "ok" }
+
+  const filtered = lines.filter((line) => !isSameIpLine(line))
+  // Drop a single trailing blank introduced by `split("\n")` so we
+  // do not accumulate empty lines on every replacement.
+  if (filtered.length > 0 && filtered.at(-1) === "") filtered.pop()
+  filtered.push(expectedLine)
+  const newContent = `${filtered.join("\n")}\n`
+  await guardedWriteFile(conn, {
+    mode: HOSTS_FILE_MODE,
+    newContent,
+    originalContent: content,
+    remotePath: HOSTS_FILE,
+  })
+  return { status: "changed" }
+}
+
+/**
+ * Apply the `state: "absent"` reconciliation for /etc/hosts.
+ *
+ * @param conn - The SSH connection.
+ * @param parameters - Cached hosts state context.
+ * @param snapshot - The current /etc/hosts content and its lines.
+ * @returns The module result for the apply operation.
+ */
+async function applyHostsAbsent(
+  conn: SshConnection,
+  parameters: HostsStateParameters,
+  snapshot: HostsFileSnapshot
+): Promise<ModuleResult> {
+  const { matchesAbsentTarget } = parameters
+  const { content, lines } = snapshot
+  const alreadyAbsent = !lines.some((line) => matchesAbsentTarget(line))
+  if (alreadyAbsent) return { status: "ok" }
+  const newContent = lines.filter((line) => !matchesAbsentTarget(line)).join("\n")
+  await guardedWriteFile(conn, {
+    mode: HOSTS_FILE_MODE,
+    newContent,
+    originalContent: content,
+    remotePath: HOSTS_FILE,
+  })
+  return { status: "changed" }
+}
+
+/**
+ * Apply the desired /etc/hosts entry for the given parameters.
+ *
+ * @param conn - The SSH connection.
+ * @param parameters - Cached hosts state context.
+ * @returns The module result for the apply operation.
+ */
+async function applyHostsState(
+  conn: SshConnection,
+  parameters: HostsStateParameters
+): Promise<ModuleResult> {
+  const content = await conn.readFile(HOSTS_FILE)
+  const snapshot: HostsFileSnapshot = { content, lines: content.split("\n") }
+  return parameters.state === "present"
+    ? applyHostsPresent(conn, parameters, snapshot)
+    : applyHostsAbsent(conn, parameters, snapshot)
+}
+
+/**
+ * Determine whether the current /etc/hosts content already matches the
+ * desired hosts entry.
+ *
+ * @param conn - The SSH connection.
+ * @param parameters - Cached hosts state context.
+ * @returns `"ok"` when the file matches, otherwise `"needs-apply"`.
+ */
+async function checkHostsState(
+  conn: SshConnection,
+  parameters: HostsStateParameters
+): Promise<"needs-apply" | "ok"> {
+  const { expectedLine, isSameIpLine, matchesAbsentTarget, state } = parameters
+  const content = await conn.readFile(HOSTS_FILE)
+  const lines = content.split("\n")
+
+  if (state === "present") {
+    // Drift if there is more than one entry for this IP or if the
+    // single entry does not match the desired byte sequence — both
+    // would be reconciled by apply.
+    const sameIpLines = lines.filter((line) => isSameIpLine(line))
+    if (sameIpLines.length === 1 && sameIpLines[0]?.trim() === expectedLine) return "ok"
+    return NEEDS_APPLY
+  }
+
+  const found = lines.some((line) => matchesAbsentTarget(line))
+  return found ? NEEDS_APPLY : "ok"
+}
+
 /**
  * Modules for managing network configuration on the remote host.
  */
@@ -330,11 +460,11 @@ export const net = {
     // whitespace and hostname order.
     const isSameIpLine = (line: string): boolean => {
       const parsed = parseHostsLine(line)
-      return parsed !== undefined && parsed.ip === ip
+      return parsed?.ip === ip
     }
     const matchesAbsentTarget = (line: string): boolean => {
       const parsed = parseHostsLine(line)
-      if (parsed === undefined || parsed.ip !== ip) return false
+      if (parsed?.ip !== ip) return false
       return hostnameSetsEqual(parsed.hostnames, hostnames)
     }
 
@@ -343,64 +473,21 @@ export const net = {
         if (!conn) {
           return failed(`[net.hosts: ${ip} ${hostnames.join(" ")}] SSH connection is required`)
         }
-
-        const content = await conn.readFile(HOSTS_FILE)
-        const lines = content.split("\n")
-
-        if (state === "present") {
-          // The file is already canonical when there is exactly one line for
-          // this IP and it matches the desired byte sequence. Otherwise we
-          // strip every line whose first token equals `ip` and append the
-          // expected line, which collapses duplicates and replaces stale
-          // entries (e.g. `192.168.1.1 host1` -> `192.168.1.1 host2`).
-          const sameIpLines = lines.filter((line) => isSameIpLine(line))
-          const alreadyCanonical =
-            sameIpLines.length === 1 && sameIpLines[0]?.trim() === expectedLine
-          if (alreadyCanonical) return { status: "ok" }
-
-          const filtered = lines.filter((line) => !isSameIpLine(line))
-          // Drop a single trailing blank introduced by `split("\n")` so we
-          // do not accumulate empty lines on every replacement.
-          if (filtered.length > 0 && filtered.at(-1) === "") filtered.pop()
-          filtered.push(expectedLine)
-          const newContent = `${filtered.join("\n")}\n`
-          await guardedWriteFile(conn, {
-            mode: HOSTS_FILE_MODE,
-            newContent,
-            originalContent: content,
-            remotePath: HOSTS_FILE,
-          })
-        } else {
-          const alreadyAbsent = !lines.some((line) => matchesAbsentTarget(line))
-          if (alreadyAbsent) return { status: "ok" }
-          const newContent = lines.filter((line) => !matchesAbsentTarget(line)).join("\n")
-          await guardedWriteFile(conn, {
-            mode: HOSTS_FILE_MODE,
-            newContent,
-            originalContent: content,
-            remotePath: HOSTS_FILE,
-          })
-        }
-
-        return { status: "changed" }
+        return applyHostsState(conn, {
+          expectedLine,
+          isSameIpLine,
+          matchesAbsentTarget,
+          state,
+        })
       },
       async check(conn: null | SshConnection): Promise<"needs-apply" | "ok"> {
         if (!conn) return NEEDS_APPLY
-
-        const content = await conn.readFile(HOSTS_FILE)
-        const lines = content.split("\n")
-
-        if (state === "present") {
-          // Drift if there is more than one entry for this IP or if the
-          // single entry does not match the desired byte sequence — both
-          // would be reconciled by apply.
-          const sameIpLines = lines.filter((line) => isSameIpLine(line))
-          if (sameIpLines.length === 1 && sameIpLines[0]?.trim() === expectedLine) return "ok"
-          return NEEDS_APPLY
-        }
-
-        const found = lines.some((line) => matchesAbsentTarget(line))
-        return found ? NEEDS_APPLY : "ok"
+        return checkHostsState(conn, {
+          expectedLine,
+          isSameIpLine,
+          matchesAbsentTarget,
+          state,
+        })
       },
       name: `net.hosts: ${ip} ${hostnames.join(" ")}`,
     }

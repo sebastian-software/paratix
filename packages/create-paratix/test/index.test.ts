@@ -828,22 +828,18 @@ describe("promptForHostFingerprint", () => {
     )
     expect(scanner).toHaveBeenCalledWith("example.com")
     expect(select).toHaveBeenCalledTimes(2)
-    expect(select).toHaveBeenNthCalledWith(
-      2,
-      "Pin the scanned host fingerprint for example.com?",
-      [
-        {
-          description: expect.stringContaining("Pin the scanned fingerprint"),
-          label: "Pin this fingerprint",
-          value: "pin",
-        },
-        {
-          description: expect.stringContaining("Keep the expectedHostFingerprint placeholder"),
-          label: "Discard and keep placeholder",
-          value: "discard",
-        },
-      ]
-    )
+    expect(select).toHaveBeenNthCalledWith(2, "Pin the scanned host fingerprint for example.com?", [
+      {
+        description: expect.stringContaining("Pin the scanned fingerprint"),
+        label: "Pin this fingerprint",
+        value: "pin",
+      },
+      {
+        description: expect.stringContaining("Keep the expectedHostFingerprint placeholder"),
+        label: "Discard and keep placeholder",
+        value: "discard",
+      },
+    ])
   })
 
   // R-0000122: an operator who chooses "Discard and keep placeholder" must
@@ -1081,18 +1077,18 @@ describe("readHostFingerprintViaSsh2", () => {
     try {
       const promise = readHostFingerprintViaSsh2("example.com", {
         clientFactory: () => fakeClient,
-        readyTimeoutMs: 5_000,
+        readyTimeoutMs: 5000,
       })
 
-      // Attach the rejection assertion before advancing timers so the
-      // promise's rejection handler is wired up when the watchdog fires.
-      const assertion = expect(promise).rejects.toThrow(
-        /host key scan timed out after 10000ms/v
-      )
-
+      // Attach a no-op rejection handler before advancing timers so the
+      // watchdog can settle the promise without an unhandled-rejection
+      // warning from Node, then advance timers and assert.
+      promise.catch(() => {
+        // Swallow the rejection until the assertion below observes it.
+      })
       // Watchdog is armed at readyTimeoutMs * 2 = 10_000ms.
       await vi.advanceTimersByTimeAsync(10_001)
-      await assertion
+      await expect(promise).rejects.toThrow(/host key scan timed out after 10000ms/v)
 
       expect(fakeClient.removeAllListeners).toHaveBeenCalled()
     } finally {

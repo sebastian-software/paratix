@@ -21,7 +21,7 @@ const ID_CMD = "id"
 // may be lowercase letters, digits, underscores, or hyphens; an optional
 // trailing `$` is accepted to match the convention used for samba machine
 // accounts.
-const USER_NAME_PATTERN = /^[a-z_][a-z0-9_-]*\$?$/
+const USER_NAME_PATTERN = /^[a-z_][a-z0-9_\-]*\$?$/v
 
 function assertValidUserName(name: string): void {
   if (!USER_NAME_PATTERN.test(name)) {
@@ -34,7 +34,8 @@ function assertValidUserName(name: string): void {
 // (commas, newlines, flag-shaped values) cannot reach the `useradd` /
 // `usermod` argument vector. uid_t is a 32-bit unsigned integer on Linux, so
 // any value outside [0, 2^32) would be silently truncated by `useradd --uid`.
-const UID_MAX_EXCLUSIVE = 2 ** 32
+const UID_BIT_WIDTH = 32
+const UID_MAX_EXCLUSIVE = 2 ** UID_BIT_WIDTH
 
 function assertValidUid(uid: number): void {
   if (!Number.isInteger(uid) || uid < 0 || uid >= UID_MAX_EXCLUSIVE) {
