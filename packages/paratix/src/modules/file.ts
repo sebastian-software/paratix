@@ -57,6 +57,10 @@ function validateAbsentPath(remotePath: string): void {
     throw new Error("file.absent: remotePath must not be empty")
   }
 
+  if (!posix.isAbsolute(trimmedPath)) {
+    throw new Error(`file.absent: remotePath must be an absolute path: ${remotePath}`)
+  }
+
   if (posix.normalize(trimmedPath) === "/") {
     throw new Error(`file.absent: refusing to remove destructive path: ${remotePath}`)
   }
