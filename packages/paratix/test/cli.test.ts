@@ -1123,16 +1123,36 @@ describe("CLI entrypoint", () => {
   it("awaits the async apply action and prints validation errors for invalid playbooks", () => {
     const tempDirectory = mkdtempSync(join(tmpdir(), "paratix-cli-"))
     const playbookPath = join(tempDirectory, "invalid-server.mjs")
-    const cliPath = resolve(new URL("../dist/cli.js", import.meta.url).pathname)
+    const definePath = join(tempDirectory, "package-display-version.mjs")
+    const packageDirectory = resolve(new URL("..", import.meta.url).pathname)
+    const cliPath = resolve(new URL("../src/cli.ts", import.meta.url).pathname)
 
     try {
       writeFileSync(playbookPath, "export default {}\n")
+      writeFileSync(
+        definePath,
+        `globalThis.PACKAGE_DISPLAY_VERSION = ${JSON.stringify(PACKAGE_DISPLAY_VERSION)};\n`
+      )
 
       const error = captureExecFailure(() => {
-        execFileSync(process.execPath, [cliPath, "apply", playbookPath, "--dry-run"], {
-          encoding: "utf8",
-          stdio: "pipe",
-        })
+        execFileSync(
+          process.execPath,
+          [
+            "--import",
+            "tsx",
+            "--import",
+            definePath,
+            cliPath,
+            "apply",
+            playbookPath,
+            "--dry-run",
+          ],
+          {
+            cwd: packageDirectory,
+            encoding: "utf8",
+            stdio: "pipe",
+          }
+        )
       })
 
       expect(error).toBeInstanceOf(Error)
