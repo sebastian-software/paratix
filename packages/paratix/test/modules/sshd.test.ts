@@ -822,7 +822,7 @@ describe("sshd.port — apply: validation and rollback", () => {
     const mockSsh = createMockSsh({
       [CAT_SSHD]: { stdout: "Port 22" },
     })
-    trackWriteFile(mockSsh)
+    const writtenFiles = trackWriteFile(mockSsh)
     const execSpy = vi.spyOn(mockSsh, "exec")
     const addPortSpy = vi.spyOn(mockSsh, "addPort")
     const removePortSpy = vi.spyOn(mockSsh, "removePort")
@@ -840,6 +840,39 @@ describe("sshd.port — apply: validation and rollback", () => {
 
     expect(addPortSpy).toHaveBeenCalledWith(2222)
     expect(removePortSpy).toHaveBeenCalledWith(2222)
+    expect(writtenFiles.at(-1)?.content).toBe("Port 22")
+    expect(writtenFiles.at(-1)?.path).toBe(SSHD_CONFIG)
+  })
+
+  it("restores config and ssh.socket when restart fails after disabling socket activation", async () => {
+    const mockSsh = createMockSsh({
+      [CAT_SSHD]: { stdout: "Port 22" },
+    })
+    const writtenFiles = trackWriteFile(mockSsh)
+    const execSpy = vi.spyOn(mockSsh, "exec")
+    const removePortSpy = vi.spyOn(mockSsh, "removePort")
+
+    execSpy
+      .mockResolvedValueOnce({ code: 0, stderr: "", stdout: "" }) // mkdir -p /run/sshd
+      .mockResolvedValueOnce({ code: 0, stderr: "", stdout: "" }) // sshd -t
+      .mockResolvedValueOnce({ code: 0, stderr: "", stdout: "" }) // ssh.socket exists
+      .mockResolvedValueOnce({ code: 0, stderr: "", stdout: "" }) // ssh.socket enabled
+      .mockResolvedValueOnce({ code: 0, stderr: "", stdout: "" }) // ssh.socket active
+      .mockResolvedValueOnce({ code: 0, stderr: "", stdout: "" }) // disable --now ssh.socket
+      .mockResolvedValueOnce({ code: 0, stderr: "", stdout: "" }) // sshd.service exists
+      .mockRejectedValueOnce(new Error("systemctl restart sshd failed")) // systemctl restart
+      .mockResolvedValueOnce({ code: 0, stderr: "", stdout: "" }) // enable --now ssh.socket
+
+    const mod = sshd.port(2222)
+    await expect(mod.apply(mockSsh, emptyEnv)).rejects.toThrow("systemctl restart sshd failed")
+
+    const execCommands = execSpy.mock.calls.map((args) => args[0])
+    expect(execCommands).toContain("systemctl disable --now ssh.socket")
+    expect(execCommands).toContain("systemctl enable --now ssh.socket")
+    expect(execCommands.filter((command) => command === "systemctl restart sshd")).toHaveLength(2)
+    expect(removePortSpy).toHaveBeenCalledWith(2222)
+    expect(writtenFiles.at(-1)?.content).toBe("Port 22")
+    expect(writtenFiles.at(-1)?.path).toBe(SSHD_CONFIG)
   })
 
   it("regression — keeps added port when restart aborts the SSH session", async () => {

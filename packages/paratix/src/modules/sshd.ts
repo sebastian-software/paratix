@@ -19,6 +19,10 @@ const SSHD_CONFIG_PATH = "/etc/ssh/sshd_config"
 const SSHD_CONFIG_MODE = "0644"
 const SYSTEMCTL = "systemctl"
 
+type SshSocketState =
+  | { active: boolean; enabled: boolean; exists: true }
+  | { exists: false }
+
 // sshd_config(5) directive names are alphabetic ASCII identifiers (the parser
 // is case-insensitive). Constraining keys to this shape prevents callers from
 // smuggling regex/shell metacharacters or whitespace into the rewriter.
@@ -60,17 +64,55 @@ async function ensurePrivilegeSeparationDirectory(ssh: SshConnection): Promise<v
   })
 }
 
-async function disableSocketActivatedSsh(ssh: SshConnection): Promise<void> {
+async function captureSshSocketState(ssh: SshConnection): Promise<SshSocketState> {
   const socketExists = await ssh.exec("systemctl cat ssh.socket >/dev/null 2>&1", {
     ignoreExitCode: true,
     silent: true,
   })
-  if (socketExists.code !== 0) return
+  if (socketExists.code !== 0) return { exists: false }
+
+  const enabled = await ssh.exec("systemctl is-enabled --quiet ssh.socket", {
+    ignoreExitCode: true,
+    silent: true,
+  })
+  const active = await ssh.exec("systemctl is-active --quiet ssh.socket", {
+    ignoreExitCode: true,
+    silent: true,
+  })
+
+  return {
+    active: active.code === 0,
+    enabled: enabled.code === 0,
+    exists: true,
+  }
+}
+
+async function disableSocketActivatedSsh(ssh: SshConnection): Promise<SshSocketState> {
+  const socketState = await captureSshSocketState(ssh)
+  if (!socketState.exists) return socketState
 
   await ssh.exec("systemctl disable --now ssh.socket", {
     ignoreExitCode: false,
     silent: true,
   })
+  return socketState
+}
+
+async function restoreSocketActivatedSsh(
+  ssh: SshConnection,
+  socketState: SshSocketState
+): Promise<void> {
+  if (!socketState.exists) return
+  if (socketState.enabled && socketState.active) {
+    await ssh.exec("systemctl enable --now ssh.socket", { ignoreExitCode: false, silent: true })
+    return
+  }
+  if (socketState.enabled) {
+    await ssh.exec("systemctl enable ssh.socket", { ignoreExitCode: false, silent: true })
+  }
+  if (socketState.active) {
+    await ssh.exec("systemctl start ssh.socket", { ignoreExitCode: false, silent: true })
+  }
 }
 
 async function resolveSshServiceUnit(ssh: SshConnection): Promise<"ssh" | "sshd"> {
@@ -188,13 +230,23 @@ async function applySshdPort(ssh: SshConnection, targetPort: number): Promise<Mo
   })
   await validateSshdConfig(ssh, originalConfig)
   ssh.addPort(targetPort)
+  let socketState: SshSocketState = { exists: false }
+  let serviceUnit: "ssh" | "sshd" | undefined
   try {
-    await disableSocketActivatedSsh(ssh)
-    const serviceUnit = await resolveSshServiceUnit(ssh)
+    socketState = await disableSocketActivatedSsh(ssh)
+    serviceUnit = await resolveSshServiceUnit(ssh)
     await ssh.exec(`${SYSTEMCTL} restart ${serviceUnit}`, { silent: true })
   } catch (error) {
     if (!isRestartDisconnect(error)) {
       ssh.removePort(targetPort)
+      await ssh.writeFile(SSHD_CONFIG_PATH, originalConfig, { mode: SSHD_CONFIG_MODE })
+      await restoreSocketActivatedSsh(ssh, socketState)
+      if (serviceUnit != null) {
+        await ssh.exec(`${SYSTEMCTL} restart ${serviceUnit}`, {
+          ignoreExitCode: true,
+          silent: true,
+        })
+      }
     }
     throw error
   }
