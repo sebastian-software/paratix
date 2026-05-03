@@ -6,8 +6,13 @@ import { withRegisteredSecrets } from "../secretSink.js"
 import { shellQuote, validateMode } from "../ssh.js"
 import { maskSecrets } from "../sshHelpers.js"
 import { type Module, type ModuleResult, NEEDS_APPLY, type SshConnection } from "../types.js"
+import {
+  buildCurlArgvHeaderFlags,
+  buildCurlConfigPayload as buildSharedCurlConfigPayload,
+  hasSensitiveQueryParameters,
+} from "./curlHelpers.js"
 import { hasFlag, setFlag } from "./moduleHelpers.js"
-import { isValidHeaderName, isValidHeaderValue, validateHttpUrl } from "./netHelpers.js"
+import { validateHttpUrl } from "./netHelpers.js"
 
 /**
  * Options shared by all download methods.
@@ -46,30 +51,6 @@ type DownloadOwnership = {
   group: string
   mode: string
   owner: string
-}
-
-function hasSensitiveQueryParameters(url: URL): boolean {
-  const sensitiveTokens = new Set([
-    "auth",
-    "credential",
-    "key",
-    "passwd",
-    "password",
-    "secret",
-    "sig",
-    "signature",
-    "token",
-  ])
-  for (const [name] of url.searchParams) {
-    const parts = name
-      .toLowerCase()
-      .replaceAll(".", " ")
-      .replaceAll("_", " ")
-      .replaceAll("-", " ")
-      .split(" ")
-    if (parts.some((part) => sensitiveTokens.has(part))) return true
-  }
-  return false
 }
 
 function extractUrlSecrets(url: string): string[] {
@@ -202,81 +183,6 @@ function buildCurlProtocolFlags(parameters: Pick<DownloadParameters, "allowInsec
 }
 
 /**
- * Headers whose values are considered sensitive and must therefore be fed to
- * curl via stdin (`--config -`) instead of being inlined into argv. Matching
- * is case-insensitive.
- *
- * Bearer tokens, GitHub PATs, Basic-Auth credentials, and presigned tokens
- * land here so they never appear in `/var/log/auth.log` (sudo logging) or in
- * `/proc/<pid>/cmdline` / `ps -ef` while the download runs.
- */
-const SENSITIVE_HEADER_NAMES = new Set(["authorization", "proxy-authorization"])
-
-function isSensitiveHeader(name: string): boolean {
-  return SENSITIVE_HEADER_NAMES.has(name.toLowerCase())
-}
-
-/**
- * Encode a string for use as a quoted value in a curl config file. Curl's
- * config grammar allows `\\` and `\"` inside double-quoted strings.
- *
- * @param value - The value to encode (URL or header value).
- * @returns The escaped value without surrounding quotes.
- */
-function escapeCurlConfigValue(value: string): string {
-  return value.replaceAll("\\", String.raw`\\`).replaceAll('"', String.raw`\"`)
-}
-
-/**
- * Validate a header name/value pair and throw with a helpful message when the
- * name or value would inject newlines or invalid characters into the request.
- *
- * @param name - The HTTP header field name.
- * @param value - The HTTP header field value.
- */
-function validateHeaderPair(name: string, value: string): void {
-  if (!isValidHeaderName(name)) {
-    throw new Error(`Invalid HTTP header name: ${name}`)
-  }
-  if (!isValidHeaderValue(value)) {
-    throw new Error(`Invalid HTTP header value for ${name}: value contains newline characters`)
-  }
-}
-
-/**
- * Build the stdin config payload for `curl --config -`.
- *
- * The URL is always passed through stdin. Sensitive headers (Authorization,
- * Proxy-Authorization) are also routed through stdin so bearer tokens and
- * presigned URL secrets never leak via `sudo` logging or `ps -ef`. Non-
- * sensitive headers are returned separately so the caller can place them on
- * argv where the visibility cost is acceptable.
- *
- * @param parameters - Download parameters with the URL and optional headers.
- * @returns The stdin config text and the headers that should still go to argv.
- */
-function buildCurlConfigPayload(parameters: DownloadParameters): {
-  argvHeaders: Array<[string, string]>
-  configInput: string
-} {
-  const lines: string[] = [`url = "${escapeCurlConfigValue(parameters.url)}"`]
-  const argvHeaders: Array<[string, string]> = []
-
-  for (const [name, value] of Object.entries(parameters.headers ?? {})) {
-    validateHeaderPair(name, value)
-    if (isSensitiveHeader(name)) {
-      const headerLine = `${name}: ${value}`
-      lines.push(`header = "${escapeCurlConfigValue(headerLine)}"`)
-    } else {
-      argvHeaders.push([name, value])
-    }
-  }
-
-  // Trailing newline so the final config directive is terminated cleanly.
-  return { argvHeaders, configInput: `${lines.join("\n")}\n` }
-}
-
-/**
  * Build the curl command string and the stdin payload that carries sensitive
  * material (URL plus Authorization-style headers).
  *
@@ -293,14 +199,12 @@ function buildCurlCommand(parameters: DownloadParameters): {
   command: string
   input: string
 } {
-  const { argvHeaders, configInput } = buildCurlConfigPayload(parameters)
-  const headerFlags = argvHeaders
-    .map(([name, value]) => {
-      const headerLine = `${name}: ${value}`
-      return `-H ${shellQuote(headerLine)}`
-    })
-    .join(" ")
-  const headerPart = headerFlags.length > 0 ? `${headerFlags} ` : ""
+  const { argvHeaders, configInput } = buildSharedCurlConfigPayload({
+    headers: parameters.headers,
+    routeUrlThroughConfig: true,
+    url: parameters.url,
+  })
+  const headerPart = buildCurlArgvHeaderFlags(argvHeaders)
   const protocolFlags = buildCurlProtocolFlags(parameters)
   return {
     command: `curl -fsSL -o ${shellQuote(parameters.destination)} ${protocolFlags} ${headerPart}--config -`,

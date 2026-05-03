@@ -1,6 +1,7 @@
 /* eslint-disable max-lines */
 import { failed } from "../moduleFailure.js"
 import { getRunnerAbortSignal } from "../runnerAbortSignal.js"
+import { withRegisteredSecrets } from "../secretSink.js"
 import { shellQuote } from "../ssh.js"
 import {
   guardedWriteFile,
@@ -10,7 +11,7 @@ import {
   type SshConnection,
 } from "../types.js"
 import {
-  buildCurlHeaderFlags,
+  buildHttpCheckParameters,
   buildWaitForName,
   buildWaitForTestCommand,
   checkHttpCondition,
@@ -395,28 +396,35 @@ export const net = {
     options?: { body?: string; headers?: Record<string, string>; method?: string; status?: number }
   ): Module {
     const method = options?.method ?? "GET"
-    const parameters: HttpCheckParameters = {
-      expectedBody: options?.body,
-      expectedStatus: options?.status ?? DEFAULT_EXPECTED_STATUS,
-      headerFlags: buildCurlHeaderFlags(options?.headers ?? {}),
-      methodFlag: method === "GET" ? "" : `-X ${shellQuote(method)} `,
+    const parameters: HttpCheckParameters = buildHttpCheckParameters({
+      body: options?.body,
+      headers: options?.headers,
+      method,
+      status: options?.status ?? DEFAULT_EXPECTED_STATUS,
       url,
-    }
+    })
 
     return {
       async apply(conn: null | SshConnection): Promise<ModuleResult> {
         if (!conn) return failed(`[net.request: ${method} ${url}] SSH connection is required`)
 
-        const ok = await checkHttpCondition(conn, parameters)
-        return ok
-          ? { status: "ok" }
-          : failed(`[net.request: ${method} ${url}] HTTP request did not match expectations`)
+        // Register Authorization header values and any signed-URL secrets so
+        // a CommandError raised from inside checkHttpCondition is masked
+        // when its stderr reaches printCommandFailure.
+        return withRegisteredSecrets(parameters.secrets, async () => {
+          const ok = await checkHttpCondition(conn, parameters)
+          return ok
+            ? { status: "ok" }
+            : failed(`[net.request: ${method} ${url}] HTTP request did not match expectations`)
+        })
       },
       async check(conn: null | SshConnection): Promise<"needs-apply" | "ok"> {
         if (!conn) return NEEDS_APPLY
 
-        const ok = await checkHttpCondition(conn, parameters)
-        return ok ? "ok" : NEEDS_APPLY
+        return withRegisteredSecrets(parameters.secrets, async () => {
+          const ok = await checkHttpCondition(conn, parameters)
+          return ok ? "ok" : NEEDS_APPLY
+        })
       },
       name: `net.request: ${method} ${url}`,
     }

@@ -1,6 +1,15 @@
 import type { SshConnection } from "../types.js"
 
 import { shellQuote } from "../ssh.js"
+import {
+  buildCurlArgvHeaderFlags,
+  buildCurlConfigPayload,
+  hasSensitiveQueryParameters,
+  isValidHeaderName,
+  isValidHeaderValue,
+} from "./curlHelpers.js"
+
+export { isValidHeaderName, isValidHeaderValue } from "./curlHelpers.js"
 
 /** Wait-for condition and timing options. */
 export type WaitForOptions = {
@@ -20,16 +29,22 @@ export type WaitForOptions = {
 
 /** Precomputed curl command parts for an HTTP request check. */
 export type HttpCheckParameters = {
+  /** Stdin payload for `curl --config -` carrying the URL when sensitive and any Authorization-style headers. Empty string when no stdin payload is needed. */
+  configInput: string
   /** Expected substring in the response body, or `undefined` to skip body verification. */
   expectedBody: string | undefined
   /** HTTP status code the response must return (e.g. `200`). */
   expectedStatus: number
-  /** Pre-built `-H` curl flags string with trailing space, or empty string. */
+  /** Pre-built `-H` curl flags string with trailing space, or empty string. Only contains non-sensitive headers. */
   headerFlags: string
   /** Pre-built `-X METHOD ` curl flag string with trailing space, or empty string for GET. */
   methodFlag: string
-  /** The URL to request. */
+  /** Strings (Authorization values, signed URLs) registered as secrets so they are masked in CommandError stack traces. */
+  secrets: string[]
+  /** The URL to request. Only inlined onto argv when `urlOnArgv` is `true`. */
   url: string
+  /** When `true`, the URL is appended to the curl argv. When `false`, it must be supplied via the stdin config payload. */
+  urlOnArgv: boolean
 }
 
 /**
@@ -67,37 +82,6 @@ export function buildWaitForName(options: WaitForOptions): string {
   return "net.waitFor"
 }
 
-/** Last ASCII control character (U+001F). */
-const LAST_CONTROL_CHAR = 0x1f
-/** ASCII DEL character (U+007F). */
-const DEL_CHAR = 0x7f
-
-/**
- * Check whether a string is a valid HTTP header name per RFC 7230 (token chars).
- * Rejects control characters, DEL, colons, and any non-printable ASCII.
- *
- * @param name - The header name to validate.
- * @returns `true` if the name contains only valid token characters, `false` otherwise.
- */
-export function isValidHeaderName(name: string): boolean {
-  for (let index = 0; index < name.length; index++) {
-    const code = name.charCodeAt(index)
-    if (code <= LAST_CONTROL_CHAR || code >= DEL_CHAR || name[index] === ":") return false
-  }
-  return name.length > 0
-}
-
-/**
- * Check whether a string is safe to use as an HTTP header value.
- * Rejects values containing CR, LF, or null bytes to prevent HTTP header injection.
- *
- * @param value - The header value to validate.
- * @returns `true` if the value contains no newline characters, `false` otherwise.
- */
-export function isValidHeaderValue(value: string): boolean {
-  return !value.includes("\r") && !value.includes("\n") && !value.includes("\0")
-}
-
 /**
  * Build curl `-H` flags from a headers record for use in shell commands.
  * Validates header names and values to prevent HTTP header injection.
@@ -122,6 +106,125 @@ export function buildCurlHeaderFlags(headers: Record<string, string>): string {
 }
 
 /**
+ * Build the curl invocation parts for an HTTP request check.
+ *
+ * Authorization-style headers are routed through `--config -` via stdin so
+ * bearer tokens never appear on the curl command line where `ps -ef` or
+ * sudo logging could capture them. URLs whose query string carries
+ * presigned tokens or signatures are routed through the same stdin payload.
+ *
+ * @param options - The HTTP request configuration.
+ * @param options.body - Expected substring in the response body.
+ * @param options.headers - Additional HTTP headers, possibly including Authorization.
+ * @param options.method - HTTP method (default: `"GET"`).
+ * @param options.status - Expected HTTP status code (default: `200`).
+ * @param options.url - The URL to request.
+ * @returns The precomputed curl parts plus the secrets to register.
+ */
+export function buildHttpCheckParameters(options: {
+  body?: string
+  headers?: Record<string, string>
+  method?: string
+  status: number
+  url: string
+}): HttpCheckParameters {
+  const headers = options.headers ?? {}
+  const method = options.method ?? "GET"
+  const parsedUrl = new URL(options.url)
+  const urlIsSensitive = hasSensitiveQueryParameters(parsedUrl)
+
+  const { argvHeaders, configInput } = buildCurlConfigPayload({
+    headers,
+    routeUrlThroughConfig: urlIsSensitive,
+    url: options.url,
+  })
+
+  const secrets: string[] = []
+  for (const [name, value] of Object.entries(headers)) {
+    const lowered = name.toLowerCase()
+    if ((lowered === "authorization" || lowered === "proxy-authorization") && value.length > 0) {
+      secrets.push(value)
+    }
+  }
+  if (urlIsSensitive) secrets.push(options.url)
+
+  return {
+    configInput,
+    expectedBody: options.body,
+    expectedStatus: options.status,
+    headerFlags: buildCurlArgvHeaderFlags(argvHeaders),
+    methodFlag: method === "GET" ? "" : `-X ${shellQuote(method)} `,
+    secrets,
+    url: options.url,
+    urlOnArgv: !urlIsSensitive,
+  }
+}
+
+/**
+ * Render the URL portion of the curl argv. Returns the empty string when the
+ * URL has been routed through the stdin config payload.
+ *
+ * @param parameters - The precomputed HTTP check parameters.
+ * @returns The shell-quoted URL with a leading space, or `""`.
+ */
+function buildCurlUrlArgvSegment(parameters: HttpCheckParameters): string {
+  return parameters.urlOnArgv ? shellQuote(parameters.url) : ""
+}
+
+/**
+ * Determine whether curl needs `--config -` (because the URL or any sensitive
+ * header was routed through stdin).
+ *
+ * @param parameters - The precomputed HTTP check parameters.
+ * @returns The `--config -` flag with a leading space, or `""`.
+ */
+function buildCurlConfigFlag(parameters: HttpCheckParameters): string {
+  return parameters.configInput.length > 0 ? "--config -" : ""
+}
+
+/**
+ * Join the curl argv segments together using single spaces, dropping empty
+ * pieces so the resulting command stays well-formed.
+ *
+ * @param segments - The argv segments to join.
+ * @returns The combined argv string.
+ */
+function joinCurlSegments(segments: string[]): string {
+  return segments.filter((segment) => segment.length > 0).join(" ")
+}
+
+/**
+ * Run a single curl invocation against the remote host. Uses
+ * `silent: true` and forwards the stdin config payload (when any) so
+ * Authorization-style headers stay out of `/proc/<pid>/cmdline`. Registered
+ * secrets keep the curl stderr masked when ssh.exec surfaces a CommandError.
+ *
+ * @param conn - The active SSH connection.
+ * @param argvBase - The curl flags that precede the headers (e.g. `curl -s ...`).
+ * @param parameters - The precomputed HTTP check parameters.
+ * @returns Trimmed stdout from the curl invocation.
+ */
+async function execCurl(
+  conn: SshConnection,
+  argvBase: string,
+  parameters: HttpCheckParameters
+): Promise<string> {
+  const command = joinCurlSegments([
+    argvBase,
+    parameters.methodFlag.trim(),
+    parameters.headerFlags.trim(),
+    buildCurlUrlArgvSegment(parameters),
+    buildCurlConfigFlag(parameters),
+  ])
+  const result = await conn.exec(command, {
+    input: parameters.configInput.length > 0 ? parameters.configInput : undefined,
+    secrets: parameters.secrets,
+    silent: true,
+  })
+  return result.stdout.trim()
+}
+
+/**
  * Check whether an HTTP endpoint matches the expected status code and body content.
  *
  * @param conn - Active SSH connection to execute curl commands on.
@@ -133,13 +236,11 @@ export async function checkHttpCondition(
   parameters: HttpCheckParameters
 ): Promise<boolean> {
   try {
-    const statusCommand = `curl -s -o /dev/null -w '%{http_code}' ${parameters.methodFlag}${parameters.headerFlags}${shellQuote(parameters.url)}`
-    const statusOutput = await conn.output(statusCommand)
-    if (statusOutput.trim() !== String(parameters.expectedStatus)) return false
+    const statusOutput = await execCurl(conn, "curl -s -o /dev/null -w '%{http_code}'", parameters)
+    if (statusOutput !== String(parameters.expectedStatus)) return false
 
     if (parameters.expectedBody != null) {
-      const bodyCommand = `curl -s ${parameters.methodFlag}${parameters.headerFlags}${shellQuote(parameters.url)}`
-      const bodyOutput = await conn.output(bodyCommand)
+      const bodyOutput = await execCurl(conn, "curl -s", parameters)
       if (!bodyOutput.includes(parameters.expectedBody)) return false
     }
 

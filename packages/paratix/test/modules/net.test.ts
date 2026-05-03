@@ -2,6 +2,11 @@ import { describe, expect, it } from "vitest"
 
 import { net } from "../../src/index.js"
 import { setRunnerAbortSignal } from "../../src/runnerAbortSignal.js"
+import {
+  clearRegisteredSecrets,
+  getRegisteredSecrets,
+  registerSecret,
+} from "../../src/secretSink.js"
 import { createMockSsh } from "../helpers/mockSsh.js"
 
 const emptyEnv = {}
@@ -1009,5 +1014,109 @@ describe("net.request — apply", () => {
     const mod = net.request("https://example.com/health")
     const result = await mod.apply(mockSsh, emptyEnv)
     expect(result.status).toBe("failed")
+  })
+})
+
+// R-0000072: Authorization (and other sensitive) header values must be routed
+// through `curl --config -` over stdin instead of being inlined into argv,
+// where `ps -ef` and sudo logging would capture them. The header values must
+// also be registered in the process-scoped secret sink so CommandError stack
+// traces are masked when curl fails.
+describe("net.request — R-0000072 sensitive header masking", () => {
+  it("never inlines the Authorization header value on the curl command line (check)", async () => {
+    const token = "Bearer super-secret-PAT-XYZ123"
+    const mockSsh = createMockSsh()
+
+    const mod = net.request("https://example.com/health", {
+      headers: { Authorization: token },
+    })
+    await mod.check(mockSsh, emptyEnv)
+
+    // Every executed curl command must omit the secret token. Mocking returns
+    // status "" so the check returns needs-apply; we only care about the
+    // command shape here.
+    for (const command of mockSsh.calls) {
+      expect(command).not.toContain(token)
+      expect(command).not.toContain("-H 'Authorization:")
+    }
+    // Sanity: the command was a curl invocation.
+    expect(mockSsh.calls.some((c) => c.startsWith("curl "))).toBe(true)
+  })
+
+  it("forwards the Authorization header via the curl --config - stdin payload", async () => {
+    const token = "Bearer super-secret-PAT-XYZ123"
+    const mockSsh = createMockSsh()
+
+    const mod = net.request("https://example.com/health", {
+      headers: { Authorization: token },
+    })
+    await mod.check(mockSsh, emptyEnv)
+
+    const curlCall = mockSsh.execCalls.find((entry) => entry.command.startsWith("curl "))
+    expect(curlCall).toBeDefined()
+    expect(curlCall?.command).toContain("--config -")
+    expect(curlCall?.options?.input).toContain(`Authorization: ${token}`)
+    expect(curlCall?.options?.secrets).toContain(token)
+  })
+
+  it("registers the Authorization header value as a process-scoped secret during apply", async () => {
+    clearRegisteredSecrets()
+    const token = "Bearer super-secret-PAT-XYZ123"
+    const seen: string[] = []
+    const mockSsh = createMockSsh()
+    // Capture the secrets registered while the curl call is running.
+    const originalExec = mockSsh.exec
+    mockSsh.exec = async (command, options) => {
+      seen.push(...getRegisteredSecrets())
+      return originalExec(command, options)
+    }
+
+    const mod = net.request("https://example.com/health", {
+      headers: { Authorization: token },
+      status: 200,
+    })
+    await mod.apply(mockSsh, emptyEnv)
+
+    expect(seen).toContain(token)
+    // Sink is rebalanced after apply finishes.
+    expect(getRegisteredSecrets()).not.toContain(token)
+    clearRegisteredSecrets()
+  })
+
+  it("does not register a secret when no Authorization header is present", async () => {
+    clearRegisteredSecrets()
+    // Pre-register an unrelated value to confirm we never rely on a leftover.
+    registerSecret("unrelated-secret-marker")
+    try {
+      const mockSsh = createMockSsh({
+        "curl -s -o /dev/null -w '%{http_code}' 'https://example.com/health'": { stdout: "200" },
+      })
+      const mod = net.request("https://example.com/health")
+      await mod.apply(mockSsh, emptyEnv)
+
+      const curlCall = mockSsh.execCalls.find((entry) => entry.command.startsWith("curl "))
+      expect(curlCall).toBeDefined()
+      expect(curlCall?.options?.secrets).toStrictEqual([])
+      expect(curlCall?.options?.input).toBeUndefined()
+    } finally {
+      clearRegisteredSecrets()
+    }
+  })
+
+  it("masks signed-URL query parameters by routing the URL through stdin", async () => {
+    clearRegisteredSecrets()
+    const url = "https://example.com/object?signature=abc123&token=xyz789"
+    const mockSsh = createMockSsh()
+
+    const mod = net.request(url)
+    await mod.check(mockSsh, emptyEnv)
+
+    const curlCall = mockSsh.execCalls.find((entry) => entry.command.startsWith("curl "))
+    expect(curlCall).toBeDefined()
+    expect(curlCall?.command).not.toContain(url)
+    expect(curlCall?.command).toContain("--config -")
+    expect(curlCall?.options?.input).toContain(`url = "${url}"`)
+    expect(curlCall?.options?.secrets).toContain(url)
+    clearRegisteredSecrets()
   })
 })
