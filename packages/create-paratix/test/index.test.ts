@@ -1257,6 +1257,8 @@ describe("writeProjectFiles", () => {
       scripts: {
         apply: "paratix apply server.ts",
         "apply:dry": "paratix apply server.ts --dry-run",
+        "apply:first-run": "paratix apply server.ts --first-run",
+        "apply:first-run:dry": "paratix apply server.ts --dry-run --first-run",
         "format:check": "prettier --check .",
         "format:fix": "prettier --write .",
         lint: "eslint .",
@@ -1743,6 +1745,8 @@ describe("scaffoldProject", () => {
     expect(console.log).toHaveBeenCalledWith(
       expect.stringContaining("Project created successfully!")
     )
+    expect(console.log).toHaveBeenCalledWith(expect.stringContaining("pnpm apply:first-run:dry"))
+    expect(console.log).toHaveBeenCalledWith(expect.stringContaining("pnpm apply:first-run"))
     expect(console.log).toHaveBeenCalledWith(expect.stringContaining("pnpm apply:dry"))
     expect(console.log).toHaveBeenCalledWith(expect.stringContaining("pnpm apply"))
     expect(console.log).not.toHaveBeenCalledWith(
@@ -1764,6 +1768,8 @@ describe("scaffoldProject", () => {
     expect(console.log).toHaveBeenCalledWith(
       expect.stringContaining("Project files created, but dependency installation failed.")
     )
+    expect(console.log).toHaveBeenCalledWith(expect.stringContaining("pnpm apply:first-run:dry"))
+    expect(console.log).toHaveBeenCalledWith(expect.stringContaining("pnpm apply:first-run"))
     expect(console.log).toHaveBeenCalledWith(expect.stringContaining("pnpm apply:dry"))
     expect(console.log).toHaveBeenCalledWith(expect.stringContaining("pnpm apply"))
     expect(console.log).not.toHaveBeenCalledWith(
@@ -1772,7 +1778,7 @@ describe("scaffoldProject", () => {
     expect(process.exitCode).toBe(1)
   })
 
-  it("prints npm completion commands with apply:dry before apply", () => {
+  it("prints npm completion commands with first-run bootstrap before regular apply", () => {
     const installer = vi.fn().mockReturnValue(true)
 
     scaffoldProject(
@@ -1784,6 +1790,8 @@ describe("scaffoldProject", () => {
       }
     )
 
+    expect(console.log).toHaveBeenCalledWith(expect.stringContaining("npm run apply:first-run:dry"))
+    expect(console.log).toHaveBeenCalledWith(expect.stringContaining("npm run apply:first-run"))
     expect(console.log).toHaveBeenCalledWith(expect.stringContaining("npm run apply:dry"))
     expect(console.log).toHaveBeenCalledWith(expect.stringContaining("npm run apply"))
   })

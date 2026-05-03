@@ -24,8 +24,9 @@ For most users, the fastest way to start is the scaffold:
 ```bash
 pnpm create paratix my-server
 cd my-server
+pnpm apply:first-run:dry
+pnpm apply:first-run
 pnpm apply:dry
-pnpm apply --first-run
 pnpm apply
 ```
 

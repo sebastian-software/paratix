@@ -52,6 +52,8 @@ Project created successfully!
 
 Edit server.ts with your server details, then:
 
+  ${prefix} apply:first-run:dry
+  ${prefix} apply:first-run
   ${prefix} apply:dry
   ${prefix} apply
 `)
@@ -66,6 +68,8 @@ Project files created, but dependency installation failed.
 
 Install dependencies manually, then run:
 
+  ${prefix} apply:first-run:dry
+  ${prefix} apply:first-run
   ${prefix} apply:dry
   ${prefix} apply
 `)

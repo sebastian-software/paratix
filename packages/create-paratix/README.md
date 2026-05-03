@@ -44,8 +44,9 @@ cd my-server
 Run the bootstrap flow:
 
 ```bash
+pnpm apply:first-run:dry
+pnpm apply:first-run
 pnpm apply:dry
-pnpm apply --first-run
 pnpm apply
 ```
 

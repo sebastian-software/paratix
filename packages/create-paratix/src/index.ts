@@ -121,6 +121,8 @@ export function writeProjectFiles(projectDirectory: string, options?: ScaffoldOp
     scripts: {
       apply: "paratix apply server.ts",
       "apply:dry": "paratix apply server.ts --dry-run",
+      "apply:first-run": "paratix apply server.ts --first-run",
+      "apply:first-run:dry": "paratix apply server.ts --dry-run --first-run",
       "format:check": "prettier --check .",
       "format:fix": "prettier --write .",
       lint: "eslint .",
