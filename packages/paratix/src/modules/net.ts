@@ -709,17 +709,32 @@ export const net = {
         if (state === "present") {
           const devicePart =
             device !== undefined && device !== "" ? ` dev ${shellQuote(device)}` : ""
-          await conn.exec(
+          const routeResult = await conn.exec(
             `ip route replace ${shellQuote(destination)} via ${shellQuote(gateway)}${devicePart}`,
             EXEC_OPTS
           )
+          if (routeResult.code !== 0) {
+            return failedCommand(`[net.route: ${destination}] ip route replace failed`, routeResult)
+          }
           const dropinContent = buildRouteDropin(destination, gateway, device)
           await conn.writeFile(dropinPath, dropinContent, { mode: NET_CONFIG_FILE_MODE })
-          await conn.exec(NETWORKCTL_RELOAD, EXEC_OPTS)
+          const reloadResult = await conn.exec(NETWORKCTL_RELOAD, EXEC_OPTS)
+          if (reloadResult.code !== 0) {
+            return failedCommand(`[net.route: ${destination}] networkctl reload failed`, reloadResult)
+          }
         } else {
-          await conn.exec(`ip route del ${shellQuote(destination)}`, EXEC_OPTS)
-          await conn.exec(`rm -f ${shellQuote(dropinPath)}`, EXEC_OPTS)
-          await conn.exec(NETWORKCTL_RELOAD, EXEC_OPTS)
+          const routeResult = await conn.exec(`ip route del ${shellQuote(destination)}`, EXEC_OPTS)
+          if (routeResult.code !== 0) {
+            return failedCommand(`[net.route: ${destination}] ip route del failed`, routeResult)
+          }
+          const removeResult = await conn.exec(`rm -f ${shellQuote(dropinPath)}`, EXEC_OPTS)
+          if (removeResult.code !== 0) {
+            return failedCommand(`[net.route: ${destination}] drop-in removal failed`, removeResult)
+          }
+          const reloadResult = await conn.exec(NETWORKCTL_RELOAD, EXEC_OPTS)
+          if (reloadResult.code !== 0) {
+            return failedCommand(`[net.route: ${destination}] networkctl reload failed`, reloadResult)
+          }
         }
 
         return { status: "changed" }

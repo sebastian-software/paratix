@@ -550,6 +550,30 @@ describe("net.route — apply", () => {
     expect(mockSsh.calls).toContain("networkctl reload")
   })
 
+  it("returns failed when ip route replace fails (state: present)", async () => {
+    const mockSsh = createMockSsh({
+      "ip route replace '10.0.0.0/24' via '192.168.1.1'": {
+        code: 2,
+        stderr: "Nexthop has invalid gateway",
+      },
+    })
+    const mod = net.route("10.0.0.0/24", "192.168.1.1")
+    const result = await mod.apply(mockSsh, emptyEnv)
+    expect(result.status).toBe("failed")
+    expect(String(result.error)).toContain("ip route replace failed")
+    expect(mockSsh.calls).not.toContain("networkctl reload")
+  })
+
+  it("returns failed when networkctl reload fails after adding route", async () => {
+    const mockSsh = createMockSsh({
+      "networkctl reload": { code: 1, stderr: "reload failed" },
+    })
+    const mod = net.route("10.0.0.0/24", "192.168.1.1")
+    const result = await mod.apply(mockSsh, emptyEnv)
+    expect(result.status).toBe("failed")
+    expect(String(result.error)).toContain("networkctl reload failed")
+  })
+
   it("returns changed after removing a route (state: absent)", async () => {
     const mockSsh = createMockSsh()
     const mod = net.route("10.0.0.0/24", "192.168.1.1", { state: "absent" })
@@ -564,6 +588,17 @@ describe("net.route — apply", () => {
     expect(mockSsh.calls).toContain("ip route del '10.0.0.0/24'")
   })
 
+  it("returns failed when ip route del fails (state: absent)", async () => {
+    const mockSsh = createMockSsh({
+      "ip route del '10.0.0.0/24'": { code: 2, stderr: "No such process" },
+    })
+    const mod = net.route("10.0.0.0/24", "192.168.1.1", { state: "absent" })
+    const result = await mod.apply(mockSsh, emptyEnv)
+    expect(result.status).toBe("failed")
+    expect(String(result.error)).toContain("ip route del failed")
+    expect(mockSsh.calls).not.toContain("networkctl reload")
+  })
+
   it("removes drop-in file when state is absent", async () => {
     const dropinPath = "/etc/systemd/network/50-paratix-route-10.0.0.0-24.network"
     const mockSsh = createMockSsh()
@@ -572,11 +607,33 @@ describe("net.route — apply", () => {
     expect(mockSsh.calls).toContain(`rm -f '${dropinPath}'`)
   })
 
+  it("returns failed when drop-in removal fails (state: absent)", async () => {
+    const dropinPath = "/etc/systemd/network/50-paratix-route-10.0.0.0-24.network"
+    const mockSsh = createMockSsh({
+      [`rm -f '${dropinPath}'`]: { code: 1, stderr: "permission denied" },
+    })
+    const mod = net.route("10.0.0.0/24", "192.168.1.1", { state: "absent" })
+    const result = await mod.apply(mockSsh, emptyEnv)
+    expect(result.status).toBe("failed")
+    expect(String(result.error)).toContain("drop-in removal failed")
+    expect(mockSsh.calls).not.toContain("networkctl reload")
+  })
+
   it("reloads networkctl after removing route (state: absent)", async () => {
     const mockSsh = createMockSsh()
     const mod = net.route("10.0.0.0/24", "192.168.1.1", { state: "absent" })
     await mod.apply(mockSsh, emptyEnv)
     expect(mockSsh.calls).toContain("networkctl reload")
+  })
+
+  it("returns failed when networkctl reload fails after removing route", async () => {
+    const mockSsh = createMockSsh({
+      "networkctl reload": { code: 1, stderr: "reload failed" },
+    })
+    const mod = net.route("10.0.0.0/24", "192.168.1.1", { state: "absent" })
+    const result = await mod.apply(mockSsh, emptyEnv)
+    expect(result.status).toBe("failed")
+    expect(String(result.error)).toContain("networkctl reload failed")
   })
 
   it("sanitizes destination with colons for drop-in filename", async () => {
