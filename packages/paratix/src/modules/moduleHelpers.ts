@@ -4,7 +4,15 @@ import { shellQuote } from "../ssh.js"
 
 export const FLAGS_DIRECTORY = "/var/lib/paratix/flags"
 
-const FLAG_NAME_PATTERN = /^[\w.\-]+$/v
+// Flag names land directly in shell commands like `[ -f /var/lib/paratix/flags/<name> ]`
+// and `find ... -name '<prefix>*' -delete`. We therefore reject any name that could
+// resolve to a directory traversal segment (`..`, leading dot, trailing dot) or
+// contain a path separator. The pattern requires an alphanumeric leading
+// character; afterwards each character must either be a word character / dash, or
+// a dot that is immediately followed by an alphanumeric character. That single
+// alternation forbids `..`, leading or trailing dots, and slashes without
+// nesting quantifiers (which would trigger the unsafe-regex heuristic).
+const FLAG_NAME_PATTERN = /^[A-Za-z0-9](?:[\w\-]|\.[A-Za-z0-9])*$/v
 
 function validateFlagName(value: string, label: string): void {
   if (!FLAG_NAME_PATTERN.test(value)) {

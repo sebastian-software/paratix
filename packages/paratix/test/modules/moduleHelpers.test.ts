@@ -64,6 +64,59 @@ describe("setVersionedFlag – empty string validation", () => {
   })
 })
 
+describe("hasFlag – rejects path-traversal-like names", () => {
+  it("rejects flagName equal to '..' (would resolve to parent directory)", async () => {
+    // [ -f /var/lib/paratix/flags/.. ] would always be true, masking missing flags.
+    const ssh = createMockSsh()
+    await expect(hasFlag(ssh, "..")).rejects.toThrow(/flagName must match/v)
+  })
+
+  it("rejects flagName with a leading dot", async () => {
+    // Hidden-style names like ".foo" are not permitted; they collide with the
+    // directory-traversal exclusion and complicate reasoning about flag files.
+    const ssh = createMockSsh()
+    await expect(hasFlag(ssh, ".foo")).rejects.toThrow(/flagName must match/v)
+  })
+
+  it("rejects flagName containing a path separator", async () => {
+    // A `/` would let a flag name escape the flags directory entirely.
+    const ssh = createMockSsh()
+    await expect(hasFlag(ssh, "foo/bar")).rejects.toThrow(/flagName must match/v)
+  })
+})
+
+describe("setVersionedFlag – rejects path-traversal-like names", () => {
+  it("rejects flagPrefix equal to '..'", async () => {
+    // A `..` prefix would let `find -name '..*' -delete` target paths outside
+    // the flags directory hierarchy on some find implementations.
+    const ssh = createMockSsh()
+    await expect(setVersionedFlag(ssh, "valid-flag", "..")).rejects.toThrow(
+      /flagPrefix must match/v
+    )
+  })
+
+  it("rejects flagPrefix with a leading dot", async () => {
+    const ssh = createMockSsh()
+    await expect(setVersionedFlag(ssh, "valid-flag", ".hidden-")).rejects.toThrow(
+      /flagPrefix must match/v
+    )
+  })
+
+  it("rejects flagPrefix containing a path separator", async () => {
+    const ssh = createMockSsh()
+    await expect(setVersionedFlag(ssh, "valid-flag", "foo/bar")).rejects.toThrow(
+      /flagPrefix must match/v
+    )
+  })
+
+  it("rejects flagName equal to '..'", async () => {
+    const ssh = createMockSsh()
+    await expect(setVersionedFlag(ssh, "..", "valid-prefix-")).rejects.toThrow(
+      /flagName must match/v
+    )
+  })
+})
+
 describe("setVersionedFlag – rejects shell-special characters", () => {
   it("rejects flagPrefix containing spaces and parentheses", async () => {
     const ssh = createMockSsh()
