@@ -619,6 +619,43 @@ describe("compose.config — apply", () => {
     expect(writtenFiles[1]?.path).toBe(remotePath)
   })
 
+  it("rolls back to prior content when validation throws after writing", async () => {
+    const priorContent = "services:\n  web:\n    image: nginx:1.0\n"
+    const validationError = new Error("validation command timed out")
+    const writtenFiles: Array<{
+      content: string
+      mode: string | undefined
+      path: string
+    }> = []
+    const mockSsh = createComposeMockSsh({
+      [`[ -e '${remotePath}' ]`]: { code: 0 },
+      [`cat '${remotePath}'`]: { code: 0, stdout: priorContent },
+      [`stat -c '%a' '${remotePath}'`]: { code: 0, stdout: "600" },
+    })
+    const originalExec = mockSsh.exec
+    mockSsh.exec = async (command, options) => {
+      if (command === `${composeCmd("podman")} config --quiet`) throw validationError
+      return originalExec(command, options)
+    }
+    mockSsh.writeFile = async (
+      path: string,
+      content: string,
+      writeOptions: { mode: string }
+    ): Promise<void> => {
+      await Promise.resolve()
+      writtenFiles.push({ content, mode: writeOptions.mode, path })
+    }
+
+    const mod = compose.config({ content: "broken: yaml: [\n", projectDirectory })
+    await expect(mod.apply(mockSsh, emptyEnv)).rejects.toThrow(validationError)
+
+    expect(writtenFiles).toHaveLength(2)
+    expect(writtenFiles[0]?.content).toBe("broken: yaml: [\n")
+    expect(writtenFiles[1]?.content).toBe(priorContent.trim())
+    expect(writtenFiles[1]?.mode).toBe("600")
+    expect(writtenFiles[1]?.path).toBe(remotePath)
+  })
+
   it("rolls back to prior content when validation fails (src path)", async () => {
     const { readFile: readFileMock } = await import("node:fs/promises")
     const priorContent = "services:\n  api:\n    image: alpine:3\n"

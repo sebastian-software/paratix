@@ -541,18 +541,29 @@ export const compose = {
         // `compose ... config --quiet` rejects the new content.
         const priorState = await capturePriorComposeFile(connection, remotePath)
 
-        await writeComposeFileForValidation(connection, remotePath, options)
+        let rollbackPending = true
+        try {
+          await writeComposeFileForValidation(connection, remotePath, options)
 
-        const validate = await connection.exec(
-          `${composeCommand(runtime, projectDirectory)} config --quiet`,
-          EXEC_OPTS
-        )
-        if (validate.code !== 0) {
-          await rollbackComposeFile(connection, remotePath, priorState)
-          return failedCommand(
-            `[compose.config] validation failed for ${projectDirectory}`,
-            validate
+          const validate = await connection.exec(
+            `${composeCommand(runtime, projectDirectory)} config --quiet`,
+            EXEC_OPTS
           )
+          if (validate.code !== 0) {
+            rollbackPending = false
+            await rollbackComposeFile(connection, remotePath, priorState)
+            return failedCommand(
+              `[compose.config] validation failed for ${projectDirectory}`,
+              validate
+            )
+          }
+
+          rollbackPending = false
+        } catch (error) {
+          if (rollbackPending) {
+            await rollbackComposeFile(connection, remotePath, priorState)
+          }
+          throw error
         }
 
         return { status: "changed" }
