@@ -53,6 +53,16 @@ const UINT32_SIZE = 4
 const HASHED_HOST_PARTS = 4
 
 /**
+ * Strict base64 alphabet used to validate the key field of a known_hosts line.
+ *
+ * `Buffer.from(value, "base64")` silently ignores invalid characters which would
+ * truncate corrupt or tampered entries instead of rejecting them. We therefore
+ * reject anything that contains whitespace, padding inside the body, or any
+ * character outside the standard base64 alphabet before decoding.
+ */
+const STRICT_BASE64_PATTERN = /^[A-Za-z0-9+\/]+=*$/v
+
+/**
  * In-memory cache for accepted host keys that could not be persisted to disk.
  * Keyed by the formatted host needle (e.g. `"example.com"` or `"[example.com]:2222"`).
  */
@@ -74,6 +84,12 @@ function parseKnownHostsLine(line: string): KnownHostEntry[] {
   const hostsPart = parts[offset]
   const algo = parts[offset + 1]
   const base64Key = parts[offset + 2]
+
+  // Reject entries whose key field is not strict base64. `Buffer.from` would
+  // otherwise drop unknown characters and produce a truncated buffer, which
+  // could let corrupt or tampered known_hosts entries influence later lookups
+  // such as findRevokedEntry.
+  if (!STRICT_BASE64_PATTERN.test(base64Key)) return []
 
   const key = Buffer.from(base64Key, "base64")
   return hostsPart.split(",").map((host) => ({ algo, host, key, marker }))

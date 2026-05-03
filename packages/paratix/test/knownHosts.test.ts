@@ -164,6 +164,40 @@ describe("parseKnownHosts", () => {
     expect(entries).toHaveLength(0)
   })
 
+  it("skips entries whose base64 key contains characters outside the strict alphabet", () => {
+    // Whitespace, control characters, and any character outside [A-Za-z0-9+/=]
+    // would be silently dropped by Buffer.from(value, "base64"), producing a
+    // truncated buffer. Verify such lines are rejected entirely.
+    const validKey = makeKeyBuffer("ssh-ed25519").toString("base64")
+    const corruptKey = `${validKey.slice(0, 8)}!@#${validKey.slice(8)}`
+    const content = `example.com ssh-ed25519 ${corruptKey}`
+
+    const entries = parseKnownHosts(content)
+
+    expect(entries).toHaveLength(0)
+  })
+
+  it("skips entries whose base64 key has invalid padding placement", () => {
+    // Padding characters in the middle of the key are not valid strict base64
+    // and must be rejected before Buffer.from silently ignores them.
+    const content = "example.com ssh-ed25519 AAAA==BBBB"
+
+    const entries = parseKnownHosts(content)
+
+    expect(entries).toHaveLength(0)
+  })
+
+  it("skips realistic mixed content that contains a corrupt base64 entry", () => {
+    const validKey = makeKeyBuffer("ssh-ed25519").toString("base64")
+    const corruptLine = "corrupt.example ssh-ed25519 not_base64$$$"
+    const content = [corruptLine, `valid.example ssh-ed25519 ${validKey}`].join("\n")
+
+    const entries = parseKnownHosts(content)
+
+    expect(entries).toHaveLength(1)
+    expect(entries[0]?.host).toBe("valid.example")
+  })
+
   it("parses multiple valid entries from multi-line content", () => {
     const keyA = makeKeyBuffer("ssh-ed25519", Buffer.from("key-a"))
     const keyB = makeKeyBuffer("ssh-rsa", Buffer.from("key-b"))
