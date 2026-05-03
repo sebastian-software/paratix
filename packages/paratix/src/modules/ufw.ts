@@ -91,6 +91,7 @@ export const ufw = {
         if (!ssh)
           return failed(`[ufw.rule: ${action} ${portList.join(",")}] SSH connection is required`)
 
+        let anyChanged = false
         for (const port of portList) {
           // eslint-disable-next-line no-await-in-loop
           const result = await ssh.exec(
@@ -103,9 +104,15 @@ export const ufw = {
               result
             )
           }
+          // R-0000076: ufw prints "Skipping adding existing rule" when the
+          // rule is already present. Treat that as a no-op so apply only
+          // returns "changed" when at least one port was newly added.
+          if (!result.stdout.includes("Skipping adding existing rule")) {
+            anyChanged = true
+          }
         }
 
-        return { status: "changed" }
+        return { status: anyChanged ? "changed" : "ok" }
       },
       async check(ssh: null | SshConnection): Promise<"needs-apply" | "ok"> {
         if (!ssh) return NEEDS_APPLY

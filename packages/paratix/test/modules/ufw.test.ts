@@ -188,6 +188,45 @@ describe("ufw.rule", () => {
     expect(ssh.calls).toStrictEqual(["ufw 'allow' '80'", "ufw 'allow' '443'", "ufw 'allow' '8080'"])
   })
 
+  // R-0000076 regression: when ufw prints "Skipping adding existing rule"
+  // for every port, apply must return ok rather than always claiming the
+  // run changed something.
+  it("apply returns ok when ufw skips every existing rule", async () => {
+    const skipOutput = "Skipping adding existing rule\nSkipping adding existing rule (v6)\n"
+    const ssh = createMockSsh({
+      "ufw 'allow' '443'": { code: 0, stdout: skipOutput },
+      "ufw 'allow' '80'": { code: 0, stdout: skipOutput },
+    })
+    const mod = ufw.rule("allow", [80, 443])
+    const result = await mod.apply(ssh, emptyEnv)
+    expect(result.status).toBe("ok")
+    expect(ssh.calls).toStrictEqual(["ufw 'allow' '80'", "ufw 'allow' '443'"])
+  })
+
+  it("apply returns changed when ufw adds every rule fresh", async () => {
+    const addedOutput = "Rule added\nRule added (v6)\n"
+    const ssh = createMockSsh({
+      "ufw 'allow' '443'": { code: 0, stdout: addedOutput },
+      "ufw 'allow' '80'": { code: 0, stdout: addedOutput },
+    })
+    const mod = ufw.rule("allow", [80, 443])
+    const result = await mod.apply(ssh, emptyEnv)
+    expect(result.status).toBe("changed")
+  })
+
+  it("apply returns changed when at least one port is new and others are skipped", async () => {
+    const ssh = createMockSsh({
+      "ufw 'allow' '443'": { code: 0, stdout: "Rule added\nRule added (v6)\n" },
+      "ufw 'allow' '80'": {
+        code: 0,
+        stdout: "Skipping adding existing rule\nSkipping adding existing rule (v6)\n",
+      },
+    })
+    const mod = ufw.rule("allow", [80, 443])
+    const result = await mod.apply(ssh, emptyEnv)
+    expect(result.status).toBe("changed")
+  })
+
   it("apply returns failed and stops when one port command fails", async () => {
     const ssh = createMockSsh({
       "ufw 'deny' '22'": { code: 0 },
