@@ -761,6 +761,50 @@ describe("SshConnectionImpl", () => {
       expect(ssh.getConnectionInfo().agentSocket).toBeUndefined()
     })
 
+    it("registers the interactive ssh login password in the secret sink during connect (R-0000095 regression)", async () => {
+      // Regression: tryPasswordFallback called tryConnectOnPorts(undefined,
+      // password, agent) without registering the prompt response in the
+      // process-wide secret sink. A connect-time error message that included
+      // the credential (e.g. ssh2 protocol traces) would surface the password
+      // verbatim through `printCommandFailure`. The fix wraps the connect
+      // attempt in `withRegisteredSecrets([password], ...)` so the redaction
+      // pipeline sees the password while the connect runs.
+      const { getRegisteredSecrets } = await import("../src/secretSink.js")
+      const password = "leak-prone-password"
+      vi.mocked(promptTerminal).mockResolvedValueOnce(password)
+
+      let registeredDuringConnect: string[] = []
+      vi.mocked(tryConnectOnPort).mockImplementationOnce(async () => {
+        // Snapshot the sink while the connect attempt is in flight.
+        await Promise.resolve()
+        registeredDuringConnect = getRegisteredSecrets()
+      })
+
+      const ssh = makeSshInstanceWithAgent({ passwordFallback: true })
+
+      await ssh.connect()
+
+      // While the connect was running, the sink contained the prompt response.
+      expect(registeredDuringConnect).toContain(password)
+      // After the connect resolves, the registration must be released so the
+      // sink does not grow unboundedly across long-running CLI sessions.
+      expect(getRegisteredSecrets()).not.toContain(password)
+    })
+
+    it("releases the secret-sink registration when connect fails (R-0000095 regression)", async () => {
+      // Failure path: even when tryConnectOnPorts rejects, the password must
+      // not stay in the sink — `withRegisteredSecrets` always releases.
+      const { getRegisteredSecrets } = await import("../src/secretSink.js")
+      const password = "leak-prone-password-2"
+      vi.mocked(promptTerminal).mockResolvedValueOnce(password)
+      vi.mocked(tryConnectOnPort).mockRejectedValueOnce(new Error("Connection refused"))
+
+      const ssh = makeSshInstanceWithAgent({ passwordFallback: true })
+
+      await expect(ssh.connect()).rejects.toThrow()
+      expect(getRegisteredSecrets()).not.toContain(password)
+    })
+
     it("throws when SSH_AUTH_SOCK is set to an empty string", async () => {
       process.env.SSH_AUTH_SOCK = ""
 

@@ -9,7 +9,7 @@ import { Client, type ClientChannel } from "ssh2"
 import type { ExecOptions, ExecResult, SshConfig, SshConnection } from "./types.js"
 
 import { buildHostVerifier, extractAlgoFromKey, HostKeyVerificationError } from "./knownHosts.js"
-import { getRegisteredSecrets } from "./secretSink.js"
+import { getRegisteredSecrets, withRegisteredSecrets } from "./secretSink.js"
 import { sftpDownload, sftpUpload } from "./sftp.js"
 import {
   cleanupFailedSshClient,
@@ -601,23 +601,41 @@ export class SshConnectionImpl implements SshConnection {
         this.authMethod = "privateKey"
         return
       }
-      if (this.config.passwordFallback) {
-        const password = await promptTerminal(
-          `Password for ${this.config.user}@${this.runtime.host}: `,
-          true,
-          options
-        )
-        if (await this.tryConnectOnPorts(privateKey, password)) {
-          this.authMethod = "password"
-          return
-        }
-      }
+      if (await this.tryPrivateKeyPasswordFallback(privateKey, options)) return
       throw new Error(
         `Failed to connect to ${this.runtime.host} on ports: ${this.runtime.ports.join(", ")}`
       )
     } finally {
       privateKey.fill(0)
     }
+  }
+
+  /**
+   * Prompt for a password and retry the connect using both the loaded
+   * private key and the prompt response. R-0000095: the prompt response is
+   * registered in the process-wide secret sink for the duration of the
+   * connect attempt so any thrown diagnostic masks the credential.
+   *
+   * @param privateKey - The loaded private key buffer to combine with the prompt response.
+   * @param options - Prompt options (e.g. abort signal) forwarded from `connect()`.
+   * @returns `true` when the password attempt succeeded, `false` when the fallback was disabled or all ports refused the credential.
+   */
+  private async tryPrivateKeyPasswordFallback(
+    privateKey: Buffer,
+    options?: PromptOptions
+  ): Promise<boolean> {
+    if (!this.config.passwordFallback) return false
+    const password = await promptTerminal(
+      `Password for ${this.config.user}@${this.runtime.host}: `,
+      true,
+      options
+    )
+    const accepted = await withRegisteredSecrets([password], async () =>
+      this.tryConnectOnPorts(privateKey, password)
+    )
+    if (!accepted) return false
+    this.authMethod = "password"
+    return true
   }
 
   private async createRemoteTempPath(command: string, prefix: string): Promise<string> {
@@ -1043,9 +1061,18 @@ trap - EXIT
       true,
       options
     )
-    if (!(await this.tryConnectOnPorts(undefined, password, agent))) return false
-    this.authMethod = "password"
-    return true
+    // R-0000095: register the interactively entered SSH login password in
+    // the process-wide secret sink for the duration of the connect attempt.
+    // Without this, a thrown error from `tryConnectOnPorts` (e.g. an ssh2
+    // protocol failure that includes the credential in its trace) would
+    // surface the plaintext password to stderr via `printCommandFailure` /
+    // `printVerboseGenericError`. Mirroring the sudo-password handling, the
+    // sink registration is released as soon as the connect attempt resolves.
+    return withRegisteredSecrets([password], async () => {
+      if (!(await this.tryConnectOnPorts(undefined, password, agent))) return false
+      this.authMethod = "password"
+      return true
+    })
   }
 
   private async rewriteRemoteFileViaShell(
