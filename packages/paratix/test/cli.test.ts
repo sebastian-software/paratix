@@ -265,15 +265,29 @@ describe("applyCliProcessEnvironment", () => {
   })
 
   it("leaves process.env unchanged without --first-run", () => {
-    applyCliProcessEnvironment({ firstRun: false })
+    const restore = applyCliProcessEnvironment({ firstRun: false })
 
+    expect(process.env.PARATIX_FIRST_RUN).toBeUndefined()
+    restore()
     expect(process.env.PARATIX_FIRST_RUN).toBeUndefined()
   })
 
   it("sets process.env.PARATIX_FIRST_RUN before playbook loading when --first-run is enabled", () => {
-    applyCliProcessEnvironment({ firstRun: true })
+    const restore = applyCliProcessEnvironment({ firstRun: true })
 
     expect(process.env.PARATIX_FIRST_RUN).toBe("true")
+    restore()
+    expect(process.env.PARATIX_FIRST_RUN).toBeUndefined()
+  })
+
+  it("restores an existing PARATIX_FIRST_RUN value", () => {
+    process.env.PARATIX_FIRST_RUN = "external"
+
+    const restore = applyCliProcessEnvironment({ firstRun: true })
+
+    expect(process.env.PARATIX_FIRST_RUN).toBe("true")
+    restore()
+    expect(process.env.PARATIX_FIRST_RUN).toBe("external")
   })
 })
 
@@ -1177,6 +1191,42 @@ describe("CLI entrypoint", () => {
       const definition = await loadServerDefinitionFromFile(playbookPath, { firstRun: true })
 
       expect(definition.run).toStrictEqual(["true"])
+      expect(process.env.PARATIX_FIRST_RUN).toBeUndefined()
+    } finally {
+      rmSync(tempDirectory, { force: true, recursive: true })
+      delete process.env.PARATIX_FIRST_RUN
+    }
+  })
+
+  it("does not leak PARATIX_FIRST_RUN into a later playbook load", async () => {
+    const tempDirectory = mkdtempSync(join(tmpdir(), "paratix-cli-first-run-leak-"))
+    const firstRunPlaybookPath = join(tempDirectory, "first-run.mjs")
+    const regularPlaybookPath = join(tempDirectory, "regular.mjs")
+
+    try {
+      for (const playbookPath of [firstRunPlaybookPath, regularPlaybookPath]) {
+        writeFileSync(
+          playbookPath,
+          [
+            "export default {",
+            "  name: 'test-server',",
+            "  host: '1.2.3.4',",
+            "  ssh: { user: 'root', ports: [22] },",
+            "  run: [process.env['PARATIX_FIRST_RUN'] ?? 'missing'],",
+            "}",
+          ].join("\n")
+        )
+      }
+
+      const firstDefinition = await loadServerDefinitionFromFile(firstRunPlaybookPath, {
+        firstRun: true,
+      })
+      const regularDefinition = await loadServerDefinitionFromFile(regularPlaybookPath, {
+        firstRun: false,
+      })
+
+      expect(firstDefinition.run).toStrictEqual(["true"])
+      expect(regularDefinition.run).toStrictEqual(["missing"])
     } finally {
       rmSync(tempDirectory, { force: true, recursive: true })
       delete process.env.PARATIX_FIRST_RUN

@@ -260,9 +260,18 @@ export function applyCliEnvironmentOverrides(
   return { ...environment, [FIRST_RUN_ENV_NAME]: "true" }
 }
 
-export function applyCliProcessEnvironment(options: { firstRun: boolean }): void {
-  if (!options.firstRun) return
+export function applyCliProcessEnvironment(options: { firstRun: boolean }): () => void {
+  const previousValue = process.env[FIRST_RUN_ENV_NAME]
+  const hadPreviousValue = Object.hasOwn(process.env, FIRST_RUN_ENV_NAME)
+  if (!options.firstRun) return () => undefined
   process.env[FIRST_RUN_ENV_NAME] = "true"
+  return () => {
+    if (hadPreviousValue) {
+      process.env[FIRST_RUN_ENV_NAME] = previousValue
+    } else {
+      delete process.env[FIRST_RUN_ENV_NAME]
+    }
+  }
 }
 
 /**
@@ -289,38 +298,42 @@ export async function loadServerDefinitionFromFile(
   const filePath = resolve(file)
   const fileUrl = pathToFileURL(filePath).href
 
-  applyCliProcessEnvironment(options)
+  const restoreProcessEnvironment = applyCliProcessEnvironment(options)
 
-  // Register tsx for TypeScript imports.
-  // R-0000071: narrow the catch so only a genuine missing-tsx error is
-  // routed through handleTsxLoadFailure. Any other error from the dynamic
-  // import (incompatible Node, broken install, OOM, transitive dep
-  // missing) is rethrown with the original cause so the CLI exit handler
-  // surfaces the real loader failure instead of falsely reporting that
-  // tsx is not installed.
   try {
-    const tsx = (await import("tsx/esm/api")) as { register: () => void }
-    tsx.register()
-  } catch (error) {
-    if (isMissingTsxDependencyError(error)) {
-      handleTsxLoadFailure(filePath)
-    } else {
-      throw new Error(
-        `Failed to load tsx/esm/api: ${error instanceof Error ? error.message : String(error)}`,
-        {
-          cause: error,
-        }
-      )
+    // Register tsx for TypeScript imports.
+    // R-0000071: narrow the catch so only a genuine missing-tsx error is
+    // routed through handleTsxLoadFailure. Any other error from the dynamic
+    // import (incompatible Node, broken install, OOM, transitive dep
+    // missing) is rethrown with the original cause so the CLI exit handler
+    // surfaces the real loader failure instead of falsely reporting that
+    // tsx is not installed.
+    try {
+      const tsx = (await import("tsx/esm/api")) as { register: () => void }
+      tsx.register()
+    } catch (error) {
+      if (isMissingTsxDependencyError(error)) {
+        handleTsxLoadFailure(filePath)
+      } else {
+        throw new Error(
+          `Failed to load tsx/esm/api: ${error instanceof Error ? error.message : String(error)}`,
+          {
+            cause: error,
+          }
+        )
+      }
     }
+
+    // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment -- Dynamic import has unknown shape
+    const imported = await import(fileUrl)
+    // eslint-disable-next-line @typescript-eslint/no-unsafe-member-access, @typescript-eslint/no-unsafe-type-assertion -- Accessing .default on dynamic import
+    const definition = (imported.default ?? imported) as ServerDefinition
+
+    validateServerDefinition(definition, filePath)
+    return definition
+  } finally {
+    restoreProcessEnvironment()
   }
-
-  // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment -- Dynamic import has unknown shape
-  const imported = await import(fileUrl)
-  // eslint-disable-next-line @typescript-eslint/no-unsafe-member-access, @typescript-eslint/no-unsafe-type-assertion -- Accessing .default on dynamic import
-  const definition = (imported.default ?? imported) as ServerDefinition
-
-  validateServerDefinition(definition, filePath)
-  return definition
 }
 
 type ApplyCommandOptions = {
