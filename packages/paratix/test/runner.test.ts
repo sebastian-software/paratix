@@ -2359,6 +2359,93 @@ describe("runPlaybook shutdown handler leak on SSH connection failure", () => {
   })
 })
 
+describe("runPlaybook secret sink cleanup", () => {
+  beforeEach(() => {
+    vi.spyOn(console, "log").mockImplementation(() => {
+      /* noop */
+    })
+    vi.spyOn(console, "error").mockImplementation(() => {
+      /* noop */
+    })
+    vi.resetModules()
+  })
+
+  afterEach(async () => {
+    const { clearRegisteredSecrets } = await import("../src/secretSink.js")
+    clearRegisteredSecrets()
+    vi.restoreAllMocks()
+    vi.resetModules()
+    process.exitCode = 0
+  })
+
+  it("clears registered secrets after a successful run", async () => {
+    const capturedConfigs: unknown[] = []
+    vi.doMock("../src/ssh.js", () => ({
+      shellQuote: (s: string) => `'${s}'`,
+      SshConnectionImpl: makeMockSshClass(capturedConfigs),
+    }))
+
+    const [{ runPlaybook }, { getRegisteredSecrets, registerSecret }] = await Promise.all([
+      import("../src/runner.js"),
+      import("../src/secretSink.js"),
+    ])
+    const secret = "runner-success-secret"
+    const module: Module = {
+      apply: vi.fn(),
+      check: vi.fn().mockImplementation(() => {
+        registerSecret(secret)
+        expect(getRegisteredSecrets()).toContain(secret)
+        return "ok"
+      }),
+      name: "secret-check",
+    }
+    const definition: ServerDefinition = {
+      host: "1.2.3.4",
+      name: "test-server",
+      run: [module],
+      ssh: { ports: [22], privateKey: "~/.ssh/id", user: "root" },
+    }
+
+    await expect(runPlaybook(definition)).resolves.toBeUndefined()
+
+    expect(getRegisteredSecrets()).toStrictEqual([])
+  })
+
+  it("clears registered secrets after a failed run", async () => {
+    const capturedConfigs: unknown[] = []
+    vi.doMock("../src/ssh.js", () => ({
+      shellQuote: (s: string) => `'${s}'`,
+      SshConnectionImpl: makeMockSshClass(capturedConfigs),
+    }))
+
+    const [{ runPlaybook }, { getRegisteredSecrets, registerSecret }] = await Promise.all([
+      import("../src/runner.js"),
+      import("../src/secretSink.js"),
+    ])
+    const secret = "runner-failure-secret"
+    const module: Module = {
+      apply: vi.fn().mockImplementation(() => {
+        registerSecret(secret)
+        expect(getRegisteredSecrets()).toContain(secret)
+        return { error: new Error("module failed"), status: "failed" } satisfies ModuleResult
+      }),
+      check: vi.fn().mockResolvedValue("needs-apply"),
+      name: "secret-apply",
+    }
+    const definition: ServerDefinition = {
+      host: "1.2.3.4",
+      name: "test-server",
+      run: [module],
+      ssh: { ports: [22], privateKey: "~/.ssh/id", user: "root" },
+    }
+
+    await expect(runPlaybook(definition)).resolves.toBeUndefined()
+
+    expect(process.exitCode).toBe(1)
+    expect(getRegisteredSecrets()).toStrictEqual([])
+  })
+})
+
 // Bug regression: recipes must NOT apply() child modules in dry-run mode, only check()
 describe("runPlaybook dry-run recipe behaviour", () => {
   beforeEach(() => {
