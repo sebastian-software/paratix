@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process"
-import { mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs"
+import { mkdtempSync, readFileSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join, resolve } from "node:path"
 import { pathToFileURL } from "node:url"
@@ -109,7 +109,11 @@ describe("isDirectCliExecution", () => {
       ).not.toThrow()
       expect(isDirectCliExecution(pathToFileURL(targetPath).href, loopingSymlink)).toBe(false)
     } finally {
-      rmSync(tempDirectory, { force: true, recursive: true })
+      // Unlink the symlink loop before rmSync so that Node/macOS does not
+      // encounter ELOOP when recursively deleting the directory.
+      try { unlinkSync(loopingSymlink) } catch { /* already gone */ }
+      try { unlinkSync(innerLoopSymlink) } catch { /* already gone */ }
+      try { rmSync(tempDirectory, { force: true, recursive: true }) } catch { /* best-effort cleanup */ }
     }
   })
 })
