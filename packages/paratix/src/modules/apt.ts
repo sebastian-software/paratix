@@ -20,6 +20,23 @@ import { hasFlag, setVersionedFlag } from "./moduleHelpers.js"
 const NONINTERACTIVE = "DEBIAN_FRONTEND=noninteractive"
 const APT_REPOSITORY_MODE = "0644"
 
+// R-0000098: apt resource names land directly in shell paths like
+// `/etc/apt/keyrings/${name}.gpg` and `/etc/apt/sources.list.d/${name}.list`.
+// Reject any value that could resolve to a path-traversal segment (`..`),
+// contain a path separator, or otherwise escape the intended directory.
+// The pattern allows word characters, dots and dashes; the explicit
+// `..` reject below forbids the only single-character-class form that
+// could still produce a traversal segment.
+const APT_RESOURCE_NAME_PATTERN = /^[\w.\-]+$/v
+
+function validateAptResourceName(name: string): void {
+  if (name.length === 0 || name.includes("..") || !APT_RESOURCE_NAME_PATTERN.test(name)) {
+    throw new Error(
+      `apt: name must match ${String(APT_RESOURCE_NAME_PATTERN)} and must not contain '..', got: ${JSON.stringify(name)}`
+    )
+  }
+}
+
 const APT_BASE_EXEC_OPTS = { ignoreExitCode: true, silent: true } as const
 
 function aptExecOptions(options?: UpgradeOptions): ExecOptions {
@@ -274,6 +291,7 @@ export const apt = {
    * @returns A Module that imports the GPG key.
    */
   key(name: string, url: string, options: { fingerprint: string }): Module {
+    validateAptResourceName(name)
     validateAptKeyUrl(url)
     const expectedFingerprint = normalizeOpenPgpFingerprint(options.fingerprint)
     const keyringPath = `/etc/apt/keyrings/${name}.gpg`
@@ -355,11 +373,13 @@ export const apt = {
     }
 
     const name = nameOrPpa
+    validateAptResourceName(name)
     const signedBy = options?.signedBy
     let expectedContent = source
 
     if (signedBy !== false) {
       const keyName = typeof signedBy === "string" ? signedBy : name
+      validateAptResourceName(keyName)
       expectedContent = injectSignedBy(expectedContent, `/etc/apt/keyrings/${keyName}.gpg`)
     }
 

@@ -178,6 +178,26 @@ describe("apt.key", () => {
       apt.key("docker", "https://download.docker.com/linux/ubuntu/gpg", { fingerprint: "abc" })
     ).toThrow(/requires an OpenPGP fingerprint/v)
   })
+
+  // R-0000098 regression: name lands directly in
+  // `/etc/apt/keyrings/${name}.gpg` and must reject path-traversal
+  // segments (`..`, slashes, empty string) before any shell command
+  // is constructed.
+  it("throws when name contains '..' (path traversal)", () => {
+    expect(() => apt.key("../../tmp/evil", "https://example.com/key.gpg", { fingerprint })).toThrow(
+      /must not contain '\.\.'/v
+    )
+  })
+
+  it("throws when name contains a path separator", () => {
+    expect(() => apt.key("foo/bar", "https://example.com/key.gpg", { fingerprint })).toThrow(
+      /must match/v
+    )
+  })
+
+  it("throws when name is empty", () => {
+    expect(() => apt.key("", "https://example.com/key.gpg", { fingerprint })).toThrow(/must match/v)
+  })
 })
 
 describe("apt.distUpgrade", () => {
@@ -467,6 +487,22 @@ describe("apt.repository (standard form)", () => {
     const mod = apt.repository("docker", source)
     const result = await mod.check(ssh, emptyEnv)
     expect(result).toBe("needs-apply")
+  })
+
+  // R-0000098 regression: name lands directly in
+  // `/etc/apt/sources.list.d/${name}.list` and must reject path-traversal
+  // segments (`..`, slashes, empty string) before any shell command
+  // is constructed.
+  it("throws when name contains '..' (path traversal)", () => {
+    expect(() => apt.repository("../../tmp/evil", source)).toThrow(/must not contain '\.\.'/v)
+  })
+
+  it("throws when name contains a path separator", () => {
+    expect(() => apt.repository("foo/bar", source)).toThrow(/must match/v)
+  })
+
+  it("throws when name is empty", () => {
+    expect(() => apt.repository("", source)).toThrow(/must match/v)
   })
 })
 
