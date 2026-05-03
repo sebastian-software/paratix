@@ -17,7 +17,6 @@ import { createIntegrationEnvironment, type IntegrationEnvironment } from "./har
 const emptyEnv = {}
 const HTTP_SERVER_READY_DELAY_MS = 250
 const HTTP_SERVER_READY_RETRIES = 20
-// cspell:ignore ordner konfiguration
 const unicodeFileName = "über datei こんにちは.txt"
 const unicodeTemplateName = "grüße-vorlage.tmpl"
 const unicodeContent = "Grüße aus Köln – こんにちは мир\n"
@@ -118,7 +117,6 @@ async function startRemoteHttpServer(
 ): Promise<void> {
   const pidPath = `/tmp/paratix-http-${String(port)}.pid`
   const logPath = `/tmp/paratix-http-${String(port)}.log`
-  // cspell:ignore nohup
   await ssh.exec(
     `sh -lc ${shellQuote(
       `cd ${shellQuote(directory)} && nohup python3 -m http.server ${String(port)} --bind 127.0.0.1 >${shellQuote(logPath)} 2>&1 & echo $! > ${shellQuote(pidPath)}`
@@ -193,9 +191,12 @@ describe("Paratix integration", () => {
   it("connects with a pinned host key and passes probeSudo against the real server", async () => {
     const environment = getEnvironment()
     const ssh = await connectSsh([environment.primaryPort])
-    await expect(ssh.probeSudo()).resolves.toBeUndefined()
-    expect(ssh.getConnectionInfo().port).toBe(environment.primaryPort)
-    ssh.disconnect()
+    try {
+      await expect(ssh.probeSudo()).resolves.toBeUndefined()
+      expect(ssh.getConnectionInfo().port).toBe(environment.primaryPort)
+    } finally {
+      ssh.disconnect()
+    }
   })
 
   it("uploads and downloads files over real SFTP", async () => {
@@ -204,19 +205,24 @@ describe("Paratix integration", () => {
     const localDirectory = mkdtempSync(join(tmpdir(), "paratix-sftp-"))
     const localUploadPath = join(localDirectory, "upload.txt")
     const localDownloadPath = join(localDirectory, "download.txt")
-    const remoteUploadPath = "/home/paratix/uploaded.txt"
-    const remoteDownloadPath = "/home/paratix/remote.txt"
+    const remoteBase = `/home/paratix/integration-${randomUUID()}`
+    const remoteUploadPath = `${remoteBase}/uploaded.txt`
+    const remoteDownloadPath = `${remoteBase}/remote.txt`
 
-    writeFileSync(localUploadPath, "upload-content\n", "utf8")
-    await ssh.uploadFile(localUploadPath, remoteUploadPath)
-    expect(await ssh.readFile(remoteUploadPath)).toBe("upload-content")
+    try {
+      writeFileSync(localUploadPath, "upload-content\n", "utf8")
+      await ssh.exec(`mkdir -p ${shellQuote(remoteBase)}`, { silent: true })
+      await ssh.uploadFile(localUploadPath, remoteUploadPath)
+      expect(await ssh.readFile(remoteUploadPath)).toBe("upload-content")
 
-    await ssh.writeFile(remoteDownloadPath, "download-content\n", { mode: "0644" })
-    await ssh.downloadFile(remoteDownloadPath, localDownloadPath)
-    expect(await readFile(localDownloadPath, "utf8")).toBe("download-content\n")
-
-    ssh.disconnect()
-    await rm(localDirectory, { force: true, recursive: true })
+      await ssh.writeFile(remoteDownloadPath, "download-content\n", { mode: "0644" })
+      await ssh.downloadFile(remoteDownloadPath, localDownloadPath)
+      expect(await readFile(localDownloadPath, "utf8")).toBe("download-content\n")
+    } finally {
+      await ssh.exec(`rm -rf ${shellQuote(remoteBase)}`, { silent: true })
+      ssh.disconnect()
+      await rm(localDirectory, { force: true, recursive: true })
+    }
   })
 
   it("uploads and downloads unicode filenames and content over real SFTP", async () => {
@@ -225,34 +231,41 @@ describe("Paratix integration", () => {
     const localDirectory = mkdtempSync(join(tmpdir(), "paratix-sftp-unicode-"))
     const localUploadPath = join(localDirectory, unicodeFileName)
     const localDownloadPath = join(localDirectory, `download-${unicodeFileName}`)
-    const remoteDirectory = "/home/paratix/über ordner"
+    const remoteBase = `/home/paratix/integration-${randomUUID()}`
+    const remoteDirectory = `${remoteBase}/über ordner`
     const remoteUploadPath = `${remoteDirectory}/${unicodeFileName}`
     const remoteDownloadPath = `${remoteDirectory}/下載-ß.txt`
 
-    writeFileSync(localUploadPath, unicodeContent, "utf8")
-    await ssh.exec(`mkdir -p ${shellQuote(remoteDirectory)}`, { silent: true })
-    await ssh.uploadFile(localUploadPath, remoteUploadPath)
-    expect(await ssh.readFile(remoteUploadPath)).toBe(unicodeContent.trimEnd())
+    try {
+      writeFileSync(localUploadPath, unicodeContent, "utf8")
+      await ssh.exec(`mkdir -p ${shellQuote(remoteDirectory)}`, { silent: true })
+      await ssh.uploadFile(localUploadPath, remoteUploadPath)
+      expect(await ssh.readFile(remoteUploadPath)).toBe(unicodeContent.trimEnd())
 
-    await ssh.writeFile(remoteDownloadPath, unicodeBlockContent, { mode: "0644" })
-    await ssh.downloadFile(remoteDownloadPath, localDownloadPath)
-    expect(await readFile(localDownloadPath, "utf8")).toBe(unicodeBlockContent)
-
-    ssh.disconnect()
-    await rm(localDirectory, { force: true, recursive: true })
+      await ssh.writeFile(remoteDownloadPath, unicodeBlockContent, { mode: "0644" })
+      await ssh.downloadFile(remoteDownloadPath, localDownloadPath)
+      expect(await readFile(localDownloadPath, "utf8")).toBe(unicodeBlockContent)
+    } finally {
+      await ssh.exec(`rm -rf ${shellQuote(remoteBase)}`, { silent: true })
+      ssh.disconnect()
+      await rm(localDirectory, { force: true, recursive: true })
+    }
   })
 
   it("reconnects successfully on a different configured port", async () => {
     const environment = getEnvironment()
     const ssh = await connectSsh([environment.primaryPort])
 
-    ssh.removePort(environment.primaryPort)
-    ssh.addPort(environment.secondaryPort)
-    await ssh.reconnect()
+    try {
+      ssh.removePort(environment.primaryPort)
+      ssh.addPort(environment.secondaryPort)
+      await ssh.reconnect()
 
-    expect(ssh.getConnectionInfo().port).toBe(environment.secondaryPort)
-    expect(await ssh.output("whoami")).toBe("root")
-    ssh.disconnect()
+      expect(ssh.getConnectionInfo().port).toBe(environment.secondaryPort)
+      expect(await ssh.output("whoami")).toBe("root")
+    } finally {
+      ssh.disconnect()
+    }
   })
 
   it("runs a real happy-path playbook against the integration server", async () => {
@@ -260,36 +273,43 @@ describe("Paratix integration", () => {
     const localDirectory = mkdtempSync(join(tmpdir(), "paratix-playbook-"))
     const localSourcePath = join(localDirectory, "source.txt")
     const localTemplatePath = join(localDirectory, "template.tmpl")
-
-    writeFileSync(localSourcePath, "copied-from-local\n", "utf8")
-    writeFileSync(localTemplatePath, "Hello {{NAME|raw}}\n", "utf8")
-
-    const definition = server({
-      env: { NAME: "integration" },
-      host: environment.host,
-      name: "integration-happy-path",
-      run: [
-        file.directory("/root/app"),
-        file.copy("/root/app/source.txt", localSourcePath),
-        file.template("/root/app/template.txt", localTemplatePath),
-        command.shell(`printf '%s\\n' ready > ${shellQuote("/root/app/marker.txt")}`, {
-          check: `test -f ${shellQuote("/root/app/marker.txt")}`,
-          name: "create marker",
-        }),
-      ],
-      ssh: createSshConfig([environment.primaryPort], {}, "root"),
-    })
-
-    await expect(runPlaybook(definition)).resolves.toBeUndefined()
-    expect(process.exitCode).toBe(0)
+    const remoteBase = `/root/integration-${randomUUID()}`
+    const remoteApp = `${remoteBase}/app`
+    const markerPath = `${remoteApp}/marker.txt`
 
     const ssh = await connectSsh([environment.primaryPort], {}, "root")
-    expect(await ssh.readFile("/root/app/source.txt")).toBe("copied-from-local")
-    expect(await ssh.readFile("/root/app/template.txt")).toBe("Hello integration")
-    expect(await ssh.readFile("/root/app/marker.txt")).toBe("ready")
-    ssh.disconnect()
 
-    await rm(localDirectory, { force: true, recursive: true })
+    try {
+      writeFileSync(localSourcePath, "copied-from-local\n", "utf8")
+      writeFileSync(localTemplatePath, "Hello {{NAME|raw}}\n", "utf8")
+
+      const definition = server({
+        env: { NAME: "integration" },
+        host: environment.host,
+        name: "integration-happy-path",
+        run: [
+          file.directory(remoteApp),
+          file.copy(`${remoteApp}/source.txt`, localSourcePath),
+          file.template(`${remoteApp}/template.txt`, localTemplatePath),
+          command.shell(`printf '%s\\n' ready > ${shellQuote(markerPath)}`, {
+            check: `test -f ${shellQuote(markerPath)}`,
+            name: "create marker",
+          }),
+        ],
+        ssh: createSshConfig([environment.primaryPort], {}, "root"),
+      })
+
+      await expect(runPlaybook(definition)).resolves.toBeUndefined()
+      expect(process.exitCode).toBe(0)
+
+      expect(await ssh.readFile(`${remoteApp}/source.txt`)).toBe("copied-from-local")
+      expect(await ssh.readFile(`${remoteApp}/template.txt`)).toBe("Hello integration")
+      expect(await ssh.readFile(markerPath)).toBe("ready")
+    } finally {
+      await ssh.exec(`rm -rf ${shellQuote(remoteBase)}`, { silent: true })
+      ssh.disconnect()
+      await rm(localDirectory, { force: true, recursive: true })
+    }
   })
 
   it("converges file and command modules to verifiable remote state", async () => {
