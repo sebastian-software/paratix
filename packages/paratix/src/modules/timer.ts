@@ -75,7 +75,7 @@ async function checkAbsent(
 ): Promise<"needs-apply" | "ok"> {
   if (await ssh.exists(locations.servicePath)) return NEEDS_APPLY
   if (await ssh.exists(locations.timerPath)) return NEEDS_APPLY
-  return "ok"
+  return (await hasResidualTimerState(ssh, locations.timerUnit)) ? NEEDS_APPLY : "ok"
 }
 
 type SyncOutcome =
@@ -123,6 +123,12 @@ async function syncUnitFiles(
 async function isTimerFullyActive(ssh: SshConnection, timerUnit: string): Promise<boolean> {
   const enabled = await ssh.test(`${SYSTEMCTL} is-enabled --quiet ${shellQuote(timerUnit)}`)
   if (!enabled) return false
+  return ssh.test(`${SYSTEMCTL} is-active --quiet ${shellQuote(timerUnit)}`)
+}
+
+async function hasResidualTimerState(ssh: SshConnection, timerUnit: string): Promise<boolean> {
+  const enabled = await ssh.test(`${SYSTEMCTL} is-enabled --quiet ${shellQuote(timerUnit)}`)
+  if (enabled) return true
   return ssh.test(`${SYSTEMCTL} is-active --quiet ${shellQuote(timerUnit)}`)
 }
 
@@ -215,10 +221,11 @@ async function applyAbsent(ssh: SshConnection, context: AbsentContext): Promise<
   const { locations, module, name } = context
 
   // Idempotent no-op: if neither unit file exists, there is nothing to clean
-  // up. Skipping the systemctl/rm sequence avoids a spurious daemon-reload.
+  // up unless systemd still has residual active/enabled state for the timer.
   const serviceExists = await ssh.exists(locations.servicePath)
   const timerExists = await ssh.exists(locations.timerPath)
-  if (!serviceExists && !timerExists) return { status: "ok" }
+  const residualState = await hasResidualTimerState(ssh, locations.timerUnit)
+  if (!serviceExists && !timerExists && !residualState) return { status: "ok" }
 
   // Best-effort disable; ignore failure (unit may already be gone). `disable
   // --now` also removes the wants/ symlink, which is why we run it before
@@ -228,12 +235,14 @@ async function applyAbsent(ssh: SshConnection, context: AbsentContext): Promise<
     silent: true,
   })
 
-  const remove = await ssh.exec(
-    `rm -f ${shellQuote(locations.timerPath)} ${shellQuote(locations.servicePath)}`,
-    { ignoreExitCode: true, silent: true }
-  )
-  if (remove.code !== 0) {
-    return failedCommand(`[${module}: ${name}] failed to remove unit files`, remove)
+  if (serviceExists || timerExists) {
+    const remove = await ssh.exec(
+      `rm -f ${shellQuote(locations.timerPath)} ${shellQuote(locations.servicePath)}`,
+      { ignoreExitCode: true, silent: true }
+    )
+    if (remove.code !== 0) {
+      return failedCommand(`[${module}: ${name}] failed to remove unit files`, remove)
+    }
   }
 
   const reload = await ssh.exec(`${SYSTEMCTL} daemon-reload`, {
