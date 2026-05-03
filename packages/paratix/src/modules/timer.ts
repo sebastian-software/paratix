@@ -14,20 +14,55 @@ import {
 const SYSTEMCTL = "systemctl"
 const UNIT_FILE_MODE = "0644"
 
+function normalizeMode(mode: string): string {
+  return mode.replace(/^0+/v, "")
+}
+
+type FileMatchSpec = {
+  expected: string
+  expectedMode?: string
+  path: string
+}
+
 // When `apply` runs after a `check` that already inspected the same paths,
 // this issues another `exists`/`readFile` round-trip. The extra calls are
 // accepted because the check phase only reports `needs-apply`/`ok` and does
 // not propagate read results to apply, and re-reading right before writing
 // avoids acting on stale data when the remote state changes between phases.
-async function fileMatches(ssh: SshConnection, path: string, expected: string): Promise<boolean> {
-  if (!(await ssh.exists(path))) return false
-  const remote = await ssh.readFile(path)
-  return remote.trim() === expected.trim()
+//
+// When `expectedMode` is supplied, the file's current mode is read via
+// `stat -c '%a'` and compared after normalizing leading zeros so that values
+// like `"644"` and `"0644"` compare equal. Any failure to obtain a mode --
+// missing file, stat failure, or empty output -- counts as a mismatch so the
+// caller treats the file as needing apply.
+async function fileMatches(ssh: SshConnection, spec: FileMatchSpec): Promise<boolean> {
+  if (!(await ssh.exists(spec.path))) return false
+  const remote = await ssh.readFile(spec.path)
+  if (remote.trim() !== spec.expected.trim()) return false
+  if (spec.expectedMode === undefined) return true
+  const modeResult = await ssh.exec(`stat -c '%a' ${shellQuote(spec.path)}`, {
+    ignoreExitCode: true,
+    silent: true,
+  })
+  if (modeResult.code !== 0) return false
+  const currentMode = modeResult.stdout.trim()
+  if (currentMode === "") return false
+  return normalizeMode(currentMode) === normalizeMode(spec.expectedMode)
 }
 
 async function checkPresent(ssh: SshConnection, paths: TimerPaths): Promise<"needs-apply" | "ok"> {
-  if (!(await fileMatches(ssh, paths.servicePath, paths.serviceContent))) return NEEDS_APPLY
-  if (!(await fileMatches(ssh, paths.timerPath, paths.timerContent))) return NEEDS_APPLY
+  const serviceMatched = await fileMatches(ssh, {
+    expected: paths.serviceContent,
+    expectedMode: UNIT_FILE_MODE,
+    path: paths.servicePath,
+  })
+  if (!serviceMatched) return NEEDS_APPLY
+  const timerMatched = await fileMatches(ssh, {
+    expected: paths.timerContent,
+    expectedMode: UNIT_FILE_MODE,
+    path: paths.timerPath,
+  })
+  if (!timerMatched) return NEEDS_APPLY
   const enabled = await ssh.test(`${SYSTEMCTL} is-enabled --quiet ${shellQuote(paths.timerUnit)}`)
   if (!enabled) return NEEDS_APPLY
   const active = await ssh.test(`${SYSTEMCTL} is-active --quiet ${shellQuote(paths.timerUnit)}`)
@@ -52,8 +87,16 @@ async function syncUnitFiles(
   name: string,
   paths: TimerPaths
 ): Promise<SyncOutcome> {
-  const serviceMatched = await fileMatches(ssh, paths.servicePath, paths.serviceContent)
-  const timerMatched = await fileMatches(ssh, paths.timerPath, paths.timerContent)
+  const serviceMatched = await fileMatches(ssh, {
+    expected: paths.serviceContent,
+    expectedMode: UNIT_FILE_MODE,
+    path: paths.servicePath,
+  })
+  const timerMatched = await fileMatches(ssh, {
+    expected: paths.timerContent,
+    expectedMode: UNIT_FILE_MODE,
+    path: paths.timerPath,
+  })
 
   if (!serviceMatched) {
     await ssh.writeFile(paths.servicePath, paths.serviceContent, { mode: UNIT_FILE_MODE })

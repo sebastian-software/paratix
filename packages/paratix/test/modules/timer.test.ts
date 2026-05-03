@@ -26,11 +26,58 @@ describe("timer.scheduled — check (state: present)", () => {
       [`[ -e '${TIMER_PATH}' ]`]: { code: 0 },
       [`cat '${SERVICE_PATH}'`]: { code: 0, stdout: expectedServiceContent },
       [`cat '${TIMER_PATH}'`]: { code: 0, stdout: expectedTimerContent },
+      [`stat -c '%a' '${SERVICE_PATH}'`]: { code: 0, stdout: "644\n" },
+      [`stat -c '%a' '${TIMER_PATH}'`]: { code: 0, stdout: "644\n" },
       "systemctl is-active --quiet 'backup.timer'": { code: 0 },
       "systemctl is-enabled --quiet 'backup.timer'": { code: 0 },
     })
     const mod = timer.scheduled("backup", baseOptions)
     expect(await mod.check(ssh, emptyEnv)).toBe("ok")
+  })
+
+  it("returns needs-apply when service unit mode drifts to 0600", async () => {
+    const ssh = createMockSsh({
+      [`[ -e '${SERVICE_PATH}' ]`]: { code: 0 },
+      [`[ -e '${TIMER_PATH}' ]`]: { code: 0 },
+      [`cat '${SERVICE_PATH}'`]: { code: 0, stdout: expectedServiceContent },
+      [`cat '${TIMER_PATH}'`]: { code: 0, stdout: expectedTimerContent },
+      [`stat -c '%a' '${SERVICE_PATH}'`]: { code: 0, stdout: "600\n" },
+      [`stat -c '%a' '${TIMER_PATH}'`]: { code: 0, stdout: "644\n" },
+      "systemctl is-active --quiet 'backup.timer'": { code: 0 },
+      "systemctl is-enabled --quiet 'backup.timer'": { code: 0 },
+    })
+    const mod = timer.scheduled("backup", baseOptions)
+    expect(await mod.check(ssh, emptyEnv)).toBe("needs-apply")
+  })
+
+  it("returns needs-apply when timer unit mode drifts to 0600", async () => {
+    const ssh = createMockSsh({
+      [`[ -e '${SERVICE_PATH}' ]`]: { code: 0 },
+      [`[ -e '${TIMER_PATH}' ]`]: { code: 0 },
+      [`cat '${SERVICE_PATH}'`]: { code: 0, stdout: expectedServiceContent },
+      [`cat '${TIMER_PATH}'`]: { code: 0, stdout: expectedTimerContent },
+      [`stat -c '%a' '${SERVICE_PATH}'`]: { code: 0, stdout: "644\n" },
+      [`stat -c '%a' '${TIMER_PATH}'`]: { code: 0, stdout: "600\n" },
+      "systemctl is-active --quiet 'backup.timer'": { code: 0 },
+      "systemctl is-enabled --quiet 'backup.timer'": { code: 0 },
+    })
+    const mod = timer.scheduled("backup", baseOptions)
+    expect(await mod.check(ssh, emptyEnv)).toBe("needs-apply")
+  })
+
+  it("returns needs-apply when stat for the service unit mode fails", async () => {
+    const ssh = createMockSsh({
+      [`[ -e '${SERVICE_PATH}' ]`]: { code: 0 },
+      [`[ -e '${TIMER_PATH}' ]`]: { code: 0 },
+      [`cat '${SERVICE_PATH}'`]: { code: 0, stdout: expectedServiceContent },
+      [`cat '${TIMER_PATH}'`]: { code: 0, stdout: expectedTimerContent },
+      [`stat -c '%a' '${SERVICE_PATH}'`]: { code: 1, stdout: "" },
+      [`stat -c '%a' '${TIMER_PATH}'`]: { code: 0, stdout: "644\n" },
+      "systemctl is-active --quiet 'backup.timer'": { code: 0 },
+      "systemctl is-enabled --quiet 'backup.timer'": { code: 0 },
+    })
+    const mod = timer.scheduled("backup", baseOptions)
+    expect(await mod.check(ssh, emptyEnv)).toBe("needs-apply")
   })
 
   it("returns needs-apply when service file is missing", async () => {
@@ -66,6 +113,8 @@ describe("timer.scheduled — check (state: present)", () => {
       [`[ -e '${TIMER_PATH}' ]`]: { code: 0 },
       [`cat '${SERVICE_PATH}'`]: { code: 0, stdout: expectedServiceContent },
       [`cat '${TIMER_PATH}'`]: { code: 0, stdout: expectedTimerContent },
+      [`stat -c '%a' '${SERVICE_PATH}'`]: { code: 0, stdout: "644\n" },
+      [`stat -c '%a' '${TIMER_PATH}'`]: { code: 0, stdout: "644\n" },
       "systemctl is-enabled --quiet 'backup.timer'": { code: 1 },
     })
     const mod = timer.scheduled("backup", baseOptions)
@@ -78,6 +127,8 @@ describe("timer.scheduled — check (state: present)", () => {
       [`[ -e '${TIMER_PATH}' ]`]: { code: 0 },
       [`cat '${SERVICE_PATH}'`]: { code: 0, stdout: expectedServiceContent },
       [`cat '${TIMER_PATH}'`]: { code: 0, stdout: expectedTimerContent },
+      [`stat -c '%a' '${SERVICE_PATH}'`]: { code: 0, stdout: "644\n" },
+      [`stat -c '%a' '${TIMER_PATH}'`]: { code: 0, stdout: "644\n" },
       "systemctl is-active --quiet 'backup.timer'": { code: 1 },
       "systemctl is-enabled --quiet 'backup.timer'": { code: 0 },
     })
@@ -337,6 +388,8 @@ describe("timer.scheduled — apply (state: present, idempotency)", () => {
       [`[ -e '${TIMER_PATH}' ]`]: { code: 0 },
       [`cat '${SERVICE_PATH}'`]: { code: 0, stdout: expectedServiceContent },
       [`cat '${TIMER_PATH}'`]: { code: 0, stdout: expectedTimerContent },
+      [`stat -c '%a' '${SERVICE_PATH}'`]: { code: 0, stdout: "644\n" },
+      [`stat -c '%a' '${TIMER_PATH}'`]: { code: 0, stdout: "644\n" },
       "systemctl is-active --quiet 'backup.timer'": { code: 0 },
       "systemctl is-enabled --quiet 'backup.timer'": { code: 0 },
     })
@@ -354,6 +407,8 @@ describe("timer.scheduled — apply (state: present, idempotency)", () => {
       [`[ -e '${TIMER_PATH}' ]`]: { code: 0 },
       [`cat '${SERVICE_PATH}'`]: { code: 0, stdout: expectedServiceContent },
       [`cat '${TIMER_PATH}'`]: { code: 0, stdout: expectedTimerContent },
+      [`stat -c '%a' '${SERVICE_PATH}'`]: { code: 0, stdout: "644\n" },
+      [`stat -c '%a' '${TIMER_PATH}'`]: { code: 0, stdout: "644\n" },
       "systemctl enable --now 'backup.timer'": { code: 0 },
       "systemctl is-enabled --quiet 'backup.timer'": { code: 1 },
     })
@@ -371,6 +426,7 @@ describe("timer.scheduled — apply (state: present, idempotency)", () => {
       [`[ -e '${TIMER_PATH}' ]`]: { code: 0 },
       [`cat '${SERVICE_PATH}'`]: { code: 0, stdout: "[Unit]\nDescription=stale\n" },
       [`cat '${TIMER_PATH}'`]: { code: 0, stdout: expectedTimerContent },
+      [`stat -c '%a' '${TIMER_PATH}'`]: { code: 0, stdout: "644\n" },
       "systemctl daemon-reload": { code: 0 },
       "systemctl enable --now 'backup.timer'": { code: 0 },
     })
@@ -379,6 +435,58 @@ describe("timer.scheduled — apply (state: present, idempotency)", () => {
     expect(result.status).toBe("changed")
     expect(ssh.calls).toContain("systemctl daemon-reload")
     expect(ssh.calls).not.toContain("systemctl restart 'backup.timer'")
+  })
+
+  it("rewrites the service unit when its mode drifts to 0600", async () => {
+    const ssh = createMockSsh({
+      [`[ -e '${SERVICE_PATH}' ]`]: { code: 0 },
+      [`[ -e '${TIMER_PATH}' ]`]: { code: 0 },
+      [`cat '${SERVICE_PATH}'`]: { code: 0, stdout: expectedServiceContent },
+      [`cat '${TIMER_PATH}'`]: { code: 0, stdout: expectedTimerContent },
+      [`stat -c '%a' '${SERVICE_PATH}'`]: { code: 0, stdout: "600\n" },
+      [`stat -c '%a' '${TIMER_PATH}'`]: { code: 0, stdout: "644\n" },
+      "systemctl daemon-reload": { code: 0 },
+      "systemctl enable --now 'backup.timer'": { code: 0 },
+    })
+    const writes: Array<{ content: string; mode: string | undefined; path: string }> = []
+    // eslint-disable-next-line @typescript-eslint/require-await -- Mock implementation
+    ssh.writeFile = async (path: string, content: string, opts?: { mode?: string }) => {
+      writes.push({ content, mode: opts?.mode, path })
+    }
+    const mod = timer.scheduled("backup", baseOptions)
+    const result = await mod.apply(ssh, emptyEnv)
+    expect(result.status).toBe("changed")
+    const servicePaths = writes.filter((w) => w.path === SERVICE_PATH)
+    expect(servicePaths).toHaveLength(1)
+    expect(servicePaths[0]?.mode).toBe("0644")
+    expect(writes.some((w) => w.path === TIMER_PATH)).toBe(false)
+  })
+
+  it("rewrites the timer unit when its mode drifts to 0600", async () => {
+    const ssh = createMockSsh({
+      [`[ -e '${SERVICE_PATH}' ]`]: { code: 0 },
+      [`[ -e '${TIMER_PATH}' ]`]: { code: 0 },
+      [`cat '${SERVICE_PATH}'`]: { code: 0, stdout: expectedServiceContent },
+      [`cat '${TIMER_PATH}'`]: { code: 0, stdout: expectedTimerContent },
+      [`stat -c '%a' '${SERVICE_PATH}'`]: { code: 0, stdout: "644\n" },
+      [`stat -c '%a' '${TIMER_PATH}'`]: { code: 0, stdout: "600\n" },
+      "systemctl daemon-reload": { code: 0 },
+      "systemctl enable --now 'backup.timer'": { code: 0 },
+      "systemctl restart 'backup.timer'": { code: 0 },
+    })
+    const writes: Array<{ content: string; mode: string | undefined; path: string }> = []
+    // eslint-disable-next-line @typescript-eslint/require-await -- Mock implementation
+    ssh.writeFile = async (path: string, content: string, opts?: { mode?: string }) => {
+      writes.push({ content, mode: opts?.mode, path })
+    }
+    const mod = timer.scheduled("backup", baseOptions)
+    const result = await mod.apply(ssh, emptyEnv)
+    expect(result.status).toBe("changed")
+    const timerWrites = writes.filter((w) => w.path === TIMER_PATH)
+    expect(timerWrites).toHaveLength(1)
+    expect(timerWrites[0]?.mode).toBe("0644")
+    expect(writes.some((w) => w.path === SERVICE_PATH)).toBe(false)
+    expect(ssh.calls).toContain("systemctl restart 'backup.timer'")
   })
 })
 
