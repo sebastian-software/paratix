@@ -13,6 +13,27 @@ const NONINTERACTIVE = "DEBIAN_FRONTEND=noninteractive"
 const CODENAME_RE = /^[a-z]{3,20}$/v
 const APT_SOURCES_MODE = "0644"
 
+// prettier-ignore
+const REGEXP_SPECIAL = new Set(["?", ".", "(", ")", "[", "]", "{", "}", "*", "\\", "^", "+", "|", "$"])
+
+/**
+ * Escape every regex special character in `value` so the string can be used
+ * verbatim inside a `RegExp` source. Used by {@link rewriteSourcesFile} to
+ * build a token-boundary anchored pattern from the codename without giving
+ * the codename the chance to inject regex syntax. Mirrors the helper used
+ * by `sshd.ts` so the two modules stay consistent.
+ *
+ * @param value - The string to escape.
+ * @returns A regex-safe version of `value`.
+ */
+function escapeRegExp(value: string): string {
+  let result = ""
+  for (const ch of value) {
+    result += REGEXP_SPECIAL.has(ch) ? `\\${ch}` : ch
+  }
+  return result
+}
+
 /**
  * Options for the {@link releaseUpgrade.upgrade} module.
  */
@@ -129,7 +150,21 @@ async function rewriteSourcesFile(
   parameters: RewriteSourcesParameters
 ): Promise<null | SourcesSnapshot> {
   const { currentCodename, originalContent, remotePath, ssh, targetCodename } = parameters
-  const updatedContent = originalContent.replaceAll(currentCodename, targetCodename)
+  // R-0000103: anchor the substitution at token boundaries so the codename
+  // is only swapped when it appears as a standalone field. The naive
+  // `replaceAll` corrupts URLs (`archive.ubuntu.com/ubuntu-trusty-updates/`),
+  // comments, hyphenated backports/security suites (`trusty-backports`,
+  // `trusty-security`) and any repository whose name happens to contain the
+  // codename as a substring. Plain `\b` is not enough because JavaScript
+  // treats `-` as a non-word character, so `\btrusty\b` would still match
+  // inside `ubuntu-trusty-updates`. The look-behind/look-ahead pair extends
+  // the boundary to also reject adjacent hyphens, dots and `_`, which are
+  // the separators used in apt sources, URLs and hyphenated suite names.
+  const codenamePattern = new RegExp(
+    `(?<![\\w.\\-])${escapeRegExp(currentCodename)}(?![\\w.\\-])`,
+    "gv"
+  )
+  const updatedContent = originalContent.replaceAll(codenamePattern, targetCodename)
   if (updatedContent === originalContent) return null
 
   await guardedWriteFile(ssh, {

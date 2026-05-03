@@ -413,6 +413,70 @@ describe("releaseUpgrade.upgrade — apply (Debian)", () => {
       expect(extraWrites[0]?.content).not.toContain("bookworm")
     })
 
+    // R-0000103 regression: codename substitution must be anchored at token
+    // boundaries so URLs, repository names and other strings that merely
+    // contain the codename as a substring are left intact. Only standalone
+    // codename occurrences (e.g. the suite field of a `deb` line) may be
+    // rewritten.
+    it("R-0000103: only replaces standalone codename occurrences, not substring matches", async () => {
+      const currentCodename = "trusty"
+      const targetCodename = "noble"
+      // Mixed content: a real `deb` suite reference (must change), a URL
+      // path that contains `trusty` as part of a longer host segment (must
+      // NOT change) and a comment line that mentions `trusty-updates` (must
+      // also stay intact because the codename is part of a hyphenated
+      // token).
+      const originalSources = [
+        `deb http://archive.ubuntu.com/ubuntu-trusty-updates/ ${currentCodename} main`,
+        "# repo backports for trusty-backports stay untouched",
+        "deb http://archive.ubuntu.com/ubuntu/ trusty-security main",
+      ].join("\n")
+      const ssh = createMockSsh({
+        "cat '/etc/apt/sources.list'": { code: 0, stdout: originalSources },
+        "cat '/etc/os-release'": { code: 0, stdout: DEBIAN_OS_RELEASE },
+        "curl -fsSL https://deb.debian.org/debian/dists/stable/Release": {
+          code: 0,
+          stdout: `Origin: Debian\nCodename: ${targetCodename}\nSuite: stable\n`,
+        },
+        "DEBIAN_FRONTEND=noninteractive apt-get autoremove -y": { code: 0 },
+        "DEBIAN_FRONTEND=noninteractive apt-get full-upgrade -y": { code: 0 },
+        "DEBIAN_FRONTEND=noninteractive apt-get update": { code: 0 },
+        "DEBIAN_FRONTEND=noninteractive dpkg --configure -a": { code: 0 },
+        "find /etc/apt/sources.list.d/ \\( -name '*.list' -o -name '*.sources' \\) -type f -print0":
+          FIND_SOURCES_EMPTY,
+        "lsb_release -cs": { code: 0, stdout: `${currentCodename}\n` },
+      })
+      const writes = captureWriteFile(ssh)
+      const mod = releaseUpgrade.upgrade()
+      const result = await mod.apply(ssh, emptyEnv)
+
+      expect(result.status).toBe("changed")
+      const sourcesWrites = writes.filter((w) => w.path === "/etc/apt/sources.list")
+      expect(sourcesWrites).toHaveLength(1)
+      const written = sourcesWrites[0].content
+
+      // Standalone suite reference is rewritten.
+      expect(written).toContain(`ubuntu-trusty-updates/ ${targetCodename} main`)
+
+      // Substring occurrences (URL path segment, hyphenated suite tokens
+      // and the comment) must remain unchanged.
+      expect(written).toContain("ubuntu-trusty-updates/")
+      expect(written).toContain("trusty-backports")
+      expect(written).toContain("trusty-security")
+
+      // Sanity: the only standalone `trusty` token (the suite field of
+      // the first `deb` line) has been rewritten, and the new codename
+      // appears as a standalone token. We deliberately use look-behind
+      // and look-ahead patterns that reject adjacent word characters,
+      // dots and hyphens because JavaScript's `\b` treats `-` as a
+      // non-word boundary and would still match `trusty` inside
+      // `ubuntu-trusty-updates`.
+      const standaloneTrusty = /(?<![\w.\-])trusty(?![\w.\-])/v
+      const standaloneNoble = /(?<![\w.\-])noble(?![\w.\-])/v
+      expect(standaloneTrusty.test(written)).toBe(false)
+      expect(standaloneNoble.test(written)).toBe(true)
+    })
+
     it("does not roll back when the upgrade pipeline succeeds", async () => {
       const ssh = createMockSsh(debianApplyResponses("bookworm", "trixie"))
       const writes = captureWriteFile(ssh)
