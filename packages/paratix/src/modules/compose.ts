@@ -263,7 +263,16 @@ async function checkComposeSystemdUnit(parameters: {
     runtime,
   })
   const remoteContent = await parameters.ssh.readFile(parameters.filePath)
-  return remoteContent.trim() === content.trim() ? "ok" : NEEDS_APPLY
+  if (remoteContent.trim() !== content.trim()) return NEEDS_APPLY
+
+  // R-0000085: detect manual mode drift (e.g. an operator ran
+  // `chmod 0600 compose-app.service`): even when the content matches, the
+  // apply path would re-set the mode to SYSTEMD_UNIT_MODE, so check must
+  // report needs-apply to keep the run idempotent — mirroring the same
+  // pattern used by createComposeConfigCheck.
+  const rawMode = await parameters.ssh.output(`stat -c '%a' ${shellQuote(parameters.filePath)}`)
+  const remoteMode = rawMode.trim()
+  return remoteMode === SYSTEMD_UNIT_MODE.replace(/^0+/v, "") ? "ok" : NEEDS_APPLY
 }
 
 function resolveComposeSystemdIdentity(options: { name?: string; projectDirectory: string }): {

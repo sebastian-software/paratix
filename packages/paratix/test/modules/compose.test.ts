@@ -872,22 +872,24 @@ describe("compose.systemd — check", () => {
     expect(result).toBe("needs-apply")
   })
 
-  it("returns ok when unit file content matches expected content (podman)", async () => {
+  it("returns ok when unit file content and mode match expected values (podman)", async () => {
     const content = expectedPodmanUnit(projectDirectory, defaultServiceName)
     const mockSsh = createComposeMockSsh({
       [`[ -e '${unitFilePath}' ]`]: { code: 0 },
       [`cat '${unitFilePath}'`]: { code: 0, stdout: content },
+      [`stat -c '%a' '${unitFilePath}'`]: { code: 0, stdout: "644" },
     })
     const mod = compose.systemd({ projectDirectory })
     const result = await mod.check(mockSsh, emptyEnv)
     expect(result).toBe("ok")
   })
 
-  it("returns ok when unit file content matches expected content (docker)", async () => {
+  it("returns ok when unit file content and mode match expected values (docker)", async () => {
     const content = expectedDockerUnit(projectDirectory, defaultServiceName)
     const mockSsh = createComposeMockSsh({
       [`[ -e '${unitFilePath}' ]`]: { code: 0 },
       [`cat '${unitFilePath}'`]: { code: 0, stdout: content },
+      [`stat -c '%a' '${unitFilePath}'`]: { code: 0, stdout: "644" },
       "command -v docker": { code: 0 },
       "command -v podman": { code: 1 },
     })
@@ -900,6 +902,19 @@ describe("compose.systemd — check", () => {
     const mockSsh = createComposeMockSsh({
       [`[ -e '${unitFilePath}' ]`]: { code: 0 },
       [`cat '${unitFilePath}'`]: { code: 0, stdout: "outdated content" },
+    })
+    const mod = compose.systemd({ projectDirectory })
+    const result = await mod.check(mockSsh, emptyEnv)
+    expect(result).toBe("needs-apply")
+  })
+
+  it("regression: returns needs-apply when remote mode has drifted from SYSTEMD_UNIT_MODE", async () => {
+    const content = expectedPodmanUnit(projectDirectory, defaultServiceName)
+    const mockSsh = createComposeMockSsh({
+      [`[ -e '${unitFilePath}' ]`]: { code: 0 },
+      [`cat '${unitFilePath}'`]: { code: 0, stdout: content },
+      // Operator manually ran `chmod 0600 compose-app.service` — content matches, but mode does not.
+      [`stat -c '%a' '${unitFilePath}'`]: { code: 0, stdout: "600" },
     })
     const mod = compose.systemd({ projectDirectory })
     const result = await mod.check(mockSsh, emptyEnv)
