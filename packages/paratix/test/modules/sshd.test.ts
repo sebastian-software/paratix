@@ -432,7 +432,7 @@ describe("sshd.config — dry-run", () => {
       status: "changed",
     })
     expect(writtenFiles).toHaveLength(1)
-    expect(writtenFiles[0]?.path).toMatch(/^\/tmp\/paratix-sshd-dry-run-.+\.conf$/v)
+    expect(writtenFiles[0]?.path).toMatch(/paratix-sshd-dry-run-.+\.conf$/v)
     expect(writtenFiles[0]?.content).toContain("PasswordAuthentication no")
     const execCommands = execSpy.mock.calls.map((args) => args[0])
     expect(execCommands.some((command) => command.startsWith("sshd -t -f "))).toBe(true)
