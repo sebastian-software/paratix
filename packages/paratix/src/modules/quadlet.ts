@@ -25,6 +25,10 @@ const CONTAINERS_SYSTEMD_DIRECTORY_COMMAND = "mkdir -p '/etc/containers/systemd'
 const QUADLET_FILE_MODE = "0644"
 const SYSTEMCTL = "systemctl"
 
+function normalizeMode(mode: string): string {
+  return mode.replace(/^0+/v, "")
+}
+
 function generateContainerQuadlet(options: QuadletContainerOptions): string {
   const serviceLines = buildQuadletServiceLines(options)
   const sections = [
@@ -92,7 +96,15 @@ async function checkQuadletFile(parameters: {
   const exists = await parameters.ssh.exists(parameters.filePath)
   if (!exists) return NEEDS_APPLY
   const remoteContent = await parameters.ssh.readFile(parameters.filePath)
-  return remoteContent.trim() === parameters.content.trim() ? "ok" : NEEDS_APPLY
+  if (remoteContent.trim() !== parameters.content.trim()) return NEEDS_APPLY
+  const modeResult = await parameters.ssh.exec(`stat -c '%a' ${shellQuote(parameters.filePath)}`, {
+    ignoreExitCode: true,
+    silent: true,
+  })
+  if (modeResult.code !== 0) return NEEDS_APPLY
+  const currentMode = modeResult.stdout.trim()
+  if (currentMode === "") return NEEDS_APPLY
+  return normalizeMode(currentMode) === normalizeMode(QUADLET_FILE_MODE) ? "ok" : NEEDS_APPLY
 }
 
 async function inspectQuadletImageId(parameters: {

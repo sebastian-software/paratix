@@ -61,6 +61,7 @@ describe("quadlet.container", () => {
     const ssh = createMockSsh({
       [`[ -e '${quadletFilePath}' ]`]: { code: 0 },
       [`cat '${quadletFilePath}'`]: { code: 0, stdout: expectedQuadletContent() },
+      [`stat -c '%a' '${quadletFilePath}'`]: { code: 0, stdout: "644\n" },
     })
 
     const result = await createQuadletModule().check(ssh, emptyEnv)
@@ -82,6 +83,30 @@ describe("quadlet.container", () => {
     const ssh = createMockSsh({
       [`[ -e '${quadletFilePath}' ]`]: { code: 0 },
       [`cat '${quadletFilePath}'`]: { code: 0, stdout: "[Unit]\nDescription=Old\n" },
+    })
+
+    const result = await createQuadletModule().check(ssh, emptyEnv)
+
+    expect(result).toBe("needs-apply")
+  })
+
+  it("check returns needs-apply when content matches but mode drifts to 0600", async () => {
+    const ssh = createMockSsh({
+      [`[ -e '${quadletFilePath}' ]`]: { code: 0 },
+      [`cat '${quadletFilePath}'`]: { code: 0, stdout: expectedQuadletContent() },
+      [`stat -c '%a' '${quadletFilePath}'`]: { code: 0, stdout: "600\n" },
+    })
+
+    const result = await createQuadletModule().check(ssh, emptyEnv)
+
+    expect(result).toBe("needs-apply")
+  })
+
+  it("check returns needs-apply when stat for the quadlet file mode fails", async () => {
+    const ssh = createMockSsh({
+      [`[ -e '${quadletFilePath}' ]`]: { code: 0 },
+      [`cat '${quadletFilePath}'`]: { code: 0, stdout: expectedQuadletContent() },
+      [`stat -c '%a' '${quadletFilePath}'`]: { code: 1, stdout: "" },
     })
 
     const result = await createQuadletModule().check(ssh, emptyEnv)
@@ -167,6 +192,7 @@ describe("quadlet.container", () => {
     const ssh = createMockSsh({
       [`[ -e '${filePath}' ]`]: { code: 0 },
       [`cat '${filePath}'`]: { code: 0, stdout: expectedContent },
+      [`stat -c '%a' '${filePath}'`]: { code: 0, stdout: "644\n" },
     })
 
     const result = await mod.check(ssh, emptyEnv)
