@@ -2,6 +2,7 @@ import { meta } from "../meta.js"
 import { failed, failedCommand } from "../moduleFailure.js"
 import {
   guardedWriteFile,
+  type ExecResult,
   type Module,
   type ModuleMetaEntry,
   type ModuleResult,
@@ -12,6 +13,7 @@ import {
 const NONINTERACTIVE = "DEBIAN_FRONTEND=noninteractive"
 const CODENAME_RE = /^[a-z]{3,20}$/v
 const APT_SOURCES_MODE = "0644"
+const NO_UBUNTU_RELEASE_PATTERN = /no new release (found|available)/iv
 
 // prettier-ignore
 const REGEXP_SPECIAL = new Set(["?", ".", "(", ")", "[", "]", "{", "}", "*", "\\", "^", "+", "|", "$"])
@@ -32,6 +34,11 @@ function escapeRegExp(value: string): string {
     result += REGEXP_SPECIAL.has(ch) ? `\\${ch}` : ch
   }
   return result
+}
+
+function isNoUbuntuReleaseAvailable(result: ExecResult): boolean {
+  if (result.code === 0) return false
+  return NO_UBUNTU_RELEASE_PATTERN.test(`${result.stdout}\n${result.stderr}`)
 }
 
 /**
@@ -335,10 +342,13 @@ async function applyUbuntu(
   options: ReleaseUpgradeOptions
 ): Promise<ModuleResult> {
   if (options.dryRun === true) {
-    await ssh.exec("do-release-upgrade -c", {
+    const result = await ssh.exec("do-release-upgrade -c", {
       ignoreExitCode: true,
       silent: true,
     })
+    if (result.code !== 0 && !isNoUbuntuReleaseAvailable(result)) {
+      return failedCommand("[releaseUpgrade.upgrade] do-release-upgrade -c failed", result)
+    }
     return { status: "ok" }
   }
 
@@ -523,7 +533,8 @@ export const releaseUpgrade = {
             ignoreExitCode: true,
             silent: true,
           })
-          return result.code === 0 ? NEEDS_APPLY : "ok"
+          if (isNoUbuntuReleaseAvailable(result)) return "ok"
+          return NEEDS_APPLY
         }
 
         // Debian: compare current codename to stable

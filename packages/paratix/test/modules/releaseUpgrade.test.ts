@@ -21,11 +21,12 @@ type WriteCapture = { content: string; path: string }
 
 // Helper: build responses for Ubuntu check/apply
 function ubuntuResponses(
-  upgradeCheckCode: number
+  upgradeCheckCode: number,
+  output = ""
 ): Record<string, { code?: number; stdout?: string }> {
   return {
     "cat '/etc/os-release'": { code: 0, stdout: UBUNTU_OS_RELEASE },
-    "do-release-upgrade -c": { code: upgradeCheckCode },
+    "do-release-upgrade -c": { code: upgradeCheckCode, stdout: output },
   }
 }
 
@@ -80,11 +81,18 @@ describe("releaseUpgrade.upgrade — check", () => {
     expect(result).toBe("needs-apply")
   })
 
-  it("Ubuntu: do-release-upgrade -c exits non-0 → ok (no upgrade)", async () => {
-    const ssh = createMockSsh(ubuntuResponses(1))
+  it("Ubuntu: do-release-upgrade -c reports no new release → ok", async () => {
+    const ssh = createMockSsh(ubuntuResponses(1, "No new release found.\n"))
     const mod = releaseUpgrade.upgrade()
     const result = await mod.check(ssh, emptyEnv)
     expect(result).toBe("ok")
+  })
+
+  it("Ubuntu: do-release-upgrade -c execution error → needs-apply", async () => {
+    const ssh = createMockSsh(ubuntuResponses(127, "do-release-upgrade: not found\n"))
+    const mod = releaseUpgrade.upgrade()
+    const result = await mod.check(ssh, emptyEnv)
+    expect(result).toBe("needs-apply")
   })
 
   it("Debian: current codename differs from stable → needs-apply", async () => {
@@ -147,6 +155,17 @@ describe("releaseUpgrade.upgrade — apply (Ubuntu)", () => {
     expect(ssh.calls).toContain("do-release-upgrade -c")
     expect(ssh.calls).not.toContain("DEBIAN_FRONTEND=noninteractive apt-get update")
     expect(ssh.calls).not.toContain("do-release-upgrade -f DistUpgradeViewNonInteractive")
+  })
+
+  it("dryRun: fails when do-release-upgrade -c execution fails", async () => {
+    const ssh = createMockSsh({
+      "cat '/etc/os-release'": { code: 0, stdout: UBUNTU_OS_RELEASE },
+      "do-release-upgrade -c": { code: 127, stderr: "do-release-upgrade: not found" },
+    })
+    const mod = releaseUpgrade.upgrade({ dryRun: true })
+    const result = await mod.apply(ssh, emptyEnv)
+    expect(result.status).toBe("failed")
+    expect(String(result.error)).toContain("do-release-upgrade -c failed")
   })
 
   it("apt-get update fails → failed", async () => {
