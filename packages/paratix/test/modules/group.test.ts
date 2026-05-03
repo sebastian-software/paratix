@@ -161,6 +161,7 @@ describe("group.absent", () => {
 
   it("apply returns changed when groupdel succeeds", async () => {
     const ssh = createMockSsh({
+      "getent group 'deploy'": { code: 0, stdout: "deploy:x:1234:" },
       "groupdel 'deploy'": { code: 0 },
     })
     const mod = group.absent("deploy")
@@ -171,11 +172,40 @@ describe("group.absent", () => {
 
   it("apply returns failed when groupdel exits with non-zero code", async () => {
     const ssh = createMockSsh({
+      "getent group 'deploy'": { code: 0, stdout: "deploy:x:1234:" },
       "groupdel 'deploy'": { code: 1 },
     })
     const mod = group.absent("deploy")
     const result = await mod.apply(ssh, emptyEnv)
     expect(result.status).toBe("failed")
+  })
+
+  // R-0000080: when the group is already gone, the getent probe must
+  // short-circuit so groupdel is never invoked. This mirrors the early
+  // return in cron.absent and user.absent (after R-0000077) and prevents
+  // apply from reporting failedCommand for an already-satisfied state.
+  it("apply returns ok and skips groupdel when the group does not exist", async () => {
+    const ssh = createMockSsh({
+      "getent group 'deploy'": { code: 1 },
+    })
+    const mod = group.absent("deploy")
+    const result = await mod.apply(ssh, emptyEnv)
+    expect(result.status).toBe("ok")
+    expect(ssh.calls.some((c) => c.startsWith("groupdel"))).toBe(false)
+  })
+
+  // R-0000080 defensive fallback: even when the getent probe says the
+  // group exists, a concurrent removal can cause groupdel to exit with
+  // code 6 ("specified group doesn't exist"). Treat that as idempotent
+  // success.
+  it("apply returns ok when groupdel exits with code 6 (group already gone)", async () => {
+    const ssh = createMockSsh({
+      "getent group 'deploy'": { code: 0, stdout: "deploy:x:1234:" },
+      "groupdel 'deploy'": { code: 6 },
+    })
+    const mod = group.absent("deploy")
+    const result = await mod.apply(ssh, emptyEnv)
+    expect(result.status).toBe("ok")
   })
 
   it("apply returns failed when ssh is null", async () => {

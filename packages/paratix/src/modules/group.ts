@@ -39,16 +39,24 @@ export const group = {
    * @returns A Module that ensures the group is absent.
    */
   absent(name: string): Module {
+    // R-0000080: groupdel returns exit code 6 ("specified group doesn't
+    // exist") when the group has already been removed. Treat this case as
+    // idempotent success — both by probing `getent group` first to mirror
+    // cron.absent's early-return pattern (and user.absent after R-0000077),
+    // and by mapping exit code 6 to status ok as a defensive fallback when
+    // the group is removed between the probe and the groupdel call.
+    const GROUPDEL_NOT_FOUND_EXIT_CODE = 6
     return {
       async apply(ssh: null | SshConnection): Promise<ModuleResult> {
         if (!ssh) return failed(`[group.absent: ${name}] SSH connection is required`)
+        if ((await readGroupGid(ssh, name)) == null) return { status: "ok" }
         const result = await ssh.exec(`groupdel ${shellQuote(name)}`, {
           ignoreExitCode: true,
           silent: true,
         })
-        return result.code === 0
-          ? { status: "changed" }
-          : failedCommand(`[group.absent: ${name}] groupdel failed`, result)
+        if (result.code === 0) return { status: "changed" }
+        if (result.code === GROUPDEL_NOT_FOUND_EXIT_CODE) return { status: "ok" }
+        return failedCommand(`[group.absent: ${name}] groupdel failed`, result)
       },
       async check(ssh: null | SshConnection): Promise<"needs-apply" | "ok"> {
         if (!ssh) return NEEDS_APPLY
