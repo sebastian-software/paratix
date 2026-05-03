@@ -5,6 +5,7 @@ import { type Module, type ModuleResult, NEEDS_APPLY, type SshConnection } from 
 const EXEC_OPTS = { ignoreExitCode: true, silent: true } as const
 const SYSCTL_DIR = "/etc/sysctl.d"
 const SYSCTL_CONFIG_MODE = "0644"
+const SYSCTL_KEY_PATTERN = /^[\w.\-]+$/iv
 
 /**
  * Sanitize a sysctl key for safe use in a filesystem path.
@@ -19,6 +20,41 @@ function sanitizeKey(key: string): string {
 }
 
 /**
+ * Validate a sysctl key. Only alphanumerics, dot, underscore, and hyphen are
+ * allowed so the key can be embedded in shell commands and filenames without
+ * enabling injection or path-separator tricks.
+ *
+ * @param key - The sysctl key to validate.
+ * @throws {Error} When the key is empty or contains disallowed characters.
+ */
+function validateKey(key: string): void {
+  if (key.length === 0) {
+    throw new Error("sysctl.set: key must not be empty")
+  }
+  if (!SYSCTL_KEY_PATTERN.test(key)) {
+    throw new Error(
+      `sysctl.set: key must match ${String(SYSCTL_KEY_PATTERN)}, got: ${JSON.stringify(key)}`
+    )
+  }
+}
+
+/**
+ * Validate a sysctl value. Newline and carriage return characters are rejected
+ * because they would let callers inject additional directives into the
+ * generated `sysctl.d` configuration file.
+ *
+ * @param value - The sysctl value to validate.
+ * @throws {Error} When the value contains a newline or carriage return.
+ */
+function validateValue(value: string): void {
+  if (/[\n\r]/v.test(value)) {
+    throw new Error(
+      `sysctl.set: value must not contain newline or carriage return characters, got: ${JSON.stringify(value)}`
+    )
+  }
+}
+
+/**
  * Build the content of a sysctl.d configuration file.
  * The trailing newline is required by the sysctl.d(5) format.
  *
@@ -28,6 +64,39 @@ function sanitizeKey(key: string): string {
  */
 function buildSysctlConfig(key: string, value: string): string {
   return `${key} = ${value}\n`
+}
+
+type CheckPresentStateInput = {
+  configPath: string
+  expectedContent: string
+  key: string
+  value: string
+}
+
+/**
+ * Check whether the live sysctl value and the persisted configuration file
+ * match the desired state.
+ *
+ * @param conn - The SSH connection to the remote host.
+ * @param input - The desired key/value plus the persistence file location and
+ *   expected content.
+ * @returns `"ok"` when both live and persisted state match, otherwise
+ *   `"needs-apply"`.
+ */
+async function checkPresentState(
+  conn: SshConnection,
+  input: CheckPresentStateInput
+): Promise<"needs-apply" | "ok"> {
+  const { configPath, expectedContent, key, value } = input
+  const result = await conn.exec(`sysctl -n ${shellQuote(key)}`, EXEC_OPTS)
+  if (result.code !== 0) return NEEDS_APPLY
+  if (result.stdout.trim() !== value) return NEEDS_APPLY
+
+  const configExists = await conn.exec(`test -f ${shellQuote(configPath)}`, EXEC_OPTS)
+  if (configExists.code !== 0) return NEEDS_APPLY
+
+  const fileContent = await conn.readFile(configPath)
+  return fileContent.trim() === expectedContent.trim() ? "ok" : NEEDS_APPLY
 }
 
 /**
@@ -51,6 +120,8 @@ export const sysctl = {
    * @returns A Module that manages the sysctl parameter.
    */
   set(key: string, value: string, options?: { state?: "absent" | "present" }): Module {
+    validateKey(key)
+    validateValue(value)
     const state = options?.state ?? "present"
     const configPath = `${SYSCTL_DIR}/99-paratix-${sanitizeKey(key)}.conf`
     const expectedContent = buildSysctlConfig(key, value)
@@ -76,15 +147,7 @@ export const sysctl = {
         if (!conn) return NEEDS_APPLY
 
         if (state === "present") {
-          const result = await conn.exec(`sysctl -n ${shellQuote(key)}`, EXEC_OPTS)
-          const currentValue = result.stdout.trim()
-          if (currentValue !== value) return NEEDS_APPLY
-
-          const configExists = await conn.exec(`test -f ${shellQuote(configPath)}`, EXEC_OPTS)
-          if (configExists.code !== 0) return NEEDS_APPLY
-
-          const fileContent = await conn.readFile(configPath)
-          return fileContent.trim() === expectedContent.trim() ? "ok" : NEEDS_APPLY
+          return checkPresentState(conn, { configPath, expectedContent, key, value })
         }
 
         const fileExists = await conn.exec(`test -f ${shellQuote(configPath)}`, EXEC_OPTS)

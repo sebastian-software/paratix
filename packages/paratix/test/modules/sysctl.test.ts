@@ -39,6 +39,15 @@ describe("sysctl.set — check", () => {
     expect(result).toBe("needs-apply")
   })
 
+  it("returns needs-apply when sysctl -n exits non-zero (e.g. unknown key)", async () => {
+    const mockSsh = createMockSsh({
+      [`sysctl -n '${KEY}'`]: { code: 255, stderr: "sysctl: cannot stat ...", stdout: "" },
+    })
+    const mod = sysctl.set(KEY, VALUE)
+    const result = await mod.check(mockSsh, emptyEnv)
+    expect(result).toBe("needs-apply")
+  })
+
   it("returns needs-apply when config file does not exist", async () => {
     const mockSsh = createMockSsh({
       [`sysctl -n '${KEY}'`]: { code: 0, stdout: VALUE },
@@ -134,5 +143,47 @@ describe("sysctl.set — name", () => {
   it("has descriptive name for absent state", () => {
     const mod = sysctl.set(KEY, VALUE, { state: "absent" })
     expect(mod.name).toBe(`sysctl.set: absent ${KEY}`)
+  })
+})
+
+// ─── sysctl.set — validation ──────────────────────────────────────────────────
+
+describe("sysctl.set — validation", () => {
+  it("throws when key is empty", () => {
+    expect(() => sysctl.set("", VALUE)).toThrow(/key must not be empty/v)
+  })
+
+  it("throws when key contains a newline", () => {
+    expect(() => sysctl.set(`${KEY}\nmalicious = 1`, VALUE)).toThrow(/key must match/v)
+  })
+
+  it("throws when key contains a carriage return", () => {
+    expect(() => sysctl.set(`${KEY}\rmalicious`, VALUE)).toThrow(/key must match/v)
+  })
+
+  it("throws when key contains a path separator", () => {
+    expect(() => sysctl.set("net/ipv4/ip_forward", VALUE)).toThrow(/key must match/v)
+  })
+
+  it("throws when key contains whitespace", () => {
+    expect(() => sysctl.set("net.ipv4 ip_forward", VALUE)).toThrow(/key must match/v)
+  })
+
+  it("throws when key contains a shell metacharacter", () => {
+    expect(() => sysctl.set("net.ipv4.ip_forward;rm", VALUE)).toThrow(/key must match/v)
+  })
+
+  it("throws when value contains a newline", () => {
+    expect(() => sysctl.set(KEY, "1\nkernel.hostname = pwned")).toThrow(
+      /value must not contain newline/v
+    )
+  })
+
+  it("throws when value contains a carriage return", () => {
+    expect(() => sysctl.set(KEY, "1\rinjected")).toThrow(/value must not contain newline/v)
+  })
+
+  it("accepts a key with dots, underscores, hyphens, and digits", () => {
+    expect(() => sysctl.set("net.ipv4.tcp_rmem-max_v2", "4096 87380 6291456")).not.toThrow()
   })
 })
