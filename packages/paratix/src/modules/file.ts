@@ -12,6 +12,7 @@ import {
   NEEDS_APPLY,
   type SshConnection,
 } from "../types.js"
+import { applyDirectoryState } from "./fileDirectoryHelpers.js"
 import { assemble, block, properties, replace, stat } from "./fileExtra.js"
 import { hexHashesEqual, localSha256, sha256String } from "./fileHelpers.js"
 import {
@@ -231,24 +232,12 @@ export const file = {
    * @returns A Module that ensures the directory exists.
    */
   directory(remotePath: string, options?: { mode?: string; owner?: string }): Module {
+    if (options?.mode != null) validateMode(options.mode)
+
     return {
       async apply(ssh: null | SshConnection): Promise<ModuleResult> {
         if (!ssh) return failed(`[file.directory: ${remotePath}] SSH connection is required`)
-        await ssh.exec(`mkdir -p ${shellQuote(remotePath)}`, { silent: true })
-
-        if (options?.mode != null) {
-          validateMode(options.mode)
-          await ssh.exec(`chmod ${shellQuote(options.mode)} ${shellQuote(remotePath)}`, {
-            silent: true,
-          })
-        }
-        if (options?.owner != null) {
-          await ssh.exec(`chown ${shellQuote(options.owner)} ${shellQuote(remotePath)}`, {
-            silent: true,
-          })
-        }
-
-        return { status: "changed" }
+        return applyDirectoryState({ options, remotePath, ssh })
       },
       async check(ssh: null | SshConnection): Promise<"needs-apply" | "ok"> {
         if (!ssh) return NEEDS_APPLY

@@ -60,6 +60,63 @@ describe("file.directory", () => {
     const result = await mod.check(ssh, emptyEnv)
     expect(result).toBe("needs-apply")
   })
+
+  it("regression R-0000109 — apply returns ok and skips mkdir/chmod/chown when directory matches desired state", async () => {
+    const ssh = createMockSsh({
+      "[ -d '/var/app' ]": { code: 0 },
+      "stat -c '%a %U %G' '/var/app'": { stdout: "755 www-data www-data" },
+    })
+
+    const mod = file.directory("/var/app", { mode: "0755", owner: "www-data:www-data" })
+    const result = await mod.apply(ssh, emptyEnv)
+
+    expect(result.status).toBe("ok")
+    expect(ssh.calls).not.toContain("mkdir -p '/var/app'")
+    expect(ssh.calls).not.toContain("chmod '0755' '/var/app'")
+    expect(ssh.calls).not.toContain("chown 'www-data:www-data' '/var/app'")
+  })
+
+  it("regression R-0000109 — apply returns changed and only issues mkdir when directory is missing", async () => {
+    const ssh = createMockSsh({
+      "[ -d '/var/app' ]": { code: 1 },
+    })
+
+    const mod = file.directory("/var/app")
+    const result = await mod.apply(ssh, emptyEnv)
+
+    expect(result.status).toBe("changed")
+    expect(ssh.calls).toContain("mkdir -p '/var/app'")
+  })
+
+  it("regression R-0000109 — apply returns changed and only issues chmod when only mode drifted", async () => {
+    const ssh = createMockSsh({
+      "[ -d '/var/app' ]": { code: 0 },
+      "stat -c '%a %U %G' '/var/app'": { stdout: "700 www-data www-data" },
+    })
+
+    const mod = file.directory("/var/app", { mode: "0755", owner: "www-data:www-data" })
+    const result = await mod.apply(ssh, emptyEnv)
+
+    expect(result.status).toBe("changed")
+    expect(ssh.calls).not.toContain("mkdir -p '/var/app'")
+    expect(ssh.calls).toContain("chmod '0755' '/var/app'")
+    expect(ssh.calls).not.toContain("chown 'www-data:www-data' '/var/app'")
+  })
+
+  it("regression R-0000109 — apply returns changed and only issues chown when only owner drifted", async () => {
+    const ssh = createMockSsh({
+      "[ -d '/var/app' ]": { code: 0 },
+      "stat -c '%a %U %G' '/var/app'": { stdout: "755 root root" },
+    })
+
+    const mod = file.directory("/var/app", { mode: "0755", owner: "www-data:www-data" })
+    const result = await mod.apply(ssh, emptyEnv)
+
+    expect(result.status).toBe("changed")
+    expect(ssh.calls).not.toContain("mkdir -p '/var/app'")
+    expect(ssh.calls).not.toContain("chmod '0755' '/var/app'")
+    expect(ssh.calls).toContain("chown 'www-data:www-data' '/var/app'")
+  })
 })
 
 describe("file.absent", () => {
