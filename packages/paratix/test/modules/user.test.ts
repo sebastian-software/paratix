@@ -461,4 +461,42 @@ describe("validation", () => {
   it("user.absent throws when the name contains non-ASCII letters", () => {
     expect(() => user.absent("Üser")).toThrow("is invalid")
   })
+
+  // R-0000120: uid must be a non-negative finite integer below 2^32 — `useradd
+  // --uid` would silently truncate larger values and reject NaN with an
+  // implementation-defined error message that exposes the raw input.
+  it("user.present throws when uid is negative", () => {
+    expect(() => user.present("alice", { uid: -1 })).toThrow("uid")
+  })
+
+  it("user.present throws when uid is NaN", () => {
+    expect(() => user.present("alice", { uid: Number.NaN })).toThrow("uid")
+  })
+
+  it("user.present throws when uid is fractional", () => {
+    expect(() => user.present("alice", { uid: 1000.5 })).toThrow("uid")
+  })
+
+  it("user.present throws when uid is above the uid_t range", () => {
+    expect(() => user.present("alice", { uid: 2 ** 32 })).toThrow("uid")
+  })
+
+  // R-0000120: a comma in a group name would inject an additional `--groups`
+  // entry, and a newline could split the rendered command. Both must be
+  // rejected at construction time.
+  it("user.present throws when a group name contains a comma", () => {
+    expect(() => user.present("alice", { groups: ["sudo,docker"] })).toThrow("group name")
+  })
+
+  it("user.present throws when a group name contains a newline", () => {
+    expect(() => user.present("alice", { groups: ["sudo\ndocker"] })).toThrow("group name")
+  })
+
+  it("user.present throws when a group name is empty", () => {
+    expect(() => user.present("alice", { groups: [""] })).toThrow("group name")
+  })
+
+  it("user.present throws when a group name starts with a flag", () => {
+    expect(() => user.present("alice", { groups: ["--badgroup"] })).toThrow("group name")
+  })
 })

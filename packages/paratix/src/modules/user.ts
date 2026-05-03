@@ -29,6 +29,36 @@ function assertValidUserName(name: string): void {
   }
 }
 
+// R-0000120: validate the `uid` and `groups` options at construction time so
+// numeric drift (NaN, negative, fractional, > 2^32) and group-name injection
+// (commas, newlines, flag-shaped values) cannot reach the `useradd` /
+// `usermod` argument vector. uid_t is a 32-bit unsigned integer on Linux, so
+// any value outside [0, 2^32) would be silently truncated by `useradd --uid`.
+const UID_MAX_EXCLUSIVE = 2 ** 32
+
+function assertValidUid(uid: number): void {
+  if (!Number.isInteger(uid) || uid < 0 || uid >= UID_MAX_EXCLUSIVE) {
+    throw new Error(`uid ${JSON.stringify(uid)} is invalid`)
+  }
+}
+
+function assertValidGroupName(group: string): void {
+  // Group names follow the same POSIX whitelist as user names, which already
+  // forbids commas (which would inject an extra `--groups` entry) and
+  // newlines (which could split commands when concatenated into a shell
+  // pipeline).
+  if (!USER_NAME_PATTERN.test(group)) {
+    throw new Error(`group name ${JSON.stringify(group)} is invalid`)
+  }
+}
+
+function assertValidUserOptions(options: UserOptions): void {
+  if (options.uid != null) assertValidUid(options.uid)
+  if (options.groups != null) {
+    for (const group of options.groups) assertValidGroupName(group)
+  }
+}
+
 function buildUserArguments(mode: "useradd" | "usermod", options?: UserOptions): string[] {
   const flags: string[] = []
   if (options?.uid != null) flags.push(`--uid ${String(options.uid)}`)
@@ -266,6 +296,11 @@ export const user = {
     // flag-shaped names cannot slip past `useradd` / `usermod` argument
     // parsing.
     assertValidUserName(name)
+    // R-0000120: validate uid and group names synchronously at construction
+    // time so out-of-range / non-integer uids and injection-shaped group
+    // names (commas, newlines, leading flags) cannot reach
+    // `useradd`/`usermod --groups`.
+    if (options != null) assertValidUserOptions(options)
     return {
       async apply(ssh: null | SshConnection): Promise<ModuleResult> {
         if (!ssh) return failed(`[user.present: ${name}] SSH connection is required`)
