@@ -242,6 +242,84 @@ describe("parseCliArguments", () => {
       'Error: "--bootstrap-root" was removed. Use "--initial-user root" instead.'
     )
   })
+
+  // R-0000129: An empty or whitespace-only argument value would silently
+  // disable downstream validation (e.g. `--host ""` would later present as
+  // a missing host) and must therefore fail closed at the parser boundary.
+  it("rejects an empty argument value (R-0000129)", async () => {
+    vi.spyOn(console, "error").mockImplementation((...args) => {
+      void args
+    })
+
+    await expectProcessExit(() => {
+      parseCliArguments(["my-server", "--host", ""])
+    })
+
+    expect(console.error).toHaveBeenCalledWith(
+      'Error: Empty value for "--host" — provide a non-empty value.'
+    )
+  })
+
+  it("rejects a whitespace-only argument value (R-0000129)", async () => {
+    vi.spyOn(console, "error").mockImplementation((...args) => {
+      void args
+    })
+
+    await expectProcessExit(() => {
+      parseCliArguments(["my-server", "--initial-user", "   "])
+    })
+
+    expect(console.error).toHaveBeenCalledWith(
+      'Error: Empty value for "--initial-user" — provide a non-empty value.'
+    )
+  })
+
+  // R-0000129: A value carrying CR/LF characters lets an attacker smuggle a
+  // second line into log output or any file derived from the option
+  // (header injection into the generated server.ts, sudoers, etc.). Reject
+  // both \r and \n as well as the combined \r\n sequence at the parser
+  // boundary.
+  it("rejects an argument value containing LF (R-0000129)", async () => {
+    vi.spyOn(console, "error").mockImplementation((...args) => {
+      void args
+    })
+
+    await expectProcessExit(() => {
+      parseCliArguments(["my-server", "--admin-public-key", "first-line\nsecond-line"])
+    })
+
+    expect(console.error).toHaveBeenCalledWith(
+      'Error: Multi-line value for "--admin-public-key" — provide a single-line value.'
+    )
+  })
+
+  it("rejects an argument value containing CR (R-0000129)", async () => {
+    vi.spyOn(console, "error").mockImplementation((...args) => {
+      void args
+    })
+
+    await expectProcessExit(() => {
+      parseCliArguments(["my-server", "--admin-public-key-file", "/tmp/admin.pub\rextra"])
+    })
+
+    expect(console.error).toHaveBeenCalledWith(
+      'Error: Multi-line value for "--admin-public-key-file" — provide a single-line value.'
+    )
+  })
+
+  it("rejects an argument value containing CRLF (R-0000129)", async () => {
+    vi.spyOn(console, "error").mockImplementation((...args) => {
+      void args
+    })
+
+    await expectProcessExit(() => {
+      parseCliArguments(["my-server", "--host", "example.com\r\nrm -rf /"])
+    })
+
+    expect(console.error).toHaveBeenCalledWith(
+      'Error: Multi-line value for "--host" — provide a single-line value.'
+    )
+  })
 })
 
 describe("admin public key validation", () => {

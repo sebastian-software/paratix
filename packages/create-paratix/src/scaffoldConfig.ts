@@ -111,6 +111,24 @@ function parseArgumentValue(
   if (value == null || value.startsWith("--")) {
     parameters.exitWithMessage(`Error: Missing value for "${parameters.optionName}".`)
   }
+  // R-0000129: After the missing-value/long-flag guard above, also reject
+  // values that consist only of whitespace and values that span multiple
+  // lines. Empty or whitespace-only values silently disable downstream
+  // validation (`""` would later present as a missing host or username),
+  // and `\r\n`-bearing values can smuggle an entire second line into log
+  // output or files generated from the option (e.g. via header injection
+  // into `server.ts`). Both cases are rejected with a clear,
+  // option-specific error message.
+  if (value.trim() === "") {
+    parameters.exitWithMessage(
+      `Error: Empty value for "${parameters.optionName}" — provide a non-empty value.`
+    )
+  }
+  if (/[\r\n]/v.test(value)) {
+    parameters.exitWithMessage(
+      `Error: Multi-line value for "${parameters.optionName}" — provide a single-line value.`
+    )
+  }
   return value
 }
 
