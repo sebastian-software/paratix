@@ -11,3 +11,4 @@ tmp/
 sebastian-gmbh-paratix-test
 packages/paratix/src/output.ts
 init-test.sh
+.claude/scheduled_tasks.lock
