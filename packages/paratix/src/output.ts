@@ -395,7 +395,7 @@ function printVerboseErrorCause(cause: unknown, depth: number): void {
   if (cause instanceof Error) {
     const stack = cause.stack?.trim() ?? ""
     const stackOrMessage = stack.length > 0 ? stack : String(cause)
-    printVerboseErrorBlock(label, stackOrMessage)
+    printVerboseErrorBlock(label, maskRegisteredSecrets(stackOrMessage))
     const nestedCause = getErrorCause(cause)
     if (nestedCause !== undefined) {
       printVerboseErrorCause(nestedCause, depth + 1)
@@ -403,7 +403,7 @@ function printVerboseErrorCause(cause: unknown, depth: number): void {
     return
   }
 
-  printVerboseErrorBlock(label, String(cause))
+  printVerboseErrorBlock(label, maskRegisteredSecrets(String(cause)))
 }
 
 function printVerboseGenericError(error: Error): void {

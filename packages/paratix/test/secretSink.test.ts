@@ -135,6 +135,50 @@ describe("printCommandFailure — secret redaction (R-0000041)", () => {
     expect(allOutput).toContain(REDACTED)
   })
 
+  it("redacts registered secrets in verbose error causes", () => {
+    registerSecret("cause-secret-GHI")
+    const cause = new Error("Nested failure")
+    cause.stack = "Error: Nested failure\n    at nested (/file.ts:1) // cause-secret-GHI inside"
+    const error = Object.assign(new Error("Outer failure"), { cause })
+
+    const calls: unknown[][] = []
+    const originalError = console.error
+    console.error = (...args: unknown[]): void => {
+      calls.push(args)
+    }
+    try {
+      printCommandFailure(error, true)
+    } finally {
+      console.error = originalError
+    }
+    const allOutput = calls.map((args) => args.map(String).join(" ")).join("\n")
+    expect(calls.length).toBeGreaterThan(0)
+    expect(allOutput).not.toContain("cause-secret-GHI")
+    expect(allOutput).toContain(REDACTED)
+  })
+
+  it("redacts registered secrets in verbose non-error causes", () => {
+    registerSecret("primitive-cause-secret-JKL")
+    const error = Object.assign(new Error("Outer failure"), {
+      cause: "primitive-cause-secret-JKL",
+    })
+
+    const calls: unknown[][] = []
+    const originalError = console.error
+    console.error = (...args: unknown[]): void => {
+      calls.push(args)
+    }
+    try {
+      printCommandFailure(error, true)
+    } finally {
+      console.error = originalError
+    }
+    const allOutput = calls.map((args) => args.map(String).join(" ")).join("\n")
+    expect(calls.length).toBeGreaterThan(0)
+    expect(allOutput).not.toContain("primitive-cause-secret-JKL")
+    expect(allOutput).toContain(REDACTED)
+  })
+
   it("redacts registered secrets in CommandError verbose output", () => {
     registerSecret("commanderror-secret-DEF")
     const error = new CommandError(
