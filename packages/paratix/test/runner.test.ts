@@ -617,6 +617,43 @@ describe("runPlaybook handlePortChange + handleReboot interaction", () => {
     expect(reconnect).toHaveBeenCalledTimes(1)
     process.exitCode = 0
   })
+
+  it("calls addPort for every sshd.port meta entry when a module emits multiple", async () => {
+    const capturedConfigs: unknown[] = []
+    const addPort = vi.fn()
+    const reconnect = vi.fn().mockResolvedValue(null)
+
+    vi.doMock("../src/ssh.js", () => ({
+      shellQuote: (s: string) => `'${s}'`,
+      SshConnectionImpl: makeMockSshClass(capturedConfigs, { addPort, reconnect }),
+    }))
+
+    const { runPlaybook } = await import("../src/runner.js")
+
+    const moduleWithMultiplePorts = makeModuleWithMeta([
+      meta.sshdPort(2222),
+      meta.sshdPort(2223),
+    ])
+
+    const definition: ServerDefinition = {
+      host: "1.2.3.4",
+      name: "test-server",
+      run: [moduleWithMultiplePorts],
+      ssh: { ports: [22], privateKey: "~/.ssh/id", user: "root" },
+    }
+
+    await runPlaybook(definition)
+
+    expect(addPort).toHaveBeenCalledTimes(2)
+    expect(addPort).toHaveBeenNthCalledWith(1, 2222)
+    expect(addPort).toHaveBeenNthCalledWith(2, 2223)
+    // reconnect runs once after all ports have been registered
+    expect(reconnect).toHaveBeenCalledTimes(1)
+    const [reconnectOrder] = reconnect.mock.invocationCallOrder
+    const [, secondAddPortOrder] = addPort.mock.invocationCallOrder
+    expect(reconnectOrder).toBeGreaterThan(secondAddPortOrder)
+    process.exitCode = 0
+  })
 })
 
 describe("runPlaybook recipe child control-plane processing", () => {

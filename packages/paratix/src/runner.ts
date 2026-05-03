@@ -207,26 +207,30 @@ async function handlePortChange(
   ssh: SshConnectionImpl,
   metaEntries: ModuleResult["meta"]
 ): Promise<void> {
-  const portEntry = metaEntries?.find((entry) => isSshdPortMetaEntry(entry))
-  if (portEntry == null) return
+  const portEntries = metaEntries?.filter((entry) => isSshdPortMetaEntry(entry)) ?? []
+  if (portEntries.length === 0) return
 
-  const newPort = portEntry.port
-  ssh.addPort(newPort)
+  const addedPorts: number[] = []
+  for (const portEntry of portEntries) {
+    ssh.addPort(portEntry.port)
+    addedPorts.push(portEntry.port)
+  }
 
   // Skip reconnect when a reboot is pending — the reboot handler will
-  // reconnect on all registered ports (including the newly added one).
+  // reconnect on all registered ports (including the newly added ones).
   if (metaEntries?.some((entry) => isSystemRebootMetaEntry(entry)) ?? false) return
 
   try {
     await ssh.reconnect()
   } catch (error) {
-    // Roll back the optimistic addPort so the failed port does not stick in
-    // runtime.ports for any subsequent reuse of the connection. Mirrors the
-    // rollback behavior in modules/sshd.ts:applySshdPort.
-    ssh.removePort(newPort)
+    // Roll back the optimistic addPort calls so the failed ports do not stick
+    // in runtime.ports for any subsequent reuse of the connection. Mirrors
+    // the rollback behavior in modules/sshd.ts:applySshdPort.
+    for (const port of addedPorts) ssh.removePort(port)
+    const portList = addedPorts.join(", ")
     console.error(
-      `Failed to reconnect on port ${newPort} after port change: ${String(error)}. ` +
-        `Verify that port ${newPort} is allowed by the server's firewall rules.`
+      `Failed to reconnect on port(s) ${portList} after port change: ${String(error)}. ` +
+        `Verify that port(s) ${portList} are allowed by the server's firewall rules.`
     )
     throw error
   }
