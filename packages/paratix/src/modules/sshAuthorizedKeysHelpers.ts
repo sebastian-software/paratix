@@ -143,7 +143,15 @@ export async function applyAuthorizedKeys(
     return failed(`[ssh.authorizedKeys: ${user} (${state})] SSH connection is required`)
   }
 
-  const home = await resolveHome(conn, user)
+  let home: string
+  try {
+    home = await resolveHome(conn, user)
+  } catch (error) {
+    if (state === "absent" && isUnsafeAuthorizedKeysHomeError(error, user)) {
+      return { status: "ok" }
+    }
+    throw error
+  }
   // R-0000065: resolve the primary group exactly once for the duration of
   // this apply so the directory chown, the authorized_keys chown and the
   // matching `stat` comparison all reference the same group identity.

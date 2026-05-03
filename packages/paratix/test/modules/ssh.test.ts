@@ -467,6 +467,22 @@ describe("ssh.authorizedKeys", () => {
     expect(mockSsh.calls).not.toContain("[ -e '/.ssh/authorized_keys' ]")
   })
 
+  it("returns ok in apply for absent state when the target user does not exist", async () => {
+    const mockSsh = createMockSsh({
+      "getent passwd 'ghost' | cut -d: -f6": { stdout: "" },
+    })
+    const mod = ssh.authorizedKeys("ghost", testKey, { state: "absent" })
+
+    const result = await mod.apply(mockSsh, emptyEnv)
+
+    expect(result.status).toBe("ok")
+    expect(mockSsh.calls).not.toContain(
+      "mkdir -p '/.ssh' && chmod 700 '/.ssh' && chown 'ghost':'ghost' '/.ssh'"
+    )
+    expect(mockSsh.calls).not.toContain("[ -e '/.ssh' ]")
+    expect(mockSsh.calls).not.toContain("[ -e '/.ssh/authorized_keys' ]")
+  })
+
   it("check returns needs-apply when ssh is null", async () => {
     const mod = ssh.authorizedKeys("alice", testKey)
     const result = await mod.check(null, emptyEnv)
