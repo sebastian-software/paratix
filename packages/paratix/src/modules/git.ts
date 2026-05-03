@@ -155,6 +155,26 @@ async function resolveRemoteReference(
 }
 
 /**
+ * Resolve the remote default branch HEAD to a commit SHA.
+ *
+ * @param conn - The SSH connection to the remote host.
+ * @param destination - The repository path on the remote host.
+ * @returns The remote HEAD SHA, or `null` when it cannot be resolved.
+ */
+async function resolveRemoteHead(
+  conn: SshConnection,
+  destination: string
+): Promise<null | string> {
+  const result = await conn.exec(`git -C ${shellQuote(destination)} ls-remote origin HEAD`, EXEC_OPTS)
+  if (result.code !== 0) return null
+
+  const output = result.stdout.trim()
+  if (output === "") return null
+
+  return output.split("\n")[0].split("\t")[0]
+}
+
+/**
  * Modules for managing Git repositories on the remote host.
  */
 export const git = {
@@ -197,13 +217,16 @@ export const git = {
         const gitDirectoryExists = await conn.test(`test -d ${shellQuote(gitDirectory)}`)
         if (!gitDirectoryExists) return NEEDS_APPLY
 
-        if (reference === undefined || reference === "") return "ok"
-
         const headResult = await conn.exec(
           `git -C ${shellQuote(destination)} rev-parse HEAD`,
           SILENT
         )
         const head = headResult.stdout.trim()
+
+        if (reference === undefined || reference === "") {
+          const remoteHead = await resolveRemoteHead(conn, destination)
+          return remoteHead != null && head === remoteHead ? "ok" : NEEDS_APPLY
+        }
 
         const resolved = await resolveRemoteReference(conn, destination, reference)
 

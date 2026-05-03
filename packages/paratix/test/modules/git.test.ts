@@ -26,12 +26,32 @@ describe("git.clone — check", () => {
   })
 
   it("returns ok when .git directory exists and no ref is specified", async () => {
+    const sha = "abc1234567890"
     const mockSsh = createMockSsh({
+      [`git -C '${destination}' ls-remote origin HEAD`]: {
+        code: 0,
+        stdout: `${sha}\tHEAD\n`,
+      },
+      [`git -C '${destination}' rev-parse HEAD`]: { code: 0, stdout: sha },
       [`test -d '${gitDir}'`]: { code: 0 },
     })
     const mod = git.clone(repo, destination)
     const result = await mod.check(mockSsh, emptyEnv)
     expect(result).toBe("ok")
+  })
+
+  it("returns needs-apply when no ref is specified and remote default branch advanced", async () => {
+    const mockSsh = createMockSsh({
+      [`git -C '${destination}' ls-remote origin HEAD`]: {
+        code: 0,
+        stdout: "bbb222\tHEAD\n",
+      },
+      [`git -C '${destination}' rev-parse HEAD`]: { code: 0, stdout: "aaa111" },
+      [`test -d '${gitDir}'`]: { code: 0 },
+    })
+    const mod = git.clone(repo, destination)
+    const result = await mod.check(mockSsh, emptyEnv)
+    expect(result).toBe("needs-apply")
   })
 
   it("returns ok when .git directory exists, ref is specified, and HEAD matches branch ref", async () => {
