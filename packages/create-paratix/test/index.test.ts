@@ -1180,7 +1180,7 @@ describe("writeProjectFiles", () => {
     const parsed: unknown = JSON.parse(raw)
 
     expect(parsed).toMatchObject({
-      dependencies: { paratix: expect.stringMatching(/^\^/v) },
+      dependencies: { paratix: "^0.10.0" },
     })
   })
 

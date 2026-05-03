@@ -47,6 +47,9 @@ export {
   normalizeInitialUserName,
 } from "./scaffoldConfig.js"
 export type { InitialUserConfig } from "./templates.js"
+
+const PARATIX_DEPENDENCY_RANGE = "^0.10.0"
+
 type ScaffoldOptions = {
   adminPublicKey?: string
   expectedHostFingerprint?: string
@@ -101,7 +104,7 @@ export function writeProjectFiles(projectDirectory: string, options?: ScaffoldOp
 
   const packageJson = {
     dependencies: {
-      paratix: "^0.1.0",
+      paratix: PARATIX_DEPENDENCY_RANGE,
     },
     devDependencies: {
       "@types/node": "^24.5.2",
