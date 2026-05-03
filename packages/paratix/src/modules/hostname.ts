@@ -27,7 +27,11 @@ export const hostname = {
       },
       async check(ssh: null | SshConnection): Promise<"needs-apply" | "ok"> {
         if (!ssh) return NEEDS_APPLY
-        const current = await ssh.output("hostname")
+        // Use `hostnamectl --static` to read the persisted hostname from /etc/hostname
+        // rather than the kernel-resolved hostname returned by `hostname`, which can
+        // differ (e.g. FQDN vs. short name) depending on /etc/hosts and nsswitch.conf
+        // and would otherwise cause check to report drift even after a successful apply.
+        const current = await ssh.output("hostnamectl --static")
         return current === name ? "ok" : NEEDS_APPLY
       },
       name: `hostname.set: ${name}`,
