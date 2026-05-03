@@ -236,3 +236,18 @@ export async function hasNoSwapFstabEntry(ssh: SshConnection, path: string): Pro
   const currentFstabContent = await ssh.readFile(FSTAB_PATH)
   return findFstabEntry(currentFstabContent, path) == null
 }
+
+function normalizeMode(mode: string): string {
+  return mode.replace(/^0+/v, "")
+}
+
+export async function swapFileModeMatches(
+  ssh: SshConnection,
+  options: NormalizedSwapFileOptions
+): Promise<boolean> {
+  const result = await ssh.exec(`stat -c '%a' ${shellQuote(options.path)}`, EXEC_OPTS)
+  if (result.code !== 0) return false
+  const currentMode = result.stdout.trim()
+  if (currentMode === "") return false
+  return normalizeMode(currentMode) === normalizeMode(options.mode)
+}

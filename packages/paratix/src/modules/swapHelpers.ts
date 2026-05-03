@@ -9,6 +9,7 @@ import {
   isSwapActive,
   needsSwapRecreation,
   type NormalizedSwapFileOptions,
+  swapFileModeMatches,
 } from "./swapFileHelpers.js"
 
 const EXEC_OPTS = { ignoreExitCode: true, silent: true } as const
@@ -110,7 +111,8 @@ async function checkPresent(
 ): Promise<"needs-apply" | "ok"> {
   if (await needsSwapRecreation(ssh, options)) return NEEDS_APPLY
   if (!(await isSwapActive(ssh, options.path))) return NEEDS_APPLY
-  return (await hasSwapFstabEntry(ssh, options)) ? "ok" : NEEDS_APPLY
+  if (!(await hasSwapFstabEntry(ssh, options))) return NEEDS_APPLY
+  return (await swapFileModeMatches(ssh, options)) ? "ok" : NEEDS_APPLY
 }
 
 export async function checkSwapFile(

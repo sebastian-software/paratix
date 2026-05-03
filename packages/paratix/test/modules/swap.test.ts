@@ -16,10 +16,11 @@ describe("swap.file — check", () => {
     expect(result).toBe("needs-apply")
   })
 
-  it("returns ok when swap file, activation, and fstab entry all match", async () => {
+  it("returns ok when swap file, activation, fstab entry, and mode all match", async () => {
     const ssh = createMockSsh({
       [`cat '/etc/fstab'`]: { stdout: `${fstabLine}\n` },
       [`cat '${swapPath}'`]: { stdout: "existing swap bytes" },
+      [`stat -c '%a' '${swapPath}'`]: { code: 0, stdout: "600\n" },
       [`stat -c %s '${swapPath}'`]: { stdout: swapSizeBytes },
       [`swaplabel '${swapPath}' >/dev/null 2>&1`]: { code: 0 },
       "swapon --show=NAME --noheadings": { stdout: `${swapPath}\n` },
@@ -27,6 +28,34 @@ describe("swap.file — check", () => {
     const mod = swap.file({ path: swapPath, size: swapSize })
     const result = await mod.check(ssh, emptyEnv)
     expect(result).toBe("ok")
+  })
+
+  it("returns needs-apply when the swap file mode drifts", async () => {
+    const ssh = createMockSsh({
+      [`cat '/etc/fstab'`]: { stdout: `${fstabLine}\n` },
+      [`cat '${swapPath}'`]: { stdout: "existing swap bytes" },
+      [`stat -c '%a' '${swapPath}'`]: { code: 0, stdout: "644\n" },
+      [`stat -c %s '${swapPath}'`]: { stdout: swapSizeBytes },
+      [`swaplabel '${swapPath}' >/dev/null 2>&1`]: { code: 0 },
+      "swapon --show=NAME --noheadings": { stdout: `${swapPath}\n` },
+    })
+    const mod = swap.file({ path: swapPath, size: swapSize })
+    const result = await mod.check(ssh, emptyEnv)
+    expect(result).toBe("needs-apply")
+  })
+
+  it("returns needs-apply when stat for the swap file mode fails", async () => {
+    const ssh = createMockSsh({
+      [`cat '/etc/fstab'`]: { stdout: `${fstabLine}\n` },
+      [`cat '${swapPath}'`]: { stdout: "existing swap bytes" },
+      [`stat -c '%a' '${swapPath}'`]: { code: 1, stdout: "" },
+      [`stat -c %s '${swapPath}'`]: { stdout: swapSizeBytes },
+      [`swaplabel '${swapPath}' >/dev/null 2>&1`]: { code: 0 },
+      "swapon --show=NAME --noheadings": { stdout: `${swapPath}\n` },
+    })
+    const mod = swap.file({ path: swapPath, size: swapSize })
+    const result = await mod.check(ssh, emptyEnv)
+    expect(result).toBe("needs-apply")
   })
 
   it("returns needs-apply when the swap file is missing", async () => {
