@@ -138,7 +138,9 @@ async function waitForEnterOrAbort(abortSignal: AbortSignal | undefined): Promis
   return new Promise<void>((resolve, reject) => {
     let settled = false
 
-    const onData = (): void => {
+    const onData = (chunk: unknown): void => {
+      const input = Buffer.isBuffer(chunk) ? chunk.toString("utf8") : String(chunk)
+      if (!input.includes("\n") && !input.includes("\r")) return
       if (settled) return
       settled = true
       cleanup()
@@ -164,7 +166,7 @@ async function waitForEnterOrAbort(abortSignal: AbortSignal | undefined): Promis
       return
     }
 
-    process.stdin.once("data", onData)
+    process.stdin.on("data", onData)
     abortSignal?.addEventListener("abort", onAbort, { once: true })
   })
 }

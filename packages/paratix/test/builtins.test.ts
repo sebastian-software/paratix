@@ -144,14 +144,14 @@ describe("pause", () => {
     expect(result).toBe("needs-apply")
   })
 
-  it("apply calls process.stdin.pause() after the data event resolves the promise", async () => {
+  it("apply calls process.stdin.pause() after Enter resolves the promise", async () => {
     const stdoutSpy = vi.spyOn(process.stdout, "write").mockImplementation(() => true)
 
-    let capturedCallback: (() => void) | undefined
-    const onceSpy = vi
-      .spyOn(process.stdin, "once")
+    let capturedCallback: ((chunk: Buffer) => void) | undefined
+    const onSpy = vi
+      .spyOn(process.stdin, "on")
       .mockImplementation((_event: string | symbol, callback: (...args: unknown[]) => void) => {
-        capturedCallback = callback as () => void
+        capturedCallback = callback as (chunk: Buffer) => void
         return process.stdin
       })
     const removeSpy = vi
@@ -163,16 +163,54 @@ describe("pause", () => {
     // eslint-disable-next-line prefer-spread
     const applyPromise = mod.apply(null, emptyEnv)
 
-    // Emit the data event so the promise can resolve
+    // Emit Enter so the promise can resolve.
     expect(capturedCallback).toBeDefined()
-    capturedCallback!()
+    capturedCallback!(Buffer.from("\n"))
 
     await applyPromise
 
     expect(stdinPauseSpy).toHaveBeenCalledOnce()
 
     stdoutSpy.mockRestore()
-    onceSpy.mockRestore()
+    onSpy.mockRestore()
+    removeSpy.mockRestore()
+    stdinPauseSpy.mockRestore()
+  })
+
+  it("ignores non-Enter data events while waiting for pause confirmation", async () => {
+    const stdoutSpy = vi.spyOn(process.stdout, "write").mockImplementation(() => true)
+
+    let capturedCallback: ((chunk: Buffer) => void) | undefined
+    const onSpy = vi
+      .spyOn(process.stdin, "on")
+      .mockImplementation((_event: string | symbol, callback: (...args: unknown[]) => void) => {
+        capturedCallback = callback as (chunk: Buffer) => void
+        return process.stdin
+      })
+    const removeSpy = vi
+      .spyOn(process.stdin, "removeListener")
+      .mockImplementation(() => process.stdin)
+    const stdinPauseSpy = vi.spyOn(process.stdin, "pause").mockImplementation(() => process.stdin)
+
+    const mod = pause()
+    // eslint-disable-next-line prefer-spread
+    const applyPromise = mod.apply(null, emptyEnv)
+
+    expect(capturedCallback).toBeDefined()
+    capturedCallback!(Buffer.from("x"))
+
+    await Promise.resolve()
+
+    expect(stdinPauseSpy).not.toHaveBeenCalled()
+    expect(removeSpy).not.toHaveBeenCalled()
+
+    capturedCallback!(Buffer.from("\r"))
+    await applyPromise
+
+    expect(stdinPauseSpy).toHaveBeenCalledOnce()
+
+    stdoutSpy.mockRestore()
+    onSpy.mockRestore()
     removeSpy.mockRestore()
     stdinPauseSpy.mockRestore()
   })
@@ -181,8 +219,8 @@ describe("pause", () => {
     const stdoutSpy = vi.spyOn(process.stdout, "write").mockImplementation(() => true)
 
     let capturedCallback: ((...args: unknown[]) => void) | undefined
-    const onceSpy = vi
-      .spyOn(process.stdin, "once")
+    const onSpy = vi
+      .spyOn(process.stdin, "on")
       .mockImplementation((_event: string | symbol, callback: (...args: unknown[]) => void) => {
         capturedCallback = callback
         return process.stdin
@@ -217,7 +255,7 @@ describe("pause", () => {
     } finally {
       setPauseAbortSignal(undefined)
       stdoutSpy.mockRestore()
-      onceSpy.mockRestore()
+      onSpy.mockRestore()
       removeListenerSpy.mockRestore()
       stdinPauseSpy.mockRestore()
     }
@@ -225,7 +263,7 @@ describe("pause", () => {
 
   it("rejects synchronously when the abort signal is already aborted at the start of pause", async () => {
     const stdoutSpy = vi.spyOn(process.stdout, "write").mockImplementation(() => true)
-    const onceSpy = vi.spyOn(process.stdin, "once")
+    const onSpy = vi.spyOn(process.stdin, "on")
     const stdinPauseSpy = vi.spyOn(process.stdin, "pause").mockImplementation(() => process.stdin)
 
     const controller = new AbortController()
@@ -238,11 +276,11 @@ describe("pause", () => {
       await expect(mod.apply(null, emptyEnv)).rejects.toThrow(/aborted before pause/v)
 
       // stdin "data" listener is never installed when the signal is already aborted.
-      expect(onceSpy).not.toHaveBeenCalled()
+      expect(onSpy).not.toHaveBeenCalled()
     } finally {
       setPauseAbortSignal(undefined)
       stdoutSpy.mockRestore()
-      onceSpy.mockRestore()
+      onSpy.mockRestore()
       stdinPauseSpy.mockRestore()
     }
   })
