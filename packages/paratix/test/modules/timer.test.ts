@@ -572,6 +572,65 @@ describe("timer.scheduled — environment quoting", () => {
     expect(writes[SERVICE_PATH]).toContain("Environment=LEVEL=info")
     expect(writes[SERVICE_PATH]).not.toContain('Environment=LEVEL="info"')
   })
+
+  it("quotes environment values containing shell command substitution", async () => {
+    const ssh = createMockSsh({
+      [`[ -e '${SERVICE_PATH}' ]`]: { code: 1 },
+      [`[ -e '${TIMER_PATH}' ]`]: { code: 1 },
+    })
+    const writes: Record<string, string> = {}
+    // eslint-disable-next-line @typescript-eslint/require-await -- Mock implementation
+    ssh.writeFile = async (path: string, content: string) => {
+      writes[path] = content
+    }
+    const mod = timer.scheduled("backup", {
+      environment: { TOKEN: "$(rm -rf /)" },
+      exec: "/usr/local/bin/backup",
+      onCalendar: "daily",
+    })
+    await mod.apply(ssh, emptyEnv)
+    expect(writes[SERVICE_PATH]).toContain('Environment=TOKEN="$(rm -rf /)"')
+  })
+
+  it("quotes environment values containing bidirectional Unicode codepoints", async () => {
+    const ssh = createMockSsh({
+      [`[ -e '${SERVICE_PATH}' ]`]: { code: 1 },
+      [`[ -e '${TIMER_PATH}' ]`]: { code: 1 },
+    })
+    const writes: Record<string, string> = {}
+    // eslint-disable-next-line @typescript-eslint/require-await -- Mock implementation
+    ssh.writeFile = async (path: string, content: string) => {
+      writes[path] = content
+    }
+    // U+202E RIGHT-TO-LEFT OVERRIDE -- must not appear unquoted in the unit
+    const bidi = "\u{202E}BAD"
+    const mod = timer.scheduled("backup", {
+      environment: { LABEL: bidi },
+      exec: "/usr/local/bin/backup",
+      onCalendar: "daily",
+    })
+    await mod.apply(ssh, emptyEnv)
+    expect(writes[SERVICE_PATH]).toContain(`Environment=LABEL="${bidi}"`)
+  })
+
+  it("quotes environment values containing non-ASCII letters", async () => {
+    const ssh = createMockSsh({
+      [`[ -e '${SERVICE_PATH}' ]`]: { code: 1 },
+      [`[ -e '${TIMER_PATH}' ]`]: { code: 1 },
+    })
+    const writes: Record<string, string> = {}
+    // eslint-disable-next-line @typescript-eslint/require-await -- Mock implementation
+    ssh.writeFile = async (path: string, content: string) => {
+      writes[path] = content
+    }
+    const mod = timer.scheduled("backup", {
+      environment: { GREETING: "grüße" },
+      exec: "/usr/local/bin/backup",
+      onCalendar: "daily",
+    })
+    await mod.apply(ssh, emptyEnv)
+    expect(writes[SERVICE_PATH]).toContain('Environment=GREETING="grüße"')
+  })
 })
 
 describe("timer.scheduled — module name and validation", () => {
@@ -741,6 +800,115 @@ describe("timer.scheduled — module name and validation", () => {
         workingDirectory: "   ",
       })
     ).toThrow(/workingDirectory must not be empty/v)
+  })
+
+  it("throws when user contains shell command substitution", () => {
+    expect(() =>
+      timer.scheduled("backup", {
+        exec: "/usr/local/bin/backup",
+        onCalendar: "daily",
+        user: "deploy$(whoami)",
+      })
+    ).toThrow(/user must match/v)
+  })
+
+  it("throws when user contains uppercase letters", () => {
+    expect(() =>
+      timer.scheduled("backup", {
+        exec: "/usr/local/bin/backup",
+        onCalendar: "daily",
+        user: "Deploy",
+      })
+    ).toThrow(/user must match/v)
+  })
+
+  it("throws when user is purely numeric (UID strings are rejected)", () => {
+    expect(() =>
+      timer.scheduled("backup", {
+        exec: "/usr/local/bin/backup",
+        onCalendar: "daily",
+        user: "1000",
+      })
+    ).toThrow(/user must match/v)
+  })
+
+  it("throws when user contains a bidirectional Unicode codepoint", () => {
+    expect(() =>
+      timer.scheduled("backup", {
+        exec: "/usr/local/bin/backup",
+        onCalendar: "daily",
+        user: "deploy\u{202E}root",
+      })
+    ).toThrow(/user must match/v)
+  })
+
+  it("throws when group contains a hash character", () => {
+    expect(() =>
+      timer.scheduled("backup", {
+        exec: "/usr/local/bin/backup",
+        group: "deploy#admin",
+        onCalendar: "daily",
+      })
+    ).toThrow(/group must match/v)
+  })
+
+  it("throws when group contains a space", () => {
+    expect(() =>
+      timer.scheduled("backup", {
+        exec: "/usr/local/bin/backup",
+        group: "dep loy",
+        onCalendar: "daily",
+      })
+    ).toThrow(/group must match/v)
+  })
+
+  it("throws when workingDirectory is a relative path", () => {
+    expect(() =>
+      timer.scheduled("backup", {
+        exec: "/usr/local/bin/backup",
+        onCalendar: "daily",
+        workingDirectory: "srv/app",
+      })
+    ).toThrow(/workingDirectory must be an absolute POSIX path/v)
+  })
+
+  it("throws when workingDirectory contains a hash character", () => {
+    expect(() =>
+      timer.scheduled("backup", {
+        exec: "/usr/local/bin/backup",
+        onCalendar: "daily",
+        workingDirectory: "/srv/app#hack",
+      })
+    ).toThrow(/workingDirectory must be an absolute POSIX path/v)
+  })
+
+  it("throws when workingDirectory contains a bidirectional Unicode codepoint with hash", () => {
+    expect(() =>
+      timer.scheduled("backup", {
+        exec: "/usr/local/bin/backup",
+        onCalendar: "daily",
+        workingDirectory: "/srv/\u{202E}#evil",
+      })
+    ).toThrow(/workingDirectory must be an absolute POSIX path/v)
+  })
+
+  it("accepts a Samba-style machine account name with trailing dollar sign", async () => {
+    const ssh = createMockSsh({
+      [`[ -e '${SERVICE_PATH}' ]`]: { code: 1 },
+      [`[ -e '${TIMER_PATH}' ]`]: { code: 1 },
+    })
+    const writes: Record<string, string> = {}
+    // eslint-disable-next-line @typescript-eslint/require-await -- Mock implementation
+    ssh.writeFile = async (path: string, content: string) => {
+      writes[path] = content
+    }
+    const mod = timer.scheduled("backup", {
+      exec: "/usr/local/bin/backup",
+      onCalendar: "daily",
+      user: "host$",
+    })
+    await mod.apply(ssh, emptyEnv)
+    expect(writes[SERVICE_PATH]).toContain("User=host$")
   })
 
   it("does not validate exec or onCalendar when state is absent", () => {
