@@ -546,6 +546,37 @@ describe("net.route — apply", () => {
     expect(mockSsh.calls).toContain("ip route replace '10.0.0.0/24' via '192.168.1.1' dev 'eth0'")
   })
 
+  it("writes the persistent systemd-networkd drop-in when adding a route", async () => {
+    const writtenFiles: Array<{
+      content: string
+      options?: { mode?: string }
+      path: string
+    }> = []
+    const mockSsh = createMockSsh()
+    mockSsh.writeFile = async (
+      path: string,
+      content: string,
+      options?: { mode?: string }
+    ): Promise<void> => {
+      writtenFiles.push({ content, options, path })
+    }
+    const mod = net.route("10.0.0.0/24", "192.168.1.1", { device: "eth0" })
+
+    await mod.apply(mockSsh, emptyEnv)
+
+    expect(writtenFiles).toContainEqual({
+      content:
+        "[Match]\n" +
+        "Name=eth0\n" +
+        "\n" +
+        "[Route]\n" +
+        "Destination=10.0.0.0/24\n" +
+        "Gateway=192.168.1.1\n",
+      options: { mode: "0644" },
+      path: "/etc/systemd/network/50-paratix-route-10.0.0.0-24.network",
+    })
+  })
+
   it("reloads networkctl after adding route (state: present)", async () => {
     const mockSsh = createMockSsh()
     const mod = net.route("10.0.0.0/24", "192.168.1.1")
