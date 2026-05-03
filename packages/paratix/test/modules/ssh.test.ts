@@ -596,7 +596,7 @@ describe("ssh.authorizedKeys", () => {
     )
     expect(mockSsh.calls).toContain(aliceMktempPattern)
     expect(mockSsh.calls).toContain(
-      `{ if [ -f ${aliceKeys} ]; then cat ${aliceKeys}; grep -qxF -- '${testKey}' ${aliceKeys} || printf '%s\\n' '${testKey}'; else printf '%s\\n' '${testKey}'; fi; } > '${tempPath}'`
+      `{ if [ -f ${aliceKeys} ]; then awk '1' ${aliceKeys}; grep -qxF -- '${testKey}' ${aliceKeys} || printf '%s\\n' '${testKey}'; else printf '%s\\n' '${testKey}'; fi; } > '${tempPath}'`
     )
     expect(mockSsh.calls).not.toContain(`printf '%s\\n' '${testKey}' >> ${aliceKeys}`)
     expect(mockSsh.calls).toContain(
@@ -627,10 +627,25 @@ describe("ssh.authorizedKeys", () => {
     const applyResult = await mod.apply(mockSsh, emptyEnv)
     expect(applyResult.status).toBe("changed")
     expect(mockSsh.calls).toContain(
-      `{ if [ -f ${aliceKeys} ]; then cat ${aliceKeys}; grep -qxF -- '${testKey}' ${aliceKeys} || printf '%s\\n' '${testKey}'; else printf '%s\\n' '${testKey}'; fi; } > '${tempPath}'`
+      `{ if [ -f ${aliceKeys} ]; then awk '1' ${aliceKeys}; grep -qxF -- '${testKey}' ${aliceKeys} || printf '%s\\n' '${testKey}'; else printf '%s\\n' '${testKey}'; fi; } > '${tempPath}'`
     )
     expect(mockSsh.calls).not.toContain(
       `{ if [ -f ${aliceKeys} ]; then cat ${aliceKeys}; fi; printf '%s\\n' '${testKey}'; } > '${tempPath}'`
+    )
+  })
+
+  it("regression: present rewrite terminates existing authorized_keys before appending", async () => {
+    const mockSsh = createMockSsh(
+      aliceResponses({
+        [aliceMktempPattern]: { stdout: tempPath },
+      })
+    )
+    const mod = ssh.authorizedKeys("alice", testKey)
+
+    await mod.apply(mockSsh, emptyEnv)
+
+    expect(mockSsh.calls).toContain(
+      `{ if [ -f ${aliceKeys} ]; then awk '1' ${aliceKeys}; grep -qxF -- '${testKey}' ${aliceKeys} || printf '%s\\n' '${testKey}'; else printf '%s\\n' '${testKey}'; fi; } > '${tempPath}'`
     )
   })
 
@@ -864,7 +879,7 @@ describe("ssh.authorizedKeys", () => {
     expect(mockSsh.calls).toContain("mktemp '/home/my user/.ssh/.authorized-keys.XXXXXX'")
     // Temp rewrite command must quote the space-containing path
     expect(mockSsh.calls).toContain(
-      `{ if [ -f '/home/my user/.ssh/authorized_keys' ]; then cat '/home/my user/.ssh/authorized_keys'; grep -qxF -- '${testKey}' '/home/my user/.ssh/authorized_keys' || printf '%s\\n' '${testKey}'; else printf '%s\\n' '${testKey}'; fi; } > '${spaceyTemp}'`
+      `{ if [ -f '/home/my user/.ssh/authorized_keys' ]; then awk '1' '/home/my user/.ssh/authorized_keys'; grep -qxF -- '${testKey}' '/home/my user/.ssh/authorized_keys' || printf '%s\\n' '${testKey}'; else printf '%s\\n' '${testKey}'; fi; } > '${spaceyTemp}'`
     )
     // Chmod must quote the space-containing path
     expect(mockSsh.calls).toContain(

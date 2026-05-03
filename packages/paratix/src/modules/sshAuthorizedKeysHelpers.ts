@@ -117,7 +117,7 @@ async function rewriteAuthorizedKeys(
   try {
     if (state === "present") {
       await conn.exec(
-        `{ if [ -f ${shellQuote(authorizedKeysPath)} ]; then cat ${shellQuote(authorizedKeysPath)}; grep -qxF -- ${shellQuote(key)} ${shellQuote(authorizedKeysPath)} || printf '%s\\n' ${shellQuote(key)}; else printf '%s\\n' ${shellQuote(key)}; fi; } > ${shellQuote(temporaryPath)}`,
+        `{ if [ -f ${shellQuote(authorizedKeysPath)} ]; then awk '1' ${shellQuote(authorizedKeysPath)}; grep -qxF -- ${shellQuote(key)} ${shellQuote(authorizedKeysPath)} || printf '%s\\n' ${shellQuote(key)}; else printf '%s\\n' ${shellQuote(key)}; fi; } > ${shellQuote(temporaryPath)}`,
         { silent: true }
       )
     } else {
