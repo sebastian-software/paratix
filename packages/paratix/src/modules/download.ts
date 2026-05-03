@@ -1,9 +1,10 @@
 import { createHash, timingSafeEqual } from "node:crypto"
+import { posix as path } from "node:path"
 
 /* eslint-disable max-lines */
 import { failed } from "../moduleFailure.js"
 import { withRegisteredSecrets } from "../secretSink.js"
-import { shellQuote, validateMode } from "../ssh.js"
+import { shellQuote, validateMktempPath, validateMode } from "../ssh.js"
 import { maskSecrets } from "../sshHelpers.js"
 import { type Module, type ModuleResult, NEEDS_APPLY, type SshConnection } from "../types.js"
 import {
@@ -173,8 +174,40 @@ async function checkLargeDownload(
   return "ok"
 }
 
+// R-0000107: prefix used by `mktemp` for the in-flight download path. The
+// leading dot keeps the temp file hidden from typical glob expansions; the
+// validateMktempPath check rejects any output that does not start with
+// "<destinationDir>/.paratix-download.".
+const DOWNLOAD_TEMPORARY_PREFIX = ".paratix-download"
+
 function buildTemporaryDownloadPathCommand(destination: string): string {
-  return `mktemp "$(dirname ${shellQuote(destination)})/.paratix-download.XXXXXX"`
+  return `mktemp "$(dirname ${shellQuote(destination)})/${DOWNLOAD_TEMPORARY_PREFIX}.XXXXXX"`
+}
+
+/**
+ * Validate the path returned by `mktemp` against the expected destination
+ * directory and prefix. Without this guard, a locale warning, multi-line
+ * stdout or a tampered `mktemp` could smuggle an unexpected path into the
+ * subsequent curl, mv, chmod/chown and rm -f calls.
+ *
+ * @param destination - The final download destination — its directory is
+ *   the only path under which the temp file may live.
+ * @param rawTemporaryPath - The raw stdout from `mktemp` (already trimmed
+ *   by `conn.output`).
+ * @returns The validated temp path.
+ * @throws {Error} When the path does not match the expected pattern.
+ */
+function validateTemporaryDownloadPath(destination: string, rawTemporaryPath: string): string {
+  const directory = path.dirname(destination)
+  try {
+    return validateMktempPath(directory, rawTemporaryPath, DOWNLOAD_TEMPORARY_PREFIX)
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : String(error)
+    throw new Error(
+      `[download] mktemp produced an unexpected path for ${destination}: ${reason}`,
+      { cause: error }
+    )
+  }
 }
 
 function buildCurlProtocolFlags(parameters: Pick<DownloadParameters, "allowInsecureHttp">): string {
@@ -361,8 +394,15 @@ async function runCurlDownload(
   await conn.exec(`mkdir -p "$(dirname ${shellQuote(parameters.destination)})"`, {
     silent: true,
   })
-  const temporaryDestination = await conn.output(
+  const rawTemporaryDestination = await conn.output(
     buildTemporaryDownloadPathCommand(parameters.destination)
+  )
+  // R-0000107: validate the mktemp output before any subcommand consumes
+  // it. Reuses the shared validateMktempPath helper from ssh.ts (already
+  // applied in aptKeyHelpers.ts and archive.ts/allocateRemoteUploadPath).
+  const temporaryDestination = validateTemporaryDownloadPath(
+    parameters.destination,
+    rawTemporaryDestination
   )
   const downloadParameters = { ...parameters, destination: temporaryDestination }
   let shouldCleanupTemporaryFile = true

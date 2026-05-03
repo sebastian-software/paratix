@@ -39,8 +39,10 @@ type MockSshWithOptions = {
  *
  * @returns A mock SSH connection that stores each exec call with its options.
  */
-function createMockSshWithOptions(): MockSshWithOptions {
-  const base = createMockSsh()
+function createMockSshWithOptions(
+  responses?: Parameters<typeof createMockSsh>[0]
+): MockSshWithOptions {
+  const base = createMockSsh(responses)
   const execCalls: Array<{ command: string; options?: ExecOptions }> = []
   const mock: MockSshWithOptions = {
     ...base,
@@ -51,6 +53,28 @@ function createMockSshWithOptions(): MockSshWithOptions {
     execCalls,
   }
   return mock
+}
+
+/**
+ * R-0000107 helper: build a mktemp stub for tests that exercise download.url
+ * / download.large / download.github apply paths. The stub returns a
+ * deterministic temporary path that satisfies the validateMktempPath
+ * contract (`<dirname>/.paratix-download.<suffix>`).
+ *
+ * @param destination - The download destination path (matches the directory
+ *   the mktemp stdout must live under).
+ * @param temporaryPath - The temporary path the stub should return.
+ * @returns A response map for {@link createMockSsh}.
+ */
+function downloadMktempStub(
+  destination: string,
+  temporaryPath: string
+): Parameters<typeof createMockSsh>[0] {
+  return {
+    [`mktemp "$(dirname '${destination}')/.paratix-download.XXXXXX"`]: {
+      stdout: `${temporaryPath}\n`,
+    },
+  }
 }
 
 describe("download.url", () => {
@@ -167,7 +191,7 @@ describe("download.url", () => {
     })
 
     it("creates target directory via mkdir -p", async () => {
-      const mockSsh = createMockSsh()
+      const mockSsh = createMockSsh(downloadMktempStub(destination, temporaryDestination))
       const mod = download.url(destination, url, allowUnverifiedDownload)
       await mod.apply(mockSsh, emptyEnv)
       expect(mockSsh.calls).toContain(`mkdir -p "$(dirname '${destination}')"`)
@@ -323,6 +347,49 @@ describe("download.url", () => {
       const conn = null
       const result = await mod.apply(conn, emptyEnv)
       expect(result.status).toBe("failed")
+    })
+
+    it("R-0000107: rejects a poisoned mktemp output (locale warning) without curl/mv/rm", async () => {
+      // Older paratix versions handed every byte from `mktemp` straight
+      // into curl, mv, chmod/chown and rm -f. A locale warning prepended
+      // by a hostile or misconfigured shell would turn into a path like
+      //   "mktemp: ungültiges Format ...\n/usr/local/bin/.paratix-download.AbCdEf"
+      // and silently steer the curl pipeline at an unexpected location.
+      // validateMktempPath rejects the entire payload instead.
+      const poisonedOutput =
+        "mktemp: ungültiges Format ...\n/usr/local/bin/.paratix-download.AbCdEf"
+      const mockSsh = createMockSsh({
+        [`mktemp "$(dirname '${destination}')/.paratix-download.XXXXXX"`]: {
+          stdout: poisonedOutput,
+        },
+      })
+      const mod = download.url(destination, url, allowUnverifiedDownload)
+      await expect(mod.apply(mockSsh, emptyEnv)).rejects.toThrow(
+        /mktemp produced an unexpected path/v
+      )
+      // The downstream pipeline must not have run.
+      expect(mockSsh.calls.every((c) => !c.startsWith("curl"))).toBe(true)
+      expect(mockSsh.calls.every((c) => !c.startsWith("mv "))).toBe(true)
+      expect(mockSsh.calls.every((c) => !c.startsWith("rm -f"))).toBe(true)
+    })
+
+    it("R-0000107: rejects a mktemp output that escapes the destination directory", async () => {
+      // A `mktemp` whose stdout points to a different directory (e.g.
+      // /tmp instead of /usr/local/bin) must not be used as the temp
+      // path — curl, mv and rm -f would otherwise act on a file outside
+      // the dedicated namespace.
+      const escapedTemporaryPath = "/tmp/.paratix-download.AbCdEf"
+      const mockSsh = createMockSsh({
+        [`mktemp "$(dirname '${destination}')/.paratix-download.XXXXXX"`]: {
+          stdout: `${escapedTemporaryPath}\n`,
+        },
+      })
+      const mod = download.url(destination, url, allowUnverifiedDownload)
+      await expect(mod.apply(mockSsh, emptyEnv)).rejects.toThrow(
+        /mktemp produced an unexpected path/v
+      )
+      expect(mockSsh.calls.every((c) => !c.startsWith("curl"))).toBe(true)
+      expect(mockSsh.calls.every((c) => !c.startsWith("mv "))).toBe(true)
     })
 
     it("preserves the primary download error when cleanup also fails", async () => {
@@ -528,9 +595,11 @@ describe("download.url", () => {
   })
 
   describe("secrets propagation", () => {
+    const stub = downloadMktempStub(destination, temporaryDestination)
+
     it("passes header values as secrets when exec is called for curl", async () => {
       const token = "supersecret-bearer-token"
-      const mock = createMockSshWithOptions()
+      const mock = createMockSshWithOptions(stub)
       const mod = download.url(destination, url, {
         ...allowUnverifiedDownload,
         headers: { Authorization: `Bearer ${token}` },
@@ -543,7 +612,7 @@ describe("download.url", () => {
     })
 
     it("passes an empty secrets array when no headers are provided", async () => {
-      const mock = createMockSshWithOptions()
+      const mock = createMockSshWithOptions(stub)
       const mod = download.url(destination, url, allowUnverifiedDownload)
       await mod.apply(mock, emptyEnv)
 
@@ -555,7 +624,7 @@ describe("download.url", () => {
     it("passes presigned URLs as secrets when query parameters look sensitive", async () => {
       const presignedUrl =
         "https://example.com/file?X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Signature=super-secret-signature"
-      const mock = createMockSshWithOptions()
+      const mock = createMockSshWithOptions(stub)
       const mod = download.url(destination, presignedUrl, allowUnverifiedDownload)
       await mod.apply(mock, emptyEnv)
 
@@ -651,7 +720,7 @@ describe("download.github", () => {
       // because sudo logging would persist it in /var/log/auth.log and
       // ps -ef / /proc/<pid>/cmdline would expose it during the download.
       const token = "ghp_supersecrettoken"
-      const mockSsh = createMockSsh()
+      const mockSsh = createMockSsh(downloadMktempStub(destination, temporaryDestination))
       const mod = download.github(destination, {
         ...allowUnverifiedDownload,
         asset,
@@ -673,7 +742,7 @@ describe("download.github", () => {
     })
 
     it("does not send Authorization header when no token is provided", async () => {
-      const mockSsh = createMockSsh()
+      const mockSsh = createMockSsh(downloadMktempStub(destination, temporaryDestination))
       const mod = download.github(destination, { ...allowUnverifiedDownload, asset, repo, tag })
       await mod.apply(mockSsh, emptyEnv)
       const curlCall = mockSsh.execCalls.find((entry) => entry.command.startsWith("curl -fsSL"))
@@ -784,7 +853,7 @@ describe("download.github", () => {
       // plain template literal without encodeURIComponent, so the raw characters
       // end up in the curl command instead of their encoded equivalents.
       const tagWithSpecialChars = "v1.5.0+build.1"
-      const mockSsh = createMockSsh()
+      const mockSsh = createMockSsh(downloadMktempStub(destination, temporaryDestination))
       const mod = download.github(destination, {
         ...allowUnverifiedDownload,
         asset,
@@ -805,7 +874,7 @@ describe("download.github", () => {
       // percent-encoded. Without encodeURIComponent the space is passed raw,
       // which produces an invalid URL in the curl command.
       const assetWithSpace = "my tool 1.0.zip"
-      const mockSsh = createMockSsh()
+      const mockSsh = createMockSsh(downloadMktempStub(destination, temporaryDestination))
       const mod = download.github(destination, {
         ...allowUnverifiedDownload,
         asset: assetWithSpace,
@@ -830,7 +899,7 @@ describe("download.github", () => {
       const [encodedOwner, encodedRepo] = repoWithSpecialChars
         .split("/")
         .map((part) => encodeURIComponent(part))
-      const mockSsh = createMockSsh()
+      const mockSsh = createMockSsh(downloadMktempStub(destination, temporaryDestination))
       const mod = download.github(destination, {
         ...allowUnverifiedDownload,
         asset,
@@ -1151,9 +1220,11 @@ describe("download.large", () => {
   })
 
   describe("secrets propagation", () => {
+    const stub = downloadMktempStub(destination, temporaryDestination)
+
     it("passes header values as secrets when exec is called for curl", async () => {
       const token = "supersecret-bearer-token"
-      const mock = createMockSshWithOptions()
+      const mock = createMockSshWithOptions(stub)
       const mod = download.large(destination, url, {
         ...allowUnverifiedDownload,
         headers: { Authorization: `Bearer ${token}` },
@@ -1166,7 +1237,7 @@ describe("download.large", () => {
     })
 
     it("passes an empty secrets array when no headers are provided", async () => {
-      const mock = createMockSshWithOptions()
+      const mock = createMockSshWithOptions(stub)
       const mod = download.large(destination, url, allowUnverifiedDownload)
       await mod.apply(mock, emptyEnv)
 
@@ -1178,7 +1249,7 @@ describe("download.large", () => {
     it("passes presigned URLs as secrets when query parameters look sensitive", async () => {
       const presignedUrl =
         "https://example.com/large-file.iso?token=opaque-download-token&expires=123"
-      const mock = createMockSshWithOptions()
+      const mock = createMockSshWithOptions(stub)
       const mod = download.large(destination, presignedUrl, allowUnverifiedDownload)
       await mod.apply(mock, emptyEnv)
 
@@ -1217,10 +1288,12 @@ describe("download.large", () => {
 
 describe("buildCurlCommand — header name validation", () => {
   const destination = "/tmp/file"
+  const temporaryDestination = "/tmp/.paratix-download.HDR1"
   const url = "https://example.com/file"
+  const stub = downloadMktempStub(destination, temporaryDestination)
 
   it("throws when header name contains \\r\\n (CRLF injection)", async () => {
-    const mockSsh = createMockSsh()
+    const mockSsh = createMockSsh(stub)
     const mod = download.url(destination, url, {
       ...allowUnverifiedDownload,
       headers: { "X-Evil\r\nX-Injected": "value" },
@@ -1229,7 +1302,7 @@ describe("buildCurlCommand — header name validation", () => {
   })
 
   it("throws when header name contains a bare \\n", async () => {
-    const mockSsh = createMockSsh()
+    const mockSsh = createMockSsh(stub)
     const mod = download.url(destination, url, {
       ...allowUnverifiedDownload,
       headers: { "X-Evil\nInjected": "value" },
@@ -1238,7 +1311,7 @@ describe("buildCurlCommand — header name validation", () => {
   })
 
   it("throws when header name contains a bare \\r", async () => {
-    const mockSsh = createMockSsh()
+    const mockSsh = createMockSsh(stub)
     const mod = download.url(destination, url, {
       ...allowUnverifiedDownload,
       headers: { "X-Evil\rInjected": "value" },
@@ -1247,7 +1320,7 @@ describe("buildCurlCommand — header name validation", () => {
   })
 
   it("throws when header name contains a control character (\\x01)", async () => {
-    const mockSsh = createMockSsh()
+    const mockSsh = createMockSsh(stub)
     const mod = download.url(destination, url, {
       ...allowUnverifiedDownload,
       headers: { "X-Bad\x01Name": "value" },
@@ -1256,7 +1329,7 @@ describe("buildCurlCommand — header name validation", () => {
   })
 
   it("throws when header name contains a colon", async () => {
-    const mockSsh = createMockSsh()
+    const mockSsh = createMockSsh(stub)
     const mod = download.url(destination, url, {
       ...allowUnverifiedDownload,
       headers: { "X-Bad:Name": "value" },
@@ -1268,7 +1341,7 @@ describe("buildCurlCommand — header name validation", () => {
     // R-0000037: Authorization is sensitive and is now passed via curl
     // --config from stdin. The header name stays accepted by the validator,
     // but no longer appears on argv.
-    const mockSsh = createMockSsh()
+    const mockSsh = createMockSsh(stub)
     const mod = download.url(destination, url, {
       ...allowUnverifiedDownload,
       headers: { Authorization: "Bearer token123" },
@@ -1281,7 +1354,7 @@ describe("buildCurlCommand — header name validation", () => {
   })
 
   it("accepts a valid hyphenated header name", async () => {
-    const mockSsh = createMockSsh()
+    const mockSsh = createMockSsh(stub)
     const mod = download.url(destination, url, {
       ...allowUnverifiedDownload,
       headers: { "X-Custom-Header": "some-value" },
@@ -1297,10 +1370,12 @@ describe("buildCurlCommand — header name validation", () => {
 
 describe("buildCurlCommand — header value validation", () => {
   const destination = "/tmp/file"
+  const temporaryDestination = "/tmp/.paratix-download.HDR2"
   const url = "https://example.com/file"
+  const stub = downloadMktempStub(destination, temporaryDestination)
 
   it("throws when header value contains \\r (CR injection)", async () => {
-    const mockSsh = createMockSsh()
+    const mockSsh = createMockSsh(stub)
     const mod = download.url(destination, url, {
       ...allowUnverifiedDownload,
       headers: { "X-Custom": "value\rX-Injected: injected" },
@@ -1311,7 +1386,7 @@ describe("buildCurlCommand — header value validation", () => {
   })
 
   it("throws when header value contains \\n (LF injection)", async () => {
-    const mockSsh = createMockSsh()
+    const mockSsh = createMockSsh(stub)
     const mod = download.url(destination, url, {
       ...allowUnverifiedDownload,
       headers: { "X-Custom": "value\nX-Injected: injected" },
@@ -1322,7 +1397,7 @@ describe("buildCurlCommand — header value validation", () => {
   })
 
   it("accepts a normal header value without newline characters", async () => {
-    const mockSsh = createMockSsh()
+    const mockSsh = createMockSsh(stub)
     const mod = download.url(destination, url, {
       ...allowUnverifiedDownload,
       headers: { "X-Custom": "safe-value" },
@@ -1337,9 +1412,14 @@ describe("buildCurlCommand — header value validation", () => {
 describe("buildCurlCommand — redirect protocol policy", () => {
   const destination = "/tmp/file"
   const httpsUrl = "https://example.com/file"
+  const tempPath = "/tmp/.paratix-download.RDR1"
+  const githubDestination = "/usr/local/bin/terraform"
+  const githubTempPath = "/usr/local/bin/.paratix-download.RDR2"
+  const largeDestination = "/var/cache/big.iso"
+  const largeTempPath = "/var/cache/.paratix-download.RDR3"
 
   it("restricts initial URL and redirects to https by default", async () => {
-    const mockSsh = createMockSsh()
+    const mockSsh = createMockSsh(downloadMktempStub(destination, tempPath))
     const mod = download.url(destination, httpsUrl, allowUnverifiedDownload)
     const result = await mod.apply(mockSsh, emptyEnv)
 
@@ -1349,7 +1429,7 @@ describe("buildCurlCommand — redirect protocol policy", () => {
   })
 
   it("allows http and https for initial URL and redirects when allowInsecureHttp is true", async () => {
-    const mockSsh = createMockSsh()
+    const mockSsh = createMockSsh(downloadMktempStub(destination, tempPath))
     const mod = download.url(destination, "http://example.com/file", {
       ...allowUnverifiedDownload,
       allowInsecureHttp: true,
@@ -1362,8 +1442,8 @@ describe("buildCurlCommand — redirect protocol policy", () => {
   })
 
   it("uses https-only redirect policy for github downloads by default", async () => {
-    const mockSsh = createMockSsh()
-    const mod = download.github("/usr/local/bin/terraform", {
+    const mockSsh = createMockSsh(downloadMktempStub(githubDestination, githubTempPath))
+    const mod = download.github(githubDestination, {
       ...allowUnverifiedDownload,
       asset: "terraform_1.5.0_linux_amd64.zip",
       repo: "hashicorp/terraform",
@@ -1377,8 +1457,8 @@ describe("buildCurlCommand — redirect protocol policy", () => {
   })
 
   it("propagates insecure http redirect opt-in for large downloads", async () => {
-    const mockSsh = createMockSsh()
-    const mod = download.large("/var/cache/big.iso", "http://example.com/big.iso", {
+    const mockSsh = createMockSsh(downloadMktempStub(largeDestination, largeTempPath))
+    const mod = download.large(largeDestination, "http://example.com/big.iso", {
       ...allowUnverifiedDownload,
       allowInsecureHttp: true,
     })
@@ -1394,13 +1474,15 @@ describe("buildCurlCommand — redirect protocol policy", () => {
 
 describe("download.github — secrets propagation", () => {
   const destination = "/usr/local/bin/terraform"
+  const temporaryDestination = "/usr/local/bin/.paratix-download.GH9999"
   const repo = "hashicorp/terraform"
   const tag = "v1.5.0"
   const asset = "terraform_1.5.0_linux_amd64.zip"
+  const stub = downloadMktempStub(destination, temporaryDestination)
 
   it("passes token as secrets when exec is called for curl", async () => {
     const token = "ghp_supersecrettoken"
-    const mock = createMockSshWithOptions()
+    const mock = createMockSshWithOptions(stub)
     const mod = download.github(destination, {
       ...allowUnverifiedDownload,
       asset,
@@ -1416,7 +1498,7 @@ describe("download.github — secrets propagation", () => {
   })
 
   it("does not set secrets when no token is provided", async () => {
-    const mock = createMockSshWithOptions()
+    const mock = createMockSshWithOptions(stub)
     const mod = download.github(destination, { ...allowUnverifiedDownload, asset, repo, tag })
     await mod.apply(mock, emptyEnv)
 
