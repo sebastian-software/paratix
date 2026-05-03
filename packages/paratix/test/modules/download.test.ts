@@ -1034,18 +1034,17 @@ describe("download.large", () => {
       expect(result).toBe("needs-apply")
     })
 
-    it("recovers a stale crash by setting the flag when destination exists and sha256 matches", async () => {
+    it("returns needs-apply without setting the flag when destination exists and sha256 matches but flag is missing", async () => {
       const sha256 = "aabbccddaabbccddaabbccddaabbccddaabbccddaabbccddaabbccddaabbccdd"
       const mockSsh = createMockSsh({
         [`[ -e '${destination}' ]`]: { code: 0 },
-        [`[ -f '${destination}' ]`]: { code: 0 },
         [`[ -f /var/lib/paratix/flags/'${flagName}' ]`]: { code: 1 },
-        [`sha256sum '${destination}'`]: { stdout: `${sha256}  ${destination}` },
       })
       const mod = download.large(destination, url, { sha256 })
       const result = await mod.check(mockSsh, emptyEnv)
-      expect(result).toBe("ok")
-      expect(mockSsh.calls).toContain(`touch /var/lib/paratix/flags/'${flagName}'`)
+      expect(result).toBe("needs-apply")
+      expect(mockSsh.calls).not.toContain(`touch /var/lib/paratix/flags/'${flagName}'`)
+      expect(mockSsh.calls).not.toContain(`sha256sum '${destination}'`)
     })
 
     it("does not set the flag during recovery when sha256 mismatches", async () => {

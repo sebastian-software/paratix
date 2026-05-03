@@ -163,16 +163,10 @@ async function checkLargeDownload(
   const flagExists = await hasFlag(conn, flagName)
   const destinationExists = await conn.exists(destination)
 
+  if (!flagExists) return NEEDS_APPLY
   if (!destinationExists) return NEEDS_APPLY
   if (!(await destinationHashMatches(conn, destination, options))) return NEEDS_APPLY
   if (!(await metadataMatches(conn, destination, options))) return NEEDS_APPLY
-
-  // Recover from a crash between the final mv and setFlag: if the file is
-  // already on disk (and, when configured, the hash matches), restore the
-  // flag instead of triggering a costly re-download.
-  if (!flagExists) {
-    await setFlag(conn, flagName)
-  }
 
   return "ok"
 }
