@@ -416,3 +416,49 @@ describe("user.absent apply", () => {
     expect(result.status).toBe("failed")
   })
 })
+
+// R-0000119: user.present and user.absent must reject names that violate the
+// POSIX user-name whitelist before they can reach `useradd`, `usermod`, or
+// `userdel`. The validation runs at module-construction time so misuse fails
+// fast — long before an SSH connection is opened.
+describe("validation", () => {
+  it("user.present throws when the name starts with a flag", () => {
+    expect(() => user.present("--name")).toThrow("is invalid")
+  })
+
+  it("user.present throws when the name is empty", () => {
+    expect(() => user.present("")).toThrow("is invalid")
+  })
+
+  it("user.present throws when the name contains a space", () => {
+    expect(() => user.present("name with space")).toThrow("is invalid")
+  })
+
+  it("user.present throws when the name has a leading digit", () => {
+    expect(() => user.present("1nval1d")).toThrow("is invalid")
+  })
+
+  it("user.present throws when the name contains non-ASCII letters", () => {
+    expect(() => user.present("Üser")).toThrow("is invalid")
+  })
+
+  it("user.absent throws when the name starts with a flag", () => {
+    expect(() => user.absent("--name")).toThrow("is invalid")
+  })
+
+  it("user.absent throws when the name is empty", () => {
+    expect(() => user.absent("")).toThrow("is invalid")
+  })
+
+  it("user.absent throws when the name contains a space", () => {
+    expect(() => user.absent("name with space")).toThrow("is invalid")
+  })
+
+  it("user.absent throws when the name has a leading digit", () => {
+    expect(() => user.absent("1nval1d")).toThrow("is invalid")
+  })
+
+  it("user.absent throws when the name contains non-ASCII letters", () => {
+    expect(() => user.absent("Üser")).toThrow("is invalid")
+  })
+})

@@ -13,6 +13,22 @@ type UserOptions = {
 
 const ID_CMD = "id"
 
+// R-0000119: enforce the POSIX user/group name whitelist at module-construction
+// time so flag-shaped or empty names (e.g. `--badname`, `-r`, `""`) cannot
+// reach `useradd`, `usermod`, `userdel`, or `--groups` where they would either
+// be interpreted as options or trigger undefined behaviour. The leading
+// character must be a lowercase letter or underscore; subsequent characters
+// may be lowercase letters, digits, underscores, or hyphens; an optional
+// trailing `$` is accepted to match the convention used for samba machine
+// accounts.
+const USER_NAME_PATTERN = /^[a-z_][a-z0-9_-]*\$?$/
+
+function assertValidUserName(name: string): void {
+  if (!USER_NAME_PATTERN.test(name)) {
+    throw new Error(`user name ${JSON.stringify(name)} is invalid`)
+  }
+}
+
 function buildUserArguments(mode: "useradd" | "usermod", options?: UserOptions): string[] {
   const flags: string[] = []
   if (options?.uid != null) flags.push(`--uid ${String(options.uid)}`)
@@ -194,6 +210,9 @@ export const user = {
    * @returns A Module that ensures the user account is absent.
    */
   absent(name: string, options?: { removeHome?: boolean }): Module {
+    // R-0000119: validate the username synchronously at construction time so
+    // flag-shaped names cannot slip past `userdel` argument parsing.
+    assertValidUserName(name)
     // R-0000077: userdel returns exit code 6 ("specified user doesn't
     // exist") when the account has already been removed. Treat this case
     // as idempotent success — both by probing `id` first to mirror
@@ -243,6 +262,10 @@ export const user = {
    * @returns A Module that ensures the user account is present.
    */
   present(name: string, options?: UserOptions): Module {
+    // R-0000119: validate the username synchronously at construction time so
+    // flag-shaped names cannot slip past `useradd` / `usermod` argument
+    // parsing.
+    assertValidUserName(name)
     return {
       async apply(ssh: null | SshConnection): Promise<ModuleResult> {
         if (!ssh) return failed(`[user.present: ${name}] SSH connection is required`)
