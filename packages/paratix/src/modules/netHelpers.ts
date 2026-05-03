@@ -47,6 +47,8 @@ export type HttpCheckParameters = {
   urlOnArgv: boolean
 }
 
+const HTTP_STATUS_MARKER = "\n__PARATIX_HTTP_STATUS__:"
+
 /**
  * Build the shell command used to test a wait-for condition.
  *
@@ -230,13 +232,25 @@ export async function checkHttpCondition(
   parameters: HttpCheckParameters
 ): Promise<boolean> {
   try {
+    if (parameters.expectedBody != null) {
+      const output = await execCurl(
+        conn,
+        "curl -s -w '\\n__PARATIX_HTTP_STATUS__:%{http_code}'",
+        parameters
+      )
+      const markerIndex = output.lastIndexOf(HTTP_STATUS_MARKER)
+      if (markerIndex < 0) return false
+
+      const bodyOutput = output.slice(0, markerIndex)
+      const statusOutput = output.slice(markerIndex + HTTP_STATUS_MARKER.length).trim()
+      if (statusOutput !== String(parameters.expectedStatus)) return false
+      if (!bodyOutput.includes(parameters.expectedBody)) return false
+
+      return true
+    }
+
     const statusOutput = await execCurl(conn, "curl -s -o /dev/null -w '%{http_code}'", parameters)
     if (statusOutput !== String(parameters.expectedStatus)) return false
-
-    if (parameters.expectedBody != null) {
-      const bodyOutput = await execCurl(conn, "curl -s", parameters)
-      if (!bodyOutput.includes(parameters.expectedBody)) return false
-    }
 
     return true
   } catch {

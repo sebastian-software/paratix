@@ -1245,18 +1245,23 @@ describe("net.request — check", () => {
 
   it("returns ok when status AND body match", async () => {
     const mockSsh = createMockSsh({
-      "curl -s -o /dev/null -w '%{http_code}' 'https://example.com/health'": { stdout: "200" },
-      "curl -s 'https://example.com/health'": { stdout: "OK" },
+      "curl -s -w '\\n__PARATIX_HTTP_STATUS__:%{http_code}' 'https://example.com/health'": {
+        stdout: "OK\n__PARATIX_HTTP_STATUS__:200",
+      },
     })
     const mod = net.request("https://example.com/health", { body: "OK" })
     const result = await mod.check(mockSsh, emptyEnv)
     expect(result).toBe("ok")
+    expect(mockSsh.calls).toEqual([
+      "curl -s -w '\\n__PARATIX_HTTP_STATUS__:%{http_code}' 'https://example.com/health'",
+    ])
   })
 
   it("returns needs-apply when body does not match even if status matches", async () => {
     const mockSsh = createMockSsh({
-      "curl -s -o /dev/null -w '%{http_code}' 'https://example.com/health'": { stdout: "200" },
-      "curl -s 'https://example.com/health'": { stdout: "ERROR" },
+      "curl -s -w '\\n__PARATIX_HTTP_STATUS__:%{http_code}' 'https://example.com/health'": {
+        stdout: "ERROR\n__PARATIX_HTTP_STATUS__:200",
+      },
     })
     const mod = net.request("https://example.com/health", { body: "OK" })
     const result = await mod.check(mockSsh, emptyEnv)
