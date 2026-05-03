@@ -16,6 +16,29 @@ import type {
 import { resolveEnvironment } from "../src/environment.js"
 import { meta } from "../src/meta.js"
 import { recipe as createRecipe } from "../src/recipe.js"
+import {
+  createTestSignalBus,
+  resetSignalBus,
+  setSignalBus,
+  type TestSignalBus,
+} from "../src/signalBus.js"
+
+let signalBus: TestSignalBus
+
+// Vitest unterstützt file-scope beforeEach/afterEach: Sie greifen für ALLE
+// Tests in dieser Datei, unabhängig vom describe-Block. Damit erhält jeder
+// Test einen frischen Signal-Bus, ohne dass jeder einzelne describe-Block
+// die Registrierung wiederholen muss.
+// eslint-disable-next-line vitest/require-top-level-describe -- absichtlich file-scope
+beforeEach(() => {
+  signalBus = createTestSignalBus()
+  setSignalBus(signalBus)
+})
+
+// eslint-disable-next-line vitest/require-top-level-describe -- absichtlich file-scope
+afterEach(() => {
+  resetSignalBus()
+})
 
 function makeMockSshClass(
   capturedConfigs: unknown[],
@@ -1006,8 +1029,8 @@ describe("runPlaybook signal handling", () => {
 
     const { runPlaybook } = await import("../src/runner.js")
 
-    const interruptListenersBefore = process.listenerCount("SIGINT")
-    const terminateListenersBefore = process.listenerCount("SIGTERM")
+    const interruptListenersBefore = signalBus.listenerCount("SIGINT")
+    const terminateListenersBefore = signalBus.listenerCount("SIGTERM")
 
     const definition: ServerDefinition = {
       host: "1.2.3.4",
@@ -1018,8 +1041,8 @@ describe("runPlaybook signal handling", () => {
 
     await runPlaybook(definition)
 
-    expect(process.listenerCount("SIGINT")).toBe(interruptListenersBefore)
-    expect(process.listenerCount("SIGTERM")).toBe(terminateListenersBefore)
+    expect(signalBus.listenerCount("SIGINT")).toBe(interruptListenersBefore)
+    expect(signalBus.listenerCount("SIGTERM")).toBe(terminateListenersBefore)
   })
 
   it("calls ssh.disconnect() and sets exitCode to 130 when SIGINT is received during runPlaybook", async () => {
@@ -1036,7 +1059,7 @@ describe("runPlaybook signal handling", () => {
         .fn()
         .mockImplementationOnce(async () => {
           await Promise.resolve()
-          process.emit("SIGINT", "SIGINT")
+          signalBus.emit("SIGINT")
           return "needs-apply" as const
         })
         .mockResolvedValue("needs-apply"),
@@ -1071,7 +1094,7 @@ describe("runPlaybook signal handling", () => {
         .fn()
         .mockImplementationOnce(async () => {
           await Promise.resolve()
-          process.emit("SIGTERM", "SIGTERM")
+          signalBus.emit("SIGTERM")
           return "needs-apply" as const
         })
         .mockResolvedValue("needs-apply"),
@@ -1103,7 +1126,7 @@ describe("runPlaybook signal handling", () => {
         .fn()
         .mockImplementationOnce(async () => {
           await Promise.resolve()
-          process.emit("SIGINT", "SIGINT")
+          signalBus.emit("SIGINT")
           return { status: "changed" } satisfies ModuleResult
         })
         .mockResolvedValue({ status: "changed" } satisfies ModuleResult),
@@ -1147,7 +1170,7 @@ describe("runPlaybook signal handling", () => {
     const interruptedModule: Module = {
       apply: vi.fn().mockImplementationOnce(async () => {
         await Promise.resolve()
-        process.emit("SIGINT", "SIGINT")
+        signalBus.emit("SIGINT")
         throw new Error("socket closed during shutdown")
       }),
       check: vi.fn().mockResolvedValue("needs-apply"),
@@ -1187,7 +1210,7 @@ describe("runPlaybook signal handling", () => {
       _modules: [],
       apply: vi.fn().mockImplementationOnce(async () => {
         await Promise.resolve()
-        process.emit("SIGTERM", "SIGTERM")
+        signalBus.emit("SIGTERM")
         throw new Error("recipe transport closed during shutdown")
       }),
       check: vi.fn().mockResolvedValue("needs-apply" as const),
@@ -1273,7 +1296,7 @@ describe("runPlaybook signal handling", () => {
       const firstSignal: Module = {
         apply: vi.fn().mockImplementationOnce(async () => {
           await Promise.resolve()
-          process.emit(signalName, signalName)
+          signalBus.emit(signalName)
           return { status: "changed" } satisfies ModuleResult
         }),
         check: vi.fn().mockResolvedValue("needs-apply"),
@@ -1331,7 +1354,7 @@ describe("runPlaybook signal handling", () => {
         disconnect: disconnectFn,
         reconnect: vi.fn().mockImplementation(async () => {
           await Promise.resolve()
-          process.emit("SIGINT", "SIGINT")
+          signalBus.emit("SIGINT")
           throw new Error("Reconnect interrupted by signal")
         }),
       }),
@@ -1376,7 +1399,7 @@ describe("runPlaybook signal handling", () => {
     const module1: Module = {
       apply: vi.fn().mockImplementationOnce(async () => {
         await Promise.resolve()
-        process.emit("SIGINT", "SIGINT")
+        signalBus.emit("SIGINT")
         return { status: "changed" } satisfies ModuleResult
       }),
       check: vi.fn().mockResolvedValue("needs-apply"),
@@ -1890,8 +1913,8 @@ describe("runPlaybook shutdown handler leak on SSH connection failure", () => {
 
     const { runPlaybook } = await import("../src/runner.js")
 
-    const sigintBefore = process.listenerCount("SIGINT")
-    const sigtermBefore = process.listenerCount("SIGTERM")
+    const sigintBefore = signalBus.listenerCount("SIGINT")
+    const sigtermBefore = signalBus.listenerCount("SIGTERM")
 
     const definition: ServerDefinition = {
       host: "1.2.3.4",
@@ -1907,8 +1930,8 @@ describe("runPlaybook shutdown handler leak on SSH connection failure", () => {
     // removed even when createSshConnection() fails. Currently this does NOT happen
     // because createSshConnection() is outside the try block, so the finally block
     // with process.removeListener() is never reached.
-    expect(process.listenerCount("SIGINT")).toBe(sigintBefore)
-    expect(process.listenerCount("SIGTERM")).toBe(sigtermBefore)
+    expect(signalBus.listenerCount("SIGINT")).toBe(sigintBefore)
+    expect(signalBus.listenerCount("SIGTERM")).toBe(sigtermBefore)
   })
 
   it("prints run context before connect failures", async () => {
@@ -1957,8 +1980,8 @@ describe("runPlaybook shutdown handler leak on SSH connection failure", () => {
 
     const { runPlaybook } = await import("../src/runner.js")
 
-    const sigintBefore = process.listenerCount("SIGINT")
-    const sigtermBefore = process.listenerCount("SIGTERM")
+    const sigintBefore = signalBus.listenerCount("SIGINT")
+    const sigtermBefore = signalBus.listenerCount("SIGTERM")
 
     const definition: ServerDefinition = {
       host: "1.2.3.4",
@@ -1978,8 +2001,8 @@ describe("runPlaybook shutdown handler leak on SSH connection failure", () => {
 
     await expect(runPlaybook(definition)).resolves.toBeUndefined()
 
-    expect(process.listenerCount("SIGINT")).toBe(sigintBefore)
-    expect(process.listenerCount("SIGTERM")).toBe(sigtermBefore)
+    expect(signalBus.listenerCount("SIGINT")).toBe(sigintBefore)
+    expect(signalBus.listenerCount("SIGTERM")).toBe(sigtermBefore)
     expect(process.exitCode).toBe(1)
   })
 
@@ -2066,7 +2089,7 @@ describe("runPlaybook shutdown handler leak on SSH connection failure", () => {
       SshConnectionImpl: class MockConnectInterrupted {
         public connect = vi.fn().mockImplementation(async () => {
           await Promise.resolve()
-          process.emit("SIGINT", "SIGINT")
+          signalBus.emit("SIGINT")
           throw new Error("connect interrupted")
         })
         public disconnect = disconnect
@@ -2099,7 +2122,7 @@ describe("runPlaybook shutdown handler leak on SSH connection failure", () => {
         public disconnect = disconnect
         public exec = vi.fn().mockImplementation(async () => {
           await Promise.resolve()
-          process.emit("SIGTERM", "SIGTERM")
+          signalBus.emit("SIGTERM")
           throw new Error("probe interrupted")
         })
         public probeSudo = vi.fn().mockResolvedValue(null)
@@ -2139,7 +2162,7 @@ describe("runPlaybook shutdown handler leak on SSH connection failure", () => {
       SshConnectionImpl: class MockConnectResolvedThenInterrupted {
         public connect = vi.fn().mockImplementation(async () => {
           await Promise.resolve()
-          process.emit("SIGINT", "SIGINT")
+          signalBus.emit("SIGINT")
         })
         public disconnect = disconnect
         public probeSudo = probeSudo
@@ -2229,7 +2252,7 @@ describe("runPlaybook shutdown handler leak on SSH connection failure", () => {
       SshConnectionImpl: class MockPromptBootstrapInterrupted {
         public connect = vi.fn().mockImplementation(async () => {
           await Promise.resolve()
-          process.emit("SIGTERM", "SIGTERM")
+          signalBus.emit("SIGTERM")
         })
         public disconnect = disconnect
         public probeSudo = probeSudo
@@ -2264,7 +2287,7 @@ describe("runPlaybook shutdown handler leak on SSH connection failure", () => {
           async () =>
             new Promise((_, reject) => {
               queueMicrotask(() => {
-                process.emit("SIGINT", "SIGINT")
+                signalBus.emit("SIGINT")
                 reject(new Error("prompt interrupted"))
               })
             })
@@ -2310,7 +2333,7 @@ describe("runPlaybook shutdown handler leak on SSH connection failure", () => {
     const interruptedModule: Module = {
       apply: vi.fn().mockResolvedValue({ status: "changed" } satisfies ModuleResult),
       check: vi.fn().mockImplementation(() => {
-        process.emit("SIGINT", "SIGINT")
+        signalBus.emit("SIGINT")
         return "needs-apply"
       }),
       name: "interrupt-between-check-and-apply",
@@ -2920,7 +2943,7 @@ describe("runPlaybook dry-run recipe behaviour", () => {
       _dryRunBlocker: true,
       apply: vi.fn().mockResolvedValue({ status: "failed" } satisfies ModuleResult),
       check: vi.fn().mockImplementation(() => {
-        process.emit("SIGTERM", "SIGTERM")
+        signalBus.emit("SIGTERM")
         return "needs-apply"
       }),
       name: "dry-run-blocker",

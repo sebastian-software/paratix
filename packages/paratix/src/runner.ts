@@ -29,6 +29,7 @@ import {
 import { setRunnerAbortSignal } from "./runnerAbortSignal.js"
 import { resolveExitCode, signalExitCode } from "./runnerHelpers.js"
 import { clearRegisteredSecrets } from "./secretSink.js"
+import { getSignalBus, type SignalName } from "./signalBus.js"
 import { runSignalModules, type SignalRunStatus } from "./signalOrchestration.js"
 import { SshConnectionImpl } from "./ssh.js"
 
@@ -60,8 +61,8 @@ function setupShutdownHandlers(): ShutdownState {
     ssh?.disconnect()
   }
 
-  process.on("SIGINT", handleShutdownSignal)
-  process.on("SIGTERM", handleShutdownSignal)
+  getSignalBus().on("SIGINT", handleShutdownSignal as (signal: SignalName) => void)
+  getSignalBus().on("SIGTERM", handleShutdownSignal as (signal: SignalName) => void)
 
   return {
     handleShutdownSignal,
@@ -779,7 +780,7 @@ function teardownPlaybookResources(parameters: {
   ssh: SshConnectionImpl | undefined
 }): void {
   for (const signal of ["SIGINT", "SIGTERM"] as const)
-    process.removeListener(signal, parameters.handleShutdownSignal)
+    getSignalBus().off(signal, parameters.handleShutdownSignal as (signal: SignalName) => void)
   setRunnerAbortSignal(undefined)
   clearRegisteredSecrets()
   parameters.ssh?.disconnect()
