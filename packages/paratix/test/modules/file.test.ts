@@ -11,7 +11,14 @@ import { createMockSsh } from "../helpers/mockSsh.js"
 
 const emptyEnv = {}
 const unicodeContent = "Grüße aus Köln – こんにちは мир\n"
-const unicodeName = "über datei.txt"
+// R-0000139: keep filenames that hit the local filesystem ASCII-only.
+// On macOS the filesystem normalizes unicode filenames to NFD while
+// Linux ext4 preserves the bytes the program wrote — typically NFC.
+// An identity comparison (`localPath === uploadedFiles[0].local`)
+// would therefore break on whichever platform did not match the
+// literal source bytes. Remote paths still travel as opaque strings
+// and may contain unicode.
+const unicodeName = "ascii-datei.txt"
 const unicodeRemotePath = "/remote/über ordner/äöü.txt"
 
 describe("file.directory", () => {
@@ -999,7 +1006,9 @@ describe("file.template", () => {
   it("apply renders unicode template content and values", async () => {
     const dir = mkdtempSync(join(tmpdir(), "paratix-test-"))
     try {
-      const templatePath = join(dir, "grüße-テンプレート.tmpl")
+      // R-0000139: ASCII-only template filename for filesystem stability;
+      // unicode is exercised via content/values and remote paths below.
+      const templatePath = join(dir, "ascii-template.tmpl")
       writeFileSync(templatePath, "Hallo {{name|raw}} aus {{city|raw}}", "utf8")
 
       const writtenFiles: Array<{ content: string; path: string }> = []
