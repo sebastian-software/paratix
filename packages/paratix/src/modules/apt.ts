@@ -15,6 +15,7 @@ import {
   validateAptKeyUrl,
   verifyAptKeyFingerprint,
 } from "./aptKeyHelpers.js"
+import { sha256String } from "./fileHelpers.js"
 import { hasFlag, setVersionedFlag } from "./moduleHelpers.js"
 
 const NONINTERACTIVE = "DEBIAN_FRONTEND=noninteractive"
@@ -66,6 +67,142 @@ function parseDebconfOutput(stdout: string): Record<string, string> {
     }
   }
   return values
+}
+
+// R-0000104: short hash length for the per-package and per-selections
+// segments of the debconf marker flag. 16 hex chars = 64 bits, which
+// gives a collision-resistant identifier without bloating the flag
+// file name.
+const APT_DEBCONF_HASH_LENGTH = 16
+
+/**
+ * Build the marker flag prefix and full flag name for an apt.debconf
+ * configuration. The prefix is keyed only to `packageName` so that
+ * `setVersionedFlag` deletes stale flags from previous selection sets
+ * when the desired selections change. The full flag name additionally
+ * encodes a hash of the selections so that drift in the desired values
+ * is detected as `needs-apply` instead of being masked by an existing
+ * flag.
+ *
+ * @param packageName - The package name whose debconf selections are pre-seeded.
+ * @param selectionsText - Newline-joined `pkg question type value` lines.
+ * @returns The flag prefix (for cleanup) and the full flag name.
+ */
+function buildDebconfFlagInfo(
+  packageName: string,
+  selectionsText: string
+): { flagName: string; flagPrefix: string } {
+  const packageHash = sha256String(packageName).slice(0, APT_DEBCONF_HASH_LENGTH)
+  const selectionsHash = sha256String(`${packageName}\n${selectionsText}`).slice(
+    0,
+    APT_DEBCONF_HASH_LENGTH
+  )
+  const flagPrefix = `apt-debconf-${packageHash}-`
+  const flagName = `${flagPrefix}${selectionsHash}`
+  return { flagName, flagPrefix }
+}
+
+/**
+ * Build the newline-joined selections text fed to `debconf-set-selections`.
+ *
+ * Each line has the form `<package> <question> <type> <value>` and uses
+ * the type returned by `resolveDebconfType`. Newline characters in
+ * questions or values are rejected up-front because debconf's flat-file
+ * format cannot represent them.
+ *
+ * @param ssh - Active SSH connection used to query debconf types.
+ * @param packageName - The package name whose selections are pre-seeded.
+ * @param selections - A map of `question -> value` entries.
+ * @returns A `failed` ModuleResult on rejection, otherwise the joined text.
+ */
+async function buildDebconfSelectionsText(
+  ssh: SshConnection,
+  packageName: string,
+  selections: Record<string, string>
+): Promise<ModuleResult | string> {
+  const lines: string[] = []
+  for (const [question, value] of Object.entries(selections)) {
+    if (question.includes("\n") || value.includes("\n")) {
+      return failed(
+        `[apt.debconf] selections for ${packageName} must not contain newline characters`
+      )
+    }
+    // eslint-disable-next-line no-await-in-loop
+    const type = await resolveDebconfType(ssh, question)
+    lines.push(`${packageName} ${question} ${type} ${value}`)
+  }
+  return lines.join("\n")
+}
+
+/**
+ * Compare the live debconf database for an installed package against
+ * the desired selections. Returns `ok` when every requested question
+ * already holds the desired value, otherwise `needs-apply`.
+ *
+ * @param ssh - Active SSH connection to the remote host.
+ * @param packageName - The package name to probe.
+ * @param selections - Desired `question -> value` map.
+ * @returns `ok` when the live database matches, otherwise `needs-apply`.
+ */
+async function checkInstalledDebconfState(
+  ssh: SshConnection,
+  packageName: string,
+  selections: Record<string, string>
+): Promise<"needs-apply" | "ok"> {
+  const result = await ssh.exec(`debconf-show ${shellQuote(packageName)}`, APT_BASE_EXEC_OPTS)
+  if (result.code !== 0) return NEEDS_APPLY
+
+  const currentValues = parseDebconfOutput(result.stdout)
+  for (const [question, value] of Object.entries(selections)) {
+    if (currentValues[question] !== value) return NEEDS_APPLY
+  }
+  return "ok"
+}
+
+/**
+ * Consult the versioned marker flag for an apt.debconf configuration.
+ * Used as the fallback idempotency signal when the package is not yet
+ * installed and `debconf-show` therefore cannot report state.
+ *
+ * @param ssh - Active SSH connection to the remote host.
+ * @param packageName - The package name whose selections are pre-seeded.
+ * @param selections - Desired `question -> value` map.
+ * @returns `ok` when the marker for the current selections exists,
+ *   otherwise `needs-apply`.
+ */
+async function checkBufferedDebconfMarker(
+  ssh: SshConnection,
+  packageName: string,
+  selections: Record<string, string>
+): Promise<"needs-apply" | "ok"> {
+  const selectionsTextOrFailure = await buildDebconfSelectionsText(ssh, packageName, selections)
+  if (typeof selectionsTextOrFailure !== "string") return NEEDS_APPLY
+
+  const { flagName } = buildDebconfFlagInfo(packageName, selectionsTextOrFailure)
+  return (await hasFlag(ssh, flagName)) ? "ok" : NEEDS_APPLY
+}
+
+/**
+ * Probe whether the given Debian package is installed.
+ *
+ * Uses `dpkg-query -W -f='${Status}'` and matches the freeform status
+ * line against the canonical `install ok installed` token. This avoids
+ * false positives for packages that are merely partially installed,
+ * unpacked, or whose configuration was removed (`config-files` /
+ * `not-installed` / `unpacked` states), where the debconf database
+ * may be stale or incomplete.
+ *
+ * @param ssh - Active SSH connection.
+ * @param packageName - The package name to probe.
+ * @returns `true` when dpkg reports the package as fully installed.
+ */
+async function isAptPackageInstalled(ssh: SshConnection, packageName: string): Promise<boolean> {
+  const result = await ssh.exec(
+    `dpkg-query -W -f='\${Status}' ${shellQuote(packageName)}`,
+    APT_BASE_EXEC_OPTS
+  )
+  if (result.code !== 0) return false
+  return result.stdout.trim() === "install ok installed"
 }
 
 /**
@@ -184,19 +321,14 @@ export const apt = {
       async apply(ssh: null | SshConnection): Promise<ModuleResult> {
         if (!ssh) return failed(`[apt.debconf] SSH connection is required for ${packageName}`)
 
-        const lines: string[] = []
-        for (const [question, value] of Object.entries(selections)) {
-          if (question.includes("\n") || value.includes("\n")) {
-            return failed(
-              `[apt.debconf] selections for ${packageName} must not contain newline characters`
-            )
-          }
-          // eslint-disable-next-line no-await-in-loop
-          const type = await resolveDebconfType(ssh, question)
-          lines.push(`${packageName} ${question} ${type} ${value}`)
-        }
+        const selectionsTextOrFailure = await buildDebconfSelectionsText(
+          ssh,
+          packageName,
+          selections
+        )
+        if (typeof selectionsTextOrFailure !== "string") return selectionsTextOrFailure
 
-        const selectionsText = lines.join("\n")
+        const selectionsText = selectionsTextOrFailure
         // R-0000063: use `printf '%s' …` instead of `echo …` so selection
         // values that begin with `-` (interpreted as flags by some echo
         // implementations) or contain backslash sequences (interpreted by
@@ -209,22 +341,31 @@ export const apt = {
         )
         if (result.code !== 0)
           return failedCommand(`[apt.debconf] failed to set selections for ${packageName}`, result)
+
+        // R-0000104: persist a versioned marker flag so that subsequent
+        // `check` runs return `ok` even when the package is not yet
+        // installed (in which case `debconf-show` would exit non-zero
+        // and yield a permanent `needs-apply`). The flag prefix is keyed
+        // to the package, so changing the desired selections evicts the
+        // stale flag and `check` will correctly report `needs-apply`.
+        const { flagName, flagPrefix } = buildDebconfFlagInfo(packageName, selectionsText)
+        await setVersionedFlag(ssh, flagName, flagPrefix)
+
         return { status: "changed" }
       },
       async check(ssh: null | SshConnection): Promise<"needs-apply" | "ok"> {
         if (!ssh) return NEEDS_APPLY
 
-        const result = await ssh.exec(`debconf-show ${shellQuote(packageName)}`, {
-          ignoreExitCode: true,
-          silent: true,
-        })
-        if (result.code !== 0) return NEEDS_APPLY
-
-        const currentValues = parseDebconfOutput(result.stdout)
-        for (const [question, value] of Object.entries(selections)) {
-          if (currentValues[question] !== value) return NEEDS_APPLY
-        }
-        return "ok"
+        // R-0000104: distinguish between `package installed, drift` and
+        // `package not installed, selections buffered`. When the package
+        // is installed the live debconf database is the source of truth.
+        // When it is not yet installed `debconf-show` exits non-zero and
+        // we must instead consult the versioned marker flag set by
+        // `apply` to decide whether the buffered selections still match
+        // the desired set.
+        return (await isAptPackageInstalled(ssh, packageName))
+          ? checkInstalledDebconfState(ssh, packageName, selections)
+          : checkBufferedDebconfMarker(ssh, packageName, selections)
       },
       name: `apt.debconf: ${packageName}`,
     }

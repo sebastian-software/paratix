@@ -1,6 +1,8 @@
+/* eslint-disable no-template-curly-in-string -- Shell dpkg-query format strings, not JS templates */
 import { describe, expect, it } from "vitest"
 
 import { apt } from "../../src/modules/apt.js"
+import { sha256String } from "../../src/modules/fileHelpers.js"
 import { createMockSsh } from "../helpers/mockSsh.js"
 
 const emptyEnv = {}
@@ -508,6 +510,8 @@ describe("apt.repository (standard form)", () => {
 
 describe("apt.debconf", () => {
   const selections = { "postfix/main_mailer_type": "Internet Site" }
+  const dpkgInstalled = { code: 0, stdout: "install ok installed" }
+  const dpkgNotInstalled = { code: 1, stdout: "" }
 
   it("check returns ok when debconf-show output matches selections", async () => {
     const ssh = createMockSsh({
@@ -515,6 +519,7 @@ describe("apt.debconf", () => {
         code: 0,
         stdout: "* postfix/main_mailer_type: Internet Site",
       },
+      "dpkg-query -W -f='${Status}' 'postfix'": dpkgInstalled,
     })
     const mod = apt.debconf("postfix", selections)
     const result = await mod.check(ssh, emptyEnv)
@@ -527,6 +532,7 @@ describe("apt.debconf", () => {
         code: 0,
         stdout: "* postfix/main_mailer_type: Local only",
       },
+      "dpkg-query -W -f='${Status}' 'postfix'": dpkgInstalled,
     })
     const mod = apt.debconf("postfix", selections)
     const result = await mod.check(ssh, emptyEnv)
@@ -539,9 +545,10 @@ describe("apt.debconf", () => {
     expect(result).toBe("needs-apply")
   })
 
-  it("check returns needs-apply when debconf-show fails", async () => {
+  it("check returns needs-apply when debconf-show fails on an installed package", async () => {
     const ssh = createMockSsh({
       "debconf-show 'postfix'": { code: 1, stdout: "" },
+      "dpkg-query -W -f='${Status}' 'postfix'": dpkgInstalled,
     })
     const mod = apt.debconf("postfix", selections)
     const result = await mod.check(ssh, emptyEnv)
@@ -598,5 +605,77 @@ describe("apt.debconf", () => {
     expect(ssh.calls).not.toContain(
       "echo 'pkg pkg/backslash-value string a\\tb\\nc' | debconf-set-selections"
     )
+  })
+
+  // R-0000104 regression: when the package is not yet installed, the
+  // first run reports `needs-apply`, `apply` writes a versioned marker
+  // flag, and a subsequent `check` (still with the package not
+  // installed) returns `ok`. Without the marker this would loop forever
+  // because `debconf-show` exits non-zero for uninstalled packages.
+  it("check returns ok on the second run after apply when the package is not installed", async () => {
+    const packageName = "postfix"
+    const selectionsText = "postfix postfix/main_mailer_type string Internet Site"
+    const packageHash = sha256String(packageName).slice(0, 16)
+    const selectionsHash = sha256String(`${packageName}\n${selectionsText}`).slice(0, 16)
+    const flagPath = `/var/lib/paratix/flags/'apt-debconf-${packageHash}-${selectionsHash}'`
+    const dpkgQuery = "dpkg-query -W -f='${Status}' 'postfix'"
+
+    // First check: package not installed and marker absent.
+    const ssh1 = createMockSsh({
+      [`[ -f ${flagPath} ]`]: { code: 1 },
+      [dpkgQuery]: dpkgNotInstalled,
+      "echo 'METAGET postfix/main_mailer_type type' | debconf-communicate": {
+        code: 0,
+        stdout: "0 string\n",
+      },
+    })
+    const mod = apt.debconf(packageName, selections)
+    expect(await mod.check(ssh1, emptyEnv)).toBe("needs-apply")
+
+    // Apply: package still not installed, debconf-set-selections
+    // succeeds, marker flag is written via setVersionedFlag.
+    const ssh2 = createMockSsh({
+      [dpkgQuery]: dpkgNotInstalled,
+      "echo 'METAGET postfix/main_mailer_type type' | debconf-communicate": {
+        code: 0,
+        stdout: "0 string\n",
+      },
+      "printf '%s' 'postfix postfix/main_mailer_type string Internet Site' | debconf-set-selections":
+        { code: 0 },
+    })
+    expect(await mod.apply(ssh2, emptyEnv)).toStrictEqual({ status: "changed" })
+    expect(ssh2.calls).toContain(
+      `find /var/lib/paratix/flags -maxdepth 1 -name 'apt-debconf-${packageHash}-*' -delete && touch ${flagPath}`
+    )
+
+    // Second check: package still not installed, marker flag exists →
+    // must return ok instead of looping back into needs-apply.
+    const ssh3 = createMockSsh({
+      [`[ -f ${flagPath} ]`]: { code: 0 },
+      [dpkgQuery]: dpkgNotInstalled,
+      "echo 'METAGET postfix/main_mailer_type type' | debconf-communicate": {
+        code: 0,
+        stdout: "0 string\n",
+      },
+    })
+    expect(await mod.check(ssh3, emptyEnv)).toBe("ok")
+  })
+
+  it("check returns needs-apply when the package is not installed and no marker flag exists", async () => {
+    const packageName = "postfix"
+    const selectionsText = "postfix postfix/main_mailer_type string Internet Site"
+    const packageHash = sha256String(packageName).slice(0, 16)
+    const selectionsHash = sha256String(`${packageName}\n${selectionsText}`).slice(0, 16)
+    const flagPath = `/var/lib/paratix/flags/'apt-debconf-${packageHash}-${selectionsHash}'`
+    const ssh = createMockSsh({
+      [`[ -f ${flagPath} ]`]: { code: 1 },
+      "dpkg-query -W -f='${Status}' 'postfix'": dpkgNotInstalled,
+      "echo 'METAGET postfix/main_mailer_type type' | debconf-communicate": {
+        code: 0,
+        stdout: "0 string\n",
+      },
+    })
+    const mod = apt.debconf("postfix", selections)
+    expect(await mod.check(ssh, emptyEnv)).toBe("needs-apply")
   })
 })
