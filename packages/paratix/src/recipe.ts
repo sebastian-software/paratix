@@ -1,4 +1,5 @@
 /* eslint-disable max-lines -- recipe orchestration intentionally stays co-located */
+import { createNullPrototypeEnvironment } from "./environment.js"
 import { isEnvironmentMetaEntry, mergeEnvironmentFromMeta } from "./meta.js"
 import {
   printCommandFailure,
@@ -292,7 +293,13 @@ async function executeModules(
   const shutdownSignal = parameters.shutdownSignal ?? (() => null)
   const verbose = parameters.verbose ?? false
   let state: RecipeState = {
-    env: { ...parameters.environment },
+    // R-0000079: preserve the null-prototype guarantee that
+    // R-0000069/R-0000070/R-0000074 establish for the runner-level
+    // environment. Plain object spread (`{ ...environment }`) would create a
+    // map with `Object.prototype`, exposing the first child module of every
+    // recipe to a polluted-fähige environment. Mirror the meta.ts:214
+    // approach.
+    env: Object.assign(createNullPrototypeEnvironment(), parameters.environment),
     meta: undefined,
     signalsPending: false,
     status: "ok",

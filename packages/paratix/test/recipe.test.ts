@@ -86,6 +86,39 @@ describe("recipe", () => {
     expect(result.status).toBe("ok")
   })
 
+  it("hands the first child module a null-prototype environment", async () => {
+    // R-0000079: executeModules used to initialize state.env via object
+    // spread (`{ ...parameters.environment }`), which always creates a plain
+    // object with Object.prototype, breaking the null-prototype hardening
+    // from R-0000069 / R-0000070 / R-0000074 for the very first child
+    // module. Verify that the first child observes a map without
+    // Object.prototype on the prototype chain.
+    let receivedEnv: Environment | undefined
+    const captureModule: Module = {
+      // eslint-disable-next-line @typescript-eslint/require-await -- Interface requires async
+      async apply(_ssh, environment) {
+        receivedEnv = environment
+        return { status: "ok" }
+      },
+      // eslint-disable-next-line @typescript-eslint/require-await -- Interface requires async
+      async check() {
+        return "needs-apply"
+      },
+      name: "capture-module",
+    }
+
+    const nullProtoEnv: Environment = Object.create(null)
+    nullProtoEnv.EXISTING = "value"
+
+    const r = recipe("test-recipe", [captureModule])
+    // eslint-disable-next-line prefer-spread
+    await r.apply(null, nullProtoEnv)
+
+    expect(receivedEnv).toBeDefined()
+    expect(Object.getPrototypeOf(receivedEnv)).toBeNull()
+    expect(receivedEnv?.EXISTING).toBe("value")
+  })
+
   it("aggregates status as changed when at least one module changed", async () => {
     const mod1 = makeModule("ok", "ok", "mod-1")
     const mod2 = makeModule("needs-apply", "changed", "mod-2")
