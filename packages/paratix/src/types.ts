@@ -177,8 +177,8 @@ export type ExecOptions = {
  * All methods that accept a `command` string run it on the remote host.
  */
 export type SshConnection = {
-  /** Register an additional port that was opened on the remote host. */
-  addPort: (port: number) => void
+  /** Register an additional port that was opened on the remote host. Returns `true` when added. */
+  addPort: (port: number) => boolean
   /** Close the SSH connection and free resources. */
   disconnect: () => void
   /** Download a remote file to the local filesystem. */

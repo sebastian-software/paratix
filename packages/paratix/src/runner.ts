@@ -213,8 +213,9 @@ async function handlePortChange(
 
   const addedPorts: number[] = []
   for (const portEntry of portEntries) {
-    ssh.addPort(portEntry.port)
-    addedPorts.push(portEntry.port)
+    if (ssh.addPort(portEntry.port)) {
+      addedPorts.push(portEntry.port)
+    }
   }
 
   // Skip reconnect when a reboot is pending — the reboot handler will

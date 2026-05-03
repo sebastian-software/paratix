@@ -236,7 +236,7 @@ describe("runPlaybook reconnect failure propagation", () => {
   it("rolls back addPort by calling removePort when reconnect after port change fails", async () => {
     const capturedConfigs: unknown[] = []
     const reconnectError = new Error("Connection refused")
-    const addPort = vi.fn()
+    const addPort = vi.fn().mockReturnValue(true)
     const removePort = vi.fn()
 
     vi.doMock("../src/ssh.js", () => ({
@@ -267,6 +267,42 @@ describe("runPlaybook reconnect failure propagation", () => {
 
     expect(addPort).toHaveBeenCalledWith(2222)
     expect(removePort).toHaveBeenCalledWith(2222)
+  })
+
+  it("does not remove an already registered port when reconnect after port change fails", async () => {
+    const capturedConfigs: unknown[] = []
+    const reconnectError = new Error("Connection refused")
+    const addPort = vi.fn().mockReturnValue(false)
+    const removePort = vi.fn()
+
+    vi.doMock("../src/ssh.js", () => ({
+      shellQuote: (s: string) => `'${s}'`,
+      SshConnectionImpl: makeMockSshClass(capturedConfigs, {
+        addPort,
+        reconnect: vi.fn().mockRejectedValue(reconnectError),
+        removePort,
+      }),
+    }))
+
+    const { runPlaybook } = await import("../src/runner.js")
+
+    const moduleWithPortChange = makeModuleWithMeta([meta.sshdPort(22)])
+
+    const definition: ServerDefinition = {
+      host: "1.2.3.4",
+      name: "test-server",
+      run: [moduleWithPortChange],
+      ssh: {
+        ports: [22],
+        privateKey: "~/.ssh/id",
+        user: "root",
+      },
+    }
+
+    await runPlaybook(definition)
+
+    expect(addPort).toHaveBeenCalledWith(22)
+    expect(removePort).not.toHaveBeenCalled()
   })
 
   it("stops processing subsequent modules when reconnect fails after port change", async () => {

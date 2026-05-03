@@ -372,16 +372,18 @@ describe("SshConnectionImpl", () => {
     it("adds a new port to the runtime port state", () => {
       const ssh = makeSshInstance({ ports: [22] })
 
-      ssh.addPort(2222)
+      const added = ssh.addPort(2222)
 
+      expect(added).toBe(true)
       expect((ssh as unknown as Record<string, { ports: number[] }>).runtime.ports).toContain(2222)
     })
 
     it("does not add a duplicate port", () => {
       const ssh = makeSshInstance({ ports: [22] })
 
-      ssh.addPort(22)
+      const added = ssh.addPort(22)
 
+      expect(added).toBe(false)
       expect((ssh as unknown as Record<string, { ports: number[] }>).runtime.ports).toHaveLength(1)
     })
   })

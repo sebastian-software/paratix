@@ -136,8 +136,10 @@ export class SshConnectionImpl implements SshConnection {
     this.cachedSudoPassword = config.sudoPassword == null ? null : Buffer.from(config.sudoPassword)
   }
 
-  public addPort(port: number): void {
-    if (!this.runtime.ports.includes(port)) this.runtime.ports.push(port)
+  public addPort(port: number): boolean {
+    if (this.runtime.ports.includes(port)) return false
+    this.runtime.ports.push(port)
+    return true
   }
 
   /**
