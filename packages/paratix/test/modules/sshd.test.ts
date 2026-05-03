@@ -228,6 +228,59 @@ describe("sshd.config — apply", () => {
     const written = writtenFiles.find((f) => f.path === SSHD_CONFIG)
     expect(written?.content).toContain("AuthorizedKeysFile /etc/ssh/authorized_keys/%u")
   })
+
+  // R-0000113 regression: apply must rewrite the top-level directive but
+  // leave any Match-block override of the same directive untouched. Editing
+  // inside Match blocks would silently change the security posture for the
+  // matched group (e.g. flipping PasswordAuthentication for an admin user).
+  it("regression — preserves Match-block overrides when rewriting a top-level directive", async () => {
+    const originalConfig = [
+      "PasswordAuthentication yes",
+      "PermitRootLogin no",
+      "",
+      "Match User admin",
+      "    PasswordAuthentication yes",
+      "",
+    ].join("\n")
+    const mockSsh = createMockSsh({
+      [CAT_SSHD]: { stdout: originalConfig },
+    })
+    const writtenFiles = trackWriteFile(mockSsh)
+
+    const mod = sshd.config({ PasswordAuthentication: "no" })
+    const result = await mod.apply(mockSsh, emptyEnv)
+
+    expect(result.status).toBe("changed")
+    const written = writtenFiles.find((f) => f.path === SSHD_CONFIG)
+    expect(written).toBeDefined()
+    // Top-level directive was rewritten…
+    expect(written?.content).toMatch(/^PasswordAuthentication no$/mv)
+    // …but the Match-block override stayed intact.
+    expect(written?.content).toMatch(/Match User admin\n {4}PasswordAuthentication yes/v)
+  })
+
+  // R-0000113: when no top-level occurrence exists yet, the new directive
+  // must be inserted before the first Match block — not after it, where it
+  // would silently fall under the Match scope.
+  it("regression — appends a new top-level directive before the first Match block", async () => {
+    const originalConfig = ["# header", "Match User admin", "    PermitRootLogin yes", ""].join(
+      "\n"
+    )
+    const mockSsh = createMockSsh({
+      [CAT_SSHD]: { stdout: originalConfig },
+    })
+    const writtenFiles = trackWriteFile(mockSsh)
+
+    const mod = sshd.config({ PasswordAuthentication: "no" })
+    await mod.apply(mockSsh, emptyEnv)
+
+    const written = writtenFiles.find((f) => f.path === SSHD_CONFIG)
+    expect(written).toBeDefined()
+    const passwordIndex = written!.content.indexOf("PasswordAuthentication no")
+    const matchIndex = written!.content.indexOf("Match User admin")
+    expect(passwordIndex).toBeGreaterThanOrEqual(0)
+    expect(matchIndex).toBeGreaterThan(passwordIndex)
+  })
 })
 
 // ─── sshd.config — check ──────────────────────────────────────────────────────
@@ -314,11 +367,12 @@ describe("sshd.config — check", () => {
     expect(result).toBe("ok")
   })
 
-  // R-0000045 regression: a top-level value that matches the desired value
-  // must not mask a later Match-block override that disagrees. The previous
-  // implementation tested the entire content with a single multi-line regex
-  // and returned `ok` as soon as one occurrence matched.
-  it("regression — returns needs-apply when a Match block overrides the desired value", async () => {
+  // R-0000113 regression: check only inspects top-level directives and
+  // ignores Match-block overrides — apply must not edit Match blocks, so a
+  // disagreeing Match-block override must not flip the top-level check to
+  // needs-apply (otherwise apply would loop forever without changing the
+  // value sshd actually evaluates for non-Match connections).
+  it("regression — ignores Match-block overrides and returns ok when the top-level value matches", async () => {
     const mockSsh = createMockSsh({
       [CAT_SSHD]: {
         stdout: [
@@ -332,7 +386,7 @@ describe("sshd.config — check", () => {
     })
     const mod = sshd.config({ PasswordAuthentication: "no" })
     const result = await mod.check(mockSsh, emptyEnv)
-    expect(result).toBe("needs-apply")
+    expect(result).toBe("ok")
   })
 
   // R-0000045: a Match-block override that agrees with the desired value

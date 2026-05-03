@@ -18,17 +18,6 @@ const SSHD_CONFIG_PATH = "/etc/ssh/sshd_config"
 const SSHD_CONFIG_MODE = "0644"
 const SYSTEMCTL = "systemctl"
 
-// prettier-ignore
-const REGEXP_SPECIAL = new Set(["?", ".", "(", ")", "[", "]", "{", "}", "*", "\\", "^", "+", "|", "$"])
-
-function escapeRegExp(s: string): string {
-  let result = ""
-  for (const ch of s) {
-    result += REGEXP_SPECIAL.has(ch) ? `\\${ch}` : ch
-  }
-  return result
-}
-
 async function validateSshdConfig(ssh: SshConnection, originalConfig: string): Promise<void> {
   await ensurePrivilegeSeparationDirectory(ssh)
   const result = await ssh.exec("sshd -t", { ignoreExitCode: true, silent: true })
@@ -166,27 +155,33 @@ function parseSshdConfigLine(rawLine: string): { directive: string; value: strin
 }
 
 /**
- * Check whether every active occurrence of `key` in the sshd_config `content`
- * has the given `value`. An "active" occurrence is a non-comment line whose
- * first token equals `key` (case-insensitive, leading whitespace allowed),
- * which also covers directives nested inside `Match` blocks.
+ * Detect whether a sshd_config line opens a `Match` block. Match conditions
+ * scope every directive that follows them until the next `Match` line or
+ * the end of the file (per `sshd_config(5)`).
+ */
+function isMatchBlockLine(rawLine: string): boolean {
+  const parsed = parseSshdConfigLine(rawLine)
+  return parsed != null && parsed.directive.toLowerCase() === "match"
+}
+
+/**
+ * Check whether every top-level active occurrence of `key` in the sshd_config
+ * `content` has the given `value`. An "active" occurrence is a non-comment
+ * line whose first token equals `key` (case-insensitive, leading whitespace
+ * allowed). Lines inside a `Match` block (everything after the first
+ * top-level `Match` directive) are intentionally ignored: the apply path
+ * only edits top-level directives, so the check must mirror that scope.
  *
- * Returns `true` when at least one active occurrence exists and all of them
- * match the desired value. Returns `false` when:
- * - no active occurrence of `key` exists at all (apply will need to append it), or
- * - at least one active occurrence has a different value (e.g. a `Match`
- *   block override of `PasswordAuthentication yes` when the desired value
- *   is `no`).
- *
- * Mirrors the apply path's `applySshdSettingToContent`, which rewrites every
- * matching line — so a top-level value paired with a `Match` block override
- * on the same key now correctly reports as drift.
+ * Returns `true` when at least one top-level occurrence exists and all of
+ * them match the desired value. Returns `false` when:
+ * - no top-level occurrence of `key` exists at all (apply will need to append it), or
+ * - at least one top-level occurrence has a different value.
  *
  * @param content - The full sshd_config file content.
  * @param key - The directive name to scan for (case-insensitive).
- * @param value - The desired value; every active occurrence must match this.
- * @returns `true` when at least one active occurrence exists and all of them
- *   match the desired value, `false` otherwise.
+ * @param value - The desired value; every top-level occurrence must match this.
+ * @returns `true` when at least one top-level occurrence exists and all of
+ *   them match the desired value, `false` otherwise.
  */
 function sshdSettingMatchesEverywhere(content: string, key: string, value: string): boolean {
   const desiredValue = value.trim()
@@ -194,6 +189,8 @@ function sshdSettingMatchesEverywhere(content: string, key: string, value: strin
   let foundAny = false
 
   for (const rawLine of content.split(/\r?\n/v)) {
+    if (isMatchBlockLine(rawLine)) break
+
     const parsed = parseSshdConfigLine(rawLine)
     if (parsed == null) continue
     if (parsed.directive.toLowerCase() !== expectedKeyLower) continue
@@ -205,24 +202,54 @@ function sshdSettingMatchesEverywhere(content: string, key: string, value: strin
   return foundAny
 }
 
+/**
+ * Rewrite every top-level occurrence of `key` to `value`, leaving any
+ * `Match`-block override of the same directive untouched. When no top-level
+ * occurrence exists, the directive is inserted just before the first
+ * `Match` block (or appended at the end of the file when no `Match` block
+ * exists).
+ *
+ * Editing inside `Match` blocks would silently change the security posture
+ * of an existing override (e.g. flipping `PasswordAuthentication` for an
+ * admin Match-User group), which is why this function refuses to touch
+ * anything past the first `Match` line.
+ */
 function applySshdSettingToContent(content: string, key: string, value: string): string {
-  // Use the case-insensitive flag so the apply path mirrors the case-insensitive
-  // semantics of `sshdSettingMatchesEverywhere` (and sshd's own parser). When a
-  // replacement happens we also normalize the directive to its canonical
-  // casing, so the file converges on the desired spelling instead of leaving a
-  // mixed-case directive in place.
-  // eslint-disable-next-line security/detect-non-literal-regexp
-  const pattern = new RegExp(`^${escapeRegExp(key)}\\s.*`, "gimv")
-  const replaced = content.replace(pattern, `${key} ${value}`)
+  const expectedKeyLower = key.toLowerCase()
+  const lines = content.split(/\r?\n/v)
+  const trailingNewline = content.endsWith("\n")
 
-  if (replaced !== content) {
-    return replaced
+  let firstMatchIndex = -1
+  let didReplace = false
+
+  for (let i = 0; i < lines.length; i++) {
+    const rawLine = lines[i] ?? ""
+    if (isMatchBlockLine(rawLine)) {
+      firstMatchIndex = i
+      break
+    }
+    const parsed = parseSshdConfigLine(rawLine)
+    if (parsed == null) continue
+    if (parsed.directive.toLowerCase() !== expectedKeyLower) continue
+
+    // Preserve any leading whitespace from the original line so indentation
+    // (rare at top level, but possible) is not silently rewritten.
+    const leadingWhitespace = rawLine.slice(0, rawLine.length - rawLine.trimStart().length)
+    lines[i] = `${leadingWhitespace}${key} ${value}`
+    didReplace = true
   }
-  // eslint-disable-next-line security/detect-non-literal-regexp
-  if (new RegExp(`^${escapeRegExp(key)}\\s`, "imv").test(content)) {
-    return content
+
+  if (didReplace) {
+    return lines.join("\n")
   }
-  return content.endsWith("\n") ? `${content}${key} ${value}\n` : `${content}\n${key} ${value}\n`
+
+  const newDirectiveLine = `${key} ${value}`
+  if (firstMatchIndex >= 0) {
+    lines.splice(firstMatchIndex, 0, newDirectiveLine)
+    return lines.join("\n")
+  }
+
+  return trailingNewline ? `${content}${newDirectiveLine}\n` : `${content}\n${newDirectiveLine}\n`
 }
 
 function isRestartDisconnect(error: unknown): boolean {
