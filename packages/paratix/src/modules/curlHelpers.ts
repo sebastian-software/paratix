@@ -32,27 +32,6 @@ export function isValidHeaderValue(value: string): boolean {
 }
 
 /**
- * Headers whose values are considered sensitive and must therefore be fed to
- * curl via stdin (`--config -`) instead of being inlined into argv. Matching
- * is case-insensitive.
- *
- * Bearer tokens, GitHub PATs, Basic-Auth credentials, and presigned tokens
- * land here so they never appear in `/var/log/auth.log` (sudo logging) or in
- * `/proc/<pid>/cmdline` / `ps -ef` while curl runs.
- */
-export const SENSITIVE_HEADER_NAMES = new Set(["authorization", "proxy-authorization"])
-
-/**
- * Check whether a header name is considered sensitive.
- *
- * @param name - The HTTP header name (case-insensitive).
- * @returns `true` when the header carries credentials.
- */
-export function isSensitiveHeader(name: string): boolean {
-  return SENSITIVE_HEADER_NAMES.has(name.toLowerCase())
-}
-
-/**
  * Check whether the given URL's query string carries sensitive material such
  * as presigned tokens, signatures, or credentials.
  *
@@ -112,10 +91,11 @@ export function validateHeaderPair(name: string, value: string): void {
 
 /**
  * Result of {@link buildCurlConfigPayload}: the stdin config payload and the
- * non-sensitive headers the caller should still place on argv.
+ * argv header list. Header values are always routed through stdin because
+ * arbitrary custom headers may carry credentials.
  */
 export type CurlConfigPayload = {
-  /** Header pairs that may stay on argv (no Authorization-style values). */
+  /** Header pairs that may stay on argv. Currently empty by design. */
   argvHeaders: Array<[string, string]>
   /** Stdin config payload (terminated with a trailing newline). */
   configInput: string
@@ -124,18 +104,16 @@ export type CurlConfigPayload = {
 /**
  * Build the stdin config payload for `curl --config -`.
  *
- * The URL is passed through stdin when `parameters.routeUrlThroughConfig`
- * is `true` (typically because the URL embeds presigned tokens). Sensitive
- * headers (Authorization, Proxy-Authorization) are also routed through stdin
- * so bearer tokens and presigned URL secrets never leak via `sudo` logging or
- * `ps -ef`. Non-sensitive headers are returned separately so the caller can
- * place them on argv where the visibility cost is acceptable.
+ * The URL is passed through stdin when `parameters.routeUrlThroughConfig` is
+ * `true` (typically because the URL embeds presigned tokens). All headers are
+ * routed through stdin so custom credentials never leak via `sudo` logging or
+ * `ps -ef`.
  *
  * @param parameters - The URL plus optional headers and routing options.
- * @param parameters.headers - Additional HTTP headers, possibly including Authorization.
+ * @param parameters.headers - Additional HTTP headers.
  * @param parameters.routeUrlThroughConfig - When `true`, the URL is written to the stdin payload instead of staying on argv.
  * @param parameters.url - The URL to forward to curl.
- * @returns The stdin config text and the headers that should still go to argv.
+ * @returns The stdin config text and an empty argv header list.
  */
 export function buildCurlConfigPayload(parameters: {
   headers?: Record<string, string>
@@ -150,12 +128,8 @@ export function buildCurlConfigPayload(parameters: {
 
   for (const [name, value] of Object.entries(parameters.headers ?? {})) {
     validateHeaderPair(name, value)
-    if (isSensitiveHeader(name)) {
-      const headerLine = `${name}: ${value}`
-      lines.push(`header = "${escapeCurlConfigValue(headerLine)}"`)
-    } else {
-      argvHeaders.push([name, value])
-    }
+    const headerLine = `${name}: ${value}`
+    lines.push(`header = "${escapeCurlConfigValue(headerLine)}"`)
   }
 
   // Trailing newline so the final config directive is terminated cleanly.
@@ -163,7 +137,7 @@ export function buildCurlConfigPayload(parameters: {
 }
 
 /**
- * Render an argv-safe `-H` flag string from the non-sensitive header list
+ * Render an argv-safe `-H` flag string from a caller-supplied header list
  * returned by {@link buildCurlConfigPayload}. Returns an empty string when no
  * headers remain so callers can splice the result into a command unchanged.
  *

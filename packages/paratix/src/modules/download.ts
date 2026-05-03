@@ -73,7 +73,10 @@ function buildDownloadParameters(
   return {
     ...options,
     destination,
-    secrets: [...Object.values(options.headers ?? {}), ...urlSecrets],
+    secrets: [
+      ...Object.values(options.headers ?? {}).filter((value) => value.length > 0),
+      ...urlSecrets,
+    ],
     url,
   }
 }
@@ -215,14 +218,12 @@ function buildCurlProtocolFlags(parameters: Pick<DownloadParameters, "allowInsec
 }
 
 /**
- * Build the curl command string and the stdin payload that carries sensitive
- * material (URL plus Authorization-style headers).
+ * Build the curl command string and the stdin payload that carries request
+ * material (URL plus headers).
  *
- * The URL and any Authorization/Proxy-Authorization headers are no longer
- * inlined as argv. They flow through `curl --config -` via stdin so they
- * never leak into `/var/log/auth.log` (sudo logging) or
- * `/proc/<pid>/cmdline` / `ps -ef` while the download runs. Non-sensitive
- * headers stay on argv to keep the command readable.
+ * The URL and all headers flow through `curl --config -` via stdin so
+ * credentials in arbitrary custom headers never leak into `/var/log/auth.log`
+ * (sudo logging) or `/proc/<pid>/cmdline` / `ps -ef` while the download runs.
  *
  * @param parameters - Download parameters containing destination, url, and optional headers.
  * @returns The assembled curl shell command and the stdin config payload.
@@ -299,7 +300,7 @@ async function cleanupTemporaryDownloadFile(
 }
 
 /**
- * Run the curl download with the URL and any sensitive headers passed via
+ * Run the curl download with the URL and headers passed via
  * `--config -` from stdin. Stdout/stderr remain masked through `secrets` so
  * verbose logs do not leak signed URLs or bearer tokens.
  *

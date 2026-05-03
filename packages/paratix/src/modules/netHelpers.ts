@@ -29,17 +29,17 @@ export type WaitForOptions = {
 
 /** Precomputed curl command parts for an HTTP request check. */
 export type HttpCheckParameters = {
-  /** Stdin payload for `curl --config -` carrying the URL when sensitive and any Authorization-style headers. Empty string when no stdin payload is needed. */
+  /** Stdin payload for `curl --config -` carrying the URL when sensitive and any headers. Empty string when no stdin payload is needed. */
   configInput: string
   /** Expected substring in the response body, or `undefined` to skip body verification. */
   expectedBody: string | undefined
   /** HTTP status code the response must return (e.g. `200`). */
   expectedStatus: number
-  /** Pre-built `-H` curl flags string with trailing space, or empty string. Only contains non-sensitive headers. */
+  /** Pre-built `-H` curl flags string with trailing space, or empty string. Currently empty for user headers by design. */
   headerFlags: string
   /** Pre-built `-X METHOD ` curl flag string with trailing space, or empty string for GET. */
   methodFlag: string
-  /** Strings (Authorization values, signed URLs) registered as secrets so they are masked in CommandError stack traces. */
+  /** Strings (header values, signed URLs) registered as secrets so they are masked in CommandError stack traces. */
   secrets: string[]
   /** The URL to request. Only inlined onto argv when `urlOnArgv` is `true`. */
   url: string
@@ -108,14 +108,14 @@ export function buildCurlHeaderFlags(headers: Record<string, string>): string {
 /**
  * Build the curl invocation parts for an HTTP request check.
  *
- * Authorization-style headers are routed through `--config -` via stdin so
- * bearer tokens never appear on the curl command line where `ps -ef` or
- * sudo logging could capture them. URLs whose query string carries
- * presigned tokens or signatures are routed through the same stdin payload.
+ * Headers are routed through `--config -` via stdin so custom credentials
+ * never appear on the curl command line where `ps -ef` or sudo logging could
+ * capture them. URLs whose query string carries presigned tokens or
+ * signatures are routed through the same stdin payload.
  *
  * @param options - The HTTP request configuration.
  * @param options.body - Expected substring in the response body.
- * @param options.headers - Additional HTTP headers, possibly including Authorization.
+ * @param options.headers - Additional HTTP headers.
  * @param options.method - HTTP method (default: `"GET"`).
  * @param options.status - Expected HTTP status code (default: `200`).
  * @param options.url - The URL to request.
@@ -139,13 +139,7 @@ export function buildHttpCheckParameters(options: {
     url: options.url,
   })
 
-  const secrets: string[] = []
-  for (const [name, value] of Object.entries(headers)) {
-    const lowered = name.toLowerCase()
-    if ((lowered === "authorization" || lowered === "proxy-authorization") && value.length > 0) {
-      secrets.push(value)
-    }
-  }
+  const secrets = Object.values(headers).filter((value) => value.length > 0)
   if (urlIsSensitive) secrets.push(options.url)
 
   return {
@@ -172,8 +166,8 @@ function buildCurlUrlArgvSegment(parameters: HttpCheckParameters): string {
 }
 
 /**
- * Determine whether curl needs `--config -` (because the URL or any sensitive
- * header was routed through stdin).
+ * Determine whether curl needs `--config -` (because the URL or any header
+ * was routed through stdin).
  *
  * @param parameters - The precomputed HTTP check parameters.
  * @returns The `--config -` flag with a leading space, or `""`.
@@ -196,8 +190,8 @@ function joinCurlSegments(segments: string[]): string {
 /**
  * Run a single curl invocation against the remote host. Uses
  * `silent: true` and forwards the stdin config payload (when any) so
- * Authorization-style headers stay out of `/proc/<pid>/cmdline`. Registered
- * secrets keep the curl stderr masked when ssh.exec surfaces a CommandError.
+ * headers stay out of `/proc/<pid>/cmdline`. Registered secrets keep the curl
+ * stderr masked when ssh.exec surfaces a CommandError.
  *
  * @param conn - The active SSH connection.
  * @param argvBase - The curl flags that precede the headers (e.g. `curl -s ...`).

@@ -1118,12 +1118,12 @@ describe("net.request — apply", () => {
   })
 })
 
-// R-0000072: Authorization (and other sensitive) header values must be routed
-// through `curl --config -` over stdin instead of being inlined into argv,
-// where `ps -ef` and sudo logging would capture them. The header values must
-// also be registered in the process-scoped secret sink so CommandError stack
-// traces are masked when curl fails.
-describe("net.request — R-0000072 sensitive header masking", () => {
+// R-0000072/R-0000144: Header values must be routed through
+// `curl --config -` over stdin instead of being inlined into argv, where
+// `ps -ef` and sudo logging would capture them. The header values must also
+// be registered in the process-scoped secret sink so CommandError stack traces
+// are masked when curl fails.
+describe("net.request — header masking", () => {
   // R-0000133: clear the process-scoped secret sink after every test so a
   // failing assertion cannot leak registered secrets into following tests.
   // Mirrors the pattern used by `secretSink.test.ts:17`.
@@ -1167,6 +1167,24 @@ describe("net.request — R-0000072 sensitive header masking", () => {
     expect(curlCall?.options?.secrets).toContain(token)
   })
 
+  it("forwards arbitrary headers via stdin and registers their values as secrets", async () => {
+    const apiKey = "super-secret-api-key-XYZ123"
+    const mockSsh = createMockSsh()
+
+    const mod = net.request("https://example.com/health", {
+      headers: { "X-Api-Key": apiKey },
+    })
+    await mod.check(mockSsh, emptyEnv)
+
+    const curlCall = mockSsh.execCalls.find((entry) => entry.command.startsWith("curl "))
+    expect(curlCall).toBeDefined()
+    expect(curlCall?.command).not.toContain(apiKey)
+    expect(curlCall?.command).not.toContain("-H 'X-Api-Key:")
+    expect(curlCall?.command).toContain("--config -")
+    expect(curlCall?.options?.input).toContain(`header = "X-Api-Key: ${apiKey}"`)
+    expect(curlCall?.options?.secrets).toContain(apiKey)
+  })
+
   it("registers the Authorization header value as a process-scoped secret during apply", async () => {
     const token = "Bearer super-secret-PAT-XYZ123"
     const seen: string[] = []
@@ -1189,7 +1207,7 @@ describe("net.request — R-0000072 sensitive header masking", () => {
     expect(getRegisteredSecrets()).not.toContain(token)
   })
 
-  it("does not register a secret when no Authorization header is present", async () => {
+  it("does not register a secret when no headers are present", async () => {
     // Pre-register an unrelated value to confirm we never rely on a leftover.
     registerSecret("unrelated-secret-marker")
     const mockSsh = createMockSsh({
