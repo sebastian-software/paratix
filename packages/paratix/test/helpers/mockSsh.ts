@@ -65,6 +65,15 @@ function getAllowlistForKind(
   return options?.allowUnstubbedTest
 }
 
+function hasExplicitDefaultForKind(
+  kind: "exec" | "output" | "test",
+  options: MockSshOptions | undefined
+): boolean {
+  if (kind === "exec") return options?.defaultExecResult !== undefined
+  if (kind === "test") return options?.defaultTestResult !== undefined
+  return false
+}
+
 function getMockResponse(input: {
   command: string
   kind: "exec" | "output" | "test"
@@ -77,9 +86,7 @@ function getMockResponse(input: {
   const allowlist = getAllowlistForKind(input.kind, input.options)
 
   const strict = input.options?.strict ?? true
-  const hasExplicitDefault =
-    (input.kind === "exec" && input.options?.defaultExecResult !== undefined) ||
-    (input.kind === "test" && input.options?.defaultTestResult !== undefined)
+  const hasExplicitDefault = hasExplicitDefaultForKind(input.kind, input.options)
 
   if (strict && !hasExplicitDefault && !isAllowed(input.command, allowlist)) {
     throw buildUnstubbedCommandError(input.kind, input.command)

@@ -55,7 +55,7 @@ function makeMockSshClass(
   }
 ) {
   return class MockSshConnectionImpl {
-    public addPort = overrides?.addPort ?? vi.fn()
+    public addPort = overrides?.addPort ?? vi.fn().mockReturnValue(true)
     public connect = vi.fn().mockResolvedValue(null)
     public disconnect = overrides?.disconnect ?? vi.fn()
     public downloadFile = vi.fn().mockResolvedValue(null)

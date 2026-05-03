@@ -562,6 +562,7 @@ describe("net.route — apply", () => {
       options?: { mode?: string }
     ): Promise<void> => {
       writtenFiles.push({ content, options, path })
+      await Promise.resolve()
     }
     const mod = net.route("10.0.0.0/24", "192.168.1.1", { device: "eth0" })
 
@@ -629,8 +630,8 @@ describe("net.route — apply", () => {
 
   it("returns failed when ip route del fails (state: absent)", async () => {
     const mockSsh = createMockSsh({
-      [routeShowCommand]: { code: 0, stdout: liveRouteOutput },
       "ip route del '10.0.0.0/24'": { code: 2, stderr: "No such process" },
+      [routeShowCommand]: { code: 0, stdout: liveRouteOutput },
     })
     const mod = net.route("10.0.0.0/24", "192.168.1.1", { state: "absent" })
     const result = await mod.apply(mockSsh, emptyEnv)
@@ -1255,7 +1256,7 @@ describe("net.request — check", () => {
     const mod = net.request("https://example.com/health", { body: "OK" })
     const result = await mod.check(mockSsh, emptyEnv)
     expect(result).toBe("ok")
-    expect(mockSsh.calls).toEqual([
+    expect(mockSsh.calls).toStrictEqual([
       "curl -s -w '\\n__PARATIX_HTTP_STATUS__:%{http_code}' 'https://example.com/health'",
     ])
   })

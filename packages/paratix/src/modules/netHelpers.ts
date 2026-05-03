@@ -239,20 +239,17 @@ export async function checkHttpCondition(
         parameters
       )
       const markerIndex = output.lastIndexOf(HTTP_STATUS_MARKER)
-      if (markerIndex < 0) return false
+      if (markerIndex === -1) return false
 
       const bodyOutput = output.slice(0, markerIndex)
-      const statusOutput = output.slice(markerIndex + HTTP_STATUS_MARKER.length).trim()
-      if (statusOutput !== String(parameters.expectedStatus)) return false
-      if (!bodyOutput.includes(parameters.expectedBody)) return false
+      const bodyStatusOutput = output.slice(markerIndex + HTTP_STATUS_MARKER.length).trim()
+      if (bodyStatusOutput !== String(parameters.expectedStatus)) return false
 
-      return true
+      return bodyOutput.includes(parameters.expectedBody)
     }
 
     const statusOutput = await execCurl(conn, "curl -s -o /dev/null -w '%{http_code}'", parameters)
-    if (statusOutput !== String(parameters.expectedStatus)) return false
-
-    return true
+    return statusOutput === String(parameters.expectedStatus)
   } catch {
     return false
   }

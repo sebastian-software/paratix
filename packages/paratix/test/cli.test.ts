@@ -1137,16 +1137,7 @@ describe("CLI entrypoint", () => {
       const error = captureExecFailure(() => {
         execFileSync(
           process.execPath,
-          [
-            "--import",
-            "tsx",
-            "--import",
-            definePath,
-            cliPath,
-            "apply",
-            playbookPath,
-            "--dry-run",
-          ],
+          ["--import", "tsx", "--import", definePath, cliPath, "apply", playbookPath, "--dry-run"],
           {
             cwd: packageDirectory,
             encoding: "utf8",

@@ -142,12 +142,8 @@ describe("file.absent", () => {
     expect(() => file.absent("tmp/old-file")).toThrow(
       "file.absent: remotePath must be an absolute path: tmp/old-file"
     )
-    expect(() => file.absent(".")).toThrow(
-      "file.absent: remotePath must be an absolute path: ."
-    )
-    expect(() => file.absent("..")).toThrow(
-      "file.absent: remotePath must be an absolute path: .."
-    )
+    expect(() => file.absent(".")).toThrow("file.absent: remotePath must be an absolute path: .")
+    expect(() => file.absent("..")).toThrow("file.absent: remotePath must be an absolute path: ..")
     expect(() => file.absent("foo/../..")).toThrow(
       "file.absent: remotePath must be an absolute path: foo/../.."
     )

@@ -263,15 +263,16 @@ export function applyCliEnvironmentOverrides(
 export function applyCliProcessEnvironment(options: { firstRun: boolean }): () => void {
   const previousValue = process.env[FIRST_RUN_ENV_NAME]
   const hadPreviousValue = Object.hasOwn(process.env, FIRST_RUN_ENV_NAME)
-  if (!options.firstRun) return () => undefined
-  process.env[FIRST_RUN_ENV_NAME] = "true"
-  return () => {
+  const restoreProcessEnvironment = (): void => {
     if (hadPreviousValue) {
       process.env[FIRST_RUN_ENV_NAME] = previousValue
     } else {
-      delete process.env[FIRST_RUN_ENV_NAME]
+      delete process.env.PARATIX_FIRST_RUN
     }
   }
+  if (!options.firstRun) return restoreProcessEnvironment
+  process.env[FIRST_RUN_ENV_NAME] = "true"
+  return restoreProcessEnvironment
 }
 
 /**

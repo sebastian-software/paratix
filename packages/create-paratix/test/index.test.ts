@@ -943,10 +943,8 @@ describe("promptForHostFingerprint", () => {
 
     await expect(promptForHostFingerprint("example.com", select, scanner)).resolves.toBeUndefined()
 
-    const warningCalls = vi
-      .mocked(console.error)
-      .mock.calls.map((call) => String(call[0]))
-      .join("\n")
+    const errorMock = console.error as unknown as { mock: { calls: unknown[][] } }
+    const warningCalls = errorMock.mock.calls.map((call) => String(call[0])).join("\n")
     expect(warningCalls).toContain("Warning: failed to scan SSH host key for example.com.")
     expect(warningCalls).toContain("network timeout")
     expect(warningCalls).toContain("man-in-the-middle")
@@ -1808,9 +1806,9 @@ describe("scaffoldProject", () => {
       }
     )
 
-    const completionMessage = vi
-      .mocked(console.log)
-      .mock.calls.map((call) => String(call[0]))
+    const logMock = console.log as unknown as { mock: { calls: unknown[][] } }
+    const completionMessage = logMock.mock.calls
+      .map((call) => String(call[0]))
       .find((message) => message.includes("Project created successfully!"))
 
     expect(completionMessage).toBeDefined()

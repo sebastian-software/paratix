@@ -201,11 +201,9 @@ describe("user.present apply", () => {
     // The hash must not appear unredacted in the failure message because
     // user.setPassword passed it as a secret to ssh.exec.
     expect(result.error?.message).not.toContain("$6$hash")
-    if (!(result.error instanceof CommandError)) {
-      throw new Error("expected CommandError")
-    }
-    expect(result.error.fullStderr).not.toContain("$6$hash")
-    expect(result.error.fullStdout).not.toContain("$6$hash")
+    const commandError = result.error as CommandError
+    expect(commandError.fullStderr).not.toContain("$6$hash")
+    expect(commandError.fullStdout).not.toContain("$6$hash")
   })
 
   it("does not call chpasswd when no password is set", async () => {

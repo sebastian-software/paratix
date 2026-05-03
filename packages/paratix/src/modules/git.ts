@@ -161,11 +161,11 @@ async function resolveRemoteReference(
  * @param destination - The repository path on the remote host.
  * @returns The remote HEAD SHA, or `null` when it cannot be resolved.
  */
-async function resolveRemoteHead(
-  conn: SshConnection,
-  destination: string
-): Promise<null | string> {
-  const result = await conn.exec(`git -C ${shellQuote(destination)} ls-remote origin HEAD`, EXEC_OPTS)
+async function resolveRemoteHead(conn: SshConnection, destination: string): Promise<null | string> {
+  const result = await conn.exec(
+    `git -C ${shellQuote(destination)} ls-remote origin HEAD`,
+    EXEC_OPTS
+  )
   if (result.code !== 0) return null
 
   const output = result.stdout.trim()

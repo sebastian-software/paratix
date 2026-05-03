@@ -195,6 +195,21 @@ function isRecipe(target: Module): target is RecipeModule {
   return "_isRecipe" in target && (target as RecipeModule)._isRecipe
 }
 
+function addSshdPorts(ssh: SshConnectionImpl, metaEntries: ModuleResult["meta"]): number[] {
+  const portEntries = metaEntries?.filter((entry) => isSshdPortMetaEntry(entry)) ?? []
+  const addedPorts: number[] = []
+  for (const portEntry of portEntries) {
+    if (ssh.addPort(portEntry.port)) {
+      addedPorts.push(portEntry.port)
+    }
+  }
+  return addedPorts
+}
+
+function hasSshdPortMeta(metaEntries: ModuleResult["meta"]): boolean {
+  return metaEntries?.some((entry) => isSshdPortMetaEntry(entry)) ?? false
+}
+
 async function initializeEnvironment(
   options: RunOptions,
   definition: ServerDefinition
@@ -208,15 +223,8 @@ async function handlePortChange(
   ssh: SshConnectionImpl,
   metaEntries: ModuleResult["meta"]
 ): Promise<void> {
-  const portEntries = metaEntries?.filter((entry) => isSshdPortMetaEntry(entry)) ?? []
-  if (portEntries.length === 0) return
-
-  const addedPorts: number[] = []
-  for (const portEntry of portEntries) {
-    if (ssh.addPort(portEntry.port)) {
-      addedPorts.push(portEntry.port)
-    }
-  }
+  if (!hasSshdPortMeta(metaEntries)) return
+  const addedPorts = addSshdPorts(ssh, metaEntries)
 
   // Skip reconnect when a reboot is pending — the reboot handler will
   // reconnect on all registered ports (including the newly added ones).

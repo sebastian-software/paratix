@@ -1017,7 +1017,7 @@ describe("compose.systemd — apply", () => {
       ...composeSystemdRecoveryResponses(),
     })
     mockSsh.writeFile = async (): Promise<void> => {
-      throw new Error("disk full")
+      await Promise.reject(new Error("disk full"))
     }
 
     const mod = compose.systemd({ projectDirectory })

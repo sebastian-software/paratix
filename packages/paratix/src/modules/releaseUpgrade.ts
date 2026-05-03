@@ -1,8 +1,8 @@
 import { meta } from "../meta.js"
 import { failed, failedCommand } from "../moduleFailure.js"
 import {
-  guardedWriteFile,
   type ExecResult,
+  guardedWriteFile,
   type Module,
   type ModuleMetaEntry,
   type ModuleResult,
@@ -13,7 +13,7 @@ import {
 const NONINTERACTIVE = "DEBIAN_FRONTEND=noninteractive"
 const CODENAME_RE = /^[a-z]{3,20}$/v
 const APT_SOURCES_MODE = "0644"
-const NO_UBUNTU_RELEASE_PATTERN = /no new release (found|available)/iv
+const NO_UBUNTU_RELEASE_PATTERN = /no new release (?:found|available)/iv
 
 // prettier-ignore
 const REGEXP_SPECIAL = new Set(["?", ".", "(", ")", "[", "]", "{", "}", "*", "\\", "^", "+", "|", "$"])
@@ -167,6 +167,7 @@ async function rewriteSourcesFile(
   // inside `ubuntu-trusty-updates`. The look-behind/look-ahead pair extends
   // the boundary to also reject adjacent hyphens, dots and `_`, which are
   // the separators used in apt sources, URLs and hyphenated suite names.
+  // eslint-disable-next-line security/detect-non-literal-regexp -- currentCodename is escaped before interpolation.
   const codenamePattern = new RegExp(
     `(?<![\\w.\\-])${escapeRegExp(currentCodename)}(?![\\w.\\-])`,
     "gv"
