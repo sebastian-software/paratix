@@ -9,6 +9,7 @@ import { Client, type ClientChannel } from "ssh2"
 import type { ExecOptions, ExecResult, SshConfig, SshConnection } from "./types.js"
 
 import { buildHostVerifier, extractAlgoFromKey, HostKeyVerificationError } from "./knownHosts.js"
+import { getRegisteredSecrets } from "./secretSink.js"
 import { sftpDownload, sftpUpload } from "./sftp.js"
 import {
   cleanupFailedSshClient,
@@ -520,7 +521,14 @@ export class SshConnectionImpl implements SshConnection {
   private buildSecrets(extra?: string[]): SecretSource[] {
     const cachedPasswordSecret =
       this.cachedSudoPassword == null ? [] : [() => this.cachedSudoPassword?.toString("utf8") ?? ""]
-    return [...cachedPasswordSecret, ...(extra ?? [])]
+    // R-0000092: include the process-wide secret sink (op tokens, signed
+    // download URLs, user password hashes, ...) so every consumer of
+    // `buildSecrets` — including the cleanup-warning path — masks the same
+    // material that `printCommandFailure` would mask. Snapshot the registered
+    // values at call time so each one is treated as an independent secret
+    // variant by the masking pipeline.
+    const registeredSecrets: SecretSource[] = getRegisteredSecrets()
+    return [...cachedPasswordSecret, ...registeredSecrets, ...(extra ?? [])]
   }
 
   private async cacheAndValidateSudoPassword(password: string): Promise<void> {

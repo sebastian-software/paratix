@@ -2434,6 +2434,51 @@ describe("SshConnectionImpl", () => {
 
       stderrSpy.mockRestore()
     })
+
+    it("masks globally registered secrets in cleanup warnings (R-0000092 regression)", async () => {
+      // Regression: buildSecrets() only contributed the cached sudo password,
+      // so cleanup-warning paths could leak op tokens, signed download URLs,
+      // and other globally-registered secret material into stderr. The fix
+      // merges getRegisteredSecrets() into buildSecrets() so every consumer
+      // benefits from the shared sink.
+      const { registerSecret, unregisterSecret } = await import("../src/secretSink.js")
+      const opToken = "op-token-DO-NOT-LEAK"
+      const mktempOutput = "/tmp/paratix-download.LEAKTEST"
+      const executedCommands: string[] = []
+
+      registerSecret(opToken)
+      try {
+        const execSpy = vi
+          .fn()
+          .mockImplementationOnce(makeExecHandler(executedCommands, mktempOutput))
+          .mockImplementationOnce(makeExecHandler(executedCommands, ""))
+          .mockImplementationOnce((_cmd: string, callback: ExecCallback) => {
+            executedCommands.push(_cmd)
+            callback(new Error(`rm -f failed: ${opToken} surfaced in error`), makeStream())
+          })
+
+        const client = makeClientWithExecSpy(execSpy)
+        const ssh = makeConnectedSsh(client, { user: "deploy" })
+        const stderrSpy = vi.spyOn(process.stderr, "write").mockImplementation(() => true)
+
+        await ssh.downloadFile("/var/log/secure", "/tmp/local-secure")
+
+        await vi.waitFor(() => {
+          expect(stderrSpy).toHaveBeenCalled()
+        })
+
+        const stderrOutput = stderrSpy.mock.calls.map((args) => String(args[0])).join("")
+        expect(stderrOutput).toContain(`failed to remove temp file ${mktempOutput}`)
+        // The globally-registered secret must NOT appear verbatim in the
+        // warning; it must be replaced by the redaction marker.
+        expect(stderrOutput).not.toContain(opToken)
+        expect(stderrOutput).toContain("[REDACTED]")
+
+        stderrSpy.mockRestore()
+      } finally {
+        unregisterSecret(opToken)
+      }
+    })
   })
 
   // -------------------------------------------------------------------------
