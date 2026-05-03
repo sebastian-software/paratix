@@ -37,6 +37,20 @@ async function requireComposeRuntime(parameters: {
   )
 }
 
+const COMPOSE_UP_ACTION_KEYWORDS = ["Creating", "Recreating", "Starting", "Started", "Pulling"]
+
+/**
+ * R-0000078: when every service was already running, `compose up -d`
+ * emits no action keywords and the run is a true no-op. Treat that as
+ * status ok so apply does not always report "changed".
+ *
+ * @param composeOutput - The combined stdout/stderr returned by `compose up`.
+ * @returns `true` when at least one action keyword was emitted.
+ */
+function composeUpReportedChange(composeOutput: string): boolean {
+  return COMPOSE_UP_ACTION_KEYWORDS.some((keyword) => composeOutput.includes(keyword))
+}
+
 /**
  * Detect whether `podman` or `docker` is available on the remote host.
  * Podman is preferred when both are installed.
@@ -775,13 +789,19 @@ export const compose = {
 
         const serviceArguments = services?.map((s) => shellQuote(s)).join(" ") ?? ""
         const suffix = serviceArguments === "" ? "" : ` ${serviceArguments}`
+        // R-0000078: redirect stderr to stdout so the action keywords that
+        // compose prints on stderr ("Creating", "Recreating", "Starting",
+        // "Started", "Pulling") are observable, mirroring compose.pull's
+        // approach.
         const result = await connection.exec(
-          `${composeCommand(runtime, projectDirectory)} up -d${suffix}`,
+          `${composeCommand(runtime, projectDirectory)} up -d${suffix} 2>&1`,
           EXEC_OPTS
         )
-        return result.code === 0
-          ? { status: "changed" }
-          : failedCommand(`[compose.up] failed for ${projectDirectory}`, result)
+        if (result.code !== 0) {
+          return failedCommand(`[compose.up] failed for ${projectDirectory}`, result)
+        }
+
+        return { status: composeUpReportedChange(result.stdout) ? "changed" : "ok" }
       },
       async check(ssh: null | SshConnection): Promise<"needs-apply" | "ok"> {
         if (!ssh) return NEEDS_APPLY

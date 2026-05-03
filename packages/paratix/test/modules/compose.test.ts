@@ -125,9 +125,12 @@ describe("compose.up — apply", () => {
     expect(String(result.error)).toContain("no container runtime found")
   })
 
-  it("returns changed on successful up", async () => {
+  it("returns changed on successful up that started a service", async () => {
     const mockSsh = createComposeMockSsh({
-      [`${composeCmd("podman")} up -d`]: { code: 0 },
+      [`${composeCmd("podman")} up -d 2>&1`]: {
+        code: 0,
+        stdout: "Creating web ... done\nCreating db ... done\n",
+      },
     })
     const mod = compose.up({ projectDirectory })
     const result = await mod.apply(mockSsh, emptyEnv)
@@ -136,35 +139,68 @@ describe("compose.up — apply", () => {
 
   it("includes services in command when services list is provided", async () => {
     const mockSsh = createComposeMockSsh({
-      [`${composeCmd("podman")} up -d 'web' 'db'`]: { code: 0 },
+      [`${composeCmd("podman")} up -d 'web' 'db' 2>&1`]: {
+        code: 0,
+        stdout: "Starting web ... done\nStarting db ... done\n",
+      },
     })
     const mod = compose.up({ projectDirectory, services: ["web", "db"] })
     const result = await mod.apply(mockSsh, emptyEnv)
     expect(result.status).toBe("changed")
-    expect(mockSsh.calls).toContain(`${composeCmd("podman")} up -d 'web' 'db'`)
+    expect(mockSsh.calls).toContain(`${composeCmd("podman")} up -d 'web' 'db' 2>&1`)
   })
 
   it("uses docker when only docker is available", async () => {
     const mockSsh = createComposeMockSsh({
-      [`${composeCmd("docker")} up -d`]: { code: 0 },
+      [`${composeCmd("docker")} up -d 2>&1`]: {
+        code: 0,
+        stdout: "Creating web ... done\n",
+      },
       "command -v docker": { code: 0 },
       "command -v podman": { code: 1 },
     })
     const mod = compose.up({ projectDirectory })
     const result = await mod.apply(mockSsh, emptyEnv)
     expect(result.status).toBe("changed")
-    expect(mockSsh.calls).toContain(`${composeCmd("docker")} up -d`)
+    expect(mockSsh.calls).toContain(`${composeCmd("docker")} up -d 2>&1`)
   })
 
   it("returns failed when up command fails", async () => {
     const mockSsh = createComposeMockSsh({
-      [`${composeCmd("podman")} up -d`]: { code: 1, stderr: "compose up failed" },
+      [`${composeCmd("podman")} up -d 2>&1`]: { code: 1, stderr: "compose up failed" },
     })
     const mod = compose.up({ projectDirectory })
     const result = await mod.apply(mockSsh, emptyEnv)
     expect(result.status).toBe("failed")
     expect(result.error).toBeInstanceOf(Error)
     expect(String(result.error)).toContain("[compose.up] failed")
+  })
+
+  // R-0000078: when every service was already running, compose up emits
+  // no action keywords (Creating/Recreating/Starting/Started/Pulling).
+  // Treat that as a no-op so the run is not flagged as "changed".
+  it("returns ok when no service had to be brought up", async () => {
+    const mockSsh = createComposeMockSsh({
+      [`${composeCmd("podman")} up -d 2>&1`]: {
+        code: 0,
+        stdout: "web is up-to-date\ndb is up-to-date\n",
+      },
+    })
+    const mod = compose.up({ projectDirectory })
+    const result = await mod.apply(mockSsh, emptyEnv)
+    expect(result.status).toBe("ok")
+  })
+
+  it("returns changed when compose recreates an existing service", async () => {
+    const mockSsh = createComposeMockSsh({
+      [`${composeCmd("podman")} up -d 2>&1`]: {
+        code: 0,
+        stdout: "Recreating web ... done\n",
+      },
+    })
+    const mod = compose.up({ projectDirectory })
+    const result = await mod.apply(mockSsh, emptyEnv)
+    expect(result.status).toBe("changed")
   })
 })
 
@@ -1114,21 +1150,21 @@ describe("compose.systemd — naming", () => {
 describe("Runtime detection", () => {
   it("prefers podman over docker when both are available", async () => {
     const mockSsh = createComposeMockSsh({
-      [`${composeCmd("podman")} up -d`]: { code: 0 },
+      [`${composeCmd("podman")} up -d 2>&1`]: { code: 0 },
     })
     const mod = compose.up({ projectDirectory })
     await mod.apply(mockSsh, emptyEnv)
-    expect(mockSsh.calls).toContain(`${composeCmd("podman")} up -d`)
-    expect(mockSsh.calls).not.toContain(`${composeCmd("docker")} up -d`)
+    expect(mockSsh.calls).toContain(`${composeCmd("podman")} up -d 2>&1`)
+    expect(mockSsh.calls).not.toContain(`${composeCmd("docker")} up -d 2>&1`)
   })
 
   it("uses explicit runtime override without detection", async () => {
     const mockSsh = createComposeMockSsh({
-      [`${composeCmd("docker")} up -d`]: { code: 0 },
+      [`${composeCmd("docker")} up -d 2>&1`]: { code: 0 },
     })
     const mod = compose.up({ projectDirectory, runtime: "docker" })
     await mod.apply(mockSsh, emptyEnv)
-    expect(mockSsh.calls).toContain(`${composeCmd("docker")} up -d`)
+    expect(mockSsh.calls).toContain(`${composeCmd("docker")} up -d 2>&1`)
     expect(mockSsh.calls).not.toContain("command -v docker")
     expect(mockSsh.calls).not.toContain("command -v podman")
   })
