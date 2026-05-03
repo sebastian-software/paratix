@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest"
+import { describe, expect, it, vi } from "vitest"
 
 import { createMockSsh, createStrictMockSsh } from "./mockSsh.js"
 
@@ -25,6 +25,30 @@ describe("createMockSsh", () => {
     expect(ssh.addPortCalls).toStrictEqual([2022, 8080])
     expect(ssh.removePortCalls).toStrictEqual([2022])
     expect(ssh.updateHostCalls).toStrictEqual(["10.0.0.1", "10.0.0.2"])
+  })
+
+  it("returns the configured defaultTestResult for unstubbed test calls", async () => {
+    const ssh = createMockSsh({}, { defaultTestResult: false })
+
+    await expect(ssh.test("test -f /tmp/missing")).resolves.toBe(false)
+  })
+
+  it("still honors stubbed responses when defaultTestResult is false", async () => {
+    const ssh = createMockSsh({ "test -f /tmp/exists": { code: 0 } }, { defaultTestResult: false })
+
+    await expect(ssh.test("test -f /tmp/exists")).resolves.toBe(true)
+    await expect(ssh.test("test -f /tmp/missing")).resolves.toBe(false)
+  })
+
+  it("warns about unstubbed test calls when warnOnUnstubbedTest is enabled", async () => {
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => undefined)
+    try {
+      const ssh = createMockSsh({}, { warnOnUnstubbedTest: true })
+      await ssh.test("test -f /tmp/audit")
+      expect(warnSpy).toHaveBeenCalledWith("createMockSsh: unstubbed test call: test -f /tmp/audit")
+    } finally {
+      warnSpy.mockRestore()
+    }
   })
 })
 

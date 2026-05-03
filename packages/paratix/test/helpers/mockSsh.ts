@@ -17,7 +17,20 @@ type MockSshOptions = {
   allowUnstubbedExec?: string[]
   allowUnstubbedOutput?: string[]
   allowUnstubbedTest?: string[]
+  /**
+   * Result returned by `ssh.test()` for unstubbed commands.
+   * Defaults to `true` for backward compatibility — tests that want to opt
+   * into a stricter posture can set this to `false` so unstubbed `test`
+   * calls surface as failed predicates rather than silent positives.
+   */
+  defaultTestResult?: boolean
   strict?: boolean
+  /**
+   * When `true`, log a `console.warn` for every unstubbed `ssh.test()` call so
+   * test authors can audit silent permissive matches. Off by default to keep
+   * existing test runs quiet.
+   */
+  warnOnUnstubbedTest?: boolean
 }
 
 /** Recorded `ssh.exec` invocation: the command string plus the options it received. */
@@ -106,11 +119,18 @@ function createTest(
   responses?: MockResponses,
   options?: MockSshOptions
 ): MockSsh["test"] {
+  const defaultResult = options?.defaultTestResult ?? true
+  const warnOnUnstubbed = options?.warnOnUnstubbedTest ?? false
   // eslint-disable-next-line @typescript-eslint/require-await -- Mock implementation
   return async (command) => {
     calls.push(command)
     const match = getMockResponse({ command, kind: "test", options, responses })
-    return match ? match.code === 0 : true
+    if (match) return match.code === 0
+    if (warnOnUnstubbed) {
+      // eslint-disable-next-line no-console -- Opt-in test diagnostics
+      console.warn(`createMockSsh: unstubbed test call: ${command}`)
+    }
+    return defaultResult
   }
 }
 
