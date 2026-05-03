@@ -702,6 +702,9 @@ describe("promptForHostFingerprint", () => {
     vi.spyOn(console, "error").mockImplementation((...args) => {
       void args
     })
+    vi.spyOn(console, "log").mockImplementation((...args) => {
+      void args
+    })
   })
 
   afterEach(() => {
@@ -733,8 +736,10 @@ describe("promptForHostFingerprint", () => {
     )
   })
 
-  it("stores the scanned host fingerprint when the user accepts the TOFU step", async () => {
-    const select = vi.fn().mockResolvedValueOnce("scan")
+  // R-0000122: a single "scan" choice must NOT pin the fingerprint silently.
+  // Operators have to confirm out-of-band before the value reaches server.ts.
+  it("pins the scanned host fingerprint only after explicit confirmation", async () => {
+    const select = vi.fn().mockResolvedValueOnce("scan").mockResolvedValueOnce("pin")
     const scanner = vi.fn().mockResolvedValueOnce({
       algorithm: "ssh-ed25519",
       fingerprint: "SHA256:scanned-fingerprint",
@@ -744,6 +749,59 @@ describe("promptForHostFingerprint", () => {
       "SHA256:scanned-fingerprint"
     )
     expect(scanner).toHaveBeenCalledWith("example.com")
+    expect(select).toHaveBeenCalledTimes(2)
+    expect(select).toHaveBeenNthCalledWith(
+      2,
+      "Pin the scanned host fingerprint for example.com?",
+      [
+        {
+          description: expect.stringContaining("Pin the scanned fingerprint"),
+          label: "Pin this fingerprint",
+          value: "pin",
+        },
+        {
+          description: expect.stringContaining("Keep the expectedHostFingerprint placeholder"),
+          label: "Discard and keep placeholder",
+          value: "discard",
+        },
+      ]
+    )
+  })
+
+  // R-0000122: an operator who chooses "Discard and keep placeholder" must
+  // not have the scanned fingerprint pinned into server.ts.
+  it("returns undefined when the operator discards the scanned fingerprint", async () => {
+    const select = vi.fn().mockResolvedValueOnce("scan").mockResolvedValueOnce("discard")
+    const scanner = vi.fn().mockResolvedValueOnce({
+      algorithm: "ssh-ed25519",
+      fingerprint: "SHA256:scanned-fingerprint",
+    })
+
+    await expect(promptForHostFingerprint("example.com", select, scanner)).resolves.toBeUndefined()
+    expect(scanner).toHaveBeenCalledTimes(1)
+    expect(select).toHaveBeenCalledTimes(2)
+  })
+
+  // R-0000122: the scanned material must be displayed in an isolated,
+  // multi-line block so an operator can copy it cleanly for an out-of-band
+  // comparison. The algorithm has to appear next to the fingerprint.
+  it("renders algorithm and fingerprint on isolated lines before asking to pin", async () => {
+    const select = vi.fn().mockResolvedValueOnce("scan").mockResolvedValueOnce("discard")
+    const scanner = vi.fn().mockResolvedValueOnce({
+      algorithm: "ssh-ed25519",
+      fingerprint: "SHA256:scanned-fingerprint",
+    })
+
+    await promptForHostFingerprint("example.com", select, scanner)
+
+    expect(console.log).toHaveBeenCalledTimes(1)
+    const message = vi.mocked(console.log).mock.calls[0]?.[0]
+    expect(message).toContain("Scanned SSH host key for example.com:22")
+    expect(message).toContain("algorithm:")
+    expect(message).toContain("ssh-ed25519")
+    expect(message).toContain("fingerprint:")
+    expect(message).toContain("SHA256:scanned-fingerprint")
+    expect(message).toContain("out-of-band")
   })
 
   it("falls back to the placeholder when host-key scanning fails", async () => {
@@ -754,6 +812,9 @@ describe("promptForHostFingerprint", () => {
     expect(console.error).toHaveBeenCalledWith(
       "network timeout Keeping the expectedHostFingerprint placeholder in server.ts."
     )
+    // R-0000122: when the scanner fails, the confirmation step must be
+    // skipped — there is no fingerprint to confirm.
+    expect(select).toHaveBeenCalledTimes(1)
   })
 })
 

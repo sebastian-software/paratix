@@ -52,6 +52,45 @@ function buildHostsLine(ip: string, hostnames: string[]): string {
 }
 
 /**
+ * R-0000101: parse a non-comment hosts file line into its IP token and the
+ * set of hostnames after it. Comment-only lines and blank lines return
+ * `undefined` so the caller can preserve them verbatim.
+ *
+ * @param line - A single line from /etc/hosts.
+ * @returns The parsed IP and hostname tokens, or `undefined` for blanks
+ *   and comment lines.
+ */
+function parseHostsLine(line: string): undefined | { hostnames: string[]; ip: string } {
+  const trimmed = line.trim()
+  if (trimmed === "" || trimmed.startsWith("#")) return undefined
+  const tokens = trimmed.split(/\s+/v)
+  const [ip, ...hostnames] = tokens
+  if (ip === undefined || ip === "") return undefined
+  return { hostnames, ip }
+}
+
+/**
+ * R-0000101: determine whether two hostname token lists describe the same
+ * set of hostnames, ignoring order and duplicate entries. This lets
+ * `state: "absent"` match `192.168.1.1 host1 host2` against a desired
+ * `192.168.1.1 host2 host1` without requiring byte-identical lines.
+ *
+ * @param actual - Hostname tokens parsed from the file.
+ * @param expected - Desired hostnames.
+ * @returns `true` when both sets are equal.
+ */
+function hostnameSetsEqual(actual: string[], expected: string[]): boolean {
+  if (actual.length === 0 || expected.length === 0) return false
+  const a = new Set(actual)
+  const b = new Set(expected)
+  if (a.size !== b.size) return false
+  for (const name of a) {
+    if (!b.has(name)) return false
+  }
+  return true
+}
+
+/**
  * Generate the content of a resolv.conf file.
  *
  * @param nameservers - List of nameserver addresses.
@@ -284,6 +323,21 @@ export const net = {
     const state = options?.state ?? "present"
     const expectedLine = buildHostsLine(ip, hostnames)
 
+    // R-0000101: a hosts line for the same IP with a different hostname set
+    // collides with the desired entry. `state: "present"` must therefore
+    // replace any line whose IP token matches `ip` instead of leaving the
+    // stale line in place, and `state: "absent"` must match tolerantly across
+    // whitespace and hostname order.
+    const isSameIpLine = (line: string): boolean => {
+      const parsed = parseHostsLine(line)
+      return parsed !== undefined && parsed.ip === ip
+    }
+    const matchesAbsentTarget = (line: string): boolean => {
+      const parsed = parseHostsLine(line)
+      if (parsed === undefined || parsed.ip !== ip) return false
+      return hostnameSetsEqual(parsed.hostnames, hostnames)
+    }
+
     return {
       async apply(conn: null | SshConnection): Promise<ModuleResult> {
         if (!conn) {
@@ -294,10 +348,22 @@ export const net = {
         const lines = content.split("\n")
 
         if (state === "present") {
-          const alreadyPresent = lines.some((line) => line.trim() === expectedLine)
-          if (alreadyPresent) return { status: "ok" }
-          const suffix = content.endsWith("\n") ? "" : "\n"
-          const newContent = `${content}${suffix}${expectedLine}\n`
+          // The file is already canonical when there is exactly one line for
+          // this IP and it matches the desired byte sequence. Otherwise we
+          // strip every line whose first token equals `ip` and append the
+          // expected line, which collapses duplicates and replaces stale
+          // entries (e.g. `192.168.1.1 host1` -> `192.168.1.1 host2`).
+          const sameIpLines = lines.filter((line) => isSameIpLine(line))
+          const alreadyCanonical =
+            sameIpLines.length === 1 && sameIpLines[0]?.trim() === expectedLine
+          if (alreadyCanonical) return { status: "ok" }
+
+          const filtered = lines.filter((line) => !isSameIpLine(line))
+          // Drop a single trailing blank introduced by `split("\n")` so we
+          // do not accumulate empty lines on every replacement.
+          if (filtered.length > 0 && filtered.at(-1) === "") filtered.pop()
+          filtered.push(expectedLine)
+          const newContent = `${filtered.join("\n")}\n`
           await guardedWriteFile(conn, {
             mode: HOSTS_FILE_MODE,
             newContent,
@@ -305,9 +371,9 @@ export const net = {
             remotePath: HOSTS_FILE,
           })
         } else {
-          const alreadyAbsent = !lines.some((line) => line.trim() === expectedLine)
+          const alreadyAbsent = !lines.some((line) => matchesAbsentTarget(line))
           if (alreadyAbsent) return { status: "ok" }
-          const newContent = lines.filter((line) => line.trim() !== expectedLine).join("\n")
+          const newContent = lines.filter((line) => !matchesAbsentTarget(line)).join("\n")
           await guardedWriteFile(conn, {
             mode: HOSTS_FILE_MODE,
             newContent,
@@ -323,11 +389,17 @@ export const net = {
 
         const content = await conn.readFile(HOSTS_FILE)
         const lines = content.split("\n")
-        const found = lines.some((line) => line.trim() === expectedLine)
 
         if (state === "present") {
-          return found ? "ok" : NEEDS_APPLY
+          // Drift if there is more than one entry for this IP or if the
+          // single entry does not match the desired byte sequence — both
+          // would be reconciled by apply.
+          const sameIpLines = lines.filter((line) => isSameIpLine(line))
+          if (sameIpLines.length === 1 && sameIpLines[0]?.trim() === expectedLine) return "ok"
+          return NEEDS_APPLY
         }
+
+        const found = lines.some((line) => matchesAbsentTarget(line))
         return found ? NEEDS_APPLY : "ok"
       },
       name: `net.hosts: ${ip} ${hostnames.join(" ")}`,

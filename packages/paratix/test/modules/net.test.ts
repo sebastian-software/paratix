@@ -166,6 +166,62 @@ describe("net.hosts — apply", () => {
     expect(mockSsh.calls).toContain("cat '/etc/hosts'")
   })
 
+  // R-0000101: hosts entries are normalized by IP. When `state: "present"`
+  // is applied for an IP that already has a different hostname set on disk,
+  // the stale line must be replaced rather than left next to the new entry,
+  // so resolution is unambiguous after apply.
+  it("replaces a stale entry for the same IP instead of duplicating it (state: present)", async () => {
+    const mockSsh = createMockSsh({
+      "cat '/etc/hosts'": { stdout: "127.0.0.1 localhost\n192.168.1.1 host1\n" },
+    })
+    const writes: Array<{ content: string; mode: string; path: string }> = []
+    mockSsh.writeFile = async (path, content, options) => {
+      writes.push({ content, mode: options.mode, path })
+      await Promise.resolve()
+    }
+
+    const mod = net.hosts("192.168.1.1", ["host2"])
+    const result = await mod.apply(mockSsh, emptyEnv)
+
+    expect(result.status).toBe("changed")
+    expect(writes).toHaveLength(1)
+    expect(writes[0]?.content).toBe("127.0.0.1 localhost\n192.168.1.1 host2\n")
+    // The previous host1 entry must be gone, not coexist with host2.
+    expect(writes[0]?.content).not.toContain("host1")
+  })
+
+  // R-0000101: matching for `state: "absent"` must be tolerant of whitespace
+  // and hostname order so an entry written as `1.2.3.4 alpha beta` still
+  // gets removed when the playbook lists `["beta", "alpha"]`.
+  it("removes an entry whose hostnames match the desired set in any order (state: absent)", async () => {
+    const mockSsh = createMockSsh({
+      "cat '/etc/hosts'": { stdout: "127.0.0.1 localhost\n10.0.0.1   alpha   beta\n" },
+    })
+    const writes: Array<{ content: string; mode: string; path: string }> = []
+    mockSsh.writeFile = async (path, content, options) => {
+      writes.push({ content, mode: options.mode, path })
+      await Promise.resolve()
+    }
+
+    const mod = net.hosts("10.0.0.1", ["beta", "alpha"], { state: "absent" })
+    const result = await mod.apply(mockSsh, emptyEnv)
+
+    expect(result.status).toBe("changed")
+    expect(writes).toHaveLength(1)
+    expect(writes[0]?.content).not.toContain("10.0.0.1")
+  })
+
+  // R-0000101: check must report drift when the on-disk hostname set differs
+  // from the desired set, even if the IP already has a line.
+  it("returns needs-apply from check when same IP has a different hostname set", async () => {
+    const mockSsh = createMockSsh({
+      "cat '/etc/hosts'": { stdout: "192.168.1.1 host1\n" },
+    })
+    const mod = net.hosts("192.168.1.1", ["host2"])
+    const result = await mod.check(mockSsh, emptyEnv)
+    expect(result).toBe("needs-apply")
+  })
+
   it("writes /etc/hosts back with mode 0644 instead of the generic 0600 default", async () => {
     const mockSsh = createMockSsh({
       "cat '/etc/hosts'": { stdout: "127.0.0.1 localhost\n" },

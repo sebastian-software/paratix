@@ -52,6 +52,39 @@ const HOST_FINGERPRINT_OPTIONS: Array<SelectOption<"placeholder" | "scan">> = [
   },
 ]
 
+// R-0000122: after scanning the live host key we must not silently pin the
+// fingerprint (blind TOFU). The operator confirms the scanned value out of
+// band before it is written into server.ts.
+const HOST_FINGERPRINT_CONFIRM_OPTIONS: Array<SelectOption<"discard" | "pin">> = [
+  {
+    description:
+      "Pin the scanned fingerprint into server.ts. Only choose this if the algorithm and fingerprint match an out-of-band reference (server console, provider dashboard, ssh-keyscan over a trusted network).",
+    label: "Pin this fingerprint",
+    value: "pin",
+  },
+  {
+    description:
+      "Keep the expectedHostFingerprint placeholder in server.ts. Choose this if you cannot verify the fingerprint right now.",
+    label: "Discard and keep placeholder",
+    value: "discard",
+  },
+]
+
+// R-0000122: render the scanned host key on isolated lines so an operator
+// can copy it cleanly for an out-of-band comparison.
+function describeScanResult(host: string, result: HostFingerprintScanResult): string {
+  return [
+    "",
+    `Scanned SSH host key for ${host}:22`,
+    `  algorithm:   ${result.algorithm}`,
+    `  fingerprint:`,
+    `    ${result.fingerprint}`,
+    "",
+    "Compare this value against an out-of-band reference before pinning it.",
+    "",
+  ].join("\n")
+}
+
 function createTerminalPrompt(): { close: () => void; prompt: PromptFunction } {
   const readline = createInterface({ input: process.stdin, output: process.stdout })
   return {
@@ -173,7 +206,7 @@ export async function promptForAdminPublicKey(
 
 export async function promptForHostFingerprint(
   host: string,
-  select?: SelectFunction<"placeholder" | "scan">,
+  select?: SelectFunction<"discard" | "pin" | "placeholder" | "scan">,
   scanner: (host: string) => Promise<HostFingerprintScanResult> = readHostFingerprintViaSsh2
 ): Promise<string | undefined> {
   const terminalSelect = select == null ? createTerminalSelect() : null
@@ -184,7 +217,7 @@ export async function promptForHostFingerprint(
   }
 
   try {
-    const hostKeyMode = await choose(
+    const hostKeyMode = await (choose as SelectFunction<"placeholder" | "scan">)(
       `How should create-paratix bootstrap the SSH host key for ${host}?`,
       HOST_FINGERPRINT_OPTIONS
     )
@@ -192,15 +225,29 @@ export async function promptForHostFingerprint(
       return undefined
     }
 
+    let result: HostFingerprintScanResult
     try {
-      const result = await scanner(host)
-      return result.fingerprint
+      result = await scanner(host)
     } catch (error) {
       console.error(
         `${error instanceof Error ? error.message : String(error)} Keeping the expectedHostFingerprint placeholder in server.ts.`
       )
       return undefined
     }
+
+    // R-0000122: surface the scanned material on isolated lines so the
+    // operator can copy and compare it against an out-of-band reference
+    // before pinning it into server.ts.
+    console.log(describeScanResult(host, result))
+
+    const confirmation = await (choose as SelectFunction<"discard" | "pin">)(
+      `Pin the scanned host fingerprint for ${host}?`,
+      HOST_FINGERPRINT_CONFIRM_OPTIONS
+    )
+    if (confirmation !== "pin") {
+      return undefined
+    }
+    return result.fingerprint
   } finally {
     terminalSelect?.close()
   }
