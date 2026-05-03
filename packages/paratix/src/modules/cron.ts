@@ -70,6 +70,60 @@ function looksLikeCronJobLine(lines: string[], index: number): boolean {
   return true
 }
 
+/** Arguments for {@link computePresentMutation}. */
+type PresentMutationArguments = {
+  /** The desired cron job line. */
+  cronJob: string
+  /** The current crontab lines (not mutated). */
+  lines: string[]
+  /** The paratix marker comment. */
+  marker: string
+  /** The current index of the marker, or `-1`. */
+  markerIndex: number
+}
+
+/**
+ * Compute the new crontab lines required to make the `present` state hold.
+ *
+ * Returns `null` when no mutation is required (the marker already exists
+ * and is followed by the desired job line), allowing the caller to
+ * short-circuit without writing the crontab.
+ *
+ * @param mutation - The mutation inputs (see {@link PresentMutationArguments}).
+ * @returns The new crontab lines, or `null` when no write is needed.
+ */
+function computePresentMutation(mutation: PresentMutationArguments): null | string[] {
+  const { cronJob, lines, marker, markerIndex } = mutation
+
+  // R-0000081: short-circuit when the marker already exists and the
+  // following line already matches the desired cron job. Without this,
+  // apply would overwrite the line with the same value and re-write the
+  // crontab, reporting "changed" on every run when invoked directly
+  // (e.g. as a signal target). Mirrors the no-op returns that R-0000075
+  // added to file.replace.apply and R-0000077 added to user.absent.apply.
+  if (markerIndex !== -1 && lines[markerIndex + 1] === cronJob) return null
+
+  const next = [...lines]
+
+  if (markerIndex === -1) {
+    // No marker yet — append at the end.
+    next.push(marker, cronJob)
+  } else if (looksLikeCronJobLine(next, markerIndex + 1)) {
+    // R-0000047: only overwrite the next line when it actually looks
+    // like a managed cron job. This prevents user-authored comments /
+    // blanks that ended up between marker and previous job from being
+    // silently destroyed by a re-apply.
+    next[markerIndex + 1] = cronJob
+  } else {
+    // Marker is the last line, or the next line is a comment / blank
+    // that the user inserted — splice the new job in instead of
+    // overwriting unrelated content.
+    next.splice(markerIndex + 1, 0, cronJob)
+  }
+
+  return next
+}
+
 /** Options for `cron.job`. */
 type CronJobOptions = {
   /** The crontab line to manage (e.g. `"0 * * * * /usr/bin/backup"`). */
@@ -172,22 +226,11 @@ export const cron = {
         const lines = await readCrontab(ssh, user)
         const markerIndex = lines.indexOf(marker)
 
+        let nextLines: string[]
         if (state === "present") {
-          if (markerIndex === -1) {
-            // No marker yet — append at the end.
-            lines.push(marker, cronJob)
-          } else if (looksLikeCronJobLine(lines, markerIndex + 1)) {
-            // R-0000047: only overwrite the next line when it actually
-            // looks like a managed cron job. This prevents user-authored
-            // comments / blanks that ended up between marker and previous
-            // job from being silently destroyed by a re-apply.
-            lines[markerIndex + 1] = cronJob
-          } else {
-            // Marker is the last line, or the next line is a comment /
-            // blank that the user inserted — splice the new job in instead
-            // of overwriting unrelated content.
-            lines.splice(markerIndex + 1, 0, cronJob)
-          }
+          const computed = computePresentMutation({ cronJob, lines, marker, markerIndex })
+          if (computed === null) return { status: "ok" }
+          nextLines = computed
         } else if (markerIndex === -1) {
           return { status: "ok" }
         } else {
@@ -197,10 +240,11 @@ export const cron = {
           // different, drop only the marker and keep the surrounding
           // content untouched.
           const removeCount = lines[markerIndex + 1] === cronJob ? 2 : 1
-          lines.splice(markerIndex, removeCount)
+          nextLines = [...lines]
+          nextLines.splice(markerIndex, removeCount)
         }
 
-        await writeCrontab(ssh, user, lines)
+        await writeCrontab(ssh, user, nextLines)
         return { status: "changed" }
       },
 

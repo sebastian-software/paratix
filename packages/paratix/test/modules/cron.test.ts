@@ -133,6 +133,26 @@ describe("cron.job", () => {
     expect(writeCall).toContain("0 3 * * * /backup.sh")
   })
 
+  it("apply returns ok and does not write when marker and job line already match (state: present)", async () => {
+    // R-0000081: when the marker exists and the following line already
+    // equals the desired cron job, apply must short-circuit, return
+    // status ok, and skip the crontab write so direct apply invocations
+    // (e.g. via signal targets) do not report spurious "changed". Mirrors
+    // the no-op returns that R-0000075 added to file.replace.apply and
+    // R-0000077 added to user.absent.apply.
+    const mockSsh = createMockSsh({
+      "crontab -u 'alice' -l": {
+        code: 0,
+        stdout: "# paratix: backup\n0 3 * * * /backup.sh\n",
+      },
+    })
+    const mod = cron.job("alice", "backup", { job: "0 3 * * * /backup.sh" })
+    const result = await mod.apply(mockSsh, emptyEnv)
+    expect(result.status).toBe("ok")
+    const writeCall = mockSsh.calls.find((c) => c.startsWith("printf '%s'"))
+    expect(writeCall).toBeUndefined()
+  })
+
   it("apply replaces job line when marker exists but job differs (state: present)", async () => {
     const mockSsh = createMockSsh({
       "crontab -u 'alice' -l": {
