@@ -4,6 +4,7 @@ import type { Environment, Module } from "../src/types.js"
 
 import { firstRun, signals } from "../src/builtins.js"
 import { recipe } from "../src/recipe.js"
+import { setRunnerAbortSignal } from "../src/runnerAbortSignal.js"
 import { CommandError } from "../src/sshHelpers.js"
 import { createMockSsh } from "./helpers/mockSsh.js"
 
@@ -684,5 +685,39 @@ describe("recipe", () => {
     expect(result.status).toBe("changed")
     expect(innerSecond.check).not.toHaveBeenCalled()
     expect(innerSecond.apply).not.toHaveBeenCalled()
+  })
+
+  it("honors the runner abort signal between children in check (R-0000096)", async () => {
+    // R-0000096: recipe.check used to iterate every child synchronously
+    // without observing the runner abort signal. When earlier check()
+    // implementations are slow, SIGINT only takes effect after the whole
+    // recipe finished checking. After the fix, the loop bails out as soon
+    // as the abort signal is set and reports "ok" so no apply runs.
+    const controller = new AbortController()
+    const firstChild: Module = {
+      apply: vi.fn().mockResolvedValue({ status: "changed" }),
+      // eslint-disable-next-line @typescript-eslint/require-await -- Interface requires async
+      async check() {
+        controller.abort()
+        return "ok"
+      },
+      name: "first-check",
+    }
+    const secondChild: Module = {
+      apply: vi.fn().mockResolvedValue({ status: "changed" }),
+      check: vi.fn().mockResolvedValue("needs-apply"),
+      name: "second-check",
+    }
+
+    setRunnerAbortSignal(controller.signal)
+    try {
+      const r = recipe("test-recipe", [firstChild, secondChild])
+      const result = await r.check(null, emptyEnv)
+
+      expect(result).toBe("ok")
+      expect(secondChild.check).not.toHaveBeenCalled()
+    } finally {
+      setRunnerAbortSignal(undefined)
+    }
   })
 })
