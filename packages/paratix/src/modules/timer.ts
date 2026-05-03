@@ -126,6 +126,48 @@ async function isTimerFullyActive(ssh: SshConnection, timerUnit: string): Promis
   return ssh.test(`${SYSTEMCTL} is-active --quiet ${shellQuote(timerUnit)}`)
 }
 
+type RestartContext = {
+  name: string
+  needsRestartForContentChange: boolean
+  needsRestartForStaleState: boolean
+  paths: TimerPaths
+}
+
+// Restart the timer in two situations:
+//   1. The timer unit content changed -- restart re-reads the schedule.
+//   2. The unit files match on disk but the timer was not fully active
+//      (stale RAM state, e.g. after a `systemctl edit` override that was
+//      reverted). `enable --now` does not pick up such drift, so we force a
+//      `daemon-reload` plus `restart` to reset the in-memory state.
+// Without a content change and a healthy active state, `enable --now`
+// already started it and restarting would just abort an in-flight oneshot
+// job.
+async function restartTimerIfNeeded(
+  ssh: SshConnection,
+  context: RestartContext
+): Promise<ModuleResult | null> {
+  const { name, needsRestartForContentChange, needsRestartForStaleState, paths } = context
+  if (!needsRestartForContentChange && !needsRestartForStaleState) return null
+
+  if (needsRestartForStaleState) {
+    const reload = await ssh.exec(`${SYSTEMCTL} daemon-reload`, {
+      ignoreExitCode: true,
+      silent: true,
+    })
+    if (reload.code !== 0) {
+      return failedCommand(`[timer.scheduled: ${name}] systemctl daemon-reload failed`, reload)
+    }
+  }
+  const restart = await ssh.exec(`${SYSTEMCTL} restart ${shellQuote(paths.timerUnit)}`, {
+    ignoreExitCode: true,
+    silent: true,
+  })
+  if (restart.code !== 0) {
+    return failedCommand(`[timer.scheduled: ${name}] systemctl restart failed`, restart)
+  }
+  return null
+}
+
 async function applyPresent(
   ssh: SshConnection,
   name: string,
@@ -134,14 +176,13 @@ async function applyPresent(
   const sync = await syncUnitFiles(ssh, name, paths)
   if (!sync.ok) return sync.failure
 
+  const filesMatched = sync.serviceMatched && sync.timerMatched
+  const fullyActive = filesMatched ? await isTimerFullyActive(ssh, paths.timerUnit) : false
+
   // If both files matched and the timer is already enabled and active, nothing
   // needs to change. Reporting `ok` here keeps direct apply calls (e.g. inside
   // recipes) from triggering spurious change signals.
-  if (
-    sync.serviceMatched &&
-    sync.timerMatched &&
-    (await isTimerFullyActive(ssh, paths.timerUnit))
-  ) {
+  if (filesMatched && fullyActive) {
     return { status: "ok" }
   }
 
@@ -153,18 +194,13 @@ async function applyPresent(
     return failedCommand(`[timer.scheduled: ${name}] systemctl enable --now failed`, enable)
   }
 
-  // Only restart when the timer unit content changed; restart re-reads the
-  // schedule. Without a content change `enable --now` already started it and
-  // restarting would just abort an in-flight oneshot job.
-  if (!sync.timerMatched) {
-    const restart = await ssh.exec(`${SYSTEMCTL} restart ${shellQuote(paths.timerUnit)}`, {
-      ignoreExitCode: true,
-      silent: true,
-    })
-    if (restart.code !== 0) {
-      return failedCommand(`[timer.scheduled: ${name}] systemctl restart failed`, restart)
-    }
-  }
+  const restartFailure = await restartTimerIfNeeded(ssh, {
+    name,
+    needsRestartForContentChange: !sync.timerMatched,
+    needsRestartForStaleState: filesMatched && !fullyActive,
+    paths,
+  })
+  if (restartFailure) return restartFailure
 
   return { status: "changed" }
 }
