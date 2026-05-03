@@ -1,3 +1,4 @@
+import { createNullPrototypeEnvironment } from "./environment.js"
 import { mergeEnvironmentFromMeta } from "./meta.js"
 import { detectPackageManager, isPackageInstalled } from "./modules/package.js"
 import { shellQuote } from "./ssh.js"
@@ -19,7 +20,17 @@ type ConditionalApplyState = {
 }
 
 function createConditionalApplyState(environment: Environment): ConditionalApplyState {
-  return { environment: { ...environment }, meta: [], status: "ok" }
+  // R-0000087: preserve the null-prototype guarantee that
+  // R-0000069/R-0000070/R-0000074 establish for the runner-level
+  // environment. Plain object spread (`{ ...environment }`) would create a
+  // map with `Object.prototype`, exposing the first child module of every
+  // when(...) guard to a polluted-fähige environment. Mirror the
+  // recipe.ts:302 / meta.ts:214 approach.
+  return {
+    environment: Object.assign(createNullPrototypeEnvironment(), environment),
+    meta: [],
+    status: "ok",
+  }
 }
 
 function markConditionalApplyChanged(state: ConditionalApplyState): ConditionalApplyState {
@@ -119,7 +130,9 @@ async function checkConditionalModules(
   ssh: null | SshConnection,
   environment: Environment
 ): Promise<"needs-apply" | "ok"> {
-  const currentEnvironment = { ...environment }
+  // R-0000087: same null-prototype preservation as createConditionalApplyState
+  // for the check-side traversal of when(...) guards.
+  const currentEnvironment = Object.assign(createNullPrototypeEnvironment(), environment)
   for (const currentModule of modules) {
     // eslint-disable-next-line no-await-in-loop
     const result = await currentModule.check(ssh, currentEnvironment)

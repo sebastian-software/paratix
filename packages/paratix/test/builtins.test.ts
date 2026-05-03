@@ -453,6 +453,64 @@ describe("when", () => {
     expect(envsSeenBySecond[0]).toHaveProperty("fromFirst", "mutated")
   })
 
+  // R-0000087 regression: when(...).apply must hand inner modules an environment
+  // without `Object.prototype` on the prototype chain. The previous spread-based
+  // copy (`{ ...environment }`) silently dropped the null-prototype hardening
+  // established by R-0000069/R-0000070/R-0000074.
+  it("apply hands the first inner module a null-prototype environment", async () => {
+    let receivedEnv: Environment | undefined
+    const captureModule: Module = {
+      // eslint-disable-next-line @typescript-eslint/require-await -- Interface requires async
+      async apply(_ssh, env) {
+        receivedEnv = env
+        return { status: "ok" }
+      },
+      // eslint-disable-next-line @typescript-eslint/require-await -- Interface requires async
+      async check() {
+        return "needs-apply"
+      },
+      name: "capture-module",
+    }
+
+    const nullProtoEnv: Environment = Object.create(null)
+    nullProtoEnv.EXISTING = "value"
+
+    const mod = when(() => true, captureModule)
+    // eslint-disable-next-line prefer-spread
+    await mod.apply(null, nullProtoEnv)
+
+    expect(receivedEnv).toBeDefined()
+    expect(Object.getPrototypeOf(receivedEnv)).toBeNull()
+    expect(receivedEnv?.EXISTING).toBe("value")
+  })
+
+  // R-0000087 regression: same guarantee for the check-side traversal.
+  it("check hands the first inner module a null-prototype environment", async () => {
+    let receivedEnv: Environment | undefined
+    const captureModule: Module = {
+      // eslint-disable-next-line @typescript-eslint/require-await -- Interface requires async
+      async apply() {
+        return { status: "ok" }
+      },
+      // eslint-disable-next-line @typescript-eslint/require-await -- Interface requires async
+      async check(_ssh, env) {
+        receivedEnv = env
+        return "ok"
+      },
+      name: "capture-module",
+    }
+
+    const nullProtoEnv: Environment = Object.create(null)
+    nullProtoEnv.EXISTING = "value"
+
+    const mod = when(() => true, captureModule)
+    await mod.check(null, nullProtoEnv)
+
+    expect(receivedEnv).toBeDefined()
+    expect(Object.getPrototypeOf(receivedEnv)).toBeNull()
+    expect(receivedEnv?.EXISTING).toBe("value")
+  })
+
   it("packageInstalled runs inner modules when the package is present", async () => {
     const ssh = createMockSsh({
       [DPKG_UFW_INSTALLED]: { code: 0 },
