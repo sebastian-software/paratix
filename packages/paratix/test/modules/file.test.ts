@@ -601,6 +601,67 @@ describe("file.line", () => {
   })
 })
 
+describe("file.line — apply without options.match", () => {
+  it("regression R-0000108 — apply returns ok and does not append a duplicate when the line is already present", async () => {
+    const appendCalls: string[] = []
+    const ssh = createMockSsh({
+      "[ -e '/etc/config' ]": { code: 0 },
+      "cat '/etc/config'": { stdout: "first-line\nmy-line\nlast-line\n" },
+    })
+    // eslint-disable-next-line @typescript-eslint/require-await -- Mock
+    ssh.exec = async (command: string) => {
+      appendCalls.push(command)
+      return { code: 0, stderr: "", stdout: "" }
+    }
+
+    const mod = file.line("/etc/config", "my-line")
+    const result = await mod.apply(ssh, emptyEnv)
+
+    expect(result.status).toBe("ok")
+    // No printf append must have been issued because the line already exists.
+    const appendIssued = appendCalls.some((command) =>
+      command.startsWith("printf '%s\\n' 'my-line'")
+    )
+    expect(appendIssued).toBe(false)
+  })
+
+  it("regression R-0000108 — second apply is a no-op once the line was appended", async () => {
+    // Drive two consecutive applies against a mutable view of the remote
+    // file. After the first apply we manually flip the remote content to
+    // include "my-line" — this models the post-append filesystem state and
+    // proves that the second apply does not append a duplicate.
+    const state = { content: "first-line\nlast-line\n" }
+    const appendCalls: string[] = []
+    const ssh = createMockSsh()
+    // eslint-disable-next-line @typescript-eslint/require-await -- Mock
+    ssh.exists = async () => true
+    // eslint-disable-next-line @typescript-eslint/require-await -- Mock
+    ssh.readFile = async () => state.content
+    // eslint-disable-next-line @typescript-eslint/require-await -- Mock
+    ssh.exec = async (command: string) => {
+      appendCalls.push(command)
+      return { code: 0, stderr: "", stdout: "" }
+    }
+
+    const mod = file.line("/etc/config", "my-line")
+    const firstResult = await mod.apply(ssh, emptyEnv)
+    // Reflect the append on the simulated remote so the second apply sees
+    // the post-state — exactly what would happen on a real remote.
+    state.content = `${state.content}my-line\n`
+    const secondResult = await mod.apply(ssh, emptyEnv)
+
+    expect(firstResult.status).toBe("changed")
+    expect(secondResult.status).toBe("ok")
+    const appendCount = appendCalls.filter(
+      (command) => command === "printf '%s\\n' 'my-line' >> '/etc/config'"
+    ).length
+    expect(appendCount).toBe(1)
+    // The remote view must contain "my-line" exactly once.
+    const occurrences = state.content.match(/^my-line$/gmv)
+    expect(occurrences).toStrictEqual(["my-line"])
+  })
+})
+
 describe("file.line — sed-Escaping Regression (apply with options.match)", () => {
   it("regression — apply replaces the full matching line, not only the matched substring", async () => {
     const writtenFiles: Array<{ content: string; path: string }> = []

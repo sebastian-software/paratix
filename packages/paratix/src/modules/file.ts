@@ -61,6 +61,58 @@ function validateAbsentPath(remotePath: string): void {
   }
 }
 
+async function applyLineAppend(input: {
+  line: string
+  remotePath: string
+  ssh: SshConnection
+}): Promise<ModuleResult> {
+  // R-0000108: short-circuit when the line is already present so apply does
+  // not append duplicates on direct invocation (e.g. from signal targets that
+  // bypass check). Mirrors the no-op return pattern from R-0000075/77/81/88.
+  const existsBeforeAppend = await input.ssh.exists(input.remotePath)
+  if (existsBeforeAppend) {
+    const existingContent = await input.ssh.readFile(input.remotePath)
+    if (splitLines(existingContent).includes(input.line)) return { status: "ok" }
+  }
+
+  // Append line using printf to avoid shell interpretation
+  await input.ssh.exec(
+    `printf '%s\\n' ${shellQuote(input.line)} >> ${shellQuote(input.remotePath)}`,
+    { silent: true }
+  )
+  return { status: "changed" }
+}
+
+async function applyLineReplace(input: {
+  line: string
+  match: string
+  remotePath: string
+  ssh: SshConnection
+}): Promise<ModuleResult> {
+  // Replace the first matching full line (client-side to avoid sed escaping issues)
+  const content = await input.ssh.readFile(input.remotePath)
+  const { hasTrailingNewline, lines } = splitLinesPreservingTrailingNewline(content)
+  // eslint-disable-next-line security/detect-non-literal-regexp
+  const pattern = new RegExp(input.match, "mu")
+  const matchingLineIndex = findFirstMatchingLineIndex(lines, pattern)
+  if (matchingLineIndex === -1) {
+    return failed(
+      `[file.line: ${input.remotePath}] No line matching ${input.match} found for replacement`
+    )
+  }
+  lines[matchingLineIndex] = input.line
+  let newContent = lines.join("\n")
+  if (hasTrailingNewline) newContent += "\n"
+  const ownership = await readOwnership(input.ssh, input.remotePath)
+  await guardedWriteFile(input.ssh, {
+    mode: normalizeMode(ownership.mode),
+    newContent,
+    originalContent: content,
+    remotePath: input.remotePath,
+  })
+  return { status: "changed" }
+}
+
 async function templateStateMatches(input: {
   options?: { mode?: string; owner?: string }
   remotePath: string
@@ -227,35 +279,10 @@ export const file = {
         if (!ssh) return failed(`[file.line: ${remotePath}] SSH connection is required`)
 
         if (options?.match == null) {
-          // Append line using printf to avoid shell interpretation
-          await ssh.exec(`printf '%s\\n' ${shellQuote(line)} >> ${shellQuote(remotePath)}`, {
-            silent: true,
-          })
-        } else {
-          // Replace the first matching full line (client-side to avoid sed escaping issues)
-          const content = await ssh.readFile(remotePath)
-          const { hasTrailingNewline, lines } = splitLinesPreservingTrailingNewline(content)
-          // eslint-disable-next-line security/detect-non-literal-regexp
-          const pattern = new RegExp(options.match, "mu")
-          const matchingLineIndex = findFirstMatchingLineIndex(lines, pattern)
-          if (matchingLineIndex === -1) {
-            return failed(
-              `[file.line: ${remotePath}] No line matching ${options.match} found for replacement`
-            )
-          }
-          lines[matchingLineIndex] = line
-          let newContent = lines.join("\n")
-          if (hasTrailingNewline) newContent += "\n"
-          const ownership = await readOwnership(ssh, remotePath)
-          await guardedWriteFile(ssh, {
-            mode: normalizeMode(ownership.mode),
-            newContent,
-            originalContent: content,
-            remotePath,
-          })
+          return applyLineAppend({ line, remotePath, ssh })
         }
 
-        return { status: "changed" }
+        return applyLineReplace({ line, match: options.match, remotePath, ssh })
       },
       async check(ssh: null | SshConnection): Promise<"needs-apply" | "ok"> {
         if (!ssh) return NEEDS_APPLY
