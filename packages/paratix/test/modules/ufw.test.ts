@@ -303,7 +303,12 @@ describe("ufw.rule", () => {
     expect(result).toBe("needs-apply")
   })
 
-  it("check returns ok when the port is configured with a /tcp suffix", async () => {
+  // R-0000118 regression: the caller asked for `ufw allow 22` (no
+  // protocol qualifier), but only a `22/tcp` rule is present on the host.
+  // That is drift, not a satisfied rule, because apply would otherwise
+  // add a second protocol-agnostic rule on top of the existing tcp-only
+  // entry.
+  it("check returns needs-apply when only a protocol-specific /tcp rule exists", async () => {
     const ssh = createMockSsh({
       "ufw status": {
         stdout: [
@@ -317,10 +322,10 @@ describe("ufw.rule", () => {
     })
     const mod = ufw.rule("allow", 22)
     const result = await mod.check(ssh, emptyEnv)
-    expect(result).toBe("ok")
+    expect(result).toBe("needs-apply")
   })
 
-  it("check returns ok when the port is configured with a /udp suffix", async () => {
+  it("check returns needs-apply when only a protocol-specific /udp rule exists", async () => {
     const ssh = createMockSsh({
       "ufw status": {
         stdout: [
@@ -334,6 +339,32 @@ describe("ufw.rule", () => {
     })
     const mod = ufw.rule("allow", 53)
     const result = await mod.check(ssh, emptyEnv)
-    expect(result).toBe("ok")
+    expect(result).toBe("needs-apply")
+  })
+
+  // R-0000118: invalid port values must be rejected at construction time
+  // rather than first surfacing when ufw refuses the rule on the host.
+  it("throws when constructed with a non-integer port", () => {
+    expect(() => ufw.rule("allow", 22.5)).toThrow(
+      "ufw.rule requires integer ports between 1 and 65535, got 22.5"
+    )
+  })
+
+  it("throws when constructed with a port below 1", () => {
+    expect(() => ufw.rule("allow", 0)).toThrow(
+      "ufw.rule requires integer ports between 1 and 65535, got 0"
+    )
+  })
+
+  it("throws when constructed with a port above 65535", () => {
+    expect(() => ufw.rule("allow", 70_000)).toThrow(
+      "ufw.rule requires integer ports between 1 and 65535, got 70000"
+    )
+  })
+
+  it("throws when one port in a multi-port rule is invalid", () => {
+    expect(() => ufw.rule("allow", [80, -1, 443])).toThrow(
+      "ufw.rule requires integer ports between 1 and 65535, got -1"
+    )
   })
 })

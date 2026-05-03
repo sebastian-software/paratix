@@ -1,4 +1,5 @@
 import { failed, failedCommand } from "../moduleFailure.js"
+import { isValidTcpPort } from "../serverDefinitionValidation.js"
 import { shellQuote } from "../ssh.js"
 import { type Module, type ModuleResult, NEEDS_APPLY, type SshConnection } from "../types.js"
 import { detectPackageManager, isPackageInstalled } from "./package.js"
@@ -86,6 +87,15 @@ export const ufw = {
    */
   rule(action: "allow" | "deny", ports: number | number[]): Module {
     const portList = Array.isArray(ports) ? ports : [ports]
+    // R-0000118: validate ports up front so callers fail fast on invalid
+    // numbers rather than only discovering the problem at apply time when
+    // ufw rejects the rule. Mirrors the validation pattern used in
+    // sshd.port and serverDefinitionValidation.collectPortsErrors.
+    for (const port of portList) {
+      if (!isValidTcpPort(port)) {
+        throw new Error(`ufw.rule requires integer ports between 1 and 65535, got ${String(port)}`)
+      }
+    }
     return {
       async apply(ssh: null | SshConnection): Promise<ModuleResult> {
         if (!ssh)
@@ -120,11 +130,16 @@ export const ufw = {
         const status = await ssh.output(`${UFW} status`)
         for (const port of portList) {
           const expectedAction = action === "allow" ? "ALLOW" : "DENY"
-          // Anchor the port at the line start and require a whitespace boundary
-          // after the optional /tcp or /udp suffix so port 22 does not match
-          // 5022, 1022, 2222 etc.
+          // R-0000118: match only the protocol-agnostic form `<port> ACTION`.
+          // The caller asked for `ufw <action> <port>` (no /tcp or /udp
+          // suffix), which adds rules for both protocols. Accepting a
+          // protocol-specific entry like `22/tcp ALLOW` here would hide a
+          // drift where only one protocol is configured and apply would
+          // therefore add a second, parametrically different rule.
+          // Anchor the port at the line start and require a whitespace
+          // boundary so port 22 does not match 5022, 1022, 2222 etc.
           // eslint-disable-next-line security/detect-non-literal-regexp
-          const pattern = new RegExp(`^${port}(?:/(?:tcp|udp))?\\s+${expectedAction}\\b`, "mv")
+          const pattern = new RegExp(`^${port}\\s+${expectedAction}\\b`, "mv")
           if (!pattern.test(status)) {
             return NEEDS_APPLY
           }
