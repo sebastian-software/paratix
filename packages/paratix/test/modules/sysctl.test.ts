@@ -130,6 +130,16 @@ describe("sysctl.set — apply", () => {
     expect(result.status).toBe("changed")
     expect(mockSsh.calls).toContain(`rm -f '${CONF_PATH}'`)
   })
+
+  it("returns failed when removing config file fails (state: absent)", async () => {
+    const mockSsh = createMockSsh({
+      [`rm -f '${CONF_PATH}'`]: { code: 1, stderr: "read-only file system" },
+    })
+    const mod = sysctl.set(KEY, VALUE, { state: "absent" })
+    const result = await mod.apply(mockSsh, emptyEnv)
+    expect(result.status).toBe("failed")
+    expect(String(result.error)).toContain("failed to remove config file")
+  })
 })
 
 // ─── sysctl.set — name ────────────────────────────────────────────────────────

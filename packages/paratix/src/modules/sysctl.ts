@@ -138,7 +138,10 @@ export const sysctl = {
           }
           await conn.writeFile(configPath, expectedContent, { mode: SYSCTL_CONFIG_MODE })
         } else {
-          await conn.exec(`rm -f ${shellQuote(configPath)}`, EXEC_OPTS)
+          const result = await conn.exec(`rm -f ${shellQuote(configPath)}`, EXEC_OPTS)
+          if (result.code !== 0) {
+            return failedCommand(`[sysctl.set: ${key}] failed to remove config file`, result)
+          }
         }
 
         return { status: "changed" }
