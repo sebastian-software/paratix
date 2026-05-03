@@ -269,6 +269,16 @@ async function resolveCliOrPromptAdminPublicKey(parameters: {
   return undefined
 }
 
+export async function resolveCliOrPromptHost(
+  host: string | undefined,
+  prompt: () => Promise<string> = promptForHost
+): Promise<string> {
+  if (host !== undefined) return validateHost(host)
+  if (process.stdin.isTTY && process.stdout.isTTY) return prompt()
+
+  exitWithMessage("Missing --host in non-interactive environment. Pass --host <domain-or-ip>.")
+}
+
 function main(): void {
   const { adminPublicKey, adminPublicKeyFile, host, initialUser, projectName } = parseCliArguments(
     process.argv.slice(2)
@@ -278,7 +288,7 @@ function main(): void {
 
   const pm = detectPackageManager()
   void (async () => {
-    const validatedHost = host == null ? await promptForHost() : validateHost(host)
+    const validatedHost = await resolveCliOrPromptHost(host)
     const resolvedExpectedHostFingerprint =
       process.stdin.isTTY && process.stdout.isTTY
         ? await promptForHostFingerprint(validatedHost)

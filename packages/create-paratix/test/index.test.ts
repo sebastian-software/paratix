@@ -16,6 +16,7 @@ import {
   promptForHost,
   promptForHostFingerprint,
   promptForInitialUserConfig,
+  resolveCliOrPromptHost,
   scaffoldProject,
   validateHost,
   writeProjectFiles,
@@ -703,6 +704,45 @@ describe("promptForHost", () => {
 
     await expect(promptForHost(prompt, () => void closePrompt())).resolves.toBe("203.0.113.10")
     expect(closePrompt).toHaveBeenCalledTimes(1)
+  })
+})
+
+describe("resolveCliOrPromptHost", () => {
+  afterEach(() => {
+    vi.restoreAllMocks()
+  })
+
+  it("uses the provided --host without prompting", async () => {
+    const prompt = vi.fn().mockResolvedValue("prompted.example.com")
+
+    await expect(resolveCliOrPromptHost("example.com", prompt)).resolves.toBe("example.com")
+    expect(prompt).not.toHaveBeenCalled()
+  })
+
+  it("fails fast without --host in non-interactive environments", async () => {
+    const prompt = vi.fn().mockResolvedValue("prompted.example.com")
+    const stdinTty = Object.getOwnPropertyDescriptor(process.stdin, "isTTY")
+    const stdoutTty = Object.getOwnPropertyDescriptor(process.stdout, "isTTY")
+    vi.spyOn(console, "error").mockImplementation((...args) => {
+      void args
+    })
+
+    try {
+      Object.defineProperty(process.stdin, "isTTY", { configurable: true, value: false })
+      Object.defineProperty(process.stdout, "isTTY", { configurable: true, value: false })
+
+      await expectProcessExit(() => resolveCliOrPromptHost(undefined, prompt))
+
+      expect(console.error).toHaveBeenCalledWith(
+        "Missing --host in non-interactive environment. Pass --host <domain-or-ip>."
+      )
+      expect(prompt).not.toHaveBeenCalled()
+    } finally {
+      if (stdinTty) Object.defineProperty(process.stdin, "isTTY", stdinTty)
+      else Reflect.deleteProperty(process.stdin, "isTTY")
+      if (stdoutTty) Object.defineProperty(process.stdout, "isTTY", stdoutTty)
+      else Reflect.deleteProperty(process.stdout, "isTTY")
+    }
   })
 })
 
