@@ -440,6 +440,34 @@ describe("host parsing", () => {
     expect(isValidHost("bad host")).toBe(false)
   })
 
+  it("rejects hosts containing ASCII control characters (R-0000125)", () => {
+    expect(isValidHost(`evil${String.fromCharCode(0)}.example.com`)).toBe(false)
+    expect(isValidHost(`evil${String.fromCharCode(0x0d)}.example.com`)).toBe(false)
+    expect(isValidHost(`evil${String.fromCharCode(0x0a)}.example.com`)).toBe(false)
+    expect(isValidHost(`evil${String.fromCharCode(0x09)}.example.com`)).toBe(false)
+    expect(isValidHost(`evil${String.fromCharCode(0x1b)}.example.com`)).toBe(false)
+    expect(isValidHost(`evil${String.fromCharCode(0x7f)}.example.com`)).toBe(false)
+  })
+
+  it("rejects hosts containing C1 control characters (R-0000125)", () => {
+    expect(isValidHost(`evil${String.fromCharCode(0x80)}.example.com`)).toBe(false)
+    expect(isValidHost(`evil${String.fromCharCode(0x9f)}.example.com`)).toBe(false)
+  })
+
+  it("rejects hosts containing Unicode bidi override codepoints (R-0000125)", () => {
+    expect(isValidHost(`evil${String.fromCodePoint(0x20_2e)}.example.com`)).toBe(false)
+    expect(isValidHost(`evil${String.fromCodePoint(0x20_2d)}.example.com`)).toBe(false)
+    expect(isValidHost(`evil${String.fromCodePoint(0x20_0e)}.example.com`)).toBe(false)
+    expect(isValidHost(`evil${String.fromCodePoint(0x20_0f)}.example.com`)).toBe(false)
+    expect(isValidHost(`evil${String.fromCodePoint(0x20_66)}.example.com`)).toBe(false)
+    expect(isValidHost(`evil${String.fromCodePoint(0x20_69)}.example.com`)).toBe(false)
+  })
+
+  it("rejects shell-metachar payloads via whitespace or NUL framing (R-0000125)", () => {
+    expect(isValidHost("evil.example.com;rm -rf /")).toBe(false)
+    expect(isValidHost(`evil.example.com${String.fromCharCode(0)};rm -rf /`)).toBe(false)
+  })
+
   it("validates a trimmed host", () => {
     expect(validateHost(" example.com ")).toBe("example.com")
   })
@@ -852,6 +880,86 @@ describe("readHostFingerprintViaSsh2", () => {
         clientFactory: () => fakeClient,
       })
     ).rejects.toThrow(/Invalid SSH host key buffer/v)
+  })
+
+  // R-0000127: ssh2 cannot detect a TCP half-open state; if neither close
+  // nor error fires, the Promise must still settle through the watchdog.
+  it("rejects through the watchdog when ssh2 never fires close or error", async () => {
+    vi.useFakeTimers()
+
+    const fakeClient = {
+      connect: vi.fn(() => {
+        // Intentionally do not invoke any handler — simulate a half-open
+        // socket where neither error nor close ever fire.
+      }),
+      end: vi.fn(),
+      handlers: {} as Record<string, (error?: Error) => void>,
+      on: vi.fn((event: string, handler: (error?: Error) => void) => {
+        fakeClient.handlers[event] = handler
+        return fakeClient
+      }),
+      removeAllListeners: vi.fn(),
+    }
+
+    try {
+      const promise = readHostFingerprintViaSsh2("example.com", {
+        clientFactory: () => fakeClient,
+        readyTimeoutMs: 5_000,
+      })
+
+      // Attach the rejection assertion before advancing timers so the
+      // promise's rejection handler is wired up when the watchdog fires.
+      const assertion = expect(promise).rejects.toThrow(
+        /host key scan timed out after 10000ms/v
+      )
+
+      // Watchdog is armed at readyTimeoutMs * 2 = 10_000ms.
+      await vi.advanceTimersByTimeAsync(10_001)
+      await assertion
+
+      expect(fakeClient.removeAllListeners).toHaveBeenCalled()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  // R-0000127: when the close handler resolves first, the watchdog must be
+  // cleared so it cannot keep the event loop alive or fire spuriously.
+  it("clears the watchdog on a successful resolution", async () => {
+    const hostKey = Buffer.from(
+      "0000000b7373682d6564323535313900000020e04a2a8d2c1b47d9c6b4d114e9d2a1ea4ad8eb49c1a14851771ab0ef0457f12",
+      "hex"
+    )
+
+    const clearTimeoutSpy = vi.spyOn(globalThis, "clearTimeout")
+
+    try {
+      const fakeClient = {
+        connect: vi.fn((config: { hostVerifier?: (key: Buffer) => boolean }) => {
+          config.hostVerifier?.(hostKey)
+          setImmediate(() => {
+            fakeClient.handlers.error(new Error("Host denied"))
+          })
+        }),
+        end: vi.fn(),
+        handlers: {} as Record<string, (error?: Error) => void>,
+        on: vi.fn((event: string, handler: (error?: Error) => void) => {
+          fakeClient.handlers[event] = handler
+          return fakeClient
+        }),
+        removeAllListeners: vi.fn(),
+      }
+
+      await expect(
+        readHostFingerprintViaSsh2("example.com", {
+          clientFactory: () => fakeClient,
+        })
+      ).resolves.toMatchObject({ algorithm: "ssh-ed25519" })
+
+      expect(clearTimeoutSpy).toHaveBeenCalled()
+    } finally {
+      clearTimeoutSpy.mockRestore()
+    }
   })
 })
 

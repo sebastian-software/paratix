@@ -172,7 +172,19 @@ async function readFingerprintFromClient(
   let capturedResult: HostFingerprintScanResult | null = null
 
   return new Promise((resolve, reject) => {
+    // R-0000127: ssh2 only emits "ready"/"close"/"error" through Client. If
+    // the TCP socket goes into a half-open state (peer firewall blackholes
+    // packets after the handshake started, NAT entry expires, …) neither
+    // event fires and the Promise hangs forever. We arm a fallback watchdog
+    // at twice the readyTimeoutMs to guarantee that the Promise always
+    // settles. The handler runs through rejectOnce so a real error/close
+    // event that arrives later is still ignored.
+    let watchdog: NodeJS.Timeout | null = null
     const cleanup = (): void => {
+      if (watchdog != null) {
+        clearTimeout(watchdog)
+        watchdog = null
+      }
       cleanupClient(client)
     }
     const { rejectOnce, resolveOnce } = createSettlementHandlers({
@@ -182,6 +194,17 @@ async function readFingerprintFromClient(
       reject,
       resolve,
     })
+    watchdog = setTimeout(() => {
+      rejectOnce(
+        new Error(
+          `host key scan timed out after ${String(readyTimeoutMs * 2)}ms (TCP half-open?)`
+        )
+      )
+    }, readyTimeoutMs * 2)
+    // The watchdog must not keep the Node.js event loop alive after the
+    // Promise has otherwise settled. unref is best-effort; on platforms
+    // without it the explicit clearTimeout in cleanup still wins.
+    watchdog.unref?.()
     registerFingerprintListeners({
       client,
       onScanResult: () => capturedResult,
