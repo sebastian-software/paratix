@@ -139,8 +139,10 @@ async function dryRunSshdConfig(
  * Parse a single sshd_config line into its directive name and value, or
  * `null` when the line is empty / a comment / cannot be split into the
  * `<directive> <value>` shape. Leading whitespace is allowed (Match-block
- * lines are commonly indented), and inline `# comment` suffixes are
- * stripped from the value side.
+ * lines are commonly indented). sshd_config only recognises whole-line
+ * comments (`#` at the start of the trimmed line), so `#` characters are
+ * preserved verbatim inside the value — matching the apply path
+ * (`applySshdSettingToContent`) which writes the value as-is.
  *
  * @param rawLine - A single line from sshd_config.
  * @returns The parsed directive and trimmed value, or `null` if the line
@@ -150,15 +152,14 @@ function parseSshdConfigLine(rawLine: string): { directive: string; value: strin
   const stripped = rawLine.replace(/^\s+/v, "")
   if (stripped.length === 0 || stripped.startsWith("#")) return null
 
-  const withoutComment = stripped.split("#", 1)[0]
   // Find the boundary between the directive and its value via the first
   // whitespace character. This is unambiguous for sshd_config: directive
   // names never contain whitespace.
-  const firstSpace = withoutComment.search(/\s/v)
+  const firstSpace = stripped.search(/\s/v)
   if (firstSpace <= 0) return null
 
-  const directive = withoutComment.slice(0, firstSpace)
-  const value = withoutComment.slice(firstSpace).trim()
+  const directive = stripped.slice(0, firstSpace)
+  const value = stripped.slice(firstSpace).trim()
   if (value.length === 0) return null
 
   return { directive, value }

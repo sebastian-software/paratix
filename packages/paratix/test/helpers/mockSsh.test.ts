@@ -12,6 +12,20 @@ describe("createMockSsh", () => {
     await expect(ssh.output("cat /tmp/file")).resolves.toBe("")
     await expect(ssh.test("test -f /tmp/file")).resolves.toBe(true)
   })
+
+  it("records addPort, removePort and updateHost invocations", () => {
+    const ssh = createMockSsh()
+
+    ssh.addPort(2022)
+    ssh.addPort(8080)
+    ssh.removePort(2022)
+    ssh.updateHost("10.0.0.1")
+    ssh.updateHost("10.0.0.2")
+
+    expect(ssh.addPortCalls).toStrictEqual([2022, 8080])
+    expect(ssh.removePortCalls).toStrictEqual([2022])
+    expect(ssh.updateHostCalls).toStrictEqual(["10.0.0.1", "10.0.0.2"])
+  })
 })
 
 describe("createStrictMockSsh", () => {

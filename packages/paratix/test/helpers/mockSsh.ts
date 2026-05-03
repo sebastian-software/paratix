@@ -23,7 +23,13 @@ type MockSshOptions = {
 /** Recorded `ssh.exec` invocation: the command string plus the options it received. */
 export type ExecCall = { command: string; options: ExecOptions | undefined }
 
-type MockSsh = { calls: string[]; execCalls: ExecCall[] } & SshConnection
+type MockSsh = {
+  addPortCalls: number[]
+  calls: string[]
+  execCalls: ExecCall[]
+  removePortCalls: number[]
+  updateHostCalls: string[]
+} & SshConnection
 
 function isAllowed(command: string, allowed?: string[]): boolean {
   return allowed?.includes(command) ?? false
@@ -108,14 +114,55 @@ function createTest(
   }
 }
 
+type RecordingSpies = {
+  addPort: (port: number) => void
+  addPortCalls: number[]
+  removePort: (port: number) => void
+  removePortCalls: number[]
+  updateHost: (host: string) => void
+  updateHostCalls: string[]
+}
+
+function createRecordingSpies(): RecordingSpies {
+  const addPortCalls: number[] = []
+  const removePortCalls: number[] = []
+  const updateHostCalls: string[] = []
+  return {
+    addPort: (port) => {
+      addPortCalls.push(port)
+    },
+    addPortCalls,
+    removePort: (port) => {
+      removePortCalls.push(port)
+    },
+    removePortCalls,
+    updateHost: (host) => {
+      updateHostCalls.push(host)
+    },
+    updateHostCalls,
+  }
+}
+
+function getMockConnectionInfo(): ReturnType<SshConnection["getConnectionInfo"]> {
+  return {
+    authMethod: "privateKey",
+    host: "1.2.3.4",
+    port: 22,
+    privateKeyPath: "~/.ssh/id",
+    user: "root",
+  }
+}
+
 export function createMockSsh(responses?: MockResponses, options?: MockSshOptions): MockSsh {
   const calls: string[] = []
   const execCalls: ExecCall[] = []
+  const spies = createRecordingSpies()
   const exec = createExec({ calls, execCalls }, responses, options)
   const output = createOutput(calls, responses, options)
   const test = createTest(calls, responses, options)
   return {
-    addPort: noopMethod,
+    addPort: spies.addPort,
+    addPortCalls: spies.addPortCalls,
     calls,
     disconnect: noopMethod,
     downloadFile: noop,
@@ -124,15 +171,7 @@ export function createMockSsh(responses?: MockResponses, options?: MockSshOption
     async exists(path) {
       return this.test(`[ -e ${shellQuote(path)} ]`)
     },
-    getConnectionInfo() {
-      return {
-        authMethod: "privateKey",
-        host: "1.2.3.4",
-        port: 22,
-        privateKeyPath: "~/.ssh/id",
-        user: "root",
-      }
-    },
+    getConnectionInfo: getMockConnectionInfo,
     async lines(command) {
       const out = await this.output(command)
       return out.length > 0 ? out.split("\n") : []
@@ -142,14 +181,16 @@ export function createMockSsh(responses?: MockResponses, options?: MockSshOption
     async readFile(path) {
       return this.output(`cat ${shellQuote(path)}`)
     },
-    removePort: noopMethod,
+    removePort: spies.removePort,
+    removePortCalls: spies.removePortCalls,
     async sha256(path) {
       const exists = await this.test(`[ -f ${shellQuote(path)} ]`)
       if (!exists) return null
       return responses?.[`sha256sum ${shellQuote(path)}`]?.stdout?.split(/\s+/v)[0] ?? "abc123"
     },
     test,
-    updateHost: noopMethod,
+    updateHost: spies.updateHost,
+    updateHostCalls: spies.updateHostCalls,
     uploadFile: noop,
     writeFile: noop,
   }
