@@ -116,7 +116,7 @@ describe("pkg.installed", () => {
   it("apply returns changed when install succeeds (apt)", async () => {
     const ssh = createMockSsh({
       ...APT_FOUND,
-      "DEBIAN_FRONTEND=noninteractive apt-get install -y 'nginx' 'curl'": { code: 0 },
+      "DEBIAN_FRONTEND=noninteractive apt-get install -y -- 'nginx' 'curl'": { code: 0 },
     })
     const mod = pkg.installed("nginx", "curl")
     expect(await mod.apply(ssh, emptyEnv)).toStrictEqual({ status: "changed" })
@@ -125,14 +125,14 @@ describe("pkg.installed", () => {
   it("apply forwards options.timeout when last argument is an options object", async () => {
     const ssh = createMockSsh({
       ...APT_FOUND,
-      "DEBIAN_FRONTEND=noninteractive apt-get install -y 'texlive-full'": { code: 0 },
+      "DEBIAN_FRONTEND=noninteractive apt-get install -y -- 'texlive-full'": { code: 0 },
     })
     const mod = pkg.installed("texlive-full", { timeout: 600_000 })
     const result = await mod.apply(ssh, emptyEnv)
     expect(result).toStrictEqual({ status: "changed" })
     expect(mod.name).toBe("package.installed: texlive-full")
     const installCall = ssh.execCalls.find(
-      (c) => c.command === "DEBIAN_FRONTEND=noninteractive apt-get install -y 'texlive-full'"
+      (c) => c.command === "DEBIAN_FRONTEND=noninteractive apt-get install -y -- 'texlive-full'"
     )
     expect(installCall?.options?.timeout).toBe(600_000)
   })
@@ -140,12 +140,12 @@ describe("pkg.installed", () => {
   it("apply without options does not set a timeout key (installed)", async () => {
     const ssh = createMockSsh({
       ...APT_FOUND,
-      "DEBIAN_FRONTEND=noninteractive apt-get install -y 'nginx'": { code: 0 },
+      "DEBIAN_FRONTEND=noninteractive apt-get install -y -- 'nginx'": { code: 0 },
     })
     const mod = pkg.installed("nginx")
     await mod.apply(ssh, emptyEnv)
     const installCall = ssh.execCalls.find(
-      (c) => c.command === "DEBIAN_FRONTEND=noninteractive apt-get install -y 'nginx'"
+      (c) => c.command === "DEBIAN_FRONTEND=noninteractive apt-get install -y -- 'nginx'"
     )
     expect(installCall?.options).not.toHaveProperty("timeout")
   })
@@ -169,7 +169,7 @@ describe("pkg.installed", () => {
   it("apply returns failed when install command fails", async () => {
     const ssh = createMockSsh({
       ...APT_FOUND,
-      "DEBIAN_FRONTEND=noninteractive apt-get install -y 'nginx'": { code: 1 },
+      "DEBIAN_FRONTEND=noninteractive apt-get install -y -- 'nginx'": { code: 1 },
     })
     const mod = pkg.installed("nginx")
     const result = await mod.apply(ssh, emptyEnv)
@@ -190,6 +190,13 @@ describe("pkg.installed", () => {
   it("throws when called with no packages", () => {
     expect(() => pkg.installed()).toThrow("at least one package name is required")
   })
+
+  it.each(["", " ", "nginx curl", "nginx\ncurl", "nginx\rcurl", "-o"])(
+    "throws for invalid package name %j",
+    (packageName) => {
+      expect(() => pkg.installed(packageName)).toThrow("invalid package name")
+    }
+  )
 })
 
 // ---------------------------------------------------------------------------
@@ -231,7 +238,7 @@ describe("pkg.absent", () => {
   it("apply returns changed when remove succeeds (apt)", async () => {
     const ssh = createMockSsh({
       ...APT_FOUND,
-      "DEBIAN_FRONTEND=noninteractive apt-get remove -y 'nginx'": { code: 0 },
+      "DEBIAN_FRONTEND=noninteractive apt-get remove -y -- 'nginx'": { code: 0 },
     })
     const mod = pkg.absent("nginx")
     expect(await mod.apply(ssh, emptyEnv)).toStrictEqual({ status: "changed" })
@@ -240,13 +247,13 @@ describe("pkg.absent", () => {
   it("apply forwards options.timeout when last argument is an options object", async () => {
     const ssh = createMockSsh({
       ...APT_FOUND,
-      "DEBIAN_FRONTEND=noninteractive apt-get remove -y 'nginx'": { code: 0 },
+      "DEBIAN_FRONTEND=noninteractive apt-get remove -y -- 'nginx'": { code: 0 },
     })
     const mod = pkg.absent("nginx", { timeout: 300_000 })
     expect(await mod.apply(ssh, emptyEnv)).toStrictEqual({ status: "changed" })
     expect(mod.name).toBe("package.absent: nginx")
     const removeCall = ssh.execCalls.find(
-      (c) => c.command === "DEBIAN_FRONTEND=noninteractive apt-get remove -y 'nginx'"
+      (c) => c.command === "DEBIAN_FRONTEND=noninteractive apt-get remove -y -- 'nginx'"
     )
     expect(removeCall?.options?.timeout).toBe(300_000)
   })
@@ -271,6 +278,13 @@ describe("pkg.absent", () => {
   it("throws when called with no packages", () => {
     expect(() => pkg.absent()).toThrow("at least one package name is required")
   })
+
+  it.each(["", " ", "nginx curl", "nginx\ncurl", "nginx\rcurl", "-o"])(
+    "throws for invalid package name %j",
+    (packageName) => {
+      expect(() => pkg.absent(packageName)).toThrow("invalid package name")
+    }
+  )
 })
 
 // ---------------------------------------------------------------------------
@@ -524,31 +538,31 @@ describe("package manager detection", () => {
   it("uses apt when which apt-get succeeds", async () => {
     const ssh = createMockSsh({
       ...APT_FOUND,
-      "DEBIAN_FRONTEND=noninteractive apt-get install -y 'nginx'": { code: 0 },
+      "DEBIAN_FRONTEND=noninteractive apt-get install -y -- 'nginx'": { code: 0 },
     })
     const mod = pkg.installed("nginx")
     await mod.apply(ssh, emptyEnv)
-    expect(ssh.calls).toContain("DEBIAN_FRONTEND=noninteractive apt-get install -y 'nginx'")
+    expect(ssh.calls).toContain("DEBIAN_FRONTEND=noninteractive apt-get install -y -- 'nginx'")
   })
 
   it("uses dnf when apt-get is absent but dnf is present", async () => {
     const ssh = createMockSsh({
       ...DNF_FOUND,
-      "dnf install -y 'nginx'": { code: 0 },
+      "dnf install -y -- 'nginx'": { code: 0 },
     })
     const mod = pkg.installed("nginx")
     await mod.apply(ssh, emptyEnv)
-    expect(ssh.calls).toContain("dnf install -y 'nginx'")
+    expect(ssh.calls).toContain("dnf install -y -- 'nginx'")
   })
 
   it("uses yum when apt-get and dnf are absent but yum is present", async () => {
     const ssh = createMockSsh({
       ...YUM_FOUND,
-      "yum install -y 'nginx'": { code: 0 },
+      "yum install -y -- 'nginx'": { code: 0 },
     })
     const mod = pkg.installed("nginx")
     await mod.apply(ssh, emptyEnv)
-    expect(ssh.calls).toContain("yum install -y 'nginx'")
+    expect(ssh.calls).toContain("yum install -y -- 'nginx'")
   })
 
   it("uses apk when apt-get, dnf and yum are absent but apk is present", async () => {
@@ -564,11 +578,11 @@ describe("package manager detection", () => {
   it("uses correct remove command for dnf", async () => {
     const ssh = createMockSsh({
       ...DNF_FOUND,
-      "dnf remove -y 'nginx'": { code: 0 },
+      "dnf remove -y -- 'nginx'": { code: 0 },
     })
     const mod = pkg.absent("nginx")
     await mod.apply(ssh, emptyEnv)
-    expect(ssh.calls).toContain("dnf remove -y 'nginx'")
+    expect(ssh.calls).toContain("dnf remove -y -- 'nginx'")
   })
 
   it("uses correct remove command for apk", async () => {

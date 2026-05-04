@@ -38,6 +38,18 @@ function splitPackagesAndOptions(values: ReadonlyArray<string | UpgradeOptions>)
   return { options, packages }
 }
 
+function validatePackageNames(moduleName: string, packages: readonly string[]): void {
+  if (packages.length === 0) {
+    throw new Error(`${moduleName}: at least one package name is required`)
+  }
+
+  for (const packageName of packages) {
+    if (packageName.length === 0 || /\s/v.test(packageName) || packageName.startsWith("-")) {
+      throw new Error(`${moduleName}: invalid package name ${JSON.stringify(packageName)}`)
+    }
+  }
+}
+
 /** Supported system package managers. */
 type PackageManager = "apk" | "apt" | "dnf" | "yum"
 
@@ -46,16 +58,16 @@ const pmCache = new WeakMap<SshConnection, null | PackageManager>()
 
 const INSTALL_COMMANDS = {
   apk: (pkgs: string) => `apk add ${pkgs}`,
-  apt: (pkgs: string) => `DEBIAN_FRONTEND=noninteractive apt-get install -y ${pkgs}`,
-  dnf: (pkgs: string) => `dnf install -y ${pkgs}`,
-  yum: (pkgs: string) => `yum install -y ${pkgs}`,
+  apt: (pkgs: string) => `DEBIAN_FRONTEND=noninteractive apt-get install -y -- ${pkgs}`,
+  dnf: (pkgs: string) => `dnf install -y -- ${pkgs}`,
+  yum: (pkgs: string) => `yum install -y -- ${pkgs}`,
 } as const
 
 const REMOVE_COMMANDS = {
   apk: (pkgs: string) => `apk del ${pkgs}`,
-  apt: (pkgs: string) => `DEBIAN_FRONTEND=noninteractive apt-get remove -y ${pkgs}`,
-  dnf: (pkgs: string) => `dnf remove -y ${pkgs}`,
-  yum: (pkgs: string) => `yum remove -y ${pkgs}`,
+  apt: (pkgs: string) => `DEBIAN_FRONTEND=noninteractive apt-get remove -y -- ${pkgs}`,
+  dnf: (pkgs: string) => `dnf remove -y -- ${pkgs}`,
+  yum: (pkgs: string) => `yum remove -y -- ${pkgs}`,
 } as const
 
 const UPDATE_COMMANDS = {
@@ -180,9 +192,7 @@ export const pkg = {
    */
   absent(...packagesAndOptions: Array<string | UpgradeOptions>): Module {
     const { options, packages } = splitPackagesAndOptions(packagesAndOptions)
-    if (packages.length === 0) {
-      throw new Error("package.absent: at least one package name is required")
-    }
+    validatePackageNames("package.absent", packages)
     return {
       async apply(ssh: null | SshConnection): Promise<ModuleResult> {
         if (!ssh)
@@ -232,9 +242,7 @@ export const pkg = {
    */
   installed(...packagesAndOptions: Array<string | UpgradeOptions>): Module {
     const { options, packages } = splitPackagesAndOptions(packagesAndOptions)
-    if (packages.length === 0) {
-      throw new Error("package.installed: at least one package name is required")
-    }
+    validatePackageNames("package.installed", packages)
     return {
       async apply(ssh: null | SshConnection): Promise<ModuleResult> {
         if (!ssh) {
