@@ -158,6 +158,11 @@ describe("system.reboot — apply", () => {
 })
 
 describe("system.uptime — check", () => {
+  it("is marked as a dry-run meta producer", () => {
+    const mod = system.uptime()
+    expect(mod._dryRunMetaProducer).toBe(true)
+  })
+
   it("returns needs-apply with a valid ssh connection", async () => {
     const ssh = createMockSsh()
     const mod = system.uptime()
@@ -224,6 +229,11 @@ const FACTS_RESPONSES = {
 }
 
 describe("system.facts — check", () => {
+  it("is marked as a dry-run meta producer", () => {
+    const mod = system.facts()
+    expect(mod._dryRunMetaProducer).toBe(true)
+  })
+
   it("returns needs-apply with valid ssh", async () => {
     const ssh = createMockSsh()
     const mod = system.facts()

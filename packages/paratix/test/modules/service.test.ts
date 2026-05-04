@@ -324,6 +324,11 @@ describe("service.reload", () => {
 })
 
 describe("service.facts", () => {
+  it("is marked as a dry-run meta producer", () => {
+    const mod = service.facts()
+    expect(mod._dryRunMetaProducer).toBe(true)
+  })
+
   it("check always returns needs-apply", async () => {
     const mod = service.facts()
     const result = await mod.check(null, emptyEnv)

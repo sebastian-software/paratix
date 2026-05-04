@@ -90,6 +90,11 @@ const emptyEnv = {}
 // ---------------------------------------------------------------------------
 
 describe("op.resolve — check", () => {
+  it("is marked as a dry-run meta producer", () => {
+    const module_ = op.resolve({})
+    expect(module_._dryRunMetaProducer).toBe(true)
+  })
+
   it("always returns needs-apply", async () => {
     const module_ = op.resolve({})
     const result = await module_.check(null, emptyEnv)
