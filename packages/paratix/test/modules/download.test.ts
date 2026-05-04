@@ -1,6 +1,8 @@
 import { createHash } from "node:crypto"
 import { describe, expect, it, vi } from "vitest"
 
+import type { ExecOptions } from "../../src/types.js"
+
 import { download } from "../../src/modules/download.js"
 import { createMockSsh as createBaseMockSsh } from "../helpers/mockSsh.js"
 
@@ -95,6 +97,30 @@ function downloadMktempStub(
   return {
     [`mktemp "$(dirname '${destination}')/.paratix-download.XXXXXX"`]: {
       stdout: `${temporaryPath}\n`,
+    },
+  }
+}
+
+function createMockSshWithFailingCurl(parameters: {
+  curlCommand: string
+  curlError: Error
+  destination: string
+  temporaryDestination: string
+}): ReturnType<typeof createMockSsh> {
+  const base = createMockSsh(
+    downloadMktempStub(parameters.destination, parameters.temporaryDestination)
+  )
+
+  return {
+    ...base,
+    async exec(command: string, options?: ExecOptions) {
+      if (command === parameters.curlCommand) {
+        base.calls.push(command)
+        base.execCalls.push({ command, options })
+        throw parameters.curlError
+      }
+
+      return base.exec(command, options)
     },
   }
 }
@@ -210,6 +236,24 @@ describe("download.url", () => {
       const curlCall = mockSsh.execCalls.find((entry) => entry.command.startsWith("curl -fsSL"))
       expect(curlCall?.options?.input).toBe(`url = "${url}"\n`)
       expect(mockSsh.calls).toContain(`mv '${temporaryDestination}' '${destination}'`)
+    })
+
+    it("cleans up the temporary file and leaves destination untouched when curl fails", async () => {
+      const curlCommand = `curl -fsSL -o '${temporaryDestination}' ${httpsOnlyCurlProtocolFlags} --config -`
+      const curlError = new Error("curl failed")
+      const mockSsh = createMockSshWithFailingCurl({
+        curlCommand,
+        curlError,
+        destination,
+        temporaryDestination,
+      })
+      const mod = download.url(destination, url, allowUnverifiedDownload)
+
+      await expect(mod.apply(mockSsh, emptyEnv)).rejects.toBe(curlError)
+
+      expect(mockSsh.calls).toContain(curlCommand)
+      expect(mockSsh.calls).toContain(`rm -f '${temporaryDestination}'`)
+      expect(mockSsh.calls).not.toContain(`mv '${temporaryDestination}' '${destination}'`)
     })
 
     it("creates target directory via mkdir -p", async () => {
@@ -801,6 +845,24 @@ describe("download.github", () => {
       expect(mockSsh.calls).toContain(`mv '${temporaryDestination}' '${destination}'`)
     })
 
+    it("cleans up the temporary file and leaves destination untouched when curl fails", async () => {
+      const curlCommand = `curl -fsSL -o '${temporaryDestination}' ${httpsOnlyCurlProtocolFlags} --config -`
+      const curlError = new Error("curl failed")
+      const mockSsh = createMockSshWithFailingCurl({
+        curlCommand,
+        curlError,
+        destination,
+        temporaryDestination,
+      })
+      const mod = download.github(destination, { ...allowUnverifiedDownload, asset, repo, tag })
+
+      await expect(mod.apply(mockSsh, emptyEnv)).rejects.toBe(curlError)
+
+      expect(mockSsh.calls).toContain(curlCommand)
+      expect(mockSsh.calls).toContain(`rm -f '${temporaryDestination}'`)
+      expect(mockSsh.calls).not.toContain(`mv '${temporaryDestination}' '${destination}'`)
+    })
+
     it("sends Authorization and Accept via stdin when a token is provided", async () => {
       // R-0000037: the GitHub PAT must not be inlined into the curl argv,
       // because sudo logging would persist it in /var/log/auth.log and
@@ -1204,6 +1266,25 @@ describe("download.large", () => {
       expect(curlCall?.options?.input).toBe(`url = "${url}"\n`)
       expect(mockSsh.calls).toContain(`mv '${temporaryDestination}' '${destination}'`)
       expect(mockSsh.calls).toContain(`touch /var/lib/paratix/flags/'${flagName}'`)
+    })
+
+    it("cleans up the temporary file and does not set the flag when curl fails", async () => {
+      const curlCommand = `curl -fsSL -o '${temporaryDestination}' ${httpsOnlyCurlProtocolFlags} --config -`
+      const curlError = new Error("curl failed")
+      const mockSsh = createMockSshWithFailingCurl({
+        curlCommand,
+        curlError,
+        destination,
+        temporaryDestination,
+      })
+      const mod = download.large(destination, url, allowUnverifiedDownload)
+
+      await expect(mod.apply(mockSsh, emptyEnv)).rejects.toBe(curlError)
+
+      expect(mockSsh.calls).toContain(curlCommand)
+      expect(mockSsh.calls).toContain(`rm -f '${temporaryDestination}'`)
+      expect(mockSsh.calls).not.toContain(`mv '${temporaryDestination}' '${destination}'`)
+      expect(mockSsh.calls).not.toContain(`touch /var/lib/paratix/flags/'${flagName}'`)
     })
 
     it("creates flags directory before setting flag", async () => {
