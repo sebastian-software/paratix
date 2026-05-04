@@ -17,6 +17,11 @@ If you already know tools like Ansible, the core idea will feel familiar. The di
 - **Readable execution model**: recipes, signals, and checkpoints keep larger playbooks structured and predictable.
 - **Bootstrap support for real servers**: scaffold a hardened first-run flow and continue from a dedicated admin user.
 
+## Prerequisites
+
+- Node.js `>=24.0.0`
+- pnpm `10.30.3` or newer
+
 ## Usage
 
 For most users, the fastest way to start is the scaffold:
