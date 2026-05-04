@@ -93,6 +93,40 @@ type SshRuntimeState = {
   ports: number[]
 }
 
+function getAbortReason(signal: AbortSignal): Error {
+  return signal.reason instanceof Error ? signal.reason : new Error("SSH operation aborted")
+}
+
+async function sleepWithAbort(delay: number, abortSignal?: AbortSignal): Promise<void> {
+  if (delay <= 0) return
+  if (abortSignal?.aborted === true) throw getAbortReason(abortSignal)
+  if (abortSignal == null) {
+    await new Promise<void>((resolve) => {
+      setTimeout(resolve, delay)
+    })
+    return
+  }
+
+  await new Promise<void>((resolve, reject) => {
+    let timer: ReturnType<typeof setTimeout>
+    let handleAbort: () => void
+    const cleanup = (): void => {
+      abortSignal.removeEventListener("abort", handleAbort)
+    }
+    handleAbort = (): void => {
+      clearTimeout(timer)
+      cleanup()
+      reject(getAbortReason(abortSignal))
+    }
+    timer = setTimeout(() => {
+      cleanup()
+      resolve()
+    }, delay)
+
+    abortSignal.addEventListener("abort", handleAbort, { once: true })
+  })
+}
+
 export class SshConnectionImpl implements SshConnection {
   private agentSocket: null | string = null
   private authMethod: AuthMethod = null
@@ -288,9 +322,7 @@ export class SshConnectionImpl implements SshConnection {
           (JITTER_BASE + Math.random() * JITTER_RANGE)
         const delay = Math.min(jitter, Math.max(0, deadline - Date.now()))
         // eslint-disable-next-line no-await-in-loop
-        await new Promise<void>((resolve) => {
-          setTimeout(resolve, delay)
-        })
+        await sleepWithAbort(delay, this.promptAbortSignal)
         attempt++
       }
     }
@@ -962,6 +994,18 @@ trap - EXIT
     await this.cacheAndValidateSudoPassword(password)
   }
 
+  private registerConnectedClient(client: Client, port: number): void {
+    client.on("close", () => {
+      const error = new Error("SSH connection closed unexpectedly")
+      for (const rejectFunction of this.pendingRejects) {
+        rejectFunction(error)
+      }
+      this.pendingRejects.clear()
+    })
+    this.client = client
+    this.connectedPort = port
+  }
+
   private async setRemoteTempMode(remotePath: string, mode: string): Promise<void> {
     validateMode(mode)
     const command = `chmod ${shellQuote(mode)} ${shellQuote(remotePath)}`
@@ -1026,6 +1070,7 @@ trap - EXIT
         const wrappedVerifier = this.wrapHostVerifier(verifier.hostVerifier)
         // eslint-disable-next-line no-await-in-loop
         await tryConnectOnPort({
+          abortSignal: this.promptAbortSignal,
           agent,
           agentForward: this.config.agentForward,
           client,
@@ -1039,20 +1084,13 @@ trap - EXIT
         // Ensure the host key is persisted to disk before returning
         // eslint-disable-next-line no-await-in-loop
         if (verifier.pendingPersist != null) await verifier.pendingPersist
-        client.on("close", () => {
-          const error = new Error("SSH connection closed unexpectedly")
-          for (const rejectFunction of this.pendingRejects) {
-            rejectFunction(error)
-          }
-          this.pendingRejects.clear()
-        })
-        this.client = client
-        this.connectedPort = port
+        this.registerConnectedClient(client, port)
         return true
       } catch (error) {
         // Always release the failed Client so its sockets, buffers, and
         // listeners do not leak before the loop tries the next port.
         cleanupFailedSshClient(client)
+        if (this.promptAbortSignal?.aborted === true) throw getAbortReason(this.promptAbortSignal)
         if (error instanceof HostKeyVerificationError) throw error
         // Try next port
       }

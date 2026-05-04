@@ -624,6 +624,41 @@ describe("SshConnectionImpl", () => {
       expect((ssh as any).promptAbortSignal).toBe(abortController.signal)
     })
 
+    it("aborts an in-flight reconnect attempt without retrying", async () => {
+      const abortController = new AbortController()
+      const abortError = new Error("Interrupted by SIGINT")
+      vi.mocked(tryConnectOnPort).mockResolvedValueOnce()
+
+      const ssh = makeSshInstance({ maxReconnectAttempts: 3, reconnectTimeout: 300_000 })
+      await ssh.connect({ abortSignal: abortController.signal })
+
+      vi.mocked(tryConnectOnPort).mockImplementationOnce(
+        async ({ abortSignal }) =>
+          new Promise<void>((_resolve, reject) => {
+            abortSignal?.addEventListener(
+              "abort",
+              () => {
+                reject(abortSignal.reason)
+              },
+              { once: true }
+            )
+          })
+      )
+
+      const reconnectPromise = ssh.reconnect()
+      reconnectPromise.catch(() => {
+        /* handled below */
+      })
+      await vi.waitFor(() => {
+        expect(tryConnectOnPort).toHaveBeenCalledTimes(2)
+      })
+
+      abortController.abort(abortError)
+
+      await expect(reconnectPromise).rejects.toThrow("Interrupted by SIGINT")
+      expect(tryConnectOnPort).toHaveBeenCalledTimes(2)
+    })
+
     it("pins host key on initial connection", async () => {
       const hostKey = Buffer.from("new-host-key")
 
@@ -1072,6 +1107,42 @@ describe("SshConnectionImpl", () => {
       ]
       expect(callArgs.privateKey).toBe(fakeKeyBuffer)
       expect(Buffer.isBuffer(callArgs.privateKey)).toBe(true)
+    })
+
+    it("aborts an in-flight initial connect and does not try the next port", async () => {
+      const abortController = new AbortController()
+      const abortError = new Error("Interrupted by SIGINT")
+      vi.mocked(tryConnectOnPort).mockImplementationOnce(
+        async ({ abortSignal }) =>
+          new Promise<void>((_resolve, reject) => {
+            abortSignal?.addEventListener(
+              "abort",
+              () => {
+                reject(abortSignal.reason)
+              },
+              { once: true }
+            )
+          })
+      )
+
+      const ssh = makeSshInstance({ ports: [22, 2222] })
+      const connectPromise = ssh.connect({ abortSignal: abortController.signal })
+      connectPromise.catch(() => {
+        /* handled below */
+      })
+      await vi.waitFor(() => {
+        expect(tryConnectOnPort).toHaveBeenCalledOnce()
+      })
+
+      const [callArgs] = vi.mocked(tryConnectOnPort).mock.calls[0] as [
+        Parameters<typeof tryConnectOnPort>[0],
+      ]
+      expect(callArgs.abortSignal).toBe(abortController.signal)
+
+      abortController.abort(abortError)
+
+      await expect(connectPromise).rejects.toThrow("Interrupted by SIGINT")
+      expect(tryConnectOnPort).toHaveBeenCalledOnce()
     })
 
     it("expands ~/ privateKey paths for connect() and getConnectionInfo()", async () => {

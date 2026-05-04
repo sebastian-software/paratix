@@ -977,6 +977,28 @@ describe("tryConnectOnPort", () => {
     expect(client.listenerCount("ready")).toBe(0)
     expect(client.listenerCount("error")).toBe(0)
   })
+
+  it("cleans up the client and timer when the connect attempt is aborted", async () => {
+    vi.useFakeTimers()
+    const client = createMockClient()
+    const abortController = new AbortController()
+    const abortError = new Error("Interrupted by SIGINT")
+    const promise = tryConnectOnPort({
+      abortSignal: abortController.signal,
+      client,
+      host: "example.test",
+      port: 2222,
+      username: "root",
+    })
+
+    abortController.abort(abortError)
+
+    await expect(promise).rejects.toThrow("Interrupted by SIGINT")
+    expect(client.end).toHaveBeenCalledOnce()
+    expect(client.listenerCount("ready")).toBe(0)
+    expect(client.listenerCount("error")).toBe(0)
+    expect(vi.getTimerCount()).toBe(0)
+  })
 })
 
 // ---------------------------------------------------------------------------

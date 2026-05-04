@@ -313,6 +313,8 @@ export function collectStreamOutput(parameters: StreamOutputParameters): void {
 
 /** Parameters for a single SSH connection attempt on one port. */
 export type ConnectParameters = {
+  /** Optional signal used to abort an in-flight connect attempt. */
+  abortSignal?: AbortSignal
   /** Path to the SSH agent socket (e.g. `SSH_AUTH_SOCK`). Used when no `privateKey` is provided. */
   agent?: string
   /** Forward the local SSH agent to the remote host during this session. */
@@ -389,6 +391,10 @@ export function cleanupFailedSshClient(client: Client): void {
   }
 }
 
+function getConnectAbortReason(signal: AbortSignal): Error {
+  return signal.reason instanceof Error ? signal.reason : new Error("SSH connect aborted")
+}
+
 /**
  * Attempt a single SSH connection on a specific port.
  *
@@ -398,18 +404,34 @@ export function cleanupFailedSshClient(client: Client): void {
  * @param parameters - Connection parameters.
  */
 export async function tryConnectOnPort(parameters: ConnectParameters): Promise<void> {
-  const { client, port } = parameters
+  const { abortSignal, client, port } = parameters
   const connectConfig = buildConnectConfig(parameters)
   return new Promise((resolve, reject) => {
+    if (abortSignal?.aborted === true) {
+      cleanupFailedSshClient(client)
+      reject(getConnectAbortReason(abortSignal))
+      return
+    }
+
     const cleanupConnectListeners = (): void => {
       client.off("ready", handleReady)
       client.off("error", handleError)
+      abortSignal?.removeEventListener("abort", handleAbort)
     }
 
     const handleTimeout = (): void => {
       cleanupConnectListeners()
       cleanupFailedSshClient(client)
       reject(new Error(`Connection timeout on port ${port}`))
+    }
+
+    const handleAbort = (): void => {
+      clearTimeout(timeout)
+      cleanupConnectListeners()
+      cleanupFailedSshClient(client)
+      reject(
+        abortSignal == null ? new Error("SSH connect aborted") : getConnectAbortReason(abortSignal)
+      )
     }
 
     const handleReady = (): void => {
@@ -429,6 +451,7 @@ export async function tryConnectOnPort(parameters: ConnectParameters): Promise<v
 
     client.on("ready", handleReady)
     client.on("error", handleError)
+    abortSignal?.addEventListener("abort", handleAbort, { once: true })
     client.connect(connectConfig)
   })
 }
