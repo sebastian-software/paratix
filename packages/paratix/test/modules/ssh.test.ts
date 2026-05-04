@@ -769,6 +769,30 @@ describe("ssh.authorizedKeys", () => {
     expect(mockSsh.calls).not.toContain(`${aliceHome}/.ssh/authorized_keys.tmp`)
   })
 
+  it.each([
+    ["empty output", ""],
+    ["multiline output", `${tempPath}\n${aliceHome}/.ssh/.authorized-keys.EVIL`],
+    ["outside .ssh", "/tmp/.authorized-keys.ABCDEF"],
+    ["wrong prefix", `${aliceHome}/.ssh/not-authorized-keys.ABCDEF`],
+  ])("rejects unsafe authorized_keys mktemp output: %s", async (_caseName, stdout) => {
+    const foreignPath = "/tmp/.authorized-keys.ABCDEF"
+    const mockSsh = createMockSsh(
+      aliceResponses({
+        [aliceMktempPattern]: { stdout },
+      })
+    )
+    const mod = ssh.authorizedKeys("alice", testKey)
+
+    await expect(mod.apply(mockSsh, emptyEnv)).rejects.toThrow("Unexpected mktemp output")
+    expect(mockSsh.calls).not.toContain(
+      `{ if [ -f ${aliceKeys} ]; then awk '1' ${aliceKeys}; grep -qxF -- '${testKey}' ${aliceKeys} || printf '%s\\n' '${testKey}'; else printf '%s\\n' '${testKey}'; fi; } > '${foreignPath}'`
+    )
+    expect(mockSsh.calls).not.toContain(
+      `chmod 600 '${foreignPath}' && chown 'alice':'alice' '${foreignPath}' && mv '${foreignPath}' ${aliceKeys} && chmod 600 ${aliceKeys} && chown 'alice':'alice' ${aliceKeys}`
+    )
+    expect(mockSsh.calls).not.toContain(`rm -f '${foreignPath}'`)
+  })
+
   it("keeps temporary authorized_keys rewrites in the target user's .ssh directory for absent state", async () => {
     const mockSsh = createMockSsh(
       aliceResponses({

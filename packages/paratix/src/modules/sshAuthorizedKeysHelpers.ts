@@ -1,5 +1,5 @@
 import { failed } from "../moduleFailure.js"
-import { shellQuote } from "../ssh.js"
+import { shellQuote, validateMktempPath } from "../ssh.js"
 import { type ModuleResult, NEEDS_APPLY, type SshConnection } from "../types.js"
 
 async function resolveHome(conn: SshConnection, user: string): Promise<string> {
@@ -59,7 +59,8 @@ async function createAuthorizedKeysTemporaryPath(
   sshDirectoryPath: string
 ): Promise<string> {
   const template = `${sshDirectoryPath}/.authorized-keys.XXXXXX`
-  return conn.output(`mktemp ${shellQuote(template)}`)
+  const temporaryPath = await conn.output(`mktemp ${shellQuote(template)}`)
+  return validateMktempPath(sshDirectoryPath, temporaryPath, ".authorized-keys")
 }
 
 async function ensureAuthorizedKeysIsNotSymlink(
