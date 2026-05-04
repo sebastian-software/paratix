@@ -92,7 +92,17 @@ function writeScaffoldSupportFiles(projectDirectory: string, initialUser: Initia
   )
 }
 
+function validateRootBootstrapConfiguration(options?: ScaffoldOptions): void {
+  if (options?.initialUser?.kind === "root" && options.adminPublicKey == null) {
+    throw new Error(
+      "Root bootstrap requires --admin-public-key or --admin-public-key-file so the generated admin user can log in after the first run."
+    )
+  }
+}
+
 export function writeProjectFiles(projectDirectory: string, options?: ScaffoldOptions): void {
+  validateRootBootstrapConfiguration(options)
+
   // eslint-disable-next-line security/detect-non-literal-fs-filename
   mkdirSync(projectDirectory, { recursive: true })
   // eslint-disable-next-line security/detect-non-literal-fs-filename
@@ -102,11 +112,6 @@ export function writeProjectFiles(projectDirectory: string, options?: ScaffoldOp
   const initialUser = options?.initialUser ?? { kind: "admin", user: "paratix" }
   const adminPublicKey = options?.adminPublicKey
   const expectedHostFingerprint = options?.expectedHostFingerprint
-  if (initialUser.kind === "root" && adminPublicKey == null) {
-    throw new Error(
-      "Root bootstrap requires --admin-public-key or --admin-public-key-file so the generated admin user can log in after the first run."
-    )
-  }
 
   const packageJson = {
     dependencies: {
@@ -240,6 +245,7 @@ export function scaffoldProject(
 ): boolean {
   const normalizedProjectName = normalizeProjectName(projectName)
   const projectDirectory = resolve(normalizedProjectName)
+  validateRootBootstrapConfiguration(options)
   createProjectDirectoryAtomically(projectDirectory, normalizedProjectName)
 
   console.log(`Creating Paratix project in ${projectDirectory}...`)

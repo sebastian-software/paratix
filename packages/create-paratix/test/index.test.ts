@@ -1760,13 +1760,16 @@ describe("scaffoldProject", () => {
   const projectDirectory = resolve(projectName)
   const paddedProjectName = " create-paratix-trim-test "
   const trimmedProjectName = "create-paratix-trim-test"
+  const missingKeyProjectName = "create-paratix-missing-root-key-test"
   const paddedProjectDirectory = resolve(paddedProjectName)
   const trimmedProjectDirectory = resolve(trimmedProjectName)
+  const missingKeyProjectDirectory = resolve(missingKeyProjectName)
 
   beforeEach(() => {
     rmSync(projectDirectory, { force: true, recursive: true })
     rmSync(paddedProjectDirectory, { force: true, recursive: true })
     rmSync(trimmedProjectDirectory, { force: true, recursive: true })
+    rmSync(missingKeyProjectDirectory, { force: true, recursive: true })
     vi.spyOn(console, "log").mockImplementation((...args) => {
       void args
     })
@@ -1781,6 +1784,7 @@ describe("scaffoldProject", () => {
     rmSync(projectDirectory, { force: true, recursive: true })
     rmSync(paddedProjectDirectory, { force: true, recursive: true })
     rmSync(trimmedProjectDirectory, { force: true, recursive: true })
+    rmSync(missingKeyProjectDirectory, { force: true, recursive: true })
     process.exitCode = undefined
   })
 
@@ -1889,6 +1893,24 @@ describe("scaffoldProject", () => {
     ])
   })
 
+  it("rejects root bootstrap without an admin public key before creating the target directory", () => {
+    const installer = vi.fn().mockReturnValue(true)
+
+    expect(() => {
+      scaffoldProject(
+        missingKeyProjectName,
+        { command: "pnpm install", name: "pnpm" },
+        { host: "example.com", initialUser: { kind: "root" }, installer }
+      )
+    }).toThrow(/Root bootstrap requires --admin-public-key or --admin-public-key-file/v)
+
+    expect(existsSync(missingKeyProjectDirectory)).toBe(false)
+    expect(installer).not.toHaveBeenCalled()
+    expect(console.log).not.toHaveBeenCalledWith(
+      `Creating Paratix project in ${missingKeyProjectDirectory}...`
+    )
+  })
+
   // R-0000124 regression: scaffoldProject must fail closed when the target
   // directory already exists, instead of silently overwriting files inside it.
   // Previously the function used `existsSync(...) ? exit : mkdirSync(..., { recursive: true })`
@@ -1905,7 +1927,12 @@ describe("scaffoldProject", () => {
       scaffoldProject(
         projectName,
         { command: "pnpm install", name: "pnpm" },
-        { host: "example.com", initialUser: { kind: "root" }, installer }
+        {
+          adminPublicKey: TEST_ADMIN_PUBLIC_KEY,
+          host: "example.com",
+          initialUser: { kind: "root" },
+          installer,
+        }
       )
     })
 
