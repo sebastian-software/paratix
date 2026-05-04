@@ -263,6 +263,7 @@ export const pkg = {
           // eslint-disable-next-line no-await-in-loop
           if (!(await isPackageInstalled(ssh, pm, packageName))) {
             const quoted = packages.map((p) => shellQuote(p)).join(" ")
+            // eslint-disable-next-line no-await-in-loop -- install runs only after finding first missing package
             const result = await ssh.exec(INSTALL_COMMANDS[pm](quoted), execOptions(options))
             if (result.code !== 0) {
               return failedCommand(

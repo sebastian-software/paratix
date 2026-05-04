@@ -100,10 +100,8 @@ export async function withRegisteredSecrets<T>(
 
 function maskScopedResult<T>(result: T, secrets: readonly string[]): T {
   if (secrets.length === 0 || !isModuleResult(result) || result.status !== "failed") return result
-  if (result.error != null) {
-    result.error = maskScopedError(result.error, secrets)
-  }
-  return result
+  if (result.error == null) return result
+  return { ...result, error: maskScopedError(result.error, secrets) }
 }
 
 function isModuleResult(value: unknown): value is ModuleResult {
@@ -120,26 +118,37 @@ function maskScopedError(error: unknown, secrets: readonly string[]): Error {
     return error instanceof Error ? error : new Error(maskSecrets(String(error), [...secrets]))
   }
 
-  error.message = maskSecrets(error.message, [...secrets])
-  if (error.stack != null) error.stack = maskSecrets(error.stack, [...secrets])
-  if (error.cause instanceof Error) {
-    Object.defineProperty(error, "cause", {
+  const maskedError = error
+  Object.defineProperty(maskedError, "message", {
+    configurable: true,
+    value: maskSecrets(maskedError.message, [...secrets]),
+    writable: true,
+  })
+  if (maskedError.stack != null) {
+    Object.defineProperty(maskedError, "stack", {
       configurable: true,
-      value: maskScopedError(error.cause, secrets),
+      value: maskSecrets(maskedError.stack, [...secrets]),
       writable: true,
     })
   }
-  if (error instanceof CommandError) {
-    Object.defineProperty(error, "fullStdout", {
+  if (maskedError.cause instanceof Error) {
+    Object.defineProperty(maskedError, "cause", {
       configurable: true,
-      value: maskSecrets(error.fullStdout, [...secrets]),
-    })
-    Object.defineProperty(error, "fullStderr", {
-      configurable: true,
-      value: maskSecrets(error.fullStderr, [...secrets]),
+      value: maskScopedError(maskedError.cause, secrets),
+      writable: true,
     })
   }
-  return error
+  if (maskedError instanceof CommandError) {
+    Object.defineProperty(maskedError, "fullStdout", {
+      configurable: true,
+      value: maskSecrets(maskedError.fullStdout, [...secrets]),
+    })
+    Object.defineProperty(maskedError, "fullStderr", {
+      configurable: true,
+      value: maskSecrets(maskedError.fullStderr, [...secrets]),
+    })
+  }
+  return maskedError
 }
 
 /**

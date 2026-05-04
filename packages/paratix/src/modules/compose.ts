@@ -96,12 +96,23 @@ async function composeProjectVolumesExist(parameters: {
   ssh: SshConnection
 }): Promise<boolean> {
   const projectName = basename(parameters.projectDirectory)
+  const composeProjectLabel = `label=com.docker.compose.project=${projectName}`
   const result = await parameters.ssh.exec(
-    `${parameters.runtime} volume ls --filter ${shellQuote(`label=com.docker.compose.project=${projectName}`)} -q`,
+    `${parameters.runtime} volume ls --filter ${shellQuote(composeProjectLabel)} -q`,
     EXEC_OPTS
   )
   if (result.code !== 0) return true
   return result.stdout.trim().length > 0
+}
+
+async function checkComposeDownNoContainers(parameters: {
+  projectDirectory: string
+  runtime: ComposeRuntime
+  ssh: SshConnection
+  volumes?: boolean
+}): Promise<"needs-apply" | "ok"> {
+  if (parameters.volumes !== true) return "ok"
+  return (await composeProjectVolumesExist(parameters)) ? NEEDS_APPLY : "ok"
 }
 
 async function resolveDesiredComposeContent(options: {
@@ -647,17 +658,11 @@ export const compose = {
 
         const stdout = result.stdout.trim()
         if (stdout === "") {
-          return volumes === true &&
-            (await composeProjectVolumesExist({ projectDirectory, runtime: rt, ssh }))
-            ? NEEDS_APPLY
-            : "ok"
+          return checkComposeDownNoContainers({ projectDirectory, runtime: rt, ssh, volumes })
         }
         const states = parseContainerStates(stdout)
         if (states.length === 0 && stdout === "[]") {
-          return volumes === true &&
-            (await composeProjectVolumesExist({ projectDirectory, runtime: rt, ssh }))
-            ? NEEDS_APPLY
-            : "ok"
+          return checkComposeDownNoContainers({ projectDirectory, runtime: rt, ssh, volumes })
         }
 
         return NEEDS_APPLY

@@ -258,10 +258,10 @@ describe("releaseUpgrade.upgrade — apply (Debian)", () => {
       ssh.execCalls
         .filter((call) =>
           [
+            "DEBIAN_FRONTEND=noninteractive apt-get autoremove -y",
+            "DEBIAN_FRONTEND=noninteractive apt-get full-upgrade -y",
             "DEBIAN_FRONTEND=noninteractive apt-get update",
             "DEBIAN_FRONTEND=noninteractive dpkg --configure -a",
-            "DEBIAN_FRONTEND=noninteractive apt-get full-upgrade -y",
-            "DEBIAN_FRONTEND=noninteractive apt-get autoremove -y",
           ].includes(call.command)
         )
         .map((call) => call.options)

@@ -294,7 +294,10 @@ async function createEnvironmentResources(packageDirectory: string): Promise<{
   const workspaceHome = await prepareWorkspaceHome()
   const containerName = `paratix-integration-${Date.now()}`
   const dockerImageTag = `${DOCKER_IMAGE_TAG_PREFIX}:${containerName}`
-  const fixturePrivateKeyPath = resolve(packageDirectory, "test/integration/fixtures/client_ed25519")
+  const fixturePrivateKeyPath = resolve(
+    packageDirectory,
+    "test/integration/fixtures/client_ed25519"
+  )
   const clientPrivateKeyPath = join(workspaceHome, ".ssh", "client_ed25519")
   await copyFile(fixturePrivateKeyPath, clientPrivateKeyPath)
   await chmod(clientPrivateKeyPath, PRIVATE_KEY_MODE)

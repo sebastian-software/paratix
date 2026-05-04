@@ -643,8 +643,8 @@ describe("package manager detection", () => {
   it("uses correct remove command for apk", async () => {
     const ssh = createMockSsh({
       ...APK_FOUND,
-      "apk info -e 'nginx'": { code: 0 },
       "apk del 'nginx'": { code: 0 },
+      "apk info -e 'nginx'": { code: 0 },
     })
     const mod = pkg.absent("nginx")
     await mod.apply(ssh, emptyEnv)

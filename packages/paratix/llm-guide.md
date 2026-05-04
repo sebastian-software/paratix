@@ -271,8 +271,8 @@ apt.distUpgrade("2026-05-01", { timeout: 1_200_000 })
 
 ### `releaseUpgrade`
 
-| Method                   | Signature                                                                       | Idempotent |
-| ------------------------ | ------------------------------------------------------------------------------- | ---------- |
+| Method                   | Signature                                                                                         | Idempotent |
+| ------------------------ | ------------------------------------------------------------------------------------------------- | ---------- |
 | `releaseUpgrade.upgrade` | `(options?: { dryRun?: boolean; resolveHost?: () => Promise<string>; timeout?: number }): Module` | Yes        |
 
 ### `rsync`

@@ -51,7 +51,7 @@ describe("cron.job", () => {
       "crontab -u 'alice' -l": { code: 1, stderr: "permission denied\n" },
     })
     const mod = cron.job("alice", "backup", { job: "0 3 * * * /backup.sh" })
-    await expect(mod.check(mockSsh, emptyEnv)).rejects.toThrow(/failed to read crontab/)
+    await expect(mod.check(mockSsh, emptyEnv)).rejects.toThrow(/failed to read crontab/v)
   })
 
   it("check returns needs-apply when marker exists but job line differs (state: present)", async () => {
@@ -132,7 +132,7 @@ describe("cron.job", () => {
       "crontab -u 'alice' -l": { code: 1, stderr: "permission denied\n" },
     })
     const mod = cron.job("alice", "backup", { job: "0 3 * * * /backup.sh" })
-    await expect(mod.apply(mockSsh, emptyEnv)).rejects.toThrow(/failed to read crontab/)
+    await expect(mod.apply(mockSsh, emptyEnv)).rejects.toThrow(/failed to read crontab/v)
     expect(mockSsh.calls.some((call) => call.startsWith("printf '%s'"))).toBe(false)
   })
 

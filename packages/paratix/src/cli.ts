@@ -382,11 +382,7 @@ program
   .option("--env <key=value...>", "Set env values", collectEnvironment, {})
   .option("--env-file <path>", "Load dotenv file")
   .option("--first-run", "Set PARATIX_FIRST_RUN=true before loading the playbook", false)
-  .option(
-    "--reconnect-timeout <seconds>",
-    "SSH reconnect timeout",
-    parsePositiveNumber
-  )
+  .option("--reconnect-timeout <seconds>", "SSH reconnect timeout", parsePositiveNumber)
   .option("--verbose", "Show full stack traces on error", false)
   .action(async (file: string, options: Record<string, unknown>) => {
     try {

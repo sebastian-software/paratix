@@ -1,4 +1,4 @@
-import { posix as path } from "node:path"
+import { posix as posixPath } from "node:path"
 
 import { failedCommand } from "../moduleFailure.js"
 import { shellQuote, validateMode } from "../ssh.js"
@@ -82,24 +82,20 @@ function validateSwapFilePath(value: string): void {
   if (/\s/v.test(value)) {
     throw new Error("swap.file: path must not contain whitespace")
   }
-  if (!path.isAbsolute(value)) {
+  if (!posixPath.isAbsolute(value)) {
     throw new Error("swap.file: path must be absolute")
   }
   if (value === "/") {
     throw new Error("swap.file: path must not be the filesystem root")
   }
-  if (path.normalize(value) !== value) {
+  if (posixPath.normalize(value) !== value) {
     throw new Error("swap.file: path must be normalized")
   }
 }
 
 function validateSwapPriority(priority: number | undefined): void {
   if (priority === undefined) return
-  if (
-    !Number.isInteger(priority) ||
-    priority < MIN_SWAP_PRIORITY ||
-    priority > MAX_SWAP_PRIORITY
-  ) {
+  if (!Number.isInteger(priority) || priority < MIN_SWAP_PRIORITY || priority > MAX_SWAP_PRIORITY) {
     throw new Error(
       `swap.file: priority must be an integer between ${MIN_SWAP_PRIORITY} and ${MAX_SWAP_PRIORITY}`
     )
@@ -218,7 +214,7 @@ export async function ensureSwapFilePresent(parameters: {
   ssh: SshConnection
 }): Promise<ModuleResult | true> {
   const createDirectoryResult = await parameters.ssh.exec(
-    `mkdir -p ${shellQuote(path.dirname(parameters.path))}`,
+    `mkdir -p ${shellQuote(posixPath.dirname(parameters.path))}`,
     EXEC_OPTS
   )
   if (createDirectoryResult.code !== 0) {

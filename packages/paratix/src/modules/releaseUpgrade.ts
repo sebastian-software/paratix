@@ -1,8 +1,8 @@
 import { meta } from "../meta.js"
 import { failed, failedCommand } from "../moduleFailure.js"
 import {
-  type ExecResult,
   type ExecOptions,
+  type ExecResult,
   guardedWriteFile,
   type Module,
   type ModuleMetaEntry,
@@ -313,19 +313,22 @@ async function buildRebootMeta(options: ReleaseUpgradeOptions): Promise<ModuleMe
   return entries
 }
 
-async function runReleaseUpgradeCommand(
-  ssh: SshConnection,
-  command: string,
-  failureMessage: string,
-  options: ReleaseUpgradeOptions
-): Promise<ModuleResult | null> {
-  const result = await ssh.exec(command, releaseUpgradeExecOptions(options))
-  return result.code === 0 ? null : failedCommand(failureMessage, result)
-}
-
 function releaseUpgradeExecOptions(options: ReleaseUpgradeOptions): ExecOptions {
   if (options.timeout === undefined) return { ignoreExitCode: true, silent: true }
   return { ignoreExitCode: true, silent: true, timeout: options.timeout }
+}
+
+async function runReleaseUpgradeCommand(parameters: {
+  command: string
+  failureMessage: string
+  options: ReleaseUpgradeOptions
+  ssh: SshConnection
+}): Promise<ModuleResult | null> {
+  const result = await parameters.ssh.exec(
+    parameters.command,
+    releaseUpgradeExecOptions(parameters.options)
+  )
+  return result.code === 0 ? null : failedCommand(parameters.failureMessage, result)
 }
 
 /**
@@ -356,20 +359,20 @@ async function applyUbuntu(
     return { status: "ok" }
   }
 
-  const updateFailure = await runReleaseUpgradeCommand(
+  const updateFailure = await runReleaseUpgradeCommand({
+    command: `${NONINTERACTIVE} apt-get update`,
+    failureMessage: "[releaseUpgrade.upgrade] apt-get update failed",
+    options,
     ssh,
-    `${NONINTERACTIVE} apt-get update`,
-    "[releaseUpgrade.upgrade] apt-get update failed",
-    options
-  )
+  })
   if (updateFailure != null) return updateFailure
 
-  const upgradeFailure = await runReleaseUpgradeCommand(
+  const upgradeFailure = await runReleaseUpgradeCommand({
+    command: "do-release-upgrade -f DistUpgradeViewNonInteractive",
+    failureMessage: "[releaseUpgrade.upgrade] do-release-upgrade failed",
+    options,
     ssh,
-    "do-release-upgrade -f DistUpgradeViewNonInteractive",
-    "[releaseUpgrade.upgrade] do-release-upgrade failed",
-    options
-  )
+  })
   if (upgradeFailure != null) return upgradeFailure
 
   const entries = await buildRebootMeta(options)
@@ -386,6 +389,7 @@ async function applyUbuntu(
  * stays straightforward and the per-step retry order remains explicit.
  *
  * @param ssh - Active SSH connection to the remote host.
+ * @param options - Upgrade options used to derive per-command exec options.
  * @returns The first non-zero apt-step failure as a `ModuleResult`, or
  *   `null` when all four steps succeeded.
  */
@@ -393,36 +397,36 @@ async function runDebianUpgradePipeline(
   ssh: SshConnection,
   options: ReleaseUpgradeOptions
 ): Promise<ModuleResult | null> {
-  const updateFailure = await runReleaseUpgradeCommand(
+  const updateFailure = await runReleaseUpgradeCommand({
+    command: `${NONINTERACTIVE} apt-get update`,
+    failureMessage: "[releaseUpgrade.upgrade] apt-get update failed",
+    options,
     ssh,
-    `${NONINTERACTIVE} apt-get update`,
-    "[releaseUpgrade.upgrade] apt-get update failed",
-    options
-  )
+  })
   if (updateFailure != null) return updateFailure
 
-  const configureFailure = await runReleaseUpgradeCommand(
+  const configureFailure = await runReleaseUpgradeCommand({
+    command: `${NONINTERACTIVE} dpkg --configure -a`,
+    failureMessage: "[releaseUpgrade.upgrade] dpkg --configure -a failed",
+    options,
     ssh,
-    `${NONINTERACTIVE} dpkg --configure -a`,
-    "[releaseUpgrade.upgrade] dpkg --configure -a failed",
-    options
-  )
+  })
   if (configureFailure != null) return configureFailure
 
-  const upgradeFailure = await runReleaseUpgradeCommand(
+  const upgradeFailure = await runReleaseUpgradeCommand({
+    command: `${NONINTERACTIVE} apt-get full-upgrade -y`,
+    failureMessage: "[releaseUpgrade.upgrade] apt-get full-upgrade failed",
+    options,
     ssh,
-    `${NONINTERACTIVE} apt-get full-upgrade -y`,
-    "[releaseUpgrade.upgrade] apt-get full-upgrade failed",
-    options
-  )
+  })
   if (upgradeFailure != null) return upgradeFailure
 
-  const autoremoveFailure = await runReleaseUpgradeCommand(
+  const autoremoveFailure = await runReleaseUpgradeCommand({
+    command: `${NONINTERACTIVE} apt-get autoremove -y`,
+    failureMessage: "[releaseUpgrade.upgrade] apt-get autoremove failed",
+    options,
     ssh,
-    `${NONINTERACTIVE} apt-get autoremove -y`,
-    "[releaseUpgrade.upgrade] apt-get autoremove failed",
-    options
-  )
+  })
   if (autoremoveFailure != null) return autoremoveFailure
 
   return null

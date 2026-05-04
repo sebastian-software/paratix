@@ -884,9 +884,7 @@ describe("net writers — CR/LF validation", () => {
     expect(() => net.resolv({ nameservers: ["999.999.999.999"] })).toThrow(
       /valid IPv4 or IPv6 address/v
     )
-    expect(() => net.resolv({ nameservers: ["not-an-ip"] })).toThrow(
-      /valid IPv4 or IPv6 address/v
-    )
+    expect(() => net.resolv({ nameservers: ["not-an-ip"] })).toThrow(/valid IPv4 or IPv6 address/v)
   })
 
   it("accepts IPv4 and IPv6 resolv nameservers", () => {
@@ -903,7 +901,14 @@ describe("net writers — CR/LF validation", () => {
   })
 
   it("rejects invalid resolv search domains", () => {
-    const invalidDomains = ["", "bad domain", "_srv.example", "-example.com", "example-.com", "a..b"]
+    const invalidDomains = [
+      "",
+      "bad domain",
+      "_srv.example",
+      "-example.com",
+      "example-.com",
+      "a..b",
+    ]
     for (const domain of invalidDomains) {
       expect(() => net.resolv({ nameservers: ["1.1.1.1"], search: [domain] })).toThrow(
         /invalid search domain/v

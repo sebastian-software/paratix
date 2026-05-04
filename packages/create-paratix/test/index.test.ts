@@ -1948,10 +1948,14 @@ describe("scaffoldProject", () => {
 
     try {
       await expectProcessExit(() => {
-        scaffoldProject("../create-paratix-invalid", { command: "pnpm install", name: "pnpm" }, {
-          host: "example.com",
-          installer,
-        })
+        scaffoldProject(
+          "../create-paratix-invalid",
+          { command: "pnpm install", name: "pnpm" },
+          {
+            host: "example.com",
+            installer,
+          }
+        )
       })
 
       expect(console.error).toHaveBeenCalledWith(

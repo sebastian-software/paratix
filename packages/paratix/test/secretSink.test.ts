@@ -95,12 +95,15 @@ describe("withRegisteredSecrets", () => {
   })
 
   it("masks scoped secrets on failed module results before unregistering", async () => {
-    const result = await withRegisteredSecrets(["alpha"], async () => ({
-      error: new CommandError("failed alpha", "stdout alpha", "stderr alpha"),
-      status: "failed" as const,
-    }))
+    const result = await withRegisteredSecrets(["alpha"], async () => {
+      await Promise.resolve()
+      return {
+        error: new CommandError("failed alpha", "stdout alpha", "stderr alpha"),
+        status: "failed" as const,
+      }
+    })
 
-    expect(result.error?.message).toBe("failed [REDACTED]")
+    expect(result.error.message).toBe("failed [REDACTED]")
     expect(result.error).toBeInstanceOf(CommandError)
     expect((result.error as CommandError | undefined)?.fullStdout).toBe("stdout [REDACTED]")
     expect((result.error as CommandError | undefined)?.fullStderr).toBe("stderr [REDACTED]")
