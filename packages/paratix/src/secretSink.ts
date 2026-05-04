@@ -117,11 +117,11 @@ function isModuleResult(value: unknown): value is ModuleResult {
 
 function maskScopedError(error: unknown, secrets: readonly string[]): Error {
   if (!(error instanceof Error) || secrets.length === 0) {
-    return error instanceof Error ? error : new Error(maskSecrets(String(error), secrets))
+    return error instanceof Error ? error : new Error(maskSecrets(String(error), [...secrets]))
   }
 
-  error.message = maskSecrets(error.message, secrets)
-  if (error.stack != null) error.stack = maskSecrets(error.stack, secrets)
+  error.message = maskSecrets(error.message, [...secrets])
+  if (error.stack != null) error.stack = maskSecrets(error.stack, [...secrets])
   if (error.cause instanceof Error) {
     Object.defineProperty(error, "cause", {
       configurable: true,
@@ -132,11 +132,11 @@ function maskScopedError(error: unknown, secrets: readonly string[]): Error {
   if (error instanceof CommandError) {
     Object.defineProperty(error, "fullStdout", {
       configurable: true,
-      value: maskSecrets(error.fullStdout, secrets),
+      value: maskSecrets(error.fullStdout, [...secrets]),
     })
     Object.defineProperty(error, "fullStderr", {
       configurable: true,
-      value: maskSecrets(error.fullStderr, secrets),
+      value: maskSecrets(error.fullStderr, [...secrets]),
     })
   }
   return error
