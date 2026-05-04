@@ -39,6 +39,12 @@ type MockSshOptions = {
    */
   defaultTestResult?: boolean
   /**
+   * When `true`, `ssh.exec()` rejects for non-zero exit codes unless the call
+   * sets `ignoreExitCode`. This mirrors the production SSH connection for
+   * tests that need to exercise command failure propagation.
+   */
+  rejectNonZeroExit?: boolean
+  /**
    * Explicit command stubs matched after exact responses and before any
    * fallback defaults or allowlists.
    */
@@ -145,6 +151,28 @@ function buildExecResult(match?: Partial<ExecResult>): ExecResult {
   }
 }
 
+function buildCommandError(command: string, result: ExecResult): Error {
+  return new Error(
+    `Command failed with exit code ${String(result.code)}: ${command}\nstdout: ${result.stdout}\nstderr: ${result.stderr}`
+  )
+}
+
+function rejectNonZeroExit(input: {
+  command: string
+  execOptions: ExecOptions | undefined
+  options: MockSshOptions | undefined
+  result: ExecResult
+}): void {
+  const { command, execOptions, options, result } = input
+  if (
+    options?.rejectNonZeroExit === true &&
+    result.code !== 0 &&
+    execOptions?.ignoreExitCode !== true
+  ) {
+    throw buildCommandError(command, result)
+  }
+}
+
 type ExecRecorder = { calls: string[]; execCalls: ExecCall[] }
 
 function createExec(
@@ -157,11 +185,17 @@ function createExec(
     recorder.calls.push(command)
     recorder.execCalls.push({ command, options: execOptions })
     const match = getMockResponse({ command, kind: "exec", options, responses })
-    if (match) return buildExecResult(match)
+    if (match) {
+      const result = buildExecResult(match)
+      rejectNonZeroExit({ command, execOptions, options, result })
+      return result
+    }
     if (options?.defaultExecResult === "throw") {
       throw buildUnstubbedCommandError("exec", command)
     }
-    return buildExecResult(options?.defaultExecResult)
+    const defaultResult = buildExecResult(options?.defaultExecResult)
+    rejectNonZeroExit({ command, execOptions, options, result: defaultResult })
+    return defaultResult
   }
 }
 
