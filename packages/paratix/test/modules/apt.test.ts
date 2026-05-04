@@ -165,6 +165,34 @@ describe("apt.key", () => {
     expect(String(result.error)).toContain("[apt.key] failed to import docker")
   })
 
+  it("ignores non-zero temp file cleanup exit codes", async () => {
+    const ssh = createMockSsh({
+      "curl -fsSL 'https://download.docker.com/linux/ubuntu/gpg' -o '/tmp/apt-key-docker.ABCDEF'": {
+        code: 0,
+      },
+      "gpg --dearmor --yes -o '/etc/apt/keyrings/docker.gpg' '/tmp/apt-key-docker.ABCDEF'": {
+        code: 2,
+        stderr: "gpg: dearmor failed: No such file or directory",
+      },
+      "gpg --show-keys --with-colons '/tmp/apt-key-docker.ABCDEF'": {
+        code: 0,
+        stdout: "pub:-:255:22:::\nfpr:::::::::1234567890ABCDEF1234567890ABCDEF12345678:\n",
+      },
+      "mkdir -p /etc/apt/keyrings": { code: 0 },
+      "mktemp '/tmp/apt-key-docker.XXXXXX'": { stdout: "/tmp/apt-key-docker.ABCDEF\n" },
+      "rm -f '/tmp/apt-key-docker.ABCDEF'": { code: 1 },
+    })
+    const mod = apt.key("docker", "https://download.docker.com/linux/ubuntu/gpg", { fingerprint })
+    const result = await mod.apply(ssh, emptyEnv)
+    const cleanup = ssh.execCalls.find(
+      (call) => call.command === "rm -f '/tmp/apt-key-docker.ABCDEF'"
+    )
+
+    expect(result.status).toBe("failed")
+    expect(String(result.error)).toContain("[apt.key] failed to import docker")
+    expect(cleanup?.options).toMatchObject({ ignoreExitCode: true, silent: true })
+  })
+
   // R-0000066 regression: applyAptKey must validate the path returned by
   // `mktemp` before embedding it in the curl, gpg --dearmor and rm -f
   // subcommands. Multi-line output or a path that does not match the

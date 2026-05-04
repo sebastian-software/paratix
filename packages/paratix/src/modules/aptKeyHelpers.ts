@@ -177,6 +177,6 @@ export async function applyAptKey(
       url,
     })
   } finally {
-    await ssh.exec(`rm -f ${shellQuote(temporaryPath)}`, { silent: true })
+    await ssh.exec(`rm -f ${shellQuote(temporaryPath)}`, { ignoreExitCode: true, silent: true })
   }
 }
