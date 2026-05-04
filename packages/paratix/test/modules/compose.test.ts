@@ -319,6 +319,15 @@ describe("compose.down — check", () => {
     expect(result).toBe("ok")
   })
 
+  it("returns ok when Docker Compose reports no containers as an empty JSON array", async () => {
+    const mockSsh = createComposeMockSsh({
+      [`${composeCmd("podman")} ps --format json`]: { code: 0, stdout: "[]" },
+    })
+    const mod = compose.down({ projectDirectory })
+    const result = await mod.check(mockSsh, emptyEnv)
+    expect(result).toBe("ok")
+  })
+
   it("returns needs-apply when ps command fails", async () => {
     const mockSsh = createComposeMockSsh({
       [`${composeCmd("podman")} ps --format json`]: { code: 1 },

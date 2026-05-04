@@ -633,6 +633,8 @@ export const compose = {
 
         const stdout = result.stdout.trim()
         if (stdout === "") return "ok"
+        const states = parseContainerStates(stdout)
+        if (states.length === 0 && stdout === "[]") return "ok"
 
         return NEEDS_APPLY
       },
