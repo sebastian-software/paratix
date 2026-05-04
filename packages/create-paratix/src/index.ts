@@ -10,6 +10,7 @@ import {
 } from "./interactivePrompts.js"
 import { readAdminPublicKeyFile, validateAdminPublicKey } from "./publicKeySelection.js"
 import {
+  normalizeProgrammaticScaffoldStringOptions,
   parseCliArguments as parseScaffoldCliArguments,
   parseInitialUserConfig as parseScaffoldInitialUserConfig,
   validateExpectedHostFingerprint as validateScaffoldExpectedHostFingerprint,
@@ -127,15 +128,13 @@ function validateRootBootstrapConfiguration(
 export function writeProjectFiles(projectDirectory: string, options?: ScaffoldOptions): void {
   const initialUser = normalizeProgrammaticInitialUserConfig(options?.initialUser)
   validateRootBootstrapConfiguration(initialUser, options?.adminPublicKey)
+  const { adminPublicKey, expectedHostFingerprint, host } =
+    normalizeProgrammaticScaffoldStringOptions(options)
 
   // eslint-disable-next-line security/detect-non-literal-fs-filename
   mkdirSync(projectDirectory, { recursive: true })
   // eslint-disable-next-line security/detect-non-literal-fs-filename
   mkdirSync(join(projectDirectory, "files"), { recursive: true })
-
-  const host = options?.host ?? "1.2.3.4"
-  const adminPublicKey = options?.adminPublicKey
-  const expectedHostFingerprint = options?.expectedHostFingerprint
 
   const packageJson = {
     dependencies: {
@@ -195,14 +194,7 @@ function exitWithMessage(message: string): never {
   process.exit(1)
 }
 
-export function parseCliArguments(argv: string[]): {
-  adminPublicKey: string | undefined
-  adminPublicKeyFile: string | undefined
-  expectedHostFingerprint: string | undefined
-  host: string | undefined
-  initialUser: string | undefined
-  projectName: string | undefined
-} {
+export function parseCliArguments(argv: string[]): ReturnType<typeof parseScaffoldCliArguments> {
   return parseScaffoldCliArguments(argv, exitWithMessage)
 }
 
@@ -238,19 +230,6 @@ function isErrnoException(error: unknown): error is NodeJS.ErrnoException {
   return error instanceof Error && "code" in error && typeof error.code === "string"
 }
 
-/**
- * Atomically create the project directory.
- *
- * R-0000124: Atomic directory creation — `mkdirSync` without `recursive`
- * throws EEXIST if the target already exists, closing the TOCTOU window
- * between an `existsSync` pre-check and the subsequent `writeFileSync`
- * calls. A racing process that creates the directory between the check
- * and the create would otherwise let us silently overwrite its files.
- *
- * @param projectDirectory The absolute path of the project directory to create.
- * @param normalizedProjectName The trimmed project name used in the
- *   user-visible error message when the directory already exists.
- */
 function createProjectDirectoryAtomically(
   projectDirectory: string,
   normalizedProjectName: string

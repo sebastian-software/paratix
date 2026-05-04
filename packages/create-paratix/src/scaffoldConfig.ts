@@ -1,7 +1,15 @@
 import type { InitialUserConfig } from "./templates.js"
 
+import { validateAdminPublicKey } from "./publicKeySelection.js"
+
 type ExitWithMessage = (message: string) => never
 type PromptFunction = (question: string) => Promise<string>
+
+type ProgrammaticScaffoldStringOptions = {
+  adminPublicKey?: string
+  expectedHostFingerprint?: string
+  host?: string
+}
 
 const CLI_USAGE =
   "Usage: create-paratix <project-name> [--host <domain-or-ip>] [--initial-user <root|name>] [--expected-host-fingerprint <fingerprint>] [--admin-public-key <ssh-public-key>] [--admin-public-key-file <path>]"
@@ -105,6 +113,26 @@ export function validateExpectedHostFingerprint(
   }
 
   return value
+}
+
+function throwValidationError(message: string): never {
+  throw new Error(message)
+}
+
+export function normalizeProgrammaticScaffoldStringOptions(
+  options: ProgrammaticScaffoldStringOptions | undefined
+): { host: string } & ProgrammaticScaffoldStringOptions {
+  return {
+    adminPublicKey:
+      options?.adminPublicKey == null
+        ? undefined
+        : validateAdminPublicKey(throwValidationError, options.adminPublicKey),
+    expectedHostFingerprint:
+      options?.expectedHostFingerprint == null
+        ? undefined
+        : validateExpectedHostFingerprint(throwValidationError, options.expectedHostFingerprint),
+    host: options?.host == null ? "1.2.3.4" : validateHost(throwValidationError, options.host),
+  }
 }
 
 export async function promptForHost(prompt: PromptFunction): Promise<string> {

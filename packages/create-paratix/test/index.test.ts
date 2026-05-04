@@ -1729,29 +1729,25 @@ describe("writeProjectFiles", () => {
 
   it("generated server.ts embeds a selected local public key directly", () => {
     writeProjectFiles(TEST_DIR, {
-      adminPublicKey: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIBExample generated@test",
+      adminPublicKey: TEST_ADMIN_PUBLIC_KEY,
       host: "deploy.example.com",
       initialUser: { kind: "admin", user: "deploy" },
     })
 
     const content = readFileSync(join(TEST_DIR, "server.ts"), "utf8")
 
-    expect(content).toContain(
-      'const adminPublicKey = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIBExample generated@test";'
-    )
+    expect(content).toContain(`const adminPublicKey = ${JSON.stringify(TEST_ADMIN_PUBLIC_KEY)};`)
     expect(content).not.toContain("REPLACE_ME_WITH_YOUR_PUBLIC_KEY")
   })
 
   it("generated server.ts also embeds a CLI-supplied public key directly", () => {
     writeProjectFiles(TEST_DIR, {
-      adminPublicKey: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAICli supplied@test",
+      adminPublicKey: TEST_ADMIN_PUBLIC_KEY,
     })
 
     const content = readFileSync(join(TEST_DIR, "server.ts"), "utf8")
 
-    expect(content).toContain(
-      'const adminPublicKey = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAICli supplied@test";'
-    )
+    expect(content).toContain(`const adminPublicKey = ${JSON.stringify(TEST_ADMIN_PUBLIC_KEY)};`)
   })
 
   it("generated server.ts keeps first-run host-key checking fail-closed", () => {
@@ -1774,7 +1770,7 @@ describe("writeProjectFiles", () => {
   it("generated server.ts embeds a scanned expectedHostFingerprint and keeps strict host-key checking enabled", () => {
     writeProjectFiles(TEST_DIR, {
       adminPublicKey: TEST_ADMIN_PUBLIC_KEY,
-      expectedHostFingerprint: "SHA256:scanned-fingerprint",
+      expectedHostFingerprint: TEST_HOST_FINGERPRINT,
       host: "deploy.example.com",
       initialUser: { kind: "root" },
     })
@@ -1782,11 +1778,50 @@ describe("writeProjectFiles", () => {
     const content = readFileSync(join(TEST_DIR, "server.ts"), "utf8")
 
     expect(content).toContain('const strictHostKeyChecking = "yes";')
-    expect(content).toContain('expectedHostFingerprint: "SHA256:scanned-fingerprint"')
+    expect(content).toContain(`expectedHostFingerprint: ${JSON.stringify(TEST_HOST_FINGERPRINT)}`)
     expect(content).not.toContain(
       'expectedHostFingerprint: "SHA256:REPLACE_ME_WITH_YOUR_HOST_FINGERPRINT"'
     )
     expect(content).not.toContain('"accept-new"')
+  })
+
+  it("rejects invalid programmatic hosts before creating files", () => {
+    expect(() => {
+      writeProjectFiles(TEST_DIR, {
+        host: "bad host",
+        initialUser: { kind: "admin", user: "deploy" },
+      })
+    }).toThrow(
+      'Error: Invalid host "bad host" — use a domain name, IPv4, or IPv6 address without spaces.'
+    )
+
+    expect(existsSync(join(TEST_DIR, "server.ts"))).toBe(false)
+  })
+
+  it("rejects invalid programmatic admin public keys before creating files", () => {
+    expect(() => {
+      writeProjectFiles(TEST_DIR, {
+        adminPublicKey: "invalid-key",
+        initialUser: { kind: "admin", user: "deploy" },
+      })
+    }).toThrow(
+      'Error: Invalid value for "--admin-public-key" — provide a valid single-line OpenSSH public key.'
+    )
+
+    expect(existsSync(join(TEST_DIR, "server.ts"))).toBe(false)
+  })
+
+  it("rejects invalid programmatic expected host fingerprints before creating files", () => {
+    expect(() => {
+      writeProjectFiles(TEST_DIR, {
+        expectedHostFingerprint: "SHA256:trusted-host-fingerprint",
+        initialUser: { kind: "admin", user: "deploy" },
+      })
+    }).toThrow(
+      'Error: Invalid expected host fingerprint "SHA256:trusted-host-fingerprint" — use an OpenSSH SHA256 fingerprint.'
+    )
+
+    expect(existsSync(join(TEST_DIR, "server.ts"))).toBe(false)
   })
 
   it("generated server.ts keeps the ~/.ssh privateKey default that Paratix expands at runtime", () => {
