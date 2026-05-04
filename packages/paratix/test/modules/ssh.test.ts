@@ -328,6 +328,27 @@ describe("ssh.knownHosts", () => {
     )
   })
 
+  it.each([0, 65_536, 22.5, Number.NaN, "22"])(
+    "rejects invalid known_hosts ports for present state: %s",
+    (port) => {
+      expect(() =>
+        ssh.knownHosts("github.com", {
+          expectedFingerprint: hostFingerprint,
+          port: port as never,
+        })
+      ).toThrow("ssh.knownHosts(github.com) port must be an integer between 1 and 65535")
+    }
+  )
+
+  it.each([0, 65_536, 22.5, Number.NaN, "22"])(
+    "rejects invalid known_hosts ports for absent state: %s",
+    (port) => {
+      expect(() => ssh.knownHosts("github.com", { port: port as never, state: "absent" })).toThrow(
+        "ssh.knownHosts(github.com) port must be an integer between 1 and 65535"
+      )
+    }
+  )
+
   it("does not reject the construction-time call when state is absent and no trust anchor is set", () => {
     expect(() => ssh.knownHosts("github.com", { state: "absent" })).not.toThrow()
   })

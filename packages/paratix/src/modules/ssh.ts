@@ -1,5 +1,6 @@
 import { computeFingerprint } from "../knownHosts.js"
 import { failed } from "../moduleFailure.js"
+import { isValidTcpPort } from "../serverDefinitionValidation.js"
 import { shellQuote } from "../ssh.js"
 import { type Module, type ModuleResult, NEEDS_APPLY, type SshConnection } from "../types.js"
 import { applyAuthorizedKeys, checkAuthorizedKeys } from "./sshAuthorizedKeysHelpers.js"
@@ -96,6 +97,13 @@ function getVerifiedScannedHostKeyLines(
 
 function hasKnownHostsTrustAnchor(options?: KnownHostsOptions): boolean {
   return options?.expectedFingerprint != null || options?.publicKey != null
+}
+
+function assertKnownHostsPort(host: string, options?: KnownHostsOptions): void {
+  if (options?.port === undefined) return
+  if (!isValidTcpPort(options.port)) {
+    throw new Error(`ssh.knownHosts(${host}) port must be an integer between 1 and 65535`)
+  }
 }
 
 function knownHostsLookupTarget(host: string, options?: KnownHostsOptions): string {
@@ -228,6 +236,7 @@ export const ssh = {
    * @returns A Module that manages the known hosts entry.
    */
   knownHosts(host: string, options?: KnownHostsOptions): Module {
+    assertKnownHostsPort(host, options)
     const state = options?.state ?? "present"
     const lookupTarget = knownHostsLookupTarget(host, options)
 
