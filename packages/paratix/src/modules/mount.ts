@@ -13,6 +13,8 @@ import {
 const EXEC_OPTS = { ignoreExitCode: true, silent: true } as const
 const FSTAB_PATH = "/etc/fstab"
 const FSTAB_MODE = "0644"
+const MOUNT_PRESENT = "mount.present"
+const WHITESPACE_PATTERN = /\s/v
 
 /**
  * Reject mount paths that would be destructive or are obviously malformed.
@@ -32,7 +34,10 @@ function validateMountPath(caller: string, path: string): void {
   if (path.length === 0) {
     throw new Error(`${caller}: mount path must not be empty`)
   }
-  if (path.includes("\n") || path.includes("\r")) {
+  if (WHITESPACE_PATTERN.test(path)) {
+    throw new Error(`${caller}: mount path is invalid: ${JSON.stringify(path)}`)
+  }
+  if (!posix.isAbsolute(path)) {
     throw new Error(`${caller}: mount path is invalid: ${JSON.stringify(path)}`)
   }
   if (path !== posix.normalize(path)) {
@@ -40,6 +45,15 @@ function validateMountPath(caller: string, path: string): void {
   }
   if (path === "/") {
     throw new Error(`${caller}: refusing to operate on destructive path: ${path}`)
+  }
+}
+
+function validateFstabField(caller: string, fieldName: string, value: string): void {
+  if (value.length === 0) {
+    throw new Error(`${caller}: ${fieldName} fstab field must not be empty`)
+  }
+  if (WHITESPACE_PATTERN.test(value)) {
+    throw new Error(`${caller}: ${fieldName} fstab field must not contain whitespace`)
   }
 }
 
@@ -423,7 +437,10 @@ export const mount = {
     src: string
   }): Module {
     const { fstype, opts, path, persist = true, src } = options
-    validateMountPath("mount.present", path)
+    validateMountPath(MOUNT_PRESENT, path)
+    validateFstabField(MOUNT_PRESENT, "src", src)
+    validateFstabField(MOUNT_PRESENT, "fstype", fstype)
+    validateFstabField(MOUNT_PRESENT, "opts", opts)
 
     return {
       async apply(ssh: null | SshConnection): Promise<ModuleResult> {

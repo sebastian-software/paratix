@@ -46,6 +46,14 @@ describe("mount.absent — path validation", () => {
     expect(() => mount.absent({ path: "/mnt/data\r" })).toThrow(/mount path is invalid/v)
   })
 
+  it("throws when path is relative", () => {
+    expect(() => mount.absent({ path: "mnt/data" })).toThrow(/mount path is invalid/v)
+  })
+
+  it("throws when path contains whitespace", () => {
+    expect(() => mount.absent({ path: "/mnt/data other" })).toThrow(/mount path is invalid/v)
+  })
+
   it("throws when path is not normalized", () => {
     expect(() => mount.absent({ path: "/mnt//data" })).toThrow(/mount path is invalid/v)
   })
@@ -76,10 +84,51 @@ describe("mount.present — path validation", () => {
     ).toThrow(/mount path is invalid/v)
   })
 
+  it("throws when path is relative", () => {
+    expect(() =>
+      mount.present({ fstype: mountFstype, opts: mountOpts, path: "mnt/data", src: mountSrc })
+    ).toThrow(/mount path is invalid/v)
+  })
+
+  it("throws when path contains whitespace", () => {
+    expect(() =>
+      mount.present({
+        fstype: mountFstype,
+        opts: mountOpts,
+        path: "/mnt/data other",
+        src: mountSrc,
+      })
+    ).toThrow(/mount path is invalid/v)
+  })
+
   it("throws when path is not normalized", () => {
     expect(() =>
       mount.present({ fstype: mountFstype, opts: mountOpts, path: "/mnt//data", src: mountSrc })
     ).toThrow(/mount path is invalid/v)
+  })
+
+  it.each([
+    ["src", { src: "" }],
+    ["src", { src: "tmp fs" }],
+    ["src", { src: "tmpfs\nother" }],
+    ["src", { src: "tmpfs\rother" }],
+    ["fstype", { fstype: "" }],
+    ["fstype", { fstype: "tmp fs" }],
+    ["fstype", { fstype: "tmpfs\nother" }],
+    ["opts", { opts: "" }],
+    ["opts", { opts: "noexec nosuid" }],
+    ["opts", { opts: "noexec\tnosuid" }],
+    ["opts", { opts: "noexec\nnosuid" }],
+  ])("throws when %s is not a valid fstab field", (_fieldName, overrides) => {
+    expect(() =>
+      mount.present({
+        fstype: mountFstype,
+        opts: mountOpts,
+        path: mountPath,
+        src: mountSrc,
+        ...overrides,
+      })
+    ).toThrow(/fstab field/v)
   })
 })
 
