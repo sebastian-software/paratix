@@ -721,7 +721,7 @@ describe("sftpUpload", () => {
     await expect(promise).resolves.toBeUndefined()
   })
 
-  it("resolves when the remote writeStream emits close without finish", async () => {
+  it("rejects and cleans up when the remote writeStream closes without finish", async () => {
     const { sftp, sftpWriteStream } = makeSftpSession()
     const client = makeClientMock(sftp)
 
@@ -731,7 +731,9 @@ describe("sftpUpload", () => {
     const promise = sftpUpload(client, "/local/file.txt", "/remote/file.txt")
 
     sftpWriteStream.emit("close")
-    await expect(promise).resolves.toBeUndefined()
+    await expect(promise).rejects.toThrow("SFTP upload closed before finish: /remote/file.txt")
+    expect(localReadStream.destroy).toHaveBeenCalledOnce()
+    expect(sftpWriteStream.destroy).toHaveBeenCalledOnce()
   })
 
   // ---------------------------------------------------------------------------

@@ -91,6 +91,7 @@ function openUploadStreams(
  *
  * @param options - Stream piping options including timeout configuration.
  * @param options.completionEvents - Stream events that mark a successful transfer.
+ * @param options.prematureCloseMessage - Error message for a close before a successful transfer.
  * @param options.readStream - The source stream to read from.
  * @param options.reject - Promise reject callback.
  * @param options.resolve - Promise resolve callback.
@@ -101,6 +102,7 @@ function openUploadStreams(
  */
 function wireStreams(options: {
   completionEvents?: Array<"close" | "finish">
+  prematureCloseMessage?: string
   readStream: Readable
   reject: (reason: Error) => void
   resolve: () => void
@@ -111,6 +113,7 @@ function wireStreams(options: {
 }): void {
   const {
     completionEvents = ["finish"],
+    prematureCloseMessage,
     readStream,
     reject,
     resolve,
@@ -137,6 +140,13 @@ function wireStreams(options: {
   for (const completionEvent of completionEvents) {
     writeStream.on(completionEvent, () => {
       settlement.resolveOnce()
+    })
+  }
+  if (prematureCloseMessage !== undefined) {
+    writeStream.on("close", () => {
+      readStream.destroy()
+      if (typeof writeStream.destroy === "function") writeStream.destroy()
+      settlement.rejectOnce(new Error(prematureCloseMessage))
     })
   }
   writeStream.on("error", (writeError: Error) => {
@@ -257,7 +267,8 @@ export async function sftpUpload(
       }
 
       wireStreams({
-        completionEvents: ["close", "finish"],
+        completionEvents: ["finish"],
+        prematureCloseMessage: `SFTP upload closed before finish: ${remotePath}`,
         readStream: streams.readStream,
         reject,
         resolve,
