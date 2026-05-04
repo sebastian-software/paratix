@@ -40,6 +40,8 @@ type BaseDownloadOptions = {
 type DownloadParameters = {
   /** Absolute path on the remote server where the file is written. */
   destination: string
+  /** Force a fresh transfer even when the destination already matches sha256. */
+  force?: boolean
   /** Additional HTTP headers sent with the curl request. */
   headers?: Record<string, string>
   /** Strings to mask in error messages (e.g. tokens). */
@@ -405,7 +407,7 @@ async function performDownload(
     // re-apply ownership/permissions instead of re-downloading the payload.
     // This honors download.large's "fetched once" contract even when the
     // operator drifted mode/owner/group out-of-band.
-    if (await destinationContentMatchesSha256(conn, parameters)) {
+    if (parameters.force !== true && (await destinationContentMatchesSha256(conn, parameters))) {
       const changed = await applyDriftedFileAttributes(conn, parameters)
       return { status: changed ? "changed" : "ok" }
     }

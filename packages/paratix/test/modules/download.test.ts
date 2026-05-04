@@ -546,6 +546,28 @@ describe("download.url", () => {
         expect(mockSsh.calls).toContain(`mv '${temporaryDestination}' '${destination}'`)
       })
 
+      it("forces a full curl download when force is true even if sha256 matches", async () => {
+        const mockSsh = createMockSsh({
+          [`[ -e '${destination}' ]`]: { code: 0 },
+          [`[ -f '${destination}' ]`]: { code: 0 },
+          [`[ -f '${temporaryDestination}' ]`]: { code: 0 },
+          [`mktemp "$(dirname '${destination}')/.paratix-download.XXXXXX"`]: {
+            stdout: `${temporaryDestination}\n`,
+          },
+          [`sha256sum '${temporaryDestination}'`]: {
+            stdout: `${sha256}  ${temporaryDestination}`,
+          },
+        })
+        const mod = download.url(destination, url, { force: true, sha256 })
+        const result = await mod.apply(mockSsh, emptyEnv)
+        expect(result.status).toBe("changed")
+        expect(mockSsh.calls).not.toContain(`sha256sum '${destination}'`)
+        expect(mockSsh.calls).toContain(
+          `curl -fsSL -o '${temporaryDestination}' ${httpsOnlyCurlProtocolFlags} --config -`
+        )
+        expect(mockSsh.calls).toContain(`mv '${temporaryDestination}' '${destination}'`)
+      })
+
       it("never enters the fast path when sha256 is not provided", async () => {
         // Without sha256 the hash check cannot vouch for the on-disk content,
         // so apply must always run curl through the slow path.
