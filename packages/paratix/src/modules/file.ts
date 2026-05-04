@@ -1,7 +1,7 @@
 import { readFile } from "node:fs/promises"
 import { posix } from "node:path"
 
-import { failed } from "../moduleFailure.js"
+import { failed, failedCommand } from "../moduleFailure.js"
 import { shellQuote, validateMode } from "../ssh.js"
 import { renderTemplate } from "../template.js"
 import {
@@ -151,7 +151,16 @@ export const file = {
     return {
       async apply(ssh: null | SshConnection): Promise<ModuleResult> {
         if (!ssh) return failed(`[file.absent: ${remotePath}] SSH connection is required`)
-        await ssh.exec(`rm -rf ${shellQuote(remotePath)}`, { silent: true })
+        if (!(await ssh.exists(remotePath))) return { status: "ok" }
+
+        const result = await ssh.exec(`rm -rf ${shellQuote(remotePath)}`, {
+          ignoreExitCode: true,
+          silent: true,
+        })
+        if (result.code !== 0) {
+          return failedCommand(`[file.absent: ${remotePath}] rm failed`, result)
+        }
+
         return { status: "changed" }
       },
       async check(ssh: null | SshConnection): Promise<"needs-apply" | "ok"> {

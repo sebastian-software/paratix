@@ -183,6 +183,53 @@ describe("file.absent", () => {
     const result = await mod.check(null, emptyEnv)
     expect(result).toBe("needs-apply")
   })
+
+  it("apply returns failed when ssh is null", async () => {
+    const mod = file.absent("/tmp/old-file")
+    // eslint-disable-next-line prefer-spread -- mod.apply is a Module method, not Function.prototype.apply
+    const result = await mod.apply(null, emptyEnv)
+    expect(result.status).toBe("failed")
+  })
+
+  it("apply returns ok and skips rm when the path is already absent", async () => {
+    const ssh = createMockSsh({
+      "[ -e '/tmp/old-file' ]": { code: 1 },
+    })
+    const mod = file.absent("/tmp/old-file")
+    const result = await mod.apply(ssh, emptyEnv)
+
+    expect(result.status).toBe("ok")
+    expect(ssh.calls).not.toContain("rm -rf '/tmp/old-file'")
+  })
+
+  it("apply removes an existing path with shell quoting", async () => {
+    const remotePath = "/tmp/old file's dir"
+    const ssh = createMockSsh({
+      "[ -e '/tmp/old file'\\''s dir' ]": { code: 0 },
+      "rm -rf '/tmp/old file'\\''s dir'": { code: 0 },
+    })
+    const mod = file.absent(remotePath)
+    const result = await mod.apply(ssh, emptyEnv)
+
+    expect(result.status).toBe("changed")
+    expect(ssh.execCalls).toContainEqual({
+      command: "rm -rf '/tmp/old file'\\''s dir'",
+      options: { ignoreExitCode: true, silent: true },
+    })
+  })
+
+  it("apply returns failed when rm exits non-zero", async () => {
+    const ssh = createMockSsh({
+      "[ -e '/tmp/stubborn' ]": { code: 0 },
+      "rm -rf '/tmp/stubborn'": { code: 1, stderr: "permission denied" },
+    })
+    const mod = file.absent("/tmp/stubborn")
+    const result = await mod.apply(ssh, emptyEnv)
+
+    expect(result.status).toBe("failed")
+    expect(result.error).toBeInstanceOf(Error)
+    expect(String(result.error)).toContain("rm failed")
+  })
 })
 
 describe("file.chmod", () => {
