@@ -746,6 +746,23 @@ describe("file.line — apply without options.match", () => {
 })
 
 describe("file.line — sed-Escaping Regression (apply with options.match)", () => {
+  it("apply returns ok without writing when the matched line already equals the target", async () => {
+    const writtenFiles: Array<{ content: string; path: string }> = []
+    const ssh = createMockSsh({
+      "cat '/etc/config'": { stdout: "OTHER=foo\nKEY=value\nEND=bar\n" },
+    })
+    // eslint-disable-next-line @typescript-eslint/require-await -- Mock
+    ssh.writeFile = async (path: string, content: string) => {
+      writtenFiles.push({ content, path })
+    }
+
+    const mod = file.line("/etc/config", "KEY=value", { match: "KEY=.*" })
+    const result = await mod.apply(ssh, emptyEnv)
+
+    expect(result.status).toBe("ok")
+    expect(writtenFiles).toStrictEqual([])
+  })
+
   it("regression — apply replaces the full matching line, not only the matched substring", async () => {
     const writtenFiles: Array<{ content: string; path: string }> = []
     const ssh = createMockSsh({

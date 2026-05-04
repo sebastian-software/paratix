@@ -105,6 +105,7 @@ async function applyLineReplace(input: {
       `[file.line: ${input.remotePath}] No line matching ${input.match} found for replacement`
     )
   }
+  if (lines[matchingLineIndex] === input.line) return { status: "ok" }
   lines[matchingLineIndex] = input.line
   let newContent = lines.join("\n")
   if (hasTrailingNewline) newContent += "\n"
