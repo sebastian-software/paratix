@@ -1070,6 +1070,28 @@ describe("file.assemble", () => {
     }
   })
 
+  it("check returns ok when no mode is configured and an existing file has mode 0600", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "paratix-test-"))
+    try {
+      const frag1 = join(dir, "frag1.txt")
+      writeFileSync(frag1, "Hello")
+      const combinedHash = sha256Hex("Hello")
+
+      const ssh = createMockSsh({
+        "[ -e '/remote/assembled.txt' ]": { code: 0 },
+        "[ -f '/remote/assembled.txt' ]": { code: 0 },
+        "sha256sum '/remote/assembled.txt'": { stdout: `${combinedHash}  /remote/assembled.txt` },
+        "stat -c '%a %U %G' '/remote/assembled.txt'": { stdout: "600 root root" },
+      })
+
+      const mod = file.assemble("/remote/assembled.txt", [frag1])
+      const result = await mod.check(ssh, emptyEnv)
+      expect(result).toBe("ok")
+    } finally {
+      rmSync(dir, { recursive: true })
+    }
+  })
+
   it("check returns needs-apply when file does not exist", async () => {
     const dir = mkdtempSync(join(tmpdir(), "paratix-test-"))
     try {
@@ -1164,9 +1186,9 @@ describe("file.assemble", () => {
     }
   })
 
-  // R-0000059: file.assemble.check must also detect mode/owner drift, mirroring
-  // file.copy.check. Hash-only comparison previously masked manual chmod/chown
-  // edits and the recipe falsely reported `ok` after operator drift.
+  // R-0000059: file.assemble.check must detect explicit mode/owner drift.
+  // Hash-only comparison previously masked manual chmod/chown edits and the
+  // recipe falsely reported `ok` after operator drift.
   it("check returns needs-apply when the hash matches but the mode drifted", async () => {
     const dir = mkdtempSync(join(tmpdir(), "paratix-test-"))
     try {
