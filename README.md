@@ -64,7 +64,7 @@ export default server({
 Apply it with:
 
 ```bash
-paratix apply server.ts
+npx paratix apply server.ts
 ```
 
 Useful flags:
