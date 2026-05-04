@@ -25,6 +25,25 @@ describe("guardedWriteFile", () => {
     expect(writeFileSpy).toHaveBeenCalledWith(remotePath, newContent, { mode })
   })
 
+  it("does not treat significant whitespace as drift when contents match byte-for-byte", async () => {
+    const remotePath = "/etc/app.conf"
+    const mode = "0644"
+    const originalContent = "  indented=true  \n"
+    const newContent = "  indented=false  \n"
+
+    const ssh = createMockSsh(
+      {
+        [`cat '${remotePath}'`]: { stdout: originalContent },
+      },
+      { allowWrites: [{ options: { mode }, remotePath }] }
+    )
+    const writeFileSpy = vi.spyOn(ssh, "writeFile")
+
+    await guardedWriteFile(ssh, { mode, newContent, originalContent, remotePath })
+
+    expect(writeFileSpy).toHaveBeenCalledWith(remotePath, newContent, { mode })
+  })
+
   it("passes the mode option to writeFile when provided", async () => {
     // Arrange
     const remotePath = "/etc/secret.conf"
@@ -116,6 +135,23 @@ describe("guardedWriteFile", () => {
     ).rejects.toThrow(/Concurrent modification/v)
 
     // Assert: writeFile must never be called when the guard triggers
+    expect(writeFileSpy).not.toHaveBeenCalled()
+  })
+
+  it("detects concurrent modification when only trailing whitespace changed", async () => {
+    const remotePath = "/etc/app.conf"
+    const mode = "0644"
+    const originalContent = "key=value\n"
+    const newContent = "key=updated\n"
+    const ssh = createMockSsh({
+      [`cat '${remotePath}'`]: { stdout: "key=value  \n" },
+    })
+    const writeFileSpy = vi.spyOn(ssh, "writeFile")
+
+    await expect(
+      guardedWriteFile(ssh, { mode, newContent, originalContent, remotePath })
+    ).rejects.toThrow(/Concurrent modification/v)
+
     expect(writeFileSpy).not.toHaveBeenCalled()
   })
 })

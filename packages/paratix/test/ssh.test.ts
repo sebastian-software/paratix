@@ -1807,6 +1807,22 @@ describe("SshConnectionImpl", () => {
       expect(executedCommand).not.toContain("sudo")
       expect(executedCommand).toContain("cat")
     })
+
+    it("preserves leading spaces, trailing whitespace, and final newline", async () => {
+      const fileContent = "  leading\nvalue=1  \n"
+      const execSpy = vi.fn().mockImplementation((_command: string, callback: ExecCallback) => {
+        const stream = makeStream()
+        callback(undefined, stream)
+        stream.emit("data", Buffer.from(fileContent))
+        stream.emit("close", 0)
+      })
+      const client = makeClientWithExecSpy(execSpy)
+      const ssh = makeConnectedSsh(client, { user: "root" })
+
+      const result = await ssh.readFile("/etc/app.conf")
+
+      expect(result).toBe(fileContent)
+    })
   })
 
   // -------------------------------------------------------------------------

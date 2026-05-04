@@ -235,7 +235,8 @@ export function createMockSsh(responses?: MockResponses, options?: MockSshOption
     probeSudo: sideEffects.probeSudo,
     probeSudoCalls: sideEffects.probeSudoCalls,
     async readFile(path) {
-      return this.output(`cat ${shellQuote(path)}`)
+      const result = await this.exec(`cat ${shellQuote(path)}`, { silent: true })
+      return result.stdout
     },
     removePort: spies.removePort,
     removePortCalls: spies.removePortCalls,

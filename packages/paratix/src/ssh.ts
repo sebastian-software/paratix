@@ -296,7 +296,8 @@ export class SshConnectionImpl implements SshConnection {
   }
 
   public async readFile(remotePath: string): Promise<string> {
-    return this.output(`cat ${shellQuote(remotePath)}`)
+    const result = await this.exec(`cat ${shellQuote(remotePath)}`, { silent: true })
+    return result.stdout
   }
 
   public async reconnect(): Promise<void> {
