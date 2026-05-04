@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process"
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join, resolve } from "node:path"
 import { pathToFileURL } from "node:url"
@@ -67,5 +67,67 @@ describe("dist CLI", () => {
         "SECRET"
       )
     ).resolves.toBe("resolved-secret")
+  })
+
+  it("supports package specifier imports from a consumer project", () => {
+    const tempDirectory = mkdtempSync(join(tmpdir(), "paratix-consumer-dist-"))
+    const nodeModulesDirectory = join(tempDirectory, "node_modules")
+    const consumerScriptPath = join(tempDirectory, "consumer.mjs")
+
+    try {
+      mkdirSync(nodeModulesDirectory)
+      symlinkSync(packageRootDirectory, join(nodeModulesDirectory, "paratix"), "dir")
+      writeFileSync(join(tempDirectory, "package.json"), '{ "type": "module" }\n')
+      writeFileSync(
+        consumerScriptPath,
+        `
+import { resolveEnvironment } from "paratix"
+import { file, package as pkg, service } from "paratix/modules"
+
+if (typeof resolveEnvironment !== "function") {
+  throw new Error("paratix did not export resolveEnvironment")
+}
+if (typeof file?.directory !== "function") {
+  throw new Error("paratix/modules did not export file.directory")
+}
+if (typeof pkg?.installed !== "function") {
+  throw new Error("paratix/modules did not export package.installed")
+}
+if (typeof service?.enabled !== "function") {
+  throw new Error("paratix/modules did not export service.enabled")
+}
+
+const resolved = await resolveEnvironment({ async SECRET() { return "resolved-secret" } }, "SECRET")
+if (resolved !== "resolved-secret") {
+  throw new Error("resolveEnvironment did not resolve lazy consumer values")
+}
+
+const modules = [
+  file.directory("/tmp/paratix-consumer-test"),
+  pkg.installed("curl"),
+  service.enabled("ssh"),
+]
+for (const module of modules) {
+  if (typeof module.name !== "string" || typeof module.check !== "function" || typeof module.apply !== "function") {
+    throw new Error("module export did not create a valid runtime module")
+  }
+}
+
+console.log("consumer imports ok")
+`
+      )
+
+      const output = execFileSync(process.execPath, [consumerScriptPath], {
+        cwd: tempDirectory,
+        encoding: "utf8",
+        killSignal: "SIGTERM",
+        maxBuffer: CLI_COMMAND_MAX_BUFFER,
+        timeout: CLI_COMMAND_TIMEOUT_MS,
+      }).trim()
+
+      expect(output).toBe("consumer imports ok")
+    } finally {
+      rmSync(tempDirectory, { force: true, recursive: true })
+    }
   })
 })
