@@ -10,6 +10,8 @@ import {
   NEEDS_APPLY,
   type SshConnection,
 } from "../types.js"
+import { sha256String } from "./fileHelpers.js"
+import { hasFlag, setVersionedFlag } from "./moduleHelpers.js"
 import {
   buildHttpCheckParameters,
   buildWaitForName,
@@ -323,6 +325,19 @@ type RouteCheckParameters = {
 
 type RouteParameters = Omit<RouteCheckParameters, "state">
 
+function buildRouteReloadFlag(parameters: RouteParameters): {
+  flagName: string
+  flagPrefix: string
+} {
+  const routeKey = `${parameters.destination}\n${parameters.gateway}\n${parameters.device ?? ""}`
+  const routeHash = sha256String(routeKey).slice(0, 16)
+  const flagPrefix = `net-route-${routeHash}-`
+  return {
+    flagName: `${flagPrefix}${sha256String(buildRouteDropin(parameters.destination, parameters.gateway, parameters.device)).slice(0, 16)}`,
+    flagPrefix,
+  }
+}
+
 /**
  * Run the live-route check against the remote host.
  *
@@ -379,7 +394,9 @@ async function checkRouteState(
     if (!dropinPresent) return NEEDS_APPLY
     const expected = buildRouteDropin(destination, gateway, device)
     const current = await conn.readFile(dropinPath)
-    return current.trim() === expected.trim() ? "ok" : NEEDS_APPLY
+    if (current.trim() !== expected.trim()) return NEEDS_APPLY
+    const reloadFlag = buildRouteReloadFlag({ destination, device, dropinPath, gateway })
+    return (await hasFlag(conn, reloadFlag.flagName)) ? "ok" : NEEDS_APPLY
   }
 
   // absent: neither the live route nor the drop-in may remain — a lingering
@@ -439,6 +456,10 @@ async function applyRouteState(
       `[net.route: ${parameters.destination}] networkctl reload failed`,
       reloadResult
     )
+  }
+  if (parameters.state === "present") {
+    const reloadFlag = buildRouteReloadFlag(parameters)
+    await setVersionedFlag(conn, reloadFlag.flagName, reloadFlag.flagPrefix)
   }
   return { status: "changed" }
 }

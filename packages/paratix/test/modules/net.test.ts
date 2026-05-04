@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it } from "vitest"
 
 import { net } from "../../src/index.js"
+import { sha256String } from "../../src/modules/fileHelpers.js"
 import { setRunnerAbortSignal } from "../../src/runnerAbortSignal.js"
 import {
   clearRegisteredSecrets,
@@ -13,6 +14,17 @@ const createMockSsh: typeof createBaseMockSsh = (responses, options) =>
   createBaseMockSsh(responses, { strict: false, ...options })
 
 const emptyEnv = {}
+
+function buildRouteReloadFlagCheck(input: {
+  destination: string
+  device?: string
+  gateway: string
+}): string {
+  const routeKey = `${input.destination}\n${input.gateway}\n${input.device ?? ""}`
+  const dropin = `[Match]\nName=${input.device ?? "*"}\n\n[Route]\nDestination=${input.destination}\nGateway=${input.gateway}\n`
+  const flagName = `net-route-${sha256String(routeKey).slice(0, 16)}-${sha256String(dropin).slice(0, 16)}`
+  return `[ -f /var/lib/paratix/flags/'${flagName}' ]`
+}
 
 // ─── net.hosts ────────────────────────────────────────────────────────────────
 
@@ -399,6 +411,11 @@ describe("net.route — check", () => {
     const expectedDropin = `[Match]\nName=eth0\n\n[Route]\nDestination=10.0.0.0/24\nGateway=192.168.1.1\n`
     const mockSsh = createMockSsh({
       [`cat '${dropinPath}'`]: { stdout: expectedDropin },
+      [buildRouteReloadFlagCheck({
+        destination: "10.0.0.0/24",
+        device: "eth0",
+        gateway: "192.168.1.1",
+      })]: { code: 0 },
       [`test -f '${dropinPath}'`]: { code: 0 },
       "ip route show '10.0.0.0/24'": { stdout: "10.0.0.0/24 via 192.168.1.1 dev eth0" },
     })
@@ -508,12 +525,35 @@ describe("net.route — check", () => {
     const expectedDropin = `[Match]\nName=eth0\n\n[Route]\nDestination=10.0.0.0/24\nGateway=192.168.1.1\n`
     const mockSsh = createMockSsh({
       [`cat '${dropinPath}'`]: { stdout: expectedDropin },
+      [buildRouteReloadFlagCheck({
+        destination: "10.0.0.0/24",
+        device: "eth0",
+        gateway: "192.168.1.1",
+      })]: { code: 0 },
       [`test -f '${dropinPath}'`]: { code: 0 },
       "ip route show '10.0.0.0/24'": { stdout: "10.0.0.0/24 via 192.168.1.1 dev eth0" },
     })
     const mod = net.route("10.0.0.0/24", "192.168.1.1", { device: "eth0" })
     const result = await mod.check(mockSsh, emptyEnv)
     expect(result).toBe("ok")
+  })
+
+  it("returns needs-apply when route and drop-in match but reload marker is missing", async () => {
+    const dropinPath = "/etc/systemd/network/50-paratix-route-10.0.0.0-24.network"
+    const expectedDropin = `[Match]\nName=eth0\n\n[Route]\nDestination=10.0.0.0/24\nGateway=192.168.1.1\n`
+    const mockSsh = createMockSsh({
+      [`cat '${dropinPath}'`]: { stdout: expectedDropin },
+      [buildRouteReloadFlagCheck({
+        destination: "10.0.0.0/24",
+        device: "eth0",
+        gateway: "192.168.1.1",
+      })]: { code: 1 },
+      [`test -f '${dropinPath}'`]: { code: 0 },
+      "ip route show '10.0.0.0/24'": { stdout: "10.0.0.0/24 via 192.168.1.1 dev eth0" },
+    })
+    const mod = net.route("10.0.0.0/24", "192.168.1.1", { device: "eth0" })
+    const result = await mod.check(mockSsh, emptyEnv)
+    expect(result).toBe("needs-apply")
   })
 })
 
@@ -603,6 +643,11 @@ describe("net.route — apply", () => {
   })
 
   it("returns failed when networkctl reload fails after adding route", async () => {
+    const reloadFlagCheck = buildRouteReloadFlagCheck({
+      destination: "10.0.0.0/24",
+      gateway: "192.168.1.1",
+    }).replace("[ -f ", "touch ")
+    const reloadFlagPath = reloadFlagCheck.slice(0, -2)
     const mockSsh = createMockSsh({
       "networkctl reload": { code: 1, stderr: "reload failed" },
     })
@@ -610,6 +655,7 @@ describe("net.route — apply", () => {
     const result = await mod.apply(mockSsh, emptyEnv)
     expect(result.status).toBe("failed")
     expect(String(result.error)).toContain("networkctl reload failed")
+    expect(mockSsh.calls.some((call) => call.includes(reloadFlagPath))).toBe(false)
   })
 
   it("returns changed after removing a route (state: absent)", async () => {
