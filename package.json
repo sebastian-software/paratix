@@ -12,7 +12,7 @@
     "lint:eslint": "eslint",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
-    "agent:check": "pnpm lint && pnpm format:check && pnpm typecheck && pnpm test",
+    "agent:check": "pnpm lint && pnpm format:check && pnpm typecheck && pnpm build && pnpm test",
     "agent:check:integration": "pnpm agent:check && pnpm test:integration"
   },
   "repository": {
