@@ -35,6 +35,11 @@ type RemoteStat = {
   owner: string
 }
 
+type CleanupStep = {
+  name: string
+  run: () => Promise<void> | void
+}
+
 function getEnvironment(): IntegrationEnvironment {
   if (integrationEnvironment == null) {
     throw new Error("Integration environment has not been initialized")
@@ -145,6 +150,65 @@ async function expectModuleCheckOk(
   await expect(mod.check(ssh, environment)).resolves.toBe("ok")
 }
 
+async function runCleanupSteps(steps: CleanupStep[]): Promise<void> {
+  const failures: Error[] = []
+
+  await runCleanupStep(steps, 0, failures)
+
+  if (failures.length > 0) {
+    throw new AggregateError(failures, "One or more cleanup steps failed")
+  }
+}
+
+async function runCleanupStep(
+  steps: CleanupStep[],
+  index: number,
+  failures: Error[]
+): Promise<void> {
+  const step = steps.at(index)
+  if (step == null) return
+
+  try {
+    await step.run()
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : String(error)
+    failures.push(new Error(`${step.name}: ${reason}`))
+  }
+
+  await runCleanupStep(steps, index + 1, failures)
+}
+
+function removeRemoteDirectoryStep(
+  ssh: SshConnection,
+  remoteDirectory: string,
+  name = "remove remote test directory"
+): CleanupStep {
+  return {
+    name,
+    async run() {
+      await ssh.exec(`rm -rf ${shellQuote(remoteDirectory)}`, { silent: true })
+    },
+  }
+}
+
+function disconnectSshStep(ssh: SshConnection): CleanupStep {
+  return {
+    name: "disconnect SSH",
+    run() {
+      ssh.disconnect()
+    },
+  }
+}
+
+function removeLocalDirectoryStep(localDirectory: string): CleanupStep {
+  return {
+    name: "remove local test directory",
+    async run() {
+      await rm(localDirectory, { force: true, recursive: true })
+    },
+  }
+}
+
 async function startRemoteHttpServer(
   ssh: SshConnection,
   directory: string,
@@ -184,6 +248,38 @@ async function waitForRemoteHttpServer(
   await sleep(HTTP_SERVER_READY_DELAY_MS)
   await waitForRemoteHttpServer(ssh, url, retries - 1)
 }
+
+describe("cleanup helper", () => {
+  it("runs every cleanup step even when an earlier cleanup fails", async () => {
+    const calls: string[] = []
+
+    await expect(
+      runCleanupSteps([
+        {
+          name: "remote cleanup",
+          run() {
+            calls.push("remote")
+            throw new Error("remote cleanup failed")
+          },
+        },
+        {
+          name: "disconnect",
+          run() {
+            calls.push("disconnect")
+          },
+        },
+        {
+          name: "local cleanup",
+          run() {
+            calls.push("local")
+          },
+        },
+      ])
+    ).rejects.toThrow(AggregateError)
+
+    expect(calls).toStrictEqual(["remote", "disconnect", "local"])
+  })
+})
 
 describe("Paratix integration", () => {
   beforeAll(async () => {
@@ -254,9 +350,11 @@ describe("Paratix integration", () => {
       await ssh.downloadFile(remoteDownloadPath, localDownloadPath)
       expect(await readFile(localDownloadPath, "utf8")).toBe("download-content\n")
     } finally {
-      await ssh.exec(`rm -rf ${shellQuote(remoteBase)}`, { silent: true })
-      ssh.disconnect()
-      await rm(localDirectory, { force: true, recursive: true })
+      await runCleanupSteps([
+        removeRemoteDirectoryStep(ssh, remoteBase, "remove remote SFTP test directory"),
+        disconnectSshStep(ssh),
+        removeLocalDirectoryStep(localDirectory),
+      ])
     }
   })
 
@@ -281,9 +379,11 @@ describe("Paratix integration", () => {
       await ssh.downloadFile(remoteDownloadPath, localDownloadPath)
       expect(await readFile(localDownloadPath, "utf8")).toBe(unicodeBlockContent)
     } finally {
-      await ssh.exec(`rm -rf ${shellQuote(remoteBase)}`, { silent: true })
-      ssh.disconnect()
-      await rm(localDirectory, { force: true, recursive: true })
+      await runCleanupSteps([
+        removeRemoteDirectoryStep(ssh, remoteBase, "remove remote unicode SFTP test directory"),
+        disconnectSshStep(ssh),
+        removeLocalDirectoryStep(localDirectory),
+      ])
     }
   })
 
@@ -331,9 +431,11 @@ describe("Paratix integration", () => {
         ssh.lines("find /tmp -maxdepth 1 -user paratix -name 'paratix-upload.*' -print | sort")
       ).resolves.toStrictEqual(temporaryUploadsBeforeFailure)
     } finally {
-      await ssh.exec(`rm -rf ${shellQuote(remoteBase)}`, { silent: true })
-      ssh.disconnect()
-      await rm(localDirectory, { force: true, recursive: true })
+      await runCleanupSteps([
+        removeRemoteDirectoryStep(ssh, remoteBase, "remove remote non-root SFTP test directory"),
+        disconnectSshStep(ssh),
+        removeLocalDirectoryStep(localDirectory),
+      ])
     }
   })
 
@@ -449,9 +551,11 @@ describe("Paratix integration", () => {
       expect(await ssh.readFile(`${remoteApp}/template.txt`)).toBe("Hello integration")
       expect(await ssh.readFile(markerPath)).toBe("ready")
     } finally {
-      await ssh.exec(`rm -rf ${shellQuote(remoteBase)}`, { silent: true })
-      ssh.disconnect()
-      await rm(localDirectory, { force: true, recursive: true })
+      await runCleanupSteps([
+        removeRemoteDirectoryStep(ssh, remoteBase, "remove remote playbook test directory"),
+        disconnectSshStep(ssh),
+        removeLocalDirectoryStep(localDirectory),
+      ])
     }
   })
 
@@ -513,9 +617,11 @@ describe("Paratix integration", () => {
       expect(output).toContain("(dry-run)")
       await expect(ssh.test(`test -f ${shellQuote(markerPath)}`)).resolves.toBe(false)
     } finally {
-      await ssh.exec(`rm -rf ${shellQuote(remoteBase)}`, { silent: true })
-      ssh.disconnect()
-      await rm(localDirectory, { force: true, recursive: true })
+      await runCleanupSteps([
+        removeRemoteDirectoryStep(ssh, remoteBase, "remove remote dist CLI test directory"),
+        disconnectSshStep(ssh),
+        removeLocalDirectoryStep(localDirectory),
+      ])
     }
   })
 
@@ -576,9 +682,11 @@ describe("Paratix integration", () => {
       await expectModuleCheckOk(templateModule, ssh, { NAME: "integration" })
       await expectModuleCheckOk(commandModule, ssh)
     } finally {
-      await ssh.exec(`rm -rf ${shellQuote(remoteBase)}`, { silent: true })
-      ssh.disconnect()
-      await rm(localDirectory, { force: true, recursive: true })
+      await runCleanupSteps([
+        removeRemoteDirectoryStep(ssh, remoteBase, "remove remote module test directory"),
+        disconnectSshStep(ssh),
+        removeLocalDirectoryStep(localDirectory),
+      ])
     }
   })
 
@@ -643,9 +751,11 @@ describe("Paratix integration", () => {
       await expectModuleCheckOk(templateModule, ssh, { city: "München", name: "Jörg" })
       await expectModuleCheckOk(blockModule, ssh)
     } finally {
-      await ssh.exec(`rm -rf ${shellQuote(remoteBase)}`, { silent: true })
-      ssh.disconnect()
-      await rm(localDirectory, { force: true, recursive: true })
+      await runCleanupSteps([
+        removeRemoteDirectoryStep(ssh, remoteBase, "remove remote unicode module test directory"),
+        disconnectSshStep(ssh),
+        removeLocalDirectoryStep(localDirectory),
+      ])
     }
   })
 
@@ -715,9 +825,16 @@ describe("Paratix integration", () => {
       await expectModuleCheckOk(urlModule, ssh)
       await expectModuleCheckOk(largeModule, ssh)
     } finally {
-      await stopRemoteHttpServer(ssh, port)
-      await ssh.exec(`rm -rf ${shellQuote(remoteBase)}`, { silent: true })
-      ssh.disconnect()
+      await runCleanupSteps([
+        {
+          name: "stop remote HTTP server",
+          async run() {
+            await stopRemoteHttpServer(ssh, port)
+          },
+        },
+        removeRemoteDirectoryStep(ssh, remoteBase, "remove remote download test directory"),
+        disconnectSshStep(ssh),
+      ])
     }
   })
 })
