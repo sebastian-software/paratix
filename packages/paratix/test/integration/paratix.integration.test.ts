@@ -252,6 +252,54 @@ describe("Paratix integration", () => {
     }
   })
 
+  it("uses sudo finalization and cleanup for non-root SFTP transfers", async () => {
+    const environment = getEnvironment()
+    const ssh = await connectSsh([environment.primaryPort])
+    const localDirectory = mkdtempSync(join(tmpdir(), "paratix-sftp-non-root-"))
+    const localUploadPath = join(localDirectory, "upload.txt")
+    const localDownloadPath = join(localDirectory, "download.txt")
+    const localFailedUploadPath = join(localDirectory, "failed-upload.txt")
+    const remoteBase = `/root/non-root-sftp-${randomUUID()}`
+    const remoteUploadPath = `${remoteBase}/uploaded.txt`
+    const remoteDownloadPath = `${remoteBase}/download.txt`
+    const missingParentUploadPath = `${remoteBase}/missing-parent/uploaded.txt`
+
+    try {
+      writeFileSync(localUploadPath, "non-root upload\n", "utf8")
+      writeFileSync(localFailedUploadPath, "failed upload\n", "utf8")
+      await ssh.exec(`mkdir -p ${shellQuote(remoteBase)} && chmod 0755 ${shellQuote(remoteBase)}`, {
+        silent: true,
+      })
+
+      await ssh.uploadFile(localUploadPath, remoteUploadPath, { mode: "0640" })
+      expect(await ssh.readFile(remoteUploadPath)).toBe("non-root upload")
+      expect(await readRemoteStat(ssh, remoteUploadPath)).toStrictEqual({
+        group: "root",
+        mode: "640",
+        owner: "root",
+      })
+
+      await ssh.exec(
+        `printf %s ${shellQuote("sudo-only download\n")} > ${shellQuote(remoteDownloadPath)} && chmod 0600 ${shellQuote(remoteDownloadPath)} && chown root:root ${shellQuote(remoteDownloadPath)}`,
+        { silent: true }
+      )
+      await ssh.downloadFile(remoteDownloadPath, localDownloadPath)
+      expect(await readFile(localDownloadPath, "utf8")).toBe("sudo-only download\n")
+
+      const temporaryUploadsBeforeFailure = await ssh.lines(
+        "find /tmp -maxdepth 1 -user paratix -name 'paratix-upload.*' -print | sort"
+      )
+      await expect(ssh.uploadFile(localFailedUploadPath, missingParentUploadPath)).rejects.toThrow()
+      await expect(
+        ssh.lines("find /tmp -maxdepth 1 -user paratix -name 'paratix-upload.*' -print | sort")
+      ).resolves.toStrictEqual(temporaryUploadsBeforeFailure)
+    } finally {
+      await ssh.exec(`rm -rf ${shellQuote(remoteBase)}`, { silent: true })
+      ssh.disconnect()
+      await rm(localDirectory, { force: true, recursive: true })
+    }
+  })
+
   it("reconnects successfully on a different configured port", async () => {
     const environment = getEnvironment()
     const ssh = await connectSsh([environment.primaryPort])
