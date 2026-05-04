@@ -1,4 +1,6 @@
 /* eslint-disable max-lines */
+import { isIP } from "node:net"
+
 import { failed, failedCommand } from "../moduleFailure.js"
 import { getRunnerAbortSignal } from "../runnerAbortSignal.js"
 import { withRegisteredSecrets } from "../secretSink.js"
@@ -32,6 +34,10 @@ const DEFAULT_POLL_INTERVAL_MS = 2000
 const DEFAULT_POLL_TIMEOUT_MS = 60_000
 const DEFAULT_EXPECTED_STATUS = 200
 const NET_RELOAD_HASH_LENGTH = 16
+const MAX_HOSTNAME_LENGTH = 253
+const MAX_HOSTNAME_LABEL_LENGTH = 63
+const HOSTNAME_LABEL_CHARS_PATTERN = /^[a-z0-9\x2d]+$/iv
+const HOSTNAME_LABEL_EDGE_PATTERN = /^[a-z0-9]$/iv
 
 /**
  * Sanitize a destination string for use in a filename.
@@ -75,6 +81,49 @@ function validateRouteOptions(parameters: {
   validateSingleLineNetworkValue("route destination", parameters.destination)
   validateSingleLineNetworkValue("route gateway", parameters.gateway)
   if (parameters.device != null) validateSingleLineNetworkValue("route device", parameters.device)
+}
+
+function validateHostsToken(label: string, value: string): void {
+  if (value === "" || /\s/v.test(value)) {
+    throw new Error(`[net.hosts] invalid ${label}: value must be a non-empty single token`)
+  }
+}
+
+function isValidHostnameLabel(label: string): boolean {
+  if (label === "" || label.length > MAX_HOSTNAME_LABEL_LENGTH) return false
+  if (!HOSTNAME_LABEL_CHARS_PATTERN.test(label)) return false
+  const first = label.at(0)
+  const last = label.at(-1)
+  return (
+    first !== undefined &&
+    last !== undefined &&
+    HOSTNAME_LABEL_EDGE_PATTERN.test(first) &&
+    HOSTNAME_LABEL_EDGE_PATTERN.test(last)
+  )
+}
+
+function validateHostsHostname(hostname: string): void {
+  validateHostsToken("hostname", hostname)
+  if (hostname.length > MAX_HOSTNAME_LENGTH) {
+    throw new Error("[net.hosts] invalid hostname: value is too long")
+  }
+  const labels = hostname.split(".")
+  if (labels.some((label) => !isValidHostnameLabel(label))) {
+    throw new Error("[net.hosts] invalid hostname: value must be a valid hostname")
+  }
+}
+
+function validateHostsOptions(ip: string, hostnames: string[]): void {
+  validateHostsToken("IP address", ip)
+  if (isIP(ip) === 0) {
+    throw new Error("[net.hosts] invalid IP address: value must be a valid IPv4 or IPv6 address")
+  }
+  if (hostnames.length === 0) {
+    throw new Error("[net.hosts] invalid hostnames: at least one hostname is required")
+  }
+  for (const hostname of hostnames) {
+    validateHostsHostname(hostname)
+  }
 }
 
 /**
@@ -676,6 +725,8 @@ export const net = {
    * @returns A Module that manages the hosts entry.
    */
   hosts(ip: string, hostnames: string[], options?: { state?: "absent" | "present" }): Module {
+    validateHostsOptions(ip, hostnames)
+
     const state = options?.state ?? "present"
     const expectedLine = buildHostsLine(ip, hostnames)
 
