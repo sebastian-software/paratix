@@ -502,4 +502,23 @@ describe("validation", () => {
   it("user.present throws when a group name starts with a flag", () => {
     expect(() => user.present("alice", { groups: ["--badgroup"] })).toThrow("group name")
   })
+
+  // R-0000226: password hashes are written to `chpasswd -e` via stdin as
+  // `<user>:<hash>\n`. Structural separators must be rejected before they can
+  // add extra chpasswd entries or alter the field boundary.
+  it("user.present throws when a password hash contains a newline", () => {
+    expect(() => user.present("alice", { password: "$6$hash\nbob:$6$other" })).toThrow(
+      "password hash"
+    )
+  })
+
+  it("user.present throws when a password hash contains a carriage return", () => {
+    expect(() => user.present("alice", { password: "$6$hash\rbob:$6$other" })).toThrow(
+      "password hash"
+    )
+  })
+
+  it("user.present throws when a password hash contains a colon", () => {
+    expect(() => user.present("alice", { password: "$6$hash:extra" })).toThrow("password hash")
+  })
 })

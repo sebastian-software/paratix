@@ -53,11 +53,18 @@ function assertValidGroupName(group: string): void {
   }
 }
 
+function assertValidPasswordHash(password: string): void {
+  if (/[:\r\n]/v.test(password)) {
+    throw new Error("password hash is invalid")
+  }
+}
+
 function assertValidUserOptions(options: UserOptions): void {
   if (options.uid != null) assertValidUid(options.uid)
   if (options.groups != null) {
     for (const group of options.groups) assertValidGroupName(group)
   }
+  if (options.password != null) assertValidPasswordHash(options.password)
 }
 
 function buildUserArguments(mode: "useradd" | "usermod", options?: UserOptions): string[] {
