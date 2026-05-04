@@ -201,7 +201,7 @@ function createHardenedAdminServerTemplate(parameters: {
   initialAdminUser: string
 }): string {
   const { adminPublicKey, expectedHostFingerprint, host, initialAdminUser } = parameters
-  const adminUserDeclaration = `const adminUser = "${initialAdminUser}";`
+  const adminUserDeclaration = `const adminUser = ${JSON.stringify(initialAdminUser)};`
 
   return `${createBaseServerHeader({
     adminPublicKey,

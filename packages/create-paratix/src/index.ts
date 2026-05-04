@@ -94,8 +94,30 @@ function writeScaffoldSupportFiles(projectDirectory: string, initialUser: Initia
   )
 }
 
-function validateRootBootstrapConfiguration(options?: ScaffoldOptions): void {
-  if (options?.initialUser?.kind === "root" && options.adminPublicKey == null) {
+function normalizeProgrammaticInitialUserConfig(
+  initialUser?: InitialUserConfig
+): InitialUserConfig {
+  if (initialUser == null) return { kind: "admin", user: "paratix" }
+  if (initialUser.kind === "root") return { kind: "root" }
+
+  const parsedInitialUser = parseScaffoldInitialUserConfig((message) => {
+    throw new Error(message)
+  }, initialUser.user)
+
+  if (parsedInitialUser.kind !== "admin") {
+    throw new Error(
+      `Error: Invalid initial user "${initialUser.user}" — use a non-root lowercase Linux username for admin mode.`
+    )
+  }
+
+  return parsedInitialUser
+}
+
+function validateRootBootstrapConfiguration(
+  initialUser: InitialUserConfig,
+  adminPublicKey: string | undefined
+): void {
+  if (initialUser.kind === "root" && adminPublicKey == null) {
     throw new Error(
       "Root bootstrap requires --admin-public-key or --admin-public-key-file so the generated admin user can log in after the first run."
     )
@@ -103,7 +125,8 @@ function validateRootBootstrapConfiguration(options?: ScaffoldOptions): void {
 }
 
 export function writeProjectFiles(projectDirectory: string, options?: ScaffoldOptions): void {
-  validateRootBootstrapConfiguration(options)
+  const initialUser = normalizeProgrammaticInitialUserConfig(options?.initialUser)
+  validateRootBootstrapConfiguration(initialUser, options?.adminPublicKey)
 
   // eslint-disable-next-line security/detect-non-literal-fs-filename
   mkdirSync(projectDirectory, { recursive: true })
@@ -111,7 +134,6 @@ export function writeProjectFiles(projectDirectory: string, options?: ScaffoldOp
   mkdirSync(join(projectDirectory, "files"), { recursive: true })
 
   const host = options?.host ?? "1.2.3.4"
-  const initialUser = options?.initialUser ?? { kind: "admin", user: "paratix" }
   const adminPublicKey = options?.adminPublicKey
   const expectedHostFingerprint = options?.expectedHostFingerprint
 
@@ -251,12 +273,13 @@ export function scaffoldProject(
 ): boolean {
   const normalizedProjectName = validateProjectName(projectName)
   const projectDirectory = resolve(normalizedProjectName)
-  validateRootBootstrapConfiguration(options)
+  const initialUser = normalizeProgrammaticInitialUserConfig(options?.initialUser)
+  validateRootBootstrapConfiguration(initialUser, options?.adminPublicKey)
   createProjectDirectoryAtomically(projectDirectory, normalizedProjectName)
 
   console.log(`Creating Paratix project in ${projectDirectory}...`)
 
-  writeProjectFiles(projectDirectory, options)
+  writeProjectFiles(projectDirectory, { ...options, initialUser })
   const installer = options?.installer ?? installDependencies
   const installed = installer(projectDirectory, pm)
   if (!installed) {

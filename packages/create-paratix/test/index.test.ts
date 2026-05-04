@@ -31,6 +31,7 @@ import {
 import {
   AUTO_UPGRADES_20_TEMPLATE,
   createAdminNopasswdSudoersContent,
+  createServerTemplate,
   UNATTENDED_UPGRADES_50_TEMPLATE,
 } from "../src/templates.js"
 
@@ -1516,6 +1517,51 @@ describe("writeProjectFiles", () => {
     expect(content).not.toContain('user: "root"')
   })
 
+  it("normalizes a padded programmatic admin username before rendering server.ts", () => {
+    writeProjectFiles(TEST_DIR, {
+      host: "deploy.example.com",
+      initialUser: { kind: "admin", user: " deploy " },
+    })
+
+    const content = readFileSync(join(TEST_DIR, "server.ts"), "utf8")
+
+    expect(content).toContain('const adminUser = "deploy";')
+    expect(content).not.toContain('const adminUser = " deploy ";')
+  })
+
+  it("rejects an invalid programmatic admin username before creating files", () => {
+    expect(() => {
+      writeProjectFiles(TEST_DIR, {
+        host: "deploy.example.com",
+        initialUser: { kind: "admin", user: 'deploy";\nthrow new Error("owned")' },
+      })
+    }).toThrow(/Invalid initial user/v)
+
+    expect(existsSync(join(TEST_DIR, "server.ts"))).toBe(false)
+  })
+
+  it("rejects programmatic admin mode with root as the username", () => {
+    expect(() => {
+      writeProjectFiles(TEST_DIR, {
+        host: "deploy.example.com",
+        initialUser: { kind: "admin", user: "root" },
+      })
+    }).toThrow(/use a non-root lowercase Linux username for admin mode/v)
+
+    expect(existsSync(join(TEST_DIR, "server.ts"))).toBe(false)
+  })
+
+  it("server template safely serializes admin usernames when called directly", () => {
+    const initialAdminUser = 'deploy";\nthrow new Error("owned")'
+    const content = createServerTemplate({
+      host: "deploy.example.com",
+      initialUser: { kind: "admin", user: initialAdminUser },
+    })
+
+    expect(content).toContain(`const adminUser = ${JSON.stringify(initialAdminUser)};`)
+    expect(content).not.toContain(`const adminUser = "${initialAdminUser}";`)
+  })
+
   it("generated server.ts safely serializes quote characters in the host", () => {
     const host = 'dangerous"host.example'
     writeProjectFiles(TEST_DIR, {
@@ -1994,6 +2040,25 @@ describe("scaffoldProject", () => {
     expect(console.log).not.toHaveBeenCalledWith(
       `Creating Paratix project in ${missingKeyProjectDirectory}...`
     )
+  })
+
+  it("rejects invalid programmatic initial users before creating the target directory", () => {
+    const installer = vi.fn().mockReturnValue(true)
+
+    expect(() => {
+      scaffoldProject(
+        missingKeyProjectName,
+        { command: "pnpm install", name: "pnpm" },
+        {
+          host: "example.com",
+          initialUser: { kind: "admin", user: "Deploy" },
+          installer,
+        }
+      )
+    }).toThrow(/Invalid initial user/v)
+
+    expect(existsSync(missingKeyProjectDirectory)).toBe(false)
+    expect(installer).not.toHaveBeenCalled()
   })
 
   // R-0000124 regression: scaffoldProject must fail closed when the target
