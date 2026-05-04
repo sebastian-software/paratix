@@ -101,7 +101,7 @@ function buildRemoteSpec(
   const remoteHost = connectionInfo.host.includes(":")
     ? `[${connectionInfo.host}]`
     : connectionInfo.host
-  return `${connectionInfo.user}@${remoteHost}:${destination}`
+  return `${connectionInfo.user}@${remoteHost}:${shellQuote(destination)}`
 }
 
 function formatKnownHostsLabel(host: string, port: number): string {
