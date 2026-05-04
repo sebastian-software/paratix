@@ -1,3 +1,5 @@
+import { posix as pathPosix } from "node:path"
+
 import { failed, failedCommand } from "../moduleFailure.js"
 import { shellQuote, validateMktempPath } from "../ssh.js"
 import { type Module, type ModuleResult, NEEDS_APPLY, type SshConnection } from "../types.js"
@@ -176,6 +178,17 @@ type ApplyParameters = {
   upload: boolean
 }
 
+function validateExtractDestination(destination: string): { destination: string } | ModuleResult {
+  if (!destination.startsWith("/")) {
+    return failed(`[archive.extract] destination must be an absolute path: ${destination}`)
+  }
+  const normalized = pathPosix.normalize(destination)
+  if (normalized === "/") {
+    return failed(`[archive.extract] refusing to extract to destructive destination /`)
+  }
+  return { destination: normalized }
+}
+
 /**
  * R-0000067: list the archive members and reject any entry whose
  * normalized path is absolute or escapes the destination via `..`. For
@@ -204,10 +217,6 @@ async function validatedArchiveMembers(
     return failed(`[archive.extract] refusing to extract ${parameters.source}: ${unsafe}`)
   }
   return listing.members
-}
-
-function destinationIsDestructive(destination: string): boolean {
-  return destination.length > 0 && destination.split("/").every((part) => part === "")
 }
 
 function trimTrailingSlashes(path: string): string {
@@ -261,13 +270,12 @@ async function runExtraction(
 ): Promise<ModuleResult> {
   const { destination, marker, owner, source } = parameters
 
-  if (destinationIsDestructive(destination)) {
-    return failed(`[archive.extract] refusing to extract ${source} to destructive destination /`)
-  }
+  const validatedDestination = validateExtractDestination(destination)
+  if ("status" in validatedDestination) return validatedDestination
 
-  await conn.exec(`mkdir -p ${shellQuote(destination)}`, SILENT)
+  await conn.exec(`mkdir -p ${shellQuote(validatedDestination.destination)}`, SILENT)
 
-  const cmd = extractCommand(source, remoteSource, destination)
+  const cmd = extractCommand(source, remoteSource, validatedDestination.destination)
   if (cmd === null) return failed(`[archive.extract] unsupported archive format for ${source}`)
 
   // R-0000067: validate every archive member before we hand the archive to
@@ -283,7 +291,11 @@ async function runExtraction(
     return failedCommand(`[archive.extract] failed to extract ${source}`, result)
   }
 
-  await applyExtractedMemberOwner(conn, { destination, members, owner })
+  await applyExtractedMemberOwner(conn, {
+    destination: validatedDestination.destination,
+    members,
+    owner,
+  })
 
   const markerWritten = await writeMarker(conn, remoteSource, { marker })
   return markerWritten
@@ -407,27 +419,45 @@ export const archive = {
     destination: string,
     options?: { owner?: string; upload?: boolean }
   ): Module {
-    const marker = markerPath(source, destination)
+    const normalizedDestination = destination.startsWith("/")
+      ? pathPosix.normalize(destination)
+      : destination
+    const marker = markerPath(source, normalizedDestination)
     const upload = options?.upload === true
     const owner = options?.owner
-    const parameters: ApplyParameters = { destination, marker, owner, source, upload }
+    const parameters: ApplyParameters = {
+      destination: normalizedDestination,
+      marker,
+      owner,
+      source,
+      upload,
+    }
 
     return {
       async apply(conn: null | SshConnection): Promise<ModuleResult> {
-        if (!conn) return failed(`[archive.extract] SSH connection is required for ${destination}`)
+        if (!conn) {
+          return failed(`[archive.extract] SSH connection is required for ${normalizedDestination}`)
+        }
         return applyExtract(conn, parameters)
       },
       async check(conn: null | SshConnection): Promise<"needs-apply" | "ok"> {
         if (!conn) return NEEDS_APPLY
 
         // 1. Does the destination directory exist?
-        const destinationExists = await conn.test(`test -d ${shellQuote(destination)}`)
+        const destinationExists = await conn.test(`test -d ${shellQuote(normalizedDestination)}`)
         if (!destinationExists) return NEEDS_APPLY
 
         // 2. Does the marker file exist?
         const markerExists = await conn.test(`test -f ${shellQuote(marker)}`)
         if (!markerExists) return NEEDS_APPLY
-        if (!(await archiveOwnerMatches(conn, { destination, owner, source, upload }))) {
+        if (
+          !(await archiveOwnerMatches(conn, {
+            destination: normalizedDestination,
+            owner,
+            source,
+            upload,
+          }))
+        ) {
           return NEEDS_APPLY
         }
 
@@ -440,7 +470,7 @@ export const archive = {
         // re-extraction of a potentially very large archive.
         return (await archiveMarkerMatches(conn, { marker, source, upload })) ? "ok" : NEEDS_APPLY
       },
-      name: `archive.extract: ${destination}`,
+      name: `archive.extract: ${normalizedDestination}`,
     }
   },
 }

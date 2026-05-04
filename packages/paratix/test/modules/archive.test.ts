@@ -324,6 +324,35 @@ describe("archive.extract — apply", () => {
     )
   })
 
+  it.each(["/", "/tmp/..", "/var/.."])(
+    "rejects destination %s after POSIX normalization",
+    async (rootLikeDestination) => {
+      const mockSsh = createMockSsh({})
+
+      const mod = archive.extract(src, rootLikeDestination)
+      const result = await mod.apply(mockSsh, emptyEnv)
+
+      expect(result.status).toBe("failed")
+      expect(String(result.error)).toContain("destructive destination /")
+      expect(mockSsh.calls).not.toContain("mkdir -p '/'")
+      expect(mockSsh.calls).not.toContain(
+        `tar --no-same-owner --no-overwrite-dir -xzf '${src}' -C '/'`
+      )
+    }
+  )
+
+  it("rejects relative destinations before extracting", async () => {
+    const relativeDestination = "opt/app"
+    const mockSsh = createMockSsh({})
+
+    const mod = archive.extract(src, relativeDestination)
+    const result = await mod.apply(mockSsh, emptyEnv)
+
+    expect(result.status).toBe("failed")
+    expect(String(result.error)).toContain("destination must be an absolute path")
+    expect(mockSsh.calls).not.toContain(`mkdir -p '${relativeDestination}'`)
+  })
+
   it("uploads file via mktemp-allocated path and cleans up when upload is true", async () => {
     const localFile = "/local/app.tar.gz"
     const remoteTmp = "/tmp/paratix-upload.AbCdEfGh"
