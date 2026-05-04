@@ -4,6 +4,9 @@ import { git } from "../../src/modules/git.js"
 import { shellQuote } from "../../src/ssh.js"
 import { createMockSsh as createBaseMockSsh } from "../helpers/mockSsh.js"
 
+type MockSshOptions = NonNullable<Parameters<typeof createBaseMockSsh>[1]>
+type MockSshResponses = Parameters<typeof createBaseMockSsh>[0]
+
 const emptyEnv = {}
 
 const repo = "git@github.com:example/repo.git"
@@ -17,8 +20,16 @@ const createMockSsh: typeof createBaseMockSsh = (responses, options) =>
       [originUrlCommand]: { code: 0, stdout: repo },
       ...responses,
     },
-    { strict: false, ...options }
+    options
   )
+
+const successfulGitApplyOptions: MockSshOptions = {
+  defaultExecResult: { code: 0 },
+}
+
+function createGitApplyMockSsh(responses: MockSshResponses = {}) {
+  return createMockSsh(responses, successfulGitApplyOptions)
+}
 
 describe("git.clone — check", () => {
   it("returns needs-apply when conn is null", async () => {
@@ -236,7 +247,7 @@ describe("git.clone — apply", () => {
   })
 
   it("clones repo without branch when .git does not exist and no ref is given", async () => {
-    const mockSsh = createMockSsh({
+    const mockSsh = createGitApplyMockSsh({
       [`test -d '${gitDir}'`]: { code: 1 },
     })
     const mod = git.clone(repo, destination)
@@ -246,7 +257,7 @@ describe("git.clone — apply", () => {
   })
 
   it("clones repo with --branch when .git does not exist and ref is given", async () => {
-    const mockSsh = createMockSsh({
+    const mockSsh = createGitApplyMockSsh({
       [`test -d '${gitDir}'`]: { code: 1 },
     })
     const mod = git.clone(repo, destination, { ref: "main" })
@@ -282,7 +293,7 @@ describe("git.clone — apply", () => {
   })
 
   it("pulls when .git exists and no ref is given", async () => {
-    const mockSsh = createMockSsh({
+    const mockSsh = createGitApplyMockSsh({
       [`test -d '${gitDir}'`]: { code: 0 },
     })
     const mod = git.clone(repo, destination)
@@ -293,7 +304,7 @@ describe("git.clone — apply", () => {
 
   it("updates the origin URL before pulling when an existing checkout drifted", async () => {
     const oldRepo = "git@github.com:other/repo.git"
-    const mockSsh = createMockSsh({
+    const mockSsh = createGitApplyMockSsh({
       [`git -C '${destination}' remote set-url origin '${repo}'`]: { code: 0 },
       [`test -d '${gitDir}'`]: { code: 0 },
       [originUrlCommand]: { code: 0, stdout: oldRepo },
@@ -308,7 +319,7 @@ describe("git.clone — apply", () => {
   })
 
   it("adds origin before pulling when an existing git repository has no origin", async () => {
-    const mockSsh = createMockSsh({
+    const mockSsh = createGitApplyMockSsh({
       [`git -C '${destination}' remote add origin '${repo}'`]: { code: 0 },
       [`test -d '${gitDir}'`]: { code: 0 },
       [originUrlCommand]: { code: 2 },
@@ -325,7 +336,7 @@ describe("git.clone — apply", () => {
   })
 
   it("fetches, checks out, and resets to origin/<ref> when ref is a remote-tracking branch", async () => {
-    const mockSsh = createMockSsh({
+    const mockSsh = createGitApplyMockSsh({
       [`git -C '${destination}' for-each-ref --format=%(refname) refs/remotes/origin/'main'`]: {
         code: 0,
         stdout: "refs/remotes/origin/main\n",
@@ -345,7 +356,7 @@ describe("git.clone — apply", () => {
   it("resets directly to <ref> when ref is a tag and has no remote-tracking branch", async () => {
     // The for-each-ref probe returns no match, so the direct reset path
     // resolves the tag commit (and not a same-named branch tip).
-    const mockSsh = createMockSsh({
+    const mockSsh = createGitApplyMockSsh({
       [`git -C '${destination}' for-each-ref --format=%(refname) refs/remotes/origin/'v1.0.0'`]: {
         code: 0,
         stdout: "",
@@ -362,7 +373,7 @@ describe("git.clone — apply", () => {
 
   it("resets directly to <ref> when ref is a bare commit SHA", async () => {
     const sha = "abc123def456"
-    const mockSsh = createMockSsh({
+    const mockSsh = createGitApplyMockSsh({
       [`git -C '${destination}' for-each-ref --format=%(refname) refs/remotes/origin/'${sha}'`]: {
         code: 0,
         stdout: "",
@@ -378,7 +389,7 @@ describe("git.clone — apply", () => {
   })
 
   it("returns failed when branch reset fails", async () => {
-    const mockSsh = createMockSsh({
+    const mockSsh = createGitApplyMockSsh({
       [`git -C '${destination}' for-each-ref --format=%(refname) refs/remotes/origin/'main'`]: {
         code: 0,
         stdout: "refs/remotes/origin/main\n",
@@ -392,7 +403,7 @@ describe("git.clone — apply", () => {
   })
 
   it("returns failed when direct reset fails for a tag", async () => {
-    const mockSsh = createMockSsh({
+    const mockSsh = createGitApplyMockSsh({
       [`git -C '${destination}' for-each-ref --format=%(refname) refs/remotes/origin/'v1.0.0'`]: {
         code: 0,
         stdout: "",
@@ -407,7 +418,7 @@ describe("git.clone — apply", () => {
 
   it("falls back to clone without --branch when --branch fails (bare SHA)", async () => {
     const sha = "abc123def456"
-    const mockSsh = createMockSsh({
+    const mockSsh = createGitApplyMockSsh({
       [`git clone --branch '${sha}' '${repo}' '${destination}'`]: { code: 128 },
       [`test -d '${gitDir}'`]: { code: 1 },
     })

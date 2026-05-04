@@ -3,13 +3,29 @@ import { describe, expect, it } from "vitest"
 import { timer } from "../../src/modules/timer.js"
 import { createMockSsh as createBaseMockSsh } from "../helpers/mockSsh.js"
 
+type MockSshOptions = NonNullable<Parameters<typeof createBaseMockSsh>[1]>
+type MockSshResponses = Parameters<typeof createBaseMockSsh>[0]
+
 const createMockSsh: typeof createBaseMockSsh = (responses, options) =>
-  createBaseMockSsh(responses, { strict: false, ...options })
+  createBaseMockSsh(responses, options)
 
 const emptyEnv = {}
 
 const SERVICE_PATH = "/etc/systemd/system/backup.service"
 const TIMER_PATH = "/etc/systemd/system/backup.timer"
+
+const successfulTimerApplyOptions: MockSshOptions = {
+  allowWrites: [
+    { options: { mode: "0644" }, remotePath: SERVICE_PATH },
+    { options: { mode: "0644" }, remotePath: TIMER_PATH },
+  ],
+  defaultExecResult: { code: 0 },
+  defaultTestResult: true,
+}
+
+function createTimerApplyMockSsh(responses: MockSshResponses = {}) {
+  return createMockSsh(responses, successfulTimerApplyOptions)
+}
 
 const baseOptions = {
   exec: "/usr/local/bin/backup",
@@ -96,6 +112,7 @@ describe("timer.scheduled — check (state: present)", () => {
       [`[ -e '${SERVICE_PATH}' ]`]: { code: 0 },
       [`[ -e '${TIMER_PATH}' ]`]: { code: 1 },
       [`cat '${SERVICE_PATH}'`]: { code: 0, stdout: expectedServiceContent },
+      [`stat -c '%a' '${SERVICE_PATH}'`]: { code: 0, stdout: "644\n" },
     })
     const mod = timer.scheduled("backup", baseOptions)
     expect(await mod.check(ssh, emptyEnv)).toBe("needs-apply")
@@ -188,7 +205,7 @@ describe("timer.scheduled — check (state: absent)", () => {
 
 describe("timer.scheduled — apply (state: present)", () => {
   it("writes both unit files, reloads, enables and restarts the timer", async () => {
-    const ssh = createMockSsh({
+    const ssh = createTimerApplyMockSsh({
       [`[ -e '${SERVICE_PATH}' ]`]: { code: 1 },
       [`[ -e '${TIMER_PATH}' ]`]: { code: 1 },
       "systemctl daemon-reload": { code: 0 },
@@ -204,7 +221,7 @@ describe("timer.scheduled — apply (state: present)", () => {
   })
 
   it("returns failed when daemon-reload fails", async () => {
-    const ssh = createMockSsh({
+    const ssh = createTimerApplyMockSsh({
       [`[ -e '${SERVICE_PATH}' ]`]: { code: 1 },
       [`[ -e '${TIMER_PATH}' ]`]: { code: 1 },
       "systemctl daemon-reload": { code: 1, stderr: "boom" },
@@ -215,7 +232,7 @@ describe("timer.scheduled — apply (state: present)", () => {
   })
 
   it("returns failed when enable --now fails", async () => {
-    const ssh = createMockSsh({
+    const ssh = createTimerApplyMockSsh({
       [`[ -e '${SERVICE_PATH}' ]`]: { code: 1 },
       [`[ -e '${TIMER_PATH}' ]`]: { code: 1 },
       "systemctl daemon-reload": { code: 0 },
@@ -227,7 +244,7 @@ describe("timer.scheduled — apply (state: present)", () => {
   })
 
   it("returns failed when restart fails", async () => {
-    const ssh = createMockSsh({
+    const ssh = createTimerApplyMockSsh({
       [`[ -e '${SERVICE_PATH}' ]`]: { code: 1 },
       [`[ -e '${TIMER_PATH}' ]`]: { code: 1 },
       "systemctl daemon-reload": { code: 0 },
@@ -249,7 +266,7 @@ describe("timer.scheduled — apply (state: present)", () => {
 
 describe("timer.scheduled — apply (state: absent)", () => {
   it("disables the timer, removes both unit files and reloads", async () => {
-    const ssh = createMockSsh({
+    const ssh = createTimerApplyMockSsh({
       [`rm -f '${TIMER_PATH}' '${SERVICE_PATH}'`]: { code: 0 },
       "systemctl daemon-reload": { code: 0 },
       "systemctl disable --now 'backup.timer'": { code: 0 },
@@ -263,7 +280,7 @@ describe("timer.scheduled — apply (state: absent)", () => {
   })
 
   it("ignores disable failure but still removes files and reloads", async () => {
-    const ssh = createMockSsh({
+    const ssh = createTimerApplyMockSsh({
       [`rm -f '${TIMER_PATH}' '${SERVICE_PATH}'`]: { code: 0 },
       "systemctl daemon-reload": { code: 0 },
       "systemctl disable --now 'backup.timer'": { code: 1, stderr: "no such unit" },
@@ -274,7 +291,7 @@ describe("timer.scheduled — apply (state: absent)", () => {
   })
 
   it("disables residual active timer state even when unit files are absent", async () => {
-    const ssh = createMockSsh({
+    const ssh = createTimerApplyMockSsh({
       [`[ -e '${SERVICE_PATH}' ]`]: { code: 1 },
       [`[ -e '${TIMER_PATH}' ]`]: { code: 1 },
       "systemctl daemon-reload": { code: 0 },
@@ -291,7 +308,7 @@ describe("timer.scheduled — apply (state: absent)", () => {
   })
 
   it("returns failed when rm fails", async () => {
-    const ssh = createMockSsh({
+    const ssh = createTimerApplyMockSsh({
       [`rm -f '${TIMER_PATH}' '${SERVICE_PATH}'`]: { code: 1, stderr: "EACCES" },
       "systemctl disable --now 'backup.timer'": { code: 0 },
     })
@@ -301,7 +318,7 @@ describe("timer.scheduled — apply (state: absent)", () => {
   })
 
   it("returns failed when daemon-reload fails after removal", async () => {
-    const ssh = createMockSsh({
+    const ssh = createTimerApplyMockSsh({
       [`rm -f '${TIMER_PATH}' '${SERVICE_PATH}'`]: { code: 0 },
       "systemctl daemon-reload": { code: 1, stderr: "boom" },
       "systemctl disable --now 'backup.timer'": { code: 0 },
@@ -314,7 +331,7 @@ describe("timer.scheduled — apply (state: absent)", () => {
 
 describe("timer.scheduled — unit content", () => {
   it("writes the exact expected service and timer file contents for baseOptions", async () => {
-    const ssh = createMockSsh({
+    const ssh = createTimerApplyMockSsh({
       [`[ -e '${SERVICE_PATH}' ]`]: { code: 1 },
       [`[ -e '${TIMER_PATH}' ]`]: { code: 1 },
     })
@@ -330,7 +347,7 @@ describe("timer.scheduled — unit content", () => {
   })
 
   it("renders multiple OnCalendar lines when an array is supplied", async () => {
-    const ssh = createMockSsh({
+    const ssh = createTimerApplyMockSsh({
       [`[ -e '${SERVICE_PATH}' ]`]: { code: 1 },
     })
     const writes: Record<string, string> = {}
@@ -348,7 +365,7 @@ describe("timer.scheduled — unit content", () => {
   })
 
   it("includes optional service hardening lines when supplied", async () => {
-    const ssh = createMockSsh({
+    const ssh = createTimerApplyMockSsh({
       [`[ -e '${SERVICE_PATH}' ]`]: { code: 1 },
       [`[ -e '${TIMER_PATH}' ]`]: { code: 1 },
     })
@@ -374,7 +391,7 @@ describe("timer.scheduled — unit content", () => {
   })
 
   it("omits Persistent= when explicitly set to false", async () => {
-    const ssh = createMockSsh({
+    const ssh = createTimerApplyMockSsh({
       [`[ -e '${SERVICE_PATH}' ]`]: { code: 1 },
       [`[ -e '${TIMER_PATH}' ]`]: { code: 1 },
     })
@@ -393,7 +410,7 @@ describe("timer.scheduled — unit content", () => {
   })
 
   it("includes RandomizedDelaySec and AccuracySec when supplied", async () => {
-    const ssh = createMockSsh({
+    const ssh = createTimerApplyMockSsh({
       [`[ -e '${SERVICE_PATH}' ]`]: { code: 1 },
       [`[ -e '${TIMER_PATH}' ]`]: { code: 1 },
     })
@@ -478,7 +495,7 @@ describe("timer.scheduled — apply (state: present, idempotency)", () => {
   })
 
   it("does not restart when only the service file changed", async () => {
-    const ssh = createMockSsh({
+    const ssh = createTimerApplyMockSsh({
       [`[ -e '${SERVICE_PATH}' ]`]: { code: 0 },
       [`[ -e '${TIMER_PATH}' ]`]: { code: 0 },
       [`cat '${SERVICE_PATH}'`]: { code: 0, stdout: "[Unit]\nDescription=stale\n" },
@@ -549,7 +566,7 @@ describe("timer.scheduled — apply (state: present, idempotency)", () => {
 
 describe("timer.scheduled — environment quoting", () => {
   it("quotes environment values that contain whitespace", async () => {
-    const ssh = createMockSsh({
+    const ssh = createTimerApplyMockSsh({
       [`[ -e '${SERVICE_PATH}' ]`]: { code: 1 },
       [`[ -e '${TIMER_PATH}' ]`]: { code: 1 },
     })
@@ -568,7 +585,7 @@ describe("timer.scheduled — environment quoting", () => {
   })
 
   it("escapes embedded quotes and backslashes in environment values", async () => {
-    const ssh = createMockSsh({
+    const ssh = createTimerApplyMockSsh({
       [`[ -e '${SERVICE_PATH}' ]`]: { code: 1 },
       [`[ -e '${TIMER_PATH}' ]`]: { code: 1 },
     })
@@ -587,7 +604,7 @@ describe("timer.scheduled — environment quoting", () => {
   })
 
   it("leaves simple environment values unquoted", async () => {
-    const ssh = createMockSsh({
+    const ssh = createTimerApplyMockSsh({
       [`[ -e '${SERVICE_PATH}' ]`]: { code: 1 },
       [`[ -e '${TIMER_PATH}' ]`]: { code: 1 },
     })
@@ -607,7 +624,7 @@ describe("timer.scheduled — environment quoting", () => {
   })
 
   it("quotes environment values containing shell command substitution", async () => {
-    const ssh = createMockSsh({
+    const ssh = createTimerApplyMockSsh({
       [`[ -e '${SERVICE_PATH}' ]`]: { code: 1 },
       [`[ -e '${TIMER_PATH}' ]`]: { code: 1 },
     })
@@ -626,7 +643,7 @@ describe("timer.scheduled — environment quoting", () => {
   })
 
   it("quotes environment values containing bidirectional Unicode codepoints", async () => {
-    const ssh = createMockSsh({
+    const ssh = createTimerApplyMockSsh({
       [`[ -e '${SERVICE_PATH}' ]`]: { code: 1 },
       [`[ -e '${TIMER_PATH}' ]`]: { code: 1 },
     })
@@ -647,7 +664,7 @@ describe("timer.scheduled — environment quoting", () => {
   })
 
   it("quotes environment values containing non-ASCII letters", async () => {
-    const ssh = createMockSsh({
+    const ssh = createTimerApplyMockSsh({
       [`[ -e '${SERVICE_PATH}' ]`]: { code: 1 },
       [`[ -e '${TIMER_PATH}' ]`]: { code: 1 },
     })
@@ -926,7 +943,7 @@ describe("timer.scheduled — module name and validation", () => {
   })
 
   it("accepts a Samba-style machine account name with trailing dollar sign", async () => {
-    const ssh = createMockSsh({
+    const ssh = createTimerApplyMockSsh({
       [`[ -e '${SERVICE_PATH}' ]`]: { code: 1 },
       [`[ -e '${TIMER_PATH}' ]`]: { code: 1 },
     })
@@ -990,7 +1007,7 @@ describe("timer.absent", () => {
   })
 
   it("apply disables the timer, removes both unit files and reloads", async () => {
-    const ssh = createMockSsh({
+    const ssh = createTimerApplyMockSsh({
       [`rm -f '${TIMER_PATH}' '${SERVICE_PATH}'`]: { code: 0 },
       "systemctl daemon-reload": { code: 0 },
       "systemctl disable --now 'backup.timer'": { code: 0 },
@@ -1004,7 +1021,7 @@ describe("timer.absent", () => {
   })
 
   it("apply tolerates a missing unit during disable", async () => {
-    const ssh = createMockSsh({
+    const ssh = createTimerApplyMockSsh({
       [`rm -f '${TIMER_PATH}' '${SERVICE_PATH}'`]: { code: 0 },
       "systemctl daemon-reload": { code: 0 },
       "systemctl disable --now 'backup.timer'": { code: 1, stderr: "no such unit" },
@@ -1015,7 +1032,7 @@ describe("timer.absent", () => {
   })
 
   it("apply returns failed when rm fails", async () => {
-    const ssh = createMockSsh({
+    const ssh = createTimerApplyMockSsh({
       [`rm -f '${TIMER_PATH}' '${SERVICE_PATH}'`]: { code: 1, stderr: "EACCES" },
       "systemctl disable --now 'backup.timer'": { code: 0 },
     })
@@ -1025,7 +1042,7 @@ describe("timer.absent", () => {
   })
 
   it("apply returns failed when daemon-reload fails", async () => {
-    const ssh = createMockSsh({
+    const ssh = createTimerApplyMockSsh({
       [`rm -f '${TIMER_PATH}' '${SERVICE_PATH}'`]: { code: 0 },
       "systemctl daemon-reload": { code: 1, stderr: "boom" },
       "systemctl disable --now 'backup.timer'": { code: 0 },
@@ -1050,7 +1067,7 @@ describe("timer.absent", () => {
   })
 
   it("apply runs full cleanup when only one of the two unit files still exists", async () => {
-    const ssh = createMockSsh({
+    const ssh = createTimerApplyMockSsh({
       [`[ -e '${SERVICE_PATH}' ]`]: { code: 0 },
       [`[ -e '${TIMER_PATH}' ]`]: { code: 1 },
       [`rm -f '${TIMER_PATH}' '${SERVICE_PATH}'`]: { code: 0 },
@@ -1078,7 +1095,7 @@ describe("timer.absent", () => {
   })
 
   it("uses timer.absent as failure message prefix, not timer.scheduled", async () => {
-    const ssh = createMockSsh({
+    const ssh = createTimerApplyMockSsh({
       [`rm -f '${TIMER_PATH}' '${SERVICE_PATH}'`]: { code: 1, stderr: "EACCES" },
       "systemctl disable --now 'backup.timer'": { code: 0 },
     })

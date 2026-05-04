@@ -4,8 +4,20 @@ import { computeFingerprint } from "../../src/knownHosts.js"
 import { ssh } from "../../src/modules/ssh.js"
 import { createMockSsh as createBaseMockSsh } from "../helpers/mockSsh.js"
 
+type MockSshOptions = NonNullable<Parameters<typeof createBaseMockSsh>[1]>
+type MockSshResponses = Parameters<typeof createBaseMockSsh>[0]
+
 const createMockSsh: typeof createBaseMockSsh = (responses, options) =>
-  createBaseMockSsh(responses, { strict: false, ...options })
+  createBaseMockSsh(responses, options)
+
+const successfulSshApplyOptions: MockSshOptions = {
+  defaultExecResult: { code: 0 },
+  defaultTestResult: true,
+}
+
+function createSshApplyMockSsh(responses: MockSshResponses = {}) {
+  return createMockSsh(responses, successfulSshApplyOptions)
+}
 
 const emptyEnv = {}
 
@@ -44,7 +56,7 @@ function createKnownHostsTrackingMock(
   const grepCommand = `grep -qxF '${line}' ~/.ssh/known_hosts`
   const printfCommand = `printf '%s\\n' '${line}' >> ~/.ssh/known_hosts`
   let present = false
-  const base = createMockSsh(baseResponses)
+  const base = createSshApplyMockSsh(baseResponses)
   return {
     ...base,
     async exec(command: string, options?: Parameters<typeof base.exec>[1]) {
@@ -201,7 +213,7 @@ describe("ssh.knownHosts", () => {
   })
 
   it("apply verifies a scanned host key against the expected fingerprint before appending it", async () => {
-    const mockSsh = createMockSsh({
+    const mockSsh = createSshApplyMockSsh({
       [`grep -qxF '${scannedLine}' ~/.ssh/known_hosts`]: { code: 1 },
       "ssh-keyscan -H 'github.com' 2>/dev/null": { stdout: `${scannedLine}\n` },
     })
@@ -215,7 +227,7 @@ describe("ssh.knownHosts", () => {
   })
 
   it("apply verifies a scanned host key against the expected public key before appending it", async () => {
-    const mockSsh = createMockSsh({
+    const mockSsh = createSshApplyMockSsh({
       [`grep -qxF '${scannedLine}' ~/.ssh/known_hosts`]: { code: 1 },
       "ssh-keyscan -H 'github.com' 2>/dev/null": { stdout: `${scannedLine}\n` },
     })
@@ -227,7 +239,7 @@ describe("ssh.knownHosts", () => {
   })
 
   it("apply scans the configured non-standard port before appending a verified host key", async () => {
-    const mockSsh = createMockSsh({
+    const mockSsh = createSshApplyMockSsh({
       [`grep -qxF '${scannedLine}' ~/.ssh/known_hosts`]: { code: 1 },
       "ssh-keyscan -p 2222 -H 'github.com' 2>/dev/null": { stdout: `${scannedLine}\n` },
     })
@@ -246,7 +258,7 @@ describe("ssh.knownHosts", () => {
   it("apply persists only the scanned line that matches the configured trust anchor", async () => {
     const extraKey = makeHostKeyBuffer("ssh-rsa", Buffer.from("extra-host-key"))
     const extraLine = `|1|hashed-host|hashed-extra ssh-rsa ${extraKey.toString("base64")}`
-    const mockSsh = createMockSsh({
+    const mockSsh = createSshApplyMockSsh({
       [`grep -qxF '${scannedLine}' ~/.ssh/known_hosts`]: { code: 1 },
       "ssh-keyscan -H 'github.com' 2>/dev/null": { stdout: `${scannedLine}\n${extraLine}\n` },
     })
@@ -266,7 +278,7 @@ describe("ssh.knownHosts", () => {
     // ~/.ssh/known_hosts (grep -qxF returns code 0), the apply path must not
     // append it again. A second consecutive run therefore produces neither
     // duplicates nor a second `printf >> known_hosts` call, and reports ok.
-    const mockSsh = createMockSsh({
+    const mockSsh = createSshApplyMockSsh({
       [`grep -qxF '${scannedLine}' ~/.ssh/known_hosts`]: { code: 0 },
       "ssh-keyscan -H 'github.com' 2>/dev/null": { stdout: `${scannedLine}\n` },
     })
@@ -304,7 +316,7 @@ describe("ssh.knownHosts", () => {
   })
 
   it("apply rejects scanned keys that do not match the expected fingerprint", async () => {
-    const mockSsh = createMockSsh({
+    const mockSsh = createSshApplyMockSsh({
       "ssh-keyscan -H 'github.com' 2>/dev/null": { stdout: `${scannedLine}\n` },
     })
     const mod = ssh.knownHosts("github.com", {
@@ -358,7 +370,7 @@ describe("ssh.knownHosts", () => {
   })
 
   it("apply removes host via ssh-keygen -R (state: absent)", async () => {
-    const mockSsh = createMockSsh({
+    const mockSsh = createSshApplyMockSsh({
       "ssh-keygen -F 'github.com'": { code: 0 },
     })
     const mod = ssh.knownHosts("github.com", { state: "absent" })
@@ -368,7 +380,7 @@ describe("ssh.knownHosts", () => {
   })
 
   it("apply returns ok and skips ssh-keygen -R when the host is not in known_hosts (state: absent)", async () => {
-    const mockSsh = createMockSsh({
+    const mockSsh = createSshApplyMockSsh({
       "ssh-keygen -F 'github.com'": { code: 1 },
     })
     const mod = ssh.knownHosts("github.com", { state: "absent" })
@@ -380,7 +392,7 @@ describe("ssh.knownHosts", () => {
   })
 
   it("apply removes a non-standard-port host entry via a bracketed ssh-keygen -R target", async () => {
-    const mockSsh = createMockSsh({
+    const mockSsh = createSshApplyMockSsh({
       "ssh-keygen -F '[github.com]:2222'": { code: 0 },
     })
     const mod = ssh.knownHosts("github.com", { port: 2222, state: "absent" })
@@ -426,6 +438,8 @@ describe("ssh.authorizedKeys", () => {
   it("check returns ok when key exists in authorized_keys (state: present)", async () => {
     const mockSsh = createMockSsh(
       aliceResponses({
+        "[ -e '/home/alice/.ssh' ]": { code: 0 },
+        "[ -e '/home/alice/.ssh/authorized_keys' ]": { code: 0 },
         "[ -L '/home/alice/.ssh/authorized_keys' ]": { code: 1 },
         [`grep -qxF -- '${testKey}' ${aliceKeys}`]: { code: 0 },
         "stat -c '%a %U %G %F' '/home/alice/.ssh'": { stdout: "700 alice alice directory" },
@@ -496,7 +510,7 @@ describe("ssh.authorizedKeys", () => {
   })
 
   it("returns ok in apply for absent state when the target user does not exist", async () => {
-    const mockSsh = createMockSsh({
+    const mockSsh = createSshApplyMockSsh({
       "getent passwd 'ghost' | cut -d: -f6": { stdout: "" },
     })
     const mod = ssh.authorizedKeys("ghost", testKey, { state: "absent" })
@@ -607,7 +621,7 @@ describe("ssh.authorizedKeys", () => {
   })
 
   it("apply creates directory, adds key with correct permissions (state: present)", async () => {
-    const mockSsh = createMockSsh(
+    const mockSsh = createSshApplyMockSsh(
       aliceResponses({
         [aliceMktempPattern]: { stdout: tempPath },
       })
@@ -634,7 +648,7 @@ describe("ssh.authorizedKeys", () => {
   })
 
   it("regression: apply does not append a duplicate key when only permissions have drifted", async () => {
-    const mockSsh = createMockSsh(
+    const mockSsh = createSshApplyMockSsh(
       aliceResponses({
         "[ -e '/home/alice/.ssh' ]": { code: 0 },
         "[ -e '/home/alice/.ssh/authorized_keys' ]": { code: 0 },
@@ -663,7 +677,7 @@ describe("ssh.authorizedKeys", () => {
   })
 
   it("regression: present rewrite terminates existing authorized_keys before appending", async () => {
-    const mockSsh = createMockSsh(
+    const mockSsh = createSshApplyMockSsh(
       aliceResponses({
         [aliceMktempPattern]: { stdout: tempPath },
       })
@@ -678,7 +692,7 @@ describe("ssh.authorizedKeys", () => {
   })
 
   it("apply removes key with grep -vxF || true pattern (state: absent)", async () => {
-    const mockSsh = createMockSsh(
+    const mockSsh = createSshApplyMockSsh(
       aliceResponses({
         [aliceMktempPattern]: { stdout: tempPath },
       })
@@ -711,7 +725,7 @@ describe("ssh.authorizedKeys", () => {
     expect(collateralEntry.includes(sharedKeyBody)).toBe(true)
     expect(collateralEntry).not.toBe(exactKeyToRemove)
 
-    const mockSsh = createMockSsh(
+    const mockSsh = createSshApplyMockSsh(
       aliceResponses({
         [aliceMktempPattern]: { stdout: tempPath },
       })
@@ -727,7 +741,7 @@ describe("ssh.authorizedKeys", () => {
   })
 
   it("regression: apply resets ownership and mode after removing a key (state: absent)", async () => {
-    const mockSsh = createMockSsh(
+    const mockSsh = createSshApplyMockSsh(
       aliceResponses({
         [aliceMktempPattern]: { stdout: tempPath },
       })
@@ -772,7 +786,7 @@ describe("ssh.authorizedKeys", () => {
   })
 
   it("stages the authorized_keys rewrite inside the target user's .ssh directory, not under /run", async () => {
-    const mockSsh = createMockSsh(
+    const mockSsh = createSshApplyMockSsh(
       aliceResponses({
         [aliceMktempPattern]: { stdout: tempPath },
       })
@@ -801,7 +815,7 @@ describe("ssh.authorizedKeys", () => {
     ["wrong prefix", `${aliceHome}/.ssh/not-authorized-keys.ABCDEF`],
   ])("rejects unsafe authorized_keys mktemp output: %s", async (_caseName, stdout) => {
     const foreignPath = "/tmp/.authorized-keys.ABCDEF"
-    const mockSsh = createMockSsh(
+    const mockSsh = createSshApplyMockSsh(
       aliceResponses({
         [aliceMktempPattern]: { stdout },
       })
@@ -819,7 +833,7 @@ describe("ssh.authorizedKeys", () => {
   })
 
   it("keeps temporary authorized_keys rewrites in the target user's .ssh directory for absent state", async () => {
-    const mockSsh = createMockSsh(
+    const mockSsh = createSshApplyMockSsh(
       aliceResponses({
         [aliceMktempPattern]: { stdout: tempPath },
       })
@@ -843,7 +857,7 @@ describe("ssh.authorizedKeys", () => {
   })
 
   it("fails closed in apply when the user does not exist and resolveHome returns an empty string", async () => {
-    const mockSsh = createMockSsh({
+    const mockSsh = createSshApplyMockSsh({
       "getent passwd 'ghost' | cut -d: -f6": { stdout: "" },
     })
     const mod = ssh.authorizedKeys("ghost", testKey)
@@ -861,6 +875,8 @@ describe("ssh.authorizedKeys", () => {
 
   it("resolves home directory dynamically for root user", async () => {
     const mockSsh = createMockSsh({
+      "[ -e '/root/.ssh' ]": { code: 0 },
+      "[ -e '/root/.ssh/authorized_keys' ]": { code: 0 },
       "[ -L '/root/.ssh/authorized_keys' ]": { code: 1 },
       [`grep -qxF -- '${testKey}' '/root/.ssh/authorized_keys'`]: { code: 0 },
       "getent passwd 'root' | cut -d: -f6": { stdout: "/root" },
@@ -877,6 +893,8 @@ describe("ssh.authorizedKeys", () => {
 
   it("resolves home directory dynamically for non-root user", async () => {
     const mockSsh = createMockSsh({
+      "[ -e '/home/deploy/.ssh' ]": { code: 0 },
+      "[ -e '/home/deploy/.ssh/authorized_keys' ]": { code: 0 },
       "[ -L '/home/deploy/.ssh/authorized_keys' ]": { code: 1 },
       [`grep -qxF -- '${testKey}' '/home/deploy/.ssh/authorized_keys'`]: { code: 0 },
       "getent passwd 'deploy' | cut -d: -f6": { stdout: "/home/deploy" },
@@ -894,6 +912,8 @@ describe("ssh.authorizedKeys", () => {
   it("regression: home path with spaces is correctly shell-quoted in check", async () => {
     const spaceyHome = "/home/my user"
     const mockSsh = createMockSsh({
+      "[ -e '/home/my user/.ssh' ]": { code: 0 },
+      "[ -e '/home/my user/.ssh/authorized_keys' ]": { code: 0 },
       "[ -L '/home/my user/.ssh/authorized_keys' ]": { code: 1 },
       [`grep -qxF -- '${testKey}' '/home/my user/.ssh/authorized_keys'`]: { code: 0 },
       "getent passwd 'alice' | cut -d: -f6": { stdout: spaceyHome },
@@ -915,7 +935,7 @@ describe("ssh.authorizedKeys", () => {
   it("regression: home path with spaces is correctly shell-quoted in apply", async () => {
     const spaceyHome = "/home/my user"
     const spaceyTemp = "/home/my user/.ssh/.authorized-keys.ABCDEF"
-    const mockSsh = createMockSsh({
+    const mockSsh = createSshApplyMockSsh({
       "getent passwd 'alice' | cut -d: -f6": { stdout: spaceyHome },
       "id -gn 'alice'": { stdout: "alice" },
       "mktemp '/home/my user/.ssh/.authorized-keys.XXXXXX'": { stdout: spaceyTemp },
@@ -946,7 +966,7 @@ describe("ssh.authorizedKeys", () => {
   // a stable check-ok state is reachable without overwriting the
   // semantically correct group ownership.
   it("R-0000065: apply uses the user's resolved primary group for chown when it differs from the username", async () => {
-    const mockSsh = createMockSsh({
+    const mockSsh = createSshApplyMockSsh({
       "getent passwd 'deploy' | cut -d: -f6": { stdout: "/home/deploy" },
       "id -gn 'deploy'": { stdout: "users" },
       "mktemp '/home/deploy/.ssh/.authorized-keys.XXXXXX'": {
@@ -974,6 +994,8 @@ describe("ssh.authorizedKeys", () => {
 
   it("R-0000065: check returns ok when the primary group differs from the username and matches stat output", async () => {
     const mockSsh = createMockSsh({
+      "[ -e '/home/deploy/.ssh' ]": { code: 0 },
+      "[ -e '/home/deploy/.ssh/authorized_keys' ]": { code: 0 },
       "[ -L '/home/deploy/.ssh/authorized_keys' ]": { code: 1 },
       [`grep -qxF -- '${testKey}' '/home/deploy/.ssh/authorized_keys'`]: { code: 0 },
       "getent passwd 'deploy' | cut -d: -f6": { stdout: "/home/deploy" },

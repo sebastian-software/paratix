@@ -4,8 +4,20 @@ import { describe, expect, it } from "vitest"
 import { mount } from "../../src/modules/mount.js"
 import { createMockSsh as createBaseMockSsh } from "../helpers/mockSsh.js"
 
+type MockSshOptions = NonNullable<Parameters<typeof createBaseMockSsh>[1]>
+type MockSshResponses = Parameters<typeof createBaseMockSsh>[0]
+
 const createMockSsh: typeof createBaseMockSsh = (responses, options) =>
-  createBaseMockSsh(responses, { strict: false, ...options })
+  createBaseMockSsh(responses, options)
+
+const successfulMountApplyOptions: MockSshOptions = {
+  allowWrites: [{ options: { mode: "0644" }, remotePath: "/etc/fstab" }],
+  defaultExecResult: { code: 0 },
+}
+
+function createMountApplyMockSsh(responses: MockSshResponses = {}) {
+  return createMockSsh(responses, successfulMountApplyOptions)
+}
 
 const emptyEnv = {}
 
@@ -314,7 +326,7 @@ describe("mount.present — apply", () => {
   })
 
   it("creates mountpoint with mkdir -p", async () => {
-    const mockSsh = createMockSsh({
+    const mockSsh = createMountApplyMockSsh({
       [findmntCheckCmd]: { code: 0, stdout: liveMountStdout },
     })
     const mod = mount.present({
@@ -330,7 +342,7 @@ describe("mount.present — apply", () => {
 
   it("writes fstab entry when persist is true", async () => {
     const writtenFiles: Array<{ content: string; path: string }> = []
-    const mockSsh = createMockSsh({
+    const mockSsh = createMountApplyMockSsh({
       "cat '/etc/fstab'": { stdout: "# /etc/fstab\n" },
       [findmntCheckCmd]: { code: 0, stdout: liveMountStdout },
     })
@@ -349,7 +361,7 @@ describe("mount.present — apply", () => {
   })
 
   it("reads fstab before writing (cat command)", async () => {
-    const mockSsh = createMockSsh({
+    const mockSsh = createMountApplyMockSsh({
       "cat '/etc/fstab'": { stdout: "# /etc/fstab\n" },
       [findmntCheckCmd]: { code: 0, stdout: liveMountStdout },
     })
@@ -364,7 +376,7 @@ describe("mount.present — apply", () => {
   })
 
   it("runs mount command when not already mounted", async () => {
-    const mockSsh = createMockSsh({
+    const mockSsh = createMountApplyMockSsh({
       "cat '/etc/fstab'": { stdout: `${fstabLine}\n` },
       [findmntCheckCmd]: { code: 1 },
     })
@@ -379,7 +391,7 @@ describe("mount.present — apply", () => {
   })
 
   it("returns ok when already mounted and fstab matches", async () => {
-    const mockSsh = createMockSsh({
+    const mockSsh = createMountApplyMockSsh({
       "cat '/etc/fstab'": { stdout: `${fstabLine}\n` },
       [findmntCheckCmd]: { code: 0, stdout: liveMountStdout },
     })
@@ -394,7 +406,7 @@ describe("mount.present — apply", () => {
   })
 
   it("returns changed when mount was needed", async () => {
-    const mockSsh = createMockSsh({
+    const mockSsh = createMountApplyMockSsh({
       "cat '/etc/fstab'": { stdout: "# /etc/fstab\n" },
       [findmntCheckCmd]: { code: 1 },
     })
@@ -409,7 +421,7 @@ describe("mount.present — apply", () => {
   })
 
   it("returns failed when mount command fails", async () => {
-    const mockSsh = createMockSsh({
+    const mockSsh = createMountApplyMockSsh({
       "cat '/etc/fstab'": { stdout: `${fstabLine}\n` },
       [findmntCheckCmd]: { code: 1 },
       [mountCmd]: { code: 1, stderr: "mount failed" },
@@ -429,7 +441,7 @@ describe("mount.present — apply", () => {
   it("updates existing fstab entry when options differ", async () => {
     const oldLine = `${mountSrc} ${mountPath} ${mountFstype} defaults 0 0`
     const writtenFiles: Array<{ content: string; path: string }> = []
-    const mockSsh = createMockSsh({
+    const mockSsh = createMountApplyMockSsh({
       "cat '/etc/fstab'": { stdout: `${oldLine}\n` },
       [findmntCheckCmd]: { code: 0, stdout: liveMountStdout },
     })
@@ -451,7 +463,7 @@ describe("mount.present — apply", () => {
   })
 
   it("skips fstab when persist is false", async () => {
-    const mockSsh = createMockSsh({
+    const mockSsh = createMountApplyMockSsh({
       [findmntCheckCmd]: { code: 0, stdout: liveMountStdout },
     })
     const mod = mount.present({
@@ -469,7 +481,7 @@ describe("mount.present — apply", () => {
   // src and fstype still match is converged via `mount -o remount,<opts>`.
   it("issues mount -o remount when only options drifted", async () => {
     const remountCmd = `mount -o remount,'${mountOpts}' '${mountSrc}' '${mountPath}'`
-    const mockSsh = createMockSsh({
+    const mockSsh = createMountApplyMockSsh({
       [findmntCheckCmd]: { code: 0, stdout: `${mountSrc} ${mountFstype} defaults` },
       [remountCmd]: { code: 0 },
     })
@@ -490,7 +502,7 @@ describe("mount.present — apply", () => {
   // R-0000049 regression: a live mount whose source drifted falls back to
   // umount + a fresh mount because remount cannot change the source.
   it("issues umount + mount when the source drifted", async () => {
-    const mockSsh = createMockSsh({
+    const mockSsh = createMountApplyMockSsh({
       [findmntCheckCmd]: { code: 0, stdout: `/dev/sdb1 ${mountFstype} ${mountOpts}` },
       [mountCmd]: { code: 0 },
       [umountCmd]: { code: 0 },
@@ -513,7 +525,7 @@ describe("mount.present — apply", () => {
 
   // R-0000049 regression: a drifted fstype also falls back to umount + mount.
   it("issues umount + mount when the fstype drifted", async () => {
-    const mockSsh = createMockSsh({
+    const mockSsh = createMountApplyMockSsh({
       [findmntCheckCmd]: { code: 0, stdout: `${mountSrc} ext4 ${mountOpts}` },
       [mountCmd]: { code: 0 },
       [umountCmd]: { code: 0 },
@@ -591,7 +603,7 @@ describe("mount.absent — apply", () => {
   })
 
   it("runs umount when mounted", async () => {
-    const mockSsh = createMockSsh({
+    const mockSsh = createMountApplyMockSsh({
       "cat '/etc/fstab'": { stdout: "# /etc/fstab\n" },
       [findmntTestCmd]: { code: 0 },
     })
@@ -602,7 +614,7 @@ describe("mount.absent — apply", () => {
   })
 
   it("returns failed when umount fails", async () => {
-    const mockSsh = createMockSsh({
+    const mockSsh = createMountApplyMockSsh({
       [findmntTestCmd]: { code: 0 },
       [umountCmd]: { code: 1, stderr: "umount failed" },
     })
@@ -615,7 +627,7 @@ describe("mount.absent — apply", () => {
 
   it("removes fstab entry when persist is true", async () => {
     const writtenFiles: Array<{ content: string; path: string }> = []
-    const mockSsh = createMockSsh({
+    const mockSsh = createMountApplyMockSsh({
       "cat '/etc/fstab'": { stdout: `${fstabLine}\n` },
       [findmntTestCmd]: { code: 1 },
     })
@@ -631,7 +643,7 @@ describe("mount.absent — apply", () => {
   })
 
   it("returns ok when nothing to do (not mounted, no fstab entry)", async () => {
-    const mockSsh = createMockSsh({
+    const mockSsh = createMountApplyMockSsh({
       "cat '/etc/fstab'": { stdout: "# /etc/fstab\n" },
       [findmntTestCmd]: { code: 1 },
     })
@@ -641,7 +653,7 @@ describe("mount.absent — apply", () => {
   })
 
   it("returns changed when umount was needed", async () => {
-    const mockSsh = createMockSsh({
+    const mockSsh = createMountApplyMockSsh({
       "cat '/etc/fstab'": { stdout: "# /etc/fstab\n" },
       [findmntTestCmd]: { code: 0 },
     })
@@ -651,7 +663,7 @@ describe("mount.absent — apply", () => {
   })
 
   it("skips fstab when persist is false", async () => {
-    const mockSsh = createMockSsh({
+    const mockSsh = createMountApplyMockSsh({
       [findmntTestCmd]: { code: 1 },
     })
     const mod = mount.absent({ path: mountPath, persist: false })
@@ -660,7 +672,7 @@ describe("mount.absent — apply", () => {
   })
 
   it("skips umount when not mounted", async () => {
-    const mockSsh = createMockSsh({
+    const mockSsh = createMountApplyMockSsh({
       "cat '/etc/fstab'": { stdout: "# /etc/fstab\n" },
       [findmntTestCmd]: { code: 1 },
     })

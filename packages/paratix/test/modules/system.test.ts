@@ -10,9 +10,12 @@ import { system } from "../../src/modules/system.js"
 import { createMockSsh as createBaseMockSsh } from "../helpers/mockSsh.js"
 
 const createMockSsh: typeof createBaseMockSsh = (responses, options) =>
-  createBaseMockSsh(responses, { strict: false, ...options })
+  createBaseMockSsh(responses, options)
 
 const emptyEnv = {}
+const successfulRebootResponses = {
+  "shutdown -r now": { code: 0 },
+}
 
 describe("system.reboot — check", () => {
   it("returns needs-apply with a valid ssh connection", async () => {
@@ -39,7 +42,7 @@ describe("system.reboot — apply", () => {
   })
 
   it("sends shutdown -r now and returns meta with system.reboot set to true", async () => {
-    const ssh = createMockSsh()
+    const ssh = createMockSsh(successfulRebootResponses)
     const mod = system.reboot()
     const result = await mod.apply(ssh, emptyEnv)
     expect(result.status).toBe("changed")
@@ -48,14 +51,14 @@ describe("system.reboot — apply", () => {
   })
 
   it("does not set system.host in meta when no resolveHost option is given", async () => {
-    const ssh = createMockSsh()
+    const ssh = createMockSsh(successfulRebootResponses)
     const mod = system.reboot()
     const result = await mod.apply(ssh, emptyEnv)
     expect(result.meta?.some(isSystemHostMetaEntry)).toBe(false)
   })
 
   it("calls resolveHost and sets system.host in meta when resolveHost is provided", async () => {
-    const ssh = createMockSsh()
+    const ssh = createMockSsh(successfulRebootResponses)
     const resolveHost = vi.fn().mockResolvedValue("10.0.0.42")
     const mod = system.reboot({ resolveHost })
     const result = await mod.apply(ssh, emptyEnv)
@@ -90,7 +93,7 @@ describe("system.reboot — apply", () => {
   })
 
   it("falls back to current host when resolveHost throws", async () => {
-    const ssh = createMockSsh()
+    const ssh = createMockSsh(successfulRebootResponses)
     const resolveHost = vi.fn().mockRejectedValue(new Error("DNS failed"))
     const mod = system.reboot({ resolveHost })
     const result = await mod.apply(ssh, emptyEnv)
