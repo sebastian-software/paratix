@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest"
 
 import { script } from "../../src/index.js"
+import { shellQuote } from "../../src/ssh.js"
 import { createStrictMockSsh } from "../helpers/mockSsh.js"
 
 const emptyEnv = {}
@@ -21,9 +22,9 @@ function makeRemoteScriptPath(name: string, suffix = "ABCDEF"): string {
 }
 
 function buildScriptCommand(remotePath: string, args?: string[]): string {
-  const quotedArgs = args?.map((arg) => `'${arg}'`).join(" ") ?? ""
-  if (quotedArgs === "") return `'${remotePath}'`
-  return `'${remotePath}' ${quotedArgs}`
+  const quotedArgs = args?.map((arg) => shellQuote(arg)).join(" ") ?? ""
+  if (quotedArgs === "") return shellQuote(remotePath)
+  return `${shellQuote(remotePath)} ${quotedArgs}`
 }
 
 function createScriptMockSsh(options?: {
@@ -197,6 +198,19 @@ describe("script.once — apply", () => {
     const mod = script.once("setup", "/local/setup.sh", { args: ["--env", "production"] })
     await mod.apply(mockSsh, emptyEnv)
     expect(mockSsh.calls).toContain(`'${remotePath}' '--env' 'production'`)
+  })
+
+  it("shell-quotes arguments that contain quotes, backslashes, and command substitution", async () => {
+    const remotePath = makeRemoteScriptPath("setup")
+    const args = ["a'b", String.raw`x\y`, "$(id)"]
+    const mockSsh = createScriptMockSsh({ args })
+    const mod = script.once("setup", "/local/setup.sh", { args })
+
+    await mod.apply(mockSsh, emptyEnv)
+
+    expect(mockSsh.calls).toContain(
+      `${shellQuote(remotePath)} ${args.map((arg) => shellQuote(arg)).join(" ")}`
+    )
   })
 
   it("does not append arguments when args is an empty array", async () => {
