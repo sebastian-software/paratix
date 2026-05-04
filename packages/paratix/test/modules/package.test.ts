@@ -251,6 +251,12 @@ describe("pkg.absent", () => {
     expect(await mod.check(null, emptyEnv)).toBe("needs-apply")
   })
 
+  it("check returns needs-apply when no package manager is found", async () => {
+    const ssh = createMockSsh({ ...NO_PM })
+    const mod = pkg.absent("nginx")
+    expect(await mod.check(ssh, emptyEnv)).toBe("needs-apply")
+  })
+
   // apply
 
   it("apply returns changed when remove succeeds (apt)", async () => {
@@ -300,6 +306,32 @@ describe("pkg.absent", () => {
     const result = await mod.apply(null, emptyEnv)
     expect(result.status).toBe("failed")
     expect(result.error?.message).toContain("[package.absent: nginx] SSH connection is required")
+  })
+
+  it("apply returns failed when no package manager is found", async () => {
+    const ssh = createMockSsh({ ...NO_PM })
+    const mod = pkg.absent("nginx")
+    const result = await mod.apply(ssh, emptyEnv)
+    expect(result.status).toBe("failed")
+    expect(result.error?.message).toContain("No supported package manager found")
+  })
+
+  it("apply returns failed when the remove command fails", async () => {
+    const ssh = createMockSsh({
+      ...APT_FOUND,
+      "DEBIAN_FRONTEND=noninteractive apt-get remove -y -- 'nginx'": {
+        code: 1,
+        stderr: "remove failed",
+      },
+      "dpkg-query -W -f='${Status}' 'nginx' 2>/dev/null | grep -q 'install ok installed'": {
+        code: 0,
+      },
+    })
+    const mod = pkg.absent("nginx")
+    const result = await mod.apply(ssh, emptyEnv)
+    expect(result.status).toBe("failed")
+    expect(result.error).toBeInstanceOf(CommandError)
+    expect(result.error?.message).toContain("package removal failed")
   })
 
   // name
