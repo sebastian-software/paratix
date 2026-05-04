@@ -270,8 +270,9 @@ async function handleReboot(
 
 async function applyRunnerControlPlaneMeta(
   ssh: SshConnectionImpl,
-  step: Pick<OrchestrationStep, "meta">
+  step: Pick<OrchestrationStep, "meta" | "status">
 ): Promise<void> {
+  if (step.status === "failed") return
   if (step.meta == null) return
   assertValidModuleMetaEntries(step.meta)
   await handlePortChange(ssh, step.meta)
@@ -287,7 +288,7 @@ async function handleMetaAndBuildResult(
 
   if (result.meta != null) {
     currentEnvironment = await mergeEnvironmentFromMeta(currentEnvironment, result.meta)
-    await applyRunnerControlPlaneMeta(ssh, { meta: result.meta })
+    await applyRunnerControlPlaneMeta(ssh, { meta: result.meta, status: result.status })
   }
 
   return {

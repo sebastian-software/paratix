@@ -540,6 +540,96 @@ describe("runPlaybook meta validation", () => {
   })
 })
 
+describe("runPlaybook failed result control-plane meta", () => {
+  beforeEach(() => {
+    vi.spyOn(console, "log").mockImplementation(() => {
+      /* noop */
+    })
+    vi.spyOn(console, "error").mockImplementation(() => {
+      /* noop */
+    })
+    vi.resetModules()
+  })
+
+  afterEach(() => {
+    vi.restoreAllMocks()
+    vi.resetModules()
+    process.exitCode = 0
+  })
+
+  it("does not apply sshd.port meta from a failed module result", async () => {
+    const capturedConfigs: unknown[] = []
+    const addPort = vi.fn().mockReturnValue(true)
+    const reconnect = vi.fn().mockResolvedValue(null)
+    const removePort = vi.fn()
+
+    vi.doMock("../src/ssh.js", () => ({
+      shellQuote: (s: string) => `'${s}'`,
+      SshConnectionImpl: makeMockSshClass(capturedConfigs, { addPort, reconnect, removePort }),
+    }))
+
+    const { runPlaybook } = await import("../src/runner.js")
+
+    const failedModule: Module = {
+      apply: vi.fn().mockResolvedValue({
+        meta: [meta.sshdPort(2222)],
+        status: "failed",
+      } satisfies ModuleResult),
+      check: vi.fn().mockResolvedValue("needs-apply"),
+      name: "failed-port-module",
+    }
+
+    const definition: ServerDefinition = {
+      host: "1.2.3.4",
+      name: "test-server",
+      run: [failedModule],
+      ssh: { ports: [22], privateKey: "~/.ssh/id", user: "root" },
+    }
+
+    await runPlaybook(definition)
+
+    expect(process.exitCode).toBe(1)
+    expect(addPort).not.toHaveBeenCalled()
+    expect(reconnect).not.toHaveBeenCalled()
+    expect(removePort).not.toHaveBeenCalled()
+  })
+
+  it("does not apply reboot or host meta from a failed module result", async () => {
+    const capturedConfigs: unknown[] = []
+    const reconnect = vi.fn().mockResolvedValue(null)
+    const updateHost = vi.fn()
+
+    vi.doMock("../src/ssh.js", () => ({
+      shellQuote: (s: string) => `'${s}'`,
+      SshConnectionImpl: makeMockSshClass(capturedConfigs, { reconnect, updateHost }),
+    }))
+
+    const { runPlaybook } = await import("../src/runner.js")
+
+    const failedModule: Module = {
+      apply: vi.fn().mockResolvedValue({
+        meta: [meta.systemHost("10.0.0.42"), meta.systemReboot()],
+        status: "failed",
+      } satisfies ModuleResult),
+      check: vi.fn().mockResolvedValue("needs-apply"),
+      name: "failed-reboot-module",
+    }
+
+    const definition: ServerDefinition = {
+      host: "1.2.3.4",
+      name: "test-server",
+      run: [failedModule],
+      ssh: { ports: [22], privateKey: "~/.ssh/id", user: "root" },
+    }
+
+    await runPlaybook(definition)
+
+    expect(process.exitCode).toBe(1)
+    expect(updateHost).not.toHaveBeenCalled()
+    expect(reconnect).not.toHaveBeenCalled()
+  })
+})
+
 describe("runPlaybook SSH config immutability", () => {
   beforeEach(() => {
     vi.spyOn(console, "log").mockImplementation(() => {
