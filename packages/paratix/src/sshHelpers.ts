@@ -29,11 +29,14 @@ export function shellQuote(s: string): string {
 }
 
 const CONNECTION_TIMEOUT = 10_000
+export const DEFAULT_MAX_OUTPUT_BYTES = Number("1048576")
+const CAPTURE_TRUNCATION_MARKER = "\n[output truncated]"
 
 /**
  * Maximum number of characters included in a {@link CommandError} message
  * before the output is truncated. Output beyond this limit is still available
- * on {@link CommandError.fullStdout} and {@link CommandError.fullStderr}.
+ * on {@link CommandError.fullStdout} and {@link CommandError.fullStderr}, up
+ * to the configured capture limit.
  */
 export const MAX_OUTPUT_LENGTH = 500
 
@@ -57,13 +60,102 @@ function codepointLengthExceeds(text: string, limit: number): boolean {
   return false
 }
 
+function fitUtf8Prefix(text: string, maxBytes: number): string {
+  let bytes = 0
+  let sliceEnd = 0
+  for (const char of text) {
+    const charBytes = Buffer.byteLength(char, "utf8")
+    if (bytes + charBytes > maxBytes) break
+    bytes += charBytes
+    sliceEnd += char.length
+  }
+  return text.slice(0, sliceEnd)
+}
+
+function resolveMaxOutputBytes(options: ExecOptions): number {
+  const value = options.maxOutputBytes ?? DEFAULT_MAX_OUTPUT_BYTES
+  if (!Number.isFinite(value) || value < 0) {
+    throw new Error("ExecOptions.maxOutputBytes must be a non-negative finite number")
+  }
+  return Math.floor(value)
+}
+
+class CapturedOutput {
+  private byteLength = 0
+  private text = ""
+  private truncated = false
+
+  public constructor(private readonly maxBytes: number) {}
+
+  public append(chunk: string): void {
+    if (this.truncated) return
+    const chunkBytes = Buffer.byteLength(chunk, "utf8")
+    const remainingBytes = this.maxBytes - this.byteLength
+    if (chunkBytes <= remainingBytes) {
+      this.text += chunk
+      this.byteLength += chunkBytes
+      return
+    }
+
+    if (remainingBytes > 0) {
+      const prefix = fitUtf8Prefix(chunk, remainingBytes)
+      this.text += prefix
+      this.byteLength += Buffer.byteLength(prefix, "utf8")
+    }
+    this.text += CAPTURE_TRUNCATION_MARKER
+    this.truncated = true
+  }
+
+  public isTruncated(): boolean {
+    return this.truncated
+  }
+
+  public toString(): string {
+    return this.text
+  }
+}
+
+type CapturedStreams = {
+  capturedStderr: string
+  capturedStdout: string
+  stderr: CapturedOutput
+  stdout: CapturedOutput
+}
+
+function outputSummaryWasTruncated(streams: CapturedStreams): boolean {
+  return (
+    streams.stdout.isTruncated() ||
+    streams.stderr.isTruncated() ||
+    codepointLengthExceeds(streams.capturedStdout, MAX_OUTPUT_LENGTH) ||
+    codepointLengthExceeds(streams.capturedStderr, MAX_OUTPUT_LENGTH)
+  )
+}
+
+type CommandErrorParameters = {
+  capturedStderr: string
+  capturedStdout: string
+  command: string
+  reason: string
+  secrets: SecretSource[]
+  wasTruncated: boolean
+}
+
+function buildCommandError(parameters: CommandErrorParameters): CommandError {
+  const hint = parameters.wasTruncated ? "\n(use --verbose for full output)" : ""
+  return new CommandError(
+    `Command failed with ${parameters.reason}: ${maskSecrets(parameters.command, parameters.secrets)}\nstdout: ${truncateOutput(parameters.capturedStdout)}\nstderr: ${truncateOutput(parameters.capturedStderr)}${hint}`,
+    parameters.capturedStdout,
+    parameters.capturedStderr
+  )
+}
+
 /**
  * Error thrown when a remote command exits with a non-zero exit code.
  *
- * The `message` contains a truncated summary of stdout and stderr
- * (up to {@link MAX_OUTPUT_LENGTH} characters each). The full, untruncated
- * output is available on {@link CommandError.fullStdout} and {@link CommandError.fullStderr} for use
- * in verbose error reporting.
+ * The `message` contains a truncated summary of stdout and stderr (up to
+ * {@link MAX_OUTPUT_LENGTH} characters each). Captured output is capped by
+ * `ExecOptions.maxOutputBytes`; truncated captures are marked in
+ * {@link CommandError.fullStdout} and {@link CommandError.fullStderr}.
  *
  * @example
  * ```ts
@@ -248,16 +340,24 @@ function normalizeSshCloseSignal(signal: null | string | undefined): string | un
  */
 export function collectStreamOutput(parameters: StreamOutputParameters): void {
   const { command, options, reject, resolve, stream, timer } = parameters
-  let stdout = ""
-  let stderr = ""
+  let maxOutputBytes: number
+  try {
+    maxOutputBytes = resolveMaxOutputBytes(options)
+  } catch (error) {
+    clearTimeout(timer)
+    reject(error instanceof Error ? error : new Error(String(error)))
+    return
+  }
+  const stdout = new CapturedOutput(maxOutputBytes)
+  const stderr = new CapturedOutput(maxOutputBytes)
 
   const secrets = parameters.secrets ?? []
   const stdoutMasker = createStreamMasker((text) => {
-    stdout += text
+    stdout.append(text)
     if (!options.silent) writeStdout(text)
   }, secrets)
   const stderrMasker = createStreamMasker((text) => {
-    stderr += text
+    stderr.append(text)
     if (!options.silent) writeStderr(text)
   }, secrets)
 
@@ -283,37 +383,38 @@ export function collectStreamOutput(parameters: StreamOutputParameters): void {
     clearTimeout(timer)
     stdoutMasker.flush()
     stderrMasker.flush()
+    const capturedStdout = stdout.toString()
+    const capturedStderr = stderr.toString()
+    const capturedStreams = { capturedStderr, capturedStdout, stderr, stdout }
     const closeSignal = normalizeSshCloseSignal(signal)
     if (closeSignal !== undefined) {
-      const wasTruncated =
-        codepointLengthExceeds(stdout, MAX_OUTPUT_LENGTH) ||
-        codepointLengthExceeds(stderr, MAX_OUTPUT_LENGTH)
-      const hint = wasTruncated ? "\n(use --verbose for full output)" : ""
       reject(
-        new CommandError(
-          `Command failed with signal ${closeSignal}: ${maskSecrets(command, secrets)}\nstdout: ${truncateOutput(stdout)}\nstderr: ${truncateOutput(stderr)}${hint}`,
-          stdout,
-          stderr
-        )
+        buildCommandError({
+          capturedStderr,
+          capturedStdout,
+          command,
+          reason: `signal ${closeSignal}`,
+          secrets,
+          wasTruncated: outputSummaryWasTruncated(capturedStreams),
+        })
       )
       return
     }
     const exitCode = normalizeSshCloseCode(code)
     if (exitCode !== 0 && options.ignoreExitCode !== true) {
-      const wasTruncated =
-        codepointLengthExceeds(stdout, MAX_OUTPUT_LENGTH) ||
-        codepointLengthExceeds(stderr, MAX_OUTPUT_LENGTH)
-      const hint = wasTruncated ? "\n(use --verbose for full output)" : ""
       reject(
-        new CommandError(
-          `Command failed with exit code ${exitCode}: ${maskSecrets(command, secrets)}\nstdout: ${truncateOutput(stdout)}\nstderr: ${truncateOutput(stderr)}${hint}`,
-          stdout,
-          stderr
-        )
+        buildCommandError({
+          capturedStderr,
+          capturedStdout,
+          command,
+          reason: `exit code ${exitCode}`,
+          secrets,
+          wasTruncated: outputSummaryWasTruncated(capturedStreams),
+        })
       )
       return
     }
-    resolve({ code: exitCode, stderr, stdout })
+    resolve({ code: exitCode, stderr: capturedStderr, stdout: capturedStdout })
   })
 }
 

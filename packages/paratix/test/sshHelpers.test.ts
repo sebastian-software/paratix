@@ -7,6 +7,7 @@ import {
   collectStreamOutput,
   CommandError,
   createStreamMasker,
+  DEFAULT_MAX_OUTPUT_BYTES,
   maskSecrets,
   MAX_OUTPUT_LENGTH,
   shellQuote,
@@ -405,6 +406,39 @@ describe("collectStreamOutput", () => {
     expect(result.stderr).toBe("")
   })
 
+  it("limits captured stdout on successful exit while keeping a truncation marker", async () => {
+    const result = await runCollect({
+      command: "yes",
+      emitClose: { code: 0 },
+      emitStdout: "abcdef",
+      options: { maxOutputBytes: 4, silent: true },
+    })
+
+    expect(result.stdout).toBe("abcd\n[output truncated]")
+  })
+
+  it("keeps output unchanged when captured stdout stays within the byte limit", async () => {
+    const result = await runCollect({
+      command: "printf",
+      emitClose: { code: 0 },
+      emitStdout: "abcd",
+      options: { maxOutputBytes: 4, silent: true },
+    })
+
+    expect(result.stdout).toBe("abcd")
+  })
+
+  it("limits captured output by UTF-8 bytes without splitting multibyte characters", async () => {
+    const result = await runCollect({
+      command: "printf",
+      emitClose: { code: 0 },
+      emitStdout: "aöb",
+      options: { maxOutputBytes: 2, silent: true },
+    })
+
+    expect(result.stdout).toBe("a\n[output truncated]")
+  })
+
   it("resolves without masking when secrets parameter is omitted", async () => {
     const result = await runCollect({
       command: "whoami",
@@ -479,6 +513,19 @@ describe("collectStreamOutput", () => {
     expect(result.stdout).toContain("[REDACTED]")
     expect(result.stderr).not.toContain(secret)
     expect(result.stderr).toContain("[REDACTED]")
+  })
+
+  it("masks secrets before applying the capture limit at a chunk boundary", async () => {
+    const result = await runCollect({
+      command: "printf",
+      emitClose: { code: 0 },
+      emitStdout: "prefix hunter2 suffix",
+      options: { maxOutputBytes: 17, silent: true },
+      secrets: ["hunter2"],
+    })
+
+    expect(result.stdout).toBe("prefix [REDACTED]\n[output truncated]")
+    expect(result.stdout).not.toContain("hunter2")
   })
 
   it("does not reject when ignoreExitCode is true even on non-zero exit", async () => {
@@ -866,7 +913,7 @@ describe("CommandError and truncation", () => {
     expect(msg).not.toContain("(use --verbose for full output)")
   })
 
-  it("fullStdout contains the complete (untruncated) masked stdout", async () => {
+  it("fullStdout contains the complete masked stdout within the capture limit", async () => {
     const longStdout = "g".repeat(MAX_OUTPUT_LENGTH + 50)
     const promise = runCollect({
       command: "false",
@@ -880,7 +927,7 @@ describe("CommandError and truncation", () => {
     expect(error.fullStdout).toHaveLength(MAX_OUTPUT_LENGTH + 50)
   })
 
-  it("fullStderr contains the complete (untruncated) masked stderr", async () => {
+  it("fullStderr contains the complete masked stderr within the capture limit", async () => {
     const longStderr = "h".repeat(MAX_OUTPUT_LENGTH + 50)
     const promise = runCollect({
       command: "false",
@@ -892,6 +939,40 @@ describe("CommandError and truncation", () => {
     const error = await getCommandError(promise)
     expect(error.fullStderr).toBe(longStderr)
     expect(error.fullStderr).toHaveLength(MAX_OUTPUT_LENGTH + 50)
+  })
+
+  it("limits fullStdout on command failure", async () => {
+    const promise = runCollect({
+      command: "false",
+      emitClose: { code: 1 },
+      emitStdout: "abcdef",
+      options: { maxOutputBytes: 4, silent: true },
+    })
+
+    const error = await getCommandError(promise)
+    expect(error.fullStdout).toBe("abcd\n[output truncated]")
+  })
+
+  it("limits fullStderr on command failure", async () => {
+    const promise = runCollect({
+      command: "false",
+      emitClose: { code: 1 },
+      emitStderr: "abcdef",
+      options: { maxOutputBytes: 4, silent: true },
+    })
+
+    const error = await getCommandError(promise)
+    expect(error.fullStderr).toBe("abcd\n[output truncated]")
+  })
+
+  it("uses the default max output byte limit when no explicit limit is provided", async () => {
+    const result = await runCollect({
+      command: "printf",
+      emitClose: { code: 0 },
+      emitStdout: "x".repeat(DEFAULT_MAX_OUTPUT_BYTES + 1),
+    })
+
+    expect(result.stdout).toBe(`${"x".repeat(DEFAULT_MAX_OUTPUT_BYTES)}\n[output truncated]`)
   })
 
   it("secrets are masked in fullStdout and fullStderr before truncation check", async () => {

@@ -164,6 +164,12 @@ export type ExecOptions = {
    * `ps -ef`, or `/proc/<pid>/cmdline`.
    */
   input?: string
+  /**
+   * Maximum number of UTF-8 bytes captured per output stream for `stdout` and
+   * `stderr`. Live output still streams fully; only the stored ExecResult and
+   * CommandError output are capped.
+   */
+  maxOutputBytes?: number
   /** Strings to mask in error messages (e.g. tokens, passwords). */
   secrets?: string[]
   /** Suppress stdout/stderr from the console while running. */
