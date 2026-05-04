@@ -32,7 +32,22 @@ import {
   UNATTENDED_UPGRADES_50_TEMPLATE,
 } from "../src/templates.js"
 
-const TEST_ADMIN_PUBLIC_KEY = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIRootBootstrap generated@test"
+function createWireString(value: Buffer | string): Buffer {
+  const bytes = typeof value === "string" ? Buffer.from(value, "utf8") : value
+  const lengthPrefix = Buffer.alloc(4)
+  lengthPrefix.writeUInt32BE(bytes.length, 0)
+  return Buffer.concat([lengthPrefix, bytes])
+}
+
+function createEd25519PublicKey(comment: string, keyMaterial = Buffer.alloc(32, 1)): string {
+  const encodedKey = Buffer.concat([
+    createWireString("ssh-ed25519"),
+    createWireString(keyMaterial),
+  ]).toString("base64")
+  return `ssh-ed25519 ${encodedKey} ${comment}`
+}
+
+const TEST_ADMIN_PUBLIC_KEY = createEd25519PublicKey("generated@test")
 
 async function expectProcessExit(
   callback: () => Promise<void> | void,
@@ -402,11 +417,7 @@ describe("admin public key validation", () => {
   })
 
   it("accepts a valid OpenSSH public key", () => {
-    expect(
-      isValidAdminPublicKey(
-        "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIBxv2sz0YF80J6V1rP4Y9l8n8A6oQ2V9m3YbQdK6Yz4Z user@example"
-      )
-    ).toBe(true)
+    expect(isValidAdminPublicKey(createEd25519PublicKey("user@example"))).toBe(true)
   })
 
   it("rejects values without a supported OpenSSH algorithm prefix", () => {
@@ -416,6 +427,32 @@ describe("admin public key validation", () => {
 
   it("rejects invalid base64 payloads", () => {
     expect(isValidAdminPublicKey("ssh-ed25519 not-base64!! user@example")).toBe(false)
+  })
+
+  it("rejects base64 payloads that are not OpenSSH wire blobs", () => {
+    expect(isValidAdminPublicKey("ssh-ed25519 YWJj user@example")).toBe(false)
+  })
+
+  it("rejects public keys whose wire algorithm does not match the prefix", () => {
+    const encodedRsaPrefixEd25519Body = Buffer.concat([
+      createWireString("ssh-rsa"),
+      createWireString(Buffer.from([0x01, 0x00, 0x01])),
+      createWireString(Buffer.from([0x01, 0x23, 0x45])),
+    ]).toString("base64")
+
+    expect(isValidAdminPublicKey(`ssh-ed25519 ${encodedRsaPrefixEd25519Body} user@example`)).toBe(
+      false
+    )
+  })
+
+  it("rejects public keys with trailing data after the wire blob", () => {
+    const encodedKey = Buffer.concat([
+      createWireString("ssh-ed25519"),
+      createWireString(Buffer.alloc(32, 1)),
+      Buffer.from([0]),
+    ]).toString("base64")
+
+    expect(isValidAdminPublicKey(`ssh-ed25519 ${encodedKey} user@example`)).toBe(false)
   })
 
   it("rejects syntactically broken single-line values", () => {
@@ -521,8 +558,7 @@ describe("admin public key validation", () => {
   // paths like `./id_ed25519.pub` without relying on shell expansion.
   it("resolves a relative admin public key file path against the current working directory", () => {
     mkdirSync(TEST_DIR, { recursive: true })
-    const publicKey =
-      "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIBxv2sz0YF80J6V1rP4Y9l8n8A6oQ2V9m3YbQdK6Yz4Z user@example"
+    const publicKey = createEd25519PublicKey("user@example")
     const absoluteKeyFile = join(TEST_DIR, "relative-admin.pub")
     writeFileSync(absoluteKeyFile, `${publicKey}\n`)
 

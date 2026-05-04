@@ -4,6 +4,8 @@ import { basename, join, resolve } from "node:path"
 
 import type { SelectFunction, SelectOption } from "./promptUi.js"
 
+import { hasValidOpenSshPublicKeyWireBlob } from "./openSshPublicKeyWire.js"
+
 export type LocalPublicKey = {
   key: string
   label: string
@@ -168,7 +170,11 @@ function isCanonicalBase64(value: string): boolean {
 
 export function isValidAdminPublicKey(value: string): boolean {
   const parsedKey = parseOpenSshPublicKey(value.trim())
-  return parsedKey != null && isCanonicalBase64(parsedKey.encodedKey)
+  return (
+    parsedKey != null &&
+    isCanonicalBase64(parsedKey.encodedKey) &&
+    hasValidOpenSshPublicKeyWireBlob(parsedKey.algorithm, parsedKey.encodedKey)
+  )
 }
 
 export function validateAdminPublicKey(
