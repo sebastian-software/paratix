@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from "vitest"
+import { afterEach, describe, expect, it, vi } from "vitest"
 
 import { net } from "../../src/index.js"
 import { sha256String } from "../../src/modules/fileHelpers.js"
@@ -1028,6 +1028,41 @@ describe("net.interface — apply", () => {
     expect(String(result.error)).toContain("netplan apply failed")
   })
 
+  it("restores the previous Netplan config when netplan apply fails", async () => {
+    const netplanPath = "/etc/netplan/60-paratix-eth0.yaml"
+    const previousConfig = "network:\n  version: 2\n"
+    const mockSsh = createMockSsh({
+      [`cat '${netplanPath}'`]: { stdout: previousConfig },
+      "netplan apply": { code: 1, stderr: "bad netplan" },
+      "test -d '/etc/netplan'": { code: 0 },
+      [`test -f '${netplanPath}'`]: { code: 0 },
+    })
+    const writeFile = vi.spyOn(mockSsh, "writeFile").mockResolvedValue()
+    const mod = net.interface("eth0", { dhcp: true })
+
+    const result = await mod.apply(mockSsh, emptyEnv)
+
+    expect(result.status).toBe("failed")
+    expect(writeFile).toHaveBeenLastCalledWith(netplanPath, previousConfig.trim(), {
+      mode: "0644",
+    })
+  })
+
+  it("removes a newly-created Netplan config when netplan apply fails", async () => {
+    const netplanPath = "/etc/netplan/60-paratix-eth0.yaml"
+    const mockSsh = createMockSsh({
+      "netplan apply": { code: 1, stderr: "bad netplan" },
+      "test -d '/etc/netplan'": { code: 0 },
+      [`test -f '${netplanPath}'`]: { code: 1 },
+    })
+    const mod = net.interface("eth0", { dhcp: true })
+
+    const result = await mod.apply(mockSsh, emptyEnv)
+
+    expect(result.status).toBe("failed")
+    expect(mockSsh.calls).toContain(`rm -f '${netplanPath}'`)
+  })
+
   it("returns changed in networkd mode", async () => {
     const mockSsh = createMockSsh({
       "test -d '/etc/netplan'": { code: 1 },
@@ -1055,6 +1090,26 @@ describe("net.interface — apply", () => {
     const result = await mod.apply(mockSsh, emptyEnv)
     expect(result.status).toBe("failed")
     expect(String(result.error)).toContain("networkctl reload failed")
+  })
+
+  it("restores the previous networkd config when networkctl reload fails", async () => {
+    const networkdPath = "/etc/systemd/network/60-paratix-eth0.network"
+    const previousConfig = "[Match]\nName=eth0\n\n[Network]\nDHCP=yes\n"
+    const mockSsh = createMockSsh({
+      [`cat '${networkdPath}'`]: { stdout: previousConfig },
+      "networkctl reload": { code: 1, stderr: "reload failed" },
+      "test -d '/etc/netplan'": { code: 1 },
+      [`test -f '${networkdPath}'`]: { code: 0 },
+    })
+    const writeFile = vi.spyOn(mockSsh, "writeFile").mockResolvedValue()
+    const mod = net.interface("eth0", { dhcp: false })
+
+    const result = await mod.apply(mockSsh, emptyEnv)
+
+    expect(result.status).toBe("failed")
+    expect(writeFile).toHaveBeenLastCalledWith(networkdPath, previousConfig.trim(), {
+      mode: "0644",
+    })
   })
 
   it("does not run netplan apply in networkd mode", async () => {

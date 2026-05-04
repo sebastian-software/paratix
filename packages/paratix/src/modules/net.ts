@@ -175,6 +175,58 @@ type InterfaceOptions = {
   nameservers?: string[]
 }
 
+type InterfaceConfigSnapshot = {
+  existed: boolean
+  path: string
+  previousContent: string
+}
+
+async function captureInterfaceConfigSnapshot(
+  conn: SshConnection,
+  path: string
+): Promise<InterfaceConfigSnapshot> {
+  const existed = await conn.test(`test -f ${shellQuote(path)}`)
+  return {
+    existed,
+    path,
+    previousContent: existed ? await conn.readFile(path) : "",
+  }
+}
+
+async function rollbackInterfaceConfig(
+  conn: SshConnection,
+  snapshot: InterfaceConfigSnapshot
+): Promise<ModuleResult | null> {
+  if (snapshot.existed) {
+    await conn.writeFile(snapshot.path, snapshot.previousContent, { mode: NET_CONFIG_FILE_MODE })
+    return null
+  }
+
+  const result = await conn.exec(`rm -f ${shellQuote(snapshot.path)}`, EXEC_OPTS)
+  return result.code === 0
+    ? null
+    : failedCommand(`[net.interface] rollback removal failed for ${snapshot.path}`, result)
+}
+
+async function writeAndApplyInterfaceConfig(parameters: {
+  applyCommand: string
+  content: string
+  failureMessage: string
+  path: string
+  ssh: SshConnection
+}): Promise<ModuleResult> {
+  const snapshot = await captureInterfaceConfigSnapshot(parameters.ssh, parameters.path)
+  await parameters.ssh.writeFile(parameters.path, parameters.content, {
+    mode: NET_CONFIG_FILE_MODE,
+  })
+  const result = await parameters.ssh.exec(parameters.applyCommand, EXEC_OPTS)
+  if (result.code === 0) return { status: "changed" }
+
+  const rollbackFailure = await rollbackInterfaceConfig(parameters.ssh, snapshot)
+  if (rollbackFailure != null) return rollbackFailure
+  return failedCommand(parameters.failureMessage, result)
+}
+
 /**
  * Generate a Netplan YAML configuration for a network interface.
  *
@@ -680,21 +732,23 @@ export const net = {
 
         if (useNetplan) {
           const content = buildNetplanYaml(name, options)
-          await conn.writeFile(netplanPath, content, { mode: NET_CONFIG_FILE_MODE })
-          const result = await conn.exec("netplan apply", EXEC_OPTS)
-          if (result.code !== 0) {
-            return failedCommand(`[net.interface: ${name}] netplan apply failed`, result)
-          }
+          return writeAndApplyInterfaceConfig({
+            applyCommand: "netplan apply",
+            content,
+            failureMessage: `[net.interface: ${name}] netplan apply failed`,
+            path: netplanPath,
+            ssh: conn,
+          })
         } else {
           const content = buildNetworkdConfig(name, options)
-          await conn.writeFile(networkdPath, content, { mode: NET_CONFIG_FILE_MODE })
-          const result = await conn.exec(NETWORKCTL_RELOAD, EXEC_OPTS)
-          if (result.code !== 0) {
-            return failedCommand(`[net.interface: ${name}] networkctl reload failed`, result)
-          }
+          return writeAndApplyInterfaceConfig({
+            applyCommand: NETWORKCTL_RELOAD,
+            content,
+            failureMessage: `[net.interface: ${name}] networkctl reload failed`,
+            path: networkdPath,
+            ssh: conn,
+          })
         }
-
-        return { status: "changed" }
       },
       async check(conn: null | SshConnection): Promise<"needs-apply" | "ok"> {
         if (!conn) return NEEDS_APPLY
