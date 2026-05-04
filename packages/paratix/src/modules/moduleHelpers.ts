@@ -47,6 +47,7 @@ export async function setVersionedFlag(
 }
 
 export async function setFlag(ssh: SshConnection, flagName: string): Promise<void> {
+  validateFlagName(flagName, "flagName")
   await ensureFlagsDirectory(ssh)
   await ssh.exec(`touch ${FLAGS_DIRECTORY}/${shellQuote(flagName)}`, { silent: true })
 }

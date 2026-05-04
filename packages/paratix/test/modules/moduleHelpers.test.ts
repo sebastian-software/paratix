@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest"
 
-import { FLAGS_DIRECTORY, hasFlag, setVersionedFlag } from "../../src/modules/moduleHelpers.js"
+import { FLAGS_DIRECTORY, hasFlag, setFlag, setVersionedFlag } from "../../src/modules/moduleHelpers.js"
 import { createMockSsh as createBaseMockSsh } from "../helpers/mockSsh.js"
 
 const createMockSsh: typeof createBaseMockSsh = (responses, options) =>
@@ -85,6 +85,33 @@ describe("hasFlag – rejects path-traversal-like names", () => {
     // A `/` would let a flag name escape the flags directory entirely.
     const ssh = createMockSsh()
     await expect(hasFlag(ssh, "foo/bar")).rejects.toThrow(/flagName must match/v)
+  })
+})
+
+describe("setFlag – rejects path-traversal-like names", () => {
+  it("rejects flagName equal to '..'", async () => {
+    const ssh = createMockSsh()
+    await expect(setFlag(ssh, "..")).rejects.toThrow(/flagName must match/v)
+  })
+
+  it("rejects flagName with a leading dot", async () => {
+    const ssh = createMockSsh()
+    await expect(setFlag(ssh, ".foo")).rejects.toThrow(/flagName must match/v)
+  })
+
+  it("rejects flagName containing a path separator", async () => {
+    const ssh = createMockSsh()
+    await expect(setFlag(ssh, "foo/bar")).rejects.toThrow(/flagName must match/v)
+  })
+
+  it("does not throw for a valid flagName", async () => {
+    const flagName = "valid-flag"
+    const ssh = createMockSsh({
+      [`touch ${FLAGS_DIRECTORY}/'${flagName}'`]: { code: 0 },
+      "mkdir -p /var/lib/paratix/flags": { code: 0 },
+    })
+
+    await expect(setFlag(ssh, flagName)).resolves.not.toThrow()
   })
 })
 
