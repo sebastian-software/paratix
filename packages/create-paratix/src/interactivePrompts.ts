@@ -70,25 +70,6 @@ const HOST_FINGERPRINT_CONFIRM_OPTIONS: Array<SelectOption<"discard" | "pin">> =
   },
 ]
 
-// R-0000128: a failed scan can be a real network issue, but it can also be
-// a man-in-the-middle that drops the SSH handshake to force a downgrade.
-// We surface the failure as an explicit warning and require the operator
-// to acknowledge it instead of silently returning undefined.
-const HOST_FINGERPRINT_SCAN_FAILURE_OPTIONS: Array<SelectOption<"abort" | "continue">> = [
-  {
-    description:
-      "Abort scaffolding now. Investigate the network path (TCP reachability, firewall, DNS) before retrying.",
-    label: "Abort and investigate",
-    value: "abort",
-  },
-  {
-    description:
-      "Keep the expectedHostFingerprint placeholder in server.ts and continue. Verify the host key out of band before the first paratix apply.",
-    label: "Continue without pinning",
-    value: "continue",
-  },
-]
-
 // R-0000122: render the scanned host key on isolated lines so an operator
 // can copy it cleanly for an out-of-band comparison.
 function describeScanResult(host: string, result: HostFingerprintScanResult): string {
@@ -226,7 +207,7 @@ export async function promptForAdminPublicKey(
 // R-0000128: explicit type for the host-fingerprint prompt so callers and
 // tests can express any combination of select responses while keeping the
 // internal call sites strongly typed.
-type HostFingerprintSelectValue = "abort" | "continue" | "discard" | "pin" | "placeholder" | "scan"
+type HostFingerprintSelectValue = "discard" | "pin" | "placeholder" | "scan"
 
 /**
  * Run a typed select on a chooser parameterised over a wider value set.
@@ -252,11 +233,7 @@ async function chooseFrom<TWide extends string, TNarrow extends TWide>(
   return result as TNarrow
 }
 
-async function confirmAfterScanFailure(
-  choose: SelectFunction<HostFingerprintSelectValue>,
-  host: string,
-  error: unknown
-): Promise<void> {
+function failAfterScanFailure(host: string, error: unknown): never {
   const reason = error instanceof Error ? error.message : String(error)
   // R-0000128: word the failure as an explicit MITM-warning so an operator
   // does not dismiss it as a transient network glitch.
@@ -272,19 +249,11 @@ async function confirmAfterScanFailure(
     ].join("\n")
   )
 
-  const decision = await chooseFrom(
-    choose,
-    `How should create-paratix proceed after the failed host-key scan for ${host}?`,
-    HOST_FINGERPRINT_SCAN_FAILURE_OPTIONS
+  throw new Error(
+    `Aborting scaffolding: host-key scan for ${host} failed (${reason}). ` +
+      `Re-run create-paratix once the SSH handshake to ${host}:22 succeeds, ` +
+      `or pass --expected-host-fingerprint with an out-of-band verified fingerprint.`
   )
-
-  if (decision === "abort") {
-    throw new Error(
-      `Aborting scaffolding: host-key scan for ${host} failed (${reason}). ` +
-        `Re-run create-paratix once the SSH handshake to ${host}:22 succeeds, ` +
-        `or skip the scan by selecting "Keep placeholder".`
-    )
-  }
 }
 
 /**
@@ -309,12 +278,7 @@ async function scanAndConfirmFingerprint(parameters: {
     result = await scanner(host)
   } catch (error) {
     // R-0000128: do not silently swallow scan failures. Surface a
-    // possible-MITM warning and let the operator decide between aborting
-    // and continuing without pinning. confirmAfterScanFailure throws
-    // when the operator chooses to abort so the caller propagates a
-    // non-zero exit instead of a quiet undefined.
-    await confirmAfterScanFailure(choose, host, error)
-    return undefined
+    failAfterScanFailure(host, error)
   }
 
   // R-0000122: surface the scanned material on isolated lines so the
@@ -328,7 +292,10 @@ async function scanAndConfirmFingerprint(parameters: {
     HOST_FINGERPRINT_CONFIRM_OPTIONS
   )
   if (confirmation !== "pin") {
-    return undefined
+    throw new Error(
+      `Aborting scaffolding: scanned host fingerprint for ${host} was not pinned. ` +
+        `Re-run create-paratix and pin a verified fingerprint, or pass --expected-host-fingerprint.`
+    )
   }
   return result.fingerprint
 }

@@ -937,16 +937,18 @@ describe("promptForHostFingerprint", () => {
     ])
   })
 
-  // R-0000122: an operator who chooses "Discard and keep placeholder" must
-  // not have the scanned fingerprint pinned into server.ts.
-  it("returns undefined when the operator discards the scanned fingerprint", async () => {
+  // R-0000202: after a scan has happened, discarding it must not downgrade
+  // to a generated accept-new first run.
+  it("rejects when the operator discards the scanned fingerprint", async () => {
     const select = vi.fn().mockResolvedValueOnce("scan").mockResolvedValueOnce("discard")
     const scanner = vi.fn().mockResolvedValueOnce({
       algorithm: "ssh-ed25519",
       fingerprint: "SHA256:scanned-fingerprint",
     })
 
-    await expect(promptForHostFingerprint("example.com", select, scanner)).resolves.toBeUndefined()
+    await expect(promptForHostFingerprint("example.com", select, scanner)).rejects.toThrow(
+      /scanned host fingerprint for example.com was not pinned/v
+    )
     expect(scanner).toHaveBeenCalledTimes(1)
     expect(select).toHaveBeenCalledTimes(2)
   })
@@ -955,7 +957,7 @@ describe("promptForHostFingerprint", () => {
   // multi-line block so an operator can copy it cleanly for an out-of-band
   // comparison. The algorithm has to appear next to the fingerprint.
   it("renders algorithm and fingerprint on isolated lines before asking to pin", async () => {
-    const select = vi.fn().mockResolvedValueOnce("scan").mockResolvedValueOnce("discard")
+    const select = vi.fn().mockResolvedValueOnce("scan").mockResolvedValueOnce("pin")
     const scanner = vi.fn().mockResolvedValueOnce({
       algorithm: "ssh-ed25519",
       fingerprint: "SHA256:scanned-fingerprint",
@@ -973,14 +975,15 @@ describe("promptForHostFingerprint", () => {
     expect(message).toContain("out-of-band")
   })
 
-  // R-0000128: a scan failure must surface as an explicit MITM-style
-  // warning. The operator confirms how to proceed instead of the function
-  // silently returning undefined.
-  it("emits a MITM warning and prompts the operator after a scan failure", async () => {
-    const select = vi.fn().mockResolvedValueOnce("scan").mockResolvedValueOnce("continue")
+  // R-0000202: a scan failure must surface as an explicit MITM-style warning
+  // and abort instead of falling back to an accept-new first run.
+  it("emits a MITM warning and rejects after a scan failure", async () => {
+    const select = vi.fn().mockResolvedValueOnce("scan")
     const scanner = vi.fn().mockRejectedValueOnce(new Error("network timeout"))
 
-    await expect(promptForHostFingerprint("example.com", select, scanner)).resolves.toBeUndefined()
+    await expect(promptForHostFingerprint("example.com", select, scanner)).rejects.toThrow(
+      /host-key scan for example.com failed \(network timeout\)/v
+    )
 
     const errorMock = console.error as unknown as { mock: { calls: unknown[][] } }
     const warningCalls = errorMock.mock.calls.map((call) => String(call[0])).join("\n")
@@ -989,37 +992,17 @@ describe("promptForHostFingerprint", () => {
     expect(warningCalls).toContain("man-in-the-middle")
     expect(warningCalls).toContain("Verify the host key out of band")
 
-    expect(select).toHaveBeenCalledTimes(2)
-    expect(select).toHaveBeenNthCalledWith(
-      2,
-      "How should create-paratix proceed after the failed host-key scan for example.com?",
-      [
-        {
-          description: expect.stringContaining("Abort scaffolding now"),
-          label: "Abort and investigate",
-          value: "abort",
-        },
-        {
-          description: expect.stringContaining("Keep the expectedHostFingerprint placeholder"),
-          label: "Continue without pinning",
-          value: "continue",
-        },
-      ]
-    )
+    expect(select).toHaveBeenCalledTimes(1)
   })
 
-  // R-0000128: aborting after a scan failure must surface a hard failure
-  // so the parent main() exits with a non-zero code (instead of letting
-  // the operator silently scaffold a project against a possibly-MITM'd
-  // host).
-  it("rejects with an actionable error when the operator aborts after a scan failure", async () => {
-    const select = vi.fn().mockResolvedValueOnce("scan").mockResolvedValueOnce("abort")
+  it("rejects with an actionable error after a scan failure", async () => {
+    const select = vi.fn().mockResolvedValueOnce("scan")
     const scanner = vi.fn().mockRejectedValueOnce(new Error("connect ETIMEDOUT"))
 
     await expect(promptForHostFingerprint("example.com", select, scanner)).rejects.toThrow(
       /Aborting scaffolding: host-key scan for example.com failed \(connect ETIMEDOUT\)/v
     )
-    expect(select).toHaveBeenCalledTimes(2)
+    expect(select).toHaveBeenCalledTimes(1)
   })
 })
 
