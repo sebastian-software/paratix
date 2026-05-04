@@ -1722,6 +1722,11 @@ describe("file.replace", () => {
 })
 
 describe("file.stat", () => {
+  it("marks itself as a dry-run meta producer", () => {
+    const mod = file.stat("/var/app/file.txt")
+    expect(mod._dryRunMetaProducer).toBe(true)
+  })
+
   it("check always returns needs-apply so runner invokes apply", async () => {
     const ssh = createMockSsh()
     const mod = file.stat("/var/app/file.txt")
