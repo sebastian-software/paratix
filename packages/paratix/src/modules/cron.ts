@@ -1,4 +1,4 @@
-import { failed } from "../moduleFailure.js"
+import { failed, failedCommand } from "../moduleFailure.js"
 import { shellQuote } from "../ssh.js"
 import { type Module, type ModuleResult, NEEDS_APPLY, type SshConnection } from "../types.js"
 
@@ -17,22 +17,38 @@ async function readCrontab(ssh: SshConnection, user: string): Promise<string[]> 
   return result.code === 0 ? result.stdout.trimEnd().split("\n") : []
 }
 
+type WriteCrontabArguments = {
+  /** Failure message used when removing an empty crontab fails. */
+  failureMessage: string
+  /** The crontab lines to write. An empty array removes the crontab. */
+  lines: string[]
+  /** The active SSH connection. */
+  ssh: SshConnection
+  /** The target user whose crontab is written. */
+  user: string
+}
+
 /**
  * Write a new crontab for a user, or remove it entirely when the content is empty.
  *
- * @param ssh - The active SSH connection.
- * @param user - The target user whose crontab is written.
- * @param lines - The crontab lines to write. An empty array removes the crontab.
+ * @param input - Crontab write arguments.
+ * @returns A failure result when empty-crontab removal fails, otherwise `null`.
  */
-async function writeCrontab(ssh: SshConnection, user: string, lines: string[]): Promise<void> {
+async function writeCrontab(input: WriteCrontabArguments): Promise<ModuleResult | null> {
+  const { failureMessage, lines, ssh, user } = input
+
   if (lines.length === 0) {
-    await ssh.exec(`crontab -u ${shellQuote(user)} -r`, { ignoreExitCode: true, silent: true })
-    return
+    const result = await ssh.exec(`crontab -u ${shellQuote(user)} -r`, {
+      ignoreExitCode: true,
+      silent: true,
+    })
+    return result.code === 0 ? null : failedCommand(failureMessage, result)
   }
   const content = `${lines.join("\n")}\n`
   await ssh.exec(`printf '%s' ${shellQuote(content)} | crontab -u ${shellQuote(user)} -`, {
     silent: true,
   })
+  return null
 }
 
 /**
@@ -179,7 +195,13 @@ export const cron = {
         // removed so we cannot accidentally delete unrelated content.
         const removeCount = looksLikeCronJobLine(lines, markerIndex + 1) ? 2 : 1
         lines.splice(markerIndex, removeCount)
-        await writeCrontab(ssh, user, lines)
+        const failure = await writeCrontab({
+          failureMessage: `[cron.absent: ${name} (${user})] crontab removal failed`,
+          lines,
+          ssh,
+          user,
+        })
+        if (failure) return failure
         return { status: "changed" }
       },
 
@@ -244,7 +266,13 @@ export const cron = {
           nextLines.splice(markerIndex, removeCount)
         }
 
-        await writeCrontab(ssh, user, nextLines)
+        const failure = await writeCrontab({
+          failureMessage: `[cron.job: ${name} (${user})] crontab removal failed`,
+          lines: nextLines,
+          ssh,
+          user,
+        })
+        if (failure) return failure
         return { status: "changed" }
       },
 

@@ -230,6 +230,26 @@ describe("cron.job", () => {
     expect(writeCall).toBeUndefined()
   })
 
+  it("apply returns failed when crontab removal fails (state: absent)", async () => {
+    const mockSsh = createMockSsh({
+      "crontab -u 'alice' -l": {
+        code: 0,
+        stdout: "# paratix: backup\n0 3 * * * /backup.sh\n",
+      },
+      "crontab -u 'alice' -r": {
+        code: 1,
+        stderr: "permission denied",
+      },
+    })
+    const mod = cron.job("alice", "backup", { job: "0 3 * * * /backup.sh", state: "absent" })
+    const result = await mod.apply(mockSsh, emptyEnv)
+    expect(result.status).toBe("failed")
+    expect(result.error?.message).toContain(
+      "[cron.job: backup (alice)] crontab removal failed (exit code 1)"
+    )
+    expect(result.error?.message).toContain("permission denied")
+  })
+
   it("apply returns failed when ssh is null (state: absent)", async () => {
     const mod = cron.job("alice", "backup", { job: "0 3 * * * /backup.sh", state: "absent" })
     const conn = null
@@ -416,6 +436,26 @@ describe("cron.absent", () => {
     const result = await mod.apply(mockSsh, emptyEnv)
     expect(result.status).toBe("changed")
     expect(mockSsh.calls).toContain("crontab -u 'alice' -r")
+  })
+
+  it("apply returns failed when crontab removal fails", async () => {
+    const mockSsh = createMockSsh({
+      "crontab -u 'alice' -l": {
+        code: 0,
+        stdout: "# paratix: backup\n0 3 * * * /backup.sh\n",
+      },
+      "crontab -u 'alice' -r": {
+        code: 1,
+        stderr: "permission denied",
+      },
+    })
+    const mod = cron.absent("alice", "backup")
+    const result = await mod.apply(mockSsh, emptyEnv)
+    expect(result.status).toBe("failed")
+    expect(result.error?.message).toContain(
+      "[cron.absent: backup (alice)] crontab removal failed (exit code 1)"
+    )
+    expect(result.error?.message).toContain("permission denied")
   })
 
   it("apply returns ok when marker is not present (nothing to remove)", async () => {
