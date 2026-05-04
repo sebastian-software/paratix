@@ -32,6 +32,8 @@ import {
   UNATTENDED_UPGRADES_50_TEMPLATE,
 } from "../src/templates.js"
 
+const TEST_ADMIN_PUBLIC_KEY = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIRootBootstrap generated@test"
+
 async function expectProcessExit(
   callback: () => Promise<void> | void,
   expectedCode = 1
@@ -1522,6 +1524,7 @@ describe("writeProjectFiles", () => {
 
   it("generated server.ts embeds a scanned expectedHostFingerprint and keeps strict host-key checking enabled", () => {
     writeProjectFiles(TEST_DIR, {
+      adminPublicKey: TEST_ADMIN_PUBLIC_KEY,
       expectedHostFingerprint: "SHA256:scanned-fingerprint",
       host: "deploy.example.com",
       initialUser: { kind: "root" },
@@ -1573,7 +1576,11 @@ describe("writeProjectFiles", () => {
   })
 
   it("generated server.ts supports an explicit root bootstrap transition mode", () => {
-    writeProjectFiles(TEST_DIR, { host: "203.0.113.10", initialUser: { kind: "root" } })
+    writeProjectFiles(TEST_DIR, {
+      adminPublicKey: TEST_ADMIN_PUBLIC_KEY,
+      host: "203.0.113.10",
+      initialUser: { kind: "root" },
+    })
 
     const content = readFileSync(join(TEST_DIR, "server.ts"), "utf8")
 
@@ -1592,8 +1599,17 @@ describe("writeProjectFiles", () => {
     expect(content).not.toContain('service.restart("sshd")')
   })
 
+  it("rejects root bootstrap without an admin public key", () => {
+    expect(() => {
+      writeProjectFiles(TEST_DIR, { host: "203.0.113.10", initialUser: { kind: "root" } })
+    }).toThrow(/Root bootstrap requires --admin-public-key or --admin-public-key-file/v)
+  })
+
   it("generated server.ts does not scaffold a hardcoded sshd restart signal", () => {
-    writeProjectFiles(TEST_DIR, { initialUser: { kind: "root" } })
+    writeProjectFiles(TEST_DIR, {
+      adminPublicKey: TEST_ADMIN_PUBLIC_KEY,
+      initialUser: { kind: "root" },
+    })
 
     const content = readFileSync(join(TEST_DIR, "server.ts"), "utf8")
 
@@ -1602,7 +1618,10 @@ describe("writeProjectFiles", () => {
   })
 
   it("generated root-bootstrap server.ts switches to the admin user after FIRST_RUN", () => {
-    writeProjectFiles(TEST_DIR, { initialUser: { kind: "root" } })
+    writeProjectFiles(TEST_DIR, {
+      adminPublicKey: TEST_ADMIN_PUBLIC_KEY,
+      initialUser: { kind: "root" },
+    })
 
     const content = readFileSync(join(TEST_DIR, "server.ts"), "utf8")
 
@@ -1613,7 +1632,10 @@ describe("writeProjectFiles", () => {
   })
 
   it("generated root-bootstrap server.ts provisions passwordless sudo for the bootstrap admin user", () => {
-    writeProjectFiles(TEST_DIR, { initialUser: { kind: "root" } })
+    writeProjectFiles(TEST_DIR, {
+      adminPublicKey: TEST_ADMIN_PUBLIC_KEY,
+      initialUser: { kind: "root" },
+    })
 
     const content = readFileSync(join(TEST_DIR, "server.ts"), "utf8")
 
@@ -1627,7 +1649,10 @@ describe("writeProjectFiles", () => {
   })
 
   it("generated root-bootstrap project writes the sudoers drop-in for the admin user", () => {
-    writeProjectFiles(TEST_DIR, { initialUser: { kind: "root" } })
+    writeProjectFiles(TEST_DIR, {
+      adminPublicKey: TEST_ADMIN_PUBLIC_KEY,
+      initialUser: { kind: "root" },
+    })
 
     const sudoersPath = join(TEST_DIR, "files", "admin-nopasswd-sudoers")
 
@@ -1671,7 +1696,10 @@ describe("writeProjectFiles", () => {
   })
 
   it("generated root-bootstrap server.ts also opens firewall port 2222 before ssh-hardening-transition", () => {
-    writeProjectFiles(TEST_DIR, { initialUser: { kind: "root" } })
+    writeProjectFiles(TEST_DIR, {
+      adminPublicKey: TEST_ADMIN_PUBLIC_KEY,
+      initialUser: { kind: "root" },
+    })
 
     const content = readFileSync(join(TEST_DIR, "server.ts"), "utf8")
     const firewallIndex = content.indexOf('recipe("firewall"')
@@ -1683,7 +1711,10 @@ describe("writeProjectFiles", () => {
   })
 
   it("generated server.ts includes the first-run stop after ssh hardening, kernel hardening and automatic security upgrades", () => {
-    writeProjectFiles(TEST_DIR, { initialUser: { kind: "root" } })
+    writeProjectFiles(TEST_DIR, {
+      adminPublicKey: TEST_ADMIN_PUBLIC_KEY,
+      initialUser: { kind: "root" },
+    })
 
     const content = readFileSync(join(TEST_DIR, "server.ts"), "utf8")
     const sshHardeningIndex = content.indexOf('recipe("ssh-hardening-transition"')
@@ -1768,7 +1799,12 @@ describe("scaffoldProject", () => {
     const result = scaffoldProject(
       projectName,
       { command: "pnpm install", name: "pnpm" },
-      { host: "example.com", initialUser: { kind: "root" }, installer }
+      {
+        adminPublicKey: TEST_ADMIN_PUBLIC_KEY,
+        host: "example.com",
+        initialUser: { kind: "root" },
+        installer,
+      }
     )
 
     expect(result).toBe(true)

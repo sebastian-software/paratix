@@ -101,6 +101,11 @@ export function writeProjectFiles(projectDirectory: string, options?: ScaffoldOp
   const initialUser = options?.initialUser ?? { kind: "admin", user: "paratix" }
   const adminPublicKey = options?.adminPublicKey
   const expectedHostFingerprint = options?.expectedHostFingerprint
+  if (initialUser.kind === "root" && adminPublicKey == null) {
+    throw new Error(
+      "Root bootstrap requires --admin-public-key or --admin-public-key-file so the generated admin user can log in after the first run."
+    )
+  }
 
   const packageJson = {
     dependencies: {
