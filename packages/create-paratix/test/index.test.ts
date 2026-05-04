@@ -1,5 +1,6 @@
 import { generateKeyPairSync } from "node:crypto"
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs"
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
+import { tmpdir } from "node:os"
 import { join, resolve } from "node:path"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 
@@ -142,6 +143,7 @@ function createInvalidEcdsaNistp256PublicKey(comment: string): string {
 
 const TEST_ADMIN_PUBLIC_KEY = createEd25519PublicKey("generated@test")
 const TEST_HOST_FINGERPRINT = "SHA256:MYVLAwRUnY5x4jwQ1SPUJoYXVb/fB/L3kFjCi5WxfYA"
+let TEST_DIR = ""
 
 async function expectProcessExit(
   callback: () => Promise<void> | void,
@@ -515,6 +517,7 @@ describe("parseCliArguments", () => {
 
 describe("admin public key validation", () => {
   beforeEach(() => {
+    TEST_DIR = mkdtempSync(join(tmpdir(), "create-paratix-test-"))
     vi.spyOn(console, "error").mockImplementation((...args) => {
       void args
     })
@@ -522,6 +525,8 @@ describe("admin public key validation", () => {
 
   afterEach(() => {
     vi.restoreAllMocks()
+    rmSync(TEST_DIR, { force: true, recursive: true })
+    TEST_DIR = ""
   })
 
   it("accepts a valid OpenSSH public key", () => {
@@ -1431,15 +1436,14 @@ describe("readHostFingerprintViaSsh2", () => {
   })
 })
 
-const TEST_DIR = resolve("/tmp/create-paratix-test")
-
 describe("writeProjectFiles", () => {
   beforeEach(() => {
-    mkdirSync(TEST_DIR, { recursive: true })
+    TEST_DIR = mkdtempSync(join(tmpdir(), "create-paratix-test-"))
   })
 
   afterEach(() => {
     rmSync(TEST_DIR, { force: true, recursive: true })
+    TEST_DIR = ""
   })
 
   it("creates a package.json in the target directory", () => {
@@ -2051,19 +2055,26 @@ describe("writeProjectFiles", () => {
 
 describe("scaffoldProject", () => {
   const projectName = "create-paratix-scaffold-test"
-  const projectDirectory = resolve(projectName)
   const paddedProjectName = " create-paratix-trim-test "
   const trimmedProjectName = "create-paratix-trim-test"
   const missingKeyProjectName = "create-paratix-missing-root-key-test"
-  const paddedProjectDirectory = resolve(paddedProjectName)
-  const trimmedProjectDirectory = resolve(trimmedProjectName)
-  const missingKeyProjectDirectory = resolve(missingKeyProjectName)
+  let missingKeyProjectDirectory = ""
+  let originalCwd = ""
+  let paddedProjectDirectory = ""
+  let projectDirectory = ""
+  let scaffoldRoot = ""
+  let trimmedProjectDirectory = ""
 
   beforeEach(() => {
-    rmSync(projectDirectory, { force: true, recursive: true })
-    rmSync(paddedProjectDirectory, { force: true, recursive: true })
-    rmSync(trimmedProjectDirectory, { force: true, recursive: true })
-    rmSync(missingKeyProjectDirectory, { force: true, recursive: true })
+    originalCwd = process.cwd()
+    scaffoldRoot = mkdtempSync(join(tmpdir(), "create-paratix-scaffold-"))
+    const scaffoldCwd = join(scaffoldRoot, "cwd")
+    mkdirSync(scaffoldCwd)
+    process.chdir(scaffoldCwd)
+    projectDirectory = resolve(projectName)
+    paddedProjectDirectory = resolve(paddedProjectName)
+    trimmedProjectDirectory = resolve(trimmedProjectName)
+    missingKeyProjectDirectory = resolve(missingKeyProjectName)
     vi.spyOn(console, "log").mockImplementation((...args) => {
       void args
     })
@@ -2075,10 +2086,8 @@ describe("scaffoldProject", () => {
 
   afterEach(() => {
     vi.restoreAllMocks()
-    rmSync(projectDirectory, { force: true, recursive: true })
-    rmSync(paddedProjectDirectory, { force: true, recursive: true })
-    rmSync(trimmedProjectDirectory, { force: true, recursive: true })
-    rmSync(missingKeyProjectDirectory, { force: true, recursive: true })
+    process.chdir(originalCwd)
+    rmSync(scaffoldRoot, { force: true, recursive: true })
     process.exitCode = undefined
   })
 
@@ -2257,28 +2266,23 @@ describe("scaffoldProject", () => {
   it("rejects invalid project names before creating directories", async () => {
     const installer = vi.fn().mockReturnValue(true)
     const invalidProjectDirectory = resolve("..", "create-paratix-invalid")
-    rmSync(invalidProjectDirectory, { force: true, recursive: true })
 
-    try {
-      await expectProcessExit(() => {
-        scaffoldProject(
-          "../create-paratix-invalid",
-          { command: "pnpm install", name: "pnpm" },
-          {
-            host: "example.com",
-            installer,
-          }
-        )
-      })
-
-      expect(console.error).toHaveBeenCalledWith(
-        'Error: Invalid project name "../create-paratix-invalid" — use only lowercase letters, numbers, and hyphens.'
+    await expectProcessExit(() => {
+      scaffoldProject(
+        "../create-paratix-invalid",
+        { command: "pnpm install", name: "pnpm" },
+        {
+          host: "example.com",
+          installer,
+        }
       )
-      expect(existsSync(invalidProjectDirectory)).toBe(false)
-      expect(installer).not.toHaveBeenCalled()
-    } finally {
-      rmSync(invalidProjectDirectory, { force: true, recursive: true })
-    }
+    })
+
+    expect(console.error).toHaveBeenCalledWith(
+      'Error: Invalid project name "../create-paratix-invalid" — use only lowercase letters, numbers, and hyphens.'
+    )
+    expect(existsSync(invalidProjectDirectory)).toBe(false)
+    expect(installer).not.toHaveBeenCalled()
   })
 
   it("normalizes padded project names before creating the project directory and package name", () => {
