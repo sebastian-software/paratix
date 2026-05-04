@@ -20,6 +20,7 @@ import {
   runApplyCommand,
 } from "../src/cli.js"
 import { printCliHeader } from "../src/output.js"
+import { clearRegisteredSecrets, registerSecret } from "../src/secretSink.js"
 
 declare const PACKAGE_VERSION: string
 declare const PACKAGE_DISPLAY_VERSION: string
@@ -787,6 +788,7 @@ describe("parsePositiveNumber", () => {
 
   afterEach(() => {
     vi.restoreAllMocks()
+    clearRegisteredSecrets()
   })
 
   it("returns the numeric value for a valid positive integer string", () => {
@@ -1099,6 +1101,45 @@ describe("printExceptionError", () => {
   it("does not attempt to walk the cause chain for non-Error values", () => {
     printExceptionError("plain string error", true)
     expect(errorSpy).toHaveBeenCalledTimes(1)
+  })
+
+  it("redacts registered secrets in error messages", () => {
+    registerSecret("cli-message-secret")
+    printExceptionError(new Error("failed with cli-message-secret"), false)
+
+    const output = errorSpy.mock.calls.map((args) => String(args[0])).join("\n")
+    expect(output).toContain("[REDACTED]")
+    expect(output).not.toContain("cli-message-secret")
+  })
+
+  it("redacts registered secrets in error causes", () => {
+    registerSecret("cli-cause-secret")
+    const error = new Error("top-level", { cause: new Error("nested cli-cause-secret") })
+    printExceptionError(error, false)
+
+    const output = errorSpy.mock.calls.map((args) => String(args[0])).join("\n")
+    expect(output).toContain("  Caused by: nested [REDACTED]")
+    expect(output).not.toContain("cli-cause-secret")
+  })
+
+  it("redacts registered secrets in non-Error object output", () => {
+    registerSecret("cli-object-secret")
+    printExceptionError({ token: "cli-object-secret" }, false)
+
+    const output = errorSpy.mock.calls.map((args) => String(args[0])).join("\n")
+    expect(output).toContain("[REDACTED]")
+    expect(output).not.toContain("cli-object-secret")
+  })
+
+  it("redacts registered secrets in verbose stack traces", () => {
+    registerSecret("cli-stack-secret")
+    const error = new Error("top-level")
+    error.stack = "Error: top-level\n    at run (/tmp/file.ts:1) // cli-stack-secret"
+    printExceptionError(error, true)
+
+    const output = errorSpy.mock.calls.map((args) => String(args[0])).join("\n")
+    expect(output).toContain("[REDACTED]")
+    expect(output).not.toContain("cli-stack-secret")
   })
 })
 

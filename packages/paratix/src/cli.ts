@@ -10,6 +10,7 @@ import type { Environment, ServerDefinition } from "./types.js"
 import { printCliHeader } from "./output.js"
 import { type RunOptions, runPlaybook } from "./runner.js"
 import { collectSshConfigErrors } from "./serverDefinitionValidation.js"
+import { maskRegisteredSecrets } from "./secretSink.js"
 
 declare const PACKAGE_DISPLAY_VERSION: string
 
@@ -164,15 +165,15 @@ function validateServerDefinition(value: unknown, file: string): asserts value i
  * @returns A human-readable string representation of `value`.
  */
 function errorToString(value: unknown): string {
-  if (value instanceof Error) return value.message
+  if (value instanceof Error) return maskRegisteredSecrets(value.message)
   if (typeof value === "object" && value !== null) {
     try {
-      return JSON.stringify(value)
+      return maskRegisteredSecrets(JSON.stringify(value))
     } catch {
-      return inspect(value, { breakLength: Infinity, depth: 5 })
+      return maskRegisteredSecrets(inspect(value, { breakLength: Infinity, depth: 5 }))
     }
   }
-  return String(value)
+  return maskRegisteredSecrets(String(value))
 }
 
 /**
@@ -202,7 +203,7 @@ export function printExceptionError(error: unknown, verbose: boolean): void {
     printCauseChain(error)
 
     if (verbose && error.stack != null) {
-      console.error(`\n${error.stack}`)
+      console.error(`\n${maskRegisteredSecrets(error.stack)}`)
     }
   }
 }
