@@ -5,7 +5,7 @@ import net from "node:net"
 import { tmpdir } from "node:os"
 import { join, resolve } from "node:path"
 
-const DOCKER_IMAGE_TAG = "paratix-integration-sshd:latest"
+const DOCKER_IMAGE_TAG_PREFIX = "paratix-integration-sshd"
 const HOST = "127.0.0.1"
 const TEN = "0123456789".length
 const KILOBYTE = 1024
@@ -209,6 +209,7 @@ function createEnvironmentResult(parameters: {
   cleanup: () => Promise<void>
   clientPrivateKeyPath: string
   containerName: string
+  dockerImageTag: string
   hostPublicKey: string
   primaryPort: number
   secondaryPort: number
@@ -218,7 +219,7 @@ function createEnvironmentResult(parameters: {
     cleanup: parameters.cleanup,
     clientPrivateKeyPath: parameters.clientPrivateKeyPath,
     containerName: parameters.containerName,
-    dockerImageTag: DOCKER_IMAGE_TAG,
+    dockerImageTag: parameters.dockerImageTag,
     host: HOST,
     hostPublicKey: parameters.hostPublicKey,
     primaryPort: parameters.primaryPort,
@@ -227,10 +228,19 @@ function createEnvironmentResult(parameters: {
   }
 }
 
-function createCleanup(containerName: string, workspaceHome: string): () => Promise<void> {
+function createCleanup(
+  containerName: string,
+  dockerImageTag: string,
+  workspaceHome: string
+): () => Promise<void> {
   return async (): Promise<void> => {
     try {
       await runCommand("docker", ["rm", "-f", containerName])
+    } catch {
+      // Best-effort cleanup.
+    }
+    try {
+      await runCommand("docker", ["image", "rm", "-f", dockerImageTag])
     } catch {
       // Best-effort cleanup.
     }
@@ -242,28 +252,36 @@ async function createEnvironmentResources(packageDirectory: string): Promise<{
   cleanup: () => Promise<void>
   clientPrivateKeyPath: string
   containerName: string
+  dockerImageTag: string
   workspaceHome: string
 }> {
   const workspaceHome = await prepareWorkspaceHome()
   const containerName = `paratix-integration-${Date.now()}`
+  const dockerImageTag = `${DOCKER_IMAGE_TAG_PREFIX}:${containerName}`
   const clientPrivateKeyPath = resolve(packageDirectory, "test/integration/fixtures/client_ed25519")
   chmodSync(clientPrivateKeyPath, PRIVATE_KEY_MODE)
-  await buildIntegrationImage(packageDirectory)
-  const cleanup = createCleanup(containerName, workspaceHome)
-  return { cleanup, clientPrivateKeyPath, containerName, workspaceHome }
+  await buildIntegrationImage(packageDirectory, dockerImageTag)
+  const cleanup = createCleanup(containerName, dockerImageTag, workspaceHome)
+  return { cleanup, clientPrivateKeyPath, containerName, dockerImageTag, workspaceHome }
 }
 
-async function buildIntegrationImage(packageDirectory: string): Promise<void> {
+async function buildIntegrationImage(
+  packageDirectory: string,
+  dockerImageTag: string
+): Promise<void> {
   await runCommand(
     "docker",
-    ["build", "-t", DOCKER_IMAGE_TAG, "-f", "test/integration/docker/Dockerfile", "."],
+    ["build", "-t", dockerImageTag, "-f", "test/integration/docker/Dockerfile", "."],
     {
       cwd: packageDirectory,
     }
   )
 }
 
-async function startIntegrationContainer(containerName: string): Promise<void> {
+async function startIntegrationContainer(
+  containerName: string,
+  dockerImageTag: string
+): Promise<void> {
   await runCommand("docker", [
     "run",
     "--detach",
@@ -273,7 +291,7 @@ async function startIntegrationContainer(containerName: string): Promise<void> {
     `${HOST}::22`,
     "--publish",
     `${HOST}::2222`,
-    DOCKER_IMAGE_TAG,
+    dockerImageTag,
   ])
 }
 
@@ -295,11 +313,11 @@ export async function createIntegrationEnvironment(
   packageDirectory: string
 ): Promise<IntegrationEnvironment> {
   await ensureIntegrationRuntimeIsAvailable()
-  const { cleanup, clientPrivateKeyPath, containerName, workspaceHome } =
+  const { cleanup, clientPrivateKeyPath, containerName, dockerImageTag, workspaceHome } =
     await createEnvironmentResources(packageDirectory)
 
   try {
-    await startIntegrationContainer(containerName)
+    await startIntegrationContainer(containerName, dockerImageTag)
     const { primaryPort, secondaryPort } = await readPublishedPorts(containerName)
     await waitForTcpPort(HOST, primaryPort, SSH_READY_TIMEOUT)
     await waitForTcpPort(HOST, secondaryPort, SSH_READY_TIMEOUT)
@@ -308,6 +326,7 @@ export async function createIntegrationEnvironment(
       cleanup,
       clientPrivateKeyPath,
       containerName,
+      dockerImageTag,
       hostPublicKey,
       primaryPort,
       secondaryPort,
