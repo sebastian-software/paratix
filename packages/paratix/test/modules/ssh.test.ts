@@ -170,6 +170,10 @@ describe("ssh.knownHosts", () => {
     const mod = ssh.knownHosts("github.com", { expectedFingerprint: hostFingerprint })
     const result = await mod.check(mockSsh, emptyEnv)
     expect(result).toBe("needs-apply")
+    expect(mockSsh.execCalls).toContainEqual({
+      command: "ssh-keygen -F 'github.com'",
+      options: { ignoreExitCode: true, silent: true },
+    })
   })
 
   it("check returns needs-apply when ssh is null", async () => {

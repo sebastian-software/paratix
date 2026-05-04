@@ -125,10 +125,16 @@ async function hasMatchingKnownHostTrustAnchor(
   host: string,
   options: KnownHostsOptions
 ): Promise<boolean> {
-  const knownHostOutput = await conn.output(
-    `ssh-keygen -F ${shellQuote(knownHostsLookupTarget(host, options))}`
+  const result = await conn.exec(
+    `ssh-keygen -F ${shellQuote(knownHostsLookupTarget(host, options))}`,
+    {
+      ignoreExitCode: true,
+      silent: true,
+    }
   )
-  const knownHostLines = parseHostKeyLines(knownHostOutput)
+  if (result.code === 1) return false
+
+  const knownHostLines = parseHostKeyLines(result.stdout)
 
   if (knownHostLines.length === 0) return false
 
