@@ -107,6 +107,7 @@ describe("swap.file — check", () => {
   it("returns ok for absent state when file is gone, inactive, and not persisted", async () => {
     const ssh = createMockSsh({
       [`[ -e '${swapPath}' ]`]: { code: 1 },
+      [`[ -L '${swapPath}' ]`]: { code: 1 },
       [`cat '/etc/fstab'`]: { stdout: "# fstab\n" },
       "swapon --show=NAME --noheadings": { stdout: "" },
     })
@@ -138,6 +139,8 @@ describe("swap.file — apply", () => {
   it("creates, initializes, enables, and persists a new swap file", async () => {
     const writtenFiles: Array<{ content: string; path: string }> = []
     const ssh = createMockSsh({
+      [`[ -e '${swapPath}' ]`]: { code: 1 },
+      [`[ -L '${swapPath}' ]`]: { code: 1 },
       [`cat '/etc/fstab'`]: { stdout: "# fstab\n" },
       [`cat '${swapPath}'`]: { code: 1, stdout: "" },
       [`chmod '0600' '${swapPath}'`]: { code: 0 },
@@ -170,6 +173,9 @@ describe("swap.file — apply", () => {
   it("recreates the file when size changed and swap is active", async () => {
     const writtenFiles: Array<{ content: string; path: string }> = []
     const ssh = createMockSsh({
+      [`[ -e '${swapPath}' ]`]: { code: 0 },
+      [`[ -f '${swapPath}' ]`]: { code: 0 },
+      [`[ -L '${swapPath}' ]`]: { code: 1 },
       [`cat '/etc/fstab'`]: { stdout: `${fstabLine}\n` },
       [`cat '${swapPath}'`]: { stdout: "existing swap bytes" },
       [`chmod '0600' '${swapPath}'`]: { code: 0 },
@@ -203,10 +209,61 @@ describe("swap.file — apply", () => {
     expect(writtenFiles).toStrictEqual([])
   })
 
+  it("refuses to recreate an existing regular file without a swap signature", async () => {
+    const ssh = createMockSsh({
+      [`[ -e '${swapPath}' ]`]: { code: 0 },
+      [`[ -f '${swapPath}' ]`]: { code: 0 },
+      [`[ -L '${swapPath}' ]`]: { code: 1 },
+      [`cat '${swapPath}'`]: { stdout: "important application data" },
+      [`stat -c %s '${swapPath}'`]: { stdout: "1073741824" },
+      [`swaplabel '${swapPath}' >/dev/null 2>&1`]: { code: 1 },
+    })
+
+    const mod = swap.file({ path: swapPath, size: swapSize })
+    const result = await mod.apply(ssh, emptyEnv)
+
+    expect(result.status).toBe("failed")
+    expect(result.error?.message).toContain("refusing to remove unsafe path")
+    expect(ssh.calls).not.toContain(`rm -f '${swapPath}'`)
+    expect(ssh.calls).not.toContain(`mkswap '${swapPath}'`)
+    expect(ssh.calls).not.toContain(`swapon '${swapPath}'`)
+    expect(ssh.calls).not.toContain(`cat '/etc/fstab'`)
+  })
+
+  it.each([
+    {
+      description: "symbolic link",
+      responses: {
+        [`[ -L '${swapPath}' ]`]: { code: 0 },
+      },
+    },
+    {
+      description: "directory",
+      responses: {
+        [`[ -e '${swapPath}' ]`]: { code: 0 },
+        [`[ -f '${swapPath}' ]`]: { code: 1 },
+        [`[ -L '${swapPath}' ]`]: { code: 1 },
+      },
+    },
+  ])("refuses to remove an unsafe $description for absent state", async ({ responses }) => {
+    const ssh = createMockSsh(responses)
+
+    const mod = swap.file({ path: swapPath, size: swapSize, state: "absent" })
+    const result = await mod.apply(ssh, emptyEnv)
+
+    expect(result.status).toBe("failed")
+    expect(result.error?.message).toContain("refusing to remove unsafe path")
+    expect(ssh.calls).not.toContain(`rm -f '${swapPath}'`)
+    expect(ssh.calls).not.toContain(`swapoff '${swapPath}'`)
+    expect(ssh.calls).not.toContain(`cat '/etc/fstab'`)
+  })
+
   it("uses 1M block size in dd fallback regardless of swap size", async () => {
     const smallSize = "512M"
     const writtenFiles: Array<{ content: string; path: string }> = []
     const ssh = createMockSsh({
+      [`[ -e '${swapPath}' ]`]: { code: 1 },
+      [`[ -L '${swapPath}' ]`]: { code: 1 },
       [`cat '/etc/fstab'`]: { stdout: "# fstab\n" },
       [`cat '${swapPath}'`]: { code: 1, stdout: "" },
       [`chmod '0600' '${swapPath}'`]: { code: 0 },
@@ -237,9 +294,13 @@ describe("swap.file — apply", () => {
   it("removes swap activation, persistence, and file for absent state", async () => {
     const writtenFiles: Array<{ content: string; path: string }> = []
     const ssh = createMockSsh({
+      [`[ -e '${swapPath}' ]`]: { code: 0 },
+      [`[ -f '${swapPath}' ]`]: { code: 0 },
+      [`[ -L '${swapPath}' ]`]: { code: 1 },
       [`cat '/etc/fstab'`]: { stdout: `${fstabLine}\n` },
       [`cat '${swapPath}'`]: { stdout: "existing swap bytes" },
       [`rm -f '${swapPath}'`]: { code: 0 },
+      [`swaplabel '${swapPath}' >/dev/null 2>&1`]: { code: 0 },
       [`swapoff '${swapPath}'`]: { code: 0 },
       "swapon --show=NAME --noheadings": { stdout: `${swapPath}\n` },
     })

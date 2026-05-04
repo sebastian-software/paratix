@@ -1,7 +1,8 @@
-import { failedCommand } from "../moduleFailure.js"
+import { failed, failedCommand } from "../moduleFailure.js"
 import { shellQuote } from "../ssh.js"
 import { type ModuleResult, NEEDS_APPLY, type SshConnection } from "../types.js"
 import {
+  classifySwapFilePath,
   ensureSwapFilePresent,
   ensureSwapFstabState,
   hasNoSwapFstabEntry,
@@ -13,6 +14,16 @@ import {
 } from "./swapFileHelpers.js"
 
 const EXEC_OPTS = { ignoreExitCode: true, silent: true } as const
+
+async function ensureSafeSwapRemoval(
+  ssh: SshConnection,
+  path: string
+): Promise<"missing" | "ok" | ModuleResult> {
+  const classification = await classifySwapFilePath(ssh, path)
+  if (classification.state === "missing") return "missing"
+  if (classification.state === "managed-swap-file") return "ok"
+  return failed(`[swap.file: ${path}] refusing to remove unsafe path: ${classification.reason}`)
+}
 
 async function disableSwap(ssh: SshConnection, path: string): Promise<boolean | ModuleResult> {
   if (!(await isSwapActive(ssh, path))) return false
@@ -32,11 +43,16 @@ async function recreateSwapFile(
 ): Promise<"changed" | "ok" | ModuleResult> {
   if (!(await needsSwapRecreation(ssh, options))) return "ok"
 
+  const safeRemoval = await ensureSafeSwapRemoval(ssh, options.path)
+  if (typeof safeRemoval !== "string") return safeRemoval
+
   const disableResult = await disableSwap(ssh, options.path)
   if (typeof disableResult !== "boolean") return disableResult
 
-  const removeResult = await removeSwapFile(ssh, options.path)
-  if (typeof removeResult !== "boolean") return removeResult
+  if (safeRemoval === "ok") {
+    const removeResult = await removeSwapFile(ssh, options.path)
+    if (typeof removeResult !== "boolean") return removeResult
+  }
 
   const createResult = await ensureSwapFilePresent({
     mode: options.mode,
@@ -59,13 +75,17 @@ async function applyAbsentSwapFile(
   options: NormalizedSwapFileOptions
 ): Promise<ModuleResult> {
   let swapChanged = false
+  const safeRemoval = await ensureSafeSwapRemoval(ssh, options.path)
+  if (typeof safeRemoval !== "string") return safeRemoval
   const disableResult = await disableSwap(ssh, options.path)
   if (typeof disableResult !== "boolean") return disableResult
   if (disableResult) swapChanged = true
   if (await ensureSwapFstabState({ desiredLine: null, path: options.path, ssh })) swapChanged = true
-  const removeResult = await removeSwapFile(ssh, options.path)
-  if (typeof removeResult !== "boolean") return removeResult
-  if (removeResult) swapChanged = true
+  if (safeRemoval === "ok") {
+    const removeResult = await removeSwapFile(ssh, options.path)
+    if (typeof removeResult !== "boolean") return removeResult
+    if (removeResult) swapChanged = true
+  }
   return { status: swapChanged ? "changed" : "ok" }
 }
 

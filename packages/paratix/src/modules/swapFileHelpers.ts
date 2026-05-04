@@ -37,6 +37,11 @@ export type NormalizedSwapFileOptions = {
   state: "absent" | "present"
 }
 
+export type SwapFilePathClassification =
+  | { reason: string; state: "unsafe" }
+  | { state: "managed-swap-file" }
+  | { state: "missing" }
+
 function normalizeSizeToBytes(size: number | string): number {
   if (typeof size === "number") {
     if (!Number.isInteger(size) || size <= 0) {
@@ -122,6 +127,23 @@ async function hasSwapSignature(ssh: SshConnection, path: string): Promise<boole
 async function readFileSizeInBytes(ssh: SshConnection, path: string): Promise<number> {
   const output = await ssh.output(`stat -c %s ${shellQuote(path)}`)
   return Number.parseInt(output.trim(), 10)
+}
+
+export async function classifySwapFilePath(
+  ssh: SshConnection,
+  path: string
+): Promise<SwapFilePathClassification> {
+  if (await ssh.test(`[ -L ${shellQuote(path)} ]`)) {
+    return { reason: "existing path is a symbolic link", state: "unsafe" }
+  }
+  if (!(await ssh.exists(path))) return { state: "missing" }
+  if (!(await ssh.test(`[ -f ${shellQuote(path)} ]`))) {
+    return { reason: "existing path is not a regular file", state: "unsafe" }
+  }
+  if (!(await hasSwapSignature(ssh, path))) {
+    return { reason: "existing regular file is not a swap file", state: "unsafe" }
+  }
+  return { state: "managed-swap-file" }
 }
 
 export async function ensureSwapFstabState(parameters: {
