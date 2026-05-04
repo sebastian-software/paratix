@@ -6,6 +6,7 @@ import { beforeEach, describe, expect, it, type Mock, vi } from "vitest"
 import { resolveEnvironment } from "../../src/environment.js"
 import { mergeEnvironmentFromMeta } from "../../src/meta.js"
 import { op } from "../../src/modules/op.js"
+import { clearRegisteredSecrets, getRegisteredSecrets } from "../../src/secretSink.js"
 
 type MockChildProcess = { stdin: { end: Mock } } & EventEmitter
 
@@ -115,6 +116,7 @@ describe("op.resolve — check", () => {
 describe("op.resolve — apply", () => {
   beforeEach(() => {
     vi.resetAllMocks()
+    clearRegisteredSecrets()
     spawnCalls = []
     mockSpawnWith("")
   })
@@ -157,6 +159,23 @@ describe("op.resolve — apply", () => {
     const metaEnvironment = await mergeEnvironmentFromMeta({}, result.meta)
     const code = await resolveEnvironment(metaEnvironment, "token")
     expect(code).toMatch(/^\d{6}$/v)
+  })
+
+  it("registers each generated OTP code in the secret sink", async () => {
+    const otpauthUri =
+      "otpauth://totp/Test?secret=GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ&period=30&digits=6"
+    mockSpawnWith(`${otpauthUri}\n`)
+
+    const module_ = op.resolve({ token: "op://vault/item/one-time-password" })
+    // eslint-disable-next-line prefer-spread
+    const result = await module_.apply(null, emptyEnv)
+
+    expect(result.status).toBe("ok")
+    const metaEnvironment = await mergeEnvironmentFromMeta({}, result.meta)
+    const code = await resolveEnvironment(metaEnvironment, "token")
+
+    expect(code).toMatch(/^\d{6}$/v)
+    expect(getRegisteredSecrets()).toContain(code)
   })
 
   it("recognises OTP fields by /one-time-password suffix", async () => {

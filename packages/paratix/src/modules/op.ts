@@ -199,7 +199,11 @@ async function resolveOtpReferences(
 
     const otpauthUri = stdout.trim()
     if (otpauthUri.length > 0) leakedValues.push(otpauthUri)
-    result[name] = () => generateTotpCode(otpauthUri)
+    result[name] = () => {
+      const code = generateTotpCode(otpauthUri)
+      registerSecret(code)
+      return code
+    }
   }
 
   return result
