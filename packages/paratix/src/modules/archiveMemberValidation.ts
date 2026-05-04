@@ -178,7 +178,7 @@ function parseZipListing(stdout: string): ArchiveMember[] {
  * @param input - The raw path string from the archive listing.
  * @returns The normalized relative path, or null on traversal escape.
  */
-function normalizeRelativePath(input: string): null | string {
+export function normalizeArchiveMemberPath(input: string): null | string {
   const segments = input.split("/")
   const stack: string[] = []
   for (const segment of segments) {
@@ -207,10 +207,10 @@ function normalizeRelativePath(input: string): null | string {
  */
 export function memberEscapesDestination(member: ArchiveMember): boolean {
   if (member.path.startsWith("/")) return true
-  if (normalizeRelativePath(member.path) === null) return true
+  if (normalizeArchiveMemberPath(member.path) === null) return true
   if (member.linkTarget !== null) {
     if (member.linkTarget.startsWith("/")) return true
-    if (normalizeRelativePath(member.linkTarget) === null) return true
+    if (normalizeArchiveMemberPath(member.linkTarget) === null) return true
   }
   return false
 }

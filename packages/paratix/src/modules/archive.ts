@@ -5,6 +5,7 @@ import {
   type ArchiveMember,
   archiveMemberUnsafeReason,
   listArchiveMembers,
+  normalizeArchiveMemberPath,
 } from "./archiveMemberValidation.js"
 import { localSha256, sha256String } from "./fileHelpers.js"
 
@@ -167,7 +168,7 @@ type ApplyParameters = {
   destination: string
   /** The marker file path. */
   marker: string
-  /** Optional owner for chown -R. */
+  /** Optional owner for extracted archive members. */
   owner: string | undefined
   /** The source archive path. */
   source: string
@@ -188,10 +189,10 @@ type ApplyParameters = {
  * @param parameters.source - The original source path (for format detection).
  * @returns Either a failure {@link ModuleResult} or null when all members are safe.
  */
-async function rejectUnsafeArchiveMembers(
+async function validatedArchiveMembers(
   conn: SshConnection,
   parameters: { archivePath: string; source: string }
-): Promise<ModuleResult | null> {
+): Promise<ArchiveMember[] | ModuleResult> {
   const listing = await listArchiveMembers(conn, parameters)
   if ("failureReason" in listing) {
     return failed(`[archive.extract] ${listing.failureReason}`)
@@ -202,7 +203,47 @@ async function rejectUnsafeArchiveMembers(
   if (unsafe !== undefined) {
     return failed(`[archive.extract] refusing to extract ${parameters.source}: ${unsafe}`)
   }
-  return null
+  return listing.members
+}
+
+function destinationIsDestructive(destination: string): boolean {
+  return destination.length > 0 && destination.split("/").every((part) => part === "")
+}
+
+function trimTrailingSlashes(path: string): string {
+  let end = path.length
+  while (end > 0 && path[end - 1] === "/") end -= 1
+  return path.slice(0, end)
+}
+
+function archiveMemberDestinationPath(destination: string, member: ArchiveMember): null | string {
+  const memberPath = normalizeArchiveMemberPath(member.path)
+  if (memberPath === null) return null
+  const base = trimTrailingSlashes(destination) || "/"
+  if (memberPath === "") return base
+  return base === "/" ? `/${memberPath}` : `${base}/${memberPath}`
+}
+
+function extractedMemberPaths(destination: string, members: ArchiveMember[]): string[] {
+  const paths = new Set<string>()
+  for (const member of members) {
+    const path = archiveMemberDestinationPath(destination, member)
+    if (path !== null) paths.add(path)
+  }
+  return [...paths]
+}
+
+async function applyExtractedMemberOwner(
+  conn: SshConnection,
+  parameters: { destination: string; members: ArchiveMember[]; owner?: string }
+): Promise<void> {
+  const { destination, members, owner } = parameters
+  if (owner == null || owner === "") return
+  await Promise.all(
+    extractedMemberPaths(destination, members).map(async (path) =>
+      conn.exec(`chown -h ${shellQuote(owner)} ${shellQuote(path)}`, SILENT)
+    )
+  )
 }
 
 /**
@@ -220,6 +261,10 @@ async function runExtraction(
 ): Promise<ModuleResult> {
   const { destination, marker, owner, source } = parameters
 
+  if (destinationIsDestructive(destination)) {
+    return failed(`[archive.extract] refusing to extract ${source} to destructive destination /`)
+  }
+
   await conn.exec(`mkdir -p ${shellQuote(destination)}`, SILENT)
 
   const cmd = extractCommand(source, remoteSource, destination)
@@ -230,17 +275,15 @@ async function runExtraction(
   // exists) but before the actual extract command runs, otherwise a
   // malicious archive could already have written a file outside the
   // destination by the time we notice.
-  const unsafe = await rejectUnsafeArchiveMembers(conn, { archivePath: remoteSource, source })
-  if (unsafe !== null) return unsafe
+  const members = await validatedArchiveMembers(conn, { archivePath: remoteSource, source })
+  if (!Array.isArray(members)) return members
 
   const result = await conn.exec(cmd, EXEC_OPTS)
   if (result.code !== 0) {
     return failedCommand(`[archive.extract] failed to extract ${source}`, result)
   }
 
-  if (owner !== undefined && owner !== "") {
-    await conn.exec(`chown -R ${shellQuote(owner)} ${shellQuote(destination)}`, SILENT)
-  }
+  await applyExtractedMemberOwner(conn, { destination, members, owner })
 
   const markerWritten = await writeMarker(conn, remoteSource, { marker })
   return markerWritten
@@ -281,23 +324,44 @@ async function applyExtract(
   }
 }
 
-function buildOwnerDriftCommand(destination: string, owner: string): string {
-  const [user = "", group = ""] = owner.split(":", 2)
-  const predicates: string[] = []
-  if (user !== "") predicates.push(`! -user ${shellQuote(user)}`)
-  if (group !== "") predicates.push(`! -group ${shellQuote(group)}`)
-  return `find ${shellQuote(destination)} \\( ${predicates.join(" -o ")} \\) -print -quit`
+function ownerMatchesStat(stdout: string, owner: string): boolean {
+  const [actualUser = "", actualGroup = ""] = stdout.trim().split(/\s+/v, 2)
+  const [expectedUser = "", expectedGroup = ""] = owner.split(":", 2)
+  if (expectedUser !== "" && actualUser !== expectedUser) return false
+  if (expectedGroup !== "" && actualGroup !== expectedGroup) return false
+  return true
+}
+
+async function extractedMemberOwnerMatches(
+  conn: SshConnection,
+  parameters: { owner: string; path: string }
+): Promise<boolean> {
+  const { owner, path } = parameters
+  const exists = await conn.exec(
+    `[ -e ${shellQuote(path)} ] || [ -L ${shellQuote(path)} ]`,
+    EXEC_OPTS
+  )
+  if (exists.code !== 0) return false
+  const stat = await conn.exec(`stat -c '%U %G' -- ${shellQuote(path)}`, EXEC_OPTS)
+  if (stat.code !== 0) return false
+  return ownerMatchesStat(stat.stdout, owner)
 }
 
 async function archiveOwnerMatches(
   conn: SshConnection,
-  parameters: { destination: string; owner?: string }
+  parameters: { destination: string; owner?: string; source: string; upload: boolean }
 ): Promise<boolean> {
-  const { destination, owner } = parameters
+  const { destination, owner, source, upload } = parameters
   if (owner == null || owner === "") return true
-  const result = await conn.exec(buildOwnerDriftCommand(destination, owner), EXEC_OPTS)
-  if (result.code !== 0) return false
-  return result.stdout.trim() === ""
+  if (upload) return true
+  const members = await validatedArchiveMembers(conn, { archivePath: source, source })
+  if (!Array.isArray(members)) return false
+  const matches = await Promise.all(
+    extractedMemberPaths(destination, members).map(async (path) =>
+      extractedMemberOwnerMatches(conn, { owner, path })
+    )
+  )
+  return matches.every(Boolean)
 }
 
 async function archiveMarkerMatches(
@@ -334,7 +398,7 @@ export const archive = {
    * @param source - Path to the archive (remote path, or local path when upload is true).
    * @param destination - The destination directory on the remote host.
    * @param options - Optional settings.
-   * @param options.owner - Run chown -R after extraction.
+   * @param options.owner - Set ownership on extracted archive members after extraction.
    * @param options.upload - Upload a local file to the remote host before extracting.
    * @returns A Module that manages the archive extraction.
    */
@@ -363,7 +427,9 @@ export const archive = {
         // 2. Does the marker file exist?
         const markerExists = await conn.test(`test -f ${shellQuote(marker)}`)
         if (!markerExists) return NEEDS_APPLY
-        if (!(await archiveOwnerMatches(conn, { destination, owner }))) return NEEDS_APPLY
+        if (!(await archiveOwnerMatches(conn, { destination, owner, source, upload }))) {
+          return NEEDS_APPLY
+        }
 
         // 3. Compare SHA256 of the archive with the marker file content.
         // R-0000105: distinguish between "marker is genuinely missing" and

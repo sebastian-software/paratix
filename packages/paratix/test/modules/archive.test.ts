@@ -11,6 +11,7 @@ const emptyEnv = {}
 const src = "/tmp/app.tar.gz"
 const destination = "/opt/app"
 const alternateDestination = "/opt/app-alt"
+const safeTarListing = "-rw-r--r-- root/root 0 1970-01-01 00:00 app/file"
 
 // Stable hash of `${src}\n${destination}` for marker file naming.
 const srcHash = "2889be4b654d6b7f7922971e7fb3fdf1c5ebd92b9c52462be2683a735c7562ef"
@@ -57,11 +58,13 @@ describe("archive.extract — check", () => {
 
   it("returns ok when marker matches and extracted owner matches", async () => {
     const mockSsh = createMockSsh({
+      [`[ -e '${destination}/app/file' ] || [ -L '${destination}/app/file' ]`]: { code: 0 },
       [`cat '${marker}'`]: { code: 0, stdout: archiveSha },
-      [`find '${destination}' \\( ! -user 'www-data' -o ! -group 'www-data' \\) -print -quit`]: {
+      [`stat -c '%U %G' -- '${destination}/app/file'`]: {
         code: 0,
-        stdout: "",
+        stdout: "www-data www-data\n",
       },
+      [`tar -tvzf '${src}'`]: { code: 0, stdout: safeTarListing },
       [`test -d '${destination}'`]: { code: 0 },
       [`test -f '${marker}'`]: { code: 0 },
     })
@@ -73,10 +76,12 @@ describe("archive.extract — check", () => {
 
   it("returns needs-apply when extracted owner has drifted", async () => {
     const mockSsh = createMockSsh({
-      [`find '${destination}' \\( ! -user 'www-data' -o ! -group 'www-data' \\) -print -quit`]: {
+      [`[ -e '${destination}/app/file' ] || [ -L '${destination}/app/file' ]`]: { code: 0 },
+      [`stat -c '%U %G' -- '${destination}/app/file'`]: {
         code: 0,
-        stdout: `${destination}/app/file\n`,
+        stdout: "root root\n",
       },
+      [`tar -tvzf '${src}'`]: { code: 0, stdout: safeTarListing },
       [`test -d '${destination}'`]: { code: 0 },
       [`test -f '${marker}'`]: { code: 0 },
     })
@@ -179,7 +184,6 @@ describe("archive.extract — apply", () => {
   // R-0000067: tar invocations now run with `--no-same-owner --no-overwrite-dir`
   // and a member-validation step. Each apply test stubs the member listing
   // with a single safe entry so the validation step passes.
-  const safeTarListing = "-rw-r--r-- root/root 0 1970-01-01 00:00 app/file"
   const safeZipListing = "-rw-r--r--  2.0 unx        0 b- defN 26-May-04 00:00 app/file\n"
 
   it("extracts tar.gz archive and writes marker", async () => {
@@ -289,7 +293,7 @@ describe("archive.extract — apply", () => {
     )
   })
 
-  it("runs chown when owner is specified", async () => {
+  it("limits chown to extracted members when owner is specified", async () => {
     const mockSsh = createMockSsh({
       [`tar --no-same-owner --no-overwrite-dir -xzf '${src}' -C '${destination}'`]: { code: 0 },
       [`tar -tvzf '${src}'`]: { code: 0, stdout: safeTarListing },
@@ -301,7 +305,23 @@ describe("archive.extract — apply", () => {
     const result = await mod.apply(mockSsh, emptyEnv)
 
     expect(result.status).toBe("changed")
-    expect(mockSsh.calls).toContain(`chown -R 'www-data:www-data' '${destination}'`)
+    expect(mockSsh.calls).toContain(`chown -h 'www-data:www-data' '${destination}/app/file'`)
+    expect(mockSsh.calls).not.toContain(`chown -R 'www-data:www-data' '${destination}'`)
+  })
+
+  it("rejects root destination before extracting when owner is specified", async () => {
+    const rootDestination = "/"
+    const mockSsh = createMockSsh({})
+
+    const mod = archive.extract(src, rootDestination, { owner: "www-data:www-data" })
+    const result = await mod.apply(mockSsh, emptyEnv)
+
+    expect(result.status).toBe("failed")
+    expect(String(result.error)).toContain("refusing to extract")
+    expect(mockSsh.calls).not.toContain(`mkdir -p '${rootDestination}'`)
+    expect(mockSsh.calls).not.toContain(
+      `tar --no-same-owner --no-overwrite-dir -xzf '${src}' -C '${rootDestination}'`
+    )
   })
 
   it("uploads file via mktemp-allocated path and cleans up when upload is true", async () => {
