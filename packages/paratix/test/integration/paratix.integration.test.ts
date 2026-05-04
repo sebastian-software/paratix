@@ -1,8 +1,10 @@
+import { execFileSync } from "node:child_process"
 import { createHash, randomUUID } from "node:crypto"
 import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs"
 import { readFile, rm } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join, resolve } from "node:path"
+import { pathToFileURL } from "node:url"
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest"
 
 import type { Environment, Module, SshConfig, SshConnection } from "../../src/types.js"
@@ -446,6 +448,70 @@ describe("Paratix integration", () => {
       expect(await ssh.readFile(`${remoteApp}/source.txt`)).toBe("copied-from-local")
       expect(await ssh.readFile(`${remoteApp}/template.txt`)).toBe("Hello integration")
       expect(await ssh.readFile(markerPath)).toBe("ready")
+    } finally {
+      await ssh.exec(`rm -rf ${shellQuote(remoteBase)}`, { silent: true })
+      ssh.disconnect()
+      await rm(localDirectory, { force: true, recursive: true })
+    }
+  })
+
+  it("runs the built apply CLI dry-run with a valid playbook against the integration server", async () => {
+    const environment = getEnvironment()
+    const packageDirectory = resolve(import.meta.dirname, "../..")
+    const localDirectory = mkdtempSync(join(tmpdir(), "paratix-dist-cli-playbook-"))
+    const playbookPath = join(localDirectory, "playbook.mjs")
+    const remoteBase = `/root/dist-cli-${randomUUID()}`
+    const markerPath = `${remoteBase}/marker.txt`
+    const distCliPath = resolve(packageDirectory, "dist/cli.js")
+    const distIndexUrl = pathToFileURL(resolve(packageDirectory, "dist/index.js")).href
+    const distModulesUrl = pathToFileURL(resolve(packageDirectory, "dist/modules/index.js")).href
+    const markerCommand = `mkdir -p ${shellQuote(remoteBase)} && printf '%s\\n' changed > ${shellQuote(markerPath)}`
+    const markerCheck = `test -f ${shellQuote(markerPath)}`
+    const ssh = await connectSsh([environment.primaryPort], {}, "root")
+
+    try {
+      writeFileSync(
+        playbookPath,
+        [
+          `import { server } from ${JSON.stringify(distIndexUrl)}`,
+          `import { command } from ${JSON.stringify(distModulesUrl)}`,
+          "",
+          "export default server({",
+          "  name: 'dist-cli-integration',",
+          `  host: ${JSON.stringify(environment.host)},`,
+          "  ssh: {",
+          `    expectedHostPublicKey: ${JSON.stringify(environment.hostPublicKey)},`,
+          `    ports: [${String(environment.primaryPort)}],`,
+          `    privateKey: ${JSON.stringify(environment.clientPrivateKeyPath)},`,
+          "    strictHostKeyChecking: 'yes',",
+          "    user: 'root',",
+          "  },",
+          "  run: [",
+          `    command.shell(${JSON.stringify(markerCommand)}, {`,
+          `      check: ${JSON.stringify(markerCheck)},`,
+          "      name: 'create dist cli dry-run marker',",
+          "    }),",
+          "  ],",
+          "})",
+          "",
+        ].join("\n")
+      )
+
+      const output = execFileSync(
+        process.execPath,
+        [distCliPath, "apply", playbookPath, "--dry-run"],
+        {
+          cwd: packageDirectory,
+          encoding: "utf8",
+          env: { ...process.env, HOME: testHome },
+          stdio: "pipe",
+        }
+      )
+
+      expect(output).toContain("dist-cli-integration")
+      expect(output).toContain("create dist cli dry-run marker")
+      expect(output).toContain("(dry-run)")
+      await expect(ssh.test(`test -f ${shellQuote(markerPath)}`)).resolves.toBe(false)
     } finally {
       await ssh.exec(`rm -rf ${shellQuote(remoteBase)}`, { silent: true })
       ssh.disconnect()
