@@ -6,10 +6,20 @@ import { createMockSsh as createBaseMockSsh } from "../helpers/mockSsh.js"
 
 const createMockSsh: typeof createBaseMockSsh = (responses, options) =>
   createBaseMockSsh(responses, {
-    defaultExecResult: { code: 0 },
-    defaultOutputResult: "",
-    defaultTestResult: false,
     ...options,
+    responseStubs: [
+      { command: /^\[ -e '\/(?:opt|usr)\//v, result: { code: 1 } },
+      { command: /^stat -c '%a %U %G' '\/(?:opt|usr)\//v, result: { stdout: "644 root root" } },
+      { command: /^mkdir -p /v, result: { code: 0 } },
+      { command: /^mktemp /v, result: { stdout: "/tmp/.paratix-download.stub" } },
+      { command: /^curl /v, result: { code: 0 } },
+      { command: /^chmod /v, result: { code: 0 } },
+      { command: /^chown /v, result: { code: 0 } },
+      { command: /^mv /v, result: { code: 0 } },
+      { command: /^rm -f /v, result: { code: 0 } },
+      { command: /^touch \/var\/lib\/paratix\/flags\//v, result: { code: 0 } },
+      ...(options?.responseStubs ?? []),
+    ],
   })
 
 const emptyEnv = {}

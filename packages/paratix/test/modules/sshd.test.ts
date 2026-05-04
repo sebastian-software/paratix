@@ -6,9 +6,27 @@ import { createMockSsh as createBaseMockSsh } from "../helpers/mockSsh.js"
 
 const createMockSsh: typeof createBaseMockSsh = (responses, options) =>
   createBaseMockSsh(responses, {
-    allowWrites: [{ options: { mode: "0644" }, remotePath: /^\/tmp\/paratix-sshd-dry-run-/v }],
-    defaultExecResult: { code: 0 },
     ...options,
+    allowWrites: [
+      { options: { mode: "0644" }, remotePath: /^\/tmp\/paratix-sshd-dry-run-/v },
+      ...(options?.allowWrites ?? []),
+    ],
+    responseStubs: [
+      { command: "mkdir -p '/run/sshd'", result: { code: 0 } },
+      { command: "sshd -t", result: { code: 0 } },
+      { command: SYSTEMCTL_CAT_SSHD, result: { code: 0 } },
+      { command: SYSTEMCTL_CAT_SSH, result: { code: 1 } },
+      { command: "systemctl reload sshd", result: { code: 0 } },
+      { command: "systemctl reload ssh", result: { code: 0 } },
+      { command: "systemctl cat ssh.socket >/dev/null 2>&1", result: { code: 1 } },
+      { command: "systemctl is-enabled ssh.socket >/dev/null 2>&1", result: { code: 1 } },
+      { command: "systemctl is-active ssh.socket >/dev/null 2>&1", result: { code: 1 } },
+      { command: "systemctl disable --now ssh.socket", result: { code: 0 } },
+      { command: "systemctl enable --now ssh.socket", result: { code: 0 } },
+      { command: "systemctl restart sshd", result: { code: 0 } },
+      { command: /^rm -f '\/tmp\/paratix-sshd-dry-run-.+\.conf'$/v, result: { code: 0 } },
+      ...(options?.responseStubs ?? []),
+    ],
   })
 
 const emptyEnv = {}

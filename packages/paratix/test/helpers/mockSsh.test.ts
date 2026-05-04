@@ -178,6 +178,22 @@ describe("createMockSsh", () => {
     await expect(ssh.output("cat /tmp/file")).resolves.toBe("stubbed")
     await expect(ssh.output("stat /tmp/file")).resolves.toBe("legacy output")
   })
+
+  it("supports precise response stubs without permitting unrelated commands", async () => {
+    const ssh = createMockSsh(
+      {},
+      {
+        responseStubs: [
+          { command: /^stat -c '%a %U %G' '\/etc\//v, result: { stdout: "644 root root" } },
+        ],
+      }
+    )
+
+    await expect(ssh.output("stat -c '%a %U %G' '/etc/config'")).resolves.toBe("644 root root")
+    await expect(ssh.output("cat /etc/config")).rejects.toThrow(
+      "createMockSsh: unstubbed output call: cat /etc/config"
+    )
+  })
 })
 
 describe("createStrictMockSsh", () => {

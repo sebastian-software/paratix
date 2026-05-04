@@ -11,10 +11,39 @@ import { createMockSsh as createBaseMockSsh } from "../helpers/mockSsh.js"
 
 const createMockSsh: typeof createBaseMockSsh = (responses, options) =>
   createBaseMockSsh(responses, {
-    defaultExecResult: { code: 0 },
-    defaultOutputResult: "",
-    defaultTestResult: true,
     ...options,
+    allowUploads: [
+      { localPath: /^\/.+/v, options: { mode: "0644" }, remotePath: /^\/remote\/.+/v },
+      { localPath: /^\/.+/v, options: { mode: "0600" }, remotePath: /^\/remote\/.+/v },
+      ...(options?.allowUploads ?? []),
+    ],
+    allowWrites: [
+      { options: { mode: "0644" }, remotePath: /^\/(?:etc|remote)\//v },
+      { options: { mode: "0600" }, remotePath: /^\/(?:etc|remote)\//v },
+      ...(options?.allowWrites ?? []),
+    ],
+    responseStubs: [
+      {
+        command: /^stat -c '%a %U %G' '\/(?:etc|remote|var)\//v,
+        result: { stdout: "644 root root" },
+      },
+      { command: /^stat -c '%a' '\/(?:etc|remote|var)\//v, result: { stdout: "644" } },
+      {
+        command:
+          /^\[ -e '\/(?:etc\/(?:config|hosts|über hosts|nginx\/nginx\.conf)|remote\/.+)' \]$/v,
+        result: { code: 0 },
+      },
+      {
+        command:
+          /^grep -qF '# END paratix: (?:myblock|grüße-block)' '\/etc\/(?:hosts|über hosts)'$/v,
+        result: { code: 0 },
+      },
+      { command: /^mkdir -p '\/(?:remote|var)\//v, result: { code: 0 } },
+      { command: /^chmod '[0-7]+' '\/(?:remote|var)\//v, result: { code: 0 } },
+      { command: /^chown '[^']+' '\/(?:remote|var)\//v, result: { code: 0 } },
+      { command: /^chgrp '[^']+' '\/(?:remote|var)\//v, result: { code: 0 } },
+      ...(options?.responseStubs ?? []),
+    ],
   })
 
 const emptyEnv = {}
@@ -1351,6 +1380,7 @@ describe("file.block", () => {
 
   it("check returns needs-apply when markers not found", async () => {
     const ssh = createMockSsh({
+      [`cat '/etc/hosts'`]: { stdout: "unmanaged content\n" },
       [`grep -qF '# BEGIN paratix: myblock' '/etc/hosts'`]: { code: 1 },
     })
 

@@ -11,6 +11,11 @@ import {
 
 type MockResponses = Record<string, Partial<ExecResult>>
 
+type MockResponseStub = {
+  command: RegExp | string
+  result: Partial<ExecResult>
+}
+
 type MockSshOptions = {
   allowUnstubbedExec?: string[]
   allowUnstubbedOutput?: string[]
@@ -33,6 +38,11 @@ type MockSshOptions = {
    * treats unspecified predicates as true or false.
    */
   defaultTestResult?: boolean
+  /**
+   * Explicit command stubs matched after exact responses and before any
+   * fallback defaults or allowlists.
+   */
+  responseStubs?: MockResponseStub[]
   /**
    * When `true`, log a `console.warn` for every unstubbed `ssh.test()` call so
    * test authors can audit silent permissive matches. Off by default to keep
@@ -91,6 +101,18 @@ function hasExplicitDefaultForKind(
   }
 }
 
+function matchesResponseStub(command: string, stub: MockResponseStub): boolean {
+  if (typeof stub.command === "string") return stub.command === command
+  return stub.command.test(command)
+}
+
+function getResponseStub(
+  command: string,
+  options: MockSshOptions | undefined
+): MockResponseStub | undefined {
+  return options?.responseStubs?.find((stub) => matchesResponseStub(command, stub))
+}
+
 function getMockResponse(input: {
   command: string
   kind: "exec" | "output" | "test"
@@ -99,6 +121,9 @@ function getMockResponse(input: {
 }): Partial<ExecResult> | undefined {
   const match = input.responses?.[input.command]
   if (match) return match
+
+  const stub = getResponseStub(input.command, input.options)
+  if (stub) return stub.result
 
   const allowlist = getAllowlistForKind(input.kind, input.options)
 

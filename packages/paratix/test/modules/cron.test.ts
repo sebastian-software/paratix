@@ -4,7 +4,14 @@ import { cron } from "../../src/modules/cron.js"
 import { createMockSsh as createBaseMockSsh } from "../helpers/mockSsh.js"
 
 const createMockSsh: typeof createBaseMockSsh = (responses, options) =>
-  createBaseMockSsh(responses, { defaultExecResult: { code: 0 }, ...options })
+  createBaseMockSsh(responses, {
+    ...options,
+    responseStubs: [
+      { command: /^printf '%s' /v, result: { code: 0 } },
+      { command: /^crontab -u '[^']+' /v, result: { code: 0 } },
+      ...(options?.responseStubs ?? []),
+    ],
+  })
 
 const emptyEnv = {}
 
