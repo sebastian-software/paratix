@@ -1,7 +1,7 @@
-import { dirname } from "node:path"
+import { posix as path } from "node:path"
 
 import { failedCommand } from "../moduleFailure.js"
-import { shellQuote } from "../ssh.js"
+import { shellQuote, validateMode } from "../ssh.js"
 import { guardedWriteFile, type ModuleResult, type SshConnection } from "../types.js"
 
 const EXEC_OPTS = { ignoreExitCode: true, silent: true } as const
@@ -23,6 +23,8 @@ const SIZE_POWERS = {
   P: POWER_5,
   T: POWER_4,
 } as const
+const MIN_SWAP_PRIORITY = -1
+const MAX_SWAP_PRIORITY = 32_767
 
 function isSizeUnit(unit: string): unit is keyof typeof SIZE_POWERS {
   return Object.hasOwn(SIZE_POWERS, unit)
@@ -71,6 +73,37 @@ function normalizeSizeForCommand(size: number | string): string {
 function buildSwapFstabLine(path: string, priority?: number): string {
   const options = priority == null ? "sw" : `sw,pri=${String(priority)}`
   return `${path} none swap ${options} 0 0`
+}
+
+function validateSwapFilePath(value: string): void {
+  if (value === "") {
+    throw new Error("swap.file: path must be a non-empty absolute path")
+  }
+  if (/\s/v.test(value)) {
+    throw new Error("swap.file: path must not contain whitespace")
+  }
+  if (!path.isAbsolute(value)) {
+    throw new Error("swap.file: path must be absolute")
+  }
+  if (value === "/") {
+    throw new Error("swap.file: path must not be the filesystem root")
+  }
+  if (path.normalize(value) !== value) {
+    throw new Error("swap.file: path must be normalized")
+  }
+}
+
+function validateSwapPriority(priority: number | undefined): void {
+  if (priority === undefined) return
+  if (
+    !Number.isInteger(priority) ||
+    priority < MIN_SWAP_PRIORITY ||
+    priority > MAX_SWAP_PRIORITY
+  ) {
+    throw new Error(
+      `swap.file: priority must be an integer between ${MIN_SWAP_PRIORITY} and ${MAX_SWAP_PRIORITY}`
+    )
+  }
 }
 
 function findFstabEntry(fstabContent: string, path: string): null | string {
@@ -185,7 +218,7 @@ export async function ensureSwapFilePresent(parameters: {
   ssh: SshConnection
 }): Promise<ModuleResult | true> {
   const createDirectoryResult = await parameters.ssh.exec(
-    `mkdir -p ${shellQuote(dirname(parameters.path))}`,
+    `mkdir -p ${shellQuote(path.dirname(parameters.path))}`,
     EXEC_OPTS
   )
   if (createDirectoryResult.code !== 0) {
@@ -233,10 +266,14 @@ export function normalizeSwapFileOptions(options: {
   state?: "absent" | "present"
 }): NormalizedSwapFileOptions {
   const state = options.state ?? "present"
+  const mode = options.mode ?? "0600"
+  validateSwapFilePath(options.path)
+  validateMode(mode)
+  validateSwapPriority(options.priority)
   return {
     expectedFstabLine:
       state === "present" ? buildSwapFstabLine(options.path, options.priority) : null,
-    mode: options.mode ?? "0600",
+    mode,
     path: options.path,
     sizeBytes: normalizeSizeToBytes(options.size),
     sizeForCommand: normalizeSizeForCommand(options.size),

@@ -319,6 +319,34 @@ describe("swap.file — apply", () => {
   })
 })
 
+describe("swap.file — option validation", () => {
+  it("accepts valid path, mode, and priority boundaries", () => {
+    expect(() =>
+      swap.file({ mode: "0600", path: swapPath, priority: -1, size: swapSize })
+    ).not.toThrow()
+    expect(() => swap.file({ path: swapPath, priority: 0, size: swapSize })).not.toThrow()
+    expect(() => swap.file({ path: swapPath, priority: 32_767, size: swapSize })).not.toThrow()
+  })
+
+  it("rejects unsafe swap file paths", () => {
+    for (const path of ["", "swapfile", "/", "/var/../swapfile", "/swap file", "/swapfile\n"]) {
+      expect(() => swap.file({ path, size: swapSize })).toThrow(/swap\.file: path/v)
+    }
+  })
+
+  it("rejects invalid file modes", () => {
+    for (const mode of ["888", "77", ""]) {
+      expect(() => swap.file({ mode, path: swapPath, size: swapSize })).toThrow(/mode/v)
+    }
+  })
+
+  it("rejects invalid priorities", () => {
+    for (const priority of [1.5, Number.NaN, Number.POSITIVE_INFINITY, -2, 32_768]) {
+      expect(() => swap.file({ path: swapPath, priority, size: swapSize })).toThrow(/priority/v)
+    }
+  })
+})
+
 describe("swap tuning wrappers", () => {
   it("uses sysctl.set for swappiness", () => {
     const mod = swap.swappiness(10)
