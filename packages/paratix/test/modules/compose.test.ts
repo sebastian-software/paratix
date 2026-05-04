@@ -636,9 +636,7 @@ describe("compose.config — apply", () => {
     // the captured prior content with the captured mode.
     expect(writtenFiles).toHaveLength(2)
     expect(writtenFiles[0]?.content).toBe("broken: yaml: [\n")
-    // readFile in production trims trailing newlines (output() trims), and
-    // the mock mirrors that behaviour.
-    expect(writtenFiles[1]?.content).toBe(priorContent.trim())
+    expect(writtenFiles[1]?.content).toBe(priorContent)
     expect(writtenFiles[1]?.mode).toBe("600")
     expect(writtenFiles[1]?.path).toBe(remotePath)
   })
@@ -671,7 +669,7 @@ describe("compose.config — apply", () => {
 
     expect(writtenFiles).toHaveLength(2)
     expect(writtenFiles[0]?.content).toBe("broken: yaml: [\n")
-    expect(writtenFiles[1]?.content).toBe(priorContent.trim())
+    expect(writtenFiles[1]?.content).toBe(priorContent)
     expect(writtenFiles[1]?.mode).toBe("600")
     expect(writtenFiles[1]?.path).toBe(remotePath)
   })
@@ -723,7 +721,7 @@ describe("compose.config — apply", () => {
     expect(uploadedFiles).toHaveLength(1)
     expect(uploadedFiles[0]?.src).toBe("/local/broken.yml")
     expect(writtenFiles).toHaveLength(1)
-    expect(writtenFiles[0]?.content).toBe(priorContent.trim())
+    expect(writtenFiles[0]?.content).toBe(priorContent)
     expect(writtenFiles[0]?.mode).toBe("600")
     expect(writtenFiles[0]?.path).toBe(remotePath)
   })

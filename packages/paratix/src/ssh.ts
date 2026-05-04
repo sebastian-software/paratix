@@ -400,10 +400,7 @@ export class SshConnectionImpl implements SshConnection {
     const client = this.ensureClient()
     const localTemporary = join(tmpdir(), `paratix-write-${randomUUID()}`)
     const remoteTemporary = await this.createRemoteWritableTempPath(remotePath, "paratix-write")
-    const temporaryMode = resolveWriteFileMode(
-      remotePath,
-      options
-    )
+    const temporaryMode = resolveWriteFileMode(remotePath, options)
     const expectedSize = Buffer.byteLength(content, "utf8")
     try {
       // eslint-disable-next-line security/detect-non-literal-fs-filename

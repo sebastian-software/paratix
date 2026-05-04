@@ -127,7 +127,7 @@ function parseContainerStates(stdout: string): string[] {
 
     return parsed.map((entry: unknown) => {
       if (typeof entry === "object" && entry !== null && "State" in entry) {
-        const state = (entry).State
+        const state = entry.State
         return typeof state === "string" ? state : ""
       }
       return ""

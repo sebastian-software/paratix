@@ -211,6 +211,7 @@ function getMockConnectionInfo(): ReturnType<SshConnection["getConnectionInfo"]>
 export function createMockSsh(responses?: MockResponses, options?: MockSshOptions): MockSsh {
   const calls: string[] = []
   const execCalls: ExecCall[] = []
+  const exec = createExec({ calls, execCalls }, responses, options)
   const spies = createRecordingSpies()
   const sideEffects = createSideEffectRecorder(options)
   return {
@@ -221,7 +222,7 @@ export function createMockSsh(responses?: MockResponses, options?: MockSshOption
     disconnectCalls: sideEffects.disconnectCalls,
     downloadFile: sideEffects.downloadFile,
     downloadFileCalls: sideEffects.downloadFileCalls,
-    exec: createExec({ calls, execCalls }, responses, options),
+    exec,
     execCalls,
     async exists(path) {
       return this.test(`[ -e ${shellQuote(path)} ]`)
@@ -235,7 +236,7 @@ export function createMockSsh(responses?: MockResponses, options?: MockSshOption
     probeSudo: sideEffects.probeSudo,
     probeSudoCalls: sideEffects.probeSudoCalls,
     async readFile(path) {
-      const result = await this.exec(`cat ${shellQuote(path)}`, { silent: true })
+      const result = await exec(`cat ${shellQuote(path)}`, { silent: true })
       return result.stdout
     },
     removePort: spies.removePort,

@@ -1133,7 +1133,7 @@ describe("net.interface — apply", () => {
     const result = await mod.apply(mockSsh, emptyEnv)
 
     expect(result.status).toBe("failed")
-    expect(writeFile).toHaveBeenLastCalledWith(netplanPath, previousConfig.trim(), {
+    expect(writeFile).toHaveBeenLastCalledWith(netplanPath, previousConfig, {
       mode: "0644",
     })
   })
@@ -1209,7 +1209,7 @@ describe("net.interface — apply", () => {
     const result = await mod.apply(mockSsh, emptyEnv)
 
     expect(result.status).toBe("failed")
-    expect(writeFile).toHaveBeenLastCalledWith(networkdPath, previousConfig.trim(), {
+    expect(writeFile).toHaveBeenLastCalledWith(networkdPath, previousConfig, {
       mode: "0644",
     })
   })

@@ -326,9 +326,7 @@ describe("releaseUpgrade.upgrade — apply (Debian)", () => {
     }
 
     it("apt-get update fails → restores the original /etc/apt/sources.list content", async () => {
-      // readFile (output) trims trailing whitespace, so the snapshot is the
-      // trimmed content (no trailing newline).
-      const originalSources = "deb http://deb.debian.org/debian bookworm main"
+      const originalSources = "deb http://deb.debian.org/debian bookworm main\n"
       const ssh = createMockSsh(
         debianApplyResponses("bookworm", "trixie", {
           "DEBIAN_FRONTEND=noninteractive apt-get update": { code: 1 },
@@ -347,9 +345,7 @@ describe("releaseUpgrade.upgrade — apply (Debian)", () => {
     })
 
     it("dpkg --configure -a fails → restores the original sources content", async () => {
-      // readFile (output) trims trailing whitespace, so the snapshot is the
-      // trimmed content (no trailing newline).
-      const originalSources = "deb http://deb.debian.org/debian bookworm main"
+      const originalSources = "deb http://deb.debian.org/debian bookworm main\n"
       const ssh = createMockSsh(
         debianApplyResponses("bookworm", "trixie", {
           "DEBIAN_FRONTEND=noninteractive dpkg --configure -a": { code: 1 },
@@ -365,9 +361,7 @@ describe("releaseUpgrade.upgrade — apply (Debian)", () => {
     })
 
     it("apt-get full-upgrade fails → restores the original sources content", async () => {
-      // readFile (output) trims trailing whitespace, so the snapshot is the
-      // trimmed content (no trailing newline).
-      const originalSources = "deb http://deb.debian.org/debian bookworm main"
+      const originalSources = "deb http://deb.debian.org/debian bookworm main\n"
       const ssh = createMockSsh(
         debianApplyResponses("bookworm", "trixie", {
           "DEBIAN_FRONTEND=noninteractive apt-get full-upgrade -y": { code: 1 },
@@ -383,9 +377,7 @@ describe("releaseUpgrade.upgrade — apply (Debian)", () => {
     })
 
     it("apt-get autoremove fails → restores the original sources content", async () => {
-      // readFile (output) trims trailing whitespace, so the snapshot is the
-      // trimmed content (no trailing newline).
-      const originalSources = "deb http://deb.debian.org/debian bookworm main"
+      const originalSources = "deb http://deb.debian.org/debian bookworm main\n"
       const ssh = createMockSsh(
         debianApplyResponses("bookworm", "trixie", {
           "DEBIAN_FRONTEND=noninteractive apt-get autoremove -y": { code: 1 },
@@ -401,8 +393,7 @@ describe("releaseUpgrade.upgrade — apply (Debian)", () => {
     })
 
     it("rolls back additional sources.list.d files alongside sources.list", async () => {
-      // readFile (output) trims trailing whitespace.
-      const originalMainSources = "deb http://deb.debian.org/debian bookworm main"
+      const originalMainSources = "deb http://deb.debian.org/debian bookworm main\n"
       const originalExtraSources = "deb http://example.com/repo bookworm contrib"
       const extraPath = "/etc/apt/sources.list.d/extra.list"
       const ssh = createMockSsh(

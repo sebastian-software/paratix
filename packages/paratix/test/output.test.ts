@@ -63,10 +63,10 @@ describe("printModuleResult", () => {
 
   it("renders a live running line on TTY and replaces it with the final result", () => {
     const writes: string[] = []
-    vi.spyOn(process.stdout, "write").mockImplementation(((chunk: string | Uint8Array) => {
+    vi.spyOn(process.stdout, "write").mockImplementation((chunk: string | Uint8Array) => {
       writes.push(String(chunk))
       return true
-    }))
+    })
     const originalIsTTY = process.stdout.isTTY
     const originalClearLine = bindOptionalStdoutMethod("clearLine")
     const originalCursorTo = bindOptionalStdoutMethod("cursorTo")
@@ -119,10 +119,10 @@ describe("printModuleResult", () => {
 
   it("renders package modules compactly while the spinner is active", () => {
     const writes: string[] = []
-    vi.spyOn(process.stdout, "write").mockImplementation(((chunk: string | Uint8Array) => {
+    vi.spyOn(process.stdout, "write").mockImplementation((chunk: string | Uint8Array) => {
       writes.push(String(chunk))
       return true
-    }))
+    })
     const originalIsTTY = process.stdout.isTTY
     const originalClearLine = bindOptionalStdoutMethod("clearLine")
     const originalCursorTo = bindOptionalStdoutMethod("cursorTo")
@@ -178,9 +178,7 @@ describe("printModuleResult", () => {
   it("stops and clears live output on request", () => {
     const clearLine = vi.fn(() => true)
     const cursorTo = vi.fn(() => true)
-    vi.spyOn(process.stdout, "write").mockImplementation(
-      (() => true)
-    )
+    vi.spyOn(process.stdout, "write").mockImplementation(() => true)
     const originalIsTTY = process.stdout.isTTY
     const originalClearLine = bindOptionalStdoutMethod("clearLine")
     const originalCursorTo = bindOptionalStdoutMethod("cursorTo")
@@ -238,10 +236,10 @@ describe("printRecipeHeader", () => {
     const writes: string[] = []
     const clearLine = vi.fn(() => true)
     const cursorTo = vi.fn(() => true)
-    vi.spyOn(process.stdout, "write").mockImplementation(((chunk: string | Uint8Array) => {
+    vi.spyOn(process.stdout, "write").mockImplementation((chunk: string | Uint8Array) => {
       writes.push(String(chunk))
       return true
-    }))
+    })
     const originalIsTTY = process.stdout.isTTY
     const originalClearLine = bindOptionalStdoutMethod("clearLine")
     const originalCursorTo = bindOptionalStdoutMethod("cursorTo")

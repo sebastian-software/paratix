@@ -290,7 +290,7 @@ export async function appendHostKey(host: string, port: number, keyBuffer: Buffe
 
 function getFileSystemErrorCode(error: unknown): string | undefined {
   return typeof error === "object" && error !== null && "code" in error
-    ? String((error).code)
+    ? String(error.code)
     : undefined
 }
 
