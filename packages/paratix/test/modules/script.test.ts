@@ -241,6 +241,31 @@ describe("script.once — apply", () => {
     expect(mockSsh.calls).toContain("mktemp -p /tmp 'paratix-script-setup.XXXXXX'")
   })
 
+  it.each([
+    ["empty output", ""],
+    ["multiline output", "/tmp/paratix-script-setup.ABCDEF\n/tmp/paratix-script-setup.EVIL"],
+    ["outside /tmp", "/var/tmp/paratix-script-setup.ABCDEF"],
+    ["wrong prefix", "/tmp/not-paratix-script-setup.ABCDEF"],
+  ])("rejects unsafe mktemp output: %s", async (_caseName, stdout) => {
+    const safePath = makeRemoteScriptPath("setup")
+    const mockSsh = createScriptMockSsh({
+      responses: {
+        "mktemp -p /tmp 'paratix-script-setup.XXXXXX'": { code: 0, stdout },
+      },
+    })
+    const mod = script.once("setup", "/local/setup.sh")
+
+    const result = await mod.apply(mockSsh, emptyEnv)
+
+    expect(result.status).toBe("failed")
+    expect(mockSsh.calls).not.toContain(`chmod +x '${safePath}'`)
+    expect(mockSsh.calls).not.toContain(`'${safePath}'`)
+    expect(mockSsh.calls).not.toContain(`rm -f '${safePath}'`)
+    expect(mockSsh.calls).not.toContain(
+      `find ${FLAGS_DIRECTORY} -maxdepth 1 -name 'script-setup-*' -delete && touch ${FLAGS_DIRECTORY}/'script-setup-1'`
+    )
+  })
+
   it("uses correct flag name with custom version", async () => {
     const mockSsh = createScriptMockSsh({ version: "2" })
     const mod = script.once("setup", "/local/setup.sh", { version: "2" })

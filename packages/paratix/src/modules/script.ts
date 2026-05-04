@@ -1,5 +1,5 @@
 import { failed, failedCommand } from "../moduleFailure.js"
-import { shellQuote } from "../ssh.js"
+import { shellQuote, validateMktempPath } from "../ssh.js"
 import { type Module, type ModuleResult, NEEDS_APPLY, type SshConnection } from "../types.js"
 import { hasFlag, setVersionedFlag } from "./moduleHelpers.js"
 
@@ -29,7 +29,12 @@ async function allocateRemoteScriptPath(
   if (remotePath.length === 0) {
     return failed(`[script.once: ${name}] mktemp returned an empty path`)
   }
-  return remotePath
+  try {
+    return validateMktempPath("/tmp", remotePath, `paratix-script-${name}`)
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : String(error)
+    return failed(`[script.once: ${name}] mktemp returned an unsafe path: ${reason}`)
+  }
 }
 
 /**
