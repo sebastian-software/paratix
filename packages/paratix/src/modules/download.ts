@@ -280,6 +280,47 @@ async function applyFileAttributes(
   }
 }
 
+function downloadModeDrifted(current: DownloadOwnership, options: BaseDownloadOptions): boolean {
+  return options.mode != null && current.mode !== options.mode.replace(/^0+/v, "")
+}
+
+function downloadOwnerDrifted(current: DownloadOwnership, options: BaseDownloadOptions): boolean {
+  return (
+    (options.owner != null && current.owner !== options.owner) ||
+    (options.group != null && current.group !== options.group)
+  )
+}
+
+async function applyDriftedFileAttributes(
+  conn: SshConnection,
+  parameters: DownloadParameters
+): Promise<boolean> {
+  if (parameters.mode == null && parameters.owner == null && parameters.group == null) {
+    return false
+  }
+
+  const current = await readDownloadOwnership(conn, parameters.destination)
+  let changed = false
+
+  if (parameters.mode != null && downloadModeDrifted(current, parameters)) {
+    validateMode(parameters.mode)
+    await conn.exec(`chmod ${shellQuote(parameters.mode)} ${shellQuote(parameters.destination)}`, {
+      silent: true,
+    })
+    changed = true
+  }
+
+  if (downloadOwnerDrifted(current, parameters)) {
+    const ownerSpec = `${parameters.owner ?? ""}:${parameters.group ?? ""}`
+    await conn.exec(`chown ${shellQuote(ownerSpec)} ${shellQuote(parameters.destination)}`, {
+      silent: true,
+    })
+    changed = true
+  }
+
+  return changed
+}
+
 async function cleanupTemporaryDownloadFile(
   conn: SshConnection,
   parameters: Pick<DownloadParameters, "destination" | "secrets">
@@ -365,8 +406,8 @@ async function performDownload(
     // This honors download.large's "fetched once" contract even when the
     // operator drifted mode/owner/group out-of-band.
     if (await destinationContentMatchesSha256(conn, parameters)) {
-      await applyFileAttributes(conn, parameters)
-      return { status: "changed" }
+      const changed = await applyDriftedFileAttributes(conn, parameters)
+      return { status: changed ? "changed" : "ok" }
     }
 
     return runCurlDownload(conn, parameters)

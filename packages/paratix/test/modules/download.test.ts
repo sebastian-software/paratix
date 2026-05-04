@@ -441,6 +441,47 @@ describe("download.url", () => {
 
     // ─── R-0000062: metadata-only fast path ─────────────────────────────────
     describe("metadata-only fast path", () => {
+      it("returns ok when sha256 and requested metadata already match", async () => {
+        const mockSsh = createMockSsh({
+          [`[ -e '${destination}' ]`]: { code: 0 },
+          [`[ -f '${destination}' ]`]: { code: 0 },
+          [`sha256sum '${destination}'`]: { stdout: `${sha256}  ${destination}` },
+          [`stat -c '%a %U %G' '${destination}'`]: { stdout: "755 deploy staff" },
+        })
+        const mod = download.url(destination, url, {
+          group: "staff",
+          mode: "0755",
+          owner: "deploy",
+          sha256,
+        })
+        const result = await mod.apply(mockSsh, emptyEnv)
+        expect(result.status).toBe("ok")
+        expect(mockSsh.calls).toContain(`stat -c '%a %U %G' '${destination}'`)
+        expect(mockSsh.calls.every((c) => !c.startsWith("chmod"))).toBe(true)
+        expect(mockSsh.calls.every((c) => !c.startsWith("chown"))).toBe(true)
+        expect(mockSsh.calls.every((c) => !c.startsWith("curl"))).toBe(true)
+      })
+
+      it("returns changed and applies only drifted metadata when sha256 matches", async () => {
+        const mockSsh = createMockSsh({
+          [`[ -e '${destination}' ]`]: { code: 0 },
+          [`[ -f '${destination}' ]`]: { code: 0 },
+          [`sha256sum '${destination}'`]: { stdout: `${sha256}  ${destination}` },
+          [`stat -c '%a %U %G' '${destination}'`]: { stdout: "755 root staff" },
+        })
+        const mod = download.url(destination, url, {
+          group: "staff",
+          mode: "0755",
+          owner: "deploy",
+          sha256,
+        })
+        const result = await mod.apply(mockSsh, emptyEnv)
+        expect(result.status).toBe("changed")
+        expect(mockSsh.calls).not.toContain(`chmod '0755' '${destination}'`)
+        expect(mockSsh.calls).toContain(`chown 'deploy:staff' '${destination}'`)
+        expect(mockSsh.calls.every((c) => !c.startsWith("curl"))).toBe(true)
+      })
+
       it("heals mode drift via chmod only when sha256 matches and destination exists", async () => {
         // Existing destination already matches the expected sha256 — only
         // mode drifted. Apply must chmod and skip curl entirely.
