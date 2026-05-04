@@ -3,9 +3,12 @@ import { describe, expect, it } from "vitest"
 
 import { pkg } from "../../src/modules/package.js"
 import { CommandError } from "../../src/sshHelpers.js"
-import { createMockSsh } from "../helpers/mockSsh.js"
+import { createMockSsh as createBaseMockSsh } from "../helpers/mockSsh.js"
 
 const emptyEnv = {}
+
+const createMockSsh: typeof createBaseMockSsh = (responses, options) =>
+  createBaseMockSsh(responses, { defaultTestResult: false, ...options })
 
 // ---------------------------------------------------------------------------
 // Helpers: mock responses for package manager detection
@@ -150,6 +153,21 @@ describe("pkg.installed", () => {
     expect(installCall?.options).not.toHaveProperty("timeout")
   })
 
+  it("apply returns ok without install when all packages are already installed", async () => {
+    const ssh = createMockSsh({
+      ...APT_FOUND,
+      "dpkg-query -W -f='${Status}' 'curl' 2>/dev/null | grep -q 'install ok installed'": {
+        code: 0,
+      },
+      "dpkg-query -W -f='${Status}' 'nginx' 2>/dev/null | grep -q 'install ok installed'": {
+        code: 0,
+      },
+    })
+    const mod = pkg.installed("nginx", "curl")
+    expect(await mod.apply(ssh, emptyEnv)).toStrictEqual({ status: "ok" })
+    expect(ssh.calls.some((call) => call.includes("apt-get install"))).toBe(false)
+  })
+
   it("apply returns failed when ssh is null", async () => {
     const mod = pkg.installed("nginx")
     // eslint-disable-next-line prefer-spread
@@ -239,6 +257,9 @@ describe("pkg.absent", () => {
     const ssh = createMockSsh({
       ...APT_FOUND,
       "DEBIAN_FRONTEND=noninteractive apt-get remove -y -- 'nginx'": { code: 0 },
+      "dpkg-query -W -f='${Status}' 'nginx' 2>/dev/null | grep -q 'install ok installed'": {
+        code: 0,
+      },
     })
     const mod = pkg.absent("nginx")
     expect(await mod.apply(ssh, emptyEnv)).toStrictEqual({ status: "changed" })
@@ -248,6 +269,9 @@ describe("pkg.absent", () => {
     const ssh = createMockSsh({
       ...APT_FOUND,
       "DEBIAN_FRONTEND=noninteractive apt-get remove -y -- 'nginx'": { code: 0 },
+      "dpkg-query -W -f='${Status}' 'nginx' 2>/dev/null | grep -q 'install ok installed'": {
+        code: 0,
+      },
     })
     const mod = pkg.absent("nginx", { timeout: 300_000 })
     expect(await mod.apply(ssh, emptyEnv)).toStrictEqual({ status: "changed" })
@@ -256,6 +280,18 @@ describe("pkg.absent", () => {
       (c) => c.command === "DEBIAN_FRONTEND=noninteractive apt-get remove -y -- 'nginx'"
     )
     expect(removeCall?.options?.timeout).toBe(300_000)
+  })
+
+  it("apply returns ok without remove when all packages are already absent", async () => {
+    const ssh = createMockSsh({
+      ...APT_FOUND,
+      "dpkg-query -W -f='${Status}' 'nginx' 2>/dev/null | grep -q 'install ok installed'": {
+        code: 1,
+      },
+    })
+    const mod = pkg.absent("nginx")
+    expect(await mod.apply(ssh, emptyEnv)).toStrictEqual({ status: "ok" })
+    expect(ssh.calls.some((call) => call.includes("apt-get remove"))).toBe(false)
   })
 
   it("apply returns failed when ssh is null", async () => {
@@ -348,6 +384,15 @@ describe("pkg.update", () => {
     await mod.apply(ssh, emptyEnv)
     const updateCall = ssh.execCalls.find((c) => c.command === "apt-get update")
     expect(updateCall?.options?.timeout).toBe(450_000)
+  })
+
+  it("apply returns ok without update when flag already exists", async () => {
+    const ssh = createMockSsh({
+      [FLAG]: { code: 0 },
+    })
+    const mod = pkg.update("2024-01-15")
+    expect(await mod.apply(ssh, emptyEnv)).toStrictEqual({ status: "ok" })
+    expect(ssh.calls).not.toContain("apt-get update")
   })
 
   it("apply returns failed when ssh is null", async () => {
@@ -496,6 +541,15 @@ describe("pkg.upgrade", () => {
     expect(upgradeCall?.options).not.toHaveProperty("timeout")
   })
 
+  it("apply returns ok without upgrade when flag already exists", async () => {
+    const ssh = createMockSsh({
+      [FLAG]: { code: 0 },
+    })
+    const mod = pkg.upgrade("2024-01-15")
+    expect(await mod.apply(ssh, emptyEnv)).toStrictEqual({ status: "ok" })
+    expect(ssh.calls.some((call) => call.includes("apt-get upgrade"))).toBe(false)
+  })
+
   it("apply returns failed when ssh is null", async () => {
     const mod = pkg.upgrade("2024-01-15")
     // eslint-disable-next-line prefer-spread
@@ -579,6 +633,7 @@ describe("package manager detection", () => {
     const ssh = createMockSsh({
       ...DNF_FOUND,
       "dnf remove -y -- 'nginx'": { code: 0 },
+      "rpm -q 'nginx'": { code: 0 },
     })
     const mod = pkg.absent("nginx")
     await mod.apply(ssh, emptyEnv)
@@ -588,6 +643,7 @@ describe("package manager detection", () => {
   it("uses correct remove command for apk", async () => {
     const ssh = createMockSsh({
       ...APK_FOUND,
+      "apk info -e 'nginx'": { code: 0 },
       "apk del 'nginx'": { code: 0 },
     })
     const mod = pkg.absent("nginx")

@@ -199,6 +199,15 @@ export const pkg = {
           return failed(`[package.absent: ${packages.join(", ")}] SSH connection is required`)
         const pm = await detectPackageManager(ssh)
         if (!pm) return missingPackageManager(`package.absent: ${packages.join(", ")}`)
+        let anyInstalled = false
+        for (const packageName of packages) {
+          // eslint-disable-next-line no-await-in-loop
+          if (await isPackageInstalled(ssh, pm, packageName)) {
+            anyInstalled = true
+            break
+          }
+        }
+        if (!anyInstalled) return { status: "ok" }
         const quoted = packages.map((p) => shellQuote(p)).join(" ")
         const result = await ssh.exec(REMOVE_COMMANDS[pm](quoted), execOptions(options))
         if (result.code !== 0) {
@@ -250,15 +259,21 @@ export const pkg = {
         }
         const pm = await detectPackageManager(ssh)
         if (!pm) return missingPackageManager(`package.installed: ${packages.join(", ")}`)
-        const quoted = packages.map((p) => shellQuote(p)).join(" ")
-        const result = await ssh.exec(INSTALL_COMMANDS[pm](quoted), execOptions(options))
-        if (result.code !== 0) {
-          return failedCommand(
-            `[package.installed: ${packages.join(", ")}] package installation failed`,
-            result
-          )
+        for (const packageName of packages) {
+          // eslint-disable-next-line no-await-in-loop
+          if (!(await isPackageInstalled(ssh, pm, packageName))) {
+            const quoted = packages.map((p) => shellQuote(p)).join(" ")
+            const result = await ssh.exec(INSTALL_COMMANDS[pm](quoted), execOptions(options))
+            if (result.code !== 0) {
+              return failedCommand(
+                `[package.installed: ${packages.join(", ")}] package installation failed`,
+                result
+              )
+            }
+            return { status: "changed" }
+          }
         }
-        return { status: "changed" }
+        return { status: "ok" }
       },
       async check(ssh: null | SshConnection): Promise<"needs-apply" | "ok"> {
         if (!ssh) return NEEDS_APPLY
@@ -295,6 +310,7 @@ export const pkg = {
     return {
       async apply(ssh: null | SshConnection): Promise<ModuleResult> {
         if (!ssh) return failed(`[package.update: ${date}] SSH connection is required`)
+        if (await hasFlag(ssh, flagName)) return { status: "ok" }
         const pm = await detectPackageManager(ssh)
         if (!pm) return missingPackageManager(`package.update: ${date}`)
         const result = await ssh.exec(UPDATE_COMMANDS[pm], execOptions(options))
@@ -342,6 +358,7 @@ export const pkg = {
     return {
       async apply(ssh: null | SshConnection): Promise<ModuleResult> {
         if (!ssh) return failed(`[package.upgrade: ${date}] SSH connection is required`)
+        if (await hasFlag(ssh, flagName)) return { status: "ok" }
         const pm = await detectPackageManager(ssh)
         if (!pm) return missingPackageManager(`package.upgrade: ${date}`)
 
