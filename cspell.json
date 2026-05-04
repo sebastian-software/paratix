@@ -87,6 +87,7 @@
     "redir",
     "resolv",
     "seccomp",
+    "sebastian",
     "sigint",
     "sigterm",
     "sonarjs",

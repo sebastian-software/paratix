@@ -1,11 +1,15 @@
 /* eslint-disable max-lines -- integration harness keeps Docker lifecycle helpers together */
 import { execFile } from "node:child_process"
+import { randomUUID } from "node:crypto"
 import { chmod, copyFile, mkdir, mkdtemp, rm } from "node:fs/promises"
 import net from "node:net"
 import { tmpdir } from "node:os"
 import { join, resolve } from "node:path"
 
 const DOCKER_IMAGE_TAG_PREFIX = "paratix-integration-sshd"
+const DOCKER_RESOURCE_LABEL_PREFIX = "com.sebastian-software.paratix.integration"
+const DOCKER_RESOURCE_MANAGED_LABEL = `${DOCKER_RESOURCE_LABEL_PREFIX}.managed=true`
+const DOCKER_RESOURCE_ID_LABEL = `${DOCKER_RESOURCE_LABEL_PREFIX}.id`
 const HOST = "127.0.0.1"
 const TEN = "0123456789".length
 const KILOBYTE = 1024
@@ -49,6 +53,12 @@ type RuntimeAvailabilityOptions = {
   env?: NodeJS.ProcessEnv
   platform?: NodeJS.Platform
   run?: CommandRunner
+}
+
+type DockerResourceMetadata = {
+  containerName: string
+  dockerImageTag: string
+  labels: string[]
 }
 
 class CommandExecutionError extends Error {
@@ -235,6 +245,18 @@ function parseDockerPort(output: string): number {
   return Number(port)
 }
 
+export function createDockerResourceMetadata(resourceId = randomUUID()): DockerResourceMetadata {
+  return {
+    containerName: `paratix-integration-${resourceId}`,
+    dockerImageTag: `${DOCKER_IMAGE_TAG_PREFIX}:${resourceId}`,
+    labels: [DOCKER_RESOURCE_MANAGED_LABEL, `${DOCKER_RESOURCE_ID_LABEL}=${resourceId}`],
+  }
+}
+
+function createDockerLabelArguments(labels: string[]): string[] {
+  return labels.flatMap((label) => ["--label", label])
+}
+
 async function prepareWorkspaceHome(): Promise<string> {
   const workspaceHome = await mkdtemp(join(tmpdir(), "paratix-integration-home-"))
   await mkdir(join(workspaceHome, ".ssh"), { mode: SSH_HOME_MODE, recursive: true })
@@ -289,11 +311,11 @@ async function createEnvironmentResources(packageDirectory: string): Promise<{
   clientPrivateKeyPath: string
   containerName: string
   dockerImageTag: string
+  dockerLabels: string[]
   workspaceHome: string
 }> {
   const workspaceHome = await prepareWorkspaceHome()
-  const containerName = `paratix-integration-${Date.now()}`
-  const dockerImageTag = `${DOCKER_IMAGE_TAG_PREFIX}:${containerName}`
+  const { containerName, dockerImageTag, labels: dockerLabels } = createDockerResourceMetadata()
   const fixturePrivateKeyPath = resolve(
     packageDirectory,
     "test/integration/fixtures/client_ed25519"
@@ -301,18 +323,34 @@ async function createEnvironmentResources(packageDirectory: string): Promise<{
   const clientPrivateKeyPath = join(workspaceHome, ".ssh", "client_ed25519")
   await copyFile(fixturePrivateKeyPath, clientPrivateKeyPath)
   await chmod(clientPrivateKeyPath, PRIVATE_KEY_MODE)
-  await buildIntegrationImage(packageDirectory, dockerImageTag)
+  await buildIntegrationImage(packageDirectory, dockerImageTag, dockerLabels)
   const cleanup = createCleanup(containerName, dockerImageTag, workspaceHome)
-  return { cleanup, clientPrivateKeyPath, containerName, dockerImageTag, workspaceHome }
+  return {
+    cleanup,
+    clientPrivateKeyPath,
+    containerName,
+    dockerImageTag,
+    dockerLabels,
+    workspaceHome,
+  }
 }
 
 async function buildIntegrationImage(
   packageDirectory: string,
-  dockerImageTag: string
+  dockerImageTag: string,
+  labels: string[]
 ): Promise<void> {
   await runCommand(
     "docker",
-    ["build", "-t", dockerImageTag, "-f", "test/integration/docker/Dockerfile", "."],
+    [
+      "build",
+      ...createDockerLabelArguments(labels),
+      "-t",
+      dockerImageTag,
+      "-f",
+      "test/integration/docker/Dockerfile",
+      ".",
+    ],
     {
       cwd: packageDirectory,
     }
@@ -321,13 +359,15 @@ async function buildIntegrationImage(
 
 async function startIntegrationContainer(
   containerName: string,
-  dockerImageTag: string
+  dockerImageTag: string,
+  labels: string[]
 ): Promise<void> {
   await runCommand("docker", [
     "run",
     "--detach",
     "--name",
     containerName,
+    ...createDockerLabelArguments(labels),
     "--publish",
     `${HOST}::22`,
     "--publish",
@@ -354,11 +394,17 @@ export async function createIntegrationEnvironment(
   packageDirectory: string
 ): Promise<IntegrationEnvironment> {
   await ensureIntegrationRuntimeIsAvailable()
-  const { cleanup, clientPrivateKeyPath, containerName, dockerImageTag, workspaceHome } =
-    await createEnvironmentResources(packageDirectory)
+  const {
+    cleanup,
+    clientPrivateKeyPath,
+    containerName,
+    dockerImageTag,
+    dockerLabels,
+    workspaceHome,
+  } = await createEnvironmentResources(packageDirectory)
 
   try {
-    await startIntegrationContainer(containerName, dockerImageTag)
+    await startIntegrationContainer(containerName, dockerImageTag, dockerLabels)
     const { primaryPort, secondaryPort } = await readPublishedPorts(containerName)
     await waitForTcpPort(HOST, primaryPort, SSH_READY_TIMEOUT)
     await waitForTcpPort(HOST, secondaryPort, SSH_READY_TIMEOUT)
