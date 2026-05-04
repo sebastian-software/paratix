@@ -443,11 +443,11 @@ describe("collectStreamOutput", () => {
           options: { silent: true },
           reject,
           resolve,
-          stream: stream as unknown as StreamOutputParameters["stream"],
+          stream,
           timer,
         })
         // Simulate ssh2 sending undefined for the code
-        stream.emit("close", undefined as unknown as number)
+        stream.emit("close", undefined)
         clearTimeout(timer)
       }
     )

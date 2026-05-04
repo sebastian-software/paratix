@@ -2749,7 +2749,7 @@ describe("SshConnectionImpl", () => {
       const execSpy = vi.fn().mockImplementation((_command: string, callback: ExecCallback) => {
         const stream = makeStream()
         callback(undefined, stream)
-        stream.emit("close", undefined as unknown as number)
+        stream.emit("close", undefined)
       })
 
       const client = makeClientWithExecSpy(execSpy)
@@ -2780,7 +2780,7 @@ describe("SshConnectionImpl", () => {
         const stream = makeStream()
         callback(undefined, stream)
         stream.emit("data", Buffer.from(" hello \n"))
-        stream.emit("close", undefined as unknown as number)
+        stream.emit("close", undefined)
       })
 
       const client = makeClientWithExecSpy(execSpy)
@@ -2797,12 +2797,12 @@ describe("SshConnectionImpl", () => {
         .mockImplementationOnce((_command: string, callback: ExecCallback) => {
           const stream = makeStream()
           callback(undefined, stream)
-          stream.emit("close", undefined as unknown as number)
+          stream.emit("close", undefined)
         })
         .mockImplementationOnce((_command: string, callback: ExecCallback) => {
           const stream = makeStream()
           callback(undefined, stream)
-          stream.emit("close", undefined as unknown as number)
+          stream.emit("close", undefined)
         })
 
       const client = makeClientWithExecSpy(execSpy)

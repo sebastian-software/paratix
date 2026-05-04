@@ -38,7 +38,7 @@ class MockReadableStream extends EventEmitter {
 }
 
 function makeMockStream(): SftpMockStream {
-  return new MockReadableStream() as SftpMockStream
+  return new MockReadableStream()
 }
 
 function makeSftpSession() {
