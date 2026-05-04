@@ -25,6 +25,7 @@ const gitShortHash = resolveGitShortHash(import.meta.dirname)
 const displayVersion = gitShortHash === "" ? version : `${version}-${gitShortHash}`
 
 export default defineConfig({
+  banner: { js: "#!/usr/bin/env node" },
   clean: true,
   define: {
     PACKAGE_DISPLAY_VERSION: JSON.stringify(displayVersion),
