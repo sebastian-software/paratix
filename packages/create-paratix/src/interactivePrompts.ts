@@ -46,8 +46,8 @@ const HOST_FINGERPRINT_OPTIONS: Array<SelectOption<"placeholder" | "scan">> = [
   },
   {
     description:
-      "Keep the expectedHostFingerprint placeholder in server.ts and verify the host key manually later.",
-    label: "Keep placeholder",
+      "Skip pinning now. The generated project will fail closed until known_hosts is prepared or a verified expectedHostFingerprint/PublicKey is added.",
+    label: "Skip pinning",
     value: "placeholder",
   },
 ]
@@ -64,8 +64,8 @@ const HOST_FINGERPRINT_CONFIRM_OPTIONS: Array<SelectOption<"discard" | "pin">> =
   },
   {
     description:
-      "Keep the expectedHostFingerprint placeholder in server.ts. Choose this if you cannot verify the fingerprint right now.",
-    label: "Discard and keep placeholder",
+      "Skip pinning now. The generated project will fail closed until known_hosts is prepared or a verified host-key pin is added.",
+    label: "Discard and skip",
     value: "discard",
   },
 ]

@@ -906,8 +906,8 @@ describe("promptForHostFingerprint", () => {
         },
         {
           description:
-            "Keep the expectedHostFingerprint placeholder in server.ts and verify the host key manually later.",
-          label: "Keep placeholder",
+            "Skip pinning now. The generated project will fail closed until known_hosts is prepared or a verified expectedHostFingerprint/PublicKey is added.",
+          label: "Skip pinning",
           value: "placeholder",
         },
       ]
@@ -935,15 +935,15 @@ describe("promptForHostFingerprint", () => {
         value: "pin",
       },
       {
-        description: expect.stringContaining("Keep the expectedHostFingerprint placeholder"),
-        label: "Discard and keep placeholder",
+        description: expect.stringContaining("fail closed"),
+        label: "Discard and skip",
         value: "discard",
       },
     ])
   })
 
-  // R-0000202: after a scan has happened, discarding it must not downgrade
-  // to a generated accept-new first run.
+  // R-0000202: after a scan has happened, discarding it must keep scaffolding
+  // fail-closed instead of silently trusting the presented key.
   it("rejects when the operator discards the scanned fingerprint", async () => {
     const select = vi.fn().mockResolvedValueOnce("scan").mockResolvedValueOnce("discard")
     const scanner = vi.fn().mockResolvedValueOnce({
@@ -981,7 +981,7 @@ describe("promptForHostFingerprint", () => {
   })
 
   // R-0000202: a scan failure must surface as an explicit MITM-style warning
-  // and abort instead of falling back to an accept-new first run.
+  // and abort instead of silently trusting the presented key.
   it("emits a MITM warning and rejects after a scan failure", async () => {
     const select = vi.fn().mockResolvedValueOnce("scan")
     const scanner = vi.fn().mockRejectedValueOnce(new Error("network timeout"))
@@ -1495,13 +1495,15 @@ describe("writeProjectFiles", () => {
     )
   })
 
-  it("generated server.ts includes an explicit host-key bootstrap for the first apply:dry", () => {
+  it("generated server.ts keeps first-run host-key checking fail-closed", () => {
     writeProjectFiles(TEST_DIR)
 
     const content = readFileSync(join(TEST_DIR, "server.ts"), "utf8")
 
-    expect(content).toContain('const strictHostKeyChecking = FIRST_RUN ? "accept-new" : "yes";')
+    expect(content).toContain('const strictHostKeyChecking = "yes";')
     expect(content).toContain('pass "paratix apply ... --first-run" for the bootstrap run')
+    expect(content).toContain("pin expectedHostFingerprint/PublicKey or pre-populate known_hosts")
+    expect(content).not.toContain('"accept-new"')
     expect(content).toContain(
       'expectedHostFingerprint: "SHA256:REPLACE_ME_WITH_YOUR_HOST_FINGERPRINT"'
     )
@@ -1525,7 +1527,7 @@ describe("writeProjectFiles", () => {
     expect(content).not.toContain(
       'expectedHostFingerprint: "SHA256:REPLACE_ME_WITH_YOUR_HOST_FINGERPRINT"'
     )
-    expect(content).not.toContain('const strictHostKeyChecking = FIRST_RUN ? "accept-new" : "yes";')
+    expect(content).not.toContain('"accept-new"')
   })
 
   it("generated server.ts keeps the ~/.ssh privateKey default that Paratix expands at runtime", () => {
@@ -1579,7 +1581,8 @@ describe("writeProjectFiles", () => {
     expect(content).toContain("Transitional bootstrap mode:")
     expect(content).toContain('PasswordAuthentication: "no"')
     expect(content).toContain('PermitRootLogin: FIRST_RUN ? "prohibit-password" : "no"')
-    expect(content).toContain('const strictHostKeyChecking = FIRST_RUN ? "accept-new" : "yes";')
+    expect(content).toContain('const strictHostKeyChecking = "yes";')
+    expect(content).not.toContain('"accept-new"')
     expect(content).toContain(
       'expectedHostFingerprint: "SHA256:REPLACE_ME_WITH_YOUR_HOST_FINGERPRINT"'
     )

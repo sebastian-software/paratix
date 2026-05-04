@@ -76,12 +76,13 @@ The scaffolded project includes:
 The generated project keeps this explicit:
 
 - `paratix apply ... --first-run` stays on port `22`, completes the hardened bootstrap stage, and stops intentionally at the first-run checkpoint
-- later runs use the hardened path, usually on port `2222`, with strict host-key checking again
+- first and later runs use strict host-key checking; pin `expectedHostFingerprint`/`expectedHostPublicKey` or pre-populate `known_hosts` before connecting
+- later runs use the hardened path, usually on port `2222`, with the same strict host-key checking
 
 When you scaffold interactively, the CLI can also:
 
 - select an admin public key from `~/.ssh`
-- pin the current host key from SSH port `22` as `expectedHostFingerprint`
+- scan the current host key from SSH port `22` and pin it as `expectedHostFingerprint` after you verify it out of band
 
 ## Non-Interactive Usage
 

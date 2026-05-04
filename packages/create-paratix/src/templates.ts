@@ -90,10 +90,7 @@ function createBaseServerHeader({
   host,
   sshUser,
 }: BaseServerHeaderOptions): string {
-  const strictHostKeyCheckingDeclaration =
-    expectedHostFingerprint == null
-      ? 'const strictHostKeyChecking = FIRST_RUN ? "accept-new" : "yes";'
-      : 'const strictHostKeyChecking = "yes";'
+  const strictHostKeyCheckingDeclaration = 'const strictHostKeyChecking = "yes";'
   const expectedHostFingerprintLine =
     expectedHostFingerprint == null
       ? '    // expectedHostFingerprint: "SHA256:REPLACE_ME_WITH_YOUR_HOST_FINGERPRINT",'
@@ -116,9 +113,10 @@ export default server({
   ssh: {
     ports: sshPorts,
     privateKey: "~/.ssh/id_ed25519", // "~" is expanded by Paratix
-    // FIRST_RUN keeps the bootstrap path explicit:
+    // FIRST_RUN keeps the bootstrap path explicit and fail-closed:
     // - pass "paratix apply ... --first-run" for the bootstrap run
-    // - later runs omit that flag and go through port 2222 with strict host-key checking again
+    // - pin expectedHostFingerprint/PublicKey or pre-populate known_hosts before connecting
+    // - later runs omit that flag and go through port 2222 with the same strict host-key checking
     strictHostKeyChecking,
     user: ${sshUser},
 ${expectedHostFingerprintLine}
