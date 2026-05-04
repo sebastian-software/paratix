@@ -1,11 +1,21 @@
 import { describe, expect, it, vi } from "vitest"
 
+import { sha256String } from "../../src/modules/fileHelpers.js"
 import { quadlet } from "../../src/modules/quadlet.js"
 import { createMockSsh } from "../helpers/mockSsh.js"
 
 const emptyEnv = {}
 
 const quadletFilePath = "/etc/containers/systemd/traefik.container"
+const traefikReloadFlagPrefix = `quadlet-container-${sha256String("traefik").slice(0, 16)}-`
+
+function buildReloadFlag(name: string, content: string): string {
+  return `quadlet-container-${sha256String(name).slice(0, 16)}-${sha256String(content).slice(0, 16)}`
+}
+
+function buildReloadFlagCheck(name: string, content: string): string {
+  return `[ -f /var/lib/paratix/flags/'${buildReloadFlag(name, content)}' ]`
+}
 
 function expectedQuadletContent(): string {
   return [
@@ -56,12 +66,23 @@ function createQuadletModule() {
   })
 }
 
+function createSuccessfulApplySsh() {
+  return createMockSsh(
+    {
+      "mkdir -p '/etc/containers/systemd'": { code: 0 },
+      "systemctl daemon-reload": { code: 0 },
+    },
+    { defaultExecResult: { code: 0 } }
+  )
+}
+
 describe("quadlet.container", () => {
   it("check returns ok when the remote quadlet matches", async () => {
     const ssh = createMockSsh({
       [`[ -e '${quadletFilePath}' ]`]: { code: 0 },
       [`cat '${quadletFilePath}'`]: { code: 0, stdout: expectedQuadletContent() },
       [`stat -c '%a' '${quadletFilePath}'`]: { code: 0, stdout: "644\n" },
+      [buildReloadFlagCheck("traefik", expectedQuadletContent())]: { code: 0 },
     })
 
     const result = await createQuadletModule().check(ssh, emptyEnv)
@@ -114,10 +135,26 @@ describe("quadlet.container", () => {
     expect(result).toBe("needs-apply")
   })
 
+  it("check returns needs-apply when daemon-reload marker is missing", async () => {
+    const ssh = createMockSsh({
+      [`[ -e '${quadletFilePath}' ]`]: { code: 0 },
+      [`cat '${quadletFilePath}'`]: { code: 0, stdout: expectedQuadletContent() },
+      [`stat -c '%a' '${quadletFilePath}'`]: { code: 0, stdout: "644\n" },
+      [buildReloadFlagCheck("traefik", expectedQuadletContent())]: { code: 1 },
+    })
+
+    const result = await createQuadletModule().check(ssh, emptyEnv)
+
+    expect(result).toBe("needs-apply")
+  })
+
   it("apply creates the quadlet directory, writes the file, and reloads systemd", async () => {
     const ssh = createMockSsh({
+      "mkdir -p /var/lib/paratix/flags": { code: 0 },
       "mkdir -p '/etc/containers/systemd'": { code: 0 },
       "systemctl daemon-reload": { code: 0 },
+      [`find /var/lib/paratix/flags -maxdepth 1 -name '${traefikReloadFlagPrefix}*' -delete && touch /var/lib/paratix/flags/'${buildReloadFlag("traefik", expectedQuadletContent())}'`]:
+        { code: 0 },
     })
     const writeFile = vi.spyOn(ssh, "writeFile").mockResolvedValue()
 
@@ -126,6 +163,9 @@ describe("quadlet.container", () => {
     expect(result.status).toBe("changed")
     expect(ssh.calls).toContain("mkdir -p '/etc/containers/systemd'")
     expect(ssh.calls).toContain("systemctl daemon-reload")
+    expect(ssh.calls).toContain(
+      `find /var/lib/paratix/flags -maxdepth 1 -name '${traefikReloadFlagPrefix}*' -delete && touch /var/lib/paratix/flags/'${buildReloadFlag("traefik", expectedQuadletContent())}'`
+    )
     expect(writeFile).toHaveBeenCalledWith(quadletFilePath, expectedQuadletContent(), {
       mode: "0644",
     })
@@ -139,6 +179,9 @@ describe("quadlet.container", () => {
     const result = await createQuadletModule().apply(ssh, emptyEnv)
 
     expect(result.status).toBe("failed")
+    expect(ssh.calls).not.toContain(
+      `find /var/lib/paratix/flags -maxdepth 1 -name '${traefikReloadFlagPrefix}*' -delete && touch /var/lib/paratix/flags/'${buildReloadFlag("traefik", expectedQuadletContent())}'`
+    )
   })
 
   it("apply returns failed when systemctl daemon-reload exits with non-zero code", async () => {
@@ -193,6 +236,7 @@ describe("quadlet.container", () => {
       [`[ -e '${filePath}' ]`]: { code: 0 },
       [`cat '${filePath}'`]: { code: 0, stdout: expectedContent },
       [`stat -c '%a' '${filePath}'`]: { code: 0, stdout: "644\n" },
+      [buildReloadFlagCheck("pocket-id", expectedContent)]: { code: 0 },
     })
 
     const result = await mod.check(ssh, emptyEnv)
@@ -206,10 +250,7 @@ describe("quadlet.container", () => {
       name: "nginx",
     })
 
-    const ssh = createMockSsh({
-      "mkdir -p '/etc/containers/systemd'": { code: 0 },
-      "systemctl daemon-reload": { code: 0 },
-    })
+    const ssh = createSuccessfulApplySsh()
     const writeFile = vi.spyOn(ssh, "writeFile").mockResolvedValue()
 
     await mod.apply(ssh, emptyEnv)
@@ -227,10 +268,7 @@ describe("quadlet.container", () => {
       name: "nginx-no-health",
     })
 
-    const ssh = createMockSsh({
-      "mkdir -p '/etc/containers/systemd'": { code: 0 },
-      "systemctl daemon-reload": { code: 0 },
-    })
+    const ssh = createSuccessfulApplySsh()
     const writeFile = vi.spyOn(ssh, "writeFile").mockResolvedValue()
 
     await mod.apply(ssh, emptyEnv)
@@ -296,10 +334,7 @@ describe("quadlet.container", () => {
       workingDir: "/app",
     })
 
-    const ssh = createMockSsh({
-      "mkdir -p '/etc/containers/systemd'": { code: 0 },
-      "systemctl daemon-reload": { code: 0 },
-    })
+    const ssh = createSuccessfulApplySsh()
     const writeFile = vi.spyOn(ssh, "writeFile").mockResolvedValue()
 
     await mod.apply(ssh, emptyEnv)
@@ -359,10 +394,7 @@ describe("quadlet.container", () => {
       timeoutStopSec: 30,
     })
 
-    const ssh = createMockSsh({
-      "mkdir -p '/etc/containers/systemd'": { code: 0 },
-      "systemctl daemon-reload": { code: 0 },
-    })
+    const ssh = createSuccessfulApplySsh()
     const writeFile = vi.spyOn(ssh, "writeFile").mockResolvedValue()
 
     await mod.apply(ssh, emptyEnv)
@@ -383,10 +415,7 @@ describe("quadlet.container", () => {
       name: "no-svc",
     })
 
-    const ssh = createMockSsh({
-      "mkdir -p '/etc/containers/systemd'": { code: 0 },
-      "systemctl daemon-reload": { code: 0 },
-    })
+    const ssh = createSuccessfulApplySsh()
     const writeFile = vi.spyOn(ssh, "writeFile").mockResolvedValue()
 
     await mod.apply(ssh, emptyEnv)
@@ -403,10 +432,7 @@ describe("quadlet.container", () => {
       name: "health-on-fail",
     })
 
-    const ssh = createMockSsh({
-      "mkdir -p '/etc/containers/systemd'": { code: 0 },
-      "systemctl daemon-reload": { code: 0 },
-    })
+    const ssh = createSuccessfulApplySsh()
     const writeFile = vi.spyOn(ssh, "writeFile").mockResolvedValue()
 
     await mod.apply(ssh, emptyEnv)
@@ -423,10 +449,7 @@ describe("quadlet.container", () => {
       readOnly: false,
     })
 
-    const ssh = createMockSsh({
-      "mkdir -p '/etc/containers/systemd'": { code: 0 },
-      "systemctl daemon-reload": { code: 0 },
-    })
+    const ssh = createSuccessfulApplySsh()
     const writeFile = vi.spyOn(ssh, "writeFile").mockResolvedValue()
 
     await mod.apply(ssh, emptyEnv)

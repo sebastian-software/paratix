@@ -1,6 +1,8 @@
 import { failed, failedCommand } from "../moduleFailure.js"
 import { shellQuote } from "../ssh.js"
 import { type Module, type ModuleResult, NEEDS_APPLY, type SshConnection } from "../types.js"
+import { sha256String } from "./fileHelpers.js"
+import { hasFlag, setVersionedFlag } from "./moduleHelpers.js"
 import {
   buildQuadletContainerLines,
   buildQuadletImagePullCommand,
@@ -27,6 +29,20 @@ const SYSTEMCTL = "systemctl"
 
 function normalizeMode(mode: string): string {
   return mode.replace(/^0+/v, "")
+}
+
+function buildQuadletReloadFlag(
+  name: string,
+  content: string
+): {
+  flagName: string
+  flagPrefix: string
+} {
+  const flagPrefix = `quadlet-container-${sha256String(name).slice(0, 16)}-`
+  return {
+    flagName: `${flagPrefix}${sha256String(content).slice(0, 16)}`,
+    flagPrefix,
+  }
 }
 
 function generateContainerQuadlet(options: QuadletContainerOptions): string {
@@ -204,15 +220,21 @@ export const quadlet = {
     validateQuadletName(options.name)
     const filePath = getQuadletContainerFilePath(options.name)
     const content = generateContainerQuadlet(options)
+    const reloadFlag = buildQuadletReloadFlag(options.name, content)
 
     return {
       async apply(ssh: null | SshConnection): Promise<ModuleResult> {
         if (!ssh) return failed(`[quadlet.container: ${options.name}] SSH connection is required`)
-        return applyQuadletFile({ content, filePath, name: options.name, ssh })
+        const result = await applyQuadletFile({ content, filePath, name: options.name, ssh })
+        if (result.status !== "changed") return result
+        await setVersionedFlag(ssh, reloadFlag.flagName, reloadFlag.flagPrefix)
+        return result
       },
       async check(ssh: null | SshConnection): Promise<"needs-apply" | "ok"> {
         if (!ssh) return NEEDS_APPLY
-        return checkQuadletFile({ content, filePath, ssh })
+        const fileResult = await checkQuadletFile({ content, filePath, ssh })
+        if (fileResult !== "ok") return fileResult
+        return (await hasFlag(ssh, reloadFlag.flagName)) ? "ok" : NEEDS_APPLY
       },
       name: `quadlet.container: ${options.name}`,
     }
