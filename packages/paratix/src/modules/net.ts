@@ -468,6 +468,39 @@ function buildRouteReloadFlag(parameters: RouteParameters): {
 }
 
 /**
+ * Test whether a tokenized `ip route` line contains an exact keyword value.
+ *
+ * @param tokens - Whitespace-split route line tokens.
+ * @param keyword - The route keyword to find, such as `via` or `dev`.
+ * @param expected - The exact token expected after the keyword.
+ * @returns `true` when the keyword is followed by the exact expected value.
+ */
+function routeTokenValueMatches(tokens: string[], keyword: string, expected: string): boolean {
+  const index = tokens.indexOf(keyword)
+  return index !== -1 && tokens[index + 1] === expected
+}
+
+/**
+ * Test whether one `ip route show` output line matches the desired route.
+ *
+ * @param line - A single `ip route show` output line.
+ * @param parameters - The expected route destination, gateway and device.
+ * @param parameters.destination - The expected destination token.
+ * @param parameters.device - Optional expected device token.
+ * @param parameters.gateway - The expected gateway token.
+ * @returns `true` when destination, gateway and optional device match exactly.
+ */
+function routeLineMatches(
+  line: string,
+  parameters: { destination: string; device?: string; gateway: string }
+): boolean {
+  const tokens = line.trim().split(/\s+/v)
+  if (tokens[0] !== parameters.destination) return false
+  if (!routeTokenValueMatches(tokens, "via", parameters.gateway)) return false
+  return parameters.device == null || routeTokenValueMatches(tokens, "dev", parameters.device)
+}
+
+/**
  * Run the live-route check against the remote host.
  *
  * @param conn - The SSH connection.
@@ -481,11 +514,11 @@ async function hasLiveRoute(
   conn: SshConnection,
   parameters: { destination: string; device?: string; gateway: string }
 ): Promise<boolean> {
-  const { destination, device, gateway } = parameters
-  const result = await conn.exec(`ip route show ${shellQuote(destination)}`, EXEC_OPTS)
-  const output = result.stdout.trim()
-  if (!output.includes(`via ${gateway}`)) return false
-  return device == null || output.includes(` dev ${device}`)
+  const result = await conn.exec(`ip route show ${shellQuote(parameters.destination)}`, EXEC_OPTS)
+  if (result.code !== 0) return false
+  return result.stdout
+    .split(/\r?\n/v)
+    .some((line) => line.trim() !== "" && routeLineMatches(line, parameters))
 }
 
 /**
