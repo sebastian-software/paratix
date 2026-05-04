@@ -54,6 +54,41 @@ function buildRepositoryUpdateFlag(
   }
 }
 
+type AptRepositorySnapshot =
+  | {
+      content: string
+      exists: true
+    }
+  | { exists: false }
+
+async function snapshotAptRepository(
+  ssh: SshConnection,
+  filePath: string
+): Promise<AptRepositorySnapshot> {
+  const exists = await ssh.test(`[ -f ${shellQuote(filePath)} ]`)
+  if (!exists) return { exists: false }
+  return { content: await ssh.readFile(filePath), exists: true }
+}
+
+async function restoreAptRepository(
+  ssh: SshConnection,
+  filePath: string,
+  snapshot: AptRepositorySnapshot
+): Promise<"ok" | ModuleResult> {
+  if (snapshot.exists) {
+    await ssh.writeFile(filePath, snapshot.content, { mode: APT_REPOSITORY_MODE })
+    return "ok"
+  }
+  const removeResult = await ssh.exec(`rm -f ${shellQuote(filePath)}`, {
+    ignoreExitCode: true,
+    silent: true,
+  })
+  if (removeResult.code !== 0) {
+    return failedCommand("[apt.repository] failed to rollback repository file", removeResult)
+  }
+  return "ok"
+}
+
 const APT_BASE_EXEC_OPTS = { ignoreExitCode: true, silent: true } as const
 
 function aptExecOptions(options?: UpgradeOptions): ExecOptions {
@@ -546,13 +581,17 @@ export const apt = {
     return {
       async apply(ssh: null | SshConnection): Promise<ModuleResult> {
         if (!ssh) return failed(`[apt.repository] SSH connection is required for ${name}`)
+        const previousRepository = await snapshotAptRepository(ssh, filePath)
         await ssh.writeFile(filePath, `${expectedContent}\n`, { mode: APT_REPOSITORY_MODE })
         const result = await ssh.exec(`${NONINTERACTIVE} apt-get update`, {
           ignoreExitCode: true,
           silent: true,
         })
-        if (result.code !== 0)
+        if (result.code !== 0) {
+          const rollback = await restoreAptRepository(ssh, filePath, previousRepository)
+          if (rollback !== "ok") return rollback
           return failedCommand(`[apt.repository] apt-get update failed for ${name}`, result)
+        }
         await setVersionedFlag(ssh, updateFlag.flagName, updateFlag.flagPrefix)
         return { status: "changed" }
       },

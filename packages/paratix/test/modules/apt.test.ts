@@ -576,6 +576,7 @@ describe("apt.repository (standard form)", () => {
   it("apply sets update marker only after apt-get update succeeds", async () => {
     const ssh = createMockSsh(
       {
+        [`[ -f '${filePath}' ]`]: { code: 1 },
         "DEBIAN_FRONTEND=noninteractive apt-get update": { code: 0 },
       },
       { defaultExecResult: SUCCESSFUL_EXEC_DEFAULT }
@@ -591,6 +592,8 @@ describe("apt.repository (standard form)", () => {
 
   it("apply does not set update marker when apt-get update fails", async () => {
     const ssh = createMockSsh({
+      [`[ -f '${filePath}' ]`]: { code: 1 },
+      [`rm -f '${filePath}'`]: { code: 0 },
       "DEBIAN_FRONTEND=noninteractive apt-get update": { code: 1 },
     })
     const mod = apt.repository("docker", source)
@@ -600,6 +603,31 @@ describe("apt.repository (standard form)", () => {
     expect(ssh.calls).not.toContain(
       `find /var/lib/paratix/flags -maxdepth 1 -name 'apt-repository-${sha256String("docker").slice(0, 16)}-*' -delete && touch /var/lib/paratix/flags/'${updateFlag}'`
     )
+  })
+
+  it("apply rolls back the repository file when apt-get update fails", async () => {
+    const previousContent = "deb https://download.docker.com/linux/ubuntu jammy stable\n"
+    const ssh = createMockSsh({
+      [`[ -f '${filePath}' ]`]: { code: 0 },
+      [`cat '${filePath}'`]: { stdout: previousContent },
+      "DEBIAN_FRONTEND=noninteractive apt-get update": { code: 1 },
+    })
+    const mod = apt.repository("docker", source)
+    const result = await mod.apply(ssh, emptyEnv)
+
+    expect(result.status).toBe("failed")
+    expect(ssh.writeFileCalls).toStrictEqual([
+      {
+        content: `${expectedContentWithSignedBy}\n`,
+        options: { mode: "0644" },
+        remotePath: filePath,
+      },
+      {
+        content: previousContent,
+        options: { mode: "0644" },
+        remotePath: filePath,
+      },
+    ])
   })
 
   // R-0000098 regression: name lands directly in
