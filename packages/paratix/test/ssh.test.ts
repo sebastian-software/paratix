@@ -2688,6 +2688,21 @@ describe("SshConnectionImpl", () => {
       ).resolves.toBeUndefined()
     })
 
+    it("rejects signal-closed execRaw streams instead of treating them as success", async () => {
+      const execSpy = vi.fn().mockImplementation((_command: string, callback: ExecCallback) => {
+        const stream = makeStream()
+        callback(undefined, stream)
+        stream.emit("close", null, "SIGKILL")
+      })
+
+      const client = makeClientWithExecSpy(execSpy)
+      const ssh = makeConnectedSsh(client, { sudoPassword: null, user: "deploy" })
+
+      await expect(
+        (ssh as unknown as Record<string, unknown>).execWithoutSudo("true")
+      ).rejects.toThrow("Command failed with signal SIGKILL")
+    })
+
     it("treats undefined ssh2 close code as exit code 0 in outputWithoutSudo (regression)", async () => {
       const execSpy = vi.fn().mockImplementation((_command: string, callback: ExecCallback) => {
         const stream = makeStream()

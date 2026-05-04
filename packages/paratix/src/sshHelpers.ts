@@ -231,8 +231,12 @@ function writeStderr(t: string): void {
  * @param code - Exit code from the ssh2 `close` event.
  * @returns A normalized numeric exit code.
  */
-export function normalizeSshCloseCode(code: number | undefined): number {
+export function normalizeSshCloseCode(code: null | number | undefined): number {
   return code ?? 0
+}
+
+function normalizeSshCloseSignal(signal: null | string | undefined): string | undefined {
+  return signal == null || signal === "" ? undefined : signal
 }
 
 /**
@@ -268,10 +272,25 @@ export function collectStreamOutput(parameters: StreamOutputParameters): void {
     stderrMasker.flush()
     reject(error)
   })
-  stream.on("close", (code: number) => {
+  stream.on("close", (code: null | number | undefined, signal?: null | string) => {
     clearTimeout(timer)
     stdoutMasker.flush()
     stderrMasker.flush()
+    const closeSignal = normalizeSshCloseSignal(signal)
+    if (closeSignal !== undefined) {
+      const wasTruncated =
+        codepointLengthExceeds(stdout, MAX_OUTPUT_LENGTH) ||
+        codepointLengthExceeds(stderr, MAX_OUTPUT_LENGTH)
+      const hint = wasTruncated ? "\n(use --verbose for full output)" : ""
+      reject(
+        new CommandError(
+          `Command failed with signal ${closeSignal}: ${maskSecrets(command, secrets)}\nstdout: ${truncateOutput(stdout)}\nstderr: ${truncateOutput(stderr)}${hint}`,
+          stdout,
+          stderr
+        )
+      )
+      return
+    }
     const exitCode = normalizeSshCloseCode(code)
     if (exitCode !== 0 && options.ignoreExitCode !== true) {
       const wasTruncated =

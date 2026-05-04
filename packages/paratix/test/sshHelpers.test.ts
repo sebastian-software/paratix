@@ -29,7 +29,7 @@ type CollectResult = Promise<{ code: number; stderr: string; stdout: string }>
 
 async function runCollect(
   overrides: {
-    emitClose?: { code: number }
+    emitClose?: { code: null | number | undefined; signal?: string }
     emitStderr?: string
     emitStdout?: string
   } & Partial<StreamOutputParameters>
@@ -54,7 +54,7 @@ async function runCollect(
 
     if (emitStdout !== undefined) stream.emit("data", Buffer.from(emitStdout))
     if (emitStderr !== undefined) stderr.emit("data", Buffer.from(emitStderr))
-    stream.emit("close", emitClose.code)
+    stream.emit("close", emitClose.code, emitClose.signal)
 
     clearTimeout(timer)
   })
@@ -435,6 +435,16 @@ describe("collectStreamOutput", () => {
     )
 
     expect(result.code).toBe(0)
+  })
+
+  it("rejects signal-closed streams even when exit codes are ignored", async () => {
+    const promise = runCollect({
+      emitClose: { code: null, signal: "SIGKILL" },
+      emitStderr: "killed",
+      options: { ignoreExitCode: true, silent: true },
+    })
+
+    await expect(promise).rejects.toThrow("Command failed with signal SIGKILL")
   })
 
   it("masks secrets in resolved stdout and stderr on successful exit (exit code 0)", async () => {

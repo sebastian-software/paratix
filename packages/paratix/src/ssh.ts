@@ -860,8 +860,12 @@ export class SshConnectionImpl implements SshConnection {
         stream.on("data", (chunk: Buffer) => {
           chunks.push(chunk)
         })
-        stream.on("close", (code: number) => {
+        stream.on("close", (code: null | number | undefined, signal?: null | string) => {
           clearTimeout(timer)
+          if (signal != null && signal !== "") {
+            wrappedReject(new Error(`Command failed with signal ${signal}: ${command}`))
+            return
+          }
           wrappedResolve({
             exitCode: normalizeSshCloseCode(code),
             stdout: Buffer.concat(chunks).toString("utf8"),
