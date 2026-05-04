@@ -4,7 +4,7 @@ import { archive } from "../../src/modules/archive.js"
 import { createMockSsh as createBaseMockSsh } from "../helpers/mockSsh.js"
 
 const createMockSsh: typeof createBaseMockSsh = (responses, options) =>
-  createBaseMockSsh(responses, { strict: false, ...options })
+  createBaseMockSsh(responses, { defaultExecResult: { code: 0 }, ...options })
 
 const emptyEnv = {}
 

@@ -4,7 +4,7 @@ import { cron } from "../../src/modules/cron.js"
 import { createMockSsh as createBaseMockSsh } from "../helpers/mockSsh.js"
 
 const createMockSsh: typeof createBaseMockSsh = (responses, options) =>
-  createBaseMockSsh(responses, { strict: false, ...options })
+  createBaseMockSsh(responses, { defaultExecResult: { code: 0 }, ...options })
 
 const emptyEnv = {}
 

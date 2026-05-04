@@ -5,7 +5,11 @@ import { sshd } from "../../src/modules/sshd.js"
 import { createMockSsh as createBaseMockSsh } from "../helpers/mockSsh.js"
 
 const createMockSsh: typeof createBaseMockSsh = (responses, options) =>
-  createBaseMockSsh(responses, { strict: false, ...options })
+  createBaseMockSsh(responses, {
+    allowWrites: [{ options: { mode: "0644" }, remotePath: /^\/tmp\/paratix-sshd-dry-run-/v }],
+    defaultExecResult: { code: 0 },
+    ...options,
+  })
 
 const emptyEnv = {}
 const SSHD_CONFIG = "/etc/ssh/sshd_config"

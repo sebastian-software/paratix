@@ -4,7 +4,7 @@ import { swap } from "../../src/modules/swap.js"
 import { createMockSsh as createBaseMockSsh } from "../helpers/mockSsh.js"
 
 const createMockSsh: typeof createBaseMockSsh = (responses, options) =>
-  createBaseMockSsh(responses, { strict: false, ...options })
+  createBaseMockSsh(responses, { defaultTestResult: true, ...options })
 
 const emptyEnv = {}
 const swapPath = "/swapfile"
@@ -63,6 +63,7 @@ describe("swap.file — check", () => {
 
   it("returns needs-apply when the swap file is missing", async () => {
     const ssh = createMockSsh({
+      [`[ -e '${swapPath}' ]`]: { code: 1 },
       [`cat '/etc/fstab'`]: { stdout: `${fstabLine}\n` },
       [`cat '${swapPath}'`]: { code: 1, stdout: "" },
     })
