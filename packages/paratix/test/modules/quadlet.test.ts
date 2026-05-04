@@ -150,7 +150,7 @@ describe("quadlet.container", () => {
 
   it("apply creates the quadlet directory, writes the file, and reloads systemd", async () => {
     const ssh = createMockSsh({
-      [`find /var/lib/paratix/flags -maxdepth 1 -name '${traefikReloadFlagPrefix}*' -delete && touch /var/lib/paratix/flags/'${buildReloadFlag("traefik", expectedQuadletContent())}'`]:
+      [`find /var/lib/paratix/flags -maxdepth 1 -name '${traefikReloadFlagPrefix}*' ! -name '*.lock' -delete && touch /var/lib/paratix/flags/'${buildReloadFlag("traefik", expectedQuadletContent())}'`]:
         { code: 0 },
       "mkdir -p '/etc/containers/systemd'": { code: 0 },
       "mkdir -p /var/lib/paratix/flags": { code: 0 },
@@ -164,7 +164,7 @@ describe("quadlet.container", () => {
     expect(ssh.calls).toContain("mkdir -p '/etc/containers/systemd'")
     expect(ssh.calls).toContain("systemctl daemon-reload")
     expect(ssh.calls).toContain(
-      `find /var/lib/paratix/flags -maxdepth 1 -name '${traefikReloadFlagPrefix}*' -delete && touch /var/lib/paratix/flags/'${buildReloadFlag("traefik", expectedQuadletContent())}'`
+      `find /var/lib/paratix/flags -maxdepth 1 -name '${traefikReloadFlagPrefix}*' ! -name '*.lock' -delete && touch /var/lib/paratix/flags/'${buildReloadFlag("traefik", expectedQuadletContent())}'`
     )
     expect(writeFile).toHaveBeenCalledWith(quadletFilePath, expectedQuadletContent(), {
       mode: "0644",
@@ -180,7 +180,7 @@ describe("quadlet.container", () => {
 
     expect(result.status).toBe("failed")
     expect(ssh.calls).not.toContain(
-      `find /var/lib/paratix/flags -maxdepth 1 -name '${traefikReloadFlagPrefix}*' -delete && touch /var/lib/paratix/flags/'${buildReloadFlag("traefik", expectedQuadletContent())}'`
+      `find /var/lib/paratix/flags -maxdepth 1 -name '${traefikReloadFlagPrefix}*' ! -name '*.lock' -delete && touch /var/lib/paratix/flags/'${buildReloadFlag("traefik", expectedQuadletContent())}'`
     )
   })
 

@@ -39,13 +39,18 @@ function createScriptMockSsh(options?: {
   const remotePath = makeRemoteScriptPath(name, options?.remoteSuffix)
   const mktempCmd = `mktemp -p /tmp 'paratix-script-${name}.XXXXXX'`
   const scriptCommand = buildScriptCommand(remotePath, options?.args)
-  const flagCommand = `find ${FLAGS_DIRECTORY} -maxdepth 1 -name 'script-${name}-*' -delete && touch ${FLAGS_DIRECTORY}/'script-${name}-${version}'`
+  const flagName = `script-${name}-${version}`
+  const lockName = `${flagName}.lock`
+  const flagCommand = `find ${FLAGS_DIRECTORY} -maxdepth 1 -name 'script-${name}-*' ! -name '*.lock' -delete && touch ${FLAGS_DIRECTORY}/'script-${name}-${version}'`
 
   return createStrictMockSsh(
     {
+      [`[ -f ${FLAGS_DIRECTORY}/'${flagName}' ]`]: { code: 1 },
       [`chmod +x '${remotePath}'`]: { code: 0 },
       [`mkdir -p ${FLAGS_DIRECTORY}`]: { code: 0 },
+      [`mkdir ${FLAGS_DIRECTORY}/'${lockName}'`]: { code: 0 },
       [`rm -f '${remotePath}'`]: { code: 0 },
+      [`rmdir ${FLAGS_DIRECTORY}/'${lockName}'`]: { code: 0 },
       [flagCommand]: { code: 0 },
       [mktempCmd]: { code: 0, stdout: `${remotePath}\n` },
       [scriptCommand]: { code: 0 },
@@ -130,7 +135,7 @@ describe("script.once — apply", () => {
 
     // flag set
     expect(mockSsh.calls).toContain(
-      `find ${FLAGS_DIRECTORY} -maxdepth 1 -name 'script-setup-*' -delete && touch ${FLAGS_DIRECTORY}/'script-setup-1'`
+      `find ${FLAGS_DIRECTORY} -maxdepth 1 -name 'script-setup-*' ! -name '*.lock' -delete && touch ${FLAGS_DIRECTORY}/'script-setup-1'`
     )
   })
 
@@ -144,12 +149,12 @@ describe("script.once — apply", () => {
     const chmodIdx = mockSsh.calls.indexOf(`chmod +x '${remotePath}'`)
     const execIdx = mockSsh.calls.indexOf(`'${remotePath}'`)
     const flagIdx = mockSsh.calls.indexOf(
-      `find ${FLAGS_DIRECTORY} -maxdepth 1 -name 'script-setup-*' -delete && touch ${FLAGS_DIRECTORY}/'script-setup-1'`
+      `find ${FLAGS_DIRECTORY} -maxdepth 1 -name 'script-setup-*' ! -name '*.lock' -delete && touch ${FLAGS_DIRECTORY}/'script-setup-1'`
     )
     const rmIdx = mockSsh.calls.indexOf(`rm -f '${remotePath}'`)
 
     expect(chmodIdx).toBeLessThan(execIdx)
-    expect(execIdx).toBeLessThan(mkdirIdx)
+    expect(mkdirIdx).toBeLessThan(chmodIdx)
     expect(mkdirIdx).toBeLessThan(flagIdx)
     // cleanup happens last (in finally block, after flag is set)
     expect(flagIdx).toBeLessThan(rmIdx)
@@ -201,6 +206,19 @@ describe("script.once — apply", () => {
     await mod.apply(mockSsh, emptyEnv)
     const flagCall = mockSsh.calls.find((c) => c.includes("touch"))
     expect(flagCall).toBeUndefined()
+  })
+
+  it("direct apply returns ok without uploading when the flag already exists", async () => {
+    const mockSsh = createStrictMockSsh({
+      [`[ -f ${FLAGS_DIRECTORY}/'script-setup-1' ]`]: { code: 0 },
+    })
+    const mod = script.once("setup", "/local/setup.sh")
+    const result = await mod.apply(mockSsh, emptyEnv)
+
+    expect(result).toStrictEqual({ status: "ok" })
+    expect(mockSsh.uploadFileCalls).toHaveLength(0)
+    expect(mockSsh.calls).not.toContain("mktemp -p /tmp 'paratix-script-setup.XXXXXX'")
+    expect(mockSsh.calls).not.toContain(`mkdir ${FLAGS_DIRECTORY}/'script-setup-1.lock'`)
   })
 
   it("passes shell-quoted arguments to script", async () => {
@@ -287,7 +305,7 @@ describe("script.once — apply", () => {
     expect(mockSsh.calls).not.toContain(`'${safePath}'`)
     expect(mockSsh.calls).not.toContain(`rm -f '${safePath}'`)
     expect(mockSsh.calls).not.toContain(
-      `find ${FLAGS_DIRECTORY} -maxdepth 1 -name 'script-setup-*' -delete && touch ${FLAGS_DIRECTORY}/'script-setup-1'`
+      `find ${FLAGS_DIRECTORY} -maxdepth 1 -name 'script-setup-*' ! -name '*.lock' -delete && touch ${FLAGS_DIRECTORY}/'script-setup-1'`
     )
   })
 
@@ -296,7 +314,7 @@ describe("script.once — apply", () => {
     const mod = script.once("setup", "/local/setup.sh", { version: "2" })
     await mod.apply(mockSsh, emptyEnv)
     expect(mockSsh.calls).toContain(
-      `find ${FLAGS_DIRECTORY} -maxdepth 1 -name 'script-setup-*' -delete && touch ${FLAGS_DIRECTORY}/'script-setup-2'`
+      `find ${FLAGS_DIRECTORY} -maxdepth 1 -name 'script-setup-*' ! -name '*.lock' -delete && touch ${FLAGS_DIRECTORY}/'script-setup-2'`
     )
   })
 
@@ -305,7 +323,9 @@ describe("script.once — apply", () => {
     const mod = script.once("setup", "/local/setup.sh", { version: "3" })
     await mod.apply(mockSsh, emptyEnv)
     const flagCall = mockSsh.calls.find((c) => c.includes("touch"))
-    expect(flagCall).toContain(`find ${FLAGS_DIRECTORY} -maxdepth 1 -name 'script-setup-*' -delete`)
+    expect(flagCall).toContain(
+      `find ${FLAGS_DIRECTORY} -maxdepth 1 -name 'script-setup-*' ! -name '*.lock' -delete`
+    )
     expect(flagCall).toContain(`touch ${FLAGS_DIRECTORY}/'script-setup-3'`)
   })
 })
@@ -344,8 +364,8 @@ describe("script.once — flagPrefix is shell-quoted to prevent injection", () =
     // The find command that clears old version flags must shell-quote the prefix
     // to prevent command injection via crafted flag names. The glob star stays
     // outside the quotes so it still expands:
-    //   find /var/lib/paratix/flags -maxdepth 1 -name 'script-my-script-*' -delete
-    const expectedFindCmd = `find ${FLAGS_DIRECTORY} -maxdepth 1 -name 'script-my-script-*' -delete && touch ${FLAGS_DIRECTORY}/'script-my-script-1'`
+    //   find /var/lib/paratix/flags -maxdepth 1 -name 'script-my-script-*' ! -name '*.lock' -delete
+    const expectedFindCmd = `find ${FLAGS_DIRECTORY} -maxdepth 1 -name 'script-my-script-*' ! -name '*.lock' -delete && touch ${FLAGS_DIRECTORY}/'script-my-script-1'`
     expect(mockSsh.calls).toContain(expectedFindCmd)
   })
 })

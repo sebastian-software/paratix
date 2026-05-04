@@ -1,7 +1,7 @@
 import { failed, failedCommand } from "../moduleFailure.js"
 import { shellQuote, validateMktempPath } from "../ssh.js"
 import { type Module, type ModuleResult, NEEDS_APPLY, type SshConnection } from "../types.js"
-import { hasFlag, setVersionedFlag } from "./moduleHelpers.js"
+import { applyWithFlagLock, hasFlag, setVersionedFlag } from "./moduleHelpers.js"
 
 const EXEC_OPTS = { ignoreExitCode: true, silent: true } as const
 const NAME_PATTERN = /^[\w.\-]+$/iv
@@ -67,37 +67,42 @@ export const script = {
       async apply(ssh: null | SshConnection): Promise<ModuleResult> {
         if (!ssh) return failed(`[script.once: ${name}] SSH connection is required`)
 
-        // R-0000050: create a per-run remote path via `mktemp` so two
-        // concurrent applies of the same script (e.g. parallel runs
-        // against the same host fleet) cannot race on the same
-        // `/tmp/paratix-script-<name>` file.
-        const allocation = await allocateRemoteScriptPath(ssh, name)
-        if (typeof allocation !== "string") return allocation
-        const remotePath = allocation
+        return applyWithFlagLock(ssh, {
+          async apply() {
+            // R-0000050: create a per-run remote path via `mktemp` so two
+            // concurrent applies of the same script (e.g. parallel runs
+            // against the same host fleet) cannot race on the same
+            // `/tmp/paratix-script-<name>` file.
+            const allocation = await allocateRemoteScriptPath(ssh, name)
+            if (typeof allocation !== "string") return allocation
+            const remotePath = allocation
 
-        await ssh.uploadFile(localPath, remotePath)
+            await ssh.uploadFile(localPath, remotePath)
 
-        try {
-          await ssh.exec(`chmod +x ${shellQuote(remotePath)}`, { silent: true })
+            try {
+              await ssh.exec(`chmod +x ${shellQuote(remotePath)}`, { silent: true })
 
-          const cmd =
-            scriptArguments != null && scriptArguments.length > 0
-              ? `${shellQuote(remotePath)} ${scriptArguments.map((a) => shellQuote(a)).join(" ")}`
-              : shellQuote(remotePath)
-          const result = await ssh.exec(cmd, EXEC_OPTS)
+              const cmd =
+                scriptArguments != null && scriptArguments.length > 0
+                  ? `${shellQuote(remotePath)} ${scriptArguments.map((a) => shellQuote(a)).join(" ")}`
+                  : shellQuote(remotePath)
+              const result = await ssh.exec(cmd, EXEC_OPTS)
 
-          if (result.code !== 0) {
-            return failedCommand(`[script.once: ${name}] script execution failed`, result)
-          }
+              if (result.code !== 0) {
+                return failedCommand(`[script.once: ${name}] script execution failed`, result)
+              }
 
-          await setVersionedFlag(ssh, flagName, flagPrefix)
+              await setVersionedFlag(ssh, flagName, flagPrefix)
 
-          return { status: "changed" }
-        } finally {
-          // The finally block now removes the per-run path created via
-          // mktemp above, never the deterministic legacy path.
-          await ssh.exec(`rm -f ${shellQuote(remotePath)}`, { silent: true })
-        }
+              return { status: "changed" }
+            } finally {
+              // The finally block now removes the per-run path created via
+              // mktemp above, never the deterministic legacy path.
+              await ssh.exec(`rm -f ${shellQuote(remotePath)}`, { silent: true })
+            }
+          },
+          flagName,
+        })
       },
       async check(ssh: null | SshConnection): Promise<"needs-apply" | "ok"> {
         if (!ssh) return NEEDS_APPLY

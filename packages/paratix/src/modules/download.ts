@@ -12,7 +12,7 @@ import {
   buildCurlConfigPayload as buildSharedCurlConfigPayload,
   hasSensitiveQueryParameters,
 } from "./curlHelpers.js"
-import { hasFlag, setFlag } from "./moduleHelpers.js"
+import { applyWithFlagLock, hasFlag, setFlag } from "./moduleHelpers.js"
 import { validateHttpUrl } from "./netHelpers.js"
 
 /**
@@ -670,12 +670,17 @@ export const download = {
       async apply(conn: null | SshConnection): Promise<ModuleResult> {
         if (!conn) return failed(`[download.large: ${destination}] SSH connection is required`)
 
-        const result = await performDownload(conn, downloadParameters)
+        return applyWithFlagLock(conn, {
+          async apply() {
+            const result = await performDownload(conn, downloadParameters)
 
-        if (result.status === "failed") return result
+            if (result.status === "failed") return result
 
-        await setFlag(conn, flagName)
-        return { ...result, status: "changed" }
+            await setFlag(conn, flagName)
+            return { ...result, status: "changed" }
+          },
+          flagName,
+        })
       },
       async check(conn: null | SshConnection): Promise<"needs-apply" | "ok"> {
         if (!conn) return NEEDS_APPLY

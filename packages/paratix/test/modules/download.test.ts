@@ -1163,6 +1163,18 @@ describe("download.large", () => {
       expect(result.status).toBe("failed")
     })
 
+    it("direct apply returns ok without downloading when the flag already exists", async () => {
+      const mockSsh = createMockSsh({
+        [`[ -f /var/lib/paratix/flags/'${flagName}' ]`]: { code: 0 },
+      })
+      const mod = download.large(destination, url, allowUnverifiedDownload)
+      const result = await mod.apply(mockSsh, emptyEnv)
+      expect(result).toStrictEqual({ status: "ok" })
+      expect(mockSsh.calls.every((c) => !c.startsWith("curl"))).toBe(true)
+      expect(mockSsh.calls.every((c) => !c.startsWith("mktemp"))).toBe(true)
+      expect(mockSsh.calls).not.toContain(`mkdir /var/lib/paratix/flags/'${flagName}.lock'`)
+    })
+
     it("downloads file via curl --config from stdin and sets flag on success", async () => {
       const mockSsh = createMockSsh({
         [`mktemp "$(dirname '${destination}')/.paratix-download.XXXXXX"`]: {

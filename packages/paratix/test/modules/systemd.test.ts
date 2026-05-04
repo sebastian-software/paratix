@@ -126,7 +126,7 @@ describe("systemd.unit", () => {
   const reloadFlagCheck = `[ -f /var/lib/paratix/flags/'${reloadFlag}' ]`
   const reloadFlagSet =
     `find /var/lib/paratix/flags -maxdepth 1 -name ` +
-    `'systemd-unit-${sha256String(unitName).slice(0, 16)}-*' -delete && ` +
+    `'systemd-unit-${sha256String(unitName).slice(0, 16)}-*' ! -name '*.lock' -delete && ` +
     `touch /var/lib/paratix/flags/'${reloadFlag}'`
 
   it("check returns ok when file exists, content matches, and mode is 0644", async () => {

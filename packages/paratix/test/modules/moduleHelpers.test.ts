@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest"
 
 import {
+  applyWithFlagLock,
   FLAGS_DIRECTORY,
   hasFlag,
   setFlag,
@@ -10,6 +11,79 @@ import { createMockSsh as createBaseMockSsh } from "../helpers/mockSsh.js"
 
 const createMockSsh: typeof createBaseMockSsh = (responses, options) =>
   createBaseMockSsh(responses, options)
+
+function deferred(): { promise: Promise<void>; resolve: () => void } {
+  let resolvePromise: (() => void) | undefined
+  const promise = new Promise<void>((resolve) => {
+    resolvePromise = resolve
+  })
+  return {
+    promise,
+    resolve() {
+      resolvePromise?.()
+    },
+  }
+}
+
+function createSharedFlagMockSsh(flagName: string): ReturnType<typeof createMockSsh> {
+  const base = createMockSsh(
+    {},
+    {
+      defaultExecResult: { code: 0 },
+      defaultOutputResult: "",
+      defaultTestResult: false,
+    }
+  )
+  let flagExists = false
+  let lockExists = false
+  const waiters: Array<() => void> = []
+
+  function resolveWaiters(): void {
+    for (const resolve of waiters.splice(0)) resolve()
+  }
+
+  const flagTestCommand = `[ -f ${FLAGS_DIRECTORY}/'${flagName}' ]`
+  const lockMkdirCommand = `mkdir ${FLAGS_DIRECTORY}/'${flagName}.lock'`
+  const lockRmdirCommand = `rmdir ${FLAGS_DIRECTORY}/'${flagName}.lock'`
+  const touchFlagCommand = `touch ${FLAGS_DIRECTORY}/'${flagName}'`
+
+  return {
+    ...base,
+    async exec(command, options) {
+      base.calls.push(command)
+      base.execCalls.push({ command, options })
+      if (command === lockMkdirCommand) {
+        if (lockExists) return { code: 1, stderr: "", stdout: "" }
+        lockExists = true
+        return { code: 0, stderr: "", stdout: "" }
+      }
+      if (command === lockRmdirCommand) {
+        lockExists = false
+        resolveWaiters()
+        return { code: 0, stderr: "", stdout: "" }
+      }
+      if (command === touchFlagCommand) {
+        flagExists = true
+        resolveWaiters()
+        return { code: 0, stderr: "", stdout: "" }
+      }
+      if (command.startsWith("i=0; while [ -d")) {
+        if (!flagExists && lockExists) {
+          await new Promise<void>((resolve) => {
+            waiters.push(resolve)
+          })
+        }
+        return { code: 0, stderr: "", stdout: "" }
+      }
+      return { code: 0, stderr: "", stdout: "" }
+    },
+    async test(command) {
+      await Promise.resolve()
+      base.calls.push(command)
+      return command === flagTestCommand && flagExists
+    },
+  }
+}
 
 describe("hasFlag – empty string validation", () => {
   it("throws when flagName is an empty string", async () => {
@@ -52,7 +126,7 @@ describe("setVersionedFlag – empty string validation", () => {
     const flagPrefix = "valid-prefix-"
     const flagName = "valid-prefix-1.0"
     const ssh = createMockSsh({
-      [`find ${FLAGS_DIRECTORY} -maxdepth 1 -name '${flagPrefix}*' -delete && touch ${FLAGS_DIRECTORY}/'${flagName}'`]:
+      [`find ${FLAGS_DIRECTORY} -maxdepth 1 -name '${flagPrefix}*' ! -name '*.lock' -delete && touch ${FLAGS_DIRECTORY}/'${flagName}'`]:
         {
           code: 0,
         },
@@ -64,7 +138,7 @@ describe("setVersionedFlag – empty string validation", () => {
   it("calls find with the correct prefix glob to replace old versioned flags", async () => {
     const flagPrefix = "myapp-"
     const flagName = "myapp-2.0"
-    const expectedCommand = `find ${FLAGS_DIRECTORY} -maxdepth 1 -name '${flagPrefix}*' -delete && touch ${FLAGS_DIRECTORY}/'${flagName}'`
+    const expectedCommand = `find ${FLAGS_DIRECTORY} -maxdepth 1 -name '${flagPrefix}*' ! -name '*.lock' -delete && touch ${FLAGS_DIRECTORY}/'${flagName}'`
     const ssh = createMockSsh({
       [expectedCommand]: { code: 0 },
       "mkdir -p /var/lib/paratix/flags": { code: 0 },
@@ -119,6 +193,66 @@ describe("setFlag – rejects path-traversal-like names", () => {
     })
 
     await expect(setFlag(ssh, flagName)).resolves.not.toThrow()
+  })
+})
+
+describe("applyWithFlagLock", () => {
+  it("skips apply when a direct apply call finds an existing flag", async () => {
+    const flagName = "apply-once"
+    const ssh = createMockSsh({
+      [`[ -f ${FLAGS_DIRECTORY}/'${flagName}' ]`]: { code: 0 },
+    })
+    let applyCalls = 0
+
+    const result = await applyWithFlagLock(ssh, {
+      async apply() {
+        await Promise.resolve()
+        applyCalls += 1
+        return { status: "changed" }
+      },
+      flagName,
+    })
+
+    expect(result).toStrictEqual({ status: "ok" })
+    expect(applyCalls).toBe(0)
+    expect(ssh.calls).not.toContain(`mkdir ${FLAGS_DIRECTORY}/'${flagName}.lock'`)
+  })
+
+  it("runs apply once while a parallel caller waits for the flag", async () => {
+    const flagName = "parallel-apply"
+    const ssh = createSharedFlagMockSsh(flagName)
+    const firstApplyStarted = deferred()
+    const finishFirstApply = deferred()
+    let applyCalls = 0
+
+    const first = applyWithFlagLock(ssh, {
+      async apply() {
+        applyCalls += 1
+        firstApplyStarted.resolve()
+        await finishFirstApply.promise
+        await setFlag(ssh, flagName)
+        return { status: "changed" }
+      },
+      flagName,
+    })
+
+    await firstApplyStarted.promise
+
+    const second = applyWithFlagLock(ssh, {
+      async apply() {
+        applyCalls += 1
+        await setFlag(ssh, flagName)
+        return { status: "changed" }
+      },
+      flagName,
+    })
+
+    finishFirstApply.resolve()
+    const results = await Promise.all([first, second])
+
+    expect(results).toStrictEqual([{ status: "changed" }, { status: "ok" }])
+    expect(applyCalls).toBe(1)
+    expect(ssh.calls).toContain(`mkdir ${FLAGS_DIRECTORY}/'${flagName}.lock'`)
   })
 })
 

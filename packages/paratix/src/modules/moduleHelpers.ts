@@ -1,8 +1,10 @@
-import type { SshConnection } from "../types.js"
+import type { ModuleResult, SshConnection } from "../types.js"
 
+import { failedCommand } from "../moduleFailure.js"
 import { shellQuote } from "../ssh.js"
 
 export const FLAGS_DIRECTORY = "/var/lib/paratix/flags"
+const FLAG_LOCK_WAIT_SECONDS = 300
 
 // Flag names land directly in shell commands like `[ -f /var/lib/paratix/flags/<name> ]`
 // and `find ... -name '<prefix>*' -delete`. We therefore reject any name that could
@@ -41,7 +43,7 @@ export async function setVersionedFlag(
   await ensureFlagsDirectory(ssh)
   const glob = shellQuote(`${flagPrefix}*`)
   await ssh.exec(
-    `find ${FLAGS_DIRECTORY} -maxdepth 1 -name ${glob} -delete && touch ${FLAGS_DIRECTORY}/${shellQuote(flagName)}`,
+    `find ${FLAGS_DIRECTORY} -maxdepth 1 -name ${glob} ! -name '*.lock' -delete && touch ${FLAGS_DIRECTORY}/${shellQuote(flagName)}`,
     { silent: true }
   )
 }
@@ -50,4 +52,101 @@ export async function setFlag(ssh: SshConnection, flagName: string): Promise<voi
   validateFlagName(flagName, "flagName")
   await ensureFlagsDirectory(ssh)
   await ssh.exec(`touch ${FLAGS_DIRECTORY}/${shellQuote(flagName)}`, { silent: true })
+}
+
+function flagPath(flagName: string): string {
+  return `${FLAGS_DIRECTORY}/${shellQuote(flagName)}`
+}
+
+function flagLockName(flagName: string): string {
+  return `${flagName}.lock`
+}
+
+async function acquireFlagLock(ssh: SshConnection, lockName: string): Promise<boolean> {
+  validateFlagName(lockName, "lockName")
+  await ensureFlagsDirectory(ssh)
+  const result = await ssh.exec(`mkdir ${flagPath(lockName)}`, {
+    ignoreExitCode: true,
+    silent: true,
+  })
+  return result.code === 0
+}
+
+async function releaseFlagLock(ssh: SshConnection, lockName: string): Promise<void> {
+  validateFlagName(lockName, "lockName")
+  await ssh.exec(`rmdir ${flagPath(lockName)}`, { ignoreExitCode: true, silent: true })
+}
+
+async function waitForFlagLockResolution(
+  ssh: SshConnection,
+  parameters: { flagName: string; lockName: string; waitSeconds: number }
+): Promise<"resolved" | ModuleResult> {
+  const flag = flagPath(parameters.flagName)
+  const lock = flagPath(parameters.lockName)
+  const waitSeconds = String(parameters.waitSeconds)
+  const command =
+    `i=0; while [ -d ${lock} ] && [ ! -f ${flag} ] && [ "$i" -lt ${waitSeconds} ]; do ` +
+    "sleep 1; i=$((i+1)); done; " +
+    `[ ! -d ${lock} ] || [ -f ${flag} ]`
+  const result = await ssh.exec(command, { ignoreExitCode: true, silent: true })
+  if (result.code === 0) return "resolved"
+  return failedCommand(
+    `[moduleHelpers] timed out waiting for flag lock ${parameters.lockName}`,
+    result
+  )
+}
+
+export async function applyWithFlagLock(
+  ssh: SshConnection,
+  parameters: {
+    apply: () => Promise<ModuleResult>
+    flagName: string
+    waitSeconds?: number
+  }
+): Promise<ModuleResult> {
+  validateFlagName(parameters.flagName, "flagName")
+  const lockName = flagLockName(parameters.flagName)
+  validateFlagName(lockName, "lockName")
+
+  return tryApplyWithFlagLock(ssh, { ...parameters, lockName })
+}
+
+async function runLockedFlagApply(
+  ssh: SshConnection,
+  parameters: {
+    apply: () => Promise<ModuleResult>
+    flagName: string
+    lockName: string
+  }
+): Promise<ModuleResult> {
+  try {
+    if (await hasFlag(ssh, parameters.flagName)) return { status: "ok" }
+    return await parameters.apply()
+  } finally {
+    await releaseFlagLock(ssh, parameters.lockName)
+  }
+}
+
+async function tryApplyWithFlagLock(
+  ssh: SshConnection,
+  parameters: {
+    apply: () => Promise<ModuleResult>
+    flagName: string
+    lockName: string
+    waitSeconds?: number
+  }
+): Promise<ModuleResult> {
+  if (await hasFlag(ssh, parameters.flagName)) return { status: "ok" }
+
+  if (await acquireFlagLock(ssh, parameters.lockName)) {
+    return runLockedFlagApply(ssh, parameters)
+  }
+
+  const waitResult = await waitForFlagLockResolution(ssh, {
+    flagName: parameters.flagName,
+    lockName: parameters.lockName,
+    waitSeconds: parameters.waitSeconds ?? FLAG_LOCK_WAIT_SECONDS,
+  })
+  if (waitResult !== "resolved") return waitResult
+  return tryApplyWithFlagLock(ssh, parameters)
 }

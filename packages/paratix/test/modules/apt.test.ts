@@ -16,6 +16,16 @@ const createMockSsh: typeof createBaseMockSsh = (responses, options) =>
 
 const emptyEnv = {}
 const SUCCESSFUL_EXEC_DEFAULT = { code: 0 } as const
+const DIST_UPGRADE_FLAG = "apt-dist-upgrade-2024-01-15"
+
+function distUpgradeApplyLockResponses(): Record<string, { code?: number; stdout?: string }> {
+  return {
+    [`[ -f /var/lib/paratix/flags/'${DIST_UPGRADE_FLAG}' ]`]: { code: 1 },
+    [`mkdir /var/lib/paratix/flags/'${DIST_UPGRADE_FLAG}.lock'`]: { code: 0 },
+    [`rmdir /var/lib/paratix/flags/'${DIST_UPGRADE_FLAG}.lock'`]: { code: 0 },
+    "mkdir -p /var/lib/paratix/flags": { code: 0 },
+  }
+}
 
 describe("apt.key", () => {
   const fingerprint = "1234567890ABCDEF1234567890ABCDEF12345678"
@@ -318,10 +328,11 @@ describe("apt.distUpgrade", () => {
 
   it("apply returns changed and runs the three-step pipeline", async () => {
     const ssh = createMockSsh({
+      ...distUpgradeApplyLockResponses(),
       "DEBIAN_FRONTEND=noninteractive apt-get dist-upgrade -y": { code: 0 },
       "DEBIAN_FRONTEND=noninteractive apt-get update": { code: 0 },
       "DEBIAN_FRONTEND=noninteractive dpkg --configure -a": { code: 0 },
-      "find /var/lib/paratix/flags -maxdepth 1 -name 'apt-dist-upgrade-*' -delete && touch /var/lib/paratix/flags/'apt-dist-upgrade-2024-01-15'":
+      "find /var/lib/paratix/flags -maxdepth 1 -name 'apt-dist-upgrade-*' ! -name '*.lock' -delete && touch /var/lib/paratix/flags/'apt-dist-upgrade-2024-01-15'":
         { code: 0 },
       "mkdir -p /var/lib/paratix/flags": { code: 0 },
     })
@@ -340,10 +351,11 @@ describe("apt.distUpgrade", () => {
   // by the package.ts apt-upgrade pipeline.
   it("apply runs dpkg --configure -a before apt-get update and apt-get dist-upgrade", async () => {
     const ssh = createMockSsh({
+      ...distUpgradeApplyLockResponses(),
       "DEBIAN_FRONTEND=noninteractive apt-get dist-upgrade -y": { code: 0 },
       "DEBIAN_FRONTEND=noninteractive apt-get update": { code: 0 },
       "DEBIAN_FRONTEND=noninteractive dpkg --configure -a": { code: 0 },
-      "find /var/lib/paratix/flags -maxdepth 1 -name 'apt-dist-upgrade-*' -delete && touch /var/lib/paratix/flags/'apt-dist-upgrade-2024-01-15'":
+      "find /var/lib/paratix/flags -maxdepth 1 -name 'apt-dist-upgrade-*' ! -name '*.lock' -delete && touch /var/lib/paratix/flags/'apt-dist-upgrade-2024-01-15'":
         { code: 0 },
       "mkdir -p /var/lib/paratix/flags": { code: 0 },
     })
@@ -363,10 +375,11 @@ describe("apt.distUpgrade", () => {
 
   it("apply without options does not set a timeout key", async () => {
     const ssh = createMockSsh({
+      ...distUpgradeApplyLockResponses(),
       "DEBIAN_FRONTEND=noninteractive apt-get dist-upgrade -y": { code: 0 },
       "DEBIAN_FRONTEND=noninteractive apt-get update": { code: 0 },
       "DEBIAN_FRONTEND=noninteractive dpkg --configure -a": { code: 0 },
-      "find /var/lib/paratix/flags -maxdepth 1 -name 'apt-dist-upgrade-*' -delete && touch /var/lib/paratix/flags/'apt-dist-upgrade-2024-01-15'":
+      "find /var/lib/paratix/flags -maxdepth 1 -name 'apt-dist-upgrade-*' ! -name '*.lock' -delete && touch /var/lib/paratix/flags/'apt-dist-upgrade-2024-01-15'":
         { code: 0 },
       "mkdir -p /var/lib/paratix/flags": { code: 0 },
     })
@@ -380,10 +393,11 @@ describe("apt.distUpgrade", () => {
 
   it("apply forwards options.timeout to every step", async () => {
     const ssh = createMockSsh({
+      ...distUpgradeApplyLockResponses(),
       "DEBIAN_FRONTEND=noninteractive apt-get dist-upgrade -y": { code: 0 },
       "DEBIAN_FRONTEND=noninteractive apt-get update": { code: 0 },
       "DEBIAN_FRONTEND=noninteractive dpkg --configure -a": { code: 0 },
-      "find /var/lib/paratix/flags -maxdepth 1 -name 'apt-dist-upgrade-*' -delete && touch /var/lib/paratix/flags/'apt-dist-upgrade-2024-01-15'":
+      "find /var/lib/paratix/flags -maxdepth 1 -name 'apt-dist-upgrade-*' ! -name '*.lock' -delete && touch /var/lib/paratix/flags/'apt-dist-upgrade-2024-01-15'":
         { code: 0 },
       "mkdir -p /var/lib/paratix/flags": { code: 0 },
     })
@@ -404,10 +418,11 @@ describe("apt.distUpgrade", () => {
 
   it("apply with options.timeout=undefined does not set a timeout key", async () => {
     const ssh = createMockSsh({
+      ...distUpgradeApplyLockResponses(),
       "DEBIAN_FRONTEND=noninteractive apt-get dist-upgrade -y": { code: 0 },
       "DEBIAN_FRONTEND=noninteractive apt-get update": { code: 0 },
       "DEBIAN_FRONTEND=noninteractive dpkg --configure -a": { code: 0 },
-      "find /var/lib/paratix/flags -maxdepth 1 -name 'apt-dist-upgrade-*' -delete && touch /var/lib/paratix/flags/'apt-dist-upgrade-2024-01-15'":
+      "find /var/lib/paratix/flags -maxdepth 1 -name 'apt-dist-upgrade-*' ! -name '*.lock' -delete && touch /var/lib/paratix/flags/'apt-dist-upgrade-2024-01-15'":
         { code: 0 },
       "mkdir -p /var/lib/paratix/flags": { code: 0 },
     })
@@ -421,6 +436,7 @@ describe("apt.distUpgrade", () => {
 
   it("apply stops at the first failing step and reports it", async () => {
     const ssh = createMockSsh({
+      ...distUpgradeApplyLockResponses(),
       // R-0000055: dpkg --configure -a now runs first; an apt-get update
       // failure must therefore still abort the dist-upgrade step but
       // dpkg --configure -a is expected to have already run.
@@ -436,6 +452,17 @@ describe("apt.distUpgrade", () => {
     expect(result.error?.message).toContain("[apt.distUpgrade] apt-get update failed")
     expect(ssh.calls).toContain("DEBIAN_FRONTEND=noninteractive dpkg --configure -a")
     expect(ssh.calls).not.toContain("DEBIAN_FRONTEND=noninteractive apt-get dist-upgrade -y")
+  })
+
+  it("direct apply returns ok without running the pipeline when the flag already exists", async () => {
+    const ssh = createMockSsh({
+      [`[ -f /var/lib/paratix/flags/'${DIST_UPGRADE_FLAG}' ]`]: { code: 0 },
+    })
+    const mod = apt.distUpgrade("2024-01-15")
+    const result = await mod.apply(ssh, emptyEnv)
+    expect(result).toStrictEqual({ status: "ok" })
+    expect(ssh.calls).not.toContain("DEBIAN_FRONTEND=noninteractive dpkg --configure -a")
+    expect(ssh.calls).not.toContain(`mkdir /var/lib/paratix/flags/'${DIST_UPGRADE_FLAG}.lock'`)
   })
 })
 
@@ -643,7 +670,7 @@ describe("apt.repository (standard form)", () => {
 
     expect(result.status).toBe("changed")
     expect(ssh.calls).toContain(
-      `find /var/lib/paratix/flags -maxdepth 1 -name 'apt-repository-${sha256String("docker").slice(0, 16)}-*' -delete && touch /var/lib/paratix/flags/'${updateFlag}'`
+      `find /var/lib/paratix/flags -maxdepth 1 -name 'apt-repository-${sha256String("docker").slice(0, 16)}-*' ! -name '*.lock' -delete && touch /var/lib/paratix/flags/'${updateFlag}'`
     )
   })
 
@@ -658,7 +685,7 @@ describe("apt.repository (standard form)", () => {
 
     expect(result.status).toBe("failed")
     expect(ssh.calls).not.toContain(
-      `find /var/lib/paratix/flags -maxdepth 1 -name 'apt-repository-${sha256String("docker").slice(0, 16)}-*' -delete && touch /var/lib/paratix/flags/'${updateFlag}'`
+      `find /var/lib/paratix/flags -maxdepth 1 -name 'apt-repository-${sha256String("docker").slice(0, 16)}-*' ! -name '*.lock' -delete && touch /var/lib/paratix/flags/'${updateFlag}'`
     )
   })
 
@@ -850,7 +877,7 @@ describe("apt.debconf", () => {
     )
     expect(await mod.apply(ssh2, emptyEnv)).toStrictEqual({ status: "changed" })
     expect(ssh2.calls).toContain(
-      `find /var/lib/paratix/flags -maxdepth 1 -name 'apt-debconf-${packageHash}-*' -delete && touch ${flagPath}`
+      `find /var/lib/paratix/flags -maxdepth 1 -name 'apt-debconf-${packageHash}-*' ! -name '*.lock' -delete && touch ${flagPath}`
     )
 
     // Second check: package still not installed, marker flag exists →
