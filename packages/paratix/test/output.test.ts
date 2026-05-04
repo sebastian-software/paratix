@@ -8,6 +8,7 @@ import {
   renderCliHeader,
   resetLiveOutputForTests,
   startModuleSpinner,
+  stopLiveModuleOutput,
   withRecipeOutputScope,
 } from "../src/output.js"
 import { CommandError } from "../src/sshHelpers.js"
@@ -170,6 +171,47 @@ describe("printModuleResult", () => {
       Object.defineProperty(process.stdout, "columns", {
         configurable: true,
         value: originalColumns,
+      })
+    }
+  })
+
+  it("stops and clears live output on request", () => {
+    const clearLine = vi.fn(() => true)
+    const cursorTo = vi.fn(() => true)
+    vi.spyOn(process.stdout, "write").mockImplementation((() => true) as typeof process.stdout.write)
+    const originalIsTTY = process.stdout.isTTY
+    const originalClearLine = bindOptionalStdoutMethod("clearLine")
+    const originalCursorTo = bindOptionalStdoutMethod("cursorTo")
+
+    Object.defineProperty(process.stdout, "isTTY", { configurable: true, value: true })
+    Object.defineProperty(process.stdout, "clearLine", {
+      configurable: true,
+      value: clearLine,
+    })
+    Object.defineProperty(process.stdout, "cursorTo", {
+      configurable: true,
+      value: cursorTo,
+    })
+
+    try {
+      startModuleSpinner("service.restart: app")
+      stopLiveModuleOutput(true)
+      printModuleResult("service.restart: app", "ok")
+
+      expect(clearLine).toHaveBeenCalledTimes(2)
+      expect(cursorTo).toHaveBeenCalledTimes(2)
+    } finally {
+      Object.defineProperty(process.stdout, "isTTY", {
+        configurable: true,
+        value: originalIsTTY,
+      })
+      Object.defineProperty(process.stdout, "clearLine", {
+        configurable: true,
+        value: originalClearLine,
+      })
+      Object.defineProperty(process.stdout, "cursorTo", {
+        configurable: true,
+        value: originalCursorTo,
       })
     }
   })

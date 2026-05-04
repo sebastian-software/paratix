@@ -25,6 +25,7 @@ import {
   printRunContext,
   printSummary,
   startModuleSpinner,
+  stopLiveModuleOutput,
 } from "./output.js"
 import { setRunnerAbortSignal } from "./runnerAbortSignal.js"
 import { resolveExitCode, signalExitCode } from "./runnerHelpers.js"
@@ -57,6 +58,7 @@ function setupShutdownHandlers(): ShutdownState {
     }
     receivedSignal = signal
     promptAbortController.abort(new Error(`Terminal prompt interrupted by ${signal}`))
+    stopLiveModuleOutput(true)
     console.error(`\nReceived ${signal}, shutting down…`)
     ssh?.disconnect()
   }
@@ -788,6 +790,7 @@ function teardownPlaybookResources(parameters: {
   handleShutdownSignal: (signal: NodeJS.Signals) => void
   ssh: SshConnectionImpl | undefined
 }): void {
+  stopLiveModuleOutput(true)
   for (const signal of ["SIGINT", "SIGTERM"] as const)
     getSignalBus().off(signal, parameters.handleShutdownSignal as (signal: SignalName) => void)
   setRunnerAbortSignal(undefined)

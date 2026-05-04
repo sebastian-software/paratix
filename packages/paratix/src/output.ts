@@ -190,6 +190,10 @@ function stopAnimatedModuleLine(clearCurrentLine = false): void {
   }
 }
 
+export function stopLiveModuleOutput(clearCurrentLine = false): void {
+  stopAnimatedModuleLine(clearCurrentLine)
+}
+
 export function startModuleSpinner(name: string, detail?: string): void {
   if (!supportsAnimatedModuleOutput()) return
 
@@ -468,6 +472,7 @@ export function printSummary(stats: {
   signals: number
   skipped: number
 }): void {
+  stopAnimatedModuleLine(true)
   const parts = [
     pc.yellow(`${stats.changed} changed`),
     pc.green(`${stats.ok} ok`),
