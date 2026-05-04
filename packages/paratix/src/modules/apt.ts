@@ -380,18 +380,19 @@ export const apt = {
         if (typeof selectionsTextOrFailure !== "string") return selectionsTextOrFailure
 
         const selectionsText = selectionsTextOrFailure
-        // R-0000063: use `printf '%s' …` instead of `echo …` so selection
-        // values that begin with `-` (interpreted as flags by some echo
-        // implementations) or contain backslash sequences (interpreted by
-        // POSIX echo) are passed through verbatim regardless of which shell
-        // `/bin/sh` resolves to. Mirrors the pattern used by
-        // cron.writeCrontab.
-        const result = await ssh.exec(
-          `printf '%s' ${shellQuote(selectionsText)} | debconf-set-selections`,
-          { ignoreExitCode: true, silent: true }
-        )
+        const selectionValues = Object.values(selections)
+        const result = await ssh.exec("debconf-set-selections", {
+          ignoreExitCode: true,
+          input: selectionsText,
+          secrets: selectionValues,
+          silent: true,
+        })
         if (result.code !== 0)
-          return failedCommand(`[apt.debconf] failed to set selections for ${packageName}`, result)
+          return failedCommand(
+            `[apt.debconf] failed to set selections for ${packageName}`,
+            result,
+            selectionValues
+          )
 
         // R-0000104: persist a versioned marker flag so that subsequent
         // `check` runs return `ok` even when the package is not yet

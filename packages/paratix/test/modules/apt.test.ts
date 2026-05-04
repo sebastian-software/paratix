@@ -787,53 +787,75 @@ describe("apt.debconf", () => {
     expect(String(result.error)).toContain("must not contain newline characters")
   })
 
-  // R-0000063 regression: the apply pipe must use `printf '%s' …` instead of
-  // `echo …` so values that begin with `-` (which some echo implementations
-  // interpret as flags) and values containing backslash sequences (which
-  // POSIX echo may interpret) are forwarded to debconf-set-selections
-  // verbatim regardless of which shell `/bin/sh` resolves to.
-  it("apply uses printf '%s' to pipe selections starting with a dash verbatim", async () => {
+  it("apply passes selections starting with a dash through stdin", async () => {
     const ssh = createMockSsh(
       {
+        "debconf-set-selections": { code: 0 },
         "echo 'METAGET pkg/dash-value type' | debconf-communicate": {
           code: 0,
           stdout: "0 string\n",
         },
-        "printf '%s' 'pkg pkg/dash-value string -n' | debconf-set-selections": { code: 0 },
       },
       { defaultExecResult: SUCCESSFUL_EXEC_DEFAULT }
     )
     const mod = apt.debconf("pkg", { "pkg/dash-value": "-n" })
     const result = await mod.apply(ssh, emptyEnv)
-    expect(result).toStrictEqual({ status: "changed" })
-    expect(ssh.calls).toContain(
-      "printf '%s' 'pkg pkg/dash-value string -n' | debconf-set-selections"
+    const debconfSetSelections = ssh.execCalls.find(
+      (call) => call.command === "debconf-set-selections"
     )
+
+    expect(result).toStrictEqual({ status: "changed" })
+    expect(debconfSetSelections?.options).toMatchObject({
+      input: "pkg pkg/dash-value string -n",
+      secrets: ["-n"],
+    })
     expect(ssh.calls).not.toContain("echo 'pkg pkg/dash-value string -n' | debconf-set-selections")
   })
 
-  it("apply uses printf '%s' so backslash sequences reach debconf-set-selections verbatim", async () => {
+  it("apply passes backslash sequences to debconf-set-selections through stdin", async () => {
     const ssh = createMockSsh(
       {
+        "debconf-set-selections": { code: 0 },
         "echo 'METAGET pkg/backslash-value type' | debconf-communicate": {
           code: 0,
           stdout: "0 string\n",
-        },
-        "printf '%s' 'pkg pkg/backslash-value string a\\tb\\nc' | debconf-set-selections": {
-          code: 0,
         },
       },
       { defaultExecResult: SUCCESSFUL_EXEC_DEFAULT }
     )
     const mod = apt.debconf("pkg", { "pkg/backslash-value": String.raw`a\tb\nc` })
     const result = await mod.apply(ssh, emptyEnv)
-    expect(result).toStrictEqual({ status: "changed" })
-    expect(ssh.calls).toContain(
-      "printf '%s' 'pkg pkg/backslash-value string a\\tb\\nc' | debconf-set-selections"
+    const debconfSetSelections = ssh.execCalls.find(
+      (call) => call.command === "debconf-set-selections"
     )
+
+    expect(result).toStrictEqual({ status: "changed" })
+    expect(debconfSetSelections?.options).toMatchObject({
+      input: "pkg pkg/backslash-value string a\\tb\\nc",
+      secrets: [String.raw`a\tb\nc`],
+    })
     expect(ssh.calls).not.toContain(
       "echo 'pkg pkg/backslash-value string a\\tb\\nc' | debconf-set-selections"
     )
+  })
+
+  it("apply masks selection values when debconf-set-selections fails", async () => {
+    const ssh = createMockSsh({
+      "debconf-set-selections": {
+        code: 1,
+        stderr: "invalid value super-secret-answer",
+      },
+      "echo 'METAGET pkg/secret type' | debconf-communicate": {
+        code: 0,
+        stdout: "0 string\n",
+      },
+    })
+    const mod = apt.debconf("pkg", { "pkg/secret": "super-secret-answer" })
+    const result = await mod.apply(ssh, emptyEnv)
+
+    expect(result.status).toBe("failed")
+    expect(String(result.error)).toContain("invalid value [REDACTED]")
+    expect(String(result.error)).not.toContain("super-secret-answer")
   })
 
   // R-0000104 regression: when the package is not yet installed, the
@@ -865,13 +887,12 @@ describe("apt.debconf", () => {
     // succeeds, marker flag is written via setVersionedFlag.
     const ssh2 = createMockSsh(
       {
+        "debconf-set-selections": { code: 0 },
         [dpkgQuery]: dpkgNotInstalled,
         "echo 'METAGET postfix/main_mailer_type type' | debconf-communicate": {
           code: 0,
           stdout: "0 string\n",
         },
-        "printf '%s' 'postfix postfix/main_mailer_type string Internet Site' | debconf-set-selections":
-          { code: 0 },
       },
       { defaultExecResult: SUCCESSFUL_EXEC_DEFAULT }
     )
