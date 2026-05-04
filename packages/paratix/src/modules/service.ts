@@ -4,6 +4,14 @@ import { shellQuote } from "../ssh.js"
 import { type Module, type ModuleResult, NEEDS_APPLY, type SshConnection } from "../types.js"
 
 const SYSTEMCTL = "systemctl"
+const SYSTEMD_UNIT_NAME_PATTERN = /^[\w.@:\-]+$/v
+
+function validateUnitName(name: string): string {
+  if (!name || name.startsWith("-") || !SYSTEMD_UNIT_NAME_PATTERN.test(name)) {
+    throw new Error(`Invalid systemd unit name: ${name}`)
+  }
+  return name
+}
 
 /**
  * Modules for managing systemd services.
@@ -18,10 +26,11 @@ export const service = {
    * @returns A Module that ensures the service is disabled.
    */
   disabled(name: string): Module {
+    const unitName = validateUnitName(name)
     return {
       async apply(ssh: null | SshConnection): Promise<ModuleResult> {
         if (!ssh) return failed(`[service.disabled: ${name}] SSH connection is required`)
-        const result = await ssh.exec(`${SYSTEMCTL} disable ${shellQuote(name)}`, {
+        const result = await ssh.exec(`${SYSTEMCTL} disable -- ${shellQuote(unitName)}`, {
           ignoreExitCode: true,
           silent: true,
         })
@@ -31,7 +40,7 @@ export const service = {
       },
       async check(ssh: null | SshConnection): Promise<"needs-apply" | "ok"> {
         if (!ssh) return NEEDS_APPLY
-        const enabled = await ssh.test(`${SYSTEMCTL} is-enabled --quiet ${shellQuote(name)}`)
+        const enabled = await ssh.test(`${SYSTEMCTL} is-enabled --quiet -- ${shellQuote(unitName)}`)
         return enabled ? "needs-apply" : "ok"
       },
       name: `service.disabled: ${name}`,
@@ -44,10 +53,11 @@ export const service = {
    * @returns A Module that ensures the service is enabled.
    */
   enabled(name: string): Module {
+    const unitName = validateUnitName(name)
     return {
       async apply(ssh: null | SshConnection): Promise<ModuleResult> {
         if (!ssh) return failed(`[service.enabled: ${name}] SSH connection is required`)
-        const result = await ssh.exec(`${SYSTEMCTL} enable ${shellQuote(name)}`, {
+        const result = await ssh.exec(`${SYSTEMCTL} enable -- ${shellQuote(unitName)}`, {
           ignoreExitCode: true,
           silent: true,
         })
@@ -57,7 +67,7 @@ export const service = {
       },
       async check(ssh: null | SshConnection): Promise<"needs-apply" | "ok"> {
         if (!ssh) return NEEDS_APPLY
-        return (await ssh.test(`${SYSTEMCTL} is-enabled --quiet ${shellQuote(name)}`))
+        return (await ssh.test(`${SYSTEMCTL} is-enabled --quiet -- ${shellQuote(unitName)}`))
           ? "ok"
           : NEEDS_APPLY
       },
@@ -110,10 +120,11 @@ export const service = {
    * @returns A Module that reloads the service.
    */
   reload(name: string): Module {
+    const unitName = validateUnitName(name)
     return {
       async apply(ssh: null | SshConnection): Promise<ModuleResult> {
         if (!ssh) return failed(`[service.reload: ${name}] SSH connection is required`)
-        const result = await ssh.exec(`${SYSTEMCTL} reload ${shellQuote(name)}`, {
+        const result = await ssh.exec(`${SYSTEMCTL} reload -- ${shellQuote(unitName)}`, {
           ignoreExitCode: true,
           silent: true,
         })
@@ -136,10 +147,11 @@ export const service = {
    * @returns A Module that restarts the service.
    */
   restart(name: string): Module {
+    const unitName = validateUnitName(name)
     return {
       async apply(ssh: null | SshConnection): Promise<ModuleResult> {
         if (!ssh) return failed(`[service.restart: ${name}] SSH connection is required`)
-        const result = await ssh.exec(`${SYSTEMCTL} restart ${shellQuote(name)}`, {
+        const result = await ssh.exec(`${SYSTEMCTL} restart -- ${shellQuote(unitName)}`, {
           ignoreExitCode: true,
           silent: true,
         })
@@ -162,10 +174,11 @@ export const service = {
    * @returns A Module that ensures the service is running.
    */
   running(name: string): Module {
+    const unitName = validateUnitName(name)
     return {
       async apply(ssh: null | SshConnection): Promise<ModuleResult> {
         if (!ssh) return failed(`[service.running: ${name}] SSH connection is required`)
-        const result = await ssh.exec(`${SYSTEMCTL} start ${shellQuote(name)}`, {
+        const result = await ssh.exec(`${SYSTEMCTL} start -- ${shellQuote(unitName)}`, {
           ignoreExitCode: true,
           silent: true,
         })
@@ -175,7 +188,7 @@ export const service = {
       },
       async check(ssh: null | SshConnection): Promise<"needs-apply" | "ok"> {
         if (!ssh) return NEEDS_APPLY
-        return (await ssh.test(`${SYSTEMCTL} is-active --quiet ${shellQuote(name)}`))
+        return (await ssh.test(`${SYSTEMCTL} is-active --quiet -- ${shellQuote(unitName)}`))
           ? "ok"
           : NEEDS_APPLY
       },
@@ -189,10 +202,11 @@ export const service = {
    * @returns A Module that ensures the service is stopped.
    */
   stopped(name: string): Module {
+    const unitName = validateUnitName(name)
     return {
       async apply(ssh: null | SshConnection): Promise<ModuleResult> {
         if (!ssh) return failed(`[service.stopped: ${name}] SSH connection is required`)
-        const result = await ssh.exec(`${SYSTEMCTL} stop ${shellQuote(name)}`, {
+        const result = await ssh.exec(`${SYSTEMCTL} stop -- ${shellQuote(unitName)}`, {
           ignoreExitCode: true,
           silent: true,
         })
@@ -202,7 +216,7 @@ export const service = {
       },
       async check(ssh: null | SshConnection): Promise<"needs-apply" | "ok"> {
         if (!ssh) return NEEDS_APPLY
-        const active = await ssh.test(`${SYSTEMCTL} is-active --quiet ${shellQuote(name)}`)
+        const active = await ssh.test(`${SYSTEMCTL} is-active --quiet -- ${shellQuote(unitName)}`)
         return active ? "needs-apply" : "ok"
       },
       name: `service.stopped: ${name}`,

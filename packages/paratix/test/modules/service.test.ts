@@ -7,10 +7,54 @@ import { createMockSsh } from "../helpers/mockSsh.js"
 
 const emptyEnv = {}
 
+describe("service unit name validation", () => {
+  const factories = [
+    (name: string) => service.disabled(name),
+    (name: string) => service.enabled(name),
+    (name: string) => service.running(name),
+    (name: string) => service.stopped(name),
+    (name: string) => service.restart(name),
+    (name: string) => service.reload(name),
+  ]
+
+  it("accepts common systemd unit names", () => {
+    for (const createModule of factories) {
+      expect(() => createModule("nginx")).not.toThrow()
+      expect(() => createModule("docker.service")).not.toThrow()
+      expect(() => createModule("getty@tty1.service")).not.toThrow()
+    }
+  })
+
+  it("rejects names that can be interpreted as systemctl options", () => {
+    for (const createModule of factories) {
+      expect(() => createModule("--global")).toThrow("Invalid systemd unit name")
+      expect(() => createModule("-nginx")).toThrow("Invalid systemd unit name")
+    }
+  })
+
+  it("rejects empty names and names with unsafe characters", () => {
+    const invalidNames = [
+      "",
+      " ",
+      "nginx other",
+      "nginx\nother",
+      "nginx\rother",
+      "foo/bar.service",
+      "nginx;reboot",
+    ]
+
+    for (const createModule of factories) {
+      for (const name of invalidNames) {
+        expect(() => createModule(name)).toThrow("Invalid systemd unit name")
+      }
+    }
+  })
+})
+
 describe("service.running", () => {
   it("check returns ok when the service is active", async () => {
     const ssh = createMockSsh({
-      "systemctl is-active --quiet 'nginx'": { code: 0 },
+      "systemctl is-active --quiet -- 'nginx'": { code: 0 },
     })
     const mod = service.running("nginx")
     const result = await mod.check(ssh, emptyEnv)
@@ -19,7 +63,7 @@ describe("service.running", () => {
 
   it("check returns needs-apply when the service is inactive", async () => {
     const ssh = createMockSsh({
-      "systemctl is-active --quiet 'nginx'": { code: 1 },
+      "systemctl is-active --quiet -- 'nginx'": { code: 1 },
     })
     const mod = service.running("nginx")
     const result = await mod.check(ssh, emptyEnv)
@@ -36,7 +80,7 @@ describe("service.running", () => {
 describe("service.enabled", () => {
   it("check returns ok when the service is enabled", async () => {
     const ssh = createMockSsh({
-      "systemctl is-enabled --quiet 'nginx'": { code: 0 },
+      "systemctl is-enabled --quiet -- 'nginx'": { code: 0 },
     })
     const mod = service.enabled("nginx")
     const result = await mod.check(ssh, emptyEnv)
@@ -45,7 +89,7 @@ describe("service.enabled", () => {
 
   it("check returns needs-apply when the service is not enabled", async () => {
     const ssh = createMockSsh({
-      "systemctl is-enabled --quiet 'nginx'": { code: 1 },
+      "systemctl is-enabled --quiet -- 'nginx'": { code: 1 },
     })
     const mod = service.enabled("nginx")
     const result = await mod.check(ssh, emptyEnv)
@@ -60,7 +104,7 @@ describe("service.enabled", () => {
 
   it("apply returns changed when systemctl enable exits with code 0", async () => {
     const ssh = createMockSsh({
-      "systemctl enable 'nginx'": { code: 0 },
+      "systemctl enable -- 'nginx'": { code: 0 },
     })
     const mod = service.enabled("nginx")
     const result = await mod.apply(ssh, emptyEnv)
@@ -69,7 +113,7 @@ describe("service.enabled", () => {
 
   it("apply returns failed when systemctl enable exits with non-zero code", async () => {
     const ssh = createMockSsh({
-      "systemctl enable 'nginx'": { code: 1 },
+      "systemctl enable -- 'nginx'": { code: 1 },
     })
     const mod = service.enabled("nginx")
     const result = await mod.apply(ssh, emptyEnv)
@@ -87,7 +131,7 @@ describe("service.enabled", () => {
 describe("service.running apply", () => {
   it("apply returns changed when systemctl start exits with code 0", async () => {
     const ssh = createMockSsh({
-      "systemctl start 'nginx'": { code: 0 },
+      "systemctl start -- 'nginx'": { code: 0 },
     })
     const mod = service.running("nginx")
     const result = await mod.apply(ssh, emptyEnv)
@@ -96,7 +140,7 @@ describe("service.running apply", () => {
 
   it("apply returns failed when systemctl start exits with non-zero code", async () => {
     const ssh = createMockSsh({
-      "systemctl start 'nginx'": { code: 1 },
+      "systemctl start -- 'nginx'": { code: 1 },
     })
     const mod = service.running("nginx")
     const result = await mod.apply(ssh, emptyEnv)
@@ -114,7 +158,7 @@ describe("service.running apply", () => {
 describe("service.stopped", () => {
   it("check returns ok when the service is inactive", async () => {
     const ssh = createMockSsh({
-      "systemctl is-active --quiet 'nginx'": { code: 1 },
+      "systemctl is-active --quiet -- 'nginx'": { code: 1 },
     })
     const mod = service.stopped("nginx")
     const result = await mod.check(ssh, emptyEnv)
@@ -123,7 +167,7 @@ describe("service.stopped", () => {
 
   it("check returns needs-apply when the service is active", async () => {
     const ssh = createMockSsh({
-      "systemctl is-active --quiet 'nginx'": { code: 0 },
+      "systemctl is-active --quiet -- 'nginx'": { code: 0 },
     })
     const mod = service.stopped("nginx")
     const result = await mod.check(ssh, emptyEnv)
@@ -138,7 +182,7 @@ describe("service.stopped", () => {
 
   it("apply returns changed when systemctl stop exits with code 0", async () => {
     const ssh = createMockSsh({
-      "systemctl stop 'nginx'": { code: 0 },
+      "systemctl stop -- 'nginx'": { code: 0 },
     })
     const mod = service.stopped("nginx")
     const result = await mod.apply(ssh, emptyEnv)
@@ -147,7 +191,7 @@ describe("service.stopped", () => {
 
   it("apply returns failed when systemctl stop exits with non-zero code", async () => {
     const ssh = createMockSsh({
-      "systemctl stop 'nginx'": { code: 1 },
+      "systemctl stop -- 'nginx'": { code: 1 },
     })
     const mod = service.stopped("nginx")
     const result = await mod.apply(ssh, emptyEnv)
@@ -165,7 +209,7 @@ describe("service.stopped", () => {
 describe("service.disabled", () => {
   it("check returns ok when the service is not enabled", async () => {
     const ssh = createMockSsh({
-      "systemctl is-enabled --quiet 'nginx'": { code: 1 },
+      "systemctl is-enabled --quiet -- 'nginx'": { code: 1 },
     })
     const mod = service.disabled("nginx")
     const result = await mod.check(ssh, emptyEnv)
@@ -174,7 +218,7 @@ describe("service.disabled", () => {
 
   it("check returns needs-apply when the service is enabled", async () => {
     const ssh = createMockSsh({
-      "systemctl is-enabled --quiet 'nginx'": { code: 0 },
+      "systemctl is-enabled --quiet -- 'nginx'": { code: 0 },
     })
     const mod = service.disabled("nginx")
     const result = await mod.check(ssh, emptyEnv)
@@ -189,7 +233,7 @@ describe("service.disabled", () => {
 
   it("apply returns changed when systemctl disable exits with code 0", async () => {
     const ssh = createMockSsh({
-      "systemctl disable 'nginx'": { code: 0 },
+      "systemctl disable -- 'nginx'": { code: 0 },
     })
     const mod = service.disabled("nginx")
     const result = await mod.apply(ssh, emptyEnv)
@@ -198,7 +242,7 @@ describe("service.disabled", () => {
 
   it("apply returns failed when systemctl disable exits with non-zero code", async () => {
     const ssh = createMockSsh({
-      "systemctl disable 'nginx'": { code: 1 },
+      "systemctl disable -- 'nginx'": { code: 1 },
     })
     const mod = service.disabled("nginx")
     const result = await mod.apply(ssh, emptyEnv)
@@ -222,7 +266,7 @@ describe("service.restart", () => {
 
   it("apply returns changed when systemctl restart exits with code 0", async () => {
     const ssh = createMockSsh({
-      "systemctl restart 'nginx'": { code: 0 },
+      "systemctl restart -- 'nginx'": { code: 0 },
     })
     const mod = service.restart("nginx")
     const result = await mod.apply(ssh, emptyEnv)
@@ -231,7 +275,7 @@ describe("service.restart", () => {
 
   it("apply returns failed when systemctl restart exits with non-zero code", async () => {
     const ssh = createMockSsh({
-      "systemctl restart 'nginx'": { code: 1 },
+      "systemctl restart -- 'nginx'": { code: 1 },
     })
     const mod = service.restart("nginx")
     const result = await mod.apply(ssh, emptyEnv)
@@ -255,7 +299,7 @@ describe("service.reload", () => {
 
   it("apply returns changed when systemctl reload exits with code 0", async () => {
     const ssh = createMockSsh({
-      "systemctl reload 'nginx'": { code: 0 },
+      "systemctl reload -- 'nginx'": { code: 0 },
     })
     const mod = service.reload("nginx")
     const result = await mod.apply(ssh, emptyEnv)
@@ -264,7 +308,7 @@ describe("service.reload", () => {
 
   it("apply returns failed when systemctl reload exits with non-zero code", async () => {
     const ssh = createMockSsh({
-      "systemctl reload 'nginx'": { code: 1 },
+      "systemctl reload -- 'nginx'": { code: 1 },
     })
     const mod = service.reload("nginx")
     const result = await mod.apply(ssh, emptyEnv)
