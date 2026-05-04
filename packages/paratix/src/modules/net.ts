@@ -17,8 +17,8 @@ import {
   checkHttpCondition,
   delay,
   type HttpCheckParameters,
-  type WaitForOptions,
   validateHttpUrl,
+  type WaitForOptions,
 } from "./netHelpers.js"
 
 const EXEC_OPTS = { ignoreExitCode: true, silent: true } as const

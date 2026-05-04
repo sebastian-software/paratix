@@ -13,6 +13,15 @@ type TransferSettlement = {
   resolveOnce: () => void
 }
 
+type TransferStreams = {
+  readStream: Readable
+  writeStream: Writable
+}
+
+function normalizeTransferError(error: unknown, message: string): Error {
+  return error instanceof Error ? error : new Error(`${message}: ${String(error)}`)
+}
+
 function createTransferSettlement(options: {
   clearTimer: () => void
   reject: (reason: Error) => void
@@ -36,6 +45,44 @@ function createTransferSettlement(options: {
       options.sftp.end()
       options.resolve()
     },
+  }
+}
+
+function openDownloadStreams(
+  sftp: SFTPWrapper,
+  remotePath: string,
+  temporaryPath: string
+): TransferStreams {
+  let readStream: Readable | undefined
+  try {
+    readStream = sftp.createReadStream(remotePath)
+    // eslint-disable-next-line security/detect-non-literal-fs-filename
+    const writeStream = createWriteStream(temporaryPath, { mode: 0o600 })
+    return { readStream, writeStream }
+  } catch (streamError) {
+    if (readStream !== undefined && typeof readStream.destroy === "function") {
+      readStream.destroy()
+    }
+    throw normalizeTransferError(streamError, "Failed to create SFTP download streams")
+  }
+}
+
+function openUploadStreams(
+  sftp: SFTPWrapper,
+  localPath: string,
+  remotePath: string
+): TransferStreams {
+  let readStream: Readable | undefined
+  try {
+    // eslint-disable-next-line security/detect-non-literal-fs-filename
+    readStream = createReadStream(localPath)
+    const writeStream = sftp.createWriteStream(remotePath, { mode: 0o600 })
+    return { readStream, writeStream }
+  } catch (streamError) {
+    if (readStream !== undefined && typeof readStream.destroy === "function") {
+      readStream.destroy()
+    }
+    throw normalizeTransferError(streamError, "Failed to create SFTP upload streams")
   }
 }
 
@@ -113,7 +160,7 @@ function wireStreams(options: {
  * @param localPath - Destination path on the local filesystem.
  * @param timeout - Maximum time in ms before the transfer is aborted.
  */
-// eslint-disable-next-line max-params -- timeout parameter extends the existing signature
+// eslint-disable-next-line max-lines-per-function, max-params -- timeout parameter extends the existing signature; cleanup/finalize logic is intentionally kept together
 export async function sftpDownload(
   client: Client,
   remotePath: string,
@@ -142,29 +189,19 @@ export async function sftpDownload(
         return
       }
 
-      let readStream: Readable | undefined
-      let writeStream: Writable | undefined
+      let streams: TransferStreams
       try {
-        readStream = sftp.createReadStream(remotePath)
-        // eslint-disable-next-line security/detect-non-literal-fs-filename
-        writeStream = createWriteStream(temporaryPath, { mode: 0o600 })
+        streams = openDownloadStreams(sftp, remotePath, temporaryPath)
         shouldCleanupTemporaryFile = true
       } catch (streamError) {
-        if (readStream !== undefined && typeof readStream.destroy === "function") {
-          readStream.destroy()
-        }
         sftp.end()
-        rejectWithCleanup(
-          streamError instanceof Error
-            ? streamError
-            : new Error(`Failed to create SFTP download streams: ${String(streamError)}`)
-        )
+        rejectWithCleanup(normalizeTransferError(streamError, "Failed to create SFTP download"))
         return
       }
 
       wireStreams({
         completionEvents: ["finish"],
-        readStream,
+        readStream: streams.readStream,
         reject: rejectWithCleanup,
         resolve: () => {
           try {
@@ -182,7 +219,7 @@ export async function sftpDownload(
         sftp,
         timeout,
         timeoutMessage: `SFTP download timed out after ${timeout}ms: ${remotePath}`,
-        writeStream,
+        writeStream: streams.writeStream,
       })
     })
   })
@@ -210,34 +247,24 @@ export async function sftpUpload(
         return
       }
 
-      let readStream: Readable | undefined
-      let writeStream: Writable | undefined
+      let streams: TransferStreams
       try {
-        // eslint-disable-next-line security/detect-non-literal-fs-filename
-        readStream = createReadStream(localPath)
-        writeStream = sftp.createWriteStream(remotePath, { mode: 0o600 })
+        streams = openUploadStreams(sftp, localPath, remotePath)
       } catch (streamError) {
-        if (readStream !== undefined && typeof readStream.destroy === "function") {
-          readStream.destroy()
-        }
         sftp.end()
-        reject(
-          streamError instanceof Error
-            ? streamError
-            : new Error(`Failed to create SFTP upload streams: ${String(streamError)}`)
-        )
+        reject(normalizeTransferError(streamError, "Failed to create SFTP upload"))
         return
       }
 
       wireStreams({
         completionEvents: ["close", "finish"],
-        readStream,
+        readStream: streams.readStream,
         reject,
         resolve,
         sftp,
         timeout,
         timeoutMessage: `SFTP upload timed out after ${timeout}ms: ${remotePath}`,
-        writeStream,
+        writeStream: streams.writeStream,
       })
     })
   })

@@ -9,7 +9,7 @@
     "typecheck": "pnpm -r --filter './packages/*' exec tsc --noEmit",
     "lint": "concurrently --kill-others-on-fail --passthrough-arguments --names lint:oxlint,lint:eslint 'pnpm lint:oxlint' 'pnpm lint:eslint'",
     "lint:oxlint": "oxlint -c oxlint.config.ts",
-    "lint:eslint": "eslint",
+    "lint:eslint": "eslint --max-warnings=0",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
     "agent:check": "pnpm lint && pnpm format:check && pnpm typecheck && pnpm build && pnpm test",

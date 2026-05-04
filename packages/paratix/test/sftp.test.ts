@@ -92,7 +92,7 @@ describe("sftpDownload", () => {
   it("rejects and closes the sftp session when remote read stream creation throws", async () => {
     const { sftp, sftpEnd } = makeSftpSession()
     const client = makeClientMock(sftp)
-    vi.mocked(sftp.createReadStream).mockImplementation(() => {
+    vi.mocked(sftp).createReadStream.mockImplementation(() => {
       throw new Error("remote open failed")
     })
 
@@ -582,7 +582,7 @@ describe("sftpUpload", () => {
       "local open failed"
     )
     expect(sftpEnd).toHaveBeenCalledOnce()
-    expect(sftp.createWriteStream).not.toHaveBeenCalled()
+    expect(vi.mocked(sftp).createWriteStream.mock.calls).toHaveLength(0)
   })
 
   it("rejects, destroys the local stream, and closes sftp when remote write stream creation throws", async () => {
@@ -590,7 +590,7 @@ describe("sftpUpload", () => {
     const client = makeClientMock(sftp)
     const localReadStream = makeMockStream()
     vi.mocked(createReadStream).mockReturnValue(localReadStream as unknown as ReadStream)
-    vi.mocked(sftp.createWriteStream).mockImplementation(() => {
+    vi.mocked(sftp).createWriteStream.mockImplementation(() => {
       throw new Error("remote open failed")
     })
 

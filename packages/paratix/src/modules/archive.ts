@@ -300,6 +300,27 @@ async function archiveOwnerMatches(
   return result.stdout.trim() === ""
 }
 
+async function archiveMarkerMatches(
+  conn: SshConnection,
+  parameters: { marker: string; source: string; upload: boolean }
+): Promise<boolean> {
+  const { marker, source, upload } = parameters
+  const markerResult = await conn.exec(`cat ${shellQuote(marker)}`, EXEC_OPTS)
+  if (markerResult.code !== 0) {
+    if (/no such file/iv.test(markerResult.stderr)) return false
+    throw buildMarkerUnreadableError(markerResult)
+  }
+  const markerContent = markerResult.stdout.trim()
+
+  if (upload) {
+    const localHash = await localSha256(source)
+    return localHash === markerContent
+  }
+
+  const remoteSha = await conn.sha256(source)
+  return remoteSha === markerContent
+}
+
 /**
  * Modules for managing archive extraction on the remote host.
  */
@@ -351,21 +372,7 @@ export const archive = {
         // Without this differentiation a transient permission error would
         // collapse markerResult.stdout to "" and force an unnecessary
         // re-extraction of a potentially very large archive.
-        const markerResult = await conn.exec(`cat ${shellQuote(marker)}`, EXEC_OPTS)
-        if (markerResult.code !== 0) {
-          if (/no such file/iv.test(markerResult.stderr)) return NEEDS_APPLY
-          throw buildMarkerUnreadableError(markerResult)
-        }
-        const markerContent = markerResult.stdout.trim()
-
-        if (upload) {
-          // Compute local SHA256 without uploading.
-          const localHash = await localSha256(source)
-          return localHash === markerContent ? "ok" : NEEDS_APPLY
-        }
-
-        const remoteSha = await conn.sha256(source)
-        return remoteSha === markerContent ? "ok" : NEEDS_APPLY
+        return (await archiveMarkerMatches(conn, { marker, source, upload })) ? "ok" : NEEDS_APPLY
       },
       name: `archive.extract: ${destination}`,
     }

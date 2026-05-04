@@ -7,10 +7,11 @@ import pc from "picocolors"
 
 import type { Environment, ServerDefinition } from "./types.js"
 
+import { isMissingTsxDependencyError } from "./cliTsxHelpers.js"
 import { printCliHeader } from "./output.js"
 import { type RunOptions, runPlaybook } from "./runner.js"
-import { collectSshConfigErrors } from "./serverDefinitionValidation.js"
 import { maskRegisteredSecrets } from "./secretSink.js"
+import { collectSshConfigErrors } from "./serverDefinitionValidation.js"
 
 declare const PACKAGE_DISPLAY_VERSION: string
 
@@ -274,43 +275,6 @@ export function applyCliProcessEnvironment(options: { firstRun: boolean }): () =
   if (!options.firstRun) return restoreProcessEnvironment
   process.env[FIRST_RUN_ENV_NAME] = "true"
   return restoreProcessEnvironment
-}
-
-/**
- * R-0000071: detect whether a thrown import error genuinely indicates that
- * the optional `tsx/esm/api` module is missing, rather than a real loader
- * failure (incompatible Node, broken install, OOM, transitive dep missing).
- * Only when the error is a module-not-found error and the missing specifier
- * is exactly `tsx` or `tsx/esm/api` do we treat it as "tsx is not installed".
- *
- * @param error - The error caught while importing `tsx/esm/api`.
- * @returns True if the error indicates a missing tsx dependency.
- */
-function extractMissingModuleSpecifier(message: string): null | string {
-  const packageMatch = /Cannot find package ['"](?<specifier>[^'"]+)['"]/v.exec(message)
-  if (packageMatch?.groups?.specifier != null) return packageMatch.groups.specifier
-
-  const moduleMatch = /Cannot find module ['"](?<specifier>[^'"]+)['"]/v.exec(message)
-  if (moduleMatch?.groups?.specifier != null) return moduleMatch.groups.specifier
-
-  return null
-}
-
-function isTsxLoaderSpecifier(specifier: string): boolean {
-  const normalized = specifier.replaceAll("\\", "/")
-  return (
-    normalized === "tsx" ||
-    normalized === "tsx/esm/api" ||
-    normalized.endsWith("/tsx/esm/api")
-  )
-}
-
-function isMissingTsxDependencyError(error: unknown): boolean {
-  if (!(error instanceof Error)) return false
-  const code = "code" in error ? error.code : undefined
-  if (code !== "ERR_MODULE_NOT_FOUND" && code !== "MODULE_NOT_FOUND") return false
-  const specifier = extractMissingModuleSpecifier(error.message)
-  return specifier != null && isTsxLoaderSpecifier(specifier)
 }
 
 export async function loadServerDefinitionFromFile(

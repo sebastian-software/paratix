@@ -67,13 +67,13 @@ describe("git.clone — check", () => {
   it("returns needs-apply when the existing checkout points at a different origin URL", async () => {
     const sha = "abc1234567890"
     const mockSsh = createMockSsh({
-      [originUrlCommand]: { code: 0, stdout: "git@github.com:other/repo.git" },
       [`git -C '${destination}' ls-remote origin HEAD`]: {
         code: 0,
         stdout: `${sha}\tHEAD\n`,
       },
       [`git -C '${destination}' rev-parse HEAD`]: { code: 0, stdout: sha },
       [`test -d '${gitDir}'`]: { code: 0 },
+      [originUrlCommand]: { code: 0, stdout: "git@github.com:other/repo.git" },
     })
     const mod = git.clone(repo, destination)
     const result = await mod.check(mockSsh, emptyEnv)
@@ -223,9 +223,9 @@ describe("git.clone — apply", () => {
   it("updates the origin URL before pulling when an existing checkout drifted", async () => {
     const oldRepo = "git@github.com:other/repo.git"
     const mockSsh = createMockSsh({
-      [originUrlCommand]: { code: 0, stdout: oldRepo },
       [`git -C '${destination}' remote set-url origin '${repo}'`]: { code: 0 },
       [`test -d '${gitDir}'`]: { code: 0 },
+      [originUrlCommand]: { code: 0, stdout: oldRepo },
     })
     const mod = git.clone(repo, destination)
 
