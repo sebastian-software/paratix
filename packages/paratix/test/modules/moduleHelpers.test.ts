@@ -9,7 +9,7 @@ import {
 import { createMockSsh as createBaseMockSsh } from "../helpers/mockSsh.js"
 
 const createMockSsh: typeof createBaseMockSsh = (responses, options) =>
-  createBaseMockSsh(responses, { strict: false, ...options })
+  createBaseMockSsh(responses, options)
 
 describe("hasFlag – empty string validation", () => {
   it("throws when flagName is an empty string", async () => {
@@ -20,7 +20,9 @@ describe("hasFlag – empty string validation", () => {
   })
 
   it("does not throw for a valid flagName", async () => {
-    const ssh = createMockSsh()
+    const ssh = createMockSsh({
+      "[ -f /var/lib/paratix/flags/'valid-flag' ]": { code: 0 },
+    })
     await expect(hasFlag(ssh, "valid-flag")).resolves.not.toThrow()
   })
 })

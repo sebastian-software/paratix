@@ -691,10 +691,10 @@ describe("file.line — apply without options.match", () => {
       "[ -e '/etc/config' ]": { code: 0 },
       "cat '/etc/config'": { stdout: "first-line\nmy-line\nlast-line\n" },
     })
-    // eslint-disable-next-line @typescript-eslint/require-await -- Mock
+    const baseExec = ssh.exec
     ssh.exec = async (command: string) => {
       appendCalls.push(command)
-      return { code: 0, stderr: "", stdout: "" }
+      return baseExec(command)
     }
 
     const mod = file.line("/etc/config", "my-line")
@@ -759,7 +759,7 @@ describe("file.line — sed-Escaping Regression (apply with options.match)", () 
     const mod = file.line("/etc/config", "KEY=value", { match: "KEY=.*" })
     await mod.apply(ssh, emptyEnv)
 
-    expect(writtenFiles[0]?.content).toBe("KEY=value\nSECOND=line")
+    expect(writtenFiles[0]?.content).toBe("KEY=value\nSECOND=line\n")
   })
 
   it("apply replaces line containing & without treating it as a backreference", async () => {

@@ -5,7 +5,12 @@ import { download } from "../../src/modules/download.js"
 import { createMockSsh as createBaseMockSsh } from "../helpers/mockSsh.js"
 
 const createMockSsh: typeof createBaseMockSsh = (responses, options) =>
-  createBaseMockSsh(responses, { strict: false, ...options })
+  createBaseMockSsh(responses, {
+    defaultExecResult: { code: 0 },
+    defaultOutputResult: "",
+    defaultTestResult: false,
+    ...options,
+  })
 
 const emptyEnv = {}
 const allowUnverifiedDownload = { allowUnverifiedDownload: true } as const
@@ -1015,6 +1020,7 @@ describe("download.large", () => {
     it("returns ok when flag exists and sha256 matches", async () => {
       const sha256 = "aabbccddaabbccddaabbccddaabbccddaabbccddaabbccddaabbccddaabbccdd"
       const mockSsh = createMockSsh({
+        [`[ -e '${destination}' ]`]: { code: 0 },
         [`[ -f '${destination}' ]`]: { code: 0 },
         [`[ -f /var/lib/paratix/flags/'${flagName}' ]`]: { code: 0 },
         [`sha256sum '${destination}'`]: { stdout: `${sha256}  ${destination}` },
