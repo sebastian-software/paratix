@@ -9,6 +9,13 @@ const UNIT_NAME_PATTERN = /^[\w@.\-]+$/v
 const SYSTEMD_UNIT_MODE = "0644"
 const SYSTEMD_UNIT_RELOAD_HASH_LENGTH = 16
 
+function validateUnitName(name: string): string {
+  if (!name || name.startsWith("-") || !UNIT_NAME_PATTERN.test(name)) {
+    throw new Error(`Invalid systemd unit name: ${name}`)
+  }
+  return name
+}
+
 function normalizeMode(mode: string): string {
   return mode.replace(/^0+/v, "")
 }
@@ -67,10 +74,11 @@ export const systemd = {
    * @returns A Module that ensures the unit is masked.
    */
   masked(name: string): Module {
+    const unitName = validateUnitName(name)
     return {
       async apply(ssh: null | SshConnection): Promise<ModuleResult> {
         if (!ssh) return failed(`[systemd.masked: ${name}] SSH connection is required`)
-        const result = await ssh.exec(`${SYSTEMCTL} mask ${shellQuote(name)}`, {
+        const result = await ssh.exec(`${SYSTEMCTL} mask -- ${shellQuote(unitName)}`, {
           ignoreExitCode: true,
           silent: true,
         })
@@ -80,7 +88,7 @@ export const systemd = {
       },
       async check(ssh: null | SshConnection): Promise<"needs-apply" | "ok"> {
         if (!ssh) return NEEDS_APPLY
-        const result = await ssh.exec(`${SYSTEMCTL} is-enabled ${shellQuote(name)}`, {
+        const result = await ssh.exec(`${SYSTEMCTL} is-enabled -- ${shellQuote(unitName)}`, {
           ignoreExitCode: true,
           silent: true,
         })
@@ -102,11 +110,9 @@ export const systemd = {
    * @returns A Module that ensures the unit file is present with the given content.
    */
   unit(name: string, content: string): Module {
-    if (!UNIT_NAME_PATTERN.test(name)) {
-      throw new Error(`systemd.unit: name must match ${String(UNIT_NAME_PATTERN)}, got: ${name}`)
-    }
-    const filePath = `/etc/systemd/system/${name}`
-    const reloadFlag = buildSystemdUnitReloadFlag(name, content)
+    const unitName = validateUnitName(name)
+    const filePath = `/etc/systemd/system/${unitName}`
+    const reloadFlag = buildSystemdUnitReloadFlag(unitName, content)
     return {
       async apply(ssh: null | SshConnection): Promise<ModuleResult> {
         if (!ssh) return failed(`[systemd.unit: ${name}] SSH connection is required`)
@@ -147,10 +153,11 @@ export const systemd = {
    * @returns A Module that ensures the unit is unmasked.
    */
   unmasked(name: string): Module {
+    const unitName = validateUnitName(name)
     return {
       async apply(ssh: null | SshConnection): Promise<ModuleResult> {
         if (!ssh) return failed(`[systemd.unmasked: ${name}] SSH connection is required`)
-        const result = await ssh.exec(`${SYSTEMCTL} unmask ${shellQuote(name)}`, {
+        const result = await ssh.exec(`${SYSTEMCTL} unmask -- ${shellQuote(unitName)}`, {
           ignoreExitCode: true,
           silent: true,
         })
@@ -160,7 +167,7 @@ export const systemd = {
       },
       async check(ssh: null | SshConnection): Promise<"needs-apply" | "ok"> {
         if (!ssh) return NEEDS_APPLY
-        const result = await ssh.exec(`${SYSTEMCTL} is-enabled ${shellQuote(name)}`, {
+        const result = await ssh.exec(`${SYSTEMCTL} is-enabled -- ${shellQuote(unitName)}`, {
           ignoreExitCode: true,
           silent: true,
         })

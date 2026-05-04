@@ -59,7 +59,7 @@ describe("systemd.daemonReload", () => {
 describe("systemd.masked", () => {
   it("check returns ok when unit is already masked", async () => {
     const ssh = createMockSsh({
-      "systemctl is-enabled 'apt-daily.timer'": { code: 0, stdout: "masked\n" },
+      "systemctl is-enabled -- 'apt-daily.timer'": { code: 0, stdout: "masked\n" },
     })
     const mod = systemd.masked("apt-daily.timer")
     const result = await mod.check(ssh, emptyEnv)
@@ -68,7 +68,7 @@ describe("systemd.masked", () => {
 
   it("check returns needs-apply when unit is enabled", async () => {
     const ssh = createMockSsh({
-      "systemctl is-enabled 'apt-daily.timer'": { code: 0, stdout: "enabled\n" },
+      "systemctl is-enabled -- 'apt-daily.timer'": { code: 0, stdout: "enabled\n" },
     })
     const mod = systemd.masked("apt-daily.timer")
     const result = await mod.check(ssh, emptyEnv)
@@ -77,7 +77,7 @@ describe("systemd.masked", () => {
 
   it("check returns needs-apply when unit is disabled", async () => {
     const ssh = createMockSsh({
-      "systemctl is-enabled 'apt-daily.timer'": { code: 1, stdout: "disabled\n" },
+      "systemctl is-enabled -- 'apt-daily.timer'": { code: 1, stdout: "disabled\n" },
     })
     const mod = systemd.masked("apt-daily.timer")
     const result = await mod.check(ssh, emptyEnv)
@@ -92,17 +92,17 @@ describe("systemd.masked", () => {
 
   it("apply executes systemctl mask and returns changed on success", async () => {
     const ssh = createMockSsh({
-      "systemctl mask 'apt-daily.timer'": { code: 0 },
+      "systemctl mask -- 'apt-daily.timer'": { code: 0 },
     })
     const mod = systemd.masked("apt-daily.timer")
     const result = await mod.apply(ssh, emptyEnv)
     expect(result.status).toBe("changed")
-    expect(ssh.calls).toContain("systemctl mask 'apt-daily.timer'")
+    expect(ssh.calls).toContain("systemctl mask -- 'apt-daily.timer'")
   })
 
   it("apply returns failed when systemctl mask exits with non-zero code", async () => {
     const ssh = createMockSsh({
-      "systemctl mask 'apt-daily.timer'": { code: 1 },
+      "systemctl mask -- 'apt-daily.timer'": { code: 1 },
     })
     const mod = systemd.masked("apt-daily.timer")
     const result = await mod.apply(ssh, emptyEnv)
@@ -232,39 +232,72 @@ describe("systemd.unit", () => {
 })
 
 describe("systemd.unit — input validation", () => {
+  const factories = [
+    (name: string) => systemd.masked(name),
+    (name: string) => systemd.unmasked(name),
+    (name: string) => systemd.unit(name, "[Unit]"),
+  ]
+
+  it("throws when name is empty", () => {
+    for (const createModule of factories) {
+      expect(() => createModule("")).toThrow(/Invalid systemd unit name/v)
+    }
+  })
+
+  it("throws when name can be interpreted as a systemctl option", () => {
+    for (const createModule of factories) {
+      expect(() => createModule("--global.service")).toThrow(/Invalid systemd unit name/v)
+      expect(() => createModule("-foo.service")).toThrow(/Invalid systemd unit name/v)
+    }
+  })
+
   it("throws when name contains path traversal (../../etc/passwd)", () => {
-    expect(() => systemd.unit("../../etc/passwd", "[Unit]")).toThrow(/name must match/v)
+    for (const createModule of factories) {
+      expect(() => createModule("../../etc/passwd")).toThrow(/Invalid systemd unit name/v)
+    }
   })
 
   it("throws when name contains a forward slash (foo/bar.service)", () => {
-    expect(() => systemd.unit("foo/bar.service", "[Unit]")).toThrow(/name must match/v)
+    for (const createModule of factories) {
+      expect(() => createModule("foo/bar.service")).toThrow(/Invalid systemd unit name/v)
+    }
   })
 
   it("throws when name contains a space", () => {
-    expect(() => systemd.unit("my service.service", "[Unit]")).toThrow(/name must match/v)
+    for (const createModule of factories) {
+      expect(() => createModule("my service.service")).toThrow(/Invalid systemd unit name/v)
+    }
   })
 
   it("throws when name contains shell metacharacters (semicolon)", () => {
-    expect(() => systemd.unit("app;rm.service", "[Unit]")).toThrow(/name must match/v)
+    for (const createModule of factories) {
+      expect(() => createModule("app;rm.service")).toThrow(/Invalid systemd unit name/v)
+    }
   })
 
   it("allows valid service names with letters, digits, dots, hyphens, and underscores", () => {
-    expect(() => systemd.unit("my-app.service", "[Unit]")).not.toThrow()
+    for (const createModule of factories) {
+      expect(() => createModule("my-app.service")).not.toThrow()
+    }
   })
 
   it("allows valid timer names", () => {
-    expect(() => systemd.unit("backup.timer", "[Unit]")).not.toThrow()
+    for (const createModule of factories) {
+      expect(() => createModule("backup.timer")).not.toThrow()
+    }
   })
 
   it("allows names with the @ instance specifier", () => {
-    expect(() => systemd.unit("app@instance.service", "[Unit]")).not.toThrow()
+    for (const createModule of factories) {
+      expect(() => createModule("app@instance.service")).not.toThrow()
+    }
   })
 })
 
 describe("systemd.unmasked", () => {
   it("check returns ok when unit is not masked", async () => {
     const ssh = createMockSsh({
-      "systemctl is-enabled 'apt-daily.timer'": { code: 0, stdout: "enabled\n" },
+      "systemctl is-enabled -- 'apt-daily.timer'": { code: 0, stdout: "enabled\n" },
     })
     const mod = systemd.unmasked("apt-daily.timer")
     const result = await mod.check(ssh, emptyEnv)
@@ -273,7 +306,7 @@ describe("systemd.unmasked", () => {
 
   it("check returns ok when unit is disabled but not masked", async () => {
     const ssh = createMockSsh({
-      "systemctl is-enabled 'apt-daily.timer'": { code: 1, stdout: "disabled\n" },
+      "systemctl is-enabled -- 'apt-daily.timer'": { code: 1, stdout: "disabled\n" },
     })
     const mod = systemd.unmasked("apt-daily.timer")
     const result = await mod.check(ssh, emptyEnv)
@@ -282,7 +315,7 @@ describe("systemd.unmasked", () => {
 
   it("check returns needs-apply when unit is masked", async () => {
     const ssh = createMockSsh({
-      "systemctl is-enabled 'apt-daily.timer'": { code: 1, stdout: "masked\n" },
+      "systemctl is-enabled -- 'apt-daily.timer'": { code: 1, stdout: "masked\n" },
     })
     const mod = systemd.unmasked("apt-daily.timer")
     const result = await mod.check(ssh, emptyEnv)
@@ -297,17 +330,17 @@ describe("systemd.unmasked", () => {
 
   it("apply executes systemctl unmask and returns changed on success", async () => {
     const ssh = createMockSsh({
-      "systemctl unmask 'apt-daily.timer'": { code: 0 },
+      "systemctl unmask -- 'apt-daily.timer'": { code: 0 },
     })
     const mod = systemd.unmasked("apt-daily.timer")
     const result = await mod.apply(ssh, emptyEnv)
     expect(result.status).toBe("changed")
-    expect(ssh.calls).toContain("systemctl unmask 'apt-daily.timer'")
+    expect(ssh.calls).toContain("systemctl unmask -- 'apt-daily.timer'")
   })
 
   it("apply returns failed when systemctl unmask exits with non-zero code", async () => {
     const ssh = createMockSsh({
-      "systemctl unmask 'apt-daily.timer'": { code: 1 },
+      "systemctl unmask -- 'apt-daily.timer'": { code: 1 },
     })
     const mod = systemd.unmasked("apt-daily.timer")
     const result = await mod.apply(ssh, emptyEnv)
