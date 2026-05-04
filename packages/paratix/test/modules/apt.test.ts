@@ -376,12 +376,15 @@ describe("apt.repository (standard form)", () => {
   const filePath = "/etc/apt/sources.list.d/docker.list"
   const expectedContentWithSignedBy =
     "deb [signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu noble stable"
+  const updateFlag = `apt-repository-${sha256String("docker").slice(0, 16)}-${sha256String(expectedContentWithSignedBy).slice(0, 16)}`
+  const updateFlagCheck = `[ -f /var/lib/paratix/flags/'${updateFlag}' ]`
 
   it("check returns ok when file exists with correct content (auto signed-by)", async () => {
     const ssh = createMockSsh({
       [`[ -f '${filePath}' ]`]: { code: 0 },
       [`cat '${filePath}'`]: { stdout: expectedContentWithSignedBy },
       [`stat -c '%a' '${filePath}'`]: { stdout: "644" },
+      [updateFlagCheck]: { code: 0 },
     })
     const mod = apt.repository("docker", source)
     const result = await mod.check(ssh, emptyEnv)
@@ -408,6 +411,7 @@ describe("apt.repository (standard form)", () => {
       [`[ -f '${filePath}' ]`]: { code: 0 },
       [`cat '${filePath}'`]: { stdout: expectedContentWithSignedBy },
       [`stat -c '%a' '${filePath}'`]: { stdout: "644" },
+      [updateFlagCheck]: { code: 0 },
     })
     const mod = apt.repository("docker", source)
     const result = await mod.check(ssh, emptyEnv)
@@ -426,10 +430,12 @@ describe("apt.repository (standard form)", () => {
   })
 
   it("check returns ok when signedBy is false and file matches source without signed-by", async () => {
+    const signedByFalseFlag = `apt-repository-${sha256String("docker").slice(0, 16)}-${sha256String(source).slice(0, 16)}`
     const ssh = createMockSsh({
       [`[ -f '${filePath}' ]`]: { code: 0 },
       [`cat '${filePath}'`]: { stdout: source },
       [`stat -c '%a' '${filePath}'`]: { stdout: "644" },
+      [`[ -f /var/lib/paratix/flags/'${signedByFalseFlag}' ]`]: { code: 0 },
     })
     const mod = apt.repository("docker", source, { signedBy: false })
     const result = await mod.check(ssh, emptyEnv)
@@ -439,10 +445,12 @@ describe("apt.repository (standard form)", () => {
   it("check returns ok when explicit signedBy uses custom key path", async () => {
     const customContent =
       "deb [signed-by=/etc/apt/keyrings/custom.gpg] https://download.docker.com/linux/ubuntu noble stable"
+    const customFlag = `apt-repository-${sha256String("docker").slice(0, 16)}-${sha256String(customContent).slice(0, 16)}`
     const ssh = createMockSsh({
       [`[ -f '${filePath}' ]`]: { code: 0 },
       [`cat '${filePath}'`]: { stdout: customContent },
       [`stat -c '%a' '${filePath}'`]: { stdout: "644" },
+      [`[ -f /var/lib/paratix/flags/'${customFlag}' ]`]: { code: 0 },
     })
     const mod = apt.repository("docker", source, { signedBy: "custom" })
     const result = await mod.check(ssh, emptyEnv)
@@ -459,6 +467,7 @@ describe("apt.repository (standard form)", () => {
       [`[ -f '${filePath}' ]`]: { code: 0 },
       [`cat '${filePath}'`]: { stdout: tabbed },
       [`stat -c '%a' '${filePath}'`]: { stdout: "644" },
+      [updateFlagCheck]: { code: 0 },
     })
     const mod = apt.repository("docker", source)
     const result = await mod.check(ssh, emptyEnv)
@@ -472,6 +481,7 @@ describe("apt.repository (standard form)", () => {
       [`[ -f '${filePath}' ]`]: { code: 0 },
       [`cat '${filePath}'`]: { stdout: spaced },
       [`stat -c '%a' '${filePath}'`]: { stdout: "644" },
+      [updateFlagCheck]: { code: 0 },
     })
     const mod = apt.repository("docker", source)
     const result = await mod.check(ssh, emptyEnv)
@@ -484,6 +494,7 @@ describe("apt.repository (standard form)", () => {
       [`[ -f '${filePath}' ]`]: { code: 0 },
       [`cat '${filePath}'`]: { stdout: trailing },
       [`stat -c '%a' '${filePath}'`]: { stdout: "644" },
+      [updateFlagCheck]: { code: 0 },
     })
     const mod = apt.repository("docker", source)
     const result = await mod.check(ssh, emptyEnv)
@@ -511,6 +522,44 @@ describe("apt.repository (standard form)", () => {
     const mod = apt.repository("docker", source)
     const result = await mod.check(ssh, emptyEnv)
     expect(result).toBe("needs-apply")
+  })
+
+  it("check returns needs-apply when update marker is missing", async () => {
+    const ssh = createMockSsh({
+      [`[ -f '${filePath}' ]`]: { code: 0 },
+      [`cat '${filePath}'`]: { stdout: expectedContentWithSignedBy },
+      [`stat -c '%a' '${filePath}'`]: { stdout: "644" },
+      [updateFlagCheck]: { code: 1 },
+    })
+    const mod = apt.repository("docker", source)
+    const result = await mod.check(ssh, emptyEnv)
+    expect(result).toBe("needs-apply")
+  })
+
+  it("apply sets update marker only after apt-get update succeeds", async () => {
+    const ssh = createMockSsh({
+      "DEBIAN_FRONTEND=noninteractive apt-get update": { code: 0 },
+    })
+    const mod = apt.repository("docker", source)
+    const result = await mod.apply(ssh, emptyEnv)
+
+    expect(result.status).toBe("changed")
+    expect(ssh.calls).toContain(
+      `find /var/lib/paratix/flags -maxdepth 1 -name 'apt-repository-${sha256String("docker").slice(0, 16)}-*' -delete && touch /var/lib/paratix/flags/'${updateFlag}'`
+    )
+  })
+
+  it("apply does not set update marker when apt-get update fails", async () => {
+    const ssh = createMockSsh({
+      "DEBIAN_FRONTEND=noninteractive apt-get update": { code: 1 },
+    })
+    const mod = apt.repository("docker", source)
+    const result = await mod.apply(ssh, emptyEnv)
+
+    expect(result.status).toBe("failed")
+    expect(ssh.calls).not.toContain(
+      `find /var/lib/paratix/flags -maxdepth 1 -name 'apt-repository-${sha256String("docker").slice(0, 16)}-*' -delete && touch /var/lib/paratix/flags/'${updateFlag}'`
+    )
   })
 
   // R-0000098 regression: name lands directly in

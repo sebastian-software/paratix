@@ -38,6 +38,20 @@ function validateAptResourceName(name: string): void {
   }
 }
 
+function buildRepositoryUpdateFlag(
+  name: string,
+  expectedContent: string
+): {
+  flagName: string
+  flagPrefix: string
+} {
+  const flagPrefix = `apt-repository-${sha256String(name).slice(0, 16)}-`
+  return {
+    flagName: `${flagPrefix}${sha256String(expectedContent).slice(0, 16)}`,
+    flagPrefix,
+  }
+}
+
 const APT_BASE_EXEC_OPTS = { ignoreExitCode: true, silent: true } as const
 
 function aptExecOptions(options?: UpgradeOptions): ExecOptions {
@@ -525,6 +539,7 @@ export const apt = {
     }
 
     const filePath = `/etc/apt/sources.list.d/${name}.list`
+    const updateFlag = buildRepositoryUpdateFlag(name, expectedContent)
 
     return {
       async apply(ssh: null | SshConnection): Promise<ModuleResult> {
@@ -536,6 +551,7 @@ export const apt = {
         })
         if (result.code !== 0)
           return failedCommand(`[apt.repository] apt-get update failed for ${name}`, result)
+        await setVersionedFlag(ssh, updateFlag.flagName, updateFlag.flagPrefix)
         return { status: "changed" }
       },
       async check(ssh: null | SshConnection): Promise<"needs-apply" | "ok"> {
@@ -555,7 +571,9 @@ export const apt = {
         }
 
         const mode = await ssh.output(`stat -c '%a' ${shellQuote(filePath)}`)
-        return mode.trim() === APT_REPOSITORY_MODE.replace(/^0+/v, "") ? "ok" : NEEDS_APPLY
+        if (mode.trim() !== APT_REPOSITORY_MODE.replace(/^0+/v, "")) return NEEDS_APPLY
+
+        return (await hasFlag(ssh, updateFlag.flagName)) ? "ok" : NEEDS_APPLY
       },
       name: `apt.repository: ${name}`,
     }
