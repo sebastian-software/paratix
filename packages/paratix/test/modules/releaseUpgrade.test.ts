@@ -2,9 +2,19 @@ import { describe, expect, it, vi } from "vitest"
 
 import { isSystemHostMetaEntry, isSystemRebootMetaEntry } from "../../src/meta.js"
 import { releaseUpgrade } from "../../src/modules/releaseUpgrade.js"
-import { createMockSsh } from "../helpers/mockSsh.js"
+import { createMockSsh as createBaseMockSsh } from "../helpers/mockSsh.js"
 
 const emptyEnv = {}
+
+const createMockSsh: typeof createBaseMockSsh = (responses, options) =>
+  createBaseMockSsh(responses, {
+    ...options,
+    allowWrites: [
+      { options: { mode: "0644" }, remotePath: "/etc/apt/sources.list" },
+      { options: { mode: "0644" }, remotePath: /^\/etc\/apt\/sources\.list\.d\/.+$/v },
+      ...(options?.allowWrites ?? []),
+    ],
+  })
 
 // os-release content helpers
 const UBUNTU_OS_RELEASE = 'ID=ubuntu\nVERSION_ID="22.04"\n'

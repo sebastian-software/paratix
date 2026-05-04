@@ -1,6 +1,11 @@
 import { describe, expect, it } from "vitest"
 
-import { FLAGS_DIRECTORY, hasFlag, setFlag, setVersionedFlag } from "../../src/modules/moduleHelpers.js"
+import {
+  FLAGS_DIRECTORY,
+  hasFlag,
+  setFlag,
+  setVersionedFlag,
+} from "../../src/modules/moduleHelpers.js"
 import { createMockSsh as createBaseMockSsh } from "../helpers/mockSsh.js"
 
 const createMockSsh: typeof createBaseMockSsh = (responses, options) =>

@@ -24,10 +24,25 @@ function composeCmd(runtime: "docker" | "podman"): string {
 function createComposeMockSsh(
   responses?: Record<string, { code?: number; stderr?: string; stdout?: string }>
 ) {
-  return createStrictMockSsh({
-    "command -v podman": { code: 0 },
-    ...responses,
-  })
+  return createStrictMockSsh(
+    {
+      "command -v podman": { code: 0 },
+      ...responses,
+    },
+    {
+      allowUploads: [
+        {
+          localPath: "/local/compose.yml",
+          options: { mode: "0600" },
+          remotePath: "/opt/app/compose.yml",
+        },
+      ],
+      allowWrites: [
+        { options: { mode: "0600" }, remotePath: "/opt/app/compose.yml" },
+        { options: { mode: "0644" }, remotePath: /^\/etc\/systemd\/system\/.+$/v },
+      ],
+    }
+  )
 }
 
 // ─── compose.up ──────────────────────────────────────────────────────────────

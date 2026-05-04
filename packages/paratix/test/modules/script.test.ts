@@ -41,15 +41,26 @@ function createScriptMockSsh(options?: {
   const scriptCommand = buildScriptCommand(remotePath, options?.args)
   const flagCommand = `find ${FLAGS_DIRECTORY} -maxdepth 1 -name 'script-${name}-*' -delete && touch ${FLAGS_DIRECTORY}/'script-${name}-${version}'`
 
-  return createStrictMockSsh({
-    [`chmod +x '${remotePath}'`]: { code: 0 },
-    [`mkdir -p ${FLAGS_DIRECTORY}`]: { code: 0 },
-    [`rm -f '${remotePath}'`]: { code: 0 },
-    [flagCommand]: { code: 0 },
-    [mktempCmd]: { code: 0, stdout: `${remotePath}\n` },
-    [scriptCommand]: { code: 0 },
-    ...options?.responses,
-  })
+  return createStrictMockSsh(
+    {
+      [`chmod +x '${remotePath}'`]: { code: 0 },
+      [`mkdir -p ${FLAGS_DIRECTORY}`]: { code: 0 },
+      [`rm -f '${remotePath}'`]: { code: 0 },
+      [flagCommand]: { code: 0 },
+      [mktempCmd]: { code: 0, stdout: `${remotePath}\n` },
+      [scriptCommand]: { code: 0 },
+      ...options?.responses,
+    },
+    {
+      allowUploads: [
+        {
+          localPath: "/local/setup.sh",
+          options: undefined,
+          remotePath: /^\/tmp\/paratix-script-[^.]+\.[^.]+$/v,
+        },
+      ],
+    }
+  )
 }
 
 // ---------------------------------------------------------------------------

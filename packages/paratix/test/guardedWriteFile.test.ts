@@ -11,7 +11,7 @@ describe("guardedWriteFile", () => {
     const originalContent = "key=value"
     const newContent = "key=updated"
 
-    const ssh = createMockSsh()
+    const ssh = createMockSsh({}, { allowWrites: [{ options: { mode }, remotePath }] })
     // Directly mock readFile to return the exact originalContent without any
     // trimming side effects from the internal output() implementation.
     vi.spyOn(ssh, "readFile").mockResolvedValue(originalContent)
@@ -32,7 +32,7 @@ describe("guardedWriteFile", () => {
     const newContent = "secret=xyz"
     const mode = "0600"
 
-    const ssh = createMockSsh()
+    const ssh = createMockSsh({}, { allowWrites: [{ options: { mode }, remotePath }] })
     vi.spyOn(ssh, "readFile").mockResolvedValue(originalContent)
     const writeFileSpy = vi.spyOn(ssh, "writeFile")
 

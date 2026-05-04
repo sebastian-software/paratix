@@ -6,7 +6,13 @@ import { sha256String } from "../../src/modules/fileHelpers.js"
 import { createMockSsh as createBaseMockSsh } from "../helpers/mockSsh.js"
 
 const createMockSsh: typeof createBaseMockSsh = (responses, options) =>
-  createBaseMockSsh(responses, options)
+  createBaseMockSsh(responses, {
+    ...options,
+    allowWrites: [
+      { options: { mode: "0644" }, remotePath: /^\/etc\/apt\/sources\.list\.d\/.+\.list$/v },
+      ...(options?.allowWrites ?? []),
+    ],
+  })
 
 const emptyEnv = {}
 const SUCCESSFUL_EXEC_DEFAULT = { code: 0 } as const

@@ -2,9 +2,18 @@ import { describe, expect, it } from "vitest"
 
 import { sha256String } from "../../src/modules/fileHelpers.js"
 import { systemd } from "../../src/modules/systemd.js"
-import { createMockSsh } from "../helpers/mockSsh.js"
+import { createMockSsh as createBaseMockSsh } from "../helpers/mockSsh.js"
 
 const emptyEnv = {}
+
+const createMockSsh: typeof createBaseMockSsh = (responses, options) =>
+  createBaseMockSsh(responses, {
+    ...options,
+    allowWrites: [
+      { options: { mode: "0644" }, remotePath: /^\/etc\/systemd\/system\/.+$/v },
+      ...(options?.allowWrites ?? []),
+    ],
+  })
 
 describe("systemd.daemonReload", () => {
   it("check always returns needs-apply with a valid ssh connection", async () => {

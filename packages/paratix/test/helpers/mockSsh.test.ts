@@ -13,6 +13,21 @@ describe("createMockSsh", () => {
     await expect(ssh.test("test -f /tmp/file")).rejects.toThrow(
       "createMockSsh: unstubbed test call: test -f /tmp/file"
     )
+    expect(() => {
+      ssh.disconnect()
+    }).toThrow("createMockSsh: unstubbed disconnect call: disconnect()")
+    await expect(ssh.downloadFile("/remote/file", "/local/file")).rejects.toThrow(
+      "createMockSsh: unstubbed downloadFile call: /remote/file -> /local/file"
+    )
+    await expect(ssh.uploadFile("/local/file", "/remote/file")).rejects.toThrow(
+      "createMockSsh: unstubbed uploadFile call: /local/file -> /remote/file"
+    )
+    await expect(ssh.writeFile("/remote/file", "secret content", { mode: "0600" })).rejects.toThrow(
+      "createMockSsh: unstubbed writeFile call: /remote/file (content redacted, 14 bytes)"
+    )
+    await expect(ssh.probeSudo()).rejects.toThrow(
+      "createMockSsh: unstubbed probeSudo call: probeSudo()"
+    )
   })
 
   it("supports explicit permissive legacy behavior", async () => {
@@ -21,6 +36,15 @@ describe("createMockSsh", () => {
     await expect(ssh.exec("echo ok")).resolves.toMatchObject({ code: 0, stderr: "", stdout: "" })
     await expect(ssh.output("cat /tmp/file")).resolves.toBe("")
     await expect(ssh.test("test -f /tmp/file")).resolves.toBe(true)
+    expect(() => {
+      ssh.disconnect()
+    }).not.toThrow()
+    await expect(ssh.downloadFile("/remote/file", "/local/file")).resolves.toBeUndefined()
+    await expect(ssh.uploadFile("/local/file", "/remote/file")).resolves.toBeUndefined()
+    await expect(
+      ssh.writeFile("/remote/file", "secret content", { mode: "0600" })
+    ).resolves.toBeUndefined()
+    await expect(ssh.probeSudo()).resolves.toBeUndefined()
   })
 
   it("records addPort, removePort and updateHost invocations", () => {
@@ -35,6 +59,48 @@ describe("createMockSsh", () => {
     expect(ssh.addPortCalls).toStrictEqual([2022, 8080])
     expect(ssh.removePortCalls).toStrictEqual([2022])
     expect(ssh.updateHostCalls).toStrictEqual(["10.0.0.1", "10.0.0.2"])
+  })
+
+  it("records side-effect invocations", async () => {
+    const ssh = createMockSsh(
+      {},
+      {
+        allowDisconnect: true,
+        allowDownloads: [{ localPath: "/local/file", remotePath: "/remote/file" }],
+        allowProbeSudo: true,
+        allowUploads: [
+          { localPath: "/local/input", options: { mode: "0644" }, remotePath: "/remote/input" },
+        ],
+        allowWrites: [{ options: { mode: "0600" }, remotePath: "/remote/output" }],
+      }
+    )
+
+    ssh.disconnect()
+    await ssh.downloadFile("/remote/file", "/local/file")
+    await ssh.uploadFile("/local/input", "/remote/input", { mode: "0644" })
+    await ssh.writeFile("/remote/output", "secret content", { mode: "0600" })
+    await ssh.probeSudo()
+
+    expect(ssh.disconnectCalls).toHaveLength(1)
+    expect(ssh.downloadFileCalls).toStrictEqual([
+      { localPath: "/local/file", remotePath: "/remote/file" },
+    ])
+    expect(ssh.uploadFileCalls).toStrictEqual([
+      { localPath: "/local/input", options: { mode: "0644" }, remotePath: "/remote/input" },
+    ])
+    expect(ssh.writeFileCalls).toStrictEqual([
+      { content: "secret content", options: { mode: "0600" }, remotePath: "/remote/output" },
+    ])
+    expect(ssh.probeSudoCalls).toHaveLength(1)
+  })
+
+  it("does not include writeFile content in strict error messages", async () => {
+    const ssh = createMockSsh()
+    const secret = "super-secret-token-value"
+
+    await expect(ssh.writeFile("/remote/secret", secret, { mode: "0600" })).rejects.not.toThrow(
+      secret
+    )
   })
 
   it("returns the configured defaultTestResult for unstubbed test calls", async () => {
@@ -141,14 +207,30 @@ describe("createStrictMockSsh", () => {
     const ssh = createStrictMockSsh(
       {},
       {
+        allowDisconnect: true,
+        allowDownloads: [{ localPath: "/local/file", remotePath: "/remote/file" }],
+        allowProbeSudo: true,
         allowUnstubbedExec: ["echo ok"],
         allowUnstubbedOutput: ["cat /tmp/file"],
         allowUnstubbedTest: ["test -f /tmp/file"],
+        allowUploads: [
+          { localPath: "/local/file", options: undefined, remotePath: "/remote/file" },
+        ],
+        allowWrites: [{ options: { mode: "0600" }, remotePath: "/remote/file" }],
       }
     )
 
     await expect(ssh.exec("echo ok")).resolves.toMatchObject({ code: 0, stderr: "", stdout: "" })
     await expect(ssh.output("cat /tmp/file")).resolves.toBe("")
     await expect(ssh.test("test -f /tmp/file")).resolves.toBe(true)
+    expect(() => {
+      ssh.disconnect()
+    }).not.toThrow()
+    await expect(ssh.downloadFile("/remote/file", "/local/file")).resolves.toBeUndefined()
+    await expect(ssh.uploadFile("/local/file", "/remote/file")).resolves.toBeUndefined()
+    await expect(
+      ssh.writeFile("/remote/file", "content", { mode: "0600" })
+    ).resolves.toBeUndefined()
+    await expect(ssh.probeSudo()).resolves.toBeUndefined()
   })
 })

@@ -1,13 +1,13 @@
 import type { ExecOptions, ExecResult, SshConnection } from "../../src/types.js"
 
 import { shellQuote } from "../../src/ssh.js"
-
-const noop = async (): Promise<void> => {
-  /* mock noop */
-}
-const noopMethod = (): void => {
-  /* mock noop */
-}
+import {
+  createSideEffectRecorder,
+  type DownloadFileCall,
+  type SideEffectOptions,
+  type UploadFileCall,
+  type WriteFileCall,
+} from "./mockSshSideEffects.js"
 
 type MockResponses = Record<string, Partial<ExecResult>>
 
@@ -33,15 +33,13 @@ type MockSshOptions = {
    * treats unspecified predicates as true or false.
    */
   defaultTestResult?: boolean
-  /** Set to `false` for legacy permissive behavior. */
-  strict?: boolean
   /**
    * When `true`, log a `console.warn` for every unstubbed `ssh.test()` call so
    * test authors can audit silent permissive matches. Off by default to keep
    * existing test runs quiet.
    */
   warnOnUnstubbedTest?: boolean
-}
+} & SideEffectOptions
 
 /** Recorded `ssh.exec` invocation: the command string plus the options it received. */
 export type ExecCall = { command: string; options: ExecOptions | undefined }
@@ -49,9 +47,14 @@ export type ExecCall = { command: string; options: ExecOptions | undefined }
 type MockSsh = {
   addPortCalls: number[]
   calls: string[]
+  disconnectCalls: Array<Record<never, never>>
+  downloadFileCalls: DownloadFileCall[]
   execCalls: ExecCall[]
+  probeSudoCalls: Array<Record<never, never>>
   removePortCalls: number[]
   updateHostCalls: string[]
+  uploadFileCalls: UploadFileCall[]
+  writeFileCalls: WriteFileCall[]
 } & SshConnection
 
 function isAllowed(command: string, allowed?: string[]): boolean {
@@ -169,14 +172,10 @@ function createTest(
   }
 }
 
-type RecordingSpies = {
-  addPort: (port: number) => boolean
-  addPortCalls: number[]
-  removePort: (port: number) => void
-  removePortCalls: number[]
-  updateHost: (host: string) => void
-  updateHostCalls: string[]
-}
+type RecordingSpies = Pick<
+  MockSsh,
+  "addPort" | "addPortCalls" | "removePort" | "removePortCalls" | "updateHost" | "updateHostCalls"
+>
 
 function createRecordingSpies(): RecordingSpies {
   const addPortCalls: number[] = []
@@ -213,16 +212,16 @@ export function createMockSsh(responses?: MockResponses, options?: MockSshOption
   const calls: string[] = []
   const execCalls: ExecCall[] = []
   const spies = createRecordingSpies()
-  const exec = createExec({ calls, execCalls }, responses, options)
-  const output = createOutput(calls, responses, options)
-  const test = createTest(calls, responses, options)
+  const sideEffects = createSideEffectRecorder(options)
   return {
     addPort: spies.addPort,
     addPortCalls: spies.addPortCalls,
     calls,
-    disconnect: noopMethod,
-    downloadFile: noop,
-    exec,
+    disconnect: sideEffects.disconnect,
+    disconnectCalls: sideEffects.disconnectCalls,
+    downloadFile: sideEffects.downloadFile,
+    downloadFileCalls: sideEffects.downloadFileCalls,
+    exec: createExec({ calls, execCalls }, responses, options),
     execCalls,
     async exists(path) {
       return this.test(`[ -e ${shellQuote(path)} ]`)
@@ -232,8 +231,9 @@ export function createMockSsh(responses?: MockResponses, options?: MockSshOption
       const out = await this.output(command)
       return out.length > 0 ? out.split("\n") : []
     },
-    output,
-    probeSudo: noop,
+    output: createOutput(calls, responses, options),
+    probeSudo: sideEffects.probeSudo,
+    probeSudoCalls: sideEffects.probeSudoCalls,
     async readFile(path) {
       return this.output(`cat ${shellQuote(path)}`)
     },
@@ -247,11 +247,13 @@ export function createMockSsh(responses?: MockResponses, options?: MockSshOption
       if (match == null) return null
       return match.stdout?.split(/\s+/v)[0] ?? null
     },
-    test,
+    test: createTest(calls, responses, options),
     updateHost: spies.updateHost,
     updateHostCalls: spies.updateHostCalls,
-    uploadFile: noop,
-    writeFile: noop,
+    uploadFile: sideEffects.uploadFile,
+    uploadFileCalls: sideEffects.uploadFileCalls,
+    writeFile: sideEffects.writeFile,
+    writeFileCalls: sideEffects.writeFileCalls,
   }
 }
 

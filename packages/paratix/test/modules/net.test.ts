@@ -10,8 +10,22 @@ import {
 } from "../../src/secretSink.js"
 import { createMockSsh as createBaseMockSsh } from "../helpers/mockSsh.js"
 
+const NET_WRITE_ALLOWLIST = [
+  { options: { mode: "0644" }, remotePath: "/etc/hosts" },
+  { options: { mode: "0644" }, remotePath: "/etc/resolv.conf" },
+  { options: { mode: "0644" }, remotePath: /^\/etc\/netplan\/60-paratix-.+\.yaml$/v },
+  {
+    options: { mode: "0644" },
+    remotePath: /^\/etc\/systemd\/network\/50-paratix-route-.+\.network$/v,
+  },
+  { options: { mode: "0644" }, remotePath: /^\/etc\/systemd\/network\/60-paratix-.+\.network$/v },
+] as const
+
 const createMockSsh: typeof createBaseMockSsh = (responses, options) =>
-  createBaseMockSsh(responses, options)
+  createBaseMockSsh(responses, {
+    ...options,
+    allowWrites: [...NET_WRITE_ALLOWLIST, ...(options?.allowWrites ?? [])],
+  })
 
 const emptyEnv = {}
 const routeDropinPath = "/etc/systemd/network/50-paratix-route-10.0.0.0-24.network"

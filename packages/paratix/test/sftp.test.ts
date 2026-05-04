@@ -436,7 +436,6 @@ describe("sftpDownload", () => {
 
     // Assert — promise must reject with a descriptive timeout message
     await expect(promise).rejects.toThrow("SFTP download timed out after 5000ms: /remote/file.txt")
-
   })
 
   it("leaves the destination path untouched on timeout", async () => {
@@ -455,7 +454,6 @@ describe("sftpDownload", () => {
     expect(vi.mocked(renameSync)).not.toHaveBeenCalled()
     expect(vi.mocked(unlinkSync)).toHaveBeenCalledWith(tempPath)
     expect(vi.mocked(unlinkSync)).not.toHaveBeenCalledWith("/local/file.txt")
-
   })
 
   it("leaves the destination path untouched on stream errors", async () => {
@@ -495,7 +493,6 @@ describe("sftpDownload", () => {
     expect(sftpReadStream.destroy).toHaveBeenCalledOnce()
     expect(localWriteStream.destroy).toHaveBeenCalledOnce()
     expect(sftpEnd).toHaveBeenCalledOnce()
-
   })
 
   it("clears timeout on successful transfer", async () => {
@@ -517,7 +514,6 @@ describe("sftpDownload", () => {
 
     // Assert — promise already resolved; no extra sftp.end() from a late timeout
     await expect(promise).resolves.toBeUndefined()
-
   })
 
   it("clears timeout on stream error", async () => {
@@ -541,7 +537,6 @@ describe("sftpDownload", () => {
 
     // Assert — sftp.end() was called exactly once (from the error handler, not the timeout)
     expect(sftpEnd).toHaveBeenCalledOnce()
-
   })
 })
 
@@ -869,7 +864,6 @@ describe("sftpUpload", () => {
 
     // Assert — promise must reject with a descriptive timeout message
     await expect(promise).rejects.toThrow("SFTP upload timed out after 5000ms: /remote/file.txt")
-
   })
 
   it("destroys both streams and ends sftp session on timeout", async () => {
@@ -892,7 +886,6 @@ describe("sftpUpload", () => {
     expect(localReadStream.destroy).toHaveBeenCalledOnce()
     expect(sftpWriteStream.destroy).toHaveBeenCalledOnce()
     expect(sftpEnd).toHaveBeenCalledOnce()
-
   })
 
   it("clears timeout on successful transfer", async () => {
@@ -914,7 +907,6 @@ describe("sftpUpload", () => {
 
     // Assert — promise already resolved; no extra sftp.end() from a late timeout
     await expect(promise).resolves.toBeUndefined()
-
   })
 
   it("clears timeout on stream error", async () => {
@@ -938,6 +930,5 @@ describe("sftpUpload", () => {
 
     // Assert — sftp.end() was called exactly once (from the error handler, not the timeout)
     expect(sftpEnd).toHaveBeenCalledOnce()
-
   })
 })

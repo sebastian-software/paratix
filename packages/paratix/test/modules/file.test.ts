@@ -1155,7 +1155,10 @@ describe("file.assemble", () => {
       const frag1 = join(dir, "frag1.txt")
       writeFileSync(frag1, "Hello")
 
-      const ssh = createMockSsh()
+      const ssh = createMockSsh(
+        {},
+        { allowWrites: [{ options: { mode: "999" }, remotePath: "/remote/assembled.txt" }] }
+      )
       const mod = file.assemble("/remote/assembled.txt", [frag1], { mode: "999" })
 
       await expect(mod.apply(ssh, emptyEnv)).rejects.toThrow(/mode/v)

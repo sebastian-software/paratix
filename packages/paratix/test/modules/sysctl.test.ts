@@ -1,9 +1,18 @@
 import { describe, expect, it, vi } from "vitest"
 
 import { sysctl } from "../../src/modules/sysctl.js"
-import { createMockSsh } from "../helpers/mockSsh.js"
+import { createMockSsh as createBaseMockSsh } from "../helpers/mockSsh.js"
 
 const emptyEnv = {}
+
+const createMockSsh: typeof createBaseMockSsh = (responses, options) =>
+  createBaseMockSsh(responses, {
+    ...options,
+    allowWrites: [
+      { options: { mode: "0644" }, remotePath: /^\/etc\/sysctl\.d\/99-paratix-.+\.conf$/v },
+      ...(options?.allowWrites ?? []),
+    ],
+  })
 
 const KEY = "net.ipv4.ip_forward"
 const VALUE = "1"
