@@ -1,7 +1,6 @@
 /* eslint-disable max-lines -- integration harness keeps Docker lifecycle helpers together */
 import { execFile } from "node:child_process"
-import { chmodSync } from "node:fs"
-import { mkdir, mkdtemp, rm } from "node:fs/promises"
+import { chmod, copyFile, mkdir, mkdtemp, rm } from "node:fs/promises"
 import net from "node:net"
 import { tmpdir } from "node:os"
 import { join, resolve } from "node:path"
@@ -295,8 +294,10 @@ async function createEnvironmentResources(packageDirectory: string): Promise<{
   const workspaceHome = await prepareWorkspaceHome()
   const containerName = `paratix-integration-${Date.now()}`
   const dockerImageTag = `${DOCKER_IMAGE_TAG_PREFIX}:${containerName}`
-  const clientPrivateKeyPath = resolve(packageDirectory, "test/integration/fixtures/client_ed25519")
-  chmodSync(clientPrivateKeyPath, PRIVATE_KEY_MODE)
+  const fixturePrivateKeyPath = resolve(packageDirectory, "test/integration/fixtures/client_ed25519")
+  const clientPrivateKeyPath = join(workspaceHome, ".ssh", "client_ed25519")
+  await copyFile(fixturePrivateKeyPath, clientPrivateKeyPath)
+  await chmod(clientPrivateKeyPath, PRIVATE_KEY_MODE)
   await buildIntegrationImage(packageDirectory, dockerImageTag)
   const cleanup = createCleanup(containerName, dockerImageTag, workspaceHome)
   return { cleanup, clientPrivateKeyPath, containerName, dockerImageTag, workspaceHome }
