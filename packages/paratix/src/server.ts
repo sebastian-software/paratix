@@ -4,12 +4,14 @@ import { validateSshConfig } from "./serverDefinitionValidation.js"
 
 function isModuleLike(value: unknown): boolean {
   if (value === null || typeof value !== "object") return false
-  const candidate = value as Record<string, unknown>
   return (
-    typeof candidate.name === "string" &&
-    candidate.name.length > 0 &&
-    typeof candidate.check === "function" &&
-    typeof candidate.apply === "function"
+    "apply" in value &&
+    "check" in value &&
+    "name" in value &&
+    typeof value.name === "string" &&
+    value.name.length > 0 &&
+    typeof value.check === "function" &&
+    typeof value.apply === "function"
   )
 }
 
@@ -19,7 +21,7 @@ function validateModuleList(
   options?: { requireNonEmpty?: boolean }
 ): void {
   if (!Array.isArray(modules)) {
-    throw new Error(`ServerDefinition: ${property} must be an array of modules`)
+    throw new TypeError(`ServerDefinition: ${property} must be an array of modules`)
   }
   if (options?.requireNonEmpty === true && modules.length === 0) {
     throw new Error("ServerDefinition: run must contain at least one module")

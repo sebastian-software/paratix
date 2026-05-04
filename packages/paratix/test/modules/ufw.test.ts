@@ -38,8 +38,8 @@ describe("ufw.enabled", () => {
   // interactive Y/N prompt.
   it("apply returns changed when ufw --force enable succeeds", async () => {
     const ssh = createMockSsh({
-      "ufw allow '22'": { code: 0 },
       "ufw --force enable": { code: 0 },
+      "ufw allow '22'": { code: 0 },
     })
     const mod = ufw.enabled()
     const result = await mod.apply(ssh, emptyEnv)
@@ -51,8 +51,8 @@ describe("ufw.enabled", () => {
 
   it("apply allows the active SSH port before enabling ufw", async () => {
     const ssh = createMockSsh({
-      "ufw allow '2222'": { code: 0 },
       "ufw --force enable": { code: 0 },
+      "ufw allow '2222'": { code: 0 },
     })
     ssh.getConnectionInfo = () => ({
       authMethod: "privateKey",
@@ -71,8 +71,8 @@ describe("ufw.enabled", () => {
 
   it("apply fails without enabling when allowing the active SSH port fails", async () => {
     const ssh = createMockSsh({
-      "ufw allow '22'": { code: 1, stderr: "bad port" },
       "ufw --force enable": { code: 0 },
+      "ufw allow '22'": { code: 1, stderr: "bad port" },
     })
 
     const mod = ufw.enabled()
@@ -84,8 +84,8 @@ describe("ufw.enabled", () => {
 
   it("apply returns failed when ufw --force enable exits with non-zero code", async () => {
     const ssh = createMockSsh({
-      "ufw allow '22'": { code: 0 },
       "ufw --force enable": { code: 1 },
+      "ufw allow '22'": { code: 0 },
     })
     const mod = ufw.enabled()
     const result = await mod.apply(ssh, emptyEnv)
