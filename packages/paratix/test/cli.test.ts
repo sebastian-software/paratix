@@ -25,6 +25,8 @@ import { clearRegisteredSecrets, registerSecret } from "../src/secretSink.js"
 declare const PACKAGE_VERSION: string
 declare const PACKAGE_DISPLAY_VERSION: string
 
+const packageDirectory = resolve(new URL("..", import.meta.url).pathname)
+
 type ExecFailure = {
   status?: null | number
   stderr?: Buffer | string
@@ -1437,6 +1439,37 @@ describe("CLI entrypoint", () => {
       expect(calls[0]?.options).not.toHaveProperty("reconnectTimeout")
     } finally {
       logSpy.mockRestore()
+      rmSync(tempDirectory, { force: true, recursive: true })
+    }
+  })
+
+  it("runs the published dist CLI for version and apply validation errors", () => {
+    const packageJson = JSON.parse(readFileSync(join(packageDirectory, "package.json"), "utf8")) as {
+      bin: { paratix: string }
+      version: string
+    }
+    const distCliPath = resolve(packageDirectory, packageJson.bin.paratix)
+    const firstLine = readFileSync(distCliPath, "utf8").split("\n")[0]
+    expect(firstLine).toBe("#!/usr/bin/env node")
+
+    const versionOutput = execFileSync(process.execPath, [distCliPath, "--version"], {
+      cwd: packageDirectory,
+      encoding: "utf8",
+    }).trim()
+    expect(versionOutput).toMatch(new RegExp(`^${packageJson.version}(?:-[0-9a-f]{7,})?$`, "v"))
+
+    const tempDirectory = mkdtempSync(join(tmpdir(), "paratix-cli-dist-"))
+    const invalidPlaybookPath = join(tempDirectory, "invalid.mjs")
+    try {
+      writeFileSync(invalidPlaybookPath, "export default {}\n")
+      expect(() =>
+        execFileSync(process.execPath, [distCliPath, "apply", invalidPlaybookPath, "--dry-run"], {
+          cwd: packageDirectory,
+          encoding: "utf8",
+          stdio: "pipe",
+        })
+      ).toThrow(/does not export a valid ServerDefinition[\s\S]*Missing property 'name'/v)
+    } finally {
       rmSync(tempDirectory, { force: true, recursive: true })
     }
   })
