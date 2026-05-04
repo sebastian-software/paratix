@@ -6,6 +6,20 @@ import { detectPackageManager, isPackageInstalled } from "./package.js"
 
 const UFW = "ufw"
 
+async function allowCurrentSshPort(ssh: SshConnection): Promise<ModuleResult | null> {
+  const { port } = ssh.getConnectionInfo()
+  if (!isValidTcpPort(port)) {
+    return failed(`[ufw.enabled] current SSH port is invalid: ${String(port)}`)
+  }
+  const result = await ssh.exec(`${UFW} allow ${shellQuote(String(port))}`, {
+    ignoreExitCode: true,
+    silent: true,
+  })
+  return result.code === 0
+    ? null
+    : failedCommand(`[ufw.enabled] ufw allow failed for current SSH port ${String(port)}`, result)
+}
+
 /**
  * Modules for managing the UFW (Uncomplicated Firewall) on Debian/Ubuntu hosts.
  */
@@ -55,6 +69,8 @@ export const ufw = {
     return {
       async apply(ssh: null | SshConnection): Promise<ModuleResult> {
         if (!ssh) return failed("[ufw.enabled] SSH connection is required")
+        const allowResult = await allowCurrentSshPort(ssh)
+        if (allowResult !== null) return allowResult
         // R-0000064: use the officially supported `--force` flag for
         // non-interactive enable instead of piping `y` into stdin. Mirrors
         // the call shape used by ufw.disabled.apply and avoids relying on

@@ -38,17 +38,53 @@ describe("ufw.enabled", () => {
   // interactive Y/N prompt.
   it("apply returns changed when ufw --force enable succeeds", async () => {
     const ssh = createMockSsh({
+      "ufw allow '22'": { code: 0 },
       "ufw --force enable": { code: 0 },
     })
     const mod = ufw.enabled()
     const result = await mod.apply(ssh, emptyEnv)
     expect(result.status).toBe("changed")
+    expect(ssh.calls).toStrictEqual(["ufw allow '22'", "ufw --force enable"])
     expect(ssh.calls).toContain("ufw --force enable")
     expect(ssh.calls).not.toContain("echo 'y' | ufw enable")
   })
 
+  it("apply allows the active SSH port before enabling ufw", async () => {
+    const ssh = createMockSsh({
+      "ufw allow '2222'": { code: 0 },
+      "ufw --force enable": { code: 0 },
+    })
+    ssh.getConnectionInfo = () => ({
+      authMethod: "privateKey",
+      host: "1.2.3.4",
+      port: 2222,
+      privateKeyPath: "~/.ssh/id",
+      user: "root",
+    })
+
+    const mod = ufw.enabled()
+    const result = await mod.apply(ssh, emptyEnv)
+
+    expect(result.status).toBe("changed")
+    expect(ssh.calls).toStrictEqual(["ufw allow '2222'", "ufw --force enable"])
+  })
+
+  it("apply fails without enabling when allowing the active SSH port fails", async () => {
+    const ssh = createMockSsh({
+      "ufw allow '22'": { code: 1, stderr: "bad port" },
+      "ufw --force enable": { code: 0 },
+    })
+
+    const mod = ufw.enabled()
+    const result = await mod.apply(ssh, emptyEnv)
+
+    expect(result.status).toBe("failed")
+    expect(ssh.calls).toStrictEqual(["ufw allow '22'"])
+  })
+
   it("apply returns failed when ufw --force enable exits with non-zero code", async () => {
     const ssh = createMockSsh({
+      "ufw allow '22'": { code: 0 },
       "ufw --force enable": { code: 1 },
     })
     const mod = ufw.enabled()
