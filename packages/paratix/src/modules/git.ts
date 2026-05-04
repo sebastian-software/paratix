@@ -123,7 +123,10 @@ async function readOriginUrl(conn: SshConnection, destination: string): Promise<
   return remoteUrl.length === 0 ? null : remoteUrl
 }
 
-async function ensureOriginUrl(conn: SshConnection, parameters: GitCloneParameters): Promise<boolean> {
+async function ensureOriginUrl(
+  conn: SshConnection,
+  parameters: GitCloneParameters
+): Promise<boolean> {
   const { destination, repo } = parameters
   const currentOrigin = await readOriginUrl(conn, destination)
   if (currentOrigin === repo) return true

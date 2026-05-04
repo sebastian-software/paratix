@@ -16,11 +16,7 @@ function extractMissingModuleSpecifier(message: string): null | string {
 
 function isTsxLoaderSpecifier(specifier: string): boolean {
   const normalized = specifier.replaceAll("\\", "/")
-  return (
-    normalized === "tsx" ||
-    normalized === "tsx/esm/api" ||
-    normalized.endsWith("/tsx/esm/api")
-  )
+  return normalized === "tsx" || normalized === "tsx/esm/api" || normalized.endsWith("/tsx/esm/api")
 }
 
 /**

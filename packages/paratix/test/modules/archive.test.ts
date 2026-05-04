@@ -58,11 +58,10 @@ describe("archive.extract — check", () => {
   it("returns ok when marker matches and extracted owner matches", async () => {
     const mockSsh = createMockSsh({
       [`cat '${marker}'`]: { code: 0, stdout: archiveSha },
-      [`find '${destination}' \\( ! -user 'www-data' -o ! -group 'www-data' \\) -print -quit`]:
-        {
-          code: 0,
-          stdout: "",
-        },
+      [`find '${destination}' \\( ! -user 'www-data' -o ! -group 'www-data' \\) -print -quit`]: {
+        code: 0,
+        stdout: "",
+      },
       [`test -d '${destination}'`]: { code: 0 },
       [`test -f '${marker}'`]: { code: 0 },
     })
@@ -74,11 +73,10 @@ describe("archive.extract — check", () => {
 
   it("returns needs-apply when extracted owner has drifted", async () => {
     const mockSsh = createMockSsh({
-      [`find '${destination}' \\( ! -user 'www-data' -o ! -group 'www-data' \\) -print -quit`]:
-        {
-          code: 0,
-          stdout: `${destination}/app/file\n`,
-        },
+      [`find '${destination}' \\( ! -user 'www-data' -o ! -group 'www-data' \\) -print -quit`]: {
+        code: 0,
+        stdout: `${destination}/app/file\n`,
+      },
       [`test -d '${destination}'`]: { code: 0 },
       [`test -f '${marker}'`]: { code: 0 },
     })
