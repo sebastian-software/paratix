@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto"
-import { mkdtempSync, writeFileSync } from "node:fs"
+import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs"
 import { readFile, rm } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join, resolve } from "node:path"
@@ -94,6 +94,39 @@ async function readRemoteStat(ssh: SshConnection, remotePath: string): Promise<R
   const raw = await ssh.output(`stat -c '%a %U %G' ${shellQuote(remotePath)}`)
   const [mode = "", owner = "", group = ""] = raw.trim().split(" ")
   return { group, mode, owner }
+}
+
+function createAcceptNewSshConfig(port: number): SshConfig {
+  const environment = getEnvironment()
+  return {
+    ports: [port],
+    privateKey: environment.clientPrivateKeyPath,
+    strictHostKeyChecking: "accept-new",
+    user: "paratix",
+  }
+}
+
+function createKnownHostsSshConfig(port: number): SshConfig {
+  const environment = getEnvironment()
+  return {
+    ports: [port],
+    privateKey: environment.clientPrivateKeyPath,
+    strictHostKeyChecking: "yes",
+    user: "paratix",
+  }
+}
+
+async function connectWithConfig(config: SshConfig): Promise<SshConnectionImpl> {
+  const ssh = new SshConnectionImpl(getEnvironment().host, config)
+  await ssh.connect()
+  return ssh
+}
+
+function createTamperedHostPublicKey(publicKey: string): string {
+  const [algorithm = "", base64Key = ""] = publicKey.trim().split(/\s+/v)
+  const key = Buffer.from(base64Key, "base64")
+  key[key.length - 1] ^= 1
+  return `${algorithm} ${key.toString("base64")}`
 }
 
 async function sleep(delayMs: number): Promise<void> {
@@ -298,6 +331,64 @@ describe("Paratix integration", () => {
       ssh.disconnect()
       await rm(localDirectory, { force: true, recursive: true })
     }
+  })
+
+  it("persists accept-new host keys and reconnects with strict known_hosts verification", async () => {
+    const environment = getEnvironment()
+    const acceptNewSsh = await connectWithConfig(createAcceptNewSshConfig(environment.primaryPort))
+    acceptNewSsh.disconnect()
+
+    const knownHosts = await readFile(join(testHome, ".ssh", "known_hosts"), "utf8")
+    expect(knownHosts).toContain(`[${environment.host}]:${String(environment.primaryPort)}`)
+
+    const strictSsh = await connectWithConfig(createKnownHostsSshConfig(environment.primaryPort))
+    try {
+      expect(await strictSsh.output("whoami")).toBe("paratix")
+    } finally {
+      strictSsh.disconnect()
+    }
+  })
+
+  it("keeps accept-new known_hosts entries scoped to their SSH port", async () => {
+    const environment = getEnvironment()
+    const primarySsh = await connectWithConfig(createAcceptNewSshConfig(environment.primaryPort))
+    primarySsh.disconnect()
+
+    const secondaryStrictSsh = new SshConnectionImpl(
+      environment.host,
+      createKnownHostsSshConfig(environment.secondaryPort)
+    )
+    await expect(secondaryStrictSsh.connect()).rejects.toBeInstanceOf(HostKeyVerificationError)
+    secondaryStrictSsh.disconnect()
+
+    const secondaryAcceptNewSsh = await connectWithConfig(
+      createAcceptNewSshConfig(environment.secondaryPort)
+    )
+    secondaryAcceptNewSsh.disconnect()
+
+    const secondaryKnownHostsSsh = await connectWithConfig(
+      createKnownHostsSshConfig(environment.secondaryPort)
+    )
+    try {
+      expect(await secondaryKnownHostsSsh.output("whoami")).toBe("paratix")
+    } finally {
+      secondaryKnownHostsSsh.disconnect()
+    }
+  })
+
+  it("rejects changed host keys from known_hosts", async () => {
+    const environment = getEnvironment()
+    const hostLabel = `[${environment.host}]:${String(environment.primaryPort)}`
+    const tamperedHostPublicKey = createTamperedHostPublicKey(environment.hostPublicKey)
+    mkdirSync(join(testHome, ".ssh"), { recursive: true })
+    writeFileSync(join(testHome, ".ssh", "known_hosts"), `${hostLabel} ${tamperedHostPublicKey}\n`)
+
+    const ssh = new SshConnectionImpl(
+      environment.host,
+      createKnownHostsSshConfig(environment.primaryPort)
+    )
+    await expect(ssh.connect()).rejects.toBeInstanceOf(HostKeyVerificationError)
+    ssh.disconnect()
   })
 
   it("reconnects successfully on a different configured port", async () => {
