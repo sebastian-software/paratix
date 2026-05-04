@@ -10,7 +10,12 @@ import { file } from "../../src/modules/file.js"
 import { createMockSsh as createBaseMockSsh } from "../helpers/mockSsh.js"
 
 const createMockSsh: typeof createBaseMockSsh = (responses, options) =>
-  createBaseMockSsh(responses, { strict: false, ...options })
+  createBaseMockSsh(responses, {
+    defaultExecResult: { code: 0 },
+    defaultOutputResult: "",
+    defaultTestResult: true,
+    ...options,
+  })
 
 const emptyEnv = {}
 const unicodeContent = "Grüße aus Köln – こんにちは мир\n"

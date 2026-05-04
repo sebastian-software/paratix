@@ -22,6 +22,12 @@ type MockSshOptions = {
    */
   defaultExecResult?: "throw" | Partial<ExecResult>
   /**
+   * Result returned by `ssh.output()` for unstubbed commands.
+   * By default, unstubbed calls reject. Set this when a test intentionally
+   * does not care about a specific output command.
+   */
+  defaultOutputResult?: string
+  /**
    * Result returned by `ssh.test()` for unstubbed commands.
    * By default, unstubbed calls reject. Set this when a test intentionally
    * treats unspecified predicates as true or false.
@@ -71,6 +77,7 @@ function hasExplicitDefaultForKind(
 ): boolean {
   if (kind === "exec") return options?.defaultExecResult !== undefined
   if (kind === "test") return options?.defaultTestResult !== undefined
+  if (kind === "output") return options?.defaultOutputResult !== undefined
   return false
 }
 
@@ -131,7 +138,8 @@ function createOutput(
   // eslint-disable-next-line @typescript-eslint/require-await -- Mock implementation
   return async (command) => {
     calls.push(command)
-    return getMockResponse({ command, kind: "output", options, responses })?.stdout?.trim() ?? ""
+    const match = getMockResponse({ command, kind: "output", options, responses })
+    return match?.stdout?.trim() ?? options?.defaultOutputResult ?? ""
   }
 }
 

@@ -96,6 +96,22 @@ describe("createMockSsh", () => {
       "createMockSsh: unstubbed exec call: rename-me"
     )
   })
+
+  it("returns the configured defaultOutputResult for unstubbed output calls", async () => {
+    const ssh = createMockSsh({}, { defaultOutputResult: "legacy output" })
+
+    await expect(ssh.output("stat /tmp/file")).resolves.toBe("legacy output")
+  })
+
+  it("still honors stubbed responses when defaultOutputResult is set", async () => {
+    const ssh = createMockSsh(
+      { "cat /tmp/file": { stdout: "stubbed\n" } },
+      { defaultOutputResult: "legacy output" }
+    )
+
+    await expect(ssh.output("cat /tmp/file")).resolves.toBe("stubbed")
+    await expect(ssh.output("stat /tmp/file")).resolves.toBe("legacy output")
+  })
 })
 
 describe("createStrictMockSsh", () => {

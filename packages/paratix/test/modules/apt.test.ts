@@ -6,16 +6,17 @@ import { sha256String } from "../../src/modules/fileHelpers.js"
 import { createMockSsh as createBaseMockSsh } from "../helpers/mockSsh.js"
 
 const createMockSsh: typeof createBaseMockSsh = (responses, options) =>
-  createBaseMockSsh(responses, { strict: false, ...options })
+  createBaseMockSsh(responses, options)
 
 const emptyEnv = {}
+const SUCCESSFUL_EXEC_DEFAULT = { code: 0 } as const
 
 describe("apt.key", () => {
   const fingerprint = "1234567890ABCDEF1234567890ABCDEF12345678"
 
   it("check returns ok when key file exists", async () => {
     const ssh = createMockSsh({
-      "[ -f /etc/apt/keyrings/'docker'.gpg ]": { code: 0 },
+      "[ -f '/etc/apt/keyrings/docker.gpg' ]": { code: 0 },
       "gpg --show-keys --with-colons '/etc/apt/keyrings/docker.gpg'": {
         code: 0,
         stdout: "pub:-:255:22:::\nfpr:::::::::1234567890ABCDEF1234567890ABCDEF12345678:\n",
@@ -28,7 +29,7 @@ describe("apt.key", () => {
 
   it("check returns needs-apply when key file is missing", async () => {
     const ssh = createMockSsh({
-      "[ -f /etc/apt/keyrings/'docker'.gpg ]": { code: 1 },
+      "[ -f '/etc/apt/keyrings/docker.gpg' ]": { code: 1 },
     })
     const mod = apt.key("docker", "https://download.docker.com/linux/ubuntu/gpg", { fingerprint })
     const result = await mod.check(ssh, emptyEnv)
@@ -43,7 +44,7 @@ describe("apt.key", () => {
 
   it("check returns needs-apply when the installed key fingerprint mismatches", async () => {
     const ssh = createMockSsh({
-      "[ -f /etc/apt/keyrings/'docker'.gpg ]": { code: 0 },
+      "[ -f '/etc/apt/keyrings/docker.gpg' ]": { code: 0 },
       "gpg --show-keys --with-colons '/etc/apt/keyrings/docker.gpg'": {
         code: 0,
         stdout: "pub:-:255:22:::\nfpr:::::::::AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA:\n",
@@ -537,9 +538,12 @@ describe("apt.repository (standard form)", () => {
   })
 
   it("apply sets update marker only after apt-get update succeeds", async () => {
-    const ssh = createMockSsh({
-      "DEBIAN_FRONTEND=noninteractive apt-get update": { code: 0 },
-    })
+    const ssh = createMockSsh(
+      {
+        "DEBIAN_FRONTEND=noninteractive apt-get update": { code: 0 },
+      },
+      { defaultExecResult: SUCCESSFUL_EXEC_DEFAULT }
+    )
     const mod = apt.repository("docker", source)
     const result = await mod.apply(ssh, emptyEnv)
 
@@ -641,13 +645,16 @@ describe("apt.debconf", () => {
   // POSIX echo may interpret) are forwarded to debconf-set-selections
   // verbatim regardless of which shell `/bin/sh` resolves to.
   it("apply uses printf '%s' to pipe selections starting with a dash verbatim", async () => {
-    const ssh = createMockSsh({
-      "echo 'METAGET pkg/dash-value type' | debconf-communicate": {
-        code: 0,
-        stdout: "0 string\n",
+    const ssh = createMockSsh(
+      {
+        "echo 'METAGET pkg/dash-value type' | debconf-communicate": {
+          code: 0,
+          stdout: "0 string\n",
+        },
+        "printf '%s' 'pkg pkg/dash-value string -n' | debconf-set-selections": { code: 0 },
       },
-      "printf '%s' 'pkg pkg/dash-value string -n' | debconf-set-selections": { code: 0 },
-    })
+      { defaultExecResult: SUCCESSFUL_EXEC_DEFAULT }
+    )
     const mod = apt.debconf("pkg", { "pkg/dash-value": "-n" })
     const result = await mod.apply(ssh, emptyEnv)
     expect(result).toStrictEqual({ status: "changed" })
@@ -658,15 +665,18 @@ describe("apt.debconf", () => {
   })
 
   it("apply uses printf '%s' so backslash sequences reach debconf-set-selections verbatim", async () => {
-    const ssh = createMockSsh({
-      "echo 'METAGET pkg/backslash-value type' | debconf-communicate": {
-        code: 0,
-        stdout: "0 string\n",
+    const ssh = createMockSsh(
+      {
+        "echo 'METAGET pkg/backslash-value type' | debconf-communicate": {
+          code: 0,
+          stdout: "0 string\n",
+        },
+        "printf '%s' 'pkg pkg/backslash-value string a\\tb\\nc' | debconf-set-selections": {
+          code: 0,
+        },
       },
-      "printf '%s' 'pkg pkg/backslash-value string a\\tb\\nc' | debconf-set-selections": {
-        code: 0,
-      },
-    })
+      { defaultExecResult: SUCCESSFUL_EXEC_DEFAULT }
+    )
     const mod = apt.debconf("pkg", { "pkg/backslash-value": String.raw`a\tb\nc` })
     const result = await mod.apply(ssh, emptyEnv)
     expect(result).toStrictEqual({ status: "changed" })
@@ -705,15 +715,18 @@ describe("apt.debconf", () => {
 
     // Apply: package still not installed, debconf-set-selections
     // succeeds, marker flag is written via setVersionedFlag.
-    const ssh2 = createMockSsh({
-      [dpkgQuery]: dpkgNotInstalled,
-      "echo 'METAGET postfix/main_mailer_type type' | debconf-communicate": {
-        code: 0,
-        stdout: "0 string\n",
+    const ssh2 = createMockSsh(
+      {
+        [dpkgQuery]: dpkgNotInstalled,
+        "echo 'METAGET postfix/main_mailer_type type' | debconf-communicate": {
+          code: 0,
+          stdout: "0 string\n",
+        },
+        "printf '%s' 'postfix postfix/main_mailer_type string Internet Site' | debconf-set-selections":
+          { code: 0 },
       },
-      "printf '%s' 'postfix postfix/main_mailer_type string Internet Site' | debconf-set-selections":
-        { code: 0 },
-    })
+      { defaultExecResult: SUCCESSFUL_EXEC_DEFAULT }
+    )
     expect(await mod.apply(ssh2, emptyEnv)).toStrictEqual({ status: "changed" })
     expect(ssh2.calls).toContain(
       `find /var/lib/paratix/flags -maxdepth 1 -name 'apt-debconf-${packageHash}-*' -delete && touch ${flagPath}`
