@@ -117,7 +117,7 @@ async function updateRepo(conn: SshConnection, parameters: GitCloneParameters): 
 }
 
 async function readOriginUrl(conn: SshConnection, destination: string): Promise<null | string> {
-  const result = await conn.exec(`git -C ${shellQuote(destination)} remote get-url origin`, SILENT)
+  const result = await conn.exec(`git -C ${shellQuote(destination)} remote get-url origin`, EXEC_OPTS)
   if (result.code !== 0) return null
   const remoteUrl = result.stdout.trim()
   return remoteUrl.length === 0 ? null : remoteUrl

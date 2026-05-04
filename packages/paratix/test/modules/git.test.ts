@@ -236,6 +236,23 @@ describe("git.clone — apply", () => {
     expect(mockSsh.calls).toContain(`git -C '${destination}' pull`)
   })
 
+  it("adds origin before pulling when an existing git repository has no origin", async () => {
+    const mockSsh = createMockSsh({
+      [`git -C '${destination}' remote add origin '${repo}'`]: { code: 0 },
+      [`test -d '${gitDir}'`]: { code: 0 },
+      [originUrlCommand]: { code: 2 },
+    })
+    const mod = git.clone(repo, destination)
+
+    const result = await mod.apply(mockSsh, emptyEnv)
+
+    expect(result.status).toBe("changed")
+    expect(mockSsh.calls).toContain(`git -C '${destination}' remote add origin '${repo}'`)
+    expect(mockSsh.calls).toContain(`git -C '${destination}' pull`)
+    const originCall = mockSsh.execCalls.find((call) => call.command === originUrlCommand)
+    expect(originCall?.options).toStrictEqual({ ignoreExitCode: true, silent: true })
+  })
+
   it("fetches, checks out, and resets to origin/<ref> when ref is a remote-tracking branch", async () => {
     const mockSsh = createMockSsh({
       [`git -C '${destination}' for-each-ref --format=%(refname) refs/remotes/origin/'main'`]: {
