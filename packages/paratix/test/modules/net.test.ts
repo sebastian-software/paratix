@@ -729,6 +729,47 @@ describe("net.interface — R-0000100 name validation", () => {
   })
 })
 
+describe("net writers — CR/LF validation", () => {
+  it("rejects interface addresses containing line breaks", () => {
+    expect(() =>
+      net.interface("eth0", { addresses: ["192.168.1.10/24\n      dhcp4: true"] })
+    ).toThrow(/interface address.*CR or LF/v)
+  })
+
+  it("rejects interface gateways containing line breaks", () => {
+    expect(() => net.interface("eth0", { gateway: "192.168.1.1\nDNS=1.1.1.1" })).toThrow(
+      /interface gateway.*CR or LF/v
+    )
+  })
+
+  it("rejects resolv nameservers containing line breaks", () => {
+    expect(() => net.resolv({ nameservers: ["1.1.1.1\nsearch injected.local"] })).toThrow(
+      /resolv nameserver.*CR or LF/v
+    )
+  })
+
+  it("rejects resolv search domains containing line breaks", () => {
+    expect(() =>
+      net.resolv({
+        nameservers: ["1.1.1.1"],
+        search: ["example.com\nnameserver 9.9.9.9"],
+      })
+    ).toThrow(/resolv search domain.*CR or LF/v)
+  })
+
+  it("rejects route destinations containing line breaks", () => {
+    expect(() => net.route("10.0.0.0/24\nGateway=1.2.3.4", "192.168.1.1")).toThrow(
+      /route destination.*CR or LF/v
+    )
+  })
+
+  it("rejects route devices containing line breaks", () => {
+    expect(() => net.route("10.0.0.0/24", "192.168.1.1", { device: "eth0\n[Route]" })).toThrow(
+      /route device.*CR or LF/v
+    )
+  })
+})
+
 describe("net.interface — check", () => {
   it("returns needs-apply when conn is null", async () => {
     const mod = net.interface("eth0", {})

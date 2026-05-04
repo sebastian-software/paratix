@@ -41,6 +41,39 @@ function sanitizeForFilename(value: string): string {
   return value.replaceAll("/", "-").replaceAll(":", "-").replace(/^-+/v, "")
 }
 
+function validateSingleLineNetworkValue(label: string, value: string): void {
+  if (value.includes("\r") || value.includes("\n")) {
+    throw new Error(`[net] invalid ${label}: value must not contain CR or LF`)
+  }
+}
+
+function validateSingleLineNetworkValues(label: string, values?: string[]): void {
+  for (const value of values ?? []) {
+    validateSingleLineNetworkValue(label, value)
+  }
+}
+
+function validateInterfaceOptions(options: InterfaceOptions): void {
+  validateSingleLineNetworkValues("interface address", options.addresses)
+  validateSingleLineNetworkValues("interface nameserver", options.nameservers)
+  if (options.gateway != null) validateSingleLineNetworkValue("interface gateway", options.gateway)
+}
+
+function validateResolvOptions(options: { nameservers: string[]; search?: string[] }): void {
+  validateSingleLineNetworkValues("resolv nameserver", options.nameservers)
+  validateSingleLineNetworkValues("resolv search domain", options.search)
+}
+
+function validateRouteOptions(parameters: {
+  destination: string
+  device?: string
+  gateway: string
+}): void {
+  validateSingleLineNetworkValue("route destination", parameters.destination)
+  validateSingleLineNetworkValue("route gateway", parameters.gateway)
+  if (parameters.device != null) validateSingleLineNetworkValue("route device", parameters.device)
+}
+
 /**
  * Build the expected hosts line for an IP and its hostnames.
  *
@@ -614,6 +647,7 @@ export const net = {
           `— must match /^[A-Za-z0-9][\\w.\\-]*$/`
       )
     }
+    validateInterfaceOptions(options)
     const netplanPath = `/etc/netplan/60-paratix-${name}.yaml`
     const networkdPath = `/etc/systemd/network/60-paratix-${name}.network`
 
@@ -726,6 +760,7 @@ export const net = {
    * @returns A Module that manages /etc/resolv.conf.
    */
   resolv(options: { nameservers: string[]; search?: string[] }): Module {
+    validateResolvOptions(options)
     const expectedContent = buildResolvConfig(options.nameservers, options.search)
 
     return {
@@ -767,6 +802,7 @@ export const net = {
   ): Module {
     const state = options?.state ?? "present"
     const device = options?.device
+    validateRouteOptions({ destination, device, gateway })
     const sanitized = sanitizeForFilename(destination)
     const dropinPath = `/etc/systemd/network/50-paratix-route-${sanitized}.network`
 
