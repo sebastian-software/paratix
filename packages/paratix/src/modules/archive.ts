@@ -281,6 +281,25 @@ async function applyExtract(
   }
 }
 
+function buildOwnerDriftCommand(destination: string, owner: string): string {
+  const [user = "", group = ""] = owner.split(":", 2)
+  const predicates: string[] = []
+  if (user !== "") predicates.push(`! -user ${shellQuote(user)}`)
+  if (group !== "") predicates.push(`! -group ${shellQuote(group)}`)
+  return `find ${shellQuote(destination)} \\( ${predicates.join(" -o ")} \\) -print -quit`
+}
+
+async function archiveOwnerMatches(
+  conn: SshConnection,
+  parameters: { destination: string; owner?: string }
+): Promise<boolean> {
+  const { destination, owner } = parameters
+  if (owner == null || owner === "") return true
+  const result = await conn.exec(buildOwnerDriftCommand(destination, owner), EXEC_OPTS)
+  if (result.code !== 0) return false
+  return result.stdout.trim() === ""
+}
+
 /**
  * Modules for managing archive extraction on the remote host.
  */
@@ -323,6 +342,7 @@ export const archive = {
         // 2. Does the marker file exist?
         const markerExists = await conn.test(`test -f ${shellQuote(marker)}`)
         if (!markerExists) return NEEDS_APPLY
+        if (!(await archiveOwnerMatches(conn, { destination, owner }))) return NEEDS_APPLY
 
         // 3. Compare SHA256 of the archive with the marker file content.
         // R-0000105: distinguish between "marker is genuinely missing" and

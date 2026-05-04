@@ -55,6 +55,39 @@ describe("archive.extract — check", () => {
     expect(result).toBe("ok")
   })
 
+  it("returns ok when marker matches and extracted owner matches", async () => {
+    const mockSsh = createMockSsh({
+      [`cat '${marker}'`]: { code: 0, stdout: archiveSha },
+      [`find '${destination}' \\( ! -user 'www-data' -o ! -group 'www-data' \\) -print -quit`]:
+        {
+          code: 0,
+          stdout: "",
+        },
+      [`test -d '${destination}'`]: { code: 0 },
+      [`test -f '${marker}'`]: { code: 0 },
+    })
+    vi.spyOn(mockSsh, "sha256").mockResolvedValue(archiveSha)
+    const mod = archive.extract(src, destination, { owner: "www-data:www-data" })
+    const result = await mod.check(mockSsh, emptyEnv)
+    expect(result).toBe("ok")
+  })
+
+  it("returns needs-apply when extracted owner has drifted", async () => {
+    const mockSsh = createMockSsh({
+      [`find '${destination}' \\( ! -user 'www-data' -o ! -group 'www-data' \\) -print -quit`]:
+        {
+          code: 0,
+          stdout: `${destination}/app/file\n`,
+        },
+      [`test -d '${destination}'`]: { code: 0 },
+      [`test -f '${marker}'`]: { code: 0 },
+    })
+    const mod = archive.extract(src, destination, { owner: "www-data:www-data" })
+    const result = await mod.check(mockSsh, emptyEnv)
+    expect(result).toBe("needs-apply")
+    expect(mockSsh.calls).not.toContain(`cat '${marker}'`)
+  })
+
   it("returns needs-apply when marker does not match remote archive sha256", async () => {
     const mockSsh = createMockSsh({
       [`cat '${marker}'`]: { code: 0, stdout: "old-hash" },
