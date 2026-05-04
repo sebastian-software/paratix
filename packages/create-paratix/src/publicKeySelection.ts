@@ -63,7 +63,7 @@ function containsPrivateKeyMarker(value: string): boolean {
 }
 
 function parseOpenSshPublicKey(value: string): null | ParsedPublicKey {
-  if (value.length === 0 || value.includes("\n")) {
+  if (value.length === 0 || /[\r\n]/v.test(value)) {
     return null
   }
 

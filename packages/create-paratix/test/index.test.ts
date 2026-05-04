@@ -26,6 +26,7 @@ import {
   writeProjectFiles,
 } from "../src/index.js"
 import {
+  discoverLocalPublicKeys,
   isValidAdminPublicKey,
   readAdminPublicKeyFile,
   validateAdminPublicKey,
@@ -533,6 +534,10 @@ describe("admin public key validation", () => {
     expect(isValidAdminPublicKey(createEd25519PublicKey("user@example"))).toBe(true)
   })
 
+  it("rejects public keys with embedded carriage returns", () => {
+    expect(isValidAdminPublicKey(createEd25519PublicKey("user\rexample"))).toBe(false)
+  })
+
   it("accepts a valid 2048-bit RSA public key", () => {
     expect(isValidAdminPublicKey(createGeneratedRsa2048PublicKey("rsa@example"))).toBe(true)
   })
@@ -639,6 +644,18 @@ describe("admin public key validation", () => {
     )
   })
 
+  it("fails closed for admin public key files with embedded carriage returns", () => {
+    const invalidKeyFile = join(TEST_DIR, "cr-admin.pub")
+    mkdirSync(TEST_DIR, { recursive: true })
+    writeFileSync(invalidKeyFile, `${createEd25519PublicKey("user\rexample")}\n`)
+
+    expect(() => {
+      readAdminPublicKeyFile(throwExitError, invalidKeyFile)
+    }).toThrow(
+      'Error: Invalid value for "--admin-public-key-file" — provide a valid single-line OpenSSH public key.'
+    )
+  })
+
   // R-0000126: validateAdminPublicKey must hard-reject any value containing a
   // private-key PEM marker so a leaked private key cannot be embedded into
   // the scaffolded server.ts via either CLI flag.
@@ -732,6 +749,24 @@ describe("admin public key validation", () => {
     }).toThrow("Error: Failed to read admin public key file.")
 
     expect(console.error).toHaveBeenCalledWith("Error: Failed to read admin public key file.")
+  })
+
+  it("omits discovered local public keys with embedded carriage returns", () => {
+    mkdirSync(TEST_DIR, { recursive: true })
+    const validKey = createEd25519PublicKey("user@example")
+    writeFileSync(join(TEST_DIR, "id_ed25519.pub"), `${validKey}\n`)
+    writeFileSync(
+      join(TEST_DIR, "id_ed25519_cr.pub"),
+      `${createEd25519PublicKey("user\rexample")}\n`
+    )
+
+    expect(discoverLocalPublicKeys(TEST_DIR)).toStrictEqual([
+      {
+        key: validKey,
+        label: "id_ed25519.pub",
+        path: join(TEST_DIR, "id_ed25519.pub"),
+      },
+    ])
   })
 })
 
