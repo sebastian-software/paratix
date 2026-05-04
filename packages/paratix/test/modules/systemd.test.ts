@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest"
 
+import { sha256String } from "../../src/modules/fileHelpers.js"
 import { systemd } from "../../src/modules/systemd.js"
 import { createMockSsh } from "../helpers/mockSsh.js"
 
@@ -112,12 +113,19 @@ describe("systemd.unit", () => {
   // Content without trailing newline so mock output matches after trim()
   const unitContent = "[Unit]\nDescription=My App\n\n[Service]\nExecStart=/usr/bin/my-app"
   const filePath = `/etc/systemd/system/${unitName}`
+  const reloadFlag = `systemd-unit-${sha256String(unitName).slice(0, 16)}-${sha256String(unitContent).slice(0, 16)}`
+  const reloadFlagCheck = `[ -f /var/lib/paratix/flags/'${reloadFlag}' ]`
+  const reloadFlagSet =
+    `find /var/lib/paratix/flags -maxdepth 1 -name ` +
+    `'systemd-unit-${sha256String(unitName).slice(0, 16)}-*' -delete && ` +
+    `touch /var/lib/paratix/flags/'${reloadFlag}'`
 
   it("check returns ok when file exists, content matches, and mode is 0644", async () => {
     const ssh = createMockSsh({
       [`[ -e '${filePath}' ]`]: { code: 0 },
       [`cat '${filePath}'`]: { code: 0, stdout: unitContent },
       [`stat -c '%a' '${filePath}'`]: { code: 0, stdout: "644\n" },
+      [reloadFlagCheck]: { code: 0 },
     })
     const mod = systemd.unit(unitName, unitContent)
     const result = await mod.check(ssh, emptyEnv)
@@ -165,6 +173,18 @@ describe("systemd.unit", () => {
     expect(result).toBe("needs-apply")
   })
 
+  it("check returns needs-apply when daemon-reload marker is missing", async () => {
+    const ssh = createMockSsh({
+      [`[ -e '${filePath}' ]`]: { code: 0 },
+      [`cat '${filePath}'`]: { code: 0, stdout: unitContent },
+      [`stat -c '%a' '${filePath}'`]: { code: 0, stdout: "644\n" },
+      [reloadFlagCheck]: { code: 1 },
+    })
+    const mod = systemd.unit(unitName, unitContent)
+    const result = await mod.check(ssh, emptyEnv)
+    expect(result).toBe("needs-apply")
+  })
+
   it("check returns needs-apply when ssh is null", async () => {
     const mod = systemd.unit(unitName, unitContent)
     const result = await mod.check(null, emptyEnv)
@@ -173,12 +193,15 @@ describe("systemd.unit", () => {
 
   it("apply writes the file and runs daemon-reload returning changed on success", async () => {
     const ssh = createMockSsh({
+      "mkdir -p /var/lib/paratix/flags": { code: 0 },
       "systemctl daemon-reload": { code: 0 },
+      [reloadFlagSet]: { code: 0 },
     })
     const mod = systemd.unit(unitName, unitContent)
     const result = await mod.apply(ssh, emptyEnv)
     expect(result.status).toBe("changed")
     expect(ssh.calls).toContain("systemctl daemon-reload")
+    expect(ssh.calls).toContain(reloadFlagSet)
   })
 
   it("apply returns failed when daemon-reload exits with non-zero code", async () => {
@@ -188,6 +211,7 @@ describe("systemd.unit", () => {
     const mod = systemd.unit(unitName, unitContent)
     const result = await mod.apply(ssh, emptyEnv)
     expect(result.status).toBe("failed")
+    expect(ssh.calls).not.toContain(reloadFlagSet)
   })
 
   it("apply returns failed when ssh is null", async () => {

@@ -1,6 +1,8 @@
 import { failed, failedCommand } from "../moduleFailure.js"
 import { shellQuote } from "../ssh.js"
 import { type Module, type ModuleResult, NEEDS_APPLY, type SshConnection } from "../types.js"
+import { sha256String } from "./fileHelpers.js"
+import { hasFlag, setVersionedFlag } from "./moduleHelpers.js"
 
 const SYSTEMCTL = "systemctl"
 const UNIT_NAME_PATTERN = /^[\w@.\-]+$/v
@@ -8,6 +10,20 @@ const SYSTEMD_UNIT_MODE = "0644"
 
 function normalizeMode(mode: string): string {
   return mode.replace(/^0+/v, "")
+}
+
+function buildSystemdUnitReloadFlag(
+  name: string,
+  content: string
+): {
+  flagName: string
+  flagPrefix: string
+} {
+  const flagPrefix = `systemd-unit-${sha256String(name).slice(0, 16)}-`
+  return {
+    flagName: `${flagPrefix}${sha256String(content).slice(0, 16)}`,
+    flagPrefix,
+  }
 }
 
 /**
@@ -89,6 +105,7 @@ export const systemd = {
       throw new Error(`systemd.unit: name must match ${String(UNIT_NAME_PATTERN)}, got: ${name}`)
     }
     const filePath = `/etc/systemd/system/${name}`
+    const reloadFlag = buildSystemdUnitReloadFlag(name, content)
     return {
       async apply(ssh: null | SshConnection): Promise<ModuleResult> {
         if (!ssh) return failed(`[systemd.unit: ${name}] SSH connection is required`)
@@ -97,9 +114,11 @@ export const systemd = {
           ignoreExitCode: true,
           silent: true,
         })
-        return result.code === 0
-          ? { status: "changed" }
-          : failedCommand(`[systemd.unit: ${name}] systemctl daemon-reload failed`, result)
+        if (result.code !== 0) {
+          return failedCommand(`[systemd.unit: ${name}] systemctl daemon-reload failed`, result)
+        }
+        await setVersionedFlag(ssh, reloadFlag.flagName, reloadFlag.flagPrefix)
+        return { status: "changed" }
       },
       async check(ssh: null | SshConnection): Promise<"needs-apply" | "ok"> {
         if (!ssh) return NEEDS_APPLY
@@ -114,7 +133,8 @@ export const systemd = {
         if (modeResult.code !== 0) return NEEDS_APPLY
         const currentMode = modeResult.stdout.trim()
         if (currentMode === "") return NEEDS_APPLY
-        return normalizeMode(currentMode) === normalizeMode(SYSTEMD_UNIT_MODE) ? "ok" : NEEDS_APPLY
+        if (normalizeMode(currentMode) !== normalizeMode(SYSTEMD_UNIT_MODE)) return NEEDS_APPLY
+        return (await hasFlag(ssh, reloadFlag.flagName)) ? "ok" : NEEDS_APPLY
       },
       name: `systemd.unit: ${name}`,
     }
