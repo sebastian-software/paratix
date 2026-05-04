@@ -181,14 +181,13 @@ async function restartSshdOnNewPort(
     serviceUnit = await resolveSshServiceUnit(ssh)
     await ssh.exec(`${SYSTEMCTL} restart ${serviceUnit}`, { silent: true })
   } catch (error) {
-    if (!isRestartDisconnect(error)) {
-      await restoreSshdPortRestartFailure(ssh, {
-        originalConfig,
-        serviceUnit,
-        socketState,
-        targetPort,
-      })
-    }
+    if (isRestartDisconnect(error)) return
+    await restoreSshdPortRestartFailure(ssh, {
+      originalConfig,
+      serviceUnit,
+      socketState,
+      targetPort,
+    })
     throw error
   }
 }

@@ -895,10 +895,37 @@ describe("sshd.port — apply: validation and rollback", () => {
       .mockRejectedValueOnce(new Error("SSH connection closed unexpectedly"))
 
     const mod = sshd.port(2222)
-    await expect(mod.apply(mockSsh, emptyEnv)).rejects.toThrow("SSH connection closed unexpectedly")
+    const result = await mod.apply(mockSsh, emptyEnv)
 
+    expect(result).toMatchObject({
+      meta: [{ kind: "sshd.port", port: 2222 }],
+      status: "changed",
+    })
     expect(addPortSpy).toHaveBeenCalledWith(2222)
     expect(removePortSpy).not.toHaveBeenCalled()
+  })
+
+  it("returns reconnect meta when restart resets the SSH session", async () => {
+    const mockSsh = createMockSsh({
+      [CAT_SSHD]: { stdout: "Port 22" },
+    })
+    trackWriteFile(mockSsh)
+    const execSpy = vi.spyOn(mockSsh, "exec")
+
+    execSpy
+      .mockResolvedValueOnce({ code: 0, stderr: "", stdout: "" }) // mkdir -p /run/sshd
+      .mockResolvedValueOnce({ code: 0, stderr: "", stdout: "" }) // sshd -t
+      .mockResolvedValueOnce({ code: 1, stderr: "", stdout: "" }) // ssh.socket missing
+      .mockResolvedValueOnce({ code: 0, stderr: "", stdout: "" }) // sshd.service exists
+      .mockRejectedValueOnce(new Error("ECONNRESET"))
+
+    const mod = sshd.port(2222)
+    const result = await mod.apply(mockSsh, emptyEnv)
+
+    expect(result).toMatchObject({
+      meta: [{ kind: "sshd.port", port: 2222 }],
+      status: "changed",
+    })
   })
 
   it("falls back to ssh.service for restart on Ubuntu-style systems", async () => {
