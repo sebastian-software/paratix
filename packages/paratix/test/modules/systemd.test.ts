@@ -194,8 +194,8 @@ describe("systemd.unit", () => {
   it("apply writes the file and runs daemon-reload returning changed on success", async () => {
     const ssh = createMockSsh({
       "mkdir -p /var/lib/paratix/flags": { code: 0 },
-      "systemctl daemon-reload": { code: 0 },
       [reloadFlagSet]: { code: 0 },
+      "systemctl daemon-reload": { code: 0 },
     })
     const mod = systemd.unit(unitName, unitContent)
     const result = await mod.apply(ssh, emptyEnv)

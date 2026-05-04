@@ -150,11 +150,11 @@ describe("quadlet.container", () => {
 
   it("apply creates the quadlet directory, writes the file, and reloads systemd", async () => {
     const ssh = createMockSsh({
-      "mkdir -p /var/lib/paratix/flags": { code: 0 },
-      "mkdir -p '/etc/containers/systemd'": { code: 0 },
-      "systemctl daemon-reload": { code: 0 },
       [`find /var/lib/paratix/flags -maxdepth 1 -name '${traefikReloadFlagPrefix}*' -delete && touch /var/lib/paratix/flags/'${buildReloadFlag("traefik", expectedQuadletContent())}'`]:
         { code: 0 },
+      "mkdir -p '/etc/containers/systemd'": { code: 0 },
+      "mkdir -p /var/lib/paratix/flags": { code: 0 },
+      "systemctl daemon-reload": { code: 0 },
     })
     const writeFile = vi.spyOn(ssh, "writeFile").mockResolvedValue()
 

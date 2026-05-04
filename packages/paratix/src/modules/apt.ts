@@ -1,3 +1,4 @@
+/* eslint-disable max-lines -- apt module variants share helper code and fixtures */
 import type { UpgradeOptions } from "./package.js"
 
 import { failed, failedCommand } from "../moduleFailure.js"
@@ -20,6 +21,7 @@ import { hasFlag, setVersionedFlag } from "./moduleHelpers.js"
 
 const NONINTERACTIVE = "DEBIAN_FRONTEND=noninteractive"
 const APT_REPOSITORY_MODE = "0644"
+const APT_REPOSITORY_HASH_LENGTH = 16
 
 // R-0000098: apt resource names land directly in shell paths like
 // `/etc/apt/keyrings/${name}.gpg` and `/etc/apt/sources.list.d/${name}.list`.
@@ -45,9 +47,9 @@ function buildRepositoryUpdateFlag(
   flagName: string
   flagPrefix: string
 } {
-  const flagPrefix = `apt-repository-${sha256String(name).slice(0, 16)}-`
+  const flagPrefix = `apt-repository-${sha256String(name).slice(0, APT_REPOSITORY_HASH_LENGTH)}-`
   return {
-    flagName: `${flagPrefix}${sha256String(expectedContent).slice(0, 16)}`,
+    flagName: `${flagPrefix}${sha256String(expectedContent).slice(0, APT_REPOSITORY_HASH_LENGTH)}`,
     flagPrefix,
   }
 }

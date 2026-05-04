@@ -1,3 +1,4 @@
+/* eslint-disable max-lines-per-function, max-statements -- ssh2 stream handlers are intentionally co-located */
 import type { Client, ClientChannel, ConnectConfig } from "ssh2"
 
 import type { ExecOptions, ExecResult } from "./types.js"

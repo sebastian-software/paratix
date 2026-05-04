@@ -178,7 +178,9 @@ describe("printModuleResult", () => {
   it("stops and clears live output on request", () => {
     const clearLine = vi.fn(() => true)
     const cursorTo = vi.fn(() => true)
-    vi.spyOn(process.stdout, "write").mockImplementation((() => true) as typeof process.stdout.write)
+    vi.spyOn(process.stdout, "write").mockImplementation(
+      (() => true) as typeof process.stdout.write
+    )
     const originalIsTTY = process.stdout.isTTY
     const originalClearLine = bindOptionalStdoutMethod("clearLine")
     const originalCursorTo = bindOptionalStdoutMethod("cursorTo")

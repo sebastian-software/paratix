@@ -1,3 +1,4 @@
+/* eslint-disable max-lines -- integration harness keeps Docker lifecycle helpers together */
 import { execFile } from "node:child_process"
 import { chmodSync } from "node:fs"
 import { mkdir, mkdtemp, rm } from "node:fs/promises"

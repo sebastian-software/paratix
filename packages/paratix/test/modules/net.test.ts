@@ -15,8 +15,6 @@ const createMockSsh: typeof createBaseMockSsh = (responses, options) =>
 
 const emptyEnv = {}
 const routeDropinPath = "/etc/systemd/network/50-paratix-route-10.0.0.0-24.network"
-const netplanConfigPath = "/etc/netplan/60-paratix-eth0.yaml"
-const networkdConfigPath = "/etc/systemd/network/60-paratix-eth0.network"
 const SUCCESSFUL_EXEC_DEFAULT = { code: 0 } as const
 const APPLY_TO_NEW_FILE_DEFAULTS = {
   defaultExecResult: SUCCESSFUL_EXEC_DEFAULT,
@@ -419,12 +417,12 @@ describe("net.route — check", () => {
     const expectedDropin = `[Match]\nName=eth0\n\n[Route]\nDestination=10.0.0.0/24\nGateway=192.168.1.1\n`
     const mockSsh = createMockSsh({
       [`cat '${dropinPath}'`]: { stdout: expectedDropin },
+      [`test -f '${dropinPath}'`]: { code: 0 },
       [buildRouteReloadFlagCheck({
         destination: "10.0.0.0/24",
         device: "eth0",
         gateway: "192.168.1.1",
       })]: { code: 0 },
-      [`test -f '${dropinPath}'`]: { code: 0 },
       "ip route show '10.0.0.0/24'": { stdout: "10.0.0.0/24 via 192.168.1.1 dev eth0" },
     })
     const mod = net.route("10.0.0.0/24", "192.168.1.1", { device: "eth0" })
@@ -537,12 +535,12 @@ describe("net.route — check", () => {
     const expectedDropin = `[Match]\nName=eth0\n\n[Route]\nDestination=10.0.0.0/24\nGateway=192.168.1.1\n`
     const mockSsh = createMockSsh({
       [`cat '${dropinPath}'`]: { stdout: expectedDropin },
+      [`test -f '${dropinPath}'`]: { code: 0 },
       [buildRouteReloadFlagCheck({
         destination: "10.0.0.0/24",
         device: "eth0",
         gateway: "192.168.1.1",
       })]: { code: 0 },
-      [`test -f '${dropinPath}'`]: { code: 0 },
       "ip route show '10.0.0.0/24'": { stdout: "10.0.0.0/24 via 192.168.1.1 dev eth0" },
     })
     const mod = net.route("10.0.0.0/24", "192.168.1.1", { device: "eth0" })
@@ -555,12 +553,12 @@ describe("net.route — check", () => {
     const expectedDropin = `[Match]\nName=eth0\n\n[Route]\nDestination=10.0.0.0/24\nGateway=192.168.1.1\n`
     const mockSsh = createMockSsh({
       [`cat '${dropinPath}'`]: { stdout: expectedDropin },
+      [`test -f '${dropinPath}'`]: { code: 0 },
       [buildRouteReloadFlagCheck({
         destination: "10.0.0.0/24",
         device: "eth0",
         gateway: "192.168.1.1",
       })]: { code: 1 },
-      [`test -f '${dropinPath}'`]: { code: 0 },
       "ip route show '10.0.0.0/24'": { stdout: "10.0.0.0/24 via 192.168.1.1 dev eth0" },
     })
     const mod = net.route("10.0.0.0/24", "192.168.1.1", { device: "eth0" })
@@ -732,8 +730,8 @@ describe("net.route — apply", () => {
   it("returns failed when drop-in removal fails (state: absent)", async () => {
     const dropinPath = "/etc/systemd/network/50-paratix-route-10.0.0.0-24.network"
     const mockSsh = createMockSsh({
-      [routeShowCommand]: { code: 0, stdout: "" },
       [`rm -f '${dropinPath}'`]: { code: 1, stderr: "permission denied" },
+      [routeShowCommand]: { code: 0, stdout: "" },
     })
     const mod = net.route("10.0.0.0/24", "192.168.1.1", { state: "absent" })
     const result = await mod.apply(mockSsh, emptyEnv)
@@ -1067,9 +1065,9 @@ describe("net.interface — apply", () => {
     const previousConfig = "network:\n  version: 2\n"
     const mockSsh = createMockSsh({
       [`cat '${netplanPath}'`]: { stdout: previousConfig },
+      [`test -f '${netplanPath}'`]: { code: 0 },
       "netplan apply": { code: 1, stderr: "bad netplan" },
       "test -d '/etc/netplan'": { code: 0 },
-      [`test -f '${netplanPath}'`]: { code: 0 },
     })
     const writeFile = vi.spyOn(mockSsh, "writeFile").mockResolvedValue()
     const mod = net.interface("eth0", { dhcp: true })
@@ -1086,9 +1084,9 @@ describe("net.interface — apply", () => {
     const netplanPath = "/etc/netplan/60-paratix-eth0.yaml"
     const mockSsh = createMockSsh(
       {
+        [`test -f '${netplanPath}'`]: { code: 1 },
         "netplan apply": { code: 1, stderr: "bad netplan" },
         "test -d '/etc/netplan'": { code: 0 },
-        [`test -f '${netplanPath}'`]: { code: 1 },
       },
       APPLY_TO_NEW_FILE_DEFAULTS
     )
@@ -1143,9 +1141,9 @@ describe("net.interface — apply", () => {
     const previousConfig = "[Match]\nName=eth0\n\n[Network]\nDHCP=yes\n"
     const mockSsh = createMockSsh({
       [`cat '${networkdPath}'`]: { stdout: previousConfig },
+      [`test -f '${networkdPath}'`]: { code: 0 },
       "networkctl reload": { code: 1, stderr: "reload failed" },
       "test -d '/etc/netplan'": { code: 1 },
-      [`test -f '${networkdPath}'`]: { code: 0 },
     })
     const writeFile = vi.spyOn(mockSsh, "writeFile").mockResolvedValue()
     const mod = net.interface("eth0", { dhcp: false })

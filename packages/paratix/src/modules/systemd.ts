@@ -7,6 +7,7 @@ import { hasFlag, setVersionedFlag } from "./moduleHelpers.js"
 const SYSTEMCTL = "systemctl"
 const UNIT_NAME_PATTERN = /^[\w@.\-]+$/v
 const SYSTEMD_UNIT_MODE = "0644"
+const SYSTEMD_UNIT_RELOAD_HASH_LENGTH = 16
 
 function normalizeMode(mode: string): string {
   return mode.replace(/^0+/v, "")
@@ -19,9 +20,9 @@ function buildSystemdUnitReloadFlag(
   flagName: string
   flagPrefix: string
 } {
-  const flagPrefix = `systemd-unit-${sha256String(name).slice(0, 16)}-`
+  const flagPrefix = `systemd-unit-${sha256String(name).slice(0, SYSTEMD_UNIT_RELOAD_HASH_LENGTH)}-`
   return {
-    flagName: `${flagPrefix}${sha256String(content).slice(0, 16)}`,
+    flagName: `${flagPrefix}${sha256String(content).slice(0, SYSTEMD_UNIT_RELOAD_HASH_LENGTH)}`,
     flagPrefix,
   }
 }

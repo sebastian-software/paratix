@@ -31,6 +31,7 @@ const NETWORKCTL_RELOAD = "networkctl reload"
 const DEFAULT_POLL_INTERVAL_MS = 2000
 const DEFAULT_POLL_TIMEOUT_MS = 60_000
 const DEFAULT_EXPECTED_STATUS = 200
+const NET_RELOAD_HASH_LENGTH = 16
 
 /**
  * Sanitize a destination string for use in a filename.
@@ -382,10 +383,13 @@ function buildRouteReloadFlag(parameters: RouteParameters): {
   flagPrefix: string
 } {
   const routeKey = `${parameters.destination}\n${parameters.gateway}\n${parameters.device ?? ""}`
-  const routeHash = sha256String(routeKey).slice(0, 16)
+  const routeHash = sha256String(routeKey).slice(0, NET_RELOAD_HASH_LENGTH)
   const flagPrefix = `net-route-${routeHash}-`
+  const dropinHash = sha256String(
+    buildRouteDropin(parameters.destination, parameters.gateway, parameters.device)
+  ).slice(0, NET_RELOAD_HASH_LENGTH)
   return {
-    flagName: `${flagPrefix}${sha256String(buildRouteDropin(parameters.destination, parameters.gateway, parameters.device)).slice(0, 16)}`,
+    flagName: `${flagPrefix}${dropinHash}`,
     flagPrefix,
   }
 }
@@ -442,19 +446,34 @@ async function checkRouteState(
   const dropinPresent = await routeDropinExists(conn, dropinPath)
 
   if (state === "present") {
-    if (!live) return NEEDS_APPLY
-    if (!dropinPresent) return NEEDS_APPLY
-    const expected = buildRouteDropin(destination, gateway, device)
-    const current = await conn.readFile(dropinPath)
-    if (current.trim() !== expected.trim()) return NEEDS_APPLY
-    const reloadFlag = buildRouteReloadFlag({ destination, device, dropinPath, gateway })
-    return (await hasFlag(conn, reloadFlag.flagName)) ? "ok" : NEEDS_APPLY
+    return checkPresentRouteState(
+      conn,
+      { destination, device, dropinPath, gateway },
+      {
+        dropinPresent,
+        live,
+      }
+    )
   }
 
   // absent: neither the live route nor the drop-in may remain — a lingering
   // drop-in would re-create the route on the next reboot.
   if (live) return NEEDS_APPLY
   return dropinPresent ? NEEDS_APPLY : "ok"
+}
+
+async function checkPresentRouteState(
+  conn: SshConnection,
+  parameters: RouteParameters,
+  state: { dropinPresent: boolean; live: boolean }
+): Promise<"needs-apply" | "ok"> {
+  if (!state.live) return NEEDS_APPLY
+  if (!state.dropinPresent) return NEEDS_APPLY
+  const expected = buildRouteDropin(parameters.destination, parameters.gateway, parameters.device)
+  const current = await conn.readFile(parameters.dropinPath)
+  if (current.trim() !== expected.trim()) return NEEDS_APPLY
+  const reloadFlag = buildRouteReloadFlag(parameters)
+  return (await hasFlag(conn, reloadFlag.flagName)) ? "ok" : NEEDS_APPLY
 }
 
 async function applyPresentRoute(
@@ -731,24 +750,23 @@ export const net = {
         const useNetplan = await conn.test("test -d '/etc/netplan'")
 
         if (useNetplan) {
-          const content = buildNetplanYaml(name, options)
+          const netplanContent = buildNetplanYaml(name, options)
           return writeAndApplyInterfaceConfig({
             applyCommand: "netplan apply",
-            content,
+            content: netplanContent,
             failureMessage: `[net.interface: ${name}] netplan apply failed`,
             path: netplanPath,
             ssh: conn,
           })
-        } else {
-          const content = buildNetworkdConfig(name, options)
-          return writeAndApplyInterfaceConfig({
-            applyCommand: NETWORKCTL_RELOAD,
-            content,
-            failureMessage: `[net.interface: ${name}] networkctl reload failed`,
-            path: networkdPath,
-            ssh: conn,
-          })
         }
+        const networkdContent = buildNetworkdConfig(name, options)
+        return writeAndApplyInterfaceConfig({
+          applyCommand: NETWORKCTL_RELOAD,
+          content: networkdContent,
+          failureMessage: `[net.interface: ${name}] networkctl reload failed`,
+          path: networkdPath,
+          ssh: conn,
+        })
       },
       async check(conn: null | SshConnection): Promise<"needs-apply" | "ok"> {
         if (!conn) return NEEDS_APPLY

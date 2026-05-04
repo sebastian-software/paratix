@@ -1,3 +1,4 @@
+/* eslint-disable max-lines, max-lines-per-function -- file extra modules are grouped for discoverability */
 import { readFile } from "node:fs/promises"
 
 import { environmentToMetaEntries } from "../meta.js"
@@ -41,9 +42,9 @@ async function resolveWriteMode(
 
 type BlockMarkers = { begin: string; end: string; full: string }
 type ParsedManagedBlock =
-  | { status: "absent" }
   | { content: string; endIndex: number; startIndex: number; status: "present" }
   | { reason: string; status: "invalid" }
+  | { status: "absent" }
 
 function parseManagedBlock(text: string, markers: BlockMarkers): ParsedManagedBlock {
   const lines = text.split("\n")
@@ -73,15 +74,47 @@ function parseManagedBlock(text: string, markers: BlockMarkers): ParsedManagedBl
   }
 }
 
-function replaceBlock(text: string, markers: BlockMarkers, block: ParsedManagedBlock): string {
-  if (block.status !== "present") return text
+function replaceBlock(
+  text: string,
+  markers: BlockMarkers,
+  parsedBlock: ParsedManagedBlock
+): string {
+  if (parsedBlock.status !== "present") return text
   const lines = text.split("\n")
   const result = [
-    ...lines.slice(0, block.startIndex),
+    ...lines.slice(0, parsedBlock.startIndex),
     markers.full,
-    ...lines.slice(block.endIndex + 1),
+    ...lines.slice(parsedBlock.endIndex + 1),
   ]
   return result.join("\n")
+}
+
+async function applyBlockToExistingFile(parameters: {
+  existing: string
+  fullBlock: string
+  markers: BlockMarkers
+  remotePath: string
+  resourceLabel: string
+  ssh: SshConnection
+}): Promise<ModuleResult | null> {
+  const { existing, fullBlock, markers, remotePath, resourceLabel, ssh } = parameters
+  const parsedBlock = parseManagedBlock(existing, markers)
+
+  if (parsedBlock.status === "invalid") {
+    return failed(`[file.block: ${resourceLabel}] invalid marker pair: ${parsedBlock.reason}`)
+  }
+
+  const newContent =
+    parsedBlock.status === "present"
+      ? replaceBlock(existing, markers, parsedBlock)
+      : `${existing}${existing.endsWith("\n") ? "" : "\n"}${fullBlock}\n`
+  await guardedWriteFile(ssh, {
+    mode: await resolveWriteMode(ssh, remotePath),
+    newContent,
+    originalContent: existing,
+    remotePath,
+  })
+  return null
 }
 
 /** Options for the {@link block} module. */
@@ -181,30 +214,15 @@ export function block(remotePath: string, options: BlockOptions): Module {
       if (exists) {
         const existing = await ssh.readFile(remotePath)
         const markers: BlockMarkers = { begin: beginMarker, end: endMarker, full: fullBlock }
-        const block = parseManagedBlock(existing, markers)
-
-        if (block.status === "invalid") {
-          return failed(
-            `[file.block: ${remotePath} (${options.name})] invalid marker pair: ${block.reason}`
-          )
-        }
-
-        if (block.status === "present") {
-          await guardedWriteFile(ssh, {
-            mode: await resolveWriteMode(ssh, remotePath),
-            newContent: replaceBlock(existing, markers, block),
-            originalContent: existing,
-            remotePath,
-          })
-        } else {
-          const separator = existing.endsWith("\n") ? "" : "\n"
-          await guardedWriteFile(ssh, {
-            mode: await resolveWriteMode(ssh, remotePath),
-            newContent: `${existing}${separator}${fullBlock}\n`,
-            originalContent: existing,
-            remotePath,
-          })
-        }
+        const failure = await applyBlockToExistingFile({
+          existing,
+          fullBlock,
+          markers,
+          remotePath,
+          resourceLabel: `${remotePath} (${options.name})`,
+          ssh,
+        })
+        if (failure != null) return failure
       } else {
         await ssh.writeFile(remotePath, `${fullBlock}\n`, {
           mode: await resolveWriteMode(ssh, remotePath),
@@ -225,12 +243,14 @@ export function block(remotePath: string, options: BlockOptions): Module {
       if (!hasBeginMarker && !hasEndMarker) return NEEDS_APPLY
 
       const fileContent = await ssh.readFile(remotePath)
-      const block = parseManagedBlock(fileContent, {
+      const parsedBlock = parseManagedBlock(fileContent, {
         begin: beginMarker,
         end: endMarker,
         full: `${beginMarker}\n${options.content}\n${endMarker}`,
       })
-      return block.status === "present" && block.content === options.content ? "ok" : NEEDS_APPLY
+      return parsedBlock.status === "present" && parsedBlock.content === options.content
+        ? "ok"
+        : NEEDS_APPLY
     },
     name: `file.block: ${remotePath} (${options.name})`,
   }

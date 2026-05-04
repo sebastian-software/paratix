@@ -25,6 +25,7 @@ import {
 
 const CONTAINERS_SYSTEMD_DIRECTORY_COMMAND = "mkdir -p '/etc/containers/systemd'"
 const QUADLET_FILE_MODE = "0644"
+const QUADLET_RELOAD_HASH_LENGTH = 16
 const SYSTEMCTL = "systemctl"
 
 function normalizeMode(mode: string): string {
@@ -38,9 +39,9 @@ function buildQuadletReloadFlag(
   flagName: string
   flagPrefix: string
 } {
-  const flagPrefix = `quadlet-container-${sha256String(name).slice(0, 16)}-`
+  const flagPrefix = `quadlet-container-${sha256String(name).slice(0, QUADLET_RELOAD_HASH_LENGTH)}-`
   return {
-    flagName: `${flagPrefix}${sha256String(content).slice(0, 16)}`,
+    flagName: `${flagPrefix}${sha256String(content).slice(0, QUADLET_RELOAD_HASH_LENGTH)}`,
     flagPrefix,
   }
 }

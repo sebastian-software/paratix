@@ -75,10 +75,17 @@ function hasExplicitDefaultForKind(
   kind: "exec" | "output" | "test",
   options: MockSshOptions | undefined
 ): boolean {
-  if (kind === "exec") return options?.defaultExecResult !== undefined
-  if (kind === "test") return options?.defaultTestResult !== undefined
-  if (kind === "output") return options?.defaultOutputResult !== undefined
-  return false
+  switch (kind) {
+    case "exec": {
+      return options?.defaultExecResult !== undefined
+    }
+    case "output": {
+      return options?.defaultOutputResult !== undefined
+    }
+    case "test": {
+      return options?.defaultTestResult !== undefined
+    }
+  }
 }
 
 function getMockResponse(input: {

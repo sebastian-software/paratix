@@ -434,9 +434,9 @@ describe("apt.repository (standard form)", () => {
     const signedByFalseFlag = `apt-repository-${sha256String("docker").slice(0, 16)}-${sha256String(source).slice(0, 16)}`
     const ssh = createMockSsh({
       [`[ -f '${filePath}' ]`]: { code: 0 },
+      [`[ -f /var/lib/paratix/flags/'${signedByFalseFlag}' ]`]: { code: 0 },
       [`cat '${filePath}'`]: { stdout: source },
       [`stat -c '%a' '${filePath}'`]: { stdout: "644" },
-      [`[ -f /var/lib/paratix/flags/'${signedByFalseFlag}' ]`]: { code: 0 },
     })
     const mod = apt.repository("docker", source, { signedBy: false })
     const result = await mod.check(ssh, emptyEnv)
@@ -449,9 +449,9 @@ describe("apt.repository (standard form)", () => {
     const customFlag = `apt-repository-${sha256String("docker").slice(0, 16)}-${sha256String(customContent).slice(0, 16)}`
     const ssh = createMockSsh({
       [`[ -f '${filePath}' ]`]: { code: 0 },
+      [`[ -f /var/lib/paratix/flags/'${customFlag}' ]`]: { code: 0 },
       [`cat '${filePath}'`]: { stdout: customContent },
       [`stat -c '%a' '${filePath}'`]: { stdout: "644" },
-      [`[ -f /var/lib/paratix/flags/'${customFlag}' ]`]: { code: 0 },
     })
     const mod = apt.repository("docker", source, { signedBy: "custom" })
     const result = await mod.check(ssh, emptyEnv)

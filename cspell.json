@@ -95,6 +95,7 @@
     "systemctl",
     "texlive",
     "tmpfs",
+    "traefik",
     "tmpl",
     "toctou",
     "totp",

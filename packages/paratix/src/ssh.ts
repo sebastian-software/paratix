@@ -1,4 +1,4 @@
-/* eslint-disable max-lines */
+/* eslint-disable max-lines, max-lines-per-function -- SSH transport methods keep callback wiring local */
 import { randomUUID, timingSafeEqual } from "node:crypto"
 import { type Stats, unlinkSync, writeFileSync } from "node:fs"
 import { readFile, stat } from "node:fs/promises"
