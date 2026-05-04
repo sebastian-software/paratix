@@ -670,11 +670,10 @@ export const download = {
 
         const result = await performDownload(conn, downloadParameters)
 
-        if (result.status === "changed") {
-          await setFlag(conn, flagName)
-        }
+        if (result.status === "failed") return result
 
-        return result
+        await setFlag(conn, flagName)
+        return { ...result, status: "changed" }
       },
       async check(conn: null | SshConnection): Promise<"needs-apply" | "ok"> {
         if (!conn) return NEEDS_APPLY

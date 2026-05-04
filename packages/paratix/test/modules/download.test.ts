@@ -1226,6 +1226,21 @@ describe("download.large", () => {
       expect(mockSsh.calls.every((c) => !c.startsWith("curl"))).toBe(true)
       expect(mockSsh.calls.every((c) => !c.startsWith("mktemp"))).toBe(true)
     })
+
+    it("sets flag and reports changed when fast path finds matching content and metadata", async () => {
+      const sha256 = "aabbccddaabbccddaabbccddaabbccddaabbccddaabbccddaabbccddaabbccdd"
+      const mockSsh = createMockSsh({
+        [`[ -e '${destination}' ]`]: { code: 0 },
+        [`[ -f '${destination}' ]`]: { code: 0 },
+        [`sha256sum '${destination}'`]: { stdout: `${sha256}  ${destination}` },
+      })
+      const mod = download.large(destination, url, { sha256 })
+      const result = await mod.apply(mockSsh, emptyEnv)
+      expect(result.status).toBe("changed")
+      expect(mockSsh.calls).toContain(`touch /var/lib/paratix/flags/'${flagName}'`)
+      expect(mockSsh.calls.every((c) => !c.startsWith("curl"))).toBe(true)
+      expect(mockSsh.calls.every((c) => !c.startsWith("mktemp"))).toBe(true)
+    })
   })
 
   describe("name", () => {
