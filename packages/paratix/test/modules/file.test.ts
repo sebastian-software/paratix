@@ -1302,6 +1302,21 @@ describe("file.block", () => {
     expect(result).toBe("needs-apply")
   })
 
+  it("check returns needs-apply when block end marker is missing", async () => {
+    const beginMarker = "# BEGIN paratix: myblock"
+    const fileContent = `${beginMarker}\ncontent line\nimportant foreign content`
+
+    const ssh = createMockSsh({
+      [`cat '/etc/hosts'`]: { stdout: fileContent },
+      [`grep -qF '# BEGIN paratix: myblock' '/etc/hosts'`]: { code: 0 },
+      [`grep -qF '# END paratix: myblock' '/etc/hosts'`]: { code: 1 },
+    })
+
+    const mod = file.block("/etc/hosts", { content: "content line", name: "myblock" })
+    const result = await mod.check(ssh, emptyEnv)
+    expect(result).toBe("needs-apply")
+  })
+
   it("check returns needs-apply when ssh is null", async () => {
     const mod = file.block("/etc/hosts", { content: "content line", name: "myblock" })
     const result = await mod.check(null, emptyEnv)
@@ -1351,6 +1366,28 @@ describe("file.block", () => {
     expect(result.status).toBe("changed")
     expect(writtenFiles[0]?.content).toContain("new content")
     expect(writtenFiles[0]?.content).not.toContain("old content")
+  })
+
+  it("apply fails without writing when block end marker is missing", async () => {
+    const beginMarker = "# BEGIN paratix: myblock"
+    const existingContent = `before\n${beginMarker}\nold content\nafter`
+
+    const writtenFiles: Array<{ content: string; path: string }> = []
+    const ssh = createMockSsh({
+      [`cat '/etc/hosts'`]: { stdout: existingContent },
+      [`grep -qF '# BEGIN paratix: myblock' '/etc/hosts'`]: { code: 0 },
+    })
+    // eslint-disable-next-line @typescript-eslint/require-await -- Mock
+    ssh.writeFile = async (path: string, content: string) => {
+      writtenFiles.push({ content, path })
+    }
+
+    const mod = file.block("/etc/hosts", { content: "new content", name: "myblock" })
+    const result = await mod.apply(ssh, emptyEnv)
+
+    expect(result.status).toBe("failed")
+    expect(result.error?.message).toContain("invalid marker pair")
+    expect(writtenFiles).toHaveLength(0)
   })
 
   it("apply preserves unicode block content and unicode paths", async () => {

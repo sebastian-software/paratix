@@ -40,38 +40,48 @@ async function resolveWriteMode(
 }
 
 type BlockMarkers = { begin: string; end: string; full: string }
+type ParsedManagedBlock =
+  | { status: "absent" }
+  | { content: string; endIndex: number; startIndex: number; status: "present" }
+  | { reason: string; status: "invalid" }
 
-function replaceBlock(text: string, markers: BlockMarkers): string {
+function parseManagedBlock(text: string, markers: BlockMarkers): ParsedManagedBlock {
   const lines = text.split("\n")
-  const result: string[] = []
-  let insideBlock = false
-  for (const line of lines) {
-    if (line.includes(markers.begin)) {
-      result.push(markers.full)
-      insideBlock = true
-    } else if (insideBlock && line.includes(markers.end)) {
-      insideBlock = false
-    } else if (!insideBlock) {
-      result.push(line)
-    }
+  const beginIndexes: number[] = []
+  const endIndexes: number[] = []
+  for (const [index, line] of lines.entries()) {
+    if (line.includes(markers.begin)) beginIndexes.push(index)
+    if (line.includes(markers.end)) endIndexes.push(index)
   }
-  return result.join("\n")
+
+  if (beginIndexes.length === 0 && endIndexes.length === 0) return { status: "absent" }
+  if (beginIndexes.length !== 1 || endIndexes.length !== 1) {
+    return { reason: "expected exactly one begin marker and one end marker", status: "invalid" }
+  }
+
+  const [startIndex] = beginIndexes
+  const [endIndex] = endIndexes
+  if (startIndex >= endIndex) {
+    return { reason: "begin marker must appear before end marker", status: "invalid" }
+  }
+
+  return {
+    content: lines.slice(startIndex + 1, endIndex).join("\n"),
+    endIndex,
+    startIndex,
+    status: "present",
+  }
 }
 
-function extractBlockContent(text: string, beginMarker: string, endMarker: string): string {
+function replaceBlock(text: string, markers: BlockMarkers, block: ParsedManagedBlock): string {
+  if (block.status !== "present") return text
   const lines = text.split("\n")
-  const blockLines: string[] = []
-  let insideBlock = false
-  for (const line of lines) {
-    if (line.includes(beginMarker)) {
-      insideBlock = true
-    } else if (insideBlock && line.includes(endMarker)) {
-      insideBlock = false
-    } else if (insideBlock) {
-      blockLines.push(line)
-    }
-  }
-  return blockLines.join("\n")
+  const result = [
+    ...lines.slice(0, block.startIndex),
+    markers.full,
+    ...lines.slice(block.endIndex + 1),
+  ]
+  return result.join("\n")
 }
 
 /** Options for the {@link block} module. */
@@ -170,13 +180,19 @@ export function block(remotePath: string, options: BlockOptions): Module {
 
       if (exists) {
         const existing = await ssh.readFile(remotePath)
-        const hasMarker = existing.includes(beginMarker)
+        const markers: BlockMarkers = { begin: beginMarker, end: endMarker, full: fullBlock }
+        const block = parseManagedBlock(existing, markers)
 
-        if (hasMarker) {
-          const markers: BlockMarkers = { begin: beginMarker, end: endMarker, full: fullBlock }
+        if (block.status === "invalid") {
+          return failed(
+            `[file.block: ${remotePath} (${options.name})] invalid marker pair: ${block.reason}`
+          )
+        }
+
+        if (block.status === "present") {
           await guardedWriteFile(ssh, {
             mode: await resolveWriteMode(ssh, remotePath),
-            newContent: replaceBlock(existing, markers),
+            newContent: replaceBlock(existing, markers, block),
             originalContent: existing,
             remotePath,
           })
@@ -200,14 +216,21 @@ export function block(remotePath: string, options: BlockOptions): Module {
     async check(ssh: null | SshConnection): Promise<"needs-apply" | "ok"> {
       if (!ssh) return NEEDS_APPLY
 
-      const hasMarker = await ssh.test(
+      const hasBeginMarker = await ssh.test(
         `grep -qF ${shellQuote(beginMarker)} ${shellQuote(remotePath)}`
       )
-      if (!hasMarker) return NEEDS_APPLY
+      const hasEndMarker = await ssh.test(
+        `grep -qF ${shellQuote(endMarker)} ${shellQuote(remotePath)}`
+      )
+      if (!hasBeginMarker && !hasEndMarker) return NEEDS_APPLY
 
       const fileContent = await ssh.readFile(remotePath)
-      const current = extractBlockContent(fileContent, beginMarker, endMarker)
-      return current === options.content ? "ok" : NEEDS_APPLY
+      const block = parseManagedBlock(fileContent, {
+        begin: beginMarker,
+        end: endMarker,
+        full: `${beginMarker}\n${options.content}\n${endMarker}`,
+      })
+      return block.status === "present" && block.content === options.content ? "ok" : NEEDS_APPLY
     },
     name: `file.block: ${remotePath} (${options.name})`,
   }
