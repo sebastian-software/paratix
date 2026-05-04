@@ -3,6 +3,7 @@ import { failed } from "../moduleFailure.js"
 import { isValidTcpPort } from "../serverDefinitionValidation.js"
 import { shellQuote } from "../ssh.js"
 import { type Module, type ModuleResult, NEEDS_APPLY, type SshConnection } from "../types.js"
+import { assertValidUserName } from "./posixNames.js"
 import { applyAuthorizedKeys, checkAuthorizedKeys } from "./sshAuthorizedKeysHelpers.js"
 
 type KnownHostsOptions = {
@@ -215,6 +216,7 @@ export const ssh = {
    * @returns A Module that manages the authorized key entry.
    */
   authorizedKeys(user: string, key: string, options?: { state?: "absent" | "present" }): Module {
+    assertValidUserName(user)
     assertAuthorizedKeyValue(key)
     const state = options?.state ?? "present"
 

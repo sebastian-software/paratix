@@ -2,6 +2,7 @@ import { failed, failedCommand } from "../moduleFailure.js"
 import { registerSecret, unregisterSecret } from "../secretSink.js"
 import { shellQuote } from "../ssh.js"
 import { type Module, type ModuleResult, NEEDS_APPLY, type SshConnection } from "../types.js"
+import { assertValidGroupName, assertValidUserName } from "./posixNames.js"
 
 type UserOptions = {
   groups?: string[]
@@ -12,22 +13,6 @@ type UserOptions = {
 }
 
 const ID_CMD = "id"
-
-// R-0000119: enforce the POSIX user/group name whitelist at module-construction
-// time so flag-shaped or empty names (e.g. `--badname`, `-r`, `""`) cannot
-// reach `useradd`, `usermod`, `userdel`, or `--groups` where they would either
-// be interpreted as options or trigger undefined behaviour. The leading
-// character must be a lowercase letter or underscore; subsequent characters
-// may be lowercase letters, digits, underscores, or hyphens; an optional
-// trailing `$` is accepted to match the convention used for samba machine
-// accounts.
-const USER_NAME_PATTERN = /^[a-z_][a-z0-9_\-]*\$?$/v
-
-function assertValidUserName(name: string): void {
-  if (!USER_NAME_PATTERN.test(name)) {
-    throw new Error(`user name ${JSON.stringify(name)} is invalid`)
-  }
-}
 
 // R-0000120: validate the `uid` and `groups` options at construction time so
 // numeric drift (NaN, negative, fractional, > 2^32) and group-name injection
@@ -40,16 +25,6 @@ const UID_MAX_EXCLUSIVE = 2 ** UID_BIT_WIDTH
 function assertValidUid(uid: number): void {
   if (!Number.isInteger(uid) || uid < 0 || uid >= UID_MAX_EXCLUSIVE) {
     throw new Error(`uid ${JSON.stringify(uid)} is invalid`)
-  }
-}
-
-function assertValidGroupName(group: string): void {
-  // Group names follow the same POSIX whitelist as user names, which already
-  // forbids commas (which would inject an extra `--groups` entry) and
-  // newlines (which could split commands when concatenated into a shell
-  // pipeline).
-  if (!USER_NAME_PATTERN.test(group)) {
-    throw new Error(`group name ${JSON.stringify(group)} is invalid`)
   }
 }
 

@@ -1027,4 +1027,13 @@ describe("ssh.authorizedKeys", () => {
   it("rejects an empty key at construction time", () => {
     expect(() => ssh.authorizedKeys("alice", "")).toThrow(/must not be empty/v)
   })
+
+  it.each(["", "--name", "-r", "bad user", "1alice", "älice"])(
+    "rejects invalid usernames at construction time: %s",
+    (user) => {
+      expect(() => ssh.authorizedKeys(user, testKey)).toThrow(
+        `user name ${JSON.stringify(user)} is invalid`
+      )
+    }
+  )
 })
