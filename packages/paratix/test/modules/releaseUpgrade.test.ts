@@ -154,6 +154,30 @@ describe("releaseUpgrade.upgrade — apply (Ubuntu)", () => {
     expect(ssh.calls).toContain("do-release-upgrade -f DistUpgradeViewNonInteractive")
   })
 
+  it("passes timeout to Ubuntu upgrade commands", async () => {
+    const ssh = createMockSsh({
+      "cat '/etc/os-release'": { code: 0, stdout: UBUNTU_OS_RELEASE },
+      "DEBIAN_FRONTEND=noninteractive apt-get update": { code: 0 },
+      "do-release-upgrade -f DistUpgradeViewNonInteractive": { code: 0 },
+    })
+    const mod = releaseUpgrade.upgrade({ timeout: 900_000 })
+    const result = await mod.apply(ssh, emptyEnv)
+    expect(result.status).toBe("changed")
+    expect(
+      ssh.execCalls
+        .filter((call) =>
+          [
+            "DEBIAN_FRONTEND=noninteractive apt-get update",
+            "do-release-upgrade -f DistUpgradeViewNonInteractive",
+          ].includes(call.command)
+        )
+        .map((call) => call.options)
+    ).toStrictEqual([
+      { ignoreExitCode: true, silent: true, timeout: 900_000 },
+      { ignoreExitCode: true, silent: true, timeout: 900_000 },
+    ])
+  })
+
   it("dryRun: runs only do-release-upgrade -c and returns ok", async () => {
     const ssh = createMockSsh({
       "cat '/etc/os-release'": { code: 0, stdout: UBUNTU_OS_RELEASE },
@@ -165,6 +189,19 @@ describe("releaseUpgrade.upgrade — apply (Ubuntu)", () => {
     expect(ssh.calls).toContain("do-release-upgrade -c")
     expect(ssh.calls).not.toContain("DEBIAN_FRONTEND=noninteractive apt-get update")
     expect(ssh.calls).not.toContain("do-release-upgrade -f DistUpgradeViewNonInteractive")
+  })
+
+  it("dryRun: passes timeout to do-release-upgrade -c", async () => {
+    const ssh = createMockSsh({
+      "cat '/etc/os-release'": { code: 0, stdout: UBUNTU_OS_RELEASE },
+      "do-release-upgrade -c": { code: 0 },
+    })
+    const mod = releaseUpgrade.upgrade({ dryRun: true, timeout: 900_000 })
+    const result = await mod.apply(ssh, emptyEnv)
+    expect(result.status).toBe("ok")
+    expect(
+      ssh.execCalls.find((call) => call.command === "do-release-upgrade -c")?.options
+    ).toStrictEqual({ ignoreExitCode: true, silent: true, timeout: 900_000 })
   })
 
   it("dryRun: fails when do-release-upgrade -c execution fails", async () => {
@@ -210,6 +247,30 @@ describe("releaseUpgrade.upgrade — apply (Debian)", () => {
     expect(ssh.calls).toContain("DEBIAN_FRONTEND=noninteractive apt-get update")
     expect(ssh.calls).toContain("DEBIAN_FRONTEND=noninteractive apt-get full-upgrade -y")
     expect(ssh.calls).toContain("DEBIAN_FRONTEND=noninteractive apt-get autoremove -y")
+  })
+
+  it("passes timeout to Debian upgrade pipeline commands", async () => {
+    const ssh = createMockSsh(debianApplyResponses("bookworm", "trixie"))
+    const mod = releaseUpgrade.upgrade({ timeout: 1_200_000 })
+    const result = await mod.apply(ssh, emptyEnv)
+    expect(result.status).toBe("changed")
+    expect(
+      ssh.execCalls
+        .filter((call) =>
+          [
+            "DEBIAN_FRONTEND=noninteractive apt-get update",
+            "DEBIAN_FRONTEND=noninteractive dpkg --configure -a",
+            "DEBIAN_FRONTEND=noninteractive apt-get full-upgrade -y",
+            "DEBIAN_FRONTEND=noninteractive apt-get autoremove -y",
+          ].includes(call.command)
+        )
+        .map((call) => call.options)
+    ).toStrictEqual([
+      { ignoreExitCode: true, silent: true, timeout: 1_200_000 },
+      { ignoreExitCode: true, silent: true, timeout: 1_200_000 },
+      { ignoreExitCode: true, silent: true, timeout: 1_200_000 },
+      { ignoreExitCode: true, silent: true, timeout: 1_200_000 },
+    ])
   })
 
   it("dryRun: no commands executed after codename lookup, returns ok", async () => {

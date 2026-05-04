@@ -2,6 +2,7 @@ import { meta } from "../meta.js"
 import { failed, failedCommand } from "../moduleFailure.js"
 import {
   type ExecResult,
+  type ExecOptions,
   guardedWriteFile,
   type Module,
   type ModuleMetaEntry,
@@ -57,6 +58,8 @@ type ReleaseUpgradeOptions = {
    * `system.host` meta so the runner can reconnect to the correct address.
    */
   resolveHost?: () => Promise<string>
+  /** Override the SSH layer's command timeout (milliseconds) for upgrade steps. */
+  timeout?: number
 }
 
 type Distro = "debian" | "ubuntu"
@@ -313,13 +316,16 @@ async function buildRebootMeta(options: ReleaseUpgradeOptions): Promise<ModuleMe
 async function runReleaseUpgradeCommand(
   ssh: SshConnection,
   command: string,
-  failureMessage: string
+  failureMessage: string,
+  options: ReleaseUpgradeOptions
 ): Promise<ModuleResult | null> {
-  const result = await ssh.exec(command, {
-    ignoreExitCode: true,
-    silent: true,
-  })
+  const result = await ssh.exec(command, releaseUpgradeExecOptions(options))
   return result.code === 0 ? null : failedCommand(failureMessage, result)
+}
+
+function releaseUpgradeExecOptions(options: ReleaseUpgradeOptions): ExecOptions {
+  if (options.timeout === undefined) return { ignoreExitCode: true, silent: true }
+  return { ignoreExitCode: true, silent: true, timeout: options.timeout }
 }
 
 /**
@@ -343,10 +349,7 @@ async function applyUbuntu(
   options: ReleaseUpgradeOptions
 ): Promise<ModuleResult> {
   if (options.dryRun === true) {
-    const result = await ssh.exec("do-release-upgrade -c", {
-      ignoreExitCode: true,
-      silent: true,
-    })
+    const result = await ssh.exec("do-release-upgrade -c", releaseUpgradeExecOptions(options))
     if (result.code !== 0 && !isNoUbuntuReleaseAvailable(result)) {
       return failedCommand("[releaseUpgrade.upgrade] do-release-upgrade -c failed", result)
     }
@@ -356,14 +359,16 @@ async function applyUbuntu(
   const updateFailure = await runReleaseUpgradeCommand(
     ssh,
     `${NONINTERACTIVE} apt-get update`,
-    "[releaseUpgrade.upgrade] apt-get update failed"
+    "[releaseUpgrade.upgrade] apt-get update failed",
+    options
   )
   if (updateFailure != null) return updateFailure
 
   const upgradeFailure = await runReleaseUpgradeCommand(
     ssh,
     "do-release-upgrade -f DistUpgradeViewNonInteractive",
-    "[releaseUpgrade.upgrade] do-release-upgrade failed"
+    "[releaseUpgrade.upgrade] do-release-upgrade failed",
+    options
   )
   if (upgradeFailure != null) return upgradeFailure
 
@@ -384,32 +389,39 @@ async function applyUbuntu(
  * @returns The first non-zero apt-step failure as a `ModuleResult`, or
  *   `null` when all four steps succeeded.
  */
-async function runDebianUpgradePipeline(ssh: SshConnection): Promise<ModuleResult | null> {
+async function runDebianUpgradePipeline(
+  ssh: SshConnection,
+  options: ReleaseUpgradeOptions
+): Promise<ModuleResult | null> {
   const updateFailure = await runReleaseUpgradeCommand(
     ssh,
     `${NONINTERACTIVE} apt-get update`,
-    "[releaseUpgrade.upgrade] apt-get update failed"
+    "[releaseUpgrade.upgrade] apt-get update failed",
+    options
   )
   if (updateFailure != null) return updateFailure
 
   const configureFailure = await runReleaseUpgradeCommand(
     ssh,
     `${NONINTERACTIVE} dpkg --configure -a`,
-    "[releaseUpgrade.upgrade] dpkg --configure -a failed"
+    "[releaseUpgrade.upgrade] dpkg --configure -a failed",
+    options
   )
   if (configureFailure != null) return configureFailure
 
   const upgradeFailure = await runReleaseUpgradeCommand(
     ssh,
     `${NONINTERACTIVE} apt-get full-upgrade -y`,
-    "[releaseUpgrade.upgrade] apt-get full-upgrade failed"
+    "[releaseUpgrade.upgrade] apt-get full-upgrade failed",
+    options
   )
   if (upgradeFailure != null) return upgradeFailure
 
   const autoremoveFailure = await runReleaseUpgradeCommand(
     ssh,
     `${NONINTERACTIVE} apt-get autoremove -y`,
-    "[releaseUpgrade.upgrade] apt-get autoremove failed"
+    "[releaseUpgrade.upgrade] apt-get autoremove failed",
+    options
   )
   if (autoremoveFailure != null) return autoremoveFailure
 
@@ -460,7 +472,7 @@ async function applyDebian(
   // would then operate on a half-migrated system.
   const snapshots = await replaceCodenameInSourcesList(ssh, currentCodename, targetCodename)
 
-  const pipelineFailure = await runDebianUpgradePipeline(ssh)
+  const pipelineFailure = await runDebianUpgradePipeline(ssh, options)
   if (pipelineFailure != null) {
     await restoreSourcesSnapshots(ssh, snapshots)
     return pipelineFailure
@@ -534,10 +546,7 @@ export const releaseUpgrade = {
         if (distro == null) return NEEDS_APPLY
 
         if (distro === "ubuntu") {
-          const result = await ssh.exec("do-release-upgrade -c", {
-            ignoreExitCode: true,
-            silent: true,
-          })
+          const result = await ssh.exec("do-release-upgrade -c", releaseUpgradeExecOptions(options))
           if (isNoUbuntuReleaseAvailable(result)) return "ok"
           return NEEDS_APPLY
         }
