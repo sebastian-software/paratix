@@ -25,6 +25,9 @@ import { clearRegisteredSecrets, registerSecret } from "../src/secretSink.js"
 declare const PACKAGE_VERSION: string
 declare const PACKAGE_DISPLAY_VERSION: string
 
+const CLI_COMMAND_TIMEOUT_MS = 30_000
+const CLI_COMMAND_MAX_BUFFER = 10 * 1024 * 1024
+
 type ExecFailure = {
   status?: null | number
   stderr?: Buffer | string
@@ -1193,7 +1196,10 @@ describe("CLI entrypoint", () => {
           {
             cwd: packageDirectory,
             encoding: "utf8",
+            killSignal: "SIGTERM",
+            maxBuffer: CLI_COMMAND_MAX_BUFFER,
             stdio: "pipe",
+            timeout: CLI_COMMAND_TIMEOUT_MS,
           }
         )
       })

@@ -12,10 +12,16 @@ const DOCKER_RESOURCE_MANAGED_LABEL = `${DOCKER_RESOURCE_LABEL_PREFIX}.managed=t
 const DOCKER_RESOURCE_ID_LABEL = `${DOCKER_RESOURCE_LABEL_PREFIX}.id`
 const HOST = "127.0.0.1"
 const TEN = "0123456789".length
+const EIGHT = "12345678".length
 const KILOBYTE = 1024
 const MEGABYTE = KILOBYTE * KILOBYTE
 const TEN_MEGABYTES = TEN * MEGABYTE
+const COMMAND_FAILURE_OUTPUT_LIMIT = EIGHT * KILOBYTE
 const COMMAND_MAX_BUFFER = TEN_MEGABYTES
+const DEFAULT_COMMAND_TIMEOUT_MS = 30_000
+const SHORT_COMMAND_TIMEOUT_MS = 15_000
+const CLEANUP_COMMAND_TIMEOUT_MS = 60_000
+const LONG_COMMAND_TIMEOUT_MS = 150_000
 const PRIVATE_KEY_MODE = 0o600
 const SSH_HOME_MODE = 0o700
 const SOCKET_TIMEOUT = 1000
@@ -36,6 +42,7 @@ export type IntegrationEnvironment = {
 
 type CommandOptions = {
   cwd?: string
+  timeoutMs?: number
 }
 
 type CommandResult = {
@@ -71,6 +78,11 @@ class CommandExecutionError extends Error {
   }
 }
 
+function tailOutput(output: string): string {
+  if (output.length <= COMMAND_FAILURE_OUTPUT_LIMIT) return output
+  return output.slice(-COMMAND_FAILURE_OUTPUT_LIMIT)
+}
+
 async function execFileText(
   command: string,
   commandArguments: string[],
@@ -83,11 +95,17 @@ async function execFileText(
       {
         cwd: options.cwd,
         encoding: "utf8",
+        killSignal: "SIGTERM",
         maxBuffer: COMMAND_MAX_BUFFER,
+        timeout: options.timeoutMs ?? DEFAULT_COMMAND_TIMEOUT_MS,
       },
       (error, stdout, stderr) => {
         if (error != null) {
-          reject(new CommandExecutionError("Command execution failed", stderr, { cause: error }))
+          reject(
+            new CommandExecutionError("Command execution failed", tailOutput(stderr), {
+              cause: error,
+            })
+          )
           return
         }
         resolve({ stderr, stdout })
@@ -125,7 +143,7 @@ async function runCommand(
 
 async function startColima(run: CommandRunner): Promise<void> {
   try {
-    await run("colima", ["start"])
+    await run("colima", ["start"], { timeoutMs: LONG_COMMAND_TIMEOUT_MS })
   } catch (startError) {
     throw new Error(
       "Integration tests require Colima. `colima` is installed, but the explicit opt-in start failed.",
@@ -136,7 +154,7 @@ async function startColima(run: CommandRunner): Promise<void> {
 
 async function ensureDockerIsAvailable(run: CommandRunner): Promise<void> {
   try {
-    await run("docker", ["info"])
+    await run("docker", ["info"], { timeoutMs: DEFAULT_COMMAND_TIMEOUT_MS })
   } catch (error) {
     throw new Error("Integration tests require a reachable Docker runtime.", { cause: error })
   }
@@ -157,7 +175,7 @@ async function ensureColimaIsAvailable(
   run: CommandRunner
 ): Promise<void> {
   try {
-    await run("which", ["colima"])
+    await run("which", ["colima"], { timeoutMs: SHORT_COMMAND_TIMEOUT_MS })
   } catch (error) {
     throw new Error(
       "Integration tests require Colima, but `colima` was not found in PATH. Install Colima and retry.",
@@ -166,7 +184,7 @@ async function ensureColimaIsAvailable(
   }
 
   try {
-    const status = await run("colima", ["status"])
+    const status = await run("colima", ["status"], { timeoutMs: SHORT_COMMAND_TIMEOUT_MS })
     if (/running/iv.test(status)) return
   } catch {
     if (shouldStartColima(environment)) {
@@ -196,7 +214,7 @@ export async function ensureIntegrationRuntimeIsAvailable(
   await ensureColimaIsAvailable(environment, run)
 
   try {
-    await run("docker", ["info"])
+    await run("docker", ["info"], { timeoutMs: DEFAULT_COMMAND_TIMEOUT_MS })
   } catch (error) {
     throw new Error(
       "Colima is available, but Docker is not reachable through the active Colima runtime.",
@@ -293,12 +311,16 @@ function createCleanup(
 ): () => Promise<void> {
   return async (): Promise<void> => {
     try {
-      await runCommand("docker", ["rm", "-f", containerName])
+      await runCommand("docker", ["rm", "-f", containerName], {
+        timeoutMs: CLEANUP_COMMAND_TIMEOUT_MS,
+      })
     } catch {
       // Best-effort cleanup.
     }
     try {
-      await runCommand("docker", ["image", "rm", "-f", dockerImageTag])
+      await runCommand("docker", ["image", "rm", "-f", dockerImageTag], {
+        timeoutMs: CLEANUP_COMMAND_TIMEOUT_MS,
+      })
     } catch {
       // Best-effort cleanup.
     }
@@ -353,6 +375,7 @@ async function buildIntegrationImage(
     ],
     {
       cwd: packageDirectory,
+      timeoutMs: LONG_COMMAND_TIMEOUT_MS,
     }
   )
 }
@@ -362,32 +385,44 @@ async function startIntegrationContainer(
   dockerImageTag: string,
   labels: string[]
 ): Promise<void> {
-  await runCommand("docker", [
-    "run",
-    "--detach",
-    "--name",
-    containerName,
-    ...createDockerLabelArguments(labels),
-    "--publish",
-    `${HOST}::22`,
-    "--publish",
-    `${HOST}::2222`,
-    dockerImageTag,
-  ])
+  await runCommand(
+    "docker",
+    [
+      "run",
+      "--detach",
+      "--name",
+      containerName,
+      ...createDockerLabelArguments(labels),
+      "--publish",
+      `${HOST}::22`,
+      "--publish",
+      `${HOST}::2222`,
+      dockerImageTag,
+    ],
+    { timeoutMs: DEFAULT_COMMAND_TIMEOUT_MS }
+  )
 }
 
 async function readPublishedPorts(
   containerName: string
 ): Promise<{ primaryPort: number; secondaryPort: number }> {
-  const primaryPort = parseDockerPort(await runCommand("docker", ["port", containerName, "22/tcp"]))
+  const primaryPort = parseDockerPort(
+    await runCommand("docker", ["port", containerName, "22/tcp"], {
+      timeoutMs: SHORT_COMMAND_TIMEOUT_MS,
+    })
+  )
   const secondaryPort = parseDockerPort(
-    await runCommand("docker", ["port", containerName, "2222/tcp"])
+    await runCommand("docker", ["port", containerName, "2222/tcp"], {
+      timeoutMs: SHORT_COMMAND_TIMEOUT_MS,
+    })
   )
   return { primaryPort, secondaryPort }
 }
 
 async function readHostPublicKey(containerName: string): Promise<string> {
-  return runCommand("docker", ["exec", containerName, "cat", "/etc/ssh/ssh_host_ed25519_key.pub"])
+  return runCommand("docker", ["exec", containerName, "cat", "/etc/ssh/ssh_host_ed25519_key.pub"], {
+    timeoutMs: SHORT_COMMAND_TIMEOUT_MS,
+  })
 }
 
 export async function createIntegrationEnvironment(

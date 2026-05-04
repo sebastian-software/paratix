@@ -1,4 +1,4 @@
-import { execFileSync } from "node:child_process"
+import { execFile } from "node:child_process"
 import { createHash, randomUUID } from "node:crypto"
 import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs"
 import { readFile, rm } from "node:fs/promises"
@@ -19,6 +19,8 @@ import { createIntegrationEnvironment, type IntegrationEnvironment } from "./har
 const emptyEnv = {}
 const HTTP_SERVER_READY_DELAY_MS = 250
 const HTTP_SERVER_READY_RETRIES = 20
+const CLI_COMMAND_TIMEOUT_MS = 60_000
+const CLI_COMMAND_MAX_BUFFER = 10 * 1024 * 1024
 const unicodeFileName = "über datei こんにちは.txt"
 const unicodeTemplateName = "grüße-vorlage.tmpl"
 const unicodeContent = "Grüße aus Köln – こんにちは мир\n"
@@ -139,6 +141,39 @@ function createTamperedHostPublicKey(publicKey: string): string {
 async function sleep(delayMs: number): Promise<void> {
   return new Promise((resolve) => {
     setTimeout(resolve, delayMs)
+  })
+}
+
+async function execFileText(
+  executablePath: string,
+  commandArguments: string[],
+  options: {
+    cwd: string
+    env?: NodeJS.ProcessEnv
+  }
+): Promise<string> {
+  return new Promise((resolve, reject) => {
+    execFile(
+      executablePath,
+      commandArguments,
+      {
+        cwd: options.cwd,
+        encoding: "utf8",
+        env: options.env,
+        killSignal: "SIGTERM",
+        maxBuffer: CLI_COMMAND_MAX_BUFFER,
+        timeout: CLI_COMMAND_TIMEOUT_MS,
+      },
+      (error, stdout) => {
+        if (error != null) {
+          reject(
+            error instanceof Error ? error : new Error("Command execution failed", { cause: error })
+          )
+          return
+        }
+        resolve(stdout)
+      }
+    )
   })
 }
 
@@ -601,14 +636,12 @@ describe("Paratix integration", () => {
         ].join("\n")
       )
 
-      const output = execFileSync(
+      const output = await execFileText(
         process.execPath,
         [distCliPath, "apply", playbookPath, "--dry-run"],
         {
           cwd: packageDirectory,
-          encoding: "utf8",
           env: { ...process.env, HOME: testHome },
-          stdio: "pipe",
         }
       )
 
