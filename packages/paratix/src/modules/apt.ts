@@ -125,6 +125,35 @@ function parseDebconfOutput(stdout: string): Record<string, string> {
 // gives a collision-resistant identifier without bloating the flag
 // file name.
 const APT_DEBCONF_HASH_LENGTH = 16
+const DEBCONF_FIELD_SEPARATOR_PATTERN = /\s/v
+const DEBCONF_LINE_BREAK_PATTERN = /[\r\n]/v
+
+function validateDebconfPackageName(packageName: string): ModuleResult | null {
+  if (packageName.length === 0 || DEBCONF_FIELD_SEPARATOR_PATTERN.test(packageName)) {
+    return failed(
+      `[apt.debconf] packageName must not be empty or contain whitespace: ${JSON.stringify(packageName)}`
+    )
+  }
+  return null
+}
+
+function validateDebconfQuestion(packageName: string, question: string): ModuleResult | null {
+  if (question.length === 0 || DEBCONF_FIELD_SEPARATOR_PATTERN.test(question)) {
+    return failed(
+      `[apt.debconf] question for ${packageName} must not be empty or contain whitespace: ${JSON.stringify(question)}`
+    )
+  }
+  return null
+}
+
+function validateDebconfValue(packageName: string, value: string): ModuleResult | null {
+  if (DEBCONF_LINE_BREAK_PATTERN.test(value)) {
+    return failed(
+      `[apt.debconf] selections for ${packageName} must not contain CR or LF characters`
+    )
+  }
+  return null
+}
 
 /**
  * Build the marker flag prefix and full flag name for an apt.debconf
@@ -171,13 +200,17 @@ async function buildDebconfSelectionsText(
   packageName: string,
   selections: Record<string, string>
 ): Promise<ModuleResult | string> {
+  const packageNameFailure = validateDebconfPackageName(packageName)
+  if (packageNameFailure) return packageNameFailure
+
   const lines: string[] = []
   for (const [question, value] of Object.entries(selections)) {
-    if (question.includes("\n") || value.includes("\n")) {
-      return failed(
-        `[apt.debconf] selections for ${packageName} must not contain newline characters`
-      )
-    }
+    const questionFailure = validateDebconfQuestion(packageName, question)
+    if (questionFailure) return questionFailure
+
+    const valueFailure = validateDebconfValue(packageName, value)
+    if (valueFailure) return valueFailure
+
     // eslint-disable-next-line no-await-in-loop
     const type = await resolveDebconfType(ssh, question)
     lines.push(`${packageName} ${question} ${type} ${value}`)

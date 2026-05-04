@@ -784,7 +784,55 @@ describe("apt.debconf", () => {
     const result = await mod.apply(ssh, emptyEnv)
     expect(result.status).toBe("failed")
     expect(result.error).toBeInstanceOf(Error)
-    expect(String(result.error)).toContain("must not contain newline characters")
+    expect(String(result.error)).toContain("must not contain CR or LF characters")
+  })
+
+  it("returns a failed result when a selection value contains carriage returns", async () => {
+    const mod = apt.debconf("postfix", { "postfix/main_mailer_type": "Internet\rSite" })
+    const ssh = createMockSsh({})
+    const result = await mod.apply(ssh, emptyEnv)
+    expect(result.status).toBe("failed")
+    expect(String(result.error)).toContain("must not contain CR or LF characters")
+  })
+
+  it("returns a failed result when packageName contains whitespace", async () => {
+    const mod = apt.debconf("postfix injected", selections)
+    const ssh = createMockSsh({})
+    const result = await mod.apply(ssh, emptyEnv)
+    expect(result.status).toBe("failed")
+    expect(String(result.error)).toContain("packageName must not be empty or contain whitespace")
+    expect(ssh.calls).not.toContain("debconf-set-selections")
+  })
+
+  it("returns a failed result when packageName contains CR or LF characters", async () => {
+    const mod = apt.debconf("postfix\ninjected", selections)
+    const ssh = createMockSsh({})
+    const result = await mod.apply(ssh, emptyEnv)
+    expect(result.status).toBe("failed")
+    expect(String(result.error)).toContain("packageName must not be empty or contain whitespace")
+    expect(ssh.calls).not.toContain("debconf-set-selections")
+  })
+
+  it("returns a failed result when a debconf question contains whitespace", async () => {
+    const mod = apt.debconf("postfix", { "postfix/main mailer type": "Internet Site" })
+    const ssh = createMockSsh({})
+    const result = await mod.apply(ssh, emptyEnv)
+    expect(result.status).toBe("failed")
+    expect(String(result.error)).toContain(
+      "question for postfix must not be empty or contain whitespace"
+    )
+    expect(ssh.calls).not.toContain("debconf-set-selections")
+  })
+
+  it("returns a failed result when a debconf question contains CR or LF characters", async () => {
+    const mod = apt.debconf("postfix", { "postfix/main_mailer_type\nowner": "Internet Site" })
+    const ssh = createMockSsh({})
+    const result = await mod.apply(ssh, emptyEnv)
+    expect(result.status).toBe("failed")
+    expect(String(result.error)).toContain(
+      "question for postfix must not be empty or contain whitespace"
+    )
+    expect(ssh.calls).not.toContain("debconf-set-selections")
   })
 
   it("apply passes selections starting with a dash through stdin", async () => {
