@@ -1,3 +1,4 @@
+import { generateKeyPairSync } from "node:crypto"
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs"
 import { join, resolve } from "node:path"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
@@ -48,6 +49,95 @@ function createEd25519PublicKey(comment: string, keyMaterial = Buffer.alloc(32, 
     createWireString(keyMaterial),
   ]).toString("base64")
   return `ssh-ed25519 ${encodedKey} ${comment}`
+}
+
+function createMpint(value: Buffer): Buffer {
+  return createWireString(value)
+}
+
+function createRsaPublicKey(comment: string, exponent: Buffer, modulus: Buffer): string {
+  const encodedKey = Buffer.concat([
+    createWireString("ssh-rsa"),
+    createMpint(exponent),
+    createMpint(modulus),
+  ]).toString("base64")
+  return `ssh-rsa ${encodedKey} ${comment}`
+}
+
+function createRsaModulus(bitLength: number): Buffer {
+  const byteLength = Math.ceil(bitLength / 8)
+  const modulus = Buffer.alloc(byteLength, 0)
+  const leadingBit = (bitLength - 1) % 8
+  modulus[0] = 1 << leadingBit
+
+  return modulus[0] >= 0x80 ? Buffer.concat([Buffer.from([0]), modulus]) : modulus
+}
+
+function decodeBase64Url(value: string): Buffer {
+  return Buffer.from(value, "base64url")
+}
+
+function encodePositiveMpint(value: Buffer): Buffer {
+  return value[0] >= 0x80 ? Buffer.concat([Buffer.from([0]), value]) : value
+}
+
+function createGeneratedRsa2048PublicKey(comment: string): string {
+  const { publicKey } = generateKeyPairSync("rsa", {
+    modulusLength: 2048,
+    publicExponent: 0x1_00_01,
+  })
+  const jwk = publicKey.export({ format: "jwk" })
+  if (typeof jwk.e !== "string" || typeof jwk.n !== "string") {
+    throw new TypeError("Generated RSA key did not export public parameters.")
+  }
+
+  return createRsaPublicKey(
+    comment,
+    encodePositiveMpint(decodeBase64Url(jwk.e)),
+    encodePositiveMpint(decodeBase64Url(jwk.n))
+  )
+}
+
+function createEcdsaNistp256PublicKey(comment: string): string {
+  const { publicKey } = generateKeyPairSync("ec", { namedCurve: "P-256" })
+  const jwk = publicKey.export({ format: "jwk" })
+  if (typeof jwk.x !== "string" || typeof jwk.y !== "string") {
+    throw new TypeError("Generated P-256 key did not export coordinates.")
+  }
+
+  const point = Buffer.concat([Buffer.from([0x04]), decodeBase64Url(jwk.x), decodeBase64Url(jwk.y)])
+  const encodedKey = Buffer.concat([
+    createWireString("ecdsa-sha2-nistp256"),
+    createWireString("nistp256"),
+    createWireString(point),
+  ]).toString("base64")
+  return `ecdsa-sha2-nistp256 ${encodedKey} ${comment}`
+}
+
+function createSecurityKeyEcdsaNistp256PublicKey(comment: string): string {
+  const { publicKey } = generateKeyPairSync("ec", { namedCurve: "P-256" })
+  const jwk = publicKey.export({ format: "jwk" })
+  if (typeof jwk.x !== "string" || typeof jwk.y !== "string") {
+    throw new TypeError("Generated P-256 key did not export coordinates.")
+  }
+
+  const point = Buffer.concat([Buffer.from([0x04]), decodeBase64Url(jwk.x), decodeBase64Url(jwk.y)])
+  const encodedKey = Buffer.concat([
+    createWireString("sk-ecdsa-sha2-nistp256@openssh.com"),
+    createWireString("nistp256"),
+    createWireString(point),
+    createWireString("ssh:"),
+  ]).toString("base64")
+  return `sk-ecdsa-sha2-nistp256@openssh.com ${encodedKey} ${comment}`
+}
+
+function createInvalidEcdsaNistp256PublicKey(comment: string): string {
+  const encodedKey = Buffer.concat([
+    createWireString("ecdsa-sha2-nistp256"),
+    createWireString("nistp256"),
+    createWireString(Buffer.concat([Buffer.from([0x04]), Buffer.alloc(64, 0)])),
+  ]).toString("base64")
+  return `ecdsa-sha2-nistp256 ${encodedKey} ${comment}`
 }
 
 const TEST_ADMIN_PUBLIC_KEY = createEd25519PublicKey("generated@test")
@@ -438,6 +528,18 @@ describe("admin public key validation", () => {
     expect(isValidAdminPublicKey(createEd25519PublicKey("user@example"))).toBe(true)
   })
 
+  it("accepts a valid 2048-bit RSA public key", () => {
+    expect(isValidAdminPublicKey(createGeneratedRsa2048PublicKey("rsa@example"))).toBe(true)
+  })
+
+  it("accepts a valid ECDSA nistp256 public key", () => {
+    expect(isValidAdminPublicKey(createEcdsaNistp256PublicKey("ecdsa@example"))).toBe(true)
+  })
+
+  it("accepts a valid security-key ECDSA nistp256 public key", () => {
+    expect(isValidAdminPublicKey(createSecurityKeyEcdsaNistp256PublicKey("sk@example"))).toBe(true)
+  })
+
   it("rejects values without a supported OpenSSH algorithm prefix", () => {
     expect(isValidAdminPublicKey("not-a-key")).toBe(false)
     expect(isValidAdminPublicKey("ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIBxv2sz0YF80")).toBe(false)
@@ -471,6 +573,32 @@ describe("admin public key validation", () => {
     ]).toString("base64")
 
     expect(isValidAdminPublicKey(`ssh-ed25519 ${encodedKey} user@example`)).toBe(false)
+  })
+
+  it("rejects RSA public keys with a modulus smaller than 2048 bits", () => {
+    expect(
+      isValidAdminPublicKey(
+        createRsaPublicKey(
+          "tiny-rsa@example",
+          Buffer.from([0x01, 0x00, 0x01]),
+          createRsaModulus(1024)
+        )
+      )
+    ).toBe(false)
+  })
+
+  it("rejects RSA public keys with an invalid exponent", () => {
+    expect(
+      isValidAdminPublicKey(
+        createRsaPublicKey("bad-exponent@example", Buffer.from([0x02]), createRsaModulus(2048))
+      )
+    ).toBe(false)
+  })
+
+  it("rejects ECDSA public keys with a point outside the declared curve", () => {
+    expect(isValidAdminPublicKey(createInvalidEcdsaNistp256PublicKey("bad-ecdsa@example"))).toBe(
+      false
+    )
   })
 
   it("rejects syntactically broken single-line values", () => {
