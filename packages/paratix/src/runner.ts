@@ -30,7 +30,7 @@ import {
 import { setRunnerAbortSignal } from "./runnerAbortSignal.js"
 import { resolveExitCode, signalExitCode } from "./runnerHelpers.js"
 import { clearRegisteredSecrets } from "./secretSink.js"
-import { getSignalBus, type SignalName } from "./signalBus.js"
+import { getSignalBus } from "./signalBus.js"
 import { runSignalModules, type SignalRunStatus } from "./signalOrchestration.js"
 import { SshConnectionImpl } from "./ssh.js"
 
@@ -63,13 +63,13 @@ function setupShutdownHandlers(): ShutdownState {
     ssh?.disconnect()
   }
 
-  getSignalBus().on("SIGINT", handleShutdownSignal as (signal: SignalName) => void)
-  getSignalBus().on("SIGTERM", handleShutdownSignal as (signal: SignalName) => void)
+  getSignalBus().on("SIGINT", handleShutdownSignal)
+  getSignalBus().on("SIGTERM", handleShutdownSignal)
 
   return {
     handleShutdownSignal,
     promptAbortSignal: promptAbortController.signal,
-    setSsh: (connection: SshConnectionImpl) => {
+    setSsh(connection: SshConnectionImpl) {
       ssh = connection
     },
     shutdownSignal: () => receivedSignal,
@@ -335,18 +335,18 @@ async function runRecipeModule(
     }
 
     const result = await recipeModule.apply(ssh, environment, {
-      onChildStep: async (step) => {
+      async onChildStep(step) {
         await applyRunnerControlPlaneMeta(ssh, step)
       },
-      onSignalStep: async (step) => {
+      async onSignalStep(step) {
         await applyRunnerControlPlaneMeta(ssh, step)
       },
       shutdownSignal,
       signalHooks: {
-        onSignalFinished: (status: ModuleStatus) => {
+        onSignalFinished(status: ModuleStatus) {
           stats.update(status)
         },
-        onSignalStarted: () => {
+        onSignalStarted() {
           stats.incrementSignals()
         },
       },
@@ -682,14 +682,14 @@ async function runSignals(parameters: SignalArguments): Promise<SignalRunStatus>
   return runSignalModules({
     environment: env,
     hooks: {
-      onSignalFinished: (status: ModuleStatus) => {
+      onSignalFinished(status: ModuleStatus) {
         stats.update(status)
       },
-      onSignalStarted: () => {
+      onSignalStarted() {
         stats.incrementSignals()
       },
     },
-    onSignalStep: async (step) => {
+    async onSignalStep(step) {
       await applyRunnerControlPlaneMeta(ssh, step)
     },
     shutdownSignal,
@@ -792,7 +792,7 @@ function teardownPlaybookResources(parameters: {
 }): void {
   stopLiveModuleOutput(true)
   for (const signal of ["SIGINT", "SIGTERM"] as const)
-    getSignalBus().off(signal, parameters.handleShutdownSignal as (signal: SignalName) => void)
+    getSignalBus().off(signal, parameters.handleShutdownSignal)
   setRunnerAbortSignal(undefined)
   clearRegisteredSecrets()
   parameters.ssh?.disconnect()

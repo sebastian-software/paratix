@@ -31,7 +31,7 @@ function validConfig(overrides: Record<string, unknown> = {}) {
 describe("server", () => {
   it("returns the config unchanged for a valid definition", () => {
     const config = validConfig()
-    const result = server(config as Parameters<typeof server>[0])
+    const result = server(config)
     expect(result).toBe(config)
   })
 
@@ -245,7 +245,7 @@ describe("server", () => {
       server(
         validConfig({
           ssh: { ...validSsh, strictHostKeyChecking: "bad-value" },
-        }) as Parameters<typeof server>[0]
+        })
       )
     } catch (error) {
       message = (error as Error).message

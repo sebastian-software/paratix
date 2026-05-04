@@ -524,17 +524,24 @@ describe("collectStreamOutput", () => {
 // ---------------------------------------------------------------------------
 
 describe("live-output masking via process.stdout/stderr.write", () => {
-  let stdoutWriteSpy: ReturnType<typeof vi.spyOn>
-  let stderrWriteSpy: ReturnType<typeof vi.spyOn>
+  let stderrWrites: string[]
+  let stdoutWrites: string[]
 
   beforeEach(() => {
-    stdoutWriteSpy = vi.spyOn(process.stdout, "write").mockImplementation(() => true)
-    stderrWriteSpy = vi.spyOn(process.stderr, "write").mockImplementation(() => true)
+    stderrWrites = []
+    stdoutWrites = []
+    vi.spyOn(process.stdout, "write").mockImplementation((chunk) => {
+      stdoutWrites.push(String(chunk))
+      return true
+    })
+    vi.spyOn(process.stderr, "write").mockImplementation((chunk) => {
+      stderrWrites.push(String(chunk))
+      return true
+    })
   })
 
   afterEach(() => {
-    stdoutWriteSpy.mockRestore()
-    stderrWriteSpy.mockRestore()
+    vi.restoreAllMocks()
   })
 
   it("masks secrets in process.stdout.write when silent is false", async () => {
@@ -550,7 +557,7 @@ describe("live-output masking via process.stdout/stderr.write", () => {
         command: "echo something",
         options: { silent: false },
         reject,
-        resolve: () => {
+        resolve() {
           resolve()
         },
         secrets: [secret],
@@ -564,9 +571,8 @@ describe("live-output masking via process.stdout/stderr.write", () => {
       clearTimeout(timer)
     })
 
-    const stdoutCalls = stdoutWriteSpy.mock.calls.map((args) => String(args[0]))
-    expect(stdoutCalls.join("")).not.toContain(secret)
-    expect(stdoutCalls.join("")).toContain("[REDACTED]")
+    expect(stdoutWrites.join("")).not.toContain(secret)
+    expect(stdoutWrites.join("")).toContain("[REDACTED]")
   })
 
   it("masks shell-quoted secrets split across stdout chunks when silent is false", async () => {
@@ -583,7 +589,7 @@ describe("live-output masking via process.stdout/stderr.write", () => {
         command: "echo something",
         options: { silent: false },
         reject,
-        resolve: () => {
+        resolve() {
           resolve()
         },
         secrets: [secret],
@@ -598,7 +604,7 @@ describe("live-output masking via process.stdout/stderr.write", () => {
       clearTimeout(timer)
     })
 
-    const stdoutOutput = stdoutWriteSpy.mock.calls.map((args) => String(args[0])).join("")
+    const stdoutOutput = stdoutWrites.join("")
     expect(stdoutOutput).not.toContain(secret)
     expect(stdoutOutput).not.toContain(escapedSecret)
     expect(stdoutOutput).toContain("[REDACTED]")
@@ -617,7 +623,7 @@ describe("live-output masking via process.stdout/stderr.write", () => {
         command: "deploy",
         options: { silent: false },
         reject,
-        resolve: () => {
+        resolve() {
           resolve()
         },
         secrets: [secret],
@@ -631,9 +637,8 @@ describe("live-output masking via process.stdout/stderr.write", () => {
       clearTimeout(timer)
     })
 
-    const stderrCalls = stderrWriteSpy.mock.calls.map((args) => String(args[0]))
-    expect(stderrCalls.join("")).not.toContain(secret)
-    expect(stderrCalls.join("")).toContain("[REDACTED]")
+    expect(stderrWrites.join("")).not.toContain(secret)
+    expect(stderrWrites.join("")).toContain("[REDACTED]")
   })
 
   it("masks secrets in both stdout and stderr live-output simultaneously", async () => {
@@ -650,7 +655,7 @@ describe("live-output masking via process.stdout/stderr.write", () => {
         command: "run",
         options: { silent: false },
         reject,
-        resolve: () => {
+        resolve() {
           resolve()
         },
         secrets: [password, token],
@@ -664,8 +669,8 @@ describe("live-output masking via process.stdout/stderr.write", () => {
       clearTimeout(timer)
     })
 
-    const stdoutOutput = stdoutWriteSpy.mock.calls.map((args) => String(args[0])).join("")
-    const stderrOutput = stderrWriteSpy.mock.calls.map((args) => String(args[0])).join("")
+    const stdoutOutput = stdoutWrites.join("")
+    const stderrOutput = stderrWrites.join("")
 
     expect(stdoutOutput).not.toContain(password)
     expect(stdoutOutput).toContain("[REDACTED]")
@@ -686,7 +691,7 @@ describe("live-output masking via process.stdout/stderr.write", () => {
         command: "run",
         options: { silent: true },
         reject,
-        resolve: () => {
+        resolve() {
           resolve()
         },
         secrets: [secret],
@@ -700,8 +705,8 @@ describe("live-output masking via process.stdout/stderr.write", () => {
       clearTimeout(timer)
     })
 
-    expect(stdoutWriteSpy).not.toHaveBeenCalled()
-    expect(stderrWriteSpy).not.toHaveBeenCalled()
+    expect(stdoutWrites).toStrictEqual([])
+    expect(stderrWrites).toStrictEqual([])
   })
 })
 

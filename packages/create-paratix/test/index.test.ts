@@ -41,7 +41,7 @@ async function expectProcessExit(
   const exitError = new Error(`process.exit:${expectedCode}`)
   const exitSpy = vi.spyOn(process, "exit").mockImplementation(((code?: number) => {
     throw code === expectedCode ? exitError : new Error(`process.exit:${String(code)}`)
-  }) as typeof process.exit)
+  }))
 
   await expect(Promise.resolve().then(callback)).rejects.toThrow(exitError.message)
   expect(exitSpy).toHaveBeenCalledWith(expectedCode)

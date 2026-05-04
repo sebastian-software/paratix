@@ -151,7 +151,7 @@ describe("pause", () => {
     const onSpy = vi
       .spyOn(process.stdin, "on")
       .mockImplementation((_event: string | symbol, callback: (...args: unknown[]) => void) => {
-        capturedCallback = callback as (chunk: Buffer) => void
+        capturedCallback = callback
         return process.stdin
       })
     const removeSpy = vi
@@ -184,7 +184,7 @@ describe("pause", () => {
     const onSpy = vi
       .spyOn(process.stdin, "on")
       .mockImplementation((_event: string | symbol, callback: (...args: unknown[]) => void) => {
-        capturedCallback = callback as (chunk: Buffer) => void
+        capturedCallback = callback
         return process.stdin
       })
     const removeSpy = vi

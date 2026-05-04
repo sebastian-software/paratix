@@ -126,7 +126,7 @@ function wireStreams(options: {
     settlement.rejectOnce(new Error(timeoutMessage))
   }, timeout)
   const settlement = createTransferSettlement({
-    clearTimer: () => {
+    clearTimer() {
       clearTimeout(timer)
     },
     reject,
@@ -160,7 +160,7 @@ function wireStreams(options: {
  * @param localPath - Destination path on the local filesystem.
  * @param timeout - Maximum time in ms before the transfer is aborted.
  */
-// eslint-disable-next-line max-lines-per-function, max-params -- timeout parameter extends the existing signature; cleanup/finalize logic is intentionally kept together
+// eslint-disable-next-line max-params -- timeout parameter extends the existing signature; cleanup/finalize logic is intentionally kept together
 export async function sftpDownload(
   client: Client,
   remotePath: string,
@@ -203,7 +203,7 @@ export async function sftpDownload(
         completionEvents: ["finish"],
         readStream: streams.readStream,
         reject: rejectWithCleanup,
-        resolve: () => {
+        resolve() {
           try {
             // eslint-disable-next-line security/detect-non-literal-fs-filename
             renameSync(temporaryPath, localPath)

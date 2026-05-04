@@ -232,7 +232,7 @@ export function createFilesystemGuard(parameters: {
 }): Module {
   const typeName = filesystemTypeName(parameters.testFlag)
   return createConditionalModule({
-    condition: async (ssh) => {
+    async condition(ssh) {
       if (ssh == null) return false
       const exists = await ssh.test(`test ${parameters.testFlag} ${shellQuote(parameters.path)}`)
       return parameters.invert ? !exists : exists
@@ -248,7 +248,7 @@ export function createCommandGuard(
   modules: Module[]
 ): Module {
   return createConditionalModule({
-    condition: async (ssh) => {
+    async condition(ssh) {
       if (ssh == null) return false
       const exists = await ssh.test(`command -v ${shellQuote(commandName)} >/dev/null 2>&1`)
       return invert ? !exists : exists
@@ -264,7 +264,7 @@ export function createPackageGuard(
   modules: Module[]
 ): Module {
   return createConditionalModule({
-    condition: async (ssh) => {
+    async condition(ssh) {
       if (ssh == null) return false
       const pm = await detectPackageManager(ssh)
       if (pm == null) return false

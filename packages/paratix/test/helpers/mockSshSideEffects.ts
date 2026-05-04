@@ -155,7 +155,7 @@ export function createSideEffectRecorder(options?: SideEffectOptions): SideEffec
   const uploadFileCalls: UploadFileCall[] = []
   const writeFileCalls: WriteFileCall[] = []
   return {
-    disconnect: () => {
+    disconnect() {
       disconnectCalls.push({})
       assertAllowed({
         allowed: options?.allowDisconnect === true,

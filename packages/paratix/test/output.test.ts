@@ -66,7 +66,7 @@ describe("printModuleResult", () => {
     vi.spyOn(process.stdout, "write").mockImplementation(((chunk: string | Uint8Array) => {
       writes.push(String(chunk))
       return true
-    }) as typeof process.stdout.write)
+    }))
     const originalIsTTY = process.stdout.isTTY
     const originalClearLine = bindOptionalStdoutMethod("clearLine")
     const originalCursorTo = bindOptionalStdoutMethod("cursorTo")
@@ -122,7 +122,7 @@ describe("printModuleResult", () => {
     vi.spyOn(process.stdout, "write").mockImplementation(((chunk: string | Uint8Array) => {
       writes.push(String(chunk))
       return true
-    }) as typeof process.stdout.write)
+    }))
     const originalIsTTY = process.stdout.isTTY
     const originalClearLine = bindOptionalStdoutMethod("clearLine")
     const originalCursorTo = bindOptionalStdoutMethod("cursorTo")
@@ -179,7 +179,7 @@ describe("printModuleResult", () => {
     const clearLine = vi.fn(() => true)
     const cursorTo = vi.fn(() => true)
     vi.spyOn(process.stdout, "write").mockImplementation(
-      (() => true) as typeof process.stdout.write
+      (() => true)
     )
     const originalIsTTY = process.stdout.isTTY
     const originalClearLine = bindOptionalStdoutMethod("clearLine")
@@ -241,7 +241,7 @@ describe("printRecipeHeader", () => {
     vi.spyOn(process.stdout, "write").mockImplementation(((chunk: string | Uint8Array) => {
       writes.push(String(chunk))
       return true
-    }) as typeof process.stdout.write)
+    }))
     const originalIsTTY = process.stdout.isTTY
     const originalClearLine = bindOptionalStdoutMethod("clearLine")
     const originalCursorTo = bindOptionalStdoutMethod("cursorTo")

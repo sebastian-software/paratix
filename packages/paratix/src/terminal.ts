@@ -82,7 +82,7 @@ export async function promptTerminal(
       hidden,
       reject,
       rl,
-      setSettled: () => {
+      setSettled() {
         settled = true
       },
       settled: () => settled,

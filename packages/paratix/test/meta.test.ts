@@ -124,16 +124,16 @@ describe("meta runtime validation", () => {
 
   it("rejects malformed entries", () => {
     expect(() => {
-      assertValidModuleMetaEntry({ kind: "sshd.port", port: "2222" } as unknown)
+      assertValidModuleMetaEntry({ kind: "sshd.port", port: "2222" })
     }).toThrow("Invalid sshd.port meta entry")
     expect(() => {
-      assertValidModuleMetaEntry({ host: "", kind: "system.host" } as unknown)
+      assertValidModuleMetaEntry({ host: "", kind: "system.host" })
     }).toThrow("Invalid system.host meta entry")
     expect(() => {
-      assertValidModuleMetaEntry({ kind: "env", name: "", value: "x" } as unknown)
+      assertValidModuleMetaEntry({ kind: "env", name: "", value: "x" })
     }).toThrow("Invalid env meta entry")
     expect(() => {
-      assertValidModuleMetaEntry({ kind: "mystery" } as unknown)
+      assertValidModuleMetaEntry({ kind: "mystery" })
     }).toThrow("Invalid meta entry kind")
   })
 })

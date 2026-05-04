@@ -75,13 +75,13 @@ function createSelectRenderer<TValue extends string>(
   let selectedIndex = 0
 
   return {
-    moveDown: (): void => {
+    moveDown(): void {
       selectedIndex = (selectedIndex + 1) % options.length
     },
-    moveUp: (): void => {
+    moveUp(): void {
       selectedIndex = (selectedIndex - 1 + options.length) % options.length
     },
-    render: (): void => {
+    render(): void {
       renderedLines = redrawSelect(createSelectLines(prompt, options, selectedIndex), renderedLines)
     },
     selectedValue: (): TValue => options[selectedIndex].value,

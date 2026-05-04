@@ -24,10 +24,10 @@ export type TestSignalBus = {
 
 const defaultProcessSignalBus: SignalBus = {
   listenerCount: (signal) => process.listenerCount(signal),
-  off: (signal, handler) => {
+  off(signal, handler) {
     process.removeListener(signal, handler)
   },
-  on: (signal, handler) => {
+  on(signal, handler) {
     process.on(signal, handler)
   },
 }

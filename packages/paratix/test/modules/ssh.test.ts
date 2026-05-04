@@ -47,14 +47,14 @@ function createKnownHostsTrackingMock(
   const base = createMockSsh(baseResponses)
   return {
     ...base,
-    exec: async (command: string, options?: Parameters<typeof base.exec>[1]) => {
+    async exec(command: string, options?: Parameters<typeof base.exec>[1]) {
       const result = await base.exec(command, options)
       if (command === printfCommand) present = true
       return result
     },
     test: async (command: string): Promise<boolean> =>
       command === grepCommand ? present : base.test(command),
-  } as ReturnType<typeof createMockSsh>
+  }
 }
 
 describe("ssh.knownHosts", () => {

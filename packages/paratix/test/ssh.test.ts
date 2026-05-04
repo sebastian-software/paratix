@@ -87,7 +87,7 @@ vi.mock("../src/terminal.js", () => ({
 type StreamWithStderr = {
   close: () => void
   stderr: EventEmitter
-  write: ReturnType<typeof vi.fn>
+  write: (chunk: Buffer | string) => boolean
 } & EventEmitter
 
 type ExecCallback = (error: Error | undefined, stream: StreamWithStderr) => void
@@ -95,15 +95,14 @@ type ExecCallback = (error: Error | undefined, stream: StreamWithStderr) => void
 function makeStream(): StreamWithStderr {
   const stream = new EventEmitter() as StreamWithStderr
   stream.stderr = new EventEmitter()
-  // Define methods on the object so vi.spyOn can find them
-  stream.write = (() => true) as unknown as ReturnType<typeof vi.fn>
+  stream.write = () => true
   stream.close = () => {
     /* noop */
   }
-  vi.spyOn(stream, "write" as never).mockImplementation((() => true) as never)
-  vi.spyOn(stream, "close" as never).mockImplementation((() => {
+  vi.spyOn(stream, "write").mockImplementation(() => true)
+  vi.spyOn(stream, "close").mockImplementation(() => {
     /* noop */
-  }) as never)
+  })
   return stream
 }
 
@@ -278,7 +277,7 @@ describe("SshConnectionImpl", () => {
     // connect() calls readFile(path) without encoding — the result must be a Buffer
     // so that privateKey.fill(0) in the finally-block does not throw a TypeError.
     const fsp = await import("node:fs/promises")
-    vi.mocked(fsp.readFile).mockResolvedValue(Buffer.from("fake-private-key") as never)
+    vi.mocked(fsp.readFile).mockResolvedValue(Buffer.from("fake-private-key"))
     vi.mocked(fsp.stat).mockResolvedValue({ size: 11 } as never)
   })
 
@@ -638,7 +637,7 @@ describe("SshConnectionImpl", () => {
             abortSignal?.addEventListener(
               "abort",
               () => {
-                reject(abortSignal.reason)
+                reject(abortError)
               },
               { once: true }
             )
@@ -761,9 +760,7 @@ describe("SshConnectionImpl", () => {
       await ssh.connect()
 
       expect(tryConnectOnPort).toHaveBeenCalledOnce()
-      const [callArgs] = vi.mocked(tryConnectOnPort).mock.calls[0] as [
-        Parameters<typeof tryConnectOnPort>[0],
-      ]
+      const [callArgs] = vi.mocked(tryConnectOnPort).mock.calls[0]
       expect(callArgs.agent).toBe(AGENT_SOCKET)
       expect(callArgs.privateKey).toBeUndefined()
     })
@@ -788,9 +785,7 @@ describe("SshConnectionImpl", () => {
 
       expect(promptTerminal).toHaveBeenCalledOnce()
       expect(tryConnectOnPort).toHaveBeenCalledOnce()
-      const [callArgs] = vi.mocked(tryConnectOnPort).mock.calls[0] as [
-        Parameters<typeof tryConnectOnPort>[0],
-      ]
+      const [callArgs] = vi.mocked(tryConnectOnPort).mock.calls[0]
       expect(callArgs.agent).toBeUndefined()
       expect(callArgs.password).toBe("secret-password")
       expect(callArgs.privateKey).toBeUndefined()
@@ -863,9 +858,7 @@ describe("SshConnectionImpl", () => {
       await ssh.connect()
 
       expect(promptTerminal).toHaveBeenCalledOnce()
-      const [callArgs] = vi.mocked(tryConnectOnPort).mock.calls[0] as [
-        Parameters<typeof tryConnectOnPort>[0],
-      ]
+      const [callArgs] = vi.mocked(tryConnectOnPort).mock.calls[0]
       expect(callArgs.agent).toBeUndefined()
       expect(callArgs.password).toBe("secret-password")
     })
@@ -902,9 +895,7 @@ describe("SshConnectionImpl", () => {
       const ssh = makeSshInstanceWithAgent({ agentForward: true })
       await ssh.connect()
 
-      const [callArgsForward] = vi.mocked(tryConnectOnPort).mock.calls[0] as [
-        Parameters<typeof tryConnectOnPort>[0],
-      ]
+      const [callArgsForward] = vi.mocked(tryConnectOnPort).mock.calls[0]
       expect(callArgsForward.agentForward).toBe(true)
     })
 
@@ -914,9 +905,7 @@ describe("SshConnectionImpl", () => {
       const ssh = makeSshInstance()
       await ssh.connect()
 
-      const [callArgsKeyAuth] = vi.mocked(tryConnectOnPort).mock.calls[0] as [
-        Parameters<typeof tryConnectOnPort>[0],
-      ]
+      const [callArgsKeyAuth] = vi.mocked(tryConnectOnPort).mock.calls[0]
       expect(callArgsKeyAuth.agentForward).toBeUndefined()
     })
 
@@ -1039,7 +1028,7 @@ describe("SshConnectionImpl", () => {
       // Arrange: readFile mock returns a Buffer to simulate binary-safe read
       const { readFile } = await import("node:fs/promises")
       const fakeKeyBuffer = Buffer.from("fake-pem-key-content")
-      vi.mocked(readFile).mockResolvedValueOnce(fakeKeyBuffer as never)
+      vi.mocked(readFile).mockResolvedValueOnce(fakeKeyBuffer)
       vi.mocked(tryConnectOnPort).mockResolvedValueOnce()
 
       const ssh = makeSshInstance()
@@ -1059,7 +1048,7 @@ describe("SshConnectionImpl", () => {
       // Arrange
       const { readFile } = await import("node:fs/promises")
       const fakeKeyBuffer = Buffer.from("sensitive-private-key")
-      vi.mocked(readFile).mockResolvedValueOnce(fakeKeyBuffer as never)
+      vi.mocked(readFile).mockResolvedValueOnce(fakeKeyBuffer)
       vi.mocked(tryConnectOnPort).mockResolvedValueOnce()
 
       const ssh = makeSshInstance()
@@ -1075,7 +1064,7 @@ describe("SshConnectionImpl", () => {
       // Arrange
       const { readFile } = await import("node:fs/promises")
       const fakeKeyBuffer = Buffer.from("sensitive-private-key")
-      vi.mocked(readFile).mockResolvedValueOnce(fakeKeyBuffer as never)
+      vi.mocked(readFile).mockResolvedValueOnce(fakeKeyBuffer)
       // All ports fail — tryConnectOnPorts returns false, connect() throws
       vi.mocked(tryConnectOnPort).mockRejectedValue(new Error("Connection refused"))
 
@@ -1092,7 +1081,7 @@ describe("SshConnectionImpl", () => {
       // Arrange
       const { readFile } = await import("node:fs/promises")
       const fakeKeyBuffer = Buffer.from("my-rsa-key")
-      vi.mocked(readFile).mockResolvedValueOnce(fakeKeyBuffer as never)
+      vi.mocked(readFile).mockResolvedValueOnce(fakeKeyBuffer)
       vi.mocked(tryConnectOnPort).mockResolvedValueOnce()
 
       const ssh = makeSshInstance()
@@ -1102,9 +1091,7 @@ describe("SshConnectionImpl", () => {
 
       // Assert: the Buffer was forwarded unchanged to tryConnectOnPort
       expect(tryConnectOnPort).toHaveBeenCalledOnce()
-      const [callArgs] = vi.mocked(tryConnectOnPort).mock.calls[0] as [
-        Parameters<typeof tryConnectOnPort>[0],
-      ]
+      const [callArgs] = vi.mocked(tryConnectOnPort).mock.calls[0]
       expect(callArgs.privateKey).toBe(fakeKeyBuffer)
       expect(Buffer.isBuffer(callArgs.privateKey)).toBe(true)
     })
@@ -1118,7 +1105,7 @@ describe("SshConnectionImpl", () => {
             abortSignal?.addEventListener(
               "abort",
               () => {
-                reject(abortSignal.reason)
+                reject(abortError)
               },
               { once: true }
             )
@@ -1134,9 +1121,7 @@ describe("SshConnectionImpl", () => {
         expect(tryConnectOnPort).toHaveBeenCalledOnce()
       })
 
-      const [callArgs] = vi.mocked(tryConnectOnPort).mock.calls[0] as [
-        Parameters<typeof tryConnectOnPort>[0],
-      ]
+      const [callArgs] = vi.mocked(tryConnectOnPort).mock.calls[0]
       expect(callArgs.abortSignal).toBe(abortController.signal)
 
       abortController.abort(abortError)
@@ -1235,7 +1220,7 @@ describe("SshConnectionImpl", () => {
       // immediately and no listeners must be attached via collectStreamOutput.
       expect(pendingCallback).toBeDefined()
       const lateStream = makeStream()
-      pendingCallback!(undefined, lateStream as unknown as Parameters<ExecCallback>[1])
+      pendingCallback!(undefined, lateStream)
 
       expect(lateStream.close).toHaveBeenCalledOnce()
       expect(collectMock).not.toHaveBeenCalled()
@@ -3005,7 +2990,7 @@ describe("SshConnectionImpl", () => {
       const lateStream = makeStream()
       const dataListenerSpy = vi.spyOn(lateStream, "on")
       const stderrListenerSpy = vi.spyOn(lateStream.stderr, "on")
-      pendingCallback!(undefined, lateStream as unknown as Parameters<ExecCallback>[1])
+      pendingCallback!(undefined, lateStream)
 
       expect(lateStream.close).toHaveBeenCalledOnce()
       expect(dataListenerSpy).not.toHaveBeenCalled()
@@ -3111,7 +3096,7 @@ describe("SshConnectionImpl", () => {
       vi.mocked(knownHosts.buildHostVerifier).mockReturnValue({})
       vi.mocked(tryConnectOnPort).mockResolvedValue()
       const fsp = await import("node:fs/promises")
-      vi.mocked(fsp.readFile).mockResolvedValue(Buffer.from("fake-private-key") as never)
+      vi.mocked(fsp.readFile).mockResolvedValue(Buffer.from("fake-private-key"))
     })
 
     it("calls buildHostVerifier with default mode 'yes' when strictHostKeyChecking is not set", async () => {
@@ -3237,9 +3222,7 @@ describe("SshConnectionImpl", () => {
 
       await ssh.connect()
 
-      const [callArgs] = vi.mocked(tryConnectOnPort).mock.calls[0] as [
-        Parameters<typeof tryConnectOnPort>[0],
-      ]
+      const [callArgs] = vi.mocked(tryConnectOnPort).mock.calls[0]
       // The hostVerifier is now a wrapper that delegates to the original
       expect(callArgs.hostVerifier).not.toBe(fakeVerifier)
       expect(callArgs.hostVerifier).toBeTypeOf("function")
@@ -3296,9 +3279,7 @@ describe("SshConnectionImpl", () => {
 
       await ssh.connect()
 
-      const [callArgs] = vi.mocked(tryConnectOnPort).mock.calls[0] as [
-        Parameters<typeof tryConnectOnPort>[0],
-      ]
+      const [callArgs] = vi.mocked(tryConnectOnPort).mock.calls[0]
       // The wrapper is always present for host-key pinning, even without an original verifier
       expect(callArgs.hostVerifier).toBeTypeOf("function")
     })

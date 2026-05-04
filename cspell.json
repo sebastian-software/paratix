@@ -86,6 +86,7 @@
     "seccomp",
     "sigint",
     "sigterm",
+    "sonarjs",
     "sshd",
     "swapfile",
     "swaplabel",

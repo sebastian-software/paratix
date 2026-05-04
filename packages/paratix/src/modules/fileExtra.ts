@@ -1,4 +1,4 @@
-/* eslint-disable max-lines, max-lines-per-function -- file extra modules are grouped for discoverability */
+/* eslint-disable max-lines -- file extra modules are grouped for discoverability */
 import { readFile } from "node:fs/promises"
 
 import { environmentToMetaEntries } from "../meta.js"

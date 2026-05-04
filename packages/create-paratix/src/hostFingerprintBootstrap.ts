@@ -74,7 +74,7 @@ function createConnectionConfig(parameters: {
   const { captureScanResult, host, port, readyTimeoutMs } = parameters
   return {
     host,
-    hostVerifier: (key: Buffer): boolean => {
+    hostVerifier(key: Buffer): boolean {
       const buffer = Buffer.from(key)
       // R-0000123: capture the algorithm name alongside the fingerprint so
       // the interactive prompt can show both values to the operator.
@@ -124,13 +124,13 @@ function createSettlementHandlers(parameters: {
   let settled = false
 
   return {
-    rejectOnce: (error: unknown): void => {
+    rejectOnce(error: unknown): void {
       if (settled) return
       settled = true
       cleanup()
       reject(toError(error, host, port))
     },
-    resolveOnce: (result: HostFingerprintScanResult): void => {
+    resolveOnce(result: HostFingerprintScanResult): void {
       if (settled) return
       settled = true
       cleanup()
@@ -225,7 +225,7 @@ async function readFingerprintFromClient(
     try {
       client.connect(
         createConnectionConfig({
-          captureScanResult: (result) => {
+          captureScanResult(result) {
             capturedResult = result
           },
           host,

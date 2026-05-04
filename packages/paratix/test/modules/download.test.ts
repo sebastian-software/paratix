@@ -50,7 +50,7 @@ function createMockSshWithOptions(
   const execCalls: Array<{ command: string; options?: ExecOptions }> = []
   const mock: MockSshWithOptions = {
     ...base,
-    exec: async (command: string, options?: ExecOptions) => {
+    async exec(command: string, options?: ExecOptions) {
       execCalls.push({ command, options })
       return base.exec(command, options)
     },

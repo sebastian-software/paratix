@@ -182,16 +182,16 @@ function createRecordingSpies(): RecordingSpies {
   const removePortCalls: number[] = []
   const updateHostCalls: string[] = []
   return {
-    addPort: (port) => {
+    addPort(port) {
       addPortCalls.push(port)
       return true
     },
     addPortCalls,
-    removePort: (port) => {
+    removePort(port) {
       removePortCalls.push(port)
     },
     removePortCalls,
-    updateHost: (host) => {
+    updateHost(host) {
       updateHostCalls.push(host)
     },
     updateHostCalls,

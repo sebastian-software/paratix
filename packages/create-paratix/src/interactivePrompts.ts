@@ -88,7 +88,7 @@ function describeScanResult(host: string, result: HostFingerprintScanResult): st
 function createTerminalPrompt(): { close: () => void; prompt: PromptFunction } {
   const readline = createInterface({ input: process.stdin, output: process.stdout })
   return {
-    close: (): void => {
+    close(): void {
       readline.close()
     },
     prompt: async (question: string): Promise<string> => readline.question(question),

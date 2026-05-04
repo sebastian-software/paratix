@@ -1,4 +1,4 @@
-/* eslint-disable max-lines, max-lines-per-function -- SSH transport methods keep callback wiring local */
+/* eslint-disable max-lines -- SSH transport methods keep callback wiring local */
 import { randomUUID, timingSafeEqual } from "node:crypto"
 import { type Stats, unlinkSync, writeFileSync } from "node:fs"
 import { readFile, stat } from "node:fs/promises"
@@ -108,17 +108,15 @@ async function sleepWithAbort(delay: number, abortSignal?: AbortSignal): Promise
   }
 
   await new Promise<void>((resolve, reject) => {
-    let timer: ReturnType<typeof setTimeout>
-    let handleAbort: () => void
-    const cleanup = (): void => {
-      abortSignal.removeEventListener("abort", handleAbort)
-    }
-    handleAbort = (): void => {
+    const handleAbort = (): void => {
       clearTimeout(timer)
       cleanup()
       reject(getAbortReason(abortSignal))
     }
-    timer = setTimeout(() => {
+    const cleanup = (): void => {
+      abortSignal.removeEventListener("abort", handleAbort)
+    }
+    const timer = setTimeout(() => {
       cleanup()
       resolve()
     }, delay)
@@ -404,7 +402,7 @@ export class SshConnectionImpl implements SshConnection {
     const remoteTemporary = await this.createRemoteWritableTempPath(remotePath, "paratix-write")
     const temporaryMode = resolveWriteFileMode(
       remotePath,
-      options as { mode?: string } | null | undefined
+      options
     )
     const expectedSize = Buffer.byteLength(content, "utf8")
     try {
@@ -1046,6 +1044,7 @@ trap - EXIT
    * @param agent - SSH agent socket path (e.g. `SSH_AUTH_SOCK`). Used when `privateKey` is absent.
    * @returns `true` if a port connected successfully, `false` if all ports failed.
    */
+  // eslint-disable-next-line sonarjs/cognitive-complexity -- port fallback, host-key errors, and abort handling belong together
   private async tryConnectOnPorts(
     privateKey?: Buffer | string,
     password?: string,
