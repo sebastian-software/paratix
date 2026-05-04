@@ -1296,6 +1296,19 @@ describe("net.request — check", () => {
     const result = await mod.check(null, emptyEnv)
     expect(result).toBe("needs-apply")
   })
+
+  it("allows http URLs for endpoint checks", () => {
+    const mod = net.request("http://example.com/health")
+    expect(mod.name).toBe("net.request: GET http://example.com/health")
+  })
+
+  it("rejects file URLs before building a curl command", () => {
+    expect(() => net.request("file:///etc/passwd")).toThrow(/Unsupported URL scheme 'file'/v)
+  })
+
+  it("rejects ftp URLs before building a curl command", () => {
+    expect(() => net.request("ftp://example.com/file")).toThrow(/Unsupported URL scheme 'ftp'/v)
+  })
 })
 
 describe("net.request — apply", () => {

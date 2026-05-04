@@ -18,6 +18,7 @@ import {
   delay,
   type HttpCheckParameters,
   type WaitForOptions,
+  validateHttpUrl,
 } from "./netHelpers.js"
 
 const EXEC_OPTS = { ignoreExitCode: true, silent: true } as const
@@ -676,6 +677,7 @@ export const net = {
     url: string,
     options?: { body?: string; headers?: Record<string, string>; method?: string; status?: number }
   ): Module {
+    validateHttpUrl(url, { allowHttp: true })
     const method = options?.method ?? "GET"
     const parameters: HttpCheckParameters = buildHttpCheckParameters({
       body: options?.body,
