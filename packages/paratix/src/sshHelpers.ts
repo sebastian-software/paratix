@@ -401,21 +401,34 @@ export async function tryConnectOnPort(parameters: ConnectParameters): Promise<v
   const { client, port } = parameters
   const connectConfig = buildConnectConfig(parameters)
   return new Promise((resolve, reject) => {
-    const timeout = setTimeout(() => {
+    const cleanupConnectListeners = (): void => {
+      client.off("ready", handleReady)
+      client.off("error", handleError)
+    }
+
+    const handleTimeout = (): void => {
+      cleanupConnectListeners()
       cleanupFailedSshClient(client)
       reject(new Error(`Connection timeout on port ${port}`))
-    }, CONNECTION_TIMEOUT)
+    }
 
-    client.on("ready", () => {
+    const handleReady = (): void => {
       clearTimeout(timeout)
+      cleanupConnectListeners()
       resolve()
-    })
-    client.on("error", (error: Error) => {
+    }
+
+    const handleError = (error: Error): void => {
       clearTimeout(timeout)
+      cleanupConnectListeners()
       cleanupFailedSshClient(client)
       reject(error)
-    })
+    }
 
+    const timeout = setTimeout(handleTimeout, CONNECTION_TIMEOUT)
+
+    client.on("ready", handleReady)
+    client.on("error", handleError)
     client.connect(connectConfig)
   })
 }

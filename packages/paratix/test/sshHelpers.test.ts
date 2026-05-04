@@ -1,3 +1,5 @@
+import type { Client } from "ssh2"
+
 import { EventEmitter } from "node:events"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 
@@ -9,6 +11,7 @@ import {
   MAX_OUTPUT_LENGTH,
   shellQuote,
   type StreamOutputParameters,
+  tryConnectOnPort,
   validateMode,
 } from "../src/sshHelpers.js"
 
@@ -18,11 +21,26 @@ import {
 
 type MockChannel = { stderr: EventEmitter } & EventEmitter
 
+type MockClient = {
+  connect: Client["connect"]
+  end: Client["end"]
+} & Client &
+  EventEmitter
+
 function createMockChannel(): { stderr: EventEmitter; stream: MockChannel } {
   const stream = new EventEmitter() as MockChannel
   const stderr = new EventEmitter()
   stream.stderr = stderr
   return { stderr, stream }
+}
+
+function createMockClient(): MockClient {
+  const client = new EventEmitter() as MockClient
+  client.connect = () => client
+  client.end = () => client
+  vi.spyOn(client, "connect")
+  vi.spyOn(client, "end")
+  return client
 }
 
 type CollectResult = Promise<{ code: number; stderr: string; stdout: string }>
@@ -878,6 +896,86 @@ describe("CommandError and truncation", () => {
 
     const msg = await getErrorMessage(promise)
     expect(msg).toContain(prefix)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// tryConnectOnPort
+// ---------------------------------------------------------------------------
+
+describe("tryConnectOnPort", () => {
+  afterEach(() => {
+    vi.useRealTimers()
+  })
+
+  it("removes connect-phase listeners after the client is ready", async () => {
+    const client = createMockClient()
+    const promise = tryConnectOnPort({
+      client,
+      host: "example.test",
+      port: 22,
+      username: "root",
+    })
+
+    expect(client.listenerCount("ready")).toBe(1)
+    expect(client.listenerCount("error")).toBe(1)
+
+    client.emit("ready")
+
+    await expect(promise).resolves.toBeUndefined()
+    expect(client.listenerCount("ready")).toBe(0)
+    expect(client.listenerCount("error")).toBe(0)
+
+    client.on("error", () => {
+      /* runtime errors are handled by the active SSH session */
+    })
+    client.emit("error", new Error("runtime failure"))
+
+    expect(client.end).not.toHaveBeenCalled()
+  })
+
+  it("cleans up the client when the connect-phase error fires before ready", async () => {
+    const client = createMockClient()
+    const error = new Error("Permission denied")
+    const promise = tryConnectOnPort({
+      client,
+      host: "example.test",
+      port: 22,
+      username: "root",
+    })
+
+    client.emit("error", error)
+
+    await expect(promise).rejects.toThrow("Permission denied")
+    expect(client.end).toHaveBeenCalledOnce()
+    expect(client.listenerCount("ready")).toBe(0)
+    expect(client.listenerCount("error")).toBe(0)
+  })
+
+  it("cleans up the client when the connect attempt times out", async () => {
+    vi.useFakeTimers()
+    const client = createMockClient()
+    const promise = tryConnectOnPort({
+      client,
+      host: "example.test",
+      port: 2222,
+      username: "root",
+    })
+    const rejection = promise.then(
+      () => {
+        throw new Error("Expected promise to reject")
+      },
+      (error: unknown) => error
+    )
+
+    await vi.advanceTimersByTimeAsync(10_000)
+
+    await expect(rejection).resolves.toMatchObject({
+      message: "Connection timeout on port 2222",
+    })
+    expect(client.end).toHaveBeenCalledOnce()
+    expect(client.listenerCount("ready")).toBe(0)
+    expect(client.listenerCount("error")).toBe(0)
   })
 })
 
