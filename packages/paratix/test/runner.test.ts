@@ -600,6 +600,47 @@ describe("runPlaybook SSH config immutability", () => {
   })
 })
 
+describe("runPlaybook runtime module validation", () => {
+  beforeEach(() => {
+    vi.spyOn(console, "log").mockImplementation(() => {
+      /* noop */
+    })
+    vi.spyOn(console, "error").mockImplementation(() => {
+      /* noop */
+    })
+    vi.resetModules()
+  })
+
+  afterEach(() => {
+    vi.restoreAllMocks()
+    vi.resetModules()
+    process.exitCode = 0
+  })
+
+  it("rejects malformed run modules before constructing an SSH connection", async () => {
+    const capturedConfigs: unknown[] = []
+
+    vi.doMock("../src/ssh.js", () => ({
+      shellQuote: (s: string) => `'${s}'`,
+      SshConnectionImpl: makeMockSshClass(capturedConfigs),
+    }))
+
+    const { runPlaybook } = await import("../src/runner.js")
+
+    const definition = {
+      host: "1.2.3.4",
+      name: "test-server",
+      run: [{ name: "broken-module" }],
+      ssh: { ports: [22], privateKey: "~/.ssh/id", user: "root" },
+    } as unknown as ServerDefinition
+
+    await expect(runPlaybook(definition)).rejects.toThrow(
+      "ServerDefinition: run[0] must be a module with name, check, and apply"
+    )
+    expect(capturedConfigs).toStrictEqual([])
+  })
+})
+
 // Bug regression: when sshd.port and system.reboot are both set, reconnect must only be called once
 describe("runPlaybook handlePortChange + handleReboot interaction", () => {
   beforeEach(() => {

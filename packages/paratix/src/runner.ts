@@ -30,6 +30,7 @@ import {
 import { setRunnerAbortSignal } from "./runnerAbortSignal.js"
 import { resolveExitCode, signalExitCode } from "./runnerHelpers.js"
 import { clearRegisteredSecrets } from "./secretSink.js"
+import { validateServerDefinition } from "./server.js"
 import { getSignalBus } from "./signalBus.js"
 import { runSignalModules, type SignalRunStatus } from "./signalOrchestration.js"
 import { SshConnectionImpl } from "./ssh.js"
@@ -802,6 +803,7 @@ export async function runPlaybook(
   definition: ServerDefinition,
   options: RunOptions = {}
 ): Promise<void> {
+  validateServerDefinition(definition, { allowEmptyRun: true })
   const { dryRun = false, verbose = false } = options
   const environment = await initializeEnvironment(options, definition)
   const { handleShutdownSignal, promptAbortSignal, setSsh, shutdownSignal } =
