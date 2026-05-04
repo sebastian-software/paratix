@@ -25,18 +25,18 @@ Paratix hat drei Hierarchieebenen:
 Playbook (die TypeScript-Datei des Benutzers)
 │
 ├── Recipe: "hardening"
-│   ├── Modul: apt.installed("ufw", "fail2ban")
+│   ├── Modul: package.installed("ufw", "fail2ban")
 │   ├── Modul: sshd.port(22022)
 │   ├── Modul: file.copy("/etc/ssh/sshd_config")
 │   ├── Modul: ufw.rule("allow", [22022, 80, 443])
 │   └── Signal: service.restart("sshd")  ← nur wenn etwas changed war
 │
 ├── Recipe: "podman"
-│   ├── Modul: apt.installed("podman")
+│   ├── Modul: package.installed("podman")
 │   ├── Modul: file.copy("/etc/containers/registries.conf")
 │   └── Signal: service.restart("podman")
 │
-└── Modul: apt.upgrade("2024-03-10")  ← einzelnes Modul direkt im Playbook
+└── Modul: package.upgrade("2024-03-10")  ← einzelnes Modul direkt im Playbook
 ```
 
 ### Modul (Plugin)
@@ -111,7 +111,7 @@ den Server und eine geordnete Liste von Recipes und Modulen:
 
 ```typescript
 import { server, recipe } from "paratix"
-import { apt, sshd, file, ufw, service } from "paratix/modules"
+import { apt, sshd, file, ufw, service, package as pkg } from "paratix/modules"
 
 export default server({
   name: "vps-primary",
@@ -132,7 +132,7 @@ export default server({
     recipe(
       "hardening",
       [
-        apt.installed("ufw", "fail2ban"),
+        pkg.installed("ufw", "fail2ban"),
         sshd.port(22022),
         file.template("/etc/ssh/sshd_config", "./files/sshd_config.tmpl"),
         ufw.rule("allow", [22022, 80, 443]),
@@ -145,7 +145,7 @@ export default server({
     recipe(
       "podman",
       [
-        apt.installed("podman"),
+        pkg.installed("podman"),
         file.copy("/etc/containers/registries.conf", "./files/registries.conf"),
       ],
       {
@@ -161,7 +161,7 @@ export default server({
       }
     ),
 
-    apt.upgrade("2024-03-10"),
+    pkg.upgrade("2024-03-10"),
   ],
 })
 ```
@@ -291,7 +291,7 @@ VORHER:
   /var/lib/paratix/flags/apt-upgrade-20230815
   /var/lib/paratix/flags/apt-upgrade-20240201
 
-APPLY: apt.upgrade("2024-03-10")
+APPLY: package.upgrade("2024-03-10")
   → rm apt-upgrade-20230815, apt-upgrade-20240201
   → touch apt-upgrade-20240310
 
@@ -795,23 +795,23 @@ Dadurch sind sie in der Ausgabe wie jedes andere Modul sichtbar.
 
 ### Idempotente Module (Standard)
 
-| Modul             | Check-Strategie              |
-| ----------------- | ---------------------------- |
-| `apt.installed`   | `dpkg -l <paket>` prüfen     |
-| `apt.absent`      | `dpkg -l <paket>` prüfen     |
-| `file.copy`       | SHA-256 Hash vergleichen     |
-| `file.line`       | `grep -qF` nach Zeile suchen |
-| `service.enabled` | `systemctl is-enabled`       |
-| `service.running` | `systemctl is-active`        |
-| `user.present`    | `id <user>` prüfen           |
-| `ufw.rule`        | `ufw status` parsen          |
-| `sshd.port`       | `sshd_config` auslesen       |
+| Modul               | Check-Strategie              |
+| ------------------- | ---------------------------- |
+| `package.installed` | `dpkg -l <paket>` prüfen     |
+| `package.absent`    | `dpkg -l <paket>` prüfen     |
+| `file.copy`         | SHA-256 Hash vergleichen     |
+| `file.line`         | `grep -qF` nach Zeile suchen |
+| `service.enabled`   | `systemctl is-enabled`       |
+| `service.running`   | `systemctl is-active`        |
+| `user.present`      | `id <user>` prüfen           |
+| `ufw.rule`          | `ufw status` parsen          |
+| `sshd.port`         | `sshd_config` auslesen       |
 
 ### State-Flag-Module (für teure Operationen)
 
 | Modul             | Flag-Strategie                 |
 | ----------------- | ------------------------------ |
-| `apt.upgrade`     | Flag mit Datum                 |
+| `package.upgrade` | Flag mit Datum                 |
 | `apt.distUpgrade` | Flag mit Datum                 |
 | `script.once`     | Flag mit Script-Name + Version |
 | `download.large`  | Flag mit URL-Hash              |
@@ -1163,7 +1163,7 @@ Projekts ein (`packageManager`-Feld). Anschliessend wird automatisch
 
 ```typescript
 import { server } from "paratix"
-import { apt, hostname } from "paratix/modules"
+import { hostname, package as pkg } from "paratix/modules"
 
 export default server({
   name: "vps-01",
@@ -1174,7 +1174,7 @@ export default server({
     privateKey: "~/.ssh/id_ed25519",
   },
 
-  run: [hostname.set("vps-01"), apt.upgrade("2024-03-10")],
+  run: [hostname.set("vps-01"), pkg.upgrade("2024-03-10")],
 })
 ```
 
@@ -1380,7 +1380,7 @@ ist. Andernfalls gibt es `{ status: "skipped" }` zurueck.
 
 ```typescript
 import { server, recipe, when } from "paratix"
-import { system, apt } from "paratix/modules"
+import { system, apt, file, package as pkg } from "paratix/modules"
 
 export default server({
   // ...
@@ -1393,7 +1393,7 @@ export default server({
     // Mehrere Module bedingt ausfuehren
     when(
       (env) => Number(env["system.ram.total"]) >= 4096,
-      apt.installed("elasticsearch"),
+      pkg.installed("elasticsearch"),
       file.template("/etc/elasticsearch/elasticsearch.yml", "./files/elasticsearch.tmpl.yml")
     ),
   ],
