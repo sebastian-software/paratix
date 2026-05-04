@@ -1941,6 +1941,29 @@ describe("scaffoldProject", () => {
     expect(readFileSync(sentinelPath, "utf8")).toBe("PRE_EXISTING_CONTENT")
   })
 
+  it("rejects invalid project names before creating directories", async () => {
+    const installer = vi.fn().mockReturnValue(true)
+    const invalidProjectDirectory = resolve("..", "create-paratix-invalid")
+    rmSync(invalidProjectDirectory, { force: true, recursive: true })
+
+    try {
+      await expectProcessExit(() => {
+        scaffoldProject("../create-paratix-invalid", { command: "pnpm install", name: "pnpm" }, {
+          host: "example.com",
+          installer,
+        })
+      })
+
+      expect(console.error).toHaveBeenCalledWith(
+        'Error: Invalid project name "../create-paratix-invalid" — use only lowercase letters, numbers, and hyphens.'
+      )
+      expect(existsSync(invalidProjectDirectory)).toBe(false)
+      expect(installer).not.toHaveBeenCalled()
+    } finally {
+      rmSync(invalidProjectDirectory, { force: true, recursive: true })
+    }
+  })
+
   it("normalizes padded project names before creating the project directory and package name", () => {
     const installer = vi.fn().mockReturnValue(true)
 

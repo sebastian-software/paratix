@@ -243,7 +243,7 @@ export function scaffoldProject(
   pm: PackageManager,
   options?: ScaffoldOptions
 ): boolean {
-  const normalizedProjectName = normalizeProjectName(projectName)
+  const normalizedProjectName = validateProjectName(projectName)
   const projectDirectory = resolve(normalizedProjectName)
   validateRootBootstrapConfiguration(options)
   createProjectDirectoryAtomically(projectDirectory, normalizedProjectName)
