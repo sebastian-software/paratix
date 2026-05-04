@@ -73,6 +73,7 @@ function makeClientMock(sftp: SFTPWrapper): Client {
 
 describe("sftpDownload", () => {
   afterEach(() => {
+    vi.useRealTimers()
     vi.resetAllMocks()
   })
 
@@ -436,7 +437,6 @@ describe("sftpDownload", () => {
     // Assert — promise must reject with a descriptive timeout message
     await expect(promise).rejects.toThrow("SFTP download timed out after 5000ms: /remote/file.txt")
 
-    vi.useRealTimers()
   })
 
   it("leaves the destination path untouched on timeout", async () => {
@@ -456,7 +456,6 @@ describe("sftpDownload", () => {
     expect(vi.mocked(unlinkSync)).toHaveBeenCalledWith(tempPath)
     expect(vi.mocked(unlinkSync)).not.toHaveBeenCalledWith("/local/file.txt")
 
-    vi.useRealTimers()
   })
 
   it("leaves the destination path untouched on stream errors", async () => {
@@ -497,7 +496,6 @@ describe("sftpDownload", () => {
     expect(localWriteStream.destroy).toHaveBeenCalledOnce()
     expect(sftpEnd).toHaveBeenCalledOnce()
 
-    vi.useRealTimers()
   })
 
   it("clears timeout on successful transfer", async () => {
@@ -520,7 +518,6 @@ describe("sftpDownload", () => {
     // Assert — promise already resolved; no extra sftp.end() from a late timeout
     await expect(promise).resolves.toBeUndefined()
 
-    vi.useRealTimers()
   })
 
   it("clears timeout on stream error", async () => {
@@ -545,7 +542,6 @@ describe("sftpDownload", () => {
     // Assert — sftp.end() was called exactly once (from the error handler, not the timeout)
     expect(sftpEnd).toHaveBeenCalledOnce()
 
-    vi.useRealTimers()
   })
 })
 
@@ -555,6 +551,7 @@ describe("sftpDownload", () => {
 
 describe("sftpUpload", () => {
   afterEach(() => {
+    vi.useRealTimers()
     vi.resetAllMocks()
   })
 
@@ -873,7 +870,6 @@ describe("sftpUpload", () => {
     // Assert — promise must reject with a descriptive timeout message
     await expect(promise).rejects.toThrow("SFTP upload timed out after 5000ms: /remote/file.txt")
 
-    vi.useRealTimers()
   })
 
   it("destroys both streams and ends sftp session on timeout", async () => {
@@ -897,7 +893,6 @@ describe("sftpUpload", () => {
     expect(sftpWriteStream.destroy).toHaveBeenCalledOnce()
     expect(sftpEnd).toHaveBeenCalledOnce()
 
-    vi.useRealTimers()
   })
 
   it("clears timeout on successful transfer", async () => {
@@ -920,7 +915,6 @@ describe("sftpUpload", () => {
     // Assert — promise already resolved; no extra sftp.end() from a late timeout
     await expect(promise).resolves.toBeUndefined()
 
-    vi.useRealTimers()
   })
 
   it("clears timeout on stream error", async () => {
@@ -945,6 +939,5 @@ describe("sftpUpload", () => {
     // Assert — sftp.end() was called exactly once (from the error handler, not the timeout)
     expect(sftpEnd).toHaveBeenCalledOnce()
 
-    vi.useRealTimers()
   })
 })
