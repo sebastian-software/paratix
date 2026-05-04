@@ -11,6 +11,7 @@ import {
   stopLiveModuleOutput,
   withRecipeOutputScope,
 } from "../src/output.js"
+import { clearRegisteredSecrets, registerSecret } from "../src/secretSink.js"
 import { CommandError } from "../src/sshHelpers.js"
 
 function bindOptionalStdoutMethod(name: "clearLine" | "cursorTo") {
@@ -37,6 +38,7 @@ describe("printModuleResult", () => {
 
   afterEach(() => {
     resetLiveOutputForTests()
+    clearRegisteredSecrets()
     vi.restoreAllMocks()
   })
 
@@ -59,6 +61,17 @@ describe("printModuleResult", () => {
     expect(consoleLogs).toHaveLength(1)
     expect(consoleLogs[0]).toContain("changed")
     expect(consoleLogs[0]).toContain("(sha256:new-traefik-id)")
+  })
+
+  it("masks registered secrets in module names and details before rendering results", () => {
+    const secret = "module-result-secret-XYZ123"
+    registerSecret(secret)
+
+    printModuleResult(`command.shell: deploy --token ${secret}`, "changed", `rotated ${secret}`)
+
+    const output = consoleLogs.join("\n")
+    expect(output).not.toContain(secret)
+    expect(output).toContain("[REDACTED]")
   })
 
   it("renders a live running line on TTY and replaces it with the final result", () => {
@@ -100,6 +113,59 @@ describe("printModuleResult", () => {
       Object.defineProperty(process.stdout, "cursorTo", {
         configurable: true,
         value: originalCursorTo,
+      })
+    }
+  })
+
+  it("masks registered secrets before writing live spinner output", () => {
+    const writes: string[] = []
+    const secret = "spinner-secret-XYZ123"
+    registerSecret(secret)
+    vi.spyOn(process.stdout, "write").mockImplementation((chunk: string | Uint8Array) => {
+      writes.push(String(chunk))
+      return true
+    })
+    const originalIsTTY = process.stdout.isTTY
+    const originalClearLine = bindOptionalStdoutMethod("clearLine")
+    const originalCursorTo = bindOptionalStdoutMethod("cursorTo")
+    const originalColumns = process.stdout.columns
+
+    Object.defineProperty(process.stdout, "isTTY", { configurable: true, value: true })
+    Object.defineProperty(process.stdout, "clearLine", {
+      configurable: true,
+      value: vi.fn(() => true),
+    })
+    Object.defineProperty(process.stdout, "cursorTo", {
+      configurable: true,
+      value: vi.fn(() => true),
+    })
+    Object.defineProperty(process.stdout, "columns", {
+      configurable: true,
+      value: 120,
+    })
+
+    try {
+      startModuleSpinner(`command.shell: deploy --token ${secret}`, `waiting for ${secret}`)
+
+      const output = writes.join("\n")
+      expect(output).not.toContain(secret)
+      expect(output).toContain("[REDACTED]")
+    } finally {
+      Object.defineProperty(process.stdout, "isTTY", {
+        configurable: true,
+        value: originalIsTTY,
+      })
+      Object.defineProperty(process.stdout, "clearLine", {
+        configurable: true,
+        value: originalClearLine,
+      })
+      Object.defineProperty(process.stdout, "cursorTo", {
+        configurable: true,
+        value: originalCursorTo,
+      })
+      Object.defineProperty(process.stdout, "columns", {
+        configurable: true,
+        value: originalColumns,
       })
     }
   })

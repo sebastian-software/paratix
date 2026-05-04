@@ -199,10 +199,12 @@ export function startModuleSpinner(name: string, detail?: string): void {
 
   clearPendingRecipeClosureGuides()
   stopAnimatedModuleLine()
+  const maskedName = maskRegisteredSecrets(name)
+  const maskedDetail = detail == null ? undefined : maskRegisteredSecrets(detail)
   const displayModule = formatDisplayModule({
     continuationIndentWidth: getContinuationIndent().length,
-    detail,
-    name,
+    detail: maskedDetail,
+    name: maskedName,
     status: "waiting",
     terminalColumns: process.stdout.columns,
   })
@@ -275,13 +277,16 @@ function printRenderedModuleResult(parameters: {
   status: DisplayStatus
 }): void {
   const extraGuideDepths = parameters.extraGuideDepths ?? []
+  const maskedName = maskRegisteredSecrets(parameters.name)
+  const maskedDetail =
+    parameters.detail == null ? undefined : maskRegisteredSecrets(parameters.detail)
   const displayModule = formatDisplayModule({
     continuationIndentWidth: `${buildGuideIndent(
       OUTPUT_INDENT_UNIT.repeat(Math.max(getCurrentOutputDepth() + 2, 1)),
       { extraGuideDepths }
     )}   `.length,
-    detail: parameters.detail,
-    name: parameters.name,
+    detail: maskedDetail,
+    name: maskedName,
     status: parameters.status,
     terminalColumns: process.stdout.columns,
   })
