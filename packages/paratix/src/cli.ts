@@ -16,7 +16,6 @@ import { collectSshConfigErrors } from "./serverDefinitionValidation.js"
 declare const PACKAGE_DISPLAY_VERSION: string
 
 const SECONDS_TO_MS = 1000
-const DEFAULT_RECONNECT_TIMEOUT_SECONDS = 300
 const ENVIRONMENT_KEY_PATTERN = /^[A-Za-z_]\w*$/v
 const FIRST_RUN_ENV_NAME = "PARATIX_FIRST_RUN"
 
@@ -327,7 +326,7 @@ type ApplyCommandOptions = {
   env: Environment
   envFile?: string
   firstRun: boolean
-  reconnectTimeout: number
+  reconnectTimeout?: number
   verbose: boolean
 }
 
@@ -346,13 +345,17 @@ export async function runApplyCommand(
     firstRun: options.firstRun,
   })
 
-  await run(definition, {
+  const runOptions: RunOptions = {
     dryRun: options.dryRun,
     envFile: options.envFile,
     envOverrides: environmentOverrides,
-    reconnectTimeout: options.reconnectTimeout * SECONDS_TO_MS,
     verbose: options.verbose,
-  })
+  }
+  if (options.reconnectTimeout !== undefined) {
+    runOptions.reconnectTimeout = options.reconnectTimeout * SECONDS_TO_MS
+  }
+
+  await run(definition, runOptions)
 }
 
 export function exitAfterApplyError(error: unknown, verbose: boolean): never {
@@ -382,8 +385,7 @@ program
   .option(
     "--reconnect-timeout <seconds>",
     "SSH reconnect timeout",
-    parsePositiveNumber,
-    DEFAULT_RECONNECT_TIMEOUT_SECONDS
+    parsePositiveNumber
   )
   .option("--verbose", "Show full stack traces on error", false)
   .action(async (file: string, options: Record<string, unknown>) => {

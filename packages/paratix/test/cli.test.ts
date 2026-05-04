@@ -1398,6 +1398,49 @@ describe("CLI entrypoint", () => {
     }
   })
 
+  it("omits reconnectTimeout when the apply option is not provided", async () => {
+    const tempDirectory = mkdtempSync(join(tmpdir(), "paratix-cli-apply-options-"))
+    const playbookPath = join(tempDirectory, "capture-default-options.mjs")
+    const calls: Array<{ options: unknown }> = []
+    const logSpy = vi.spyOn(console, "log").mockImplementation(() => {
+      /* suppress CLI header */
+    })
+
+    try {
+      writeFileSync(
+        playbookPath,
+        [
+          "export default {",
+          "  name: 'test-server',",
+          "  host: '1.2.3.4',",
+          "  ssh: { user: 'root', ports: [22], reconnectTimeout: 45000 },",
+          "  run: ['noop'],",
+          "}",
+        ].join("\n")
+      )
+
+      await runApplyCommand(
+        playbookPath,
+        {
+          dryRun: true,
+          env: {},
+          firstRun: false,
+          verbose: false,
+        },
+        async (_definition, options) => {
+          await Promise.resolve()
+          calls.push({ options })
+        }
+      )
+
+      expect(calls).toHaveLength(1)
+      expect(calls[0]?.options).not.toHaveProperty("reconnectTimeout")
+    } finally {
+      logSpy.mockRestore()
+      rmSync(tempDirectory, { force: true, recursive: true })
+    }
+  })
+
   it("preserves an exit code set by the runner when the apply action fails", () => {
     const exitSpy = vi.spyOn(process, "exit").mockImplementation(() => {
       throw new Error("process.exit")
