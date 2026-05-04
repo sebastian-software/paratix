@@ -607,6 +607,44 @@ describe("archive.extract — apply", () => {
     )
   })
 
+  it("rejects extraction when an existing destination ancestor is a symlink", async () => {
+    const mockSsh = createMockSsh({
+      [`test ! -L '${destination}'`]: { code: 1 },
+    })
+
+    const mod = archive.extract(src, destination)
+    const result = await mod.apply(mockSsh, emptyEnv)
+
+    expect(result.status).toBe("failed")
+    expect(String(result.error)).toContain("destination path")
+    expect(String(result.error)).toContain("is a symlink")
+    expect(mockSsh.calls).not.toContain(`mkdir -p '${destination}'`)
+    expect(mockSsh.calls).not.toContain(`tar -tvzf '${src}'`)
+    expect(mockSsh.calls).not.toContain(
+      `tar --no-same-owner --no-overwrite-dir -xzf '${src}' -C '${destination}'`
+    )
+  })
+
+  it("rejects extraction when an existing member ancestor is a symlink", async () => {
+    const symlinkedMemberAncestor = `${destination}/app`
+    const mockSsh = createMockSsh({
+      [`tar -tvzf '${src}'`]: { code: 0, stdout: safeTarListing },
+      [`test ! -L '${symlinkedMemberAncestor}'`]: { code: 1 },
+    })
+
+    const mod = archive.extract(src, destination)
+    const result = await mod.apply(mockSsh, emptyEnv)
+
+    expect(result.status).toBe("failed")
+    expect(String(result.error)).toContain(JSON.stringify(symlinkedMemberAncestor))
+    expect(String(result.error)).toContain("is a symlink")
+    expect(mockSsh.calls).toContain(`mkdir -p '${destination}'`)
+    expect(mockSsh.calls).toContain(`tar -tvzf '${src}'`)
+    expect(mockSsh.calls).not.toContain(
+      `tar --no-same-owner --no-overwrite-dir -xzf '${src}' -C '${destination}'`
+    )
+  })
+
   it("rejects a tar archive that contains a block device member", async () => {
     const tarListing = `brw-r--r-- root/root 8,0 1970-01-01 00:00 app/device\n`
     const mockSsh = createMockSsh({

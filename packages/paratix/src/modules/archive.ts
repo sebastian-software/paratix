@@ -4,10 +4,16 @@ import { failed, failedCommand } from "../moduleFailure.js"
 import { shellQuote, validateMktempPath } from "../ssh.js"
 import { type Module, type ModuleResult, NEEDS_APPLY, type SshConnection } from "../types.js"
 import {
+  archiveMemberDestinationPaths,
+  archiveMemberPathsWithAncestors,
+  destinationPathWithAncestors,
+  validateExtractDestination,
+  validateNoSymlinkPaths,
+} from "./archiveDestinationValidation.js"
+import {
   type ArchiveMember,
   archiveMemberUnsafeReason,
   listArchiveMembers,
-  normalizeArchiveMemberPath,
 } from "./archiveMemberValidation.js"
 import { localSha256, sha256String } from "./fileHelpers.js"
 
@@ -178,17 +184,6 @@ type ApplyParameters = {
   upload: boolean
 }
 
-function validateExtractDestination(destination: string): { destination: string } | ModuleResult {
-  if (!destination.startsWith("/")) {
-    return failed(`[archive.extract] destination must be an absolute path: ${destination}`)
-  }
-  const normalized = pathPosix.normalize(destination)
-  if (normalized === "/") {
-    return failed(`[archive.extract] refusing to extract to destructive destination /`)
-  }
-  return { destination: normalized }
-}
-
 /**
  * R-0000067: list the archive members and reject any entry whose
  * normalized path is absolute or escapes the destination via `..`. For
@@ -219,29 +214,6 @@ async function validatedArchiveMembers(
   return listing.members
 }
 
-function trimTrailingSlashes(path: string): string {
-  let end = path.length
-  while (end > 0 && path[end - 1] === "/") end -= 1
-  return path.slice(0, end)
-}
-
-function archiveMemberDestinationPath(destination: string, member: ArchiveMember): null | string {
-  const memberPath = normalizeArchiveMemberPath(member.path)
-  if (memberPath === null) return null
-  const base = trimTrailingSlashes(destination) || "/"
-  if (memberPath === "") return base
-  return base === "/" ? `/${memberPath}` : `${base}/${memberPath}`
-}
-
-function extractedMemberPaths(destination: string, members: ArchiveMember[]): string[] {
-  const paths = new Set<string>()
-  for (const member of members) {
-    const path = archiveMemberDestinationPath(destination, member)
-    if (path !== null) paths.add(path)
-  }
-  return [...paths]
-}
-
 async function applyExtractedMemberOwner(
   conn: SshConnection,
   parameters: { destination: string; members: ArchiveMember[]; owner?: string }
@@ -249,10 +221,39 @@ async function applyExtractedMemberOwner(
   const { destination, members, owner } = parameters
   if (owner == null || owner === "") return
   await Promise.all(
-    extractedMemberPaths(destination, members).map(async (path) =>
+    archiveMemberDestinationPaths(destination, members).map(async (path) =>
       conn.exec(`chown -h ${shellQuote(owner)} ${shellQuote(path)}`, SILENT)
     )
   )
+}
+
+async function prepareExtractDestination(
+  conn: SshConnection,
+  parameters: { destination: string; source: string }
+): Promise<{ destination: string } | ModuleResult> {
+  const validatedDestination = validateExtractDestination(parameters.destination)
+  if ("status" in validatedDestination) return validatedDestination
+  const unsafeDestinationAncestor = await validateNoSymlinkPaths(conn, {
+    paths: destinationPathWithAncestors(validatedDestination.destination),
+    source: parameters.source,
+  })
+  if (unsafeDestinationAncestor !== null) return unsafeDestinationAncestor
+  await conn.exec(`mkdir -p ${shellQuote(validatedDestination.destination)}`, SILENT)
+  return validatedDestination
+}
+
+async function validateMembersForExtraction(
+  conn: SshConnection,
+  parameters: { destination: string; remoteSource: string; source: string }
+): Promise<ArchiveMember[] | ModuleResult> {
+  const { destination, remoteSource, source } = parameters
+  const members = await validatedArchiveMembers(conn, { archivePath: remoteSource, source })
+  if (!Array.isArray(members)) return members
+  const unsafeMemberPath = await validateNoSymlinkPaths(conn, {
+    paths: archiveMemberPathsWithAncestors(destination, members),
+    source,
+  })
+  return unsafeMemberPath ?? members
 }
 
 /**
@@ -270,10 +271,8 @@ async function runExtraction(
 ): Promise<ModuleResult> {
   const { destination, marker, owner, source } = parameters
 
-  const validatedDestination = validateExtractDestination(destination)
+  const validatedDestination = await prepareExtractDestination(conn, { destination, source })
   if ("status" in validatedDestination) return validatedDestination
-
-  await conn.exec(`mkdir -p ${shellQuote(validatedDestination.destination)}`, SILENT)
 
   const cmd = extractCommand(source, remoteSource, validatedDestination.destination)
   if (cmd === null) return failed(`[archive.extract] unsupported archive format for ${source}`)
@@ -283,7 +282,11 @@ async function runExtraction(
   // exists) but before the actual extract command runs, otherwise a
   // malicious archive could already have written a file outside the
   // destination by the time we notice.
-  const members = await validatedArchiveMembers(conn, { archivePath: remoteSource, source })
+  const members = await validateMembersForExtraction(conn, {
+    destination: validatedDestination.destination,
+    remoteSource,
+    source,
+  })
   if (!Array.isArray(members)) return members
 
   const result = await conn.exec(cmd, EXEC_OPTS)
@@ -369,7 +372,7 @@ async function archiveOwnerMatches(
   const members = await validatedArchiveMembers(conn, { archivePath: source, source })
   if (!Array.isArray(members)) return false
   const matches = await Promise.all(
-    extractedMemberPaths(destination, members).map(async (path) =>
+    archiveMemberDestinationPaths(destination, members).map(async (path) =>
       extractedMemberOwnerMatches(conn, { owner, path })
     )
   )
