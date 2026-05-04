@@ -40,6 +40,17 @@ function captureExecFailure(callback: () => void): ExecFailure {
   throw new Error("Expected command to fail")
 }
 
+async function captureAsyncError(promise: Promise<unknown>): Promise<Error> {
+  try {
+    await promise
+  } catch (error) {
+    if (error instanceof Error) return error
+    throw new Error(`Expected Error rejection, received ${String(error)}`, { cause: error })
+  }
+
+  throw new Error("Expected promise to fail")
+}
+
 describe("PACKAGE_VERSION", () => {
   it("matches the version in package.json", () => {
     const packageJsonPath = resolve(new URL("../package.json", import.meta.url).pathname)
@@ -298,7 +309,7 @@ describe("isServerDefinitionLike", () => {
   })
 
   it("returns false for undefined", () => {
-    const value: unknown = void 0 as unknown
+    const value: unknown = undefined
     expect(isServerDefinitionLike(value)).toBe(false)
   })
 
@@ -1210,13 +1221,20 @@ describe("CLI entrypoint", () => {
       writeFileSync(playbookPath, "export default {}")
 
       const realCause = new Error("incompatible Node version: tsx requires Node >=20")
-      vi.doMock("tsx/esm/api", () => {
-        throw realCause
-      })
+      vi.doMock("tsx/esm/api", () => ({
+        register() {
+          throw realCause
+        },
+      }))
 
-      await expect(loadServerDefinitionFromFile(playbookPath, { firstRun: false })).rejects.toThrow(
-        /Failed to load tsx\/esm\/api/v
+      const error = await captureAsyncError(
+        loadServerDefinitionFromFile(playbookPath, { firstRun: false })
       )
+
+      expect(error).toMatchObject({
+        message: expect.stringMatching(/Failed to load tsx\/esm\/api/v),
+      })
+      expect(error.cause).toBe(realCause)
     } finally {
       vi.doUnmock("tsx/esm/api")
       rmSync(tempDirectory, { force: true, recursive: true })
@@ -1236,13 +1254,20 @@ describe("CLI entrypoint", () => {
         ),
         { code: "MODULE_NOT_FOUND" }
       )
-      vi.doMock("tsx/esm/api", () => {
-        throw realCause
-      })
+      vi.doMock("tsx/esm/api", () => ({
+        register() {
+          throw realCause
+        },
+      }))
 
-      await expect(loadServerDefinitionFromFile(playbookPath, { firstRun: false })).rejects.toThrow(
-        /Failed to load tsx\/esm\/api/v
+      const error = await captureAsyncError(
+        loadServerDefinitionFromFile(playbookPath, { firstRun: false })
       )
+
+      expect(error).toMatchObject({
+        message: expect.stringMatching(/Failed to load tsx\/esm\/api/v),
+      })
+      expect(error.cause).toBe(realCause)
     } finally {
       vi.doUnmock("tsx/esm/api")
       rmSync(tempDirectory, { force: true, recursive: true })
