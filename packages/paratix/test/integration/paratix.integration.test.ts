@@ -322,7 +322,9 @@ describe("Paratix integration", () => {
       const temporaryUploadsBeforeFailure = await ssh.lines(
         "find /tmp -maxdepth 1 -user paratix -name 'paratix-upload.*' -print | sort"
       )
-      await expect(ssh.uploadFile(localFailedUploadPath, missingParentUploadPath)).rejects.toThrow()
+      await expect(ssh.uploadFile(localFailedUploadPath, missingParentUploadPath)).rejects.toThrow(
+        "Command failed"
+      )
       await expect(
         ssh.lines("find /tmp -maxdepth 1 -user paratix -name 'paratix-upload.*' -print | sort")
       ).resolves.toStrictEqual(temporaryUploadsBeforeFailure)
