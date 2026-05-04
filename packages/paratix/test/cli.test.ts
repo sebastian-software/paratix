@@ -246,6 +246,23 @@ describe("collectEnvironment", () => {
     )
   })
 
+  it.each(["__proto__", "constructor", "prototype"])(
+    "calls process.exit(2) when the env name is reserved: %s",
+    (key) => {
+      let exitCalled = false
+      try {
+        collectEnvironment(`${key}=value`, {})
+      } catch {
+        exitCalled = true
+      }
+      expect(exitCalled).toBe(true)
+      expect(exitSpy).toHaveBeenCalledWith(2)
+      expect(errorSpy).toHaveBeenCalledWith(
+        `Forbidden --env name: ${key} (reserved JavaScript identifier)`
+      )
+    }
+  )
+
   it("accumulates multiple entries into the previous object", () => {
     const first = collectEnvironment("FOO=bar", {})
     const second = collectEnvironment("BAZ=qux", first)

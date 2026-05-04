@@ -8,6 +8,7 @@ import pc from "picocolors"
 import type { Environment, ServerDefinition } from "./types.js"
 
 import { isMissingTsxDependencyError } from "./cliTsxHelpers.js"
+import { ENVIRONMENT_FORBIDDEN_KEYS } from "./environment.js"
 import { printCliHeader } from "./output.js"
 import { type RunOptions, runPlaybook } from "./runner.js"
 import { maskRegisteredSecrets } from "./secretSink.js"
@@ -432,6 +433,11 @@ export function collectEnvironment(
     console.error(
       `Invalid --env name: ${key === "" ? "(empty)" : key} (expected [A-Za-z_][A-Za-z0-9_]*)`
     )
+    // eslint-disable-next-line node/no-process-exit
+    process.exit(2)
+  }
+  if (ENVIRONMENT_FORBIDDEN_KEYS.has(key)) {
+    console.error(`Forbidden --env name: ${key} (reserved JavaScript identifier)`)
     // eslint-disable-next-line node/no-process-exit
     process.exit(2)
   }
