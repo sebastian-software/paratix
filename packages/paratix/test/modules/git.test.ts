@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest"
 
 import { git } from "../../src/modules/git.js"
+import { shellQuote } from "../../src/ssh.js"
 import { createMockSsh as createBaseMockSsh } from "../helpers/mockSsh.js"
 
 const emptyEnv = {}
@@ -196,6 +197,34 @@ describe("git.clone — check", () => {
     await mod.check(mockSsh, emptyEnv)
     expect(mockSsh.calls).toContain(`git -C '${destination}' ls-remote origin 'main'`)
   })
+
+  it("quotes adversarial destination and ref values during check", async () => {
+    const adversarialRepo = "git@example.com:team/repo '$(touch repo-check)'.git"
+    const adversarialDestination = "/opt/my app/it's $(touch dest-check)"
+    const adversarialRef = "release/it's $(touch ref-check)"
+    const adversarialGitDir = `${adversarialDestination}/.git`
+    const quotedDestination = shellQuote(adversarialDestination)
+    const quotedRef = shellQuote(adversarialRef)
+    const sha = "abc123"
+    const mockSsh = createMockSsh({
+      [`git -C ${quotedDestination} ls-remote origin ${quotedRef}`]: {
+        code: 0,
+        stdout: `${sha}\trefs/heads/${adversarialRef}\n`,
+      },
+      [`git -C ${quotedDestination} remote get-url origin`]: {
+        code: 0,
+        stdout: adversarialRepo,
+      },
+      [`git -C ${quotedDestination} rev-parse HEAD`]: { code: 0, stdout: sha },
+      [`test -d ${shellQuote(adversarialGitDir)}`]: { code: 0 },
+    })
+    const mod = git.clone(adversarialRepo, adversarialDestination, { ref: adversarialRef })
+
+    const result = await mod.check(mockSsh, emptyEnv)
+
+    expect(result).toBe("ok")
+    expect(mockSsh.calls).toContain(`git -C ${quotedDestination} ls-remote origin ${quotedRef}`)
+  })
 })
 
 describe("git.clone — apply", () => {
@@ -224,6 +253,32 @@ describe("git.clone — apply", () => {
     const result = await mod.apply(mockSsh, emptyEnv)
     expect(result.status).toBe("changed")
     expect(mockSsh.calls).toContain(`git clone --branch 'main' '${repo}' '${destination}'`)
+  })
+
+  it("quotes adversarial repo, destination, and ref values when cloning", async () => {
+    const adversarialRepo = "git@example.com:team/repo '$(touch repo-apply)'.git"
+    const adversarialDestination = "/opt/my app/it's $(touch dest-apply)"
+    const adversarialRef = "release/it's $(touch ref-apply)"
+    const adversarialGitDir = `${adversarialDestination}/.git`
+    const expectedCommand = [
+      "git clone --branch",
+      shellQuote(adversarialRef),
+      shellQuote(adversarialRepo),
+      shellQuote(adversarialDestination),
+    ].join(" ")
+    const mockSsh = createMockSsh({
+      [`test -d ${shellQuote(adversarialGitDir)}`]: { code: 1 },
+      [expectedCommand]: { code: 0 },
+    })
+    const mod = git.clone(adversarialRepo, adversarialDestination, { ref: adversarialRef })
+
+    const result = await mod.apply(mockSsh, emptyEnv)
+
+    expect(result.status).toBe("changed")
+    expect(mockSsh.execCalls).toContainEqual({
+      command: expectedCommand,
+      options: { ignoreExitCode: true, silent: true },
+    })
   })
 
   it("pulls when .git exists and no ref is given", async () => {
