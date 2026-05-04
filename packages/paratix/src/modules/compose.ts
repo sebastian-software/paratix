@@ -11,7 +11,6 @@ const UNIT_NAME_PATTERN = /^[\w@.\-]+$/v
 const COMPOSE_CONFIG_MODE = "0600"
 const SYSTEMD_UNIT_MODE = "0644"
 
-// cspell:ignore podman
 type ComposeRuntime = "docker" | "podman"
 
 function requireComposeSsh(

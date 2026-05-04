@@ -1,4 +1,3 @@
-// cspell:ignore fstype noexec nosuid nodev tmpfs umount findmnt noheadings mountpoint fstab
 import { describe, expect, it } from "vitest"
 
 import { mount } from "../../src/modules/mount.js"

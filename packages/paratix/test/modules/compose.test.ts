@@ -14,8 +14,6 @@ const emptyEnv = {}
 
 const projectDirectory = "/opt/app"
 
-// cspell:ignore podman
-
 // Helper: build the compose command prefix for a given runtime
 function composeCmd(runtime: "docker" | "podman"): string {
   return `${runtime} compose --project-directory '${projectDirectory}'`

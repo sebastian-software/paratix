@@ -4,7 +4,6 @@ import { failed, failedCommand } from "../moduleFailure.js"
 import { shellQuote, validateMktempPath } from "../ssh.js"
 import { buildCurlConfigPayload, hasSensitiveQueryParameters } from "./curlHelpers.js"
 
-// cspell:ignore OPENPGP
 const OPENPGP_FINGERPRINT_RE = /^[A-F0-9]{40,64}$/v
 
 export function normalizeOpenPgpFingerprint(fingerprint: string): string {
