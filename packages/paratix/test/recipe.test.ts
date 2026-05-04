@@ -2,7 +2,9 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 
 import type { Environment, Module } from "../src/types.js"
 
-import { firstRun, signals } from "../src/builtins.js"
+import { assert, fail, firstRun, signals } from "../src/builtins.js"
+import { dryRunRecipeModule } from "../src/dryRunRecipe.js"
+import { resolveEnvironment } from "../src/environment.js"
 import { recipe } from "../src/recipe.js"
 import { setRunnerAbortSignal } from "../src/runnerAbortSignal.js"
 import { CommandError } from "../src/sshHelpers.js"
@@ -515,6 +517,85 @@ describe("recipe", () => {
     const r = recipe("empty", [])
     const result = await r.check(null, emptyEnv)
     expect(result).toBe("ok")
+  })
+
+  it("aggregates dry-run blocker markers from nested recipe children", () => {
+    const nestedRecipe = recipe("nested-recipe", [assert(() => false, "must pass")])
+    const outerRecipe = recipe("outer-recipe", [nestedRecipe])
+
+    expect(nestedRecipe._dryRunBlocker).toBe(true)
+    expect(nestedRecipe._applyDryRun).toStrictEqual(expect.any(Function))
+    expect(outerRecipe._dryRunBlocker).toBe(true)
+    expect(outerRecipe._applyDryRun).toStrictEqual(expect.any(Function))
+  })
+
+  it("treats nested fail() as a blocker in recipe dry-run mode", async () => {
+    const laterChild: Module = {
+      apply: vi.fn().mockResolvedValue({ status: "changed" }),
+      check: vi.fn().mockResolvedValue("needs-apply"),
+      name: "later-child",
+    }
+    const outerRecipe = recipe("outer-recipe", [
+      recipe("nested-recipe", [fail("stop here")]),
+      laterChild,
+    ])
+
+    const result = await dryRunRecipeModule({
+      environment: emptyEnv,
+      recipeModule: outerRecipe,
+      ssh: createMockSsh(),
+    })
+
+    expect(result.status).toBe("failed")
+    expect(result.shouldBreak).toBe(true)
+    expect(laterChild.check).not.toHaveBeenCalled()
+    expect(laterChild.apply).not.toHaveBeenCalled()
+  })
+
+  it("propagates nested dry-run meta producer env to later recipe children", async () => {
+    const metaProducer: Module = {
+      _dryRunMetaProducer: true,
+      apply: vi.fn().mockResolvedValue({
+        meta: [
+          {
+            kind: "env",
+            name: "TOKEN",
+            async resolve() {
+              await Promise.resolve()
+              return "nested-secret"
+            },
+            valueType: "string",
+          },
+        ],
+        status: "ok",
+      }),
+      check: vi.fn().mockResolvedValue("needs-apply"),
+      name: "meta-producer",
+    }
+    let receivedEnvInCheck: Environment | undefined
+    const dependentChild: Module = {
+      apply: vi.fn().mockResolvedValue({ status: "ok" }),
+      check: vi.fn().mockImplementation(async (_ssh, env: Environment) => {
+        await Promise.resolve()
+        receivedEnvInCheck = env
+        return "ok" as const
+      }),
+      name: "dependent-child",
+    }
+    const outerRecipe = recipe("outer-recipe", [
+      recipe("nested-recipe", [metaProducer]),
+      dependentChild,
+    ])
+
+    await dryRunRecipeModule({
+      environment: emptyEnv,
+      recipeModule: outerRecipe,
+      ssh: createMockSsh(),
+    })
+
+    expect(receivedEnvInCheck).toBeDefined()
+    await expect(resolveEnvironment(receivedEnvInCheck!, "TOKEN")).resolves.toBe("nested-secret")
+    expect(dependentChild.apply).not.toHaveBeenCalled()
   })
 
   it("check returns ok when all child modules report ok", async () => {

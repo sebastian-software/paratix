@@ -1,4 +1,5 @@
 /* eslint-disable max-lines -- recipe orchestration intentionally stays co-located */
+import { dryRunRecipeModule } from "./dryRunRecipe.js"
 import { createNullPrototypeEnvironment } from "./environment.js"
 import { isEnvironmentMetaEntry, mergeEnvironmentFromMeta } from "./meta.js"
 import {
@@ -473,6 +474,51 @@ function shouldRunRecipeSignalsAtEnd(state: RecipeState, signals?: Module[]): si
   return state.signalsPending && state.status === "changed" && signals != null
 }
 
+function shouldExecuteRecipeDryRun(module: Module): boolean {
+  return (
+    module._applyDryRun != null ||
+    module._dryRunBlocker === true ||
+    module._dryRunMetaProducer === true
+  )
+}
+
+function recipeNeedsDryRunApply(modules: Module[]): boolean {
+  return modules.some((module) => shouldExecuteRecipeDryRun(module))
+}
+
+function createRecipeDryRunApply(
+  name: string,
+  modules: Module[],
+  needsDryRunApply: boolean
+): Module["_applyDryRun"] | undefined {
+  if (!needsDryRunApply) return undefined
+  return async (ssh: null | SshConnection, environment: Environment): Promise<ModuleResult> => {
+    const result = await dryRunRecipeModule({
+      environment,
+      recipeModule: {
+        _isRecipe: true,
+        _modules: modules,
+        async apply() {
+          await Promise.resolve()
+          return { status: "ok" }
+        },
+        async check() {
+          await Promise.resolve()
+          return "ok"
+        },
+        name,
+      },
+      ssh,
+    })
+
+    return {
+      _stopRun: result.stopRun,
+      meta: result.meta,
+      status: result.status ?? "ok",
+    }
+  }
+}
+
 /**
  * Group a list of modules into a named, self-contained recipe.
  *
@@ -501,7 +547,17 @@ export function recipe(
   modules: Module[],
   options?: { signals?: Module[] }
 ): RecipeModule {
+  const needsDryRunApply = recipeNeedsDryRunApply(modules)
+  const applyDryRun = createRecipeDryRunApply(name, modules, needsDryRunApply)
+
   return {
+    ...(modules.some((module) => module._dryRunBlocker === true)
+      ? { _dryRunBlocker: true as const }
+      : {}),
+    ...(modules.some((module) => module._dryRunMetaProducer === true)
+      ? { _dryRunMetaProducer: true as const }
+      : {}),
+    ...(applyDryRun == null ? {} : { _applyDryRun: applyDryRun }),
     _isRecipe: true,
     _modules: modules,
     _signals: options?.signals,

@@ -1,6 +1,5 @@
 import type { RecipeModule } from "./recipe.js"
-import type { SshConnectionImpl } from "./ssh.js"
-import type { Environment, ModuleStatus } from "./types.js"
+import type { Environment, ModuleMetaEntry, ModuleStatus, SshConnection } from "./types.js"
 
 import { mergeEnvironmentFromMeta } from "./meta.js"
 import {
@@ -11,7 +10,13 @@ import {
   withRecipeOutputScope,
 } from "./output.js"
 
-type StepResult = { env: Environment; shouldBreak: boolean; status?: ModuleStatus; stopRun?: true }
+type StepResult = {
+  env: Environment
+  meta?: ModuleMetaEntry[]
+  shouldBreak: boolean
+  status?: ModuleStatus
+  stopRun?: true
+}
 
 function shouldExecuteApplyDuringDryRun(module: RecipeModule["_modules"][number]): boolean {
   return (
@@ -23,7 +28,7 @@ function shouldExecuteApplyDuringDryRun(module: RecipeModule["_modules"][number]
 
 async function executeDryRunBlockingModule(parameters: {
   childModule: RecipeModule["_modules"][number]
-  connection: null | SshConnectionImpl
+  connection: null | SshConnection
   environment: Environment
   verbose: boolean
 }): Promise<StepResult> {
@@ -41,6 +46,7 @@ async function executeDryRunBlockingModule(parameters: {
   }
   return {
     env: nextEnvironment,
+    meta: result.meta,
     shouldBreak: result.status === "failed" || result._stopRun === true,
     status: result.status,
     stopRun: result._stopRun,
@@ -50,7 +56,7 @@ async function executeDryRunBlockingModule(parameters: {
 async function executeDryRunChildModule(parameters: {
   childModule: RecipeModule["_modules"][number]
   environment: Environment
-  ssh: SshConnectionImpl
+  ssh: null | SshConnection
   verbose: boolean
 }): Promise<StepResult> {
   const { childModule, environment, ssh, verbose } = parameters
@@ -72,12 +78,13 @@ export async function dryRunRecipeModule(parameters: {
     verbose?: boolean
   }
   recipeModule: RecipeModule
-  ssh: SshConnectionImpl
+  ssh: null | SshConnection
 }): Promise<StepResult> {
   return withRecipeOutputScope(async () => {
     const { environment, recipeModule, ssh } = parameters
     printRecipeHeader(recipeModule.name)
     let aggregatedStatus: "changed" | "ok" = "ok"
+    const aggregatedMeta: ModuleMetaEntry[] = []
     let currentEnvironment = environment
     const verbose = parameters.options?.verbose ?? false
 
@@ -91,9 +98,15 @@ export async function dryRunRecipeModule(parameters: {
       })
       if (result.shouldBreak) return result
       currentEnvironment = result.env
+      if (result.meta != null) aggregatedMeta.push(...result.meta)
       if (result.status === "changed") aggregatedStatus = "changed"
     }
 
-    return { env: currentEnvironment, shouldBreak: false, status: aggregatedStatus }
+    return {
+      env: currentEnvironment,
+      meta: aggregatedMeta.length === 0 ? undefined : aggregatedMeta,
+      shouldBreak: false,
+      status: aggregatedStatus,
+    }
   })
 }
