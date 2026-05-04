@@ -30,7 +30,7 @@ export default defineConfig({
     PACKAGE_VERSION: JSON.stringify(version),
   },
   test: {
-    exclude: ["test/integration/**/*.test.ts"],
+    exclude: ["test/integration/**/*.test.ts", "test/postbuild/**/*.test.ts"],
     include: ["test/**/*.test.ts"],
   },
 })

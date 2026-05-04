@@ -16,8 +16,10 @@
   },
   "scripts": {
     "build": "tsup",
-    "test": "vitest run",
-    "test:integration": "vitest run --config vitest.integration.config.ts",
+    "test": "pnpm test:unit && pnpm test:dist",
+    "test:dist": "pnpm build && vitest run --config vitest.distribution.config.ts",
+    "test:integration": "pnpm build && vitest run --config vitest.integration.config.ts",
+    "test:unit": "vitest run",
     "test:watch": "vitest"
   },
   "dependencies": {
