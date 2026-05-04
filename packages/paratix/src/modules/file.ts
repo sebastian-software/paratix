@@ -80,11 +80,10 @@ async function applyLineAppend(input: {
     if (splitLines(existingContent).includes(input.line)) return { status: "ok" }
   }
 
-  // Append line using printf to avoid shell interpretation
-  await input.ssh.exec(
-    `printf '%s\\n' ${shellQuote(input.line)} >> ${shellQuote(input.remotePath)}`,
-    { silent: true }
-  )
+  await input.ssh.exec(`cat >> ${shellQuote(input.remotePath)}`, {
+    input: `${input.line}\n`,
+    silent: true,
+  })
   return { status: "changed" }
 }
 

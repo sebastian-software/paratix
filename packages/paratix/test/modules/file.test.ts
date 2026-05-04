@@ -777,10 +777,7 @@ describe("file.line — apply without options.match", () => {
     const result = await mod.apply(ssh, emptyEnv)
 
     expect(result.status).toBe("ok")
-    // No printf append must have been issued because the line already exists.
-    const appendIssued = appendCalls.some((command) =>
-      command.startsWith("printf '%s\\n' 'my-line'")
-    )
+    const appendIssued = appendCalls.some((command) => command === "cat >> '/etc/config'")
     expect(appendIssued).toBe(false)
   })
 
@@ -811,13 +808,30 @@ describe("file.line — apply without options.match", () => {
 
     expect(firstResult.status).toBe("changed")
     expect(secondResult.status).toBe("ok")
-    const appendCount = appendCalls.filter(
-      (command) => command === "printf '%s\\n' 'my-line' >> '/etc/config'"
-    ).length
+    const appendCount = appendCalls.filter((command) => command === "cat >> '/etc/config'").length
     expect(appendCount).toBe(1)
     // The remote view must contain "my-line" exactly once.
     const occurrences = state.content.match(/^my-line$/gmv)
     expect(occurrences).toStrictEqual(["my-line"])
+  })
+
+  it("appends the line through stdin so secret content is not exposed in the SSH command", async () => {
+    const secretLine = "API_TOKEN=secret-token-with 'quotes' and spaces"
+    const ssh = createMockSsh({
+      "[ -e '/etc/config' ]": { code: 0 },
+      "cat '/etc/config'": { stdout: "first-line\nlast-line\n" },
+      "cat >> '/etc/config'": { code: 0 },
+    })
+
+    const mod = file.line("/etc/config", secretLine)
+    const result = await mod.apply(ssh, emptyEnv)
+
+    expect(result.status).toBe("changed")
+    expect(ssh.execCalls).toContainEqual({
+      command: "cat >> '/etc/config'",
+      options: { input: `${secretLine}\n`, silent: true },
+    })
+    expect(ssh.execCalls.map((call) => call.command).join("\n")).not.toContain(secretLine)
   })
 })
 
