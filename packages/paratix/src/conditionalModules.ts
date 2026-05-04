@@ -59,6 +59,13 @@ function shouldExecuteConditionalApply(module: Module, dryRun: boolean): boolean
   )
 }
 
+function getConditionalChildConnection(
+  module: Module,
+  ssh: null | SshConnection
+): null | SshConnection {
+  return module.local === true ? null : ssh
+}
+
 async function mergeConditionalApplyState(
   state: ConditionalApplyState,
   result: ModuleResult
@@ -83,8 +90,9 @@ async function applyConditionalModules(parameters: {
   let state = createConditionalApplyState(parameters.environment)
 
   for (const currentModule of modules) {
+    const connection = getConditionalChildConnection(currentModule, ssh)
     // eslint-disable-next-line no-await-in-loop
-    const checkResult = await currentModule.check(ssh, state.environment)
+    const checkResult = await currentModule.check(connection, state.environment)
     if (checkResult === "ok") continue
 
     if (!shouldExecuteConditionalApply(currentModule, dryRun)) {
@@ -97,7 +105,7 @@ async function applyConditionalModules(parameters: {
       dryRun,
       environment: state.environment,
       module: currentModule,
-      ssh,
+      ssh: connection,
     })
     if (result.status === "failed") return result
     // eslint-disable-next-line no-await-in-loop -- downstream env must see each module's meta in order
@@ -134,8 +142,9 @@ async function checkConditionalModules(
   // for the check-side traversal of when(...) guards.
   const currentEnvironment = Object.assign(createNullPrototypeEnvironment(), environment)
   for (const currentModule of modules) {
+    const connection = getConditionalChildConnection(currentModule, ssh)
     // eslint-disable-next-line no-await-in-loop
-    const result = await currentModule.check(ssh, currentEnvironment)
+    const result = await currentModule.check(connection, currentEnvironment)
     if (result === NEEDS_APPLY) {
       return NEEDS_APPLY
     }

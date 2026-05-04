@@ -379,6 +379,75 @@ describe("when", () => {
     expect(result.status).toBe("ok")
   })
 
+  it("passes null to local child module in check()", async () => {
+    const localModule: Module = {
+      apply: vi.fn().mockResolvedValue({ status: "changed" }),
+      check: vi.fn().mockResolvedValue("ok"),
+      local: true,
+      name: "local-child",
+    }
+    const remoteModule: Module = {
+      apply: vi.fn().mockResolvedValue({ status: "changed" }),
+      check: vi.fn().mockResolvedValue("ok"),
+      name: "remote-child",
+    }
+    const mockSsh = createMockSsh()
+    const mod = when(() => true, localModule, remoteModule)
+
+    await mod.check(mockSsh, emptyEnv)
+
+    expect(localModule.check).toHaveBeenCalledWith(null, expect.any(Object))
+    expect(remoteModule.check).toHaveBeenCalledWith(mockSsh, expect.any(Object))
+  })
+
+  it("passes null to local child module in apply()", async () => {
+    const localModule: Module = {
+      apply: vi.fn().mockResolvedValue({ status: "changed" }),
+      check: vi.fn().mockResolvedValue("needs-apply"),
+      local: true,
+      name: "local-child",
+    }
+    const remoteModule: Module = {
+      apply: vi.fn().mockResolvedValue({ status: "changed" }),
+      check: vi.fn().mockResolvedValue("needs-apply"),
+      name: "remote-child",
+    }
+    const mockSsh = createMockSsh()
+    const mod = when(() => true, localModule, remoteModule)
+
+    await mod.apply(mockSsh, emptyEnv)
+
+    expect(localModule.check).toHaveBeenCalledWith(null, expect.any(Object))
+    expect(localModule.apply).toHaveBeenCalledWith(null, expect.any(Object))
+    expect(remoteModule.check).toHaveBeenCalledWith(mockSsh, expect.any(Object))
+    expect(remoteModule.apply).toHaveBeenCalledWith(mockSsh, expect.any(Object))
+  })
+
+  it("passes null to local child module in dry-run apply()", async () => {
+    const localModule: Module = {
+      _applyDryRun: vi.fn().mockResolvedValue({ status: "changed" }),
+      apply: vi.fn().mockResolvedValue({ status: "changed" }),
+      check: vi.fn().mockResolvedValue("needs-apply"),
+      local: true,
+      name: "local-child",
+    }
+    const remoteModule: Module = {
+      _applyDryRun: vi.fn().mockResolvedValue({ status: "changed" }),
+      apply: vi.fn().mockResolvedValue({ status: "changed" }),
+      check: vi.fn().mockResolvedValue("needs-apply"),
+      name: "remote-child",
+    }
+    const mockSsh = createMockSsh()
+    const mod = when(() => true, localModule, remoteModule)
+
+    await mod._applyDryRun?.(mockSsh, emptyEnv)
+
+    expect(localModule.check).toHaveBeenCalledWith(null, expect.any(Object))
+    expect(localModule._applyDryRun).toHaveBeenCalledWith(null, expect.any(Object))
+    expect(remoteModule.check).toHaveBeenCalledWith(mockSsh, expect.any(Object))
+    expect(remoteModule._applyDryRun).toHaveBeenCalledWith(mockSsh, expect.any(Object))
+  })
+
   it("apply propagates error details when an inner module returns failed", async () => {
     const innerModule = makeFailedModule("inner module exploded")
     const mod = when(() => true, innerModule)
