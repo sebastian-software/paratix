@@ -89,6 +89,36 @@ describe("sftpDownload", () => {
     )
   })
 
+  it("rejects and closes the sftp session when remote read stream creation throws", async () => {
+    const { sftp, sftpEnd } = makeSftpSession()
+    const client = makeClientMock(sftp)
+    vi.mocked(sftp.createReadStream).mockImplementation(() => {
+      throw new Error("remote open failed")
+    })
+
+    await expect(sftpDownload(client, "/remote/file.txt", "/local/file.txt")).rejects.toThrow(
+      "remote open failed"
+    )
+    expect(sftpEnd).toHaveBeenCalledOnce()
+    expect(vi.mocked(createWriteStream)).not.toHaveBeenCalled()
+    expect(vi.mocked(unlinkSync)).not.toHaveBeenCalled()
+  })
+
+  it("rejects, destroys the remote stream, and closes sftp when local write stream creation throws", async () => {
+    const { sftp, sftpEnd, sftpReadStream } = makeSftpSession()
+    const client = makeClientMock(sftp)
+    vi.mocked(createWriteStream).mockImplementation(() => {
+      throw new Error("local open failed")
+    })
+
+    await expect(sftpDownload(client, "/remote/file.txt", "/local/file.txt")).rejects.toThrow(
+      "local open failed"
+    )
+    expect(sftpReadStream.destroy).toHaveBeenCalledOnce()
+    expect(sftpEnd).toHaveBeenCalledOnce()
+    expect(vi.mocked(unlinkSync)).not.toHaveBeenCalled()
+  })
+
   it("does not remove the local path when the sftp session fails before creating the writeStream", async () => {
     const connectionError = new Error("sftp session failed")
     const client = {
@@ -539,6 +569,36 @@ describe("sftpUpload", () => {
     await expect(sftpUpload(client, "/local/file.txt", "/remote/file.txt")).rejects.toThrow(
       "sftp session failed"
     )
+  })
+
+  it("rejects and closes the sftp session when local read stream creation throws", async () => {
+    const { sftp, sftpEnd } = makeSftpSession()
+    const client = makeClientMock(sftp)
+    vi.mocked(createReadStream).mockImplementation(() => {
+      throw new Error("local open failed")
+    })
+
+    await expect(sftpUpload(client, "/local/file.txt", "/remote/file.txt")).rejects.toThrow(
+      "local open failed"
+    )
+    expect(sftpEnd).toHaveBeenCalledOnce()
+    expect(sftp.createWriteStream).not.toHaveBeenCalled()
+  })
+
+  it("rejects, destroys the local stream, and closes sftp when remote write stream creation throws", async () => {
+    const { sftp, sftpEnd } = makeSftpSession()
+    const client = makeClientMock(sftp)
+    const localReadStream = makeMockStream()
+    vi.mocked(createReadStream).mockReturnValue(localReadStream as unknown as ReadStream)
+    vi.mocked(sftp.createWriteStream).mockImplementation(() => {
+      throw new Error("remote open failed")
+    })
+
+    await expect(sftpUpload(client, "/local/file.txt", "/remote/file.txt")).rejects.toThrow(
+      "remote open failed"
+    )
+    expect(localReadStream.destroy).toHaveBeenCalledOnce()
+    expect(sftpEnd).toHaveBeenCalledOnce()
   })
 
   it("creates the remote writeStream with restrictive mode 0600", async () => {

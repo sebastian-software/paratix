@@ -142,10 +142,25 @@ export async function sftpDownload(
         return
       }
 
-      const readStream = sftp.createReadStream(remotePath)
-      // eslint-disable-next-line security/detect-non-literal-fs-filename
-      const writeStream = createWriteStream(temporaryPath, { mode: 0o600 })
-      shouldCleanupTemporaryFile = true
+      let readStream: Readable | undefined
+      let writeStream: Writable | undefined
+      try {
+        readStream = sftp.createReadStream(remotePath)
+        // eslint-disable-next-line security/detect-non-literal-fs-filename
+        writeStream = createWriteStream(temporaryPath, { mode: 0o600 })
+        shouldCleanupTemporaryFile = true
+      } catch (streamError) {
+        if (readStream !== undefined && typeof readStream.destroy === "function") {
+          readStream.destroy()
+        }
+        sftp.end()
+        rejectWithCleanup(
+          streamError instanceof Error
+            ? streamError
+            : new Error(`Failed to create SFTP download streams: ${String(streamError)}`)
+        )
+        return
+      }
 
       wireStreams({
         completionEvents: ["finish"],
@@ -195,9 +210,24 @@ export async function sftpUpload(
         return
       }
 
-      // eslint-disable-next-line security/detect-non-literal-fs-filename
-      const readStream = createReadStream(localPath)
-      const writeStream = sftp.createWriteStream(remotePath, { mode: 0o600 })
+      let readStream: Readable | undefined
+      let writeStream: Writable | undefined
+      try {
+        // eslint-disable-next-line security/detect-non-literal-fs-filename
+        readStream = createReadStream(localPath)
+        writeStream = sftp.createWriteStream(remotePath, { mode: 0o600 })
+      } catch (streamError) {
+        if (readStream !== undefined && typeof readStream.destroy === "function") {
+          readStream.destroy()
+        }
+        sftp.end()
+        reject(
+          streamError instanceof Error
+            ? streamError
+            : new Error(`Failed to create SFTP upload streams: ${String(streamError)}`)
+        )
+        return
+      }
 
       wireStreams({
         completionEvents: ["close", "finish"],
