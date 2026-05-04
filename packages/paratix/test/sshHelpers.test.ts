@@ -517,6 +517,30 @@ describe("collectStreamOutput", () => {
 
     await expect(promise).rejects.toThrow("ECONNRESET")
   })
+
+  it("rejects immediately with the stderr stream error", async () => {
+    const { stderr, stream } = createMockChannel()
+    const stderrError = new Error("stderr channel reset")
+
+    const promise = new Promise<{ code: number; stderr: string; stdout: string }>(
+      (resolve, reject) => {
+        const timer = setTimeout(() => {
+          reject(new Error("Timed out — stderr stream error was not forwarded"))
+        }, 5000)
+        collectStreamOutput({
+          command: "cat /etc/hosts",
+          options: { silent: true },
+          reject,
+          resolve,
+          stream: stream as unknown as StreamOutputParameters["stream"],
+          timer,
+        })
+        stderr.emit("error", stderrError)
+      }
+    )
+
+    await expect(promise).rejects.toThrow("stderr channel reset")
+  })
 })
 
 // ---------------------------------------------------------------------------

@@ -273,6 +273,12 @@ export function collectStreamOutput(parameters: StreamOutputParameters): void {
     stderrMasker.flush()
     reject(error)
   })
+  stream.stderr.on("error", (error: Error) => {
+    clearTimeout(timer)
+    stdoutMasker.flush()
+    stderrMasker.flush()
+    reject(error)
+  })
   stream.on("close", (code: null | number | undefined, signal?: null | string) => {
     clearTimeout(timer)
     stdoutMasker.flush()
