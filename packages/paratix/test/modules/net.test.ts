@@ -875,6 +875,24 @@ describe("net writers — CR/LF validation", () => {
     )
   })
 
+  it("rejects empty resolv nameservers", () => {
+    expect(() => net.resolv({ nameservers: [] })).toThrow(/at least one nameserver/v)
+  })
+
+  it("rejects invalid resolv nameserver addresses", () => {
+    expect(() => net.resolv({ nameservers: [""] })).toThrow(/valid IPv4 or IPv6 address/v)
+    expect(() => net.resolv({ nameservers: ["999.999.999.999"] })).toThrow(
+      /valid IPv4 or IPv6 address/v
+    )
+    expect(() => net.resolv({ nameservers: ["not-an-ip"] })).toThrow(
+      /valid IPv4 or IPv6 address/v
+    )
+  })
+
+  it("accepts IPv4 and IPv6 resolv nameservers", () => {
+    expect(() => net.resolv({ nameservers: ["1.1.1.1", "2001:4860:4860::8888"] })).not.toThrow()
+  })
+
   it("rejects resolv search domains containing line breaks", () => {
     expect(() =>
       net.resolv({
@@ -882,6 +900,19 @@ describe("net writers — CR/LF validation", () => {
         search: ["example.com\nnameserver 9.9.9.9"],
       })
     ).toThrow(/resolv search domain.*CR or LF/v)
+  })
+
+  it("rejects invalid resolv search domains", () => {
+    const invalidDomains = ["", "bad domain", "_srv.example", "-example.com", "example-.com", "a..b"]
+    for (const domain of invalidDomains) {
+      expect(() => net.resolv({ nameservers: ["1.1.1.1"], search: [domain] })).toThrow(
+        /invalid search domain/v
+      )
+    }
+  })
+
+  it("accepts single-label resolv search domains", () => {
+    expect(() => net.resolv({ nameservers: ["1.1.1.1"], search: ["local"] })).not.toThrow()
   })
 
   it("rejects route destinations containing line breaks", () => {

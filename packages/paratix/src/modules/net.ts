@@ -71,6 +71,30 @@ function validateInterfaceOptions(options: InterfaceOptions): void {
 function validateResolvOptions(options: { nameservers: string[]; search?: string[] }): void {
   validateSingleLineNetworkValues("resolv nameserver", options.nameservers)
   validateSingleLineNetworkValues("resolv search domain", options.search)
+  if (options.nameservers.length === 0) {
+    throw new Error("[net.resolv] invalid nameservers: at least one nameserver is required")
+  }
+  for (const nameserver of options.nameservers) {
+    if (isIP(nameserver) === 0) {
+      throw new Error("[net.resolv] invalid nameserver: value must be a valid IPv4 or IPv6 address")
+    }
+  }
+  for (const domain of options.search ?? []) {
+    validateResolvSearchDomain(domain)
+  }
+}
+
+function validateResolvSearchDomain(domain: string): void {
+  if (domain === "" || /\s/v.test(domain)) {
+    throw new Error("[net.resolv] invalid search domain: value must be a non-empty single token")
+  }
+  if (domain.length > MAX_HOSTNAME_LENGTH) {
+    throw new Error("[net.resolv] invalid search domain: value is too long")
+  }
+  const labels = domain.split(".")
+  if (labels.some((label) => !isValidHostnameLabel(label))) {
+    throw new Error("[net.resolv] invalid search domain: value must be a valid DNS domain")
+  }
 }
 
 function validateRouteOptions(parameters: {
