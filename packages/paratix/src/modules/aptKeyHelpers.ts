@@ -2,6 +2,7 @@ import type { ModuleResult, SshConnection } from "../types.js"
 
 import { failed, failedCommand } from "../moduleFailure.js"
 import { shellQuote, validateMktempPath } from "../ssh.js"
+import { buildCurlConfigPayload, hasSensitiveQueryParameters } from "./curlHelpers.js"
 
 // cspell:ignore OPENPGP
 const OPENPGP_FINGERPRINT_RE = /^[A-F0-9]{40,64}$/v
@@ -44,6 +45,21 @@ export function validateAptKeyUrl(url: string): void {
   if (parsedUrl.protocol !== "https:") {
     throw new Error(`apt.key requires an https URL, got: ${url}`)
   }
+}
+
+function extractAptKeyUrlSecrets(url: string): string[] {
+  const parsedUrl = new URL(url)
+  const secrets: string[] = []
+  if (
+    parsedUrl.username.length > 0 ||
+    parsedUrl.password.length > 0 ||
+    hasSensitiveQueryParameters(parsedUrl)
+  ) {
+    secrets.push(url)
+  }
+  if (parsedUrl.username.length > 0) secrets.push(decodeURIComponent(parsedUrl.username))
+  if (parsedUrl.password.length > 0) secrets.push(decodeURIComponent(parsedUrl.password))
+  return secrets
 }
 
 async function inspectOpenPgpFingerprint(
@@ -133,11 +149,16 @@ async function downloadVerifyAndImportAptKey(
   }
 ): Promise<ModuleResult> {
   const { expectedFingerprint, keyringPath, name, temporaryPath, url } = parameters
-  const download = await ssh.exec(`curl -fsSL ${shellQuote(url)} -o ${shellQuote(temporaryPath)}`, {
+  const urlSecrets = extractAptKeyUrlSecrets(url)
+  const curlConfig = buildCurlConfigPayload({ routeUrlThroughConfig: true, url })
+  const download = await ssh.exec(`curl -fsSL -o ${shellQuote(temporaryPath)} --config -`, {
     ignoreExitCode: true,
+    input: curlConfig.configInput,
+    secrets: urlSecrets,
     silent: true,
   })
-  if (download.code !== 0) return failedCommand(`[apt.key] failed to download ${name}`, download)
+  if (download.code !== 0)
+    return failedCommand(`[apt.key] failed to download ${name}`, download, urlSecrets)
   const fingerprintCheck = await verifyAptKeyFingerprint({
     expectedFingerprint,
     name,

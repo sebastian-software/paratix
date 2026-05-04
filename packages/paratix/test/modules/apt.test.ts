@@ -19,6 +19,7 @@ const SUCCESSFUL_EXEC_DEFAULT = { code: 0 } as const
 
 describe("apt.key", () => {
   const fingerprint = "1234567890ABCDEF1234567890ABCDEF12345678"
+  const downloadCommand = "curl -fsSL -o '/tmp/apt-key-docker.ABCDEF' --config -"
 
   it("check returns ok when key file exists", async () => {
     const ssh = createMockSsh({
@@ -63,7 +64,7 @@ describe("apt.key", () => {
 
   it("apply downloads, verifies fingerprint, and then imports the key", async () => {
     const ssh = createMockSsh({
-      "curl -fsSL 'https://download.docker.com/linux/ubuntu/gpg' -o '/tmp/apt-key-docker.ABCDEF'": {
+      [downloadCommand]: {
         code: 0,
       },
       "gpg --dearmor --yes -o '/etc/apt/keyrings/docker.gpg' '/tmp/apt-key-docker.ABCDEF'": {
@@ -82,18 +83,48 @@ describe("apt.key", () => {
     expect(result).toStrictEqual({ status: "changed" })
     expect(ssh.calls).toContain("mkdir -p /etc/apt/keyrings")
     expect(ssh.calls).toContain("mktemp '/tmp/apt-key-docker.XXXXXX'")
-    expect(ssh.calls).toContain(
-      "curl -fsSL 'https://download.docker.com/linux/ubuntu/gpg' -o '/tmp/apt-key-docker.ABCDEF'"
-    )
+    expect(ssh.calls).toContain(downloadCommand)
+    expect(ssh.execCalls.find((call) => call.command === downloadCommand)?.options).toMatchObject({
+      input: 'url = "https://download.docker.com/linux/ubuntu/gpg"\n',
+      silent: true,
+    })
     expect(ssh.calls).toContain("gpg --show-keys --with-colons '/tmp/apt-key-docker.ABCDEF'")
     expect(ssh.calls).toContain(
       "gpg --dearmor --yes -o '/etc/apt/keyrings/docker.gpg' '/tmp/apt-key-docker.ABCDEF'"
     )
   })
 
+  it("passes credentialed and sensitive query URLs through curl stdin instead of argv", async () => {
+    const sensitiveUrl = "https://apt-user:s3cr3t@example.com/key.gpg?token=abc123&download=true"
+    const ssh = createMockSsh({
+      [downloadCommand]: {
+        code: 0,
+      },
+      "gpg --dearmor --yes -o '/etc/apt/keyrings/docker.gpg' '/tmp/apt-key-docker.ABCDEF'": {
+        code: 0,
+      },
+      "gpg --show-keys --with-colons '/tmp/apt-key-docker.ABCDEF'": {
+        code: 0,
+        stdout: "pub:-:255:22:::\nfpr:::::::::1234567890ABCDEF1234567890ABCDEF12345678:\n",
+      },
+      "mkdir -p /etc/apt/keyrings": { code: 0 },
+      "mktemp '/tmp/apt-key-docker.XXXXXX'": { stdout: "/tmp/apt-key-docker.ABCDEF\n" },
+      "rm -f '/tmp/apt-key-docker.ABCDEF'": { code: 0 },
+    })
+    const mod = apt.key("docker", sensitiveUrl, { fingerprint })
+    const result = await mod.apply(ssh, emptyEnv)
+    const download = ssh.execCalls.find((call) => call.command === downloadCommand)
+
+    expect(result.status).toBe("changed")
+    expect(download?.command).not.toContain("s3cr3t")
+    expect(download?.command).not.toContain("token=abc123")
+    expect(download?.options?.input).toBe(`url = "${sensitiveUrl}"\n`)
+    expect(download?.options?.secrets).toStrictEqual([sensitiveUrl, "apt-user", "s3cr3t"])
+  })
+
   it("returns a failed result when the downloaded key fingerprint mismatches", async () => {
     const ssh = createMockSsh({
-      "curl -fsSL 'https://download.docker.com/linux/ubuntu/gpg' -o '/tmp/apt-key-docker.ABCDEF'": {
+      [downloadCommand]: {
         code: 0,
       },
       "gpg --show-keys --with-colons '/tmp/apt-key-docker.ABCDEF'": {
@@ -113,7 +144,7 @@ describe("apt.key", () => {
 
   it("rejects downloaded key material with extra primary keys", async () => {
     const ssh = createMockSsh({
-      "curl -fsSL 'https://download.docker.com/linux/ubuntu/gpg' -o '/tmp/apt-key-docker.ABCDEF'": {
+      [downloadCommand]: {
         code: 0,
       },
       "gpg --show-keys --with-colons '/tmp/apt-key-docker.ABCDEF'": {
@@ -143,7 +174,7 @@ describe("apt.key", () => {
 
   it("returns a failed result with error details when key import fails", async () => {
     const ssh = createMockSsh({
-      "curl -fsSL 'https://download.docker.com/linux/ubuntu/gpg' -o '/tmp/apt-key-docker.ABCDEF'": {
+      [downloadCommand]: {
         code: 0,
       },
       "gpg --dearmor --yes -o '/etc/apt/keyrings/docker.gpg' '/tmp/apt-key-docker.ABCDEF'": {
@@ -167,7 +198,7 @@ describe("apt.key", () => {
 
   it("ignores non-zero temp file cleanup exit codes", async () => {
     const ssh = createMockSsh({
-      "curl -fsSL 'https://download.docker.com/linux/ubuntu/gpg' -o '/tmp/apt-key-docker.ABCDEF'": {
+      [downloadCommand]: {
         code: 0,
       },
       "gpg --dearmor --yes -o '/etc/apt/keyrings/docker.gpg' '/tmp/apt-key-docker.ABCDEF'": {
@@ -211,9 +242,7 @@ describe("apt.key", () => {
     expect(String(result.error)).toContain(
       "[apt.key] mktemp produced an unexpected path for docker"
     )
-    expect(ssh.calls).not.toContain(
-      "curl -fsSL 'https://download.docker.com/linux/ubuntu/gpg' -o '/tmp/apt-key-docker.ABCDEF'"
-    )
+    expect(ssh.calls).not.toContain(downloadCommand)
     expect(ssh.calls).not.toContain("gpg --show-keys --with-colons '/tmp/apt-key-docker.ABCDEF'")
     expect(ssh.calls).not.toContain(
       "gpg --dearmor --yes -o '/etc/apt/keyrings/docker.gpg' '/tmp/apt-key-docker.ABCDEF'"
