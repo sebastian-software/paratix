@@ -55,7 +55,7 @@ export type ArchiveMember = {
   /** Original archive format used to derive this entry. */
   format: "tar" | "zip"
   /** Member kind inferred from listing metadata. */
-  kind: "file" | "hardlink" | "symlink"
+  kind: "directory" | "file" | "hardlink" | "special" | "symlink"
   /** Resolved link target (relative or absolute) for symlinks/hardlinks, or null. */
   linkTarget: null | string
   /** Member path as recorded in the archive. */
@@ -81,8 +81,10 @@ const ZIP_INFO_LINE_PATTERN =
   /^(?<mode>[\-bcdlps][\-rwxStTs]{9})\s+(?:\S+\s+){7}(?<path>\S.*)$/v
 
 function archiveMemberKindFromMode(mode: string): ArchiveMember["kind"] {
+  if (mode.startsWith("d")) return "directory"
   if (mode.startsWith("l")) return "symlink"
   if (mode.startsWith("h")) return "hardlink"
+  if (!mode.startsWith("-")) return "special"
   return "file"
 }
 
@@ -142,7 +144,7 @@ function parseZipInfoLine(line: string): ArchiveMember | null {
   if (!match?.groups) return null
   return {
     format: "zip",
-    kind: match.groups.mode.startsWith("l") ? "symlink" : "file",
+    kind: archiveMemberKindFromMode(match.groups.mode),
     linkTarget: null,
     path: match.groups.path,
   }
@@ -222,6 +224,9 @@ export function memberEscapesDestination(member: ArchiveMember): boolean {
 export function archiveMemberUnsafeReason(member: ArchiveMember): null | string {
   if (member.format === "zip" && member.kind === "symlink") {
     return `member ${JSON.stringify(member.path)} is a symlink`
+  }
+  if (member.kind === "special") {
+    return `member ${JSON.stringify(member.path)} is a special file`
   }
   if (!memberEscapesDestination(member)) return null
   const detail =

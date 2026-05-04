@@ -558,6 +558,22 @@ describe("archive.extract — apply", () => {
     )
   })
 
+  it("rejects a tar archive that contains a block device member", async () => {
+    const tarListing = `brw-r--r-- root/root 8,0 1970-01-01 00:00 app/device\n`
+    const mockSsh = createMockSsh({
+      [`tar -tvzf '${src}'`]: { code: 0, stdout: tarListing },
+    })
+
+    const mod = archive.extract(src, destination)
+    const result = await mod.apply(mockSsh, emptyEnv)
+
+    expect(result.status).toBe("failed")
+    expect(String(result.error)).toContain("is a special file")
+    expect(mockSsh.calls).not.toContain(
+      `tar --no-same-owner --no-overwrite-dir -xzf '${src}' -C '${destination}'`
+    )
+  })
+
   it("rejects a zip archive that contains a `/etc/passwd` member without invoking unzip -o", async () => {
     const zipSrc = "/tmp/app.zip"
     const mockSsh = createMockSsh({
@@ -606,6 +622,23 @@ describe("archive.extract — apply", () => {
 
     expect(result.status).toBe("failed")
     expect(String(result.error)).toContain("is a symlink")
+    expect(mockSsh.calls).not.toContain(`unzip -o '${zipSrc}' -d '${destination}'`)
+  })
+
+  it("rejects a zip archive that contains a fifo member", async () => {
+    const zipSrc = "/tmp/app.zip"
+    const mockSsh = createMockSsh({
+      [`unzip -Zs '${zipSrc}'`]: {
+        code: 0,
+        stdout: "prw-r--r--  2.0 unx        0 b- stor 26-May-04 00:00 app/fifo\n",
+      },
+    })
+
+    const mod = archive.extract(zipSrc, destination)
+    const result = await mod.apply(mockSsh, emptyEnv)
+
+    expect(result.status).toBe("failed")
+    expect(String(result.error)).toContain("is a special file")
     expect(mockSsh.calls).not.toContain(`unzip -o '${zipSrc}' -d '${destination}'`)
   })
 
