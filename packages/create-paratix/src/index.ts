@@ -163,6 +163,7 @@ function exitWithMessage(message: string): never {
 export function parseCliArguments(argv: string[]): {
   adminPublicKey: string | undefined
   adminPublicKeyFile: string | undefined
+  expectedHostFingerprint: string | undefined
   host: string | undefined
   initialUser: string | undefined
   projectName: string | undefined
@@ -282,9 +283,14 @@ export async function resolveCliOrPromptHost(
 }
 
 function main(): void {
-  const { adminPublicKey, adminPublicKeyFile, host, initialUser, projectName } = parseCliArguments(
-    process.argv.slice(2)
-  )
+  const {
+    adminPublicKey,
+    adminPublicKeyFile,
+    expectedHostFingerprint,
+    host,
+    initialUser,
+    projectName,
+  } = parseCliArguments(process.argv.slice(2))
 
   const normalizedProjectName = validateProjectName(projectName)
 
@@ -292,9 +298,9 @@ function main(): void {
   void (async () => {
     const validatedHost = await resolveCliOrPromptHost(host)
     const resolvedExpectedHostFingerprint =
-      process.stdin.isTTY && process.stdout.isTTY
+      expectedHostFingerprint ?? (process.stdin.isTTY && process.stdout.isTTY
         ? await promptForHostFingerprint(validatedHost)
-        : undefined
+        : undefined)
     const initialUserConfig =
       initialUser == null ? await promptForInitialUserConfig() : parseInitialUserConfig(initialUser)
     const resolvedAdminPublicKey = await resolveCliOrPromptAdminPublicKey({

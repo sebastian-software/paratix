@@ -169,6 +169,7 @@ describe("parseCliArguments", () => {
     expect(parseCliArguments(["my-server"])).toStrictEqual({
       adminPublicKey: undefined,
       adminPublicKeyFile: undefined,
+      expectedHostFingerprint: undefined,
       host: undefined,
       initialUser: undefined,
       projectName: "my-server",
@@ -179,6 +180,7 @@ describe("parseCliArguments", () => {
     expect(parseCliArguments(["my-server", "--host", "example.com"])).toStrictEqual({
       adminPublicKey: undefined,
       adminPublicKeyFile: undefined,
+      expectedHostFingerprint: undefined,
       host: "example.com",
       initialUser: undefined,
       projectName: "my-server",
@@ -189,6 +191,7 @@ describe("parseCliArguments", () => {
     expect(parseCliArguments(["my-server", "--initial-user", "root"])).toStrictEqual({
       adminPublicKey: undefined,
       adminPublicKeyFile: undefined,
+      expectedHostFingerprint: undefined,
       host: undefined,
       initialUser: "root",
       projectName: "my-server",
@@ -199,6 +202,7 @@ describe("parseCliArguments", () => {
     expect(parseCliArguments(["my-server", "--initial-user", "deploy"])).toStrictEqual({
       adminPublicKey: undefined,
       adminPublicKeyFile: undefined,
+      expectedHostFingerprint: undefined,
       host: undefined,
       initialUser: "deploy",
       projectName: "my-server",
@@ -215,6 +219,7 @@ describe("parseCliArguments", () => {
     ).toStrictEqual({
       adminPublicKey: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAITest generated@test",
       adminPublicKeyFile: undefined,
+      expectedHostFingerprint: undefined,
       host: undefined,
       initialUser: undefined,
       projectName: "my-server",
@@ -227,6 +232,24 @@ describe("parseCliArguments", () => {
     ).toStrictEqual({
       adminPublicKey: undefined,
       adminPublicKeyFile: "/tmp/admin.pub",
+      expectedHostFingerprint: undefined,
+      host: undefined,
+      initialUser: undefined,
+      projectName: "my-server",
+    })
+  })
+
+  it("supports an explicit expected host fingerprint", () => {
+    expect(
+      parseCliArguments([
+        "my-server",
+        "--expected-host-fingerprint",
+        "SHA256:trusted-host-fingerprint",
+      ])
+    ).toStrictEqual({
+      adminPublicKey: undefined,
+      adminPublicKeyFile: undefined,
+      expectedHostFingerprint: "SHA256:trusted-host-fingerprint",
       host: undefined,
       initialUser: undefined,
       projectName: "my-server",
@@ -342,6 +365,20 @@ describe("parseCliArguments", () => {
 
     expect(console.error).toHaveBeenCalledWith(
       'Error: Multi-line value for "--host" — provide a single-line value.'
+    )
+  })
+
+  it("rejects a multi-line expected host fingerprint value", async () => {
+    vi.spyOn(console, "error").mockImplementation((...args) => {
+      void args
+    })
+
+    await expectProcessExit(() => {
+      parseCliArguments(["my-server", "--expected-host-fingerprint", "SHA256:good\nbad"])
+    })
+
+    expect(console.error).toHaveBeenCalledWith(
+      'Error: Multi-line value for "--expected-host-fingerprint" — provide a single-line value.'
     )
   })
 })

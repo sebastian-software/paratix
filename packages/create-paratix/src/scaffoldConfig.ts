@@ -4,7 +4,7 @@ type ExitWithMessage = (message: string) => never
 type PromptFunction = (question: string) => Promise<string>
 
 const CLI_USAGE =
-  "Usage: create-paratix <project-name> [--host <domain-or-ip>] [--initial-user <root|name>] [--admin-public-key <ssh-public-key>] [--admin-public-key-file <path>]"
+  "Usage: create-paratix <project-name> [--host <domain-or-ip>] [--initial-user <root|name>] [--expected-host-fingerprint <fingerprint>] [--admin-public-key <ssh-public-key>] [--admin-public-key-file <path>]"
 
 export function getCliUsage(): string {
   return CLI_USAGE
@@ -104,7 +104,12 @@ function parseArgumentValue(
   index: number,
   parameters: {
     exitWithMessage: ExitWithMessage
-    optionName: "--admin-public-key-file" | "--admin-public-key" | "--host" | "--initial-user"
+    optionName:
+      | "--admin-public-key-file"
+      | "--admin-public-key"
+      | "--expected-host-fingerprint"
+      | "--host"
+      | "--initial-user"
   }
 ): string {
   const value = argv.at(index + 1)
@@ -142,6 +147,7 @@ function handleUnknownOption(argument: string, exitWithMessage: ExitWithMessage)
 type ParsedCliArguments = {
   adminPublicKey: string | undefined
   adminPublicKeyFile: string | undefined
+  expectedHostFingerprint: string | undefined
   host: string | undefined
   initialUser: string | undefined
   projectName: string | undefined
@@ -167,6 +173,15 @@ function parseOptionAssignment(parameters: {
       initialUser: parseArgumentValue(parameters.argv, parameters.index, {
         exitWithMessage: parameters.exitWithMessage,
         optionName: "--initial-user",
+      }),
+    }
+  }
+
+  if (parameters.argument === "--expected-host-fingerprint") {
+    return {
+      expectedHostFingerprint: parseArgumentValue(parameters.argv, parameters.index, {
+        exitWithMessage: parameters.exitWithMessage,
+        optionName: "--expected-host-fingerprint",
       }),
     }
   }
@@ -199,6 +214,7 @@ export function parseCliArguments(
   const parsed: ParsedCliArguments = {
     adminPublicKey: undefined,
     adminPublicKeyFile: undefined,
+    expectedHostFingerprint: undefined,
     host: undefined,
     initialUser: undefined,
     projectName: undefined,
