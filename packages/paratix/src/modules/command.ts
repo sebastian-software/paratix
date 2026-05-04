@@ -33,6 +33,9 @@ export const command = {
         const moduleName = options?.name ?? "command.shell"
         if (!ssh) return failed(`[${moduleName}] SSH connection is required`)
         const secrets = options?.secrets ?? []
+        if (options?.check != null && (await ssh.test(options.check))) {
+          return { status: "ok" }
+        }
         const result = await ssh.exec(cmd, {
           ignoreExitCode: true,
           secrets,

@@ -55,6 +55,32 @@ describe("command.shell — apply with exit code 0", () => {
     const result = await mod.apply(mockSsh, emptyEnv)
     expect(result.status).toBe("changed")
   })
+
+  it("returns ok without executing the command when check already passes", async () => {
+    const mockSsh = createMockSshWithOptions({ "which tool": { code: 0 } })
+    const mod = command.shell("install-tool", { check: "which tool" })
+    const result = await mod.apply(mockSsh, emptyEnv)
+
+    expect(result.status).toBe("ok")
+    expect(mockSsh.execCalls).toHaveLength(0)
+  })
+
+  it("executes the command when check does not pass", async () => {
+    const mockSsh = createMockSshWithOptions({
+      "install-tool": { code: 0 },
+      "which tool": { code: 1 },
+    })
+    const mod = command.shell("install-tool", { check: "which tool" })
+    const result = await mod.apply(mockSsh, emptyEnv)
+
+    expect(result.status).toBe("changed")
+    expect(mockSsh.execCalls).toStrictEqual([
+      {
+        command: "install-tool",
+        options: { ignoreExitCode: true, secrets: [], silent: true },
+      },
+    ])
+  })
 })
 
 // ---------------------------------------------------------------------------
