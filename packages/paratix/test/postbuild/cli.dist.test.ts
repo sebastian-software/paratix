@@ -2,6 +2,7 @@ import { execFileSync } from "node:child_process"
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join, resolve } from "node:path"
+import { pathToFileURL } from "node:url"
 import { describe, expect, it } from "vitest"
 
 const packageRootDirectory = resolve(import.meta.dirname, "../..")
@@ -47,5 +48,24 @@ describe("dist CLI", () => {
     } finally {
       rmSync(tempDirectory, { force: true, recursive: true })
     }
+  })
+
+  it("exports resolveEnvironment from the published package entry point", async () => {
+    const distIndexUrl = pathToFileURL(resolve(packageRootDirectory, "dist/index.js")).href
+    const { resolveEnvironment } = (await import(distIndexUrl)) as {
+      resolveEnvironment: (environment: Record<string, unknown>, key: string) => Promise<unknown>
+    }
+
+    await expect(
+      resolveEnvironment(
+        {
+          async SECRET() {
+            await Promise.resolve()
+            return "resolved-secret"
+          },
+        },
+        "SECRET"
+      )
+    ).resolves.toBe("resolved-secret")
   })
 })

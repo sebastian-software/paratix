@@ -1,4 +1,5 @@
 export { assert, debug, fail, firstRun, pause, signals, when } from "./builtins.js"
+export { resolveEnvironment } from "./environment.js"
 export {
   assertValidModuleMetaEntries,
   assertValidModuleMetaEntry,
