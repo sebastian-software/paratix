@@ -131,15 +131,35 @@ function isSensitiveQueryParameterName(name: string): boolean {
   return parts.some((part) => SENSITIVE_QUERY_TOKENS.has(part))
 }
 
-function redactUrlForDisplay(url: string, parsedUrl: URL): string {
-  if (!hasSensitiveQueryParameters(parsedUrl)) return url
+function hasUrlCredentials(url: URL): boolean {
+  return url.username.length > 0 || url.password.length > 0
+}
 
-  const displayUrl = new URL(parsedUrl)
+function redactUrlCredentials(url: URL): URL {
+  const displayUrl = new URL(url)
+  if (displayUrl.username.length > 0) displayUrl.username = REDACTED_QUERY_VALUE
+  if (displayUrl.password.length > 0) displayUrl.password = REDACTED_QUERY_VALUE
+  return displayUrl
+}
+
+function redactSensitiveQueryParameters(url: URL): URL {
+  const displayUrl = new URL(url)
   for (const [name] of displayUrl.searchParams) {
     if (isSensitiveQueryParameterName(name)) {
       displayUrl.searchParams.set(name, REDACTED_QUERY_VALUE)
     }
   }
+  return displayUrl
+}
+
+function redactUrlForDisplay(url: string, parsedUrl: URL): string {
+  const shouldRedactQuery = hasSensitiveQueryParameters(parsedUrl)
+  const shouldRedactCredentials = hasUrlCredentials(parsedUrl)
+  if (!shouldRedactQuery && !shouldRedactCredentials) return url
+
+  let displayUrl = new URL(parsedUrl)
+  if (shouldRedactCredentials) displayUrl = redactUrlCredentials(displayUrl)
+  if (shouldRedactQuery) displayUrl = redactSensitiveQueryParameters(displayUrl)
   return displayUrl.toString()
 }
 
@@ -169,7 +189,7 @@ export function buildHttpCheckParameters(options: {
   const headers = options.headers ?? {}
   const method = options.method ?? "GET"
   const parsedUrl = new URL(options.url)
-  const urlIsSensitive = hasSensitiveQueryParameters(parsedUrl)
+  const urlIsSensitive = hasSensitiveQueryParameters(parsedUrl) || hasUrlCredentials(parsedUrl)
 
   const { argvHeaders, configInput } = buildCurlConfigPayload({
     headers,
@@ -178,7 +198,11 @@ export function buildHttpCheckParameters(options: {
   })
 
   const secrets = Object.values(headers).filter((value) => value.length > 0)
-  if (urlIsSensitive) secrets.push(options.url)
+  if (urlIsSensitive) {
+    secrets.push(options.url)
+    if (parsedUrl.username.length > 0) secrets.push(parsedUrl.username)
+    if (parsedUrl.password.length > 0) secrets.push(parsedUrl.password)
+  }
 
   return {
     configInput,

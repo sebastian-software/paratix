@@ -46,6 +46,13 @@ function buildRouteReloadFlagCheck(input: {
   return `[ -f /var/lib/paratix/flags/'${flagName}' ]`
 }
 
+function getFirstCurlExecCall(mockSsh: ReturnType<typeof createMockSsh>) {
+  const curlCall = mockSsh.execCalls.find((entry) => entry.command.startsWith("curl "))
+  expect(curlCall).toBeDefined()
+  if (curlCall == null) throw new Error("Expected a curl exec call")
+  return curlCall
+}
+
 // ─── net.hosts ────────────────────────────────────────────────────────────────
 
 describe("net.hosts — validation", () => {
@@ -1793,6 +1800,24 @@ describe("net.request — header masking", () => {
     expect(curlCall?.options?.secrets).toContain(url)
   })
 
+  it("masks URL userinfo by routing the URL through stdin", async () => {
+    const url = "https://user:password@example.com/health"
+    const mockSsh = createMockSsh()
+
+    const mod = net.request(url)
+    await mod.check(mockSsh, emptyEnv)
+
+    const curlCall = getFirstCurlExecCall(mockSsh)
+    expect(curlCall.command).not.toContain(url)
+    expect(curlCall.command).not.toContain("user")
+    expect(curlCall.command).not.toContain("password")
+    expect(curlCall.command).toContain("--config -")
+    expect(curlCall.options?.input).toContain(`url = "${url}"`)
+    expect(curlCall.options?.secrets).toContain(url)
+    expect(curlCall.options?.secrets).toContain("user")
+    expect(curlCall.options?.secrets).toContain("password")
+  })
+
   it("redacts sensitive signed-URL query values from the module name", () => {
     const mod = net.request("https://example.com/object?signature=abc123&token=xyz789&part=1")
 
@@ -1801,6 +1826,25 @@ describe("net.request — header masking", () => {
     )
     expect(mod.name).not.toContain("abc123")
     expect(mod.name).not.toContain("xyz789")
+  })
+
+  it("redacts URL userinfo from the module name", () => {
+    const mod = net.request("https://user:password@example.com/health")
+
+    expect(mod.name).toBe("net.request: GET https://REDACTED:REDACTED@example.com/health")
+    expect(mod.name).not.toContain("user")
+    expect(mod.name).not.toContain("password")
+  })
+
+  it("redacts URL userinfo and sensitive query values from the module name", () => {
+    const mod = net.request("https://user:password@example.com/object?token=abc123&part=1")
+
+    expect(mod.name).toBe(
+      "net.request: GET https://REDACTED:REDACTED@example.com/object?token=REDACTED&part=1"
+    )
+    expect(mod.name).not.toContain("user")
+    expect(mod.name).not.toContain("password")
+    expect(mod.name).not.toContain("abc123")
   })
 
   it("redacts sensitive signed-URL query values from apply failure messages", async () => {
@@ -1815,5 +1859,18 @@ describe("net.request — header masking", () => {
     expect(String(result.error)).toContain("token=REDACTED")
     expect(String(result.error)).not.toContain("abc123")
     expect(String(result.error)).not.toContain("xyz789")
+  })
+
+  it("redacts URL userinfo from apply failure messages", async () => {
+    const rawUrl = "https://user:password@example.com/health"
+    const mockSsh = createMockSsh()
+    const mod = net.request(rawUrl)
+
+    const result = await mod.apply(mockSsh, emptyEnv)
+
+    expect(result.status).toBe("failed")
+    expect(String(result.error)).toContain("https://REDACTED:REDACTED@example.com/health")
+    expect(String(result.error)).not.toContain("user")
+    expect(String(result.error)).not.toContain("password")
   })
 })
