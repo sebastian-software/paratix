@@ -90,6 +90,20 @@ function composeCommand(runtime: ComposeRuntime, projectDirectory: string): stri
   return `${runtime} compose --project-directory ${shellQuote(projectDirectory)}`
 }
 
+async function composeProjectVolumesExist(parameters: {
+  projectDirectory: string
+  runtime: ComposeRuntime
+  ssh: SshConnection
+}): Promise<boolean> {
+  const projectName = basename(parameters.projectDirectory)
+  const result = await parameters.ssh.exec(
+    `${parameters.runtime} volume ls --filter ${shellQuote(`label=com.docker.compose.project=${projectName}`)} -q`,
+    EXEC_OPTS
+  )
+  if (result.code !== 0) return true
+  return result.stdout.trim().length > 0
+}
+
 async function resolveDesiredComposeContent(options: {
   content?: string
   src?: string
@@ -632,9 +646,19 @@ export const compose = {
         if (result.code !== 0) return NEEDS_APPLY
 
         const stdout = result.stdout.trim()
-        if (stdout === "") return "ok"
+        if (stdout === "") {
+          return volumes === true &&
+            (await composeProjectVolumesExist({ projectDirectory, runtime: rt, ssh }))
+            ? NEEDS_APPLY
+            : "ok"
+        }
         const states = parseContainerStates(stdout)
-        if (states.length === 0 && stdout === "[]") return "ok"
+        if (states.length === 0 && stdout === "[]") {
+          return volumes === true &&
+            (await composeProjectVolumesExist({ projectDirectory, runtime: rt, ssh }))
+            ? NEEDS_APPLY
+            : "ok"
+        }
 
         return NEEDS_APPLY
       },
