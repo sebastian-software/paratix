@@ -684,10 +684,12 @@ export const net = {
       status: options?.status ?? DEFAULT_EXPECTED_STATUS,
       url,
     })
+    const displayUrl = parameters.displayUrl
 
     return {
       async apply(conn: null | SshConnection): Promise<ModuleResult> {
-        if (!conn) return failed(`[net.request: ${method} ${url}] SSH connection is required`)
+        if (!conn)
+          return failed(`[net.request: ${method} ${displayUrl}] SSH connection is required`)
 
         // Register Authorization header values and any signed-URL secrets so
         // a CommandError raised from inside checkHttpCondition is masked
@@ -696,7 +698,9 @@ export const net = {
           const ok = await checkHttpCondition(conn, parameters)
           return ok
             ? { status: "ok" }
-            : failed(`[net.request: ${method} ${url}] HTTP request did not match expectations`)
+            : failed(
+                `[net.request: ${method} ${displayUrl}] HTTP request did not match expectations`
+              )
         })
       },
       async check(conn: null | SshConnection): Promise<"needs-apply" | "ok"> {
@@ -707,7 +711,7 @@ export const net = {
           return ok ? "ok" : NEEDS_APPLY
         })
       },
-      name: `net.request: ${method} ${url}`,
+      name: `net.request: ${method} ${displayUrl}`,
     }
   },
 

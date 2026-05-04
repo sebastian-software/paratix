@@ -31,6 +31,8 @@ export type WaitForOptions = {
 export type HttpCheckParameters = {
   /** Stdin payload for `curl --config -` carrying the URL when sensitive and any headers. Empty string when no stdin payload is needed. */
   configInput: string
+  /** URL safe for module names and user-visible errors. Sensitive query values are redacted. */
+  displayUrl: string
   /** Expected substring in the response body, or `undefined` to skip body verification. */
   expectedBody: string | undefined
   /** HTTP status code the response must return (e.g. `200`). */
@@ -48,6 +50,18 @@ export type HttpCheckParameters = {
 }
 
 const HTTP_STATUS_MARKER = "\n__PARATIX_HTTP_STATUS__:"
+const REDACTED_QUERY_VALUE = "REDACTED"
+const SENSITIVE_QUERY_TOKENS = new Set([
+  "auth",
+  "credential",
+  "key",
+  "passwd",
+  "password",
+  "secret",
+  "sig",
+  "signature",
+  "token",
+])
 
 /**
  * Build the shell command used to test a wait-for condition.
@@ -107,6 +121,28 @@ export function buildCurlHeaderFlags(headers: Record<string, string>): string {
   return flags.length > 0 ? `${flags} ` : ""
 }
 
+function isSensitiveQueryParameterName(name: string): boolean {
+  const parts = name
+    .toLowerCase()
+    .replaceAll(".", " ")
+    .replaceAll("_", " ")
+    .replaceAll("-", " ")
+    .split(" ")
+  return parts.some((part) => SENSITIVE_QUERY_TOKENS.has(part))
+}
+
+function redactUrlForDisplay(url: string, parsedUrl: URL): string {
+  if (!hasSensitiveQueryParameters(parsedUrl)) return url
+
+  const displayUrl = new URL(parsedUrl)
+  for (const [name] of displayUrl.searchParams) {
+    if (isSensitiveQueryParameterName(name)) {
+      displayUrl.searchParams.set(name, REDACTED_QUERY_VALUE)
+    }
+  }
+  return displayUrl.toString()
+}
+
 /**
  * Build the curl invocation parts for an HTTP request check.
  *
@@ -146,6 +182,7 @@ export function buildHttpCheckParameters(options: {
 
   return {
     configInput,
+    displayUrl: redactUrlForDisplay(options.url, parsedUrl),
     expectedBody: options.body,
     expectedStatus: options.status,
     headerFlags: buildCurlArgvHeaderFlags(argvHeaders),

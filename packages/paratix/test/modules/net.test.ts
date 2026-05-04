@@ -1443,4 +1443,28 @@ describe("net.request — header masking", () => {
     expect(curlCall?.options?.input).toContain(`url = "${url}"`)
     expect(curlCall?.options?.secrets).toContain(url)
   })
+
+  it("redacts sensitive signed-URL query values from the module name", () => {
+    const mod = net.request("https://example.com/object?signature=abc123&token=xyz789&part=1")
+
+    expect(mod.name).toBe(
+      "net.request: GET https://example.com/object?signature=REDACTED&token=REDACTED&part=1"
+    )
+    expect(mod.name).not.toContain("abc123")
+    expect(mod.name).not.toContain("xyz789")
+  })
+
+  it("redacts sensitive signed-URL query values from apply failure messages", async () => {
+    const rawUrl = "https://example.com/object?signature=abc123&token=xyz789"
+    const mockSsh = createMockSsh()
+    const mod = net.request(rawUrl)
+
+    const result = await mod.apply(mockSsh, emptyEnv)
+
+    expect(result.status).toBe("failed")
+    expect(String(result.error)).toContain("signature=REDACTED")
+    expect(String(result.error)).toContain("token=REDACTED")
+    expect(String(result.error)).not.toContain("abc123")
+    expect(String(result.error)).not.toContain("xyz789")
+  })
 })
