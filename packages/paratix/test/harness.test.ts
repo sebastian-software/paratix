@@ -1,9 +1,27 @@
-import { describe, expect, it, vi } from "vitest"
+import type * as FsPromises from "node:fs/promises"
+
+import { execFile } from "node:child_process"
+import { access, rm } from "node:fs/promises"
+import { resolve } from "node:path"
+import { afterEach, describe, expect, it, vi } from "vitest"
 
 import {
   createDockerResourceMetadata,
+  createIntegrationEnvironment,
   ensureIntegrationRuntimeIsAvailable,
 } from "./integration/harness.js"
+
+vi.mock("node:child_process", () => ({
+  execFile: vi.fn(),
+}))
+
+vi.mock("node:fs/promises", async () => {
+  const actual = await vi.importActual<typeof FsPromises>("node:fs/promises")
+  return {
+    ...actual,
+    rm: vi.fn(actual.rm),
+  }
+})
 
 type CommandCall = {
   arguments: string[]
@@ -30,6 +48,32 @@ function createCommandRunner(responses: Partial<Record<string, Error | string>>)
     return response
   })
   return { calls, run }
+}
+
+const mockExecFile = vi.mocked(execFile)
+const mockRm = vi.mocked(rm)
+
+function mockIntegrationBuildFailure(commands: CommandCall[]): void {
+  mockExecFile.mockImplementation((...callArguments: unknown[]) => {
+    const command = callArguments[0] as string
+    const commandArguments = callArguments[1] as string[]
+    const callback = callArguments.at(-1) as (
+      error: Error | null,
+      stdout: string,
+      stderr: string
+    ) => void
+    commands.push({ arguments: commandArguments, command })
+    if (command === "colima" && commandArguments[0] === "status") {
+      callback(null, "Running", "")
+      return undefined as never
+    }
+    if (command === "docker" && commandArguments[0] === "build") {
+      callback(new Error("build failed"), "", "docker build failed")
+      return undefined as never
+    }
+    callback(null, "ok", "")
+    return undefined as never
+  })
 }
 
 describe("createDockerResourceMetadata", () => {
@@ -65,7 +109,44 @@ describe("createDockerResourceMetadata", () => {
   })
 })
 
+describe("createIntegrationEnvironment", () => {
+  afterEach(() => {
+    vi.clearAllMocks()
+  })
+
+  it("removes the temporary workspace home when the Docker build fails", async () => {
+    const commands: CommandCall[] = []
+    mockIntegrationBuildFailure(commands)
+
+    await expect(createIntegrationEnvironment(resolve(import.meta.dirname, ".."))).rejects.toThrow(
+      "docker build failed"
+    )
+
+    const workspaceHome = mockRm.mock.calls
+      .map(([path]) => String(path))
+      .find((path) => path.includes("paratix-integration-home-"))
+    expect(workspaceHome).toBeDefined()
+    await expect(access(workspaceHome!)).rejects.toThrow("ENOENT")
+    expect(
+      commands.map(({ arguments: commandArguments, command }) =>
+        commandKey(command, commandArguments)
+      )
+    ).toStrictEqual(
+      expect.arrayContaining([
+        "docker info",
+        expect.stringMatching(/^docker build /v),
+        expect.stringMatching(/^docker rm -f paratix-integration-/v),
+        expect.stringMatching(/^docker image rm -f paratix-integration-sshd:/v),
+      ])
+    )
+  })
+})
+
 describe("ensureIntegrationRuntimeIsAvailable", () => {
+  afterEach(() => {
+    vi.clearAllMocks()
+  })
+
   it("does not start Colima implicitly when it is stopped on macOS", async () => {
     const { calls, run } = createCommandRunner({
       "colima status": "Stopped",

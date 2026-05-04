@@ -338,15 +338,24 @@ async function createEnvironmentResources(packageDirectory: string): Promise<{
 }> {
   const workspaceHome = await prepareWorkspaceHome()
   const { containerName, dockerImageTag, labels: dockerLabels } = createDockerResourceMetadata()
+  const cleanup = createCleanup(containerName, dockerImageTag, workspaceHome)
   const fixturePrivateKeyPath = resolve(
     packageDirectory,
     "test/integration/fixtures/client_ed25519"
   )
   const clientPrivateKeyPath = join(workspaceHome, ".ssh", "client_ed25519")
-  await copyFile(fixturePrivateKeyPath, clientPrivateKeyPath)
-  await chmod(clientPrivateKeyPath, PRIVATE_KEY_MODE)
-  await buildIntegrationImage(packageDirectory, dockerImageTag, dockerLabels)
-  const cleanup = createCleanup(containerName, dockerImageTag, workspaceHome)
+  try {
+    await copyFile(fixturePrivateKeyPath, clientPrivateKeyPath)
+    await chmod(clientPrivateKeyPath, PRIVATE_KEY_MODE)
+    await buildIntegrationImage(packageDirectory, dockerImageTag, dockerLabels)
+  } catch (error) {
+    try {
+      await cleanup()
+    } catch {
+      // Preserve the setup failure; cleanup is best-effort on this path.
+    }
+    throw error
+  }
   return {
     cleanup,
     clientPrivateKeyPath,
