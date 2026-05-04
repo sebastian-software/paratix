@@ -40,6 +40,18 @@ type CommandResult = {
   stdout: string
 }
 
+type CommandRunner = (
+  command: string,
+  commandArguments: string[],
+  options?: CommandOptions
+) => Promise<string>
+
+type RuntimeAvailabilityOptions = {
+  env?: NodeJS.ProcessEnv
+  platform?: NodeJS.Platform
+  run?: CommandRunner
+}
+
 class CommandExecutionError extends Error {
   public readonly stderr: string
 
@@ -102,28 +114,41 @@ async function runCommand(
   }
 }
 
-async function startColima(): Promise<void> {
+async function startColima(run: CommandRunner): Promise<void> {
   try {
-    await runCommand("colima", ["start"])
+    await run("colima", ["start"])
   } catch (startError) {
     throw new Error(
-      "Integration tests require Colima. `colima` is installed, but it could not be started automatically.",
+      "Integration tests require Colima. `colima` is installed, but the explicit opt-in start failed.",
       { cause: startError }
     )
   }
 }
 
-async function ensureDockerIsAvailable(): Promise<void> {
+async function ensureDockerIsAvailable(run: CommandRunner): Promise<void> {
   try {
-    await runCommand("docker", ["info"])
+    await run("docker", ["info"])
   } catch (error) {
     throw new Error("Integration tests require a reachable Docker runtime.", { cause: error })
   }
 }
 
-async function ensureColimaIsAvailable(): Promise<void> {
+function shouldStartColima(environment: NodeJS.ProcessEnv): boolean {
+  return environment.PARATIX_INTEGRATION_START_COLIMA === "true"
+}
+
+function createColimaNotRunningError(): Error {
+  return new Error(
+    "Integration tests require a running Colima runtime. Start Colima manually or set PARATIX_INTEGRATION_START_COLIMA=true to allow the integration harness to start it."
+  )
+}
+
+async function ensureColimaIsAvailable(
+  environment: NodeJS.ProcessEnv,
+  run: CommandRunner
+): Promise<void> {
   try {
-    await runCommand("which", ["colima"])
+    await run("which", ["colima"])
   } catch (error) {
     throw new Error(
       "Integration tests require Colima, but `colima` was not found in PATH. Install Colima and retry.",
@@ -132,26 +157,37 @@ async function ensureColimaIsAvailable(): Promise<void> {
   }
 
   try {
-    const status = await runCommand("colima", ["status"])
-    if (!/running/iv.test(status)) {
-      await runCommand("colima", ["start"])
-    }
+    const status = await run("colima", ["status"])
+    if (/running/iv.test(status)) return
   } catch {
-    await startColima()
+    if (shouldStartColima(environment)) {
+      await startColima(run)
+      return
+    }
+    throw createColimaNotRunningError()
   }
+
+  if (!shouldStartColima(environment)) throw createColimaNotRunningError()
+  await startColima(run)
 }
 
-async function ensureIntegrationRuntimeIsAvailable(): Promise<void> {
-  const isCiRuntime = process.env.CI === "true"
-  if (isCiRuntime || process.platform !== "darwin") {
-    await ensureDockerIsAvailable()
+export async function ensureIntegrationRuntimeIsAvailable(
+  options: RuntimeAvailabilityOptions = {}
+): Promise<void> {
+  const environment = options.env ?? process.env
+  const platform = options.platform ?? process.platform
+  const run = options.run ?? runCommand
+
+  const isCiRuntime = environment.CI === "true"
+  if (isCiRuntime || platform !== "darwin") {
+    await ensureDockerIsAvailable(run)
     return
   }
 
-  await ensureColimaIsAvailable()
+  await ensureColimaIsAvailable(environment, run)
 
   try {
-    await runCommand("docker", ["info"])
+    await run("docker", ["info"])
   } catch (error) {
     throw new Error(
       "Colima is available, but Docker is not reachable through the active Colima runtime.",
