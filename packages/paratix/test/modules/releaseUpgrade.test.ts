@@ -218,6 +218,25 @@ describe("releaseUpgrade.upgrade — apply (Debian)", () => {
     expect(ssh.calls).not.toContain("DEBIAN_FRONTEND=noninteractive apt-get full-upgrade -y")
   })
 
+  it("returns ok without running the upgrade pipeline when Debian already uses the target codename", async () => {
+    const ssh = createMockSsh({
+      "cat '/etc/os-release'": { code: 0, stdout: DEBIAN_OS_RELEASE },
+      "curl -fsSL https://deb.debian.org/debian/dists/stable/Release": {
+        code: 0,
+        stdout: DEBIAN_STABLE_RELEASE_CURL,
+      },
+      "lsb_release -cs": { code: 0, stdout: "trixie\n" },
+    })
+    const mod = releaseUpgrade.upgrade()
+    const result = await mod.apply(ssh, emptyEnv)
+
+    expect(result.status).toBe("ok")
+    expect(result.meta).toBeUndefined()
+    expect(ssh.calls).not.toContain("cat /etc/apt/sources.list")
+    expect(ssh.calls).not.toContain("DEBIAN_FRONTEND=noninteractive apt-get update")
+    expect(ssh.calls).not.toContain("DEBIAN_FRONTEND=noninteractive apt-get full-upgrade -y")
+  })
+
   it("apt-get update fails → failed", async () => {
     const ssh = createMockSsh(
       debianApplyResponses("bookworm", "trixie", {

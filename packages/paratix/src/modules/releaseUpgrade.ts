@@ -424,8 +424,8 @@ async function runDebianUpgradePipeline(ssh: SshConnection): Promise<ModuleResul
  * apt sources to point at the new suite, then executes the four-step
  * upgrade sequence: `apt-get update`, `dpkg --configure -a` (to resolve
  * any previously interrupted package configurations), `apt-get full-upgrade`,
- * and `apt-get autoremove`. When `dryRun` is set, the upgrade is skipped
- * entirely and `"ok"` is returned.
+ * and `apt-get autoremove`. When `dryRun` is set or the host already runs
+ * the target codename, the upgrade is skipped entirely and `"ok"` is returned.
  *
  * On success, returns `status: "changed"` with reboot meta so the runner
  * can reconnect after the post-upgrade restart. On failure of any apt
@@ -446,6 +446,10 @@ async function applyDebian(
   const targetCodename = await getDebianStableCodename(ssh)
 
   if (options.dryRun === true) {
+    return { status: "ok" }
+  }
+
+  if (currentCodename === targetCodename) {
     return { status: "ok" }
   }
 
