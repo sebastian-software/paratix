@@ -57,7 +57,8 @@ async function writeCrontab(input: WriteCrontabArguments): Promise<ModuleResult 
     return result.code === 0 ? null : failedCommand(failureMessage, result)
   }
   const content = `${lines.join("\n")}\n`
-  await ssh.exec(`printf '%s' ${shellQuote(content)} | crontab -u ${shellQuote(user)} -`, {
+  await ssh.exec(`crontab -u ${shellQuote(user)} -`, {
+    input: content,
     silent: true,
   })
   return null
