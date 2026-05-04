@@ -146,9 +146,9 @@ export default server({
 
 ### `command`
 
-| Method          | Signature                                                            | Idempotent        |
-| --------------- | -------------------------------------------------------------------- | ----------------- |
-| `command.shell` | `(cmd: string, options?: { check?: string; name?: string }): Module` | Only with `check` |
+| Method          | Signature                                                                                | Idempotent        |
+| --------------- | ---------------------------------------------------------------------------------------- | ----------------- |
+| `command.shell` | `(cmd: string, options?: { check?: string; name?: string; secrets?: string[] }): Module` | Only with `check` |
 
 ### `cron`
 

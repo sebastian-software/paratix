@@ -2,6 +2,19 @@ import { failed, failedCommand } from "../moduleFailure.js"
 import { maskSecrets } from "../sshHelpers.js"
 import { type Module, type ModuleResult, NEEDS_APPLY, type SshConnection } from "../types.js"
 
+async function commandCheckPassed(
+  ssh: SshConnection,
+  check: string,
+  secrets: string[]
+): Promise<boolean> {
+  const result = await ssh.exec(check, {
+    ignoreExitCode: true,
+    secrets,
+    silent: true,
+  })
+  return result.code === 0
+}
+
 /**
  * Modules for running arbitrary shell commands on the remote host.
  */
@@ -33,7 +46,7 @@ export const command = {
         const moduleName = options?.name ?? "command.shell"
         if (!ssh) return failed(`[${moduleName}] SSH connection is required`)
         const secrets = options?.secrets ?? []
-        if (options?.check != null && (await ssh.test(options.check))) {
+        if (options?.check != null && (await commandCheckPassed(ssh, options.check, secrets))) {
           return { status: "ok" }
         }
         const result = await ssh.exec(cmd, {
@@ -53,7 +66,9 @@ export const command = {
       async check(ssh: null | SshConnection): Promise<"needs-apply" | "ok"> {
         if (!ssh) return NEEDS_APPLY
         if (options?.check == null) return NEEDS_APPLY
-        return (await ssh.test(options.check)) ? "ok" : NEEDS_APPLY
+        return (await commandCheckPassed(ssh, options.check, options.secrets ?? []))
+          ? "ok"
+          : NEEDS_APPLY
       },
       name: options?.name ?? "command.shell",
     }

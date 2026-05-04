@@ -62,7 +62,12 @@ describe("command.shell — apply with exit code 0", () => {
     const result = await mod.apply(mockSsh, emptyEnv)
 
     expect(result.status).toBe("ok")
-    expect(mockSsh.execCalls).toHaveLength(0)
+    expect(mockSsh.execCalls).toStrictEqual([
+      {
+        command: "which tool",
+        options: { ignoreExitCode: true, secrets: [], silent: true },
+      },
+    ])
   })
 
   it("executes the command when check does not pass", async () => {
@@ -76,8 +81,30 @@ describe("command.shell — apply with exit code 0", () => {
     expect(result.status).toBe("changed")
     expect(mockSsh.execCalls).toStrictEqual([
       {
+        command: "which tool",
+        options: { ignoreExitCode: true, secrets: [], silent: true },
+      },
+      {
         command: "install-tool",
         options: { ignoreExitCode: true, secrets: [], silent: true },
+      },
+    ])
+  })
+
+  it("passes secrets to the apply guard check", async () => {
+    const secret = "guard-secret-token"
+    const mockSsh = createMockSshWithOptions({ [`test -f /tmp/${secret}`]: { code: 0 } })
+    const mod = command.shell("install-tool", {
+      check: `test -f /tmp/${secret}`,
+      secrets: [secret],
+    })
+    const result = await mod.apply(mockSsh, emptyEnv)
+
+    expect(result.status).toBe("ok")
+    expect(mockSsh.execCalls).toStrictEqual([
+      {
+        command: `test -f /tmp/${secret}`,
+        options: { ignoreExitCode: true, secrets: [secret], silent: true },
       },
     ])
   })
@@ -152,17 +179,47 @@ describe("command.shell — check", () => {
   })
 
   it("returns ok when check command exits with code 0", async () => {
-    const mockSsh = createStrictMockSsh({ "which tool": { code: 0 } })
+    const mockSsh = createMockSshWithOptions({ "which tool": { code: 0 } })
     const mod = command.shell("install-tool", { check: "which tool" })
     const result = await mod.check(mockSsh, emptyEnv)
     expect(result).toBe("ok")
+    expect(mockSsh.execCalls).toStrictEqual([
+      {
+        command: "which tool",
+        options: { ignoreExitCode: true, secrets: [], silent: true },
+      },
+    ])
   })
 
   it("returns needs-apply when check command exits with non-zero code", async () => {
-    const mockSsh = createStrictMockSsh({ "which tool": { code: 1 } })
+    const mockSsh = createMockSshWithOptions({ "which tool": { code: 1 } })
     const mod = command.shell("install-tool", { check: "which tool" })
     const result = await mod.check(mockSsh, emptyEnv)
     expect(result).toBe("needs-apply")
+    expect(mockSsh.execCalls).toStrictEqual([
+      {
+        command: "which tool",
+        options: { ignoreExitCode: true, secrets: [], silent: true },
+      },
+    ])
+  })
+
+  it("passes secrets to the standalone check command", async () => {
+    const secret = "check-secret-token"
+    const mockSsh = createMockSshWithOptions({ [`test -f /tmp/${secret}`]: { code: 0 } })
+    const mod = command.shell("install-tool", {
+      check: `test -f /tmp/${secret}`,
+      secrets: [secret],
+    })
+    const result = await mod.check(mockSsh, emptyEnv)
+
+    expect(result).toBe("ok")
+    expect(mockSsh.execCalls).toStrictEqual([
+      {
+        command: `test -f /tmp/${secret}`,
+        options: { ignoreExitCode: true, secrets: [secret], silent: true },
+      },
+    ])
   })
 })
 
