@@ -14,7 +14,19 @@ async function readCrontab(ssh: SshConnection, user: string): Promise<string[]> 
     ignoreExitCode: true,
     silent: true,
   })
-  return result.code === 0 ? result.stdout.trimEnd().split("\n") : []
+  if (result.code === 0) return result.stdout.trimEnd().split("\n")
+  if (isMissingCrontabResult(result.stdout, result.stderr, user)) return []
+  throw new Error(
+    `[cron] failed to read crontab for ${user} (exit code ${String(result.code)}): ${
+      result.stderr || result.stdout || "unknown error"
+    }`
+  )
+}
+
+function isMissingCrontabResult(stdout: string, stderr: string, user: string): boolean {
+  const output = `${stdout}\n${stderr}`.trim()
+  if (output === "") return true
+  return output.toLowerCase().includes(`no crontab for ${user.toLowerCase()}`)
 }
 
 type WriteCrontabArguments = {

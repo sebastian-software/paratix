@@ -27,7 +27,7 @@ describe("cron.job", () => {
 
   it("check returns needs-apply when no crontab exists (exit code 1) (state: present)", async () => {
     const mockSsh = createMockSsh({
-      "crontab -u 'alice' -l": { code: 1, stdout: "" },
+      "crontab -u 'alice' -l": { code: 1, stderr: "no crontab for alice\n", stdout: "" },
     })
     const mod = cron.job("alice", "backup", { job: "0 3 * * * /backup.sh" })
     const result = await mod.check(mockSsh, emptyEnv)
@@ -44,6 +44,14 @@ describe("cron.job", () => {
     const mod = cron.job("alice", "backup", { job: "0 3 * * * /backup.sh" })
     const result = await mod.check(mockSsh, emptyEnv)
     expect(result).toBe("needs-apply")
+  })
+
+  it("check throws when crontab cannot be read (state: present)", async () => {
+    const mockSsh = createMockSsh({
+      "crontab -u 'alice' -l": { code: 1, stderr: "permission denied\n" },
+    })
+    const mod = cron.job("alice", "backup", { job: "0 3 * * * /backup.sh" })
+    await expect(mod.check(mockSsh, emptyEnv)).rejects.toThrow(/failed to read crontab/)
   })
 
   it("check returns needs-apply when marker exists but job line differs (state: present)", async () => {
@@ -82,7 +90,7 @@ describe("cron.job", () => {
 
   it("check returns ok when no crontab exists (exit code 1) (state: absent)", async () => {
     const mockSsh = createMockSsh({
-      "crontab -u 'alice' -l": { code: 1, stdout: "" },
+      "crontab -u 'alice' -l": { code: 1, stderr: "no crontab for alice\n", stdout: "" },
     })
     const mod = cron.job("alice", "backup", { job: "0 3 * * * /backup.sh", state: "absent" })
     const result = await mod.check(mockSsh, emptyEnv)
@@ -107,7 +115,7 @@ describe("cron.job", () => {
 
   it("apply appends marker and job to empty crontab (state: present)", async () => {
     const mockSsh = createMockSsh({
-      "crontab -u 'alice' -l": { code: 1, stdout: "" },
+      "crontab -u 'alice' -l": { code: 1, stderr: "no crontab for alice\n", stdout: "" },
     })
     const mod = cron.job("alice", "backup", { job: "0 3 * * * /backup.sh" })
     const result = await mod.apply(mockSsh, emptyEnv)
@@ -117,6 +125,15 @@ describe("cron.job", () => {
     expect(writeCall).toContain("# paratix: backup")
     expect(writeCall).toContain("0 3 * * * /backup.sh")
     expect(writeCall).toContain("crontab -u 'alice' -")
+  })
+
+  it("apply throws when crontab cannot be read (state: present)", async () => {
+    const mockSsh = createMockSsh({
+      "crontab -u 'alice' -l": { code: 1, stderr: "permission denied\n" },
+    })
+    const mod = cron.job("alice", "backup", { job: "0 3 * * * /backup.sh" })
+    await expect(mod.apply(mockSsh, emptyEnv)).rejects.toThrow(/failed to read crontab/)
+    expect(mockSsh.calls.some((call) => call.startsWith("printf '%s'"))).toBe(false)
   })
 
   it("apply appends marker and job to existing crontab with other entries (state: present)", async () => {
@@ -386,7 +403,7 @@ describe("cron.absent", () => {
 
   it("check returns ok when no crontab exists", async () => {
     const mockSsh = createMockSsh({
-      "crontab -u 'alice' -l": { code: 1, stdout: "" },
+      "crontab -u 'alice' -l": { code: 1, stderr: "no crontab for alice\n", stdout: "" },
     })
     const mod = cron.absent("alice", "backup")
     expect(await mod.check(mockSsh, emptyEnv)).toBe("ok")
