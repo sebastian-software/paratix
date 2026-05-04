@@ -105,6 +105,36 @@ describe("apt.key", () => {
     expect(String(result.error)).toContain("[apt.key] fingerprint mismatch for docker")
   })
 
+  it("rejects downloaded key material with extra primary keys", async () => {
+    const ssh = createMockSsh({
+      "curl -fsSL 'https://download.docker.com/linux/ubuntu/gpg' -o '/tmp/apt-key-docker.ABCDEF'": {
+        code: 0,
+      },
+      "gpg --show-keys --with-colons '/tmp/apt-key-docker.ABCDEF'": {
+        code: 0,
+        stdout:
+          "pub:-:255:22:::\n" +
+          "fpr:::::::::1234567890ABCDEF1234567890ABCDEF12345678:\n" +
+          "sub:-:255:22:::\n" +
+          "fpr:::::::::BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB:\n" +
+          "pub:-:255:22:::\n" +
+          "fpr:::::::::AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA:\n",
+      },
+      "mkdir -p /etc/apt/keyrings": { code: 0 },
+      "mktemp '/tmp/apt-key-docker.XXXXXX'": { stdout: "/tmp/apt-key-docker.ABCDEF\n" },
+      "rm -f '/tmp/apt-key-docker.ABCDEF'": { code: 0 },
+    })
+    const mod = apt.key("docker", "https://download.docker.com/linux/ubuntu/gpg", { fingerprint })
+    const result = await mod.apply(ssh, emptyEnv)
+    expect(result.status).toBe("failed")
+    expect(String(result.error)).toContain(
+      "[apt.key] key material for docker contains 2 primary keys"
+    )
+    expect(ssh.calls).not.toContain(
+      "gpg --dearmor --yes -o '/etc/apt/keyrings/docker.gpg' '/tmp/apt-key-docker.ABCDEF'"
+    )
+  })
+
   it("returns a failed result with error details when key import fails", async () => {
     const ssh = createMockSsh({
       "curl -fsSL 'https://download.docker.com/linux/ubuntu/gpg' -o '/tmp/apt-key-docker.ABCDEF'": {

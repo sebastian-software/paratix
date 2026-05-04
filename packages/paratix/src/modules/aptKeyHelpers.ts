@@ -16,15 +16,22 @@ export function normalizeOpenPgpFingerprint(fingerprint: string): string {
   return normalized
 }
 
-function parseOpenPgpFingerprint(stdout: string): null | string {
+function parseOpenPgpPrimaryKeyFingerprints(stdout: string): string[] {
+  const fingerprints: string[] = []
+  let currentKeyRecord: null | string = null
+
   for (const line of stdout.split("\n")) {
     const parts = line.trim().split(":")
-    const fingerprint = parts[0] === "fpr" ? parts[9] : null
+    if (parts[0] === "pub" || parts[0] === "sub") {
+      currentKeyRecord = parts[0]
+      continue
+    }
+    const fingerprint = parts[0] === "fpr" && currentKeyRecord === "pub" ? parts[9] : null
     if (fingerprint != null && fingerprint.length > 0) {
-      return normalizeOpenPgpFingerprint(fingerprint)
+      fingerprints.push(normalizeOpenPgpFingerprint(fingerprint))
     }
   }
-  return null
+  return fingerprints
 }
 
 export function validateAptKeyUrl(url: string): void {
@@ -41,6 +48,7 @@ export function validateAptKeyUrl(url: string): void {
 
 async function inspectOpenPgpFingerprint(
   ssh: SshConnection,
+  name: string,
   path: string
 ): Promise<{ fingerprint: string; result: ModuleResult }> {
   const fingerprintResult = await ssh.exec(`gpg --show-keys --with-colons ${shellQuote(path)}`, {
@@ -53,10 +61,19 @@ async function inspectOpenPgpFingerprint(
       result: failedCommand("[apt.key] failed to inspect key material", fingerprintResult),
     }
   }
-  const fingerprint = parseOpenPgpFingerprint(fingerprintResult.stdout)
-  if (fingerprint == null) {
+  const fingerprints = parseOpenPgpPrimaryKeyFingerprints(fingerprintResult.stdout)
+  if (fingerprints.length === 0) {
     return { fingerprint: "", result: failed("[apt.key] failed to parse key fingerprint") }
   }
+  if (fingerprints.length > 1) {
+    return {
+      fingerprint: "",
+      result: failed(
+        `[apt.key] key material for ${name} contains ${fingerprints.length} primary keys`
+      ),
+    }
+  }
+  const [fingerprint] = fingerprints
   return { fingerprint, result: { status: "changed" } }
 }
 
@@ -67,7 +84,7 @@ export async function verifyAptKeyFingerprint(parameters: {
   ssh: SshConnection
 }): Promise<"ok" | ModuleResult> {
   const { expectedFingerprint, name, path, ssh } = parameters
-  const inspection = await inspectOpenPgpFingerprint(ssh, path)
+  const inspection = await inspectOpenPgpFingerprint(ssh, name, path)
   if (inspection.result.status === "failed") return inspection.result
   if (inspection.fingerprint !== expectedFingerprint) {
     return failed(
