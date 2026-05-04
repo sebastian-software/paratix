@@ -303,7 +303,8 @@ function main(): void {
   void (async () => {
     const validatedHost = await resolveCliOrPromptHost(host)
     const resolvedExpectedHostFingerprint =
-      expectedHostFingerprint ?? (process.stdin.isTTY && process.stdout.isTTY
+      expectedHostFingerprint ??
+      (process.stdin.isTTY && process.stdout.isTTY
         ? await promptForHostFingerprint(validatedHost)
         : undefined)
     const initialUserConfig =
