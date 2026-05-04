@@ -1,5 +1,6 @@
 import { mkdirSync, writeFileSync } from "node:fs"
 import { basename, join, resolve } from "node:path"
+import { fileURLToPath } from "node:url"
 
 import {
   promptForAdminPublicKey,
@@ -328,7 +329,12 @@ function main(): void {
 // Only run when executed directly, not when imported (e.g. in tests)
 // Exported for testing: verifies the guard is safe when argv[1] is undefined.
 export function isDirectExecution(moduleUrl: string, argv1: null | string | undefined): boolean {
-  return argv1 != null && moduleUrl.endsWith(argv1.replaceAll("\\", "/"))
+  if (argv1 == null) return false
+  try {
+    return resolve(fileURLToPath(moduleUrl)) === resolve(argv1)
+  } catch {
+    return false
+  }
 }
 
 if (isDirectExecution(import.meta.url, process.argv[1])) {

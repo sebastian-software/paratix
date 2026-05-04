@@ -157,12 +157,17 @@ describe("isDirectExecution (process.argv[1] regression)", () => {
     expect(isDirectExecution("file:///project/src/index.js", "/other/script.js")).toBe(false)
   })
 
-  it("returns true when the module URL ends with the normalised argv1 path", () => {
+  it("returns true when the module URL resolves to argv1", () => {
     expect(isDirectExecution("file:///project/src/index.js", "/project/src/index.js")).toBe(true)
   })
 
-  it("normalises Windows backslashes in argv1 before comparing", () => {
-    expect(isDirectExecution("file:///project/src/index.js", "\\project\\src\\index.js")).toBe(true)
+  it("returns true when the module URL contains URL-encoded path characters", () => {
+    expect(
+      isDirectExecution(
+        "file:///tmp/create-paratix%20dir/%23hash/%25percent/dist/index.js",
+        "/tmp/create-paratix dir/#hash/%percent/dist/index.js"
+      )
+    ).toBe(true)
   })
 })
 
