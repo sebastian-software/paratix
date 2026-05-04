@@ -550,9 +550,12 @@ export const apt = {
         // grammar treats any whitespace as a field separator, so
         // `deb<TAB>https://...` and `deb https://...` are semantically
         // identical and must not flap between `ok` and `needs-apply`.
-        return normalizeAptSourceContent(content) === normalizeAptSourceContent(expectedContent)
-          ? "ok"
-          : NEEDS_APPLY
+        if (normalizeAptSourceContent(content) !== normalizeAptSourceContent(expectedContent)) {
+          return NEEDS_APPLY
+        }
+
+        const mode = await ssh.output(`stat -c '%a' ${shellQuote(filePath)}`)
+        return mode.trim() === APT_REPOSITORY_MODE.replace(/^0+/v, "") ? "ok" : NEEDS_APPLY
       },
       name: `apt.repository: ${name}`,
     }

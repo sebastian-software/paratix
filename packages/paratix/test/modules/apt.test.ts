@@ -381,6 +381,7 @@ describe("apt.repository (standard form)", () => {
     const ssh = createMockSsh({
       [`[ -f '${filePath}' ]`]: { code: 0 },
       [`cat '${filePath}'`]: { stdout: expectedContentWithSignedBy },
+      [`stat -c '%a' '${filePath}'`]: { stdout: "644" },
     })
     const mod = apt.repository("docker", source)
     const result = await mod.check(ssh, emptyEnv)
@@ -406,6 +407,7 @@ describe("apt.repository (standard form)", () => {
     const ssh = createMockSsh({
       [`[ -f '${filePath}' ]`]: { code: 0 },
       [`cat '${filePath}'`]: { stdout: expectedContentWithSignedBy },
+      [`stat -c '%a' '${filePath}'`]: { stdout: "644" },
     })
     const mod = apt.repository("docker", source)
     const result = await mod.check(ssh, emptyEnv)
@@ -416,6 +418,7 @@ describe("apt.repository (standard form)", () => {
     const ssh = createMockSsh({
       [`[ -f '${filePath}' ]`]: { code: 0 },
       [`cat '${filePath}'`]: { stdout: source },
+      [`stat -c '%a' '${filePath}'`]: { stdout: "644" },
     })
     const mod = apt.repository("docker", source)
     const result = await mod.check(ssh, emptyEnv)
@@ -426,6 +429,7 @@ describe("apt.repository (standard form)", () => {
     const ssh = createMockSsh({
       [`[ -f '${filePath}' ]`]: { code: 0 },
       [`cat '${filePath}'`]: { stdout: source },
+      [`stat -c '%a' '${filePath}'`]: { stdout: "644" },
     })
     const mod = apt.repository("docker", source, { signedBy: false })
     const result = await mod.check(ssh, emptyEnv)
@@ -438,6 +442,7 @@ describe("apt.repository (standard form)", () => {
     const ssh = createMockSsh({
       [`[ -f '${filePath}' ]`]: { code: 0 },
       [`cat '${filePath}'`]: { stdout: customContent },
+      [`stat -c '%a' '${filePath}'`]: { stdout: "644" },
     })
     const mod = apt.repository("docker", source, { signedBy: "custom" })
     const result = await mod.check(ssh, emptyEnv)
@@ -453,6 +458,7 @@ describe("apt.repository (standard form)", () => {
     const ssh = createMockSsh({
       [`[ -f '${filePath}' ]`]: { code: 0 },
       [`cat '${filePath}'`]: { stdout: tabbed },
+      [`stat -c '%a' '${filePath}'`]: { stdout: "644" },
     })
     const mod = apt.repository("docker", source)
     const result = await mod.check(ssh, emptyEnv)
@@ -465,6 +471,7 @@ describe("apt.repository (standard form)", () => {
     const ssh = createMockSsh({
       [`[ -f '${filePath}' ]`]: { code: 0 },
       [`cat '${filePath}'`]: { stdout: spaced },
+      [`stat -c '%a' '${filePath}'`]: { stdout: "644" },
     })
     const mod = apt.repository("docker", source)
     const result = await mod.check(ssh, emptyEnv)
@@ -476,6 +483,7 @@ describe("apt.repository (standard form)", () => {
     const ssh = createMockSsh({
       [`[ -f '${filePath}' ]`]: { code: 0 },
       [`cat '${filePath}'`]: { stdout: trailing },
+      [`stat -c '%a' '${filePath}'`]: { stdout: "644" },
     })
     const mod = apt.repository("docker", source)
     const result = await mod.check(ssh, emptyEnv)
@@ -488,6 +496,17 @@ describe("apt.repository (standard form)", () => {
     const ssh = createMockSsh({
       [`[ -f '${filePath}' ]`]: { code: 0 },
       [`cat '${filePath}'`]: { stdout: driftedContent },
+    })
+    const mod = apt.repository("docker", source)
+    const result = await mod.check(ssh, emptyEnv)
+    expect(result).toBe("needs-apply")
+  })
+
+  it("check returns needs-apply when repository file mode drifted", async () => {
+    const ssh = createMockSsh({
+      [`[ -f '${filePath}' ]`]: { code: 0 },
+      [`cat '${filePath}'`]: { stdout: expectedContentWithSignedBy },
+      [`stat -c '%a' '${filePath}'`]: { stdout: "600" },
     })
     const mod = apt.repository("docker", source)
     const result = await mod.check(ssh, emptyEnv)
