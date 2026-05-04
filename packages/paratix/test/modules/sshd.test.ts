@@ -364,12 +364,7 @@ describe("sshd.config — check", () => {
     expect(result).toBe("ok")
   })
 
-  // R-0000113 regression: check only inspects top-level directives and
-  // ignores Match-block overrides — apply must not edit Match blocks, so a
-  // disagreeing Match-block override must not flip the top-level check to
-  // needs-apply (otherwise apply would loop forever without changing the
-  // value sshd actually evaluates for non-Match connections).
-  it("regression — ignores Match-block overrides and returns ok when the top-level value matches", async () => {
+  it("returns needs-apply when a security-sensitive Match-block override contradicts the desired value", async () => {
     const mockSsh = createMockSsh({
       [CAT_SSHD]: {
         stdout: [
@@ -382,6 +377,22 @@ describe("sshd.config — check", () => {
       },
     })
     const mod = sshd.config({ PasswordAuthentication: "no" })
+    const result = await mod.check(mockSsh, emptyEnv)
+    expect(result).toBe("needs-apply")
+  })
+
+  it("keeps ignoring non-security Match-block overrides when the top-level value matches", async () => {
+    const mockSsh = createMockSsh({
+      [CAT_SSHD]: {
+        stdout: [
+          "AuthorizedKeysFile .ssh/authorized_keys",
+          "",
+          "Match User admin",
+          "    AuthorizedKeysFile /etc/ssh/admin_authorized_keys",
+        ].join("\n"),
+      },
+    })
+    const mod = sshd.config({ AuthorizedKeysFile: ".ssh/authorized_keys" })
     const result = await mod.check(mockSsh, emptyEnv)
     expect(result).toBe("ok")
   })

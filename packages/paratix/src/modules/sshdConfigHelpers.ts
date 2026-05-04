@@ -41,6 +41,51 @@ export function isMatchBlockLine(rawLine: string): boolean {
   return parsed?.directive.toLowerCase() === "match"
 }
 
+const SECURITY_RELEVANT_DIRECTIVES = new Set([
+  "allowgroups",
+  "allowusers",
+  "authenticationmethods",
+  "challengeresponseauthentication",
+  "denygroups",
+  "denyusers",
+  "kbdinteractiveauthentication",
+  "passwordauthentication",
+  "permitemptypasswords",
+  "permitrootlogin",
+  "pubkeyauthentication",
+])
+
+function directiveContradictsValue(
+  rawLine: string,
+  expectedKeyLower: string,
+  desiredValue: string
+): boolean {
+  const parsed = parseSshdConfigLine(rawLine)
+  return parsed?.directive.toLowerCase() === expectedKeyLower && parsed.value !== desiredValue
+}
+
+function hasContradictingMatchBlockOverride(
+  content: string,
+  key: string,
+  desiredValue: string
+): boolean {
+  const expectedKeyLower = key.toLowerCase()
+  if (!SECURITY_RELEVANT_DIRECTIVES.has(expectedKeyLower)) return false
+
+  let insideMatchBlock = false
+  for (const rawLine of content.split(/\r?\n/v)) {
+    if (isMatchBlockLine(rawLine)) {
+      insideMatchBlock = true
+      continue
+    }
+    if (!insideMatchBlock) continue
+
+    if (directiveContradictsValue(rawLine, expectedKeyLower, desiredValue)) return true
+  }
+
+  return false
+}
+
 /**
  * Check whether every top-level active occurrence of `key` in the sshd_config
  * `content` has the given `value`. An "active" occurrence is a non-comment
@@ -76,7 +121,8 @@ export function sshdSettingMatchesEverywhere(content: string, key: string, value
     if (parsed.value !== desiredValue) return false
   }
 
-  return foundAny
+  if (!foundAny) return false
+  return !hasContradictingMatchBlockOverride(content, key, desiredValue)
 }
 
 /**
