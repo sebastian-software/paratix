@@ -131,10 +131,14 @@ function maskScopedError(error: unknown, secrets: readonly string[]): Error {
       writable: true,
     })
   }
-  if (maskedError.cause instanceof Error) {
+  const cause = maskedError.cause
+  if (cause !== undefined) {
     Object.defineProperty(maskedError, "cause", {
       configurable: true,
-      value: maskScopedError(maskedError.cause, secrets),
+      value:
+        cause instanceof Error
+          ? maskScopedError(cause, secrets)
+          : maskSecrets(stringifyCause(cause), [...secrets]),
       writable: true,
     })
   }
@@ -149,6 +153,28 @@ function maskScopedError(error: unknown, secrets: readonly string[]): Error {
     })
   }
   return maskedError
+}
+
+function stringifyCause(cause: unknown): string {
+  if (typeof cause === "string") return cause
+  if (typeof cause === "function")
+    return cause.name.length > 0 ? `[Function: ${cause.name}]` : "[Function]"
+  if (typeof cause === "number") return String(cause)
+  if (typeof cause === "boolean") return String(cause)
+  if (typeof cause === "bigint") return String(cause)
+  if (typeof cause === "symbol") return String(cause)
+  if (cause === undefined) return String(cause)
+  if (cause === null) return "null"
+  return stringifyObjectCause(cause)
+}
+
+function stringifyObjectCause(cause: object): string {
+  try {
+    const serialized = JSON.stringify(cause) as string | undefined
+    return serialized ?? Object.prototype.toString.call(cause)
+  } catch {
+    return Object.prototype.toString.call(cause)
+  }
 }
 
 /**

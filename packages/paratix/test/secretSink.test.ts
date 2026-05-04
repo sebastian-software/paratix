@@ -94,6 +94,17 @@ describe("withRegisteredSecrets", () => {
     expect(getRegisteredSecrets()).toStrictEqual([])
   })
 
+  it("masks scoped secrets on primitive error causes before unregistering", async () => {
+    await expect(
+      withRegisteredSecrets(["primitive-cause-secret"], async () => {
+        await Promise.resolve()
+        throw Object.assign(new Error("boom"), { cause: "primitive-cause-secret" })
+      })
+    ).rejects.toHaveProperty("cause", REDACTED)
+
+    expect(getRegisteredSecrets()).toStrictEqual([])
+  })
+
   it("masks scoped secrets on failed module results before unregistering", async () => {
     const result = await withRegisteredSecrets(["alpha"], async () => {
       await Promise.resolve()
