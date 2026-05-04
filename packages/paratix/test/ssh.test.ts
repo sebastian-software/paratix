@@ -3082,6 +3082,16 @@ describe("SshConnectionImpl", () => {
 
       await expect(ssh.probeSudo()).rejects.toThrow("stderr channel error")
     })
+
+    it("propagates exec callback errors from test()", async () => {
+      const execSpy = vi.fn().mockImplementation((_command: string, callback: ExecCallback) => {
+        callback(new Error("channel open failed"), makeStream())
+      })
+      const client = makeClientWithExecSpy(execSpy)
+      const ssh = makeConnectedSsh(client)
+
+      await expect(ssh.test("test -f /etc/passwd")).rejects.toThrow("channel open failed")
+    })
   })
 
   // -------------------------------------------------------------------------

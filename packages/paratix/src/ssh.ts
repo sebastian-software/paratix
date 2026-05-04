@@ -342,12 +342,8 @@ export class SshConnectionImpl implements SshConnection {
   }
 
   public async test(command: string): Promise<boolean> {
-    try {
-      const result = await this.exec(command, { ignoreExitCode: true, silent: true })
-      return result.code === 0
-    } catch {
-      return false
-    }
+    const result = await this.exec(command, { ignoreExitCode: true, silent: true })
+    return result.code === 0
   }
 
   public updateHost(host: string): void {
