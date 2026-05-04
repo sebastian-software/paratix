@@ -4,6 +4,25 @@ import { type Module, type ModuleResult, NEEDS_APPLY, type SshConnection } from 
 
 const GETENT_GROUP = "getent group"
 
+// R-0000238: validate group names at module-construction time so empty,
+// flag-shaped, or shell-control-shaped names cannot reach groupadd,
+// groupmod, or groupdel. This mirrors the user module's POSIX whitelist.
+const GROUP_NAME_PATTERN = /^[a-z_][a-z0-9_\-]*\$?$/v
+const GID_BIT_WIDTH = 32
+const GID_MAX_EXCLUSIVE = 2 ** GID_BIT_WIDTH
+
+function assertValidGroupName(name: string): void {
+  if (!GROUP_NAME_PATTERN.test(name)) {
+    throw new Error(`group name ${JSON.stringify(name)} is invalid`)
+  }
+}
+
+function assertValidGid(gid: number): void {
+  if (!Number.isInteger(gid) || gid < 0 || gid >= GID_MAX_EXCLUSIVE) {
+    throw new Error(`gid ${JSON.stringify(gid)} is invalid`)
+  }
+}
+
 /**
  * Read the GID of an existing group via `getent group <name>`. Returns the
  * GID as the string it appears in `/etc/group` (third colon-separated
@@ -39,6 +58,7 @@ export const group = {
    * @returns A Module that ensures the group is absent.
    */
   absent(name: string): Module {
+    assertValidGroupName(name)
     // R-0000080: groupdel returns exit code 6 ("specified group doesn't
     // exist") when the group has already been removed. Treat this case as
     // idempotent success — both by probing `getent group` first to mirror
@@ -50,7 +70,7 @@ export const group = {
       async apply(ssh: null | SshConnection): Promise<ModuleResult> {
         if (!ssh) return failed(`[group.absent: ${name}] SSH connection is required`)
         if ((await readGroupGid(ssh, name)) == null) return { status: "ok" }
-        const result = await ssh.exec(`groupdel ${shellQuote(name)}`, {
+        const result = await ssh.exec(`groupdel -- ${shellQuote(name)}`, {
           ignoreExitCode: true,
           silent: true,
         })
@@ -77,6 +97,8 @@ export const group = {
    * @returns A Module that ensures the group is present.
    */
   present(name: string, options?: { gid?: number }): Module {
+    assertValidGroupName(name)
+    if (options?.gid != null) assertValidGid(options.gid)
     return {
       async apply(ssh: null | SshConnection): Promise<ModuleResult> {
         if (!ssh) return failed(`[group.present: ${name}] SSH connection is required`)
@@ -84,8 +106,8 @@ export const group = {
         const existingGid = await readGroupGid(ssh, name)
         if (existingGid == null) {
           // Group does not exist yet — create it with the desired GID.
-          const gidArgument = options?.gid == null ? "" : `--gid ${String(options.gid)}`
-          const result = await ssh.exec(`groupadd ${gidArgument} ${shellQuote(name)}`, {
+          const arguments_ = options?.gid == null ? ["--"] : ["--gid", String(options.gid), "--"]
+          const result = await ssh.exec(`groupadd ${arguments_.join(" ")} ${shellQuote(name)}`, {
             ignoreExitCode: true,
             silent: true,
           })
@@ -104,7 +126,7 @@ export const group = {
         // so the drift becomes recoverable instead of blocking on
         // `groupadd: group already exists`.
         const groupmodResult = await ssh.exec(
-          `groupmod -g ${String(options.gid)} ${shellQuote(name)}`,
+          `groupmod -g ${String(options.gid)} -- ${shellQuote(name)}`,
           { ignoreExitCode: true, silent: true }
         )
         return groupmodResult.code === 0

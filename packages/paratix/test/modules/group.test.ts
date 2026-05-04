@@ -54,29 +54,29 @@ describe("group.present", () => {
   it("apply returns changed when groupadd succeeds without gid", async () => {
     const ssh = createMockSsh({
       "getent group 'deploy'": { code: 1 },
-      "groupadd  'deploy'": { code: 0 },
+      "groupadd -- 'deploy'": { code: 0 },
     })
     const mod = group.present("deploy")
     const result = await mod.apply(ssh, emptyEnv)
     expect(result.status).toBe("changed")
-    expect(ssh.calls).toContain("groupadd  'deploy'")
+    expect(ssh.calls).toContain("groupadd -- 'deploy'")
   })
 
   it("apply returns changed when groupadd succeeds with gid", async () => {
     const ssh = createMockSsh({
       "getent group 'deploy'": { code: 1 },
-      "groupadd --gid 1200 'deploy'": { code: 0 },
+      "groupadd --gid 1200 -- 'deploy'": { code: 0 },
     })
     const mod = group.present("deploy", { gid: 1200 })
     const result = await mod.apply(ssh, emptyEnv)
     expect(result.status).toBe("changed")
-    expect(ssh.calls).toContain("groupadd --gid 1200 'deploy'")
+    expect(ssh.calls).toContain("groupadd --gid 1200 -- 'deploy'")
   })
 
   it("apply returns failed when groupadd exits with non-zero code", async () => {
     const ssh = createMockSsh({
       "getent group 'deploy'": { code: 1 },
-      "groupadd --gid 1200 'deploy'": { code: 1 },
+      "groupadd --gid 1200 -- 'deploy'": { code: 1 },
     })
     const mod = group.present("deploy", { gid: 1200 })
     const result = await mod.apply(ssh, emptyEnv)
@@ -102,19 +102,19 @@ describe("group.present", () => {
   it("apply runs groupmod -g <gid> when group exists with mismatched GID", async () => {
     const ssh = createMockSsh({
       "getent group 'deploy'": { code: 0, stdout: "deploy:x:1234:" },
-      "groupmod -g 1200 'deploy'": { code: 0 },
+      "groupmod -g 1200 -- 'deploy'": { code: 0 },
     })
     const mod = group.present("deploy", { gid: 1200 })
     const result = await mod.apply(ssh, emptyEnv)
     expect(result.status).toBe("changed")
-    expect(ssh.calls).toContain("groupmod -g 1200 'deploy'")
+    expect(ssh.calls).toContain("groupmod -g 1200 -- 'deploy'")
     expect(ssh.calls.some((c) => c.startsWith("groupadd"))).toBe(false)
   })
 
   it("apply returns failed when groupmod exits with non-zero code", async () => {
     const ssh = createMockSsh({
       "getent group 'deploy'": { code: 0, stdout: "deploy:x:1234:" },
-      "groupmod -g 1200 'deploy'": { code: 1 },
+      "groupmod -g 1200 -- 'deploy'": { code: 1 },
     })
     const mod = group.present("deploy", { gid: 1200 })
     const result = await mod.apply(ssh, emptyEnv)
@@ -132,6 +132,25 @@ describe("group.present", () => {
     const mod = group.present("deploy")
     expect(mod.name).toBe("group.present: deploy")
   })
+
+  it("throws when the group name is empty", () => {
+    expect(() => group.present("")).toThrow("group name")
+  })
+
+  it("throws when the group name starts with a flag", () => {
+    expect(() => group.present("--badgroup")).toThrow("group name")
+  })
+
+  it("throws when the group name contains a newline", () => {
+    expect(() => group.present("deploy\nadmin")).toThrow("group name")
+  })
+
+  it.each([Number.NaN, Number.POSITIVE_INFINITY, -1, 1.5, 2 ** 32])(
+    "throws when gid is invalid: %s",
+    (gid) => {
+      expect(() => group.present("deploy", { gid })).toThrow("gid")
+    }
+  )
 })
 
 describe("group.absent", () => {
@@ -162,18 +181,18 @@ describe("group.absent", () => {
   it("apply returns changed when groupdel succeeds", async () => {
     const ssh = createMockSsh({
       "getent group 'deploy'": { code: 0, stdout: "deploy:x:1234:" },
-      "groupdel 'deploy'": { code: 0 },
+      "groupdel -- 'deploy'": { code: 0 },
     })
     const mod = group.absent("deploy")
     const result = await mod.apply(ssh, emptyEnv)
     expect(result.status).toBe("changed")
-    expect(ssh.calls).toContain("groupdel 'deploy'")
+    expect(ssh.calls).toContain("groupdel -- 'deploy'")
   })
 
   it("apply returns failed when groupdel exits with non-zero code", async () => {
     const ssh = createMockSsh({
       "getent group 'deploy'": { code: 0, stdout: "deploy:x:1234:" },
-      "groupdel 'deploy'": { code: 1 },
+      "groupdel -- 'deploy'": { code: 1 },
     })
     const mod = group.absent("deploy")
     const result = await mod.apply(ssh, emptyEnv)
@@ -201,7 +220,7 @@ describe("group.absent", () => {
   it("apply returns ok when groupdel exits with code 6 (group already gone)", async () => {
     const ssh = createMockSsh({
       "getent group 'deploy'": { code: 0, stdout: "deploy:x:1234:" },
-      "groupdel 'deploy'": { code: 6 },
+      "groupdel -- 'deploy'": { code: 6 },
     })
     const mod = group.absent("deploy")
     const result = await mod.apply(ssh, emptyEnv)
@@ -218,5 +237,13 @@ describe("group.absent", () => {
   it("uses the expected module name", () => {
     const mod = group.absent("deploy")
     expect(mod.name).toBe("group.absent: deploy")
+  })
+
+  it("throws when the group name is empty", () => {
+    expect(() => group.absent("")).toThrow("group name")
+  })
+
+  it("throws when the group name starts with a flag", () => {
+    expect(() => group.absent("--badgroup")).toThrow("group name")
   })
 })
