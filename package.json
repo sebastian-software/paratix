@@ -40,11 +40,12 @@
   },
   "devDependencies": {
     "@cspell/dict-de-de": "^4.1.2",
+    "concurrently": "^9.1.2",
     "eslint": "^10.3.0",
     "eslint-config-setup": "^0.4.0",
     "jiti": "^2.6.1",
-    "concurrently": "^9.1.2",
     "oxlint": "^1.62.0",
-    "prettier": "^3.8.3"
+    "prettier": "^3.8.3",
+    "typescript": "^6.0.3"
   }
 }
