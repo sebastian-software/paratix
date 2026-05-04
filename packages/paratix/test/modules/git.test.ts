@@ -3,14 +3,21 @@ import { describe, expect, it } from "vitest"
 import { git } from "../../src/modules/git.js"
 import { createMockSsh as createBaseMockSsh } from "../helpers/mockSsh.js"
 
-const createMockSsh: typeof createBaseMockSsh = (responses, options) =>
-  createBaseMockSsh(responses, { strict: false, ...options })
-
 const emptyEnv = {}
 
 const repo = "git@github.com:example/repo.git"
 const destination = "/opt/myapp"
 const gitDir = `${destination}/.git`
+const originUrlCommand = `git -C '${destination}' remote get-url origin`
+
+const createMockSsh: typeof createBaseMockSsh = (responses, options) =>
+  createBaseMockSsh(
+    {
+      [originUrlCommand]: { code: 0, stdout: repo },
+      ...responses,
+    },
+    { strict: false, ...options }
+  )
 
 describe("git.clone — check", () => {
   it("returns needs-apply when conn is null", async () => {
@@ -50,6 +57,22 @@ describe("git.clone — check", () => {
         stdout: "bbb222\tHEAD\n",
       },
       [`git -C '${destination}' rev-parse HEAD`]: { code: 0, stdout: "aaa111" },
+      [`test -d '${gitDir}'`]: { code: 0 },
+    })
+    const mod = git.clone(repo, destination)
+    const result = await mod.check(mockSsh, emptyEnv)
+    expect(result).toBe("needs-apply")
+  })
+
+  it("returns needs-apply when the existing checkout points at a different origin URL", async () => {
+    const sha = "abc1234567890"
+    const mockSsh = createMockSsh({
+      [originUrlCommand]: { code: 0, stdout: "git@github.com:other/repo.git" },
+      [`git -C '${destination}' ls-remote origin HEAD`]: {
+        code: 0,
+        stdout: `${sha}\tHEAD\n`,
+      },
+      [`git -C '${destination}' rev-parse HEAD`]: { code: 0, stdout: sha },
       [`test -d '${gitDir}'`]: { code: 0 },
     })
     const mod = git.clone(repo, destination)
@@ -194,6 +217,22 @@ describe("git.clone — apply", () => {
     const mod = git.clone(repo, destination)
     const result = await mod.apply(mockSsh, emptyEnv)
     expect(result.status).toBe("changed")
+    expect(mockSsh.calls).toContain(`git -C '${destination}' pull`)
+  })
+
+  it("updates the origin URL before pulling when an existing checkout drifted", async () => {
+    const oldRepo = "git@github.com:other/repo.git"
+    const mockSsh = createMockSsh({
+      [originUrlCommand]: { code: 0, stdout: oldRepo },
+      [`git -C '${destination}' remote set-url origin '${repo}'`]: { code: 0 },
+      [`test -d '${gitDir}'`]: { code: 0 },
+    })
+    const mod = git.clone(repo, destination)
+
+    const result = await mod.apply(mockSsh, emptyEnv)
+
+    expect(result.status).toBe("changed")
+    expect(mockSsh.calls).toContain(`git -C '${destination}' remote set-url origin '${repo}'`)
     expect(mockSsh.calls).toContain(`git -C '${destination}' pull`)
   })
 

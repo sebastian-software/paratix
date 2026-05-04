@@ -116,6 +116,26 @@ async function updateRepo(conn: SshConnection, parameters: GitCloneParameters): 
   return pull.code === 0
 }
 
+async function readOriginUrl(conn: SshConnection, destination: string): Promise<null | string> {
+  const result = await conn.exec(`git -C ${shellQuote(destination)} remote get-url origin`, SILENT)
+  if (result.code !== 0) return null
+  const remoteUrl = result.stdout.trim()
+  return remoteUrl.length === 0 ? null : remoteUrl
+}
+
+async function ensureOriginUrl(conn: SshConnection, parameters: GitCloneParameters): Promise<boolean> {
+  const { destination, repo } = parameters
+  const currentOrigin = await readOriginUrl(conn, destination)
+  if (currentOrigin === repo) return true
+
+  const command =
+    currentOrigin == null
+      ? `git -C ${shellQuote(destination)} remote add origin ${shellQuote(repo)}`
+      : `git -C ${shellQuote(destination)} remote set-url origin ${shellQuote(repo)}`
+  const result = await conn.exec(command, EXEC_OPTS)
+  return result.code === 0
+}
+
 /**
  * Resolve a reference to a commit SHA by querying the remote via `git ls-remote`.
  *
@@ -204,7 +224,7 @@ export const git = {
 
         const directoryExists = await conn.test(`test -d ${shellQuote(gitDirectory)}`)
         const success = await (directoryExists
-          ? updateRepo(conn, parameters)
+          ? (await ensureOriginUrl(conn, parameters)) && (await updateRepo(conn, parameters))
           : cloneRepo(conn, parameters))
 
         return success
@@ -216,6 +236,8 @@ export const git = {
 
         const gitDirectoryExists = await conn.test(`test -d ${shellQuote(gitDirectory)}`)
         if (!gitDirectoryExists) return NEEDS_APPLY
+        const currentOrigin = await readOriginUrl(conn, destination)
+        if (currentOrigin !== repo) return NEEDS_APPLY
 
         const headResult = await conn.exec(
           `git -C ${shellQuote(destination)} rev-parse HEAD`,
