@@ -117,7 +117,10 @@ async function updateRepo(conn: SshConnection, parameters: GitCloneParameters): 
 }
 
 async function readOriginUrl(conn: SshConnection, destination: string): Promise<null | string> {
-  const result = await conn.exec(`git -C ${shellQuote(destination)} remote get-url origin`, EXEC_OPTS)
+  const result = await conn.exec(
+    `git -C ${shellQuote(destination)} remote get-url origin`,
+    EXEC_OPTS
+  )
   if (result.code !== 0) return null
   const remoteUrl = result.stdout.trim()
   return remoteUrl.length === 0 ? null : remoteUrl
@@ -142,10 +145,12 @@ async function ensureOriginUrl(
 /**
  * Resolve a reference to a commit SHA by querying the remote via `git ls-remote`.
  *
- * For tags, the dereferenced line (`refs/tags/<ref>^{}`) is preferred because it
- * contains the commit SHA rather than the tag object SHA. When `ls-remote`
- * returns no output (e.g. because the reference is already a bare commit SHA),
- * the reference string is returned as-is.
+ * Remote branches are preferred over same-named tags to match `apply`, which
+ * resets branch refs to `origin/<ref>`. For tags, the dereferenced line
+ * (`refs/tags/<ref>^{}`) is preferred because it contains the commit SHA rather
+ * than the tag object SHA. When `ls-remote` returns no output (e.g. because the
+ * reference is already a bare commit SHA), the reference string is returned
+ * as-is.
  *
  * @param conn - The SSH connection to the remote host.
  * @param destination - The repository path on the remote host.
@@ -166,6 +171,12 @@ async function resolveRemoteReference(
   if (output === "") return reference
 
   const lines = output.split("\n")
+  const branchReference = `refs/heads/${reference}`
+
+  for (const line of lines) {
+    const [sha, referenceName] = line.split("\t")
+    if (referenceName === branchReference) return sha
+  }
 
   // Prefer the dereferenced tag line (^{}) when present.
   for (const line of lines) {

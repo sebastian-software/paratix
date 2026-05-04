@@ -126,6 +126,22 @@ describe("git.clone — check", () => {
     expect(result).toBe("ok")
   })
 
+  it("prefers a remote branch over a same-named annotated tag during check", async () => {
+    const branchSha = "111111"
+    const tagSha = "222222"
+    const mockSsh = createMockSsh({
+      [`git -C '${destination}' ls-remote origin 'release'`]: {
+        code: 0,
+        stdout: `aaa111\trefs/tags/release\n${tagSha}\trefs/tags/release^{}\n${branchSha}\trefs/heads/release\n`,
+      },
+      [`git -C '${destination}' rev-parse HEAD`]: { code: 0, stdout: branchSha },
+      [`test -d '${gitDir}'`]: { code: 0 },
+    })
+    const mod = git.clone(repo, destination, { ref: "release" })
+    const result = await mod.check(mockSsh, emptyEnv)
+    expect(result).toBe("ok")
+  })
+
   it("falls back to bare SHA when ls-remote returns empty output", async () => {
     const headSha = "aaa111"
     const bareSha = "ccc333"
