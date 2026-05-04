@@ -16,7 +16,9 @@
  * registered secret material is masked before it reaches stderr.
  */
 
-import { maskSecrets } from "./sshHelpers.js"
+import type { ModuleResult } from "./types.js"
+
+import { CommandError, maskSecrets } from "./sshHelpers.js"
 
 /**
  * Reference-counted registry: a single secret may be registered concurrently
@@ -85,12 +87,59 @@ export async function withRegisteredSecrets<T>(
     registered.push(secret)
   }
   try {
-    return await body()
+    const result = await body()
+    return maskScopedResult(result, registered)
+  } catch (error) {
+    throw maskScopedError(error, registered)
   } finally {
     for (const secret of registered) {
       unregisterSecret(secret)
     }
   }
+}
+
+function maskScopedResult<T>(result: T, secrets: readonly string[]): T {
+  if (secrets.length === 0 || !isModuleResult(result) || result.status !== "failed") return result
+  if (result.error != null) {
+    result.error = maskScopedError(result.error, secrets)
+  }
+  return result
+}
+
+function isModuleResult(value: unknown): value is ModuleResult {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    "status" in value &&
+    typeof (value as { status?: unknown }).status === "string"
+  )
+}
+
+function maskScopedError(error: unknown, secrets: readonly string[]): Error {
+  if (!(error instanceof Error) || secrets.length === 0) {
+    return error instanceof Error ? error : new Error(maskSecrets(String(error), secrets))
+  }
+
+  error.message = maskSecrets(error.message, secrets)
+  if (error.stack != null) error.stack = maskSecrets(error.stack, secrets)
+  if (error.cause instanceof Error) {
+    Object.defineProperty(error, "cause", {
+      configurable: true,
+      value: maskScopedError(error.cause, secrets),
+      writable: true,
+    })
+  }
+  if (error instanceof CommandError) {
+    Object.defineProperty(error, "fullStdout", {
+      configurable: true,
+      value: maskSecrets(error.fullStdout, secrets),
+    })
+    Object.defineProperty(error, "fullStderr", {
+      configurable: true,
+      value: maskSecrets(error.fullStderr, secrets),
+    })
+  }
+  return error
 }
 
 /**

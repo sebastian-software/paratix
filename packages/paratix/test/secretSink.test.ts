@@ -83,6 +83,30 @@ describe("withRegisteredSecrets", () => {
     expect(getRegisteredSecrets()).toStrictEqual([])
   })
 
+  it("masks scoped secrets on errors before unregistering", async () => {
+    await expect(
+      withRegisteredSecrets(["alpha"], async () => {
+        await Promise.resolve()
+        throw new Error("boom alpha")
+      })
+    ).rejects.toThrow("boom [REDACTED]")
+
+    expect(getRegisteredSecrets()).toStrictEqual([])
+  })
+
+  it("masks scoped secrets on failed module results before unregistering", async () => {
+    const result = await withRegisteredSecrets(["alpha"], async () => ({
+      error: new CommandError("failed alpha", "stdout alpha", "stderr alpha"),
+      status: "failed" as const,
+    }))
+
+    expect(result.error?.message).toBe("failed [REDACTED]")
+    expect(result.error).toBeInstanceOf(CommandError)
+    expect((result.error as CommandError | undefined)?.fullStdout).toBe("stdout [REDACTED]")
+    expect((result.error as CommandError | undefined)?.fullStderr).toBe("stderr [REDACTED]")
+    expect(getRegisteredSecrets()).toStrictEqual([])
+  })
+
   it("ignores empty strings without affecting the unregister bookkeeping", async () => {
     await withRegisteredSecrets(["", "value"], async () => {
       await Promise.resolve()
