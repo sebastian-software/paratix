@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import { readHostFingerprintViaSsh2 } from "../src/hostFingerprintBootstrap.js"
 import {
   isDirectExecution,
+  isValidExpectedHostFingerprint,
   isValidHost,
   isValidInitialUserName,
   isValidProjectName,
@@ -18,6 +19,7 @@ import {
   promptForInitialUserConfig,
   resolveCliOrPromptHost,
   scaffoldProject,
+  validateExpectedHostFingerprint,
   validateHost,
   writeProjectFiles,
 } from "../src/index.js"
@@ -48,6 +50,7 @@ function createEd25519PublicKey(comment: string, keyMaterial = Buffer.alloc(32, 
 }
 
 const TEST_ADMIN_PUBLIC_KEY = createEd25519PublicKey("generated@test")
+const TEST_HOST_FINGERPRINT = "SHA256:MYVLAwRUnY5x4jwQ1SPUJoYXVb/fB/L3kFjCi5WxfYA"
 
 async function expectProcessExit(
   callback: () => Promise<void> | void,
@@ -263,19 +266,33 @@ describe("parseCliArguments", () => {
 
   it("supports an explicit expected host fingerprint", () => {
     expect(
+      parseCliArguments(["my-server", "--expected-host-fingerprint", TEST_HOST_FINGERPRINT])
+    ).toStrictEqual({
+      adminPublicKey: undefined,
+      adminPublicKeyFile: undefined,
+      expectedHostFingerprint: TEST_HOST_FINGERPRINT,
+      host: undefined,
+      initialUser: undefined,
+      projectName: "my-server",
+    })
+  })
+
+  it("rejects an invalid expected host fingerprint", async () => {
+    vi.spyOn(console, "error").mockImplementation((...args) => {
+      void args
+    })
+
+    await expectProcessExit(() => {
       parseCliArguments([
         "my-server",
         "--expected-host-fingerprint",
         "SHA256:trusted-host-fingerprint",
       ])
-    ).toStrictEqual({
-      adminPublicKey: undefined,
-      adminPublicKeyFile: undefined,
-      expectedHostFingerprint: "SHA256:trusted-host-fingerprint",
-      host: undefined,
-      initialUser: undefined,
-      projectName: "my-server",
     })
+
+    expect(console.error).toHaveBeenCalledWith(
+      'Error: Invalid expected host fingerprint "SHA256:trusted-host-fingerprint" — use an OpenSSH SHA256 fingerprint.'
+    )
   })
 
   it("rejects passing both admin public key flags together", async () => {
@@ -670,6 +687,38 @@ describe("host parsing", () => {
 
     expect(console.error).toHaveBeenCalledWith(
       'Error: Invalid host "bad host" — use a domain name, IPv4, or IPv6 address without spaces.'
+    )
+  })
+})
+
+describe("expected host fingerprint parsing", () => {
+  it("accepts an OpenSSH SHA256 fingerprint", () => {
+    expect(isValidExpectedHostFingerprint(TEST_HOST_FINGERPRINT)).toBe(true)
+    expect(validateExpectedHostFingerprint(TEST_HOST_FINGERPRINT)).toBe(TEST_HOST_FINGERPRINT)
+  })
+
+  it("rejects fingerprints with the wrong digest prefix", () => {
+    expect(
+      isValidExpectedHostFingerprint("MD5:aa:bb:cc:dd:ee:ff:00:11:22:33:44:55:66:77:88:99")
+    ).toBe(false)
+  })
+
+  it("rejects padded or non-base64 SHA256 fingerprints", () => {
+    expect(isValidExpectedHostFingerprint(`${TEST_HOST_FINGERPRINT}=`)).toBe(false)
+    expect(isValidExpectedHostFingerprint("SHA256:trusted-host-fingerprint")).toBe(false)
+  })
+
+  it("exits for invalid expected host fingerprints", async () => {
+    vi.spyOn(console, "error").mockImplementation((...args) => {
+      void args
+    })
+
+    await expectProcessExit(() => {
+      validateExpectedHostFingerprint("SHA256:trusted-host-fingerprint")
+    })
+
+    expect(console.error).toHaveBeenCalledWith(
+      'Error: Invalid expected host fingerprint "SHA256:trusted-host-fingerprint" — use an OpenSSH SHA256 fingerprint.'
     )
   })
 })

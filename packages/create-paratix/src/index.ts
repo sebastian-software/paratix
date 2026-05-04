@@ -12,6 +12,7 @@ import { readAdminPublicKeyFile, validateAdminPublicKey } from "./publicKeySelec
 import {
   parseCliArguments as parseScaffoldCliArguments,
   parseInitialUserConfig as parseScaffoldInitialUserConfig,
+  validateExpectedHostFingerprint as validateScaffoldExpectedHostFingerprint,
   validateHost as validateScaffoldHost,
 } from "./scaffoldConfig.js"
 import {
@@ -42,6 +43,7 @@ export {
   promptForInitialUserConfig,
 } from "./interactivePrompts.js"
 export {
+  isValidExpectedHostFingerprint,
   isValidHost,
   isValidInitialUserName,
   normalizeHost,
@@ -188,6 +190,10 @@ export function parseInitialUserConfig(value: string): InitialUserConfig {
 
 export function validateHost(value: string): string {
   return validateScaffoldHost(exitWithMessage, value)
+}
+
+export function validateExpectedHostFingerprint(value: string): string {
+  return validateScaffoldExpectedHostFingerprint(exitWithMessage, value)
 }
 
 function validateProjectName(name: string | undefined): string {

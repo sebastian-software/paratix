@@ -6,6 +6,8 @@ type PromptFunction = (question: string) => Promise<string>
 const CLI_USAGE =
   "Usage: create-paratix <project-name> [--host <domain-or-ip>] [--initial-user <root|name>] [--expected-host-fingerprint <fingerprint>] [--admin-public-key <ssh-public-key>] [--admin-public-key-file <path>]"
 
+const OPENSSH_SHA256_FINGERPRINT_PATTERN = /^SHA256:[A-Za-z0-9+\/]{43}$/v
+
 export function getCliUsage(): string {
   return CLI_USAGE
 }
@@ -86,6 +88,23 @@ export function validateHost(exitWithMessage: ExitWithMessage, value: string): s
     )
   }
   return normalizedValue
+}
+
+export function isValidExpectedHostFingerprint(value: string): boolean {
+  return OPENSSH_SHA256_FINGERPRINT_PATTERN.test(value)
+}
+
+export function validateExpectedHostFingerprint(
+  exitWithMessage: ExitWithMessage,
+  value: string
+): string {
+  if (!isValidExpectedHostFingerprint(value)) {
+    exitWithMessage(
+      `Error: Invalid expected host fingerprint "${value}" — use an OpenSSH SHA256 fingerprint.`
+    )
+  }
+
+  return value
 }
 
 export async function promptForHost(prompt: PromptFunction): Promise<string> {
@@ -178,11 +197,16 @@ function parseOptionAssignment(parameters: {
   }
 
   if (parameters.argument === "--expected-host-fingerprint") {
+    const expectedHostFingerprint = parseArgumentValue(parameters.argv, parameters.index, {
+      exitWithMessage: parameters.exitWithMessage,
+      optionName: "--expected-host-fingerprint",
+    })
+
     return {
-      expectedHostFingerprint: parseArgumentValue(parameters.argv, parameters.index, {
-        exitWithMessage: parameters.exitWithMessage,
-        optionName: "--expected-host-fingerprint",
-      }),
+      expectedHostFingerprint: validateExpectedHostFingerprint(
+        parameters.exitWithMessage,
+        expectedHostFingerprint
+      ),
     }
   }
 
