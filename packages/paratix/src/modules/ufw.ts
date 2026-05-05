@@ -20,6 +20,14 @@ async function allowCurrentSshPort(ssh: SshConnection): Promise<ModuleResult | n
     : failedCommand(`[ufw.enabled] ufw allow failed for current SSH port ${String(port)}`, result)
 }
 
+function hasProtocolAgnosticRule(status: string, port: number, action: "ALLOW" | "DENY"): boolean {
+  // Match only the protocol-agnostic form `<port> ACTION`. Protocol-specific
+  // entries like `22/tcp ALLOW`, opposite actions, and similar ports must not
+  // satisfy the rule.
+  // eslint-disable-next-line security/detect-non-literal-regexp
+  return new RegExp(`^${port}\\s+${action}\\b`, "mv").test(status)
+}
+
 /**
  * Modules for managing the UFW (Uncomplicated Firewall) on Debian/Ubuntu hosts.
  */
@@ -87,7 +95,12 @@ export const ufw = {
       async check(ssh: null | SshConnection): Promise<"needs-apply" | "ok"> {
         if (!ssh) return NEEDS_APPLY
         const status = await ssh.output(`${UFW} status`)
-        return status.includes("Status: active") ? "ok" : NEEDS_APPLY
+        if (!status.includes("Status: active")) return NEEDS_APPLY
+
+        const { port } = ssh.getConnectionInfo()
+        if (!isValidTcpPort(port)) return NEEDS_APPLY
+
+        return hasProtocolAgnosticRule(status, port, "ALLOW") ? "ok" : NEEDS_APPLY
       },
       name: "ufw.enabled",
     }
@@ -154,9 +167,7 @@ export const ufw = {
           // therefore add a second, parametrically different rule.
           // Anchor the port at the line start and require a whitespace
           // boundary so port 22 does not match 5022, 1022, 2222 etc.
-          // eslint-disable-next-line security/detect-non-literal-regexp
-          const pattern = new RegExp(`^${port}\\s+${expectedAction}\\b`, "mv")
-          if (!pattern.test(status)) {
+          if (!hasProtocolAgnosticRule(status, port, expectedAction)) {
             return NEEDS_APPLY
           }
         }

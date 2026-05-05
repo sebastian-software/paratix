@@ -7,14 +7,129 @@ const emptyEnv = {}
 const DPKG_STATUS_LITERAL = ["${", "Status}"].join("")
 const DPKG_UFW_INSTALLED = `dpkg-query -W -f='${DPKG_STATUS_LITERAL}' 'ufw' 2>/dev/null | grep -q 'install ok installed'`
 
+function createMockSshOnPort(
+  responses: Parameters<typeof createMockSsh>[0],
+  port: number
+): ReturnType<typeof createMockSsh> {
+  const ssh = createMockSsh(responses)
+  ssh.getConnectionInfo = () => ({
+    authMethod: "privateKey",
+    host: "1.2.3.4",
+    port,
+    privateKeyPath: "~/.ssh/id",
+    user: "root",
+  })
+  return ssh
+}
+
 describe("ufw.enabled", () => {
-  it("check returns ok when ufw is active", async () => {
-    const ssh = createMockSsh({
-      "ufw status": { stdout: "Status: active" },
-    })
+  it("check returns ok when ufw is active and the current SSH port is allowed", async () => {
+    const ssh = createMockSshOnPort(
+      {
+        "ufw status": {
+          stdout: [
+            "Status: active",
+            "",
+            "To                         Action      From",
+            "--                         ------      ----",
+            "22                         ALLOW       Anywhere",
+          ].join("\n"),
+        },
+      },
+      22
+    )
     const mod = ufw.enabled()
     const result = await mod.check(ssh, emptyEnv)
     expect(result).toBe("ok")
+  })
+
+  it("check returns needs-apply when ufw is active but the current SSH port is missing", async () => {
+    const ssh = createMockSsh({
+      "ufw status": {
+        stdout: [
+          "Status: active",
+          "",
+          "To                         Action      From",
+          "--                         ------      ----",
+          "80                         ALLOW       Anywhere",
+        ].join("\n"),
+      },
+    })
+    const mod = ufw.enabled()
+    const result = await mod.check(ssh, emptyEnv)
+    expect(result).toBe("needs-apply")
+  })
+
+  it("check returns ok when ufw is active and custom SSH port 2222 is allowed", async () => {
+    const ssh = createMockSshOnPort(
+      {
+        "ufw status": {
+          stdout: [
+            "Status: active",
+            "",
+            "To                         Action      From",
+            "--                         ------      ----",
+            "2222                       ALLOW       Anywhere",
+          ].join("\n"),
+        },
+      },
+      2222
+    )
+
+    const mod = ufw.enabled()
+    const result = await mod.check(ssh, emptyEnv)
+    expect(result).toBe("ok")
+  })
+
+  it("check returns needs-apply when only a protocol-specific SSH allow rule exists", async () => {
+    const ssh = createMockSsh({
+      "ufw status": {
+        stdout: [
+          "Status: active",
+          "",
+          "To                         Action      From",
+          "--                         ------      ----",
+          "22/tcp                     ALLOW       Anywhere",
+        ].join("\n"),
+      },
+    })
+    const mod = ufw.enabled()
+    const result = await mod.check(ssh, emptyEnv)
+    expect(result).toBe("needs-apply")
+  })
+
+  it("check returns needs-apply when a similar port is allowed instead of the SSH port", async () => {
+    const ssh = createMockSsh({
+      "ufw status": {
+        stdout: [
+          "Status: active",
+          "",
+          "To                         Action      From",
+          "--                         ------      ----",
+          "5022                       ALLOW       Anywhere",
+        ].join("\n"),
+      },
+    })
+    const mod = ufw.enabled()
+    const result = await mod.check(ssh, emptyEnv)
+    expect(result).toBe("needs-apply")
+  })
+
+  it("check returns needs-apply when the current SSH port has a deny rule", async () => {
+    const ssh = createMockSsh({
+      "ufw status": {
+        stdout: [
+          "Status: active",
+          "",
+          "To                         Action      From",
+          "--                         ------      ----",
+          "22                         DENY        Anywhere",
+        ].join("\n"),
+      },
+    })
+    const mod = ufw.enabled()
+    const result = await mod.check(ssh, emptyEnv)
+    expect(result).toBe("needs-apply")
   })
 
   it("check returns needs-apply when ufw is inactive", async () => {
@@ -50,17 +165,13 @@ describe("ufw.enabled", () => {
   })
 
   it("apply allows the active SSH port before enabling ufw", async () => {
-    const ssh = createMockSsh({
-      "ufw --force enable": { code: 0 },
-      "ufw allow '2222'": { code: 0 },
-    })
-    ssh.getConnectionInfo = () => ({
-      authMethod: "privateKey",
-      host: "1.2.3.4",
-      port: 2222,
-      privateKeyPath: "~/.ssh/id",
-      user: "root",
-    })
+    const ssh = createMockSshOnPort(
+      {
+        "ufw --force enable": { code: 0 },
+        "ufw allow '2222'": { code: 0 },
+      },
+      2222
+    )
 
     const mod = ufw.enabled()
     const result = await mod.apply(ssh, emptyEnv)
