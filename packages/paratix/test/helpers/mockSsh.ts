@@ -39,9 +39,8 @@ type MockSshOptions = {
    */
   defaultTestResult?: boolean
   /**
-   * When `true`, `ssh.exec()` rejects for non-zero exit codes unless the call
-   * sets `ignoreExitCode`. This mirrors the production SSH connection for
-   * tests that need to exercise command failure propagation.
+   * When `false`, `ssh.exec()` and `ssh.output()` return non-zero results by
+   * default. Leave unset for production-like command failure propagation.
    */
   rejectNonZeroExit?: boolean
   /**
@@ -165,7 +164,7 @@ function rejectNonZeroExit(input: {
 }): void {
   const { command, execOptions, options, result } = input
   if (
-    options?.rejectNonZeroExit === true &&
+    options?.rejectNonZeroExit !== false &&
     result.code !== 0 &&
     execOptions?.ignoreExitCode !== true
   ) {

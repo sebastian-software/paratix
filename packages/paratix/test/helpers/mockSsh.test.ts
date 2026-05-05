@@ -130,10 +130,38 @@ describe("createMockSsh", () => {
     }
   })
 
-  it("returns the configured defaultExecResult for unstubbed exec calls", async () => {
+  it("rejects the configured defaultExecResult when it has a non-zero exit code", async () => {
     const ssh = createMockSsh(
       {},
       { defaultExecResult: { code: 1, stderr: "command not found", stdout: "" } }
+    )
+
+    await expect(ssh.exec("rename-me")).rejects.toThrow(
+      "Command failed with exit code 1: rename-me"
+    )
+  })
+
+  it("returns non-zero exec results when ignoreExitCode is true", async () => {
+    const ssh = createMockSsh({
+      "cat /tmp/file": { code: 1, stderr: "permission denied", stdout: "partial\n" },
+    })
+
+    await expect(
+      ssh.exec("cat /tmp/file", { ignoreExitCode: true, silent: true })
+    ).resolves.toMatchObject({
+      code: 1,
+      stderr: "permission denied",
+      stdout: "partial\n",
+    })
+  })
+
+  it("supports explicit permissive non-zero exec behavior", async () => {
+    const ssh = createMockSsh(
+      {},
+      {
+        defaultExecResult: { code: 1, stderr: "command not found", stdout: "" },
+        rejectNonZeroExit: false,
+      }
     )
 
     await expect(ssh.exec("rename-me")).resolves.toMatchObject({
@@ -179,36 +207,31 @@ describe("createMockSsh", () => {
     await expect(ssh.output("stat /tmp/file")).resolves.toBe("legacy output")
   })
 
-  it("rejects output calls with non-zero exit codes when configured", async () => {
-    const ssh = createMockSsh(
-      { "cat /tmp/file": { code: 1, stderr: "permission denied", stdout: "partial\n" } },
-      { rejectNonZeroExit: true }
-    )
+  it("rejects output calls with non-zero exit codes by default", async () => {
+    const ssh = createMockSsh({
+      "cat /tmp/file": { code: 1, stderr: "permission denied", stdout: "partial\n" },
+    })
 
     await expect(ssh.output("cat /tmp/file")).rejects.toThrow(
       "Command failed with exit code 1: cat /tmp/file"
     )
   })
 
-  it("rejects lines calls when output returns a non-zero exit code", async () => {
-    const ssh = createMockSsh(
-      { "cat /tmp/list": { code: 1, stderr: "permission denied", stdout: "a\nb\n" } },
-      { rejectNonZeroExit: true }
-    )
+  it("rejects lines calls when output returns a non-zero exit code by default", async () => {
+    const ssh = createMockSsh({
+      "cat /tmp/list": { code: 1, stderr: "permission denied", stdout: "a\nb\n" },
+    })
 
     await expect(ssh.lines("cat /tmp/list")).rejects.toThrow(
       "Command failed with exit code 1: cat /tmp/list"
     )
   })
 
-  it("rejects sha256 calls when sha256sum returns a non-zero exit code", async () => {
-    const ssh = createMockSsh(
-      {
-        "[ -f '/tmp/file' ]": { code: 0 },
-        "sha256sum '/tmp/file'": { code: 1, stderr: "read error", stdout: "" },
-      },
-      { rejectNonZeroExit: true }
-    )
+  it("rejects sha256 calls when sha256sum returns a non-zero exit code by default", async () => {
+    const ssh = createMockSsh({
+      "[ -f '/tmp/file' ]": { code: 0 },
+      "sha256sum '/tmp/file'": { code: 1, stderr: "read error", stdout: "" },
+    })
 
     await expect(ssh.sha256("/tmp/file")).rejects.toThrow(
       "Command failed with exit code 1: sha256sum '/tmp/file'"
