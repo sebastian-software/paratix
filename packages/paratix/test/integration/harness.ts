@@ -68,6 +68,15 @@ type DockerResourceMetadata = {
   labels: string[]
 }
 
+export function restoreHomeEnvironmentVariable(originalHome: string | undefined): void {
+  if (originalHome === undefined) {
+    delete process.env.HOME
+    return
+  }
+
+  process.env.HOME = originalHome
+}
+
 class CommandExecutionError extends Error {
   public readonly stderr: string
 

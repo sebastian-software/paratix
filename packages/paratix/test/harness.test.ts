@@ -9,6 +9,7 @@ import {
   createDockerResourceMetadata,
   createIntegrationEnvironment,
   ensureIntegrationRuntimeIsAvailable,
+  restoreHomeEnvironmentVariable,
 } from "./integration/harness.js"
 
 vi.mock("node:child_process", () => ({
@@ -139,6 +140,36 @@ describe("createIntegrationEnvironment", () => {
         expect.stringMatching(/^docker image rm -f paratix-integration-sshd:/v),
       ])
     )
+  })
+})
+
+describe("restoreHomeEnvironmentVariable", () => {
+  it("restores the previous environment variable value", () => {
+    const previousHome = process.env.HOME
+
+    try {
+      process.env.HOME = "/tmp/test-home"
+
+      restoreHomeEnvironmentVariable("/Users/example")
+
+      expect(process.env.HOME).toBe("/Users/example")
+    } finally {
+      restoreHomeEnvironmentVariable(previousHome)
+    }
+  })
+
+  it("deletes the environment variable when it was previously unset", () => {
+    const previousHome = process.env.HOME
+
+    try {
+      process.env.HOME = "/tmp/test-home"
+
+      restoreHomeEnvironmentVariable(undefined)
+
+      expect(Object.hasOwn(process.env, "HOME")).toBe(false)
+    } finally {
+      restoreHomeEnvironmentVariable(previousHome)
+    }
   })
 })
 

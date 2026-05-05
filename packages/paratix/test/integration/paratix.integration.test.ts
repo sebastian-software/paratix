@@ -14,7 +14,11 @@ import { clearHostKeyCache, HostKeyVerificationError } from "../../src/knownHost
 import { runPlaybook } from "../../src/runner.js"
 import { server } from "../../src/server.js"
 import { SshConnectionImpl } from "../../src/ssh.js"
-import { createIntegrationEnvironment, type IntegrationEnvironment } from "./harness.js"
+import {
+  createIntegrationEnvironment,
+  type IntegrationEnvironment,
+  restoreHomeEnvironmentVariable,
+} from "./harness.js"
 
 const emptyEnv = {}
 const HTTP_SERVER_READY_DELAY_MS = 250
@@ -330,14 +334,14 @@ describe("cleanup helper", () => {
 
 describe("Paratix integration", () => {
   beforeAll(async () => {
+    originalHome = process.env.HOME
     integrationEnvironment = await createIntegrationEnvironment(
       resolve(import.meta.dirname, "../..")
     )
-    originalHome = process.env.HOME
   })
 
   afterAll(async () => {
-    process.env.HOME = originalHome
+    restoreHomeEnvironmentVariable(originalHome)
     await integrationEnvironment?.cleanup()
   })
 
