@@ -14,8 +14,10 @@ import { sftpDownload, sftpUpload } from "./sftp.js"
 import {
   cleanupFailedSshClient,
   collectStreamOutput,
+  maskPreparedSecrets,
   maskSecrets,
   normalizeSshCloseCode,
+  prepareSecrets,
   type SecretSource,
   shellQuote,
   tryConnectOnPort,
@@ -803,18 +805,20 @@ export class SshConnectionImpl implements SshConnection {
     const client = this.ensureClient()
     const environmentPrefix = this.buildEnvPrefix(options.env)
     const { command: cmd, needsPassword } = this.sudoCommand(command, environmentPrefix)
+    const secrets = prepareSecrets(this.buildSecrets(options.secrets))
     return new Promise((resolve, reject) => {
       const { isSettled, wrappedReject, wrappedResolve } = this.createSettledCallbacks<ExecResult>(
         resolve,
         reject
       )
       const timeout = options.timeout ?? COMMAND_TIMEOUT
-      const secrets = this.buildSecrets(options.secrets)
       let activeStream: ClientChannel | null = null
       const timer = setTimeout(() => {
         activeStream?.close()
         wrappedReject(
-          new Error(`Command timed out after ${timeout}ms: ${maskSecrets(command, secrets)}`)
+          new Error(
+            `Command timed out after ${timeout}ms: ${maskPreparedSecrets(command, secrets)}`
+          )
         )
       }, timeout)
       client.exec(cmd, (error: Error | undefined, stream: ClientChannel) => {

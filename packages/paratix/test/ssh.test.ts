@@ -68,8 +68,10 @@ vi.mock("../src/sshHelpers.js", async () => {
   return {
     cleanupFailedSshClient: vi.fn(actual.cleanupFailedSshClient),
     collectStreamOutput: vi.fn(actual.collectStreamOutput),
+    maskPreparedSecrets: actual.maskPreparedSecrets,
     maskSecrets: actual.maskSecrets,
     normalizeSshCloseCode: actual.normalizeSshCloseCode,
+    prepareSecrets: actual.prepareSecrets,
     shellQuote: actual.shellQuote,
     tryConnectOnPort: vi.fn(),
     validateMode: actual.validateMode,
@@ -1158,6 +1160,20 @@ describe("SshConnectionImpl", () => {
   // -------------------------------------------------------------------------
 
   describe("exec", () => {
+    it("rejects redaction-placeholder secrets before starting a remote command", async () => {
+      const execSpy = vi.fn()
+      const client = makeClientWithExecSpy(execSpy)
+      const ssh = makeConnectedSsh(client, { user: "deploy" })
+      ;(ssh as unknown as Record<string, unknown>).cachedSudoPassword = null
+      ;(ssh as unknown as Record<string, unknown>).sudoReady = true
+
+      await expect(
+        ssh.exec("echo should-not-run", { secrets: ["bad[REDACTED]secret"] })
+      ).rejects.toThrow(/redaction placeholder/v)
+
+      expect(execSpy).not.toHaveBeenCalled()
+    })
+
     it("rejects with timeout error when stream never closes", async () => {
       vi.useFakeTimers()
 
@@ -1367,7 +1383,7 @@ describe("SshConnectionImpl", () => {
       expect(execSpy).toHaveBeenCalledOnce()
     })
 
-    it("does not materialize cached sudo passwords on successful exec calls without output", async () => {
+    it("materializes cached sudo passwords before starting exec output handling", async () => {
       const passwordBuffer = Buffer.from("my-sudo-pass")
       const toStringSpy = vi.spyOn(passwordBuffer, "toString")
 
@@ -1382,10 +1398,10 @@ describe("SshConnectionImpl", () => {
 
       await ssh.exec("whoami")
 
-      expect(toStringSpy).not.toHaveBeenCalled()
+      expect(toStringSpy).toHaveBeenCalledOnce()
     })
 
-    it("materializes cached sudo passwords lazily on timeout masking paths only", async () => {
+    it("reuses prepared cached sudo password variants on timeout masking paths", async () => {
       vi.useFakeTimers()
 
       const passwordBuffer = Buffer.from("my-sudo-pass")
@@ -1403,8 +1419,9 @@ describe("SshConnectionImpl", () => {
       execPromise.catch(() => {
         /* handled below */
       })
+      await Promise.resolve()
 
-      expect(toStringSpy).not.toHaveBeenCalled()
+      expect(toStringSpy).toHaveBeenCalledOnce()
 
       await vi.advanceTimersByTimeAsync(5001)
 

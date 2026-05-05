@@ -136,14 +136,14 @@ type CommandErrorParameters = {
   capturedStdout: string
   command: string
   reason: string
-  secrets: SecretSource[]
+  secrets: PreparedSecrets
   wasTruncated: boolean
 }
 
 function buildCommandError(parameters: CommandErrorParameters): CommandError {
   const hint = parameters.wasTruncated ? "\n(use --verbose for full output)" : ""
   return new CommandError(
-    `Command failed with ${parameters.reason}: ${maskSecrets(parameters.command, parameters.secrets)}\nstdout: ${truncateOutput(parameters.capturedStdout)}\nstderr: ${truncateOutput(parameters.capturedStderr)}${hint}`,
+    `Command failed with ${parameters.reason}: ${maskPreparedSecrets(parameters.command, parameters.secrets)}\nstdout: ${truncateOutput(parameters.capturedStdout)}\nstderr: ${truncateOutput(parameters.capturedStderr)}${hint}`,
     parameters.capturedStdout,
     parameters.capturedStderr
   )
@@ -188,12 +188,15 @@ export type StreamOutputParameters = {
   options: ExecOptions
   reject: (reason: Error) => void
   resolve: (value: ExecResult) => void
-  secrets?: SecretSource[]
+  secrets?: PreparedSecrets | SecretSource[]
   stream: ClientChannel
   timer: ReturnType<typeof setTimeout>
 }
 
 export type SecretSource = (() => string) | string
+export type PreparedSecrets = {
+  variants: string[]
+}
 
 /** Placeholder used when redacting secrets from output. */
 const REDACTED = "[REDACTED]"
@@ -224,24 +227,25 @@ function getSecretVariants(secrets: SecretSource[]): string[] {
   return [...variants].sort((a, b) => b.length - a.length)
 }
 
-function createLazyVariantResolver(secrets: SecretSource[]): {
+export function prepareSecrets(secrets: SecretSource[]): PreparedSecrets {
+  return { variants: getSecretVariants(secrets) }
+}
+
+function ensurePreparedSecrets(secrets: PreparedSecrets | SecretSource[]): PreparedSecrets {
+  return "variants" in secrets ? secrets : prepareSecrets(secrets)
+}
+
+function createVariantResolver(secrets: PreparedSecrets): {
   getMaxLength: () => number
   mask: (text: string) => string
 } {
-  let variants: null | string[] = null
-
-  const getVariants = (): string[] => {
-    variants ??= getSecretVariants(secrets)
-    return variants
-  }
-
   return {
     getMaxLength(): number {
-      return Math.max(0, ...getVariants().map((variant) => variant.length))
+      return Math.max(0, ...secrets.variants.map((variant) => variant.length))
     },
     mask(text: string): string {
       let masked = text
-      for (const variant of getVariants()) {
+      for (const variant of secrets.variants) {
         masked = masked.replaceAll(variant, REDACTED)
       }
       return masked
@@ -249,13 +253,12 @@ function createLazyVariantResolver(secrets: SecretSource[]): {
   }
 }
 
+export function maskPreparedSecrets(text: string, secrets: PreparedSecrets): string {
+  return createVariantResolver(secrets).mask(text)
+}
+
 export function maskSecrets(text: string, secrets: SecretSource[]): string {
-  let masked = text
-  const variants = getSecretVariants(secrets)
-  for (const variant of variants) {
-    masked = masked.replaceAll(variant, REDACTED)
-  }
-  return masked
+  return maskPreparedSecrets(text, prepareSecrets(secrets))
 }
 
 /**
@@ -269,9 +272,9 @@ export function maskSecrets(text: string, secrets: SecretSource[]): string {
  */
 export function createStreamMasker(
   write: (text: string) => void,
-  secrets: SecretSource[]
+  secrets: PreparedSecrets | SecretSource[]
 ): { flush: () => void; push: (chunk: string) => void } {
-  const resolver = createLazyVariantResolver(secrets)
+  const resolver = createVariantResolver(ensurePreparedSecrets(secrets))
   let overlap: null | number = null
   const getOverlap = (): number => {
     overlap ??= Math.max(0, resolver.getMaxLength() - 1)
@@ -341,8 +344,11 @@ function normalizeSshCloseSignal(signal: null | string | undefined): string | un
 export function collectStreamOutput(parameters: StreamOutputParameters): void {
   const { command, options, reject, resolve, stream, timer } = parameters
   let maxOutputBytes: number
+  let secrets: PreparedSecrets
   try {
     maxOutputBytes = resolveMaxOutputBytes(options)
+    secrets =
+      parameters.secrets == null ? prepareSecrets([]) : ensurePreparedSecrets(parameters.secrets)
   } catch (error) {
     clearTimeout(timer)
     reject(error instanceof Error ? error : new Error(String(error)))
@@ -351,7 +357,6 @@ export function collectStreamOutput(parameters: StreamOutputParameters): void {
   const stdout = new CapturedOutput(maxOutputBytes)
   const stderr = new CapturedOutput(maxOutputBytes)
 
-  const secrets = parameters.secrets ?? []
   const stdoutMasker = createStreamMasker((text) => {
     stdout.append(text)
     if (!options.silent) writeStdout(text)

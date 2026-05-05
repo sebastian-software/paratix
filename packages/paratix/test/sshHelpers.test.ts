@@ -339,16 +339,12 @@ describe("maskSecrets", () => {
     expect(maskSecrets(`command uses ${escapedSecret}`, [secret])).toBe("command uses [REDACTED]")
   })
 
-  it("resolves lazy secret sources only when masking is needed", () => {
+  it("resolves lazy secret sources when preparing stream masking", () => {
     const resolveSecret = vi.fn(() => "hunter2")
 
-    const masker = createStreamMasker(() => {
+    createStreamMasker(() => {
       /* noop */
     }, [resolveSecret])
-
-    expect(resolveSecret).not.toHaveBeenCalled()
-
-    masker.push("plain text")
 
     expect(resolveSecret).toHaveBeenCalledOnce()
   })
@@ -359,6 +355,70 @@ describe("maskSecrets", () => {
 // ---------------------------------------------------------------------------
 
 describe("collectStreamOutput", () => {
+  it("rejects placeholder secrets before registering stdout stream listeners", () => {
+    const { stream } = createMockChannel()
+    const rejectSpy = vi.fn()
+    const resolveSpy = vi.fn()
+    const reject: StreamOutputParameters["reject"] = (reason) => {
+      rejectSpy(reason)
+    }
+    const resolve: StreamOutputParameters["resolve"] = (value) => {
+      resolveSpy(value)
+    }
+    const timer = setTimeout(() => {
+      /* intentionally never fires in tests */
+    }, 60_000)
+
+    collectStreamOutput({
+      command: "echo hello",
+      options: { silent: true },
+      reject,
+      resolve,
+      secrets: ["bad[REDACTED]secret"],
+      stream: stream as unknown as StreamOutputParameters["stream"],
+      timer,
+    })
+
+    expect(rejectSpy).toHaveBeenCalledWith(
+      expect.objectContaining({ message: expect.stringMatching(/redaction placeholder/v) })
+    )
+    expect(stream.listenerCount("data")).toBe(0)
+    stream.emit("data", Buffer.from("output after rejection"))
+    clearTimeout(timer)
+  })
+
+  it("rejects placeholder secrets before registering stderr stream listeners", () => {
+    const { stderr, stream } = createMockChannel()
+    const rejectSpy = vi.fn()
+    const resolveSpy = vi.fn()
+    const reject: StreamOutputParameters["reject"] = (reason) => {
+      rejectSpy(reason)
+    }
+    const resolve: StreamOutputParameters["resolve"] = (value) => {
+      resolveSpy(value)
+    }
+    const timer = setTimeout(() => {
+      /* intentionally never fires in tests */
+    }, 60_000)
+
+    collectStreamOutput({
+      command: "echo hello",
+      options: { silent: true },
+      reject,
+      resolve,
+      secrets: ["bad[REDACTED]secret"],
+      stream: stream as unknown as StreamOutputParameters["stream"],
+      timer,
+    })
+
+    expect(rejectSpy).toHaveBeenCalledWith(
+      expect.objectContaining({ message: expect.stringMatching(/redaction placeholder/v) })
+    )
+    expect(stderr.listenerCount("data")).toBe(0)
+    stderr.emit("data", Buffer.from("error after rejection"))
+    clearTimeout(timer)
+  })
+
   it("rejects with exit code and masked secrets when exit code is non-zero", async () => {
     const secret = "p@ssw0rd"
     const promise = runCollect({
