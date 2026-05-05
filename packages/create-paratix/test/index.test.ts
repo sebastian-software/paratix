@@ -1746,8 +1746,8 @@ describe("writeProjectFiles", () => {
         eslint: expect.stringMatching(/^\^/v),
         "eslint-config-setup": expect.stringMatching(/^\^/v),
         prettier: expect.stringMatching(/^\^/v),
-        typescript: expect.stringMatching(/^\^/v),
         tsx: expect.stringMatching(/^\^/v),
+        typescript: expect.stringMatching(/^\^/v),
       },
       scripts: {
         apply: "paratix apply server.ts",
@@ -2309,7 +2309,13 @@ describe("scaffoldProject", () => {
   const projectName = "create-paratix-scaffold-test"
   const paddedProjectName = " create-paratix-trim-test "
   const trimmedProjectName = "create-paratix-trim-test"
+  const invalidAdminKeyProjectName = "create-paratix-invalid-admin-key-test"
+  const invalidFingerprintProjectName = "create-paratix-invalid-fingerprint-test"
+  const invalidHostProjectName = "create-paratix-invalid-host-test"
   const missingKeyProjectName = "create-paratix-missing-root-key-test"
+  let invalidAdminKeyProjectDirectory = ""
+  let invalidFingerprintProjectDirectory = ""
+  let invalidHostProjectDirectory = ""
   let missingKeyProjectDirectory = ""
   let originalCwd = ""
   let paddedProjectDirectory = ""
@@ -2326,6 +2332,9 @@ describe("scaffoldProject", () => {
     projectDirectory = resolve(projectName)
     paddedProjectDirectory = resolve(paddedProjectName)
     trimmedProjectDirectory = resolve(trimmedProjectName)
+    invalidAdminKeyProjectDirectory = resolve(invalidAdminKeyProjectName)
+    invalidFingerprintProjectDirectory = resolve(invalidFingerprintProjectName)
+    invalidHostProjectDirectory = resolve(invalidHostProjectName)
     missingKeyProjectDirectory = resolve(missingKeyProjectName)
     vi.spyOn(console, "log").mockImplementation((...args) => {
       void args
@@ -2464,6 +2473,71 @@ describe("scaffoldProject", () => {
     expect(console.log).not.toHaveBeenCalledWith(
       `Creating Paratix project in ${missingKeyProjectDirectory}...`
     )
+  })
+
+  it("rejects invalid programmatic hosts before creating the target directory", () => {
+    const installer = vi.fn().mockReturnValue(true)
+
+    expect(() => {
+      scaffoldProject(
+        invalidHostProjectName,
+        { command: "pnpm install", name: "pnpm" },
+        {
+          host: "bad host",
+          initialUser: { kind: "admin", user: "deploy" },
+          installer,
+        }
+      )
+    }).toThrow(
+      'Error: Invalid host "bad host" — use a domain name, IPv4, or IPv6 address without spaces.'
+    )
+
+    expect(existsSync(invalidHostProjectDirectory)).toBe(false)
+    expect(installer).not.toHaveBeenCalled()
+  })
+
+  it("rejects invalid programmatic admin public keys before creating the target directory", () => {
+    const installer = vi.fn().mockReturnValue(true)
+
+    expect(() => {
+      scaffoldProject(
+        invalidAdminKeyProjectName,
+        { command: "pnpm install", name: "pnpm" },
+        {
+          adminPublicKey: "invalid-key",
+          host: "example.com",
+          initialUser: { kind: "admin", user: "deploy" },
+          installer,
+        }
+      )
+    }).toThrow(
+      'Error: Invalid value for "--admin-public-key" — provide a valid single-line OpenSSH public key.'
+    )
+
+    expect(existsSync(invalidAdminKeyProjectDirectory)).toBe(false)
+    expect(installer).not.toHaveBeenCalled()
+  })
+
+  it("rejects invalid programmatic expected host fingerprints before creating the target directory", () => {
+    const installer = vi.fn().mockReturnValue(true)
+
+    expect(() => {
+      scaffoldProject(
+        invalidFingerprintProjectName,
+        { command: "pnpm install", name: "pnpm" },
+        {
+          expectedHostFingerprint: "SHA256:trusted-host-fingerprint",
+          host: "example.com",
+          initialUser: { kind: "admin", user: "deploy" },
+          installer,
+        }
+      )
+    }).toThrow(
+      'Error: Invalid expected host fingerprint "SHA256:trusted-host-fingerprint" — use an OpenSSH SHA256 fingerprint.'
+    )
+
+    expect(existsSync(invalidFingerprintProjectDirectory)).toBe(false)
+    expect(installer).not.toHaveBeenCalled()
   })
 
   it("rejects invalid programmatic initial users before creating the target directory", () => {

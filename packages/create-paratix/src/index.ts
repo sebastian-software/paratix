@@ -146,8 +146,8 @@ export function writeProjectFiles(projectDirectory: string, options?: ScaffoldOp
       eslint: "^10.0.3",
       "eslint-config-setup": "^0.3.3",
       prettier: "^3.6.2",
-      typescript: "^5.9.2",
       tsx: "^4.20.6",
+      typescript: "^5.9.2",
     },
     engines: {
       node: ">=24.0.0",
@@ -255,15 +255,15 @@ export function scaffoldProject(
   const normalizedProjectName = validateProjectName(projectName)
   const projectDirectory = resolve(normalizedProjectName)
   const initialUser = normalizeProgrammaticInitialUserConfig(options?.initialUser)
-  validateRootBootstrapConfiguration(initialUser, options?.adminPublicKey)
+  const normalizedStringOptions = normalizeProgrammaticScaffoldStringOptions(options)
+  validateRootBootstrapConfiguration(initialUser, normalizedStringOptions.adminPublicKey)
   createProjectDirectoryAtomically(projectDirectory, normalizedProjectName)
 
   console.log(`Creating Paratix project in ${projectDirectory}...`)
 
-  writeProjectFiles(projectDirectory, { ...options, initialUser })
+  writeProjectFiles(projectDirectory, { ...options, ...normalizedStringOptions, initialUser })
   const installer = options?.installer ?? installDependencies
-  const installed = installer(projectDirectory, pm)
-  if (!installed) {
+  if (!installer(projectDirectory, pm)) {
     process.exitCode = 1
     printPartialSuccessMessage(normalizedProjectName, pm)
     return false
