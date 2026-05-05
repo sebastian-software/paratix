@@ -247,16 +247,62 @@ describe("sshd.config — apply", () => {
   })
 
   // R-0000113 regression: apply must rewrite the top-level directive but
-  // leave any Match-block override of the same directive untouched. Editing
-  // inside Match blocks would silently change the security posture for the
-  // matched group (e.g. flipping PasswordAuthentication for an admin user).
-  it("regression — preserves Match-block overrides when rewriting a top-level directive", async () => {
+  // leave any non-security Match-block override of the same directive untouched.
+  it("regression — preserves non-security Match-block overrides when rewriting a top-level directive", async () => {
     const originalConfig = [
-      "PasswordAuthentication yes",
+      "X11Forwarding yes",
       "PermitRootLogin no",
       "",
       "Match User admin",
+      "    X11Forwarding yes",
+      "",
+    ].join("\n")
+    const mockSsh = createMockSsh({
+      [CAT_SSHD]: { stdout: originalConfig },
+    })
+    const writtenFiles = trackWriteFile(mockSsh)
+
+    const mod = sshd.config({ X11Forwarding: "no" })
+    const result = await mod.apply(mockSsh, emptyEnv)
+
+    expect(result.status).toBe("changed")
+    const written = writtenFiles.find((f) => f.path === SSHD_CONFIG)
+    expect(written).toBeDefined()
+    // Top-level directive was rewritten…
+    expect(written?.content).toMatch(/^X11Forwarding no$/mv)
+    // …but the Match-block override stayed intact.
+    expect(written?.content).toMatch(/Match User admin\n {4}X11Forwarding yes/v)
+  })
+
+  it("rejects security-sensitive Match-block overrides that would keep check drifting", async () => {
+    const originalConfig = [
+      "PasswordAuthentication yes",
+      "",
+      "Match User admin",
       "    PasswordAuthentication yes",
+      "",
+    ].join("\n")
+    const mockSsh = createMockSsh({
+      [CAT_SSHD]: { stdout: originalConfig },
+    })
+    const writtenFiles = trackWriteFile(mockSsh)
+    const execSpy = vi.spyOn(mockSsh, "exec")
+
+    const mod = sshd.config({ PasswordAuthentication: "no" })
+    const result = await mod.apply(mockSsh, emptyEnv)
+
+    expect(result.status).toBe("failed")
+    expect(result.error?.message).toContain("conflicting security-relevant Match-block override")
+    expect(writtenFiles).toHaveLength(0)
+    expect(execSpy.mock.calls.map((args) => args[0])).not.toContain("systemctl reload sshd")
+  })
+
+  it("returns ok on follow-up check when security-sensitive Match-block overrides agree", async () => {
+    const originalConfig = [
+      "PasswordAuthentication yes",
+      "",
+      "Match User admin",
+      "    PasswordAuthentication no",
       "",
     ].join("\n")
     const mockSsh = createMockSsh({
@@ -270,10 +316,11 @@ describe("sshd.config — apply", () => {
     expect(result.status).toBe("changed")
     const written = writtenFiles.find((f) => f.path === SSHD_CONFIG)
     expect(written).toBeDefined()
-    // Top-level directive was rewritten…
-    expect(written?.content).toMatch(/^PasswordAuthentication no$/mv)
-    // …but the Match-block override stayed intact.
-    expect(written?.content).toMatch(/Match User admin\n {4}PasswordAuthentication yes/v)
+
+    const followUpSsh = createMockSsh({
+      [CAT_SSHD]: { stdout: written!.content },
+    })
+    await expect(mod.check(followUpSsh, emptyEnv)).resolves.toBe("ok")
   })
 
   // R-0000113: when no top-level occurrence exists yet, the new directive
@@ -488,6 +535,31 @@ describe("sshd.config — dry-run", () => {
     expect(result?.status).toBe("failed")
     expect(result?.error).toBeInstanceOf(Error)
     expect(String(result?.error)).toContain("sshd -t failed for prospective config")
+  })
+
+  it("rejects security-sensitive Match-block overrides before dry-run validation", async () => {
+    const mockSsh = createMockSsh({
+      [CAT_SSHD]: {
+        stdout: [
+          "PasswordAuthentication yes",
+          "",
+          "Match User admin",
+          "    PasswordAuthentication yes",
+        ].join("\n"),
+      },
+    })
+    const writtenFiles = trackWriteFile(mockSsh)
+    const execSpy = vi.spyOn(mockSsh, "exec")
+
+    const mod = sshd.config({ PasswordAuthentication: "no" })
+    const result = await mod._applyDryRun?.(mockSsh, emptyEnv)
+
+    expect(result?.status).toBe("failed")
+    expect(result?.error?.message).toContain("conflicting security-relevant Match-block override")
+    expect(writtenFiles).toHaveLength(0)
+    expect(
+      execSpy.mock.calls.map((args) => args[0]).some((command) => command.includes("sshd -t"))
+    ).toBe(false)
   })
 })
 

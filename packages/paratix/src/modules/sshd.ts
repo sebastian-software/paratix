@@ -12,7 +12,11 @@ import {
   NEEDS_APPLY,
   type SshConnection,
 } from "../types.js"
-import { applySshdSettingToContent, sshdSettingMatchesEverywhere } from "./sshdConfigHelpers.js"
+import {
+  applySshdSettingToContent,
+  findContradictingSshdMatchBlockOverride,
+  sshdSettingMatchesEverywhere,
+} from "./sshdConfigHelpers.js"
 
 const DEFAULT_SSH_PORT = 22
 const PRIVILEGE_SEPARATION_DIRECTORY = "/run/sshd"
@@ -259,6 +263,19 @@ function buildSshdPortContent(
   return buildSshdConfigContent(originalConfig, { Port: String(targetPort) })
 }
 
+function rejectNonConvergingSshdMatchOverrides(
+  content: string,
+  settings: Record<string, string>
+): ModuleResult | undefined {
+  const directive = findContradictingSshdMatchBlockOverride(content, settings)
+  if (directive == null) return undefined
+
+  return failed(
+    `[sshd.config: ${directive}] conflicting security-relevant Match-block override ` +
+      "would remain after apply; update or remove the override manually"
+  )
+}
+
 async function applySshdPort(ssh: SshConnection, targetPort: number): Promise<ModuleResult> {
   const originalConfig = await ssh.readFile(SSHD_CONFIG_PATH)
   const { didChange, newContent } = buildSshdPortContent(originalConfig, targetPort)
@@ -303,6 +320,11 @@ export const sshd = {
 
         const originalConfig = await ssh.readFile(SSHD_CONFIG_PATH)
         const { didChange, newContent } = buildSshdConfigContent(originalConfig, settings)
+        const nonConvergingMatchOverride = rejectNonConvergingSshdMatchOverrides(
+          newContent,
+          settings
+        )
+        if (nonConvergingMatchOverride != null) return nonConvergingMatchOverride
         if (!didChange) {
           return { status: "ok" }
         }
@@ -314,6 +336,11 @@ export const sshd = {
 
         const originalConfig = await ssh.readFile(SSHD_CONFIG_PATH)
         const { didChange, newContent } = buildSshdConfigContent(originalConfig, settings)
+        const nonConvergingMatchOverride = rejectNonConvergingSshdMatchOverrides(
+          newContent,
+          settings
+        )
+        if (nonConvergingMatchOverride != null) return nonConvergingMatchOverride
         if (didChange) {
           await guardedWriteFile(ssh, {
             mode: SSHD_CONFIG_MODE,

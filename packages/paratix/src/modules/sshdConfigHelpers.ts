@@ -86,6 +86,16 @@ function hasContradictingMatchBlockOverride(
   return false
 }
 
+export function findContradictingSshdMatchBlockOverride(
+  content: string,
+  settings: Record<string, string>
+): string | undefined {
+  for (const [key, value] of Object.entries(settings)) {
+    if (hasContradictingMatchBlockOverride(content, key, value.trim())) return key
+  }
+  return undefined
+}
+
 /**
  * Check whether every top-level active occurrence of `key` in the sshd_config
  * `content` has the given `value`. An "active" occurrence is a non-comment
