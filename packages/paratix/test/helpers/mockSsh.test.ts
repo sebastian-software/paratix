@@ -179,6 +179,42 @@ describe("createMockSsh", () => {
     await expect(ssh.output("stat /tmp/file")).resolves.toBe("legacy output")
   })
 
+  it("rejects output calls with non-zero exit codes when configured", async () => {
+    const ssh = createMockSsh(
+      { "cat /tmp/file": { code: 1, stderr: "permission denied", stdout: "partial\n" } },
+      { rejectNonZeroExit: true }
+    )
+
+    await expect(ssh.output("cat /tmp/file")).rejects.toThrow(
+      "Command failed with exit code 1: cat /tmp/file"
+    )
+  })
+
+  it("rejects lines calls when output returns a non-zero exit code", async () => {
+    const ssh = createMockSsh(
+      { "cat /tmp/list": { code: 1, stderr: "permission denied", stdout: "a\nb\n" } },
+      { rejectNonZeroExit: true }
+    )
+
+    await expect(ssh.lines("cat /tmp/list")).rejects.toThrow(
+      "Command failed with exit code 1: cat /tmp/list"
+    )
+  })
+
+  it("rejects sha256 calls when sha256sum returns a non-zero exit code", async () => {
+    const ssh = createMockSsh(
+      {
+        "[ -f '/tmp/file' ]": { code: 0 },
+        "sha256sum '/tmp/file'": { code: 1, stderr: "read error", stdout: "" },
+      },
+      { rejectNonZeroExit: true }
+    )
+
+    await expect(ssh.sha256("/tmp/file")).rejects.toThrow(
+      "Command failed with exit code 1: sha256sum '/tmp/file'"
+    )
+  })
+
   it("supports precise response stubs without permitting unrelated commands", async () => {
     const ssh = createMockSsh(
       {},

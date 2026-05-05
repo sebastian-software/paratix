@@ -208,7 +208,9 @@ function createOutput(
   return async (command) => {
     calls.push(command)
     const match = getMockResponse({ command, kind: "output", options, responses })
-    return match?.stdout?.trim() ?? options?.defaultOutputResult ?? ""
+    const result = buildExecResult(match ?? { stdout: options?.defaultOutputResult })
+    rejectNonZeroExit({ command, execOptions: undefined, options, result })
+    return result.stdout.trim()
   }
 }
 
@@ -304,9 +306,8 @@ export function createMockSsh(responses?: MockResponses, options?: MockSshOption
       const exists = await this.test(`[ -f ${shellQuote(path)} ]`)
       if (!exists) return null
       const command = `sha256sum ${shellQuote(path)}`
-      const match = getMockResponse({ command, kind: "exec", options, responses })
-      if (match == null) return null
-      return match.stdout?.split(/\s+/v)[0] ?? null
+      const output = await this.output(command)
+      return output.split(/\s+/v)[0] ?? null
     },
     test: createTest(calls, responses, options),
     updateHost: spies.updateHost,
