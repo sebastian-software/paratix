@@ -844,6 +844,22 @@ describe("archive.extract — apply", () => {
     expectNoArchiveMarkerWrite(mockSsh)
   })
 
+  it("rejects a tar archive with an unparsed listing line before invoking tar -x", async () => {
+    const tarListing = `${safeTarListing}\nnot-a-member\n`
+    const mockSsh = createMockSsh({
+      [`tar -tvzf '${src}'`]: { code: 0, stdout: tarListing },
+    })
+
+    const mod = archive.extract(src, destination)
+    const result = await mod.apply(mockSsh, emptyEnv)
+
+    expect(result.status).toBe("failed")
+    expect(String(result.error)).toContain("could not parse tar listing line")
+    expect(mockSsh.calls).toContain(`tar -tvzf '${src}'`)
+    expectNoTarExtractCalls(mockSsh)
+    expectNoArchiveMarkerWrite(mockSsh)
+  })
+
   it("rejects a zip archive that contains a `/etc/passwd` member without invoking unzip -o", async () => {
     const zipSrc = "/tmp/app.zip"
     const mockSsh = createMockSsh({
@@ -915,6 +931,25 @@ describe("archive.extract — apply", () => {
 
     expect(result.status).toBe("failed")
     expect(String(result.error)).toContain("is a special file")
+    expect(mockSsh.calls).toContain(`unzip -Zs '${zipSrc}'`)
+    expectNoUnzipExtractCalls(mockSsh)
+    expectNoArchiveMarkerWrite(mockSsh)
+  })
+
+  it("rejects a zip archive with an unparsed listing line before invoking unzip -o", async () => {
+    const zipSrc = "/tmp/app.zip"
+    const mockSsh = createMockSsh({
+      [`unzip -Zs '${zipSrc}'`]: {
+        code: 0,
+        stdout: "-rw-r--r--  2.0 unx        0 b- defN 26-May-04 00:00 app/file\nnot-a-member\n",
+      },
+    })
+
+    const mod = archive.extract(zipSrc, destination)
+    const result = await mod.apply(mockSsh, emptyEnv)
+
+    expect(result.status).toBe("failed")
+    expect(String(result.error)).toContain("could not parse zip listing line")
     expect(mockSsh.calls).toContain(`unzip -Zs '${zipSrc}'`)
     expectNoUnzipExtractCalls(mockSsh)
     expectNoArchiveMarkerWrite(mockSsh)

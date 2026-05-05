@@ -62,6 +62,12 @@ export type ArchiveMember = {
   path: string
 }
 
+type ArchiveListing = { failureReason: string } | { members: ArchiveMember[] }
+type ArchiveMemberParseResult =
+  | { failureReason: string; status: "invalid" }
+  | { member: ArchiveMember; status: "parsed" }
+  | { status: "ignored" }
+
 /**
  * Parse a `tar -tv…f` listing line into an {@link ArchiveMember}.
  *
@@ -70,17 +76,22 @@ export type ArchiveMember = {
  *     mode   user/group   size   date   time   name [-> linktarget]
  *     mode   user/group   size   date   time   name link to linktarget
  *
- * Lines that do not match this shape are skipped (e.g. blank lines,
- * locale-specific headers from non-coreutils tar implementations).
+ * Blank lines are ignored. Non-empty lines that do not match this shape are
+ * rejected so the safety guard fails closed before extraction.
  *
  * @param line - A single line from `tar -tv…f` output.
- * @returns The parsed member, or null when the line cannot be parsed.
+ * @returns The parsed member, an ignored marker or an invalid-line reason.
  */
 const TAR_LINK_ARROW = " -> "
 const TAR_HARDLINK_TARGET = " link to "
+const TAR_VERBOSE_LINE_PATTERN =
+  /^(?<mode>[\-bcdhlps][\-rwxStTs]{9})\s+\S+\s+\S+\s+\S+\s+\S+\s+(?<rest>\S.*)$/v
 const ZIP_INFO_LINE_PATTERN =
   // eslint-disable-next-line security/detect-unsafe-regex -- Anchored Info-ZIP listing parser with fixed-width mode and bounded column count.
   /^(?<mode>[\-bcdlps][\-rwxStTs]{9})\s+(?:\S+\s+){7}(?<path>\S.*)$/v
+const ZIP_INFO_SIZE_LINE_PATTERN = /^Zip file size:\s+\d+\s+bytes,\s+number of entries:\s+\d+$/v
+const ZIP_INFO_SUMMARY_LINE_PATTERN =
+  /^\d+\s+files?,\s+\d+\s+bytes uncompressed,\s+\d+\s+bytes compressed:\s+[\d.]+%$/v
 
 function archiveMemberKindFromMode(mode: string): ArchiveMember["kind"] {
   if (mode.startsWith("d")) return "directory"
@@ -90,40 +101,54 @@ function archiveMemberKindFromMode(mode: string): ArchiveMember["kind"] {
   return "file"
 }
 
-function parseTarVerboseLine(line: string): ArchiveMember | null {
+function parseTarVerboseLine(line: string): ArchiveMemberParseResult {
   const trimmed = line.replace(/\r$/v, "")
-  if (trimmed.length === 0) return null
+  if (trimmed.length === 0) return { status: "ignored" }
   // mode owner/group size date time path[ -> link]
   // The trailing capture starts with a non-whitespace character so the
   // greedy `\s+` separators cannot exchange characters with the path
   // capture (avoids polynomial backtracking).
-  const match = /^(?<mode>\S+)\s+\S+\s+\S+\s+\S+\s+\S+\s+(?<rest>\S.*)$/v.exec(trimmed) ?? null
-  if (!match?.groups) return null
+  const match = TAR_VERBOSE_LINE_PATTERN.exec(trimmed) ?? null
+  if (!match?.groups) {
+    return {
+      failureReason: `could not parse tar listing line: ${JSON.stringify(trimmed)}`,
+      status: "invalid",
+    }
+  }
   const kind = archiveMemberKindFromMode(match.groups.mode)
   const rest = match.groups.rest
   const arrowIndex = rest.indexOf(TAR_LINK_ARROW)
   if (arrowIndex !== -1 && kind !== "file") {
     return {
-      format: "tar",
-      kind,
-      linkTarget: rest.slice(arrowIndex + TAR_LINK_ARROW.length),
-      path: rest.slice(0, arrowIndex),
+      member: {
+        format: "tar",
+        kind,
+        linkTarget: rest.slice(arrowIndex + TAR_LINK_ARROW.length),
+        path: rest.slice(0, arrowIndex),
+      },
+      status: "parsed",
     }
   }
   const hardlinkTargetIndex = rest.indexOf(TAR_HARDLINK_TARGET)
   if (hardlinkTargetIndex !== -1 && kind === "hardlink") {
     return {
-      format: "tar",
-      kind,
-      linkTarget: rest.slice(hardlinkTargetIndex + TAR_HARDLINK_TARGET.length),
-      path: rest.slice(0, hardlinkTargetIndex),
+      member: {
+        format: "tar",
+        kind,
+        linkTarget: rest.slice(hardlinkTargetIndex + TAR_HARDLINK_TARGET.length),
+        path: rest.slice(0, hardlinkTargetIndex),
+      },
+      status: "parsed",
     }
   }
   return {
-    format: "tar",
-    kind,
-    linkTarget: null,
-    path: rest,
+    member: {
+      format: "tar",
+      kind,
+      linkTarget: null,
+      path: rest,
+    },
+    status: "parsed",
   }
 }
 
@@ -131,49 +156,68 @@ function parseTarVerboseLine(line: string): ArchiveMember | null {
  * Parse the full listing of a tar archive into {@link ArchiveMember}s.
  *
  * @param stdout - The combined stdout of `tar -tv…f`.
- * @returns The parsed members.
+ * @returns The parsed members, or a failure reason for unparsed member lines.
  */
-function parseTarListing(stdout: string): ArchiveMember[] {
+function parseTarListing(stdout: string): ArchiveListing {
   const members: ArchiveMember[] = []
   for (const line of stdout.split("\n")) {
     const parsed = parseTarVerboseLine(line)
-    if (parsed !== null) members.push(parsed)
+    if (parsed.status === "invalid") return { failureReason: parsed.failureReason }
+    if (parsed.status === "parsed") members.push(parsed.member)
   }
-  return members
+  return { members }
 }
 
 /**
  * Parse one Info-ZIP `unzip -Zs` listing line into an {@link ArchiveMember}.
  *
  * @param line - A single line from `unzip -Zs`.
- * @returns The parsed member, or null for headers/unsupported lines.
+ * @returns The parsed member, an ignored marker or an invalid-line reason.
  */
-function parseZipInfoLine(line: string): ArchiveMember | null {
+function parseZipInfoLine(line: string): ArchiveMemberParseResult {
   const trimmed = line.replace(/\r$/v, "")
-  if (trimmed.length === 0) return null
+  if (trimmed.length === 0) return { status: "ignored" }
+  if (isIgnoredZipInfoLine(trimmed)) return { status: "ignored" }
   const match = ZIP_INFO_LINE_PATTERN.exec(trimmed) ?? null
-  if (!match?.groups) return null
-  return {
-    format: "zip",
-    kind: archiveMemberKindFromMode(match.groups.mode),
-    linkTarget: null,
-    path: match.groups.path,
+  if (!match?.groups) {
+    return {
+      failureReason: `could not parse zip listing line: ${JSON.stringify(trimmed)}`,
+      status: "invalid",
+    }
   }
+  return {
+    member: {
+      format: "zip",
+      kind: archiveMemberKindFromMode(match.groups.mode),
+      linkTarget: null,
+      path: match.groups.path,
+    },
+    status: "parsed",
+  }
+}
+
+function isIgnoredZipInfoLine(line: string): boolean {
+  return (
+    line.startsWith("Archive:") ||
+    ZIP_INFO_SIZE_LINE_PATTERN.test(line) ||
+    ZIP_INFO_SUMMARY_LINE_PATTERN.test(line)
+  )
 }
 
 /**
  * Parse the listing of a zip archive into {@link ArchiveMember}s.
  *
  * @param stdout - The combined stdout of `unzip -Zs`.
- * @returns The parsed members.
+ * @returns The parsed members, or a failure reason for unparsed member lines.
  */
-function parseZipListing(stdout: string): ArchiveMember[] {
+function parseZipListing(stdout: string): ArchiveListing {
   const members: ArchiveMember[] = []
   for (const line of stdout.split("\n")) {
     const parsed = parseZipInfoLine(line)
-    if (parsed !== null) members.push(parsed)
+    if (parsed.status === "invalid") return { failureReason: parsed.failureReason }
+    if (parsed.status === "parsed") members.push(parsed.member)
   }
-  return members
+  return { members }
 }
 
 /**
@@ -260,7 +304,7 @@ export function archiveMemberUnsafeReason(member: ArchiveMember): null | string 
 export async function listArchiveMembers(
   conn: SshConnection,
   parameters: { archivePath: string; source: string }
-): Promise<{ failureReason: string } | { members: ArchiveMember[] }> {
+): Promise<ArchiveListing> {
   const command = listArchiveMembersCommand(parameters.source, parameters.archivePath)
   if (command === null) {
     return { failureReason: `unsupported archive format for ${parameters.source}` }
@@ -272,6 +316,6 @@ export async function listArchiveMembers(
     }
   }
   const lower = parameters.source.toLowerCase()
-  if (isZipSource(lower)) return { members: parseZipListing(result.stdout) }
-  return { members: parseTarListing(result.stdout) }
+  if (isZipSource(lower)) return parseZipListing(result.stdout)
+  return parseTarListing(result.stdout)
 }
