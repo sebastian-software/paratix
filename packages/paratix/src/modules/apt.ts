@@ -129,9 +129,13 @@ const DEBCONF_FIELD_SEPARATOR_PATTERN = /\s/v
 const DEBCONF_LINE_BREAK_PATTERN = /[\r\n]/v
 
 function validateDebconfPackageName(packageName: string): ModuleResult | null {
-  if (packageName.length === 0 || DEBCONF_FIELD_SEPARATOR_PATTERN.test(packageName)) {
+  if (
+    packageName.length === 0 ||
+    packageName.startsWith("-") ||
+    DEBCONF_FIELD_SEPARATOR_PATTERN.test(packageName)
+  ) {
     return failed(
-      `[apt.debconf] packageName must not be empty or contain whitespace: ${JSON.stringify(packageName)}`
+      `[apt.debconf] packageName must not be empty, start with '-', or contain whitespace: ${JSON.stringify(packageName)}`
     )
   }
   return null
@@ -440,6 +444,7 @@ export const apt = {
       },
       async check(ssh: null | SshConnection): Promise<"needs-apply" | "ok"> {
         if (!ssh) return NEEDS_APPLY
+        if (validateDebconfPackageName(packageName)) return NEEDS_APPLY
 
         // R-0000104: distinguish between `package installed, drift` and
         // `package not installed, selections buffered`. When the package

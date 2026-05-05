@@ -849,7 +849,9 @@ describe("apt.debconf", () => {
     const ssh = createMockSsh({})
     const result = await mod.apply(ssh, emptyEnv)
     expect(result.status).toBe("failed")
-    expect(String(result.error)).toContain("packageName must not be empty or contain whitespace")
+    expect(String(result.error)).toContain(
+      "packageName must not be empty, start with '-', or contain whitespace"
+    )
     expect(ssh.calls).not.toContain("debconf-set-selections")
   })
 
@@ -858,7 +860,28 @@ describe("apt.debconf", () => {
     const ssh = createMockSsh({})
     const result = await mod.apply(ssh, emptyEnv)
     expect(result.status).toBe("failed")
-    expect(String(result.error)).toContain("packageName must not be empty or contain whitespace")
+    expect(String(result.error)).toContain(
+      "packageName must not be empty, start with '-', or contain whitespace"
+    )
+    expect(ssh.calls).not.toContain("debconf-set-selections")
+  })
+
+  it("check returns needs-apply without probing dpkg when packageName starts with a dash", async () => {
+    const ssh = createMockSsh({})
+    const mod = apt.debconf("--status-fd=2", selections)
+    const result = await mod.check(ssh, emptyEnv)
+    expect(result).toBe("needs-apply")
+    expect(ssh.calls).not.toContain("dpkg-query -W -f='${Status}' '--status-fd=2'")
+  })
+
+  it("returns a failed result when packageName starts with a dash", async () => {
+    const mod = apt.debconf("--status-fd=2", selections)
+    const ssh = createMockSsh({})
+    const result = await mod.apply(ssh, emptyEnv)
+    expect(result.status).toBe("failed")
+    expect(String(result.error)).toContain(
+      "packageName must not be empty, start with '-', or contain whitespace"
+    )
     expect(ssh.calls).not.toContain("debconf-set-selections")
   })
 
