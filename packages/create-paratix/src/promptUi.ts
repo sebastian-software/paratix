@@ -1,5 +1,7 @@
 import { emitKeypressEvents } from "node:readline"
 
+import { escapeCliControlCharacters } from "./cliFormat.js"
+
 export type SelectOption<TValue extends string> = {
   description: string
   label: string
@@ -11,18 +13,22 @@ export type SelectFunction<TValue extends string> = (
   options: Array<SelectOption<TValue>>
 ) => Promise<TValue>
 
-function createSelectLines<TValue extends string>(
+export function createSelectLines<TValue extends string>(
   prompt: string,
   options: Array<SelectOption<TValue>>,
   selectedIndex: number
 ): string[] {
+  const escapedPrompt = escapeCliControlCharacters(prompt)
   return [
-    prompt,
+    escapedPrompt,
     "",
     "Use the arrow keys to choose an option:",
     ...options.flatMap((option, index) => {
       const prefix = index === selectedIndex ? ">" : " "
-      return [`${prefix} ${option.label}`, `   ${option.description}`]
+      return [
+        `${prefix} ${escapeCliControlCharacters(option.label)}`,
+        `   ${escapeCliControlCharacters(option.description)}`,
+      ]
     }),
     "",
     "Press Enter to confirm.",

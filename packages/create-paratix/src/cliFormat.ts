@@ -3,7 +3,11 @@ const MINIMUM_ESCAPE_WIDTH = 4
 
 /* eslint-disable regexp/no-control-character, prefer-regex-literals, regexp/require-unicode-sets-regexp -- escaping these codepoints is the purpose of the helper */
 // oxlint-disable-next-line no-control-regex
-const TERMINAL_CONTROL_CODEPOINTS = new RegExp("[\\u0000-\\u001F\\u007F-\\u009F]", "gu")
+const TERMINAL_CONTROL_CODEPOINTS = new RegExp(
+  // oxlint-disable-next-line no-control-regex
+  "[\\u0000-\\u001F\\u007F-\\u009F\\u200E\\u200F\\u202A-\\u202E\\u2066-\\u2069]",
+  "gu"
+)
 /* eslint-enable regexp/no-control-character, prefer-regex-literals, regexp/require-unicode-sets-regexp */
 
 function formatCodePointEscape(character: string): string {

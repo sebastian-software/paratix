@@ -26,6 +26,7 @@ import {
   validateHost,
   writeProjectFiles,
 } from "../src/index.js"
+import { createSelectLines } from "../src/promptUi.js"
 import {
   discoverLocalPublicKeys,
   isValidAdminPublicKey,
@@ -1254,6 +1255,30 @@ describe("promptForAdminPublicKey", () => {
     expect(console.error).toHaveBeenCalledWith(
       "No readable public keys were found in ~/.ssh. Keeping the placeholder in server.ts."
     )
+  })
+})
+
+describe("createSelectLines", () => {
+  it("escapes unsafe terminal characters in prompt and option text", () => {
+    const escapeByte = String.fromCharCode(0x1b)
+    const bidiOverride = String.fromCodePoint(0x20_2e)
+    const rendered = createSelectLines(
+      `Select${escapeByte} public key:`,
+      [
+        {
+          description: `/tmp/${bidiOverride}id_ed25519.pub`,
+          label: `id${escapeByte}_ed25519.pub`,
+          value: `/tmp/${escapeByte}${bidiOverride}id_ed25519.pub`,
+        },
+      ],
+      0
+    ).join("\n")
+
+    expect(rendered).toContain("Select\\u{001B} public key:")
+    expect(rendered).toContain("> id\\u{001B}_ed25519.pub")
+    expect(rendered).toContain("/tmp/\\u{202E}id_ed25519.pub")
+    expect(rendered).not.toContain(escapeByte)
+    expect(rendered).not.toContain(bidiOverride)
   })
 })
 
