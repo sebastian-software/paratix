@@ -589,6 +589,16 @@ export class SshConnectionImpl implements SshConnection {
     }
   }
 
+  private async agentSocketExists(agent: string): Promise<boolean> {
+    try {
+      // eslint-disable-next-line security/detect-non-literal-fs-filename -- agent is validated from SSH_AUTH_SOCK env var
+      await stat(agent)
+      return true
+    } catch {
+      return false
+    }
+  }
+
   private async connectViaAgent(options?: PromptOptions): Promise<void> {
     const agent = process.env.SSH_AUTH_SOCK
     if (agent == null || agent.length === 0) {
@@ -600,10 +610,8 @@ export class SshConnectionImpl implements SshConnection {
       }
       throw new Error("No privateKey configured and SSH_AUTH_SOCK is not set")
     }
-    try {
-      // eslint-disable-next-line security/detect-non-literal-fs-filename -- agent is validated from SSH_AUTH_SOCK env var
-      await stat(agent)
-    } catch {
+    if (!(await this.agentSocketExists(agent))) {
+      if (await this.tryPasswordFallback(options)) return
       throw new Error(`SSH_AUTH_SOCK points to non-existent path: ${agent}`)
     }
     if (await this.tryConnectOnPorts(undefined, undefined, agent)) {

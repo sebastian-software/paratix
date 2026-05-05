@@ -877,6 +877,26 @@ describe("SshConnectionImpl", () => {
       expect(tryConnectOnPort).not.toHaveBeenCalled()
     })
 
+    it("falls back to interactive password auth when SSH_AUTH_SOCK points to a non-existent path and passwordFallback is enabled", async () => {
+      vi.mocked(stat).mockRejectedValueOnce(new Error("ENOENT"))
+      vi.mocked(promptTerminal).mockResolvedValueOnce("secret-password")
+      vi.mocked(tryConnectOnPort).mockResolvedValueOnce()
+      process.env.SSH_AUTH_SOCK = "/no/such/socket"
+
+      const ssh = makeSshInstanceWithAgent({ passwordFallback: true })
+
+      await ssh.connect()
+
+      expect(promptTerminal).toHaveBeenCalledOnce()
+      expect(tryConnectOnPort).toHaveBeenCalledOnce()
+      const [callArgs] = vi.mocked(tryConnectOnPort).mock.calls[0]
+      expect(callArgs.agent).toBeUndefined()
+      expect(callArgs.password).toBe("secret-password")
+      expect(callArgs.privateKey).toBeUndefined()
+      expect(ssh.getConnectionInfo().authMethod).toBe("password")
+      expect(ssh.getConnectionInfo().agentSocket).toBeUndefined()
+    })
+
     it("throws when SSH_AUTH_SOCK is set but all port connections fail", async () => {
       vi.mocked(tryConnectOnPort).mockRejectedValue(new Error("Connection refused"))
       process.env.SSH_AUTH_SOCK = AGENT_SOCKET
