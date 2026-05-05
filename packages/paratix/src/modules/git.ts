@@ -6,6 +6,12 @@ const EXEC_OPTS = { ignoreExitCode: true, silent: true } as const
 const SILENT = { silent: true } as const
 
 function validateCloneRepo(repo: string): void {
+  if (repo.startsWith("-")) {
+    throw new Error(
+      "git.clone repo must not start with '-' because Git could parse it as an option."
+    )
+  }
+
   let parsed: URL
   try {
     parsed = new URL(repo)
@@ -19,6 +25,14 @@ function validateCloneRepo(repo: string): void {
   ) {
     throw new Error(
       "git.clone repo URLs must not embed credentials. Use SSH with deploy keys or an SSH agent instead."
+    )
+  }
+}
+
+function validateCloneReference(reference: string | undefined): void {
+  if (reference !== undefined && reference !== "" && reference.startsWith("-")) {
+    throw new Error(
+      "git.clone ref must not start with '-' because Git could parse it as an option."
     )
   }
 }
@@ -45,13 +59,13 @@ async function cloneRepo(conn: SshConnection, parameters: GitCloneParameters): P
   if (reference !== undefined && reference !== "") {
     // Try --branch first (works for branches and tags, not bare SHAs).
     const result = await conn.exec(
-      `git clone --branch ${shellQuote(reference)} ${shellQuote(repo)} ${shellQuote(destination)}`,
+      `git clone --branch ${shellQuote(reference)} -- ${shellQuote(repo)} ${shellQuote(destination)}`,
       EXEC_OPTS
     )
     // Fallback: clone without --branch then checkout (handles bare commit SHAs).
     if (result.code !== 0) {
       const fallback = await conn.exec(
-        `git clone ${shellQuote(repo)} ${shellQuote(destination)}`,
+        `git clone -- ${shellQuote(repo)} ${shellQuote(destination)}`,
         EXEC_OPTS
       )
       if (fallback.code !== 0) return false
@@ -64,7 +78,7 @@ async function cloneRepo(conn: SshConnection, parameters: GitCloneParameters): P
     return true
   }
   const cloneResult = await conn.exec(
-    `git clone ${shellQuote(repo)} ${shellQuote(destination)}`,
+    `git clone -- ${shellQuote(repo)} ${shellQuote(destination)}`,
     EXEC_OPTS
   )
   return cloneResult.code === 0
@@ -181,7 +195,7 @@ async function resolveRemoteReference(
   reference: string
 ): Promise<string> {
   const result = await conn.exec(
-    `git -C ${shellQuote(destination)} ls-remote origin ${shellQuote(reference)}`,
+    `git -C ${shellQuote(destination)} ls-remote -- origin ${shellQuote(reference)}`,
     EXEC_OPTS
   )
 
@@ -215,7 +229,7 @@ async function resolveRemoteReference(
  */
 async function resolveRemoteHead(conn: SshConnection, destination: string): Promise<null | string> {
   const result = await conn.exec(
-    `git -C ${shellQuote(destination)} ls-remote origin HEAD`,
+    `git -C ${shellQuote(destination)} ls-remote -- origin HEAD`,
     EXEC_OPTS
   )
   if (result.code !== 0) return null
@@ -249,6 +263,7 @@ export const git = {
     validateCloneRepo(repo)
 
     const reference = options?.ref
+    validateCloneReference(reference)
     const gitDirectory = `${destination}/.git`
     const parameters: GitCloneParameters = { destination, reference, repo }
 

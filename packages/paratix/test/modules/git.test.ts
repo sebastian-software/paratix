@@ -38,6 +38,22 @@ describe("git.clone — validation", () => {
     )
   })
 
+  it("rejects repo operands that look like Git options", () => {
+    expect(() => git.clone("--upload-pack=touch injected", destination)).toThrow(
+      "repo must not start with '-'"
+    )
+  })
+
+  it("rejects non-empty ref operands that look like Git options", () => {
+    expect(() => git.clone(repo, destination, { ref: "--detach" })).toThrow(
+      "ref must not start with '-'"
+    )
+  })
+
+  it("accepts an empty ref", () => {
+    expect(() => git.clone(repo, destination, { ref: "" })).not.toThrow()
+  })
+
   it("rejects HTTPS repo URLs with only a username", () => {
     expect(() => git.clone("https://token@example.com/org/repo.git", destination)).toThrow(
       "must not embed credentials"
@@ -73,7 +89,7 @@ describe("git.clone — check", () => {
   it("returns ok when .git directory exists and no ref is specified", async () => {
     const sha = "abc1234567890"
     const mockSsh = createMockSsh({
-      [`git -C '${destination}' ls-remote origin HEAD`]: {
+      [`git -C '${destination}' ls-remote -- origin HEAD`]: {
         code: 0,
         stdout: `${sha}\tHEAD\n`,
       },
@@ -87,7 +103,7 @@ describe("git.clone — check", () => {
 
   it("returns needs-apply when no ref is specified and remote default branch advanced", async () => {
     const mockSsh = createMockSsh({
-      [`git -C '${destination}' ls-remote origin HEAD`]: {
+      [`git -C '${destination}' ls-remote -- origin HEAD`]: {
         code: 0,
         stdout: "bbb222\tHEAD\n",
       },
@@ -102,7 +118,7 @@ describe("git.clone — check", () => {
   it("returns needs-apply when the existing checkout points at a different origin URL", async () => {
     const sha = "abc1234567890"
     const mockSsh = createMockSsh({
-      [`git -C '${destination}' ls-remote origin HEAD`]: {
+      [`git -C '${destination}' ls-remote -- origin HEAD`]: {
         code: 0,
         stdout: `${sha}\tHEAD\n`,
       },
@@ -118,7 +134,7 @@ describe("git.clone — check", () => {
   it("returns ok when .git directory exists, ref is specified, and HEAD matches branch ref", async () => {
     const sha = "abc1234567890"
     const mockSsh = createMockSsh({
-      [`git -C '${destination}' ls-remote origin 'main'`]: {
+      [`git -C '${destination}' ls-remote -- origin 'main'`]: {
         code: 0,
         stdout: `${sha}\trefs/heads/main\n`,
       },
@@ -134,7 +150,7 @@ describe("git.clone — check", () => {
     const headSha = "aaa111"
     const remoteSha = "bbb222"
     const mockSsh = createMockSsh({
-      [`git -C '${destination}' ls-remote origin 'main'`]: {
+      [`git -C '${destination}' ls-remote -- origin 'main'`]: {
         code: 0,
         stdout: `${remoteSha}\trefs/heads/main\n`,
       },
@@ -149,7 +165,7 @@ describe("git.clone — check", () => {
   it("resolves annotated tag via ls-remote dereferenced line and HEAD matches", async () => {
     const sha = "deadbeef"
     const mockSsh = createMockSsh({
-      [`git -C '${destination}' ls-remote origin 'v1.0.0'`]: {
+      [`git -C '${destination}' ls-remote -- origin 'v1.0.0'`]: {
         code: 0,
         stdout: `aaa111bbb222\trefs/tags/v1.0.0\n${sha}\trefs/tags/v1.0.0^{}\n`,
       },
@@ -165,7 +181,7 @@ describe("git.clone — check", () => {
     const branchSha = "111111"
     const tagSha = "222222"
     const mockSsh = createMockSsh({
-      [`git -C '${destination}' ls-remote origin 'release'`]: {
+      [`git -C '${destination}' ls-remote -- origin 'release'`]: {
         code: 0,
         stdout: `aaa111\trefs/tags/release\n${tagSha}\trefs/tags/release^{}\n${branchSha}\trefs/heads/release\n`,
       },
@@ -181,7 +197,7 @@ describe("git.clone — check", () => {
     const headSha = "aaa111"
     const bareSha = "ccc333"
     const mockSsh = createMockSsh({
-      [`git -C '${destination}' ls-remote origin '${bareSha}'`]: { code: 2, stdout: "" },
+      [`git -C '${destination}' ls-remote -- origin '${bareSha}'`]: { code: 2, stdout: "" },
       [`git -C '${destination}' rev-parse HEAD`]: { code: 0, stdout: headSha },
       [`test -d '${gitDir}'`]: { code: 0 },
     })
@@ -193,7 +209,7 @@ describe("git.clone — check", () => {
   it("returns ok when ref is a bare SHA and HEAD matches", async () => {
     const sha = "abc123def456"
     const mockSsh = createMockSsh({
-      [`git -C '${destination}' ls-remote origin '${sha}'`]: { code: 2, stdout: "" },
+      [`git -C '${destination}' ls-remote -- origin '${sha}'`]: { code: 2, stdout: "" },
       [`git -C '${destination}' rev-parse HEAD`]: { code: 0, stdout: sha },
       [`test -d '${gitDir}'`]: { code: 0 },
     })
@@ -205,7 +221,7 @@ describe("git.clone — check", () => {
   it("resolves lightweight tag via first ls-remote line", async () => {
     const sha = "deadbeef123"
     const mockSsh = createMockSsh({
-      [`git -C '${destination}' ls-remote origin 'v2.0.0'`]: {
+      [`git -C '${destination}' ls-remote -- origin 'v2.0.0'`]: {
         code: 0,
         stdout: `${sha}\trefs/tags/v2.0.0\n`,
       },
@@ -220,7 +236,7 @@ describe("git.clone — check", () => {
   it("uses ls-remote to resolve ref during check", async () => {
     const sha = "abc123"
     const mockSsh = createMockSsh({
-      [`git -C '${destination}' ls-remote origin 'main'`]: {
+      [`git -C '${destination}' ls-remote -- origin 'main'`]: {
         code: 0,
         stdout: `${sha}\trefs/heads/main\n`,
       },
@@ -229,7 +245,7 @@ describe("git.clone — check", () => {
     })
     const mod = git.clone(repo, destination, { ref: "main" })
     await mod.check(mockSsh, emptyEnv)
-    expect(mockSsh.calls).toContain(`git -C '${destination}' ls-remote origin 'main'`)
+    expect(mockSsh.calls).toContain(`git -C '${destination}' ls-remote -- origin 'main'`)
   })
 
   it("quotes adversarial destination and ref values during check", async () => {
@@ -241,7 +257,7 @@ describe("git.clone — check", () => {
     const quotedRef = shellQuote(adversarialRef)
     const sha = "abc123"
     const mockSsh = createMockSsh({
-      [`git -C ${quotedDestination} ls-remote origin ${quotedRef}`]: {
+      [`git -C ${quotedDestination} ls-remote -- origin ${quotedRef}`]: {
         code: 0,
         stdout: `${sha}\trefs/heads/${adversarialRef}\n`,
       },
@@ -257,7 +273,7 @@ describe("git.clone — check", () => {
     const result = await mod.check(mockSsh, emptyEnv)
 
     expect(result).toBe("ok")
-    expect(mockSsh.calls).toContain(`git -C ${quotedDestination} ls-remote origin ${quotedRef}`)
+    expect(mockSsh.calls).toContain(`git -C ${quotedDestination} ls-remote -- origin ${quotedRef}`)
   })
 })
 
@@ -276,7 +292,7 @@ describe("git.clone — apply", () => {
     const mod = git.clone(repo, destination)
     const result = await mod.apply(mockSsh, emptyEnv)
     expect(result.status).toBe("changed")
-    expect(mockSsh.calls).toContain(`git clone '${repo}' '${destination}'`)
+    expect(mockSsh.calls).toContain(`git clone -- '${repo}' '${destination}'`)
   })
 
   it("clones repo with --branch when .git does not exist and ref is given", async () => {
@@ -286,7 +302,7 @@ describe("git.clone — apply", () => {
     const mod = git.clone(repo, destination, { ref: "main" })
     const result = await mod.apply(mockSsh, emptyEnv)
     expect(result.status).toBe("changed")
-    expect(mockSsh.calls).toContain(`git clone --branch 'main' '${repo}' '${destination}'`)
+    expect(mockSsh.calls).toContain(`git clone --branch 'main' -- '${repo}' '${destination}'`)
   })
 
   it("quotes adversarial repo, destination, and ref values when cloning", async () => {
@@ -297,6 +313,7 @@ describe("git.clone — apply", () => {
     const expectedCommand = [
       "git clone --branch",
       shellQuote(adversarialRef),
+      "--",
       shellQuote(adversarialRepo),
       shellQuote(adversarialDestination),
     ].join(" ")
@@ -442,19 +459,19 @@ describe("git.clone — apply", () => {
   it("falls back to clone without --branch when --branch fails (bare SHA)", async () => {
     const sha = "abc123def456"
     const mockSsh = createGitApplyMockSsh({
-      [`git clone --branch '${sha}' '${repo}' '${destination}'`]: { code: 128 },
+      [`git clone --branch '${sha}' -- '${repo}' '${destination}'`]: { code: 128 },
       [`test -d '${gitDir}'`]: { code: 1 },
     })
     const mod = git.clone(repo, destination, { ref: sha })
     const result = await mod.apply(mockSsh, emptyEnv)
     expect(result.status).toBe("changed")
-    expect(mockSsh.calls).toContain(`git clone '${repo}' '${destination}'`)
+    expect(mockSsh.calls).toContain(`git clone -- '${repo}' '${destination}'`)
     expect(mockSsh.calls).toContain(`git -C '${destination}' checkout '${sha}'`)
   })
 
   it("returns failed when clone fails", async () => {
     const mockSsh = createMockSsh({
-      [`git clone '${repo}' '${destination}'`]: { code: 128 },
+      [`git clone -- '${repo}' '${destination}'`]: { code: 128 },
       [`test -d '${gitDir}'`]: { code: 1 },
     })
     const mod = git.clone(repo, destination)
