@@ -73,6 +73,23 @@ async function ensureAuthorizedKeysIsNotSymlink(
   )
 }
 
+async function ensureSshDirectoryForAuthorizedKeys(
+  conn: SshConnection,
+  parameters: {
+    primaryGroup: string
+    sshDirectoryPath: string
+    user: string
+  }
+): Promise<void> {
+  const { primaryGroup, sshDirectoryPath, user } = parameters
+  const directory = shellQuote(sshDirectoryPath)
+
+  await conn.exec(
+    `[ ! -L ${directory} ] || { echo '.ssh must not be a symlink' >&2; exit 1; }; if [ -e ${directory} ]; then [ -d ${directory} ] || { echo '.ssh must be a directory' >&2; exit 1; }; else mkdir -p ${directory}; fi; [ -d ${directory} ] && [ ! -L ${directory} ] || { echo '.ssh must be a real directory' >&2; exit 1; }; chmod 700 ${directory} && chown ${shellQuote(user)}:${shellQuote(primaryGroup)} ${directory}`,
+    { silent: true }
+  )
+}
+
 async function authorizedKeysSecurityStateIsValid(
   conn: SshConnection,
   parameters: {
@@ -168,13 +185,9 @@ export async function applyAuthorizedKeys(
   // matching `stat` comparison all reference the same group identity.
   const primaryGroup = await resolvePrimaryGroup(conn, user)
   const sshDirectoryPath = `${home}/.ssh`
-  const directory = shellQuote(sshDirectoryPath)
   const authorizedKeysPath = `${home}/.ssh/authorized_keys`
 
-  await conn.exec(
-    `mkdir -p ${directory} && chmod 700 ${directory} && chown ${shellQuote(user)}:${shellQuote(primaryGroup)} ${directory}`,
-    { silent: true }
-  )
+  await ensureSshDirectoryForAuthorizedKeys(conn, { primaryGroup, sshDirectoryPath, user })
   await ensureAuthorizedKeysIsNotSymlink(conn, authorizedKeysPath)
   await rewriteAuthorizedKeys(conn, {
     authorizedKeysPath,

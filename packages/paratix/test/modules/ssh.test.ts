@@ -440,6 +440,8 @@ describe("ssh.authorizedKeys", () => {
   const aliceKeys = `'/home/alice/.ssh/authorized_keys'`
   const aliceMktempPattern = "mktemp '/home/alice/.ssh/.authorized-keys.XXXXXX'"
   const tempPath = "/home/alice/.ssh/.authorized-keys.ABCDEF"
+  const aliceSshDirectoryGuard =
+    "[ ! -L '/home/alice/.ssh' ] || { echo '.ssh must not be a symlink' >&2; exit 1; }; if [ -e '/home/alice/.ssh' ]; then [ -d '/home/alice/.ssh' ] || { echo '.ssh must be a directory' >&2; exit 1; }; else mkdir -p '/home/alice/.ssh'; fi; [ -d '/home/alice/.ssh' ] && [ ! -L '/home/alice/.ssh' ] || { echo '.ssh must be a real directory' >&2; exit 1; }; chmod 700 '/home/alice/.ssh' && chown 'alice':'alice' '/home/alice/.ssh'"
 
   function aliceResponses(
     extra?: Record<string, Partial<{ code: number; stderr: string; stdout: string }>>
@@ -645,9 +647,7 @@ describe("ssh.authorizedKeys", () => {
     const mod = ssh.authorizedKeys("alice", testKey)
     const result = await mod.apply(mockSsh, emptyEnv)
     expect(result.status).toBe("changed")
-    expect(mockSsh.calls).toContain(
-      `mkdir -p ${aliceDir} && chmod 700 ${aliceDir} && chown 'alice':'alice' ${aliceDir}`
-    )
+    expect(mockSsh.calls).toContain(aliceSshDirectoryGuard)
     expect(mockSsh.calls).not.toContain("install -d -m 700 /run/paratix")
     expect(mockSsh.calls).toContain(
       `[ ! -L ${aliceKeys} ] || { echo 'authorized_keys must not be a symlink' >&2; exit 1; }`
@@ -799,6 +799,34 @@ describe("ssh.authorizedKeys", () => {
 
     await expect(mod.apply(mockSsh, emptyEnv)).rejects.toThrow("Command failed")
     expect(mockSsh.calls).not.toContain(aliceMktempPattern)
+  })
+
+  it("rejects when .ssh is a symlink before chmod, chown, mktemp, or rewrite", async () => {
+    const mockSsh = createMockSsh(
+      aliceResponses({
+        [aliceSshDirectoryGuard]: {
+          code: 1,
+          stderr: ".ssh must not be a symlink",
+        },
+      }),
+      {
+        rejectNonZeroExit: true,
+      }
+    )
+    const mod = ssh.authorizedKeys("alice", testKey)
+
+    await expect(mod.apply(mockSsh, emptyEnv)).rejects.toThrow(".ssh must not be a symlink")
+    expect(mockSsh.calls).toContain(aliceSshDirectoryGuard)
+    expect(mockSsh.calls).not.toContain(
+      `mkdir -p ${aliceDir} && chmod 700 ${aliceDir} && chown 'alice':'alice' ${aliceDir}`
+    )
+    expect(mockSsh.calls).not.toContain(aliceMktempPattern)
+    expect(mockSsh.calls).not.toContain(
+      `{ if [ -f ${aliceKeys} ]; then awk '1' ${aliceKeys}; grep -qxF -- '${testKey}' ${aliceKeys} || printf '%s\\n' '${testKey}'; else printf '%s\\n' '${testKey}'; fi; } > '${tempPath}'`
+    )
+    expect(mockSsh.calls).not.toContain(
+      `chmod 600 '${tempPath}' && chown 'alice':'alice' '${tempPath}' && mv '${tempPath}' ${aliceKeys} && chmod 600 ${aliceKeys} && chown 'alice':'alice' ${aliceKeys}`
+    )
   })
 
   it("stages the authorized_keys rewrite inside the target user's .ssh directory, not under /run", async () => {
@@ -961,7 +989,7 @@ describe("ssh.authorizedKeys", () => {
     expect(result.status).toBe("changed")
     // Directory creation must quote the space-containing path
     expect(mockSsh.calls).toContain(
-      `mkdir -p '/home/my user/.ssh' && chmod 700 '/home/my user/.ssh' && chown 'alice':'alice' '/home/my user/.ssh'`
+      `[ ! -L '/home/my user/.ssh' ] || { echo '.ssh must not be a symlink' >&2; exit 1; }; if [ -e '/home/my user/.ssh' ]; then [ -d '/home/my user/.ssh' ] || { echo '.ssh must be a directory' >&2; exit 1; }; else mkdir -p '/home/my user/.ssh'; fi; [ -d '/home/my user/.ssh' ] && [ ! -L '/home/my user/.ssh' ] || { echo '.ssh must be a real directory' >&2; exit 1; }; chmod 700 '/home/my user/.ssh' && chown 'alice':'alice' '/home/my user/.ssh'`
     )
     // mktemp must operate inside the quoted .ssh directory
     expect(mockSsh.calls).toContain("mktemp '/home/my user/.ssh/.authorized-keys.XXXXXX'")
@@ -996,7 +1024,7 @@ describe("ssh.authorizedKeys", () => {
     expect(result.status).toBe("changed")
     // Directory chown uses the resolved primary group, not the username.
     expect(mockSsh.calls).toContain(
-      `mkdir -p '/home/deploy/.ssh' && chmod 700 '/home/deploy/.ssh' && chown 'deploy':'users' '/home/deploy/.ssh'`
+      `[ ! -L '/home/deploy/.ssh' ] || { echo '.ssh must not be a symlink' >&2; exit 1; }; if [ -e '/home/deploy/.ssh' ]; then [ -d '/home/deploy/.ssh' ] || { echo '.ssh must be a directory' >&2; exit 1; }; else mkdir -p '/home/deploy/.ssh'; fi; [ -d '/home/deploy/.ssh' ] && [ ! -L '/home/deploy/.ssh' ] || { echo '.ssh must be a real directory' >&2; exit 1; }; chmod 700 '/home/deploy/.ssh' && chown 'deploy':'users' '/home/deploy/.ssh'`
     )
     // The authorized_keys chown must also use the resolved primary group.
     expect(mockSsh.calls).toContain(
