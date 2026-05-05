@@ -557,7 +557,7 @@ Conditionally run modules based on package state on the remote host.
 
 ```typescript
 when.packageInstalled("ufw", ufw.disabled())
-when.packageAbsent("docker-ce", package.installed("docker-ce"))
+when.packageAbsent("docker-ce", pkg.installed("docker-ce"))
 ```
 
 ### `when.commandExists(name, ...modules)` / `when.commandMissing(name, ...modules)`
@@ -566,7 +566,7 @@ Conditionally run modules based on whether a command exists on the remote host.
 
 ```typescript
 when.commandExists("docker", service.running("docker"))
-when.commandMissing("docker", package.installed("docker-ce"))
+when.commandMissing("docker", pkg.installed("docker-ce"))
 ```
 
 ### Filesystem guard variants
