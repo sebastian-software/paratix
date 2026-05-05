@@ -469,9 +469,9 @@ describe("mount.present — apply", () => {
   it("returns failed and does not touch fstab or mount when mkdir -p fails", async () => {
     const writtenFiles: Array<{ content: string; path: string }> = []
     const mockSsh = createMountApplyMockSsh({
-      [mkdirCmd]: { code: 1, stderr: "permission denied" },
       "cat '/etc/fstab'": { stdout: "# /etc/fstab\n" },
       [findmntCheckCmd]: { code: 1 },
+      [mkdirCmd]: { code: 1, stderr: "permission denied" },
     })
     // eslint-disable-next-line @typescript-eslint/require-await -- Mock implementation
     mockSsh.writeFile = async (path: string, content: string): Promise<void> => {

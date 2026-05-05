@@ -62,7 +62,14 @@ export async function promptTerminal(
 
   return new Promise((resolve, reject) => {
     let settled = false
-    let rejectClosedPrompt = (): void => {}
+
+    const rejectClosedPrompt = (): void => {
+      if (settled) return
+      settled = true
+      cleanup()
+      if (hidden) process.stderr.write("\n")
+      reject(new Error("Terminal prompt closed before input was received"))
+    }
 
     const cleanup = (): void => {
       abortSignal?.removeEventListener("abort", rejectPrompt)
@@ -89,14 +96,6 @@ export async function promptTerminal(
       },
       settled: () => settled,
     })
-
-    rejectClosedPrompt = () => {
-      if (settled) return
-      settled = true
-      cleanup()
-      if (hidden) process.stderr.write("\n")
-      reject(new Error("Terminal prompt closed before input was received"))
-    }
 
     if (abortSignal?.aborted === true) {
       rejectPrompt()

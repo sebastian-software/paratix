@@ -1,41 +1,49 @@
 import { EventEmitter } from "node:events"
-
 import { afterEach, describe, expect, it, vi } from "vitest"
 
 type QuestionCallback = (answer: string) => void
-type MockReadline = EventEmitter & {
-  close: ReturnType<typeof vi.fn>
-  question: ReturnType<typeof vi.fn>
+
+class MockReadline extends EventEmitter {
+  public close(): void {
+    this.emit("close")
+  }
+
+  public question(_question: string, _callback: QuestionCallback): void {
+    void _question
+    void _callback
+  }
 }
 
 async function loadPromptTerminalWithMockedReadline() {
   vi.resetModules()
 
   const interfaces: MockReadline[] = []
+  const questionCallbacks: QuestionCallback[] = []
+  const closeSpies: Array<ReturnType<typeof vi.spyOn>> = []
 
   vi.doMock("node:readline", () => ({
     createInterface: vi.fn(() => {
-      const rl = new EventEmitter() as MockReadline
-      rl.close = vi.fn(() => {
-        rl.emit("close")
+      const rl = new MockReadline()
+      closeSpies.push(vi.spyOn(rl, "close"))
+      vi.spyOn(rl, "question").mockImplementation((_question, callback) => {
+        questionCallbacks.push(callback)
       })
-      rl.question = vi.fn()
       interfaces.push(rl)
       return rl
     }),
   }))
 
   const { promptTerminal } = await import("../src/terminal.js")
-  return { interfaces, promptTerminal }
+  return { closeSpies, interfaces, promptTerminal, questionCallbacks }
 }
 
-afterEach(() => {
-  vi.doUnmock("node:readline")
-  vi.resetModules()
-  vi.restoreAllMocks()
-})
-
 describe("promptTerminal", () => {
+  afterEach(() => {
+    vi.doUnmock("node:readline")
+    vi.resetModules()
+    vi.restoreAllMocks()
+  })
+
   it("rejects when readline closes before an answer is received", async () => {
     const { interfaces, promptTerminal } = await loadPromptTerminalWithMockedReadline()
     const prompt = promptTerminal("Password: ")
@@ -46,15 +54,13 @@ describe("promptTerminal", () => {
   })
 
   it("resolves once when the answer arrives before readline closes", async () => {
-    const { interfaces, promptTerminal } = await loadPromptTerminalWithMockedReadline()
+    const { closeSpies, promptTerminal, questionCallbacks } =
+      await loadPromptTerminalWithMockedReadline()
     const prompt = promptTerminal("Password: ")
-    const questionCall = interfaces[0]?.question.mock.calls[0] as
-      | [question: string, callback: QuestionCallback]
-      | undefined
 
-    questionCall?.[1]("secret")
+    questionCallbacks[0]?.("secret")
 
     await expect(prompt).resolves.toBe("secret")
-    expect(interfaces[0]?.close).toHaveBeenCalledOnce()
+    expect(closeSpies[0]).toHaveBeenCalledOnce()
   })
 })

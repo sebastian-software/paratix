@@ -278,6 +278,24 @@ export function applyCliProcessEnvironment(options: { firstRun: boolean }): () =
   return restoreProcessEnvironment
 }
 
+async function registerTsxForTypeScriptEntry(filePath: string): Promise<void> {
+  try {
+    const tsx = (await import("tsx/esm/api")) as { register: () => void }
+    tsx.register()
+  } catch (error) {
+    if (isMissingTsxDependencyError(error)) {
+      handleTsxLoadFailure(filePath)
+      return
+    }
+    throw new Error(
+      `Failed to load tsx/esm/api: ${error instanceof Error ? error.message : String(error)}`,
+      {
+        cause: error,
+      }
+    )
+  }
+}
+
 export async function loadServerDefinitionFromFile(
   file: string,
   options: { firstRun: boolean }
@@ -296,23 +314,7 @@ export async function loadServerDefinitionFromFile(
     // missing) is rethrown with the original cause so the CLI exit handler
     // surfaces the real loader failure instead of falsely reporting that
     // tsx is not installed.
-    if (isTypeScriptEntry) {
-      try {
-        const tsx = (await import("tsx/esm/api")) as { register: () => void }
-        tsx.register()
-      } catch (error) {
-        if (isMissingTsxDependencyError(error)) {
-          handleTsxLoadFailure(filePath)
-        } else {
-          throw new Error(
-            `Failed to load tsx/esm/api: ${error instanceof Error ? error.message : String(error)}`,
-            {
-              cause: error,
-            }
-          )
-        }
-      }
-    }
+    if (isTypeScriptEntry) await registerTsxForTypeScriptEntry(filePath)
 
     // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment -- Dynamic import has unknown shape
     const imported = await import(fileUrl)
