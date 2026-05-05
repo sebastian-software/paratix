@@ -146,6 +146,7 @@ export function writeProjectFiles(projectDirectory: string, options?: ScaffoldOp
       eslint: "^10.0.3",
       "eslint-config-setup": "^0.3.3",
       prettier: "^3.6.2",
+      typescript: "^5.9.2",
       tsx: "^4.20.6",
     },
     engines: {

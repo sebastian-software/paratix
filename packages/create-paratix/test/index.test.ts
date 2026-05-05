@@ -1734,7 +1734,7 @@ describe("writeProjectFiles", () => {
     expect(deriveParatixDependencyRange()).toBe(`^${readCreateParatixPackageVersion()}`)
   })
 
-  it("generated package.json includes tsx and @types/node so apply scripts can run server.ts immediately", () => {
+  it("generated package.json includes TypeScript tooling so apply and lint scripts work immediately", () => {
     writeProjectFiles(TEST_DIR)
 
     const raw = readFileSync(join(TEST_DIR, "package.json"), "utf8")
@@ -1746,6 +1746,7 @@ describe("writeProjectFiles", () => {
         eslint: expect.stringMatching(/^\^/v),
         "eslint-config-setup": expect.stringMatching(/^\^/v),
         prettier: expect.stringMatching(/^\^/v),
+        typescript: expect.stringMatching(/^\^/v),
         tsx: expect.stringMatching(/^\^/v),
       },
       scripts: {
