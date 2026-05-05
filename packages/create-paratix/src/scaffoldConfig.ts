@@ -1,5 +1,6 @@
 import type { InitialUserConfig } from "./templates.js"
 
+import { formatCliValue } from "./cliFormat.js"
 import { validateAdminPublicKey } from "./publicKeySelection.js"
 
 type ExitWithMessage = (message: string) => never
@@ -35,7 +36,7 @@ export function parseInitialUserConfig(
   const normalizedValue = normalizeInitialUserName(value)
   if (!isValidInitialUserName(normalizedValue)) {
     exitWithMessage(
-      `Error: Invalid initial user "${value}" — use "root" or a valid lowercase Linux username.`
+      `Error: Invalid initial user ${formatCliValue(value)} — use "root" or a valid lowercase Linux username.`
     )
   }
 
@@ -92,7 +93,7 @@ export function validateHost(exitWithMessage: ExitWithMessage, value: string): s
   const normalizedValue = normalizeHost(value)
   if (!isValidHost(normalizedValue)) {
     exitWithMessage(
-      `Error: Invalid host "${value}" — use a domain name, IPv4, or IPv6 address without spaces.`
+      `Error: Invalid host ${formatCliValue(value)} — use a domain name, IPv4, or IPv6 address without spaces.`
     )
   }
   return normalizedValue
@@ -108,7 +109,7 @@ export function validateExpectedHostFingerprint(
 ): string {
   if (!isValidExpectedHostFingerprint(value)) {
     exitWithMessage(
-      `Error: Invalid expected host fingerprint "${value}" — use an OpenSSH SHA256 fingerprint.`
+      `Error: Invalid expected host fingerprint ${formatCliValue(value)} — use an OpenSSH SHA256 fingerprint.`
     )
   }
 
@@ -188,7 +189,7 @@ function handleUnknownOption(argument: string, exitWithMessage: ExitWithMessage)
   if (argument === "--bootstrap-root") {
     exitWithMessage('Error: "--bootstrap-root" was removed. Use "--initial-user root" instead.')
   }
-  exitWithMessage(`Error: Unknown option "${argument}".`)
+  exitWithMessage(`Error: Unknown option ${formatCliValue(argument)}.`)
 }
 
 type ParsedCliArguments = {

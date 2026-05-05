@@ -2,6 +2,7 @@ import { mkdirSync, writeFileSync } from "node:fs"
 import { basename, join, resolve } from "node:path"
 import { fileURLToPath } from "node:url"
 
+import { escapeCliControlCharacters, formatCliValue } from "./cliFormat.js"
 import {
   promptForAdminPublicKey,
   promptForHost,
@@ -107,7 +108,7 @@ function normalizeProgrammaticInitialUserConfig(
 
   if (parsedInitialUser.kind !== "admin") {
     throw new Error(
-      `Error: Invalid initial user "${initialUser.user}" — use a non-root lowercase Linux username for admin mode.`
+      `Error: Invalid initial user ${formatCliValue(initialUser.user)} — use a non-root lowercase Linux username for admin mode.`
     )
   }
 
@@ -189,7 +190,7 @@ function derivePackageName(projectDirectory: string): string {
 }
 
 function exitWithMessage(message: string): never {
-  console.error(message)
+  console.error(escapeCliControlCharacters(message))
   // eslint-disable-next-line node/no-process-exit
   process.exit(1)
 }
@@ -219,7 +220,7 @@ function validateProjectName(name: string | undefined): string {
 
   if (!isValidProjectName(normalizedName)) {
     exitWithMessage(
-      `Error: Invalid project name "${name}" — use only lowercase letters, numbers, and hyphens.`
+      `Error: Invalid project name ${formatCliValue(name)} — use only lowercase letters, numbers, and hyphens.`
     )
   }
 
@@ -239,7 +240,7 @@ function createProjectDirectoryAtomically(
     mkdirSync(projectDirectory, { recursive: false })
   } catch (error: unknown) {
     if (isErrnoException(error) && error.code === "EEXIST") {
-      exitWithMessage(`Error: Directory "${normalizedProjectName}" already exists.`)
+      exitWithMessage(`Error: Directory ${formatCliValue(normalizedProjectName)} already exists.`)
     }
     throw error
   }
@@ -335,7 +336,9 @@ function main(): void {
       initialUser: initialUserConfig,
     })
   })().catch((error: unknown) => {
-    console.error(error instanceof Error ? error.message : String(error))
+    console.error(
+      escapeCliControlCharacters(error instanceof Error ? error.message : String(error))
+    )
     process.exitCode = 1
   })
 }

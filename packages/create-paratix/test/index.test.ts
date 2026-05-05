@@ -389,6 +389,22 @@ describe("parseCliArguments", () => {
     )
   })
 
+  it("escapes control bytes in invalid expected host fingerprint errors", async () => {
+    const escapeByte = String.fromCharCode(0x1b)
+    vi.spyOn(console, "error").mockImplementation((...args) => {
+      void args
+    })
+
+    await expectProcessExit(() => {
+      parseCliArguments(["my-server", "--expected-host-fingerprint", `SHA256:bad${escapeByte}`])
+    })
+
+    expect(console.error).toHaveBeenCalledWith(
+      'Error: Invalid expected host fingerprint "SHA256:bad\\u{001B}" — use an OpenSSH SHA256 fingerprint.'
+    )
+    expect(String(vi.mocked(console.error).mock.calls[0]?.[0])).not.toContain(escapeByte)
+  })
+
   it("rejects passing both admin public key flags together", async () => {
     vi.spyOn(console, "error").mockImplementation((...args) => {
       void args
@@ -421,6 +437,20 @@ describe("parseCliArguments", () => {
     expect(console.error).toHaveBeenCalledWith(
       'Error: "--bootstrap-root" was removed. Use "--initial-user root" instead.'
     )
+  })
+
+  it("escapes control bytes in unknown option errors", async () => {
+    const escapeByte = String.fromCharCode(0x1b)
+    vi.spyOn(console, "error").mockImplementation((...args) => {
+      void args
+    })
+
+    await expectProcessExit(() => {
+      parseCliArguments(["my-server", `--bad${escapeByte}option`])
+    })
+
+    expect(console.error).toHaveBeenCalledWith('Error: Unknown option "--bad\\u{001B}option".')
+    expect(String(vi.mocked(console.error).mock.calls[0]?.[0])).not.toContain(escapeByte)
   })
 
   // R-0000129: An empty or whitespace-only argument value would silently
@@ -783,6 +813,22 @@ describe("initial user parsing", () => {
     expect(isValidInitialUserName("")).toBe(false)
   })
 
+  it("escapes control bytes in invalid initial user errors", async () => {
+    const escapeByte = String.fromCharCode(0x1b)
+    vi.spyOn(console, "error").mockImplementation((...args) => {
+      void args
+    })
+
+    await expectProcessExit(() => {
+      parseInitialUserConfig(`deploy${escapeByte}root`)
+    })
+
+    expect(console.error).toHaveBeenCalledWith(
+      'Error: Invalid initial user "deploy\\u{001B}root" — use "root" or a valid lowercase Linux username.'
+    )
+    expect(String(vi.mocked(console.error).mock.calls[0]?.[0])).not.toContain(escapeByte)
+  })
+
   it("maps root to the explicit root config", () => {
     expect(parseInitialUserConfig(" root ")).toStrictEqual({ kind: "root" })
   })
@@ -858,6 +904,22 @@ describe("host parsing", () => {
       'Error: Invalid host "bad host" — use a domain name, IPv4, or IPv6 address without spaces.'
     )
   })
+
+  it("escapes control bytes in invalid host errors", async () => {
+    const escapeByte = String.fromCharCode(0x1b)
+    vi.spyOn(console, "error").mockImplementation((...args) => {
+      void args
+    })
+
+    await expectProcessExit(() => {
+      validateHost(`bad${escapeByte}host`)
+    })
+
+    expect(console.error).toHaveBeenCalledWith(
+      'Error: Invalid host "bad\\u{001B}host" — use a domain name, IPv4, or IPv6 address without spaces.'
+    )
+    expect(String(vi.mocked(console.error).mock.calls[0]?.[0])).not.toContain(escapeByte)
+  })
 })
 
 describe("expected host fingerprint parsing", () => {
@@ -889,6 +951,22 @@ describe("expected host fingerprint parsing", () => {
     expect(console.error).toHaveBeenCalledWith(
       'Error: Invalid expected host fingerprint "SHA256:trusted-host-fingerprint" — use an OpenSSH SHA256 fingerprint.'
     )
+  })
+
+  it("escapes control bytes in direct expected host fingerprint validation errors", async () => {
+    const escapeByte = String.fromCharCode(0x1b)
+    vi.spyOn(console, "error").mockImplementation((...args) => {
+      void args
+    })
+
+    await expectProcessExit(() => {
+      validateExpectedHostFingerprint(`SHA256:bad${escapeByte}`)
+    })
+
+    expect(console.error).toHaveBeenCalledWith(
+      'Error: Invalid expected host fingerprint "SHA256:bad\\u{001B}" — use an OpenSSH SHA256 fingerprint.'
+    )
+    expect(String(vi.mocked(console.error).mock.calls[0]?.[0])).not.toContain(escapeByte)
   })
 })
 
@@ -1251,6 +1329,26 @@ describe("promptForHostFingerprint", () => {
     expect(warningCalls).toContain("man-in-the-middle")
     expect(warningCalls).toContain("Verify the host key out of band")
 
+    expect(select).toHaveBeenCalledTimes(1)
+  })
+
+  it("escapes control bytes in host-key scan warnings", async () => {
+    const escapeByte = String.fromCharCode(0x1b)
+    const host = `example${escapeByte}.com`
+    const select = vi.fn().mockResolvedValueOnce("scan")
+    const scanner = vi.fn().mockRejectedValueOnce(new Error(`network${escapeByte}timeout`))
+
+    await expect(promptForHostFingerprint(host, select, scanner)).rejects.toThrow(
+      /host-key scan for example\\u\{001B\}\.com failed \(network\\u\{001B\}timeout\)/v
+    )
+
+    const warningCalls = vi
+      .mocked(console.error)
+      .mock.calls.map((call) => String(call[0]))
+      .join("\n")
+    expect(warningCalls).toContain("Warning: failed to scan SSH host key for example\\u{001B}.com.")
+    expect(warningCalls).toContain("network\\u{001B}timeout")
+    expect(warningCalls).not.toContain(escapeByte)
     expect(select).toHaveBeenCalledTimes(1)
   })
 

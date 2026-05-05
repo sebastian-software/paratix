@@ -2,6 +2,7 @@ import { createInterface } from "node:readline/promises"
 
 import type { InitialUserConfig } from "./templates.js"
 
+import { escapeCliControlCharacters } from "./cliFormat.js"
 import {
   type HostFingerprintScanResult,
   readHostFingerprintViaSsh2,
@@ -73,12 +74,13 @@ const HOST_FINGERPRINT_CONFIRM_OPTIONS: Array<SelectOption<"discard" | "pin">> =
 // R-0000122: render the scanned host key on isolated lines so an operator
 // can copy it cleanly for an out-of-band comparison.
 function describeScanResult(host: string, result: HostFingerprintScanResult): string {
+  const escapedHost = escapeCliControlCharacters(host)
   return [
     "",
-    `Scanned SSH host key for ${host}:22`,
-    `  algorithm:   ${result.algorithm}`,
+    `Scanned SSH host key for ${escapedHost}:22`,
+    `  algorithm:   ${escapeCliControlCharacters(result.algorithm)}`,
     `  fingerprint:`,
-    `    ${result.fingerprint}`,
+    `    ${escapeCliControlCharacters(result.fingerprint)}`,
     "",
     "Compare this value against an out-of-band reference before pinning it.",
     "",
@@ -234,13 +236,14 @@ async function chooseFrom<TWide extends string, TNarrow extends TWide>(
 }
 
 function failAfterScanFailure(host: string, error: unknown): never {
-  const reason = error instanceof Error ? error.message : String(error)
+  const reason = escapeCliControlCharacters(error instanceof Error ? error.message : String(error))
+  const escapedHost = escapeCliControlCharacters(host)
   // R-0000128: word the failure as an explicit MITM-warning so an operator
   // does not dismiss it as a transient network glitch.
   console.error(
     [
       "",
-      `Warning: failed to scan SSH host key for ${host}.`,
+      `Warning: failed to scan SSH host key for ${escapedHost}.`,
       `  reason: ${reason}`,
       "  This may indicate a man-in-the-middle attempt or a firewall blocking",
       "  the SSH handshake. Verify the host key out of band before pinning",
@@ -250,8 +253,8 @@ function failAfterScanFailure(host: string, error: unknown): never {
   )
 
   throw new Error(
-    `Aborting scaffolding: host-key scan for ${host} failed (${reason}). ` +
-      `Re-run create-paratix once the SSH handshake to ${host}:22 succeeds, ` +
+    `Aborting scaffolding: host-key scan for ${escapedHost} failed (${reason}). ` +
+      `Re-run create-paratix once the SSH handshake to ${escapedHost}:22 succeeds, ` +
       `or pass --expected-host-fingerprint with an out-of-band verified fingerprint.`
   )
 }
@@ -288,12 +291,13 @@ async function scanAndConfirmFingerprint(parameters: {
 
   const confirmation = await chooseFrom(
     choose,
-    `Pin the scanned host fingerprint for ${host}?`,
+    `Pin the scanned host fingerprint for ${escapeCliControlCharacters(host)}?`,
     HOST_FINGERPRINT_CONFIRM_OPTIONS
   )
   if (confirmation !== "pin") {
+    const escapedHost = escapeCliControlCharacters(host)
     throw new Error(
-      `Aborting scaffolding: scanned host fingerprint for ${host} was not pinned. ` +
+      `Aborting scaffolding: scanned host fingerprint for ${escapedHost} was not pinned. ` +
         `Re-run create-paratix and pin a verified fingerprint, or pass --expected-host-fingerprint.`
     )
   }
@@ -315,7 +319,7 @@ export async function promptForHostFingerprint(
   try {
     const hostKeyMode = await chooseFrom(
       choose,
-      `How should create-paratix bootstrap the SSH host key for ${host}?`,
+      `How should create-paratix bootstrap the SSH host key for ${escapeCliControlCharacters(host)}?`,
       HOST_FINGERPRINT_OPTIONS
     )
     if (hostKeyMode !== "scan") {
