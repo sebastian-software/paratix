@@ -1,7 +1,7 @@
 import type * as childProcess from "node:child_process"
 
 import { EventEmitter } from "node:events"
-import { beforeEach, describe, expect, it, type Mock, vi } from "vitest"
+import { afterEach, beforeEach, describe, expect, it, type Mock, vi } from "vitest"
 
 import { resolveEnvironment } from "../../src/environment.js"
 import { mergeEnvironmentFromMeta } from "../../src/meta.js"
@@ -119,6 +119,10 @@ describe("op.resolve — apply", () => {
     clearRegisteredSecrets()
     spawnCalls = []
     mockSpawnWith("")
+  })
+
+  afterEach(() => {
+    clearRegisteredSecrets()
   })
 
   it("resolves regular secrets via op inject and returns them as meta", async () => {
@@ -300,7 +304,12 @@ describe("op.resolve — apply", () => {
 describe("op.resolve — JSON validation", () => {
   beforeEach(() => {
     vi.resetAllMocks()
+    clearRegisteredSecrets()
     spawnCalls = []
+  })
+
+  afterEach(() => {
+    clearRegisteredSecrets()
   })
 
   it("returns failed when op inject returns an array", async () => {
