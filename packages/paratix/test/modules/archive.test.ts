@@ -337,6 +337,8 @@ describe("archive.extract — apply", () => {
       `tar --no-same-owner --no-overwrite-dir -xzf '${src}' -C '${destination}'`
     )
     expect(mockSsh.calls).toContain(`mkdir -p '/var/lib/paratix/flags'`)
+    expect(mockSsh.writeFile).toHaveBeenCalledOnce()
+    expect(mockSsh.writeFile).toHaveBeenCalledWith(marker, archiveSha, { mode: "0644" })
   })
 
   it("extracts .tar archive", async () => {
