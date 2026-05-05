@@ -53,6 +53,9 @@ function validateFstabField(caller: string, fieldName: string, value: string): v
   if (value.length === 0) {
     throw new Error(`${caller}: ${fieldName} fstab field must not be empty`)
   }
+  if (fieldName === "src" && value.startsWith("-")) {
+    throw new Error(`${caller}: ${fieldName} fstab field must not start with '-'`)
+  }
   if (WHITESPACE_PATTERN.test(value)) {
     throw new Error(`${caller}: ${fieldName} fstab field must not contain whitespace`)
   }
@@ -186,7 +189,7 @@ async function applyMountConvergence(
 
   if (onlyOptionsDrifted) {
     const remountResult = await ssh.exec(
-      `mount -o remount,${shellQuote(opts)} ${shellQuote(src)} ${shellQuote(path)}`,
+      `mount -o remount,${shellQuote(opts)} -- ${shellQuote(src)} ${shellQuote(path)}`,
       EXEC_OPTS
     )
     if (remountResult.code === 0) return null
@@ -198,7 +201,7 @@ async function applyMountConvergence(
     return failedCommand(`[mount.present: ${path}] umount before remount failed`, umountResult)
   }
   const mountResult = await ssh.exec(
-    `mount -t ${shellQuote(fstype)} -o ${shellQuote(opts)} ${shellQuote(src)} ${shellQuote(path)}`,
+    `mount -t ${shellQuote(fstype)} -o ${shellQuote(opts)} -- ${shellQuote(src)} ${shellQuote(path)}`,
     EXEC_OPTS
   )
   if (mountResult.code !== 0) {
@@ -233,7 +236,7 @@ async function ensureLiveMount(
 
   if (live == null) {
     const mountResult = await ssh.exec(
-      `mount -t ${shellQuote(fstype)} -o ${shellQuote(opts)} ${shellQuote(src)} ${shellQuote(path)}`,
+      `mount -t ${shellQuote(fstype)} -o ${shellQuote(opts)} -- ${shellQuote(src)} ${shellQuote(path)}`,
       EXEC_OPTS
     )
     if (mountResult.code !== 0) {

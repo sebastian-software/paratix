@@ -32,7 +32,7 @@ const fstabLine = `${mountSrc} ${mountPath} ${mountFstype} ${mountOpts} 0 0`
 
 const findmntCheckCmd = `findmnt --noheadings --output SOURCE,FSTYPE,OPTIONS '${mountPath}'`
 const findmntTestCmd = `findmnt --noheadings '${mountPath}'`
-const mountCmd = `mount -t '${mountFstype}' -o '${mountOpts}' '${mountSrc}' '${mountPath}'`
+const mountCmd = `mount -t '${mountFstype}' -o '${mountOpts}' -- '${mountSrc}' '${mountPath}'`
 const umountCmd = `umount '${mountPath}'`
 const mkdirCmd = `mkdir -p '${mountPath}'`
 
@@ -118,6 +118,17 @@ describe("mount.present — path validation", () => {
     expect(() =>
       mount.present({ fstype: mountFstype, opts: mountOpts, path: "/mnt//data", src: mountSrc })
     ).toThrow(/mount path is invalid/v)
+  })
+
+  it("throws when src starts with a flag prefix", () => {
+    expect(() =>
+      mount.present({
+        fstype: mountFstype,
+        opts: mountOpts,
+        path: mountPath,
+        src: "--bind",
+      })
+    ).toThrow(/src fstab field must not start with '-'/v)
   })
 
   it.each([
@@ -615,7 +626,7 @@ describe("mount.present — apply", () => {
   // R-0000049 regression: a live mount whose options drifted but whose
   // src and fstype still match is converged via `mount -o remount,<opts>`.
   it("issues mount -o remount when only options drifted", async () => {
-    const remountCmd = `mount -o remount,'${mountOpts}' '${mountSrc}' '${mountPath}'`
+    const remountCmd = `mount -o remount,'${mountOpts}' -- '${mountSrc}' '${mountPath}'`
     const mockSsh = createMountApplyMockSsh({
       [findmntCheckCmd]: { code: 0, stdout: `${mountSrc} ${mountFstype} defaults` },
       [remountCmd]: { code: 0 },
