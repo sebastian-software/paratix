@@ -1443,7 +1443,7 @@ describe("net.waitFor — check", () => {
 
   it("returns ok when port is open (nc -z)", async () => {
     const mockSsh = createMockSsh({
-      "nc -z '127.0.0.1' '8080'": { code: 0 },
+      "nc -z -w '1' '127.0.0.1' '8080'": { code: 0 },
     })
     const mod = net.waitFor({ port: 8080 })
     const result = await mod.check(mockSsh, emptyEnv)
@@ -1452,7 +1452,7 @@ describe("net.waitFor — check", () => {
 
   it("returns needs-apply when port is closed", async () => {
     const mockSsh = createMockSsh({
-      "nc -z '127.0.0.1' '8080'": { code: 1 },
+      "nc -z -w '1' '127.0.0.1' '8080'": { code: 1 },
     })
     const mod = net.waitFor({ port: 8080 })
     const result = await mod.check(mockSsh, emptyEnv)
@@ -1518,6 +1518,18 @@ describe("net.waitFor — check", () => {
 })
 
 describe("net.waitFor — apply", () => {
+  it("rejects non-positive or non-finite timing values", () => {
+    expect(() => net.waitFor({ port: 8080, timeout: 0 })).toThrow(
+      "[net.waitFor] invalid timeout: value must be a finite positive number"
+    )
+    expect(() => net.waitFor({ interval: Number.NaN, port: 8080 })).toThrow(
+      "[net.waitFor] invalid interval: value must be a finite positive number"
+    )
+    expect(() => net.waitFor({ interval: Number.POSITIVE_INFINITY, port: 8080 })).toThrow(
+      "[net.waitFor] invalid interval: value must be a finite positive number"
+    )
+  })
+
   it("returns failed when conn is null", async () => {
     const mod = net.waitFor({ port: 8080 })
     // eslint-disable-next-line prefer-spread
@@ -1527,20 +1539,40 @@ describe("net.waitFor — apply", () => {
 
   it("returns changed when port becomes available immediately", async () => {
     const mockSsh = createMockSsh({
-      "nc -z '127.0.0.1' '8080'": { code: 0 },
+      "nc -z -w '60' '127.0.0.1' '8080'": { code: 0 },
     })
     const mod = net.waitFor({ port: 8080 })
     const result = await mod.apply(mockSsh, emptyEnv)
     expect(result.status).toBe("changed")
+    expect(mockSsh.execCalls[0]?.options).toMatchObject({
+      ignoreExitCode: true,
+      silent: true,
+    })
+    expect(mockSsh.execCalls[0]?.options?.timeout).toBeGreaterThan(0)
+    expect(mockSsh.execCalls[0]?.options?.timeout).toBeLessThanOrEqual(60_000)
   })
 
   it("returns failed on timeout when condition never becomes true", async () => {
     const mockSsh = createMockSsh({
-      "nc -z '127.0.0.1' '9999'": { code: 1 },
+      "nc -z -w '1' '127.0.0.1' '9999'": { code: 1 },
     })
     const mod = net.waitFor({ interval: 5, port: 9999, timeout: 10 })
     const result = await mod.apply(mockSsh, emptyEnv)
     expect(result.status).toBe("failed")
+  })
+
+  it("caps poll delays to the remaining timeout budget", async () => {
+    const mockSsh = createMockSsh({
+      "nc -z -w '1' '127.0.0.1' '9999'": { code: 1 },
+    })
+    const mod = net.waitFor({ interval: 60_000, port: 9999, timeout: 10 })
+
+    const start = Date.now()
+    const result = await mod.apply(mockSsh, emptyEnv)
+    const elapsed = Date.now() - start
+
+    expect(result.status).toBe("failed")
+    expect(elapsed).toBeLessThan(1000)
   })
 
   // R-0000052: net.waitFor must observe the runner abort signal so SIGINT
@@ -1549,7 +1581,7 @@ describe("net.waitFor — apply", () => {
   it("returns failed within the next tick after the runner abort signal fires", async () => {
     const mockSsh = createMockSsh({
       // Probe always fails so the loop falls through to the delay.
-      "nc -z '127.0.0.1' '9000'": { code: 1 },
+      "nc -z -w '600' '127.0.0.1' '9000'": { code: 1 },
     })
     const controller = new AbortController()
     setRunnerAbortSignal(controller.signal)
@@ -1590,7 +1622,7 @@ describe("net.waitFor — apply", () => {
 
   it("returns failed synchronously when the abort signal is already aborted at apply start", async () => {
     const mockSsh = createMockSsh({
-      "nc -z '127.0.0.1' '9001'": { code: 1 },
+      "nc -z -w '600' '127.0.0.1' '9001'": { code: 1 },
     })
     const controller = new AbortController()
     controller.abort(new Error("aborted before apply"))
@@ -1607,7 +1639,7 @@ describe("net.waitFor — apply", () => {
       expect(result.error?.message).toMatch(/aborted by shutdown signal/v)
       expect(elapsed).toBeLessThan(1000)
       // The probe is never invoked when the signal is already aborted.
-      expect(mockSsh.calls).not.toContain("nc -z '127.0.0.1' '9001'")
+      expect(mockSsh.calls).not.toContain("nc -z -w '600' '127.0.0.1' '9001'")
     } finally {
       setRunnerAbortSignal(undefined)
     }

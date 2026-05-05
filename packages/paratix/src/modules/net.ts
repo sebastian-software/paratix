@@ -30,6 +30,7 @@ const HOSTS_FILE = "/etc/hosts"
 const HOSTS_FILE_MODE = "0644"
 const NET_CONFIG_FILE_MODE = "0644"
 const NETWORKCTL_RELOAD = "networkctl reload"
+const MS_PER_SECOND = 1000
 const DEFAULT_POLL_INTERVAL_MS = 2000
 const DEFAULT_POLL_TIMEOUT_MS = 60_000
 const DEFAULT_EXPECTED_STATUS = 200
@@ -38,6 +39,95 @@ const MAX_HOSTNAME_LENGTH = 253
 const MAX_HOSTNAME_LABEL_LENGTH = 63
 const HOSTNAME_LABEL_CHARS_PATTERN = /^[a-z0-9\x2d]+$/iv
 const HOSTNAME_LABEL_EDGE_PATTERN = /^[a-z0-9]$/iv
+
+function validateWaitForTimingOption(label: string, value: number): void {
+  if (Number.isFinite(value) && value > 0) return
+  throw new Error(`[net.waitFor] invalid ${label}: value must be a finite positive number`)
+}
+
+function getRemainingWaitForMs(start: number, timeout: number): number {
+  return Math.max(0, timeout - (Date.now() - start))
+}
+
+function getWaitForPortProbeTimeoutSeconds(remainingMs: number): number {
+  return Math.max(1, Math.ceil(remainingMs / MS_PER_SECOND))
+}
+
+async function runWaitForProbe(parameters: {
+  conn: SshConnection
+  host: string
+  options: WaitForOptions
+  remainingMs: number
+}): Promise<boolean> {
+  const command = buildWaitForTestCommand(
+    parameters.options,
+    parameters.host,
+    getWaitForPortProbeTimeoutSeconds(parameters.remainingMs)
+  )
+  const result = await parameters.conn.exec(command, {
+    ignoreExitCode: true,
+    silent: true,
+    timeout: parameters.remainingMs,
+  })
+  return result.code === 0
+}
+
+async function waitForNextPoll(parameters: {
+  abortSignal?: AbortSignal
+  interval: number
+  remainingMs: number
+}): Promise<"aborted" | "continue" | "timeout"> {
+  const delayMs = Math.min(parameters.interval, parameters.remainingMs)
+  if (delayMs <= 0) return "timeout"
+  try {
+    await delay(delayMs, parameters.abortSignal)
+    return "continue"
+  } catch {
+    return "aborted"
+  }
+}
+
+function isWaitForAborted(abortSignal?: AbortSignal): boolean {
+  return abortSignal?.aborted === true
+}
+
+async function runWaitForPoll(parameters: {
+  abortSignal?: AbortSignal
+  conn: SshConnection
+  host: string
+  interval: number
+  options: WaitForOptions
+  remainingMs: number
+}): Promise<"aborted" | "continue" | "ok" | "timeout"> {
+  if (parameters.remainingMs <= 0) return "timeout"
+  if (isWaitForAborted(parameters.abortSignal)) return "aborted"
+  if (await runWaitForProbe(parameters)) return "ok"
+  if (isWaitForAborted(parameters.abortSignal)) return "aborted"
+  return waitForNextPoll(parameters)
+}
+
+async function waitForCondition(parameters: {
+  conn: SshConnection
+  host: string
+  interval: number
+  options: WaitForOptions
+  timeout: number
+}): Promise<"aborted" | "ok" | "timeout"> {
+  const abortSignal = getRunnerAbortSignal()
+  const start = Date.now()
+  for (;;) {
+    const remainingMs = getRemainingWaitForMs(start, parameters.timeout)
+    // eslint-disable-next-line no-await-in-loop
+    const waitResult = await runWaitForPoll({ ...parameters, abortSignal, remainingMs })
+    if (waitResult !== "continue") return waitResult
+  }
+}
+
+function waitForAbortFailure(options: WaitForOptions): ModuleResult {
+  return failed(
+    `[${buildWaitForName(options)}] aborted by shutdown signal before condition was met`
+  )
+}
 
 /**
  * Sanitize a destination string for use in a filename.
@@ -1038,6 +1128,8 @@ export const net = {
   waitFor(options: WaitForOptions): Module {
     const interval = options.interval ?? DEFAULT_POLL_INTERVAL_MS
     const timeout = options.timeout ?? DEFAULT_POLL_TIMEOUT_MS
+    validateWaitForTimingOption("interval", interval)
+    validateWaitForTimingOption("timeout", timeout)
     const host = options.host ?? "127.0.0.1"
     const testCommand = buildWaitForTestCommand(options, host)
 
@@ -1050,28 +1142,9 @@ export const net = {
         // of running until the configured timeout. The same abort signal is
         // observed by the `pause` builtin (R-0000027); both share the
         // process-scoped holder in runnerAbortSignal.ts.
-        const abortSignal = getRunnerAbortSignal()
-        const isAborted = (): boolean => abortSignal?.aborted === true
-        const abortFailure = (): ModuleResult =>
-          failed(
-            `[${buildWaitForName(options)}] aborted by shutdown signal before condition was met`
-          )
-
-        const start = Date.now()
-        while (Date.now() - start < timeout) {
-          if (isAborted()) return abortFailure()
-          // eslint-disable-next-line no-await-in-loop
-          const success = await conn.test(testCommand)
-          if (success) return { status: "changed" }
-          if (isAborted()) return abortFailure()
-          try {
-            // eslint-disable-next-line no-await-in-loop
-            await delay(interval, abortSignal)
-          } catch {
-            return abortFailure()
-          }
-        }
-
+        const result = await waitForCondition({ conn, host, interval, options, timeout })
+        if (result === "ok") return { status: "changed" }
+        if (result === "aborted") return waitForAbortFailure(options)
         return failed(`[${buildWaitForName(options)}] condition was not met within ${timeout}ms`)
       },
       async check(conn: null | SshConnection): Promise<"needs-apply" | "ok"> {

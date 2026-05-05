@@ -59,11 +59,17 @@ const REDACTED_QUERY_VALUE = "REDACTED"
  *
  * @param options - The wait-for condition options.
  * @param host - The resolved host address for port checks.
+ * @param probeTimeoutSeconds - Timeout passed to `nc -w` for port checks.
  * @returns The shell test command string.
  */
-export function buildWaitForTestCommand(options: WaitForOptions, host: string): string {
+export function buildWaitForTestCommand(
+  options: WaitForOptions,
+  host: string,
+  probeTimeoutSeconds = 1
+): string {
   if (options.port != null) {
-    return `nc -z ${shellQuote(host)} ${shellQuote(String(options.port))}`
+    const timeout = shellQuote(String(probeTimeoutSeconds))
+    return `nc -z -w ${timeout} ${shellQuote(host)} ${shellQuote(String(options.port))}`
   }
   if (options.file != null && options.contains != null) {
     return `grep -q ${shellQuote(options.contains)} ${shellQuote(options.file)}`
