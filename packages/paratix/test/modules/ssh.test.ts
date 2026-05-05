@@ -122,7 +122,7 @@ describe("ssh.knownHosts", () => {
     expect(result).toBe("needs-apply")
   })
 
-  it("check returns ok when known_hosts contains the pinned key plus additional keys for the same host", async () => {
+  it("check returns needs-apply when known_hosts contains the pinned key plus an unpinned key", async () => {
     const extraKey = makeHostKeyBuffer("ssh-rsa", Buffer.from("extra-host-key"))
     const extraLine = `|1|hashed-host|hashed-extra ssh-rsa ${extraKey.toString("base64")}`
     const mockSsh = createMockSsh({
@@ -132,10 +132,10 @@ describe("ssh.knownHosts", () => {
 
     const result = await mod.check(mockSsh, emptyEnv)
 
-    expect(result).toBe("ok")
+    expect(result).toBe("needs-apply")
   })
 
-  it("check returns ok when an older entry exists as long as one line matches the expected fingerprint", async () => {
+  it("check returns needs-apply when an older entry exists even if one line matches the expected fingerprint", async () => {
     const driftedKey = makeHostKeyBuffer("ssh-ed25519", Buffer.from("drifted-host-key"))
     const driftedLine = `|1|hashed-host|hashed-old ssh-ed25519 ${driftedKey.toString("base64")}`
     const mockSsh = createMockSsh({
@@ -145,10 +145,10 @@ describe("ssh.knownHosts", () => {
 
     const result = await mod.check(mockSsh, emptyEnv)
 
-    expect(result).toBe("ok")
+    expect(result).toBe("needs-apply")
   })
 
-  it("check returns ok when another algorithm exists as long as one line matches the expected public key", async () => {
+  it("check returns needs-apply when another algorithm exists even if one line matches the expected public key", async () => {
     const extraKey = makeHostKeyBuffer("ssh-rsa", Buffer.from("legacy-rsa-key"))
     const extraLine = `|1|hashed-host|hashed-rsa ssh-rsa ${extraKey.toString("base64")}`
     const mockSsh = createMockSsh({
@@ -158,7 +158,7 @@ describe("ssh.knownHosts", () => {
 
     const result = await mod.check(mockSsh, emptyEnv)
 
-    expect(result).toBe("ok")
+    expect(result).toBe("needs-apply")
   })
 
   it("check uses a bracketed known_hosts lookup target for non-standard ports", async () => {
@@ -271,6 +271,22 @@ describe("ssh.knownHosts", () => {
     expect(mockSsh.calls).not.toContain(
       `printf '%s\\n' '${scannedLine}' '${extraLine}' >> ~/.ssh/known_hosts`
     )
+  })
+
+  it("apply replaces mixed known_hosts entries with verified host key lines", async () => {
+    const driftedKey = makeHostKeyBuffer("ssh-ed25519", Buffer.from("drifted-host-key"))
+    const driftedLine = `|1|hashed-host|hashed-old ssh-ed25519 ${driftedKey.toString("base64")}`
+    const mockSsh = createSshApplyMockSsh({
+      "ssh-keygen -F 'github.com'": { code: 0, stdout: `${driftedLine}\n${scannedLine}\n` },
+      "ssh-keyscan -H 'github.com' 2>/dev/null": { stdout: `${scannedLine}\n` },
+    })
+    const mod = ssh.knownHosts("github.com", { expectedFingerprint: hostFingerprint })
+
+    const result = await mod.apply(mockSsh, emptyEnv)
+
+    expect(result.status).toBe("changed")
+    expect(mockSsh.calls).toContain("ssh-keygen -R 'github.com'")
+    expect(mockSsh.calls).toContain(`printf '%s\\n' '${scannedLine}' >> ~/.ssh/known_hosts`)
   })
 
   it("apply skips appending lines already present in known_hosts (R-0000038 idempotency)", async () => {

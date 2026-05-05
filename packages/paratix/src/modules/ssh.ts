@@ -139,7 +139,23 @@ async function hasMatchingKnownHostTrustAnchor(
 
   if (knownHostLines.length === 0) return false
 
-  return knownHostLines.some((line) => lineMatchesTrustAnchor(line, options))
+  return knownHostLines.every((line) => lineMatchesTrustAnchor(line, options))
+}
+
+async function getKnownHostLines(
+  conn: SshConnection,
+  host: string,
+  options?: KnownHostsOptions
+): Promise<string[]> {
+  const result = await conn.exec(
+    `ssh-keygen -F ${shellQuote(knownHostsLookupTarget(host, options))}`,
+    {
+      ignoreExitCode: true,
+      silent: true,
+    }
+  )
+  if (result.code === 1) return []
+  return parseHostKeyLines(result.stdout)
 }
 
 /**
@@ -185,7 +201,17 @@ async function applyKnownHostsPresent(
   const verifiedLines = getVerifiedScannedHostKeyLines(host, scannedLines, options ?? {})
   await conn.exec("mkdir -p ~/.ssh && chmod 700 ~/.ssh", { silent: true })
 
-  const missingLines = await filterMissingKnownHostLines(conn, verifiedLines)
+  const existingLines = await getKnownHostLines(conn, host, options)
+  const hasMismatchedExistingLines = existingLines.some(
+    (line) => !lineMatchesTrustAnchor(line, options ?? {})
+  )
+  if (hasMismatchedExistingLines) {
+    await conn.exec(`ssh-keygen -R ${shellQuote(knownHostsLookupTarget(host, options))}`)
+  }
+
+  const missingLines = hasMismatchedExistingLines
+    ? verifiedLines
+    : await filterMissingKnownHostLines(conn, verifiedLines)
   if (missingLines.length === 0) {
     return { status: "ok" }
   }
