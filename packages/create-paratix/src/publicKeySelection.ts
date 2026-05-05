@@ -1,4 +1,4 @@
-import { readdirSync, readFileSync } from "node:fs"
+import { lstatSync, readdirSync, readFileSync, type Stats } from "node:fs"
 import { homedir } from "node:os"
 import { basename, join, resolve } from "node:path"
 
@@ -57,6 +57,8 @@ const PRIVATE_KEY_MARKERS = [
   "BEGIN PRIVATE KEY",
   "BEGIN ENCRYPTED PRIVATE KEY",
 ]
+
+const MAX_PUBLIC_KEY_FILE_BYTES = 16_384
 
 function containsPrivateKeyMarker(value: string): boolean {
   return PRIVATE_KEY_MARKERS.some((marker) => value.includes(marker))
@@ -203,6 +205,18 @@ export function readAdminPublicKeyFile(exitWithMessage: ExitWithMessage, path: s
   const resolvedPath = resolve(path)
 
   let value: string
+  let stat: Stats
+
+  try {
+    // eslint-disable-next-line security/detect-non-literal-fs-filename
+    stat = lstatSync(resolvedPath)
+  } catch {
+    exitWithMessage(`Error: Failed to read admin public key file.`)
+  }
+
+  if (!stat.isFile() || stat.size > MAX_PUBLIC_KEY_FILE_BYTES) {
+    exitWithMessage(`Error: Failed to read admin public key file.`)
+  }
 
   try {
     // eslint-disable-next-line security/detect-non-literal-fs-filename
@@ -224,6 +238,11 @@ export function discoverLocalPublicKeys(sshDirectory = join(homedir(), ".ssh")):
         const path = join(sshDirectory, entry)
 
         try {
+          // eslint-disable-next-line security/detect-non-literal-fs-filename
+          const stat = lstatSync(path)
+          if (!stat.isFile() || stat.size > MAX_PUBLIC_KEY_FILE_BYTES) {
+            return []
+          }
           // eslint-disable-next-line security/detect-non-literal-fs-filename
           const key = readFileSync(path, "utf8").trim()
           if (!isValidAdminPublicKey(key)) {

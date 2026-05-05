@@ -781,6 +781,28 @@ describe("admin public key validation", () => {
     expect(console.error).toHaveBeenCalledWith("Error: Failed to read admin public key file.")
   })
 
+  it("emits a neutral error message when the admin public key file is a directory", () => {
+    const directoryPath = join(TEST_DIR, "directory.pub")
+    mkdirSync(directoryPath, { recursive: true })
+
+    expect(() => {
+      readAdminPublicKeyFile(throwExitError, directoryPath)
+    }).toThrow("Error: Failed to read admin public key file.")
+
+    expect(console.error).toHaveBeenCalledWith("Error: Failed to read admin public key file.")
+  })
+
+  it("emits a neutral error message when the admin public key file is too large", () => {
+    const oversizedPath = join(TEST_DIR, "oversized.pub")
+    writeFileSync(oversizedPath, Buffer.alloc(16 * 1024 + 1, "x"))
+
+    expect(() => {
+      readAdminPublicKeyFile(throwExitError, oversizedPath)
+    }).toThrow("Error: Failed to read admin public key file.")
+
+    expect(console.error).toHaveBeenCalledWith("Error: Failed to read admin public key file.")
+  })
+
   it("omits discovered local public keys with embedded carriage returns", () => {
     mkdirSync(TEST_DIR, { recursive: true })
     const validKey = createEd25519PublicKey("user@example")
@@ -789,6 +811,23 @@ describe("admin public key validation", () => {
       join(TEST_DIR, "id_ed25519_cr.pub"),
       `${createEd25519PublicKey("user\rexample")}\n`
     )
+
+    expect(discoverLocalPublicKeys(TEST_DIR)).toStrictEqual([
+      {
+        key: validKey,
+        label: "id_ed25519.pub",
+        path: join(TEST_DIR, "id_ed25519.pub"),
+      },
+    ])
+  })
+
+  it("skips discovered public key entries that are directories or too large", () => {
+    mkdirSync(TEST_DIR, { recursive: true })
+    mkdirSync(join(TEST_DIR, "directory.pub"))
+    writeFileSync(join(TEST_DIR, "oversized.pub"), Buffer.alloc(16 * 1024 + 1, "x"))
+
+    const validKey = createEd25519PublicKey("user@example")
+    writeFileSync(join(TEST_DIR, "id_ed25519.pub"), `${validKey}\n`)
 
     expect(discoverLocalPublicKeys(TEST_DIR)).toStrictEqual([
       {
