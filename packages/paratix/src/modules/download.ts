@@ -12,6 +12,7 @@ import {
   buildCurlConfigPayload as buildSharedCurlConfigPayload,
   hasSensitiveQueryParameters,
 } from "./curlHelpers.js"
+import { renderChownCommand } from "./fileMetadataHelpers.js"
 import { applyWithFlagLock, hasFlag, setFlag } from "./moduleHelpers.js"
 import { validateHttpUrl } from "./netHelpers.js"
 
@@ -276,7 +277,7 @@ async function applyFileAttributes(
   }
   if (parameters.owner != null || parameters.group != null) {
     const ownerSpec = `${parameters.owner ?? ""}:${parameters.group ?? ""}`
-    await conn.exec(`chown ${shellQuote(ownerSpec)} ${shellQuote(parameters.destination)}`, {
+    await conn.exec(renderChownCommand(ownerSpec, parameters.destination), {
       silent: true,
     })
   }
@@ -314,7 +315,7 @@ async function applyDriftedFileAttributes(
 
   if (downloadOwnerDrifted(current, parameters)) {
     const ownerSpec = `${parameters.owner ?? ""}:${parameters.group ?? ""}`
-    await conn.exec(`chown ${shellQuote(ownerSpec)} ${shellQuote(parameters.destination)}`, {
+    await conn.exec(renderChownCommand(ownerSpec, parameters.destination), {
       silent: true,
     })
     changed = true

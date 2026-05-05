@@ -16,6 +16,7 @@ import {
   listArchiveMembers,
 } from "./archiveMemberValidation.js"
 import { localSha256, sha256String } from "./fileHelpers.js"
+import { renderChownSymlinkCommand } from "./fileMetadataHelpers.js"
 
 const EXEC_OPTS = { ignoreExitCode: true, silent: true } as const
 const SILENT = { silent: true } as const
@@ -56,10 +57,6 @@ function buildMarkerUnreadableError(result: { code: number; stderr: string }): E
  * @param destination - The target directory for extraction.
  * @returns The shell command to extract the archive, or null if unsupported.
  */
-// R-0000067: harden tar invocations with `--no-same-owner` and
-// `--no-overwrite-dir` so an extraction cannot grant ownership of an
-// existing directory to a UID embedded in the archive and cannot replace a
-// pre-existing directory mode wholesale.
 const TAR_HARDEN_FLAGS = "--no-same-owner --no-overwrite-dir"
 
 function extractCommand(source: string, archivePath: string, destination: string): null | string {
@@ -218,11 +215,10 @@ async function applyExtractedMemberOwner(
   conn: SshConnection,
   parameters: { destination: string; members: ArchiveMember[]; owner?: string }
 ): Promise<void> {
-  const { destination, members, owner } = parameters
-  if (owner == null || owner === "") return
+  if (parameters.owner == null || parameters.owner === "") return
   await Promise.all(
-    archiveMemberDestinationPaths(destination, members).map(async (path) =>
-      conn.exec(`chown -h ${shellQuote(owner)} ${shellQuote(path)}`, SILENT)
+    archiveMemberDestinationPaths(parameters.destination, parameters.members).map(async (path) =>
+      conn.exec(renderChownSymlinkCommand(parameters.owner ?? "", path), SILENT)
     )
   )
 }

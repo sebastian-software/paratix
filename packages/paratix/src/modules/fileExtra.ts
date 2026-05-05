@@ -12,7 +12,7 @@ import {
   type SshConnection,
 } from "../types.js"
 import { hexHashesEqual, sha256String } from "./fileHelpers.js"
-import { ownershipMatches, readOwnership } from "./fileMetadataHelpers.js"
+import { ownershipMatches, readOwnership, renderChownCommand } from "./fileMetadataHelpers.js"
 import { assertValidGroupName, assertValidUserName } from "./posixNames.js"
 
 /** Index where the file-type field starts in `stat -c '%s %a %U %G %F %Y'` output. */
@@ -160,7 +160,7 @@ export function assemble(
         })
       }
       if (options?.owner != null) {
-        await ssh.exec(`chown ${shellQuote(options.owner)} ${shellQuote(remotePath)}`, {
+        await ssh.exec(renderChownCommand(options.owner, remotePath), {
           silent: true,
         })
       }
@@ -334,7 +334,7 @@ async function maybeApplyCombinedChown(context: DriftContext): Promise<boolean> 
     return false
   }
   const ownerGroup = `${options.owner}:${options.group}`
-  await ssh.exec(`chown -- ${shellQuote(ownerGroup)} ${shellQuote(remotePath)}`, { silent: true })
+  await ssh.exec(renderChownCommand(ownerGroup, remotePath), { silent: true })
   return true
 }
 
@@ -347,7 +347,7 @@ async function maybeApplyCombinedChown(context: DriftContext): Promise<boolean> 
 async function maybeApplySingleChown(context: DriftContext): Promise<boolean> {
   const { current, options, remotePath, ssh } = context
   if (options.owner == null || current.owner === options.owner) return false
-  await ssh.exec(`chown -- ${shellQuote(options.owner)} ${shellQuote(remotePath)}`, {
+  await ssh.exec(renderChownCommand(options.owner, remotePath), {
     silent: true,
   })
   return true

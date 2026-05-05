@@ -10,6 +10,36 @@ export type FileOwnership = {
 
 const DEFAULT_FILE_WRITE_MODE = "0644"
 
+export function assertValidChownOwnershipSpec(ownerSpec: string): void {
+  if (ownerSpec === "") {
+    throw new Error("chown ownership spec must not be empty")
+  }
+
+  const [owner = "", group = ""] = ownerSpec.split(":", 2)
+  if (owner === "" && group === "") {
+    throw new Error("chown ownership spec must include an owner or group")
+  }
+
+  for (const [field, value] of [
+    ["owner", owner],
+    ["group", group],
+  ] as const) {
+    if (value.startsWith("-")) {
+      throw new Error(`chown ${field} component must not start with "-": ${JSON.stringify(value)}`)
+    }
+  }
+}
+
+export function renderChownCommand(ownerSpec: string, remotePath: string): string {
+  assertValidChownOwnershipSpec(ownerSpec)
+  return `chown -- ${shellQuote(ownerSpec)} ${shellQuote(remotePath)}`
+}
+
+export function renderChownSymlinkCommand(ownerSpec: string, remotePath: string): string {
+  assertValidChownOwnershipSpec(ownerSpec)
+  return `chown -h -- ${shellQuote(ownerSpec)} ${shellQuote(remotePath)}`
+}
+
 export async function readOwnership(
   ssh: SshConnection,
   remotePath: string
@@ -49,7 +79,7 @@ export async function applyFileMetadata(
   }
 
   if (options?.owner != null) {
-    await ssh.exec(`chown ${shellQuote(options.owner)} ${shellQuote(remotePath)}`, {
+    await ssh.exec(renderChownCommand(options.owner, remotePath), {
       silent: true,
     })
   }
@@ -82,7 +112,11 @@ export function createMetadataModule(
 
       if (kind === "chmod") validateMode(value)
 
-      await ssh.exec(`${kind} ${shellQuote(value)} ${shellQuote(remotePath)}`, { silent: true })
+      const command =
+        kind === "chmod"
+          ? `chmod ${shellQuote(value)} ${shellQuote(remotePath)}`
+          : renderChownCommand(value, remotePath)
+      await ssh.exec(command, { silent: true })
       return { status: "changed" }
     },
     async check(ssh: null | SshConnection): Promise<"needs-apply" | "ok"> {

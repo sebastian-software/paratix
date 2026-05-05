@@ -21,6 +21,7 @@ import {
   normalizeMode,
   ownershipMatches,
   readOwnership,
+  renderChownCommand,
   resolveWriteMode,
 } from "./fileMetadataHelpers.js"
 
@@ -209,7 +210,7 @@ export const file = {
         await ssh.uploadFile(localPath, remotePath, { mode: desiredMode })
 
         if (options?.owner != null) {
-          await ssh.exec(`chown ${shellQuote(options.owner)} ${shellQuote(remotePath)}`, {
+          await ssh.exec(renderChownCommand(options.owner, remotePath), {
             silent: true,
           })
         }

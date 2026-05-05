@@ -1,7 +1,12 @@
 import type { ModuleResult, SshConnection } from "../types.js"
 
 import { shellQuote } from "../ssh.js"
-import { type FileOwnership, ownershipMatches, readOwnership } from "./fileMetadataHelpers.js"
+import {
+  type FileOwnership,
+  ownershipMatches,
+  readOwnership,
+  renderChownCommand,
+} from "./fileMetadataHelpers.js"
 
 /**
  * Issue `chmod` only when the current mode differs from the requested mode.
@@ -52,10 +57,9 @@ export async function applyDirectoryOwner(input: {
   const ownerAlreadyMatches =
     input.ownership != null && ownershipMatches(input.ownership, { owner: input.requestedOwner })
   if (ownerAlreadyMatches) return false
-  await input.ssh.exec(
-    `chown ${shellQuote(input.requestedOwner)} ${shellQuote(input.remotePath)}`,
-    { silent: true }
-  )
+  await input.ssh.exec(renderChownCommand(input.requestedOwner, input.remotePath), {
+    silent: true,
+  })
   return true
 }
 

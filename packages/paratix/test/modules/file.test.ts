@@ -120,7 +120,7 @@ describe("file.directory", () => {
     expect(result.status).toBe("ok")
     expect(ssh.calls).not.toContain("mkdir -p '/var/app'")
     expect(ssh.calls).not.toContain("chmod '0755' '/var/app'")
-    expect(ssh.calls).not.toContain("chown 'www-data:www-data' '/var/app'")
+    expect(ssh.calls).not.toContain("chown -- 'www-data:www-data' '/var/app'")
   })
 
   it("regression R-0000109 — apply returns changed and only issues mkdir when directory is missing", async () => {
@@ -147,7 +147,7 @@ describe("file.directory", () => {
     expect(result.status).toBe("changed")
     expect(ssh.calls).not.toContain("mkdir -p '/var/app'")
     expect(ssh.calls).toContain("chmod '0755' '/var/app'")
-    expect(ssh.calls).not.toContain("chown 'www-data:www-data' '/var/app'")
+    expect(ssh.calls).not.toContain("chown -- 'www-data:www-data' '/var/app'")
   })
 
   it("regression R-0000109 — apply returns changed and only issues chown when only owner drifted", async () => {
@@ -162,7 +162,20 @@ describe("file.directory", () => {
     expect(result.status).toBe("changed")
     expect(ssh.calls).not.toContain("mkdir -p '/var/app'")
     expect(ssh.calls).not.toContain("chmod '0755' '/var/app'")
-    expect(ssh.calls).toContain("chown 'www-data:www-data' '/var/app'")
+    expect(ssh.calls).toContain("chown -- 'www-data:www-data' '/var/app'")
+  })
+
+  it("rejects option-like owner components before directory chown", async () => {
+    const ssh = createMockSsh({
+      "[ -d '/var/app' ]": { code: 0 },
+      "stat -c '%a %U %G' '/var/app'": { stdout: "755 root root" },
+    })
+    const mod = file.directory("/var/app", { owner: "--reference=/etc/shadow" })
+
+    await expect(mod.apply(ssh, emptyEnv)).rejects.toThrow(
+      'chown owner component must not start with "-": "--reference=/etc/shadow"'
+    )
+    expect(ssh.calls).not.toContain("chown -- '--reference=/etc/shadow' '/var/app'")
   })
 })
 
@@ -346,7 +359,25 @@ describe("file.chown", () => {
     const result = await mod.apply(ssh, emptyEnv)
 
     expect(result.status).toBe("changed")
-    expect(ssh.calls).toContain("chown 'www-data:www-data' '/var/app/config.yml'")
+    expect(ssh.calls).toContain("chown -- 'www-data:www-data' '/var/app/config.yml'")
+  })
+
+  it("renders -- before normal and numeric owner specs", async () => {
+    const ssh = createMockSsh()
+    const mod = file.chown("/var/app/config.yml", "1000:1000")
+    const result = await mod.apply(ssh, emptyEnv)
+
+    expect(result.status).toBe("changed")
+    expect(ssh.calls).toContain("chown -- '1000:1000' '/var/app/config.yml'")
+  })
+
+  it("rejects owner specs whose group component starts with a dash", async () => {
+    const ssh = createMockSsh()
+    const mod = file.chown("/var/app/config.yml", "deploy:-R")
+
+    await expect(mod.apply(ssh, emptyEnv)).rejects.toThrow(
+      'chown group component must not start with "-": "-R"'
+    )
   })
 })
 
@@ -570,7 +601,7 @@ describe("file.copy", () => {
       ])
       // file.copy no longer issues a separate chmod after uploadFile.
       expect(ssh.calls).not.toContain("chmod '0600' '/remote/file.txt'")
-      expect(ssh.calls).toContain("chown 'www-data' '/remote/file.txt'")
+      expect(ssh.calls).toContain("chown -- 'www-data' '/remote/file.txt'")
     } finally {
       rmSync(dir, { recursive: true })
     }

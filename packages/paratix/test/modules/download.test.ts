@@ -288,7 +288,7 @@ describe("download.url", () => {
       })
       const result = await mod.apply(mockSsh, emptyEnv)
       expect(result.status).toBe("changed")
-      expect(mockSsh.calls).toContain(`chown 'root:wheel' '${temporaryDestination}'`)
+      expect(mockSsh.calls).toContain(`chown -- 'root:wheel' '${temporaryDestination}'`)
     })
 
     it("sets only owner via chown when owner is specified without group", async () => {
@@ -300,7 +300,7 @@ describe("download.url", () => {
       const mod = download.url(destination, url, { ...allowUnverifiedDownload, owner: "deploy" })
       const result = await mod.apply(mockSsh, emptyEnv)
       expect(result.status).toBe("changed")
-      expect(mockSsh.calls).toContain(`chown 'deploy:' '${temporaryDestination}'`)
+      expect(mockSsh.calls).toContain(`chown -- 'deploy:' '${temporaryDestination}'`)
     })
 
     it("sets only group via chown when group is specified without owner", async () => {
@@ -312,7 +312,39 @@ describe("download.url", () => {
       const mod = download.url(destination, url, { ...allowUnverifiedDownload, group: "staff" })
       const result = await mod.apply(mockSsh, emptyEnv)
       expect(result.status).toBe("changed")
-      expect(mockSsh.calls).toContain(`chown ':staff' '${temporaryDestination}'`)
+      expect(mockSsh.calls).toContain(`chown -- ':staff' '${temporaryDestination}'`)
+    })
+
+    it("rejects option-like owner specs before chown", async () => {
+      const mockSsh = createMockSsh({
+        [`mktemp "$(dirname '${destination}')/.paratix-download.XXXXXX"`]: {
+          stdout: `${temporaryDestination}\n`,
+        },
+      })
+      const mod = download.url(destination, url, {
+        ...allowUnverifiedDownload,
+        owner: "--reference=/etc/shadow",
+      })
+
+      await expect(mod.apply(mockSsh, emptyEnv)).rejects.toThrow(
+        'chown owner component must not start with "-": "--reference=/etc/shadow"'
+      )
+      expect(mockSsh.calls).not.toContain(
+        `chown -- '--reference=/etc/shadow:' '${temporaryDestination}'`
+      )
+    })
+
+    it("rejects option-like group specs before chown", async () => {
+      const mockSsh = createMockSsh({
+        [`mktemp "$(dirname '${destination}')/.paratix-download.XXXXXX"`]: {
+          stdout: `${temporaryDestination}\n`,
+        },
+      })
+      const mod = download.url(destination, url, { ...allowUnverifiedDownload, group: "-R" })
+
+      await expect(mod.apply(mockSsh, emptyEnv)).rejects.toThrow(
+        'chown group component must not start with "-": "-R"'
+      )
     })
 
     it("sends Authorization header via stdin so the bearer token is not on argv", async () => {
@@ -540,7 +572,7 @@ describe("download.url", () => {
         const result = await mod.apply(mockSsh, emptyEnv)
         expect(result.status).toBe("changed")
         expect(mockSsh.calls).not.toContain(`chmod '0755' '${destination}'`)
-        expect(mockSsh.calls).toContain(`chown 'deploy:staff' '${destination}'`)
+        expect(mockSsh.calls).toContain(`chown -- 'deploy:staff' '${destination}'`)
         expect(mockSsh.calls.every((c) => !c.startsWith("curl"))).toBe(true)
       })
 
@@ -572,7 +604,7 @@ describe("download.url", () => {
         const mod = download.url(destination, url, { owner: "deploy", sha256 })
         const result = await mod.apply(mockSsh, emptyEnv)
         expect(result.status).toBe("changed")
-        expect(mockSsh.calls).toContain(`chown 'deploy:' '${destination}'`)
+        expect(mockSsh.calls).toContain(`chown -- 'deploy:' '${destination}'`)
         expect(mockSsh.calls.every((c) => !c.startsWith("curl"))).toBe(true)
         expect(mockSsh.calls.every((c) => !c.startsWith("mktemp"))).toBe(true)
       })

@@ -305,8 +305,24 @@ describe("archive.extract — apply", () => {
     const result = await mod.apply(mockSsh, emptyEnv)
 
     expect(result.status).toBe("changed")
-    expect(mockSsh.calls).toContain(`chown -h 'www-data:www-data' '${destination}/app/file'`)
+    expect(mockSsh.calls).toContain(`chown -h -- 'www-data:www-data' '${destination}/app/file'`)
     expect(mockSsh.calls).not.toContain(`chown -R 'www-data:www-data' '${destination}'`)
+  })
+
+  it("rejects option-like owner specs before member chown", async () => {
+    const mockSsh = createMockSsh({
+      [`tar --no-same-owner --no-overwrite-dir -xzf '${src}' -C '${destination}'`]: { code: 0 },
+      [`tar -tvzf '${src}'`]: { code: 0, stdout: safeTarListing },
+    })
+    vi.spyOn(mockSsh, "sha256").mockResolvedValue(archiveSha)
+    vi.spyOn(mockSsh, "writeFile").mockResolvedValue()
+
+    const mod = archive.extract(src, destination, { owner: "-R" })
+
+    await expect(mod.apply(mockSsh, emptyEnv)).rejects.toThrow(
+      'chown owner component must not start with "-": "-R"'
+    )
+    expect(mockSsh.calls).not.toContain(`chown -h -- '-R' '${destination}/app/file'`)
   })
 
   it("rejects root destination before extracting when owner is specified", async () => {
