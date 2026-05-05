@@ -1016,6 +1016,7 @@ describe("printExceptionError", () => {
   })
 
   afterEach(() => {
+    clearRegisteredSecrets()
     vi.restoreAllMocks()
   })
 
