@@ -870,7 +870,7 @@ describe("net.route — apply", () => {
     const result = await mod.apply(mockSsh, emptyEnv)
 
     expect(result.status).toBe("changed")
-    expect(mockSsh.calls).not.toContain("ip route del '10.0.0.0/24'")
+    expect(mockSsh.calls.some((call) => call.startsWith("ip route del "))).toBe(false)
     expect(mockSsh.calls).toContain(`rm -f '${dropinPath}'`)
     expect(mockSsh.calls).toContain("networkctl reload")
   })
