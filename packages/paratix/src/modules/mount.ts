@@ -9,6 +9,7 @@ import {
   NEEDS_APPLY,
   type SshConnection,
 } from "../types.js"
+import { mountOptionsMatch } from "./mountOptions.js"
 
 const EXEC_OPTS = { ignoreExitCode: true, silent: true } as const
 const FSTAB_PATH = "/etc/fstab"
@@ -327,8 +328,8 @@ async function readLiveMount(ssh: SshConnection, path: string): Promise<LiveMoun
 /**
  * Decide whether the live mount attributes match the desired source,
  * filesystem type, and options. The options string is compared as a
- * normalized comma-separated set so superficial ordering differences (e.g.
- * `noexec,nosuid` vs. `nosuid,noexec`) do not cause spurious drift.
+ * normalized comma-separated set so superficial ordering differences and
+ * expanded defaults do not cause spurious drift.
  *
  * @param live - The live mount attributes parsed from findmnt.
  * @param desired - The desired source, fstype and opts.
@@ -343,13 +344,7 @@ function liveMountMatchesDesired(
 ): boolean {
   if (live.source !== desired.src) return false
   if (live.fstype !== desired.fstype) return false
-  const liveOptions = new Set(live.options.split(",").filter(Boolean))
-  const desiredOptions = new Set(desired.opts.split(",").filter(Boolean))
-  if (liveOptions.size !== desiredOptions.size) return false
-  for (const opt of desiredOptions) {
-    if (!liveOptions.has(opt)) return false
-  }
-  return true
+  return mountOptionsMatch(live.options, desired.opts)
 }
 
 /**
@@ -415,11 +410,10 @@ export const mount = {
    * Ensure a filesystem is mounted at the given path. Creates the mountpoint
    * directory if it does not exist. Optionally persists the mount in `/etc/fstab`.
    *
-   * The check phase verifies that the mountpoint is active (via `findmnt`) and,
-   * when `persist` is `true`, that the fstab entry matches the desired line
-   * exactly. It does **not** compare the currently mounted source, filesystem
-   * type, or options against the desired values — a remount is only triggered
-   * when the mountpoint is absent entirely.
+   * The check phase verifies that the mountpoint is active (via `findmnt`), that
+   * its live source / filesystem type / normalized options match the desired
+   * values, and, when `persist` is `true`, that the fstab entry matches the
+   * desired line exactly.
    *
    * @param options - Configuration for the mount.
    * @param options.fstype - The filesystem type (e.g. `"ext4"`, `"tmpfs"`, `"nfs"`).

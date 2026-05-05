@@ -24,6 +24,8 @@ const mountPath = "/mnt/data"
 const mountSrc = "tmpfs"
 const mountFstype = "tmpfs"
 const mountOpts = "noexec,nosuid,nodev,size=512m"
+const defaultMountOpts = "defaults"
+const expandedDefaultMountOpts = "rw,relatime"
 
 // Exact fstab line as buildFstabLine would produce
 const fstabLine = `${mountSrc} ${mountPath} ${mountFstype} ${mountOpts} 0 0`
@@ -295,6 +297,62 @@ describe("mount.present — check", () => {
     expect(result).toBe("ok")
   })
 
+  it("returns ok when defaults are expanded in live mount options", async () => {
+    const mockSsh = createMockSsh({
+      "cat '/etc/fstab'": {
+        stdout: `${mountSrc} ${mountPath} ${mountFstype} ${defaultMountOpts} 0 0\n`,
+      },
+      [findmntCheckCmd]: {
+        code: 0,
+        stdout: `${mountSrc} ${mountFstype} ${expandedDefaultMountOpts}`,
+      },
+    })
+    const mod = mount.present({
+      fstype: mountFstype,
+      opts: defaultMountOpts,
+      path: mountPath,
+      src: mountSrc,
+    })
+    const result = await mod.check(mockSsh, emptyEnv)
+    expect(result).toBe("ok")
+  })
+
+  it("preserves explicit security option drift when defaults are desired", async () => {
+    const mockSsh = createMockSsh({
+      [findmntCheckCmd]: {
+        code: 0,
+        stdout: `${mountSrc} ${mountFstype} ${expandedDefaultMountOpts},noexec`,
+      },
+    })
+    const mod = mount.present({
+      fstype: mountFstype,
+      opts: defaultMountOpts,
+      path: mountPath,
+      persist: false,
+      src: mountSrc,
+    })
+    const result = await mod.check(mockSsh, emptyEnv)
+    expect(result).toBe("needs-apply")
+  })
+
+  it("returns ok when explicit security options are combined with defaults", async () => {
+    const mockSsh = createMockSsh({
+      [findmntCheckCmd]: {
+        code: 0,
+        stdout: `${mountSrc} ${mountFstype} ${expandedDefaultMountOpts},noexec`,
+      },
+    })
+    const mod = mount.present({
+      fstype: mountFstype,
+      opts: `${defaultMountOpts},noexec`,
+      path: mountPath,
+      persist: false,
+      src: mountSrc,
+    })
+    const result = await mod.check(mockSsh, emptyEnv)
+    expect(result).toBe("ok")
+  })
+
   it("uses findmnt with correct arguments", async () => {
     const mockSsh = createMockSsh({
       [findmntCheckCmd]: { code: 1 },
@@ -397,6 +455,26 @@ describe("mount.present — apply", () => {
     const mod = mount.present({
       fstype: mountFstype,
       opts: mountOpts,
+      path: mountPath,
+      src: mountSrc,
+    })
+    const result = await mod.apply(mockSsh, emptyEnv)
+    expect(result.status).toBe("ok")
+  })
+
+  it("returns ok when defaults are expanded in live mount options", async () => {
+    const mockSsh = createMountApplyMockSsh({
+      "cat '/etc/fstab'": {
+        stdout: `${mountSrc} ${mountPath} ${mountFstype} ${defaultMountOpts} 0 0\n`,
+      },
+      [findmntCheckCmd]: {
+        code: 0,
+        stdout: `${mountSrc} ${mountFstype} ${expandedDefaultMountOpts}`,
+      },
+    })
+    const mod = mount.present({
+      fstype: mountFstype,
+      opts: defaultMountOpts,
       path: mountPath,
       src: mountSrc,
     })
