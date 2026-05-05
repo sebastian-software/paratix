@@ -1,5 +1,7 @@
 import { describe, expect, it, vi } from "vitest"
 
+import type { ExecResult } from "../../src/types.js"
+
 import { archive } from "../../src/modules/archive.js"
 import { createMockSsh as createBaseMockSsh } from "../helpers/mockSsh.js"
 
@@ -7,6 +9,7 @@ const createMockSsh: typeof createBaseMockSsh = (responses, options) =>
   createBaseMockSsh(responses, { defaultExecResult: { code: 0 }, ...options })
 
 type MockSsh = ReturnType<typeof createMockSsh>
+type ExecTracker = { exec: MockSsh["exec"]; maxActive: () => number }
 
 const emptyEnv = {}
 
@@ -14,11 +17,69 @@ const src = "/tmp/app.tar.gz"
 const destination = "/opt/app"
 const alternateDestination = "/opt/app-alt"
 const safeTarListing = "-rw-r--r-- root/root 0 1970-01-01 00:00 app/file"
+const archiveOwnerMemberConcurrencyLimit = 8
 
 // Stable hash of `${src}\n${destination}` for marker file naming.
 const srcHash = "2889be4b654d6b7f7922971e7fb3fdf1c5ebd92b9c52462be2683a735c7562ef"
 const marker = `/var/lib/paratix/flags/archive-${srcHash}.sha256`
 const archiveSha = "abc123def456"
+
+function tarListingForMemberPaths(memberPaths: string[]): string {
+  return memberPaths
+    .map((memberPath) => `-rw-r--r-- root/root 0 1970-01-01 00:00 ${memberPath}`)
+    .join("\n")
+}
+
+async function waitForTrackedExecTick(): Promise<void> {
+  await new Promise<void>((resolve) => {
+    setTimeout(resolve, 1)
+  })
+}
+
+function createTrackedExec(
+  mockSsh: MockSsh,
+  originalExec: MockSsh["exec"],
+  parameters: {
+    isTrackedCommand: (command: string) => boolean
+    resultForCommand: (command: string) => ExecResult
+  }
+): ExecTracker {
+  let active = 0
+  let maxActive = 0
+
+  return {
+    async exec(command, options) {
+      if (!parameters.isTrackedCommand(command)) return originalExec(command, options)
+      mockSsh.calls.push(command)
+      mockSsh.execCalls.push({ command, options })
+      active += 1
+      maxActive = Math.max(maxActive, active)
+      await waitForTrackedExecTick()
+      active -= 1
+      return parameters.resultForCommand(command)
+    },
+    maxActive: () => maxActive,
+  }
+}
+
+function createOwnerCheckExecTracker(mockSsh: MockSsh, originalExec: MockSsh["exec"]): ExecTracker {
+  return createTrackedExec(mockSsh, originalExec, {
+    isTrackedCommand: (command) =>
+      command.startsWith(`[ -e '${destination}/app/file-`) ||
+      command.startsWith(`stat -c '%U %G' -- '${destination}/app/file-`),
+    resultForCommand: (command) =>
+      command.startsWith("stat ")
+        ? { code: 0, stderr: "", stdout: "www-data www-data\n" }
+        : { code: 0, stderr: "", stdout: "" },
+  })
+}
+
+function createOwnerChownExecTracker(mockSsh: MockSsh, originalExec: MockSsh["exec"]): ExecTracker {
+  return createTrackedExec(mockSsh, originalExec, {
+    isTrackedCommand: (command) => command.startsWith("chown -h -- 'www-data:www-data' "),
+    resultForCommand: () => ({ code: 0, stderr: "", stdout: "" }),
+  })
+}
 
 function expectNoTarExtractCalls(mockSsh: MockSsh): void {
   const tarExtractCalls = mockSsh.calls.filter((command) => /^tar\b.*\s-x\S*\s/v.test(command))
@@ -105,6 +166,32 @@ describe("archive.extract — check", () => {
     const result = await mod.check(mockSsh, emptyEnv)
     expect(result).toBe("needs-apply")
     expect(mockSsh.calls).not.toContain(`cat '${marker}'`)
+  })
+
+  it("limits concurrent owner checks across extracted archive members", async () => {
+    const memberPaths = Array.from({ length: 24 }, (_value, index) => `app/file-${String(index)}`)
+    const mockSsh = createMockSsh({
+      [`cat '${marker}'`]: { code: 0, stdout: archiveSha },
+      [`tar -tvzf '${src}'`]: { code: 0, stdout: tarListingForMemberPaths(memberPaths) },
+      [`test -d '${destination}'`]: { code: 0 },
+      [`test -f '${marker}'`]: { code: 0 },
+    })
+    const originalExec = mockSsh.exec.bind(mockSsh)
+    const ownerExecTracker = createOwnerCheckExecTracker(mockSsh, originalExec)
+
+    vi.spyOn(mockSsh, "exec").mockImplementation(ownerExecTracker.exec)
+    vi.spyOn(mockSsh, "sha256").mockResolvedValue(archiveSha)
+
+    const mod = archive.extract(src, destination, { owner: "www-data:www-data" })
+    const result = await mod.check(mockSsh, emptyEnv)
+
+    expect(result).toBe("ok")
+    expect(
+      mockSsh.calls.filter((command) =>
+        command.startsWith(`stat -c '%U %G' -- '${destination}/app/file-`)
+      )
+    ).toHaveLength(memberPaths.length)
+    expect(ownerExecTracker.maxActive()).toBeLessThanOrEqual(archiveOwnerMemberConcurrencyLimit)
   })
 
   it("returns needs-apply when marker does not match remote archive sha256", async () => {
@@ -323,6 +410,29 @@ describe("archive.extract — apply", () => {
     expect(result.status).toBe("changed")
     expect(mockSsh.calls).toContain(`chown -h -- 'www-data:www-data' '${destination}/app/file'`)
     expect(mockSsh.calls).not.toContain(`chown -R 'www-data:www-data' '${destination}'`)
+  })
+
+  it("limits concurrent owner chown commands across extracted archive members", async () => {
+    const memberPaths = Array.from({ length: 24 }, (_value, index) => `app/file-${String(index)}`)
+    const mockSsh = createMockSsh({
+      [`tar --no-same-owner --no-overwrite-dir -xzf '${src}' -C '${destination}'`]: { code: 0 },
+      [`tar -tvzf '${src}'`]: { code: 0, stdout: tarListingForMemberPaths(memberPaths) },
+    })
+    const originalExec = mockSsh.exec.bind(mockSsh)
+    const chownExecTracker = createOwnerChownExecTracker(mockSsh, originalExec)
+
+    vi.spyOn(mockSsh, "exec").mockImplementation(chownExecTracker.exec)
+    vi.spyOn(mockSsh, "sha256").mockResolvedValue(archiveSha)
+    vi.spyOn(mockSsh, "writeFile").mockResolvedValue()
+
+    const mod = archive.extract(src, destination, { owner: "www-data:www-data" })
+    const result = await mod.apply(mockSsh, emptyEnv)
+
+    expect(result.status).toBe("changed")
+    expect(
+      mockSsh.calls.filter((command) => command.startsWith("chown -h -- 'www-data:www-data' "))
+    ).toHaveLength(memberPaths.length)
+    expect(chownExecTracker.maxActive()).toBeLessThanOrEqual(archiveOwnerMemberConcurrencyLimit)
   })
 
   it("rejects option-like owner specs before member chown", async () => {

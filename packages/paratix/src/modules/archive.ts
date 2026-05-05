@@ -1,3 +1,4 @@
+/* eslint-disable max-lines -- archive module keeps extraction and idempotency helpers together */
 import { posix as pathPosix } from "node:path"
 
 import { failed, failedCommand } from "../moduleFailure.js"
@@ -22,6 +23,35 @@ const EXEC_OPTS = { ignoreExitCode: true, silent: true } as const
 const SILENT = { silent: true } as const
 const FLAGS_DIR = "/var/lib/paratix/flags"
 const ARCHIVE_MARKER_MODE = "0644"
+const ARCHIVE_OWNER_MEMBER_CONCURRENCY = 8
+
+async function mapWithConcurrencyLimit<TItem, TResult>(
+  items: TItem[],
+  limit: number,
+  mapper: (item: TItem, index: number) => Promise<TResult>
+): Promise<TResult[]> {
+  if (items.length === 0) return []
+
+  const results: TResult[] = []
+  let nextIndex = 0
+
+  async function worker(): Promise<void> {
+    for (;;) {
+      const index = nextIndex
+      nextIndex += 1
+      if (index >= items.length) return
+      // eslint-disable-next-line no-await-in-loop -- each worker intentionally runs one bounded queue slot at a time
+      results[index] = await mapper(items[index], index)
+    }
+  }
+
+  await Promise.all(
+    Array.from({ length: Math.min(limit, items.length) }, async () => {
+      await worker()
+    })
+  )
+  return results
+}
 
 /**
  * Derive the marker file path from the source and destination paths.
@@ -216,10 +246,11 @@ async function applyExtractedMemberOwner(
   parameters: { destination: string; members: ArchiveMember[]; owner?: string }
 ): Promise<void> {
   if (parameters.owner == null || parameters.owner === "") return
-  await Promise.all(
-    archiveMemberDestinationPaths(parameters.destination, parameters.members).map(async (path) =>
-      conn.exec(renderChownSymlinkCommand(parameters.owner ?? "", path), SILENT)
-    )
+  const owner = parameters.owner
+  await mapWithConcurrencyLimit(
+    archiveMemberDestinationPaths(parameters.destination, parameters.members),
+    ARCHIVE_OWNER_MEMBER_CONCURRENCY,
+    async (path) => conn.exec(renderChownSymlinkCommand(owner, path), SILENT)
   )
 }
 
@@ -367,10 +398,10 @@ async function archiveOwnerMatches(
   if (upload) return true
   const members = await validatedArchiveMembers(conn, { archivePath: source, source })
   if (!Array.isArray(members)) return false
-  const matches = await Promise.all(
-    archiveMemberDestinationPaths(destination, members).map(async (path) =>
-      extractedMemberOwnerMatches(conn, { owner, path })
-    )
+  const matches = await mapWithConcurrencyLimit(
+    archiveMemberDestinationPaths(destination, members),
+    ARCHIVE_OWNER_MEMBER_CONCURRENCY,
+    async (path) => extractedMemberOwnerMatches(conn, { owner, path })
   )
   return matches.every(Boolean)
 }
