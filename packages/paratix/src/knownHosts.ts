@@ -149,9 +149,7 @@ function lookupHostEntry(
   host: string,
   port: number
 ): KnownHostEntry | null {
-  const match = findMatchingEntries(entries, host, port).find(
-    (entry) => entry.marker !== "@revoked"
-  )
+  const match = findMatchingEntries(entries, host, port).find((entry) => entry.marker == null)
   return match ?? null
 }
 
@@ -190,8 +188,8 @@ function verifyHostKeyAgainstKnownEntries(parameters: {
     )
   }
 
-  const nonRevokedEntries = fileEntries.filter((entry) => entry.marker !== "@revoked")
-  const matchingEntry = nonRevokedEntries.find(
+  const rawHostKeyEntries = fileEntries.filter((entry) => entry.marker == null)
+  const matchingEntry = rawHostKeyEntries.find(
     (entry) => entry.key.length === key.length && timingSafeEqual(entry.key, key)
   )
   if (matchingEntry != null) return true
@@ -199,8 +197,8 @@ function verifyHostKeyAgainstKnownEntries(parameters: {
     return true
   }
 
-  const firstNonRevokedKey = nonRevokedEntries.at(0)?.key
-  if (firstNonRevokedKey != null) throwHostKeyMismatch(host, key, firstNonRevokedKey)
+  const firstRawHostKey = rawHostKeyEntries.at(0)?.key
+  if (firstRawHostKey != null) throwHostKeyMismatch(host, key, firstRawHostKey)
   if (cachedKey != null) throwHostKeyMismatch(host, key, cachedKey)
   return false
 }

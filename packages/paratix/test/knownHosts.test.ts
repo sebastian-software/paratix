@@ -132,6 +132,21 @@ describe("parseKnownHosts", () => {
     })
   })
 
+  it("parses @cert-authority entries without treating the marker as a host", () => {
+    const key = makeKeyBuffer("ssh-ed25519")
+    const base64Key = key.toString("base64")
+    const content = `@cert-authority example.com ssh-ed25519 ${base64Key}`
+
+    const entries = parseKnownHosts(content)
+
+    expect(entries).toHaveLength(1)
+    expect(entries[0]).toMatchObject({
+      algo: "ssh-ed25519",
+      host: "example.com",
+      marker: "@cert-authority",
+    })
+  })
+
   it("splits comma-separated hosts into separate entries", () => {
     const key = makeKeyBuffer("ssh-ed25519")
     const base64Key = key.toString("base64")
@@ -306,6 +321,20 @@ describe("lookupHostKey", () => {
     // entry stored as "example.com" (port 22 format) should not match port 2222 lookup
     const plainEntries = [{ algo: "ssh-ed25519", host: "example.com", key: edKey }]
     expect(lookupHostKey(plainEntries, "example.com", 2222)).toBeNull()
+  })
+
+  it("does not return @cert-authority entries as raw host keys", () => {
+    const certAuthorityEntries = parseKnownHosts(
+      `@cert-authority example.com ssh-ed25519 ${edKey.toString("base64")}`
+    )
+
+    expect(lookupHostKey(certAuthorityEntries, "example.com", 22)).toBeNull()
+  })
+
+  it("does not return unknown marker entries as raw host keys", () => {
+    const markerEntries = parseKnownHosts(`@unknown example.com ssh-ed25519 ${edKey.toString("base64")}`)
+
+    expect(lookupHostKey(markerEntries, "example.com", 22)).toBeNull()
   })
 })
 
@@ -712,6 +741,34 @@ describe("buildHostVerifier", () => {
 
     expect(() => hostVerifier!(ed25519Key)).toThrow(/not found in known_hosts/v)
     expect(() => hostVerifier!(ed25519Key)).toThrow("unknownhost.com")
+  })
+
+  it("mode 'yes' with only @cert-authority entry treats the raw host key as unknown", () => {
+    readFileSyncMock.mockReturnValue(
+      `@cert-authority example.com ssh-ed25519 ${ed25519Key.toString("base64")}\n`
+    )
+
+    const { hostVerifier } = buildHostVerifier("yes", { host: "example.com", port: 22 })
+    expect(hostVerifier).toBeDefined()
+
+    expect(() => hostVerifier!(ed25519Key)).toThrow(/not found in known_hosts/v)
+  })
+
+  it("mode 'accept-new' with only @cert-authority entry persists a raw host key", async () => {
+    readFileSyncMock.mockReturnValue(
+      `@cert-authority ca-only.example ssh-ed25519 ${ed25519Key.toString("base64")}\n`
+    )
+
+    const { hostVerifier, pendingPersist } = buildHostVerifier("accept-new", {
+      host: "ca-only.example",
+      port: 22,
+    })
+    expect(hostVerifier).toBeDefined()
+
+    expect(hostVerifier!(ed25519Key)).toBe(true)
+    await pendingPersist
+    expect(appendFileMock).toHaveBeenCalledOnce()
+    expect(String(appendFileMock.mock.calls[0]?.[1])).toContain("ca-only.example ssh-ed25519")
   })
 
   it("mode 'yes' with known host and wrong key: hostVerifier throws Error", () => {
