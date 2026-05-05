@@ -343,6 +343,10 @@ describe("compose.down — check", () => {
 
   it("returns needs-apply for volumes when no containers remain but project volumes exist", async () => {
     const mockSsh = createComposeMockSsh({
+      [`${composeCmd("podman")} config --format json`]: {
+        code: 0,
+        stdout: JSON.stringify({ name: "app" }),
+      },
       [`${composeCmd("podman")} ps --format json`]: { code: 0, stdout: "[]" },
       "podman volume ls --filter 'label=com.docker.compose.project=app' -q": {
         code: 0,
@@ -356,6 +360,10 @@ describe("compose.down — check", () => {
 
   it("returns ok for volumes when no containers or project volumes remain", async () => {
     const mockSsh = createComposeMockSsh({
+      [`${composeCmd("podman")} config --format json`]: {
+        code: 0,
+        stdout: JSON.stringify({ name: "app" }),
+      },
       [`${composeCmd("podman")} ps --format json`]: { code: 0, stdout: "[]" },
       "podman volume ls --filter 'label=com.docker.compose.project=app' -q": {
         code: 0,
@@ -369,12 +377,69 @@ describe("compose.down — check", () => {
 
   it("returns needs-apply for volumes when volume inspection fails", async () => {
     const mockSsh = createComposeMockSsh({
+      [`${composeCmd("podman")} config --format json`]: {
+        code: 0,
+        stdout: JSON.stringify({ name: "app" }),
+      },
       [`${composeCmd("podman")} ps --format json`]: { code: 0, stdout: "[]" },
       "podman volume ls --filter 'label=com.docker.compose.project=app' -q": { code: 1 },
     })
     const mod = compose.down({ projectDirectory, volumes: true })
     const result = await mod.check(mockSsh, emptyEnv)
     expect(result).toBe("needs-apply")
+  })
+
+  it("uses the effective compose project name for volume checks", async () => {
+    const mockSsh = createComposeMockSsh({
+      [`${composeCmd("podman")} config --format json`]: {
+        code: 0,
+        stdout: JSON.stringify({ name: "configured-stack" }),
+      },
+      [`${composeCmd("podman")} ps --format json`]: { code: 0, stdout: "[]" },
+      "podman volume ls --filter 'label=com.docker.compose.project=configured-stack' -q": {
+        code: 0,
+        stdout: "configured-stack_data\n",
+      },
+    })
+    const mod = compose.down({ projectDirectory, volumes: true })
+    const result = await mod.check(mockSsh, emptyEnv)
+    expect(result).toBe("needs-apply")
+    expect(mockSsh.calls).toContain(
+      "podman volume ls --filter 'label=com.docker.compose.project=configured-stack' -q"
+    )
+  })
+
+  it("falls back to the project directory basename when compose config omits a name", async () => {
+    const mockSsh = createComposeMockSsh({
+      [`${composeCmd("podman")} config --format json`]: {
+        code: 0,
+        stdout: JSON.stringify({ services: {} }),
+      },
+      [`${composeCmd("podman")} ps --format json`]: { code: 0, stdout: "[]" },
+      "podman volume ls --filter 'label=com.docker.compose.project=app' -q": {
+        code: 0,
+        stdout: "",
+      },
+    })
+    const mod = compose.down({ projectDirectory, volumes: true })
+    const result = await mod.check(mockSsh, emptyEnv)
+    expect(result).toBe("ok")
+  })
+
+  it("returns needs-apply when the compose project name cannot be resolved", async () => {
+    const mockSsh = createComposeMockSsh({
+      [`${composeCmd("podman")} config --format json`]: {
+        code: 1,
+        stderr: "invalid compose file",
+      },
+      [`${composeCmd("podman")} ps --format json`]: { code: 0, stdout: "[]" },
+    })
+    const mod = compose.down({ projectDirectory, volumes: true })
+    const result = await mod.check(mockSsh, emptyEnv)
+    expect(result).toBe("needs-apply")
+    expect(mockSsh.calls).not.toContain(
+      "podman volume ls --filter 'label=com.docker.compose.project=app' -q"
+    )
   })
 
   it("returns needs-apply when ps command fails", async () => {

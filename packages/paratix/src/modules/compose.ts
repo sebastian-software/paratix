@@ -89,12 +89,40 @@ function composeCommand(runtime: ComposeRuntime, projectDirectory: string): stri
   return `${runtime} compose --project-directory ${shellQuote(projectDirectory)}`
 }
 
+function parseComposeProjectName(stdout: string, projectDirectory: string): null | string {
+  try {
+    const parsed: unknown = JSON.parse(stdout)
+    if (typeof parsed === "object" && parsed !== null && "name" in parsed) {
+      const name = parsed.name
+      if (typeof name === "string" && name.trim() !== "") return name
+    }
+    return basename(projectDirectory)
+  } catch {
+    return null
+  }
+}
+
+async function resolveComposeProjectName(parameters: {
+  projectDirectory: string
+  runtime: ComposeRuntime
+  ssh: SshConnection
+}): Promise<null | string> {
+  const result = await parameters.ssh.exec(
+    `${composeCommand(parameters.runtime, parameters.projectDirectory)} config --format json`,
+    EXEC_OPTS
+  )
+  if (result.code !== 0) return null
+  return parseComposeProjectName(result.stdout, parameters.projectDirectory)
+}
+
 async function composeProjectVolumesExist(parameters: {
   projectDirectory: string
   runtime: ComposeRuntime
   ssh: SshConnection
 }): Promise<boolean> {
-  const projectName = basename(parameters.projectDirectory)
+  const projectName = await resolveComposeProjectName(parameters)
+  if (projectName === null) return true
+
   const composeProjectLabel = `label=com.docker.compose.project=${projectName}`
   const result = await parameters.ssh.exec(
     `${parameters.runtime} volume ls --filter ${shellQuote(composeProjectLabel)} -q`,
