@@ -31,6 +31,15 @@ describe("apt.key", () => {
   const fingerprint = "1234567890ABCDEF1234567890ABCDEF12345678"
   const downloadCommand = "curl -fsSL -o '/tmp/apt-key-docker.ABCDEF' --config -"
 
+  function aptKeyValidationMessage(url: string): string {
+    try {
+      apt.key("docker", url, { fingerprint })
+    } catch (error) {
+      return error instanceof Error ? error.message : String(error)
+    }
+    throw new Error("apt.key did not throw")
+  }
+
   it("check returns ok when key file exists", async () => {
     const ssh = createMockSsh({
       "[ -f '/etc/apt/keyrings/docker.gpg' ]": { code: 0 },
@@ -280,6 +289,30 @@ describe("apt.key", () => {
     expect(() =>
       apt.key("docker", "http://download.docker.com/linux/ubuntu/gpg", { fingerprint })
     ).toThrow(/requires an https URL/v)
+  })
+
+  it("redacts URL credentials from validation errors", () => {
+    const secretUrl = "http://apt-user:s3cr3t@example.com/key.gpg"
+    const message = aptKeyValidationMessage(secretUrl)
+
+    expect(message).toContain("REDACTED")
+    expect(message).not.toMatch(/apt-user|s3cr3t/v)
+  })
+
+  it("redacts sensitive query values from validation errors", () => {
+    const secretUrl = "http://example.com/key.gpg?token=abc123&download=true"
+    const message = aptKeyValidationMessage(secretUrl)
+
+    expect(message).toContain("token=REDACTED")
+    expect(message).not.toContain("abc123")
+  })
+
+  it("does not echo malformed URLs in validation errors", () => {
+    const secretUrl = "https://example .com/key.gpg?token=abc123"
+    const message = aptKeyValidationMessage(secretUrl)
+
+    expect(message).toBe("apt.key requires a valid URL")
+    expect(message).not.toMatch(/abc123|example \.com/v)
   })
 
   it("throws when fingerprint is invalid", () => {

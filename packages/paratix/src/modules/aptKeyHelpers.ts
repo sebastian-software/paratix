@@ -5,6 +5,7 @@ import { shellQuote, validateMktempPath } from "../ssh.js"
 import { buildCurlConfigPayload, hasSensitiveQueryParameters } from "./curlHelpers.js"
 
 const OPENPGP_FINGERPRINT_RE = /^[A-F0-9]{40,64}$/v
+const REDACTED_URL_VALUE = "REDACTED"
 
 export function normalizeOpenPgpFingerprint(fingerprint: string): string {
   const normalized = fingerprint.replaceAll(/\s+/gv, "").toUpperCase()
@@ -39,11 +40,23 @@ export function validateAptKeyUrl(url: string): void {
   try {
     parsedUrl = new URL(url)
   } catch {
-    throw new Error(`apt.key requires a valid URL, got: ${url}`)
+    throw new Error("apt.key requires a valid URL")
   }
   if (parsedUrl.protocol !== "https:") {
-    throw new Error(`apt.key requires an https URL, got: ${url}`)
+    throw new Error(`apt.key requires an https URL, got: ${redactAptKeyUrlForDisplay(parsedUrl)}`)
   }
+}
+
+function redactAptKeyUrlForDisplay(url: URL): string {
+  const displayUrl = new URL(url)
+  if (displayUrl.username.length > 0) displayUrl.username = REDACTED_URL_VALUE
+  if (displayUrl.password.length > 0) displayUrl.password = REDACTED_URL_VALUE
+  if (hasSensitiveQueryParameters(displayUrl)) {
+    for (const [name] of displayUrl.searchParams) {
+      displayUrl.searchParams.set(name, REDACTED_URL_VALUE)
+    }
+  }
+  return displayUrl.toString()
 }
 
 function extractAptKeyUrlSecrets(url: string): string[] {
