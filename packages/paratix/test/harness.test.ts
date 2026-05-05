@@ -1,6 +1,7 @@
 import type * as FsPromises from "node:fs/promises"
 
 import { execFile } from "node:child_process"
+import { writeFileSync } from "node:fs"
 import { access, rm } from "node:fs/promises"
 import { resolve } from "node:path"
 import { afterEach, describe, expect, it, vi } from "vitest"
@@ -66,6 +67,14 @@ function mockIntegrationBuildFailure(commands: CommandCall[]): void {
     commands.push({ arguments: commandArguments, command })
     if (command === "colima" && commandArguments[0] === "status") {
       callback(null, "Running", "")
+      return undefined as never
+    }
+    if (command === "ssh-keygen") {
+      const privateKeyPath = commandArguments.at(commandArguments.indexOf("-f") + 1)
+      if (privateKeyPath == null) throw new Error("ssh-keygen test call is missing -f")
+      writeFileSync(privateKeyPath, "test private key")
+      writeFileSync(`${privateKeyPath}.pub`, "ssh-ed25519 test-public-key paratix-integration")
+      callback(null, "ok", "")
       return undefined as never
     }
     if (command === "docker" && commandArguments[0] === "build") {
@@ -135,6 +144,12 @@ describe("createIntegrationEnvironment", () => {
     ).toStrictEqual(
       expect.arrayContaining([
         "docker info",
+        expect.stringMatching(
+          /^ssh-keygen -t ed25519 -N {2}-f .*client_ed25519 -C paratix-integration$/v
+        ),
+        expect.stringMatching(
+          /^docker build .* --build-arg CLIENT_PUBLIC_KEY=ssh-ed25519 test-public-key paratix-integration /v
+        ),
         expect.stringMatching(/^docker build /v),
         expect.stringMatching(/^docker rm -f paratix-integration-/v),
         expect.stringMatching(/^docker image rm -f paratix-integration-sshd:/v),

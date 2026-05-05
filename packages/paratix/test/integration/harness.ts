@@ -1,10 +1,10 @@
 /* eslint-disable max-lines -- integration harness keeps Docker lifecycle helpers together */
 import { execFile } from "node:child_process"
 import { randomUUID } from "node:crypto"
-import { chmod, copyFile, mkdir, mkdtemp, rm } from "node:fs/promises"
+import { chmod, mkdir, mkdtemp, readFile, rm } from "node:fs/promises"
 import net from "node:net"
 import { tmpdir } from "node:os"
-import { join, resolve } from "node:path"
+import { join } from "node:path"
 
 const DOCKER_IMAGE_TAG_PREFIX = "paratix-integration-sshd"
 const DOCKER_RESOURCE_LABEL_PREFIX = "com.sebastian-software.paratix.integration"
@@ -290,6 +290,17 @@ async function prepareWorkspaceHome(): Promise<string> {
   return workspaceHome
 }
 
+async function generateClientKeyPair(clientPrivateKeyPath: string): Promise<string> {
+  await runCommand(
+    "ssh-keygen",
+    ["-t", "ed25519", "-N", "", "-f", clientPrivateKeyPath, "-C", "paratix-integration"],
+    { timeoutMs: SHORT_COMMAND_TIMEOUT_MS }
+  )
+  await chmod(clientPrivateKeyPath, PRIVATE_KEY_MODE)
+  const publicKey = await readFile(`${clientPrivateKeyPath}.pub`, "utf8")
+  return publicKey.trim()
+}
+
 function createEnvironmentResult(parameters: {
   cleanup: () => Promise<void>
   clientPrivateKeyPath: string
@@ -348,15 +359,15 @@ async function createEnvironmentResources(packageDirectory: string): Promise<{
   const workspaceHome = await prepareWorkspaceHome()
   const { containerName, dockerImageTag, labels: dockerLabels } = createDockerResourceMetadata()
   const cleanup = createCleanup(containerName, dockerImageTag, workspaceHome)
-  const fixturePrivateKeyPath = resolve(
-    packageDirectory,
-    "test/integration/fixtures/client_ed25519"
-  )
   const clientPrivateKeyPath = join(workspaceHome, ".ssh", "client_ed25519")
   try {
-    await copyFile(fixturePrivateKeyPath, clientPrivateKeyPath)
-    await chmod(clientPrivateKeyPath, PRIVATE_KEY_MODE)
-    await buildIntegrationImage(packageDirectory, dockerImageTag, dockerLabels)
+    const clientPublicKey = await generateClientKeyPair(clientPrivateKeyPath)
+    await buildIntegrationImage({
+      clientPublicKey,
+      dockerImageTag,
+      labels: dockerLabels,
+      packageDirectory,
+    })
   } catch (error) {
     try {
       await cleanup()
@@ -375,24 +386,27 @@ async function createEnvironmentResources(packageDirectory: string): Promise<{
   }
 }
 
-async function buildIntegrationImage(
-  packageDirectory: string,
-  dockerImageTag: string,
+async function buildIntegrationImage(parameters: {
+  clientPublicKey: string
+  dockerImageTag: string
   labels: string[]
-): Promise<void> {
+  packageDirectory: string
+}): Promise<void> {
   await runCommand(
     "docker",
     [
       "build",
-      ...createDockerLabelArguments(labels),
+      ...createDockerLabelArguments(parameters.labels),
+      "--build-arg",
+      `CLIENT_PUBLIC_KEY=${parameters.clientPublicKey}`,
       "-t",
-      dockerImageTag,
+      parameters.dockerImageTag,
       "-f",
       "test/integration/docker/Dockerfile",
       ".",
     ],
     {
-      cwd: packageDirectory,
+      cwd: parameters.packageDirectory,
       timeoutMs: LONG_COMMAND_TIMEOUT_MS,
     }
   )
