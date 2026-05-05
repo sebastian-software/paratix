@@ -5,6 +5,24 @@ import { type Module, type ModuleResult, NEEDS_APPLY, type SshConnection } from 
 const EXEC_OPTS = { ignoreExitCode: true, silent: true } as const
 const SILENT = { silent: true } as const
 
+function validateCloneRepo(repo: string): void {
+  let parsed: URL
+  try {
+    parsed = new URL(repo)
+  } catch {
+    return
+  }
+
+  if (
+    (parsed.protocol === "http:" || parsed.protocol === "https:") &&
+    (parsed.username.length > 0 || parsed.password.length > 0)
+  ) {
+    throw new Error(
+      "git.clone repo URLs must not embed credentials. Use SSH with deploy keys or an SSH agent instead."
+    )
+  }
+}
+
 /** Parameters for a git clone or update operation. */
 type GitCloneParameters = {
   /** The destination path on the remote host. */
@@ -228,6 +246,8 @@ export const git = {
    * @returns A Module that manages the cloned repository.
    */
   clone(repo: string, destination: string, options?: { ref?: string }): Module {
+    validateCloneRepo(repo)
+
     const reference = options?.ref
     const gitDirectory = `${destination}/.git`
     const parameters: GitCloneParameters = { destination, reference, repo }

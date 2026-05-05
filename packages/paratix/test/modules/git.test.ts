@@ -31,6 +31,29 @@ function createGitApplyMockSsh(responses: MockSshResponses = {}) {
   return createMockSsh(responses, successfulGitApplyOptions)
 }
 
+describe("git.clone — validation", () => {
+  it("rejects HTTPS repo URLs with embedded credentials", () => {
+    expect(() => git.clone("https://user:secret@example.com/org/repo.git", destination)).toThrow(
+      "must not embed credentials"
+    )
+  })
+
+  it("rejects HTTPS repo URLs with only a username", () => {
+    expect(() => git.clone("https://token@example.com/org/repo.git", destination)).toThrow(
+      "must not embed credentials"
+    )
+  })
+
+  it("accepts HTTPS repo URLs without credentials", () => {
+    expect(() => git.clone("https://github.com/example/repo.git", destination)).not.toThrow()
+  })
+
+  it("accepts SCP-like and SSH repo URLs", () => {
+    expect(() => git.clone("git@github.com:example/repo.git", destination)).not.toThrow()
+    expect(() => git.clone("ssh://git@github.com/example/repo.git", destination)).not.toThrow()
+  })
+})
+
 describe("git.clone — check", () => {
   it("returns needs-apply when conn is null", async () => {
     const mod = git.clone(repo, destination)
