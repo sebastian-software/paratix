@@ -24,6 +24,10 @@ export function getSignalBus(): TestSignalBus {
   return signalBus
 }
 
+function rejectUnstubbedSshMethod(methodName: string): Error {
+  return new Error(`makeMockSshClass: unstubbed SSH method call: ${methodName}`)
+}
+
 export function makeMockSshClass(
   capturedConfigs: unknown[],
   overrides?: {
@@ -42,23 +46,26 @@ export function makeMockSshClass(
     public addPort = overrides?.addPort ?? vi.fn().mockReturnValue(true)
     public connect = vi.fn().mockResolvedValue(null)
     public disconnect = overrides?.disconnect ?? vi.fn()
-    public downloadFile = vi.fn().mockResolvedValue(null)
-    public exec = overrides?.exec ?? vi.fn().mockResolvedValue({ code: 0, stderr: "", stdout: "" })
-    public exists = vi.fn().mockResolvedValue(true)
+    public downloadFile = vi.fn().mockRejectedValue(rejectUnstubbedSshMethod("downloadFile"))
+    public exec = overrides?.exec ?? vi.fn().mockRejectedValue(rejectUnstubbedSshMethod("exec"))
+    public exists = vi.fn().mockRejectedValue(rejectUnstubbedSshMethod("exists"))
     public getConnectionInfo = vi
       .fn()
       .mockReturnValue({ host: "1.2.3.4", port: 22, privateKeyPath: "~/.ssh/id", user: "root" })
-    public lines = vi.fn().mockResolvedValue([])
-    public output = overrides?.output ?? vi.fn().mockResolvedValue("")
+    public lines = vi.fn().mockRejectedValue(rejectUnstubbedSshMethod("lines"))
+    public output =
+      overrides?.output ?? vi.fn().mockRejectedValue(rejectUnstubbedSshMethod("output"))
     public probeSudo = vi.fn().mockResolvedValue(null)
-    public readFile = overrides?.readFile ?? vi.fn().mockResolvedValue("")
+    public readFile =
+      overrides?.readFile ?? vi.fn().mockRejectedValue(rejectUnstubbedSshMethod("readFile"))
     public reconnect = overrides?.reconnect ?? vi.fn().mockResolvedValue(null)
     public removePort = overrides?.removePort ?? vi.fn()
-    public sha256 = vi.fn().mockResolvedValue(null)
-    public test = vi.fn().mockResolvedValue(true)
+    public sha256 = vi.fn().mockRejectedValue(rejectUnstubbedSshMethod("sha256"))
+    public test = vi.fn().mockRejectedValue(rejectUnstubbedSshMethod("test"))
     public updateHost = overrides?.updateHost ?? vi.fn()
-    public uploadFile = vi.fn().mockResolvedValue(null)
-    public writeFile = overrides?.writeFile ?? vi.fn().mockResolvedValue(null)
+    public uploadFile = vi.fn().mockRejectedValue(rejectUnstubbedSshMethod("uploadFile"))
+    public writeFile =
+      overrides?.writeFile ?? vi.fn().mockRejectedValue(rejectUnstubbedSshMethod("writeFile"))
 
     public constructor(_host: string, config: unknown) {
       capturedConfigs.push(config)

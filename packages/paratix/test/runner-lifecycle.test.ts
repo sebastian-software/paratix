@@ -340,6 +340,7 @@ describe("runPlaybook failed result diagnostics", () => {
       shellQuote: (s: string) => `'${s}'`,
       SshConnectionImpl: makeMockSshClass(capturedConfigs, {
         exec: vi.fn().mockResolvedValue({ code: 1, stderr: "permission denied", stdout: "" }),
+        output: vi.fn().mockResolvedValue("old-hostname"),
       }),
     }))
     vi.spyOn(console, "error").mockImplementation((...args) => {
@@ -422,6 +423,7 @@ describe("runPlaybook failed result diagnostics", () => {
       shellQuote: (s: string) => `'${s}'`,
       SshConnectionImpl: makeMockSshClass(capturedConfigs, {
         exec: vi.fn().mockResolvedValue({ code: 1, stderr: "permission denied", stdout: "" }),
+        output: vi.fn().mockResolvedValue("old-hostname"),
       }),
     }))
     vi.spyOn(console, "error").mockImplementation((...args) => {
