@@ -749,9 +749,20 @@ describe("SshConnectionImpl", () => {
 
   describe("connect (agent auth)", () => {
     const AGENT_SOCKET = "/run/user/1000/ssh-agent.sock"
+    let originalSshAuthSock: string | undefined
+
+    beforeEach(() => {
+      originalSshAuthSock = process.env.SSH_AUTH_SOCK
+      delete process.env.SSH_AUTH_SOCK
+    })
 
     afterEach(() => {
-      delete process.env.SSH_AUTH_SOCK
+      if (originalSshAuthSock === undefined) {
+        delete process.env.SSH_AUTH_SOCK
+        return
+      }
+
+      process.env.SSH_AUTH_SOCK = originalSshAuthSock
     })
 
     it("connects via SSH agent when privateKey is omitted and SSH_AUTH_SOCK is set", async () => {
@@ -768,7 +779,7 @@ describe("SshConnectionImpl", () => {
     })
 
     it("throws when privateKey is omitted and SSH_AUTH_SOCK is not set", async () => {
-      // SSH_AUTH_SOCK is absent (deleted in afterEach, not set here)
+      // SSH_AUTH_SOCK is absent because this block clears it in beforeEach.
       const ssh = makeSshInstanceWithAgent()
 
       await expect(ssh.connect()).rejects.toThrow(
