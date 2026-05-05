@@ -1,9 +1,10 @@
-import { createHash, createHmac, timingSafeEqual } from "node:crypto"
+import { createHash, timingSafeEqual } from "node:crypto"
 import { readFileSync } from "node:fs"
 import { appendFile, mkdir } from "node:fs/promises"
 import { homedir } from "node:os"
 import { join } from "node:path"
 
+import { matchesKnownHostPatternList } from "./knownHostPatterns.js"
 import { shellQuote } from "./sshHelpers.js"
 
 type HostVerifierOptions = {
@@ -36,6 +37,8 @@ export type KnownHostEntry = {
   algo: string
   /** Host pattern as stored in the file (plain hostname or `[host]:port` notation). */
   host: string
+  /** OpenSSH comma-separated host pattern list from the original line. */
+  hostPatterns?: string[]
   /** Raw public key bytes decoded from the Base64 field. */
   key: Buffer
   /** Optional OpenSSH marker such as `@revoked`. */
@@ -50,7 +53,6 @@ const DEFAULT_SSH_PORT = 22
 
 /** Byte size of the uint32 length prefix in SSH wire format. */
 const UINT32_SIZE = 4
-const HASHED_HOST_PARTS = 4
 
 /**
  * Strict base64 alphabet used to validate the key field of a known_hosts line.
@@ -92,7 +94,8 @@ function parseKnownHostsLine(line: string): KnownHostEntry[] {
   if (!STRICT_BASE64_PATTERN.test(base64Key)) return []
 
   const key = Buffer.from(base64Key, "base64")
-  return hostsPart.split(",").map((host) => ({ algo, host, key, marker }))
+  const hostPatterns = hostsPart.split(",")
+  return hostPatterns.map((host) => ({ algo, host, hostPatterns, key, marker }))
 }
 
 /**
@@ -128,25 +131,8 @@ function formatHostNeedle(host: string, port: number): string {
   return port === DEFAULT_SSH_PORT ? host : `[${host}]:${port}`
 }
 
-/**
- * Look up a host key in the parsed known_hosts entries.
- *
- * @param pattern - The stored OpenSSH hashed host pattern.
- * @param needle - The formatted host lookup needle.
- * @returns Whether the hashed entry matches the target host.
- */
-function matchesHashedHost(pattern: string, needle: string): boolean {
-  if (!pattern.startsWith("|1|")) return false
-
-  const parts = pattern.split("|")
-  if (parts.length !== HASHED_HOST_PARTS || parts[1] !== "1") return false
-
-  const salt = Buffer.from(parts[2] ?? "", "base64")
-  const expectedHash = Buffer.from(parts[3] ?? "", "base64")
-  if (salt.length === 0 || expectedHash.length === 0) return false
-
-  const actualHash = createHmac("sha1", salt).update(needle).digest()
-  return actualHash.length === expectedHash.length && timingSafeEqual(actualHash, expectedHash)
+function matchesKnownHostEntry(entry: KnownHostEntry, needle: string): boolean {
+  return matchesKnownHostPatternList(entry.hostPatterns ?? [entry.host], needle)
 }
 
 function findMatchingEntries(
@@ -155,7 +141,7 @@ function findMatchingEntries(
   port: number
 ): KnownHostEntry[] {
   const needle = formatHostNeedle(host, port)
-  return entries.filter((entry) => entry.host === needle || matchesHashedHost(entry.host, needle))
+  return entries.filter((entry) => matchesKnownHostEntry(entry, needle))
 }
 
 function lookupHostEntry(

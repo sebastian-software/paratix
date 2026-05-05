@@ -264,6 +264,28 @@ describe("lookupHostKey", () => {
     expect(result).toStrictEqual(edKey)
   })
 
+  it("finds key for a wildcard host pattern", () => {
+    const wildcardEntries = [{ algo: "ssh-ed25519", host: "*.example.com", key: edKey }]
+    expect(lookupHostKey(wildcardEntries, "app.example.com", 22)).toStrictEqual(edKey)
+    expect(lookupHostKey(wildcardEntries, "example.com", 22)).toBeNull()
+  })
+
+  it("honors negated patterns in a comma-separated host list", () => {
+    const patternEntries = parseKnownHosts(
+      `*.example.com,!blocked.example.com ssh-ed25519 ${edKey.toString("base64")}`
+    )
+
+    expect(lookupHostKey(patternEntries, "app.example.com", 22)).toStrictEqual(edKey)
+    expect(lookupHostKey(patternEntries, "blocked.example.com", 22)).toBeNull()
+  })
+
+  it("matches wildcard patterns for bracketed non-standard ports", () => {
+    const wildcardEntries = [{ algo: "ssh-ed25519", host: "[*.example.com]:2222", key: rsaKey }]
+
+    expect(lookupHostKey(wildcardEntries, "app.example.com", 2222)).toStrictEqual(rsaKey)
+    expect(lookupHostKey(wildcardEntries, "app.example.com", 22)).toBeNull()
+  })
+
   it("returns null when host is not found", () => {
     const result = lookupHostKey(entries, "unknown.com", 22)
     expect(result).toBeNull()
@@ -613,6 +635,19 @@ describe("buildHostVerifier", () => {
     expect(appendFileMock).not.toHaveBeenCalled()
   })
 
+  it("mode 'accept-new' with wildcard known host and correct key: returns true without appending", () => {
+    readFileSyncMock.mockReturnValue(`*.example.com ssh-ed25519 ${ed25519Key.toString("base64")}\n`)
+
+    const { hostVerifier } = buildHostVerifier("accept-new", {
+      host: "app.example.com",
+      port: 22,
+    })
+    expect(hostVerifier).toBeDefined()
+
+    expect(hostVerifier!(ed25519Key)).toBe(true)
+    expect(appendFileMock).not.toHaveBeenCalled()
+  })
+
   it("mode 'accept-new' with known host and wrong key: hostVerifier throws Error", () => {
     readFileSyncMock.mockReturnValue(makeKnownHostsContent("example.com", 22, ed25519Key))
 
@@ -710,6 +745,38 @@ describe("buildHostVerifier", () => {
 
     expect(() => hostVerifier!(ed25519Key)).toThrow(/revoked/v)
     expect(appendFileMock).not.toHaveBeenCalled()
+  })
+
+  it("mode 'accept-new' with @revoked wildcard host key: rejects matching hosts", () => {
+    readFileSyncMock.mockReturnValue(
+      `@revoked *.example.com ssh-ed25519 ${ed25519Key.toString("base64")}\n`
+    )
+
+    const { hostVerifier } = buildHostVerifier("accept-new", {
+      host: "app.example.com",
+      port: 22,
+    })
+    expect(hostVerifier).toBeDefined()
+
+    expect(() => hostVerifier!(ed25519Key)).toThrow(/revoked/v)
+    expect(appendFileMock).not.toHaveBeenCalled()
+  })
+
+  it("mode 'accept-new' with @revoked negated wildcard host key: accepts excluded hosts as new", async () => {
+    readFileSyncMock.mockReturnValue(
+      `@revoked *.example.com,!safe.example.com ssh-ed25519 ${ed25519Key.toString("base64")}\n`
+    )
+
+    const { hostVerifier } = buildHostVerifier("accept-new", {
+      host: "safe.example.com",
+      port: 22,
+    })
+    expect(hostVerifier).toBeDefined()
+
+    expect(hostVerifier!(ed25519Key)).toBe(true)
+    await Promise.resolve()
+
+    expect(appendFileMock).toHaveBeenCalled()
   })
 
   it("mode 'accept-new': writes WARNING to stderr when appendHostKey fails", async () => {
