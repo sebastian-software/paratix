@@ -68,6 +68,7 @@ export type ArchiveMember = {
  * The expected line shape is:
  *
  *     mode   user/group   size   date   time   name [-> linktarget]
+ *     mode   user/group   size   date   time   name link to linktarget
  *
  * Lines that do not match this shape are skipped (e.g. blank lines,
  * locale-specific headers from non-coreutils tar implementations).
@@ -76,6 +77,7 @@ export type ArchiveMember = {
  * @returns The parsed member, or null when the line cannot be parsed.
  */
 const TAR_LINK_ARROW = " -> "
+const TAR_HARDLINK_TARGET = " link to "
 const ZIP_INFO_LINE_PATTERN =
   // eslint-disable-next-line security/detect-unsafe-regex -- Anchored Info-ZIP listing parser with fixed-width mode and bounded column count.
   /^(?<mode>[\-bcdlps][\-rwxStTs]{9})\s+(?:\S+\s+){7}(?<path>\S.*)$/v
@@ -106,6 +108,15 @@ function parseTarVerboseLine(line: string): ArchiveMember | null {
       kind,
       linkTarget: rest.slice(arrowIndex + TAR_LINK_ARROW.length),
       path: rest.slice(0, arrowIndex),
+    }
+  }
+  const hardlinkTargetIndex = rest.indexOf(TAR_HARDLINK_TARGET)
+  if (hardlinkTargetIndex !== -1 && kind === "hardlink") {
+    return {
+      format: "tar",
+      kind,
+      linkTarget: rest.slice(hardlinkTargetIndex + TAR_HARDLINK_TARGET.length),
+      path: rest.slice(0, hardlinkTargetIndex),
     }
   }
   return {

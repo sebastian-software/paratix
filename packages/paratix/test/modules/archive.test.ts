@@ -623,6 +623,40 @@ describe("archive.extract — apply", () => {
     )
   })
 
+  it("rejects a tar archive whose hardlink target is an absolute path", async () => {
+    const tarListing = `hrw-r--r-- root/root 0 1970-01-01 00:00 app/passwd link to /etc/passwd\n`
+    const mockSsh = createMockSsh({
+      [`tar -tvzf '${src}'`]: { code: 0, stdout: tarListing },
+    })
+
+    const mod = archive.extract(src, destination)
+    const result = await mod.apply(mockSsh, emptyEnv)
+
+    expect(result.status).toBe("failed")
+    expect(String(result.error)).toContain("would escape destination")
+    expect(mockSsh.calls).not.toContain(
+      `tar --no-same-owner --no-overwrite-dir -xzf '${src}' -C '${destination}'`
+    )
+    expect(mockSsh.writeFileCalls).toHaveLength(0)
+  })
+
+  it("rejects a tar archive whose hardlink target traverses outside the destination", async () => {
+    const tarListing = `hrw-r--r-- root/root 0 1970-01-01 00:00 app/passwd link to ../../etc/passwd\n`
+    const mockSsh = createMockSsh({
+      [`tar -tvzf '${src}'`]: { code: 0, stdout: tarListing },
+    })
+
+    const mod = archive.extract(src, destination)
+    const result = await mod.apply(mockSsh, emptyEnv)
+
+    expect(result.status).toBe("failed")
+    expect(String(result.error)).toContain("would escape destination")
+    expect(mockSsh.calls).not.toContain(
+      `tar --no-same-owner --no-overwrite-dir -xzf '${src}' -C '${destination}'`
+    )
+    expect(mockSsh.writeFileCalls).toHaveLength(0)
+  })
+
   it("rejects extraction when an existing destination ancestor is a symlink", async () => {
     const mockSsh = createMockSsh({
       [`test ! -L '${destination}'`]: { code: 1 },
