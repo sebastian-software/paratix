@@ -207,7 +207,7 @@ describe("file.absent", () => {
 
   it("check returns ok when the path does not exist", async () => {
     const ssh = createMockSsh({
-      "[ -e '/tmp/old-file' ]": { code: 1 },
+      "[ -e '/tmp/old-file' ] || [ -L '/tmp/old-file' ]": { code: 1 },
     })
     const mod = file.absent("/tmp/old-file")
     const result = await mod.check(ssh, emptyEnv)
@@ -216,9 +216,18 @@ describe("file.absent", () => {
 
   it("check returns needs-apply when the path exists", async () => {
     const ssh = createMockSsh({
-      "[ -e '/tmp/old-file' ]": { code: 0 },
+      "[ -e '/tmp/old-file' ] || [ -L '/tmp/old-file' ]": { code: 0 },
     })
     const mod = file.absent("/tmp/old-file")
+    const result = await mod.check(ssh, emptyEnv)
+    expect(result).toBe("needs-apply")
+  })
+
+  it("check returns needs-apply when the path is a dangling symlink", async () => {
+    const ssh = createMockSsh({
+      "[ -e '/tmp/dangling-link' ] || [ -L '/tmp/dangling-link' ]": { code: 0 },
+    })
+    const mod = file.absent("/tmp/dangling-link")
     const result = await mod.check(ssh, emptyEnv)
     expect(result).toBe("needs-apply")
   })
@@ -238,7 +247,7 @@ describe("file.absent", () => {
 
   it("apply returns ok and skips rm when the path is already absent", async () => {
     const ssh = createMockSsh({
-      "[ -e '/tmp/old-file' ]": { code: 1 },
+      "[ -e '/tmp/old-file' ] || [ -L '/tmp/old-file' ]": { code: 1 },
     })
     const mod = file.absent("/tmp/old-file")
     const result = await mod.apply(ssh, emptyEnv)
@@ -250,7 +259,7 @@ describe("file.absent", () => {
   it("apply removes an existing path with shell quoting", async () => {
     const remotePath = "/tmp/old file's dir"
     const ssh = createMockSsh({
-      "[ -e '/tmp/old file'\\''s dir' ]": { code: 0 },
+      "[ -e '/tmp/old file'\\''s dir' ] || [ -L '/tmp/old file'\\''s dir' ]": { code: 0 },
       "rm -rf '/tmp/old file'\\''s dir'": { code: 0 },
     })
     const mod = file.absent(remotePath)
@@ -263,9 +272,24 @@ describe("file.absent", () => {
     })
   })
 
+  it("apply removes a dangling symlink", async () => {
+    const ssh = createMockSsh({
+      "[ -e '/tmp/dangling-link' ] || [ -L '/tmp/dangling-link' ]": { code: 0 },
+      "rm -rf '/tmp/dangling-link'": { code: 0 },
+    })
+    const mod = file.absent("/tmp/dangling-link")
+    const result = await mod.apply(ssh, emptyEnv)
+
+    expect(result.status).toBe("changed")
+    expect(ssh.execCalls).toContainEqual({
+      command: "rm -rf '/tmp/dangling-link'",
+      options: { ignoreExitCode: true, silent: true },
+    })
+  })
+
   it("apply returns failed when rm exits non-zero", async () => {
     const ssh = createMockSsh({
-      "[ -e '/tmp/stubborn' ]": { code: 0 },
+      "[ -e '/tmp/stubborn' ] || [ -L '/tmp/stubborn' ]": { code: 0 },
       "rm -rf '/tmp/stubborn'": { code: 1, stderr: "permission denied" },
     })
     const mod = file.absent("/tmp/stubborn")

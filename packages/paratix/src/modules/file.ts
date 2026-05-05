@@ -67,6 +67,11 @@ function validateAbsentPath(remotePath: string): void {
   }
 }
 
+async function absentPathExists(ssh: SshConnection, remotePath: string): Promise<boolean> {
+  const quotedPath = shellQuote(remotePath)
+  return ssh.test(`[ -e ${quotedPath} ] || [ -L ${quotedPath} ]`)
+}
+
 async function applyLineAppend(input: {
   line: string
   remotePath: string
@@ -151,7 +156,7 @@ export const file = {
     return {
       async apply(ssh: null | SshConnection): Promise<ModuleResult> {
         if (!ssh) return failed(`[file.absent: ${remotePath}] SSH connection is required`)
-        if (!(await ssh.exists(remotePath))) return { status: "ok" }
+        if (!(await absentPathExists(ssh, remotePath))) return { status: "ok" }
 
         const result = await ssh.exec(`rm -rf ${shellQuote(remotePath)}`, {
           ignoreExitCode: true,
@@ -165,7 +170,7 @@ export const file = {
       },
       async check(ssh: null | SshConnection): Promise<"needs-apply" | "ok"> {
         if (!ssh) return NEEDS_APPLY
-        return (await ssh.test(`[ -e ${shellQuote(remotePath)} ]`)) ? "needs-apply" : "ok"
+        return (await absentPathExists(ssh, remotePath)) ? "needs-apply" : "ok"
       },
       name: `file.absent: ${remotePath}`,
     }
