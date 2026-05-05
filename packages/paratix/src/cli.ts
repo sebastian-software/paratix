@@ -1,6 +1,6 @@
 import { Command } from "commander"
 import { realpathSync } from "node:fs"
-import { resolve } from "node:path"
+import { extname, resolve } from "node:path"
 import { fileURLToPath, pathToFileURL } from "node:url"
 import { inspect } from "node:util"
 import pc from "picocolors"
@@ -19,6 +19,7 @@ declare const PACKAGE_DISPLAY_VERSION: string
 const SECONDS_TO_MS = 1000
 const ENVIRONMENT_KEY_PATTERN = /^[A-Za-z_]\w*$/v
 const FIRST_RUN_ENV_NAME = "PARATIX_FIRST_RUN"
+const TYPESCRIPT_ENTRY_EXTENSIONS = new Set([".cts", ".mts", ".ts"])
 
 function resolveRealPath(path: string): null | string {
   try {
@@ -283,6 +284,7 @@ export async function loadServerDefinitionFromFile(
 ): Promise<ServerDefinition> {
   const filePath = resolve(file)
   const fileUrl = pathToFileURL(filePath).href
+  const isTypeScriptEntry = TYPESCRIPT_ENTRY_EXTENSIONS.has(extname(filePath).toLowerCase())
 
   const restoreProcessEnvironment = applyCliProcessEnvironment(options)
 
@@ -294,19 +296,21 @@ export async function loadServerDefinitionFromFile(
     // missing) is rethrown with the original cause so the CLI exit handler
     // surfaces the real loader failure instead of falsely reporting that
     // tsx is not installed.
-    try {
-      const tsx = (await import("tsx/esm/api")) as { register: () => void }
-      tsx.register()
-    } catch (error) {
-      if (isMissingTsxDependencyError(error)) {
-        handleTsxLoadFailure(filePath)
-      } else {
-        throw new Error(
-          `Failed to load tsx/esm/api: ${error instanceof Error ? error.message : String(error)}`,
-          {
-            cause: error,
-          }
-        )
+    if (isTypeScriptEntry) {
+      try {
+        const tsx = (await import("tsx/esm/api")) as { register: () => void }
+        tsx.register()
+      } catch (error) {
+        if (isMissingTsxDependencyError(error)) {
+          handleTsxLoadFailure(filePath)
+        } else {
+          throw new Error(
+            `Failed to load tsx/esm/api: ${error instanceof Error ? error.message : String(error)}`,
+            {
+              cause: error,
+            }
+          )
+        }
       }
     }
 

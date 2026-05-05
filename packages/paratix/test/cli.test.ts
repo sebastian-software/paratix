@@ -1298,6 +1298,42 @@ describe("CLI entrypoint", () => {
     }
   })
 
+  it.each([
+    [".js", "export default"],
+    [".mjs", "export default"],
+    [".cjs", "module.exports ="],
+  ])("loads native %s playbooks without registering tsx", async (extension, exportSyntax) => {
+    const tempDirectory = mkdtempSync(join(tmpdir(), "paratix-cli-native-js-"))
+    const playbookPath = join(tempDirectory, `playbook${extension}`)
+
+    try {
+      writeFileSync(
+        playbookPath,
+        [
+          `${exportSyntax} {`,
+          "  name: 'native-js-server',",
+          "  host: '1.2.3.4',",
+          "  ssh: { user: 'root', ports: [22] },",
+          "  run: ['noop'],",
+          "}",
+        ].join("\n")
+      )
+
+      vi.doMock("tsx/esm/api", () => ({
+        register() {
+          throw new Error("tsx should not be loaded for native JavaScript playbooks")
+        },
+      }))
+
+      const definition = await loadServerDefinitionFromFile(playbookPath, { firstRun: false })
+
+      expect(definition.name).toBe("native-js-server")
+    } finally {
+      vi.doUnmock("tsx/esm/api")
+      rmSync(tempDirectory, { force: true, recursive: true })
+    }
+  })
+
   it("sets PARATIX_FIRST_RUN before importing the playbook when --first-run is passed", async () => {
     const tempDirectory = mkdtempSync(join(tmpdir(), "paratix-cli-first-run-"))
     const playbookPath = join(tempDirectory, "capture-first-run.mjs")
