@@ -13,6 +13,7 @@ import {
 } from "../types.js"
 import { hexHashesEqual, sha256String } from "./fileHelpers.js"
 import { ownershipMatches, readOwnership } from "./fileMetadataHelpers.js"
+import { assertValidGroupName, assertValidUserName } from "./posixNames.js"
 
 /** Index where the file-type field starts in `stat -c '%s %a %U %G %F %Y'` output. */
 const STAT_TYPE_START_INDEX = 4
@@ -297,6 +298,12 @@ type DriftContext = {
   ssh: SshConnection
 }
 
+function assertValidPropertiesOptions(options: PropertiesOptions): void {
+  if (options.mode != null) validateMode(options.mode)
+  if (options.owner != null) assertValidUserName(options.owner)
+  if (options.group != null) assertValidGroupName(options.group)
+}
+
 /**
  * Apply mode drift via `chmod` only when the desired mode differs from the
  * current mode reported by stat.
@@ -307,7 +314,7 @@ type DriftContext = {
 async function applyModeDrift(context: DriftContext): Promise<boolean> {
   const { current, options, remotePath, ssh } = context
   if (options.mode == null || modeMatches(current.mode, options.mode)) return false
-  await ssh.exec(`chmod ${shellQuote(options.mode)} ${shellQuote(remotePath)}`, {
+  await ssh.exec(`chmod -- ${shellQuote(options.mode)} ${shellQuote(remotePath)}`, {
     silent: true,
   })
   return true
@@ -327,7 +334,7 @@ async function maybeApplyCombinedChown(context: DriftContext): Promise<boolean> 
     return false
   }
   const ownerGroup = `${options.owner}:${options.group}`
-  await ssh.exec(`chown ${shellQuote(ownerGroup)} ${shellQuote(remotePath)}`, { silent: true })
+  await ssh.exec(`chown -- ${shellQuote(ownerGroup)} ${shellQuote(remotePath)}`, { silent: true })
   return true
 }
 
@@ -340,7 +347,7 @@ async function maybeApplyCombinedChown(context: DriftContext): Promise<boolean> 
 async function maybeApplySingleChown(context: DriftContext): Promise<boolean> {
   const { current, options, remotePath, ssh } = context
   if (options.owner == null || current.owner === options.owner) return false
-  await ssh.exec(`chown ${shellQuote(options.owner)} ${shellQuote(remotePath)}`, {
+  await ssh.exec(`chown -- ${shellQuote(options.owner)} ${shellQuote(remotePath)}`, {
     silent: true,
   })
   return true
@@ -355,7 +362,7 @@ async function maybeApplySingleChown(context: DriftContext): Promise<boolean> {
 async function maybeApplySingleChgrp(context: DriftContext): Promise<boolean> {
   const { current, options, remotePath, ssh } = context
   if (options.group == null || current.group === options.group) return false
-  await ssh.exec(`chgrp ${shellQuote(options.group)} ${shellQuote(remotePath)}`, {
+  await ssh.exec(`chgrp -- ${shellQuote(options.group)} ${shellQuote(remotePath)}`, {
     silent: true,
   })
   return true
@@ -391,6 +398,8 @@ async function applyOwnershipDrift(context: DriftContext): Promise<boolean> {
  * @returns A Module that ensures the properties match.
  */
 export function properties(remotePath: string, options: PropertiesOptions): Module {
+  assertValidPropertiesOptions(options)
+
   return {
     async apply(ssh: null | SshConnection): Promise<ModuleResult> {
       if (!ssh) return failed(`[file.properties: ${remotePath}] SSH connection is required`)

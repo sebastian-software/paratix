@@ -40,8 +40,11 @@ const createMockSsh: typeof createBaseMockSsh = (responses, options) =>
       },
       { command: /^mkdir -p '\/(?:remote|var)\//v, result: { code: 0 } },
       { command: /^chmod '[0-7]+' '\/(?:remote|var)\//v, result: { code: 0 } },
+      { command: /^chmod -- '[0-7]+' '\/(?:remote|var)\//v, result: { code: 0 } },
       { command: /^chown '[^']+' '\/(?:remote|var)\//v, result: { code: 0 } },
+      { command: /^chown -- '[^']+' '\/(?:remote|var)\//v, result: { code: 0 } },
       { command: /^chgrp '[^']+' '\/(?:remote|var)\//v, result: { code: 0 } },
+      { command: /^chgrp -- '[^']+' '\/(?:remote|var)\//v, result: { code: 0 } },
       ...(options?.responseStubs ?? []),
     ],
   })
@@ -1534,6 +1537,24 @@ describe("file.block", () => {
 })
 
 describe("file.properties", () => {
+  it("rejects invalid modes before rendering chmod", () => {
+    expect(() => file.properties("/var/app", { mode: "--reference=/tmp/source" })).toThrow(
+      "Invalid file mode"
+    )
+  })
+
+  it("rejects option-like owner names before rendering chown", () => {
+    expect(() => file.properties("/var/app", { owner: "--reference=/tmp/source" })).toThrow(
+      'user name "--reference=/tmp/source" is invalid'
+    )
+  })
+
+  it("rejects option-like group names before rendering chgrp", () => {
+    expect(() => file.properties("/var/app", { group: "--reference=/tmp/source" })).toThrow(
+      'group name "--reference=/tmp/source" is invalid'
+    )
+  })
+
   it("check returns ok when all properties match", async () => {
     const ssh = createMockSsh({
       "stat -c '%a %U %G' '/var/app'": { stdout: "644 www-data www-data" },
@@ -1578,8 +1599,8 @@ describe("file.properties", () => {
     const result = await mod.apply(ssh, emptyEnv)
 
     expect(result.status).toBe("changed")
-    expect(ssh.calls).toContain("chmod '0644' '/var/app'")
-    expect(ssh.calls).toContain("chown 'www-data' '/var/app'")
+    expect(ssh.calls).toContain("chmod -- '0644' '/var/app'")
+    expect(ssh.calls).toContain("chown -- 'www-data' '/var/app'")
   })
 
   it("apply returns ok and does not run chmod/chown/chgrp when nothing has drifted", async () => {
@@ -1594,10 +1615,10 @@ describe("file.properties", () => {
     const result = await mod.apply(ssh, emptyEnv)
 
     expect(result.status).toBe("ok")
-    expect(ssh.calls).not.toContain("chmod '0644' '/var/app'")
-    expect(ssh.calls).not.toContain("chown 'www-data:www-data' '/var/app'")
-    expect(ssh.calls).not.toContain("chown 'www-data' '/var/app'")
-    expect(ssh.calls).not.toContain("chgrp 'www-data' '/var/app'")
+    expect(ssh.calls).not.toContain("chmod -- '0644' '/var/app'")
+    expect(ssh.calls).not.toContain("chown -- 'www-data:www-data' '/var/app'")
+    expect(ssh.calls).not.toContain("chown -- 'www-data' '/var/app'")
+    expect(ssh.calls).not.toContain("chgrp -- 'www-data' '/var/app'")
   })
 
   it("apply only runs chmod when only mode has drifted", async () => {
@@ -1612,8 +1633,8 @@ describe("file.properties", () => {
     const result = await mod.apply(ssh, emptyEnv)
 
     expect(result.status).toBe("changed")
-    expect(ssh.calls).toContain("chmod '0644' '/var/app'")
-    expect(ssh.calls).not.toContain("chown 'www-data:www-data' '/var/app'")
+    expect(ssh.calls).toContain("chmod -- '0644' '/var/app'")
+    expect(ssh.calls).not.toContain("chown -- 'www-data:www-data' '/var/app'")
   })
 
   it("apply combines chown owner:group when both have drifted", async () => {
@@ -1628,10 +1649,10 @@ describe("file.properties", () => {
     const result = await mod.apply(ssh, emptyEnv)
 
     expect(result.status).toBe("changed")
-    expect(ssh.calls).not.toContain("chmod '0644' '/var/app'")
-    expect(ssh.calls).toContain("chown 'www-data:www-data' '/var/app'")
-    expect(ssh.calls).not.toContain("chown 'www-data' '/var/app'")
-    expect(ssh.calls).not.toContain("chgrp 'www-data' '/var/app'")
+    expect(ssh.calls).not.toContain("chmod -- '0644' '/var/app'")
+    expect(ssh.calls).toContain("chown -- 'www-data:www-data' '/var/app'")
+    expect(ssh.calls).not.toContain("chown -- 'www-data' '/var/app'")
+    expect(ssh.calls).not.toContain("chgrp -- 'www-data' '/var/app'")
   })
 
   it("apply only invokes chgrp when group alone has drifted", async () => {
@@ -1642,7 +1663,7 @@ describe("file.properties", () => {
     const result = await mod.apply(ssh, emptyEnv)
 
     expect(result.status).toBe("changed")
-    expect(ssh.calls).toContain("chgrp 'www-data' '/var/app'")
+    expect(ssh.calls).toContain("chgrp -- 'www-data' '/var/app'")
   })
 
   it("apply normalises mode comparisons: 0644 desired matches 644 from stat", async () => {
@@ -1653,7 +1674,7 @@ describe("file.properties", () => {
     const result = await mod.apply(ssh, emptyEnv)
 
     expect(result.status).toBe("ok")
-    expect(ssh.calls).not.toContain("chmod '0644' '/var/app'")
+    expect(ssh.calls).not.toContain("chmod -- '0644' '/var/app'")
   })
 })
 
