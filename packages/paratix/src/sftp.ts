@@ -22,6 +22,47 @@ function normalizeTransferError(error: unknown, message: string): Error {
   return error instanceof Error ? error : new Error(`${message}: ${String(error)}`)
 }
 
+function openSftp(options: {
+  client: Client
+  onOpen: (sftp: SFTPWrapper) => void
+  reject: (reason: Error) => void
+  timeout: number
+  timeoutMessage: string
+}): void {
+  const { client, onOpen, reject, timeout, timeoutMessage } = options
+  let settled = false
+
+  const timer = setTimeout(() => {
+    if (settled) return
+    settled = true
+    client.end()
+    reject(new Error(timeoutMessage))
+  }, timeout)
+
+  try {
+    client.sftp((error, sftp) => {
+      if (settled) {
+        sftp.end()
+        return
+      }
+
+      clearTimeout(timer)
+      settled = true
+
+      if (error) {
+        reject(error)
+        return
+      }
+
+      onOpen(sftp)
+    })
+  } catch (openError) {
+    clearTimeout(timer)
+    settled = true
+    reject(normalizeTransferError(openError, "Failed to open SFTP session"))
+  }
+}
+
 function createTransferSettlement(options: {
   clearTimer: () => void
   reject: (reason: Error) => void
@@ -193,44 +234,45 @@ export async function sftpDownload(
       reject(reason)
     }
 
-    client.sftp((error, sftp) => {
-      if (error) {
-        rejectWithCleanup(error)
-        return
-      }
+    openSftp({
+      client,
+      onOpen(sftp) {
+        let streams: TransferStreams
+        try {
+          streams = openDownloadStreams(sftp, remotePath, temporaryPath)
+          shouldCleanupTemporaryFile = true
+        } catch (streamError) {
+          sftp.end()
+          rejectWithCleanup(normalizeTransferError(streamError, "Failed to create SFTP download"))
+          return
+        }
 
-      let streams: TransferStreams
-      try {
-        streams = openDownloadStreams(sftp, remotePath, temporaryPath)
-        shouldCleanupTemporaryFile = true
-      } catch (streamError) {
-        sftp.end()
-        rejectWithCleanup(normalizeTransferError(streamError, "Failed to create SFTP download"))
-        return
-      }
-
-      wireStreams({
-        completionEvents: ["finish"],
-        readStream: streams.readStream,
-        reject: rejectWithCleanup,
-        resolve() {
-          try {
-            // eslint-disable-next-line security/detect-non-literal-fs-filename
-            renameSync(temporaryPath, localPath)
-            resolve()
-          } catch (finalizeError) {
-            rejectWithCleanup(
-              finalizeError instanceof Error
-                ? finalizeError
-                : new Error(`Failed to finalize SFTP download: ${String(finalizeError)}`)
-            )
-          }
-        },
-        sftp,
-        timeout,
-        timeoutMessage: `SFTP download timed out after ${timeout}ms: ${remotePath}`,
-        writeStream: streams.writeStream,
-      })
+        wireStreams({
+          completionEvents: ["finish"],
+          readStream: streams.readStream,
+          reject: rejectWithCleanup,
+          resolve() {
+            try {
+              // eslint-disable-next-line security/detect-non-literal-fs-filename
+              renameSync(temporaryPath, localPath)
+              resolve()
+            } catch (finalizeError) {
+              rejectWithCleanup(
+                finalizeError instanceof Error
+                  ? finalizeError
+                  : new Error(`Failed to finalize SFTP download: ${String(finalizeError)}`)
+              )
+            }
+          },
+          sftp,
+          timeout,
+          timeoutMessage: `SFTP download timed out after ${timeout}ms: ${remotePath}`,
+          writeStream: streams.writeStream,
+        })
+      },
+      reject: rejectWithCleanup,
+      timeout,
+      timeoutMessage: `SFTP download session timed out after ${timeout}ms: ${remotePath}`,
     })
   })
 }
@@ -251,32 +293,33 @@ export async function sftpUpload(
   timeout = SFTP_TIMEOUT
 ): Promise<void> {
   return new Promise((resolve, reject) => {
-    client.sftp((error, sftp) => {
-      if (error) {
-        reject(error)
-        return
-      }
+    openSftp({
+      client,
+      onOpen(sftp) {
+        let streams: TransferStreams
+        try {
+          streams = openUploadStreams(sftp, localPath, remotePath)
+        } catch (streamError) {
+          sftp.end()
+          reject(normalizeTransferError(streamError, "Failed to create SFTP upload"))
+          return
+        }
 
-      let streams: TransferStreams
-      try {
-        streams = openUploadStreams(sftp, localPath, remotePath)
-      } catch (streamError) {
-        sftp.end()
-        reject(normalizeTransferError(streamError, "Failed to create SFTP upload"))
-        return
-      }
-
-      wireStreams({
-        completionEvents: ["finish"],
-        prematureCloseMessage: `SFTP upload closed before finish: ${remotePath}`,
-        readStream: streams.readStream,
-        reject,
-        resolve,
-        sftp,
-        timeout,
-        timeoutMessage: `SFTP upload timed out after ${timeout}ms: ${remotePath}`,
-        writeStream: streams.writeStream,
-      })
+        wireStreams({
+          completionEvents: ["finish"],
+          prematureCloseMessage: `SFTP upload closed before finish: ${remotePath}`,
+          readStream: streams.readStream,
+          reject,
+          resolve,
+          sftp,
+          timeout,
+          timeoutMessage: `SFTP upload timed out after ${timeout}ms: ${remotePath}`,
+          writeStream: streams.writeStream,
+        })
+      },
+      reject,
+      timeout,
+      timeoutMessage: `SFTP upload session timed out after ${timeout}ms: ${remotePath}`,
     })
   })
 }

@@ -90,6 +90,46 @@ describe("sftpDownload", () => {
     )
   })
 
+  it("rejects and ends the client when sftp session opening times out", async () => {
+    vi.useFakeTimers()
+    const clientEnd = vi.fn()
+    const client = {
+      end: clientEnd,
+      sftp: vi.fn(),
+    } as unknown as Client
+
+    const promise = sftpDownload(client, "/remote/file.txt", "/local/file.txt", 5000)
+    vi.advanceTimersByTime(5001)
+
+    await expect(promise).rejects.toThrow(
+      "SFTP download session timed out after 5000ms: /remote/file.txt"
+    )
+    expect(clientEnd).toHaveBeenCalledOnce()
+    expect(vi.mocked(createWriteStream)).not.toHaveBeenCalled()
+  })
+
+  it("closes a late sftp session after download session opening times out", async () => {
+    vi.useFakeTimers()
+    let openCallback: Parameters<Client["sftp"]>[0] | undefined
+    const { sftp, sftpEnd } = makeSftpSession()
+    const client = {
+      end: vi.fn(),
+      sftp: vi.fn().mockImplementation((cb: Parameters<Client["sftp"]>[0]) => {
+        openCallback = cb
+      }),
+    } as unknown as Client
+
+    const promise = sftpDownload(client, "/remote/file.txt", "/local/file.txt", 5000)
+    vi.advanceTimersByTime(5001)
+    await promise.catch(() => {
+      /* expected rejection */
+    })
+    openCallback?.(undefined, sftp)
+
+    expect(sftpEnd).toHaveBeenCalledOnce()
+    expect(vi.mocked(createWriteStream)).not.toHaveBeenCalled()
+  })
+
   it("rejects and closes the sftp session when remote read stream creation throws", async () => {
     const { sftp, sftpEnd } = makeSftpSession()
     const client = makeClientMock(sftp)
@@ -561,6 +601,46 @@ describe("sftpUpload", () => {
     await expect(sftpUpload(client, "/local/file.txt", "/remote/file.txt")).rejects.toThrow(
       "sftp session failed"
     )
+  })
+
+  it("rejects and ends the client when sftp session opening times out", async () => {
+    vi.useFakeTimers()
+    const clientEnd = vi.fn()
+    const client = {
+      end: clientEnd,
+      sftp: vi.fn(),
+    } as unknown as Client
+
+    const promise = sftpUpload(client, "/local/file.txt", "/remote/file.txt", 5000)
+    vi.advanceTimersByTime(5001)
+
+    await expect(promise).rejects.toThrow(
+      "SFTP upload session timed out after 5000ms: /remote/file.txt"
+    )
+    expect(clientEnd).toHaveBeenCalledOnce()
+    expect(vi.mocked(createReadStream)).not.toHaveBeenCalled()
+  })
+
+  it("closes a late sftp session after upload session opening times out", async () => {
+    vi.useFakeTimers()
+    let openCallback: Parameters<Client["sftp"]>[0] | undefined
+    const { sftp, sftpEnd } = makeSftpSession()
+    const client = {
+      end: vi.fn(),
+      sftp: vi.fn().mockImplementation((cb: Parameters<Client["sftp"]>[0]) => {
+        openCallback = cb
+      }),
+    } as unknown as Client
+
+    const promise = sftpUpload(client, "/local/file.txt", "/remote/file.txt", 5000)
+    vi.advanceTimersByTime(5001)
+    await promise.catch(() => {
+      /* expected rejection */
+    })
+    openCallback?.(undefined, sftp)
+
+    expect(sftpEnd).toHaveBeenCalledOnce()
+    expect(vi.mocked(createReadStream)).not.toHaveBeenCalled()
   })
 
   it("rejects and closes the sftp session when local read stream creation throws", async () => {
