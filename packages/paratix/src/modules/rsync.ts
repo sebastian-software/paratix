@@ -11,6 +11,7 @@ import { type Module, type ModuleResult, NEEDS_APPLY, type SshConnection } from 
 
 type RsyncPhase = "apply" | "check"
 const DEFAULT_SSH_PORT = 22
+const STRICT_HOST_KEY_CHECKING_VALUES = new Set(["accept-new", "no", "off", "yes"])
 
 type SyncOptions = {
   /** Permission mode applied via `--chmod`, e.g. `"Du=rwx,go=rx,Fu=rw,go=r"`. */
@@ -37,6 +38,15 @@ type SyncOptions = {
    * (not recommended for production).
    */
   strictHostKeyChecking?: "accept-new" | "no" | "off" | "yes"
+}
+
+function validateStrictHostKeyChecking(value: unknown): void {
+  if (value == null) return
+  if (typeof value === "string" && STRICT_HOST_KEY_CHECKING_VALUES.has(value)) return
+
+  throw new Error(
+    '[rsync.sync] strictHostKeyChecking must be one of "accept-new", "no", "off", or "yes"'
+  )
 }
 
 /**
@@ -379,6 +389,8 @@ export const rsync = {
    * ```
    */
   sync(options: SyncOptions): Module {
+    validateStrictHostKeyChecking(options.strictHostKeyChecking)
+
     return {
       async apply(ssh: null | SshConnection): Promise<ModuleResult> {
         if (!ssh) return failed("[rsync.sync] SSH connection is required")

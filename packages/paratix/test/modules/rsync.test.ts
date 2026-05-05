@@ -380,15 +380,42 @@ describe("rsync.sync — argument building", () => {
     expect(transportArg).not.toContain('-i "$HOME/.ssh/deploy key"')
   })
 
-  it("uses custom StrictHostKeyChecking value when provided", async () => {
-    const mockSsh = createMockSsh()
-    const mod = rsync.sync({ dest: "/remote/dest", src: "/local/src", strictHostKeyChecking: "no" })
-    await mod.apply(mockSsh, emptyEnv)
+  it.each(["accept-new", "no", "off", "yes"] as const)(
+    "uses custom StrictHostKeyChecking=%s when provided",
+    async (strictHostKeyChecking) => {
+      const mockSsh = createMockSsh()
+      const mod = rsync.sync({ dest: "/remote/dest", src: "/local/src", strictHostKeyChecking })
+      await mod.apply(mockSsh, emptyEnv)
 
-    const args = getArgs()
-    const eIdx = args.indexOf("-e")
-    const transportArg = args[eIdx + 1]
-    expect(transportArg).toContain("-o StrictHostKeyChecking=no")
+      const args = getArgs()
+      const eIdx = args.indexOf("-e")
+      const transportArg = args[eIdx + 1]
+      expect(transportArg).toContain(`-o StrictHostKeyChecking=${strictHostKeyChecking}`)
+    }
+  )
+
+  it("rejects invalid StrictHostKeyChecking strings at module construction", () => {
+    expect(() =>
+      rsync.sync({
+        dest: "/remote/dest",
+        src: "/local/src",
+        strictHostKeyChecking: "maybe" as never,
+      })
+    ).toThrow(
+      '[rsync.sync] strictHostKeyChecking must be one of "accept-new", "no", "off", or "yes"'
+    )
+  })
+
+  it("rejects non-string StrictHostKeyChecking values at module construction", () => {
+    expect(() =>
+      rsync.sync({
+        dest: "/remote/dest",
+        src: "/local/src",
+        strictHostKeyChecking: false as never,
+      })
+    ).toThrow(
+      '[rsync.sync] strictHostKeyChecking must be one of "accept-new", "no", "off", or "yes"'
+    )
   })
 
   it("does not rely on a local known_hosts entry when the session exports a verified host key", async () => {
