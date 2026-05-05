@@ -445,7 +445,10 @@ export const mount = {
 
         let changed = false
 
-        await ssh.exec(`mkdir -p ${shellQuote(path)}`, EXEC_OPTS)
+        const mkdirResult = await ssh.exec(`mkdir -p ${shellQuote(path)}`, EXEC_OPTS)
+        if (mkdirResult.code !== 0) {
+          return failedCommand(`[mount.present: ${path}] mkdir -p failed`, mkdirResult)
+        }
 
         if (persist) {
           const desiredLine = buildFstabLine({ fstype, opts, path, src })

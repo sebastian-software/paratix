@@ -466,6 +466,33 @@ describe("mount.present — apply", () => {
     expect(mockSsh.calls).toContain(mkdirCmd)
   })
 
+  it("returns failed and does not touch fstab or mount when mkdir -p fails", async () => {
+    const writtenFiles: Array<{ content: string; path: string }> = []
+    const mockSsh = createMountApplyMockSsh({
+      [mkdirCmd]: { code: 1, stderr: "permission denied" },
+      "cat '/etc/fstab'": { stdout: "# /etc/fstab\n" },
+      [findmntCheckCmd]: { code: 1 },
+    })
+    // eslint-disable-next-line @typescript-eslint/require-await -- Mock implementation
+    mockSsh.writeFile = async (path: string, content: string): Promise<void> => {
+      writtenFiles.push({ content, path })
+    }
+    const mod = mount.present({
+      fstype: mountFstype,
+      opts: mountOpts,
+      path: mountPath,
+      src: mountSrc,
+    })
+    const result = await mod.apply(mockSsh, emptyEnv)
+
+    expect(result.status).toBe("failed")
+    expect(result.error?.message).toContain("[mount.present: /mnt/data] mkdir -p failed")
+    expect(mockSsh.calls).not.toContain("cat '/etc/fstab'")
+    expect(mockSsh.calls).not.toContain(findmntCheckCmd)
+    expect(mockSsh.calls).not.toContain(mountCmd)
+    expect(writtenFiles).toStrictEqual([])
+  })
+
   it("writes fstab entry when persist is true", async () => {
     const writtenFiles: Array<{ content: string; path: string }> = []
     const mockSsh = createMountApplyMockSsh({
