@@ -167,8 +167,9 @@ function makeConnectedSshWithCloseListener(
   options: { sudoPassword?: null | string; user?: string } = {}
 ): SshConnectionImpl {
   const ssh = makeConnectedSsh(client, options)
-  ;(ssh as unknown as { registerConnectedClient: (client: Client, port: number) => void })
-    .registerConnectedClient(client, 22)
+  ;(
+    ssh as unknown as { registerConnectedClient: (client: Client, port: number) => void }
+  ).registerConnectedClient(client, 22)
   return ssh
 }
 

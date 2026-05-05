@@ -332,7 +332,9 @@ describe("lookupHostKey", () => {
   })
 
   it("does not return unknown marker entries as raw host keys", () => {
-    const markerEntries = parseKnownHosts(`@unknown example.com ssh-ed25519 ${edKey.toString("base64")}`)
+    const markerEntries = parseKnownHosts(
+      `@unknown example.com ssh-ed25519 ${edKey.toString("base64")}`
+    )
 
     expect(lookupHostKey(markerEntries, "example.com", 22)).toBeNull()
   })

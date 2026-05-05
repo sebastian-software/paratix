@@ -4,28 +4,46 @@ import { type Module, type ModuleResult, NEEDS_APPLY, type SshConnection } from 
 
 const HOSTNAME_MAX_LENGTH = 253
 const HOSTNAME_LABEL_MAX_LENGTH = 63
-const HOSTNAME_LABEL_PATTERN = /^[a-zA-Z0-9](?:[a-zA-Z0-9\x2d]*[a-zA-Z0-9])?$/v
+
+function isHostnameLabelCharacter(character: string): boolean {
+  if (character >= "a" && character <= "z") return true
+  if (character >= "A" && character <= "Z") return true
+  if (character >= "0" && character <= "9") return true
+  return character === "-"
+}
+
+function isValidHostnameLabel(label: string): boolean {
+  if (label.startsWith("-") || label.endsWith("-")) return false
+  for (const character of label) {
+    if (!isHostnameLabelCharacter(character)) return false
+  }
+  return true
+}
 
 function validateHostname(name: string): void {
   if (name.length === 0) {
     throw new Error("hostname.set: hostname must not be empty")
   }
   if (name.length > HOSTNAME_MAX_LENGTH) {
-    throw new Error(`hostname.set: hostname must be at most ${String(HOSTNAME_MAX_LENGTH)} characters`)
+    throw new Error(
+      `hostname.set: hostname must be at most ${String(HOSTNAME_MAX_LENGTH)} characters`
+    )
   }
   if (name.startsWith("-")) {
     throw new Error("hostname.set: hostname must not start with '-'")
   }
   for (const label of name.split(".")) {
     if (label.length === 0) {
-      throw new Error(`hostname.set: hostname must not contain empty labels: ${JSON.stringify(name)}`)
+      throw new Error(
+        `hostname.set: hostname must not contain empty labels: ${JSON.stringify(name)}`
+      )
     }
     if (label.length > HOSTNAME_LABEL_MAX_LENGTH) {
       throw new Error(
         `hostname.set: hostname labels must be at most ${String(HOSTNAME_LABEL_MAX_LENGTH)} characters`
       )
     }
-    if (!HOSTNAME_LABEL_PATTERN.test(label)) {
+    if (!isValidHostnameLabel(label)) {
       throw new Error(`hostname.set: invalid hostname label: ${JSON.stringify(label)}`)
     }
   }

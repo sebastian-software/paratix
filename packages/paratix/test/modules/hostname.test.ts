@@ -6,12 +6,9 @@ import { createMockSsh } from "../helpers/mockSsh.js"
 const emptyEnv = {}
 
 describe("hostname.set", () => {
-  it.each(["my-server", "web01", "web-01.example.com"])(
-    "accepts valid hostname %s",
-    (name) => {
-      expect(() => hostname.set(name)).not.toThrow()
-    }
-  )
+  it.each(["my-server", "web01", "web-01.example.com"])("accepts valid hostname %s", (name) => {
+    expect(() => hostname.set(name)).not.toThrow()
+  })
 
   it.each([
     ["", "must not be empty"],

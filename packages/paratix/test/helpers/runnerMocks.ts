@@ -85,7 +85,7 @@ export function makeModuleWithMeta(metaEntries: ModuleMetaEntry[]): Module {
 
 type MockChildProcess = {
   stderr?: EventEmitter
-  stdin?: { end: ReturnType<typeof vi.fn> }
+  stdin?: { end: ReturnType<typeof vi.fn> } & EventEmitter
   stdout?: EventEmitter
 } & EventEmitter
 
@@ -93,7 +93,7 @@ export function createMockSpawnChild(stdout: string, exitCode = 0): MockChildPro
   const child = new EventEmitter() as MockChildProcess
   child.stdout = new EventEmitter()
   child.stderr = new EventEmitter()
-  child.stdin = { end: vi.fn() }
+  child.stdin = Object.assign(new EventEmitter(), { end: vi.fn() })
 
   queueMicrotask(() => {
     child.stdout?.emit("data", Buffer.from(stdout))
