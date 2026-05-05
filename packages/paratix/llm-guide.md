@@ -49,6 +49,7 @@ import {
   apt,
   archive,
   command,
+  compose,
   cron,
   download,
   file,
@@ -56,10 +57,13 @@ import {
   group,
   hostname,
   mount,
+  net,
   op,
   package as pkg,
+  quadlet,
   releaseUpgrade,
   rsync,
+  script,
   service,
   ssh,
   sshd,
@@ -225,6 +229,17 @@ the idiomatic way to ensure a previously installed cron job is gone.
 | `mount.present` | `(options: { fstype: string; opts: string; path: string; persist?: boolean; src: string }): Module` | Yes        |
 | `mount.absent`  | `(options: { path: string; persist?: boolean }): Module`                                            | Yes        |
 
+### `net`
+
+| Method          | Signature                                                                                                                | Idempotent |
+| --------------- | ------------------------------------------------------------------------------------------------------------------------ | ---------- |
+| `net.hosts`     | `(ip: string, hostnames: string[], options?: { state?: "absent" \| "present" }): Module`                                 | Yes        |
+| `net.interface` | `(name: string, options: InterfaceOptions): Module`                                                                      | Yes        |
+| `net.request`   | `(url: string, options?: { body?: string; headers?: Record<string, string>; method?: string; status?: number }): Module` | Yes        |
+| `net.resolv`    | `(options: { nameservers: string[]; search?: string[] }): Module`                                                        | Yes        |
+| `net.route`     | `(destination: string, gateway: string, options?: { device?: string; state?: "absent" \| "present" }): Module`           | Yes        |
+| `net.waitFor`   | `(options: WaitForOptions): Module`                                                                                      | Yes        |
+
 ### `op`
 
 | Method       | Signature                                      | Idempotent                        |
@@ -284,6 +299,12 @@ apt.distUpgrade("2026-05-01", { timeout: 1_200_000 })
 When the active Paratix SSH session already verified the host via `ssh.expectedHostFingerprint`
 or `ssh.expectedHostPublicKey`, `rsync.sync()` reuses that verified host key for the external
 rsync SSH process and does not depend on a local `known_hosts` entry.
+
+### `script`
+
+| Method        | Signature                                                                                    | Idempotent           |
+| ------------- | -------------------------------------------------------------------------------------------- | -------------------- |
+| `script.once` | `(name: string, localPath: string, options?: { args?: string[]; version?: string }): Module` | Yes (versioned flag) |
 
 ### `service`
 
