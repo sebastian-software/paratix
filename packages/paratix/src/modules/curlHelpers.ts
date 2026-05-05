@@ -4,6 +4,18 @@ import { shellQuote } from "../ssh.js"
 const LAST_CONTROL_CHAR = 0x1f
 /** ASCII DEL character (U+007F). */
 const DEL_CHAR = 0x7f
+const SENSITIVE_QUERY_TOKENS = new Set([
+  "auth",
+  "credential",
+  "key",
+  "passwd",
+  "password",
+  "secret",
+  "sig",
+  "signature",
+  "token",
+])
+const QUERY_PARAMETER_SEPARATORS = new Set(["_", "-", "."])
 
 /**
  * Check whether a string is a valid HTTP header name per RFC 7230 (token chars).
@@ -43,6 +55,66 @@ export function validateCurlConfigValue(label: string, value: string): void {
   throw new Error(`${label} must not contain CR, LF, or NUL characters`)
 }
 
+function isAsciiUppercase(char: string): boolean {
+  return char >= "A" && char <= "Z"
+}
+
+function isAsciiLowercase(char: string): boolean {
+  return char >= "a" && char <= "z"
+}
+
+function isAsciiDigit(char: string): boolean {
+  return char >= "0" && char <= "9"
+}
+
+function appendQueryParameterToken(tokens: string[], current: string): string {
+  if (current.length > 0) tokens.push(current.toLowerCase())
+  return ""
+}
+
+function isCamelCaseBoundary(name: string, index: number): boolean {
+  if (index <= 0) return false
+
+  const char = name.charAt(index)
+  const previous = name.charAt(index - 1)
+  if (!isAsciiUppercase(char) || QUERY_PARAMETER_SEPARATORS.has(previous)) return false
+  if (isAsciiLowercase(previous) || isAsciiDigit(previous)) return true
+
+  if (index + 1 >= name.length) return false
+  const next = name.charAt(index + 1)
+  return isAsciiUppercase(previous) && isAsciiLowercase(next)
+}
+
+function tokenizeQueryParameterName(name: string): string[] {
+  const tokens: string[] = []
+  let current = ""
+  for (let index = 0; index < name.length; index++) {
+    const char = name.charAt(index)
+    if (QUERY_PARAMETER_SEPARATORS.has(char)) {
+      current = appendQueryParameterToken(tokens, current)
+      continue
+    }
+    if (isCamelCaseBoundary(name, index)) current = appendQueryParameterToken(tokens, current)
+    current += char
+  }
+  appendQueryParameterToken(tokens, current)
+  return tokens
+}
+
+/**
+ * Check whether a query parameter name looks sensitive.
+ *
+ * CamelCase boundaries are tokenized before lowercasing so names such as
+ * `apiKey` and `clientSecret` match the same token list as `api_key` and
+ * `client-secret`, while unrelated substrings such as `monkey` do not match.
+ *
+ * @param name - The query parameter name to inspect.
+ * @returns `true` when at least one token is known to carry credentials.
+ */
+export function isSensitiveQueryParameterName(name: string): boolean {
+  return tokenizeQueryParameterName(name).some((part) => SENSITIVE_QUERY_TOKENS.has(part))
+}
+
 /**
  * Check whether the given URL's query string carries sensitive material such
  * as presigned tokens, signatures, or credentials.
@@ -51,25 +123,8 @@ export function validateCurlConfigValue(label: string, value: string): void {
  * @returns `true` when at least one query parameter name looks sensitive.
  */
 export function hasSensitiveQueryParameters(url: URL): boolean {
-  const sensitiveTokens = new Set([
-    "auth",
-    "credential",
-    "key",
-    "passwd",
-    "password",
-    "secret",
-    "sig",
-    "signature",
-    "token",
-  ])
   for (const [name] of url.searchParams) {
-    const parts = name
-      .toLowerCase()
-      .replaceAll(".", " ")
-      .replaceAll("_", " ")
-      .replaceAll("-", " ")
-      .split(" ")
-    if (parts.some((part) => sensitiveTokens.has(part))) return true
+    if (isSensitiveQueryParameterName(name)) return true
   }
   return false
 }

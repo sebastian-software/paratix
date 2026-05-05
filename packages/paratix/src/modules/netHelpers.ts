@@ -5,6 +5,7 @@ import {
   buildCurlArgvHeaderFlags,
   buildCurlConfigPayload,
   hasSensitiveQueryParameters,
+  isSensitiveQueryParameterName,
   isValidHeaderName,
   isValidHeaderValue,
   validateCurlConfigValue,
@@ -52,17 +53,6 @@ export type HttpCheckParameters = {
 
 const HTTP_STATUS_MARKER = "\n__PARATIX_HTTP_STATUS__:"
 const REDACTED_QUERY_VALUE = "REDACTED"
-const SENSITIVE_QUERY_TOKENS = new Set([
-  "auth",
-  "credential",
-  "key",
-  "passwd",
-  "password",
-  "secret",
-  "sig",
-  "signature",
-  "token",
-])
 
 /**
  * Build the shell command used to test a wait-for condition.
@@ -120,16 +110,6 @@ export function buildCurlHeaderFlags(headers: Record<string, string>): string {
     })
     .join(" ")
   return flags.length > 0 ? `${flags} ` : ""
-}
-
-function isSensitiveQueryParameterName(name: string): boolean {
-  const parts = name
-    .toLowerCase()
-    .replaceAll(".", " ")
-    .replaceAll("_", " ")
-    .replaceAll("-", " ")
-    .split(" ")
-  return parts.some((part) => SENSITIVE_QUERY_TOKENS.has(part))
 }
 
 function hasUrlCredentials(url: URL): boolean {

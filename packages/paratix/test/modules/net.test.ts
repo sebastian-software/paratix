@@ -8,6 +8,7 @@ import {
   getRegisteredSecrets,
   registerSecret,
 } from "../../src/secretSink.js"
+import { shellQuote } from "../../src/ssh.js"
 import { createMockSsh as createBaseMockSsh } from "../helpers/mockSsh.js"
 
 const NET_WRITE_ALLOWLIST = [
@@ -1850,6 +1851,39 @@ describe("net.request — header masking", () => {
     expect(curlCall?.command).toContain("--config -")
     expect(curlCall?.options?.input).toContain(`url = "${url}"`)
     expect(curlCall?.options?.secrets).toContain(url)
+  })
+
+  it("masks camelcase and separated sensitive query parameters without substring matches", async () => {
+    const url =
+      "https://example.com/object?apiKey=abc123&clientSecret=def456&accessKey=ghi789&access_token=jkl012&monkey=banana"
+    const mockSsh = createMockSsh()
+
+    const mod = net.request(url)
+    await mod.check(mockSsh, emptyEnv)
+
+    const curlCall = getFirstCurlExecCall(mockSsh)
+    expect(curlCall.command).not.toContain(url)
+    expect(curlCall.command).toContain("--config -")
+    expect(curlCall.options?.input).toContain(`url = "${url}"`)
+    expect(curlCall.options?.secrets).toContain(url)
+    expect(mod.name).toBe(
+      "net.request: GET https://example.com/object?apiKey=REDACTED&clientSecret=REDACTED&accessKey=REDACTED&access_token=REDACTED&monkey=banana"
+    )
+  })
+
+  it("does not treat non-sensitive query substrings as secrets", async () => {
+    const url = "https://example.com/object?monkey=banana&partition=1"
+    const mockSsh = createMockSsh()
+
+    const mod = net.request(url)
+    await mod.check(mockSsh, emptyEnv)
+
+    const curlCall = getFirstCurlExecCall(mockSsh)
+    expect(curlCall.command).toContain(shellQuote(url))
+    expect(curlCall.command).not.toContain("--config -")
+    expect(curlCall.options?.input).toBeUndefined()
+    expect(curlCall.options?.secrets).toStrictEqual([])
+    expect(mod.name).toBe(`net.request: GET ${url}`)
   })
 
   it("masks URL userinfo by routing the URL through stdin", async () => {
