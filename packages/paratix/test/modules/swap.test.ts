@@ -4,7 +4,7 @@ import { swap } from "../../src/modules/swap.js"
 import { createMockSsh as createBaseMockSsh } from "../helpers/mockSsh.js"
 
 const createMockSsh: typeof createBaseMockSsh = (responses, options) =>
-  createBaseMockSsh(responses, { defaultTestResult: true, ...options })
+  createBaseMockSsh(responses, options)
 
 const emptyEnv = {}
 const swapPath = "/swapfile"
@@ -21,6 +21,7 @@ describe("swap.file — check", () => {
 
   it("returns ok when swap file, activation, fstab entry, and mode all match", async () => {
     const ssh = createMockSsh({
+      [`[ -e '${swapPath}' ]`]: { code: 0 },
       [`cat '/etc/fstab'`]: { stdout: `${fstabLine}\n` },
       [`cat '${swapPath}'`]: { stdout: "existing swap bytes" },
       [`stat -c '%a' '${swapPath}'`]: { code: 0, stdout: "600\n" },
@@ -35,6 +36,7 @@ describe("swap.file — check", () => {
 
   it("returns needs-apply when the swap file mode drifts", async () => {
     const ssh = createMockSsh({
+      [`[ -e '${swapPath}' ]`]: { code: 0 },
       [`cat '/etc/fstab'`]: { stdout: `${fstabLine}\n` },
       [`cat '${swapPath}'`]: { stdout: "existing swap bytes" },
       [`stat -c '%a' '${swapPath}'`]: { code: 0, stdout: "644\n" },
@@ -49,6 +51,7 @@ describe("swap.file — check", () => {
 
   it("returns needs-apply when stat for the swap file mode fails", async () => {
     const ssh = createMockSsh({
+      [`[ -e '${swapPath}' ]`]: { code: 0 },
       [`cat '/etc/fstab'`]: { stdout: `${fstabLine}\n` },
       [`cat '${swapPath}'`]: { stdout: "existing swap bytes" },
       [`stat -c '%a' '${swapPath}'`]: { code: 1, stdout: "" },
@@ -74,6 +77,7 @@ describe("swap.file — check", () => {
 
   it("returns needs-apply when the size differs", async () => {
     const ssh = createMockSsh({
+      [`[ -e '${swapPath}' ]`]: { code: 0 },
       [`cat '${swapPath}'`]: { stdout: "existing swap bytes" },
       [`stat -c %s '${swapPath}'`]: { stdout: "1073741824" },
     })
@@ -84,6 +88,7 @@ describe("swap.file — check", () => {
 
   it("returns needs-apply when the file lacks a swap signature", async () => {
     const ssh = createMockSsh({
+      [`[ -e '${swapPath}' ]`]: { code: 0 },
       [`cat '${swapPath}'`]: { stdout: "existing bytes" },
       [`stat -c %s '${swapPath}'`]: { stdout: swapSizeBytes },
       [`swaplabel '${swapPath}' >/dev/null 2>&1`]: { code: 1 },
@@ -95,6 +100,7 @@ describe("swap.file — check", () => {
 
   it("returns needs-apply when the swap is not active", async () => {
     const ssh = createMockSsh({
+      [`[ -e '${swapPath}' ]`]: { code: 0 },
       [`cat '${swapPath}'`]: { stdout: "existing swap bytes" },
       [`stat -c %s '${swapPath}'`]: { stdout: swapSizeBytes },
       [`swaplabel '${swapPath}' >/dev/null 2>&1`]: { code: 0 },

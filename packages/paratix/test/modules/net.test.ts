@@ -29,11 +29,45 @@ const createMockSsh: typeof createBaseMockSsh = (responses, options) =>
 
 const emptyEnv = {}
 const routeDropinPath = "/etc/systemd/network/50-paratix-route-10.0.0.0-24.network"
-const SUCCESSFUL_EXEC_DEFAULT = { code: 0 } as const
-const APPLY_TO_NEW_FILE_DEFAULTS = {
-  defaultExecResult: SUCCESSFUL_EXEC_DEFAULT,
-  defaultTestResult: false,
-} as const
+const SUCCESSFUL_ROUTE_APPLY_OPTIONS = {
+  responseStubs: [
+    { command: /^ip route replace '[^']+' via '[^']+'$/v, result: { code: 0 } },
+    { command: /^ip route replace '[^']+' via '[^']+' dev '[^']+'$/v, result: { code: 0 } },
+    { command: /^ip route del '[^']+' via '[^']+'$/v, result: { code: 0 } },
+    { command: /^ip route del '[^']+' via '[^']+' dev '[^']+'$/v, result: { code: 0 } },
+    {
+      command: /^rm -f '\/etc\/systemd\/network\/50-paratix-route-[^']+\.network'$/v,
+      result: { code: 0 },
+    },
+    { command: "networkctl reload", result: { code: 0 } },
+    { command: "mkdir -p /var/lib/paratix/flags", result: { code: 0 } },
+    {
+      command:
+        /^find \/var\/lib\/paratix\/flags -maxdepth 1 -name 'net-route-[^']+-\*' ! -name '\*\.lock' -delete && touch \/var\/lib\/paratix\/flags\/'net-route-[^']+'$/v,
+      result: { code: 0 },
+    },
+    { command: /^ip route show '[^']+'$/v, result: { code: 0, stdout: "" } },
+  ],
+} satisfies NonNullable<Parameters<typeof createMockSsh>[1]>
+const APPLY_TO_NEW_FILE_OPTIONS = {
+  responseStubs: [
+    { command: /^test -f '\/etc\/netplan\/60-paratix-[^']+\.yaml'$/v, result: { code: 1 } },
+    {
+      command: /^test -f '\/etc\/systemd\/network\/60-paratix-[^']+\.network'$/v,
+      result: { code: 1 },
+    },
+    { command: "netplan apply", result: { code: 0 } },
+    { command: "networkctl reload", result: { code: 0 } },
+    {
+      command: /^rm -f '\/etc\/netplan\/60-paratix-[^']+\.yaml'$/v,
+      result: { code: 0 },
+    },
+    {
+      command: /^rm -f '\/etc\/systemd\/network\/60-paratix-[^']+\.network'$/v,
+      result: { code: 0 },
+    },
+  ],
+} satisfies NonNullable<Parameters<typeof createMockSsh>[1]>
 
 function buildRouteReloadFlagCheck(input: {
   destination: string
@@ -682,21 +716,21 @@ describe("net.route — apply", () => {
   })
 
   it("returns changed after adding a route (state: present)", async () => {
-    const mockSsh = createMockSsh({}, { defaultExecResult: SUCCESSFUL_EXEC_DEFAULT })
+    const mockSsh = createMockSsh({}, SUCCESSFUL_ROUTE_APPLY_OPTIONS)
     const mod = net.route("10.0.0.0/24", "192.168.1.1")
     const result = await mod.apply(mockSsh, emptyEnv)
     expect(result.status).toBe("changed")
   })
 
   it("runs ip route replace (state: present)", async () => {
-    const mockSsh = createMockSsh({}, { defaultExecResult: SUCCESSFUL_EXEC_DEFAULT })
+    const mockSsh = createMockSsh({}, SUCCESSFUL_ROUTE_APPLY_OPTIONS)
     const mod = net.route("10.0.0.0/24", "192.168.1.1")
     await mod.apply(mockSsh, emptyEnv)
     expect(mockSsh.calls).toContain("ip route replace '10.0.0.0/24' via '192.168.1.1'")
   })
 
   it("runs ip route replace with dev when device is given (state: present)", async () => {
-    const mockSsh = createMockSsh({}, { defaultExecResult: SUCCESSFUL_EXEC_DEFAULT })
+    const mockSsh = createMockSsh({}, SUCCESSFUL_ROUTE_APPLY_OPTIONS)
     const mod = net.route("10.0.0.0/24", "192.168.1.1", { device: "eth0" })
     await mod.apply(mockSsh, emptyEnv)
     expect(mockSsh.calls).toContain("ip route replace '10.0.0.0/24' via '192.168.1.1' dev 'eth0'")
@@ -708,7 +742,7 @@ describe("net.route — apply", () => {
       options?: { mode?: string }
       path: string
     }> = []
-    const mockSsh = createMockSsh({}, { defaultExecResult: SUCCESSFUL_EXEC_DEFAULT })
+    const mockSsh = createMockSsh({}, SUCCESSFUL_ROUTE_APPLY_OPTIONS)
     mockSsh.writeFile = async (
       path: string,
       content: string,
@@ -735,7 +769,7 @@ describe("net.route — apply", () => {
   })
 
   it("reloads networkctl after adding route (state: present)", async () => {
-    const mockSsh = createMockSsh({}, { defaultExecResult: SUCCESSFUL_EXEC_DEFAULT })
+    const mockSsh = createMockSsh({}, SUCCESSFUL_ROUTE_APPLY_OPTIONS)
     const mod = net.route("10.0.0.0/24", "192.168.1.1")
     await mod.apply(mockSsh, emptyEnv)
     expect(mockSsh.calls).toContain("networkctl reload")
@@ -765,7 +799,7 @@ describe("net.route — apply", () => {
       {
         "networkctl reload": { code: 1, stderr: "reload failed" },
       },
-      { defaultExecResult: SUCCESSFUL_EXEC_DEFAULT }
+      SUCCESSFUL_ROUTE_APPLY_OPTIONS
     )
     const mod = net.route("10.0.0.0/24", "192.168.1.1")
     const result = await mod.apply(mockSsh, emptyEnv)
@@ -775,7 +809,7 @@ describe("net.route — apply", () => {
   })
 
   it("returns changed after removing a route (state: absent)", async () => {
-    const mockSsh = createMockSsh({}, { defaultExecResult: SUCCESSFUL_EXEC_DEFAULT })
+    const mockSsh = createMockSsh({}, SUCCESSFUL_ROUTE_APPLY_OPTIONS)
     const mod = net.route("10.0.0.0/24", "192.168.1.1", { state: "absent" })
     const result = await mod.apply(mockSsh, emptyEnv)
     expect(result.status).toBe("changed")
@@ -786,7 +820,7 @@ describe("net.route — apply", () => {
       {
         [routeShowCommand]: { code: 0, stdout: liveRouteOutput },
       },
-      { defaultExecResult: SUCCESSFUL_EXEC_DEFAULT }
+      SUCCESSFUL_ROUTE_APPLY_OPTIONS
     )
     const mod = net.route("10.0.0.0/24", "192.168.1.1", { state: "absent" })
     await mod.apply(mockSsh, emptyEnv)
@@ -798,7 +832,7 @@ describe("net.route — apply", () => {
       {
         [routeShowCommand]: { code: 0, stdout: liveRouteOutput },
       },
-      { defaultExecResult: SUCCESSFUL_EXEC_DEFAULT }
+      SUCCESSFUL_ROUTE_APPLY_OPTIONS
     )
     const mod = net.route("10.0.0.0/24", "192.168.1.1", {
       device: "eth0",
@@ -829,7 +863,7 @@ describe("net.route — apply", () => {
       {
         [routeShowCommand]: { code: 0, stdout: "" },
       },
-      { defaultExecResult: SUCCESSFUL_EXEC_DEFAULT }
+      SUCCESSFUL_ROUTE_APPLY_OPTIONS
     )
     const mod = net.route("10.0.0.0/24", "192.168.1.1", { state: "absent" })
     const result = await mod.apply(mockSsh, emptyEnv)
@@ -842,7 +876,7 @@ describe("net.route — apply", () => {
 
   it("removes drop-in file when state is absent", async () => {
     const dropinPath = "/etc/systemd/network/50-paratix-route-10.0.0.0-24.network"
-    const mockSsh = createMockSsh({}, { defaultExecResult: SUCCESSFUL_EXEC_DEFAULT })
+    const mockSsh = createMockSsh({}, SUCCESSFUL_ROUTE_APPLY_OPTIONS)
     const mod = net.route("10.0.0.0/24", "192.168.1.1", { state: "absent" })
     await mod.apply(mockSsh, emptyEnv)
     expect(mockSsh.calls).toContain(`rm -f '${dropinPath}'`)
@@ -862,7 +896,7 @@ describe("net.route — apply", () => {
   })
 
   it("reloads networkctl after removing route (state: absent)", async () => {
-    const mockSsh = createMockSsh({}, { defaultExecResult: SUCCESSFUL_EXEC_DEFAULT })
+    const mockSsh = createMockSsh({}, SUCCESSFUL_ROUTE_APPLY_OPTIONS)
     const mod = net.route("10.0.0.0/24", "192.168.1.1", { state: "absent" })
     await mod.apply(mockSsh, emptyEnv)
     expect(mockSsh.calls).toContain("networkctl reload")
@@ -873,7 +907,7 @@ describe("net.route — apply", () => {
       {
         "networkctl reload": { code: 1, stderr: "reload failed" },
       },
-      { defaultExecResult: SUCCESSFUL_EXEC_DEFAULT }
+      SUCCESSFUL_ROUTE_APPLY_OPTIONS
     )
     const mod = net.route("10.0.0.0/24", "192.168.1.1", { state: "absent" })
     const result = await mod.apply(mockSsh, emptyEnv)
@@ -883,7 +917,7 @@ describe("net.route — apply", () => {
 
   it("sanitizes destination with colons for drop-in filename", async () => {
     // IPv6 destination: colons replaced with dashes
-    const mockSsh = createMockSsh({}, { defaultExecResult: SUCCESSFUL_EXEC_DEFAULT })
+    const mockSsh = createMockSsh({}, SUCCESSFUL_ROUTE_APPLY_OPTIONS)
     const mod = net.route("fd00::/64", "fe80::1", { state: "absent" })
     await mod.apply(mockSsh, emptyEnv)
     // drop-in path uses sanitized destination
@@ -1184,7 +1218,7 @@ describe("net.interface — apply", () => {
       {
         "test -d '/etc/netplan'": { code: 0 },
       },
-      APPLY_TO_NEW_FILE_DEFAULTS
+      APPLY_TO_NEW_FILE_OPTIONS
     )
     const mod = net.interface("eth0", {})
     const result = await mod.apply(mockSsh, emptyEnv)
@@ -1196,7 +1230,7 @@ describe("net.interface — apply", () => {
       {
         "test -d '/etc/netplan'": { code: 0 },
       },
-      APPLY_TO_NEW_FILE_DEFAULTS
+      APPLY_TO_NEW_FILE_OPTIONS
     )
     const mod = net.interface("eth0", {})
     await mod.apply(mockSsh, emptyEnv)
@@ -1209,7 +1243,7 @@ describe("net.interface — apply", () => {
         "netplan apply": { code: 1, stderr: "bad netplan" },
         "test -d '/etc/netplan'": { code: 0 },
       },
-      APPLY_TO_NEW_FILE_DEFAULTS
+      APPLY_TO_NEW_FILE_OPTIONS
     )
     const mod = net.interface("eth0", {})
     const result = await mod.apply(mockSsh, emptyEnv)
@@ -1245,7 +1279,7 @@ describe("net.interface — apply", () => {
         "netplan apply": { code: 1, stderr: "bad netplan" },
         "test -d '/etc/netplan'": { code: 0 },
       },
-      APPLY_TO_NEW_FILE_DEFAULTS
+      APPLY_TO_NEW_FILE_OPTIONS
     )
     const mod = net.interface("eth0", { dhcp: true })
 
@@ -1260,7 +1294,7 @@ describe("net.interface — apply", () => {
       {
         "test -d '/etc/netplan'": { code: 1 },
       },
-      APPLY_TO_NEW_FILE_DEFAULTS
+      APPLY_TO_NEW_FILE_OPTIONS
     )
     const mod = net.interface("eth0", {})
     const result = await mod.apply(mockSsh, emptyEnv)
@@ -1272,7 +1306,7 @@ describe("net.interface — apply", () => {
       {
         "test -d '/etc/netplan'": { code: 1 },
       },
-      APPLY_TO_NEW_FILE_DEFAULTS
+      APPLY_TO_NEW_FILE_OPTIONS
     )
     const mod = net.interface("eth0", {})
     await mod.apply(mockSsh, emptyEnv)
@@ -1285,7 +1319,7 @@ describe("net.interface — apply", () => {
         "networkctl reload": { code: 1, stderr: "reload failed" },
         "test -d '/etc/netplan'": { code: 1 },
       },
-      APPLY_TO_NEW_FILE_DEFAULTS
+      APPLY_TO_NEW_FILE_OPTIONS
     )
     const mod = net.interface("eth0", {})
     const result = await mod.apply(mockSsh, emptyEnv)
@@ -1318,7 +1352,7 @@ describe("net.interface — apply", () => {
       {
         "test -d '/etc/netplan'": { code: 1 },
       },
-      APPLY_TO_NEW_FILE_DEFAULTS
+      APPLY_TO_NEW_FILE_OPTIONS
     )
     const mod = net.interface("eth0", {})
     await mod.apply(mockSsh, emptyEnv)
@@ -1330,7 +1364,7 @@ describe("net.interface — apply", () => {
       {
         "test -d '/etc/netplan'": { code: 0 },
       },
-      APPLY_TO_NEW_FILE_DEFAULTS
+      APPLY_TO_NEW_FILE_OPTIONS
     )
     const mod = net.interface("eth0", {})
     await mod.apply(mockSsh, emptyEnv)
@@ -1342,7 +1376,7 @@ describe("net.interface — apply", () => {
       {
         "test -d '/etc/netplan'": { code: 0 },
       },
-      APPLY_TO_NEW_FILE_DEFAULTS
+      APPLY_TO_NEW_FILE_OPTIONS
     )
     const mod = net.interface("eth0", { dhcp: true })
     const result = await mod.apply(mockSsh, emptyEnv)
@@ -1354,7 +1388,7 @@ describe("net.interface — apply", () => {
       {
         "test -d '/etc/netplan'": { code: 1 },
       },
-      APPLY_TO_NEW_FILE_DEFAULTS
+      APPLY_TO_NEW_FILE_OPTIONS
     )
     const mod = net.interface("eth0", {
       addresses: ["192.168.1.10/24"],
@@ -1370,7 +1404,7 @@ describe("net.interface — apply", () => {
       {
         "test -d '/etc/netplan'": { code: 0 },
       },
-      APPLY_TO_NEW_FILE_DEFAULTS
+      APPLY_TO_NEW_FILE_OPTIONS
     )
     const mod = net.interface("eth0", {
       addresses: ["192.168.1.10/24"],
@@ -1387,7 +1421,7 @@ describe("net.interface — apply", () => {
       {
         "test -d '/etc/netplan'": { code: 0 },
       },
-      APPLY_TO_NEW_FILE_DEFAULTS
+      APPLY_TO_NEW_FILE_OPTIONS
     )
     const mod = net.interface("eth0", {})
     await mod.apply(mockSsh, emptyEnv)

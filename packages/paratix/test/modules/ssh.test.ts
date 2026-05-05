@@ -11,8 +11,36 @@ const createMockSsh: typeof createBaseMockSsh = (responses, options) =>
   createBaseMockSsh(responses, options)
 
 const successfulSshApplyOptions: MockSshOptions = {
-  defaultExecResult: { code: 0 },
-  defaultTestResult: true,
+  responseStubs: [
+    { command: "mkdir -p ~/.ssh && chmod 700 ~/.ssh", result: { code: 0 } },
+    { command: /^ssh-keygen -F '[^']+'$/v, result: { code: 1 } },
+    { command: /^ssh-keygen -R '[^']+'$/v, result: { code: 0 } },
+    {
+      command: /^printf '%s\\n' '[^']+' >> ~\/\.ssh\/known_hosts$/v,
+      result: { code: 0 },
+    },
+    {
+      command:
+        /^\[ ! -L '[^']+\/\.ssh' \] \|\| \{ echo '\.ssh must not be a symlink' >&2; exit 1; \}; if \[ -e '[^']+\/\.ssh' \]; then \[ -d '[^']+\/\.ssh' \] \|\| \{ echo '\.ssh must be a directory' >&2; exit 1; \}; else mkdir -p '[^']+\/\.ssh'; fi; \[ -d '[^']+\/\.ssh' \] && \[ ! -L '[^']+\/\.ssh' \] \|\| \{ echo '\.ssh must be a real directory' >&2; exit 1; \}; chmod 700 '[^']+\/\.ssh' && chown '[^']+':'[^']+' '[^']+\/\.ssh'$/v,
+      result: { code: 0 },
+    },
+    {
+      command:
+        /^\[ ! -L '[^']+\/\.ssh\/authorized_keys' \] \|\| \{ echo 'authorized_keys must not be a symlink' >&2; exit 1; \}$/v,
+      result: { code: 0 },
+    },
+    {
+      command:
+        /^\{ if \[ -f '[^']+\/\.ssh\/authorized_keys' \]; then .+; fi; \} > '[^']+\/\.ssh\/\.authorized-keys\.[^']+'$/v,
+      result: { code: 0 },
+    },
+    {
+      command:
+        /^chmod 600 '[^']+\/\.ssh\/\.authorized-keys\.[^']+' && chown '[^']+':'[^']+' '[^']+\/\.ssh\/\.authorized-keys\.[^']+' && mv '[^']+\/\.ssh\/\.authorized-keys\.[^']+' '[^']+\/\.ssh\/authorized_keys' && chmod 600 '[^']+\/\.ssh\/authorized_keys' && chown '[^']+':'[^']+' '[^']+\/\.ssh\/authorized_keys'$/v,
+      result: { code: 0 },
+    },
+    { command: /^rm -f '[^']+\/\.ssh\/\.authorized-keys\.[^']+'$/v, result: { code: 0 } },
+  ],
 }
 
 function createSshApplyMockSsh(responses: MockSshResponses = {}) {
