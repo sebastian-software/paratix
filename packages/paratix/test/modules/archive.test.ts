@@ -641,6 +641,25 @@ describe("archive.extract — apply", () => {
     )
   })
 
+  it("rejects extraction before creating the destination when a parent directory is a symlink", async () => {
+    const symlinkedDestinationAncestor = "/opt"
+    const mockSsh = createMockSsh({
+      [`test ! -L '${symlinkedDestinationAncestor}'`]: { code: 1 },
+    })
+
+    const mod = archive.extract(src, destination)
+    const result = await mod.apply(mockSsh, emptyEnv)
+
+    expect(result.status).toBe("failed")
+    expect(String(result.error)).toContain(JSON.stringify(symlinkedDestinationAncestor))
+    expect(String(result.error)).toContain("is a symlink")
+    expect(mockSsh.calls).not.toContain(`mkdir -p '${destination}'`)
+    expect(mockSsh.calls).not.toContain(`tar -tvzf '${src}'`)
+    expect(mockSsh.calls).not.toContain(
+      `tar --no-same-owner --no-overwrite-dir -xzf '${src}' -C '${destination}'`
+    )
+  })
+
   it("rejects extraction when an existing member ancestor is a symlink", async () => {
     const symlinkedMemberAncestor = `${destination}/app`
     const mockSsh = createMockSsh({
