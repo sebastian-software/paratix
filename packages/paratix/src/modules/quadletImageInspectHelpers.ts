@@ -4,7 +4,7 @@ function shellQuoteForQuadletImageInspect(value: string): string {
 }
 
 export function buildQuadletImageInspectCommand(image: string): string {
-  return `podman image inspect ${shellQuoteForQuadletImageInspect(image)}`
+  return `podman image inspect -- ${shellQuoteForQuadletImageInspect(image)}`
 }
 
 export function formatQuadletImageIdentifierDetail(imageIdentifier: string): string {

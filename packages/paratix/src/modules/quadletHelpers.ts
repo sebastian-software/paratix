@@ -264,7 +264,7 @@ export function buildQuadletInstallSection(options: QuadletContainerOptions): st
 export function buildQuadletImagePullCommand(options: QuadletImageUpdateOptions): string {
   const authFileFlag =
     options.authFile == null ? "" : ` --authfile ${shellQuoteForQuadlet(options.authFile)}`
-  return `podman pull${authFileFlag} ${shellQuoteForQuadlet(options.image)} 2>&1`
+  return `podman pull${authFileFlag} -- ${shellQuoteForQuadlet(options.image)} 2>&1`
 }
 
 export function getQuadletContainerFilePath(name: string): string {
@@ -284,6 +284,12 @@ const UNIT_NAME_PATTERN = /^[\w@.\-]+$/v
 export function validateQuadletName(name: string): void {
   if (!UNIT_NAME_PATTERN.test(name)) {
     throw new Error(`quadlet: name must match ${String(UNIT_NAME_PATTERN)}, got: ${name}`)
+  }
+}
+
+export function validateQuadletImageValue(field: string, value: string): void {
+  if (value.startsWith("-")) {
+    throw new Error(`quadlet: ${field} must not start with '-', got: ${JSON.stringify(value)}`)
   }
 }
 

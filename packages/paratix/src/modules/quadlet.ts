@@ -15,6 +15,7 @@ import {
   type QuadletImageUpdateOptions,
   quadletPullOutputIndicatesChange,
   renderQuadletSection,
+  validateQuadletImageValue,
   validateQuadletName,
 } from "./quadletHelpers.js"
 import {
@@ -219,6 +220,7 @@ export const quadlet = {
    */
   container(options: QuadletContainerOptions): Module {
     validateQuadletName(options.name)
+    validateQuadletImageValue("image", options.image)
     const filePath = getQuadletContainerFilePath(options.name)
     const content = generateContainerQuadlet(options)
     const reloadFlag = buildQuadletReloadFlag(options.name, content)
@@ -254,6 +256,8 @@ export const quadlet = {
   updateImage(options: QuadletImageUpdateOptions): Module {
     validateQuadletName(options.name)
     if (options.serviceName != null) validateQuadletName(options.serviceName)
+    validateQuadletImageValue("image", options.image)
+    if (options.authFile != null) validateQuadletImageValue("authFile", options.authFile)
 
     const pullCommand = buildQuadletImagePullCommand(options)
     const inspectCommand = buildQuadletImageInspectCommand(options.image)
