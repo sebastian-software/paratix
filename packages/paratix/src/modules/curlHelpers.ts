@@ -16,6 +16,7 @@ const SENSITIVE_QUERY_TOKENS = new Set([
   "token",
 ])
 const QUERY_PARAMETER_SEPARATORS = new Set(["_", "-", "."])
+const REDACTED_URL_VALUE = "REDACTED"
 
 /**
  * Check whether a string is a valid HTTP header name per RFC 7230 (token chars).
@@ -127,6 +128,30 @@ export function hasSensitiveQueryParameters(url: URL): boolean {
     if (isSensitiveQueryParameterName(name)) return true
   }
   return false
+}
+
+/**
+ * Redact credentials and sensitive query parameter values before rendering a
+ * URL into user-visible text.
+ *
+ * @param url - The parsed URL to redact.
+ * @returns A stringified URL with credentials and sensitive query values redacted.
+ */
+export function redactUrlForDisplay(url: URL): string {
+  const displayUrl = new URL(url)
+  if (displayUrl.username.length > 0) displayUrl.username = REDACTED_URL_VALUE
+  if (displayUrl.password.length > 0) displayUrl.password = REDACTED_URL_VALUE
+  if (hasSensitiveQueryParameters(displayUrl)) {
+    const redactedParameters = new URLSearchParams()
+    for (const [name, value] of displayUrl.searchParams) {
+      redactedParameters.append(
+        name,
+        isSensitiveQueryParameterName(name) ? REDACTED_URL_VALUE : value
+      )
+    }
+    displayUrl.search = redactedParameters.toString()
+  }
+  return displayUrl.toString()
 }
 
 /**

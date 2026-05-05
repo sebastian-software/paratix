@@ -740,6 +740,29 @@ describe("download.url", () => {
       )
     })
 
+    it("redacts URL credentials from rejected download.url schemes", () => {
+      const secretUrl = "http://user:s3cr3t@example.com/file?download=true"
+
+      expect(() => download.url(destination, secretUrl, allowUnverifiedDownload)).toThrow(
+        "http://REDACTED:REDACTED@example.com/file?download=true"
+      )
+      expect(() => download.url(destination, secretUrl, allowUnverifiedDownload)).not.toThrow(
+        /user|s3cr3t/v
+      )
+    })
+
+    it("redacts sensitive query values from rejected download.url schemes", () => {
+      const secretUrl =
+        "http://example.com/file?token=abc123&signature=sig456&download=true&monkey=banana"
+
+      expect(() => download.url(destination, secretUrl, allowUnverifiedDownload)).toThrow(
+        "token=REDACTED&signature=REDACTED&download=true&monkey=banana"
+      )
+      expect(() => download.url(destination, secretUrl, allowUnverifiedDownload)).not.toThrow(
+        /abc123|sig456/v
+      )
+    })
+
     it("accepts http:// URL when allowInsecureHttp is true", () => {
       expect(() =>
         download.url(destination, "http://example.com/file", {
@@ -1432,6 +1455,17 @@ describe("download.large", () => {
       expect(() => download.large(destination, "not-a-url")).toThrow("Invalid URL")
     })
 
+    it("does not echo malformed download.large URLs in validation errors", () => {
+      const secretUrl = "https://example .com/large-file.iso?token=abc123"
+
+      expect(() => download.large(destination, secretUrl, allowUnverifiedDownload)).toThrow(
+        "Invalid URL: expected an http or https URL"
+      )
+      expect(() => download.large(destination, secretUrl, allowUnverifiedDownload)).not.toThrow(
+        /abc123|example \.com/v
+      )
+    })
+
     it("accepts https:// URL with explicit opt-out", () => {
       expect(() =>
         download.large(destination, "https://example.com/file", allowUnverifiedDownload)
@@ -1441,6 +1475,17 @@ describe("download.large", () => {
     it("rejects http:// URL without explicit opt-in", () => {
       expect(() => download.large(destination, "http://example.com/file")).toThrow(
         "Insecure URL scheme"
+      )
+    })
+
+    it("redacts URL credentials and sensitive query values from rejected download.large schemes", () => {
+      const secretUrl = "http://user:s3cr3t@example.com/large-file.iso?sig=abc123&expires=123"
+
+      expect(() => download.large(destination, secretUrl, allowUnverifiedDownload)).toThrow(
+        "http://REDACTED:REDACTED@example.com/large-file.iso?sig=REDACTED&expires=123"
+      )
+      expect(() => download.large(destination, secretUrl, allowUnverifiedDownload)).not.toThrow(
+        /user|s3cr3t|abc123/v
       )
     })
   })

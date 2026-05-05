@@ -5,9 +5,9 @@ import {
   buildCurlArgvHeaderFlags,
   buildCurlConfigPayload,
   hasSensitiveQueryParameters,
-  isSensitiveQueryParameterName,
   isValidHeaderName,
   isValidHeaderValue,
+  redactUrlForDisplay as redactParsedUrlForDisplay,
   validateCurlConfigValue,
 } from "./curlHelpers.js"
 
@@ -52,7 +52,6 @@ export type HttpCheckParameters = {
 }
 
 const HTTP_STATUS_MARKER = "\n__PARATIX_HTTP_STATUS__:"
-const REDACTED_QUERY_VALUE = "REDACTED"
 
 /**
  * Build the shell command used to test a wait-for condition.
@@ -122,32 +121,12 @@ function hasUrlCredentials(url: URL): boolean {
   return url.username.length > 0 || url.password.length > 0
 }
 
-function redactUrlCredentials(url: URL): URL {
-  const displayUrl = new URL(url)
-  if (displayUrl.username.length > 0) displayUrl.username = REDACTED_QUERY_VALUE
-  if (displayUrl.password.length > 0) displayUrl.password = REDACTED_QUERY_VALUE
-  return displayUrl
-}
-
-function redactSensitiveQueryParameters(url: URL): URL {
-  const displayUrl = new URL(url)
-  for (const [name] of displayUrl.searchParams) {
-    if (isSensitiveQueryParameterName(name)) {
-      displayUrl.searchParams.set(name, REDACTED_QUERY_VALUE)
-    }
-  }
-  return displayUrl
-}
-
 function redactUrlForDisplay(url: string, parsedUrl: URL): string {
   const shouldRedactQuery = hasSensitiveQueryParameters(parsedUrl)
   const shouldRedactCredentials = hasUrlCredentials(parsedUrl)
   if (!shouldRedactQuery && !shouldRedactCredentials) return url
 
-  let displayUrl = new URL(parsedUrl)
-  if (shouldRedactCredentials) displayUrl = redactUrlCredentials(displayUrl)
-  if (shouldRedactQuery) displayUrl = redactSensitiveQueryParameters(displayUrl)
-  return displayUrl.toString()
+  return redactParsedUrlForDisplay(parsedUrl)
 }
 
 /**
@@ -318,16 +297,19 @@ export function validateHttpUrl(url: string, options?: { allowHttp?: boolean }):
   try {
     parsed = new URL(url)
   } catch {
-    throw new Error(`Invalid URL '${url}': expected an http or https URL`)
+    throw new Error("Invalid URL: expected an http or https URL")
   }
+  const displayUrl = redactParsedUrlForDisplay(parsed)
   if (parsed.protocol === "https:") return
   if (parsed.protocol === "http:" && options?.allowHttp === true) return
   if (parsed.protocol === "http:") {
-    throw new Error(`Insecure URL scheme 'http' in '${url}': only https is allowed by default`)
+    throw new Error(
+      `Insecure URL scheme 'http' in '${displayUrl}': only https is allowed by default`
+    )
   }
   if (parsed.protocol !== "https:") {
     throw new Error(
-      `Unsupported URL scheme '${parsed.protocol.replace(/:$/v, "")}' in '${url}': only http and https are allowed`
+      `Unsupported URL scheme '${parsed.protocol.replace(/:$/v, "")}' in '${displayUrl}': only http and https are allowed`
     )
   }
 }
