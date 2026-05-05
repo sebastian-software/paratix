@@ -57,6 +57,10 @@ function includesGrepRewrite(command: string): boolean {
   return command.includes(" > '") && command.includes("grep")
 }
 
+function isKnownHostsAppend(command: string): boolean {
+  return command.startsWith("printf '%s\\n' ") && command.endsWith(" >> ~/.ssh/known_hosts")
+}
+
 function makeHostKeyBuffer(algo: string, keyData = Buffer.from("fake-host-key-data")): Buffer {
   const algoBytes = Buffer.from(algo)
   const lengthBuffer = Buffer.alloc(4)
@@ -295,10 +299,9 @@ describe("ssh.knownHosts", () => {
     const result = await mod.apply(mockSsh, emptyEnv)
 
     expect(result.status).toBe("changed")
-    expect(mockSsh.calls).toContain(`printf '%s\\n' '${scannedLine}' >> ~/.ssh/known_hosts`)
-    expect(mockSsh.calls).not.toContain(
-      `printf '%s\\n' '${scannedLine}' '${extraLine}' >> ~/.ssh/known_hosts`
-    )
+    expect(mockSsh.calls.filter(isKnownHostsAppend)).toStrictEqual([
+      `printf '%s\\n' '${scannedLine}' >> ~/.ssh/known_hosts`,
+    ])
   })
 
   it("apply replaces mixed known_hosts entries with verified host key lines", async () => {
