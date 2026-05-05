@@ -105,15 +105,27 @@ describe("service.enabled", () => {
   it("apply returns changed when systemctl enable exits with code 0", async () => {
     const ssh = createMockSsh({
       "systemctl enable -- 'nginx'": { code: 0 },
+      "systemctl is-enabled --quiet -- 'nginx'": { code: 1 },
     })
     const mod = service.enabled("nginx")
     const result = await mod.apply(ssh, emptyEnv)
     expect(result.status).toBe("changed")
   })
 
+  it("apply returns ok without enabling when the service is already enabled", async () => {
+    const ssh = createMockSsh({
+      "systemctl is-enabled --quiet -- 'nginx'": { code: 0 },
+    })
+    const mod = service.enabled("nginx")
+    const result = await mod.apply(ssh, emptyEnv)
+    expect(result.status).toBe("ok")
+    expect(ssh.calls).toStrictEqual(["systemctl is-enabled --quiet -- 'nginx'"])
+  })
+
   it("apply returns failed when systemctl enable exits with non-zero code", async () => {
     const ssh = createMockSsh({
       "systemctl enable -- 'nginx'": { code: 1 },
+      "systemctl is-enabled --quiet -- 'nginx'": { code: 1 },
     })
     const mod = service.enabled("nginx")
     const result = await mod.apply(ssh, emptyEnv)
@@ -131,6 +143,7 @@ describe("service.enabled", () => {
 describe("service.running apply", () => {
   it("apply returns changed when systemctl start exits with code 0", async () => {
     const ssh = createMockSsh({
+      "systemctl is-active --quiet -- 'nginx'": { code: 1 },
       "systemctl start -- 'nginx'": { code: 0 },
     })
     const mod = service.running("nginx")
@@ -138,8 +151,19 @@ describe("service.running apply", () => {
     expect(result.status).toBe("changed")
   })
 
+  it("apply returns ok without starting when the service is already active", async () => {
+    const ssh = createMockSsh({
+      "systemctl is-active --quiet -- 'nginx'": { code: 0 },
+    })
+    const mod = service.running("nginx")
+    const result = await mod.apply(ssh, emptyEnv)
+    expect(result.status).toBe("ok")
+    expect(ssh.calls).toStrictEqual(["systemctl is-active --quiet -- 'nginx'"])
+  })
+
   it("apply returns failed when systemctl start exits with non-zero code", async () => {
     const ssh = createMockSsh({
+      "systemctl is-active --quiet -- 'nginx'": { code: 1 },
       "systemctl start -- 'nginx'": { code: 1 },
     })
     const mod = service.running("nginx")
@@ -182,6 +206,7 @@ describe("service.stopped", () => {
 
   it("apply returns changed when systemctl stop exits with code 0", async () => {
     const ssh = createMockSsh({
+      "systemctl is-active --quiet -- 'nginx'": { code: 0 },
       "systemctl stop -- 'nginx'": { code: 0 },
     })
     const mod = service.stopped("nginx")
@@ -189,8 +214,19 @@ describe("service.stopped", () => {
     expect(result.status).toBe("changed")
   })
 
+  it("apply returns ok without stopping when the service is already inactive", async () => {
+    const ssh = createMockSsh({
+      "systemctl is-active --quiet -- 'nginx'": { code: 1 },
+    })
+    const mod = service.stopped("nginx")
+    const result = await mod.apply(ssh, emptyEnv)
+    expect(result.status).toBe("ok")
+    expect(ssh.calls).toStrictEqual(["systemctl is-active --quiet -- 'nginx'"])
+  })
+
   it("apply returns failed when systemctl stop exits with non-zero code", async () => {
     const ssh = createMockSsh({
+      "systemctl is-active --quiet -- 'nginx'": { code: 0 },
       "systemctl stop -- 'nginx'": { code: 1 },
     })
     const mod = service.stopped("nginx")
@@ -234,15 +270,27 @@ describe("service.disabled", () => {
   it("apply returns changed when systemctl disable exits with code 0", async () => {
     const ssh = createMockSsh({
       "systemctl disable -- 'nginx'": { code: 0 },
+      "systemctl is-enabled --quiet -- 'nginx'": { code: 0 },
     })
     const mod = service.disabled("nginx")
     const result = await mod.apply(ssh, emptyEnv)
     expect(result.status).toBe("changed")
   })
 
+  it("apply returns ok without disabling when the service is already disabled", async () => {
+    const ssh = createMockSsh({
+      "systemctl is-enabled --quiet -- 'nginx'": { code: 1 },
+    })
+    const mod = service.disabled("nginx")
+    const result = await mod.apply(ssh, emptyEnv)
+    expect(result.status).toBe("ok")
+    expect(ssh.calls).toStrictEqual(["systemctl is-enabled --quiet -- 'nginx'"])
+  })
+
   it("apply returns failed when systemctl disable exits with non-zero code", async () => {
     const ssh = createMockSsh({
       "systemctl disable -- 'nginx'": { code: 1 },
+      "systemctl is-enabled --quiet -- 'nginx'": { code: 0 },
     })
     const mod = service.disabled("nginx")
     const result = await mod.apply(ssh, emptyEnv)

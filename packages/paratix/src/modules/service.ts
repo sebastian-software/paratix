@@ -30,6 +30,8 @@ export const service = {
     return {
       async apply(ssh: null | SshConnection): Promise<ModuleResult> {
         if (!ssh) return failed(`[service.disabled: ${name}] SSH connection is required`)
+        const enabled = await ssh.test(`${SYSTEMCTL} is-enabled --quiet -- ${shellQuote(unitName)}`)
+        if (!enabled) return { status: "ok" }
         const result = await ssh.exec(`${SYSTEMCTL} disable -- ${shellQuote(unitName)}`, {
           ignoreExitCode: true,
           silent: true,
@@ -57,6 +59,8 @@ export const service = {
     return {
       async apply(ssh: null | SshConnection): Promise<ModuleResult> {
         if (!ssh) return failed(`[service.enabled: ${name}] SSH connection is required`)
+        const enabled = await ssh.test(`${SYSTEMCTL} is-enabled --quiet -- ${shellQuote(unitName)}`)
+        if (enabled) return { status: "ok" }
         const result = await ssh.exec(`${SYSTEMCTL} enable -- ${shellQuote(unitName)}`, {
           ignoreExitCode: true,
           silent: true,
@@ -178,6 +182,8 @@ export const service = {
     return {
       async apply(ssh: null | SshConnection): Promise<ModuleResult> {
         if (!ssh) return failed(`[service.running: ${name}] SSH connection is required`)
+        const active = await ssh.test(`${SYSTEMCTL} is-active --quiet -- ${shellQuote(unitName)}`)
+        if (active) return { status: "ok" }
         const result = await ssh.exec(`${SYSTEMCTL} start -- ${shellQuote(unitName)}`, {
           ignoreExitCode: true,
           silent: true,
@@ -206,6 +212,8 @@ export const service = {
     return {
       async apply(ssh: null | SshConnection): Promise<ModuleResult> {
         if (!ssh) return failed(`[service.stopped: ${name}] SSH connection is required`)
+        const active = await ssh.test(`${SYSTEMCTL} is-active --quiet -- ${shellQuote(unitName)}`)
+        if (!active) return { status: "ok" }
         const result = await ssh.exec(`${SYSTEMCTL} stop -- ${shellQuote(unitName)}`, {
           ignoreExitCode: true,
           silent: true,
