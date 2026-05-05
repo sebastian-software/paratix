@@ -198,7 +198,7 @@ describe("sftpDownload", () => {
   })
 
   it("writes downloads to a temp file in the destination directory and renames on success", async () => {
-    const { sftp } = makeSftpSession()
+    const { sftp, sftpReadStream } = makeSftpSession()
     const client = makeClientMock(sftp)
 
     const localWriteStream = new EventEmitter()
@@ -215,6 +215,7 @@ describe("sftpDownload", () => {
     expect(tempPath).not.toBe("/local/file.txt")
     expect(tempPath).toMatch(/^\/local\/\.paratix-download-.+\.tmp$/v)
     expect(options).toStrictEqual({ mode: 0o600 })
+    expect(sftpReadStream.pipe).toHaveBeenCalledWith(localWriteStream)
     expect(vi.mocked(renameSync)).toHaveBeenCalledWith(tempPath, "/local/file.txt")
   })
 
@@ -733,6 +734,7 @@ describe("sftpUpload", () => {
     ).mock.calls
     expect(createWriteStreamCalls).toHaveLength(1)
     expect(createWriteStreamCalls[0]).toStrictEqual(["/remote/file.txt", { mode: 0o600 }])
+    expect(localReadStream.pipe).toHaveBeenCalledWith(sftpWriteStream)
   })
 
   it("preserves unicode local and remote paths for uploads", async () => {
