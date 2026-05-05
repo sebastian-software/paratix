@@ -1,9 +1,6 @@
 import { shellQuote } from "../ssh.js"
 
-/** Last ASCII control character (U+001F). */
-const LAST_CONTROL_CHAR = 0x1f
-/** ASCII DEL character (U+007F). */
-const DEL_CHAR = 0x7f
+const HTTP_HEADER_NAME_SPECIAL_CHARS = "!#$%&'*+-.^_`|~"
 const SENSITIVE_QUERY_TOKENS = new Set([
   "auth",
   "credential",
@@ -20,17 +17,25 @@ const REDACTED_URL_VALUE = "REDACTED"
 
 /**
  * Check whether a string is a valid HTTP header name per RFC 7230 (token chars).
- * Rejects control characters, DEL, colons, and any non-printable ASCII.
+ * Rejects whitespace, separators outside the token grammar, and non-ASCII.
  *
  * @param name - The header name to validate.
  * @returns `true` if the name contains only valid token characters, `false` otherwise.
  */
 export function isValidHeaderName(name: string): boolean {
-  for (let index = 0; index < name.length; index++) {
-    const code = name.charCodeAt(index)
-    if (code <= LAST_CONTROL_CHAR || code >= DEL_CHAR || name[index] === ":") return false
+  if (name.length === 0) return false
+  for (const char of name) {
+    if (
+      isAsciiUppercase(char) ||
+      isAsciiLowercase(char) ||
+      isAsciiDigit(char) ||
+      HTTP_HEADER_NAME_SPECIAL_CHARS.includes(char)
+    ) {
+      continue
+    }
+    return false
   }
-  return name.length > 0
+  return true
 }
 
 /**
