@@ -317,6 +317,64 @@ describe("mount.present — check", () => {
     expect(result).toBe("ok")
   })
 
+  it("returns ok when ext4 adds generated live options to defaults", async () => {
+    const ext4Src = "/dev/sdb1"
+    const ext4Fstype = "ext4"
+    const mockSsh = createMockSsh({
+      "cat '/etc/fstab'": {
+        stdout: `${ext4Src} ${mountPath} ${ext4Fstype} ${defaultMountOpts} 0 0\n`,
+      },
+      [findmntCheckCmd]: {
+        code: 0,
+        stdout: `${ext4Src} ${ext4Fstype} rw,relatime,errors=remount-ro`,
+      },
+    })
+    const mod = mount.present({
+      fstype: ext4Fstype,
+      opts: defaultMountOpts,
+      path: mountPath,
+      src: ext4Src,
+    })
+    const result = await mod.check(mockSsh, emptyEnv)
+    expect(result).toBe("ok")
+  })
+
+  it("returns ok when tmpfs adds generated live inode options", async () => {
+    const mockSsh = createMockSsh({
+      [findmntCheckCmd]: {
+        code: 0,
+        stdout: `${mountSrc} ${mountFstype} rw,nosuid,nodev,noexec,relatime,size=512m,inode64`,
+      },
+    })
+    const mod = mount.present({
+      fstype: mountFstype,
+      opts: mountOpts,
+      path: mountPath,
+      persist: false,
+      src: mountSrc,
+    })
+    const result = await mod.check(mockSsh, emptyEnv)
+    expect(result).toBe("ok")
+  })
+
+  it("returns ok when tmpfs normalizes size units in live options", async () => {
+    const mockSsh = createMockSsh({
+      [findmntCheckCmd]: {
+        code: 0,
+        stdout: `${mountSrc} ${mountFstype} rw,nosuid,nodev,noexec,relatime,size=536870912`,
+      },
+    })
+    const mod = mount.present({
+      fstype: mountFstype,
+      opts: mountOpts,
+      path: mountPath,
+      persist: false,
+      src: mountSrc,
+    })
+    const result = await mod.check(mockSsh, emptyEnv)
+    expect(result).toBe("ok")
+  })
+
   it("preserves explicit security option drift when defaults are desired", async () => {
     const mockSsh = createMockSsh({
       [findmntCheckCmd]: {
