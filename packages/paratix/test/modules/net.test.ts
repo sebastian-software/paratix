@@ -781,7 +781,7 @@ describe("net.route — apply", () => {
     expect(result.status).toBe("changed")
   })
 
-  it("runs ip route del (state: absent)", async () => {
+  it("runs ip route del with the checked gateway (state: absent)", async () => {
     const mockSsh = createMockSsh(
       {
         [routeShowCommand]: { code: 0, stdout: liveRouteOutput },
@@ -790,12 +790,30 @@ describe("net.route — apply", () => {
     )
     const mod = net.route("10.0.0.0/24", "192.168.1.1", { state: "absent" })
     await mod.apply(mockSsh, emptyEnv)
-    expect(mockSsh.calls).toContain("ip route del '10.0.0.0/24'")
+    expect(mockSsh.calls).toContain("ip route del '10.0.0.0/24' via '192.168.1.1'")
+  })
+
+  it("runs ip route del with the checked gateway and device (state: absent)", async () => {
+    const mockSsh = createMockSsh(
+      {
+        [routeShowCommand]: { code: 0, stdout: liveRouteOutput },
+      },
+      { defaultExecResult: SUCCESSFUL_EXEC_DEFAULT }
+    )
+    const mod = net.route("10.0.0.0/24", "192.168.1.1", {
+      device: "eth0",
+      state: "absent",
+    })
+    await mod.apply(mockSsh, emptyEnv)
+    expect(mockSsh.calls).toContain("ip route del '10.0.0.0/24' via '192.168.1.1' dev 'eth0'")
   })
 
   it("returns failed when ip route del fails (state: absent)", async () => {
     const mockSsh = createMockSsh({
-      "ip route del '10.0.0.0/24'": { code: 2, stderr: "No such process" },
+      "ip route del '10.0.0.0/24' via '192.168.1.1'": {
+        code: 2,
+        stderr: "No such process",
+      },
       [routeShowCommand]: { code: 0, stdout: liveRouteOutput },
     })
     const mod = net.route("10.0.0.0/24", "192.168.1.1", { state: "absent" })

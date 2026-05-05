@@ -606,7 +606,11 @@ async function applyAbsentRoute(
 ): Promise<ModuleResult | null> {
   const { destination, device, dropinPath, gateway } = parameters
   if (await hasLiveRoute(conn, { destination, device, gateway })) {
-    const routeResult = await conn.exec(`ip route del ${shellQuote(destination)}`, EXEC_OPTS)
+    const devicePart = device !== undefined && device !== "" ? ` dev ${shellQuote(device)}` : ""
+    const routeResult = await conn.exec(
+      `ip route del ${shellQuote(destination)} via ${shellQuote(gateway)}${devicePart}`,
+      EXEC_OPTS
+    )
     if (routeResult.code !== 0) {
       return failedCommand(`[net.route: ${destination}] ip route del failed`, routeResult)
     }
