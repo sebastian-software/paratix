@@ -144,6 +144,14 @@ describe("rsync.sync — check", () => {
     expect(result).toBe("ok")
   })
 
+  it("returns ok when dry-run only emits whitespace", async () => {
+    mockSuccess(" \n\t\n")
+    const mockSsh = createMockSsh()
+    const mod = rsync.sync({ dest: "/remote/dest", src: "/local/src" })
+    const result = await mod.check(mockSsh, emptyEnv)
+    expect(result).toBe("ok")
+  })
+
   it("throws a descriptive error when the rsync dry-run command fails", async () => {
     mockFailureWithStderr({ code: 23, stderr: "Permission denied (publickey)." })
     const mockSsh = createMockSsh()
@@ -209,6 +217,22 @@ describe("rsync.sync — apply", () => {
     expect(result.status).toBe("ok")
   })
 
+  it("returns ok when rsync only emits whitespace", async () => {
+    mockSuccess(" \n\t\n")
+    const mockSsh = createMockSsh()
+    const mod = rsync.sync({ dest: "/remote/dest", src: "/local/src" })
+    const result = await mod.apply(mockSsh, emptyEnv)
+    expect(result.status).toBe("ok")
+  })
+
+  it("returns changed when rsync stdout has no trailing newline", async () => {
+    mockSuccess(">f+++++++++ file.txt")
+    const mockSsh = createMockSsh()
+    const mod = rsync.sync({ dest: "/remote/dest", src: "/local/src" })
+    const result = await mod.apply(mockSsh, emptyEnv)
+    expect(result.status).toBe("changed")
+  })
+
   it("returns failed when rsync command fails", async () => {
     mockFailureWithStderr({ code: 12, stderr: "rsync: connection unexpectedly closed" })
     const mockSsh = createMockSsh()
@@ -223,6 +247,35 @@ describe("rsync.sync — apply", () => {
       fullStderr: "rsync: connection unexpectedly closed",
       fullStdout: "",
     })
+  })
+
+  it("bounds captured stdout when rsync emits large output before failing", async () => {
+    const stdout = ">f+++++++++ assets/image-XXXXXX.png\n".repeat(10_000)
+    mockFailureWithStderr({ code: 23, stdout })
+    const mockSsh = createMockSsh()
+    const mod = rsync.sync({ dest: "/remote/dest", src: "/local/src" })
+    const result = await mod.apply(mockSsh, emptyEnv)
+
+    expect(result.status).toBe("failed")
+    expect(result.error).toBeInstanceOf(CommandError)
+    expect(result.error).toMatchObject({
+      fullStderr: "",
+    })
+    expect((result.error as CommandError).fullStdout.length).toBeLessThan(stdout.length)
+    expect((result.error as CommandError).fullStdout).toContain("rsync stdout truncated")
+  })
+
+  it("bounds captured stderr when rsync emits large error output", async () => {
+    const stderr = "rsync: repeated permission error\n".repeat(10_000)
+    mockFailureWithStderr({ code: 23, stderr })
+    const mockSsh = createMockSsh()
+    const mod = rsync.sync({ dest: "/remote/dest", src: "/local/src" })
+    const result = await mod.apply(mockSsh, emptyEnv)
+
+    expect(result.status).toBe("failed")
+    expect(result.error).toBeInstanceOf(CommandError)
+    expect((result.error as CommandError).fullStderr.length).toBeLessThan(stderr.length)
+    expect((result.error as CommandError).fullStderr).toContain("rsync stderr truncated")
   })
 
   it("does NOT include --dry-run flag", async () => {

@@ -11,6 +11,9 @@ import { type Module, type ModuleResult, NEEDS_APPLY, type SshConnection } from 
 
 type RsyncPhase = "apply" | "check"
 const DEFAULT_SSH_PORT = 22
+const BYTES_PER_KIB = 1024
+const RSYNC_OUTPUT_CAPTURE_LIMIT_KIB = 64
+const RSYNC_OUTPUT_CAPTURE_LIMIT = RSYNC_OUTPUT_CAPTURE_LIMIT_KIB * BYTES_PER_KIB
 const STRICT_HOST_KEY_CHECKING_VALUES = new Set(["accept-new", "no", "off", "yes"])
 
 type SyncOptions = {
@@ -244,66 +247,89 @@ function createRsyncError(
   )
 }
 
-/**
- * Drain a partial buffer into the line sink and keep any trailing characters
- * after the last newline for the next chunk. Hoisted to module scope so the
- * runner does not recreate it for every `data` event.
- *
- * @param buffer - The current accumulated chunk text.
- * @param sink - Callback that receives the completed `\n`-terminated lines.
- * @returns The remainder of `buffer` that follows the last newline.
- */
-function flushBufferToLines(buffer: string, sink: (chunk: string) => void): string {
-  const newlineIndex = buffer.lastIndexOf("\n")
-  if (newlineIndex === -1) return buffer
-  sink(buffer.slice(0, newlineIndex + 1))
-  return buffer.slice(newlineIndex + 1)
+type BoundedOutputCapture = {
+  append: (chunk: string) => void
+  hasNonWhitespace: () => boolean
+  text: () => string
+}
+
+function createBoundedOutputCapture(streamName: "stderr" | "stdout"): BoundedOutputCapture {
+  const truncationMarker = `\n[paratix] rsync ${streamName} truncated after ${String(
+    RSYNC_OUTPUT_CAPTURE_LIMIT
+  )} characters\n`
+  let captured = ""
+  let hasOutput = false
+  let truncated = false
+
+  return {
+    append(chunk: string): void {
+      if (/\S/v.test(chunk)) hasOutput = true
+      if (truncated) return
+
+      const remaining = RSYNC_OUTPUT_CAPTURE_LIMIT - captured.length
+      if (chunk.length <= remaining) {
+        captured += chunk
+        return
+      }
+
+      captured += chunk.slice(0, Math.max(0, remaining)) + truncationMarker
+      truncated = true
+    },
+    hasNonWhitespace(): boolean {
+      return hasOutput
+    },
+    text(): string {
+      return captured
+    },
+  }
 }
 
 /**
- * Run `rsync` and stream stdout/stderr line-by-line. R-0000040: replaces the
- * previous `execFile` runner whose default 1 MiB stdout buffer could trip
- * `ERR_CHILD_PROCESS_STDIO_MAXBUFFER` on large `--itemize-changes` outputs.
+ * Run `rsync` and stream stdout/stderr into bounded diagnostic buffers.
+ * R-0000040: replaces the previous `execFile` runner whose default 1 MiB
+ * stdout buffer could trip `ERR_CHILD_PROCESS_STDIO_MAXBUFFER` on large
+ * `--itemize-changes` outputs.
  *
  * @param rsyncArguments - The fully-built argv for the rsync invocation.
  * @returns The captured stdout, stderr, and exit code.
  */
-async function runRsyncProcess(
-  rsyncArguments: string[]
-): Promise<{ code: null | number; spawnError?: Error; stderr: string; stdout: string }> {
+async function runRsyncProcess(rsyncArguments: string[]): Promise<{
+  code: null | number
+  hasStdout: boolean
+  spawnError?: Error
+  stderr: string
+  stdout: string
+}> {
   return new Promise((resolve) => {
     const child = spawn("rsync", rsyncArguments, { stdio: ["ignore", "pipe", "pipe"] })
-    let stdout = ""
-    let stderr = ""
-    let stdoutBuffer = ""
-    let stderrBuffer = ""
+    const stdout = createBoundedOutputCapture("stdout")
+    const stderr = createBoundedOutputCapture("stderr")
 
     child.stdout.setEncoding("utf8")
     child.stderr.setEncoding("utf8")
     child.stdout.on("data", (chunk: string) => {
-      stdoutBuffer += chunk
-      stdoutBuffer = flushBufferToLines(stdoutBuffer, (lines) => {
-        stdout += lines
-      })
+      stdout.append(chunk)
     })
     child.stderr.on("data", (chunk: string) => {
-      stderrBuffer += chunk
-      stderrBuffer = flushBufferToLines(stderrBuffer, (lines) => {
-        stderr += lines
-      })
+      stderr.append(chunk)
     })
 
     child.on("error", (error: Error) => {
-      stdout += stdoutBuffer
-      stderr += stderrBuffer
-      stdoutBuffer = ""
-      stderrBuffer = ""
-      resolve({ code: null, spawnError: error, stderr, stdout })
+      resolve({
+        code: null,
+        hasStdout: stdout.hasNonWhitespace(),
+        spawnError: error,
+        stderr: stderr.text(),
+        stdout: stdout.text(),
+      })
     })
     child.on("close", (code: null | number) => {
-      stdout += stdoutBuffer
-      stderr += stderrBuffer
-      resolve({ code, stderr, stdout })
+      resolve({
+        code,
+        hasStdout: stdout.hasNonWhitespace(),
+        stderr: stderr.text(),
+        stdout: stdout.text(),
+      })
     })
   })
 }
@@ -347,7 +373,7 @@ async function executeRsync(parameters: {
         stdout: result.stdout,
       })
     }
-    return result.stdout
+    return result.hasStdout ? result.stdout : ""
   } finally {
     cleanupVerifiedKnownHostsFile(verifiedKnownHostsPath)
   }
