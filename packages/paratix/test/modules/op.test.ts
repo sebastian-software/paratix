@@ -8,7 +8,12 @@ import { mergeEnvironmentFromMeta } from "../../src/meta.js"
 import { op } from "../../src/modules/op.js"
 import { clearRegisteredSecrets, getRegisteredSecrets } from "../../src/secretSink.js"
 
-type MockChildProcess = { stdin: { end: Mock } } & EventEmitter
+type MockStdin = {
+  end: Mock
+  once: Mock
+} & EventEmitter
+
+type MockChildProcess = { stdin: MockStdin } & EventEmitter
 
 function createMockChild(stdout: string, exitCode = 0, stderr = ""): MockChildProcess {
   const child = new EventEmitter() as MockChildProcess
@@ -16,7 +21,17 @@ function createMockChild(stdout: string, exitCode = 0, stderr = ""): MockChildPr
   const stderrEmitter = new EventEmitter()
   Object.defineProperty(child, "stdout", { value: stdoutEmitter })
   Object.defineProperty(child, "stderr", { value: stderrEmitter })
-  child.stdin = { end: vi.fn() }
+  child.stdin = Object.assign(new EventEmitter(), {
+    end: vi.fn(),
+    once: vi.fn(function once(
+      this: EventEmitter,
+      eventName: string,
+      listener: (...arguments_: unknown[]) => void
+    ) {
+      EventEmitter.prototype.once.call(this, eventName, listener)
+      return this
+    }),
+  })
 
   // Emit data and close asynchronously so listeners are registered first
   queueMicrotask(() => {
@@ -51,7 +66,17 @@ function createEnoentMockChild(): MockChildProcess {
   const stderrEmitter = new EventEmitter()
   Object.defineProperty(child, "stdout", { value: stdoutEmitter })
   Object.defineProperty(child, "stderr", { value: stderrEmitter })
-  child.stdin = { end: vi.fn() }
+  child.stdin = Object.assign(new EventEmitter(), {
+    end: vi.fn(),
+    once: vi.fn(function once(
+      this: EventEmitter,
+      eventName: string,
+      listener: (...arguments_: unknown[]) => void
+    ) {
+      EventEmitter.prototype.once.call(this, eventName, listener)
+      return this
+    }),
+  })
 
   queueMicrotask(() => {
     const enoent = Object.assign(new Error("spawn op ENOENT"), { code: "ENOENT" })
@@ -64,6 +89,17 @@ function mockSpawnWithSpawnError(): void {
   mockedSpawnFn.mockImplementation((command: string, args?: readonly string[]) => {
     trackSpawn(command, args ?? [])
     return createEnoentMockChild() as never
+  })
+}
+
+function mockSpawnWithStdinError(error: Error): void {
+  mockedSpawnFn.mockImplementation((command: string, args?: readonly string[]) => {
+    trackSpawn(command, args ?? [])
+    const child = createMockChild("", 0)
+    child.stdin.end.mockImplementationOnce(() => {
+      child.stdin.emit("error", error)
+    })
+    return child as never
   })
 }
 
@@ -222,6 +258,17 @@ describe("op.resolve — apply", () => {
 
     expect(result.status).toBe("failed")
     expect(result.error?.message).toContain("Failed to resolve 1Password references")
+  })
+
+  it("returns failed when op stdin emits an error", async () => {
+    mockSpawnWithStdinError(new Error("write EPIPE"))
+
+    const module_ = op.resolve({ password: "op://vault/item/password" })
+    // eslint-disable-next-line prefer-spread
+    const result = await module_.apply(null, emptyEnv)
+
+    expect(result.status).toBe("failed")
+    expect(result.error?.message).toContain("write EPIPE")
   })
 
   it("returns { status: 'failed' } when op read throws", async () => {

@@ -61,8 +61,21 @@ async function spawnWithInput(
     const child: ChildProcess = spawn(command, commandArguments, {
       stdio: ["pipe", "pipe", "pipe"],
     })
+    let settled = false
     let stdout = ""
     let stderr = ""
+
+    const rejectOnce = (error: Error): void => {
+      if (settled) return
+      settled = true
+      reject(error)
+    }
+
+    const resolveOnce = (output: string): void => {
+      if (settled) return
+      settled = true
+      resolve(output)
+    }
 
     child.stdout?.on("data", (chunk: Buffer) => {
       stdout += chunk.toString()
@@ -71,18 +84,25 @@ async function spawnWithInput(
       stderr += chunk.toString()
     })
     child.on("error", (error) => {
-      reject(describeSpawnError(command, error))
+      rejectOnce(describeSpawnError(command, error))
     })
     child.on("close", (code) => {
       if (code === 0) {
-        resolve(stdout)
+        resolveOnce(stdout)
         return
       }
       const hint = isAuthFailure(stderr) ? ` ${OP_SIGNIN_HINT}` : ""
-      reject(new Error(`${command} exited with code ${String(code)}: ${stderr}${hint}`))
+      rejectOnce(new Error(`${command} exited with code ${String(code)}: ${stderr}${hint}`))
+    })
+    child.stdin?.once("error", (error) => {
+      rejectOnce(describeSpawnError(command, error))
     })
 
-    child.stdin?.end(input)
+    try {
+      child.stdin?.end(input)
+    } catch (error) {
+      rejectOnce(describeSpawnError(command, error))
+    }
   })
 }
 
