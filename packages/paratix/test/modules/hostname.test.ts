@@ -6,6 +6,29 @@ import { createMockSsh } from "../helpers/mockSsh.js"
 const emptyEnv = {}
 
 describe("hostname.set", () => {
+  it.each(["my-server", "web01", "web-01.example.com"])(
+    "accepts valid hostname %s",
+    (name) => {
+      expect(() => hostname.set(name)).not.toThrow()
+    }
+  )
+
+  it.each([
+    ["", "must not be empty"],
+    ["-my-server", "must not start"],
+    ["my server", "invalid hostname label"],
+    ["my_server", "invalid hostname label"],
+    [".my-server", "empty labels"],
+    ["my-server.", "empty labels"],
+    ["my..server", "empty labels"],
+    ["my-server.-example", "invalid hostname label"],
+    ["my-server.example-", "invalid hostname label"],
+    ["a".repeat(64), "labels must be at most 63 characters"],
+    [[...Array.from({ length: 127 }, () => "a"), "aa"].join("."), "at most 253 characters"],
+  ])("rejects invalid hostname %s", (name, message) => {
+    expect(() => hostname.set(name)).toThrow(message)
+  })
+
   it("check returns ok when the persisted hostname matches the desired name", async () => {
     const ssh = createMockSsh({
       "hostnamectl --static": { code: 0, stdout: "my-server" },
