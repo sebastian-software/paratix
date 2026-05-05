@@ -32,6 +32,18 @@ export function isValidHeaderValue(value: string): boolean {
 }
 
 /**
+ * Validate a string before it is rendered as one curl config value.
+ * CR, LF and NUL would terminate or corrupt curl's line-based config grammar.
+ *
+ * @param label - User-safe description of the value being validated.
+ * @param value - The value that will be written to the curl config payload.
+ */
+export function validateCurlConfigValue(label: string, value: string): void {
+  if (isValidHeaderValue(value)) return
+  throw new Error(`${label} must not contain CR, LF, or NUL characters`)
+}
+
+/**
  * Check whether the given URL's query string carries sensitive material such
  * as presigned tokens, signatures, or credentials.
  *
@@ -70,6 +82,7 @@ export function hasSensitiveQueryParameters(url: URL): boolean {
  * @returns The escaped value without surrounding quotes.
  */
 export function escapeCurlConfigValue(value: string): string {
+  validateCurlConfigValue("curl config value", value)
   return value.replaceAll("\\", String.raw`\\`).replaceAll('"', String.raw`\"`)
 }
 
@@ -122,6 +135,7 @@ export function buildCurlConfigPayload(parameters: {
 }): CurlConfigPayload {
   const lines: string[] = []
   if (parameters.routeUrlThroughConfig === true) {
+    validateCurlConfigValue("URL", parameters.url)
     lines.push(`url = "${escapeCurlConfigValue(parameters.url)}"`)
   }
   const argvHeaders: Array<[string, string]> = []
@@ -129,6 +143,7 @@ export function buildCurlConfigPayload(parameters: {
   for (const [name, value] of Object.entries(parameters.headers ?? {})) {
     validateHeaderPair(name, value)
     const headerLine = `${name}: ${value}`
+    validateCurlConfigValue(`HTTP header line for ${name}`, headerLine)
     lines.push(`header = "${escapeCurlConfigValue(headerLine)}"`)
   }
 

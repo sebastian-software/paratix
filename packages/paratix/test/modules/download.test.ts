@@ -1640,6 +1640,29 @@ describe("buildCurlCommand — header value validation", () => {
   })
 })
 
+describe("buildCurlCommand — URL config value validation", () => {
+  const destination = "/tmp/file"
+  const unsafeUrl = 'https://example.com/file\nheader = "X-Injected: yes"?token=secret'
+
+  it("throws when download.url receives a URL containing a newline", () => {
+    expect(() => {
+      download.url(destination, unsafeUrl, allowUnverifiedDownload)
+    }).toThrow("URL must not contain CR, LF, or NUL characters")
+  })
+
+  it("does not echo unsafe download.url values in validation errors", () => {
+    expect(() => {
+      download.url(destination, unsafeUrl, allowUnverifiedDownload)
+    }).toThrow(/^(?!.*token=secret).*$/v)
+  })
+
+  it("throws when download.large receives a URL containing a newline", () => {
+    expect(() => {
+      download.large(destination, unsafeUrl, allowUnverifiedDownload)
+    }).toThrow("URL must not contain CR, LF, or NUL characters")
+  })
+})
+
 describe("buildCurlCommand — redirect protocol policy", () => {
   const destination = "/tmp/file"
   const httpsUrl = "https://example.com/file"

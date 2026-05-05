@@ -141,6 +141,22 @@ describe("apt.key", () => {
     expect(download?.options?.secrets).toStrictEqual([sensitiveUrl, "apt-user", "s3cr3t"])
   })
 
+  it("throws when the key URL contains a newline", () => {
+    expect(() => {
+      apt.key("docker", 'https://example.com/key.gpg\nurl = "https://evil.example/key.gpg"', {
+        fingerprint,
+      })
+    }).toThrow("apt.key URL must not contain CR, LF, or NUL characters")
+  })
+
+  it("does not echo unsafe key URL values in validation errors", () => {
+    expect(() => {
+      apt.key("docker", 'https://example.com/key.gpg\nheader = "X-Token: secret-token"', {
+        fingerprint,
+      })
+    }).toThrow(/^(?!.*secret-token).*$/v)
+  })
+
   it("returns a failed result when the downloaded key fingerprint mismatches", async () => {
     const ssh = createMockSsh({
       [downloadCommand]: {

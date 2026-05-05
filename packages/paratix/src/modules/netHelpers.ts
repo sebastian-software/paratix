@@ -7,6 +7,7 @@ import {
   hasSensitiveQueryParameters,
   isValidHeaderName,
   isValidHeaderValue,
+  validateCurlConfigValue,
 } from "./curlHelpers.js"
 
 export { isValidHeaderName, isValidHeaderValue } from "./curlHelpers.js"
@@ -326,6 +327,7 @@ export async function checkHttpCondition(
  * @throws {Error} If the URL is malformed or the scheme is not allowed.
  */
 export function validateHttpUrl(url: string, options?: { allowHttp?: boolean }): void {
+  validateCurlConfigValue("URL", url)
   let parsed: URL
   try {
     parsed = new URL(url)

@@ -2,7 +2,11 @@ import type { ModuleResult, SshConnection } from "../types.js"
 
 import { failed, failedCommand } from "../moduleFailure.js"
 import { shellQuote, validateMktempPath } from "../ssh.js"
-import { buildCurlConfigPayload, hasSensitiveQueryParameters } from "./curlHelpers.js"
+import {
+  buildCurlConfigPayload,
+  hasSensitiveQueryParameters,
+  validateCurlConfigValue,
+} from "./curlHelpers.js"
 
 const OPENPGP_FINGERPRINT_RE = /^[A-F0-9]{40,64}$/v
 const REDACTED_URL_VALUE = "REDACTED"
@@ -36,6 +40,7 @@ function parseOpenPgpPrimaryKeyFingerprints(stdout: string): string[] {
 }
 
 export function validateAptKeyUrl(url: string): void {
+  validateCurlConfigValue("apt.key URL", url)
   let parsedUrl: URL
   try {
     parsedUrl = new URL(url)
