@@ -999,12 +999,17 @@ trap - EXIT
   }
 
   private registerConnectedClient(client: Client, port: number): void {
-    client.on("close", () => {
-      const error = new Error("SSH connection closed unexpectedly")
+    const rejectPending = (error: Error): void => {
       for (const rejectFunction of this.pendingRejects) {
         rejectFunction(error)
       }
       this.pendingRejects.clear()
+    }
+    client.on("close", () => {
+      rejectPending(new Error("SSH connection closed unexpectedly"))
+    })
+    client.on("error", (error) => {
+      rejectPending(error)
     })
     this.client = client
     this.connectedPort = port

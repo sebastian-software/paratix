@@ -152,9 +152,9 @@ function makeConnectedSsh(
 }
 
 /**
- * Creates an SSH instance with a mock client that also has the 'close' listener
- * registered — exactly as tryConnectOnPorts() would do it. This allows tests to
- * simulate an unexpected connection drop by emitting 'close' on the client.
+ * Creates an SSH instance with a mock client that also has the connected-client
+ * lifecycle listeners registered — exactly as tryConnectOnPorts() would do it.
+ * This allows tests to simulate unexpected connection drop/error events.
  *
  * @param client - Mock SSH2 Client that also extends EventEmitter so 'close' can be emitted.
  * @param options - Optional connection options.
@@ -167,16 +167,8 @@ function makeConnectedSshWithCloseListener(
   options: { sudoPassword?: null | string; user?: string } = {}
 ): SshConnectionImpl {
   const ssh = makeConnectedSsh(client, options)
-  const pendingRejects = (ssh as unknown as Record<string, unknown>).pendingRejects as Set<
-    (reason: Error) => void
-  >
-  client.on("close", () => {
-    const error = new Error("SSH connection closed unexpectedly")
-    for (const rejectFunction of pendingRejects) {
-      rejectFunction(error)
-    }
-    pendingRejects.clear()
-  })
+  ;(ssh as unknown as { registerConnectedClient: (client: Client, port: number) => void })
+    .registerConnectedClient(client, 22)
   return ssh
 }
 
@@ -1566,6 +1558,34 @@ describe("SshConnectionImpl", () => {
       clientEmitter.emit("close")
 
       await expect(execPromise).rejects.toThrow("SSH connection closed unexpectedly")
+    })
+
+    it("rejects pending exec() immediately when connected client emits 'error'", async () => {
+      let capturedStream: null | StreamWithStderr = null
+      const execSpy = vi.fn().mockImplementation((_command: string, callback: ExecCallback) => {
+        const stream = makeStream()
+        capturedStream = stream
+        callback(undefined, stream)
+        // Stream intentionally never emits 'close' — the exec() Promise stays pending
+      })
+
+      const clientEmitter = new EventEmitter()
+      const client = Object.assign(clientEmitter, {
+        end: vi.fn(),
+        exec: execSpy,
+        sftp: vi.fn(),
+      }) as unknown as Client & EventEmitter
+
+      const ssh = makeConnectedSshWithCloseListener(client, {})
+
+      const execPromise = ssh.exec("sleep infinity")
+      await Promise.resolve()
+
+      expect(capturedStream).not.toBeNull()
+
+      clientEmitter.emit("error", new Error("socket failure"))
+
+      await expect(execPromise).rejects.toThrow("socket failure")
     })
 
     it("rejects when client.exec callback receives an error", async () => {
