@@ -62,9 +62,11 @@ export async function promptTerminal(
 
   return new Promise((resolve, reject) => {
     let settled = false
+    let rejectClosedPrompt = (): void => {}
 
     const cleanup = (): void => {
       abortSignal?.removeEventListener("abort", rejectPrompt)
+      rl.removeListener("close", rejectClosedPrompt)
     }
 
     const resolvePrompt = (answer: string): void => {
@@ -88,12 +90,21 @@ export async function promptTerminal(
       settled: () => settled,
     })
 
+    rejectClosedPrompt = () => {
+      if (settled) return
+      settled = true
+      cleanup()
+      if (hidden) process.stderr.write("\n")
+      reject(new Error("Terminal prompt closed before input was received"))
+    }
+
     if (abortSignal?.aborted === true) {
       rejectPrompt()
       return
     }
 
     abortSignal?.addEventListener("abort", rejectPrompt, { once: true })
+    rl.once("close", rejectClosedPrompt)
 
     rl.question(question, (answer) => {
       resolvePrompt(answer)
