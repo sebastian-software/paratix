@@ -97,6 +97,7 @@ function aptExecOptions(options?: UpgradeOptions): ExecOptions {
 }
 
 const PPA_PREFIX = "ppa:"
+const PPA_IDENTIFIER_PATTERN = /^[a-z0-9][a-z0-9+\-]*\/[a-z0-9][a-z0-9+\-]*$/v
 /**
  * Parse the output of `debconf-show` into a question-to-value map.
  *
@@ -293,6 +294,14 @@ async function isAptPackageInstalled(ssh: SshConnection, packageName: string): P
   return result.stdout.trim() === "install ok installed"
 }
 
+function validatePpaIdentifier(ppa: string, ppaPath: string): void {
+  if (!PPA_IDENTIFIER_PATTERN.test(ppaPath)) {
+    throw new Error(
+      `apt.repository: PPA identifier must use Launchpad owner/name form with lowercase letters, numbers, '+' or '-', got: ${JSON.stringify(ppa)}`
+    )
+  }
+}
+
 /**
  * Build a Module that adds a Launchpad PPA via `add-apt-repository`.
  *
@@ -304,6 +313,10 @@ async function isAptPackageInstalled(ssh: SshConnection, packageName: string): P
  */
 function buildPpaRepository(ppa: string): Module {
   const ppaPath = ppa.slice(PPA_PREFIX.length)
+  validatePpaIdentifier(ppa, ppaPath)
+  const launchpadContentHost = ["ppa.launchpad", "content.net"].join("")
+  const launchpadContentPath = `/${launchpadContentHost}/${ppaPath}/`
+  const launchpadPath = `/ppa.launchpad.net/${ppaPath}/`
   return {
     async apply(ssh: null | SshConnection): Promise<ModuleResult> {
       if (!ssh) return failed(`[apt.repository] SSH connection is required for ${ppa}`)
@@ -316,9 +329,11 @@ function buildPpaRepository(ppa: string): Module {
     },
     async check(ssh: null | SshConnection): Promise<"needs-apply" | "ok"> {
       if (!ssh) return NEEDS_APPLY
-      return (await ssh.test(`grep -rq ${shellQuote(ppaPath)} /etc/apt/sources.list.d/`))
-        ? "ok"
-        : NEEDS_APPLY
+      const checkCommand = [
+        `grep -RqsF -- ${shellQuote(launchpadContentPath)} /etc/apt/sources.list.d/`,
+        `grep -RqsF -- ${shellQuote(launchpadPath)} /etc/apt/sources.list.d/`,
+      ].join(" || ")
+      return (await ssh.test(checkCommand)) ? "ok" : NEEDS_APPLY
     },
     name: `apt.repository: ${ppa}`,
   }

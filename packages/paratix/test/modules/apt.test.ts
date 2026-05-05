@@ -516,9 +516,12 @@ describe("apt.distUpgrade", () => {
 })
 
 describe("apt.repository (PPA form)", () => {
+  const launchpadContentHost = ["ppa.launchpad", "content.net"].join("")
+  const ppaCheckCommand = `grep -RqsF -- '/${launchpadContentHost}/nginx/stable/' /etc/apt/sources.list.d/ || grep -RqsF -- '/ppa.launchpad.net/nginx/stable/' /etc/apt/sources.list.d/`
+
   it("check returns ok when PPA is found in sources", async () => {
     const ssh = createMockSsh({
-      "grep -rq 'nginx/stable' /etc/apt/sources.list.d/": { code: 0 },
+      [ppaCheckCommand]: { code: 0 },
     })
     const mod = apt.repository("ppa:nginx/stable")
     const result = await mod.check(ssh, emptyEnv)
@@ -527,7 +530,7 @@ describe("apt.repository (PPA form)", () => {
 
   it("check returns needs-apply when PPA is not found", async () => {
     const ssh = createMockSsh({
-      "grep -rq 'nginx/stable' /etc/apt/sources.list.d/": { code: 1 },
+      [ppaCheckCommand]: { code: 1 },
     })
     const mod = apt.repository("ppa:nginx/stable")
     const result = await mod.check(ssh, emptyEnv)
@@ -538,6 +541,27 @@ describe("apt.repository (PPA form)", () => {
     const mod = apt.repository("ppa:nginx/stable")
     const result = await mod.check(null, emptyEnv)
     expect(result).toBe("needs-apply")
+  })
+
+  it("throws when a PPA identifier contains regex metacharacters", () => {
+    expect(() => apt.repository("ppa:nginx/.+")).toThrow(
+      "PPA identifier must use Launchpad owner/name form"
+    )
+  })
+
+  it("throws when a PPA identifier does not use owner/name form", () => {
+    expect(() => apt.repository("ppa:nginx")).toThrow(
+      "PPA identifier must use Launchpad owner/name form"
+    )
+  })
+
+  it("apply adds a valid PPA", async () => {
+    const ssh = createMockSsh({
+      "add-apt-repository -y 'ppa:nginx/stable'": { code: 0 },
+    })
+    const mod = apt.repository("ppa:nginx/stable")
+    const result = await mod.apply(ssh, emptyEnv)
+    expect(result).toStrictEqual({ status: "changed" })
   })
 })
 
