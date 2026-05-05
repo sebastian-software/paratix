@@ -488,11 +488,17 @@ Methods available on the `ssh` parameter:
 {
   env?: Record<string, string>       // Extra environment variables
   ignoreExitCode?: boolean           // Don't throw on non-zero exit
+  input?: string                     // Payload written to stdin before EOF
+  maxOutputBytes?: number            // Cap stored stdout/stderr bytes
   secrets?: string[]                 // Strings to mask in error output
   silent?: boolean                   // Suppress stdout/stderr
   timeout?: number                   // Abort after N milliseconds
 }
 ```
+
+Prefer `input` for secret payloads instead of shell arguments, so values do not
+leak through process lists, `/proc/<pid>/cmdline`, or SSH logs. Add the same
+values to `secrets` only as an additional masking guard for error output.
 
 ## Template System
 
