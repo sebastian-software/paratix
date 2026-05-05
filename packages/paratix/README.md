@@ -29,10 +29,13 @@ If you want the fastest path, scaffold a project first:
 ```bash
 npm create paratix my-server
 cd my-server
+npm run apply:first-run:dry
+npm run apply:first-run
 npm run apply:dry
-npm run apply -- --first-run
 npm run apply
 ```
+
+Use the first-run dry-run to preview the bootstrap changes before hardening a fresh server.
 
 If you want to install `paratix` directly:
 
