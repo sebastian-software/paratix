@@ -336,7 +336,7 @@ describe("sftpDownload", () => {
 
   it("resolves when the local writeStream emits finish", async () => {
     // Arrange
-    const { sftp } = makeSftpSession()
+    const { sftp, sftpEnd } = makeSftpSession()
     const client = makeClientMock(sftp)
 
     const localWriteStream = new EventEmitter()
@@ -348,6 +348,7 @@ describe("sftpDownload", () => {
 
     // Assert — promise must resolve on successful transfer
     await expect(promise).resolves.toBeUndefined()
+    expect(sftpEnd).toHaveBeenCalledOnce()
   })
 
   it("rejects and removes the temp file when renameSync fails during local finalization", async () => {
@@ -833,7 +834,7 @@ describe("sftpUpload", () => {
 
   it("resolves when the remote writeStream emits finish", async () => {
     // Arrange
-    const { sftp, sftpWriteStream } = makeSftpSession()
+    const { sftp, sftpEnd, sftpWriteStream } = makeSftpSession()
     const client = makeClientMock(sftp)
 
     const localReadStream = makeMockStream()
@@ -845,6 +846,7 @@ describe("sftpUpload", () => {
 
     // Assert — promise must resolve on successful transfer
     await expect(promise).resolves.toBeUndefined()
+    expect(sftpEnd).toHaveBeenCalledOnce()
   })
 
   it("rejects and cleans up when the remote writeStream closes without finish", async () => {
