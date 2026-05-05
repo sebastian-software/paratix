@@ -244,6 +244,18 @@ function removeLocalDirectoryStep(localDirectory: string): CleanupStep {
   }
 }
 
+function removeCreatedLocalDirectoryStep(getLocalDirectory: () => string | undefined): CleanupStep {
+  return {
+    name: "remove local test directory",
+    async run() {
+      const localDirectory = getLocalDirectory()
+      if (localDirectory == null) return
+
+      await removeLocalDirectoryStep(localDirectory).run()
+    },
+  }
+}
+
 async function startRemoteHttpServer(
   ssh: SshConnection,
   directory: string,
@@ -351,7 +363,11 @@ describe("Paratix integration", () => {
       user: "paratix",
     })
 
-    await expect(ssh.connect()).rejects.toBeInstanceOf(HostKeyVerificationError)
+    try {
+      await expect(ssh.connect()).rejects.toBeInstanceOf(HostKeyVerificationError)
+    } finally {
+      await runCleanupSteps([disconnectSshStep(ssh)])
+    }
   })
 
   it("connects with a pinned host key and passes probeSudo against the real server", async () => {
@@ -368,14 +384,16 @@ describe("Paratix integration", () => {
   it("uploads and downloads files over real SFTP", async () => {
     const environment = getEnvironment()
     const ssh = await connectSsh([environment.primaryPort], {}, "root")
-    const localDirectory = mkdtempSync(join(tmpdir(), "paratix-sftp-"))
-    const localUploadPath = join(localDirectory, "upload.txt")
-    const localDownloadPath = join(localDirectory, "download.txt")
     const remoteBase = `/home/paratix/integration-${randomUUID()}`
-    const remoteUploadPath = `${remoteBase}/uploaded.txt`
-    const remoteDownloadPath = `${remoteBase}/remote.txt`
+    let localDirectory: string | undefined
 
     try {
+      localDirectory = mkdtempSync(join(tmpdir(), "paratix-sftp-"))
+      const localUploadPath = join(localDirectory, "upload.txt")
+      const localDownloadPath = join(localDirectory, "download.txt")
+      const remoteUploadPath = `${remoteBase}/uploaded.txt`
+      const remoteDownloadPath = `${remoteBase}/remote.txt`
+
       writeFileSync(localUploadPath, "upload-content\n", "utf8")
       await ssh.exec(`mkdir -p ${shellQuote(remoteBase)}`, { silent: true })
       await ssh.uploadFile(localUploadPath, remoteUploadPath)
@@ -388,7 +406,7 @@ describe("Paratix integration", () => {
       await runCleanupSteps([
         removeRemoteDirectoryStep(ssh, remoteBase, "remove remote SFTP test directory"),
         disconnectSshStep(ssh),
-        removeLocalDirectoryStep(localDirectory),
+        removeCreatedLocalDirectoryStep(() => localDirectory),
       ])
     }
   })
@@ -396,15 +414,17 @@ describe("Paratix integration", () => {
   it("uploads and downloads unicode filenames and content over real SFTP", async () => {
     const environment = getEnvironment()
     const ssh = await connectSsh([environment.primaryPort], {}, "root")
-    const localDirectory = mkdtempSync(join(tmpdir(), "paratix-sftp-unicode-"))
-    const localUploadPath = join(localDirectory, unicodeFileName)
-    const localDownloadPath = join(localDirectory, `download-${unicodeFileName}`)
     const remoteBase = `/home/paratix/integration-${randomUUID()}`
     const remoteDirectory = `${remoteBase}/über ordner`
-    const remoteUploadPath = `${remoteDirectory}/${unicodeFileName}`
-    const remoteDownloadPath = `${remoteDirectory}/下載-ß.txt`
+    let localDirectory: string | undefined
 
     try {
+      localDirectory = mkdtempSync(join(tmpdir(), "paratix-sftp-unicode-"))
+      const localUploadPath = join(localDirectory, unicodeFileName)
+      const localDownloadPath = join(localDirectory, `download-${unicodeFileName}`)
+      const remoteUploadPath = `${remoteDirectory}/${unicodeFileName}`
+      const remoteDownloadPath = `${remoteDirectory}/下載-ß.txt`
+
       writeFileSync(localUploadPath, unicodeContent, "utf8")
       await ssh.exec(`mkdir -p ${shellQuote(remoteDirectory)}`, { silent: true })
       await ssh.uploadFile(localUploadPath, remoteUploadPath)
@@ -417,7 +437,7 @@ describe("Paratix integration", () => {
       await runCleanupSteps([
         removeRemoteDirectoryStep(ssh, remoteBase, "remove remote unicode SFTP test directory"),
         disconnectSshStep(ssh),
-        removeLocalDirectoryStep(localDirectory),
+        removeCreatedLocalDirectoryStep(() => localDirectory),
       ])
     }
   })
@@ -425,16 +445,18 @@ describe("Paratix integration", () => {
   it("uses sudo finalization and cleanup for non-root SFTP transfers", async () => {
     const environment = getEnvironment()
     const ssh = await connectSsh([environment.primaryPort])
-    const localDirectory = mkdtempSync(join(tmpdir(), "paratix-sftp-non-root-"))
-    const localUploadPath = join(localDirectory, "upload.txt")
-    const localDownloadPath = join(localDirectory, "download.txt")
-    const localFailedUploadPath = join(localDirectory, "failed-upload.txt")
     const remoteBase = `/root/non-root-sftp-${randomUUID()}`
-    const remoteUploadPath = `${remoteBase}/uploaded.txt`
-    const remoteDownloadPath = `${remoteBase}/download.txt`
-    const missingParentUploadPath = `${remoteBase}/missing-parent/uploaded.txt`
+    let localDirectory: string | undefined
 
     try {
+      localDirectory = mkdtempSync(join(tmpdir(), "paratix-sftp-non-root-"))
+      const localUploadPath = join(localDirectory, "upload.txt")
+      const localDownloadPath = join(localDirectory, "download.txt")
+      const localFailedUploadPath = join(localDirectory, "failed-upload.txt")
+      const remoteUploadPath = `${remoteBase}/uploaded.txt`
+      const remoteDownloadPath = `${remoteBase}/download.txt`
+      const missingParentUploadPath = `${remoteBase}/missing-parent/uploaded.txt`
+
       writeFileSync(localUploadPath, "non-root upload\n", "utf8")
       writeFileSync(localFailedUploadPath, "failed upload\n", "utf8")
       await ssh.exec(`mkdir -p ${shellQuote(remoteBase)} && chmod 0755 ${shellQuote(remoteBase)}`, {
@@ -469,7 +491,7 @@ describe("Paratix integration", () => {
       await runCleanupSteps([
         removeRemoteDirectoryStep(ssh, remoteBase, "remove remote non-root SFTP test directory"),
         disconnectSshStep(ssh),
-        removeLocalDirectoryStep(localDirectory),
+        removeCreatedLocalDirectoryStep(() => localDirectory),
       ])
     }
   })
@@ -477,10 +499,13 @@ describe("Paratix integration", () => {
   it("persists accept-new host keys and reconnects with strict known_hosts verification", async () => {
     const environment = getEnvironment()
     const acceptNewSsh = await connectWithConfig(createAcceptNewSshConfig(environment.primaryPort))
-    acceptNewSsh.disconnect()
 
-    const knownHosts = await readFile(join(testHome, ".ssh", "known_hosts"), "utf8")
-    expect(knownHosts).toContain(`[${environment.host}]:${String(environment.primaryPort)}`)
+    try {
+      const knownHosts = await readFile(join(testHome, ".ssh", "known_hosts"), "utf8")
+      expect(knownHosts).toContain(`[${environment.host}]:${String(environment.primaryPort)}`)
+    } finally {
+      await runCleanupSteps([disconnectSshStep(acceptNewSsh)])
+    }
 
     const strictSsh = await connectWithConfig(createKnownHostsSshConfig(environment.primaryPort))
     try {
@@ -493,19 +518,30 @@ describe("Paratix integration", () => {
   it("keeps accept-new known_hosts entries scoped to their SSH port", async () => {
     const environment = getEnvironment()
     const primarySsh = await connectWithConfig(createAcceptNewSshConfig(environment.primaryPort))
-    primarySsh.disconnect()
+    try {
+      expect(primarySsh.getConnectionInfo().port).toBe(environment.primaryPort)
+    } finally {
+      await runCleanupSteps([disconnectSshStep(primarySsh)])
+    }
 
     const secondaryStrictSsh = new SshConnectionImpl(
       environment.host,
       createKnownHostsSshConfig(environment.secondaryPort)
     )
-    await expect(secondaryStrictSsh.connect()).rejects.toBeInstanceOf(HostKeyVerificationError)
-    secondaryStrictSsh.disconnect()
+    try {
+      await expect(secondaryStrictSsh.connect()).rejects.toBeInstanceOf(HostKeyVerificationError)
+    } finally {
+      await runCleanupSteps([disconnectSshStep(secondaryStrictSsh)])
+    }
 
     const secondaryAcceptNewSsh = await connectWithConfig(
       createAcceptNewSshConfig(environment.secondaryPort)
     )
-    secondaryAcceptNewSsh.disconnect()
+    try {
+      expect(secondaryAcceptNewSsh.getConnectionInfo().port).toBe(environment.secondaryPort)
+    } finally {
+      await runCleanupSteps([disconnectSshStep(secondaryAcceptNewSsh)])
+    }
 
     const secondaryKnownHostsSsh = await connectWithConfig(
       createKnownHostsSshConfig(environment.secondaryPort)
@@ -528,8 +564,11 @@ describe("Paratix integration", () => {
       environment.host,
       createKnownHostsSshConfig(environment.primaryPort)
     )
-    await expect(ssh.connect()).rejects.toBeInstanceOf(HostKeyVerificationError)
-    ssh.disconnect()
+    try {
+      await expect(ssh.connect()).rejects.toBeInstanceOf(HostKeyVerificationError)
+    } finally {
+      await runCleanupSteps([disconnectSshStep(ssh)])
+    }
   })
 
   it("reconnects successfully on a different configured port", async () => {
@@ -550,16 +589,17 @@ describe("Paratix integration", () => {
 
   it("runs a real happy-path playbook against the integration server", async () => {
     const environment = getEnvironment()
-    const localDirectory = mkdtempSync(join(tmpdir(), "paratix-playbook-"))
-    const localSourcePath = join(localDirectory, "source.txt")
-    const localTemplatePath = join(localDirectory, "template.tmpl")
     const remoteBase = `/root/integration-${randomUUID()}`
     const remoteApp = `${remoteBase}/app`
     const markerPath = `${remoteApp}/marker.txt`
-
     const ssh = await connectSsh([environment.primaryPort], {}, "root")
+    let localDirectory: string | undefined
 
     try {
+      localDirectory = mkdtempSync(join(tmpdir(), "paratix-playbook-"))
+      const localSourcePath = join(localDirectory, "source.txt")
+      const localTemplatePath = join(localDirectory, "template.tmpl")
+
       writeFileSync(localSourcePath, "copied-from-local\n", "utf8")
       writeFileSync(localTemplatePath, "Hello {{NAME|raw}}\n", "utf8")
 
@@ -589,7 +629,7 @@ describe("Paratix integration", () => {
       await runCleanupSteps([
         removeRemoteDirectoryStep(ssh, remoteBase, "remove remote playbook test directory"),
         disconnectSshStep(ssh),
-        removeLocalDirectoryStep(localDirectory),
+        removeCreatedLocalDirectoryStep(() => localDirectory),
       ])
     }
   })
@@ -597,8 +637,6 @@ describe("Paratix integration", () => {
   it("runs the built apply CLI dry-run with a valid playbook against the integration server", async () => {
     const environment = getEnvironment()
     const packageDirectory = resolve(import.meta.dirname, "../..")
-    const localDirectory = mkdtempSync(join(tmpdir(), "paratix-dist-cli-playbook-"))
-    const playbookPath = join(localDirectory, "playbook.mjs")
     const remoteBase = `/root/dist-cli-${randomUUID()}`
     const markerPath = `${remoteBase}/marker.txt`
     const distCliPath = resolve(packageDirectory, "dist/cli.js")
@@ -607,8 +645,12 @@ describe("Paratix integration", () => {
     const markerCommand = `mkdir -p ${shellQuote(remoteBase)} && printf '%s\\n' changed > ${shellQuote(markerPath)}`
     const markerCheck = `test -f ${shellQuote(markerPath)}`
     const ssh = await connectSsh([environment.primaryPort], {}, "root")
+    let localDirectory: string | undefined
 
     try {
+      localDirectory = mkdtempSync(join(tmpdir(), "paratix-dist-cli-playbook-"))
+      const playbookPath = join(localDirectory, "playbook.mjs")
+
       writeFileSync(
         playbookPath,
         [
@@ -653,40 +695,42 @@ describe("Paratix integration", () => {
       await runCleanupSteps([
         removeRemoteDirectoryStep(ssh, remoteBase, "remove remote dist CLI test directory"),
         disconnectSshStep(ssh),
-        removeLocalDirectoryStep(localDirectory),
+        removeCreatedLocalDirectoryStep(() => localDirectory),
       ])
     }
   })
 
   it("converges file and command modules to verifiable remote state", async () => {
     const ssh = await connectSsh([getEnvironment().primaryPort], {}, "root")
-    const localDirectory = mkdtempSync(join(tmpdir(), "paratix-modules-"))
     const remoteBase = `/root/integration-${randomUUID()}`
-    const localSourcePath = join(localDirectory, "source.txt")
-    const localTemplatePath = join(localDirectory, "template.tmpl")
-
-    writeFileSync(localSourcePath, "copied-from-integration\n", "utf8")
-    writeFileSync(localTemplatePath, "Hello {{NAME|raw}}\n", "utf8")
-
-    const directoryModule = file.directory(`${remoteBase}/app`, {
-      mode: "0750",
-      owner: "root:root",
-    })
-    const copyModule = file.copy(`${remoteBase}/app/source.txt`, localSourcePath, {
-      mode: "0640",
-      owner: "root:root",
-    })
-    const templateModule = file.template(`${remoteBase}/app/template.txt`, localTemplatePath, {
-      mode: "0644",
-      owner: "root:root",
-    })
     const markerPath = `${remoteBase}/app/marker.txt`
-    const commandModule = command.shell(`printf '%s\\n' ready > ${shellQuote(markerPath)}`, {
-      check: `test -f ${shellQuote(markerPath)}`,
-      name: "create integration marker",
-    })
+    let localDirectory: string | undefined
 
     try {
+      localDirectory = mkdtempSync(join(tmpdir(), "paratix-modules-"))
+      const localSourcePath = join(localDirectory, "source.txt")
+      const localTemplatePath = join(localDirectory, "template.tmpl")
+
+      writeFileSync(localSourcePath, "copied-from-integration\n", "utf8")
+      writeFileSync(localTemplatePath, "Hello {{NAME|raw}}\n", "utf8")
+
+      const directoryModule = file.directory(`${remoteBase}/app`, {
+        mode: "0750",
+        owner: "root:root",
+      })
+      const copyModule = file.copy(`${remoteBase}/app/source.txt`, localSourcePath, {
+        mode: "0640",
+        owner: "root:root",
+      })
+      const templateModule = file.template(`${remoteBase}/app/template.txt`, localTemplatePath, {
+        mode: "0644",
+        owner: "root:root",
+      })
+      const commandModule = command.shell(`printf '%s\\n' ready > ${shellQuote(markerPath)}`, {
+        check: `test -f ${shellQuote(markerPath)}`,
+        name: "create integration marker",
+      })
+
       await expect(directoryModule.apply(ssh, emptyEnv)).resolves.toMatchObject({
         status: "changed",
       })
@@ -718,45 +762,47 @@ describe("Paratix integration", () => {
       await runCleanupSteps([
         removeRemoteDirectoryStep(ssh, remoteBase, "remove remote module test directory"),
         disconnectSshStep(ssh),
-        removeLocalDirectoryStep(localDirectory),
+        removeCreatedLocalDirectoryStep(() => localDirectory),
       ])
     }
   })
 
   it("converges unicode file, template, and block modules to verifiable remote state", async () => {
     const ssh = await connectSsh([getEnvironment().primaryPort], {}, "root")
-    const localDirectory = mkdtempSync(join(tmpdir(), "paratix-unicode-modules-"))
     const remoteBase = `/root/integration-${randomUUID()}-äöü`
     const remoteDirectory = `${remoteBase}/über ordner`
     const remoteCopyPath = `${remoteDirectory}/${unicodeFileName}`
     const remoteTemplatePath = `${remoteDirectory}/結果-template.txt`
     const remoteBlockPath = `${remoteDirectory}/konfiguration ü.txt`
-    const localSourcePath = join(localDirectory, unicodeFileName)
-    const localTemplatePath = join(localDirectory, unicodeTemplateName)
-
-    writeFileSync(localSourcePath, unicodeContent, "utf8")
-    writeFileSync(localTemplatePath, "Hallo {{name|raw}} aus {{city|raw}}", "utf8")
-    await ssh.exec(`mkdir -p ${shellQuote(remoteDirectory)}`, { silent: true })
-    await ssh.writeFile(remoteBlockPath, "vorher\n", { mode: "0644" })
-
-    const directoryModule = file.directory(remoteDirectory, {
-      mode: "0750",
-      owner: "root:root",
-    })
-    const copyModule = file.copy(remoteCopyPath, localSourcePath, {
-      mode: "0640",
-      owner: "root:root",
-    })
-    const templateModule = file.template(remoteTemplatePath, localTemplatePath, {
-      mode: "0644",
-      owner: "root:root",
-    })
-    const blockModule = file.block(remoteBlockPath, {
-      content: unicodeBlockContent,
-      name: "grüße-block",
-    })
+    let localDirectory: string | undefined
 
     try {
+      localDirectory = mkdtempSync(join(tmpdir(), "paratix-unicode-modules-"))
+      const localSourcePath = join(localDirectory, unicodeFileName)
+      const localTemplatePath = join(localDirectory, unicodeTemplateName)
+
+      writeFileSync(localSourcePath, unicodeContent, "utf8")
+      writeFileSync(localTemplatePath, "Hallo {{name|raw}} aus {{city|raw}}", "utf8")
+      await ssh.exec(`mkdir -p ${shellQuote(remoteDirectory)}`, { silent: true })
+      await ssh.writeFile(remoteBlockPath, "vorher\n", { mode: "0644" })
+
+      const directoryModule = file.directory(remoteDirectory, {
+        mode: "0750",
+        owner: "root:root",
+      })
+      const copyModule = file.copy(remoteCopyPath, localSourcePath, {
+        mode: "0640",
+        owner: "root:root",
+      })
+      const templateModule = file.template(remoteTemplatePath, localTemplatePath, {
+        mode: "0644",
+        owner: "root:root",
+      })
+      const blockModule = file.block(remoteBlockPath, {
+        content: unicodeBlockContent,
+        name: "grüße-block",
+      })
+
       await expect(directoryModule.apply(ssh, emptyEnv)).resolves.toMatchObject({
         status: "changed",
       })
@@ -787,7 +833,7 @@ describe("Paratix integration", () => {
       await runCleanupSteps([
         removeRemoteDirectoryStep(ssh, remoteBase, "remove remote unicode module test directory"),
         disconnectSshStep(ssh),
-        removeLocalDirectoryStep(localDirectory),
+        removeCreatedLocalDirectoryStep(() => localDirectory),
       ])
     }
   })
