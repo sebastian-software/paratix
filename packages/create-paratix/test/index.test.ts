@@ -1492,9 +1492,10 @@ describe("readHostFingerprintViaSsh2", () => {
 
     const fakeClient = {
       connect: vi.fn((config: { hostVerifier?: (key: Buffer) => boolean }) => {
-        // Let the original hostVerifier rejection propagate through connect()
-        // so readFingerprintFromClient catches and rejects with the algo error.
         verdicts.push(config.hostVerifier?.(hostKey))
+        setImmediate(() => {
+          fakeClient.handlers.error(new Error("Host denied"))
+        })
       }),
       end: vi.fn(),
       handlers: {} as Record<string, (error?: Error) => void>,
@@ -1511,8 +1512,7 @@ describe("readHostFingerprintViaSsh2", () => {
       })
     ).rejects.toThrow(/unsupported SSH host key algorithm "ssh-bogus"/v)
 
-    // hostVerifier never returns when it throws — the array stays empty.
-    expect(verdicts).toStrictEqual([])
+    expect(verdicts).toStrictEqual([false])
   })
 
   it("rejects with a MITM warning when the presented key buffer is too short", async () => {
@@ -1521,6 +1521,9 @@ describe("readHostFingerprintViaSsh2", () => {
     const fakeClient = {
       connect: vi.fn((config: { hostVerifier?: (key: Buffer) => boolean }) => {
         config.hostVerifier?.(truncatedKey)
+        setImmediate(() => {
+          fakeClient.handlers.close()
+        })
       }),
       end: vi.fn(),
       handlers: {} as Record<string, (error?: Error) => void>,
@@ -1536,6 +1539,41 @@ describe("readHostFingerprintViaSsh2", () => {
         clientFactory: () => fakeClient,
       })
     ).rejects.toThrow(/Invalid SSH host key buffer/v)
+  })
+
+  it("settles host key verifier errors raised from an asynchronous ssh2 callback", async () => {
+    // Wire-format buffer with algorithm "ssh-bogus" (length-prefixed ASCII).
+    const algoName = "ssh-bogus"
+    const algoBytes = Buffer.from(algoName, "ascii")
+    const lengthPrefix = Buffer.alloc(4)
+    lengthPrefix.writeUInt32BE(algoBytes.length, 0)
+    const hostKey = Buffer.concat([lengthPrefix, algoBytes, Buffer.from("payload")])
+
+    const verdicts: Array<boolean | undefined> = []
+
+    const fakeClient = {
+      connect: vi.fn((config: { hostVerifier?: (key: Buffer) => boolean }) => {
+        setImmediate(() => {
+          verdicts.push(config.hostVerifier?.(hostKey))
+          fakeClient.handlers.error(new Error("Host denied"))
+        })
+      }),
+      end: vi.fn(),
+      handlers: {} as Record<string, (error?: Error) => void>,
+      on: vi.fn((event: string, handler: (error?: Error) => void) => {
+        fakeClient.handlers[event] = handler
+        return fakeClient
+      }),
+      removeAllListeners: vi.fn(),
+    }
+
+    await expect(
+      readHostFingerprintViaSsh2("example.com", {
+        clientFactory: () => fakeClient,
+      })
+    ).rejects.toThrow(/unsupported SSH host key algorithm "ssh-bogus"/v)
+
+    expect(verdicts).toStrictEqual([false])
   })
 
   // R-0000127: ssh2 cannot detect a TCP half-open state; if neither close
