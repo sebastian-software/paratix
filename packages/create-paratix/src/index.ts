@@ -3,6 +3,7 @@ import { basename, join, resolve } from "node:path"
 import { fileURLToPath } from "node:url"
 
 import { escapeCliControlCharacters, formatCliValue } from "./cliFormat.js"
+import { deriveParatixDependencyRange } from "./dependencyRange.js"
 import {
   promptForAdminPublicKey,
   promptForHost,
@@ -38,6 +39,7 @@ import {
   UNATTENDED_UPGRADES_50_TEMPLATE,
 } from "./templates.js"
 
+export { deriveParatixDependencyRange } from "./dependencyRange.js"
 export {
   promptForAdminPublicKey,
   promptForHost,
@@ -52,8 +54,6 @@ export {
   normalizeInitialUserName,
 } from "./scaffoldConfig.js"
 export type { InitialUserConfig } from "./templates.js"
-
-const PARATIX_DEPENDENCY_RANGE = "^0.10.0"
 
 type ScaffoldOptions = {
   adminPublicKey?: string
@@ -139,7 +139,7 @@ export function writeProjectFiles(projectDirectory: string, options?: ScaffoldOp
 
   const packageJson = {
     dependencies: {
-      paratix: PARATIX_DEPENDENCY_RANGE,
+      paratix: deriveParatixDependencyRange(),
     },
     devDependencies: {
       "@types/node": "^24.5.2",

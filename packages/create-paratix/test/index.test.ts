@@ -6,6 +6,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 
 import { readHostFingerprintViaSsh2 } from "../src/hostFingerprintBootstrap.js"
 import {
+  deriveParatixDependencyRange,
   isDirectExecution,
   isValidExpectedHostFingerprint,
   isValidHost,
@@ -43,6 +44,16 @@ function createWireString(value: Buffer | string): Buffer {
   const lengthPrefix = Buffer.alloc(4)
   lengthPrefix.writeUInt32BE(bytes.length, 0)
   return Buffer.concat([lengthPrefix, bytes])
+}
+
+function readCreateParatixPackageVersion(): string {
+  const raw = readFileSync(new URL("../package.json", import.meta.url), "utf8")
+  const parsed = JSON.parse(raw) as { version?: unknown }
+  if (typeof parsed.version !== "string") {
+    throw new TypeError("create-paratix package.json must contain a version string.")
+  }
+
+  return parsed.version
 }
 
 function createEd25519PublicKey(comment: string, keyMaterial = Buffer.alloc(32, 1)): string {
@@ -1649,10 +1660,15 @@ describe("writeProjectFiles", () => {
 
     const raw = readFileSync(join(TEST_DIR, "package.json"), "utf8")
     const parsed: unknown = JSON.parse(raw)
+    const expectedRange = `^${readCreateParatixPackageVersion()}`
 
     expect(parsed).toMatchObject({
-      dependencies: { paratix: "^0.10.0" },
+      dependencies: { paratix: expectedRange },
     })
+  })
+
+  it("derives the paratix dependency range from the create-paratix package version", () => {
+    expect(deriveParatixDependencyRange()).toBe(`^${readCreateParatixPackageVersion()}`)
   })
 
   it("generated package.json includes tsx and @types/node so apply scripts can run server.ts immediately", () => {
