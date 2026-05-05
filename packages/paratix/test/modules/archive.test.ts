@@ -5,12 +5,6 @@ import type { ExecResult } from "../../src/types.js"
 import { archive } from "../../src/modules/archive.js"
 import { createMockSsh as createBaseMockSsh } from "../helpers/mockSsh.js"
 
-const createMockSsh: typeof createBaseMockSsh = (responses, options) =>
-  createBaseMockSsh(responses, { defaultExecResult: { code: 0 }, ...options })
-
-type MockSsh = ReturnType<typeof createMockSsh>
-type ExecTracker = { exec: MockSsh["exec"]; maxActive: () => number }
-
 const emptyEnv = {}
 
 const src = "/tmp/app.tar.gz"
@@ -23,6 +17,43 @@ const archiveOwnerMemberConcurrencyLimit = 8
 const srcHash = "2889be4b654d6b7f7922971e7fb3fdf1c5ebd92b9c52462be2683a735c7562ef"
 const marker = `/var/lib/paratix/flags/archive-${srcHash}.sha256`
 const archiveSha = "abc123def456"
+
+const archiveSymlinkCheckPaths = [
+  "/opt",
+  destination,
+  `${destination}/app`,
+  `${destination}/app/file`,
+  ...Array.from({ length: 24 }, (_value, index) => `${destination}/app/file-${String(index)}`),
+]
+const archiveCleanupPaths = [
+  "/tmp/paratix-upload.AbCdEfGh",
+  "/tmp/paratix-upload.FAIL1234",
+  "/tmp/paratix-upload.FIRST111",
+  "/tmp/paratix-upload.SECOND22",
+]
+const archiveApplyResponseStubs: NonNullable<
+  Parameters<typeof createBaseMockSsh>[1]
+>["responseStubs"] = [
+  ...archiveSymlinkCheckPaths.map((path) => ({
+    command: `test ! -L '${path}'`,
+    result: { code: 0 },
+  })),
+  { command: `mkdir -p '${destination}'`, result: { code: 0 } },
+  { command: "mkdir -p '/var/lib/paratix/flags'", result: { code: 0 } },
+  ...archiveCleanupPaths.map((path) => ({
+    command: `rm -f '${path}'`,
+    result: { code: 0 },
+  })),
+]
+
+const createMockSsh: typeof createBaseMockSsh = (responses, options) =>
+  createBaseMockSsh(responses, {
+    ...options,
+    responseStubs: [...archiveApplyResponseStubs, ...(options?.responseStubs ?? [])],
+  })
+
+type MockSsh = ReturnType<typeof createMockSsh>
+type ExecTracker = { exec: MockSsh["exec"]; maxActive: () => number }
 
 function tarListingForMemberPaths(memberPaths: string[]): string {
   return memberPaths
@@ -398,6 +429,7 @@ describe("archive.extract — apply", () => {
 
   it("limits chown to extracted members when owner is specified", async () => {
     const mockSsh = createMockSsh({
+      [`chown -h -- 'www-data:www-data' '${destination}/app/file'`]: { code: 0 },
       [`tar --no-same-owner --no-overwrite-dir -xzf '${src}' -C '${destination}'`]: { code: 0 },
       [`tar -tvzf '${src}'`]: { code: 0, stdout: safeTarListing },
     })
