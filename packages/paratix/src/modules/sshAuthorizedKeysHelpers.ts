@@ -2,6 +2,9 @@ import { failed } from "../moduleFailure.js"
 import { shellQuote, validateMktempPath } from "../ssh.js"
 import { type ModuleResult, NEEDS_APPLY, type SshConnection } from "../types.js"
 
+const AUTHORIZED_KEYS_TEMPORARY_DIRECTORY = "/run/paratix"
+const AUTHORIZED_KEYS_TEMPORARY_PREFIX = "authorized-keys"
+
 async function resolveHome(conn: SshConnection, user: string): Promise<string> {
   const home = await conn.output(`getent passwd ${shellQuote(user)} | cut -d: -f6`)
   if (home.length === 0 || home === "/") {
@@ -54,13 +57,18 @@ async function resolveApplyHome(
   }
 }
 
-async function createAuthorizedKeysTemporaryPath(
-  conn: SshConnection,
-  sshDirectoryPath: string
-): Promise<string> {
-  const template = `${sshDirectoryPath}/.authorized-keys.XXXXXX`
+async function createAuthorizedKeysTemporaryPath(conn: SshConnection): Promise<string> {
+  await conn.exec(
+    `install -d -m 700 -o root -g root ${shellQuote(AUTHORIZED_KEYS_TEMPORARY_DIRECTORY)}`,
+    { silent: true }
+  )
+  const template = `${AUTHORIZED_KEYS_TEMPORARY_DIRECTORY}/${AUTHORIZED_KEYS_TEMPORARY_PREFIX}.XXXXXX`
   const temporaryPath = await conn.output(`mktemp ${shellQuote(template)}`)
-  return validateMktempPath(sshDirectoryPath, temporaryPath, ".authorized-keys")
+  return validateMktempPath(
+    AUTHORIZED_KEYS_TEMPORARY_DIRECTORY,
+    temporaryPath,
+    AUTHORIZED_KEYS_TEMPORARY_PREFIX
+  )
 }
 
 async function ensureAuthorizedKeysIsNotSymlink(
@@ -124,13 +132,12 @@ async function rewriteAuthorizedKeys(
     authorizedKeysPath: string
     key: string
     primaryGroup: string
-    sshDirectoryPath: string
     state: "absent" | "present"
     user: string
   }
 ): Promise<void> {
-  const { authorizedKeysPath, key, primaryGroup, sshDirectoryPath, state, user } = parameters
-  const temporaryPath = await createAuthorizedKeysTemporaryPath(conn, sshDirectoryPath)
+  const { authorizedKeysPath, key, primaryGroup, state, user } = parameters
+  const temporaryPath = await createAuthorizedKeysTemporaryPath(conn)
 
   try {
     if (state === "present") {
@@ -156,7 +163,7 @@ async function rewriteAuthorizedKeys(
     // `apply` overwrites the semantically correct group ownership only to
     // see `check` go green on the next run.
     await conn.exec(
-      `chmod 600 ${shellQuote(temporaryPath)} && chown ${shellQuote(user)}:${shellQuote(primaryGroup)} ${shellQuote(temporaryPath)} && mv ${shellQuote(temporaryPath)} ${shellQuote(authorizedKeysPath)} && chmod 600 ${shellQuote(authorizedKeysPath)} && chown ${shellQuote(user)}:${shellQuote(primaryGroup)} ${shellQuote(authorizedKeysPath)}`,
+      `chmod 600 ${shellQuote(temporaryPath)} && chown ${shellQuote(user)}:${shellQuote(primaryGroup)} ${shellQuote(temporaryPath)} && [ ! -L ${shellQuote(authorizedKeysPath)} ] || { echo 'authorized_keys must not be a symlink' >&2; exit 1; } && mv -T ${shellQuote(temporaryPath)} ${shellQuote(authorizedKeysPath)}`,
       { silent: true }
     )
   } finally {
@@ -193,7 +200,6 @@ export async function applyAuthorizedKeys(
     authorizedKeysPath,
     key,
     primaryGroup,
-    sshDirectoryPath,
     state,
     user,
   })
