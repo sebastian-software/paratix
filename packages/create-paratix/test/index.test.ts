@@ -1301,14 +1301,14 @@ describe("promptForHostFingerprint", () => {
     expect(select).toHaveBeenCalledTimes(2)
     expect(select).toHaveBeenNthCalledWith(2, "Pin the scanned host fingerprint for example.com?", [
       {
-        description: expect.stringContaining("Pin the scanned fingerprint"),
-        label: "Pin this fingerprint",
-        value: "pin",
-      },
-      {
         description: expect.stringContaining("fail closed"),
         label: "Discard and skip",
         value: "discard",
+      },
+      {
+        description: expect.stringContaining("Pin the scanned fingerprint"),
+        label: "Pin this fingerprint",
+        value: "pin",
       },
     ])
   })

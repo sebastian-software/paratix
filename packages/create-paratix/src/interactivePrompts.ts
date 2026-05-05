@@ -59,15 +59,15 @@ const HOST_FINGERPRINT_OPTIONS: Array<SelectOption<"placeholder" | "scan">> = [
 const HOST_FINGERPRINT_CONFIRM_OPTIONS: Array<SelectOption<"discard" | "pin">> = [
   {
     description:
-      "Pin the scanned fingerprint into server.ts. Only choose this if the algorithm and fingerprint match an out-of-band reference (server console, provider dashboard, ssh-keyscan over a trusted network).",
-    label: "Pin this fingerprint",
-    value: "pin",
-  },
-  {
-    description:
       "Skip pinning now. The generated project will fail closed until known_hosts is prepared or a verified host-key pin is added.",
     label: "Discard and skip",
     value: "discard",
+  },
+  {
+    description:
+      "Pin the scanned fingerprint into server.ts. Only choose this if the algorithm and fingerprint match an out-of-band reference (server console, provider dashboard, ssh-keyscan over a trusted network).",
+    label: "Pin this fingerprint",
+    value: "pin",
   },
 ]
 
