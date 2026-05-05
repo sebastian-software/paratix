@@ -161,7 +161,7 @@ async function restartQuadletService(parameters: {
   ssh: SshConnection
 }): Promise<ModuleResult> {
   const restartResult = await parameters.ssh.exec(
-    `${SYSTEMCTL} restart ${shellQuote(parameters.serviceName)}`,
+    `${SYSTEMCTL} restart -- ${shellQuote(parameters.serviceName)}`,
     {
       ignoreExitCode: true,
       silent: true,

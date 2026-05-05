@@ -282,6 +282,9 @@ export function quadletPullOutputIndicatesChange(output: string): boolean {
 const UNIT_NAME_PATTERN = /^[\w@.\-]+$/v
 
 export function validateQuadletName(name: string): void {
+  if (name.startsWith("-")) {
+    throw new Error(`quadlet: name must not start with '-', got: ${JSON.stringify(name)}`)
+  }
   if (!UNIT_NAME_PATTERN.test(name)) {
     throw new Error(`quadlet: name must match ${String(UNIT_NAME_PATTERN)}, got: ${name}`)
   }

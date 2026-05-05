@@ -288,6 +288,15 @@ describe("quadlet.container", () => {
     }).toThrow(/name must match/v)
   })
 
+  it("throws when the quadlet name looks like a systemctl option", () => {
+    expect(() => {
+      quadlet.container({
+        image: "docker.io/library/nginx:latest",
+        name: "--user",
+      })
+    }).toThrow(/name must not start with '-'/v)
+  })
+
   it("throws when the image value looks like a podman option", () => {
     expect(() => {
       quadlet.container({
@@ -507,7 +516,7 @@ describe("quadlet.updateImage", () => {
         code: 0,
         stdout: "Copying blob sha256:123\nWriting manifest to image destination\n",
       },
-      "systemctl restart 'traefik'": { code: 0 },
+      "systemctl restart -- 'traefik'": { code: 0 },
     })
 
     const result = await quadlet
@@ -523,7 +532,7 @@ describe("quadlet.updateImage", () => {
     })
     expect(ssh.calls).toContain("podman image inspect -- 'docker.io/library/traefik:v3.3'")
     expect(ssh.calls).toContain("podman pull -- 'docker.io/library/traefik:v3.3' 2>&1")
-    expect(ssh.calls).toContain("systemctl restart 'traefik'")
+    expect(ssh.calls).toContain("systemctl restart -- 'traefik'")
   })
 
   it("returns ok and skips restart when the image is already up to date", async () => {
@@ -542,11 +551,17 @@ describe("quadlet.updateImage", () => {
       .apply(ssh, emptyEnv)
 
     expect(result.status).toBe("ok")
-    expect(ssh.calls).not.toContain("systemctl restart 'traefik'")
+    expect(ssh.calls).not.toContain("systemctl restart -- 'traefik'")
   })
 
   it("passes authFile to podman pull for private registries", async () => {
+    const authFilePullCommand =
+      "podman pull --authfile '/run/containers/auth.json' -- 'ghcr.io/acme/private-app:latest' 2>&1"
     const ssh = createMockSsh({
+      [authFilePullCommand]: {
+        code: 0,
+        stdout: "Downloaded newer image for ghcr.io/acme/private-app:latest",
+      },
       "podman image inspect -- 'ghcr.io/acme/private-app:latest'": {
         code: 0,
         stdout: JSON.stringify([
@@ -556,11 +571,7 @@ describe("quadlet.updateImage", () => {
           },
         ]),
       },
-      "podman pull --authfile '/run/containers/auth.json' -- 'ghcr.io/acme/private-app:latest' 2>&1": {
-        code: 0,
-        stdout: "Downloaded newer image for ghcr.io/acme/private-app:latest",
-      },
-      "systemctl restart 'private-app'": { code: 0 },
+      "systemctl restart -- 'private-app'": { code: 0 },
     })
 
     const result = await quadlet
@@ -575,9 +586,7 @@ describe("quadlet.updateImage", () => {
       detail: "(sha256:private-registry-digest)",
       status: "changed",
     })
-    expect(ssh.calls).toContain(
-      "podman pull --authfile '/run/containers/auth.json' -- 'ghcr.io/acme/private-app:latest' 2>&1"
-    )
+    expect(ssh.calls).toContain(authFilePullCommand)
   })
 
   it("throws when the update image value looks like a podman option", () => {
@@ -599,6 +608,16 @@ describe("quadlet.updateImage", () => {
     }).toThrow(/authFile must not start with '-'/v)
   })
 
+  it("throws when the overridden service name looks like a systemctl option", () => {
+    expect(() => {
+      quadlet.updateImage({
+        image: "ghcr.io/acme/private-app:latest",
+        name: "private-app",
+        serviceName: "--user",
+      })
+    }).toThrow(/name must not start with '-'/v)
+  })
+
   it("restarts the overridden service name when provided", async () => {
     const ssh = createMockSsh({
       "podman image inspect -- 'ghcr.io/acme/private-app:latest'": {
@@ -614,7 +633,7 @@ describe("quadlet.updateImage", () => {
         code: 0,
         stdout: "Storing signatures\n",
       },
-      "systemctl restart 'private-app-canary'": { code: 0 },
+      "systemctl restart -- 'private-app-canary'": { code: 0 },
     })
 
     const result = await quadlet
@@ -629,7 +648,7 @@ describe("quadlet.updateImage", () => {
       detail: "(sha256:canary-registry-digest)",
       status: "changed",
     })
-    expect(ssh.calls).toContain("systemctl restart 'private-app-canary'")
+    expect(ssh.calls).toContain("systemctl restart -- 'private-app-canary'")
   })
 
   it("returns failed when image inspection fails after a changed pull", async () => {
@@ -652,7 +671,7 @@ describe("quadlet.updateImage", () => {
       .apply(ssh, emptyEnv)
 
     expect(result.status).toBe("failed")
-    expect(ssh.calls).not.toContain("systemctl restart 'traefik'")
+    expect(ssh.calls).not.toContain("systemctl restart -- 'traefik'")
   })
 
   it("returns failed when image inspection returns no ID", async () => {
@@ -687,7 +706,7 @@ describe("quadlet.updateImage", () => {
         code: 0,
         stdout: "Copying config sha256:abc\n",
       },
-      "systemctl restart 'traefik'": { code: 0 },
+      "systemctl restart -- 'traefik'": { code: 0 },
     })
 
     const result = await quadlet
@@ -736,7 +755,7 @@ describe("quadlet.updateImage", () => {
         code: 0,
         stdout: "Copying config sha256:abc\n",
       },
-      "systemctl restart 'traefik'": {
+      "systemctl restart -- 'traefik'": {
         code: 1,
         stderr: "restart failed",
       },

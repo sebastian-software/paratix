@@ -305,6 +305,9 @@ function resolveComposeSystemdIdentity(options: { name?: string; projectDirector
   unitFileName: string
 } {
   const serviceName = options.name ?? `compose-${basename(options.projectDirectory)}`
+  if (serviceName.startsWith("-")) {
+    throw new Error(`compose.systemd: name must not start with '-', got: ${serviceName}`)
+  }
   if (!UNIT_NAME_PATTERN.test(serviceName)) {
     throw new Error(
       `compose.systemd: name must match ${String(UNIT_NAME_PATTERN)}, got: ${serviceName}`
@@ -323,7 +326,7 @@ async function prepareComposeSystemdTarget(parameters: {
   connection: SshConnection
   unitFileName: string
 }): Promise<void> {
-  await parameters.connection.exec(`systemctl unmask ${shellQuote(parameters.unitFileName)}`, {
+  await parameters.connection.exec(`systemctl unmask -- ${shellQuote(parameters.unitFileName)}`, {
     ignoreExitCode: true,
     silent: true,
   })

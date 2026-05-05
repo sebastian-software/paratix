@@ -926,7 +926,7 @@ function composeSystemdRecoveryResponses(
 ): Record<string, { code: number; stdout?: string }> {
   return {
     [`rm -f '${filePath}'`]: { code: 0 },
-    [`systemctl unmask '${serviceName}.service'`]: { code: 0 },
+    [`systemctl unmask -- '${serviceName}.service'`]: { code: 0 },
   }
 }
 
@@ -1081,7 +1081,7 @@ describe("compose.systemd — apply", () => {
 
     expect(result.status).toBe("failed")
     expect(String(result.error)).toContain("atomic write failed")
-    expect(mockSsh.calls).toContain("systemctl unmask 'compose-app.service'")
+    expect(mockSsh.calls).toContain("systemctl unmask -- 'compose-app.service'")
     expect(mockSsh.calls).not.toContain("rm -f '/etc/systemd/system/compose-app.service'")
     expect(mockSsh.calls).not.toContain("systemctl daemon-reload")
   })
@@ -1224,7 +1224,7 @@ describe("compose.systemd — apply", () => {
         path: serviceUnitPath,
       },
     ])
-    expect(mockSsh.calls.indexOf("systemctl unmask 'mailcow.service'")).toBeLessThan(
+    expect(mockSsh.calls.indexOf("systemctl unmask -- 'mailcow.service'")).toBeLessThan(
       mockSsh.calls.indexOf("cat '/etc/systemd/system/mailcow.service'")
     )
     expect(mockSsh.calls).not.toContain("rm -f '/etc/systemd/system/mailcow.service'")
@@ -1241,6 +1241,12 @@ describe("compose.systemd — naming", () => {
   it("uses explicit name when provided", () => {
     const mod = compose.systemd({ name: "my-stack", projectDirectory })
     expect(mod.name).toBe("compose.systemd: my-stack.service")
+  })
+
+  it("throws when explicit name looks like a systemctl option", () => {
+    expect(() => compose.systemd({ name: "--user", projectDirectory })).toThrow(
+      /name must not start with '-'/v
+    )
   })
 
   it("explicit name is used as unit file name", async () => {

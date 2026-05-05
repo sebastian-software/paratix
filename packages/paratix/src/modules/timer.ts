@@ -63,9 +63,11 @@ async function checkPresent(ssh: SshConnection, paths: TimerPaths): Promise<"nee
     path: paths.timerPath,
   })
   if (!timerMatched) return NEEDS_APPLY
-  const enabled = await ssh.test(`${SYSTEMCTL} is-enabled --quiet ${shellQuote(paths.timerUnit)}`)
+  const enabled = await ssh.test(
+    `${SYSTEMCTL} is-enabled --quiet -- ${shellQuote(paths.timerUnit)}`
+  )
   if (!enabled) return NEEDS_APPLY
-  const active = await ssh.test(`${SYSTEMCTL} is-active --quiet ${shellQuote(paths.timerUnit)}`)
+  const active = await ssh.test(`${SYSTEMCTL} is-active --quiet -- ${shellQuote(paths.timerUnit)}`)
   return active ? "ok" : NEEDS_APPLY
 }
 
@@ -121,15 +123,15 @@ async function syncUnitFiles(
 }
 
 async function isTimerFullyActive(ssh: SshConnection, timerUnit: string): Promise<boolean> {
-  const enabled = await ssh.test(`${SYSTEMCTL} is-enabled --quiet ${shellQuote(timerUnit)}`)
+  const enabled = await ssh.test(`${SYSTEMCTL} is-enabled --quiet -- ${shellQuote(timerUnit)}`)
   if (!enabled) return false
-  return ssh.test(`${SYSTEMCTL} is-active --quiet ${shellQuote(timerUnit)}`)
+  return ssh.test(`${SYSTEMCTL} is-active --quiet -- ${shellQuote(timerUnit)}`)
 }
 
 async function hasResidualTimerState(ssh: SshConnection, timerUnit: string): Promise<boolean> {
-  const enabled = await ssh.test(`${SYSTEMCTL} is-enabled --quiet ${shellQuote(timerUnit)}`)
+  const enabled = await ssh.test(`${SYSTEMCTL} is-enabled --quiet -- ${shellQuote(timerUnit)}`)
   if (enabled) return true
-  return ssh.test(`${SYSTEMCTL} is-active --quiet ${shellQuote(timerUnit)}`)
+  return ssh.test(`${SYSTEMCTL} is-active --quiet -- ${shellQuote(timerUnit)}`)
 }
 
 type RestartContext = {
@@ -164,7 +166,7 @@ async function restartTimerIfNeeded(
       return failedCommand(`[timer.scheduled: ${name}] systemctl daemon-reload failed`, reload)
     }
   }
-  const restart = await ssh.exec(`${SYSTEMCTL} restart ${shellQuote(paths.timerUnit)}`, {
+  const restart = await ssh.exec(`${SYSTEMCTL} restart -- ${shellQuote(paths.timerUnit)}`, {
     ignoreExitCode: true,
     silent: true,
   })
@@ -192,7 +194,7 @@ async function applyPresent(
     return { status: "ok" }
   }
 
-  const enable = await ssh.exec(`${SYSTEMCTL} enable --now ${shellQuote(paths.timerUnit)}`, {
+  const enable = await ssh.exec(`${SYSTEMCTL} enable --now -- ${shellQuote(paths.timerUnit)}`, {
     ignoreExitCode: true,
     silent: true,
   })
@@ -230,7 +232,7 @@ async function applyAbsent(ssh: SshConnection, context: AbsentContext): Promise<
   // Best-effort disable; ignore failure (unit may already be gone). `disable
   // --now` also removes the wants/ symlink, which is why we run it before
   // deleting the unit files.
-  await ssh.exec(`${SYSTEMCTL} disable --now ${shellQuote(locations.timerUnit)}`, {
+  await ssh.exec(`${SYSTEMCTL} disable --now -- ${shellQuote(locations.timerUnit)}`, {
     ignoreExitCode: true,
     silent: true,
   })

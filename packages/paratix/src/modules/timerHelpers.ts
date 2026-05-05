@@ -196,6 +196,9 @@ export function validatePresentOptions(options: TimerScheduledOptions): void {
 }
 
 export function assertTimerName(name: string): void {
+  if (name.startsWith("-")) {
+    throw new Error(`timer: name must not start with '-', got: ${JSON.stringify(name)}`)
+  }
   if (!TIMER_NAME_PATTERN.test(name)) {
     throw new Error(
       `timer: name must match ${String(TIMER_NAME_PATTERN)}, got: ${JSON.stringify(name)}`

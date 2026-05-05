@@ -47,8 +47,8 @@ describe("timer.scheduled — check (state: present)", () => {
       [`cat '${TIMER_PATH}'`]: { code: 0, stdout: expectedTimerContent },
       [`stat -c '%a' '${SERVICE_PATH}'`]: { code: 0, stdout: "644\n" },
       [`stat -c '%a' '${TIMER_PATH}'`]: { code: 0, stdout: "644\n" },
-      "systemctl is-active --quiet 'backup.timer'": { code: 0 },
-      "systemctl is-enabled --quiet 'backup.timer'": { code: 0 },
+      "systemctl is-active --quiet -- 'backup.timer'": { code: 0 },
+      "systemctl is-enabled --quiet -- 'backup.timer'": { code: 0 },
     })
     const mod = timer.scheduled("backup", baseOptions)
     expect(await mod.check(ssh, emptyEnv)).toBe("ok")
@@ -62,8 +62,8 @@ describe("timer.scheduled — check (state: present)", () => {
       [`cat '${TIMER_PATH}'`]: { code: 0, stdout: expectedTimerContent },
       [`stat -c '%a' '${SERVICE_PATH}'`]: { code: 0, stdout: "600\n" },
       [`stat -c '%a' '${TIMER_PATH}'`]: { code: 0, stdout: "644\n" },
-      "systemctl is-active --quiet 'backup.timer'": { code: 0 },
-      "systemctl is-enabled --quiet 'backup.timer'": { code: 0 },
+      "systemctl is-active --quiet -- 'backup.timer'": { code: 0 },
+      "systemctl is-enabled --quiet -- 'backup.timer'": { code: 0 },
     })
     const mod = timer.scheduled("backup", baseOptions)
     expect(await mod.check(ssh, emptyEnv)).toBe("needs-apply")
@@ -77,8 +77,8 @@ describe("timer.scheduled — check (state: present)", () => {
       [`cat '${TIMER_PATH}'`]: { code: 0, stdout: expectedTimerContent },
       [`stat -c '%a' '${SERVICE_PATH}'`]: { code: 0, stdout: "644\n" },
       [`stat -c '%a' '${TIMER_PATH}'`]: { code: 0, stdout: "600\n" },
-      "systemctl is-active --quiet 'backup.timer'": { code: 0 },
-      "systemctl is-enabled --quiet 'backup.timer'": { code: 0 },
+      "systemctl is-active --quiet -- 'backup.timer'": { code: 0 },
+      "systemctl is-enabled --quiet -- 'backup.timer'": { code: 0 },
     })
     const mod = timer.scheduled("backup", baseOptions)
     expect(await mod.check(ssh, emptyEnv)).toBe("needs-apply")
@@ -92,8 +92,8 @@ describe("timer.scheduled — check (state: present)", () => {
       [`cat '${TIMER_PATH}'`]: { code: 0, stdout: expectedTimerContent },
       [`stat -c '%a' '${SERVICE_PATH}'`]: { code: 1, stdout: "" },
       [`stat -c '%a' '${TIMER_PATH}'`]: { code: 0, stdout: "644\n" },
-      "systemctl is-active --quiet 'backup.timer'": { code: 0 },
-      "systemctl is-enabled --quiet 'backup.timer'": { code: 0 },
+      "systemctl is-active --quiet -- 'backup.timer'": { code: 0 },
+      "systemctl is-enabled --quiet -- 'backup.timer'": { code: 0 },
     })
     const mod = timer.scheduled("backup", baseOptions)
     expect(await mod.check(ssh, emptyEnv)).toBe("needs-apply")
@@ -135,7 +135,7 @@ describe("timer.scheduled — check (state: present)", () => {
       [`cat '${TIMER_PATH}'`]: { code: 0, stdout: expectedTimerContent },
       [`stat -c '%a' '${SERVICE_PATH}'`]: { code: 0, stdout: "644\n" },
       [`stat -c '%a' '${TIMER_PATH}'`]: { code: 0, stdout: "644\n" },
-      "systemctl is-enabled --quiet 'backup.timer'": { code: 1 },
+      "systemctl is-enabled --quiet -- 'backup.timer'": { code: 1 },
     })
     const mod = timer.scheduled("backup", baseOptions)
     expect(await mod.check(ssh, emptyEnv)).toBe("needs-apply")
@@ -149,8 +149,8 @@ describe("timer.scheduled — check (state: present)", () => {
       [`cat '${TIMER_PATH}'`]: { code: 0, stdout: expectedTimerContent },
       [`stat -c '%a' '${SERVICE_PATH}'`]: { code: 0, stdout: "644\n" },
       [`stat -c '%a' '${TIMER_PATH}'`]: { code: 0, stdout: "644\n" },
-      "systemctl is-active --quiet 'backup.timer'": { code: 1 },
-      "systemctl is-enabled --quiet 'backup.timer'": { code: 0 },
+      "systemctl is-active --quiet -- 'backup.timer'": { code: 1 },
+      "systemctl is-enabled --quiet -- 'backup.timer'": { code: 0 },
     })
     const mod = timer.scheduled("backup", baseOptions)
     expect(await mod.check(ssh, emptyEnv)).toBe("needs-apply")
@@ -167,8 +167,8 @@ describe("timer.scheduled — check (state: absent)", () => {
     const ssh = createMockSsh({
       [`[ -e '${SERVICE_PATH}' ]`]: { code: 1 },
       [`[ -e '${TIMER_PATH}' ]`]: { code: 1 },
-      "systemctl is-active --quiet 'backup.timer'": { code: 1 },
-      "systemctl is-enabled --quiet 'backup.timer'": { code: 1 },
+      "systemctl is-active --quiet -- 'backup.timer'": { code: 1 },
+      "systemctl is-enabled --quiet -- 'backup.timer'": { code: 1 },
     })
     const mod = timer.scheduled("backup", { ...baseOptions, state: "absent" })
     expect(await mod.check(ssh, emptyEnv)).toBe("ok")
@@ -178,8 +178,8 @@ describe("timer.scheduled — check (state: absent)", () => {
     const ssh = createMockSsh({
       [`[ -e '${SERVICE_PATH}' ]`]: { code: 1 },
       [`[ -e '${TIMER_PATH}' ]`]: { code: 1 },
-      "systemctl is-active --quiet 'backup.timer'": { code: 0 },
-      "systemctl is-enabled --quiet 'backup.timer'": { code: 1 },
+      "systemctl is-active --quiet -- 'backup.timer'": { code: 0 },
+      "systemctl is-enabled --quiet -- 'backup.timer'": { code: 1 },
     })
     const mod = timer.scheduled("backup", { ...baseOptions, state: "absent" })
     expect(await mod.check(ssh, emptyEnv)).toBe("needs-apply")
@@ -209,15 +209,15 @@ describe("timer.scheduled — apply (state: present)", () => {
       [`[ -e '${SERVICE_PATH}' ]`]: { code: 1 },
       [`[ -e '${TIMER_PATH}' ]`]: { code: 1 },
       "systemctl daemon-reload": { code: 0 },
-      "systemctl enable --now 'backup.timer'": { code: 0 },
-      "systemctl restart 'backup.timer'": { code: 0 },
+      "systemctl enable --now -- 'backup.timer'": { code: 0 },
+      "systemctl restart -- 'backup.timer'": { code: 0 },
     })
     const mod = timer.scheduled("backup", baseOptions)
     const result = await mod.apply(ssh, emptyEnv)
     expect(result.status).toBe("changed")
     expect(ssh.calls).toContain("systemctl daemon-reload")
-    expect(ssh.calls).toContain("systemctl enable --now 'backup.timer'")
-    expect(ssh.calls).toContain("systemctl restart 'backup.timer'")
+    expect(ssh.calls).toContain("systemctl enable --now -- 'backup.timer'")
+    expect(ssh.calls).toContain("systemctl restart -- 'backup.timer'")
   })
 
   it("returns failed when daemon-reload fails", async () => {
@@ -236,7 +236,7 @@ describe("timer.scheduled — apply (state: present)", () => {
       [`[ -e '${SERVICE_PATH}' ]`]: { code: 1 },
       [`[ -e '${TIMER_PATH}' ]`]: { code: 1 },
       "systemctl daemon-reload": { code: 0 },
-      "systemctl enable --now 'backup.timer'": { code: 1, stderr: "denied" },
+      "systemctl enable --now -- 'backup.timer'": { code: 1, stderr: "denied" },
     })
     const mod = timer.scheduled("backup", baseOptions)
     const result = await mod.apply(ssh, emptyEnv)
@@ -248,8 +248,8 @@ describe("timer.scheduled — apply (state: present)", () => {
       [`[ -e '${SERVICE_PATH}' ]`]: { code: 1 },
       [`[ -e '${TIMER_PATH}' ]`]: { code: 1 },
       "systemctl daemon-reload": { code: 0 },
-      "systemctl enable --now 'backup.timer'": { code: 0 },
-      "systemctl restart 'backup.timer'": { code: 1, stderr: "no" },
+      "systemctl enable --now -- 'backup.timer'": { code: 0 },
+      "systemctl restart -- 'backup.timer'": { code: 1, stderr: "no" },
     })
     const mod = timer.scheduled("backup", baseOptions)
     const result = await mod.apply(ssh, emptyEnv)
@@ -269,12 +269,12 @@ describe("timer.scheduled — apply (state: absent)", () => {
     const ssh = createTimerApplyMockSsh({
       [`rm -f '${TIMER_PATH}' '${SERVICE_PATH}'`]: { code: 0 },
       "systemctl daemon-reload": { code: 0 },
-      "systemctl disable --now 'backup.timer'": { code: 0 },
+      "systemctl disable --now -- 'backup.timer'": { code: 0 },
     })
     const mod = timer.scheduled("backup", { ...baseOptions, state: "absent" })
     const result = await mod.apply(ssh, emptyEnv)
     expect(result.status).toBe("changed")
-    expect(ssh.calls).toContain("systemctl disable --now 'backup.timer'")
+    expect(ssh.calls).toContain("systemctl disable --now -- 'backup.timer'")
     expect(ssh.calls).toContain(`rm -f '${TIMER_PATH}' '${SERVICE_PATH}'`)
     expect(ssh.calls).toContain("systemctl daemon-reload")
   })
@@ -283,7 +283,7 @@ describe("timer.scheduled — apply (state: absent)", () => {
     const ssh = createTimerApplyMockSsh({
       [`rm -f '${TIMER_PATH}' '${SERVICE_PATH}'`]: { code: 0 },
       "systemctl daemon-reload": { code: 0 },
-      "systemctl disable --now 'backup.timer'": { code: 1, stderr: "no such unit" },
+      "systemctl disable --now -- 'backup.timer'": { code: 1, stderr: "no such unit" },
     })
     const mod = timer.scheduled("backup", { ...baseOptions, state: "absent" })
     const result = await mod.apply(ssh, emptyEnv)
@@ -295,14 +295,14 @@ describe("timer.scheduled — apply (state: absent)", () => {
       [`[ -e '${SERVICE_PATH}' ]`]: { code: 1 },
       [`[ -e '${TIMER_PATH}' ]`]: { code: 1 },
       "systemctl daemon-reload": { code: 0 },
-      "systemctl disable --now 'backup.timer'": { code: 0 },
-      "systemctl is-active --quiet 'backup.timer'": { code: 0 },
-      "systemctl is-enabled --quiet 'backup.timer'": { code: 1 },
+      "systemctl disable --now -- 'backup.timer'": { code: 0 },
+      "systemctl is-active --quiet -- 'backup.timer'": { code: 0 },
+      "systemctl is-enabled --quiet -- 'backup.timer'": { code: 1 },
     })
     const mod = timer.scheduled("backup", { ...baseOptions, state: "absent" })
     const result = await mod.apply(ssh, emptyEnv)
     expect(result.status).toBe("changed")
-    expect(ssh.calls).toContain("systemctl disable --now 'backup.timer'")
+    expect(ssh.calls).toContain("systemctl disable --now -- 'backup.timer'")
     expect(ssh.calls).not.toContain(`rm -f '${TIMER_PATH}' '${SERVICE_PATH}'`)
     expect(ssh.calls).toContain("systemctl daemon-reload")
   })
@@ -310,7 +310,7 @@ describe("timer.scheduled — apply (state: absent)", () => {
   it("returns failed when rm fails", async () => {
     const ssh = createTimerApplyMockSsh({
       [`rm -f '${TIMER_PATH}' '${SERVICE_PATH}'`]: { code: 1, stderr: "EACCES" },
-      "systemctl disable --now 'backup.timer'": { code: 0 },
+      "systemctl disable --now -- 'backup.timer'": { code: 0 },
     })
     const mod = timer.scheduled("backup", { ...baseOptions, state: "absent" })
     const result = await mod.apply(ssh, emptyEnv)
@@ -321,7 +321,7 @@ describe("timer.scheduled — apply (state: absent)", () => {
     const ssh = createTimerApplyMockSsh({
       [`rm -f '${TIMER_PATH}' '${SERVICE_PATH}'`]: { code: 0 },
       "systemctl daemon-reload": { code: 1, stderr: "boom" },
-      "systemctl disable --now 'backup.timer'": { code: 0 },
+      "systemctl disable --now -- 'backup.timer'": { code: 0 },
     })
     const mod = timer.scheduled("backup", { ...baseOptions, state: "absent" })
     const result = await mod.apply(ssh, emptyEnv)
@@ -440,15 +440,15 @@ describe("timer.scheduled — apply (state: present, idempotency)", () => {
       [`cat '${TIMER_PATH}'`]: { code: 0, stdout: expectedTimerContent },
       [`stat -c '%a' '${SERVICE_PATH}'`]: { code: 0, stdout: "644\n" },
       [`stat -c '%a' '${TIMER_PATH}'`]: { code: 0, stdout: "644\n" },
-      "systemctl is-active --quiet 'backup.timer'": { code: 0 },
-      "systemctl is-enabled --quiet 'backup.timer'": { code: 0 },
+      "systemctl is-active --quiet -- 'backup.timer'": { code: 0 },
+      "systemctl is-enabled --quiet -- 'backup.timer'": { code: 0 },
     })
     const mod = timer.scheduled("backup", baseOptions)
     const result = await mod.apply(ssh, emptyEnv)
     expect(result.status).toBe("ok")
     expect(ssh.calls).not.toContain("systemctl daemon-reload")
-    expect(ssh.calls).not.toContain("systemctl restart 'backup.timer'")
-    expect(ssh.calls).not.toContain("systemctl enable --now 'backup.timer'")
+    expect(ssh.calls).not.toContain("systemctl restart -- 'backup.timer'")
+    expect(ssh.calls).not.toContain("systemctl enable --now -- 'backup.timer'")
   })
 
   it("runs enable --now, daemon-reload and restart when files match but timer is not enabled (stale RAM state)", async () => {
@@ -460,16 +460,16 @@ describe("timer.scheduled — apply (state: present, idempotency)", () => {
       [`stat -c '%a' '${SERVICE_PATH}'`]: { code: 0, stdout: "644\n" },
       [`stat -c '%a' '${TIMER_PATH}'`]: { code: 0, stdout: "644\n" },
       "systemctl daemon-reload": { code: 0 },
-      "systemctl enable --now 'backup.timer'": { code: 0 },
-      "systemctl is-enabled --quiet 'backup.timer'": { code: 1 },
-      "systemctl restart 'backup.timer'": { code: 0 },
+      "systemctl enable --now -- 'backup.timer'": { code: 0 },
+      "systemctl is-enabled --quiet -- 'backup.timer'": { code: 1 },
+      "systemctl restart -- 'backup.timer'": { code: 0 },
     })
     const mod = timer.scheduled("backup", baseOptions)
     const result = await mod.apply(ssh, emptyEnv)
     expect(result.status).toBe("changed")
-    expect(ssh.calls).toContain("systemctl enable --now 'backup.timer'")
+    expect(ssh.calls).toContain("systemctl enable --now -- 'backup.timer'")
     expect(ssh.calls).toContain("systemctl daemon-reload")
-    expect(ssh.calls).toContain("systemctl restart 'backup.timer'")
+    expect(ssh.calls).toContain("systemctl restart -- 'backup.timer'")
   })
 
   it("runs daemon-reload and restart when files match but timer is enabled and inactive (stale RAM state)", async () => {
@@ -481,17 +481,17 @@ describe("timer.scheduled — apply (state: present, idempotency)", () => {
       [`stat -c '%a' '${SERVICE_PATH}'`]: { code: 0, stdout: "644\n" },
       [`stat -c '%a' '${TIMER_PATH}'`]: { code: 0, stdout: "644\n" },
       "systemctl daemon-reload": { code: 0 },
-      "systemctl enable --now 'backup.timer'": { code: 0 },
-      "systemctl is-active --quiet 'backup.timer'": { code: 1 },
-      "systemctl is-enabled --quiet 'backup.timer'": { code: 0 },
-      "systemctl restart 'backup.timer'": { code: 0 },
+      "systemctl enable --now -- 'backup.timer'": { code: 0 },
+      "systemctl is-active --quiet -- 'backup.timer'": { code: 1 },
+      "systemctl is-enabled --quiet -- 'backup.timer'": { code: 0 },
+      "systemctl restart -- 'backup.timer'": { code: 0 },
     })
     const mod = timer.scheduled("backup", baseOptions)
     const result = await mod.apply(ssh, emptyEnv)
     expect(result.status).toBe("changed")
-    expect(ssh.calls).toContain("systemctl enable --now 'backup.timer'")
+    expect(ssh.calls).toContain("systemctl enable --now -- 'backup.timer'")
     expect(ssh.calls).toContain("systemctl daemon-reload")
-    expect(ssh.calls).toContain("systemctl restart 'backup.timer'")
+    expect(ssh.calls).toContain("systemctl restart -- 'backup.timer'")
   })
 
   it("does not restart when only the service file changed", async () => {
@@ -502,13 +502,13 @@ describe("timer.scheduled — apply (state: present, idempotency)", () => {
       [`cat '${TIMER_PATH}'`]: { code: 0, stdout: expectedTimerContent },
       [`stat -c '%a' '${TIMER_PATH}'`]: { code: 0, stdout: "644\n" },
       "systemctl daemon-reload": { code: 0 },
-      "systemctl enable --now 'backup.timer'": { code: 0 },
+      "systemctl enable --now -- 'backup.timer'": { code: 0 },
     })
     const mod = timer.scheduled("backup", baseOptions)
     const result = await mod.apply(ssh, emptyEnv)
     expect(result.status).toBe("changed")
     expect(ssh.calls).toContain("systemctl daemon-reload")
-    expect(ssh.calls).not.toContain("systemctl restart 'backup.timer'")
+    expect(ssh.calls).not.toContain("systemctl restart -- 'backup.timer'")
   })
 
   it("rewrites the service unit when its mode drifts to 0600", async () => {
@@ -520,7 +520,7 @@ describe("timer.scheduled — apply (state: present, idempotency)", () => {
       [`stat -c '%a' '${SERVICE_PATH}'`]: { code: 0, stdout: "600\n" },
       [`stat -c '%a' '${TIMER_PATH}'`]: { code: 0, stdout: "644\n" },
       "systemctl daemon-reload": { code: 0 },
-      "systemctl enable --now 'backup.timer'": { code: 0 },
+      "systemctl enable --now -- 'backup.timer'": { code: 0 },
     })
     const writes: Array<{ content: string; mode: string | undefined; path: string }> = []
     // eslint-disable-next-line @typescript-eslint/require-await -- Mock implementation
@@ -545,8 +545,8 @@ describe("timer.scheduled — apply (state: present, idempotency)", () => {
       [`stat -c '%a' '${SERVICE_PATH}'`]: { code: 0, stdout: "644\n" },
       [`stat -c '%a' '${TIMER_PATH}'`]: { code: 0, stdout: "600\n" },
       "systemctl daemon-reload": { code: 0 },
-      "systemctl enable --now 'backup.timer'": { code: 0 },
-      "systemctl restart 'backup.timer'": { code: 0 },
+      "systemctl enable --now -- 'backup.timer'": { code: 0 },
+      "systemctl restart -- 'backup.timer'": { code: 0 },
     })
     const writes: Array<{ content: string; mode: string | undefined; path: string }> = []
     // eslint-disable-next-line @typescript-eslint/require-await -- Mock implementation
@@ -560,7 +560,7 @@ describe("timer.scheduled — apply (state: present, idempotency)", () => {
     expect(timerWrites).toHaveLength(1)
     expect(timerWrites[0]?.mode).toBe("0644")
     expect(writes.some((w) => w.path === SERVICE_PATH)).toBe(false)
-    expect(ssh.calls).toContain("systemctl restart 'backup.timer'")
+    expect(ssh.calls).toContain("systemctl restart -- 'backup.timer'")
   })
 })
 
@@ -703,6 +703,10 @@ describe("timer.scheduled — module name and validation", () => {
 
   it("throws when name contains non-ASCII word characters", () => {
     expect(() => timer.scheduled("bäckup", baseOptions)).toThrow(/name must match/v)
+  })
+
+  it("throws when name looks like a systemctl option", () => {
+    expect(() => timer.scheduled("--user", baseOptions)).toThrow(/name must not start with '-'/v)
   })
 
   it("throws when exec contains a newline", () => {
@@ -977,8 +981,8 @@ describe("timer.absent", () => {
     const ssh = createMockSsh({
       [`[ -e '${SERVICE_PATH}' ]`]: { code: 1 },
       [`[ -e '${TIMER_PATH}' ]`]: { code: 1 },
-      "systemctl is-active --quiet 'backup.timer'": { code: 1 },
-      "systemctl is-enabled --quiet 'backup.timer'": { code: 1 },
+      "systemctl is-active --quiet -- 'backup.timer'": { code: 1 },
+      "systemctl is-enabled --quiet -- 'backup.timer'": { code: 1 },
     })
     const mod = timer.absent("backup")
     expect(await mod.check(ssh, emptyEnv)).toBe("ok")
@@ -1010,12 +1014,12 @@ describe("timer.absent", () => {
     const ssh = createTimerApplyMockSsh({
       [`rm -f '${TIMER_PATH}' '${SERVICE_PATH}'`]: { code: 0 },
       "systemctl daemon-reload": { code: 0 },
-      "systemctl disable --now 'backup.timer'": { code: 0 },
+      "systemctl disable --now -- 'backup.timer'": { code: 0 },
     })
     const mod = timer.absent("backup")
     const result = await mod.apply(ssh, emptyEnv)
     expect(result.status).toBe("changed")
-    expect(ssh.calls).toContain("systemctl disable --now 'backup.timer'")
+    expect(ssh.calls).toContain("systemctl disable --now -- 'backup.timer'")
     expect(ssh.calls).toContain(`rm -f '${TIMER_PATH}' '${SERVICE_PATH}'`)
     expect(ssh.calls).toContain("systemctl daemon-reload")
   })
@@ -1024,7 +1028,7 @@ describe("timer.absent", () => {
     const ssh = createTimerApplyMockSsh({
       [`rm -f '${TIMER_PATH}' '${SERVICE_PATH}'`]: { code: 0 },
       "systemctl daemon-reload": { code: 0 },
-      "systemctl disable --now 'backup.timer'": { code: 1, stderr: "no such unit" },
+      "systemctl disable --now -- 'backup.timer'": { code: 1, stderr: "no such unit" },
     })
     const mod = timer.absent("backup")
     const result = await mod.apply(ssh, emptyEnv)
@@ -1034,7 +1038,7 @@ describe("timer.absent", () => {
   it("apply returns failed when rm fails", async () => {
     const ssh = createTimerApplyMockSsh({
       [`rm -f '${TIMER_PATH}' '${SERVICE_PATH}'`]: { code: 1, stderr: "EACCES" },
-      "systemctl disable --now 'backup.timer'": { code: 0 },
+      "systemctl disable --now -- 'backup.timer'": { code: 0 },
     })
     const mod = timer.absent("backup")
     const result = await mod.apply(ssh, emptyEnv)
@@ -1045,7 +1049,7 @@ describe("timer.absent", () => {
     const ssh = createTimerApplyMockSsh({
       [`rm -f '${TIMER_PATH}' '${SERVICE_PATH}'`]: { code: 0 },
       "systemctl daemon-reload": { code: 1, stderr: "boom" },
-      "systemctl disable --now 'backup.timer'": { code: 0 },
+      "systemctl disable --now -- 'backup.timer'": { code: 0 },
     })
     const mod = timer.absent("backup")
     const result = await mod.apply(ssh, emptyEnv)
@@ -1056,14 +1060,14 @@ describe("timer.absent", () => {
     const ssh = createMockSsh({
       [`[ -e '${SERVICE_PATH}' ]`]: { code: 1 },
       [`[ -e '${TIMER_PATH}' ]`]: { code: 1 },
-      "systemctl is-active --quiet 'backup.timer'": { code: 1 },
-      "systemctl is-enabled --quiet 'backup.timer'": { code: 1 },
+      "systemctl is-active --quiet -- 'backup.timer'": { code: 1 },
+      "systemctl is-enabled --quiet -- 'backup.timer'": { code: 1 },
     })
     const mod = timer.absent("backup")
     const result = await mod.apply(ssh, emptyEnv)
     expect(result.status).toBe("ok")
     expect(ssh.calls).not.toContain("systemctl daemon-reload")
-    expect(ssh.calls).not.toContain("systemctl disable --now 'backup.timer'")
+    expect(ssh.calls).not.toContain("systemctl disable --now -- 'backup.timer'")
   })
 
   it("apply runs full cleanup when only one of the two unit files still exists", async () => {
@@ -1072,12 +1076,12 @@ describe("timer.absent", () => {
       [`[ -e '${TIMER_PATH}' ]`]: { code: 1 },
       [`rm -f '${TIMER_PATH}' '${SERVICE_PATH}'`]: { code: 0 },
       "systemctl daemon-reload": { code: 0 },
-      "systemctl disable --now 'backup.timer'": { code: 0 },
+      "systemctl disable --now -- 'backup.timer'": { code: 0 },
     })
     const mod = timer.absent("backup")
     const result = await mod.apply(ssh, emptyEnv)
     expect(result.status).toBe("changed")
-    expect(ssh.calls).toContain("systemctl disable --now 'backup.timer'")
+    expect(ssh.calls).toContain("systemctl disable --now -- 'backup.timer'")
     expect(ssh.calls).toContain(`rm -f '${TIMER_PATH}' '${SERVICE_PATH}'`)
     expect(ssh.calls).toContain("systemctl daemon-reload")
   })
@@ -1097,7 +1101,7 @@ describe("timer.absent", () => {
   it("uses timer.absent as failure message prefix, not timer.scheduled", async () => {
     const ssh = createTimerApplyMockSsh({
       [`rm -f '${TIMER_PATH}' '${SERVICE_PATH}'`]: { code: 1, stderr: "EACCES" },
-      "systemctl disable --now 'backup.timer'": { code: 0 },
+      "systemctl disable --now -- 'backup.timer'": { code: 0 },
     })
     const mod = timer.absent("backup")
     const result = await mod.apply(ssh, emptyEnv)
