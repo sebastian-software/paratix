@@ -6,6 +6,8 @@ import { createMockSsh as createBaseMockSsh } from "../helpers/mockSsh.js"
 const createMockSsh: typeof createBaseMockSsh = (responses, options) =>
   createBaseMockSsh(responses, { defaultExecResult: { code: 0 }, ...options })
 
+type MockSsh = ReturnType<typeof createMockSsh>
+
 const emptyEnv = {}
 
 const src = "/tmp/app.tar.gz"
@@ -17,6 +19,20 @@ const safeTarListing = "-rw-r--r-- root/root 0 1970-01-01 00:00 app/file"
 const srcHash = "2889be4b654d6b7f7922971e7fb3fdf1c5ebd92b9c52462be2683a735c7562ef"
 const marker = `/var/lib/paratix/flags/archive-${srcHash}.sha256`
 const archiveSha = "abc123def456"
+
+function expectNoTarExtractCalls(mockSsh: MockSsh): void {
+  const tarExtractCalls = mockSsh.calls.filter((command) => /^tar\b.*\s-x\S*\s/v.test(command))
+  expect(tarExtractCalls).toStrictEqual([])
+}
+
+function expectNoUnzipExtractCalls(mockSsh: MockSsh): void {
+  const unzipExtractCalls = mockSsh.calls.filter((command) => command.startsWith("unzip -o "))
+  expect(unzipExtractCalls).toStrictEqual([])
+}
+
+function expectNoArchiveMarkerWrite(mockSsh: MockSsh): void {
+  expect(mockSsh.writeFileCalls).toHaveLength(0)
+}
 
 describe("archive.extract — check", () => {
   it("returns needs-apply when conn is null", async () => {
@@ -579,16 +595,9 @@ describe("archive.extract — apply", () => {
 
     expect(result.status).toBe("failed")
     expect(String(result.error)).toContain("would escape destination")
-    // The actual extract must not have been issued.
-    expect(mockSsh.calls).not.toContain(
-      `tar --no-same-owner --no-overwrite-dir -xzf '${src}' -C '${destination}'`
-    )
-    // Nothing was written outside the destination because the extraction
-    // never ran; in particular no marker was written.
-    const writeCalls = mockSsh.calls.filter((c) =>
-      c.startsWith("mkdir -p '/var/lib/paratix/flags'")
-    )
-    expect(writeCalls).toHaveLength(0)
+    expect(mockSsh.calls).toContain(`tar -tvzf '${src}'`)
+    expectNoTarExtractCalls(mockSsh)
+    expectNoArchiveMarkerWrite(mockSsh)
   })
 
   it("rejects a tar archive whose member is an absolute path", async () => {
@@ -602,9 +611,9 @@ describe("archive.extract — apply", () => {
 
     expect(result.status).toBe("failed")
     expect(String(result.error)).toContain("would escape destination")
-    expect(mockSsh.calls).not.toContain(
-      `tar --no-same-owner --no-overwrite-dir -xzf '${src}' -C '${destination}'`
-    )
+    expect(mockSsh.calls).toContain(`tar -tvzf '${src}'`)
+    expectNoTarExtractCalls(mockSsh)
+    expectNoArchiveMarkerWrite(mockSsh)
   })
 
   it("rejects a tar archive whose symlink target points outside the destination", async () => {
@@ -618,9 +627,9 @@ describe("archive.extract — apply", () => {
 
     expect(result.status).toBe("failed")
     expect(String(result.error)).toContain("would escape destination")
-    expect(mockSsh.calls).not.toContain(
-      `tar --no-same-owner --no-overwrite-dir -xzf '${src}' -C '${destination}'`
-    )
+    expect(mockSsh.calls).toContain(`tar -tvzf '${src}'`)
+    expectNoTarExtractCalls(mockSsh)
+    expectNoArchiveMarkerWrite(mockSsh)
   })
 
   it("rejects a tar archive whose hardlink target is an absolute path", async () => {
@@ -634,10 +643,9 @@ describe("archive.extract — apply", () => {
 
     expect(result.status).toBe("failed")
     expect(String(result.error)).toContain("would escape destination")
-    expect(mockSsh.calls).not.toContain(
-      `tar --no-same-owner --no-overwrite-dir -xzf '${src}' -C '${destination}'`
-    )
-    expect(mockSsh.writeFileCalls).toHaveLength(0)
+    expect(mockSsh.calls).toContain(`tar -tvzf '${src}'`)
+    expectNoTarExtractCalls(mockSsh)
+    expectNoArchiveMarkerWrite(mockSsh)
   })
 
   it("rejects a tar archive whose hardlink target traverses outside the destination", async () => {
@@ -651,10 +659,9 @@ describe("archive.extract — apply", () => {
 
     expect(result.status).toBe("failed")
     expect(String(result.error)).toContain("would escape destination")
-    expect(mockSsh.calls).not.toContain(
-      `tar --no-same-owner --no-overwrite-dir -xzf '${src}' -C '${destination}'`
-    )
-    expect(mockSsh.writeFileCalls).toHaveLength(0)
+    expect(mockSsh.calls).toContain(`tar -tvzf '${src}'`)
+    expectNoTarExtractCalls(mockSsh)
+    expectNoArchiveMarkerWrite(mockSsh)
   })
 
   it("rejects extraction when an existing destination ancestor is a symlink", async () => {
@@ -670,9 +677,8 @@ describe("archive.extract — apply", () => {
     expect(String(result.error)).toContain("is a symlink")
     expect(mockSsh.calls).not.toContain(`mkdir -p '${destination}'`)
     expect(mockSsh.calls).not.toContain(`tar -tvzf '${src}'`)
-    expect(mockSsh.calls).not.toContain(
-      `tar --no-same-owner --no-overwrite-dir -xzf '${src}' -C '${destination}'`
-    )
+    expectNoTarExtractCalls(mockSsh)
+    expectNoArchiveMarkerWrite(mockSsh)
   })
 
   it("rejects extraction before creating the destination when a parent directory is a symlink", async () => {
@@ -689,9 +695,8 @@ describe("archive.extract — apply", () => {
     expect(String(result.error)).toContain("is a symlink")
     expect(mockSsh.calls).not.toContain(`mkdir -p '${destination}'`)
     expect(mockSsh.calls).not.toContain(`tar -tvzf '${src}'`)
-    expect(mockSsh.calls).not.toContain(
-      `tar --no-same-owner --no-overwrite-dir -xzf '${src}' -C '${destination}'`
-    )
+    expectNoTarExtractCalls(mockSsh)
+    expectNoArchiveMarkerWrite(mockSsh)
   })
 
   it("rejects extraction when an existing member ancestor is a symlink", async () => {
@@ -709,9 +714,8 @@ describe("archive.extract — apply", () => {
     expect(String(result.error)).toContain("is a symlink")
     expect(mockSsh.calls).toContain(`mkdir -p '${destination}'`)
     expect(mockSsh.calls).toContain(`tar -tvzf '${src}'`)
-    expect(mockSsh.calls).not.toContain(
-      `tar --no-same-owner --no-overwrite-dir -xzf '${src}' -C '${destination}'`
-    )
+    expectNoTarExtractCalls(mockSsh)
+    expectNoArchiveMarkerWrite(mockSsh)
   })
 
   it("rejects a tar archive that contains a block device member", async () => {
@@ -725,9 +729,9 @@ describe("archive.extract — apply", () => {
 
     expect(result.status).toBe("failed")
     expect(String(result.error)).toContain("is a special file")
-    expect(mockSsh.calls).not.toContain(
-      `tar --no-same-owner --no-overwrite-dir -xzf '${src}' -C '${destination}'`
-    )
+    expect(mockSsh.calls).toContain(`tar -tvzf '${src}'`)
+    expectNoTarExtractCalls(mockSsh)
+    expectNoArchiveMarkerWrite(mockSsh)
   })
 
   it("rejects a zip archive that contains a `/etc/passwd` member without invoking unzip -o", async () => {
@@ -744,7 +748,9 @@ describe("archive.extract — apply", () => {
 
     expect(result.status).toBe("failed")
     expect(String(result.error)).toContain("would escape destination")
-    expect(mockSsh.calls).not.toContain(`unzip -o '${zipSrc}' -d '${destination}'`)
+    expect(mockSsh.calls).toContain(`unzip -Zs '${zipSrc}'`)
+    expectNoUnzipExtractCalls(mockSsh)
+    expectNoArchiveMarkerWrite(mockSsh)
   })
 
   it("rejects a zip archive that contains a `..` traversal member", async () => {
@@ -761,7 +767,9 @@ describe("archive.extract — apply", () => {
 
     expect(result.status).toBe("failed")
     expect(String(result.error)).toContain("would escape destination")
-    expect(mockSsh.calls).not.toContain(`unzip -o '${zipSrc}' -d '${destination}'`)
+    expect(mockSsh.calls).toContain(`unzip -Zs '${zipSrc}'`)
+    expectNoUnzipExtractCalls(mockSsh)
+    expectNoArchiveMarkerWrite(mockSsh)
   })
 
   it("rejects a zip archive that contains a symlink member", async () => {
@@ -778,7 +786,9 @@ describe("archive.extract — apply", () => {
 
     expect(result.status).toBe("failed")
     expect(String(result.error)).toContain("is a symlink")
-    expect(mockSsh.calls).not.toContain(`unzip -o '${zipSrc}' -d '${destination}'`)
+    expect(mockSsh.calls).toContain(`unzip -Zs '${zipSrc}'`)
+    expectNoUnzipExtractCalls(mockSsh)
+    expectNoArchiveMarkerWrite(mockSsh)
   })
 
   it("rejects a zip archive that contains a fifo member", async () => {
@@ -795,7 +805,9 @@ describe("archive.extract — apply", () => {
 
     expect(result.status).toBe("failed")
     expect(String(result.error)).toContain("is a special file")
-    expect(mockSsh.calls).not.toContain(`unzip -o '${zipSrc}' -d '${destination}'`)
+    expect(mockSsh.calls).toContain(`unzip -Zs '${zipSrc}'`)
+    expectNoUnzipExtractCalls(mockSsh)
+    expectNoArchiveMarkerWrite(mockSsh)
   })
 
   it("has correct module name", () => {
