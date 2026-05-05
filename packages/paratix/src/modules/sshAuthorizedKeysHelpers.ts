@@ -142,7 +142,7 @@ async function rewriteAuthorizedKeys(
   try {
     if (state === "present") {
       await conn.exec(
-        `{ if [ -f ${shellQuote(authorizedKeysPath)} ]; then awk '1' ${shellQuote(authorizedKeysPath)}; grep -qxF -- ${shellQuote(key)} ${shellQuote(authorizedKeysPath)} || printf '%s\\n' ${shellQuote(key)}; else printf '%s\\n' ${shellQuote(key)}; fi; } > ${shellQuote(temporaryPath)}`,
+        `{ if [ -f ${shellQuote(authorizedKeysPath)} ]; then awk '1' ${shellQuote(authorizedKeysPath)} > ${shellQuote(temporaryPath)} || exit $?; grep -qxF -- ${shellQuote(key)} ${shellQuote(authorizedKeysPath)}; grep_status=$?; if [ "$grep_status" -eq 0 ]; then :; elif [ "$grep_status" -eq 1 ]; then printf '%s\\n' ${shellQuote(key)} >> ${shellQuote(temporaryPath)}; else exit "$grep_status"; fi; else printf '%s\\n' ${shellQuote(key)} > ${shellQuote(temporaryPath)}; fi; }`,
         { silent: true }
       )
     } else {
@@ -151,7 +151,7 @@ async function rewriteAuthorizedKeys(
       // whose key body is a substring of the key being deleted (e.g. a key
       // appearing again with options-prefix or a different comment).
       await conn.exec(
-        `{ if [ -f ${shellQuote(authorizedKeysPath)} ]; then grep -vxF -- ${shellQuote(key)} ${shellQuote(authorizedKeysPath)} || true; fi; } > ${shellQuote(temporaryPath)}`,
+        `{ if [ -f ${shellQuote(authorizedKeysPath)} ]; then grep -vxF -- ${shellQuote(key)} ${shellQuote(authorizedKeysPath)} > ${shellQuote(temporaryPath)}; grep_status=$?; if [ "$grep_status" -eq 0 ] || [ "$grep_status" -eq 1 ]; then :; else exit "$grep_status"; fi; else : > ${shellQuote(temporaryPath)}; fi; }`,
         { silent: true }
       )
     }
