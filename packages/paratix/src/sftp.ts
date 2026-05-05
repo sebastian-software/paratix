@@ -40,9 +40,9 @@ function openSftp(options: {
   }, timeout)
 
   try {
-    client.sftp((error, sftp) => {
+    const handleSftpOpen = (error: Error | undefined, sftp: SFTPWrapper | undefined): void => {
       if (settled) {
-        sftp.end()
+        sftp?.end()
         return
       }
 
@@ -53,9 +53,15 @@ function openSftp(options: {
         reject(error)
         return
       }
+      if (sftp === undefined) {
+        reject(new Error("Failed to open SFTP session: missing SFTP session"))
+        return
+      }
 
       onOpen(sftp)
-    })
+    }
+
+    client.sftp(handleSftpOpen)
   } catch (openError) {
     clearTimeout(timer)
     settled = true

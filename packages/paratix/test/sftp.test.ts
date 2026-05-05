@@ -130,6 +130,28 @@ describe("sftpDownload", () => {
     expect(vi.mocked(createWriteStream)).not.toHaveBeenCalled()
   })
 
+  it("ignores a late sftp error callback after download session opening times out", async () => {
+    vi.useFakeTimers()
+    let openCallback: Parameters<Client["sftp"]>[0] | undefined
+    const client = {
+      end: vi.fn(),
+      sftp: vi.fn().mockImplementation((cb: Parameters<Client["sftp"]>[0]) => {
+        openCallback = cb
+      }),
+    } as unknown as Client
+
+    const promise = sftpDownload(client, "/remote/file.txt", "/local/file.txt", 5000)
+    vi.advanceTimersByTime(5001)
+    await promise.catch(() => {
+      /* expected rejection */
+    })
+
+    expect(() => {
+      openCallback?.(new Error("late sftp error"), undefined as unknown as SFTPWrapper)
+    }).not.toThrow()
+    expect(vi.mocked(createWriteStream)).not.toHaveBeenCalled()
+  })
+
   it("rejects and closes the sftp session when remote read stream creation throws", async () => {
     const { sftp, sftpEnd } = makeSftpSession()
     const client = makeClientMock(sftp)
@@ -640,6 +662,28 @@ describe("sftpUpload", () => {
     openCallback?.(undefined, sftp)
 
     expect(sftpEnd).toHaveBeenCalledOnce()
+    expect(vi.mocked(createReadStream)).not.toHaveBeenCalled()
+  })
+
+  it("ignores a late sftp error callback after upload session opening times out", async () => {
+    vi.useFakeTimers()
+    let openCallback: Parameters<Client["sftp"]>[0] | undefined
+    const client = {
+      end: vi.fn(),
+      sftp: vi.fn().mockImplementation((cb: Parameters<Client["sftp"]>[0]) => {
+        openCallback = cb
+      }),
+    } as unknown as Client
+
+    const promise = sftpUpload(client, "/local/file.txt", "/remote/file.txt", 5000)
+    vi.advanceTimersByTime(5001)
+    await promise.catch(() => {
+      /* expected rejection */
+    })
+
+    expect(() => {
+      openCallback?.(new Error("late sftp error"), undefined as unknown as SFTPWrapper)
+    }).not.toThrow()
     expect(vi.mocked(createReadStream)).not.toHaveBeenCalled()
   })
 
