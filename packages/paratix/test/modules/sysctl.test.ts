@@ -192,6 +192,14 @@ describe("sysctl.set — validation", () => {
     expect(() => sysctl.set("net.ipv4.ip_forward;rm", VALUE)).toThrow(/key must match/v)
   })
 
+  it("throws when key starts with a short sysctl option", () => {
+    expect(() => sysctl.set("-w", VALUE)).toThrow(/key must match/v)
+  })
+
+  it("throws when key starts with a long sysctl option", () => {
+    expect(() => sysctl.set("--system", VALUE)).toThrow(/key must match/v)
+  })
+
   it("throws when value contains a newline", () => {
     expect(() => sysctl.set(KEY, "1\nkernel.hostname = pwned")).toThrow(
       /value must not contain newline/v

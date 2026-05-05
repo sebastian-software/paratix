@@ -5,7 +5,7 @@ import { type Module, type ModuleResult, NEEDS_APPLY, type SshConnection } from 
 const EXEC_OPTS = { ignoreExitCode: true, silent: true } as const
 const SYSCTL_DIR = "/etc/sysctl.d"
 const SYSCTL_CONFIG_MODE = "0644"
-const SYSCTL_KEY_PATTERN = /^[\w.\-]+$/iv
+const SYSCTL_KEY_PATTERN = /^\w[\w.\-]*$/iv
 
 /**
  * Sanitize a sysctl key for safe use in a filesystem path.
@@ -20,9 +20,10 @@ function sanitizeKey(key: string): string {
 }
 
 /**
- * Validate a sysctl key. Only alphanumerics, dot, underscore, and hyphen are
- * allowed so the key can be embedded in shell commands and filenames without
- * enabling injection or path-separator tricks.
+ * Validate a sysctl key. It must start with an alphanumeric or underscore
+ * character, and only alphanumerics, dot, underscore, and hyphen are allowed so
+ * the key can be embedded in shell commands and filenames without enabling
+ * injection, option parsing, or path-separator tricks.
  *
  * @param key - The sysctl key to validate.
  * @throws {Error} When the key is empty or contains disallowed characters.
