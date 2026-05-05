@@ -1,13 +1,22 @@
 import { execFileSync } from "node:child_process"
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs"
+import {
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs"
 import { tmpdir } from "node:os"
-import { join, resolve } from "node:path"
+import { dirname, join, resolve } from "node:path"
 import { pathToFileURL } from "node:url"
 import { describe, expect, it } from "vitest"
 
 const packageRootDirectory = resolve(import.meta.dirname, "../..")
 const CLI_COMMAND_TIMEOUT_MS = 30_000
 const CLI_COMMAND_MAX_BUFFER = 10 * 1024 * 1024
+const PACKAGE_COMMAND_TIMEOUT_MS = 60_000
 
 describe("dist CLI", () => {
   it("runs the published CLI for version and apply validation errors", () => {
@@ -72,11 +81,51 @@ describe("dist CLI", () => {
   it("supports package specifier imports from a consumer project", () => {
     const tempDirectory = mkdtempSync(join(tmpdir(), "paratix-consumer-dist-"))
     const nodeModulesDirectory = join(tempDirectory, "node_modules")
+    const consumerPackageDirectory = join(nodeModulesDirectory, "paratix")
     const consumerScriptPath = join(tempDirectory, "consumer.mjs")
 
     try {
-      mkdirSync(nodeModulesDirectory)
-      symlinkSync(packageRootDirectory, join(nodeModulesDirectory, "paratix"), "dir")
+      execFileSync("pnpm", ["pack", "--pack-destination", tempDirectory], {
+        cwd: packageRootDirectory,
+        encoding: "utf8",
+        killSignal: "SIGTERM",
+        maxBuffer: CLI_COMMAND_MAX_BUFFER,
+        timeout: PACKAGE_COMMAND_TIMEOUT_MS,
+      })
+
+      const packageTarball = readdirSync(tempDirectory).find((entry) => entry.endsWith(".tgz"))
+      expect(packageTarball).toBeDefined()
+
+      mkdirSync(consumerPackageDirectory, { recursive: true })
+      execFileSync(
+        "tar",
+        [
+          "-xzf",
+          join(tempDirectory, packageTarball!),
+          "-C",
+          consumerPackageDirectory,
+          "--strip-components=1",
+        ],
+        {
+          cwd: tempDirectory,
+          killSignal: "SIGTERM",
+          maxBuffer: CLI_COMMAND_MAX_BUFFER,
+          timeout: PACKAGE_COMMAND_TIMEOUT_MS,
+        }
+      )
+
+      const packedPackageJson = JSON.parse(
+        readFileSync(join(consumerPackageDirectory, "package.json"), "utf8")
+      ) as {
+        dependencies: Record<string, string>
+      }
+      for (const dependencyName of Object.keys(packedPackageJson.dependencies)) {
+        const dependencyTarget = join(packageRootDirectory, "node_modules", dependencyName)
+        const dependencyLink = join(nodeModulesDirectory, dependencyName)
+        mkdirSync(dirname(dependencyLink), { recursive: true })
+        symlinkSync(dependencyTarget, dependencyLink)
+      }
+
       writeFileSync(join(tempDirectory, "package.json"), '{ "type": "module" }\n')
       writeFileSync(
         consumerScriptPath,
