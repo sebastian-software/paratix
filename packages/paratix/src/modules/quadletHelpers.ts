@@ -78,8 +78,8 @@ export type QuadletImageUpdateOptions = {
 }
 
 const CONTAINERS_SYSTEMD_DIRECTORY = "/etc/containers/systemd"
-const QUADLET_ENVIRONMENT_KEY_PATTERN = /^[A-Za-z_][A-Za-z0-9_]*$/v
-const QUADLET_SAFE_ENVIRONMENT_VALUE_PATTERN = /^[A-Za-z0-9_@%+=:,\x2e\/\-]*$/v
+const QUADLET_ENVIRONMENT_KEY_PATTERN = /^[A-Za-z_]\w*$/v
+const QUADLET_SAFE_ENVIRONMENT_VALUE_PATTERN = /^[\w@%+=:,\x2e\/\-]*$/v
 const QUADLET_PULL_CHANGED_OUTPUT_PATTERNS = [
   "Copying blob",
   "Copying config",

@@ -126,11 +126,11 @@ async function isRemoteTrackingBranch(
 async function updateRepo(conn: SshConnection, parameters: GitCloneParameters): Promise<boolean> {
   const { destination, reference } = parameters
   if (reference !== undefined && reference !== "") {
-    const fetch = await conn.exec(
+    const fetchResult = await conn.exec(
       `git -C ${shellQuote(destination)} fetch origin --tags --force`,
       EXEC_OPTS
     )
-    if (fetch.code !== 0) return false
+    if (fetchResult.code !== 0) return false
     const checkout = await conn.exec(
       `git -C ${shellQuote(destination)} checkout ${shellQuote(reference)}`,
       EXEC_OPTS
@@ -144,13 +144,16 @@ async function updateRepo(conn: SshConnection, parameters: GitCloneParameters): 
     )
     return reset.code === 0
   }
-  const fetch = await conn.exec(`git -C ${shellQuote(destination)} fetch origin HEAD`, EXEC_OPTS)
-  if (fetch.code !== 0) return false
-  const reset = await conn.exec(
+  const fetchHeadResult = await conn.exec(
+    `git -C ${shellQuote(destination)} fetch origin HEAD`,
+    EXEC_OPTS
+  )
+  if (fetchHeadResult.code !== 0) return false
+  const resetHeadResult = await conn.exec(
     `git -C ${shellQuote(destination)} reset --hard FETCH_HEAD`,
     EXEC_OPTS
   )
-  return reset.code === 0
+  return resetHeadResult.code === 0
 }
 
 async function readOriginUrl(conn: SshConnection, destination: string): Promise<null | string> {

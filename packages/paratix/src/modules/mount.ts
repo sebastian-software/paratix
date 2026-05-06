@@ -1,5 +1,7 @@
 import { posix } from "node:path"
 
+import type { LiveMount } from "./mountTypes.js"
+
 import { failed, failedCommand } from "../moduleFailure.js"
 import { shellQuote } from "../ssh.js"
 import {
@@ -9,6 +11,7 @@ import {
   NEEDS_APPLY,
   type SshConnection,
 } from "../types.js"
+import { applyMountConvergence } from "./mountConvergence.js"
 import { mountOptionsMatch } from "./mountOptions.js"
 
 const EXEC_OPTS = { ignoreExitCode: true, silent: true } as const
@@ -159,71 +162,6 @@ async function removePersistedMountIfPresent(ssh: SshConnection, path: string): 
   return true
 }
 
-type MountConvergenceParameters = {
-  fstype: string
-  live: LiveMount
-  opts: string
-  path: string
-  src: string
-}
-
-/**
- * Converge a drifted live mount to the desired src / fstype / opts.
- *
- * When only the options drifted and the source / fstype match, run
- * `mount -o remount,<opts>` for a non-disruptive in-place adjustment. When
- * the source or fstype drifted, fall back to `umount` + a fresh `mount`
- * because remount cannot change those.
- *
- * @param ssh - Active SSH connection.
- * @param parameters - Desired mount values plus the live snapshot.
- * @returns A failure `ModuleResult` when the convergence command failed,
- *   or `null` on success.
- */
-async function applyMountConvergence(
-  ssh: SshConnection,
-  parameters: MountConvergenceParameters
-): Promise<ModuleResult | null> {
-  const { fstype, live, opts, path, src } = parameters
-  const onlyOptionsDrifted = live.source === src && live.fstype === fstype
-
-  if (onlyOptionsDrifted) {
-    const remountResult = await ssh.exec(
-      `mount -o remount,${shellQuote(opts)} -- ${shellQuote(src)} ${shellQuote(path)}`,
-      EXEC_OPTS
-    )
-    if (remountResult.code === 0) return null
-    return failedCommand(`[mount.present: ${path}] mount -o remount failed`, remountResult)
-  }
-
-  const umountResult = await ssh.exec(`umount ${shellQuote(path)}`, EXEC_OPTS)
-  if (umountResult.code !== 0) {
-    return failedCommand(`[mount.present: ${path}] umount before remount failed`, umountResult)
-  }
-  const mountResult = await ssh.exec(
-    `mount -t ${shellQuote(fstype)} -o ${shellQuote(opts)} -- ${shellQuote(src)} ${shellQuote(path)}`,
-    EXEC_OPTS
-  )
-  if (mountResult.code !== 0) {
-    const restoreCommand = `mount -t ${shellQuote(live.fstype)} -o ${shellQuote(live.options)} -- ${shellQuote(live.source)} ${shellQuote(path)}`
-    const restoreResult = await ssh.exec(restoreCommand, EXEC_OPTS)
-    if (restoreResult.code !== 0) {
-      const replacementDetail = mountResult.stderr.trim() || mountResult.stdout.trim()
-      const replacementSummary =
-        replacementDetail.length > 0 ? `; replacement failure: ${replacementDetail}` : ""
-      const message =
-        `[mount.present: ${path}] mount after umount failed and ` +
-        `restoring previous mount failed${replacementSummary}`
-      return failedCommand(
-        message,
-        restoreResult
-      )
-    }
-    return failedCommand(`[mount.present: ${path}] mount after umount failed`, mountResult)
-  }
-  return null
-}
-
 type EnsureLiveMountParameters = {
   fstype: string
   opts: string
@@ -303,12 +241,6 @@ async function ensureFstabEntry(
     remotePath: FSTAB_PATH,
   })
   return true
-}
-
-type LiveMount = {
-  fstype: string
-  options: string
-  source: string
 }
 
 /**

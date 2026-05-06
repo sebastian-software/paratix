@@ -346,8 +346,8 @@ describe("git.clone — apply", () => {
     const oldRepo = "git@github.com:other/repo.git"
     const mockSsh = createGitApplyMockSsh({
       [`git -C '${destination}' fetch origin HEAD`]: { code: 0 },
-      [`git -C '${destination}' reset --hard FETCH_HEAD`]: { code: 0 },
       [`git -C '${destination}' remote set-url origin '${repo}'`]: { code: 0 },
+      [`git -C '${destination}' reset --hard FETCH_HEAD`]: { code: 0 },
       [`test -d '${gitDir}'`]: { code: 0 },
       [originUrlCommand]: { code: 0, stdout: oldRepo },
     })
@@ -364,8 +364,8 @@ describe("git.clone — apply", () => {
   it("adds origin before resetting to remote HEAD when an existing git repository has no origin", async () => {
     const mockSsh = createGitApplyMockSsh({
       [`git -C '${destination}' fetch origin HEAD`]: { code: 0 },
-      [`git -C '${destination}' reset --hard FETCH_HEAD`]: { code: 0 },
       [`git -C '${destination}' remote add origin '${repo}'`]: { code: 0 },
+      [`git -C '${destination}' reset --hard FETCH_HEAD`]: { code: 0 },
       [`test -d '${gitDir}'`]: { code: 0 },
       [originUrlCommand]: { code: 2 },
     })

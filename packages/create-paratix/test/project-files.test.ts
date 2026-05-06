@@ -20,7 +20,7 @@ import {
 
 let TEST_DIR = ""
 
-const repoRoot = resolve(fileURLToPath(new URL("../../..", import.meta.url)))
+const packageRoot = resolve(fileURLToPath(new URL("..", import.meta.url)))
 const paratixIndexPath = resolve(
   fileURLToPath(new URL("../../paratix/src/index.ts", import.meta.url))
 )
@@ -167,7 +167,7 @@ describe("writeProjectFiles", () => {
               paratix: [paratixIndexPath],
               "paratix/modules": [paratixModulesPath],
             },
-            typeRoots: [join(repoRoot, "node_modules", "@types")],
+            typeRoots: [join(packageRoot, "node_modules", "@types")],
           },
           extends: "./tsconfig.json",
           include: ["server.ts"],

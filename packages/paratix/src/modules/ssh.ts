@@ -1,10 +1,11 @@
-import { computeFingerprint, extractAlgoFromKey } from "../knownHosts.js"
+import { computeFingerprint } from "../knownHosts.js"
 import { failed } from "../moduleFailure.js"
 import { isValidTcpPort } from "../serverDefinitionValidation.js"
 import { shellQuote } from "../ssh.js"
 import { type Module, type ModuleResult, NEEDS_APPLY, type SshConnection } from "../types.js"
 import { assertValidUserName } from "./posixNames.js"
 import { applyAuthorizedKeys, checkAuthorizedKeys } from "./sshAuthorizedKeysHelpers.js"
+import { assertAuthorizedKeyValue } from "./sshPublicKeyValidation.js"
 
 type KnownHostsOptions = {
   expectedFingerprint?: string
@@ -17,117 +18,6 @@ const SSH_KEYSCAN_MIN_FIELDS = 3
 const DEFAULT_SSH_PORT = 22
 const ASCII_SPACE_CODE_POINT = 0x20
 const ASCII_DELETE_CODE_POINT = 0x7f
-const UINT32_SIZE = 4
-const STRICT_BASE64_PATTERN = /^[A-Za-z0-9+\/]+=*$/v
-const AUTHORIZED_KEY_ALGORITHMS = new Set([
-  "ecdsa-sha2-nistp256",
-  "ecdsa-sha2-nistp384",
-  "ecdsa-sha2-nistp521",
-  "sk-ecdsa-sha2-nistp256@openssh.com",
-  "sk-ssh-ed25519@openssh.com",
-  "ssh-ed25519",
-  "ssh-rsa",
-])
-
-type SshStringField = {
-  nextOffset: number
-  value: Buffer
-}
-
-function readSshStringField(buffer: Buffer, offset: number): SshStringField {
-  if (offset + UINT32_SIZE > buffer.length) {
-    throw new Error("truncated SSH string length")
-  }
-  const length = buffer.readUInt32BE(offset)
-  const valueStart = offset + UINT32_SIZE
-  const valueEnd = valueStart + length
-  if (valueEnd > buffer.length) {
-    throw new Error("truncated SSH string value")
-  }
-  return { nextOffset: valueEnd, value: buffer.subarray(valueStart, valueEnd) }
-}
-
-function assertNoTrailingKeyBlobData(buffer: Buffer, offset: number): void {
-  if (offset !== buffer.length) {
-    throw new Error("unexpected trailing key data")
-  }
-}
-
-function assertAuthorizedKeyBlobShape(algorithm: string, keyBuffer: Buffer): void {
-  const firstField = readSshStringField(keyBuffer, 0)
-  const encodedAlgorithm = firstField.value.toString("ascii")
-  if (encodedAlgorithm !== algorithm) {
-    throw new Error(
-      `algorithm ${algorithm} does not match encoded key algorithm ${encodedAlgorithm}`
-    )
-  }
-
-  if (algorithm === "ssh-ed25519" || algorithm === "sk-ssh-ed25519@openssh.com") {
-    const keyField = readSshStringField(keyBuffer, firstField.nextOffset)
-    if (keyField.value.length !== 32) {
-      throw new Error(`${algorithm} key payload must be 32 bytes`)
-    }
-    const nextOffset =
-      algorithm === "sk-ssh-ed25519@openssh.com"
-        ? readSshStringField(keyBuffer, keyField.nextOffset).nextOffset
-        : keyField.nextOffset
-    assertNoTrailingKeyBlobData(keyBuffer, nextOffset)
-    return
-  }
-
-  if (algorithm.startsWith("ecdsa-sha2-") || algorithm.startsWith("sk-ecdsa-sha2-")) {
-    const curveField = readSshStringField(keyBuffer, firstField.nextOffset)
-    const keyField = readSshStringField(keyBuffer, curveField.nextOffset)
-    if (curveField.value.length === 0 || keyField.value.length === 0) {
-      throw new Error(`${algorithm} key payload is incomplete`)
-    }
-    const nextOffset =
-      algorithm.startsWith("sk-ecdsa-sha2-")
-        ? readSshStringField(keyBuffer, keyField.nextOffset).nextOffset
-        : keyField.nextOffset
-    assertNoTrailingKeyBlobData(keyBuffer, nextOffset)
-    return
-  }
-
-  const exponentField = readSshStringField(keyBuffer, firstField.nextOffset)
-  const modulusField = readSshStringField(keyBuffer, exponentField.nextOffset)
-  if (exponentField.value.length === 0 || modulusField.value.length === 0) {
-    throw new Error(`${algorithm} key payload is incomplete`)
-  }
-  assertNoTrailingKeyBlobData(keyBuffer, modulusField.nextOffset)
-}
-
-function assertAuthorizedKeyValue(value: string): void {
-  if (value.length === 0) {
-    throw new Error("ssh.authorizedKeys: key must not be empty")
-  }
-  if (/[\n\r]/v.test(value)) {
-    throw new Error(`ssh.authorizedKeys: key must not contain newlines: ${JSON.stringify(value)}`)
-  }
-  const parts = value.trim().split(/\s+/v)
-  if (parts.length < 2) {
-    throw new Error(
-      "ssh.authorizedKeys requires a full public key in the format '<algorithm> <base64>'"
-    )
-  }
-  const [algorithm, base64Key] = parts
-  if (!AUTHORIZED_KEY_ALGORITHMS.has(algorithm)) {
-    throw new Error(`ssh.authorizedKeys: unsupported public key algorithm: ${algorithm}`)
-  }
-  if (!STRICT_BASE64_PATTERN.test(base64Key)) {
-    throw new Error("ssh.authorizedKeys: key field must be strict base64")
-  }
-
-  const keyBuffer = Buffer.from(base64Key, "base64")
-  try {
-    extractAlgoFromKey(keyBuffer)
-    assertAuthorizedKeyBlobShape(algorithm, keyBuffer)
-  } catch (error) {
-    throw new Error("ssh.authorizedKeys: key field is not a valid OpenSSH public key", {
-      cause: error,
-    })
-  }
-}
 
 function normalizePublicKey(publicKey: string): string {
   const parts = publicKey.trim().split(/\s+/v)

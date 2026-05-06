@@ -144,7 +144,10 @@ async function metadataMatches(
   return downloadOwnershipMatches(ownership, options)
 }
 
-async function destinationIsRegularFile(conn: SshConnection, destination: string): Promise<boolean> {
+async function destinationIsRegularFile(
+  conn: SshConnection,
+  destination: string
+): Promise<boolean> {
   return conn.test(`[ -f ${shellQuote(destination)} ]`)
 }
 

@@ -607,9 +607,7 @@ import { meta } from "paratix"
   meta: [
     meta.env("db.password", "s3cret!"),
     meta.env("api.token", "tok_abc123..."),
-    meta.env("admin.otp", () =>
-      calculateOTP("otpauth://totp/...?secret=JBSWY3DPEHPK3PXP")
-    ),
+    meta.env("admin.otp", () => calculateOTP("otpauth://totp/...?secret=JBSWY3DPEHPK3PXP")),
     meta.env("backup.passphrase", "correct-horse-battery-staple"),
   ]
 }

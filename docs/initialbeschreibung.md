@@ -702,10 +702,14 @@ um Konflikte zu vermeiden:
 import { meta } from "paratix"
 
 // sshd.port-Modul setzt nach Umlegung:
-{ meta: [meta.sshdPort(22022)] }
+{
+  meta: [meta.sshdPort(22022)]
+}
 
 // user.present-Modul setzt nach Erstellung:
-{ meta: [meta.env("user.home", "/home/deploy")] }
+{
+  meta: [meta.env("user.home", "/home/deploy")]
+}
 ```
 
 ### Templates
