@@ -189,14 +189,22 @@ function createFirstRunStopModule(): string {
 `
 }
 
-function createAdminRecipe(recipeName: string): string {
+function createAdminRecipe(recipeName: string, adminPublicKey?: string): string {
+  const authorizedKeysLine =
+    adminPublicKey == null
+      ? [
+          "      // Add a valid OpenSSH public key before enabling this line:",
+          "      // ssh.authorizedKeys(adminUser, adminPublicKey),",
+        ].join("\n")
+      : "      ssh.authorizedKeys(adminUser, adminPublicKey),"
+
   return `
     recipe("${recipeName}", [
       user.present(adminUser, {
         groups: ["sudo"],
         shell: "/bin/bash",
       }),
-      ssh.authorizedKeys(adminUser, adminPublicKey),
+${authorizedKeysLine}
     ]),
 `
 }
@@ -217,7 +225,7 @@ function createHardenedAdminServerTemplate(parameters: {
     host,
     sshUser: "adminUser",
   })}
-${createAdminRecipe("admin-access")}
+${createAdminRecipe("admin-access", adminPublicKey)}
 ${createFirewallRecipe()}
     recipe("ssh-hardening", [
       sshd.port(2222),
@@ -248,7 +256,7 @@ function createBootstrapRootServerTemplate(
     host,
     sshUser: 'FIRST_RUN ? "root" : adminUser',
   })}
-${createAdminRecipe("bootstrap-admin-user")}
+${createAdminRecipe("bootstrap-admin-user", adminPublicKey)}
     recipe("bootstrap-admin-sudo", [
       file.copy(
         "/etc/sudoers.d/90-paratix-admin-nopasswd",

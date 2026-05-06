@@ -215,11 +215,26 @@ describe("writeProjectFiles", () => {
     expect(content).toContain('const FIRST_RUN = process.env["PARATIX_FIRST_RUN"] === "true";')
     expect(content).toContain('host: "1.2.3.4"')
     expect(content).toContain("user: adminUser")
-    expect(content).toContain("ssh.authorizedKeys(adminUser, adminPublicKey)")
+    expect(content).toContain("// Add a valid OpenSSH public key before enabling this line:")
+    expect(content).toContain("// ssh.authorizedKeys(adminUser, adminPublicKey),")
+    expect(content).not.toContain("      ssh.authorizedKeys(adminUser, adminPublicKey),")
     expect(content).toContain('PasswordAuthentication: "no"')
     expect(content).toContain('PermitRootLogin: "no"')
     expect(content).not.toContain('user: "root"')
     expect(content).not.toContain('PermitRootLogin: "prohibit-password"')
+  })
+
+  it("generated server.ts installs the admin public key when one is provided", () => {
+    writeProjectFiles(TEST_DIR, {
+      adminPublicKey: TEST_ADMIN_PUBLIC_KEY,
+      initialUser: { kind: "admin", user: "deploy" },
+    })
+
+    const content = readFileSync(join(TEST_DIR, "server.ts"), "utf8")
+
+    expect(content).toContain(`const adminPublicKey = ${JSON.stringify(TEST_ADMIN_PUBLIC_KEY)};`)
+    expect(content).toContain("      ssh.authorizedKeys(adminUser, adminPublicKey),")
+    expect(content).not.toContain("// ssh.authorizedKeys(adminUser, adminPublicKey),")
   })
 
   it("generated server.ts uses an explicitly provided admin username", () => {
