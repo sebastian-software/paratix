@@ -124,7 +124,7 @@ describe("runPlaybook op.resolve integration", () => {
     const capturedConfigs: unknown[] = []
 
     vi.doMock("node:child_process", () => ({
-      spawn: vi.fn(() => createMockSpawnChild(JSON.stringify({ SECRET: "resolved-secret" }))),
+      spawn: vi.fn(() => createMockSpawnChild("resolved-secret\n")),
     }))
     vi.doMock("../src/ssh.js", () => ({
       shellQuote: (s: string) => `'${s}'`,

@@ -103,12 +103,12 @@ function mockSpawnWithStdinError(error: Error): void {
   })
 }
 
-function mockSpawnBySubcommand(outputs: Record<string, string>): void {
+function mockSpawnByReference(outputs: Record<string, string>): void {
   mockedSpawnFn.mockImplementation((command: string, args?: readonly string[]) => {
     const argsList = args ?? []
     trackSpawn(command, argsList)
-    const subcommand = argsList[0] ?? ""
-    const output = outputs[subcommand] ?? ""
+    const reference = argsList[1] ?? ""
+    const output = outputs[reference] ?? ""
     return createMockChild(output) as never
   })
 }
@@ -161,8 +161,8 @@ describe("op.resolve — apply", () => {
     clearRegisteredSecrets()
   })
 
-  it("resolves regular secrets via op inject and returns them as meta", async () => {
-    mockSpawnWith(JSON.stringify({ password: "secret123" }))
+  it("resolves regular secrets via op read and returns them as meta", async () => {
+    mockSpawnWith("secret123\n")
 
     const module_ = op.resolve({ password: "op://vault/item/password" })
     // eslint-disable-next-line prefer-spread
@@ -171,6 +171,19 @@ describe("op.resolve — apply", () => {
     expect(result.status).toBe("ok")
     const metaEnvironment = await mergeEnvironmentFromMeta({}, result.meta)
     await expect(resolveEnvironment(metaEnvironment, "password")).resolves.toBe("secret123")
+  })
+
+  it("preserves JSON-special characters in regular secrets", async () => {
+    const resolvedValue = 'quoted "value" with backslash \\ and newline\nsecond line'
+    mockSpawnWith(`${resolvedValue}\n`)
+
+    const module_ = op.resolve({ password: "op://vault/item/password" })
+    // eslint-disable-next-line prefer-spread
+    const result = await module_.apply(null, emptyEnv)
+
+    expect(result.status).toBe("ok")
+    const metaEnvironment = await mergeEnvironmentFromMeta({}, result.meta)
+    await expect(resolveEnvironment(metaEnvironment, "password")).resolves.toBe(resolvedValue)
   })
 
   it("resolves OTP fields via op read and returns lazy functions as meta", async () => {
@@ -230,7 +243,7 @@ describe("op.resolve — apply", () => {
     expect(result.status).toBe("ok")
     const metaEnvironment = await mergeEnvironmentFromMeta({}, result.meta)
     await expect(resolveEnvironment(metaEnvironment, "token")).resolves.toMatch(/^\d{6}$/v)
-    // op inject must NOT have been called for OTP-only references
+    // Regular reference resolution must not run for OTP-only references.
     const injectCalls = spawnCalls.filter((c) => c.args[0] === "inject")
     expect(injectCalls).toHaveLength(0)
   })
@@ -249,7 +262,7 @@ describe("op.resolve — apply", () => {
     await expect(resolveEnvironment(metaEnvironment, "token")).resolves.toMatch(/^\d{6}$/v)
   })
 
-  it("returns { status: 'failed' } when op inject throws", async () => {
+  it("returns { status: 'failed' } when op read throws for a regular reference", async () => {
     mockSpawnWith("", 1)
 
     const module_ = op.resolve({ password: "op://vault/item/password" })
@@ -282,8 +295,11 @@ describe("op.resolve — apply", () => {
     expect(result.error?.message).toContain("Failed to resolve 1Password references")
   })
 
-  it("calls op inject only once for multiple regular references (batch)", async () => {
-    mockSpawnWith(JSON.stringify({ apiKey: "key123", dbPassword: "db456" }))
+  it("calls op read once for each regular reference", async () => {
+    mockSpawnByReference({
+      "op://vault/item/api-key": "key123\n",
+      "op://vault/item/db-password": "db456\n",
+    })
 
     const module_ = op.resolve({
       apiKey: "op://vault/item/api-key",
@@ -292,11 +308,14 @@ describe("op.resolve — apply", () => {
     // eslint-disable-next-line prefer-spread
     await module_.apply(null, emptyEnv)
 
-    expect(spawnCalls).toHaveLength(1)
-    expect(spawnCalls[0].args).toStrictEqual(["inject"])
+    expect(spawnCalls).toHaveLength(2)
+    expect(spawnCalls.map((call) => call.args)).toStrictEqual([
+      ["read", "op://vault/item/api-key"],
+      ["read", "op://vault/item/db-password"],
+    ])
   })
 
-  it("does not call op inject when only OTP fields are present", async () => {
+  it("does not call op read for regular references when only OTP fields are present", async () => {
     const otpauthUri =
       "otpauth://totp/Test?secret=GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ&period=30&digits=6"
     mockSpawnWith(`${otpauthUri}\n`)
@@ -325,9 +344,9 @@ describe("op.resolve — apply", () => {
     const otpauthUri =
       "otpauth://totp/Test?secret=GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ&period=30&digits=6"
 
-    mockSpawnBySubcommand({
-      inject: JSON.stringify({ password: "secret123" }),
-      read: `${otpauthUri}\n`,
+    mockSpawnByReference({
+      "op://vault/item/one-time-password": `${otpauthUri}\n`,
+      "op://vault/item/password": "secret123\n",
     })
 
     const module_ = op.resolve({
@@ -345,10 +364,10 @@ describe("op.resolve — apply", () => {
 })
 
 // ---------------------------------------------------------------------------
-// JSON validation
+// error masking
 // ---------------------------------------------------------------------------
 
-describe("op.resolve — JSON validation", () => {
+describe("op.resolve — error masking", () => {
   beforeEach(() => {
     vi.resetAllMocks()
     clearRegisteredSecrets()
@@ -357,28 +376,6 @@ describe("op.resolve — JSON validation", () => {
 
   afterEach(() => {
     clearRegisteredSecrets()
-  })
-
-  it("returns failed when op inject returns an array", async () => {
-    mockSpawnWith(JSON.stringify(["not", "an", "object"]))
-
-    const module_ = op.resolve({ password: "op://vault/item/password" })
-    // eslint-disable-next-line prefer-spread
-    const result = await module_.apply(null, emptyEnv)
-
-    expect(result.status).toBe("failed")
-    expect(result.error?.message).toContain("unexpected non-object JSON")
-  })
-
-  it("returns failed when op inject returns non-string values", async () => {
-    mockSpawnWith(JSON.stringify({ password: 42 }))
-
-    const module_ = op.resolve({ password: "op://vault/item/password" })
-    // eslint-disable-next-line prefer-spread
-    const result = await module_.apply(null, emptyEnv)
-
-    expect(result.status).toBe("failed")
-    expect(result.error?.message).toContain("non-string values")
   })
 
   it("masks reference strings echoed in op stderr from the failure message", async () => {
@@ -396,14 +393,13 @@ describe("op.resolve — JSON validation", () => {
 
   it("masks the resolved regular secret value when it leaks into op stderr", async () => {
     const resolvedValue = "super-secret-resolved-value-12345"
-    // Two op calls: the first inject succeeds and resolves the secret, the
+    // Two op calls: the first op read succeeds and resolves the secret, the
     // second op read for the OTP fails with stderr that contains the
     // already-resolved value (e.g. via a stack trace or echoing).
     const stderrLeak = `connection failed; last value=${resolvedValue}`
-    mockSpawnBySubcommand({})
     mockedSpawnFn.mockImplementationOnce(((command: string, args: readonly string[]) => {
       trackSpawn(command, args)
-      return createMockChild(JSON.stringify({ password: resolvedValue }))
+      return createMockChild(`${resolvedValue}\n`)
     }) as never)
     mockedSpawnFn.mockImplementationOnce(((command: string, args: readonly string[]) => {
       trackSpawn(command, args)
@@ -447,20 +443,6 @@ describe("op.resolve — JSON validation", () => {
     expect(result.status).toBe("failed")
     expect(result.error?.message).not.toContain(otpauthUri)
     expect(result.error?.message).not.toContain("GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ")
-  })
-
-  it("does not include raw stdout in the failure message when JSON parsing fails", async () => {
-    const sneakySecret = "super-secret-resolved-value"
-    // Invalid JSON: `op` produced raw secret-like output instead of JSON.
-    mockSpawnWith(sneakySecret, 0)
-
-    const module_ = op.resolve({ password: "op://vault/item/password" })
-    // eslint-disable-next-line prefer-spread
-    const result = await module_.apply(null, emptyEnv)
-
-    expect(result.status).toBe("failed")
-    expect(result.error?.message).not.toContain(sneakySecret)
-    expect(result.error?.message).toContain("invalid JSON")
   })
 
   it("explains the install path when op is not on PATH (ENOENT)", async () => {

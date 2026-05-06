@@ -573,13 +573,13 @@ Die SSH-Optionen werden automatisch aus der Serverdefinition abgeleitet.
 
 ## op — 1Password Secret-Aufloesung
 
-| Modul        | Beschreibung                                                                                                                                                                                                                                                                                                                                                | Check-Strategie                                  | Aufwand |
-| ------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------ | ------- |
-| `op.resolve` | Loest `op://`-Referenzen ueber die 1Password CLI (`op`) auf dem Controller auf. Akzeptiert ein `Record<string, string>` mit Env-Keys und `op://`-URIs als Werte. Alle Referenzen werden in einem einzigen `op`-Aufruf aufgeloest und die echten Werte als Meta-Eintraege in den Env geschrieben. **Laeuft lokal auf dem Controller, nicht auf dem Server.** | Immer `ok` (reines Lesen, keine Serveraenderung) | mittel  |
+| Modul        | Beschreibung                                                                                                                                                                                                                                                                               | Check-Strategie                                 | Aufwand |
+| ------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ----------------------------------------------- | ------- |
+| `op.resolve` | Löst `op://`-Referenzen über die 1Password CLI (`op`) auf dem Controller auf. Akzeptiert ein `Record<string, string>` mit Env-Keys und `op://`-URIs als Werte. Die echten Werte werden als Meta-Einträge in den Env geschrieben. **Läuft lokal auf dem Controller, nicht auf dem Server.** | Immer `ok` (reines Lesen, keine Serveränderung) | mittel  |
 
 **Wichtig:** Dieses Modul ist ein **lokales Modul** — es nutzt kein SSH,
 sondern ruft `op` auf dem Controller-Rechner auf. Es implementiert dennoch
-die Plugin-Schnittstelle und gibt seine Ergebnisse ueber `meta` zurueck.
+die Plugin-Schnittstelle und gibt seine Ergebnisse über `meta` zurück.
 
 **Parameter:**
 
@@ -613,24 +613,24 @@ beliebig viel Zeit vergehen kann.
 Regulaere Secrets (Passwoerter, Tokens, etc.) werden sofort als Strings
 aufgeloest, da sie sich nicht zeitlich aendern.
 
-**Umsetzung via `op inject`:** Das Modul nutzt `op inject`, um alle
-Referenzen in einem einzigen CLI-Aufruf aufzuloesen. Dafuer wird intern
-ein JSON-Template gebaut und durch `op inject` gepipt:
+**Umsetzung via `op read`:** Das Modul nutzt `op read <reference>`, um jede
+reguläre Referenz direkt als Rohwert aufzulösen. Dadurch bleiben Anführungs-
+zeichen, Backslashes und Zeilenumbrüche unverändert erhalten:
 
 ```bash
-echo '{"db.password":"op://Employee/Database/password","api.token":"op://Employee/API-Service/credential"}' | op inject
-# → {"db.password":"s3cret!","api.token":"tok_abc123..."}
+op read op://Employee/Database/password
+# → s3cret!
 ```
 
-Das Ergebnis wird geparst und die Werte in den Env geschrieben. Ein einziger
-`op inject`-Aufruf loest alle regulaeren Referenzen auf.
+Das Ergebnis wird als String in den Env geschrieben und als Secret-Wert für
+die Ausgabe-Maskierung registriert.
 
 **OTP-Felder** werden separat behandelt:
 
-- OTP-Referenzen (Feld endet auf `one-time-password` oder `otp`) werden aus
-  dem `op inject`-Batch herausgenommen.
-- Fuer jedes OTP-Feld wird einmalig via `op read <reference>` die
-  `otpauth://`-URI abgerufen (enthaelt das TOTP-Secret).
+- OTP-Referenzen (Feld endet auf `one-time-password` oder `otp`) werden
+  separat behandelt.
+- Für jedes OTP-Feld wird einmalig via `op read <reference>` die
+  `otpauth://`-URI abgerufen (enthält das TOTP-Secret).
 - In den Env wird eine Funktion `() => string` geschrieben, die bei jedem
   Zugriff aus dem Secret einen frischen TOTP-Code berechnet (lokal, ohne
   erneuten `op`-Aufruf).

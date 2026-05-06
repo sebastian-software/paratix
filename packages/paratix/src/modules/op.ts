@@ -149,8 +149,12 @@ function splitReferences(
   return [regularEntries, otpEntries]
 }
 
+function stripTrailingCliNewline(value: string): string {
+  return value.replace(/\r?\n$/v, "")
+}
+
 /**
- * Resolve regular (non-OTP) 1Password references in bulk via `op inject`.
+ * Resolve regular (non-OTP) 1Password references via `op read`.
  *
  * @param entries - Map of logical names to 1Password references.
  * @param leakedValues - Mutable sink that captures every resolved value. The
@@ -163,33 +167,16 @@ async function resolveRegularReferences(
   entries: Record<string, string>,
   leakedValues: string[]
 ): Promise<Record<string, string>> {
-  if (Object.keys(entries).length === 0) return {}
+  const result: Record<string, string> = {}
 
-  const stdout = await spawnWithInput("op", ["inject"], JSON.stringify(entries))
-
-  let parsed: unknown
-  try {
-    parsed = JSON.parse(stdout)
-  } catch {
-    // Do not include stdout in the message: it contains resolved secrets.
-    throw new Error("op inject returned invalid JSON")
-  }
-
-  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
-    throw new Error("op inject returned unexpected non-object JSON")
-  }
-
-  // eslint-disable-next-line @typescript-eslint/no-unsafe-type-assertion -- validated: non-null, non-array object
-  const record = parsed as Record<string, unknown>
-  if (!Object.values(record).every((v) => typeof v === "string")) {
-    throw new Error("op inject returned object with non-string values")
-  }
-
-  // eslint-disable-next-line @typescript-eslint/no-unsafe-type-assertion -- all values validated as strings above
-  const result = record as Record<string, string>
-  for (const value of Object.values(result)) {
+  for (const [name, reference] of Object.entries(entries)) {
+    // eslint-disable-next-line no-await-in-loop
+    const stdout = await spawnWithInput("op", ["read", reference], "")
+    const value = stripTrailingCliNewline(stdout)
     if (value.length > 0) leakedValues.push(value)
+    result[name] = value
   }
+
   return result
 }
 
@@ -217,7 +204,7 @@ async function resolveOtpReferences(
     // eslint-disable-next-line no-await-in-loop
     const stdout = await spawnWithInput("op", ["read", reference], "")
 
-    const otpauthUri = stdout.trim()
+    const otpauthUri = stripTrailingCliNewline(stdout).trim()
     if (otpauthUri.length > 0) leakedValues.push(otpauthUri)
     result[name] = () => {
       const code = generateTotpCode(otpauthUri)
@@ -236,7 +223,7 @@ export const op = {
   /**
    * Resolve 1Password secret references into environment values.
    *
-   * Regular references are resolved in bulk via `op inject`.
+   * Regular references are resolved via `op read`.
    * References ending in `/one-time-password` or `/otp` are resolved individually
    * via `op read` and returned as lazy functions that compute a fresh TOTP code
    * on each call.

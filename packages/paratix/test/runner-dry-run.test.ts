@@ -659,7 +659,7 @@ describe("runPlaybook dry-run recipe behaviour", () => {
     const capturedConfigs: unknown[] = []
 
     vi.doMock("node:child_process", () => ({
-      spawn: vi.fn(() => createMockSpawnChild(JSON.stringify({ SECRET: "resolved-secret" }))),
+      spawn: vi.fn(() => createMockSpawnChild("resolved-secret\n")),
     }))
     vi.doMock("../src/ssh.js", () => ({
       shellQuote: (s: string) => `'${s}'`,
@@ -830,7 +830,7 @@ describe("runPlaybook dry-run recipe behaviour", () => {
     const capturedConfigs: unknown[] = []
 
     vi.doMock("node:child_process", () => ({
-      spawn: vi.fn(() => createMockSpawnChild(JSON.stringify({ TOKEN: "recipe-secret" }))),
+      spawn: vi.fn(() => createMockSpawnChild("recipe-secret\n")),
     }))
     vi.doMock("../src/ssh.js", () => ({
       shellQuote: (s: string) => `'${s}'`,
@@ -946,7 +946,7 @@ describe("runPlaybook dry-run recipe behaviour", () => {
     const capturedConfigs: unknown[] = []
 
     vi.doMock("node:child_process", () => ({
-      spawn: vi.fn(() => createMockSpawnChild(JSON.stringify({ SECRET: "wrapped-secret" }))),
+      spawn: vi.fn(() => createMockSpawnChild("wrapped-secret\n")),
     }))
     vi.doMock("../src/ssh.js", () => ({
       shellQuote: (s: string) => `'${s}'`,
