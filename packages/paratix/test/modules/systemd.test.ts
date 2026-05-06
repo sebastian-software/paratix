@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest"
+import { describe, expect, it, vi } from "vitest"
 
 import { sha256String } from "../../src/modules/fileHelpers.js"
 import { systemd } from "../../src/modules/systemd.js"
@@ -202,6 +202,7 @@ describe("systemd.unit", () => {
 
   it("apply writes the file and runs daemon-reload returning changed on success", async () => {
     const ssh = createMockSsh({
+      [`[ -e '${filePath}' ]`]: { code: 1 },
       "mkdir -p /var/lib/paratix/flags": { code: 0 },
       [reloadFlagSet]: { code: 0 },
       "systemctl daemon-reload": { code: 0 },
@@ -215,12 +216,31 @@ describe("systemd.unit", () => {
 
   it("apply returns failed when daemon-reload exits with non-zero code", async () => {
     const ssh = createMockSsh({
+      [`[ -e '${filePath}' ]`]: { code: 1 },
+      [`rm -f '${filePath}'`]: { code: 0 },
       "systemctl daemon-reload": { code: 1 },
     })
     const mod = systemd.unit(unitName, unitContent)
     const result = await mod.apply(ssh, emptyEnv)
     expect(result.status).toBe("failed")
     expect(ssh.calls).not.toContain(reloadFlagSet)
+    expect(ssh.calls).toContain(`rm -f '${filePath}'`)
+  })
+
+  it("restores an existing unit file when daemon-reload fails", async () => {
+    const previousContent = "[Unit]\nDescription=Previous\n"
+    const ssh = createMockSsh({
+      [`[ -e '${filePath}' ]`]: { code: 0 },
+      [`cat '${filePath}'`]: { stdout: previousContent },
+      [`stat -c '%a' '${filePath}'`]: { code: 0, stdout: "600\n" },
+      "systemctl daemon-reload": { code: 1 },
+    })
+    const writeFile = vi.spyOn(ssh, "writeFile").mockResolvedValue()
+    const mod = systemd.unit(unitName, unitContent)
+    const result = await mod.apply(ssh, emptyEnv)
+    expect(result.status).toBe("failed")
+    expect(writeFile).toHaveBeenNthCalledWith(1, filePath, unitContent, { mode: "0644" })
+    expect(writeFile).toHaveBeenNthCalledWith(2, filePath, previousContent, { mode: "600" })
   })
 
   it("apply returns failed when ssh is null", async () => {

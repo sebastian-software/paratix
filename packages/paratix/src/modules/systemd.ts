@@ -34,6 +34,43 @@ function buildSystemdUnitReloadFlag(
   }
 }
 
+type UnitFileSnapshot =
+  | {
+      content: string
+      exists: true
+      mode: string
+    }
+  | { exists: false }
+
+async function snapshotUnitFile(ssh: SshConnection, filePath: string): Promise<UnitFileSnapshot> {
+  if (!(await ssh.exists(filePath))) return { exists: false }
+  const content = await ssh.readFile(filePath)
+  const modeResult = await ssh.exec(`stat -c '%a' ${shellQuote(filePath)}`, {
+    ignoreExitCode: true,
+    silent: true,
+  })
+  return {
+    content,
+    exists: true,
+    mode:
+      modeResult.code === 0 && modeResult.stdout.trim() !== ""
+        ? modeResult.stdout.trim()
+        : SYSTEMD_UNIT_MODE,
+  }
+}
+
+async function restoreUnitFileSnapshot(
+  ssh: SshConnection,
+  filePath: string,
+  snapshot: UnitFileSnapshot
+): Promise<void> {
+  if (snapshot.exists) {
+    await ssh.writeFile(filePath, snapshot.content, { mode: snapshot.mode })
+    return
+  }
+  await ssh.exec(`rm -f ${shellQuote(filePath)}`, { ignoreExitCode: true, silent: true })
+}
+
 /**
  * Modules for managing systemd unit files and unit masking.
  *
@@ -116,12 +153,14 @@ export const systemd = {
     return {
       async apply(ssh: null | SshConnection): Promise<ModuleResult> {
         if (!ssh) return failed(`[systemd.unit: ${name}] SSH connection is required`)
+        const snapshot = await snapshotUnitFile(ssh, filePath)
         await ssh.writeFile(filePath, content, { mode: SYSTEMD_UNIT_MODE })
         const result = await ssh.exec(`${SYSTEMCTL} daemon-reload`, {
           ignoreExitCode: true,
           silent: true,
         })
         if (result.code !== 0) {
+          await restoreUnitFileSnapshot(ssh, filePath, snapshot)
           return failedCommand(`[systemd.unit: ${name}] systemctl daemon-reload failed`, result)
         }
         await setVersionedFlag(ssh, reloadFlag.flagName, reloadFlag.flagPrefix)

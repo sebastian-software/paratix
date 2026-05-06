@@ -47,6 +47,46 @@ function buildQuadletReloadFlag(
   }
 }
 
+type QuadletFileSnapshot =
+  | {
+      content: string
+      exists: true
+      mode: string
+    }
+  | { exists: false }
+
+async function snapshotQuadletFile(
+  ssh: SshConnection,
+  filePath: string
+): Promise<QuadletFileSnapshot> {
+  if (!(await ssh.exists(filePath))) return { exists: false }
+  const content = await ssh.readFile(filePath)
+  const modeResult = await ssh.exec(`stat -c '%a' ${shellQuote(filePath)}`, {
+    ignoreExitCode: true,
+    silent: true,
+  })
+  return {
+    content,
+    exists: true,
+    mode:
+      modeResult.code === 0 && modeResult.stdout.trim() !== ""
+        ? modeResult.stdout.trim()
+        : QUADLET_FILE_MODE,
+  }
+}
+
+async function restoreQuadletFileSnapshot(
+  ssh: SshConnection,
+  filePath: string,
+  snapshot: QuadletFileSnapshot
+): Promise<void> {
+  if (snapshot.exists) {
+    await ssh.writeFile(filePath, snapshot.content, { mode: snapshot.mode })
+    return
+  }
+  await ssh.exec(`rm -f ${shellQuote(filePath)}`, { ignoreExitCode: true, silent: true })
+}
+
 function generateContainerQuadlet(options: QuadletContainerOptions): string {
   const serviceLines = buildQuadletServiceLines(options)
   const sections = [
@@ -90,6 +130,7 @@ async function applyQuadletFile(parameters: {
     )
   }
 
+  const snapshot = await snapshotQuadletFile(parameters.ssh, parameters.filePath)
   await parameters.ssh.writeFile(parameters.filePath, parameters.content, {
     mode: QUADLET_FILE_MODE,
   })
@@ -98,12 +139,12 @@ async function applyQuadletFile(parameters: {
     ignoreExitCode: true,
     silent: true,
   })
-  return daemonReload.code === 0
-    ? { status: "changed" }
-    : failedCommand(
-        `[quadlet.container: ${parameters.name}] systemctl daemon-reload failed`,
-        daemonReload
-      )
+  if (daemonReload.code === 0) return { status: "changed" }
+  await restoreQuadletFileSnapshot(parameters.ssh, parameters.filePath, snapshot)
+  return failedCommand(
+    `[quadlet.container: ${parameters.name}] systemctl daemon-reload failed`,
+    daemonReload
+  )
 }
 
 async function checkQuadletFile(parameters: {

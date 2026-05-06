@@ -72,7 +72,15 @@ function createSuccessfulApplySsh() {
       "mkdir -p '/etc/containers/systemd'": { code: 0 },
       "systemctl daemon-reload": { code: 0 },
     },
-    { defaultExecResult: { code: 0 } }
+    {
+      defaultExecResult: { code: 0 },
+      responseStubs: [
+        {
+          command: /^\[ -e '\/etc\/containers\/systemd\/[^']+\.container' \]$/v,
+          result: { code: 1 },
+        },
+      ],
+    }
   )
 }
 
@@ -150,6 +158,7 @@ describe("quadlet.container", () => {
 
   it("apply creates the quadlet directory, writes the file, and reloads systemd", async () => {
     const ssh = createMockSsh({
+      [`[ -e '${quadletFilePath}' ]`]: { code: 1 },
       [`find /var/lib/paratix/flags -maxdepth 1 -name '${traefikReloadFlagPrefix}*' ! -name '*.lock' -delete && touch /var/lib/paratix/flags/'${buildReloadFlag("traefik", expectedQuadletContent())}'`]:
         { code: 0 },
       "mkdir -p '/etc/containers/systemd'": { code: 0 },
@@ -186,7 +195,9 @@ describe("quadlet.container", () => {
 
   it("apply returns failed when systemctl daemon-reload exits with non-zero code", async () => {
     const ssh = createMockSsh({
+      [`[ -e '${quadletFilePath}' ]`]: { code: 1 },
       "mkdir -p '/etc/containers/systemd'": { code: 0 },
+      [`rm -f '${quadletFilePath}'`]: { code: 0 },
       "systemctl daemon-reload": { code: 1, stderr: "reload failed" },
     })
     vi.spyOn(ssh, "writeFile").mockResolvedValue()
@@ -194,6 +205,29 @@ describe("quadlet.container", () => {
     const result = await createQuadletModule().apply(ssh, emptyEnv)
 
     expect(result.status).toBe("failed")
+    expect(ssh.calls).toContain(`rm -f '${quadletFilePath}'`)
+  })
+
+  it("restores an existing quadlet when systemctl daemon-reload fails", async () => {
+    const previousContent = "[Container]\nImage=docker.io/library/traefik:v3.2\n"
+    const ssh = createMockSsh({
+      [`[ -e '${quadletFilePath}' ]`]: { code: 0 },
+      [`cat '${quadletFilePath}'`]: { stdout: previousContent },
+      [`stat -c '%a' '${quadletFilePath}'`]: { code: 0, stdout: "600\n" },
+      "mkdir -p '/etc/containers/systemd'": { code: 0 },
+      "systemctl daemon-reload": { code: 1, stderr: "reload failed" },
+    })
+    const writeFile = vi.spyOn(ssh, "writeFile").mockResolvedValue()
+
+    const result = await createQuadletModule().apply(ssh, emptyEnv)
+
+    expect(result.status).toBe("failed")
+    expect(writeFile).toHaveBeenNthCalledWith(1, quadletFilePath, expectedQuadletContent(), {
+      mode: "0644",
+    })
+    expect(writeFile).toHaveBeenNthCalledWith(2, quadletFilePath, previousContent, {
+      mode: "600",
+    })
   })
 
   it("generates EnvironmentFile and Healthcheck directives", async () => {
