@@ -144,10 +144,16 @@ idempotent, sofern nicht anders vermerkt.
 
 ## download — Datei-Downloads
 
-| Modul            | Beschreibung                                                                                                                                                                                      | Check-Strategie                                          | Aufwand |
-| ---------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------- | ------- |
-| `download.url`   | Laedt eine Datei von einer HTTP/HTTPS-URL auf den Server herunter. Nutzt `curl` (Default) mit Fallback auf `wget` falls curl nicht installiert ist. Unterstuetzt Checksum-Verifikation (SHA-256). | Checksum der existierenden Datei vs. erwartete Checksum  | mittel  |
-| `download.large` | Wie `download.url`, aber fuer grosse Dateien. Nutzt State-Flag, da der Download teuer ist und die Checksum-Pruefung bei sehr grossen Dateien langsam sein kann.                                   | State-Flag: `/var/lib/paratix/flags/download-<url-hash>` | mittel  |
+| Modul            | Beschreibung                                                                                                                                                                                                                                                            | Check-Strategie                                          | Aufwand |
+| ---------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------- | ------- |
+| `download.url`   | Lädt eine Datei von einer HTTPS-URL auf den Server herunter. Nutzt `curl` (Default) mit Fallback auf `wget` falls curl nicht installiert ist. Verlangt `sha256` oder explizit `allowUnverifiedDownload: true`; `http://` ist nur mit `allowInsecureHttp: true` erlaubt. | Checksum der existierenden Datei vs. erwartete Checksum  | mittel  |
+| `download.large` | Wie `download.url`, aber für große Dateien. Nutzt zusätzlich ein State-Flag, da der Download teuer ist; der gleiche HTTPS- und Integritätsvertrag gilt auch für große Dateien.                                                                                          | State-Flag: `/var/lib/paratix/flags/download-<url-hash>` | mittel  |
+
+Downloads brauchen immer eine explizite Integritätsentscheidung: entweder
+`sha256` für die Prüfung der heruntergeladenen und bereits vorhandenen Datei
+oder `allowUnverifiedDownload: true`, wenn ein ungeprüfter Download bewusst
+akzeptiert wird. HTTPS ist der Standard; `http://`-URLs und HTTP-Redirects
+laufen nur mit `allowInsecureHttp: true`.
 
 ---
 
