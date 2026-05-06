@@ -356,6 +356,28 @@ describe("file.chown", () => {
     expect(result).toBe("ok")
   })
 
+  it("check returns ok when a group-only ownership spec already matches", async () => {
+    const ssh = createMockSsh({
+      "[ -e '/var/app/config.yml' ]": { code: 0 },
+      "stat -c '%a %U %G' '/var/app/config.yml'": { stdout: "644 root www-data" },
+    })
+
+    const mod = file.chown("/var/app/config.yml", ":www-data")
+    const result = await mod.check(ssh, emptyEnv)
+    expect(result).toBe("ok")
+  })
+
+  it("check returns needs-apply when a group-only ownership spec differs", async () => {
+    const ssh = createMockSsh({
+      "[ -e '/var/app/config.yml' ]": { code: 0 },
+      "stat -c '%a %U %G' '/var/app/config.yml'": { stdout: "644 root root" },
+    })
+
+    const mod = file.chown("/var/app/config.yml", ":www-data")
+    const result = await mod.check(ssh, emptyEnv)
+    expect(result).toBe("needs-apply")
+  })
+
   it("check returns needs-apply when the path does not exist", async () => {
     const ssh = createMockSsh({
       "[ -e '/var/app/config.yml' ]": { code: 1 },
@@ -535,6 +557,28 @@ describe("file.copy", () => {
       const mod = file.copy("/remote/file.txt", localPath, { owner: "www-data:www-data" })
       const result = await mod.check(ssh, emptyEnv)
       expect(result).toBe("needs-apply")
+    } finally {
+      rmSync(dir, { recursive: true })
+    }
+  })
+
+  it("check returns ok when group-only owner spec matches despite matching SHA-256", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "paratix-test-"))
+    try {
+      const localPath = join(dir, "source.txt")
+      writeFileSync(localPath, "hello world")
+      const localHash = sha256HexBuffer(Buffer.from("hello world"))
+
+      const ssh = createMockSsh({
+        "[ -e '/remote/file.txt' ]": { code: 0 },
+        "[ -f '/remote/file.txt' ]": { code: 0 },
+        "sha256sum '/remote/file.txt'": { stdout: `${localHash}  /remote/file.txt` },
+        "stat -c '%a %U %G' '/remote/file.txt'": { stdout: "644 root www-data" },
+      })
+
+      const mod = file.copy("/remote/file.txt", localPath, { owner: ":www-data" })
+      const result = await mod.check(ssh, emptyEnv)
+      expect(result).toBe("ok")
     } finally {
       rmSync(dir, { recursive: true })
     }

@@ -53,6 +53,19 @@ export function normalizeMode(mode: string): string {
   return mode.startsWith("0") ? mode : `0${mode}`
 }
 
+function ownershipComponentMatches(expected: string, actual: string): boolean {
+  return expected === "" || actual === expected
+}
+
+function groupOwnershipMatches(
+  expectsGroup: boolean,
+  expectedGroup: string,
+  actualGroup: string
+): boolean {
+  if (!expectsGroup) return true
+  return ownershipComponentMatches(expectedGroup, actualGroup)
+}
+
 export async function resolveWriteMode(
   ssh: SshConnection,
   remotePath: string,
@@ -94,8 +107,8 @@ export function ownershipMatches(
 
   const expectsGroup = options.owner.includes(":")
   const [expectedOwner, expectedGroup = ""] = options.owner.split(":", 2)
-  if (current.owner !== expectedOwner) return false
-  if (expectsGroup && current.group !== expectedGroup) return false
+  if (!ownershipComponentMatches(expectedOwner, current.owner)) return false
+  if (!groupOwnershipMatches(expectsGroup, expectedGroup, current.group)) return false
   return true
 }
 
