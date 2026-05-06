@@ -80,6 +80,13 @@ function resolveMaxOutputBytes(options: ExecOptions): number {
   return Math.floor(value)
 }
 
+function resolveReadyTimeout(parameters: ConnectParameters): number {
+  return Math.max(
+    1,
+    Math.min(CONNECTION_TIMEOUT, Math.floor(parameters.readyTimeout ?? CONNECTION_TIMEOUT))
+  )
+}
+
 class CapturedOutput {
   private byteLength = 0
   private text = ""
@@ -443,6 +450,8 @@ export type ConnectParameters = {
   port: number
   /** PEM-encoded private key content. Mutually exclusive with `agent`. */
   privateKey?: Buffer | string
+  /** Per-port connect timeout in milliseconds. Defaults to the standard SSH connection timeout. */
+  readyTimeout?: number
   /** Username to authenticate as. */
   username: string
 }
@@ -456,10 +465,11 @@ export type ConnectParameters = {
 function buildConnectConfig(parameters: ConnectParameters): ConnectConfig {
   const { agent, agentForward, host, hostVerifier, password, port, privateKey, username } =
     parameters
+  const readyTimeout = resolveReadyTimeout(parameters)
   const connectConfig: ConnectConfig = {
     host,
     port,
-    readyTimeout: CONNECTION_TIMEOUT,
+    readyTimeout,
     username,
   }
   if (privateKey != null) {
@@ -518,6 +528,7 @@ function getConnectAbortReason(signal: AbortSignal): Error {
 export async function tryConnectOnPort(parameters: ConnectParameters): Promise<void> {
   const { abortSignal, client, port } = parameters
   const connectConfig = buildConnectConfig(parameters)
+  const readyTimeout = resolveReadyTimeout(parameters)
   return new Promise((resolve, reject) => {
     if (abortSignal?.aborted === true) {
       cleanupFailedSshClient(client)
@@ -559,7 +570,7 @@ export async function tryConnectOnPort(parameters: ConnectParameters): Promise<v
       reject(error)
     }
 
-    const timeout = setTimeout(handleTimeout, CONNECTION_TIMEOUT)
+    const timeout = setTimeout(handleTimeout, readyTimeout)
 
     client.on("ready", handleReady)
     client.on("error", handleError)

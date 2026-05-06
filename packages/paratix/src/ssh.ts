@@ -89,6 +89,13 @@ const RECONNECT_MAX_DELAY = 30_000
 
 type AuthMethod = "agent" | "password" | "privateKey" | null
 type PromptOptions = { abortSignal?: AbortSignal }
+type ConnectOptions = { reconnectDeadline?: number } & PromptOptions
+type TryConnectOnPortsOptions = {
+  agent?: string
+  password?: string
+  privateKey?: Buffer | string
+  reconnectDeadline?: number
+}
 
 type SshRuntimeState = {
   host: string
@@ -97,6 +104,14 @@ type SshRuntimeState = {
 
 function getAbortReason(signal: AbortSignal): Error {
   return signal.reason instanceof Error ? signal.reason : new Error("SSH operation aborted")
+}
+
+function hasReconnectDeadlineExpired(reconnectDeadline?: number): boolean {
+  return reconnectDeadline != null && reconnectDeadline <= Date.now()
+}
+
+function getRemainingReconnectTimeout(reconnectDeadline?: number): number | undefined {
+  return reconnectDeadline == null ? undefined : reconnectDeadline - Date.now()
 }
 
 async function sleepWithAbort(delay: number, abortSignal?: AbortSignal): Promise<void> {
@@ -190,7 +205,7 @@ export class SshConnectionImpl implements SshConnection {
    * @param options - Optional prompt behavior for interactive password fallback.
    * @throws {Error} When no port in `config.ports` accepts the connection.
    */
-  public async connect(options?: PromptOptions): Promise<void> {
+  public async connect(options?: ConnectOptions): Promise<void> {
     // R-0000090: only overwrite the cached prompt signal when the caller
     // actually passed one. `reconnect()` calls `connect()` without options;
     // unconditionally writing `undefined` would silently discard the signal
@@ -310,7 +325,7 @@ export class SshConnectionImpl implements SshConnection {
       try {
         this.disconnectTransport()
         // eslint-disable-next-line no-await-in-loop
-        await this.connect()
+        await this.connect({ reconnectDeadline: deadline })
         return
       } catch (error) {
         if (
@@ -599,7 +614,7 @@ export class SshConnectionImpl implements SshConnection {
     }
   }
 
-  private async connectViaAgent(options?: PromptOptions): Promise<void> {
+  private async connectViaAgent(options?: ConnectOptions): Promise<void> {
     const agent = process.env.SSH_AUTH_SOCK
     if (agent == null || agent.length === 0) {
       if (await this.tryPasswordFallback(options)) return
@@ -614,7 +629,7 @@ export class SshConnectionImpl implements SshConnection {
       if (await this.tryPasswordFallback(options)) return
       throw new Error(`SSH_AUTH_SOCK points to non-existent path: ${agent}`)
     }
-    if (await this.tryConnectOnPorts(undefined, undefined, agent)) {
+    if (await this.tryConnectOnPorts({ agent, reconnectDeadline: options?.reconnectDeadline })) {
       this.agentSocket = agent
       this.authMethod = "agent"
       return
@@ -625,7 +640,7 @@ export class SshConnectionImpl implements SshConnection {
     )
   }
 
-  private async connectViaPrivateKey(options?: PromptOptions): Promise<void> {
+  private async connectViaPrivateKey(options?: ConnectOptions): Promise<void> {
     const privateKeyPath = this.config.privateKey
     if (privateKeyPath == null) {
       throw new Error("connectViaPrivateKey requires config.privateKey")
@@ -633,7 +648,12 @@ export class SshConnectionImpl implements SshConnection {
     // eslint-disable-next-line security/detect-non-literal-fs-filename
     const privateKey = await readFile(expandHomePath(privateKeyPath))
     try {
-      if (await this.tryConnectOnPorts(privateKey)) {
+      if (
+        await this.tryConnectOnPorts({
+          privateKey,
+          reconnectDeadline: options?.reconnectDeadline,
+        })
+      ) {
         this.authMethod = "privateKey"
         return
       }
@@ -658,7 +678,7 @@ export class SshConnectionImpl implements SshConnection {
    */
   private async tryPrivateKeyPasswordFallback(
     privateKey: Buffer,
-    options?: PromptOptions
+    options?: ConnectOptions
   ): Promise<boolean> {
     if (!this.config.passwordFallback) return false
     const password = await promptTerminal(
@@ -667,7 +687,11 @@ export class SshConnectionImpl implements SshConnection {
       options
     )
     const accepted = await withRegisteredSecrets([password], async () =>
-      this.tryConnectOnPorts(privateKey, password)
+      this.tryConnectOnPorts({
+        password,
+        privateKey,
+        reconnectDeadline: options?.reconnectDeadline,
+      })
     )
     if (!accepted) return false
     this.authMethod = "password"
@@ -1049,19 +1073,14 @@ trap - EXIT
   /**
    * Iterate over `config.ports` and attempt a connection on each one.
    *
-   * @param privateKey - PEM-encoded private key content, or `undefined` when using agent auth.
-   * @param password - Optional password for keyboard-interactive fallback.
-   * @param agent - SSH agent socket path (e.g. `SSH_AUTH_SOCK`). Used when `privateKey` is absent.
+   * @param options - Auth parameters and optional reconnect deadline for bounded per-port attempts.
    * @returns `true` if a port connected successfully, `false` if all ports failed.
    */
   // eslint-disable-next-line sonarjs/cognitive-complexity -- port fallback, host-key errors, and abort handling belong together
-  private async tryConnectOnPorts(
-    privateKey?: Buffer | string,
-    password?: string,
-    agent?: string
-  ): Promise<boolean> {
+  private async tryConnectOnPorts(options: TryConnectOnPortsOptions = {}): Promise<boolean> {
     const mode = this.config.strictHostKeyChecking ?? "yes"
     for (const port of this.runtime.ports) {
+      if (hasReconnectDeadlineExpired(options.reconnectDeadline)) return false
       // R-0000039: keep the Client reference outside the try-block so the
       // catch path can close it explicitly. ssh2's Client retains internal
       // sockets, buffers, and listeners after a failed connect; without an
@@ -1081,14 +1100,15 @@ trap - EXIT
         // eslint-disable-next-line no-await-in-loop
         await tryConnectOnPort({
           abortSignal: this.promptAbortSignal,
-          agent,
+          agent: options.agent,
           agentForward: this.config.agentForward,
           client,
           host: this.runtime.host,
           hostVerifier: wrappedVerifier,
-          password,
+          password: options.password,
           port,
-          privateKey,
+          privateKey: options.privateKey,
+          readyTimeout: getRemainingReconnectTimeout(options.reconnectDeadline),
           username: this.config.user,
         })
         // Ensure the host key is persisted to disk before returning
@@ -1108,7 +1128,7 @@ trap - EXIT
     return false
   }
 
-  private async tryPasswordFallback(options?: PromptOptions, agent?: string): Promise<boolean> {
+  private async tryPasswordFallback(options?: ConnectOptions, agent?: string): Promise<boolean> {
     if (!this.config.passwordFallback) return false
     const password = await promptTerminal(
       `Password for ${this.config.user}@${this.runtime.host}: `,
@@ -1123,7 +1143,14 @@ trap - EXIT
     // `printVerboseGenericError`. Mirroring the sudo-password handling, the
     // sink registration is released as soon as the connect attempt resolves.
     return withRegisteredSecrets([password], async () => {
-      if (!(await this.tryConnectOnPorts(undefined, password, agent))) return false
+      if (
+        !(await this.tryConnectOnPorts({
+          agent,
+          password,
+          reconnectDeadline: options?.reconnectDeadline,
+        }))
+      )
+        return false
       this.authMethod = "password"
       return true
     })

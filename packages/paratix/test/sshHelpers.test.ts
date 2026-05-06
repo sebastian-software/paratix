@@ -1148,6 +1148,42 @@ describe("tryConnectOnPort", () => {
     expect(client.listenerCount("error")).toBe(0)
   })
 
+  it("uses a bounded ready timeout for ssh2 and the local connect timer", async () => {
+    vi.useFakeTimers()
+    const client = createMockClient()
+    const promise = tryConnectOnPort({
+      client,
+      host: "example.test",
+      port: 2222,
+      readyTimeout: 1500,
+      username: "root",
+    })
+    const rejection = promise.then(
+      () => {
+        throw new Error("Expected promise to reject")
+      },
+      (error: unknown) => error
+    )
+
+    expect(client.connect).toHaveBeenCalledWith(
+      expect.objectContaining({
+        readyTimeout: 1500,
+      })
+    )
+
+    await vi.advanceTimersByTimeAsync(1499)
+    expect(client.end).not.toHaveBeenCalled()
+
+    await vi.advanceTimersByTimeAsync(1)
+
+    await expect(rejection).resolves.toMatchObject({
+      message: "Connection timeout on port 2222",
+    })
+    expect(client.end).toHaveBeenCalledOnce()
+    expect(client.listenerCount("ready")).toBe(0)
+    expect(client.listenerCount("error")).toBe(0)
+  })
+
   it("cleans up the client and timer when the connect attempt is aborted", async () => {
     vi.useFakeTimers()
     const client = createMockClient()

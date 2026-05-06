@@ -734,6 +734,43 @@ describe("SshConnectionImpl", () => {
         /Failed to reconnect to 1\.2\.3\.4 after \d+ attempts \(timeout: 3000ms\)/v
       )
     })
+
+    it("passes the remaining reconnect deadline to each port attempt", async () => {
+      vi.useFakeTimers()
+
+      vi.mocked(tryConnectOnPort)
+        .mockImplementationOnce(async () => {
+          await vi.advanceTimersByTimeAsync(1500)
+          throw new Error("Connection timeout on port 22")
+        })
+        .mockRejectedValue(new Error("Connection timeout on port 2222"))
+
+      const ssh = makeSshInstance({
+        maxReconnectAttempts: 1,
+        ports: [22, 2222],
+        reconnectTimeout: 2500,
+      })
+
+      const reconnectPromise = ssh.reconnect()
+      reconnectPromise.catch(() => {
+        /* handled below */
+      })
+
+      await vi.waitFor(() => {
+        expect(tryConnectOnPort).toHaveBeenCalledTimes(2)
+      })
+      await vi.advanceTimersByTimeAsync(1000)
+
+      await expect(reconnectPromise).rejects.toThrow(
+        /Failed to reconnect to 1\.2\.3\.4 after 1 attempts \(timeout: 2500ms\)/v
+      )
+      const firstAttempt = vi.mocked(tryConnectOnPort).mock.calls[0][0]
+      const secondAttempt = vi.mocked(tryConnectOnPort).mock.calls[1][0]
+      const firstReadyTimeout = firstAttempt.readyTimeout!
+      expect(firstReadyTimeout).toBeGreaterThan(0)
+      expect(firstReadyTimeout).toBeLessThanOrEqual(2500)
+      expect(secondAttempt.readyTimeout).toBe(firstReadyTimeout - 1500)
+    })
   })
 
   // -------------------------------------------------------------------------
