@@ -79,6 +79,13 @@ async function cleanupSwapTemporaryPath(ssh: SshConnection, temporaryPath: strin
   await ssh.exec(`rm -f ${shellQuote(temporaryPath)}`, EXEC_OPTS)
 }
 
+export async function cleanupSwapTemporaryFile(
+  ssh: SshConnection,
+  temporaryPath: string
+): Promise<void> {
+  await cleanupSwapTemporaryPath(ssh, temporaryPath)
+}
+
 async function initializeSwapTemporaryFile(
   parameters: SwapFileCreationParameters,
   temporaryPath: string
@@ -125,9 +132,14 @@ async function publishSwapTemporaryFile(
   return failedCommand(`[swap.file: ${parameters.path}] swap file publish failed`, publishResult)
 }
 
-export async function ensureSwapFilePresent(
+export type InitializedSwapTemporaryFile = {
+  parentDirectory: string
+  temporaryPath: string
+}
+
+export async function createInitializedSwapTemporaryFile(
   parameters: SwapFileCreationParameters
-): Promise<ModuleResult | true> {
+): Promise<InitializedSwapTemporaryFile | ModuleResult> {
   const parentDirectory = posixPath.dirname(parameters.path)
   const parentResult = await ensureSwapParentDirectory(parameters, parentDirectory)
   if (parentResult !== true) return parentResult
@@ -138,5 +150,24 @@ export async function ensureSwapFilePresent(
   const initializeResult = await initializeSwapTemporaryFile(parameters, temporaryPath)
   if (initializeResult !== true) return initializeResult
 
-  return publishSwapTemporaryFile(parameters, parentDirectory, temporaryPath)
+  return { parentDirectory, temporaryPath }
+}
+
+export async function publishInitializedSwapTemporaryFile(
+  parameters: SwapFileCreationParameters,
+  temporaryFile: InitializedSwapTemporaryFile
+): Promise<ModuleResult | true> {
+  return publishSwapTemporaryFile(
+    parameters,
+    temporaryFile.parentDirectory,
+    temporaryFile.temporaryPath
+  )
+}
+
+export async function ensureSwapFilePresent(
+  parameters: SwapFileCreationParameters
+): Promise<ModuleResult | true> {
+  const temporaryFile = await createInitializedSwapTemporaryFile(parameters)
+  if ("status" in temporaryFile) return temporaryFile
+  return publishInitializedSwapTemporaryFile(parameters, temporaryFile)
 }

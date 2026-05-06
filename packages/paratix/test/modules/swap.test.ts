@@ -272,6 +272,81 @@ describe("swap.file — apply", () => {
     expect(writtenFiles).toStrictEqual([])
   })
 
+  it("does not swapoff the existing swap file when replacement creation fails", async () => {
+    const ssh = createMockSsh({
+      [`[ -e '${swapPath}' ]`]: { code: 0 },
+      [`[ -f '${swapPath}' ]`]: { code: 0 },
+      [`[ -L '${swapPath}' ]`]: { code: 1 },
+      [`cat '${swapPath}'`]: { stdout: "existing swap bytes" },
+      [`mkdir -p '/'`]: { code: 0 },
+      [`rm -f '${swapTempPath}'`]: { code: 0 },
+      [`stat -c %s '${swapPath}'`]: { stdout: "1073741824" },
+      [`swaplabel '${swapPath}' >/dev/null 2>&1`]: { code: 0 },
+      [createSwapTempCommand]: { code: 1, stderr: "disk full" },
+      [mktempSwapCommand]: { code: 0, stdout: `${swapTempPath}\n` },
+      [safeSwapParentCommand]: { code: 0, stdout: "/\n" },
+    })
+
+    const mod = swap.file({ path: swapPath, size: swapSize })
+    const result = await mod.apply(ssh, emptyEnv)
+
+    expect(result.status).toBe("failed")
+    expect(result.error?.message).toContain("swap file creation failed")
+    expect(ssh.calls).not.toContain(`swapoff '${swapPath}'`)
+    expect(ssh.calls).not.toContain(`rm -f '${swapPath}'`)
+  })
+
+  it("does not swapoff the existing swap file when replacement chmod fails", async () => {
+    const ssh = createMockSsh({
+      [`[ -e '${swapPath}' ]`]: { code: 0 },
+      [`[ -f '${swapPath}' ]`]: { code: 0 },
+      [`[ -L '${swapPath}' ]`]: { code: 1 },
+      [`cat '${swapPath}'`]: { stdout: "existing swap bytes" },
+      [`chmod '0600' '${swapTempPath}'`]: { code: 1, stderr: "chmod failed" },
+      [`mkdir -p '/'`]: { code: 0 },
+      [`rm -f '${swapTempPath}'`]: { code: 0 },
+      [`stat -c %s '${swapPath}'`]: { stdout: "1073741824" },
+      [`swaplabel '${swapPath}' >/dev/null 2>&1`]: { code: 0 },
+      [createSwapTempCommand]: { code: 0 },
+      [mktempSwapCommand]: { code: 0, stdout: `${swapTempPath}\n` },
+      [safeSwapParentCommand]: { code: 0, stdout: "/\n" },
+    })
+
+    const mod = swap.file({ path: swapPath, size: swapSize })
+    const result = await mod.apply(ssh, emptyEnv)
+
+    expect(result.status).toBe("failed")
+    expect(result.error?.message).toContain("chmod failed")
+    expect(ssh.calls).not.toContain(`swapoff '${swapPath}'`)
+    expect(ssh.calls).not.toContain(`rm -f '${swapPath}'`)
+  })
+
+  it("does not swapoff the existing swap file when replacement mkswap fails", async () => {
+    const ssh = createMockSsh({
+      [`[ -e '${swapPath}' ]`]: { code: 0 },
+      [`[ -f '${swapPath}' ]`]: { code: 0 },
+      [`[ -L '${swapPath}' ]`]: { code: 1 },
+      [`cat '${swapPath}'`]: { stdout: "existing swap bytes" },
+      [`chmod '0600' '${swapTempPath}'`]: { code: 0 },
+      [`mkdir -p '/'`]: { code: 0 },
+      [`mkswap '${swapTempPath}'`]: { code: 1, stderr: "mkswap failed" },
+      [`rm -f '${swapTempPath}'`]: { code: 0 },
+      [`stat -c %s '${swapPath}'`]: { stdout: "1073741824" },
+      [`swaplabel '${swapPath}' >/dev/null 2>&1`]: { code: 0 },
+      [createSwapTempCommand]: { code: 0 },
+      [mktempSwapCommand]: { code: 0, stdout: `${swapTempPath}\n` },
+      [safeSwapParentCommand]: { code: 0, stdout: "/\n" },
+    })
+
+    const mod = swap.file({ path: swapPath, size: swapSize })
+    const result = await mod.apply(ssh, emptyEnv)
+
+    expect(result.status).toBe("failed")
+    expect(result.error?.message).toContain("mkswap failed")
+    expect(ssh.calls).not.toContain(`swapoff '${swapPath}'`)
+    expect(ssh.calls).not.toContain(`rm -f '${swapPath}'`)
+  })
+
   it("refuses to recreate an existing regular file without a swap signature", async () => {
     const ssh = createMockSsh({
       [`[ -e '${swapPath}' ]`]: { code: 0 },

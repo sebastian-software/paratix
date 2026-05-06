@@ -3,12 +3,15 @@ import { shellQuote } from "../ssh.js"
 import { type ModuleResult, NEEDS_APPLY, type SshConnection } from "../types.js"
 import {
   classifySwapFilePath,
+  cleanupSwapTemporaryFile,
+  createInitializedSwapTemporaryFile,
   ensureSwapFilePresent,
   ensureSwapFstabState,
   hasNoSwapFstabEntry,
   hasSwapFstabEntry,
   isSwapActive,
   needsSwapRecreation,
+  publishInitializedSwapTemporaryFile,
   type NormalizedSwapFileOptions,
   swapFileModeMatches,
 } from "./swapFileHelpers.js"
@@ -46,12 +49,44 @@ async function recreateSwapFile(
   const safeRemoval = await ensureSafeSwapRemoval(ssh, options.path)
   if (typeof safeRemoval !== "string") return safeRemoval
 
-  const disableResult = await disableSwap(ssh, options.path)
-  if (typeof disableResult !== "boolean") return disableResult
-
   if (safeRemoval === "ok") {
+    const replacementFile = await createInitializedSwapTemporaryFile({
+      mode: options.mode,
+      path: options.path,
+      size: options.sizeForCommand,
+      sizeBytes: options.sizeBytes,
+      ssh,
+    })
+    if ("status" in replacementFile) return replacementFile
+
+    const disableResult = await disableSwap(ssh, options.path)
+    if (typeof disableResult !== "boolean") {
+      await cleanupSwapTemporaryFile(ssh, replacementFile.temporaryPath)
+      return disableResult
+    }
+
     const removeResult = await removeSwapFile(ssh, options.path)
-    if (typeof removeResult !== "boolean") return removeResult
+    if (typeof removeResult !== "boolean") {
+      await cleanupSwapTemporaryFile(ssh, replacementFile.temporaryPath)
+      if (disableResult) await enableSwap(ssh, options.path)
+      return removeResult
+    }
+
+    const publishResult = await publishInitializedSwapTemporaryFile(
+      {
+        mode: options.mode,
+        path: options.path,
+        size: options.sizeForCommand,
+        sizeBytes: options.sizeBytes,
+        ssh,
+      },
+      replacementFile
+    )
+    if (publishResult !== true) {
+      if (disableResult) await enableSwap(ssh, options.path)
+      return publishResult
+    }
+    return "changed"
   }
 
   const createResult = await ensureSwapFilePresent({

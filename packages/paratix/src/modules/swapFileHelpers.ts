@@ -3,7 +3,12 @@ import { posix as posixPath } from "node:path"
 import { shellQuote, validateMode } from "../ssh.js"
 import { guardedWriteFile, type SshConnection } from "../types.js"
 
-export { ensureSwapFilePresent } from "./swapFileCreateHelpers.js"
+export {
+  cleanupSwapTemporaryFile,
+  createInitializedSwapTemporaryFile,
+  ensureSwapFilePresent,
+  publishInitializedSwapTemporaryFile,
+} from "./swapFileCreateHelpers.js"
 
 const EXEC_OPTS = { ignoreExitCode: true, silent: true } as const
 const FSTAB_PATH = "/etc/fstab"
