@@ -437,6 +437,48 @@ describe("quadlet.container", () => {
     expect(content).toContain("Unmask=/proc/latency_stats")
   })
 
+  it("quotes Environment values that contain systemd token separators", async () => {
+    const mod = quadlet.container({
+      environment: {
+        APP_GREETING: 'hello "world"',
+        APP_PATH: String.raw`C:\Program Files\App`,
+        APP_TOKEN: "abc-123_./:@%+=",
+      },
+      image: "docker.io/library/nginx:latest",
+      name: "quoted-env",
+    })
+
+    const ssh = createSuccessfulApplySsh()
+    const writeFile = vi.spyOn(ssh, "writeFile").mockResolvedValue()
+
+    await mod.apply(ssh, emptyEnv)
+
+    const content = writeFile.mock.calls[0][1]
+    expect(content).toContain('Environment=APP_GREETING="hello \\"world\\""')
+    expect(content).toContain('Environment=APP_PATH="C:\\\\Program Files\\\\App"')
+    expect(content).toContain("Environment=APP_TOKEN=abc-123_./:@%+=")
+  })
+
+  it("rejects invalid Environment keys", () => {
+    expect(() => {
+      quadlet.container({
+        environment: { "APP-NAME": "nginx" },
+        image: "docker.io/library/nginx:latest",
+        name: "invalid-env-key",
+      })
+    }).toThrow("environment key is invalid")
+  })
+
+  it("rejects Environment values with newlines", () => {
+    expect(() => {
+      quadlet.container({
+        environment: { APP_CONFIG: "line-one\nline-two" },
+        image: "docker.io/library/nginx:latest",
+        name: "invalid-env-value",
+      })
+    }).toThrow("environment values must not contain newlines")
+  })
+
   it("renders Restart in [Service] section, not [Container]", async () => {
     const mod = quadlet.container({
       image: "docker.io/library/nginx:latest",

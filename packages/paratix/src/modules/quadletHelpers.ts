@@ -78,6 +78,8 @@ export type QuadletImageUpdateOptions = {
 }
 
 const CONTAINERS_SYSTEMD_DIRECTORY = "/etc/containers/systemd"
+const QUADLET_ENVIRONMENT_KEY_PATTERN = /^[A-Za-z_][A-Za-z0-9_]*$/v
+const QUADLET_SAFE_ENVIRONMENT_VALUE_PATTERN = /^[A-Za-z0-9_@%+=:,\x2e\/\-]*$/v
 const QUADLET_PULL_CHANGED_OUTPUT_PATTERNS = [
   "Copying blob",
   "Copying config",
@@ -200,7 +202,26 @@ function buildQuadletMetadataLines(options: QuadletContainerOptions): string[] {
 function renderQuadletEnvironment(environment: Record<string, string>): string[] {
   return Object.entries(environment)
     .sort(([left], [right]) => left.localeCompare(right))
-    .map(([key, value]) => renderQuadletLine("Environment", `${key}=${value}`))
+    .map(([key, value]) => renderQuadletEnvironmentLine(key, value))
+}
+
+function assertQuadletEnvironmentKey(key: string): void {
+  if (!QUADLET_ENVIRONMENT_KEY_PATTERN.test(key)) {
+    throw new Error(`quadlet.container environment key is invalid: ${JSON.stringify(key)}`)
+  }
+}
+
+function quoteQuadletEnvironmentValue(value: string): string {
+  if (/[\n\r]/v.test(value)) {
+    throw new Error("quadlet.container environment values must not contain newlines")
+  }
+  if (QUADLET_SAFE_ENVIRONMENT_VALUE_PATTERN.test(value)) return value
+  return `"${value.replaceAll("\\", "\\\\").replaceAll('"', '\\"')}"`
+}
+
+function renderQuadletEnvironmentLine(key: string, value: string): string {
+  assertQuadletEnvironmentKey(key)
+  return renderQuadletLine("Environment", `${key}=${quoteQuadletEnvironmentValue(value)}`)
 }
 
 function buildQuadletTuningLines(options: QuadletContainerOptions): string[] {
