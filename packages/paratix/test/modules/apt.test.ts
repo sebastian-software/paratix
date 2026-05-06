@@ -649,6 +649,24 @@ describe("apt.repository (standard form)", () => {
     expect(result).toBe("ok")
   })
 
+  it("throws when source contains multiple lines", () => {
+    expect(() => apt.repository("docker", `${source}\n${source}`)).toThrow(
+      "apt.repository: source must be exactly one line"
+    )
+  })
+
+  it("throws when signedBy is false and source contains multiple lines", () => {
+    expect(() =>
+      apt.repository("docker", `${source}\n# additional repository`, { signedBy: false })
+    ).toThrow("apt.repository: source must be exactly one line")
+  })
+
+  it("throws when signedBy is enabled for a non-deb source line", () => {
+    expect(() => apt.repository("docker", `# ${source}`)).toThrow(
+      "apt.repository: source must start with deb or deb-src when signedBy is enabled"
+    )
+  })
+
   it("check returns ok when explicit signedBy uses custom key path", async () => {
     const customContent =
       "deb [signed-by=/etc/apt/keyrings/custom.gpg] https://download.docker.com/linux/ubuntu noble stable"

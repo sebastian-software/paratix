@@ -90,6 +90,7 @@ async function restoreAptRepository(
 }
 
 const APT_BASE_EXEC_OPTS = { ignoreExitCode: true, silent: true } as const
+const APT_SOURCE_LINE_BREAK_PATTERN = /[\r\n]/v
 
 function aptExecOptions(options?: UpgradeOptions): ExecOptions {
   if (options?.timeout === undefined) return APT_BASE_EXEC_OPTS
@@ -367,12 +368,23 @@ async function resolveDebconfType(ssh: SshConnection, question: string): Promise
 const BRACKETED_SOURCE_RE = /^(?<prefix>deb(?:-src)?)\s+\[(?<opts>[^\]]*)\](?<rest>.*)$/v
 const PLAIN_SOURCE_RE = /^(?<prefix>deb(?:-src)?)\s(?<rest>.+)$/v
 
+function validateRepositorySourceLine(sourceLine: string): string {
+  if (APT_SOURCE_LINE_BREAK_PATTERN.test(sourceLine)) {
+    throw new Error("apt.repository: source must be exactly one line")
+  }
+  const trimmed = sourceLine.trim()
+  if (trimmed.length === 0) {
+    throw new Error("apt.repository: source must not be empty")
+  }
+  return trimmed
+}
+
 /**
  * Inject a `signed-by=<keyPath>` option into a deb source line.
  *
  * Handles both the bracketed form (`deb [arch=amd64] ...`) and the plain
- * form (`deb https://...`). If the line does not match either pattern it is
- * returned unchanged.
+ * form (`deb https://...`). Non-deb source lines are rejected because they
+ * cannot be isolated with a keyring-specific `signed-by` option.
  *
  * @param sourceLine - A single deb/deb-src source line.
  * @param keyPath - Absolute path to the GPG keyring file on the remote host.
@@ -388,7 +400,7 @@ function injectSignedBy(sourceLine: string, keyPath: string): string {
   if (withoutBrackets?.groups) {
     return `${withoutBrackets.groups.prefix} [signed-by=${keyPath}] ${withoutBrackets.groups.rest}`
   }
-  return sourceLine
+  throw new Error("apt.repository: source must start with deb or deb-src when signedBy is enabled")
 }
 
 /**
@@ -634,7 +646,7 @@ export const apt = {
     const name = nameOrPpa
     validateAptResourceName(name)
     const signedBy = options?.signedBy
-    let expectedContent = source
+    let expectedContent = validateRepositorySourceLine(source)
 
     if (signedBy !== false) {
       const keyName = typeof signedBy === "string" ? signedBy : name
