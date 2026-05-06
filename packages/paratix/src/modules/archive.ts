@@ -65,6 +65,10 @@ function markerPath(source: string, destination: string): string {
   return `${FLAGS_DIR}/archive-${hash}.sha256`
 }
 
+function ownerPathsMarkerPath(marker: string): string {
+  return `${marker}.owner-paths`
+}
+
 /**
  * Build a descriptive error for a marker file that exists but cannot be
  * read. The `cat` stderr is preferred over the exit code when available.
@@ -254,6 +258,24 @@ async function applyExtractedMemberOwner(
   )
 }
 
+async function writeOwnerPathsMarker(
+  conn: SshConnection,
+  parameters: {
+    destination: string
+    marker: string
+    members: ArchiveMember[]
+    owner?: string
+    upload: boolean
+  }
+): Promise<void> {
+  if (!parameters.upload) return
+  if (parameters.owner == null || parameters.owner === "") return
+  const paths = archiveMemberDestinationPaths(parameters.destination, parameters.members)
+  await conn.writeFile(ownerPathsMarkerPath(parameters.marker), JSON.stringify(paths), {
+    mode: ARCHIVE_MARKER_MODE,
+  })
+}
+
 async function prepareExtractDestination(
   conn: SshConnection,
   parameters: { destination: string; source: string }
@@ -328,9 +350,15 @@ async function runExtraction(
   })
 
   const markerWritten = await writeMarker(conn, remoteSource, { marker })
-  return markerWritten
-    ? { status: "changed" }
-    : failed(`[archive.extract] failed to write marker for ${source}`)
+  if (!markerWritten) return failed(`[archive.extract] failed to write marker for ${source}`)
+  await writeOwnerPathsMarker(conn, {
+    destination: validatedDestination.destination,
+    marker,
+    members,
+    owner,
+    upload: parameters.upload,
+  })
+  return { status: "changed" }
 }
 
 /**
@@ -374,6 +402,10 @@ function ownerMatchesStat(stdout: string, owner: string): boolean {
   return true
 }
 
+function isStringArray(value: unknown): value is string[] {
+  return Array.isArray(value) && value.every((item) => typeof item === "string")
+}
+
 async function extractedMemberOwnerMatches(
   conn: SshConnection,
   parameters: { owner: string; path: string }
@@ -391,19 +423,54 @@ async function extractedMemberOwnerMatches(
 
 async function archiveOwnerMatches(
   conn: SshConnection,
-  parameters: { destination: string; owner?: string; source: string; upload: boolean }
+  parameters: {
+    destination: string
+    marker: string
+    owner?: string
+    source: string
+    upload: boolean
+  }
 ): Promise<boolean> {
-  const { destination, owner, source, upload } = parameters
+  const { destination, marker, owner, source, upload } = parameters
   if (owner == null || owner === "") return true
-  if (upload) return true
+  if (upload) {
+    const paths = await readOwnerPathsMarker(conn, marker)
+    if (paths === null) return false
+    return ownerMatchesPaths(conn, { owner, paths })
+  }
   const members = await validatedArchiveMembers(conn, { archivePath: source, source })
   if (!Array.isArray(members)) return false
+  return ownerMatchesPaths(conn, {
+    owner,
+    paths: archiveMemberDestinationPaths(destination, members),
+  })
+}
+
+async function ownerMatchesPaths(
+  conn: SshConnection,
+  parameters: { owner: string; paths: string[] }
+): Promise<boolean> {
+  const { owner, paths } = parameters
   const matches = await mapWithConcurrencyLimit(
-    archiveMemberDestinationPaths(destination, members),
+    paths,
     ARCHIVE_OWNER_MEMBER_CONCURRENCY,
     async (path) => extractedMemberOwnerMatches(conn, { owner, path })
   )
   return matches.every(Boolean)
+}
+
+async function readOwnerPathsMarker(conn: SshConnection, marker: string): Promise<null | string[]> {
+  const markerResult = await conn.exec(`cat ${shellQuote(ownerPathsMarkerPath(marker))}`, EXEC_OPTS)
+  if (markerResult.code !== 0) {
+    if (/no such file/iv.test(markerResult.stderr)) return null
+    throw buildMarkerUnreadableError(markerResult)
+  }
+  try {
+    const paths: unknown = JSON.parse(markerResult.stdout)
+    return isStringArray(paths) ? paths : null
+  } catch {
+    return null
+  }
 }
 
 async function archiveMarkerMatches(
@@ -483,6 +550,7 @@ export const archive = {
         if (
           !(await archiveOwnerMatches(conn, {
             destination: normalizedDestination,
+            marker,
             owner,
             source,
             upload,

@@ -304,6 +304,74 @@ describe("archive.extract — check", () => {
 
     vi.restoreAllMocks()
   })
+
+  it("returns ok for upload archives when the stored owner paths still match", async () => {
+    const localFile = "/local/app.tar.gz"
+    const localFileHash = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    const localSrcHash = "edd161527d28e0daec8363c041e405c2b17a6fabc2b74d3b5e956652b98a3520"
+    const localMarker = `/var/lib/paratix/flags/archive-${localSrcHash}.sha256`
+    const ownerPathsMarker = `${localMarker}.owner-paths`
+
+    const mockSsh = createMockSsh({
+      [`[ -e '${destination}/app/file' ] || [ -L '${destination}/app/file' ]`]: { code: 0 },
+      [`cat '${localMarker}'`]: { code: 0, stdout: localFileHash },
+      [`cat '${ownerPathsMarker}'`]: {
+        code: 0,
+        stdout: JSON.stringify([`${destination}/app/file`]),
+      },
+      [`stat -c '%U %G' -- '${destination}/app/file'`]: {
+        code: 0,
+        stdout: "www-data www-data\n",
+      },
+      [`test -d '${destination}'`]: { code: 0 },
+      [`test -f '${localMarker}'`]: { code: 0 },
+    })
+
+    const fileHelpers = await import("../../src/modules/fileHelpers.js")
+    vi.spyOn(fileHelpers, "localSha256").mockResolvedValue(localFileHash)
+    vi.spyOn(mockSsh, "uploadFile").mockResolvedValue()
+
+    const mod = archive.extract(localFile, destination, {
+      owner: "www-data:www-data",
+      upload: true,
+    })
+    const result = await mod.check(mockSsh, emptyEnv)
+    expect(result).toBe("ok")
+    expect(mockSsh.uploadFile).not.toHaveBeenCalled()
+
+    vi.restoreAllMocks()
+  })
+
+  it("returns needs-apply for upload archives when a stored owner path drifts", async () => {
+    const localFile = "/local/app.tar.gz"
+    const localSrcHash = "edd161527d28e0daec8363c041e405c2b17a6fabc2b74d3b5e956652b98a3520"
+    const localMarker = `/var/lib/paratix/flags/archive-${localSrcHash}.sha256`
+    const ownerPathsMarker = `${localMarker}.owner-paths`
+
+    const mockSsh = createMockSsh({
+      [`[ -e '${destination}/app/file' ] || [ -L '${destination}/app/file' ]`]: { code: 0 },
+      [`cat '${ownerPathsMarker}'`]: {
+        code: 0,
+        stdout: JSON.stringify([`${destination}/app/file`]),
+      },
+      [`stat -c '%U %G' -- '${destination}/app/file'`]: {
+        code: 0,
+        stdout: "root root\n",
+      },
+      [`test -d '${destination}'`]: { code: 0 },
+      [`test -f '${localMarker}'`]: { code: 0 },
+    })
+    vi.spyOn(mockSsh, "uploadFile").mockResolvedValue()
+
+    const mod = archive.extract(localFile, destination, {
+      owner: "www-data:www-data",
+      upload: true,
+    })
+    const result = await mod.check(mockSsh, emptyEnv)
+    expect(result).toBe("needs-apply")
+    expect(mockSsh.calls).not.toContain(`cat '${localMarker}'`)
+    expect(mockSsh.uploadFile).not.toHaveBeenCalled()
+  })
 })
 
 describe("archive.extract — apply", () => {
@@ -550,6 +618,40 @@ describe("archive.extract — apply", () => {
     expect(result.status).toBe("changed")
     expect(mockSsh.uploadFile).toHaveBeenCalledWith(localFile, remoteTmp)
     expect(mockSsh.calls).toContain(`rm -f '${remoteTmp}'`)
+  })
+
+  it("persists extracted owner paths for upload archives with owner", async () => {
+    const localFile = "/local/app.tar.gz"
+    const remoteTmp = "/tmp/paratix-upload.AbCdEfGh"
+    const localSrcHash = "edd161527d28e0daec8363c041e405c2b17a6fabc2b74d3b5e956652b98a3520"
+    const localMarker = `/var/lib/paratix/flags/archive-${localSrcHash}.sha256`
+    const ownerPathsMarker = `${localMarker}.owner-paths`
+
+    const mockSsh = createMockSsh({
+      [`chown -h -- 'www-data:www-data' '${destination}/app/file'`]: { code: 0 },
+      [`tar --no-same-owner --no-overwrite-dir -xzf '${remoteTmp}' -C '${destination}'`]: {
+        code: 0,
+      },
+      [`tar -tvzf '${remoteTmp}'`]: { code: 0, stdout: safeTarListing },
+      "mktemp /tmp/paratix-upload.XXXXXXXX": { code: 0, stdout: remoteTmp },
+    })
+    vi.spyOn(mockSsh, "sha256").mockResolvedValue(archiveSha)
+    vi.spyOn(mockSsh, "writeFile").mockResolvedValue()
+    vi.spyOn(mockSsh, "uploadFile").mockResolvedValue()
+
+    const mod = archive.extract(localFile, destination, {
+      owner: "www-data:www-data",
+      upload: true,
+    })
+    const result = await mod.apply(mockSsh, emptyEnv)
+
+    expect(result.status).toBe("changed")
+    expect(mockSsh.writeFile).toHaveBeenCalledWith(localMarker, archiveSha, { mode: "0644" })
+    expect(mockSsh.writeFile).toHaveBeenCalledWith(
+      ownerPathsMarker,
+      JSON.stringify([`${destination}/app/file`]),
+      { mode: "0644" }
+    )
   })
 
   it("regression: allocates a fresh remote upload path per invocation, even with identical local sources", async () => {
