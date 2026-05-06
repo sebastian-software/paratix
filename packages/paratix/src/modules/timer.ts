@@ -24,6 +24,35 @@ type FileMatchSpec = {
   path: string
 }
 
+type FileSnapshot = { content: string; exists: true } | { exists: false }
+
+async function readFileSnapshot(ssh: SshConnection, path: string): Promise<FileSnapshot> {
+  if (!(await ssh.exists(path))) return { exists: false }
+  return { content: await ssh.readFile(path), exists: true }
+}
+
+async function restoreFileSnapshot(
+  ssh: SshConnection,
+  path: string,
+  snapshot: FileSnapshot
+): Promise<void> {
+  if (snapshot.exists) {
+    await ssh.writeFile(path, snapshot.content, { mode: UNIT_FILE_MODE })
+    return
+  }
+  await ssh.exec(`rm -f ${shellQuote(path)}`, { ignoreExitCode: true, silent: true })
+}
+
+async function restoreUnitFileSnapshots(
+  ssh: SshConnection,
+  paths: TimerPaths,
+  snapshots: { service?: FileSnapshot; timer?: FileSnapshot }
+): Promise<void> {
+  if (snapshots.service != null)
+    await restoreFileSnapshot(ssh, paths.servicePath, snapshots.service)
+  if (snapshots.timer != null) await restoreFileSnapshot(ssh, paths.timerPath, snapshots.timer)
+}
+
 // When `apply` runs after a `check` that already inspected the same paths,
 // this issues another `exists`/`readFile` round-trip. The extra calls are
 // accepted because the check phase only reports `needs-apply`/`ok` and does
@@ -99,6 +128,10 @@ async function syncUnitFiles(
     expectedMode: UNIT_FILE_MODE,
     path: paths.timerPath,
   })
+  const snapshots = {
+    service: serviceMatched ? undefined : await readFileSnapshot(ssh, paths.servicePath),
+    timer: timerMatched ? undefined : await readFileSnapshot(ssh, paths.timerPath),
+  }
 
   if (!serviceMatched) {
     await ssh.writeFile(paths.servicePath, paths.serviceContent, { mode: UNIT_FILE_MODE })
@@ -113,6 +146,7 @@ async function syncUnitFiles(
       silent: true,
     })
     if (reload.code !== 0) {
+      await restoreUnitFileSnapshots(ssh, paths, snapshots)
       return {
         failure: failedCommand(`[timer.scheduled: ${name}] systemctl daemon-reload failed`, reload),
         ok: false,

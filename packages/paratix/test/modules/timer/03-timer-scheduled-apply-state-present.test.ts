@@ -91,11 +91,34 @@ describe("timer.scheduled — apply (state: present)", () => {
     const ssh = createTimerApplyMockSsh({
       [`[ -e '${SERVICE_PATH}' ]`]: { code: 1 },
       [`[ -e '${TIMER_PATH}' ]`]: { code: 1 },
+      [`rm -f '${SERVICE_PATH}'`]: { code: 0 },
+      [`rm -f '${TIMER_PATH}'`]: { code: 0 },
       "systemctl daemon-reload": { code: 1, stderr: "boom" },
     })
     const mod = timer.scheduled("backup", baseOptions)
     const result = await mod.apply(ssh, emptyEnv)
     expect(result.status).toBe("failed")
+    expect(ssh.calls).toContain(`rm -f '${SERVICE_PATH}'`)
+    expect(ssh.calls).toContain(`rm -f '${TIMER_PATH}'`)
+  })
+
+  it("restores previous unit files when daemon-reload fails", async () => {
+    const previousService = "[Unit]\nDescription=old service\n"
+    const previousTimer = "[Unit]\nDescription=old timer\n"
+    const ssh = createTimerApplyMockSsh({
+      [`[ -e '${SERVICE_PATH}' ]`]: { code: 0 },
+      [`[ -e '${TIMER_PATH}' ]`]: { code: 0 },
+      [`cat '${SERVICE_PATH}'`]: { stdout: previousService },
+      [`cat '${TIMER_PATH}'`]: { stdout: previousTimer },
+      [`stat -c '%a' '${SERVICE_PATH}'`]: { stdout: "0644" },
+      [`stat -c '%a' '${TIMER_PATH}'`]: { stdout: "0644" },
+      "systemctl daemon-reload": { code: 1, stderr: "boom" },
+    })
+    const mod = timer.scheduled("backup", baseOptions)
+    const result = await mod.apply(ssh, emptyEnv)
+    expect(result.status).toBe("failed")
+    expect(ssh.writeFileCalls.at(-2)?.content).toBe(previousService)
+    expect(ssh.writeFileCalls.at(-1)?.content).toBe(previousTimer)
   })
 
   it("returns failed when enable --now fails", async () => {
