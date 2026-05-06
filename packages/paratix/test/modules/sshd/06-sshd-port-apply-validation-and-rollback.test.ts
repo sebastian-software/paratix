@@ -224,6 +224,7 @@ describe("sshd.port — apply: validation and rollback", () => {
   it("returns ok and does not write when the desired port is already configured", async () => {
     const mockSsh = createMockSsh({
       [CAT_SSHD]: { stdout: "Port 2222\n" },
+      "ss -H -ltn 'sport = :2222'": { code: 0, stdout: "LISTEN 0 128 0.0.0.0:2222\n" },
     })
     const writtenFiles = trackWriteFile(mockSsh)
     const execSpy = vi.spyOn(mockSsh, "exec")
@@ -232,13 +233,32 @@ describe("sshd.port — apply: validation and rollback", () => {
     const mod = sshd.port(2222)
     const result = await mod.apply(mockSsh, emptyEnv)
 
-    // No write, no restart, no addPort — early return when config is already correct
+    // No write, no restart, no addPort — early return when config and live listener are correct
     expect(writtenFiles).toHaveLength(0)
     expect(result.status).toBe("ok")
     expect(result).not.toHaveProperty("meta")
     const execCommands = execSpy.mock.calls.map((args) => args[0])
     expect(execCommands).not.toContain("systemctl restart sshd")
     expect(addPortSpy).not.toHaveBeenCalled()
+  })
+
+  it("restarts and emits reconnect meta when config matches but target port is not live", async () => {
+    const mockSsh = createMockSsh({
+      [CAT_SSHD]: { stdout: "Port 2222\n" },
+      "ss -H -ltn 'sport = :2222'": { code: 1, stdout: "" },
+    })
+    const writtenFiles = trackWriteFile(mockSsh)
+    const execSpy = vi.spyOn(mockSsh, "exec")
+    const addPortSpy = vi.spyOn(mockSsh, "addPort")
+
+    const mod = sshd.port(2222)
+    const result = await mod.apply(mockSsh, emptyEnv)
+
+    expect(writtenFiles).toHaveLength(0)
+    expect(result.status).toBe("changed")
+    expect(result.meta?.find(isSshdPortMetaEntry)?.port).toBe(2222)
+    expect(addPortSpy).toHaveBeenCalledWith(2222)
+    expect(execSpy.mock.calls.map((args) => args[0])).toContain("systemctl restart sshd")
   })
 
   it("regression — addPort is called before systemctl restart sshd", async () => {

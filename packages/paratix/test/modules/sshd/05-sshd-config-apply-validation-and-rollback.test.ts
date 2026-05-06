@@ -140,7 +140,7 @@ describe("sshd.config — apply: validation and rollback", () => {
     const mockSsh = createMockSsh({
       [CAT_SSHD]: { stdout: originalConfig },
     })
-    trackWriteFile(mockSsh)
+    const writtenFiles = trackWriteFile(mockSsh)
     const execSpy = vi.spyOn(mockSsh, "exec")
 
     execSpy
@@ -159,6 +159,7 @@ describe("sshd.config — apply: validation and rollback", () => {
       SYSTEMCTL_CAT_SSHD,
       "systemctl reload sshd",
     ])
+    expect(writtenFiles.at(-1)).toStrictEqual({ content: originalConfig, path: SSHD_CONFIG })
   })
 
   it("falls back to ssh.service for reload on Ubuntu-style systems", async () => {

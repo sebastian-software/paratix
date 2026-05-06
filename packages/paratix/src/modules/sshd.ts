@@ -200,6 +200,14 @@ async function reloadSshd(ssh: SshConnection): Promise<ModuleResult> {
     : failedCommand(`[sshd.config] systemctl reload ${serviceUnit} failed`, result)
 }
 
+async function liveSshdPortMatches(ssh: SshConnection, targetPort: number): Promise<boolean> {
+  const result = await ssh.exec(`ss -H -ltn 'sport = :${String(targetPort)}'`, {
+    ignoreExitCode: true,
+    silent: true,
+  })
+  return result.code === 0 && result.stdout.trim() !== ""
+}
+
 async function restoreSshdPortRestartFailure(
   ssh: SshConnection,
   parameters: {
@@ -332,7 +340,12 @@ async function applySshdPort(ssh: SshConnection, targetPort: number): Promise<Mo
   const originalConfig = await ssh.readFile(SSHD_CONFIG_PATH)
   const { didChange, newContent } = buildSshdPortContent(originalConfig, targetPort)
   if (!didChange) {
-    return { status: "ok" }
+    if (await liveSshdPortMatches(ssh, targetPort)) return { status: "ok" }
+    await restartSshdOnNewPort(ssh, targetPort, originalConfig)
+    return {
+      meta: [sshdPortMeta(targetPort)],
+      status: "changed",
+    }
   }
 
   await guardedWriteFile(ssh, {
@@ -408,7 +421,11 @@ export const sshd = {
           return { status: "ok" }
         }
 
-        return reloadSshd(ssh)
+        const reloadResult = await reloadSshd(ssh)
+        if (reloadResult.status === "failed") {
+          await ssh.writeFile(SSHD_CONFIG_PATH, originalConfig, { mode: SSHD_CONFIG_MODE })
+        }
+        return reloadResult
       },
       async check(ssh: null | SshConnection): Promise<"needs-apply" | "ok"> {
         if (!ssh) return NEEDS_APPLY
