@@ -61,11 +61,25 @@ function isKnownHostsAppend(command: string): boolean {
   return command.startsWith("printf '%s\\n' ") && command.endsWith(" >> ~/.ssh/known_hosts")
 }
 
-function makeHostKeyBuffer(algo: string, keyData = Buffer.from("fake-host-key-data")): Buffer {
-  const algoBytes = Buffer.from(algo)
+function sshString(value: Buffer | string): Buffer {
+  const valueBytes = typeof value === "string" ? Buffer.from(value) : value
   const lengthBuffer = Buffer.alloc(4)
-  lengthBuffer.writeUInt32BE(algoBytes.length)
-  return Buffer.concat([lengthBuffer, algoBytes, keyData])
+  lengthBuffer.writeUInt32BE(valueBytes.length)
+  return Buffer.concat([lengthBuffer, valueBytes])
+}
+
+function makeHostKeyBuffer(algo: string): Buffer {
+  if (algo === "ssh-ed25519") {
+    return Buffer.concat([sshString(algo), sshString(Buffer.alloc(32, 1))])
+  }
+  if (algo === "ssh-rsa") {
+    return Buffer.concat([
+      sshString(algo),
+      sshString(Buffer.from([1, 0, 1])),
+      sshString(Buffer.alloc(32, 2)),
+    ])
+  }
+  return Buffer.concat([sshString(algo), sshString(Buffer.alloc(16, 3))])
 }
 
 function presentAuthorizedKeysRewriteCommand(
@@ -137,7 +151,7 @@ function createKnownHostsTrackingMock(
 }
 
 describe("ssh.authorizedKeys", () => {
-  const testKey = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAI test-key"
+  const testKey = `ssh-ed25519 ${makeHostKeyBuffer("ssh-ed25519").toString("base64")} test-key`
 
   // resolveHome calls conn.output() which returns the home path
   const getentAlice = "getent passwd 'alice' | cut -d: -f6"
@@ -170,6 +184,28 @@ describe("ssh.authorizedKeys", () => {
       ...extra,
     }
   }
+
+  it("rejects authorized_keys entries with invalid base64 key material", () => {
+    expect(() => {
+      ssh.authorizedKeys("alice", "ssh-ed25519 not-base64! test-key")
+    }).toThrow("strict base64")
+  })
+
+  it("rejects authorized_keys entries whose encoded algorithm does not match", () => {
+    const mismatchedKey = `ssh-rsa ${makeHostKeyBuffer("ssh-ed25519").toString("base64")} test-key`
+
+    expect(() => {
+      ssh.authorizedKeys("alice", mismatchedKey)
+    }).toThrow("valid OpenSSH public key")
+  })
+
+  it("rejects authorized_keys entries with unsupported key algorithms", () => {
+    const unsupportedKey = `ssh-dss ${makeHostKeyBuffer("ssh-dss").toString("base64")} test-key`
+
+    expect(() => {
+      ssh.authorizedKeys("alice", unsupportedKey)
+    }).toThrow("unsupported public key algorithm")
+  })
 
   it("check returns ok when key exists in authorized_keys (state: present)", async () => {
     const mockSsh = createMockSsh(
@@ -478,15 +514,14 @@ describe("ssh.authorizedKeys", () => {
   // test asserts the absent path renders the whole-line filter, never the
   // substring filter.
   it("regression: absent apply uses whole-line filter so it cannot delete keys that share a substring", async () => {
-    const sharedKeyBody = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAI shared-body"
-    const exactKeyToRemove = sharedKeyBody
-    const collateralEntry = `command="/usr/bin/restricted" ${sharedKeyBody}`
+    const exactKeyToRemove = testKey
+    const collateralEntry = `command="/usr/bin/restricted" ${testKey}`
 
     // Sanity: in the unfixed implementation, `grep -vF -- '<body>' ...` would
     // also match the collateral entry because it contains `<body>` as a
     // substring. The fixed implementation uses `grep -vxF` (whole-line),
     // which only matches the exact `exactKeyToRemove` line.
-    expect(collateralEntry.includes(sharedKeyBody)).toBe(true)
+    expect(collateralEntry.includes(testKey)).toBe(true)
     expect(collateralEntry).not.toBe(exactKeyToRemove)
 
     const mockSsh = createSshApplyMockSsh(
