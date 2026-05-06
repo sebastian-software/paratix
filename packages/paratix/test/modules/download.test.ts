@@ -4,7 +4,7 @@ import { describe, expect, it, vi } from "vitest"
 import type { ExecOptions } from "../../src/types.js"
 
 import { download } from "../../src/modules/download.js"
-import { createMockSsh as createBaseMockSsh } from "../helpers/mockSsh.js"
+import { createMockSsh as createBaseMockSsh, type ExecCall } from "../helpers/mockSsh.js"
 
 const createMockSsh: typeof createBaseMockSsh = (responses, options) =>
   createBaseMockSsh(responses, {
@@ -54,7 +54,7 @@ type MockSshWithOptions = {
     command: string,
     options?: ExecOptions
   ) => Promise<{ code: number; stderr: string; stdout: string }>
-  execCalls: Array<{ command: string; options?: ExecOptions }>
+  execCalls: ExecCall[]
 } & ReturnType<typeof createMockSsh>
 
 /**
@@ -67,7 +67,7 @@ function createMockSshWithOptions(
   responses?: Parameters<typeof createMockSsh>[0]
 ): MockSshWithOptions {
   const base = createMockSsh(responses)
-  const execCalls: Array<{ command: string; options?: ExecOptions }> = []
+  const execCalls: ExecCall[] = []
   const mock: MockSshWithOptions = {
     ...base,
     async exec(command: string, options?: ExecOptions) {

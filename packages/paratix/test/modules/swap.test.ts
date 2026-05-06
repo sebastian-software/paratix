@@ -237,7 +237,10 @@ describe("swap.file — apply", () => {
     expect(ssh.calls).not.toContain(`cat '/etc/fstab'`)
   })
 
-  it.each([
+  const unsafePathCases: Array<{
+    description: string
+    responses: Parameters<typeof createMockSsh>[0]
+  }> = [
     {
       description: "symbolic link",
       responses: {
@@ -252,18 +255,23 @@ describe("swap.file — apply", () => {
         [`[ -L '${swapPath}' ]`]: { code: 1 },
       },
     },
-  ])("refuses to remove an unsafe $description for absent state", async ({ responses }) => {
-    const ssh = createMockSsh(responses)
+  ]
 
-    const mod = swap.file({ path: swapPath, size: swapSize, state: "absent" })
-    const result = await mod.apply(ssh, emptyEnv)
+  it.each(unsafePathCases)(
+    "refuses to remove an unsafe $description for absent state",
+    async ({ responses }) => {
+      const ssh = createMockSsh(responses)
 
-    expect(result.status).toBe("failed")
-    expect(result.error?.message).toContain("refusing to remove unsafe path")
-    expect(ssh.calls).not.toContain(`rm -f '${swapPath}'`)
-    expect(ssh.calls).not.toContain(`swapoff '${swapPath}'`)
-    expect(ssh.calls).not.toContain(`cat '/etc/fstab'`)
-  })
+      const mod = swap.file({ path: swapPath, size: swapSize, state: "absent" })
+      const result = await mod.apply(ssh, emptyEnv)
+
+      expect(result.status).toBe("failed")
+      expect(result.error?.message).toContain("refusing to remove unsafe path")
+      expect(ssh.calls).not.toContain(`rm -f '${swapPath}'`)
+      expect(ssh.calls).not.toContain(`swapoff '${swapPath}'`)
+      expect(ssh.calls).not.toContain(`cat '/etc/fstab'`)
+    }
+  )
 
   it("uses 1M block size in dd fallback regardless of swap size", async () => {
     const smallSize = "512M"

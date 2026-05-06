@@ -13,6 +13,12 @@ import {
   restoreHomeEnvironmentVariable,
 } from "./integration/harness.js"
 
+type CommandRunner = (
+  command: string,
+  commandArguments: string[],
+  options?: { cwd?: string; timeoutMs?: number }
+) => Promise<string>
+
 vi.mock("node:child_process", () => ({
   execFile: vi.fn(),
 }))
@@ -36,7 +42,7 @@ function commandKey(command: string, commandArguments: string[]): string {
 
 function createCommandRunner(responses: Partial<Record<string, Error | string>>): {
   calls: CommandCall[]
-  run: ReturnType<typeof vi.fn>
+  run: CommandRunner
 } {
   const calls: CommandCall[] = []
   const run = vi.fn(async (command: string, commandArguments: string[]) => {

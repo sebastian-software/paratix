@@ -556,7 +556,7 @@ describe("runPlaybook shutdown handler leak on SSH connection failure", () => {
           apply: vi.fn(),
           check: vi.fn(async (ssh: null | SshConnection) => {
             await ssh?.exec("true")
-            return "ok"
+            return "ok" as const
           }),
           name: "needs-sudo",
         },
@@ -597,7 +597,7 @@ describe("runPlaybook shutdown handler leak on SSH connection failure", () => {
           apply: vi.fn(),
           check: vi.fn(async (ssh: null | SshConnection) => {
             await ssh?.exec("true")
-            return "ok"
+            return "ok" as const
           }),
           name: "needs-sudo",
         },
@@ -704,7 +704,7 @@ describe("runPlaybook shutdown handler leak on SSH connection failure", () => {
           apply: vi.fn(),
           check: vi.fn(async (ssh: null | SshConnection) => {
             await ssh?.exec("true")
-            return "ok"
+            return "ok" as const
           }),
           name: "needs-sudo",
         },
@@ -871,7 +871,7 @@ describe("runPlaybook shutdown handler leak on SSH connection failure", () => {
           apply: vi.fn(),
           check: vi.fn(async (ssh: null | SshConnection) => {
             await ssh?.exec("true")
-            return "ok"
+            return "ok" as const
           }),
           name: "needs-sudo",
         },

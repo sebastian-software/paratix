@@ -8,8 +8,12 @@ import { rsync } from "../../src/modules/rsync.js"
 import { CommandError } from "../../src/sshHelpers.js"
 import { createMockSsh } from "../helpers/mockSsh.js"
 
+const KNOWN_HOSTS_TEST_UUID = vi.hoisted<ReturnType<typeof randomUUID>>(
+  () => "00000000-0000-4000-8000-000000000000"
+)
+
 vi.mock("node:crypto", () => ({
-  randomUUID: vi.fn().mockReturnValue("known-hosts-test"),
+  randomUUID: vi.fn().mockReturnValue(KNOWN_HOSTS_TEST_UUID),
 }))
 
 vi.mock("node:child_process", () => ({
@@ -354,7 +358,7 @@ describe("rsync.sync — argument building", () => {
   beforeEach(() => {
     mockSpawn.mockReset()
     mockSuccess()
-    mockRandomUUID.mockReturnValue("known-hosts-test")
+    mockRandomUUID.mockReturnValue(KNOWN_HOSTS_TEST_UUID)
     mockUnlinkSync.mockReset()
     mockWriteFileSync.mockReset()
   })
@@ -398,7 +402,7 @@ describe("rsync.sync — argument building", () => {
     await mod.apply(mockSsh, emptyEnv)
 
     expect(mockWriteFileSync).toHaveBeenCalledWith(
-      expect.stringContaining("/paratix-rsync-known-hosts-known-hosts-test"),
+      expect.stringContaining(`/paratix-rsync-known-hosts-${KNOWN_HOSTS_TEST_UUID}`),
       "1.2.3.4 ssh-ed25519 AAAAPINNEDKEY\n",
       { mode: 0o600 }
     )
@@ -406,11 +410,11 @@ describe("rsync.sync — argument building", () => {
     const eIdx = args.indexOf("-e")
     const transportArg = args[eIdx + 1]
     expect(transportArg).toContain("UserKnownHostsFile='")
-    expect(transportArg).toContain("paratix-rsync-known-hosts-known-hosts-test")
+    expect(transportArg).toContain(`paratix-rsync-known-hosts-${KNOWN_HOSTS_TEST_UUID}`)
     expect(transportArg).toContain("-o GlobalKnownHostsFile=/dev/null")
     expect(transportArg).toContain("-o StrictHostKeyChecking=yes")
     expect(mockUnlinkSync).toHaveBeenCalledWith(
-      expect.stringContaining("/paratix-rsync-known-hosts-known-hosts-test")
+      expect.stringContaining(`/paratix-rsync-known-hosts-${KNOWN_HOSTS_TEST_UUID}`)
     )
   })
 
@@ -485,7 +489,7 @@ describe("rsync.sync — argument building", () => {
     await mod.check(mockSsh, emptyEnv)
 
     expect(mockWriteFileSync).toHaveBeenCalledWith(
-      expect.stringContaining("/paratix-rsync-known-hosts-known-hosts-test"),
+      expect.stringContaining(`/paratix-rsync-known-hosts-${KNOWN_HOSTS_TEST_UUID}`),
       "fresh-host.example ssh-ed25519 AAAAFRESHKEY\n",
       { mode: 0o600 }
     )
@@ -493,7 +497,7 @@ describe("rsync.sync — argument building", () => {
     const eIdx = args.indexOf("-e")
     const transportArg = args[eIdx + 1]
     expect(transportArg).toContain("UserKnownHostsFile='")
-    expect(transportArg).toContain("paratix-rsync-known-hosts-known-hosts-test")
+    expect(transportArg).toContain(`paratix-rsync-known-hosts-${KNOWN_HOSTS_TEST_UUID}`)
     expect(transportArg).toContain("-o GlobalKnownHostsFile=/dev/null")
   })
 

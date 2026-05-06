@@ -537,7 +537,7 @@ describe("collectStreamOutput", () => {
           options: { silent: true },
           reject,
           resolve,
-          stream,
+          stream: stream as StreamOutputParameters["stream"],
           timer,
         })
         // Simulate ssh2 sending undefined for the code

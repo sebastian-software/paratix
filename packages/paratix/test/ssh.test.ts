@@ -22,6 +22,21 @@ import {
 } from "../src/sshHelpers.js"
 import { promptTerminal } from "../src/terminal.js"
 
+type PrivateSshConnection = {
+  execWithoutSudo: (command: string) => Promise<void>
+  outputWithoutSudo: (command: string) => Promise<string>
+}
+
+async function expectRejectedError(promise: Promise<unknown>): Promise<Error> {
+  try {
+    await promise
+  } catch (error) {
+    if (error instanceof Error) return error
+    throw new TypeError(`Expected Error rejection, got ${String(error)}`, { cause: error })
+  }
+  throw new Error("Expected promise to reject")
+}
+
 // ---------------------------------------------------------------------------
 // Mocks
 // ---------------------------------------------------------------------------
@@ -1326,7 +1341,7 @@ describe("SshConnectionImpl", () => {
 
       await vi.advanceTimersByTimeAsync(5001)
 
-      const error = await execPromise.catch((error: unknown) => error as Error)
+      const error = await expectRejectedError(execPromise)
       expect(error.message).not.toContain(secret)
       expect(error.message).toContain("[REDACTED]")
     })
@@ -1405,7 +1420,7 @@ describe("SshConnectionImpl", () => {
 
       await vi.advanceTimersByTimeAsync(5001)
 
-      const error = await execPromise.catch((error: unknown) => error as Error)
+      const error = await expectRejectedError(execPromise)
       expect(error.message).not.toContain(secret)
       expect(error.message).not.toContain(escapedSecret)
       expect(error.message).toContain("[REDACTED]")
@@ -1486,7 +1501,7 @@ describe("SshConnectionImpl", () => {
 
       await vi.advanceTimersByTimeAsync(5001)
 
-      const error = await execPromise.catch((error: unknown) => error as Error)
+      const error = await expectRejectedError(execPromise)
       expect(error.message).toContain("[REDACTED]")
       expect(toStringSpy).toHaveBeenCalledOnce()
     })
@@ -1511,14 +1526,15 @@ describe("SshConnectionImpl", () => {
       await ssh.exec("whoami")
 
       expect(capturedStream).not.toBeNull()
+      const capturedExecStream = capturedStream as unknown as StreamWithStderr
       expect(vi.mocked(collectStreamOutput)).toHaveBeenCalledOnce()
-      expect(vi.mocked(capturedStream!.write)).toHaveBeenCalledWith(Buffer.from("my-sudo-pass"))
-      expect(vi.mocked(capturedStream!.write)).toHaveBeenCalledWith("\n")
+      expect(vi.mocked(capturedExecStream.write)).toHaveBeenCalledWith(Buffer.from("my-sudo-pass"))
+      expect(vi.mocked(capturedExecStream.write)).toHaveBeenCalledWith("\n")
 
       // collectStreamOutput must be invoked before stream.write so that all
       // stream event listeners are registered before the sudo password is sent
       const collectOrder = vi.mocked(collectStreamOutput).mock.invocationCallOrder[0]
-      const writeOrder = vi.mocked(capturedStream?.write).mock.invocationCallOrder[0]
+      const writeOrder = vi.mocked(capturedExecStream.write).mock.invocationCallOrder[0]
       expect(collectOrder).toBeDefined()
       expect(writeOrder).toBeDefined()
       expect(collectOrder).toBeLessThan(writeOrder)
@@ -2862,7 +2878,7 @@ describe("SshConnectionImpl", () => {
       const ssh = makeConnectedSsh(client, { sudoPassword: null, user: "deploy" })
 
       await expect(
-        (ssh as unknown as Record<string, unknown>).execWithoutSudo("true")
+        (ssh as unknown as PrivateSshConnection).execWithoutSudo("true")
       ).resolves.toBeUndefined()
     })
 
@@ -2877,7 +2893,7 @@ describe("SshConnectionImpl", () => {
       const ssh = makeConnectedSsh(client, { sudoPassword: null, user: "deploy" })
 
       await expect(
-        (ssh as unknown as Record<string, unknown>).execWithoutSudo("true")
+        (ssh as unknown as PrivateSshConnection).execWithoutSudo("true")
       ).rejects.toThrow("Command failed with signal SIGKILL")
     })
 
@@ -2893,7 +2909,7 @@ describe("SshConnectionImpl", () => {
       const ssh = makeConnectedSsh(client, { sudoPassword: null, user: "deploy" })
 
       await expect(
-        (ssh as unknown as Record<string, unknown>).outputWithoutSudo("echo hello")
+        (ssh as unknown as PrivateSshConnection).outputWithoutSudo("echo hello")
       ).resolves.toBe("hello")
     })
 
@@ -2949,7 +2965,7 @@ describe("SshConnectionImpl", () => {
       const ssh = makeConnectedSsh(client, { sudoPassword: null, user: "deploy" })
 
       // Act
-      const error = await ssh.probeSudo().catch((error: unknown) => error as Error)
+      const error = await expectRejectedError(ssh.probeSudo())
 
       // Assert: error is thrown
       expect(error).toBeInstanceOf(Error)

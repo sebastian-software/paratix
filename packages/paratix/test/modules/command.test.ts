@@ -4,7 +4,7 @@ import type { ExecOptions } from "../../src/types.js"
 
 import { command } from "../../src/modules/command.js"
 import { CommandError } from "../../src/sshHelpers.js"
-import { createStrictMockSsh } from "../helpers/mockSsh.js"
+import { createStrictMockSsh, type ExecCall } from "../helpers/mockSsh.js"
 
 const emptyEnv = {}
 
@@ -13,14 +13,14 @@ type MockSshWithOptions = {
     command: string,
     options?: ExecOptions
   ) => Promise<{ code: number; stderr: string; stdout: string }>
-  execCalls: Array<{ command: string; options?: ExecOptions }>
+  execCalls: ExecCall[]
 } & ReturnType<typeof createStrictMockSsh>
 
 function createMockSshWithOptions(
   responses?: Record<string, { code?: number; stderr?: string; stdout?: string }>
 ): MockSshWithOptions {
   const base = createStrictMockSsh(responses)
-  const execCalls: Array<{ command: string; options?: ExecOptions }> = []
+  const execCalls: ExecCall[] = []
   return {
     ...base,
     async exec(remoteCommand: string, options?: ExecOptions) {

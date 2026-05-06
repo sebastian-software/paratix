@@ -1,3 +1,5 @@
+import type { Client, ConnectConfig } from "ssh2"
+
 import { generateKeyPairSync } from "node:crypto"
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
@@ -158,12 +160,50 @@ const TEST_ADMIN_PUBLIC_KEY = createEd25519PublicKey("generated@test")
 const TEST_HOST_FINGERPRINT = "SHA256:MYVLAwRUnY5x4jwQ1SPUJoYXVb/fB/L3kFjCi5WxfYA"
 let TEST_DIR = ""
 
+type FakeHostKeyClient = {
+  connect: ReturnType<typeof vi.fn>
+  end: ReturnType<typeof vi.fn>
+  handlers: Record<string, (error?: Error) => void>
+  on: ReturnType<typeof vi.fn>
+  removeAllListeners: ReturnType<typeof vi.fn>
+}
+
+function createFakeHostKeyClient(
+  connectImplementation: (config: ConnectConfig, client: FakeHostKeyClient) => void
+): FakeHostKeyClient {
+  const fakeClient = {
+    connect: vi.fn((config: ConnectConfig) => {
+      connectImplementation(config, fakeClient)
+      return fakeClient as unknown as Client
+    }),
+    end: vi.fn(() => fakeClient as unknown as Client),
+    handlers: {} as Record<string, (error?: Error) => void>,
+    on: vi.fn((event: string, handler: (error?: Error) => void) => {
+      fakeClient.handlers[event] = handler
+      return fakeClient as unknown as Client
+    }),
+    removeAllListeners: vi.fn(() => fakeClient as unknown as Client),
+  }
+
+  return fakeClient
+}
+
+function useFakeHostKeyClient(fakeClient: FakeHostKeyClient): Client {
+  return fakeClient as unknown as Client
+}
+
+function callHostVerifier(config: ConnectConfig, key: Buffer): boolean | undefined {
+  const hostVerifier = config.hostVerifier as ((key: Buffer) => boolean | undefined) | undefined
+  const verdict = hostVerifier?.(key)
+  return typeof verdict === "boolean" ? verdict : undefined
+}
+
 async function expectProcessExit(
   callback: () => Promise<void> | void,
   expectedCode = 1
 ): Promise<void> {
   const exitError = new Error(`process.exit:${expectedCode}`)
-  const exitSpy = vi.spyOn(process, "exit").mockImplementation((code?: number) => {
+  const exitSpy = vi.spyOn(process, "exit").mockImplementation((code) => {
     throw code === expectedCode ? exitError : new Error(`process.exit:${String(code)}`)
   })
 
@@ -1177,7 +1217,9 @@ describe("resolveCliOrPromptHost", () => {
     })
 
     try {
-      await expectProcessExit(async () => resolveCliOrPromptHost(undefined, prompt))
+      await expectProcessExit(async () => {
+        await resolveCliOrPromptHost(undefined, prompt)
+      })
 
       expect(console.error).toHaveBeenCalledWith(
         "Missing --host in non-interactive environment. Pass --host <domain-or-ip>."
@@ -1444,34 +1486,23 @@ describe("readHostFingerprintViaSsh2", () => {
       "0000000b7373682d6564323535313900000020e04a2a8d2c1b47d9c6b4d114e9d2a1ea4ad8eb49c1a14851771ab0ef0457f12",
       "hex"
     )
-    const connect = vi.fn((config: { hostVerifier?: (key: Buffer) => boolean }) => {
-      config.hostVerifier?.(hostKey)
+    const fakeClient = createFakeHostKeyClient((config, client) => {
+      callHostVerifier(config, hostKey)
       setImmediate(() => {
-        fakeClient.handlers.error(new Error("Host denied"))
+        client.handlers.error(new Error("Host denied"))
       })
     })
 
-    const fakeClient = {
-      connect,
-      end: vi.fn(),
-      handlers: {} as Record<string, (error?: Error) => void>,
-      on: vi.fn((event: string, handler: (error?: Error) => void) => {
-        fakeClient.handlers[event] = handler
-        return fakeClient
-      }),
-      removeAllListeners: vi.fn(),
-    }
-
     await expect(
       readHostFingerprintViaSsh2("example.com", {
-        clientFactory: () => fakeClient,
+        clientFactory: () => useFakeHostKeyClient(fakeClient),
       })
     ).resolves.toStrictEqual({
       algorithm: "ssh-ed25519",
       fingerprint: "SHA256:MYVLAwRUnY5x4jwQ1SPUJoYXVb/fB/L3kFjCi5WxfYA",
     })
 
-    expect(connect).toHaveBeenCalledWith(
+    expect(fakeClient.connect).toHaveBeenCalledWith(
       expect.objectContaining({
         host: "example.com",
         port: 22,
@@ -1482,25 +1513,15 @@ describe("readHostFingerprintViaSsh2", () => {
   })
 
   it("fails clearly when ssh2 cannot obtain a host key", async () => {
-    const fakeClient = {
-      connect: vi.fn((config: { hostVerifier?: (key: Buffer) => boolean }) => {
-        void config
-        setImmediate(() => {
-          fakeClient.handlers.error(new Error("connect ECONNREFUSED"))
-        })
-      }),
-      end: vi.fn(),
-      handlers: {} as Record<string, (error?: Error) => void>,
-      on: vi.fn((event: string, handler: (error?: Error) => void) => {
-        fakeClient.handlers[event] = handler
-        return fakeClient
-      }),
-      removeAllListeners: vi.fn(),
-    }
+    const fakeClient = createFakeHostKeyClient((_config, client) => {
+      setImmediate(() => {
+        client.handlers.error(new Error("connect ECONNREFUSED"))
+      })
+    })
 
     await expect(
       readHostFingerprintViaSsh2("example.com", {
-        clientFactory: () => fakeClient,
+        clientFactory: () => useFakeHostKeyClient(fakeClient),
       })
     ).rejects.toThrow("Failed to read the host key from example.com:22: connect ECONNREFUSED")
   })
@@ -1515,25 +1536,16 @@ describe("readHostFingerprintViaSsh2", () => {
 
     const verdicts: Array<boolean | undefined> = []
 
-    const fakeClient = {
-      connect: vi.fn((config: { hostVerifier?: (key: Buffer) => boolean }) => {
-        verdicts.push(config.hostVerifier?.(hostKey))
-        setImmediate(() => {
-          fakeClient.handlers.error(new Error("Host denied"))
-        })
-      }),
-      end: vi.fn(),
-      handlers: {} as Record<string, (error?: Error) => void>,
-      on: vi.fn((event: string, handler: (error?: Error) => void) => {
-        fakeClient.handlers[event] = handler
-        return fakeClient
-      }),
-      removeAllListeners: vi.fn(),
-    }
+    const fakeClient = createFakeHostKeyClient((config, client) => {
+      verdicts.push(callHostVerifier(config, hostKey))
+      setImmediate(() => {
+        client.handlers.error(new Error("Host denied"))
+      })
+    })
 
     await expect(
       readHostFingerprintViaSsh2("example.com", {
-        clientFactory: () => fakeClient,
+        clientFactory: () => useFakeHostKeyClient(fakeClient),
       })
     ).rejects.toThrow(/unsupported SSH host key algorithm "ssh-bogus"/v)
 
@@ -1543,25 +1555,16 @@ describe("readHostFingerprintViaSsh2", () => {
   it("rejects with a MITM warning when the presented key buffer is too short", async () => {
     const truncatedKey = Buffer.from([0, 0])
 
-    const fakeClient = {
-      connect: vi.fn((config: { hostVerifier?: (key: Buffer) => boolean }) => {
-        config.hostVerifier?.(truncatedKey)
-        setImmediate(() => {
-          fakeClient.handlers.close()
-        })
-      }),
-      end: vi.fn(),
-      handlers: {} as Record<string, (error?: Error) => void>,
-      on: vi.fn((event: string, handler: (error?: Error) => void) => {
-        fakeClient.handlers[event] = handler
-        return fakeClient
-      }),
-      removeAllListeners: vi.fn(),
-    }
+    const fakeClient = createFakeHostKeyClient((config, client) => {
+      callHostVerifier(config, truncatedKey)
+      setImmediate(() => {
+        client.handlers.close()
+      })
+    })
 
     await expect(
       readHostFingerprintViaSsh2("example.com", {
-        clientFactory: () => fakeClient,
+        clientFactory: () => useFakeHostKeyClient(fakeClient),
       })
     ).rejects.toThrow(/Invalid SSH host key buffer/v)
   })
@@ -1576,25 +1579,16 @@ describe("readHostFingerprintViaSsh2", () => {
 
     const verdicts: Array<boolean | undefined> = []
 
-    const fakeClient = {
-      connect: vi.fn((config: { hostVerifier?: (key: Buffer) => boolean }) => {
-        setImmediate(() => {
-          verdicts.push(config.hostVerifier?.(hostKey))
-          fakeClient.handlers.error(new Error("Host denied"))
-        })
-      }),
-      end: vi.fn(),
-      handlers: {} as Record<string, (error?: Error) => void>,
-      on: vi.fn((event: string, handler: (error?: Error) => void) => {
-        fakeClient.handlers[event] = handler
-        return fakeClient
-      }),
-      removeAllListeners: vi.fn(),
-    }
+    const fakeClient = createFakeHostKeyClient((config, client) => {
+      setImmediate(() => {
+        verdicts.push(callHostVerifier(config, hostKey))
+        client.handlers.error(new Error("Host denied"))
+      })
+    })
 
     await expect(
       readHostFingerprintViaSsh2("example.com", {
-        clientFactory: () => fakeClient,
+        clientFactory: () => useFakeHostKeyClient(fakeClient),
       })
     ).rejects.toThrow(/unsupported SSH host key algorithm "ssh-bogus"/v)
 
@@ -1606,23 +1600,14 @@ describe("readHostFingerprintViaSsh2", () => {
   it("rejects through the watchdog when ssh2 never fires close or error", async () => {
     vi.useFakeTimers()
 
-    const fakeClient = {
-      connect: vi.fn(() => {
-        // Intentionally do not invoke any handler — simulate a half-open
-        // socket where neither error nor close ever fire.
-      }),
-      end: vi.fn(),
-      handlers: {} as Record<string, (error?: Error) => void>,
-      on: vi.fn((event: string, handler: (error?: Error) => void) => {
-        fakeClient.handlers[event] = handler
-        return fakeClient
-      }),
-      removeAllListeners: vi.fn(),
-    }
+    const fakeClient = createFakeHostKeyClient(() => {
+      // Intentionally do not invoke any handler — simulate a half-open
+      // socket where neither error nor close ever fire.
+    })
 
     try {
       const promise = readHostFingerprintViaSsh2("example.com", {
-        clientFactory: () => fakeClient,
+        clientFactory: () => useFakeHostKeyClient(fakeClient),
         readyTimeoutMs: 5000,
       })
 
@@ -1653,25 +1638,16 @@ describe("readHostFingerprintViaSsh2", () => {
     const clearTimeoutSpy = vi.spyOn(globalThis, "clearTimeout")
 
     try {
-      const fakeClient = {
-        connect: vi.fn((config: { hostVerifier?: (key: Buffer) => boolean }) => {
-          config.hostVerifier?.(hostKey)
-          setImmediate(() => {
-            fakeClient.handlers.error(new Error("Host denied"))
-          })
-        }),
-        end: vi.fn(),
-        handlers: {} as Record<string, (error?: Error) => void>,
-        on: vi.fn((event: string, handler: (error?: Error) => void) => {
-          fakeClient.handlers[event] = handler
-          return fakeClient
-        }),
-        removeAllListeners: vi.fn(),
-      }
+      const fakeClient = createFakeHostKeyClient((config, client) => {
+        callHostVerifier(config, hostKey)
+        setImmediate(() => {
+          client.handlers.error(new Error("Host denied"))
+        })
+      })
 
       await expect(
         readHostFingerprintViaSsh2("example.com", {
-          clientFactory: () => fakeClient,
+          clientFactory: () => useFakeHostKeyClient(fakeClient),
         })
       ).resolves.toMatchObject({ algorithm: "ssh-ed25519" })
 

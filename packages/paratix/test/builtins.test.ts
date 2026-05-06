@@ -477,7 +477,7 @@ describe("when", () => {
     const snoopModule: Module = {
       // eslint-disable-next-line @typescript-eslint/require-await -- Interface requires async
       async apply(_ssh, env) {
-        return { meta: env, status: "ok" }
+        return { meta: [meta.env("original", String(env.original))], status: "ok" }
       },
       // eslint-disable-next-line @typescript-eslint/require-await -- Interface requires async
       async check(_ssh, env) {
