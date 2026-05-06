@@ -96,8 +96,8 @@ function createBaseServerHeader({
       ? '    // expectedHostFingerprint: "SHA256:REPLACE_ME_WITH_YOUR_HOST_FINGERPRINT",'
       : `    expectedHostFingerprint: ${JSON.stringify(expectedHostFingerprint)}, // captured from port 22 during scaffolding`
 
-  return `import { firstRun, recipe, server } from "paratix";
-import { file, hostname, net, package as packages, ssh, sshd, sysctl, ufw, user } from "paratix/modules";
+  return `import { firstRun, recipe, server, when } from "paratix";
+import { command, file, hostname, net, package as packages, ssh, sshd, sysctl, ufw, user } from "paratix/modules";
 
 ${adminUserDeclaration}
 const adminPublicKey = ${JSON.stringify(adminPublicKey ?? "ssh-ed25519 REPLACE_ME_WITH_YOUR_PUBLIC_KEY")};
@@ -139,6 +139,13 @@ function createFirewallRecipe(): string {
   return `
     recipe("firewall", [
       ufw.rule("allow", firewallTcpPorts),
+      when(
+        (env) => env["FIRST_RUN"] !== true,
+        command.shell("ufw --force delete allow 22", {
+          check: "! ufw status | grep -Eq '^22[[:space:]]+ALLOW'",
+          name: "remove bootstrap ssh firewall rule",
+        })
+      ),
       ufw.enabled(),
     ]),
 `

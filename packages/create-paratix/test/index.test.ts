@@ -2077,6 +2077,24 @@ describe("writeProjectFiles", () => {
     )
     expect(content).toContain("ports: sshPorts")
     expect(content).toContain('ufw.rule("allow", firewallTcpPorts)')
+    expect(content).toContain('(env) => env["FIRST_RUN"] !== true')
+    expect(content).toContain('command.shell("ufw --force delete allow 22", {')
+    expect(content).toContain('check: "! ufw status | grep -Eq \'^22[[:space:]]+ALLOW\'"')
+  })
+
+  it("generated server.ts keeps port 22 open during first run before removing it later", () => {
+    writeProjectFiles(TEST_DIR)
+
+    const content = readFileSync(join(TEST_DIR, "server.ts"), "utf8")
+    const firstRunPortsIndex = content.indexOf(
+      "const firewallTcpPorts = FIRST_RUN ? [22, 2222, 80, 443] : [2222, 80, 443];"
+    )
+    const removeBootstrapRuleIndex = content.indexOf('name: "remove bootstrap ssh firewall rule"')
+
+    expect(firstRunPortsIndex).toBeGreaterThanOrEqual(0)
+    expect(removeBootstrapRuleIndex).toBeGreaterThanOrEqual(0)
+    expect(firstRunPortsIndex).toBeLessThan(removeBootstrapRuleIndex)
+    expect(content).toContain('when(\n        (env) => env["FIRST_RUN"] !== true,')
   })
 
   it("generated server.ts opens firewall port 2222 before applying sshd.port(2222)", () => {
@@ -2248,7 +2266,7 @@ describe("writeProjectFiles", () => {
     expect(sshHardeningIndex).toBeLessThan(kernelHardeningIndex)
     expect(kernelHardeningIndex).toBeLessThan(automaticUpgradesIndex)
     expect(automaticUpgradesIndex).toBeLessThan(firstRunStopIndex)
-    expect(content).toContain('import { firstRun, recipe, server } from "paratix";')
+    expect(content).toContain('import { firstRun, recipe, server, when } from "paratix";')
     expect(content).toContain("// Add application and user-facing services below this line.")
   })
 
