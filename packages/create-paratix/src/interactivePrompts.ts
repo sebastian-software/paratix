@@ -97,12 +97,14 @@ function createTerminalPrompt(): { close: () => void; prompt: PromptFunction } {
   }
 }
 
-function createPromptSession(prompt?: PromptFunction): {
+export type InitialUserPromptSession = {
   ask: PromptFunction
   chooseInitialUser: SelectFunction<"admin" | "root">
   closePrompt: () => void
   closeSelect: () => void
-} {
+}
+
+function createPromptSession(prompt?: PromptFunction): InitialUserPromptSession {
   const terminalPrompt = prompt == null ? createTerminalPrompt() : null
   const terminalSelect = prompt == null ? createTerminalSelect() : null
   if (terminalPrompt != null && terminalSelect != null) {
@@ -162,9 +164,10 @@ export async function promptForHost(
 
 export async function promptForInitialUserConfig(
   prompt?: PromptFunction,
-  select?: SelectFunction<"admin" | "root">
+  select?: SelectFunction<"admin" | "root">,
+  createSession: (prompt?: PromptFunction) => InitialUserPromptSession = createPromptSession
 ): Promise<InitialUserConfig> {
-  const promptSession = createPromptSession(prompt)
+  const promptSession = createSession(prompt)
   const chooseInitialUser = select ?? promptSession.chooseInitialUser
 
   try {

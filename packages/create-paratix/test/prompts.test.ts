@@ -8,7 +8,7 @@ import {
   resolveCliOrPromptHost,
 } from "../src/index.js"
 import { createSelectLines } from "../src/promptUi.js"
-import { countActiveHandles, expectProcessExit, setProcessTtyForTest } from "./helpers.js"
+import { expectProcessExit, setProcessTtyForTest } from "./helpers.js"
 
 describe("promptForInitialUserConfig", () => {
   beforeEach(() => {
@@ -62,43 +62,47 @@ describe("promptForInitialUserConfig", () => {
     expect(prompt).toHaveBeenNthCalledWith(1, "Admin username: ")
   })
 
-  // R-0000057 regression: a throw inside promptForAdminUser (closed stdin,
-  // EPIPE, SIGINT) must not leak the readline interface. The cleanup is
-  // guarded by a finally block, so the underlying close hook fires
-  // regardless of whether the success path ran. We verify it indirectly
-  // here by counting active handles before and after, and by re-running
-  // the function with a fresh throw to confirm no handle accumulates.
-  it("cleans up open handles when an error propagates from the admin prompt", async () => {
-    const select = vi.fn().mockResolvedValueOnce("admin")
-    const prompt = vi.fn().mockRejectedValueOnce(new Error("stdin closed"))
+  it("closes prompt and select sessions when an error propagates from the admin prompt", async () => {
+    const closePrompt = vi.fn()
+    const closeSelect = vi.fn()
+    const ask = vi.fn().mockRejectedValueOnce(new Error("stdin closed"))
+    const chooseInitialUser = vi.fn().mockResolvedValueOnce("admin")
+    const createSession = vi.fn(() => ({
+      ask,
+      chooseInitialUser,
+      closePrompt,
+      closeSelect,
+    }))
 
-    // Snapshot the active-handle count before invoking the function.
-    const handlesBefore = countActiveHandles()
+    await expect(promptForInitialUserConfig(undefined, undefined, createSession)).rejects.toThrow(
+      "stdin closed"
+    )
 
-    await expect(promptForInitialUserConfig(prompt, select)).rejects.toThrow("stdin closed")
-
-    // After the rejection, no extra handle must remain. Allow the event
-    // loop to drain so the readline close completes.
-    await new Promise<void>((resolve) => {
-      setImmediate(resolve)
-    })
-    const handlesAfter = countActiveHandles()
-    expect(handlesAfter).toBeLessThanOrEqual(handlesBefore)
+    expect(chooseInitialUser).toHaveBeenCalledTimes(1)
+    expect(ask).toHaveBeenCalledWith("Admin username: ")
+    expect(closeSelect).toHaveBeenCalledTimes(1)
+    expect(closePrompt).toHaveBeenCalledTimes(1)
   })
 
-  it("cleans up open handles when the chooser itself throws", async () => {
-    const select = vi.fn().mockRejectedValueOnce(new Error("chooser cancelled"))
-    const prompt = vi.fn()
+  it("closes prompt and select sessions when the chooser itself throws", async () => {
+    const closePrompt = vi.fn()
+    const closeSelect = vi.fn()
+    const ask = vi.fn()
+    const chooseInitialUser = vi.fn().mockRejectedValueOnce(new Error("chooser cancelled"))
+    const createSession = vi.fn(() => ({
+      ask,
+      chooseInitialUser,
+      closePrompt,
+      closeSelect,
+    }))
 
-    const handlesBefore = countActiveHandles()
+    await expect(promptForInitialUserConfig(undefined, undefined, createSession)).rejects.toThrow(
+      "chooser cancelled"
+    )
 
-    await expect(promptForInitialUserConfig(prompt, select)).rejects.toThrow("chooser cancelled")
-
-    await new Promise<void>((resolve) => {
-      setImmediate(resolve)
-    })
-    const handlesAfter = countActiveHandles()
-    expect(handlesAfter).toBeLessThanOrEqual(handlesBefore)
+    expect(ask).not.toHaveBeenCalled()
+    expect(closeSelect).toHaveBeenCalledTimes(1)
+    expect(closePrompt).toHaveBeenCalledTimes(1)
   })
 })
 
