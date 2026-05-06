@@ -35,6 +35,7 @@ export function makeMockSshClass(
     disconnect?: ReturnType<typeof vi.fn>
     exec?: ReturnType<typeof vi.fn>
     output?: ReturnType<typeof vi.fn>
+    probeSudo?: ReturnType<typeof vi.fn>
     readFile?: ReturnType<typeof vi.fn>
     reconnect?: ReturnType<typeof vi.fn>
     removePort?: ReturnType<typeof vi.fn>
@@ -55,7 +56,8 @@ export function makeMockSshClass(
     public lines = vi.fn().mockRejectedValue(rejectUnstubbedSshMethod("lines"))
     public output =
       overrides?.output ?? vi.fn().mockRejectedValue(rejectUnstubbedSshMethod("output"))
-    public probeSudo = vi.fn().mockResolvedValue(null)
+    public probeSudo =
+      overrides?.probeSudo ?? vi.fn().mockRejectedValue(rejectUnstubbedSshMethod("probeSudo"))
     public readFile =
       overrides?.readFile ?? vi.fn().mockRejectedValue(rejectUnstubbedSshMethod("readFile"))
     public reconnect = overrides?.reconnect ?? vi.fn().mockResolvedValue(null)
