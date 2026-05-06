@@ -817,6 +817,34 @@ describe("mount.present — apply", () => {
     expect(mockSsh.calls).toContain(restoreMountCmd)
     expect(mockSsh.calls.indexOf(mountCmd)).toBeLessThan(mockSsh.calls.indexOf(restoreMountCmd))
   })
+
+  it("returns the restore failure when replacement mount and rollback both fail", async () => {
+    const liveSource = "/dev/sdb1"
+    const liveFstype = "ext4"
+    const liveOptions = "rw,noexec"
+    const restoreMountCmd = `mount -t '${liveFstype}' -o '${liveOptions}' -- '${liveSource}' '${mountPath}'`
+    const mockSsh = createMountApplyMockSsh({
+      [findmntCheckCmd]: { code: 0, stdout: `${liveSource} ${liveFstype} ${liveOptions}` },
+      [mountCmd]: { code: 1, stderr: "replacement failed" },
+      [restoreMountCmd]: { code: 32, stderr: "restore failed" },
+      [umountCmd]: { code: 0 },
+    })
+    const mod = mount.present({
+      fstype: mountFstype,
+      opts: mountOpts,
+      path: mountPath,
+      persist: false,
+      src: mountSrc,
+    })
+    const result = await mod.apply(mockSsh, emptyEnv)
+    expect(result.status).toBe("failed")
+    expect(result.error?.message).toContain(
+      "[mount.present: /mnt/data] mount after umount failed and restoring previous mount failed"
+    )
+    expect(result.error?.message).toContain("replacement failed")
+    expect(result.error?.message).toContain("restore failed")
+    expect(mockSsh.calls).toContain(restoreMountCmd)
+  })
 })
 
 // ─── mount.absent ─────────────────────────────────────────────────────────────

@@ -206,7 +206,19 @@ async function applyMountConvergence(
   )
   if (mountResult.code !== 0) {
     const restoreCommand = `mount -t ${shellQuote(live.fstype)} -o ${shellQuote(live.options)} -- ${shellQuote(live.source)} ${shellQuote(path)}`
-    await ssh.exec(restoreCommand, EXEC_OPTS)
+    const restoreResult = await ssh.exec(restoreCommand, EXEC_OPTS)
+    if (restoreResult.code !== 0) {
+      const replacementDetail = mountResult.stderr.trim() || mountResult.stdout.trim()
+      const replacementSummary =
+        replacementDetail.length > 0 ? `; replacement failure: ${replacementDetail}` : ""
+      const message =
+        `[mount.present: ${path}] mount after umount failed and ` +
+        `restoring previous mount failed${replacementSummary}`
+      return failedCommand(
+        message,
+        restoreResult
+      )
+    }
     return failedCommand(`[mount.present: ${path}] mount after umount failed`, mountResult)
   }
   return null
