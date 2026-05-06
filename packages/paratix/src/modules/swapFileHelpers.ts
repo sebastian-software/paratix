@@ -1,14 +1,14 @@
 import { posix as posixPath } from "node:path"
 
-import { failedCommand } from "../moduleFailure.js"
 import { shellQuote, validateMode } from "../ssh.js"
-import { guardedWriteFile, type ModuleResult, type SshConnection } from "../types.js"
+import { guardedWriteFile, type SshConnection } from "../types.js"
+
+export { ensureSwapFilePresent } from "./swapFileCreateHelpers.js"
 
 const EXEC_OPTS = { ignoreExitCode: true, silent: true } as const
 const FSTAB_PATH = "/etc/fstab"
 const FSTAB_MODE = "0644"
 const KIBI = 1024
-const MEBI = KIBI * KIBI
 const POWER_0 = 0
 const POWER_1 = 1
 const POWER_2 = 2
@@ -204,54 +204,6 @@ export async function ensureSwapFstabState(parameters: {
     remotePath: FSTAB_PATH,
   })
   return true
-}
-
-export async function ensureSwapFilePresent(parameters: {
-  mode: string
-  path: string
-  size: string
-  sizeBytes: number
-  ssh: SshConnection
-}): Promise<ModuleResult | true> {
-  const createDirectoryResult = await parameters.ssh.exec(
-    `mkdir -p ${shellQuote(posixPath.dirname(parameters.path))}`,
-    EXEC_OPTS
-  )
-  if (createDirectoryResult.code !== 0) {
-    return failedCommand(`[swap.file: ${parameters.path}] mkdir failed`, createDirectoryResult)
-  }
-
-  // Use 1 MiB block size in the dd fallback so we never allocate the full swap
-  // size as a single buffer in RAM (which can OOM tiny VMs that need swap)
-  // and so BusyBox dd, which does not support multi-gigabyte block sizes,
-  // still works.
-  const ddBlockCount = Math.ceil(parameters.sizeBytes / MEBI)
-  const createFileResult = await parameters.ssh.exec(
-    `fallocate -l ${shellQuote(parameters.size)} ${shellQuote(parameters.path)} || dd if=/dev/zero of=${shellQuote(parameters.path)} bs=1M count=${String(ddBlockCount)} status=none`,
-    EXEC_OPTS
-  )
-  if (createFileResult.code !== 0) {
-    return failedCommand(
-      `[swap.file: ${parameters.path}] swap file creation failed`,
-      createFileResult
-    )
-  }
-
-  const chmodResult = await parameters.ssh.exec(
-    `chmod ${shellQuote(parameters.mode)} ${shellQuote(parameters.path)}`,
-    EXEC_OPTS
-  )
-  if (chmodResult.code !== 0) {
-    return failedCommand(`[swap.file: ${parameters.path}] chmod failed`, chmodResult)
-  }
-
-  const makeSwapResult = await parameters.ssh.exec(
-    `mkswap ${shellQuote(parameters.path)}`,
-    EXEC_OPTS
-  )
-  return makeSwapResult.code === 0
-    ? true
-    : failedCommand(`[swap.file: ${parameters.path}] mkswap failed`, makeSwapResult)
 }
 
 export function normalizeSwapFileOptions(options: {

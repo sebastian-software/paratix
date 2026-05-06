@@ -11,6 +11,11 @@ const swapPath = "/swapfile"
 const swapSize = "2G"
 const swapSizeBytes = "2147483648"
 const fstabLine = `${swapPath} none swap sw 0 0`
+const swapTempPath = "/.swapfile.paratix.ABC123"
+const safeSwapParentCommand = "find '/' -maxdepth 0 -type d -user root ! -perm /022 | grep -Fx '/'"
+const createSwapTempCommand = `fallocate -l '${swapSize}' '${swapTempPath}' || dd if=/dev/zero of='${swapTempPath}' bs=1M count=2048 status=none`
+const mktempSwapCommand = "mktemp -p '/' '.swapfile.paratix.XXXXXX'"
+const publishSwapCommand = `find '/' -maxdepth 0 -type d -user root ! -perm /022 | grep -Fx '/' && [ ! -e '${swapPath}' ] && [ ! -L '${swapPath}' ] && mv -T '${swapTempPath}' '${swapPath}'`
 
 describe("swap.file — check", () => {
   it("returns needs-apply when ssh is null", async () => {
@@ -150,12 +155,14 @@ describe("swap.file — apply", () => {
       [`[ -L '${swapPath}' ]`]: { code: 1 },
       [`cat '/etc/fstab'`]: { stdout: "# fstab\n" },
       [`cat '${swapPath}'`]: { code: 1, stdout: "" },
-      [`chmod '0600' '${swapPath}'`]: { code: 0 },
-      [`fallocate -l '${swapSize}' '${swapPath}' || dd if=/dev/zero of='${swapPath}' bs=1M count=2048 status=none`]:
-        { code: 0 },
+      [`chmod '0600' '${swapTempPath}'`]: { code: 0 },
       [`mkdir -p '/'`]: { code: 0 },
-      [`mkswap '${swapPath}'`]: { code: 0 },
+      [`mkswap '${swapTempPath}'`]: { code: 0 },
       [`swapon '${swapPath}'`]: { code: 0 },
+      [createSwapTempCommand]: { code: 0 },
+      [mktempSwapCommand]: { code: 0, stdout: `${swapTempPath}\n` },
+      [publishSwapCommand]: { code: 0 },
+      [safeSwapParentCommand]: { code: 0, stdout: "/\n" },
       "swapon --show=NAME --noheadings": { stdout: "" },
     })
     // eslint-disable-next-line @typescript-eslint/require-await -- mock implementation
@@ -168,13 +175,60 @@ describe("swap.file — apply", () => {
 
     expect(result.status).toBe("changed")
     expect(ssh.calls).toContain(`mkdir -p '/'`)
-    expect(ssh.calls).toContain(
-      `fallocate -l '${swapSize}' '${swapPath}' || dd if=/dev/zero of='${swapPath}' bs=1M count=2048 status=none`
-    )
-    expect(ssh.calls).toContain(`chmod '0600' '${swapPath}'`)
-    expect(ssh.calls).toContain(`mkswap '${swapPath}'`)
+    expect(ssh.calls).toContain(safeSwapParentCommand)
+    expect(ssh.calls).toContain(createSwapTempCommand)
+    expect(ssh.calls).toContain(`chmod '0600' '${swapTempPath}'`)
+    expect(ssh.calls).toContain(`mkswap '${swapTempPath}'`)
+    expect(ssh.calls).toContain(publishSwapCommand)
     expect(ssh.calls).toContain(`swapon '${swapPath}'`)
     expect(writtenFiles).toStrictEqual([{ content: `# fstab\n${fstabLine}\n`, path: "/etc/fstab" }])
+  })
+
+  it("refuses to create a swap file in a writable parent directory", async () => {
+    const ssh = createMockSsh({
+      [`[ -e '${swapPath}' ]`]: { code: 1 },
+      [`[ -L '${swapPath}' ]`]: { code: 1 },
+      [`cat '${swapPath}'`]: { code: 1, stdout: "" },
+      [`mkdir -p '/'`]: { code: 0 },
+      [safeSwapParentCommand]: { code: 1 },
+      "swapon --show=NAME --noheadings": { stdout: "" },
+    })
+
+    const mod = swap.file({ path: swapPath, size: swapSize })
+    const result = await mod.apply(ssh, emptyEnv)
+
+    expect(result.status).toBe("failed")
+    expect(result.error?.message).toContain("parent directory is not safe")
+    expect(ssh.calls).not.toContain(mktempSwapCommand)
+    expect(ssh.calls).not.toContain(createSwapTempCommand)
+    expect(ssh.calls).not.toContain(`swapon '${swapPath}'`)
+    expect(ssh.calls).not.toContain(`cat '/etc/fstab'`)
+  })
+
+  it("cleans up the temp file and fails when the final publish guard detects a target race", async () => {
+    const ssh = createMockSsh({
+      [`[ -e '${swapPath}' ]`]: { code: 1 },
+      [`[ -L '${swapPath}' ]`]: { code: 1 },
+      [`cat '${swapPath}'`]: { code: 1, stdout: "" },
+      [`chmod '0600' '${swapTempPath}'`]: { code: 0 },
+      [`mkdir -p '/'`]: { code: 0 },
+      [`mkswap '${swapTempPath}'`]: { code: 0 },
+      [`rm -f '${swapTempPath}'`]: { code: 0 },
+      [createSwapTempCommand]: { code: 0 },
+      [mktempSwapCommand]: { code: 0, stdout: `${swapTempPath}\n` },
+      [publishSwapCommand]: { code: 1 },
+      [safeSwapParentCommand]: { code: 0, stdout: "/\n" },
+      "swapon --show=NAME --noheadings": { stdout: "" },
+    })
+
+    const mod = swap.file({ path: swapPath, size: swapSize })
+    const result = await mod.apply(ssh, emptyEnv)
+
+    expect(result.status).toBe("failed")
+    expect(result.error?.message).toContain("swap file publish failed")
+    expect(ssh.calls).toContain(`rm -f '${swapTempPath}'`)
+    expect(ssh.calls).not.toContain(`swapon '${swapPath}'`)
+    expect(ssh.calls).not.toContain(`cat '/etc/fstab'`)
   })
 
   it("recreates the file when size changed and swap is active", async () => {
@@ -185,16 +239,18 @@ describe("swap.file — apply", () => {
       [`[ -L '${swapPath}' ]`]: { code: 1 },
       [`cat '/etc/fstab'`]: { stdout: `${fstabLine}\n` },
       [`cat '${swapPath}'`]: { stdout: "existing swap bytes" },
-      [`chmod '0600' '${swapPath}'`]: { code: 0 },
-      [`fallocate -l '${swapSize}' '${swapPath}' || dd if=/dev/zero of='${swapPath}' bs=1M count=2048 status=none`]:
-        { code: 0 },
+      [`chmod '0600' '${swapTempPath}'`]: { code: 0 },
       [`mkdir -p '/'`]: { code: 0 },
-      [`mkswap '${swapPath}'`]: { code: 0 },
+      [`mkswap '${swapTempPath}'`]: { code: 0 },
       [`rm -f '${swapPath}'`]: { code: 0 },
       [`stat -c %s '${swapPath}'`]: { stdout: "1073741824" },
       [`swaplabel '${swapPath}' >/dev/null 2>&1`]: { code: 0 },
       [`swapoff '${swapPath}'`]: { code: 0 },
       [`swapon '${swapPath}'`]: { code: 0 },
+      [createSwapTempCommand]: { code: 0 },
+      [mktempSwapCommand]: { code: 0, stdout: `${swapTempPath}\n` },
+      [publishSwapCommand]: { code: 0 },
+      [safeSwapParentCommand]: { code: 0, stdout: "/\n" },
     })
     // eslint-disable-next-line @typescript-eslint/require-await -- mock implementation
     ssh.writeFile = async (path: string, content: string): Promise<void> => {
@@ -211,7 +267,7 @@ describe("swap.file — apply", () => {
     expect(result.status).toBe("changed")
     expect(ssh.calls).toContain(`swapoff '${swapPath}'`)
     expect(ssh.calls).toContain(`rm -f '${swapPath}'`)
-    expect(ssh.calls).toContain(`mkswap '${swapPath}'`)
+    expect(ssh.calls).toContain(`mkswap '${swapTempPath}'`)
     expect(ssh.calls).toContain(`swapon '${swapPath}'`)
     expect(writtenFiles).toStrictEqual([])
   })
@@ -281,12 +337,15 @@ describe("swap.file — apply", () => {
       [`[ -L '${swapPath}' ]`]: { code: 1 },
       [`cat '/etc/fstab'`]: { stdout: "# fstab\n" },
       [`cat '${swapPath}'`]: { code: 1, stdout: "" },
-      [`chmod '0600' '${swapPath}'`]: { code: 0 },
-      [`fallocate -l '${smallSize}' '${swapPath}' || dd if=/dev/zero of='${swapPath}' bs=1M count=512 status=none`]:
+      [`chmod '0600' '${swapTempPath}'`]: { code: 0 },
+      [`fallocate -l '${smallSize}' '${swapTempPath}' || dd if=/dev/zero of='${swapTempPath}' bs=1M count=512 status=none`]:
         { code: 0 },
       [`mkdir -p '/'`]: { code: 0 },
-      [`mkswap '${swapPath}'`]: { code: 0 },
+      [`mkswap '${swapTempPath}'`]: { code: 0 },
       [`swapon '${swapPath}'`]: { code: 0 },
+      [mktempSwapCommand]: { code: 0, stdout: `${swapTempPath}\n` },
+      [publishSwapCommand]: { code: 0 },
+      [safeSwapParentCommand]: { code: 0, stdout: "/\n" },
       "swapon --show=NAME --noheadings": { stdout: "" },
     })
     // eslint-disable-next-line @typescript-eslint/require-await -- mock implementation
@@ -299,7 +358,7 @@ describe("swap.file — apply", () => {
 
     expect(result.status).toBe("changed")
     expect(ssh.calls).toContain(
-      `fallocate -l '${smallSize}' '${swapPath}' || dd if=/dev/zero of='${swapPath}' bs=1M count=512 status=none`
+      `fallocate -l '${smallSize}' '${swapTempPath}' || dd if=/dev/zero of='${swapTempPath}' bs=1M count=512 status=none`
     )
     // The fallback writes the desired fstab line; confirm no other writes
     // leaked through the writeFile spy.
