@@ -191,8 +191,12 @@ export async function expectProcessExit(
     throw code === expectedCode ? exitError : new Error(`process.exit:${String(code)}`)
   })
 
-  await expect(Promise.resolve().then(callback)).rejects.toThrow(exitError.message)
-  expect(exitSpy).toHaveBeenCalledWith(expectedCode)
+  try {
+    await expect(Promise.resolve().then(callback)).rejects.toThrow(exitError.message)
+    expect(exitSpy).toHaveBeenCalledWith(expectedCode)
+  } finally {
+    exitSpy.mockRestore()
+  }
 }
 
 export function throwExitError(message: string): never {

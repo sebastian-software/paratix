@@ -116,6 +116,10 @@ describe("isDirectExecution (process.argv[1] regression)", () => {
 })
 
 describe("parseCliArguments", () => {
+  afterEach(() => {
+    vi.restoreAllMocks()
+  })
+
   it("uses interactive initial-user selection by default", () => {
     expect(parseCliArguments(["my-server"])).toStrictEqual({
       adminPublicKey: undefined,
@@ -672,6 +676,10 @@ describe("admin public key validation", () => {
 })
 
 describe("initial user parsing", () => {
+  afterEach(() => {
+    vi.restoreAllMocks()
+  })
+
   it("accepts valid lowercase Linux usernames", () => {
     expect(isValidInitialUserName("deploy")).toBe(true)
     expect(isValidInitialUserName("admin_user")).toBe(true)
@@ -710,6 +718,10 @@ describe("initial user parsing", () => {
 })
 
 describe("host parsing", () => {
+  afterEach(() => {
+    vi.restoreAllMocks()
+  })
+
   it("trims padded hosts", () => {
     expect(normalizeHost(" example.com ")).toBe("example.com")
   })
@@ -794,6 +806,10 @@ describe("host parsing", () => {
 })
 
 describe("expected host fingerprint parsing", () => {
+  afterEach(() => {
+    vi.restoreAllMocks()
+  })
+
   it("accepts an OpenSSH SHA256 fingerprint", () => {
     expect(isValidExpectedHostFingerprint(TEST_HOST_FINGERPRINT)).toBe(true)
     expect(validateExpectedHostFingerprint(TEST_HOST_FINGERPRINT)).toBe(TEST_HOST_FINGERPRINT)
