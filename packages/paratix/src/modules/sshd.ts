@@ -29,6 +29,8 @@ type SshSocketState = { active: boolean; enabled: boolean; exists: true } | { ex
 
 type SshdServiceUnit = "ssh" | "sshd"
 
+type SshdServiceBootState = { enabled: boolean; unit: SshdServiceUnit }
+
 // sshd_config(5) directive names are alphabetic ASCII identifiers (the parser
 // is case-insensitive). Constraining keys to this shape prevents callers from
 // smuggling regex/shell metacharacters or whitespace into the rewriter.
@@ -143,6 +145,50 @@ async function resolveSshServiceUnit(ssh: SshConnection): Promise<SshdServiceUni
   )
 }
 
+async function sshServiceBootState(
+  ssh: SshConnection,
+  serviceUnit: SshdServiceUnit
+): Promise<SshdServiceBootState> {
+  const enabled = await ssh.exec(`${SYSTEMCTL} is-enabled --quiet ${serviceUnit}.service`, {
+    ignoreExitCode: true,
+    silent: true,
+  })
+  return { enabled: enabled.code === 0, unit: serviceUnit }
+}
+
+async function ensureSshServiceBootEnabled(
+  ssh: SshConnection,
+  parameters: { serviceUnit: SshdServiceUnit; socketState: SshSocketState }
+): Promise<SshdServiceBootState> {
+  const bootState = await sshServiceBootState(ssh, parameters.serviceUnit)
+  if (parameters.socketState.exists && parameters.socketState.enabled && !bootState.enabled) {
+    await ssh.exec(`${SYSTEMCTL} enable ${parameters.serviceUnit}.service`, {
+      ignoreExitCode: false,
+      silent: true,
+    })
+  }
+  return bootState
+}
+
+async function restoreSshServiceBootState(
+  ssh: SshConnection,
+  bootState: SshdServiceBootState | undefined
+): Promise<void> {
+  if (bootState == null || bootState.enabled) return
+  await ssh.exec(`${SYSTEMCTL} disable ${bootState.unit}.service`, {
+    ignoreExitCode: true,
+    silent: true,
+  })
+}
+
+async function socketActivationBootPathNeedsApply(ssh: SshConnection): Promise<boolean> {
+  const socketState = await captureSshSocketState(ssh)
+  if (!socketState.exists || !socketState.enabled) return false
+  const serviceUnit = await resolveSshServiceUnit(ssh)
+  const bootState = await sshServiceBootState(ssh, serviceUnit)
+  return !bootState.enabled
+}
+
 async function reloadSshd(ssh: SshConnection): Promise<ModuleResult> {
   const serviceUnit = await resolveSshServiceUnit(ssh)
   const result = await ssh.exec(`${SYSTEMCTL} reload ${serviceUnit}`, {
@@ -158,6 +204,7 @@ async function restoreSshdPortRestartFailure(
   ssh: SshConnection,
   parameters: {
     originalConfig: string
+    serviceBootState?: SshdServiceBootState
     serviceUnit?: SshdServiceUnit
     socketState: SshSocketState
     targetPort: number
@@ -165,6 +212,7 @@ async function restoreSshdPortRestartFailure(
 ): Promise<void> {
   ssh.removePort(parameters.targetPort)
   await ssh.writeFile(SSHD_CONFIG_PATH, parameters.originalConfig, { mode: SSHD_CONFIG_MODE })
+  await restoreSshServiceBootState(ssh, parameters.serviceBootState)
   await restoreSocketActivatedSsh(ssh, parameters.socketState)
   if (parameters.serviceUnit == null) return
   await ssh.exec(`${SYSTEMCTL} restart ${parameters.serviceUnit}`, {
@@ -181,14 +229,17 @@ async function restartSshdOnNewPort(
   ssh.addPort(targetPort)
   let socketState: SshSocketState = { exists: false }
   let serviceUnit: SshdServiceUnit | undefined
+  let serviceBootState: SshdServiceBootState | undefined
   try {
     socketState = await disableSocketActivatedSsh(ssh)
     serviceUnit = await resolveSshServiceUnit(ssh)
+    serviceBootState = await ensureSshServiceBootEnabled(ssh, { serviceUnit, socketState })
     await ssh.exec(`${SYSTEMCTL} restart ${serviceUnit}`, { silent: true })
   } catch (error) {
     if (isRestartDisconnect(error)) return
     await restoreSshdPortRestartFailure(ssh, {
       originalConfig,
+      serviceBootState,
       serviceUnit,
       socketState,
       targetPort,
@@ -419,7 +470,9 @@ export const sshd = {
           // When no top-level Port directive exists, sshd defaults to port 22.
           return targetPort === DEFAULT_SSH_PORT ? "ok" : NEEDS_APPLY
         }
-        if (portValues.every((portValue) => portValue === String(targetPort))) return "ok"
+        if (portValues.every((portValue) => portValue === String(targetPort))) {
+          return (await socketActivationBootPathNeedsApply(ssh)) ? NEEDS_APPLY : "ok"
+        }
         return NEEDS_APPLY
       },
       name: `sshd.port: ${targetPort}`,

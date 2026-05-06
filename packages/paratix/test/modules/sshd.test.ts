@@ -16,6 +16,8 @@ const createMockSsh: typeof createBaseMockSsh = (responses, options) =>
       { command: "sshd -t", result: { code: 0 } },
       { command: SYSTEMCTL_CAT_SSHD, result: { code: 0 } },
       { command: SYSTEMCTL_CAT_SSH, result: { code: 1 } },
+      { command: "systemctl is-enabled --quiet sshd.service", result: { code: 0 } },
+      { command: "systemctl is-enabled --quiet ssh.service", result: { code: 0 } },
       { command: "systemctl reload sshd", result: { code: 0 } },
       { command: "systemctl reload ssh", result: { code: 0 } },
       { command: "systemctl cat ssh.socket >/dev/null 2>&1", result: { code: 1 } },
@@ -620,6 +622,19 @@ describe("sshd.port — check", () => {
     expect(result).toBe("ok")
   })
 
+  it("returns needs-apply when ssh.socket is enabled but the SSH service is disabled", async () => {
+    const mockSsh = createMockSsh({
+      [CAT_SSHD]: { stdout: "Port 2222\n" },
+      "systemctl cat ssh.socket >/dev/null 2>&1": { code: 0 },
+      "systemctl is-active --quiet ssh.socket": { code: 0 },
+      "systemctl is-enabled --quiet ssh.socket": { code: 0 },
+      "systemctl is-enabled --quiet sshd.service": { code: 1 },
+    })
+    const mod = sshd.port(2222)
+    const result = await mod.check(mockSsh, emptyEnv)
+    expect(result).toBe("needs-apply")
+  })
+
   it("has correct module name", () => {
     const mod = sshd.port(2222)
     expect(mod.name).toBe("sshd.port: 2222")
@@ -852,6 +867,32 @@ describe("sshd.port — apply: validation and rollback", () => {
     expect(restartIndex).toBeGreaterThan(socketDisableIndex)
   })
 
+  it("enables the SSH service for boot when disabling an enabled ssh.socket", async () => {
+    const mockSsh = createMockSsh({
+      [CAT_SSHD]: { stdout: "Port 22" },
+    })
+    trackWriteFile(mockSsh)
+    const execSpy = vi.spyOn(mockSsh, "exec")
+
+    execSpy
+      .mockResolvedValueOnce({ code: 0, stderr: "", stdout: "" }) // mkdir -p /run/sshd
+      .mockResolvedValueOnce({ code: 0, stderr: "", stdout: "" }) // sshd -t
+      .mockResolvedValueOnce({ code: 0, stderr: "", stdout: "" }) // ssh.socket exists
+      .mockResolvedValueOnce({ code: 0, stderr: "", stdout: "" }) // ssh.socket enabled
+      .mockResolvedValueOnce({ code: 0, stderr: "", stdout: "" }) // ssh.socket active
+      .mockResolvedValueOnce({ code: 0, stderr: "", stdout: "" }) // disable --now ssh.socket
+      .mockResolvedValueOnce({ code: 0, stderr: "", stdout: "" }) // sshd.service exists
+      .mockResolvedValueOnce({ code: 1, stderr: "", stdout: "" }) // sshd.service disabled
+      .mockResolvedValueOnce({ code: 0, stderr: "", stdout: "" }) // enable sshd.service
+      .mockResolvedValueOnce({ code: 0, stderr: "", stdout: "" }) // restart sshd
+
+    const mod = sshd.port(2222)
+    const result = await mod.apply(mockSsh, emptyEnv)
+
+    expect(result.status).toBe("changed")
+    expect(execSpy.mock.calls.map((args) => args[0])).toContain("systemctl enable sshd.service")
+  })
+
   it("keeps the previous restart path when ssh.socket does not exist", async () => {
     const mockSsh = createMockSsh({
       [CAT_SSHD]: { stdout: "Port 22" },
@@ -950,6 +991,7 @@ describe("sshd.port — apply: validation and rollback", () => {
       .mockResolvedValueOnce({ code: 0, stderr: "", stdout: "" }) // sshd -t
       .mockResolvedValueOnce({ code: 1, stderr: "", stdout: "" }) // ssh.socket missing
       .mockResolvedValueOnce({ code: 0, stderr: "", stdout: "" }) // sshd.service exists
+      .mockResolvedValueOnce({ code: 0, stderr: "", stdout: "" }) // sshd.service enabled
       .mockRejectedValueOnce(new Error("systemctl restart sshd failed")) // systemctl restart
 
     const mod = sshd.port(2222)
@@ -977,6 +1019,7 @@ describe("sshd.port — apply: validation and rollback", () => {
       .mockResolvedValueOnce({ code: 0, stderr: "", stdout: "" }) // ssh.socket active
       .mockResolvedValueOnce({ code: 0, stderr: "", stdout: "" }) // disable --now ssh.socket
       .mockResolvedValueOnce({ code: 0, stderr: "", stdout: "" }) // sshd.service exists
+      .mockResolvedValueOnce({ code: 0, stderr: "", stdout: "" }) // sshd.service enabled
       .mockRejectedValueOnce(new Error("systemctl restart sshd failed")) // systemctl restart
       .mockResolvedValueOnce({ code: 0, stderr: "", stdout: "" }) // enable --now ssh.socket
 
@@ -1006,6 +1049,7 @@ describe("sshd.port — apply: validation and rollback", () => {
       .mockResolvedValueOnce({ code: 0, stderr: "", stdout: "" }) // sshd -t
       .mockResolvedValueOnce({ code: 1, stderr: "", stdout: "" }) // ssh.socket missing
       .mockResolvedValueOnce({ code: 0, stderr: "", stdout: "" }) // sshd.service exists
+      .mockResolvedValueOnce({ code: 0, stderr: "", stdout: "" }) // sshd.service enabled
       .mockRejectedValueOnce(new Error("SSH connection closed unexpectedly"))
 
     const mod = sshd.port(2222)
@@ -1031,6 +1075,7 @@ describe("sshd.port — apply: validation and rollback", () => {
       .mockResolvedValueOnce({ code: 0, stderr: "", stdout: "" }) // sshd -t
       .mockResolvedValueOnce({ code: 1, stderr: "", stdout: "" }) // ssh.socket missing
       .mockResolvedValueOnce({ code: 0, stderr: "", stdout: "" }) // sshd.service exists
+      .mockResolvedValueOnce({ code: 0, stderr: "", stdout: "" }) // sshd.service enabled
       .mockRejectedValueOnce(new Error("ECONNRESET"))
 
     const mod = sshd.port(2222)
@@ -1054,6 +1099,7 @@ describe("sshd.port — apply: validation and rollback", () => {
       .mockResolvedValueOnce({ code: 0, stderr: "", stdout: "" })
       .mockResolvedValueOnce({ code: 1, stderr: "", stdout: "" })
       .mockResolvedValueOnce({ code: 1, stderr: "", stdout: "" })
+      .mockResolvedValueOnce({ code: 0, stderr: "", stdout: "" })
       .mockResolvedValueOnce({ code: 0, stderr: "", stdout: "" })
       .mockResolvedValueOnce({ code: 0, stderr: "", stdout: "" })
 
