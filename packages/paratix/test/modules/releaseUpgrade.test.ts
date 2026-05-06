@@ -513,19 +513,17 @@ describe("releaseUpgrade.upgrade — apply (Debian)", () => {
       expect(extraWrites[0]?.content).not.toContain("bookworm")
     })
 
-    // R-0000103 regression: codename substitution must be anchored at token
-    // boundaries so URLs, repository names and other strings that merely
-    // contain the codename as a substring are left intact. Only standalone
-    // codename occurrences (e.g. the suite field of a `deb` line) may be
-    // rewritten.
-    it("R-0000103: only replaces standalone codename occurrences, not substring matches", async () => {
+    // R-0000103 regression: codename substitution must be field-aware so URLs,
+    // repository names and comments that merely contain the codename as a
+    // substring are left intact. Only suite fields of active source entries
+    // may be rewritten.
+    it("R-0000103: only replaces suite fields, not URL or comment substring matches", async () => {
       const currentCodename = "trusty"
       const targetCodename = "noble"
-      // Mixed content: a real `deb` suite reference (must change), a URL
-      // path that contains `trusty` as part of a longer host segment (must
-      // NOT change) and a comment line that mentions `trusty-updates` (must
-      // also stay intact because the codename is part of a hyphenated
-      // token).
+      // Mixed content: real `deb` suite references (must change), a URL path
+      // that contains `trusty` as part of a longer host segment (must NOT
+      // change) and a comment line that mentions `trusty-backports` (must also
+      // stay intact because comments are not apt suite fields).
       const originalSources = [
         `deb http://archive.ubuntu.com/ubuntu-trusty-updates/ ${currentCodename} main`,
         "# repo backports for trusty-backports stay untouched",
@@ -557,24 +555,98 @@ describe("releaseUpgrade.upgrade — apply (Debian)", () => {
 
       // Standalone suite reference is rewritten.
       expect(written).toContain(`ubuntu-trusty-updates/ ${targetCodename} main`)
+      expect(written).toContain(
+        `deb http://archive.ubuntu.com/ubuntu/ ${targetCodename}-security main`
+      )
 
-      // Substring occurrences (URL path segment, hyphenated suite tokens
-      // and the comment) must remain unchanged.
+      // Substring occurrences outside suite fields (URL path segment and the
+      // comment) must remain unchanged.
       expect(written).toContain("ubuntu-trusty-updates/")
       expect(written).toContain("trusty-backports")
-      expect(written).toContain("trusty-security")
 
-      // Sanity: the only standalone `trusty` token (the suite field of
-      // the first `deb` line) has been rewritten, and the new codename
-      // appears as a standalone token. We deliberately use look-behind
-      // and look-ahead patterns that reject adjacent word characters,
-      // dots and hyphens because JavaScript's `\b` treats `-` as a
-      // non-word boundary and would still match `trusty` inside
-      // `ubuntu-trusty-updates`.
+      // Sanity: the only standalone `trusty` token (the suite field of the
+      // first `deb` line) has been rewritten, and the new codename appears as
+      // a standalone token.
       const standaloneTrusty = /(?<![\w.\-])trusty(?![\w.\-])/v
       const standaloneNoble = /(?<![\w.\-])noble(?![\w.\-])/v
       expect(standaloneTrusty.test(written)).toBe(false)
       expect(standaloneNoble.test(written)).toBe(true)
+    })
+
+    it("migrates release-derived suites in active .list source fields", async () => {
+      const originalSources = [
+        "deb [arch=amd64 signed-by=/usr/share/keyrings/debian.gpg] http://deb.debian.org/debian bookworm main contrib",
+        "deb http://deb.debian.org/debian bookworm-updates main",
+        "deb-src http://security.debian.org/debian-security bookworm-security main",
+        "deb http://deb.debian.org/debian bookworm-backports main",
+        "# deb http://deb.debian.org/debian bookworm-updates main",
+        "deb http://mirror.example/bookworm-updates bookworm main",
+      ].join("\n")
+      const ssh = createMockSsh({
+        "cat '/etc/apt/sources.list'": { code: 0, stdout: originalSources },
+        "cat '/etc/os-release'": { code: 0, stdout: DEBIAN_OS_RELEASE },
+        "curl -fsSL https://deb.debian.org/debian/dists/stable/Release": {
+          code: 0,
+          stdout: "Origin: Debian\nCodename: trixie\nSuite: stable\n",
+        },
+        "DEBIAN_FRONTEND=noninteractive apt-get autoremove -y": { code: 0 },
+        "DEBIAN_FRONTEND=noninteractive apt-get full-upgrade -y": { code: 0 },
+        "DEBIAN_FRONTEND=noninteractive apt-get update": { code: 0 },
+        "DEBIAN_FRONTEND=noninteractive dpkg --configure -a": { code: 0 },
+        "find /etc/apt/sources.list.d/ \\( -name '*.list' -o -name '*.sources' \\) -type f -print0":
+          FIND_SOURCES_EMPTY,
+        "lsb_release -cs": { code: 0, stdout: "bookworm\n" },
+      })
+      const writes = captureWriteFile(ssh)
+      const mod = releaseUpgrade.upgrade()
+      const result = await mod.apply(ssh, emptyEnv)
+
+      expect(result.status).toBe("changed")
+      const written = writes.find((w) => w.path === "/etc/apt/sources.list")?.content
+      expect(written).toBe(
+        [
+          "deb [arch=amd64 signed-by=/usr/share/keyrings/debian.gpg] http://deb.debian.org/debian trixie main contrib",
+          "deb http://deb.debian.org/debian trixie-updates main",
+          "deb-src http://security.debian.org/debian-security trixie-security main",
+          "deb http://deb.debian.org/debian trixie-backports main",
+          "# deb http://deb.debian.org/debian bookworm-updates main",
+          "deb http://mirror.example/bookworm-updates trixie main",
+        ].join("\n")
+      )
+    })
+
+    it("migrates release-derived suites in deb822 .sources files", async () => {
+      const sourcesPath = "/etc/apt/sources.list.d/debian.sources"
+      const originalSources = [
+        "Types: deb deb-src",
+        "URIs: http://deb.debian.org/debian-bookworm",
+        "Suites: bookworm bookworm-updates bookworm-security bookworm-backports experimental",
+        "Components: main contrib",
+      ].join("\n")
+      const ssh = createMockSsh(
+        debianApplyResponses("bookworm", "trixie", {
+          [`cat '${sourcesPath}'`]: { code: 0, stdout: originalSources },
+          "find /etc/apt/sources.list.d/ \\( -name '*.list' -o -name '*.sources' \\) -type f -print0":
+            {
+              code: 0,
+              stdout: `${sourcesPath}\0`,
+            },
+        })
+      )
+      const writes = captureWriteFile(ssh)
+      const mod = releaseUpgrade.upgrade()
+      const result = await mod.apply(ssh, emptyEnv)
+
+      expect(result.status).toBe("changed")
+      const written = writes.find((w) => w.path === sourcesPath)?.content
+      expect(written).toBe(
+        [
+          "Types: deb deb-src",
+          "URIs: http://deb.debian.org/debian-bookworm",
+          "Suites: trixie trixie-updates trixie-security trixie-backports experimental",
+          "Components: main contrib",
+        ].join("\n")
+      )
     })
 
     it("does not roll back when the upgrade pipeline succeeds", async () => {

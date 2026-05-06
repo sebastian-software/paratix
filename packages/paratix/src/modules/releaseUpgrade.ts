@@ -10,32 +10,12 @@ import {
   NEEDS_APPLY,
   type SshConnection,
 } from "../types.js"
+import { rewriteAptSourcesContent } from "./releaseUpgradeSources.js"
 
 const NONINTERACTIVE = "DEBIAN_FRONTEND=noninteractive"
 const CODENAME_RE = /^[a-z]{3,20}$/v
 const APT_SOURCES_MODE = "0644"
 const NO_UBUNTU_RELEASE_PATTERN = /no new release (?:found|available)/iv
-
-// prettier-ignore
-const REGEXP_SPECIAL = new Set(["?", ".", "(", ")", "[", "]", "{", "}", "*", "\\", "^", "+", "|", "$"])
-
-/**
- * Escape every regex special character in `value` so the string can be used
- * verbatim inside a `RegExp` source. Used by {@link rewriteSourcesFile} to
- * build a token-boundary anchored pattern from the codename without giving
- * the codename the chance to inject regex syntax. Mirrors the helper used
- * by `sshd.ts` so the two modules stay consistent.
- *
- * @param value - The string to escape.
- * @returns A regex-safe version of `value`.
- */
-function escapeRegExp(value: string): string {
-  let result = ""
-  for (const ch of value) {
-    result += REGEXP_SPECIAL.has(ch) ? `\\${ch}` : ch
-  }
-  return result
-}
 
 function isNoUbuntuReleaseAvailable(result: ExecResult): boolean {
   if (result.code === 0) return false
@@ -147,35 +127,18 @@ type RewriteSourcesParameters = {
   targetCodename: string
 }
 
-/**
- * Apply the codename rewrite to a single sources file when the new content
- * differs from the original, returning the snapshot needed to roll back.
- *
- * @param parameters - The rewrite parameters: ssh handle, remote path,
- *   original content, current codename and target codename.
- * @returns The snapshot when the file was modified, or `null` when no
- *   rewrite was necessary.
- */
 async function rewriteSourcesFile(
   parameters: RewriteSourcesParameters
 ): Promise<null | SourcesSnapshot> {
   const { currentCodename, originalContent, remotePath, ssh, targetCodename } = parameters
-  // R-0000103: anchor the substitution at token boundaries so the codename
-  // is only swapped when it appears as a standalone field. The naive
-  // `replaceAll` corrupts URLs (`archive.ubuntu.com/ubuntu-trusty-updates/`),
-  // comments, hyphenated backports/security suites (`trusty-backports`,
-  // `trusty-security`) and any repository whose name happens to contain the
-  // codename as a substring. Plain `\b` is not enough because JavaScript
-  // treats `-` as a non-word character, so `\btrusty\b` would still match
-  // inside `ubuntu-trusty-updates`. The look-behind/look-ahead pair extends
-  // the boundary to also reject adjacent hyphens, dots and `_`, which are
-  // the separators used in apt sources, URLs and hyphenated suite names.
-  // eslint-disable-next-line security/detect-non-literal-regexp -- currentCodename is escaped before interpolation.
-  const codenamePattern = new RegExp(
-    `(?<![\\w.\\-])${escapeRegExp(currentCodename)}(?![\\w.\\-])`,
-    "gv"
-  )
-  const updatedContent = originalContent.replaceAll(codenamePattern, targetCodename)
+  // Rewrite only apt suite fields. URLs, comments and unrelated deb822 fields
+  // may contain release codenames as substrings and must remain untouched.
+  const updatedContent = rewriteAptSourcesContent({
+    currentCodename,
+    originalContent,
+    remotePath,
+    targetCodename,
+  })
   if (updatedContent === originalContent) return null
 
   await guardedWriteFile(ssh, {
