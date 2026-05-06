@@ -502,6 +502,8 @@ interface ExecOptions {
   ignoreExitCode?: boolean
   /** Umgebungsvariablen für den Befehl */
   env?: Record<string, string>
+  /** Werte, die in Logs und Diagnosen als [REDACTED] maskiert werden */
+  secrets?: string[]
 }
 
 interface SshConnection {
