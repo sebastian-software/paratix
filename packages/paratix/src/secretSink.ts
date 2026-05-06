@@ -26,6 +26,13 @@ import { CommandError, maskSecrets } from "./sshHelpers.js"
  * the value once the last registration goes out of scope.
  */
 const secretCounts = new Map<string, number>()
+const REDACTED_PLACEHOLDER = "[REDACTED]"
+
+function assertRegistrableSecret(secret: string): void {
+  if (secret.includes(REDACTED_PLACEHOLDER)) {
+    throw new Error("Secret registrations must not contain the redaction placeholder")
+  }
+}
 
 /**
  * Register a secret string for redaction in subsequent diagnostic output.
@@ -38,6 +45,7 @@ const secretCounts = new Map<string, number>()
  */
 export function registerSecret(secret: string): void {
   if (secret.length === 0) return
+  assertRegistrableSecret(secret)
   secretCounts.set(secret, (secretCounts.get(secret) ?? 0) + 1)
 }
 
@@ -81,8 +89,11 @@ export async function withRegisteredSecrets<T>(
   body: () => Promise<T>
 ): Promise<T> {
   const registered: string[] = []
-  for (const secret of secrets) {
-    if (secret.length === 0) continue
+  const registerableSecrets = secrets.filter((secret) => secret.length > 0)
+  for (const secret of registerableSecrets) {
+    assertRegistrableSecret(secret)
+  }
+  for (const secret of registerableSecrets) {
     registerSecret(secret)
     registered.push(secret)
   }

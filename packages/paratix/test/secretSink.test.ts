@@ -34,6 +34,15 @@ describe("secretSink — registration", () => {
     expect(maskRegisteredSecrets("hello world")).toBe("hello world")
   })
 
+  it("rejects registrations that already contain the redaction placeholder", () => {
+    expect(() => {
+      registerSecret(`token-${REDACTED}-value`)
+    }).toThrow("redaction placeholder")
+
+    expect(getRegisteredSecrets()).toStrictEqual([])
+    expect(maskRegisteredSecrets(`token-${REDACTED}-value`)).toBe(`token-${REDACTED}-value`)
+  })
+
   it("reference-counts duplicate registrations so a single unregister keeps the secret active", () => {
     registerSecret("dup-secret")
     registerSecret("dup-secret")
@@ -127,6 +136,17 @@ describe("withRegisteredSecrets", () => {
       expect(getRegisteredSecrets()).toStrictEqual(["value"])
     })
     expect(getRegisteredSecrets()).toStrictEqual([])
+  })
+
+  it("validates all scoped secrets before mutating the global sink", async () => {
+    await expect(
+      withRegisteredSecrets(["alpha", `token-${REDACTED}-value`], async () => {
+        await Promise.resolve()
+      })
+    ).rejects.toThrow("redaction placeholder")
+
+    expect(getRegisteredSecrets()).toStrictEqual([])
+    expect(maskRegisteredSecrets("alpha")).toBe("alpha")
   })
 })
 
