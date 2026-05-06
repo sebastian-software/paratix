@@ -1,0 +1,474 @@
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
+
+import {
+  promptForAdminPublicKey,
+  promptForHost,
+  promptForHostFingerprint,
+  promptForInitialUserConfig,
+  resolveCliOrPromptHost,
+} from "../src/index.js"
+import { createSelectLines } from "../src/promptUi.js"
+import { countActiveHandles, expectProcessExit, setProcessTtyForTest } from "./helpers.js"
+
+describe("promptForInitialUserConfig", () => {
+  beforeEach(() => {
+    vi.spyOn(console, "error").mockImplementation((...args) => {
+      void args
+    })
+  })
+
+  afterEach(() => {
+    vi.restoreAllMocks()
+  })
+
+  it("supports the interactive root flow", async () => {
+    const prompt = vi.fn()
+    const select = vi.fn().mockResolvedValueOnce("root")
+
+    await expect(promptForInitialUserConfig(prompt, select)).resolves.toStrictEqual({
+      kind: "root",
+    })
+    expect(prompt).not.toHaveBeenCalled()
+    expect(select).toHaveBeenCalledTimes(1)
+    expect(select).toHaveBeenCalledWith(
+      "Which SSH user already works for the first connection to this server?",
+      [
+        {
+          description:
+            "Fresh server with SSH access only as root. Paratix bootstraps a dedicated admin user first.",
+          label: "Root user",
+          value: "root",
+        },
+        {
+          description:
+            "A named admin user already exists. Paratix connects directly as that user and skips root bootstrap.",
+          label: "Admin user",
+          value: "admin",
+        },
+      ]
+    )
+  })
+
+  it("supports the interactive admin flow with a concrete username", async () => {
+    const prompt = vi.fn().mockResolvedValueOnce("deploy")
+    const select = vi.fn().mockResolvedValueOnce("admin")
+
+    await expect(promptForInitialUserConfig(prompt, select)).resolves.toStrictEqual({
+      kind: "admin",
+      user: "deploy",
+    })
+    expect(select).toHaveBeenCalledTimes(1)
+    expect(prompt).toHaveBeenCalledTimes(1)
+    expect(prompt).toHaveBeenNthCalledWith(1, "Admin username: ")
+  })
+
+  // R-0000057 regression: a throw inside promptForAdminUser (closed stdin,
+  // EPIPE, SIGINT) must not leak the readline interface. The cleanup is
+  // guarded by a finally block, so the underlying close hook fires
+  // regardless of whether the success path ran. We verify it indirectly
+  // here by counting active handles before and after, and by re-running
+  // the function with a fresh throw to confirm no handle accumulates.
+  it("cleans up open handles when an error propagates from the admin prompt", async () => {
+    const select = vi.fn().mockResolvedValueOnce("admin")
+    const prompt = vi.fn().mockRejectedValueOnce(new Error("stdin closed"))
+
+    // Snapshot the active-handle count before invoking the function.
+    const handlesBefore = countActiveHandles()
+
+    await expect(promptForInitialUserConfig(prompt, select)).rejects.toThrow("stdin closed")
+
+    // After the rejection, no extra handle must remain. Allow the event
+    // loop to drain so the readline close completes.
+    await new Promise<void>((resolve) => {
+      setImmediate(resolve)
+    })
+    const handlesAfter = countActiveHandles()
+    expect(handlesAfter).toBeLessThanOrEqual(handlesBefore)
+  })
+
+  it("cleans up open handles when the chooser itself throws", async () => {
+    const select = vi.fn().mockRejectedValueOnce(new Error("chooser cancelled"))
+    const prompt = vi.fn()
+
+    const handlesBefore = countActiveHandles()
+
+    await expect(promptForInitialUserConfig(prompt, select)).rejects.toThrow("chooser cancelled")
+
+    await new Promise<void>((resolve) => {
+      setImmediate(resolve)
+    })
+    const handlesAfter = countActiveHandles()
+    expect(handlesAfter).toBeLessThanOrEqual(handlesBefore)
+  })
+})
+
+describe("promptForHost", () => {
+  beforeEach(() => {
+    vi.spyOn(console, "error").mockImplementation((...args) => {
+      void args
+    })
+  })
+
+  afterEach(() => {
+    vi.restoreAllMocks()
+  })
+
+  it("accepts a valid interactive host", async () => {
+    const prompt = vi.fn().mockResolvedValueOnce("example.com")
+
+    await expect(promptForHost(prompt)).resolves.toBe("example.com")
+    expect(prompt).toHaveBeenCalledWith("Server host (domain or IP): ")
+  })
+
+  it("closes the host prompt session after a successful prompt run", async () => {
+    const prompt = vi.fn().mockResolvedValueOnce("example.com")
+    const closePrompt = vi.fn()
+
+    await expect(promptForHost(prompt, () => void closePrompt())).resolves.toBe("example.com")
+    expect(closePrompt).toHaveBeenCalledTimes(1)
+  })
+
+  it("retries until a valid host is entered", async () => {
+    const prompt = vi.fn().mockResolvedValueOnce("bad host").mockResolvedValueOnce("203.0.113.10")
+
+    await expect(promptForHost(prompt)).resolves.toBe("203.0.113.10")
+    expect(console.error).toHaveBeenCalledWith(
+      "Error: Please enter a domain name, IPv4, or IPv6 address without spaces."
+    )
+  })
+
+  it("also closes the host prompt session after retries", async () => {
+    const prompt = vi.fn().mockResolvedValueOnce("bad host").mockResolvedValueOnce("203.0.113.10")
+    const closePrompt = vi.fn()
+
+    await expect(promptForHost(prompt, () => void closePrompt())).resolves.toBe("203.0.113.10")
+    expect(closePrompt).toHaveBeenCalledTimes(1)
+  })
+})
+
+describe("resolveCliOrPromptHost", () => {
+  afterEach(() => {
+    vi.restoreAllMocks()
+  })
+
+  it("uses the provided --host without prompting", async () => {
+    const prompt = vi.fn().mockResolvedValue("prompted.example.com")
+
+    await expect(resolveCliOrPromptHost("example.com", prompt)).resolves.toBe("example.com")
+    expect(prompt).not.toHaveBeenCalled()
+  })
+
+  it("fails fast without --host in non-interactive environments", async () => {
+    const prompt = vi.fn().mockResolvedValue("prompted.example.com")
+    const restoreTty = setProcessTtyForTest(false, false)
+    vi.spyOn(console, "error").mockImplementation((...args) => {
+      void args
+    })
+
+    try {
+      await expectProcessExit(async () => {
+        await resolveCliOrPromptHost(undefined, prompt)
+      })
+
+      expect(console.error).toHaveBeenCalledWith(
+        "Missing --host in non-interactive environment. Pass --host <domain-or-ip>."
+      )
+      expect(prompt).not.toHaveBeenCalled()
+    } finally {
+      restoreTty()
+    }
+  })
+})
+
+describe("promptForAdminPublicKey", () => {
+  beforeEach(() => {
+    vi.spyOn(console, "error").mockImplementation((...args) => {
+      void args
+    })
+  })
+
+  afterEach(() => {
+    vi.restoreAllMocks()
+  })
+
+  it("keeps the placeholder when the user declines local key reuse", async () => {
+    const select = vi.fn().mockResolvedValueOnce("placeholder")
+
+    await expect(promptForAdminPublicKey(select)).resolves.toBeUndefined()
+    expect(select).toHaveBeenCalledTimes(1)
+    expect(select).toHaveBeenNthCalledWith(
+      1,
+      "How should create-paratix configure the admin SSH public key?",
+      [
+        {
+          description:
+            "Read a public key from ~/.ssh and embed it directly into server.ts for the bootstrap admin user.",
+          label: "Use local public key",
+          value: "local",
+        },
+        {
+          description:
+            "Keep the placeholder in server.ts and paste your public key manually before the first apply.",
+          label: "Keep placeholder",
+          value: "placeholder",
+        },
+      ]
+    )
+  })
+
+  it("does not offer the placeholder for root bootstrap admin key selection", async () => {
+    const select = vi
+      .fn()
+      .mockResolvedValueOnce("local")
+      .mockResolvedValueOnce("/tmp/id_ed25519.pub")
+
+    await expect(
+      promptForAdminPublicKey(
+        select,
+        [
+          {
+            key: "ssh-ed25519 AAAA example-ed25519",
+            label: "id_ed25519.pub",
+            path: "/tmp/id_ed25519.pub",
+          },
+        ],
+        { allowPlaceholder: false }
+      )
+    ).resolves.toBe("ssh-ed25519 AAAA example-ed25519")
+    expect(select).toHaveBeenNthCalledWith(
+      1,
+      "How should create-paratix configure the admin SSH public key?",
+      [
+        {
+          description:
+            "Read a public key from ~/.ssh and embed it directly into server.ts for the bootstrap admin user.",
+          label: "Use local public key",
+          value: "local",
+        },
+      ]
+    )
+  })
+
+  it("selects from multiple local public keys via the cursor flow", async () => {
+    const select = vi
+      .fn()
+      .mockResolvedValueOnce("local")
+      .mockResolvedValueOnce("/tmp/id_ed25519.pub")
+
+    await expect(
+      promptForAdminPublicKey(select, [
+        {
+          key: "ssh-rsa AAAA example-rsa",
+          label: "id_rsa.pub",
+          path: "/tmp/id_rsa.pub",
+        },
+        {
+          key: "ssh-ed25519 AAAA example-ed25519",
+          label: "id_ed25519.pub",
+          path: "/tmp/id_ed25519.pub",
+        },
+      ])
+    ).resolves.toBe("ssh-ed25519 AAAA example-ed25519")
+    expect(select).toHaveBeenCalledTimes(2)
+  })
+
+  it("falls back to the placeholder when no readable local public keys exist", async () => {
+    const select = vi.fn().mockResolvedValueOnce("local")
+
+    await expect(promptForAdminPublicKey(select, [])).resolves.toBeUndefined()
+    expect(console.error).toHaveBeenCalledWith(
+      "No readable public keys were found in ~/.ssh. Keeping the placeholder in server.ts."
+    )
+  })
+
+  it("does not claim placeholder fallback for root bootstrap when no local keys exist", async () => {
+    const select = vi.fn().mockResolvedValueOnce("local")
+
+    await expect(
+      promptForAdminPublicKey(select, [], { allowPlaceholder: false })
+    ).resolves.toBeUndefined()
+    expect(console.error).toHaveBeenCalledWith(
+      "No readable public keys were found in ~/.ssh. Root bootstrap requires an admin public key."
+    )
+  })
+})
+
+describe("createSelectLines", () => {
+  it("escapes unsafe terminal characters in prompt and option text", () => {
+    const escapeByte = String.fromCharCode(0x1b)
+    const bidiOverride = String.fromCodePoint(0x20_2e)
+    const rendered = createSelectLines(
+      `Select${escapeByte} public key:`,
+      [
+        {
+          description: `/tmp/${bidiOverride}id_ed25519.pub`,
+          label: `id${escapeByte}_ed25519.pub`,
+          value: `/tmp/${escapeByte}${bidiOverride}id_ed25519.pub`,
+        },
+      ],
+      0
+    ).join("\n")
+
+    expect(rendered).toContain("Select\\u{001B} public key:")
+    expect(rendered).toContain("> id\\u{001B}_ed25519.pub")
+    expect(rendered).toContain("/tmp/\\u{202E}id_ed25519.pub")
+    expect(rendered).not.toContain(escapeByte)
+    expect(rendered).not.toContain(bidiOverride)
+  })
+})
+
+describe("promptForHostFingerprint", () => {
+  beforeEach(() => {
+    vi.spyOn(console, "error").mockImplementation((...args) => {
+      void args
+    })
+    vi.spyOn(console, "log").mockImplementation((...args) => {
+      void args
+    })
+  })
+
+  afterEach(() => {
+    vi.restoreAllMocks()
+  })
+
+  it("keeps the placeholder when the user declines host-key scanning", async () => {
+    const select = vi.fn().mockResolvedValueOnce("placeholder")
+    const scanner = vi.fn()
+
+    await expect(promptForHostFingerprint("example.com", select, scanner)).resolves.toBeUndefined()
+    expect(scanner).not.toHaveBeenCalled()
+    expect(select).toHaveBeenCalledWith(
+      "How should create-paratix bootstrap the SSH host key for example.com?",
+      [
+        {
+          description:
+            "Read the currently presented host key from SSH port 22 via ssh2 and pin its fingerprint in server.ts.",
+          label: "Scan host key",
+          value: "scan",
+        },
+        {
+          description:
+            "Skip pinning now. The generated project will fail closed until known_hosts is prepared or a verified expectedHostFingerprint/PublicKey is added.",
+          label: "Skip pinning",
+          value: "placeholder",
+        },
+      ]
+    )
+  })
+
+  // R-0000122: a single "scan" choice must NOT pin the fingerprint silently.
+  // Operators have to confirm out-of-band before the value reaches server.ts.
+  it("pins the scanned host fingerprint only after explicit confirmation", async () => {
+    const select = vi.fn().mockResolvedValueOnce("scan").mockResolvedValueOnce("pin")
+    const scanner = vi.fn().mockResolvedValueOnce({
+      algorithm: "ssh-ed25519",
+      fingerprint: "SHA256:scanned-fingerprint",
+    })
+
+    await expect(promptForHostFingerprint("example.com", select, scanner)).resolves.toBe(
+      "SHA256:scanned-fingerprint"
+    )
+    expect(scanner).toHaveBeenCalledWith("example.com")
+    expect(select).toHaveBeenCalledTimes(2)
+    expect(select).toHaveBeenNthCalledWith(2, "Pin the scanned host fingerprint for example.com?", [
+      {
+        description: expect.stringContaining("fail closed"),
+        label: "Discard and skip",
+        value: "discard",
+      },
+      {
+        description: expect.stringContaining("Pin the scanned fingerprint"),
+        label: "Pin this fingerprint",
+        value: "pin",
+      },
+    ])
+  })
+
+  // R-0000202: after a scan has happened, discarding it must keep scaffolding
+  // fail-closed instead of silently trusting the presented key.
+  it("rejects when the operator discards the scanned fingerprint", async () => {
+    const select = vi.fn().mockResolvedValueOnce("scan").mockResolvedValueOnce("discard")
+    const scanner = vi.fn().mockResolvedValueOnce({
+      algorithm: "ssh-ed25519",
+      fingerprint: "SHA256:scanned-fingerprint",
+    })
+
+    await expect(promptForHostFingerprint("example.com", select, scanner)).rejects.toThrow(
+      /scanned host fingerprint for example.com was not pinned/v
+    )
+    expect(scanner).toHaveBeenCalledTimes(1)
+    expect(select).toHaveBeenCalledTimes(2)
+  })
+
+  // R-0000122: the scanned material must be displayed in an isolated,
+  // multi-line block so an operator can copy it cleanly for an out-of-band
+  // comparison. The algorithm has to appear next to the fingerprint.
+  it("renders algorithm and fingerprint on isolated lines before asking to pin", async () => {
+    const select = vi.fn().mockResolvedValueOnce("scan").mockResolvedValueOnce("pin")
+    const scanner = vi.fn().mockResolvedValueOnce({
+      algorithm: "ssh-ed25519",
+      fingerprint: "SHA256:scanned-fingerprint",
+    })
+
+    await promptForHostFingerprint("example.com", select, scanner)
+
+    expect(console.log).toHaveBeenCalledTimes(1)
+    const message = vi.mocked(console.log).mock.calls[0]?.[0]
+    expect(message).toContain("Scanned SSH host key for example.com:22")
+    expect(message).toContain("algorithm:")
+    expect(message).toContain("ssh-ed25519")
+    expect(message).toContain("fingerprint:")
+    expect(message).toContain("SHA256:scanned-fingerprint")
+    expect(message).toContain("out-of-band")
+  })
+
+  // R-0000202: a scan failure must surface as an explicit MITM-style warning
+  // and abort instead of silently trusting the presented key.
+  it("emits a MITM warning and rejects after a scan failure", async () => {
+    const select = vi.fn().mockResolvedValueOnce("scan")
+    const scanner = vi.fn().mockRejectedValueOnce(new Error("network timeout"))
+
+    await expect(promptForHostFingerprint("example.com", select, scanner)).rejects.toThrow(
+      /host-key scan for example.com failed \(network timeout\)/v
+    )
+
+    const errorMock = console.error as unknown as { mock: { calls: unknown[][] } }
+    const warningCalls = errorMock.mock.calls.map((call) => String(call[0])).join("\n")
+    expect(warningCalls).toContain("Warning: failed to scan SSH host key for example.com.")
+    expect(warningCalls).toContain("network timeout")
+    expect(warningCalls).toContain("man-in-the-middle")
+    expect(warningCalls).toContain("Verify the host key out of band")
+
+    expect(select).toHaveBeenCalledTimes(1)
+  })
+
+  it("escapes control bytes in host-key scan warnings", async () => {
+    const escapeByte = String.fromCharCode(0x1b)
+    const host = `example${escapeByte}.com`
+    const select = vi.fn().mockResolvedValueOnce("scan")
+    const scanner = vi.fn().mockRejectedValueOnce(new Error(`network${escapeByte}timeout`))
+
+    await expect(promptForHostFingerprint(host, select, scanner)).rejects.toThrow(
+      /host-key scan for example\\u\{001B\}\.com failed \(network\\u\{001B\}timeout\)/v
+    )
+
+    const warningCalls = vi
+      .mocked(console.error)
+      .mock.calls.map((call) => String(call[0]))
+      .join("\n")
+    expect(warningCalls).toContain("Warning: failed to scan SSH host key for example\\u{001B}.com.")
+    expect(warningCalls).toContain("network\\u{001B}timeout")
+    expect(warningCalls).not.toContain(escapeByte)
+    expect(select).toHaveBeenCalledTimes(1)
+  })
+
+  it("rejects with an actionable error after a scan failure", async () => {
+    const select = vi.fn().mockResolvedValueOnce("scan")
+    const scanner = vi.fn().mockRejectedValueOnce(new Error("connect ETIMEDOUT"))
+
+    await expect(promptForHostFingerprint("example.com", select, scanner)).rejects.toThrow(
+      /Aborting scaffolding: host-key scan for example.com failed \(connect ETIMEDOUT\)/v
+    )
+    expect(select).toHaveBeenCalledTimes(1)
+  })
+})

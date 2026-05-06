@@ -1,0 +1,660 @@
+import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs"
+import { tmpdir } from "node:os"
+import { join } from "node:path"
+import { afterEach, beforeEach, describe, expect, it } from "vitest"
+
+import { deriveParatixDependencyRange, writeProjectFiles } from "../src/index.js"
+import {
+  AUTO_UPGRADES_20_TEMPLATE,
+  createAdminNopasswdSudoersContent,
+  createServerTemplate,
+  UNATTENDED_UPGRADES_50_TEMPLATE,
+} from "../src/templates.js"
+import {
+  readCreateParatixPackageVersion,
+  TEST_ADMIN_PUBLIC_KEY,
+  TEST_HOST_FINGERPRINT,
+} from "./helpers.js"
+
+let TEST_DIR = ""
+
+describe("writeProjectFiles", () => {
+  beforeEach(() => {
+    TEST_DIR = mkdtempSync(join(tmpdir(), "create-paratix-test-"))
+  })
+
+  afterEach(() => {
+    rmSync(TEST_DIR, { force: true, recursive: true })
+    TEST_DIR = ""
+  })
+
+  it("creates a package.json in the target directory", () => {
+    writeProjectFiles(TEST_DIR)
+
+    expect(existsSync(join(TEST_DIR, "package.json"))).toBe(true)
+  })
+
+  it("generated package.json contains an engines field with node >=24.0.0", () => {
+    writeProjectFiles(TEST_DIR)
+
+    const raw = readFileSync(join(TEST_DIR, "package.json"), "utf8")
+    const parsed: unknown = JSON.parse(raw)
+
+    expect(parsed).toMatchObject({
+      engines: { node: ">=24.0.0" },
+    })
+  })
+
+  it("generated package.json has type module", () => {
+    writeProjectFiles(TEST_DIR)
+
+    const raw = readFileSync(join(TEST_DIR, "package.json"), "utf8")
+    const parsed: unknown = JSON.parse(raw)
+
+    expect(parsed).toMatchObject({ type: "module" })
+  })
+
+  it("generated package.json contains the paratix dependency", () => {
+    writeProjectFiles(TEST_DIR)
+
+    const raw = readFileSync(join(TEST_DIR, "package.json"), "utf8")
+    const parsed: unknown = JSON.parse(raw)
+    const expectedRange = `^${readCreateParatixPackageVersion()}`
+
+    expect(parsed).toMatchObject({
+      dependencies: { paratix: expectedRange },
+    })
+  })
+
+  it("derives the paratix dependency range from the create-paratix package version", () => {
+    expect(deriveParatixDependencyRange()).toBe(`^${readCreateParatixPackageVersion()}`)
+  })
+
+  it("generated package.json includes TypeScript tooling so apply and lint scripts work immediately", () => {
+    writeProjectFiles(TEST_DIR)
+
+    const raw = readFileSync(join(TEST_DIR, "package.json"), "utf8")
+    const parsed: unknown = JSON.parse(raw)
+
+    expect(parsed).toMatchObject({
+      devDependencies: {
+        "@types/node": expect.stringMatching(/^\^/v),
+        eslint: expect.stringMatching(/^\^/v),
+        "eslint-config-setup": expect.stringMatching(/^\^/v),
+        prettier: expect.stringMatching(/^\^/v),
+        tsx: expect.stringMatching(/^\^/v),
+        typescript: expect.stringMatching(/^\^/v),
+      },
+      scripts: {
+        apply: "paratix apply server.ts",
+        "apply:dry": "paratix apply server.ts --dry-run",
+        "apply:first-run": "paratix apply server.ts --first-run",
+        "apply:first-run:dry": "paratix apply server.ts --dry-run --first-run",
+        "format:check": "prettier --check .",
+        "format:fix": "prettier --write .",
+        lint: "eslint .",
+      },
+    })
+  })
+
+  it("derives package.json name correctly from a Windows-style absolute path", () => {
+    const windowsPath = join(TEST_DIR, "windows", "C:\\tmp\\windows-project")
+    writeProjectFiles(windowsPath)
+
+    const raw = readFileSync(join(windowsPath, "package.json"), "utf8")
+    const parsed = JSON.parse(raw) as { name: string }
+
+    expect(parsed.name).toBe("windows-project")
+  })
+
+  it("derives package.json name correctly from a backslash-separated relative path", () => {
+    const windowsRelativePath = join(TEST_DIR, "windows", "tmp\\nested\\mixed-project")
+    writeProjectFiles(windowsRelativePath)
+
+    const raw = readFileSync(join(windowsRelativePath, "package.json"), "utf8")
+    const parsed = JSON.parse(raw) as { name: string }
+
+    expect(parsed.name).toBe("mixed-project")
+  })
+
+  it("creates a server.ts file", () => {
+    writeProjectFiles(TEST_DIR)
+
+    expect(existsSync(join(TEST_DIR, "server.ts"))).toBe(true)
+  })
+
+  it("generated tsconfig.json uses the DX-oriented ESNext/Bundler defaults", () => {
+    writeProjectFiles(TEST_DIR)
+
+    const raw = readFileSync(join(TEST_DIR, "tsconfig.json"), "utf8")
+    const parsed = JSON.parse(raw) as {
+      compilerOptions: { module: string; moduleResolution: string; types: string[] }
+      include: string[]
+    }
+
+    expect(parsed.compilerOptions).toMatchObject({
+      module: "ESNext",
+      moduleResolution: "Bundler",
+      types: ["node"],
+    })
+    expect(parsed.include).toStrictEqual(["**/*.ts"])
+  })
+
+  it("writes a Prettier config matching the scaffold default", () => {
+    writeProjectFiles(TEST_DIR)
+
+    const raw = readFileSync(join(TEST_DIR, ".prettierrc"), "utf8")
+    const parsed = JSON.parse(raw) as Record<string, boolean | number | string>
+
+    expect(parsed).toStrictEqual({
+      arrowParens: "always",
+      bracketSpacing: true,
+      printWidth: 100,
+      semi: false,
+      singleQuote: false,
+      tabWidth: 2,
+      trailingComma: "es5",
+    })
+  })
+
+  it("writes a .prettierignore that excludes package-manager lockfiles", () => {
+    writeProjectFiles(TEST_DIR)
+
+    const content = readFileSync(join(TEST_DIR, ".prettierignore"), "utf8")
+
+    expect(content).toContain("pnpm-lock.yaml")
+    expect(content).toContain("package-lock.json")
+    expect(content).toContain("yarn.lock")
+    expect(content).toContain("bun.lockb")
+  })
+
+  it("writes an eslint.config.ts using eslint-config-setup for node projects", () => {
+    writeProjectFiles(TEST_DIR)
+
+    const content = readFileSync(join(TEST_DIR, "eslint.config.ts"), "utf8")
+
+    expect(content).toContain('import { getEslintConfig } from "eslint-config-setup"')
+    expect(content).toContain("export default await getEslintConfig({ node: true })")
+  })
+
+  it("generated server.ts uses packages.upgrade and packages.installed (not apt.*)", () => {
+    // Regression: SERVER_TEMPLATE previously used the deprecated apt module
+    // (apt.upgrade / apt.installed). After Plan-0013 refactoring the correct
+    // module is `package as packages` with packages.upgrade / packages.installed.
+    // TypeScript cannot catch this because the template is a plain string.
+    writeProjectFiles(TEST_DIR)
+
+    const content = readFileSync(join(TEST_DIR, "server.ts"), "utf8")
+
+    expect(content).toContain("packages.upgrade(")
+    expect(content).toContain('packages.installed("curl", "htop", "ufw")')
+    expect(content).not.toContain("apt.upgrade(")
+    expect(content).not.toContain("apt.installed(")
+  })
+
+  it("generated server.ts imports package as packages from paratix/modules", () => {
+    // Regression: import must use `package as packages`, not the old `apt` import.
+    writeProjectFiles(TEST_DIR)
+
+    const content = readFileSync(join(TEST_DIR, "server.ts"), "utf8")
+
+    expect(content).toContain("package as packages")
+    expect(content).toContain("net, package as packages")
+    expect(content).not.toContain("import { apt")
+  })
+
+  it("generated server.ts uses the hardened admin mode by default", () => {
+    writeProjectFiles(TEST_DIR)
+
+    const content = readFileSync(join(TEST_DIR, "server.ts"), "utf8")
+
+    expect(content).toContain('const adminUser = "paratix";')
+    expect(content).toContain(
+      'const adminPublicKey = "ssh-ed25519 REPLACE_ME_WITH_YOUR_PUBLIC_KEY";'
+    )
+    expect(content).toContain('const FIRST_RUN = process.env["PARATIX_FIRST_RUN"] === "true";')
+    expect(content).toContain('host: "1.2.3.4"')
+    expect(content).toContain("user: adminUser")
+    expect(content).toContain("ssh.authorizedKeys(adminUser, adminPublicKey)")
+    expect(content).toContain('PasswordAuthentication: "no"')
+    expect(content).toContain('PermitRootLogin: "no"')
+    expect(content).not.toContain('user: "root"')
+    expect(content).not.toContain('PermitRootLogin: "prohibit-password"')
+  })
+
+  it("generated server.ts uses an explicitly provided admin username", () => {
+    writeProjectFiles(TEST_DIR, {
+      host: "deploy.example.com",
+      initialUser: { kind: "admin", user: "deploy" },
+    })
+
+    const content = readFileSync(join(TEST_DIR, "server.ts"), "utf8")
+
+    expect(content).toContain('const adminUser = "deploy";')
+    expect(content).toContain('host: "deploy.example.com"')
+    expect(content).toContain("user: adminUser")
+    expect(content).toContain('recipe("admin-access"')
+    expect(content).not.toContain('user: "root"')
+  })
+
+  it("normalizes a padded programmatic admin username before rendering server.ts", () => {
+    writeProjectFiles(TEST_DIR, {
+      host: "deploy.example.com",
+      initialUser: { kind: "admin", user: " deploy " },
+    })
+
+    const content = readFileSync(join(TEST_DIR, "server.ts"), "utf8")
+
+    expect(content).toContain('const adminUser = "deploy";')
+    expect(content).not.toContain('const adminUser = " deploy ";')
+  })
+
+  it("rejects an invalid programmatic admin username before creating files", () => {
+    expect(() => {
+      writeProjectFiles(TEST_DIR, {
+        host: "deploy.example.com",
+        initialUser: { kind: "admin", user: 'deploy";\nthrow new Error("owned")' },
+      })
+    }).toThrow(/Invalid initial user/v)
+
+    expect(existsSync(join(TEST_DIR, "server.ts"))).toBe(false)
+  })
+
+  it("rejects programmatic admin mode with root as the username", () => {
+    expect(() => {
+      writeProjectFiles(TEST_DIR, {
+        host: "deploy.example.com",
+        initialUser: { kind: "admin", user: "root" },
+      })
+    }).toThrow(/use a non-root lowercase Linux username for admin mode/v)
+
+    expect(existsSync(join(TEST_DIR, "server.ts"))).toBe(false)
+  })
+
+  it("server template safely serializes admin usernames when called directly", () => {
+    const initialAdminUser = 'deploy";\nthrow new Error("owned")'
+    const content = createServerTemplate({
+      host: "deploy.example.com",
+      initialUser: { kind: "admin", user: initialAdminUser },
+    })
+
+    expect(content).toContain(`const adminUser = ${JSON.stringify(initialAdminUser)};`)
+    expect(content).not.toContain(`const adminUser = "${initialAdminUser}";`)
+  })
+
+  it("generated server.ts safely serializes quote characters in the host", () => {
+    const host = 'dangerous"host.example'
+    writeProjectFiles(TEST_DIR, {
+      host,
+      initialUser: { kind: "admin", user: "deploy" },
+    })
+
+    const content = readFileSync(join(TEST_DIR, "server.ts"), "utf8")
+
+    expect(content).toContain(`host: ${JSON.stringify(host)}`)
+    expect(content).not.toContain(`host: "${host}"`)
+  })
+
+  it("generated server.ts safely serializes backslashes in the host", () => {
+    const host = String.raw`example\host`
+    writeProjectFiles(TEST_DIR, {
+      host,
+      initialUser: { kind: "admin", user: "deploy" },
+    })
+
+    const content = readFileSync(join(TEST_DIR, "server.ts"), "utf8")
+
+    expect(content).toContain(`host: ${JSON.stringify(host)}`)
+  })
+
+  it("generated server.ts safely serializes other string-literal escape sequences in the host", () => {
+    const host = String.raw`example\${template}\path`
+    writeProjectFiles(TEST_DIR, {
+      host,
+      initialUser: { kind: "admin", user: "deploy" },
+    })
+
+    const content = readFileSync(join(TEST_DIR, "server.ts"), "utf8")
+
+    expect(content).toContain(`host: ${JSON.stringify(host)}`)
+  })
+
+  it("generated server.ts embeds a selected local public key directly", () => {
+    writeProjectFiles(TEST_DIR, {
+      adminPublicKey: TEST_ADMIN_PUBLIC_KEY,
+      host: "deploy.example.com",
+      initialUser: { kind: "admin", user: "deploy" },
+    })
+
+    const content = readFileSync(join(TEST_DIR, "server.ts"), "utf8")
+
+    expect(content).toContain(`const adminPublicKey = ${JSON.stringify(TEST_ADMIN_PUBLIC_KEY)};`)
+    expect(content).not.toContain("REPLACE_ME_WITH_YOUR_PUBLIC_KEY")
+  })
+
+  it("generated server.ts also embeds a CLI-supplied public key directly", () => {
+    writeProjectFiles(TEST_DIR, {
+      adminPublicKey: TEST_ADMIN_PUBLIC_KEY,
+    })
+
+    const content = readFileSync(join(TEST_DIR, "server.ts"), "utf8")
+
+    expect(content).toContain(`const adminPublicKey = ${JSON.stringify(TEST_ADMIN_PUBLIC_KEY)};`)
+  })
+
+  it("generated server.ts keeps first-run host-key checking fail-closed", () => {
+    writeProjectFiles(TEST_DIR)
+
+    const content = readFileSync(join(TEST_DIR, "server.ts"), "utf8")
+
+    expect(content).toContain('const strictHostKeyChecking = "yes";')
+    expect(content).toContain('pass "paratix apply ... --first-run" for the bootstrap run')
+    expect(content).toContain("pin expectedHostFingerprint/PublicKey or pre-populate known_hosts")
+    expect(content).not.toContain('"accept-new"')
+    expect(content).toContain(
+      'expectedHostFingerprint: "SHA256:REPLACE_ME_WITH_YOUR_HOST_FINGERPRINT"'
+    )
+    expect(content).toContain(
+      'expectedHostPublicKey: "ssh-ed25519 REPLACE_ME_WITH_YOUR_HOST_PUBLIC_KEY"'
+    )
+  })
+
+  it("generated server.ts embeds a scanned expectedHostFingerprint and keeps strict host-key checking enabled", () => {
+    writeProjectFiles(TEST_DIR, {
+      adminPublicKey: TEST_ADMIN_PUBLIC_KEY,
+      expectedHostFingerprint: TEST_HOST_FINGERPRINT,
+      host: "deploy.example.com",
+      initialUser: { kind: "root" },
+    })
+
+    const content = readFileSync(join(TEST_DIR, "server.ts"), "utf8")
+
+    expect(content).toContain('const strictHostKeyChecking = "yes";')
+    expect(content).toContain(`expectedHostFingerprint: ${JSON.stringify(TEST_HOST_FINGERPRINT)}`)
+    expect(content).not.toContain(
+      'expectedHostFingerprint: "SHA256:REPLACE_ME_WITH_YOUR_HOST_FINGERPRINT"'
+    )
+    expect(content).not.toContain('"accept-new"')
+  })
+
+  it("rejects invalid programmatic hosts before creating files", () => {
+    expect(() => {
+      writeProjectFiles(TEST_DIR, {
+        host: "bad host",
+        initialUser: { kind: "admin", user: "deploy" },
+      })
+    }).toThrow(
+      'Error: Invalid host "bad host" — use a domain name, IPv4, or IPv6 address without spaces.'
+    )
+
+    expect(existsSync(join(TEST_DIR, "server.ts"))).toBe(false)
+  })
+
+  it("rejects invalid programmatic admin public keys before creating files", () => {
+    expect(() => {
+      writeProjectFiles(TEST_DIR, {
+        adminPublicKey: "invalid-key",
+        initialUser: { kind: "admin", user: "deploy" },
+      })
+    }).toThrow(
+      'Error: Invalid value for "--admin-public-key" — provide a valid single-line OpenSSH public key.'
+    )
+
+    expect(existsSync(join(TEST_DIR, "server.ts"))).toBe(false)
+  })
+
+  it("rejects invalid programmatic expected host fingerprints before creating files", () => {
+    expect(() => {
+      writeProjectFiles(TEST_DIR, {
+        expectedHostFingerprint: "SHA256:trusted-host-fingerprint",
+        initialUser: { kind: "admin", user: "deploy" },
+      })
+    }).toThrow(
+      'Error: Invalid expected host fingerprint "SHA256:trusted-host-fingerprint" — use an OpenSSH SHA256 fingerprint.'
+    )
+
+    expect(existsSync(join(TEST_DIR, "server.ts"))).toBe(false)
+  })
+
+  it("generated server.ts keeps the ~/.ssh privateKey default that Paratix expands at runtime", () => {
+    writeProjectFiles(TEST_DIR)
+
+    const content = readFileSync(join(TEST_DIR, "server.ts"), "utf8")
+
+    expect(content).toContain('privateKey: "~/.ssh/id_ed25519"')
+    expect(content).toContain('"~" is expanded by Paratix')
+  })
+
+  it("generated server.ts gates firewall and ssh ports behind FIRST_RUN", () => {
+    writeProjectFiles(TEST_DIR)
+
+    const content = readFileSync(join(TEST_DIR, "server.ts"), "utf8")
+
+    expect(content).toContain('const FIRST_RUN = process.env["PARATIX_FIRST_RUN"] === "true";')
+    expect(content).toContain("const sshPorts = FIRST_RUN ? [22] : [2222];")
+    expect(content).toContain(
+      "const firewallTcpPorts = FIRST_RUN ? [22, 2222, 80, 443] : [2222, 80, 443];"
+    )
+    expect(content).toContain("ports: sshPorts")
+    expect(content).toContain('ufw.rule("allow", firewallTcpPorts)')
+    expect(content).toContain('(env) => env["FIRST_RUN"] !== true')
+    expect(content).toContain('command.shell("ufw --force delete allow 22", {')
+    expect(content).toContain("check: \"! ufw status | grep -Eq '^22[[:space:]]+ALLOW'\"")
+  })
+
+  it("generated server.ts keeps port 22 open during first run before removing it later", () => {
+    writeProjectFiles(TEST_DIR)
+
+    const content = readFileSync(join(TEST_DIR, "server.ts"), "utf8")
+    const firstRunPortsIndex = content.indexOf(
+      "const firewallTcpPorts = FIRST_RUN ? [22, 2222, 80, 443] : [2222, 80, 443];"
+    )
+    const removeBootstrapRuleIndex = content.indexOf('name: "remove bootstrap ssh firewall rule"')
+
+    expect(firstRunPortsIndex).toBeGreaterThanOrEqual(0)
+    expect(removeBootstrapRuleIndex).toBeGreaterThanOrEqual(0)
+    expect(firstRunPortsIndex).toBeLessThan(removeBootstrapRuleIndex)
+    expect(content).toContain('when(\n        (env) => env["FIRST_RUN"] !== true,')
+  })
+
+  it("generated server.ts opens firewall port 2222 before applying sshd.port(2222)", () => {
+    writeProjectFiles(TEST_DIR)
+
+    const content = readFileSync(join(TEST_DIR, "server.ts"), "utf8")
+    const firewallIndex = content.indexOf('recipe("firewall"')
+    const sshHardeningIndex = content.indexOf('recipe("ssh-hardening"')
+
+    expect(firewallIndex).toBeGreaterThanOrEqual(0)
+    expect(sshHardeningIndex).toBeGreaterThanOrEqual(0)
+    expect(firewallIndex).toBeLessThan(sshHardeningIndex)
+  })
+
+  it("generated server.ts supports an explicit root bootstrap transition mode", () => {
+    writeProjectFiles(TEST_DIR, {
+      adminPublicKey: TEST_ADMIN_PUBLIC_KEY,
+      host: "203.0.113.10",
+      initialUser: { kind: "root" },
+    })
+
+    const content = readFileSync(join(TEST_DIR, "server.ts"), "utf8")
+
+    expect(content).toContain('host: "203.0.113.10"')
+    expect(content).toContain('user: FIRST_RUN ? "root" : adminUser')
+    expect(content).toContain('const adminUser = "paratix";')
+    expect(content).toContain('const FIRST_RUN = process.env["PARATIX_FIRST_RUN"] === "true";')
+    expect(content).toContain("Transitional bootstrap mode:")
+    expect(content).toContain('PasswordAuthentication: "no"')
+    expect(content).toContain('PermitRootLogin: FIRST_RUN ? "prohibit-password" : "no"')
+    expect(content).toContain('const strictHostKeyChecking = "yes";')
+    expect(content).not.toContain('"accept-new"')
+    expect(content).toContain(
+      'expectedHostFingerprint: "SHA256:REPLACE_ME_WITH_YOUR_HOST_FINGERPRINT"'
+    )
+    expect(content).not.toContain("--bootstrap-root")
+    expect(content).not.toContain('service.restart("sshd")')
+  })
+
+  it("rejects root bootstrap without an admin public key", () => {
+    expect(() => {
+      writeProjectFiles(TEST_DIR, { host: "203.0.113.10", initialUser: { kind: "root" } })
+    }).toThrow(/Root bootstrap requires --admin-public-key or --admin-public-key-file/v)
+  })
+
+  it("generated server.ts does not scaffold a hardcoded sshd restart signal", () => {
+    writeProjectFiles(TEST_DIR, {
+      adminPublicKey: TEST_ADMIN_PUBLIC_KEY,
+      initialUser: { kind: "root" },
+    })
+
+    const content = readFileSync(join(TEST_DIR, "server.ts"), "utf8")
+
+    expect(content).not.toContain('service.restart("sshd")')
+    expect(content).not.toContain('signals: [service.restart("sshd")]')
+  })
+
+  it("generated root-bootstrap server.ts switches to the admin user after FIRST_RUN", () => {
+    writeProjectFiles(TEST_DIR, {
+      adminPublicKey: TEST_ADMIN_PUBLIC_KEY,
+      initialUser: { kind: "root" },
+    })
+
+    const content = readFileSync(join(TEST_DIR, "server.ts"), "utf8")
+
+    expect(content).toContain('user: FIRST_RUN ? "root" : adminUser')
+    expect(content).toContain('PermitRootLogin: FIRST_RUN ? "prohibit-password" : "no"')
+    expect(content).not.toContain('user: "root"')
+    expect(content).not.toContain('PermitRootLogin: "prohibit-password"')
+  })
+
+  it("generated root-bootstrap server.ts provisions passwordless sudo for the bootstrap admin user", () => {
+    writeProjectFiles(TEST_DIR, {
+      adminPublicKey: TEST_ADMIN_PUBLIC_KEY,
+      initialUser: { kind: "root" },
+    })
+
+    const content = readFileSync(join(TEST_DIR, "server.ts"), "utf8")
+
+    expect(content).toContain('recipe("bootstrap-admin-sudo"')
+    expect(content).toContain("file.copy(")
+    expect(content).toContain('"/etc/sudoers.d/90-paratix-admin-nopasswd"')
+    expect(content).toContain('"./files/admin-nopasswd-sudoers"')
+    expect(content).toContain('mode: "0440"')
+    expect(content).toContain('owner: "root:root"')
+    expect(content).toContain("NOPASSWD sudo")
+  })
+
+  it("generated root-bootstrap project writes the sudoers drop-in for the admin user", () => {
+    writeProjectFiles(TEST_DIR, {
+      adminPublicKey: TEST_ADMIN_PUBLIC_KEY,
+      initialUser: { kind: "root" },
+    })
+
+    const sudoersPath = join(TEST_DIR, "files", "admin-nopasswd-sudoers")
+
+    expect(existsSync(sudoersPath)).toBe(true)
+    expect(readFileSync(sudoersPath, "utf8")).toBe(createAdminNopasswdSudoersContent("paratix"))
+  })
+
+  it("generated direct-admin project does not add a bootstrap sudoers drop-in", () => {
+    writeProjectFiles(TEST_DIR, { initialUser: { kind: "admin", user: "deploy" } })
+
+    const content = readFileSync(join(TEST_DIR, "server.ts"), "utf8")
+
+    expect(content).not.toContain('recipe("bootstrap-admin-sudo"')
+    expect(existsSync(join(TEST_DIR, "files", "admin-nopasswd-sudoers"))).toBe(false)
+  })
+
+  it("generated server.ts exposes FIRST_RUN through env for template logic and operator visibility", () => {
+    writeProjectFiles(TEST_DIR)
+
+    const content = readFileSync(join(TEST_DIR, "server.ts"), "utf8")
+
+    expect(content).toContain('const serverName = "my-server";')
+    expect(content).toContain("name: serverName")
+    expect(content).toContain("env: {")
+    expect(content).toContain("FIRST_RUN,")
+    expect(content).toContain("SERVER_NAME: serverName,")
+    expect(content).toContain("SSH_PORT: 2222,")
+    expect(content).toContain("hostname.set(serverName)")
+  })
+
+  it("generated server.ts adds /etc/hosts before setting the hostname", () => {
+    writeProjectFiles(TEST_DIR)
+
+    const content = readFileSync(join(TEST_DIR, "server.ts"), "utf8")
+    const hostsIndex = content.indexOf('net.hosts("127.0.1.1", [serverName])')
+    const hostnameIndex = content.indexOf("hostname.set(serverName)")
+
+    expect(hostsIndex).toBeGreaterThanOrEqual(0)
+    expect(hostnameIndex).toBeGreaterThanOrEqual(0)
+    expect(hostsIndex).toBeLessThan(hostnameIndex)
+  })
+
+  it("generated root-bootstrap server.ts also opens firewall port 2222 before ssh-hardening-transition", () => {
+    writeProjectFiles(TEST_DIR, {
+      adminPublicKey: TEST_ADMIN_PUBLIC_KEY,
+      initialUser: { kind: "root" },
+    })
+
+    const content = readFileSync(join(TEST_DIR, "server.ts"), "utf8")
+    const firewallIndex = content.indexOf('recipe("firewall"')
+    const sshHardeningIndex = content.indexOf('recipe("ssh-hardening-transition"')
+
+    expect(firewallIndex).toBeGreaterThanOrEqual(0)
+    expect(sshHardeningIndex).toBeGreaterThanOrEqual(0)
+    expect(firewallIndex).toBeLessThan(sshHardeningIndex)
+  })
+
+  it("generated server.ts includes the first-run stop after ssh hardening, kernel hardening and automatic security upgrades", () => {
+    writeProjectFiles(TEST_DIR, {
+      adminPublicKey: TEST_ADMIN_PUBLIC_KEY,
+      initialUser: { kind: "root" },
+    })
+
+    const content = readFileSync(join(TEST_DIR, "server.ts"), "utf8")
+    const sshHardeningIndex = content.indexOf('recipe("ssh-hardening-transition"')
+    const kernelHardeningIndex = content.indexOf('recipe("kernel-hardening"')
+    const automaticUpgradesIndex = content.indexOf('recipe("automatic-security-upgrades"')
+    const firstRunStopIndex = content.indexOf(
+      'firstRun.stop("Bootstrap foundation complete; rerun without --first-run to continue.")'
+    )
+
+    expect(sshHardeningIndex).toBeGreaterThanOrEqual(0)
+    expect(kernelHardeningIndex).toBeGreaterThanOrEqual(0)
+    expect(automaticUpgradesIndex).toBeGreaterThanOrEqual(0)
+    expect(firstRunStopIndex).toBeGreaterThanOrEqual(0)
+    expect(sshHardeningIndex).toBeLessThan(kernelHardeningIndex)
+    expect(kernelHardeningIndex).toBeLessThan(automaticUpgradesIndex)
+    expect(automaticUpgradesIndex).toBeLessThan(firstRunStopIndex)
+    expect(content).toContain('import { firstRun, recipe, server, when } from "paratix";')
+    expect(content).toContain("// Add application and user-facing services below this line.")
+  })
+
+  it("generated server.ts configures unattended-upgrades via scaffolded files", () => {
+    writeProjectFiles(TEST_DIR)
+
+    const content = readFileSync(join(TEST_DIR, "server.ts"), "utf8")
+
+    expect(content).toContain('recipe("automatic-security-upgrades"')
+    expect(content).toContain('packages.installed("unattended-upgrades")')
+    expect(content).toContain('"/etc/apt/apt.conf.d/20auto-upgrades"')
+    expect(content).toContain('"/etc/apt/apt.conf.d/50unattended-upgrades"')
+  })
+
+  it("generated project writes unattended-upgrades scaffold files", () => {
+    writeProjectFiles(TEST_DIR)
+
+    expect(readFileSync(join(TEST_DIR, "files", "20auto-upgrades"), "utf8")).toBe(
+      AUTO_UPGRADES_20_TEMPLATE
+    )
+    expect(readFileSync(join(TEST_DIR, "files", "50unattended-upgrades"), "utf8")).toBe(
+      UNATTENDED_UPGRADES_50_TEMPLATE
+    )
+  })
+
+  it("creates a files subdirectory", () => {
+    writeProjectFiles(TEST_DIR)
+
+    expect(existsSync(join(TEST_DIR, "files"))).toBe(true)
+  })
+})
