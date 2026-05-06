@@ -601,11 +601,17 @@ op.resolve({
 **Rueckgabe (meta):**
 
 ```typescript
+import { meta } from "paratix"
+
 {
-  "db.password":       "s3cret!",                      // string — sofort aufgeloest
-  "api.token":         "tok_abc123...",                 // string — sofort aufgeloest
-  "admin.otp":         () => calculateOTP("otpauth://totp/...?secret=JBSWY3DPEHPK3PXP"),
-  "backup.passphrase": "correct-horse-battery-staple",  // string — sofort aufgeloest
+  meta: [
+    meta.env("db.password", "s3cret!"),
+    meta.env("api.token", "tok_abc123..."),
+    meta.env("admin.otp", () =>
+      calculateOTP("otpauth://totp/...?secret=JBSWY3DPEHPK3PXP")
+    ),
+    meta.env("backup.passphrase", "correct-horse-battery-staple"),
+  ]
 }
 ```
 

@@ -46,14 +46,30 @@ Operation auf dem Server ab und implementiert die **Plugin-Schnittstelle**:
 
 ```typescript
 /** Einfacher Wert oder lazy evaluierte Funktion (z.B. für OTPs) */
-type EnvValue = string | number | (() => string | number) | (() => Promise<string | number>)
+type EnvValue =
+  | string
+  | number
+  | boolean
+  | (() => string | number | boolean)
+  | (() => Promise<string | number | boolean>)
 
 type Env = Record<string, EnvValue>
 
+type ModuleMetaEntry =
+  | {
+      kind: "env"
+      name: string
+      resolve: () => Promise<string | number | boolean>
+      valueType: "string" | "number" | "boolean"
+    }
+  | { kind: "sshd.port"; port: number }
+  | { kind: "system.host"; host: string }
+  | { kind: "system.reboot" }
+
 interface ModuleResult {
   status: "ok" | "changed" | "skipped" | "failed"
-  /** Optionale Metadaten, die in den Env einfließen */
-  meta?: Env
+  /** Optionale typisierte Meta-Einträge fuer Env und Runner-Steuerung */
+  meta?: ModuleMetaEntry[]
 }
 
 interface Module {
@@ -406,7 +422,7 @@ bis eine Verbindung steht. Das ermöglicht:
 ### Port-Umlegung zur Laufzeit
 
 Wenn ein Modul den SSH-Port ändert (z.B. `sshd.port(22022)`), meldet es den
-neuen Port über `meta` zurück (`{ "sshd.port": 22022 }`). Paratix fuegt den
+neuen Port über `meta` zurück (`[meta.sshdPort(22022)]`). Paratix fuegt den
 neuen Port dynamisch zur internen Port-Liste hinzu, damit er bei einem
 Reconnect beruecksichtigt wird. Die Portaenderung im SSHD wird erst nach
 einem Service-Restart wirksam — der Reconnect erfolgt automatisch, wenn die
@@ -683,11 +699,13 @@ Env übernommen und stehen allen nachfolgenden Modulen zur Verfügung.
 um Konflikte zu vermeiden:
 
 ```typescript
+import { meta } from "paratix"
+
 // sshd.port-Modul setzt nach Umlegung:
-{ meta: { "sshd.port": 22022 } }
+{ meta: [meta.sshdPort(22022)] }
 
 // user.present-Modul setzt nach Erstellung:
-{ meta: { "user.home": "/home/deploy" } }
+{ meta: [meta.env("user.home", "/home/deploy")] }
 ```
 
 ### Templates

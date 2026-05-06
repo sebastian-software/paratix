@@ -28,7 +28,7 @@ type Token =
  * tokenizer attempt the match at the current cursor position only.
  */
 // eslint-disable-next-line security/detect-unsafe-regex -- modifier group is consumed via match.groups
-const placeholderPattern = /\{\{(?<varName>\w+)(?:\|(?<modifier>\w*))?\}\}/vy
+const placeholderPattern = /\{\{(?<varName>\w+(?:\.\w+)*)(?:\|(?<modifier>\w*))?\}\}/vy
 
 /**
  * Single-pass tokenizer that walks a template string and emits an ordered

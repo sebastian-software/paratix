@@ -1093,6 +1093,31 @@ describe("file.template", () => {
     }
   })
 
+  it("renders dotted environment keys in template placeholders", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "paratix-test-"))
+    try {
+      const templatePath = join(dir, "template.txt")
+      writeFileSync(templatePath, "listen {{app.port|raw}} on {{system.host|raw}}")
+      const renderedContent = "listen 8080 on app.example.com"
+      const renderedHash = sha256Hex(renderedContent)
+
+      const ssh = createMockSsh({
+        "[ -e '/remote/out.txt' ]": { code: 0 },
+        "[ -f '/remote/out.txt' ]": { code: 0 },
+        "sha256sum '/remote/out.txt'": { stdout: `${renderedHash}  /remote/out.txt` },
+      })
+
+      const mod = file.template("/remote/out.txt", templatePath)
+      const result = await mod.check(ssh, {
+        "app.port": 8080,
+        "system.host": "app.example.com",
+      })
+      expect(result).toBe("ok")
+    } finally {
+      rmSync(dir, { recursive: true })
+    }
+  })
+
   it("check returns needs-apply when file does not exist", async () => {
     const dir = mkdtempSync(join(tmpdir(), "paratix-test-"))
     try {
