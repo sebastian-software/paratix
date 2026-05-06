@@ -154,6 +154,38 @@ describe("net.interface — check", () => {
     expect(result).toBe("ok")
   })
 
+  it("returns needs-apply when live gateway only matches as a prefix", async () => {
+    const expectedConfig = [
+      "[Match]",
+      "Name=eth0",
+      "",
+      "[Network]",
+      "DHCP=no",
+      "Address=10.0.0.20/24",
+      "",
+      "[Route]",
+      "Gateway=10.0.0.1",
+    ].join("\n")
+    const mockSsh = createMockSsh({
+      "cat '/etc/systemd/network/60-paratix-eth0.network'": { stdout: `${expectedConfig}\n` },
+      "ip -o addr show dev 'eth0'": {
+        stdout: "2: eth0    inet 10.0.0.20/24 brd 10.0.0.255 scope global eth0\n",
+      },
+      "ip link show dev 'eth0'": { code: 0 },
+      "ip route show default dev 'eth0'": {
+        stdout: "default via 10.0.0.10 dev eth0 proto static\n",
+      },
+      "test -d '/etc/netplan'": { code: 1 },
+      "test -f '/etc/systemd/network/60-paratix-eth0.network'": { code: 0 },
+    })
+    const mod = net.interface("eth0", {
+      addresses: ["10.0.0.20/24"],
+      gateway: "10.0.0.1",
+    })
+    const result = await mod.check(mockSsh, emptyEnv)
+    expect(result).toBe("needs-apply")
+  })
+
   it("returns needs-apply when config matches but live address is missing", async () => {
     const expectedConfig = [
       "[Match]",

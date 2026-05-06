@@ -523,11 +523,18 @@ async function interfaceAddressesMatch(
 async function interfaceGatewayMatches(
   conn: SshConnection,
   name: string,
-  gateway?: string
+  gateway = ""
 ): Promise<boolean> {
-  if ((gateway ?? "") === "") return true
+  if (gateway === "") return true
   const defaultRoute = await conn.exec(`ip route show default dev ${shellQuote(name)}`, EXEC_OPTS)
-  return defaultRoute.code === 0 && defaultRoute.stdout.includes(`via ${gateway}`)
+  return defaultRoute.code === 0 && defaultRouteGatewayMatches(defaultRoute.stdout, gateway)
+}
+
+function defaultRouteGatewayMatches(output: string, gateway: string): boolean {
+  return output.split(/\r?\n/v).some((line) => {
+    const tokens = line.trim().split(/\s+/v)
+    return tokens[0] === "default" && routeTokenValueMatches(tokens, "via", gateway)
+  })
 }
 
 /** Parameters for the net.route check helper. */
