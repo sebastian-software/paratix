@@ -110,7 +110,7 @@ async function isRemoteTrackingBranch(
 }
 
 /**
- * Update an existing repository to a specific ref, or pull latest if no ref given.
+ * Update an existing repository to a specific ref, or to remote HEAD if no ref is given.
  *
  * When a reference is provided, the function fetches all tags and then checks
  * out the reference. It then probes whether the reference exists as a
@@ -144,8 +144,13 @@ async function updateRepo(conn: SshConnection, parameters: GitCloneParameters): 
     )
     return reset.code === 0
   }
-  const pull = await conn.exec(`git -C ${shellQuote(destination)} pull`, EXEC_OPTS)
-  return pull.code === 0
+  const fetch = await conn.exec(`git -C ${shellQuote(destination)} fetch origin HEAD`, EXEC_OPTS)
+  if (fetch.code !== 0) return false
+  const reset = await conn.exec(
+    `git -C ${shellQuote(destination)} reset --hard FETCH_HEAD`,
+    EXEC_OPTS
+  )
+  return reset.code === 0
 }
 
 async function readOriginUrl(conn: SshConnection, destination: string): Promise<null | string> {
@@ -250,8 +255,8 @@ export const git = {
    *
    * If the destination directory does not yet contain a `.git` folder, the
    * repository is cloned from scratch. If it already exists, the repository is
-   * updated instead (fetch + checkout + reset). When no `ref` is specified, a
-   * plain `git pull` is performed on an existing clone.
+   * updated instead (fetch + checkout + reset). When no `ref` is specified,
+   * the existing clone is reset to the current remote default branch HEAD.
    *
    * @param repo - The repository URL to clone.
    * @param destination - The destination path on the remote host.

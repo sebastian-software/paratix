@@ -329,21 +329,24 @@ describe("git.clone — apply", () => {
     })
   })
 
-  it("pulls when .git exists and no ref is given", async () => {
+  it("resets to the remote default HEAD when .git exists and no ref is given", async () => {
     const mockSsh = createGitApplyMockSsh({
-      [`git -C '${destination}' pull`]: { code: 0 },
+      [`git -C '${destination}' fetch origin HEAD`]: { code: 0 },
+      [`git -C '${destination}' reset --hard FETCH_HEAD`]: { code: 0 },
       [`test -d '${gitDir}'`]: { code: 0 },
     })
     const mod = git.clone(repo, destination)
     const result = await mod.apply(mockSsh, emptyEnv)
     expect(result.status).toBe("changed")
-    expect(mockSsh.calls).toContain(`git -C '${destination}' pull`)
+    expect(mockSsh.calls).toContain(`git -C '${destination}' fetch origin HEAD`)
+    expect(mockSsh.calls).toContain(`git -C '${destination}' reset --hard FETCH_HEAD`)
   })
 
-  it("updates the origin URL before pulling when an existing checkout drifted", async () => {
+  it("updates the origin URL before resetting to remote HEAD when an existing checkout drifted", async () => {
     const oldRepo = "git@github.com:other/repo.git"
     const mockSsh = createGitApplyMockSsh({
-      [`git -C '${destination}' pull`]: { code: 0 },
+      [`git -C '${destination}' fetch origin HEAD`]: { code: 0 },
+      [`git -C '${destination}' reset --hard FETCH_HEAD`]: { code: 0 },
       [`git -C '${destination}' remote set-url origin '${repo}'`]: { code: 0 },
       [`test -d '${gitDir}'`]: { code: 0 },
       [originUrlCommand]: { code: 0, stdout: oldRepo },
@@ -354,12 +357,14 @@ describe("git.clone — apply", () => {
 
     expect(result.status).toBe("changed")
     expect(mockSsh.calls).toContain(`git -C '${destination}' remote set-url origin '${repo}'`)
-    expect(mockSsh.calls).toContain(`git -C '${destination}' pull`)
+    expect(mockSsh.calls).toContain(`git -C '${destination}' fetch origin HEAD`)
+    expect(mockSsh.calls).toContain(`git -C '${destination}' reset --hard FETCH_HEAD`)
   })
 
-  it("adds origin before pulling when an existing git repository has no origin", async () => {
+  it("adds origin before resetting to remote HEAD when an existing git repository has no origin", async () => {
     const mockSsh = createGitApplyMockSsh({
-      [`git -C '${destination}' pull`]: { code: 0 },
+      [`git -C '${destination}' fetch origin HEAD`]: { code: 0 },
+      [`git -C '${destination}' reset --hard FETCH_HEAD`]: { code: 0 },
       [`git -C '${destination}' remote add origin '${repo}'`]: { code: 0 },
       [`test -d '${gitDir}'`]: { code: 0 },
       [originUrlCommand]: { code: 2 },
@@ -370,7 +375,8 @@ describe("git.clone — apply", () => {
 
     expect(result.status).toBe("changed")
     expect(mockSsh.calls).toContain(`git -C '${destination}' remote add origin '${repo}'`)
-    expect(mockSsh.calls).toContain(`git -C '${destination}' pull`)
+    expect(mockSsh.calls).toContain(`git -C '${destination}' fetch origin HEAD`)
+    expect(mockSsh.calls).toContain(`git -C '${destination}' reset --hard FETCH_HEAD`)
     const originCall = mockSsh.execCalls.find((call) => call.command === originUrlCommand)
     expect(originCall?.options).toStrictEqual({ ignoreExitCode: true, silent: true })
   })
