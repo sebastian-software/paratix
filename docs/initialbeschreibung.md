@@ -438,8 +438,8 @@ Das Timeout ist per CLI-Parameter konfigurierbar:
 paratix apply ./my-server.ts --reconnect-timeout 300
 ```
 
-Standardmäßig wartet Paratix unbegrenzt (interaktiver Modus). Für
-automatisierte Läufe (Cronjob, CI/CD) sollte ein Timeout gesetzt werden.
+Standardmäßig wartet Paratix 120 Sekunden. Für automatisierte Läufe (Cronjob,
+CI/CD) kann ein abweichendes Timeout gesetzt werden.
 
 ### Server-Reboot
 
@@ -830,12 +830,12 @@ Die TypeScript-Datei wird via `tsx` ausgeführt.
 
 ### Parameter
 
-| Parameter             | Beschreibung                                        |
-| --------------------- | --------------------------------------------------- |
-| `--reconnect-timeout` | Timeout in Sekunden für SSH-Reconnect (Standard: ∞) |
-| `--dry-run`           | Nur Check ausführen, keine Änderungen vornehmen     |
-| `--env key=value`     | Env-Eintrag setzen (überschreibt Playbook-Werte)    |
-| `--env-file <path>`   | Env-Einträge aus DotEnv-Datei laden                 |
+| Parameter             | Beschreibung                                          |
+| --------------------- | ----------------------------------------------------- |
+| `--reconnect-timeout` | Timeout in Sekunden für SSH-Reconnect (Standard: 120) |
+| `--dry-run`           | Nur Check ausführen, keine Änderungen vornehmen       |
+| `--env key=value`     | Env-Eintrag setzen (überschreibt Playbook-Werte)      |
+| `--env-file <path>`   | Env-Einträge aus DotEnv-Datei laden                   |
 
 ---
 
@@ -986,7 +986,7 @@ Initial:    1s
 Faktor:     2x
 Maximum:    30s
 Jitter:     ±25%
-Timeout:    konfigurierbar (--reconnect-timeout), Default: unbegrenzt
+Timeout:    konfigurierbar (--reconnect-timeout), Default: 120s
 ```
 
 Verlauf: 1s → 2s → 4s → 8s → 16s → 30s → 30s → ... (jeweils ±25% Jitter).
