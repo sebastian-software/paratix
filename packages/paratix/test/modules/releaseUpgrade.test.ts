@@ -59,6 +59,7 @@ function debianApplyResponses(
   overrides: Record<string, { code?: number; stdout?: string }> = {}
 ) {
   return {
+    "[ -e '/etc/apt/sources.list' ]": { code: 0 },
     "cat '/etc/apt/sources.list'": {
       code: 0,
       stdout: `deb http://deb.debian.org/debian ${currentCodename} main\n`,
@@ -319,6 +320,44 @@ describe("releaseUpgrade.upgrade — apply (Debian)", () => {
     expect(result.status).toBe("failed")
   })
 
+  it("supports Deb822-only sources when the main sources.list file is missing", async () => {
+    const sourcesPath = "/etc/apt/sources.list.d/debian.sources"
+    const originalSources = [
+      "Types: deb",
+      "URIs: https://deb.debian.org/debian",
+      "Suites: bookworm bookworm-updates",
+      "Components: main",
+      "",
+    ].join("\n")
+    const writes: WriteCapture[] = []
+    const ssh = createMockSsh(
+      debianApplyResponses("bookworm", "trixie", {
+        "[ -e '/etc/apt/sources.list' ]": { code: 1 },
+        [`cat '${sourcesPath}'`]: { code: 0, stdout: originalSources },
+        "find /etc/apt/sources.list.d/ \\( -name '*.list' -o -name '*.sources' \\) -type f -print0":
+          {
+            code: 0,
+            stdout: `${sourcesPath}\0`,
+          },
+      })
+    )
+    ssh.writeFile = async (path, content): Promise<void> => {
+      await Promise.resolve()
+      writes.push({ content, path })
+    }
+
+    const mod = releaseUpgrade.upgrade()
+    const result = await mod.apply(ssh, emptyEnv)
+
+    expect(result.status).toBe("changed")
+    expect(ssh.calls).not.toContain("cat '/etc/apt/sources.list'")
+    expect(ssh.calls).toContain(`cat '${sourcesPath}'`)
+    expect(ssh.calls).toContain("DEBIAN_FRONTEND=noninteractive apt-get update")
+    const written = writes.find((write) => write.path === sourcesPath)?.content
+    expect(written).toContain("Suites: trixie trixie-updates")
+    expect(writes.some((write) => write.path === "/etc/apt/sources.list")).toBe(false)
+  })
+
   it("apt-get full-upgrade fails → failed", async () => {
     const ssh = createMockSsh(
       debianApplyResponses("bookworm", "trixie", {
@@ -530,6 +569,7 @@ describe("releaseUpgrade.upgrade — apply (Debian)", () => {
         "deb http://archive.ubuntu.com/ubuntu/ trusty-security main",
       ].join("\n")
       const ssh = createMockSsh({
+        "[ -e '/etc/apt/sources.list' ]": { code: 0 },
         "cat '/etc/apt/sources.list'": { code: 0, stdout: originalSources },
         "cat '/etc/os-release'": { code: 0, stdout: DEBIAN_OS_RELEASE },
         "curl -fsSL https://deb.debian.org/debian/dists/stable/Release": {
@@ -583,6 +623,7 @@ describe("releaseUpgrade.upgrade — apply (Debian)", () => {
         "deb http://mirror.example/bookworm-updates bookworm main",
       ].join("\n")
       const ssh = createMockSsh({
+        "[ -e '/etc/apt/sources.list' ]": { code: 0 },
         "cat '/etc/apt/sources.list'": { code: 0, stdout: originalSources },
         "cat '/etc/os-release'": { code: 0, stdout: DEBIAN_OS_RELEASE },
         "curl -fsSL https://deb.debian.org/debian/dists/stable/Release": {

@@ -172,15 +172,17 @@ async function replaceCodenameInSourcesList(
 ): Promise<SourcesSnapshot[]> {
   const snapshots: SourcesSnapshot[] = []
 
-  const sourcesContent = await ssh.readFile(APT_SOURCES_LIST)
-  const mainSnapshot = await rewriteSourcesFile({
-    currentCodename,
-    originalContent: sourcesContent,
-    remotePath: APT_SOURCES_LIST,
-    ssh,
-    targetCodename,
-  })
-  if (mainSnapshot != null) snapshots.push(mainSnapshot)
+  if (await ssh.exists(APT_SOURCES_LIST)) {
+    const sourcesContent = await ssh.readFile(APT_SOURCES_LIST)
+    const mainSnapshot = await rewriteSourcesFile({
+      currentCodename,
+      originalContent: sourcesContent,
+      remotePath: APT_SOURCES_LIST,
+      ssh,
+      targetCodename,
+    })
+    if (mainSnapshot != null) snapshots.push(mainSnapshot)
+  }
 
   // R-0000053: use `find ... -print0` and split on the NUL byte so the
   // pipeline stays safe against pathological filenames containing
