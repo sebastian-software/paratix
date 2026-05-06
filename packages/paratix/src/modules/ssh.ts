@@ -15,6 +15,8 @@ type KnownHostsOptions = {
 
 const SSH_KEYSCAN_MIN_FIELDS = 3
 const DEFAULT_SSH_PORT = 22
+const ASCII_SPACE_CODE_POINT = 0x20
+const ASCII_DELETE_CODE_POINT = 0x7f
 
 function assertAuthorizedKeyValue(value: string): void {
   if (value.length === 0) {
@@ -104,6 +106,29 @@ function assertKnownHostsPort(host: string, options?: KnownHostsOptions): void {
   if (options?.port === undefined) return
   if (!isValidTcpPort(options.port)) {
     throw new Error(`ssh.knownHosts(${host}) port must be an integer between 1 and 65535`)
+  }
+}
+
+function hasUnsafeKnownHostsHostCharacter(host: string): boolean {
+  for (const character of host) {
+    const codePoint = character.codePointAt(0)
+    if (codePoint == null) return true
+    if (
+      codePoint <= ASCII_SPACE_CODE_POINT ||
+      codePoint === ASCII_DELETE_CODE_POINT ||
+      character.trim().length === 0
+    ) {
+      return true
+    }
+  }
+  return false
+}
+
+function assertKnownHostsHost(host: string): void {
+  if (host.length === 0 || host.startsWith("-") || hasUnsafeKnownHostsHostCharacter(host)) {
+    throw new Error(
+      `ssh.knownHosts host must not be empty, start with '-', or contain whitespace/control characters: ${JSON.stringify(host)}`
+    )
   }
 }
 
@@ -270,6 +295,7 @@ export const ssh = {
    * @returns A Module that manages the known hosts entry.
    */
   knownHosts(host: string, options?: KnownHostsOptions): Module {
+    assertKnownHostsHost(host)
     assertKnownHostsPort(host, options)
     const state = options?.state ?? "present"
     const lookupTarget = knownHostsLookupTarget(host, options)

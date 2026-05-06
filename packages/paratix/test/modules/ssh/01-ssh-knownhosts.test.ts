@@ -427,6 +427,28 @@ describe("ssh.knownHosts", () => {
     )
   })
 
+  it.each(["", "-H github.com", "github.com other", "github.com\nother"])(
+    "rejects unsafe known_hosts hosts for present state: %s",
+    (host) => {
+      expect(() =>
+        ssh.knownHosts(host, {
+          expectedFingerprint: hostFingerprint,
+        })
+      ).toThrow(
+        "ssh.knownHosts host must not be empty, start with '-', or contain whitespace/control characters"
+      )
+    }
+  )
+
+  it.each(["", "-R github.com", "github.com other", "github.com\nother"])(
+    "rejects unsafe known_hosts hosts for absent state: %s",
+    (host) => {
+      expect(() => ssh.knownHosts(host, { state: "absent" })).toThrow(
+        "ssh.knownHosts host must not be empty, start with '-', or contain whitespace/control characters"
+      )
+    }
+  )
+
   it.each([0, 65_536, 22.5, Number.NaN, "22"])(
     "rejects invalid known_hosts ports for present state: %s",
     (port) => {
