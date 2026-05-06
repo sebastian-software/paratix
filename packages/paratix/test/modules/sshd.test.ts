@@ -602,6 +602,15 @@ describe("sshd.port — check", () => {
     expect(result).toBe("needs-apply")
   })
 
+  it("returns needs-apply when mixed active top-level ports include the target port", async () => {
+    const mockSsh = createMockSsh({
+      [CAT_SSHD]: { stdout: "Port 22\nPort 2222\n" },
+    })
+    const mod = sshd.port(2222)
+    const result = await mod.check(mockSsh, emptyEnv)
+    expect(result).toBe("needs-apply")
+  })
+
   it("returns ok for default port 22 when no Port directive exists", async () => {
     const mockSsh = createMockSsh({
       [CAT_SSHD]: { stdout: "# sshd config\n" },

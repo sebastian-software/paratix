@@ -97,6 +97,31 @@ export function findContradictingSshdMatchBlockOverride(
 }
 
 /**
+ * Collect values for active top-level occurrences of a directive. Comments,
+ * empty lines and directives inside the first `Match` block are ignored.
+ *
+ * @param content - The full sshd_config file content.
+ * @param key - The directive name to scan for (case-insensitive).
+ * @returns The trimmed values for each active top-level occurrence.
+ */
+export function collectTopLevelSshdDirectiveValues(content: string, key: string): string[] {
+  const expectedKeyLower = key.toLowerCase()
+  const values: string[] = []
+
+  for (const rawLine of content.split(/\r?\n/v)) {
+    if (isMatchBlockLine(rawLine)) break
+
+    const parsed = parseSshdConfigLine(rawLine)
+    if (parsed == null) continue
+    if (parsed.directive.toLowerCase() !== expectedKeyLower) continue
+
+    values.push(parsed.value)
+  }
+
+  return values
+}
+
+/**
  * Check whether every top-level active occurrence of `key` in the sshd_config
  * `content` has the given `value`. An "active" occurrence is a non-comment
  * line whose first token equals `key` (case-insensitive, leading whitespace
@@ -117,21 +142,9 @@ export function findContradictingSshdMatchBlockOverride(
  */
 export function sshdSettingMatchesEverywhere(content: string, key: string, value: string): boolean {
   const desiredValue = value.trim()
-  const expectedKeyLower = key.toLowerCase()
-  let foundAny = false
-
-  for (const rawLine of content.split(/\r?\n/v)) {
-    if (isMatchBlockLine(rawLine)) break
-
-    const parsed = parseSshdConfigLine(rawLine)
-    if (parsed == null) continue
-    if (parsed.directive.toLowerCase() !== expectedKeyLower) continue
-
-    foundAny = true
-    if (parsed.value !== desiredValue) return false
-  }
-
-  if (!foundAny) return false
+  const values = collectTopLevelSshdDirectiveValues(content, key)
+  if (values.length === 0) return false
+  if (values.some((currentValue) => currentValue !== desiredValue)) return false
   return !hasContradictingMatchBlockOverride(content, key, desiredValue)
 }
 

@@ -14,6 +14,7 @@ import {
 } from "../types.js"
 import {
   applySshdSettingToContent,
+  collectTopLevelSshdDirectiveValues,
   findContradictingSshdMatchBlockOverride,
   sshdSettingMatchesEverywhere,
 } from "./sshdConfigHelpers.js"
@@ -413,11 +414,12 @@ export const sshd = {
         if (!ssh) return NEEDS_APPLY
 
         const content = await ssh.readFile(SSHD_CONFIG_PATH)
-        // eslint-disable-next-line security/detect-non-literal-regexp
-        const pattern = new RegExp(`^Port\\s+${String(targetPort)}$`, "mv")
-        if (pattern.test(content)) return "ok"
-        // When no Port directive exists, sshd defaults to port 22
-        if (targetPort === DEFAULT_SSH_PORT && !/^Port\s/mv.test(content)) return "ok"
+        const portValues = collectTopLevelSshdDirectiveValues(content, "Port")
+        if (portValues.length === 0) {
+          // When no top-level Port directive exists, sshd defaults to port 22.
+          return targetPort === DEFAULT_SSH_PORT ? "ok" : NEEDS_APPLY
+        }
+        if (portValues.every((portValue) => portValue === String(targetPort))) return "ok"
         return NEEDS_APPLY
       },
       name: `sshd.port: ${targetPort}`,
