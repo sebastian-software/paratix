@@ -1,8 +1,9 @@
 /* eslint-disable max-lines -- SSH transport methods keep callback wiring local */
-import { randomUUID, timingSafeEqual } from "node:crypto"
-import { type Stats, unlinkSync, writeFileSync } from "node:fs"
+import type { Stats } from "node:fs"
+
+import { timingSafeEqual } from "node:crypto"
 import { readFile, stat } from "node:fs/promises"
-import { homedir, tmpdir } from "node:os"
+import { homedir } from "node:os"
 import { join, posix } from "node:path"
 import { Client, type ClientChannel } from "ssh2"
 
@@ -10,7 +11,7 @@ import type { ExecOptions, ExecResult, SshConfig, SshConnection } from "./types.
 
 import { buildHostVerifier, extractAlgoFromKey, HostKeyVerificationError } from "./knownHosts.js"
 import { getRegisteredSecrets, withRegisteredSecrets } from "./secretSink.js"
-import { sftpDownload, sftpUpload } from "./sftp.js"
+import { sftpDownload, sftpUpload, sftpUploadContent } from "./sftp.js"
 import {
   cleanupFailedSshClient,
   collectStreamOutput,
@@ -396,9 +397,9 @@ export class SshConnectionImpl implements SshConnection {
   /**
    * Write a string to a remote file atomically via write-to-temp + mv.
    *
-   * The content is first written to a local temporary file, uploaded via SFTP
-   * to a remote temporary file, then moved to the final destination with `mv`.
-   * This ensures the target file is never left in a half-written state.
+   * The content is streamed via SFTP to a remote temporary file, then moved to
+   * the final destination with `mv`. This ensures the target file is never
+   * left in a half-written state.
    *
    * @param remotePath - Destination path on the remote host.
    * @param content - The string content to write.
@@ -411,14 +412,11 @@ export class SshConnectionImpl implements SshConnection {
     options: { mode: string }
   ): Promise<void> {
     const client = this.ensureClient()
-    const localTemporary = join(tmpdir(), `paratix-write-${randomUUID()}`)
     const remoteTemporary = await this.createRemoteWritableTempPath(remotePath, "paratix-write")
     const temporaryMode = resolveWriteFileMode(remotePath, options)
     const expectedSize = Buffer.byteLength(content, "utf8")
     try {
-      // eslint-disable-next-line security/detect-non-literal-fs-filename
-      writeFileSync(localTemporary, content, { mode: 0o600 })
-      await sftpUpload(client, localTemporary, remoteTemporary)
+      await sftpUploadContent(client, content, remoteTemporary)
       await this.setRemoteTempMode(remoteTemporary, temporaryMode)
       await this.finalizeRemoteTempFile(remoteTemporary, remotePath, temporaryMode)
       await this.ensureRemoteWriteFile({
@@ -428,7 +426,7 @@ export class SshConnectionImpl implements SshConnection {
         remotePath,
       })
     } finally {
-      await this.cleanupWriteFileTemporaryPaths(localTemporary, remoteTemporary)
+      await this.cleanupWriteFileTemporaryPath(remoteTemporary)
     }
   }
 
@@ -483,16 +481,7 @@ export class SshConnectionImpl implements SshConnection {
   }
 
   /* eslint-disable perfectionist/sort-classes -- writeFile recovery helpers stay grouped for this fix */
-  private async cleanupWriteFileTemporaryPaths(
-    localTemporary: string,
-    remoteTemporary: string
-  ): Promise<void> {
-    try {
-      // eslint-disable-next-line security/detect-non-literal-fs-filename
-      unlinkSync(localTemporary)
-    } catch {
-      // local cleanup is best-effort
-    }
+  private async cleanupWriteFileTemporaryPath(remoteTemporary: string): Promise<void> {
     try {
       await this.cleanupRemoteTempFile(remoteTemporary)
     } catch (cleanupError) {

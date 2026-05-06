@@ -76,6 +76,7 @@ vi.mock("../src/knownHosts.js", async () => {
 vi.mock("../src/sftp.js", () => ({
   sftpDownload: vi.fn().mockResolvedValue(null),
   sftpUpload: vi.fn(),
+  sftpUploadContent: vi.fn(),
 }))
 
 vi.mock("../src/sshHelpers.js", async () => {
@@ -2300,8 +2301,8 @@ describe("SshConnectionImpl", () => {
 
   describe("writeFile", () => {
     it("stages write temp files in /tmp for non-root users before privileged finalization", async () => {
-      const { sftpUpload } = await import("../src/sftp.js")
-      vi.mocked(sftpUpload).mockResolvedValue()
+      const { sftpUploadContent } = await import("../src/sftp.js")
+      vi.mocked(sftpUploadContent).mockResolvedValue()
 
       const tempPath = "/tmp/paratix-write.ABCDEF"
       const remotePath = "/etc/systemd/system/my-app.service"
@@ -2332,12 +2333,12 @@ describe("SshConnectionImpl", () => {
       expect(executedCommands[3]).toContain("stat -c")
       expect(executedCommands[3]).toContain(remotePath)
       expect(executedCommands[4]).toBe(`rm -f '${tempPath}'`)
-      expect(vi.mocked(sftpUpload)).toHaveBeenCalledOnce()
+      expect(vi.mocked(sftpUploadContent)).toHaveBeenCalledOnce()
     })
 
     it("applies restrictive mode 0600 to the remote temp file before mv when no mode option is provided", async () => {
-      const { sftpUpload } = await import("../src/sftp.js")
-      vi.mocked(sftpUpload).mockResolvedValue()
+      const { sftpUploadContent } = await import("../src/sftp.js")
+      vi.mocked(sftpUploadContent).mockResolvedValue()
 
       const tempPath = "/remote/paratix-write.ABCDEF"
       const executedCommands: string[] = []
@@ -2357,8 +2358,8 @@ describe("SshConnectionImpl", () => {
     })
 
     it("always uses atomic SFTP path (write-to-temp + mv) for all content", async () => {
-      const { sftpUpload } = await import("../src/sftp.js")
-      vi.mocked(sftpUpload).mockResolvedValue()
+      const { sftpUploadContent } = await import("../src/sftp.js")
+      vi.mocked(sftpUploadContent).mockResolvedValue()
 
       const tempPath = "/remote/paratix-write.ABCDEF"
       const executedCommands: string[] = []
@@ -2370,8 +2371,8 @@ describe("SshConnectionImpl", () => {
 
       await ssh.writeFile("/remote/plain.txt", "hello world", { mode: "0600" })
 
-      // SFTP upload must have been called — atomic path
-      expect(vi.mocked(sftpUpload)).toHaveBeenCalledOnce()
+      // SFTP content upload must have been called — atomic path
+      expect(vi.mocked(sftpUploadContent)).toHaveBeenCalledOnce()
 
       // printf must NOT have been used
       const usedPrintf = executedCommands.some((cmd) => cmd.includes("printf"))
@@ -2384,8 +2385,8 @@ describe("SshConnectionImpl", () => {
     })
 
     it("runs chmod on temp file before mv when mode option is provided", async () => {
-      const { sftpUpload } = await import("../src/sftp.js")
-      vi.mocked(sftpUpload).mockResolvedValue()
+      const { sftpUploadContent } = await import("../src/sftp.js")
+      vi.mocked(sftpUploadContent).mockResolvedValue()
 
       const tempPath = "/remote/paratix-write.ABCDEF"
       const executedCommands: string[] = []
@@ -2397,7 +2398,7 @@ describe("SshConnectionImpl", () => {
 
       await ssh.writeFile("/remote/path", "hello world", { mode: "0755" })
 
-      expect(vi.mocked(sftpUpload)).toHaveBeenCalledOnce()
+      expect(vi.mocked(sftpUploadContent)).toHaveBeenCalledOnce()
 
       const chmodCommand = executedCommands.find((cmd) => cmd.includes("chmod"))
       expect(chmodCommand).toBeDefined()
@@ -2410,8 +2411,8 @@ describe("SshConnectionImpl", () => {
     })
 
     it("uses a privileged destination temp path for the shell fallback instead of /tmp for non-root users", async () => {
-      const { sftpUpload } = await import("../src/sftp.js")
-      vi.mocked(sftpUpload).mockResolvedValue()
+      const { sftpUploadContent } = await import("../src/sftp.js")
+      vi.mocked(sftpUploadContent).mockResolvedValue()
 
       const initialTempPath = "/tmp/paratix-write.ABCDEF"
       const fallbackTempPath = "/etc/apt/sources.list.d/paratix-write.FALLBACK"

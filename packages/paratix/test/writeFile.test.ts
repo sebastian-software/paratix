@@ -1,18 +1,17 @@
 import type { Client, SFTPWrapper } from "ssh2"
 
 import { EventEmitter } from "node:events"
-import { unlinkSync, writeFileSync } from "node:fs"
+import { writeFileSync } from "node:fs"
 import { stat } from "node:fs/promises"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 
-import { sftpUpload } from "../src/sftp.js"
+import { sftpUpload, sftpUploadContent } from "../src/sftp.js"
 import { SshConnectionImpl } from "../src/ssh.js"
 
 // vi.mock is hoisted to the top of the file by vitest before any imports are
 // evaluated, so the module under test receives the mocked version.
 vi.mock("node:fs", () => ({
   readFileSync: vi.fn().mockReturnValue(""),
-  unlinkSync: vi.fn(),
   writeFileSync: vi.fn(),
 }))
 
@@ -22,6 +21,7 @@ vi.mock("node:fs/promises", () => ({
 
 vi.mock("../src/sftp.js", () => ({
   sftpUpload: vi.fn(),
+  sftpUploadContent: vi.fn(),
 }))
 
 // ---------------------------------------------------------------------------
@@ -127,7 +127,7 @@ describe("SshConnectionImpl.writeFile — small content", () => {
 
   beforeEach(() => {
     execSpy = makeExecSpy("/etc/paratix-write.SMALL", 11)
-    vi.mocked(sftpUpload).mockResolvedValue()
+    vi.mocked(sftpUploadContent).mockResolvedValue()
   })
 
   afterEach(() => {
@@ -143,9 +143,9 @@ describe("SshConnectionImpl.writeFile — small content", () => {
     // Act
     await ssh.writeFile("/etc/config", content, { mode: "0600" })
 
-    // Assert: SFTP path was used — writeFileSync creates local temp, sftpUpload transfers
-    expect(vi.mocked(sftpUpload)).toHaveBeenCalledOnce()
-    expect(vi.mocked(writeFileSync)).toHaveBeenCalledOnce()
+    // Assert: SFTP path was used without creating a local content file.
+    expect(vi.mocked(sftpUploadContent)).toHaveBeenCalledOnce()
+    expect(vi.mocked(writeFileSync)).not.toHaveBeenCalled()
 
     // exec calls: mktemp, mv, rm -f
     const calls = execSpy.mock.calls as Array<[string, ...unknown[]]>
@@ -175,6 +175,7 @@ describe("SshConnectionImpl.writeFile — small content", () => {
     )
     expect(vi.mocked(writeFileSync)).not.toHaveBeenCalled()
     expect(vi.mocked(sftpUpload)).not.toHaveBeenCalled()
+    expect(vi.mocked(sftpUploadContent)).not.toHaveBeenCalled()
   })
 })
 
@@ -187,14 +188,14 @@ describe("SshConnectionImpl.writeFile — large content (> 64 KB)", () => {
 
   beforeEach(() => {
     execSpy = makeExecSpy("/etc/paratix-write.ABCDEF", 100_000)
-    vi.mocked(sftpUpload).mockResolvedValue()
+    vi.mocked(sftpUploadContent).mockResolvedValue()
   })
 
   afterEach(() => {
     vi.resetAllMocks()
   })
 
-  it("creates a local tmp file via writeFileSync", async () => {
+  it("does not create a local content file via writeFileSync", async () => {
     // Arrange
     const client = makeClientWithExecSpy(execSpy)
     const ssh = makeConnectedSsh(client)
@@ -204,36 +205,10 @@ describe("SshConnectionImpl.writeFile — large content (> 64 KB)", () => {
     await ssh.writeFile("/etc/large-config", content, { mode: "0600" })
 
     // Assert
-    expect(vi.mocked(writeFileSync)).toHaveBeenCalledOnce()
-    const [localPath, writtenContent] = vi.mocked(writeFileSync).mock.calls[0] as [string, string]
-    expect(localPath).toMatch(/paratix-write-/v)
-    expect(writtenContent).toBe(content)
+    expect(vi.mocked(writeFileSync)).not.toHaveBeenCalled()
   })
 
-  // ---------------------------------------------------------------------------
-  // Regression: local temp file must be created with mode 0o600 (not world-readable)
-  // ---------------------------------------------------------------------------
-
-  it("creates the local tmp file with mode 0o600 (regression: was world-readable without mode option)", async () => {
-    // Root cause: writeFileSync(localTemporary, content) was called without a
-    // mode option, resulting in the default 0o666 (world-readable after umask).
-    // Fix: writeFileSync(localTemporary, content, { mode: 0o600 }) ensures the
-    // temp file is owner-only, protecting sensitive content during the upload.
-    const client = makeClientWithExecSpy(execSpy)
-    const ssh = makeConnectedSsh(client)
-    const content = makeLargeContent()
-
-    // Act
-    await ssh.writeFile("/etc/large-config", content, { mode: "0600" })
-
-    // Assert: third argument to writeFileSync must include mode 0o600
-    expect(vi.mocked(writeFileSync)).toHaveBeenCalledOnce()
-    const writeCall = vi.mocked(writeFileSync).mock.calls[0] as [string, string, { mode: number }]
-    const options = writeCall[2]
-    expect(options).toMatchObject({ mode: 0o600 })
-  })
-
-  it("calls sftpUpload with the local tmp file and the remote tmp path", async () => {
+  it("calls sftpUploadContent with the content and the remote tmp path", async () => {
     // Arrange
     const client = makeClientWithExecSpy(execSpy)
     const ssh = makeConnectedSsh(client)
@@ -243,13 +218,13 @@ describe("SshConnectionImpl.writeFile — large content (> 64 KB)", () => {
     await ssh.writeFile("/etc/large-config", content, { mode: "0600" })
 
     // Assert
-    expect(vi.mocked(sftpUpload)).toHaveBeenCalledOnce()
-    const [, localPath, remoteTmpPath] = vi.mocked(sftpUpload).mock.calls[0] as [
+    expect(vi.mocked(sftpUploadContent)).toHaveBeenCalledOnce()
+    const [, uploadedContent, remoteTmpPath] = vi.mocked(sftpUploadContent).mock.calls[0] as [
       unknown,
       string,
       string,
     ]
-    expect(localPath).toMatch(/paratix-write-/v)
+    expect(uploadedContent).toBe(content)
     expect(remoteTmpPath).toBe("/etc/paratix-write.ABCDEF")
   })
 
@@ -271,7 +246,7 @@ describe("SshConnectionImpl.writeFile — large content (> 64 KB)", () => {
     expect(mvCmd).toContain("/etc/large-config")
   })
 
-  it("removes the local tmp file after a successful upload (finally block)", async () => {
+  it("does not remove a local tmp file after a successful upload", async () => {
     // Arrange
     const client = makeClientWithExecSpy(execSpy)
     const ssh = makeConnectedSsh(client)
@@ -280,16 +255,12 @@ describe("SshConnectionImpl.writeFile — large content (> 64 KB)", () => {
     // Act
     await ssh.writeFile("/etc/large-config", content, { mode: "0600" })
 
-    // Assert: unlinkSync was called with the same path written by writeFileSync
-    expect(vi.mocked(unlinkSync)).toHaveBeenCalledOnce()
-    const [unlinkedPath] = vi.mocked(unlinkSync).mock.calls[0] as [string]
-    const [writtenPath] = vi.mocked(writeFileSync).mock.calls[0] as [string, ...unknown[]]
-    expect(unlinkedPath).toBe(writtenPath)
+    expect(vi.mocked(writeFileSync)).not.toHaveBeenCalled()
   })
 
-  it("removes the local tmp file even when sftpUpload throws (finally block)", async () => {
+  it("does not create a local tmp file when content upload throws", async () => {
     // Arrange
-    vi.mocked(sftpUpload).mockRejectedValue(new Error("SFTP transfer failed"))
+    vi.mocked(sftpUploadContent).mockRejectedValue(new Error("SFTP transfer failed"))
     const client = makeSimpleClient()
     const ssh = makeConnectedSsh(client)
     const content = makeLargeContent()
@@ -299,30 +270,29 @@ describe("SshConnectionImpl.writeFile — large content (> 64 KB)", () => {
       "SFTP transfer failed"
     )
 
-    // Cleanup must still happen despite the error
-    expect(vi.mocked(unlinkSync)).toHaveBeenCalledOnce()
+    expect(vi.mocked(writeFileSync)).not.toHaveBeenCalled()
   })
 
   // ---------------------------------------------------------------------------
-  // Regression: remote tmp file cleanup after sftpUpload failure
+  // Regression: remote tmp file cleanup after content upload failure
   // ---------------------------------------------------------------------------
 
-  it("calls rm -f for the remote tmp file when sftpUpload throws (best-effort cleanup)", async () => {
+  it("calls rm -f for the remote tmp file when content upload throws (best-effort cleanup)", async () => {
     // Arrange
     const remoteTmpPath = "/etc/paratix-write.CLEANUP"
-    vi.mocked(sftpUpload).mockRejectedValue(new Error("SFTP transfer failed"))
+    vi.mocked(sftpUploadContent).mockRejectedValue(new Error("SFTP transfer failed"))
     const remoteCleanupSpy = makeExecSpy(remoteTmpPath, 100_000)
     const client = makeClientWithExecSpy(remoteCleanupSpy)
     const ssh = makeConnectedSsh(client)
     const content = makeLargeContent()
 
-    // Act + Assert: the original sftpUpload error propagates
+    // Act + Assert: the original content upload error propagates
     await expect(ssh.writeFile("/etc/large-config", content, { mode: "0600" })).rejects.toThrow(
       "SFTP transfer failed"
     )
 
     // Assert: exec must have been called with rm -f for the remote tmp path.
-    // The rm -f is the last exec call (after mktemp and the failed sftpUpload).
+    // The rm -f is the last exec call (after mktemp and the failed content upload).
     const calls = remoteCleanupSpy.mock.calls as Array<[string, ...unknown[]]>
     const executedCommands = calls.map(([cmd]) => cmd)
     expect(executedCommands).toStrictEqual(
@@ -331,7 +301,7 @@ describe("SshConnectionImpl.writeFile — large content (> 64 KB)", () => {
   })
 
   it("swallows an error thrown by the remote rm -f cleanup (best-effort)", async () => {
-    // Arrange: sftpUpload succeeds, but rm -f in the finally block throws
+    // Arrange: content upload succeeds, but rm -f in the finally block throws
     const remoteTmpPath = "/etc/paratix-write.CLEANUP2"
 
     // exec spy: mktemp returns the remote tmp path, mv succeeds, rm -f fails
@@ -446,7 +416,7 @@ describe("SshConnectionImpl.writeFile — large content (> 64 KB)", () => {
 
     const client = makeClientWithExecSpy(emptyFileExecSpy)
     const ssh = makeConnectedSsh(client)
-    vi.mocked(sftpUpload).mockResolvedValue()
+    vi.mocked(sftpUploadContent).mockResolvedValue()
 
     await expect(
       ssh.writeFile(remotePath, "unit-content", { mode: "0644" })
@@ -538,7 +508,7 @@ describe("SshConnectionImpl.writeFile — large content (> 64 KB)", () => {
 
     const client = makeClientWithExecSpy(stdinFallbackExecSpy)
     const ssh = makeConnectedSsh(client)
-    vi.mocked(sftpUpload).mockResolvedValue()
+    vi.mocked(sftpUploadContent).mockResolvedValue()
 
     await expect(ssh.writeFile(remotePath, largeContent, { mode: "0644" })).resolves.toBeUndefined()
 
@@ -570,7 +540,7 @@ describe("SshConnectionImpl.writeFile — large content (> 64 KB)", () => {
 
     const client = makeClientWithExecSpy(makeDiskCheckExecSpy("DISK", dfOutput))
     const ssh = makeConnectedSsh(client)
-    vi.mocked(sftpUpload).mockResolvedValue()
+    vi.mocked(sftpUploadContent).mockResolvedValue()
 
     await expect(ssh.writeFile(remotePath, "unit-content", { mode: "0644" })).rejects.toThrow(
       /disk full/v
@@ -584,7 +554,7 @@ describe("SshConnectionImpl.writeFile — large content (> 64 KB)", () => {
 
     const client = makeClientWithExecSpy(makeDiskCheckExecSpy("NODISK", dfOutput))
     const ssh = makeConnectedSsh(client)
-    vi.mocked(sftpUpload).mockResolvedValue()
+    vi.mocked(sftpUploadContent).mockResolvedValue()
 
     await expect(ssh.writeFile(remotePath, "unit-content", { mode: "0644" })).rejects.toThrow(
       /remote file is empty/v

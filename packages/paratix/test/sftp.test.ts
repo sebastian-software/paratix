@@ -9,9 +9,10 @@ import {
   unlinkSync,
   type WriteStream,
 } from "node:fs"
+import { Writable } from "node:stream"
 import { afterEach, describe, expect, it, vi } from "vitest"
 
-import { sftpDownload, sftpUpload } from "../src/sftp.js"
+import { sftpDownload, sftpUpload, sftpUploadContent } from "../src/sftp.js"
 
 // vi.mock is hoisted to the top of the file by vitest before any imports are
 // evaluated, so the module under test receives the mocked version.
@@ -35,6 +36,25 @@ type SftpMockStream = {
 class MockReadableStream extends EventEmitter {
   public destroy = vi.fn()
   public pipe = vi.fn()
+}
+
+class CollectingWritableStream extends Writable {
+  public readonly chunks: Buffer[] = []
+  public readonly destroySpy = vi.fn()
+
+  public override _write(
+    chunk: Buffer,
+    _encoding: BufferEncoding,
+    callback: (error?: Error | null) => void
+  ): void {
+    this.chunks.push(Buffer.from(chunk))
+    callback()
+  }
+
+  public override destroy(error?: Error): this {
+    this.destroySpy(error)
+    return super.destroy(error)
+  }
 }
 
 function makeMockStream(): SftpMockStream {
@@ -1059,6 +1079,50 @@ describe("sftpUpload", () => {
     vi.advanceTimersByTime(10_000)
 
     // Assert — sftp.end() was called exactly once (from the error handler, not the timeout)
+    expect(sftpEnd).toHaveBeenCalledOnce()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// sftpUploadContent
+// ---------------------------------------------------------------------------
+
+describe("sftpUploadContent", () => {
+  afterEach(() => {
+    vi.useRealTimers()
+    vi.resetAllMocks()
+  })
+
+  it("streams UTF-8 content to the remote writeStream without opening a local file", async () => {
+    const { sftp, sftpEnd } = makeSftpSession()
+    const client = makeClientMock(sftp)
+    const remoteWriteStream = new CollectingWritableStream()
+    vi.mocked(sftp).createWriteStream.mockReturnValue(remoteWriteStream as never)
+
+    await expect(
+      sftpUploadContent(client, "hello üñîçødé", "/remote/secret.txt")
+    ).resolves.toBeUndefined()
+
+    expect(vi.mocked(createReadStream)).not.toHaveBeenCalled()
+    const createWriteStreamCalls = (
+      sftp.createWriteStream as unknown as { mock: { calls: unknown[][] } }
+    ).mock.calls
+    expect(createWriteStreamCalls[0]).toStrictEqual(["/remote/secret.txt", { mode: 0o600 }])
+    expect(Buffer.concat(remoteWriteStream.chunks).toString("utf8")).toBe("hello üñîçødé")
+    expect(sftpEnd).toHaveBeenCalledOnce()
+  })
+
+  it("rejects and closes the sftp session when remote write stream creation throws", async () => {
+    const { sftp, sftpEnd } = makeSftpSession()
+    const client = makeClientMock(sftp)
+    vi.mocked(sftp).createWriteStream.mockImplementation(() => {
+      throw new Error("remote open failed")
+    })
+
+    await expect(sftpUploadContent(client, "secret", "/remote/secret.txt")).rejects.toThrow(
+      "remote open failed"
+    )
+    expect(vi.mocked(createReadStream)).not.toHaveBeenCalled()
     expect(sftpEnd).toHaveBeenCalledOnce()
   })
 })

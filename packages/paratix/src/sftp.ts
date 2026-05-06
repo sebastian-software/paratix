@@ -1,9 +1,11 @@
-import type { Readable, Writable } from "node:stream"
+/* eslint-disable max-lines -- SFTP transfer helpers keep stream lifecycle wiring local */
+import type { Writable } from "node:stream"
 import type { Client, SFTPWrapper } from "ssh2"
 
 import { randomUUID } from "node:crypto"
 import { createReadStream, createWriteStream, renameSync, unlinkSync } from "node:fs"
 import { dirname, join } from "node:path"
+import { Readable } from "node:stream"
 
 /** Default timeout for SFTP transfers in milliseconds (2 minutes). */
 export const SFTP_TIMEOUT = 120_000
@@ -130,6 +132,24 @@ function openUploadStreams(
       readStream.destroy()
     }
     throw normalizeTransferError(streamError, "Failed to create SFTP upload streams")
+  }
+}
+
+function openContentUploadStreams(
+  sftp: SFTPWrapper,
+  content: string,
+  remotePath: string
+): TransferStreams {
+  let readStream: Readable | undefined
+  try {
+    readStream = Readable.from([Buffer.from(content, "utf8")])
+    const writeStream = sftp.createWriteStream(remotePath, { mode: 0o600 })
+    return { readStream, writeStream }
+  } catch (streamError) {
+    if (readStream !== undefined && typeof readStream.destroy === "function") {
+      readStream.destroy()
+    }
+    throw normalizeTransferError(streamError, "Failed to create SFTP content upload streams")
   }
 }
 
@@ -326,6 +346,53 @@ export async function sftpUpload(
       reject,
       timeout,
       timeoutMessage: `SFTP upload session timed out after ${timeout}ms: ${remotePath}`,
+    })
+  })
+}
+
+/**
+ * Transfer string content directly to a remote path via SFTP.
+ *
+ * @param client - The connected ssh2 client.
+ * @param content - UTF-8 string content to transfer.
+ * @param remotePath - Destination path on the remote host.
+ * @param timeout - Maximum time in ms before the transfer is aborted.
+ */
+// eslint-disable-next-line max-params -- timeout parameter mirrors sftpUpload
+export async function sftpUploadContent(
+  client: Client,
+  content: string,
+  remotePath: string,
+  timeout = SFTP_TIMEOUT
+): Promise<void> {
+  return new Promise((resolve, reject) => {
+    openSftp({
+      client,
+      onOpen(sftp) {
+        let streams: TransferStreams
+        try {
+          streams = openContentUploadStreams(sftp, content, remotePath)
+        } catch (streamError) {
+          sftp.end()
+          reject(normalizeTransferError(streamError, "Failed to create SFTP content upload"))
+          return
+        }
+
+        wireStreams({
+          completionEvents: ["finish"],
+          prematureCloseMessage: `SFTP content upload closed before finish: ${remotePath}`,
+          readStream: streams.readStream,
+          reject,
+          resolve,
+          sftp,
+          timeout,
+          timeoutMessage: `SFTP content upload timed out after ${timeout}ms: ${remotePath}`,
+          writeStream: streams.writeStream,
+        })
+      },
+      reject,
+      timeout,
+      timeoutMessage: `SFTP content upload session timed out after ${timeout}ms: ${remotePath}`,
     })
   })
 }
