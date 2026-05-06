@@ -11,8 +11,8 @@ import {
   hasSwapFstabEntry,
   isSwapActive,
   needsSwapRecreation,
-  publishInitializedSwapTemporaryFile,
   type NormalizedSwapFileOptions,
+  publishInitializedSwapTemporaryFile,
   swapFileModeMatches,
 } from "./swapFileHelpers.js"
 
@@ -40,6 +40,77 @@ async function removeSwapFile(ssh: SshConnection, path: string): Promise<boolean
   return result.code === 0 ? true : failedCommand(`[swap.file: ${path}] rm failed`, result)
 }
 
+async function createMissingSwapFile(
+  ssh: SshConnection,
+  options: NormalizedSwapFileOptions
+): Promise<"changed" | ModuleResult> {
+  const createResult = await ensureSwapFilePresent({
+    mode: options.mode,
+    path: options.path,
+    size: options.sizeForCommand,
+    sizeBytes: options.sizeBytes,
+    ssh,
+  })
+  return createResult === true ? "changed" : createResult
+}
+
+async function disableAndRemoveSwapForReplacement(
+  ssh: SshConnection,
+  path: string,
+  temporaryPath: string
+): Promise<boolean | ModuleResult> {
+  const disableResult = await disableSwap(ssh, path)
+  if (typeof disableResult !== "boolean") {
+    await cleanupSwapTemporaryFile(ssh, temporaryPath)
+    return disableResult
+  }
+
+  const removeResult = await removeSwapFile(ssh, path)
+  if (typeof removeResult !== "boolean") {
+    await cleanupSwapTemporaryFile(ssh, temporaryPath)
+    if (disableResult) await enableSwap(ssh, path)
+    return removeResult
+  }
+  return disableResult
+}
+
+async function replaceManagedSwapFile(
+  ssh: SshConnection,
+  options: NormalizedSwapFileOptions
+): Promise<"changed" | ModuleResult> {
+  const replacementFile = await createInitializedSwapTemporaryFile({
+    mode: options.mode,
+    path: options.path,
+    size: options.sizeForCommand,
+    sizeBytes: options.sizeBytes,
+    ssh,
+  })
+  if ("status" in replacementFile) return replacementFile
+
+  const disabledSwap = await disableAndRemoveSwapForReplacement(
+    ssh,
+    options.path,
+    replacementFile.temporaryPath
+  )
+  if (typeof disabledSwap !== "boolean") return disabledSwap
+
+  const publishResult = await publishInitializedSwapTemporaryFile(
+    {
+      mode: options.mode,
+      path: options.path,
+      size: options.sizeForCommand,
+      sizeBytes: options.sizeBytes,
+      ssh,
+    },
+    replacementFile
+  )
+  if (publishResult !== true) {
+    if (disabledSwap) await enableSwap(ssh, options.path)
+    return publishResult
+  }
+  return "changed"
+}
+
 async function recreateSwapFile(
   ssh: SshConnection,
   options: NormalizedSwapFileOptions
@@ -49,54 +120,9 @@ async function recreateSwapFile(
   const safeRemoval = await ensureSafeSwapRemoval(ssh, options.path)
   if (typeof safeRemoval !== "string") return safeRemoval
 
-  if (safeRemoval === "ok") {
-    const replacementFile = await createInitializedSwapTemporaryFile({
-      mode: options.mode,
-      path: options.path,
-      size: options.sizeForCommand,
-      sizeBytes: options.sizeBytes,
-      ssh,
-    })
-    if ("status" in replacementFile) return replacementFile
-
-    const disableResult = await disableSwap(ssh, options.path)
-    if (typeof disableResult !== "boolean") {
-      await cleanupSwapTemporaryFile(ssh, replacementFile.temporaryPath)
-      return disableResult
-    }
-
-    const removeResult = await removeSwapFile(ssh, options.path)
-    if (typeof removeResult !== "boolean") {
-      await cleanupSwapTemporaryFile(ssh, replacementFile.temporaryPath)
-      if (disableResult) await enableSwap(ssh, options.path)
-      return removeResult
-    }
-
-    const publishResult = await publishInitializedSwapTemporaryFile(
-      {
-        mode: options.mode,
-        path: options.path,
-        size: options.sizeForCommand,
-        sizeBytes: options.sizeBytes,
-        ssh,
-      },
-      replacementFile
-    )
-    if (publishResult !== true) {
-      if (disableResult) await enableSwap(ssh, options.path)
-      return publishResult
-    }
-    return "changed"
-  }
-
-  const createResult = await ensureSwapFilePresent({
-    mode: options.mode,
-    path: options.path,
-    size: options.sizeForCommand,
-    sizeBytes: options.sizeBytes,
-    ssh,
-  })
-  return createResult === true ? "changed" : createResult
+  return safeRemoval === "ok"
+    ? replaceManagedSwapFile(ssh, options)
+    : createMissingSwapFile(ssh, options)
 }
 
 async function enableSwap(ssh: SshConnection, path: string): Promise<boolean | ModuleResult> {

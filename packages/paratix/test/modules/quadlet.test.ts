@@ -196,8 +196,8 @@ describe("quadlet.container", () => {
   it("apply returns failed when systemctl daemon-reload exits with non-zero code", async () => {
     const ssh = createMockSsh({
       [`[ -e '${quadletFilePath}' ]`]: { code: 1 },
-      "mkdir -p '/etc/containers/systemd'": { code: 0 },
       [`rm -f '${quadletFilePath}'`]: { code: 0 },
+      "mkdir -p '/etc/containers/systemd'": { code: 0 },
       "systemctl daemon-reload": { code: 1, stderr: "reload failed" },
     })
     vi.spyOn(ssh, "writeFile").mockResolvedValue()
