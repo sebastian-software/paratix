@@ -132,11 +132,12 @@ async function rewriteAuthorizedKeys(
     authorizedKeysPath: string
     key: string
     primaryGroup: string
+    sshDirectoryPath: string
     state: "absent" | "present"
     user: string
   }
 ): Promise<void> {
-  const { authorizedKeysPath, key, primaryGroup, state, user } = parameters
+  const { authorizedKeysPath, key, primaryGroup, sshDirectoryPath, state, user } = parameters
   const temporaryPath = await createAuthorizedKeysTemporaryPath(conn)
 
   try {
@@ -162,8 +163,13 @@ async function rewriteAuthorizedKeys(
     // `deploy:users`, `www-data:www-data`) and prevents a drift loop where
     // `apply` overwrites the semantically correct group ownership only to
     // see `check` go green on the next run.
+    const quotedTemporaryPath = shellQuote(temporaryPath)
+    const quotedSshDirectoryPath = shellQuote(sshDirectoryPath)
+    const quotedAuthorizedKeysPath = shellQuote(authorizedKeysPath)
+    const expectedSshDirectoryState = shellQuote(`700 ${user} ${primaryGroup} directory`)
+
     await conn.exec(
-      `chmod 600 ${shellQuote(temporaryPath)} && chown ${shellQuote(user)}:${shellQuote(primaryGroup)} ${shellQuote(temporaryPath)} && [ ! -L ${shellQuote(authorizedKeysPath)} ] || { echo 'authorized_keys must not be a symlink' >&2; exit 1; } && mv -T ${shellQuote(temporaryPath)} ${shellQuote(authorizedKeysPath)}`,
+      `chmod 600 ${quotedTemporaryPath} && chown ${shellQuote(user)}:${shellQuote(primaryGroup)} ${quotedTemporaryPath} && { [ ! -L ${quotedSshDirectoryPath} ] || { echo '.ssh must not be a symlink' >&2; exit 1; }; [ -d ${quotedSshDirectoryPath} ] || { echo '.ssh must be a directory' >&2; exit 1; }; ssh_directory_state=$(stat -c '%a %U %G %F' ${quotedSshDirectoryPath}) || exit $?; [ "$ssh_directory_state" = ${expectedSshDirectoryState} ] || { echo '.ssh ownership changed before authorized_keys replace' >&2; exit 1; }; [ ! -L ${quotedAuthorizedKeysPath} ] || { echo 'authorized_keys must not be a symlink' >&2; exit 1; }; mv -T ${quotedTemporaryPath} ${quotedAuthorizedKeysPath}; }`,
       { silent: true }
     )
   } finally {
@@ -200,6 +206,7 @@ export async function applyAuthorizedKeys(
     authorizedKeysPath,
     key,
     primaryGroup,
+    sshDirectoryPath,
     state,
     user,
   })

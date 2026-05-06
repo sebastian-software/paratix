@@ -35,8 +35,7 @@ const successfulSshApplyOptions: MockSshOptions = {
       result: { code: 0 },
     },
     {
-      command:
-        /^chmod 600 '\/run\/paratix\/authorized-keys\.[^']+' && chown '[^']+':'[^']+' '\/run\/paratix\/authorized-keys\.[^']+' && \[ ! -L '[^']+\/\.ssh\/authorized_keys' \] \|\| \{ echo 'authorized_keys must not be a symlink' >&2; exit 1; \} && mv -T '\/run\/paratix\/authorized-keys\.[^']+' '[^']+\/\.ssh\/authorized_keys'$/v,
+      command: /^chmod 600 '\/run\/paratix\/authorized-keys\.[^']+' && chown /v,
       result: { code: 0 },
     },
     { command: /^rm -f '\/run\/paratix\/authorized-keys\.[^']+'$/v, result: { code: 0 } },
@@ -82,6 +81,25 @@ function absentAuthorizedKeysRewriteCommand(
   key: string
 ): string {
   return `{ if [ -f ${authorizedKeysPath} ]; then grep -vxF -- '${key}' ${authorizedKeysPath} > '${temporaryPath}'; grep_status=$?; if [ "$grep_status" -eq 0 ] || [ "$grep_status" -eq 1 ]; then :; else exit "$grep_status"; fi; else : > '${temporaryPath}'; fi; }`
+}
+
+function authorizedKeysFinalReplaceCommand(parameters: {
+  authorizedKeysPath: string
+  expectedSshDirectoryState: string
+  group: string
+  sshDirectoryPath: string
+  temporaryPath: string
+  user: string
+}): string {
+  const {
+    authorizedKeysPath,
+    expectedSshDirectoryState,
+    group,
+    sshDirectoryPath,
+    temporaryPath,
+    user,
+  } = parameters
+  return `chmod 600 '${temporaryPath}' && chown '${user}':'${group}' '${temporaryPath}' && { [ ! -L ${sshDirectoryPath} ] || { echo '.ssh must not be a symlink' >&2; exit 1; }; [ -d ${sshDirectoryPath} ] || { echo '.ssh must be a directory' >&2; exit 1; }; ssh_directory_state=$(stat -c '%a %U %G %F' ${sshDirectoryPath}) || exit $?; [ "$ssh_directory_state" = '${expectedSshDirectoryState}' ] || { echo '.ssh ownership changed before authorized_keys replace' >&2; exit 1; }; [ ! -L ${authorizedKeysPath} ] || { echo 'authorized_keys must not be a symlink' >&2; exit 1; }; mv -T '${temporaryPath}' ${authorizedKeysPath}; }`
 }
 
 /**
@@ -490,6 +508,14 @@ describe("ssh.authorizedKeys", () => {
   const tempPath = "/run/paratix/authorized-keys.ABCDEF"
   const aliceSshDirectoryGuard =
     "[ ! -L '/home/alice/.ssh' ] || { echo '.ssh must not be a symlink' >&2; exit 1; }; if [ -e '/home/alice/.ssh' ]; then [ -d '/home/alice/.ssh' ] || { echo '.ssh must be a directory' >&2; exit 1; }; else mkdir -p '/home/alice/.ssh'; fi; [ -d '/home/alice/.ssh' ] && [ ! -L '/home/alice/.ssh' ] || { echo '.ssh must be a real directory' >&2; exit 1; }; chmod 700 '/home/alice/.ssh' && chown 'alice':'alice' '/home/alice/.ssh'"
+  const aliceFinalReplaceCommand = authorizedKeysFinalReplaceCommand({
+    authorizedKeysPath: aliceKeys,
+    expectedSshDirectoryState: "700 alice alice directory",
+    group: "alice",
+    sshDirectoryPath: aliceDir,
+    temporaryPath: tempPath,
+    user: "alice",
+  })
 
   function aliceResponses(
     extra?: Record<string, Partial<{ code: number; stderr: string; stdout: string }>>
@@ -705,9 +731,7 @@ describe("ssh.authorizedKeys", () => {
       presentAuthorizedKeysRewriteCommand(aliceKeys, tempPath, testKey)
     )
     expect(mockSsh.calls).not.toContain(`printf '%s\\n' '${testKey}' >> ${aliceKeys}`)
-    expect(mockSsh.calls).toContain(
-      `chmod 600 '${tempPath}' && chown 'alice':'alice' '${tempPath}' && [ ! -L ${aliceKeys} ] || { echo 'authorized_keys must not be a symlink' >&2; exit 1; } && mv -T '${tempPath}' ${aliceKeys}`
-    )
+    expect(mockSsh.calls).toContain(aliceFinalReplaceCommand)
     expect(mockSsh.calls).toContain(`rm -f '${tempPath}'`)
   })
 
@@ -757,7 +781,6 @@ describe("ssh.authorizedKeys", () => {
 
   it("regression: present rewrite fails closed when reading authorized_keys fails", async () => {
     const rewriteCommand = presentAuthorizedKeysRewriteCommand(aliceKeys, tempPath, testKey)
-    const replaceCommand = `chmod 600 '${tempPath}' && chown 'alice':'alice' '${tempPath}' && [ ! -L ${aliceKeys} ] || { echo 'authorized_keys must not be a symlink' >&2; exit 1; } && mv -T '${tempPath}' ${aliceKeys}`
     const mockSsh = createMockSsh(
       aliceResponses({
         [aliceMktempPattern]: { stdout: tempPath },
@@ -769,7 +792,7 @@ describe("ssh.authorizedKeys", () => {
 
     await expect(mod.apply(mockSsh, emptyEnv)).rejects.toThrow("awk: read error")
     expect(mockSsh.calls).toContain(rewriteCommand)
-    expect(mockSsh.calls).not.toContain(replaceCommand)
+    expect(mockSsh.calls).not.toContain(aliceFinalReplaceCommand)
   })
 
   it("apply removes key with grep -vxF and preserves filter errors (state: absent)", async () => {
@@ -790,7 +813,6 @@ describe("ssh.authorizedKeys", () => {
 
   it("regression: absent rewrite fails closed on grep errors and does not replace the target", async () => {
     const rewriteCommand = absentAuthorizedKeysRewriteCommand(aliceKeys, tempPath, testKey)
-    const replaceCommand = `chmod 600 '${tempPath}' && chown 'alice':'alice' '${tempPath}' && [ ! -L ${aliceKeys} ] || { echo 'authorized_keys must not be a symlink' >&2; exit 1; } && mv -T '${tempPath}' ${aliceKeys}`
     const mockSsh = createMockSsh(
       aliceResponses({
         [aliceMktempPattern]: { stdout: tempPath },
@@ -802,7 +824,7 @@ describe("ssh.authorizedKeys", () => {
 
     await expect(mod.apply(mockSsh, emptyEnv)).rejects.toThrow("grep: read error")
     expect(mockSsh.calls).toContain(rewriteCommand)
-    expect(mockSsh.calls).not.toContain(replaceCommand)
+    expect(mockSsh.calls).not.toContain(aliceFinalReplaceCommand)
   })
 
   // R-0000044: in real life, a `grep -vF -- '<key body>'` filter matches any
@@ -847,9 +869,7 @@ describe("ssh.authorizedKeys", () => {
     const mod = ssh.authorizedKeys("alice", testKey, { state: "absent" })
     const result = await mod.apply(mockSsh, emptyEnv)
     expect(result.status).toBe("changed")
-    expect(mockSsh.calls).toContain(
-      `chmod 600 '${tempPath}' && chown 'alice':'alice' '${tempPath}' && [ ! -L ${aliceKeys} ] || { echo 'authorized_keys must not be a symlink' >&2; exit 1; } && mv -T '${tempPath}' ${aliceKeys}`
-    )
+    expect(mockSsh.calls).toContain(aliceFinalReplaceCommand)
   })
 
   it("rejects when authorized_keys is a symlink", async () => {
@@ -906,9 +926,31 @@ describe("ssh.authorizedKeys", () => {
     expect(mockSsh.calls).not.toContain(
       presentAuthorizedKeysRewriteCommand(aliceKeys, tempPath, testKey)
     )
-    expect(mockSsh.calls).not.toContain(
-      `chmod 600 '${tempPath}' && chown 'alice':'alice' '${tempPath}' && [ ! -L ${aliceKeys} ] || { echo 'authorized_keys must not be a symlink' >&2; exit 1; } && mv -T '${tempPath}' ${aliceKeys}`
+    expect(mockSsh.calls).not.toContain(aliceFinalReplaceCommand)
+  })
+
+  it("regression: rejects when .ssh is exchanged before the final authorized_keys replace", async () => {
+    const mockSsh = createMockSsh(
+      aliceResponses({
+        [aliceFinalReplaceCommand]: {
+          code: 1,
+          stderr: ".ssh ownership changed before authorized_keys replace",
+        },
+        [aliceMktempPattern]: { stdout: tempPath },
+      }),
+      { ...successfulSshApplyOptions, rejectNonZeroExit: true }
     )
+    const mod = ssh.authorizedKeys("alice", testKey)
+
+    await expect(mod.apply(mockSsh, emptyEnv)).rejects.toThrow(
+      ".ssh ownership changed before authorized_keys replace"
+    )
+    expect(mockSsh.calls).toContain(aliceSshDirectoryGuard)
+    expect(mockSsh.calls).toContain(
+      presentAuthorizedKeysRewriteCommand(aliceKeys, tempPath, testKey)
+    )
+    expect(mockSsh.calls).toContain(aliceFinalReplaceCommand)
+    expect(mockSsh.calls).toContain(`rm -f '${tempPath}'`)
   })
 
   it("stages the authorized_keys rewrite under the root-controlled /run/paratix directory", async () => {
@@ -952,7 +994,14 @@ describe("ssh.authorizedKeys", () => {
       presentAuthorizedKeysRewriteCommand(aliceKeys, foreignPath, testKey)
     )
     expect(mockSsh.calls).not.toContain(
-      `chmod 600 '${foreignPath}' && chown 'alice':'alice' '${foreignPath}' && [ ! -L ${aliceKeys} ] || { echo 'authorized_keys must not be a symlink' >&2; exit 1; } && mv -T '${foreignPath}' ${aliceKeys}`
+      authorizedKeysFinalReplaceCommand({
+        authorizedKeysPath: aliceKeys,
+        expectedSshDirectoryState: "700 alice alice directory",
+        group: "alice",
+        sshDirectoryPath: aliceDir,
+        temporaryPath: foreignPath,
+        user: "alice",
+      })
     )
     expect(mockSsh.calls).not.toContain(`rm -f '${foreignPath}'`)
   })
@@ -1084,7 +1133,14 @@ describe("ssh.authorizedKeys", () => {
     )
     // Chmod must quote the space-containing path
     expect(mockSsh.calls).toContain(
-      `chmod 600 '${spaceyTemp}' && chown 'alice':'alice' '${spaceyTemp}' && [ ! -L '/home/my user/.ssh/authorized_keys' ] || { echo 'authorized_keys must not be a symlink' >&2; exit 1; } && mv -T '${spaceyTemp}' '/home/my user/.ssh/authorized_keys'`
+      authorizedKeysFinalReplaceCommand({
+        authorizedKeysPath: "'/home/my user/.ssh/authorized_keys'",
+        expectedSshDirectoryState: "700 alice alice directory",
+        group: "alice",
+        sshDirectoryPath: "'/home/my user/.ssh'",
+        temporaryPath: spaceyTemp,
+        user: "alice",
+      })
     )
   })
 
@@ -1113,7 +1169,14 @@ describe("ssh.authorizedKeys", () => {
     )
     // The authorized_keys chown must also use the resolved primary group.
     expect(mockSsh.calls).toContain(
-      `chmod 600 '/run/paratix/authorized-keys.DEPLOY' && chown 'deploy':'users' '/run/paratix/authorized-keys.DEPLOY' && [ ! -L '/home/deploy/.ssh/authorized_keys' ] || { echo 'authorized_keys must not be a symlink' >&2; exit 1; } && mv -T '/run/paratix/authorized-keys.DEPLOY' '/home/deploy/.ssh/authorized_keys'`
+      authorizedKeysFinalReplaceCommand({
+        authorizedKeysPath: "'/home/deploy/.ssh/authorized_keys'",
+        expectedSshDirectoryState: "700 deploy users directory",
+        group: "users",
+        sshDirectoryPath: "'/home/deploy/.ssh'",
+        temporaryPath: "/run/paratix/authorized-keys.DEPLOY",
+        user: "deploy",
+      })
     )
     // The legacy `${user}:${user}` chown must not be issued.
     expect(mockSsh.calls).not.toContain(
