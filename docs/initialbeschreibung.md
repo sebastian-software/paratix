@@ -665,8 +665,8 @@ Quellen frühere überschreiben:
 
 ```
 1. .env-Datei    (z.B. .env.production)
-2. CLI-Parameter (--env key=value)
-3. Playbook      (env: { ... } in der Serverdefinition)
+2. Playbook      (env: { ... } in der Serverdefinition)
+3. CLI-Parameter (--env key=value)
 4. Module        (meta-Einträge aus ModuleResult zur Laufzeit)
 ```
 

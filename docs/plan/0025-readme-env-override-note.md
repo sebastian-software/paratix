@@ -6,13 +6,16 @@ Add a note to `packages/create-paratix/README.md` explaining that env values def
 
 ## Background
 
+Status: überholt. Die ursprüngliche Annahme zur Priorität von `server({ env })`
+war falsch; CLI-Overrides gewinnen.
+
 The `initializeEnvironment()` function in `packages/paratix/src/runner.ts` merges environment values in this order (last wins):
 
 1. `--env-file <path>`
-2. `--env <key=value>` CLI flags
-3. `definition.env` from `server()`
+2. `definition.env` from `server()`
+3. `--env <key=value>` CLI flags
 
-Because `server({ env })` has the highest priority, values defined there cannot be overridden at runtime via CLI flags or `.env` files. This is a common source of confusion — users may put secrets in `server({ env })` thinking they can override them later, but they cannot.
+Because CLI flags have the highest priority, values defined in `server({ env })` can be overridden at runtime via `--env`. `.env` files remain the lowest-priority defaults.
 
 ## Changes
 
@@ -20,13 +23,13 @@ Because `server({ env })` has the highest priority, values defined there cannot 
 
 Added a blockquote note after the existing merge-order list (line 167) with three key points:
 
-1. Values in `server({ env })` cannot be overridden from the CLI
+1. Values in `server({ env })` can be overridden from the CLI
 2. Secrets and per-run values should go into `.env` files or `--env` flags
 3. The `env` field in `server()` should be reserved for static defaults
 
 ## Review
 
-- Accuracy: Confirmed against `runner.ts:58-72` — merge order is correct
+- Accuracy: Corrected against `runner.ts` — merge order is `.env` < `server({ env })` < `--env`
 - Clarity: Note is structured as fact → consequence → recommendation
 - Tone: Matches the README's concise, imperative style
 - Placement: Directly after the merge-order list it refers to
