@@ -375,10 +375,18 @@ async function applyModule(parameters: {
 }): Promise<StepResult> {
   const { currentEnvironment, dryRun = false, ssh, targetModule, verbose } = parameters
   const connection = targetModule.local === true ? null : ssh
-  const result =
-    dryRun && targetModule._applyDryRun != null
-      ? await targetModule._applyDryRun(connection, currentEnvironment)
-      : await targetModule.apply(connection, currentEnvironment)
+  let result: ModuleResult
+  if (dryRun && targetModule._applyDryRun != null) {
+    result = await targetModule._applyDryRun(connection, currentEnvironment)
+  } else if (targetModule._supportsChildStepHook === true) {
+    result = await targetModule.apply(connection, currentEnvironment, {
+      async onChildStep(step) {
+        await applyRunnerControlPlaneMeta(ssh, step)
+      },
+    })
+  } else {
+    result = await targetModule.apply(connection, currentEnvironment)
+  }
   const stepResult = await handleMetaAndBuildResult(ssh, currentEnvironment, result)
   const detail = dryRun ? (result._dryRunDetail ?? "(dry-run)") : result.detail
   printModuleResult(targetModule.name, result.status, detail)

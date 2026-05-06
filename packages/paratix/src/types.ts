@@ -99,6 +99,15 @@ export type OrchestrationStep = {
 }
 
 /**
+ * Optional internal apply hooks used by composite modules to expose child
+ * orchestration steps to their surrounding runner scope.
+ * @internal
+ */
+export type ModuleApplyOptions = {
+  onChildStep?: (step: OrchestrationStep) => Promise<void>
+}
+
+/**
  * A single idempotent unit of work that can be checked and applied.
  * Modules form the building blocks of a server recipe.
  */
@@ -122,10 +131,20 @@ export type Module = {
    */
   _dryRunMetaProducer?: true
   /**
+   * Internal marker for composite modules that can expose child orchestration
+   * steps to the surrounding runner scope.
+   * @internal
+   */
+  _supportsChildStepHook?: true
+  /**
    * Enforce the desired state.
    * @returns A {@link ModuleResult} describing what happened.
    */
-  apply: (ssh: null | SshConnection, environment: Environment) => Promise<ModuleResult>
+  apply: (
+    ssh: null | SshConnection,
+    environment: Environment,
+    options?: ModuleApplyOptions
+  ) => Promise<ModuleResult>
   /**
    * Determine whether the module needs to run.
    * @returns `"ok"` if the desired state is already present, `"needs-apply"` otherwise.

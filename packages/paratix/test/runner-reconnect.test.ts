@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 
 import type { Module, ModuleResult, ServerDefinition } from "../src/types.js"
 
+import { when } from "../src/builtins.js"
 import { meta } from "../src/meta.js"
 import { recipe as createRecipe } from "../src/recipe.js"
 import {
@@ -603,6 +604,114 @@ describe("runPlaybook recipe child control-plane processing", () => {
 
     expect(secondChild.check).toHaveBeenCalledOnce()
     expect(updateHost).toHaveBeenCalledWith("10.0.0.42")
+    expect(reconnect).toHaveBeenCalledTimes(1)
+  })
+})
+
+describe("runPlaybook conditional child control-plane processing", () => {
+  beforeEach(() => {
+    vi.spyOn(console, "log").mockImplementation(() => {
+      /* noop */
+    })
+    vi.spyOn(console, "error").mockImplementation(() => {
+      /* noop */
+    })
+    vi.resetModules()
+  })
+
+  afterEach(() => {
+    vi.restoreAllMocks()
+    vi.resetModules()
+    process.exitCode = 0
+  })
+
+  it("processes conditional child sshd.port meta before the next child starts", async () => {
+    const capturedConfigs: unknown[] = []
+    const addPort = vi.fn()
+    const reconnect = vi.fn().mockResolvedValue(null)
+
+    vi.doMock("../src/ssh.js", () => ({
+      shellQuote: (s: string) => `'${s}'`,
+      SshConnectionImpl: makeMockSshClass(capturedConfigs, { addPort, reconnect }),
+    }))
+
+    const { runPlaybook } = await import("../src/runner.js")
+
+    const portChangingChild: Module = {
+      apply: vi.fn().mockResolvedValue({
+        meta: [meta.sshdPort(2222)],
+        status: "changed",
+      } satisfies ModuleResult),
+      check: vi.fn().mockResolvedValue("needs-apply"),
+      name: "conditional-port-change-child",
+    }
+    const secondChildCheck = vi.fn().mockImplementation(() => {
+      expect(addPort).toHaveBeenCalledWith(2222)
+      expect(reconnect).toHaveBeenCalledTimes(1)
+      expect(addPort.mock.invocationCallOrder[0]).toBeLessThan(
+        secondChildCheck.mock.invocationCallOrder[0]
+      )
+      expect(reconnect.mock.invocationCallOrder[0]).toBeLessThan(
+        secondChildCheck.mock.invocationCallOrder[0]
+      )
+      return "ok"
+    })
+    const secondChild: Module = {
+      apply: vi.fn().mockResolvedValue({ status: "ok" } satisfies ModuleResult),
+      check: secondChildCheck,
+      name: "conditional-second-child",
+    }
+
+    const definition: ServerDefinition = {
+      host: "1.2.3.4",
+      name: "test-server",
+      run: [when(() => true, portChangingChild, secondChild)],
+      ssh: { ports: [22], privateKey: "~/.ssh/id", user: "root" },
+    }
+
+    await runPlaybook(definition)
+
+    expect(secondChild.check).toHaveBeenCalledOnce()
+    expect(reconnect).toHaveBeenCalledTimes(1)
+  })
+
+  it("keeps successful conditional child control-plane meta when a later child fails", async () => {
+    const capturedConfigs: unknown[] = []
+    const addPort = vi.fn()
+    const reconnect = vi.fn().mockResolvedValue(null)
+
+    vi.doMock("../src/ssh.js", () => ({
+      shellQuote: (s: string) => `'${s}'`,
+      SshConnectionImpl: makeMockSshClass(capturedConfigs, { addPort, reconnect }),
+    }))
+
+    const { runPlaybook } = await import("../src/runner.js")
+
+    const portChangingChild: Module = {
+      apply: vi.fn().mockResolvedValue({
+        meta: [meta.sshdPort(2222)],
+        status: "changed",
+      } satisfies ModuleResult),
+      check: vi.fn().mockResolvedValue("needs-apply"),
+      name: "conditional-port-change-child",
+    }
+    const failingChild: Module = {
+      apply: vi.fn().mockResolvedValue({ status: "failed" } satisfies ModuleResult),
+      check: vi.fn().mockResolvedValue("needs-apply"),
+      name: "conditional-failing-child",
+    }
+
+    const definition: ServerDefinition = {
+      host: "1.2.3.4",
+      name: "test-server",
+      run: [when(() => true, portChangingChild, failingChild)],
+      ssh: { ports: [22], privateKey: "~/.ssh/id", user: "root" },
+    }
+
+    await runPlaybook(definition)
+
+    expect(process.exitCode).toBe(1)
+    expect(addPort).toHaveBeenCalledWith(2222)
     expect(reconnect).toHaveBeenCalledTimes(1)
   })
 })

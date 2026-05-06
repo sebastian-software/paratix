@@ -1,10 +1,9 @@
 import { createNullPrototypeEnvironment } from "./environment.js"
-import { mergeEnvironmentFromMeta } from "./meta.js"
-import { detectPackageManager, isPackageInstalled } from "./modules/package.js"
-import { shellQuote } from "./ssh.js"
+import { isEnvironmentMetaEntry, mergeEnvironmentFromMeta } from "./meta.js"
 import {
   type Environment,
   type Module,
+  type ModuleApplyOptions,
   type ModuleMetaEntry,
   type ModuleResult,
   NEEDS_APPLY,
@@ -41,11 +40,15 @@ async function executeConditionalApply(parameters: {
   dryRun: boolean
   environment: Environment
   module: Module
+  onChildStep?: ModuleApplyOptions["onChildStep"]
   ssh: null | SshConnection
 }): Promise<ModuleResult> {
   const { dryRun, environment, module, ssh } = parameters
   if (dryRun && module._applyDryRun != null) {
     return module._applyDryRun(ssh, environment)
+  }
+  if (module._supportsChildStepHook === true && parameters.onChildStep != null) {
+    return module.apply(ssh, environment, { onChildStep: parameters.onChildStep })
   }
   return module.apply(ssh, environment)
 }
@@ -67,26 +70,67 @@ function getConditionalChildConnection(
 }
 
 async function mergeConditionalApplyState(
+  preserveControlPlaneMeta: boolean,
   state: ConditionalApplyState,
   result: ModuleResult
 ): Promise<ConditionalApplyState> {
   const environment = await mergeEnvironmentFromMeta(state.environment, result.meta)
+  const resultMeta =
+    result.meta == null || preserveControlPlaneMeta
+      ? result.meta
+      : result.meta.filter(isEnvironmentMetaEntry)
   return {
     environment,
     flushSignals: result._flushSignals === true ? true : state.flushSignals,
-    meta: result.meta == null ? state.meta : [...state.meta, ...result.meta],
+    meta: resultMeta == null ? state.meta : [...state.meta, ...resultMeta],
     status: result.status === "changed" ? "changed" : state.status,
     stopRun: result._stopRun === true ? true : state.stopRun,
   }
+}
+
+async function notifyConditionalChildStep(parameters: {
+  environment: Environment
+  onChildStep?: ModuleApplyOptions["onChildStep"]
+  result: ModuleResult
+}): Promise<void> {
+  if (parameters.onChildStep == null) return
+  await parameters.onChildStep({
+    _flushSignals: parameters.result._flushSignals,
+    _stopRun: parameters.result._stopRun,
+    env: parameters.environment,
+    meta: parameters.result.meta,
+    status: parameters.result.status,
+  })
+}
+
+async function processConditionalApplyResult(parameters: {
+  onChildStep?: ModuleApplyOptions["onChildStep"]
+  preserveControlPlaneMeta: boolean
+  result: ModuleResult
+  state: ConditionalApplyState
+}): Promise<ConditionalApplyState> {
+  const state = await mergeConditionalApplyState(
+    parameters.preserveControlPlaneMeta,
+    parameters.state,
+    parameters.result
+  )
+  await notifyConditionalChildStep({
+    environment: state.environment,
+    onChildStep: parameters.onChildStep,
+    result: parameters.result,
+  })
+  return state
 }
 
 async function applyConditionalModules(parameters: {
   dryRun?: boolean
   environment: Environment
   modules: Module[]
+  onChildStep?: ModuleApplyOptions["onChildStep"]
   ssh: null | SshConnection
 }): Promise<ModuleResult> {
   const { dryRun = false, modules, ssh } = parameters
+  const preserveControlPlaneMeta = parameters.onChildStep == null
   let state = createConditionalApplyState(parameters.environment)
 
   for (const currentModule of modules) {
@@ -105,11 +149,17 @@ async function applyConditionalModules(parameters: {
       dryRun,
       environment: state.environment,
       module: currentModule,
+      onChildStep: parameters.onChildStep,
       ssh: connection,
     })
     if (result.status === "failed") return result
-    // eslint-disable-next-line no-await-in-loop -- downstream env must see each module's meta in order
-    state = await mergeConditionalApplyState(state, result)
+    // eslint-disable-next-line no-await-in-loop -- downstream env and runner control-plane state must stay ordered
+    state = await processConditionalApplyResult({
+      onChildStep: parameters.onChildStep,
+      preserveControlPlaneMeta,
+      result,
+      state,
+    })
     if (state.stopRun === true) break
   }
 
@@ -181,6 +231,7 @@ export function createConditionalModule(parameters: {
   )
 
   return {
+    _supportsChildStepHook: true as const,
     ...(parameters.modules.some((module) => module._dryRunBlocker === true)
       ? { _dryRunBlocker: true as const }
       : {}),
@@ -188,11 +239,20 @@ export function createConditionalModule(parameters: {
       ? { _dryRunMetaProducer: true as const }
       : {}),
     ...(applyDryRun == null ? {} : { _applyDryRun: applyDryRun }),
-    async apply(ssh: null | SshConnection, environment: Environment): Promise<ModuleResult> {
+    async apply(
+      ssh: null | SshConnection,
+      environment: Environment,
+      options?: ModuleApplyOptions
+    ): Promise<ModuleResult> {
       if (!(await parameters.condition(ssh, environment))) {
         return { status: "skipped" }
       }
-      return applyConditionalModules({ environment, modules: parameters.modules, ssh })
+      return applyConditionalModules({
+        environment,
+        modules: parameters.modules,
+        onChildStep: options?.onChildStep,
+        ssh,
+      })
     },
     async check(
       ssh: null | SshConnection,
@@ -205,73 +265,4 @@ export function createConditionalModule(parameters: {
     },
     name: parameters.name,
   }
-}
-
-function filesystemTypeName(testFlag: "-d" | "-f" | "-L" | "-S"): string {
-  switch (testFlag) {
-    case "-d": {
-      return "path"
-    }
-    case "-f": {
-      return "file"
-    }
-    case "-L": {
-      return "symlink"
-    }
-    case "-S": {
-      return "socket"
-    }
-  }
-}
-
-export function createFilesystemGuard(parameters: {
-  invert: boolean
-  modules: Module[]
-  path: string
-  testFlag: "-d" | "-f" | "-L" | "-S"
-}): Module {
-  const typeName = filesystemTypeName(parameters.testFlag)
-  return createConditionalModule({
-    async condition(ssh) {
-      if (ssh == null) return false
-      const exists = await ssh.test(`test ${parameters.testFlag} ${shellQuote(parameters.path)}`)
-      return parameters.invert ? !exists : exists
-    },
-    modules: parameters.modules,
-    name: `when.${typeName}${parameters.invert ? "Missing" : "Exists"}: ${parameters.path}`,
-  })
-}
-
-export function createCommandGuard(
-  commandName: string,
-  invert: boolean,
-  modules: Module[]
-): Module {
-  return createConditionalModule({
-    async condition(ssh) {
-      if (ssh == null) return false
-      const exists = await ssh.test(`command -v ${shellQuote(commandName)} >/dev/null 2>&1`)
-      return invert ? !exists : exists
-    },
-    modules,
-    name: `when.command${invert ? "Missing" : "Exists"}: ${commandName}`,
-  })
-}
-
-export function createPackageGuard(
-  packageName: string,
-  invert: boolean,
-  modules: Module[]
-): Module {
-  return createConditionalModule({
-    async condition(ssh) {
-      if (ssh == null) return false
-      const pm = await detectPackageManager(ssh)
-      if (pm == null) return false
-      const installed = await isPackageInstalled(ssh, pm, packageName)
-      return invert ? !installed : installed
-    },
-    modules,
-    name: `when.package${invert ? "Absent" : "Installed"}: ${packageName}`,
-  })
 }

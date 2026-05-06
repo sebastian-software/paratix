@@ -1,9 +1,9 @@
 import {
   createCommandGuard,
-  createConditionalModule,
   createFilesystemGuard,
   createPackageGuard,
-} from "./conditionalModules.js"
+} from "./conditionalGuards.js"
+import { createConditionalModule } from "./conditionalModules.js"
 import { failed } from "./moduleFailure.js"
 import { getRunnerAbortSignal, setRunnerAbortSignal } from "./runnerAbortSignal.js"
 import {

@@ -161,15 +161,16 @@ async function executeOneModule(parameters: {
   // recipe loop observes SIGINT/SIGTERM and the runner still sees meta
   // and signal stats from grand-children. Leaf modules use the plain
   // 2-arg Module.apply contract.
-  const result = isRecipeModuleLike(targetModule)
-    ? await targetModule.apply(connection, currentEnvironment, {
-        onChildStep: parameters.onChildStep,
-        onSignalStep: parameters.onSignalStep,
-        shutdownSignal: parameters.shutdownSignal,
-        signalHooks: parameters.signalHooks,
-        verbose,
-      })
-    : await targetModule.apply(connection, currentEnvironment)
+  const result = await applyRecipeChild({
+    connection,
+    currentEnvironment,
+    onChildStep: parameters.onChildStep,
+    onSignalStep: parameters.onSignalStep,
+    shutdownSignal: parameters.shutdownSignal,
+    signalHooks: parameters.signalHooks,
+    targetModule,
+    verbose,
+  })
   printRecipeChildResult(targetModule, result)
   if (result.status === "failed" && result.error != null) {
     printCommandFailure(result.error, verbose)
@@ -192,6 +193,35 @@ async function checkRecipeChild(
 ): Promise<"needs-apply" | "ok"> {
   startModuleSpinner(targetModule.name)
   return targetModule.check(connection, currentEnvironment)
+}
+
+async function applyRecipeChild(parameters: {
+  connection: null | SshConnection
+  currentEnvironment: Environment
+  onChildStep?: (step: OrchestrationStep) => Promise<void>
+  onSignalStep?: (step: OrchestrationStep) => Promise<void>
+  shutdownSignal?: () => NodeJS.Signals | null
+  signalHooks?: SignalHooks
+  targetModule: Module
+  verbose: boolean
+}): Promise<ModuleResult> {
+  if (isRecipeModuleLike(parameters.targetModule)) {
+    return parameters.targetModule.apply(parameters.connection, parameters.currentEnvironment, {
+      onChildStep: parameters.onChildStep,
+      onSignalStep: parameters.onSignalStep,
+      shutdownSignal: parameters.shutdownSignal,
+      signalHooks: parameters.signalHooks,
+      verbose: parameters.verbose,
+    })
+  }
+
+  if (parameters.targetModule._supportsChildStepHook === true && parameters.onChildStep != null) {
+    return parameters.targetModule.apply(parameters.connection, parameters.currentEnvironment, {
+      onChildStep: parameters.onChildStep,
+    })
+  }
+
+  return parameters.targetModule.apply(parameters.connection, parameters.currentEnvironment)
 }
 
 async function applyExecutedRecipeStep(parameters: {
@@ -561,6 +591,7 @@ export function recipe(
     _isRecipe: true,
     _modules: modules,
     _signals: options?.signals,
+    _supportsChildStepHook: true,
     async apply(
       ssh: null | SshConnection,
       environment: Environment,
