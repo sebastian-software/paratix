@@ -843,7 +843,7 @@ Die TypeScript-Datei wird via `tsx` ausgeführt.
 
 ```
 1. Serverdefinition laden (TypeScript-Datei via tsx)
-2. Env initialisieren (.env-Datei → CLI-Parameter → Playbook-env)
+2. Env initialisieren (.env-Datei → Playbook-env → CLI-Parameter)
 3. SSH-Verbindung herstellen (Ports der Reihe nach durchprobieren)
 4. State-Flags vom Server einlesen (/var/lib/paratix/flags/)
 5. Recipes und Module sequenziell ausführen:
@@ -1274,11 +1274,17 @@ Befehle auf dem Controller aus (z.B. via `child_process`), nicht ueber SSH.
 
 ### Secret-Masking
 
-Env-Keys die `password`, `secret` oder `token` enthalten
-(case-insensitive) werden in jeder Konsolenausgabe automatisch maskiert
-(`***`). Das betrifft Debug-Ausgaben, Fehlerausgaben und Template-Rendering-
-Logs. Die Werte selbst bleiben intern unveraendert — nur die Anzeige wird
-maskiert.
+Paratix maskiert konkrete Secret-Werte, die Module oder SSH-/Exec-Aufrufe beim
+zentralen Secret-Register anmelden. Diese Werte werden in Konsolenausgaben als
+`[REDACTED]` angezeigt. Das betrifft zum Beispiel durch `op.resolve`
+aufgelöste Secrets und OTP-Codes, SSH-/Sudo-Passwörter,
+User-Passwort-Hashes und explizit über `ExecOptions.secrets` registrierte
+Werte.
+
+Env-Key-Namen allein lösen keine automatische Maskierung aus. Eigene Module
+müssen sensible Werte explizit registrieren oder sie über APIs übergeben, die
+Secrets registrieren. Die Werte selbst bleiben intern unverändert; nur die
+Anzeige wird maskiert.
 
 ### Temp-Dateien
 
