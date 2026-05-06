@@ -261,6 +261,49 @@ describe("pause", () => {
     }
   })
 
+  it("rejects and removes stdin listeners when input closes before Enter", async () => {
+    const stdoutSpy = vi.spyOn(process.stdout, "write").mockImplementation(() => true)
+
+    const listeners = new Map<string | symbol, (...args: unknown[]) => void>()
+    const onSpy = vi
+      .spyOn(process.stdin, "on")
+      .mockImplementation((event: string | symbol, callback: (...args: unknown[]) => void) => {
+        listeners.set(event, callback)
+        return process.stdin
+      })
+    const removedListeners: Array<{ callback: unknown; event: string | symbol }> = []
+    const removeListenerSpy = vi
+      .spyOn(process.stdin, "removeListener")
+      .mockImplementation((event: string | symbol, listener: (...args: unknown[]) => void) => {
+        removedListeners.push({ callback: listener, event })
+        return process.stdin
+      })
+    const stdinPauseSpy = vi.spyOn(process.stdin, "pause").mockImplementation(() => process.stdin)
+
+    try {
+      const mod = pause()
+      // eslint-disable-next-line prefer-spread
+      const applyPromise = mod.apply(null, emptyEnv)
+
+      const endListener = listeners.get("end")
+      expect(endListener).toBeDefined()
+      endListener!()
+
+      await expect(applyPromise).rejects.toThrow(/closed before Enter/v)
+
+      expect(removedListeners).toContainEqual({ callback: listeners.get("data"), event: "data" })
+      expect(removedListeners).toContainEqual({ callback: listeners.get("end"), event: "end" })
+      expect(removedListeners).toContainEqual({ callback: listeners.get("close"), event: "close" })
+      expect(removedListeners).toContainEqual({ callback: listeners.get("error"), event: "error" })
+      expect(stdinPauseSpy).toHaveBeenCalledOnce()
+    } finally {
+      stdoutSpy.mockRestore()
+      onSpy.mockRestore()
+      removeListenerSpy.mockRestore()
+      stdinPauseSpy.mockRestore()
+    }
+  })
+
   it("rejects synchronously when the abort signal is already aborted at the start of pause", async () => {
     const stdoutSpy = vi.spyOn(process.stdout, "write").mockImplementation(() => true)
     const onSpy = vi.spyOn(process.stdin, "on")

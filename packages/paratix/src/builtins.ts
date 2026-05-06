@@ -156,8 +156,27 @@ async function waitForEnterOrAbort(abortSignal: AbortSignal | undefined): Promis
       reject(normalizePauseAbortReason(abortSignal?.reason))
     }
 
+    const onClosed = (): void => {
+      if (settled) return
+      settled = true
+      cleanup()
+      process.stdin.pause()
+      reject(new Error("pause input closed before Enter"))
+    }
+
+    const onError = (error: unknown): void => {
+      if (settled) return
+      settled = true
+      cleanup()
+      process.stdin.pause()
+      reject(error instanceof Error ? error : new Error("pause input error"))
+    }
+
     function cleanup(): void {
       process.stdin.removeListener("data", onData)
+      process.stdin.removeListener("end", onClosed)
+      process.stdin.removeListener("close", onClosed)
+      process.stdin.removeListener("error", onError)
       abortSignal?.removeEventListener("abort", onAbort)
     }
 
@@ -166,6 +185,9 @@ async function waitForEnterOrAbort(abortSignal: AbortSignal | undefined): Promis
       return
     }
 
+    process.stdin.on("end", onClosed)
+    process.stdin.on("close", onClosed)
+    process.stdin.on("error", onError)
     process.stdin.on("data", onData)
     abortSignal?.addEventListener("abort", onAbort, { once: true })
   })
