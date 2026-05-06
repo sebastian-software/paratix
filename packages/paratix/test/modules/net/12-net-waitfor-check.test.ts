@@ -101,6 +101,36 @@ describe("net.waitFor — check", () => {
     expect(result).toBe("ok")
   })
 
+  it("supports an explicit host for port checks", async () => {
+    const mockSsh = createMockSsh({
+      "nc -z -w '1' '::1' '8080'": { code: 0 },
+    })
+    const mod = net.waitFor({ host: "::1", port: 8080 })
+    const result = await mod.check(mockSsh, emptyEnv)
+    expect(result).toBe("ok")
+  })
+
+  it("throws when a port check host could be parsed as an nc option", () => {
+    expect(() => net.waitFor({ host: "-w 99", port: 8080 })).toThrow(
+      "[net.waitFor] invalid host: value must not be empty, start with '-', or contain whitespace/control characters"
+    )
+  })
+
+  it("throws when a port check host contains whitespace", () => {
+    expect(() => net.waitFor({ host: "example.com other", port: 8080 })).toThrow(
+      "[net.waitFor] invalid host: value must not be empty, start with '-', or contain whitespace/control characters"
+    )
+  })
+
+  it("throws when a port is outside the TCP range", () => {
+    expect(() => net.waitFor({ port: 0 })).toThrow(
+      "[net.waitFor] invalid port: value must be an integer between 1 and 65535"
+    )
+    expect(() => net.waitFor({ port: 65_536 })).toThrow(
+      "[net.waitFor] invalid port: value must be an integer between 1 and 65535"
+    )
+  })
+
   it("returns needs-apply when port is closed", async () => {
     const mockSsh = createMockSsh({
       "nc -z -w '1' '127.0.0.1' '8080'": { code: 1 },

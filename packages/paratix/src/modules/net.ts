@@ -4,6 +4,7 @@ import { isIP } from "node:net"
 import { failed, failedCommand } from "../moduleFailure.js"
 import { getRunnerAbortSignal } from "../runnerAbortSignal.js"
 import { withRegisteredSecrets } from "../secretSink.js"
+import { isValidTcpPort } from "../serverDefinitionValidation.js"
 import { shellQuote } from "../ssh.js"
 import {
   guardedWriteFile,
@@ -22,6 +23,7 @@ import {
   delay,
   type HttpCheckParameters,
   validateHttpUrl,
+  validateWaitForHost,
   type WaitForOptions,
 } from "./netHelpers.js"
 
@@ -1138,6 +1140,10 @@ export const net = {
     validateWaitForTimingOption("interval", interval)
     validateWaitForTimingOption("timeout", timeout)
     const host = options.host ?? "127.0.0.1"
+    validateWaitForHost(host)
+    if (options.port != null && !isValidTcpPort(options.port)) {
+      throw new Error("[net.waitFor] invalid port: value must be an integer between 1 and 65535")
+    }
     const testCommand = buildWaitForTestCommand(options, host)
 
     return {

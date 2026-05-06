@@ -52,6 +52,31 @@ export type HttpCheckParameters = {
 }
 
 const HTTP_STATUS_MARKER = "\n__PARATIX_HTTP_STATUS__:"
+const ASCII_SPACE_CODE_POINT = 0x20
+const ASCII_DELETE_CODE_POINT = 0x7f
+
+export function validateWaitForHost(host: string): void {
+  if (host.length === 0 || host.startsWith("-") || hasWaitForHostUnsafeCharacter(host)) {
+    throw new Error(
+      `[net.waitFor] invalid host: value must not be empty, start with '-', or contain whitespace/control characters`
+    )
+  }
+}
+
+function hasWaitForHostUnsafeCharacter(host: string): boolean {
+  for (const character of host) {
+    const codePoint = character.codePointAt(0)
+    if (codePoint == null) return true
+    if (
+      codePoint <= ASCII_SPACE_CODE_POINT ||
+      codePoint === ASCII_DELETE_CODE_POINT ||
+      character.trim().length === 0
+    ) {
+      return true
+    }
+  }
+  return false
+}
 
 /**
  * Build the shell command used to test a wait-for condition.
