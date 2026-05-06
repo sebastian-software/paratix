@@ -13,6 +13,7 @@ type HostVerifierOptions = {
 }
 
 export type HostVerifierResult = {
+  commitAcceptedHostKey?: () => Promise<void>
   hostVerifier?: (key: Buffer) => boolean
   pendingPersist?: Promise<void>
 }
@@ -406,8 +407,12 @@ export function buildHostVerifier(
   const entries = loadKnownHostEntries()
   const fileEntries = findMatchingEntries(entries, host, port)
   const cachedKey = inMemoryHostKeys.get(formatHostNeedle(host, port)) ?? null
+  let acceptedHostKey: Buffer | null = null
 
   const result: { hostVerifier: (key: Buffer) => boolean } & HostVerifierResult = {
+    async commitAcceptedHostKey(): Promise<void> {
+      if (acceptedHostKey != null) await acceptAndPersistHostKey(host, port, acceptedHostKey)
+    },
     hostVerifier(key: Buffer): boolean {
       if (
         mode !== "no" &&
@@ -427,8 +432,9 @@ export function buildHostVerifier(
         )
       }
       if (mode === "no") return true
-      // mode === "accept-new": accept and persist
-      result.pendingPersist = acceptAndPersistHostKey(host, port, key)
+      // mode === "accept-new": accept this key for this handshake, but only
+      // commit TOFU trust after ssh2 reports the connection as ready.
+      acceptedHostKey = Buffer.from(key)
       return true
     },
   }

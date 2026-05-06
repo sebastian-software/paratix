@@ -9,7 +9,12 @@ import { Client, type ClientChannel } from "ssh2"
 
 import type { ExecOptions, ExecResult, SshConfig, SshConnection } from "./types.js"
 
-import { buildHostVerifier, extractAlgoFromKey, HostKeyVerificationError } from "./knownHosts.js"
+import {
+  buildHostVerifier,
+  extractAlgoFromKey,
+  HostKeyVerificationError,
+  type HostVerifierResult,
+} from "./knownHosts.js"
 import { getRegisteredSecrets, withRegisteredSecrets } from "./secretSink.js"
 import { sftpDownload, sftpUpload, sftpUploadContent } from "./sftp.js"
 import {
@@ -96,6 +101,10 @@ type TryConnectOnPortsOptions = {
   password?: string
   privateKey?: Buffer | string
   reconnectDeadline?: number
+}
+type HostKeyAttempt = {
+  commit: () => void
+  hostVerifier: (key: Buffer) => boolean
 }
 
 type SshRuntimeState = {
@@ -1067,7 +1076,6 @@ trap - EXIT
    */
   // eslint-disable-next-line sonarjs/cognitive-complexity -- port fallback, host-key errors, and abort handling belong together
   private async tryConnectOnPorts(options: TryConnectOnPortsOptions = {}): Promise<boolean> {
-    const mode = this.config.strictHostKeyChecking ?? "yes"
     for (const port of this.runtime.ports) {
       if (hasReconnectDeadlineExpired(options.reconnectDeadline)) return false
       // R-0000039: keep the Client reference outside the try-block so the
@@ -1078,14 +1086,14 @@ trap - EXIT
       const client = new Client()
       try {
         const verifier = buildHostVerifier(
-          mode,
+          this.config.strictHostKeyChecking ?? "yes",
           { host: this.runtime.host, port },
           {
             expectedHostFingerprint: this.config.expectedHostFingerprint,
             expectedHostPublicKey: this.config.expectedHostPublicKey,
           }
         )
-        const wrappedVerifier = this.wrapHostVerifier(verifier.hostVerifier)
+        const hostKeyAttempt = this.createHostKeyAttempt(verifier.hostVerifier)
         // eslint-disable-next-line no-await-in-loop
         await tryConnectOnPort({
           abortSignal: this.promptAbortSignal,
@@ -1093,16 +1101,17 @@ trap - EXIT
           agentForward: this.config.agentForward,
           client,
           host: this.runtime.host,
-          hostVerifier: wrappedVerifier,
+          hostVerifier: hostKeyAttempt.hostVerifier,
           password: options.password,
           port,
           privateKey: options.privateKey,
           readyTimeout: getRemainingReconnectTimeout(options.reconnectDeadline),
           username: this.config.user,
         })
-        // Ensure the host key is persisted to disk before returning
+        hostKeyAttempt.commit()
+        // Ensure the host key is persisted to disk before returning.
         // eslint-disable-next-line no-await-in-loop
-        if (verifier.pendingPersist != null) await verifier.pendingPersist
+        await this.commitAcceptedHostKey(verifier)
         this.registerConnectedClient(client, port)
         return true
       } catch (error) {
@@ -1185,6 +1194,53 @@ trap - EXIT
     }
   }
 
+  private async commitAcceptedHostKey(verifier: HostVerifierResult): Promise<void> {
+    if (verifier.commitAcceptedHostKey != null) {
+      await verifier.commitAcceptedHostKey()
+      return
+    }
+    if (verifier.pendingPersist != null) await verifier.pendingPersist
+  }
+
+  /**
+   * Create a host-key verification attempt that only commits accepted trust
+   * state after the SSH handshake succeeds.
+   *
+   * @param original - The original verifier from `buildHostVerifier`, if any.
+   * @returns A verifier and commit callback for host-key pinning.
+   */
+  private createHostKeyAttempt(original?: (key: Buffer) => boolean): HostKeyAttempt {
+    let acceptedPinnedHostKey: Buffer | null = null
+    let acceptedVerifiedHostKey: Buffer | null = null
+
+    return {
+      commit: (): void => {
+        if (acceptedVerifiedHostKey != null) this.verifiedHostKey ??= acceptedVerifiedHostKey
+        if (acceptedPinnedHostKey != null) this.pinnedHostKey ??= acceptedPinnedHostKey
+      },
+      hostVerifier: (key: Buffer): boolean => {
+        if (
+          this.pinnedHostKey != null &&
+          (this.pinnedHostKey.length !== key.length || !timingSafeEqual(this.pinnedHostKey, key))
+        ) {
+          this.clearCachedPassword()
+          throw new HostKeyVerificationError(
+            `HOST KEY CHANGED on reconnect to ${this.runtime.host}: ` +
+              "the remote host key does not match the key from the initial connection. " +
+              "This could indicate a man-in-the-middle attack."
+          )
+        }
+        if (original != null) {
+          const accepted = original(key)
+          if (!accepted) return false
+          acceptedVerifiedHostKey ??= Buffer.from(key)
+        }
+        acceptedPinnedHostKey ??= Buffer.from(key)
+        return true
+      },
+    }
+  }
+
   private async verifyRemoteWriteFile(
     remotePath: string,
     expectedSize: number
@@ -1203,36 +1259,6 @@ trap - EXIT
     return actualSize === expectedSize ? "matches" : "size-mismatch"
   }
   /* eslint-enable perfectionist/sort-classes */
-
-  /**
-   * Wrap a host-key verifier to pin the accepted key on first connection and
-   * reject key changes on subsequent connections (reconnects).
-   *
-   * @param original - The original verifier from `buildHostVerifier`, if any.
-   * @returns A verifier that enforces host-key pinning.
-   */
-  private wrapHostVerifier(original?: (key: Buffer) => boolean): (key: Buffer) => boolean {
-    return (key: Buffer): boolean => {
-      if (
-        this.pinnedHostKey != null &&
-        (this.pinnedHostKey.length !== key.length || !timingSafeEqual(this.pinnedHostKey, key))
-      ) {
-        this.clearCachedPassword()
-        throw new HostKeyVerificationError(
-          `HOST KEY CHANGED on reconnect to ${this.runtime.host}: ` +
-            "the remote host key does not match the key from the initial connection. " +
-            "This could indicate a man-in-the-middle attack."
-        )
-      }
-      if (original != null) {
-        const accepted = original(key)
-        if (!accepted) return false
-        this.verifiedHostKey ??= Buffer.from(key)
-      }
-      this.pinnedHostKey ??= Buffer.from(key)
-      return true
-    }
-  }
 
   /**
    * Write the cached sudo password followed by a newline to the given stream.

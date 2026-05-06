@@ -208,6 +208,13 @@ function makeSshInstance(
   return new SshConnectionImpl(overrides.host ?? "1.2.3.4", config)
 }
 
+function makeWireHostKey(algorithmName: string, payload: string): Buffer {
+  const algorithm = Buffer.from(algorithmName)
+  const algorithmLength = Buffer.alloc(4)
+  algorithmLength.writeUInt32BE(algorithm.length)
+  return Buffer.concat([algorithmLength, algorithm, Buffer.from(payload)])
+}
+
 function makeWriteFileExecSpy(
   executedCommands: string[],
   tempPath: string
@@ -3472,6 +3479,68 @@ describe("SshConnectionImpl", () => {
       resolvePersist?.()
       await connectPromise
       expect(connected).toBe(true)
+    })
+
+    it("commits host-key trust only for the port that completes the SSH handshake", async () => {
+      const firstKey = makeWireHostKey("ssh-ed25519", "failed-port-key")
+      const secondKey = makeWireHostKey("ssh-ed25519", "successful-port-key")
+      const { buildHostVerifier } = await import("../src/knownHosts.js")
+      vi.mocked(buildHostVerifier).mockReturnValue({
+        hostVerifier: vi.fn().mockReturnValue(true),
+      })
+      vi.mocked(tryConnectOnPort)
+        .mockImplementationOnce(async ({ hostVerifier }) => {
+          hostVerifier?.(firstKey)
+          await Promise.resolve()
+          throw new Error("first port failed after host verification")
+        })
+        .mockImplementationOnce(async ({ hostVerifier }) => {
+          hostVerifier?.(secondKey)
+          await Promise.resolve()
+        })
+
+      const ssh = makeSshInstance({ host: "1.2.3.4", ports: [22, 2222] })
+
+      await ssh.connect()
+
+      expect(ssh.getConnectionInfo().verifiedHostPublicKey).toBe(
+        `ssh-ed25519 ${secondKey.toString("base64")}`
+      )
+      expect((ssh as unknown as { pinnedHostKey: Buffer | null }).pinnedHostKey).toStrictEqual(
+        secondKey
+      )
+    })
+
+    it("defers accept-new persistence until a port completes the SSH handshake", async () => {
+      const firstCommitAcceptedHostKey = vi.fn().mockResolvedValue(undefined)
+      const secondCommitAcceptedHostKey = vi.fn().mockResolvedValue(undefined)
+      const { buildHostVerifier } = await import("../src/knownHosts.js")
+      vi.mocked(buildHostVerifier)
+        .mockReturnValueOnce({
+          commitAcceptedHostKey: firstCommitAcceptedHostKey,
+          hostVerifier: vi.fn().mockReturnValue(true),
+        })
+        .mockReturnValueOnce({
+          commitAcceptedHostKey: secondCommitAcceptedHostKey,
+          hostVerifier: vi.fn().mockReturnValue(true),
+        })
+      vi.mocked(tryConnectOnPort)
+        .mockImplementationOnce(async ({ hostVerifier }) => {
+          hostVerifier?.(makeWireHostKey("ssh-ed25519", "failed-port-key"))
+          await Promise.resolve()
+          throw new Error("first port failed after host verification")
+        })
+        .mockImplementationOnce(async ({ hostVerifier }) => {
+          hostVerifier?.(makeWireHostKey("ssh-ed25519", "successful-port-key"))
+          await Promise.resolve()
+        })
+
+      const ssh = makeSshInstance({ host: "1.2.3.4", ports: [22, 2222] })
+
+      await ssh.connect()
+
+      expect(firstCommitAcceptedHostKey).not.toHaveBeenCalled()
+      expect(secondCommitAcceptedHostKey).toHaveBeenCalledOnce()
     })
   })
 })

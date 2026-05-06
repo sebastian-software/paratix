@@ -578,18 +578,21 @@ describe("buildHostVerifier", () => {
     expect(() => hostVerifier!(ed25519Key)).toThrow(/configured trust anchor/v)
   })
 
-  it("mode 'accept-new' with unknown host: hostVerifier returns true and calls appendHostKey", async () => {
+  it("mode 'accept-new' with unknown host: hostVerifier returns true and commits appendHostKey later", async () => {
     // No known hosts
     readFileSyncMock.mockReturnValue("")
 
-    const { hostVerifier } = buildHostVerifier("accept-new", { host: "newhost.com", port: 22 })
+    const { commitAcceptedHostKey, hostVerifier } = buildHostVerifier("accept-new", {
+      host: "newhost.com",
+      port: 22,
+    })
     expect(hostVerifier).toBeDefined()
 
     const result = hostVerifier!(ed25519Key)
     expect(result).toBe(true)
+    expect(appendFileMock).not.toHaveBeenCalled()
 
-    // appendHostKey is fire-and-forget, give microtasks a chance to run
-    await Promise.resolve()
+    await commitAcceptedHostKey?.()
 
     expect(appendFileMock).toHaveBeenCalled()
   })
@@ -600,12 +603,16 @@ describe("buildHostVerifier", () => {
       throw missingFileError
     })
 
-    const { hostVerifier } = buildHostVerifier("accept-new", { host: "newhost.com", port: 22 })
+    const { commitAcceptedHostKey, hostVerifier } = buildHostVerifier("accept-new", {
+      host: "newhost.com",
+      port: 22,
+    })
     expect(hostVerifier).toBeDefined()
 
     expect(hostVerifier!(ed25519Key)).toBe(true)
+    expect(appendFileMock).not.toHaveBeenCalled()
 
-    await Promise.resolve()
+    await commitAcceptedHostKey?.()
 
     expect(appendFileMock).toHaveBeenCalled()
   })
@@ -628,10 +635,16 @@ describe("buildHostVerifier", () => {
     const stderrSpy = vi.spyOn(process.stderr, "write").mockImplementation(() => true)
 
     try {
-      const { hostVerifier } = buildHostVerifier("accept-new", { host: "newhost.com", port: 22 })
+      const { commitAcceptedHostKey, hostVerifier } = buildHostVerifier("accept-new", {
+        host: "newhost.com",
+        port: 22,
+      })
       expect(hostVerifier).toBeDefined()
 
       hostVerifier!(ed25519Key)
+      expect(stderrSpy).not.toHaveBeenCalled()
+
+      await commitAcceptedHostKey?.()
 
       expect(stderrSpy).toHaveBeenCalledTimes(1)
       const warning = (stderrSpy.mock.calls[0] as [string])[0]
@@ -761,14 +774,14 @@ describe("buildHostVerifier", () => {
       `@cert-authority ca-only.example ssh-ed25519 ${ed25519Key.toString("base64")}\n`
     )
 
-    const { hostVerifier, pendingPersist } = buildHostVerifier("accept-new", {
+    const { commitAcceptedHostKey, hostVerifier } = buildHostVerifier("accept-new", {
       host: "ca-only.example",
       port: 22,
     })
     expect(hostVerifier).toBeDefined()
 
     expect(hostVerifier!(ed25519Key)).toBe(true)
-    await pendingPersist
+    await commitAcceptedHostKey?.()
     expect(appendFileMock).toHaveBeenCalledOnce()
     expect(String(appendFileMock.mock.calls[0]?.[1])).toContain("ca-only.example ssh-ed25519")
   })
@@ -826,14 +839,14 @@ describe("buildHostVerifier", () => {
       `@revoked *.example.com,!safe.example.com ssh-ed25519 ${ed25519Key.toString("base64")}\n`
     )
 
-    const { hostVerifier } = buildHostVerifier("accept-new", {
+    const { commitAcceptedHostKey, hostVerifier } = buildHostVerifier("accept-new", {
       host: "safe.example.com",
       port: 22,
     })
     expect(hostVerifier).toBeDefined()
 
     expect(hostVerifier!(ed25519Key)).toBe(true)
-    await Promise.resolve()
+    await commitAcceptedHostKey?.()
 
     expect(appendFileMock).toHaveBeenCalled()
   })
@@ -848,24 +861,24 @@ describe("buildHostVerifier", () => {
     const stderrSpy = vi.spyOn(process.stderr, "write").mockImplementation(() => true)
 
     try {
-      const { hostVerifier } = buildHostVerifier("accept-new", { host: "newhost.com", port: 22 })
+      const { commitAcceptedHostKey, hostVerifier } = buildHostVerifier("accept-new", {
+        host: "newhost.com",
+        port: 22,
+      })
       expect(hostVerifier).toBeDefined()
 
-      // hostVerifier itself returns true — the appendHostKey failure is fire-and-forget
+      // hostVerifier itself returns true; persistence is committed separately.
       const result = hostVerifier!(ed25519Key)
       expect(result).toBe(true)
+      expect(stderrSpy).not.toHaveBeenCalled()
 
-      // The first stderr.write is the "Permanently added" warning (synchronous)
-      expect(stderrSpy).toHaveBeenCalledTimes(1)
+      await commitAcceptedHostKey?.()
+      expect(stderrSpy).toHaveBeenCalledTimes(2)
       const addedWarning = (stderrSpy.mock.calls[0] as [string])[0]
       expect(addedWarning).toContain("WARNING")
       expect(addedWarning).toContain("Permanently added")
       expect(addedWarning).toContain("newhost.com")
 
-      // Flush the full async chain: mkdir resolves → appendFile rejects → .catch() runs
-      await vi.waitFor(() => {
-        expect(stderrSpy).toHaveBeenCalledTimes(2)
-      })
       const persistWarning = (stderrSpy.mock.calls[1] as [string])[0]
       expect(persistWarning).toContain("WARNING")
       expect(persistWarning).toContain("cached in memory")
@@ -878,13 +891,16 @@ describe("buildHostVerifier", () => {
   it("mode 'accept-new' with unknown host on non-standard port: appends [host]:port entry", async () => {
     readFileSyncMock.mockReturnValue("")
 
-    const { hostVerifier } = buildHostVerifier("accept-new", { host: "example.com", port: 2222 })
+    const { commitAcceptedHostKey, hostVerifier } = buildHostVerifier("accept-new", {
+      host: "example.com",
+      port: 2222,
+    })
     expect(hostVerifier).toBeDefined()
 
     const result = hostVerifier!(ed25519Key)
     expect(result).toBe(true)
 
-    await Promise.resolve()
+    await commitAcceptedHostKey?.()
 
     expect(appendFileMock).toHaveBeenCalled()
     const [, content] = appendFileMock.mock.calls[0] as [string, string, unknown]
@@ -922,7 +938,7 @@ describe("buildHostVerifier", () => {
     // Arrange: empty known_hosts, appendFile succeeds
     readFileSyncMock.mockReturnValue("")
 
-    const { hostVerifier: firstVerifier } = buildHostVerifier("accept-new", {
+    const { commitAcceptedHostKey, hostVerifier: firstVerifier } = buildHostVerifier("accept-new", {
       host: "newhost.com",
       port: 22,
     })
@@ -932,7 +948,7 @@ describe("buildHostVerifier", () => {
     const firstResult = firstVerifier!(ed25519Key)
     expect(firstResult).toBe(true)
 
-    await Promise.resolve()
+    await commitAcceptedHostKey?.()
 
     // Arrange: second verifier with empty known_hosts but in-memory cache still populated
     // (clearHostKeyCache NOT called)
@@ -955,14 +971,14 @@ describe("buildHostVerifier", () => {
     // Arrange: empty known_hosts, accept key A
     readFileSyncMock.mockReturnValue("")
 
-    const { hostVerifier: firstVerifier } = buildHostVerifier("accept-new", {
+    const { commitAcceptedHostKey, hostVerifier: firstVerifier } = buildHostVerifier("accept-new", {
       host: "newhost.com",
       port: 22,
     })
     expect(firstVerifier).toBeDefined()
     firstVerifier!(ed25519Key)
 
-    await Promise.resolve()
+    await commitAcceptedHostKey?.()
 
     // Arrange: second verifier with empty known_hosts but cached key A still in memory
     readFileSyncMock.mockReturnValue("")
@@ -986,10 +1002,14 @@ describe("buildHostVerifier", () => {
     const stderrSpy = vi.spyOn(process.stderr, "write").mockImplementation(() => true)
 
     try {
-      const { hostVerifier } = buildHostVerifier("accept-new", { host: "newhost.com", port: 22 })
+      const { commitAcceptedHostKey, hostVerifier } = buildHostVerifier("accept-new", {
+        host: "newhost.com",
+        port: 22,
+      })
       expect(hostVerifier).toBeDefined()
 
       hostVerifier!(ed25519Key)
+      await commitAcceptedHostKey?.()
 
       // Wait for the async .catch() to fire
       await vi.waitFor(() => {
@@ -1012,10 +1032,14 @@ describe("buildHostVerifier", () => {
     const stderrSpy = vi.spyOn(process.stderr, "write").mockImplementation(() => true)
 
     try {
-      const { hostVerifier } = buildHostVerifier("accept-new", { host: "newhost.com", port: 2222 })
+      const { commitAcceptedHostKey, hostVerifier } = buildHostVerifier("accept-new", {
+        host: "newhost.com",
+        port: 2222,
+      })
       expect(hostVerifier).toBeDefined()
 
       hostVerifier!(ed25519Key)
+      await commitAcceptedHostKey?.()
 
       // Wait for the async .catch() to fire
       await vi.waitFor(() => {
@@ -1046,10 +1070,14 @@ describe("buildHostVerifier", () => {
       const stderrSpy = vi.spyOn(process.stderr, "write").mockImplementation(() => true)
 
       try {
-        const { hostVerifier } = buildHostVerifier("accept-new", { host: maliciousHost, port })
+        const { commitAcceptedHostKey, hostVerifier } = buildHostVerifier("accept-new", {
+          host: maliciousHost,
+          port,
+        })
         expect(hostVerifier).toBeDefined()
 
         hostVerifier!(ed25519Key)
+        await commitAcceptedHostKey?.()
 
         // Wait for the async .catch() to fire and write the second warning
         await vi.waitFor(() => {
@@ -1071,14 +1099,14 @@ describe("buildHostVerifier", () => {
     // Arrange: accept a key so it gets cached
     readFileSyncMock.mockReturnValue("")
 
-    const { hostVerifier: firstVerifier } = buildHostVerifier("accept-new", {
+    const { commitAcceptedHostKey, hostVerifier: firstVerifier } = buildHostVerifier("accept-new", {
       host: "newhost.com",
       port: 22,
     })
     expect(firstVerifier).toBeDefined()
     firstVerifier!(ed25519Key)
 
-    await Promise.resolve()
+    await commitAcceptedHostKey?.()
 
     // Act: clear the cache
     clearHostKeyCache()
@@ -1086,19 +1114,19 @@ describe("buildHostVerifier", () => {
     // Arrange: new verifier with empty known_hosts and empty cache
     readFileSyncMock.mockReturnValue("")
     appendFileMock.mockClear()
-    const { hostVerifier: secondVerifier } = buildHostVerifier("accept-new", {
-      host: "newhost.com",
-      port: 22,
-    })
+    const { commitAcceptedHostKey: secondCommitAcceptedHostKey, hostVerifier: secondVerifier } =
+      buildHostVerifier("accept-new", {
+        host: "newhost.com",
+        port: 22,
+      })
     expect(secondVerifier).toBeDefined()
 
     // Act: second verifier should treat the key as unknown again
     const result = secondVerifier!(ed25519Key)
     expect(result).toBe(true)
 
-    await Promise.resolve()
-
     // Assert: appendFile called again (key was unknown, not from cache)
+    await secondCommitAcceptedHostKey?.()
     expect(appendFileMock).toHaveBeenCalledTimes(1)
   })
 })
