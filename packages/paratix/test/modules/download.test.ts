@@ -1295,6 +1295,7 @@ describe("download.large", () => {
 
     it("direct apply returns ok without downloading when the flag already exists", async () => {
       const mockSsh = createMockSsh({
+        [`[ -e '${destination}' ]`]: { code: 0 },
         [`[ -f /var/lib/paratix/flags/'${flagName}' ]`]: { code: 0 },
       })
       const mod = download.large(destination, url, allowUnverifiedDownload)
@@ -1303,6 +1304,40 @@ describe("download.large", () => {
       expect(mockSsh.calls.every((c) => !c.startsWith("curl"))).toBe(true)
       expect(mockSsh.calls.every((c) => !c.startsWith("mktemp"))).toBe(true)
       expect(mockSsh.calls).not.toContain(`mkdir /var/lib/paratix/flags/'${flagName}.lock'`)
+    })
+
+    it("repairs a missing destination even when the flag already exists", async () => {
+      const mockSsh = createMockSsh({
+        ...downloadMktempStub(destination, temporaryDestination),
+        [`[ -e '${destination}' ]`]: { code: 1 },
+        [`[ -f /var/lib/paratix/flags/'${flagName}' ]`]: { code: 0 },
+      })
+      const mod = download.large(destination, url, allowUnverifiedDownload)
+      const result = await mod.apply(mockSsh, emptyEnv)
+      expect(result.status).toBe("changed")
+      expect(mockSsh.calls).toContain(
+        `curl -fsSL -o '${temporaryDestination}' ${httpsOnlyCurlProtocolFlags} --config -`
+      )
+      expect(mockSsh.calls).toContain(`mv '${temporaryDestination}' '${destination}'`)
+      expect(mockSsh.calls).toContain(`touch /var/lib/paratix/flags/'${flagName}'`)
+    })
+
+    it("repairs metadata drift when the flag already exists", async () => {
+      const sha256 = "aabbccddaabbccddaabbccddaabbccddaabbccddaabbccddaabbccddaabbccdd"
+      const mockSsh = createMockSsh({
+        [`[ -e '${destination}' ]`]: { code: 0 },
+        [`[ -f '${destination}' ]`]: { code: 0 },
+        [`[ -f /var/lib/paratix/flags/'${flagName}' ]`]: { code: 0 },
+        [`sha256sum '${destination}'`]: { stdout: `${sha256}  ${destination}` },
+        [`stat -c '%a %U %G' '${destination}'`]: { stdout: "644 root root" },
+      })
+      const mod = download.large(destination, url, { mode: "0755", sha256 })
+      const result = await mod.apply(mockSsh, emptyEnv)
+      expect(result.status).toBe("changed")
+      expect(mockSsh.calls).toContain(`chmod '0755' '${destination}'`)
+      expect(mockSsh.calls).toContain(`touch /var/lib/paratix/flags/'${flagName}'`)
+      expect(mockSsh.calls.every((c) => !c.startsWith("curl"))).toBe(true)
+      expect(mockSsh.calls.every((c) => !c.startsWith("mktemp"))).toBe(true)
     })
 
     it("downloads file via curl --config from stdin and sets flag on success", async () => {

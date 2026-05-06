@@ -101,6 +101,7 @@ export async function applyWithFlagLock(
   parameters: {
     apply: () => Promise<ModuleResult>
     flagName: string
+    shouldApply?: () => Promise<boolean>
     waitSeconds?: number
   }
 ): Promise<ModuleResult> {
@@ -117,14 +118,26 @@ async function runLockedFlagApply(
     apply: () => Promise<ModuleResult>
     flagName: string
     lockName: string
+    shouldApply?: () => Promise<boolean>
   }
 ): Promise<ModuleResult> {
   try {
-    if (await hasFlag(ssh, parameters.flagName)) return { status: "ok" }
+    if (!(await shouldRunFlagApply(ssh, parameters))) return { status: "ok" }
     return await parameters.apply()
   } finally {
     await releaseFlagLock(ssh, parameters.lockName)
   }
+}
+
+async function shouldRunFlagApply(
+  ssh: SshConnection,
+  parameters: {
+    flagName: string
+    shouldApply?: () => Promise<boolean>
+  }
+): Promise<boolean> {
+  if (!(await hasFlag(ssh, parameters.flagName))) return true
+  return parameters.shouldApply == null ? false : parameters.shouldApply()
 }
 
 async function tryApplyWithFlagLock(
@@ -133,10 +146,11 @@ async function tryApplyWithFlagLock(
     apply: () => Promise<ModuleResult>
     flagName: string
     lockName: string
+    shouldApply?: () => Promise<boolean>
     waitSeconds?: number
   }
 ): Promise<ModuleResult> {
-  if (await hasFlag(ssh, parameters.flagName)) return { status: "ok" }
+  if (!(await shouldRunFlagApply(ssh, parameters))) return { status: "ok" }
 
   if (await acquireFlagLock(ssh, parameters.lockName)) {
     return runLockedFlagApply(ssh, parameters)

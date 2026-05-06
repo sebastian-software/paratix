@@ -681,6 +681,15 @@ export const download = {
             return { ...result, status: "changed" }
           },
           flagName,
+          async shouldApply() {
+            return (
+              (await checkLargeDownload(conn, {
+                destination,
+                flagName,
+                options: resolvedOptions,
+              })) === NEEDS_APPLY
+            )
+          },
         })
       },
       async check(conn: null | SshConnection): Promise<"needs-apply" | "ok"> {
