@@ -276,8 +276,9 @@ export function scaffoldProject(
 async function resolveCliOrPromptAdminPublicKey(parameters: {
   adminPublicKey: string | undefined
   adminPublicKeyFile: string | undefined
+  allowPlaceholder?: boolean
 }): Promise<string | undefined> {
-  const { adminPublicKey, adminPublicKeyFile } = parameters
+  const { adminPublicKey, adminPublicKeyFile, allowPlaceholder = true } = parameters
 
   if (adminPublicKey !== undefined) {
     return validateAdminPublicKey(exitWithMessage, adminPublicKey)
@@ -288,7 +289,7 @@ async function resolveCliOrPromptAdminPublicKey(parameters: {
   }
 
   if (process.stdin.isTTY && process.stdout.isTTY) {
-    return promptForAdminPublicKey()
+    return promptForAdminPublicKey(undefined, undefined, { allowPlaceholder })
   }
 
   return undefined
@@ -329,6 +330,7 @@ function main(): void {
     const resolvedAdminPublicKey = await resolveCliOrPromptAdminPublicKey({
       adminPublicKey,
       adminPublicKeyFile,
+      allowPlaceholder: initialUserConfig.kind !== "root",
     })
     scaffoldProject(normalizedProjectName, pm, {
       adminPublicKey: resolvedAdminPublicKey,

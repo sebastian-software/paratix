@@ -16,6 +16,9 @@ type ExitWithMessage = (message: string) => never
 
 type PublicKeyChoice = "local" | "placeholder"
 type ParsedPublicKey = { algorithm: string; encodedKey: string }
+type PromptForAdminPublicKeyOptions = {
+  allowPlaceholder?: boolean
+}
 
 const PUBLIC_KEY_PROMPT_OPTIONS: Array<SelectOption<PublicKeyChoice>> = [
   {
@@ -267,13 +270,30 @@ function createPublicKeyOptions(publicKeys: LocalPublicKey[]): Array<SelectOptio
   }))
 }
 
+function createPublicKeyModeOptions(
+  allowPlaceholder: boolean
+): Array<SelectOption<PublicKeyChoice>> {
+  if (allowPlaceholder) return PUBLIC_KEY_PROMPT_OPTIONS
+  return PUBLIC_KEY_PROMPT_OPTIONS.filter((option) => option.value !== "placeholder")
+}
+
+function printNoLocalPublicKeysMessage(allowPlaceholder: boolean): void {
+  console.error(
+    allowPlaceholder
+      ? "No readable public keys were found in ~/.ssh. Keeping the placeholder in server.ts."
+      : "No readable public keys were found in ~/.ssh. Root bootstrap requires an admin public key."
+  )
+}
+
 export async function promptForAdminPublicKey(
   select: SelectFunction<string>,
-  publicKeys = discoverLocalPublicKeys()
+  publicKeys = discoverLocalPublicKeys(),
+  options?: PromptForAdminPublicKeyOptions
 ): Promise<string | undefined> {
+  const allowPlaceholder = options?.allowPlaceholder ?? true
   const publicKeyMode = await select(
     "How should create-paratix configure the admin SSH public key?",
-    PUBLIC_KEY_PROMPT_OPTIONS
+    createPublicKeyModeOptions(allowPlaceholder)
   )
 
   if (publicKeyMode !== "local") {
@@ -281,9 +301,7 @@ export async function promptForAdminPublicKey(
   }
 
   if (publicKeys.length === 0) {
-    console.error(
-      "No readable public keys were found in ~/.ssh. Keeping the placeholder in server.ts."
-    )
+    printNoLocalPublicKeysMessage(allowPlaceholder)
     return undefined
   }
 

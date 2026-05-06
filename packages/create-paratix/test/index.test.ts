@@ -1267,6 +1267,39 @@ describe("promptForAdminPublicKey", () => {
     )
   })
 
+  it("does not offer the placeholder for root bootstrap admin key selection", async () => {
+    const select = vi
+      .fn()
+      .mockResolvedValueOnce("local")
+      .mockResolvedValueOnce("/tmp/id_ed25519.pub")
+
+    await expect(
+      promptForAdminPublicKey(
+        select,
+        [
+          {
+            key: "ssh-ed25519 AAAA example-ed25519",
+            label: "id_ed25519.pub",
+            path: "/tmp/id_ed25519.pub",
+          },
+        ],
+        { allowPlaceholder: false }
+      )
+    ).resolves.toBe("ssh-ed25519 AAAA example-ed25519")
+    expect(select).toHaveBeenNthCalledWith(
+      1,
+      "How should create-paratix configure the admin SSH public key?",
+      [
+        {
+          description:
+            "Read a public key from ~/.ssh and embed it directly into server.ts for the bootstrap admin user.",
+          label: "Use local public key",
+          value: "local",
+        },
+      ]
+    )
+  })
+
   it("selects from multiple local public keys via the cursor flow", async () => {
     const select = vi
       .fn()
@@ -1296,6 +1329,17 @@ describe("promptForAdminPublicKey", () => {
     await expect(promptForAdminPublicKey(select, [])).resolves.toBeUndefined()
     expect(console.error).toHaveBeenCalledWith(
       "No readable public keys were found in ~/.ssh. Keeping the placeholder in server.ts."
+    )
+  })
+
+  it("does not claim placeholder fallback for root bootstrap when no local keys exist", async () => {
+    const select = vi.fn().mockResolvedValueOnce("local")
+
+    await expect(
+      promptForAdminPublicKey(select, [], { allowPlaceholder: false })
+    ).resolves.toBeUndefined()
+    expect(console.error).toHaveBeenCalledWith(
+      "No readable public keys were found in ~/.ssh. Root bootstrap requires an admin public key."
     )
   })
 })
@@ -2079,7 +2123,7 @@ describe("writeProjectFiles", () => {
     expect(content).toContain('ufw.rule("allow", firewallTcpPorts)')
     expect(content).toContain('(env) => env["FIRST_RUN"] !== true')
     expect(content).toContain('command.shell("ufw --force delete allow 22", {')
-    expect(content).toContain('check: "! ufw status | grep -Eq \'^22[[:space:]]+ALLOW\'"')
+    expect(content).toContain("check: \"! ufw status | grep -Eq '^22[[:space:]]+ALLOW'\"")
   })
 
   it("generated server.ts keeps port 22 open during first run before removing it later", () => {

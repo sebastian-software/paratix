@@ -190,7 +190,8 @@ export async function promptForInitialUserConfig(
 
 export async function promptForAdminPublicKey(
   select?: SelectFunction<string>,
-  publicKeys?: Array<{ key: string; label: string; path: string }>
+  publicKeys?: Array<{ key: string; label: string; path: string }>,
+  options?: { allowPlaceholder?: boolean }
 ): Promise<string | undefined> {
   const terminalSelect = select == null ? createTerminalSelect() : null
   const choose = select ?? terminalSelect?.select
@@ -200,7 +201,7 @@ export async function promptForAdminPublicKey(
   }
 
   try {
-    return await promptForScaffoldAdminPublicKey(choose, publicKeys)
+    return await promptForScaffoldAdminPublicKey(choose, publicKeys, options)
   } finally {
     terminalSelect?.close()
   }
