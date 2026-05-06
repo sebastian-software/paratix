@@ -422,6 +422,60 @@ describe("mount.present — check", () => {
     expect(result).toBe("ok")
   })
 
+  it("returns needs-apply when live options contain unexpected allow_other", async () => {
+    const mockSsh = createMockSsh({
+      [findmntCheckCmd]: {
+        code: 0,
+        stdout: `${mountSrc} ${mountFstype} ${expandedDefaultMountOpts},allow_other`,
+      },
+    })
+    const mod = mount.present({
+      fstype: mountFstype,
+      opts: defaultMountOpts,
+      path: mountPath,
+      persist: false,
+      src: mountSrc,
+    })
+    const result = await mod.check(mockSsh, emptyEnv)
+    expect(result).toBe("needs-apply")
+  })
+
+  it("returns needs-apply when live options contain unexpected bind", async () => {
+    const mockSsh = createMockSsh({
+      [findmntCheckCmd]: {
+        code: 0,
+        stdout: `${mountSrc} ${mountFstype} ${expandedDefaultMountOpts},bind`,
+      },
+    })
+    const mod = mount.present({
+      fstype: mountFstype,
+      opts: defaultMountOpts,
+      path: mountPath,
+      persist: false,
+      src: mountSrc,
+    })
+    const result = await mod.check(mockSsh, emptyEnv)
+    expect(result).toBe("needs-apply")
+  })
+
+  it("returns needs-apply when live options contain unexpected propagation", async () => {
+    const mockSsh = createMockSsh({
+      [findmntCheckCmd]: {
+        code: 0,
+        stdout: `${mountSrc} ${mountFstype} ${expandedDefaultMountOpts},shared:12`,
+      },
+    })
+    const mod = mount.present({
+      fstype: mountFstype,
+      opts: defaultMountOpts,
+      path: mountPath,
+      persist: false,
+      src: mountSrc,
+    })
+    const result = await mod.check(mockSsh, emptyEnv)
+    expect(result).toBe("needs-apply")
+  })
+
   it("uses findmnt with correct arguments", async () => {
     const mockSsh = createMockSsh({
       [findmntCheckCmd]: { code: 1 },

@@ -1,5 +1,5 @@
 const IMPLICIT_MOUNT_OPTIONS = new Set(
-  "async auto defaults dev exec nouser relatime rw suid".split(" ")
+  "async auto defaults dev errors=remount-ro exec inode64 nouser relatime rw suid".split(" ")
 )
 
 const STRICT_OPTION_GROUPS = [
@@ -26,6 +26,9 @@ export function mountOptionsMatch(liveOptions: string, desiredOptions: string): 
 
   for (const option of desired.normalized) {
     if (!live.normalized.has(option)) return false
+  }
+  for (const option of live.normalized) {
+    if (!desired.normalized.has(option)) return false
   }
   return true
 }
