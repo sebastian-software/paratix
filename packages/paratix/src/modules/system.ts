@@ -68,19 +68,23 @@ async function triggerReboot(ssh: SshConnection): Promise<ModuleResult | null> {
  * Build the meta entries emitted on a successful reboot trigger.
  *
  * Always emits `system.reboot`; additionally emits `system.host` if the
- * caller supplied a `resolveHost` option that resolves successfully.
+ * caller supplied a `resolveHost` option. Resolver failures are returned as a
+ * module failure so reconnect drift is visible to the operator.
  *
  * @param options - The reboot options (specifically `resolveHost`).
- * @returns The list of meta entries for the module result.
+ * @returns The list of meta entries for the module result, or a failure result.
  */
-async function buildRebootMetaEntries(options: RebootOptions): Promise<ModuleMetaEntry[]> {
+async function buildRebootMetaEntries(
+  options: RebootOptions
+): Promise<ModuleMetaEntry[] | ModuleResult> {
   const entries: ModuleMetaEntry[] = [meta.systemReboot()]
   if (options.resolveHost != null) {
     try {
       const newHost = await options.resolveHost()
       entries.push(meta.systemHost(newHost))
-    } catch {
-      // resolveHost failed — reconnect will use current host
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error)
+      return failed(`[system.reboot] resolveHost failed\n${message}`)
     }
   }
   return entries
@@ -280,6 +284,7 @@ export const system = {
         if (failure !== null) return failure
 
         const entries = await buildRebootMetaEntries(options)
+        if (!Array.isArray(entries)) return entries
         return { meta: entries, status: "changed" }
       },
       // eslint-disable-next-line @typescript-eslint/require-await

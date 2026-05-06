@@ -92,14 +92,15 @@ describe("system.reboot — apply", () => {
     expect(result.meta).toBeUndefined()
   })
 
-  it("falls back to current host when resolveHost throws", async () => {
+  it("returns failed when resolveHost throws", async () => {
     const ssh = createMockSsh(successfulRebootResponses)
     const resolveHost = vi.fn().mockRejectedValue(new Error("DNS failed"))
     const mod = system.reboot({ resolveHost })
     const result = await mod.apply(ssh, emptyEnv)
-    expect(result.status).toBe("changed")
-    expect(result.meta?.some(isSystemRebootMetaEntry)).toBe(true)
-    expect(result.meta?.some(isSystemHostMetaEntry)).toBe(false)
+    expect(result.status).toBe("failed")
+    expect(result.error?.message).toContain("[system.reboot] resolveHost failed")
+    expect(result.error?.message).toContain("DNS failed")
+    expect(result.meta).toBeUndefined()
   })
 
   it("treats SSH connection closed mid-shutdown as a successful reboot trigger", async () => {

@@ -258,21 +258,23 @@ async function restoreSourcesSnapshots(
  * re-resolution after the upgrade completes.
  *
  * Always sets `system.reboot` to `"true"`. If `options.resolveHost` is
- * provided and resolves successfully, `system.host` is set to the returned
- * address. Failures from `resolveHost` are silently ignored so the runner
- * falls back to the current host.
+ * provided, `system.host` is set to the returned address. Failures from
+ * `resolveHost` are returned as module failures so reconnect drift is visible.
  *
  * @param options - Upgrade options containing an optional `resolveHost` callback.
- * @returns A meta map suitable for inclusion in a `ModuleResult`.
+ * @returns A meta map suitable for inclusion in a `ModuleResult`, or a failure result.
  */
-async function buildRebootMeta(options: ReleaseUpgradeOptions): Promise<ModuleMetaEntry[]> {
+async function buildRebootMeta(
+  options: ReleaseUpgradeOptions
+): Promise<ModuleMetaEntry[] | ModuleResult> {
   const entries: ModuleMetaEntry[] = [meta.systemReboot()]
   if (options.resolveHost != null) {
     try {
       const newHost = await options.resolveHost()
       entries.push(meta.systemHost(newHost))
-    } catch {
-      // resolveHost failed — reconnect will use current host
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error)
+      return failed(`[releaseUpgrade.upgrade] resolveHost failed\n${message}`)
     }
   }
   return entries
@@ -341,6 +343,7 @@ async function applyUbuntu(
   if (upgradeFailure != null) return upgradeFailure
 
   const entries = await buildRebootMeta(options)
+  if (!Array.isArray(entries)) return entries
   return { meta: entries, status: "changed" }
 }
 
@@ -448,6 +451,7 @@ async function applyDebian(
   }
 
   const entries = await buildRebootMeta(options)
+  if (!Array.isArray(entries)) return entries
   return { meta: entries, status: "changed" }
 }
 

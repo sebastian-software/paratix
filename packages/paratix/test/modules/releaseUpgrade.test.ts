@@ -737,7 +737,7 @@ describe("releaseUpgrade.upgrade — apply (general)", () => {
     expect(result.meta?.some(isSystemRebootMetaEntry)).toBe(true)
   })
 
-  it("resolveHost fails → meta without system.host, upgrade still succeeds", async () => {
+  it("returns failed when resolveHost fails", async () => {
     const ssh = createMockSsh({
       "cat '/etc/os-release'": { code: 0, stdout: UBUNTU_OS_RELEASE },
       "DEBIAN_FRONTEND=noninteractive apt-get update": { code: 0 },
@@ -746,8 +746,9 @@ describe("releaseUpgrade.upgrade — apply (general)", () => {
     const resolveHost = vi.fn().mockRejectedValue(new Error("DNS timeout"))
     const mod = releaseUpgrade.upgrade({ resolveHost })
     const result = await mod.apply(ssh, emptyEnv)
-    expect(result.status).toBe("changed")
-    expect(result.meta?.some(isSystemRebootMetaEntry)).toBe(true)
-    expect(result.meta?.some(isSystemHostMetaEntry)).toBe(false)
+    expect(result.status).toBe("failed")
+    expect(result.error?.message).toContain("[releaseUpgrade.upgrade] resolveHost failed")
+    expect(result.error?.message).toContain("DNS timeout")
+    expect(result.meta).toBeUndefined()
   })
 })
