@@ -517,7 +517,9 @@ describe("apt.distUpgrade", () => {
 
 describe("apt.repository (PPA form)", () => {
   const launchpadContentHost = ["ppa.launchpad", "content.net"].join("")
-  const ppaCheckCommand = `grep -RqsF -- '/${launchpadContentHost}/nginx/stable/' /etc/apt/sources.list.d/ || grep -RqsF -- '/ppa.launchpad.net/nginx/stable/' /etc/apt/sources.list.d/`
+  const activeSourceLinesCommand =
+    "grep -RshE -- '^[[:space:]]*deb(-src)?[[:space:]]' /etc/apt/sources.list.d/ 2>/dev/null"
+  const ppaCheckCommand = `${activeSourceLinesCommand} | grep -Fqs -- '/${launchpadContentHost}/nginx/stable/' || ${activeSourceLinesCommand} | grep -Fqs -- '/ppa.launchpad.net/nginx/stable/'`
 
   it("check returns ok when PPA is found in sources", async () => {
     const ssh = createMockSsh({
@@ -535,6 +537,17 @@ describe("apt.repository (PPA form)", () => {
     const mod = apt.repository("ppa:nginx/stable")
     const result = await mod.check(ssh, emptyEnv)
     expect(result).toBe("needs-apply")
+  })
+
+  it("check only searches active source lines", async () => {
+    const ssh = createMockSsh({
+      [ppaCheckCommand]: { code: 1 },
+    })
+    const mod = apt.repository("ppa:nginx/stable")
+    const result = await mod.check(ssh, emptyEnv)
+    expect(result).toBe("needs-apply")
+    expect(ssh.calls).toStrictEqual([ppaCheckCommand])
+    expect(ppaCheckCommand).toContain("^[[:space:]]*deb")
   })
 
   it("check returns needs-apply when ssh is null", async () => {

@@ -317,6 +317,8 @@ function buildPpaRepository(ppa: string): Module {
   const launchpadContentHost = ["ppa.launchpad", "content.net"].join("")
   const launchpadContentPath = `/${launchpadContentHost}/${ppaPath}/`
   const launchpadPath = `/ppa.launchpad.net/${ppaPath}/`
+  const activeSourceLinesCommand =
+    "grep -RshE -- '^[[:space:]]*deb(-src)?[[:space:]]' /etc/apt/sources.list.d/ 2>/dev/null"
   return {
     async apply(ssh: null | SshConnection): Promise<ModuleResult> {
       if (!ssh) return failed(`[apt.repository] SSH connection is required for ${ppa}`)
@@ -330,8 +332,8 @@ function buildPpaRepository(ppa: string): Module {
     async check(ssh: null | SshConnection): Promise<"needs-apply" | "ok"> {
       if (!ssh) return NEEDS_APPLY
       const checkCommand = [
-        `grep -RqsF -- ${shellQuote(launchpadContentPath)} /etc/apt/sources.list.d/`,
-        `grep -RqsF -- ${shellQuote(launchpadPath)} /etc/apt/sources.list.d/`,
+        `${activeSourceLinesCommand} | grep -Fqs -- ${shellQuote(launchpadContentPath)}`,
+        `${activeSourceLinesCommand} | grep -Fqs -- ${shellQuote(launchpadPath)}`,
       ].join(" || ")
       return (await ssh.test(checkCommand)) ? "ok" : NEEDS_APPLY
     },
