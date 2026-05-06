@@ -611,6 +611,29 @@ describe("mount.present — apply", () => {
     expect(result.error?.message).toContain("[mount.present: /mnt/data] mount failed")
   })
 
+  it("does not persist a new fstab entry when mount command fails", async () => {
+    const writtenFiles: Array<{ content: string; path: string }> = []
+    const mockSsh = createMountApplyMockSsh({
+      "cat '/etc/fstab'": { stdout: "# /etc/fstab\n" },
+      [findmntCheckCmd]: { code: 1 },
+      [mountCmd]: { code: 1, stderr: "mount failed" },
+    })
+    // eslint-disable-next-line @typescript-eslint/require-await -- Mock implementation
+    mockSsh.writeFile = async (path: string, content: string): Promise<void> => {
+      writtenFiles.push({ content, path })
+    }
+    const mod = mount.present({
+      fstype: mountFstype,
+      opts: mountOpts,
+      path: mountPath,
+      src: mountSrc,
+    })
+    const result = await mod.apply(mockSsh, emptyEnv)
+
+    expect(result.status).toBe("failed")
+    expect(writtenFiles).toStrictEqual([])
+  })
+
   it("updates existing fstab entry when options differ", async () => {
     const oldLine = `${mountSrc} ${mountPath} ${mountFstype} defaults 0 0`
     const writtenFiles: Array<{ content: string; path: string }> = []

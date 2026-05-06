@@ -450,14 +450,14 @@ export const mount = {
           return failedCommand(`[mount.present: ${path}] mkdir -p failed`, mkdirResult)
         }
 
+        const liveResult = await ensureLiveMount(ssh, { fstype, opts, path, src })
+        if (typeof liveResult !== "boolean") return liveResult
+        if (liveResult) changed = true
+
         if (persist) {
           const desiredLine = buildFstabLine({ fstype, opts, path, src })
           if (await ensureFstabEntry(ssh, path, desiredLine)) changed = true
         }
-
-        const liveResult = await ensureLiveMount(ssh, { fstype, opts, path, src })
-        if (typeof liveResult !== "boolean") return liveResult
-        if (liveResult) changed = true
 
         return { status: changed ? "changed" : "ok" }
       },
