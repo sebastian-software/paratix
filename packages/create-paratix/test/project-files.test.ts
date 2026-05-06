@@ -1,6 +1,8 @@
-import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs"
+import { spawnSync } from "node:child_process"
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
-import { join } from "node:path"
+import { join, resolve } from "node:path"
+import { fileURLToPath } from "node:url"
 import { afterEach, beforeEach, describe, expect, it } from "vitest"
 
 import { deriveParatixDependencyRange, writeProjectFiles } from "../src/index.js"
@@ -17,6 +19,17 @@ import {
 } from "./helpers.js"
 
 let TEST_DIR = ""
+
+const repoRoot = resolve(fileURLToPath(new URL("../../..", import.meta.url)))
+const paratixIndexPath = resolve(
+  fileURLToPath(new URL("../../paratix/src/index.ts", import.meta.url))
+)
+const paratixModulesPath = resolve(
+  fileURLToPath(new URL("../../paratix/src/modules/index.ts", import.meta.url))
+)
+const tscBinaryPath = resolve(
+  fileURLToPath(new URL("../../../node_modules/typescript/bin/tsc", import.meta.url))
+)
 
 describe("writeProjectFiles", () => {
   beforeEach(() => {
@@ -138,6 +151,41 @@ describe("writeProjectFiles", () => {
       types: ["node"],
     })
     expect(parsed.include).toStrictEqual(["**/*.ts"])
+  })
+
+  it("generated server.ts typechecks against the local paratix package types", () => {
+    writeProjectFiles(TEST_DIR)
+
+    writeFileSync(
+      join(TEST_DIR, "tsconfig.typecheck.json"),
+      `${JSON.stringify(
+        {
+          compilerOptions: {
+            baseUrl: ".",
+            ignoreDeprecations: "6.0",
+            paths: {
+              paratix: [paratixIndexPath],
+              "paratix/modules": [paratixModulesPath],
+            },
+            typeRoots: [join(repoRoot, "node_modules", "@types")],
+          },
+          extends: "./tsconfig.json",
+          include: ["server.ts"],
+        },
+        null,
+        2
+      )}\n`
+    )
+
+    const typecheck = spawnSync(
+      tscBinaryPath,
+      ["--noEmit", "--project", "tsconfig.typecheck.json"],
+      {
+        cwd: TEST_DIR,
+        encoding: "utf8",
+      }
+    )
+    expect(typecheck.status, `${typecheck.stdout}\n${typecheck.stderr}`).toBe(0)
   })
 
   it("writes a Prettier config matching the scaffold default", () => {
