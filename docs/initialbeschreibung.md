@@ -612,15 +612,18 @@ interface SshConnection {
   // --- Verbindungsinformationen ---
 
   /**
-   * Gibt die aktuelle Verbindungskonfiguration zurueck.
-   * Wird von Modulen wie rsync.sync benoetigt, die lokal laufen
-   * aber SSH-Parameter fuer den Transfer brauchen.
+   * Gibt die aktuelle Verbindungskonfiguration zurück.
+   * Wird von lokalen Transfer-Modulen benötigt, die SSH-Parameter
+   * außerhalb der bestehenden SSH-Session brauchen.
    */
   getConnectionInfo(): {
+    agentSocket?: string
+    authMethod?: "agent" | "password" | "privateKey"
     host: string
     port: number
     user: string
-    privateKeyPath: string
+    privateKeyPath?: string
+    verifiedHostPublicKey?: string
   }
 }
 ```
@@ -1103,11 +1106,19 @@ selbst.
 
 ### rsync — Verbindungsdaten
 
-`SshConnection` bietet eine Methode `getConnectionInfo()` die
-`{ host, port, user, privateKeyPath }` zurueckgibt. Das `rsync.sync`-Modul
-ist kein lokales Modul — es erhaelt die `SshConnection`, liest die
-Verbindungsdaten via `getConnectionInfo()`, und fuehrt `rsync` lokal via
-`child_process` aus.
+`SshConnection` bietet eine Methode `getConnectionInfo()`, die die tatsächlich
+genutzten Verbindungsdaten zurückgibt. `privateKeyPath` ist nur gesetzt, wenn
+die aktuelle Session per Private Key aufgebaut wurde. Bei Agent-Authentifizierung
+stehen stattdessen `authMethod: "agent"` und `agentSocket` aus `SSH_AUTH_SOCK`
+zur Verfügung. Bei Passwort-Authentifizierung ist `authMethod: "password"`
+gesetzt; lokale Transfer-Module müssen diesen Pfad entweder ablehnen oder einen
+eigenen Passwort-fähigen Transport nutzen.
+
+Lokale Module wie `rsync.sync` müssen Private-Key- und Agent-Auth getrennt
+behandeln: für Private-Key-Auth können sie `-i <privateKeyPath>` und
+`IdentitiesOnly=yes` setzen, für Agent-Auth `IdentityAgent=<agentSocket>`.
+`verifiedHostPublicKey` enthält den verifizierten Host-Key im OpenSSH-Format
+und kann für temporäre, pinningbasierte `known_hosts`-Dateien genutzt werden.
 
 ### command.shell (kein command.run)
 
@@ -1306,9 +1317,20 @@ Zwischenspeichern, kein Cleanup noetig.
 interface SshConfig {
   user: string
   ports: number[]
-  privateKey: string
+  /** Private-Key-Pfad. Optional; ohne Wert nutzt Paratix SSH_AUTH_SOCK. */
+  privateKey?: string
+  /** Lokalen SSH-Agent an die Remote-Session weiterreichen. */
+  agentForward?: boolean
+  /** Erwarteter SHA256-Host-Fingerprint als Trust Anchor. */
+  expectedHostFingerprint?: string
+  /** Erwarteter OpenSSH-Host-Public-Key als Trust Anchor. */
+  expectedHostPublicKey?: string
+  /** Host-Key-Prüfung: "yes" ist Default, "accept-new" ist explizites TOFU. */
+  strictHostKeyChecking?: "accept-new" | "no" | "yes"
   passwordFallback?: boolean
-  /** Sudo-Passwort fuer non-root User. Optional — wenn nicht gesetzt und
+  reconnectTimeout?: number
+  maxReconnectAttempts?: number
+  /** Sudo-Passwort für non-root User. Optional — wenn nicht gesetzt und
    *  sudo ein Passwort verlangt, wird interaktiv im Terminal gefragt. */
   sudoPassword?: string
 }
