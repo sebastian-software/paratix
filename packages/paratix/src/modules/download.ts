@@ -144,6 +144,10 @@ async function metadataMatches(
   return downloadOwnershipMatches(ownership, options)
 }
 
+async function destinationIsRegularFile(conn: SshConnection, destination: string): Promise<boolean> {
+  return conn.test(`[ -f ${shellQuote(destination)} ]`)
+}
+
 async function destinationHashMatches(
   conn: SshConnection,
   destination: string,
@@ -164,7 +168,7 @@ async function checkLargeDownload(
 ): Promise<"needs-apply" | "ok"> {
   const { destination, flagName, options } = parameters
   const flagExists = await hasFlag(conn, flagName)
-  const destinationExists = await conn.exists(destination)
+  const destinationExists = await destinationIsRegularFile(conn, destination)
 
   if (!flagExists) return NEEDS_APPLY
   if (!destinationExists) return NEEDS_APPLY
@@ -489,7 +493,7 @@ async function checkDownload(
     return (await metadataMatches(conn, destination, options)) ? "ok" : NEEDS_APPLY
   }
 
-  const fileExists = await conn.exists(destination)
+  const fileExists = await destinationIsRegularFile(conn, destination)
   if (!fileExists) return NEEDS_APPLY
   return (await metadataMatches(conn, destination, options)) ? "ok" : NEEDS_APPLY
 }

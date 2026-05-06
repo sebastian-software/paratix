@@ -11,6 +11,7 @@ const createMockSsh: typeof createBaseMockSsh = (responses, options) =>
     ...options,
     responseStubs: [
       { command: /^\[ -e '\/(?:opt|usr)\//v, result: { code: 1 } },
+      { command: /^\[ -f '\/(?:opt|usr)\//v, result: { code: 1 } },
       { command: /^stat -c '%a %U %G' '\/(?:opt|usr)\//v, result: { stdout: "644 root root" } },
       { command: /^mkdir -p /v, result: { code: 0 } },
       { command: /^mktemp /v, result: { stdout: "/tmp/.paratix-download.stub" } },
@@ -156,7 +157,7 @@ describe("download.url", () => {
 
     it("returns ok when file exists (no sha256)", async () => {
       const mockSsh = createMockSsh({
-        [`[ -e '${destination}' ]`]: { code: 0 },
+        [`[ -f '${destination}' ]`]: { code: 0 },
       })
       const mod = download.url(destination, url, allowUnverifiedDownload)
       const result = await mod.check(mockSsh, emptyEnv)
@@ -165,7 +166,17 @@ describe("download.url", () => {
 
     it("returns needs-apply when file does not exist (no sha256)", async () => {
       const mockSsh = createMockSsh({
-        [`[ -e '${destination}' ]`]: { code: 1 },
+        [`[ -f '${destination}' ]`]: { code: 1 },
+      })
+      const mod = download.url(destination, url, allowUnverifiedDownload)
+      const result = await mod.check(mockSsh, emptyEnv)
+      expect(result).toBe("needs-apply")
+    })
+
+    it("returns needs-apply when the destination exists but is not a regular file", async () => {
+      const mockSsh = createMockSsh({
+        [`[ -e '${destination}' ]`]: { code: 0 },
+        [`[ -f '${destination}' ]`]: { code: 1 },
       })
       const mod = download.url(destination, url, allowUnverifiedDownload)
       const result = await mod.check(mockSsh, emptyEnv)
@@ -194,7 +205,7 @@ describe("download.url", () => {
 
     it("returns needs-apply when owner and group drift without sha256", async () => {
       const mockSsh = createMockSsh({
-        [`[ -e '${destination}' ]`]: { code: 0 },
+        [`[ -f '${destination}' ]`]: { code: 0 },
         [`stat -c '%a %U %G' '${destination}'`]: { stdout: "755 root wheel" },
       })
       const mod = download.url(destination, url, {
@@ -832,7 +843,7 @@ describe("download.github", () => {
   describe("check", () => {
     it("returns ok when file exists (no sha256)", async () => {
       const mockSsh = createMockSsh({
-        [`[ -e '${destination}' ]`]: { code: 0 },
+        [`[ -f '${destination}' ]`]: { code: 0 },
       })
       const mod = download.github(destination, { ...allowUnverifiedDownload, asset, repo, tag })
       const result = await mod.check(mockSsh, emptyEnv)
@@ -841,7 +852,17 @@ describe("download.github", () => {
 
     it("returns needs-apply when file does not exist", async () => {
       const mockSsh = createMockSsh({
-        [`[ -e '${destination}' ]`]: { code: 1 },
+        [`[ -f '${destination}' ]`]: { code: 1 },
+      })
+      const mod = download.github(destination, { ...allowUnverifiedDownload, asset, repo, tag })
+      const result = await mod.check(mockSsh, emptyEnv)
+      expect(result).toBe("needs-apply")
+    })
+
+    it("returns needs-apply when the destination exists but is not a regular file", async () => {
+      const mockSsh = createMockSsh({
+        [`[ -e '${destination}' ]`]: { code: 0 },
+        [`[ -f '${destination}' ]`]: { code: 1 },
       })
       const mod = download.github(destination, { ...allowUnverifiedDownload, asset, repo, tag })
       const result = await mod.check(mockSsh, emptyEnv)
@@ -860,7 +881,7 @@ describe("download.github", () => {
 
     it("returns needs-apply when owner or group drift", async () => {
       const mockSsh = createMockSsh({
-        [`[ -e '${destination}' ]`]: { code: 0 },
+        [`[ -f '${destination}' ]`]: { code: 0 },
         [`stat -c '%a %U %G' '${destination}'`]: { stdout: "755 root wheel" },
       })
       const mod = download.github(destination, {
@@ -1141,7 +1162,7 @@ describe("download.large", () => {
 
     it("returns ok when flag file exists", async () => {
       const mockSsh = createMockSsh({
-        [`[ -e '${destination}' ]`]: { code: 0 },
+        [`[ -f '${destination}' ]`]: { code: 0 },
         [`[ -f /var/lib/paratix/flags/'${flagName}' ]`]: { code: 0 },
       })
       const mod = download.large(destination, url, allowUnverifiedDownload)
@@ -1151,7 +1172,7 @@ describe("download.large", () => {
 
     it("returns needs-apply when flag and destination both do not exist", async () => {
       const mockSsh = createMockSsh({
-        [`[ -e '${destination}' ]`]: { code: 1 },
+        [`[ -f '${destination}' ]`]: { code: 1 },
         [`[ -f /var/lib/paratix/flags/'${flagName}' ]`]: { code: 1 },
       })
       const mod = download.large(destination, url, allowUnverifiedDownload)
@@ -1161,7 +1182,18 @@ describe("download.large", () => {
 
     it("returns needs-apply when flag exists but destination file is missing", async () => {
       const mockSsh = createMockSsh({
-        [`[ -e '${destination}' ]`]: { code: 1 },
+        [`[ -f '${destination}' ]`]: { code: 1 },
+        [`[ -f /var/lib/paratix/flags/'${flagName}' ]`]: { code: 0 },
+      })
+      const mod = download.large(destination, url, allowUnverifiedDownload)
+      const result = await mod.check(mockSsh, emptyEnv)
+      expect(result).toBe("needs-apply")
+    })
+
+    it("returns needs-apply when flag exists but destination is not a regular file", async () => {
+      const mockSsh = createMockSsh({
+        [`[ -e '${destination}' ]`]: { code: 0 },
+        [`[ -f '${destination}' ]`]: { code: 1 },
         [`[ -f /var/lib/paratix/flags/'${flagName}' ]`]: { code: 0 },
       })
       const mod = download.large(destination, url, allowUnverifiedDownload)
@@ -1211,7 +1243,7 @@ describe("download.large", () => {
 
     it("returns needs-apply when group drifts despite flag and existing destination", async () => {
       const mockSsh = createMockSsh({
-        [`[ -e '${destination}' ]`]: { code: 0 },
+        [`[ -f '${destination}' ]`]: { code: 0 },
         [`[ -f /var/lib/paratix/flags/'${flagName}' ]`]: { code: 0 },
         [`stat -c '%a %U %G' '${destination}'`]: { stdout: "644 root wheel" },
       })
@@ -1295,7 +1327,7 @@ describe("download.large", () => {
 
     it("direct apply returns ok without downloading when the flag already exists", async () => {
       const mockSsh = createMockSsh({
-        [`[ -e '${destination}' ]`]: { code: 0 },
+        [`[ -f '${destination}' ]`]: { code: 0 },
         [`[ -f /var/lib/paratix/flags/'${flagName}' ]`]: { code: 0 },
       })
       const mod = download.large(destination, url, allowUnverifiedDownload)
@@ -1309,7 +1341,7 @@ describe("download.large", () => {
     it("repairs a missing destination even when the flag already exists", async () => {
       const mockSsh = createMockSsh({
         ...downloadMktempStub(destination, temporaryDestination),
-        [`[ -e '${destination}' ]`]: { code: 1 },
+        [`[ -f '${destination}' ]`]: { code: 1 },
         [`[ -f /var/lib/paratix/flags/'${flagName}' ]`]: { code: 0 },
       })
       const mod = download.large(destination, url, allowUnverifiedDownload)
