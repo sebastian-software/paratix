@@ -34,7 +34,7 @@ idempotent, sofern nicht anders vermerkt.
 | Modul             | Beschreibung                                                                                                                                                                                                                                                                                                                              | Check-Strategie                                                | Aufwand |
 | ----------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------- | ------- |
 | `file.copy`       | Kopiert eine lokale Datei auf den Server. Vergleicht per SHA-256-Hash, ob die Datei bereits identisch ist.                                                                                                                                                                                                                                | SHA-256-Vergleich lokal vs. remote                             | einfach |
-| `file.template`   | Rendert ein Template mit dem aktuellen Env und kopiert das Ergebnis auf den Server. Templates nutzen `{{key}}`-Syntax fuer Env-Zugriff.                                                                                                                                                                                                   | SHA-256 des gerenderten Templates vs. Remote-Datei             | einfach |
+| `file.template`   | Rendert ein Template mit dem aktuellen Env und kopiert das Ergebnis auf den Server. Templates laufen standardmäßig im Strict Mode: Env-Zugriffe brauchen explizite Modifier wie `{{key\|raw}}` oder `{{key\|shell}}`.                                                                                                                     | SHA-256 des gerenderten Templates vs. Remote-Datei             | einfach |
 | `file.line`       | Stellt sicher, dass eine bestimmte Zeile in einer Datei vorhanden ist. Ohne `match`-Parameter: fuegt die Zeile am Ende hinzu, falls nicht vorhanden. Mit `match`-Parameter (Regex): ersetzt die erste Zeile die auf das Muster passt. Beispiel: `file.line("/etc/ssh/sshd_config", "PermitRootLogin no", { match: "^PermitRootLogin" })`. | `grep -qF` nach Zeile oder `grep` nach `match`-Pattern         | mittel  |
 | `file.block`      | Fuegt einen Textblock mit Marker-Zeilen in eine Datei ein oder aktualisiert ihn. Marker-Format: `# BEGIN paratix: <block-name>` / `# END paratix: <block-name>`. Der Kommentar-Prefix (`#`, `//`, `;`) ist konfigurierbar (Default: `#`). Ermoeglicht wiederholtes Aktualisieren desselben Blocks.                                        | `grep` nach Marker-Zeilen, Inhalt zwischen Markern vergleichen | mittel  |
 | `file.replace`    | Ersetzt alle Vorkommen eines regulaeren Ausdrucks in einer Datei.                                                                                                                                                                                                                                                                         | `grep` nach Pattern, pruefen ob Ersetzung noetig               | mittel  |
@@ -329,8 +329,8 @@ vollstaendige System-Informationen verlassen.
 
 ```
 # ./files/nginx.tmpl.conf
-# Konfiguriert fuer {{system.hostname}} ({{system.os}} {{system.os.version}})
-worker_processes {{system.cpu.cores}};
+# Konfiguriert für {{system.hostname|raw}} ({{system.os|raw}} {{system.os.version|raw}})
+worker_processes {{system.cpu.cores|raw}};
 ```
 
 **Nutzung in Playbooks (bedingte Logik via `when()`):**
@@ -665,7 +665,7 @@ export default server({
 
     // Ab hier stehen die Secrets im Env zur Verfuegung:
     file.template("/opt/convex-manager/.env", "./files/convex.tmpl.env"),
-    // Template kann {{convex.jwt_secret}} verwenden
+    // Template kann {{convex.jwt_secret|raw}} verwenden
   ],
 })
 ```

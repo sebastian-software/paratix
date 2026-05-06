@@ -696,10 +696,10 @@ Template-System. Templates haben Zugriff auf alle Env-Einträge:
 # ./files/nginx-app.tmpl.conf
 server {
     listen 80;
-    server_name {{app.domain}};
+    server_name {{app.domain|raw}};
 
     location / {
-        proxy_pass http://127.0.0.1:{{app.port}};
+        proxy_pass http://127.0.0.1:{{app.port|raw}};
     }
 }
 ```
@@ -997,14 +997,20 @@ durchprobiert.
 
 ### Template-Engine
 
-Bewusst minimalistisch — nur `{{key}}`-Ersetzung:
+Bewusst minimalistisch — Env-Zugriffe mit explizitem Kontext:
 
-- `{{key}}` wird durch `resolveEnv(env, key)` ersetzt.
-- **Fehlende Keys werfen einen Fehler.** Stilles Ignorieren wuerde zu
-  kaputten Konfigurationsdateien fuehren.
-- **Escaping:** `\{{` fuer literales `{{`.
-- **Kein Looping, kein Conditional** — dafuer gibt es TypeScript im Playbook.
-  Komplexe Logik gehoert in die Playbook-Datei, nicht in Templates.
+- `{{key|raw}}` wird durch `resolveEnv(env, key)` ersetzt und unverändert
+  eingefügt. Das ist passend für Konfigurationswerte, nicht für Shell-Befehle.
+- `{{key|shell}}` rendert den Wert als Shell-Argument. Nutze diesen Modifier,
+  sobald der Wert in einem Shell-Kontext landet.
+- Bare-Placeholder wie `{{key}}` werfen im Strict Mode einen Fehler. Strict Mode
+  ist der Default von `file.template`; `strict: false` ist nur eine bewusste
+  Ausnahme für Legacy-Templates.
+- **Fehlende Keys werfen einen Fehler.** Stilles Ignorieren würde zu kaputten
+  Konfigurationsdateien führen.
+- **Escaping:** `\{{` für literales `{{`.
+- **Kein Looping, kein Conditional** — dafür gibt es TypeScript im Playbook.
+  Komplexe Logik gehört in die Playbook-Datei, nicht in Templates.
 - **Encoding:** immer UTF-8.
 
 ### file.copy / file.template: Berechtigungen
