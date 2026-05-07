@@ -151,6 +151,10 @@ async function destinationIsRegularFile(
   return conn.test(`[ -f ${shellQuote(destination)} ]`)
 }
 
+async function destinationIsDirectory(conn: SshConnection, destination: string): Promise<boolean> {
+  return conn.test(`[ -d ${shellQuote(destination)} ]`)
+}
+
 async function destinationHashMatches(
   conn: SshConnection,
   destination: string,
@@ -459,8 +463,11 @@ async function runCurlDownload(
       return failed(`[download] checksum verification failed for ${parameters.destination}`)
     }
     await applyFileAttributes(conn, downloadParameters)
+    if (await destinationIsDirectory(conn, parameters.destination)) {
+      return failed(`[download] destination is a directory: ${parameters.destination}`)
+    }
     await conn.exec(
-      `mv ${shellQuote(downloadParameters.destination)} ${shellQuote(parameters.destination)}`,
+      `mv -T -- ${shellQuote(downloadParameters.destination)} ${shellQuote(parameters.destination)}`,
       { silent: true }
     )
     shouldCleanupTemporaryFile = false
