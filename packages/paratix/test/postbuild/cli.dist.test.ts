@@ -188,7 +188,9 @@ export default {
       const packedPackageJson = JSON.parse(
         readFileSync(join(consumerPackageDirectory, "package.json"), "utf8")
       ) as {
+        bin: { paratix: string }
         dependencies: Record<string, string>
+        version: string
       }
       for (const dependencyName of Object.keys(packedPackageJson.dependencies)) {
         const dependencyTarget = join(packageRootDirectory, "node_modules", dependencyName)
@@ -196,6 +198,19 @@ export default {
         mkdirSync(dirname(dependencyLink), { recursive: true })
         symlinkSync(dependencyTarget, dependencyLink)
       }
+
+      const packedBinaryPath = join(consumerPackageDirectory, packedPackageJson.bin.paratix)
+      const packedBinaryVersion = execFileSync(packedBinaryPath, ["--version"], {
+        cwd: tempDirectory,
+        encoding: "utf8",
+        killSignal: "SIGTERM",
+        maxBuffer: CLI_COMMAND_MAX_BUFFER,
+        timeout: CLI_COMMAND_TIMEOUT_MS,
+      }).trim()
+      expect(packedBinaryVersion).toMatch(
+        // eslint-disable-next-line security/detect-non-literal-regexp -- packed package version comes from local package.json
+        new RegExp(`^${packedPackageJson.version}(?:-[0-9a-f]{7,})?$`, "v")
+      )
 
       writeFileSync(join(tempDirectory, "package.json"), '{ "type": "module" }\n')
       writeFileSync(
