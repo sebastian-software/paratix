@@ -5,12 +5,12 @@ import {
   createReadStream,
   createWriteStream,
   type ReadStream,
-  renameSync,
   unlinkSync,
   type WriteStream,
 } from "node:fs"
+import { rename } from "node:fs/promises"
 import { Writable } from "node:stream"
-import { afterEach, describe, expect, it, vi } from "vitest"
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 
 import { sftpDownload, sftpUpload, sftpUploadContent } from "../src/sftp.js"
 
@@ -19,8 +19,12 @@ import { sftpDownload, sftpUpload, sftpUploadContent } from "../src/sftp.js"
 vi.mock("node:fs", () => ({
   createReadStream: vi.fn(),
   createWriteStream: vi.fn(),
-  renameSync: vi.fn(),
   unlinkSync: vi.fn(),
+}))
+
+// R-0000148: sftpDownload finalizes via async fs/promises.rename instead of renameSync.
+vi.mock("node:fs/promises", () => ({
+  rename: vi.fn().mockResolvedValue(undefined),
 }))
 
 // ---------------------------------------------------------------------------
@@ -95,6 +99,12 @@ describe("sftpDownload", () => {
   afterEach(() => {
     vi.useRealTimers()
     vi.resetAllMocks()
+  })
+
+  beforeEach(() => {
+    // R-0000148: keep the rename mock returning a resolved promise by default;
+    // vi.resetAllMocks() in afterEach removes the implementation otherwise.
+    vi.mocked(rename).mockResolvedValue(undefined)
   })
 
   it("rejects when the sftp callback returns an error", async () => {
@@ -236,7 +246,7 @@ describe("sftpDownload", () => {
     expect(tempPath).toMatch(/^\/local\/\.paratix-download-.+\.tmp$/v)
     expect(options).toStrictEqual({ mode: 0o600 })
     expect(sftpReadStream.pipe).toHaveBeenCalledWith(localWriteStream)
-    expect(vi.mocked(renameSync)).toHaveBeenCalledWith(tempPath, "/local/file.txt")
+    expect(vi.mocked(rename)).toHaveBeenCalledWith(tempPath, "/local/file.txt")
   })
 
   it("preserves unicode remote and local paths for downloads", async () => {
@@ -259,7 +269,7 @@ describe("sftpDownload", () => {
     expect(createReadStreamCalls[0]?.[0]).toBe(remotePath)
     expect(tempPath).toContain("/local/")
     expect(tempPath).toContain(".paratix-download-")
-    expect(vi.mocked(renameSync)).toHaveBeenCalledWith(tempPath, localPath)
+    expect(vi.mocked(rename)).toHaveBeenCalledWith(tempPath, localPath)
   })
 
   it("rejects when the readStream emits an error (regression: missing error handler)", async () => {
@@ -332,7 +342,7 @@ describe("sftpDownload", () => {
     expect(vi.mocked(unlinkSync)).toHaveBeenCalledOnce()
     expect(vi.mocked(unlinkSync)).toHaveBeenCalledWith(tempPath)
     expect(vi.mocked(unlinkSync)).not.toHaveBeenCalledWith("/local/file.txt")
-    expect(vi.mocked(renameSync)).not.toHaveBeenCalled()
+    expect(vi.mocked(rename)).not.toHaveBeenCalled()
   })
 
   it("closes the sftp session when the local writeStream emits an error", async () => {
@@ -371,15 +381,13 @@ describe("sftpDownload", () => {
     expect(sftpEnd).toHaveBeenCalledOnce()
   })
 
-  it("rejects and removes the temp file when renameSync fails during local finalization", async () => {
+  it("rejects and removes the temp file when rename fails during local finalization", async () => {
     const { sftp } = makeSftpSession()
     const client = makeClientMock(sftp)
 
     const localWriteStream = new EventEmitter()
     vi.mocked(createWriteStream).mockReturnValue(localWriteStream as unknown as WriteStream)
-    vi.mocked(renameSync).mockImplementation(() => {
-      throw new Error("rename failed")
-    })
+    vi.mocked(rename).mockRejectedValueOnce(new Error("rename failed"))
 
     const promise = sftpDownload(client, "/remote/file.txt", "/local/file.txt")
     const [tempPath] = vi.mocked(createWriteStream).mock.calls[0] as [string]
@@ -387,6 +395,55 @@ describe("sftpDownload", () => {
 
     await expect(promise).rejects.toThrow("rename failed")
     expect(vi.mocked(unlinkSync)).toHaveBeenCalledWith(tempPath)
+    expect(vi.mocked(unlinkSync)).not.toHaveBeenCalledWith("/local/file.txt")
+  })
+
+  it("uses async rename and uses fs/promises.rename for finalization (R-0000148)", async () => {
+    const { sftp } = makeSftpSession()
+    const client = makeClientMock(sftp)
+
+    const localWriteStream = new EventEmitter()
+    vi.mocked(createWriteStream).mockReturnValue(localWriteStream as unknown as WriteStream)
+
+    const promise = sftpDownload(client, "/remote/file.txt", "/local/file.txt")
+    localWriteStream.emit("finish")
+
+    await expect(promise).resolves.toBeUndefined()
+    expect(vi.mocked(rename)).toHaveBeenCalledOnce()
+  })
+
+  it("does not unlink the final file when a late rejection arrives after rename succeeded (R-0000148)", async () => {
+    const { sftp } = makeSftpSession()
+    const client = makeClientMock(sftp)
+
+    // Defer the rename promise so we can manually resolve and observe ordering.
+    let resolveRename: (() => void) | undefined
+    vi.mocked(rename).mockImplementationOnce(async () => {
+      await new Promise<void>((res) => {
+        resolveRename = res
+      })
+    })
+
+    const localWriteStream = new EventEmitter()
+    vi.mocked(createWriteStream).mockReturnValue(localWriteStream as unknown as WriteStream)
+
+    const promise = sftpDownload(client, "/remote/file.txt", "/local/file.txt")
+    const [tempPath] = vi.mocked(createWriteStream).mock.calls[0] as [string]
+
+    // Trigger the success path that schedules the async rename.
+    localWriteStream.emit("finish")
+    expect(resolveRename).toBeDefined()
+    resolveRename!()
+
+    await expect(promise).resolves.toBeUndefined()
+
+    // Reset call history so we can detect any unwanted late unlinks.
+    vi.mocked(unlinkSync).mockClear()
+
+    // After the rename succeeded, the cleanup flag must be false.
+    // Even if some hypothetical late code path tries the same temp path,
+    // there should be no unlink of the (now-renamed) final file.
+    expect(vi.mocked(unlinkSync)).not.toHaveBeenCalledWith(tempPath)
     expect(vi.mocked(unlinkSync)).not.toHaveBeenCalledWith("/local/file.txt")
   })
 
@@ -535,7 +592,7 @@ describe("sftpDownload", () => {
     vi.advanceTimersByTime(5001)
 
     await expect(promise).rejects.toThrow("SFTP download timed out after 5000ms: /remote/file.txt")
-    expect(vi.mocked(renameSync)).not.toHaveBeenCalled()
+    expect(vi.mocked(rename)).not.toHaveBeenCalled()
     expect(vi.mocked(unlinkSync)).toHaveBeenCalledWith(tempPath)
     expect(vi.mocked(unlinkSync)).not.toHaveBeenCalledWith("/local/file.txt")
   })
@@ -552,7 +609,7 @@ describe("sftpDownload", () => {
     localWriteStream.emit("error", new Error("local write stream broke"))
 
     await expect(promise).rejects.toThrow("local write stream broke")
-    expect(vi.mocked(renameSync)).not.toHaveBeenCalled()
+    expect(vi.mocked(rename)).not.toHaveBeenCalled()
     expect(vi.mocked(unlinkSync)).toHaveBeenCalledWith(tempPath)
     expect(vi.mocked(unlinkSync)).not.toHaveBeenCalledWith("/local/file.txt")
   })

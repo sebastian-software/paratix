@@ -3,7 +3,8 @@ import type { Writable } from "node:stream"
 import type { Client, SFTPWrapper } from "ssh2"
 
 import { randomUUID } from "node:crypto"
-import { createReadStream, createWriteStream, renameSync, unlinkSync } from "node:fs"
+import { createReadStream, createWriteStream, unlinkSync } from "node:fs"
+import { rename } from "node:fs/promises"
 import { dirname, join } from "node:path"
 import { Readable } from "node:stream"
 
@@ -278,17 +279,24 @@ export async function sftpDownload(
           readStream: streams.readStream,
           reject: rejectWithCleanup,
           resolve() {
-            try {
-              // eslint-disable-next-line security/detect-non-literal-fs-filename
-              renameSync(temporaryPath, localPath)
-              resolve()
-            } catch (finalizeError) {
-              rejectWithCleanup(
-                finalizeError instanceof Error
-                  ? finalizeError
-                  : new Error(`Failed to finalize SFTP download: ${String(finalizeError)}`)
-              )
-            }
+            // R-0000148: use async rename so the event loop is not blocked on
+            // network filesystems or large files. After a successful rename,
+            // disable the cleanup flag so a late stray rejection cannot
+            // unlink the freshly renamed final file.
+            // eslint-disable-next-line security/detect-non-literal-fs-filename
+            rename(temporaryPath, localPath).then(
+              () => {
+                shouldCleanupTemporaryFile = false
+                resolve()
+              },
+              (finalizeError: unknown) => {
+                rejectWithCleanup(
+                  finalizeError instanceof Error
+                    ? finalizeError
+                    : new Error(`Failed to finalize SFTP download: ${String(finalizeError)}`)
+                )
+              }
+            )
           },
           sftp,
           timeout,
