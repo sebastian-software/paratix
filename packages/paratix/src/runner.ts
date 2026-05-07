@@ -43,6 +43,45 @@ type ShutdownState = {
   shutdownSignal: () => NodeJS.Signals | null
 }
 
+/** ASCII ESC byte (0x1B) used to start ANSI/VT100 control sequences. */
+const ASCII_ESC = 0x1b
+
+/**
+ * ANSI escape sequence "ESC [ ? 25 h" that re-enables the terminal cursor
+ * after a spinner or prompt may have hidden it via "[?25l".
+ */
+const ANSI_SHOW_CURSOR = `${String.fromCharCode(ASCII_ESC)}[?25h`
+
+/**
+ * Best-effort terminal/secret cleanup performed before `process.exit` on a
+ * second SIGINT/SIGTERM. Each step is wrapped in a try/catch so a failure in
+ * one step never prevents the others from running.
+ */
+function performShutdownBestEffortCleanup(): void {
+  try {
+    stopLiveModuleOutput(true)
+  } catch {
+    // ignore: cleanup is best-effort
+  }
+  try {
+    if (process.stdin.isTTY) {
+      process.stdin.setRawMode(false)
+    }
+  } catch {
+    // ignore: not all streams support raw mode
+  }
+  try {
+    process.stdout.write(ANSI_SHOW_CURSOR)
+  } catch {
+    // ignore: stdout may already be closed
+  }
+  try {
+    clearRegisteredSecrets()
+  } catch {
+    // ignore: secret sink should never throw, but guard defensively
+  }
+}
+
 /**
  * Registers shutdown handlers.
  * @returns The listener state and first-signal getter.
@@ -54,6 +93,10 @@ function setupShutdownHandlers(): ShutdownState {
 
   const handleShutdownSignal = (signal: NodeJS.Signals): void => {
     if (receivedSignal != null) {
+      // A second signal forces a hard exit. Run best-effort cleanup first so
+      // the terminal is not left in raw mode / cursor hidden, and so the
+      // secret sink does not retain registered values.
+      performShutdownBestEffortCleanup()
       // eslint-disable-next-line node/no-process-exit
       process.exit(signalExitCode(signal))
     }
@@ -75,6 +118,14 @@ function setupShutdownHandlers(): ShutdownState {
     },
     shutdownSignal: () => receivedSignal,
   }
+}
+
+/**
+ * Exposed for tests to observe the second-signal cleanup path without
+ * spawning a real process.
+ */
+export const __testing = {
+  performShutdownBestEffortCleanup,
 }
 
 export type RunOptions = {

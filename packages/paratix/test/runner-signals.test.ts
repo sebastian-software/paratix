@@ -1,5 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 
+import type * as OutputModule from "../src/output.js"
+import type * as SecretSinkModule from "../src/secretSink.js"
 import type { Module, ModuleResult, ServerDefinition, SshConnection } from "../src/types.js"
 
 import { meta } from "../src/meta.js"
@@ -1169,6 +1171,112 @@ describe("runSignals stats tracking", () => {
     expect(process.exitCode).toBe(0)
     // The signal module result "changed" must be reflected in the summary stats
     expect(successSignal.apply).toHaveBeenCalledOnce()
+  })
+})
+
+describe("runPlaybook second-signal best-effort cleanup", () => {
+  beforeEach(() => {
+    vi.spyOn(console, "log").mockImplementation(() => {
+      /* noop */
+    })
+    vi.spyOn(console, "error").mockImplementation(() => {
+      /* noop */
+    })
+    vi.resetModules()
+  })
+
+  afterEach(() => {
+    vi.restoreAllMocks()
+    vi.resetModules()
+    process.exitCode = 0
+  })
+
+  it("performShutdownBestEffortCleanup stops live output, restores raw mode, shows the cursor and clears secrets", async () => {
+    const stopLiveModuleOutputSpy = vi.fn()
+    const clearRegisteredSecretsSpy = vi.fn()
+
+    vi.doMock("../src/output.js", async () => {
+      const actual = await vi.importActual<typeof OutputModule>("../src/output.js")
+      return {
+        ...actual,
+        stopLiveModuleOutput: stopLiveModuleOutputSpy,
+      }
+    })
+    vi.doMock("../src/secretSink.js", async () => {
+      const actual = await vi.importActual<typeof SecretSinkModule>("../src/secretSink.js")
+      return {
+        ...actual,
+        clearRegisteredSecrets: clearRegisteredSecretsSpy,
+      }
+    })
+
+    const stdoutWrites: string[] = []
+    const stdoutWriteSpy = vi
+      .spyOn(process.stdout, "write")
+      .mockImplementation((chunk: string | Uint8Array): boolean => {
+        stdoutWrites.push(Buffer.from(chunk).toString("utf8"))
+        return true
+      })
+
+    const setRawModeSpy = vi.fn(() => process.stdin)
+    const setRawModeBackup = Reflect.get(process.stdin, "setRawMode") as unknown
+    const previousIsTTY = process.stdin.isTTY
+    Object.defineProperty(process.stdin, "isTTY", { configurable: true, value: true })
+    Reflect.set(process.stdin, "setRawMode", setRawModeSpy)
+
+    try {
+      const { __testing } = await import("../src/runner.js")
+      __testing.performShutdownBestEffortCleanup()
+
+      expect(stopLiveModuleOutputSpy).toHaveBeenCalledWith(true)
+      expect(setRawModeSpy).toHaveBeenCalledWith(false)
+      // Cursor restore must use the ANSI "show cursor" sequence ESC + "[?25h".
+      const cursorWrite = stdoutWrites.find((entry) => entry.includes("[?25h"))
+      expect(cursorWrite).toBeDefined()
+      expect(cursorWrite?.charCodeAt(0)).toBe(0x1b)
+      expect(clearRegisteredSecretsSpy).toHaveBeenCalledOnce()
+    } finally {
+      Reflect.set(process.stdin, "setRawMode", setRawModeBackup)
+      Object.defineProperty(process.stdin, "isTTY", { configurable: true, value: previousIsTTY })
+      stdoutWriteSpy.mockRestore()
+    }
+  })
+
+  it("a single failing cleanup step does not prevent the others from running", async () => {
+    const stopLiveModuleOutputSpy = vi.fn().mockImplementation(() => {
+      throw new Error("live output failure")
+    })
+    const clearRegisteredSecretsSpy = vi.fn()
+
+    vi.doMock("../src/output.js", async () => {
+      const actual = await vi.importActual<typeof OutputModule>("../src/output.js")
+      return {
+        ...actual,
+        stopLiveModuleOutput: stopLiveModuleOutputSpy,
+      }
+    })
+    vi.doMock("../src/secretSink.js", async () => {
+      const actual = await vi.importActual<typeof SecretSinkModule>("../src/secretSink.js")
+      return {
+        ...actual,
+        clearRegisteredSecrets: clearRegisteredSecretsSpy,
+      }
+    })
+
+    const stdoutWriteSpy = vi.spyOn(process.stdout, "write").mockImplementation(() => true)
+
+    try {
+      const { __testing } = await import("../src/runner.js")
+      expect(() => {
+        __testing.performShutdownBestEffortCleanup()
+      }).not.toThrow()
+
+      // Despite stopLiveModuleOutput throwing, the other steps still ran.
+      expect(stopLiveModuleOutputSpy).toHaveBeenCalled()
+      expect(clearRegisteredSecretsSpy).toHaveBeenCalled()
+    } finally {
+      stdoutWriteSpy.mockRestore()
+    }
   })
 })
 
