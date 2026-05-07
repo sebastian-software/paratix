@@ -3603,6 +3603,36 @@ describe("SshConnectionImpl", () => {
       await expect(ssh.probeSudo()).rejects.toThrow("stderr channel error")
     })
 
+    it("caches a failed sudo probe so subsequent exec calls do not re-prompt (R-0000145 regression)", async () => {
+      // Regression: when probeSudo failed (e.g. sudo not installed), the next
+      // ensureSudoReady call would launch a fresh probe and re-prompt the
+      // user, producing an effective prompt loop on hosts without working
+      // sudo. The fix records the failure reason and re-throws it on
+      // subsequent calls without re-running the probe.
+      const execSpy = vi
+        .fn()
+        // First exec call: command -v sudo — sudo NOT installed (exit 1)
+        .mockImplementationOnce((_command: string, callback: ExecCallback) => {
+          const stream = makeStream()
+          callback(undefined, stream)
+          stream.emit("close", 1)
+        })
+
+      const client = makeClientWithExecSpy(execSpy)
+      const ssh = makeConnectedSsh(client, { sudoPassword: null, user: "deploy" })
+
+      // First exec: probe runs and fails with "sudo is not installed".
+      await expect(ssh.exec("whoami")).rejects.toThrow("sudo is not installed")
+      expect(execSpy).toHaveBeenCalledOnce()
+      expect(promptTerminal).not.toHaveBeenCalled()
+
+      // Second exec: must rethrow the cached reason WITHOUT re-running the
+      // probe and WITHOUT prompting for a sudo password.
+      await expect(ssh.exec("whoami")).rejects.toThrow("sudo is not installed")
+      expect(execSpy).toHaveBeenCalledOnce()
+      expect(promptTerminal).not.toHaveBeenCalled()
+    })
+
     it("propagates exec callback errors from test()", async () => {
       const execSpy = vi.fn().mockImplementation((_command: string, callback: ExecCallback) => {
         callback(new Error("channel open failed"), makeStream())

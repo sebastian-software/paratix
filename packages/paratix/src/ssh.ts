@@ -187,6 +187,14 @@ export class SshConnectionImpl implements SshConnection {
   private pinnedHostKey: Buffer | null = null
   private promptAbortSignal: AbortSignal | undefined
   private readonly runtime: SshRuntimeState
+  /**
+   * Cached error from a previous sudo probe failure. Once a probe has failed
+   * (sudo not installed, wrong password, etc.) we re-throw this error on
+   * subsequent privileged exec calls instead of repeating the probe and
+   * re-prompting the user (R-0000145). A successful `cacheAndValidateSudoPassword`
+   * clears the cache.
+   */
+  private sudoProbeFailedReason: Error | null = null
   private sudoProbePromise: null | Promise<void> = null
   private sudoReady = false
   private verifiedHostKey: Buffer | null = null
@@ -247,6 +255,11 @@ export class SshConnectionImpl implements SshConnection {
 
   public disconnect(): void {
     this.clearCachedPassword()
+    // R-0000145: a fresh connection deserves a fresh probe attempt; the
+    // cached failure reason from a previous session must not poison a new
+    // one (e.g. after the operator has installed sudo on the remote host).
+    this.sudoProbeFailedReason = null
+    this.sudoReady = false
     this.disconnectTransport()
   }
 
@@ -829,6 +842,12 @@ export class SshConnectionImpl implements SshConnection {
       this.sudoReady = true
       return
     }
+    // R-0000145: once a probe has failed, fail fast on every subsequent call
+    // instead of re-running the probe (which would re-prompt the user and
+    // could produce an endless prompt loop on hosts without working sudo).
+    if (this.sudoProbeFailedReason != null) {
+      throw this.sudoProbeFailedReason
+    }
     if (this.sudoProbePromise != null) {
       await this.sudoProbePromise
       return
@@ -836,7 +855,13 @@ export class SshConnectionImpl implements SshConnection {
     this.sudoProbePromise = this.probeSudo({ abortSignal: this.promptAbortSignal }).finally(() => {
       this.sudoProbePromise = null
     })
-    await this.sudoProbePromise
+    try {
+      await this.sudoProbePromise
+    } catch (error) {
+      // Cache the failure so further `exec` calls do not re-trigger a prompt.
+      this.sudoProbeFailedReason = error instanceof Error ? error : new Error(String(error))
+      throw error
+    }
   }
 
   /**
