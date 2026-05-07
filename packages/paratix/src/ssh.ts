@@ -50,7 +50,16 @@ async function statLocalFile(path: string): Promise<Stats> {
 function validateMktempPath(directory: string, path: string, prefix: string): string {
   const normalizedDirectory = directory === "/" ? "" : directory
   const expectedPrefix = `${normalizedDirectory}/${prefix}.`
-  if (!path.startsWith(expectedPrefix) || path.includes("\n") || path.endsWith("/")) {
+  // R-0000155: reject CR explicitly alongside LF. A remote host that emits
+  // Windows-style line endings (or a misconfigured shell that injects a
+  // stray CR) could otherwise smuggle control characters into the path
+  // verbatim and break downstream argument parsing.
+  if (
+    !path.startsWith(expectedPrefix) ||
+    path.includes("\n") ||
+    path.includes("\r") ||
+    path.endsWith("/")
+  ) {
     throw new Error(`Unexpected mktemp output: ${path}`)
   }
   return path

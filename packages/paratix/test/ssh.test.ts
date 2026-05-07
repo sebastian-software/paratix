@@ -13,7 +13,7 @@ import type * as SshHelpers from "../src/sshHelpers.js"
 import { HostKeyVerificationError } from "../src/knownHosts.js"
 import { rsync } from "../src/modules/rsync.js"
 import { sftpDownload } from "../src/sftp.js"
-import { SshConnectionImpl } from "../src/ssh.js"
+import { SshConnectionImpl, validateMktempPath } from "../src/ssh.js"
 import {
   cleanupFailedSshClient,
   collectStreamOutput,
@@ -4158,5 +4158,45 @@ describe("SshConnectionImpl", () => {
       expect(firstCommitAcceptedHostKey).not.toHaveBeenCalled()
       expect(secondCommitAcceptedHostKey).toHaveBeenCalledOnce()
     })
+  })
+})
+
+// ---------------------------------------------------------------------------
+// validateMktempPath
+// ---------------------------------------------------------------------------
+
+describe("validateMktempPath", () => {
+  it("accepts a normal mktemp path", () => {
+    expect(() =>
+      validateMktempPath("/tmp", "/tmp/paratix-write.ABCDEF", "paratix-write")
+    ).not.toThrow()
+  })
+
+  it("rejects an embedded LF in the mktemp output", () => {
+    expect(() =>
+      validateMktempPath("/tmp", "/tmp/paratix-write.AB\nCDEF", "paratix-write")
+    ).toThrow(/Unexpected mktemp output/v)
+  })
+
+  it("rejects an embedded CR in the mktemp output (R-0000155 regression)", () => {
+    // Regression: validateMktempPath only blocked LF. A remote host emitting
+    // CRLF or a misconfigured shell that smuggled a stray CR into the path
+    // could otherwise inject control characters that break downstream
+    // argument parsing.
+    expect(() =>
+      validateMktempPath("/tmp", "/tmp/paratix-write.AB\rCDEF", "paratix-write")
+    ).toThrow(/Unexpected mktemp output/v)
+  })
+
+  it("rejects an mktemp output that does not match the expected prefix", () => {
+    expect(() =>
+      validateMktempPath("/tmp", "/var/tmp/paratix-write.ABCDEF", "paratix-write")
+    ).toThrow(/Unexpected mktemp output/v)
+  })
+
+  it("rejects an mktemp output that ends with a slash", () => {
+    expect(() => validateMktempPath("/tmp", "/tmp/paratix-write.ABCDEF/", "paratix-write")).toThrow(
+      /Unexpected mktemp output/v
+    )
   })
 })
