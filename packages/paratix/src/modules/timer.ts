@@ -269,10 +269,13 @@ async function disableTimerForAbsent(
   // `disable --now` removes the wants/ symlink, so run it before deleting
   // unit files. Only tolerate the expected missing-unit race; real stop or
   // disable failures mean the timer may still be active or enabled.
-  const disable = await ssh.exec(`${SYSTEMCTL} disable --now -- ${shellQuote(locations.timerUnit)}`, {
-    ignoreExitCode: true,
-    silent: true,
-  })
+  const disable = await ssh.exec(
+    `${SYSTEMCTL} disable --now -- ${shellQuote(locations.timerUnit)}`,
+    {
+      ignoreExitCode: true,
+      silent: true,
+    }
+  )
   if (disable.code === 0 || isMissingUnitDisableResult(disable)) return undefined
   return failedCommand(`[${module}: ${name}] systemctl disable --now failed`, disable)
 }

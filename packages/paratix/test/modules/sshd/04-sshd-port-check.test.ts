@@ -27,7 +27,10 @@ const createMockSsh: typeof createBaseMockSsh = (responses, options) =>
       { command: "systemctl disable --now ssh.socket", result: { code: 0 } },
       { command: "systemctl enable --now ssh.socket", result: { code: 0 } },
       { command: "systemctl restart sshd", result: { code: 0 } },
-      { command: /^ss -H -ltn 'sport = :\d+'$/v, result: { code: 0, stdout: "LISTEN 0 128 *:2222\n" } },
+      {
+        command: /^ss -H -ltn 'sport = :\d+'$/v,
+        result: { code: 0, stdout: "LISTEN 0 128 *:2222\n" },
+      },
       { command: /^rm -f '\/tmp\/paratix-sshd-dry-run-.+\.conf'$/v, result: { code: 0 } },
       ...(options?.responseStubs ?? []),
     ],
