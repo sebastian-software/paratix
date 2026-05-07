@@ -176,6 +176,19 @@ describe("download.url", () => {
       expect(result).toBe("needs-apply")
     })
 
+    it("returns needs-apply for a symlink even when SHA-256 would match its target", async () => {
+      const mockSsh = createMockSsh({
+        [`[ -f '${destination}' ]`]: { code: 0 },
+        [`[ -L '${destination}' ]`]: { code: 0 },
+        [`sha256sum '${destination}'`]: { stdout: `${sha256}  ${destination}` },
+      })
+      const mod = download.url(destination, url, { sha256 })
+      const result = await mod.check(mockSsh, emptyEnv)
+
+      expect(result).toBe("needs-apply")
+      expect(mockSsh.calls).not.toContain(`sha256sum '${destination}'`)
+    })
+
     it("returns needs-apply when file does not exist (no sha256)", async () => {
       const mockSsh = createMockSsh({
         [`[ -f '${destination}' ]`]: { code: 1 },

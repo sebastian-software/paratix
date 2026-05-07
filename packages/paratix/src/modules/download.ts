@@ -516,14 +516,15 @@ async function checkDownload(
   if (!conn) return NEEDS_APPLY
   if (options.force === true) return NEEDS_APPLY
 
+  const fileExists = await destinationIsRegularFile(conn, destination)
+  if (!fileExists) return NEEDS_APPLY
+
   if (options.sha256 != null) {
     const actualHash = await conn.sha256(destination)
     if (!hashMatches(actualHash, options.sha256)) return NEEDS_APPLY
     return (await metadataMatches(conn, destination, options)) ? "ok" : NEEDS_APPLY
   }
 
-  const fileExists = await destinationIsRegularFile(conn, destination)
-  if (!fileExists) return NEEDS_APPLY
   return (await metadataMatches(conn, destination, options)) ? "ok" : NEEDS_APPLY
 }
 
