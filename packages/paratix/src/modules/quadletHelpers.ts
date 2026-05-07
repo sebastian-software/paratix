@@ -311,9 +311,28 @@ export function validateQuadletName(name: string): void {
   }
 }
 
+// OCI references are practically much shorter than 512 chars; capping here
+// hardens systemd unit parsing and shell construction against pathological
+// inputs.
+const QUADLET_IMAGE_VALUE_MAX_LENGTH = 512
+// Permitted characters: ASCII letters/digits, _ . : @ / -. Rejects
+// whitespace, NUL, newlines and other control codes.
+const QUADLET_IMAGE_VALUE_PATTERN = /^[\w.:@\-\/]+$/v
+
 export function validateQuadletImageValue(field: string, value: string): void {
+  if (value.length === 0) throw new Error(`quadlet: ${field} must not be empty`)
+  if (value.length > QUADLET_IMAGE_VALUE_MAX_LENGTH) {
+    throw new Error(
+      `quadlet: ${field} must not exceed ${String(QUADLET_IMAGE_VALUE_MAX_LENGTH)} characters, got: ${String(value.length)}`
+    )
+  }
   if (value.startsWith("-")) {
     throw new Error(`quadlet: ${field} must not start with '-', got: ${JSON.stringify(value)}`)
+  }
+  if (!QUADLET_IMAGE_VALUE_PATTERN.test(value)) {
+    throw new Error(
+      `quadlet: ${field} must match ${String(QUADLET_IMAGE_VALUE_PATTERN)}, got: ${JSON.stringify(value)}`
+    )
   }
 }
 

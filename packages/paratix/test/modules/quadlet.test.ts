@@ -340,6 +340,52 @@ describe("quadlet.container", () => {
     }).toThrow(/image must not start with '-'/v)
   })
 
+  it("throws when the image contains a newline", () => {
+    expect(() => {
+      quadlet.container({
+        image: "docker.io/library/nginx:latest\ninjected",
+        name: "nginx",
+      })
+    }).toThrow(/image must match/v)
+  })
+
+  it("throws when the image contains a NUL byte", () => {
+    expect(() => {
+      quadlet.container({
+        image: "docker.io/library/nginx:latest ",
+        name: "nginx",
+      })
+    }).toThrow(/image must match/v)
+  })
+
+  it("throws when the image contains whitespace", () => {
+    expect(() => {
+      quadlet.container({
+        image: "docker.io/library/nginx :latest",
+        name: "nginx",
+      })
+    }).toThrow(/image must match/v)
+  })
+
+  it("throws when the image is empty", () => {
+    expect(() => {
+      quadlet.container({
+        image: "",
+        name: "nginx",
+      })
+    }).toThrow(/image must not be empty/v)
+  })
+
+  it("throws when the image exceeds the length limit", () => {
+    const overlyLong = `docker.io/library/${"a".repeat(600)}:latest`
+    expect(() => {
+      quadlet.container({
+        image: overlyLong,
+        name: "nginx",
+      })
+    }).toThrow(/image must not exceed/v)
+  })
+
   it("generates all container section fields in correct order", async () => {
     const mod = quadlet.container({
       addCapability: ["NET_ADMIN"],
