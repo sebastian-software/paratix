@@ -50,6 +50,17 @@ function composeUpReportedChange(composeOutput: string): boolean {
   return COMPOSE_UP_ACTION_KEYWORDS.some((keyword) => composeOutput.includes(keyword))
 }
 
+function validateComposeUpServices(services: string[] | undefined): void {
+  for (const service of services ?? []) {
+    if (service === "") {
+      throw new Error("compose.up services must not contain empty service names")
+    }
+    if (service.startsWith("-")) {
+      throw new Error(`compose.up service names must not start with "-", got ${service}`)
+    }
+  }
+}
+
 /**
  * Detect whether `podman` or `docker` is available on the remote host.
  * Podman is preferred when both are installed.
@@ -866,6 +877,7 @@ export const compose = {
    */
   up(options: { projectDirectory: string; runtime?: ComposeRuntime; services?: string[] }): Module {
     const { projectDirectory, runtime: explicitRuntime, services } = options
+    validateComposeUpServices(services)
 
     return {
       async apply(ssh: null | SshConnection): Promise<ModuleResult> {

@@ -224,6 +224,20 @@ describe("compose.up — name", () => {
   })
 })
 
+describe("compose.up — service validation", () => {
+  it("rejects empty service names", () => {
+    expect(() => compose.up({ projectDirectory, services: ["web", ""] })).toThrow(
+      "compose.up services must not contain empty service names"
+    )
+  })
+
+  it("rejects service names that would be parsed as compose options", () => {
+    expect(() => compose.up({ projectDirectory, services: ["--remove-orphans"] })).toThrow(
+      'compose.up service names must not start with "-", got --remove-orphans'
+    )
+  })
+})
+
 // ─── compose.pull ─────────────────────────────────────────────────────────────
 
 describe("compose.pull — check", () => {
