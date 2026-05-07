@@ -44,7 +44,7 @@ function ubuntuResponses(
 function debianCheckResponses(currentCodename: string, stableCodename: string) {
   return {
     "cat '/etc/os-release'": { code: 0, stdout: DEBIAN_OS_RELEASE },
-    "curl -fsSL https://deb.debian.org/debian/dists/stable/Release": {
+    "curl --max-time 30 -fsSL https://deb.debian.org/debian/dists/stable/Release": {
       code: 0,
       stdout: `Origin: Debian\nCodename: ${stableCodename}\nSuite: stable\n`,
     },
@@ -65,7 +65,7 @@ function debianApplyResponses(
       stdout: `deb http://deb.debian.org/debian ${currentCodename} main\n`,
     },
     "cat '/etc/os-release'": { code: 0, stdout: DEBIAN_OS_RELEASE },
-    "curl -fsSL https://deb.debian.org/debian/dists/stable/Release": {
+    "curl --max-time 30 -fsSL https://deb.debian.org/debian/dists/stable/Release": {
       code: 0,
       stdout: `Origin: Debian\nCodename: ${targetCodename}\nSuite: stable\n`,
     },
@@ -274,10 +274,26 @@ describe("releaseUpgrade.upgrade — apply (Debian)", () => {
     ])
   })
 
+  it("R-0000177: stable codename curl uses --max-time 30", async () => {
+    const ssh = createMockSsh({
+      "cat '/etc/os-release'": { code: 0, stdout: DEBIAN_OS_RELEASE },
+      "curl --max-time 30 -fsSL https://deb.debian.org/debian/dists/stable/Release": {
+        code: 0,
+        stdout: DEBIAN_STABLE_RELEASE_CURL,
+      },
+      "lsb_release -cs": { code: 0, stdout: "bookworm\n" },
+    })
+    const mod = releaseUpgrade.upgrade({ dryRun: true })
+    await mod.apply(ssh, emptyEnv)
+    expect(ssh.calls).toContain(
+      "curl --max-time 30 -fsSL https://deb.debian.org/debian/dists/stable/Release"
+    )
+  })
+
   it("dryRun: no commands executed after codename lookup, returns ok", async () => {
     const ssh = createMockSsh({
       "cat '/etc/os-release'": { code: 0, stdout: DEBIAN_OS_RELEASE },
-      "curl -fsSL https://deb.debian.org/debian/dists/stable/Release": {
+      "curl --max-time 30 -fsSL https://deb.debian.org/debian/dists/stable/Release": {
         code: 0,
         stdout: DEBIAN_STABLE_RELEASE_CURL,
       },
@@ -293,7 +309,7 @@ describe("releaseUpgrade.upgrade — apply (Debian)", () => {
   it("returns ok without running the upgrade pipeline when Debian already uses the target codename", async () => {
     const ssh = createMockSsh({
       "cat '/etc/os-release'": { code: 0, stdout: DEBIAN_OS_RELEASE },
-      "curl -fsSL https://deb.debian.org/debian/dists/stable/Release": {
+      "curl --max-time 30 -fsSL https://deb.debian.org/debian/dists/stable/Release": {
         code: 0,
         stdout: DEBIAN_STABLE_RELEASE_CURL,
       },
@@ -632,7 +648,7 @@ describe("releaseUpgrade.upgrade — apply (Debian)", () => {
         "[ -e '/etc/apt/sources.list' ]": { code: 0 },
         "cat '/etc/apt/sources.list'": { code: 0, stdout: originalSources },
         "cat '/etc/os-release'": { code: 0, stdout: DEBIAN_OS_RELEASE },
-        "curl -fsSL https://deb.debian.org/debian/dists/stable/Release": {
+        "curl --max-time 30 -fsSL https://deb.debian.org/debian/dists/stable/Release": {
           code: 0,
           stdout: `Origin: Debian\nCodename: ${targetCodename}\nSuite: stable\n`,
         },
@@ -686,7 +702,7 @@ describe("releaseUpgrade.upgrade — apply (Debian)", () => {
         "[ -e '/etc/apt/sources.list' ]": { code: 0 },
         "cat '/etc/apt/sources.list'": { code: 0, stdout: originalSources },
         "cat '/etc/os-release'": { code: 0, stdout: DEBIAN_OS_RELEASE },
-        "curl -fsSL https://deb.debian.org/debian/dists/stable/Release": {
+        "curl --max-time 30 -fsSL https://deb.debian.org/debian/dists/stable/Release": {
           code: 0,
           stdout: "Origin: Debian\nCodename: trixie\nSuite: stable\n",
         },

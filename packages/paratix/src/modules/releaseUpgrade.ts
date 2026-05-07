@@ -91,10 +91,15 @@ async function getDebianCurrentCodename(ssh: SshConnection): Promise<string> {
  * @throws {Error} When the `Codename:` field is absent from the Release file.
  */
 async function getDebianStableCodename(ssh: SshConnection): Promise<string> {
-  const result = await ssh.exec("curl -fsSL https://deb.debian.org/debian/dists/stable/Release", {
-    ignoreExitCode: true,
-    silent: true,
-  })
+  // R-0000177: --max-time bounds the wall-clock duration of the request so
+  // that a stuck mirror cannot hang the entire upgrade module.
+  const result = await ssh.exec(
+    "curl --max-time 30 -fsSL https://deb.debian.org/debian/dists/stable/Release",
+    {
+      ignoreExitCode: true,
+      silent: true,
+    }
+  )
   for (const line of result.stdout.split("\n")) {
     const match = /^Codename:\s+(?<name>\S+)$/v.exec(line)
     if (match?.groups) {
