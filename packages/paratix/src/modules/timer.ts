@@ -168,6 +168,14 @@ async function hasResidualTimerState(ssh: SshConnection, timerUnit: string): Pro
   return ssh.test(`${SYSTEMCTL} is-active --quiet -- ${shellQuote(timerUnit)}`)
 }
 
+function isMissingUnitDisableResult(result: { stderr?: string; stdout?: string }): boolean {
+  const output = `${result.stderr ?? ""}\n${result.stdout ?? ""}`.toLowerCase()
+  return (
+    output.includes("no such unit") ||
+    (output.includes("unit file") && output.includes("does not exist"))
+  )
+}
+
 type RestartContext = {
   name: string
   needsRestartForContentChange: boolean
@@ -263,13 +271,16 @@ async function applyAbsent(ssh: SshConnection, context: AbsentContext): Promise<
   const residualState = await hasResidualTimerState(ssh, locations.timerUnit)
   if (!serviceExists && !timerExists && !residualState) return { status: "ok" }
 
-  // Best-effort disable; ignore failure (unit may already be gone). `disable
-  // --now` also removes the wants/ symlink, which is why we run it before
-  // deleting the unit files.
-  await ssh.exec(`${SYSTEMCTL} disable --now -- ${shellQuote(locations.timerUnit)}`, {
+  // `disable --now` removes the wants/ symlink, so run it before deleting
+  // unit files. Only tolerate the expected missing-unit race; real stop or
+  // disable failures mean the timer may still be active or enabled.
+  const disable = await ssh.exec(`${SYSTEMCTL} disable --now -- ${shellQuote(locations.timerUnit)}`, {
     ignoreExitCode: true,
     silent: true,
   })
+  if (disable.code !== 0 && !isMissingUnitDisableResult(disable)) {
+    return failedCommand(`[${module}: ${name}] systemctl disable --now failed`, disable)
+  }
 
   if (serviceExists || timerExists) {
     const remove = await ssh.exec(

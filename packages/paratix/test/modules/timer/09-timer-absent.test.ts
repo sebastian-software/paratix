@@ -123,6 +123,20 @@ describe("timer.absent", () => {
     expect(result.status).toBe("changed")
   })
 
+  it("apply returns failed when disable reports a real stop error", async () => {
+    const ssh = createAbsentApplyWithExistingUnitsMockSsh({
+      "systemctl disable --now -- 'backup.timer'": {
+        code: 1,
+        stderr: "Failed to stop backup.timer: Access denied",
+      },
+    })
+    const mod = timer.absent("backup")
+    const result = await mod.apply(ssh, emptyEnv)
+    expect(result.status).toBe("failed")
+    expect(result.error?.message).toContain("systemctl disable --now failed")
+    expect(ssh.calls).not.toContain(`rm -f '${TIMER_PATH}' '${SERVICE_PATH}'`)
+  })
+
   it("apply returns failed when rm fails", async () => {
     const ssh = createAbsentApplyWithExistingUnitsMockSsh({
       [`rm -f '${TIMER_PATH}' '${SERVICE_PATH}'`]: { code: 1, stderr: "EACCES" },
