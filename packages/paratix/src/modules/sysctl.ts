@@ -108,6 +108,147 @@ async function checkPresentState(
 }
 
 /**
+ * Options for {@link sysctl.set}.
+ */
+export type SysctlSetOptions = {
+  /**
+   * When `state` is `"absent"`, optionally restore this live runtime value
+   * after removing the persistence file. Without `resetValue`, only the
+   * persistence file is removed and the live kernel value remains unchanged
+   * until the next reboot.
+   *
+   * Use this for security-relevant parameters (e.g. resetting
+   * `net.ipv4.ip_forward` to `"0"`) where leaving the live value in place
+   * would silently violate the desired absent state.
+   */
+  resetValue?: string
+  state?: "absent" | "present"
+}
+
+type ApplyPresentStateInput = {
+  configPath: string
+  expectedContent: string
+  key: string
+  value: string
+}
+
+/**
+ * Apply the `present` state: write the live value via `sysctl -w` and
+ * persist the configuration file.
+ *
+ * @param conn - The SSH connection to the remote host.
+ * @param input - The desired key/value plus the persistence file location and
+ *   expected content.
+ * @returns A `ModuleResult` indicating success (`changed`) or a command
+ *   failure.
+ */
+async function applyPresentState(
+  conn: SshConnection,
+  input: ApplyPresentStateInput
+): Promise<ModuleResult> {
+  const { configPath, expectedContent, key, value } = input
+  const assignment = `${key}=${value}`
+  const result = await conn.exec(`sysctl -w ${shellQuote(assignment)}`, EXEC_OPTS)
+  if (result.code !== 0) {
+    return failedCommand(`[sysctl.set: ${key}] sysctl -w failed`, result)
+  }
+  await conn.writeFile(configPath, expectedContent, { mode: SYSCTL_CONFIG_MODE })
+  return { status: "changed" }
+}
+
+/**
+ * Restore the live runtime value when `state` is `"absent"` and a
+ * `resetValue` was provided. The reset is verified via `sysctl -n`.
+ *
+ * @param conn - The SSH connection to the remote host.
+ * @param key - The sysctl key to reset.
+ * @param resetValue - The desired live value to write back.
+ * @returns A failure `ModuleResult` if the reset did not converge,
+ *   otherwise `undefined` to signal success.
+ */
+async function resetLiveValue(
+  conn: SshConnection,
+  key: string,
+  resetValue: string
+): Promise<ModuleResult | undefined> {
+  const assignment = `${key}=${resetValue}`
+  const writeResult = await conn.exec(`sysctl -w ${shellQuote(assignment)}`, EXEC_OPTS)
+  if (writeResult.code !== 0) {
+    return failedCommand(
+      `[sysctl.set: ${key}] sysctl -w failed while resetting live value`,
+      writeResult
+    )
+  }
+  const verify = await conn.exec(`sysctl -n ${shellQuote(key)}`, EXEC_OPTS)
+  if (verify.code !== 0) {
+    return failedCommand(`[sysctl.set: ${key}] failed to read live value after reset`, verify)
+  }
+  if (verify.stdout.trim() !== resetValue) {
+    return failed(
+      `[sysctl.set: ${key}] live value did not converge to reset value: expected ${JSON.stringify(resetValue)}, got ${JSON.stringify(verify.stdout.trim())}`
+    )
+  }
+  return undefined
+}
+
+type AbsentStateInput = {
+  configPath: string
+  key: string
+  resetValue: string | undefined
+}
+
+/**
+ * Apply the `absent` state: remove the persistence file and, if a
+ * `resetValue` is given, restore the live runtime value.
+ *
+ * @param conn - The SSH connection to the remote host.
+ * @param input - The persistence file location, the sysctl key, and the
+ *   optional `resetValue` to restore on the live system.
+ * @returns A `ModuleResult` indicating success (`changed`) or a command
+ *   failure.
+ */
+async function applyAbsentState(
+  conn: SshConnection,
+  input: AbsentStateInput
+): Promise<ModuleResult> {
+  const { configPath, key, resetValue } = input
+  const removeResult = await conn.exec(`rm -f ${shellQuote(configPath)}`, EXEC_OPTS)
+  if (removeResult.code !== 0) {
+    return failedCommand(`[sysctl.set: ${key}] failed to remove config file`, removeResult)
+  }
+  if (resetValue !== undefined) {
+    const resetFailure = await resetLiveValue(conn, key, resetValue)
+    if (resetFailure) return resetFailure
+  }
+  return { status: "changed" }
+}
+
+/**
+ * Check whether the `absent` state has converged: the persistence file is
+ * gone and (if `resetValue` is set) the live runtime value matches.
+ *
+ * @param conn - The SSH connection to the remote host.
+ * @param input - The persistence file location, the sysctl key, and the
+ *   optional `resetValue` to compare against the live runtime value.
+ * @returns `"ok"` when the absent state has converged, otherwise
+ *   `"needs-apply"`.
+ */
+async function checkAbsentState(
+  conn: SshConnection,
+  input: AbsentStateInput
+): Promise<"needs-apply" | "ok"> {
+  const { configPath, key, resetValue } = input
+  const fileExists = await conn.exec(`test -f ${shellQuote(configPath)}`, EXEC_OPTS)
+  if (fileExists.code === 0) return NEEDS_APPLY
+  if (resetValue !== undefined) {
+    const live = await conn.exec(`sysctl -n ${shellQuote(key)}`, EXEC_OPTS)
+    if (live.code !== 0) return NEEDS_APPLY
+    if (live.stdout.trim() !== resetValue) return NEEDS_APPLY
+  }
+  return "ok"
+}
+
+/**
  * Modules for managing kernel parameters via sysctl on the remote host.
  */
 export const sysctl = {
@@ -118,51 +259,45 @@ export const sysctl = {
    * file is written to `/etc/sysctl.d/99-paratix-<sanitized-key>-<hash>.conf`
    * for persistence.
    *
-   * When `state` is `"absent"`, the persistence file is removed but the live
-   * value is not reverted (a reboot will restore the default).
+   * When `state` is `"absent"`, the persistence file is removed. By default
+   * the live value is not reverted (a reboot will restore the default). Pass
+   * `resetValue` to additionally write the desired runtime value back to the
+   * kernel via `sysctl -w` so the absent state converges on the live system
+   * as well.
    *
    * @param key - The sysctl key (e.g. "net.ipv4.ip_forward").
    * @param value - The desired value (e.g. "1").
    * @param options - Optional settings.
    * @param options.state - Whether the parameter should be "present" (default) or "absent".
+   * @param options.resetValue - Live runtime value to restore when `state` is `"absent"`.
+   *   Ignored when `state` is `"present"`.
    * @returns A Module that manages the sysctl parameter.
    */
-  set(key: string, value: string, options?: { state?: "absent" | "present" }): Module {
+  set(key: string, value: string, options?: SysctlSetOptions): Module {
     validateKey(key)
     validateValue(value)
     const state = options?.state ?? "present"
+    const resetValue = options?.resetValue
+    if (resetValue !== undefined) {
+      validateValue(resetValue)
+    }
     const configPath = `${SYSCTL_DIR}/99-paratix-${sanitizeKey(key)}-${keyHash(key)}.conf`
     const expectedContent = buildSysctlConfig(key, value)
 
     return {
       async apply(conn: null | SshConnection): Promise<ModuleResult> {
         if (!conn) return failed(`[sysctl.set: ${key}] SSH connection is required`)
-
         if (state === "present") {
-          const assignment = `${key}=${value}`
-          const result = await conn.exec(`sysctl -w ${shellQuote(assignment)}`, EXEC_OPTS)
-          if (result.code !== 0) {
-            return failedCommand(`[sysctl.set: ${key}] sysctl -w failed`, result)
-          }
-          await conn.writeFile(configPath, expectedContent, { mode: SYSCTL_CONFIG_MODE })
-        } else {
-          const result = await conn.exec(`rm -f ${shellQuote(configPath)}`, EXEC_OPTS)
-          if (result.code !== 0) {
-            return failedCommand(`[sysctl.set: ${key}] failed to remove config file`, result)
-          }
+          return applyPresentState(conn, { configPath, expectedContent, key, value })
         }
-
-        return { status: "changed" }
+        return applyAbsentState(conn, { configPath, key, resetValue })
       },
       async check(conn: null | SshConnection): Promise<"needs-apply" | "ok"> {
         if (!conn) return NEEDS_APPLY
-
         if (state === "present") {
           return checkPresentState(conn, { configPath, expectedContent, key, value })
         }
-
-        const fileExists = await conn.exec(`test -f ${shellQuote(configPath)}`, EXEC_OPTS)
-        return fileExists.code === 0 ? NEEDS_APPLY : "ok"
+        return checkAbsentState(conn, { configPath, key, resetValue })
       },
       name: state === "present" ? `sysctl.set: ${key}=${value}` : `sysctl.set: absent ${key}`,
     }

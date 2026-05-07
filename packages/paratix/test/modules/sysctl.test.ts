@@ -104,6 +104,38 @@ describe("sysctl.set — check", () => {
     const result = await mod.check(mockSsh, emptyEnv)
     expect(result).toBe("needs-apply")
   })
+
+  // state: absent + resetValue
+
+  it("returns ok when config file is gone and live value matches resetValue (state: absent)", async () => {
+    const mockSsh = createMockSsh({
+      [`sysctl -n '${KEY}'`]: { code: 0, stdout: "0" },
+      [`test -f '${CONF_PATH}'`]: { code: 1 },
+    })
+    const mod = sysctl.set(KEY, VALUE, { resetValue: "0", state: "absent" })
+    const result = await mod.check(mockSsh, emptyEnv)
+    expect(result).toBe("ok")
+  })
+
+  it("returns needs-apply when live value differs from resetValue (state: absent)", async () => {
+    const mockSsh = createMockSsh({
+      [`sysctl -n '${KEY}'`]: { code: 0, stdout: "1" },
+      [`test -f '${CONF_PATH}'`]: { code: 1 },
+    })
+    const mod = sysctl.set(KEY, VALUE, { resetValue: "0", state: "absent" })
+    const result = await mod.check(mockSsh, emptyEnv)
+    expect(result).toBe("needs-apply")
+  })
+
+  it("returns needs-apply when live value cannot be read (state: absent + resetValue)", async () => {
+    const mockSsh = createMockSsh({
+      [`sysctl -n '${KEY}'`]: { code: 255, stderr: "unknown key", stdout: "" },
+      [`test -f '${CONF_PATH}'`]: { code: 1 },
+    })
+    const mod = sysctl.set(KEY, VALUE, { resetValue: "0", state: "absent" })
+    const result = await mod.check(mockSsh, emptyEnv)
+    expect(result).toBe("needs-apply")
+  })
 })
 
 // ─── sysctl.set — apply ───────────────────────────────────────────────────────
@@ -155,6 +187,53 @@ describe("sysctl.set — apply", () => {
     const result = await mod.apply(mockSsh, emptyEnv)
     expect(result.status).toBe("failed")
     expect(String(result.error)).toContain("failed to remove config file")
+  })
+
+  it("removes file and writes resetValue to live kernel (state: absent + resetValue)", async () => {
+    const mockSsh = createMockSsh({
+      [`rm -f '${CONF_PATH}'`]: { code: 0 },
+      [`sysctl -n '${KEY}'`]: { code: 0, stdout: "0" },
+      [`sysctl -w '${KEY}=0'`]: { code: 0 },
+    })
+    const mod = sysctl.set(KEY, VALUE, { resetValue: "0", state: "absent" })
+    const result = await mod.apply(mockSsh, emptyEnv)
+    expect(result.status).toBe("changed")
+    expect(mockSsh.calls).toContain(`rm -f '${CONF_PATH}'`)
+    expect(mockSsh.calls).toContain(`sysctl -w '${KEY}=0'`)
+    expect(mockSsh.calls).toContain(`sysctl -n '${KEY}'`)
+  })
+
+  it("returns failed when sysctl -w fails during reset (state: absent + resetValue)", async () => {
+    const mockSsh = createMockSsh({
+      [`rm -f '${CONF_PATH}'`]: { code: 0 },
+      [`sysctl -w '${KEY}=0'`]: { code: 1, stderr: "permission denied" },
+    })
+    const mod = sysctl.set(KEY, VALUE, { resetValue: "0", state: "absent" })
+    const result = await mod.apply(mockSsh, emptyEnv)
+    expect(result.status).toBe("failed")
+    expect(String(result.error)).toContain("sysctl -w failed while resetting live value")
+  })
+
+  it("returns failed when live value did not converge after reset (state: absent + resetValue)", async () => {
+    const mockSsh = createMockSsh({
+      [`rm -f '${CONF_PATH}'`]: { code: 0 },
+      [`sysctl -n '${KEY}'`]: { code: 0, stdout: "1" },
+      [`sysctl -w '${KEY}=0'`]: { code: 0 },
+    })
+    const mod = sysctl.set(KEY, VALUE, { resetValue: "0", state: "absent" })
+    const result = await mod.apply(mockSsh, emptyEnv)
+    expect(result.status).toBe("failed")
+    expect(String(result.error)).toContain("did not converge")
+  })
+
+  it("does not run sysctl -w when resetValue is not given (state: absent)", async () => {
+    const mockSsh = createMockSsh({
+      [`rm -f '${CONF_PATH}'`]: { code: 0 },
+    })
+    const mod = sysctl.set(KEY, VALUE, { state: "absent" })
+    const result = await mod.apply(mockSsh, emptyEnv)
+    expect(result.status).toBe("changed")
+    expect(mockSsh.calls).not.toContain(`sysctl -w '${KEY}=${VALUE}'`)
   })
 })
 

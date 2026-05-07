@@ -350,9 +350,9 @@ rsync SSH process and does not depend on a local `known_hosts` entry.
 
 ### `sysctl`
 
-| Method       | Signature                                                                           | Idempotent |
-| ------------ | ----------------------------------------------------------------------------------- | ---------- |
-| `sysctl.set` | `(key: string, value: string, options?: { state?: "absent" \| "present" }): Module` | Yes        |
+| Method       | Signature                                                                                                | Idempotent                                                                                                                                  |
+| ------------ | -------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------- |
+| `sysctl.set` | `(key: string, value: string, options?: { resetValue?: string; state?: "absent" \| "present" }): Module` | Yes for `present`. For `absent`: only the persistence file is removed by default; pass `resetValue` to also restore the live runtime value. |
 
 ### `system`
 
