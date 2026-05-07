@@ -208,6 +208,11 @@ async function liveSshdPortMatches(ssh: SshConnection, targetPort: number): Prom
   return result.code === 0 && result.stdout.trim() !== ""
 }
 
+async function sshdPortConfigMatchesLive(ssh: SshConnection, targetPort: number): Promise<boolean> {
+  if (await socketActivationBootPathNeedsApply(ssh)) return false
+  return liveSshdPortMatches(ssh, targetPort)
+}
+
 async function restoreSshdPortRestartFailure(
   ssh: SshConnection,
   parameters: {
@@ -486,12 +491,10 @@ export const sshd = {
         if (portValues.length === 0) {
           // When no top-level Port directive exists, sshd defaults to port 22.
           if (targetPort !== DEFAULT_SSH_PORT) return NEEDS_APPLY
-          if (await socketActivationBootPathNeedsApply(ssh)) return NEEDS_APPLY
-          return (await liveSshdPortMatches(ssh, targetPort)) ? "ok" : NEEDS_APPLY
+          return (await sshdPortConfigMatchesLive(ssh, targetPort)) ? "ok" : NEEDS_APPLY
         }
         if (portValues.every((portValue) => portValue === String(targetPort))) {
-          if (await socketActivationBootPathNeedsApply(ssh)) return NEEDS_APPLY
-          return (await liveSshdPortMatches(ssh, targetPort)) ? "ok" : NEEDS_APPLY
+          return (await sshdPortConfigMatchesLive(ssh, targetPort)) ? "ok" : NEEDS_APPLY
         }
         return NEEDS_APPLY
       },
