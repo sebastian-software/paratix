@@ -309,6 +309,28 @@ describe("releaseUpgrade.upgrade — apply (Debian)", () => {
     expect(ssh.calls).not.toContain("DEBIAN_FRONTEND=noninteractive apt-get full-upgrade -y")
   })
 
+  it("fails without rewriting sources when Debian is on testing instead of the stable predecessor", async () => {
+    const ssh = createMockSsh(debianApplyResponses("testing", "trixie"))
+    const mod = releaseUpgrade.upgrade()
+    const result = await mod.apply(ssh, emptyEnv)
+
+    expect(result.status).toBe("failed")
+    expect(String(result.error)).toContain("unsupported Debian release upgrade path")
+    expect(ssh.calls).not.toContain("cat '/etc/apt/sources.list'")
+    expect(ssh.calls).not.toContain("DEBIAN_FRONTEND=noninteractive apt-get update")
+  })
+
+  it("fails without rewriting sources when Debian is newer than current stable", async () => {
+    const ssh = createMockSsh(debianApplyResponses("forky", "trixie"))
+    const mod = releaseUpgrade.upgrade()
+    const result = await mod.apply(ssh, emptyEnv)
+
+    expect(result.status).toBe("failed")
+    expect(String(result.error)).toContain("unsupported Debian release upgrade path")
+    expect(ssh.calls).not.toContain("cat '/etc/apt/sources.list'")
+    expect(ssh.calls).not.toContain("DEBIAN_FRONTEND=noninteractive apt-get update")
+  })
+
   it("apt-get update fails → failed", async () => {
     const ssh = createMockSsh(
       debianApplyResponses("bookworm", "trixie", {
@@ -557,16 +579,16 @@ describe("releaseUpgrade.upgrade — apply (Debian)", () => {
     // substring are left intact. Only suite fields of active source entries
     // may be rewritten.
     it("R-0000103: only replaces suite fields, not URL or comment substring matches", async () => {
-      const currentCodename = "trusty"
-      const targetCodename = "noble"
+      const currentCodename = "bookworm"
+      const targetCodename = "trixie"
       // Mixed content: real `deb` suite references (must change), a URL path
-      // that contains `trusty` as part of a longer host segment (must NOT
-      // change) and a comment line that mentions `trusty-backports` (must also
+      // that contains `bookworm` as part of a longer host segment (must NOT
+      // change) and a comment line that mentions `bookworm-backports` (must also
       // stay intact because comments are not apt suite fields).
       const originalSources = [
-        `deb http://archive.ubuntu.com/ubuntu-trusty-updates/ ${currentCodename} main`,
-        "# repo backports for trusty-backports stay untouched",
-        "deb http://archive.ubuntu.com/ubuntu/ trusty-security main",
+        `deb http://archive.ubuntu.com/ubuntu-bookworm-updates/ ${currentCodename} main`,
+        "# repo backports for bookworm-backports stay untouched",
+        "deb http://archive.ubuntu.com/ubuntu/ bookworm-security main",
       ].join("\n")
       const ssh = createMockSsh({
         "[ -e '/etc/apt/sources.list' ]": { code: 0 },
@@ -594,23 +616,23 @@ describe("releaseUpgrade.upgrade — apply (Debian)", () => {
       const written = sourcesWrites[0].content
 
       // Standalone suite reference is rewritten.
-      expect(written).toContain(`ubuntu-trusty-updates/ ${targetCodename} main`)
+      expect(written).toContain(`ubuntu-bookworm-updates/ ${targetCodename} main`)
       expect(written).toContain(
         `deb http://archive.ubuntu.com/ubuntu/ ${targetCodename}-security main`
       )
 
       // Substring occurrences outside suite fields (URL path segment and the
       // comment) must remain unchanged.
-      expect(written).toContain("ubuntu-trusty-updates/")
-      expect(written).toContain("trusty-backports")
+      expect(written).toContain("ubuntu-bookworm-updates/")
+      expect(written).toContain("bookworm-backports")
 
-      // Sanity: the only standalone `trusty` token (the suite field of the
+      // Sanity: the only standalone `bookworm` token (the suite field of the
       // first `deb` line) has been rewritten, and the new codename appears as
       // a standalone token.
-      const standaloneTrusty = /(?<![\w.\-])trusty(?![\w.\-])/v
-      const standaloneNoble = /(?<![\w.\-])noble(?![\w.\-])/v
-      expect(standaloneTrusty.test(written)).toBe(false)
-      expect(standaloneNoble.test(written)).toBe(true)
+      const standaloneBookworm = /(?<![\w.\-])bookworm(?![\w.\-])/v
+      const standaloneTrixie = /(?<![\w.\-])trixie(?![\w.\-])/v
+      expect(standaloneBookworm.test(written)).toBe(false)
+      expect(standaloneTrixie.test(written)).toBe(true)
     })
 
     it("migrates release-derived suites in active .list source fields", async () => {

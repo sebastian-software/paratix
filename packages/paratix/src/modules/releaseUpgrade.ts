@@ -10,13 +10,12 @@ import {
   NEEDS_APPLY,
   type SshConnection,
 } from "../types.js"
-import { rewriteAptSourcesContent } from "./releaseUpgradeSources.js"
+import { isSupportedDebianUpgradePath, rewriteAptSourcesContent } from "./releaseUpgradeSources.js"
 
 const NONINTERACTIVE = "DEBIAN_FRONTEND=noninteractive"
 const CODENAME_RE = /^[a-z]{3,20}$/v
 const APT_SOURCES_MODE = "0644"
 const NO_UBUNTU_RELEASE_PATTERN = /no new release (?:found|available)/iv
-
 function isNoUbuntuReleaseAvailable(result: ExecResult): boolean {
   if (result.code === 0) return false
   return NO_UBUNTU_RELEASE_PATTERN.test(`${result.stdout}\n${result.stderr}`)
@@ -429,12 +428,12 @@ async function applyDebian(
   const currentCodename = await getDebianCurrentCodename(ssh)
   const targetCodename = await getDebianStableCodename(ssh)
 
-  if (options.dryRun === true) {
-    return { status: "ok" }
-  }
+  if (options.dryRun === true || currentCodename === targetCodename) return { status: "ok" }
 
-  if (currentCodename === targetCodename) {
-    return { status: "ok" }
+  if (!isSupportedDebianUpgradePath(currentCodename, targetCodename)) {
+    return failed(
+      `[releaseUpgrade.upgrade] unsupported Debian release upgrade path: ${currentCodename} -> ${targetCodename}`
+    )
   }
 
   // R-0000046: snapshot every sources file before rewriting it so a

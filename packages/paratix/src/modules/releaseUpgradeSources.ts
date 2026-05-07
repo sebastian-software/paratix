@@ -1,4 +1,10 @@
 const RELEASE_DERIVED_SUITE_SUFFIXES = ["-updates", "-security", "-backports"] as const
+const DEBIAN_SUPPORTED_PREDECESSORS = {
+  bookworm: "bullseye",
+  bullseye: "buster",
+  buster: "stretch",
+  trixie: "bookworm",
+} as const
 const APT_LIST_SUITE_PATTERN =
   // eslint-disable-next-line security/detect-unsafe-regex -- Line-bounded apt source field parser; captures only the suite token.
   /^(?<prefix>[ \t]*(?:deb|deb-src)[ \t]+(?:\[[^\]\r\n]*\][ \t]+)?[^ \t\r\n]+[ \t]+)(?<suite>[^ \t\r\n]+)/gmv
@@ -14,6 +20,23 @@ function rewriteReleaseSuite(
     if (suite === `${currentCodename}${suffix}`) return `${targetCodename}${suffix}`
   }
   return suite
+}
+
+export function isSupportedDebianUpgradePath(
+  currentCodename: string,
+  targetCodename: string
+): boolean {
+  switch (targetCodename) {
+    case "bookworm":
+    case "bullseye":
+    case "buster":
+    case "trixie": {
+      return DEBIAN_SUPPORTED_PREDECESSORS[targetCodename] === currentCodename
+    }
+    default: {
+      return false
+    }
+  }
 }
 
 export function rewriteAptSourcesContent(parameters: {
