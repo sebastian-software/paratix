@@ -379,6 +379,31 @@ describe("file.chmod", () => {
     expect(result.status).toBe("changed")
     expect(ssh.calls).toContain("chmod '0644' '/var/app/config.yml'")
   })
+
+  it("regression R-0000133 — apply refuses to chmod through a symlink", async () => {
+    // chmod follows symlinks, so without an explicit -L guard file.chmod on a
+    // symlinked path silently rewrites the mode of the link target. The guard
+    // must reject the operation up-front, even when the link is dangling.
+    const ssh = createMockSsh({
+      "[ -L '/var/app/config.yml' ]": { code: 0 },
+    })
+    const mod = file.chmod("/var/app/config.yml", "0644")
+    const result = await mod.apply(ssh, emptyEnv)
+
+    expect(result.status).toBe("failed")
+    expect(result.error?.message).toContain("refuses to operate through symlink")
+    expect(ssh.calls).not.toContain("chmod '0644' '/var/app/config.yml'")
+  })
+
+  it("regression R-0000133 — check returns needs-apply when the target is a symlink", async () => {
+    const ssh = createMockSsh({
+      "[ -e '/var/app/config.yml' ]": { code: 0 },
+      "[ -L '/var/app/config.yml' ]": { code: 0 },
+    })
+    const mod = file.chmod("/var/app/config.yml", "0644")
+    const result = await mod.check(ssh, emptyEnv)
+    expect(result).toBe("needs-apply")
+  })
 })
 
 describe("file.chown", () => {
@@ -461,6 +486,30 @@ describe("file.chown", () => {
     await expect(mod.apply(ssh, emptyEnv)).rejects.toThrow(
       'chown group component must not start with "-": "-R"'
     )
+  })
+
+  it("regression R-0000133 — apply refuses to chown through a symlink", async () => {
+    // chown follows symlinks, so without an explicit -L guard file.chown on a
+    // symlinked path silently rewrites the ownership of the link target.
+    const ssh = createMockSsh({
+      "[ -L '/var/app/config.yml' ]": { code: 0 },
+    })
+    const mod = file.chown("/var/app/config.yml", "www-data:www-data")
+    const result = await mod.apply(ssh, emptyEnv)
+
+    expect(result.status).toBe("failed")
+    expect(result.error?.message).toContain("refuses to operate through symlink")
+    expect(ssh.calls).not.toContain("chown -- 'www-data:www-data' '/var/app/config.yml'")
+  })
+
+  it("regression R-0000133 — check returns needs-apply when the target is a symlink", async () => {
+    const ssh = createMockSsh({
+      "[ -e '/var/app/config.yml' ]": { code: 0 },
+      "[ -L '/var/app/config.yml' ]": { code: 0 },
+    })
+    const mod = file.chown("/var/app/config.yml", "www-data:www-data")
+    const result = await mod.check(ssh, emptyEnv)
+    expect(result).toBe("needs-apply")
   })
 })
 
@@ -1970,6 +2019,33 @@ describe("file.properties", () => {
 
     expect(result.status).toBe("ok")
     expect(ssh.calls).not.toContain("chmod -- '0644' '/var/app'")
+  })
+
+  it("regression R-0000133 — apply refuses to mutate a symlinked path", async () => {
+    // chmod/chown/chgrp follow symlinks. file.properties must reject symlinks
+    // before reading state or issuing any mutation, otherwise a malicious or
+    // accidental link redirects the change onto the target.
+    const ssh = createMockSsh({
+      "[ -L '/var/app' ]": { code: 0 },
+    })
+    const mod = file.properties("/var/app", { group: "www-data", mode: "0644", owner: "www-data" })
+    const result = await mod.apply(ssh, emptyEnv)
+
+    expect(result.status).toBe("failed")
+    expect(result.error?.message).toContain("refuses to operate through symlink")
+    expect(ssh.calls).not.toContain("chmod -- '0644' '/var/app'")
+    expect(ssh.calls).not.toContain("chown -- 'www-data:www-data' '/var/app'")
+    expect(ssh.calls).not.toContain("chgrp -- 'www-data' '/var/app'")
+    expect(ssh.calls).not.toContain("stat -c '%a %U %G' '/var/app'")
+  })
+
+  it("regression R-0000133 — check returns needs-apply when the target is a symlink", async () => {
+    const ssh = createMockSsh({
+      "[ -L '/var/app' ]": { code: 0 },
+    })
+    const mod = file.properties("/var/app", { mode: "0644" })
+    const result = await mod.check(ssh, emptyEnv)
+    expect(result).toBe("needs-apply")
   })
 })
 

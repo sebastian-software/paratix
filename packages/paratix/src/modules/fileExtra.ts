@@ -14,7 +14,7 @@ import {
 import { hexHashesEqual, sha256String } from "./fileHelpers.js"
 import { ownershipMatches, readOwnership, renderChownCommand } from "./fileMetadataHelpers.js"
 import { assertValidGroupName, assertValidUserName } from "./posixNames.js"
-import { isRegularFileWithoutSymlink } from "./remoteFileChecks.js"
+import { isRegularFileWithoutSymlink, isSymlink } from "./remoteFileChecks.js"
 
 /** Index where the file-type field starts in `stat -c '%s %a %U %G %F %Y'` output. */
 const STAT_TYPE_START_INDEX = 4
@@ -412,6 +412,15 @@ export function properties(remotePath: string, options: PropertiesOptions): Modu
     async apply(ssh: null | SshConnection): Promise<ModuleResult> {
       if (!ssh) return failed(`[file.properties: ${remotePath}] SSH connection is required`)
 
+      // R-0000133: chmod/chown/chgrp follow symlinks, so file.properties on a
+      // symlinked path would silently rewrite mode and ownership of the link
+      // target. Refuse the operation up-front before any mutation.
+      if (await isSymlink(ssh, remotePath)) {
+        return failed(
+          `[file.properties: ${remotePath}] refuses to operate through symlink — chmod/chown/chgrp would follow the link`
+        )
+      }
+
       const current = await readPropertiesState(ssh, remotePath)
       const context: DriftContext = { current, options, remotePath, ssh }
       const modeChanged = await applyModeDrift(context)
@@ -422,6 +431,9 @@ export function properties(remotePath: string, options: PropertiesOptions): Modu
     },
     async check(ssh: null | SshConnection): Promise<"needs-apply" | "ok"> {
       if (!ssh) return NEEDS_APPLY
+      // R-0000133: symlinks are never "ok" because apply will refuse to follow
+      // them. Defer the failure to apply so the dedicated error surfaces.
+      if (await isSymlink(ssh, remotePath)) return NEEDS_APPLY
 
       const { group, mode, owner } = await readPropertiesState(ssh, remotePath)
 

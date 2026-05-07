@@ -1,6 +1,7 @@
 import { failed } from "../moduleFailure.js"
 import { shellQuote, validateMode } from "../ssh.js"
 import { type Module, type ModuleResult, NEEDS_APPLY, type SshConnection } from "../types.js"
+import { isSymlink } from "./remoteFileChecks.js"
 
 export type FileOwnership = {
   group: string
@@ -84,14 +85,26 @@ export async function applyFileMetadata(
   remotePath: string,
   options?: { mode?: string; owner?: string }
 ): Promise<void> {
-  if (options?.mode != null) {
+  if (options?.mode == null && options?.owner == null) return
+
+  // R-0000133: chmod/chown follow symlinks. Refusing here prevents the caller
+  // (e.g. file.template.apply) from silently rewriting the mode or ownership
+  // of the symlink target — which is almost never the intent and may cross
+  // privilege boundaries.
+  if (await isSymlink(ssh, remotePath)) {
+    throw new Error(
+      `[file metadata: ${remotePath}] refuses to operate through symlink — chmod/chown would follow the link`
+    )
+  }
+
+  if (options.mode != null) {
     validateMode(options.mode)
     await ssh.exec(`chmod ${shellQuote(options.mode)} ${shellQuote(remotePath)}`, {
       silent: true,
     })
   }
 
-  if (options?.owner != null) {
+  if (options.owner != null) {
     await ssh.exec(renderChownCommand(options.owner, remotePath), {
       silent: true,
     })
@@ -123,6 +136,15 @@ export function createMetadataModule(
     async apply(ssh: null | SshConnection): Promise<ModuleResult> {
       if (!ssh) return failed(`[${name}] SSH connection is required`)
 
+      // R-0000133: explicitly reject symlinks so chmod/chown cannot follow the
+      // link and rewrite mode/owner of the target. `[ -L path ]` matches even
+      // when the link is dangling (`[ -e path ]` returns false).
+      if (await isSymlink(ssh, remotePath)) {
+        return failed(
+          `[${name}] refuses to operate through symlink — ${kind} would follow the link`
+        )
+      }
+
       if (kind === "chmod") validateMode(value)
 
       const command =
@@ -135,6 +157,10 @@ export function createMetadataModule(
     async check(ssh: null | SshConnection): Promise<"needs-apply" | "ok"> {
       if (!ssh) return NEEDS_APPLY
       if (!(await ssh.exists(remotePath))) return NEEDS_APPLY
+      // R-0000133: symlinks are never "ok" because apply will refuse to follow
+      // them. Reporting NEEDS_APPLY here defers the failure to apply, which
+      // surfaces the dedicated error message instead of silently passing.
+      if (await isSymlink(ssh, remotePath)) return NEEDS_APPLY
 
       const ownership = await readOwnership(ssh, remotePath)
       const matches = kind === "chmod" ? { mode: value } : { owner: value }
