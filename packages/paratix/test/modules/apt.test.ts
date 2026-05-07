@@ -43,7 +43,9 @@ describe("apt.key", () => {
 
   it("check returns ok when key file exists", async () => {
     const ssh = createMockSsh({
-      "[ -f '/etc/apt/keyrings/docker.gpg' ]": { code: 0 },
+      "[ -f '/etc/apt/keyrings/docker.gpg' ] && [ ! -L '/etc/apt/keyrings/docker.gpg' ]": {
+        code: 0,
+      },
       "gpg --show-keys --with-colons '/etc/apt/keyrings/docker.gpg'": {
         code: 0,
         stdout: "pub:-:255:22:::\nfpr:::::::::1234567890ABCDEF1234567890ABCDEF12345678:\n",
@@ -56,7 +58,9 @@ describe("apt.key", () => {
 
   it("check returns needs-apply when key file is missing", async () => {
     const ssh = createMockSsh({
-      "[ -f '/etc/apt/keyrings/docker.gpg' ]": { code: 1 },
+      "[ -f '/etc/apt/keyrings/docker.gpg' ] && [ ! -L '/etc/apt/keyrings/docker.gpg' ]": {
+        code: 1,
+      },
     })
     const mod = apt.key("docker", "https://download.docker.com/linux/ubuntu/gpg", { fingerprint })
     const result = await mod.check(ssh, emptyEnv)
@@ -71,7 +75,9 @@ describe("apt.key", () => {
 
   it("check returns needs-apply when the installed key fingerprint mismatches", async () => {
     const ssh = createMockSsh({
-      "[ -f '/etc/apt/keyrings/docker.gpg' ]": { code: 0 },
+      "[ -f '/etc/apt/keyrings/docker.gpg' ] && [ ! -L '/etc/apt/keyrings/docker.gpg' ]": {
+        code: 0,
+      },
       "gpg --show-keys --with-colons '/etc/apt/keyrings/docker.gpg'": {
         code: 0,
         stdout: "pub:-:255:22:::\nfpr:::::::::AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA:\n",
@@ -84,6 +90,7 @@ describe("apt.key", () => {
 
   it("apply downloads, verifies fingerprint, and then imports the key", async () => {
     const ssh = createMockSsh({
+      "[ -L '/etc/apt/keyrings/docker.gpg' ]": { code: 1 },
       [downloadCommand]: {
         code: 0,
       },
@@ -118,6 +125,7 @@ describe("apt.key", () => {
   it("passes credentialed and sensitive query URLs through curl stdin instead of argv", async () => {
     const sensitiveUrl = "https://apt-user:s3cr3t@example.com/key.gpg?token=abc123&download=true"
     const ssh = createMockSsh({
+      "[ -L '/etc/apt/keyrings/docker.gpg' ]": { code: 1 },
       [downloadCommand]: {
         code: 0,
       },
@@ -211,6 +219,7 @@ describe("apt.key", () => {
 
   it("returns a failed result with error details when key import fails", async () => {
     const ssh = createMockSsh({
+      "[ -L '/etc/apt/keyrings/docker.gpg' ]": { code: 1 },
       [downloadCommand]: {
         code: 0,
       },
@@ -235,6 +244,7 @@ describe("apt.key", () => {
 
   it("ignores non-zero temp file cleanup exit codes", async () => {
     const ssh = createMockSsh({
+      "[ -L '/etc/apt/keyrings/docker.gpg' ]": { code: 1 },
       [downloadCommand]: {
         code: 0,
       },
@@ -357,6 +367,44 @@ describe("apt.key", () => {
 
   it("throws when name is empty", () => {
     expect(() => apt.key("", "https://example.com/key.gpg", { fingerprint })).toThrow(/must match/v)
+  })
+
+  // R-0000134 regression: a symlink at the keyring path must be treated as
+  // "not present" by check (so apply runs) and rejected by apply before any
+  // gpg --dearmor call truncates or overwrites the link target.
+  it("check returns needs-apply when the keyring path is a symlink", async () => {
+    const ssh = createMockSsh({
+      "[ -f '/etc/apt/keyrings/docker.gpg' ] && [ ! -L '/etc/apt/keyrings/docker.gpg' ]": {
+        code: 1,
+      },
+    })
+    const mod = apt.key("docker", "https://download.docker.com/linux/ubuntu/gpg", { fingerprint })
+    const result = await mod.check(ssh, emptyEnv)
+    expect(result).toBe("needs-apply")
+    expect(ssh.calls).not.toContain("gpg --show-keys --with-colons '/etc/apt/keyrings/docker.gpg'")
+  })
+
+  it("apply refuses to dearmor through a symlinked keyring path", async () => {
+    const ssh = createMockSsh({
+      "[ -L '/etc/apt/keyrings/docker.gpg' ]": { code: 0 },
+      [downloadCommand]: { code: 0 },
+      "gpg --show-keys --with-colons '/tmp/apt-key-docker.ABCDEF'": {
+        code: 0,
+        stdout: "pub:-:255:22:::\nfpr:::::::::1234567890ABCDEF1234567890ABCDEF12345678:\n",
+      },
+      "mkdir -p /etc/apt/keyrings": { code: 0 },
+      "mktemp '/tmp/apt-key-docker.XXXXXX'": { stdout: "/tmp/apt-key-docker.ABCDEF\n" },
+      "rm -f '/tmp/apt-key-docker.ABCDEF'": { code: 0 },
+    })
+    const mod = apt.key("docker", "https://download.docker.com/linux/ubuntu/gpg", { fingerprint })
+    const result = await mod.apply(ssh, emptyEnv)
+    expect(result.status).toBe("failed")
+    expect(String(result.error)).toContain(
+      "[apt.key] refuses to write through symlink at /etc/apt/keyrings/docker.gpg"
+    )
+    expect(ssh.calls).not.toContain(
+      "gpg --dearmor --yes -o '/etc/apt/keyrings/docker.gpg' '/tmp/apt-key-docker.ABCDEF'"
+    )
   })
 })
 

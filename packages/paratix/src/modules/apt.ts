@@ -581,7 +581,13 @@ export const apt = {
       },
       async check(ssh: null | SshConnection): Promise<"needs-apply" | "ok"> {
         if (!ssh) return NEEDS_APPLY
-        const keyExists = await ssh.test(`[ -f ${shellQuote(keyringPath)} ]`)
+        // R-0000134: a symlink at the keyring path is treated as "not present"
+        // so apply runs, where it will refuse the import with a clear error.
+        // The combined test prevents `[ -f path ]` from following a symlink
+        // and reporting a stale or attacker-controlled target as up-to-date.
+        const keyExists = await ssh.test(
+          `[ -f ${shellQuote(keyringPath)} ] && [ ! -L ${shellQuote(keyringPath)} ]`
+        )
         if (!keyExists) return NEEDS_APPLY
 
         return (await verifyAptKeyFingerprint({

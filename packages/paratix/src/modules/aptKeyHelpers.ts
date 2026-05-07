@@ -186,6 +186,14 @@ async function downloadVerifyAndImportAptKey(
     ssh,
   })
   if (fingerprintCheck !== "ok") return fingerprintCheck
+  // R-0000134: refuse to dearmor into a symlinked keyring path. `gpg --dearmor
+  // --yes -o` follows symlinks and would truncate or overwrite whatever the
+  // link points at before we can validate the destination. We deliberately do
+  // not unlink the symlink automatically; the operator must decide.
+  const keyringIsSymlink = await ssh.test(`[ -L ${shellQuote(keyringPath)} ]`)
+  if (keyringIsSymlink) {
+    return failed(`[apt.key] refuses to write through symlink at ${keyringPath}`)
+  }
   const importResult = await ssh.exec(
     `gpg --dearmor --yes -o ${shellQuote(keyringPath)} ${shellQuote(temporaryPath)}`,
     { ignoreExitCode: true, silent: true }
