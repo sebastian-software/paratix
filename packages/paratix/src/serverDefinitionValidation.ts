@@ -1,5 +1,6 @@
-import { validateExpectedHostPublicKey } from "./knownHosts.js"
 import type { SshConfig } from "./types.js"
+
+import { validateExpectedHostPublicKey } from "./knownHosts.js"
 
 const STRICT_HOST_KEY_ERROR = `Invalid property 'ssh.strictHostKeyChecking' (expected "accept-new", "no", or "yes")`
 const MAX_TCP_PORT = 65_535

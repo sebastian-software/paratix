@@ -64,6 +64,16 @@ export async function applyDirectoryOwner(input: {
   return true
 }
 
+async function ensureDirectoryExists(input: {
+  exists: boolean
+  remotePath: string
+  ssh: SshConnection
+}): Promise<boolean> {
+  if (input.exists) return false
+  await input.ssh.exec(`mkdir -p ${shellQuote(input.remotePath)}`, { silent: true })
+  return true
+}
+
 /**
  * R-0000109: idempotent implementation of `file.directory.apply`. Probes
  * existence plus current metadata before mutating so apply only reports
@@ -88,12 +98,11 @@ export async function applyDirectoryState(input: {
     return failed(`[file.directory: ${input.remotePath}] path must not be a symlink`)
   }
   const exists = await input.ssh.test(`[ -d ${shellQuote(input.remotePath)} ]`)
-  let changed = false
-
-  if (!exists) {
-    await input.ssh.exec(`mkdir -p ${shellQuote(input.remotePath)}`, { silent: true })
-    changed = true
-  }
+  let changed = await ensureDirectoryExists({
+    exists,
+    remotePath: input.remotePath,
+    ssh: input.ssh,
+  })
 
   const ownership = exists ? await readOwnership(input.ssh, input.remotePath) : undefined
 

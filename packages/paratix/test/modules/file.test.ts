@@ -83,8 +83,8 @@ describe("file.directory", () => {
 
   it("check returns needs-apply when the path is a symlink to a directory", async () => {
     const ssh = createMockSsh({
-      "[ -L '/var/app' ]": { code: 0 },
       "[ -d '/var/app' ]": { code: 0 },
+      "[ -L '/var/app' ]": { code: 0 },
     })
     const mod = file.directory("/var/app")
     const result = await mod.check(ssh, emptyEnv)

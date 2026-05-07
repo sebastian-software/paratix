@@ -366,9 +366,8 @@ export const mount = {
       async check(ssh: null | SshConnection): Promise<"needs-apply" | "ok"> {
         if (!ssh) return NEEDS_APPLY
 
-        if ((await ssh.exec(buildMountPathSymlinkGuard(path), EXEC_OPTS)).code !== 0) {
-          return NEEDS_APPLY
-        }
+        const symlinkGuard = await ssh.exec(buildMountPathSymlinkGuard(path), EXEC_OPTS)
+        if (symlinkGuard.code !== 0) return NEEDS_APPLY
         const isMounted = await ssh.test(`findmnt --noheadings ${shellQuote(path)}`)
         if (isMounted) return NEEDS_APPLY
 
@@ -441,9 +440,8 @@ export const mount = {
       async check(ssh: null | SshConnection): Promise<"needs-apply" | "ok"> {
         if (!ssh) return NEEDS_APPLY
 
-        if ((await ssh.exec(buildMountPathSymlinkGuard(path), EXEC_OPTS)).code !== 0) {
-          return NEEDS_APPLY
-        }
+        const symlinkGuard = await ssh.exec(buildMountPathSymlinkGuard(path), EXEC_OPTS)
+        if (symlinkGuard.code !== 0) return NEEDS_APPLY
         const live = await readLiveMount(ssh, path)
         if (live == null) return NEEDS_APPLY
         // R-0000049: compare the live source / fstype / options against

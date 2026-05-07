@@ -168,8 +168,8 @@ describe("download.url", () => {
 
     it("returns needs-apply when file path is a symlink to a regular file", async () => {
       const mockSsh = createMockSsh({
-        [`[ -L '${destination}' ]`]: { code: 0 },
         [`[ -f '${destination}' ]`]: { code: 0 },
+        [`[ -L '${destination}' ]`]: { code: 0 },
       })
       const mod = download.url(destination, url, allowUnverifiedDownload)
       const result = await mod.check(mockSsh, emptyEnv)
@@ -877,8 +877,8 @@ describe("download.github", () => {
 
     it("returns needs-apply when file path is a symlink to a regular file", async () => {
       const mockSsh = createMockSsh({
-        [`[ -L '${destination}' ]`]: { code: 0 },
         [`[ -f '${destination}' ]`]: { code: 0 },
+        [`[ -L '${destination}' ]`]: { code: 0 },
       })
       const mod = download.github(destination, { ...allowUnverifiedDownload, asset, repo, tag })
       const result = await mod.check(mockSsh, emptyEnv)
@@ -1220,9 +1220,9 @@ describe("download.large", () => {
 
     it("returns needs-apply when flag exists but destination is a symlink to a regular file", async () => {
       const mockSsh = createMockSsh({
-        [`[ -L '${destination}' ]`]: { code: 0 },
         [`[ -f '${destination}' ]`]: { code: 0 },
         [`[ -f /var/lib/paratix/flags/'${flagName}' ]`]: { code: 0 },
+        [`[ -L '${destination}' ]`]: { code: 0 },
       })
       const mod = download.large(destination, url, allowUnverifiedDownload)
       const result = await mod.check(mockSsh, emptyEnv)

@@ -963,9 +963,12 @@ export class SshConnectionImpl implements SshConnection {
     validateMode(mode)
     const targetGuard = `[ ! -d ${shellQuote(remotePath)} ] && [ ! -L ${shellQuote(remotePath)} ]`
     if (this.config.user === "root") {
-      await this.exec(`${targetGuard} && mv -T -- ${shellQuote(temporaryPath)} ${shellQuote(remotePath)}`, {
-        silent: true,
-      })
+      await this.exec(
+        `${targetGuard} && mv -T -- ${shellQuote(temporaryPath)} ${shellQuote(remotePath)}`,
+        {
+          silent: true,
+        }
+      )
       return
     }
 

@@ -351,7 +351,7 @@ function normalizePinnedPublicKey(publicKey: string): string {
   return `${algorithm} ${key}`
 }
 
-export function validateExpectedHostPublicKey(publicKey: string): string | null {
+export function validateExpectedHostPublicKey(publicKey: string): null | string {
   try {
     normalizePinnedPublicKey(publicKey)
     return null
