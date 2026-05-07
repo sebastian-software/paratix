@@ -2,8 +2,11 @@ import { failed } from "../moduleFailure.js"
 import { shellQuote, validateMktempPath } from "../ssh.js"
 import { type ModuleResult, NEEDS_APPLY, type SshConnection } from "../types.js"
 
-const AUTHORIZED_KEYS_TEMPORARY_DIRECTORY = "/run/paratix"
-const AUTHORIZED_KEYS_TEMPORARY_PREFIX = "authorized-keys"
+// R-0000181: prefix used by `mktemp` for the in-flight authorized_keys
+// rewrite. The leading dot keeps the temp file hidden from typical
+// glob expansions; the validateMktempPath check rejects any output that
+// does not start with `<home>/.ssh/.paratix-authorized-keys.`.
+const AUTHORIZED_KEYS_TEMPORARY_PREFIX = ".paratix-authorized-keys"
 
 async function resolveHome(conn: SshConnection, user: string): Promise<string> {
   const home = await conn.output(`getent passwd ${shellQuote(user)} | cut -d: -f6`)
@@ -57,15 +60,29 @@ async function resolveApplyHome(
   }
 }
 
-async function createAuthorizedKeysTemporaryPath(conn: SshConnection): Promise<string> {
-  await conn.exec(
-    `install -d -m 700 -o root -g root ${shellQuote(AUTHORIZED_KEYS_TEMPORARY_DIRECTORY)}`,
-    { silent: true }
-  )
-  const template = `${AUTHORIZED_KEYS_TEMPORARY_DIRECTORY}/${AUTHORIZED_KEYS_TEMPORARY_PREFIX}.XXXXXX`
+/**
+ * R-0000181: allocate the temporary file for the authorized_keys rewrite
+ * inside the user's `~/.ssh` directory, on the same filesystem as the
+ * destination. The earlier `/run/paratix` (tmpfs) location forced `mv -T`
+ * into a cross-filesystem copy+unlink, breaking atomicity; on NFS with
+ * `root_squash` it could even fail outright.
+ *
+ * The mktemp template uses the dotfile prefix so the temp file is hidden
+ * from typical glob expansions, and `validateMktempPath` rejects any
+ * stdout that does not match `<sshDirectory>/.paratix-authorized-keys.*`.
+ *
+ * @param conn - The active SSH connection.
+ * @param sshDirectoryPath - Absolute path of the user's `~/.ssh` directory.
+ * @returns The validated temporary file path.
+ */
+async function createAuthorizedKeysTemporaryPath(
+  conn: SshConnection,
+  sshDirectoryPath: string
+): Promise<string> {
+  const template = `${sshDirectoryPath}/${AUTHORIZED_KEYS_TEMPORARY_PREFIX}.XXXXXX`
   const temporaryPath = await conn.output(`mktemp ${shellQuote(template)}`)
   return validateMktempPath(
-    AUTHORIZED_KEYS_TEMPORARY_DIRECTORY,
+    sshDirectoryPath,
     temporaryPath,
     AUTHORIZED_KEYS_TEMPORARY_PREFIX
   )
@@ -138,7 +155,10 @@ async function rewriteAuthorizedKeys(
   }
 ): Promise<void> {
   const { authorizedKeysPath, key, primaryGroup, sshDirectoryPath, state, user } = parameters
-  const temporaryPath = await createAuthorizedKeysTemporaryPath(conn)
+  // R-0000181: temp file lives in the same filesystem as the destination so
+  // `mv -T` is atomic (single rename(2)) and so NFS root_squash hosts do not
+  // hit cross-filesystem copy fallbacks.
+  const temporaryPath = await createAuthorizedKeysTemporaryPath(conn, sshDirectoryPath)
 
   try {
     if (state === "present") {

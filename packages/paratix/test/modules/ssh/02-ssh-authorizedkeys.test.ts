@@ -30,16 +30,23 @@ const successfulSshApplyOptions: MockSshOptions = {
         /^\[ ! -L '[^']+\/\.ssh\/authorized_keys' \] \|\| \{ echo 'authorized_keys must not be a symlink' >&2; exit 1; \}$/v,
       result: { code: 0 },
     },
-    { command: "install -d -m 700 -o root -g root '/run/paratix'", result: { code: 0 } },
     {
       command: /^\{ if \[ -f '[^']+\/\.ssh\/authorized_keys' \]; then .+; fi; \}$/v,
       result: { code: 0 },
     },
     {
-      command: /^chmod 600 '\/run\/paratix\/authorized-keys\.[^']+' && chown /v,
+      command:
+        /^chmod 600 '[^']+\/\.ssh\/\.paratix-authorized-keys\.[^']+' && chown /v,
       result: { code: 0 },
     },
-    { command: /^rm -f '\/run\/paratix\/authorized-keys\.[^']+'$/v, result: { code: 0 } },
+    {
+      command: /^rm -f '[^']+\/\.ssh\/\.paratix-authorized-keys\.[^']+'$/v,
+      result: { code: 0 },
+    },
+    {
+      command: /^mktemp '[^']+\/\.ssh\/\.paratix-authorized-keys\.X{6}'$/v,
+      result: { stdout: "/home/alice/.ssh/.paratix-authorized-keys.STUB" },
+    },
   ],
 }
 
@@ -161,9 +168,10 @@ describe("ssh.authorizedKeys", () => {
   const aliceHome = "/home/alice"
   const aliceDir = `'/home/alice/.ssh'`
   const aliceKeys = `'/home/alice/.ssh/authorized_keys'`
-  const authorizedKeysTemporaryDirectoryCommand = "install -d -m 700 -o root -g root '/run/paratix'"
-  const aliceMktempPattern = "mktemp '/run/paratix/authorized-keys.XXXXXX'"
-  const tempPath = "/run/paratix/authorized-keys.ABCDEF"
+  // R-0000181: temp file lives in <home>/.ssh on the destination filesystem
+  // so `mv -T` is atomic (single rename(2)) and avoids cross-FS copies.
+  const aliceMktempPattern = "mktemp '/home/alice/.ssh/.paratix-authorized-keys.XXXXXX'"
+  const tempPath = "/home/alice/.ssh/.paratix-authorized-keys.ABCDEF"
   const aliceSshDirectoryGuard =
     "[ ! -L '/home/alice/.ssh' ] || { echo '.ssh must not be a symlink' >&2; exit 1; }; if [ -e '/home/alice/.ssh' ]; then [ -d '/home/alice/.ssh' ] || { echo '.ssh must be a directory' >&2; exit 1; }; else mkdir -p '/home/alice/.ssh'; fi; [ -d '/home/alice/.ssh' ] && [ ! -L '/home/alice/.ssh' ] || { echo '.ssh must be a real directory' >&2; exit 1; }; chmod 700 '/home/alice/.ssh' && chown 'alice':'alice' '/home/alice/.ssh'"
   const aliceFinalReplaceCommand = authorizedKeysFinalReplaceCommand({
@@ -402,7 +410,6 @@ describe("ssh.authorizedKeys", () => {
     const result = await mod.apply(mockSsh, emptyEnv)
     expect(result.status).toBe("changed")
     expect(mockSsh.calls).toContain(aliceSshDirectoryGuard)
-    expect(mockSsh.calls).toContain(authorizedKeysTemporaryDirectoryCommand)
     expect(mockSsh.calls).toContain(
       `[ ! -L ${aliceKeys} ] || { echo 'authorized_keys must not be a symlink' >&2; exit 1; }`
     )
@@ -632,7 +639,10 @@ describe("ssh.authorizedKeys", () => {
     expect(mockSsh.calls).toContain(`rm -f '${tempPath}'`)
   })
 
-  it("stages the authorized_keys rewrite under the root-controlled /run/paratix directory", async () => {
+  // R-0000181: temp file must live in <home>/.ssh, on the same filesystem
+  // as authorized_keys, so `mv -T` is atomic instead of a cross-FS copy
+  // that loses owner/mode and breaks under NFS root_squash.
+  it("stages the authorized_keys rewrite inside <home>/.ssh on the destination filesystem", async () => {
     const mockSsh = createSshApplyMockSsh(
       aliceResponses({
         [aliceMktempPattern]: { stdout: tempPath },
@@ -643,24 +653,19 @@ describe("ssh.authorizedKeys", () => {
     const result = await mod.apply(mockSsh, emptyEnv)
 
     expect(result.status).toBe("changed")
-    // Staging path lives under the root-controlled runtime directory, not the user-owned home.
-    expect(mockSsh.calls).toContain(authorizedKeysTemporaryDirectoryCommand)
     expect(mockSsh.calls).toContain(aliceMktempPattern)
-    expect(tempPath.startsWith("/run/paratix/")).toBe(true)
-    expect(tempPath.startsWith(`${aliceHome}/.ssh/`)).toBe(false)
-    // Older legacy paths are not used.
-    expect(mockSsh.calls).not.toContain(`mktemp ${aliceHome}/.ssh/authorized_keys.XXXXXX`)
-    expect(mockSsh.calls).not.toContain(`mktemp ${aliceHome}/.ssh/authorized_keys.tmp.XXXXXX`)
-    expect(mockSsh.calls).not.toContain(`${aliceHome}/.ssh/authorized_keys.tmp`)
+    expect(tempPath.startsWith(`${aliceHome}/.ssh/.paratix-authorized-keys.`)).toBe(true)
+    // The legacy /run/paratix path must not be used any more.
+    expect(mockSsh.calls.every((c) => !c.includes("/run/paratix"))).toBe(true)
   })
 
   it.each([
     ["empty output", ""],
-    ["multiline output", `${tempPath}\n/run/paratix/authorized-keys.EVIL`],
-    ["outside /run/paratix", "/tmp/authorized-keys.ABCDEF"],
-    ["wrong prefix", "/run/paratix/not-authorized-keys.ABCDEF"],
+    ["multiline output", `${tempPath}\n${aliceHome}/.ssh/.paratix-authorized-keys.EVIL`],
+    ["outside <home>/.ssh", "/tmp/.paratix-authorized-keys.ABCDEF"],
+    ["wrong prefix", `${aliceHome}/.ssh/not-paratix-authorized-keys.ABCDEF`],
   ])("rejects unsafe authorized_keys mktemp output: %s", async (_caseName, stdout) => {
-    const foreignPath = "/tmp/authorized-keys.ABCDEF"
+    const foreignPath = "/tmp/.paratix-authorized-keys.ABCDEF"
     const mockSsh = createSshApplyMockSsh(
       aliceResponses({
         [aliceMktempPattern]: { stdout },
@@ -685,7 +690,7 @@ describe("ssh.authorizedKeys", () => {
     expect(mockSsh.calls).not.toContain(`rm -f '${foreignPath}'`)
   })
 
-  it("keeps temporary authorized_keys rewrites in /run/paratix for absent state", async () => {
+  it("stages absent-state rewrites inside <home>/.ssh as well", async () => {
     const mockSsh = createSshApplyMockSsh(
       aliceResponses({
         [aliceMktempPattern]: { stdout: tempPath },
@@ -696,10 +701,8 @@ describe("ssh.authorizedKeys", () => {
     const result = await mod.apply(mockSsh, emptyEnv)
 
     expect(result.status).toBe("changed")
-    expect(mockSsh.calls).toContain(authorizedKeysTemporaryDirectoryCommand)
     expect(mockSsh.calls).toContain(aliceMktempPattern)
-    expect(mockSsh.calls).not.toContain(`mktemp ${aliceHome}/.ssh/authorized_keys.XXXXXX`)
-    expect(mockSsh.calls).not.toContain(`mktemp ${aliceHome}/.ssh/authorized_keys.tmp.XXXXXX`)
+    expect(mockSsh.calls.every((c) => !c.includes("/run/paratix"))).toBe(true)
   })
 
   it("apply returns failed when ssh is null", async () => {
@@ -787,11 +790,12 @@ describe("ssh.authorizedKeys", () => {
 
   it("regression: home path with spaces is correctly shell-quoted in apply", async () => {
     const spaceyHome = "/home/my user"
-    const spaceyTemp = "/run/paratix/authorized-keys.SPACEY"
+    const spaceyMktemp = "mktemp '/home/my user/.ssh/.paratix-authorized-keys.XXXXXX'"
+    const spaceyTemp = "/home/my user/.ssh/.paratix-authorized-keys.SPACEY"
     const mockSsh = createSshApplyMockSsh({
       "getent passwd 'alice' | cut -d: -f6": { stdout: spaceyHome },
       "id -gn 'alice'": { stdout: "alice" },
-      "mktemp '/run/paratix/authorized-keys.XXXXXX'": { stdout: spaceyTemp },
+      [spaceyMktemp]: { stdout: spaceyTemp },
     })
     const mod = ssh.authorizedKeys("alice", testKey)
     const result = await mod.apply(mockSsh, emptyEnv)
@@ -800,8 +804,8 @@ describe("ssh.authorizedKeys", () => {
     expect(mockSsh.calls).toContain(
       `[ ! -L '/home/my user/.ssh' ] || { echo '.ssh must not be a symlink' >&2; exit 1; }; if [ -e '/home/my user/.ssh' ]; then [ -d '/home/my user/.ssh' ] || { echo '.ssh must be a directory' >&2; exit 1; }; else mkdir -p '/home/my user/.ssh'; fi; [ -d '/home/my user/.ssh' ] && [ ! -L '/home/my user/.ssh' ] || { echo '.ssh must be a real directory' >&2; exit 1; }; chmod 700 '/home/my user/.ssh' && chown 'alice':'alice' '/home/my user/.ssh'`
     )
-    // mktemp must operate inside the root-controlled temporary directory.
-    expect(mockSsh.calls).toContain("mktemp '/run/paratix/authorized-keys.XXXXXX'")
+    // R-0000181: mktemp must operate inside <home>/.ssh on the destination filesystem.
+    expect(mockSsh.calls).toContain(spaceyMktemp)
     // Temp rewrite command must quote the space-containing path
     expect(mockSsh.calls).toContain(
       presentAuthorizedKeysRewriteCommand(
@@ -830,12 +834,12 @@ describe("ssh.authorizedKeys", () => {
   // a stable check-ok state is reachable without overwriting the
   // semantically correct group ownership.
   it("R-0000065: apply uses the user's resolved primary group for chown when it differs from the username", async () => {
+    const deployMktemp = "mktemp '/home/deploy/.ssh/.paratix-authorized-keys.XXXXXX'"
+    const deployTemp = "/home/deploy/.ssh/.paratix-authorized-keys.DEPLOY"
     const mockSsh = createSshApplyMockSsh({
+      [deployMktemp]: { stdout: deployTemp },
       "getent passwd 'deploy' | cut -d: -f6": { stdout: "/home/deploy" },
       "id -gn 'deploy'": { stdout: "users" },
-      "mktemp '/run/paratix/authorized-keys.XXXXXX'": {
-        stdout: "/run/paratix/authorized-keys.DEPLOY",
-      },
     })
     const mod = ssh.authorizedKeys("deploy", testKey)
 
@@ -853,7 +857,7 @@ describe("ssh.authorizedKeys", () => {
         expectedSshDirectoryState: "700 deploy users directory",
         group: "users",
         sshDirectoryPath: "'/home/deploy/.ssh'",
-        temporaryPath: "/run/paratix/authorized-keys.DEPLOY",
+        temporaryPath: deployTemp,
         user: "deploy",
       })
     )
