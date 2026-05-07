@@ -1017,6 +1017,7 @@ function composeSystemdRecoveryResponses(
   filePath = unitFilePath
 ): Record<string, { code: number; stdout?: string }> {
   return {
+    [`chown 'root:root' '${filePath}'`]: { code: 0 },
     [`rm -f '${filePath}'`]: { code: 0 },
     [`systemctl unmask -- '${serviceName}.service'`]: { code: 0 },
   }
@@ -1071,6 +1072,7 @@ describe("compose.systemd — check", () => {
       [`[ -e '${unitFilePath}' ]`]: { code: 0 },
       [`cat '${unitFilePath}'`]: { code: 0, stdout: content },
       [`stat -c '%a' '${unitFilePath}'`]: { code: 0, stdout: "644" },
+      [`stat -c '%U %G' '${unitFilePath}'`]: { code: 0, stdout: "root root" },
     })
     const mod = compose.systemd({ projectDirectory })
     const result = await mod.check(mockSsh, emptyEnv)
@@ -1083,6 +1085,7 @@ describe("compose.systemd — check", () => {
       [`[ -e '${unitFilePath}' ]`]: { code: 0 },
       [`cat '${unitFilePath}'`]: { code: 0, stdout: content },
       [`stat -c '%a' '${unitFilePath}'`]: { code: 0, stdout: "644" },
+      [`stat -c '%U %G' '${unitFilePath}'`]: { code: 0, stdout: "root root" },
       "command -v docker": { code: 0 },
       "command -v podman": { code: 1 },
     })
@@ -1108,6 +1111,38 @@ describe("compose.systemd — check", () => {
       [`cat '${unitFilePath}'`]: { code: 0, stdout: content },
       // Operator manually ran `chmod 0600 compose-app.service` — content matches, but mode does not.
       [`stat -c '%a' '${unitFilePath}'`]: { code: 0, stdout: "600" },
+    })
+    const mod = compose.systemd({ projectDirectory })
+    const result = await mod.check(mockSsh, emptyEnv)
+    expect(result).toBe("needs-apply")
+  })
+
+  // R-0000164: detect manual owner/group drift on the system-wide unit file
+  // (e.g. an operator ran `chown svc:svc compose-app.service`). The apply
+  // path explicitly runs `chown root:root`, so check must report needs-apply
+  // when the owner has drifted — otherwise apply silently rewrites the unit
+  // on every run, and the hardening regression of a non-root-owned unit
+  // goes undetected.
+  it("R-0000164: returns needs-apply when remote owner has drifted from root:root", async () => {
+    const content = expectedPodmanUnit(projectDirectory, defaultServiceName)
+    const mockSsh = createComposeMockSsh({
+      [`[ -e '${unitFilePath}' ]`]: { code: 0 },
+      [`cat '${unitFilePath}'`]: { code: 0, stdout: content },
+      [`stat -c '%a' '${unitFilePath}'`]: { code: 0, stdout: "644" },
+      [`stat -c '%U %G' '${unitFilePath}'`]: { code: 0, stdout: "svc svc" },
+    })
+    const mod = compose.systemd({ projectDirectory })
+    const result = await mod.check(mockSsh, emptyEnv)
+    expect(result).toBe("needs-apply")
+  })
+
+  it("R-0000164: returns needs-apply when remote group has drifted from root", async () => {
+    const content = expectedPodmanUnit(projectDirectory, defaultServiceName)
+    const mockSsh = createComposeMockSsh({
+      [`[ -e '${unitFilePath}' ]`]: { code: 0 },
+      [`cat '${unitFilePath}'`]: { code: 0, stdout: content },
+      [`stat -c '%a' '${unitFilePath}'`]: { code: 0, stdout: "644" },
+      [`stat -c '%U %G' '${unitFilePath}'`]: { code: 0, stdout: "root staff" },
     })
     const mod = compose.systemd({ projectDirectory })
     const result = await mod.check(mockSsh, emptyEnv)
@@ -1156,6 +1191,39 @@ describe("compose.systemd — apply", () => {
     expect(writtenFiles[0]?.content).toContain("[Unit]")
     expect(writtenFiles[0]?.content).toContain("[Service]")
     expect(mockSsh.calls).toContain("systemctl daemon-reload")
+    // R-0000164: apply must run `chown root:root` on the unit after the
+    // writeFile, because the writeFile path only sets the mode and would
+    // otherwise leave any pre-existing owner drift in place.
+    expect(mockSsh.calls).toContain(`chown 'root:root' '${unitFilePath}'`)
+  })
+
+  // R-0000164: when the explicit chown after writeFile fails (e.g. invalid
+  // user/group on the host) apply must surface a failure rather than
+  // silently continuing with a non-root-owned unit.
+  it("R-0000164: returns failed when the explicit chown root:root fails", async () => {
+    const mockSsh = createComposeMockSsh({
+      ...composeSystemdRecoveryResponses(),
+      [`cat '${unitFilePath}'`]: {
+        code: 0,
+        stdout: expectedPodmanUnit(projectDirectory, defaultServiceName),
+      },
+      [`chown 'root:root' '${unitFilePath}'`]: {
+        code: 1,
+        stderr: "chown: invalid user: 'root:root'",
+      },
+    })
+    mockSsh.writeFile = async (): Promise<void> => {
+      // accept the write
+      await Promise.resolve()
+    }
+
+    const mod = compose.systemd({ projectDirectory })
+    const result = await mod.apply(mockSsh, emptyEnv)
+
+    expect(result.status).toBe("failed")
+    expect(String(result.error)).toContain("failed to set owner root:root")
+    // daemon-reload must not run when ownership could not be enforced.
+    expect(mockSsh.calls).not.toContain("systemctl daemon-reload")
   })
 
   it("returns failed when daemon-reload fails", async () => {

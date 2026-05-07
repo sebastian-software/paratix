@@ -302,6 +302,22 @@ async function applyComposeSystemdUnit(parameters: {
     if (fallbackFailure != null) return fallbackFailure
   }
 
+  // R-0000164: writeFile sets the file mode but not its owner/group, so an
+  // owner drift introduced by a previous manual `chown` would persist. The
+  // shell-fallback path already runs `chown root:root`, but the happy path
+  // goes through writeFile and never runs that command. Always re-set owner
+  // to root:root after a successful write so check and apply stay symmetric.
+  const ownerResult = await parameters.connection.exec(
+    `chown ${shellQuote("root:root")} ${shellQuote(parameters.filePath)}`,
+    EXEC_OPTS
+  )
+  if (ownerResult.code !== 0) {
+    return failedCommand(
+      `[compose.systemd] failed to set owner root:root on ${parameters.unitFileName}`,
+      ownerResult
+    )
+  }
+
   const result = await parameters.connection.exec("systemctl daemon-reload", EXEC_OPTS)
   return result.code === 0
     ? { status: "changed" }
@@ -337,7 +353,17 @@ async function checkComposeSystemdUnit(parameters: {
   // pattern used by createComposeConfigCheck.
   const rawMode = await parameters.ssh.output(`stat -c '%a' ${shellQuote(parameters.filePath)}`)
   const remoteMode = rawMode.trim()
-  return remoteMode === SYSTEMD_UNIT_MODE.replace(/^0+/v, "") ? "ok" : NEEDS_APPLY
+  if (remoteMode !== SYSTEMD_UNIT_MODE.replace(/^0+/v, "")) return NEEDS_APPLY
+
+  // R-0000164: detect manual owner/group drift (e.g. an operator ran
+  // `chown svc:svc compose-app.service`). The apply path explicitly runs
+  // `chown root:root` on the unit, so a check that ignored ownership would
+  // report "ok" while apply silently kept rewriting the unit on every run.
+  // A non-root owner of a system-wide unit is also a hardening regression.
+  const rawOwner = await parameters.ssh.output(`stat -c '%U %G' ${shellQuote(parameters.filePath)}`)
+  if (rawOwner.trim() !== "root root") return NEEDS_APPLY
+
+  return "ok"
 }
 
 function resolveComposeSystemdIdentity(options: { name?: string; projectDirectory: string }): {
