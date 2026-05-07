@@ -780,7 +780,8 @@ describe("myModule", () => {
 ### `createMockSsh` behavior
 
 - Accepts `Record<string, Partial<ExecResult>>` mapping command strings to responses.
-- Default response: `{ code: 0, stdout: "", stderr: "" }`.
+- Unknown commands fail closed with an error. Add every expected command to the
+  response map, or the helper throws instead of returning a successful default.
 - `ssh.test(cmd)` returns `code === 0`.
 - `ssh.exists(path)` delegates to `ssh.test("[ -e '<path>' ]")`.
 - `ssh.readFile(path)` delegates to `ssh.output("cat '<path>'")`.
