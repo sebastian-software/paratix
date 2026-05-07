@@ -391,6 +391,19 @@ async function writeAndApplyInterfaceConfig(parameters: {
 
   const rollbackFailure = await rollbackInterfaceConfig(parameters.ssh, snapshot)
   if (rollbackFailure != null) return rollbackFailure
+
+  // Restoring the file is not enough: the live network state still reflects
+  // the failed apply attempt. Re-run the apply command so the kernel/netplan
+  // configuration matches the restored on-disk state. If this re-apply also
+  // fails, surface a clear divergence message so operators know the live
+  // state diverges from the restored configuration file.
+  const reApply = await parameters.ssh.exec(parameters.applyCommand, EXEC_OPTS)
+  if (reApply.code !== 0) {
+    return failedCommand(
+      `${parameters.failureMessage}; rollback restored the configuration file but re-applying the previous configuration also failed — live network state diverges from on-disk configuration`,
+      reApply
+    )
+  }
   return failedCommand(parameters.failureMessage, result)
 }
 

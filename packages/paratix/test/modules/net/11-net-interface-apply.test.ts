@@ -151,6 +151,50 @@ describe("net.interface — apply", () => {
     })
   })
 
+  it("re-runs netplan apply after restoring the previous config (live state recovery)", async () => {
+    const netplanPath = "/etc/netplan/60-paratix-eth0.yaml"
+    const previousConfig = "network:\n  version: 2\n"
+    const mockSsh = createMockSsh({
+      [`cat '${netplanPath}'`]: { stdout: previousConfig },
+      [`test -f '${netplanPath}'`]: { code: 0 },
+      "test -d '/etc/netplan'": { code: 0 },
+    })
+    vi.spyOn(mockSsh, "writeFile").mockResolvedValue()
+    const exec = vi
+      .spyOn(mockSsh, "exec")
+      .mockResolvedValueOnce({ code: 1, stderr: "bad netplan", stdout: "" })
+      .mockResolvedValueOnce({ code: 0, stderr: "", stdout: "" })
+    const mod = net.interface("eth0", { dhcp: true })
+
+    const result = await mod.apply(mockSsh, emptyEnv)
+
+    expect(result.status).toBe("failed")
+    expect(String(result.error)).toContain("netplan apply failed")
+    expect(String(result.error)).not.toContain("diverges")
+    const netplanApplyCalls = exec.mock.calls.filter(([cmd]) => cmd === "netplan apply")
+    expect(netplanApplyCalls).toHaveLength(2)
+  })
+
+  it("reports live divergence when re-applying the previous Netplan config also fails", async () => {
+    const netplanPath = "/etc/netplan/60-paratix-eth0.yaml"
+    const previousConfig = "network:\n  version: 2\n"
+    const mockSsh = createMockSsh({
+      [`cat '${netplanPath}'`]: { stdout: previousConfig },
+      [`test -f '${netplanPath}'`]: { code: 0 },
+      "test -d '/etc/netplan'": { code: 0 },
+    })
+    vi.spyOn(mockSsh, "writeFile").mockResolvedValue()
+    vi.spyOn(mockSsh, "exec")
+      .mockResolvedValueOnce({ code: 1, stderr: "bad netplan", stdout: "" })
+      .mockResolvedValueOnce({ code: 1, stderr: "still broken", stdout: "" })
+    const mod = net.interface("eth0", { dhcp: true })
+
+    const result = await mod.apply(mockSsh, emptyEnv)
+
+    expect(result.status).toBe("failed")
+    expect(String(result.error)).toContain("diverges")
+  })
+
   it("removes a newly-created Netplan config when netplan apply fails", async () => {
     const netplanPath = "/etc/netplan/60-paratix-eth0.yaml"
     const mockSsh = createMockSsh(
