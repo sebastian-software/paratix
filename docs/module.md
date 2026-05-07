@@ -463,24 +463,26 @@ recipe(
 
 ## sysctl — Kernel-Parameter
 
-| Modul        | Beschreibung                                                                                                                                                                                                                                                         | Check-Strategie                                          | Aufwand |
-| ------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------- | ------- |
-| `sysctl.set` | Setzt einen Kernel-Parameter zur Laufzeit und persistiert ihn in `/etc/sysctl.d/`. Akzeptiert Key-Value-Paare. Der Parameter wird sofort via `sysctl -w` angewendet und in eine Datei unter `/etc/sysctl.d/60-paratix.conf` geschrieben, damit er Reboots ueberlebt. | `sysctl -n <key>` abfragen und mit Soll-Wert vergleichen | einfach |
+| Modul        | Beschreibung                                                                                                                                                                                                                                                                                                       | Check-Strategie                                          | Aufwand |
+| ------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | -------------------------------------------------------- | ------- |
+| `sysctl.set` | Setzt einen einzelnen Kernel-Parameter zur Laufzeit und persistiert ihn pro Key in `/etc/sysctl.d/`. Signatur: `sysctl.set(key, value, options?)`. Der Parameter wird sofort via `sysctl -w` angewendet und in eine eigene Datei `99-paratix-<sanitized-key>-<hash>.conf` geschrieben, damit er Reboots ueberlebt. | `sysctl -n <key>` abfragen und mit Soll-Wert vergleichen | einfach |
 
 **Beispiel:**
 
 ```typescript
-sysctl.set({
-  "net.ipv6.conf.all.forwarding": 1,
-  "net.ipv4.ip_forward": 1,
-  "kernel.core_pattern": "/dev/null", // Core-Dumps deaktivieren
-})
+run(server, [
+  sysctl.set("net.ipv6.conf.all.forwarding", "1"),
+  sysctl.set("net.ipv4.ip_forward", "1"),
+  sysctl.set("kernel.core_pattern", "/dev/null"), // Core-Dumps deaktivieren
+])
 ```
 
-**Persistenz:** Alle von Paratix gesetzten Parameter werden in einer einzigen
-Datei `/etc/sysctl.d/60-paratix.conf` gesammelt. Bei jedem Aufruf wird die
-Datei aktualisiert (bestehende Keys ueberschrieben, neue angehaengt).
-Anschliessend wird `sysctl --system` ausgefuehrt, um alle Dateien neu zu laden.
+**Persistenz:** Pro Aufruf wird genau eine Datei
+`/etc/sysctl.d/99-paratix-<sanitized-key>-<hash>.conf` mit dem Inhalt
+`<key> = <value>` geschrieben (z.B.
+`/etc/sysctl.d/99-paratix-net-ipv4-ip_forward-<hash>.conf`). Mehrere Keys
+liegen damit in getrennten Dateien; `sysctl -w` setzt den Live-Wert sofort,
+ein separater Reload-Schritt ist nicht noetig.
 
 ---
 
