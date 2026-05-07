@@ -1,7 +1,18 @@
+import { createHash } from "node:crypto"
 import { describe, expect, it } from "vitest"
 
 import { cron } from "../../src/modules/cron.js"
 import { createMockSsh as createBaseMockSsh } from "../helpers/mockSsh.js"
+
+/**
+ * R-0000168: replicate the marker comment cron.ts writes (legacy form
+ * `# paratix: <name>` plus the sha256-tagged form). Tests stub the tagged
+ * form so direct checks see the same marker the module emits on apply.
+ */
+function taggedMarker(name: string, cronJob: string): string {
+  const digest = createHash("sha256").update(cronJob).digest("hex")
+  return `# paratix: ${name} sha256=${digest}`
+}
 
 const createMockSsh: typeof createBaseMockSsh = (responses, options) =>
   createBaseMockSsh(responses, {
@@ -35,15 +46,32 @@ describe("cron.job", () => {
   // ---------------------------------------------------------------------------
 
   it("check returns ok when marker and correct job line exist (state: present)", async () => {
+    const job = "0 3 * * * /backup.sh"
     const mockSsh = createMockSsh({
       "crontab -u 'alice' -l": {
         code: 0,
-        stdout: "# paratix: backup\n0 3 * * * /backup.sh\n",
+        stdout: `${taggedMarker("backup", job)}\n${job}\n`,
       },
     })
-    const mod = cron.job("alice", "backup", { job: "0 3 * * * /backup.sh" })
+    const mod = cron.job("alice", "backup", { job })
     const result = await mod.check(mockSsh, emptyEnv)
     expect(result).toBe("ok")
+  })
+
+  // R-0000168: legacy markers (without the sha256 tag) must trigger
+  // needs-apply during check so apply can refresh the marker line into
+  // the tagged form on disk.
+  it("check returns needs-apply when marker is legacy form without hash tag", async () => {
+    const job = "0 3 * * * /backup.sh"
+    const mockSsh = createMockSsh({
+      "crontab -u 'alice' -l": {
+        code: 0,
+        stdout: `# paratix: backup\n${job}\n`,
+      },
+    })
+    const mod = cron.job("alice", "backup", { job })
+    const result = await mod.check(mockSsh, emptyEnv)
+    expect(result).toBe("needs-apply")
   })
 
   it("check returns needs-apply when no crontab exists (exit code 1) (state: present)", async () => {
@@ -257,16 +285,35 @@ describe("cron.job", () => {
     // (e.g. via signal targets) do not report spurious "changed". Mirrors
     // the no-op returns that R-0000075 added to file.replace.apply and
     // R-0000077 added to user.absent.apply.
+    const job = "0 3 * * * /backup.sh"
     const mockSsh = createMockSsh({
       "crontab -u 'alice' -l": {
         code: 0,
-        stdout: "# paratix: backup\n0 3 * * * /backup.sh\n",
+        stdout: `${taggedMarker("backup", job)}\n${job}\n`,
       },
     })
-    const mod = cron.job("alice", "backup", { job: "0 3 * * * /backup.sh" })
+    const mod = cron.job("alice", "backup", { job })
     const result = await mod.apply(mockSsh, emptyEnv)
     expect(result.status).toBe("ok")
     expect(findCrontabWriteCall(mockSsh)).toBeUndefined()
+  })
+
+  // R-0000168: when the on-disk marker is the legacy untagged form, apply
+  // rewrites the crontab so the marker gains the sha256 tag.
+  it("apply rewrites legacy marker into tagged form (state: present)", async () => {
+    const job = "0 3 * * * /backup.sh"
+    const mockSsh = createMockSsh({
+      "crontab -u 'alice' -l": {
+        code: 0,
+        stdout: `# paratix: backup\n${job}\n`,
+      },
+    })
+    const mod = cron.job("alice", "backup", { job })
+    const result = await mod.apply(mockSsh, emptyEnv)
+    expect(result.status).toBe("changed")
+    const writeInput = findCrontabWriteInput(mockSsh)
+    expect(writeInput).toContain(taggedMarker("backup", job))
+    expect(writeInput).toContain(job)
   })
 
   it("apply replaces job line when marker exists but job differs (state: present)", async () => {
@@ -557,6 +604,41 @@ describe("cron.absent", () => {
     expect(writeInput).not.toContain("# paratix: backup")
     expect(writeInput).not.toContain("0 3 * * * /backup.sh")
     expect(writeInput).toContain("0 5 * * * /other.sh")
+  })
+
+  // R-0000168: when the marker carries a sha256 hash and the line below it
+  // does NOT match (because the user replaced the managed job with their
+  // own), cron.absent must drop only the marker and keep the user's line.
+  it("apply preserves user-replaced follow-up line when marker hash differs", async () => {
+    const previousJob = "0 3 * * * /backup.sh"
+    const userReplacedJob = "0 4 * * * /custom-job.sh"
+    const mockSsh = createMockSsh({
+      "crontab -u 'alice' -l": {
+        code: 0,
+        stdout: `${taggedMarker("backup", previousJob)}\n${userReplacedJob}\n`,
+      },
+    })
+    const mod = cron.absent("alice", "backup")
+    const result = await mod.apply(mockSsh, emptyEnv)
+    expect(result.status).toBe("changed")
+    const writeInput = findCrontabWriteInput(mockSsh)
+    expect(writeInput).not.toContain("# paratix: backup")
+    // The user's replacement job must survive cron.absent.
+    expect(writeInput).toContain(userReplacedJob)
+  })
+
+  it("apply removes marker and follow-up line when marker hash matches", async () => {
+    const job = "0 3 * * * /backup.sh"
+    const mockSsh = createMockSsh({
+      "crontab -u 'alice' -l": {
+        code: 0,
+        stdout: `${taggedMarker("backup", job)}\n${job}\n`,
+      },
+    })
+    const mod = cron.absent("alice", "backup")
+    const result = await mod.apply(mockSsh, emptyEnv)
+    expect(result.status).toBe("changed")
+    expect(mockSsh.calls).toContain("crontab -u 'alice' -r")
   })
 
   it("apply removes the crontab entirely when last managed entry is removed", async () => {

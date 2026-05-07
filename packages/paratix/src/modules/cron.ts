@@ -1,3 +1,5 @@
+import { createHash } from "node:crypto"
+
 import { failed, failedCommand } from "../moduleFailure.js"
 import { shellQuote } from "../ssh.js"
 import { type Module, type ModuleResult, NEEDS_APPLY, type SshConnection } from "../types.js"
@@ -71,15 +73,76 @@ async function writeCrontab(input: WriteCrontabArguments): Promise<ModuleResult 
 }
 
 /**
+ * R-0000168: derive a stable digest of a cron job line so the marker
+ * comment can carry the hash of the last managed job. `cron.absent` reads
+ * the digest back from the marker and only removes a follow-up line whose
+ * hash matches, preventing user-authored replacement jobs from being
+ * deleted.
+ *
+ * @param cronJob - The cron job line to hash.
+ * @returns The 64-character lowercase hex sha256 digest.
+ */
+function cronJobDigest(cronJob: string): string {
+  return createHash("sha256").update(cronJob).digest("hex")
+}
+
+const MARKER_HASH_TAG = " sha256="
+const MARKER_PREFIX = "# paratix: "
+
+/**
+ * R-0000168: render the marker comment that precedes a managed cron job.
+ * The hash suffix lets `cron.absent` recognise the line below it as one we
+ * wrote ourselves before deleting it.
+ *
+ * @param name - Logical job name supplied by the caller.
+ * @param cronJob - The cron job line written immediately below the marker.
+ * @returns The full marker comment to insert into the crontab.
+ */
+function renderMarkerLine(name: string, cronJob: string): string {
+  return `${MARKER_PREFIX}${name}${MARKER_HASH_TAG}${cronJobDigest(cronJob)}`
+}
+
+/**
+ * R-0000168: extract the recorded sha256 digest from a marker line, or
+ * `null` when the marker pre-dates R-0000168 (legacy `# paratix: <name>`).
+ *
+ * @param markerLine - The full marker line read from the crontab.
+ * @returns The recorded digest, or `null` for legacy markers.
+ */
+function readMarkerDigest(markerLine: string): null | string {
+  const tagIndex = markerLine.indexOf(MARKER_HASH_TAG)
+  if (tagIndex === -1) return null
+  const digest = markerLine.slice(tagIndex + MARKER_HASH_TAG.length).trim()
+  return /^[\da-f]{64}$/v.test(digest) ? digest : null
+}
+
+/**
+ * R-0000168: locate the marker for `name` in the crontab. Both the legacy
+ * (no hash) and the hash-tagged forms are matched so existing crontabs keep
+ * working through a paratix upgrade.
+ *
+ * @param lines - The crontab lines to search.
+ * @param name - Logical job name.
+ * @returns The marker index, or `-1` when no marker is present.
+ */
+function findMarkerIndex(lines: string[], name: string): number {
+  const legacyMarker = `${MARKER_PREFIX}${name}`
+  const taggedPrefix = `${legacyMarker}${MARKER_HASH_TAG}`
+  return lines.findIndex(
+    (line) => line === legacyMarker || line.startsWith(taggedPrefix)
+  )
+}
+
+/**
  * Check whether a marker-job pair is correctly present in crontab lines.
  *
  * @param lines - The crontab lines to inspect.
- * @param marker - The marker comment to search for.
+ * @param name - The logical name written into the marker comment.
  * @param cronJob - The expected job line after the marker.
  * @returns `true` if the marker exists and is followed by the expected job line.
  */
-function hasMarkedJob(lines: string[], marker: string, cronJob: string): boolean {
-  const index = lines.indexOf(marker)
+function hasMarkedJob(lines: string[], name: string, cronJob: string): boolean {
+  const index = findMarkerIndex(lines, name)
   return index !== -1 && index + 1 < lines.length && lines[index + 1] === cronJob
 }
 
@@ -111,7 +174,7 @@ type PresentMutationArguments = {
   cronJob: string
   /** The current crontab lines (not mutated). */
   lines: string[]
-  /** The paratix marker comment. */
+  /** The paratix marker comment with hash tag. */
   marker: string
   /** The current index of the marker, or `-1`. */
   markerIndex: number
@@ -120,9 +183,9 @@ type PresentMutationArguments = {
 /**
  * Compute the new crontab lines required to make the `present` state hold.
  *
- * Returns `null` when no mutation is required (the marker already exists
- * and is followed by the desired job line), allowing the caller to
- * short-circuit without writing the crontab.
+ * Returns `null` when no mutation is required (the marker already exists,
+ * carries the matching hash tag, and is followed by the desired job line),
+ * allowing the caller to short-circuit without writing the crontab.
  *
  * @param mutation - The mutation inputs (see {@link PresentMutationArguments}).
  * @returns The new crontab lines, or `null` when no write is needed.
@@ -130,13 +193,17 @@ type PresentMutationArguments = {
 function computePresentMutation(mutation: PresentMutationArguments): null | string[] {
   const { cronJob, lines, marker, markerIndex } = mutation
 
-  // R-0000081: short-circuit when the marker already exists and the
-  // following line already matches the desired cron job. Without this,
-  // apply would overwrite the line with the same value and re-write the
-  // crontab, reporting "changed" on every run when invoked directly
+  // R-0000081: short-circuit when the marker already carries the desired
+  // hash tag and the following line already matches the cron job. Without
+  // this, apply would overwrite the line with the same value and re-write
+  // the crontab, reporting "changed" on every run when invoked directly
   // (e.g. as a signal target). Mirrors the no-op returns that R-0000075
   // added to file.replace.apply and R-0000077 added to user.absent.apply.
-  if (markerIndex !== -1 && lines[markerIndex + 1] === cronJob) return null
+  // R-0000168: legacy markers (no hash tag) drop into the rewrite path
+  // below so the upgraded tagged marker lands on disk.
+  if (markerIndex !== -1 && lines[markerIndex] === marker && lines[markerIndex + 1] === cronJob) {
+    return null
+  }
 
   const next = [...lines]
 
@@ -148,11 +215,16 @@ function computePresentMutation(mutation: PresentMutationArguments): null | stri
     // like a managed cron job. This prevents user-authored comments /
     // blanks that ended up between marker and previous job from being
     // silently destroyed by a re-apply.
+    // R-0000168: refresh the marker line itself so it gains (or updates)
+    // the hash tag for the new cron job.
+    next[markerIndex] = marker
     next[markerIndex + 1] = cronJob
   } else {
     // Marker is the last line, or the next line is a comment / blank
     // that the user inserted — splice the new job in instead of
-    // overwriting unrelated content.
+    // overwriting unrelated content. R-0000168: refresh the marker line
+    // so the recorded hash tag reflects the cron job we splice in.
+    next[markerIndex] = marker
     next.splice(markerIndex + 1, 0, cronJob)
   }
 
@@ -198,21 +270,33 @@ export const cron = {
    */
   absent(user: string, name: string): Module {
     assertCronName(name)
-    const marker = `# paratix: ${name}`
 
     return {
       async apply(ssh: null | SshConnection): Promise<ModuleResult> {
         if (!ssh) return failed(`[cron.absent: ${name} (${user})] SSH connection is required`)
 
         const lines = await readCrontab(ssh, user)
-        const markerIndex = lines.indexOf(marker)
+        const markerIndex = findMarkerIndex(lines, name)
         if (markerIndex === -1) return { status: "ok" }
 
-        // R-0000047: only splice the next line as well when it actually
-        // looks like a cron job. If the marker is the last line, or the
-        // next line is a user comment / blank, only the marker itself is
-        // removed so we cannot accidentally delete unrelated content.
-        const removeCount = looksLikeCronJobLine(lines, markerIndex + 1) ? 2 : 1
+        // R-0000168: prefer the recorded hash tag — only delete the
+        // follow-up line when its sha256 matches the value paratix wrote
+        // when the cron job was last installed. If a user replaced the
+        // managed job with their own (and the marker still carries the
+        // old hash), we leave their line untouched and only drop the
+        // marker.
+        // R-0000047: legacy markers (pre-R-0000168) have no recorded hash;
+        // fall back to the conservative "looks like a cron job line" rule
+        // so unrelated user content next to the marker is preserved.
+        const recordedDigest = readMarkerDigest(lines[markerIndex] ?? "")
+        const followLine = lines[markerIndex + 1]
+        const followIsManagedJob =
+          followLine !== undefined &&
+          (recordedDigest === null
+            ? looksLikeCronJobLine(lines, markerIndex + 1)
+            : looksLikeCronJobLine(lines, markerIndex + 1) &&
+              cronJobDigest(followLine) === recordedDigest)
+        const removeCount = followIsManagedJob ? 2 : 1
         lines.splice(markerIndex, removeCount)
         const failure = await writeCrontab({
           failureMessage: `[cron.absent: ${name} (${user})] crontab removal failed`,
@@ -228,7 +312,7 @@ export const cron = {
         if (!ssh) return NEEDS_APPLY
 
         const lines = await readCrontab(ssh, user)
-        return lines.includes(marker) ? NEEDS_APPLY : "ok"
+        return findMarkerIndex(lines, name) === -1 ? "ok" : NEEDS_APPLY
       },
 
       name: `cron.absent: ${name} (${user})`,
@@ -258,14 +342,17 @@ export const cron = {
 
     const state = options.state ?? "present"
     const cronJob = options.job
-    const marker = `# paratix: ${name}`
+    // R-0000168: marker carries the sha256 of the cron job so cron.absent
+    // (and `cron.job(state="absent")`) can recognise the line they wrote
+    // and avoid deleting user-replaced follow-up content.
+    const marker = renderMarkerLine(name, cronJob)
 
     return {
       async apply(ssh: null | SshConnection): Promise<ModuleResult> {
         if (!ssh) return failed(`[cron.job: ${name} (${user})] SSH connection is required`)
 
         const lines = await readCrontab(ssh, user)
-        const markerIndex = lines.indexOf(marker)
+        const markerIndex = findMarkerIndex(lines, name)
 
         let nextLines: string[]
         if (state === "present") {
@@ -299,14 +386,19 @@ export const cron = {
         if (!ssh) return NEEDS_APPLY
 
         const lines = await readCrontab(ssh, user)
-        const found = hasMarkedJob(lines, marker, cronJob)
+        const markerIndex = findMarkerIndex(lines, name)
+        const found = hasMarkedJob(lines, name, cronJob)
 
         if (state === "present") {
-          return found ? "ok" : NEEDS_APPLY
+          // R-0000168: also re-apply when the marker exists but predates
+          // the hash tag, so the upgraded marker lands on disk.
+          if (!found) return NEEDS_APPLY
+          if (markerIndex === -1) return NEEDS_APPLY
+          return lines[markerIndex] === marker ? "ok" : NEEDS_APPLY
         }
 
         // state === "absent": ok when marker is not found
-        return lines.includes(marker) ? NEEDS_APPLY : "ok"
+        return markerIndex === -1 ? "ok" : NEEDS_APPLY
       },
 
       name: `cron.job: ${name} (${user})`,
