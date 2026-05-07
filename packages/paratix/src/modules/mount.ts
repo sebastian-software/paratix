@@ -52,6 +52,30 @@ function validateMountPath(caller: string, path: string): void {
   }
 }
 
+function buildMountPathSymlinkGuard(path: string): string {
+  return [
+    `mount_path=${shellQuote(path)}`,
+    'current="$mount_path"',
+    'while [ "$current" != "/" ]; do',
+    'if [ -e "$current" ] && [ -L "$current" ]; then',
+    `printf '%s\\n' "mount path contains symlink: $current" >&2`,
+    "exit 1",
+    "fi",
+    'current=$(dirname "$current")',
+    "done",
+  ].join("; ")
+}
+
+async function ensureNoMountPathSymlink(
+  ssh: SshConnection,
+  moduleName: string,
+  path: string
+): Promise<ModuleResult | null> {
+  const result = await ssh.exec(buildMountPathSymlinkGuard(path), EXEC_OPTS)
+  if (result.code === 0) return null
+  return failedCommand(`[${moduleName}: ${path}] mount path symlink check failed`, result)
+}
+
 function validateFstabField(caller: string, fieldName: string, value: string): void {
   if (value.length === 0) {
     throw new Error(`${caller}: ${fieldName} fstab field must not be empty`)
@@ -322,6 +346,8 @@ export const mount = {
         if (!ssh) return failed(`[mount.absent: ${path}] SSH connection is required`)
 
         let changed = false
+        const symlinkFailure = await ensureNoMountPathSymlink(ssh, "mount.absent", path)
+        if (symlinkFailure != null) return symlinkFailure
 
         const unmountResult = await unmountIfNeeded(ssh, path)
         if (typeof unmountResult !== "boolean") {
@@ -340,6 +366,9 @@ export const mount = {
       async check(ssh: null | SshConnection): Promise<"needs-apply" | "ok"> {
         if (!ssh) return NEEDS_APPLY
 
+        if ((await ssh.exec(buildMountPathSymlinkGuard(path), EXEC_OPTS)).code !== 0) {
+          return NEEDS_APPLY
+        }
         const isMounted = await ssh.test(`findmnt --noheadings ${shellQuote(path)}`)
         if (isMounted) return NEEDS_APPLY
 
@@ -390,6 +419,8 @@ export const mount = {
         if (!ssh) return failed(`[mount.present: ${path}] SSH connection is required`)
 
         let changed = false
+        const symlinkFailure = await ensureNoMountPathSymlink(ssh, MOUNT_PRESENT, path)
+        if (symlinkFailure != null) return symlinkFailure
 
         const mkdirResult = await ssh.exec(`mkdir -p ${shellQuote(path)}`, EXEC_OPTS)
         if (mkdirResult.code !== 0) {
@@ -410,6 +441,9 @@ export const mount = {
       async check(ssh: null | SshConnection): Promise<"needs-apply" | "ok"> {
         if (!ssh) return NEEDS_APPLY
 
+        if ((await ssh.exec(buildMountPathSymlinkGuard(path), EXEC_OPTS)).code !== 0) {
+          return NEEDS_APPLY
+        }
         const live = await readLiveMount(ssh, path)
         if (live == null) return NEEDS_APPLY
         // R-0000049: compare the live source / fstype / options against

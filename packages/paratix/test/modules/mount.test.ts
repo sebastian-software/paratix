@@ -7,7 +7,7 @@ type MockSshOptions = NonNullable<Parameters<typeof createBaseMockSsh>[1]>
 type MockSshResponses = Parameters<typeof createBaseMockSsh>[0]
 
 const createMockSsh: typeof createBaseMockSsh = (responses, options) =>
-  createBaseMockSsh(responses, options)
+  createBaseMockSsh({ [mountPathSymlinkGuardCmd]: { code: 0 }, ...responses }, options)
 
 const successfulMountApplyOptions: MockSshOptions = {
   allowWrites: [{ options: { mode: "0644" }, remotePath: "/etc/fstab" }],
@@ -35,6 +35,17 @@ const findmntTestCmd = `findmnt --noheadings '${mountPath}'`
 const mountCmd = `mount -t '${mountFstype}' -o '${mountOpts}' -- '${mountSrc}' '${mountPath}'`
 const umountCmd = `umount '${mountPath}'`
 const mkdirCmd = `mkdir -p '${mountPath}'`
+const mountPathSymlinkGuardCmd = [
+  `mount_path='${mountPath}'`,
+  'current="$mount_path"',
+  'while [ "$current" != "/" ]; do',
+  'if [ -e "$current" ] && [ -L "$current" ]; then',
+  `printf '%s\\n' "mount path contains symlink: $current" >&2`,
+  "exit 1",
+  "fi",
+  'current=$(dirname "$current")',
+  "done",
+].join("; ")
 
 // findmnt --output stdout for a live mount whose source/fstype/options
 // match the desired values exactly.
@@ -182,6 +193,21 @@ describe("mount.present — check", () => {
     })
     const result = await mod.check(mockSsh, emptyEnv)
     expect(result).toBe("needs-apply")
+  })
+
+  it("returns needs-apply when mount path contains a symlink", async () => {
+    const mockSsh = createMockSsh({
+      [mountPathSymlinkGuardCmd]: { code: 1, stderr: "mount path contains symlink: /mnt" },
+    })
+    const mod = mount.present({
+      fstype: mountFstype,
+      opts: mountOpts,
+      path: mountPath,
+      src: mountSrc,
+    })
+    const result = await mod.check(mockSsh, emptyEnv)
+    expect(result).toBe("needs-apply")
+    expect(mockSsh.calls).not.toContain(findmntCheckCmd)
   })
 
   it("returns ok when mounted and fstab entry matches (persist: true)", async () => {
@@ -518,6 +544,24 @@ describe("mount.present — apply", () => {
     })
     await mod.apply(mockSsh, emptyEnv)
     expect(mockSsh.calls).toContain(mkdirCmd)
+  })
+
+  it("returns failed and skips mkdir when mount path contains a symlink", async () => {
+    const mockSsh = createMountApplyMockSsh({
+      [mountPathSymlinkGuardCmd]: { code: 1, stderr: "mount path contains symlink: /mnt" },
+    })
+    const mod = mount.present({
+      fstype: mountFstype,
+      opts: mountOpts,
+      path: mountPath,
+      src: mountSrc,
+    })
+    const result = await mod.apply(mockSsh, emptyEnv)
+    expect(result.status).toBe("failed")
+    expect(result.error?.message).toContain(
+      "[mount.present: /mnt/data] mount path symlink check failed"
+    )
+    expect(mockSsh.calls).not.toContain(mkdirCmd)
   })
 
   it("returns failed and does not touch fstab or mount when mkdir -p fails", async () => {
@@ -866,6 +910,16 @@ describe("mount.absent — check", () => {
     expect(mockSsh.calls).toContain(findmntTestCmd)
   })
 
+  it("returns needs-apply when mount path contains a symlink", async () => {
+    const mockSsh = createMockSsh({
+      [mountPathSymlinkGuardCmd]: { code: 1, stderr: "mount path contains symlink: /mnt" },
+    })
+    const mod = mount.absent({ path: mountPath })
+    const result = await mod.check(mockSsh, emptyEnv)
+    expect(result).toBe("needs-apply")
+    expect(mockSsh.calls).not.toContain(findmntTestCmd)
+  })
+
   it("returns ok when not mounted and no fstab entry (persist: true)", async () => {
     const mockSsh = createMockSsh({
       "cat '/etc/fstab'": { stdout: "# /etc/fstab\n" },
@@ -914,6 +968,20 @@ describe("mount.absent — apply", () => {
     await mod.apply(mockSsh, emptyEnv)
     expect(mockSsh.calls.indexOf(findmntTestCmd)).toBeLessThan(mockSsh.calls.indexOf(umountCmd))
     expect(mockSsh.calls).toContain(umountCmd)
+  })
+
+  it("returns failed and skips umount when mount path contains a symlink", async () => {
+    const mockSsh = createMountApplyMockSsh({
+      [mountPathSymlinkGuardCmd]: { code: 1, stderr: "mount path contains symlink: /mnt" },
+    })
+    const mod = mount.absent({ path: mountPath })
+    const result = await mod.apply(mockSsh, emptyEnv)
+    expect(result.status).toBe("failed")
+    expect(result.error?.message).toContain(
+      "[mount.absent: /mnt/data] mount path symlink check failed"
+    )
+    expect(mockSsh.calls).not.toContain(findmntTestCmd)
+    expect(mockSsh.calls).not.toContain(umountCmd)
   })
 
   it("returns failed when umount fails", async () => {
