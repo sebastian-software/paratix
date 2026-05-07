@@ -834,7 +834,11 @@ export class SshConnectionImpl implements SshConnection {
   private async execPrepared(command: string, options: ExecOptions = {}): Promise<ExecResult> {
     const client = this.ensureClient()
     const environmentPrefix = this.buildEnvPrefix(options.env)
-    const { command: cmd, needsPassword } = this.sudoCommand(command, environmentPrefix)
+    const { command: cmd, needsPassword } = this.sudoCommand(
+      command,
+      environmentPrefix,
+      options.input != null
+    )
     const secrets = prepareSecrets(this.buildSecrets(options.secrets))
     return new Promise((resolve, reject) => {
       const { isSettled, wrappedReject, wrappedResolve } = this.createSettledCallbacks<ExecResult>(
@@ -1060,16 +1064,21 @@ trap - EXIT
    *
    * @param command - The raw command to execute.
    * @param environmentPrefix - Optional env var prefix string.
+   * @param hasInput - Whether the command receives caller-provided stdin.
    * @returns An object with the final command and whether a password must be written to stdin.
    */
   private sudoCommand(
     command: string,
-    environmentPrefix = ""
+    environmentPrefix = "",
+    hasInput = false
   ): { command: string; needsPassword: boolean } {
     if (this.config.user === "root") {
       return { command: `${environmentPrefix}${command}`, needsPassword: false }
     }
     const quoted = shellQuote(`${environmentPrefix}${command}`)
+    if (this.cachedSudoPassword != null && hasInput) {
+      return { command: `sudo -n bash -c ${quoted}`, needsPassword: false }
+    }
     if (this.cachedSudoPassword != null) {
       return { command: `SUDO_PROMPT='' sudo -S bash -c ${quoted}`, needsPassword: true }
     }

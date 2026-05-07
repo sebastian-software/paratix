@@ -1467,6 +1467,34 @@ describe("SshConnectionImpl", () => {
       expect(execSpy).toHaveBeenCalledOnce()
     })
 
+    it("uses passwordless sudo and writes only command input when stdin is provided", async () => {
+      let capturedStream: null | ReturnType<typeof makeStream> = null
+      const endCalls: unknown[][] = []
+      const execSpy = vi.fn().mockImplementation((_command: string, callback: ExecCallback) => {
+        const stream = makeStream()
+        Object.assign(stream, {
+          end(...args: unknown[]) {
+            endCalls.push(args)
+            return stream
+          },
+        })
+        capturedStream = stream
+        callback(undefined, stream)
+        stream.emit("close", 0)
+      })
+      const client = makeClientWithExecSpy(execSpy)
+      const ssh = makeConnectedSsh(client, { sudoPassword: "my-sudo-pass", user: "deploy" })
+
+      await ssh.exec("tee /etc/config", { input: "payload\n" })
+
+      const [executedCommand] = execSpy.mock.calls[0] as [string, ...unknown[]]
+      const execStream = capturedStream as unknown as ReturnType<typeof makeStream>
+      expect(executedCommand).toMatch(/^sudo -n bash -c /v)
+      expect(execStream.write).not.toHaveBeenCalledWith(Buffer.from("my-sudo-pass"))
+      expect(execStream.write).not.toHaveBeenCalledWith("\n")
+      expect(endCalls).toContainEqual(["payload\n"])
+    })
+
     it("materializes cached sudo passwords before starting exec output handling", async () => {
       const passwordBuffer = Buffer.from("my-sudo-pass")
       const toStringSpy = vi.spyOn(passwordBuffer, "toString")
