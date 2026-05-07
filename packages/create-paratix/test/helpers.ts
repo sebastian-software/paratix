@@ -144,6 +144,54 @@ export function createInvalidEcdsaNistp256PublicKey(comment: string): string {
 export const TEST_ADMIN_PUBLIC_KEY = createEd25519PublicKey("generated@test")
 export const TEST_HOST_FINGERPRINT = "SHA256:MYVLAwRUnY5x4jwQ1SPUJoYXVb/fB/L3kFjCi5WxfYA"
 
+export function buildEd25519HostKeyBuffer(
+  publicKey: Buffer = Buffer.alloc(ED25519_KEY_BYTES, 1)
+): Buffer {
+  return Buffer.concat([createWireString("ssh-ed25519"), createWireString(publicKey)])
+}
+
+export type EcdsaHostKeyFixtureSpec = {
+  algorithm: "ecdsa-sha2-nistp256" | "ecdsa-sha2-nistp384" | "ecdsa-sha2-nistp521"
+  curveName: "nistp256" | "nistp384" | "nistp521"
+  jwkCurveName: "P-256" | "P-384" | "P-521"
+  pointByteLength: number
+}
+
+export function buildEcdsaHostKeyBuffer(spec: EcdsaHostKeyFixtureSpec): Buffer {
+  const { algorithm, curveName, jwkCurveName, pointByteLength } = spec
+  const { publicKey } = generateKeyPairSync("ec", { namedCurve: jwkCurveName })
+  const jwk = publicKey.export({ format: "jwk" })
+  if (typeof jwk.x !== "string" || typeof jwk.y !== "string") {
+    throw new TypeError(`Generated ${jwkCurveName} key did not export coordinates.`)
+  }
+  const coordinateLength = (pointByteLength - 1) / 2
+  const x = decodeBase64Url(jwk.x)
+  const y = decodeBase64Url(jwk.y)
+  // Left-pad coordinates to the curve's coordinate length so the encoded
+  // point matches the OpenSSH wire format's fixed-width uncompressed layout.
+  const paddedX = Buffer.concat([Buffer.alloc(coordinateLength - x.length, 0), x])
+  const paddedY = Buffer.concat([Buffer.alloc(coordinateLength - y.length, 0), y])
+  const point = Buffer.concat([Buffer.from([UNCOMPRESSED_EC_POINT_PREFIX]), paddedX, paddedY])
+  return Buffer.concat([
+    createWireString(algorithm),
+    createWireString(curveName),
+    createWireString(point),
+  ])
+}
+
+export function buildEcdsaPointFromGeneratedKey(jwkCurveName: "P-256" | "P-384" | "P-521"): Buffer {
+  const { publicKey } = generateKeyPairSync("ec", { namedCurve: jwkCurveName })
+  const jwk = publicKey.export({ format: "jwk" })
+  if (typeof jwk.x !== "string" || typeof jwk.y !== "string") {
+    throw new TypeError(`Generated ${jwkCurveName} key did not export coordinates.`)
+  }
+  return Buffer.concat([
+    Buffer.from([UNCOMPRESSED_EC_POINT_PREFIX]),
+    decodeBase64Url(jwk.x),
+    decodeBase64Url(jwk.y),
+  ])
+}
+
 export type FakeHostKeyClient = {
   connect: ReturnType<typeof vi.fn>
   end: ReturnType<typeof vi.fn>

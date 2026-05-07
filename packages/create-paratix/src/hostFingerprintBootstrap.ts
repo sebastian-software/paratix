@@ -1,6 +1,8 @@
 import { createHash } from "node:crypto"
 import { Client, type ConnectConfig } from "ssh2"
 
+import { validateHostKeyBlob } from "./hostKeyBlobValidation.js"
+
 type HostKeyClient = Pick<Client, "connect" | "end" | "on" | "removeAllListeners">
 type HostKeyClientFactory = () => HostKeyClient
 
@@ -12,7 +14,7 @@ type HostFingerprintBootstrapOptions = {
 
 // R-0000123: callers need both the algorithm and the fingerprint so an
 // operator can spot a downgrade attack (for example a sudden switch from
-// ssh-ed25519 to ssh-rsa) before pinning the fingerprint into server.ts.
+// ssh-ed25519 to a weaker key) before pinning the fingerprint into server.ts.
 export type HostFingerprintScanResult = {
   algorithm: string
   fingerprint: string
@@ -22,12 +24,18 @@ const DEFAULT_HOST_FINGERPRINT_PORT = 22
 const DEFAULT_READY_TIMEOUT_MS = 10_000
 const SSH_KEY_ALGO_LENGTH_FIELD_BYTES = 4
 
+// R-0000128: ssh-rsa is intentionally absent from this allowlist. The wire
+// blob alone does not let us cheaply enforce a 2048-bit modulus floor in a
+// pre-handshake host-verifier callback while keeping the validation logic
+// minimal, and modern Linux distributions ship ed25519 host keys by default.
+// Operators who must pin an RSA host key should pass --expected-host-fingerprint
+// with an out-of-band verified value instead. This is a breaking change for
+// hosts that present only ssh-rsa host keys during the scan.
 const ACCEPTED_HOST_KEY_ALGORITHMS = new Set([
   "ecdsa-sha2-nistp256",
   "ecdsa-sha2-nistp384",
   "ecdsa-sha2-nistp521",
   "ssh-ed25519",
-  "ssh-rsa",
 ])
 
 function extractHostKeyAlgorithm(keyBuffer: Buffer): string {
@@ -81,6 +89,11 @@ function createConnectionConfig(parameters: {
         // R-0000123: capture the algorithm name alongside the fingerprint so
         // the interactive prompt can show both values to the operator.
         const algorithm = assertSupportedHostKeyAlgorithm(buffer)
+        // R-0000128: an algorithm label alone proves nothing — a MITM can
+        // ship arbitrary bytes after the label. Reject malformed wire
+        // payloads (truncated, wrong curve, point off-curve) before we
+        // pin a fingerprint computed over them.
+        validateHostKeyBlob(buffer, algorithm)
         captureScanResult({ algorithm, fingerprint: computeFingerprint(buffer) })
       } catch (error) {
         captureHostVerifierError(error)
