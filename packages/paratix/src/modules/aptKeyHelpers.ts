@@ -168,12 +168,15 @@ async function downloadVerifyAndImportAptKey(
   const { expectedFingerprint, keyringPath, name, temporaryPath, url } = parameters
   const urlSecrets = extractAptKeyUrlSecrets(url)
   const curlConfig = buildCurlConfigPayload({ routeUrlThroughConfig: true, url })
-  const download = await ssh.exec(`curl -fsSL -o ${shellQuote(temporaryPath)} --config -`, {
-    ignoreExitCode: true,
-    input: curlConfig.configInput,
-    secrets: urlSecrets,
-    silent: true,
-  })
+  const download = await ssh.exec(
+    `curl -fsSL -o ${shellQuote(temporaryPath)} --proto '=https' --proto-redir '=https' --config -`,
+    {
+      ignoreExitCode: true,
+      input: curlConfig.configInput,
+      secrets: urlSecrets,
+      silent: true,
+    }
+  )
   if (download.code !== 0)
     return failedCommand(`[apt.key] failed to download ${name}`, download, urlSecrets)
   const fingerprintCheck = await verifyAptKeyFingerprint({

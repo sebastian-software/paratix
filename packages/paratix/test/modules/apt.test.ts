@@ -29,7 +29,8 @@ function distUpgradeApplyLockResponses(): Record<string, { code?: number; stdout
 
 describe("apt.key", () => {
   const fingerprint = "1234567890ABCDEF1234567890ABCDEF12345678"
-  const downloadCommand = "curl -fsSL -o '/tmp/apt-key-docker.ABCDEF' --config -"
+  const downloadCommand =
+    "curl -fsSL -o '/tmp/apt-key-docker.ABCDEF' --proto '=https' --proto-redir '=https' --config -"
 
   function aptKeyValidationMessage(url: string): string {
     try {
@@ -103,6 +104,7 @@ describe("apt.key", () => {
     expect(ssh.calls).toContain("mkdir -p /etc/apt/keyrings")
     expect(ssh.calls).toContain("mktemp '/tmp/apt-key-docker.XXXXXX'")
     expect(ssh.calls).toContain(downloadCommand)
+    expect(downloadCommand).toContain("--proto '=https' --proto-redir '=https'")
     expect(ssh.execCalls.find((call) => call.command === downloadCommand)?.options).toMatchObject({
       input: 'url = "https://download.docker.com/linux/ubuntu/gpg"\n',
       silent: true,
