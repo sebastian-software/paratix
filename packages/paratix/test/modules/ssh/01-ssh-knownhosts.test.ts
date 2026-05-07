@@ -398,6 +398,26 @@ describe("ssh.knownHosts", () => {
     expect(printfCalls).toHaveLength(1)
   })
 
+  // R-0000173: when ssh-keygen -F exits with an unexpected code (corrupt
+  // known_hosts → 255, argument error → 2), apply must surface a failed
+  // ModuleResult. Treating these as "host not found" would silently apply
+  // on a damaged file without telling the operator.
+  it("apply returns failed when ssh-keygen -F exits with code 255 (corrupted known_hosts)", async () => {
+    const mockSsh = createSshApplyMockSsh({
+      [`ssh-keygen -F 'github.com'`]: {
+        code: 255,
+        stderr: "ssh-keygen: failed to parse known_hosts: corrupt entry\n",
+      },
+      "ssh-keyscan -H 'github.com' 2>/dev/null": { stdout: `${scannedLine}\n` },
+    })
+    const mod = ssh.knownHosts("github.com", {
+      expectedFingerprint: hostFingerprint,
+    })
+    const result = await mod.apply(mockSsh, emptyEnv)
+    expect(result.status).toBe("failed")
+    expect(result.error?.message).toContain("ssh-keygen -F exited with unexpected code 255")
+  })
+
   // R-0000170: trust-anchor mismatches must surface as a failed
   // ModuleResult, not an uncaught exception, so callers see a maskable
   // failure consistent with other modules.

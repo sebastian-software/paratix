@@ -1,3 +1,4 @@
+/* eslint-disable max-lines -- ssh module keeps known_hosts/authorized_keys helpers together */
 import { computeFingerprint } from "../knownHosts.js"
 import { failed } from "../moduleFailure.js"
 import { isValidTcpPort } from "../serverDefinitionValidation.js"
@@ -138,6 +139,33 @@ function sshKeyscanCommand(host: string, options?: KnownHostsOptions): string {
   return `ssh-keyscan -p ${port} -H ${shellQuote(host)} 2>/dev/null`
 }
 
+/**
+ * R-0000173: ssh-keygen -F documents only exit codes 0 (host found) and 1
+ * (host not found). Anything else (e.g. 2 for argument errors, 255 for
+ * known_hosts file corruption) is an unexpected condition that must surface
+ * as a failure instead of being silently coerced into "not found".
+ *
+ * @param exitCode - The exit code returned by `ssh-keygen -F`.
+ * @returns `true` when the exit code is one of the documented values.
+ */
+function isExpectedSshKeygenLookupExitCode(exitCode: number): boolean {
+  return exitCode === 0 || exitCode === 1
+}
+
+class SshKeygenLookupError extends Error {
+  public readonly exitCode: number
+  public readonly stderr: string
+
+  public constructor(host: string, exitCode: number, stderr: string) {
+    super(
+      `ssh.knownHosts(${host}) ssh-keygen -F exited with unexpected code ${String(exitCode)}: ${stderr.trim() || "no stderr"}`
+    )
+    this.name = "SshKeygenLookupError"
+    this.exitCode = exitCode
+    this.stderr = stderr
+  }
+}
+
 async function hasMatchingKnownHostTrustAnchor(
   conn: SshConnection,
   host: string,
@@ -151,6 +179,11 @@ async function hasMatchingKnownHostTrustAnchor(
     }
   )
   if (result.code === 1) return false
+  // R-0000173: code 0 means a match was found; any other value is a real
+  // error that must propagate so the caller can return a failed result.
+  if (!isExpectedSshKeygenLookupExitCode(result.code)) {
+    throw new SshKeygenLookupError(host, result.code, result.stderr)
+  }
 
   const knownHostLines = parseHostKeyLines(result.stdout)
 
@@ -172,7 +205,17 @@ async function getKnownHostLines(
     }
   )
   if (result.code === 1) return []
+  // R-0000173: same guard as hasMatchingKnownHostTrustAnchor — refuse to
+  // silently treat unexpected codes (corrupted known_hosts, bad argv) as
+  // an empty result set.
+  if (!isExpectedSshKeygenLookupExitCode(result.code)) {
+    throw new SshKeygenLookupError(host, result.code, result.stderr)
+  }
   return parseHostKeyLines(result.stdout)
+}
+
+function isSshKeygenLookupError(error: unknown): error is SshKeygenLookupError {
+  return error instanceof SshKeygenLookupError
 }
 
 /**
@@ -198,6 +241,98 @@ async function filterMissingKnownHostLines(
 }
 
 /**
+ * R-0000170: resolve the verified scanned host key lines or convert a
+ * verification throw into a failed ModuleResult. Keeps the verification
+ * boundary in a single helper so applyKnownHostsPresent stays under the
+ * project's max-statements lint cap.
+ *
+ * @param host - The hostname or IP address being scanned.
+ * @param scannedLines - The raw lines returned by ssh-keyscan.
+ * @param options - The knownHosts options containing the trust anchor.
+ * @returns A tuple of (verifiedLines, failureResult). Exactly one is set.
+ */
+function resolveVerifiedLines(
+  host: string,
+  scannedLines: string[],
+  options: KnownHostsOptions
+): { failure: ModuleResult; verifiedLines: null } | { failure: null; verifiedLines: string[] } {
+  try {
+    const verifiedLines = getVerifiedScannedHostKeyLines(host, scannedLines, options)
+    return { failure: null, verifiedLines }
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error)
+    return {
+      failure: failed(`[ssh.knownHosts: ${host} (present)] ${detail}`),
+      verifiedLines: null,
+    }
+  }
+}
+
+/**
+ * R-0000173: resolve the existing known_hosts lines or convert an
+ * unexpected ssh-keygen exit code (corrupt file, bad argv) into a failed
+ * ModuleResult instead of letting it escape as an uncaught exception.
+ *
+ * @param conn - The SSH connection.
+ * @param host - The hostname being looked up.
+ * @param options - The knownHosts options carrying the optional port.
+ * @returns A tuple of (existingLines, failureResult). Exactly one is set.
+ */
+async function resolveExistingKnownHostLines(
+  conn: SshConnection,
+  host: string,
+  options?: KnownHostsOptions
+): Promise<
+  { existingLines: null; failure: ModuleResult } | { existingLines: string[]; failure: null }
+> {
+  try {
+    const existingLines = await getKnownHostLines(conn, host, options)
+    return { existingLines, failure: null }
+  } catch (error) {
+    if (isSshKeygenLookupError(error)) {
+      return {
+        existingLines: null,
+        failure: failed(`[ssh.knownHosts: ${host} (present)] ${error.message}`),
+      }
+    }
+    throw error
+  }
+}
+
+/**
+ * Compute the lines that still need to be appended to `~/.ssh/known_hosts`,
+ * removing any drifted entries first when the existing lines do not match
+ * the configured trust anchor.
+ *
+ * @param conn - The SSH connection.
+ * @param parameters - Reconciliation context.
+ * @param parameters.host - The hostname being scanned.
+ * @param parameters.options - The knownHosts options carrying the trust anchor.
+ * @param parameters.existingLines - Lines currently present in known_hosts.
+ * @param parameters.verifiedLines - Lines that passed trust-anchor verification.
+ * @returns The set of lines that still need to be written.
+ */
+async function reconcileKnownHostsState(
+  conn: SshConnection,
+  parameters: {
+    existingLines: string[]
+    host: string
+    options?: KnownHostsOptions
+    verifiedLines: string[]
+  }
+): Promise<string[]> {
+  const { existingLines, host, options, verifiedLines } = parameters
+  const hasMismatchedExistingLines = existingLines.some(
+    (line) => !lineMatchesTrustAnchor(line, options ?? {})
+  )
+  if (hasMismatchedExistingLines) {
+    await conn.exec(`ssh-keygen -R ${shellQuote(knownHostsLookupTarget(host, options))}`)
+    return verifiedLines
+  }
+  return filterMissingKnownHostLines(conn, verifiedLines)
+}
+
+/**
  * Apply the `state: "present"` path of `ssh.knownHosts`: scan the host,
  * verify each line against the trust anchor, and append only the lines that
  * are not yet in `~/.ssh/known_hosts` (R-0000038 idempotency).
@@ -215,31 +350,20 @@ async function applyKnownHostsPresent(
   const { host, options } = parameters
   const scannedOutput = await conn.output(sshKeyscanCommand(host, options))
   const scannedLines = parseHostKeyLines(scannedOutput)
-  // R-0000170: getVerifiedScannedHostKeyLines throws on trust-anchor
-  // mismatches (no scanned line matched expectedFingerprint / publicKey).
-  // Catch the throw and surface it as a failed ModuleResult so callers see
-  // a consistent { status: "failed", error } instead of an uncaught
-  // exception that escapes the module's failure-handling contract.
-  let verifiedLines: string[]
-  try {
-    verifiedLines = getVerifiedScannedHostKeyLines(host, scannedLines, options ?? {})
-  } catch (error) {
-    const detail = error instanceof Error ? error.message : String(error)
-    return failed(`[ssh.knownHosts: ${host} (present)] ${detail}`)
-  }
+  const verification = resolveVerifiedLines(host, scannedLines, options ?? {})
+  if (verification.failure) return verification.failure
+
   await conn.exec("mkdir -p ~/.ssh && chmod 700 ~/.ssh", { silent: true })
 
-  const existingLines = await getKnownHostLines(conn, host, options)
-  const hasMismatchedExistingLines = existingLines.some(
-    (line) => !lineMatchesTrustAnchor(line, options ?? {})
-  )
-  if (hasMismatchedExistingLines) {
-    await conn.exec(`ssh-keygen -R ${shellQuote(knownHostsLookupTarget(host, options))}`)
-  }
+  const existing = await resolveExistingKnownHostLines(conn, host, options)
+  if (existing.failure) return existing.failure
 
-  const missingLines = hasMismatchedExistingLines
-    ? verifiedLines
-    : await filterMissingKnownHostLines(conn, verifiedLines)
+  const missingLines = await reconcileKnownHostsState(conn, {
+    existingLines: existing.existingLines,
+    host,
+    options,
+    verifiedLines: verification.verifiedLines,
+  })
   if (missingLines.length === 0) {
     return { status: "ok" }
   }
