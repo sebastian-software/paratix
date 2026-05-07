@@ -548,6 +548,44 @@ describe("releaseUpgrade.upgrade — apply (Debian)", () => {
     // on the embedded space. The previous newline-splitting code would
     // pass the path verbatim too, but a path containing a literal newline
     // would be silently truncated. NUL-delimited splitting is robust.
+    it("R-0000172: skips paths that escape the sources.list.d directory", async () => {
+      // The find pipeline could in principle yield paths outside the
+      // expected directory if it were ever swapped for a less constrained
+      // command. Defense-in-depth: such paths must be skipped.
+      const escapingPath = "/etc/passwd"
+      const ssh = createMockSsh(
+        debianApplyResponses("bookworm", "trixie", {
+          "find /etc/apt/sources.list.d/ \\( -name '*.list' -o -name '*.sources' \\) -type f -print0":
+            { code: 0, stdout: `${escapingPath}\0` },
+        })
+      )
+      const writes = captureWriteFile(ssh)
+      const mod = releaseUpgrade.upgrade()
+      const result = await mod.apply(ssh, emptyEnv)
+      expect(result.status).toBe("changed")
+      expect(writes.find((w) => w.path === escapingPath)).toBeUndefined()
+    })
+
+    it("R-0000172: skips paths containing newlines or NUL-like control chars", async () => {
+      // Even when -print0 keeps the NUL boundaries clean, an embedded
+      // newline in a filename could still break downstream tooling.
+      const cleanPath = "/etc/apt/sources.list.d/clean.list"
+      const dirtyPath = "/etc/apt/sources.list.d/with\nnewline.list"
+      const ssh = createMockSsh(
+        debianApplyResponses("bookworm", "trixie", {
+          [`cat '${cleanPath}'`]: { code: 0, stdout: "deb http://example.com/repo bookworm main" },
+          "find /etc/apt/sources.list.d/ \\( -name '*.list' -o -name '*.sources' \\) -type f -print0":
+            { code: 0, stdout: `${dirtyPath}\0${cleanPath}\0` },
+        })
+      )
+      const writes = captureWriteFile(ssh)
+      const mod = releaseUpgrade.upgrade()
+      const result = await mod.apply(ssh, emptyEnv)
+      expect(result.status).toBe("changed")
+      expect(writes.find((w) => w.path === dirtyPath)).toBeUndefined()
+      expect(writes.find((w) => w.path === cleanPath)).toBeDefined()
+    })
+
     it("processes a sources.list.d filename containing whitespace via -print0", async () => {
       // readFile (mock output()) trims trailing whitespace.
       const originalExtraSources = "deb http://example.com/repo bookworm main"

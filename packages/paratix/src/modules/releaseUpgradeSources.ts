@@ -1,3 +1,23 @@
+const APT_SOURCES_LIST_DIRECTORY = "/etc/apt/sources.list.d/"
+const ASCII_CONTROL_BOUNDARY = 0x20
+const ASCII_DEL_CODE_POINT = 0x7f
+
+/**
+ * @param filePath - A path produced by `find -print0` over the apt sources
+ *   directory.
+ * @returns `true` when the path stays inside the expected directory and
+ *   carries no ASCII control characters that would break downstream tooling.
+ */
+export function isAcceptableSourcesPath(filePath: string): boolean {
+  if (!filePath.startsWith(APT_SOURCES_LIST_DIRECTORY)) return false
+  for (let index = 0; index < filePath.length; index++) {
+    const code = filePath.codePointAt(index)
+    if (code === undefined) continue
+    if (code < ASCII_CONTROL_BOUNDARY || code === ASCII_DEL_CODE_POINT) return false
+  }
+  return true
+}
+
 const RELEASE_DERIVED_SUITE_SUFFIXES = ["-updates", "-security", "-backports"] as const
 const DEBIAN_SUPPORTED_PREDECESSORS = {
   bookworm: "bullseye",

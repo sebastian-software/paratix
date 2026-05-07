@@ -10,7 +10,11 @@ import {
   NEEDS_APPLY,
   type SshConnection,
 } from "../types.js"
-import { isSupportedDebianUpgradePath, rewriteAptSourcesContent } from "./releaseUpgradeSources.js"
+import {
+  isAcceptableSourcesPath,
+  isSupportedDebianUpgradePath,
+  rewriteAptSourcesContent,
+} from "./releaseUpgradeSources.js"
 
 const NONINTERACTIVE = "DEBIAN_FRONTEND=noninteractive"
 const CODENAME_RE = /^[a-z]{3,20}$/v
@@ -196,10 +200,10 @@ async function replaceCodenameInSourcesList(
     return snapshots
   }
 
-  // Split on the NUL byte; the trailing empty string (after the last NUL)
-  // is filtered out below.
+  // R-0000172: defense-in-depth — paths that escape the sources directory or
+  // carry ASCII control characters are skipped before readFile / writeFile.
   for (const filePath of listFilesResult.stdout.split("\0")) {
-    if (filePath.length === 0) continue
+    if (filePath.length === 0 || !isAcceptableSourcesPath(filePath)) continue
     // eslint-disable-next-line no-await-in-loop
     const content = await ssh.readFile(filePath)
     // eslint-disable-next-line no-await-in-loop
