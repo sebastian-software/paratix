@@ -83,6 +83,11 @@ async function applyLineAppend(input: {
   // bypass check). Mirrors the no-op return pattern from R-0000075/77/81/88.
   const existsBeforeAppend = await input.ssh.exists(input.remotePath)
   if (existsBeforeAppend) {
+    if (!(await isRegularFileWithoutSymlink(input.ssh, input.remotePath))) {
+      return failed(
+        `[file.line: ${input.remotePath}] path must be a regular file and not a symlink`
+      )
+    }
     const existingContent = await input.ssh.readFile(input.remotePath)
     if (splitLines(existingContent).includes(input.line)) return { status: "ok" }
   }
@@ -101,6 +106,9 @@ async function applyLineReplace(input: {
   ssh: SshConnection
 }): Promise<ModuleResult> {
   // Replace the first matching full line (client-side to avoid sed escaping issues)
+  if (!(await isRegularFileWithoutSymlink(input.ssh, input.remotePath))) {
+    return failed(`[file.line: ${input.remotePath}] path must be a regular file and not a symlink`)
+  }
   const content = await input.ssh.readFile(input.remotePath)
   const { hasTrailingNewline, lines } = splitLinesPreservingTrailingNewline(content)
   // eslint-disable-next-line security/detect-non-literal-regexp
@@ -298,6 +306,7 @@ export const file = {
         if (!ssh) return NEEDS_APPLY
         const exists = await ssh.exists(remotePath)
         if (!exists) return NEEDS_APPLY
+        if (!(await isRegularFileWithoutSymlink(ssh, remotePath))) return NEEDS_APPLY
 
         const content = await ssh.readFile(remotePath)
         const lines = splitLines(content)

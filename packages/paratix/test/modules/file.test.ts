@@ -856,6 +856,18 @@ describe("file.line", () => {
     expect(ssh.calls).not.toContain("cat '/etc/config'")
   })
 
+  it("check returns needs-apply when the line target is a symlink", async () => {
+    const ssh = createMockSsh({
+      "[ -e '/etc/config' ]": { code: 0 },
+      "[ -f '/etc/config' ] && [ ! -L '/etc/config' ]": { code: 1 },
+      "cat '/etc/config'": { stdout: "my-line\n" },
+    })
+    const mod = file.line("/etc/config", "my-line")
+    const result = await mod.check(ssh, emptyEnv)
+    expect(result).toBe("needs-apply")
+    expect(ssh.calls).not.toContain("cat '/etc/config'")
+  })
+
   it("regression — check returns needs-apply for a substring match without an exact target line", async () => {
     const ssh = createMockSsh({
       "cat '/etc/config'": { stdout: "some-line\nprefix-my-line-suffix\nother-line" },
@@ -919,6 +931,19 @@ describe("file.line", () => {
 })
 
 describe("file.line — apply without options.match", () => {
+  it("apply fails without appending when the line target is a symlink", async () => {
+    const ssh = createMockSsh({
+      "[ -e '/etc/config' ]": { code: 0 },
+      "[ -f '/etc/config' ] && [ ! -L '/etc/config' ]": { code: 1 },
+    })
+    const mod = file.line("/etc/config", "my-line")
+    const result = await mod.apply(ssh, emptyEnv)
+
+    expect(result.status).toBe("failed")
+    expect(result.error?.message).toContain("path must be a regular file and not a symlink")
+    expect(ssh.calls).not.toContain("cat >> '/etc/config'")
+  })
+
   it("regression R-0000108 — apply returns ok and does not append a duplicate when the line is already present", async () => {
     const appendCalls: string[] = []
     const ssh = createMockSsh({
@@ -1654,6 +1679,22 @@ describe("file.block", () => {
     expect(result).toBe("needs-apply")
   })
 
+  it("check returns needs-apply when the block target is a symlink", async () => {
+    const ssh = createMockSsh({
+      "[ -e '/etc/hosts' ]": { code: 0 },
+      "[ -f '/etc/hosts' ] && [ ! -L '/etc/hosts' ]": { code: 1 },
+      [`cat '/etc/hosts'`]: {
+        stdout: "# BEGIN paratix: myblock\ncontent line\n# END paratix: myblock\n",
+      },
+      [`grep -qF '# BEGIN paratix: myblock' '/etc/hosts'`]: { code: 0 },
+    })
+
+    const mod = file.block("/etc/hosts", { content: "content line", name: "myblock" })
+    const result = await mod.check(ssh, emptyEnv)
+    expect(result).toBe("needs-apply")
+    expect(ssh.calls).not.toContain("cat '/etc/hosts'")
+  })
+
   it("check returns needs-apply when ssh is null", async () => {
     const mod = file.block("/etc/hosts", { content: "content line", name: "myblock" })
     const result = await mod.check(null, emptyEnv)
@@ -1680,6 +1721,25 @@ describe("file.block", () => {
     expect(writtenFiles[0]?.content).toContain("my line")
     expect(writtenFiles[0]?.content).toContain("# END paratix: myblock")
     expect(writtenFiles[0]?.content).toContain("existing content")
+  })
+
+  it("apply fails without writing when the block target is a symlink", async () => {
+    const writtenFiles: Array<{ content: string; path: string }> = []
+    const ssh = createMockSsh({
+      "[ -e '/etc/hosts' ]": { code: 0 },
+      "[ -f '/etc/hosts' ] && [ ! -L '/etc/hosts' ]": { code: 1 },
+    })
+    // eslint-disable-next-line @typescript-eslint/require-await -- Mock
+    ssh.writeFile = async (path: string, content: string) => {
+      writtenFiles.push({ content, path })
+    }
+
+    const mod = file.block("/etc/hosts", { content: "my line", name: "myblock" })
+    const result = await mod.apply(ssh, emptyEnv)
+
+    expect(result.status).toBe("failed")
+    expect(result.error?.message).toContain("path must be a regular file and not a symlink")
+    expect(writtenFiles).toStrictEqual([])
   })
 
   it("apply replaces block content when markers exist", async () => {
@@ -1935,6 +1995,19 @@ describe("file.replace", () => {
     expect(result).toBe("needs-apply")
   })
 
+  it("check returns needs-apply when the replace target is a symlink", async () => {
+    const ssh = createMockSsh({
+      "[ -e '/etc/config' ]": { code: 0 },
+      "[ -f '/etc/config' ] && [ ! -L '/etc/config' ]": { code: 1 },
+      "cat '/etc/config'": { stdout: "foo old-value bar" },
+    })
+
+    const mod = file.replace("/etc/config", "old-value", "new-value")
+    const result = await mod.check(ssh, emptyEnv)
+    expect(result).toBe("needs-apply")
+    expect(ssh.calls).not.toContain("cat '/etc/config'")
+  })
+
   it("check returns ok after apply when replacement uses negative lookahead to prevent re-matching", async () => {
     // Regression for R-0000034: pattern "foo(?!bar)" with replacement "foobar".
     // The old grep-based check reported needs-apply forever because the file
@@ -1981,6 +2054,25 @@ describe("file.replace", () => {
 
     expect(result.status).toBe("changed")
     expect(writtenFiles[0]?.content).toBe("foo new-value bar new-value baz")
+  })
+
+  it("apply fails without writing when the replace target is a symlink", async () => {
+    const writtenFiles: Array<{ content: string; path: string }> = []
+    const ssh = createMockSsh({
+      "[ -f '/etc/config' ] && [ ! -L '/etc/config' ]": { code: 1 },
+      "cat '/etc/config'": { stdout: "foo old-value bar" },
+    })
+    // eslint-disable-next-line @typescript-eslint/require-await -- Mock
+    ssh.writeFile = async (path: string, content: string) => {
+      writtenFiles.push({ content, path })
+    }
+
+    const mod = file.replace("/etc/config", "old-value", "new-value")
+    const result = await mod.apply(ssh, emptyEnv)
+
+    expect(result.status).toBe("failed")
+    expect(result.error?.message).toContain("path must be a regular file and not a symlink")
+    expect(writtenFiles).toStrictEqual([])
   })
 
   it("apply returns ok and does not write when pattern produces no replacement", async () => {

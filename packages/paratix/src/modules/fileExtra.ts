@@ -213,6 +213,11 @@ export function block(remotePath: string, options: BlockOptions): Module {
       const exists = await ssh.exists(remotePath)
 
       if (exists) {
+        if (!(await isRegularFileWithoutSymlink(ssh, remotePath))) {
+          return failed(
+            `[file.block: ${remotePath} (${options.name})] path must be a regular file and not a symlink`
+          )
+        }
         const existing = await ssh.readFile(remotePath)
         const markers: BlockMarkers = { begin: beginMarker, end: endMarker, full: fullBlock }
         const failure = await applyBlockToExistingFile({
@@ -234,6 +239,9 @@ export function block(remotePath: string, options: BlockOptions): Module {
     },
     async check(ssh: null | SshConnection): Promise<"needs-apply" | "ok"> {
       if (!ssh) return NEEDS_APPLY
+      const exists = await ssh.exists(remotePath)
+      if (!exists) return NEEDS_APPLY
+      if (!(await isRegularFileWithoutSymlink(ssh, remotePath))) return NEEDS_APPLY
 
       const hasBeginMarker = await ssh.test(
         `grep -qF ${shellQuote(beginMarker)} ${shellQuote(remotePath)}`
@@ -445,6 +453,9 @@ export function replace(remotePath: string, pattern: string, replacement: string
   return {
     async apply(ssh: null | SshConnection): Promise<ModuleResult> {
       if (!ssh) return failed(`[file.replace: ${remotePath}] SSH connection is required`)
+      if (!(await isRegularFileWithoutSymlink(ssh, remotePath))) {
+        return failed(`[file.replace: ${remotePath}] path must be a regular file and not a symlink`)
+      }
 
       const content = await ssh.readFile(remotePath)
       // eslint-disable-next-line security/detect-non-literal-regexp -- pattern from module config, not user input
@@ -469,6 +480,7 @@ export function replace(remotePath: string, pattern: string, replacement: string
 
       const exists = await ssh.exists(remotePath)
       if (!exists) return NEEDS_APPLY
+      if (!(await isRegularFileWithoutSymlink(ssh, remotePath))) return NEEDS_APPLY
 
       const content = await ssh.readFile(remotePath)
       // eslint-disable-next-line security/detect-non-literal-regexp -- pattern from module config, not user input
