@@ -84,6 +84,10 @@ vi.mock("../src/sshHelpers.js", async () => {
   return {
     cleanupFailedSshClient: vi.fn(actual.cleanupFailedSshClient),
     collectStreamOutput: vi.fn(actual.collectStreamOutput),
+    // R-0000146: secretSink.maskScopedError performs `instanceof CommandError`
+    // when masking thrown errors via withRegisteredSecrets, so the mock must
+    // re-export the real class.
+    CommandError: actual.CommandError,
     maskPreparedSecrets: actual.maskPreparedSecrets,
     maskSecrets: actual.maskSecrets,
     normalizeSshCloseCode: actual.normalizeSshCloseCode,
@@ -3330,6 +3334,51 @@ describe("SshConnectionImpl", () => {
 
       await expect(ssh.probeSudo()).resolves.toBeUndefined()
       expect(promptTerminal).not.toHaveBeenCalled()
+    })
+
+    it("registers the sudo password in the secret sink during validation (R-0000146 regression)", async () => {
+      // Regression: cacheAndValidateSudoPassword wrapped only the direct
+      // error message via maskSecrets([password]), so the cause-chain
+      // printed by printCauseChain (which only masks sink-registered
+      // values) could leak the plaintext password to stderr. The fix
+      // wraps the probe in withRegisteredSecrets so the global mask
+      // covers any thrown diagnostic for the duration of the probe.
+      const { getRegisteredSecrets } = await import("../src/secretSink.js")
+      const password = "leak-prone-sudo-pw"
+      vi.mocked(promptTerminal).mockResolvedValueOnce(password)
+
+      let registeredDuringProbe: string[] = []
+      const execSpy = vi
+        .fn()
+        // First call: command -v sudo — installed
+        .mockImplementationOnce((_command: string, callback: ExecCallback) => {
+          const stream = makeStream()
+          callback(undefined, stream)
+          stream.emit("close", 0)
+        })
+        // Second call: sudo -n true — passwordless probe fails
+        .mockImplementationOnce((_command: string, callback: ExecCallback) => {
+          const stream = makeStream()
+          callback(undefined, stream)
+          stream.emit("close", 1)
+        })
+        // Third call: sudo -S validation — succeed and snapshot the sink
+        .mockImplementationOnce((_command: string, callback: ExecCallback) => {
+          registeredDuringProbe = getRegisteredSecrets()
+          const stream = makeStream()
+          callback(undefined, stream)
+          stream.emit("close", 0)
+        })
+
+      const client = makeClientWithExecSpy(execSpy)
+      const ssh = makeConnectedSsh(client, { sudoPassword: null, user: "deploy" })
+
+      await ssh.probeSudo()
+
+      // While the validation runs, the entered password sits in the sink.
+      expect(registeredDuringProbe).toContain(password)
+      // After the probe resolves, the registration must be released.
+      expect(getRegisteredSecrets()).not.toContain(password)
     })
 
     it("masks the sudo password in the error message when authentication fails (regression)", async () => {

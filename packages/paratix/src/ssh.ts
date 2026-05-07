@@ -635,8 +635,19 @@ export class SshConnectionImpl implements SshConnection {
       throw new Error("Sudo password must not contain newline characters")
     }
     this.cachedSudoPassword = Buffer.from(password)
+    // R-0000146: register the entered password in the process-wide secret
+    // sink for the duration of the probe. Without this, a thrown
+    // diagnostic—including the wrapping `cause` chain printed by
+    // `printCauseChain` in cli.ts via `errorToString(cause)`—could leak
+    // the plain-text password through paths that mask only the global
+    // sink (not the locally-passed `[password]` array). The registration
+    // is released as soon as the probe resolves; on success the caller
+    // typically registers the password elsewhere via the buffered cached
+    // copy used by buildSecrets.
     try {
-      await this.execPrepared("true", { silent: true, timeout: 10_000 })
+      await withRegisteredSecrets([password], async () => {
+        await this.execPrepared("true", { silent: true, timeout: 10_000 })
+      })
       this.sudoReady = true
     } catch (error) {
       const masked = maskSecrets(String(error), [password])
