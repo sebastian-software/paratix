@@ -3,6 +3,11 @@ import { isValidTcpPort } from "../serverDefinitionValidation.js"
 import { shellQuote } from "../ssh.js"
 import { type Module, type ModuleResult, NEEDS_APPLY, type SshConnection } from "../types.js"
 import { detectPackageManager, isPackageInstalled } from "./package.js"
+import {
+  hasProtocolAgnosticIpv6Rule,
+  hasProtocolAgnosticRule,
+  statusIncludesIpv6Rules,
+} from "./ufwStatus.js"
 
 const UFW = "ufw"
 
@@ -18,27 +23,6 @@ async function allowCurrentSshPort(ssh: SshConnection): Promise<ModuleResult | n
   return result.code === 0
     ? null
     : failedCommand(`[ufw.enabled] ufw allow failed for current SSH port ${String(port)}`, result)
-}
-
-function hasProtocolAgnosticRule(status: string, port: number, action: "ALLOW" | "DENY"): boolean {
-  // Match only the protocol-agnostic form `<port> ACTION`. Protocol-specific
-  // entries like `22/tcp ALLOW`, opposite actions, and similar ports must not
-  // satisfy the rule.
-  // eslint-disable-next-line security/detect-non-literal-regexp
-  return new RegExp(`^${port}\\s+${action}\\b`, "mv").test(status)
-}
-
-function hasProtocolAgnosticIpv6Rule(
-  status: string,
-  port: number,
-  action: "ALLOW" | "DENY"
-): boolean {
-  // eslint-disable-next-line security/detect-non-literal-regexp
-  return new RegExp(`^${port}\\s+\\(v6\\)\\s+${action}\\b`, "mv").test(status)
-}
-
-function statusIncludesIpv6Rules(status: string): boolean {
-  return status.includes("(v6)")
 }
 
 function ufwRuleApplyChanged(stdout: string): boolean {

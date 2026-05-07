@@ -18,6 +18,7 @@ import {
   findContradictingSshdMatchBlockOverride,
   sshdSettingMatchesEverywhere,
 } from "./sshdConfigHelpers.js"
+import { classifyUfwAccess } from "./ufwStatus.js"
 
 const DEFAULT_SSH_PORT = 22
 const PRIVILEGE_SEPARATION_DIRECTORY = "/run/sshd"
@@ -344,7 +345,26 @@ function rejectNonConvergingSshdMatchOverrides(
   )
 }
 
+function ufwBlocksPortFailure(targetPort: number): ModuleResult {
+  return failed(
+    `[sshd.port: ${String(targetPort)}] ufw is active but port ${String(targetPort)} is not ` +
+      `allowed; add 'ufw.rule("allow", ${String(targetPort)})' before sshd.port to avoid lockout`
+  )
+}
+
+async function rejectWhenUfwBlocksTargetPort(
+  ssh: SshConnection,
+  targetPort: number
+): Promise<ModuleResult | undefined> {
+  const access = await classifyUfwAccess(ssh, targetPort)
+  if (access === "blocked") return ufwBlocksPortFailure(targetPort)
+  return undefined
+}
+
 async function applySshdPort(ssh: SshConnection, targetPort: number): Promise<ModuleResult> {
+  const ufwGuard = await rejectWhenUfwBlocksTargetPort(ssh, targetPort)
+  if (ufwGuard != null) return ufwGuard
+
   const originalConfig = await ssh.readFile(SSHD_CONFIG_PATH)
   const { didChange, newContent } = buildSshdPortContent(originalConfig, targetPort)
   if (!didChange) {
@@ -469,6 +489,9 @@ export const sshd = {
     return {
       async _applyDryRun(ssh: null | SshConnection): Promise<ModuleResult> {
         if (!ssh) return failed(`[sshd.port: ${targetPort}] SSH connection is required`)
+
+        const ufwGuard = await rejectWhenUfwBlocksTargetPort(ssh, targetPort)
+        if (ufwGuard != null) return ufwGuard
 
         const originalConfig = await ssh.readFile(SSHD_CONFIG_PATH)
         const { didChange, newContent } = buildSshdPortContent(originalConfig, targetPort)
