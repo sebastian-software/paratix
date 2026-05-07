@@ -712,7 +712,12 @@ export const download = {
             if (result.status === "failed") return result
 
             await setFlag(conn, flagName)
-            return { ...result, status: "changed" }
+            // R-0000156: respect the original result.status (e.g. "ok" when
+            // performDownload skipped the download because content + metadata
+            // already matched). Always forcing "changed" would falsely
+            // re-trigger signal targets like service.restart on direct apply
+            // invocations that did no actual work.
+            return result
           },
           flagName,
           async shouldApply() {

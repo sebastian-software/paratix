@@ -1563,7 +1563,12 @@ describe("download.large", () => {
       expect(mockSsh.calls.every((c) => !c.startsWith("mktemp"))).toBe(true)
     })
 
-    it("sets flag and reports changed when fast path finds matching content and metadata", async () => {
+    // R-0000156: when performDownload returns { status: "ok" } because the
+    // existing destination already matches sha256 and metadata, apply must
+    // honor the "ok" status instead of forcing "changed". Direct apply
+    // invocations via signal targets (e.g. service.restart) would otherwise
+    // re-fire on every run even though no real change happened.
+    it("sets flag and reports ok when fast path finds matching content and metadata", async () => {
       const sha256 = "aabbccddaabbccddaabbccddaabbccddaabbccddaabbccddaabbccddaabbccdd"
       const mockSsh = createMockSsh({
         [`[ -e '${destination}' ]`]: { code: 0 },
@@ -1572,7 +1577,7 @@ describe("download.large", () => {
       })
       const mod = download.large(destination, url, { sha256 })
       const result = await mod.apply(mockSsh, emptyEnv)
-      expect(result.status).toBe("changed")
+      expect(result.status).toBe("ok")
       expect(mockSsh.calls).toContain(`touch /var/lib/paratix/flags/'${flagName}'`)
       expect(mockSsh.calls.every((c) => !c.startsWith("curl"))).toBe(true)
       expect(mockSsh.calls.every((c) => !c.startsWith("mktemp"))).toBe(true)
