@@ -1,22 +1,21 @@
-import { mkdirSync, realpathSync, writeFileSync } from "node:fs"
+import { mkdirSync, writeFileSync } from "node:fs"
 import { basename, join, resolve } from "node:path"
-import { fileURLToPath } from "node:url"
 
 import { escapeCliControlCharacters, formatCliValue } from "./cliFormat.js"
-import { deriveParatixDependencyRange } from "./dependencyRange.js"
 import {
-  promptForAdminPublicKey,
-  promptForHost,
-  promptForHostFingerprint,
-  promptForInitialUserConfig,
-} from "./interactivePrompts.js"
-import { readAdminPublicKeyFile, validateAdminPublicKey } from "./publicKeySelection.js"
+  exitWithMessage,
+  parseCliArguments,
+  parseInitialUserConfig,
+  resolveCliOrPromptAdminPublicKey,
+  resolveCliOrPromptHost,
+} from "./cliValidation.js"
+import { deriveParatixDependencyRange } from "./dependencyRange.js"
+import { isDirectExecution } from "./directExecution.js"
+import { promptForHostFingerprint, promptForInitialUserConfig } from "./interactivePrompts.js"
+import { createProjectDirectoryAtomically } from "./projectDirectory.js"
 import {
   normalizeProgrammaticScaffoldStringOptions,
-  parseCliArguments as parseScaffoldCliArguments,
   parseInitialUserConfig as parseScaffoldInitialUserConfig,
-  validateExpectedHostFingerprint as validateScaffoldExpectedHostFingerprint,
-  validateHost as validateScaffoldHost,
 } from "./scaffoldConfig.js"
 import {
   detectPackageManager,
@@ -39,7 +38,15 @@ import {
   UNATTENDED_UPGRADES_50_TEMPLATE,
 } from "./templates.js"
 
+export {
+  parseCliArguments,
+  parseInitialUserConfig,
+  resolveCliOrPromptHost,
+  validateExpectedHostFingerprint,
+  validateHost,
+} from "./cliValidation.js"
 export { deriveParatixDependencyRange } from "./dependencyRange.js"
+export { isDirectExecution } from "./directExecution.js"
 export {
   promptForAdminPublicKey,
   promptForHost,
@@ -190,28 +197,6 @@ function derivePackageName(projectDirectory: string): string {
   return basename(projectDirectory.replaceAll("\\", "/"))
 }
 
-function exitWithMessage(message: string): never {
-  console.error(escapeCliControlCharacters(message))
-  // eslint-disable-next-line node/no-process-exit
-  process.exit(1)
-}
-
-export function parseCliArguments(argv: string[]): ReturnType<typeof parseScaffoldCliArguments> {
-  return parseScaffoldCliArguments(argv, exitWithMessage)
-}
-
-export function parseInitialUserConfig(value: string): InitialUserConfig {
-  return parseScaffoldInitialUserConfig(exitWithMessage, value)
-}
-
-export function validateHost(value: string): string {
-  return validateScaffoldHost(exitWithMessage, value)
-}
-
-export function validateExpectedHostFingerprint(value: string): string {
-  return validateScaffoldExpectedHostFingerprint(exitWithMessage, value)
-}
-
 function validateProjectName(name: string | undefined): string {
   if (name == null || name === "") {
     exitWithMessage("Usage: create-paratix <project-name>")
@@ -226,25 +211,6 @@ function validateProjectName(name: string | undefined): string {
   }
 
   return normalizedName
-}
-
-function isErrnoException(error: unknown): error is NodeJS.ErrnoException {
-  return error instanceof Error && "code" in error && typeof error.code === "string"
-}
-
-function createProjectDirectoryAtomically(
-  projectDirectory: string,
-  normalizedProjectName: string
-): void {
-  try {
-    // eslint-disable-next-line security/detect-non-literal-fs-filename
-    mkdirSync(projectDirectory, { recursive: false })
-  } catch (error: unknown) {
-    if (isErrnoException(error) && error.code === "EEXIST") {
-      exitWithMessage(`Error: Directory ${formatCliValue(normalizedProjectName)} already exists.`)
-    }
-    throw error
-  }
 }
 
 export function scaffoldProject(
@@ -271,38 +237,6 @@ export function scaffoldProject(
 
   printSuccessMessage(normalizedProjectName, pm)
   return true
-}
-
-async function resolveCliOrPromptAdminPublicKey(parameters: {
-  adminPublicKey: string | undefined
-  adminPublicKeyFile: string | undefined
-  allowPlaceholder?: boolean
-}): Promise<string | undefined> {
-  const { adminPublicKey, adminPublicKeyFile, allowPlaceholder = true } = parameters
-
-  if (adminPublicKey !== undefined) {
-    return validateAdminPublicKey(exitWithMessage, adminPublicKey)
-  }
-
-  if (adminPublicKeyFile !== undefined) {
-    return readAdminPublicKeyFile(exitWithMessage, adminPublicKeyFile)
-  }
-
-  if (process.stdin.isTTY && process.stdout.isTTY) {
-    return promptForAdminPublicKey(undefined, undefined, { allowPlaceholder })
-  }
-
-  return undefined
-}
-
-export async function resolveCliOrPromptHost(
-  host: string | undefined,
-  prompt: () => Promise<string> = promptForHost
-): Promise<string> {
-  if (host !== undefined) return validateHost(host)
-  if (process.stdin.isTTY && process.stdout.isTTY) return prompt()
-
-  exitWithMessage("Missing --host in non-interactive environment. Pass --host <domain-or-ip>.")
 }
 
 function main(): void {
@@ -344,20 +278,6 @@ function main(): void {
     )
     process.exitCode = 1
   })
-}
-
-// Only run when executed directly, not when imported (e.g. in tests)
-// Exported for testing: verifies the guard is safe when argv[1] is undefined.
-export function isDirectExecution(moduleUrl: string, argv1: null | string | undefined): boolean {
-  if (argv1 == null) return false
-  try {
-    return (
-      realpathSync.native(resolve(fileURLToPath(moduleUrl))) ===
-      realpathSync.native(resolve(argv1))
-    )
-  } catch {
-    return false
-  }
 }
 
 if (isDirectExecution(import.meta.url, process.argv[1])) {

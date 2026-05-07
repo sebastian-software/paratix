@@ -67,11 +67,20 @@ describe("dist CLI", () => {
     }
     const distCliPath = resolve(packageRootDirectory, packageJson.bin.paratix)
     const distCliSource = readFileSync(distCliPath, "utf8")
-    const sshChunkImportPattern =
-      /import\s*\{[^}]*\bSshConnectionImpl\b[^}]*\}\s*from\s*"(?<specifier>[^"]+)"/s
-    const sshChunkSpecifier = sshChunkImportPattern.exec(distCliSource)?.groups?.specifier
-    expect(sshChunkSpecifier).toBeDefined()
-    const distSshChunkUrl = pathToFileURL(resolve(dirname(distCliPath), sshChunkSpecifier!)).href
+    const sshExportIndex = distCliSource.indexOf("SshConnectionImpl")
+    const importStart = distCliSource.lastIndexOf("import", sshExportIndex)
+    const importEnd = distCliSource.indexOf(";", sshExportIndex)
+    expect(importStart).toBeGreaterThanOrEqual(0)
+    expect(importEnd).toBeGreaterThan(importStart)
+    const importStatement = distCliSource.slice(importStart, importEnd)
+    const fromMarker = 'from "'
+    const specifierStart = importStatement.indexOf(fromMarker) + fromMarker.length
+    const specifierEnd = importStatement.indexOf('"', specifierStart)
+    expect(specifierStart).toBeGreaterThanOrEqual(fromMarker.length)
+    expect(specifierEnd).toBeGreaterThan(specifierStart)
+    const distSshChunkUrl = pathToFileURL(
+      resolve(dirname(distCliPath), importStatement.slice(specifierStart, specifierEnd))
+    ).href
     const tempDirectory = mkdtempSync(join(tmpdir(), "paratix-cli-apply-dist-"))
     const playbookPath = join(tempDirectory, "valid-playbook.mjs")
 

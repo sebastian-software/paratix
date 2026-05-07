@@ -182,6 +182,15 @@ async function applyAbsentSwapFile(
   return { status: swapChanged ? "changed" : "ok" }
 }
 
+async function ensureExistingSwapFileMode(
+  ssh: SshConnection,
+  options: NormalizedSwapFileOptions,
+  recreateResult: "changed" | "ok"
+): Promise<boolean | ModuleResult> {
+  if (recreateResult === "changed") return false
+  return ensureSwapFileMode(ssh, options)
+}
+
 async function applyPresentSwapFile(
   ssh: SshConnection,
   options: NormalizedSwapFileOptions
@@ -190,11 +199,9 @@ async function applyPresentSwapFile(
   const recreateResult = await recreateSwapFile(ssh, options)
   if (typeof recreateResult !== "string") return recreateResult
   if (recreateResult === "changed") swapChanged = true
-  if (recreateResult === "ok") {
-    const modeResult = await ensureSwapFileMode(ssh, options)
-    if (typeof modeResult !== "boolean") return modeResult
-    if (modeResult) swapChanged = true
-  }
+  const modeResult = await ensureExistingSwapFileMode(ssh, options, recreateResult)
+  if (typeof modeResult !== "boolean") return modeResult
+  if (modeResult) swapChanged = true
   const enableResult = await enableSwap(ssh, options.path)
   if (typeof enableResult !== "boolean") return enableResult
   if (enableResult) swapChanged = true
