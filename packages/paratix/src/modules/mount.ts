@@ -12,7 +12,7 @@ import {
   type SshConnection,
 } from "../types.js"
 import { applyMountConvergence } from "./mountConvergence.js"
-import { mountOptionsMatch } from "./mountOptions.js"
+import { liveMountOptionsMatch } from "./mountOptions.js"
 
 const EXEC_OPTS = { ignoreExitCode: true, silent: true } as const
 const FSTAB_PATH = "/etc/fstab"
@@ -317,7 +317,7 @@ function liveMountMatchesDesired(
 ): boolean {
   if (live.source !== desired.src) return false
   if (live.fstype !== desired.fstype) return false
-  return mountOptionsMatch(live.options, desired.opts)
+  return liveMountOptionsMatch(live.options, desired.opts)
 }
 
 /**

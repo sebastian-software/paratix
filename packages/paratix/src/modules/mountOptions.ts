@@ -13,6 +13,8 @@ const STRICT_OPTION_GROUPS = [
   ["user", "nouser", "users", "owner", "group"],
 ]
 
+const FSTAB_ONLY_OPTIONS = new Set(["_netdev", "nofail", "noauto"])
+
 type NormalizedMountOptions = {
   normalized: Set<string>
   raw: Set<string>
@@ -22,6 +24,20 @@ export function mountOptionsMatch(liveOptions: string, desiredOptions: string): 
   const live = normalizeMountOptions(liveOptions)
   const desired = normalizeMountOptions(desiredOptions)
 
+  return normalizedMountOptionsMatch(live, desired)
+}
+
+export function liveMountOptionsMatch(liveOptions: string, desiredOptions: string): boolean {
+  const live = normalizeMountOptions(liveOptions)
+  const desired = normalizeMountOptions(desiredOptions, { ignoreFstabOnly: true })
+
+  return normalizedMountOptionsMatch(live, desired)
+}
+
+function normalizedMountOptionsMatch(
+  live: NormalizedMountOptions,
+  desired: NormalizedMountOptions
+): boolean {
   if (!strictOptionsMatch(live.raw, desired.raw)) return false
 
   for (const option of desired.normalized) {
@@ -33,7 +49,10 @@ export function mountOptionsMatch(liveOptions: string, desiredOptions: string): 
   return true
 }
 
-function normalizeMountOptions(options: string): NormalizedMountOptions {
+function normalizeMountOptions(
+  options: string,
+  behavior: { ignoreFstabOnly?: boolean } = {}
+): NormalizedMountOptions {
   const result: NormalizedMountOptions = {
     normalized: new Set<string>(),
     raw: new Set<string>(),
@@ -44,6 +63,7 @@ function normalizeMountOptions(options: string): NormalizedMountOptions {
     if (trimmed.length === 0) continue
 
     const normalizedOption = normalizeOption(trimmed)
+    if (behavior.ignoreFstabOnly === true && isFstabOnlyOption(normalizedOption)) continue
     result.raw.add(normalizedOption)
     if (!IMPLICIT_MOUNT_OPTIONS.has(normalizedOption)) {
       result.normalized.add(normalizedOption)
@@ -51,6 +71,10 @@ function normalizeMountOptions(options: string): NormalizedMountOptions {
   }
 
   return result
+}
+
+function isFstabOnlyOption(option: string): boolean {
+  return FSTAB_ONLY_OPTIONS.has(option) || option.startsWith("x-systemd.")
 }
 
 function normalizeOption(option: string): string {

@@ -225,6 +225,23 @@ describe("mount.present — check", () => {
     expect(result).toBe("ok")
   })
 
+  it("returns ok when fstab-only options are absent from live mount options", async () => {
+    const optsWithFstabOnly = `${mountOpts},nofail,_netdev,x-systemd.requires=network-online.target`
+    const fstabOnlyLine = `${mountSrc} ${mountPath} ${mountFstype} ${optsWithFstabOnly} 0 0`
+    const mockSsh = createMockSsh({
+      "cat '/etc/fstab'": { stdout: `${fstabOnlyLine}\n` },
+      [findmntCheckCmd]: { code: 0, stdout: liveMountStdout },
+    })
+    const mod = mount.present({
+      fstype: mountFstype,
+      opts: optsWithFstabOnly,
+      path: mountPath,
+      src: mountSrc,
+    })
+    const result = await mod.check(mockSsh, emptyEnv)
+    expect(result).toBe("ok")
+  })
+
   it("returns needs-apply when mounted but fstab entry differs", async () => {
     const mockSsh = createMockSsh({
       "cat '/etc/fstab'": { stdout: `${mountSrc} ${mountPath} ${mountFstype} defaults 0 0\n` },
