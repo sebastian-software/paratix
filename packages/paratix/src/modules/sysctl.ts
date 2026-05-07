@@ -1,3 +1,5 @@
+import { createHash } from "node:crypto"
+
 import { failed, failedCommand } from "../moduleFailure.js"
 import { shellQuote } from "../ssh.js"
 import { type Module, type ModuleResult, NEEDS_APPLY, type SshConnection } from "../types.js"
@@ -5,6 +7,7 @@ import { type Module, type ModuleResult, NEEDS_APPLY, type SshConnection } from 
 const EXEC_OPTS = { ignoreExitCode: true, silent: true } as const
 const SYSCTL_DIR = "/etc/sysctl.d"
 const SYSCTL_CONFIG_MODE = "0644"
+const SYSCTL_KEY_HASH_LENGTH = 12
 const SYSCTL_KEY_PATTERN = /^\w[\w.\-]*$/iv
 
 /**
@@ -17,6 +20,10 @@ const SYSCTL_KEY_PATTERN = /^\w[\w.\-]*$/iv
  */
 function sanitizeKey(key: string): string {
   return key.replaceAll(".", "-")
+}
+
+function keyHash(key: string): string {
+  return createHash("sha256").update(key).digest("hex").slice(0, SYSCTL_KEY_HASH_LENGTH)
 }
 
 /**
@@ -108,8 +115,8 @@ export const sysctl = {
    * Set a sysctl kernel parameter and persist it across reboots.
    *
    * The live value is applied immediately via `sysctl -w` and a configuration
-   * file is written to `/etc/sysctl.d/99-paratix-<sanitized-key>.conf` for
-   * persistence.
+   * file is written to `/etc/sysctl.d/99-paratix-<sanitized-key>-<hash>.conf`
+   * for persistence.
    *
    * When `state` is `"absent"`, the persistence file is removed but the live
    * value is not reverted (a reboot will restore the default).
@@ -124,7 +131,7 @@ export const sysctl = {
     validateKey(key)
     validateValue(value)
     const state = options?.state ?? "present"
-    const configPath = `${SYSCTL_DIR}/99-paratix-${sanitizeKey(key)}.conf`
+    const configPath = `${SYSCTL_DIR}/99-paratix-${sanitizeKey(key)}-${keyHash(key)}.conf`
     const expectedContent = buildSysctlConfig(key, value)
 
     return {

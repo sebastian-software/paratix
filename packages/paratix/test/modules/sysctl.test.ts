@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto"
 import { describe, expect, it, vi } from "vitest"
 
 import { sysctl } from "../../src/modules/sysctl.js"
@@ -16,8 +17,14 @@ const createMockSsh: typeof createBaseMockSsh = (responses, options) =>
 
 const KEY = "net.ipv4.ip_forward"
 const VALUE = "1"
-const CONF_PATH = "/etc/sysctl.d/99-paratix-net-ipv4-ip_forward.conf"
+const CONF_PATH = configPathForKey(KEY)
 const CONF_CONTENT = "net.ipv4.ip_forward = 1\n"
+
+function configPathForKey(key: string): string {
+  const sanitizedKey = key.replaceAll(".", "-")
+  const hash = createHash("sha256").update(key).digest("hex").slice(0, 12)
+  return `/etc/sysctl.d/99-paratix-${sanitizedKey}-${hash}.conf`
+}
 
 // ─── sysctl.set — check ───────────────────────────────────────────────────────
 
@@ -148,6 +155,31 @@ describe("sysctl.set — apply", () => {
     const result = await mod.apply(mockSsh, emptyEnv)
     expect(result.status).toBe("failed")
     expect(String(result.error)).toContain("failed to remove config file")
+  })
+})
+
+describe("sysctl.set — config path", () => {
+  it("uses distinct persistence paths for keys that differ only by dot and hyphen", async () => {
+    const dottedKey = "net.ipv4.test-key"
+    const hyphenatedKey = "net-ipv4.test-key"
+    const dottedPath = configPathForKey(dottedKey)
+    const hyphenatedPath = configPathForKey(hyphenatedKey)
+    const mockSsh = createMockSsh({
+      [`sysctl -w '${dottedKey}=1'`]: { code: 0 },
+      [`sysctl -w '${hyphenatedKey}=1'`]: { code: 0 },
+    })
+    const writeFileSpy = vi.spyOn(mockSsh, "writeFile")
+
+    await sysctl.set(dottedKey, "1").apply(mockSsh, emptyEnv)
+    await sysctl.set(hyphenatedKey, "1").apply(mockSsh, emptyEnv)
+
+    expect(dottedPath).not.toBe(hyphenatedPath)
+    expect(writeFileSpy).toHaveBeenCalledWith(dottedPath, `${dottedKey} = 1\n`, {
+      mode: "0644",
+    })
+    expect(writeFileSpy).toHaveBeenCalledWith(hyphenatedPath, `${hyphenatedKey} = 1\n`, {
+      mode: "0644",
+    })
   })
 })
 
