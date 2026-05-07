@@ -1,4 +1,4 @@
-import { lstatSync, readdirSync, readFileSync } from "node:fs"
+import { readdirSync, readFileSync, statSync } from "node:fs"
 import { homedir } from "node:os"
 import { basename, join, resolve } from "node:path"
 
@@ -217,10 +217,14 @@ export function readAdminPublicKeyFile(exitWithMessage: ExitWithMessage, path: s
     throw new Error(`Error: Failed to read admin public key file.`)
   }
 
+  // R-0000186: statSync follows symbolic links so that legitimate operator
+  // setups (e.g. ~/.ssh/id_ed25519.pub linked into a password-manager vault)
+  // are accepted. The downstream readFileSync also follows the link, so the
+  // size and isFile() guards remain meaningful for the eventual file.
   const stat = (() => {
     try {
       // eslint-disable-next-line security/detect-non-literal-fs-filename
-      return lstatSync(resolvedPath)
+      return statSync(resolvedPath)
     } catch {
       return failWithReadError()
     }
@@ -252,8 +256,10 @@ export function discoverLocalPublicKeys(sshDirectory = join(homedir(), ".ssh")):
         const path = join(sshDirectory, entry)
 
         try {
+          // R-0000186: follow symlinks so ~/.ssh/*.pub entries that point to
+          // a password-manager vault (or similar) are still discovered.
           // eslint-disable-next-line security/detect-non-literal-fs-filename
-          const stat = lstatSync(path)
+          const stat = statSync(path)
           if (!stat.isFile() || stat.size > MAX_PUBLIC_KEY_FILE_BYTES) {
             return []
           }

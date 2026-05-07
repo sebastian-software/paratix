@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs"
+import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
@@ -658,6 +658,42 @@ describe("admin public key validation", () => {
     }).toThrow("Error: Failed to read admin public key file.")
 
     expect(exitMessages[0]).toBe("Error: Failed to read admin public key file.")
+  })
+
+  // R-0000186: legitimate operator setups symlink ~/.ssh/*.pub into a
+  // password-manager vault. statSync follows the link so the file is still
+  // accepted by readAdminPublicKeyFile / discoverLocalPublicKeys.
+  it("accepts a public key file reached through a symbolic link", () => {
+    mkdirSync(TEST_DIR, { recursive: true })
+    const publicKey = createEd25519PublicKey("user@example")
+    const targetFile = join(TEST_DIR, "real-admin.pub")
+    const linkFile = join(TEST_DIR, "linked-admin.pub")
+    writeFileSync(targetFile, `${publicKey}\n`)
+    symlinkSync(targetFile, linkFile)
+
+    expect(readAdminPublicKeyFile(throwExitError, linkFile)).toBe(publicKey)
+  })
+
+  it("discovers public keys reached through a symbolic link in ~/.ssh", () => {
+    mkdirSync(TEST_DIR, { recursive: true })
+    const realDir = join(TEST_DIR, "real")
+    const sshDir = join(TEST_DIR, "ssh")
+    mkdirSync(realDir, { recursive: true })
+    mkdirSync(sshDir, { recursive: true })
+
+    const publicKey = createEd25519PublicKey("user@example")
+    const targetFile = join(realDir, "id_ed25519.pub")
+    const linkFile = join(sshDir, "id_ed25519.pub")
+    writeFileSync(targetFile, `${publicKey}\n`)
+    symlinkSync(targetFile, linkFile)
+
+    expect(discoverLocalPublicKeys(sshDir)).toStrictEqual([
+      {
+        key: publicKey,
+        label: "id_ed25519.pub",
+        path: linkFile,
+      },
+    ])
   })
 
   it("omits discovered local public keys with embedded carriage returns", () => {
