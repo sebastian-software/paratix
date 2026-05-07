@@ -1,4 +1,4 @@
-import { mkdirSync, writeFileSync } from "node:fs"
+import { mkdirSync, realpathSync, writeFileSync } from "node:fs"
 import { basename, join, resolve } from "node:path"
 import { fileURLToPath } from "node:url"
 
@@ -351,7 +351,10 @@ function main(): void {
 export function isDirectExecution(moduleUrl: string, argv1: null | string | undefined): boolean {
   if (argv1 == null) return false
   try {
-    return resolve(fileURLToPath(moduleUrl)) === resolve(argv1)
+    return (
+      realpathSync.native(resolve(fileURLToPath(moduleUrl))) ===
+      realpathSync.native(resolve(argv1))
+    )
   } catch {
     return false
   }

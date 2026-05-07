@@ -1,6 +1,7 @@
 import { spawnSync } from "node:child_process"
-import { readFileSync } from "node:fs"
-import { resolve } from "node:path"
+import { mkdtempSync, readFileSync, rmSync, symlinkSync } from "node:fs"
+import { join, resolve } from "node:path"
+import { tmpdir } from "node:os"
 import { describe, expect, it } from "vitest"
 
 const packageRootDirectory = resolve(import.meta.dirname, "../..")
@@ -29,5 +30,32 @@ describe("dist CLI", () => {
     expect(result.status).toBe(1)
     expect(result.stdout).toBe("")
     expect(result.stderr).toContain("Usage: create-paratix <project-name>")
+  })
+
+  it("runs when invoked through an npm-style bin symlink", () => {
+    const packageJson = JSON.parse(
+      readFileSync(resolve(packageRootDirectory, "package.json"), "utf8")
+    ) as {
+      bin: { "create-paratix": string }
+    }
+    const distCliPath = resolve(packageRootDirectory, packageJson.bin["create-paratix"])
+    const tempDirectory = mkdtempSync(join(tmpdir(), "create-paratix-bin-smoke-"))
+    const linkedCliPath = join(tempDirectory, "create-paratix")
+
+    try {
+      symlinkSync(distCliPath, linkedCliPath)
+      const result = spawnSync(linkedCliPath, [], {
+        cwd: packageRootDirectory,
+        encoding: "utf8",
+        killSignal: "SIGTERM",
+        timeout: CLI_COMMAND_TIMEOUT_MS,
+      })
+
+      expect(result.status).toBe(1)
+      expect(result.stdout).toBe("")
+      expect(result.stderr).toContain("Usage: create-paratix <project-name>")
+    } finally {
+      rmSync(tempDirectory, { force: true, recursive: true })
+    }
   })
 })
