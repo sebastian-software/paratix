@@ -8,13 +8,13 @@ import { failed } from "../moduleFailure.js"
 import { shellQuote } from "../ssh.js"
 import { CommandError } from "../sshHelpers.js"
 import { type Module, type ModuleResult, NEEDS_APPLY, type SshConnection } from "../types.js"
+import { validateRsyncPath, validateStrictHostKeyChecking } from "./rsyncValidation.js"
 
 type RsyncPhase = "apply" | "check"
 const DEFAULT_SSH_PORT = 22
 const BYTES_PER_KIB = 1024
 const RSYNC_OUTPUT_CAPTURE_LIMIT_KIB = 64
 const RSYNC_OUTPUT_CAPTURE_LIMIT = RSYNC_OUTPUT_CAPTURE_LIMIT_KIB * BYTES_PER_KIB
-const STRICT_HOST_KEY_CHECKING_VALUES = new Set(["accept-new", "no", "off", "yes"])
 
 type SyncOptions = {
   /** Permission mode applied via `--chmod`, e.g. `"Du=rwx,go=rx,Fu=rw,go=r"`. */
@@ -41,15 +41,6 @@ type SyncOptions = {
    * (not recommended for production).
    */
   strictHostKeyChecking?: "accept-new" | "no" | "off" | "yes"
-}
-
-function validateStrictHostKeyChecking(value: unknown): void {
-  if (value == null) return
-  if (typeof value === "string" && STRICT_HOST_KEY_CHECKING_VALUES.has(value)) return
-
-  throw new Error(
-    '[rsync.sync] strictHostKeyChecking must be one of "accept-new", "no", "off", or "yes"'
-  )
 }
 
 /**
@@ -416,6 +407,8 @@ export const rsync = {
    */
   sync(options: SyncOptions): Module {
     validateStrictHostKeyChecking(options.strictHostKeyChecking)
+    validateRsyncPath(options.src, "src")
+    validateRsyncPath(options.dest, "dest")
 
     return {
       async apply(ssh: null | SshConnection): Promise<ModuleResult> {

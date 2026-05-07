@@ -350,6 +350,38 @@ describe("rsync.sync — name", () => {
   })
 })
 
+describe("rsync.sync — path validation", () => {
+  it("R-0000179: rejects newline characters in dest", () => {
+    expect(() => {
+      rsync.sync({ dest: "/remote/dest\nbreak", src: "/local/src" })
+    }).toThrow(/dest must not contain ASCII control characters/v)
+  })
+
+  it("R-0000179: rejects newline characters in src", () => {
+    expect(() => {
+      rsync.sync({ dest: "/remote/dest", src: "/local/src\nbreak" })
+    }).toThrow(/src must not contain ASCII control characters/v)
+  })
+
+  it("R-0000179: rejects NUL byte in dest", () => {
+    expect(() => {
+      rsync.sync({ dest: "/remote/dest nul", src: "/local/src" })
+    }).toThrow(/dest must not contain ASCII control characters/v)
+  })
+
+  it("R-0000179: rejects DEL byte in src", () => {
+    expect(() => {
+      rsync.sync({ dest: "/remote/dest", src: "/local/src" })
+    }).toThrow(/src must not contain ASCII control characters/v)
+  })
+
+  it("R-0000179: rejects empty dest", () => {
+    expect(() => {
+      rsync.sync({ dest: "", src: "/local/src" })
+    }).toThrow(/dest must not be empty/v)
+  })
+})
+
 // ---------------------------------------------------------------------------
 // Argument building
 // ---------------------------------------------------------------------------
