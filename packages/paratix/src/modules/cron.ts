@@ -56,12 +56,18 @@ async function writeCrontab(input: WriteCrontabArguments): Promise<ModuleResult 
     })
     return result.code === 0 ? null : failedCommand(failureMessage, result)
   }
+  // R-0000157: install non-empty crontabs with ignoreExitCode so invalid
+  // crontab syntax, missing target users or permission-denied errors surface
+  // as a failedCommand result with maskable stdout/stderr instead of
+  // bubbling up as an uncaught CommandError exception that escapes the
+  // module's failure-handling contract.
   const content = `${lines.join("\n")}\n`
-  await ssh.exec(`crontab -u ${shellQuote(user)} -`, {
+  const result = await ssh.exec(`crontab -u ${shellQuote(user)} -`, {
+    ignoreExitCode: true,
     input: content,
     silent: true,
   })
-  return null
+  return result.code === 0 ? null : failedCommand(failureMessage, result)
 }
 
 /**

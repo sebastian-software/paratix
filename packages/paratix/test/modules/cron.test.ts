@@ -174,7 +174,10 @@ describe("cron.job", () => {
     expect(findCrontabWriteCall(mockSsh)).toBeUndefined()
   })
 
-  it("apply rejects when installing a present crontab fails", async () => {
+  it("apply returns failed when installing a present crontab fails", async () => {
+    // R-0000157: crontab install errors (invalid syntax, permission denied,
+    // missing user) must surface as a failedCommand result with masked
+    // stdout/stderr instead of an uncaught CommandError exception.
     const mockSsh = createMockSsh(
       {
         "crontab -u 'alice' -l": {
@@ -183,19 +186,52 @@ describe("cron.job", () => {
         },
       },
       {
-        rejectNonZeroExit: true,
         responseStubs: [crontabWriteFailureStub],
       }
     )
     const mod = cron.job("alice", "backup", { job: "0 3 * * * /backup.sh" })
 
-    await expect(mod.apply(mockSsh, emptyEnv)).rejects.toThrow(/install failed/v)
+    const result = await mod.apply(mockSsh, emptyEnv)
+    expect(result.status).toBe("failed")
+    expect(result.error?.message).toContain(
+      "[cron.job: backup (alice)] crontab removal failed (exit code 1)"
+    )
+    expect(result.error?.message).toContain("install failed")
     const writeCall = findCrontabWriteCall(mockSsh)
     expect(writeCall).toBeDefined()
     expect(writeCall?.command).toBe("crontab -u 'alice' -")
+    expect(writeCall?.options?.ignoreExitCode).toBe(true)
     expect(writeCall?.options?.input).toContain("0 5 * * * /other.sh")
     expect(writeCall?.options?.input).toContain("# paratix: backup")
     expect(writeCall?.options?.input).toContain("0 3 * * * /backup.sh")
+  })
+
+  it("apply returns failed when crontab rejects invalid syntax (state: present)", async () => {
+    // R-0000157: simulate `crontab -u alice -` rejecting an invalid crontab
+    // (e.g. syntax error). The module must report failed with the stderr
+    // surfaced through the failedCommand path, not throw.
+    const mockSsh = createMockSsh(
+      {
+        "crontab -u 'alice' -l": {
+          code: 0,
+          stdout: "0 5 * * * /other.sh\n",
+        },
+      },
+      {
+        responseStubs: [
+          {
+            command: "crontab -u 'alice' -",
+            result: { code: 1, stderr: 'errors in crontab file, can\'t install.\n"-":1: bad minute\n' },
+          },
+        ],
+      }
+    )
+    const mod = cron.job("alice", "backup", { job: "0 3 * * * /backup.sh" })
+
+    const result = await mod.apply(mockSsh, emptyEnv)
+    expect(result.status).toBe("failed")
+    expect(result.error?.message).toContain("crontab removal failed (exit code 1)")
+    expect(result.error?.message).toContain("errors in crontab file")
   })
 
   it("apply appends marker and job to existing crontab with other entries (state: present)", async () => {
@@ -323,7 +359,10 @@ describe("cron.job", () => {
     expect(result.error?.message).toContain("permission denied")
   })
 
-  it("apply rejects when installing a non-empty absent crontab fails", async () => {
+  it("apply returns failed when installing a non-empty absent crontab fails", async () => {
+    // R-0000157: crontab install errors must surface as failedCommand even
+    // on the absent path so callers see a maskable failure result instead
+    // of an uncaught exception.
     const mockSsh = createMockSsh(
       {
         "crontab -u 'alice' -l": {
@@ -332,16 +371,18 @@ describe("cron.job", () => {
         },
       },
       {
-        rejectNonZeroExit: true,
         responseStubs: [crontabWriteFailureStub],
       }
     )
     const mod = cron.job("alice", "backup", { job: "0 3 * * * /backup.sh", state: "absent" })
 
-    await expect(mod.apply(mockSsh, emptyEnv)).rejects.toThrow(/install failed/v)
+    const result = await mod.apply(mockSsh, emptyEnv)
+    expect(result.status).toBe("failed")
+    expect(result.error?.message).toContain("install failed")
     const writeCall = findCrontabWriteCall(mockSsh)
     expect(writeCall).toBeDefined()
     expect(writeCall?.command).toBe("crontab -u 'alice' -")
+    expect(writeCall?.options?.ignoreExitCode).toBe(true)
     expect(writeCall?.options?.input).toContain("0 5 * * * /other.sh")
     expect(writeCall?.options?.input).not.toContain("# paratix: backup")
     expect(writeCall?.options?.input).not.toContain("0 3 * * * /backup.sh")
