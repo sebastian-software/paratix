@@ -45,7 +45,7 @@ async function restoreFileSnapshot(
 
 async function restoreUnitFileSnapshots(
   ssh: SshConnection,
-  paths: TimerPaths,
+  paths: Pick<TimerPaths, "servicePath" | "timerPath">,
   snapshots: { service?: FileSnapshot; timer?: FileSnapshot }
 ): Promise<void> {
   if (snapshots.service != null)
@@ -275,6 +275,34 @@ async function disableTimerForAbsent(
   return failedCommand(`[${module}: ${name}] systemctl disable --now failed`, disable)
 }
 
+async function removeAbsentUnitFiles(
+  ssh: SshConnection,
+  context: AbsentContext,
+  existing: { service: boolean; timer: boolean }
+): Promise<ModuleResult | null> {
+  const { locations, module, name } = context
+  const snapshots = {
+    service: existing.service ? await readFileSnapshot(ssh, locations.servicePath) : undefined,
+    timer: existing.timer ? await readFileSnapshot(ssh, locations.timerPath) : undefined,
+  }
+  if (existing.service || existing.timer) {
+    const remove = await ssh.exec(
+      `rm -f ${shellQuote(locations.timerPath)} ${shellQuote(locations.servicePath)}`,
+      { ignoreExitCode: true, silent: true }
+    )
+    if (remove.code !== 0) {
+      return failedCommand(`[${module}: ${name}] failed to remove unit files`, remove)
+    }
+  }
+  const reload = await ssh.exec(`${SYSTEMCTL} daemon-reload`, {
+    ignoreExitCode: true,
+    silent: true,
+  })
+  if (reload.code === 0) return null
+  await restoreUnitFileSnapshots(ssh, locations, snapshots)
+  return failedCommand(`[${module}: ${name}] systemctl daemon-reload failed`, reload)
+}
+
 async function applyAbsent(ssh: SshConnection, context: AbsentContext): Promise<ModuleResult> {
   const { locations, module, name } = context
 
@@ -288,23 +316,11 @@ async function applyAbsent(ssh: SshConnection, context: AbsentContext): Promise<
   const disableFailure = await disableTimerForAbsent(ssh, context)
   if (disableFailure) return disableFailure
 
-  if (serviceExists || timerExists) {
-    const remove = await ssh.exec(
-      `rm -f ${shellQuote(locations.timerPath)} ${shellQuote(locations.servicePath)}`,
-      { ignoreExitCode: true, silent: true }
-    )
-    if (remove.code !== 0) {
-      return failedCommand(`[${module}: ${name}] failed to remove unit files`, remove)
-    }
-  }
-
-  const reload = await ssh.exec(`${SYSTEMCTL} daemon-reload`, {
-    ignoreExitCode: true,
-    silent: true,
+  const removeFailure = await removeAbsentUnitFiles(ssh, context, {
+    service: serviceExists,
+    timer: timerExists,
   })
-  if (reload.code !== 0) {
-    return failedCommand(`[${module}: ${name}] systemctl daemon-reload failed`, reload)
-  }
+  if (removeFailure) return removeFailure
   return { status: "changed" }
 }
 

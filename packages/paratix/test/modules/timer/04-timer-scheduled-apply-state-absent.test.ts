@@ -52,6 +52,9 @@ const expectedServiceContent =
 const expectedTimerContent =
   "[Unit]\nDescription=Paratix scheduled task: backup (timer)\n\n[Timer]\nOnCalendar=*-*-* 03:00:00\nPersistent=true\nUnit=backup.service\n\n[Install]\nWantedBy=timers.target\n"
 
+const existingServiceContent = "[Unit]\nDescription=old backup service\n"
+const existingTimerContent = "[Timer]\nOnCalendar=hourly\n"
+
 const presentApplyFromMissingUnitsResponses = {
   [`[ -e '${SERVICE_PATH}' ]`]: { code: 1 },
   [`[ -e '${TIMER_PATH}' ]`]: { code: 1 },
@@ -63,6 +66,8 @@ const presentApplyFromMissingUnitsResponses = {
 const absentApplyWithExistingUnitsResponses = {
   [`[ -e '${SERVICE_PATH}' ]`]: { code: 0 },
   [`[ -e '${TIMER_PATH}' ]`]: { code: 0 },
+  [`cat '${SERVICE_PATH}'`]: { stdout: existingServiceContent },
+  [`cat '${TIMER_PATH}'`]: { stdout: existingTimerContent },
   [`rm -f '${TIMER_PATH}' '${SERVICE_PATH}'`]: { code: 0 },
   "systemctl daemon-reload": { code: 0 },
   "systemctl disable --now -- 'backup.timer'": { code: 0 },
