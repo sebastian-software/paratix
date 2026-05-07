@@ -128,9 +128,7 @@ function readMarkerDigest(markerLine: string): null | string {
 function findMarkerIndex(lines: string[], name: string): number {
   const legacyMarker = `${MARKER_PREFIX}${name}`
   const taggedPrefix = `${legacyMarker}${MARKER_HASH_TAG}`
-  return lines.findIndex(
-    (line) => line === legacyMarker || line.startsWith(taggedPrefix)
-  )
+  return lines.findIndex((line) => line === legacyMarker || line.startsWith(taggedPrefix))
 }
 
 /**

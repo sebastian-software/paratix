@@ -254,7 +254,10 @@ describe("cron.job", () => {
         responseStubs: [
           {
             command: "crontab -u 'alice' -",
-            result: { code: 1, stderr: 'errors in crontab file, can\'t install.\n"-":1: bad minute\n' },
+            result: {
+              code: 1,
+              stderr: 'errors in crontab file, can\'t install.\n"-":1: bad minute\n',
+            },
           },
         ],
       }

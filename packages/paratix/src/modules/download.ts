@@ -538,10 +538,7 @@ function unverifiedHashMarkerPath(destination: string): string {
  * @param conn - The active SSH connection.
  * @param destination - The download destination path.
  */
-async function writeUnverifiedHashMarker(
-  conn: SshConnection,
-  destination: string
-): Promise<void> {
+async function writeUnverifiedHashMarker(conn: SshConnection, destination: string): Promise<void> {
   const hash = await conn.sha256(destination)
   if (hash == null || hash.length === 0) return
   const markerPath = unverifiedHashMarkerPath(destination)

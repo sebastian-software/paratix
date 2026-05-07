@@ -35,8 +35,7 @@ const successfulSshApplyOptions: MockSshOptions = {
       result: { code: 0 },
     },
     {
-      command:
-        /^chmod 600 '[^']+\/\.ssh\/\.paratix-authorized-keys\.[^']+' && chown /v,
+      command: /^chmod 600 '[^']+\/\.ssh\/\.paratix-authorized-keys\.[^']+' && chown /v,
       result: { code: 0 },
     },
     {

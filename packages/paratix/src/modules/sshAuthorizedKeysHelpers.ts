@@ -81,11 +81,7 @@ async function createAuthorizedKeysTemporaryPath(
 ): Promise<string> {
   const template = `${sshDirectoryPath}/${AUTHORIZED_KEYS_TEMPORARY_PREFIX}.XXXXXX`
   const temporaryPath = await conn.output(`mktemp ${shellQuote(template)}`)
-  return validateMktempPath(
-    sshDirectoryPath,
-    temporaryPath,
-    AUTHORIZED_KEYS_TEMPORARY_PREFIX
-  )
+  return validateMktempPath(sshDirectoryPath, temporaryPath, AUTHORIZED_KEYS_TEMPORARY_PREFIX)
 }
 
 async function ensureAuthorizedKeysIsNotSymlink(
