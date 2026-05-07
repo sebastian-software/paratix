@@ -209,6 +209,29 @@ describe("net.interface — check", () => {
     expect(result).toBe("needs-apply")
   })
 
+  it("returns needs-apply when the live address only contains the expected CIDR as a substring", async () => {
+    const expectedConfig = [
+      "[Match]",
+      "Name=eth0",
+      "",
+      "[Network]",
+      "DHCP=no",
+      "Address=10.0.0.1/24",
+    ].join("\n")
+    const mockSsh = createMockSsh({
+      "cat '/etc/systemd/network/60-paratix-eth0.network'": { stdout: `${expectedConfig}\n` },
+      "ip -o addr show dev 'eth0'": {
+        stdout: "2: eth0    inet 110.0.0.1/24 brd 110.0.0.255 scope global eth0\n",
+      },
+      "ip link show dev 'eth0'": { code: 0 },
+      "test -d '/etc/netplan'": { code: 1 },
+      "test -f '/etc/systemd/network/60-paratix-eth0.network'": { code: 0 },
+    })
+    const mod = net.interface("eth0", { addresses: ["10.0.0.1/24"] })
+    const result = await mod.check(mockSsh, emptyEnv)
+    expect(result).toBe("needs-apply")
+  })
+
   it("returns needs-apply when Netplan config does not exist", async () => {
     const mockSsh = createMockSsh({
       "test -d '/etc/netplan'": { code: 0 },

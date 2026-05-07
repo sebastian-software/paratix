@@ -516,10 +516,24 @@ async function interfaceAddressesMatch(
   if ((expected?.length ?? 0) === 0) return true
   const addresses = await conn.exec(`ip -o addr show dev ${shellQuote(name)}`, EXEC_OPTS)
   if (addresses.code !== 0) return false
+  const liveAddresses = parseInterfaceAddressTokens(addresses.stdout)
   for (const address of expected ?? []) {
-    if (!addresses.stdout.includes(address)) return false
+    if (!liveAddresses.has(address)) return false
   }
   return true
+}
+
+function parseInterfaceAddressTokens(output: string): Set<string> {
+  const result = new Set<string>()
+  for (const line of output.split(/\r?\n/v)) {
+    const tokens = line.trim().split(/\s+/v)
+    for (const family of ["inet", "inet6"]) {
+      const familyIndex = tokens.indexOf(family)
+      const address = tokens[familyIndex + 1]
+      if (familyIndex !== -1 && address != null) result.add(address)
+    }
+  }
+  return result
 }
 
 async function interfaceGatewayMatches(
