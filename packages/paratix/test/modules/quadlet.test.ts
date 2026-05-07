@@ -84,6 +84,25 @@ function createSuccessfulApplySsh() {
   )
 }
 
+function overrideExecForCommand(
+  ssh: ReturnType<typeof createMockSsh>,
+  command: string,
+  stdouts: string[]
+): void {
+  const originalExec = ssh.exec.bind(ssh)
+  let callIndex = 0
+  vi.spyOn(ssh, "exec").mockImplementation(async (target, options) => {
+    const matches = target === command
+    const next = matches ? Math.min(callIndex, stdouts.length - 1) : -1
+    if (matches) {
+      callIndex += 1
+      await Promise.resolve()
+      return { code: 0, stderr: "", stdout: stdouts[next] ?? "" }
+    }
+    return originalExec(target, options)
+  })
+}
+
 describe("quadlet.container", () => {
   it("check returns ok when the remote quadlet matches", async () => {
     const ssh = createMockSsh({
@@ -682,7 +701,12 @@ describe("quadlet.updateImage", () => {
   })
 
   it("returns ok and skips restart when the image is already up to date", async () => {
+    // R-0000183: pre-pull and post-pull inspects must return identical IDs
+    // for the "no change" branch.
+    const inspectStdout = "sha256:stable-local-id\ndocker.io/library/traefik@sha256:stable-digest\n"
     const ssh = createMockSsh({
+      "podman image inspect --format '{{.Id}}\\n{{range .RepoDigests}}{{.}}\\n{{end}}' -- 'docker.io/library/traefik:v3.3'":
+        { code: 0, stdout: inspectStdout },
       "podman pull -- 'docker.io/library/traefik:v3.3' 2>&1": {
         code: 0,
         stdout: "Image is up to date",
@@ -698,6 +722,36 @@ describe("quadlet.updateImage", () => {
 
     expect(result.status).toBe("ok")
     expect(ssh.calls).not.toContain("systemctl restart -- 'traefik'")
+  })
+
+  it("R-0000183: detects change when image ID differs even if pull output is non-English", async () => {
+    // Simulate a localised podman that prints German strings: the previous
+    // English-only heuristic would miss the change. The fixed implementation
+    // still detects it because the local image ID changed.
+    const inspectCommand =
+      "podman image inspect --format '{{.Id}}\\n{{range .RepoDigests}}{{.}}\\n{{end}}' -- 'docker.io/library/traefik:v3.3'"
+    const inspectStdouts = [
+      "sha256:old-local-id\ndocker.io/library/traefik@sha256:old-digest\n",
+      "sha256:new-local-id\ndocker.io/library/traefik@sha256:new-digest\n",
+    ]
+    const ssh = createMockSsh({
+      "podman pull -- 'docker.io/library/traefik:v3.3' 2>&1": {
+        code: 0,
+        stdout: "Lade BLOB sha256:abc\nManifest wird gespeichert\n",
+      },
+      "systemctl restart -- 'traefik'": { code: 0 },
+    })
+    overrideExecForCommand(ssh, inspectCommand, inspectStdouts)
+
+    const result = await quadlet
+      .updateImage({
+        image: "docker.io/library/traefik:v3.3",
+        name: "traefik",
+      })
+      .apply(ssh, emptyEnv)
+
+    expect(result.status).toBe("changed")
+    expect(ssh.calls).toContain("systemctl restart -- 'traefik'")
   })
 
   it("passes authFile to podman pull for private registries", async () => {
@@ -867,6 +921,8 @@ describe("quadlet.updateImage", () => {
 
   it("returns failed when podman pull exits non-zero", async () => {
     const ssh = createMockSsh({
+      "podman image inspect --format '{{.Id}}\\n{{range .RepoDigests}}{{.}}\\n{{end}}' -- 'docker.io/library/traefik:v3.3'":
+        { code: 1, stderr: "no such image" },
       "podman pull -- 'docker.io/library/traefik:v3.3' 2>&1": {
         code: 125,
         stderr: "pull failed",
@@ -888,12 +944,8 @@ describe("quadlet.updateImage", () => {
       "podman image inspect --format '{{.Id}}\\n{{range .RepoDigests}}{{.}}\\n{{end}}' -- 'docker.io/library/traefik:v3.3'":
         {
           code: 0,
-          stdout: JSON.stringify([
-            {
-              Id: "sha256:restart-local-id",
-              RepoDigests: ["docker.io/library/traefik@sha256:restart-registry-digest"],
-            },
-          ]),
+          stdout:
+            "sha256:restart-local-id\ndocker.io/library/traefik@sha256:restart-registry-digest\n",
         },
       "podman pull -- 'docker.io/library/traefik:v3.3' 2>&1": {
         code: 0,

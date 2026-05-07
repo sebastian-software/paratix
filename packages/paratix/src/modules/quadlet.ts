@@ -229,9 +229,29 @@ async function restartQuadletService(parameters: {
       )
 }
 
+async function inspectQuadletImageIdBeforePull(
+  parameters: QuadletImageUpdateParameters
+): Promise<null | string> {
+  // Pre-pull lookup: if the image is not present locally, the inspect call
+  // exits non-zero. Treat that as "no previous ID" and rely on the post-pull
+  // inspect to materialise an ID. Uses the same identifier selection as
+  // {@link inspectQuadletImageId} (digest preferred, image ID fallback) so a
+  // direct comparison against the post-pull result is meaningful.
+  const result = await parameters.ssh.exec(parameters.inspectCommand, {
+    ignoreExitCode: true,
+    silent: true,
+  })
+  if (result.code !== 0) return null
+  return readQuadletImageIdentifierFromInspectOutput(parameters.image, result.stdout)
+}
+
 async function applyQuadletImageUpdate(
   parameters: QuadletImageUpdateParameters
 ): Promise<ModuleResult> {
+  // R-0000183: capture the local image ID before pulling so we can detect a
+  // changed image regardless of podman's locale-dependent stdout strings.
+  const previousImageId = await inspectQuadletImageIdBeforePull(parameters)
+
   const pullResult = await parameters.ssh.exec(parameters.pullCommand, {
     ignoreExitCode: true,
     silent: true,
@@ -240,12 +260,19 @@ async function applyQuadletImageUpdate(
     return failedCommand(`[quadlet.updateImage: ${parameters.name}] podman pull failed`, pullResult)
   }
 
-  if (!quadletPullOutputIndicatesChange(pullResult.stdout)) {
-    return { status: "ok" }
-  }
-
   const imageId = await inspectQuadletImageId(parameters)
   if (typeof imageId !== "string") return imageId
+
+  // Either: the image was missing entirely before (previousImageId === null)
+  // — pull always changes the local state — or the post-pull ID differs from
+  // the pre-pull ID. Falling back to the legacy output heuristic on a tie
+  // catches the (rare) case where the inspect output cannot be compared but
+  // the pull output indicates a transfer happened.
+  const idChanged =
+    previousImageId == null ||
+    previousImageId !== imageId ||
+    quadletPullOutputIndicatesChange(pullResult.stdout)
+  if (!idChanged) return { status: "ok" }
 
   return restartQuadletService({
     imageId,
