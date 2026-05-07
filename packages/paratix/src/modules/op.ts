@@ -173,7 +173,15 @@ async function resolveRegularReferences(
     // eslint-disable-next-line no-await-in-loop
     const stdout = await spawnWithInput("op", ["read", reference], "")
     const value = stripTrailingCliNewline(stdout)
-    if (value.length > 0) leakedValues.push(value)
+    if (value.length > 0) {
+      leakedValues.push(value)
+      // R-0000165: register the resolved secret in the process-scoped sink
+      // immediately. Without this, a later failure (e.g. an OTP resolve
+      // crash, op CLI timeout, unhandled rejection) before the caller's
+      // post-loop registration would let the value leak through stack
+      // traces and shared logger trap output in plaintext.
+      registerSecret(value)
+    }
     result[name] = value
   }
 
@@ -205,7 +213,14 @@ async function resolveOtpReferences(
     const stdout = await spawnWithInput("op", ["read", reference], "")
 
     const otpauthUri = stripTrailingCliNewline(stdout).trim()
-    if (otpauthUri.length > 0) leakedValues.push(otpauthUri)
+    if (otpauthUri.length > 0) {
+      leakedValues.push(otpauthUri)
+      // R-0000165: register the otpauth URI in the secret sink as soon as
+      // it is resolved so an exception thrown later (e.g. from a follow-up
+      // op invocation or from generateTotpCode) cannot leak the URI's
+      // `secret=` parameter through stack traces or shared error renderers.
+      registerSecret(otpauthUri)
+    }
     result[name] = () => {
       const code = generateTotpCode(otpauthUri)
       registerSecret(code)

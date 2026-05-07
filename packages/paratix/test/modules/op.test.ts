@@ -391,6 +391,36 @@ describe("op.resolve — error masking", () => {
     expect(result.error?.message).not.toContain("prod-vault/database/password")
   })
 
+  // R-0000165: when an OTP resolve fails AFTER a regular secret has already
+  // been read, the resolved regular value must already be in the secret sink
+  // so any subsequent stack trace, unhandled rejection, or shared logger
+  // trap masks it. Without immediate registration the regular value would
+  // only land in the sink on the post-loop pass, leaving a window where the
+  // OTP failure could leak it in plaintext.
+  it("registers regular secrets in the sink before a later OTP resolve throws", async () => {
+    const resolvedValue = "early-registered-secret-value"
+    mockedSpawnFn.mockImplementationOnce(((command: string, args: readonly string[]) => {
+      trackSpawn(command, args)
+      return createMockChild(`${resolvedValue}\n`)
+    }) as never)
+    mockedSpawnFn.mockImplementationOnce(((command: string, args: readonly string[]) => {
+      trackSpawn(command, args)
+      return createMockChild("", 1, "otp resolve crashed")
+    }) as never)
+
+    const module_ = op.resolve({
+      password: "op://vault/item/password",
+      token: "op://vault/item/one-time-password",
+    })
+    // eslint-disable-next-line prefer-spread
+    const result = await module_.apply(null, emptyEnv)
+
+    expect(result.status).toBe("failed")
+    // The regular secret must already be in the process-scoped sink even
+    // though apply never reached the post-loop registerSecret pass.
+    expect(getRegisteredSecrets()).toContain(resolvedValue)
+  })
+
   it("masks the resolved regular secret value when it leaks into op stderr", async () => {
     const resolvedValue = "super-secret-resolved-value-12345"
     // Two op calls: the first op read succeeds and resolves the secret, the
