@@ -123,8 +123,13 @@ async function publishSwapTemporaryFile(
   parentDirectory: string,
   temporaryPath: string
 ): Promise<ModuleResult | true> {
+  // R-0000180: `mv -T -n` performs an atomic rename(2) that REFUSES to
+  // overwrite an existing target. The previous `[ ! -e ] && mv -T` had a
+  // TOCTOU window where another process could place a file at the
+  // destination between the test and the move; with `-n` the kernel-level
+  // atomicity of rename(2) closes that window.
   const publishResult = await parameters.ssh.exec(
-    `${safeParentCommand(parentDirectory)} && [ ! -e ${shellQuote(parameters.path)} ] && [ ! -L ${shellQuote(parameters.path)} ] && mv -T ${shellQuote(temporaryPath)} ${shellQuote(parameters.path)}`,
+    `${safeParentCommand(parentDirectory)} && mv -T -n ${shellQuote(temporaryPath)} ${shellQuote(parameters.path)}`,
     EXEC_OPTS
   )
   if (publishResult.code === 0) return true

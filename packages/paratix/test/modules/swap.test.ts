@@ -16,7 +16,7 @@ const swapBackupPath = `${swapPath}.paratix-backup`
 const safeSwapParentCommand = "find '/' -maxdepth 0 -type d -user root ! -perm /022 | grep -Fx '/'"
 const createSwapTempCommand = `fallocate -l '${swapSize}' '${swapTempPath}' || dd if=/dev/zero of='${swapTempPath}' bs=1M count=2048 status=none`
 const mktempSwapCommand = "mktemp -p '/' '.swapfile.paratix.XXXXXX'"
-const publishSwapCommand = `find '/' -maxdepth 0 -type d -user root ! -perm /022 | grep -Fx '/' && [ ! -e '${swapPath}' ] && [ ! -L '${swapPath}' ] && mv -T '${swapTempPath}' '${swapPath}'`
+const publishSwapCommand = `find '/' -maxdepth 0 -type d -user root ! -perm /022 | grep -Fx '/' && mv -T -n '${swapTempPath}' '${swapPath}'`
 const backupSwapCommand = `[ ! -e '${swapBackupPath}' ] && mv -T -- '${swapPath}' '${swapBackupPath}'`
 const restoreSwapCommand = `mv -T -- '${swapBackupPath}' '${swapPath}'`
 
@@ -603,6 +603,15 @@ describe("swap.file — option validation", () => {
     for (const priority of [1.5, Number.NaN, Number.POSITIVE_INFINITY, -2, 32_768]) {
       expect(() => swap.file({ path: swapPath, priority, size: swapSize })).toThrow(/priority/v)
     }
+  })
+
+  it("R-0000180: publish uses mv -T -n to avoid TOCTOU on the destination", () => {
+    // The constructed command must contain `mv -T -n` and must NOT precede
+    // it with the legacy `[ ! -e ] && [ ! -L ]` test pair, which left a
+    // TOCTOU window between test and rename.
+    expect(publishSwapCommand).toContain("mv -T -n")
+    expect(publishSwapCommand).not.toContain("[ ! -e")
+    expect(publishSwapCommand).not.toContain("[ ! -L")
   })
 
   it("R-0000178: rejects sizes that exceed Number.MAX_SAFE_INTEGER", () => {
