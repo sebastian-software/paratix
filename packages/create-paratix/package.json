@@ -11,7 +11,8 @@
   },
   "scripts": {
     "build": "tsup",
-    "test": "vitest run"
+    "test": "vitest run && pnpm test:dist",
+    "test:dist": "pnpm build && vitest run --config vitest.distribution.config.ts"
   },
   "dependencies": {
     "ssh2": "^1.16.0"
