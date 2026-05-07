@@ -698,33 +698,33 @@ describe("SshConnectionImpl.uploadFile — cleanup error secret masking", () => 
       // R-0000141: realpath dirname-symlink probe before mktemp
       .mockImplementationOnce(realpathProbeHandler)
       .mockImplementationOnce((_cmd: string, cb: ExecCallback) => {
-        // First call: mktemp — returns the remote tmp path
+        // mktemp — returns the remote tmp path
         const stream = makeStream()
         cb(undefined, stream)
         stream.emit("data", Buffer.from(remoteTmpPath))
         stream.emit("close", 0)
       })
       .mockImplementationOnce((_cmd: string, cb: ExecCallback) => {
-        // Second call: chmod 0600 — succeeds
+        // chmod 0600 — succeeds
         const stream = makeStream()
         cb(undefined, stream)
         stream.emit("close", 0)
       })
       .mockImplementationOnce((_cmd: string, cb: ExecCallback) => {
-        // Third call: mv — succeeds
-        const stream = makeStream()
-        cb(undefined, stream)
-        stream.emit("close", 0)
-      })
-      .mockImplementationOnce((_cmd: string, cb: ExecCallback) => {
-        // Fourth call: stat -c '%s' — succeeds
+        // R-0000150: stat -c '%s' on staged temp path BEFORE finalize.
         const stream = makeStream()
         cb(undefined, stream)
         stream.emit("data", Buffer.from("11"))
         stream.emit("close", 0)
       })
       .mockImplementationOnce((_cmd: string, cb: ExecCallback) => {
-        // Fifth call: rm -f — fails with an error whose message contains the password
+        // mv (finalize) — succeeds
+        const stream = makeStream()
+        cb(undefined, stream)
+        stream.emit("close", 0)
+      })
+      .mockImplementationOnce((_cmd: string, cb: ExecCallback) => {
+        // rm -f — fails with an error whose message contains the password
         cb(
           new Error(`permission denied: echo ${sudoPassword} | sudo rm -f ${remoteTmpPath}`),
           makeStream()

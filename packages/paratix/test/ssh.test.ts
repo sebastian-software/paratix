@@ -2207,6 +2207,7 @@ describe("SshConnectionImpl", () => {
 
       const execSpy = vi
         .fn()
+        // [0] mktemp
         .mockImplementationOnce((_command: string, callback: ExecCallback) => {
           const stream = makeStream()
           executedCommands.push(_command)
@@ -2214,18 +2215,14 @@ describe("SshConnectionImpl", () => {
           stream.emit("data", Buffer.from(tempPath))
           stream.emit("close", 0)
         })
+        // [1] chmod
         .mockImplementationOnce((_command: string, callback: ExecCallback) => {
           const stream = makeStream()
           executedCommands.push(_command)
           callback(undefined, stream)
           stream.emit("close", 0)
         })
-        .mockImplementationOnce((_command: string, callback: ExecCallback) => {
-          const stream = makeStream()
-          executedCommands.push(_command)
-          callback(undefined, stream)
-          stream.emit("close", 0)
-        })
+        // [2] R-0000150: stat -c '%s' on staged temp path (BEFORE finalize)
         .mockImplementationOnce((_command: string, callback: ExecCallback) => {
           const stream = makeStream()
           executedCommands.push(_command)
@@ -2233,6 +2230,14 @@ describe("SshConnectionImpl", () => {
           stream.emit("data", Buffer.from("11"))
           stream.emit("close", 0)
         })
+        // [3] mv (finalize via privileged shell script)
+        .mockImplementationOnce((_command: string, callback: ExecCallback) => {
+          const stream = makeStream()
+          executedCommands.push(_command)
+          callback(undefined, stream)
+          stream.emit("close", 0)
+        })
+        // [4] rm -f temp
         .mockImplementationOnce((_command: string, callback: ExecCallback) => {
           const stream = makeStream()
           executedCommands.push(_command)
@@ -2247,23 +2252,25 @@ describe("SshConnectionImpl", () => {
 
       await ssh.uploadFile("/local/file.txt", remotePath)
 
+      // R-0000150: size verification runs on the staged temp path BEFORE the
+      // privileged finalize/mv to avoid TOCTOU on the destination.
       expect(executedCommands[0]).toBe("mktemp '/tmp/paratix-upload.XXXXXX'")
       expect(executedCommands[1]).toBe(`chmod '0600' '${tempPath}'`)
-      expect(executedCommands[2]).toMatch(/^sudo bash -c /v)
+      expect(executedCommands[2]).toContain("stat -c")
       expect(executedCommands[2]).toContain(tempPath)
-      expect(executedCommands[2]).toContain("target_temp=$(mktemp")
-      expect(executedCommands[2]).toContain("/etc/my-app/.config.yml.paratix.XXXXXX")
-      expect(executedCommands[2]).toContain("[ ! -d")
-      expect(executedCommands[2]).toContain("[ ! -L")
-      expect(executedCommands[2]).toContain("mv -T -- ")
-      expect(executedCommands[2]).toContain(`'${tempPath}'`)
-      expect(executedCommands[2]).toContain('"$target_temp"')
-      expect(executedCommands[2]).toContain("chmod ")
-      expect(executedCommands[2]).toContain("'0600'")
-      expect(executedCommands[2]).toContain('chown "$target_owner" "$target_temp"')
-      expect(executedCommands[2]).toContain(`'${remotePath}'`)
-      expect(executedCommands[3]).toContain("%s")
-      expect(executedCommands[3]).toContain(remotePath)
+      expect(executedCommands[3]).toMatch(/^sudo bash -c /v)
+      expect(executedCommands[3]).toContain(tempPath)
+      expect(executedCommands[3]).toContain("target_temp=$(mktemp")
+      expect(executedCommands[3]).toContain("/etc/my-app/.config.yml.paratix.XXXXXX")
+      expect(executedCommands[3]).toContain("[ ! -d")
+      expect(executedCommands[3]).toContain("[ ! -L")
+      expect(executedCommands[3]).toContain("mv -T -- ")
+      expect(executedCommands[3]).toContain(`'${tempPath}'`)
+      expect(executedCommands[3]).toContain('"$target_temp"')
+      expect(executedCommands[3]).toContain("chmod ")
+      expect(executedCommands[3]).toContain("'0600'")
+      expect(executedCommands[3]).toContain('chown "$target_owner" "$target_temp"')
+      expect(executedCommands[3]).toContain(`'${remotePath}'`)
       expect(executedCommands[4]).toBe(`rm -f '${tempPath}'`)
       expect(vi.mocked(sftpUpload)).toHaveBeenCalledWith(client, "/local/file.txt", tempPath)
     })
@@ -2285,6 +2292,7 @@ describe("SshConnectionImpl", () => {
           stream.emit("data", Buffer.from("/remote"))
           stream.emit("close", 0)
         })
+        // mktemp
         .mockImplementationOnce((_command: string, callback: ExecCallback) => {
           const stream = makeStream()
           executedCommands.push(_command)
@@ -2292,18 +2300,14 @@ describe("SshConnectionImpl", () => {
           stream.emit("data", Buffer.from(tempPath))
           stream.emit("close", 0)
         })
+        // chmod
         .mockImplementationOnce((_command: string, callback: ExecCallback) => {
           const stream = makeStream()
           executedCommands.push(_command)
           callback(undefined, stream)
           stream.emit("close", 0)
         })
-        .mockImplementationOnce((_command: string, callback: ExecCallback) => {
-          const stream = makeStream()
-          executedCommands.push(_command)
-          callback(undefined, stream)
-          stream.emit("close", 0)
-        })
+        // R-0000150: stat -c '%s' on staged temp path BEFORE finalize
         .mockImplementationOnce((_command: string, callback: ExecCallback) => {
           const stream = makeStream()
           executedCommands.push(_command)
@@ -2311,6 +2315,14 @@ describe("SshConnectionImpl", () => {
           stream.emit("data", Buffer.from("11"))
           stream.emit("close", 0)
         })
+        // mv (finalize)
+        .mockImplementationOnce((_command: string, callback: ExecCallback) => {
+          const stream = makeStream()
+          executedCommands.push(_command)
+          callback(undefined, stream)
+          stream.emit("close", 0)
+        })
+        // rm
         .mockImplementationOnce((_command: string, callback: ExecCallback) => {
           const stream = makeStream()
           executedCommands.push(_command)
@@ -2349,7 +2361,7 @@ describe("SshConnectionImpl", () => {
           stream.emit("data", Buffer.from("/remote"))
           stream.emit("close", 0)
         })
-        // First call: mktemp (via output())
+        // mktemp
         .mockImplementationOnce((_command: string, callback: ExecCallback) => {
           const stream = makeStream()
           executedCommands.push(_command)
@@ -2357,21 +2369,14 @@ describe("SshConnectionImpl", () => {
           stream.emit("data", Buffer.from(tempPath))
           stream.emit("close", 0)
         })
-        // Second call: chmod (on temp file)
+        // chmod
         .mockImplementationOnce((_command: string, callback: ExecCallback) => {
           const stream = makeStream()
           executedCommands.push(_command)
           callback(undefined, stream)
           stream.emit("close", 0)
         })
-        // Third call: mv
-        .mockImplementationOnce((_command: string, callback: ExecCallback) => {
-          const stream = makeStream()
-          executedCommands.push(_command)
-          callback(undefined, stream)
-          stream.emit("close", 0)
-        })
-        // Fourth call: stat size verification
+        // R-0000150: stat -c '%s' on staged temp path BEFORE finalize
         .mockImplementationOnce((_command: string, callback: ExecCallback) => {
           const stream = makeStream()
           executedCommands.push(_command)
@@ -2379,7 +2384,14 @@ describe("SshConnectionImpl", () => {
           stream.emit("data", Buffer.from("11"))
           stream.emit("close", 0)
         })
-        // Fifth call: rm -f (cleanup in finally)
+        // mv (finalize)
+        .mockImplementationOnce((_command: string, callback: ExecCallback) => {
+          const stream = makeStream()
+          executedCommands.push(_command)
+          callback(undefined, stream)
+          stream.emit("close", 0)
+        })
+        // rm -f (cleanup in finally)
         .mockImplementationOnce((_command: string, callback: ExecCallback) => {
           const stream = makeStream()
           executedCommands.push(_command)
@@ -2419,7 +2431,7 @@ describe("SshConnectionImpl", () => {
           stream.emit("data", Buffer.from("/remote"))
           stream.emit("close", 0)
         })
-        // First call: mktemp
+        // mktemp
         .mockImplementationOnce((_command: string, callback: ExecCallback) => {
           const stream = makeStream()
           executedCommands.push(_command)
@@ -2427,21 +2439,14 @@ describe("SshConnectionImpl", () => {
           stream.emit("data", Buffer.from(tempPath))
           stream.emit("close", 0)
         })
-        // Second call: default chmod 0600
+        // default chmod 0600
         .mockImplementationOnce((_command: string, callback: ExecCallback) => {
           const stream = makeStream()
           executedCommands.push(_command)
           callback(undefined, stream)
           stream.emit("close", 0)
         })
-        // Third call: mv
-        .mockImplementationOnce((_command: string, callback: ExecCallback) => {
-          const stream = makeStream()
-          executedCommands.push(_command)
-          callback(undefined, stream)
-          stream.emit("close", 0)
-        })
-        // Fourth call: stat size verification
+        // R-0000150: stat -c '%s' on staged temp path BEFORE finalize
         .mockImplementationOnce((_command: string, callback: ExecCallback) => {
           const stream = makeStream()
           executedCommands.push(_command)
@@ -2449,7 +2454,14 @@ describe("SshConnectionImpl", () => {
           stream.emit("data", Buffer.from("11"))
           stream.emit("close", 0)
         })
-        // Fifth call: rm -f (cleanup in finally)
+        // mv (finalize)
+        .mockImplementationOnce((_command: string, callback: ExecCallback) => {
+          const stream = makeStream()
+          executedCommands.push(_command)
+          callback(undefined, stream)
+          stream.emit("close", 0)
+        })
+        // rm -f (cleanup in finally)
         .mockImplementationOnce((_command: string, callback: ExecCallback) => {
           const stream = makeStream()
           executedCommands.push(_command)
@@ -2539,6 +2551,7 @@ describe("SshConnectionImpl", () => {
           stream.emit("data", Buffer.from("/remote"))
           stream.emit("close", 0)
         })
+        // mktemp
         .mockImplementationOnce((_command: string, callback: ExecCallback) => {
           const stream = makeStream()
           executedCommands.push(_command)
@@ -2546,18 +2559,14 @@ describe("SshConnectionImpl", () => {
           stream.emit("data", Buffer.from(tempPath))
           stream.emit("close", 0)
         })
+        // chmod
         .mockImplementationOnce((_command: string, callback: ExecCallback) => {
           const stream = makeStream()
           executedCommands.push(_command)
           callback(undefined, stream)
           stream.emit("close", 0)
         })
-        .mockImplementationOnce((_command: string, callback: ExecCallback) => {
-          const stream = makeStream()
-          executedCommands.push(_command)
-          callback(undefined, stream)
-          stream.emit("close", 0)
-        })
+        // R-0000150: stat -c '%s' on staged temp path BEFORE finalize → 0 bytes
         .mockImplementationOnce((_command: string, callback: ExecCallback) => {
           const stream = makeStream()
           executedCommands.push(_command)
@@ -2578,6 +2587,8 @@ describe("SshConnectionImpl", () => {
           )
           stream.emit("close", 0)
         })
+        // rm -f cleanup in finally (mv is never reached because the size
+        // mismatch throws before finalize)
         .mockImplementationOnce((_command: string, callback: ExecCallback) => {
           const stream = makeStream()
           executedCommands.push(_command)
@@ -2589,13 +2600,97 @@ describe("SshConnectionImpl", () => {
       const ssh = makeConnectedSsh(client)
 
       await expect(ssh.uploadFile("/local/file.txt", "/remote/file.txt")).rejects.toThrow(
-        "remote file size mismatch after upload/finalize"
+        "remote file size mismatch after upload"
       )
 
       expect(executedCommands[0]).toContain("realpath -m --")
-      expect(executedCommands[4]).toContain("stat -c '%s'")
-      expect(executedCommands[5]).toContain("df -P")
-      expect(executedCommands[6]).toContain("rm -f")
+      // R-0000150: stat now runs on the staged temp path (before mv).
+      expect(executedCommands[3]).toContain("stat -c")
+      expect(executedCommands[3]).toContain(tempPath)
+      expect(executedCommands[4]).toContain("df -P")
+      expect(executedCommands[5]).toContain("rm -f")
+      // mv must not have run — assertRemoteFileSize threw before finalize.
+      expect(executedCommands.some((cmd) => cmd.includes("mv -T"))).toBe(false)
+    })
+
+    it("verifies the staged temp size BEFORE the privileged mv to avoid TOCTOU (R-0000150 regression)", async () => {
+      // Regression: assertRemoteFileSize ran AFTER the privileged finalize
+      // (mv -T). An attacker with write access to the destination directory
+      // could swap the final file between the move and the stat, so the
+      // verification reported a size for an attacker-controlled inode rather
+      // than the file Paratix actually wrote. The fix verifies the size on
+      // the staged temp path before the move.
+      const { sftpUpload } = await import("../src/sftp.js")
+      vi.mocked(sftpUpload).mockResolvedValue()
+      vi.mocked(stat).mockResolvedValueOnce({ size: 11 } as never)
+
+      const tempPath = "/remote/paratix-upload.STAGED"
+      const remotePath = "/remote/file.txt"
+      const executedCommands: string[] = []
+
+      const execSpy = vi
+        .fn()
+        // realpath dirname-symlink probe
+        .mockImplementationOnce((_command: string, callback: ExecCallback) => {
+          const stream = makeStream()
+          executedCommands.push(_command)
+          callback(undefined, stream)
+          stream.emit("data", Buffer.from("/remote"))
+          stream.emit("close", 0)
+        })
+        // mktemp
+        .mockImplementationOnce((_command: string, callback: ExecCallback) => {
+          const stream = makeStream()
+          executedCommands.push(_command)
+          callback(undefined, stream)
+          stream.emit("data", Buffer.from(tempPath))
+          stream.emit("close", 0)
+        })
+        // chmod
+        .mockImplementationOnce((_command: string, callback: ExecCallback) => {
+          const stream = makeStream()
+          executedCommands.push(_command)
+          callback(undefined, stream)
+          stream.emit("close", 0)
+        })
+        // R-0000150: stat against the temp path
+        .mockImplementationOnce((_command: string, callback: ExecCallback) => {
+          const stream = makeStream()
+          executedCommands.push(_command)
+          callback(undefined, stream)
+          stream.emit("data", Buffer.from("11"))
+          stream.emit("close", 0)
+        })
+        // mv (finalize)
+        .mockImplementationOnce((_command: string, callback: ExecCallback) => {
+          const stream = makeStream()
+          executedCommands.push(_command)
+          callback(undefined, stream)
+          stream.emit("close", 0)
+        })
+        // rm -f cleanup
+        .mockImplementationOnce((_command: string, callback: ExecCallback) => {
+          const stream = makeStream()
+          executedCommands.push(_command)
+          callback(undefined, stream)
+          stream.emit("close", 0)
+        })
+
+      const client = makeClientWithExecSpy(execSpy)
+      const ssh = makeConnectedSsh(client)
+
+      await ssh.uploadFile("/local/file.txt", remotePath)
+
+      // The stat -c '%s' command must reference the staged temp path,
+      // never the final destination.
+      const statIndex = executedCommands.findIndex((cmd) => cmd.includes("stat -c"))
+      expect(statIndex).toBeGreaterThan(-1)
+      expect(executedCommands[statIndex]).toContain(tempPath)
+      expect(executedCommands[statIndex]).not.toContain(remotePath)
+
+      // The stat must run BEFORE any mv -T command.
+      const mvIndex = executedCommands.findIndex((cmd) => cmd.includes("mv -T"))
+      expect(mvIndex).toBeGreaterThan(statIndex)
     })
   })
 

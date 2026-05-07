@@ -417,8 +417,14 @@ export class SshConnectionImpl implements SshConnection {
     try {
       await sftpUpload(client, localPath, temporaryPath)
       await this.setRemoteTempMode(temporaryPath, temporaryMode)
+      // R-0000150: verify the size on the staged temp file BEFORE the
+      // privileged finalize (`mv -T`). After the move, an attacker with
+      // write access to the destination directory could swap the final
+      // file and our `stat` would report a size for an attacker-controlled
+      // inode rather than the file we actually wrote. Asserting on the
+      // temp path eliminates that TOCTOU window.
+      await this.assertRemoteFileSize(temporaryPath, localFileSize)
       await this.finalizeRemoteTempFile(temporaryPath, remotePath, temporaryMode)
-      await this.assertRemoteFileSize(remotePath, localFileSize)
     } finally {
       try {
         await this.cleanupRemoteTempFile(temporaryPath)
@@ -487,7 +493,7 @@ export class SshConnectionImpl implements SshConnection {
 
     if (actualSize !== expectedSize) {
       throw new Error(
-        `[ssh.uploadFile: ${remotePath}] remote file size mismatch after upload/finalize; expected ${expectedSize} bytes, got ${actualSize}`
+        `[ssh.uploadFile: ${remotePath}] remote file size mismatch after upload; expected ${expectedSize} bytes, got ${actualSize}`
       )
     }
   }
