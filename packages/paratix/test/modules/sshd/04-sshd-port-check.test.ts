@@ -28,8 +28,8 @@ const createMockSsh: typeof createBaseMockSsh = (responses, options) =>
       { command: "systemctl enable --now ssh.socket", result: { code: 0 } },
       { command: "systemctl restart sshd", result: { code: 0 } },
       {
-        command: /^ss -H -ltn 'sport = :\d+'$/v,
-        result: { code: 0, stdout: "LISTEN 0 128 *:2222\n" },
+        command: /^ss -H -ltnp 'sport = :\d+'$/v,
+        result: { code: 0, stdout: 'LISTEN 0 128 *:2222 users:(("sshd",pid=123,fd=3))\n' },
       },
       { command: /^rm -f '\/tmp\/paratix-sshd-dry-run-.+\.conf'$/v, result: { code: 0 } },
       ...(options?.responseStubs ?? []),
@@ -110,7 +110,7 @@ describe("sshd.port — check", () => {
   it("returns needs-apply when the configured port matches but no live listener exists", async () => {
     const mockSsh = createMockSsh({
       [CAT_SSHD]: { stdout: "Port 2222\n" },
-      "ss -H -ltn 'sport = :2222'": { code: 0, stdout: "" },
+      "ss -H -ltnp 'sport = :2222'": { code: 0, stdout: "" },
     })
     const mod = sshd.port(2222)
     const result = await mod.check(mockSsh, emptyEnv)
@@ -138,11 +138,27 @@ describe("sshd.port — check", () => {
   it("returns ok for default port 22 when no Port directive exists", async () => {
     const mockSsh = createMockSsh({
       [CAT_SSHD]: { stdout: "# sshd config\n" },
-      "ss -H -ltn 'sport = :22'": { code: 0, stdout: "LISTEN 0 128 *:22\n" },
+      "ss -H -ltnp 'sport = :22'": {
+        code: 0,
+        stdout: 'LISTEN 0 128 *:22 users:(("sshd",pid=123,fd=3))\n',
+      },
     })
     const mod = sshd.port(22)
     const result = await mod.check(mockSsh, emptyEnv)
     expect(result).toBe("ok")
+  })
+
+  it("returns needs-apply when a non-SSH process listens on the target port", async () => {
+    const mockSsh = createMockSsh({
+      [CAT_SSHD]: { stdout: "Port 2222\n" },
+      "ss -H -ltnp 'sport = :2222'": {
+        code: 0,
+        stdout: 'LISTEN 0 128 *:2222 users:(("nginx",pid=123,fd=3))\n',
+      },
+    })
+    const mod = sshd.port(2222)
+    const result = await mod.check(mockSsh, emptyEnv)
+    expect(result).toBe("needs-apply")
   })
 
   it("returns needs-apply when ssh.socket is enabled but the SSH service is disabled", async () => {

@@ -201,11 +201,14 @@ async function reloadSshd(ssh: SshConnection): Promise<ModuleResult> {
 }
 
 async function liveSshdPortMatches(ssh: SshConnection, targetPort: number): Promise<boolean> {
-  const result = await ssh.exec(`ss -H -ltn 'sport = :${String(targetPort)}'`, {
+  const result = await ssh.exec(`ss -H -ltnp 'sport = :${String(targetPort)}'`, {
     ignoreExitCode: true,
     silent: true,
   })
-  return result.code === 0 && result.stdout.trim() !== ""
+  if (result.code !== 0) return false
+  const output = result.stdout.trim()
+  if (output === "") return false
+  return /\b(?:sshd|ssh\.socket)\b/v.test(output)
 }
 
 async function sshdPortConfigMatchesLive(ssh: SshConnection, targetPort: number): Promise<boolean> {

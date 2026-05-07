@@ -224,7 +224,10 @@ describe("sshd.port — apply: validation and rollback", () => {
   it("returns ok and does not write when the desired port is already configured", async () => {
     const mockSsh = createMockSsh({
       [CAT_SSHD]: { stdout: "Port 2222\n" },
-      "ss -H -ltn 'sport = :2222'": { code: 0, stdout: "LISTEN 0 128 0.0.0.0:2222\n" },
+      "ss -H -ltnp 'sport = :2222'": {
+        code: 0,
+        stdout: 'LISTEN 0 128 0.0.0.0:2222 users:(("sshd",pid=123,fd=3))\n',
+      },
     })
     const writtenFiles = trackWriteFile(mockSsh)
     const execSpy = vi.spyOn(mockSsh, "exec")
@@ -245,7 +248,7 @@ describe("sshd.port — apply: validation and rollback", () => {
   it("restarts and emits reconnect meta when config matches but target port is not live", async () => {
     const mockSsh = createMockSsh({
       [CAT_SSHD]: { stdout: "Port 2222\n" },
-      "ss -H -ltn 'sport = :2222'": { code: 1, stdout: "" },
+      "ss -H -ltnp 'sport = :2222'": { code: 1, stdout: "" },
     })
     const writtenFiles = trackWriteFile(mockSsh)
     const execSpy = vi.spyOn(mockSsh, "exec")
