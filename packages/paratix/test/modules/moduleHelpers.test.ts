@@ -256,6 +256,186 @@ describe("applyWithFlagLock", () => {
   })
 })
 
+type StaleLockMockState = {
+  flagExists: boolean
+  lockExists: boolean
+  staleReclaimCalls: number
+}
+
+const LOCK_COMMAND_KIND = {
+  flagTest: "flag-test",
+  lockMkdir: "lock-mkdir",
+  lockRmdir: "lock-rmdir",
+  lockWait: "lock-wait",
+  other: "other",
+  staleReclaim: "stale-reclaim",
+  touchFlag: "touch-flag",
+} as const
+
+type LockCommandKind = (typeof LOCK_COMMAND_KIND)[keyof typeof LOCK_COMMAND_KIND]
+
+function classifyLockCommand(command: string, flagName: string): LockCommandKind {
+  const lockMkdirCommand = `mkdir ${FLAGS_DIRECTORY}/'${flagName}.lock'`
+  const lockRmdirCommand = `rmdir ${FLAGS_DIRECTORY}/'${flagName}.lock'`
+  const touchFlagCommand = `touch ${FLAGS_DIRECTORY}/'${flagName}'`
+  const flagTestCommand = `[ -f ${FLAGS_DIRECTORY}/'${flagName}' ]`
+  if (command === lockMkdirCommand) return LOCK_COMMAND_KIND.lockMkdir
+  if (command === lockRmdirCommand) return LOCK_COMMAND_KIND.lockRmdir
+  if (command === touchFlagCommand) return LOCK_COMMAND_KIND.touchFlag
+  if (command === flagTestCommand) return LOCK_COMMAND_KIND.flagTest
+  if (command.startsWith("i=0; while [ -d")) return LOCK_COMMAND_KIND.lockWait
+  if (command.startsWith("if [ -d ") && command.includes("-mmin")) {
+    return LOCK_COMMAND_KIND.staleReclaim
+  }
+  return LOCK_COMMAND_KIND.other
+}
+
+function createStaleLockSsh(
+  flagName: string,
+  reclaim: "fresh" | "stale"
+): {
+  ssh: ReturnType<typeof createMockSsh>
+  state: StaleLockMockState
+} {
+  const base = createMockSsh(
+    {},
+    {
+      defaultExecResult: { code: 0 },
+      defaultOutputResult: "",
+      defaultTestResult: false,
+    }
+  )
+  const state: StaleLockMockState = {
+    flagExists: false,
+    lockExists: true, // simulate a lock left behind by a crashed holder
+    staleReclaimCalls: 0,
+  }
+
+  function handleStaleReclaim(): { code: number; stderr: string; stdout: string } {
+    state.staleReclaimCalls += 1
+    if (reclaim === "fresh") return { code: 1, stderr: "", stdout: "" }
+    state.lockExists = false
+    return { code: 0, stderr: "", stdout: "" }
+  }
+
+  function handleLockMkdir(): { code: number; stderr: string; stdout: string } {
+    if (state.lockExists) return { code: 1, stderr: "", stdout: "" }
+    state.lockExists = true
+    return { code: 0, stderr: "", stdout: "" }
+  }
+
+  function handleCommand(command: string): { code: number; stderr: string; stdout: string } {
+    const kind = classifyLockCommand(command, flagName)
+    switch (kind) {
+      case LOCK_COMMAND_KIND.flagTest: {
+        return { code: state.flagExists ? 0 : 1, stderr: "", stdout: "" }
+      }
+      case LOCK_COMMAND_KIND.lockMkdir: {
+        return handleLockMkdir()
+      }
+      case LOCK_COMMAND_KIND.lockRmdir: {
+        state.lockExists = false
+        return { code: 0, stderr: "", stdout: "" }
+      }
+      case LOCK_COMMAND_KIND.lockWait: {
+        return { code: 1, stderr: "", stdout: "" }
+      }
+      case LOCK_COMMAND_KIND.other: {
+        return { code: 0, stderr: "", stdout: "" }
+      }
+      case LOCK_COMMAND_KIND.staleReclaim: {
+        return handleStaleReclaim()
+      }
+      case LOCK_COMMAND_KIND.touchFlag: {
+        state.flagExists = true
+        return { code: 0, stderr: "", stdout: "" }
+      }
+    }
+  }
+
+  const ssh: typeof base = {
+    ...base,
+    async exec(command, options) {
+      base.calls.push(command)
+      base.execCalls.push({ command, options })
+      await Promise.resolve()
+      return handleCommand(command)
+    },
+    async test(command) {
+      await Promise.resolve()
+      base.calls.push(command)
+      const isFlagTest = classifyLockCommand(command, flagName) === "flag-test"
+      return isFlagTest && state.flagExists
+    },
+  }
+
+  return { ssh, state }
+}
+
+describe("applyWithFlagLock – stale lock recovery", () => {
+  it("reclaims a stale lock after the wait window expires and reruns apply", async () => {
+    const flagName = "stale-lock-flag"
+    const { ssh, state } = createStaleLockSsh(flagName, "stale")
+    let applyCalls = 0
+
+    const result = await applyWithFlagLock(ssh, {
+      async apply() {
+        applyCalls += 1
+        await setFlag(ssh, flagName)
+        return { status: "changed" }
+      },
+      flagName,
+      staleSeconds: 60,
+      waitSeconds: 1,
+    })
+
+    expect(result).toStrictEqual({ status: "changed" })
+    expect(state.staleReclaimCalls).toBe(1)
+    expect(applyCalls).toBe(1)
+  })
+
+  it("returns failedCommand when the lock is held but not stale", async () => {
+    const flagName = "fresh-lock-flag"
+    const { ssh } = createStaleLockSsh(flagName, "fresh")
+    let applyCalls = 0
+
+    const result = await applyWithFlagLock(ssh, {
+      async apply() {
+        applyCalls += 1
+        await Promise.resolve()
+        return { status: "changed" }
+      },
+      flagName,
+      staleSeconds: 60,
+      waitSeconds: 1,
+    })
+
+    expect(result.status).toBe("failed")
+    expect(applyCalls).toBe(0)
+  })
+
+  it("writes a holder marker after acquiring the lock", async () => {
+    const flagName = "marker-flag"
+    const ssh = createSharedFlagMockSsh(flagName)
+
+    await applyWithFlagLock(ssh, {
+      async apply() {
+        await setFlag(ssh, flagName)
+        return { status: "changed" }
+      },
+      flagName,
+    })
+
+    const markerPathFragment = `${FLAGS_DIRECTORY}/'${flagName}.lock'/holder`
+    const markerWrite = ssh.calls.find((call) => isHolderMarkerWrite(call, markerPathFragment))
+    expect(markerWrite).toBeDefined()
+  })
+})
+
+function isHolderMarkerWrite(call: string, markerPathFragment: string): boolean {
+  return call.startsWith("printf ") && call.includes(markerPathFragment)
+}
+
 describe("setVersionedFlag – rejects path-traversal-like names", () => {
   it("rejects flagPrefix equal to '..'", async () => {
     // A `..` prefix would let `find -name '..*' -delete` target paths outside

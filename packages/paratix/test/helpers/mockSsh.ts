@@ -1,6 +1,7 @@
 import type { ExecOptions, ExecResult, SshConnection } from "../../src/types.js"
 
 import { shellQuote } from "../../src/ssh.js"
+import { isFlagLockInternalSuccessCommand, isFlagLockReclaimProbe } from "./mockSshFlagLock.js"
 import {
   createSideEffectRecorder,
   type DownloadFileCall,
@@ -118,24 +119,58 @@ function getResponseStub(
   return options?.responseStubs?.find((stub) => matchesResponseStub(command, stub))
 }
 
+function findExplicitMatch(input: {
+  command: string
+  options?: MockSshOptions
+  responses?: MockResponses
+}): Partial<ExecResult> | undefined {
+  const match = input.responses?.[input.command]
+  if (match) return match
+  const stub = getResponseStub(input.command, input.options)
+  return stub?.result
+}
+
+function getFlagLockInternalDefault(
+  command: string,
+  kind: "exec" | "output" | "test"
+): Partial<ExecResult> | undefined {
+  if (kind !== "exec") return undefined
+  if (isFlagLockReclaimProbe(command)) {
+    // Default the reclaim probe to "no stale lock" so untouched tests
+    // do not silently change behaviour.
+    return { code: 1 }
+  }
+  return undefined
+}
+
+function isStrictlyAllowed(input: {
+  command: string
+  kind: "exec" | "output" | "test"
+  options?: MockSshOptions
+}): boolean {
+  const allowlist = getAllowlistForKind(input.kind, input.options)
+  if (isAllowed(input.command, allowlist)) return true
+  if (input.kind === "exec" && isFlagLockInternalSuccessCommand(input.command)) return true
+  return false
+}
+
 function getMockResponse(input: {
   command: string
   kind: "exec" | "output" | "test"
   options?: MockSshOptions
   responses?: MockResponses
 }): Partial<ExecResult> | undefined {
-  const match = input.responses?.[input.command]
+  const match = findExplicitMatch(input)
   if (match) return match
 
-  const stub = getResponseStub(input.command, input.options)
-  if (stub) return stub.result
-
-  const allowlist = getAllowlistForKind(input.kind, input.options)
+  const hasExplicitDefault = hasExplicitDefaultForKind(input.kind, input.options)
+  if (!hasExplicitDefault) {
+    const internal = getFlagLockInternalDefault(input.command, input.kind)
+    if (internal) return internal
+  }
 
   const strict = input.options?.strict ?? true
-  const hasExplicitDefault = hasExplicitDefaultForKind(input.kind, input.options)
-
-  if (strict && !hasExplicitDefault && !isAllowed(input.command, allowlist)) {
+  if (strict && !hasExplicitDefault && !isStrictlyAllowed(input)) {
     throw buildUnstubbedCommandError(input.kind, input.command)
   }
 

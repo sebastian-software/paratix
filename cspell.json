@@ -54,6 +54,7 @@
     "metacharacter",
     "metaget",
     "mktemp",
+    "mmin",
     "mpint",
     "mountpoint",
     "myblock",
