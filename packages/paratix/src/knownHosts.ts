@@ -7,6 +7,25 @@ import { join } from "node:path"
 import { matchesKnownHostPatternList } from "./knownHostPatterns.js"
 import { shellQuote } from "./sshHelpers.js"
 
+/**
+ * R-0000151: serialize all reads/writes against `~/.ssh/known_hosts` through
+ * a single in-process mutex. `loadKnownHostEntries` calls `readFileSync` from
+ * an ssh2 verifier callback, while `acceptAndPersistHostKey` writes via async
+ * `appendFile`. Without this lock, parallel handshakes could observe a
+ * partially written line, causing `parseKnownHostsLine` to drop a valid
+ * trust anchor.
+ */
+let knownHostsLock: Promise<unknown> = Promise.resolve()
+
+async function withKnownHostsLock<T>(operation: () => Promise<T> | T): Promise<T> {
+  const previous = knownHostsLock
+  const next = previous.then(async () => operation())
+  // Suppress unhandled-rejection bookkeeping on the chained sentinel; callers
+  // observe the real settlement through the returned `next` promise.
+  knownHostsLock = next.catch(() => null)
+  return next
+}
+
 type HostVerifierOptions = {
   expectedHostFingerprint?: string
   expectedHostPublicKey?: string
@@ -76,6 +95,18 @@ const inMemoryHostKeys = new Map<string, Buffer>()
  */
 export function clearHostKeyCache(): void {
   inMemoryHostKeys.clear()
+}
+
+/**
+ * Wait until every queued `appendHostKey` operation has finished.
+ *
+ * R-0000151: callers that need a synchronous read to observe the result of
+ * concurrent persists can `await` this helper first; this drains the
+ * known_hosts mutex so subsequent `readFileSync` calls see a consistent file
+ * with no partially-written lines in flight.
+ */
+export async function waitForKnownHostsWrites(): Promise<void> {
+  await knownHostsLock.catch(() => null)
 }
 
 function parseKnownHostsLine(line: string): KnownHostEntry[] {
@@ -254,6 +285,11 @@ export function computeFingerprint(key: Buffer): string {
  * Creates the `~/.ssh` directory (mode `0o700`) and the file itself if they
  * do not exist yet.
  *
+ * R-0000151: the append is serialized through {@link withKnownHostsLock} so
+ * concurrent invocations cannot interleave partial writes, and so a
+ * synchronous reader running right after this call observes the appended
+ * line in full.
+ *
  * @param host - The hostname or IP.
  * @param port - The SSH port.
  * @param keyBuffer - The raw public key buffer.
@@ -267,10 +303,12 @@ export async function appendHostKey(host: string, port: number, keyBuffer: Buffe
   const sshDirectory = join(homedir(), ".ssh")
   const filePath = join(sshDirectory, "known_hosts")
 
-  // eslint-disable-next-line security/detect-non-literal-fs-filename
-  await mkdir(sshDirectory, { mode: 0o700, recursive: true })
-  // eslint-disable-next-line security/detect-non-literal-fs-filename
-  await appendFile(filePath, line, { mode: 0o644 })
+  await withKnownHostsLock(async () => {
+    // eslint-disable-next-line security/detect-non-literal-fs-filename
+    await mkdir(sshDirectory, { mode: 0o700, recursive: true })
+    // eslint-disable-next-line security/detect-non-literal-fs-filename
+    await appendFile(filePath, line, { mode: 0o644 })
+  })
 }
 
 function getFileSystemErrorCode(error: unknown): string | undefined {

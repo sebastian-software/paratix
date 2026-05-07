@@ -9,6 +9,7 @@ import {
   extractAlgoFromKey,
   lookupHostKey,
   parseKnownHosts,
+  waitForKnownHostsWrites,
 } from "../src/knownHosts.js"
 
 // ---------------------------------------------------------------------------
@@ -1128,5 +1129,109 @@ describe("buildHostVerifier", () => {
     // Assert: appendFile called again (key was unknown, not from cache)
     await secondCommitAcceptedHostKey?.()
     expect(appendFileMock).toHaveBeenCalledTimes(1)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// R-0000151: known_hosts read/append serialization
+// ---------------------------------------------------------------------------
+
+describe("appendHostKey serialization (R-0000151)", () => {
+  let appendFileMock: ReturnType<typeof vi.fn<(...arguments_: unknown[]) => null | Promise<null>>>
+  let mkdirMock: ReturnType<typeof vi.fn<(...arguments_: unknown[]) => null | Promise<null>>>
+
+  beforeEach(async () => {
+    const fsp = await import("node:fs/promises")
+    appendFileMock = vi.mocked(fsp.appendFile) as unknown as typeof appendFileMock
+    mkdirMock = vi.mocked(fsp.mkdir) as unknown as typeof mkdirMock
+    appendFileMock.mockReset()
+    mkdirMock.mockReset()
+    mkdirMock.mockResolvedValue(null)
+    // Drain any leftover lock state from previous tests so each case starts
+    // from a known baseline.
+    await waitForKnownHostsWrites()
+  })
+
+  afterEach(async () => {
+    vi.clearAllMocks()
+    await waitForKnownHostsWrites()
+  })
+
+  it("serializes parallel appendHostKey calls so writes never interleave", async () => {
+    // Capture the call order: each appendFile call begins, asserts no other
+    // call is in flight, waits a tick, then completes.
+    let inFlight = 0
+    let maxInFlight = 0
+    const serializedAppend = async (): Promise<null> => {
+      inFlight++
+      maxInFlight = Math.max(maxInFlight, inFlight)
+      // Wait for a microtask so a parallel call has the chance to interleave
+      // if the lock were missing.
+      await Promise.resolve()
+      await Promise.resolve()
+      inFlight--
+      return null
+    }
+    appendFileMock.mockImplementation(serializedAppend)
+
+    const key = makeKeyBuffer("ssh-ed25519", Buffer.from("test-key-1"))
+
+    await Promise.all([
+      appendHostKey("first.example.com", 22, key),
+      appendHostKey("second.example.com", 22, key),
+      appendHostKey("third.example.com", 22, key),
+    ])
+
+    expect(appendFileMock).toHaveBeenCalledTimes(3)
+    // The lock guarantees at most one appendFile is in flight at any time.
+    expect(maxInFlight).toBe(1)
+  })
+
+  it("waitForKnownHostsWrites resolves once the queued append has completed", async () => {
+    let resolveAppend: (() => void) | undefined
+    const deferredAppend = async (): Promise<null> => {
+      await new Promise<void>((res) => {
+        resolveAppend = () => {
+          res()
+        }
+      })
+      return null
+    }
+    appendFileMock.mockImplementationOnce(deferredAppend)
+
+    const key = makeKeyBuffer("ssh-ed25519", Buffer.from("test-key-2"))
+    const appendPromise = appendHostKey("delayed.example.com", 22, key)
+
+    let drained = false
+    const drainPromise = waitForKnownHostsWrites().then(() => {
+      drained = true
+    })
+
+    // Allow several microtasks for `appendHostKey` to start the queued
+    // `mkdir`/`appendFile` calls so the mock implementation has been entered.
+    for (let index = 0; index < 5; index++) {
+      // eslint-disable-next-line no-await-in-loop
+      await Promise.resolve()
+    }
+    expect(drained).toBe(false)
+
+    expect(resolveAppend).toBeDefined()
+    resolveAppend!()
+
+    await appendPromise
+    await drainPromise
+    expect(drained).toBe(true)
+  })
+
+  it("a rejected append does not poison subsequent appends", async () => {
+    appendFileMock.mockRejectedValueOnce(new Error("disk full"))
+    appendFileMock.mockResolvedValueOnce(null)
+
+    const key = makeKeyBuffer("ssh-ed25519", Buffer.from("test-key-3"))
+
+    await expect(appendHostKey("fail.example.com", 22, key)).rejects.toThrow("disk full")
+    // Subsequent appends still proceed.
+    await expect(appendHostKey("ok.example.com", 22, key)).resolves.toBeUndefined()
+    expect(appendFileMock).toHaveBeenCalledTimes(2)
   })
 })
