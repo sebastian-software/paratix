@@ -321,6 +321,55 @@ describe("applyCliProcessEnvironment", () => {
     restore()
     expect(process.env.PARATIX_FIRST_RUN).toBe("external")
   })
+
+  it("deletes PARATIX_FIRST_RUN on restore when no previous value was set (firstRun=true)", () => {
+    expect(process.env.PARATIX_FIRST_RUN).toBeUndefined()
+
+    const restore = applyCliProcessEnvironment({ firstRun: true })
+
+    expect(process.env.PARATIX_FIRST_RUN).toBe("true")
+    restore()
+
+    // The key must be removed entirely, not assigned the literal string "undefined".
+    expect(Object.hasOwn(process.env, "PARATIX_FIRST_RUN")).toBe(false)
+    expect(process.env.PARATIX_FIRST_RUN).toBeUndefined()
+  })
+
+  it("does not assign the literal string 'undefined' when restoring", () => {
+    // Capture every assignment of process.env's PARATIX_FIRST_RUN. A
+    // regression would write the literal string "undefined" via
+    // `process.env[KEY] = previousValue` when previousValue is undefined.
+    const seenAssignments: Array<[PropertyKey, unknown]> = []
+    const proxy = new Proxy(process.env, {
+      deleteProperty(target, property): boolean {
+        return Reflect.deleteProperty(target, property)
+      },
+      set(target, property, value): boolean {
+        seenAssignments.push([property, value])
+        return Reflect.set(target, property, value)
+      },
+    })
+
+    const previousEnvironment = process.env
+    Reflect.set(process, "env", proxy)
+    try {
+      const restore = applyCliProcessEnvironment({ firstRun: true })
+      expect(process.env.PARATIX_FIRST_RUN).toBe("true")
+      restore()
+
+      const firstRunAssignments = seenAssignments
+        .filter(([key]) => key === "PARATIX_FIRST_RUN")
+        .map(([, value]) => value)
+
+      // The literal string "undefined" must never have been assigned.
+      expect(firstRunAssignments).not.toContain("undefined")
+      // After restore the key is gone.
+      expect(process.env.PARATIX_FIRST_RUN).toBeUndefined()
+    } finally {
+      Reflect.set(process, "env", previousEnvironment)
+      delete process.env.PARATIX_FIRST_RUN
+    }
+  })
 })
 
 describe("isServerDefinitionLike", () => {

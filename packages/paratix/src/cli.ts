@@ -267,11 +267,13 @@ export function applyCliProcessEnvironment(options: { firstRun: boolean }): () =
   const previousValue = process.env[FIRST_RUN_ENV_NAME]
   const hadPreviousValue = Object.hasOwn(process.env, FIRST_RUN_ENV_NAME)
   const restoreProcessEnvironment = (): void => {
-    if (hadPreviousValue) {
-      process.env[FIRST_RUN_ENV_NAME] = previousValue
-    } else {
-      delete process.env.PARATIX_FIRST_RUN
+    // Use FIRST_RUN_ENV_NAME consistently and avoid assigning `undefined`
+    // (which would coerce to the literal string "undefined" on process.env).
+    if (!hadPreviousValue || previousValue == null) {
+      Reflect.deleteProperty(process.env, FIRST_RUN_ENV_NAME)
+      return
     }
+    process.env[FIRST_RUN_ENV_NAME] = previousValue
   }
   if (!options.firstRun) return restoreProcessEnvironment
   process.env[FIRST_RUN_ENV_NAME] = "true"
