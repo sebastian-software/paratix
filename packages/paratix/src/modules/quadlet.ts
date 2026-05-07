@@ -131,9 +131,22 @@ async function applyQuadletFile(parameters: {
   }
 
   const snapshot = await snapshotQuadletFile(parameters.ssh, parameters.filePath)
-  await parameters.ssh.writeFile(parameters.filePath, parameters.content, {
-    mode: QUADLET_FILE_MODE,
-  })
+  // R-0000182: writeFile can throw (SFTP error after a partial write,
+  // permission denied, network drop). Catch the throw, restore the
+  // pre-existing snapshot if one was captured, and surface a `failed`
+  // result instead of leaking the exception to the runner.
+  try {
+    await parameters.ssh.writeFile(parameters.filePath, parameters.content, {
+      mode: QUADLET_FILE_MODE,
+    })
+  } catch (error) {
+    await restoreQuadletFileSnapshot(parameters.ssh, parameters.filePath, snapshot)
+    return failed(
+      `[quadlet.container: ${parameters.name}] failed to write quadlet file: ${
+        error instanceof Error ? error.message : String(error)
+      }`
+    )
+  }
 
   const daemonReload = await parameters.ssh.exec(`${SYSTEMCTL} daemon-reload`, {
     ignoreExitCode: true,

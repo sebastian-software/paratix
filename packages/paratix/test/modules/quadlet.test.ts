@@ -208,6 +208,32 @@ describe("quadlet.container", () => {
     expect(ssh.calls).toContain(`rm -f '${quadletFilePath}'`)
   })
 
+  it("R-0000182: restores snapshot and returns failed when writeFile throws", async () => {
+    const previousContent = "[Container]\nImage=docker.io/library/traefik:v3.2\n"
+    const ssh = createMockSsh({
+      [`[ -e '${quadletFilePath}' ]`]: { code: 0 },
+      [`cat '${quadletFilePath}'`]: { stdout: previousContent },
+      [`stat -c '%a' '${quadletFilePath}'`]: { code: 0, stdout: "600\n" },
+      "mkdir -p '/etc/containers/systemd'": { code: 0 },
+    })
+    const writeFile = vi
+      .spyOn(ssh, "writeFile")
+      .mockRejectedValueOnce(new Error("SFTP partial write"))
+      .mockResolvedValueOnce()
+
+    const result = await createQuadletModule().apply(ssh, emptyEnv)
+
+    expect(result.status).toBe("failed")
+    expect(result.error?.message).toContain("SFTP partial write")
+    // First call: the new content; second: the restore from snapshot.
+    expect(writeFile).toHaveBeenNthCalledWith(1, quadletFilePath, expectedQuadletContent(), {
+      mode: "0644",
+    })
+    expect(writeFile).toHaveBeenNthCalledWith(2, quadletFilePath, previousContent, {
+      mode: "600",
+    })
+  })
+
   it("restores an existing quadlet when systemctl daemon-reload fails", async () => {
     const previousContent = "[Container]\nImage=docker.io/library/traefik:v3.2\n"
     const ssh = createMockSsh({
