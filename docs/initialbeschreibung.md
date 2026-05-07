@@ -375,12 +375,16 @@ ssh: {
   privateKey: "~/.ssh/id_ed25519",
 }
 
-// Variante 2: Sudo-Passwort explizit (z.B. via op.resolve in den Env gelegt)
+// Variante 2: Sudo-Passwort explizit (z.B. aus process.env oder einer
+// vor dem Serverdefinitions-Import gesetzten Variablen). `SshConfig`
+// wird beim Import synchron validiert; `op.resolve()` und andere Module
+// laufen erst spaeter im run und koennen `ssh.sudoPassword` deshalb
+// nicht mehr befuellen.
 ssh: {
   user: "deploy",
   ports: [22],
   privateKey: "~/.ssh/id_ed25519",
-  sudoPassword: env["deploy.sudo_password"],
+  sudoPassword: process.env.SUDO_PASSWORD,
 }
 
 // Variante 3: Interaktive Abfrage (kein sudoPassword, Paratix fragt im Terminal)

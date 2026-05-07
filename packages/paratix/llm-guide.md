@@ -735,6 +735,7 @@ async check(ssh) {
 13. Do NOT call `server()` without all required fields (`name`, `host`, `ssh`, `run`) -- it throws at construction time. `name` and `host` must not be empty strings.
 14. Do NOT use empty arrays for `ssh.ports` or empty strings for `ssh.user`/`ssh.privateKey` -- validation rejects these. `ssh.privateKey` may be omitted entirely to use the SSH agent instead.
 15. Do NOT return loose `meta: { ... }` maps from custom modules -- always use typed meta entries.
+16. Do NOT set `ssh.sudoPassword` to a value from `op.resolve()` or `meta.env()` -- `SshConfig` is frozen at server construction time, before any module in `run` executes. Use a static source like `process.env.SUDO_PASSWORD` or a variable populated before the server definition is imported.
 
 ## Testing Patterns
 
