@@ -261,6 +261,22 @@ type AbsentContext = {
   name: string
 }
 
+async function disableTimerForAbsent(
+  ssh: SshConnection,
+  context: AbsentContext
+): Promise<ModuleResult | undefined> {
+  const { locations, module, name } = context
+  // `disable --now` removes the wants/ symlink, so run it before deleting
+  // unit files. Only tolerate the expected missing-unit race; real stop or
+  // disable failures mean the timer may still be active or enabled.
+  const disable = await ssh.exec(`${SYSTEMCTL} disable --now -- ${shellQuote(locations.timerUnit)}`, {
+    ignoreExitCode: true,
+    silent: true,
+  })
+  if (disable.code === 0 || isMissingUnitDisableResult(disable)) return undefined
+  return failedCommand(`[${module}: ${name}] systemctl disable --now failed`, disable)
+}
+
 async function applyAbsent(ssh: SshConnection, context: AbsentContext): Promise<ModuleResult> {
   const { locations, module, name } = context
 
@@ -271,16 +287,8 @@ async function applyAbsent(ssh: SshConnection, context: AbsentContext): Promise<
   const residualState = await hasResidualTimerState(ssh, locations.timerUnit)
   if (!serviceExists && !timerExists && !residualState) return { status: "ok" }
 
-  // `disable --now` removes the wants/ symlink, so run it before deleting
-  // unit files. Only tolerate the expected missing-unit race; real stop or
-  // disable failures mean the timer may still be active or enabled.
-  const disable = await ssh.exec(`${SYSTEMCTL} disable --now -- ${shellQuote(locations.timerUnit)}`, {
-    ignoreExitCode: true,
-    silent: true,
-  })
-  if (disable.code !== 0 && !isMissingUnitDisableResult(disable)) {
-    return failedCommand(`[${module}: ${name}] systemctl disable --now failed`, disable)
-  }
+  const disableFailure = await disableTimerForAbsent(ssh, context)
+  if (disableFailure) return disableFailure
 
   if (serviceExists || timerExists) {
     const remove = await ssh.exec(

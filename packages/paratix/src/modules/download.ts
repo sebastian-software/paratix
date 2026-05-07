@@ -155,6 +155,38 @@ async function destinationIsDirectory(conn: SshConnection, destination: string):
   return conn.test(`[ -d ${shellQuote(destination)} ]`)
 }
 
+async function finalizeDownloadedFile(
+  conn: SshConnection,
+  parameters: DownloadParameters,
+  downloadParameters: DownloadParameters
+): Promise<ModuleResult | undefined> {
+  if (await destinationIsDirectory(conn, parameters.destination)) {
+    return failed(`[download] destination is a directory: ${parameters.destination}`)
+  }
+  await conn.exec(
+    `mv -T -- ${shellQuote(downloadParameters.destination)} ${shellQuote(parameters.destination)}`,
+    { silent: true }
+  )
+  return undefined
+}
+
+async function allocateTemporaryDownloadParameters(
+  conn: SshConnection,
+  parameters: DownloadParameters
+): Promise<DownloadParameters> {
+  await conn.exec(`mkdir -p "$(dirname ${shellQuote(parameters.destination)})"`, {
+    silent: true,
+  })
+  const rawTemporaryDestination = await conn.output(
+    buildTemporaryDownloadPathCommand(parameters.destination)
+  )
+  const temporaryDestination = validateTemporaryDownloadPath(
+    parameters.destination,
+    rawTemporaryDestination
+  )
+  return { ...parameters, destination: temporaryDestination }
+}
+
 async function destinationHashMatches(
   conn: SshConnection,
   destination: string,
@@ -440,20 +472,10 @@ async function runCurlDownload(
   conn: SshConnection,
   parameters: DownloadParameters
 ): Promise<ModuleResult> {
-  await conn.exec(`mkdir -p "$(dirname ${shellQuote(parameters.destination)})"`, {
-    silent: true,
-  })
-  const rawTemporaryDestination = await conn.output(
-    buildTemporaryDownloadPathCommand(parameters.destination)
-  )
   // R-0000107: validate the mktemp output before any subcommand consumes
   // it. Reuses the shared validateMktempPath helper from ssh.ts (already
   // applied in aptKeyHelpers.ts and archive.ts/allocateRemoteUploadPath).
-  const temporaryDestination = validateTemporaryDownloadPath(
-    parameters.destination,
-    rawTemporaryDestination
-  )
-  const downloadParameters = { ...parameters, destination: temporaryDestination }
+  const downloadParameters = await allocateTemporaryDownloadParameters(conn, parameters)
   let shouldCleanupTemporaryFile = true
 
   try {
@@ -463,13 +485,8 @@ async function runCurlDownload(
       return failed(`[download] checksum verification failed for ${parameters.destination}`)
     }
     await applyFileAttributes(conn, downloadParameters)
-    if (await destinationIsDirectory(conn, parameters.destination)) {
-      return failed(`[download] destination is a directory: ${parameters.destination}`)
-    }
-    await conn.exec(
-      `mv -T -- ${shellQuote(downloadParameters.destination)} ${shellQuote(parameters.destination)}`,
-      { silent: true }
-    )
+    const finalizeFailure = await finalizeDownloadedFile(conn, parameters, downloadParameters)
+    if (finalizeFailure) return finalizeFailure
     shouldCleanupTemporaryFile = false
 
     return { status: "changed" }
