@@ -604,6 +604,18 @@ describe("swap.file — option validation", () => {
       expect(() => swap.file({ path: swapPath, priority, size: swapSize })).toThrow(/priority/v)
     }
   })
+
+  it("R-0000178: rejects sizes that exceed Number.MAX_SAFE_INTEGER", () => {
+    // 16P would translate to 16 * 1024^5 = ~1.8e16, well above
+    // Number.MAX_SAFE_INTEGER (~9e15).
+    expect(() => swap.file({ path: swapPath, size: "16P" })).toThrow(/MAX_SAFE_INTEGER/v)
+  })
+
+  it("R-0000178: accepts a size right at the safe-integer boundary", () => {
+    // Largest accepted value: a count of TiB that stays below MAX_SAFE_INTEGER
+    // when multiplied by 1024^4 = 8 * 1024^4 = 8 TiB.
+    expect(() => swap.file({ path: swapPath, size: "8T" })).not.toThrow()
+  })
 })
 
 describe("swap tuning wrappers", () => {

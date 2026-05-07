@@ -50,6 +50,36 @@ export type SwapFilePathClassification =
   | { state: "managed-swap-file" }
   | { state: "missing" }
 
+function parseSizeString(size: string): { unit: keyof typeof SIZE_POWERS; value: string } {
+  const match = /^(?<value>\d+)(?<unit>[KMGTP]?)$/iv.exec(size.trim())
+  if (match?.groups == null) {
+    throw new Error(`swap.file: unsupported size format "${size}"`)
+  }
+  const unit = match.groups.unit.toUpperCase()
+  if (!isSizeUnit(unit)) {
+    throw new Error(`swap.file: unsupported size unit "${unit}"`)
+  }
+  return { unit, value: match.groups.value }
+}
+
+function safeIntegerBytes(
+  valueBig: bigint,
+  unit: keyof typeof SIZE_POWERS,
+  original: string
+): number {
+  // R-0000178: compute the byte count via BigInt so very large units (T/P)
+  // do not silently overflow `Number.MAX_SAFE_INTEGER`. Reject values that
+  // would not survive the round-trip back to a safe integer.
+  const factor = BigInt(KIBI) ** BigInt(SIZE_POWERS[unit])
+  const bytesBig = valueBig * factor
+  if (bytesBig > BigInt(Number.MAX_SAFE_INTEGER)) {
+    throw new Error(
+      `swap.file: size "${original}" exceeds Number.MAX_SAFE_INTEGER (${String(Number.MAX_SAFE_INTEGER)} bytes)`
+    )
+  }
+  return Number(bytesBig)
+}
+
 function normalizeSizeToBytes(size: number | string): number {
   if (typeof size === "number") {
     if (!Number.isInteger(size) || size <= 0) {
@@ -58,18 +88,8 @@ function normalizeSizeToBytes(size: number | string): number {
     return size
   }
 
-  const trimmed = size.trim()
-  const match = /^(?<value>\d+)(?<unit>[KMGTP]?)$/iv.exec(trimmed)
-  if (match?.groups == null) {
-    throw new Error(`swap.file: unsupported size format "${size}"`)
-  }
-
-  const value = Number.parseInt(match.groups.value, 10)
-  const unit = match.groups.unit.toUpperCase()
-  if (!isSizeUnit(unit)) {
-    throw new Error(`swap.file: unsupported size unit "${unit}"`)
-  }
-  return value * KIBI ** SIZE_POWERS[unit]
+  const { unit, value } = parseSizeString(size)
+  return safeIntegerBytes(BigInt(value), unit, size)
 }
 
 function normalizeSizeForCommand(size: number | string): string {
