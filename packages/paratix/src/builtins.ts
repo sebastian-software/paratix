@@ -189,6 +189,11 @@ async function waitForEnterOrAbort(abortSignal: AbortSignal | undefined): Promis
     process.stdin.on("close", onClosed)
     process.stdin.on("error", onError)
     process.stdin.on("data", onData)
+    // R-0000149: explicitly resume stdin before relying on "data" events.
+    // After repeated pause/resume cycles, process.stdin may still be paused;
+    // the "data" listener would otherwise miss the very first keystroke until
+    // something else flips the stream into flowing mode.
+    process.stdin.resume()
     abortSignal?.addEventListener("abort", onAbort, { once: true })
   })
 }

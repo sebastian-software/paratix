@@ -327,6 +327,101 @@ describe("pause", () => {
       stdinPauseSpy.mockRestore()
     }
   })
+
+  it("R-0000149: calls process.stdin.resume() after attaching the data listener so the stream is in flowing mode", async () => {
+    const stdoutSpy = vi.spyOn(process.stdout, "write").mockImplementation(() => true)
+
+    const onCalls: Array<string | symbol> = []
+    const listeners = new Map<string | symbol, (...args: unknown[]) => void>()
+    const onSpy = vi
+      .spyOn(process.stdin, "on")
+      .mockImplementation((event: string | symbol, callback: (...args: unknown[]) => void) => {
+        onCalls.push(event)
+        listeners.set(event, callback)
+        return process.stdin
+      })
+    const removeSpy = vi
+      .spyOn(process.stdin, "removeListener")
+      .mockImplementation(() => process.stdin)
+    const stdinPauseSpy = vi.spyOn(process.stdin, "pause").mockImplementation(() => process.stdin)
+    const stdinResumeSpy = vi.spyOn(process.stdin, "resume").mockImplementation(() => process.stdin)
+
+    try {
+      const mod = pause()
+      // eslint-disable-next-line prefer-spread
+      const applyPromise = mod.apply(null, emptyEnv)
+
+      // resume() must be called at least once (after listener registration).
+      expect(stdinResumeSpy).toHaveBeenCalled()
+      // The "data" listener must be registered before resume() switches to flowing mode.
+      const dataIndex = onCalls.indexOf("data")
+      const resumeOrder = stdinResumeSpy.mock.invocationCallOrder[0]
+      const dataListenerOrder = onSpy.mock.invocationCallOrder[dataIndex]
+      expect(resumeOrder).toBeDefined()
+      expect(dataListenerOrder).toBeDefined()
+      expect(resumeOrder).toBeGreaterThan(dataListenerOrder)
+
+      const capturedDataCallback = listeners.get("data")
+      expect(capturedDataCallback).toBeDefined()
+      capturedDataCallback!(Buffer.from("\n"))
+      await applyPromise
+    } finally {
+      stdoutSpy.mockRestore()
+      onSpy.mockRestore()
+      removeSpy.mockRestore()
+      stdinPauseSpy.mockRestore()
+      stdinResumeSpy.mockRestore()
+    }
+  })
+
+  it("R-0000149: survives multiple pause/resume cycles without losing keystrokes", async () => {
+    const stdoutSpy = vi.spyOn(process.stdout, "write").mockImplementation(() => true)
+
+    const listeners = new Map<string | symbol, (...args: unknown[]) => void>()
+    const onSpy = vi
+      .spyOn(process.stdin, "on")
+      .mockImplementation((event: string | symbol, callback: (...args: unknown[]) => void) => {
+        listeners.set(event, callback)
+        return process.stdin
+      })
+    const removeSpy = vi
+      .spyOn(process.stdin, "removeListener")
+      .mockImplementation(() => process.stdin)
+    const stdinPauseSpy = vi.spyOn(process.stdin, "pause").mockImplementation(() => process.stdin)
+    const stdinResumeSpy = vi.spyOn(process.stdin, "resume").mockImplementation(() => process.stdin)
+
+    try {
+      // First cycle.
+      const firstMod = pause()
+      // eslint-disable-next-line prefer-spread
+      const firstPromise = firstMod.apply(null, emptyEnv)
+      const firstDataCallback = listeners.get("data")
+      expect(firstDataCallback).toBeDefined()
+      firstDataCallback!(Buffer.from("\n"))
+      await firstPromise
+
+      // Second cycle: resume() must be called again so the stream is back in flowing mode
+      // even though the previous cycle ended with stdin.pause().
+      listeners.delete("data")
+      const secondMod = pause()
+      // eslint-disable-next-line prefer-spread
+      const secondPromise = secondMod.apply(null, emptyEnv)
+      const secondDataCallback = listeners.get("data")
+      expect(secondDataCallback).toBeDefined()
+      secondDataCallback!(Buffer.from("\n"))
+      await secondPromise
+
+      // resume() was called for both cycles.
+      expect(stdinResumeSpy.mock.calls.length).toBeGreaterThanOrEqual(2)
+      expect(stdinPauseSpy.mock.calls.length).toBeGreaterThanOrEqual(2)
+    } finally {
+      stdoutSpy.mockRestore()
+      onSpy.mockRestore()
+      removeSpy.mockRestore()
+      stdinPauseSpy.mockRestore()
+      stdinResumeSpy.mockRestore()
+    }
+  })
 })
 
 describe("firstRun.stop", () => {
