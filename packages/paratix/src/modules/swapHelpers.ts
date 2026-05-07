@@ -100,10 +100,14 @@ async function removeSwapBackup(ssh: SshConnection, backupPath: string): Promise
   await ssh.exec(`rm -f ${shellQuote(backupPath)}`, EXEC_OPTS)
 }
 
+type ManagedReplacementOutcome =
+  | { backupPath: string; kind: "changed" }
+  | ({ kind: "result" } & ModuleResult)
+
 async function replaceManagedSwapFile(
   ssh: SshConnection,
   options: NormalizedSwapFileOptions
-): Promise<"changed" | ModuleResult> {
+): Promise<ManagedReplacementOutcome> {
   const replacementFile = await createInitializedSwapTemporaryFile({
     mode: options.mode,
     path: options.path,
@@ -111,14 +115,14 @@ async function replaceManagedSwapFile(
     sizeBytes: options.sizeBytes,
     ssh,
   })
-  if ("status" in replacementFile) return replacementFile
+  if ("status" in replacementFile) return { kind: "result", ...replacementFile }
 
   const replacementState = await disableAndRemoveSwapForReplacement(
     ssh,
     options.path,
     replacementFile.temporaryPath
   )
-  if ("status" in replacementState) return replacementState
+  if ("status" in replacementState) return { kind: "result", ...replacementState }
 
   const publishResult = await publishInitializedSwapTemporaryFile(
     {
@@ -132,29 +136,66 @@ async function replaceManagedSwapFile(
   )
   if (publishResult !== true) {
     const restoreResult = await restoreSwapBackup(ssh, options.path, replacementState.backupPath)
-    if (restoreResult !== true) return restoreResult
+    if (restoreResult !== true) return { kind: "result", ...restoreResult }
     if (replacementState.disabledSwap) {
       const enableResult = await enableSwap(ssh, options.path)
-      if (typeof enableResult !== "boolean") return enableResult
+      if (typeof enableResult !== "boolean") return { kind: "result", ...enableResult }
     }
-    return publishResult
+    return { kind: "result", ...publishResult }
   }
-  await removeSwapBackup(ssh, replacementState.backupPath)
-  return "changed"
+  // R-0000175: keep the backup until the entire apply pipeline (mode + enable
+  // + fstab update) finishes. The caller is responsible for invoking
+  // {@link finalizeManagedSwapBackup} or {@link rollbackManagedSwapBackup}.
+  return { backupPath: replacementState.backupPath, kind: "changed" }
 }
+
+async function rollbackManagedSwapBackup(
+  ssh: SshConnection,
+  parameters: {
+    backupPath: string
+    failureResult: ModuleResult
+    options: NormalizedSwapFileOptions
+  }
+): Promise<ModuleResult> {
+  const { backupPath, failureResult, options } = parameters
+  // Best-effort rollback: stop the (possibly active) swap on the new file,
+  // restore the backup, and try to re-enable swap on it. A failure inside
+  // the rollback is surfaced because operators must know if the host is
+  // left in a divergent state.
+  await disableSwap(ssh, options.path)
+  const restoreResult = await restoreSwapBackup(ssh, options.path, backupPath)
+  if (restoreResult !== true) return restoreResult
+  const reEnable = await enableSwap(ssh, options.path)
+  if (typeof reEnable !== "boolean") return reEnable
+  return failureResult
+}
+
+async function finalizeManagedSwapBackup(ssh: SshConnection, backupPath: string): Promise<void> {
+  await removeSwapBackup(ssh, backupPath)
+}
+
+type RecreateOutcome =
+  | "ok"
+  | { backupPath: null | string; kind: "changed" }
+  | ({ kind: "result" } & ModuleResult)
 
 async function recreateSwapFile(
   ssh: SshConnection,
   options: NormalizedSwapFileOptions
-): Promise<"changed" | "ok" | ModuleResult> {
+): Promise<RecreateOutcome> {
   if (!(await needsSwapRecreation(ssh, options))) return "ok"
 
   const safeRemoval = await ensureSafeSwapRemoval(ssh, options.path)
-  if (typeof safeRemoval !== "string") return safeRemoval
+  if (typeof safeRemoval !== "string") return { kind: "result", ...safeRemoval }
 
-  return safeRemoval === "ok"
-    ? replaceManagedSwapFile(ssh, options)
-    : createMissingSwapFile(ssh, options)
+  if (safeRemoval === "ok") {
+    const replaced = await replaceManagedSwapFile(ssh, options)
+    if (replaced.kind === "changed") return { backupPath: replaced.backupPath, kind: "changed" }
+    return replaced
+  }
+  const created = await createMissingSwapFile(ssh, options)
+  if (created === "changed") return { backupPath: null, kind: "changed" }
+  return { kind: "result", ...created }
 }
 
 async function enableSwap(ssh: SshConnection, path: string): Promise<boolean | ModuleResult> {
@@ -185,32 +226,74 @@ async function applyAbsentSwapFile(
 async function ensureExistingSwapFileMode(
   ssh: SshConnection,
   options: NormalizedSwapFileOptions,
-  recreateResult: "changed" | "ok"
+  recreated: boolean
 ): Promise<boolean | ModuleResult> {
-  if (recreateResult === "changed") return false
+  if (recreated) return false
   return ensureSwapFileMode(ssh, options)
 }
 
-async function applyPresentSwapFile(
+type PendingFinalization = {
+  backupPath: null | string
+  recreated: boolean
+}
+
+async function rollbackOrFail(
   ssh: SshConnection,
-  options: NormalizedSwapFileOptions
+  parameters: {
+    failure: ModuleResult
+    options: NormalizedSwapFileOptions
+    pending: PendingFinalization
+  }
 ): Promise<ModuleResult> {
-  let swapChanged = false
-  const recreateResult = await recreateSwapFile(ssh, options)
-  if (typeof recreateResult !== "string") return recreateResult
-  if (recreateResult === "changed") swapChanged = true
-  const modeResult = await ensureExistingSwapFileMode(ssh, options, recreateResult)
-  if (typeof modeResult !== "boolean") return modeResult
+  const { failure, options, pending } = parameters
+  if (pending.backupPath != null) {
+    return rollbackManagedSwapBackup(ssh, {
+      backupPath: pending.backupPath,
+      failureResult: failure,
+      options,
+    })
+  }
+  return failure
+}
+
+async function runApplyPresentPipeline(
+  ssh: SshConnection,
+  options: NormalizedSwapFileOptions,
+  pending: PendingFinalization
+): Promise<ModuleResult> {
+  let swapChanged = pending.recreated
+  const modeResult = await ensureExistingSwapFileMode(ssh, options, pending.recreated)
+  if (typeof modeResult !== "boolean")
+    return rollbackOrFail(ssh, { failure: modeResult, options, pending })
   if (modeResult) swapChanged = true
   const enableResult = await enableSwap(ssh, options.path)
-  if (typeof enableResult !== "boolean") return enableResult
+  if (typeof enableResult !== "boolean")
+    return rollbackOrFail(ssh, { failure: enableResult, options, pending })
   if (enableResult) swapChanged = true
   if (
     await ensureSwapFstabState({ desiredLine: options.expectedFstabLine, path: options.path, ssh })
   ) {
     swapChanged = true
   }
+  // R-0000175: every step succeeded — only now is it safe to discard the
+  // backup created by replaceManagedSwapFile.
+  if (pending.backupPath != null) await finalizeManagedSwapBackup(ssh, pending.backupPath)
   return { status: swapChanged ? "changed" : "ok" }
+}
+
+async function applyPresentSwapFile(
+  ssh: SshConnection,
+  options: NormalizedSwapFileOptions
+): Promise<ModuleResult> {
+  const recreateResult = await recreateSwapFile(ssh, options)
+  if (recreateResult === "ok") {
+    return runApplyPresentPipeline(ssh, options, { backupPath: null, recreated: false })
+  }
+  if (recreateResult.kind === "result") return recreateResult
+  return runApplyPresentPipeline(ssh, options, {
+    backupPath: recreateResult.backupPath,
+    recreated: true,
+  })
 }
 
 export async function applySwapFile(

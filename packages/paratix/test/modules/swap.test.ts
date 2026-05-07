@@ -341,6 +341,47 @@ describe("swap.file — apply", () => {
     expect(ssh.calls).toContain(`swapon '${swapPath}'`)
   })
 
+  it("R-0000175: keeps the backup until swapon and rolls back on swapon failure", async () => {
+    // After the new swap file is published, swapon fails. The pre-fix
+    // implementation removed the backup before swapon, leaving no rollback
+    // path; the fixed implementation must restore the backup and re-enable
+    // swap on the original file.
+    const ssh = createMockSsh({
+      [`[ -e '${swapPath}' ]`]: { code: 0 },
+      [`[ -f '${swapPath}' ]`]: { code: 0 },
+      [`[ -L '${swapPath}' ]`]: { code: 1 },
+      [`cat '${swapPath}'`]: { stdout: "existing swap bytes" },
+      [`chmod '0600' '${swapTempPath}'`]: { code: 0 },
+      [`mkdir -p '/'`]: { code: 0 },
+      [`mkswap '${swapTempPath}'`]: { code: 0 },
+      [`rm -f '${swapBackupPath}'`]: { code: 0 },
+      [`stat -c %s '${swapPath}'`]: { stdout: "1073741824" },
+      [`swaplabel '${swapPath}' >/dev/null 2>&1`]: { code: 0 },
+      [`swapoff '${swapPath}'`]: { code: 0 },
+      [`swapon '${swapPath}'`]: { code: 1, stderr: "swapon failed" },
+      [backupSwapCommand]: { code: 0 },
+      [createSwapTempCommand]: { code: 0 },
+      [mktempSwapCommand]: { code: 0, stdout: `${swapTempPath}\n` },
+      [publishSwapCommand]: { code: 0 },
+      [restoreSwapCommand]: { code: 0 },
+      [safeSwapParentCommand]: { code: 0, stdout: "/\n" },
+    })
+    vi.spyOn(ssh, "lines")
+      .mockResolvedValueOnce([swapPath])
+      .mockResolvedValueOnce([])
+      .mockResolvedValue([])
+
+    const mod = swap.file({ path: swapPath, size: swapSize })
+    const result = await mod.apply(ssh, emptyEnv)
+
+    expect(result.status).toBe("failed")
+    expect(result.error?.message).toContain("swapon failed")
+    // Restore must have run, and the backup must NOT have been deleted before
+    // the rollback (the rollback path never reaches `rm -f`).
+    expect(ssh.calls).toContain(restoreSwapCommand)
+    expect(ssh.calls).not.toContain(`rm -f '${swapBackupPath}'`)
+  })
+
   it("does not swapoff the existing swap file when replacement creation fails", async () => {
     const ssh = createMockSsh({
       [`[ -e '${swapPath}' ]`]: { code: 0 },
