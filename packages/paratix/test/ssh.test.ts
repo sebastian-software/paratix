@@ -3431,6 +3431,58 @@ describe("SshConnectionImpl", () => {
       expect(promptTerminal).not.toHaveBeenCalled()
     })
 
+    it("primes the remote sudo timestamp so subsequent input-bearing exec calls succeed (R-0000152 regression)", async () => {
+      // Regression: sudoCommand previously fail-closed for any exec with
+      // caller-provided stdin on hosts that required a sudo password. Once
+      // cacheAndValidateSudoPassword has authenticated via `sudo -S`, the
+      // remote sudo timestamp is fresh and `sudo -n` can run with caller
+      // input on the same channel without sharing stdin with the password.
+      vi.mocked(promptTerminal).mockResolvedValueOnce("entered-sudo-password")
+
+      const execSpy = vi
+        .fn()
+        // Probe: command -v sudo
+        .mockImplementationOnce((_command: string, callback: ExecCallback) => {
+          const stream = makeStream()
+          callback(undefined, stream)
+          stream.emit("close", 0)
+        })
+        // Probe: sudo -n true (passwordless probe fails)
+        .mockImplementationOnce((_command: string, callback: ExecCallback) => {
+          const stream = makeStream()
+          callback(undefined, stream)
+          stream.emit("close", 1)
+        })
+        // Validation: SUDO_PROMPT='' sudo -S bash -c 'true'
+        .mockImplementationOnce((_command: string, callback: ExecCallback) => {
+          const stream = makeStream()
+          callback(undefined, stream)
+          stream.emit("close", 0)
+        })
+        // Subsequent exec with input: must use sudo -n bash -c
+        .mockImplementationOnce((_command: string, callback: ExecCallback) => {
+          const stream = makeStream()
+          callback(undefined, stream)
+          stream.emit("close", 0)
+        })
+
+      const client = makeClientWithExecSpy(execSpy)
+      const ssh = makeConnectedSsh(client, { sudoPassword: null, user: "deploy" })
+
+      await ssh.probeSudo()
+
+      // After the validation, the credential cache is primed. Calling exec
+      // with caller-provided input must succeed (not fail-closed) and must
+      // use the `sudo -n bash -c …` path, NOT `SUDO_PROMPT='' sudo -S`.
+      await expect(ssh.exec("base64 -d > /tmp/file", { input: "data" })).resolves.toMatchObject({
+        code: 0,
+      })
+
+      const inputCommand = execSpy.mock.calls[3][0] as string
+      expect(inputCommand).toMatch(/^sudo -n bash -c /v)
+      expect(inputCommand).not.toContain("sudo -S")
+    })
+
     it("registers the sudo password in the secret sink during validation (R-0000146 regression)", async () => {
       // Regression: cacheAndValidateSudoPassword wrapped only the direct
       // error message via maskSecrets([password]), so the cause-chain

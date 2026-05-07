@@ -175,6 +175,18 @@ export class SshConnectionImpl implements SshConnection {
   private readonly config: SshConfig
   private connectedPort = 0
   /**
+   * Tracks whether the remote host's sudo timestamp has been primed so that
+   * subsequent `sudo -n` calls can succeed without prompting. Set to `true`
+   * once `cacheAndValidateSudoPassword` has authenticated via `sudo -S` and
+   * cleared on disconnect / clearCachedPassword.
+   *
+   * R-0000152: this lets `sudoCommand` route caller-provided input through
+   * `sudo -n bash -c` even on hosts that require a real sudo password — the
+   * password no longer has to share the single SSH stdin stream with the
+   * payload, so the previous fail-closed branch becomes a working path.
+   */
+  private credentialCachePrimed = false
+  /**
    * Tracks whether the remote host accepts passwordless sudo for the configured
    * user. Set to `true` after a successful `sudo -n true` probe (see
    * `hasPasswordlessSudo`). Used by `sudoCommand()` to safely route stdin
@@ -655,6 +667,11 @@ export class SshConnectionImpl implements SshConnection {
         await this.execPrepared("true", { silent: true, timeout: 10_000 })
       })
       this.sudoReady = true
+      // R-0000152: a successful `sudo -S` authentication primes the remote
+      // host's sudo timestamp so subsequent `sudo -n` calls can proceed
+      // without re-prompting. Track this state so `sudoCommand` can route
+      // caller-provided stdin via `sudo -n` even on password-protected hosts.
+      this.credentialCachePrimed = true
     } catch (error) {
       const masked = maskSecrets(String(error), [password])
       this.clearCachedPassword()
@@ -675,6 +692,10 @@ export class SshConnectionImpl implements SshConnection {
       this.cachedSudoPassword.fill(0)
       this.cachedSudoPassword = null
     }
+    // R-0000152: a cleared password invalidates our local view of the
+    // remote sudo cred cache too — even if the remote timestamp lingers,
+    // we have no way to refresh it without prompting again.
+    this.credentialCachePrimed = false
   }
 
   private async agentSocketExists(agent: string): Promise<boolean> {
@@ -1206,10 +1227,12 @@ trap - EXIT
       // caller-provided input cannot share that stream — sudo would consume
       // the input as the password and then fail with `sudo: a password is
       // required`. We can only safely route the input via `sudo -n bash -c`
-      // if a previous probe confirmed passwordless sudo is available;
-      // otherwise we must fail-closed with an actionable error instead of
-      // silently producing a `sudo -n` command that breaks at runtime.
-      if (!this.passwordlessSudo) {
+      // if either a previous probe confirmed passwordless sudo, or a prior
+      // successful `sudo -S` authentication has primed the remote sudo
+      // timestamp (R-0000152). Otherwise fail-closed with an actionable error
+      // instead of silently producing a `sudo -n` command that breaks at
+      // runtime.
+      if (!this.passwordlessSudo && !this.credentialCachePrimed) {
         throw new Error(
           "exec with input is not supported when sudo requires a password: " +
             "configure passwordless sudo for the connecting user or remove the input payload"
