@@ -298,6 +298,42 @@ describe("ufw.rule", () => {
     expect(result).toBe("ok")
   })
 
+  it("check returns ok when IPv4 and IPv6 protocol-agnostic rules are both present", async () => {
+    const ssh = createMockSsh({
+      "ufw status": {
+        stdout: [
+          "Status: active",
+          "",
+          "To                         Action      From",
+          "--                         ------      ----",
+          "22                         DENY        Anywhere",
+          "22 (v6)                    DENY        Anywhere (v6)",
+        ].join("\n"),
+      },
+    })
+    const mod = ufw.rule("deny", 22)
+    const result = await mod.check(ssh, emptyEnv)
+    expect(result).toBe("ok")
+  })
+
+  it("check returns needs-apply when IPv6 status is present but the matching v6 rule is missing", async () => {
+    const ssh = createMockSsh({
+      "ufw status": {
+        stdout: [
+          "Status: active",
+          "",
+          "To                         Action      From",
+          "--                         ------      ----",
+          "22                         DENY        Anywhere",
+          "80 (v6)                    ALLOW       Anywhere (v6)",
+        ].join("\n"),
+      },
+    })
+    const mod = ufw.rule("deny", 22)
+    const result = await mod.check(ssh, emptyEnv)
+    expect(result).toBe("needs-apply")
+  })
+
   it("check returns needs-apply when one port in a multi-port rule is missing", async () => {
     const ssh = createMockSsh({
       "ufw status": { stdout: "80                         ALLOW       Anywhere" },
@@ -370,6 +406,18 @@ describe("ufw.rule", () => {
       },
     })
     const mod = ufw.rule("allow", [80, 443])
+    const result = await mod.apply(ssh, emptyEnv)
+    expect(result.status).toBe("changed")
+  })
+
+  it("apply returns changed when only one address family is added", async () => {
+    const ssh = createMockSsh({
+      "ufw 'deny' '22'": {
+        code: 0,
+        stdout: "Skipping adding existing rule\nRule added (v6)\n",
+      },
+    })
+    const mod = ufw.rule("deny", 22)
     const result = await mod.apply(ssh, emptyEnv)
     expect(result.status).toBe("changed")
   })

@@ -28,6 +28,28 @@ function hasProtocolAgnosticRule(status: string, port: number, action: "ALLOW" |
   return new RegExp(`^${port}\\s+${action}\\b`, "mv").test(status)
 }
 
+function hasProtocolAgnosticIpv6Rule(
+  status: string,
+  port: number,
+  action: "ALLOW" | "DENY"
+): boolean {
+  // eslint-disable-next-line security/detect-non-literal-regexp
+  return new RegExp(`^${port}\\s+\\(v6\\)\\s+${action}\\b`, "mv").test(status)
+}
+
+function statusIncludesIpv6Rules(status: string): boolean {
+  return /\(v6\)/v.test(status)
+}
+
+function ufwRuleApplyChanged(stdout: string): boolean {
+  const lines = stdout
+    .split(/\r?\n/v)
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0)
+  if (lines.length === 0) return true
+  return lines.some((line) => !line.startsWith("Skipping adding existing rule"))
+}
+
 /**
  * Modules for managing the UFW (Uncomplicated Firewall) on Debian/Ubuntu hosts.
  */
@@ -143,10 +165,11 @@ export const ufw = {
               result
             )
           }
-          // R-0000076: ufw prints "Skipping adding existing rule" when the
-          // rule is already present. Treat that as a no-op so apply only
-          // returns "changed" when at least one port was newly added.
-          if (!result.stdout.includes("Skipping adding existing rule")) {
+          // R-0000076/R-0000114: ufw prints "Skipping adding existing rule"
+          // per address family. Treat the command as a no-op only when all
+          // emitted family lines are skips; a mixed skip/add output still
+          // means one family was repaired.
+          if (ufwRuleApplyChanged(result.stdout)) {
             anyChanged = true
           }
         }
@@ -157,6 +180,7 @@ export const ufw = {
         if (!ssh) return NEEDS_APPLY
 
         const status = await ssh.output(`${UFW} status`)
+        const requireIpv6Rule = statusIncludesIpv6Rules(status)
         for (const port of portList) {
           const expectedAction = action === "allow" ? "ALLOW" : "DENY"
           // R-0000118: match only the protocol-agnostic form `<port> ACTION`.
@@ -168,6 +192,9 @@ export const ufw = {
           // Anchor the port at the line start and require a whitespace
           // boundary so port 22 does not match 5022, 1022, 2222 etc.
           if (!hasProtocolAgnosticRule(status, port, expectedAction)) {
+            return NEEDS_APPLY
+          }
+          if (requireIpv6Rule && !hasProtocolAgnosticIpv6Rule(status, port, expectedAction)) {
             return NEEDS_APPLY
           }
         }
