@@ -59,6 +59,68 @@ describe("dist CLI", () => {
     }
   })
 
+  it("runs the published apply CLI with a valid playbook", () => {
+    const packageJson = JSON.parse(
+      readFileSync(join(packageRootDirectory, "package.json"), "utf8")
+    ) as {
+      bin: { paratix: string }
+    }
+    const distCliPath = resolve(packageRootDirectory, packageJson.bin.paratix)
+    const distCliSource = readFileSync(distCliPath, "utf8")
+    const sshChunkImportPattern =
+      /import\s*\{[^}]*\bSshConnectionImpl\b[^}]*\}\s*from\s*"(?<specifier>[^"]+)"/s
+    const sshChunkSpecifier = sshChunkImportPattern.exec(distCliSource)?.groups?.specifier
+    expect(sshChunkSpecifier).toBeDefined()
+    const distSshChunkUrl = pathToFileURL(resolve(dirname(distCliPath), sshChunkSpecifier!)).href
+    const tempDirectory = mkdtempSync(join(tmpdir(), "paratix-cli-apply-dist-"))
+    const playbookPath = join(tempDirectory, "valid-playbook.mjs")
+
+    try {
+      writeFileSync(
+        playbookPath,
+        `
+const { SshConnectionImpl } = await import(${JSON.stringify(distSshChunkUrl)})
+SshConnectionImpl.prototype.connect = async function connect() {}
+SshConnectionImpl.prototype.disconnect = function disconnect() {}
+
+export default {
+  name: "dist-apply-smoke",
+  host: "127.0.0.1",
+  ssh: { ports: [22], user: "root" },
+  run: [
+    {
+      name: "dist local apply module",
+      local: true,
+      async check(ssh) {
+        if (ssh !== null) throw new Error("local check received an SSH connection")
+        return "needs-apply"
+      },
+      async apply(ssh) {
+        if (ssh !== null) throw new Error("local apply received an SSH connection")
+        return { status: "changed", detail: "local smoke" }
+      },
+    },
+  ],
+}
+`
+      )
+
+      const output = execFileSync(process.execPath, [distCliPath, "apply", playbookPath], {
+        cwd: packageRootDirectory,
+        encoding: "utf8",
+        killSignal: "SIGTERM",
+        maxBuffer: CLI_COMMAND_MAX_BUFFER,
+        timeout: CLI_COMMAND_TIMEOUT_MS,
+      })
+
+      expect(output).toContain("dist-apply-smoke")
+      expect(output).toContain("dist local apply module")
+      expect(output).toContain("local smoke")
+    } finally {
+      rmSync(tempDirectory, { force: true, recursive: true })
+    }
+  })
+
   it("exports resolveEnvironment from the published package entry point", async () => {
     const distIndexUrl = pathToFileURL(resolve(packageRootDirectory, "dist/index.js")).href
     const { resolveEnvironment } = (await import(distIndexUrl)) as {
