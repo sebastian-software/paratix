@@ -537,7 +537,9 @@ describe("writeProjectFiles", () => {
     expect(content).toContain('ufw.rule("allow", firewallTcpPorts)')
     expect(content).toContain('(env) => env["FIRST_RUN"] !== true')
     expect(content).toContain('command.shell("ufw --force delete allow 22", {')
-    expect(content).toContain("check: \"! ufw status | grep -Eq '^22[[:space:]]+ALLOW'\"")
+    expect(content).toContain(
+      "check: \"! ufw status | grep -Eq '^22[[:space:]]+(\\\\(v6\\\\)[[:space:]]+)?ALLOW'\""
+    )
   })
 
   it("generated server.ts keeps port 22 open during first run before removing it later", () => {
