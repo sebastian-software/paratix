@@ -172,4 +172,53 @@ describe("net.request — check", () => {
   it("rejects ftp URLs before building a curl command", () => {
     expect(() => net.request("ftp://example.com/file")).toThrow(/Unsupported URL scheme 'ftp'/v)
   })
+
+  it("rejects http URLs that carry an Authorization header", () => {
+    expect(() =>
+      net.request("http://example.com/health", {
+        headers: { Authorization: "Bearer token" },
+      })
+    ).toThrow(/refusing to send sensitive headers .* over plaintext http/v)
+  })
+
+  it("rejects http URLs that carry a Cookie header (case-insensitive match)", () => {
+    expect(() =>
+      net.request("http://example.com/health", {
+        headers: { COOKIE: "session=abc" },
+      })
+    ).toThrow(/refusing to send sensitive headers .* over plaintext http/v)
+  })
+
+  it("rejects http URLs that carry an X-Api-Key header", () => {
+    expect(() =>
+      net.request("http://example.com/health", {
+        headers: { "x-api-key": "k123" },
+      })
+    ).toThrow(/refusing to send sensitive headers .* over plaintext http/v)
+  })
+
+  it("allows http URLs with sensitive headers when allowInsecureHttpHeaders is true", () => {
+    expect(() =>
+      net.request("http://example.com/health", {
+        allowInsecureHttpHeaders: true,
+        headers: { Authorization: "Bearer token" },
+      })
+    ).not.toThrow()
+  })
+
+  it("allows https URLs with sensitive headers without an opt-in", () => {
+    expect(() =>
+      net.request("https://example.com/health", {
+        headers: { Authorization: "Bearer token" },
+      })
+    ).not.toThrow()
+  })
+
+  it("allows http URLs without sensitive headers", () => {
+    expect(() =>
+      net.request("http://example.com/health", {
+        headers: { "X-Trace-Id": "abc" },
+      })
+    ).not.toThrow()
+  })
 })

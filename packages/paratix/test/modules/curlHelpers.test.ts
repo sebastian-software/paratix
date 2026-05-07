@@ -1,6 +1,10 @@
 import { describe, expect, it } from "vitest"
 
-import { buildCurlConfigPayload, isValidHeaderName } from "../../src/modules/curlHelpers.js"
+import {
+  buildCurlConfigPayload,
+  hasSensitiveHeaders,
+  isValidHeaderName,
+} from "../../src/modules/curlHelpers.js"
 
 describe("buildCurlConfigPayload", () => {
   it("rejects URL values containing curl config line separators", () => {
@@ -52,5 +56,34 @@ describe("isValidHeaderName", () => {
     ]) {
       expect(isValidHeaderName(name)).toBe(false)
     }
+  })
+})
+
+describe("hasSensitiveHeaders", () => {
+  it("returns false for an empty header map", () => {
+    expect(hasSensitiveHeaders({})).toBe(false)
+  })
+
+  it("matches Authorization regardless of casing", () => {
+    expect(hasSensitiveHeaders({ Authorization: "Bearer token" })).toBe(true)
+    expect(hasSensitiveHeaders({ AUTHORIZATION: "Bearer token" })).toBe(true)
+    expect(hasSensitiveHeaders({ authorization: "Bearer token" })).toBe(true)
+  })
+
+  it("matches Cookie, Set-Cookie, X-Api-Key, and Proxy-Authorization", () => {
+    expect(hasSensitiveHeaders({ Cookie: "session=abc" })).toBe(true)
+    expect(hasSensitiveHeaders({ "Set-Cookie": "session=abc" })).toBe(true)
+    expect(hasSensitiveHeaders({ "X-Api-Key": "k123" })).toBe(true)
+    expect(hasSensitiveHeaders({ "Proxy-Authorization": "Basic abc" })).toBe(true)
+  })
+
+  it("returns false for non-sensitive headers", () => {
+    expect(
+      hasSensitiveHeaders({
+        Accept: "application/json",
+        "Content-Type": "application/json",
+        "X-Trace-Id": "abc",
+      })
+    ).toBe(false)
   })
 })

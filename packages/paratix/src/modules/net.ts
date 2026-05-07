@@ -13,6 +13,7 @@ import {
   NEEDS_APPLY,
   type SshConnection,
 } from "../types.js"
+import { hasSensitiveHeaders } from "./curlHelpers.js"
 import { sha256String } from "./fileHelpers.js"
 import { hasFlag, setVersionedFlag } from "./moduleHelpers.js"
 import {
@@ -902,6 +903,37 @@ async function checkHostsState(
 }
 
 /**
+ * Reject combinations that would transmit credentials in cleartext: any URL
+ * using `http://` together with a sensitive header (Authorization, Cookie,
+ * X-Api-Key, …). Operators who knowingly target a local mock or a TLS-fronted
+ * proxy can opt back in by passing `allowInsecureHttpHeaders: true`.
+ *
+ * @param url - The already-validated request URL.
+ * @param headers - Optional header map supplied by the caller.
+ * @param allowInsecureHttpHeaders - When `true`, suppress the rejection.
+ */
+function rejectSensitiveHeadersOverHttp(
+  url: string,
+  headers: Record<string, string> | undefined,
+  allowInsecureHttpHeaders: boolean | undefined
+): void {
+  if (allowInsecureHttpHeaders === true) return
+  if (headers === undefined || !hasSensitiveHeaders(headers)) return
+  // The URL was already validated by validateHttpUrl, so parsing cannot fail
+  // in practice; we still wrap it defensively to avoid leaking parse errors.
+  let parsed: URL
+  try {
+    parsed = new URL(url)
+  } catch {
+    return
+  }
+  if (parsed.protocol !== "http:") return
+  throw new Error(
+    "[net.request] refusing to send sensitive headers (Authorization, Cookie, X-Api-Key, …) over plaintext http; switch to https or pass allowInsecureHttpHeaders: true to opt in"
+  )
+}
+
+/**
  * Modules for managing network configuration on the remote host.
  */
 export const net = {
@@ -1035,6 +1067,7 @@ export const net = {
    *
    * @param url - The URL to request.
    * @param options - Optional request settings.
+   * @param options.allowInsecureHttpHeaders - When `true`, allow sending sensitive headers (e.g. `Authorization`, `Cookie`) over plaintext `http://`. Default `false` rejects such combinations to prevent credential leakage.
    * @param options.body - Expected string in the response body.
    * @param options.headers - Additional HTTP headers.
    * @param options.method - HTTP method (default: `"GET"`).
@@ -1043,9 +1076,16 @@ export const net = {
    */
   request(
     url: string,
-    options?: { body?: string; headers?: Record<string, string>; method?: string; status?: number }
+    options?: {
+      allowInsecureHttpHeaders?: boolean
+      body?: string
+      headers?: Record<string, string>
+      method?: string
+      status?: number
+    }
   ): Module {
     validateHttpUrl(url, { allowHttp: true })
+    rejectSensitiveHeadersOverHttp(url, options?.headers, options?.allowInsecureHttpHeaders)
     const method = options?.method ?? "GET"
     const parameters: HttpCheckParameters = buildHttpCheckParameters({
       body: options?.body,

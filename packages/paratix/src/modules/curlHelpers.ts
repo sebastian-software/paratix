@@ -12,6 +12,13 @@ const SENSITIVE_QUERY_TOKENS = new Set([
   "signature",
   "token",
 ])
+const SENSITIVE_HEADER_NAMES = new Set([
+  "authorization",
+  "cookie",
+  "proxy-authorization",
+  "set-cookie",
+  "x-api-key",
+])
 const QUERY_PARAMETER_SEPARATORS = new Set(["_", "-", "."])
 const REDACTED_URL_VALUE = "REDACTED"
 
@@ -119,6 +126,21 @@ function tokenizeQueryParameterName(name: string): string[] {
  */
 export function isSensitiveQueryParameterName(name: string): boolean {
   return tokenizeQueryParameterName(name).some((part) => SENSITIVE_QUERY_TOKENS.has(part))
+}
+
+/**
+ * Check whether a header map contains a header name that is known to carry
+ * credentials. Comparison is case-insensitive so callers can pass headers in
+ * any casing (`Authorization`, `authorization`, `AUTHORIZATION`).
+ *
+ * @param headers - Header name/value pairs to inspect.
+ * @returns `true` when at least one header name is in the sensitive set.
+ */
+export function hasSensitiveHeaders(headers: Record<string, string>): boolean {
+  for (const name of Object.keys(headers)) {
+    if (SENSITIVE_HEADER_NAMES.has(name.toLowerCase())) return true
+  }
+  return false
 }
 
 /**

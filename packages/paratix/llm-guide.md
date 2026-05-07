@@ -237,14 +237,14 @@ only when an `http://` source or redirect is intentional.
 
 ### `net`
 
-| Method          | Signature                                                                                                                | Idempotent |
-| --------------- | ------------------------------------------------------------------------------------------------------------------------ | ---------- |
-| `net.hosts`     | `(ip: string, hostnames: string[], options?: { state?: "absent" \| "present" }): Module`                                 | Yes        |
-| `net.interface` | `(name: string, options: InterfaceOptions): Module`                                                                      | Yes        |
-| `net.request`   | `(url: string, options?: { body?: string; headers?: Record<string, string>; method?: string; status?: number }): Module` | Yes        |
-| `net.resolv`    | `(options: { nameservers: string[]; search?: string[] }): Module`                                                        | Yes        |
-| `net.route`     | `(destination: string, gateway: string, options?: { device?: string; state?: "absent" \| "present" }): Module`           | Yes        |
-| `net.waitFor`   | `(options: WaitForOptions): Module`                                                                                      | Yes        |
+| Method          | Signature                                                                                                                                                    | Idempotent |
+| --------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------ | ---------- |
+| `net.hosts`     | `(ip: string, hostnames: string[], options?: { state?: "absent" \| "present" }): Module`                                                                     | Yes        |
+| `net.interface` | `(name: string, options: InterfaceOptions): Module`                                                                                                          | Yes        |
+| `net.request`   | `(url: string, options?: { allowInsecureHttpHeaders?: boolean; body?: string; headers?: Record<string, string>; method?: string; status?: number }): Module` | Yes        |
+| `net.resolv`    | `(options: { nameservers: string[]; search?: string[] }): Module`                                                                                            | Yes        |
+| `net.route`     | `(destination: string, gateway: string, options?: { device?: string; state?: "absent" \| "present" }): Module`                                               | Yes        |
+| `net.waitFor`   | `(options: WaitForOptions): Module`                                                                                                                          | Yes        |
 
 ### `op`
 
