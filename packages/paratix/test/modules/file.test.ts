@@ -35,6 +35,13 @@ const createMockSsh: typeof createBaseMockSsh = (responses, options) =>
       },
       {
         command:
+          /^\[ -f '\/(?:etc|remote|var)\/.+?' \] && \[ ! -L '\/(?:etc|remote|var)\/.+?' \]$/v,
+        result: { code: 0 },
+      },
+      { command: /^\[ -f '\/(?:etc|remote|var)\/.+?' \]$/v, result: { code: 0 } },
+      { command: /^\[ -L '\/(?:etc|remote|var)\/.+?' \]$/v, result: { code: 1 } },
+      {
+        command:
           /^grep -qF '# END paratix: (?:myblock|grüße-block)' '\/etc\/(?:hosts|über hosts)'$/v,
         result: { code: 0 },
       },
@@ -503,6 +510,25 @@ describe("file.copy", () => {
       const ssh = createMockSsh({
         // exists check: file does not exist
         "[ -e '/remote/file.txt' ]": { code: 1 },
+        "[ -f '/remote/file.txt' ] && [ ! -L '/remote/file.txt' ]": { code: 1 },
+      })
+
+      const mod = file.copy("/remote/file.txt", localPath)
+      const result = await mod.check(ssh, emptyEnv)
+      expect(result).toBe("needs-apply")
+    } finally {
+      rmSync(dir, { recursive: true })
+    }
+  })
+
+  it("check returns needs-apply when the remote path is a symlink to a matching file", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "paratix-test-"))
+    try {
+      const localPath = join(dir, "source.txt")
+      writeFileSync(localPath, "hello world")
+
+      const ssh = createMockSsh({
+        "[ -f '/remote/file.txt' ] && [ ! -L '/remote/file.txt' ]": { code: 1 },
       })
 
       const mod = file.copy("/remote/file.txt", localPath)
@@ -1123,6 +1149,24 @@ describe("file.template", () => {
     }
   })
 
+  it("check returns needs-apply when the rendered target is a symlink to a matching file", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "paratix-test-"))
+    try {
+      const templatePath = join(dir, "template.txt")
+      writeFileSync(templatePath, "Hello World")
+
+      const ssh = createMockSsh({
+        "[ -f '/remote/out.txt' ] && [ ! -L '/remote/out.txt' ]": { code: 1 },
+      })
+
+      const mod = file.template("/remote/out.txt", templatePath)
+      const result = await mod.check(ssh, emptyEnv)
+      expect(result).toBe("needs-apply")
+    } finally {
+      rmSync(dir, { recursive: true })
+    }
+  })
+
   it("renders dotted environment keys in template placeholders", async () => {
     const dir = mkdtempSync(join(tmpdir(), "paratix-test-"))
     try {
@@ -1156,6 +1200,7 @@ describe("file.template", () => {
 
       const ssh = createMockSsh({
         "[ -e '/remote/out.txt' ]": { code: 1 },
+        "[ -f '/remote/out.txt' ] && [ ! -L '/remote/out.txt' ]": { code: 1 },
       })
 
       const mod = file.template("/remote/out.txt", templatePath)
@@ -1339,6 +1384,24 @@ describe("file.assemble", () => {
     }
   })
 
+  it("check returns needs-apply when the assembled target is a symlink to a matching file", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "paratix-test-"))
+    try {
+      const frag1 = join(dir, "frag1.txt")
+      writeFileSync(frag1, "Hello")
+
+      const ssh = createMockSsh({
+        "[ -f '/remote/assembled.txt' ] && [ ! -L '/remote/assembled.txt' ]": { code: 1 },
+      })
+
+      const mod = file.assemble("/remote/assembled.txt", [frag1])
+      const result = await mod.check(ssh, emptyEnv)
+      expect(result).toBe("needs-apply")
+    } finally {
+      rmSync(dir, { recursive: true })
+    }
+  })
+
   it("check returns ok when no mode is configured and an existing file has mode 0600", async () => {
     const dir = mkdtempSync(join(tmpdir(), "paratix-test-"))
     try {
@@ -1369,6 +1432,7 @@ describe("file.assemble", () => {
 
       const ssh = createMockSsh({
         "[ -e '/remote/assembled.txt' ]": { code: 1 },
+        "[ -f '/remote/assembled.txt' ] && [ ! -L '/remote/assembled.txt' ]": { code: 1 },
       })
 
       const mod = file.assemble("/remote/assembled.txt", [frag1])

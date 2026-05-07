@@ -24,6 +24,7 @@ import {
   renderChownCommand,
   resolveWriteMode,
 } from "./fileMetadataHelpers.js"
+import { isRegularFileWithoutSymlink } from "./remoteFileChecks.js"
 
 export type { BlockOptions } from "./fileExtra.js"
 
@@ -130,6 +131,7 @@ async function templateStateMatches(input: {
   rendered: string
   ssh: SshConnection
 }): Promise<boolean> {
+  if (!(await isRegularFileWithoutSymlink(input.ssh, input.remotePath))) return false
   const remoteHash = await input.ssh.sha256(input.remotePath)
   const localHash = sha256String(input.rendered)
   if (!hexHashesEqual(remoteHash, localHash)) return false
@@ -224,8 +226,7 @@ export const file = {
       },
       async check(ssh: null | SshConnection): Promise<"needs-apply" | "ok"> {
         if (!ssh) return NEEDS_APPLY
-        const exists = await ssh.exists(remotePath)
-        if (!exists) return NEEDS_APPLY
+        if (!(await isRegularFileWithoutSymlink(ssh, remotePath))) return NEEDS_APPLY
 
         const remoteHash = await ssh.sha256(remotePath)
         const localHash = await localSha256(localPath)
@@ -366,8 +367,7 @@ export const file = {
         environment: Environment
       ): Promise<"needs-apply" | "ok"> {
         if (!ssh) return NEEDS_APPLY
-        const exists = await ssh.exists(remotePath)
-        if (!exists) return NEEDS_APPLY
+        if (!(await isRegularFileWithoutSymlink(ssh, remotePath))) return NEEDS_APPLY
 
         const templateContent = await getTemplateContent()
         const rendered = await renderTemplate(templateContent, environment, {

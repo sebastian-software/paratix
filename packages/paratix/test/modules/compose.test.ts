@@ -24,6 +24,9 @@ function createComposeMockSsh(
 ) {
   return createStrictMockSsh(
     {
+      "[ -f '/etc/systemd/system/compose-app.service' ] && [ ! -L '/etc/systemd/system/compose-app.service' ]":
+        { code: 0 },
+      "[ -f '/opt/app/compose.yml' ] && [ ! -L '/opt/app/compose.yml' ]": { code: 0 },
       "command -v podman": { code: 0 },
       ...responses,
     },
@@ -565,7 +568,17 @@ describe("compose.config — check", () => {
 
   it("returns needs-apply when the remote file does not exist", async () => {
     const mockSsh = createComposeMockSsh({
+      "[ -f '/opt/app/compose.yml' ] && [ ! -L '/opt/app/compose.yml' ]": { code: 1 },
       [`[ -e '${remotePath}' ]`]: { code: 1 },
+    })
+    const mod = compose.config({ content: sampleContent, projectDirectory })
+    const result = await mod.check(mockSsh, emptyEnv)
+    expect(result).toBe("needs-apply")
+  })
+
+  it("returns needs-apply when the remote compose file is a symlink", async () => {
+    const mockSsh = createComposeMockSsh({
+      "[ -f '/opt/app/compose.yml' ] && [ ! -L '/opt/app/compose.yml' ]": { code: 1 },
     })
     const mod = compose.config({ content: sampleContent, projectDirectory })
     const result = await mod.check(mockSsh, emptyEnv)
@@ -1033,7 +1046,19 @@ describe("compose.systemd — check", () => {
 
   it("returns needs-apply when unit file does not exist", async () => {
     const mockSsh = createComposeMockSsh({
+      "[ -f '/etc/systemd/system/compose-app.service' ] && [ ! -L '/etc/systemd/system/compose-app.service' ]":
+        { code: 1 },
       [`[ -e '${unitFilePath}' ]`]: { code: 1 },
+    })
+    const mod = compose.systemd({ projectDirectory })
+    const result = await mod.check(mockSsh, emptyEnv)
+    expect(result).toBe("needs-apply")
+  })
+
+  it("returns needs-apply when the unit file is a symlink", async () => {
+    const mockSsh = createComposeMockSsh({
+      "[ -f '/etc/systemd/system/compose-app.service' ] && [ ! -L '/etc/systemd/system/compose-app.service' ]":
+        { code: 1 },
     })
     const mod = compose.systemd({ projectDirectory })
     const result = await mod.check(mockSsh, emptyEnv)

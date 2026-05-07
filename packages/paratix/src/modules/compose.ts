@@ -5,6 +5,7 @@ import { basename } from "node:path"
 import { failed, failedCommand } from "../moduleFailure.js"
 import { shellQuote } from "../ssh.js"
 import { type Module, type ModuleResult, NEEDS_APPLY, type SshConnection } from "../types.js"
+import { isRegularFileWithoutSymlink } from "./remoteFileChecks.js"
 
 const EXEC_OPTS = { ignoreExitCode: true, silent: true } as const
 const UNIT_NAME_PATTERN = /^[\w@.\-]+$/v
@@ -318,8 +319,9 @@ async function checkComposeSystemdUnit(parameters: {
   const runtime = await getRuntime(parameters.ssh, parameters.explicitRuntime)
   if (!runtime) return NEEDS_APPLY
 
-  const exists = await parameters.ssh.exists(parameters.filePath)
-  if (!exists) return NEEDS_APPLY
+  if (!(await isRegularFileWithoutSymlink(parameters.ssh, parameters.filePath))) {
+    return NEEDS_APPLY
+  }
 
   const content = generateSystemdUnit(parameters.projectDirectory, parameters.serviceName, {
     detached: parameters.detached,
@@ -451,8 +453,7 @@ function createComposeConfigCheck(
   return async (ssh) => {
     if (!ssh) return NEEDS_APPLY
 
-    const exists = await ssh.exists(remotePath)
-    if (!exists) return NEEDS_APPLY
+    if (!(await isRegularFileWithoutSymlink(ssh, remotePath))) return NEEDS_APPLY
 
     const desiredContent = await resolveDesiredComposeContent(options)
     if (desiredContent == null) return NEEDS_APPLY

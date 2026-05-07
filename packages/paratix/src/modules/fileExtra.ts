@@ -14,6 +14,7 @@ import {
 import { hexHashesEqual, sha256String } from "./fileHelpers.js"
 import { ownershipMatches, readOwnership, renderChownCommand } from "./fileMetadataHelpers.js"
 import { assertValidGroupName, assertValidUserName } from "./posixNames.js"
+import { isRegularFileWithoutSymlink } from "./remoteFileChecks.js"
 
 /** Index where the file-type field starts in `stat -c '%s %a %U %G %F %Y'` output. */
 const STAT_TYPE_START_INDEX = 4
@@ -169,8 +170,7 @@ export function assemble(
     },
     async check(ssh: null | SshConnection): Promise<"needs-apply" | "ok"> {
       if (!ssh) return NEEDS_APPLY
-      const exists = await ssh.exists(remotePath)
-      if (!exists) return NEEDS_APPLY
+      if (!(await isRegularFileWithoutSymlink(ssh, remotePath))) return NEEDS_APPLY
 
       const localHash = sha256String(await concatFragments(fragments))
       const remoteHash = await ssh.sha256(remotePath)
