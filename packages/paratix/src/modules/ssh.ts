@@ -215,7 +215,18 @@ async function applyKnownHostsPresent(
   const { host, options } = parameters
   const scannedOutput = await conn.output(sshKeyscanCommand(host, options))
   const scannedLines = parseHostKeyLines(scannedOutput)
-  const verifiedLines = getVerifiedScannedHostKeyLines(host, scannedLines, options ?? {})
+  // R-0000170: getVerifiedScannedHostKeyLines throws on trust-anchor
+  // mismatches (no scanned line matched expectedFingerprint / publicKey).
+  // Catch the throw and surface it as a failed ModuleResult so callers see
+  // a consistent { status: "failed", error } instead of an uncaught
+  // exception that escapes the module's failure-handling contract.
+  let verifiedLines: string[]
+  try {
+    verifiedLines = getVerifiedScannedHostKeyLines(host, scannedLines, options ?? {})
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error)
+    return failed(`[ssh.knownHosts: ${host} (present)] ${detail}`)
+  }
   await conn.exec("mkdir -p ~/.ssh && chmod 700 ~/.ssh", { silent: true })
 
   const existingLines = await getKnownHostLines(conn, host, options)

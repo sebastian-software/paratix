@@ -398,7 +398,10 @@ describe("ssh.knownHosts", () => {
     expect(printfCalls).toHaveLength(1)
   })
 
-  it("apply rejects scanned keys that do not match the expected fingerprint", async () => {
+  // R-0000170: trust-anchor mismatches must surface as a failed
+  // ModuleResult, not an uncaught exception, so callers see a maskable
+  // failure consistent with other modules.
+  it("apply returns failed when scanned keys do not match the expected fingerprint", async () => {
     const mockSsh = createSshApplyMockSsh({
       "ssh-keyscan -H 'github.com' 2>/dev/null": { stdout: `${scannedLine}\n` },
     })
@@ -406,9 +409,10 @@ describe("ssh.knownHosts", () => {
       expectedFingerprint: "SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
     })
 
-    await expect(mod.apply(mockSsh, emptyEnv)).rejects.toThrow(
-      "could not verify the scanned host key"
-    )
+    const result = await mod.apply(mockSsh, emptyEnv)
+    expect(result.status).toBe("failed")
+    expect(result.error?.message).toContain("could not verify the scanned host key")
+    expect(result.error?.message).toContain("[ssh.knownHosts: github.com (present)]")
   })
 
   it("rejects present state without a fingerprint or public key trust anchor at construction time", () => {
