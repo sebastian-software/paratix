@@ -7,7 +7,7 @@ import {
   promptForInitialUserConfig,
   resolveCliOrPromptHost,
 } from "../src/index.js"
-import { createSelectLines } from "../src/promptUi.js"
+import { cleanupSelectInput, createSelectLines } from "../src/promptUi.js"
 import { expectProcessExit, setProcessTtyForTest } from "./helpers.js"
 
 describe("promptForInitialUserConfig", () => {
@@ -474,5 +474,63 @@ describe("promptForHostFingerprint", () => {
       /Aborting scaffolding: host-key scan for example.com failed \(connect ETIMEDOUT\)/v
     )
     expect(select).toHaveBeenCalledTimes(1)
+  })
+})
+
+// R-0000190: cleanupSelectInput must not call setRawMode on non-TTY stdin
+// (test harness, piped input). The original implementation defaulted
+// previousRawMode to `false`, which would either throw or silently mutate
+// the parent shell state.
+describe("cleanupSelectInput", () => {
+  afterEach(() => {
+    vi.restoreAllMocks()
+  })
+
+  it("skips setRawMode when previousRawMode is undefined", () => {
+    const stdin = process.stdin as {
+      setRawMode?: (mode: boolean) => NodeJS.ReadStream
+    } & NodeJS.ReadStream
+    const setRawModeCalls: boolean[] = []
+    const previousSetRawMode = stdin.setRawMode
+    stdin.setRawMode = (mode: boolean): NodeJS.ReadStream => {
+      setRawModeCalls.push(mode)
+      return stdin
+    }
+    const pauseSpy = vi.spyOn(process.stdin, "pause").mockImplementation(() => process.stdin)
+    const writeSpy = vi.spyOn(process.stdout, "write").mockImplementation(() => true)
+
+    try {
+      cleanupSelectInput(undefined)
+      expect(setRawModeCalls).toStrictEqual([])
+      expect(pauseSpy).toHaveBeenCalled()
+      expect(writeSpy).toHaveBeenCalledWith("\x1B[?25h")
+    } finally {
+      stdin.setRawMode = previousSetRawMode
+      pauseSpy.mockRestore()
+      writeSpy.mockRestore()
+    }
+  })
+
+  it("restores previousRawMode when it is a boolean", () => {
+    const stdin = process.stdin as {
+      setRawMode?: (mode: boolean) => NodeJS.ReadStream
+    } & NodeJS.ReadStream
+    const setRawModeCalls: boolean[] = []
+    const previousSetRawMode = stdin.setRawMode
+    stdin.setRawMode = (mode: boolean): NodeJS.ReadStream => {
+      setRawModeCalls.push(mode)
+      return stdin
+    }
+    const pauseSpy = vi.spyOn(process.stdin, "pause").mockImplementation(() => process.stdin)
+    const writeSpy = vi.spyOn(process.stdout, "write").mockImplementation(() => true)
+
+    try {
+      cleanupSelectInput(true)
+      expect(setRawModeCalls).toStrictEqual([true])
+    } finally {
+      stdin.setRawMode = previousSetRawMode
+      pauseSpy.mockRestore()
+      writeSpy.mockRestore()
+    }
   })
 })

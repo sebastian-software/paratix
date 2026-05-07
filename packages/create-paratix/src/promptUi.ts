@@ -62,8 +62,14 @@ function prepareSelectInput(): { previousRawMode: boolean | undefined } {
   return { previousRawMode }
 }
 
-function cleanupSelectInput(previousRawMode: boolean | undefined): void {
-  process.stdin.setRawMode(previousRawMode ?? false)
+export function cleanupSelectInput(previousRawMode: boolean | undefined): void {
+  // R-0000190: only restore raw mode when we actually captured a previous
+  // boolean value. On non-TTY stdin (test harness, piped input)
+  // process.stdin.isRaw is undefined, and an unconditional setRawMode(false)
+  // would either throw or silently mutate the parent shell's terminal state.
+  if (typeof previousRawMode === "boolean") {
+    process.stdin.setRawMode(previousRawMode)
+  }
   process.stdin.pause()
   process.stdout.write("\x1B[?25h")
 }
