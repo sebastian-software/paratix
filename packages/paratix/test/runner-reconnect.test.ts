@@ -120,7 +120,7 @@ describe("runPlaybook reconnect failure propagation", () => {
       },
     }
 
-    await runPlaybook(definition)
+    await runPlaybook(definition, { rebootGraceSeconds: 0 })
 
     expect(process.exitCode).toBe(1)
   })
@@ -264,7 +264,7 @@ describe("runPlaybook reconnect failure propagation", () => {
       },
     }
 
-    await runPlaybook(definition)
+    await runPlaybook(definition, { rebootGraceSeconds: 0 })
 
     expect(subsequentModule.check).not.toHaveBeenCalled()
   })
@@ -385,7 +385,7 @@ describe("runPlaybook SSH config immutability", () => {
       ssh: sshConfig,
     }
 
-    await runPlaybook(definition)
+    await runPlaybook(definition, { rebootGraceSeconds: 0 })
 
     expect(definition.host).toBe("1.2.3.4")
     expect(definition.ssh).toStrictEqual({
@@ -437,7 +437,7 @@ describe("runPlaybook handlePortChange + handleReboot interaction", () => {
       ssh: { ports: [22], privateKey: "~/.ssh/id", user: "root" },
     }
 
-    await runPlaybook(definition)
+    await runPlaybook(definition, { rebootGraceSeconds: 0 })
 
     // reconnect is called exactly once (by the reboot handler, not the port-change handler)
     expect(reconnect).toHaveBeenCalledTimes(1)
@@ -600,10 +600,108 @@ describe("runPlaybook recipe child control-plane processing", () => {
       ssh: { ports: [22], privateKey: "~/.ssh/id", user: "root" },
     }
 
-    await runPlaybook(definition)
+    await runPlaybook(definition, { rebootGraceSeconds: 0 })
 
     expect(secondChild.check).toHaveBeenCalledOnce()
     expect(updateHost).toHaveBeenCalledWith("10.0.0.42")
+    expect(reconnect).toHaveBeenCalledTimes(1)
+  })
+})
+
+describe("runPlaybook handleReboot grace period (R-0000153)", () => {
+  beforeEach(() => {
+    vi.spyOn(console, "log").mockImplementation(() => {
+      /* noop */
+    })
+    vi.spyOn(console, "error").mockImplementation(() => {
+      /* noop */
+    })
+    vi.resetModules()
+  })
+
+  afterEach(() => {
+    vi.restoreAllMocks()
+    vi.resetModules()
+    process.exitCode = 0
+  })
+
+  it("waits for the configured grace period before the first reconnect after a reboot", async () => {
+    const capturedConfigs: unknown[] = []
+    const reconnect = vi.fn().mockResolvedValue(null)
+
+    vi.doMock("../src/ssh.js", () => ({
+      shellQuote: (s: string) => `'${s}'`,
+      SshConnectionImpl: makeMockSshClass(capturedConfigs, { reconnect }),
+    }))
+
+    const { runPlaybook } = await import("../src/runner.js")
+    const moduleWithReboot = makeModuleWithMeta([meta.systemReboot()])
+
+    const definition: ServerDefinition = {
+      host: "1.2.3.4",
+      name: "test-server",
+      run: [moduleWithReboot],
+      ssh: { ports: [22], privateKey: "~/.ssh/id", user: "root" },
+    }
+
+    const start = Date.now()
+    await runPlaybook(definition, { rebootGraceSeconds: 0.05 })
+    const elapsed = Date.now() - start
+
+    expect(reconnect).toHaveBeenCalledTimes(1)
+    // Grace was 50ms; allow generous tolerance for slow CI but assert lower bound.
+    expect(elapsed).toBeGreaterThanOrEqual(40)
+  })
+
+  it("skips the grace wait entirely when rebootGraceSeconds is 0", async () => {
+    const capturedConfigs: unknown[] = []
+    const reconnect = vi.fn().mockResolvedValue(null)
+
+    vi.doMock("../src/ssh.js", () => ({
+      shellQuote: (s: string) => `'${s}'`,
+      SshConnectionImpl: makeMockSshClass(capturedConfigs, { reconnect }),
+    }))
+
+    const { runPlaybook } = await import("../src/runner.js")
+    const moduleWithReboot = makeModuleWithMeta([meta.systemReboot()])
+
+    const definition: ServerDefinition = {
+      host: "1.2.3.4",
+      name: "test-server",
+      run: [moduleWithReboot],
+      ssh: { ports: [22], privateKey: "~/.ssh/id", user: "root" },
+    }
+
+    const start = Date.now()
+    await runPlaybook(definition, { rebootGraceSeconds: 0 })
+    const elapsed = Date.now() - start
+
+    expect(reconnect).toHaveBeenCalledTimes(1)
+    expect(elapsed).toBeLessThan(500)
+  })
+
+  it("does not consume the reconnect attempt budget for the grace wait", async () => {
+    const capturedConfigs: unknown[] = []
+    const reconnect = vi.fn().mockResolvedValue(null)
+
+    vi.doMock("../src/ssh.js", () => ({
+      shellQuote: (s: string) => `'${s}'`,
+      SshConnectionImpl: makeMockSshClass(capturedConfigs, { reconnect }),
+    }))
+
+    const { runPlaybook } = await import("../src/runner.js")
+    const moduleWithReboot = makeModuleWithMeta([meta.systemReboot()])
+
+    const definition: ServerDefinition = {
+      host: "1.2.3.4",
+      name: "test-server",
+      run: [moduleWithReboot],
+      ssh: { ports: [22], privateKey: "~/.ssh/id", user: "root" },
+    }
+
+    await runPlaybook(definition, { rebootGraceSeconds: 0 })
+
+    // The grace wait must not have caused additional reconnect calls.
     expect(reconnect).toHaveBeenCalledTimes(1)
   })
 })

@@ -343,7 +343,7 @@ describe("runPlaybook signal meta propagation", () => {
       ssh: { ports: [22], privateKey: "~/.ssh/id", user: "root" },
     }
 
-    await runPlaybook(definition)
+    await runPlaybook(definition, { rebootGraceSeconds: 0 })
 
     expect(secondSignal.apply).toHaveBeenCalledOnce()
     expect(updateHost).toHaveBeenCalledWith("10.0.0.42")

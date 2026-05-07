@@ -84,10 +84,70 @@ export type RunOptions = {
   envFile?: string
   /** Additional environment variables that override values from `envFile` and the server definition. */
   envOverrides?: Environment
+  /**
+   * Initial grace period (in seconds) the runner waits before the first
+   * reconnect attempt after a `system.reboot` meta. Defaults to
+   * {@link DEFAULT_REBOOT_GRACE_SECONDS}. The wait does not consume any of
+   * the configured `maxReconnectAttempts` budget.
+   */
+  rebootGraceSeconds?: number
   /** Custom reconnect timeout in milliseconds passed to SSH, overriding the config default. */
   reconnectTimeout?: number
   /** When `true`, failed commands print full stdout/stderr in addition to the summary error. */
   verbose?: boolean
+}
+
+/** Default grace period before reconnecting after a reboot. */
+export const DEFAULT_REBOOT_GRACE_SECONDS = 15
+const REBOOT_GRACE_SECONDS_TO_MS = 1000
+
+/**
+ * Process-scoped holder for the configured reboot grace period. Set once per
+ * `runPlaybook` invocation and cleared in teardown so a subsequent run
+ * starts from defaults.
+ */
+let rebootGraceMs: number = DEFAULT_REBOOT_GRACE_SECONDS * REBOOT_GRACE_SECONDS_TO_MS
+
+/**
+ * Process-scoped getter for the runner's shutdown signal so the reboot
+ * grace sleep can return early when SIGINT/SIGTERM arrives without
+ * threading the getter through every call site of
+ * {@link applyRunnerControlPlaneMeta}.
+ *
+ * @returns The active shutdown signal, or `null` when no shutdown is in progress.
+ */
+let rebootShutdownSignal: () => NodeJS.Signals | null = () => null
+
+function setRebootGraceFromOptions(options: RunOptions): void {
+  const seconds = options.rebootGraceSeconds ?? DEFAULT_REBOOT_GRACE_SECONDS
+  rebootGraceMs = Math.max(0, seconds) * REBOOT_GRACE_SECONDS_TO_MS
+}
+
+function resetRebootGrace(): void {
+  rebootGraceMs = DEFAULT_REBOOT_GRACE_SECONDS * REBOOT_GRACE_SECONDS_TO_MS
+  rebootShutdownSignal = () => null
+}
+
+/**
+ * Sleep helper that respects the runner's shutdown signal: returns early
+ * (without throwing) if a shutdown is in progress so the caller can react.
+ *
+ * @param durationMs - The maximum sleep duration in milliseconds.
+ * @param shutdownSignal - Getter that returns the active shutdown signal, or `null`.
+ */
+async function sleepRespectingShutdown(
+  durationMs: number,
+  shutdownSignal: () => NodeJS.Signals | null
+): Promise<void> {
+  if (durationMs <= 0) return
+  if (shutdownSignal() != null) return
+  await new Promise<void>((resolve) => {
+    const timer = setTimeout(() => {
+      resolve()
+    }, durationMs)
+    // Avoid keeping the event loop alive solely for this sleep.
+    if (typeof timer.unref === "function") timer.unref()
+  })
 }
 
 class RunStats {
@@ -259,6 +319,11 @@ async function handleReboot(
   if (hostEntry != null) {
     ssh.updateHost(hostEntry.host)
   }
+
+  // Wait an initial grace period before the first reconnect so attempts
+  // during shutdown/boot do not waste the maxReconnectAttempts budget. The
+  // wait short-circuits when a shutdown signal arrives.
+  await sleepRespectingShutdown(rebootGraceMs, rebootShutdownSignal)
 
   try {
     await ssh.reconnect()
@@ -805,7 +870,26 @@ function teardownPlaybookResources(parameters: {
     getSignalBus().off(signal, parameters.handleShutdownSignal)
   setRunnerAbortSignal(undefined)
   clearRegisteredSecrets()
+  // Restore the default reboot grace so a subsequent run starts from a known
+  // baseline instead of inheriting the previous run's value.
+  resetRebootGrace()
   parameters.ssh?.disconnect()
+}
+
+function initializeRunPlaybookContext(options: RunOptions): {
+  handleShutdownSignal: (signal: NodeJS.Signals) => void
+  promptAbortSignal: AbortSignal
+  setSsh: (connection: SshConnectionImpl) => void
+  shutdownSignal: () => NodeJS.Signals | null
+} {
+  const { handleShutdownSignal, promptAbortSignal, setSsh, shutdownSignal } =
+    setupShutdownHandlers()
+  setRunnerAbortSignal(promptAbortSignal)
+  setRebootGraceFromOptions(options)
+  // Expose the shutdown getter so the reboot grace sleep can return early
+  // when SIGINT/SIGTERM arrives mid-grace.
+  rebootShutdownSignal = shutdownSignal
+  return { handleShutdownSignal, promptAbortSignal, setSsh, shutdownSignal }
 }
 
 export async function runPlaybook(
@@ -816,8 +900,7 @@ export async function runPlaybook(
   const { dryRun = false, verbose = false } = options
   const environment = await initializeEnvironment(options, definition)
   const { handleShutdownSignal, promptAbortSignal, setSsh, shutdownSignal } =
-    setupShutdownHandlers()
-  setRunnerAbortSignal(promptAbortSignal)
+    initializeRunPlaybookContext(options)
   const stats = new RunStats()
   let ssh: SshConnectionImpl | undefined
 
