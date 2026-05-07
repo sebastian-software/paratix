@@ -78,6 +78,14 @@ async function applyLineAppend(input: {
   remotePath: string
   ssh: SshConnection
 }): Promise<ModuleResult> {
+  // R-0000132: detect symlinks explicitly so dangling symlinks (where
+  // `[ -e path ]` is false) cannot bypass the regular-file guard and cause
+  // `cat >>` to follow the link and write through to the symlink target.
+  const quotedPath = shellQuote(input.remotePath)
+  if (await input.ssh.test(`[ -L ${quotedPath} ]`)) {
+    return failed(`[file.line: ${input.remotePath}] path must be a regular file and not a symlink`)
+  }
+
   // R-0000108: short-circuit when the line is already present so apply does
   // not append duplicates on direct invocation (e.g. from signal targets that
   // bypass check). Mirrors the no-op return pattern from R-0000075/77/81/88.

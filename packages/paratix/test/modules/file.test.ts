@@ -933,8 +933,25 @@ describe("file.line", () => {
 describe("file.line — apply without options.match", () => {
   it("apply fails without appending when the line target is a symlink", async () => {
     const ssh = createMockSsh({
-      "[ -e '/etc/config' ]": { code: 0 },
-      "[ -f '/etc/config' ] && [ ! -L '/etc/config' ]": { code: 1 },
+      "[ -L '/etc/config' ]": { code: 0 },
+    })
+    const mod = file.line("/etc/config", "my-line")
+    const result = await mod.apply(ssh, emptyEnv)
+
+    expect(result.status).toBe("failed")
+    expect(result.error?.message).toContain("path must be a regular file and not a symlink")
+    expect(ssh.calls).not.toContain("cat >> '/etc/config'")
+  })
+
+  it("regression R-0000132 — apply rejects dangling symlinks before appending", async () => {
+    // [ -e path ] returns false for dangling symlinks because it dereferences
+    // the link, while [ -L path ] still reports the link itself. Without an
+    // explicit -L probe, applyLineAppend would skip the regular-file guard and
+    // pipe `cat >> path` through the symlink, writing to the resolved target
+    // (or creating it). The new guard must detect this case up-front.
+    const ssh = createMockSsh({
+      "[ -e '/etc/config' ]": { code: 1 },
+      "[ -L '/etc/config' ]": { code: 0 },
     })
     const mod = file.line("/etc/config", "my-line")
     const result = await mod.apply(ssh, emptyEnv)
