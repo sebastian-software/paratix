@@ -1369,6 +1369,11 @@ describe("SshConnectionImpl", () => {
       })
       const client = makeClientWithExecSpy(execSpy)
       const ssh = makeConnectedSsh(client, { user: "deploy" })
+      // R-0000127: simulate a confirmed passwordless-sudo probe so
+      // `sudoCommand()` may safely combine cached sudoPassword + caller
+      // input without fail-closed rejection — this test focuses on the
+      // post-timeout EPIPE swallowing path, not the fail-closed branch.
+      ;(ssh as unknown as Record<string, unknown>).passwordlessSudo = true
 
       // Track unhandled errors on the process so we can assert none escape.
       const unhandledErrors: unknown[] = []
@@ -1484,6 +1489,9 @@ describe("SshConnectionImpl", () => {
       })
       const client = makeClientWithExecSpy(execSpy)
       const ssh = makeConnectedSsh(client, { sudoPassword: "my-sudo-pass", user: "deploy" })
+      // The probe path in `hasPasswordlessSudo` would set this on a real host;
+      // simulate it explicitly so `sudoCommand()` may safely use `sudo -n`.
+      ;(ssh as unknown as Record<string, unknown>).passwordlessSudo = true
 
       await ssh.exec("tee /etc/config", { input: "payload\n" })
 
@@ -1493,6 +1501,24 @@ describe("SshConnectionImpl", () => {
       expect(execStream.write).not.toHaveBeenCalledWith(Buffer.from("my-sudo-pass"))
       expect(execStream.write).not.toHaveBeenCalledWith("\n")
       expect(endCalls).toContainEqual(["payload\n"])
+    })
+
+    it("rejects exec with input when sudo requires a password and passwordless sudo was not confirmed", async () => {
+      // R-0000127: a single SSH channel cannot multiplex `sudo -S` password
+      // input and a caller-provided stdin payload. Without a confirmed
+      // passwordless-sudo probe, the connection must fail-closed with a clear
+      // message instead of emitting `sudo -n bash -c` that would break at
+      // runtime on hosts that actually require a password.
+      const execSpy = vi.fn()
+      const client = makeClientWithExecSpy(execSpy)
+      const ssh = makeConnectedSsh(client, { sudoPassword: "my-sudo-pass", user: "deploy" })
+
+      const error = await expectRejectedError(ssh.exec("tee /etc/config", { input: "payload\n" }))
+
+      expect(error.message).toContain(
+        "exec with input is not supported when sudo requires a password"
+      )
+      expect(execSpy).not.toHaveBeenCalled()
     })
 
     it("materializes cached sudo passwords before starting exec output handling", async () => {

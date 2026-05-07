@@ -169,6 +169,15 @@ export class SshConnectionImpl implements SshConnection {
   private client: Client | null = null
   private readonly config: SshConfig
   private connectedPort = 0
+  /**
+   * Tracks whether the remote host accepts passwordless sudo for the configured
+   * user. Set to `true` after a successful `sudo -n true` probe (see
+   * `hasPasswordlessSudo`). Used by `sudoCommand()` to safely route stdin
+   * payloads via `sudo -n bash -c` only when no real password challenge would
+   * appear; when a sudo password is required, `sudo -S` cannot share a single
+   * stdin channel with caller-provided input and the call must fail-closed.
+   */
+  private passwordlessSudo = false
   private readonly pendingRejects = new Set<(reason: Error) => void>()
   private pinnedHostKey: Buffer | null = null
   private promptAbortSignal: AbortSignal | undefined
@@ -1005,6 +1014,7 @@ trap - EXIT
   private async hasPasswordlessSudo(): Promise<boolean> {
     try {
       await this.execPrepared("true", { silent: true, timeout: 10_000 })
+      this.passwordlessSudo = true
       return true
     } catch {
       return false
@@ -1077,6 +1087,20 @@ trap - EXIT
     }
     const quoted = shellQuote(`${environmentPrefix}${command}`)
     if (this.cachedSudoPassword != null && hasInput) {
+      // R-0000127: a single SSH channel only exposes one stdin stream. When
+      // sudo would prompt for a password (`sudo -S`), the password and the
+      // caller-provided input cannot share that stream — sudo would consume
+      // the input as the password and then fail with `sudo: a password is
+      // required`. We can only safely route the input via `sudo -n bash -c`
+      // if a previous probe confirmed passwordless sudo is available;
+      // otherwise we must fail-closed with an actionable error instead of
+      // silently producing a `sudo -n` command that breaks at runtime.
+      if (!this.passwordlessSudo) {
+        throw new Error(
+          "exec with input is not supported when sudo requires a password: " +
+            "configure passwordless sudo for the connecting user or remove the input payload"
+        )
+      }
       return { command: `sudo -n bash -c ${quoted}`, needsPassword: false }
     }
     if (this.cachedSudoPassword != null) {
