@@ -246,6 +246,7 @@ describe("swap.file — apply", () => {
       [`mkdir -p '/'`]: { code: 0 },
       [`mkswap '${swapTempPath}'`]: { code: 0 },
       [`rm -f '${swapBackupPath}'`]: { code: 0 },
+      [`stat -c '%a' '${swapPath}'`]: { code: 0, stdout: "600\n" },
       [`stat -c %s '${swapPath}'`]: { stdout: "1073741824" },
       [`swaplabel '${swapPath}' >/dev/null 2>&1`]: { code: 0 },
       [`swapoff '${swapPath}'`]: { code: 0 },
@@ -274,6 +275,33 @@ describe("swap.file — apply", () => {
     expect(ssh.calls).toContain(`rm -f '${swapBackupPath}'`)
     expect(ssh.calls).toContain(`mkswap '${swapTempPath}'`)
     expect(ssh.calls).toContain(`swapon '${swapPath}'`)
+    expect(writtenFiles).toStrictEqual([])
+  })
+
+  it("converges mode drift without recreating an otherwise valid active swap file", async () => {
+    const writtenFiles: Array<{ content: string; path: string }> = []
+    const ssh = createMockSsh({
+      [`[ -e '${swapPath}' ]`]: { code: 0 },
+      [`cat '/etc/fstab'`]: { stdout: `${fstabLine}\n` },
+      [`cat '${swapPath}'`]: { stdout: "existing swap bytes" },
+      [`chmod '0600' '${swapPath}'`]: { code: 0 },
+      [`stat -c '%a' '${swapPath}'`]: { code: 0, stdout: "644\n" },
+      [`stat -c %s '${swapPath}'`]: { stdout: swapSizeBytes },
+      [`swaplabel '${swapPath}' >/dev/null 2>&1`]: { code: 0 },
+      "swapon --show=NAME --noheadings": { stdout: `${swapPath}\n` },
+    })
+    // eslint-disable-next-line @typescript-eslint/require-await -- mock implementation
+    ssh.writeFile = async (path: string, content: string): Promise<void> => {
+      writtenFiles.push({ content, path })
+    }
+
+    const mod = swap.file({ path: swapPath, size: swapSize })
+    const result = await mod.apply(ssh, emptyEnv)
+
+    expect(result.status).toBe("changed")
+    expect(ssh.calls).toContain(`chmod '0600' '${swapPath}'`)
+    expect(ssh.calls).not.toContain(mktempSwapCommand)
+    expect(ssh.calls).not.toContain(`swapoff '${swapPath}'`)
     expect(writtenFiles).toStrictEqual([])
   })
 

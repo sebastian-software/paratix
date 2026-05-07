@@ -1,7 +1,8 @@
 import { posix as posixPath } from "node:path"
 
+import { failedCommand } from "../moduleFailure.js"
 import { shellQuote, validateMode } from "../ssh.js"
-import { guardedWriteFile, type SshConnection } from "../types.js"
+import { guardedWriteFile, type ModuleResult, type SshConnection } from "../types.js"
 
 export {
   cleanupSwapTemporaryFile,
@@ -269,4 +270,18 @@ export async function swapFileModeMatches(
   const currentMode = result.stdout.trim()
   if (currentMode === "") return false
   return normalizeMode(currentMode) === normalizeMode(options.mode)
+}
+
+export async function ensureSwapFileMode(
+  ssh: SshConnection,
+  options: NormalizedSwapFileOptions
+): Promise<boolean | ModuleResult> {
+  if (await swapFileModeMatches(ssh, options)) return false
+  const result = await ssh.exec(
+    `chmod ${shellQuote(options.mode)} ${shellQuote(options.path)}`,
+    EXEC_OPTS
+  )
+  return result.code === 0
+    ? true
+    : failedCommand(`[swap.file: ${options.path}] chmod failed`, result)
 }

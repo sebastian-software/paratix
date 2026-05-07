@@ -5,6 +5,7 @@ import {
   classifySwapFilePath,
   cleanupSwapTemporaryFile,
   createInitializedSwapTemporaryFile,
+  ensureSwapFileMode,
   ensureSwapFilePresent,
   ensureSwapFstabState,
   hasNoSwapFstabEntry,
@@ -189,6 +190,11 @@ async function applyPresentSwapFile(
   const recreateResult = await recreateSwapFile(ssh, options)
   if (typeof recreateResult !== "string") return recreateResult
   if (recreateResult === "changed") swapChanged = true
+  if (recreateResult === "ok") {
+    const modeResult = await ensureSwapFileMode(ssh, options)
+    if (typeof modeResult !== "boolean") return modeResult
+    if (modeResult) swapChanged = true
+  }
   const enableResult = await enableSwap(ssh, options.path)
   if (typeof enableResult !== "boolean") return enableResult
   if (enableResult) swapChanged = true
