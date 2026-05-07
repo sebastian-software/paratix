@@ -122,7 +122,14 @@ export const ufw = {
         const { port } = ssh.getConnectionInfo()
         if (!isValidTcpPort(port)) return NEEDS_APPLY
 
-        return hasProtocolAgnosticRule(status, port, "ALLOW") ? "ok" : NEEDS_APPLY
+        if (!hasProtocolAgnosticRule(status, port, "ALLOW")) return NEEDS_APPLY
+        if (
+          statusIncludesIpv6Rules(status) &&
+          !hasProtocolAgnosticIpv6Rule(status, port, "ALLOW")
+        ) {
+          return NEEDS_APPLY
+        }
+        return "ok"
       },
       name: "ufw.enabled",
     }

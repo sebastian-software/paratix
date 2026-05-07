@@ -43,6 +43,48 @@ describe("ufw.enabled", () => {
     expect(result).toBe("ok")
   })
 
+  it("check returns ok when ufw is active and both SSH port address families are allowed", async () => {
+    const ssh = createMockSshOnPort(
+      {
+        "ufw status": {
+          stdout: [
+            "Status: active",
+            "",
+            "To                         Action      From",
+            "--                         ------      ----",
+            "22                         ALLOW       Anywhere",
+            "22 (v6)                    ALLOW       Anywhere (v6)",
+          ].join("\n"),
+        },
+      },
+      22
+    )
+    const mod = ufw.enabled()
+    const result = await mod.check(ssh, emptyEnv)
+    expect(result).toBe("ok")
+  })
+
+  it("check returns needs-apply when IPv6 is enabled but lacks the SSH allow rule", async () => {
+    const ssh = createMockSshOnPort(
+      {
+        "ufw status": {
+          stdout: [
+            "Status: active",
+            "",
+            "To                         Action      From",
+            "--                         ------      ----",
+            "22                         ALLOW       Anywhere",
+            "80 (v6)                    ALLOW       Anywhere (v6)",
+          ].join("\n"),
+        },
+      },
+      22
+    )
+    const mod = ufw.enabled()
+    const result = await mod.check(ssh, emptyEnv)
+    expect(result).toBe("needs-apply")
+  })
+
   it("check returns needs-apply when ufw is active but the current SSH port is missing", async () => {
     const ssh = createMockSsh({
       "ufw status": {
