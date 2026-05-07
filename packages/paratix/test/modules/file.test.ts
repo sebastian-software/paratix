@@ -1078,9 +1078,30 @@ describe("file.line — apply without options.match", () => {
     expect(result.status).toBe("changed")
     expect(ssh.execCalls).toContainEqual({
       command: "cat >> '/etc/config'",
-      options: { input: `${secretLine}\n`, silent: true },
+      options: { ignoreExitCode: true, input: `${secretLine}\n`, silent: true },
     })
     expect(ssh.execCalls.map((call) => call.command).join("\n")).not.toContain(secretLine)
+  })
+
+  // R-0000159: cat append failures (ENOSPC, RO-FS, EACCES) must surface as a
+  // failedCommand result with maskable stderr, not as an uncaught exception
+  // and not as a misleading "changed" status.
+  it("returns failed when cat >> exits non-zero (e.g. ENOSPC)", async () => {
+    const ssh = createMockSsh({
+      "[ -e '/etc/config' ]": { code: 0 },
+      "cat '/etc/config'": { stdout: "first-line\n" },
+      "cat >> '/etc/config'": {
+        code: 1,
+        stderr: "cat: write error: No space left on device\n",
+      },
+    })
+
+    const mod = file.line("/etc/config", "my-line")
+    const result = await mod.apply(ssh, emptyEnv)
+
+    expect(result.status).toBe("failed")
+    expect(result.error?.message).toContain("[file.line: /etc/config] cat append failed")
+    expect(result.error?.message).toContain("No space left on device")
   })
 })
 

@@ -100,10 +100,19 @@ async function applyLineAppend(input: {
     if (splitLines(existingContent).includes(input.line)) return { status: "ok" }
   }
 
-  await input.ssh.exec(`cat >> ${shellQuote(input.remotePath)}`, {
+  // R-0000159: capture cat exit codes (ENOSPC, RO-FS, EACCES) as a
+  // failedCommand result so the caller sees a maskable failure with the
+  // captured stderr instead of an uncaught CommandError exception. Without
+  // this, partial-write or shell-environment errors could surface as a
+  // changed status while the line never made it to disk.
+  const result = await input.ssh.exec(`cat >> ${shellQuote(input.remotePath)}`, {
+    ignoreExitCode: true,
     input: `${input.line}\n`,
     silent: true,
   })
+  if (result.code !== 0) {
+    return failedCommand(`[file.line: ${input.remotePath}] cat append failed`, result)
+  }
   return { status: "changed" }
 }
 
