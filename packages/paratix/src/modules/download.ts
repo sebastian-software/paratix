@@ -319,6 +319,7 @@ async function verifyChecksum(
  *
  * @param conn - Active SSH connection.
  * @param parameters - Download parameters containing destination, mode, owner, and group.
+ * @returns A failed ModuleResult when chmod/chown exits non-zero, otherwise undefined.
  */
 async function applyFileAttributes(
   conn: SshConnection,
@@ -369,60 +370,73 @@ function downloadOwnerDrifted(current: DownloadOwnership, options: BaseDownloadO
   )
 }
 
+type DriftHealOutcome = { changed: boolean; failure?: ModuleResult }
+
+async function healModeDrift(
+  conn: SshConnection,
+  parameters: DownloadParameters,
+  current: DownloadOwnership
+): Promise<DriftHealOutcome> {
+  if (parameters.mode == null || !downloadModeDrifted(current, parameters)) {
+    return { changed: false }
+  }
+  validateMode(parameters.mode)
+  const result = await conn.exec(
+    `chmod ${shellQuote(parameters.mode)} ${shellQuote(parameters.destination)}`,
+    { ignoreExitCode: true, secrets: parameters.secrets, silent: true }
+  )
+  if (result.code !== 0) {
+    return {
+      changed: false,
+      failure: failedCommand(
+        `[download] chmod failed for ${parameters.destination}`,
+        result,
+        parameters.secrets
+      ),
+    }
+  }
+  return { changed: true }
+}
+
+async function healOwnerDrift(
+  conn: SshConnection,
+  parameters: DownloadParameters,
+  current: DownloadOwnership
+): Promise<DriftHealOutcome> {
+  if (!downloadOwnerDrifted(current, parameters)) return { changed: false }
+  const ownerSpec = `${parameters.owner ?? ""}:${parameters.group ?? ""}`
+  const result = await conn.exec(renderChownCommand(ownerSpec, parameters.destination), {
+    ignoreExitCode: true,
+    secrets: parameters.secrets,
+    silent: true,
+  })
+  if (result.code !== 0) {
+    return {
+      changed: false,
+      failure: failedCommand(
+        `[download] chown failed for ${parameters.destination}`,
+        result,
+        parameters.secrets
+      ),
+    }
+  }
+  return { changed: true }
+}
+
 async function applyDriftedFileAttributes(
   conn: SshConnection,
   parameters: DownloadParameters
-): Promise<{ changed: boolean; failure?: ModuleResult }> {
+): Promise<DriftHealOutcome> {
   if (parameters.mode == null && parameters.owner == null && parameters.group == null) {
     return { changed: false }
   }
 
   const current = await readDownloadOwnership(conn, parameters.destination)
-  let changed = false
-
-  if (parameters.mode != null && downloadModeDrifted(current, parameters)) {
-    validateMode(parameters.mode)
-    // R-0000158: capture chmod failures during drift heal as a failedCommand
-    // result so the metadata-only fast path stays consistent with the
-    // download path's failure handling.
-    const chmodResult = await conn.exec(
-      `chmod ${shellQuote(parameters.mode)} ${shellQuote(parameters.destination)}`,
-      { ignoreExitCode: true, secrets: parameters.secrets, silent: true }
-    )
-    if (chmodResult.code !== 0) {
-      return {
-        changed,
-        failure: failedCommand(
-          `[download] chmod failed for ${parameters.destination}`,
-          chmodResult,
-          parameters.secrets
-        ),
-      }
-    }
-    changed = true
-  }
-
-  if (downloadOwnerDrifted(current, parameters)) {
-    const ownerSpec = `${parameters.owner ?? ""}:${parameters.group ?? ""}`
-    const chownResult = await conn.exec(renderChownCommand(ownerSpec, parameters.destination), {
-      ignoreExitCode: true,
-      secrets: parameters.secrets,
-      silent: true,
-    })
-    if (chownResult.code !== 0) {
-      return {
-        changed,
-        failure: failedCommand(
-          `[download] chown failed for ${parameters.destination}`,
-          chownResult,
-          parameters.secrets
-        ),
-      }
-    }
-    changed = true
-  }
-
-  return { changed }
+  const modeOutcome = await healModeDrift(conn, parameters, current)
+  if (modeOutcome.failure) return modeOutcome
+  const ownerOutcome = await healOwnerDrift(conn, parameters, current)
+  if (ownerOutcome.failure) return { changed: modeOutcome.changed, failure: ownerOutcome.failure }
+  return { changed: modeOutcome.changed || ownerOutcome.changed }
 }
 
 async function cleanupTemporaryDownloadFile(
@@ -446,6 +460,7 @@ async function cleanupTemporaryDownloadFile(
  * @param conn - The active SSH connection.
  * @param downloadParameters - Download parameters with destination set to the
  *   temporary file used during the transfer.
+ * @returns A failed ModuleResult when curl exits non-zero, otherwise undefined.
  */
 async function executeCurlDownload(
   conn: SshConnection,
@@ -555,7 +570,8 @@ async function compareUnverifiedHashMarker(
 ): Promise<"drift" | "match" | "missing"> {
   const markerPath = unverifiedHashMarkerPath(destination)
   if (!(await conn.test(`[ -f ${shellQuote(markerPath)} ]`))) return "missing"
-  const recordedHash = (await conn.readFile(markerPath)).trim()
+  const markerContent = await conn.readFile(markerPath)
+  const recordedHash = markerContent.trim()
   if (recordedHash.length === 0) return "drift"
   const actualHash = await conn.sha256(destination)
   if (actualHash == null) return "drift"

@@ -52,11 +52,11 @@ async function writeCrontab(input: WriteCrontabArguments): Promise<ModuleResult 
   const { failureMessage, lines, ssh, user } = input
 
   if (lines.length === 0) {
-    const result = await ssh.exec(`crontab -u ${shellQuote(user)} -r`, {
+    const removeResult = await ssh.exec(`crontab -u ${shellQuote(user)} -r`, {
       ignoreExitCode: true,
       silent: true,
     })
-    return result.code === 0 ? null : failedCommand(failureMessage, result)
+    return removeResult.code === 0 ? null : failedCommand(failureMessage, removeResult)
   }
   // R-0000157: install non-empty crontabs with ignoreExitCode so invalid
   // crontab syntax, missing target users or permission-denied errors surface
@@ -64,12 +64,12 @@ async function writeCrontab(input: WriteCrontabArguments): Promise<ModuleResult 
   // bubbling up as an uncaught CommandError exception that escapes the
   // module's failure-handling contract.
   const content = `${lines.join("\n")}\n`
-  const result = await ssh.exec(`crontab -u ${shellQuote(user)} -`, {
+  const installResult = await ssh.exec(`crontab -u ${shellQuote(user)} -`, {
     ignoreExitCode: true,
     input: content,
     silent: true,
   })
-  return result.code === 0 ? null : failedCommand(failureMessage, result)
+  return installResult.code === 0 ? null : failedCommand(failureMessage, installResult)
 }
 
 /**
@@ -91,7 +91,7 @@ const MARKER_PREFIX = "# paratix: "
 
 /**
  * R-0000168: render the marker comment that precedes a managed cron job.
- * The hash suffix lets `cron.absent` recognise the line below it as one we
+ * The hash suffix lets `cron.absent` match the line below it as one we
  * wrote ourselves before deleting it.
  *
  * @param name - Logical job name supplied by the caller.
@@ -289,13 +289,12 @@ export const cron = {
         // fall back to the conservative "looks like a cron job line" rule
         // so unrelated user content next to the marker is preserved.
         const recordedDigest = readMarkerDigest(lines[markerIndex] ?? "")
-        const followLine = lines[markerIndex + 1]
+        const followLine = lines[markerIndex + 1] ?? ""
+        const followLooksLikeJob = looksLikeCronJobLine(lines, markerIndex + 1)
         const followIsManagedJob =
-          followLine !== undefined &&
-          (recordedDigest === null
-            ? looksLikeCronJobLine(lines, markerIndex + 1)
-            : looksLikeCronJobLine(lines, markerIndex + 1) &&
-              cronJobDigest(followLine) === recordedDigest)
+          recordedDigest === null
+            ? followLooksLikeJob
+            : followLooksLikeJob && cronJobDigest(followLine) === recordedDigest
         const removeCount = followIsManagedJob ? 2 : 1
         lines.splice(markerIndex, removeCount)
         const failure = await writeCrontab({
@@ -343,7 +342,7 @@ export const cron = {
     const state = options.state ?? "present"
     const cronJob = options.job
     // R-0000168: marker carries the sha256 of the cron job so cron.absent
-    // (and `cron.job(state="absent")`) can recognise the line they wrote
+    // (and `cron.job(state="absent")`) can match the line they wrote
     // and avoid deleting user-replaced follow-up content.
     const marker = renderMarkerLine(name, cronJob)
 

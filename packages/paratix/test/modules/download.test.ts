@@ -33,7 +33,7 @@ const createMockSsh: typeof createBaseMockSsh = (responses, options) =>
       // exercise the marker take the "missing marker" path.
       { command: /^\[ -f '[^']*\.sha256' \]$/v, result: { code: 1 } },
       { command: /^\[ -f '\/tmp\/file' \]$/v, result: { code: 0 } },
-      { command: /^sha256sum '\/tmp\/file'$/v, result: { stdout: "0".repeat(64) + "  /tmp/file" } },
+      { command: /^sha256sum '\/tmp\/file'$/v, result: { stdout: `${"0".repeat(64)}  /tmp/file` } },
       { command: /^printf '%s\\n' '[\da-f]{64}' > '[^']*\.sha256'$/v, result: { code: 0 } },
       { command: /^cat '[^']*\.sha256'$/v, result: { stdout: "" } },
       ...(options?.responseStubs ?? []),
@@ -173,8 +173,8 @@ describe("download.url", () => {
       // file digest. Existence alone is not sufficient any more.
       const recordedHash = "aabbccddaabbccddaabbccddaabbccddaabbccddaabbccddaabbccddaabbccdd"
       const mockSsh = createMockSsh({
-        [`[ -f '${destination}' ]`]: { code: 0 },
         [`[ -f '${destination}.sha256' ]`]: { code: 0 },
+        [`[ -f '${destination}' ]`]: { code: 0 },
         [`cat '${destination}.sha256'`]: { stdout: `${recordedHash}\n` },
         [`sha256sum '${destination}'`]: { stdout: `${recordedHash}  ${destination}` },
       })
@@ -188,8 +188,8 @@ describe("download.url", () => {
       // copy) has no `<destination>.sha256` next to it. Check must report
       // needs-apply so the next apply run records the marker.
       const mockSsh = createMockSsh({
-        [`[ -f '${destination}' ]`]: { code: 0 },
         [`[ -f '${destination}.sha256' ]`]: { code: 1 },
+        [`[ -f '${destination}' ]`]: { code: 0 },
       })
       const mod = download.url(destination, url, allowUnverifiedDownload)
       const result = await mod.check(mockSsh, emptyEnv)
@@ -203,8 +203,8 @@ describe("download.url", () => {
       const recordedHash = "aabbccddaabbccddaabbccddaabbccddaabbccddaabbccddaabbccddaabbccdd"
       const tamperedHash = "1111111111111111111111111111111111111111111111111111111111111111"
       const mockSsh = createMockSsh({
-        [`[ -f '${destination}' ]`]: { code: 0 },
         [`[ -f '${destination}.sha256' ]`]: { code: 0 },
+        [`[ -f '${destination}' ]`]: { code: 0 },
         [`cat '${destination}.sha256'`]: { stdout: `${recordedHash}\n` },
         [`sha256sum '${destination}'`]: { stdout: `${tamperedHash}  ${destination}` },
       })

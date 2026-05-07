@@ -8,6 +8,10 @@ import { createMockSsh as createBaseMockSsh } from "../helpers/mockSsh.js"
  * R-0000168: replicate the marker comment cron.ts writes (legacy form
  * `# paratix: <name>` plus the sha256-tagged form). Tests stub the tagged
  * form so direct checks see the same marker the module emits on apply.
+ *
+ * @param name - Logical job name written into the marker comment.
+ * @param cronJob - The crontab line whose digest the marker records.
+ * @returns The full sha256-tagged marker line.
  */
 function taggedMarker(name: string, cronJob: string): string {
   const digest = createHash("sha256").update(cronJob).digest("hex")
@@ -229,9 +233,10 @@ describe("cron.job", () => {
     expect(writeCall).toBeDefined()
     expect(writeCall?.command).toBe("crontab -u 'alice' -")
     expect(writeCall?.options?.ignoreExitCode).toBe(true)
-    expect(writeCall?.options?.input).toContain("0 5 * * * /other.sh")
-    expect(writeCall?.options?.input).toContain("# paratix: backup")
-    expect(writeCall?.options?.input).toContain("0 3 * * * /backup.sh")
+    const writeInput = findCrontabWriteInput(mockSsh)
+    expect(writeInput).toContain("0 5 * * * /other.sh")
+    expect(writeInput).toContain("# paratix: backup")
+    expect(writeInput).toContain("0 3 * * * /backup.sh")
   })
 
   it("apply returns failed when crontab rejects invalid syntax (state: present)", async () => {
@@ -430,9 +435,10 @@ describe("cron.job", () => {
     expect(writeCall).toBeDefined()
     expect(writeCall?.command).toBe("crontab -u 'alice' -")
     expect(writeCall?.options?.ignoreExitCode).toBe(true)
-    expect(writeCall?.options?.input).toContain("0 5 * * * /other.sh")
-    expect(writeCall?.options?.input).not.toContain("# paratix: backup")
-    expect(writeCall?.options?.input).not.toContain("0 3 * * * /backup.sh")
+    const writeInput = findCrontabWriteInput(mockSsh)
+    expect(writeInput).toContain("0 5 * * * /other.sh")
+    expect(writeInput).not.toContain("# paratix: backup")
+    expect(writeInput).not.toContain("0 3 * * * /backup.sh")
   })
 
   it("apply returns failed when ssh is null (state: absent)", async () => {
