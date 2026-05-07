@@ -1860,6 +1860,54 @@ describe("SshConnectionImpl", () => {
       await expect(ssh.exec("whoami")).rejects.toThrow("SSH channel open failed")
     })
 
+    it("registers the close handler exactly once even on error+close double-fire (R-0000143 regression)", async () => {
+      // Regression: ssh2 emits both `error` and `close` for one disconnect
+      // (e.g. error escalation followed by close). The close handler used to
+      // be registered with `client.on(...)` so any subsequent close (or a
+      // close that immediately follows an error) would fire the cleanup
+      // handler twice and produce duplicate operator-visible logs. The fix
+      // installs the close handler with `client.once(...)` so it executes at
+      // most once.
+      const execSpy = vi.fn().mockImplementation((_command: string, callback: ExecCallback) => {
+        const stream = makeStream()
+        callback(undefined, stream)
+        // Stream never emits close — promise stays pending until rejection.
+      })
+
+      const clientEmitter = new EventEmitter()
+      const client = Object.assign(clientEmitter, {
+        end: vi.fn(),
+        exec: execSpy,
+        sftp: vi.fn(),
+      }) as unknown as Client & EventEmitter
+
+      const ssh = makeConnectedSshWithCloseListener(client, {})
+
+      // Exactly one close listener should be registered, and it must be a
+      // once-style listener (no second invocation after an error+close).
+      expect(clientEmitter.listenerCount("close")).toBe(1)
+
+      const execPromise = ssh.exec("sleep infinity")
+      execPromise.catch(() => {
+        /* handled below */
+      })
+      await Promise.resolve()
+
+      // First disconnect — error path runs the cleanup, then close arrives.
+      clientEmitter.emit("error", new Error("socket failure"))
+      clientEmitter.emit("close")
+
+      await expect(execPromise).rejects.toThrow("socket failure")
+
+      // After the disconnect, the once-listener must have detached itself.
+      expect(clientEmitter.listenerCount("close")).toBe(0)
+
+      // A late spurious close emission must not run the cleanup handler again.
+      clientEmitter.emit("close")
+      // Listener count stays at zero.
+      expect(clientEmitter.listenerCount("close")).toBe(0)
+    })
+
     // -------------------------------------------------------------------------
     // env option — buildEnvPrefix validation
     // -------------------------------------------------------------------------

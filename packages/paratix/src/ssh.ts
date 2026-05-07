@@ -1114,7 +1114,14 @@ trap - EXIT
       }
       this.pendingRejects.clear()
     }
-    client.on("close", () => {
+    // R-0000143: ssh2 emits both `close` and `error` for a single
+    // disconnect event (e.g. error escalation followed by close). Use
+    // `once` for the close handler so the cleanup logic and stderr
+    // logging fire exactly once per lifecycle, avoiding duplicated lines
+    // for the operator. `rejectPending` itself is idempotent (it clears
+    // the set after calling), but the handler is also responsible for
+    // diagnostics that should not be repeated.
+    client.once("close", () => {
       rejectPending(new Error("SSH connection closed unexpectedly"))
     })
     client.on("error", (error) => {
