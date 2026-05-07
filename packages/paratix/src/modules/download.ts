@@ -2,7 +2,7 @@ import { createHash, timingSafeEqual } from "node:crypto"
 import { posix as path } from "node:path"
 
 /* eslint-disable max-lines */
-import { failed } from "../moduleFailure.js"
+import { failed, failedCommand } from "../moduleFailure.js"
 import { withRegisteredSecrets } from "../secretSink.js"
 import { shellQuote, validateMktempPath, validateMode } from "../ssh.js"
 import { maskSecrets } from "../sshHelpers.js"
@@ -165,10 +165,20 @@ async function finalizeDownloadedFile(
   if (await destinationIsDirectory(conn, parameters.destination)) {
     return failed(`[download] destination is a directory: ${parameters.destination}`)
   }
-  await conn.exec(
+  // R-0000158: convert non-zero exit codes (e.g. cross-device link, EACCES,
+  // EROFS) into a failedCommand result so callers see a maskable failure
+  // instead of an uncaught CommandError exception.
+  const result = await conn.exec(
     `mv -T -- ${shellQuote(downloadParameters.destination)} ${shellQuote(parameters.destination)}`,
-    { silent: true }
+    { ignoreExitCode: true, secrets: parameters.secrets, silent: true }
   )
+  if (result.code !== 0) {
+    return failedCommand(
+      `[download] mv into place failed for ${parameters.destination}`,
+      result,
+      parameters.secrets
+    )
+  }
   return undefined
 }
 
@@ -313,19 +323,39 @@ async function verifyChecksum(
 async function applyFileAttributes(
   conn: SshConnection,
   parameters: DownloadParameters
-): Promise<void> {
+): Promise<ModuleResult | undefined> {
   if (parameters.mode != null) {
     validateMode(parameters.mode)
-    await conn.exec(`chmod ${shellQuote(parameters.mode)} ${shellQuote(parameters.destination)}`, {
-      silent: true,
-    })
+    // R-0000158: capture chmod failures as failedCommand so permission-denied
+    // / invalid-target errors report a maskable failure instead of throwing.
+    const chmodResult = await conn.exec(
+      `chmod ${shellQuote(parameters.mode)} ${shellQuote(parameters.destination)}`,
+      { ignoreExitCode: true, secrets: parameters.secrets, silent: true }
+    )
+    if (chmodResult.code !== 0) {
+      return failedCommand(
+        `[download] chmod failed for ${parameters.destination}`,
+        chmodResult,
+        parameters.secrets
+      )
+    }
   }
   if (parameters.owner != null || parameters.group != null) {
     const ownerSpec = `${parameters.owner ?? ""}:${parameters.group ?? ""}`
-    await conn.exec(renderChownCommand(ownerSpec, parameters.destination), {
+    const chownResult = await conn.exec(renderChownCommand(ownerSpec, parameters.destination), {
+      ignoreExitCode: true,
+      secrets: parameters.secrets,
       silent: true,
     })
+    if (chownResult.code !== 0) {
+      return failedCommand(
+        `[download] chown failed for ${parameters.destination}`,
+        chownResult,
+        parameters.secrets
+      )
+    }
   }
+  return undefined
 }
 
 function downloadModeDrifted(current: DownloadOwnership, options: BaseDownloadOptions): boolean {
@@ -342,9 +372,9 @@ function downloadOwnerDrifted(current: DownloadOwnership, options: BaseDownloadO
 async function applyDriftedFileAttributes(
   conn: SshConnection,
   parameters: DownloadParameters
-): Promise<boolean> {
+): Promise<{ changed: boolean; failure?: ModuleResult }> {
   if (parameters.mode == null && parameters.owner == null && parameters.group == null) {
-    return false
+    return { changed: false }
   }
 
   const current = await readDownloadOwnership(conn, parameters.destination)
@@ -352,21 +382,47 @@ async function applyDriftedFileAttributes(
 
   if (parameters.mode != null && downloadModeDrifted(current, parameters)) {
     validateMode(parameters.mode)
-    await conn.exec(`chmod ${shellQuote(parameters.mode)} ${shellQuote(parameters.destination)}`, {
-      silent: true,
-    })
+    // R-0000158: capture chmod failures during drift heal as a failedCommand
+    // result so the metadata-only fast path stays consistent with the
+    // download path's failure handling.
+    const chmodResult = await conn.exec(
+      `chmod ${shellQuote(parameters.mode)} ${shellQuote(parameters.destination)}`,
+      { ignoreExitCode: true, secrets: parameters.secrets, silent: true }
+    )
+    if (chmodResult.code !== 0) {
+      return {
+        changed,
+        failure: failedCommand(
+          `[download] chmod failed for ${parameters.destination}`,
+          chmodResult,
+          parameters.secrets
+        ),
+      }
+    }
     changed = true
   }
 
   if (downloadOwnerDrifted(current, parameters)) {
     const ownerSpec = `${parameters.owner ?? ""}:${parameters.group ?? ""}`
-    await conn.exec(renderChownCommand(ownerSpec, parameters.destination), {
+    const chownResult = await conn.exec(renderChownCommand(ownerSpec, parameters.destination), {
+      ignoreExitCode: true,
+      secrets: parameters.secrets,
       silent: true,
     })
+    if (chownResult.code !== 0) {
+      return {
+        changed,
+        failure: failedCommand(
+          `[download] chown failed for ${parameters.destination}`,
+          chownResult,
+          parameters.secrets
+        ),
+      }
+    }
     changed = true
   }
 
-  return changed
+  return { changed }
 }
 
 async function cleanupTemporaryDownloadFile(
@@ -394,13 +450,26 @@ async function cleanupTemporaryDownloadFile(
 async function executeCurlDownload(
   conn: SshConnection,
   downloadParameters: DownloadParameters
-): Promise<void> {
+): Promise<ModuleResult | undefined> {
   const { command: curlCommand, input: curlConfig } = buildCurlCommand(downloadParameters)
-  await conn.exec(curlCommand, {
+  // R-0000158: capture curl failures (network error, 404, expired token,
+  // proto-mismatch) as a failedCommand result so callers see a maskable
+  // failure with stdout/stderr instead of an uncaught CommandError. The
+  // existing secret list keeps the rendered failure free of leaked tokens.
+  const result = await conn.exec(curlCommand, {
+    ignoreExitCode: true,
     input: curlConfig,
     secrets: downloadParameters.secrets,
     silent: true,
   })
+  if (result.code !== 0) {
+    return failedCommand(
+      `[download] curl failed for ${downloadParameters.destination}`,
+      result,
+      downloadParameters.secrets
+    )
+  }
+  return undefined
 }
 
 /**
@@ -454,8 +523,9 @@ async function performDownload(
     // This honors download.large's "fetched once" contract even when the
     // operator drifted mode/owner/group out-of-band.
     if (parameters.force !== true && (await destinationContentMatchesSha256(conn, parameters))) {
-      const changed = await applyDriftedFileAttributes(conn, parameters)
-      return { status: changed ? "changed" : "ok" }
+      const drift = await applyDriftedFileAttributes(conn, parameters)
+      if (drift.failure) return drift.failure
+      return { status: drift.changed ? "changed" : "ok" }
     }
 
     return runCurlDownload(conn, parameters)
@@ -481,12 +551,14 @@ async function runCurlDownload(
   let shouldCleanupTemporaryFile = true
 
   try {
-    await executeCurlDownload(conn, downloadParameters)
+    const curlFailure = await executeCurlDownload(conn, downloadParameters)
+    if (curlFailure) return curlFailure
 
     if (!(await verifyChecksum(conn, downloadParameters))) {
       return failed(`[download] checksum verification failed for ${parameters.destination}`)
     }
-    await applyFileAttributes(conn, downloadParameters)
+    const attributesFailure = await applyFileAttributes(conn, downloadParameters)
+    if (attributesFailure) return attributesFailure
     const finalizeFailure = await finalizeDownloadedFile(conn, parameters, downloadParameters)
     if (finalizeFailure) return finalizeFailure
     shouldCleanupTemporaryFile = false

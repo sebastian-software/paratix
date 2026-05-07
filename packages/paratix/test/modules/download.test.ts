@@ -312,6 +312,69 @@ describe("download.url", () => {
       expect(mockSsh.calls).toContain(`mkdir -p "$(dirname '${destination}')"`)
     })
 
+    // R-0000158: curl/mv/chmod/chown failures must surface as failedCommand
+    // results instead of throwing, so callers see maskable errors with the
+    // captured stdout/stderr.
+    it("returns failed when curl exits non-zero (e.g. 404 / network error)", async () => {
+      const curlCommand = `curl -fsSL -o '${temporaryDestination}' ${httpsOnlyCurlProtocolFlags} --config -`
+      const mockSsh = createMockSsh({
+        ...downloadMktempStub(destination, temporaryDestination),
+        [curlCommand]: { code: 22, stderr: "curl: (22) HTTP error 404\n" },
+      })
+      const mod = download.url(destination, url, allowUnverifiedDownload)
+      const result = await mod.apply(mockSsh, emptyEnv)
+      expect(result.status).toBe("failed")
+      expect(result.error?.message).toContain("curl failed")
+      expect(result.error?.message).toContain("HTTP error 404")
+      expect(mockSsh.calls).toContain(`rm -f '${temporaryDestination}'`)
+      expect(mockSsh.calls).not.toContain(`mv -T -- '${temporaryDestination}' '${destination}'`)
+    })
+
+    it("returns failed when mv into place exits non-zero", async () => {
+      const mvCommand = `mv -T -- '${temporaryDestination}' '${destination}'`
+      const mockSsh = createMockSsh({
+        ...downloadMktempStub(destination, temporaryDestination),
+        [mvCommand]: { code: 1, stderr: "mv: cannot move: Permission denied\n" },
+      })
+      const mod = download.url(destination, url, allowUnverifiedDownload)
+      const result = await mod.apply(mockSsh, emptyEnv)
+      expect(result.status).toBe("failed")
+      expect(result.error?.message).toContain("mv into place failed")
+      expect(result.error?.message).toContain("Permission denied")
+      expect(mockSsh.calls).toContain(`rm -f '${temporaryDestination}'`)
+    })
+
+    it("returns failed when chmod exits non-zero", async () => {
+      const chmodCommand = `chmod '0755' '${temporaryDestination}'`
+      const mockSsh = createMockSsh({
+        ...downloadMktempStub(destination, temporaryDestination),
+        [chmodCommand]: { code: 1, stderr: "chmod: operation not permitted\n" },
+      })
+      const mod = download.url(destination, url, { ...allowUnverifiedDownload, mode: "0755" })
+      const result = await mod.apply(mockSsh, emptyEnv)
+      expect(result.status).toBe("failed")
+      expect(result.error?.message).toContain("chmod failed")
+      expect(result.error?.message).toContain("operation not permitted")
+      expect(mockSsh.calls).not.toContain(`mv -T -- '${temporaryDestination}' '${destination}'`)
+    })
+
+    it("returns failed when chown exits non-zero", async () => {
+      const chownCommand = `chown -- 'deploy:' '${temporaryDestination}'`
+      const mockSsh = createMockSsh({
+        ...downloadMktempStub(destination, temporaryDestination),
+        [chownCommand]: { code: 1, stderr: "chown: invalid user\n" },
+      })
+      const mod = download.url(destination, url, {
+        ...allowUnverifiedDownload,
+        owner: "deploy",
+      })
+      const result = await mod.apply(mockSsh, emptyEnv)
+      expect(result.status).toBe("failed")
+      expect(result.error?.message).toContain("chown failed")
+      expect(result.error?.message).toContain("invalid user")
+      expect(mockSsh.calls).not.toContain(`mv -T -- '${temporaryDestination}' '${destination}'`)
+    })
+
     it("sets mode via chmod when mode is specified", async () => {
       const mockSsh = createMockSsh({
         [`mktemp "$(dirname '${destination}')/.paratix-download.XXXXXX"`]: {
