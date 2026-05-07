@@ -485,10 +485,13 @@ export const sshd = {
         const portValues = collectTopLevelSshdDirectiveValues(content, "Port")
         if (portValues.length === 0) {
           // When no top-level Port directive exists, sshd defaults to port 22.
-          return targetPort === DEFAULT_SSH_PORT ? "ok" : NEEDS_APPLY
+          if (targetPort !== DEFAULT_SSH_PORT) return NEEDS_APPLY
+          if (await socketActivationBootPathNeedsApply(ssh)) return NEEDS_APPLY
+          return (await liveSshdPortMatches(ssh, targetPort)) ? "ok" : NEEDS_APPLY
         }
         if (portValues.every((portValue) => portValue === String(targetPort))) {
-          return (await socketActivationBootPathNeedsApply(ssh)) ? NEEDS_APPLY : "ok"
+          if (await socketActivationBootPathNeedsApply(ssh)) return NEEDS_APPLY
+          return (await liveSshdPortMatches(ssh, targetPort)) ? "ok" : NEEDS_APPLY
         }
         return NEEDS_APPLY
       },
