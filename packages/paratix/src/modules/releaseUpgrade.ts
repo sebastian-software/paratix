@@ -13,6 +13,7 @@ import {
 import {
   isAcceptableSourcesPath,
   isSupportedDebianUpgradePath,
+  RELEASE_UPGRADE_DEFAULT_TIMEOUT_MS,
   rewriteAptSourcesContent,
 } from "./releaseUpgradeSources.js"
 
@@ -41,7 +42,7 @@ type ReleaseUpgradeOptions = {
    * `system.host` meta so the runner can reconnect to the correct address.
    */
   resolveHost?: () => Promise<string>
-  /** Override the SSH layer's command timeout (milliseconds) for upgrade steps. */
+  /** Override the per-step command timeout (ms). Default: 30 minutes. */
   timeout?: number
 }
 
@@ -83,22 +84,17 @@ async function getDebianCurrentCodename(ssh: SshConnection): Promise<string> {
 }
 
 /**
- * Fetch the codename of the current Debian stable release from the official
- * Debian mirrors by downloading the `Release` metadata file.
+ * Fetch the codename of the current Debian stable release from the official mirrors.
  *
- * @param ssh - Active SSH connection to the remote host.
+ * @param ssh - Active SSH connection.
  * @returns The stable codename (e.g. `"bookworm"`).
- * @throws {Error} When the `Codename:` field is absent from the Release file.
+ * @throws {Error} When the `Codename:` field is absent.
  */
 async function getDebianStableCodename(ssh: SshConnection): Promise<string> {
-  // R-0000177: --max-time bounds the wall-clock duration of the request so
-  // that a stuck mirror cannot hang the entire upgrade module.
+  // R-0000177: --max-time bounds the wall-clock duration of the request.
   const result = await ssh.exec(
     "curl --max-time 30 -fsSL https://deb.debian.org/debian/dists/stable/Release",
-    {
-      ignoreExitCode: true,
-      silent: true,
-    }
+    { ignoreExitCode: true, silent: true }
   )
   for (const line of result.stdout.split("\n")) {
     const match = /^Codename:\s+(?<name>\S+)$/v.exec(line)
@@ -289,8 +285,8 @@ async function buildRebootMeta(
 }
 
 function releaseUpgradeExecOptions(options: ReleaseUpgradeOptions): ExecOptions {
-  if (options.timeout === undefined) return { ignoreExitCode: true, silent: true }
-  return { ignoreExitCode: true, silent: true, timeout: options.timeout }
+  // prettier-ignore
+  return { ignoreExitCode: true, silent: true, timeout: options.timeout ?? RELEASE_UPGRADE_DEFAULT_TIMEOUT_MS }
 }
 
 async function runReleaseUpgradeCommand(parameters: {
@@ -361,13 +357,9 @@ async function applyUbuntu(
  * and return the first failure encountered, or `null` when all four steps
  * succeeded.
  *
- * Extracted from `applyDebian` so the failure-path rollback in `applyDebian`
- * stays straightforward and the per-step retry order remains explicit.
- *
  * @param ssh - Active SSH connection to the remote host.
  * @param options - Upgrade options used to derive per-command exec options.
- * @returns The first non-zero apt-step failure as a `ModuleResult`, or
- *   `null` when all four steps succeeded.
+ * @returns The first non-zero apt-step failure, or `null`.
  */
 async function runDebianUpgradePipeline(
   ssh: SshConnection,

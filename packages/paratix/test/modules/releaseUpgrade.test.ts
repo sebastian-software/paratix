@@ -179,6 +179,25 @@ describe("releaseUpgrade.upgrade — apply (Ubuntu)", () => {
     ])
   })
 
+  it("R-0000184: applies the default 30-minute timeout when none is provided", async () => {
+    const ssh = createMockSsh({
+      "cat '/etc/os-release'": { code: 0, stdout: UBUNTU_OS_RELEASE },
+      "DEBIAN_FRONTEND=noninteractive apt-get update": { code: 0 },
+      "do-release-upgrade -f DistUpgradeViewNonInteractive": { code: 0 },
+    })
+    const mod = releaseUpgrade.upgrade()
+    const result = await mod.apply(ssh, emptyEnv)
+    expect(result.status).toBe("changed")
+    const upgradeCall = ssh.execCalls.find(
+      (call) => call.command === "do-release-upgrade -f DistUpgradeViewNonInteractive"
+    )
+    expect(upgradeCall?.options).toStrictEqual({
+      ignoreExitCode: true,
+      silent: true,
+      timeout: 30 * 60 * 1000,
+    })
+  })
+
   it("dryRun: runs only do-release-upgrade -c and returns ok", async () => {
     const ssh = createMockSsh({
       "cat '/etc/os-release'": { code: 0, stdout: UBUNTU_OS_RELEASE },

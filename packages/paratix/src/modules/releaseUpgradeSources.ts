@@ -1,3 +1,16 @@
+// R-0000184: cap the wall-clock duration of every release-upgrade step at
+// 30 minutes by default. Long-running upgrades (e.g. cross-version Ubuntu)
+// can override this via the public `timeout` option, but unbounded runs
+// are unsafe — the runner would otherwise hang indefinitely on a stuck
+// `do-release-upgrade` or apt-get invocation.
+const RELEASE_UPGRADE_DEFAULT_TIMEOUT_MINUTES = 30
+const RELEASE_UPGRADE_SECONDS_PER_MINUTE = 60
+const RELEASE_UPGRADE_MS_PER_SECOND = 1000
+export const RELEASE_UPGRADE_DEFAULT_TIMEOUT_MS =
+  RELEASE_UPGRADE_DEFAULT_TIMEOUT_MINUTES *
+  RELEASE_UPGRADE_SECONDS_PER_MINUTE *
+  RELEASE_UPGRADE_MS_PER_SECOND
+
 const APT_SOURCES_LIST_DIRECTORY = "/etc/apt/sources.list.d/"
 const ASCII_CONTROL_BOUNDARY = 0x20
 const ASCII_DEL_CODE_POINT = 0x7f
