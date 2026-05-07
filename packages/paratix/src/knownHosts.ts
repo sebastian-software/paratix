@@ -351,6 +351,15 @@ function normalizePinnedPublicKey(publicKey: string): string {
   return `${algorithm} ${key}`
 }
 
+export function validateExpectedHostPublicKey(publicKey: string): string | null {
+  try {
+    normalizePinnedPublicKey(publicKey)
+    return null
+  } catch (error) {
+    return error instanceof Error ? error.message : String(error)
+  }
+}
+
 function formatPresentedPublicKey(key: Buffer): string {
   return `${extractAlgoFromKey(key)} ${key.toString("base64")}`
 }

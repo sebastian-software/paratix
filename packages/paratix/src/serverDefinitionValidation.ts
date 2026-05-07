@@ -1,3 +1,4 @@
+import { validateExpectedHostPublicKey } from "./knownHosts.js"
 import type { SshConfig } from "./types.js"
 
 const STRICT_HOST_KEY_ERROR = `Invalid property 'ssh.strictHostKeyChecking' (expected "accept-new", "no", or "yes")`
@@ -120,11 +121,18 @@ function collectStrictHostKeyCheckingErrors(ssh: Record<string, unknown>, errors
   }
 }
 
+function collectExpectedHostPublicKeyErrors(ssh: Record<string, unknown>, errors: string[]): void {
+  if (typeof ssh.expectedHostPublicKey !== "string") return
+  const error = validateExpectedHostPublicKey(ssh.expectedHostPublicKey)
+  if (error != null) errors.push(`Invalid property 'ssh.expectedHostPublicKey': ${error}`)
+}
+
 function collectOptionalSshFieldErrors(ssh: Record<string, unknown>, errors: string[]): void {
   collectOptionalStringErrors(ssh, "privateKey", errors)
   collectOptionalStringErrors(ssh, "sudoPassword", errors)
   collectOptionalStringErrors(ssh, "expectedHostFingerprint", errors)
   collectOptionalStringErrors(ssh, "expectedHostPublicKey", errors)
+  collectExpectedHostPublicKeyErrors(ssh, errors)
   collectOptionalBooleanErrors(ssh, "agentForward", errors)
   collectOptionalBooleanErrors(ssh, "passwordFallback", errors)
   collectOptionalNumberErrors({

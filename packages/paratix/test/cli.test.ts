@@ -720,6 +720,23 @@ describe("collectDefinitionErrors", () => {
     expect(errors).toStrictEqual([])
   })
 
+  it("returns an error when ssh.expectedHostPublicKey has no key material", () => {
+    const errors = collectDefinitionErrors({
+      host: "example.com",
+      name: "test",
+      run: ["echo hello"],
+      ssh: {
+        expectedHostPublicKey: "ssh-ed25519",
+        ports: [22],
+        privateKey: "/key",
+        user: "root",
+      },
+    })
+    expect(errors).toStrictEqual([
+      "Invalid property 'ssh.expectedHostPublicKey': Expected host public key must use the format '<algorithm> <base64>'",
+    ])
+  })
+
   it("returns an error when ssh.expectedHostFingerprint is a non-string value", () => {
     const errors = collectDefinitionErrors({
       host: "example.com",
