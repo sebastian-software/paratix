@@ -417,25 +417,25 @@ Fallback wenn kein `RepoDigest` vorhanden ist.
 Verwaltet Container-Stacks ueber `docker compose` oder `podman compose`.
 Das Modul erkennt automatisch, welche Runtime verfuegbar ist, oder akzeptiert
 eine explizite Angabe (`runtime: "docker" | "podman"`). Alle Operationen
-arbeiten relativ zu einem `project_dir`, in dem die `compose.yml` (bzw.
+arbeiten relativ zu einem `projectDirectory`, in dem die `compose.yml` (bzw.
 `docker-compose.yml`) liegt.
 
-| Modul             | Beschreibung                                                                                                                                                                                                                                           | Check-Strategie                                                                      | Aufwand |
-| ----------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------ | ------- |
-| `compose.up`      | Stellt sicher, dass alle Services eines Compose-Projekts laufen. Fuehrt `compose up -d` aus, falls Container fehlen oder nicht laufen. Akzeptiert ein `project_dir` (Pfad auf dem Server zur `compose.yml`) und optional eine Liste von Service-Namen. | `compose ps --format json` parsen — alle erwarteten Container muessen `running` sein | mittel  |
-| `compose.pull`    | Zieht die neuesten Images fuer alle Services eines Compose-Projekts. Gibt `changed` zurueck, wenn mindestens ein Image aktualisiert wurde.                                                                                                             | `compose pull` ausfuehren und Ausgabe auf `Pulling`/`Downloaded` pruefen             | mittel  |
-| `compose.down`    | Stoppt und entfernt alle Container eines Compose-Projekts. Optional mit `--volumes` zum Entfernen persistenter Volumes.                                                                                                                                | `compose ps --format json` parsen — keine Container duerfen existieren               | einfach |
-| `compose.config`  | Deployt eine `compose.yml`-Datei auf den Server (via `file.copy` oder `file.template` als Komposition) und validiert sie mit `compose config`. Kombiniert Datei-Deployment mit Syntax-Pruefung.                                                        | SHA-256-Vergleich der Compose-Datei                                                  | mittel  |
-| `compose.restart` | Signal-Modul: Fuehrt `compose down && compose up -d` aus. Wird nur als Signal in Recipes verwendet und nur getriggert, wenn innerhalb der Recipe ein Modul `changed` zurueckgegeben hat.                                                               | Signal-basiert (kein eigenstaendiger Check)                                          | einfach |
+| Modul             | Beschreibung                                                                                                                                                                                                                                                | Check-Strategie                                                                      | Aufwand |
+| ----------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------ | ------- |
+| `compose.up`      | Stellt sicher, dass alle Services eines Compose-Projekts laufen. Fuehrt `compose up -d` aus, falls Container fehlen oder nicht laufen. Akzeptiert ein `projectDirectory` (Pfad auf dem Server zur `compose.yml`) und optional eine Liste von Service-Namen. | `compose ps --format json` parsen — alle erwarteten Container muessen `running` sein | mittel  |
+| `compose.pull`    | Zieht die neuesten Images fuer alle Services eines Compose-Projekts. Gibt `changed` zurueck, wenn mindestens ein Image aktualisiert wurde.                                                                                                                  | `compose pull` ausfuehren und Ausgabe auf `Pulling`/`Downloaded` pruefen             | mittel  |
+| `compose.down`    | Stoppt und entfernt alle Container eines Compose-Projekts. Optional mit `--volumes` zum Entfernen persistenter Volumes.                                                                                                                                     | `compose ps --format json` parsen — keine Container duerfen existieren               | einfach |
+| `compose.config`  | Deployt eine `compose.yml`-Datei auf den Server (via `file.copy` oder `file.template` als Komposition) und validiert sie mit `compose config`. Kombiniert Datei-Deployment mit Syntax-Pruefung.                                                             | SHA-256-Vergleich der Compose-Datei                                                  | mittel  |
+| `compose.restart` | Signal-Modul: Fuehrt `compose down && compose up -d` aus. Wird nur als Signal in Recipes verwendet und nur getriggert, wenn innerhalb der Recipe ein Modul `changed` zurueckgegeben hat.                                                                    | Signal-basiert (kein eigenstaendiger Check)                                          | einfach |
 
 **Runtime-Erkennung:**
 
 ```typescript
 // Automatisch (prueft erst docker, dann podman)
-compose.up({ projectDir: "/opt/traefik" })
+compose.up({ projectDirectory: "/opt/traefik" })
 
 // Explizit
-compose.up({ projectDir: "/opt/traefik", runtime: "podman" })
+compose.up({ projectDirectory: "/opt/traefik", runtime: "podman" })
 ```
 
 **Beispiel im Playbook:**
@@ -446,11 +446,11 @@ recipe(
   [
     file.directory("/opt/traefik"),
     file.template("/opt/traefik/compose.yml", "./files/traefik-compose.tmpl.yml"),
-    compose.pull({ projectDir: "/opt/traefik" }),
-    compose.up({ projectDir: "/opt/traefik" }),
+    compose.pull({ projectDirectory: "/opt/traefik" }),
+    compose.up({ projectDirectory: "/opt/traefik" }),
   ],
   {
-    signals: [compose.restart({ projectDir: "/opt/traefik" })],
+    signals: [compose.restart({ projectDirectory: "/opt/traefik" })],
   }
 )
 ```
