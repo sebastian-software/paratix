@@ -3,8 +3,14 @@ function shellQuoteForQuadletImageInspect(value: string): string {
   return `'${value.replaceAll("'", escapedQuote)}'`
 }
 
+// R-0000176: ask podman for a deterministic, line-oriented projection that
+// stays small even for images with multi-megabyte manifests. The first line
+// is the image ID, every subsequent line is one RepoDigest entry.
+const QUADLET_INSPECT_FORMAT = "{{.Id}}\\n{{range .RepoDigests}}{{.}}\\n{{end}}"
+
 export function buildQuadletImageInspectCommand(image: string): string {
-  return `podman image inspect -- ${shellQuoteForQuadletImageInspect(image)}`
+  const quotedImage = shellQuoteForQuadletImageInspect(image)
+  return `podman image inspect --format '${QUADLET_INSPECT_FORMAT}' -- ${quotedImage}`
 }
 
 export function formatQuadletImageIdentifierDetail(imageIdentifier: string): string {
@@ -47,23 +53,14 @@ function parseQuadletImageInspectOutput(output: string): {
   id: null | string
   repoDigests: string[]
 } | null {
-  try {
-    const parsed = JSON.parse(output) as unknown
-    if (!Array.isArray(parsed) || parsed.length === 0) return null
-    const [firstEntry] = parsed as unknown[]
-    if (!isQuadletInspectEntry(firstEntry)) return null
-    const repoDigests = Array.isArray(firstEntry.RepoDigests) ? firstEntry.RepoDigests : []
-    return {
-      id: typeof firstEntry.Id === "string" && firstEntry.Id.length > 0 ? firstEntry.Id : null,
-      repoDigests: repoDigests.filter(
-        (entry): entry is string => typeof entry === "string" && entry.length > 0
-      ),
-    }
-  } catch {
-    return null
+  // The format string emits the image ID on the first line and one
+  // RepoDigest per following line. Empty lines (e.g. trailing newline,
+  // image without RepoDigests) are ignored.
+  const lines = output.split("\n").filter((line) => line.length > 0)
+  if (lines.length === 0) return null
+  const [first, ...rest] = lines
+  return {
+    id: first.length > 0 ? first : null,
+    repoDigests: rest,
   }
-}
-
-function isQuadletInspectEntry(value: unknown): value is { Id?: unknown; RepoDigests?: unknown[] } {
-  return value != null && typeof value === "object"
 }

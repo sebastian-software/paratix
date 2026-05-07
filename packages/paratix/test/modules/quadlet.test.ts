@@ -625,15 +625,11 @@ describe("quadlet.updateImage", () => {
 
   it("pulls the image and restarts the service when a newer image was downloaded", async () => {
     const ssh = createMockSsh({
-      "podman image inspect -- 'docker.io/library/traefik:v3.3'": {
-        code: 0,
-        stdout: JSON.stringify([
-          {
-            Id: "sha256:local-image-id",
-            RepoDigests: ["docker.io/library/traefik@sha256:registry-digest"],
-          },
-        ]),
-      },
+      "podman image inspect --format '{{.Id}}\\n{{range .RepoDigests}}{{.}}\\n{{end}}' -- 'docker.io/library/traefik:v3.3'":
+        {
+          code: 0,
+          stdout: "sha256:local-image-id\ndocker.io/library/traefik@sha256:registry-digest\n",
+        },
       "podman pull -- 'docker.io/library/traefik:v3.3' 2>&1": {
         code: 0,
         stdout: "Copying blob sha256:123\nWriting manifest to image destination\n",
@@ -652,7 +648,9 @@ describe("quadlet.updateImage", () => {
       detail: "(sha256:registry-digest)",
       status: "changed",
     })
-    expect(ssh.calls).toContain("podman image inspect -- 'docker.io/library/traefik:v3.3'")
+    expect(ssh.calls).toContain(
+      "podman image inspect --format '{{.Id}}\\n{{range .RepoDigests}}{{.}}\\n{{end}}' -- 'docker.io/library/traefik:v3.3'"
+    )
     expect(ssh.calls).toContain("podman pull -- 'docker.io/library/traefik:v3.3' 2>&1")
     expect(ssh.calls).toContain("systemctl restart -- 'traefik'")
   })
@@ -684,15 +682,12 @@ describe("quadlet.updateImage", () => {
         code: 0,
         stdout: "Downloaded newer image for ghcr.io/acme/private-app:latest",
       },
-      "podman image inspect -- 'ghcr.io/acme/private-app:latest'": {
-        code: 0,
-        stdout: JSON.stringify([
-          {
-            Id: "sha256:private-local-id",
-            RepoDigests: ["ghcr.io/acme/private-app@sha256:private-registry-digest"],
-          },
-        ]),
-      },
+      "podman image inspect --format '{{.Id}}\\n{{range .RepoDigests}}{{.}}\\n{{end}}' -- 'ghcr.io/acme/private-app:latest'":
+        {
+          code: 0,
+          stdout:
+            "sha256:private-local-id\nghcr.io/acme/private-app@sha256:private-registry-digest\n",
+        },
       "systemctl restart -- 'private-app'": { code: 0 },
     })
 
@@ -742,15 +737,12 @@ describe("quadlet.updateImage", () => {
 
   it("restarts the overridden service name when provided", async () => {
     const ssh = createMockSsh({
-      "podman image inspect -- 'ghcr.io/acme/private-app:latest'": {
-        code: 0,
-        stdout: JSON.stringify([
-          {
-            Id: "sha256:canary-local-id",
-            RepoDigests: ["ghcr.io/acme/private-app@sha256:canary-registry-digest"],
-          },
-        ]),
-      },
+      "podman image inspect --format '{{.Id}}\\n{{range .RepoDigests}}{{.}}\\n{{end}}' -- 'ghcr.io/acme/private-app:latest'":
+        {
+          code: 0,
+          stdout:
+            "sha256:canary-local-id\nghcr.io/acme/private-app@sha256:canary-registry-digest\n",
+        },
       "podman pull -- 'ghcr.io/acme/private-app:latest' 2>&1": {
         code: 0,
         stdout: "Storing signatures\n",
@@ -775,10 +767,11 @@ describe("quadlet.updateImage", () => {
 
   it("returns failed when image inspection fails after a changed pull", async () => {
     const ssh = createMockSsh({
-      "podman image inspect -- 'docker.io/library/traefik:v3.3'": {
-        code: 125,
-        stderr: "inspect failed",
-      },
+      "podman image inspect --format '{{.Id}}\\n{{range .RepoDigests}}{{.}}\\n{{end}}' -- 'docker.io/library/traefik:v3.3'":
+        {
+          code: 125,
+          stderr: "inspect failed",
+        },
       "podman pull -- 'docker.io/library/traefik:v3.3' 2>&1": {
         code: 0,
         stdout: "Copying config sha256:abc\n",
@@ -798,10 +791,11 @@ describe("quadlet.updateImage", () => {
 
   it("returns failed when image inspection returns no ID", async () => {
     const ssh = createMockSsh({
-      "podman image inspect -- 'docker.io/library/traefik:v3.3'": {
-        code: 0,
-        stdout: JSON.stringify([{ Id: null, RepoDigests: [] }]),
-      },
+      "podman image inspect --format '{{.Id}}\\n{{range .RepoDigests}}{{.}}\\n{{end}}' -- 'docker.io/library/traefik:v3.3'":
+        {
+          code: 0,
+          stdout: "",
+        },
       "podman pull -- 'docker.io/library/traefik:v3.3' 2>&1": {
         code: 0,
         stdout: "Copying config sha256:abc\n",
@@ -820,10 +814,11 @@ describe("quadlet.updateImage", () => {
 
   it("falls back to the local image ID when no repo digest is available", async () => {
     const ssh = createMockSsh({
-      "podman image inspect -- 'docker.io/library/traefik:v3.3'": {
-        code: 0,
-        stdout: JSON.stringify([{ Id: "sha256:local-only-id", RepoDigests: [] }]),
-      },
+      "podman image inspect --format '{{.Id}}\\n{{range .RepoDigests}}{{.}}\\n{{end}}' -- 'docker.io/library/traefik:v3.3'":
+        {
+          code: 0,
+          stdout: "sha256:local-only-id\n",
+        },
       "podman pull -- 'docker.io/library/traefik:v3.3' 2>&1": {
         code: 0,
         stdout: "Copying config sha256:abc\n",
@@ -864,15 +859,16 @@ describe("quadlet.updateImage", () => {
 
   it("returns failed when restarting the service fails after a changed pull", async () => {
     const ssh = createMockSsh({
-      "podman image inspect -- 'docker.io/library/traefik:v3.3'": {
-        code: 0,
-        stdout: JSON.stringify([
-          {
-            Id: "sha256:restart-local-id",
-            RepoDigests: ["docker.io/library/traefik@sha256:restart-registry-digest"],
-          },
-        ]),
-      },
+      "podman image inspect --format '{{.Id}}\\n{{range .RepoDigests}}{{.}}\\n{{end}}' -- 'docker.io/library/traefik:v3.3'":
+        {
+          code: 0,
+          stdout: JSON.stringify([
+            {
+              Id: "sha256:restart-local-id",
+              RepoDigests: ["docker.io/library/traefik@sha256:restart-registry-digest"],
+            },
+          ]),
+        },
       "podman pull -- 'docker.io/library/traefik:v3.3' 2>&1": {
         code: 0,
         stdout: "Copying config sha256:abc\n",
