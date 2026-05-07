@@ -1,3 +1,4 @@
+/* eslint-disable max-lines -- CLI entrypoint co-locates parsers, validators, and command wiring */
 import { Command } from "commander"
 import { realpathSync } from "node:fs"
 import { extname, resolve } from "node:path"
@@ -20,6 +21,14 @@ const SECONDS_TO_MS = 1000
 const ENVIRONMENT_KEY_PATTERN = /^[A-Za-z_]\w*$/v
 const FIRST_RUN_ENV_NAME = "PARATIX_FIRST_RUN"
 const TYPESCRIPT_ENTRY_EXTENSIONS = new Set([".cts", ".mts", ".ts"])
+
+/**
+ * Upper bound for second-based CLI timeouts (24h).
+ *
+ * Avoids overflow when the parsed value is later multiplied by
+ * `SECONDS_TO_MS` and added to `Date.now()` for deadline checks.
+ */
+const RECONNECT_TIMEOUT_MAX_SECONDS = 86_400
 
 function resolveRealPath(path: string): null | string {
   try {
@@ -391,7 +400,11 @@ program
   .option("--env <key=value...>", "Set env values", collectEnvironment, {})
   .option("--env-file <path>", "Load dotenv file")
   .option("--first-run", "Set PARATIX_FIRST_RUN=true before loading the playbook", false)
-  .option("--reconnect-timeout <seconds>", "SSH reconnect timeout", parsePositiveNumber)
+  .option(
+    "--reconnect-timeout <seconds>",
+    "SSH reconnect timeout (seconds, max 86400)",
+    parseReconnectTimeoutSeconds
+  )
   .option("--verbose", "Show full stack traces on error", false)
   .action(async (file: string, options: Record<string, unknown>) => {
     try {
@@ -415,14 +428,38 @@ program
     }
   })
 
-export function parsePositiveNumber(value: string): number {
+export function parsePositiveNumber(value: string, options: { max?: number } = {}): number {
   const parsed = Number(value)
   if (!Number.isFinite(parsed) || parsed <= 0) {
     console.error(`Invalid --reconnect-timeout value: ${value} (expected a positive number)`)
     // eslint-disable-next-line node/no-process-exit
     process.exit(2)
   }
+  // Enforce an explicit upper bound to prevent later overflow when the value
+  // is converted to milliseconds and added to `Date.now()`.
+  if (options.max !== undefined && parsed > options.max) {
+    console.error(
+      `Invalid --reconnect-timeout value: ${value} (must be at most ${options.max} seconds)`
+    )
+    // eslint-disable-next-line node/no-process-exit
+    process.exit(2)
+  }
   return parsed
+}
+
+/**
+ * Commander option parser for `--reconnect-timeout` (seconds).
+ *
+ * Wraps {@link parsePositiveNumber} with a hard upper bound of
+ * {@link RECONNECT_TIMEOUT_MAX_SECONDS} so values such as `1e10` are rejected
+ * with a clear error message instead of silently producing a deadline that
+ * overflows `Number.MAX_SAFE_INTEGER` after the seconds-to-ms multiplication.
+ *
+ * @param value - The raw CLI string (in seconds) to parse.
+ * @returns The validated numeric value.
+ */
+export function parseReconnectTimeoutSeconds(value: string): number {
+  return parsePositiveNumber(value, { max: RECONNECT_TIMEOUT_MAX_SECONDS })
 }
 
 export function collectEnvironment(

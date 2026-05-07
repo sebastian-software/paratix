@@ -16,6 +16,7 @@ import {
   isServerDefinitionLike,
   loadServerDefinitionFromFile,
   parsePositiveNumber,
+  parseReconnectTimeoutSeconds,
   printExceptionError,
   runApplyCommand,
 } from "../src/cli.js"
@@ -986,6 +987,86 @@ describe("parsePositiveNumber", () => {
     }
     const errorMessage = errorSpy.mock.calls[0]?.[0] as string
     expect(errorMessage).toContain("notanumber")
+  })
+
+  it("accepts values within an optional max bound", () => {
+    expect(parsePositiveNumber("60", { max: 86_400 })).toBe(60)
+    expect(exitSpy).not.toHaveBeenCalled()
+  })
+
+  it("rejects values exceeding the max bound", () => {
+    let exitCalled = false
+    try {
+      parsePositiveNumber("100000", { max: 86_400 })
+    } catch {
+      exitCalled = true
+    }
+    expect(exitCalled).toBe(true)
+    expect(exitSpy).toHaveBeenCalledWith(2)
+    const errorMessage = errorSpy.mock.calls[0]?.[0] as string
+    expect(errorMessage).toContain("at most 86400")
+  })
+})
+
+describe("parseReconnectTimeoutSeconds", () => {
+  // Rejects huge or scientific-notation values that would overflow
+  // `Date.now() + timeout`-style deadline checks after seconds-to-ms scaling.
+
+  let exitSpy: MockInstance<typeof process.exit>
+  let errorSpy: MockInstance<typeof console.error>
+
+  beforeEach(() => {
+    exitSpy = vi.spyOn(process, "exit").mockImplementation(() => {
+      throw new Error("process.exit")
+    })
+    errorSpy = vi.spyOn(console, "error").mockImplementation(() => {
+      // noop: suppress console.error output during tests
+    })
+  })
+
+  afterEach(() => {
+    vi.restoreAllMocks()
+    clearRegisteredSecrets()
+  })
+
+  it("accepts the maximum allowed value (86400 seconds)", () => {
+    expect(parseReconnectTimeoutSeconds("86400")).toBe(86_400)
+    expect(exitSpy).not.toHaveBeenCalled()
+  })
+
+  it("rejects values above 86400 seconds", () => {
+    let exitCalled = false
+    try {
+      parseReconnectTimeoutSeconds("86401")
+    } catch {
+      exitCalled = true
+    }
+    expect(exitCalled).toBe(true)
+    expect(exitSpy).toHaveBeenCalledWith(2)
+  })
+
+  it("rejects scientific notation that exceeds the max bound (1e10)", () => {
+    let exitCalled = false
+    try {
+      parseReconnectTimeoutSeconds("1e10")
+    } catch {
+      exitCalled = true
+    }
+    expect(exitCalled).toBe(true)
+    expect(exitSpy).toHaveBeenCalledWith(2)
+    const errorMessage = errorSpy.mock.calls[0]?.[0] as string
+    expect(errorMessage).toContain("1e10")
+  })
+
+  it("still rejects non-positive numbers", () => {
+    let exitCalled = false
+    try {
+      parseReconnectTimeoutSeconds("0")
+    } catch {
+      exitCalled = true
+    }
+    expect(exitCalled).toBe(true)
+    expect(exitSpy).toHaveBeenCalledWith(2)
   })
 })
 
