@@ -125,8 +125,13 @@ function getRemainingReconnectTimeout(reconnectDeadline?: number): number | unde
 }
 
 async function sleepWithAbort(delay: number, abortSignal?: AbortSignal): Promise<void> {
-  if (delay <= 0) return
+  // R-0000142: still honour the abort status when delay is non-positive.
+  // The reconnect loop reaches `delay = 0` once the deadline has expired and
+  // would otherwise spin through additional connect attempts before noticing
+  // a queued abort. Always probe the abort state up front so the next
+  // `await sleepWithAbort(...)` propagates the abort reason immediately.
   if (abortSignal?.aborted === true) throw getAbortReason(abortSignal)
+  if (delay <= 0) return
   if (abortSignal == null) {
     await new Promise<void>((resolve) => {
       setTimeout(resolve, delay)

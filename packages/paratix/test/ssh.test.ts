@@ -695,6 +695,52 @@ describe("SshConnectionImpl", () => {
       expect((ssh as any).promptAbortSignal).toBe(abortController.signal)
     })
 
+    it("propagates an aborted signal during a zero-delay backoff (R-0000142 regression)", async () => {
+      // Regression: sleepWithAbort returned eagerly when delay <= 0 without
+      // checking the abort signal. Once the reconnect deadline expired,
+      // backoff delay clamped to 0 and the loop kept attempting connects
+      // even after an abort was queued. The fix probes the abort status
+      // first and throws the abort reason regardless of the delay.
+      vi.useFakeTimers()
+      const abortController = new AbortController()
+      const abortError = new Error("Interrupted by SIGTERM")
+
+      const ssh = makeSshInstance({
+        maxReconnectAttempts: 5,
+        reconnectTimeout: 300_000,
+      })
+      await ssh.connect({ abortSignal: abortController.signal })
+
+      let connectCalls = 0
+      // First attempt: queue the abort, drive the next sleep delay to ~0 ms.
+      vi.mocked(tryConnectOnPort)
+        .mockImplementationOnce(async () => {
+          await Promise.resolve()
+          connectCalls += 1
+          abortController.abort(abortError)
+          throw new Error("connect refused")
+        })
+        .mockImplementation(async () => {
+          await Promise.resolve()
+          connectCalls += 1
+          throw new Error("connect refused")
+        })
+
+      const reconnectPromise = ssh.reconnect()
+      reconnectPromise.catch(() => {
+        /* handled below */
+      })
+      // Drive the timers forward enough to settle the post-abort sleep.
+      for (let elapsed = 0; elapsed < 60_000; elapsed += 1000) {
+        // eslint-disable-next-line no-await-in-loop
+        await vi.advanceTimersByTimeAsync(1000)
+      }
+
+      await expect(reconnectPromise).rejects.toThrow("Interrupted by SIGTERM")
+      // The abort must short-circuit; only the first attempt ran.
+      expect(connectCalls).toBe(1)
+    })
+
     it("aborts an in-flight reconnect attempt without retrying", async () => {
       const abortController = new AbortController()
       const abortError = new Error("Interrupted by SIGINT")
