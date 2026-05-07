@@ -215,14 +215,18 @@ describe("archive.extract — check", () => {
   })
 
   it("returns ok when marker matches and extracted owner matches", async () => {
+    const ownerPathsMarker = `${marker}.owner-paths`
     const mockSsh = createMockSsh({
       [`[ -e '${destination}/app/file' ] || [ -L '${destination}/app/file' ]`]: { code: 0 },
       [`cat '${marker}'`]: { code: 0, stdout: archiveSha },
+      [`cat '${ownerPathsMarker}'`]: {
+        code: 0,
+        stdout: JSON.stringify([`${destination}/app/file`]),
+      },
       [`stat -c '%U %G' -- '${destination}/app/file'`]: {
         code: 0,
         stdout: "www-data www-data\n",
       },
-      [`tar -tvzf '${src}'`]: { code: 0, stdout: safeTarListing },
       [`test -d '${destination}'`]: { code: 0 },
       [`test -f '${marker}'`]: { code: 0 },
     })
@@ -233,13 +237,17 @@ describe("archive.extract — check", () => {
   })
 
   it("returns needs-apply when extracted owner has drifted", async () => {
+    const ownerPathsMarker = `${marker}.owner-paths`
     const mockSsh = createMockSsh({
       [`[ -e '${destination}/app/file' ] || [ -L '${destination}/app/file' ]`]: { code: 0 },
+      [`cat '${ownerPathsMarker}'`]: {
+        code: 0,
+        stdout: JSON.stringify([`${destination}/app/file`]),
+      },
       [`stat -c '%U %G' -- '${destination}/app/file'`]: {
         code: 0,
         stdout: "root root\n",
       },
-      [`tar -tvzf '${src}'`]: { code: 0, stdout: safeTarListing },
       [`test -d '${destination}'`]: { code: 0 },
       [`test -f '${marker}'`]: { code: 0 },
     })
@@ -251,9 +259,13 @@ describe("archive.extract — check", () => {
 
   it("limits concurrent owner checks across extracted archive members", async () => {
     const memberPaths = Array.from({ length: 24 }, (_value, index) => `app/file-${String(index)}`)
+    const ownerPathsMarker = `${marker}.owner-paths`
     const mockSsh = createMockSsh({
       [`cat '${marker}'`]: { code: 0, stdout: archiveSha },
-      [`tar -tvzf '${src}'`]: { code: 0, stdout: tarListingForMemberPaths(memberPaths) },
+      [`cat '${ownerPathsMarker}'`]: {
+        code: 0,
+        stdout: JSON.stringify(memberPaths.map((path) => `${destination}/${path}`)),
+      },
       [`test -d '${destination}'`]: { code: 0 },
       [`test -f '${marker}'`]: { code: 0 },
     })
@@ -1220,6 +1232,92 @@ describe("archive.extract — apply", () => {
     expect(result.status).toBe("failed")
     expect(String(result.error)).toContain("failed to move extracted files")
     expect(mockSsh.calls.some((c) => archiveStageCleanupPattern.test(c))).toBe(true)
+  })
+
+  // R-0000166: the owner-paths marker is now written for both upload and
+  // non-upload extracts, so the owner re-check stays deterministic even
+  // when the source archive is mutated, replaced or removed between apply
+  // and the next check.
+  it("R-0000166: persists extracted owner paths for non-upload archives with owner", async () => {
+    const ownerPathsMarker = `${marker}.owner-paths`
+    const mockSsh = createMockSsh({
+      [`chown -h -- 'www-data:www-data' '${destination}/app/file'`]: { code: 0 },
+      [`tar --no-same-owner --no-overwrite-dir -xzf '${src}' -C '${archiveStageDirectory}'`]: {
+        code: 0,
+      },
+      [`tar -tvzf '${src}'`]: { code: 0, stdout: safeTarListing },
+    })
+    vi.spyOn(mockSsh, "sha256").mockResolvedValue(archiveSha)
+    vi.spyOn(mockSsh, "writeFile").mockResolvedValue()
+
+    const mod = archive.extract(src, destination, { owner: "www-data:www-data" })
+    const result = await mod.apply(mockSsh, emptyEnv)
+
+    expect(result.status).toBe("changed")
+    expect(mockSsh.writeFile).toHaveBeenCalledWith(marker, archiveSha, { mode: "0644" })
+    expect(mockSsh.writeFile).toHaveBeenCalledWith(
+      ownerPathsMarker,
+      JSON.stringify([`${destination}/app/file`]),
+      { mode: "0644" }
+    )
+  })
+
+  it("R-0000166: non-upload owner check operates on the persisted member list, not the live archive", async () => {
+    const ownerPathsMarker = `${marker}.owner-paths`
+    // The live archive on disk now contains a *different* member; without
+    // the persisted marker the check would stat the wrong path. With the
+    // marker the check resolves the original member and reports `ok`.
+    const driftedTarListing = "-rw-r--r-- root/root 0 1970-01-01 00:00 app/replacement"
+    const mockSsh = createMockSsh({
+      [`[ -e '${destination}/app/file' ] || [ -L '${destination}/app/file' ]`]: { code: 0 },
+      [`cat '${marker}'`]: { code: 0, stdout: archiveSha },
+      [`cat '${ownerPathsMarker}'`]: {
+        code: 0,
+        stdout: JSON.stringify([`${destination}/app/file`]),
+      },
+      [`stat -c '%U %G' -- '${destination}/app/file'`]: {
+        code: 0,
+        stdout: "www-data www-data\n",
+      },
+      [`tar -tvzf '${src}'`]: { code: 0, stdout: driftedTarListing },
+      [`test -d '${destination}'`]: { code: 0 },
+      [`test -f '${marker}'`]: { code: 0 },
+    })
+    vi.spyOn(mockSsh, "sha256").mockResolvedValue(archiveSha)
+
+    const mod = archive.extract(src, destination, { owner: "www-data:www-data" })
+    const result = await mod.check(mockSsh, emptyEnv)
+
+    expect(result).toBe("ok")
+    // The check must not consult the live archive listing when the marker is
+    // available — that's the entire point of R-0000166.
+    expect(mockSsh.calls).not.toContain(`tar -tvzf '${src}'`)
+  })
+
+  it("R-0000166: falls back to the live archive listing when the owner-paths marker is missing (legacy host)", async () => {
+    const ownerPathsMarker = `${marker}.owner-paths`
+    const mockSsh = createMockSsh({
+      [`[ -e '${destination}/app/file' ] || [ -L '${destination}/app/file' ]`]: { code: 0 },
+      [`cat '${marker}'`]: { code: 0, stdout: archiveSha },
+      [`cat '${ownerPathsMarker}'`]: {
+        code: 1,
+        stderr: "cat: No such file or directory",
+      },
+      [`stat -c '%U %G' -- '${destination}/app/file'`]: {
+        code: 0,
+        stdout: "www-data www-data\n",
+      },
+      [`tar -tvzf '${src}'`]: { code: 0, stdout: safeTarListing },
+      [`test -d '${destination}'`]: { code: 0 },
+      [`test -f '${marker}'`]: { code: 0 },
+    })
+    vi.spyOn(mockSsh, "sha256").mockResolvedValue(archiveSha)
+
+    const mod = archive.extract(src, destination, { owner: "www-data:www-data" })
+    const result = await mod.check(mockSsh, emptyEnv)
+
+    expect(result).toBe("ok")
+    expect(mockSsh.calls).toContain(`tar -tvzf '${src}'`)
   })
 
   it("R-0000162: rejects a poisoned mktemp -d output for the staging directory", async () => {

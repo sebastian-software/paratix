@@ -352,8 +352,16 @@ async function writeOwnerPathsMarker(
     upload: boolean
   }
 ): Promise<void> {
-  if (!parameters.upload) return
   if (parameters.owner == null || parameters.owner === "") return
+  // R-0000166: persist the member list in *both* upload and non-upload mode.
+  // The previous implementation only stored the list when `upload === true`
+  // and re-derived it from the live archive (`tar -tvzf <source>`) in the
+  // non-upload check. If the source archive was modified or removed between
+  // apply and the next check, the re-derived list no longer matched what
+  // was extracted, which produced false drift reports — or, worse, hid real
+  // owner drift on disk because the per-path stat operated on the wrong
+  // file list. Writing the marker on every successful apply ties the owner
+  // re-check to the same paths the extract actually touched.
   const paths = archiveMemberDestinationPaths(parameters.destination, parameters.members)
   await conn.writeFile(ownerPathsMarkerPath(parameters.marker), JSON.stringify(paths), {
     mode: ARCHIVE_MARKER_MODE,
@@ -566,11 +574,21 @@ async function archiveOwnerMatches(
 ): Promise<boolean> {
   const { destination, marker, owner, source, upload } = parameters
   if (owner == null || owner === "") return true
-  if (upload) {
-    const paths = await readOwnerPathsMarker(conn, marker)
-    if (paths === null) return false
-    return ownerMatchesPaths(conn, { owner, paths })
-  }
+
+  // R-0000166: prefer the marker for both upload and non-upload archives.
+  // The marker pins the exact member list the last apply extracted, so the
+  // owner re-check stays deterministic even when the source archive is
+  // mutated, replaced or removed between apply and the next check.
+  const paths = await readOwnerPathsMarker(conn, marker)
+  if (paths !== null) return ownerMatchesPaths(conn, { owner, paths })
+
+  // Backwards compatibility: previous paratix versions only wrote the
+  // marker when `upload === true`, so a host extracted by an older release
+  // may have a content marker but no owner-paths marker. In upload mode
+  // the missing marker is a real failure (the archive content is not
+  // available locally to re-derive the list); in non-upload mode we can
+  // safely fall back to listing the source archive on the host.
+  if (upload) return false
   const members = await validatedArchiveMembers(conn, { archivePath: source, source })
   if (!Array.isArray(members)) return false
   return ownerMatchesPaths(conn, {
