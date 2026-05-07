@@ -395,6 +395,38 @@ describe("readHostFingerprintViaSsh2", () => {
     }
   })
 
+  // R-0000187: cleanupClient must install a no-op error listener before
+  // removing the original listeners so that late error events emitted during
+  // client.end() (half-closed socket, ssh2-layer throws) do not bubble up
+  // as uncaught errors and crash the process.
+  it("absorbs late error events emitted during client.end()", async () => {
+    const hostKey = buildEd25519HostKeyBuffer()
+    const fakeClient = createFakeHostKeyClient((config, client) => {
+      callHostVerifier(config, hostKey)
+      setImmediate(() => {
+        client.handlers.error(new Error("Host denied"))
+      })
+    })
+    // After removeAllListeners + on("error", noop), end() emits a late
+    // error. The no-op listener installed by cleanupClient must absorb it.
+    fakeClient.end.mockImplementation((): void => {
+      fakeClient.handlers.error(new Error("late socket teardown error"))
+    })
+
+    await expect(
+      readHostFingerprintViaSsh2("example.com", {
+        clientFactory: () => useFakeHostKeyClient(fakeClient),
+      })
+    ).resolves.toMatchObject({ algorithm: "ssh-ed25519" })
+
+    // Two error listeners observed in total: the original from
+    // registerFingerprintListeners and the no-op installed during cleanup.
+    const errorListenerRegistrations = fakeClient.on.mock.calls.filter(
+      ([event]) => event === "error"
+    )
+    expect(errorListenerRegistrations.length).toBeGreaterThanOrEqual(2)
+  })
+
   // R-0000127: when the close handler resolves first, the watchdog must be
   // cleared so it cannot keep the event loop alive or fire spuriously.
   it("clears the watchdog on a successful resolution", async () => {

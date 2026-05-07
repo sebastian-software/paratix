@@ -120,7 +120,16 @@ function resolveBootstrapOptions(options: HostFingerprintBootstrapOptions): {
 }
 
 function cleanupClient(client: HostKeyClient): void {
+  // R-0000187: removeAllListeners drops the original error listener. If
+  // client.end() then synchronously or asynchronously emits an error event
+  // (half-closed socket, ssh2-layer throw), Node treats it as an uncaught
+  // error and crashes the process. Install a no-op error listener first so
+  // the cleanup path always has a sink for late error events.
   client.removeAllListeners()
+  client.on("error", () => {
+    // Swallow late errors emitted while shutting the connection down — at
+    // this point the fingerprint promise has already settled.
+  })
   try {
     client.end()
   } catch {
