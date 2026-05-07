@@ -26,6 +26,16 @@ const createMockSsh: typeof createBaseMockSsh = (responses, options) =>
       { command: /^mkdir \/var\/lib\/paratix\/flags\/.*\.lock'/v, result: { code: 0 } },
       { command: /^rmdir \/var\/lib\/paratix\/flags\/.*\.lock'/v, result: { code: 0 } },
       { command: /^touch \/var\/lib\/paratix\/flags\//v, result: { code: 0 } },
+      // R-0000167: download.url's hash marker write is best-effort. The
+      // sha256 probe / printf marker write stubs let pre-marker tests
+      // succeed without stubbing every post-mv destination probe. The
+      // marker file probe is stubbed false so legacy tests that do not
+      // exercise the marker take the "missing marker" path.
+      { command: /^\[ -f '[^']*\.sha256' \]$/v, result: { code: 1 } },
+      { command: /^\[ -f '\/tmp\/file' \]$/v, result: { code: 0 } },
+      { command: /^sha256sum '\/tmp\/file'$/v, result: { stdout: "0".repeat(64) + "  /tmp/file" } },
+      { command: /^printf '%s\\n' '[\da-f]{64}' > '[^']*\.sha256'$/v, result: { code: 0 } },
+      { command: /^cat '[^']*\.sha256'$/v, result: { stdout: "" } },
       ...(options?.responseStubs ?? []),
     ],
   })
@@ -157,13 +167,50 @@ describe("download.url", () => {
       expect(result).toBe("needs-apply")
     })
 
-    it("returns ok when file exists (no sha256)", async () => {
+    it("returns ok when file and marker hash match (no sha256, allowUnverifiedDownload)", async () => {
+      // R-0000167: with allowUnverifiedDownload + no sha256, the check now
+      // requires `<destination>.sha256` to exist and to match the actual
+      // file digest. Existence alone is not sufficient any more.
+      const recordedHash = "aabbccddaabbccddaabbccddaabbccddaabbccddaabbccddaabbccddaabbccdd"
       const mockSsh = createMockSsh({
         [`[ -f '${destination}' ]`]: { code: 0 },
+        [`[ -f '${destination}.sha256' ]`]: { code: 0 },
+        [`cat '${destination}.sha256'`]: { stdout: `${recordedHash}\n` },
+        [`sha256sum '${destination}'`]: { stdout: `${recordedHash}  ${destination}` },
       })
       const mod = download.url(destination, url, allowUnverifiedDownload)
       const result = await mod.check(mockSsh, emptyEnv)
       expect(result).toBe("ok")
+    })
+
+    it("returns needs-apply when marker file is missing (no sha256)", async () => {
+      // R-0000167: a file from a pre-marker run (or from an out-of-band
+      // copy) has no `<destination>.sha256` next to it. Check must report
+      // needs-apply so the next apply run records the marker.
+      const mockSsh = createMockSsh({
+        [`[ -f '${destination}' ]`]: { code: 0 },
+        [`[ -f '${destination}.sha256' ]`]: { code: 1 },
+      })
+      const mod = download.url(destination, url, allowUnverifiedDownload)
+      const result = await mod.check(mockSsh, emptyEnv)
+      expect(result).toBe("needs-apply")
+    })
+
+    it("returns needs-apply when marker hash differs from current file hash (no sha256)", async () => {
+      // R-0000167: post-write tampering (or a stale URL update) flips the
+      // file digest while the marker stays at the previous value. Check
+      // must surface that as needs-apply so apply re-downloads.
+      const recordedHash = "aabbccddaabbccddaabbccddaabbccddaabbccddaabbccddaabbccddaabbccdd"
+      const tamperedHash = "1111111111111111111111111111111111111111111111111111111111111111"
+      const mockSsh = createMockSsh({
+        [`[ -f '${destination}' ]`]: { code: 0 },
+        [`[ -f '${destination}.sha256' ]`]: { code: 0 },
+        [`cat '${destination}.sha256'`]: { stdout: `${recordedHash}\n` },
+        [`sha256sum '${destination}'`]: { stdout: `${tamperedHash}  ${destination}` },
+      })
+      const mod = download.url(destination, url, allowUnverifiedDownload)
+      const result = await mod.check(mockSsh, emptyEnv)
+      expect(result).toBe("needs-apply")
     })
 
     it("returns needs-apply when file path is a symlink to a regular file", async () => {

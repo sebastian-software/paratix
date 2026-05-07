@@ -498,6 +498,71 @@ async function destinationContentMatchesSha256(
 }
 
 /**
+ * R-0000167: derive the path of the unverified-download hash marker that
+ * `download.url` keeps next to the destination when `allowUnverifiedDownload`
+ * is set. The marker captures the sha256 of the payload as observed
+ * immediately after a successful curl run, so subsequent checks can detect
+ * post-write tampering even though the operator opted out of an a-priori
+ * digest.
+ *
+ * @param destination - The download destination path.
+ * @returns The marker path adjacent to the destination.
+ */
+function unverifiedHashMarkerPath(destination: string): string {
+  return `${destination}.sha256`
+}
+
+/**
+ * R-0000167: best-effort write of the hash marker `<destination>.sha256`
+ * containing the sha256 hex digest of the downloaded payload. The marker is
+ * read back in `check` to detect post-write tampering when no a-priori
+ * digest was provided. We do not fail the download if the marker cannot be
+ * written — the download itself succeeded, and the worst case is an extra
+ * round-trip on the next run, when the absent marker forces `needs-apply`.
+ *
+ * @param conn - The active SSH connection.
+ * @param destination - The download destination path.
+ */
+async function writeUnverifiedHashMarker(
+  conn: SshConnection,
+  destination: string
+): Promise<void> {
+  const hash = await conn.sha256(destination)
+  if (hash == null || hash.length === 0) return
+  const markerPath = unverifiedHashMarkerPath(destination)
+  // Atomic single-line write — no shell expansion of the hash, no risk of
+  // partial writes contaminating later checks. The marker only needs read
+  // access for sha256sum -c to consume it, so 0644 is acceptable.
+  await conn.exec(`printf '%s\\n' ${shellQuote(hash)} > ${shellQuote(markerPath)}`, {
+    ignoreExitCode: true,
+    silent: true,
+  })
+}
+
+/**
+ * R-0000167: read back the hash marker `<destination>.sha256` if present and
+ * compare it against the destination's current sha256 digest. Returns
+ * `"missing"` when no marker exists (legacy state pre-R-0000167), `"match"`
+ * when the marker matches the current file, and `"drift"` when they differ.
+ *
+ * @param conn - The active SSH connection.
+ * @param destination - The download destination path.
+ * @returns The comparison outcome.
+ */
+async function compareUnverifiedHashMarker(
+  conn: SshConnection,
+  destination: string
+): Promise<"drift" | "match" | "missing"> {
+  const markerPath = unverifiedHashMarkerPath(destination)
+  if (!(await conn.test(`[ -f ${shellQuote(markerPath)} ]`))) return "missing"
+  const recordedHash = (await conn.readFile(markerPath)).trim()
+  if (recordedHash.length === 0) return "drift"
+  const actualHash = await conn.sha256(destination)
+  if (actualHash == null) return "drift"
+  return hashMatches(actualHash, recordedHash) ? "match" : "drift"
+}
+
+/**
  * Execute the download, verify integrity, and set ownership/permissions.
  * Shared implementation behind both `download.url()` and `download.github()`.
  *
@@ -843,13 +908,31 @@ export const download = {
     const resolvedOptions = options ?? {}
     validateIntegrityConfiguration("download.url", resolvedOptions)
     const downloadParameters = buildDownloadParameters(destination, resolvedOptions, url)
+    // R-0000167: when the operator opted into unverified downloads (no a-priori
+    // sha256 digest), Paratix records `<destination>.sha256` after a
+    // successful download and re-checks it on subsequent runs so post-write
+    // tampering or stale URLs are detected even without a known digest.
+    const usesUnverifiedHashMarker =
+      resolvedOptions.sha256 == null && resolvedOptions.allowUnverifiedDownload === true
 
     return {
       async apply(conn: null | SshConnection): Promise<ModuleResult> {
-        return performDownload(conn, downloadParameters)
+        const result = await performDownload(conn, downloadParameters)
+        if (result.status !== "changed") return result
+        if (!usesUnverifiedHashMarker || !conn) return result
+        await writeUnverifiedHashMarker(conn, destination)
+        return result
       },
       async check(conn: null | SshConnection): Promise<"needs-apply" | "ok"> {
-        return checkDownload(conn, destination, resolvedOptions)
+        const baseResult = await checkDownload(conn, destination, resolvedOptions)
+        if (baseResult === NEEDS_APPLY) return baseResult
+        if (!usesUnverifiedHashMarker || !conn) return baseResult
+        // R-0000167: file exists and metadata matches; cross-check the hash
+        // marker so out-of-band edits (or a missing marker from a pre-R-0000167
+        // run) trigger a fresh download instead of silently masking drift.
+        return (await compareUnverifiedHashMarker(conn, destination)) === "match"
+          ? "ok"
+          : NEEDS_APPLY
       },
       name: `download.url: ${destination}`,
     }
