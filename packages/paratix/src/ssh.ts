@@ -521,9 +521,40 @@ export class SshConnectionImpl implements SshConnection {
     prefix: string
   ): Promise<string> {
     const directory = posix.dirname(remotePath)
+    // R-0000141: refuse to mktemp into a directory whose resolved path differs
+    // from the literal one — that means at least one component of the
+    // destination is a symlink and an attacker could redirect the privileged
+    // temp file (and the subsequent `mv -T`) into a location they control.
+    await this.assertDirnameHasNoSymlinkComponent(directory, remotePath)
     const template = `${directory}/${prefix}.XXXXXX`
     const path = await this.output(`mktemp ${shellQuote(template)}`)
     return validateMktempPath(directory, path, prefix)
+  }
+
+  /**
+   * Reject any destination directory whose path contains a symbolic link
+   * component. Resolving via `realpath -m` lets the check tolerate trailing
+   * components that do not yet exist while still detecting symlinks earlier
+   * in the path.
+   *
+   * @param directory - The destination directory derived from `posix.dirname`.
+   * @param remotePath - Original remote path (used for the diagnostic message).
+   * @throws {Error} when at least one component of `directory` is a symlink.
+   */
+  private async assertDirnameHasNoSymlinkComponent(
+    directory: string,
+    remotePath: string
+  ): Promise<void> {
+    if (directory === "" || directory === "/") return
+    const result = await this.output(
+      `realpath -m -- ${shellQuote(directory)} 2>/dev/null || printf '%s' ${shellQuote(directory)}`
+    )
+    const resolved = result.trim()
+    if (resolved !== directory) {
+      throw new Error(
+        `[ssh.mktemp: ${remotePath}] destination directory ${directory} resolves to ${resolved}; refusing to mktemp because at least one path component is a symbolic link`
+      )
+    }
   }
 
   private async ensureRemoteWriteFile(options: {
@@ -718,6 +749,8 @@ export class SshConnectionImpl implements SshConnection {
     prefix: string
   ): Promise<string> {
     const directory = posix.dirname(remotePath)
+    // R-0000141: same dirname-symlink protection as for the privileged path.
+    await this.assertDirnameHasNoSymlinkComponent(directory, remotePath)
     const template = `${directory}/${prefix}.XXXXXX`
     const command = `mktemp ${shellQuote(template)}`
     const path =

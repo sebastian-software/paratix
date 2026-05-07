@@ -217,10 +217,23 @@ function makeWireHostKey(algorithmName: string, payload: string): Buffer {
 
 function makeWriteFileExecSpy(
   executedCommands: string[],
-  tempPath: string
+  tempPath: string,
+  options: { realpathDirectory?: string } = {}
 ): ReturnType<typeof vi.fn> {
-  return vi
-    .fn()
+  const spy = vi.fn()
+  // R-0000141: when the destination directory triggers the dirname-symlink
+  // probe, realpath -m -- runs before the first mktemp. Echo the directory
+  // back unchanged so the validation passes.
+  if (options.realpathDirectory != null) {
+    spy.mockImplementationOnce((_command: string, callback: ExecCallback) => {
+      const stream = makeStream()
+      executedCommands.push(_command)
+      callback(undefined, stream)
+      stream.emit("data", Buffer.from(options.realpathDirectory!))
+      stream.emit("close", 0)
+    })
+  }
+  return spy
     .mockImplementationOnce((_command: string, callback: ExecCallback) => {
       const stream = makeStream()
       executedCommands.push(_command)
@@ -253,6 +266,13 @@ function makeWriteFileExecSpy(
       callback(undefined, stream)
       stream.emit("close", 0)
     })
+}
+
+// R-0000141: helper that checks whether a command transports content via
+// `printf` (legacy payload pipeline) — not the realpath dirname-symlink
+// probe that uses `printf '%s'` only as a fallback for the directory string.
+function isContentTransportPrintf(command: string): boolean {
+  return command.includes("printf") && !command.includes("realpath")
 }
 
 function makeSshInstanceWithAgent(
@@ -2159,6 +2179,14 @@ describe("SshConnectionImpl", () => {
 
       const execSpy = vi
         .fn()
+        // R-0000141: realpath dirname-symlink probe before mktemp
+        .mockImplementationOnce((_command: string, callback: ExecCallback) => {
+          const stream = makeStream()
+          executedCommands.push(_command)
+          callback(undefined, stream)
+          stream.emit("data", Buffer.from("/remote"))
+          stream.emit("close", 0)
+        })
         .mockImplementationOnce((_command: string, callback: ExecCallback) => {
           const stream = makeStream()
           executedCommands.push(_command)
@@ -2215,6 +2243,14 @@ describe("SshConnectionImpl", () => {
 
       const execSpy = vi
         .fn()
+        // R-0000141: realpath dirname-symlink probe before mktemp
+        .mockImplementationOnce((_command: string, callback: ExecCallback) => {
+          const stream = makeStream()
+          executedCommands.push(_command)
+          callback(undefined, stream)
+          stream.emit("data", Buffer.from("/remote"))
+          stream.emit("close", 0)
+        })
         // First call: mktemp (via output())
         .mockImplementationOnce((_command: string, callback: ExecCallback) => {
           const stream = makeStream()
@@ -2277,6 +2313,14 @@ describe("SshConnectionImpl", () => {
 
       const execSpy = vi
         .fn()
+        // R-0000141: realpath dirname-symlink probe before mktemp
+        .mockImplementationOnce((_command: string, callback: ExecCallback) => {
+          const stream = makeStream()
+          executedCommands.push(_command)
+          callback(undefined, stream)
+          stream.emit("data", Buffer.from("/remote"))
+          stream.emit("close", 0)
+        })
         // First call: mktemp
         .mockImplementationOnce((_command: string, callback: ExecCallback) => {
           const stream = makeStream()
@@ -2335,6 +2379,14 @@ describe("SshConnectionImpl", () => {
 
       const execSpy = vi
         .fn()
+        // R-0000141: realpath dirname-symlink probe before mktemp
+        .mockImplementationOnce((_command: string, callback: ExecCallback) => {
+          const stream = makeStream()
+          executedCommands.push(_command)
+          callback(undefined, stream)
+          stream.emit("data", Buffer.from("/remote"))
+          stream.emit("close", 0)
+        })
         // First call: mktemp (via output()) — returns temp path
         .mockImplementationOnce((_command: string, callback: ExecCallback) => {
           const stream = makeStream()
@@ -2381,6 +2433,14 @@ describe("SshConnectionImpl", () => {
 
       const execSpy = vi
         .fn()
+        // R-0000141: realpath dirname-symlink probe before mktemp
+        .mockImplementationOnce((_command: string, callback: ExecCallback) => {
+          const stream = makeStream()
+          executedCommands.push(_command)
+          callback(undefined, stream)
+          stream.emit("data", Buffer.from("/remote"))
+          stream.emit("close", 0)
+        })
         .mockImplementationOnce((_command: string, callback: ExecCallback) => {
           const stream = makeStream()
           executedCommands.push(_command)
@@ -2434,9 +2494,10 @@ describe("SshConnectionImpl", () => {
         "remote file size mismatch after upload/finalize"
       )
 
-      expect(executedCommands[3]).toContain("stat -c '%s'")
-      expect(executedCommands[4]).toContain("df -P")
-      expect(executedCommands[5]).toContain("rm -f")
+      expect(executedCommands[0]).toContain("realpath -m --")
+      expect(executedCommands[4]).toContain("stat -c '%s'")
+      expect(executedCommands[5]).toContain("df -P")
+      expect(executedCommands[6]).toContain("rm -f")
     })
   })
 
@@ -2490,7 +2551,9 @@ describe("SshConnectionImpl", () => {
       const tempPath = "/remote/paratix-write.ABCDEF"
       const executedCommands: string[] = []
 
-      const execSpy = makeWriteFileExecSpy(executedCommands, tempPath)
+      const execSpy = makeWriteFileExecSpy(executedCommands, tempPath, {
+        realpathDirectory: "/remote",
+      })
 
       const client = makeClientWithExecSpy(execSpy)
       const ssh = makeConnectedSsh(client)
@@ -2513,7 +2576,9 @@ describe("SshConnectionImpl", () => {
       const tempPath = "/remote/paratix-write.ABCDEF"
       const executedCommands: string[] = []
 
-      const execSpy = makeWriteFileExecSpy(executedCommands, tempPath)
+      const execSpy = makeWriteFileExecSpy(executedCommands, tempPath, {
+        realpathDirectory: "/remote",
+      })
 
       const client = makeClientWithExecSpy(execSpy)
       const ssh = makeConnectedSsh(client)
@@ -2523,9 +2588,11 @@ describe("SshConnectionImpl", () => {
       // SFTP content upload must have been called — atomic path
       expect(vi.mocked(sftpUploadContent)).toHaveBeenCalledOnce()
 
-      // printf must NOT have been used
-      const usedPrintf = executedCommands.some((cmd) => cmd.includes("printf"))
-      expect(usedPrintf).toBe(false)
+      // printf must NOT have been used as the content-write path (i.e.
+      // `printf '%s' '<base64-or-payload>'`). The realpath dirname-symlink
+      // probe uses `printf '%s'` only as a fallback for the directory string,
+      // which is part of validation rather than payload transport.
+      expect(executedCommands.some((cmd) => isContentTransportPrintf(cmd))).toBe(false)
 
       // mktemp and mv confirm atomic write path
       expect(executedCommands.some((cmd) => cmd.includes("mktemp"))).toBe(true)
@@ -2540,7 +2607,9 @@ describe("SshConnectionImpl", () => {
       const tempPath = "/remote/paratix-write.ABCDEF"
       const executedCommands: string[] = []
 
-      const execSpy = makeWriteFileExecSpy(executedCommands, tempPath)
+      const execSpy = makeWriteFileExecSpy(executedCommands, tempPath, {
+        realpathDirectory: "/remote",
+      })
 
       const client = makeClientWithExecSpy(execSpy)
       const ssh = makeConnectedSsh(client)
@@ -2566,6 +2635,7 @@ describe("SshConnectionImpl", () => {
       const initialTempPath = "/tmp/paratix-write.ABCDEF"
       const fallbackTempPath = "/etc/apt/sources.list.d/paratix-write.FALLBACK"
       const remotePath = "/etc/apt/sources.list.d/docker.list"
+      const destinationDirectory = "/etc/apt/sources.list.d"
       const executedCommands: string[] = []
 
       const execSpy = vi
@@ -2594,6 +2664,14 @@ describe("SshConnectionImpl", () => {
           executedCommands.push(_command)
           callback(undefined, stream)
           stream.emit("data", Buffer.from("0"))
+          stream.emit("close", 0)
+        })
+        // R-0000141: realpath dirname-symlink probe before privileged mktemp
+        .mockImplementationOnce((_command: string, callback: ExecCallback) => {
+          const stream = makeStream()
+          executedCommands.push(_command)
+          callback(undefined, stream)
+          stream.emit("data", Buffer.from(destinationDirectory))
           stream.emit("close", 0)
         })
         .mockImplementationOnce((_command: string, callback: ExecCallback) => {
@@ -2650,11 +2728,45 @@ describe("SshConnectionImpl", () => {
         ssh.writeFile(remotePath, "hello world", { mode: "0644" })
       ).resolves.toBeUndefined()
 
-      expect(executedCommands[4]).toMatch(/^sudo bash -c /v)
-      expect(executedCommands[4]).toContain("/etc/apt/sources.list.d/paratix-write.XXXXXX")
-      expect(executedCommands[5]).toContain(fallbackTempPath)
-      expect(executedCommands[5]).not.toContain(initialTempPath)
-      expect(executedCommands[10]).toBe(`rm -f '${initialTempPath}'`)
+      // R-0000141: a realpath probe runs before the privileged mktemp
+      expect(executedCommands[4]).toContain("realpath -m --")
+      expect(executedCommands[4]).toContain(destinationDirectory)
+      expect(executedCommands[5]).toMatch(/^sudo bash -c /v)
+      expect(executedCommands[5]).toContain("/etc/apt/sources.list.d/paratix-write.XXXXXX")
+      expect(executedCommands[6]).toContain(fallbackTempPath)
+      expect(executedCommands[6]).not.toContain(initialTempPath)
+      expect(executedCommands[11]).toBe(`rm -f '${initialTempPath}'`)
+    })
+
+    it("rejects writeFile when a destination dirname component is a symlink (R-0000141 regression)", async () => {
+      // Regression: validateMktempPath only checked the textual prefix of
+      // the mktemp output, so when a destination component (e.g.
+      // `/etc/sudoers.d` replaced by a symlink) pointed at attacker
+      // territory, mktemp would create the file in the attacker's directory
+      // and the subsequent `mv -T` would overwrite paths the operator did
+      // not intend. The fix runs `realpath -m --` against the dirname and
+      // refuses to mktemp when the resolved path differs from the literal
+      // one.
+      const { sftpUploadContent } = await import("../src/sftp.js")
+      vi.mocked(sftpUploadContent).mockResolvedValue()
+
+      const remotePath = "/etc/sudoers.d/paratix.conf"
+      const realpathResolved = "/var/tmp/attacker/sudoers.d"
+
+      const execSpy = vi.fn().mockImplementationOnce((_command: string, callback: ExecCallback) => {
+        const stream = makeStream()
+        callback(undefined, stream)
+        // realpath returns the (different) resolved path → must reject
+        stream.emit("data", Buffer.from(realpathResolved))
+        stream.emit("close", 0)
+      })
+
+      const client = makeClientWithExecSpy(execSpy)
+      const ssh = makeConnectedSsh(client)
+
+      await expect(ssh.writeFile(remotePath, "x", { mode: "0440" })).rejects.toThrow(
+        /at least one path component is a symbolic link/v
+      )
     })
   })
 

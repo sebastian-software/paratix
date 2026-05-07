@@ -50,12 +50,38 @@ function makeStream(): StreamWithStderr {
   return stream
 }
 
+// R-0000141: extract the literal directory argument that the dirname-symlink
+// probe passed to `realpath -m --`. The probe shape is:
+//     realpath -m -- '<dir>' 2>/dev/null || printf '%s' '<dir>'
+// Mock helpers must echo `<dir>` back so the equality check passes.
+const REALPATH_DIRECTORY_PATTERN = /realpath -m -- '(?<directory>[^']*)'/v
+function extractRealpathDirectory(command: string): string {
+  return REALPATH_DIRECTORY_PATTERN.exec(command)?.groups?.directory ?? ""
+}
+
+function isContentTransportPrintf(command: string): boolean {
+  return command.includes("printf") && !command.includes("realpath")
+}
+
+// R-0000141: shared mock handler for the realpath dirname-symlink probe —
+// echoes the literal directory back to the caller so the equality check in
+// assertDirnameHasNoSymlinkComponent passes.
+function realpathProbeHandler(cmd: string, cb: ExecCallback): void {
+  const stream = makeStream()
+  cb(undefined, stream)
+  stream.emit("data", Buffer.from(extractRealpathDirectory(cmd)))
+  stream.emit("close", 0)
+}
+
 function makeDiskCheckExecSpy(prefix: string, dfOutput: string): ReturnType<typeof vi.fn> {
   let counter = 0
   return vi.fn().mockImplementation((cmd: string, cb: ExecCallback) => {
     const stream = makeStream()
     cb(undefined, stream)
-    if (cmd.includes("mktemp")) {
+    const realpathDirectory = extractRealpathDirectory(cmd)
+    if (realpathDirectory !== "") {
+      stream.emit("data", Buffer.from(realpathDirectory))
+    } else if (cmd.includes("mktemp")) {
       counter++
       stream.emit("data", Buffer.from(`/etc/systemd/system/paratix-write.${prefix}${counter}`))
     } else if (cmd.includes("stat -c '%s'")) {
@@ -71,10 +97,12 @@ function makeExecSpy(mktempResult: string, verifiedSize = 100_000): ReturnType<t
   return vi.fn().mockImplementation((cmd: string, cb: ExecCallback) => {
     const stream = makeStream()
     cb(undefined, stream)
-    if (cmd.includes("mktemp")) {
+    const realpathDirectory = extractRealpathDirectory(cmd)
+    if (realpathDirectory !== "") {
+      stream.emit("data", Buffer.from(realpathDirectory))
+    } else if (cmd.includes("mktemp")) {
       stream.emit("data", Buffer.from(mktempResult))
-    }
-    if (cmd.includes("stat -c '%s'")) {
+    } else if (cmd.includes("stat -c '%s'")) {
       stream.emit("data", Buffer.from(String(verifiedSize)))
     }
     stream.emit("close", 0)
@@ -95,7 +123,10 @@ function makeSimpleClient(): Client {
     exec: vi.fn().mockImplementation((cmd: string, cb: ExecCallback) => {
       const stream = makeStream()
       cb(undefined, stream)
-      if (cmd.includes("mktemp")) {
+      const realpathDirectory = extractRealpathDirectory(cmd)
+      if (realpathDirectory !== "") {
+        stream.emit("data", Buffer.from(realpathDirectory))
+      } else if (cmd.includes("mktemp")) {
         stream.emit("data", Buffer.from("/etc/paratix-write.SIMPLE"))
       }
       stream.emit("close", 0)
@@ -153,8 +184,11 @@ describe("SshConnectionImpl.writeFile — small content", () => {
     expect(executedCommands.some((cmd) => cmd.includes("mktemp"))).toBe(true)
     expect(executedCommands.some((cmd) => cmd.includes("mv"))).toBe(true)
 
-    // printf/tee must NOT be used
-    expect(executedCommands.some((cmd) => cmd.includes("printf"))).toBe(false)
+    // printf/tee must NOT be used to transport content. The dirname-symlink
+    // probe (R-0000141) uses `printf '%s'` only as a fallback for the
+    // directory string when realpath is unavailable; that is not a content
+    // transport pipeline.
+    expect(executedCommands.some((cmd) => isContentTransportPrintf(cmd))).toBe(false)
     expect(executedCommands.some((cmd) => cmd.includes("tee"))).toBe(false)
   })
 
@@ -307,6 +341,8 @@ describe("SshConnectionImpl.writeFile — large content (> 64 KB)", () => {
     // exec spy: mktemp returns the remote tmp path, mv succeeds, rm -f fails
     const cleanupExecSpy = vi
       .fn()
+      // R-0000141: dirname-symlink probe (realpath) before mktemp
+      .mockImplementationOnce(realpathProbeHandler)
       .mockImplementationOnce((_cmd: string, cb: ExecCallback) => {
         // First call is always mktemp (via output()) — emit the remote tmp path
         const stream = makeStream()
@@ -354,6 +390,8 @@ describe("SshConnectionImpl.writeFile — large content (> 64 KB)", () => {
     const remotePath = "/etc/systemd/system/example.service"
     const emptyFileExecSpy = vi
       .fn()
+      // R-0000141: realpath probe before the initial mktemp.
+      .mockImplementationOnce(realpathProbeHandler)
       .mockImplementationOnce((_cmd: string, cb: ExecCallback) => {
         const stream = makeStream()
         cb(undefined, stream)
@@ -376,6 +414,8 @@ describe("SshConnectionImpl.writeFile — large content (> 64 KB)", () => {
         stream.emit("data", Buffer.from("0"))
         stream.emit("close", 0)
       })
+      // R-0000141: realpath probe before the privileged shell-fallback mktemp
+      .mockImplementationOnce(realpathProbeHandler)
       .mockImplementationOnce((_cmd: string, cb: ExecCallback) => {
         const stream = makeStream()
         cb(undefined, stream)
@@ -445,6 +485,8 @@ describe("SshConnectionImpl.writeFile — large content (> 64 KB)", () => {
 
     const stdinFallbackExecSpy = vi
       .fn()
+      // R-0000141: realpath probe before the initial mktemp.
+      .mockImplementationOnce(realpathProbeHandler)
       .mockImplementationOnce((_cmd: string, cb: ExecCallback) => {
         const stream = makeStream()
         cb(undefined, stream)
@@ -468,6 +510,8 @@ describe("SshConnectionImpl.writeFile — large content (> 64 KB)", () => {
         stream.emit("data", Buffer.from("0"))
         stream.emit("close", 0)
       })
+      // R-0000141: realpath probe before the privileged shell-fallback mktemp
+      .mockImplementationOnce(realpathProbeHandler)
       .mockImplementationOnce((_cmd: string, cb: ExecCallback) => {
         const stream = makeStream()
         cb(undefined, stream)
@@ -574,6 +618,8 @@ describe("SshConnectionImpl.writeFile — large content (> 64 KB)", () => {
     // contains the sudo password in plain text (simulates a verbose error message)
     const cleanupExecSpy = vi
       .fn()
+      // R-0000141: realpath dirname-symlink probe before mktemp
+      .mockImplementationOnce(realpathProbeHandler)
       .mockImplementationOnce((_cmd: string, cb: ExecCallback) => {
         // First call: mktemp — returns the remote tmp path
         const stream = makeStream()
@@ -649,6 +695,8 @@ describe("SshConnectionImpl.uploadFile — cleanup error secret masking", () => 
     // contains the sudo password in plain text (simulates a verbose error message)
     const cleanupExecSpy = vi
       .fn()
+      // R-0000141: realpath dirname-symlink probe before mktemp
+      .mockImplementationOnce(realpathProbeHandler)
       .mockImplementationOnce((_cmd: string, cb: ExecCallback) => {
         // First call: mktemp — returns the remote tmp path
         const stream = makeStream()
