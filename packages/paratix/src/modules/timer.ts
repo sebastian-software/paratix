@@ -255,20 +255,15 @@ async function applyPresent(
   return { status: "changed" }
 }
 
-type AbsentContext = {
-  locations: TimerLocations
-  module: string
-  name: string
-}
+type AbsentContext = { locations: TimerLocations; module: string; name: string }
 
 async function disableTimerForAbsent(
   ssh: SshConnection,
   context: AbsentContext
 ): Promise<ModuleResult | undefined> {
   const { locations, module, name } = context
-  // `disable --now` removes the wants/ symlink, so run it before deleting
-  // unit files. Only tolerate the expected missing-unit race; real stop or
-  // disable failures mean the timer may still be active or enabled.
+  // Run before deleting files so `disable --now` can remove the wants/ symlink.
+  // Only tolerate missing-unit races; real disable failures may leave active state.
   const disable = await ssh.exec(
     `${SYSTEMCTL} disable --now -- ${shellQuote(locations.timerUnit)}`,
     {
