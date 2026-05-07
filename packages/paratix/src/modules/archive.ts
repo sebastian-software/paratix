@@ -120,6 +120,16 @@ function extractCommand(source: string, archivePath: string, destination: string
 const ARCHIVE_UPLOAD_PREFIX = "paratix-upload"
 const ARCHIVE_UPLOAD_DIRECTORY = "/tmp"
 
+// R-0000162: prefix for the per-extract staging directory created via
+// `mktemp -d` *under the destination*. Extracting into a paratix-controlled,
+// freshly-created sub-directory and then atomically moving the contents into
+// the destination closes the TOCTOU window between symlink validation and
+// `tar -xzf` / `unzip -o` execution. An attacker with write access below
+// `destination` can no longer race a symlink between the validation step and
+// the extract command, because the extract no longer writes into a path the
+// attacker can influence.
+const ARCHIVE_STAGE_PREFIX = ".paratix-stage"
+
 /**
  * Allocate a unique remote upload path via `mktemp`.
  *
@@ -154,6 +164,80 @@ async function allocateRemoteUploadPath(conn: SshConnection): Promise<string> {
     throw new Error(`[archive.extract] mktemp produced an unexpected path: ${reason}`, {
       cause: error,
     })
+  }
+}
+
+/**
+ * Allocate a fresh per-extract staging directory under the destination via
+ * `mktemp -d`. The directory is on the same filesystem as the destination so
+ * that the subsequent move into the destination is `rename(2)`-cheap, and it
+ * inherits the destination's parent permissions so non-root attackers cannot
+ * inject symlinks between extraction and move. The returned path is verified
+ * via {@link validateMktempPath} to defend against locale-induced multi-line
+ * `mktemp` output.
+ *
+ * @param conn - The SSH connection.
+ * @param destination - The (already validated, absolute) destination directory.
+ * @returns The absolute path to the staging directory.
+ */
+async function allocateExtractStagingDirectory(
+  conn: SshConnection,
+  destination: string
+): Promise<string> {
+  const template = `${destination}/${ARCHIVE_STAGE_PREFIX}.XXXXXXXX`
+  const stagingPath = await conn.output(`mktemp -d ${shellQuote(template)}`)
+  if (stagingPath.length === 0) {
+    throw new Error("[archive.extract] mktemp -d did not return a staging path for extraction")
+  }
+  try {
+    return validateMktempPath(destination, stagingPath, ARCHIVE_STAGE_PREFIX)
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : String(error)
+    throw new Error(`[archive.extract] mktemp -d produced an unexpected staging path: ${reason}`, {
+      cause: error,
+    })
+  }
+}
+
+/**
+ * Move the extracted archive contents from the paratix-controlled staging
+ * directory into the destination atomically (per-entry `mv`). The final
+ * `rmdir` of the empty staging directory completes the move.
+ *
+ * `find -mindepth 1 -maxdepth 1 -print0` enumerates dotfiles and ordinary
+ * entries alike. Each entry is moved via `mv -f`, which is `rename(2)` on the
+ * same filesystem and therefore atomic per entry.
+ *
+ * @param conn - The SSH connection.
+ * @param staging - The staging directory holding the freshly extracted files.
+ * @param destination - The final destination directory.
+ * @returns Either a failure {@link ModuleResult} or null on success.
+ */
+async function moveExtractedContentsIntoDestination(
+  conn: SshConnection,
+  staging: string,
+  destination: string
+): Promise<ModuleResult | null> {
+  const destinationWithSlash = shellQuote(`${destination}/`)
+  const moveCommand = [
+    `cd ${shellQuote(staging)}`,
+    `find . -mindepth 1 -maxdepth 1 -print0 | xargs -0 -I {} mv -f {} ${destinationWithSlash}`,
+  ].join(" && ")
+  const moveResult = await conn.exec(moveCommand, EXEC_OPTS)
+  if (moveResult.code !== 0) {
+    return failedCommand(
+      `[archive.extract] failed to move extracted files into ${destination}`,
+      moveResult
+    )
+  }
+  return null
+}
+
+async function cleanupStagingDirectory(conn: SshConnection, staging: string): Promise<void> {
+  try {
+    await conn.exec(`rm -rf ${shellQuote(staging)}`, SILENT)
+  } catch {
+    // best effort: cleanup must not mask the original result
   }
 }
 
@@ -313,18 +397,75 @@ async function validateMembersForExtraction(
  * @param remoteSource - The remote archive path (uploaded temp file or original remote path).
  * @returns The module result.
  */
+/**
+ * R-0000162: extract into a paratix-controlled staging sub-directory, then
+ * move the result into the destination atomically. This closes the TOCTOU
+ * window between `validateNoSymlinkPaths` and the actual `tar -xzf` /
+ * `unzip -o` invocation: an attacker with write access below `destination`
+ * can no longer plant a symlink that the extract command then follows.
+ *
+ * @param conn - The SSH connection.
+ * @param parameters - Inputs for the staged extraction.
+ * @param parameters.destination - The validated destination directory.
+ * @param parameters.remoteSource - The remote archive path (uploaded or original).
+ * @param parameters.source - The source archive path (used for format detection).
+ */
+async function extractViaStagingDirectory(
+  conn: SshConnection,
+  parameters: { destination: string; remoteSource: string; source: string }
+): Promise<ModuleResult | null> {
+  const { destination, remoteSource, source } = parameters
+
+  // The unsupported-format check happens before staging-dir allocation so we
+  // never create (or have to clean up) a staging directory we can't use.
+  const probeCmd = extractCommand(source, remoteSource, destination)
+  if (probeCmd === null) return failed(`[archive.extract] unsupported archive format for ${source}`)
+
+  const staging = await allocateExtractStagingDirectory(conn, destination)
+  try {
+    const cmd = extractCommand(source, remoteSource, staging)
+    if (cmd === null) return failed(`[archive.extract] unsupported archive format for ${source}`)
+
+    const extractResult = await conn.exec(cmd, EXEC_OPTS)
+    if (extractResult.code !== 0) {
+      return failedCommand(`[archive.extract] failed to extract ${source}`, extractResult)
+    }
+
+    return await moveExtractedContentsIntoDestination(conn, staging, destination)
+  } finally {
+    await cleanupStagingDirectory(conn, staging)
+  }
+}
+
+async function finalizeExtraction(
+  conn: SshConnection,
+  parameters: { members: ArchiveMember[]; remoteSource: string } & ApplyParameters
+): Promise<ModuleResult> {
+  const { destination, marker, members, owner, remoteSource, source } = parameters
+
+  await applyExtractedMemberOwner(conn, { destination, members, owner })
+
+  const markerWritten = await writeMarker(conn, remoteSource, { marker })
+  if (!markerWritten) return failed(`[archive.extract] failed to write marker for ${source}`)
+  await writeOwnerPathsMarker(conn, {
+    destination,
+    marker,
+    members,
+    owner,
+    upload: parameters.upload,
+  })
+  return { status: "changed" }
+}
+
 async function runExtraction(
   conn: SshConnection,
   parameters: ApplyParameters,
   remoteSource: string
 ): Promise<ModuleResult> {
-  const { destination, marker, owner, source } = parameters
+  const { destination, source } = parameters
 
   const validatedDestination = await prepareExtractDestination(conn, { destination, source })
   if ("status" in validatedDestination) return validatedDestination
-
-  const cmd = extractCommand(source, remoteSource, validatedDestination.destination)
-  if (cmd === null) return failed(`[archive.extract] unsupported archive format for ${source}`)
 
   // R-0000067: validate every archive member before we hand the archive to
   // tar/unzip. This must happen after `mkdir -p` (so the destination
@@ -338,27 +479,19 @@ async function runExtraction(
   })
   if (!Array.isArray(members)) return members
 
-  const result = await conn.exec(cmd, EXEC_OPTS)
-  if (result.code !== 0) {
-    return failedCommand(`[archive.extract] failed to extract ${source}`, result)
-  }
+  const stagedFailure = await extractViaStagingDirectory(conn, {
+    destination: validatedDestination.destination,
+    remoteSource,
+    source,
+  })
+  if (stagedFailure !== null) return stagedFailure
 
-  await applyExtractedMemberOwner(conn, {
+  return finalizeExtraction(conn, {
+    ...parameters,
     destination: validatedDestination.destination,
     members,
-    owner,
+    remoteSource,
   })
-
-  const markerWritten = await writeMarker(conn, remoteSource, { marker })
-  if (!markerWritten) return failed(`[archive.extract] failed to write marker for ${source}`)
-  await writeOwnerPathsMarker(conn, {
-    destination: validatedDestination.destination,
-    marker,
-    members,
-    owner,
-    upload: parameters.upload,
-  })
-  return { status: "changed" }
 }
 
 /**

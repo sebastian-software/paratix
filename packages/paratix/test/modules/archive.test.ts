@@ -31,6 +31,23 @@ const archiveCleanupPaths = [
   "/tmp/paratix-upload.FIRST111",
   "/tmp/paratix-upload.SECOND22",
 ]
+
+// R-0000162: archive.extract now extracts into a paratix-controlled staging
+// directory under the destination via `mktemp -d`, then atomically moves the
+// extracted entries into the destination. Tests stub the staging-directory
+// allocation, the move command and the staging-dir cleanup with regex stubs
+// so individual tests can keep their familiar `tar … -C '${destination}'`
+// expectations.
+const archiveStageDirectory = "/opt/app/.paratix-stage.AbCdEfGh"
+const archiveStageMktempPattern = /^mktemp -d '\/opt\/app\/\.paratix-stage\.X{8}'$/v
+const archiveStageMovePattern =
+  /^cd '\/opt\/app\/\.paratix-stage\.[^']+' && find \. -mindepth 1 -maxdepth 1 -print0 \| xargs -0 -I \{\} mv -f \{\} '\/opt\/app\/'$/v
+const archiveStageCleanupPattern = /^rm -rf '\/opt\/app\/\.paratix-stage\.[^']+'$/v
+const archiveAlternateStageMktempPattern = /^mktemp -d '\/opt\/app-alt\/\.paratix-stage\.X{8}'$/v
+const archiveAlternateStageMovePattern =
+  /^cd '\/opt\/app-alt\/\.paratix-stage\.[^']+' && find \. -mindepth 1 -maxdepth 1 -print0 \| xargs -0 -I \{\} mv -f \{\} '\/opt\/app-alt\/'$/v
+const archiveAlternateStageCleanupPattern = /^rm -rf '\/opt\/app-alt\/\.paratix-stage\.[^']+'$/v
+
 const archiveApplyResponseStubs: NonNullable<
   Parameters<typeof createBaseMockSsh>[1]
 >["responseStubs"] = [
@@ -40,6 +57,15 @@ const archiveApplyResponseStubs: NonNullable<
   })),
   { command: `mkdir -p '${destination}'`, result: { code: 0 } },
   { command: "mkdir -p '/var/lib/paratix/flags'", result: { code: 0 } },
+  { command: archiveStageMktempPattern, result: { code: 0, stdout: archiveStageDirectory } },
+  { command: archiveStageMovePattern, result: { code: 0 } },
+  { command: archiveStageCleanupPattern, result: { code: 0 } },
+  {
+    command: archiveAlternateStageMktempPattern,
+    result: { code: 0, stdout: "/opt/app-alt/.paratix-stage.AbCdEfGh" },
+  },
+  { command: archiveAlternateStageMovePattern, result: { code: 0 } },
+  { command: archiveAlternateStageCleanupPattern, result: { code: 0 } },
   ...archiveCleanupPaths.map((path) => ({
     command: `rm -f '${path}'`,
     result: { code: 0 },
@@ -49,7 +75,10 @@ const archiveApplyResponseStubs: NonNullable<
 const createMockSsh: typeof createBaseMockSsh = (responses, options) =>
   createBaseMockSsh(responses, {
     ...options,
-    responseStubs: [...archiveApplyResponseStubs, ...(options?.responseStubs ?? [])],
+    // Test-supplied stubs take priority over the module-scope defaults so a
+    // single test can override e.g. the staging-dir mktemp / move / cleanup
+    // commands without having to disable the shared stubs entirely.
+    responseStubs: [...(options?.responseStubs ?? []), ...archiveApplyResponseStubs],
   })
 
 type MockSsh = ReturnType<typeof createMockSsh>
@@ -124,6 +153,27 @@ function expectNoUnzipExtractCalls(mockSsh: MockSsh): void {
 
 function expectNoArchiveMarkerWrite(mockSsh: MockSsh): void {
   expect(mockSsh.writeFileCalls).toHaveLength(0)
+}
+
+function rotateUploadMktempResponses(mockSsh: MockSsh, responses: readonly string[]): void {
+  const originalOutput = mockSsh.output.bind(mockSsh)
+  const remaining = [...responses]
+  vi.spyOn(mockSsh, "output").mockImplementation(async (command) => {
+    const isUploadMktemp = command === "mktemp /tmp/paratix-upload.XXXXXXXX"
+    return isUploadMktemp
+      ? consumeNextUploadMktemp(mockSsh, command, remaining)
+      : originalOutput(command)
+  })
+}
+
+async function consumeNextUploadMktemp(
+  mockSsh: MockSsh,
+  command: string,
+  remaining: string[]
+): Promise<string> {
+  await Promise.resolve()
+  mockSsh.calls.push(command)
+  return remaining.shift() ?? ""
 }
 
 describe("archive.extract — check", () => {
@@ -390,7 +440,9 @@ describe("archive.extract — apply", () => {
 
   it("extracts tar.gz archive and writes marker", async () => {
     const mockSsh = createMockSsh({
-      [`tar --no-same-owner --no-overwrite-dir -xzf '${src}' -C '${destination}'`]: { code: 0 },
+      [`tar --no-same-owner --no-overwrite-dir -xzf '${src}' -C '${archiveStageDirectory}'`]: {
+        code: 0,
+      },
       [`tar -tvzf '${src}'`]: { code: 0, stdout: safeTarListing },
     })
     vi.spyOn(mockSsh, "sha256").mockResolvedValue(archiveSha)
@@ -402,9 +454,13 @@ describe("archive.extract — apply", () => {
     expect(result.status).toBe("changed")
     expect(mockSsh.calls).toContain(`mkdir -p '${destination}'`)
     expect(mockSsh.calls).toContain(
-      `tar --no-same-owner --no-overwrite-dir -xzf '${src}' -C '${destination}'`
+      `tar --no-same-owner --no-overwrite-dir -xzf '${src}' -C '${archiveStageDirectory}'`
     )
     expect(mockSsh.calls).toContain(`mkdir -p '/var/lib/paratix/flags'`)
+    // R-0000162: extraction must run into the staging dir, never directly into destination.
+    expect(mockSsh.calls).not.toContain(
+      `tar --no-same-owner --no-overwrite-dir -xzf '${src}' -C '${destination}'`
+    )
     expect(mockSsh.writeFile).toHaveBeenCalledOnce()
     expect(mockSsh.writeFile).toHaveBeenCalledWith(marker, archiveSha, { mode: "0644" })
   })
@@ -412,7 +468,9 @@ describe("archive.extract — apply", () => {
   it("extracts .tar archive", async () => {
     const tarSrc = "/tmp/app.tar"
     const mockSsh = createMockSsh({
-      [`tar --no-same-owner --no-overwrite-dir -xf '${tarSrc}' -C '${destination}'`]: { code: 0 },
+      [`tar --no-same-owner --no-overwrite-dir -xf '${tarSrc}' -C '${archiveStageDirectory}'`]: {
+        code: 0,
+      },
       [`tar -tvf '${tarSrc}'`]: { code: 0, stdout: safeTarListing },
     })
     vi.spyOn(mockSsh, "sha256").mockResolvedValue(archiveSha)
@@ -423,14 +481,16 @@ describe("archive.extract — apply", () => {
 
     expect(result.status).toBe("changed")
     expect(mockSsh.calls).toContain(
-      `tar --no-same-owner --no-overwrite-dir -xf '${tarSrc}' -C '${destination}'`
+      `tar --no-same-owner --no-overwrite-dir -xf '${tarSrc}' -C '${archiveStageDirectory}'`
     )
   })
 
   it("extracts .tar.bz2 archive", async () => {
     const bz2Src = "/tmp/app.tar.bz2"
     const mockSsh = createMockSsh({
-      [`tar --no-same-owner --no-overwrite-dir -xjf '${bz2Src}' -C '${destination}'`]: { code: 0 },
+      [`tar --no-same-owner --no-overwrite-dir -xjf '${bz2Src}' -C '${archiveStageDirectory}'`]: {
+        code: 0,
+      },
       [`tar -tvjf '${bz2Src}'`]: { code: 0, stdout: safeTarListing },
     })
     vi.spyOn(mockSsh, "sha256").mockResolvedValue(archiveSha)
@@ -441,14 +501,16 @@ describe("archive.extract — apply", () => {
 
     expect(result.status).toBe("changed")
     expect(mockSsh.calls).toContain(
-      `tar --no-same-owner --no-overwrite-dir -xjf '${bz2Src}' -C '${destination}'`
+      `tar --no-same-owner --no-overwrite-dir -xjf '${bz2Src}' -C '${archiveStageDirectory}'`
     )
   })
 
   it("extracts .tar.xz archive", async () => {
     const xzSrc = "/tmp/app.tar.xz"
     const mockSsh = createMockSsh({
-      [`tar --no-same-owner --no-overwrite-dir -xJf '${xzSrc}' -C '${destination}'`]: { code: 0 },
+      [`tar --no-same-owner --no-overwrite-dir -xJf '${xzSrc}' -C '${archiveStageDirectory}'`]: {
+        code: 0,
+      },
       [`tar -tvJf '${xzSrc}'`]: { code: 0, stdout: safeTarListing },
     })
     vi.spyOn(mockSsh, "sha256").mockResolvedValue(archiveSha)
@@ -459,14 +521,14 @@ describe("archive.extract — apply", () => {
 
     expect(result.status).toBe("changed")
     expect(mockSsh.calls).toContain(
-      `tar --no-same-owner --no-overwrite-dir -xJf '${xzSrc}' -C '${destination}'`
+      `tar --no-same-owner --no-overwrite-dir -xJf '${xzSrc}' -C '${archiveStageDirectory}'`
     )
   })
 
   it("extracts .zip archive", async () => {
     const zipSrc = "/tmp/app.zip"
     const mockSsh = createMockSsh({
-      [`unzip -o '${zipSrc}' -d '${destination}'`]: { code: 0 },
+      [`unzip -o '${zipSrc}' -d '${archiveStageDirectory}'`]: { code: 0 },
       [`unzip -Zs '${zipSrc}'`]: { code: 0, stdout: safeZipListing },
     })
     vi.spyOn(mockSsh, "sha256").mockResolvedValue(archiveSha)
@@ -476,13 +538,15 @@ describe("archive.extract — apply", () => {
     const result = await mod.apply(mockSsh, emptyEnv)
 
     expect(result.status).toBe("changed")
-    expect(mockSsh.calls).toContain(`unzip -o '${zipSrc}' -d '${destination}'`)
+    expect(mockSsh.calls).toContain(`unzip -o '${zipSrc}' -d '${archiveStageDirectory}'`)
   })
 
   it("extracts .tgz archive", async () => {
     const tgzSrc = "/tmp/app.tgz"
     const mockSsh = createMockSsh({
-      [`tar --no-same-owner --no-overwrite-dir -xzf '${tgzSrc}' -C '${destination}'`]: { code: 0 },
+      [`tar --no-same-owner --no-overwrite-dir -xzf '${tgzSrc}' -C '${archiveStageDirectory}'`]: {
+        code: 0,
+      },
       [`tar -tvzf '${tgzSrc}'`]: { code: 0, stdout: safeTarListing },
     })
     vi.spyOn(mockSsh, "sha256").mockResolvedValue(archiveSha)
@@ -493,14 +557,16 @@ describe("archive.extract — apply", () => {
 
     expect(result.status).toBe("changed")
     expect(mockSsh.calls).toContain(
-      `tar --no-same-owner --no-overwrite-dir -xzf '${tgzSrc}' -C '${destination}'`
+      `tar --no-same-owner --no-overwrite-dir -xzf '${tgzSrc}' -C '${archiveStageDirectory}'`
     )
   })
 
   it("limits chown to extracted members when owner is specified", async () => {
     const mockSsh = createMockSsh({
       [`chown -h -- 'www-data:www-data' '${destination}/app/file'`]: { code: 0 },
-      [`tar --no-same-owner --no-overwrite-dir -xzf '${src}' -C '${destination}'`]: { code: 0 },
+      [`tar --no-same-owner --no-overwrite-dir -xzf '${src}' -C '${archiveStageDirectory}'`]: {
+        code: 0,
+      },
       [`tar -tvzf '${src}'`]: { code: 0, stdout: safeTarListing },
     })
     vi.spyOn(mockSsh, "sha256").mockResolvedValue(archiveSha)
@@ -517,7 +583,9 @@ describe("archive.extract — apply", () => {
   it("limits concurrent owner chown commands across extracted archive members", async () => {
     const memberPaths = Array.from({ length: 24 }, (_value, index) => `app/file-${String(index)}`)
     const mockSsh = createMockSsh({
-      [`tar --no-same-owner --no-overwrite-dir -xzf '${src}' -C '${destination}'`]: { code: 0 },
+      [`tar --no-same-owner --no-overwrite-dir -xzf '${src}' -C '${archiveStageDirectory}'`]: {
+        code: 0,
+      },
       [`tar -tvzf '${src}'`]: { code: 0, stdout: tarListingForMemberPaths(memberPaths) },
     })
     const originalExec = mockSsh.exec.bind(mockSsh)
@@ -539,7 +607,9 @@ describe("archive.extract — apply", () => {
 
   it("rejects option-like owner specs before member chown", async () => {
     const mockSsh = createMockSsh({
-      [`tar --no-same-owner --no-overwrite-dir -xzf '${src}' -C '${destination}'`]: { code: 0 },
+      [`tar --no-same-owner --no-overwrite-dir -xzf '${src}' -C '${archiveStageDirectory}'`]: {
+        code: 0,
+      },
       [`tar -tvzf '${src}'`]: { code: 0, stdout: safeTarListing },
     })
     vi.spyOn(mockSsh, "sha256").mockResolvedValue(archiveSha)
@@ -580,7 +650,7 @@ describe("archive.extract — apply", () => {
       expect(String(result.error)).toContain("destructive destination /")
       expect(mockSsh.calls).not.toContain("mkdir -p '/'")
       expect(mockSsh.calls).not.toContain(
-        `tar --no-same-owner --no-overwrite-dir -xzf '${src}' -C '/'`
+        `tar --no-same-owner --no-overwrite-dir -xzf '${src}' -C '${archiveStageDirectory}'`
       )
     }
   )
@@ -602,9 +672,10 @@ describe("archive.extract — apply", () => {
     const remoteTmp = "/tmp/paratix-upload.AbCdEfGh"
 
     const mockSsh = createMockSsh({
-      [`tar --no-same-owner --no-overwrite-dir -xzf '${remoteTmp}' -C '${destination}'`]: {
-        code: 0,
-      },
+      [`tar --no-same-owner --no-overwrite-dir -xzf '${remoteTmp}' -C '${archiveStageDirectory}'`]:
+        {
+          code: 0,
+        },
       [`tar -tvzf '${remoteTmp}'`]: { code: 0, stdout: safeTarListing },
       "mktemp /tmp/paratix-upload.XXXXXXXX": { code: 0, stdout: remoteTmp },
     })
@@ -629,9 +700,10 @@ describe("archive.extract — apply", () => {
 
     const mockSsh = createMockSsh({
       [`chown -h -- 'www-data:www-data' '${destination}/app/file'`]: { code: 0 },
-      [`tar --no-same-owner --no-overwrite-dir -xzf '${remoteTmp}' -C '${destination}'`]: {
-        code: 0,
-      },
+      [`tar --no-same-owner --no-overwrite-dir -xzf '${remoteTmp}' -C '${archiveStageDirectory}'`]:
+        {
+          code: 0,
+        },
       [`tar -tvzf '${remoteTmp}'`]: { code: 0, stdout: safeTarListing },
       "mktemp /tmp/paratix-upload.XXXXXXXX": { code: 0, stdout: remoteTmp },
     })
@@ -661,29 +733,24 @@ describe("archive.extract — apply", () => {
 
     const responses: string[] = [firstRemoteTmp, secondRemoteTmp]
     const mockSsh = createMockSsh({
-      [`tar --no-same-owner --no-overwrite-dir -xzf '${firstRemoteTmp}' -C '${destination}'`]: {
-        code: 0,
-      },
-      [`tar --no-same-owner --no-overwrite-dir -xzf '${secondRemoteTmp}' -C '${destination}'`]: {
-        code: 0,
-      },
+      [`tar --no-same-owner --no-overwrite-dir -xzf '${firstRemoteTmp}' -C '${archiveStageDirectory}'`]:
+        {
+          code: 0,
+        },
+      [`tar --no-same-owner --no-overwrite-dir -xzf '${secondRemoteTmp}' -C '${archiveStageDirectory}'`]:
+        {
+          code: 0,
+        },
       [`tar -tvzf '${firstRemoteTmp}'`]: { code: 0, stdout: safeTarListing },
       [`tar -tvzf '${secondRemoteTmp}'`]: { code: 0, stdout: safeTarListing },
       "mktemp /tmp/paratix-upload.XXXXXXXX": { code: 0, stdout: "ignored-by-spy" },
     })
     // mktemp is queried via conn.output; rotate the response so concurrent
-    // invocations produce different paths even though the local source is identical.
-    vi.spyOn(mockSsh, "output")
-      .mockImplementationOnce(async (command) => {
-        await Promise.resolve()
-        mockSsh.calls.push(command)
-        return responses[0]
-      })
-      .mockImplementationOnce(async (command) => {
-        await Promise.resolve()
-        mockSsh.calls.push(command)
-        return responses[1]
-      })
+    // upload invocations produce different paths even though the local source
+    // is identical. The staging-dir mktemp -d (R-0000162) is delegated to the
+    // base output implementation so it still resolves via the response stubs
+    // configured at module scope.
+    rotateUploadMktempResponses(mockSsh, responses)
     vi.spyOn(mockSsh, "sha256").mockResolvedValue(archiveSha)
     vi.spyOn(mockSsh, "writeFile").mockResolvedValue()
     vi.spyOn(mockSsh, "uploadFile").mockResolvedValue()
@@ -764,7 +831,7 @@ describe("archive.extract — apply", () => {
 
   it("returns failed when extraction fails", async () => {
     const mockSsh = createMockSsh({
-      [`tar --no-same-owner --no-overwrite-dir -xzf '${src}' -C '${destination}'`]: {
+      [`tar --no-same-owner --no-overwrite-dir -xzf '${src}' -C '${archiveStageDirectory}'`]: {
         code: 1,
         stderr: "tar: unexpected EOF",
       },
@@ -777,6 +844,8 @@ describe("archive.extract — apply", () => {
     expect(result.status).toBe("failed")
     expect(result.error).toBeInstanceOf(Error)
     expect(String(result.error)).toContain("[archive.extract] failed to extract")
+    // R-0000162: even when extraction fails, the staging directory must be cleaned up.
+    expect(mockSsh.calls.some((c) => archiveStageCleanupPattern.test(c))).toBe(true)
   })
 
   it("returns failed for unsupported archive format", async () => {
@@ -796,9 +865,10 @@ describe("archive.extract — apply", () => {
     const remoteTmp = "/tmp/paratix-upload.FAIL1234"
 
     const mockSsh = createMockSsh({
-      [`tar --no-same-owner --no-overwrite-dir -xzf '${remoteTmp}' -C '${destination}'`]: {
-        code: 1,
-      },
+      [`tar --no-same-owner --no-overwrite-dir -xzf '${remoteTmp}' -C '${archiveStageDirectory}'`]:
+        {
+          code: 1,
+        },
       [`tar -tvzf '${remoteTmp}'`]: { code: 0, stdout: safeTarListing },
       "mktemp /tmp/paratix-upload.XXXXXXXX": { code: 0, stdout: remoteTmp },
     })
@@ -814,7 +884,9 @@ describe("archive.extract — apply", () => {
 
   it("returns failed when sha256 of remote archive is null", async () => {
     const mockSsh = createMockSsh({
-      [`tar --no-same-owner --no-overwrite-dir -xzf '${src}' -C '${destination}'`]: { code: 0 },
+      [`tar --no-same-owner --no-overwrite-dir -xzf '${src}' -C '${archiveStageDirectory}'`]: {
+        code: 0,
+      },
       [`tar -tvzf '${src}'`]: { code: 0, stdout: safeTarListing },
     })
     vi.spyOn(mockSsh, "sha256").mockResolvedValue(null)
@@ -1094,5 +1166,84 @@ describe("archive.extract — apply", () => {
   it("has correct module name", () => {
     const mod = archive.extract(src, destination)
     expect(mod.name).toBe(`archive.extract: ${destination}`)
+  })
+
+  // R-0000162: extraction must happen into a paratix-controlled staging
+  // sub-directory under the destination (`mktemp -d`), and the contents are
+  // then atomically moved into the destination. This prevents a TOCTOU race
+  // between `validateNoSymlinkPaths` and the `tar -xzf` / `unzip -o`
+  // execution from being exploitable, because tar/unzip never writes
+  // directly into a path the attacker could replace with a symlink.
+  it("R-0000162: extracts into a paratix mktemp staging dir under the destination, then moves into place", async () => {
+    const mockSsh = createMockSsh({
+      [`tar --no-same-owner --no-overwrite-dir -xzf '${src}' -C '${archiveStageDirectory}'`]: {
+        code: 0,
+      },
+      [`tar -tvzf '${src}'`]: { code: 0, stdout: safeTarListing },
+    })
+    vi.spyOn(mockSsh, "sha256").mockResolvedValue(archiveSha)
+    vi.spyOn(mockSsh, "writeFile").mockResolvedValue()
+
+    const mod = archive.extract(src, destination)
+    const result = await mod.apply(mockSsh, emptyEnv)
+
+    expect(result.status).toBe("changed")
+    expect(mockSsh.calls.some((c) => archiveStageMktempPattern.test(c))).toBe(true)
+    expect(mockSsh.calls.some((c) => archiveStageMovePattern.test(c))).toBe(true)
+    expect(mockSsh.calls.some((c) => archiveStageCleanupPattern.test(c))).toBe(true)
+    expect(mockSsh.calls).not.toContain(
+      `tar --no-same-owner --no-overwrite-dir -xzf '${src}' -C '${destination}'`
+    )
+  })
+
+  it("R-0000162: cleans up the staging directory when the move into the destination fails", async () => {
+    const mockSsh = createMockSsh(
+      {
+        [`tar --no-same-owner --no-overwrite-dir -xzf '${src}' -C '${archiveStageDirectory}'`]: {
+          code: 0,
+        },
+        [`tar -tvzf '${src}'`]: { code: 0, stdout: safeTarListing },
+      },
+      {
+        responseStubs: [
+          {
+            command: archiveStageMovePattern,
+            result: { code: 1, stderr: "mv: cross-device link" },
+          },
+        ],
+      }
+    )
+
+    const mod = archive.extract(src, destination)
+    const result = await mod.apply(mockSsh, emptyEnv)
+
+    expect(result.status).toBe("failed")
+    expect(String(result.error)).toContain("failed to move extracted files")
+    expect(mockSsh.calls.some((c) => archiveStageCleanupPattern.test(c))).toBe(true)
+  })
+
+  it("R-0000162: rejects a poisoned mktemp -d output for the staging directory", async () => {
+    const mockSsh = createMockSsh(
+      {
+        [`tar -tvzf '${src}'`]: { code: 0, stdout: safeTarListing },
+      },
+      {
+        responseStubs: [
+          {
+            command: archiveStageMktempPattern,
+            result: { code: 0, stdout: "/tmp/elsewhere.AbCdEfGh" },
+          },
+        ],
+      }
+    )
+
+    const mod = archive.extract(src, destination)
+
+    await expect(mod.apply(mockSsh, emptyEnv)).rejects.toThrow(
+      /mktemp -d produced an unexpected staging path/v
+    )
+    expect(mockSsh.calls).not.toContain(
+      `tar --no-same-owner --no-overwrite-dir -xzf '${src}' -C '${archiveStageDirectory}'`
+    )
   })
 })
