@@ -2001,7 +2001,9 @@ describe("SshConnectionImpl", () => {
       expect(executedCommands[2]).toContain(tempPath)
       expect(executedCommands[2]).toContain("target_temp=$(mktemp")
       expect(executedCommands[2]).toContain("/etc/my-app/.config.yml.paratix.XXXXXX")
-      expect(executedCommands[2]).toContain("mv ")
+      expect(executedCommands[2]).toContain("[ ! -d")
+      expect(executedCommands[2]).toContain("[ ! -L")
+      expect(executedCommands[2]).toContain("mv -T -- ")
       expect(executedCommands[2]).toContain(`'${tempPath}'`)
       expect(executedCommands[2]).toContain('"$target_temp"')
       expect(executedCommands[2]).toContain("chmod ")
@@ -2063,7 +2065,9 @@ describe("SshConnectionImpl", () => {
 
       expect(executedCommands).toContain(`chmod '0600' '${tempPath}'`)
       const chmodIndex = executedCommands.indexOf(`chmod '0600' '${tempPath}'`)
-      const mvIndex = executedCommands.indexOf(`mv '${tempPath}' '/remote/path'`)
+      const mvIndex = executedCommands.indexOf(
+        `[ ! -d '/remote/path' ] && [ ! -L '/remote/path' ] && mv -T -- '${tempPath}' '/remote/path'`
+      )
       expect(chmodIndex).toBeGreaterThan(-1)
       expect(chmodIndex).toBeLessThan(mvIndex)
     })
@@ -2330,7 +2334,9 @@ describe("SshConnectionImpl", () => {
       expect(executedCommands[2]).toContain(tempPath)
       expect(executedCommands[2]).toContain("target_temp=$(mktemp")
       expect(executedCommands[2]).toContain("/etc/systemd/system/.my-app.service.paratix.XXXXXX")
-      expect(executedCommands[2]).toContain("mv ")
+      expect(executedCommands[2]).toContain("[ ! -d")
+      expect(executedCommands[2]).toContain("[ ! -L")
+      expect(executedCommands[2]).toContain("mv -T -- ")
       expect(executedCommands[2]).toContain(`'${tempPath}'`)
       expect(executedCommands[2]).toContain('"$target_temp"')
       expect(executedCommands[2]).toContain("chmod ")
@@ -2359,7 +2365,9 @@ describe("SshConnectionImpl", () => {
 
       expect(executedCommands).toContain(`chmod '0600' '${tempPath}'`)
       const chmodIndex = executedCommands.indexOf(`chmod '0600' '${tempPath}'`)
-      const mvIndex = executedCommands.indexOf(`mv '${tempPath}' '/remote/plain.txt'`)
+      const mvIndex = executedCommands.indexOf(
+        `[ ! -d '/remote/plain.txt' ] && [ ! -L '/remote/plain.txt' ] && mv -T -- '${tempPath}' '/remote/plain.txt'`
+      )
       expect(chmodIndex).toBeGreaterThan(-1)
       expect(chmodIndex).toBeLessThan(mvIndex)
     })

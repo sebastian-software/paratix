@@ -961,8 +961,9 @@ export class SshConnectionImpl implements SshConnection {
     mode: string
   ): Promise<void> {
     validateMode(mode)
+    const targetGuard = `[ ! -d ${shellQuote(remotePath)} ] && [ ! -L ${shellQuote(remotePath)} ]`
     if (this.config.user === "root") {
-      await this.exec(`mv ${shellQuote(temporaryPath)} ${shellQuote(remotePath)}`, {
+      await this.exec(`${targetGuard} && mv -T -- ${shellQuote(temporaryPath)} ${shellQuote(remotePath)}`, {
         silent: true,
       })
       return
@@ -972,6 +973,10 @@ export class SshConnectionImpl implements SshConnection {
     const basename = posix.basename(remotePath)
     const finalTemplate = `${directory}/.${basename}.paratix.XXXXXX`
     const finalizeScript = `
+if ! ${targetGuard}; then
+  printf '%s\n' 'target path must not be a directory or symlink' >&2
+  exit 1
+fi
 target_owner=$(stat -c '%u:%g' ${shellQuote(remotePath)} 2>/dev/null || printf '0:0')
 target_temp=''
 cleanup() {
@@ -981,10 +986,10 @@ cleanup() {
 }
 trap cleanup EXIT
 target_temp=$(mktemp ${shellQuote(finalTemplate)})
-mv ${shellQuote(temporaryPath)} "$target_temp"
+mv -T -- ${shellQuote(temporaryPath)} "$target_temp"
 chmod ${shellQuote(mode)} "$target_temp"
 chown "$target_owner" "$target_temp"
-mv "$target_temp" ${shellQuote(remotePath)}
+mv -T -- "$target_temp" ${shellQuote(remotePath)}
 trap - EXIT
 `
     await this.exec(finalizeScript, { silent: true })
