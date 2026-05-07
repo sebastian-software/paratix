@@ -12,10 +12,13 @@ const swapSize = "2G"
 const swapSizeBytes = "2147483648"
 const fstabLine = `${swapPath} none swap sw 0 0`
 const swapTempPath = "/.swapfile.paratix.ABC123"
+const swapBackupPath = `${swapPath}.paratix-backup`
 const safeSwapParentCommand = "find '/' -maxdepth 0 -type d -user root ! -perm /022 | grep -Fx '/'"
 const createSwapTempCommand = `fallocate -l '${swapSize}' '${swapTempPath}' || dd if=/dev/zero of='${swapTempPath}' bs=1M count=2048 status=none`
 const mktempSwapCommand = "mktemp -p '/' '.swapfile.paratix.XXXXXX'"
 const publishSwapCommand = `find '/' -maxdepth 0 -type d -user root ! -perm /022 | grep -Fx '/' && [ ! -e '${swapPath}' ] && [ ! -L '${swapPath}' ] && mv -T '${swapTempPath}' '${swapPath}'`
+const backupSwapCommand = `[ ! -e '${swapBackupPath}' ] && mv -T -- '${swapPath}' '${swapBackupPath}'`
+const restoreSwapCommand = `mv -T -- '${swapBackupPath}' '${swapPath}'`
 
 describe("swap.file — check", () => {
   it("returns needs-apply when ssh is null", async () => {
@@ -242,11 +245,12 @@ describe("swap.file — apply", () => {
       [`chmod '0600' '${swapTempPath}'`]: { code: 0 },
       [`mkdir -p '/'`]: { code: 0 },
       [`mkswap '${swapTempPath}'`]: { code: 0 },
-      [`rm -f '${swapPath}'`]: { code: 0 },
+      [`rm -f '${swapBackupPath}'`]: { code: 0 },
       [`stat -c %s '${swapPath}'`]: { stdout: "1073741824" },
       [`swaplabel '${swapPath}' >/dev/null 2>&1`]: { code: 0 },
       [`swapoff '${swapPath}'`]: { code: 0 },
       [`swapon '${swapPath}'`]: { code: 0 },
+      [backupSwapCommand]: { code: 0 },
       [createSwapTempCommand]: { code: 0 },
       [mktempSwapCommand]: { code: 0, stdout: `${swapTempPath}\n` },
       [publishSwapCommand]: { code: 0 },
@@ -266,10 +270,47 @@ describe("swap.file — apply", () => {
 
     expect(result.status).toBe("changed")
     expect(ssh.calls).toContain(`swapoff '${swapPath}'`)
-    expect(ssh.calls).toContain(`rm -f '${swapPath}'`)
+    expect(ssh.calls).toContain(backupSwapCommand)
+    expect(ssh.calls).toContain(`rm -f '${swapBackupPath}'`)
     expect(ssh.calls).toContain(`mkswap '${swapTempPath}'`)
     expect(ssh.calls).toContain(`swapon '${swapPath}'`)
     expect(writtenFiles).toStrictEqual([])
+  })
+
+  it("restores the old swap file and returns swapon failure when replacement publish fails", async () => {
+    const ssh = createMockSsh({
+      [`[ -e '${swapPath}' ]`]: { code: 0 },
+      [`[ -f '${swapPath}' ]`]: { code: 0 },
+      [`[ -L '${swapPath}' ]`]: { code: 1 },
+      [`cat '${swapPath}'`]: { stdout: "existing swap bytes" },
+      [`chmod '0600' '${swapTempPath}'`]: { code: 0 },
+      [`mkdir -p '/'`]: { code: 0 },
+      [`mkswap '${swapTempPath}'`]: { code: 0 },
+      [`rm -f '${swapTempPath}'`]: { code: 0 },
+      [`stat -c %s '${swapPath}'`]: { stdout: "1073741824" },
+      [`swaplabel '${swapPath}' >/dev/null 2>&1`]: { code: 0 },
+      [`swapoff '${swapPath}'`]: { code: 0 },
+      [`swapon '${swapPath}'`]: { code: 1, stderr: "swapon failed" },
+      [backupSwapCommand]: { code: 0 },
+      [createSwapTempCommand]: { code: 0 },
+      [mktempSwapCommand]: { code: 0, stdout: `${swapTempPath}\n` },
+      [publishSwapCommand]: { code: 1, stderr: "publish failed" },
+      [restoreSwapCommand]: { code: 0 },
+      [safeSwapParentCommand]: { code: 0, stdout: "/\n" },
+    })
+    vi.spyOn(ssh, "lines")
+      .mockResolvedValueOnce([swapPath])
+      .mockResolvedValueOnce([])
+      .mockResolvedValue([])
+
+    const mod = swap.file({ path: swapPath, size: swapSize })
+    const result = await mod.apply(ssh, emptyEnv)
+
+    expect(result.status).toBe("failed")
+    expect(result.error?.message).toContain("swapon failed")
+    expect(ssh.calls).toContain(backupSwapCommand)
+    expect(ssh.calls).toContain(restoreSwapCommand)
+    expect(ssh.calls).toContain(`swapon '${swapPath}'`)
   })
 
   it("does not swapoff the existing swap file when replacement creation fails", async () => {

@@ -58,20 +58,45 @@ async function disableAndRemoveSwapForReplacement(
   ssh: SshConnection,
   path: string,
   temporaryPath: string
-): Promise<boolean | ModuleResult> {
+): Promise<{ backupPath: string; disabledSwap: boolean } | ModuleResult> {
   const disableResult = await disableSwap(ssh, path)
   if (typeof disableResult !== "boolean") {
     await cleanupSwapTemporaryFile(ssh, temporaryPath)
     return disableResult
   }
 
-  const removeResult = await removeSwapFile(ssh, path)
-  if (typeof removeResult !== "boolean") {
+  const backupPath = `${path}.paratix-backup`
+  const backupResult = await ssh.exec(
+    `[ ! -e ${shellQuote(backupPath)} ] && mv -T -- ${shellQuote(path)} ${shellQuote(backupPath)}`,
+    EXEC_OPTS
+  )
+  if (backupResult.code !== 0) {
     await cleanupSwapTemporaryFile(ssh, temporaryPath)
-    if (disableResult) await enableSwap(ssh, path)
-    return removeResult
+    if (disableResult) {
+      const enableResult = await enableSwap(ssh, path)
+      if (typeof enableResult !== "boolean") return enableResult
+    }
+    return failedCommand(`[swap.file: ${path}] swap backup failed`, backupResult)
   }
-  return disableResult
+  return { backupPath, disabledSwap: disableResult }
+}
+
+async function restoreSwapBackup(
+  ssh: SshConnection,
+  path: string,
+  backupPath: string
+): Promise<ModuleResult | true> {
+  const restoreResult = await ssh.exec(
+    `mv -T -- ${shellQuote(backupPath)} ${shellQuote(path)}`,
+    EXEC_OPTS
+  )
+  return restoreResult.code === 0
+    ? true
+    : failedCommand(`[swap.file: ${path}] swap restore failed`, restoreResult)
+}
+
+async function removeSwapBackup(ssh: SshConnection, backupPath: string): Promise<void> {
+  await ssh.exec(`rm -f ${shellQuote(backupPath)}`, EXEC_OPTS)
 }
 
 async function replaceManagedSwapFile(
@@ -87,12 +112,12 @@ async function replaceManagedSwapFile(
   })
   if ("status" in replacementFile) return replacementFile
 
-  const disabledSwap = await disableAndRemoveSwapForReplacement(
+  const replacementState = await disableAndRemoveSwapForReplacement(
     ssh,
     options.path,
     replacementFile.temporaryPath
   )
-  if (typeof disabledSwap !== "boolean") return disabledSwap
+  if ("status" in replacementState) return replacementState
 
   const publishResult = await publishInitializedSwapTemporaryFile(
     {
@@ -105,9 +130,15 @@ async function replaceManagedSwapFile(
     replacementFile
   )
   if (publishResult !== true) {
-    if (disabledSwap) await enableSwap(ssh, options.path)
+    const restoreResult = await restoreSwapBackup(ssh, options.path, replacementState.backupPath)
+    if (restoreResult !== true) return restoreResult
+    if (replacementState.disabledSwap) {
+      const enableResult = await enableSwap(ssh, options.path)
+      if (typeof enableResult !== "boolean") return enableResult
+    }
     return publishResult
   }
+  await removeSwapBackup(ssh, replacementState.backupPath)
   return "changed"
 }
 
