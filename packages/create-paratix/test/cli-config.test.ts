@@ -639,6 +639,27 @@ describe("admin public key validation", () => {
     expect(console.error).toHaveBeenCalledWith("Error: Failed to read admin public key file.")
   })
 
+  // R-0000185: even if a custom exitWithMessage stub does not actually
+  // terminate execution (e.g. a test harness that swallows the thrown error
+  // upstream), readAdminPublicKeyFile must never read from uninitialised
+  // stat/value. The first failing exit call is responsible for stopping
+  // execution; subsequent code paths must not crash with a TypeError.
+  it("never reads uninitialised state when exitWithMessage returns instead of exiting", () => {
+    const missingPath = join(TEST_DIR, "missing-stub-return.pub")
+    const exitMessages: string[] = []
+    const returningExit = ((message: string) => {
+      exitMessages.push(message)
+      // Intentionally return — simulates a misuse where the never-typed
+      // contract is not honoured at runtime.
+    }) as (message: string) => never
+
+    expect(() => {
+      readAdminPublicKeyFile(returningExit, missingPath)
+    }).toThrow("Error: Failed to read admin public key file.")
+
+    expect(exitMessages[0]).toBe("Error: Failed to read admin public key file.")
+  })
+
   it("omits discovered local public keys with embedded carriage returns", () => {
     mkdirSync(TEST_DIR, { recursive: true })
     const validKey = createEd25519PublicKey("user@example")

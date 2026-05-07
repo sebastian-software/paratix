@@ -1,4 +1,4 @@
-import { lstatSync, readdirSync, readFileSync, type Stats } from "node:fs"
+import { lstatSync, readdirSync, readFileSync } from "node:fs"
 import { homedir } from "node:os"
 import { basename, join, resolve } from "node:path"
 
@@ -207,26 +207,37 @@ export function readAdminPublicKeyFile(exitWithMessage: ExitWithMessage, path: s
   // R-0000126: resolve relative paths against cwd; emit neutral errors.
   const resolvedPath = resolve(path)
 
-  let value: string
-  let stat: Stats
-
-  try {
-    // eslint-disable-next-line security/detect-non-literal-fs-filename
-    stat = lstatSync(resolvedPath)
-  } catch {
+  // R-0000185: ExitWithMessage is typed `never`, but TypeScript does not
+  // enforce that at runtime — a caller may pass a stub that returns or whose
+  // thrown error is caught upstream. After every exitWithMessage invocation
+  // we therefore guarantee a return/throw locally so we never reach a state
+  // where stat/value are read uninitialised.
+  const failWithReadError = (): never => {
     exitWithMessage(`Error: Failed to read admin public key file.`)
+    throw new Error(`Error: Failed to read admin public key file.`)
   }
+
+  const stat = (() => {
+    try {
+      // eslint-disable-next-line security/detect-non-literal-fs-filename
+      return lstatSync(resolvedPath)
+    } catch {
+      return failWithReadError()
+    }
+  })()
 
   if (!stat.isFile() || stat.size > MAX_PUBLIC_KEY_FILE_BYTES) {
-    exitWithMessage(`Error: Failed to read admin public key file.`)
+    failWithReadError()
   }
 
-  try {
-    // eslint-disable-next-line security/detect-non-literal-fs-filename
-    value = readFileSync(resolvedPath, "utf8")
-  } catch {
-    exitWithMessage(`Error: Failed to read admin public key file.`)
-  }
+  const value = (() => {
+    try {
+      // eslint-disable-next-line security/detect-non-literal-fs-filename
+      return readFileSync(resolvedPath, "utf8")
+    } catch {
+      return failWithReadError()
+    }
+  })()
 
   return validateAdminPublicKey(exitWithMessage, value, "--admin-public-key-file")
 }
