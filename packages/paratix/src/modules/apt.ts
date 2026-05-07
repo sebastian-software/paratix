@@ -61,6 +61,14 @@ type AptRepositorySnapshot =
     }
   | { exists: false }
 
+function firstNonEmptyApt(text: string): null | string {
+  for (const line of text.split("\n")) {
+    const trimmed = line.trim()
+    if (trimmed.length > 0) return trimmed
+  }
+  return null
+}
+
 async function snapshotAptRepository(
   ssh: SshConnection,
   filePath: string
@@ -675,7 +683,24 @@ export const apt = {
         if (result.code !== 0) {
           const rollback = await restoreAptRepository(ssh, filePath, previousRepository)
           if (rollback !== "ok") return rollback
-          return failedCommand(`[apt.repository] apt-get update failed for ${name}`, result)
+          // R-0000163: the on-disk repository file is now back to its
+          // pre-apply state, but apt's in-memory cache still reflects the
+          // failed `apt-get update` from the new repository. Without a second
+          // `apt-get update`, subsequent `pkg.installed` invocations would
+          // operate on a cache that no longer matches the .list file on
+          // disk. Re-run the update; if it also fails, surface both errors.
+          const rollbackUpdate = await ssh.exec(`${NONINTERACTIVE} apt-get update`, {
+            ignoreExitCode: true,
+            silent: true,
+          })
+          const failureMessage = `[apt.repository] apt-get update failed for ${name}`
+          if (rollbackUpdate.code !== 0) {
+            return failedCommand(
+              `${failureMessage}; rollback succeeded but apt-get update on the restored sources also failed (exit code ${String(rollbackUpdate.code)}): ${firstNonEmptyApt(rollbackUpdate.stderr) ?? firstNonEmptyApt(rollbackUpdate.stdout) ?? "no output"}`,
+              result
+            )
+          }
+          return failedCommand(failureMessage, result)
         }
         await setVersionedFlag(ssh, updateFlag.flagName, updateFlag.flagPrefix)
         return { status: "changed" }

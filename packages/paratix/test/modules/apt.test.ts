@@ -27,6 +27,33 @@ function distUpgradeApplyLockResponses(): Record<string, { code?: number; stdout
   }
 }
 
+// R-0000163 helper: build an `exec` override whose first invocation of
+// `apt-get update` returns failure and whose second invocation succeeds.
+// Other commands raise so the override remains tightly scoped to the
+// repository-rollback assertion.
+function createSequencedAptGetUpdateExec(): {
+  callCount: () => number
+  exec: (command: string) => Promise<{ code: number; stderr: string; stdout: string }>
+} {
+  const responses = [
+    { code: 1, stderr: "Some packages could not be installed", stdout: "" },
+    { code: 0, stderr: "", stdout: "" },
+  ]
+  let calls = 0
+  return {
+    callCount: () => calls,
+    async exec(command) {
+      const expectedCommand = "DEBIAN_FRONTEND=noninteractive apt-get update"
+      const isExpected = command === expectedCommand
+      const next = responses[calls] ?? responses.at(-1)!
+      calls += 1
+      return isExpected
+        ? next
+        : Promise.reject(new Error(`unexpected exec command in override: ${command}`))
+    },
+  }
+}
+
 describe("apt.key", () => {
   const fingerprint = "1234567890ABCDEF1234567890ABCDEF12345678"
   const downloadCommand =
@@ -866,6 +893,52 @@ describe("apt.repository (standard form)", () => {
         remotePath: filePath,
       },
     ])
+  })
+
+  // R-0000163: after a failed `apt-get update` the on-disk source list is
+  // restored, but apt's cache still reflects the failed update. The module
+  // must run `apt-get update` again to bring the in-memory cache back into
+  // sync with the restored source list.
+  it("R-0000163: re-runs apt-get update after a successful rollback to refresh the cache", async () => {
+    const previousContent = "deb https://download.docker.com/linux/ubuntu jammy stable\n"
+    const ssh = createMockSsh({
+      [`[ -f '${filePath}' ]`]: { code: 0 },
+      [`cat '${filePath}'`]: { stdout: previousContent },
+    })
+    // Override apt-get update so the first invocation (with the new repo)
+    // fails and the second (post-rollback, with the restored sources)
+    // succeeds — this is the precise sequence required by R-0000163.
+    const sequencedAptGetUpdate = createSequencedAptGetUpdateExec()
+    ssh.exec = sequencedAptGetUpdate.exec
+
+    const mod = apt.repository("docker", source)
+    const result = await mod.apply(ssh, emptyEnv)
+
+    expect(result.status).toBe("failed")
+    expect(sequencedAptGetUpdate.callCount()).toBe(2)
+    // The error reflects the original update failure, not the rollback update.
+    expect(String(result.error)).toContain("apt-get update failed")
+    expect(String(result.error)).not.toContain("rollback succeeded but apt-get update")
+  })
+
+  it("R-0000163: surfaces both errors when the post-rollback apt-get update also fails", async () => {
+    const previousContent = "deb https://download.docker.com/linux/ubuntu jammy stable\n"
+    const ssh = createMockSsh({
+      [`[ -f '${filePath}' ]`]: { code: 0 },
+      [`cat '${filePath}'`]: { stdout: previousContent },
+      "DEBIAN_FRONTEND=noninteractive apt-get update": {
+        code: 100,
+        stderr: "E: Could not resolve 'broken.example.com'",
+      },
+    })
+    const mod = apt.repository("docker", source)
+    const result = await mod.apply(ssh, emptyEnv)
+
+    expect(result.status).toBe("failed")
+    expect(String(result.error)).toContain("apt-get update failed")
+    expect(String(result.error)).toContain(
+      "rollback succeeded but apt-get update on the restored sources also failed"
+    )
   })
 
   // R-0000098 regression: name lands directly in
