@@ -1443,6 +1443,52 @@ describe("SshConnectionImpl", () => {
       expect(unhandledErrors).toHaveLength(0)
     })
 
+    it("does not surface an unhandled error when stderr emits 'error' during writeStreamInput (R-0000140 regression)", async () => {
+      // Regression: writeStreamInput attached a defensive `once("error")`
+      // listener on `stream` but not on `stream.stderr`. ssh2 forwards
+      // channel-level errors (e.g. an EPIPE while the sudo password is being
+      // written) to stderr too. Without the listener, that synchronous
+      // stderr `error` would crash the process via uncaughtException and
+      // the channel could otherwise hang silently until the 120s watchdog.
+      let capturedStream: StreamWithStderr | undefined
+      const execSpy = vi.fn().mockImplementation((_command: string, callback: ExecCallback) => {
+        const stream = makeStream()
+        capturedStream = stream
+        callback(undefined, stream)
+      })
+      const client = makeClientWithExecSpy(execSpy)
+      const ssh = makeConnectedSsh(client, { sudoPassword: "my-sudo-pass", user: "deploy" })
+
+      const unhandledErrors: unknown[] = []
+      const errorListener = (error: unknown): void => {
+        unhandledErrors.push(error)
+      }
+      process.on("uncaughtException", errorListener)
+
+      const execPromise = ssh.exec("true")
+      execPromise.catch(() => {
+        /* handled below */
+      })
+
+      await Promise.resolve()
+
+      expect(capturedStream).toBeDefined()
+      // Emit synchronous stderr 'error' as ssh2 would for an EPIPE during
+      // the sudo password write. With the fix, the defensive once-error
+      // listener on stream.stderr consumes the event silently.
+      capturedStream?.stderr.emit("error", new Error("stderr EPIPE"))
+
+      // Settle the exec so the test does not hang on the watchdog.
+      capturedStream?.emit("close", 0)
+      await execPromise.catch(() => {
+        /* handled */
+      })
+
+      await Promise.resolve()
+      process.off("uncaughtException", errorListener)
+      expect(unhandledErrors).toHaveLength(0)
+    })
+
     it("masks shell-quoted secrets in timeout error messages", async () => {
       vi.useFakeTimers()
 

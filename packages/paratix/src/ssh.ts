@@ -823,6 +823,16 @@ export class SshConnectionImpl implements SshConnection {
     stream.once("error", () => {
       // Defensive no-op.
     })
+    // R-0000140: ssh2 emits stderr `error` events (e.g. EPIPE during the
+    // sudo password write) on the stderr channel separately from the main
+    // stream. `collectStreamOutput` only attaches its own stderr listener
+    // *after* `writeStreamInput` returns, so a synchronous stderr EPIPE
+    // emitted while the password is being written would have no listener
+    // and the channel could hang silently until the 120s watchdog fires.
+    // Install a defensive stderr listener so the event is always consumed.
+    stream.stderr.once("error", () => {
+      // Defensive no-op — collectStreamOutput owns the actual rejection path.
+    })
     if (needsPassword && this.cachedSudoPassword != null) {
       try {
         this.writeSudoPassword(stream)
