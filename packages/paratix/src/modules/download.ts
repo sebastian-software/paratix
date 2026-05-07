@@ -148,7 +148,9 @@ async function destinationIsRegularFile(
   conn: SshConnection,
   destination: string
 ): Promise<boolean> {
-  return conn.test(`[ -f ${shellQuote(destination)} ]`)
+  const quotedDestination = shellQuote(destination)
+  if (!(await conn.test(`[ -f ${quotedDestination} ]`))) return false
+  return !(await conn.test(`[ -L ${quotedDestination} ]`))
 }
 
 async function destinationIsDirectory(conn: SshConnection, destination: string): Promise<boolean> {
@@ -420,7 +422,7 @@ async function destinationContentMatchesSha256(
   parameters: DownloadParameters
 ): Promise<boolean> {
   if (parameters.sha256 == null) return false
-  const exists = await conn.exists(parameters.destination)
+  const exists = await destinationIsRegularFile(conn, parameters.destination)
   if (!exists) return false
   const actualHash = await conn.sha256(parameters.destination)
   return hashMatches(actualHash, parameters.sha256)

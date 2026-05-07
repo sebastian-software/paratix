@@ -13,6 +13,7 @@ const createMockSsh: typeof createBaseMockSsh = (responses, options) =>
       { command: /^\[ -e '\/(?:opt|usr)\//v, result: { code: 1 } },
       { command: /^\[ -d '\/(?:opt|tmp|usr|var)\//v, result: { code: 1 } },
       { command: /^\[ -f '\/(?:opt|usr)\//v, result: { code: 1 } },
+      { command: /^\[ -L '\/(?:opt|usr)\//v, result: { code: 1 } },
       { command: /^stat -c '%a %U %G' '\/(?:opt|usr)\//v, result: { stdout: "644 root root" } },
       { command: /^mkdir -p /v, result: { code: 0 } },
       { command: /^mktemp /v, result: { stdout: "/tmp/.paratix-download.stub" } },
@@ -163,6 +164,16 @@ describe("download.url", () => {
       const mod = download.url(destination, url, allowUnverifiedDownload)
       const result = await mod.check(mockSsh, emptyEnv)
       expect(result).toBe("ok")
+    })
+
+    it("returns needs-apply when file path is a symlink to a regular file", async () => {
+      const mockSsh = createMockSsh({
+        [`[ -L '${destination}' ]`]: { code: 0 },
+        [`[ -f '${destination}' ]`]: { code: 0 },
+      })
+      const mod = download.url(destination, url, allowUnverifiedDownload)
+      const result = await mod.check(mockSsh, emptyEnv)
+      expect(result).toBe("needs-apply")
     })
 
     it("returns needs-apply when file does not exist (no sha256)", async () => {
@@ -864,6 +875,16 @@ describe("download.github", () => {
       expect(result).toBe("ok")
     })
 
+    it("returns needs-apply when file path is a symlink to a regular file", async () => {
+      const mockSsh = createMockSsh({
+        [`[ -L '${destination}' ]`]: { code: 0 },
+        [`[ -f '${destination}' ]`]: { code: 0 },
+      })
+      const mod = download.github(destination, { ...allowUnverifiedDownload, asset, repo, tag })
+      const result = await mod.check(mockSsh, emptyEnv)
+      expect(result).toBe("needs-apply")
+    })
+
     it("returns needs-apply when file does not exist", async () => {
       const mockSsh = createMockSsh({
         [`[ -f '${destination}' ]`]: { code: 1 },
@@ -1195,6 +1216,17 @@ describe("download.large", () => {
       const mod = download.large(destination, url, allowUnverifiedDownload)
       const result = await mod.check(mockSsh, emptyEnv)
       expect(result).toBe("ok")
+    })
+
+    it("returns needs-apply when flag exists but destination is a symlink to a regular file", async () => {
+      const mockSsh = createMockSsh({
+        [`[ -L '${destination}' ]`]: { code: 0 },
+        [`[ -f '${destination}' ]`]: { code: 0 },
+        [`[ -f /var/lib/paratix/flags/'${flagName}' ]`]: { code: 0 },
+      })
+      const mod = download.large(destination, url, allowUnverifiedDownload)
+      const result = await mod.check(mockSsh, emptyEnv)
+      expect(result).toBe("needs-apply")
     })
 
     it("returns needs-apply when flag and destination both do not exist", async () => {
