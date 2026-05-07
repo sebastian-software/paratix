@@ -4,6 +4,8 @@ import { join } from "node:path"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 
 import {
+  CliExitError,
+  handleCliExit,
   isDirectExecution,
   isValidExpectedHostFingerprint,
   isValidHost,
@@ -13,6 +15,7 @@ import {
   normalizeProjectName,
   parseCliArguments,
   parseInitialUserConfig,
+  restoreInteractiveTerminal,
   validateExpectedHostFingerprint,
   validateHost,
 } from "../src/index.js"
@@ -32,6 +35,7 @@ import {
   createSecurityKeyEcdsaNistp256PublicKey,
   createWireString,
   expectProcessExit,
+  setProcessTtyForTest,
   TEST_HOST_FINGERPRINT,
   throwExitError,
 } from "./helpers.js"
@@ -911,5 +915,89 @@ describe("expected host fingerprint parsing", () => {
       'Error: Invalid expected host fingerprint "SHA256:bad\\u{001B}" — use an OpenSSH SHA256 fingerprint.'
     )
     expect(String(vi.mocked(console.error).mock.calls[0]?.[0])).not.toContain(escapeByte)
+  })
+})
+
+// R-0000189: exitWithMessage must surface failures via a CliExitError so the
+// CLI driver can run terminal cleanup before assigning process.exitCode.
+describe("CliExitError + handleCliExit", () => {
+  afterEach(() => {
+    vi.restoreAllMocks()
+    if ("exitCode" in process) {
+      process.exitCode = 0
+    }
+  })
+
+  it("throws a CliExitError instead of calling process.exit", () => {
+    vi.spyOn(console, "error").mockImplementation((...args) => {
+      void args
+    })
+
+    let caught: unknown
+    try {
+      validateHost(" bad host ")
+    } catch (error) {
+      caught = error
+    }
+
+    expect(caught).toBeInstanceOf(CliExitError)
+    expect((caught as CliExitError).exitCode).toBe(1)
+    expect((caught as CliExitError).cliMessage).toContain("Error: Invalid host")
+  })
+
+  it("handleCliExit assigns exitCode and runs terminal cleanup for CliExitError", () => {
+    vi.spyOn(console, "error").mockImplementation((...args) => {
+      void args
+    })
+    const restoreTty = setProcessTtyForTest(true, true)
+    const stdin = process.stdin as {
+      setRawMode?: (mode: boolean) => NodeJS.ReadStream
+    } & NodeJS.ReadStream
+    const setRawModeCalls: boolean[] = []
+    const previousSetRawMode = stdin.setRawMode
+    stdin.setRawMode = (mode: boolean): NodeJS.ReadStream => {
+      setRawModeCalls.push(mode)
+      return stdin
+    }
+    const stdoutWriteSpy = vi.spyOn(process.stdout, "write").mockImplementation(() => true)
+
+    try {
+      handleCliExit(new CliExitError("boom", 7))
+      expect(process.exitCode).toBe(7)
+      expect(stdoutWriteSpy).toHaveBeenCalledWith("\x1B[?25h")
+      expect(setRawModeCalls).toContain(false)
+    } finally {
+      stdoutWriteSpy.mockRestore()
+      stdin.setRawMode = previousSetRawMode
+      restoreTty()
+      process.exitCode = 0
+    }
+  })
+
+  it("handleCliExit logs and assigns exitCode 1 for non-CliExitError values", () => {
+    const errorSpy = vi.spyOn(console, "error").mockImplementation((...args) => {
+      void args
+    })
+
+    try {
+      handleCliExit(new Error("unexpected"))
+      expect(process.exitCode).toBe(1)
+      expect(errorSpy).toHaveBeenCalledWith("unexpected")
+    } finally {
+      process.exitCode = 0
+    }
+  })
+
+  it("restoreInteractiveTerminal is a no-op when stdin/stdout are not TTYs", () => {
+    const restoreTty = setProcessTtyForTest(false, false)
+    const stdoutWriteSpy = vi.spyOn(process.stdout, "write").mockImplementation(() => true)
+
+    try {
+      restoreInteractiveTerminal()
+      expect(stdoutWriteSpy).not.toHaveBeenCalled()
+    } finally {
+      stdoutWriteSpy.mockRestore()
+      restoreTty()
+    }
   })
 })

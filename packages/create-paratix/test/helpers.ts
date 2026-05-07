@@ -234,17 +234,19 @@ export async function expectProcessExit(
   callback: () => Promise<void> | void,
   expectedCode = 1
 ): Promise<void> {
-  const exitError = new Error(`process.exit:${expectedCode}`)
-  const exitSpy = vi.spyOn(process, "exit").mockImplementation((code) => {
-    throw code === expectedCode ? exitError : new Error(`process.exit:${String(code)}`)
-  })
-
+  // R-0000189: exitWithMessage now throws a CliExitError instead of calling
+  // process.exit synchronously. Tests that previously asserted on process.exit
+  // assert on the thrown CliExitError so terminal cleanup remains observable.
+  let caught: unknown
   try {
-    await expect(Promise.resolve().then(callback)).rejects.toThrow(exitError.message)
-    expect(exitSpy).toHaveBeenCalledWith(expectedCode)
-  } finally {
-    exitSpy.mockRestore()
+    await Promise.resolve().then(callback)
+  } catch (error) {
+    caught = error
   }
+
+  const cliExitError = caught as { exitCode?: unknown; name?: string } | undefined
+  expect(cliExitError?.name).toBe("CliExitError")
+  expect(cliExitError?.exitCode).toBe(expectedCode)
 }
 
 export function throwExitError(message: string): never {

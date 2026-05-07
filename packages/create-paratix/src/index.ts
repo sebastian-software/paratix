@@ -1,9 +1,10 @@
 import { mkdirSync, writeFileSync } from "node:fs"
 import { basename, join, resolve } from "node:path"
 
-import { escapeCliControlCharacters, formatCliValue } from "./cliFormat.js"
+import { formatCliValue } from "./cliFormat.js"
 import {
   exitWithMessage,
+  handleCliExit,
   parseCliArguments,
   parseInitialUserConfig,
   resolveCliOrPromptAdminPublicKey,
@@ -39,9 +40,12 @@ import {
 } from "./templates.js"
 
 export {
+  CliExitError,
+  handleCliExit,
   parseCliArguments,
   parseInitialUserConfig,
   resolveCliOrPromptHost,
+  restoreInteractiveTerminal,
   validateExpectedHostFingerprint,
   validateHost,
 } from "./cliValidation.js"
@@ -241,19 +245,23 @@ export function scaffoldProject(
 }
 
 function main(): void {
-  const {
-    adminPublicKey,
-    adminPublicKeyFile,
-    expectedHostFingerprint,
-    host,
-    initialUser,
-    projectName,
-  } = parseCliArguments(process.argv.slice(2))
-
-  const normalizedProjectName = validateProjectName(projectName)
-
-  const pm = detectPackageManager()
+  // R-0000189: synchronous validators (parseCliArguments, validateProjectName)
+  // also throw CliExitError now. Wrap the whole pipeline in a single async
+  // closure so a single .catch handler can run cleanup for both synchronous
+  // and asynchronous failures.
   void (async () => {
+    const {
+      adminPublicKey,
+      adminPublicKeyFile,
+      expectedHostFingerprint,
+      host,
+      initialUser,
+      projectName,
+    } = parseCliArguments(process.argv.slice(2))
+
+    const normalizedProjectName = validateProjectName(projectName)
+
+    const pm = detectPackageManager()
     const validatedHost = await resolveCliOrPromptHost(host)
     const resolvedExpectedHostFingerprint =
       expectedHostFingerprint ??
@@ -274,10 +282,10 @@ function main(): void {
       initialUser: initialUserConfig,
     })
   })().catch((error: unknown) => {
-    console.error(
-      escapeCliControlCharacters(error instanceof Error ? error.message : String(error))
-    )
-    process.exitCode = 1
+    // R-0000189: handleCliExit centralises terminal cleanup before assigning
+    // the exit code so a CliExitError raised mid-prompt cannot leave the
+    // operator's terminal in raw mode with the cursor still hidden.
+    handleCliExit(error)
   })
 }
 

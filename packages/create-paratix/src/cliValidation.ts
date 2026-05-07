@@ -10,10 +10,76 @@ import {
   validateHost as validateScaffoldHost,
 } from "./scaffoldConfig.js"
 
+/**
+ * R-0000189: dedicated error type that signals a deterministic CLI exit. A
+ * synchronous `process.exit` call from inside an interactive prompt skips
+ * any in-flight cleanup (raw-mode reset, cursor visibility), which leaves
+ * the operator's terminal unusable. Throwing instead lets `main()` (or any
+ * other top-level driver) run cleanup and assign `process.exitCode` before
+ * the process exits naturally.
+ */
+export class CliExitError extends Error {
+  public readonly cliMessage: string
+  public readonly exitCode: number
+
+  public constructor(message: string, exitCode = 1) {
+    super(message)
+    this.name = "CliExitError"
+    this.cliMessage = message
+    this.exitCode = exitCode
+  }
+}
+
 export function exitWithMessage(message: string): never {
+  // R-0000189: keep emitting the user-visible error eagerly so callers and
+  // tests observe `console.error` exactly as before. The follow-up cleanup
+  // and exit-code assignment is centralised in `handleCliExit`.
   console.error(escapeCliControlCharacters(message))
-  // eslint-disable-next-line node/no-process-exit
-  process.exit(1)
+  throw new CliExitError(message)
+}
+
+/**
+ * R-0000189: shared cleanup hook so `main()` can reset interactive terminal
+ * state (cursor visibility, raw mode) after a CliExitError was thrown from
+ * an in-flight prompt. Kept as a small no-op-friendly default so the unit
+ * tests can substitute their own implementation.
+ */
+export function restoreInteractiveTerminal(): void {
+  if (process.stdout.isTTY) {
+    // Make the cursor visible again. promptUi hides it before drawing the
+    // arrow-key select; if exitWithMessage interrupts the render we never
+    // reach the matching restore inside cleanupSelectInput.
+    process.stdout.write("\x1B[?25h")
+  }
+  // setRawMode is only available on TTY streams. Reset to cooked mode so
+  // the parent shell does not inherit a broken terminal.
+  if (process.stdin.isTTY && typeof process.stdin.setRawMode === "function") {
+    try {
+      process.stdin.setRawMode(false)
+    } catch {
+      // Best effort: in some environments the call can fail even when
+      // isTTY is true (e.g. a detached PTY).
+    }
+  }
+}
+
+/**
+ * R-0000189: top-level handler that converts a thrown CliExitError into the
+ * intended exit code while running interactive cleanup. Other thrown errors
+ * are still surfaced as a generic CLI error. CliExitError already emits the
+ * user-visible message via exitWithMessage, so this handler does not print
+ * it a second time.
+ *
+ * @param error - The error caught from the CLI pipeline.
+ */
+export function handleCliExit(error: unknown): void {
+  restoreInteractiveTerminal()
+  if (error instanceof CliExitError) {
+    process.exitCode = error.exitCode
+    return
+  }
+  console.error(escapeCliControlCharacters(error instanceof Error ? error.message : String(error)))
+  process.exitCode = 1
 }
 
 export function parseCliArguments(argv: string[]): ReturnType<typeof parseScaffoldCliArguments> {
