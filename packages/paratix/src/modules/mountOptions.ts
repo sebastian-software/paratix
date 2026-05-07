@@ -13,7 +13,7 @@ const STRICT_OPTION_GROUPS = [
   ["user", "nouser", "users", "owner", "group"],
 ]
 
-const FSTAB_ONLY_OPTIONS = new Set(["_netdev", "nofail", "noauto"])
+const FSTAB_ONLY_OPTIONS = new Set(["_netdev", "noauto", "nofail"])
 
 type NormalizedMountOptions = {
   normalized: Set<string>

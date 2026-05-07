@@ -38,7 +38,7 @@ function hasProtocolAgnosticIpv6Rule(
 }
 
 function statusIncludesIpv6Rules(status: string): boolean {
-  return /\(v6\)/v.test(status)
+  return status.includes("(v6)")
 }
 
 function ufwRuleApplyChanged(stdout: string): boolean {

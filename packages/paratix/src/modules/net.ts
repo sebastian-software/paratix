@@ -529,8 +529,8 @@ function parseInterfaceAddressTokens(output: string): Set<string> {
     const tokens = line.trim().split(/\s+/v)
     for (const family of ["inet", "inet6"]) {
       const familyIndex = tokens.indexOf(family)
-      const address = tokens[familyIndex + 1]
-      if (familyIndex !== -1 && address != null) result.add(address)
+      if (familyIndex === -1 || familyIndex + 1 >= tokens.length) continue
+      result.add(tokens[familyIndex + 1])
     }
   }
   return result

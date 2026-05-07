@@ -36,11 +36,14 @@ describe("scaffoldRuntime", () => {
     ["pnpm/10.30.3 npm/? node/v25.6.1 darwin arm64", { command: "pnpm install", name: "pnpm" }],
     ["yarn/1.22.22 npm/? node/v25.6.1 darwin arm64", { command: "yarn install", name: "yarn" }],
     ["bun/1.3.0 npm/? node/v25.6.1 darwin arm64", { command: "bun install", name: "bun" }],
-    [undefined, { command: "npm install", name: "npm" }],
   ])("detects the package manager for user agent %s", (userAgent, expected) => {
-    if (userAgent !== undefined) process.env.npm_config_user_agent = userAgent
+    process.env.npm_config_user_agent = userAgent
 
     expect(detectPackageManager()).toStrictEqual(expected)
+  })
+
+  it("defaults to npm when no package-manager user agent is present", () => {
+    expect(detectPackageManager()).toStrictEqual({ command: "npm install", name: "npm" })
   })
 
   it("runs the selected install command in the generated project directory", () => {
