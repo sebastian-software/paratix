@@ -1011,11 +1011,28 @@ trap - EXIT
     await this.exec(finalizeScript, { silent: true })
   }
 
+  /**
+   * Probe whether passwordless sudo is available without provoking an
+   * interactive prompt in the SSH channel.
+   *
+   * R-0000138: previously this method funneled through `execPrepared` →
+   * `sudoCommand`, which—when no sudo password was cached—routed the probe
+   * through `sudo bash -c …` (without `-n`). On hosts requiring an actual
+   * sudo password this hung on a blocking prompt until the 10s watchdog
+   * fired and additionally produced `auth.log` failure entries. The probe
+   * now runs a dedicated `sudo -n true` via `execRaw`, so a host without
+   * passwordless sudo fails fast with a non-zero exit code in one RTT.
+   *
+   * @returns `true` when `sudo -n true` exits with code 0; `false` otherwise.
+   */
   private async hasPasswordlessSudo(): Promise<boolean> {
     try {
-      await this.execPrepared("true", { silent: true, timeout: 10_000 })
-      this.passwordlessSudo = true
-      return true
+      const result = await this.execRaw("sudo -n true")
+      if (result.exitCode === 0) {
+        this.passwordlessSudo = true
+        return true
+      }
+      return false
     } catch {
       return false
     }

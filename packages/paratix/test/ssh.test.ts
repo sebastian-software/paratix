@@ -2882,17 +2882,59 @@ describe("SshConnectionImpl", () => {
       })
 
       expect(execSpy).toHaveBeenNthCalledWith(1, "command -v sudo", expect.any(Function))
-      expect(execSpy).toHaveBeenNthCalledWith(
-        2,
-        expect.stringContaining("sudo bash -c"),
-        expect.any(Function)
-      )
+      // R-0000138: passwordless probe uses `sudo -n true` so it cannot block
+      // on a real interactive prompt.
+      expect(execSpy).toHaveBeenNthCalledWith(2, "sudo -n true", expect.any(Function))
       expect(execSpy).toHaveBeenNthCalledWith(
         3,
         expect.stringContaining("sudo bash -c"),
         expect.any(Function)
       )
       expect(promptTerminal).not.toHaveBeenCalled()
+    })
+
+    it("uses non-blocking 'sudo -n true' probe so hosts with a real sudo password fail fast (R-0000138 regression)", async () => {
+      // Regression: hasPasswordlessSudo previously routed through execPrepared
+      // / sudoCommand and—without a cached sudo password—issued the probe via
+      // `sudo bash -c true`. On hosts that actually require a sudo password
+      // this hung on a real interactive prompt inside the SSH channel until
+      // the 10s watchdog fired and recorded auth.log failure entries. The fix
+      // runs the probe via execRaw with `sudo -n true`, which exits non-zero
+      // in a single round trip without provoking a prompt.
+      const execSpy = vi
+        .fn()
+        // First call: execRaw "command -v sudo" — sudo is installed
+        .mockImplementationOnce((_command: string, callback: ExecCallback) => {
+          const stream = makeStream()
+          callback(undefined, stream)
+          stream.emit("close", 0)
+        })
+        // Second call: passwordless probe — must be `sudo -n true` so it
+        // exits non-zero without blocking on a sudo prompt.
+        .mockImplementationOnce((_command: string, callback: ExecCallback) => {
+          const stream = makeStream()
+          callback(undefined, stream)
+          stream.emit("close", 1)
+        })
+
+      const client = makeClientWithExecSpy(execSpy)
+      const ssh = makeConnectedSsh(client, { sudoPassword: null, user: "deploy" })
+      vi.mocked(promptTerminal).mockResolvedValueOnce("entered-sudo-password")
+
+      // Third call: cacheAndValidateSudoPassword runs `sudo -S bash -c true`
+      // with the cached password — succeed so the probe completes.
+      execSpy.mockImplementationOnce((_command: string, callback: ExecCallback) => {
+        const stream = makeStream()
+        callback(undefined, stream)
+        stream.emit("close", 0)
+      })
+
+      await expect(ssh.probeSudo()).resolves.toBeUndefined()
+
+      expect(execSpy).toHaveBeenNthCalledWith(1, "command -v sudo", expect.any(Function))
+      expect(execSpy).toHaveBeenNthCalledWith(2, "sudo -n true", expect.any(Function))
+      // The probe step itself must NOT use `sudo bash -c` (the blocking path).
+      expect(execSpy.mock.calls[1][0]).not.toContain("sudo bash -c")
     })
 
     it("aborts an interactive sudo prompt via abortSignal on the first shutdown signal (regression)", async () => {
