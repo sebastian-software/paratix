@@ -403,6 +403,40 @@ describe("SshConnectionImpl", () => {
       expect(added).toBe(false)
       expect((ssh as unknown as Record<string, { ports: number[] }>).runtime.ports).toHaveLength(1)
     })
+
+    it("tryConnectOnPorts iterates on a snapshot so addPort during the loop does not change visited ports (R-0000139 regression)", async () => {
+      // Regression: tryConnectOnPorts iterated over `this.runtime.ports`
+      // directly. addPort()/removePort() mutated the same array in-place, so
+      // a concurrent rollback (e.g. handlePortChange in runner.ts) during
+      // a reconnect attempt could change the iteration mid-loop and either
+      // skip a configured port or visit a freshly added one. The fix
+      // snapshots `runtime.ports` before iterating.
+      const visitedPorts: number[] = []
+      const ssh = makeSshInstance({ ports: [22, 2222] })
+
+      // First port mutates the runtime port array. Subsequent ports just record.
+      vi.mocked(tryConnectOnPort)
+        .mockImplementationOnce(async ({ port }) => {
+          await Promise.resolve()
+          visitedPorts.push(port)
+          ssh.addPort(9999)
+          ssh.removePort(2222)
+          throw new Error(`refused on ${port}`)
+        })
+        .mockImplementation(async ({ port }) => {
+          await Promise.resolve()
+          visitedPorts.push(port)
+          throw new Error(`refused on ${port}`)
+        })
+
+      await expect(ssh.connect()).rejects.toThrow(/Failed to connect/v)
+
+      // Without the snapshot, port 2222 would be removed before being
+      // visited (and 9999 would be added but is not part of the original
+      // configuration). With the snapshot the loop visits exactly the ports
+      // that were configured at entry: [22, 2222].
+      expect(visitedPorts).toStrictEqual([22, 2222])
+    })
   })
 
   // -------------------------------------------------------------------------

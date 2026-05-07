@@ -1132,9 +1132,14 @@ trap - EXIT
    * @param options - Auth parameters and optional reconnect deadline for bounded per-port attempts.
    * @returns `true` if a port connected successfully, `false` if all ports failed.
    */
-  // eslint-disable-next-line sonarjs/cognitive-complexity -- port fallback, host-key errors, and abort handling belong together
+  // R-0000139: iterate on a snapshot of `runtime.ports` so that concurrent
+  // `addPort`/`removePort` calls (e.g. from `handlePortChange` rollback in
+  // runner.ts) cannot mutate the array mid-iteration and cause skipped or
+  // re-visited entries.
+  /* eslint-disable max-statements, sonarjs/cognitive-complexity -- port fallback, host-key errors, and abort handling belong together */
   private async tryConnectOnPorts(options: TryConnectOnPortsOptions = {}): Promise<boolean> {
-    for (const port of this.runtime.ports) {
+    const ports: number[] = [...this.runtime.ports]
+    for (const port of ports) {
       if (hasReconnectDeadlineExpired(options.reconnectDeadline)) return false
       // R-0000039: keep the Client reference outside the try-block so the
       // catch path can close it explicitly. ssh2's Client retains internal
@@ -1183,6 +1188,7 @@ trap - EXIT
     }
     return false
   }
+  /* eslint-enable max-statements, sonarjs/cognitive-complexity */
 
   private async tryPasswordFallback(options?: ConnectOptions, agent?: string): Promise<boolean> {
     if (!this.config.passwordFallback) return false
