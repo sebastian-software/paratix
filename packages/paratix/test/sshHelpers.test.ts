@@ -1205,6 +1205,27 @@ describe("tryConnectOnPort", () => {
     expect(client.listenerCount("error")).toBe(0)
     expect(vi.getTimerCount()).toBe(0)
   })
+
+  it("cleans up the client and timer when client.connect throws synchronously", async () => {
+    vi.useFakeTimers()
+    const client = createMockClient()
+    vi.mocked(client.connect).mockImplementationOnce(() => {
+      throw new Error("Cannot parse privateKey")
+    })
+
+    const promise = tryConnectOnPort({
+      client,
+      host: "example.test",
+      port: 22,
+      username: "root",
+    })
+
+    await expect(promise).rejects.toThrow("Cannot parse privateKey")
+    expect(client.end).toHaveBeenCalledOnce()
+    expect(client.listenerCount("ready")).toBe(0)
+    expect(client.listenerCount("error")).toBe(0)
+    expect(vi.getTimerCount()).toBe(0)
+  })
 })
 
 // ---------------------------------------------------------------------------

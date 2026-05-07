@@ -575,6 +575,10 @@ export async function tryConnectOnPort(parameters: ConnectParameters): Promise<v
     client.on("ready", handleReady)
     client.on("error", handleError)
     abortSignal?.addEventListener("abort", handleAbort, { once: true })
-    client.connect(connectConfig)
+    try {
+      client.connect(connectConfig)
+    } catch (error) {
+      handleError(error instanceof Error ? error : new Error(String(error)))
+    }
   })
 }
