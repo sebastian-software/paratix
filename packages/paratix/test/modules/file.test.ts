@@ -65,6 +65,7 @@ describe("file.directory", () => {
   it("check returns ok when the directory exists", async () => {
     const ssh = createMockSsh({
       "[ -d '/var/app' ]": { code: 0 },
+      "[ -L '/var/app' ]": { code: 1 },
     })
     const mod = file.directory("/var/app")
     const result = await mod.check(ssh, emptyEnv)
@@ -80,6 +81,16 @@ describe("file.directory", () => {
     expect(result).toBe("needs-apply")
   })
 
+  it("check returns needs-apply when the path is a symlink to a directory", async () => {
+    const ssh = createMockSsh({
+      "[ -L '/var/app' ]": { code: 0 },
+      "[ -d '/var/app' ]": { code: 0 },
+    })
+    const mod = file.directory("/var/app")
+    const result = await mod.check(ssh, emptyEnv)
+    expect(result).toBe("needs-apply")
+  })
+
   it("check returns needs-apply when ssh is null", async () => {
     const mod = file.directory("/var/app")
     const result = await mod.check(null, emptyEnv)
@@ -89,6 +100,7 @@ describe("file.directory", () => {
   it("check returns needs-apply when directory mode differs", async () => {
     const ssh = createMockSsh({
       "[ -d '/var/app' ]": { code: 0 },
+      "[ -L '/var/app' ]": { code: 1 },
       "stat -c '%a %U %G' '/var/app'": { stdout: "755 root root" },
     })
 
@@ -100,6 +112,7 @@ describe("file.directory", () => {
   it("check returns needs-apply when directory owner differs", async () => {
     const ssh = createMockSsh({
       "[ -d '/var/app' ]": { code: 0 },
+      "[ -L '/var/app' ]": { code: 1 },
       "stat -c '%a %U %G' '/var/app'": { stdout: "700 root root" },
     })
 
@@ -111,6 +124,7 @@ describe("file.directory", () => {
   it("regression R-0000109 — apply returns ok and skips mkdir/chmod/chown when directory matches desired state", async () => {
     const ssh = createMockSsh({
       "[ -d '/var/app' ]": { code: 0 },
+      "[ -L '/var/app' ]": { code: 1 },
       "stat -c '%a %U %G' '/var/app'": { stdout: "755 www-data www-data" },
     })
 
@@ -126,6 +140,7 @@ describe("file.directory", () => {
   it("regression R-0000109 — apply returns changed and only issues mkdir when directory is missing", async () => {
     const ssh = createMockSsh({
       "[ -d '/var/app' ]": { code: 1 },
+      "[ -L '/var/app' ]": { code: 1 },
     })
 
     const mod = file.directory("/var/app")
@@ -138,6 +153,7 @@ describe("file.directory", () => {
   it("regression R-0000109 — apply returns changed and only issues chmod when only mode drifted", async () => {
     const ssh = createMockSsh({
       "[ -d '/var/app' ]": { code: 0 },
+      "[ -L '/var/app' ]": { code: 1 },
       "stat -c '%a %U %G' '/var/app'": { stdout: "700 www-data www-data" },
     })
 
@@ -153,6 +169,7 @@ describe("file.directory", () => {
   it("regression R-0000109 — apply returns changed and only issues chown when only owner drifted", async () => {
     const ssh = createMockSsh({
       "[ -d '/var/app' ]": { code: 0 },
+      "[ -L '/var/app' ]": { code: 1 },
       "stat -c '%a %U %G' '/var/app'": { stdout: "755 root root" },
     })
 
@@ -168,6 +185,7 @@ describe("file.directory", () => {
   it("rejects option-like owner components before directory chown", async () => {
     const ssh = createMockSsh({
       "[ -d '/var/app' ]": { code: 0 },
+      "[ -L '/var/app' ]": { code: 1 },
       "stat -c '%a %U %G' '/var/app'": { stdout: "755 root root" },
     })
     const mod = file.directory("/var/app", { owner: "--reference=/etc/shadow" })
@@ -176,6 +194,18 @@ describe("file.directory", () => {
       'chown owner component must not start with "-": "--reference=/etc/shadow"'
     )
     expect(ssh.calls).not.toContain("chown -- '--reference=/etc/shadow' '/var/app'")
+  })
+
+  it("apply fails without mutating metadata when the path is a symlink to a directory", async () => {
+    const ssh = createMockSsh({
+      "[ -L '/var/app' ]": { code: 0 },
+    })
+    const mod = file.directory("/var/app", { mode: "0755", owner: "www-data:www-data" })
+    const result = await mod.apply(ssh, emptyEnv)
+    expect(result.status).toBe("failed")
+    expect(result.error?.message).toContain("path must not be a symlink")
+    expect(ssh.calls).not.toContain("chmod '0755' '/var/app'")
+    expect(ssh.calls).not.toContain("chown -- 'www-data:www-data' '/var/app'")
   })
 })
 

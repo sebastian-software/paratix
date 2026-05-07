@@ -262,6 +262,7 @@ export const file = {
         if (!ssh) return NEEDS_APPLY
         const exists = await ssh.test(`[ -d ${shellQuote(remotePath)} ]`)
         if (!exists) return NEEDS_APPLY
+        if (await ssh.test(`[ -L ${shellQuote(remotePath)} ]`)) return NEEDS_APPLY
 
         const metadataMatches = ownershipMatches(await readOwnership(ssh, remotePath), options)
         return metadataMatches ? "ok" : NEEDS_APPLY

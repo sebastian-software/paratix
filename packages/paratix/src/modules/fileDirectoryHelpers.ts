@@ -1,5 +1,6 @@
 import type { ModuleResult, SshConnection } from "../types.js"
 
+import { failed } from "../moduleFailure.js"
 import { shellQuote } from "../ssh.js"
 import {
   type FileOwnership,
@@ -83,6 +84,9 @@ export async function applyDirectoryState(input: {
   remotePath: string
   ssh: SshConnection
 }): Promise<ModuleResult> {
+  if (await input.ssh.test(`[ -L ${shellQuote(input.remotePath)} ]`)) {
+    return failed(`[file.directory: ${input.remotePath}] path must not be a symlink`)
+  }
   const exists = await input.ssh.test(`[ -d ${shellQuote(input.remotePath)} ]`)
   let changed = false
 
