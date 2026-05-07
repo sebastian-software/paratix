@@ -205,31 +205,45 @@ function registerFingerprintListeners(parameters: {
 }
 
 /**
- * Arm the half-open watchdog that guarantees the fingerprint Promise always
- * settles. R-0000127: ssh2 does not emit `error`/`close` for a half-open
- * TCP socket, so we fall back to a timer at twice the readyTimeoutMs.
+ * Arm the connect/half-open watchdogs that guarantee the fingerprint Promise
+ * always settles.
+ *
+ * R-0000127: ssh2 does not emit `error`/`close` for a half-open TCP socket,
+ * so we fall back to a timer at twice the readyTimeoutMs.
+ *
+ * R-0000188: ssh2's `readyTimeout` only covers the SSH handshake phase, not
+ * the TCP connect itself. A dropped TCP `SYN` would otherwise hang the
+ * connect call until the OS default (~75–180 s). We arm an explicit TCP
+ * connect timeout at `readyTimeoutMs` so connect failures surface promptly.
+ * Neither watchdog uses `unref()` — the cleanup path explicitly clears them
+ * once the promise settles, so they are guaranteed to participate in keeping
+ * the event loop alive until that happens.
  *
  * @param parameters - Watchdog configuration.
  * @param parameters.readyTimeoutMs - The ssh2 ready timeout in milliseconds.
  * @param parameters.rejectOnce - Idempotent rejection callback.
- * @returns A cleanup function that disarms the watchdog.
+ * @returns A cleanup function that disarms both watchdogs.
  */
 function armHalfOpenWatchdog(parameters: {
   readyTimeoutMs: number
   rejectOnce: (error: unknown) => void
 }): () => void {
   const { readyTimeoutMs, rejectOnce } = parameters
-  const watchdog: NodeJS.Timeout = setTimeout(() => {
+  const tcpConnectTimeout: NodeJS.Timeout = setTimeout(() => {
+    rejectOnce(
+      new Error(
+        `host key scan TCP connect timed out after ${String(readyTimeoutMs)}ms (no SYN-ACK?)`
+      )
+    )
+  }, readyTimeoutMs)
+  const halfOpenWatchdog: NodeJS.Timeout = setTimeout(() => {
     rejectOnce(
       new Error(`host key scan timed out after ${String(readyTimeoutMs * 2)}ms (TCP half-open?)`)
     )
   }, readyTimeoutMs * 2)
-  // The watchdog must not keep the Node.js event loop alive after the
-  // Promise has otherwise settled. unref is best-effort; on platforms
-  // without it the explicit clearTimeout in cleanup still wins.
-  watchdog.unref()
   return () => {
-    clearTimeout(watchdog)
+    clearTimeout(tcpConnectTimeout)
+    clearTimeout(halfOpenWatchdog)
   }
 }
 

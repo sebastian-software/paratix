@@ -385,11 +385,39 @@ describe("readHostFingerprintViaSsh2", () => {
       promise.catch(() => {
         // Swallow the rejection until the assertion below observes it.
       })
-      // Watchdog is armed at readyTimeoutMs * 2 = 10_000ms.
-      await vi.advanceTimersByTimeAsync(10_001)
-      await expect(promise).rejects.toThrow(/host key scan timed out after 10000ms/v)
+      // The TCP connect watchdog fires first at readyTimeoutMs = 5000ms,
+      // before the half-open watchdog at readyTimeoutMs * 2 = 10000ms.
+      await vi.advanceTimersByTimeAsync(5001)
+      await expect(promise).rejects.toThrow(/host key scan TCP connect timed out after 5000ms/v)
 
       expect(fakeClient.removeAllListeners).toHaveBeenCalled()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  // R-0000188: ssh2's readyTimeout covers only the SSH handshake; an
+  // explicit TCP connect timeout must surface dropped SYN packets quickly,
+  // before falling through to the half-open watchdog at 2x.
+  it("rejects with a TCP connect timeout before the half-open watchdog fires", async () => {
+    vi.useFakeTimers()
+
+    const fakeClient = createFakeHostKeyClient(() => {
+      // Simulate a dropped SYN: ssh2 never reports anything.
+    })
+
+    try {
+      const promise = readHostFingerprintViaSsh2("example.com", {
+        clientFactory: () => useFakeHostKeyClient(fakeClient),
+        readyTimeoutMs: 3000,
+      })
+
+      promise.catch(() => {
+        // Swallow until the assertion observes it.
+      })
+      // Advance just past the TCP connect watchdog at readyTimeoutMs.
+      await vi.advanceTimersByTimeAsync(3001)
+      await expect(promise).rejects.toThrow(/TCP connect timed out after 3000ms/v)
     } finally {
       vi.useRealTimers()
     }
