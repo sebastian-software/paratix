@@ -239,13 +239,28 @@ describe("net.route — check", () => {
 
   it("returns needs-apply when live route is gone but drop-in still exists (state: absent)", async () => {
     const dropinPath = "/etc/systemd/network/50-paratix-route-10.0.0.0-24.network"
+    const expectedDropin = `[Match]\nName=*\n\n[Route]\nDestination=10.0.0.0/24\nGateway=192.168.1.1\n`
     const mockSsh = createMockSsh({
+      [`cat '${dropinPath}'`]: { stdout: expectedDropin },
       [`test -f '${dropinPath}'`]: { code: 0 },
       "ip route show '10.0.0.0/24'": { stdout: "" },
     })
     const mod = net.route("10.0.0.0/24", "192.168.1.1", { state: "absent" })
     const result = await mod.check(mockSsh, emptyEnv)
     expect(result).toBe("needs-apply")
+  })
+
+  it("returns ok when live route is gone and a foreign drop-in with the same destination exists", async () => {
+    const dropinPath = "/etc/systemd/network/50-paratix-route-10.0.0.0-24.network"
+    const foreignDropin = `[Match]\nName=eth1\n\n[Route]\nDestination=10.0.0.0/24\nGateway=192.168.1.254\n`
+    const mockSsh = createMockSsh({
+      [`cat '${dropinPath}'`]: { stdout: foreignDropin },
+      [`test -f '${dropinPath}'`]: { code: 0 },
+      "ip route show '10.0.0.0/24'": { stdout: "" },
+    })
+    const mod = net.route("10.0.0.0/24", "192.168.1.1", { state: "absent" })
+    const result = await mod.check(mockSsh, emptyEnv)
+    expect(result).toBe("ok")
   })
 
   it("returns ok when both live route and drop-in match (state: present)", async () => {

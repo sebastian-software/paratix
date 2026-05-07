@@ -646,6 +646,16 @@ async function routeDropinExists(conn: SshConnection, dropinPath: string): Promi
   return result.code === 0
 }
 
+async function routeDropinMatchesExpected(
+  conn: SshConnection,
+  parameters: RouteParameters
+): Promise<boolean> {
+  if (!(await routeDropinExists(conn, parameters.dropinPath))) return false
+  const expected = buildRouteDropin(parameters.destination, parameters.gateway, parameters.device)
+  const current = await conn.readFile(parameters.dropinPath)
+  return current.trim() === expected.trim()
+}
+
 /**
  * R-0000061: validate the persistent systemd-networkd drop-in alongside the
  * live route — analogous to `mount.present.check` after R-0000049 — so that
@@ -675,10 +685,14 @@ async function checkRouteState(
     )
   }
 
-  // absent: neither the live route nor the drop-in may remain — a lingering
-  // drop-in would re-create the route on the next reboot.
+  // absent: neither the live route nor this module's own drop-in may remain.
+  // A drop-in at the same path with different content is foreign state and
+  // must not be treated as ours to delete.
   if (live) return NEEDS_APPLY
-  return dropinPresent ? NEEDS_APPLY : "ok"
+  if (!dropinPresent) return "ok"
+  return (await routeDropinMatchesExpected(conn, { destination, device, dropinPath, gateway }))
+    ? NEEDS_APPLY
+    : "ok"
 }
 
 async function checkPresentRouteState(
@@ -728,9 +742,11 @@ async function applyAbsentRoute(
       return failedCommand(`[net.route: ${destination}] ip route del failed`, routeResult)
     }
   }
-  const removeResult = await conn.exec(`rm -f ${shellQuote(dropinPath)}`, EXEC_OPTS)
-  if (removeResult.code !== 0) {
-    return failedCommand(`[net.route: ${destination}] drop-in removal failed`, removeResult)
+  if (await routeDropinMatchesExpected(conn, parameters)) {
+    const removeResult = await conn.exec(`rm -f ${shellQuote(dropinPath)}`, EXEC_OPTS)
+    if (removeResult.code !== 0) {
+      return failedCommand(`[net.route: ${destination}] drop-in removal failed`, removeResult)
+    }
   }
   return null
 }

@@ -32,6 +32,16 @@ const SUCCESSFUL_ROUTE_APPLY_OPTIONS = {
     { command: /^ip route del '[^']+' via '[^']+'$/v, result: { code: 0 } },
     { command: /^ip route del '[^']+' via '[^']+' dev '[^']+'$/v, result: { code: 0 } },
     {
+      command: /^test -f '\/etc\/systemd\/network\/50-paratix-route-[^']+\.network'$/v,
+      result: { code: 0 },
+    },
+    {
+      command: /^cat '\/etc\/systemd\/network\/50-paratix-route-[^']+\.network'$/v,
+      result: {
+        stdout: `[Match]\nName=*\n\n[Route]\nDestination=10.0.0.0/24\nGateway=192.168.1.1\n`,
+      },
+    },
+    {
       command: /^rm -f '\/etc\/systemd\/network\/50-paratix-route-[^']+\.network'$/v,
       result: { code: 0 },
     },
@@ -263,10 +273,28 @@ describe("net.route — apply", () => {
     expect(mockSsh.calls).toContain(`rm -f '${dropinPath}'`)
   })
 
+  it("leaves a foreign drop-in with the same destination in place", async () => {
+    const dropinPath = "/etc/systemd/network/50-paratix-route-10.0.0.0-24.network"
+    const foreignDropin = `[Match]\nName=eth1\n\n[Route]\nDestination=10.0.0.0/24\nGateway=192.168.1.254\n`
+    const mockSsh = createMockSsh(
+      {
+        [`cat '${dropinPath}'`]: { stdout: foreignDropin },
+        [routeShowCommand]: { code: 0, stdout: "" },
+      },
+      SUCCESSFUL_ROUTE_APPLY_OPTIONS
+    )
+    const mod = net.route("10.0.0.0/24", "192.168.1.1", { state: "absent" })
+    await mod.apply(mockSsh, emptyEnv)
+    expect(mockSsh.calls).not.toContain(`rm -f '${dropinPath}'`)
+  })
+
   it("returns failed when drop-in removal fails (state: absent)", async () => {
     const dropinPath = "/etc/systemd/network/50-paratix-route-10.0.0.0-24.network"
+    const expectedDropin = `[Match]\nName=*\n\n[Route]\nDestination=10.0.0.0/24\nGateway=192.168.1.1\n`
     const mockSsh = createMockSsh({
+      [`cat '${dropinPath}'`]: { stdout: expectedDropin },
       [`rm -f '${dropinPath}'`]: { code: 1, stderr: "permission denied" },
+      [`test -f '${dropinPath}'`]: { code: 0 },
       [routeShowCommand]: { code: 0, stdout: "" },
     })
     const mod = net.route("10.0.0.0/24", "192.168.1.1", { state: "absent" })
@@ -298,11 +326,17 @@ describe("net.route — apply", () => {
 
   it("sanitizes destination with colons for drop-in filename", async () => {
     // IPv6 destination: colons replaced with dashes
-    const mockSsh = createMockSsh({}, SUCCESSFUL_ROUTE_APPLY_OPTIONS)
+    const dropinPath = "/etc/systemd/network/50-paratix-route-fd00---64.network"
+    const expectedDropin = `[Match]\nName=*\n\n[Route]\nDestination=fd00::/64\nGateway=fe80::1\n`
+    const mockSsh = createMockSsh(
+      {
+        [`cat '${dropinPath}'`]: { stdout: expectedDropin },
+      },
+      SUCCESSFUL_ROUTE_APPLY_OPTIONS
+    )
     const mod = net.route("fd00::/64", "fe80::1", { state: "absent" })
     await mod.apply(mockSsh, emptyEnv)
     // drop-in path uses sanitized destination
-    const dropinPath = "/etc/systemd/network/50-paratix-route-fd00---64.network"
     expect(mockSsh.calls).toContain(`rm -f '${dropinPath}'`)
   })
 })
