@@ -152,6 +152,7 @@ export function writeProjectFiles(projectDirectory: string, options?: ScaffoldOp
       "@types/node": "^24.5.2",
       eslint: "^10.0.3",
       "eslint-config-setup": "^0.3.3",
+      jiti: "^2.6.1",
       prettier: "^3.6.2",
       tsx: "^4.20.6",
       typescript: "^5.9.2",

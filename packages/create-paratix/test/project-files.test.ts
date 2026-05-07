@@ -1,5 +1,13 @@
 import { spawnSync } from "node:child_process"
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs"
 import { tmpdir } from "node:os"
 import { join, resolve } from "node:path"
 import { fileURLToPath } from "node:url"
@@ -30,6 +38,17 @@ const paratixModulesPath = resolve(
 const tscBinaryPath = resolve(
   fileURLToPath(new URL("../../../node_modules/typescript/bin/tsc", import.meta.url))
 )
+const eslintBinaryPath = resolve(
+  fileURLToPath(new URL("../../../node_modules/eslint/bin/eslint.js", import.meta.url))
+)
+
+function linkGeneratedProjectDependency(projectDirectory: string, dependencyName: string): void {
+  const nodeModulesDirectory = join(projectDirectory, "node_modules")
+  const dependencyTarget = resolve(packageRoot, "../../node_modules", dependencyName)
+  const dependencyLink = join(nodeModulesDirectory, dependencyName)
+  mkdirSync(nodeModulesDirectory, { recursive: true })
+  symlinkSync(dependencyTarget, dependencyLink)
+}
 
 describe("writeProjectFiles", () => {
   beforeEach(() => {
@@ -94,6 +113,7 @@ describe("writeProjectFiles", () => {
         "@types/node": expect.stringMatching(/^\^/v),
         eslint: expect.stringMatching(/^\^/v),
         "eslint-config-setup": expect.stringMatching(/^\^/v),
+        jiti: expect.stringMatching(/^\^/v),
         prettier: expect.stringMatching(/^\^/v),
         tsx: expect.stringMatching(/^\^/v),
         typescript: expect.stringMatching(/^\^/v),
@@ -223,6 +243,21 @@ describe("writeProjectFiles", () => {
 
     expect(content).toContain('import { getEslintConfig } from "eslint-config-setup"')
     expect(content).toContain("export default await getEslintConfig({ node: true })")
+  })
+
+  it("generated eslint config loads through the scaffolded lint toolchain", () => {
+    writeProjectFiles(TEST_DIR)
+    linkGeneratedProjectDependency(TEST_DIR, "eslint-config-setup")
+    linkGeneratedProjectDependency(TEST_DIR, "jiti")
+
+    const result = spawnSync(process.execPath, [eslintBinaryPath, "--print-config", "server.ts"], {
+      cwd: TEST_DIR,
+      encoding: "utf8",
+      timeout: 30_000,
+    })
+
+    expect(result.status).toBe(0)
+    expect(result.stdout).toContain('"languageOptions"')
   })
 
   it("generated server.ts uses packages.upgrade and packages.installed (not apt.*)", () => {
