@@ -18,6 +18,7 @@ import {
   parsePositiveNumber,
   parseReconnectTimeoutSeconds,
   printExceptionError,
+  resetTsxRegistrationForTests,
   runApplyCommand,
 } from "../src/cli.js"
 import { printCliHeader } from "../src/output.js"
@@ -1418,6 +1419,49 @@ describe("printExceptionError", () => {
 })
 
 describe("CLI entrypoint", () => {
+  beforeEach(() => {
+    // Reset the tsx registration guard so each test exercises the loader
+    // path against a clean state, regardless of which earlier test ran.
+    resetTsxRegistrationForTests()
+  })
+
+  it("registers the tsx loader at most once across multiple TypeScript playbook loads", async () => {
+    const tempDirectory = mkdtempSync(join(tmpdir(), "paratix-cli-tsx-once-"))
+    const firstPlaybookPath = join(tempDirectory, "first.ts")
+    const secondPlaybookPath = join(tempDirectory, "second.ts")
+    let registerCalls = 0
+
+    try {
+      for (const playbookPath of [firstPlaybookPath, secondPlaybookPath]) {
+        writeFileSync(
+          playbookPath,
+          [
+            "export default {",
+            "  name: 'tsx-once-server',",
+            "  host: '1.2.3.4',",
+            "  ssh: { user: 'root', ports: [22] },",
+            "  run: ['noop'],",
+            "}",
+          ].join("\n")
+        )
+      }
+
+      vi.doMock("tsx/esm/api", () => ({
+        register() {
+          registerCalls += 1
+        },
+      }))
+
+      await loadServerDefinitionFromFile(firstPlaybookPath, { firstRun: false })
+      await loadServerDefinitionFromFile(secondPlaybookPath, { firstRun: false })
+
+      expect(registerCalls).toBe(1)
+    } finally {
+      vi.doUnmock("tsx/esm/api")
+      rmSync(tempDirectory, { force: true, recursive: true })
+    }
+  })
+
   it("prints the ASCII header with the current version", () => {
     const logs: string[] = []
     const logSpy = vi.spyOn(console, "log").mockImplementation((...args: unknown[]) => {

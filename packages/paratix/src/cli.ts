@@ -359,7 +359,33 @@ export function applyCliProcessEnvironment(options: { firstRun: boolean }): () =
   return restoreProcessEnvironment
 }
 
-async function registerTsxForTypeScriptEntry(filePath: string): Promise<void> {
+/**
+ * Cached registration promise so repeated calls share the result.
+ *
+ * The tsx ESM loader registers globally and is safe to install only once:
+ * every additional `register()` call adds another loader entry that stays
+ * alive for the rest of the process. Repeated calls happen in practice when
+ * multiple TypeScript playbooks are imported sequentially (CLI batch),
+ * inside vitest worker pools, or from embedded runners. Memoizing the
+ * promise makes the helper idempotent and concurrency-safe so callers can
+ * invoke it freely without leaking loader registrations or racing on a
+ * boolean flag.
+ *
+ * On failure the cached promise is dropped so a later invocation can retry
+ * (e.g. after the operator installs tsx).
+ */
+let tsxRegistrationPromise: null | Promise<void> = null
+
+/**
+ * Resets the cached tsx registration promise. Exported so tests can
+ * exercise the registration path in isolation; production code never needs
+ * to clear the cache.
+ */
+export function resetTsxRegistrationForTests(): void {
+  tsxRegistrationPromise = null
+}
+
+async function performTsxRegistration(filePath: string): Promise<void> {
   try {
     const tsx = (await import("tsx/esm/api")) as { register: () => void }
     tsx.register()
@@ -375,6 +401,23 @@ async function registerTsxForTypeScriptEntry(filePath: string): Promise<void> {
       }
     )
   }
+}
+
+async function registerTsxForTypeScriptEntry(filePath: string): Promise<void> {
+  if (tsxRegistrationPromise != null) {
+    await tsxRegistrationPromise
+    return
+  }
+  // Wrap the registration so a rejected promise also clears the cache before
+  // surfacing the error. This keeps the cache update synchronous with the
+  // rejection (so a later call can retry once tsx becomes available) without
+  // reassigning the module-level binding across an await boundary.
+  const registration = performTsxRegistration(filePath).catch((error: unknown) => {
+    tsxRegistrationPromise = null
+    throw error
+  })
+  tsxRegistrationPromise = registration
+  await registration
 }
 
 export async function loadServerDefinitionFromFile(
