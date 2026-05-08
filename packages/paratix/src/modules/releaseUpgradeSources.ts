@@ -31,6 +31,26 @@ export function isAcceptableSourcesPath(filePath: string): boolean {
   return true
 }
 
+// R-0000240: a sources file enumerated by `find -print0` may vanish or
+// become unreadable between enumeration and the subsequent `readFile`
+// (operator cleanup, package removal, mount churn). Treat ENOENT-style
+// errors as "skip this file" so a single transient absence does not abort
+// the entire release upgrade. Other classes of errors (permission denied,
+// SSH transport failure) are still re-thrown by callers.
+const VANISHED_SOURCES_FILE_PATTERN = /no such file|enoent|cannot stat|cannot open/iv
+
+/**
+ * Detect the error message shapes that indicate a sources file vanished
+ * between enumeration and read.
+ *
+ * @param error - The error value caught from `readFile`/`writeFile`.
+ * @returns `true` when the message matches a known ENOENT-style pattern.
+ */
+export function isVanishedSourcesFileError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error)
+  return VANISHED_SOURCES_FILE_PATTERN.test(message)
+}
+
 const RELEASE_DERIVED_SUITE_SUFFIXES = ["-updates", "-security", "-backports"] as const
 const DEBIAN_SUPPORTED_PREDECESSORS = {
   bookworm: "bullseye",

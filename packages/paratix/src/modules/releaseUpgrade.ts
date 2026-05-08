@@ -14,6 +14,7 @@ import { type Distro, parseOsReleaseDistro } from "./releaseUpgradeDistro.js"
 import {
   isAcceptableSourcesPath,
   isSupportedDebianUpgradePath,
+  isVanishedSourcesFileError,
   RELEASE_UPGRADE_DEFAULT_TIMEOUT_MS,
   rewriteAptSourcesContent,
 } from "./releaseUpgradeSources.js"
@@ -146,6 +147,23 @@ async function rewriteSourcesFile(
   return { originalContent, remotePath }
 }
 
+type SnapshotSourcesParameters = Omit<RewriteSourcesParameters, "originalContent">
+
+// R-0000240: a sources file enumerated by `find -print0` may vanish between
+// enumeration and the subsequent read. Skip ENOENT-style errors so a single
+// transient absence does not abort the entire release upgrade.
+async function snapshotSourcesFileSafely(
+  parameters: SnapshotSourcesParameters
+): Promise<null | SourcesSnapshot> {
+  try {
+    const originalContent = await parameters.ssh.readFile(parameters.remotePath)
+    return await rewriteSourcesFile({ ...parameters, originalContent })
+  } catch (error) {
+    if (isVanishedSourcesFileError(error)) return null
+    throw error
+  }
+}
+
 /**
  * Replace all occurrences of `currentCodename` with `targetCodename` in
  * `/etc/apt/sources.list` and every `.list` and `.sources` file under
@@ -169,10 +187,8 @@ async function replaceCodenameInSourcesList(
   const snapshots: SourcesSnapshot[] = []
 
   if (await ssh.exists(APT_SOURCES_LIST)) {
-    const sourcesContent = await ssh.readFile(APT_SOURCES_LIST)
-    const mainSnapshot = await rewriteSourcesFile({
+    const mainSnapshot = await snapshotSourcesFileSafely({
       currentCodename,
-      originalContent: sourcesContent,
       remotePath: APT_SOURCES_LIST,
       ssh,
       targetCodename,
@@ -198,11 +214,8 @@ async function replaceCodenameInSourcesList(
   for (const filePath of listFilesResult.stdout.split("\0")) {
     if (filePath.length === 0 || !isAcceptableSourcesPath(filePath)) continue
     // eslint-disable-next-line no-await-in-loop
-    const content = await ssh.readFile(filePath)
-    // eslint-disable-next-line no-await-in-loop
-    const snapshot = await rewriteSourcesFile({
+    const snapshot = await snapshotSourcesFileSafely({
       currentCodename,
-      originalContent: content,
       remotePath: filePath,
       ssh,
       targetCodename,

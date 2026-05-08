@@ -56,7 +56,7 @@ function debianCheckResponses(currentCodename: string, stableCodename: string) {
 function debianApplyResponses(
   currentCodename: string,
   targetCodename: string,
-  overrides: Record<string, { code?: number; stdout?: string }> = {}
+  overrides: Record<string, { code?: number; stderr?: string; stdout?: string }> = {}
 ) {
   return {
     "[ -e '/etc/apt/sources.list' ]": { code: 0 },
@@ -648,6 +648,67 @@ describe("releaseUpgrade.upgrade — apply (Debian)", () => {
       expect(result.status).toBe("changed")
       expect(writes.find((w) => w.path === dirtyPath)).toBeUndefined()
       expect(writes.find((w) => w.path === cleanPath)).toBeDefined()
+    })
+
+    // R-0000240 regression: a sources file enumerated by `find -print0` can
+    // vanish before the subsequent `readFile`. Such a transient absence must
+    // be skipped so the upgrade still proceeds for the remaining files.
+    it("R-0000240: skips a sources file that vanishes between find and readFile", async () => {
+      const cleanPath = "/etc/apt/sources.list.d/clean.list"
+      const vanishedPath = "/etc/apt/sources.list.d/vanished.list"
+      const ssh = createMockSsh(
+        debianApplyResponses("bookworm", "trixie", {
+          [`cat '${cleanPath}'`]: { code: 0, stdout: "deb http://example.com/repo bookworm main" },
+          [`cat '${vanishedPath}'`]: {
+            code: 1,
+            stderr: `cat: ${vanishedPath}: No such file or directory`,
+          },
+          "find /etc/apt/sources.list.d/ \\( -name '*.list' -o -name '*.sources' \\) -type f -print0":
+            { code: 0, stdout: `${vanishedPath}\0${cleanPath}\0` },
+        })
+      )
+      const writes = captureWriteFile(ssh)
+      const mod = releaseUpgrade.upgrade()
+      const result = await mod.apply(ssh, emptyEnv)
+      expect(result.status).toBe("changed")
+      expect(writes.find((w) => w.path === vanishedPath)).toBeUndefined()
+      expect(writes.find((w) => w.path === cleanPath)).toBeDefined()
+    })
+
+    it("R-0000240: skips the main sources.list when it vanishes between exists and readFile", async () => {
+      // The main sources.list is reported by `exists` but the subsequent
+      // `cat` fails because the file was removed in between. The upgrade
+      // must still complete using the sources.list.d entries instead of
+      // aborting on the transient ENOENT.
+      const ssh = createMockSsh(
+        debianApplyResponses("bookworm", "trixie", {
+          "cat '/etc/apt/sources.list'": {
+            code: 1,
+            stderr: "cat: /etc/apt/sources.list: No such file or directory",
+          },
+        })
+      )
+      const writes = captureWriteFile(ssh)
+      const mod = releaseUpgrade.upgrade()
+      const result = await mod.apply(ssh, emptyEnv)
+      expect(result.status).toBe("changed")
+      expect(writes.find((w) => w.path === "/etc/apt/sources.list")).toBeUndefined()
+    })
+
+    it("R-0000240: re-throws non-ENOENT readFile errors so they surface to the runner", async () => {
+      const protectedPath = "/etc/apt/sources.list.d/protected.list"
+      const ssh = createMockSsh(
+        debianApplyResponses("bookworm", "trixie", {
+          [`cat '${protectedPath}'`]: { code: 1, stderr: "cat: Permission denied" },
+          "find /etc/apt/sources.list.d/ \\( -name '*.list' -o -name '*.sources' \\) -type f -print0":
+            { code: 0, stdout: `${protectedPath}\0` },
+        })
+      )
+      const mod = releaseUpgrade.upgrade()
+      // Permission errors are not transient absences — the upgrade refuses
+      // to swallow them and lets the exception propagate so the runner can
+      // surface the failure with the original cause attached.
+      await expect(mod.apply(ssh, emptyEnv)).rejects.toThrow(/Permission denied/v)
     })
 
     it("processes a sources.list.d filename containing whitespace via -print0", async () => {
