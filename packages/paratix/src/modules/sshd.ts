@@ -239,10 +239,8 @@ async function restoreSshdPortRestartFailure(
     serviceBootState?: SshdServiceBootState
     serviceUnit?: SshdServiceUnit
     socketState: SshSocketState
-    targetPort: number
   }
 ): Promise<void> {
-  ssh.removePort(parameters.targetPort)
   await ssh.writeFile(SSHD_CONFIG_PATH, parameters.originalConfig, { mode: SSHD_CONFIG_MODE })
   await restoreSshServiceBootState(ssh, parameters.serviceBootState)
   await restoreSocketActivatedSsh(ssh, parameters.socketState)
@@ -269,13 +267,29 @@ async function restartSshdOnNewPort(
     await ssh.exec(`${SYSTEMCTL} restart ${serviceUnit}`, { silent: true })
   } catch (error) {
     if (isRestartDisconnect(error)) return
-    await restoreSshdPortRestartFailure(ssh, {
-      originalConfig,
-      serviceBootState,
-      serviceUnit,
-      socketState,
-      targetPort,
-    })
+    // Drop the port marker first and unconditionally: if any subsequent restore
+    // step throws (e.g. SFTP failure rewriting sshd_config), the runner still
+    // needs to fall back to the previous port instead of staying on the new
+    // one we never managed to activate.
+    try {
+      ssh.removePort(targetPort)
+    } catch {
+      // ssh.removePort is a synchronous in-memory bookkeeping call; we still
+      // swallow defensively so an exotic implementation never blocks the
+      // remaining restore steps.
+    }
+    try {
+      await restoreSshdPortRestartFailure(ssh, {
+        originalConfig,
+        serviceBootState,
+        serviceUnit,
+        socketState,
+      })
+    } catch {
+      // Best-effort recovery: the original restart failure (re-thrown below)
+      // is the actionable error for the caller. A nested restore failure must
+      // not mask it nor leave the port marker in place.
+    }
     throw error
   }
 }

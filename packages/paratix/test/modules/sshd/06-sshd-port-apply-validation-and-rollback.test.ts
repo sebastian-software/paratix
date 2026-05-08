@@ -350,6 +350,37 @@ describe("sshd.port — apply: validation and rollback", () => {
     expect(writtenFiles.at(-1)?.path).toBe(SSHD_CONFIG)
   })
 
+  it("regression — removes added port even when rollback writeFile fails after restart error", async () => {
+    const mockSsh = createMockSsh({
+      [CAT_SSHD]: { stdout: "Port 22" },
+    })
+    const execSpy = vi.spyOn(mockSsh, "exec")
+    const addPortSpy = vi.spyOn(mockSsh, "addPort")
+    const removePortSpy = vi.spyOn(mockSsh, "removePort")
+    // The rollback writeFile to sshd_config fails (e.g. SFTP error during recovery)
+    // eslint-disable-next-line @typescript-eslint/promise-function-async -- vi.mockImplementation requires matching return type
+    vi.spyOn(mockSsh, "writeFile").mockImplementation((path: string) => {
+      if (path === SSHD_CONFIG) return Promise.reject(new Error("SFTP rollback failed"))
+      return Promise.resolve()
+    })
+
+    execSpy
+      .mockResolvedValueOnce({ code: 0, stderr: "", stdout: "" }) // mkdir -p /run/sshd
+      .mockResolvedValueOnce({ code: 0, stderr: "", stdout: "" }) // sshd -t
+      .mockResolvedValueOnce({ code: 1, stderr: "", stdout: "" }) // ssh.socket missing
+      .mockResolvedValueOnce({ code: 0, stderr: "", stdout: "" }) // sshd.service exists
+      .mockResolvedValueOnce({ code: 0, stderr: "", stdout: "" }) // sshd.service enabled
+      .mockRejectedValueOnce(new Error("systemctl restart sshd failed"))
+
+    const mod = sshd.port(2222)
+    await expect(mod.apply(mockSsh, emptyEnv)).rejects.toThrow("systemctl restart sshd failed")
+
+    // Even though the rollback writeFile threw, removePort must still have been called
+    // so the runner reverts to the previous port instead of staying on the new one.
+    expect(addPortSpy).toHaveBeenCalledWith(2222)
+    expect(removePortSpy).toHaveBeenCalledWith(2222)
+  })
+
   it("regression — keeps added port when restart aborts the SSH session", async () => {
     const mockSsh = createMockSsh({
       [CAT_SSHD]: { stdout: "Port 22" },
