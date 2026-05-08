@@ -34,6 +34,122 @@ function ufwRuleApplyChanged(stdout: string): boolean {
   return lines.some((line) => !line.startsWith("Skipping adding existing rule"))
 }
 
+type UfwRuleAction = "allow" | "deny"
+type UfwRuleKeyword = "ALLOW" | "DENY"
+
+function hasOppositeRule(input: {
+  ipv6Rules: boolean
+  oppositeKeyword: UfwRuleKeyword
+  port: number
+  status: string
+}): boolean {
+  const { ipv6Rules, oppositeKeyword, port, status } = input
+  if (hasProtocolAgnosticRule(status, port, oppositeKeyword)) return true
+  return ipv6Rules && hasProtocolAgnosticIpv6Rule(status, port, oppositeKeyword)
+}
+
+// Apply phase helper for `ufw.rule`: when a contradictory `allow`/`deny`
+// rule for the port still exists, delete it before adding the desired
+// rule. Returns a `ModuleResult` only on failure; otherwise reports
+// whether the delete actually changed the firewall.
+async function deleteOppositeRule(input: {
+  action: UfwRuleAction
+  ipv6Rules: boolean
+  oppositeAction: UfwRuleAction
+  oppositeKeyword: UfwRuleKeyword
+  port: number
+  portList: number[]
+  ssh: SshConnection
+  status: string
+}): Promise<{ changed: boolean; failure: ModuleResult | null }> {
+  const { action, ipv6Rules, oppositeAction, oppositeKeyword, port, portList, ssh, status } = input
+  if (!hasOppositeRule({ ipv6Rules, oppositeKeyword, port, status })) {
+    return { changed: false, failure: null }
+  }
+  // ufw does not expose a separate IPv6 delete; deleting the
+  // protocol-agnostic opposite rule clears both families. The same
+  // command therefore covers the IPv4-only and IPv6-only variants of the
+  // contradictory entry.
+  const deleteResult = await ssh.exec(
+    `${UFW} delete ${shellQuote(oppositeAction)} ${shellQuote(String(port))}`,
+    { ignoreExitCode: true, silent: true }
+  )
+  if (deleteResult.code !== 0) {
+    return {
+      changed: false,
+      failure: failedCommand(
+        `[ufw.rule: ${action} ${portList.join(",")}] ufw delete ${oppositeAction} failed for port ${String(port)}`,
+        deleteResult
+      ),
+    }
+  }
+  return { changed: true, failure: null }
+}
+
+async function applyUfwRulePort(input: {
+  action: UfwRuleAction
+  ipv6Rules: boolean
+  oppositeAction: UfwRuleAction
+  oppositeKeyword: UfwRuleKeyword
+  port: number
+  portList: number[]
+  ssh: SshConnection
+  status: string
+}): Promise<{ changed: boolean; failure: ModuleResult | null }> {
+  const { action, port, portList, ssh } = input
+  const deleteOutcome = await deleteOppositeRule(input)
+  if (deleteOutcome.failure) return deleteOutcome
+
+  const result = await ssh.exec(`${UFW} ${shellQuote(action)} ${shellQuote(String(port))}`, {
+    ignoreExitCode: true,
+    silent: true,
+  })
+  if (result.code !== 0) {
+    return {
+      changed: false,
+      failure: failedCommand(
+        `[ufw.rule: ${action} ${portList.join(",")}] ufw ${action} failed for port ${String(port)}`,
+        result
+      ),
+    }
+  }
+  // R-0000076/R-0000114: ufw prints "Skipping adding existing rule"
+  // per address family. Treat the command as a no-op only when all
+  // emitted family lines are skips; a mixed skip/add output still
+  // means one family was repaired.
+  return { changed: deleteOutcome.changed || ufwRuleApplyChanged(result.stdout), failure: null }
+}
+
+function checkUfwRulePort(input: {
+  expectedAction: UfwRuleKeyword
+  oppositeKeyword: UfwRuleKeyword
+  port: number
+  requireIpv6Rule: boolean
+  status: string
+}): "needs-apply" | "ok" {
+  const { expectedAction, oppositeKeyword, port, requireIpv6Rule, status } = input
+  // R-0000118: match only the protocol-agnostic form `<port> ACTION`.
+  // The caller asked for `ufw <action> <port>` (no /tcp or /udp
+  // suffix), which adds rules for both protocols. Accepting a
+  // protocol-specific entry like `22/tcp ALLOW` here would hide a
+  // drift where only one protocol is configured and apply would
+  // therefore add a second, parametrically different rule.
+  // Anchor the port at the line start and require a whitespace
+  // boundary so port 22 does not match 5022, 1022, 2222 etc.
+  if (!hasProtocolAgnosticRule(status, port, expectedAction)) return NEEDS_APPLY
+  if (requireIpv6Rule && !hasProtocolAgnosticIpv6Rule(status, port, expectedAction)) {
+    return NEEDS_APPLY
+  }
+  // R-0000174: a contradictory leftover rule (`allow` when we want
+  // `deny`, or vice versa) is drift even when the desired rule is
+  // also present. ufw evaluates rules in order, so the older opposite
+  // entry can shadow the new one. Force apply to remove it.
+  if (hasOppositeRule({ ipv6Rules: requireIpv6Rule, oppositeKeyword, port, status })) {
+    return NEEDS_APPLY
+  }
+  return "ok"
+}
+
 /**
  * Modules for managing the UFW (Uncomplicated Firewall) on Debian/Ubuntu hosts.
  */
@@ -138,31 +254,38 @@ export const ufw = {
         throw new Error(`ufw.rule requires integer ports between 1 and 65535, got ${String(port)}`)
       }
     }
+    const oppositeAction: UfwRuleAction = action === "allow" ? "deny" : "allow"
+    const expectedAction: UfwRuleKeyword = action === "allow" ? "ALLOW" : "DENY"
+    const oppositeKeyword: UfwRuleKeyword = action === "allow" ? "DENY" : "ALLOW"
     return {
       async apply(ssh: null | SshConnection): Promise<ModuleResult> {
         if (!ssh)
           return failed(`[ufw.rule: ${action} ${portList.join(",")}] SSH connection is required`)
 
+        // R-0000174: read status once up front so we can drop a contradictory
+        // predecessor rule before adding the desired one. ufw evaluates rules
+        // in order, so a stale `allow` left in place when switching to `deny`
+        // (or vice versa) can shadow the new rule. Probing the status first
+        // lets us avoid issuing `ufw delete` for ports with no contradictory
+        // entry, which keeps the apply quiet on steady state.
+        const status = await ssh.output(`${UFW} status`)
+        const ipv6Rules = statusIncludesIpv6Rules(status)
+
         let anyChanged = false
         for (const port of portList) {
           // eslint-disable-next-line no-await-in-loop
-          const result = await ssh.exec(
-            `${UFW} ${shellQuote(action)} ${shellQuote(String(port))}`,
-            { ignoreExitCode: true, silent: true }
-          )
-          if (result.code !== 0) {
-            return failedCommand(
-              `[ufw.rule: ${action} ${portList.join(",")}] ufw ${action} failed for port ${String(port)}`,
-              result
-            )
-          }
-          // R-0000076/R-0000114: ufw prints "Skipping adding existing rule"
-          // per address family. Treat the command as a no-op only when all
-          // emitted family lines are skips; a mixed skip/add output still
-          // means one family was repaired.
-          if (ufwRuleApplyChanged(result.stdout)) {
-            anyChanged = true
-          }
+          const outcome = await applyUfwRulePort({
+            action,
+            ipv6Rules,
+            oppositeAction,
+            oppositeKeyword,
+            port,
+            portList,
+            ssh,
+            status,
+          })
+          if (outcome.failure) return outcome.failure
+          if (outcome.changed) anyChanged = true
         }
 
         return { status: anyChanged ? "changed" : "ok" }
@@ -173,21 +296,14 @@ export const ufw = {
         const status = await ssh.output(`${UFW} status`)
         const requireIpv6Rule = statusIncludesIpv6Rules(status)
         for (const port of portList) {
-          const expectedAction = action === "allow" ? "ALLOW" : "DENY"
-          // R-0000118: match only the protocol-agnostic form `<port> ACTION`.
-          // The caller asked for `ufw <action> <port>` (no /tcp or /udp
-          // suffix), which adds rules for both protocols. Accepting a
-          // protocol-specific entry like `22/tcp ALLOW` here would hide a
-          // drift where only one protocol is configured and apply would
-          // therefore add a second, parametrically different rule.
-          // Anchor the port at the line start and require a whitespace
-          // boundary so port 22 does not match 5022, 1022, 2222 etc.
-          if (!hasProtocolAgnosticRule(status, port, expectedAction)) {
-            return NEEDS_APPLY
-          }
-          if (requireIpv6Rule && !hasProtocolAgnosticIpv6Rule(status, port, expectedAction)) {
-            return NEEDS_APPLY
-          }
+          const portResult = checkUfwRulePort({
+            expectedAction,
+            oppositeKeyword,
+            port,
+            requireIpv6Rule,
+            status,
+          })
+          if (portResult === NEEDS_APPLY) return NEEDS_APPLY
         }
         return "ok"
       },

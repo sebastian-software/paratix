@@ -394,6 +394,7 @@ describe("ufw.rule", () => {
   it("apply returns changed when a single-port allow rule succeeds", async () => {
     const ssh = createMockSsh({
       "ufw 'allow' '80'": { code: 0 },
+      "ufw status": { stdout: "Status: active" },
     })
     const mod = ufw.rule("allow", 80)
     const result = await mod.apply(ssh, emptyEnv)
@@ -406,11 +407,17 @@ describe("ufw.rule", () => {
       "ufw 'allow' '443'": { code: 0 },
       "ufw 'allow' '80'": { code: 0 },
       "ufw 'allow' '8080'": { code: 0 },
+      "ufw status": { stdout: "Status: active" },
     })
     const mod = ufw.rule("allow", [80, 443, 8080])
     const result = await mod.apply(ssh, emptyEnv)
     expect(result.status).toBe("changed")
-    expect(ssh.calls).toStrictEqual(["ufw 'allow' '80'", "ufw 'allow' '443'", "ufw 'allow' '8080'"])
+    expect(ssh.calls).toStrictEqual([
+      "ufw status",
+      "ufw 'allow' '80'",
+      "ufw 'allow' '443'",
+      "ufw 'allow' '8080'",
+    ])
   })
 
   // R-0000076 regression: when ufw prints "Skipping adding existing rule"
@@ -421,11 +428,12 @@ describe("ufw.rule", () => {
     const ssh = createMockSsh({
       "ufw 'allow' '443'": { code: 0, stdout: skipOutput },
       "ufw 'allow' '80'": { code: 0, stdout: skipOutput },
+      "ufw status": { stdout: "Status: active" },
     })
     const mod = ufw.rule("allow", [80, 443])
     const result = await mod.apply(ssh, emptyEnv)
     expect(result.status).toBe("ok")
-    expect(ssh.calls).toStrictEqual(["ufw 'allow' '80'", "ufw 'allow' '443'"])
+    expect(ssh.calls).toStrictEqual(["ufw status", "ufw 'allow' '80'", "ufw 'allow' '443'"])
   })
 
   it("apply returns changed when ufw adds every rule fresh", async () => {
@@ -433,6 +441,7 @@ describe("ufw.rule", () => {
     const ssh = createMockSsh({
       "ufw 'allow' '443'": { code: 0, stdout: addedOutput },
       "ufw 'allow' '80'": { code: 0, stdout: addedOutput },
+      "ufw status": { stdout: "Status: active" },
     })
     const mod = ufw.rule("allow", [80, 443])
     const result = await mod.apply(ssh, emptyEnv)
@@ -446,6 +455,7 @@ describe("ufw.rule", () => {
         code: 0,
         stdout: "Skipping adding existing rule\nSkipping adding existing rule (v6)\n",
       },
+      "ufw status": { stdout: "Status: active" },
     })
     const mod = ufw.rule("allow", [80, 443])
     const result = await mod.apply(ssh, emptyEnv)
@@ -458,6 +468,7 @@ describe("ufw.rule", () => {
         code: 0,
         stdout: "Skipping adding existing rule\nRule added (v6)\n",
       },
+      "ufw status": { stdout: "Status: active" },
     })
     const mod = ufw.rule("deny", 22)
     const result = await mod.apply(ssh, emptyEnv)
@@ -469,11 +480,12 @@ describe("ufw.rule", () => {
       "ufw 'deny' '22'": { code: 0 },
       "ufw 'deny' '25'": { code: 1 },
       "ufw 'deny' '465'": { code: 0 },
+      "ufw status": { stdout: "Status: active" },
     })
     const mod = ufw.rule("deny", [22, 25, 465])
     const result = await mod.apply(ssh, emptyEnv)
     expect(result.status).toBe("failed")
-    expect(ssh.calls).toStrictEqual(["ufw 'deny' '22'", "ufw 'deny' '25'"])
+    expect(ssh.calls).toStrictEqual(["ufw status", "ufw 'deny' '22'", "ufw 'deny' '25'"])
   })
 
   it("apply returns failed when ssh is null", async () => {
@@ -603,5 +615,164 @@ describe("ufw.rule", () => {
     expect(() => ufw.rule("allow", [80, -1, 443])).toThrow(
       "ufw.rule requires integer ports between 1 and 65535, got -1"
     )
+  })
+
+  // R-0000174 regression: switching from allow to deny (or vice versa)
+  // must remove the contradictory predecessor rule before adding the new
+  // one. ufw evaluates rules in order, so a stale opposite entry can
+  // shadow the freshly added rule.
+  it("check returns needs-apply when the contradictory allow rule still exists alongside the desired deny", async () => {
+    const ssh = createMockSsh({
+      "ufw status": {
+        stdout: [
+          "Status: active",
+          "",
+          "To                         Action      From",
+          "--                         ------      ----",
+          "22                         ALLOW       Anywhere",
+          "22                         DENY        Anywhere",
+        ].join("\n"),
+      },
+    })
+    const mod = ufw.rule("deny", 22)
+    const result = await mod.check(ssh, emptyEnv)
+    expect(result).toBe("needs-apply")
+  })
+
+  it("check returns needs-apply when the contradictory deny rule still exists alongside the desired allow", async () => {
+    const ssh = createMockSsh({
+      "ufw status": {
+        stdout: [
+          "Status: active",
+          "",
+          "To                         Action      From",
+          "--                         ------      ----",
+          "80                         DENY        Anywhere",
+          "80                         ALLOW       Anywhere",
+        ].join("\n"),
+      },
+    })
+    const mod = ufw.rule("allow", 80)
+    const result = await mod.check(ssh, emptyEnv)
+    expect(result).toBe("needs-apply")
+  })
+
+  it("check returns needs-apply when only the contradictory IPv6 opposite rule remains", async () => {
+    const ssh = createMockSsh({
+      "ufw status": {
+        stdout: [
+          "Status: active",
+          "",
+          "To                         Action      From",
+          "--                         ------      ----",
+          "22                         DENY        Anywhere",
+          "22 (v6)                    DENY        Anywhere (v6)",
+          "22 (v6)                    ALLOW       Anywhere (v6)",
+        ].join("\n"),
+      },
+    })
+    const mod = ufw.rule("deny", 22)
+    const result = await mod.check(ssh, emptyEnv)
+    expect(result).toBe("needs-apply")
+  })
+
+  it("apply deletes the contradictory allow rule before adding the deny rule", async () => {
+    const ssh = createMockSsh({
+      "ufw 'deny' '22'": { code: 0, stdout: "Rule added\nRule added (v6)\n" },
+      "ufw delete 'allow' '22'": { code: 0, stdout: "Rule deleted\nRule deleted (v6)\n" },
+      "ufw status": {
+        stdout: [
+          "Status: active",
+          "",
+          "To                         Action      From",
+          "--                         ------      ----",
+          "22                         ALLOW       Anywhere",
+          "22 (v6)                    ALLOW       Anywhere (v6)",
+        ].join("\n"),
+      },
+    })
+    const mod = ufw.rule("deny", 22)
+    const result = await mod.apply(ssh, emptyEnv)
+    expect(result.status).toBe("changed")
+    expect(ssh.calls).toStrictEqual(["ufw status", "ufw delete 'allow' '22'", "ufw 'deny' '22'"])
+  })
+
+  it("apply deletes the contradictory deny rule before adding the allow rule", async () => {
+    const ssh = createMockSsh({
+      "ufw 'allow' '80'": { code: 0, stdout: "Rule added\nRule added (v6)\n" },
+      "ufw delete 'deny' '80'": { code: 0, stdout: "Rule deleted\nRule deleted (v6)\n" },
+      "ufw status": {
+        stdout: [
+          "Status: active",
+          "",
+          "To                         Action      From",
+          "--                         ------      ----",
+          "80                         DENY        Anywhere",
+          "80 (v6)                    DENY        Anywhere (v6)",
+        ].join("\n"),
+      },
+    })
+    const mod = ufw.rule("allow", 80)
+    const result = await mod.apply(ssh, emptyEnv)
+    expect(result.status).toBe("changed")
+    expect(ssh.calls).toStrictEqual(["ufw status", "ufw delete 'deny' '80'", "ufw 'allow' '80'"])
+  })
+
+  it("apply does not call delete when no contradictory rule exists", async () => {
+    const ssh = createMockSsh({
+      "ufw 'deny' '22'": { code: 0 },
+      "ufw status": {
+        stdout: [
+          "Status: active",
+          "",
+          "To                         Action      From",
+          "--                         ------      ----",
+          "80                         ALLOW       Anywhere",
+        ].join("\n"),
+      },
+    })
+    const mod = ufw.rule("deny", 22)
+    const result = await mod.apply(ssh, emptyEnv)
+    expect(result.status).toBe("changed")
+    expect(ssh.calls).toStrictEqual(["ufw status", "ufw 'deny' '22'"])
+  })
+
+  it("apply deletes the opposite IPv6 rule even when the IPv4 entry is already gone", async () => {
+    const ssh = createMockSsh({
+      "ufw 'deny' '22'": { code: 0, stdout: "Rule added\nRule added (v6)\n" },
+      "ufw delete 'allow' '22'": { code: 0, stdout: "Rule deleted\n" },
+      "ufw status": {
+        stdout: [
+          "Status: active",
+          "",
+          "To                         Action      From",
+          "--                         ------      ----",
+          "22 (v6)                    ALLOW       Anywhere (v6)",
+        ].join("\n"),
+      },
+    })
+    const mod = ufw.rule("deny", 22)
+    const result = await mod.apply(ssh, emptyEnv)
+    expect(result.status).toBe("changed")
+    expect(ssh.calls).toStrictEqual(["ufw status", "ufw delete 'allow' '22'", "ufw 'deny' '22'"])
+  })
+
+  it("apply returns failed when the opposite rule delete exits with non-zero code", async () => {
+    const ssh = createMockSsh({
+      "ufw delete 'allow' '22'": { code: 1, stderr: "delete failed" },
+      "ufw status": {
+        stdout: [
+          "Status: active",
+          "",
+          "To                         Action      From",
+          "--                         ------      ----",
+          "22                         ALLOW       Anywhere",
+        ].join("\n"),
+      },
+    })
+    const mod = ufw.rule("deny", 22)
+    const result = await mod.apply(ssh, emptyEnv)
+    expect(result.status).toBe("failed")
+    expect(ssh.calls).toStrictEqual(["ufw status", "ufw delete 'allow' '22'"])
   })
 })
