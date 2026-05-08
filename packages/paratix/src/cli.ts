@@ -167,6 +167,17 @@ function validateServerDefinition(value: unknown, file: string): asserts value i
 }
 
 /**
+ * Inspect-fallback limits used by {@link errorToString} when JSON.stringify
+ * throws (e.g. circular references, BigInt). The bounds keep error rendering
+ * cheap and prevent leaking sensitive Buffer contents (private keys) or huge
+ * ssh2-internal arrays into stderr; subsequent maskRegisteredSecrets passes
+ * also stay linear in the bounded output size.
+ */
+const ERROR_INSPECT_DEPTH = 2
+const ERROR_INSPECT_MAX_ARRAY_LENGTH = 32
+const ERROR_INSPECT_MAX_STRING_LENGTH = 1024
+
+/**
  * Returns a human-readable string for any caught value.
  * Uses `.message` for `Error` instances and falls back to the string
  * representation for primitives.  For plain objects that have no meaningful
@@ -181,7 +192,14 @@ function errorToString(value: unknown): string {
     try {
       return maskRegisteredSecrets(JSON.stringify(value))
     } catch {
-      return maskRegisteredSecrets(inspect(value, { breakLength: Infinity, depth: 5 }))
+      return maskRegisteredSecrets(
+        inspect(value, {
+          breakLength: Infinity,
+          depth: ERROR_INSPECT_DEPTH,
+          maxArrayLength: ERROR_INSPECT_MAX_ARRAY_LENGTH,
+          maxStringLength: ERROR_INSPECT_MAX_STRING_LENGTH,
+        })
+      )
     }
   }
   return maskRegisteredSecrets(String(value))

@@ -1251,6 +1251,35 @@ describe("printExceptionError", () => {
     expect(output).toContain("1n")
   })
 
+  it("bounds the inspect fallback so huge arrays and strings are truncated", () => {
+    const hugeArray = Array.from({ length: 5000 }, (_, index) => index)
+    const hugeString = "A".repeat(50_000)
+    // Force the JSON path to throw (BigInt) so the inspect fallback runs.
+    const huge = { array: hugeArray, marker: 1n, text: hugeString }
+
+    printExceptionError(huge, false)
+
+    const output = errorSpy.mock.calls.map((args) => String(args[0])).join("\n")
+    // Even the most permissive expansion stays well below the raw size.
+    expect(output.length).toBeLessThan(10_000)
+    // util.inspect emits "... N more items" / "... N more characters" markers
+    // when bounded by maxArrayLength / maxStringLength.
+    expect(output).toMatch(/more (?:items|characters)/v)
+  })
+
+  it("truncates Buffer payloads so private key bytes never leak into stderr", () => {
+    // Force the JSON path to throw (BigInt) so the inspect fallback runs.
+    const sensitive = {
+      key: Buffer.from("A".repeat(8192)),
+      marker: 1n,
+    }
+
+    printExceptionError(sensitive, false)
+
+    const output = errorSpy.mock.calls.map((args) => String(args[0])).join("\n")
+    expect(output).not.toContain("A".repeat(2048))
+  })
+
   it("prints a single cause when the error has one cause", () => {
     const cause = new Error("root cause")
     const error = new Error("top-level error", { cause })
