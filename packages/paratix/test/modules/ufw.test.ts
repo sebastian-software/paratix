@@ -189,6 +189,22 @@ describe("ufw.enabled", () => {
     expect(result).toBe("needs-apply")
   })
 
+  // R-0000251 regression: when `ufw status` exits non-zero (e.g. ufw not
+  // installed yet on a fresh host), the check must not throw. `readUfwStatus`
+  // returns `null`, which we treat as `needs-apply` so apply runs and
+  // installs/enables ufw.
+  it("R-0000251: check returns needs-apply when ufw status exits non-zero", async () => {
+    const ssh = createMockSshOnPort(
+      {
+        "ufw status": { code: 1, stderr: "ufw: command not found" },
+      },
+      22
+    )
+    const mod = ufw.enabled()
+    const result = await mod.check(ssh, emptyEnv)
+    expect(result).toBe("needs-apply")
+  })
+
   // R-0000064 regression: the apply must use the officially supported
   // `--force` flag rather than the legacy `echo 'y' | ufw enable` pipe so
   // the call mirrors ufw.disabled and does not rely on the wording of the
@@ -284,6 +300,20 @@ describe("ufw.disabled", () => {
     const mod = ufw.disabled()
     const result = await mod.check(ssh, emptyEnv)
     expect(result).toBe("needs-apply")
+  })
+
+  // R-0000251 regression: when `ufw status` exits non-zero (binary missing
+  // between probes, kernel modules unloaded, etc.), the check must not
+  // throw. `readUfwStatus` returns `null`, which we treat as "disabled".
+  it("R-0000251: check returns ok when ufw status exits non-zero", async () => {
+    const ssh = createMockSsh({
+      [DPKG_UFW_INSTALLED]: { code: 0 },
+      "ufw status": { code: 1, stderr: "ufw: command not found" },
+      "which apt-get": { code: 0 },
+    })
+    const mod = ufw.disabled()
+    const result = await mod.check(ssh, emptyEnv)
+    expect(result).toBe("ok")
   })
 
   it("apply returns ok when ufw is not installed", async () => {

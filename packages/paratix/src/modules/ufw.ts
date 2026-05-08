@@ -6,6 +6,7 @@ import { detectPackageManager, isPackageInstalled } from "./package.js"
 import {
   hasProtocolAgnosticIpv6Rule,
   hasProtocolAgnosticRule,
+  readUfwStatus,
   statusIncludesIpv6Rules,
 } from "./ufwStatus.js"
 
@@ -183,7 +184,13 @@ export const ufw = {
           return "ok"
         }
 
-        const status = await ssh.output(`${UFW} status`)
+        // R-0000251: tolerate hosts where `ufw status` exits non-zero or the
+        // binary disappeared between the package-installed probe and the
+        // status read. `readUfwStatus` returns `null` in that case, which we
+        // treat as "the disabled state is satisfied" so the check does not
+        // throw an unstructured SSH error.
+        const status = await readUfwStatus(ssh)
+        if (status == null) return "ok"
         return status.includes("Status: inactive") ? "ok" : NEEDS_APPLY
       },
       name: "ufw.disabled",
@@ -216,7 +223,12 @@ export const ufw = {
       },
       async check(ssh: null | SshConnection): Promise<"needs-apply" | "ok"> {
         if (!ssh) return NEEDS_APPLY
-        const status = await ssh.output(`${UFW} status`)
+        // R-0000251: when ufw is not installed or `ufw status` exits non-zero,
+        // `readUfwStatus` returns `null`. Treat that as `needs-apply` (apply
+        // installs/enables ufw) instead of throwing an unstructured SSH
+        // error from `ssh.output`.
+        const status = await readUfwStatus(ssh)
+        if (status == null) return NEEDS_APPLY
         if (!status.includes("Status: active")) return NEEDS_APPLY
 
         const { port } = ssh.getConnectionInfo()
