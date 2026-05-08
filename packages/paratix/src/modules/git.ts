@@ -48,11 +48,35 @@ type GitCloneParameters = {
 }
 
 /**
+ * Remove the destination directory before retrying a clone. Used after a
+ * failed first-pass clone leaves the destination partially populated; without
+ * this cleanup the fallback `git clone` aborts with "destination path already
+ * exists". R-0000223.
+ *
+ * @param conn - The SSH connection to the remote host.
+ * @param destination - The destination path on the remote host.
+ */
+async function cleanupFailedCloneDestination(
+  conn: SshConnection,
+  destination: string
+): Promise<void> {
+  await conn.exec(`rm -rf -- ${shellQuote(destination)}`, EXEC_OPTS)
+}
+
+/**
  * Clone a repository into a new directory, optionally at a specific ref.
+ *
+ * When `reference` is non-empty the implementation first attempts a single
+ * `git clone --branch <ref>`. If that fails (e.g. because the ref is a bare
+ * commit SHA which `--branch` cannot accept) the destination is removed before
+ * falling back to a plain `git clone` + `git checkout <ref>`. R-0000223:
+ * without the destination cleanup the fallback clone fails immediately with
+ * `destination path … already exists` because the first attempt may have left
+ * a partial worktree behind.
  *
  * @param conn - The SSH connection to the remote host.
  * @param parameters - Clone parameters including repo, destination, and optional reference.
- * @returns A promise that resolves when the clone is complete.
+ * @returns A promise that resolves to `true` when the clone is complete.
  */
 async function cloneRepo(conn: SshConnection, parameters: GitCloneParameters): Promise<boolean> {
   const { destination, reference, repo } = parameters
@@ -62,20 +86,21 @@ async function cloneRepo(conn: SshConnection, parameters: GitCloneParameters): P
       `git clone --branch ${shellQuote(reference)} -- ${shellQuote(repo)} ${shellQuote(destination)}`,
       EXEC_OPTS
     )
+    if (result.code === 0) return true
+    // R-0000223: remove any partially-populated destination before retrying;
+    // a leftover .git or refs/ would cause the fallback clone to abort.
+    await cleanupFailedCloneDestination(conn, destination)
     // Fallback: clone without --branch then checkout (handles bare commit SHAs).
-    if (result.code !== 0) {
-      const fallback = await conn.exec(
-        `git clone -- ${shellQuote(repo)} ${shellQuote(destination)}`,
-        EXEC_OPTS
-      )
-      if (fallback.code !== 0) return false
-      const checkout = await conn.exec(
-        `git -C ${shellQuote(destination)} checkout ${shellQuote(reference)}`,
-        EXEC_OPTS
-      )
-      return checkout.code === 0
-    }
-    return true
+    const fallback = await conn.exec(
+      `git clone -- ${shellQuote(repo)} ${shellQuote(destination)}`,
+      EXEC_OPTS
+    )
+    if (fallback.code !== 0) return false
+    const checkout = await conn.exec(
+      `git -C ${shellQuote(destination)} checkout ${shellQuote(reference)}`,
+      EXEC_OPTS
+    )
+    return checkout.code === 0
   }
   const cloneResult = await conn.exec(
     `git clone -- ${shellQuote(repo)} ${shellQuote(destination)}`,

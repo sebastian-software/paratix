@@ -130,6 +130,7 @@
     "unvalidated",
     "userdel",
     "userlist",
-    "usermod"
+    "usermod",
+    "worktree"
   ]
 }

@@ -478,6 +478,7 @@ describe("git.clone — apply", () => {
       [`git -C '${destination}' checkout '${sha}'`]: { code: 0 },
       [`git clone -- '${repo}' '${destination}'`]: { code: 0 },
       [`git clone --branch '${sha}' -- '${repo}' '${destination}'`]: { code: 128 },
+      [`rm -rf -- '${destination}'`]: { code: 0 },
       [`test -d '${gitDir}'`]: { code: 1 },
     })
     const mod = git.clone(repo, destination, { ref: sha })
@@ -485,6 +486,29 @@ describe("git.clone — apply", () => {
     expect(result.status).toBe("changed")
     expect(mockSsh.calls).toContain(`git clone -- '${repo}' '${destination}'`)
     expect(mockSsh.calls).toContain(`git -C '${destination}' checkout '${sha}'`)
+  })
+
+  // R-0000223: a failed first-pass `git clone --branch <ref>` can leave a
+  // partially-populated destination behind. The fallback `git clone` would
+  // then abort with "destination path … already exists". Ensure the fallback
+  // path removes the destination first and that the rm precedes the second
+  // clone in the call order.
+  it("R-0000223: removes the destination before retrying fallback clone", async () => {
+    const sha = "abc123def456"
+    const mockSsh = createGitApplyMockSsh({
+      [`git -C '${destination}' checkout '${sha}'`]: { code: 0 },
+      [`git clone -- '${repo}' '${destination}'`]: { code: 0 },
+      [`git clone --branch '${sha}' -- '${repo}' '${destination}'`]: { code: 128 },
+      [`rm -rf -- '${destination}'`]: { code: 0 },
+      [`test -d '${gitDir}'`]: { code: 1 },
+    })
+    const mod = git.clone(repo, destination, { ref: sha })
+    const result = await mod.apply(mockSsh, emptyEnv)
+    expect(result.status).toBe("changed")
+    const cleanupIndex = mockSsh.calls.indexOf(`rm -rf -- '${destination}'`)
+    const fallbackIndex = mockSsh.calls.indexOf(`git clone -- '${repo}' '${destination}'`)
+    expect(cleanupIndex).toBeGreaterThanOrEqual(0)
+    expect(fallbackIndex).toBeGreaterThan(cleanupIndex)
   })
 
   it("returns failed when clone fails", async () => {
