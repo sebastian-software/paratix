@@ -219,7 +219,24 @@ export async function mergeEnvironmentFromMeta(
         `Forbidden env meta entry name: ${JSON.stringify(entry.name)} (reserved JavaScript identifier)`
       )
     }
-    nextEnvironment[entry.name] = async () => entry.resolve()
+    // R-0000206: memoize the resolved promise per entry so security-sensitive
+    // providers (e.g. 1Password CLI) are not re-invoked for every consumer
+    // of the same env key. Multiple modules reading the same key now share
+    // a single round-trip. A rejection clears the cache so a later access
+    // can retry once the underlying issue is resolved. Callers that need
+    // fresh values on every access (one-time passwords) must register a
+    // new meta entry for each access instead of reusing one.
+    let cachedResolution: null | Promise<boolean | number | string> = null
+    const resolveOnce = async (): Promise<boolean | number | string> => {
+      if (cachedResolution != null) return cachedResolution
+      const pending = entry.resolve().catch((error: unknown) => {
+        cachedResolution = null
+        throw error
+      })
+      cachedResolution = pending
+      return pending
+    }
+    nextEnvironment[entry.name] = resolveOnce
   }
   await Promise.resolve()
   return nextEnvironment

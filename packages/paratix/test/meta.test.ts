@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest"
+import { describe, expect, it, vi } from "vitest"
 
 import { resolveEnvironment } from "../src/environment.js"
 import {
@@ -91,6 +91,63 @@ describe("mergeEnvironmentFromMeta", () => {
     // The merged environment must have a null prototype so prototype-only
     // keys (e.g. hasOwnProperty, valueOf) are not inherited as resolvers.
     expect(Object.getPrototypeOf(environment)).toBeNull()
+  })
+
+  it("memoizes lazy env entries so each entry resolves at most once across multiple accesses", async () => {
+    let resolveCalls = 0
+    const environment = await mergeEnvironmentFromMeta({}, [
+      meta.env("CACHED_TOKEN", () => {
+        resolveCalls += 1
+        return `value-${String(resolveCalls)}`
+      }),
+    ])
+
+    const first = await resolveEnvironment(environment, "CACHED_TOKEN")
+    const second = await resolveEnvironment(environment, "CACHED_TOKEN")
+    const third = await resolveEnvironment(environment, "CACHED_TOKEN")
+
+    expect(first).toBe("value-1")
+    expect(second).toBe("value-1")
+    expect(third).toBe("value-1")
+    expect(resolveCalls).toBe(1)
+  })
+
+  it("coalesces concurrent accesses to the same env entry into a single resolve invocation", async () => {
+    let resolveCalls = 0
+    const deferred: { release: (value: string) => void } = {
+      release() {
+        throw new Error("release called before initialization")
+      },
+    }
+    const pending = new Promise<string>((resolve) => {
+      deferred.release = resolve
+    })
+    const environment = await mergeEnvironmentFromMeta({}, [
+      meta.env("CONCURRENT_TOKEN", async () => {
+        resolveCalls += 1
+        return pending
+      }),
+    ])
+
+    const first = resolveEnvironment(environment, "CONCURRENT_TOKEN")
+    const second = resolveEnvironment(environment, "CONCURRENT_TOKEN")
+    deferred.release("shared-value")
+
+    await expect(first).resolves.toBe("shared-value")
+    await expect(second).resolves.toBe("shared-value")
+    expect(resolveCalls).toBe(1)
+  })
+
+  it("retries after a rejected resolve so transient failures do not poison the cache", async () => {
+    const resolver = vi
+      .fn<() => Promise<string>>()
+      .mockRejectedValueOnce(new Error("transient"))
+      .mockResolvedValueOnce("recovered")
+    const environment = await mergeEnvironmentFromMeta({}, [meta.env("RETRY_TOKEN", resolver)])
+
+    await expect(resolveEnvironment(environment, "RETRY_TOKEN")).rejects.toThrow("transient")
+    await expect(resolveEnvironment(environment, "RETRY_TOKEN")).resolves.toBe("recovered")
+    expect(resolver).toHaveBeenCalledTimes(2)
   })
 
   it("rejects meta entries whose name is a reserved JavaScript identifier", async () => {
