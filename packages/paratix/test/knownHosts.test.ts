@@ -1166,6 +1166,75 @@ describe("buildHostVerifier", () => {
 })
 
 // ---------------------------------------------------------------------------
+// R-0000210: corrupt buffers from untrusted callers must surface as
+// HostKeyVerificationError, not as a raw RangeError.
+// ---------------------------------------------------------------------------
+
+describe("buildHostVerifier handling of corrupt buffers (R-0000210)", () => {
+  let readFileSyncMock: ReturnType<typeof vi.fn>
+  let appendFileMock: ReturnType<typeof vi.fn>
+  let mkdirMock: ReturnType<typeof vi.fn>
+
+  const ed25519Key = makeKeyBuffer("ssh-ed25519", Buffer.from("legit-key-material"))
+
+  beforeEach(async () => {
+    clearHostKeyCache()
+    const fs = await import("node:fs")
+    const fsp = await import("node:fs/promises")
+    readFileSyncMock = vi.mocked(fs.readFileSync)
+    appendFileMock = vi.mocked(fsp.appendFile)
+    mkdirMock = vi.mocked(fsp.mkdir)
+    appendFileMock.mockResolvedValue(null)
+    mkdirMock.mockResolvedValue(null)
+  })
+
+  afterEach(() => {
+    vi.clearAllMocks()
+  })
+
+  it("surfaces HostKeyVerificationError instead of RangeError for a malformed presented key on mismatch", async () => {
+    // known_hosts has a normal entry; the remote presents a buffer that is
+    // shorter than the SSH wire-format minimum. The mismatch path used to
+    // call extractAlgoFromKey on the corrupt buffer and throw a RangeError.
+    readFileSyncMock.mockReturnValue(`example.com ssh-ed25519 ${ed25519Key.toString("base64")}\n`)
+
+    const { hostVerifier } = await buildHostVerifier("yes", { host: "example.com", port: 22 })
+    const corruptKey = Buffer.from([0x00, 0x00])
+
+    expect(() => hostVerifier!(corruptKey)).toThrow(/HOST KEY VERIFICATION FAILED/v)
+  })
+
+  it("surfaces HostKeyVerificationError when the @revoked entry on disk is malformed", async () => {
+    // Build a wire-format key whose advertised algoLength exceeds the
+    // buffer length, so extractAlgoFromKey would throw a RangeError if
+    // called directly.
+    const corruptWire = Buffer.alloc(8)
+    corruptWire.writeUInt32BE(0xff_ff_ff_ff, 0)
+    const base64Corrupt = corruptWire.toString("base64")
+    // The remote presents the same bytes so findRevokedEntry matches.
+    readFileSyncMock.mockReturnValue(`@revoked example.com ssh-ed25519 ${base64Corrupt}\n`)
+
+    const { hostVerifier } = await buildHostVerifier("yes", { host: "example.com", port: 22 })
+
+    expect(() => hostVerifier!(corruptWire)).toThrow(/HOST KEY VERIFICATION FAILED/v)
+    expect(() => hostVerifier!(corruptWire)).toThrow(/<unknown>/v)
+  })
+
+  it("rejects a malformed presented key under a pinned trust anchor without leaking RangeError", async () => {
+    readFileSyncMock.mockReturnValue("")
+    const corruptKey = Buffer.from([0x00, 0x00])
+
+    const { hostVerifier } = await buildHostVerifier(
+      "yes",
+      { host: "newhost.com", port: 22 },
+      { expectedHostPublicKey: `ssh-ed25519 ${ed25519Key.toString("base64")}` }
+    )
+
+    expect(() => hostVerifier!(corruptKey)).toThrow(/HOST KEY VERIFICATION FAILED/v)
+  })
+})
+
+// ---------------------------------------------------------------------------
 // R-0000205: validateExpectedHostPublicKey rejects bad algorithm/base64
 // ---------------------------------------------------------------------------
 

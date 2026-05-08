@@ -219,11 +219,15 @@ function findRevokedEntry(entries: KnownHostEntry[], key: Buffer): KnownHostEntr
 }
 
 function throwHostKeyMismatch(host: string, presentedKey: Buffer, existingKey?: Buffer): never {
-  const presentedAlgo = extractAlgoFromKey(presentedKey)
+  // R-0000210: both buffers can be untrusted (presented key from a remote
+  // peer, existing key from a possibly-tampered known_hosts entry). Use the
+  // non-throwing variant so a malformed wire format surfaces as a clean
+  // HostKeyVerificationError instead of a RangeError.
+  const presentedAlgo = describeAlgoForDiagnostics(presentedKey)
   const knownHostsDetails =
     existingKey == null
       ? "remote host key does not match the key in known_hosts. "
-      : `remote host key (${presentedAlgo}) does not match the key in known_hosts (${extractAlgoFromKey(existingKey)}). `
+      : `remote host key (${presentedAlgo}) does not match the key in known_hosts (${describeAlgoForDiagnostics(existingKey)}). `
   throw new HostKeyVerificationError(
     `HOST KEY VERIFICATION FAILED for ${host}: ${knownHostsDetails}` +
       "This could indicate a man-in-the-middle attack."
@@ -239,8 +243,11 @@ function verifyHostKeyAgainstKnownEntries(parameters: {
   const { cachedKey, fileEntries, host, key } = parameters
   const revokedKey = findRevokedEntry(fileEntries, key)
   if (revokedKey != null) {
+    // R-0000210: the matched entry came from disk and may have a malformed
+    // wire-format buffer; fall back to "<unknown>" rather than letting a
+    // RangeError escape past HostKeyVerificationError.
     throw new HostKeyVerificationError(
-      `HOST KEY VERIFICATION FAILED for ${host}: remote host key (${extractAlgoFromKey(revokedKey.key)}) is marked as revoked in known_hosts.`
+      `HOST KEY VERIFICATION FAILED for ${host}: remote host key (${describeAlgoForDiagnostics(revokedKey.key)}) is marked as revoked in known_hosts.`
     )
   }
   // R-0000204: paratix does not implement `@cert-authority` validation.
@@ -290,6 +297,24 @@ export function extractAlgoFromKey(keyBuffer: Buffer): string {
     throw new Error("Invalid SSH key buffer: algorithm length exceeds buffer size")
   }
   return keyBuffer.subarray(UINT32_SIZE, UINT32_SIZE + algoLength).toString("ascii")
+}
+
+/**
+ * R-0000210: non-throwing variant of {@link extractAlgoFromKey} for
+ * untrusted input (corrupt revoked entries, presented host keys from a
+ * malicious peer). Callers that only want the algorithm for diagnostics
+ * use this and fall back to a placeholder so a malformed buffer surfaces
+ * as a {@link HostKeyVerificationError} rather than a generic `RangeError`.
+ *
+ * @param keyBuffer - The raw public key buffer (possibly malformed).
+ * @returns The algorithm name, or `"<unknown>"` when the buffer cannot be parsed.
+ */
+function describeAlgoForDiagnostics(keyBuffer: Buffer): string {
+  try {
+    return extractAlgoFromKey(keyBuffer)
+  } catch {
+    return "<unknown>"
+  }
 }
 
 /**
@@ -456,8 +481,15 @@ export function validateExpectedHostPublicKey(publicKey: string): null | string 
   }
 }
 
-function formatPresentedPublicKey(key: Buffer): string {
-  return `${extractAlgoFromKey(key)} ${key.toString("base64")}`
+function formatPresentedPublicKey(key: Buffer): null | string {
+  // R-0000210: the presented key comes from the remote peer (untrusted).
+  // Return null on a malformed wire format so verifyPinnedHostKey can fail
+  // closed with a HostKeyVerificationError instead of a RangeError.
+  try {
+    return `${extractAlgoFromKey(key)} ${key.toString("base64")}`
+  } catch {
+    return null
+  }
 }
 
 function hasPinnedHostTrustAnchor(options?: HostVerifierOptions): boolean {
@@ -473,8 +505,9 @@ function verifyPinnedHostKey(host: string, key: Buffer, options: HostVerifierOpt
   const presentedPublicKey = formatPresentedPublicKey(key)
   const presentedFingerprint = computeFingerprint(key)
 
+  // R-0000210: treat null (malformed wire format) as "does not match".
   if (
-    normalizedExpectedPublicKey === presentedPublicKey ||
+    (presentedPublicKey != null && normalizedExpectedPublicKey === presentedPublicKey) ||
     expectedFingerprint === presentedFingerprint
   ) {
     return
