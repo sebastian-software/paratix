@@ -685,7 +685,7 @@ describe("apt.repository (standard form)", () => {
 
   it("check returns ok when file exists with correct content (auto signed-by)", async () => {
     const ssh = createMockSsh({
-      [`[ -f '${filePath}' ]`]: { code: 0 },
+      [`[ -f '${filePath}' ] && [ ! -L '${filePath}' ]`]: { code: 0 },
       [`cat '${filePath}'`]: { stdout: expectedContentWithSignedBy },
       [`stat -c '%a' '${filePath}'`]: { stdout: "644" },
       [updateFlagCheck]: { code: 0 },
@@ -697,7 +697,7 @@ describe("apt.repository (standard form)", () => {
 
   it("check returns needs-apply when file does not exist", async () => {
     const ssh = createMockSsh({
-      [`[ -f '${filePath}' ]`]: { code: 1 },
+      [`[ -f '${filePath}' ] && [ ! -L '${filePath}' ]`]: { code: 1 },
     })
     const mod = apt.repository("docker", source)
     const result = await mod.check(ssh, emptyEnv)
@@ -712,7 +712,7 @@ describe("apt.repository (standard form)", () => {
 
   it("auto-derives signed-by from the repository name", async () => {
     const ssh = createMockSsh({
-      [`[ -f '${filePath}' ]`]: { code: 0 },
+      [`[ -f '${filePath}' ] && [ ! -L '${filePath}' ]`]: { code: 0 },
       [`cat '${filePath}'`]: { stdout: expectedContentWithSignedBy },
       [`stat -c '%a' '${filePath}'`]: { stdout: "644" },
       [updateFlagCheck]: { code: 0 },
@@ -724,7 +724,7 @@ describe("apt.repository (standard form)", () => {
 
   it("check returns needs-apply when content has no signed-by but auto-derivation is active", async () => {
     const ssh = createMockSsh({
-      [`[ -f '${filePath}' ]`]: { code: 0 },
+      [`[ -f '${filePath}' ] && [ ! -L '${filePath}' ]`]: { code: 0 },
       [`cat '${filePath}'`]: { stdout: source },
       [`stat -c '%a' '${filePath}'`]: { stdout: "644" },
     })
@@ -736,7 +736,7 @@ describe("apt.repository (standard form)", () => {
   it("check returns ok when signedBy is false and file matches source without signed-by", async () => {
     const signedByFalseFlag = `apt-repository-${sha256String("docker").slice(0, 16)}-${sha256String(source).slice(0, 16)}`
     const ssh = createMockSsh({
-      [`[ -f '${filePath}' ]`]: { code: 0 },
+      [`[ -f '${filePath}' ] && [ ! -L '${filePath}' ]`]: { code: 0 },
       [`[ -f /var/lib/paratix/flags/'${signedByFalseFlag}' ]`]: { code: 0 },
       [`cat '${filePath}'`]: { stdout: source },
       [`stat -c '%a' '${filePath}'`]: { stdout: "644" },
@@ -769,7 +769,7 @@ describe("apt.repository (standard form)", () => {
       "deb [signed-by=/etc/apt/keyrings/custom.gpg] https://download.docker.com/linux/ubuntu noble stable"
     const customFlag = `apt-repository-${sha256String("docker").slice(0, 16)}-${sha256String(customContent).slice(0, 16)}`
     const ssh = createMockSsh({
-      [`[ -f '${filePath}' ]`]: { code: 0 },
+      [`[ -f '${filePath}' ] && [ ! -L '${filePath}' ]`]: { code: 0 },
       [`[ -f /var/lib/paratix/flags/'${customFlag}' ]`]: { code: 0 },
       [`cat '${filePath}'`]: { stdout: customContent },
       [`stat -c '%a' '${filePath}'`]: { stdout: "644" },
@@ -786,7 +786,7 @@ describe("apt.repository (standard form)", () => {
     const tabbed =
       "deb\t[signed-by=/etc/apt/keyrings/docker.gpg]\thttps://download.docker.com/linux/ubuntu\tnoble\tstable"
     const ssh = createMockSsh({
-      [`[ -f '${filePath}' ]`]: { code: 0 },
+      [`[ -f '${filePath}' ] && [ ! -L '${filePath}' ]`]: { code: 0 },
       [`cat '${filePath}'`]: { stdout: tabbed },
       [`stat -c '%a' '${filePath}'`]: { stdout: "644" },
       [updateFlagCheck]: { code: 0 },
@@ -800,7 +800,7 @@ describe("apt.repository (standard form)", () => {
     const spaced =
       "deb   [signed-by=/etc/apt/keyrings/docker.gpg]   https://download.docker.com/linux/ubuntu   noble   stable"
     const ssh = createMockSsh({
-      [`[ -f '${filePath}' ]`]: { code: 0 },
+      [`[ -f '${filePath}' ] && [ ! -L '${filePath}' ]`]: { code: 0 },
       [`cat '${filePath}'`]: { stdout: spaced },
       [`stat -c '%a' '${filePath}'`]: { stdout: "644" },
       [updateFlagCheck]: { code: 0 },
@@ -813,7 +813,7 @@ describe("apt.repository (standard form)", () => {
   it("check returns ok when on-disk content has trailing whitespace", async () => {
     const trailing = `${expectedContentWithSignedBy}   \t  `
     const ssh = createMockSsh({
-      [`[ -f '${filePath}' ]`]: { code: 0 },
+      [`[ -f '${filePath}' ] && [ ! -L '${filePath}' ]`]: { code: 0 },
       [`cat '${filePath}'`]: { stdout: trailing },
       [`stat -c '%a' '${filePath}'`]: { stdout: "644" },
       [updateFlagCheck]: { code: 0 },
@@ -827,7 +827,7 @@ describe("apt.repository (standard form)", () => {
     const driftedContent =
       "deb [signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu jammy stable"
     const ssh = createMockSsh({
-      [`[ -f '${filePath}' ]`]: { code: 0 },
+      [`[ -f '${filePath}' ] && [ ! -L '${filePath}' ]`]: { code: 0 },
       [`cat '${filePath}'`]: { stdout: driftedContent },
     })
     const mod = apt.repository("docker", source)
@@ -837,7 +837,7 @@ describe("apt.repository (standard form)", () => {
 
   it("check returns needs-apply when repository file mode drifted", async () => {
     const ssh = createMockSsh({
-      [`[ -f '${filePath}' ]`]: { code: 0 },
+      [`[ -f '${filePath}' ] && [ ! -L '${filePath}' ]`]: { code: 0 },
       [`cat '${filePath}'`]: { stdout: expectedContentWithSignedBy },
       [`stat -c '%a' '${filePath}'`]: { stdout: "600" },
     })
@@ -848,7 +848,7 @@ describe("apt.repository (standard form)", () => {
 
   it("check returns needs-apply when update marker is missing", async () => {
     const ssh = createMockSsh({
-      [`[ -f '${filePath}' ]`]: { code: 0 },
+      [`[ -f '${filePath}' ] && [ ! -L '${filePath}' ]`]: { code: 0 },
       [`cat '${filePath}'`]: { stdout: expectedContentWithSignedBy },
       [`stat -c '%a' '${filePath}'`]: { stdout: "644" },
       [updateFlagCheck]: { code: 1 },
@@ -861,7 +861,8 @@ describe("apt.repository (standard form)", () => {
   it("apply sets update marker only after apt-get update succeeds", async () => {
     const ssh = createMockSsh(
       {
-        [`[ -f '${filePath}' ]`]: { code: 1 },
+        [`[ -f '${filePath}' ] && [ ! -L '${filePath}' ]`]: { code: 1 },
+        [`[ -L '${filePath}' ]`]: { code: 1 },
         "DEBIAN_FRONTEND=noninteractive apt-get update": { code: 0 },
       },
       { defaultExecResult: SUCCESSFUL_EXEC_DEFAULT }
@@ -877,7 +878,8 @@ describe("apt.repository (standard form)", () => {
 
   it("apply does not set update marker when apt-get update fails", async () => {
     const ssh = createMockSsh({
-      [`[ -f '${filePath}' ]`]: { code: 1 },
+      [`[ -f '${filePath}' ] && [ ! -L '${filePath}' ]`]: { code: 1 },
+      [`[ -L '${filePath}' ]`]: { code: 1 },
       [`rm -f '${filePath}'`]: { code: 0 },
       "DEBIAN_FRONTEND=noninteractive apt-get update": { code: 1 },
     })
@@ -893,7 +895,8 @@ describe("apt.repository (standard form)", () => {
   it("apply rolls back the repository file when apt-get update fails", async () => {
     const previousContent = "deb https://download.docker.com/linux/ubuntu jammy stable\n"
     const ssh = createMockSsh({
-      [`[ -f '${filePath}' ]`]: { code: 0 },
+      [`[ -f '${filePath}' ] && [ ! -L '${filePath}' ]`]: { code: 0 },
+      [`[ -L '${filePath}' ]`]: { code: 1 },
       [`cat '${filePath}'`]: { stdout: previousContent },
       "DEBIAN_FRONTEND=noninteractive apt-get update": { code: 1 },
     })
@@ -922,7 +925,8 @@ describe("apt.repository (standard form)", () => {
   it("R-0000163: re-runs apt-get update after a successful rollback to refresh the cache", async () => {
     const previousContent = "deb https://download.docker.com/linux/ubuntu jammy stable\n"
     const ssh = createMockSsh({
-      [`[ -f '${filePath}' ]`]: { code: 0 },
+      [`[ -f '${filePath}' ] && [ ! -L '${filePath}' ]`]: { code: 0 },
+      [`[ -L '${filePath}' ]`]: { code: 1 },
       [`cat '${filePath}'`]: { stdout: previousContent },
     })
     // Override apt-get update so the first invocation (with the new repo)
@@ -944,7 +948,8 @@ describe("apt.repository (standard form)", () => {
   it("R-0000163: surfaces both errors when the post-rollback apt-get update also fails", async () => {
     const previousContent = "deb https://download.docker.com/linux/ubuntu jammy stable\n"
     const ssh = createMockSsh({
-      [`[ -f '${filePath}' ]`]: { code: 0 },
+      [`[ -f '${filePath}' ] && [ ! -L '${filePath}' ]`]: { code: 0 },
+      [`[ -L '${filePath}' ]`]: { code: 1 },
       [`cat '${filePath}'`]: { stdout: previousContent },
       "DEBIAN_FRONTEND=noninteractive apt-get update": {
         code: 100,
@@ -975,6 +980,34 @@ describe("apt.repository (standard form)", () => {
 
   it("throws when name is empty", () => {
     expect(() => apt.repository("", source)).toThrow(/must match/v)
+  })
+
+  // R-0000235 regression: a symlink at the sources.list path must be treated
+  // as "not present" by check (so apply runs) and rejected by apply before
+  // any writeFile call follows the link to an attacker-controlled target.
+  // Mirrors the apt.key (R-0000134) hardening.
+  it("check returns needs-apply when the sources.list path is a symlink", async () => {
+    const ssh = createMockSsh({
+      [`[ -f '${filePath}' ] && [ ! -L '${filePath}' ]`]: { code: 1 },
+    })
+    const mod = apt.repository("docker", source)
+    const result = await mod.check(ssh, emptyEnv)
+    expect(result).toBe("needs-apply")
+    expect(ssh.calls).not.toContain(`cat '${filePath}'`)
+  })
+
+  it("apply refuses to write through a symlinked sources.list path", async () => {
+    const ssh = createMockSsh({
+      [`[ -L '${filePath}' ]`]: { code: 0 },
+    })
+    const mod = apt.repository("docker", source)
+    const result = await mod.apply(ssh, emptyEnv)
+    expect(result.status).toBe("failed")
+    expect(String(result.error)).toContain(
+      `[apt.repository] refuses to write through symlink at ${filePath}`
+    )
+    expect(ssh.writeFileCalls).toStrictEqual([])
+    expect(ssh.calls).not.toContain("DEBIAN_FRONTEND=noninteractive apt-get update")
   })
 })
 

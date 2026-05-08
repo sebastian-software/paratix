@@ -18,6 +18,7 @@ import {
 } from "./aptKeyHelpers.js"
 import { sha256String } from "./fileHelpers.js"
 import { applyWithFlagLock, hasFlag, setVersionedFlag } from "./moduleHelpers.js"
+import { isSymlink } from "./remoteFileChecks.js"
 
 const NONINTERACTIVE = "DEBIAN_FRONTEND=noninteractive"
 const APT_REPOSITORY_MODE = "0644"
@@ -73,9 +74,55 @@ async function snapshotAptRepository(
   ssh: SshConnection,
   filePath: string
 ): Promise<AptRepositorySnapshot> {
-  const exists = await ssh.test(`[ -f ${shellQuote(filePath)} ]`)
+  // R-0000235: only treat regular files (not symlinks) as existing snapshots.
+  // `[ -f path ]` follows symlinks, so without the explicit `-L` rejection a
+  // symlinked sources.list would be read through to an attacker-controlled
+  // target. Callers must also guard against writing through symlinks before
+  // invoking this helper.
+  const exists = await ssh.test(
+    `[ -f ${shellQuote(filePath)} ] && [ ! -L ${shellQuote(filePath)} ]`
+  )
   if (!exists) return { exists: false }
   return { content: await ssh.readFile(filePath), exists: true }
+}
+
+type RepositoryRollbackParameters = {
+  filePath: string
+  name: string
+  previousRepository: AptRepositorySnapshot
+  ssh: SshConnection
+  updateResult: { code: number; stderr: string; stdout: string }
+}
+
+/**
+ * Run the rollback path after `apt-get update` rejects a freshly written
+ * repository file. Restores the previous on-disk state and re-runs
+ * `apt-get update` so apt's in-memory cache matches the restored .list
+ * (R-0000163). The original update failure is preserved as the primary
+ * error; a follow-up failure is appended as context.
+ *
+ * @param parameters - Rollback context.
+ * @returns A `failed` ModuleResult describing the original update failure
+ *   plus, when applicable, the rollback-update failure context.
+ */
+async function rollbackRepositoryAfterUpdateFailure(
+  parameters: RepositoryRollbackParameters
+): Promise<ModuleResult> {
+  const { filePath, name, previousRepository, ssh, updateResult } = parameters
+  const rollback = await restoreAptRepository(ssh, filePath, previousRepository)
+  if (rollback !== "ok") return rollback
+  const rollbackUpdate = await ssh.exec(`${NONINTERACTIVE} apt-get update`, {
+    ignoreExitCode: true,
+    silent: true,
+  })
+  const failureMessage = `[apt.repository] apt-get update failed for ${name}`
+  if (rollbackUpdate.code !== 0) {
+    return failedCommand(
+      `${failureMessage}; rollback succeeded but apt-get update on the restored sources also failed (exit code ${String(rollbackUpdate.code)}): ${firstNonEmptyApt(rollbackUpdate.stderr) ?? firstNonEmptyApt(rollbackUpdate.stdout) ?? "no output"}`,
+      updateResult
+    )
+  }
+  return failedCommand(failureMessage, updateResult)
 }
 
 async function restoreAptRepository(
@@ -84,6 +131,13 @@ async function restoreAptRepository(
   snapshot: AptRepositorySnapshot
 ): Promise<"ok" | ModuleResult> {
   if (snapshot.exists) {
+    // R-0000235: defense in depth — refuse to restore through a symlink that
+    // may have appeared between the snapshot and the rollback. The apply
+    // guard runs once at the start of apply; a symlink that materializes
+    // afterwards must not let writeFile follow it to an arbitrary target.
+    if (await isSymlink(ssh, filePath)) {
+      return failed(`[apt.repository] refuses to restore through symlink at ${filePath}`)
+    }
     await ssh.writeFile(filePath, snapshot.content, { mode: APT_REPOSITORY_MODE })
     return "ok"
   }
@@ -674,6 +728,13 @@ export const apt = {
     return {
       async apply(ssh: null | SshConnection): Promise<ModuleResult> {
         if (!ssh) return failed(`[apt.repository] SSH connection is required for ${name}`)
+        // R-0000235: refuse to write through a symlinked sources.list file.
+        // `writeFile` follows symlinks and would mutate whatever the link
+        // target points at. Mirrors the apt.key (R-0000134) and
+        // compose.systemd (R-0000192) hardening.
+        if (await isSymlink(ssh, filePath)) {
+          return failed(`[apt.repository] refuses to write through symlink at ${filePath}`)
+        }
         const previousRepository = await snapshotAptRepository(ssh, filePath)
         await ssh.writeFile(filePath, `${expectedContent}\n`, { mode: APT_REPOSITORY_MODE })
         const result = await ssh.exec(`${NONINTERACTIVE} apt-get update`, {
@@ -681,33 +742,27 @@ export const apt = {
           silent: true,
         })
         if (result.code !== 0) {
-          const rollback = await restoreAptRepository(ssh, filePath, previousRepository)
-          if (rollback !== "ok") return rollback
-          // R-0000163: the on-disk repository file is now back to its
-          // pre-apply state, but apt's in-memory cache still reflects the
-          // failed `apt-get update` from the new repository. Without a second
-          // `apt-get update`, subsequent `pkg.installed` invocations would
-          // operate on a cache that no longer matches the .list file on
-          // disk. Re-run the update; if it also fails, surface both errors.
-          const rollbackUpdate = await ssh.exec(`${NONINTERACTIVE} apt-get update`, {
-            ignoreExitCode: true,
-            silent: true,
+          return rollbackRepositoryAfterUpdateFailure({
+            filePath,
+            name,
+            previousRepository,
+            ssh,
+            updateResult: result,
           })
-          const failureMessage = `[apt.repository] apt-get update failed for ${name}`
-          if (rollbackUpdate.code !== 0) {
-            return failedCommand(
-              `${failureMessage}; rollback succeeded but apt-get update on the restored sources also failed (exit code ${String(rollbackUpdate.code)}): ${firstNonEmptyApt(rollbackUpdate.stderr) ?? firstNonEmptyApt(rollbackUpdate.stdout) ?? "no output"}`,
-              result
-            )
-          }
-          return failedCommand(failureMessage, result)
         }
         await setVersionedFlag(ssh, updateFlag.flagName, updateFlag.flagPrefix)
         return { status: "changed" }
       },
       async check(ssh: null | SshConnection): Promise<"needs-apply" | "ok"> {
         if (!ssh) return NEEDS_APPLY
-        const exists = await ssh.test(`[ -f ${shellQuote(filePath)} ]`)
+        // R-0000235: a symlink at the sources.list path is treated as "not
+        // present" so apply runs, where it will refuse the write with a clear
+        // error. The combined test prevents `[ -f path ]` from following a
+        // symlink and reporting a stale or attacker-controlled target as
+        // up-to-date. Mirrors the apt.key (R-0000134) hardening.
+        const exists = await ssh.test(
+          `[ -f ${shellQuote(filePath)} ] && [ ! -L ${shellQuote(filePath)} ]`
+        )
         if (!exists) return NEEDS_APPLY
         const content = await ssh.readFile(filePath)
         // R-0000051: tolerate whitespace-only drift (tabs vs. spaces,
