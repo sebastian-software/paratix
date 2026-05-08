@@ -136,6 +136,11 @@ describe("runPlaybook reconnect failure propagation", () => {
       shellQuote: (s: string) => `'${s}'`,
       SshConnectionImpl: makeMockSshClass(capturedConfigs, {
         addPort,
+        // R-0000207: simulate a true reconnect failure — no port held a
+        // connection after the throw, so handlePortChange must roll back.
+        getConnectionInfo: vi
+          .fn()
+          .mockReturnValue({ host: "1.2.3.4", port: 0, privateKeyPath: "~/.ssh/id", user: "root" }),
         reconnect: vi.fn().mockRejectedValue(reconnectError),
         removePort,
       }),
@@ -172,6 +177,9 @@ describe("runPlaybook reconnect failure propagation", () => {
       shellQuote: (s: string) => `'${s}'`,
       SshConnectionImpl: makeMockSshClass(capturedConfigs, {
         addPort,
+        getConnectionInfo: vi
+          .fn()
+          .mockReturnValue({ host: "1.2.3.4", port: 0, privateKeyPath: "~/.ssh/id", user: "root" }),
         reconnect: vi.fn().mockRejectedValue(reconnectError),
         removePort,
       }),
@@ -195,6 +203,50 @@ describe("runPlaybook reconnect failure propagation", () => {
     await runPlaybook(definition)
 
     expect(addPort).toHaveBeenCalledWith(22)
+    expect(removePort).not.toHaveBeenCalled()
+  })
+
+  // R-0000207: when the reconnect itself succeeded but a follow-up step
+  // (e.g. commitAcceptedHostKey) threw, the runner must NOT remove the
+  // newly added ports — the connection is alive on those ports.
+  it("keeps added ports registered when reconnect succeeded but a follow-up step failed", async () => {
+    const capturedConfigs: unknown[] = []
+    const commitError = new Error("Disk full while persisting host key")
+    const addPort = vi.fn().mockReturnValue(true)
+    const removePort = vi.fn()
+
+    vi.doMock("../src/ssh.js", () => ({
+      shellQuote: (s: string) => `'${s}'`,
+      SshConnectionImpl: makeMockSshClass(capturedConfigs, {
+        addPort,
+        // The connection is still attached to a port — reconnect itself
+        // succeeded, only the post-connect work failed.
+        getConnectionInfo: vi.fn().mockReturnValue({
+          host: "1.2.3.4",
+          port: 2222,
+          privateKeyPath: "~/.ssh/id",
+          user: "root",
+        }),
+        reconnect: vi.fn().mockRejectedValue(commitError),
+        removePort,
+      }),
+    }))
+
+    const { runPlaybook } = await import("../src/runner.js")
+
+    const moduleWithPortChange = makeModuleWithMeta([meta.sshdPort(2222)])
+
+    const definition: ServerDefinition = {
+      host: "1.2.3.4",
+      name: "test-server",
+      run: [moduleWithPortChange],
+      ssh: { ports: [22], privateKey: "~/.ssh/id", user: "root" },
+    }
+
+    await runPlaybook(definition)
+
+    expect(addPort).toHaveBeenCalledWith(2222)
+    // The port is still reachable — keep it registered.
     expect(removePort).not.toHaveBeenCalled()
   })
 

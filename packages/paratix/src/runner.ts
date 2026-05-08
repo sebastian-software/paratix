@@ -387,15 +387,23 @@ async function handlePortChange(
   try {
     await ssh.reconnect()
   } catch (error) {
-    // Roll back the optimistic addPort calls so the failed ports do not stick
-    // in runtime.ports for any subsequent reuse of the connection. Mirrors
-    // the rollback behavior in modules/sshd.ts:applySshdPort.
-    for (const port of addedPorts) ssh.removePort(port)
+    // R-0000207: distinguish reconnect-failure from a post-connect failure
+    // (e.g. host-key persist, sudo probe). If the SSH client is still
+    // attached to a port, the reconnect itself succeeded and the new ports
+    // are reachable — keep them registered so subsequent reuse works. Only
+    // roll back when no port actually held a connection. Mirrors the
+    // rollback behavior in modules/sshd.ts:applySshdPort.
+    const connectedPort = ssh.getConnectionInfo().port
+    const reconnectSucceeded = connectedPort > 0
+    if (!reconnectSucceeded) {
+      for (const port of addedPorts) ssh.removePort(port)
+    }
     const portList = addedPorts.join(", ")
-    console.error(
-      `Failed to reconnect on port(s) ${portList} after port change: ${String(error)}. ` +
+    const diagnostic = reconnectSucceeded
+      ? `Reconnect on port(s) ${portList} succeeded but a follow-up step failed: ${String(error)}.`
+      : `Failed to reconnect on port(s) ${portList} after port change: ${String(error)}. ` +
         `Verify that port(s) ${portList} are allowed by the server's firewall rules.`
-    )
+    console.error(diagnostic)
     throw error
   }
 }
