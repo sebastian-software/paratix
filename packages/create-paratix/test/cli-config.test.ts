@@ -486,6 +486,22 @@ describe("admin public key validation", () => {
     expect(isValidAdminPublicKey("ssh-ed25519 ")).toBe(false)
   })
 
+  // R-0000233: bidi formatting codepoints in the comment portion of a public
+  // key would otherwise be embedded verbatim into server.ts, allowing an
+  // attacker-supplied .pub file to visually rewrite the surrounding source.
+  // Reject the entire key value when any unsafe codepoint appears anywhere.
+  it("rejects public keys whose comment contains bidi formatting codepoints", () => {
+    const bidiOverride = String.fromCodePoint(0x20_2e)
+    const key = createEd25519PublicKey(`user${bidiOverride}@example`)
+    expect(isValidAdminPublicKey(key)).toBe(false)
+  })
+
+  it("rejects public keys whose comment contains C0 control characters", () => {
+    const controlByte = String.fromCharCode(0x07)
+    const key = createEd25519PublicKey(`user${controlByte}example`)
+    expect(isValidAdminPublicKey(key)).toBe(false)
+  })
+
   it("fails closed for invalid direct admin public keys", () => {
     expect(() => {
       validateAdminPublicKey(throwExitError, "invalid-key")

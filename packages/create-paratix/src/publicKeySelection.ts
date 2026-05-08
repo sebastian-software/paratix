@@ -5,6 +5,7 @@ import { basename, join, resolve } from "node:path"
 import type { SelectFunction, SelectOption } from "./promptUi.js"
 
 import { hasValidOpenSshPublicKeyWireBlob } from "./openSshPublicKeyWire.js"
+import { containsUnsafeCodepoint } from "./unsafeCodepoints.js"
 
 export type LocalPublicKey = {
   key: string
@@ -69,6 +70,15 @@ function containsPrivateKeyMarker(value: string): boolean {
 
 function parseOpenSshPublicKey(value: string): null | ParsedPublicKey {
   if (value.length === 0 || /[\r\n]/v.test(value)) {
+    return null
+  }
+
+  // R-0000233: the third "comment" field (and any surrounding whitespace)
+  // would otherwise be embedded into server.ts as-is. Reject control
+  // characters and Unicode bidi formatting codepoints anywhere in the key
+  // string so an attacker-supplied .pub file cannot smuggle a comment that
+  // visually rewrites the surrounding server.ts source.
+  if (containsUnsafeCodepoint(value)) {
     return null
   }
 
