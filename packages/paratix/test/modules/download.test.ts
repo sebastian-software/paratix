@@ -750,6 +750,30 @@ describe("download.url", () => {
         expect(mockSsh.calls.every((c) => !c.startsWith("curl"))).toBe(true)
       })
 
+      // R-0000253 regression: BusyBox/POSIX `stat` may emit tabs or multiple
+      // spaces between the columns. The parser must split on any whitespace
+      // run (mirroring mount.ts/archive.ts) instead of a single space, or
+      // else the owner/group fields end up empty and the metadata-only fast
+      // path falsely reports drift.
+      it("R-0000253: tolerates tabs and multiple spaces in stat output", async () => {
+        const mockSsh = createMockSsh({
+          [`[ -e '${destination}' ]`]: { code: 0 },
+          [`[ -f '${destination}' ]`]: { code: 0 },
+          [`sha256sum '${destination}'`]: { stdout: `${sha256}  ${destination}` },
+          [`stat -c '%a %U %G' '${destination}'`]: { stdout: "755\tdeploy   staff" },
+        })
+        const mod = download.url(destination, url, {
+          group: "staff",
+          mode: "0755",
+          owner: "deploy",
+          sha256,
+        })
+        const result = await mod.apply(mockSsh, emptyEnv)
+        expect(result.status).toBe("ok")
+        expect(mockSsh.calls.every((c) => !c.startsWith("chmod"))).toBe(true)
+        expect(mockSsh.calls.every((c) => !c.startsWith("chown"))).toBe(true)
+      })
+
       it("returns changed and applies only drifted metadata when sha256 matches", async () => {
         const mockSsh = createMockSsh({
           [`[ -e '${destination}' ]`]: { code: 0 },

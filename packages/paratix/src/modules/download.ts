@@ -120,7 +120,11 @@ async function readDownloadOwnership(
   destination: string
 ): Promise<DownloadOwnership> {
   const raw = await conn.output(`stat -c '%a %U %G' ${shellQuote(destination)}`)
-  const [mode = "", owner = "", group = ""] = raw.trim().split(" ")
+  // R-0000253: split on any whitespace run (mirrors mount.ts/archive.ts)
+  // because BusyBox/POSIX `stat` implementations may emit tabs or multiple
+  // spaces between the columns, which broke the previous single-space
+  // split and produced empty owner/group fields.
+  const [mode = "", owner = "", group = ""] = raw.trim().split(/\s+/v)
   return { group, mode, owner }
 }
 
