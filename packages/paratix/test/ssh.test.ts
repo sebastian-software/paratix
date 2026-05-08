@@ -4294,4 +4294,44 @@ describe("validateMktempPath", () => {
       /Unexpected mktemp output/v
     )
   })
+
+  it("rejects a directory with a trailing slash (R-0000202)", () => {
+    expect(() => validateMktempPath("/tmp/", "/tmp/paratix-write.ABCDEF", "paratix-write")).toThrow(
+      /Unexpected mktemp directory/v
+    )
+  })
+
+  it("rejects a directory containing a newline (R-0000202)", () => {
+    expect(() =>
+      validateMktempPath("/tmp\nfoo", "/tmp\nfoo/paratix-write.ABCDEF", "paratix-write")
+    ).toThrow(/Unexpected mktemp directory/v)
+  })
+
+  it("rejects a directory containing a carriage return (R-0000202)", () => {
+    expect(() =>
+      validateMktempPath("/tmp\rfoo", "/tmp\rfoo/paratix-write.ABCDEF", "paratix-write")
+    ).toThrow(/Unexpected mktemp directory/v)
+  })
+
+  it("rejects a directory containing a backslash (R-0000202)", () => {
+    expect(() =>
+      validateMktempPath("/tmp\\foo", "/tmp\\foo/paratix-write.ABCDEF", "paratix-write")
+    ).toThrow(/Unexpected mktemp directory/v)
+  })
+
+  it("rejects a directory containing double slashes (R-0000202)", () => {
+    expect(() =>
+      validateMktempPath("/tmp//foo", "/tmp//foo/paratix-write.ABCDEF", "paratix-write")
+    ).toThrow(/Unexpected mktemp directory/v)
+  })
+
+  it("rejects an empty directory (R-0000202)", () => {
+    expect(() => validateMktempPath("", "/paratix-write.ABCDEF", "paratix-write")).toThrow(
+      /Unexpected mktemp directory/v
+    )
+  })
+
+  it("accepts the root directory as a special case", () => {
+    expect(() => validateMktempPath("/", "/paratix-write.ABCDEF", "paratix-write")).not.toThrow()
+  })
 })

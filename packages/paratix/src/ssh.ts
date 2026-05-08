@@ -39,15 +39,39 @@ async function statLocalFile(path: string): Promise<Stats> {
 }
 
 /**
+ * Reject any `directory` argument that contains characters mktemp output
+ * validation cannot reason about safely. R-0000202: an unchecked directory
+ * with embedded newlines, backslashes, double slashes, or a trailing slash
+ * either smuggles control characters into the matched path or builds an
+ * invalid expectedPrefix that defeats the startsWith check downstream.
+ *
+ * @param directory - The candidate target directory for `mktemp`.
+ * @throws {Error} When the directory contains forbidden characters.
+ */
+function assertValidMktempDirectory(directory: string): void {
+  const hasInvalidCharacter =
+    directory.length === 0 ||
+    directory.includes("\n") ||
+    directory.includes("\r") ||
+    directory.includes("\\") ||
+    directory.includes("//") ||
+    (directory !== "/" && directory.endsWith("/"))
+  if (hasInvalidCharacter) {
+    throw new Error(`Unexpected mktemp directory: ${directory}`)
+  }
+}
+
+/**
  * Validate that a path returned by `mktemp` matches the expected paratix pattern.
  *
  * @param directory - The target directory in which the temp file must be created.
  * @param path - The raw `mktemp` output to validate.
  * @param prefix - The expected Paratix temp-file prefix.
  * @returns The validated path.
- * @throws {Error} When the path does not match the expected pattern.
+ * @throws {Error} When the path or directory does not match the expected pattern.
  */
 function validateMktempPath(directory: string, path: string, prefix: string): string {
+  assertValidMktempDirectory(directory)
   const normalizedDirectory = directory === "/" ? "" : directory
   const expectedPrefix = `${normalizedDirectory}/${prefix}.`
   // R-0000155: reject CR explicitly alongside LF. A remote host that emits
