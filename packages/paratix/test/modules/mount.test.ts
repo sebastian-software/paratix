@@ -932,9 +932,36 @@ describe("mount.present — apply", () => {
     expect(result.error?.message).toContain(
       "[mount.present: /mnt/data] mount after umount failed and restoring previous mount failed"
     )
-    expect(result.error?.message).toContain("replacement failed")
-    expect(result.error?.message).toContain("restore failed")
+    expect(result.error?.message).toContain("restore failure: restore failed")
+    expect(result.error?.message).toContain("original mount failure: replacement failed")
     expect(mockSsh.calls).toContain(restoreMountCmd)
+  })
+
+  it("renders the restore stderr (not the original mount stderr) as the restore failure", async () => {
+    const liveSource = "/dev/sdb1"
+    const liveFstype = "ext4"
+    const liveOptions = "rw,noexec"
+    const restoreMountCmd = `mount -t '${liveFstype}' -o '${liveOptions}' -- '${liveSource}' '${mountPath}'`
+    const mockSsh = createMountApplyMockSsh({
+      [findmntCheckCmd]: { code: 0, stdout: `${liveSource} ${liveFstype} ${liveOptions}` },
+      [mountCmd]: { code: 1, stderr: "ORIGINAL_MOUNT_STDERR" },
+      [restoreMountCmd]: { code: 32, stderr: "RESTORE_STDERR" },
+      [umountCmd]: { code: 0 },
+    })
+    const mod = mount.present({
+      fstype: mountFstype,
+      opts: mountOpts,
+      path: mountPath,
+      persist: false,
+      src: mountSrc,
+    })
+    const result = await mod.apply(mockSsh, emptyEnv)
+    expect(result.status).toBe("failed")
+    // Restore failure label MUST come from restoreResult.stderr — not mountFailure.stderr.
+    expect(result.error?.message).toContain("restore failure: RESTORE_STDERR")
+    expect(result.error?.message).not.toContain("restore failure: ORIGINAL_MOUNT_STDERR")
+    // Original mount stderr is still rendered for completeness, just under a separate label.
+    expect(result.error?.message).toContain("original mount failure: ORIGINAL_MOUNT_STDERR")
   })
 })
 

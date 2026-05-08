@@ -20,13 +20,15 @@ export async function restorePreviousMountAfterFailure(parameters: {
     )
   }
 
-  const replacementDetail =
+  const restoreDetail = restoreResult.stderr.trim() || restoreResult.stdout.trim()
+  const restoreSummary = restoreDetail.length > 0 ? `; restore failure: ${restoreDetail}` : ""
+  const originalDetail =
     parameters.mountFailure.stderr.trim() || parameters.mountFailure.stdout.trim()
-  const replacementSummary =
-    replacementDetail.length > 0 ? `; replacement failure: ${replacementDetail}` : ""
+  const originalSummary =
+    originalDetail.length > 0 ? `; original mount failure: ${originalDetail}` : ""
   return failedCommand(
     `[mount.present: ${parameters.path}] mount after umount failed and ` +
-      `restoring previous mount failed${replacementSummary}`,
+      `restoring previous mount failed${restoreSummary}${originalSummary}`,
     restoreResult
   )
 }
