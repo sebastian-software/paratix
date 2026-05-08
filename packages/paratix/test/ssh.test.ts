@@ -1003,8 +1003,23 @@ describe("SshConnectionImpl", () => {
 
       const ssh = makeSshInstanceWithAgent({ passwordFallback: true })
 
-      await expect(ssh.connect()).rejects.toThrow(/Failed to connect to/v)
+      await expect(ssh.connect()).rejects.toThrow(/password authentication failed/v)
       expect(getRegisteredSecrets()).not.toContain(password)
+    })
+
+    it("throws a clear error when SSH_AUTH_SOCK is unset, passwordFallback is enabled and password auth fails", async () => {
+      // Regression: previously the error said "Failed to connect to … on
+      // ports …", which mis-attributed the cause to the agent connect loop —
+      // however no agent connect was attempted. With the fix, the error names
+      // both root causes (no agent + failed password auth).
+      vi.mocked(promptTerminal).mockResolvedValueOnce("wrong-password")
+      vi.mocked(tryConnectOnPort).mockRejectedValue(new Error("All-Auth Failed"))
+
+      const ssh = makeSshInstanceWithAgent({ passwordFallback: true })
+
+      await expect(ssh.connect()).rejects.toThrow(
+        /No SSH agent \(SSH_AUTH_SOCK is not set\) and password authentication failed/v
+      )
     })
 
     it("throws when SSH_AUTH_SOCK is set to an empty string", async () => {

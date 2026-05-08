@@ -720,13 +720,8 @@ export class SshConnectionImpl implements SshConnection {
   private async connectViaAgent(options?: ConnectOptions): Promise<void> {
     const agent = process.env.SSH_AUTH_SOCK
     if (agent == null || agent.length === 0) {
-      if (await this.tryPasswordFallback(options)) return
-      if (this.config.passwordFallback) {
-        throw new Error(
-          `Failed to connect to ${this.runtime.host} on ports: ${this.runtime.ports.join(", ")}`
-        )
-      }
-      throw new Error("No privateKey configured and SSH_AUTH_SOCK is not set")
+      await this.connectWithoutAgentSocket(options)
+      return
     }
     if (!(await this.agentSocketExists(agent))) {
       if (await this.tryPasswordFallback(options)) return
@@ -740,6 +735,24 @@ export class SshConnectionImpl implements SshConnection {
     if (await this.tryPasswordFallback(options, agent)) return
     throw new Error(
       `Could not connect to ${this.runtime.host} via SSH agent on ports ${this.runtime.ports.join(", ")}`
+    )
+  }
+
+  /**
+   * Handle the no-agent / no-private-key configuration. When `SSH_AUTH_SOCK`
+   * is unset and `passwordFallback` is enabled, attempt the password path and
+   * surface a diagnostic that names both root causes (missing agent + failed
+   * password auth) instead of a generic "Failed to connect on ports" message.
+   *
+   * @param options - Prompt options forwarded from `connect()`.
+   */
+  private async connectWithoutAgentSocket(options?: ConnectOptions): Promise<void> {
+    if (!this.config.passwordFallback) {
+      throw new Error("No privateKey configured and SSH_AUTH_SOCK is not set")
+    }
+    if (await this.tryPasswordFallback(options)) return
+    throw new Error(
+      `No SSH agent (SSH_AUTH_SOCK is not set) and password authentication failed for ${this.config.user}@${this.runtime.host}`
     )
   }
 
