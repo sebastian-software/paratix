@@ -309,7 +309,20 @@ export const system = {
       async apply(ssh: null | SshConnection): Promise<ModuleResult> {
         if (!ssh) return failed("[system.uptime] SSH connection is required")
 
-        const seconds = await ssh.output("awk '{print int($1)}' /proc/uptime")
+        // Use exec with ignoreExitCode so a missing or unreadable /proc/uptime
+        // surfaces as a `failed` module result instead of an unhandled
+        // exception thrown out of `ssh.output`.
+        const result = await ssh.exec("awk '{print int($1)}' /proc/uptime", {
+          ignoreExitCode: true,
+          silent: true,
+        })
+        if (result.code !== 0) {
+          return failedCommand("[system.uptime] failed to read /proc/uptime", result)
+        }
+        const seconds = result.stdout.trim()
+        if (seconds.length === 0) {
+          return failed("[system.uptime] /proc/uptime returned empty output")
+        }
 
         return { meta: [meta.env("system.uptime", seconds)], status: "ok" }
       },

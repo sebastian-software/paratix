@@ -699,6 +699,7 @@ describe("runPlaybook dry-run recipe behaviour", () => {
   it("propagates system facts and uptime meta to following modules in dry-run mode", async () => {
     const capturedConfigs: unknown[] = []
     const factOutputs: Record<string, string> = {
+      "awk '{print int($1)}' /proc/uptime": "12345",
       "cat /etc/os-release": 'ID=ubuntu\nVERSION_ID="24.04"\nVERSION_CODENAME=noble\n',
       "df -m /":
         "Filesystem 1M-blocks Used Available Use% Mounted on\n/dev/sda1 10240 2048 8192 20% /\n",
@@ -710,9 +711,6 @@ describe("runPlaybook dry-run recipe behaviour", () => {
       "uname -m": "x86_64\n",
       "uname -r": "6.8.0\n",
     }
-    const uptimeOutputs: Record<string, string> = {
-      "awk '{print int($1)}' /proc/uptime": "12345",
-    }
 
     vi.doMock("../src/ssh.js", () => ({
       shellQuote: (s: string) => `'${s}'`,
@@ -722,9 +720,6 @@ describe("runPlaybook dry-run recipe behaviour", () => {
           stderr: "",
           stdout: factOutputs[command],
         })),
-        output: vi
-          .fn()
-          .mockImplementation((command: keyof typeof uptimeOutputs) => uptimeOutputs[command]),
       }),
     }))
 

@@ -199,6 +199,32 @@ describe("system.uptime — apply", () => {
     const metaEnvironment = await mergeEnvironmentFromMeta({}, result.meta)
     await expect(resolveEnvironment(metaEnvironment, "system.uptime")).resolves.toBe("12345")
   })
+
+  it("returns failed when reading /proc/uptime exits with a non-zero code", async () => {
+    const ssh = createMockSsh({
+      "awk '{print int($1)}' /proc/uptime": {
+        code: 1,
+        stderr: "awk: can't open /proc/uptime",
+        stdout: "",
+      },
+    })
+    const mod = system.uptime()
+    const result = await mod.apply(ssh, emptyEnv)
+    expect(result.status).toBe("failed")
+    expect(result.error?.message).toContain("[system.uptime] failed to read /proc/uptime")
+    expect(result.meta).toBeUndefined()
+  })
+
+  it("returns failed when /proc/uptime returns empty output", async () => {
+    const ssh = createMockSsh({
+      "awk '{print int($1)}' /proc/uptime": { code: 0, stdout: "" },
+    })
+    const mod = system.uptime()
+    const result = await mod.apply(ssh, emptyEnv)
+    expect(result.status).toBe("failed")
+    expect(result.error?.message).toContain("[system.uptime] /proc/uptime returned empty output")
+    expect(result.meta).toBeUndefined()
+  })
 })
 
 // ─── system.facts ─────────────────────────────────────────────────────────────
