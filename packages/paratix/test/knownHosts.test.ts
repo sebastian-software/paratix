@@ -774,7 +774,7 @@ describe("buildHostVerifier", () => {
     expect(() => hostVerifier!(ed25519Key)).toThrow("unknownhost.com")
   })
 
-  it("mode 'yes' with only @cert-authority entry treats the raw host key as unknown", async () => {
+  it("mode 'yes' with @cert-authority entry rejects with a clear error (R-0000204)", async () => {
     readFileSyncMock.mockReturnValue(
       `@cert-authority example.com ssh-ed25519 ${ed25519Key.toString("base64")}\n`
     )
@@ -782,24 +782,23 @@ describe("buildHostVerifier", () => {
     const { hostVerifier } = await buildHostVerifier("yes", { host: "example.com", port: 22 })
     expect(hostVerifier).toBeDefined()
 
-    expect(() => hostVerifier!(ed25519Key)).toThrow(/not found in known_hosts/v)
+    expect(() => hostVerifier!(ed25519Key)).toThrow(/@cert-authority/v)
+    expect(() => hostVerifier!(ed25519Key)).toThrow(/does not validate certificate-authority/v)
   })
 
-  it("mode 'accept-new' with only @cert-authority entry persists a raw host key", async () => {
+  it("mode 'accept-new' with @cert-authority entry refuses to persist a raw host key (R-0000204)", async () => {
     readFileSyncMock.mockReturnValue(
       `@cert-authority ca-only.example ssh-ed25519 ${ed25519Key.toString("base64")}\n`
     )
 
-    const { commitAcceptedHostKey, hostVerifier } = await buildHostVerifier("accept-new", {
+    const { hostVerifier } = await buildHostVerifier("accept-new", {
       host: "ca-only.example",
       port: 22,
     })
     expect(hostVerifier).toBeDefined()
 
-    expect(hostVerifier!(ed25519Key)).toBe(true)
-    await commitAcceptedHostKey?.()
-    expect(appendFileMock).toHaveBeenCalledOnce()
-    expect(String(appendFileMock.mock.calls[0]?.[1])).toContain("ca-only.example ssh-ed25519")
+    expect(() => hostVerifier!(ed25519Key)).toThrow(/@cert-authority/v)
+    expect(appendFileMock).not.toHaveBeenCalled()
   })
 
   it("mode 'yes' with known host and wrong key: hostVerifier throws Error", async () => {

@@ -1,3 +1,4 @@
+/* eslint-disable max-lines -- known_hosts lock, parser, verifier, and persist helpers stay co-located */
 import { createHash, timingSafeEqual } from "node:crypto"
 import { readFileSync } from "node:fs"
 import { appendFile, mkdir } from "node:fs/promises"
@@ -93,6 +94,17 @@ const UINT32_SIZE = 4
  * character outside the standard base64 alphabet before decoding.
  */
 const STRICT_BASE64_PATTERN = /^[A-Za-z0-9+\/]+=*$/v
+
+/**
+ * R-0000204: human-readable hint surfaced when a `@cert-authority` entry is
+ * encountered. paratix does not validate OpenSSH certificates and refuses to
+ * silently fall through to accept-new.
+ */
+const CERT_AUTHORITY_MESSAGE =
+  "HOST KEY VERIFICATION FAILED — known_hosts contains a @cert-authority entry, " +
+  "but paratix does not validate certificate-authority host keys. " +
+  "Remove the @cert-authority marker or pin the host with ssh.expectedHostFingerprint / " +
+  "ssh.expectedHostPublicKey instead."
 
 /**
  * In-memory cache for accepted host keys that could not be persisted to disk.
@@ -231,6 +243,11 @@ function verifyHostKeyAgainstKnownEntries(parameters: {
       `HOST KEY VERIFICATION FAILED for ${host}: remote host key (${extractAlgoFromKey(revokedKey.key)}) is marked as revoked in known_hosts.`
     )
   }
+  // R-0000204: paratix does not implement `@cert-authority` validation.
+  // Refuse rather than silently append a duplicate raw-key entry next to
+  // the CA line via accept-new.
+  if (fileEntries.some((entry) => entry.marker === "@cert-authority"))
+    throw new HostKeyVerificationError(`${host}: ${CERT_AUTHORITY_MESSAGE}`)
 
   const rawHostKeyEntries = fileEntries.filter((entry) => entry.marker == null)
   const matchingEntry = rawHostKeyEntries.find(
