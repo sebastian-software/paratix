@@ -64,8 +64,8 @@ vi.mock("../src/knownHosts.js", async () => {
   const actual = await vi.importActual<typeof KnownHosts>("../src/knownHosts.js")
   return {
     appendHostKey: vi.fn().mockResolvedValue(null),
-    // Default: return empty object (no hostVerifier) so ssh.ts can safely destructure after resetAllMocks.
-    buildHostVerifier: vi.fn().mockReturnValue({}),
+    // Default: resolve to an empty object (no hostVerifier) so ssh.ts can safely destructure after resetAllMocks.
+    buildHostVerifier: vi.fn().mockResolvedValue({}),
     extractAlgoFromKey: actual.extractAlgoFromKey,
     HostKeyVerificationError: actual.HostKeyVerificationError,
     lookupHostKey: actual.lookupHostKey,
@@ -313,7 +313,7 @@ describe("SshConnectionImpl", () => {
     // Without this, the destructuring `const { hostVerifier } = buildHostVerifier(...)` in
     // tryConnectOnPorts() would throw a TypeError because the mock returns undefined.
     const knownHosts = await import("../src/knownHosts.js")
-    vi.mocked(knownHosts.buildHostVerifier).mockReturnValue({})
+    vi.mocked(knownHosts.buildHostVerifier).mockResolvedValue({})
 
     // Re-establish readFile mock after vi.resetAllMocks() wipes it.
     // connect() calls readFile(path) without encoding — the result must be a Buffer
@@ -3932,7 +3932,7 @@ describe("SshConnectionImpl", () => {
     // vi.resetAllMocks() wipes mockReturnValue, causing destructuring of the result to throw.
     beforeEach(async () => {
       const knownHosts = await import("../src/knownHosts.js")
-      vi.mocked(knownHosts.buildHostVerifier).mockReturnValue({})
+      vi.mocked(knownHosts.buildHostVerifier).mockResolvedValue({})
       vi.mocked(tryConnectOnPort).mockResolvedValue()
       const fsp = await import("node:fs/promises")
       vi.mocked(fsp.readFile).mockResolvedValue(Buffer.from("fake-private-key"))
@@ -4030,7 +4030,7 @@ describe("SshConnectionImpl", () => {
         Buffer.from("accepted-host-key"),
       ])
       const { buildHostVerifier } = await import("../src/knownHosts.js")
-      vi.mocked(buildHostVerifier).mockReturnValue({
+      vi.mocked(buildHostVerifier).mockResolvedValue({
         hostVerifier: vi.fn().mockReturnValue(true),
       })
       vi.mocked(tryConnectOnPort).mockImplementationOnce(async ({ hostVerifier }) => {
@@ -4055,7 +4055,7 @@ describe("SshConnectionImpl", () => {
     it("passes a wrapped hostVerifier that delegates to buildHostVerifier's verifier", async () => {
       const fakeVerifier = vi.fn().mockReturnValue(true)
       const { buildHostVerifier } = await import("../src/knownHosts.js")
-      vi.mocked(buildHostVerifier).mockReturnValue({ hostVerifier: fakeVerifier })
+      vi.mocked(buildHostVerifier).mockResolvedValue({ hostVerifier: fakeVerifier })
 
       const ssh = makeSshInstance({ host: "1.2.3.4", ports: [22] })
 
@@ -4106,7 +4106,7 @@ describe("SshConnectionImpl", () => {
     it("passes a wrapper hostVerifier even when mode is 'no' (for host-key pinning)", async () => {
       const { buildHostVerifier } = await import("../src/knownHosts.js")
       // mode "no" returns empty object — no hostVerifier from buildHostVerifier
-      vi.mocked(buildHostVerifier).mockReturnValue({})
+      vi.mocked(buildHostVerifier).mockResolvedValue({})
 
       const config = {
         ports: [22],
@@ -4126,7 +4126,7 @@ describe("SshConnectionImpl", () => {
     it("does not expose a verified host public key when no verifier-backed trust check ran", async () => {
       const hostKey = Buffer.from("accepted-without-verifier")
       const { buildHostVerifier } = await import("../src/knownHosts.js")
-      vi.mocked(buildHostVerifier).mockReturnValue({})
+      vi.mocked(buildHostVerifier).mockResolvedValue({})
       vi.mocked(tryConnectOnPort).mockImplementationOnce(async ({ hostVerifier }) => {
         hostVerifier?.(hostKey)
         await Promise.resolve()
@@ -4159,7 +4159,7 @@ describe("SshConnectionImpl", () => {
           return key.length > 0
         }),
       }
-      vi.mocked(buildHostVerifier).mockReturnValue(verifierResult)
+      vi.mocked(buildHostVerifier).mockResolvedValue(verifierResult)
       vi.mocked(tryConnectOnPort).mockImplementationOnce(async ({ hostVerifier }) => {
         hostVerifier?.(Buffer.from("accepted-host-key"))
         await Promise.resolve()
@@ -4184,7 +4184,7 @@ describe("SshConnectionImpl", () => {
       const firstKey = makeWireHostKey("ssh-ed25519", "failed-port-key")
       const secondKey = makeWireHostKey("ssh-ed25519", "successful-port-key")
       const { buildHostVerifier } = await import("../src/knownHosts.js")
-      vi.mocked(buildHostVerifier).mockReturnValue({
+      vi.mocked(buildHostVerifier).mockResolvedValue({
         hostVerifier: vi.fn().mockReturnValue(true),
       })
       vi.mocked(tryConnectOnPort)
@@ -4215,11 +4215,11 @@ describe("SshConnectionImpl", () => {
       const secondCommitAcceptedHostKey = vi.fn().mockResolvedValue(undefined)
       const { buildHostVerifier } = await import("../src/knownHosts.js")
       vi.mocked(buildHostVerifier)
-        .mockReturnValueOnce({
+        .mockResolvedValueOnce({
           commitAcceptedHostKey: firstCommitAcceptedHostKey,
           hostVerifier: vi.fn().mockReturnValue(true),
         })
-        .mockReturnValueOnce({
+        .mockResolvedValueOnce({
           commitAcceptedHostKey: secondCommitAcceptedHostKey,
           hostVerifier: vi.fn().mockReturnValue(true),
         })

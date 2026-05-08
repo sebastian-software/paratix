@@ -8,15 +8,25 @@ import { matchesKnownHostPatternList } from "./knownHostPatterns.js"
 import { shellQuote } from "./sshHelpers.js"
 
 /**
- * R-0000151: serialize all reads/writes against `~/.ssh/known_hosts` through
- * a single in-process mutex. `loadKnownHostEntries` calls `readFileSync` from
- * an ssh2 verifier callback, while `acceptAndPersistHostKey` writes via async
- * `appendFile`. Without this lock, parallel handshakes could observe a
- * partially written line, causing `parseKnownHostsLine` to drop a valid
+ * R-0000151 / R-0000194: serialize every read and write against
+ * `~/.ssh/known_hosts` through a single in-process mutex. `appendHostKey`
+ * runs writes via `appendFile` and `buildHostVerifier` reads the file via
+ * `readFileSync`. Both paths must share the same queue, otherwise a
+ * synchronous read from a parallel handshake could observe a partially
+ * written line that `parseKnownHostsLine` would discard, leaking a valid
  * trust anchor.
  */
 let knownHostsLock: Promise<unknown> = Promise.resolve()
 
+/**
+ * Run `operation` while holding the known_hosts mutex. Both writes
+ * (`appendHostKey`) and reads (`buildHostVerifier` -> `loadKnownHostEntries`)
+ * funnel through this helper so they observe each other in FIFO order and a
+ * synchronous read never overlaps with an async append in flight.
+ *
+ * @param operation - The read or write to perform while the lock is held.
+ * @returns The value returned by `operation` once the lock has been acquired.
+ */
 async function withKnownHostsLock<T>(operation: () => Promise<T> | T): Promise<T> {
   const previous = knownHostsLock
   const next = previous.then(async () => operation())
@@ -98,12 +108,14 @@ export function clearHostKeyCache(): void {
 }
 
 /**
- * Wait until every queued `appendHostKey` operation has finished.
+ * Wait until every queued known_hosts read or write has finished.
  *
- * R-0000151: callers that need a synchronous read to observe the result of
- * concurrent persists can `await` this helper first; this drains the
- * known_hosts mutex so subsequent `readFileSync` calls see a consistent file
- * with no partially-written lines in flight.
+ * R-0000151 / R-0000194: callers that need a synchronous read to observe the
+ * result of concurrent persists can `await` this helper first; this drains
+ * the known_hosts mutex so subsequent `readFileSync` calls see a consistent
+ * file with no partially-written lines in flight. `buildHostVerifier` already
+ * routes its read through the lock, so this helper is mainly intended for
+ * tests and out-of-band callers.
  */
 export async function waitForKnownHostsWrites(): Promise<void> {
   await knownHostsLock.catch(() => null)
@@ -285,10 +297,11 @@ export function computeFingerprint(key: Buffer): string {
  * Creates the `~/.ssh` directory (mode `0o700`) and the file itself if they
  * do not exist yet.
  *
- * R-0000151: the append is serialized through {@link withKnownHostsLock} so
- * concurrent invocations cannot interleave partial writes, and so a
- * synchronous reader running right after this call observes the appended
- * line in full.
+ * R-0000151 / R-0000194: the append is serialized through
+ * {@link withKnownHostsLock} so concurrent invocations cannot interleave
+ * partial writes. The same lock also fences the read path inside
+ * {@link buildHostVerifier}, so a verifier scheduled after this call always
+ * sees the appended line in full.
  *
  * @param host - The hostname or IP.
  * @param port - The SSH port.
@@ -436,6 +449,11 @@ function verifyPinnedHostKey(host: string, key: Buffer, options: HostVerifierOpt
  *   throws if a known key does not match.
  * - `"yes"` — throws for both unknown keys and mismatched keys.
  *
+ * R-0000194: the synchronous read of `~/.ssh/known_hosts` is funneled through
+ * the same in-process mutex as writes, so a verifier built right after a
+ * concurrent `appendHostKey` always observes the freshly persisted line and
+ * cannot race with a partial write.
+ *
  * @param mode - The host key verification strategy.
  * @param location - The target host and SSH port.
  * @param options - Optional pinned trust anchors for the remote host.
@@ -443,15 +461,15 @@ function verifyPinnedHostKey(host: string, key: Buffer, options: HostVerifierOpt
  * @throws {Error} When a known host key does not match the presented key (all modes except `"no"`).
  * @throws {Error} When no known_hosts entry exists for the host and mode is `"yes"`.
  */
-export function buildHostVerifier(
+export async function buildHostVerifier(
   mode: "accept-new" | "no" | "yes",
   location: HostLocation,
   options: HostVerifierOptions = {}
-): HostVerifierResult {
+): Promise<HostVerifierResult> {
   const { host, port } = location
   if (mode === "no" && !hasPinnedHostTrustAnchor(options)) return {}
 
-  const entries = loadKnownHostEntries()
+  const entries = await withKnownHostsLock(loadKnownHostEntries)
   const fileEntries = findMatchingEntries(entries, host, port)
   const cachedKey = inMemoryHostKeys.get(formatHostNeedle(host, port)) ?? null
   let acceptedHostKey: Buffer | null = null

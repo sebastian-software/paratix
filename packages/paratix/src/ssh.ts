@@ -1361,7 +1361,8 @@ trap - EXIT
       let tryConnectResolved = false
       let registered = false
       try {
-        const verifier = buildHostVerifier(
+        // eslint-disable-next-line no-await-in-loop -- buildHostVerifier serializes the known_hosts read; sequential per-port is intentional.
+        const verifier = await buildHostVerifier(
           this.config.strictHostKeyChecking ?? "yes",
           { host: this.runtime.host, port },
           {
