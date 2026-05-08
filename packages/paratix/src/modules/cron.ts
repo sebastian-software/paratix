@@ -56,7 +56,13 @@ async function writeCrontab(input: WriteCrontabArguments): Promise<ModuleResult 
       ignoreExitCode: true,
       silent: true,
     })
-    return removeResult.code === 0 ? null : failedCommand(failureMessage, removeResult)
+    if (removeResult.code === 0) return null
+    // R-0000227: `crontab -r` exits non-zero when no crontab exists (typical
+    // message: "no crontab for <user>"). The desired state — no crontab —
+    // is already satisfied, so treat the missing crontab as success rather
+    // than reporting failedCommand. Mirrors the logic in readCrontab.
+    if (isMissingCrontabResult(removeResult.stdout, removeResult.stderr, user)) return null
+    return failedCommand(failureMessage, removeResult)
   }
   // R-0000157: install non-empty crontabs with ignoreExitCode so invalid
   // crontab syntax, missing target users or permission-denied errors surface

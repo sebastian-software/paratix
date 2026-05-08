@@ -414,6 +414,26 @@ describe("cron.job", () => {
     expect(result.error?.message).toContain("permission denied")
   })
 
+  // R-0000227: `crontab -r` exits non-zero ("no crontab for <user>") when the
+  // crontab is already empty. That outcome already matches the desired state,
+  // so writeCrontab must report success instead of failedCommand.
+  it("R-0000227: tolerates crontab -r exiting non-zero with 'no crontab for'", async () => {
+    const mockSsh = createMockSsh({
+      "crontab -u 'alice' -l": {
+        code: 0,
+        stdout: "# paratix: backup\n0 3 * * * /backup.sh\n",
+      },
+      "crontab -u 'alice' -r": {
+        code: 1,
+        stderr: "no crontab for alice\n",
+      },
+    })
+    const mod = cron.job("alice", "backup", { job: "0 3 * * * /backup.sh", state: "absent" })
+    const result = await mod.apply(mockSsh, emptyEnv)
+    expect(result.status).toBe("changed")
+    expect(mockSsh.calls).toContain("crontab -u 'alice' -r")
+  })
+
   it("apply returns failed when installing a non-empty absent crontab fails", async () => {
     // R-0000157: crontab install errors must surface as failedCommand even
     // on the absent path so callers see a maskable failure result instead
