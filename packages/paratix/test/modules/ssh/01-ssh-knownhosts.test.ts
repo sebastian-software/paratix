@@ -553,6 +553,26 @@ describe("ssh.knownHosts", () => {
     expect(String(result.error)).toContain("ssh-keygen -R failed")
   })
 
+  // R-0000214: ssh-keyscan exits non-zero when the host is unreachable, the
+  // port is closed, or DNS fails. The previous `conn.output` call propagated
+  // that as an uncaught exception even though `2>/dev/null` suppressed the
+  // diagnostic. Surface a failedCommand result instead.
+  it("R-0000214: apply returns failedCommand when ssh-keyscan exits non-zero", async () => {
+    const mockSsh = createSshApplyMockSsh({
+      "ssh-keyscan -H 'github.com' 2>/dev/null": {
+        code: 1,
+        stderr: "ssh-keyscan: getaddrinfo: github.com: Name or service not known",
+      },
+    })
+    const mod = ssh.knownHosts("github.com", { expectedFingerprint: hostFingerprint })
+
+    const result = await mod.apply(mockSsh, emptyEnv)
+
+    expect(result.status).toBe("failed")
+    expect(String(result.error)).toContain("[ssh.knownHosts: github.com (present)]")
+    expect(String(result.error)).toContain("ssh-keyscan failed")
+  })
+
   // R-0000213: the drift-cleanup path inside reconcileKnownHostsState used
   // `conn.exec` without ignoreExitCode. A failing ssh-keygen -R would then
   // throw past applyKnownHostsPresent. Confirm it now reports failedCommand.

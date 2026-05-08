@@ -350,6 +350,28 @@ async function reconcileKnownHostsState(
   return { failure: null, missingLines: await filterMissingKnownHostLines(conn, verifiedLines) }
 }
 
+async function runSshKeyscanForKnownHosts(
+  conn: SshConnection,
+  host: string,
+  options?: KnownHostsOptions
+): Promise<{ failure: ModuleResult; lines: null } | { failure: null; lines: string[] }> {
+  // R-0000214: ssh-keyscan exits non-zero when the host is unreachable, the
+  // port is closed, or DNS fails. The previous `conn.output` call propagated
+  // that as an uncaught exception even though `2>/dev/null` suppressed the
+  // diagnostic. Run with ignoreExitCode and surface a failedCommand result.
+  const result = await conn.exec(sshKeyscanCommand(host, options), {
+    ignoreExitCode: true,
+    silent: true,
+  })
+  if (result.code !== 0) {
+    return {
+      failure: failedCommand(`[ssh.knownHosts: ${host} (present)] ssh-keyscan failed`, result),
+      lines: null,
+    }
+  }
+  return { failure: null, lines: parseHostKeyLines(result.stdout) }
+}
+
 /**
  * Apply the `state: "present"` path of `ssh.knownHosts`: scan the host,
  * verify each line against the trust anchor, and append only the lines that
@@ -366,9 +388,9 @@ async function applyKnownHostsPresent(
   parameters: { host: string; options?: KnownHostsOptions }
 ): Promise<ModuleResult> {
   const { host, options } = parameters
-  const scannedOutput = await conn.output(sshKeyscanCommand(host, options))
-  const scannedLines = parseHostKeyLines(scannedOutput)
-  const verification = resolveVerifiedLines(host, scannedLines, options ?? {})
+  const scan = await runSshKeyscanForKnownHosts(conn, host, options)
+  if (scan.failure) return scan.failure
+  const verification = resolveVerifiedLines(host, scan.lines, options ?? {})
   if (verification.failure) return verification.failure
 
   await conn.exec("mkdir -p ~/.ssh && chmod 700 ~/.ssh", { silent: true })
