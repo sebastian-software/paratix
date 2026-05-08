@@ -201,12 +201,14 @@ async function allocateExtractStagingDirectory(
 
 /**
  * Move the extracted archive contents from the paratix-controlled staging
- * directory into the destination atomically (per-entry `mv`). The final
- * `rmdir` of the empty staging directory completes the move.
- *
- * `find -mindepth 1 -maxdepth 1 -print0` enumerates dotfiles and ordinary
- * entries alike. Each entry is moved via `mv -f`, which is `rename(2)` on the
- * same filesystem and therefore atomic per entry.
+ * directory into the destination using `cp -aT` so existing destination
+ * directories are merged conflict-free. R-0000221: per-entry `mv -f` cannot
+ * merge into pre-existing subdirectories with the same name and aborts mid-way
+ * on the first conflict, leaving the destination in a partial state. Using
+ * `cp -aT staging/. destination/` recurses into existing entries, replacing
+ * regular files in place while preserving owner/group/mode/timestamps. The
+ * staging directory itself is removed by {@link cleanupStagingDirectory} after
+ * this helper returns successfully.
  *
  * @param conn - The SSH connection.
  * @param staging - The staging directory holding the freshly extracted files.
@@ -218,16 +220,15 @@ async function moveExtractedContentsIntoDestination(
   staging: string,
   destination: string
 ): Promise<ModuleResult | null> {
-  const destinationWithSlash = shellQuote(`${destination}/`)
-  const moveCommand = [
-    `cd ${shellQuote(staging)}`,
-    `find . -mindepth 1 -maxdepth 1 -print0 | xargs -0 -I {} mv -f {} ${destinationWithSlash}`,
-  ].join(" && ")
-  const moveResult = await conn.exec(moveCommand, EXEC_OPTS)
-  if (moveResult.code !== 0) {
+  // `cp -aT` treats the destination as the named target rather than placing
+  // staging *inside* destination, so we copy the staging contents (via the
+  // trailing `.`) merging into the existing destination tree.
+  const copyCommand = `cp -aT ${shellQuote(staging)} ${shellQuote(destination)}`
+  const copyResult = await conn.exec(copyCommand, EXEC_OPTS)
+  if (copyResult.code !== 0) {
     return failedCommand(
-      `[archive.extract] failed to move extracted files into ${destination}`,
-      moveResult
+      `[archive.extract] failed to copy extracted files into ${destination}`,
+      copyResult
     )
   }
   return null

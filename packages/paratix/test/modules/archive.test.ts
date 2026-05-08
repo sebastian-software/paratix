@@ -40,12 +40,11 @@ const archiveCleanupPaths = [
 // expectations.
 const archiveStageDirectory = "/opt/app/.paratix-stage.AbCdEfGh"
 const archiveStageMktempPattern = /^mktemp -d '\/opt\/app\/\.paratix-stage\.X{8}'$/v
-const archiveStageMovePattern =
-  /^cd '\/opt\/app\/\.paratix-stage\.[^']+' && find \. -mindepth 1 -maxdepth 1 -print0 \| xargs -0 -I \{\} mv -f \{\} '\/opt\/app\/'$/v
+const archiveStageMovePattern = /^cp -aT '\/opt\/app\/\.paratix-stage\.[^']+' '\/opt\/app'$/v
 const archiveStageCleanupPattern = /^rm -rf '\/opt\/app\/\.paratix-stage\.[^']+'$/v
 const archiveAlternateStageMktempPattern = /^mktemp -d '\/opt\/app-alt\/\.paratix-stage\.X{8}'$/v
 const archiveAlternateStageMovePattern =
-  /^cd '\/opt\/app-alt\/\.paratix-stage\.[^']+' && find \. -mindepth 1 -maxdepth 1 -print0 \| xargs -0 -I \{\} mv -f \{\} '\/opt\/app-alt\/'$/v
+  /^cp -aT '\/opt\/app-alt\/\.paratix-stage\.[^']+' '\/opt\/app-alt'$/v
 const archiveAlternateStageCleanupPattern = /^rm -rf '\/opt\/app-alt\/\.paratix-stage\.[^']+'$/v
 
 const archiveApplyResponseStubs: NonNullable<
@@ -1220,7 +1219,7 @@ describe("archive.extract — apply", () => {
         responseStubs: [
           {
             command: archiveStageMovePattern,
-            result: { code: 1, stderr: "mv: cross-device link" },
+            result: { code: 1, stderr: "cp: cross-device link" },
           },
         ],
       }
@@ -1230,8 +1229,30 @@ describe("archive.extract — apply", () => {
     const result = await mod.apply(mockSsh, emptyEnv)
 
     expect(result.status).toBe("failed")
-    expect(String(result.error)).toContain("failed to move extracted files")
+    expect(String(result.error)).toContain("failed to copy extracted files")
     expect(mockSsh.calls.some((c) => archiveStageCleanupPattern.test(c))).toBe(true)
+  })
+
+  // R-0000221: per-entry `mv -f` cannot merge into a pre-existing destination
+  // sub-directory; the first conflict aborts the move and the destination is
+  // left in a partial state. `cp -aT staging/. destination/` recurses into
+  // existing entries and merges conflict-free, then the staging directory is
+  // removed wholesale.
+  it("R-0000221: uses cp -aT to merge into existing destination directories conflict-free", async () => {
+    const mockSsh = createMockSsh({
+      [`tar --no-same-owner --no-overwrite-dir -xzf '${src}' -C '${archiveStageDirectory}'`]: {
+        code: 0,
+      },
+      [`tar -tvzf '${src}'`]: { code: 0, stdout: safeTarListing },
+    })
+    vi.spyOn(mockSsh, "sha256").mockResolvedValue(archiveSha)
+    vi.spyOn(mockSsh, "writeFile").mockResolvedValue()
+    const mod = archive.extract(src, destination)
+    const result = await mod.apply(mockSsh, emptyEnv)
+    expect(result.status).toBe("changed")
+    expect(mockSsh.calls.some((c) => c.startsWith("cp -aT "))).toBe(true)
+    expect(mockSsh.calls.some((c) => c.includes("find . -mindepth 1 -maxdepth 1"))).toBe(false)
+    expect(mockSsh.calls.some((c) => c.includes("xargs -0 -I {} mv -f"))).toBe(false)
   })
 
   // R-0000166: the owner-paths marker is now written for both upload and
