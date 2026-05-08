@@ -527,6 +527,36 @@ describe("printCommandFailure", () => {
     expect(output).toContain("root cause")
   })
 
+  it("breaks out of a cyclic cause chain in verbose mode without recursing forever", () => {
+    const inner = new Error("inner cause")
+    inner.stack = "Error: inner cause\n    at inner.ts:2:2"
+    const outer = new Error("outer failure", { cause: inner })
+    outer.stack = "Error: outer failure\n    at outer.ts:1:1"
+    inner.cause = outer
+
+    expect(() => {
+      printCommandFailure(outer, true)
+    }).not.toThrow()
+
+    const output = consoleErrors.join("\n")
+    expect(output).toContain("Cause 1:")
+    expect(output).toContain("inner cause")
+    expect(output).toContain("<cycle detected>")
+  })
+
+  it("breaks out of a self-referential cause in verbose mode", () => {
+    const error = new Error("self")
+    error.stack = "Error: self\n    at self.ts:1:1"
+    error.cause = error
+
+    expect(() => {
+      printCommandFailure(error, true)
+    }).not.toThrow()
+
+    const output = consoleErrors.join("\n")
+    expect(output).toContain("<cycle detected>")
+  })
+
   it("prints full stdout and stderr via verbose output when verbose is true and error is a CommandError", () => {
     const error = new CommandError(
       "Command failed with exit code 1: false\nstdout: short\nstderr: short",

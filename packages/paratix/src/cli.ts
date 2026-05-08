@@ -190,11 +190,24 @@ function errorToString(value: unknown): string {
 /**
  * Walks the cause chain of `error` and prints each cause to stderr.
  *
+ * Uses a WeakSet to detect cyclic `cause` references (e.g. produced by
+ * third-party libraries that wrap the same Error twice) so the loop always
+ * terminates instead of hanging the CLI before `process.exit` is reached.
+ *
  * @param error - The root `Error` whose `.cause` chain should be printed.
  */
 function printCauseChain(error: Error): void {
+  const visitedCauses = new WeakSet<Error>()
+  visitedCauses.add(error)
   let cause = error.cause
   while (cause != null) {
+    if (cause instanceof Error) {
+      if (visitedCauses.has(cause)) {
+        console.error("  Caused by: <cycle detected>")
+        return
+      }
+      visitedCauses.add(cause)
+    }
     console.error(`  Caused by: ${errorToString(cause)}`)
     cause = cause instanceof Error ? cause.cause : undefined
   }

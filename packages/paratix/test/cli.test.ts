@@ -1316,6 +1316,33 @@ describe("printExceptionError", () => {
     expect(errorSpy).toHaveBeenCalledWith("Error: lone error")
   })
 
+  it("breaks out of a cyclic cause chain instead of hanging", () => {
+    const first = new Error("first")
+    const second = new Error("second")
+    first.cause = second
+    second.cause = first
+
+    expect(() => {
+      printExceptionError(first, false)
+    }).not.toThrow()
+
+    const calls = errorSpy.mock.calls.map((args) => String(args[0]))
+    expect(calls.some((line) => line.includes("Caused by: second"))).toBe(true)
+    expect(calls.some((line) => line.includes("<cycle detected>"))).toBe(true)
+  })
+
+  it("breaks out of a self-referential cause without recursing", () => {
+    const error = new Error("self")
+    error.cause = error
+
+    expect(() => {
+      printExceptionError(error, false)
+    }).not.toThrow()
+
+    const calls = errorSpy.mock.calls.map((args) => String(args[0]))
+    expect(calls.some((line) => line.includes("<cycle detected>"))).toBe(true)
+  })
+
   it("does not attempt to walk the cause chain for non-Error values", () => {
     printExceptionError("plain string error", true)
     expect(errorSpy).toHaveBeenCalledTimes(1)

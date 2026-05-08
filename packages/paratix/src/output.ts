@@ -399,15 +399,24 @@ function getErrorCause(error: Error): unknown {
   return (error as { cause?: unknown } & Error).cause
 }
 
-function printVerboseErrorCause(cause: unknown, depth: number): void {
+function printVerboseErrorCause(
+  cause: unknown,
+  depth: number,
+  visitedCauses: WeakSet<Error>
+): void {
   const label = `Cause ${depth}:`
   if (cause instanceof Error) {
+    if (visitedCauses.has(cause)) {
+      printVerboseErrorBlock(label, "<cycle detected>")
+      return
+    }
+    visitedCauses.add(cause)
     const stack = cause.stack?.trim() ?? ""
     const stackOrMessage = stack.length > 0 ? stack : String(cause)
     printVerboseErrorBlock(label, maskRegisteredSecrets(stackOrMessage))
     const nestedCause = getErrorCause(cause)
     if (nestedCause !== undefined) {
-      printVerboseErrorCause(nestedCause, depth + 1)
+      printVerboseErrorCause(nestedCause, depth + 1, visitedCauses)
     }
     return
   }
@@ -424,7 +433,12 @@ function printVerboseGenericError(error: Error): void {
   printVerboseErrorBlock("Full stack:", maskRegisteredSecrets(stackOrMessage))
   const cause = getErrorCause(error)
   if (cause !== undefined) {
-    printVerboseErrorCause(cause, 1)
+    // Track every Error seen while walking the cause chain to detect cycles
+    // produced by third-party error wrapping (e.g. err.cause === err) so the
+    // recursion always terminates.
+    const visitedCauses = new WeakSet<Error>()
+    visitedCauses.add(error)
+    printVerboseErrorCause(cause, 1, visitedCauses)
   }
 }
 
