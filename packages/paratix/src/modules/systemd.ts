@@ -154,7 +154,17 @@ export const systemd = {
       async apply(ssh: null | SshConnection): Promise<ModuleResult> {
         if (!ssh) return failed(`[systemd.unit: ${name}] SSH connection is required`)
         const snapshot = await snapshotUnitFile(ssh, filePath)
-        await ssh.writeFile(filePath, content, { mode: SYSTEMD_UNIT_MODE })
+        // R-0000211: writeFile can throw (SFTP error after a partial write,
+        // permission denied, network drop). Without this guard the unit file
+        // would stay half-written while the original snapshot is discarded
+        // unrestored. Mirrors the quadlet pattern from R-0000182.
+        try {
+          await ssh.writeFile(filePath, content, { mode: SYSTEMD_UNIT_MODE })
+        } catch (error) {
+          await restoreUnitFileSnapshot(ssh, filePath, snapshot)
+          const reason = error instanceof Error ? error.message : String(error)
+          return failed(`[systemd.unit: ${name}] failed to write unit file: ${reason}`)
+        }
         const result = await ssh.exec(`${SYSTEMCTL} daemon-reload`, {
           ignoreExitCode: true,
           silent: true,

@@ -243,6 +243,51 @@ describe("systemd.unit", () => {
     expect(writeFile).toHaveBeenNthCalledWith(2, filePath, previousContent, { mode: "600" })
   })
 
+  // R-0000211: writeFile can throw (SFTP error after a partial write,
+  // permission denied, network drop). Without the try/catch around the
+  // writeFile call, the unit file would stay half-written and the captured
+  // snapshot would be discarded unrestored. Mirrors quadlet's R-0000182 fix.
+  it("R-0000211: restores an existing unit file when writeFile throws", async () => {
+    const previousContent = "[Unit]\nDescription=Previous\n"
+    const ssh = createMockSsh({
+      [`[ -e '${filePath}' ]`]: { code: 0 },
+      [`cat '${filePath}'`]: { stdout: previousContent },
+      [`stat -c '%a' '${filePath}'`]: { code: 0, stdout: "600\n" },
+    })
+    const writeFile = vi
+      .spyOn(ssh, "writeFile")
+      .mockRejectedValueOnce(new Error("SFTP write failed: ENOSPC"))
+      .mockResolvedValue()
+    const mod = systemd.unit(unitName, unitContent)
+    const result = await mod.apply(ssh, emptyEnv)
+    expect(result.status).toBe("failed")
+    expect(String(result.error)).toContain("failed to write unit file")
+    expect(String(result.error)).toContain("ENOSPC")
+    // First call attempted the new content; second call restored the snapshot.
+    expect(writeFile).toHaveBeenNthCalledWith(1, filePath, unitContent, { mode: "0644" })
+    expect(writeFile).toHaveBeenNthCalledWith(2, filePath, previousContent, { mode: "600" })
+    expect(ssh.calls).not.toContain("systemctl daemon-reload")
+  })
+
+  // R-0000211: when the file did not exist before, the snapshot is "absent"
+  // and the rollback path removes the freshly-written file via `rm -f`.
+  it("R-0000211: removes a freshly-written unit file when writeFile throws and snapshot is absent", async () => {
+    const ssh = createMockSsh({
+      [`[ -e '${filePath}' ]`]: { code: 1 },
+      [`rm -f '${filePath}'`]: { code: 0 },
+    })
+    const writeFile = vi
+      .spyOn(ssh, "writeFile")
+      .mockRejectedValueOnce(new Error("network drop during writeFile"))
+    const mod = systemd.unit(unitName, unitContent)
+    const result = await mod.apply(ssh, emptyEnv)
+    expect(result.status).toBe("failed")
+    expect(String(result.error)).toContain("failed to write unit file")
+    expect(writeFile).toHaveBeenCalledTimes(1)
+    expect(ssh.calls).toContain(`rm -f '${filePath}'`)
+    expect(ssh.calls).not.toContain("systemctl daemon-reload")
+  })
+
   it("apply returns failed when ssh is null", async () => {
     const mod = systemd.unit(unitName, unitContent)
     // eslint-disable-next-line prefer-spread
