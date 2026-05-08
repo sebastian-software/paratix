@@ -553,6 +553,31 @@ describe("ssh.knownHosts", () => {
     expect(String(result.error)).toContain("ssh-keygen -R failed")
   })
 
+  // R-0000213: the drift-cleanup path inside reconcileKnownHostsState used
+  // `conn.exec` without ignoreExitCode. A failing ssh-keygen -R would then
+  // throw past applyKnownHostsPresent. Confirm it now reports failedCommand.
+  it("R-0000213: apply returns failedCommand when drift-cleanup ssh-keygen -R fails", async () => {
+    const driftedKey = makeHostKeyBuffer("ssh-ed25519", Buffer.from("drifted-host-key"))
+    const driftedLine = `|1|hashed-host|hashed-old ssh-ed25519 ${driftedKey.toString("base64")}`
+    const mockSsh = createSshApplyMockSsh({
+      "ssh-keygen -F 'github.com'": { code: 0, stdout: `${driftedLine}\n` },
+      "ssh-keygen -R 'github.com'": {
+        code: 1,
+        stderr: "ssh-keygen: failed to update file ~/.ssh/known_hosts: Permission denied",
+      },
+      "ssh-keyscan -H 'github.com' 2>/dev/null": { stdout: `${scannedLine}\n` },
+    })
+    const mod = ssh.knownHosts("github.com", { expectedFingerprint: hostFingerprint })
+
+    const result = await mod.apply(mockSsh, emptyEnv)
+
+    expect(result.status).toBe("failed")
+    expect(String(result.error)).toContain("[ssh.knownHosts: github.com (present)]")
+    expect(String(result.error)).toContain("drift cleanup")
+    // The append must not run when the drift cleanup failed.
+    expect(mockSsh.calls.some((c) => c.startsWith("printf '%s\\n'"))).toBe(false)
+  })
+
   it("apply returns failed when ssh is null", async () => {
     const mod = ssh.knownHosts("github.com", { expectedFingerprint: hostFingerprint })
     const conn = null

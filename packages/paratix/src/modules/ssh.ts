@@ -320,16 +320,34 @@ async function reconcileKnownHostsState(
     options?: KnownHostsOptions
     verifiedLines: string[]
   }
-): Promise<string[]> {
+): Promise<
+  { failure: ModuleResult; missingLines: null } | { failure: null; missingLines: string[] }
+> {
   const { existingLines, host, options, verifiedLines } = parameters
   const hasMismatchedExistingLines = existingLines.some(
     (line) => !lineMatchesTrustAnchor(line, options ?? {})
   )
   if (hasMismatchedExistingLines) {
-    await conn.exec(`ssh-keygen -R ${shellQuote(knownHostsLookupTarget(host, options))}`)
-    return verifiedLines
+    // R-0000213: ssh-keygen -R can fail (corrupt known_hosts, permission
+    // denied). Run with ignoreExitCode and surface a failedCommand result
+    // instead of letting the exec throw and propagate as an uncaught
+    // exception. Mirrors the absent-state guard from R-0000212.
+    const removeResult = await conn.exec(
+      `ssh-keygen -R ${shellQuote(knownHostsLookupTarget(host, options))}`,
+      { ignoreExitCode: true, silent: true }
+    )
+    if (removeResult.code !== 0) {
+      return {
+        failure: failedCommand(
+          `[ssh.knownHosts: ${host} (present)] ssh-keygen -R failed during drift cleanup`,
+          removeResult
+        ),
+        missingLines: null,
+      }
+    }
+    return { failure: null, missingLines: verifiedLines }
   }
-  return filterMissingKnownHostLines(conn, verifiedLines)
+  return { failure: null, missingLines: await filterMissingKnownHostLines(conn, verifiedLines) }
 }
 
 /**
@@ -358,18 +376,19 @@ async function applyKnownHostsPresent(
   const existing = await resolveExistingKnownHostLines(conn, host, options)
   if (existing.failure) return existing.failure
 
-  const missingLines = await reconcileKnownHostsState(conn, {
+  const reconciled = await reconcileKnownHostsState(conn, {
     existingLines: existing.existingLines,
     host,
     options,
     verifiedLines: verification.verifiedLines,
   })
-  if (missingLines.length === 0) {
+  if (reconciled.failure) return reconciled.failure
+  if (reconciled.missingLines.length === 0) {
     return { status: "ok" }
   }
 
   await conn.exec(
-    `printf '%s\\n' ${missingLines.map((line) => shellQuote(line)).join(" ")} >> ~/.ssh/known_hosts`,
+    `printf '%s\\n' ${reconciled.missingLines.map((line) => shellQuote(line)).join(" ")} >> ~/.ssh/known_hosts`,
     { silent: true }
   )
   return { status: "changed" }
