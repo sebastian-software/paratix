@@ -157,6 +157,44 @@ async function destinationIsDirectory(conn: SshConnection, destination: string):
   return conn.test(`[ -d ${shellQuote(destination)} ]`)
 }
 
+/**
+ * R-0000226: refuse to write through a symlink at the destination, at the
+ * immediate `dirname(destination)`, or at any ancestor in between. Without
+ * this guard a symlinked `dirname(destination)` would steer the temp file
+ * into an attacker-controlled directory, and a symlinked `destination` itself
+ * would let `mv -T` clobber the link target instead of replacing the link.
+ *
+ * @param conn - The SSH connection.
+ * @param destination - The final download destination on the remote host.
+ * @returns A failed ModuleResult on any symlink, or null when the path is safe.
+ */
+async function ensureDownloadDestinationNotSymlinked(
+  conn: SshConnection,
+  destination: string
+): Promise<ModuleResult | null> {
+  // `[ -L destination ]` only fires when destination itself is a symlink,
+  // including dangling links. Guard explicitly so that `mv -T` cannot replace
+  // the link and orphan the previously-pointed file.
+  if (await conn.test(`[ -L ${shellQuote(destination)} ]`)) {
+    return failed(`[download] destination is a symlink: ${destination}`)
+  }
+  // Walk every existing ancestor of dirname(destination) looking for a
+  // symlink. We iterate in TypeScript so the resulting `[ -L ... ]` calls
+  // re-use the same primitives as the destination test, keeping mock-stub
+  // matching predictable.
+  let ancestor = path.dirname(destination)
+  const seen = new Set<string>()
+  while (ancestor !== "/" && ancestor !== "." && !seen.has(ancestor)) {
+    seen.add(ancestor)
+    // eslint-disable-next-line no-await-in-loop -- ancestor walk is sequential by nature
+    if (await conn.test(`[ -L ${shellQuote(ancestor)} ]`)) {
+      return failed(`[download] ancestor of ${destination} is a symlink: ${ancestor}`)
+    }
+    ancestor = path.dirname(ancestor)
+  }
+  return null
+}
+
 async function finalizeDownloadedFile(
   conn: SshConnection,
   parameters: DownloadParameters,
@@ -165,6 +203,11 @@ async function finalizeDownloadedFile(
   if (await destinationIsDirectory(conn, parameters.destination)) {
     return failed(`[download] destination is a directory: ${parameters.destination}`)
   }
+  // R-0000226: re-check destination + ancestor symlinks immediately before the
+  // atomic mv. Earlier check in runCurlDownload may race with operator action
+  // during the curl download itself.
+  const symlinkFailure = await ensureDownloadDestinationNotSymlinked(conn, parameters.destination)
+  if (symlinkFailure != null) return symlinkFailure
   // R-0000158: convert non-zero exit codes (e.g. cross-device link, EACCES,
   // EROFS) into a failedCommand result so callers see a maskable failure
   // instead of an uncaught CommandError exception.
@@ -618,34 +661,57 @@ async function performDownload(
  * @param parameters - Download parameters including destination and url.
  * @returns A {@link ModuleResult} indicating the outcome.
  */
+/**
+ * Result tuple from {@link runCurlDownloadCore}.
+ *
+ * `failure` carries the ModuleResult to surface; `cleanedUp` indicates whether
+ * the temp file was already moved into place (so the outer finally must not
+ * remove it).
+ */
+type CurlDownloadOutcome = { cleanedUp: boolean; result: ModuleResult }
+
+async function runCurlDownloadCore(
+  conn: SshConnection,
+  parameters: DownloadParameters,
+  downloadParameters: DownloadParameters
+): Promise<CurlDownloadOutcome> {
+  const curlFailure = await executeCurlDownload(conn, downloadParameters)
+  if (curlFailure) return { cleanedUp: false, result: curlFailure }
+  if (!(await verifyChecksum(conn, downloadParameters))) {
+    return {
+      cleanedUp: false,
+      result: failed(`[download] checksum verification failed for ${parameters.destination}`),
+    }
+  }
+  const attributesFailure = await applyFileAttributes(conn, downloadParameters)
+  if (attributesFailure) return { cleanedUp: false, result: attributesFailure }
+  const finalizeFailure = await finalizeDownloadedFile(conn, parameters, downloadParameters)
+  if (finalizeFailure) return { cleanedUp: false, result: finalizeFailure }
+  return { cleanedUp: true, result: { status: "changed" } }
+}
+
 async function runCurlDownload(
   conn: SshConnection,
   parameters: DownloadParameters
 ): Promise<ModuleResult> {
+  // R-0000226: refuse to download into a directory whose dirname or
+  // destination itself traverses a symlink — otherwise the temp file would
+  // land outside the operator-supplied tree and `mv -T` could be steered
+  // toward an attacker-controlled target.
+  const symlinkFailure = await ensureDownloadDestinationNotSymlinked(conn, parameters.destination)
+  if (symlinkFailure != null) return symlinkFailure
   // R-0000107: validate the mktemp output before any subcommand consumes
   // it. Reuses the shared validateMktempPath helper from ssh.ts (already
   // applied in aptKeyHelpers.ts and archive.ts/allocateRemoteUploadPath).
   const downloadParameters = await allocateTemporaryDownloadParameters(conn, parameters)
-  let shouldCleanupTemporaryFile = true
-
   try {
-    const curlFailure = await executeCurlDownload(conn, downloadParameters)
-    if (curlFailure) return curlFailure
-
-    if (!(await verifyChecksum(conn, downloadParameters))) {
-      return failed(`[download] checksum verification failed for ${parameters.destination}`)
-    }
-    const attributesFailure = await applyFileAttributes(conn, downloadParameters)
-    if (attributesFailure) return attributesFailure
-    const finalizeFailure = await finalizeDownloadedFile(conn, parameters, downloadParameters)
-    if (finalizeFailure) return finalizeFailure
-    shouldCleanupTemporaryFile = false
-
-    return { status: "changed" }
+    const outcome = await runCurlDownloadCore(conn, parameters, downloadParameters)
+    return outcome.result
   } finally {
-    if (shouldCleanupTemporaryFile) {
-      await cleanupTemporaryDownloadFile(conn, downloadParameters)
-    }
+    // Best-effort cleanup: if finalize moved the temp file into place
+    // successfully, the rm below is a no-op (file already gone). The runner
+    // does not surface temp-file rm errors per R-0000158.
+    await cleanupTemporaryDownloadFile(conn, downloadParameters)
   }
 }
 

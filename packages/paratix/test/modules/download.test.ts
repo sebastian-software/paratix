@@ -13,7 +13,8 @@ const createMockSsh: typeof createBaseMockSsh = (responses, options) =>
       { command: /^\[ -e '\/(?:opt|usr)\//v, result: { code: 1 } },
       { command: /^\[ -d '\/(?:opt|tmp|usr|var)\//v, result: { code: 1 } },
       { command: /^\[ -f '\/(?:opt|usr)\//v, result: { code: 1 } },
-      { command: /^\[ -L '\/(?:opt|usr)\//v, result: { code: 1 } },
+      // eslint-disable-next-line security/detect-unsafe-regex -- bounded character class, not user input
+      { command: /^\[ -L '\/(?:opt|tmp|usr|var)(?:\/[^']*)?' \]$/v, result: { code: 1 } },
       { command: /^stat -c '%a %U %G' '\/(?:opt|usr)\//v, result: { stdout: "644 root root" } },
       { command: /^mkdir -p /v, result: { code: 0 } },
       { command: /^mktemp /v, result: { stdout: "/tmp/.paratix-download.stub" } },
@@ -297,6 +298,34 @@ describe("download.url", () => {
   })
 
   describe("apply", () => {
+    // R-0000226: download.url must refuse to write through a symlink at the
+    // destination or any ancestor of dirname(destination). Otherwise a
+    // symlinked dirname would steer the temp file into an attacker-controlled
+    // tree and `mv -T` could clobber the link target instead of the file.
+    it("R-0000226: returns failed when destination itself is a symlink", async () => {
+      const mockSsh = createMockSsh({
+        [`[ -L '${destination}' ]`]: { code: 0 },
+      })
+      const mod = download.url(destination, url, allowUnverifiedDownload)
+      const result = await mod.apply(mockSsh, emptyEnv)
+      expect(result.status).toBe("failed")
+      expect(result.error?.message).toContain("destination is a symlink")
+      expect(mockSsh.calls.every((c) => !c.startsWith("curl"))).toBe(true)
+      expect(mockSsh.calls.every((c) => !c.startsWith("mv "))).toBe(true)
+    })
+
+    it("R-0000226: returns failed when an ancestor of dirname(destination) is a symlink", async () => {
+      const mockSsh = createMockSsh({
+        "[ -L '/usr/local/bin' ]": { code: 0 },
+        [`[ -L '${destination}' ]`]: { code: 1 },
+      })
+      const mod = download.url(destination, url, allowUnverifiedDownload)
+      const result = await mod.apply(mockSsh, emptyEnv)
+      expect(result.status).toBe("failed")
+      expect(result.error?.message).toContain("is a symlink: /usr/local/bin")
+      expect(mockSsh.calls.every((c) => !c.startsWith("curl"))).toBe(true)
+    })
+
     it("downloads file via curl --config from stdin and returns changed", async () => {
       // R-0000037: URLs (including signed/presigned ones) and Authorization
       // headers must not appear on argv. They are passed to curl via
@@ -678,7 +707,13 @@ describe("download.url", () => {
         const mod = download.url(destination, url, allowUnverifiedDownload)
         await expect(mod.apply(mockSsh, emptyEnv)).rejects.toBe(primaryError)
         expect(execMock).toHaveBeenCalledTimes(3)
+        // R-0000226: the symlink guard runs `[ -L ... ]` for the destination
+        // and every ancestor of dirname before the mkdir/mktemp/curl flow.
         expect(base.calls).toStrictEqual([
+          `[ -L '${destination}' ]`,
+          `[ -L '/usr/local/bin' ]`,
+          `[ -L '/usr/local' ]`,
+          `[ -L '/usr' ]`,
           `mkdir -p "$(dirname '${destination}')"`,
           `mktemp "$(dirname '${destination}')/.paratix-download.XXXXXX"`,
           curlCommand,
