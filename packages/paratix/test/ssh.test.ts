@@ -3189,6 +3189,40 @@ describe("SshConnectionImpl", () => {
         unregisterSecret(opToken)
       }
     })
+
+    it("preserves the original SFTP error when temp-file cleanup fails (R-0000196 regression)", async () => {
+      // Regression: cleanupRemoteTempFile previously called this.exec without
+      // ignoreExitCode and propagated rm failures. A transient rm error in
+      // the finally block would overwrite the original SFTP diagnostic with
+      // the misleading rm trace. The fix swallows rm errors and writes a
+      // best-effort warning to stderr instead.
+      const mktempOutput = "/tmp/paratix-download.ROOTCLEAN"
+      const executedCommands: string[] = []
+
+      const execSpy = vi
+        .fn()
+        .mockImplementationOnce(makeExecHandler(executedCommands, mktempOutput))
+        .mockImplementationOnce(makeExecHandler(executedCommands, ""))
+        .mockImplementationOnce((_cmd: string, callback: ExecCallback) => {
+          executedCommands.push(_cmd)
+          callback(new Error("rm -f failed unexpectedly"), makeStream())
+        })
+
+      vi.mocked(sftpDownload).mockRejectedValueOnce(new Error("Original SFTP failure"))
+
+      const client = makeClientWithExecSpy(execSpy)
+      const ssh = makeConnectedSsh(client, { user: "deploy" })
+      const stderrSpy = vi.spyOn(process.stderr, "write").mockImplementation(() => true)
+
+      await expect(ssh.downloadFile("/var/log/secure", "/tmp/local-secure")).rejects.toThrow(
+        "Original SFTP failure"
+      )
+
+      const stderrOutput = stderrSpy.mock.calls.map((args) => String(args[0])).join("")
+      expect(stderrOutput).toContain(`failed to remove temp file ${mktempOutput}`)
+
+      stderrSpy.mockRestore()
+    })
   })
 
   // -------------------------------------------------------------------------

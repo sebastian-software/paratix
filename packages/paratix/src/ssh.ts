@@ -689,11 +689,23 @@ export class SshConnectionImpl implements SshConnection {
   }
 
   private async cleanupRemoteTempFile(remotePath: string): Promise<void> {
-    const cleanup =
-      this.config.user === "root"
-        ? this.exec(`rm -f ${shellQuote(remotePath)}`, { silent: true })
-        : this.execWithoutSudo(`rm -f ${shellQuote(remotePath)}`)
-    await cleanup
+    // R-0000196: best-effort cleanup must not propagate errors — a transient
+    // SSH failure in a `finally` block would otherwise overwrite the
+    // original diagnostic with a misleading rm-failure trace. Mirror the
+    // ignoreExitCode pattern used by cleanupPrivilegedRemoteTempFile and
+    // emit a masked warning to stderr instead of throwing.
+    const command = `rm -f ${shellQuote(remotePath)}`
+    try {
+      if (this.config.user === "root") {
+        await this.exec(command, { ignoreExitCode: true, silent: true })
+        return
+      }
+      await this.execWithoutSudo(command)
+    } catch (cleanupError) {
+      process.stderr.write(
+        `Warning: failed to remove temp file ${remotePath}: ${maskSecrets(String(cleanupError), this.buildSecrets())}\n`
+      )
+    }
   }
 
   private clearCachedPassword(): void {
