@@ -152,7 +152,20 @@ async function applyPresentState(
   if (result.code !== 0) {
     return failedCommand(`[sysctl.set: ${key}] sysctl -w failed`, result)
   }
-  await conn.writeFile(configPath, expectedContent, { mode: SYSCTL_CONFIG_MODE })
+  // R-0000242: convert a `writeFile` exception into a structured `failed`
+  // ModuleResult. Without the catch, a failure of the persistence write
+  // (e.g. read-only mount, missing parent directory, permission denied)
+  // would propagate as an unstructured exception while the live kernel
+  // value already drifted via `sysctl -w`. Mirrors the R-0000182 fix in
+  // similar persist-after-mutation paths.
+  try {
+    await conn.writeFile(configPath, expectedContent, { mode: SYSCTL_CONFIG_MODE })
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : String(error)
+    return failed(
+      `[sysctl.set: ${key}] failed to persist config to ${configPath}: ${reason}; live value already set via sysctl -w`
+    )
+  }
   return { status: "changed" }
 }
 

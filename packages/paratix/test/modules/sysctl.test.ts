@@ -162,6 +162,27 @@ describe("sysctl.set — apply", () => {
     expect(result.status).toBe("failed")
   })
 
+  // R-0000242 regression: when the persistence write throws (read-only
+  // filesystem, missing parent dir, network drop) the live kernel value
+  // has already drifted via `sysctl -w`. Surface this as a structured
+  // `failed` ModuleResult instead of letting the exception propagate.
+  // Mirrors the R-0000182 hardening in similar persist-after-mutation
+  // paths.
+  it("R-0000242: returns failed when the persistence writeFile throws (state: present)", async () => {
+    const mockSsh = createMockSsh({
+      [`sysctl -w '${KEY}=${VALUE}'`]: { code: 0 },
+    })
+    vi.spyOn(mockSsh, "writeFile").mockRejectedValueOnce(
+      new Error("SFTP write failed: read-only file system")
+    )
+    const mod = sysctl.set(KEY, VALUE)
+    const result = await mod.apply(mockSsh, emptyEnv)
+    expect(result.status).toBe("failed")
+    expect(String(result.error)).toContain("failed to persist config to")
+    expect(String(result.error)).toContain("read-only file system")
+    expect(String(result.error)).toContain("live value already set via sysctl -w")
+  })
+
   it("returns failed when conn is null (state: present)", async () => {
     const mod = sysctl.set(KEY, VALUE)
     // eslint-disable-next-line prefer-spread
