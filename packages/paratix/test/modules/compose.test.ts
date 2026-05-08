@@ -37,9 +37,17 @@ function createComposeMockSsh(
           options: { mode: "0600" },
           remotePath: "/opt/app/compose.yml",
         },
+        {
+          // R-0000228: src is uploaded to the staging path, not directly to compose.yml.
+          localPath: /.+/v,
+          options: { mode: "0600" },
+          remotePath: "/opt/app/compose.yml.paratix-staging",
+        },
       ],
       allowWrites: [
         { options: { mode: "0600" }, remotePath: "/opt/app/compose.yml" },
+        // R-0000228: validation runs against a staging file before atomic mv.
+        { options: { mode: "0600" }, remotePath: "/opt/app/compose.yml.paratix-staging" },
         { options: { mode: "0644" }, remotePath: /^\/etc\/systemd\/system\/.+$/v },
       ],
     }
@@ -557,6 +565,9 @@ describe("compose.down — name", () => {
 // ─── compose.config ───────────────────────────────────────────────────────────
 
 const remotePath = `${projectDirectory}/compose.yml`
+// R-0000228: applyComposeConfig writes/validates against this staging path
+// before atomically renaming over compose.yml.
+const stagingPath = `${remotePath}.paratix-staging`
 const sampleContent = "services:\n  web:\n    image: nginx\n"
 
 describe("compose.config — check", () => {
@@ -663,11 +674,16 @@ describe("compose.config — apply", () => {
     expect(result.status).toBe("failed")
   })
 
-  it("writes content and validates with config --quiet", async () => {
+  // R-0000228: writes go to a staging file, validation reads the staging file
+  // via -f, and an atomic mv -T flips compose.yml to the validated revision
+  // so a parallel compose invocation never sees an unvalidated config.
+  it("writes content into staging, validates with -f, and activates with mv -T", async () => {
     const writtenFiles: Array<{ content: string; path: string }> = []
     const mockSsh = createComposeMockSsh({
       [`[ -e '${remotePath}' ]`]: { code: 1 },
-      [`${composeCmd("podman")} config --quiet`]: { code: 0 },
+      [`${composeCmd("podman")} -f '${stagingPath}' config --quiet`]: { code: 0 },
+      [`mv -T '${stagingPath}' '${remotePath}'`]: { code: 0 },
+      [`rm -f '${stagingPath}'`]: { code: 0 },
     })
     // eslint-disable-next-line @typescript-eslint/require-await -- Mock implementation
     mockSsh.writeFile = async (path: string, content: string): Promise<void> => {
@@ -677,9 +693,11 @@ describe("compose.config — apply", () => {
     const mod = compose.config({ content: sampleContent, projectDirectory })
     const result = await mod.apply(mockSsh, emptyEnv)
     expect(result.status).toBe("changed")
-    expect(writtenFiles[0]?.path).toBe(remotePath)
+    expect(writtenFiles[0]?.path).toBe(stagingPath)
     expect(writtenFiles[0]?.content).toBe(sampleContent)
-    expect(mockSsh.calls).toContain(`${composeCmd("podman")} config --quiet`)
+    expect(mockSsh.calls).toContain(`${composeCmd("podman")} -f '${stagingPath}' config --quiet`)
+    expect(mockSsh.calls).toContain(`mv -T '${stagingPath}' '${remotePath}'`)
+    expect(mockSsh.calls).toContain(`rm -f '${stagingPath}'`)
   })
 
   it("uploads src file with the explicit COMPOSE_CONFIG_MODE and validates", async () => {
@@ -690,7 +708,9 @@ describe("compose.config — apply", () => {
     }> = []
     const mockSsh = createComposeMockSsh({
       [`[ -e '${remotePath}' ]`]: { code: 1 },
-      [`${composeCmd("podman")} config --quiet`]: { code: 0 },
+      [`${composeCmd("podman")} -f '${stagingPath}' config --quiet`]: { code: 0 },
+      [`mv -T '${stagingPath}' '${remotePath}'`]: { code: 0 },
+      [`rm -f '${stagingPath}'`]: { code: 0 },
     })
     mockSsh.uploadFile = async (
       src: string,
@@ -705,22 +725,27 @@ describe("compose.config — apply", () => {
     const result = await mod.apply(mockSsh, emptyEnv)
     expect(result.status).toBe("changed")
     expect(uploadedFiles[0]?.src).toBe("/local/compose.yml")
-    expect(uploadedFiles[0]?.dest).toBe(remotePath)
+    // R-0000228: the src is uploaded to the staging path before validation.
+    expect(uploadedFiles[0]?.dest).toBe(stagingPath)
     // The src branch must forward an explicit mode so the resulting file is not
     // produced as the silent uploadFile temp-mode default.
     expect(uploadedFiles[0]?.options).toStrictEqual({ mode: "0600" })
-    expect(mockSsh.calls).toContain(`${composeCmd("podman")} config --quiet`)
+    expect(mockSsh.calls).toContain(`${composeCmd("podman")} -f '${stagingPath}' config --quiet`)
+    expect(mockSsh.calls).toContain(`mv -T '${stagingPath}' '${remotePath}'`)
   })
 
-  it("returns failed when validation fails", async () => {
+  it("returns failed when validation fails and never activates the staging file", async () => {
     const mockSsh = createComposeMockSsh({
       [`[ -e '${remotePath}' ]`]: { code: 1 },
-      [`${composeCmd("podman")} config --quiet`]: { code: 1 },
-      [`rm -f '${remotePath}'`]: { code: 0 },
+      [`${composeCmd("podman")} -f '${stagingPath}' config --quiet`]: { code: 1 },
+      [`rm -f '${stagingPath}'`]: { code: 0 },
     })
     const mod = compose.config({ content: sampleContent, projectDirectory })
     const result = await mod.apply(mockSsh, emptyEnv)
     expect(result.status).toBe("failed")
+    // R-0000228: the staging file is cleaned up but never moved over compose.yml.
+    expect(mockSsh.calls).toContain(`rm -f '${stagingPath}'`)
+    expect(mockSsh.calls).not.toContain(`mv -T '${stagingPath}' '${remotePath}'`)
   })
 
   it("returns failed when neither src nor content is provided", async () => {
@@ -730,9 +755,10 @@ describe("compose.config — apply", () => {
     expect(result.status).toBe("failed")
   })
 
-  it("rolls back to prior content when validation fails (content path)", async () => {
-    // R-0000035: a failed `compose ... config --quiet` validation must restore
-    // the previous compose.yml so the host is never left with a broken file.
+  // R-0000228: validation runs against the staging file. When it fails, the
+  // existing compose.yml is left completely untouched — the staging file is
+  // simply removed. Confirm no write/rollback to the active file happened.
+  it("R-0000228: leaves the active compose.yml untouched when validation fails", async () => {
     const priorContent = "services:\n  web:\n    image: nginx:1.0\n"
     const writtenFiles: Array<{
       content: string
@@ -741,9 +767,9 @@ describe("compose.config — apply", () => {
     }> = []
     const mockSsh = createComposeMockSsh({
       [`[ -e '${remotePath}' ]`]: { code: 0 },
-      [`${composeCmd("podman")} config --quiet`]: { code: 1 },
+      [`${composeCmd("podman")} -f '${stagingPath}' config --quiet`]: { code: 1 },
       [`cat '${remotePath}'`]: { code: 0, stdout: priorContent },
-      [`stat -c '%a' '${remotePath}'`]: { code: 0, stdout: "600" },
+      [`rm -f '${stagingPath}'`]: { code: 0 },
     })
     mockSsh.writeFile = async (
       path: string,
@@ -758,17 +784,18 @@ describe("compose.config — apply", () => {
     const result = await mod.apply(mockSsh, emptyEnv)
 
     expect(result.status).toBe("failed")
-    // First write: the new (broken) content. Second write: rollback restoring
-    // the captured prior content with the captured mode.
-    expect(writtenFiles).toHaveLength(2)
+    // Only the staging write happened; the active compose.yml never received
+    // a writeFile (validation failed before the atomic mv).
+    expect(writtenFiles).toHaveLength(1)
+    expect(writtenFiles[0]?.path).toBe(stagingPath)
     expect(writtenFiles[0]?.content).toBe("broken: yaml: [\n")
-    expect(writtenFiles[1]?.content).toBe(priorContent)
-    expect(writtenFiles[1]?.mode).toBe("600")
-    expect(writtenFiles[1]?.path).toBe(remotePath)
+    expect(mockSsh.calls).not.toContain(`mv -T '${stagingPath}' '${remotePath}'`)
+    expect(mockSsh.calls).toContain(`rm -f '${stagingPath}'`)
   })
 
-  it("rolls back to prior content when validation throws after writing", async () => {
-    const priorContent = "services:\n  web:\n    image: nginx:1.0\n"
+  // R-0000228: when validation throws (e.g. compose CLI itself crashes),
+  // the staging file must still be removed via the finally block.
+  it("R-0000228: cleans up the staging file when validation throws", async () => {
     const validationError = new Error("validation command timed out")
     const writtenFiles: Array<{
       content: string
@@ -777,10 +804,10 @@ describe("compose.config — apply", () => {
     }> = []
     const mockSsh = createComposeMockSsh({
       [`[ -e '${remotePath}' ]`]: { code: 0 },
-      [`cat '${remotePath}'`]: { code: 0, stdout: priorContent },
-      [`stat -c '%a' '${remotePath}'`]: { code: 0, stdout: "600" },
+      [`rm -f '${stagingPath}'`]: { code: 0 },
     })
-    vi.spyOn(mockSsh, "exec").mockRejectedValueOnce(validationError)
+    // The first exec call after writeFile is the compose validation; reject it.
+    vi.spyOn(mockSsh, "exec").mockImplementationOnce(async () => Promise.reject(validationError))
     mockSsh.writeFile = async (
       path: string,
       content: string,
@@ -793,14 +820,16 @@ describe("compose.config — apply", () => {
     const mod = compose.config({ content: "broken: yaml: [\n", projectDirectory })
     await expect(mod.apply(mockSsh, emptyEnv)).rejects.toThrow(validationError)
 
-    expect(writtenFiles).toHaveLength(2)
-    expect(writtenFiles[0]?.content).toBe("broken: yaml: [\n")
-    expect(writtenFiles[1]?.content).toBe(priorContent)
-    expect(writtenFiles[1]?.mode).toBe("600")
-    expect(writtenFiles[1]?.path).toBe(remotePath)
+    // The staging write happened, validation threw, finally removed staging.
+    expect(writtenFiles).toHaveLength(1)
+    expect(writtenFiles[0]?.path).toBe(stagingPath)
+    expect(mockSsh.calls).toContain(`rm -f '${stagingPath}'`)
+    expect(mockSsh.calls).not.toContain(`mv -T '${stagingPath}' '${remotePath}'`)
   })
 
-  it("rolls back to prior content when validation fails (src path)", async () => {
+  // R-0000228: the src path uploads to the staging file, validates with -f,
+  // and when validation fails the active compose.yml is never touched.
+  it("R-0000228: leaves the active compose.yml untouched when validation fails (src path)", async () => {
     const { readFile: readFileMock } = await import("node:fs/promises")
     const priorContent = "services:\n  api:\n    image: alpine:3\n"
     const newContent = "broken-yaml: [\n"
@@ -817,9 +846,9 @@ describe("compose.config — apply", () => {
     }> = []
     const mockSsh = createComposeMockSsh({
       [`[ -e '${remotePath}' ]`]: { code: 0 },
-      [`${composeCmd("podman")} config --quiet`]: { code: 1 },
+      [`${composeCmd("podman")} -f '${stagingPath}' config --quiet`]: { code: 1 },
       [`cat '${remotePath}'`]: { code: 0, stdout: priorContent },
-      [`stat -c '%a' '${remotePath}'`]: { code: 0, stdout: "600" },
+      [`rm -f '${stagingPath}'`]: { code: 0 },
     })
     mockSsh.uploadFile = async (
       src: string,
@@ -842,22 +871,22 @@ describe("compose.config — apply", () => {
     const result = await mod.apply(mockSsh, emptyEnv)
 
     expect(result.status).toBe("failed")
-    // The src path uploaded the broken file, validation failed, then the
-    // rollback writeFile restored the captured prior content.
+    // The src was uploaded to the staging path; the active compose.yml never
+    // received a write or upload because validation failed before mv -T.
     expect(uploadedFiles).toHaveLength(1)
     expect(uploadedFiles[0]?.src).toBe("/local/broken.yml")
-    expect(writtenFiles).toHaveLength(1)
-    expect(writtenFiles[0]?.content).toBe(priorContent)
-    expect(writtenFiles[0]?.mode).toBe("600")
-    expect(writtenFiles[0]?.path).toBe(remotePath)
+    expect(uploadedFiles[0]?.dest).toBe(stagingPath)
+    expect(writtenFiles).toHaveLength(0)
+    expect(mockSsh.calls).not.toContain(`mv -T '${stagingPath}' '${remotePath}'`)
+    expect(mockSsh.calls).toContain(`rm -f '${stagingPath}'`)
   })
 
-  it("removes the freshly written file on validation failure when no prior file existed", async () => {
+  it("removes the staging file on validation failure when no prior file existed", async () => {
     const writtenFiles: Array<{ content: string; path: string }> = []
     const mockSsh = createComposeMockSsh({
       [`[ -e '${remotePath}' ]`]: { code: 1 },
-      [`${composeCmd("podman")} config --quiet`]: { code: 1 },
-      [`rm -f '${remotePath}'`]: { code: 0 },
+      [`${composeCmd("podman")} -f '${stagingPath}' config --quiet`]: { code: 1 },
+      [`rm -f '${stagingPath}'`]: { code: 0 },
     })
     // eslint-disable-next-line @typescript-eslint/require-await -- Mock implementation
     mockSsh.writeFile = async (path: string, content: string): Promise<void> => {
@@ -868,10 +897,10 @@ describe("compose.config — apply", () => {
     const result = await mod.apply(mockSsh, emptyEnv)
 
     expect(result.status).toBe("failed")
-    // Only the failed write happened; rollback removed the freshly written
-    // compose.yml via `rm -f` instead of restoring stale content.
+    // Only the staging write happened; cleanup removed it.
     expect(writtenFiles).toHaveLength(1)
-    expect(mockSsh.calls).toContain(`rm -f '${remotePath}'`)
+    expect(writtenFiles[0]?.path).toBe(stagingPath)
+    expect(mockSsh.calls).toContain(`rm -f '${stagingPath}'`)
   })
 })
 

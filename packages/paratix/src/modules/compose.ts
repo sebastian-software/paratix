@@ -514,94 +514,70 @@ function createComposeConfigCheck(
 }
 
 /**
- * Snapshot of a `compose.yml` captured before {@link compose.config} writes a
- * new revision. When validation of the new revision fails, the snapshot is
- * used to restore the previous state.
- */
-type PriorComposeFile = { content: string; existed: true; mode: string } | { existed: false }
-
-/**
- * Capture the existing `compose.yml` at `remotePath` so a failed validation
- * can restore it. When the file does not exist yet, the returned state allows
- * the rollback to remove the freshly written file instead.
+ * Write the new compose.yml content to a staging path, leaving the active
+ * `compose.yml` untouched until validation succeeds. Either `options.src`
+ * (uploaded) or `options.content` (string) is used; the caller has already
+ * verified that exactly one is provided.
  *
  * @param ssh - The SSH connection to the remote host.
- * @param remotePath - Path to `compose.yml` on the remote host.
- * @returns A snapshot describing whether the file existed and its content/mode.
- */
-async function capturePriorComposeFile(
-  ssh: SshConnection,
-  remotePath: string
-): Promise<PriorComposeFile> {
-  const existed = await ssh.exists(remotePath)
-  if (!existed) return { existed: false }
-
-  const content = await ssh.readFile(remotePath)
-  const rawMode = await ssh.output(`stat -c '%a' ${shellQuote(remotePath)}`)
-  const trimmedMode = rawMode.trim()
-  const mode = trimmedMode === "" ? COMPOSE_CONFIG_MODE : trimmedMode
-  return { content, existed: true, mode }
-}
-
-/**
- * Write the new compose.yml content from either `options.src` (uploaded) or
- * `options.content` (string). Caller has already verified that exactly one is
- * provided.
- *
- * @param ssh - The SSH connection to the remote host.
- * @param remotePath - Destination path for the compose file.
+ * @param stagingPath - Temporary destination for the new compose content.
  * @param options - Source/content options identical to {@link compose.config}.
  * @param options.content - Inline string content to write.
  * @param options.src - Local file path to upload.
  */
-async function writeComposeFileForValidation(
+async function writeComposeStagingFile(
   ssh: SshConnection,
-  remotePath: string,
+  stagingPath: string,
   options: { content?: string; src?: string }
 ): Promise<void> {
   if (options.src !== undefined && options.src !== "") {
     // Always pass an explicit { mode } to uploadFile so the resulting
     // compose.yml mode is independent of the uploadFile temp default.
-    await ssh.uploadFile(options.src, remotePath, { mode: COMPOSE_CONFIG_MODE })
+    await ssh.uploadFile(options.src, stagingPath, { mode: COMPOSE_CONFIG_MODE })
     return
   }
   if (options.content !== undefined && options.content !== "") {
-    await ssh.writeFile(remotePath, options.content, { mode: COMPOSE_CONFIG_MODE })
+    await ssh.writeFile(stagingPath, options.content, { mode: COMPOSE_CONFIG_MODE })
   }
 }
 
-/**
- * Restore the prior `compose.yml` after a failed validation. When the file
- * did not exist before, remove the freshly-written file instead.
- *
- * @param ssh - The SSH connection to the remote host.
- * @param remotePath - Path to the compose file.
- * @param prior - The snapshot captured before the new content was written.
- */
-async function rollbackComposeFile(
-  ssh: SshConnection,
-  remotePath: string,
-  prior: PriorComposeFile
-): Promise<void> {
-  if (prior.existed) {
-    await ssh.writeFile(remotePath, prior.content, { mode: prior.mode })
-    return
-  }
-  await ssh.exec(`rm -f ${shellQuote(remotePath)}`, EXEC_OPTS)
-}
-
-async function validateWrittenComposeFile(parameters: {
+async function validateStagedComposeFile(parameters: {
   projectDirectory: string
   runtime: ComposeRuntime
   ssh: SshConnection
+  stagingPath: string
 }): Promise<ModuleResult | null> {
-  const { projectDirectory, runtime, ssh } = parameters
+  const { projectDirectory, runtime, ssh, stagingPath } = parameters
+  // R-0000228: validate against the staging file with -f so a parallel
+  // compose invocation reading <projectDirectory>/compose.yml never sees
+  // a half-written or unvalidated revision.
   const validate = await ssh.exec(
-    `${composeCommand(runtime, projectDirectory)} config --quiet`,
+    `${composeCommand(runtime, projectDirectory)} -f ${shellQuote(stagingPath)} config --quiet`,
     EXEC_OPTS
   )
   if (validate.code === 0) return null
   return failedCommand(`[compose.config] validation failed for ${projectDirectory}`, validate)
+}
+
+async function activateStagedComposeFile(
+  ssh: SshConnection,
+  stagingPath: string,
+  remotePath: string
+): Promise<ModuleResult | null> {
+  // R-0000228: atomic rename so the active compose.yml flips from prior
+  // to validated content in one syscall. mv -T refuses to descend into
+  // an existing directory at remotePath, mirroring the safety we already
+  // require for download.url destinations.
+  const move = await ssh.exec(
+    `mv -T ${shellQuote(stagingPath)} ${shellQuote(remotePath)}`,
+    EXEC_OPTS
+  )
+  if (move.code === 0) return null
+  return failedCommand(`[compose.config] failed to activate validated compose file`, move)
+}
+
+async function removeComposeStagingFile(ssh: SshConnection, stagingPath: string): Promise<void> {
+  await ssh.exec(`rm -f ${shellQuote(stagingPath)}`, EXEC_OPTS)
 }
 
 async function applyComposeConfig(parameters: {
@@ -612,21 +588,25 @@ async function applyComposeConfig(parameters: {
   ssh: SshConnection
 }): Promise<ModuleResult> {
   const { options, projectDirectory, remotePath, runtime, ssh } = parameters
-  const priorState = await capturePriorComposeFile(ssh, remotePath)
+  const stagingPath = `${remotePath}.paratix-staging`
 
-  let rollbackPending = true
+  // R-0000228: write into a staging file (not into compose.yml). The active
+  // compose.yml is only replaced after validation succeeds, so a parallel
+  // `compose up` cannot pick up an unvalidated config. The staging file is
+  // also cleaned up if validation or anything else throws.
   try {
-    await writeComposeFileForValidation(ssh, remotePath, options)
-    const validationFailure = await validateWrittenComposeFile({ projectDirectory, runtime, ssh })
-    if (validationFailure != null) {
-      rollbackPending = false
-      await rollbackComposeFile(ssh, remotePath, priorState)
-      return validationFailure
-    }
-    rollbackPending = false
-  } catch (error) {
-    if (rollbackPending) await rollbackComposeFile(ssh, remotePath, priorState)
-    throw error
+    await writeComposeStagingFile(ssh, stagingPath, options)
+    const validationFailure = await validateStagedComposeFile({
+      projectDirectory,
+      runtime,
+      ssh,
+      stagingPath,
+    })
+    if (validationFailure != null) return validationFailure
+    const activationFailure = await activateStagedComposeFile(ssh, stagingPath, remotePath)
+    if (activationFailure != null) return activationFailure
+  } finally {
+    await removeComposeStagingFile(ssh, stagingPath)
   }
 
   return { status: "changed" }
