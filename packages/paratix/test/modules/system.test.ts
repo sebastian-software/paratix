@@ -103,6 +103,29 @@ describe("system.reboot — apply", () => {
     expect(result.meta).toBeUndefined()
   })
 
+  // R-0000243: a resolver that never settles must not stall the runner.
+  // The wall-clock timeout surfaces as a `failed` result instead.
+  it("R-0000243: returns failed when resolveHost exceeds the configured timeout", async () => {
+    vi.useFakeTimers()
+    try {
+      const ssh = createMockSsh(successfulRebootResponses)
+      const resolveHost = vi.fn().mockReturnValue(
+        new Promise<string>(() => {
+          // never settles
+        })
+      )
+      const mod = system.reboot({ resolveHost, resolveHostTimeoutMs: 25 })
+      const promise = mod.apply(ssh, emptyEnv)
+      await vi.advanceTimersByTimeAsync(25)
+      const result = await promise
+      expect(result.status).toBe("failed")
+      expect(result.error?.message).toContain("[system.reboot] resolveHost failed")
+      expect(result.error?.message).toContain("timed out after 25ms")
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
   it("treats SSH connection closed mid-shutdown as a successful reboot trigger", async () => {
     const ssh = createMockSsh()
     vi.spyOn(ssh, "exec").mockImplementation(async (command: string) => {

@@ -7,6 +7,7 @@ import {
   NEEDS_APPLY,
   type SshConnection,
 } from "../types.js"
+import { buildRebootMetaEntriesWithTimeout } from "./resolveHostTimeout.js"
 
 /**
  * Options for the reboot module.
@@ -17,6 +18,13 @@ export type RebootOptions = {
    * Useful when the server's IP address may change (e.g. DHCP or cloud environments).
    */
   resolveHost?: () => Promise<string>
+  /**
+   * Wall-clock timeout (ms) applied to {@link RebootOptions.resolveHost}.
+   * Defaults to 30 seconds. Mirrors R-0000243 in
+   * {@link import("./releaseUpgrade.js")} so a stuck resolver cannot stall
+   * the runner indefinitely.
+   */
+  resolveHostTimeoutMs?: number
 }
 
 /**
@@ -77,17 +85,14 @@ async function triggerReboot(ssh: SshConnection): Promise<ModuleResult | null> {
 async function buildRebootMetaEntries(
   options: RebootOptions
 ): Promise<ModuleMetaEntry[] | ModuleResult> {
-  const entries: ModuleMetaEntry[] = [meta.systemReboot()]
-  if (options.resolveHost != null) {
-    try {
-      const newHost = await options.resolveHost()
-      entries.push(meta.systemHost(newHost))
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error)
-      return failed(`[system.reboot] resolveHost failed\n${message}`)
-    }
-  }
-  return entries
+  // R-0000243: bound the resolver with a wall-clock timeout so a hanging
+  // DNS/cloud lookup surfaces as a `failed` result instead of stalling the
+  // playbook forever.
+  return buildRebootMetaEntriesWithTimeout({
+    failurePrefix: "[system.reboot]",
+    resolveHost: options.resolveHost,
+    timeoutMs: options.resolveHostTimeoutMs,
+  })
 }
 
 /**

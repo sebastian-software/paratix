@@ -981,4 +981,31 @@ describe("releaseUpgrade.upgrade — apply (general)", () => {
     expect(result.error?.message).toContain("DNS timeout")
     expect(result.meta).toBeUndefined()
   })
+
+  // R-0000243: a hanging resolver must not stall the playbook indefinitely.
+  it("R-0000243: returns failed when resolveHost exceeds the configured timeout", async () => {
+    vi.useFakeTimers()
+    try {
+      const ssh = createMockSsh({
+        "cat '/etc/os-release'": { code: 0, stdout: UBUNTU_OS_RELEASE },
+        "DEBIAN_FRONTEND=noninteractive apt-get update": { code: 0 },
+        "do-release-upgrade -f DistUpgradeViewNonInteractive": { code: 0 },
+      })
+      const resolveHost = vi.fn().mockReturnValue(
+        new Promise<string>(() => {
+          // never settles
+        })
+      )
+      const mod = releaseUpgrade.upgrade({ resolveHost, resolveHostTimeoutMs: 25 })
+      const promise = mod.apply(ssh, emptyEnv)
+      await vi.advanceTimersByTimeAsync(25)
+      const result = await promise
+      expect(result.status).toBe("failed")
+      expect(result.error?.message).toContain("[releaseUpgrade.upgrade] resolveHost failed")
+      expect(result.error?.message).toContain("timed out after 25ms")
+      expect(result.meta).toBeUndefined()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
 })

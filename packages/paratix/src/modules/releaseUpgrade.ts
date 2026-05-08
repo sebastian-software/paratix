@@ -1,4 +1,3 @@
-import { meta } from "../meta.js"
 import { failed, failedCommand } from "../moduleFailure.js"
 import { shellQuote } from "../ssh.js"
 import {
@@ -20,6 +19,7 @@ import {
   RELEASE_UPGRADE_DEFAULT_TIMEOUT_MS,
   rewriteAptSourcesContent,
 } from "./releaseUpgradeSources.js"
+import { buildRebootMetaEntriesWithTimeout } from "./resolveHostTimeout.js"
 
 const NONINTERACTIVE = "DEBIAN_FRONTEND=noninteractive"
 const CODENAME_RE = /^[a-z]{3,20}$/v
@@ -45,6 +45,12 @@ type ReleaseUpgradeOptions = {
    * `system.host` meta so the runner can reconnect to the correct address.
    */
   resolveHost?: () => Promise<string>
+  /**
+   * Wall-clock timeout (ms) applied to {@link ReleaseUpgradeOptions.resolveHost}.
+   * Defaults to 30 seconds (R-0000243) so a hanging DNS/cloud lookup cannot
+   * stall the playbook indefinitely.
+   */
+  resolveHostTimeoutMs?: number
   /** Override the per-step command timeout (ms). Default: 30 minutes. */
   timeout?: number
 }
@@ -287,17 +293,14 @@ async function restoreSourcesSnapshots(
 async function buildRebootMeta(
   options: ReleaseUpgradeOptions
 ): Promise<ModuleMetaEntry[] | ModuleResult> {
-  const entries: ModuleMetaEntry[] = [meta.systemReboot()]
-  if (options.resolveHost != null) {
-    try {
-      const newHost = await options.resolveHost()
-      entries.push(meta.systemHost(newHost))
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error)
-      return failed(`[releaseUpgrade.upgrade] resolveHost failed\n${message}`)
-    }
-  }
-  return entries
+  // R-0000243: bound the resolver with a wall-clock timeout so a hanging
+  // DNS/cloud lookup surfaces as a `failed` result instead of stalling the
+  // playbook forever.
+  return buildRebootMetaEntriesWithTimeout({
+    failurePrefix: "[releaseUpgrade.upgrade]",
+    resolveHost: options.resolveHost,
+    timeoutMs: options.resolveHostTimeoutMs,
+  })
 }
 
 function releaseUpgradeExecOptions(options: ReleaseUpgradeOptions): ExecOptions {
