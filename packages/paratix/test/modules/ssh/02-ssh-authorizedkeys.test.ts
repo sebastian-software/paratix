@@ -1,6 +1,6 @@
 /* oxlint-disable no-unused-vars -- shared fixtures are duplicated by the mechanical test split */
 
-import { describe, expect, it, vi } from "vitest"
+import { describe, expect, it } from "vitest"
 
 import { ssh } from "../../../src/modules/ssh.js"
 import { createMockSsh as createBaseMockSsh } from "../../helpers/mockSsh.js"
@@ -476,7 +476,11 @@ describe("ssh.authorizedKeys", () => {
     )
     const mod = ssh.authorizedKeys("alice", testKey)
 
-    await expect(mod.apply(mockSsh, emptyEnv)).rejects.toThrow("awk: read error")
+    // R-0000244: mutation failures surface as a structured `failed`
+    // ModuleResult instead of an unstructured exception.
+    const result = await mod.apply(mockSsh, emptyEnv)
+    expect(result.status).toBe("failed")
+    expect(String(result.error)).toContain("awk: read error")
     expect(mockSsh.calls).toContain(rewriteCommand)
     expect(mockSsh.calls).not.toContain(aliceFinalReplaceCommand)
   })
@@ -508,7 +512,11 @@ describe("ssh.authorizedKeys", () => {
     )
     const mod = ssh.authorizedKeys("alice", testKey, { state: "absent" })
 
-    await expect(mod.apply(mockSsh, emptyEnv)).rejects.toThrow("grep: read error")
+    // R-0000244: mutation failures surface as a structured `failed`
+    // ModuleResult instead of an unstructured exception.
+    const result = await mod.apply(mockSsh, emptyEnv)
+    expect(result.status).toBe("failed")
+    expect(String(result.error)).toContain("grep: read error")
     expect(mockSsh.calls).toContain(rewriteCommand)
     expect(mockSsh.calls).not.toContain(aliceFinalReplaceCommand)
   })
@@ -557,52 +565,43 @@ describe("ssh.authorizedKeys", () => {
     expect(mockSsh.calls).toContain(aliceFinalReplaceCommand)
   })
 
-  it("rejects when authorized_keys is a symlink", async () => {
-    const base = createMockSsh(
+  it("returns failed when authorized_keys is a symlink", async () => {
+    // R-0000244: mutation failures surface as a structured `failed`
+    // ModuleResult instead of an unstructured exception.
+    const mockSsh = createMockSsh(
       aliceResponses({
         [`[ ! -L ${aliceKeys} ] || { echo 'authorized_keys must not be a symlink' >&2; exit 1; }`]:
           {
             code: 1,
             stderr: "authorized_keys must not be a symlink",
           },
-      })
+      }),
+      successfulSshApplyOptions
     )
-    const mockSsh = {
-      ...base,
-      exec: vi
-        .fn()
-        .mockImplementationOnce(async (command: string) => {
-          base.calls.push(command)
-          await Promise.resolve()
-          return { code: 0, stderr: "", stdout: "" }
-        })
-        .mockImplementationOnce(async (command: string) => {
-          base.calls.push(command)
-          await Promise.resolve()
-          throw new Error("Command failed")
-        }),
-    }
     const mod = ssh.authorizedKeys("alice", testKey)
 
-    await expect(mod.apply(mockSsh, emptyEnv)).rejects.toThrow("Command failed")
+    const result = await mod.apply(mockSsh, emptyEnv)
+    expect(result.status).toBe("failed")
+    expect(String(result.error)).toContain("authorized_keys must not be a symlink")
     expect(mockSsh.calls).not.toContain(aliceMktempPattern)
   })
 
-  it("rejects when .ssh is a symlink before chmod, chown, mktemp, or rewrite", async () => {
+  it("returns failed when .ssh is a symlink before chmod, chown, mktemp, or rewrite", async () => {
+    // R-0000244: mutation failures surface as a structured `failed`
+    // ModuleResult instead of an unstructured exception.
     const mockSsh = createMockSsh(
       aliceResponses({
         [aliceSshDirectoryGuard]: {
           code: 1,
           stderr: ".ssh must not be a symlink",
         },
-      }),
-      {
-        rejectNonZeroExit: true,
-      }
+      })
     )
     const mod = ssh.authorizedKeys("alice", testKey)
 
-    await expect(mod.apply(mockSsh, emptyEnv)).rejects.toThrow(".ssh must not be a symlink")
+    const result = await mod.apply(mockSsh, emptyEnv)
+    expect(result.status).toBe("failed")
+    expect(String(result.error)).toContain(".ssh must not be a symlink")
     expect(mockSsh.calls).toContain(aliceSshDirectoryGuard)
     expect(mockSsh.calls).not.toContain(
       `mkdir -p ${aliceDir} && chmod 700 ${aliceDir} && chown 'alice':'alice' ${aliceDir}`
@@ -614,7 +613,9 @@ describe("ssh.authorizedKeys", () => {
     expect(mockSsh.calls).not.toContain(aliceFinalReplaceCommand)
   })
 
-  it("regression: rejects when .ssh is exchanged before the final authorized_keys replace", async () => {
+  it("regression: returns failed when .ssh is exchanged before the final authorized_keys replace", async () => {
+    // R-0000244: mutation failures surface as a structured `failed`
+    // ModuleResult instead of an unstructured exception.
     const mockSsh = createMockSsh(
       aliceResponses({
         [aliceFinalReplaceCommand]: {
@@ -623,13 +624,13 @@ describe("ssh.authorizedKeys", () => {
         },
         [aliceMktempPattern]: { stdout: tempPath },
       }),
-      { ...successfulSshApplyOptions, rejectNonZeroExit: true }
+      successfulSshApplyOptions
     )
     const mod = ssh.authorizedKeys("alice", testKey)
 
-    await expect(mod.apply(mockSsh, emptyEnv)).rejects.toThrow(
-      ".ssh ownership changed before authorized_keys replace"
-    )
+    const result = await mod.apply(mockSsh, emptyEnv)
+    expect(result.status).toBe("failed")
+    expect(String(result.error)).toContain(".ssh ownership changed before authorized_keys replace")
     expect(mockSsh.calls).toContain(aliceSshDirectoryGuard)
     expect(mockSsh.calls).toContain(
       presentAuthorizedKeysRewriteCommand(aliceKeys, tempPath, testKey)

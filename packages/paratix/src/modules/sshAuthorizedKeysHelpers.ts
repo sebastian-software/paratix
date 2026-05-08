@@ -1,6 +1,9 @@
-import { failed } from "../moduleFailure.js"
+/* eslint-disable max-lines -- authorized_keys flow keeps related apply, check, and rewrite helpers together */
+import { failed, failedCommand } from "../moduleFailure.js"
 import { shellQuote, validateMktempPath } from "../ssh.js"
 import { type ModuleResult, NEEDS_APPLY, type SshConnection } from "../types.js"
+
+const MUTATION_EXEC_OPTS = { ignoreExitCode: true, silent: true } as const
 
 // R-0000181: prefix used by `mktemp` for the in-flight authorized_keys
 // rewrite. The leading dot keeps the temp file hidden from typical
@@ -84,14 +87,29 @@ async function createAuthorizedKeysTemporaryPath(
   return validateMktempPath(sshDirectoryPath, temporaryPath, AUTHORIZED_KEYS_TEMPORARY_PREFIX)
 }
 
+// R-0000244: mutation helpers return a `failedCommand` ModuleResult on
+// non-zero exit instead of letting `conn.exec` throw an unstructured
+// SSH error. Callers chain on a `null` return value.
 async function ensureAuthorizedKeysIsNotSymlink(
   conn: SshConnection,
-  authorizedKeysPath: string
-): Promise<void> {
-  await conn.exec(
+  parameters: {
+    authorizedKeysPath: string
+    state: "absent" | "present"
+    user: string
+  }
+): Promise<ModuleResult | null> {
+  const { authorizedKeysPath, state, user } = parameters
+  const result = await conn.exec(
     `[ ! -L ${shellQuote(authorizedKeysPath)} ] || { echo 'authorized_keys must not be a symlink' >&2; exit 1; }`,
-    { silent: true }
+    MUTATION_EXEC_OPTS
   )
+  if (result.code !== 0) {
+    return failedCommand(
+      `[ssh.authorizedKeys: ${user} (${state})] authorized_keys symlink check failed`,
+      result
+    )
+  }
+  return null
 }
 
 async function ensureSshDirectoryForAuthorizedKeys(
@@ -99,16 +117,24 @@ async function ensureSshDirectoryForAuthorizedKeys(
   parameters: {
     primaryGroup: string
     sshDirectoryPath: string
+    state: "absent" | "present"
     user: string
   }
-): Promise<void> {
-  const { primaryGroup, sshDirectoryPath, user } = parameters
+): Promise<ModuleResult | null> {
+  const { primaryGroup, sshDirectoryPath, state, user } = parameters
   const directory = shellQuote(sshDirectoryPath)
 
-  await conn.exec(
+  const result = await conn.exec(
     `[ ! -L ${directory} ] || { echo '.ssh must not be a symlink' >&2; exit 1; }; if [ -e ${directory} ]; then [ -d ${directory} ] || { echo '.ssh must be a directory' >&2; exit 1; }; else mkdir -p ${directory}; fi; [ -d ${directory} ] && [ ! -L ${directory} ] || { echo '.ssh must be a real directory' >&2; exit 1; }; chmod 700 ${directory} && chown ${shellQuote(user)}:${shellQuote(primaryGroup)} ${directory}`,
-    { silent: true }
+    MUTATION_EXEC_OPTS
   )
+  if (result.code !== 0) {
+    return failedCommand(
+      `[ssh.authorizedKeys: ${user} (${state})] failed to prepare .ssh directory`,
+      result
+    )
+  }
+  return null
 }
 
 async function authorizedKeysSecurityStateIsValid(
@@ -139,6 +165,77 @@ async function authorizedKeysSecurityStateIsValid(
   return authorizedKeysState.trim() === `600 ${user} ${primaryGroup} regular file`
 }
 
+async function stageAuthorizedKeysContent(
+  conn: SshConnection,
+  parameters: {
+    authorizedKeysPath: string
+    key: string
+    state: "absent" | "present"
+    temporaryPath: string
+    user: string
+  }
+): Promise<ModuleResult | null> {
+  const { authorizedKeysPath, key, state, temporaryPath, user } = parameters
+  const stage =
+    state === "present"
+      ? await conn.exec(
+          `{ if [ -f ${shellQuote(authorizedKeysPath)} ]; then awk '1' ${shellQuote(authorizedKeysPath)} > ${shellQuote(temporaryPath)} || exit $?; grep -qxF -- ${shellQuote(key)} ${shellQuote(authorizedKeysPath)}; grep_status=$?; if [ "$grep_status" -eq 0 ]; then :; elif [ "$grep_status" -eq 1 ]; then printf '%s\\n' ${shellQuote(key)} >> ${shellQuote(temporaryPath)}; else exit "$grep_status"; fi; else printf '%s\\n' ${shellQuote(key)} > ${shellQuote(temporaryPath)}; fi; }`,
+          MUTATION_EXEC_OPTS
+        )
+      : // R-0000044: use `grep -vxF` (whole-line match) to mirror the present
+        // branch's `grep -qxF` and avoid removing collateral entries whose key
+        // body is a substring of the key being deleted (e.g. a key appearing
+        // again with options-prefix or a different comment).
+        await conn.exec(
+          `{ if [ -f ${shellQuote(authorizedKeysPath)} ]; then grep -vxF -- ${shellQuote(key)} ${shellQuote(authorizedKeysPath)} > ${shellQuote(temporaryPath)}; grep_status=$?; if [ "$grep_status" -eq 0 ] || [ "$grep_status" -eq 1 ]; then :; else exit "$grep_status"; fi; else : > ${shellQuote(temporaryPath)}; fi; }`,
+          MUTATION_EXEC_OPTS
+        )
+  if (stage.code !== 0) {
+    return failedCommand(
+      `[ssh.authorizedKeys: ${user} (${state})] failed to stage authorized_keys rewrite`,
+      stage
+    )
+  }
+  return null
+}
+
+async function replaceAuthorizedKeysAtomically(
+  conn: SshConnection,
+  parameters: {
+    authorizedKeysPath: string
+    primaryGroup: string
+    sshDirectoryPath: string
+    state: "absent" | "present"
+    temporaryPath: string
+    user: string
+  }
+): Promise<ModuleResult | null> {
+  const { authorizedKeysPath, primaryGroup, sshDirectoryPath, state, temporaryPath, user } =
+    parameters
+  // R-0000065: chown to the user and the user's resolved primary group
+  // instead of `${user}:${user}`. This preserves the existing primary group
+  // on hosts where it is not equal to the username (e.g. `deploy:users`,
+  // `www-data:www-data`) and prevents a drift loop where apply overwrites
+  // the semantically correct group ownership only to see check go green on
+  // the next run.
+  const quotedTemporaryPath = shellQuote(temporaryPath)
+  const quotedSshDirectoryPath = shellQuote(sshDirectoryPath)
+  const quotedAuthorizedKeysPath = shellQuote(authorizedKeysPath)
+  const expectedSshDirectoryState = shellQuote(`700 ${user} ${primaryGroup} directory`)
+
+  const replace = await conn.exec(
+    `chmod 600 ${quotedTemporaryPath} && chown ${shellQuote(user)}:${shellQuote(primaryGroup)} ${quotedTemporaryPath} && { [ ! -L ${quotedSshDirectoryPath} ] || { echo '.ssh must not be a symlink' >&2; exit 1; }; [ -d ${quotedSshDirectoryPath} ] || { echo '.ssh must be a directory' >&2; exit 1; }; ssh_directory_state=$(stat -c '%a %U %G %F' ${quotedSshDirectoryPath}) || exit $?; [ "$ssh_directory_state" = ${expectedSshDirectoryState} ] || { echo '.ssh ownership changed before authorized_keys replace' >&2; exit 1; }; [ ! -L ${quotedAuthorizedKeysPath} ] || { echo 'authorized_keys must not be a symlink' >&2; exit 1; }; mv -T ${quotedTemporaryPath} ${quotedAuthorizedKeysPath}; }`,
+    MUTATION_EXEC_OPTS
+  )
+  if (replace.code !== 0) {
+    return failedCommand(
+      `[ssh.authorizedKeys: ${user} (${state})] failed to replace authorized_keys`,
+      replace
+    )
+  }
+  return null
+}
+
 async function rewriteAuthorizedKeys(
   conn: SshConnection,
   parameters: {
@@ -149,7 +246,7 @@ async function rewriteAuthorizedKeys(
     state: "absent" | "present"
     user: string
   }
-): Promise<void> {
+): Promise<ModuleResult | null> {
   const { authorizedKeysPath, key, primaryGroup, sshDirectoryPath, state, user } = parameters
   // R-0000181: temp file lives in the same filesystem as the destination so
   // `mv -T` is atomic (single rename(2)) and so NFS root_squash hosts do not
@@ -157,39 +254,25 @@ async function rewriteAuthorizedKeys(
   const temporaryPath = await createAuthorizedKeysTemporaryPath(conn, sshDirectoryPath)
 
   try {
-    if (state === "present") {
-      await conn.exec(
-        `{ if [ -f ${shellQuote(authorizedKeysPath)} ]; then awk '1' ${shellQuote(authorizedKeysPath)} > ${shellQuote(temporaryPath)} || exit $?; grep -qxF -- ${shellQuote(key)} ${shellQuote(authorizedKeysPath)}; grep_status=$?; if [ "$grep_status" -eq 0 ]; then :; elif [ "$grep_status" -eq 1 ]; then printf '%s\\n' ${shellQuote(key)} >> ${shellQuote(temporaryPath)}; else exit "$grep_status"; fi; else printf '%s\\n' ${shellQuote(key)} > ${shellQuote(temporaryPath)}; fi; }`,
-        { silent: true }
-      )
-    } else {
-      // R-0000044: use `grep -vxF` (whole-line match) to mirror the
-      // present branch's `grep -qxF` and avoid removing collateral entries
-      // whose key body is a substring of the key being deleted (e.g. a key
-      // appearing again with options-prefix or a different comment).
-      await conn.exec(
-        `{ if [ -f ${shellQuote(authorizedKeysPath)} ]; then grep -vxF -- ${shellQuote(key)} ${shellQuote(authorizedKeysPath)} > ${shellQuote(temporaryPath)}; grep_status=$?; if [ "$grep_status" -eq 0 ] || [ "$grep_status" -eq 1 ]; then :; else exit "$grep_status"; fi; else : > ${shellQuote(temporaryPath)}; fi; }`,
-        { silent: true }
-      )
-    }
+    const stageFailure = await stageAuthorizedKeysContent(conn, {
+      authorizedKeysPath,
+      key,
+      state,
+      temporaryPath,
+      user,
+    })
+    if (stageFailure) return stageFailure
 
-    // R-0000065: chown to the user and the user's resolved primary group
-    // instead of `${user}:${user}`. This preserves the existing primary
-    // group on hosts where it is not equal to the username (e.g.
-    // `deploy:users`, `www-data:www-data`) and prevents a drift loop where
-    // `apply` overwrites the semantically correct group ownership only to
-    // see `check` go green on the next run.
-    const quotedTemporaryPath = shellQuote(temporaryPath)
-    const quotedSshDirectoryPath = shellQuote(sshDirectoryPath)
-    const quotedAuthorizedKeysPath = shellQuote(authorizedKeysPath)
-    const expectedSshDirectoryState = shellQuote(`700 ${user} ${primaryGroup} directory`)
-
-    await conn.exec(
-      `chmod 600 ${quotedTemporaryPath} && chown ${shellQuote(user)}:${shellQuote(primaryGroup)} ${quotedTemporaryPath} && { [ ! -L ${quotedSshDirectoryPath} ] || { echo '.ssh must not be a symlink' >&2; exit 1; }; [ -d ${quotedSshDirectoryPath} ] || { echo '.ssh must be a directory' >&2; exit 1; }; ssh_directory_state=$(stat -c '%a %U %G %F' ${quotedSshDirectoryPath}) || exit $?; [ "$ssh_directory_state" = ${expectedSshDirectoryState} ] || { echo '.ssh ownership changed before authorized_keys replace' >&2; exit 1; }; [ ! -L ${quotedAuthorizedKeysPath} ] || { echo 'authorized_keys must not be a symlink' >&2; exit 1; }; mv -T ${quotedTemporaryPath} ${quotedAuthorizedKeysPath}; }`,
-      { silent: true }
-    )
+    return await replaceAuthorizedKeysAtomically(conn, {
+      authorizedKeysPath,
+      primaryGroup,
+      sshDirectoryPath,
+      state,
+      temporaryPath,
+      user,
+    })
   } finally {
-    await conn.exec(`rm -f ${shellQuote(temporaryPath)}`, { silent: true })
+    await conn.exec(`rm -f ${shellQuote(temporaryPath)}`, MUTATION_EXEC_OPTS)
   }
 }
 
@@ -216,9 +299,22 @@ export async function applyAuthorizedKeys(
   const sshDirectoryPath = `${home}/.ssh`
   const authorizedKeysPath = `${home}/.ssh/authorized_keys`
 
-  await ensureSshDirectoryForAuthorizedKeys(conn, { primaryGroup, sshDirectoryPath, user })
-  await ensureAuthorizedKeysIsNotSymlink(conn, authorizedKeysPath)
-  await rewriteAuthorizedKeys(conn, {
+  const directoryFailure = await ensureSshDirectoryForAuthorizedKeys(conn, {
+    primaryGroup,
+    sshDirectoryPath,
+    state,
+    user,
+  })
+  if (directoryFailure) return directoryFailure
+
+  const symlinkFailure = await ensureAuthorizedKeysIsNotSymlink(conn, {
+    authorizedKeysPath,
+    state,
+    user,
+  })
+  if (symlinkFailure) return symlinkFailure
+
+  const rewriteFailure = await rewriteAuthorizedKeys(conn, {
     authorizedKeysPath,
     key,
     primaryGroup,
@@ -226,6 +322,7 @@ export async function applyAuthorizedKeys(
     state,
     user,
   })
+  if (rewriteFailure) return rewriteFailure
 
   return { status: "changed" }
 }
