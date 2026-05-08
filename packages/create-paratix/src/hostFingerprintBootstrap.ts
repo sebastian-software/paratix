@@ -38,6 +38,20 @@ const ACCEPTED_HOST_KEY_ALGORITHMS = new Set([
   "ssh-ed25519",
 ])
 
+// R-0000232: validate the algorithm field as printable ASCII (0x20-0x7E)
+// before decoding. `Buffer.toString("ascii")` masks the upper bit (byte &
+// 0x7F), so manipulated bytes in the range 0x80-0xFF would silently map onto
+// printable ASCII characters. A buffer with high-bit bytes that decodes to
+// "ssh-ed25519" would then pass the allowlist check while the raw wire bytes
+// were anything else. We reject any non-printable byte up front so the
+// allowlist comparison operates on the bytes the wire actually contains.
+const PRINTABLE_ASCII_MIN = 0x20
+const PRINTABLE_ASCII_MAX = 0x7e
+
+function isPrintableAsciiByte(byte: number): boolean {
+  return byte >= PRINTABLE_ASCII_MIN && byte <= PRINTABLE_ASCII_MAX
+}
+
 function extractHostKeyAlgorithm(keyBuffer: Buffer): string {
   if (keyBuffer.length < SSH_KEY_ALGO_LENGTH_FIELD_BYTES) {
     throw new Error("Invalid SSH host key buffer: too short to contain an algorithm length field")
@@ -46,9 +60,16 @@ function extractHostKeyAlgorithm(keyBuffer: Buffer): string {
   if (algoLength === 0 || SSH_KEY_ALGO_LENGTH_FIELD_BYTES + algoLength > keyBuffer.length) {
     throw new Error("Invalid SSH host key buffer: algorithm length exceeds buffer size")
   }
-  return keyBuffer
-    .subarray(SSH_KEY_ALGO_LENGTH_FIELD_BYTES, SSH_KEY_ALGO_LENGTH_FIELD_BYTES + algoLength)
-    .toString("ascii")
+  const algorithmBytes = keyBuffer.subarray(
+    SSH_KEY_ALGO_LENGTH_FIELD_BYTES,
+    SSH_KEY_ALGO_LENGTH_FIELD_BYTES + algoLength
+  )
+  for (const byte of algorithmBytes) {
+    if (!isPrintableAsciiByte(byte)) {
+      throw new Error("Invalid SSH host key buffer: algorithm field contains non-printable bytes")
+    }
+  }
+  return algorithmBytes.toString("ascii")
 }
 
 function assertSupportedHostKeyAlgorithm(keyBuffer: Buffer): string {

@@ -132,6 +132,35 @@ describe("readHostFingerprintViaSsh2", () => {
     expect(verdicts).toStrictEqual([false])
   })
 
+  // R-0000232: the algorithm label must be validated as printable ASCII
+  // (0x20-0x7E). `Buffer.toString("ascii")` strips the high bit, so without
+  // an explicit byte-range guard a buffer whose algorithm field contains
+  // bytes 0x80-0xFF would decode to printable ASCII (e.g. "ssh-ed25519")
+  // and bypass the allowlist while the raw wire bytes are something else.
+  it("rejects host keys whose algorithm field contains non-printable bytes", async () => {
+    // Encode "ssh-ed25519" but with the high bit set on every byte. Without
+    // the byte-range guard this would still decode to "ssh-ed25519" via
+    // `toString("ascii")` (which masks 0x7F).
+    const tamperedAlgorithm = Buffer.from("ssh-ed25519", "ascii").map((byte) => byte | 0x80)
+    const hostKey = Buffer.concat([
+      createWireString(Buffer.from(tamperedAlgorithm)),
+      createWireString(Buffer.alloc(32, 0)),
+    ])
+
+    const fakeClient = createFakeHostKeyClient((config, client) => {
+      callHostVerifier(config, hostKey)
+      setImmediate(() => {
+        client.handlers.error(new Error("Host denied"))
+      })
+    })
+
+    await expect(
+      readHostFingerprintViaSsh2("example.com", {
+        clientFactory: () => useFakeHostKeyClient(fakeClient),
+      })
+    ).rejects.toThrow(/algorithm field contains non-printable bytes/v)
+  })
+
   // R-0000128: ssh-rsa is intentionally absent from the host-key allowlist
   // because we cannot enforce a 2048-bit modulus floor on the wire blob in a
   // pre-handshake host-verifier callback while keeping the validation logic
