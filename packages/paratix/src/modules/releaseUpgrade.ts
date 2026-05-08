@@ -1,5 +1,6 @@
 import { meta } from "../meta.js"
 import { failed, failedCommand } from "../moduleFailure.js"
+import { shellQuote } from "../ssh.js"
 import {
   type ExecOptions,
   type ExecResult,
@@ -15,13 +16,13 @@ import {
   isAcceptableSourcesPath,
   isSupportedDebianUpgradePath,
   isVanishedSourcesFileError,
+  readSourcesFileMode,
   RELEASE_UPGRADE_DEFAULT_TIMEOUT_MS,
   rewriteAptSourcesContent,
 } from "./releaseUpgradeSources.js"
 
 const NONINTERACTIVE = "DEBIAN_FRONTEND=noninteractive"
 const CODENAME_RE = /^[a-z]{3,20}$/v
-const APT_SOURCES_MODE = "0644"
 const NO_UBUNTU_RELEASE_PATTERN = /no new release (?:found|available)/iv
 function isNoUbuntuReleaseAvailable(result: ExecResult): boolean {
   if (result.code === 0) return false
@@ -109,9 +110,13 @@ const APT_SOURCES_LIST = "/etc/apt/sources.list"
  * {@link replaceCodenameInSourcesList} rewrote it. Used by
  * {@link restoreSourcesSnapshots} to roll back when a subsequent apt step
  * fails so the host never ends up with sources pointing at the new suite
- * while the upgrade itself failed.
+ * while the upgrade itself failed. Mirrors the snapshot format used in
+ * `quadlet.ts` and `timerFileSnapshots.ts` (R-0000241/R-0000217) where the
+ * captured mode preserves operator-specific permissions across the
+ * rollback.
  */
 type SourcesSnapshot = {
+  mode: string
   originalContent: string
   remotePath: string
 }
@@ -138,13 +143,16 @@ async function rewriteSourcesFile(
   })
   if (updatedContent === originalContent) return null
 
+  // R-0000241: capture the original mode before overwriting so the rollback
+  // can restore the operator's exact permissions instead of forcing 0644.
+  const mode = await readSourcesFileMode(ssh, remotePath, shellQuote)
   await guardedWriteFile(ssh, {
-    mode: APT_SOURCES_MODE,
+    mode,
     newContent: updatedContent,
     originalContent,
     remotePath,
   })
-  return { originalContent, remotePath }
+  return { mode, originalContent, remotePath }
 }
 
 type SnapshotSourcesParameters = Omit<RewriteSourcesParameters, "originalContent">
@@ -249,10 +257,13 @@ async function restoreSourcesSnapshots(
       // Intentional: unguarded write — restoring the original sources is
       // more important than concurrency safety during a failed-upgrade
       // rollback. An additional guarded write would refuse to roll back if
-      // the file content changed mid-flight.
+      // the file content changed mid-flight. R-0000241: the mode captured
+      // in the snapshot is restored so operator-specific permissions
+      // (e.g. `chmod 0640` for a sources file with secrets) survive the
+      // rollback unchanged.
       // eslint-disable-next-line no-await-in-loop
       await ssh.writeFile(snapshot.remotePath, snapshot.originalContent, {
-        mode: APT_SOURCES_MODE,
+        mode: snapshot.mode,
       })
     } catch {
       // Best-effort: if a single file cannot be restored, keep going so the

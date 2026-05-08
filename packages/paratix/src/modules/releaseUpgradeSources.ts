@@ -51,6 +51,57 @@ export function isVanishedSourcesFileError(error: unknown): boolean {
   return VANISHED_SOURCES_FILE_PATTERN.test(message)
 }
 
+// R-0000241: Default mode used when no original mode could be captured —
+// matches the historical apt sources permission and the canonical
+// distribution defaults shipped under `/etc/apt/`.
+export const APT_SOURCES_DEFAULT_MODE = "0644"
+
+const OCTAL_MODE_LENGTH_WITHOUT_LEADING_ZERO = 3
+
+/**
+ * Normalize a raw `stat -c '%a'` output to the four-digit octal form that
+ * `ssh.writeFile`/`guardedWriteFile` expect.
+ *
+ * @param raw - Trimmed stdout from a `stat -c '%a'` invocation.
+ * @returns The four-digit octal mode, or {@link APT_SOURCES_DEFAULT_MODE}
+ *   when the input is empty.
+ */
+export function normalizeSourcesFileMode(raw: string): string {
+  if (raw.length === 0) return APT_SOURCES_DEFAULT_MODE
+  return raw.length === OCTAL_MODE_LENGTH_WITHOUT_LEADING_ZERO ? `0${raw}` : raw
+}
+
+type ReadSourcesFileModeSsh = {
+  exec: (
+    command: string,
+    options: { ignoreExitCode: boolean; silent: boolean }
+  ) => Promise<{ code: number; stdout: string }>
+}
+
+/**
+ * Read the POSIX mode of `path` via `stat -c '%a'` and normalize the result
+ * to the four-digit octal form `guardedWriteFile`/`writeFile` expect. Falls
+ * back to {@link APT_SOURCES_DEFAULT_MODE} when stat fails (e.g. ENOENT
+ * mid-flight).
+ *
+ * @param ssh - Active SSH connection (subset typed for testability).
+ * @param path - The remote path to inspect.
+ * @param shellQuote - Function quoting `path` for safe shell interpolation.
+ * @returns The captured mode, or the apt default when stat fails.
+ */
+export async function readSourcesFileMode(
+  ssh: ReadSourcesFileModeSsh,
+  path: string,
+  shellQuote: (value: string) => string
+): Promise<string> {
+  const result = await ssh.exec(`stat -c '%a' ${shellQuote(path)}`, {
+    ignoreExitCode: true,
+    silent: true,
+  })
+  if (result.code !== 0) return APT_SOURCES_DEFAULT_MODE
+  return normalizeSourcesFileMode(result.stdout.trim())
+}
+
 const RELEASE_DERIVED_SUITE_SUFFIXES = ["-updates", "-security", "-backports"] as const
 const DEBIAN_SUPPORTED_PREDECESSORS = {
   bookworm: "bullseye",

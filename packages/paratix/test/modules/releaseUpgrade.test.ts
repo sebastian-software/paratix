@@ -14,6 +14,18 @@ const createMockSsh: typeof createBaseMockSsh = (responses, options) =>
       { options: { mode: "0644" }, remotePath: /^\/etc\/apt\/sources\.list\.d\/.+$/v },
       ...(options?.allowWrites ?? []),
     ],
+    // R-0000241: every sources file rewrite issues `stat -c '%a' <path>` to
+    // capture the original mode. Default the stat probe to an empty stdout
+    // (the rewrite then falls back to the historical 0644 default) unless an
+    // individual test stubs it explicitly.
+    responseStubs: [
+      {
+        // eslint-disable-next-line security/detect-unsafe-regex -- Bounded literal pattern matching the well-known apt sources stat command issued by the module under test.
+        command: /^stat -c '%a' '\/etc\/apt\/sources\.list(?:\.d\/.+)?'$/v,
+        result: { code: 0 },
+      },
+      ...(options?.responseStubs ?? []),
+    ],
   })
 
 // os-release content helpers
@@ -887,6 +899,39 @@ describe("releaseUpgrade.upgrade — apply (Debian)", () => {
       const sourcesWrites = writes.filter((w) => w.path === "/etc/apt/sources.list")
       expect(sourcesWrites).toHaveLength(1)
       expect(sourcesWrites[0]?.content).toContain("trixie")
+    })
+
+    // R-0000241: the snapshot must capture the original mode so a rollback
+    // restores the operator's exact permissions instead of forcing 0644.
+    it("R-0000241: rollback restores the operator-specified mode of /etc/apt/sources.list", async () => {
+      type ModeWriteCapture = { content: string; mode: string | undefined; path: string }
+      const originalSources = "deb http://deb.debian.org/debian bookworm main\n"
+      const ssh = createMockSsh(
+        debianApplyResponses("bookworm", "trixie", {
+          "DEBIAN_FRONTEND=noninteractive apt-get update": { code: 1 },
+          "stat -c '%a' '/etc/apt/sources.list'": { code: 0, stdout: "640\n" },
+        })
+      )
+      const writes: ModeWriteCapture[] = []
+      const replacement = async (
+        path: string,
+        content: string,
+        writeOptions?: { mode?: string }
+      ): Promise<void> => {
+        writes.push({ content, mode: writeOptions?.mode, path })
+        await Promise.resolve()
+      }
+      Object.assign(ssh, { writeFile: replacement })
+
+      const mod = releaseUpgrade.upgrade()
+      const result = await mod.apply(ssh, emptyEnv)
+
+      expect(result.status).toBe("failed")
+      const sourcesWrites = writes.filter((w) => w.path === "/etc/apt/sources.list")
+      // The last write to sources.list is the rollback. It must restore the
+      // captured 0640 mode rather than overwriting it with the 0644 default.
+      expect(sourcesWrites.at(-1)?.content).toBe(originalSources)
+      expect(sourcesWrites.at(-1)?.mode).toBe("0640")
     })
   })
 })
