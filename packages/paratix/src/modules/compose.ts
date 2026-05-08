@@ -5,7 +5,7 @@ import { basename } from "node:path"
 import { failed, failedCommand } from "../moduleFailure.js"
 import { shellQuote } from "../ssh.js"
 import { type Module, type ModuleResult, NEEDS_APPLY, type SshConnection } from "../types.js"
-import { isRegularFileWithoutSymlink } from "./remoteFileChecks.js"
+import { isRegularFileWithoutSymlink, isSymlink } from "./remoteFileChecks.js"
 
 const EXEC_OPTS = { ignoreExitCode: true, silent: true } as const
 const UNIT_NAME_PATTERN = /^[\w@.\-]+$/v
@@ -280,13 +280,19 @@ async function rewriteComposeSystemdUnitViaShell(parameters: {
   )
 }
 
-async function applyComposeSystemdUnit(parameters: {
+async function writeComposeSystemdUnitFile(parameters: {
   connection: SshConnection
   content: string
   filePath: string
   unitFileName: string
-}): Promise<ModuleResult> {
-  await prepareComposeSystemdTarget(parameters)
+}): Promise<ModuleResult | null> {
+  // R-0000192: refuse to write through a symlinked unit path. The check path
+  // already rejects symlinks via isRegularFileWithoutSymlink; without the same
+  // guard here, writeFile + chown root:root would follow the link and mutate
+  // an attacker-controlled target. Mirrors the apt.key (R-0000134) hardening.
+  if (await isSymlink(parameters.connection, parameters.filePath)) {
+    return failed(`[compose.systemd] refuses to write through symlink at ${parameters.filePath}`)
+  }
   try {
     await parameters.connection.writeFile(parameters.filePath, parameters.content, {
       mode: SYSTEMD_UNIT_MODE,
@@ -298,9 +304,20 @@ async function applyComposeSystemdUnit(parameters: {
 
   const writeVerification = await verifyNonEmptySystemdUnit(parameters)
   if (writeVerification !== "matches") {
-    const fallbackFailure = await rewriteComposeSystemdUnitViaShell(parameters)
-    if (fallbackFailure != null) return fallbackFailure
+    return rewriteComposeSystemdUnitViaShell(parameters)
   }
+  return null
+}
+
+async function applyComposeSystemdUnit(parameters: {
+  connection: SshConnection
+  content: string
+  filePath: string
+  unitFileName: string
+}): Promise<ModuleResult> {
+  await prepareComposeSystemdTarget(parameters)
+  const writeFailure = await writeComposeSystemdUnitFile(parameters)
+  if (writeFailure != null) return writeFailure
 
   // R-0000164: writeFile sets the file mode but not its owner/group, so an
   // owner drift introduced by a previous manual `chown` would persist. The

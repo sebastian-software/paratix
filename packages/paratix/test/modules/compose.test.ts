@@ -1017,6 +1017,7 @@ function composeSystemdRecoveryResponses(
   filePath = unitFilePath
 ): Record<string, { code: number; stdout?: string }> {
   return {
+    [`[ -L '${filePath}' ]`]: { code: 1 },
     [`chown 'root:root' '${filePath}'`]: { code: 0 },
     [`rm -f '${filePath}'`]: { code: 0 },
     [`systemctl unmask -- '${serviceName}.service'`]: { code: 0 },
@@ -1238,6 +1239,30 @@ describe("compose.systemd — apply", () => {
     const mod = compose.systemd({ projectDirectory })
     const result = await mod.apply(mockSsh, emptyEnv)
     expect(result.status).toBe("failed")
+  })
+
+  // R-0000192: refuse to write through a symlink at the unit path. The
+  // check path already rejects symlinks via isRegularFileWithoutSymlink;
+  // the apply path must mirror that guard so writeFile + chown root:root
+  // cannot be redirected to an attacker-controlled target.
+  it("R-0000192: returns failed when the unit path is a symlink", async () => {
+    const mockSsh = createComposeMockSsh({
+      ...composeSystemdRecoveryResponses(),
+      [`[ -L '${unitFilePath}' ]`]: { code: 0 },
+    })
+    let writeFileCalled = false
+    mockSsh.writeFile = async (): Promise<void> => {
+      writeFileCalled = true
+      await Promise.resolve()
+    }
+
+    const mod = compose.systemd({ projectDirectory })
+    const result = await mod.apply(mockSsh, emptyEnv)
+
+    expect(result.status).toBe("failed")
+    expect(String(result.error)).toContain("refuses to write through symlink")
+    expect(writeFileCalled).toBe(false)
+    expect(mockSsh.calls).not.toContain("systemctl daemon-reload")
   })
 
   it("keeps an existing unit file when atomic write fails", async () => {
