@@ -393,7 +393,21 @@ async function applyKnownHostsPresent(
   const verification = resolveVerifiedLines(host, scan.lines, options ?? {})
   if (verification.failure) return verification.failure
 
-  await conn.exec("mkdir -p ~/.ssh && chmod 700 ~/.ssh", { silent: true })
+  // Mirror R-0000212/213/214/215: `mkdir -p ~/.ssh && chmod 700 ~/.ssh` can
+  // fail when ~/.ssh is a symlink, has wrong permissions, or the parent
+  // directory denies writes. Run with `ignoreExitCode` and surface a
+  // failedCommand result instead of letting the exec throw past
+  // applyKnownHostsPresent.
+  const sshDirectoryResult = await conn.exec("mkdir -p ~/.ssh && chmod 700 ~/.ssh", {
+    ignoreExitCode: true,
+    silent: true,
+  })
+  if (sshDirectoryResult.code !== 0) {
+    return failedCommand(
+      `[ssh.knownHosts: ${host} (present)] failed to prepare ~/.ssh directory`,
+      sshDirectoryResult
+    )
+  }
 
   const existing = await resolveExistingKnownHostLines(conn, host, options)
   if (existing.failure) return existing.failure

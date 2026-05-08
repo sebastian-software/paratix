@@ -594,6 +594,31 @@ describe("ssh.knownHosts", () => {
     expect(String(result.error)).toContain("ssh-keyscan failed")
   })
 
+  // R-0000245: `mkdir -p ~/.ssh && chmod 700 ~/.ssh` previously ran without
+  // `ignoreExitCode`, so a symlinked ~/.ssh or a permission error would
+  // surface as an uncaught exception. Mirror R-0000212/213/214/215 by
+  // surfacing a failedCommand result instead.
+  it("R-0000245: apply returns failedCommand when ~/.ssh preparation fails", async () => {
+    const mockSsh = createMockSsh({
+      "mkdir -p ~/.ssh && chmod 700 ~/.ssh": {
+        code: 1,
+        stderr: "mkdir: cannot create directory '/home/user/.ssh': Permission denied",
+      },
+      "ssh-keyscan -H 'github.com' 2>/dev/null": { stdout: `${scannedLine}\n` },
+    })
+    const mod = ssh.knownHosts("github.com", { expectedFingerprint: hostFingerprint })
+
+    const result = await mod.apply(mockSsh, emptyEnv)
+
+    expect(result.status).toBe("failed")
+    expect(String(result.error)).toContain("[ssh.knownHosts: github.com (present)]")
+    expect(String(result.error)).toContain("failed to prepare ~/.ssh directory")
+    // Neither the trust-anchor lookup nor the append should run after the
+    // mkdir failure.
+    expect(mockSsh.calls).not.toContain("ssh-keygen -F 'github.com'")
+    expect(mockSsh.calls.some((c) => c.startsWith("printf '%s\\n'"))).toBe(false)
+  })
+
   // R-0000213: the drift-cleanup path inside reconcileKnownHostsState used
   // `conn.exec` without ignoreExitCode. A failing ssh-keygen -R would then
   // throw past applyKnownHostsPresent. Confirm it now reports failedCommand.
