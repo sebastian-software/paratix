@@ -80,7 +80,15 @@ export const script = {
             await ssh.uploadFile(localPath, remotePath)
 
             try {
-              await ssh.exec(`chmod +x ${shellQuote(remotePath)}`, { silent: true })
+              // R-0000248: surface chmod failures as a structured
+              // `failedCommand` ModuleResult instead of letting `conn.exec`
+              // throw. Without `ignoreExitCode: true` a non-zero exit (e.g.
+              // chmod refused on a noexec mount or stripped of write rights)
+              // would leak as an unstructured SSH error.
+              const chmodResult = await ssh.exec(`chmod +x ${shellQuote(remotePath)}`, EXEC_OPTS)
+              if (chmodResult.code !== 0) {
+                return failedCommand(`[script.once: ${name}] chmod failed`, chmodResult)
+              }
 
               const cmd =
                 scriptArguments != null && scriptArguments.length > 0

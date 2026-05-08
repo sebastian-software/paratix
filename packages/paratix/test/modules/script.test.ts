@@ -208,6 +208,28 @@ describe("script.once — apply", () => {
     expect(flagCall).toBeUndefined()
   })
 
+  // R-0000248 regression: chmod failures must surface as a structured
+  // `failedCommand` ModuleResult and must not leak as an unstructured SSH
+  // exception.
+  it("R-0000248: returns failed when chmod +x exits non-zero", async () => {
+    const remotePath = makeRemoteScriptPath("setup")
+    const mockSsh = createScriptMockSsh({
+      responses: {
+        [`chmod +x '${remotePath}'`]: { code: 1, stderr: "chmod: Read-only file system" },
+      },
+    })
+    const mod = script.once("setup", "/local/setup.sh")
+    const result = await mod.apply(mockSsh, emptyEnv)
+    expect(result.status).toBe("failed")
+    expect(String(result.error)).toContain("[script.once: setup] chmod failed")
+    expect(String(result.error)).toContain("Read-only file system")
+    // Script body must not run when chmod failed; cleanup still happens.
+    expect(mockSsh.calls).not.toContain(`'${remotePath}'`)
+    expect(mockSsh.calls).toContain(`rm -f '${remotePath}'`)
+    const flagCall = mockSsh.calls.find((c) => c.includes("touch"))
+    expect(flagCall).toBeUndefined()
+  })
+
   it("direct apply returns ok without uploading when the flag already exists", async () => {
     const mockSsh = createStrictMockSsh({
       [`[ -f ${FLAGS_DIRECTORY}/'script-setup-1' ]`]: { code: 0 },
