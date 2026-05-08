@@ -23,6 +23,7 @@ const FSTAB_MODE = "0644"
 // concurrent Paratix runs sharing this remote host.
 const FSTAB_FILE_MUTEX = "etc-fstab-mutex"
 const MOUNT_PRESENT = "mount.present"
+const MOUNT_ABSENT = "mount.absent"
 const WHITESPACE_PATTERN = /\s/v
 
 /**
@@ -79,6 +80,76 @@ async function ensureNoMountPathSymlink(
   const result = await ssh.exec(buildMountPathSymlinkGuard(path), EXEC_OPTS)
   if (result.code === 0) return null
   return failedCommand(`[${moduleName}: ${path}] mount path symlink check failed`, result)
+}
+
+/**
+ * R-0000224: re-resolve `path` via `readlink -f` after the symlink guard ran
+ * and verify it matches the operator-supplied path. Catches the small TOCTOU
+ * window where a privileged attacker could swap an ancestor for a symlink
+ * between the guard and the mount/mkdir call. This is best-effort defense in
+ * depth — full atomic isolation would require running mount in a private mount
+ * namespace via `unshare --mount`, which Paratix deliberately does not do
+ * because the operator uses these modules to converge the host's primary
+ * namespace.
+ *
+ * Returns `null` on success; a failure ModuleResult when the resolved path no
+ * longer matches the configured one (likely a TOCTOU swap or a previously
+ * existing symlink that was overlooked by the per-component guard).
+ *
+ * @param ssh - The SSH connection.
+ * @param moduleName - Module label for the error message (e.g. "mount.present").
+ * @param path - The configured mountpoint path.
+ * @returns A `failed` ModuleResult on mismatch, or `null` when the resolved path matches.
+ */
+async function ensureMountPathRealpathMatches(
+  ssh: SshConnection,
+  moduleName: string,
+  path: string
+): Promise<ModuleResult | null> {
+  const result = await ssh.exec(
+    `readlink -f -- ${shellQuote(path)} 2>/dev/null || printf '%s\\n' ${shellQuote(path)}`,
+    EXEC_OPTS
+  )
+  // readlink may fail (path does not yet exist before mkdir) — that's fine,
+  // there is nothing to verify in that case.
+  if (result.code !== 0) return null
+  const resolved = result.stdout.trim()
+  if (resolved === "" || resolved === path) return null
+  return failed(
+    `[${moduleName}: ${path}] resolved path differs after symlink guard: ${resolved} (TOCTOU race?)`
+  )
+}
+
+/**
+ * Run the symlink guard, ensure the mountpoint directory exists via
+ * `mkdir -p`, then re-verify the resolved path with {@link
+ * ensureMountPathRealpathMatches}. Used by {@link mount.present.apply} so the
+ * pre-mount checks live in a single helper and the apply body stays under the
+ * statement budget.
+ *
+ * @param ssh - The SSH connection.
+ * @param path - The configured mountpoint path.
+ * @returns A failure ModuleResult on any check failure, or `null` on success.
+ */
+async function preparePresentMountpoint(
+  ssh: SshConnection,
+  path: string
+): Promise<ModuleResult | null> {
+  const symlinkFailure = await ensureNoMountPathSymlink(ssh, MOUNT_PRESENT, path)
+  if (symlinkFailure != null) return symlinkFailure
+
+  const mkdirResult = await ssh.exec(`mkdir -p ${shellQuote(path)}`, EXEC_OPTS)
+  if (mkdirResult.code !== 0) {
+    return failedCommand(`[${MOUNT_PRESENT}: ${path}] mkdir -p failed`, mkdirResult)
+  }
+
+  // R-0000224: after `mkdir -p`, re-resolve the path via `readlink -f` and
+  // verify it still matches. Catches the TOCTOU window between the
+  // per-component symlink guard above and the mount() syscall below. This is
+  // best-effort defense in depth: a privileged attacker can still race between
+  // this check and the mount call. The residual risk is acceptable because
+  // mount.present is a privileged operator tool, not a sandboxed primitive.
+  return ensureMountPathRealpathMatches(ssh, MOUNT_PRESENT, path)
 }
 
 function validateFstabField(caller: string, fieldName: string, value: string): void {
@@ -360,15 +431,19 @@ export const mount = {
    */
   absent(options: { path: string; persist?: boolean }): Module {
     const { path, persist = true } = options
-    validateMountPath("mount.absent", path)
+    validateMountPath(MOUNT_ABSENT, path)
 
     return {
       async apply(ssh: null | SshConnection): Promise<ModuleResult> {
         if (!ssh) return failed(`[mount.absent: ${path}] SSH connection is required`)
 
         let changed = false
-        const symlinkFailure = await ensureNoMountPathSymlink(ssh, "mount.absent", path)
+        const symlinkFailure = await ensureNoMountPathSymlink(ssh, MOUNT_ABSENT, path)
         if (symlinkFailure != null) return symlinkFailure
+        // R-0000224: defense-in-depth realpath re-check between the guard and
+        // the unmount/fstab mutation closes the most accessible TOCTOU window.
+        const realpathFailure = await ensureMountPathRealpathMatches(ssh, MOUNT_ABSENT, path)
+        if (realpathFailure != null) return realpathFailure
 
         const unmountResult = await unmountIfNeeded(ssh, path)
         if (typeof unmountResult !== "boolean") {
@@ -438,15 +513,10 @@ export const mount = {
       async apply(ssh: null | SshConnection): Promise<ModuleResult> {
         if (!ssh) return failed(`[mount.present: ${path}] SSH connection is required`)
 
+        const preFailure = await preparePresentMountpoint(ssh, path)
+        if (preFailure != null) return preFailure
+
         let changed = false
-        const symlinkFailure = await ensureNoMountPathSymlink(ssh, MOUNT_PRESENT, path)
-        if (symlinkFailure != null) return symlinkFailure
-
-        const mkdirResult = await ssh.exec(`mkdir -p ${shellQuote(path)}`, EXEC_OPTS)
-        if (mkdirResult.code !== 0) {
-          return failedCommand(`[mount.present: ${path}] mkdir -p failed`, mkdirResult)
-        }
-
         const liveResult = await ensureLiveMount(ssh, { fstype, opts, path, src })
         if (typeof liveResult !== "boolean") return liveResult
         if (liveResult) changed = true

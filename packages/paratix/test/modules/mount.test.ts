@@ -581,6 +581,28 @@ describe("mount.present — apply", () => {
     expect(mockSsh.calls).not.toContain(mkdirCmd)
   })
 
+  // R-0000224: defense-in-depth realpath re-check after the symlink guard.
+  // If readlink resolves to a different path the mountpoint was likely
+  // swapped between the guard and the mount call (TOCTOU).
+  it("R-0000224: returns failed when readlink reports a TOCTOU swap", async () => {
+    const realpathCmd = `readlink -f -- '${mountPath}' 2>/dev/null || printf '%s\\n' '${mountPath}'`
+    const mockSsh = createMountApplyMockSsh({
+      [realpathCmd]: { code: 0, stdout: "/srv/attacker-controlled\n" },
+    })
+    const mod = mount.present({
+      fstype: mountFstype,
+      opts: mountOpts,
+      path: mountPath,
+      src: mountSrc,
+    })
+    const result = await mod.apply(mockSsh, emptyEnv)
+    expect(result.status).toBe("failed")
+    expect(result.error?.message).toContain("resolved path differs after symlink guard")
+    expect(result.error?.message).toContain("/srv/attacker-controlled")
+    // mount must not have been attempted
+    expect(mockSsh.calls).not.toContain(mountCmd)
+  })
+
   it("returns failed and does not touch fstab or mount when mkdir -p fails", async () => {
     const writtenFiles: Array<{ content: string; path: string }> = []
     const mockSsh = createMountApplyMockSsh({
