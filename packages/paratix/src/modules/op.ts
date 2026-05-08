@@ -4,9 +4,20 @@ import type { Environment, Module, ModuleResult } from "../types.js"
 
 import { environmentToMetaEntries } from "../meta.js"
 import { failed } from "../moduleFailure.js"
+import { getRunnerAbortSignal } from "../runnerAbortSignal.js"
 import { registerSecret } from "../secretSink.js"
 import { maskSecrets } from "../sshHelpers.js"
 import { generateTotpCode } from "../totp.js"
+
+/**
+ * Default upper bound for a single `op` CLI invocation. The 1Password helper
+ * can deadlock on a biometric prompt or a stale agent socket; we kill the
+ * child after this many milliseconds rather than hanging the runner. R-0000220.
+ */
+const DEFAULT_OP_TIMEOUT_MILLISECONDS = 60_000
+
+/** Grace window between SIGTERM and SIGKILL when killing a hung `op` child. */
+const OP_KILL_GRACE_MILLISECONDS = 1000
 
 const OP_INSTALL_HINT =
   "Install it from https://1password.com/downloads/command-line/ and ensure it is on PATH."
@@ -45,59 +56,183 @@ function describeSpawnError(command: string, error: unknown): Error {
 }
 
 /**
+ * Force-kill a hung child by escalating SIGTERM → SIGKILL after a short
+ * grace period. Used when the runner is shutting down or when the per-call
+ * timeout fires (R-0000220).
+ *
+ * @param child - The spawned child process to terminate.
+ */
+function killChildEscalating(child: ChildProcess): void {
+  if (child.killed || child.exitCode !== null) return
+  try {
+    child.kill("SIGTERM")
+  } catch {
+    // ignored — child may have exited between the guard and kill
+  }
+  setTimeout(() => {
+    if (child.killed || child.exitCode !== null) return
+    try {
+      child.kill("SIGKILL")
+    } catch {
+      // ignored — best-effort SIGKILL
+    }
+  }, OP_KILL_GRACE_MILLISECONDS).unref()
+}
+
+/**
+ * Wire the per-call abort signal and timeout onto a spawned child so a stuck
+ * `op` invocation cannot hang the runner.
+ *
+ * @param parameters - Wiring inputs.
+ * @param parameters.child - The spawned child process.
+ * @param parameters.command - The executable name used in error messages.
+ * @param parameters.rejectOnce - Reject closure invoked when the timeout or
+ *   abort signal fires.
+ * @param parameters.timeoutMs - Timeout in milliseconds; <= 0 disables the timer.
+ * @returns A `cleanup` function that detaches both the timer and the abort
+ *   listener; safe to call multiple times.
+ */
+function attachSpawnLifecycle(parameters: {
+  child: ChildProcess
+  command: string
+  rejectOnce: (error: Error) => void
+  timeoutMs: number
+}): () => void {
+  const { child, command, rejectOnce, timeoutMs } = parameters
+  let timeoutHandle: NodeJS.Timeout | undefined
+  if (timeoutMs > 0) {
+    timeoutHandle = setTimeout(() => {
+      killChildEscalating(child)
+      rejectOnce(new Error(`${command} timed out after ${String(timeoutMs)}ms`))
+    }, timeoutMs)
+    timeoutHandle.unref()
+  }
+  const abortSignal = getRunnerAbortSignal()
+  let abortListener: (() => void) | undefined
+  if (abortSignal !== undefined) {
+    abortListener = (): void => {
+      killChildEscalating(child)
+      rejectOnce(new Error(`${command} aborted — runner shutdown in progress`))
+    }
+    abortSignal.addEventListener("abort", abortListener, { once: true })
+  }
+  return (): void => {
+    if (timeoutHandle !== undefined) {
+      clearTimeout(timeoutHandle)
+      timeoutHandle = undefined
+    }
+    if (abortListener !== undefined && abortSignal !== undefined) {
+      abortSignal.removeEventListener("abort", abortListener)
+      abortListener = undefined
+    }
+  }
+}
+
+/** Options for {@link spawnWithInput}; extracted to keep the parameter count <= 3. */
+type SpawnWithInputOptions = {
+  /**
+   * Optional override for the per-call timeout. Defaults to
+   * {@link DEFAULT_OP_TIMEOUT_MILLISECONDS}; pass a non-positive value to
+   * disable the timer.
+   */
+  timeoutMs?: number
+}
+
+/**
  * Spawn a command, write `input` to its stdin, and collect stdout.
+ *
+ * The child is bound to the runner abort signal returned by
+ * {@link getRunnerAbortSignal}: when the runner observes SIGINT/SIGTERM the
+ * spawned process is killed (SIGTERM → SIGKILL) instead of hanging on a
+ * blocked `op` CLI (e.g. waiting on a biometric prompt). A configurable
+ * timeout (default {@link DEFAULT_OP_TIMEOUT_MILLISECONDS}) bounds individual
+ * invocations to keep the runner responsive even when no abort arrives. R-0000220.
  *
  * @param command - The executable to run.
  * @param commandArguments - Arguments for the command.
- * @param input - Data to write to stdin before closing it.
+ * @param spawnOptions - Optional behaviour overrides (input, timeout).
  * @returns The stdout output as a string.
  */
+/** Mutable IO state captured while a child is running. */
+type SpawnIoState = { stderr: string; stdout: string }
+
+/** Initial no-op detach used until {@link attachSpawnLifecycle} replaces it. */
+const NOOP_DETACH = (): void => {
+  /* placeholder until attachSpawnLifecycle wires the real detach */
+}
+
+/**
+ * Wire stdout, stderr, error and close handlers onto a spawned child so the
+ * helper resolves on success and rejects with a contextual error on failure.
+ *
+ * @param parameters - Wiring inputs.
+ * @param parameters.child - The spawned child process.
+ * @param parameters.command - The executable name used in error messages.
+ * @param parameters.io - Mutable IO accumulator that captures stdout / stderr.
+ * @param parameters.rejectOnce - Reject closure invoked on error / non-zero exit.
+ * @param parameters.resolveOnce - Resolve closure invoked when the child exits 0.
+ */
+function attachSpawnIoHandlers(parameters: {
+  child: ChildProcess
+  command: string
+  io: SpawnIoState
+  rejectOnce: (error: Error) => void
+  resolveOnce: (output: string) => void
+}): void {
+  const { child, command, io, rejectOnce, resolveOnce } = parameters
+  child.stdout?.on("data", (chunk: Buffer) => {
+    io.stdout += chunk.toString()
+  })
+  child.stderr?.on("data", (chunk: Buffer) => {
+    io.stderr += chunk.toString()
+  })
+  child.on("error", (error) => {
+    rejectOnce(describeSpawnError(command, error))
+  })
+  child.on("close", (code) => {
+    if (code === 0) {
+      resolveOnce(io.stdout)
+      return
+    }
+    const hint = isAuthFailure(io.stderr) ? ` ${OP_SIGNIN_HINT}` : ""
+    rejectOnce(new Error(`${command} exited with code ${String(code)}: ${io.stderr}${hint}`))
+  })
+  child.stdin?.once("error", (error) => {
+    rejectOnce(describeSpawnError(command, error))
+  })
+}
+
 async function spawnWithInput(
   command: string,
   commandArguments: string[],
-  input: string
+  spawnOptions: { input: string } & SpawnWithInputOptions
 ): Promise<string> {
+  const { input } = spawnOptions
+  const timeoutMs = spawnOptions.timeoutMs ?? DEFAULT_OP_TIMEOUT_MILLISECONDS
+  if (getRunnerAbortSignal()?.aborted === true) {
+    throw new Error(`${command} aborted before spawn — runner shutdown in progress`)
+  }
   return new Promise<string>((resolve, reject) => {
     const child: ChildProcess = spawn(command, commandArguments, {
       stdio: ["pipe", "pipe", "pipe"],
     })
     let settled = false
-    let stdout = ""
-    let stderr = ""
-
+    const io: SpawnIoState = { stderr: "", stdout: "" }
+    let detachLifecycle: () => void = NOOP_DETACH
     const rejectOnce = (error: Error): void => {
       if (settled) return
       settled = true
+      detachLifecycle()
       reject(error)
     }
-
     const resolveOnce = (output: string): void => {
       if (settled) return
       settled = true
+      detachLifecycle()
       resolve(output)
     }
-
-    child.stdout?.on("data", (chunk: Buffer) => {
-      stdout += chunk.toString()
-    })
-    child.stderr?.on("data", (chunk: Buffer) => {
-      stderr += chunk.toString()
-    })
-    child.on("error", (error) => {
-      rejectOnce(describeSpawnError(command, error))
-    })
-    child.on("close", (code) => {
-      if (code === 0) {
-        resolveOnce(stdout)
-        return
-      }
-      const hint = isAuthFailure(stderr) ? ` ${OP_SIGNIN_HINT}` : ""
-      rejectOnce(new Error(`${command} exited with code ${String(code)}: ${stderr}${hint}`))
-    })
-    child.stdin?.once("error", (error) => {
-      rejectOnce(describeSpawnError(command, error))
-    })
-
+    attachSpawnIoHandlers({ child, command, io, rejectOnce, resolveOnce })
+    detachLifecycle = attachSpawnLifecycle({ child, command, rejectOnce, timeoutMs })
     try {
       child.stdin?.end(input)
     } catch (error) {
@@ -171,7 +306,7 @@ async function resolveRegularReferences(
 
   for (const [name, reference] of Object.entries(entries)) {
     // eslint-disable-next-line no-await-in-loop
-    const stdout = await spawnWithInput("op", ["read", reference], "")
+    const stdout = await spawnWithInput("op", ["read", reference], { input: "" })
     const value = stripTrailingCliNewline(stdout)
     if (value.length > 0) {
       leakedValues.push(value)
@@ -210,7 +345,7 @@ async function resolveOtpReferences(
 
   for (const [name, reference] of Object.entries(entries)) {
     // eslint-disable-next-line no-await-in-loop
-    const stdout = await spawnWithInput("op", ["read", reference], "")
+    const stdout = await spawnWithInput("op", ["read", reference], { input: "" })
 
     const otpauthUri = stripTrailingCliNewline(stdout).trim()
     if (otpauthUri.length > 0) {

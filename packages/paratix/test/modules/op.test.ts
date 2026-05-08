@@ -6,6 +6,7 @@ import { afterEach, beforeEach, describe, expect, it, type Mock, vi } from "vite
 import { resolveEnvironment } from "../../src/environment.js"
 import { mergeEnvironmentFromMeta } from "../../src/meta.js"
 import { op } from "../../src/modules/op.js"
+import { setRunnerAbortSignal } from "../../src/runnerAbortSignal.js"
 import { clearRegisteredSecrets, getRegisteredSecrets } from "../../src/secretSink.js"
 
 type MockStdin = {
@@ -557,5 +558,84 @@ describe("op.resolve — local", () => {
   it("has local set to true", () => {
     const module_ = op.resolve({})
     expect(module_.local).toBe(true)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// R-0000220: abort signal coupling + timeout
+// ---------------------------------------------------------------------------
+
+describe("op.resolve — runner abort and timeout (R-0000220)", () => {
+  beforeEach(() => {
+    vi.resetAllMocks()
+    clearRegisteredSecrets()
+    spawnCalls = []
+  })
+
+  afterEach(() => {
+    setRunnerAbortSignal(undefined)
+    clearRegisteredSecrets()
+  })
+
+  it("rejects immediately when the runner abort signal is already aborted before spawn", async () => {
+    const controller = new AbortController()
+    controller.abort()
+    setRunnerAbortSignal(controller.signal)
+    // Even if spawn would succeed, apply must fail before spawning. Track that
+    // the mocked spawn was never invoked.
+    mockSpawnWith("secret123\n")
+
+    const module_ = op.resolve({ password: "op://vault/item/password" })
+    // eslint-disable-next-line prefer-spread -- Module.apply, not Function.prototype.apply
+    const result = await module_.apply(null, emptyEnv)
+
+    expect(result.status).toBe("failed")
+    expect(result.error?.message).toContain("aborted before spawn")
+    expect(spawnCalls).toHaveLength(0)
+  })
+
+  it("kills the op child and rejects when the runner abort signal fires mid-call", async () => {
+    const killCalls: NodeJS.Signals[] = []
+    const child = new EventEmitter() as MockChildProcess
+    Object.defineProperty(child, "stdout", { value: new EventEmitter() })
+    Object.defineProperty(child, "stderr", { value: new EventEmitter() })
+    Object.defineProperty(child, "exitCode", { value: null })
+    Object.defineProperty(child, "killed", { value: false })
+    ;(child as unknown as { kill: (signal: NodeJS.Signals) => void }).kill = (
+      signal: NodeJS.Signals
+    ) => {
+      killCalls.push(signal)
+    }
+    child.stdin = Object.assign(new EventEmitter(), {
+      end: vi.fn(),
+      once: vi.fn(function once(
+        this: EventEmitter,
+        eventName: string,
+        listener: (...arguments_: unknown[]) => void
+      ) {
+        EventEmitter.prototype.once.call(this, eventName, listener)
+        return this
+      }),
+    })
+    mockedSpawnFn.mockImplementation((command: string, args: readonly string[]) => {
+      trackSpawn(command, args)
+      return child as never
+    })
+
+    const controller = new AbortController()
+    setRunnerAbortSignal(controller.signal)
+
+    const module_ = op.resolve({ password: "op://vault/item/password" })
+    // eslint-disable-next-line prefer-spread -- Module.apply, not Function.prototype.apply
+    const applyPromise = module_.apply(null, emptyEnv)
+    // Trigger abort while the child is still hanging (no `close` emitted).
+    queueMicrotask(() => {
+      controller.abort()
+    })
+    const result = await applyPromise
+
+    expect(result.status).toBe("failed")
+    expect(result.error?.message).toContain("aborted")
+    expect(killCalls).toContain("SIGTERM")
   })
 })
