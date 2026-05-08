@@ -796,12 +796,21 @@ describe("SshConnectionImpl", () => {
     })
 
     it("releases ssh2 Client after every failed port connect attempt (R-0000039 regression)", async () => {
-      // R-0000039: tryConnectOnPorts must call cleanupFailedSshClient on each
-      // failed Client so listeners and TCP sockets do not leak across the
-      // reconnect loop. Simulate a connect error on every port and assert the
+      // R-0000039: tryConnectOnPort owns the lifecycle of the Client during
+      // the connect handshake — its internal handlers (handleAbort,
+      // handleError, handleTimeout) must release listeners and TCP sockets
+      // so failed reconnects do not leak. Simulate a connect error that
+      // forwards through tryConnectOnPort's internal cleanup and assert the
       // cleanup helper was invoked once per attempt.
       vi.useFakeTimers()
-      vi.mocked(tryConnectOnPort).mockRejectedValue(new Error("Connection refused"))
+      vi.mocked(tryConnectOnPort).mockImplementation(async (parameters) => {
+        // Mirror the production handleError contract: clean the client up
+        // before rejecting, since R-0000198 made tryConnectOnPorts trust
+        // the inner connect to handle cleanup on rejection.
+        cleanupFailedSshClient(parameters.client)
+        await Promise.resolve()
+        throw new Error("Connection refused")
+      })
       vi.mocked(cleanupFailedSshClient).mockClear()
 
       const ssh = makeSshInstance({
@@ -823,7 +832,8 @@ describe("SshConnectionImpl", () => {
       await expect(reconnectPromise).rejects.toThrow(
         /Failed to reconnect to 1\.2\.3\.4 after 2 attempts/v
       )
-      // 2 attempts * 3 ports each = 6 cleanup calls (one per failed Client).
+      // 2 attempts * 3 ports each = 6 cleanup calls (one per failed Client),
+      // performed by the inner connect helper per R-0000198.
       expect(cleanupFailedSshClient).toHaveBeenCalledTimes(2 * 3)
     })
 
@@ -4206,6 +4216,42 @@ describe("SshConnectionImpl", () => {
 
       expect(firstCommitAcceptedHostKey).not.toHaveBeenCalled()
       expect(secondCommitAcceptedHostKey).toHaveBeenCalledOnce()
+    })
+
+    it("cleans up exactly once when commitAcceptedHostKey fails after a successful handshake (R-0000198 regression)", async () => {
+      // Regression: when tryConnectOnPort resolved on port A but
+      // commitAcceptedHostKey then threw (e.g. ENOSPC on the known_hosts
+      // append), the outer catch in tryConnectOnPorts called
+      // cleanupFailedSshClient on a client whose lifecycle was already
+      // governed elsewhere — and tryConnectOnPort did NOT invoke cleanup
+      // for ports it had already failed. The fix flips the responsibility:
+      // the inner connect handles cleanup on its own rejection paths, and
+      // the outer catch only cleans up when a downstream step fails on an
+      // established (but unregistered) client. Net effect: exactly one
+      // cleanup per failed iteration.
+      const { buildHostVerifier } = await import("../src/knownHosts.js")
+      const failingCommit = vi.fn().mockRejectedValue(new Error("ENOSPC: known_hosts full"))
+      const succeedingCommit = vi.fn().mockResolvedValue(undefined)
+      vi.mocked(buildHostVerifier)
+        .mockReturnValueOnce({
+          commitAcceptedHostKey: failingCommit,
+          hostVerifier: vi.fn().mockReturnValue(true),
+        })
+        .mockReturnValueOnce({
+          commitAcceptedHostKey: succeedingCommit,
+          hostVerifier: vi.fn().mockReturnValue(true),
+        })
+      vi.mocked(tryConnectOnPort).mockResolvedValue()
+      vi.mocked(cleanupFailedSshClient).mockClear()
+
+      const ssh = makeSshInstance({ host: "1.2.3.4", ports: [22, 2222] })
+
+      await ssh.connect()
+
+      // First port: tryConnectOnPort resolved, commit threw, outer catch
+      // performs the single cleanup. Second port: success path, no cleanup.
+      expect(cleanupFailedSshClient).toHaveBeenCalledTimes(1)
+      expect(succeedingCommit).toHaveBeenCalledOnce()
     })
   })
 })

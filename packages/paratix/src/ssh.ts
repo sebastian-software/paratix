@@ -1290,7 +1290,7 @@ trap - EXIT
   // `addPort`/`removePort` calls (e.g. from `handlePortChange` rollback in
   // runner.ts) cannot mutate the array mid-iteration and cause skipped or
   // re-visited entries.
-  /* eslint-disable max-statements, sonarjs/cognitive-complexity -- port fallback, host-key errors, and abort handling belong together */
+  /* eslint-disable max-statements, sonarjs/cognitive-complexity, complexity -- port fallback, host-key errors, and abort handling belong together */
   private async tryConnectOnPorts(options: TryConnectOnPortsOptions = {}): Promise<boolean> {
     const ports: number[] = [...this.runtime.ports]
     for (const port of ports) {
@@ -1301,6 +1301,15 @@ trap - EXIT
       // explicit cleanup, lingering FDs and listeners accumulate across
       // reconnect attempts.
       const client = new Client()
+      // R-0000198: tryConnectOnPort cleans the client up on every internal
+      // failure path (handleAbort, handleError, handleTimeout). The outer
+      // catch must therefore only clean up when the inner connect already
+      // resolved — i.e. when a downstream step (commitAcceptedHostKey, etc.)
+      // throws on an established client. registerConnectedClient adopts the
+      // client into `this.client`, so a registered client must never be
+      // cleaned up here either.
+      let tryConnectResolved = false
+      let registered = false
       try {
         const verifier = buildHostVerifier(
           this.config.strictHostKeyChecking ?? "yes",
@@ -1325,16 +1334,22 @@ trap - EXIT
           readyTimeout: getRemainingReconnectTimeout(options.reconnectDeadline),
           username: this.config.user,
         })
+        tryConnectResolved = true
         hostKeyAttempt.commit()
         // Ensure the host key is persisted to disk before returning.
         // eslint-disable-next-line no-await-in-loop
         await this.commitAcceptedHostKey(verifier)
         this.registerConnectedClient(client, port)
+        registered = true
         return true
       } catch (error) {
-        // Always release the failed Client so its sockets, buffers, and
-        // listeners do not leak before the loop tries the next port.
-        cleanupFailedSshClient(client)
+        // Only release the client when nothing else has taken responsibility:
+        // tryConnectOnPort cleans up internally on rejection, and a
+        // registered client is owned by `this` and must not be force-closed
+        // mid-iteration.
+        if (tryConnectResolved && !registered) {
+          cleanupFailedSshClient(client)
+        }
         if (this.promptAbortSignal?.aborted === true) throw getAbortReason(this.promptAbortSignal)
         if (error instanceof HostKeyVerificationError) throw error
         // Try next port
@@ -1342,7 +1357,7 @@ trap - EXIT
     }
     return false
   }
-  /* eslint-enable max-statements, sonarjs/cognitive-complexity */
+  /* eslint-enable max-statements, sonarjs/cognitive-complexity, complexity */
 
   private async tryPasswordFallback(options?: ConnectOptions, agent?: string): Promise<boolean> {
     if (!this.config.passwordFallback) return false
