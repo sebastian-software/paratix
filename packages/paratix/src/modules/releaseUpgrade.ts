@@ -10,6 +10,7 @@ import {
   NEEDS_APPLY,
   type SshConnection,
 } from "../types.js"
+import { type Distro, parseOsReleaseDistro } from "./releaseUpgradeDistro.js"
 import {
   isAcceptableSourcesPath,
   isSupportedDebianUpgradePath,
@@ -46,27 +47,18 @@ type ReleaseUpgradeOptions = {
   timeout?: number
 }
 
-type Distro = "debian" | "ubuntu"
-
 /**
- * Detect the Linux distribution of the remote host by reading `/etc/os-release`.
+ * Detect the Linux distribution of the remote host by reading
+ * `/etc/os-release`. See {@link parseOsReleaseDistro} for the comparison
+ * rules (case-insensitive `ID=`, `ID_LIKE=` fallback per R-0000239).
  *
  * @param ssh - Active SSH connection to the remote host.
  * @returns `"debian"`, `"ubuntu"`, or `null` when the distribution cannot be
- *   identified from the `ID=` field.
+ *   identified.
  */
 async function detectDistro(ssh: SshConnection): Promise<Distro | null> {
   const osRelease = await ssh.readFile("/etc/os-release")
-  for (const line of osRelease.split("\n")) {
-    const match = /^ID=(?<value>.*)$/v.exec(line)
-    if (match?.groups) {
-      const id = match.groups.value.replaceAll('"', "").trim()
-      if (id === "ubuntu") return "ubuntu"
-      if (id === "debian") return "debian"
-      return null
-    }
-  }
-  return null
+  return parseOsReleaseDistro(osRelease)
 }
 
 /**

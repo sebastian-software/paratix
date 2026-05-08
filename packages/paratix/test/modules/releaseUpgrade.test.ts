@@ -129,6 +129,35 @@ describe("releaseUpgrade.upgrade — check", () => {
     expect(result).toBe("needs-apply")
   })
 
+  it("R-0000239: Ubuntu detected when ID is upper-cased", async () => {
+    const ssh = createMockSsh({
+      "cat '/etc/os-release'": { code: 0, stdout: 'ID=Ubuntu\nVERSION_ID="22.04"\n' },
+      "do-release-upgrade -c": { code: 0 },
+    })
+    const mod = releaseUpgrade.upgrade()
+    const result = await mod.check(ssh, emptyEnv)
+    expect(result).toBe("needs-apply")
+    expect(ssh.calls).toContain("do-release-upgrade -c")
+  })
+
+  it("R-0000239: Debian fork detected via ID_LIKE fallback", async () => {
+    const ssh = createMockSsh({
+      "cat '/etc/os-release'": {
+        code: 0,
+        stdout: "ID=raspbian\nID_LIKE=debian\nVERSION_CODENAME=bookworm\n",
+      },
+      "curl --max-time 30 -fsSL https://deb.debian.org/debian/dists/stable/Release": {
+        code: 0,
+        stdout: DEBIAN_STABLE_RELEASE_CURL,
+      },
+      "lsb_release -cs": { code: 0, stdout: "bookworm\n" },
+    })
+    const mod = releaseUpgrade.upgrade()
+    const result = await mod.check(ssh, emptyEnv)
+    expect(result).toBe("needs-apply")
+    expect(ssh.calls).toContain("lsb_release -cs")
+  })
+
   it("no SSH connection → needs-apply", async () => {
     const mod = releaseUpgrade.upgrade()
     const result = await mod.check(null, emptyEnv)
