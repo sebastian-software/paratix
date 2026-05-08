@@ -53,17 +53,32 @@ function validateSshdSettings(settings: Record<string, string>): void {
   }
 }
 
-async function validateSshdConfig(ssh: SshConnection, originalConfig: string): Promise<void> {
+async function validateSshdConfig(
+  ssh: SshConnection,
+  originalConfig: string
+): Promise<ModuleResult | undefined> {
   await ensurePrivilegeSeparationDirectory(ssh)
   const result = await ssh.exec("sshd -t", { ignoreExitCode: true, silent: true })
-  if (result.code !== 0) {
+  if (result.code === 0) return undefined
+
+  // Best-effort rollback: if the recovery write itself fails (e.g. SFTP error),
+  // we still want to surface the original validation failure rather than
+  // letting the recovery error mask it or leave the apply path throwing.
+  let rollbackError: unknown
+  try {
     // Intentional: unguarded write — restoring the original config is more
     // important than concurrency safety during a failed validation rollback.
     await ssh.writeFile(SSHD_CONFIG_PATH, originalConfig, { mode: SSHD_CONFIG_MODE })
-    throw new Error(
-      `sshd config validation failed (sshd -t), rolled back to previous config:\n${result.stderr}`
-    )
+  } catch (error) {
+    rollbackError = error
   }
+  const rollbackSuffix =
+    rollbackError == null
+      ? "rolled back to previous config"
+      : `rollback also failed: ${rollbackError instanceof Error ? rollbackError.message : String(rollbackError)}`
+  return failed(
+    `sshd config validation failed (sshd -t), ${rollbackSuffix}:\n${result.stderr}`
+  )
 }
 
 async function ensurePrivilegeSeparationDirectory(ssh: SshConnection): Promise<void> {
@@ -382,7 +397,8 @@ async function applySshdPort(ssh: SshConnection, targetPort: number): Promise<Mo
     originalContent: originalConfig,
     remotePath: SSHD_CONFIG_PATH,
   })
-  await validateSshdConfig(ssh, originalConfig)
+  const validationFailure = await validateSshdConfig(ssh, originalConfig)
+  if (validationFailure != null) return validationFailure
   await restartSshdOnNewPort(ssh, targetPort, originalConfig)
 
   return {
@@ -443,7 +459,8 @@ export const sshd = {
           })
         }
 
-        await validateSshdConfig(ssh, originalConfig)
+        const validationFailure = await validateSshdConfig(ssh, originalConfig)
+        if (validationFailure != null) return validationFailure
 
         if (!didChange) {
           return { status: "ok" }

@@ -92,7 +92,10 @@ describe("sshd.port — apply: validation and rollback", () => {
       .mockResolvedValueOnce({ code: 1, stderr: "sshd: invalid port", stdout: "" })
 
     const mod = sshd.port(2222)
-    await expect(mod.apply(mockSsh, emptyEnv)).rejects.toThrow("sshd config validation failed")
+    const result = await mod.apply(mockSsh, emptyEnv)
+
+    expect(result.status).toBe("failed")
+    expect(result.error?.message).toContain("sshd config validation failed")
 
     // Last write must restore the original config
     const lastWrite = writtenFiles.at(-1)

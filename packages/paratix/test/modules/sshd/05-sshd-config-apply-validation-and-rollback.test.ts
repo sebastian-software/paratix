@@ -76,7 +76,7 @@ function mockSshdDryRunExecValidationFailure(mockSsh: ReturnType<typeof createMo
 // ─── sshd.config — apply ──────────────────────────────────────────────────────
 
 describe("sshd.config — apply: validation and rollback", () => {
-  it("rolls back to original config and throws when sshd -t fails", async () => {
+  it("rolls back to original config and returns failed when sshd -t fails", async () => {
     // readFile internally calls output() which trims whitespace — use a value without trailing newline
     const originalConfig = "PasswordAuthentication yes"
     const mockSsh = createMockSsh({
@@ -99,13 +99,41 @@ describe("sshd.config — apply: validation and rollback", () => {
       })
 
     const mod = sshd.config({ PasswordAuthentication: "no" })
-    await expect(mod.apply(mockSsh, emptyEnv)).rejects.toThrow("sshd config validation failed")
+    const result = await mod.apply(mockSsh, emptyEnv)
+
+    expect(result.status).toBe("failed")
+    expect(result.error?.message).toContain("sshd config validation failed")
 
     // After failed validation the last write must restore the original config
     const lastWrite = writtenFiles.at(-1)
     expect(lastWrite?.path).toBe(SSHD_CONFIG)
     expect(lastWrite?.content).toBe(originalConfig)
     expect(execSpy.mock.calls.map((args) => args[0])).not.toContain("systemctl reload sshd")
+  })
+
+  it("returns failed with rollback note when both validation and rollback write fail", async () => {
+    const originalConfig = "PasswordAuthentication yes"
+    const mockSsh = createMockSsh({
+      [CAT_SSHD]: { stdout: originalConfig },
+    })
+    // eslint-disable-next-line @typescript-eslint/promise-function-async -- vi.mockImplementation requires matching return type
+    vi.spyOn(mockSsh, "writeFile").mockImplementation((path: string) => {
+      if (path === SSHD_CONFIG) {
+        return Promise.reject(new Error("SFTP rollback failed"))
+      }
+      return Promise.resolve()
+    })
+
+    vi.spyOn(mockSsh, "exec")
+      .mockResolvedValueOnce({ code: 0, stderr: "", stdout: "" })
+      .mockResolvedValueOnce({ code: 1, stderr: "sshd: bad config", stdout: "" })
+
+    const mod = sshd.config({ PasswordAuthentication: "no" })
+    const result = await mod.apply(mockSsh, emptyEnv)
+
+    expect(result.status).toBe("failed")
+    expect(result.error?.message).toContain("rollback also failed")
+    expect(result.error?.message).toContain("SFTP rollback failed")
   })
 
   it("writes new config and reloads sshd without rollback when validation succeeds", async () => {
