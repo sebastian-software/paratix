@@ -336,6 +336,45 @@ describe("applyCliProcessEnvironment", () => {
     expect(process.env.PARATIX_FIRST_RUN).toBeUndefined()
   })
 
+  it("restores process.env to the pre-CLI value across nested reentrant calls", () => {
+    expect(process.env.PARATIX_FIRST_RUN).toBeUndefined()
+
+    const restoreOuter = applyCliProcessEnvironment({ firstRun: true })
+    expect(process.env.PARATIX_FIRST_RUN).toBe("true")
+
+    // A reentrant call must not capture the synthetic "true" set by the
+    // outer call as its restore target.
+    const restoreInner = applyCliProcessEnvironment({ firstRun: true })
+    expect(process.env.PARATIX_FIRST_RUN).toBe("true")
+
+    restoreInner()
+    // The outer frame still depends on the synthetic value, so the key must
+    // remain "true" until the outer frame restores.
+    expect(process.env.PARATIX_FIRST_RUN).toBe("true")
+
+    restoreOuter()
+    // After the outermost frame restores, the original (absent) state is
+    // recovered — not the synthetic "true" the inner call observed.
+    expect(Object.hasOwn(process.env, "PARATIX_FIRST_RUN")).toBe(false)
+    expect(process.env.PARATIX_FIRST_RUN).toBeUndefined()
+  })
+
+  it("preserves an externally set value when reentrant calls layer firstRun", () => {
+    process.env.PARATIX_FIRST_RUN = "external"
+
+    const restoreOuter = applyCliProcessEnvironment({ firstRun: true })
+    expect(process.env.PARATIX_FIRST_RUN).toBe("true")
+
+    const restoreInner = applyCliProcessEnvironment({ firstRun: true })
+    expect(process.env.PARATIX_FIRST_RUN).toBe("true")
+
+    restoreInner()
+    expect(process.env.PARATIX_FIRST_RUN).toBe("true")
+
+    restoreOuter()
+    expect(process.env.PARATIX_FIRST_RUN).toBe("external")
+  })
+
   it("does not assign the literal string 'undefined' when restoring", () => {
     // Capture every assignment of process.env's PARATIX_FIRST_RUN. A
     // regression would write the literal string "undefined" via

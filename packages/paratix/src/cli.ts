@@ -272,17 +272,56 @@ export function applyCliEnvironmentOverrides(
   return { ...environment, [FIRST_RUN_ENV_NAME]: "true" }
 }
 
+/**
+ * Snapshot of the original `process.env[FIRST_RUN_ENV_NAME]` value before the
+ * outermost {@link applyCliProcessEnvironment} mutation. The CLI is normally
+ * single-shot, but tests and embedded runners can call it reentrantly. Without
+ * this stack the second call would capture the synthetic "true" the first call
+ * just installed, and "restore" it back instead of removing the key. The
+ * snapshot is only cleared once the outermost frame restores, so nested calls
+ * always see the genuine pre-CLI value as the eventual restore target.
+ */
+type FirstRunEnvironmentSnapshot = {
+  hadPreviousValue: boolean
+  previousValue: string | undefined
+}
+
+let firstRunEnvironmentSnapshot: FirstRunEnvironmentSnapshot | null = null
+let firstRunEnvironmentDepth = 0
+
+function captureFirstRunEnvironmentSnapshot(): FirstRunEnvironmentSnapshot {
+  if (firstRunEnvironmentSnapshot != null) {
+    return firstRunEnvironmentSnapshot
+  }
+  const snapshot: FirstRunEnvironmentSnapshot = {
+    hadPreviousValue: Object.hasOwn(process.env, FIRST_RUN_ENV_NAME),
+    previousValue: process.env[FIRST_RUN_ENV_NAME],
+  }
+  firstRunEnvironmentSnapshot = snapshot
+  return snapshot
+}
+
 export function applyCliProcessEnvironment(options: { firstRun: boolean }): () => void {
-  const previousValue = process.env[FIRST_RUN_ENV_NAME]
-  const hadPreviousValue = Object.hasOwn(process.env, FIRST_RUN_ENV_NAME)
+  const snapshot = captureFirstRunEnvironmentSnapshot()
+  firstRunEnvironmentDepth += 1
+  let restored = false
   const restoreProcessEnvironment = (): void => {
+    if (restored) return
+    restored = true
+    firstRunEnvironmentDepth -= 1
+    if (firstRunEnvironmentDepth > 0) {
+      // Inner frame finished but an outer frame still relies on the synthetic
+      // "true" value — leave process.env alone until the outer frame restores.
+      return
+    }
+    firstRunEnvironmentSnapshot = null
     // Use FIRST_RUN_ENV_NAME consistently and avoid assigning `undefined`
     // (which would coerce to the literal string "undefined" on process.env).
-    if (!hadPreviousValue || previousValue == null) {
+    if (!snapshot.hadPreviousValue || snapshot.previousValue == null) {
       Reflect.deleteProperty(process.env, FIRST_RUN_ENV_NAME)
       return
     }
-    process.env[FIRST_RUN_ENV_NAME] = previousValue
+    process.env[FIRST_RUN_ENV_NAME] = snapshot.previousValue
   }
   if (!options.firstRun) return restoreProcessEnvironment
   process.env[FIRST_RUN_ENV_NAME] = "true"
