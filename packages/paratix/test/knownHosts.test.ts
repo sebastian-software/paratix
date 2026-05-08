@@ -9,6 +9,7 @@ import {
   extractAlgoFromKey,
   lookupHostKey,
   parseKnownHosts,
+  validateExpectedHostPublicKey,
   waitForKnownHostsWrites,
 } from "../src/knownHosts.js"
 
@@ -1161,6 +1162,46 @@ describe("buildHostVerifier", () => {
     // Assert: appendFile called again (key was unknown, not from cache)
     await secondCommitAcceptedHostKey?.()
     expect(appendFileMock).toHaveBeenCalledTimes(1)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// R-0000205: validateExpectedHostPublicKey rejects bad algorithm/base64
+// ---------------------------------------------------------------------------
+
+describe("validateExpectedHostPublicKey (R-0000205)", () => {
+  it("accepts a well-formed ssh-ed25519 pinned public key", () => {
+    const ed25519Key = makeKeyBuffer("ssh-ed25519", Buffer.from("real-key-material"))
+    expect(
+      validateExpectedHostPublicKey(`ssh-ed25519 ${ed25519Key.toString("base64")} comment`)
+    ).toBeNull()
+  })
+
+  it("accepts ecdsa-sha2-nistp256 pinned keys", () => {
+    const ecdsaKey = makeKeyBuffer("ecdsa-sha2-nistp256", Buffer.from("ecdsa-material"))
+    expect(
+      validateExpectedHostPublicKey(`ecdsa-sha2-nistp256 ${ecdsaKey.toString("base64")}`)
+    ).toBeNull()
+  })
+
+  it("rejects an algorithm typo like 'ed25519' instead of 'ssh-ed25519'", () => {
+    const ed25519Key = makeKeyBuffer("ssh-ed25519")
+    const message = validateExpectedHostPublicKey(`ed25519 ${ed25519Key.toString("base64")}`)
+    expect(message).not.toBeNull()
+    expect(message).toMatch(/unsupported algorithm/v)
+    expect(message).toMatch(/ssh-ed25519/v)
+  })
+
+  it("rejects unknown algorithms", () => {
+    expect(validateExpectedHostPublicKey("ssh-dss AAAA")).toMatch(/unsupported algorithm/v)
+  })
+
+  it("rejects a key field that is not strict base64", () => {
+    expect(validateExpectedHostPublicKey("ssh-ed25519 not_base64$$$")).toMatch(/invalid base64/v)
+  })
+
+  it("rejects keys missing the algorithm/base64 separator", () => {
+    expect(validateExpectedHostPublicKey("ssh-ed25519")).toMatch(/<algorithm> <base64>/v)
   })
 })
 

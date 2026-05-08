@@ -410,12 +410,40 @@ async function acceptAndPersistHostKey(host: string, port: number, key: Buffer):
   }
 }
 
+/**
+ * R-0000205: allowlist of SSH host-key algorithms paratix recognises in
+ * pinned public keys. `ecdsa-sha2-*` covers the three OpenSSH curves
+ * (nistp256, nistp384, nistp521); anything outside this set is almost
+ * certainly a typo (`ed25519` vs `ssh-ed25519`) or an unsupported algorithm
+ * and is rejected up front instead of failing later with an opaque mismatch.
+ */
+const PINNED_HOST_KEY_ALGORITHM_PATTERN =
+  /^(?:ssh-ed25519|ssh-rsa|ecdsa-sha2-(?:nistp256|nistp384|nistp521))$/v
+
 function normalizePinnedPublicKey(publicKey: string): string {
   const parts = publicKey.trim().split(/\s+/v)
   if (parts.length < 2) {
     throw new Error("Expected host public key must use the format '<algorithm> <base64>'")
   }
   const [algorithm, key] = parts
+  // R-0000205: validate algorithm against the allowlist so typos like
+  // `ed25519` (missing `ssh-` prefix) fail with an actionable error instead
+  // of a misleading "remote key does not match" later.
+  if (!PINNED_HOST_KEY_ALGORITHM_PATTERN.test(algorithm)) {
+    throw new Error(
+      `Expected host public key uses unsupported algorithm '${algorithm}'. ` +
+        "Supported algorithms: ssh-ed25519, ssh-rsa, ecdsa-sha2-nistp256, ecdsa-sha2-nistp384, ecdsa-sha2-nistp521."
+    )
+  }
+  // R-0000205: validate base64 with the same strict alphabet used for
+  // known_hosts entries so silent truncation by `Buffer.from(value, "base64")`
+  // cannot mask a tampered or copy-pasted key.
+  if (!STRICT_BASE64_PATTERN.test(key)) {
+    throw new Error(
+      "Expected host public key contains invalid base64 in the key field. " +
+        "Use the exact value from `ssh-keygen -y` or the second field of an OpenSSH known_hosts line."
+    )
+  }
   return `${algorithm} ${key}`
 }
 
