@@ -1,6 +1,6 @@
 /* oxlint-disable no-unused-vars -- shared fixtures are duplicated by the mechanical test split */
 
-import { describe, expect, it } from "vitest"
+import { describe, expect, it, vi } from "vitest"
 
 import { timer } from "../../../src/modules/timer.js"
 import { createMockSsh as createBaseMockSsh } from "../../helpers/mockSsh.js"
@@ -119,6 +119,44 @@ describe("timer.scheduled — apply (state: present)", () => {
     expect(result.status).toBe("failed")
     expect(ssh.writeFileCalls.at(-2)?.content).toBe(previousService)
     expect(ssh.writeFileCalls.at(-1)?.content).toBe(previousTimer)
+  })
+
+  // R-0000216: when the second writeFile throws, the first file is left
+  // modified. The shared try/catch around both writeFile calls must
+  // restore both snapshots and surface a failed result.
+  it("R-0000216: restores both unit files when the second writeFile throws", async () => {
+    const previousService = "[Unit]\nDescription=old service\n"
+    const previousTimer = "[Unit]\nDescription=old timer\n"
+    const ssh = createTimerApplyMockSsh({
+      [`[ -e '${SERVICE_PATH}' ]`]: { code: 0 },
+      [`[ -e '${TIMER_PATH}' ]`]: { code: 0 },
+      [`cat '${SERVICE_PATH}'`]: { stdout: previousService },
+      [`cat '${TIMER_PATH}'`]: { stdout: previousTimer },
+      [`stat -c '%a' '${SERVICE_PATH}'`]: { stdout: "0644" },
+      [`stat -c '%a' '${TIMER_PATH}'`]: { stdout: "0644" },
+    })
+    // First call writes the new service content; second call (timer) throws;
+    // the catch block then issues two restore writes.
+    const writeFile = vi
+      .spyOn(ssh, "writeFile")
+      .mockResolvedValueOnce()
+      .mockRejectedValueOnce(new Error("SFTP write timer.timer failed: ENOSPC"))
+      .mockResolvedValue()
+    const mod = timer.scheduled("backup", baseOptions)
+    const result = await mod.apply(ssh, emptyEnv)
+    expect(result.status).toBe("failed")
+    expect(String(result.error)).toContain("failed to write timer unit files")
+    expect(String(result.error)).toContain("ENOSPC")
+    // First two calls are the failing apply; last two are the restore.
+    expect(writeFile).toHaveBeenNthCalledWith(1, SERVICE_PATH, expectedServiceContent, {
+      mode: "0644",
+    })
+    expect(writeFile).toHaveBeenNthCalledWith(2, TIMER_PATH, expectedTimerContent, {
+      mode: "0644",
+    })
+    expect(writeFile).toHaveBeenNthCalledWith(3, SERVICE_PATH, previousService, { mode: "0644" })
+    expect(writeFile).toHaveBeenNthCalledWith(4, TIMER_PATH, previousTimer, { mode: "0644" })
+    expect(ssh.calls).not.toContain("systemctl daemon-reload")
   })
 
   it("returns failed when enable --now fails", async () => {

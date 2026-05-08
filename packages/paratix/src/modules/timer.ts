@@ -1,3 +1,4 @@
+/* eslint-disable max-lines -- timer module keeps related lifecycle helpers (sync, restart, absent) together for cohesion */
 import { failed, failedCommand } from "../moduleFailure.js"
 import { shellQuote } from "../ssh.js"
 import { type Module, type ModuleResult, NEEDS_APPLY, type SshConnection } from "../types.js"
@@ -85,6 +86,55 @@ type SyncOutcome =
   | { failure: ModuleResult; ok: false }
   | { ok: true; serviceMatched: boolean; timerMatched: boolean }
 
+type SnapshotPair = Parameters<typeof restoreUnitFileSnapshots>[2]
+
+// R-0000216: writeFile can throw (SFTP error after a partial write,
+// permission denied, network drop). Wrap both writes in a shared
+// try/catch so a throw on the second writeFile cannot leave the first
+// file modified — the captured snapshots restore both back to the
+// pre-apply state, and the caller surfaces a failed result.
+async function writeTimerUnitFiles(
+  ssh: SshConnection,
+  parameters: {
+    name: string
+    paths: TimerPaths
+    serviceMatched: boolean
+    snapshots: SnapshotPair
+    timerMatched: boolean
+  }
+): Promise<ModuleResult | null> {
+  const { name, paths, serviceMatched, snapshots, timerMatched } = parameters
+  try {
+    if (!serviceMatched) {
+      await ssh.writeFile(paths.servicePath, paths.serviceContent, { mode: UNIT_FILE_MODE })
+    }
+    if (!timerMatched) {
+      await ssh.writeFile(paths.timerPath, paths.timerContent, { mode: UNIT_FILE_MODE })
+    }
+    return null
+  } catch (error) {
+    await restoreUnitFileSnapshots(ssh, paths, snapshots)
+    const reason = error instanceof Error ? error.message : String(error)
+    return failed(`[timer.scheduled: ${name}] failed to write timer unit files: ${reason}`)
+  }
+}
+
+async function reloadDaemonAfterTimerSync(
+  ssh: SshConnection,
+  parameters: { name: string; paths: TimerPaths; snapshots: SnapshotPair }
+): Promise<ModuleResult | null> {
+  const reload = await ssh.exec(`${SYSTEMCTL} daemon-reload`, {
+    ignoreExitCode: true,
+    silent: true,
+  })
+  if (reload.code === 0) return null
+  await restoreUnitFileSnapshots(ssh, parameters.paths, parameters.snapshots)
+  return failedCommand(
+    `[timer.scheduled: ${parameters.name}] systemctl daemon-reload failed`,
+    reload
+  )
+}
+
 async function syncUnitFiles(
   ssh: SshConnection,
   name: string,
@@ -100,31 +150,24 @@ async function syncUnitFiles(
     expectedMode: UNIT_FILE_MODE,
     path: paths.timerPath,
   })
-  const snapshots = {
+  const snapshots: SnapshotPair = {
     service: serviceMatched ? undefined : await readFileSnapshot(ssh, paths.servicePath),
     timer: timerMatched ? undefined : await readFileSnapshot(ssh, paths.timerPath),
   }
 
-  if (!serviceMatched) {
-    await ssh.writeFile(paths.servicePath, paths.serviceContent, { mode: UNIT_FILE_MODE })
-  }
-  if (!timerMatched) {
-    await ssh.writeFile(paths.timerPath, paths.timerContent, { mode: UNIT_FILE_MODE })
-  }
+  const writeFailure = await writeTimerUnitFiles(ssh, {
+    name,
+    paths,
+    serviceMatched,
+    snapshots,
+    timerMatched,
+  })
+  if (writeFailure != null) return { failure: writeFailure, ok: false }
 
-  if (!serviceMatched || !timerMatched) {
-    const reload = await ssh.exec(`${SYSTEMCTL} daemon-reload`, {
-      ignoreExitCode: true,
-      silent: true,
-    })
-    if (reload.code !== 0) {
-      await restoreUnitFileSnapshots(ssh, paths, snapshots)
-      return {
-        failure: failedCommand(`[timer.scheduled: ${name}] systemctl daemon-reload failed`, reload),
-        ok: false,
-      }
-    }
-  }
+  if (serviceMatched && timerMatched) return { ok: true, serviceMatched, timerMatched }
+
+  const reloadFailure = await reloadDaemonAfterTimerSync(ssh, { name, paths, snapshots })
+  if (reloadFailure != null) return { failure: reloadFailure, ok: false }
   return { ok: true, serviceMatched, timerMatched }
 }
 
