@@ -69,6 +69,10 @@ const absentApplyWithExistingUnitsResponses = {
   [`cat '${SERVICE_PATH}'`]: { stdout: existingServiceContent },
   [`cat '${TIMER_PATH}'`]: { stdout: existingTimerContent },
   [`rm -f '${TIMER_PATH}' '${SERVICE_PATH}'`]: { code: 0 },
+  // R-0000217: snapshot captures the unit-file mode so a rollback can
+  // restore the operator's manual chmod settings.
+  [`stat -c '%a' '${SERVICE_PATH}'`]: { code: 0, stdout: "0644" },
+  [`stat -c '%a' '${TIMER_PATH}'`]: { code: 0, stdout: "0644" },
   "systemctl daemon-reload": { code: 0 },
   "systemctl disable --now -- 'backup.timer'": { code: 0 },
   "systemctl is-active --quiet -- 'backup.timer'": { code: 1 },

@@ -121,6 +121,48 @@ describe("timer.scheduled — apply (state: present)", () => {
     expect(ssh.writeFileCalls.at(-1)?.content).toBe(previousTimer)
   })
 
+  // R-0000217: timer snapshots must capture the existing unit-file mode so
+  // the rollback restores the operator's manual chmod (e.g. 0600 because of
+  // an EnvironmentFile reference). The previous implementation hardcoded
+  // 0644 on restore and silently overwrote that hardening.
+  it("R-0000217: rollback restores the original mode captured in the snapshot", async () => {
+    const previousService = "[Unit]\nDescription=old service\n"
+    const previousTimer = "[Unit]\nDescription=old timer\n"
+    const ssh = createMockSsh(
+      {
+        [`[ -e '${SERVICE_PATH}' ]`]: { code: 0 },
+        [`[ -e '${TIMER_PATH}' ]`]: { code: 0 },
+        [`cat '${SERVICE_PATH}'`]: { stdout: previousService },
+        [`cat '${TIMER_PATH}'`]: { stdout: previousTimer },
+        // Operator hardened service mode to 0600; timer stays at 0644.
+        [`stat -c '%a' '${SERVICE_PATH}'`]: { stdout: "0600" },
+        [`stat -c '%a' '${TIMER_PATH}'`]: { stdout: "0644" },
+        "systemctl daemon-reload": { code: 1, stderr: "boom" },
+      },
+      {
+        allowWrites: [
+          { options: { mode: "0644" }, remotePath: SERVICE_PATH },
+          { options: { mode: "0600" }, remotePath: SERVICE_PATH },
+          { options: { mode: "0644" }, remotePath: TIMER_PATH },
+        ],
+      }
+    )
+    const mod = timer.scheduled("backup", baseOptions)
+    const result = await mod.apply(ssh, emptyEnv)
+    expect(result.status).toBe("failed")
+    // Last two writes are the restore: service must use 0600, timer 0644.
+    expect(ssh.writeFileCalls.at(-2)).toStrictEqual({
+      content: previousService,
+      options: { mode: "0600" },
+      remotePath: SERVICE_PATH,
+    })
+    expect(ssh.writeFileCalls.at(-1)).toStrictEqual({
+      content: previousTimer,
+      options: { mode: "0644" },
+      remotePath: TIMER_PATH,
+    })
+  })
+
   // R-0000216: when the second writeFile throws, the first file is left
   // modified. The shared try/catch around both writeFile calls must
   // restore both snapshots and surface a failed result.
