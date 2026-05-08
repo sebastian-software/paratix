@@ -90,14 +90,19 @@ export async function withRegisteredSecrets<T>(
 ): Promise<T> {
   const registered: string[] = []
   const registerableSecrets = secrets.filter((secret) => secret.length > 0)
+  // R-0000195: Validate up-front so the register loop only runs on inputs
+  // that are guaranteed registrable. The register loop and the body are then
+  // both protected by the same try/finally — if a future API extension
+  // causes `registerSecret` to throw mid-iteration, already-registered
+  // values are still released.
   for (const secret of registerableSecrets) {
     assertRegistrableSecret(secret)
   }
-  for (const secret of registerableSecrets) {
-    registerSecret(secret)
-    registered.push(secret)
-  }
   try {
+    for (const secret of registerableSecrets) {
+      registerSecret(secret)
+      registered.push(secret)
+    }
     const result = await body()
     return maskScopedResult(result, registered)
   } catch (error) {

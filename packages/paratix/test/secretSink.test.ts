@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from "vitest"
+import { afterEach, describe, expect, it, vi } from "vitest"
 
 import { printCommandFailure } from "../src/output.js"
 import {
@@ -147,6 +147,33 @@ describe("withRegisteredSecrets", () => {
 
     expect(getRegisteredSecrets()).toStrictEqual([])
     expect(maskRegisteredSecrets("alpha")).toBe("alpha")
+  })
+
+  it("releases already-registered secrets when registration is interrupted (R-0000195)", async () => {
+    // Regression: the register loop must run inside the same try/finally as
+    // the body so a throw between two registrations releases everything.
+    // Force a throw mid-registration by spying on Map.prototype.set and
+    // failing the second call.
+    // eslint-disable-next-line @typescript-eslint/unbound-method -- bound to Map instance via call() below
+    const originalSet = Map.prototype.set
+    const setSpy = vi
+      .spyOn(Map.prototype, "set")
+      .mockImplementationOnce(function mockedSet(this: Map<unknown, unknown>, key, value) {
+        return originalSet.call(this, key, value)
+      })
+      .mockImplementationOnce(() => {
+        throw new Error("simulated register failure")
+      })
+
+    await expect(
+      withRegisteredSecrets(["alpha", "beta"], async () => {
+        await Promise.resolve()
+      })
+    ).rejects.toThrow("simulated register failure")
+
+    setSpy.mockRestore()
+
+    expect(getRegisteredSecrets()).toStrictEqual([])
   })
 })
 
