@@ -72,13 +72,13 @@ async function validateSshdConfig(
   } catch (error) {
     rollbackError = error
   }
+  const rollbackMessage =
+    rollbackError instanceof Error ? rollbackError.message : String(rollbackError)
   const rollbackSuffix =
     rollbackError == null
       ? "rolled back to previous config"
-      : `rollback also failed: ${rollbackError instanceof Error ? rollbackError.message : String(rollbackError)}`
-  return failed(
-    `sshd config validation failed (sshd -t), ${rollbackSuffix}:\n${result.stderr}`
-  )
+      : `rollback also failed: ${rollbackMessage}`
+  return failed(`sshd config validation failed (sshd -t), ${rollbackSuffix}:\n${result.stderr}`)
 }
 
 async function ensurePrivilegeSeparationDirectory(ssh: SshConnection): Promise<void> {

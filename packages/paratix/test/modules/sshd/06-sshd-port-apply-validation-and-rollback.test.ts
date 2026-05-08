@@ -357,12 +357,12 @@ describe("sshd.port — apply: validation and rollback", () => {
     const execSpy = vi.spyOn(mockSsh, "exec")
     const addPortSpy = vi.spyOn(mockSsh, "addPort")
     const removePortSpy = vi.spyOn(mockSsh, "removePort")
-    // The rollback writeFile to sshd_config fails (e.g. SFTP error during recovery)
-    // eslint-disable-next-line @typescript-eslint/promise-function-async -- vi.mockImplementation requires matching return type
-    vi.spyOn(mockSsh, "writeFile").mockImplementation((path: string) => {
-      if (path === SSHD_CONFIG) return Promise.reject(new Error("SFTP rollback failed"))
-      return Promise.resolve()
-    })
+    // The initial writeFile (new config with new port) must succeed so the
+    // restart path is reached; only the rollback writeFile (restoring the
+    // original config after the failed restart) should fail in this scenario.
+    vi.spyOn(mockSsh, "writeFile")
+      .mockResolvedValueOnce(undefined)
+      .mockRejectedValueOnce(new Error("SFTP rollback failed"))
 
     execSpy
       .mockResolvedValueOnce({ code: 0, stderr: "", stdout: "" }) // mkdir -p /run/sshd

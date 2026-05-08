@@ -116,13 +116,12 @@ describe("sshd.config — apply: validation and rollback", () => {
     const mockSsh = createMockSsh({
       [CAT_SSHD]: { stdout: originalConfig },
     })
-    // eslint-disable-next-line @typescript-eslint/promise-function-async -- vi.mockImplementation requires matching return type
-    vi.spyOn(mockSsh, "writeFile").mockImplementation((path: string) => {
-      if (path === SSHD_CONFIG) {
-        return Promise.reject(new Error("SFTP rollback failed"))
-      }
-      return Promise.resolve()
-    })
+    // The initial writeFile (new config) must succeed so that validation runs;
+    // only the rollback writeFile (restoring originalConfig after sshd -t fails)
+    // is the one we want to fail in this scenario.
+    vi.spyOn(mockSsh, "writeFile")
+      .mockResolvedValueOnce(undefined)
+      .mockRejectedValueOnce(new Error("SFTP rollback failed"))
 
     vi.spyOn(mockSsh, "exec")
       .mockResolvedValueOnce({ code: 0, stderr: "", stdout: "" })
