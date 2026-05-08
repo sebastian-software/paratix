@@ -58,6 +58,24 @@ describe("apt.key", () => {
   const fingerprint = "1234567890ABCDEF1234567890ABCDEF12345678"
   const downloadCommand =
     "curl -fsSL -o '/tmp/apt-key-docker.ABCDEF' --proto '=https' --proto-redir '=https' --config -"
+  // R-0000225: gpg now runs against a temp homedir and a chmod 0644 follows
+  // the dearmor. Tests stub the homedir mktemp, the new dearmor command shape,
+  // the chmod and the rm -rf cleanup.
+  const gpgHomedir = "/tmp/apt-key-gpg-home.ABCDEF"
+  const gpgHomedirMktempCmd = "mktemp -d /tmp/apt-key-gpg-home.XXXXXX"
+  const gpgHomedirCleanupCmd = `rm -rf -- '${gpgHomedir}'`
+  const dearmorKeyringPath = "/etc/apt/keyrings/docker.gpg"
+  const dearmorTempPath = "/tmp/apt-key-docker.ABCDEF"
+  const dearmorCommand = `gpg --no-default-keyring --no-options --homedir '${gpgHomedir}' --dearmor --yes -o '${dearmorKeyringPath}' '${dearmorTempPath}'`
+  const dearmorChmodCommand = `chmod 0644 '${dearmorKeyringPath}'`
+
+  function aptKeyDearmorBaseStubs(): Record<string, { code?: number; stdout?: string }> {
+    return {
+      [dearmorChmodCommand]: { code: 0 },
+      [gpgHomedirCleanupCmd]: { code: 0 },
+      [gpgHomedirMktempCmd]: { stdout: `${gpgHomedir}\n` },
+    }
+  }
 
   function aptKeyValidationMessage(url: string): string {
     try {
@@ -117,11 +135,12 @@ describe("apt.key", () => {
 
   it("apply downloads, verifies fingerprint, and then imports the key", async () => {
     const ssh = createMockSsh({
+      ...aptKeyDearmorBaseStubs(),
       "[ -L '/etc/apt/keyrings/docker.gpg' ]": { code: 1 },
-      [downloadCommand]: {
+      [dearmorCommand]: {
         code: 0,
       },
-      "gpg --dearmor --yes -o '/etc/apt/keyrings/docker.gpg' '/tmp/apt-key-docker.ABCDEF'": {
+      [downloadCommand]: {
         code: 0,
       },
       "gpg --show-keys --with-colons '/tmp/apt-key-docker.ABCDEF'": {
@@ -144,19 +163,24 @@ describe("apt.key", () => {
       silent: true,
     })
     expect(ssh.calls).toContain("gpg --show-keys --with-colons '/tmp/apt-key-docker.ABCDEF'")
-    expect(ssh.calls).toContain(
-      "gpg --dearmor --yes -o '/etc/apt/keyrings/docker.gpg' '/tmp/apt-key-docker.ABCDEF'"
-    )
+    expect(ssh.calls).toContain(dearmorCommand)
+    // R-0000225: the dearmor must run with --homedir pointing at a fresh temp
+    // dir, and the keyring must be chmod'd 0644 afterwards.
+    expect(ssh.calls).toContain(gpgHomedirMktempCmd)
+    expect(dearmorCommand).toContain("--homedir")
+    expect(ssh.calls).toContain(dearmorChmodCommand)
+    expect(ssh.calls).toContain(gpgHomedirCleanupCmd)
   })
 
   it("passes credentialed and sensitive query URLs through curl stdin instead of argv", async () => {
     const sensitiveUrl = "https://apt-user:s3cr3t@example.com/key.gpg?token=abc123&download=true"
     const ssh = createMockSsh({
+      ...aptKeyDearmorBaseStubs(),
       "[ -L '/etc/apt/keyrings/docker.gpg' ]": { code: 1 },
-      [downloadCommand]: {
+      [dearmorCommand]: {
         code: 0,
       },
-      "gpg --dearmor --yes -o '/etc/apt/keyrings/docker.gpg' '/tmp/apt-key-docker.ABCDEF'": {
+      [downloadCommand]: {
         code: 0,
       },
       "gpg --show-keys --with-colons '/tmp/apt-key-docker.ABCDEF'": {
@@ -239,20 +263,19 @@ describe("apt.key", () => {
     expect(String(result.error)).toContain(
       "[apt.key] key material for docker contains 2 primary keys"
     )
-    expect(ssh.calls).not.toContain(
-      "gpg --dearmor --yes -o '/etc/apt/keyrings/docker.gpg' '/tmp/apt-key-docker.ABCDEF'"
-    )
+    expect(ssh.calls).not.toContain(dearmorCommand)
   })
 
   it("returns a failed result with error details when key import fails", async () => {
     const ssh = createMockSsh({
+      ...aptKeyDearmorBaseStubs(),
       "[ -L '/etc/apt/keyrings/docker.gpg' ]": { code: 1 },
-      [downloadCommand]: {
-        code: 0,
-      },
-      "gpg --dearmor --yes -o '/etc/apt/keyrings/docker.gpg' '/tmp/apt-key-docker.ABCDEF'": {
+      [dearmorCommand]: {
         code: 2,
         stderr: "gpg: dearmor failed: No such file or directory",
+      },
+      [downloadCommand]: {
+        code: 0,
       },
       "gpg --show-keys --with-colons '/tmp/apt-key-docker.ABCDEF'": {
         code: 0,
@@ -271,13 +294,14 @@ describe("apt.key", () => {
 
   it("ignores non-zero temp file cleanup exit codes", async () => {
     const ssh = createMockSsh({
+      ...aptKeyDearmorBaseStubs(),
       "[ -L '/etc/apt/keyrings/docker.gpg' ]": { code: 1 },
-      [downloadCommand]: {
-        code: 0,
-      },
-      "gpg --dearmor --yes -o '/etc/apt/keyrings/docker.gpg' '/tmp/apt-key-docker.ABCDEF'": {
+      [dearmorCommand]: {
         code: 2,
         stderr: "gpg: dearmor failed: No such file or directory",
+      },
+      [downloadCommand]: {
+        code: 0,
       },
       "gpg --show-keys --with-colons '/tmp/apt-key-docker.ABCDEF'": {
         code: 0,
@@ -318,9 +342,7 @@ describe("apt.key", () => {
     )
     expect(ssh.calls).not.toContain(downloadCommand)
     expect(ssh.calls).not.toContain("gpg --show-keys --with-colons '/tmp/apt-key-docker.ABCDEF'")
-    expect(ssh.calls).not.toContain(
-      "gpg --dearmor --yes -o '/etc/apt/keyrings/docker.gpg' '/tmp/apt-key-docker.ABCDEF'"
-    )
+    expect(ssh.calls).not.toContain(dearmorCommand)
   })
 
   it("returns failed without invoking curl or gpg when mktemp produces a path outside the expected prefix", async () => {
@@ -429,9 +451,7 @@ describe("apt.key", () => {
     expect(String(result.error)).toContain(
       "[apt.key] refuses to write through symlink at /etc/apt/keyrings/docker.gpg"
     )
-    expect(ssh.calls).not.toContain(
-      "gpg --dearmor --yes -o '/etc/apt/keyrings/docker.gpg' '/tmp/apt-key-docker.ABCDEF'"
-    )
+    expect(ssh.calls).not.toContain(dearmorCommand)
   })
 })
 

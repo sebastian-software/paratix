@@ -155,6 +155,89 @@ async function createValidatedAptKeyTemporaryPath(
   }
 }
 
+async function allocateGpgHomedir(
+  ssh: SshConnection,
+  name: string
+): Promise<{ failure: ModuleResult } | { homedir: string }> {
+  const rawHomedir = await ssh.output(`mktemp -d /tmp/apt-key-gpg-home.XXXXXX`)
+  try {
+    return { homedir: validateMktempPath("/tmp", rawHomedir, "apt-key-gpg-home") }
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : String(error)
+    return {
+      failure: failed(`[apt.key] mktemp produced an unexpected gpg homedir for ${name}: ${reason}`),
+    }
+  }
+}
+
+function buildDearmorCommand(parameters: {
+  homedir: string
+  keyringPath: string
+  temporaryPath: string
+}): string {
+  return [
+    "gpg",
+    "--no-default-keyring",
+    "--no-options",
+    "--homedir",
+    shellQuote(parameters.homedir),
+    "--dearmor",
+    "--yes",
+    "-o",
+    shellQuote(parameters.keyringPath),
+    shellQuote(parameters.temporaryPath),
+  ].join(" ")
+}
+
+/**
+ * Run `gpg --dearmor` against a temp homedir (rather than the invoking user's
+ * `~/.gnupg`) and `chmod 0644` the resulting keyring so `_apt` can read it.
+ * R-0000225: the previous implementation polluted the running user's home
+ * with a `~/.gnupg/trustdb.gpg` and left the keyring at a default mode that
+ * `_apt` could not always read.
+ *
+ * @param ssh - The active SSH connection.
+ * @param parameters - dearmor inputs.
+ * @param parameters.keyringPath - Destination path for the dearmored keyring.
+ * @param parameters.name - Logical apt.key name used in error messages.
+ * @param parameters.temporaryPath - Source temp file holding the downloaded armored key.
+ * @returns A failed ModuleResult on any error, or null on success.
+ */
+async function dearmorAptKeyToKeyring(
+  ssh: SshConnection,
+  parameters: { keyringPath: string; name: string; temporaryPath: string }
+): Promise<ModuleResult | null> {
+  const { keyringPath, name, temporaryPath } = parameters
+  const homedirResult = await allocateGpgHomedir(ssh, name)
+  if ("failure" in homedirResult) return homedirResult.failure
+  const { homedir } = homedirResult
+  try {
+    const importResult = await ssh.exec(
+      buildDearmorCommand({ homedir, keyringPath, temporaryPath }),
+      { ignoreExitCode: true, silent: true }
+    )
+    if (importResult.code !== 0) {
+      return failedCommand(`[apt.key] failed to import ${name}`, importResult)
+    }
+    // R-0000225: gpg --dearmor leaves the keyring at the umask-default mode,
+    // which on systems with restrictive umasks renders it unreadable for the
+    // unprivileged `_apt` user. Force 0644 so apt can always read the keyring.
+    const chmodResult = await ssh.exec(`chmod 0644 ${shellQuote(keyringPath)}`, {
+      ignoreExitCode: true,
+      silent: true,
+    })
+    if (chmodResult.code !== 0) {
+      return failedCommand(
+        `[apt.key] failed to chmod 0644 the keyring at ${keyringPath}`,
+        chmodResult
+      )
+    }
+    return null
+  } finally {
+    await ssh.exec(`rm -rf -- ${shellQuote(homedir)}`, { ignoreExitCode: true, silent: true })
+  }
+}
+
 async function downloadVerifyAndImportAptKey(
   ssh: SshConnection,
   parameters: {
@@ -194,13 +277,8 @@ async function downloadVerifyAndImportAptKey(
   if (keyringIsSymlink) {
     return failed(`[apt.key] refuses to write through symlink at ${keyringPath}`)
   }
-  const importResult = await ssh.exec(
-    `gpg --dearmor --yes -o ${shellQuote(keyringPath)} ${shellQuote(temporaryPath)}`,
-    { ignoreExitCode: true, silent: true }
-  )
-  if (importResult.code !== 0) {
-    return failedCommand(`[apt.key] failed to import ${name}`, importResult)
-  }
+  const dearmorFailure = await dearmorAptKeyToKeyring(ssh, { keyringPath, name, temporaryPath })
+  if (dearmorFailure != null) return dearmorFailure
   return { status: "changed" }
 }
 
