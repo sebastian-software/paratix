@@ -17,7 +17,7 @@ const safeSwapParentCommand = "find '/' -maxdepth 0 -type d -user root ! -perm /
 const createSwapTempCommand = `fallocate -l '${swapSize}' '${swapTempPath}' || dd if=/dev/zero of='${swapTempPath}' bs=1M count=2048 status=none`
 const mktempSwapCommand = "mktemp -p '/' '.swapfile.paratix.XXXXXX'"
 const publishSwapCommand = `find '/' -maxdepth 0 -type d -user root ! -perm /022 | grep -Fx '/' && mv -T -n '${swapTempPath}' '${swapPath}'`
-const backupSwapCommand = `[ ! -e '${swapBackupPath}' ] && mv -T -- '${swapPath}' '${swapBackupPath}'`
+const backupSwapCommand = `mv -T -n '${swapPath}' '${swapBackupPath}'`
 const restoreSwapCommand = `mv -T -- '${swapBackupPath}' '${swapPath}'`
 
 describe("swap.file — check", () => {
@@ -612,6 +612,15 @@ describe("swap.file — option validation", () => {
     expect(publishSwapCommand).toContain("mv -T -n")
     expect(publishSwapCommand).not.toContain("[ ! -e")
     expect(publishSwapCommand).not.toContain("[ ! -L")
+  })
+
+  // R-0000246 regression: the swap-backup creation in swapHelpers must use
+  // `mv -T -n` and must not precede it with a `[ ! -e backup ]` probe
+  // (which leaves a TOCTOU window before the rename). Mirrors R-0000180 in
+  // swapFileCreateHelpers.
+  it("R-0000246: backup uses mv -T -n to avoid TOCTOU on the backup destination", () => {
+    expect(backupSwapCommand).toContain("mv -T -n")
+    expect(backupSwapCommand).not.toContain("[ ! -e")
   })
 
   it("R-0000178: rejects sizes that exceed Number.MAX_SAFE_INTEGER", () => {

@@ -67,8 +67,12 @@ async function disableAndRemoveSwapForReplacement(
   }
 
   const backupPath = `${path}.paratix-backup`
+  // R-0000246: `mv -T -n` performs an atomic rename(2) that refuses to
+  // overwrite an existing destination, closing the TOCTOU window present
+  // in the previous `[ ! -e backup ] && mv -T` form. Mirrors R-0000180 in
+  // swapFileCreateHelpers.
   const backupResult = await ssh.exec(
-    `[ ! -e ${shellQuote(backupPath)} ] && mv -T -- ${shellQuote(path)} ${shellQuote(backupPath)}`,
+    `mv -T -n ${shellQuote(path)} ${shellQuote(backupPath)}`,
     EXEC_OPTS
   )
   if (backupResult.code !== 0) {
@@ -87,6 +91,12 @@ async function restoreSwapBackup(
   path: string,
   backupPath: string
 ): Promise<ModuleResult | true> {
+  // R-0000246: the restore path intentionally allows overwriting the
+  // current target. We are recovering from a publish/replace failure where
+  // a partial new swap file may have been written at `path`; the goal is
+  // to put the operator-managed backup back in place and restart swap.
+  // This is the inverse of the backup creation (which uses `mv -T -n` to
+  // refuse overwriting a stale backup).
   const restoreResult = await ssh.exec(
     `mv -T -- ${shellQuote(backupPath)} ${shellQuote(path)}`,
     EXEC_OPTS
