@@ -2,6 +2,7 @@ import { createInterface } from "node:readline/promises"
 
 import type { InitialUserConfig } from "./templates.js"
 
+import { CliExitError } from "./cliExitError.js"
 import { escapeCliControlCharacters } from "./cliFormat.js"
 import {
   type HostFingerprintScanResult,
@@ -11,6 +12,7 @@ import { createTerminalSelect, type SelectFunction, type SelectOption } from "./
 import { promptForAdminPublicKey as promptForScaffoldAdminPublicKey } from "./publicKeySelection.js"
 import {
   isValidInitialUserName,
+  MAX_PROMPT_ATTEMPTS,
   normalizeInitialUserName,
   promptForHost as promptForScaffoldHost,
 } from "./scaffoldConfig.js"
@@ -128,18 +130,33 @@ function createPromptSession(prompt?: PromptFunction): InitialUserPromptSession 
   }
 }
 
+// R-0000229: bound the validation retry loop so a closed stdin (EOF, piped
+// `< /dev/null`) cannot keep us spinning indefinitely while emitting error
+// messages. After MAX_PROMPT_ATTEMPTS rejected entries we abort with a
+// CliExitError so the operator sees a deterministic failure mode. An empty
+// answer (readline.question on a closed stream returns "") short-circuits
+// with a more informative EOF error instead of waiting for the limit.
 async function promptForAdminUser(ask: PromptFunction): Promise<InitialUserConfig> {
-  for (;;) {
+  for (let attempt = 0; attempt < MAX_PROMPT_ATTEMPTS; attempt++) {
     // eslint-disable-next-line no-await-in-loop
-    const adminUser = normalizeInitialUserName(await ask("Admin username: "))
+    const rawAnswer = await ask("Admin username: ")
+    const adminUser = normalizeInitialUserName(rawAnswer)
     if (isValidInitialUserName(adminUser) && adminUser !== "root") {
       return { kind: "admin", user: adminUser }
+    }
+    if (rawAnswer === "") {
+      throw new CliExitError(
+        "Error: No admin username provided — stdin is closed or empty. Pass --initial-user <root|name>."
+      )
     }
 
     console.error(
       'Error: Invalid admin username. Use a valid lowercase Linux username other than "root".'
     )
   }
+  throw new CliExitError(
+    `Error: Too many invalid admin username entries (${String(MAX_PROMPT_ATTEMPTS)}). Pass --initial-user <root|name> instead.`
+  )
 }
 
 export async function promptForHost(

@@ -104,6 +104,32 @@ describe("promptForInitialUserConfig", () => {
     expect(closeSelect).toHaveBeenCalledTimes(1)
     expect(closePrompt).toHaveBeenCalledTimes(1)
   })
+
+  // R-0000229: the admin-username prompt aborts deterministically when stdin
+  // closes (returns "" repeatedly) instead of looping forever.
+  it("aborts with a CliExitError when the admin prompt sees EOF", async () => {
+    const prompt = vi.fn().mockResolvedValue("")
+    const select = vi.fn().mockResolvedValueOnce("admin")
+
+    await expect(promptForInitialUserConfig(prompt, select)).rejects.toMatchObject({
+      cliMessage: expect.stringContaining("stdin is closed or empty"),
+      name: "CliExitError",
+    })
+    expect(prompt).toHaveBeenCalledTimes(1)
+  })
+
+  // R-0000229: bound the admin-username retry loop so persistent invalid
+  // values surface as a CliExitError instead of an endless console.error spam.
+  it("aborts after too many invalid admin username entries", async () => {
+    const prompt = vi.fn().mockResolvedValue("ROOT")
+    const select = vi.fn().mockResolvedValueOnce("admin")
+
+    await expect(promptForInitialUserConfig(prompt, select)).rejects.toMatchObject({
+      cliMessage: expect.stringContaining("Too many invalid admin username entries"),
+      name: "CliExitError",
+    })
+    expect(prompt.mock.calls.length).toBeGreaterThanOrEqual(3)
+  })
 })
 
 describe("promptForHost", () => {
@@ -147,6 +173,31 @@ describe("promptForHost", () => {
 
     await expect(promptForHost(prompt, () => void closePrompt())).resolves.toBe("203.0.113.10")
     expect(closePrompt).toHaveBeenCalledTimes(1)
+  })
+
+  // R-0000229: a prompt that always returns the empty string (closed stdin /
+  // EOF / piped from /dev/null) must not loop forever. We expect a fast
+  // CliExitError-style abort with an EOF-specific message.
+  it("aborts with a CliExitError when stdin returns empty (EOF)", async () => {
+    const prompt = vi.fn().mockResolvedValue("")
+
+    await expect(promptForHost(prompt)).rejects.toMatchObject({
+      cliMessage: expect.stringContaining("stdin is closed or empty"),
+      name: "CliExitError",
+    })
+    expect(prompt).toHaveBeenCalledTimes(1)
+  })
+
+  // R-0000229: a prompt that keeps returning invalid (but non-empty) values
+  // must give up after a bounded number of attempts instead of looping forever.
+  it("aborts with a CliExitError after too many invalid host entries", async () => {
+    const prompt = vi.fn().mockResolvedValue("bad host")
+
+    await expect(promptForHost(prompt)).rejects.toMatchObject({
+      cliMessage: expect.stringContaining("Too many invalid host entries"),
+      name: "CliExitError",
+    })
+    expect(prompt.mock.calls.length).toBeGreaterThanOrEqual(3)
   })
 })
 

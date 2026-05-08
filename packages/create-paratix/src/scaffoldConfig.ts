@@ -1,5 +1,6 @@
 import type { InitialUserConfig } from "./templates.js"
 
+import { CliExitError } from "./cliExitError.js"
 import { formatCliValue } from "./cliFormat.js"
 import { validateAdminPublicKey } from "./publicKeySelection.js"
 
@@ -136,15 +137,36 @@ export function normalizeProgrammaticScaffoldStringOptions(
   }
 }
 
+// R-0000229: bound the validation retry loop so a closed stdin (EOF, piped
+// `< /dev/null`) cannot keep us spinning indefinitely while emitting error
+// messages. After MAX_PROMPT_ATTEMPTS rejected entries we abort with a
+// CliExitError so the operator sees a deterministic failure mode. We detect
+// EOF heuristically: readline.question returns "" (without throwing) once the
+// input stream is closed, so the same empty value the validator already
+// rejects also signals "no further input available" and we surface a clearer
+// error message in that case.
+export const MAX_PROMPT_ATTEMPTS = 5
+
 export async function promptForHost(prompt: PromptFunction): Promise<string> {
-  for (;;) {
+  for (let attempt = 0; attempt < MAX_PROMPT_ATTEMPTS; attempt++) {
     // eslint-disable-next-line no-await-in-loop
-    const host = normalizeHost(await prompt("Server host (domain or IP): "))
+    const rawAnswer = await prompt("Server host (domain or IP): ")
+    const host = normalizeHost(rawAnswer)
     if (isValidHost(host)) {
       return host
     }
+    if (rawAnswer === "") {
+      // R-0000229: empty answer with no prior valid input strongly suggests
+      // a closed stdin (EOF). Fail fast instead of looping until the limit.
+      throw new CliExitError(
+        "Error: No host provided — stdin is closed or empty. Pass --host <domain-or-ip>."
+      )
+    }
     console.error("Error: Please enter a domain name, IPv4, or IPv6 address without spaces.")
   }
+  throw new CliExitError(
+    `Error: Too many invalid host entries (${String(MAX_PROMPT_ATTEMPTS)}). Pass --host <domain-or-ip> instead.`
+  )
 }
 
 function parseArgumentValue(

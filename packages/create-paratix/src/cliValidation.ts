@@ -1,5 +1,6 @@
 import type { InitialUserConfig } from "./templates.js"
 
+import { CliExitError } from "./cliExitError.js"
 import { escapeCliControlCharacters } from "./cliFormat.js"
 import { promptForAdminPublicKey, promptForHost } from "./interactivePrompts.js"
 import { readAdminPublicKeyFile, validateAdminPublicKey } from "./publicKeySelection.js"
@@ -10,25 +11,7 @@ import {
   validateHost as validateScaffoldHost,
 } from "./scaffoldConfig.js"
 
-/**
- * R-0000189: dedicated error type that signals a deterministic CLI exit. A
- * synchronous `process.exit` call from inside an interactive prompt skips
- * any in-flight cleanup (raw-mode reset, cursor visibility), which leaves
- * the operator's terminal unusable. Throwing instead lets `main()` (or any
- * other top-level driver) run cleanup and assign `process.exitCode` before
- * the process exits naturally.
- */
-export class CliExitError extends Error {
-  public readonly cliMessage: string
-  public readonly exitCode: number
-
-  public constructor(message: string, exitCode = 1) {
-    super(message)
-    this.name = "CliExitError"
-    this.cliMessage = message
-    this.exitCode = exitCode
-  }
-}
+export { CliExitError } from "./cliExitError.js"
 
 export function exitWithMessage(message: string): never {
   // R-0000189: keep emitting the user-visible error eagerly so callers and
