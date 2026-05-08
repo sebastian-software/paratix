@@ -1647,6 +1647,64 @@ describe("CLI entrypoint", () => {
     }
   })
 
+  // R-0000208: applyCliProcessEnvironment intentionally mutates the global
+  // process.env so the playbook's top-level import() can observe the
+  // first-run flag. While the synthetic "true" is installed, every other
+  // code path in the same process sees it — concurrent embedded runners
+  // therefore cross-contaminate. The companion typed Environment returned
+  // by applyCliEnvironmentOverrides remains pure and is the value the
+  // runner consumes; the global is only there for module-scope statements.
+  it("documents that concurrent first-run loads share the global process.env flag", async () => {
+    const tempDirectory = mkdtempSync(join(tmpdir(), "paratix-cli-first-run-shared-"))
+    const firstRunPlaybookPath = join(tempDirectory, "first.mjs")
+    const observerPlaybookPath = join(tempDirectory, "observer.mjs")
+    let observerFirstRunSeen: string | undefined
+
+    try {
+      writeFileSync(
+        firstRunPlaybookPath,
+        [
+          "export default {",
+          "  name: 'leader',",
+          "  host: '1.2.3.4',",
+          "  ssh: { user: 'root', ports: [22] },",
+          "  run: [process.env['PARATIX_FIRST_RUN'] ?? 'missing'],",
+          "}",
+        ].join("\n")
+      )
+      writeFileSync(
+        observerPlaybookPath,
+        [
+          "export default {",
+          "  name: 'observer',",
+          "  host: '1.2.3.5',",
+          "  ssh: { user: 'root', ports: [22] },",
+          "  run: ['ok'],",
+          "}",
+        ].join("\n")
+      )
+
+      const leaderPromise = loadServerDefinitionFromFile(firstRunPlaybookPath, { firstRun: true })
+      // While the leader's import is in-flight, an unrelated observer reads
+      // process.env and sees the synthetic "true". This is the documented
+      // caveat from R-0000208.
+      observerFirstRunSeen = process.env.PARATIX_FIRST_RUN
+      const observerPromise = loadServerDefinitionFromFile(observerPlaybookPath, {
+        firstRun: false,
+      })
+
+      const [leader] = await Promise.all([leaderPromise, observerPromise])
+
+      expect(leader.run).toStrictEqual(["true"])
+      expect(observerFirstRunSeen).toBe("true")
+      // Once both loads complete the global is fully restored.
+      expect(process.env.PARATIX_FIRST_RUN).toBeUndefined()
+    } finally {
+      rmSync(tempDirectory, { force: true, recursive: true })
+      delete process.env.PARATIX_FIRST_RUN
+    }
+  })
+
   it("does not leak PARATIX_FIRST_RUN into a later playbook load", async () => {
     const tempDirectory = mkdtempSync(join(tmpdir(), "paratix-cli-first-run-leak-"))
     const firstRunPlaybookPath = join(tempDirectory, "first-run.mjs")
