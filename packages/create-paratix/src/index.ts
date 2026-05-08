@@ -203,16 +203,31 @@ function derivePackageName(projectDirectory: string): string {
 }
 
 function validateProjectName(name: string | undefined): string {
-  if (name == null || name === "") {
+  // R-0000230: ExitWithMessage is typed `never`, but TypeScript does not
+  // enforce that at runtime — a test stub or future caller that does not
+  // throw would otherwise flow into `name.trim()` with `undefined` and crash
+  // with a confusing "Cannot read properties of undefined" error. Mirror the
+  // failWithReadError pattern in publicKeySelection (R-0000185): wrap the
+  // exitWithMessage call in a closure that guarantees a local throw, then
+  // bind the validated value before any property access.
+  const failWithUsage = (): never => {
     exitWithMessage("Usage: create-paratix <project-name>")
+    throw new Error("Usage: create-paratix <project-name>")
+  }
+  const failWithInvalidName = (rawName: string): never => {
+    const message = `Error: Invalid project name ${formatCliValue(rawName)} — use only lowercase letters, numbers, and hyphens.`
+    exitWithMessage(message)
+    throw new Error(message)
+  }
+
+  if (name == null || name === "") {
+    return failWithUsage()
   }
 
   const normalizedName = normalizeProjectName(name)
 
   if (!isValidProjectName(normalizedName)) {
-    exitWithMessage(
-      `Error: Invalid project name ${formatCliValue(name)} — use only lowercase letters, numbers, and hyphens.`
-    )
+    return failWithInvalidName(name)
   }
 
   return normalizedName

@@ -312,6 +312,26 @@ describe("scaffoldProject", () => {
     expect(installer).not.toHaveBeenCalled()
   })
 
+  // R-0000230: validateProjectName must guard against undefined/empty input
+  // even when exitWithMessage is intercepted by a non-throwing stub. We
+  // simulate that by passing the empty string and asserting the function
+  // never reaches normalizeProjectName(undefined) — it must surface a
+  // CliExitError before any directory mutation happens.
+  it("rejects an empty project name with a CliExitError before touching the filesystem", async () => {
+    const installer = vi.fn().mockReturnValue(true)
+
+    await expectProcessExit(() => {
+      scaffoldProject(
+        "",
+        { command: "pnpm install", name: "pnpm" },
+        { host: "example.com", installer }
+      )
+    })
+
+    expect(console.error).toHaveBeenCalledWith("Usage: create-paratix <project-name>")
+    expect(installer).not.toHaveBeenCalled()
+  })
+
   it("normalizes padded project names before creating the project directory and package name", () => {
     const installer = vi.fn().mockReturnValue(true)
 
