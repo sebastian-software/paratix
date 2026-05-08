@@ -150,6 +150,16 @@ export function assemble(
     async apply(ssh: null | SshConnection): Promise<ModuleResult> {
       if (!ssh) return failed(`[file.assemble: ${remotePath}] SSH connection is required`)
 
+      // Symmetric symlink-guard with check() (which uses isRegularFileWithoutSymlink).
+      // Refuse to write through a symlink — would silently overwrite the link target
+      // with attacker-controlled content. Aligned with R-0000192 (compose) and R-0000134
+      // (apt.key).
+      if (await isSymlink(ssh, remotePath)) {
+        return failed(
+          `[file.assemble: ${remotePath}] refuses to write through symlink — path must be a regular file`
+        )
+      }
+
       await ssh.writeFile(remotePath, await concatFragments(fragments), {
         mode: await resolveWriteMode(ssh, remotePath, options?.mode),
       })

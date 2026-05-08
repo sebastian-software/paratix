@@ -1596,7 +1596,7 @@ describe("file.assemble", () => {
       writeFileSync(frag1, "Hello")
 
       const ssh = createMockSsh(
-        {},
+        { "[ -L '/remote/assembled.txt' ]": { code: 1 } },
         { allowWrites: [{ options: { mode: "999" }, remotePath: "/remote/assembled.txt" }] }
       )
       const mod = file.assemble("/remote/assembled.txt", [frag1], { mode: "999" })
@@ -1616,7 +1616,9 @@ describe("file.assemble", () => {
       writeFileSync(frag2, "World")
 
       const writtenFiles: Array<{ content: string; path: string }> = []
-      const ssh = createMockSsh()
+      const ssh = createMockSsh({
+        "[ -L '/remote/assembled.txt' ]": { code: 1 },
+      })
       // eslint-disable-next-line @typescript-eslint/require-await -- Mock
       ssh.writeFile = async (path: string, content: string) => {
         writtenFiles.push({ content, path })
@@ -1629,6 +1631,32 @@ describe("file.assemble", () => {
       expect(writtenFiles).toStrictEqual([
         { content: "Hello World", path: "/remote/assembled.txt" },
       ])
+    } finally {
+      rmSync(dir, { recursive: true })
+    }
+  })
+
+  it("apply refuses to write through a symlink", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "paratix-test-"))
+    try {
+      const frag1 = join(dir, "frag1.txt")
+      writeFileSync(frag1, "Hello")
+
+      const writtenFiles: Array<{ content: string; path: string }> = []
+      const ssh = createMockSsh({
+        "[ -L '/remote/assembled.txt' ]": { code: 0 },
+      })
+      // eslint-disable-next-line @typescript-eslint/require-await -- Mock
+      ssh.writeFile = async (path: string, content: string) => {
+        writtenFiles.push({ content, path })
+      }
+
+      const mod = file.assemble("/remote/assembled.txt", [frag1])
+      const result = await mod.apply(ssh, emptyEnv)
+
+      expect(result.status).toBe("failed")
+      expect(result.error?.message).toContain("refuses to write through symlink")
+      expect(writtenFiles).toStrictEqual([])
     } finally {
       rmSync(dir, { recursive: true })
     }
