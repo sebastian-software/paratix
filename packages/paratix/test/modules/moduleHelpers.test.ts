@@ -617,12 +617,7 @@ describe("withMutexLock", () => {
     const results = await Promise.all([first, second])
 
     expect(results).toStrictEqual([1, 2])
-    expect(ordering).toStrictEqual([
-      "first-enter",
-      "first-leave",
-      "second-enter",
-      "second-leave",
-    ])
+    expect(ordering).toStrictEqual(["first-enter", "first-leave", "second-enter", "second-leave"])
   })
 
   it("rejects an invalid lockName", async () => {

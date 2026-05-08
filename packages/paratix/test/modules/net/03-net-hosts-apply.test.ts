@@ -280,6 +280,7 @@ describe("net.hosts — apply", () => {
     const originalReadFile = mockSsh.readFile.bind(mockSsh)
     mockSsh.readFile = async (remotePath: string): Promise<string> => {
       readCount += 1
+      // oxlint-disable-next-line eslint-plugin-vitest(no-conditional-in-test) -- simulating the race between an initial read and a concurrent /etc/hosts modification before the guarded re-read requires a counter-based switch in a single mock function
       if (readCount === 1) return originalReadFile(remotePath)
       // Simulate a concurrent modification that landed between the initial
       // read and the guarded re-read just before the write.

@@ -887,16 +887,20 @@ async function applyHostsState(
   // the read and the write. The mutex lock — combined with the re-read inside
   // `guardedWriteFile` — turns the sequence into a critical section that
   // either succeeds atomically or aborts cleanly on an external modification.
-  return withMutexLock(conn, {
-    lockName: HOSTS_FILE_MUTEX,
-    async section() {
-      const content = await conn.readFile(HOSTS_FILE)
-      const snapshot: HostsFileSnapshot = { content, lines: content.split("\n") }
-      return parameters.state === "present"
-        ? applyHostsPresent(conn, parameters, snapshot)
-        : applyHostsAbsent(conn, parameters, snapshot)
-    },
-  })
+  try {
+    return await withMutexLock(conn, {
+      lockName: HOSTS_FILE_MUTEX,
+      async section() {
+        const content = await conn.readFile(HOSTS_FILE)
+        const snapshot: HostsFileSnapshot = { content, lines: content.split("\n") }
+        return parameters.state === "present"
+          ? applyHostsPresent(conn, parameters, snapshot)
+          : applyHostsAbsent(conn, parameters, snapshot)
+      },
+    })
+  } catch (error) {
+    return failed(`[net.hosts] aborted: ${error instanceof Error ? error.message : String(error)}`)
+  }
 }
 
 /**
