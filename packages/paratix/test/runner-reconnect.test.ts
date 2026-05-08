@@ -206,6 +206,56 @@ describe("runPlaybook reconnect failure propagation", () => {
     expect(removePort).not.toHaveBeenCalled()
   })
 
+  // A fully failed reconnect must produce the failure-path diagnostic,
+  // not the misleading "Reconnect succeeded but follow-up step failed"
+  // message that R-0000207 introduced for partial-success cases. This
+  // depends on disconnectTransport() resetting connectedPort to 0 so that
+  // getConnectionInfo().port truly reflects the absence of a connection
+  // after the reconnect attempts are exhausted.
+  it("emits the failure-path diagnostic when reconnect fully fails (port resets to 0)", async () => {
+    const capturedConfigs: unknown[] = []
+    const reconnectError = new Error("Connection refused")
+    const consoleErrors: string[] = []
+    vi.spyOn(console, "error").mockImplementation((...args) => {
+      consoleErrors.push(args.join(" "))
+    })
+
+    vi.doMock("../src/ssh.js", () => ({
+      shellQuote: (s: string) => `'${s}'`,
+      SshConnectionImpl: makeMockSshClass(capturedConfigs, {
+        addPort: vi.fn().mockReturnValue(true),
+        // After a fully failed reconnect, ssh.disconnectTransport() must
+        // have reset connectedPort to 0 — this mock encodes that contract.
+        getConnectionInfo: vi
+          .fn()
+          .mockReturnValue({ host: "1.2.3.4", port: 0, privateKeyPath: "~/.ssh/id", user: "root" }),
+        reconnect: vi.fn().mockRejectedValue(reconnectError),
+        removePort: vi.fn(),
+      }),
+    }))
+
+    const { runPlaybook } = await import("../src/runner.js")
+    const moduleWithPortChange = makeModuleWithMeta([meta.sshdPort(2222)])
+
+    const definition: ServerDefinition = {
+      host: "1.2.3.4",
+      name: "test-server",
+      run: [moduleWithPortChange],
+      ssh: { ports: [22], privateKey: "~/.ssh/id", user: "root" },
+    }
+
+    await runPlaybook(definition)
+
+    const diagnosticLines = consoleErrors.filter((line) =>
+      line.includes("Failed to reconnect on port(s)")
+    )
+    expect(diagnosticLines).toHaveLength(1)
+    // The misleading partial-success message must NOT appear.
+    expect(
+      consoleErrors.some((line) => line.includes("succeeded but a follow-up step failed"))
+    ).toBe(false)
+  })
+
   // R-0000207: when the reconnect itself succeeded but a follow-up step
   // (e.g. commitAcceptedHostKey) threw, the runner must NOT remove the
   // newly added ports — the connection is alive on those ports.

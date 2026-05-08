@@ -938,6 +938,13 @@ export class SshConnectionImpl implements SshConnection {
       // reclaim the socket.
       fallback.unref()
     }
+    // R-0000236: clear connection-identity fields alongside the client
+    // reference. Otherwise getConnectionInfo() returns stale values after a
+    // disconnect (e.g. a non-zero port), which breaks reconnect-rollback
+    // logic in the runner that uses `port > 0` as the success signal.
+    this.connectedPort = 0
+    this.authMethod = null
+    this.agentSocket = null
     const error = new Error("SSH connection closed")
     for (const rejectFunction of this.pendingRejects) {
       rejectFunction(error)

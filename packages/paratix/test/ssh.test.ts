@@ -390,6 +390,33 @@ describe("SshConnectionImpl", () => {
       vi.useRealTimers()
     })
 
+    it("resets connectedPort, authMethod and agentSocket so getConnectionInfo() reflects no live connection (R-0000236)", () => {
+      const endSpy = vi.fn()
+      const client = makeClientWithEnd(endSpy)
+      const ssh = makeConnectedSsh(client)
+      // Simulate a connection that authenticated via the SSH agent on a
+      // non-default port — exactly what registerConnectedClient() and the
+      // agent-auth path would have written before a disconnect.
+      const sshInternals = ssh as unknown as Record<string, unknown>
+      sshInternals.connectedPort = 2222
+      sshInternals.authMethod = "agent"
+      sshInternals.agentSocket = "/tmp/mock-agent.sock"
+
+      expect(ssh.getConnectionInfo().port).toBe(2222)
+      expect(ssh.getConnectionInfo().authMethod).toBe("agent")
+      expect(ssh.getConnectionInfo().agentSocket).toBe("/tmp/mock-agent.sock")
+
+      ssh.disconnect()
+
+      // After disconnect, getConnectionInfo() must not return stale identity
+      // values. Otherwise reconnect-rollback logic that uses `port > 0` as the
+      // success signal would incorrectly classify a fully failed reconnect as
+      // a success.
+      expect(ssh.getConnectionInfo().port).toBe(0)
+      expect(ssh.getConnectionInfo().authMethod).toBeUndefined()
+      expect(ssh.getConnectionInfo().agentSocket).toBeUndefined()
+    })
+
     it("rejects pending exec() Promises when disconnect() is called while they are still pending", async () => {
       // BUG: disconnect() calls pendingRejects.clear() without iterating and
       // invoking the stored reject functions first. As a result, pending exec()
@@ -551,6 +578,38 @@ describe("SshConnectionImpl", () => {
       await expect(reconnectPromise).rejects.toThrow(
         /Failed to reconnect to 1\.2\.3\.4 after \d+ attempts \(timeout: 5000ms\)/v
       )
+    })
+
+    it("resets connectedPort to 0 after a fully failed reconnect (R-0000236)", async () => {
+      vi.useFakeTimers()
+
+      vi.mocked(tryConnectOnPort).mockRejectedValue(new Error("Connection refused"))
+
+      const ssh = makeSshInstance({ maxReconnectAttempts: 2, reconnectTimeout: 300_000 })
+      // Pretend a previous connection on port 22 was live so that
+      // getConnectionInfo() would return a stale port if disconnectTransport()
+      // forgot to reset it.
+      const sshInternals = ssh as unknown as Record<string, unknown>
+      sshInternals.connectedPort = 22
+      sshInternals.authMethod = "privateKey"
+
+      const reconnectPromise = ssh.reconnect()
+      reconnectPromise.catch(() => {
+        /* handled below */
+      })
+
+      for (let elapsed = 0; elapsed < 60_000; elapsed += 1000) {
+        // eslint-disable-next-line no-await-in-loop
+        await vi.advanceTimersByTimeAsync(1000)
+      }
+
+      await expect(reconnectPromise).rejects.toThrow(/Failed to reconnect/v)
+
+      // Critical: the runner uses `getConnectionInfo().port > 0` to decide
+      // whether to roll back newly added ports after a port-change reconnect
+      // failure. A stale port would suppress that rollback and produce a
+      // misleading "Reconnect succeeded but follow-up step failed" diagnostic.
+      expect(ssh.getConnectionInfo().port).toBe(0)
     })
 
     it("throws after maxReconnectAttempts when all attempts fail before timeout", async () => {
