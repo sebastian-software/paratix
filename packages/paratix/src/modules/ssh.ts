@@ -58,11 +58,22 @@ function lineMatchesTrustAnchor(line: string, options: KnownHostsOptions): boole
     options.publicKey == null ? null : normalizePublicKey(options.publicKey)
   const expectedFingerprint = options.expectedFingerprint
 
-  const publicKeyMatches =
-    normalizedExpectedKey != null && scannedLinePublicKey(line) === normalizedExpectedKey
-  const fingerprintMatches =
-    expectedFingerprint != null && scannedLineFingerprint(line) === expectedFingerprint
-  return publicKeyMatches || fingerprintMatches
+  // R-0000252: a malformed line in ~/.ssh/known_hosts (truncated entry,
+  // garbage after a partial write, missing algorithm/key fields) makes
+  // `scannedLinePublicKey` throw. Callers expect a boolean result so they
+  // can treat the line as drift; an uncaught exception escaping past
+  // `check`/`apply` would mean a single corrupted entry breaks the entire
+  // module. Treat malformed lines as "does not match" so the drift path
+  // takes over (ssh-keygen -R replaces them with verified entries).
+  try {
+    const publicKeyMatches =
+      normalizedExpectedKey != null && scannedLinePublicKey(line) === normalizedExpectedKey
+    const fingerprintMatches =
+      expectedFingerprint != null && scannedLineFingerprint(line) === expectedFingerprint
+    return publicKeyMatches || fingerprintMatches
+  } catch {
+    return false
+  }
 }
 
 function getVerifiedScannedHostKeyLines(

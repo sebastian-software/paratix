@@ -229,6 +229,44 @@ describe("ssh.knownHosts", () => {
     expect(result).toBe("needs-apply")
   })
 
+  // R-0000252: `lineMatchesTrustAnchor` previously called `scannedLinePublicKey`
+  // directly, which throws when a known_hosts entry has fewer than three
+  // whitespace-separated fields (truncated write, partial corruption, garbage
+  // appended after a crash). That uncaught exception escaped past `check`,
+  // breaking the entire module on a single damaged line. The fix swallows
+  // parse errors and treats malformed lines as drift so the apply-path can
+  // replace them via ssh-keygen -R.
+  it("R-0000252: check returns needs-apply when a known_hosts line is malformed", async () => {
+    const malformedLine = "garbage-only-one-field"
+    const mockSsh = createMockSsh({
+      "ssh-keygen -F 'github.com'": {
+        code: 0,
+        stdout: `${malformedLine}\n${scannedLine}\n`,
+      },
+    })
+    const mod = ssh.knownHosts("github.com", { expectedFingerprint: hostFingerprint })
+
+    const result = await mod.check(mockSsh, emptyEnv)
+
+    expect(result).toBe("needs-apply")
+  })
+
+  // R-0000252 (companion): an entirely corrupt known_hosts file (no parseable
+  // lines) must also resolve to a boolean needs-apply rather than throwing.
+  it("R-0000252: check returns needs-apply when every known_hosts line is malformed", async () => {
+    const mockSsh = createMockSsh({
+      "ssh-keygen -F 'github.com'": {
+        code: 0,
+        stdout: "garbage\nmore garbage\n",
+      },
+    })
+    const mod = ssh.knownHosts("github.com", { expectedFingerprint: hostFingerprint })
+
+    const result = await mod.check(mockSsh, emptyEnv)
+
+    expect(result).toBe("needs-apply")
+  })
+
   it("check uses a bracketed known_hosts lookup target for non-standard ports", async () => {
     const mockSsh = createMockSsh({
       "ssh-keygen -F '[github.com]:2222'": { code: 0, stdout: `${scannedLine}\n` },
