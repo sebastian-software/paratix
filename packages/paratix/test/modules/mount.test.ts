@@ -628,6 +628,36 @@ describe("mount.present — apply", () => {
     expect(writtenFiles.some((f) => f.path === "/etc/fstab")).toBe(true)
   })
 
+  // R-0000169: read-modify-write on /etc/fstab must be serialized with a
+  // mutex lock around the cat + writeFile sequence so concurrent runs cannot
+  // lose competing fstab edits.
+  it("acquires and releases the etc-fstab mutex lock around the fstab write", async () => {
+    const mockSsh = createMountApplyMockSsh({
+      "cat '/etc/fstab'": { stdout: "# /etc/fstab\n" },
+      [findmntCheckCmd]: { code: 0, stdout: liveMountStdout },
+    })
+    mockSsh.writeFile = async (): Promise<void> => {
+      // The test only asserts on lock command ordering, not file contents.
+      await Promise.resolve()
+    }
+    const mod = mount.present({
+      fstype: mountFstype,
+      opts: mountOpts,
+      path: mountPath,
+      src: mountSrc,
+    })
+    await mod.apply(mockSsh, emptyEnv)
+    const lockMkdir = "mkdir /var/lib/paratix/flags/'etc-fstab-mutex'"
+    const lockRmdir = "rmdir /var/lib/paratix/flags/'etc-fstab-mutex'"
+    expect(mockSsh.calls).toContain(lockMkdir)
+    expect(mockSsh.calls).toContain(lockRmdir)
+    const acquireIndex = mockSsh.calls.indexOf(lockMkdir)
+    const fstabReadIndex = mockSsh.calls.indexOf("cat '/etc/fstab'")
+    const releaseIndex = mockSsh.calls.indexOf(lockRmdir)
+    expect(acquireIndex).toBeLessThan(fstabReadIndex)
+    expect(fstabReadIndex).toBeLessThan(releaseIndex)
+  })
+
   it("reads fstab before writing (cat command)", async () => {
     const mockSsh = createMountApplyMockSsh({
       "cat '/etc/fstab'": { stdout: "# /etc/fstab\n" },

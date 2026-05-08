@@ -1,3 +1,4 @@
+/* eslint-disable max-lines -- mount.present and mount.absent share fstab helpers and the mutex-locked persistence flow; splitting them further would scatter behaviour across modules */
 import { posix } from "node:path"
 
 import type { LiveMount } from "./mountTypes.js"
@@ -11,12 +12,16 @@ import {
   NEEDS_APPLY,
   type SshConnection,
 } from "../types.js"
+import { withMutexLock } from "./moduleHelpers.js"
 import { applyMountConvergence } from "./mountConvergence.js"
 import { liveMountOptionsMatch } from "./mountOptions.js"
 
 const EXEC_OPTS = { ignoreExitCode: true, silent: true } as const
 const FSTAB_PATH = "/etc/fstab"
 const FSTAB_MODE = "0644"
+// Lock identifier serializing read-modify-write on /etc/fstab across
+// concurrent Paratix runs sharing this remote host.
+const FSTAB_FILE_MUTEX = "etc-fstab-mutex"
 const MOUNT_PRESENT = "mount.present"
 const WHITESPACE_PATTERN = /\s/v
 
@@ -173,17 +178,25 @@ function removeFstabEntry(fstabContent: string, path: string): string {
 }
 
 async function removePersistedMountIfPresent(ssh: SshConnection, path: string): Promise<boolean> {
-  const fstabContent = await ssh.readFile(FSTAB_PATH)
-  const entry = findFstabEntry(fstabContent, path)
-  if (entry === null) return false
-  const newContent = removeFstabEntry(fstabContent, path)
-  await guardedWriteFile(ssh, {
-    mode: FSTAB_MODE,
-    newContent,
-    originalContent: fstabContent,
-    remotePath: FSTAB_PATH,
+  // R-0000169: serialize read-modify-write on /etc/fstab so concurrent
+  // Paratix runs cannot lose competing fstab edits between the read and the
+  // write step.
+  return withMutexLock(ssh, {
+    lockName: FSTAB_FILE_MUTEX,
+    async section() {
+      const fstabContent = await ssh.readFile(FSTAB_PATH)
+      const entry = findFstabEntry(fstabContent, path)
+      if (entry === null) return false
+      const newContent = removeFstabEntry(fstabContent, path)
+      await guardedWriteFile(ssh, {
+        mode: FSTAB_MODE,
+        newContent,
+        originalContent: fstabContent,
+        remotePath: FSTAB_PATH,
+      })
+      return true
+    },
   })
-  return true
 }
 
 type EnsureLiveMountParameters = {
@@ -254,17 +267,25 @@ async function ensureFstabEntry(
   path: string,
   desiredLine: string
 ): Promise<boolean> {
-  const fstabContent = await ssh.readFile(FSTAB_PATH)
-  const existingEntry = findFstabEntry(fstabContent, path)
-  if (existingEntry === desiredLine) return false
-  const newContent = upsertFstabEntry(fstabContent, path, desiredLine)
-  await guardedWriteFile(ssh, {
-    mode: FSTAB_MODE,
-    newContent,
-    originalContent: fstabContent,
-    remotePath: FSTAB_PATH,
+  // R-0000169: serialize read-modify-write on /etc/fstab so concurrent
+  // Paratix runs cannot lose competing fstab edits between the read and the
+  // write step.
+  return withMutexLock(ssh, {
+    lockName: FSTAB_FILE_MUTEX,
+    async section() {
+      const fstabContent = await ssh.readFile(FSTAB_PATH)
+      const existingEntry = findFstabEntry(fstabContent, path)
+      if (existingEntry === desiredLine) return false
+      const newContent = upsertFstabEntry(fstabContent, path, desiredLine)
+      await guardedWriteFile(ssh, {
+        mode: FSTAB_MODE,
+        newContent,
+        originalContent: fstabContent,
+        remotePath: FSTAB_PATH,
+      })
+      return true
+    },
   })
-  return true
 }
 
 /**

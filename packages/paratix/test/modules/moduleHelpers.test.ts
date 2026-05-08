@@ -6,6 +6,7 @@ import {
   hasFlag,
   setFlag,
   setVersionedFlag,
+  withMutexLock,
 } from "../../src/modules/moduleHelpers.js"
 import { createMockSsh as createBaseMockSsh } from "../helpers/mockSsh.js"
 
@@ -493,5 +494,147 @@ describe("setVersionedFlag – rejects shell-special characters", () => {
     await expect(setVersionedFlag(ssh, "$(id)1.0", "valid-")).rejects.toThrow(
       /flagName must match/v
     )
+  })
+})
+
+function createSharedMutexMockSsh(lockName: string): ReturnType<typeof createMockSsh> {
+  const base = createMockSsh(
+    {},
+    {
+      defaultExecResult: { code: 0 },
+      defaultOutputResult: "",
+      defaultTestResult: false,
+    }
+  )
+  let lockExists = false
+  const waiters: Array<() => void> = []
+
+  function resolveWaiters(): void {
+    for (const resolve of waiters.splice(0)) resolve()
+  }
+
+  const lockMkdirCommand = `mkdir ${FLAGS_DIRECTORY}/'${lockName}'`
+  const lockRmdirCommand = `rmdir ${FLAGS_DIRECTORY}/'${lockName}'`
+
+  return {
+    ...base,
+    async exec(command, options) {
+      base.calls.push(command)
+      base.execCalls.push({ command, options })
+      if (command === lockMkdirCommand) {
+        if (lockExists) return { code: 1, stderr: "", stdout: "" }
+        lockExists = true
+        return { code: 0, stderr: "", stdout: "" }
+      }
+      if (command === lockRmdirCommand) {
+        lockExists = false
+        resolveWaiters()
+        return { code: 0, stderr: "", stdout: "" }
+      }
+      if (command.startsWith("i=0; while [ -d")) {
+        if (lockExists) {
+          await new Promise<void>((resolve) => {
+            waiters.push(resolve)
+          })
+        }
+        return { code: 0, stderr: "", stdout: "" }
+      }
+      return { code: 0, stderr: "", stdout: "" }
+    },
+  }
+}
+
+describe("withMutexLock", () => {
+  it("acquires the lock, runs the section and releases the lock", async () => {
+    const lockName = "etc-hosts-mutex"
+    const ssh = createSharedMutexMockSsh(lockName)
+    let sectionCalls = 0
+
+    const result = await withMutexLock(ssh, {
+      lockName,
+      async section() {
+        await Promise.resolve()
+        sectionCalls += 1
+        return "value" as const
+      },
+    })
+
+    expect(result).toBe("value")
+    expect(sectionCalls).toBe(1)
+    expect(ssh.calls).toContain(`mkdir ${FLAGS_DIRECTORY}/'${lockName}'`)
+    expect(ssh.calls).toContain(`rmdir ${FLAGS_DIRECTORY}/'${lockName}'`)
+  })
+
+  it("releases the lock even when the section throws", async () => {
+    const lockName = "etc-hosts-mutex"
+    const ssh = createSharedMutexMockSsh(lockName)
+    const error = new Error("boom")
+
+    await expect(
+      withMutexLock(ssh, {
+        lockName,
+        async section() {
+          await Promise.resolve()
+          throw error
+        },
+      })
+    ).rejects.toBe(error)
+
+    expect(ssh.calls).toContain(`rmdir ${FLAGS_DIRECTORY}/'${lockName}'`)
+  })
+
+  it("serialises two parallel callers competing for the same mutex", async () => {
+    const lockName = "etc-fstab-mutex"
+    const ssh = createSharedMutexMockSsh(lockName)
+    const firstStarted = deferred()
+    const finishFirst = deferred()
+    const ordering: string[] = []
+
+    const first = withMutexLock(ssh, {
+      lockName,
+      async section() {
+        ordering.push("first-enter")
+        firstStarted.resolve()
+        await finishFirst.promise
+        ordering.push("first-leave")
+        return 1
+      },
+    })
+
+    await firstStarted.promise
+
+    const second = withMutexLock(ssh, {
+      lockName,
+      async section() {
+        ordering.push("second-enter")
+        await Promise.resolve()
+        ordering.push("second-leave")
+        return 2
+      },
+    })
+
+    finishFirst.resolve()
+    const results = await Promise.all([first, second])
+
+    expect(results).toStrictEqual([1, 2])
+    expect(ordering).toStrictEqual([
+      "first-enter",
+      "first-leave",
+      "second-enter",
+      "second-leave",
+    ])
+  })
+
+  it("rejects an invalid lockName", async () => {
+    const ssh = createMockSsh()
+    await expect(
+      withMutexLock(ssh, {
+        lockName: "bad lock",
+        async section() {
+          await Promise.resolve()
+          return null
+        },
+      })
+    ).rejects.toThrow(/lockName must match/v)
   })
 })

@@ -198,6 +198,100 @@ export async function applyWithFlagLock(
   return tryApplyWithFlagLock(ssh, { ...parameters, lockName })
 }
 
+/**
+ * Run a critical section while holding a named mutex lock on the remote host.
+ *
+ * Unlike {@link applyWithFlagLock}, this helper does NOT consult or update a
+ * flag file — it serializes read-modify-write sequences on shared resources
+ * such as `/etc/hosts` or `/etc/fstab` so concurrent Paratix invocations or
+ * other processes cannot lose updates between the read and the write step.
+ *
+ * The lock uses the same atomic `mkdir` primitive as {@link applyWithFlagLock}
+ * and reuses the stale-reclaim and wait-with-backoff machinery so a crashed
+ * holder cannot deadlock future runs.
+ *
+ * @param ssh - The active SSH connection.
+ * @param parameters - Lock and section parameters.
+ * @param parameters.lockName - Lock identifier; reused processes targeting the
+ *   same resource must use the same name.
+ * @param parameters.section - Async function executed while holding the lock.
+ * @param parameters.staleSeconds - Optional stale-lock reclaim threshold.
+ * @param parameters.waitSeconds - Optional wait window when contended.
+ * @returns The value returned by `section`.
+ */
+export async function withMutexLock<TValue>(
+  ssh: SshConnection,
+  parameters: {
+    lockName: string
+    section: () => Promise<TValue>
+    /** Override the default stale-lock threshold (seconds) for tests. */
+    staleSeconds?: number
+    waitSeconds?: number
+  }
+): Promise<TValue> {
+  validateFlagName(parameters.lockName, "lockName")
+  const result = await acquireMutexAndRun(ssh, parameters)
+  if (result.kind === "ok") return result.value
+  throw new Error(result.error)
+}
+
+type MutexRunResult<TValue> = { error: string; kind: "error" } | { kind: "ok"; value: TValue }
+
+async function acquireMutexAndRun<TValue>(
+  ssh: SshConnection,
+  parameters: {
+    lockName: string
+    section: () => Promise<TValue>
+    staleSeconds?: number
+    waitSeconds?: number
+  }
+): Promise<MutexRunResult<TValue>> {
+  if (await acquireFlagLock(ssh, parameters.lockName)) {
+    return runMutexSection(ssh, parameters)
+  }
+  const waitResult = await waitForMutexLockRelease(ssh, parameters)
+  if (waitResult.kind !== "resolved") return waitResult
+  return acquireMutexAndRun(ssh, parameters)
+}
+
+async function runMutexSection<TValue>(
+  ssh: SshConnection,
+  parameters: { lockName: string; section: () => Promise<TValue> }
+): Promise<MutexRunResult<TValue>> {
+  try {
+    const value = await parameters.section()
+    return { kind: "ok", value }
+  } finally {
+    await releaseFlagLock(ssh, parameters.lockName)
+  }
+}
+
+async function waitForMutexLockRelease(
+  ssh: SshConnection,
+  parameters: {
+    lockName: string
+    staleSeconds?: number
+    waitSeconds?: number
+  }
+): Promise<{ error: string; kind: "error" } | { kind: "resolved" }> {
+  const lock = flagPath(parameters.lockName)
+  const waitSeconds = String(parameters.waitSeconds ?? FLAG_LOCK_WAIT_SECONDS)
+  const command =
+    `i=0; while [ -d ${lock} ] && [ "$i" -lt ${waitSeconds} ]; do ` +
+    "sleep 1; i=$((i+1)); done; " +
+    `[ ! -d ${lock} ]`
+  const probe = await ssh.exec(command, { ignoreExitCode: true, silent: true })
+  if (probe.code === 0) return { kind: "resolved" }
+  const staleSeconds = parameters.staleSeconds ?? FLAG_LOCK_STALE_SECONDS
+  if (await tryReclaimStaleFlagLock(ssh, parameters.lockName, staleSeconds)) {
+    return { kind: "resolved" }
+  }
+  return {
+    error: `[moduleHelpers] timed out waiting for mutex lock ${parameters.lockName}`,
+    kind: "error",
+  }
+}
+
 async function runLockedFlagApply(
   ssh: SshConnection,
   parameters: {

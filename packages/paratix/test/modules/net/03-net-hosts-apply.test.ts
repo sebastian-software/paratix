@@ -244,6 +244,62 @@ describe("net.hosts — apply", () => {
       path: "/etc/hosts",
     })
   })
+
+  // R-0000169: read-modify-write on /etc/hosts must be serialized through a
+  // mutex lock so concurrent Paratix runs cannot lose updates between the
+  // read and the write.
+  it("acquires and releases the etc-hosts mutex lock around the write", async () => {
+    const mockSsh = createMockSsh({
+      "cat '/etc/hosts'": { stdout: "127.0.0.1 localhost\n" },
+    })
+
+    const mod = net.hosts("1.2.3.4", ["myhost"])
+    const result = await mod.apply(mockSsh, emptyEnv)
+
+    expect(result.status).toBe("changed")
+    const lockMkdir = "mkdir /var/lib/paratix/flags/'etc-hosts-mutex'"
+    const lockRmdir = "rmdir /var/lib/paratix/flags/'etc-hosts-mutex'"
+    expect(mockSsh.calls).toContain(lockMkdir)
+    expect(mockSsh.calls).toContain(lockRmdir)
+    const acquireIndex = mockSsh.calls.indexOf(lockMkdir)
+    const writeReadIndex = mockSsh.calls.indexOf("cat '/etc/hosts'")
+    const releaseIndex = mockSsh.calls.indexOf(lockRmdir)
+    expect(acquireIndex).toBeLessThan(writeReadIndex)
+    expect(writeReadIndex).toBeLessThan(releaseIndex)
+  })
+
+  // R-0000169: when a concurrent process modifies /etc/hosts between the
+  // read and the write, the guarded write must abort instead of silently
+  // overwriting the foreign change. This protects callers even if a future
+  // refactor weakens the mutex serialization guarantee.
+  it("aborts the write when /etc/hosts changes between read and write", async () => {
+    const mockSsh = createMockSsh({
+      "cat '/etc/hosts'": { stdout: "127.0.0.1 localhost\n" },
+    })
+    let readCount = 0
+    const originalReadFile = mockSsh.readFile.bind(mockSsh)
+    mockSsh.readFile = async (remotePath: string): Promise<string> => {
+      readCount += 1
+      if (readCount === 1) return originalReadFile(remotePath)
+      // Simulate a concurrent modification that landed between the initial
+      // read and the guarded re-read just before the write.
+      return "127.0.0.1 localhost\n9.9.9.9 intruder\n"
+    }
+    const writes: Array<{ content: string; mode: string; path: string }> = []
+    mockSsh.writeFile = async (path, content, options) => {
+      writes.push({ content, mode: options.mode, path })
+      await Promise.resolve()
+    }
+
+    const mod = net.hosts("1.2.3.4", ["myhost"])
+    const result = await mod.apply(mockSsh, emptyEnv)
+
+    expect(result.status).toBe("failed")
+    expect(writes).toHaveLength(0)
+    // The mutex lock must still be released even when the guarded write
+    // refuses, otherwise the next run would hang forever.
+    expect(mockSsh.calls).toContain("rmdir /var/lib/paratix/flags/'etc-hosts-mutex'")
+  })
 })
 
 // ─── net.resolv ───────────────────────────────────────────────────────────────

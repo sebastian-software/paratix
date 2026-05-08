@@ -15,7 +15,7 @@ import {
 } from "../types.js"
 import { hasSensitiveHeaders } from "./curlHelpers.js"
 import { sha256String } from "./fileHelpers.js"
-import { hasFlag, setVersionedFlag } from "./moduleHelpers.js"
+import { hasFlag, setVersionedFlag, withMutexLock } from "./moduleHelpers.js"
 import {
   buildHttpCheckParameters,
   buildWaitForName,
@@ -31,6 +31,9 @@ import {
 const EXEC_OPTS = { ignoreExitCode: true, silent: true } as const
 const HOSTS_FILE = "/etc/hosts"
 const HOSTS_FILE_MODE = "0644"
+// Lock identifier serializing read-modify-write on /etc/hosts across
+// concurrent Paratix runs sharing this remote host.
+const HOSTS_FILE_MUTEX = "etc-hosts-mutex"
 const NET_CONFIG_FILE_MODE = "0644"
 const NETWORKCTL_RELOAD = "networkctl reload"
 const MS_PER_SECOND = 1000
@@ -879,11 +882,21 @@ async function applyHostsState(
   conn: SshConnection,
   parameters: HostsStateParameters
 ): Promise<ModuleResult> {
-  const content = await conn.readFile(HOSTS_FILE)
-  const snapshot: HostsFileSnapshot = { content, lines: content.split("\n") }
-  return parameters.state === "present"
-    ? applyHostsPresent(conn, parameters, snapshot)
-    : applyHostsAbsent(conn, parameters, snapshot)
+  // R-0000169: read-modify-write on /etc/hosts must be serialized so
+  // concurrent Paratix runs (or other processes) cannot lose updates between
+  // the read and the write. The mutex lock — combined with the re-read inside
+  // `guardedWriteFile` — turns the sequence into a critical section that
+  // either succeeds atomically or aborts cleanly on an external modification.
+  return withMutexLock(conn, {
+    lockName: HOSTS_FILE_MUTEX,
+    async section() {
+      const content = await conn.readFile(HOSTS_FILE)
+      const snapshot: HostsFileSnapshot = { content, lines: content.split("\n") }
+      return parameters.state === "present"
+        ? applyHostsPresent(conn, parameters, snapshot)
+        : applyHostsAbsent(conn, parameters, snapshot)
+    },
+  })
 }
 
 /**

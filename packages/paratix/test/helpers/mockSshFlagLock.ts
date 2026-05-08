@@ -5,7 +5,22 @@
 const FLAG_LOCK_INTERNAL_SUCCESS_PATTERNS: RegExp[] = [
   /^printf '%s@%s %s\\n' "\$\$" "\$\(hostname\)" "\$\(date \+%s\)" > \S+\/holder$/v,
   /^rm -f \S+\/holder$/v,
+  // Mutex-lock acquire and release commands target lock directories whose
+  // last path segment ends in the `-mutex` suffix (with an optional
+  // `-<digest>` qualifier). Default them to success so existing tests do not
+  // regress when modules adopt the mutex helper.
+  /^mkdir \/var\/lib\/paratix\/flags\/'[\w.\-]*-mutex'$/v,
+  /^rmdir \/var\/lib\/paratix\/flags\/'[\w.\-]*-mutex'$/v,
+  /^mkdir -p \/var\/lib\/paratix\/flags$/v,
 ]
+
+/**
+ * Pattern matched by the mutex-lock release wait loop. Default it to success
+ * so a test that does not opt into contention simulation observes the lock
+ * already free.
+ */
+const MUTEX_LOCK_WAIT_PATTERN =
+  /^i=0; while \[ -d \S+ \] && \[ "\$i" -lt \d+ \]; do sleep 1; i=\$\(\(i\+1\)\); done; \[ ! -d \S+ \]$/v
 
 /**
  * Pattern matched by the stale-lock reclaim probe. Tests that simulate a
@@ -21,7 +36,8 @@ const FLAG_LOCK_RECLAIM_PATTERN =
  *   marker cleanup that should default to success.
  */
 export function isFlagLockInternalSuccessCommand(command: string): boolean {
-  return FLAG_LOCK_INTERNAL_SUCCESS_PATTERNS.some((pattern) => pattern.test(command))
+  if (FLAG_LOCK_INTERNAL_SUCCESS_PATTERNS.some((pattern) => pattern.test(command))) return true
+  return MUTEX_LOCK_WAIT_PATTERN.test(command)
 }
 
 /**
