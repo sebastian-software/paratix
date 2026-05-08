@@ -89,8 +89,14 @@ export const service = {
       _dryRunMetaProducer: true,
       async apply(ssh: null | SshConnection): Promise<ModuleResult> {
         if (!ssh) return failed("[service.facts] SSH connection is required")
+        // R-0000237: pin LC_ALL=C so the parser does not depend on the
+        // remote host's locale. systemctl translates column headers and
+        // status keywords (active/inactive/failed) when LC_MESSAGES or
+        // LC_ALL is set to a non-C locale, which would otherwise corrupt
+        // the meta values produced from the third whitespace-separated
+        // column ("active") below.
         const result = await ssh.exec(
-          `${SYSTEMCTL} list-units --type=service --all --no-pager --no-legend`,
+          `LC_ALL=C ${SYSTEMCTL} list-units --type=service --all --no-pager --no-legend`,
           { ignoreExitCode: true, silent: true }
         )
         if (result.code !== 0) {

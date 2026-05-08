@@ -385,7 +385,7 @@ describe("service.facts", () => {
 
   it("apply parses systemctl list-units output and returns meta with service states", async () => {
     const ssh = createMockSsh({
-      "systemctl list-units --type=service --all --no-pager --no-legend": {
+      "LC_ALL=C systemctl list-units --type=service --all --no-pager --no-legend": {
         code: 0,
         stdout:
           "  nginx.service  loaded  active  running  A high performance web server\n  sshd.service   loaded  active  running  OpenBSD Secure Shell server\n",
@@ -401,7 +401,7 @@ describe("service.facts", () => {
 
   it("apply handles inactive services correctly", async () => {
     const ssh = createMockSsh({
-      "systemctl list-units --type=service --all --no-pager --no-legend": {
+      "LC_ALL=C systemctl list-units --type=service --all --no-pager --no-legend": {
         code: 0,
         stdout: "  nginx.service  loaded  inactive  dead  A high performance web server\n",
       },
@@ -415,7 +415,7 @@ describe("service.facts", () => {
 
   it("apply returns empty meta when no services are listed", async () => {
     const ssh = createMockSsh({
-      "systemctl list-units --type=service --all --no-pager --no-legend": {
+      "LC_ALL=C systemctl list-units --type=service --all --no-pager --no-legend": {
         code: 0,
         stdout: "",
       },
@@ -428,7 +428,7 @@ describe("service.facts", () => {
 
   it("apply returns failed when systemctl exits with non-zero code", async () => {
     const ssh = createMockSsh({
-      "systemctl list-units --type=service --all --no-pager --no-legend": {
+      "LC_ALL=C systemctl list-units --type=service --all --no-pager --no-legend": {
         code: 1,
         stdout: "",
       },
@@ -440,7 +440,7 @@ describe("service.facts", () => {
 
   it("apply strips leading Unicode bullet from failed units", async () => {
     const ssh = createMockSsh({
-      "systemctl list-units --type=service --all --no-pager --no-legend": {
+      "LC_ALL=C systemctl list-units --type=service --all --no-pager --no-legend": {
         code: 0,
         stdout:
           "\u25CF nginx.service  loaded  failed  failed  A high performance web server\n  sshd.service   loaded  active  running  OpenBSD Secure Shell server\n",
@@ -459,5 +459,26 @@ describe("service.facts", () => {
     // eslint-disable-next-line prefer-spread
     const result = await mod.apply(null, emptyEnv)
     expect(result.status).toBe("failed")
+  })
+
+  // R-0000237 regression: systemctl translates the active/inactive/failed
+  // status keywords when the remote host runs in a non-C locale, which
+  // would corrupt the parsed meta values. Pin LC_ALL=C in the invocation
+  // so the parser is locale-independent.
+  it("apply pins LC_ALL=C on the systemctl invocation", async () => {
+    const ssh = createMockSsh({
+      "LC_ALL=C systemctl list-units --type=service --all --no-pager --no-legend": {
+        code: 0,
+        stdout: "  nginx.service  loaded  active  running\n",
+      },
+    })
+    const mod = service.facts()
+    await mod.apply(ssh, emptyEnv)
+    expect(ssh.calls).toContain(
+      "LC_ALL=C systemctl list-units --type=service --all --no-pager --no-legend"
+    )
+    expect(ssh.calls).not.toContain(
+      "systemctl list-units --type=service --all --no-pager --no-legend"
+    )
   })
 })

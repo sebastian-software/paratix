@@ -770,7 +770,7 @@ describe("runPlaybook dry-run recipe behaviour", () => {
   it("propagates service facts meta to following modules in dry-run mode", async () => {
     const capturedConfigs: unknown[] = []
     const execOutputs: Record<string, string> = {
-      "systemctl list-units --type=service --all --no-pager --no-legend":
+      "LC_ALL=C systemctl list-units --type=service --all --no-pager --no-legend":
         "  nginx.service  loaded  active  running  A high performance web server\n" +
         "  sshd.service   loaded  active  running  OpenBSD Secure Shell server\n",
     }
@@ -781,7 +781,9 @@ describe("runPlaybook dry-run recipe behaviour", () => {
         exec: vi
           .fn()
           .mockImplementation(
-            (command: "systemctl list-units --type=service --all --no-pager --no-legend") => ({
+            (
+              command: "LC_ALL=C systemctl list-units --type=service --all --no-pager --no-legend"
+            ) => ({
               code: 0,
               stderr: "",
               stdout: execOutputs[command],
