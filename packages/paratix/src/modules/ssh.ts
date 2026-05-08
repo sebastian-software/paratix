@@ -1,6 +1,6 @@
 /* eslint-disable max-lines -- ssh module keeps known_hosts/authorized_keys helpers together */
 import { computeFingerprint } from "../knownHosts.js"
-import { failed } from "../moduleFailure.js"
+import { failed, failedCommand } from "../moduleFailure.js"
 import { isValidTcpPort } from "../serverDefinitionValidation.js"
 import { shellQuote } from "../ssh.js"
 import { type Module, type ModuleResult, NEEDS_APPLY, type SshConnection } from "../types.js"
@@ -450,7 +450,20 @@ export const ssh = {
           return { status: "ok" }
         }
 
-        await conn.exec(`ssh-keygen -R ${shellQuote(lookupTarget)}`)
+        // R-0000212: ssh-keygen -R can fail (permission denied, corrupted
+        // known_hosts file, ENOSPC). Mirror the present-state guards: run
+        // with ignoreExitCode and surface a failedCommand result instead of
+        // letting the exec throw and propagate as an uncaught exception.
+        const removeResult = await conn.exec(`ssh-keygen -R ${shellQuote(lookupTarget)}`, {
+          ignoreExitCode: true,
+          silent: true,
+        })
+        if (removeResult.code !== 0) {
+          return failedCommand(
+            `[ssh.knownHosts: ${host} (absent)] ssh-keygen -R failed`,
+            removeResult
+          )
+        }
         return { status: "changed" }
       },
       async check(conn: null | SshConnection): Promise<"needs-apply" | "ok"> {

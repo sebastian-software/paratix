@@ -532,6 +532,27 @@ describe("ssh.knownHosts", () => {
     expect(mockSsh.calls).toContain("ssh-keygen -R '[github.com]:2222'")
   })
 
+  // R-0000212: the absent path previously called `conn.exec` without
+  // `ignoreExitCode`, so a permission-denied or corrupted-known_hosts error
+  // would propagate as an uncaught exception. The fix mirrors R-0000170 for
+  // the present-state path: surface a failedCommand result instead.
+  it("R-0000212: apply returns failedCommand when ssh-keygen -R fails (state: absent)", async () => {
+    const mockSsh = createMockSsh({
+      "ssh-keygen -F 'github.com'": { code: 0 },
+      "ssh-keygen -R 'github.com'": {
+        code: 255,
+        stderr: "/root/.ssh/known_hosts: Permission denied",
+      },
+    })
+    const mod = ssh.knownHosts("github.com", { state: "absent" })
+
+    const result = await mod.apply(mockSsh, emptyEnv)
+
+    expect(result.status).toBe("failed")
+    expect(String(result.error)).toContain("[ssh.knownHosts: github.com (absent)]")
+    expect(String(result.error)).toContain("ssh-keygen -R failed")
+  })
+
   it("apply returns failed when ssh is null", async () => {
     const mod = ssh.knownHosts("github.com", { expectedFingerprint: hostFingerprint })
     const conn = null
