@@ -38,6 +38,7 @@ import {
   TSCONFIG_TEMPLATE,
   UNATTENDED_UPGRADES_50_TEMPLATE,
 } from "./templates.js"
+import { containsUnsafeCodepoint } from "./unsafeCodepoints.js"
 
 export {
   CliExitError,
@@ -142,6 +143,19 @@ export function writeProjectFiles(projectDirectory: string, options?: ScaffoldOp
   validateRootBootstrapConfiguration(initialUser, options?.adminPublicKey)
   const { adminPublicKey, expectedHostFingerprint, host } =
     normalizeProgrammaticScaffoldStringOptions(options)
+  // R-0000234: scaffoldProject validates the project name up front, but
+  // writeProjectFiles is exported for direct programmatic use. A caller that
+  // bypasses scaffoldProject would otherwise embed an unvalidated basename
+  // into packageJson.name — including newlines, control characters, or
+  // Unicode bidi formatting codepoints. Validate the derived name at the
+  // entry point so the security check is enforced regardless of which
+  // public function is called.
+  const packageName = derivePackageName(projectDirectory)
+  if (!isSecureDerivedPackageName(packageName)) {
+    throw new Error(
+      `Error: Invalid project directory ${formatCliValue(projectDirectory)} — the derived package name contains control or bidi codepoints.`
+    )
+  }
 
   // eslint-disable-next-line security/detect-non-literal-fs-filename
   mkdirSync(projectDirectory, { recursive: true })
@@ -164,7 +178,7 @@ export function writeProjectFiles(projectDirectory: string, options?: ScaffoldOp
     engines: {
       node: ">=24.0.0",
     },
-    name: derivePackageName(projectDirectory),
+    name: packageName,
     private: true,
     scripts: {
       apply: "paratix apply server.ts",
@@ -200,6 +214,21 @@ export function normalizeProjectName(name: string): string {
 
 function derivePackageName(projectDirectory: string): string {
   return basename(projectDirectory.replaceAll("\\", "/"))
+}
+
+// R-0000234: writeProjectFiles is exported and accepts an arbitrary path.
+// `validateProjectName` (used by scaffoldProject) is too strict for this
+// entry point — it rejects uppercase letters and would break callers that
+// pass a `mkdtempSync`-generated temp directory. We restrict the check to
+// the actual security concerns: empty, whitespace-only, multi-line, and
+// codepoints from the shared unsafe-codepoint allowlist (control bytes and
+// Unicode bidi formatting marks).
+function isSecureDerivedPackageName(name: string): boolean {
+  if (name.length === 0) return false
+  if (name.trim().length === 0) return false
+  if (/[\r\n]/v.test(name)) return false
+  if (containsUnsafeCodepoint(name)) return false
+  return true
 }
 
 function validateProjectName(name: string | undefined): string {

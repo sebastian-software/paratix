@@ -150,6 +150,34 @@ describe("writeProjectFiles", () => {
     expect(parsed.name).toBe("mixed-project")
   })
 
+  // R-0000234: writeProjectFiles is exported, so a programmatic caller can
+  // bypass scaffoldProject's project-name validation. The derived basename
+  // must be rejected when it contains control characters / bidi formatting
+  // codepoints before any file is created — otherwise the unvalidated name
+  // would be embedded into package.json.
+  it("rejects a project directory whose basename contains a newline", () => {
+    const dangerousBasename = "evil\nname"
+    const dangerousPath = join(TEST_DIR, dangerousBasename)
+
+    expect(() => {
+      writeProjectFiles(dangerousPath)
+    }).toThrow(/derived package name contains control or bidi codepoints/v)
+
+    expect(existsSync(join(dangerousPath, "package.json"))).toBe(false)
+  })
+
+  it("rejects a project directory whose basename contains a bidi codepoint", () => {
+    const bidiOverride = String.fromCodePoint(0x20_2e)
+    const dangerousBasename = `evil${bidiOverride}name`
+    const dangerousPath = join(TEST_DIR, dangerousBasename)
+
+    expect(() => {
+      writeProjectFiles(dangerousPath)
+    }).toThrow(/derived package name contains control or bidi codepoints/v)
+
+    expect(existsSync(join(dangerousPath, "package.json"))).toBe(false)
+  })
+
   it("creates a server.ts file", () => {
     writeProjectFiles(TEST_DIR)
 

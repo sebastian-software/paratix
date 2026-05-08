@@ -125,6 +125,7 @@
     "uninitialised",
     "unredacted",
     "unstubbed",
+    "unvalidated",
     "userdel",
     "userlist",
     "usermod"
