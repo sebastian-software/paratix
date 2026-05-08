@@ -409,10 +409,28 @@ async function applyKnownHostsPresent(
     return { status: "ok" }
   }
 
-  await conn.exec(
-    `printf '%s\\n' ${reconciled.missingLines.map((line) => shellQuote(line)).join(" ")} >> ~/.ssh/known_hosts`,
-    { silent: true }
+  return appendVerifiedKnownHostLines(conn, host, reconciled.missingLines)
+}
+
+async function appendVerifiedKnownHostLines(
+  conn: SshConnection,
+  host: string,
+  missingLines: string[]
+): Promise<ModuleResult> {
+  // R-0000215: the final append to ~/.ssh/known_hosts can fail (permission
+  // denied, ENOSPC). Run with ignoreExitCode and report failedCommand on
+  // non-zero exit instead of letting the exec throw and leaving the trust
+  // anchor half-written.
+  const appendResult = await conn.exec(
+    `printf '%s\\n' ${missingLines.map((line) => shellQuote(line)).join(" ")} >> ~/.ssh/known_hosts`,
+    { ignoreExitCode: true, silent: true }
   )
+  if (appendResult.code !== 0) {
+    return failedCommand(
+      `[ssh.knownHosts: ${host} (present)] failed to append to ~/.ssh/known_hosts`,
+      appendResult
+    )
+  }
   return { status: "changed" }
 }
 

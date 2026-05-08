@@ -553,6 +553,27 @@ describe("ssh.knownHosts", () => {
     expect(String(result.error)).toContain("ssh-keygen -R failed")
   })
 
+  // R-0000215: the final append to ~/.ssh/known_hosts runs unguarded; if it
+  // fails (permission denied, ENOSPC), the exec throws and the trust anchor
+  // is left half-written. Surface a failedCommand result instead.
+  it("R-0000215: apply returns failedCommand when the known_hosts append fails", async () => {
+    const mockSsh = createSshApplyMockSsh({
+      [`grep -qxF '${scannedLine}' ~/.ssh/known_hosts`]: { code: 1 },
+      [`printf '%s\\n' '${scannedLine}' >> ~/.ssh/known_hosts`]: {
+        code: 1,
+        stderr: "sh: 1: cannot create ~/.ssh/known_hosts: No space left on device",
+      },
+      "ssh-keyscan -H 'github.com' 2>/dev/null": { stdout: `${scannedLine}\n` },
+    })
+    const mod = ssh.knownHosts("github.com", { expectedFingerprint: hostFingerprint })
+
+    const result = await mod.apply(mockSsh, emptyEnv)
+
+    expect(result.status).toBe("failed")
+    expect(String(result.error)).toContain("[ssh.knownHosts: github.com (present)]")
+    expect(String(result.error)).toContain("failed to append to ~/.ssh/known_hosts")
+  })
+
   // R-0000214: ssh-keyscan exits non-zero when the host is unreachable, the
   // port is closed, or DNS fails. The previous `conn.output` call propagated
   // that as an uncaught exception even though `2>/dev/null` suppressed the
