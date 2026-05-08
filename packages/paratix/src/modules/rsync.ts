@@ -121,8 +121,12 @@ function createVerifiedKnownHostsFile(connectionInfo: {
 
   const filePath = join(tmpdir(), `paratix-rsync-known-hosts-${randomUUID()}`)
   const content = `${formatKnownHostsLabel(connectionInfo.host, connectionInfo.port)} ${connectionInfo.verifiedHostPublicKey}\n`
+  // R-0000247: open with `wx` (O_WRONLY | O_CREAT | O_EXCL) so the create
+  // step refuses to follow a pre-existing symlink in /tmp on shared hosts
+  // without sticky bit. Combined with the random UUID in the filename,
+  // this makes a symlink-replacement attack effectively impossible.
   // eslint-disable-next-line security/detect-non-literal-fs-filename
-  writeFileSync(filePath, content, { mode: 0o600 })
+  writeFileSync(filePath, content, { flag: "wx", mode: 0o600 })
   return filePath
 }
 

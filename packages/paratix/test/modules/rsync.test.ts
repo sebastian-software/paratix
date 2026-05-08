@@ -420,6 +420,10 @@ describe("rsync.sync — argument building", () => {
     expect(transportArg).toContain("-o StrictHostKeyChecking=yes")
   })
 
+  // R-0000247 regression: the verified known_hosts file is created in the
+  // shared OS tmpdir; opening with `wx` (O_WRONLY | O_CREAT | O_EXCL) causes
+  // the create step to refuse following a pre-existing symlink, defending
+  // against a symlink-replacement attack on hosts without a sticky-bit /tmp.
   it("uses a temporary verified known_hosts file for a pinned session host key", async () => {
     const mockSsh = createMockSsh()
     vi.spyOn(mockSsh, "getConnectionInfo").mockReturnValue({
@@ -436,7 +440,7 @@ describe("rsync.sync — argument building", () => {
     expect(mockWriteFileSync).toHaveBeenCalledWith(
       expect.stringContaining(`/paratix-rsync-known-hosts-${KNOWN_HOSTS_TEST_UUID}`),
       "1.2.3.4 ssh-ed25519 AAAAPINNEDKEY\n",
-      { mode: 0o600 }
+      { flag: "wx", mode: 0o600 }
     )
     const args = getArgs()
     const eIdx = args.indexOf("-e")
@@ -523,7 +527,7 @@ describe("rsync.sync — argument building", () => {
     expect(mockWriteFileSync).toHaveBeenCalledWith(
       expect.stringContaining(`/paratix-rsync-known-hosts-${KNOWN_HOSTS_TEST_UUID}`),
       "fresh-host.example ssh-ed25519 AAAAFRESHKEY\n",
-      { mode: 0o600 }
+      { flag: "wx", mode: 0o600 }
     )
     const args = getArgs()
     const eIdx = args.indexOf("-e")
