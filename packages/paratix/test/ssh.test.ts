@@ -366,6 +366,30 @@ describe("SshConnectionImpl", () => {
       expect(endSpy).toHaveBeenCalledOnce()
     })
 
+    it("calls client.destroy() as a fallback when end() does not close the socket (R-0000209)", () => {
+      vi.useFakeTimers()
+      const endSpy = vi.fn()
+      const destroySpy = vi.fn()
+      const client = {
+        destroy: destroySpy,
+        end: endSpy,
+        exec: vi.fn(),
+        sftp: vi.fn(),
+      } as unknown as Client
+      const ssh = makeConnectedSsh(client)
+
+      ssh.disconnect()
+
+      expect(endSpy).toHaveBeenCalledOnce()
+      // destroy is scheduled, not synchronous
+      expect(destroySpy).not.toHaveBeenCalled()
+
+      vi.advanceTimersByTime(5000)
+
+      expect(destroySpy).toHaveBeenCalledOnce()
+      vi.useRealTimers()
+    })
+
     it("rejects pending exec() Promises when disconnect() is called while they are still pending", async () => {
       // BUG: disconnect() calls pendingRejects.clear() without iterating and
       // invoking the stored reject functions first. As a result, pending exec()

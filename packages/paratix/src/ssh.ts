@@ -121,6 +121,9 @@ function resolveWriteFileMode(
 const COMMAND_TIMEOUT = 120_000
 const DEFAULT_MAX_RECONNECT_ATTEMPTS = 10
 const DEFAULT_RECONNECT_TIMEOUT = 120_000
+// R-0000209: how long to wait for `client.end()` to complete before
+// forcibly destroying the underlying socket.
+const DISCONNECT_DESTROY_FALLBACK_MS = 5000
 const JITTER_BASE = 0.75
 const JITTER_RANGE = 0.5
 const RECONNECT_BASE_DELAY = 1000
@@ -906,11 +909,34 @@ export class SshConnectionImpl implements SshConnection {
     return { isSettled: () => settled, wrappedReject, wrappedResolve }
   }
 
-  /** Tear down the SSH transport without touching the cached sudo password. */
+  /**
+   * Tear down the SSH transport without touching the cached sudo password.
+   *
+   * R-0000209: `client.end()` initiates a graceful disconnect, which can
+   * hang on TCP half-open until the OS keepalive expires (default ~2 hours).
+   * Schedule a `client.destroy()` fallback so test runners and reconnect
+   * loops do not leak sockets when the peer never replies.
+   */
   private disconnectTransport(): void {
     if (this.client) {
-      this.client.end()
+      const closing = this.client
       this.client = null
+      try {
+        closing.end()
+      } catch {
+        // end() may throw when the underlying socket has already been destroyed
+      }
+      const fallback = setTimeout(() => {
+        try {
+          closing.destroy()
+        } catch {
+          // destroy() must never propagate from a best-effort fallback
+        }
+      }, DISCONNECT_DESTROY_FALLBACK_MS)
+      // Do not keep the event loop alive solely for the destroy fallback —
+      // when the program is otherwise idle, it can exit and the GC will
+      // reclaim the socket.
+      fallback.unref()
     }
     const error = new Error("SSH connection closed")
     for (const rejectFunction of this.pendingRejects) {
