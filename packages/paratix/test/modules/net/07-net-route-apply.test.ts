@@ -324,6 +324,28 @@ describe("net.route — apply", () => {
     expect(String(result.error)).toContain("networkctl reload failed")
   })
 
+  it("returns ok and skips networkctl reload when nothing to remove (state: absent)", async () => {
+    // R-0000219: when applyAbsentRoute is a no-op (live route absent and no
+    // matching drop-in), the module must report `ok` and must not invoke
+    // networkctl reload. Otherwise direct-apply (signal) paths fire spurious
+    // change signals.
+    const dropinPath = "/etc/systemd/network/50-paratix-route-10.0.0.0-24.network"
+    const mockSsh = createMockSsh(
+      {
+        // No live route and no drop-in present.
+        [`test -f '${dropinPath}'`]: { code: 1 },
+        [routeShowCommand]: { code: 0, stdout: "" },
+      },
+      SUCCESSFUL_ROUTE_APPLY_OPTIONS
+    )
+    const mod = net.route("10.0.0.0/24", "192.168.1.1", { state: "absent" })
+    const result = await mod.apply(mockSsh, emptyEnv)
+    expect(result.status).toBe("ok")
+    expect(mockSsh.calls).not.toContain("networkctl reload")
+    expect(mockSsh.calls.some((call) => call.startsWith("ip route del "))).toBe(false)
+    expect(mockSsh.calls).not.toContain(`rm -f '${dropinPath}'`)
+  })
+
   it("sanitizes destination with colons for drop-in filename", async () => {
     // IPv6 destination: colons replaced with dashes
     const dropinPath = "/etc/systemd/network/50-paratix-route-fd00---64.network"

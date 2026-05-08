@@ -744,11 +744,17 @@ async function applyPresentRoute(
   return null
 }
 
+/** Result of an apply step that may or may not have mutated host state. */
+type RouteApplyOutcome =
+  | { changed: boolean; failure: null }
+  | { changed: false; failure: ModuleResult }
+
 async function applyAbsentRoute(
   conn: SshConnection,
   parameters: RouteParameters
-): Promise<ModuleResult | null> {
+): Promise<RouteApplyOutcome> {
   const { destination, device, dropinPath, gateway } = parameters
+  let changed = false
   if (await hasLiveRoute(conn, { destination, device, gateway })) {
     const devicePart = device !== undefined && device !== "" ? ` dev ${shellQuote(device)}` : ""
     const routeResult = await conn.exec(
@@ -756,39 +762,72 @@ async function applyAbsentRoute(
       EXEC_OPTS
     )
     if (routeResult.code !== 0) {
-      return failedCommand(`[net.route: ${destination}] ip route del failed`, routeResult)
+      return {
+        changed: false,
+        failure: failedCommand(`[net.route: ${destination}] ip route del failed`, routeResult),
+      }
     }
+    changed = true
   }
   if (await routeDropinMatchesExpected(conn, parameters)) {
     const removeResult = await conn.exec(`rm -f ${shellQuote(dropinPath)}`, EXEC_OPTS)
     if (removeResult.code !== 0) {
-      return failedCommand(`[net.route: ${destination}] drop-in removal failed`, removeResult)
+      return {
+        changed: false,
+        failure: failedCommand(`[net.route: ${destination}] drop-in removal failed`, removeResult),
+      }
     }
+    changed = true
+  }
+  return { changed, failure: null }
+}
+
+async function reloadNetworkctlForRoute(
+  conn: SshConnection,
+  destination: string
+): Promise<ModuleResult | null> {
+  const reloadResult = await conn.exec(NETWORKCTL_RELOAD, EXEC_OPTS)
+  if (reloadResult.code !== 0) {
+    return failedCommand(`[net.route: ${destination}] networkctl reload failed`, reloadResult)
   }
   return null
+}
+
+async function applyPresentRouteState(
+  conn: SshConnection,
+  parameters: RouteCheckParameters
+): Promise<ModuleResult> {
+  const failure = await applyPresentRoute(conn, parameters)
+  if (failure != null) return failure
+  const reloadFailure = await reloadNetworkctlForRoute(conn, parameters.destination)
+  if (reloadFailure != null) return reloadFailure
+  const reloadFlag = buildRouteReloadFlag(parameters)
+  await setVersionedFlag(conn, reloadFlag.flagName, reloadFlag.flagPrefix)
+  return { status: "changed" }
+}
+
+async function applyAbsentRouteState(
+  conn: SshConnection,
+  parameters: RouteCheckParameters
+): Promise<ModuleResult> {
+  // R-0000219: skip networkctl reload entirely when applyAbsentRoute is a
+  // no-op (live route absent and no matching drop-in) so the module reports
+  // `ok` instead of falsely signalling `changed`.
+  const outcome = await applyAbsentRoute(conn, parameters)
+  if (outcome.failure != null) return outcome.failure
+  if (!outcome.changed) return { status: "ok" }
+  const reloadFailure = await reloadNetworkctlForRoute(conn, parameters.destination)
+  if (reloadFailure != null) return reloadFailure
+  return { status: "changed" }
 }
 
 async function applyRouteState(
   conn: SshConnection,
   parameters: RouteCheckParameters
 ): Promise<ModuleResult> {
-  const failure =
-    parameters.state === "present"
-      ? await applyPresentRoute(conn, parameters)
-      : await applyAbsentRoute(conn, parameters)
-  if (failure != null) return failure
-  const reloadResult = await conn.exec(NETWORKCTL_RELOAD, EXEC_OPTS)
-  if (reloadResult.code !== 0) {
-    return failedCommand(
-      `[net.route: ${parameters.destination}] networkctl reload failed`,
-      reloadResult
-    )
-  }
-  if (parameters.state === "present") {
-    const reloadFlag = buildRouteReloadFlag(parameters)
-    await setVersionedFlag(conn, reloadFlag.flagName, reloadFlag.flagPrefix)
-  }
-  return { status: "changed" }
+  return parameters.state === "present"
+    ? applyPresentRouteState(conn, parameters)
+    : applyAbsentRouteState(conn, parameters)
 }
 
 /** Shared parameters for the net.hosts apply/check helpers. */
