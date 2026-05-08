@@ -4257,11 +4257,11 @@ describe("SshConnectionImpl", () => {
       const failingCommit = vi.fn().mockRejectedValue(new Error("ENOSPC: known_hosts full"))
       const succeedingCommit = vi.fn().mockResolvedValue(undefined)
       vi.mocked(buildHostVerifier)
-        .mockReturnValueOnce({
+        .mockResolvedValueOnce({
           commitAcceptedHostKey: failingCommit,
           hostVerifier: vi.fn().mockReturnValue(true),
         })
-        .mockReturnValueOnce({
+        .mockResolvedValueOnce({
           commitAcceptedHostKey: succeedingCommit,
           hostVerifier: vi.fn().mockReturnValue(true),
         })

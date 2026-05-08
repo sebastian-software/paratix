@@ -69,6 +69,8 @@ const absentApplyWithExistingUnitsResponses = {
   [`cat '${SERVICE_PATH}'`]: { stdout: existingServiceContent },
   [`cat '${TIMER_PATH}'`]: { stdout: existingTimerContent },
   [`rm -f '${TIMER_PATH}' '${SERVICE_PATH}'`]: { code: 0 },
+  [`stat -c '%a' '${SERVICE_PATH}'`]: { stdout: "644\n" },
+  [`stat -c '%a' '${TIMER_PATH}'`]: { stdout: "644\n" },
   "systemctl daemon-reload": { code: 0 },
   "systemctl disable --now -- 'backup.timer'": { code: 0 },
   "systemctl is-active --quiet -- 'backup.timer'": { code: 1 },

@@ -4,6 +4,7 @@ import type { TimerPaths } from "./timerHelpers.js"
 import { shellQuote } from "../ssh.js"
 
 const UNIT_FILE_MODE = "0644"
+const OCTAL_MODE_LENGTH_WITHOUT_LEADING_ZERO = 3
 
 type FileSnapshot = { content: string; exists: true; mode: string } | { exists: false }
 
@@ -19,10 +20,11 @@ export async function readFileSnapshot(ssh: SshConnection, path: string): Promis
     ignoreExitCode: true,
     silent: true,
   })
-  const mode =
+  const rawMode =
     modeResult.code === 0 && modeResult.stdout.trim() !== ""
       ? modeResult.stdout.trim()
       : UNIT_FILE_MODE
+  const mode = rawMode.length === OCTAL_MODE_LENGTH_WITHOUT_LEADING_ZERO ? `0${rawMode}` : rawMode
   return { content, exists: true, mode }
 }
 

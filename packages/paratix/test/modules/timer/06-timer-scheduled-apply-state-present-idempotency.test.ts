@@ -139,6 +139,7 @@ describe("timer.scheduled — apply (state: present, idempotency)", () => {
       [`[ -e '${TIMER_PATH}' ]`]: { code: 0 },
       [`cat '${SERVICE_PATH}'`]: { code: 0, stdout: "[Unit]\nDescription=stale\n" },
       [`cat '${TIMER_PATH}'`]: { code: 0, stdout: expectedTimerContent },
+      [`stat -c '%a' '${SERVICE_PATH}'`]: { code: 0, stdout: "644\n" },
       [`stat -c '%a' '${TIMER_PATH}'`]: { code: 0, stdout: "644\n" },
       "systemctl daemon-reload": { code: 0 },
       "systemctl enable --now -- 'backup.timer'": { code: 0 },

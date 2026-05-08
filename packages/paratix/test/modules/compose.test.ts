@@ -807,7 +807,9 @@ describe("compose.config — apply", () => {
       [`rm -f '${stagingPath}'`]: { code: 0 },
     })
     // The first exec call after writeFile is the compose validation; reject it.
-    vi.spyOn(mockSsh, "exec").mockImplementationOnce(async () => Promise.reject(validationError))
+    vi.spyOn(mockSsh, "exec").mockImplementationOnce(() => {
+      throw validationError
+    })
     mockSsh.writeFile = async (
       path: string,
       content: string,
