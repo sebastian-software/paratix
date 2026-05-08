@@ -6,6 +6,7 @@ import { when } from "../src/builtins.js"
 import { meta } from "../src/meta.js"
 import { recipe as createRecipe } from "../src/recipe.js"
 import {
+  getSignalBus,
   installRunnerTestHooks,
   makeMockSshClass,
   makeModuleWithMeta,
@@ -703,6 +704,47 @@ describe("runPlaybook handleReboot grace period (R-0000153)", () => {
 
     // The grace wait must not have caused additional reconnect calls.
     expect(reconnect).toHaveBeenCalledTimes(1)
+  })
+
+  // R-0000203: a SIGINT/SIGTERM observed mid-sleep aborts the grace timer
+  // immediately so the runner reaches its shutdown path without idling for
+  // the full grace duration.
+  it("ends the grace sleep immediately when SIGINT arrives mid-grace", async () => {
+    const capturedConfigs: unknown[] = []
+    const reconnect = vi.fn().mockResolvedValue(null)
+
+    vi.doMock("../src/ssh.js", () => ({
+      shellQuote: (s: string) => `'${s}'`,
+      SshConnectionImpl: makeMockSshClass(capturedConfigs, { reconnect }),
+    }))
+
+    const { runPlaybook } = await import("../src/runner.js")
+    const moduleWithReboot = makeModuleWithMeta([meta.systemReboot()])
+
+    const definition: ServerDefinition = {
+      host: "1.2.3.4",
+      name: "test-server",
+      run: [moduleWithReboot],
+      ssh: { ports: [22], privateKey: "~/.ssh/id", user: "root" },
+    }
+
+    // Schedule a SIGINT shortly after the run starts, while the 5-second
+    // grace sleep is still in flight. Without R-0000203, the run would have
+    // to wait the full 5 seconds; with the AbortSignal hookup it returns
+    // almost instantly.
+    const signalTimer = setTimeout(() => {
+      getSignalBus().emit("SIGINT")
+    }, 50)
+
+    const start = Date.now()
+    await runPlaybook(definition, { rebootGraceSeconds: 5 })
+    const elapsed = Date.now() - start
+
+    clearTimeout(signalTimer)
+
+    // Allow generous tolerance for slow CI but assert we did not idle for
+    // anywhere near the full 5-second grace.
+    expect(elapsed).toBeLessThan(2000)
   })
 })
 

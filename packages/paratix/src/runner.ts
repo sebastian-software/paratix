@@ -40,6 +40,12 @@ type ShutdownState = {
   handleShutdownSignal: (signal: NodeJS.Signals) => void
   promptAbortSignal: AbortSignal
   setSsh: (connection: SshConnectionImpl) => void
+  /**
+   * R-0000203: AbortSignal that fires the instant SIGINT/SIGTERM is observed,
+   * so cooperative waits like {@link sleepRespectingShutdown} can return early
+   * without polling.
+   */
+  shutdownAbortSignal: AbortSignal
   shutdownSignal: () => NodeJS.Signals | null
 }
 
@@ -90,6 +96,10 @@ function setupShutdownHandlers(): ShutdownState {
   let receivedSignal: NodeJS.Signals | null = null
   let ssh: null | SshConnectionImpl = null
   const promptAbortController = new AbortController()
+  // R-0000203: dedicated controller for cooperative waits (e.g. the reboot
+  // grace sleep). Abort fires synchronously when SIGINT/SIGTERM arrives, so
+  // active sleeps end immediately instead of running their full duration.
+  const shutdownAbortController = new AbortController()
 
   const handleShutdownSignal = (signal: NodeJS.Signals): void => {
     if (receivedSignal != null) {
@@ -102,6 +112,7 @@ function setupShutdownHandlers(): ShutdownState {
     }
     receivedSignal = signal
     promptAbortController.abort(new Error(`Terminal prompt interrupted by ${signal}`))
+    shutdownAbortController.abort(new Error(`Runner sleep interrupted by ${signal}`))
     stopLiveModuleOutput(true)
     console.error(`\nReceived ${signal}, shutting down…`)
     ssh?.disconnect()
@@ -116,6 +127,7 @@ function setupShutdownHandlers(): ShutdownState {
     setSsh(connection: SshConnectionImpl) {
       ssh = connection
     },
+    shutdownAbortSignal: shutdownAbortController.signal,
     shutdownSignal: () => receivedSignal,
   }
 }
@@ -169,6 +181,14 @@ let rebootGraceMs: number = DEFAULT_REBOOT_GRACE_SECONDS * REBOOT_GRACE_SECONDS_
  */
 let rebootShutdownSignal: () => NodeJS.Signals | null = () => null
 
+/**
+ * R-0000203: process-scoped {@link AbortSignal} mirroring the runner's
+ * shutdown handler. Set during {@link initializeRunPlaybookContext} and
+ * cleared in {@link resetRebootGrace} so the reboot grace sleep can break
+ * out of the timer the moment SIGINT/SIGTERM arrives.
+ */
+let rebootAbortSignal: AbortSignal | undefined
+
 function setRebootGraceFromOptions(options: RunOptions): void {
   const seconds = options.rebootGraceSeconds ?? DEFAULT_REBOOT_GRACE_SECONDS
   rebootGraceMs = Math.max(0, seconds) * REBOOT_GRACE_SECONDS_TO_MS
@@ -177,27 +197,47 @@ function setRebootGraceFromOptions(options: RunOptions): void {
 function resetRebootGrace(): void {
   rebootGraceMs = DEFAULT_REBOOT_GRACE_SECONDS * REBOOT_GRACE_SECONDS_TO_MS
   rebootShutdownSignal = () => null
+  rebootAbortSignal = undefined
 }
 
 /**
  * Sleep helper that respects the runner's shutdown signal: returns early
  * (without throwing) if a shutdown is in progress so the caller can react.
  *
+ * R-0000203: subscribes to a {@link AbortSignal} that fires the moment the
+ * shutdown handler observes SIGINT/SIGTERM, so an in-flight sleep ends
+ * immediately instead of running its full duration. Without the abort, the
+ * reboot reconnect would idle through the entire grace period after the
+ * operator pressed Ctrl-C.
+ *
  * @param durationMs - The maximum sleep duration in milliseconds.
  * @param shutdownSignal - Getter that returns the active shutdown signal, or `null`.
+ * @param abortSignal - Optional `AbortSignal` that ends the sleep early.
  */
 async function sleepRespectingShutdown(
   durationMs: number,
-  shutdownSignal: () => NodeJS.Signals | null
+  shutdownSignal: () => NodeJS.Signals | null,
+  abortSignal?: AbortSignal
 ): Promise<void> {
   if (durationMs <= 0) return
   if (shutdownSignal() != null) return
+  if (abortSignal?.aborted === true) return
   await new Promise<void>((resolve) => {
+    const handleAbort = (): void => {
+      clearTimeout(timer)
+      cleanup()
+      resolve()
+    }
+    const cleanup = (): void => {
+      abortSignal?.removeEventListener("abort", handleAbort)
+    }
     const timer = setTimeout(() => {
+      cleanup()
       resolve()
     }, durationMs)
     // Avoid keeping the event loop alive solely for this sleep.
     if (typeof timer.unref === "function") timer.unref()
+    abortSignal?.addEventListener("abort", handleAbort, { once: true })
   })
 }
 
@@ -373,8 +413,10 @@ async function handleReboot(
 
   // Wait an initial grace period before the first reconnect so attempts
   // during shutdown/boot do not waste the maxReconnectAttempts budget. The
-  // wait short-circuits when a shutdown signal arrives.
-  await sleepRespectingShutdown(rebootGraceMs, rebootShutdownSignal)
+  // wait short-circuits when a shutdown signal arrives — both via the
+  // synchronous shutdown getter (already set when this is reached) and via
+  // the AbortSignal that fires on a fresh SIGINT/SIGTERM mid-sleep.
+  await sleepRespectingShutdown(rebootGraceMs, rebootShutdownSignal, rebootAbortSignal)
 
   try {
     await ssh.reconnect()
@@ -933,13 +975,17 @@ function initializeRunPlaybookContext(options: RunOptions): {
   setSsh: (connection: SshConnectionImpl) => void
   shutdownSignal: () => NodeJS.Signals | null
 } {
-  const { handleShutdownSignal, promptAbortSignal, setSsh, shutdownSignal } =
+  const { handleShutdownSignal, promptAbortSignal, setSsh, shutdownAbortSignal, shutdownSignal } =
     setupShutdownHandlers()
   setRunnerAbortSignal(promptAbortSignal)
   setRebootGraceFromOptions(options)
   // Expose the shutdown getter so the reboot grace sleep can return early
   // when SIGINT/SIGTERM arrives mid-grace.
   rebootShutdownSignal = shutdownSignal
+  // R-0000203: also expose the AbortSignal so an in-flight grace sleep ends
+  // synchronously the moment the shutdown handler aborts it, instead of
+  // running its full duration.
+  rebootAbortSignal = shutdownAbortSignal
   return { handleShutdownSignal, promptAbortSignal, setSsh, shutdownSignal }
 }
 
