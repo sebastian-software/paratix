@@ -85,6 +85,13 @@ function getFirstCurlExecCall(mockSsh: ReturnType<typeof createMockSsh>) {
 
 // ─── net.hosts ────────────────────────────────────────────────────────────────
 
+// R-0000222: net.resolv refuses to write through a symlink (typical
+// systemd-resolved layout). Tests that exercise the success path stub
+// `[ -L '/etc/resolv.conf' ]` to return non-zero (= regular file).
+const RESOLV_NOT_SYMLINK_STUB = {
+  "[ -L '/etc/resolv.conf' ]": { code: 1 },
+} satisfies NonNullable<Parameters<typeof createMockSsh>[0]>
+
 describe("net.resolv — apply", () => {
   it("returns failed when conn is null", async () => {
     const conn = null
@@ -94,28 +101,28 @@ describe("net.resolv — apply", () => {
   })
 
   it("returns changed after writing resolv.conf", async () => {
-    const mockSsh = createMockSsh()
+    const mockSsh = createMockSsh(RESOLV_NOT_SYMLINK_STUB)
     const mod = net.resolv({ nameservers: ["1.1.1.1"] })
     const result = await mod.apply(mockSsh, emptyEnv)
     expect(result.status).toBe("changed")
   })
 
   it("does not unconditionally rm -f /etc/resolv.conf before writing", async () => {
-    const mockSsh = createMockSsh()
+    const mockSsh = createMockSsh(RESOLV_NOT_SYMLINK_STUB)
     const mod = net.resolv({ nameservers: ["1.1.1.1"] })
     await mod.apply(mockSsh, emptyEnv)
     expect(mockSsh.calls).not.toContain("rm -f /etc/resolv.conf")
   })
 
   it("returns changed with search domains", async () => {
-    const mockSsh = createMockSsh()
+    const mockSsh = createMockSsh(RESOLV_NOT_SYMLINK_STUB)
     const mod = net.resolv({ nameservers: ["1.1.1.1", "8.8.8.8"], search: ["example.com"] })
     const result = await mod.apply(mockSsh, emptyEnv)
     expect(result.status).toBe("changed")
   })
 
   it("does not rm -f /etc/resolv.conf even with multiple nameservers and search domains", async () => {
-    const mockSsh = createMockSsh()
+    const mockSsh = createMockSsh(RESOLV_NOT_SYMLINK_STUB)
     const mod = net.resolv({
       nameservers: ["1.1.1.1", "8.8.4.4"],
       search: ["example.com", "local"],
@@ -129,7 +136,7 @@ describe("net.resolv — apply", () => {
     // The previous implementation removed /etc/resolv.conf before writeFile,
     // which left the host without resolver configuration on any failure.
     const writeFileError = new Error("simulated disk full")
-    const mockSsh = createMockSsh()
+    const mockSsh = createMockSsh(RESOLV_NOT_SYMLINK_STUB)
     const original = mockSsh.writeFile
     mockSsh.writeFile = async (): Promise<void> => {
       await Promise.resolve()
@@ -146,6 +153,25 @@ describe("net.resolv — apply", () => {
     )
 
     mockSsh.writeFile = original
+  })
+
+  it("R-0000222: refuses to write when /etc/resolv.conf is a symlink", async () => {
+    // systemd-resolved manages /etc/resolv.conf as a symlink to
+    // /run/systemd/resolve/stub-resolv.conf — apply must refuse rather than
+    // racing or replacing the upstream stub.
+    const mockSsh = createMockSsh({
+      "[ -L '/etc/resolv.conf' ]": { code: 0 },
+    })
+    let writeFileCalled = false
+    mockSsh.writeFile = async (): Promise<void> => {
+      writeFileCalled = true
+      await Promise.resolve()
+    }
+    const mod = net.resolv({ nameservers: ["1.1.1.1"] })
+    const result = await mod.apply(mockSsh, emptyEnv)
+    expect(result.status).toBe("failed")
+    expect(result.error?.message).toContain("symlink")
+    expect(writeFileCalled).toBe(false)
   })
 })
 

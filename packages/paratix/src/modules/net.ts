@@ -27,6 +27,7 @@ import {
   validateWaitForHost,
   type WaitForOptions,
 } from "./netHelpers.js"
+import { isSymlink } from "./remoteFileChecks.js"
 
 const EXEC_OPTS = { ignoreExitCode: true, silent: true } as const
 const HOSTS_FILE = "/etc/hosts"
@@ -1206,22 +1207,33 @@ export const net = {
     validateResolvOptions(options)
     const expectedContent = buildResolvConfig(options.nameservers, options.search)
 
+    const resolvPath = "/etc/resolv.conf"
     return {
       async apply(conn: null | SshConnection): Promise<ModuleResult> {
         if (!conn) return failed("[net.resolv] SSH connection is required")
 
-        // Atomic mv-replace via writeFile overwrites both regular files and symlinks,
-        // so we never destroy /etc/resolv.conf before the replacement content is in place.
-        // A failed writeFile leaves the previous file (or symlink) intact, which keeps the
-        // host's resolver configuration usable.
-        await conn.writeFile("/etc/resolv.conf", expectedContent, { mode: NET_CONFIG_FILE_MODE })
+        // R-0000222: on systemd-resolved hosts /etc/resolv.conf is a managed
+        // symlink (e.g. -> /run/systemd/resolve/stub-resolv.conf). Writing
+        // through it would either replace the upstream stub or, depending on
+        // writeFile's atomic-rename semantics, race with systemd-resolved.
+        // Refuse the write up-front and require an operator decision (e.g.
+        // disable systemd-resolved, switch to net.dns).
+        if (await isSymlink(conn, resolvPath)) {
+          return failed(
+            `[net.resolv] ${resolvPath} is a symlink (typically managed by systemd-resolved); refuse to overwrite without operator opt-in`
+          )
+        }
+
+        // writeFile uses atomic mv-replace, so a failed write leaves the
+        // previous file intact and the host's resolver configuration usable.
+        await conn.writeFile(resolvPath, expectedContent, { mode: NET_CONFIG_FILE_MODE })
 
         return { status: "changed" }
       },
       async check(conn: null | SshConnection): Promise<"needs-apply" | "ok"> {
         if (!conn) return NEEDS_APPLY
 
-        const content = await conn.readFile("/etc/resolv.conf")
+        const content = await conn.readFile(resolvPath)
         return content.trim() === expectedContent.trim() ? "ok" : NEEDS_APPLY
       },
       name: `net.resolv: nameservers ${options.nameservers.join(",")}`,
