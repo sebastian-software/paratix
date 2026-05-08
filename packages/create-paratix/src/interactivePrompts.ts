@@ -236,8 +236,13 @@ type HostFingerprintSelectValue = "discard" | "pin" | "placeholder" | "scan"
  * Run a typed select on a chooser parameterised over a wider value set.
  * The chooser is contravariant in `TValue` for the options parameter, so
  * passing a narrow `Array<SelectOption<TNarrow>>` is sound, but the
- * returned `TWide` must be narrowed to `TNarrow` at runtime — the runtime
- * value is guaranteed to be one of the offered options.
+ * returned `TWide` must be narrowed to `TNarrow` at runtime.
+ *
+ * R-0000231: validate the returned value against the offered options at
+ * runtime before casting. A stubbed or buggy chooser that returns a value
+ * outside the options array would otherwise let an unrelated branch run
+ * (silent type-confusion). We surface a hard error so the failure mode is
+ * obvious instead of masquerading as a different option.
  *
  * @param choose - The chooser parameterised over a wider value set.
  * @param prompt - The prompt text to display.
@@ -250,10 +255,17 @@ async function chooseFrom<TWide extends string, TNarrow extends TWide>(
   options: Array<SelectOption<TNarrow>>
 ): Promise<TNarrow> {
   const result = await choose(prompt, options)
-  // The runtime value is one of `options`, hence a TNarrow. The static
-  // narrowing cannot be expressed without a cast.
-  // eslint-disable-next-line @typescript-eslint/no-unsafe-type-assertion -- runtime value is one of `options`, hence a TNarrow
-  return result as TNarrow
+  // R-0000231: runtime narrowing. A chooser that returns a value not present
+  // in the offered options is treated as a programming error. We emit a
+  // generic diagnostic so attacker-controlled labels cannot leak into the
+  // message.
+  const matchedOption = options.find((option) => option.value === result)
+  if (matchedOption == null) {
+    throw new Error(
+      `Internal error: select returned an unexpected option for prompt ${JSON.stringify(prompt)}.`
+    )
+  }
+  return matchedOption.value
 }
 
 function failAfterScanFailure(host: string, error: unknown): never {

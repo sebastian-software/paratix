@@ -477,6 +477,23 @@ describe("promptForHostFingerprint", () => {
     expect(message).toContain("out-of-band")
   })
 
+  // R-0000231: chooseFrom must reject a chooser result that is not part of
+  // the offered options instead of casting it through. We exercise the path
+  // by mocking the host-fingerprint chooser to return a stray "scan" value
+  // for the confirm step (whose options are only "discard" / "pin").
+  it("rejects a chooser result that is not one of the offered options", async () => {
+    const select = vi.fn().mockResolvedValueOnce("scan").mockResolvedValueOnce("not-a-real-option")
+    const scanner = vi.fn().mockResolvedValueOnce({
+      algorithm: "ssh-ed25519",
+      fingerprint: "SHA256:scanned-fingerprint",
+    })
+
+    await expect(promptForHostFingerprint("example.com", select, scanner)).rejects.toThrow(
+      /Internal error: select returned an unexpected option/v
+    )
+    expect(select).toHaveBeenCalledTimes(2)
+  })
+
   // R-0000202: a scan failure must surface as an explicit MITM-style warning
   // and abort instead of silently trusting the presented key.
   it("emits a MITM warning and rejects after a scan failure", async () => {
