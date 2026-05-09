@@ -99,12 +99,16 @@ describe("cron.job", () => {
     expect(result).toBe("needs-apply")
   })
 
-  it("check throws when crontab cannot be read (state: present)", async () => {
+  // R-0000272: check must NOT throw when crontab read fails; instead it
+  // returns NEEDS_APPLY so apply gets a chance to heal the underlying
+  // problem (mirrors package.installed.check).
+  it("check returns needs-apply when crontab cannot be read (state: present)", async () => {
     const mockSsh = createMockSsh({
       "crontab -u 'alice' -l": { code: 1, stderr: "permission denied\n" },
     })
     const mod = cron.job("alice", "backup", { job: "0 3 * * * /backup.sh" })
-    await expect(mod.check(mockSsh, emptyEnv)).rejects.toThrow(/failed to read crontab/v)
+    const result = await mod.check(mockSsh, emptyEnv)
+    expect(result).toBe("needs-apply")
   })
 
   it("check returns needs-apply when marker exists but job line differs (state: present)", async () => {
@@ -197,12 +201,21 @@ describe("cron.job", () => {
     expect(mockSsh.calls.some((call) => call.includes(secret))).toBe(false)
   })
 
-  it("apply throws when crontab cannot be read (state: present)", async () => {
+  // R-0000272: apply must NOT throw when crontab read fails; instead it
+  // returns a failedCommand ModuleResult so the runner can render masked
+  // stdout/stderr like every other apply failure path.
+  it("apply returns a failed ModuleResult when crontab cannot be read (state: present)", async () => {
     const mockSsh = createMockSsh({
       "crontab -u 'alice' -l": { code: 1, stderr: "permission denied\n" },
     })
     const mod = cron.job("alice", "backup", { job: "0 3 * * * /backup.sh" })
-    await expect(mod.apply(mockSsh, emptyEnv)).rejects.toThrow(/failed to read crontab/v)
+    const result = await mod.apply(mockSsh, emptyEnv)
+    expect(result).toMatchObject({
+      error: expect.objectContaining({
+        message: expect.stringContaining("crontab read failed"),
+      }),
+      status: "failed",
+    })
     expect(findCrontabWriteCall(mockSsh)).toBeUndefined()
   })
 
@@ -763,5 +776,32 @@ describe("cron.absent", () => {
 
   it("throws when name contains a newline", () => {
     expect(() => cron.absent("alice", "bad\nname")).toThrow("must not contain newlines")
+  })
+
+  // R-0000272: cron.absent uses the same readCrontab helper as cron.job.
+  // A crontab read failure (e.g. permission denied) must surface as
+  // NEEDS_APPLY in check and as a failedCommand ModuleResult in apply.
+  it("check returns needs-apply when crontab cannot be read", async () => {
+    const mockSsh = createMockSsh({
+      "crontab -u 'alice' -l": { code: 1, stderr: "permission denied\n" },
+    })
+    const mod = cron.absent("alice", "backup")
+    const result = await mod.check(mockSsh, emptyEnv)
+    expect(result).toBe("needs-apply")
+  })
+
+  it("apply returns a failed ModuleResult when crontab cannot be read", async () => {
+    const mockSsh = createMockSsh({
+      "crontab -u 'alice' -l": { code: 1, stderr: "permission denied\n" },
+    })
+    const mod = cron.absent("alice", "backup")
+    const result = await mod.apply(mockSsh, emptyEnv)
+    expect(result).toMatchObject({
+      error: expect.objectContaining({
+        message: expect.stringContaining("crontab read failed"),
+      }),
+      status: "failed",
+    })
+    expect(findCrontabWriteCall(mockSsh)).toBeUndefined()
   })
 })
