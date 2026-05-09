@@ -27,6 +27,14 @@ const createMockSsh: typeof createBaseMockSsh = (responses, options) =>
       { command: /^mkdir \/var\/lib\/paratix\/flags\/.*\.lock'/v, result: { code: 0 } },
       { command: /^rmdir \/var\/lib\/paratix\/flags\/.*\.lock'/v, result: { code: 0 } },
       { command: /^touch \/var\/lib\/paratix\/flags\//v, result: { code: 0 } },
+      // R-0000274: download.large now persists its flag via setVersionedFlag,
+      // which combines `find … -delete` with `touch …` in a single command.
+      // Stub matches both download-large- and the legacy download- prefix.
+      {
+        command:
+          /^find \/var\/lib\/paratix\/flags -maxdepth 1 -name '[^']+' ! -name '\*\.lock' -delete && touch \/var\/lib\/paratix\/flags\//v,
+        result: { code: 0 },
+      },
       // R-0000167: download.url's hash marker write is best-effort. The
       // sha256 probe / printf marker write stubs let pre-marker tests
       // succeed without stubbing every post-mv destination probe. The
@@ -46,6 +54,15 @@ const allowUnverifiedDownload = { allowUnverifiedDownload: true } as const
 const httpsOnlyCurlProtocolFlags = "--proto '=https' --proto-redir '=https'"
 const insecureHttpCurlProtocolFlags = "--proto '=http,https' --proto-redir '=http,https'"
 
+// R-0000274: keep this helper aligned with `buildLargeDownloadFlagInfo` in
+// download.ts: a destination-keyed prefix wraps the URL/headers-keyed
+// flag hash so older flag files for the same destination get evicted on
+// re-convergence by setVersionedFlag.
+function buildLargeDownloadFlagPrefix(destination: string): string {
+  const destinationHash = createHash("sha256").update(destination).digest("hex")
+  return `download-large-${destinationHash}-`
+}
+
 function buildLargeDownloadFlagName(parameters: {
   destination: string
   headers?: Record<string, string>
@@ -60,7 +77,26 @@ function buildLargeDownloadFlagName(parameters: {
     ),
     url: parameters.url,
   })
-  return `download-${createHash("sha256").update(flagKey).digest("hex")}`
+  const flagHash = createHash("sha256").update(flagKey).digest("hex")
+  return `${buildLargeDownloadFlagPrefix(parameters.destination)}${flagHash}`
+}
+
+/**
+ * R-0000274: replicate the exact `find … -delete && touch …` command
+ * `setVersionedFlag` issues, so existing assertions can pivot from
+ * `touch …` to the combined command without each test redoing the math.
+ *
+ * @param parameters - Destination context.
+ * @param parameters.destination - Download destination (drives the flag prefix).
+ * @param parameters.flagName - The full versioned flag name written on success.
+ * @returns The exact shell command string the helper executes.
+ */
+function buildLargeDownloadVersionedFlagCommand(parameters: {
+  destination: string
+  flagName: string
+}): string {
+  const flagPrefix = buildLargeDownloadFlagPrefix(parameters.destination)
+  return `find /var/lib/paratix/flags -maxdepth 1 -name '${flagPrefix}*' ! -name '*.lock' -delete && touch /var/lib/paratix/flags/'${parameters.flagName}'`
 }
 
 type MockSshWithOptions = {
@@ -1516,7 +1552,9 @@ describe("download.large", () => {
       const mod = download.large(destination, url, { sha256 })
       const result = await mod.check(mockSsh, emptyEnv)
       expect(result).toBe("needs-apply")
-      expect(mockSsh.calls).not.toContain(`touch /var/lib/paratix/flags/'${flagName}'`)
+      expect(mockSsh.calls).not.toContain(
+        buildLargeDownloadVersionedFlagCommand({ destination, flagName })
+      )
       expect(mockSsh.calls).not.toContain(`sha256sum '${destination}'`)
     })
 
@@ -1533,7 +1571,9 @@ describe("download.large", () => {
       const mod = download.large(destination, url, { sha256 })
       const result = await mod.check(mockSsh, emptyEnv)
       expect(result).toBe("needs-apply")
-      expect(mockSsh.calls).not.toContain(`touch /var/lib/paratix/flags/'${flagName}'`)
+      expect(mockSsh.calls).not.toContain(
+        buildLargeDownloadVersionedFlagCommand({ destination, flagName })
+      )
     })
   })
 
@@ -1592,7 +1632,9 @@ describe("download.large", () => {
         `curl -fsSL -o '${temporaryDestination}' ${httpsOnlyCurlProtocolFlags} --config -`
       )
       expect(mockSsh.calls).toContain(`mv -T -- '${temporaryDestination}' '${destination}'`)
-      expect(mockSsh.calls).toContain(`touch /var/lib/paratix/flags/'${flagName}'`)
+      expect(mockSsh.calls).toContain(
+        buildLargeDownloadVersionedFlagCommand({ destination, flagName })
+      )
     })
 
     it("repairs metadata drift when the flag already exists", async () => {
@@ -1608,7 +1650,9 @@ describe("download.large", () => {
       const result = await mod.apply(mockSsh, emptyEnv)
       expect(result.status).toBe("changed")
       expect(mockSsh.calls).toContain(`chmod '0755' '${destination}'`)
-      expect(mockSsh.calls).toContain(`touch /var/lib/paratix/flags/'${flagName}'`)
+      expect(mockSsh.calls).toContain(
+        buildLargeDownloadVersionedFlagCommand({ destination, flagName })
+      )
       expect(mockSsh.calls.every((c) => !c.startsWith("curl"))).toBe(true)
       expect(mockSsh.calls.every((c) => !c.startsWith("mktemp"))).toBe(true)
     })
@@ -1628,7 +1672,9 @@ describe("download.large", () => {
       const curlCall = mockSsh.execCalls.find((entry) => entry.command.startsWith("curl -fsSL"))
       expect(curlCall?.options?.input).toBe(`url = "${url}"\n`)
       expect(mockSsh.calls).toContain(`mv -T -- '${temporaryDestination}' '${destination}'`)
-      expect(mockSsh.calls).toContain(`touch /var/lib/paratix/flags/'${flagName}'`)
+      expect(mockSsh.calls).toContain(
+        buildLargeDownloadVersionedFlagCommand({ destination, flagName })
+      )
     })
 
     it("cleans up the temporary file and does not set the flag when curl fails", async () => {
@@ -1647,7 +1693,9 @@ describe("download.large", () => {
       expect(mockSsh.calls).toContain(curlCommand)
       expect(mockSsh.calls).toContain(`rm -f '${temporaryDestination}'`)
       expect(mockSsh.calls).not.toContain(`mv -T -- '${temporaryDestination}' '${destination}'`)
-      expect(mockSsh.calls).not.toContain(`touch /var/lib/paratix/flags/'${flagName}'`)
+      expect(mockSsh.calls).not.toContain(
+        buildLargeDownloadVersionedFlagCommand({ destination, flagName })
+      )
     })
 
     it("fails, cleans up, and does not set the flag when the destination is a directory", async () => {
@@ -1661,7 +1709,9 @@ describe("download.large", () => {
       expect(result.error?.message).toContain("destination is a directory")
       expect(mockSsh.calls).toContain(`rm -f '${temporaryDestination}'`)
       expect(mockSsh.calls).not.toContain(`mv -T -- '${temporaryDestination}' '${destination}'`)
-      expect(mockSsh.calls).not.toContain(`touch /var/lib/paratix/flags/'${flagName}'`)
+      expect(mockSsh.calls).not.toContain(
+        buildLargeDownloadVersionedFlagCommand({ destination, flagName })
+      )
     })
 
     it("creates flags directory before setting flag", async () => {
@@ -1674,7 +1724,9 @@ describe("download.large", () => {
       await mod.apply(mockSsh, emptyEnv)
       expect(mockSsh.calls).toContain("mkdir -p /var/lib/paratix/flags")
       const mkdirIndex = mockSsh.calls.indexOf("mkdir -p /var/lib/paratix/flags")
-      const touchIndex = mockSsh.calls.indexOf(`touch /var/lib/paratix/flags/'${flagName}'`)
+      const touchIndex = mockSsh.calls.indexOf(
+        buildLargeDownloadVersionedFlagCommand({ destination, flagName })
+      )
       expect(mkdirIndex).toBeLessThan(touchIndex)
     })
 
@@ -1690,7 +1742,9 @@ describe("download.large", () => {
       const mod = download.large(destination, url, { sha256 })
       const result = await mod.apply(mockSsh, emptyEnv)
       expect(result.status).toBe("changed")
-      expect(mockSsh.calls).toContain(`touch /var/lib/paratix/flags/'${flagName}'`)
+      expect(mockSsh.calls).toContain(
+        buildLargeDownloadVersionedFlagCommand({ destination, flagName })
+      )
     })
 
     it("returns failed and does not set flag when sha256 does not match after download", async () => {
@@ -1707,7 +1761,9 @@ describe("download.large", () => {
       const mod = download.large(destination, url, { sha256 })
       const result = await mod.apply(mockSsh, emptyEnv)
       expect(result.status).toBe("failed")
-      expect(mockSsh.calls).not.toContain(`touch /var/lib/paratix/flags/'${flagName}'`)
+      expect(mockSsh.calls).not.toContain(
+        buildLargeDownloadVersionedFlagCommand({ destination, flagName })
+      )
       expect(mockSsh.calls).toContain(`rm -f '${temporaryDestination}'`)
       expect(mockSsh.calls).not.toContain(`rm -f '${destination}'`)
       expect(mockSsh.calls).not.toContain(`mv -T -- '${temporaryDestination}' '${destination}'`)
@@ -1727,7 +1783,9 @@ describe("download.large", () => {
       const result = await mod.apply(mockSsh, emptyEnv)
       expect(result.status).toBe("changed")
       expect(mockSsh.calls).toContain(`chmod '0755' '${destination}'`)
-      expect(mockSsh.calls).toContain(`touch /var/lib/paratix/flags/'${flagName}'`)
+      expect(mockSsh.calls).toContain(
+        buildLargeDownloadVersionedFlagCommand({ destination, flagName })
+      )
       expect(mockSsh.calls.every((c) => !c.startsWith("curl"))).toBe(true)
       expect(mockSsh.calls.every((c) => !c.startsWith("mktemp"))).toBe(true)
     })
@@ -1747,7 +1805,9 @@ describe("download.large", () => {
       const mod = download.large(destination, url, { sha256 })
       const result = await mod.apply(mockSsh, emptyEnv)
       expect(result.status).toBe("ok")
-      expect(mockSsh.calls).toContain(`touch /var/lib/paratix/flags/'${flagName}'`)
+      expect(mockSsh.calls).toContain(
+        buildLargeDownloadVersionedFlagCommand({ destination, flagName })
+      )
       expect(mockSsh.calls.every((c) => !c.startsWith("curl"))).toBe(true)
       expect(mockSsh.calls.every((c) => !c.startsWith("mktemp"))).toBe(true)
     })
@@ -1881,6 +1941,49 @@ describe("download.large", () => {
           url,
         })
       )
+    })
+
+    // R-0000274: a versioned flag prefix keyed to the destination must drop
+    // older flag files for the same destination on the next successful
+    // apply. Otherwise rotating URLs or auth headers leak an unbounded
+    // number of `/var/lib/paratix/flags/download-…` entries.
+    it("uses a destination-keyed flag prefix so older URL hashes are evicted on re-convergence", async () => {
+      const firstUrl = "https://example.com/large-file.iso"
+      const secondUrl = "https://mirror.example.com/large-file.iso"
+      const firstFlagName = buildLargeDownloadFlagName({ destination, url: firstUrl })
+      const secondFlagName = buildLargeDownloadFlagName({ destination, url: secondUrl })
+
+      expect(firstFlagName).not.toBe(secondFlagName)
+
+      const flagPrefix = buildLargeDownloadFlagPrefix(destination)
+      const findPrefix = `find /var/lib/paratix/flags -maxdepth 1 -name '${flagPrefix}*' ! -name '*.lock' -delete && touch /var/lib/paratix/flags/'${flagPrefix}`
+      const isVersionedFlagCall = (call: string): boolean => call.startsWith(findPrefix)
+
+      const firstMockSsh = createMockSsh({
+        ...downloadMktempStub(destination, temporaryDestination),
+        [`[ -f '${destination}' ]`]: { code: 1 },
+        [`[ -f /var/lib/paratix/flags/'${firstFlagName}' ]`]: { code: 1 },
+      })
+      const firstMod = download.large(destination, firstUrl, allowUnverifiedDownload)
+      const firstResult = await firstMod.apply(firstMockSsh, emptyEnv)
+      expect(firstResult.status).toBe("changed")
+      const firstVersionedCalls = firstMockSsh.calls.filter(isVersionedFlagCall)
+      expect(firstVersionedCalls).toStrictEqual([
+        buildLargeDownloadVersionedFlagCommand({ destination, flagName: firstFlagName }),
+      ])
+
+      const secondMockSsh = createMockSsh({
+        ...downloadMktempStub(destination, temporaryDestination),
+        [`[ -f '${destination}' ]`]: { code: 1 },
+        [`[ -f /var/lib/paratix/flags/'${secondFlagName}' ]`]: { code: 1 },
+      })
+      const secondMod = download.large(destination, secondUrl, allowUnverifiedDownload)
+      const secondResult = await secondMod.apply(secondMockSsh, emptyEnv)
+      expect(secondResult.status).toBe("changed")
+      const secondVersionedCalls = secondMockSsh.calls.filter(isVersionedFlagCall)
+      expect(secondVersionedCalls).toStrictEqual([
+        buildLargeDownloadVersionedFlagCommand({ destination, flagName: secondFlagName }),
+      ])
     })
   })
 })

@@ -13,7 +13,7 @@ import {
   hasSensitiveQueryParameters,
 } from "./curlHelpers.js"
 import { renderChownCommand } from "./fileMetadataHelpers.js"
-import { applyWithFlagLock, hasFlag, setFlag } from "./moduleHelpers.js"
+import { applyWithFlagLock, hasFlag, setVersionedFlag } from "./moduleHelpers.js"
 import { validateHttpUrl } from "./netHelpers.js"
 
 /**
@@ -92,16 +92,35 @@ function canonicalizeHeaders(headers?: Record<string, string>): string {
   )
 }
 
-function buildLargeDownloadFlagName(
+/**
+ * R-0000274: derive both a destination-stable flag prefix and the
+ * URL/headers-keyed flag name for `download.large`. The prefix encodes a
+ * sha256 of the destination so {@link setVersionedFlag} can evict older flag
+ * files when the URL or headers change for the same destination, instead of
+ * accumulating an unbounded number of `/var/lib/paratix/flags/download-*`
+ * entries on every URL/header rotation.
+ *
+ * @param parameters - Destination, URL and headers used to derive both keys.
+ * @returns The versioned flag name and the destination-keyed flag prefix.
+ */
+function buildLargeDownloadFlagInfo(
   parameters: Pick<DownloadParameters, "destination" | "headers" | "url">
-): string {
+): {
+  flagName: string
+  flagPrefix: string
+} {
+  const destinationHash = createHash("sha256").update(parameters.destination).digest("hex")
+  const flagPrefix = `download-large-${destinationHash}-`
   const flagKey = JSON.stringify({
     destination: parameters.destination,
     headers: canonicalizeHeaders(parameters.headers),
     url: parameters.url,
   })
   const flagHash = createHash("sha256").update(flagKey).digest("hex")
-  return `download-${flagHash}`
+  return {
+    flagName: `${flagPrefix}${flagHash}`,
+    flagPrefix,
+  }
 }
 
 function validateIntegrityConfiguration(
@@ -919,7 +938,11 @@ export const download = {
     if (resolvedOptions.sha256 != null) validateSha256(resolvedOptions.sha256)
     validateIntegrityConfiguration("download.large", resolvedOptions)
     const downloadParameters = buildDownloadParameters(destination, resolvedOptions, url)
-    const flagName = buildLargeDownloadFlagName(downloadParameters)
+    // R-0000274: use a destination-keyed prefix so older flag files for the
+    // same destination (older URLs/headers) get pruned automatically by
+    // setVersionedFlag, preventing unbounded accumulation in
+    // /var/lib/paratix/flags/.
+    const { flagName, flagPrefix } = buildLargeDownloadFlagInfo(downloadParameters)
 
     return {
       async apply(conn: null | SshConnection): Promise<ModuleResult> {
@@ -931,11 +954,15 @@ export const download = {
 
             if (result.status === "failed") return result
 
-            // R-0000273: setFlag now returns a typed `ModuleResult | null`
-            // instead of throwing on EROFS/EPERM/ENOSPC. Surface the failed
-            // result on the standard failure path so the runner can render
-            // stdout/stderr instead of an uncaught exception.
-            const flagFailure = await setFlag(conn, flagName)
+            // R-0000273: setVersionedFlag returns a typed `ModuleResult |
+            // null` instead of throwing on EROFS/EPERM/ENOSPC. Surface the
+            // failed result on the standard failure path so the runner can
+            // render stdout/stderr instead of an uncaught exception.
+            // R-0000274: switch from setFlag to setVersionedFlag so older
+            // flag files keyed to the same destination (e.g. a previous
+            // URL or header set) are evicted on each successful download
+            // instead of leaking onto disk forever.
+            const flagFailure = await setVersionedFlag(conn, flagName, flagPrefix)
             if (flagFailure) return flagFailure
             // R-0000156: respect the original result.status (e.g. "ok" when
             // performDownload skipped the download because content + metadata
