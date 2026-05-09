@@ -37,18 +37,62 @@ export function isAcceptableSourcesPath(filePath: string): boolean {
 // errors as "skip this file" so a single transient absence does not abort
 // the entire release upgrade. Other classes of errors (permission denied,
 // SSH transport failure) are still re-thrown by callers.
-const VANISHED_SOURCES_FILE_PATTERN = /no such file|enoent|cannot stat|cannot open/iv
+//
+// R-0000286: prefer `error.code === "ENOENT"` so non-English locales and
+// SFTP/SSH provider variants are detected reliably. The string pattern
+// remains as a fallback for transports that surface the condition only via
+// the message text (e.g. localized `cat:` stderr).
+const VANISHED_SOURCES_FILE_PATTERN =
+  /no such file|enoent|cannot stat|cannot open|datei oder verzeichnis nicht gefunden|fichier ou r[ée]pertoire/iv
+
+function getNodeErrorCode(error: unknown): string | undefined {
+  if (typeof error !== "object" || error === null) return undefined
+  if (!("code" in error)) return undefined
+  const { code } = error
+  return typeof code === "string" ? code : undefined
+}
 
 /**
- * Detect the error message shapes that indicate a sources file vanished
- * between enumeration and read.
+ * Detect the error shapes that indicate a sources file vanished between
+ * enumeration and read.
+ *
+ * Prefers `error.code === "ENOENT"` as the structured signal — see
+ * {@link wrapMissingSourcesFileError} for the helper that decorates a raw
+ * SSH/SFTP failure with that code. Falls back to a localized message
+ * pattern for transports that only surface the condition via stderr.
  *
  * @param error - The error value caught from `readFile`/`writeFile`.
- * @returns `true` when the message matches a known ENOENT-style pattern.
+ * @returns `true` when the error indicates ENOENT for the sources file.
  */
 export function isVanishedSourcesFileError(error: unknown): boolean {
+  if (getNodeErrorCode(error) === "ENOENT") return true
   const message = error instanceof Error ? error.message : String(error)
   return VANISHED_SOURCES_FILE_PATTERN.test(message)
+}
+
+/**
+ * Decorate an arbitrary error with `code: "ENOENT"` when its rendered
+ * message matches a known "missing file" shape. Lets callers attach the
+ * structured error code that {@link isVanishedSourcesFileError} prefers,
+ * without losing the original error stack or message. Errors that do not
+ * look like a missing-file failure are returned as-is.
+ *
+ * Returns a wrapper Error rather than mutating the input so existing
+ * stack/cause information stays intact and the caller does not have to
+ * own the input lifetime.
+ *
+ * @param error - The raw error value caught from a sources-file read/write.
+ * @returns The original error when the structured code is already present
+ *   or the message does not match; otherwise a new Error carrying
+ *   `code: "ENOENT"` and `cause: error`.
+ */
+export function wrapMissingSourcesFileError(error: unknown): unknown {
+  if (!(error instanceof Error)) return error
+  if (getNodeErrorCode(error) === "ENOENT") return error
+  if (!VANISHED_SOURCES_FILE_PATTERN.test(error.message)) return error
+  const wrapped: NodeJS.ErrnoException = new Error(error.message, { cause: error })
+  wrapped.code = "ENOENT"
+  return wrapped
 }
 
 // R-0000241: Default mode used when no original mode could be captured —

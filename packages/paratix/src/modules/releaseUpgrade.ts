@@ -18,6 +18,7 @@ import {
   readSourcesFileMode,
   RELEASE_UPGRADE_DEFAULT_TIMEOUT_MS,
   rewriteAptSourcesContent,
+  wrapMissingSourcesFileError,
 } from "./releaseUpgradeSources.js"
 import { buildRebootMetaEntriesWithTimeout } from "./resolveHostTimeout.js"
 
@@ -166,6 +167,10 @@ type SnapshotSourcesParameters = Omit<RewriteSourcesParameters, "originalContent
 // R-0000240: a sources file enumerated by `find -print0` may vanish between
 // enumeration and the subsequent read. Skip ENOENT-style errors so a single
 // transient absence does not abort the entire release upgrade.
+//
+// R-0000286: decorate the raw error with `code: "ENOENT"` so downstream
+// detection can rely on the structured field rather than scanning the
+// (possibly localized) message text.
 async function snapshotSourcesFileSafely(
   parameters: SnapshotSourcesParameters
 ): Promise<null | SourcesSnapshot> {
@@ -173,8 +178,9 @@ async function snapshotSourcesFileSafely(
     const originalContent = await parameters.ssh.readFile(parameters.remotePath)
     return await rewriteSourcesFile({ ...parameters, originalContent })
   } catch (error) {
-    if (isVanishedSourcesFileError(error)) return null
-    throw error
+    const decorated = wrapMissingSourcesFileError(error)
+    if (isVanishedSourcesFileError(decorated)) return null
+    throw decorated
   }
 }
 

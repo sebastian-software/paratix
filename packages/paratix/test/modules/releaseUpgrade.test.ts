@@ -707,6 +707,32 @@ describe("releaseUpgrade.upgrade — apply (Debian)", () => {
       expect(writes.find((w) => w.path === "/etc/apt/sources.list")).toBeUndefined()
     })
 
+    // R-0000286: detect ENOENT primarily via `error.code` so non-English
+    // locales (and SFTP/SSH provider variants) are recognized as a vanished
+    // file. A German-localized `cat` error still surfaces a missing file and
+    // must be skipped, just like the English equivalent.
+    it("R-0000286: skips a sources file when readFile reports a German-localized ENOENT message", async () => {
+      const vanishedPath = "/etc/apt/sources.list.d/vanished-de.list"
+      const cleanPath = "/etc/apt/sources.list.d/clean-de.list"
+      const ssh = createMockSsh(
+        debianApplyResponses("bookworm", "trixie", {
+          [`cat '${cleanPath}'`]: { code: 0, stdout: "deb http://example.com/repo bookworm main" },
+          [`cat '${vanishedPath}'`]: {
+            code: 1,
+            stderr: `cat: '${vanishedPath}': Datei oder Verzeichnis nicht gefunden`,
+          },
+          "find /etc/apt/sources.list.d/ \\( -name '*.list' -o -name '*.sources' \\) -type f -print0":
+            { code: 0, stdout: `${vanishedPath}\0${cleanPath}\0` },
+        })
+      )
+      const writes = captureWriteFile(ssh)
+      const mod = releaseUpgrade.upgrade()
+      const result = await mod.apply(ssh, emptyEnv)
+      expect(result.status).toBe("changed")
+      expect(writes.find((w) => w.path === vanishedPath)).toBeUndefined()
+      expect(writes.find((w) => w.path === cleanPath)).toBeDefined()
+    })
+
     it("R-0000240: re-throws non-ENOENT readFile errors so they surface to the runner", async () => {
       const protectedPath = "/etc/apt/sources.list.d/protected.list"
       const ssh = createMockSsh(
