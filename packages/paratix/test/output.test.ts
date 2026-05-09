@@ -241,6 +241,64 @@ describe("printModuleResult", () => {
     }
   })
 
+  it("unrefs the spinner timer so a missed stop call cannot keep the event loop alive", () => {
+    const unrefSpy = vi.fn()
+    const setIntervalSpy = vi.spyOn(globalThis, "setInterval").mockImplementation(((
+      handler: (...args: unknown[]) => void,
+      _ms?: number
+    ) => {
+      // Return an opaque object with the same surface the spinner relies on
+      // (clearInterval + unref). Using a fake timer here lets the test assert
+      // that the production code calls unref() on whatever setInterval
+      // returned, regardless of the host runtime's Timeout shape.
+      void handler
+      return { unref: unrefSpy } as unknown as NodeJS.Timeout
+    }) as typeof setInterval)
+    vi.spyOn(globalThis, "clearInterval").mockImplementation(() => {
+      // noop: the matching mocked setInterval returns a fake timer that
+      // clearInterval cannot consume. Suppressing the call here keeps the
+      // test from throwing while still allowing the spinner to invoke it.
+    })
+    vi.spyOn(process.stdout, "write").mockImplementation(() => true)
+    const originalIsTTY = process.stdout.isTTY
+    const originalClearLine = bindOptionalStdoutMethod("clearLine")
+    const originalCursorTo = bindOptionalStdoutMethod("cursorTo")
+
+    Object.defineProperty(process.stdout, "isTTY", { configurable: true, value: true })
+    Object.defineProperty(process.stdout, "clearLine", {
+      configurable: true,
+      value: vi.fn(() => true),
+    })
+    Object.defineProperty(process.stdout, "cursorTo", {
+      configurable: true,
+      value: vi.fn(() => true),
+    })
+
+    try {
+      startModuleSpinner("service.restart: app")
+
+      // The spinner must call setInterval and immediately unref the returned
+      // timer so an uncaughtException-path that misses stopAnimatedModuleLine
+      // does not keep the Node event loop alive.
+      expect(setIntervalSpy).toHaveBeenCalled()
+      expect(unrefSpy).toHaveBeenCalledTimes(1)
+    } finally {
+      stopLiveModuleOutput(true)
+      Object.defineProperty(process.stdout, "isTTY", {
+        configurable: true,
+        value: originalIsTTY,
+      })
+      Object.defineProperty(process.stdout, "clearLine", {
+        configurable: true,
+        value: originalClearLine,
+      })
+      Object.defineProperty(process.stdout, "cursorTo", {
+        configurable: true,
+        value: originalCursorTo,
+      })
+    }
+  })
+
   it("stops and clears live output on request", () => {
     const clearLine = vi.fn(() => true)
     const cursorTo = vi.fn(() => true)

@@ -224,6 +224,11 @@ export function startModuleSpinner(name: string, detail?: string): void {
       )
     }, SPINNER_FRAME_INTERVAL_MS),
   }
+  // Avoid keeping the event loop alive solely for the spinner timer:
+  // if stopAnimatedModuleLine/stopLiveModuleOutput is missed in an
+  // unhappy-path (uncaughtException), the process should still be able
+  // to exit. Mirrors the pattern used by sleepRespectingShutdown in runner.ts.
+  if (typeof spinner.interval.unref === "function") spinner.interval.unref()
 
   activeSpinner = spinner
   writeAnimatedModuleLine(
