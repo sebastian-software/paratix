@@ -72,6 +72,82 @@ async function restoreUnitFileSnapshot(
 }
 
 /**
+ * Write a systemd unit file with rollback on writeFile failure.
+ *
+ * @param parameters - Unit-file write context.
+ * @param parameters.content - The full unit file content to write.
+ * @param parameters.filePath - Absolute remote path of the unit file.
+ * @param parameters.name - Unit name used in failure messages.
+ * @param parameters.snapshot - Pre-write snapshot used to roll back on failure.
+ * @param parameters.ssh - The active SSH connection.
+ * @returns A failed `ModuleResult` when writeFile failed, otherwise `null`.
+ */
+async function writeSystemdUnitFile(parameters: {
+  content: string
+  filePath: string
+  name: string
+  snapshot: UnitFileSnapshot
+  ssh: SshConnection
+}): Promise<ModuleResult | null> {
+  const { content, filePath, name, snapshot, ssh } = parameters
+  // R-0000211: writeFile can throw (SFTP error after a partial write,
+  // permission denied, network drop). Without this guard the unit file
+  // would stay half-written while the original snapshot is discarded
+  // unrestored. Mirrors the quadlet pattern from R-0000182.
+  try {
+    await ssh.writeFile(filePath, content, { mode: SYSTEMD_UNIT_MODE })
+    return null
+  } catch (error) {
+    await restoreUnitFileSnapshot(ssh, filePath, snapshot)
+    const reason = error instanceof Error ? error.message : String(error)
+    return failed(`[systemd.unit: ${name}] failed to write unit file: ${reason}`)
+  }
+}
+
+/**
+ * Apply a systemd unit file write + daemon-reload pipeline with rollback on
+ * any intermediate failure (write, reload, flag persist).
+ *
+ * @param parameters - Unit deployment context.
+ * @param parameters.content - The full unit file content.
+ * @param parameters.filePath - Absolute remote path of the unit file.
+ * @param parameters.name - Unit name used in failure messages.
+ * @param parameters.reloadFlag - Flag descriptor used to mark reload completion.
+ * @param parameters.reloadFlag.flagName - Versioned flag file name written on success.
+ * @param parameters.reloadFlag.flagPrefix - Flag prefix used to evict older versions.
+ * @param parameters.ssh - The active SSH connection.
+ * @returns The module result for the apply operation.
+ */
+async function applySystemdUnit(parameters: {
+  content: string
+  filePath: string
+  name: string
+  reloadFlag: { flagName: string; flagPrefix: string }
+  ssh: SshConnection
+}): Promise<ModuleResult> {
+  const { content, filePath, name, reloadFlag, ssh } = parameters
+  const snapshot = await snapshotUnitFile(ssh, filePath)
+  const writeFailure = await writeSystemdUnitFile({ content, filePath, name, snapshot, ssh })
+  if (writeFailure) return writeFailure
+  const result = await ssh.exec(`${SYSTEMCTL} daemon-reload`, {
+    ignoreExitCode: true,
+    silent: true,
+  })
+  if (result.code !== 0) {
+    await restoreUnitFileSnapshot(ssh, filePath, snapshot)
+    return failedCommand(`[systemd.unit: ${name}] systemctl daemon-reload failed`, result)
+  }
+  // R-0000273: surface flag-persist failures (EROFS/EPERM/ENOSPC) through
+  // the failedCommand path; the helper no longer throws.
+  const flagFailure = await setVersionedFlag(ssh, reloadFlag.flagName, reloadFlag.flagPrefix)
+  if (flagFailure) {
+    await restoreUnitFileSnapshot(ssh, filePath, snapshot)
+    return flagFailure
+  }
+  return { status: "changed" }
+}
+
+/**
  * Modules for managing systemd unit files and unit masking.
  *
  * The `unit` method writes unit files with idempotent checks and triggers a daemon-reload
@@ -153,28 +229,7 @@ export const systemd = {
     return {
       async apply(ssh: null | SshConnection): Promise<ModuleResult> {
         if (!ssh) return failed(`[systemd.unit: ${name}] SSH connection is required`)
-        const snapshot = await snapshotUnitFile(ssh, filePath)
-        // R-0000211: writeFile can throw (SFTP error after a partial write,
-        // permission denied, network drop). Without this guard the unit file
-        // would stay half-written while the original snapshot is discarded
-        // unrestored. Mirrors the quadlet pattern from R-0000182.
-        try {
-          await ssh.writeFile(filePath, content, { mode: SYSTEMD_UNIT_MODE })
-        } catch (error) {
-          await restoreUnitFileSnapshot(ssh, filePath, snapshot)
-          const reason = error instanceof Error ? error.message : String(error)
-          return failed(`[systemd.unit: ${name}] failed to write unit file: ${reason}`)
-        }
-        const result = await ssh.exec(`${SYSTEMCTL} daemon-reload`, {
-          ignoreExitCode: true,
-          silent: true,
-        })
-        if (result.code !== 0) {
-          await restoreUnitFileSnapshot(ssh, filePath, snapshot)
-          return failedCommand(`[systemd.unit: ${name}] systemctl daemon-reload failed`, result)
-        }
-        await setVersionedFlag(ssh, reloadFlag.flagName, reloadFlag.flagPrefix)
-        return { status: "changed" }
+        return applySystemdUnit({ content, filePath, name, reloadFlag, ssh })
       },
       async check(ssh: null | SshConnection): Promise<"needs-apply" | "ok"> {
         if (!ssh) return NEEDS_APPLY

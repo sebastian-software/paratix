@@ -633,3 +633,91 @@ describe("withMutexLock", () => {
     ).rejects.toThrow(/lockName must match/v)
   })
 })
+
+// R-0000273: setFlag, setVersionedFlag and ensureFlagsDirectory must surface
+// EROFS/EPERM/ENOSPC failures as a typed `ModuleResult` instead of throwing.
+// Apply paths invoke these helpers AFTER convergence already happened, so a
+// roh throw would mask the successful state change behind an uncaught
+// exception.
+describe("setFlag – persist failures surface as ModuleResult", () => {
+  it("returns a failed ModuleResult when touch fails with ENOSPC", async () => {
+    const flagName = "persist-failure"
+    const ssh = createMockSsh({
+      [`touch /var/lib/paratix/flags/'${flagName}'`]: {
+        code: 1,
+        stderr:
+          "touch: cannot touch '/var/lib/paratix/flags/persist-failure': No space left on device\n",
+      },
+      "mkdir -p /var/lib/paratix/flags": { code: 0 },
+    })
+    const result = await setFlag(ssh, flagName)
+    expect(result).toMatchObject({
+      error: expect.objectContaining({
+        message: expect.stringContaining("failed to persist flag"),
+      }),
+      status: "failed",
+    })
+  })
+
+  it("returns a failed ModuleResult when mkdir -p fails with EROFS", async () => {
+    const flagName = "persist-failure-rofs"
+    const ssh = createMockSsh({
+      "mkdir -p /var/lib/paratix/flags": {
+        code: 1,
+        stderr: "mkdir: cannot create directory '/var/lib/paratix/flags': Read-only file system\n",
+      },
+    })
+    const result = await setFlag(ssh, flagName)
+    expect(result).toMatchObject({
+      error: expect.objectContaining({
+        message: expect.stringContaining("failed to create /var/lib/paratix/flags"),
+      }),
+      status: "failed",
+    })
+  })
+
+  it("returns null when touch succeeds", async () => {
+    const flagName = "persist-success"
+    const ssh = createMockSsh({
+      [`touch /var/lib/paratix/flags/'${flagName}'`]: { code: 0 },
+      "mkdir -p /var/lib/paratix/flags": { code: 0 },
+    })
+    const result = await setFlag(ssh, flagName)
+    expect(result).toBeNull()
+  })
+})
+
+describe("setVersionedFlag – persist failures surface as ModuleResult", () => {
+  it("returns a failed ModuleResult when find/touch fails with EPERM", async () => {
+    const flagName = "versioned-flag-1.0"
+    const flagPrefix = "versioned-flag-"
+    const findCommand = `find /var/lib/paratix/flags -maxdepth 1 -name '${flagPrefix}*' ! -name '*.lock' -delete && touch /var/lib/paratix/flags/'${flagName}'`
+    const ssh = createMockSsh({
+      [findCommand]: {
+        code: 1,
+        stderr:
+          "touch: cannot touch '/var/lib/paratix/flags/versioned-flag-1.0': Permission denied\n",
+      },
+      "mkdir -p /var/lib/paratix/flags": { code: 0 },
+    })
+    const result = await setVersionedFlag(ssh, flagName, flagPrefix)
+    expect(result).toMatchObject({
+      error: expect.objectContaining({
+        message: expect.stringContaining("failed to persist versioned flag versioned-flag-1.0"),
+      }),
+      status: "failed",
+    })
+  })
+
+  it("returns null when find/touch succeeds", async () => {
+    const flagName = "versioned-flag-2.0"
+    const flagPrefix = "versioned-flag-"
+    const findCommand = `find /var/lib/paratix/flags -maxdepth 1 -name '${flagPrefix}*' ! -name '*.lock' -delete && touch /var/lib/paratix/flags/'${flagName}'`
+    const ssh = createMockSsh({
+      [findCommand]: { code: 0 },
+      "mkdir -p /var/lib/paratix/flags": { code: 0 },
+    })
+    const result = await setVersionedFlag(ssh, flagName, flagPrefix)
+    expect(result).toBeNull()
+  })
+})

@@ -38,6 +38,106 @@ async function allocateRemoteScriptPath(
 }
 
 /**
+ * Run a script.once apply payload: mktemp + upload + chmod + execute + flag.
+ * Extracted out of the closure inside `script.once` to keep statement counts
+ * inside lint limits while preserving the original failure semantics.
+ *
+ * @param parameters - The script execution parameters.
+ * @param parameters.flagName - Versioned flag file name written on success.
+ * @param parameters.flagPrefix - Flag prefix used to evict older versions.
+ * @param parameters.localPath - Local path of the script to upload.
+ * @param parameters.name - Logical script identifier (used in error messages).
+ * @param parameters.scriptArguments - Optional CLI arguments passed to the script.
+ * @param parameters.ssh - The active SSH connection.
+ * @returns The module result for the apply operation.
+ */
+async function runScriptOnce(parameters: {
+  flagName: string
+  flagPrefix: string
+  localPath: string
+  name: string
+  scriptArguments: string[] | undefined
+  ssh: SshConnection
+}): Promise<ModuleResult> {
+  const { flagName, flagPrefix, localPath, name, scriptArguments, ssh } = parameters
+  // R-0000050: create a per-run remote path via `mktemp` so two
+  // concurrent applies of the same script (e.g. parallel runs
+  // against the same host fleet) cannot race on the same
+  // `/tmp/paratix-script-<name>` file.
+  const allocation = await allocateRemoteScriptPath(ssh, name)
+  if (typeof allocation !== "string") return allocation
+  const remotePath = allocation
+
+  await ssh.uploadFile(localPath, remotePath)
+
+  try {
+    return await runScriptOnceBody({
+      flagName,
+      flagPrefix,
+      name,
+      remotePath,
+      scriptArguments,
+      ssh,
+    })
+  } finally {
+    // The finally block now removes the per-run path created via
+    // mktemp above, never the deterministic legacy path.
+    await ssh.exec(`rm -f ${shellQuote(remotePath)}`, { silent: true })
+  }
+}
+
+/**
+ * Inner body of {@link runScriptOnce} after path allocation and upload.
+ *
+ * @param parameters - The chmod/execute/flag parameters.
+ * @param parameters.flagName - Versioned flag file name written on success.
+ * @param parameters.flagPrefix - Flag prefix used to evict older versions.
+ * @param parameters.name - Logical script identifier (used in error messages).
+ * @param parameters.remotePath - The mktemp-allocated remote path of the uploaded script.
+ * @param parameters.scriptArguments - Optional CLI arguments passed to the script.
+ * @param parameters.ssh - The active SSH connection.
+ * @returns The module result for the apply operation.
+ */
+async function runScriptOnceBody(parameters: {
+  flagName: string
+  flagPrefix: string
+  name: string
+  remotePath: string
+  scriptArguments: string[] | undefined
+  ssh: SshConnection
+}): Promise<ModuleResult> {
+  const { flagName, flagPrefix, name, remotePath, scriptArguments, ssh } = parameters
+  // R-0000248: surface chmod failures as a structured `failedCommand`
+  // ModuleResult instead of letting `conn.exec` throw. Without
+  // `ignoreExitCode: true` a non-zero exit (e.g. chmod refused on a
+  // noexec mount or stripped of write rights) would leak as an
+  // unstructured SSH error.
+  const chmodResult = await ssh.exec(`chmod +x ${shellQuote(remotePath)}`, EXEC_OPTS)
+  if (chmodResult.code !== 0) {
+    return failedCommand(`[script.once: ${name}] chmod failed`, chmodResult)
+  }
+
+  const cmd =
+    scriptArguments != null && scriptArguments.length > 0
+      ? `${shellQuote(remotePath)} ${scriptArguments.map((a) => shellQuote(a)).join(" ")}`
+      : shellQuote(remotePath)
+  const result = await ssh.exec(cmd, EXEC_OPTS)
+
+  if (result.code !== 0) {
+    return failedCommand(`[script.once: ${name}] script execution failed`, result)
+  }
+
+  // R-0000273: setVersionedFlag now returns a typed `ModuleResult |
+  // null` instead of throwing on EROFS/EPERM/ENOSPC. Surface the
+  // failure through the standard failedCommand path so converged work
+  // remains observable.
+  const flagFailure = await setVersionedFlag(ssh, flagName, flagPrefix)
+  if (flagFailure) return flagFailure
+
+  return { status: "changed" }
+}
+
+/**
  * Modules for executing scripts on the remote host.
  */
 export const script = {
@@ -69,45 +169,14 @@ export const script = {
 
         return applyWithFlagLock(ssh, {
           async apply() {
-            // R-0000050: create a per-run remote path via `mktemp` so two
-            // concurrent applies of the same script (e.g. parallel runs
-            // against the same host fleet) cannot race on the same
-            // `/tmp/paratix-script-<name>` file.
-            const allocation = await allocateRemoteScriptPath(ssh, name)
-            if (typeof allocation !== "string") return allocation
-            const remotePath = allocation
-
-            await ssh.uploadFile(localPath, remotePath)
-
-            try {
-              // R-0000248: surface chmod failures as a structured
-              // `failedCommand` ModuleResult instead of letting `conn.exec`
-              // throw. Without `ignoreExitCode: true` a non-zero exit (e.g.
-              // chmod refused on a noexec mount or stripped of write rights)
-              // would leak as an unstructured SSH error.
-              const chmodResult = await ssh.exec(`chmod +x ${shellQuote(remotePath)}`, EXEC_OPTS)
-              if (chmodResult.code !== 0) {
-                return failedCommand(`[script.once: ${name}] chmod failed`, chmodResult)
-              }
-
-              const cmd =
-                scriptArguments != null && scriptArguments.length > 0
-                  ? `${shellQuote(remotePath)} ${scriptArguments.map((a) => shellQuote(a)).join(" ")}`
-                  : shellQuote(remotePath)
-              const result = await ssh.exec(cmd, EXEC_OPTS)
-
-              if (result.code !== 0) {
-                return failedCommand(`[script.once: ${name}] script execution failed`, result)
-              }
-
-              await setVersionedFlag(ssh, flagName, flagPrefix)
-
-              return { status: "changed" }
-            } finally {
-              // The finally block now removes the per-run path created via
-              // mktemp above, never the deterministic legacy path.
-              await ssh.exec(`rm -f ${shellQuote(remotePath)}`, { silent: true })
-            }
+            return runScriptOnce({
+              flagName,
+              flagPrefix,
+              localPath,
+              name,
+              scriptArguments,
+              ssh,
+            })
           },
           flagName,
         })

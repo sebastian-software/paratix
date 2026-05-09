@@ -311,7 +311,10 @@ export const quadlet = {
         if (!ssh) return failed(`[quadlet.container: ${options.name}] SSH connection is required`)
         const result = await applyQuadletFile({ content, filePath, name: options.name, ssh })
         if (result.status !== "changed") return result
-        await setVersionedFlag(ssh, reloadFlag.flagName, reloadFlag.flagPrefix)
+        // R-0000273: surface flag-persist failures (EROFS/EPERM/ENOSPC)
+        // through the failedCommand path; the helper no longer throws.
+        const flagFailure = await setVersionedFlag(ssh, reloadFlag.flagName, reloadFlag.flagPrefix)
+        if (flagFailure) return flagFailure
         return result
       },
       async check(ssh: null | SshConnection): Promise<"needs-apply" | "ok"> {

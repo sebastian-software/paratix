@@ -33,8 +33,25 @@ function validateFlagName(value: string, label: string): void {
   }
 }
 
-export async function ensureFlagsDirectory(ssh: SshConnection): Promise<void> {
-  await ssh.exec(`mkdir -p ${FLAGS_DIRECTORY}`, { silent: true })
+/**
+ * Ensure the paratix flags directory exists on the remote host.
+ *
+ * R-0000273: `mkdir -p` runs after a converged apply step, so failures
+ * (EROFS, EPERM, ENOSPC, ...) must not throw and undo a successful change.
+ * The helper captures the exit code via `ignoreExitCode` and returns a
+ * failed {@link ModuleResult} when the command did not succeed; on success
+ * it returns `null` so callers can keep their happy path concise.
+ *
+ * @param ssh - The active SSH connection.
+ * @returns A failed `ModuleResult` when `mkdir -p` failed, otherwise `null`.
+ */
+export async function ensureFlagsDirectory(ssh: SshConnection): Promise<ModuleResult | null> {
+  const result = await ssh.exec(`mkdir -p ${FLAGS_DIRECTORY}`, {
+    ignoreExitCode: true,
+    silent: true,
+  })
+  if (result.code === 0) return null
+  return failedCommand(`[moduleHelpers] failed to create ${FLAGS_DIRECTORY}`, result)
 }
 
 export async function hasFlag(ssh: SshConnection, flagName: string): Promise<boolean> {
@@ -42,25 +59,60 @@ export async function hasFlag(ssh: SshConnection, flagName: string): Promise<boo
   return ssh.test(`[ -f ${FLAGS_DIRECTORY}/${shellQuote(flagName)} ]`)
 }
 
+/**
+ * Persist a versioned flag, deleting any older flag files that share the
+ * given prefix.
+ *
+ * R-0000273: Apply-paths call this helper *after* the underlying convergence
+ * already happened. A roh-throw on EROFS/EPERM/ENOSPC would mask the
+ * successful state change behind an uncaught exception, so this helper now
+ * returns a typed failure instead. Callers must propagate the returned
+ * failure (or `null` on success) through their normal failure path.
+ *
+ * @param ssh - The active SSH connection.
+ * @param flagName - The new flag file name (validated).
+ * @param flagPrefix - Prefix shared by older flag files that should be deleted.
+ * @returns A failed `ModuleResult` when the flag could not be persisted, otherwise `null`.
+ */
 export async function setVersionedFlag(
   ssh: SshConnection,
   flagName: string,
   flagPrefix: string
-): Promise<void> {
+): Promise<ModuleResult | null> {
   validateFlagName(flagName, "flagName")
   validateFlagName(flagPrefix, "flagPrefix")
-  await ensureFlagsDirectory(ssh)
+  const ensureFailure = await ensureFlagsDirectory(ssh)
+  if (ensureFailure) return ensureFailure
   const glob = shellQuote(`${flagPrefix}*`)
-  await ssh.exec(
+  const result = await ssh.exec(
     `find ${FLAGS_DIRECTORY} -maxdepth 1 -name ${glob} ! -name '*.lock' -delete && touch ${FLAGS_DIRECTORY}/${shellQuote(flagName)}`,
-    { silent: true }
+    { ignoreExitCode: true, silent: true }
   )
+  if (result.code === 0) return null
+  return failedCommand(`[moduleHelpers] failed to persist versioned flag ${flagName}`, result)
 }
 
-export async function setFlag(ssh: SshConnection, flagName: string): Promise<void> {
+/**
+ * Persist a flag file marker for idempotent re-runs.
+ *
+ * R-0000273: see {@link setVersionedFlag} — convergence already happened, so
+ * a `touch` failure must surface as a typed `ModuleResult` rather than a roh
+ * throw. Callers handle the returned failure on the standard failure path.
+ *
+ * @param ssh - The active SSH connection.
+ * @param flagName - The flag file name to create.
+ * @returns A failed `ModuleResult` when `touch` failed, otherwise `null`.
+ */
+export async function setFlag(ssh: SshConnection, flagName: string): Promise<ModuleResult | null> {
   validateFlagName(flagName, "flagName")
-  await ensureFlagsDirectory(ssh)
-  await ssh.exec(`touch ${FLAGS_DIRECTORY}/${shellQuote(flagName)}`, { silent: true })
+  const ensureFailure = await ensureFlagsDirectory(ssh)
+  if (ensureFailure) return ensureFailure
+  const result = await ssh.exec(`touch ${FLAGS_DIRECTORY}/${shellQuote(flagName)}`, {
+    ignoreExitCode: true,
+    silent: true,
+  })
+  if (result.code === 0) return null
+  return failedCommand(`[moduleHelpers] failed to persist flag ${flagName}`, result)
 }
 
 function flagPath(flagName: string): string {
@@ -84,7 +136,12 @@ async function writeFlagLockHolderMarker(ssh: SshConnection, lockName: string): 
 
 async function acquireFlagLock(ssh: SshConnection, lockName: string): Promise<boolean> {
   validateFlagName(lockName, "lockName")
-  await ensureFlagsDirectory(ssh)
+  // R-0000273: ensureFlagsDirectory now returns a typed failure instead of
+  // throwing. The lock acquire path treats a directory-create failure as a
+  // missed acquisition (`return false`); callers fall through to the wait /
+  // reclaim machinery and surface a `failedCommand` from there.
+  const ensureFailure = await ensureFlagsDirectory(ssh)
+  if (ensureFailure) return false
   const result = await ssh.exec(`mkdir ${flagPath(lockName)}`, {
     ignoreExitCode: true,
     silent: true,

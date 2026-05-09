@@ -931,7 +931,12 @@ export const download = {
 
             if (result.status === "failed") return result
 
-            await setFlag(conn, flagName)
+            // R-0000273: setFlag now returns a typed `ModuleResult | null`
+            // instead of throwing on EROFS/EPERM/ENOSPC. Surface the failed
+            // result on the standard failure path so the runner can render
+            // stdout/stderr instead of an uncaught exception.
+            const flagFailure = await setFlag(conn, flagName)
+            if (flagFailure) return flagFailure
             // R-0000156: respect the original result.status (e.g. "ok" when
             // performDownload skipped the download because content + metadata
             // already matched). Always forcing "changed" would falsely

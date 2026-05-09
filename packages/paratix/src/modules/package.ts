@@ -319,7 +319,10 @@ export const pkg = {
           return failedCommand(`[package.update: ${date}] package index refresh failed`, result)
         }
 
-        await setVersionedFlag(ssh, flagName, "package-update-")
+        // R-0000273: surface flag-persist failures (EROFS/EPERM/ENOSPC)
+        // through the failedCommand path; the helper no longer throws.
+        const flagFailure = await setVersionedFlag(ssh, flagName, "package-update-")
+        if (flagFailure) return flagFailure
 
         return { status: "changed" }
       },
@@ -372,7 +375,10 @@ export const pkg = {
           }
         }
 
-        await setVersionedFlag(ssh, flagName, "package-upgrade-")
+        // R-0000273: surface flag-persist failures (EROFS/EPERM/ENOSPC)
+        // through the failedCommand path; the helper no longer throws.
+        const flagFailure = await setVersionedFlag(ssh, flagName, "package-upgrade-")
+        if (flagFailure) return flagFailure
 
         return { status: "changed" }
       },

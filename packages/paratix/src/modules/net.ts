@@ -803,7 +803,11 @@ async function applyPresentRouteState(
   const reloadFailure = await reloadNetworkctlForRoute(conn, parameters.destination)
   if (reloadFailure != null) return reloadFailure
   const reloadFlag = buildRouteReloadFlag(parameters)
-  await setVersionedFlag(conn, reloadFlag.flagName, reloadFlag.flagPrefix)
+  // R-0000273: surface flag-persist failures (EROFS/EPERM/ENOSPC) through
+  // the failedCommand path rather than letting the helper throw after a
+  // successful networkctl reload.
+  const flagFailure = await setVersionedFlag(conn, reloadFlag.flagName, reloadFlag.flagPrefix)
+  if (flagFailure) return flagFailure
   return { status: "changed" }
 }
 

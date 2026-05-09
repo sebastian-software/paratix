@@ -529,7 +529,10 @@ export const apt = {
         // to the package, so changing the desired selections evicts the
         // stale flag and `check` will correctly report `needs-apply`.
         const { flagName, flagPrefix } = buildDebconfFlagInfo(packageName, selectionsText)
-        await setVersionedFlag(ssh, flagName, flagPrefix)
+        // R-0000273: surface persist-flag failures (EROFS/EPERM/ENOSPC) on
+        // the standard failure path; the helper no longer throws.
+        const flagFailure = await setVersionedFlag(ssh, flagName, flagPrefix)
+        if (flagFailure) return flagFailure
 
         return { status: "changed" }
       },
@@ -600,7 +603,11 @@ export const apt = {
             if (upgrade.code !== 0)
               return failedCommand("[apt.distUpgrade] apt-get dist-upgrade failed", upgrade)
 
-            await setVersionedFlag(ssh, flagName, "apt-dist-upgrade-")
+            // R-0000273: setVersionedFlag now returns a typed
+            // `ModuleResult | null`; surface persist failures rather than
+            // throwing after a successful dist-upgrade.
+            const flagFailure = await setVersionedFlag(ssh, flagName, "apt-dist-upgrade-")
+            if (flagFailure) return flagFailure
 
             return { status: "changed" }
           },
@@ -750,7 +757,11 @@ export const apt = {
             updateResult: result,
           })
         }
-        await setVersionedFlag(ssh, updateFlag.flagName, updateFlag.flagPrefix)
+        // R-0000273: surface flag-persist failures (EROFS/EPERM/ENOSPC)
+        // through the failedCommand path rather than letting the helper
+        // throw after a successful apt-get update.
+        const flagFailure = await setVersionedFlag(ssh, updateFlag.flagName, updateFlag.flagPrefix)
+        if (flagFailure) return flagFailure
         return { status: "changed" }
       },
       async check(ssh: null | SshConnection): Promise<"needs-apply" | "ok"> {
