@@ -74,6 +74,7 @@ vi.mock("../src/knownHosts.js", async () => {
 })
 
 vi.mock("../src/sftp.js", () => ({
+  SFTP_TIMEOUT: 120_000,
   sftpDownload: vi.fn().mockResolvedValue(null),
   sftpUpload: vi.fn(),
   sftpUploadContent: vi.fn(),
@@ -2436,7 +2437,13 @@ describe("SshConnectionImpl", () => {
       expect(executedCommands[3]).toContain('chown "$target_owner" "$target_temp"')
       expect(executedCommands[3]).toContain(`'${remotePath}'`)
       expect(executedCommands[4]).toBe(`rm -f '${tempPath}'`)
-      expect(vi.mocked(sftpUpload)).toHaveBeenCalledWith(client, "/local/file.txt", tempPath)
+      expect(vi.mocked(sftpUpload)).toHaveBeenCalledWith(
+        client,
+        "/local/file.txt",
+        tempPath,
+        expect.any(Number),
+        expect.any(AbortSignal)
+      )
     })
 
     it("applies restrictive mode 0600 to the temp file before mv when no mode option is provided", async () => {
@@ -3236,7 +3243,9 @@ describe("SshConnectionImpl", () => {
       expect(vi.mocked(sftpDownload)).toHaveBeenCalledWith(
         client,
         "/var/log/syslog",
-        "/tmp/local-syslog"
+        "/tmp/local-syslog",
+        expect.any(Number),
+        expect.any(AbortSignal)
       )
       // No exec calls for cp/chmod/rm
       expect(execSpy).not.toHaveBeenCalled()
@@ -3308,7 +3317,9 @@ describe("SshConnectionImpl", () => {
       expect(vi.mocked(sftpDownload)).toHaveBeenCalledWith(
         client,
         mktempOutput,
-        "/tmp/local-secure"
+        "/tmp/local-secure",
+        expect.any(Number),
+        expect.any(AbortSignal)
       )
       expect(executedCommands[2]).toBe(`rm -f '${mktempOutput}'`)
     })

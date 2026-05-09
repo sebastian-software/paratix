@@ -20,6 +20,7 @@ vi.mock("node:fs/promises", () => ({
 }))
 
 vi.mock("../src/sftp.js", () => ({
+  SFTP_TIMEOUT: 120_000,
   sftpUpload: vi.fn(),
   sftpUploadContent: vi.fn(),
 }))

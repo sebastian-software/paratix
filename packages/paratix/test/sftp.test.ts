@@ -1183,3 +1183,97 @@ describe("sftpUploadContent", () => {
     expect(sftpEnd).toHaveBeenCalledOnce()
   })
 })
+
+// ---------------------------------------------------------------------------
+// connection-level abort signal (R-0000255)
+// ---------------------------------------------------------------------------
+
+describe("SFTP connection abort signal", () => {
+  afterEach(() => {
+    vi.useRealTimers()
+    vi.resetAllMocks()
+  })
+
+  beforeEach(() => {
+    vi.mocked(rename).mockResolvedValue(undefined)
+  })
+
+  it("rejects an in-flight sftpUpload immediately when the connection abort signal fires (R-0000255)", async () => {
+    const { sftp } = makeSftpSession()
+    const client = makeClientMock(sftp)
+
+    const localReadStream = new MockReadableStream()
+    vi.mocked(createReadStream).mockReturnValue(localReadStream as unknown as ReadStream)
+
+    const abortController = new AbortController()
+    const start = Date.now()
+    const promise = sftpUpload(
+      client,
+      "/local/file.txt",
+      "/remote/file.txt",
+      120_000,
+      abortController.signal
+    )
+
+    // Allow the wireStreams listener registration to settle, then abort.
+    await Promise.resolve()
+    abortController.abort()
+
+    await expect(promise).rejects.toThrow(/SFTP transfer aborted: ssh disconnect/v)
+    // The default 120 s timer must NOT have run.
+    expect(Date.now() - start).toBeLessThan(2000)
+  })
+
+  it("rejects sftpDownload immediately when the connection abort signal fires", async () => {
+    const { sftp } = makeSftpSession()
+    const client = makeClientMock(sftp)
+
+    const localWriteStream = new CollectingWritableStream()
+    vi.mocked(createWriteStream).mockReturnValue(localWriteStream as unknown as WriteStream)
+
+    const abortController = new AbortController()
+    const promise = sftpDownload(
+      client,
+      "/remote/file.txt",
+      "/local/file.txt",
+      120_000,
+      abortController.signal
+    )
+
+    await Promise.resolve()
+    abortController.abort()
+
+    await expect(promise).rejects.toThrow(/SFTP transfer aborted: ssh disconnect/v)
+  })
+
+  it("rejects sftpUploadContent immediately when the connection abort signal fires", async () => {
+    const { sftp } = makeSftpSession()
+    const client = makeClientMock(sftp)
+
+    const abortController = new AbortController()
+    const promise = sftpUploadContent(
+      client,
+      "hello",
+      "/remote/file.txt",
+      120_000,
+      abortController.signal
+    )
+
+    await Promise.resolve()
+    abortController.abort()
+
+    await expect(promise).rejects.toThrow(/SFTP transfer aborted: ssh disconnect/v)
+  })
+
+  it("rejects sftpUpload immediately when the connection abort signal already fired before the call", async () => {
+    const { sftp } = makeSftpSession()
+    const client = makeClientMock(sftp)
+
+    const abortController = new AbortController()
+    abortController.abort()
+
+    await expect(
+      sftpUpload(client, "/local/file.txt", "/remote/file.txt", 120_000, abortController.signal)
+    ).rejects.toThrow(/SFTP session aborted: ssh disconnect/v)
+  })
+})

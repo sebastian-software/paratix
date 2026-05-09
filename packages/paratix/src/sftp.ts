@@ -25,33 +25,80 @@ function normalizeTransferError(error: unknown, message: string): Error {
   return error instanceof Error ? error : new Error(`${message}: ${String(error)}`)
 }
 
+function noopAbortCleanup(): void {
+  // No subscription installed.
+}
+
+/**
+ * R-0000255: short-circuit the openSftp wait when the SSH connection is torn
+ * down externally (e.g. the SIGINT path in runner.ts). Without this, the
+ * session-open promise would idle until the default timeout fires even
+ * though the underlying transport is already gone. Returns a cleanup
+ * function the caller invokes once the open path settles, plus an `aborted`
+ * flag indicating that the abort already fired and the caller must return.
+ *
+ * @param connectionAbortSignal - Optional connection-level abort signal.
+ * @param onAbort - Called synchronously when the abort fires before settle.
+ * @returns Cleanup helper and aborted flag.
+ */
+function subscribeToConnectionAbort(
+  connectionAbortSignal: AbortSignal | undefined,
+  onAbort: () => void
+): { aborted: boolean; cleanup: () => void } {
+  if (connectionAbortSignal == null) {
+    return { aborted: false, cleanup: noopAbortCleanup }
+  }
+  if (connectionAbortSignal.aborted) {
+    onAbort()
+    return { aborted: true, cleanup: noopAbortCleanup }
+  }
+  const handleAbort = (): void => {
+    onAbort()
+  }
+  connectionAbortSignal.addEventListener("abort", handleAbort, { once: true })
+  const cleanup = (): void => {
+    connectionAbortSignal.removeEventListener("abort", handleAbort)
+  }
+  return { aborted: false, cleanup }
+}
+
 function openSftp(options: {
   client: Client
+  connectionAbortSignal?: AbortSignal
   onOpen: (sftp: SFTPWrapper) => void
   reject: (reason: Error) => void
   timeout: number
   timeoutMessage: string
 }): void {
-  const { client, onOpen, reject, timeout, timeoutMessage } = options
+  const { client, connectionAbortSignal, onOpen, reject, timeout, timeoutMessage } = options
   let settled = false
-
+  // Holder so the timer / sftp callback can call into a still-mutable cleanup
+  // reference once `subscribeToConnectionAbort` returns the real one below.
+  const abortHandle: { cleanup: () => void } = { cleanup: noopAbortCleanup }
   const timer = setTimeout(() => {
     if (settled) return
     settled = true
+    abortHandle.cleanup()
     client.end()
     reject(new Error(timeoutMessage))
   }, timeout)
-
+  const subscription = subscribeToConnectionAbort(connectionAbortSignal, () => {
+    if (settled) return
+    settled = true
+    clearTimeout(timer)
+    reject(new Error("SFTP session aborted: ssh disconnect"))
+  })
+  abortHandle.cleanup = subscription.cleanup
+  if (subscription.aborted) return
   try {
-    const handleSftpOpen = (error: Error | undefined, sftp: SFTPWrapper | undefined): void => {
+    client.sftp((error: Error | undefined, sftp: SFTPWrapper | undefined) => {
       if (settled) {
         sftp?.end()
         return
       }
-
       clearTimeout(timer)
+      abortHandle.cleanup()
       settled = true
-
       if (error) {
         reject(error)
         return
@@ -60,13 +107,11 @@ function openSftp(options: {
         reject(new Error("Failed to open SFTP session: missing SFTP session"))
         return
       }
-
       onOpen(sftp)
-    }
-
-    client.sftp(handleSftpOpen)
+    })
   } catch (openError) {
     clearTimeout(timer)
+    abortHandle.cleanup()
     settled = true
     reject(normalizeTransferError(openError, "Failed to open SFTP session"))
   }
@@ -159,6 +204,7 @@ function openContentUploadStreams(
  *
  * @param options - Stream piping options including timeout configuration.
  * @param options.completionEvents - Stream events that mark a successful transfer.
+ * @param options.connectionAbortSignal - Optional connection-level abort signal that destroys the streams when fired (R-0000255).
  * @param options.prematureCloseMessage - Error message for a close before a successful transfer.
  * @param options.readStream - The source stream to read from.
  * @param options.reject - Promise reject callback.
@@ -170,6 +216,7 @@ function openContentUploadStreams(
  */
 function wireStreams(options: {
   completionEvents?: Array<"close" | "finish">
+  connectionAbortSignal?: AbortSignal
   prematureCloseMessage?: string
   readStream: Readable
   reject: (reason: Error) => void
@@ -181,6 +228,7 @@ function wireStreams(options: {
 }): void {
   const {
     completionEvents = ["finish"],
+    connectionAbortSignal,
     prematureCloseMessage,
     readStream,
     reject,
@@ -199,11 +247,36 @@ function wireStreams(options: {
   const settlement = createTransferSettlement({
     clearTimer() {
       clearTimeout(timer)
+      if (connectionAbortSignal != null) {
+        connectionAbortSignal.removeEventListener("abort", handleConnectionAbort)
+      }
     },
     reject,
     resolve,
     sftp,
   })
+
+  // R-0000255: when the underlying SSH transport is torn down (e.g. the
+  // SIGINT handler in runner.ts) any in-flight SFTP transfer would otherwise
+  // sit idle until the default 120 s timeout fires, because client.sftp()
+  // does NOT emit a stream error on its own when the parent connection
+  // closes. Couple the transfer to a connection-level abort signal so an
+  // external disconnect destroys the streams immediately.
+  const handleConnectionAbort = (): void => {
+    readStream.destroy()
+    if (typeof writeStream.destroy === "function") writeStream.destroy()
+    settlement.rejectOnce(new Error("SFTP transfer aborted: ssh disconnect"))
+  }
+  if (connectionAbortSignal != null) {
+    if (connectionAbortSignal.aborted) {
+      // Schedule via microtask so the settlement is wired up before the
+      // synchronous abort handler fires; otherwise `settlement.rejectOnce`
+      // would run before the readStream/writeStream listeners are attached.
+      queueMicrotask(handleConnectionAbort)
+    } else {
+      connectionAbortSignal.addEventListener("abort", handleConnectionAbort, { once: true })
+    }
+  }
 
   for (const completionEvent of completionEvents) {
     writeStream.on(completionEvent, () => {
@@ -237,13 +310,18 @@ function wireStreams(options: {
  * @param remotePath - Source path on the remote host.
  * @param localPath - Destination path on the local filesystem.
  * @param timeout - Maximum time in ms before the transfer is aborted.
+ * @param connectionAbortSignal - Optional abort signal that fires when the
+ *   underlying SSH transport is torn down. Triggers immediate stream
+ *   destruction (R-0000255) so a SIGINT-driven `ssh.disconnect()` does not
+ *   leave the transfer waiting for the default 120 s timeout.
  */
-// eslint-disable-next-line max-params -- timeout parameter extends the existing signature; cleanup/finalize logic is intentionally kept together
+// eslint-disable-next-line max-params -- timeout / abort parameters extend the existing signature; cleanup/finalize logic is intentionally kept together
 export async function sftpDownload(
   client: Client,
   remotePath: string,
   localPath: string,
-  timeout = SFTP_TIMEOUT
+  timeout = SFTP_TIMEOUT,
+  connectionAbortSignal?: AbortSignal
 ): Promise<void> {
   return new Promise((resolve, reject) => {
     const temporaryPath = join(dirname(localPath), `.paratix-download-${randomUUID()}.tmp`)
@@ -263,6 +341,7 @@ export async function sftpDownload(
 
     openSftp({
       client,
+      connectionAbortSignal,
       onOpen(sftp) {
         let streams: TransferStreams
         try {
@@ -276,6 +355,7 @@ export async function sftpDownload(
 
         wireStreams({
           completionEvents: ["finish"],
+          connectionAbortSignal,
           readStream: streams.readStream,
           reject: rejectWithCleanup,
           resolve() {
@@ -318,17 +398,21 @@ export async function sftpDownload(
  * @param localPath - Source path on the local filesystem.
  * @param remotePath - Destination path on the remote host.
  * @param timeout - Maximum time in ms before the transfer is aborted.
+ * @param connectionAbortSignal - Optional abort signal that fires when the
+ *   underlying SSH transport is torn down (R-0000255).
  */
-// eslint-disable-next-line max-params -- timeout parameter extends the existing signature
+// eslint-disable-next-line max-params -- timeout / abort parameters extend the existing signature
 export async function sftpUpload(
   client: Client,
   localPath: string,
   remotePath: string,
-  timeout = SFTP_TIMEOUT
+  timeout = SFTP_TIMEOUT,
+  connectionAbortSignal?: AbortSignal
 ): Promise<void> {
   return new Promise((resolve, reject) => {
     openSftp({
       client,
+      connectionAbortSignal,
       onOpen(sftp) {
         let streams: TransferStreams
         try {
@@ -341,6 +425,7 @@ export async function sftpUpload(
 
         wireStreams({
           completionEvents: ["finish"],
+          connectionAbortSignal,
           prematureCloseMessage: `SFTP upload closed before finish: ${remotePath}`,
           readStream: streams.readStream,
           reject,
@@ -365,17 +450,21 @@ export async function sftpUpload(
  * @param content - UTF-8 string content to transfer.
  * @param remotePath - Destination path on the remote host.
  * @param timeout - Maximum time in ms before the transfer is aborted.
+ * @param connectionAbortSignal - Optional abort signal that fires when the
+ *   underlying SSH transport is torn down (R-0000255).
  */
-// eslint-disable-next-line max-params -- timeout parameter mirrors sftpUpload
+// eslint-disable-next-line max-params -- timeout / abort parameters mirror sftpUpload
 export async function sftpUploadContent(
   client: Client,
   content: string,
   remotePath: string,
-  timeout = SFTP_TIMEOUT
+  timeout = SFTP_TIMEOUT,
+  connectionAbortSignal?: AbortSignal
 ): Promise<void> {
   return new Promise((resolve, reject) => {
     openSftp({
       client,
+      connectionAbortSignal,
       onOpen(sftp) {
         let streams: TransferStreams
         try {
@@ -388,6 +477,7 @@ export async function sftpUploadContent(
 
         wireStreams({
           completionEvents: ["finish"],
+          connectionAbortSignal,
           prematureCloseMessage: `SFTP content upload closed before finish: ${remotePath}`,
           readStream: streams.readStream,
           reject,

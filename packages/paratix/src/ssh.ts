@@ -16,7 +16,7 @@ import {
   type HostVerifierResult,
 } from "./knownHosts.js"
 import { getRegisteredSecrets, withRegisteredSecrets } from "./secretSink.js"
-import { sftpDownload, sftpUpload, sftpUploadContent } from "./sftp.js"
+import { SFTP_TIMEOUT, sftpDownload, sftpUpload, sftpUploadContent } from "./sftp.js"
 import {
   cleanupFailedSshClient,
   collectStreamOutput,
@@ -211,6 +211,15 @@ export class SshConnectionImpl implements SshConnection {
   private readonly config: SshConfig
   private connectedPort = 0
   /**
+   * AbortController whose signal is fed to every SFTP transfer started over
+   * the current transport. R-0000255: when `disconnectTransport()` runs (e.g.
+   * the SIGINT path in runner.ts), this controller is aborted so any
+   * in-flight SFTP upload/download rejects in <1 s instead of waiting for the
+   * default 120 s SFTP timeout. A fresh controller is installed on the next
+   * `disconnectTransport()` call so future transfers can subscribe again.
+   */
+  private connectionAbortController: AbortController = new AbortController()
+  /**
    * Tracks whether the remote host's sudo timestamp has been primed so that
    * subsequent `sudo -n` calls can succeed without prompting. Set to `true`
    * once `cacheAndValidateSudoPassword` has authenticated via `sudo -S` and
@@ -323,7 +332,13 @@ export class SshConnectionImpl implements SshConnection {
           silent: true,
         })
       }
-      await sftpDownload(client, sourcePath, localPath)
+      await sftpDownload(
+        client,
+        sourcePath,
+        localPath,
+        SFTP_TIMEOUT,
+        this.connectionAbortController.signal
+      )
     } finally {
       if (sourcePath !== remotePath) {
         try {
@@ -462,7 +477,13 @@ export class SshConnectionImpl implements SshConnection {
     const temporaryPath = await this.createRemoteWritableTempPath(remotePath, "paratix-upload")
     const temporaryMode = options?.mode ?? "0600"
     try {
-      await sftpUpload(client, localPath, temporaryPath)
+      await sftpUpload(
+        client,
+        localPath,
+        temporaryPath,
+        SFTP_TIMEOUT,
+        this.connectionAbortController.signal
+      )
       await this.setRemoteTempMode(temporaryPath, temporaryMode)
       // R-0000150: verify the size on the staged temp file BEFORE the
       // privileged finalize (`mv -T`). After the move, an attacker with
@@ -509,7 +530,13 @@ export class SshConnectionImpl implements SshConnection {
     const temporaryMode = resolveWriteFileMode(remotePath, options)
     const expectedSize = Buffer.byteLength(content, "utf8")
     try {
-      await sftpUploadContent(client, content, remoteTemporary)
+      await sftpUploadContent(
+        client,
+        content,
+        remoteTemporary,
+        SFTP_TIMEOUT,
+        this.connectionAbortController.signal
+      )
       await this.setRemoteTempMode(remoteTemporary, temporaryMode)
       await this.finalizeRemoteTempFile(remoteTemporary, remotePath, temporaryMode)
       await this.ensureRemoteWriteFile({
@@ -977,27 +1004,50 @@ export class SshConnectionImpl implements SshConnection {
     this.passwordlessSudo = false
   }
 
+  /**
+   * R-0000255: fire the SFTP-coupled abort signal so any in-flight SFTP
+   * operations stop waiting on their dedicated channels immediately. The
+   * new AbortController replaces the old one unconditionally so subsequent
+   * connect()s expose a fresh, non-aborted signal that future SFTP operations
+   * can subscribe to.
+   */
+  private rotateConnectionAbortController(): void {
+    const previousConnectionAbort = this.connectionAbortController
+    this.connectionAbortController = new AbortController()
+    try {
+      previousConnectionAbort.abort(new Error("ssh disconnect"))
+    } catch {
+      // AbortController.abort never throws on modern runtimes; defense in
+      // depth only.
+    }
+  }
+
+  private tearDownClient(closing: Client): void {
+    this.detachClientLifecycleListeners(closing)
+    try {
+      closing.end()
+    } catch {
+      // end() may throw when the underlying socket has already been destroyed
+    }
+    const fallback = setTimeout(() => {
+      try {
+        closing.destroy()
+      } catch {
+        // destroy() must never propagate from a best-effort fallback
+      }
+    }, DISCONNECT_DESTROY_FALLBACK_MS)
+    // Do not keep the event loop alive solely for the destroy fallback —
+    // when the program is otherwise idle, it can exit and the GC will
+    // reclaim the socket.
+    fallback.unref()
+  }
+
   private disconnectTransport(): void {
+    this.rotateConnectionAbortController()
     if (this.client) {
       const closing = this.client
       this.client = null
-      this.detachClientLifecycleListeners(closing)
-      try {
-        closing.end()
-      } catch {
-        // end() may throw when the underlying socket has already been destroyed
-      }
-      const fallback = setTimeout(() => {
-        try {
-          closing.destroy()
-        } catch {
-          // destroy() must never propagate from a best-effort fallback
-        }
-      }, DISCONNECT_DESTROY_FALLBACK_MS)
-      // Do not keep the event loop alive solely for the destroy fallback —
-      // when the program is otherwise idle, it can exit and the GC will
-      // reclaim the socket.
-      fallback.unref()
+      this.tearDownClient(closing)
     }
     this.resetTransportDerivedState()
     const error = new Error("SSH connection closed")
