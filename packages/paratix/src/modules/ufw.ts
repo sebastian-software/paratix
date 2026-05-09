@@ -274,13 +274,23 @@ export const ufw = {
         if (!ssh)
           return failed(`[ufw.rule: ${action} ${portList.join(",")}] SSH connection is required`)
 
+        // R-0000281: route through `readUfwStatus` (the same guard that
+        // `ufw.disabled`/`ufw.enabled` use) so a missing or unreachable ufw
+        // binary surfaces as a structured failure instead of an unstructured
+        // SSH error from `ssh.output`. Adding rules requires ufw to be
+        // installed; treat `null` as a hard failure for apply.
         // R-0000174: read status once up front so we can drop a contradictory
         // predecessor rule before adding the desired one. ufw evaluates rules
         // in order, so a stale `allow` left in place when switching to `deny`
         // (or vice versa) can shadow the new rule. Probing the status first
         // lets us avoid issuing `ufw delete` for ports with no contradictory
         // entry, which keeps the apply quiet on steady state.
-        const status = await ssh.output(`${UFW} status`)
+        const status = await readUfwStatus(ssh)
+        if (status == null) {
+          return failed(
+            `[ufw.rule: ${action} ${portList.join(",")}] ufw is not installed; install ufw before adding rules`
+          )
+        }
         const ipv6Rules = statusIncludesIpv6Rules(status)
 
         let anyChanged = false
@@ -305,7 +315,13 @@ export const ufw = {
       async check(ssh: null | SshConnection): Promise<"needs-apply" | "ok"> {
         if (!ssh) return NEEDS_APPLY
 
-        const status = await ssh.output(`${UFW} status`)
+        // R-0000281: tolerate hosts where `ufw status` exits non-zero or the
+        // binary is missing. `readUfwStatus` returns `null` in that case;
+        // treat that as drift so apply runs (apply will surface the missing
+        // binary as a structured failure instead of an unstructured SSH
+        // error).
+        const status = await readUfwStatus(ssh)
+        if (status == null) return NEEDS_APPLY
         const requireIpv6Rule = statusIncludesIpv6Rules(status)
         for (const port of portList) {
           const portResult = checkUfwRulePort({

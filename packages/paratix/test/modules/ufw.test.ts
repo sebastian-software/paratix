@@ -805,4 +805,27 @@ describe("ufw.rule", () => {
     expect(result.status).toBe("failed")
     expect(ssh.calls).toStrictEqual(["ufw status", "ufw delete 'allow' '22'"])
   })
+
+  // R-0000281: route the apply/check status read through `readUfwStatus` so a
+  // missing/broken ufw binary surfaces as a structured failure instead of an
+  // unstructured `ssh.output` rejection.
+  it("R-0000281: apply returns failed when ufw status throws (ufw missing)", async () => {
+    const ssh = createMockSsh({
+      "ufw status": { code: 127, stderr: "ufw: not found" },
+    })
+    const mod = ufw.rule("allow", 80)
+    const result = await mod.apply(ssh, emptyEnv)
+    expect(result.status).toBe("failed")
+    expect(result.error?.message).toContain("ufw is not installed")
+    expect(ssh.calls).toStrictEqual(["ufw status"])
+  })
+
+  it("R-0000281: check returns needs-apply when ufw status throws (ufw missing)", async () => {
+    const ssh = createMockSsh({
+      "ufw status": { code: 127, stderr: "ufw: not found" },
+    })
+    const mod = ufw.rule("allow", 80)
+    const result = await mod.check(ssh, emptyEnv)
+    expect(result).toBe("needs-apply")
+  })
 })
