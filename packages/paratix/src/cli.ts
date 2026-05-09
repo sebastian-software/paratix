@@ -167,11 +167,19 @@ function validateServerDefinition(value: unknown, file: string): asserts value i
 }
 
 /**
- * Inspect-fallback limits used by {@link errorToString} when JSON.stringify
- * throws (e.g. circular references, BigInt). The bounds keep error rendering
- * cheap and prevent leaking sensitive Buffer contents (private keys) or huge
+ * Inspect bounds used by {@link errorToString} when rendering plain
+ * (non-Error) caught values. The bounds keep error rendering cheap and
+ * prevent leaking sensitive Buffer contents (private keys) or huge
  * ssh2-internal arrays into stderr; subsequent maskRegisteredSecrets passes
  * also stay linear in the bounded output size.
+ *
+ * R-0000262: previously a JSON.stringify branch ran first and only fell back
+ * to `inspect` on a thrown error. JSON.stringify(Buffer) produces
+ * `{"type":"Buffer","data":[…]}` — the entire byte array. If a caught error
+ * carried a private-key Buffer in its context, those bytes would land in
+ * stderr unbounded. Routing every plain object through `inspect` with these
+ * bounds removes that path; `compact: true` keeps the rendering similar to
+ * the previous JSON output for small, well-behaved objects.
  */
 const ERROR_INSPECT_DEPTH = 2
 const ERROR_INSPECT_MAX_ARRAY_LENGTH = 32
@@ -180,8 +188,10 @@ const ERROR_INSPECT_MAX_STRING_LENGTH = 1024
 /**
  * Returns a human-readable string for any caught value.
  * Uses `.message` for `Error` instances and falls back to the string
- * representation for primitives.  For plain objects that have no meaningful
- * `toString`, the JSON representation is used instead of `[object Object]`.
+ * representation for primitives. For plain objects, `util.inspect` with
+ * bounded array/string lengths is used instead of `[object Object]` (and
+ * instead of `JSON.stringify`, which would unfold full Buffer byte arrays
+ * — see R-0000262).
  *
  * @param value - The value to convert to a string.
  * @returns A human-readable string representation of `value`.
@@ -189,18 +199,15 @@ const ERROR_INSPECT_MAX_STRING_LENGTH = 1024
 function errorToString(value: unknown): string {
   if (value instanceof Error) return maskRegisteredSecrets(value.message)
   if (typeof value === "object" && value !== null) {
-    try {
-      return maskRegisteredSecrets(JSON.stringify(value))
-    } catch {
-      return maskRegisteredSecrets(
-        inspect(value, {
-          breakLength: Infinity,
-          depth: ERROR_INSPECT_DEPTH,
-          maxArrayLength: ERROR_INSPECT_MAX_ARRAY_LENGTH,
-          maxStringLength: ERROR_INSPECT_MAX_STRING_LENGTH,
-        })
-      )
-    }
+    return maskRegisteredSecrets(
+      inspect(value, {
+        breakLength: Infinity,
+        compact: true,
+        depth: ERROR_INSPECT_DEPTH,
+        maxArrayLength: ERROR_INSPECT_MAX_ARRAY_LENGTH,
+        maxStringLength: ERROR_INSPECT_MAX_STRING_LENGTH,
+      })
+    )
   }
   return maskRegisteredSecrets(String(value))
 }

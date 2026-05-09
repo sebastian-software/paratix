@@ -1222,9 +1222,17 @@ describe("printExceptionError", () => {
     expect(errorSpy).toHaveBeenCalledWith("Error: 42")
   })
 
-  it("prints the JSON representation for a plain object to avoid [object Object]", () => {
+  it("prints the inspect representation for a plain object to avoid [object Object]", () => {
     printExceptionError({ code: 404 }, false)
-    expect(errorSpy).toHaveBeenCalledWith('Error: {"code":404}')
+    // R-0000262: rendering routes through util.inspect with bounded
+    // array/string lengths instead of JSON.stringify, so plain Buffer values
+    // never expand to their full byte arrays in stderr. Output is similar to
+    // the previous JSON form for small objects but uses inspect's `key: value`
+    // syntax (compact: true).
+    const output = errorSpy.mock.calls.map((args) => String(args[0])).join("\n")
+    expect(output).toContain("Error:")
+    expect(output).toContain("code")
+    expect(output).toContain("404")
   })
 
   it("does not crash on circular non-Error objects and falls back to a safe representation", () => {
@@ -1252,11 +1260,13 @@ describe("printExceptionError", () => {
     expect(output).toContain("1n")
   })
 
-  it("bounds the inspect fallback so huge arrays and strings are truncated", () => {
+  it("bounds the inspect output so huge arrays and strings are truncated", () => {
     const hugeArray = Array.from({ length: 5000 }, (_, index) => index)
     const hugeString = "A".repeat(50_000)
-    // Force the JSON path to throw (BigInt) so the inspect fallback runs.
-    const huge = { array: hugeArray, marker: 1n, text: hugeString }
+    // R-0000262: rendering always routes through util.inspect now, so the
+    // bounds apply unconditionally — no BigInt marker needed to force the
+    // path that previously only ran on JSON.stringify failure.
+    const huge = { array: hugeArray, text: hugeString }
 
     printExceptionError(huge, false)
 
@@ -1269,16 +1279,22 @@ describe("printExceptionError", () => {
   })
 
   it("truncates Buffer payloads so private key bytes never leak into stderr", () => {
-    // Force the JSON path to throw (BigInt) so the inspect fallback runs.
+    // R-0000262: a plain object carrying a private-key Buffer must never
+    // serialize the full byte array. Previously JSON.stringify(Buffer)
+    // produced `{"type":"Buffer","data":[…]}` and emitted every byte; routing
+    // through util.inspect with maxArrayLength bounds this on every call,
+    // not only when JSON.stringify happens to throw.
     const sensitive = {
       key: Buffer.from("A".repeat(8192)),
-      marker: 1n,
     }
 
     printExceptionError(sensitive, false)
 
     const output = errorSpy.mock.calls.map((args) => String(args[0])).join("\n")
     expect(output).not.toContain("A".repeat(2048))
+    // The inspect output must still indicate truncation so operators see
+    // that the value was bounded (not silently elided).
+    expect(output).toMatch(/more (?:items|bytes|characters)/v)
   })
 
   it("prints a single cause when the error has one cause", () => {
