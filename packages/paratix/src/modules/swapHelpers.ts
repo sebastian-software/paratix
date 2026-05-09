@@ -224,12 +224,18 @@ async function applyAbsentSwapFile(
   const disableResult = await disableSwap(ssh, options.path)
   if (typeof disableResult !== "boolean") return disableResult
   if (disableResult) swapChanged = true
-  if (await ensureSwapFstabState({ desiredLine: null, path: options.path, ssh })) swapChanged = true
+  // R-0000287: remove the swap file before pruning the fstab entry. If the
+  // file removal fails (permission, busy), the previous order left the
+  // fstab line gone but the swap file orphaned on disk — the next mount run
+  // would no longer activate it but it still consumed space. Removing the
+  // file first means a failed rm aborts the apply with the fstab entry
+  // intact, preserving the chance to recover state on the next run.
   if (safeRemoval === "ok") {
     const removeResult = await removeSwapFile(ssh, options.path)
     if (typeof removeResult !== "boolean") return removeResult
     if (removeResult) swapChanged = true
   }
+  if (await ensureSwapFstabState({ desiredLine: null, path: options.path, ssh })) swapChanged = true
   return { status: swapChanged ? "changed" : "ok" }
 }
 

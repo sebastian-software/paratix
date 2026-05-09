@@ -576,6 +576,39 @@ describe("swap.file — apply", () => {
     expect(ssh.calls).toContain(`rm -f '${swapPath}'`)
     expect(writtenFiles).toStrictEqual([{ content: "\n", path: "/etc/fstab" }])
   })
+
+  // R-0000287: when removeSwapFile fails (permission denied, file busy), the
+  // fstab entry must remain so the next run can still recover the managed
+  // state. The earlier order pruned fstab first and left the swap file
+  // orphaned on disk after a failing rm.
+  it("R-0000287: keeps fstab entry intact and returns failed when rm fails for absent state", async () => {
+    const writtenFiles: Array<{ content: string; path: string }> = []
+    const ssh = createMockSsh({
+      [`[ -e '${swapPath}' ]`]: { code: 0 },
+      [`[ -f '${swapPath}' ]`]: { code: 0 },
+      [`[ -L '${swapPath}' ]`]: { code: 1 },
+      [`cat '/etc/fstab'`]: { stdout: `${fstabLine}\n` },
+      [`cat '${swapPath}'`]: { stdout: "existing swap bytes" },
+      [`rm -f '${swapPath}'`]: { code: 1, stderr: "rm: cannot remove: Permission denied" },
+      [`swaplabel '${swapPath}' >/dev/null 2>&1`]: { code: 0 },
+      [`swapoff '${swapPath}'`]: { code: 0 },
+      "swapon --show=NAME --noheadings": { stdout: `${swapPath}\n` },
+    })
+    // eslint-disable-next-line @typescript-eslint/require-await -- mock implementation
+    ssh.writeFile = async (path: string, content: string): Promise<void> => {
+      writtenFiles.push({ content, path })
+    }
+
+    const mod = swap.file({ path: swapPath, size: swapSize, state: "absent" })
+    const result = await mod.apply(ssh, emptyEnv)
+
+    expect(result.status).toBe("failed")
+    expect(result.error?.message).toContain("rm failed")
+    expect(ssh.calls).toContain(`rm -f '${swapPath}'`)
+    // fstab must NOT have been rewritten — the entry stays so the next run
+    // can recover.
+    expect(writtenFiles).toStrictEqual([])
+  })
 })
 
 describe("swap.file — option validation", () => {
