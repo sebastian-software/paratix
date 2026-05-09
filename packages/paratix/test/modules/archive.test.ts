@@ -616,6 +616,34 @@ describe("archive.extract — apply", () => {
     expect(chownExecTracker.maxActive()).toBeLessThanOrEqual(archiveOwnerMemberConcurrencyLimit)
   })
 
+  it("R-0000267: returns failed when chown of an extracted member fails", async () => {
+    // chown errors (EPERM, ENOENT, quota) must surface as a maskable
+    // failedCommand result instead of leaking past Promise.all in the
+    // concurrency-limited mapper as an uncaught CommandError.
+    const mockSsh = createMockSsh({
+      [`chown -h -- 'www-data:www-data' '${destination}/app/file'`]: {
+        code: 1,
+        stderr: "chown: changing ownership of '/opt/app/app/file': Operation not permitted",
+      },
+      [`tar --no-same-owner --no-overwrite-dir -xzf '${src}' -C '${archiveStageDirectory}'`]: {
+        code: 0,
+      },
+      [`tar -tvzf '${src}'`]: { code: 0, stdout: safeTarListing },
+    })
+    vi.spyOn(mockSsh, "sha256").mockResolvedValue(archiveSha)
+    vi.spyOn(mockSsh, "writeFile").mockResolvedValue()
+
+    const mod = archive.extract(src, destination, { owner: "www-data:www-data" })
+    const result = await mod.apply(mockSsh, emptyEnv)
+
+    expect(result.status).toBe("failed")
+    expect(String(result.error)).toContain("chown failed for")
+    expect(String(result.error)).toContain(`${destination}/app/file`)
+    // Marker must not be written when chown fails — otherwise the next check
+    // would flag the broken state as ok.
+    expect(mockSsh.writeFile).not.toHaveBeenCalled()
+  })
+
   it("rejects option-like owner specs before member chown", async () => {
     const mockSsh = createMockSsh({
       [`tar --no-same-owner --no-overwrite-dir -xzf '${src}' -C '${archiveStageDirectory}'`]: {

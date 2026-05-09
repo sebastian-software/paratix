@@ -332,15 +332,31 @@ async function validatedArchiveMembers(
 
 async function applyExtractedMemberOwner(
   conn: SshConnection,
-  parameters: { destination: string; members: ArchiveMember[]; owner?: string }
-): Promise<void> {
-  if (parameters.owner == null || parameters.owner === "") return
+  parameters: { destination: string; members: ArchiveMember[]; owner?: string; source: string }
+): Promise<ModuleResult | null> {
+  if (parameters.owner == null || parameters.owner === "") return null
   const owner = parameters.owner
-  await mapWithConcurrencyLimit(
+  // R-0000267: chown errors (EPERM, ENOENT, quota) under the previous
+  // `{ silent: true }` would surface as unguarded CommandError exceptions
+  // through Promise.all in mapWithConcurrencyLimit and bypass the
+  // failedCommand pipeline. Run with `ignoreExitCode` and surface the first
+  // non-zero exit as a maskable failedCommand result with stdout/stderr.
+  const results = await mapWithConcurrencyLimit(
     archiveMemberDestinationPaths(parameters.destination, parameters.members),
     ARCHIVE_OWNER_MEMBER_CONCURRENCY,
-    async (path) => conn.exec(renderChownSymlinkCommand(owner, path), SILENT)
+    async (path) => ({
+      path,
+      result: await conn.exec(renderChownSymlinkCommand(owner, path), EXEC_OPTS),
+    })
   )
+  const failure = results.find(({ result }) => result.code !== 0)
+  if (failure !== undefined) {
+    return failedCommand(
+      `[archive.extract: ${parameters.source}] chown failed for ${failure.path}`,
+      failure.result
+    )
+  }
+  return null
 }
 
 async function writeOwnerPathsMarker(
@@ -452,7 +468,13 @@ async function finalizeExtraction(
 ): Promise<ModuleResult> {
   const { destination, marker, members, owner, remoteSource, source } = parameters
 
-  await applyExtractedMemberOwner(conn, { destination, members, owner })
+  const ownerFailure = await applyExtractedMemberOwner(conn, {
+    destination,
+    members,
+    owner,
+    source,
+  })
+  if (ownerFailure !== null) return ownerFailure
 
   const markerWritten = await writeMarker(conn, remoteSource, { marker })
   if (!markerWritten) return failed(`[archive.extract] failed to write marker for ${source}`)
