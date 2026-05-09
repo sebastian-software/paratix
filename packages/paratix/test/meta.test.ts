@@ -161,6 +161,65 @@ describe("mergeEnvironmentFromMeta", () => {
       /Forbidden env meta entry name/v
     )
   })
+
+  // R-0000264: a provider that drifts away from its declared valueType (e.g.
+  // a 1Password CLI that suddenly returns a number for a "string"-typed key,
+  // or a misconfigured resolver that yields null/an object) must fail fast
+  // at the boundary. Without runtime validation the unexpected typeof would
+  // propagate through resolveEnvironment into downstream modules and
+  // template rendering.
+  it("rejects a resolved value whose typeof differs from the declared valueType", async () => {
+    // Provider promises a string (the explicit valueType) but resolves to a
+    // number — the boundary must surface a TypeError that names the entry,
+    // expected type, and actual typeof so operators can locate the drift.
+    // The declared valueType "string" is the contract; the inferred runtime
+    // value (42) must be rejected even though TypeScript's structural typing
+    // accepts `() => number` for MetaEnvironmentValue.
+    const environment = await mergeEnvironmentFromMeta({}, [
+      meta.env("DRIFT_KEY", () => 42, "string"),
+    ])
+
+    await expect(resolveEnvironment(environment, "DRIFT_KEY")).rejects.toThrow(TypeError)
+    await expect(resolveEnvironment(environment, "DRIFT_KEY")).rejects.toThrow(/"DRIFT_KEY"/v)
+    await expect(resolveEnvironment(environment, "DRIFT_KEY")).rejects.toThrow(/typeof number/v)
+    await expect(resolveEnvironment(environment, "DRIFT_KEY")).rejects.toThrow(/expected string/v)
+  })
+
+  it("does not poison the resolver cache when valueType validation fails", async () => {
+    // First call drifts to a number, second call returns the declared
+    // string. The cache must drop the rejected promise so the retry
+    // surfaces the corrected value instead of replaying the TypeError.
+    const resolver = vi
+      .fn<() => Promise<boolean | number | string>>()
+      .mockResolvedValueOnce(42)
+      .mockResolvedValueOnce("ok")
+    const environment = await mergeEnvironmentFromMeta({}, [
+      meta.env("RECOVERED_KEY", resolver, "string"),
+    ])
+
+    await expect(resolveEnvironment(environment, "RECOVERED_KEY")).rejects.toThrow(TypeError)
+    await expect(resolveEnvironment(environment, "RECOVERED_KEY")).resolves.toBe("ok")
+    expect(resolver).toHaveBeenCalledTimes(2)
+  })
+
+  it("rejects a resolved value of typeof object even when the declared type is string", async () => {
+    // The MetaEnvironmentValue union does not include null, but providers can
+    // misbehave at runtime; the boundary must catch that drift too. Constructing
+    // the EnvironmentMetaEntry directly (instead of going through meta.env)
+    // lets the test target the runtime path without TypeScript narrowing the
+    // input.
+    const driftingResolver = vi
+      .fn<() => Promise<boolean | number | string>>()
+      // The mock returns null even though the resolver type forbids it; this
+      // is the exact runtime drift the boundary check must reject.
+      .mockResolvedValue(null as unknown as string)
+    const environment = await mergeEnvironmentFromMeta({}, [
+      { kind: "env", name: "NULL_DRIFT", resolve: driftingResolver, valueType: "string" },
+    ])
+
+    await expect(resolveEnvironment(environment, "NULL_DRIFT")).rejects.toThrow(TypeError)
+    await expect(resolveEnvironment(environment, "NULL_DRIFT")).rejects.toThrow(/typeof object/v)
+  })
 })
 
 describe("meta runtime validation", () => {

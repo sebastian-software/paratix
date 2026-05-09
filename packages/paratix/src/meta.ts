@@ -227,12 +227,31 @@ export async function mergeEnvironmentFromMeta(
     // fresh values on every access (one-time passwords) must register a
     // new meta entry for each access instead of reusing one.
     let cachedResolution: null | Promise<boolean | number | string> = null
+    const expectedValueType = entry.valueType
+    const entryKey = entry.name
     const resolveOnce = async (): Promise<boolean | number | string> => {
       if (cachedResolution != null) return cachedResolution
-      const pending = entry.resolve().catch((error: unknown) => {
-        cachedResolution = null
-        throw error
-      })
+      // R-0000264: validate the resolved value against the entry's declared
+      // valueType so a provider that drifts (e.g. starts returning a number
+      // for a "string"-typed key, or a null/object) fails fast at the
+      // boundary instead of leaking an untyped value into resolveEnvironment
+      // and downstream consumers. The error must not poison the cache so a
+      // subsequent retry (after the provider is fixed) can succeed.
+      const pending = entry
+        .resolve()
+        .then((resolved): boolean | number | string => {
+          const actualType = typeof resolved
+          if (actualType !== expectedValueType) {
+            throw new TypeError(
+              `Env meta entry ${JSON.stringify(entryKey)} resolved to typeof ${actualType}, expected ${expectedValueType}`
+            )
+          }
+          return resolved
+        })
+        .catch((error: unknown) => {
+          cachedResolution = null
+          throw error
+        })
       cachedResolution = pending
       return pending
     }
