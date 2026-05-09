@@ -95,6 +95,58 @@ describe("runPlaybook signal handling", () => {
     expect(disconnectFn).toHaveBeenCalled()
   })
 
+  it("defers ssh.disconnect() to a microtask so the signal handler returns before disconnectTransport iterates pendingRejects (R-0000257 regression)", async () => {
+    // Regression: handleShutdownSignal called ssh?.disconnect() synchronously
+    // inside the signal handler. disconnect -> disconnectTransport iterates
+    // pendingRejects and calls reject handlers, which can reentrantly invoke
+    // ssh2 stream internals during a single signal-dispatch tick. ssh2
+    // assumes coherent event-loop tick lifetimes; reentrant stream access
+    // is a known crash source. The fix wraps the call in queueMicrotask so
+    // the handler returns immediately and disconnect runs in the next
+    // microtask after ssh2 has processed its pending events.
+    const disconnectInvocationOrder: string[] = []
+    const disconnect = vi.fn().mockImplementation(() => {
+      disconnectInvocationOrder.push("disconnect")
+    })
+
+    vi.doMock("../src/ssh.js", () => ({
+      shellQuote: (s: string) => `'${s}'`,
+      SshConnectionImpl: makeMockSshClass(capturedConfigs, { disconnect }),
+    }))
+
+    const { runPlaybook } = await import("../src/runner.js")
+
+    const interruptingModule: Module = {
+      apply: vi.fn().mockResolvedValue({ status: "changed" } satisfies ModuleResult),
+      check: vi.fn().mockImplementationOnce(() => {
+        getSignalBus().emit("SIGINT")
+        // Synchronously after emit, disconnect must NOT yet have been called —
+        // the signal handler must have queued it for a later microtask.
+        disconnectInvocationOrder.push("after-emit")
+        return "needs-apply" as const
+      }),
+      name: "interrupting-module",
+    }
+
+    const definition: ServerDefinition = {
+      host: "1.2.3.4",
+      name: "test-server",
+      run: [interruptingModule],
+      ssh: { ports: [22], privateKey: "~/.ssh/id", user: "root" },
+    }
+
+    await runPlaybook(definition)
+
+    // The synchronous "after-emit" marker must come before any disconnect
+    // call, proving the signal handler returned before disconnect ran.
+    const afterEmitIndex = disconnectInvocationOrder.indexOf("after-emit")
+    const firstDisconnectIndex = disconnectInvocationOrder.indexOf("disconnect")
+    expect(afterEmitIndex).toBeGreaterThan(-1)
+    expect(firstDisconnectIndex).toBeGreaterThan(-1)
+    expect(afterEmitIndex).toBeLessThan(firstDisconnectIndex)
+    expect(disconnect).toHaveBeenCalled()
+  })
+
   it("sets exitCode to 143 when SIGTERM is received during runPlaybook", async () => {
     vi.doMock("../src/ssh.js", () => ({
       shellQuote: (s: string) => `'${s}'`,

@@ -115,7 +115,18 @@ function setupShutdownHandlers(): ShutdownState {
     shutdownAbortController.abort(new Error(`Runner sleep interrupted by ${signal}`))
     stopLiveModuleOutput(true)
     console.error(`\nReceived ${signal}, shutting down…`)
-    ssh?.disconnect()
+    // R-0000257: defer ssh.disconnect() to a microtask. The signal handler
+    // runs synchronously inside Node's signal dispatch and disconnect ->
+    // disconnectTransport iterates pendingRejects, which calls reject
+    // handlers that may reentrantly invoke ssh2 stream internals. ssh2
+    // assumes coherent event-loop tick lifetimes and reentrant stream
+    // access is a known crash source. Returning to the next microtask
+    // first lets the signal handler complete cleanly and lets ssh2
+    // process any in-flight events before teardown begins.
+    const sshToDisconnect = ssh
+    queueMicrotask(() => {
+      sshToDisconnect?.disconnect()
+    })
   }
 
   getSignalBus().on("SIGINT", handleShutdownSignal)
