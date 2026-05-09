@@ -865,6 +865,35 @@ describe("file.copy", () => {
     }
   })
 
+  it("R-0000271: returns failed when chown after upload exits non-zero", async () => {
+    // chown errors after a successful uploadFile (NSS lookup failure, EPERM,
+    // missing user/group) must surface as a failedCommand ModuleResult so
+    // the runner reports the captured stderr instead of a CommandError that
+    // bypasses the failure pipeline.
+    const dir = mkdtempSync(join(tmpdir(), "paratix-test-"))
+    try {
+      const localPath = join(dir, "source.txt")
+      writeFileSync(localPath, "hello world")
+
+      const ssh = createMockSsh({
+        "chown -- 'www-data' '/remote/file.txt'": {
+          code: 1,
+          stderr: "chown: invalid user: 'www-data'",
+        },
+      })
+      vi.spyOn(ssh, "uploadFile").mockResolvedValue()
+
+      const mod = file.copy("/remote/file.txt", localPath, { owner: "www-data" })
+      const result = await mod.apply(ssh, emptyEnv)
+
+      expect(result.status).toBe("failed")
+      expect(String(result.error)).toContain("chown failed")
+      expect(ssh.uploadFile).toHaveBeenCalledOnce()
+    } finally {
+      rmSync(dir, { recursive: true })
+    }
+  })
+
   it("check returns needs-apply when remote mode drifts from the default 0644", async () => {
     const dir = mkdtempSync(join(tmpdir(), "paratix-test-"))
     try {

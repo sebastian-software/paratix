@@ -242,9 +242,16 @@ export const file = {
         await ssh.uploadFile(localPath, remotePath, { mode: desiredMode })
 
         if (options?.owner != null) {
-          await ssh.exec(renderChownCommand(options.owner, remotePath), {
+          // R-0000271: chown errors after a successful upload (NSS lookup
+          // failure, EPERM, missing user/group) must surface as a maskable
+          // failedCommand result instead of an unguarded CommandError.
+          const chownResult = await ssh.exec(renderChownCommand(options.owner, remotePath), {
+            ignoreExitCode: true,
             silent: true,
           })
+          if (chownResult.code !== 0) {
+            return failedCommand(`[file.copy: ${remotePath}] chown failed`, chownResult)
+          }
         }
 
         return { status: "changed" }
