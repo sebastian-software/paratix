@@ -4392,6 +4392,47 @@ describe("SshConnectionImpl", () => {
       expect(cleanupFailedSshClient).toHaveBeenCalledTimes(1)
       expect(succeedingCommit).toHaveBeenCalledOnce()
     })
+
+    it("rethrows the original commit-failure cause even when an abort signal fires concurrently (R-0000256 regression)", async () => {
+      // Regression: when commitAcceptedHostKey threw (e.g. TOFU persist
+      // failure during graceful shutdown) and the prompt abort signal fired
+      // simultaneously, the outer catch in tryConnectOnPorts checked the
+      // abort first and overwrote the actual diagnostic with
+      // "SSH operation aborted". The fix orders the catch so that
+      // post-handshake commit failures rethrow with the original error as
+      // cause BEFORE the abort path runs.
+      const { buildHostVerifier } = await import("../src/knownHosts.js")
+      const persistError = new Error("ENOSPC: known_hosts append failed")
+      const failingCommit = vi.fn().mockRejectedValue(persistError)
+      vi.mocked(buildHostVerifier).mockResolvedValueOnce({
+        commitAcceptedHostKey: failingCommit,
+        hostVerifier: vi.fn().mockReturnValue(true),
+      })
+      vi.mocked(tryConnectOnPort).mockResolvedValue()
+
+      const abortController = new AbortController()
+      const ssh = makeSshInstance({ host: "1.2.3.4", ports: [22] })
+      // Inject the abort signal before connect so the catch path observes it.
+      ;(ssh as unknown as { promptAbortSignal?: AbortSignal }).promptAbortSignal =
+        abortController.signal
+      // Fire the abort BEFORE invoking connect, simulating a graceful shutdown
+      // racing with the persist failure inside tryConnectOnPorts.
+      abortController.abort(new Error("SSH operation aborted"))
+
+      let caughtError: unknown
+      try {
+        await ssh.connect()
+      } catch (error) {
+        caughtError = error
+      }
+
+      // The caller must see the actual persist-failure message, not the
+      // abort reason that would otherwise mask the diagnostic.
+      expect(caughtError).toBeInstanceOf(Error)
+      expect((caughtError as Error).message).toContain("ENOSPC")
+      expect((caughtError as Error).message).not.toContain("SSH operation aborted")
+      expect((caughtError as Error).cause).toBe(persistError)
+    })
   })
 })
 

@@ -1435,8 +1435,22 @@ trap - EXIT
         if (tryConnectResolved && !registered) {
           cleanupFailedSshClient(client)
         }
-        if (this.promptAbortSignal?.aborted === true) throw getAbortReason(this.promptAbortSignal)
+        // R-0000256: when a downstream commit step (commitAcceptedHostKey,
+        // persist) threw AFTER the SSH handshake resolved, a concurrent
+        // shutdown abort would otherwise overwrite the diagnostic with
+        // "SSH operation aborted" — losing the actual TOFU/persist failure.
+        // Rethrow HostKeyVerificationError before any abort handling so the
+        // caller sees the verification failure verbatim. When the abort fired
+        // simultaneously with a post-handshake commit failure, surface the
+        // commit-failure cause via a new Error whose message preserves the
+        // original diagnostic, instead of falling through to the abort path.
         if (error instanceof HostKeyVerificationError) throw error
+        if (tryConnectResolved && this.promptAbortSignal?.aborted === true) {
+          throw error instanceof Error
+            ? new Error(error.message, { cause: error })
+            : new Error(String(error))
+        }
+        if (this.promptAbortSignal?.aborted === true) throw getAbortReason(this.promptAbortSignal)
         // Try next port
       }
     }
