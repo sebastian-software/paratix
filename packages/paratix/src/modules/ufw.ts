@@ -87,6 +87,25 @@ async function deleteOppositeRule(input: {
   return { changed: true, failure: null }
 }
 
+// R-0000282: refuse to deny the port the runner is currently connected on.
+// `applyUfwRulePort` deletes the contradictory `allow` entry before adding the
+// `deny`, which on the live SSH port would immediately lock out the runner.
+// Mirrors the lockout guard in `sshd.port` (`ufwBlocksPortFailure`).
+function rejectWhenDenyingCurrentSshPort(input: {
+  action: UfwRuleAction
+  portList: number[]
+  ssh: SshConnection
+}): ModuleResult | null {
+  const { action, portList, ssh } = input
+  if (action !== "deny") return null
+  const { port: currentSshPort } = ssh.getConnectionInfo()
+  if (!portList.includes(currentSshPort)) return null
+  return failed(
+    `[ufw.rule: ${action} ${portList.join(",")}] refuses to deny current SSH port ` +
+      `${String(currentSshPort)}; would lock the runner out`
+  )
+}
+
 async function applyUfwRulePort(input: {
   action: UfwRuleAction
   ipv6Rules: boolean
@@ -273,6 +292,9 @@ export const ufw = {
       async apply(ssh: null | SshConnection): Promise<ModuleResult> {
         if (!ssh)
           return failed(`[ufw.rule: ${action} ${portList.join(",")}] SSH connection is required`)
+
+        const lockoutFailure = rejectWhenDenyingCurrentSshPort({ action, portList, ssh })
+        if (lockoutFailure !== null) return lockoutFailure
 
         // R-0000281: route through `readUfwStatus` (the same guard that
         // `ufw.disabled`/`ufw.enabled` use) so a missing or unreachable ufw
