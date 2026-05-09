@@ -313,18 +313,19 @@ describe("archive.extract — check", () => {
     expect(mockSsh.calls).not.toContain(`test -f '${marker}'`)
   })
 
-  it("R-0000105: throws when marker cat fails with a non-missing error", async () => {
+  it("R-0000276: returns needs-apply when marker cat fails with a non-missing error", async () => {
     // Permission-denied (or any non "No such file" error) on the marker
-    // must not silently collapse to an empty stdout — that would force a
-    // costly re-extract of the entire archive even though the marker
-    // existed and matched. Surface the real cause instead.
+    // must not abort the whole run. Treat the unreadable marker as drift
+    // so apply rewrites the marker on the next run instead of throwing
+    // past the runner.
     const mockSsh = createMockSsh({
       [`cat '${marker}'`]: { code: 1, stderr: `cat: '${marker}': Permission denied` },
       [`test -d '${destination}'`]: { code: 0 },
       [`test -f '${marker}'`]: { code: 0 },
     })
     const mod = archive.extract(src, destination)
-    await expect(mod.check(mockSsh, emptyEnv)).rejects.toThrow(/marker file unreadable/v)
+    const result = await mod.check(mockSsh, emptyEnv)
+    expect(result).toBe("needs-apply")
   })
 
   it("R-0000105: returns needs-apply when marker cat reports 'No such file'", async () => {
@@ -337,6 +338,32 @@ describe("archive.extract — check", () => {
       [`test -f '${marker}'`]: { code: 0 },
     })
     const mod = archive.extract(src, destination)
+    const result = await mod.check(mockSsh, emptyEnv)
+    expect(result).toBe("needs-apply")
+  })
+
+  it("R-0000276: returns needs-apply when owner-paths marker cat fails with permission denied", async () => {
+    // Permission drift on the owner-paths marker (or any non-"no such file"
+    // stderr) must not abort the run. Treat the unreadable marker like a
+    // drift so apply heals it on the next run. With upload=false the
+    // archiveOwnerMatches helper falls back to listing the source archive,
+    // and reports drift when the on-disk owner does not match.
+    const ownerPathsMarker = `${marker}.owner-paths`
+    const mockSsh = createMockSsh({
+      [`[ -e '${destination}/app/file' ] || [ -L '${destination}/app/file' ]`]: { code: 0 },
+      [`cat '${ownerPathsMarker}'`]: {
+        code: 1,
+        stderr: `cat: '${ownerPathsMarker}': Permission denied`,
+      },
+      [`stat -c '%U %G' -- '${destination}/app/file'`]: {
+        code: 0,
+        stdout: "root root\n",
+      },
+      [`tar -tvzf '${src}'`]: { code: 0, stdout: safeTarListing },
+      [`test -d '${destination}'`]: { code: 0 },
+      [`test -f '${marker}'`]: { code: 0 },
+    })
+    const mod = archive.extract(src, destination, { owner: "www-data:www-data" })
     const result = await mod.check(mockSsh, emptyEnv)
     expect(result).toBe("needs-apply")
   })

@@ -70,20 +70,6 @@ function ownerPathsMarkerPath(marker: string): string {
 }
 
 /**
- * Build a descriptive error for a marker file that exists but cannot be
- * read. The `cat` stderr is preferred over the exit code when available.
- *
- * @param result - The result of the marker `cat` invocation.
- * @param result.code - The exit code from `cat`.
- * @param result.stderr - The stderr emitted by `cat`.
- * @returns An Error describing why the marker is unreadable.
- */
-function buildMarkerUnreadableError(result: { code: number; stderr: string }): Error {
-  const reason = result.stderr.trim() || `cat exited with code ${result.code}`
-  return new Error(`[archive.extract] marker file unreadable: ${reason}`)
-}
-
-/**
  * Build the extract command based on the file extension of the original source.
  *
  * @param source - The original archive path used for format detection.
@@ -636,8 +622,12 @@ async function ownerMatchesPaths(
 async function readOwnerPathsMarker(conn: SshConnection, marker: string): Promise<null | string[]> {
   const markerResult = await conn.exec(`cat ${shellQuote(ownerPathsMarkerPath(marker))}`, EXEC_OPTS)
   if (markerResult.code !== 0) {
-    if (/no such file/iv.test(markerResult.stderr)) return null
-    throw buildMarkerUnreadableError(markerResult)
+    // R-0000276: previously a non-"no such file" stderr (e.g. permission
+    // denied after a flag-dir mode drift, or a transient truncate race) raised
+    // an exception that propagated past archiveOwnerMatches and aborted the
+    // whole run. Falling through to NEEDS_APPLY lets apply heal the marker,
+    // mirroring the recovery path used by download.ts:compareUnverifiedHashMarker.
+    return null
   }
   try {
     const paths: unknown = JSON.parse(markerResult.stdout)
@@ -654,8 +644,11 @@ async function archiveMarkerMatches(
   const { marker, source, upload } = parameters
   const markerResult = await conn.exec(`cat ${shellQuote(marker)}`, EXEC_OPTS)
   if (markerResult.code !== 0) {
-    if (/no such file/iv.test(markerResult.stderr)) return false
-    throw buildMarkerUnreadableError(markerResult)
+    // R-0000276: any non-zero cat result (missing file, permission denied,
+    // concurrent truncate) is treated as "marker does not match" so check
+    // returns NEEDS_APPLY and the apply path heals the marker. Throwing here
+    // would abort the entire run on a recoverable flag-dir hiccup.
+    return false
   }
   const markerContent = markerResult.stdout.trim()
 
