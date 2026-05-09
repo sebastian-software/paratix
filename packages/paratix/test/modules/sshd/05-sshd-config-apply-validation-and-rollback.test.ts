@@ -243,6 +243,35 @@ describe("sshd.config — apply: validation and rollback", () => {
       SYSTEMCTL_CAT_SSH,
     ])
   })
+
+  // R-0000284: a reload failure followed by a failing rollback writeFile
+  // (e.g. SFTP error) must surface a combined error that names both causes.
+  // Without the try/catch the rollback exception bubbled up and masked the
+  // original reload diagnostic.
+  it("R-0000284: combines reload failure with rollback writeFile failure in the error message", async () => {
+    const originalConfig = "PasswordAuthentication yes"
+    const mockSsh = createMockSsh({
+      [CAT_SSHD]: { stdout: originalConfig },
+    })
+    // First write (new config) succeeds, rollback write fails.
+    vi.spyOn(mockSsh, "writeFile")
+      .mockResolvedValueOnce(undefined)
+      .mockRejectedValueOnce(new Error("SFTP rollback failed"))
+    const execSpy = vi.spyOn(mockSsh, "exec")
+    execSpy
+      .mockResolvedValueOnce({ code: 0, stderr: "", stdout: "" }) // mkdir -p /run/sshd
+      .mockResolvedValueOnce({ code: 0, stderr: "", stdout: "" }) // sshd -t
+      .mockResolvedValueOnce({ code: 0, stderr: "", stdout: "" }) // systemctl cat sshd.service
+      .mockResolvedValueOnce({ code: 1, stderr: "reload failed", stdout: "" }) // systemctl reload sshd
+
+    const mod = sshd.config({ PasswordAuthentication: "no" })
+    const result = await mod.apply(mockSsh, emptyEnv)
+
+    expect(result.status).toBe("failed")
+    expect(result.error?.message).toContain("sshd reload failed")
+    expect(result.error?.message).toContain("rollback also failed")
+    expect(result.error?.message).toContain("SFTP rollback failed")
+  })
 })
 
 // ─── sshd.port — apply ────────────────────────────────────────────────────────

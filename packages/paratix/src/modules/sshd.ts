@@ -205,6 +205,28 @@ async function socketActivationBootPathNeedsApply(ssh: SshConnection): Promise<b
   return !bootState.enabled
 }
 
+// R-0000284: wrap the rollback write so an SFTP failure cannot mask the
+// original reload failure. validateSshdConfig already follows the same
+// pattern (R-0000249) — surface a combined error that names both causes
+// instead of letting the rollback exception bubble up.
+async function rollbackSshdConfigAfterReloadFailure(
+  ssh: SshConnection,
+  parameters: { originalConfig: string; reloadResult: ModuleResult; settingNames: string }
+): Promise<ModuleResult> {
+  try {
+    await ssh.writeFile(SSHD_CONFIG_PATH, parameters.originalConfig, { mode: SSHD_CONFIG_MODE })
+    return parameters.reloadResult
+  } catch (rollbackError) {
+    const reloadMessage = parameters.reloadResult.error?.message ?? "sshd reload failed"
+    const rollbackMessage =
+      rollbackError instanceof Error ? rollbackError.message : String(rollbackError)
+    return failed(
+      `[sshd.config: ${parameters.settingNames}] sshd reload failed; rollback also failed: ` +
+        `${rollbackMessage}\n${reloadMessage}`
+    )
+  }
+}
+
 async function reloadSshd(ssh: SshConnection): Promise<ModuleResult> {
   const serviceUnit = await resolveSshServiceUnit(ssh)
   const result = await ssh.exec(`${SYSTEMCTL} reload ${serviceUnit}`, {
@@ -604,10 +626,12 @@ export const sshd = {
         }
 
         const reloadResult = await reloadSshd(ssh)
-        if (reloadResult.status === "failed") {
-          await ssh.writeFile(SSHD_CONFIG_PATH, originalConfig, { mode: SSHD_CONFIG_MODE })
-        }
-        return reloadResult
+        if (reloadResult.status !== "failed") return reloadResult
+        return rollbackSshdConfigAfterReloadFailure(ssh, {
+          originalConfig,
+          reloadResult,
+          settingNames,
+        })
       },
       async check(ssh: null | SshConnection): Promise<"needs-apply" | "ok"> {
         if (!ssh) return NEEDS_APPLY
