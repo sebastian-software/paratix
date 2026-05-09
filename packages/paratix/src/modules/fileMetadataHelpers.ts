@@ -1,7 +1,9 @@
-import { failed } from "../moduleFailure.js"
+import { failed, failedCommand } from "../moduleFailure.js"
 import { shellQuote, validateMode } from "../ssh.js"
 import { type Module, type ModuleResult, NEEDS_APPLY, type SshConnection } from "../types.js"
 import { isSymlink } from "./remoteFileChecks.js"
+
+const EXEC_OPTS = { ignoreExitCode: true, silent: true } as const
 
 export type FileOwnership = {
   group: string
@@ -84,8 +86,8 @@ export async function applyFileMetadata(
   ssh: SshConnection,
   remotePath: string,
   options?: { mode?: string; owner?: string }
-): Promise<void> {
-  if (options?.mode == null && options?.owner == null) return
+): Promise<ModuleResult | null> {
+  if (options?.mode == null && options?.owner == null) return null
 
   // R-0000133: chmod/chown follow symlinks. Refusing here prevents the caller
   // (e.g. file.template.apply) from silently rewriting the mode or ownership
@@ -99,16 +101,28 @@ export async function applyFileMetadata(
 
   if (options.mode != null) {
     validateMode(options.mode)
-    await ssh.exec(`chmod ${shellQuote(options.mode)} ${shellQuote(remotePath)}`, {
-      silent: true,
-    })
+    // R-0000269: chmod errors (read-only fs, EPERM after a SELinux relabel,
+    // missing user/group) must surface as a failedCommand ModuleResult so
+    // callers like file.template.apply can return the maskable failure
+    // through the runner pipeline instead of letting an unguarded
+    // CommandError propagate.
+    const chmodResult = await ssh.exec(
+      `chmod ${shellQuote(options.mode)} ${shellQuote(remotePath)}`,
+      EXEC_OPTS
+    )
+    if (chmodResult.code !== 0) {
+      return failedCommand(`[file metadata: ${remotePath}] chmod failed`, chmodResult)
+    }
   }
 
   if (options.owner != null) {
-    await ssh.exec(renderChownCommand(options.owner, remotePath), {
-      silent: true,
-    })
+    const chownResult = await ssh.exec(renderChownCommand(options.owner, remotePath), EXEC_OPTS)
+    if (chownResult.code !== 0) {
+      return failedCommand(`[file metadata: ${remotePath}] chown failed`, chownResult)
+    }
   }
+
+  return null
 }
 
 export function ownershipMatches(
@@ -151,7 +165,12 @@ export function createMetadataModule(
         kind === "chmod"
           ? `chmod ${shellQuote(value)} ${shellQuote(remotePath)}`
           : renderChownCommand(value, remotePath)
-      await ssh.exec(command, { silent: true })
+      // R-0000269: capture chmod/chown exit codes so failures surface as a
+      // failedCommand ModuleResult instead of an unguarded CommandError.
+      const result = await ssh.exec(command, EXEC_OPTS)
+      if (result.code !== 0) {
+        return failedCommand(`[${name}] ${kind} failed`, result)
+      }
       return { status: "changed" }
     },
     async check(ssh: null | SshConnection): Promise<"needs-apply" | "ok"> {

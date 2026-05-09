@@ -2,7 +2,7 @@ import { createHash } from "node:crypto"
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { describe, expect, it } from "vitest"
+import { describe, expect, it, vi } from "vitest"
 
 import { resolveEnvironment } from "../../src/environment.js"
 import { mergeEnvironmentFromMeta } from "../../src/meta.js"
@@ -404,6 +404,23 @@ describe("file.chmod", () => {
     const result = await mod.check(ssh, emptyEnv)
     expect(result).toBe("needs-apply")
   })
+
+  it("R-0000269: returns failed when chmod exits non-zero", async () => {
+    // chmod failures (read-only fs, EPERM) must surface as failedCommand
+    // ModuleResults instead of unguarded CommandError exceptions.
+    const ssh = createMockSsh({
+      "[ -L '/var/app/config.yml' ]": { code: 1 },
+      "chmod '0644' '/var/app/config.yml'": {
+        code: 1,
+        stderr: "chmod: changing permissions of '/var/app/config.yml': Read-only file system",
+      },
+    })
+    const mod = file.chmod("/var/app/config.yml", "0644")
+    const result = await mod.apply(ssh, emptyEnv)
+
+    expect(result.status).toBe("failed")
+    expect(String(result.error)).toContain("chmod failed")
+  })
 })
 
 describe("file.chown", () => {
@@ -510,6 +527,21 @@ describe("file.chown", () => {
     const mod = file.chown("/var/app/config.yml", "www-data:www-data")
     const result = await mod.check(ssh, emptyEnv)
     expect(result).toBe("needs-apply")
+  })
+
+  it("R-0000269: returns failed when chown exits non-zero", async () => {
+    const ssh = createMockSsh({
+      "[ -L '/var/app/config.yml' ]": { code: 1 },
+      "chown -- 'www-data:www-data' '/var/app/config.yml'": {
+        code: 1,
+        stderr: "chown: invalid user: 'www-data:www-data'",
+      },
+    })
+    const mod = file.chown("/var/app/config.yml", "www-data:www-data")
+    const result = await mod.apply(ssh, emptyEnv)
+
+    expect(result.status).toBe("failed")
+    expect(String(result.error)).toContain("chown failed")
   })
 })
 
@@ -1465,6 +1497,59 @@ describe("file.template", () => {
       expect(writtenFiles).toStrictEqual([
         { content: "Hallo Jörg aus München", path: "/remote/über-vorlage.txt" },
       ])
+    } finally {
+      rmSync(dir, { recursive: true })
+    }
+  })
+
+  it("R-0000269: returns failed when chmod after template write exits non-zero", async () => {
+    // chmod via applyFileMetadata must surface a failedCommand ModuleResult
+    // instead of an unguarded CommandError when the remote chmod fails
+    // (e.g. read-only fs, EPERM after a SELinux relabel).
+    const dir = mkdtempSync(join(tmpdir(), "paratix-test-"))
+    try {
+      const templatePath = join(dir, "template.txt")
+      writeFileSync(templatePath, "Hello")
+
+      const ssh = createMockSsh({
+        "[ -L '/remote/out.txt' ]": { code: 1 },
+        "chmod '0600' '/remote/out.txt'": {
+          code: 1,
+          stderr: "chmod: changing permissions of '/remote/out.txt': Read-only file system",
+        },
+      })
+      vi.spyOn(ssh, "writeFile").mockResolvedValue()
+
+      const mod = file.template("/remote/out.txt", templatePath, { mode: "0600" })
+      const result = await mod.apply(ssh, emptyEnv)
+
+      expect(result.status).toBe("failed")
+      expect(String(result.error)).toContain("chmod failed")
+    } finally {
+      rmSync(dir, { recursive: true })
+    }
+  })
+
+  it("R-0000269: returns failed when chown after template write exits non-zero", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "paratix-test-"))
+    try {
+      const templatePath = join(dir, "template.txt")
+      writeFileSync(templatePath, "Hello")
+
+      const ssh = createMockSsh({
+        "[ -L '/remote/out.txt' ]": { code: 1 },
+        "chown -- 'www-data' '/remote/out.txt'": {
+          code: 1,
+          stderr: "chown: invalid user: 'www-data'",
+        },
+      })
+      vi.spyOn(ssh, "writeFile").mockResolvedValue()
+
+      const mod = file.template("/remote/out.txt", templatePath, { owner: "www-data" })
+      const result = await mod.apply(ssh, emptyEnv)
+
+      expect(result.status).toBe("failed")
+      expect(String(result.error)).toContain("chown failed")
     } finally {
       rmSync(dir, { recursive: true })
     }

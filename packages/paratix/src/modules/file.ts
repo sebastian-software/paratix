@@ -384,7 +384,8 @@ export const file = {
         await ssh.writeFile(remotePath, rendered, {
           mode: await resolveWriteMode(ssh, remotePath, options?.mode),
         })
-        await applyFileMetadata(ssh, remotePath, options)
+        const metadataFailure = await applyFileMetadata(ssh, remotePath, options)
+        if (metadataFailure !== null) return metadataFailure
 
         return { status: "changed" }
       },
