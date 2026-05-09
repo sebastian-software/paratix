@@ -223,8 +223,17 @@ async function replaceAuthorizedKeysAtomically(
   const quotedAuthorizedKeysPath = shellQuote(authorizedKeysPath)
   const expectedSshDirectoryState = shellQuote(`700 ${user} ${primaryGroup} directory`)
 
+  // R-0000285: harden the final rename against a symlink race. The plain
+  // `mv -T` previously overwrote the target unconditionally; an attacker who
+  // could win the race between the `[ ! -L ]` probe and the move could
+  // redirect the write through a malicious symlink. We now (1) reject
+  // symlinks up front, (2) explicitly unlink the existing regular file via
+  // `rm -f --` while still holding the directory, and (3) run `mv -T -n` so
+  // even if a symlink is recreated in the gap the rename refuses to clobber
+  // it. The combined `--` end-of-options markers guard against pathological
+  // names beginning with `-`.
   const replace = await conn.exec(
-    `chmod 600 ${quotedTemporaryPath} && chown ${shellQuote(user)}:${shellQuote(primaryGroup)} ${quotedTemporaryPath} && { [ ! -L ${quotedSshDirectoryPath} ] || { echo '.ssh must not be a symlink' >&2; exit 1; }; [ -d ${quotedSshDirectoryPath} ] || { echo '.ssh must be a directory' >&2; exit 1; }; ssh_directory_state=$(stat -c '%a %U %G %F' ${quotedSshDirectoryPath}) || exit $?; [ "$ssh_directory_state" = ${expectedSshDirectoryState} ] || { echo '.ssh ownership changed before authorized_keys replace' >&2; exit 1; }; [ ! -L ${quotedAuthorizedKeysPath} ] || { echo 'authorized_keys must not be a symlink' >&2; exit 1; }; mv -T ${quotedTemporaryPath} ${quotedAuthorizedKeysPath}; }`,
+    `chmod 600 ${quotedTemporaryPath} && chown ${shellQuote(user)}:${shellQuote(primaryGroup)} ${quotedTemporaryPath} && { [ ! -L ${quotedSshDirectoryPath} ] || { echo '.ssh must not be a symlink' >&2; exit 1; }; [ -d ${quotedSshDirectoryPath} ] || { echo '.ssh must be a directory' >&2; exit 1; }; ssh_directory_state=$(stat -c '%a %U %G %F' ${quotedSshDirectoryPath}) || exit $?; [ "$ssh_directory_state" = ${expectedSshDirectoryState} ] || { echo '.ssh ownership changed before authorized_keys replace' >&2; exit 1; }; [ ! -L ${quotedAuthorizedKeysPath} ] || { echo 'authorized_keys must not be a symlink' >&2; exit 1; }; if [ -e ${quotedAuthorizedKeysPath} ]; then [ -f ${quotedAuthorizedKeysPath} ] || { echo 'authorized_keys must be a regular file' >&2; exit 1; }; rm -f -- ${quotedAuthorizedKeysPath}; fi; mv -T -n -- ${quotedTemporaryPath} ${quotedAuthorizedKeysPath} || { echo 'authorized_keys was recreated during replace; refusing to clobber' >&2; exit 1; }; }`,
     MUTATION_EXEC_OPTS
   )
   if (replace.code !== 0) {
