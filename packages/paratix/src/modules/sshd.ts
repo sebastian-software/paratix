@@ -251,11 +251,48 @@ async function restoreSshdPortRestartFailure(
   })
 }
 
+type SshdRestartOutcome = "completed" | "disconnected"
+
+async function recoverFromRestartFailure(
+  ssh: SshConnection,
+  parameters: {
+    originalConfig: string
+    serviceBootState?: SshdServiceBootState
+    serviceUnit?: SshdServiceUnit
+    socketState: SshSocketState
+    targetPort: number
+  }
+): Promise<void> {
+  // Drop the port marker first and unconditionally: if any subsequent restore
+  // step throws (e.g. SFTP failure rewriting sshd_config), the runner still
+  // needs to fall back to the previous port instead of staying on the new one
+  // we never managed to activate.
+  try {
+    ssh.removePort(parameters.targetPort)
+  } catch {
+    // ssh.removePort is a synchronous in-memory bookkeeping call; we still
+    // swallow defensively so an exotic implementation never blocks the
+    // remaining restore steps.
+  }
+  try {
+    await restoreSshdPortRestartFailure(ssh, {
+      originalConfig: parameters.originalConfig,
+      serviceBootState: parameters.serviceBootState,
+      serviceUnit: parameters.serviceUnit,
+      socketState: parameters.socketState,
+    })
+  } catch {
+    // Best-effort recovery: the original restart failure (re-thrown by the
+    // caller) is the actionable error. A nested restore failure must not
+    // mask it nor leave the port marker in place.
+  }
+}
+
 async function restartSshdOnNewPort(
   ssh: SshConnection,
   targetPort: number,
   originalConfig: string
-): Promise<void> {
+): Promise<SshdRestartOutcome> {
   ssh.addPort(targetPort)
   let socketState: SshSocketState = { exists: false }
   let serviceUnit: SshdServiceUnit | undefined
@@ -265,33 +302,69 @@ async function restartSshdOnNewPort(
     serviceUnit = await resolveSshServiceUnit(ssh)
     serviceBootState = await ensureSshServiceBootEnabled(ssh, { serviceUnit, socketState })
     await ssh.exec(`${SYSTEMCTL} restart ${serviceUnit}`, { silent: true })
+    return "completed"
   } catch (error) {
-    if (isRestartDisconnect(error)) return
-    // Drop the port marker first and unconditionally: if any subsequent restore
-    // step throws (e.g. SFTP failure rewriting sshd_config), the runner still
-    // needs to fall back to the previous port instead of staying on the new
-    // one we never managed to activate.
-    try {
-      ssh.removePort(targetPort)
-    } catch {
-      // ssh.removePort is a synchronous in-memory bookkeeping call; we still
-      // swallow defensively so an exotic implementation never blocks the
-      // remaining restore steps.
-    }
-    try {
-      await restoreSshdPortRestartFailure(ssh, {
-        originalConfig,
-        serviceBootState,
-        serviceUnit,
-        socketState,
-      })
-    } catch {
-      // Best-effort recovery: the original restart failure (re-thrown below)
-      // is the actionable error for the caller. A nested restore failure must
-      // not mask it nor leave the port marker in place.
-    }
+    // R-0000283: when the restart aborted the SSH session itself, treat the
+    // disconnect as a successful restart. The runner reconnects on the new
+    // port; downstream live-verification cannot run on a dead connection.
+    if (isRestartDisconnect(error)) return "disconnected"
+    await recoverFromRestartFailure(ssh, {
+      originalConfig,
+      serviceBootState,
+      serviceUnit,
+      socketState,
+      targetPort,
+    })
     throw error
   }
+}
+
+// R-0000283: poll `liveSshdPortMatches` for a short window so a slow systemd
+// transition can settle before we declare the restart a failure. Bind
+// conflicts and stale drop-ins make sshd come back without binding the
+// target port; the polling loop catches that drift before the runner
+// reconnects into the void.
+const LIVE_VERIFY_TIMEOUT_MS = 5000
+const LIVE_VERIFY_BACKOFF_MS = 250
+
+async function waitForLiveSshdPort(ssh: SshConnection, targetPort: number): Promise<boolean> {
+  const deadline = Date.now() + LIVE_VERIFY_TIMEOUT_MS
+  for (;;) {
+    // eslint-disable-next-line no-await-in-loop -- sequential probes by design
+    if (await liveSshdPortMatches(ssh, targetPort)) return true
+    if (Date.now() >= deadline) return false
+    // eslint-disable-next-line no-await-in-loop -- sequential probes by design
+    await new Promise<void>((resolve) => {
+      setTimeout(resolve, LIVE_VERIFY_BACKOFF_MS)
+    })
+  }
+}
+
+async function rollbackSshdPortAfterFailedVerification(
+  ssh: SshConnection,
+  parameters: {
+    originalConfig: string
+    originalPort: number
+    targetPort: number
+  }
+): Promise<string | undefined> {
+  try {
+    ssh.removePort(parameters.targetPort)
+  } catch {
+    // ssh.removePort is in-memory bookkeeping; never block rollback.
+  }
+  try {
+    await ssh.writeFile(SSHD_CONFIG_PATH, parameters.originalConfig, { mode: SSHD_CONFIG_MODE })
+  } catch (error) {
+    return error instanceof Error ? error.message : String(error)
+  }
+  try {
+    const serviceUnit = await resolveSshServiceUnit(ssh)
+    await ssh.exec(`${SYSTEMCTL} restart ${serviceUnit}`, { ignoreExitCode: true, silent: true })
+  } catch (error) {
+    return error instanceof Error ? error.message : String(error)
+  }
+  return undefined
 }
 
 async function validateProspectiveSshdConfig(
@@ -390,19 +463,64 @@ async function rejectWhenUfwBlocksTargetPort(
   return undefined
 }
 
+async function verifyLiveSshdPortOrRollback(
+  ssh: SshConnection,
+  parameters: {
+    originalConfig: string
+    originalPort: number
+    targetPort: number
+  }
+): Promise<ModuleResult | undefined> {
+  // R-0000283: poll the live socket so a successful restart is not declared
+  // changed when bind conflicts or external drop-ins kept sshd from listening
+  // on `targetPort`. Without this guard the runner would reconnect into the
+  // void.
+  if (await waitForLiveSshdPort(ssh, parameters.targetPort)) return undefined
+
+  const rollbackError = await rollbackSshdPortAfterFailedVerification(ssh, parameters)
+  const baseMessage =
+    `[sshd.port: ${String(parameters.targetPort)}] sshd restart succeeded but no listener ` +
+    `on port ${String(parameters.targetPort)} after ${String(LIVE_VERIFY_TIMEOUT_MS)}ms`
+  if (rollbackError == null) {
+    return failed(`${baseMessage}; rolled back to previous config and port`)
+  }
+  return failed(`${baseMessage}; rollback also failed: ${rollbackError}`)
+}
+
+async function restartAndVerifySshdPort(
+  ssh: SshConnection,
+  parameters: { originalConfig: string; originalPort: number; targetPort: number }
+): Promise<ModuleResult | undefined> {
+  const outcome = await restartSshdOnNewPort(ssh, parameters.targetPort, parameters.originalConfig)
+  // R-0000283: skip the live verification when the restart aborted the SSH
+  // session — the runner reconnects on the new port and re-running the
+  // module after reconnect catches any drift.
+  if (outcome !== "completed") return undefined
+  return verifyLiveSshdPortOrRollback(ssh, parameters)
+}
+
+async function applySshdPortWhenConfigUnchanged(
+  ssh: SshConnection,
+  parameters: { originalConfig: string; originalPort: number; targetPort: number }
+): Promise<ModuleResult> {
+  if (await liveSshdPortMatches(ssh, parameters.targetPort)) return { status: "ok" }
+  const verificationFailure = await restartAndVerifySshdPort(ssh, parameters)
+  if (verificationFailure != null) return verificationFailure
+  return {
+    meta: [sshdPortMeta(parameters.targetPort)],
+    status: "changed",
+  }
+}
+
 async function applySshdPort(ssh: SshConnection, targetPort: number): Promise<ModuleResult> {
   const ufwGuard = await rejectWhenUfwBlocksTargetPort(ssh, targetPort)
   if (ufwGuard != null) return ufwGuard
 
+  const { port: originalPort } = ssh.getConnectionInfo()
   const originalConfig = await ssh.readFile(SSHD_CONFIG_PATH)
   const { didChange, newContent } = buildSshdPortContent(originalConfig, targetPort)
   if (!didChange) {
-    if (await liveSshdPortMatches(ssh, targetPort)) return { status: "ok" }
-    await restartSshdOnNewPort(ssh, targetPort, originalConfig)
-    return {
-      meta: [sshdPortMeta(targetPort)],
-      status: "changed",
-    }
+    return applySshdPortWhenConfigUnchanged(ssh, { originalConfig, originalPort, targetPort })
   }
 
   await guardedWriteFile(ssh, {
@@ -413,7 +531,12 @@ async function applySshdPort(ssh: SshConnection, targetPort: number): Promise<Mo
   })
   const validationFailure = await validateSshdConfig(ssh, originalConfig)
   if (validationFailure != null) return validationFailure
-  await restartSshdOnNewPort(ssh, targetPort, originalConfig)
+  const verificationFailure = await restartAndVerifySshdPort(ssh, {
+    originalConfig,
+    originalPort,
+    targetPort,
+  })
+  if (verificationFailure != null) return verificationFailure
 
   return {
     meta: [sshdPortMeta(targetPort)],

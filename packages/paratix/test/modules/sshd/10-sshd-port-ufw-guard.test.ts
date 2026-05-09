@@ -58,6 +58,12 @@ const createMockSsh: typeof createBaseMockSsh = (responses, options) =>
       { command: "systemctl cat ssh.socket >/dev/null 2>&1", result: { code: 1 } },
       { command: "systemctl restart sshd", result: { code: 0 } },
       { command: /^rm -f '\/tmp\/paratix-sshd-dry-run-.+\.conf'$/v, result: { code: 0 } },
+      // R-0000283: post-restart live verify defaults to "listener present" so
+      // the existing fixtures keep proceeding past the new verify step.
+      {
+        command: /^ss -H -ltnp 'sport = :\d+'$/v,
+        result: { code: 0, stdout: 'LISTEN 0 128 0.0.0.0:0 users:(("sshd",pid=1,fd=3))\n' },
+      },
       ...(options?.responseStubs ?? []),
     ],
   })
@@ -74,6 +80,22 @@ function trackWriteFile(
     return Promise.resolve()
   })
   return writtenFiles
+}
+
+// R-0000283: post-restart verify probe pattern; tests that bulk-mock exec to
+// `code: 0, stdout: ""` need a stand-in stdout for these probes so
+// `liveSshdPortMatches` returns true.
+const SS_PROBE_PATTERN = /^ss -H -ltnp 'sport = :\d+'$/v
+const SS_PROBE_LISTENING_STDOUT = 'LISTEN 0 128 0.0.0.0:0 users:(("sshd",pid=1,fd=3))\n'
+
+function spyExecSuccessAcceptingSsProbe(mockSsh: ReturnType<typeof createMockSsh>) {
+  return vi.spyOn(mockSsh, "exec").mockImplementation(async (command) => {
+    await Promise.resolve()
+    if (SS_PROBE_PATTERN.test(command)) {
+      return { code: 0, stderr: "", stdout: SS_PROBE_LISTENING_STDOUT }
+    }
+    return { code: 0, stderr: "", stdout: "" }
+  })
 }
 
 describe("sshd.port — apply: ufw lockout guard", () => {
@@ -123,7 +145,7 @@ describe("sshd.port — apply: ufw lockout guard", () => {
       "ufw status": { stdout: UFW_STATUS_ACTIVE_PORT_2222_ALLOWED },
     })
     trackWriteFile(ssh)
-    const execSpy = vi.spyOn(ssh, "exec").mockResolvedValue({ code: 0, stderr: "", stdout: "" })
+    const execSpy = spyExecSuccessAcceptingSsProbe(ssh)
 
     const mod = sshd.port(2222)
     const result = await mod.apply(ssh, emptyEnv)
@@ -139,7 +161,7 @@ describe("sshd.port — apply: ufw lockout guard", () => {
       "ufw status": { stdout: UFW_STATUS_ACTIVE_PORT_2222_BOTH_FAMILIES },
     })
     trackWriteFile(ssh)
-    const execSpy = vi.spyOn(ssh, "exec").mockResolvedValue({ code: 0, stderr: "", stdout: "" })
+    const execSpy = spyExecSuccessAcceptingSsProbe(ssh)
 
     const mod = sshd.port(2222)
     const result = await mod.apply(ssh, emptyEnv)
@@ -155,7 +177,7 @@ describe("sshd.port — apply: ufw lockout guard", () => {
       "ufw status": { stdout: "Status: inactive" },
     })
     trackWriteFile(ssh)
-    const execSpy = vi.spyOn(ssh, "exec").mockResolvedValue({ code: 0, stderr: "", stdout: "" })
+    const execSpy = spyExecSuccessAcceptingSsProbe(ssh)
 
     const mod = sshd.port(2222)
     const result = await mod.apply(ssh, emptyEnv)

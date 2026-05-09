@@ -29,6 +29,13 @@ const createMockSsh: typeof createBaseMockSsh = (responses, options) =>
       { command: "systemctl enable --now ssh.socket", result: { code: 0 } },
       { command: "systemctl restart sshd", result: { code: 0 } },
       { command: /^rm -f '\/tmp\/paratix-sshd-dry-run-.+\.conf'$/v, result: { code: 0 } },
+      // R-0000283: default the post-restart live verify to "listener present"
+      // so existing fixtures keep passing. Tests that exercise the missing
+      // listener path stub `ss` explicitly with a non-zero exit.
+      {
+        command: /^ss -H -ltnp 'sport = :\d+'$/v,
+        result: { code: 0, stdout: 'LISTEN 0 128 0.0.0.0:2222 users:(("sshd",pid=1,fd=3))\n' },
+      },
       ...(options?.responseStubs ?? []),
     ],
   })
@@ -51,10 +58,68 @@ function trackWriteFile(
   return writtenFiles
 }
 
+// R-0000283: post-restart live verify probes `ss -H -ltnp 'sport = :<port>'`.
+// Tests that bulk-mock exec to `code: 0, stdout: ""` need a stand-in stdout for
+// these probes so `liveSshdPortMatches` returns true and the verify loop exits
+// instead of polling until timeout.
+const SS_PROBE_PATTERN = /^ss -H -ltnp 'sport = :\d+'$/v
+const SS_PROBE_LISTENING_STDOUT = 'LISTEN 0 128 0.0.0.0:0 users:(("sshd",pid=1,fd=3))\n'
+
+type ExecSpy = {
+  mockImplementation: (impl: ReturnType<typeof createMockSsh>["exec"]) => unknown
+} & ReturnType<typeof createMockSsh>["exec"]
+
+function mockExecResolvedValue(
+  execSpy: ExecSpy,
+  result: { code: number; stderr?: string; stdout?: string }
+) {
+  execSpy.mockImplementation(async (command) => {
+    await Promise.resolve()
+    if (SS_PROBE_PATTERN.test(command) && result.code === 0) {
+      return { code: 0, stderr: "", stdout: SS_PROBE_LISTENING_STDOUT }
+    }
+    return { code: result.code, stderr: result.stderr ?? "", stdout: result.stdout ?? "" }
+  })
+}
+
+function buildExecWithSsOverride(
+  originalExec: ReturnType<typeof createMockSsh>["exec"],
+  ssResponse: { code: number; stderr?: string; stdout?: string }
+): ReturnType<typeof createMockSsh>["exec"] {
+  return async (command, options) => {
+    if (!SS_PROBE_PATTERN.test(command)) return originalExec(command, options)
+    await Promise.resolve()
+    return {
+      code: ssResponse.code,
+      stderr: ssResponse.stderr ?? "",
+      stdout: ssResponse.stdout ?? "",
+    }
+  }
+}
+
+function buildSequencedSsProbeExec(
+  originalExec: ReturnType<typeof createMockSsh>["exec"],
+  responses: ReadonlyArray<{ code: number; stderr?: string; stdout?: string }>
+): ReturnType<typeof createMockSsh>["exec"] {
+  let callIndex = 0
+  return async (command, options) => {
+    if (!SS_PROBE_PATTERN.test(command)) {
+      return originalExec(command, options)
+    }
+    const response = responses[Math.min(callIndex, responses.length - 1)] ?? { code: 0 }
+    callIndex += 1
+    await Promise.resolve()
+    return { code: response.code, stderr: response.stderr ?? "", stdout: response.stdout ?? "" }
+  }
+}
+
 function mockSshdDryRunExecSuccess(mockSsh: ReturnType<typeof createMockSsh>) {
   return vi.spyOn(mockSsh, "exec").mockImplementation(async (command) => {
     mockSsh.calls.push(command)
     await Promise.resolve()
+    if (SS_PROBE_PATTERN.test(command)) {
+      return { code: 0, stderr: "", stdout: SS_PROBE_LISTENING_STDOUT }
+    }
     return { code: 0, stderr: "", stdout: "" }
   })
 }
@@ -117,7 +182,7 @@ describe("sshd.port — apply: validation and rollback", () => {
     const addPortSpy = vi.spyOn(mockSsh, "addPort")
 
     // All exec calls succeed: sshd -t passes, systemctl restart runs
-    execSpy.mockResolvedValue({ code: 0, stderr: "", stdout: "" })
+    mockExecResolvedValue(execSpy, { code: 0 })
 
     const mod = sshd.port(2222)
     const result = await mod.apply(mockSsh, emptyEnv)
@@ -143,7 +208,7 @@ describe("sshd.port — apply: validation and rollback", () => {
     trackWriteFile(mockSsh)
     const execSpy = vi.spyOn(mockSsh, "exec")
 
-    execSpy.mockResolvedValue({ code: 0, stderr: "", stdout: "" })
+    mockExecResolvedValue(execSpy, { code: 0 })
 
     const mod = sshd.port(2222)
     await mod.apply(mockSsh, emptyEnv)
@@ -215,7 +280,7 @@ describe("sshd.port — apply: validation and rollback", () => {
     trackWriteFile(mockSsh)
     const execSpy = vi.spyOn(mockSsh, "exec")
 
-    execSpy.mockResolvedValue({ code: 0, stderr: "", stdout: "" })
+    mockExecResolvedValue(execSpy, { code: 0 })
 
     const mod = sshd.port(2222)
     await mod.apply(mockSsh, emptyEnv)
@@ -249,12 +314,23 @@ describe("sshd.port — apply: validation and rollback", () => {
   })
 
   it("restarts and emits reconnect meta when config matches but target port is not live", async () => {
+    // R-0000283: live-verify probes `ss -H -ltnp` twice — once before the
+    // restart (where the listener is not yet present) and once after (where
+    // the post-restart verify confirms the listener is up). Use the sequenced
+    // helper so the pre/post progression is explicit.
     const mockSsh = createMockSsh({
       [CAT_SSHD]: { stdout: "Port 2222\n" },
-      "ss -H -ltnp 'sport = :2222'": { code: 1, stdout: "" },
     })
     const writtenFiles = trackWriteFile(mockSsh)
-    const execSpy = vi.spyOn(mockSsh, "exec")
+    const originalExec = mockSsh.exec.bind(mockSsh)
+    const execSpy = vi
+      .spyOn(mockSsh, "exec")
+      .mockImplementation(
+        buildSequencedSsProbeExec(originalExec, [
+          { code: 1 },
+          { code: 0, stdout: SS_PROBE_LISTENING_STDOUT },
+        ])
+      )
     const addPortSpy = vi.spyOn(mockSsh, "addPort")
 
     const mod = sshd.port(2222)
@@ -275,7 +351,7 @@ describe("sshd.port — apply: validation and rollback", () => {
     const execSpy = vi.spyOn(mockSsh, "exec")
     const addPortSpy = vi.spyOn(mockSsh, "addPort")
 
-    execSpy.mockResolvedValue({ code: 0, stderr: "", stdout: "" })
+    mockExecResolvedValue(execSpy, { code: 0 })
 
     const mod = sshd.port(2222)
     await mod.apply(mockSsh, emptyEnv)
@@ -455,6 +531,53 @@ describe("sshd.port — apply: validation and rollback", () => {
     expect(result.status).toBe("changed")
     expect(execSpy.mock.calls.map((args) => args[0])).toContain("systemctl restart ssh")
   })
+
+  // R-0000283: a successful restart that leaves no listener on the target port
+  // must not be reported as `changed`. The runner would reconnect into the
+  // void; instead surface a structured failure and roll back.
+  it("R-0000283: returns failed when restart succeeds but no listener appears on the target port", async () => {
+    const originalConfig = "Port 22"
+    const mockSsh = createMockSsh({
+      [CAT_SSHD]: { stdout: originalConfig },
+    })
+    const writtenFiles = trackWriteFile(mockSsh)
+    const originalExec = mockSsh.exec.bind(mockSsh)
+    vi.spyOn(mockSsh, "exec").mockImplementation(buildExecWithSsOverride(originalExec, { code: 0 }))
+    const removePortSpy = vi.spyOn(mockSsh, "removePort")
+
+    const mod = sshd.port(2222)
+    const result = await mod.apply(mockSsh, emptyEnv)
+
+    expect(result.status).toBe("failed")
+    expect(result.error?.message).toContain("no listener on port 2222")
+    expect(result.error?.message).toContain("rolled back")
+    // Last write must restore the original config.
+    expect(writtenFiles.at(-1)?.content).toBe(originalConfig)
+    expect(removePortSpy).toHaveBeenCalledWith(2222)
+  }, 10_000)
+
+  it("R-0000283: combines verify failure with rollback writeFile failure in the error message", async () => {
+    const originalConfig = "Port 22"
+    const mockSsh = createMockSsh({
+      [CAT_SSHD]: { stdout: originalConfig },
+    })
+    // First write (new config) succeeds, rollback write fails.
+    const writeFileSpy = vi
+      .spyOn(mockSsh, "writeFile")
+      .mockResolvedValueOnce(undefined)
+      .mockRejectedValueOnce(new Error("SFTP rollback failed"))
+    const originalExec = mockSsh.exec.bind(mockSsh)
+    vi.spyOn(mockSsh, "exec").mockImplementation(buildExecWithSsOverride(originalExec, { code: 0 }))
+
+    const mod = sshd.port(2222)
+    const result = await mod.apply(mockSsh, emptyEnv)
+
+    expect(result.status).toBe("failed")
+    expect(result.error?.message).toContain("no listener on port 2222")
+    expect(result.error?.message).toContain("rollback also failed")
+    expect(result.error?.message).toContain("SFTP rollback failed")
+    expect(writeFileSpy).toHaveBeenCalled()
+  }, 10_000)
 })
 
 // ─── sshd.port — dry-run ─────────────────────────────────────────────────────
