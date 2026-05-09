@@ -1,6 +1,6 @@
 import type { ModuleResult, SshConnection } from "../types.js"
 
-import { failed } from "../moduleFailure.js"
+import { failed, failedCommand } from "../moduleFailure.js"
 import { shellQuote } from "../ssh.js"
 import {
   type FileOwnership,
@@ -9,11 +9,24 @@ import {
   renderChownCommand,
 } from "./fileMetadataHelpers.js"
 
+const EXEC_OPTS = { ignoreExitCode: true, silent: true } as const
+
+/** Result of a directory mutation step: a failure result, "changed", or "unchanged". */
+type DirectoryStepResult = boolean | ModuleResult
+
+function isDirectoryFailure(result: DirectoryStepResult): result is ModuleResult {
+  return typeof result !== "boolean"
+}
+
 /**
  * Issue `chmod` only when the current mode differs from the requested mode.
  *
  * Comparison strips leading zeros from the requested mode so callers can pass
  * canonical values like `"0755"` while `stat -c '%a'` reports `"755"`.
+ *
+ * R-0000270: failures (read-only fs, EPERM, missing path) are surfaced as a
+ * failedCommand result instead of an unguarded CommandError so the caller can
+ * forward the maskable failure through the runner pipeline.
  *
  * @param input - Mode application context.
  * @param input.ownership - Current ownership state, or `undefined` when the
@@ -21,19 +34,24 @@ import {
  * @param input.remotePath - Path of the directory on the remote host.
  * @param input.requestedMode - Desired chmod mode string (e.g. `"0755"`).
  * @param input.ssh - Connected SSH session.
- * @returns `true` when a chmod was issued, `false` when the mode already matches.
+ * @returns `true` when a chmod was issued, `false` when the mode already
+ *   matches, or a failed {@link ModuleResult} when chmod exited non-zero.
  */
 export async function applyDirectoryMode(input: {
   ownership: FileOwnership | undefined
   remotePath: string
   requestedMode: string
   ssh: SshConnection
-}): Promise<boolean> {
+}): Promise<DirectoryStepResult> {
   const modeAlreadyMatches = input.ownership?.mode === input.requestedMode.replace(/^0+/v, "")
   if (modeAlreadyMatches) return false
-  await input.ssh.exec(`chmod ${shellQuote(input.requestedMode)} ${shellQuote(input.remotePath)}`, {
-    silent: true,
-  })
+  const result = await input.ssh.exec(
+    `chmod ${shellQuote(input.requestedMode)} ${shellQuote(input.remotePath)}`,
+    EXEC_OPTS
+  )
+  if (result.code !== 0) {
+    return failedCommand(`[file.directory: ${input.remotePath}] chmod failed`, result)
+  }
   return true
 }
 
@@ -41,26 +59,34 @@ export async function applyDirectoryMode(input: {
  * Issue `chown` only when the current owner (and optionally group) differs
  * from the requested value. The match logic mirrors {@link ownershipMatches}.
  *
+ * R-0000270: failures (NSS lookup error, EPERM) are surfaced as a
+ * failedCommand result so apply does not mask the underlying cause.
+ *
  * @param input - Owner application context.
  * @param input.ownership - Current ownership state, or `undefined` when the
  *   directory does not yet exist (in which case `chown` is always issued).
  * @param input.remotePath - Path of the directory on the remote host.
  * @param input.requestedOwner - Desired chown spec (e.g. `"www-data:www-data"`).
  * @param input.ssh - Connected SSH session.
- * @returns `true` when a chown was issued, `false` when the owner already matches.
+ * @returns `true` when a chown was issued, `false` when the owner already
+ *   matches, or a failed {@link ModuleResult} when chown exited non-zero.
  */
 export async function applyDirectoryOwner(input: {
   ownership: FileOwnership | undefined
   remotePath: string
   requestedOwner: string
   ssh: SshConnection
-}): Promise<boolean> {
+}): Promise<DirectoryStepResult> {
   const ownerAlreadyMatches =
     input.ownership != null && ownershipMatches(input.ownership, { owner: input.requestedOwner })
   if (ownerAlreadyMatches) return false
-  await input.ssh.exec(renderChownCommand(input.requestedOwner, input.remotePath), {
-    silent: true,
-  })
+  const result = await input.ssh.exec(
+    renderChownCommand(input.requestedOwner, input.remotePath),
+    EXEC_OPTS
+  )
+  if (result.code !== 0) {
+    return failedCommand(`[file.directory: ${input.remotePath}] chown failed`, result)
+  }
   return true
 }
 
@@ -68,10 +94,46 @@ async function ensureDirectoryExists(input: {
   exists: boolean
   remotePath: string
   ssh: SshConnection
-}): Promise<boolean> {
+}): Promise<DirectoryStepResult> {
   if (input.exists) return false
-  await input.ssh.exec(`mkdir -p ${shellQuote(input.remotePath)}`, { silent: true })
+  // R-0000270: mkdir on a read-only fs or in a directory the current user
+  // cannot write to must propagate as a failedCommand result, not as an
+  // unguarded CommandError that bypasses the runner failure pipeline.
+  const result = await input.ssh.exec(`mkdir -p ${shellQuote(input.remotePath)}`, EXEC_OPTS)
+  if (result.code !== 0) {
+    return failedCommand(`[file.directory: ${input.remotePath}] mkdir failed`, result)
+  }
   return true
+}
+
+async function applyDirectoryMetadataDrift(input: {
+  options?: { mode?: string; owner?: string }
+  ownership: FileOwnership | undefined
+  remotePath: string
+  ssh: SshConnection
+}): Promise<DirectoryStepResult> {
+  let changed = false
+  if (input.options?.mode != null) {
+    const modeResult = await applyDirectoryMode({
+      ownership: input.ownership,
+      remotePath: input.remotePath,
+      requestedMode: input.options.mode,
+      ssh: input.ssh,
+    })
+    if (isDirectoryFailure(modeResult)) return modeResult
+    changed ||= modeResult
+  }
+  if (input.options?.owner != null) {
+    const ownerResult = await applyDirectoryOwner({
+      ownership: input.ownership,
+      remotePath: input.remotePath,
+      requestedOwner: input.options.owner,
+      ssh: input.ssh,
+    })
+    if (isDirectoryFailure(ownerResult)) return ownerResult
+    changed ||= ownerResult
+  }
+  return changed
 }
 
 /**
@@ -98,33 +160,22 @@ export async function applyDirectoryState(input: {
     return failed(`[file.directory: ${input.remotePath}] path must not be a symlink`)
   }
   const exists = await input.ssh.test(`[ -d ${shellQuote(input.remotePath)} ]`)
-  let changed = await ensureDirectoryExists({
+  const mkdirResult = await ensureDirectoryExists({
     exists,
     remotePath: input.remotePath,
     ssh: input.ssh,
   })
+  if (isDirectoryFailure(mkdirResult)) return mkdirResult
 
   const ownership = exists ? await readOwnership(input.ssh, input.remotePath) : undefined
+  const metadataResult = await applyDirectoryMetadataDrift({
+    options: input.options,
+    ownership,
+    remotePath: input.remotePath,
+    ssh: input.ssh,
+  })
+  if (isDirectoryFailure(metadataResult)) return metadataResult
 
-  if (input.options?.mode != null) {
-    const modeChanged = await applyDirectoryMode({
-      ownership,
-      remotePath: input.remotePath,
-      requestedMode: input.options.mode,
-      ssh: input.ssh,
-    })
-    changed ||= modeChanged
-  }
-
-  if (input.options?.owner != null) {
-    const ownerChanged = await applyDirectoryOwner({
-      ownership,
-      remotePath: input.remotePath,
-      requestedOwner: input.options.owner,
-      ssh: input.ssh,
-    })
-    changed ||= ownerChanged
-  }
-
+  const changed = mkdirResult || metadataResult
   return { status: changed ? "changed" : "ok" }
 }

@@ -214,6 +214,59 @@ describe("file.directory", () => {
     expect(ssh.calls).not.toContain("chmod '0755' '/var/app'")
     expect(ssh.calls).not.toContain("chown -- 'www-data:www-data' '/var/app'")
   })
+
+  it("R-0000270: returns failed when mkdir on a read-only filesystem exits non-zero", async () => {
+    // mkdir failures (read-only mount, EACCES on a guarded mount) must
+    // propagate as a failedCommand ModuleResult so the runner reports the
+    // captured stderr instead of an unguarded CommandError exception.
+    const ssh = createMockSsh({
+      "[ -d '/var/app' ]": { code: 1 },
+      "[ -L '/var/app' ]": { code: 1 },
+      "mkdir -p '/var/app'": {
+        code: 1,
+        stderr: "mkdir: cannot create directory '/var/app': Read-only file system",
+      },
+    })
+    const mod = file.directory("/var/app")
+    const result = await mod.apply(ssh, emptyEnv)
+
+    expect(result.status).toBe("failed")
+    expect(String(result.error)).toContain("mkdir failed")
+  })
+
+  it("R-0000270: returns failed when chmod on an existing directory exits non-zero", async () => {
+    const ssh = createMockSsh({
+      "[ -d '/var/app' ]": { code: 0 },
+      "[ -L '/var/app' ]": { code: 1 },
+      "chmod '0755' '/var/app'": {
+        code: 1,
+        stderr: "chmod: changing permissions of '/var/app': Operation not permitted",
+      },
+      "stat -c '%a %U %G' '/var/app'": { stdout: "700 root root" },
+    })
+    const mod = file.directory("/var/app", { mode: "0755" })
+    const result = await mod.apply(ssh, emptyEnv)
+
+    expect(result.status).toBe("failed")
+    expect(String(result.error)).toContain("chmod failed")
+  })
+
+  it("R-0000270: returns failed when chown on an existing directory exits non-zero", async () => {
+    const ssh = createMockSsh({
+      "[ -d '/var/app' ]": { code: 0 },
+      "[ -L '/var/app' ]": { code: 1 },
+      "chown -- 'www-data' '/var/app'": {
+        code: 1,
+        stderr: "chown: invalid user: 'www-data'",
+      },
+      "stat -c '%a %U %G' '/var/app'": { stdout: "755 root root" },
+    })
+    const mod = file.directory("/var/app", { owner: "www-data" })
+    const result = await mod.apply(ssh, emptyEnv)
+
+    expect(result.status).toBe("failed")
+    expect(String(result.error)).toContain("chown failed")
+  })
 })
 
 describe("file.absent", () => {
