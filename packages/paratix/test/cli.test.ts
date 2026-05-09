@@ -7,7 +7,6 @@ import { afterEach, beforeEach, describe, expect, it, type MockInstance, vi } fr
 
 import {
   applyCliEnvironmentOverrides,
-  applyCliProcessEnvironment,
   collectDefinitionErrors,
   collectEnvironment,
   exitAfterApplyError,
@@ -20,6 +19,7 @@ import {
   printExceptionError,
   resetTsxRegistrationForTests,
   runApplyCommand,
+  withCliProcessEnvironment,
 } from "../src/cli.js"
 import { printCliHeader } from "../src/output.js"
 import { clearRegisteredSecrets, registerSecret } from "../src/secretSink.js"
@@ -293,90 +293,128 @@ describe("applyCliEnvironmentOverrides", () => {
   })
 })
 
-describe("applyCliProcessEnvironment", () => {
+describe("withCliProcessEnvironment", () => {
   afterEach(() => {
     delete process.env.PARATIX_FIRST_RUN
   })
 
-  it("leaves process.env unchanged without --first-run", () => {
-    const restore = applyCliProcessEnvironment({ firstRun: false })
+  it("leaves process.env unchanged without --first-run", async () => {
+    let observed: string | undefined
+    await withCliProcessEnvironment({ firstRun: false }, async () => {
+      await Promise.resolve()
+      observed = process.env.PARATIX_FIRST_RUN
+    })
 
-    expect(process.env.PARATIX_FIRST_RUN).toBeUndefined()
-    restore()
-    expect(process.env.PARATIX_FIRST_RUN).toBeUndefined()
-  })
-
-  it("sets process.env.PARATIX_FIRST_RUN before playbook loading when --first-run is enabled", () => {
-    const restore = applyCliProcessEnvironment({ firstRun: true })
-
-    expect(process.env.PARATIX_FIRST_RUN).toBe("true")
-    restore()
+    expect(observed).toBeUndefined()
     expect(process.env.PARATIX_FIRST_RUN).toBeUndefined()
   })
 
-  it("restores an existing PARATIX_FIRST_RUN value", () => {
+  it("sets process.env.PARATIX_FIRST_RUN before playbook loading when --first-run is enabled", async () => {
+    let observed: string | undefined
+    await withCliProcessEnvironment({ firstRun: true }, async () => {
+      await Promise.resolve()
+      observed = process.env.PARATIX_FIRST_RUN
+    })
+
+    expect(observed).toBe("true")
+    expect(process.env.PARATIX_FIRST_RUN).toBeUndefined()
+  })
+
+  it("restores an existing PARATIX_FIRST_RUN value", async () => {
     process.env.PARATIX_FIRST_RUN = "external"
 
-    const restore = applyCliProcessEnvironment({ firstRun: true })
+    let observed: string | undefined
+    await withCliProcessEnvironment({ firstRun: true }, async () => {
+      await Promise.resolve()
+      observed = process.env.PARATIX_FIRST_RUN
+    })
 
-    expect(process.env.PARATIX_FIRST_RUN).toBe("true")
-    restore()
+    expect(observed).toBe("true")
     expect(process.env.PARATIX_FIRST_RUN).toBe("external")
   })
 
-  it("deletes PARATIX_FIRST_RUN on restore when no previous value was set (firstRun=true)", () => {
+  it("deletes PARATIX_FIRST_RUN on restore when no previous value was set (firstRun=true)", async () => {
     expect(process.env.PARATIX_FIRST_RUN).toBeUndefined()
 
-    const restore = applyCliProcessEnvironment({ firstRun: true })
+    let observed: string | undefined
+    await withCliProcessEnvironment({ firstRun: true }, async () => {
+      await Promise.resolve()
+      observed = process.env.PARATIX_FIRST_RUN
+    })
 
-    expect(process.env.PARATIX_FIRST_RUN).toBe("true")
-    restore()
-
+    expect(observed).toBe("true")
     // The key must be removed entirely, not assigned the literal string "undefined".
     expect(Object.hasOwn(process.env, "PARATIX_FIRST_RUN")).toBe(false)
     expect(process.env.PARATIX_FIRST_RUN).toBeUndefined()
   })
 
-  it("restores process.env to the pre-CLI value across nested reentrant calls", () => {
+  it("restores process.env to the pre-CLI value across nested reentrant calls", async () => {
     expect(process.env.PARATIX_FIRST_RUN).toBeUndefined()
 
-    const restoreOuter = applyCliProcessEnvironment({ firstRun: true })
-    expect(process.env.PARATIX_FIRST_RUN).toBe("true")
+    let outerObserved: string | undefined
+    let innerObserved: string | undefined
+    let afterInnerObserved: string | undefined
 
-    // A reentrant call must not capture the synthetic "true" set by the
-    // outer call as its restore target.
-    const restoreInner = applyCliProcessEnvironment({ firstRun: true })
-    expect(process.env.PARATIX_FIRST_RUN).toBe("true")
+    await withCliProcessEnvironment({ firstRun: true }, async () => {
+      outerObserved = process.env.PARATIX_FIRST_RUN
 
-    restoreInner()
-    // The outer frame still depends on the synthetic value, so the key must
-    // remain "true" until the outer frame restores.
-    expect(process.env.PARATIX_FIRST_RUN).toBe("true")
+      // A reentrant call must not capture the synthetic "true" set by the
+      // outer call as its restore target.
+      await withCliProcessEnvironment({ firstRun: true }, async () => {
+        await Promise.resolve()
+        innerObserved = process.env.PARATIX_FIRST_RUN
+      })
 
-    restoreOuter()
+      // The outer frame still depends on the synthetic value, so the key must
+      // remain "true" until the outer frame restores.
+      afterInnerObserved = process.env.PARATIX_FIRST_RUN
+    })
+
+    expect(outerObserved).toBe("true")
+    expect(innerObserved).toBe("true")
+    expect(afterInnerObserved).toBe("true")
     // After the outermost frame restores, the original (absent) state is
     // recovered — not the synthetic "true" the inner call observed.
     expect(Object.hasOwn(process.env, "PARATIX_FIRST_RUN")).toBe(false)
     expect(process.env.PARATIX_FIRST_RUN).toBeUndefined()
   })
 
-  it("preserves an externally set value when reentrant calls layer firstRun", () => {
+  it("preserves an externally set value when reentrant calls layer firstRun", async () => {
     process.env.PARATIX_FIRST_RUN = "external"
 
-    const restoreOuter = applyCliProcessEnvironment({ firstRun: true })
-    expect(process.env.PARATIX_FIRST_RUN).toBe("true")
+    await withCliProcessEnvironment({ firstRun: true }, async () => {
+      expect(process.env.PARATIX_FIRST_RUN).toBe("true")
 
-    const restoreInner = applyCliProcessEnvironment({ firstRun: true })
-    expect(process.env.PARATIX_FIRST_RUN).toBe("true")
+      await withCliProcessEnvironment({ firstRun: true }, async () => {
+        await Promise.resolve()
+        expect(process.env.PARATIX_FIRST_RUN).toBe("true")
+      })
 
-    restoreInner()
-    expect(process.env.PARATIX_FIRST_RUN).toBe("true")
+      expect(process.env.PARATIX_FIRST_RUN).toBe("true")
+    })
 
-    restoreOuter()
     expect(process.env.PARATIX_FIRST_RUN).toBe("external")
   })
 
-  it("does not assign the literal string 'undefined' when restoring", () => {
+  it("restores process.env even when the body throws", async () => {
+    expect(process.env.PARATIX_FIRST_RUN).toBeUndefined()
+
+    // R-0000265: the wrapper must keep the try/finally discipline regardless
+    // of how the body resolves. A throwing body that previously bypassed an
+    // ad-hoc restore call would have left the global env stuck on "true".
+    await expect(
+      withCliProcessEnvironment({ firstRun: true }, async () => {
+        await Promise.resolve()
+        expect(process.env.PARATIX_FIRST_RUN).toBe("true")
+        throw new Error("body failure")
+      })
+    ).rejects.toThrow("body failure")
+
+    expect(Object.hasOwn(process.env, "PARATIX_FIRST_RUN")).toBe(false)
+    expect(process.env.PARATIX_FIRST_RUN).toBeUndefined()
+  })
+
+  it("does not assign the literal string 'undefined' when restoring", async () => {
     // Capture every assignment of process.env's PARATIX_FIRST_RUN. A
     // regression would write the literal string "undefined" via
     // `process.env[KEY] = previousValue` when previousValue is undefined.
@@ -394,9 +432,10 @@ describe("applyCliProcessEnvironment", () => {
     const previousEnvironment = process.env
     Reflect.set(process, "env", proxy)
     try {
-      const restore = applyCliProcessEnvironment({ firstRun: true })
-      expect(process.env.PARATIX_FIRST_RUN).toBe("true")
-      restore()
+      await withCliProcessEnvironment({ firstRun: true }, async () => {
+        await Promise.resolve()
+        expect(process.env.PARATIX_FIRST_RUN).toBe("true")
+      })
 
       const firstRunAssignments = seenAssignments
         .filter(([key]) => key === "PARATIX_FIRST_RUN")
@@ -1663,7 +1702,7 @@ describe("CLI entrypoint", () => {
     }
   })
 
-  // R-0000208: applyCliProcessEnvironment intentionally mutates the global
+  // R-0000208: withCliProcessEnvironment intentionally mutates the global
   // process.env so the playbook's top-level import() can observe the
   // first-run flag. While the synthetic "true" is installed, every other
   // code path in the same process sees it — concurrent embedded runners

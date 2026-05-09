@@ -311,7 +311,7 @@ export function isDirectCliExecution(moduleUrl: string, candidateEntryScript?: s
  * by the runner and threaded into module execution; runner code never reads
  * {@link FIRST_RUN_ENV_NAME} from `process.env` directly.
  *
- * The companion {@link applyCliProcessEnvironment} mutates the global
+ * The companion {@link withCliProcessEnvironment} mutates the global
  * `process.env` only for the duration of the playbook's top-level
  * `import()` so playbooks can read `process.env.PARATIX_FIRST_RUN` at module
  * scope. See that function's documentation for the cross-contamination
@@ -333,7 +333,7 @@ export function applyCliEnvironmentOverrides(
 
 /**
  * Snapshot of the original `process.env[FIRST_RUN_ENV_NAME]` value before the
- * outermost {@link applyCliProcessEnvironment} mutation. The CLI is normally
+ * outermost {@link withCliProcessEnvironment} mutation. The CLI is normally
  * single-shot, but tests and embedded runners can call it reentrantly. Without
  * this stack the second call would capture the synthetic "true" the first call
  * just installed, and "restore" it back instead of removing the key. The
@@ -361,32 +361,11 @@ function captureFirstRunEnvironmentSnapshot(): FirstRunEnvironmentSnapshot {
 }
 
 /**
- * Mutates the **global** `process.env` so that the playbook's top-level
- * `import()` evaluation can observe `PARATIX_FIRST_RUN` synchronously, and
- * returns a restore callback that the caller MUST invoke once the playbook
- * has been loaded.
- *
- * Scope and visibility (R-0000208):
- *
- * - The flag is set on the process-wide `process.env` because Node's
- *   ECMAScript module loader has no per-import override; there is no other
- *   way for a freshly imported playbook to read the value at module scope.
- * - While the returned restore callback is pending, every other code path
- *   in the same Node process — including unrelated worker tasks, vitest
- *   worker-pool fixtures, or async initializers triggered by other
- *   imports — will observe `PARATIX_FIRST_RUN === "true"`. Embedding paratix
- *   in a host application that runs concurrent first-run loads is therefore
- *   not supported; serialize the calls or run each load in a separate
- *   Node process / worker thread.
- * - Reentrant CLI calls are supported: the snapshot taken on the outermost
- *   invocation always wins, so nested calls cannot overwrite the genuine
- *   pre-CLI value with the synthetic `"true"` an outer call installed.
- *
- * The runner does not read this flag from `process.env` — it consumes the
- * value through the typed Environment returned by
- * {@link applyCliEnvironmentOverrides} — so business logic remains free of
- * implicit globals; the global mutation exists only for the playbook's
- * top-level statements.
+ * Acquire the process-environment frame for the duration of one
+ * {@link withCliProcessEnvironment} call and return the matching restore
+ * action. Internal helper: the public entrypoint is
+ * {@link withCliProcessEnvironment}, which guarantees the restore runs in a
+ * try/finally regardless of how `body` resolves.
  *
  * @param options - CLI flags that determine which mutations to apply.
  * @param options.firstRun - When `true`, sets `PARATIX_FIRST_RUN=true` in
@@ -394,7 +373,7 @@ function captureFirstRunEnvironmentSnapshot(): FirstRunEnvironmentSnapshot {
  * @returns A callback that reverts the mutation. Calling it more than once
  *   is safe; only the first call has an effect.
  */
-export function applyCliProcessEnvironment(options: { firstRun: boolean }): () => void {
+function enterCliProcessEnvironmentFrame(options: { firstRun: boolean }): () => void {
   const snapshot = captureFirstRunEnvironmentSnapshot()
   firstRunEnvironmentDepth += 1
   let restored = false
@@ -416,9 +395,64 @@ export function applyCliProcessEnvironment(options: { firstRun: boolean }): () =
     }
     process.env[FIRST_RUN_ENV_NAME] = snapshot.previousValue
   }
-  if (!options.firstRun) return restoreProcessEnvironment
-  process.env[FIRST_RUN_ENV_NAME] = "true"
+  if (options.firstRun) {
+    process.env[FIRST_RUN_ENV_NAME] = "true"
+  }
   return restoreProcessEnvironment
+}
+
+/**
+ * Runs `body` while the global `process.env` carries the CLI-derived
+ * overrides (currently `PARATIX_FIRST_RUN`) and guarantees the original
+ * environment is restored before returning, regardless of whether `body`
+ * resolves or rejects.
+ *
+ * R-0000265: this helper replaces the previous `applyCliProcessEnvironment`
+ * which returned a manual restore callback. That API trusted every caller
+ * to wire up its own try/finally; a missed restore in any code path left
+ * `PARATIX_FIRST_RUN=true` stuck on the process for the rest of its
+ * lifetime. Wrapping the body internally removes the discipline burden.
+ *
+ * Scope and visibility (R-0000208):
+ *
+ * - The flag is set on the process-wide `process.env` because Node's
+ *   ECMAScript module loader has no per-import override; there is no other
+ *   way for a freshly imported playbook to read the value at module scope.
+ * - While `body` is running, every other code path in the same Node
+ *   process — including unrelated worker tasks, vitest worker-pool
+ *   fixtures, or async initializers triggered by other imports — will
+ *   observe `PARATIX_FIRST_RUN === "true"`. Embedding paratix in a host
+ *   application that runs concurrent first-run loads is therefore not
+ *   supported; serialize the calls or run each load in a separate Node
+ *   process / worker thread.
+ * - Reentrant CLI calls are supported: the snapshot taken on the outermost
+ *   invocation always wins, so nested calls cannot overwrite the genuine
+ *   pre-CLI value with the synthetic `"true"` an outer call installed.
+ *
+ * The runner does not read this flag from `process.env` — it consumes the
+ * value through the typed Environment returned by
+ * {@link applyCliEnvironmentOverrides} — so business logic remains free of
+ * implicit globals; the global mutation exists only for the playbook's
+ * top-level statements.
+ *
+ * @param options - CLI flags that determine which mutations to apply.
+ * @param options.firstRun - When `true`, sets `PARATIX_FIRST_RUN=true` in
+ *   `process.env` for the duration of `body`.
+ * @param body - Async work to run while the override is installed. Its
+ *   resolved value is forwarded; rejections propagate after the restore
+ *   runs in `finally`.
+ * @returns The value resolved by `body`.
+ */
+export async function withCliProcessEnvironment<T>(
+  options: { firstRun: boolean },
+  body: () => Promise<T>
+): Promise<T> {
+  const restoreProcessEnvironment = enterCliProcessEnvironmentFrame(options)
+  try {
+    return await body()
+  } finally {
+    restoreProcessEnvironment()
+  }
 }
 
 /**
@@ -490,9 +524,7 @@ export async function loadServerDefinitionFromFile(
   const fileUrl = pathToFileURL(filePath).href
   const isTypeScriptEntry = TYPESCRIPT_ENTRY_EXTENSIONS.has(extname(filePath).toLowerCase())
 
-  const restoreProcessEnvironment = applyCliProcessEnvironment(options)
-
-  try {
+  return withCliProcessEnvironment(options, async () => {
     // Register tsx for TypeScript imports.
     // R-0000071: narrow the catch so only a genuine missing-tsx error is
     // routed through handleTsxLoadFailure. Any other error from the dynamic
@@ -509,9 +541,7 @@ export async function loadServerDefinitionFromFile(
 
     validateServerDefinition(definition, filePath)
     return definition
-  } finally {
-    restoreProcessEnvironment()
-  }
+  })
 }
 
 type ApplyCommandOptions = {
