@@ -4027,6 +4027,34 @@ describe("SshConnectionImpl", () => {
       expect(promptTerminal).not.toHaveBeenCalled()
     })
 
+    it("clears the cached sudo probe reason when the transport disconnects so a reconnect to a working host re-probes (R-0000258 regression)", () => {
+      // Regression: disconnectTransport (used internally by reconnect() and
+      // updateHost-after-reboot paths) did NOT reset sudoProbeFailedReason.
+      // After a successful reconnect to a different host with working sudo,
+      // ensureSudoReady would still throw the cached probe failure from the
+      // previous host. The fix mirrors the public disconnect() semantics in
+      // the internal teardown path.
+      const ssh = makeConnectedSsh(makeClientWithEnd(vi.fn()), {
+        sudoPassword: null,
+        user: "deploy",
+      })
+      const internals = ssh as unknown as Record<string, unknown>
+      // Simulate a previous probe failure plus stale sudo flags.
+      internals.sudoProbeFailedReason = new Error("sudo is not installed")
+      internals.sudoReady = true
+      internals.credentialCachePrimed = true
+      internals.passwordlessSudo = true
+
+      // Simulate disconnectTransport (the internal teardown reconnect()
+      // performs before opening a new transport on a different host).
+      ;(ssh as unknown as { disconnectTransport: () => void }).disconnectTransport()
+
+      expect(internals.sudoProbeFailedReason).toBeNull()
+      expect(internals.sudoReady).toBe(false)
+      expect(internals.credentialCachePrimed).toBe(false)
+      expect(internals.passwordlessSudo).toBe(false)
+    })
+
     it("propagates exec callback errors from test()", async () => {
       const execSpy = vi.fn().mockImplementation((_command: string, callback: ExecCallback) => {
         callback(new Error("channel open failed"), makeStream())

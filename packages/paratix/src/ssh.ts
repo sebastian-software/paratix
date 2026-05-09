@@ -303,11 +303,10 @@ export class SshConnectionImpl implements SshConnection {
 
   public disconnect(): void {
     this.clearCachedPassword()
-    // R-0000145: a fresh connection deserves a fresh probe attempt; the
-    // cached failure reason from a previous session must not poison a new
-    // one (e.g. after the operator has installed sudo on the remote host).
-    this.sudoProbeFailedReason = null
-    this.sudoReady = false
+    // R-0000145 / R-0000258: disconnectTransport now resets the sudo-related
+    // state (sudoProbeFailedReason, sudoReady, credentialCachePrimed,
+    // passwordlessSudo) so reconnect()/updateHost paths inherit the same
+    // fresh-probe semantics that public disconnect() needs.
     this.disconnectTransport()
   }
 
@@ -943,6 +942,27 @@ export class SshConnectionImpl implements SshConnection {
    * Schedule a `client.destroy()` fallback so test runners and reconnect
    * loops do not leak sockets when the peer never replies.
    */
+  /**
+   * Reset connection-derived state that must not survive a transport teardown.
+   *
+   * - R-0000236 clears the identity fields (connectedPort, authMethod,
+   *   agentSocket) so getConnectionInfo() does not return stale values that
+   *   would mislead reconnect-rollback logic.
+   * - R-0000258 clears the sudo-related state (sudoProbeFailedReason,
+   *   sudoReady, credentialCachePrimed, passwordlessSudo) so reconnect()/
+   *   updateHost paths start with a fresh sudo reality and do not re-throw a
+   *   cached probe failure from the previous host.
+   */
+  private resetTransportDerivedState(): void {
+    this.connectedPort = 0
+    this.authMethod = null
+    this.agentSocket = null
+    this.sudoProbeFailedReason = null
+    this.sudoReady = false
+    this.credentialCachePrimed = false
+    this.passwordlessSudo = false
+  }
+
   private disconnectTransport(): void {
     if (this.client) {
       const closing = this.client
@@ -965,13 +985,7 @@ export class SshConnectionImpl implements SshConnection {
       // reclaim the socket.
       fallback.unref()
     }
-    // R-0000236: clear connection-identity fields alongside the client
-    // reference. Otherwise getConnectionInfo() returns stale values after a
-    // disconnect (e.g. a non-zero port), which breaks reconnect-rollback
-    // logic in the runner that uses `port > 0` as the success signal.
-    this.connectedPort = 0
-    this.authMethod = null
-    this.agentSocket = null
+    this.resetTransportDerivedState()
     const error = new Error("SSH connection closed")
     for (const rejectFunction of this.pendingRejects) {
       rejectFunction(error)
