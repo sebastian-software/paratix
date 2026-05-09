@@ -470,6 +470,10 @@ export class SshConnectionImpl implements SshConnection {
       // file and our `stat` would report a size for an attacker-controlled
       // inode rather than the file we actually wrote. Asserting on the
       // temp path eliminates that TOCTOU window.
+      // R-0000266: assertRemoteFileSize routes the stat call through raw
+      // exec for non-root users so an expired sudo credential cache between
+      // upload and finalize cannot mask a real size mismatch with a
+      // sudo-auth error.
       await this.assertRemoteFileSize(temporaryPath, localFileSize)
       await this.finalizeRemoteTempFile(temporaryPath, remotePath, temporaryMode)
     } finally {
@@ -520,7 +524,17 @@ export class SshConnectionImpl implements SshConnection {
   }
 
   private async assertRemoteFileSize(remotePath: string, expectedSize: number): Promise<void> {
-    const rawSize = await this.output(`stat -c '%s' ${shellQuote(remotePath)}`)
+    // R-0000266: the upload temp path is owned by the connecting user (mktemp
+    // staged it under /tmp without sudo). Reading the size through `output`
+    // would funnel the call through `ensureSudoReady` and could fail with a
+    // sudo-auth error after the cached credentials expired. Use the raw exec
+    // path for non-root users so the size check stays a pure stat call and
+    // surfaces a real size mismatch instead of a sudo prompt failure.
+    const statCommand = `stat -c '%s' ${shellQuote(remotePath)}`
+    const rawSize =
+      this.config.user === "root"
+        ? await this.output(statCommand)
+        : await this.outputWithoutSudo(statCommand)
     const actualSize = Number(rawSize.trim())
 
     if (!Number.isFinite(actualSize)) {

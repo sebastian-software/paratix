@@ -2856,6 +2856,87 @@ describe("SshConnectionImpl", () => {
       const mvIndex = executedCommands.findIndex((cmd) => cmd.includes("mv -T"))
       expect(mvIndex).toBeGreaterThan(statIndex)
     })
+
+    it("runs stat -c '%s' on the user-owned temp path without sudo wrapping for non-root users (R-0000266 regression)", async () => {
+      // Regression: assertRemoteFileSize used `output()`, which routes through
+      // ensureSudoReady → sudo bash -c. After the cached sudo credentials
+      // expired between upload and the post-upload size check, the TOCTOU
+      // verification surfaced a sudo-auth error instead of a real size
+      // mismatch. The fix routes the stat call for non-root users through the
+      // raw exec path (outputWithoutSudo), mirroring setRemoteTempMode.
+      const { sftpUpload } = await import("../src/sftp.js")
+      vi.mocked(sftpUpload).mockResolvedValue()
+      vi.mocked(stat).mockResolvedValueOnce({ size: 11 } as never)
+
+      const tempPath = "/tmp/paratix-upload.ABCDEF"
+      const remotePath = "/etc/my-app/config.yml"
+      const executedCommands: string[] = []
+
+      const execSpy = vi
+        .fn()
+        // [0] mktemp
+        .mockImplementationOnce((_command: string, callback: ExecCallback) => {
+          const stream = makeStream()
+          executedCommands.push(_command)
+          callback(undefined, stream)
+          stream.emit("data", Buffer.from(tempPath))
+          stream.emit("close", 0)
+        })
+        // [1] chmod (non-root path uses raw exec without sudo)
+        .mockImplementationOnce((_command: string, callback: ExecCallback) => {
+          const stream = makeStream()
+          executedCommands.push(_command)
+          callback(undefined, stream)
+          stream.emit("close", 0)
+        })
+        // [2] stat -c '%s' on staged temp path — must run RAW, no sudo
+        .mockImplementationOnce((_command: string, callback: ExecCallback) => {
+          const stream = makeStream()
+          executedCommands.push(_command)
+          callback(undefined, stream)
+          stream.emit("data", Buffer.from("11"))
+          stream.emit("close", 0)
+        })
+        // [3] mv (privileged finalize)
+        .mockImplementationOnce((_command: string, callback: ExecCallback) => {
+          const stream = makeStream()
+          executedCommands.push(_command)
+          callback(undefined, stream)
+          stream.emit("close", 0)
+        })
+        // [4] rm -f temp
+        .mockImplementationOnce((_command: string, callback: ExecCallback) => {
+          const stream = makeStream()
+          executedCommands.push(_command)
+          callback(undefined, stream)
+          stream.emit("close", 0)
+        })
+
+      const client = makeClientWithExecSpy(execSpy)
+      const ssh = makeConnectedSsh(client, { user: "deploy" })
+      // Allow the privileged finalize step to run as `sudo bash -c …` without
+      // tripping the probe path; the focus of this test is the stat call,
+      // which must remain raw regardless of sudo state.
+      const internals = ssh as unknown as Record<string, unknown>
+      internals.cachedSudoPassword = null
+      internals.sudoReady = true
+
+      await ssh.uploadFile("/local/file.txt", remotePath)
+
+      const statIndex = executedCommands.findIndex((cmd) => cmd.includes("stat -c"))
+      expect(statIndex).toBeGreaterThan(-1)
+      // Must reference the user-owned staged temp path.
+      expect(executedCommands[statIndex]).toContain(tempPath)
+      // Must NOT be wrapped in sudo (raw exec via outputWithoutSudo).
+      // A sudo-wrapped form would prefix `sudo bash -c` or set `SUDO_PROMPT`.
+      expect(executedCommands[statIndex]).not.toMatch(/^sudo /v)
+      expect(executedCommands[statIndex]).not.toMatch(/^SUDO_PROMPT=/v)
+      // The privileged finalize (mv) step must still be wrapped in sudo, to
+      // prove the test exercises the non-root code path.
+      const mvIndex = executedCommands.findIndex((cmd) => cmd.includes("mv -T"))
+      expect(mvIndex).toBeGreaterThan(-1)
+      expect(executedCommands[mvIndex]).toMatch(/^sudo bash -c /v)
+    })
   })
 
   // -------------------------------------------------------------------------
