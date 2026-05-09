@@ -2,7 +2,7 @@
 import { readFile } from "node:fs/promises"
 
 import { environmentToMetaEntries } from "../meta.js"
-import { failed } from "../moduleFailure.js"
+import { failed, failedCommand } from "../moduleFailure.js"
 import { shellQuote, validateMode } from "../ssh.js"
 import {
   guardedWriteFile,
@@ -15,6 +15,8 @@ import { hexHashesEqual, sha256String } from "./fileHelpers.js"
 import { ownershipMatches, readOwnership, renderChownCommand } from "./fileMetadataHelpers.js"
 import { assertValidGroupName, assertValidUserName } from "./posixNames.js"
 import { isRegularFileWithoutSymlink, isSymlink } from "./remoteFileChecks.js"
+
+const EXEC_OPTS = { ignoreExitCode: true, silent: true } as const
 
 /** Index where the file-type field starts in `stat -c '%s %a %U %G %F %Y'` output. */
 const STAT_TYPE_START_INDEX = 4
@@ -166,14 +168,23 @@ export function assemble(
 
       if (options?.mode != null) {
         validateMode(options.mode)
-        await ssh.exec(`chmod ${shellQuote(options.mode)} ${shellQuote(remotePath)}`, {
-          silent: true,
-        })
+        // R-0000268: chmod failures (read-only fs, EPERM after a SELinux
+        // relabel, immutable bits) must not bubble out of apply as an
+        // unguarded CommandError. Capture the exit code and return a
+        // failedCommand result so the runner can report stdout/stderr.
+        const chmodResult = await ssh.exec(
+          `chmod ${shellQuote(options.mode)} ${shellQuote(remotePath)}`,
+          EXEC_OPTS
+        )
+        if (chmodResult.code !== 0) {
+          return failedCommand(`[file.assemble: ${remotePath}] chmod failed`, chmodResult)
+        }
       }
       if (options?.owner != null) {
-        await ssh.exec(renderChownCommand(options.owner, remotePath), {
-          silent: true,
-        })
+        const chownResult = await ssh.exec(renderChownCommand(options.owner, remotePath), EXEC_OPTS)
+        if (chownResult.code !== 0) {
+          return failedCommand(`[file.assemble: ${remotePath}] chown failed`, chownResult)
+        }
       }
 
       return { status: "changed" }
@@ -322,19 +333,32 @@ function assertValidPropertiesOptions(options: PropertiesOptions): void {
   if (options.group != null) assertValidGroupName(options.group)
 }
 
+/** Result of a drift step: a failure result, "changed", or "unchanged". */
+type DriftStepResult = boolean | ModuleResult
+
+function isDriftFailure(result: DriftStepResult): result is ModuleResult {
+  return typeof result !== "boolean"
+}
+
 /**
  * Apply mode drift via `chmod` only when the desired mode differs from the
- * current mode reported by stat.
+ * current mode reported by stat. R-0000269: failures bubble up as a
+ * failedCommand result instead of an unguarded CommandError.
  *
  * @param context - The drift context (ssh, remotePath, current, options).
- * @returns `true` if a `chmod` was issued.
+ * @returns `true` if a `chmod` was issued, `false` if no change was needed,
+ *   or a failed {@link ModuleResult} if `chmod` exited non-zero.
  */
-async function applyModeDrift(context: DriftContext): Promise<boolean> {
+async function applyModeDrift(context: DriftContext): Promise<DriftStepResult> {
   const { current, options, remotePath, ssh } = context
   if (options.mode == null || modeMatches(current.mode, options.mode)) return false
-  await ssh.exec(`chmod -- ${shellQuote(options.mode)} ${shellQuote(remotePath)}`, {
-    silent: true,
-  })
+  const result = await ssh.exec(
+    `chmod -- ${shellQuote(options.mode)} ${shellQuote(remotePath)}`,
+    EXEC_OPTS
+  )
+  if (result.code !== 0) {
+    return failedCommand(`[file.properties: ${remotePath}] chmod failed`, result)
+  }
   return true
 }
 
@@ -342,9 +366,10 @@ async function applyModeDrift(context: DriftContext): Promise<boolean> {
  * Issue a combined `chown owner:group` when both fields differ.
  *
  * @param context - The drift context.
- * @returns `true` if a combined `chown` was issued.
+ * @returns `true` if a combined `chown` was issued, `false` if no change was
+ *   required, or a failed {@link ModuleResult} when `chown` exited non-zero.
  */
-async function maybeApplyCombinedChown(context: DriftContext): Promise<boolean> {
+async function maybeApplyCombinedChown(context: DriftContext): Promise<DriftStepResult> {
   const { current, options, remotePath, ssh } = context
   const ownerNeedsUpdate = options.owner != null && current.owner !== options.owner
   const groupNeedsUpdate = options.group != null && current.group !== options.group
@@ -352,7 +377,10 @@ async function maybeApplyCombinedChown(context: DriftContext): Promise<boolean> 
     return false
   }
   const ownerGroup = `${options.owner}:${options.group}`
-  await ssh.exec(renderChownCommand(ownerGroup, remotePath), { silent: true })
+  const result = await ssh.exec(renderChownCommand(ownerGroup, remotePath), EXEC_OPTS)
+  if (result.code !== 0) {
+    return failedCommand(`[file.properties: ${remotePath}] chown failed`, result)
+  }
   return true
 }
 
@@ -360,14 +388,16 @@ async function maybeApplyCombinedChown(context: DriftContext): Promise<boolean> 
  * Issue a `chown owner` when only the owner differs.
  *
  * @param context - The drift context.
- * @returns `true` if a single-field `chown` was issued.
+ * @returns `true` if a single-field `chown` was issued, `false` if no change
+ *   was required, or a failed {@link ModuleResult} when `chown` exited non-zero.
  */
-async function maybeApplySingleChown(context: DriftContext): Promise<boolean> {
+async function maybeApplySingleChown(context: DriftContext): Promise<DriftStepResult> {
   const { current, options, remotePath, ssh } = context
   if (options.owner == null || current.owner === options.owner) return false
-  await ssh.exec(renderChownCommand(options.owner, remotePath), {
-    silent: true,
-  })
+  const result = await ssh.exec(renderChownCommand(options.owner, remotePath), EXEC_OPTS)
+  if (result.code !== 0) {
+    return failedCommand(`[file.properties: ${remotePath}] chown failed`, result)
+  }
   return true
 }
 
@@ -375,14 +405,19 @@ async function maybeApplySingleChown(context: DriftContext): Promise<boolean> {
  * Issue a `chgrp group` when only the group differs.
  *
  * @param context - The drift context.
- * @returns `true` if a `chgrp` was issued.
+ * @returns `true` if a `chgrp` was issued, `false` if no change was required,
+ *   or a failed {@link ModuleResult} when `chgrp` exited non-zero.
  */
-async function maybeApplySingleChgrp(context: DriftContext): Promise<boolean> {
+async function maybeApplySingleChgrp(context: DriftContext): Promise<DriftStepResult> {
   const { current, options, remotePath, ssh } = context
   if (options.group == null || current.group === options.group) return false
-  await ssh.exec(`chgrp -- ${shellQuote(options.group)} ${shellQuote(remotePath)}`, {
-    silent: true,
-  })
+  const result = await ssh.exec(
+    `chgrp -- ${shellQuote(options.group)} ${shellQuote(remotePath)}`,
+    EXEC_OPTS
+  )
+  if (result.code !== 0) {
+    return failedCommand(`[file.properties: ${remotePath}] chgrp failed`, result)
+  }
   return true
 }
 
@@ -391,13 +426,18 @@ async function maybeApplySingleChgrp(context: DriftContext): Promise<boolean> {
  * falling back to individual `chown` / `chgrp` calls when only one differs.
  *
  * @param context - Current state, desired options, ssh handle, and remote path.
- * @returns `true` if any of `chown` / `chgrp` was issued.
+ * @returns `true` if any of `chown` / `chgrp` was issued, `false` if nothing
+ *   changed, or a failed {@link ModuleResult} when any step exited non-zero.
  */
-async function applyOwnershipDrift(context: DriftContext): Promise<boolean> {
-  if (await maybeApplyCombinedChown(context)) return true
-  const ownerChanged = await maybeApplySingleChown(context)
-  const groupChanged = await maybeApplySingleChgrp(context)
-  return ownerChanged || groupChanged
+async function applyOwnershipDrift(context: DriftContext): Promise<DriftStepResult> {
+  const combined = await maybeApplyCombinedChown(context)
+  if (isDriftFailure(combined)) return combined
+  if (combined) return true
+  const ownerResult = await maybeApplySingleChown(context)
+  if (isDriftFailure(ownerResult)) return ownerResult
+  const groupResult = await maybeApplySingleChgrp(context)
+  if (isDriftFailure(groupResult)) return groupResult
+  return ownerResult || groupResult
 }
 
 /**
@@ -433,9 +473,11 @@ export function properties(remotePath: string, options: PropertiesOptions): Modu
 
       const current = await readPropertiesState(ssh, remotePath)
       const context: DriftContext = { current, options, remotePath, ssh }
-      const modeChanged = await applyModeDrift(context)
-      const ownershipChanged = await applyOwnershipDrift(context)
-      const changed = modeChanged || ownershipChanged
+      const modeResult = await applyModeDrift(context)
+      if (isDriftFailure(modeResult)) return modeResult
+      const ownershipResult = await applyOwnershipDrift(context)
+      if (isDriftFailure(ownershipResult)) return ownershipResult
+      const changed = modeResult || ownershipResult
 
       return { status: changed ? "changed" : "ok" }
     },

@@ -1735,6 +1735,57 @@ describe("file.assemble", () => {
       rmSync(dir, { recursive: true })
     }
   })
+
+  it("R-0000268: returns failed when chmod after writeFile exits non-zero", async () => {
+    // chmod errors after writeFile (read-only mount, EPERM after relabel,
+    // immutable bit) must surface as a failedCommand ModuleResult instead
+    // of an unguarded CommandError that bypasses the runner pipeline.
+    const dir = mkdtempSync(join(tmpdir(), "paratix-test-"))
+    try {
+      const frag1 = join(dir, "frag1.txt")
+      writeFileSync(frag1, "Hello")
+
+      const ssh = createMockSsh({
+        "[ -L '/remote/assembled.txt' ]": { code: 1 },
+        "chmod '0600' '/remote/assembled.txt'": {
+          code: 1,
+          stderr: "chmod: changing permissions of '/remote/assembled.txt': Read-only file system",
+        },
+      })
+
+      const mod = file.assemble("/remote/assembled.txt", [frag1], { mode: "0600" })
+      const result = await mod.apply(ssh, emptyEnv)
+
+      expect(result.status).toBe("failed")
+      expect(String(result.error)).toContain("chmod failed")
+    } finally {
+      rmSync(dir, { recursive: true })
+    }
+  })
+
+  it("R-0000268: returns failed when chown after writeFile exits non-zero", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "paratix-test-"))
+    try {
+      const frag1 = join(dir, "frag1.txt")
+      writeFileSync(frag1, "Hello")
+
+      const ssh = createMockSsh({
+        "[ -L '/remote/assembled.txt' ]": { code: 1 },
+        "chown -- 'www-data' '/remote/assembled.txt'": {
+          code: 1,
+          stderr: "chown: invalid user: 'www-data'",
+        },
+      })
+
+      const mod = file.assemble("/remote/assembled.txt", [frag1], { owner: "www-data" })
+      const result = await mod.apply(ssh, emptyEnv)
+
+      expect(result.status).toBe("failed")
+      expect(String(result.error)).toContain("chown failed")
+    } finally {
+      rmSync(dir, { recursive: true })
+    }
+  })
 })
 
 describe("file.block", () => {
@@ -2095,6 +2146,54 @@ describe("file.properties", () => {
     const mod = file.properties("/var/app", { mode: "0644" })
     const result = await mod.check(ssh, emptyEnv)
     expect(result).toBe("needs-apply")
+  })
+
+  it("R-0000268: returns failed when chmod exits non-zero (read-only fs)", async () => {
+    // chmod on a read-only mount must surface as a maskable failedCommand
+    // ModuleResult instead of an unguarded CommandError that bypasses the
+    // runner's failure pipeline.
+    const ssh = createMockSsh({
+      "chmod -- '0644' '/var/app'": {
+        code: 1,
+        stderr: "chmod: changing permissions of '/var/app': Read-only file system",
+      },
+      "stat -c '%a %U %G' '/var/app'": { stdout: "755 www-data www-data" },
+    })
+    const mod = file.properties("/var/app", { mode: "0644" })
+    const result = await mod.apply(ssh, emptyEnv)
+
+    expect(result.status).toBe("failed")
+    expect(String(result.error)).toContain("chmod failed")
+  })
+
+  it("R-0000268: returns failed when combined chown exits non-zero", async () => {
+    const ssh = createMockSsh({
+      "chown -- 'www-data:www-data' '/var/app'": {
+        code: 1,
+        stderr: "chown: invalid user: 'www-data:www-data'",
+      },
+      "stat -c '%a %U %G' '/var/app'": { stdout: "644 root root" },
+    })
+    const mod = file.properties("/var/app", { group: "www-data", owner: "www-data" })
+    const result = await mod.apply(ssh, emptyEnv)
+
+    expect(result.status).toBe("failed")
+    expect(String(result.error)).toContain("chown failed")
+  })
+
+  it("R-0000268: returns failed when single chgrp exits non-zero", async () => {
+    const ssh = createMockSsh({
+      "chgrp -- 'www-data' '/var/app'": {
+        code: 1,
+        stderr: "chgrp: invalid group: 'www-data'",
+      },
+      "stat -c '%a %U %G' '/var/app'": { stdout: "644 www-data root" },
+    })
+    const mod = file.properties("/var/app", { group: "www-data" })
+    const result = await mod.apply(ssh, emptyEnv)
+
+    expect(result.status).toBe("failed")
+    expect(String(result.error)).toContain("chgrp failed")
   })
 })
 
