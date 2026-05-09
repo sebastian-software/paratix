@@ -454,6 +454,62 @@ describe("SshConnectionImpl", () => {
 
       await expect(execPromise).rejects.toThrow("SSH connection closed")
     })
+
+    it("does not reject pending operations of a fresh client when an old client emits a delayed 'close' event after disconnect (R-0000254 regression)", async () => {
+      // Regression: registerConnectedClient stores `client.once("close", () =>
+      // rejectPending(...))` where rejectPending is a closure capturing
+      // `this.pendingRejects` (no snapshot). Without removing the listeners on
+      // disconnectTransport, a delayed close event from the OLD client would
+      // run rejectPending against the NEW connection's pendingRejects set and
+      // reject its in-flight exec() with "SSH connection closed unexpectedly".
+      const oldClientEmitter = new EventEmitter()
+      const oldClient = Object.assign(oldClientEmitter, {
+        end: vi.fn(),
+        exec: vi.fn(),
+        sftp: vi.fn(),
+      }) as unknown as Client & EventEmitter
+
+      const ssh = makeConnectedSshWithCloseListener(oldClient, {})
+
+      // Simulate disconnect followed by a fresh connection on a NEW client.
+      ssh.disconnect()
+
+      const newExecSpy = vi.fn().mockImplementation((_command: string, callback: ExecCallback) => {
+        const stream = makeStream()
+        callback(undefined, stream)
+        // Stream intentionally never emits 'close' — the exec() Promise stays pending
+      })
+      const newClientEmitter = new EventEmitter()
+      const newClient = Object.assign(newClientEmitter, {
+        end: vi.fn(),
+        exec: newExecSpy,
+        sftp: vi.fn(),
+      }) as unknown as Client & EventEmitter
+      ;(
+        ssh as unknown as { registerConnectedClient: (client: Client, port: number) => void }
+      ).registerConnectedClient(newClient, 22)
+
+      const execPromise = ssh.exec("sleep infinity")
+      // Attach a no-op rejection handler so unhandled-rejection detection does
+      // not interfere with the assertions below if the bug regresses.
+      let rejected = false
+      execPromise.catch(() => {
+        rejected = true
+      })
+      await Promise.resolve()
+
+      // Now the OLD client emits a delayed 'close' event. Without the fix,
+      // this would reject the new connection's pending exec() with
+      // "SSH connection closed unexpectedly". With the fix, the listener has
+      // been removed so the emit is a no-op.
+      oldClientEmitter.emit("close")
+
+      // Allow microtasks to settle.
+      await Promise.resolve()
+      await Promise.resolve()
+
+      expect(rejected).toBe(false)
+    })
   })
 
   // -------------------------------------------------------------------------

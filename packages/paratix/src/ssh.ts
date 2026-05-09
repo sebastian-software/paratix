@@ -910,6 +910,32 @@ export class SshConnectionImpl implements SshConnection {
   }
 
   /**
+   * Detach the lifecycle listeners installed by registerConnectedClient.
+   *
+   * R-0000254: `registerConnectedClient` stores `client.once("close", () =>
+   * rejectPending(...))` where `rejectPending` is a closure over
+   * `this.pendingRejects` (no snapshot). Without removing these listeners on
+   * disconnect, a delayed `close`/`error` event from the OLD client would run
+   * the closure against the NEW connection's pendingRejects after a reconnect
+   * and falsely reject freshly queued operations with
+   * "SSH connection closed unexpectedly".
+   *
+   * @param closing - The ssh2 client whose lifecycle listeners should be removed.
+   */
+  private detachClientLifecycleListeners(closing: Client): void {
+    try {
+      closing.removeAllListeners("close")
+    } catch {
+      // removeAllListeners must never propagate from the disconnect path.
+    }
+    try {
+      closing.removeAllListeners("error")
+    } catch {
+      // removeAllListeners must never propagate from the disconnect path.
+    }
+  }
+
+  /**
    * Tear down the SSH transport without touching the cached sudo password.
    *
    * R-0000209: `client.end()` initiates a graceful disconnect, which can
@@ -921,6 +947,7 @@ export class SshConnectionImpl implements SshConnection {
     if (this.client) {
       const closing = this.client
       this.client = null
+      this.detachClientLifecycleListeners(closing)
       try {
         closing.end()
       } catch {
