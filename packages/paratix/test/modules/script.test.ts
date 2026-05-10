@@ -230,6 +230,24 @@ describe("script.once — apply", () => {
     expect(flagCall).toBeUndefined()
   })
 
+  it("preserves changed status when finally rm cleanup exits non-zero", async () => {
+    const remotePath = makeRemoteScriptPath("setup")
+    const mockSsh = createScriptMockSsh({
+      responses: {
+        [`rm -f '${remotePath}'`]: { code: 1, stderr: "rm: read-only file system" },
+      },
+    })
+    const mod = script.once("setup", "/local/setup.sh")
+    const result = await mod.apply(mockSsh, emptyEnv)
+
+    // The rm cleanup ran with ignoreExitCode, so the successful run is preserved.
+    expect(result.status).toBe("changed")
+    expect(mockSsh.calls).toContain(`rm -f '${remotePath}'`)
+    // Versioned flag must still be set so the next run skips re-execution.
+    const flagCall = mockSsh.calls.find((c) => c.includes("touch"))
+    expect(flagCall).toBeDefined()
+  })
+
   it("direct apply returns ok without uploading when the flag already exists", async () => {
     const mockSsh = createStrictMockSsh({
       [`[ -f ${FLAGS_DIRECTORY}/'script-setup-1' ]`]: { code: 0 },

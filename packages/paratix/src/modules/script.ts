@@ -81,8 +81,11 @@ async function runScriptOnce(parameters: {
     })
   } finally {
     // The finally block now removes the per-run path created via
-    // mktemp above, never the deterministic legacy path.
-    await ssh.exec(`rm -f ${shellQuote(remotePath)}`, { silent: true })
+    // mktemp above, never the deterministic legacy path. `ignoreExitCode`
+    // mirrors the cleanup-rm convention used in quadlet/swap*Helpers/timer:
+    // a non-zero `rm -f` (e.g. /tmp briefly read-only, SFTP transport blip)
+    // must not overwrite the structured ModuleResult of a successful run.
+    await ssh.exec(`rm -f ${shellQuote(remotePath)}`, { ignoreExitCode: true, silent: true })
   }
 }
 
