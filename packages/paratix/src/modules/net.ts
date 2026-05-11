@@ -960,6 +960,10 @@ async function checkHostsState(
   parameters: HostsStateParameters
 ): Promise<"needs-apply" | "ok"> {
   const { expectedLine, isSameIpLine, matchesAbsentTarget, state } = parameters
+  // R-0000275: a missing /etc/hosts (fresh container/chroot) is a
+  // needs-apply situation rather than a phase-level throw. The apply path
+  // ensures the file exists, so check defers instead of escalating ENOENT.
+  if (!(await conn.exists(HOSTS_FILE))) return NEEDS_APPLY
   const content = await conn.readFile(HOSTS_FILE)
   const lines = content.split("\n")
 
@@ -1236,6 +1240,12 @@ export const net = {
       },
       async check(conn: null | SshConnection): Promise<"needs-apply" | "ok"> {
         if (!conn) return NEEDS_APPLY
+
+        // R-0000275: a missing resolv file (fresh container, host without
+        // systemd-resolved) is a needs-apply situation, not a phase-level
+        // throw. The apply path below writes the file, so check should defer
+        // rather than escalate readFile's ENOENT into a Paratix run failure.
+        if (!(await conn.exists(resolvPath))) return NEEDS_APPLY
 
         const content = await conn.readFile(resolvPath)
         return content.trim() === expectedContent.trim() ? "ok" : NEEDS_APPLY

@@ -21,6 +21,14 @@ const createMockSsh: typeof createBaseMockSsh = (responses, options) =>
   createBaseMockSsh(responses, {
     ...options,
     allowWrites: [...NET_WRITE_ALLOWLIST, ...(options?.allowWrites ?? [])],
+    // R-0000275: net.resolv.check now probes /etc/resolv.conf existence
+    // before reading. Default to "file exists" so existing fixtures keep
+    // passing; the missing-file regression test stubs `{ code: 1 }` (user
+    // stubs win because they are placed first).
+    responseStubs: [
+      ...(options?.responseStubs ?? []),
+      { command: "[ -e '/etc/resolv.conf' ]", result: { code: 0 } },
+    ],
   })
 
 const emptyEnv = {}
@@ -99,6 +107,20 @@ describe("net.resolv — check", () => {
     const mod = net.resolv({ nameservers: ["1.1.1.1"] })
     const result = await mod.check(mockSsh, emptyEnv)
     expect(result).toBe("ok")
+  })
+
+  // R-0000275: a missing /etc/resolv.conf must surface as needs-apply, not as
+  // a phase-level throw from readFile. Apply creates the file, so check defers.
+  it("returns needs-apply when resolv.conf does not exist", async () => {
+    const mockSsh = createMockSsh(
+      {},
+      {
+        responseStubs: [{ command: "[ -e '/etc/resolv.conf' ]", result: { code: 1 } }],
+      }
+    )
+    const mod = net.resolv({ nameservers: ["1.1.1.1"] })
+    const result = await mod.check(mockSsh, emptyEnv)
+    expect(result).toBe("needs-apply")
   })
 
   it("returns ok when resolv.conf matches with search domains", async () => {

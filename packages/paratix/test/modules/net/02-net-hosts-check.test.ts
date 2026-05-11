@@ -21,6 +21,15 @@ const createMockSsh: typeof createBaseMockSsh = (responses, options) =>
   createBaseMockSsh(responses, {
     ...options,
     allowWrites: [...NET_WRITE_ALLOWLIST, ...(options?.allowWrites ?? [])],
+    // R-0000275: net.hosts.check now probes /etc/hosts existence before reading.
+    // Default the probe to "file exists" so fixtures that supply the cat
+    // response keep passing; tests that exercise the missing-file path stub
+    // this probe explicitly with `{ code: 1 }` (user stubs win because they
+    // are placed first and `find` returns the first match).
+    responseStubs: [
+      ...(options?.responseStubs ?? []),
+      { command: "[ -e '/etc/hosts' ]", result: { code: 0 } },
+    ],
   })
 
 const emptyEnv = {}
@@ -99,6 +108,20 @@ describe("net.hosts — check", () => {
     const mod = net.hosts("1.2.3.4", ["myhost"])
     const result = await mod.check(mockSsh, emptyEnv)
     expect(result).toBe("ok")
+  })
+
+  // R-0000275: a missing /etc/hosts must surface as needs-apply, not as a
+  // phase-level throw from readFile. Apply ensures the file exists.
+  it("returns needs-apply when /etc/hosts does not exist", async () => {
+    const mockSsh = createMockSsh(
+      {},
+      {
+        responseStubs: [{ command: "[ -e '/etc/hosts' ]", result: { code: 1 } }],
+      }
+    )
+    const mod = net.hosts("1.2.3.4", ["myhost"])
+    const result = await mod.check(mockSsh, emptyEnv)
+    expect(result).toBe("needs-apply")
   })
 
   it("returns needs-apply when the hosts line is absent (state: present)", async () => {
