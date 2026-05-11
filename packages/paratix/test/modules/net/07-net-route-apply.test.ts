@@ -21,6 +21,17 @@ const createMockSsh: typeof createBaseMockSsh = (responses, options) =>
   createBaseMockSsh(responses, {
     ...options,
     allowWrites: [...NET_WRITE_ALLOWLIST, ...(options?.allowWrites ?? [])],
+    // R-0000277: net.route apply probes the dropin path with `[ -L … ]`
+    // (isSymlink) before writing. Default to "not a symlink" so existing
+    // fixtures keep passing; the symlink-refusal regression stubs `{ code: 0 }`
+    // explicitly.
+    responseStubs: [
+      ...(options?.responseStubs ?? []),
+      {
+        command: /^\[ -L '\/etc\/systemd\/network\/50-paratix-route-[^']+\.network' \]$/v,
+        result: { code: 1 },
+      },
+    ],
   })
 
 const emptyEnv = {}

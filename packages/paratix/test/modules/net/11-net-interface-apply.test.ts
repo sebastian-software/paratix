@@ -21,6 +21,25 @@ const createMockSsh: typeof createBaseMockSsh = (responses, options) =>
   createBaseMockSsh(responses, {
     ...options,
     allowWrites: [...NET_WRITE_ALLOWLIST, ...(options?.allowWrites ?? [])],
+    // R-0000277: net.interface apply probes the destination path with
+    // `[ -L … ]` (isSymlink) before writing. Default to "not a symlink" so
+    // existing fixtures keep passing; the symlink-refusal regression stubs
+    // `{ code: 0 }` explicitly.
+    responseStubs: [
+      ...(options?.responseStubs ?? []),
+      {
+        command: /^\[ -L '\/etc\/netplan\/60-paratix-[^']+\.yaml' \]$/v,
+        result: { code: 1 },
+      },
+      {
+        command: /^\[ -L '\/etc\/systemd\/network\/60-paratix-[^']+\.network' \]$/v,
+        result: { code: 1 },
+      },
+      {
+        command: /^\[ -L '\/etc\/systemd\/network\/50-paratix-route-[^']+\.network' \]$/v,
+        result: { code: 1 },
+      },
+    ],
   })
 
 const emptyEnv = {}
@@ -91,6 +110,26 @@ describe("net.interface — apply", () => {
     const mod = net.interface("eth0", {})
     const result = await mod.apply(conn, emptyEnv)
     expect(result.status).toBe("failed")
+  })
+
+  it("R-0000277: refuses to write through a symlinked netplan path", async () => {
+    const mockSsh = createMockSsh(
+      {
+        "test -d '/etc/netplan'": { code: 0 },
+      },
+      {
+        responseStubs: [
+          {
+            command: /^\[ -L '\/etc\/netplan\/60-paratix-[^']+\.yaml' \]$/v,
+            result: { code: 0 },
+          },
+        ],
+      }
+    )
+    const mod = net.interface("eth0", {})
+    const result = await mod.apply(mockSsh, emptyEnv)
+    expect(result.status).toBe("failed")
+    expect(result.error?.message).toContain("symlink")
   })
 
   it("returns changed in Netplan mode", async () => {

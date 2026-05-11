@@ -386,6 +386,16 @@ async function writeAndApplyInterfaceConfig(parameters: {
   path: string
   ssh: SshConnection
 }): Promise<ModuleResult> {
+  // R-0000277: refuse to write through an existing symlink. The atomic
+  // `mv`-replace inside `ssh.writeFile` already breaks symlinks at the
+  // finalize step, but a vorgelagerter Guard surfaces a clearer error to
+  // the operator and matches the defense-in-depth pattern in compose.ts,
+  // apt.ts and aptKeyHelpers.ts.
+  if (await isSymlink(parameters.ssh, parameters.path)) {
+    return failed(
+      `[net.interface: ${parameters.path}] refuses to write through symlink at the destination path`
+    )
+  }
   const snapshot = await captureInterfaceConfigSnapshot(parameters.ssh, parameters.path)
   await parameters.ssh.writeFile(parameters.path, parameters.content, {
     mode: NET_CONFIG_FILE_MODE,
@@ -739,6 +749,14 @@ async function applyPresentRoute(
   )
   if (routeResult.code !== 0) {
     return failedCommand(`[net.route: ${destination}] ip route replace failed`, routeResult)
+  }
+  // R-0000277: defense-in-depth — refuse a symlinked dropin path before the
+  // atomic write would silently break it. compose/apt/aptKeyHelpers use the
+  // same guard for predictable system paths.
+  if (await isSymlink(conn, dropinPath)) {
+    return failed(
+      `[net.route: ${destination}] refuses to write through symlink at ${dropinPath}`
+    )
   }
   const dropinContent = buildRouteDropin(destination, gateway, device)
   await conn.writeFile(dropinPath, dropinContent, { mode: NET_CONFIG_FILE_MODE })
