@@ -147,6 +147,46 @@ describe("net.hosts — apply", () => {
     expect(writes).toHaveLength(0)
   })
 
+  it("creates /etc/hosts when it is missing (state: present)", async () => {
+    const mockSsh = createMockSsh(
+      {
+        "cat '/etc/hosts'": { code: 1, stderr: "cat: /etc/hosts: No such file or directory" },
+      },
+      {
+        responseStubs: [{ command: "[ -e '/etc/hosts' ]", result: { code: 1 } }],
+      }
+    )
+
+    const mod = net.hosts("1.2.3.4", ["myhost"])
+    const result = await mod.apply(mockSsh, emptyEnv)
+
+    expect(result.status).toBe("changed")
+    expect(mockSsh.writeFileCalls).toStrictEqual([
+      {
+        content: "1.2.3.4 myhost\n",
+        options: { mode: "0644" },
+        remotePath: "/etc/hosts",
+      },
+    ])
+  })
+
+  it("returns ok without writing when /etc/hosts is missing (state: absent)", async () => {
+    const mockSsh = createMockSsh(
+      {
+        "cat '/etc/hosts'": { code: 1, stderr: "cat: /etc/hosts: No such file or directory" },
+      },
+      {
+        responseStubs: [{ command: "[ -e '/etc/hosts' ]", result: { code: 1 } }],
+      }
+    )
+
+    const mod = net.hosts("1.2.3.4", ["myhost"], { state: "absent" })
+    const result = await mod.apply(mockSsh, emptyEnv)
+
+    expect(result.status).toBe("ok")
+    expect(mockSsh.writeFileCalls).toHaveLength(0)
+  })
+
   it("reads /etc/hosts before writing (state: present)", async () => {
     const mockSsh = createMockSsh({
       "cat '/etc/hosts'": { stdout: "127.0.0.1 localhost\n" },

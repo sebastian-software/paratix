@@ -862,7 +862,14 @@ type HostsStateParameters = {
 /** Snapshot of /etc/hosts content used by the apply helpers. */
 type HostsFileSnapshot = {
   content: string
+  existed: boolean
   lines: string[]
+}
+
+async function captureHostsFileSnapshot(conn: SshConnection): Promise<HostsFileSnapshot> {
+  const existed = await conn.exists(HOSTS_FILE)
+  const content = existed ? await conn.readFile(HOSTS_FILE) : ""
+  return { content, existed, lines: content.split("\n") }
 }
 
 /**
@@ -879,7 +886,11 @@ async function applyHostsPresent(
   snapshot: HostsFileSnapshot
 ): Promise<ModuleResult> {
   const { expectedLine, isSameIpLine } = parameters
-  const { content, lines } = snapshot
+  const { content, existed, lines } = snapshot
+  if (!existed) {
+    await conn.writeFile(HOSTS_FILE, `${expectedLine}\n`, { mode: HOSTS_FILE_MODE })
+    return { status: "changed" }
+  }
   // The file is already canonical when there is exactly one line for
   // this IP and it matches the desired byte sequence. Otherwise we
   // strip every line whose first token equals `ip` and append the
@@ -918,7 +929,8 @@ async function applyHostsAbsent(
   snapshot: HostsFileSnapshot
 ): Promise<ModuleResult> {
   const { matchesAbsentTarget } = parameters
-  const { content, lines } = snapshot
+  const { content, existed, lines } = snapshot
+  if (!existed) return { status: "ok" }
   const alreadyAbsent = !lines.some((line) => matchesAbsentTarget(line))
   if (alreadyAbsent) return { status: "ok" }
   const newContent = lines.filter((line) => !matchesAbsentTarget(line)).join("\n")
@@ -951,8 +963,7 @@ async function applyHostsState(
     return await withMutexLock(conn, {
       lockName: HOSTS_FILE_MUTEX,
       async section() {
-        const content = await conn.readFile(HOSTS_FILE)
-        const snapshot: HostsFileSnapshot = { content, lines: content.split("\n") }
+        const snapshot = await captureHostsFileSnapshot(conn)
         return parameters.state === "present"
           ? applyHostsPresent(conn, parameters, snapshot)
           : applyHostsAbsent(conn, parameters, snapshot)
