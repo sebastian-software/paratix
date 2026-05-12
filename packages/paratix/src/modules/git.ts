@@ -93,6 +93,7 @@ async function cleanupFailedCloneDestination(
 async function cloneRepo(conn: SshConnection, parameters: GitCloneParameters): Promise<boolean> {
   const { destination, reference, repo } = parameters
   if (reference !== undefined && reference !== "") {
+    const destinationExistedBeforeClone = await conn.test(`test -e ${shellQuote(destination)}`)
     // Try --branch first (works for branches and tags, not bare SHAs).
     const result = await conn.exec(
       `git clone --branch ${shellQuote(reference)} -- ${shellQuote(repo)} ${shellQuote(destination)}`,
@@ -101,7 +102,9 @@ async function cloneRepo(conn: SshConnection, parameters: GitCloneParameters): P
     if (result.code === 0) return true
     // R-0000223: remove any partially-populated destination before retrying;
     // a leftover .git or refs/ would cause the fallback clone to abort.
-    await cleanupFailedCloneDestination(conn, destination)
+    if (!destinationExistedBeforeClone) {
+      await cleanupFailedCloneDestination(conn, destination)
+    }
     // Fallback: clone without --branch then checkout (handles bare commit SHAs).
     const fallback = await conn.exec(
       `git clone -- ${shellQuote(repo)} ${shellQuote(destination)}`,

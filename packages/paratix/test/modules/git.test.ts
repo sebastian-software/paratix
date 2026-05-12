@@ -329,6 +329,7 @@ describe("git.clone — apply", () => {
     const mockSsh = createGitApplyMockSsh({
       [`git clone --branch 'main' -- '${repo}' '${destination}'`]: { code: 0 },
       [`test -d '${gitDir}'`]: { code: 1 },
+      [`test -e '${destination}'`]: { code: 1 },
     })
     const mod = git.clone(repo, destination, { ref: "main" })
     const result = await mod.apply(mockSsh, emptyEnv)
@@ -350,6 +351,7 @@ describe("git.clone — apply", () => {
     ].join(" ")
     const mockSsh = createMockSsh({
       [`test -d ${shellQuote(adversarialGitDir)}`]: { code: 1 },
+      [`test -e ${shellQuote(adversarialDestination)}`]: { code: 1 },
       [expectedCommand]: { code: 0 },
     })
     const mod = git.clone(adversarialRepo, adversarialDestination, { ref: adversarialRef })
@@ -545,6 +547,7 @@ describe("git.clone — apply", () => {
       [`git clone --branch '${sha}' -- '${repo}' '${destination}'`]: { code: 128 },
       [`rm -rf -- '${destination}'`]: { code: 0 },
       [`test -d '${gitDir}'`]: { code: 1 },
+      [`test -e '${destination}'`]: { code: 1 },
     })
     const mod = git.clone(repo, destination, { ref: sha })
     const result = await mod.apply(mockSsh, emptyEnv)
@@ -566,6 +569,7 @@ describe("git.clone — apply", () => {
       [`git clone --branch '${sha}' -- '${repo}' '${destination}'`]: { code: 128 },
       [`rm -rf -- '${destination}'`]: { code: 0 },
       [`test -d '${gitDir}'`]: { code: 1 },
+      [`test -e '${destination}'`]: { code: 1 },
     })
     const mod = git.clone(repo, destination, { ref: sha })
     const result = await mod.apply(mockSsh, emptyEnv)
@@ -574,6 +578,23 @@ describe("git.clone — apply", () => {
     const fallbackIndex = mockSsh.calls.indexOf(`git clone -- '${repo}' '${destination}'`)
     expect(cleanupIndex).toBeGreaterThanOrEqual(0)
     expect(fallbackIndex).toBeGreaterThan(cleanupIndex)
+  })
+
+  it("does not remove a pre-existing non-git destination after a failed ref clone", async () => {
+    const sha = "abc123def456"
+    const mockSsh = createGitApplyMockSsh({
+      [`git clone -- '${repo}' '${destination}'`]: { code: 128 },
+      [`git clone --branch '${sha}' -- '${repo}' '${destination}'`]: { code: 128 },
+      [`test -d '${gitDir}'`]: { code: 1 },
+      [`test -e '${destination}'`]: { code: 0 },
+    })
+    const mod = git.clone(repo, destination, { ref: sha })
+
+    const result = await mod.apply(mockSsh, emptyEnv)
+
+    expect(result.status).toBe("failed")
+    expect(mockSsh.calls).not.toContain(`rm -rf -- '${destination}'`)
+    expect(mockSsh.calls).toContain(`git clone -- '${repo}' '${destination}'`)
   })
 
   it("returns failed when clone fails", async () => {
