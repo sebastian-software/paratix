@@ -63,4 +63,32 @@ describe("promptTerminal", () => {
     await expect(prompt).resolves.toBe("secret")
     expect(closeSpies[0]).toHaveBeenCalledOnce()
   })
+
+  // R-0000263: hidden mode no longer monkey-patches readline internals; it
+  // must instead hand a custom Writable to createInterface that forwards the
+  // prompt question and discards the echoed input.
+  it("uses a custom Writable as output when hidden mode is enabled", async () => {
+    vi.resetModules()
+    const createInterfaceSpy = vi.fn((args: { output: NodeJS.WritableStream }) => {
+      const rl = new MockReadline()
+      vi.spyOn(rl, "question").mockImplementation((_question, callback) => {
+        queueMicrotask(() => {
+          callback("secret")
+        })
+      })
+      // Expose the output stream so the test can probe it.
+      ;(rl as unknown as { __output: NodeJS.WritableStream }).__output = args.output
+      return rl
+    })
+    vi.doMock("node:readline", () => ({ createInterface: createInterfaceSpy }))
+
+    const { promptTerminal } = await import("../src/terminal.js")
+    const answer = await promptTerminal("Password: ", true)
+
+    expect(answer).toBe("secret")
+    expect(createInterfaceSpy).toHaveBeenCalledOnce()
+    const args = createInterfaceSpy.mock.calls[0]?.[0]
+    expect(args?.output).not.toBe(process.stderr)
+    expect(typeof (args?.output as NodeJS.WritableStream).write).toBe("function")
+  })
 })
