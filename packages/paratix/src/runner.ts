@@ -376,6 +376,29 @@ function hasSshdPortMeta(metaEntries: ModuleResult["meta"]): boolean {
   return metaEntries?.some((entry) => isSshdPortMetaEntry(entry)) ?? false
 }
 
+function hasSystemRebootMeta(metaEntries: ModuleResult["meta"]): boolean {
+  return metaEntries?.some((entry) => isSystemRebootMetaEntry(entry)) ?? false
+}
+
+function isConnectedToReportedSshdPort(
+  ssh: SshConnectionImpl,
+  metaEntries: ModuleResult["meta"]
+): boolean {
+  const connectedPort = ssh.getConnectionInfo().port
+  return (
+    connectedPort > 0 &&
+    (metaEntries?.some((entry) => isSshdPortMetaEntry(entry) && entry.port === connectedPort) ??
+      false)
+  )
+}
+
+function shouldSkipPortChangeReconnect(
+  ssh: SshConnectionImpl,
+  metaEntries: ModuleResult["meta"]
+): boolean {
+  return hasSystemRebootMeta(metaEntries) || isConnectedToReportedSshdPort(ssh, metaEntries)
+}
+
 async function initializeEnvironment(
   options: RunOptions,
   definition: ServerDefinition
@@ -394,7 +417,7 @@ async function handlePortChange(
 
   // Skip reconnect when a reboot is pending — the reboot handler will
   // reconnect on all registered ports (including the newly added ones).
-  if (metaEntries?.some((entry) => isSystemRebootMetaEntry(entry)) ?? false) return
+  if (shouldSkipPortChangeReconnect(ssh, metaEntries)) return
 
   try {
     await ssh.reconnect()

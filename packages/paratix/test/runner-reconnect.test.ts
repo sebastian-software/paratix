@@ -572,6 +572,42 @@ describe("runPlaybook handlePortChange + handleReboot interaction", () => {
     expect(reconnect).toHaveBeenCalledTimes(1)
   })
 
+  it("skips runner reconnect when sshd.port already reconnected to the reported target port", async () => {
+    const capturedConfigs: unknown[] = []
+    const addPort = vi.fn().mockReturnValue(true)
+    const reconnect = vi.fn().mockResolvedValue(null)
+
+    vi.doMock("../src/ssh.js", () => ({
+      shellQuote: (s: string) => `'${s}'`,
+      SshConnectionImpl: makeMockSshClass(capturedConfigs, {
+        addPort,
+        getConnectionInfo: vi.fn().mockReturnValue({
+          host: "1.2.3.4",
+          port: 2222,
+          privateKeyPath: "~/.ssh/id",
+          user: "root",
+        }),
+        reconnect,
+      }),
+    }))
+
+    const { runPlaybook } = await import("../src/runner.js")
+
+    const moduleWithVerifiedPortChange = makeModuleWithMeta([meta.sshdPort(2222)])
+
+    const definition: ServerDefinition = {
+      host: "1.2.3.4",
+      name: "test-server",
+      run: [moduleWithVerifiedPortChange],
+      ssh: { ports: [22], privateKey: "~/.ssh/id", user: "root" },
+    }
+
+    await runPlaybook(definition)
+
+    expect(addPort).toHaveBeenCalledWith(2222)
+    expect(reconnect).not.toHaveBeenCalled()
+  })
+
   it("calls addPort for every sshd.port meta entry when a module emits multiple", async () => {
     const capturedConfigs: unknown[] = []
     const addPort = vi.fn()
