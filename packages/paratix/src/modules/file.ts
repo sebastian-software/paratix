@@ -59,6 +59,10 @@ function validateAbsentPath(remotePath: string): void {
     throw new Error("file.absent: remotePath must not be empty")
   }
 
+  if (trimmedPath !== remotePath) {
+    throw new Error(`file.absent: remotePath must not start or end with whitespace: ${remotePath}`)
+  }
+
   if (!posix.isAbsolute(trimmedPath)) {
     throw new Error(`file.absent: remotePath must be an absolute path: ${remotePath}`)
   }

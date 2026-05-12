@@ -274,6 +274,18 @@ describe("file.absent", () => {
     expect(() => file.absent("")).toThrow("file.absent: remotePath must not be empty")
   })
 
+  it("rejects paths with leading or trailing whitespace", () => {
+    expect(() => file.absent(" /tmp/old-file")).toThrow(
+      "file.absent: remotePath must not start or end with whitespace:  /tmp/old-file"
+    )
+    expect(() => file.absent("/tmp/old-file ")).toThrow(
+      "file.absent: remotePath must not start or end with whitespace: /tmp/old-file "
+    )
+    expect(() => file.absent("\t/tmp/old-file")).toThrow(
+      "file.absent: remotePath must not start or end with whitespace: \t/tmp/old-file"
+    )
+  })
+
   it("rejects the root path", () => {
     expect(() => file.absent("/")).toThrow("file.absent: refusing to remove destructive path: /")
   })
