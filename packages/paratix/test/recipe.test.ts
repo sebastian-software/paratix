@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 
 import type { Environment, Module } from "../src/types.js"
 
-import { assert, fail, firstRun, signals } from "../src/builtins.js"
+import { assert, fail, firstRun, signals, when } from "../src/builtins.js"
 import { dryRunRecipeModule } from "../src/dryRunRecipe.js"
 import { resolveEnvironment } from "../src/environment.js"
 import { recipe } from "../src/recipe.js"
@@ -720,6 +720,52 @@ describe("recipe", () => {
     expect(firstModule.apply).not.toHaveBeenCalled()
     expect(secondModule.check).not.toHaveBeenCalled()
     expect(secondModule.apply).not.toHaveBeenCalled()
+  })
+
+  it("does not start conditional child apply() when shutdown was requested after check()", async () => {
+    let receivedSignal: NodeJS.Signals | null = null
+    const childModule: Module = {
+      apply: vi.fn().mockResolvedValue({ status: "changed" }),
+      // eslint-disable-next-line @typescript-eslint/require-await -- Interface requires async
+      async check() {
+        receivedSignal = "SIGTERM"
+        return "needs-apply"
+      },
+      name: "conditional-child",
+    }
+    const conditional = when(() => true, childModule)
+    const r = recipe("test-recipe", [conditional])
+
+    const result = await r.apply(null, emptyEnv, { shutdownSignal: () => receivedSignal })
+
+    expect(result.status).toBe("ok")
+    expect(childModule.apply).not.toHaveBeenCalled()
+  })
+
+  it("does not start dry-run blocker apply when shutdown was requested after check()", async () => {
+    let receivedSignal: NodeJS.Signals | null = null
+    const blocker: Module = {
+      _dryRunBlocker: true,
+      apply: vi.fn().mockResolvedValue({ status: "changed" }),
+      // eslint-disable-next-line @typescript-eslint/require-await -- Interface requires async
+      async check() {
+        receivedSignal = "SIGINT"
+        return "needs-apply"
+      },
+      name: "dry-run-blocker",
+    }
+    const r = recipe("test-recipe", [blocker])
+
+    const result = await dryRunRecipeModule({
+      environment: emptyEnv,
+      recipeModule: r,
+      shutdownSignal: () => receivedSignal,
+      ssh: createMockSsh(),
+    })
+
+    expect(result.status).toBeUndefined()
+    expect(result.shouldBreak).toBe(true)
+    expect(blocker.apply).not.toHaveBeenCalled()
   })
 
   it("check propagates exceptions from child module check()", async () => {

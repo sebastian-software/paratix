@@ -18,6 +18,11 @@ type ConditionalApplyState = {
   stopRun?: true
 }
 
+type ConditionalApplyStepResult =
+  | { kind: "break"; state: ConditionalApplyState }
+  | { kind: "continue"; state: ConditionalApplyState }
+  | { kind: "failed"; result: ModuleResult }
+
 function createConditionalApplyState(environment: Environment): ConditionalApplyState {
   // R-0000087: preserve the null-prototype guarantee that
   // R-0000069/R-0000070/R-0000074 establish for the runner-level
@@ -41,14 +46,18 @@ async function executeConditionalApply(parameters: {
   environment: Environment
   module: Module
   onChildStep?: ModuleApplyOptions["onChildStep"]
+  shutdownSignal: () => NodeJS.Signals | null
   ssh: null | SshConnection
 }): Promise<ModuleResult> {
   const { dryRun, environment, module, ssh } = parameters
   if (dryRun && module._applyDryRun != null) {
     return module._applyDryRun(ssh, environment)
   }
-  if (module._supportsChildStepHook === true && parameters.onChildStep != null) {
-    return module.apply(ssh, environment, { onChildStep: parameters.onChildStep })
+  if (module._supportsChildStepHook === true) {
+    return module.apply(ssh, environment, {
+      onChildStep: parameters.onChildStep,
+      shutdownSignal: parameters.shutdownSignal,
+    })
   }
   return module.apply(ssh, environment)
 }
@@ -127,40 +136,28 @@ async function applyConditionalModules(parameters: {
   environment: Environment
   modules: Module[]
   onChildStep?: ModuleApplyOptions["onChildStep"]
+  shutdownSignal?: ModuleApplyOptions["shutdownSignal"]
   ssh: null | SshConnection
 }): Promise<ModuleResult> {
   const { dryRun = false, modules, ssh } = parameters
   const preserveControlPlaneMeta = parameters.onChildStep == null
+  const shutdownSignal = parameters.shutdownSignal ?? (() => null)
   let state = createConditionalApplyState(parameters.environment)
 
   for (const currentModule of modules) {
-    const connection = getConditionalChildConnection(currentModule, ssh)
     // eslint-disable-next-line no-await-in-loop
-    const checkResult = await currentModule.check(connection, state.environment)
-    if (checkResult === "ok") continue
-
-    if (!shouldExecuteConditionalApply(currentModule, dryRun)) {
-      state = markConditionalApplyChanged(state)
-      continue
-    }
-
-    // eslint-disable-next-line no-await-in-loop -- conditional modules must preserve ordered env propagation
-    const result = await executeConditionalApply({
+    const step = await applyConditionalModuleStep({
+      currentModule,
       dryRun,
-      environment: state.environment,
-      module: currentModule,
-      onChildStep: parameters.onChildStep,
-      ssh: connection,
-    })
-    if (result.status === "failed") return result
-    // eslint-disable-next-line no-await-in-loop -- downstream env and runner control-plane state must stay ordered
-    state = await processConditionalApplyResult({
       onChildStep: parameters.onChildStep,
       preserveControlPlaneMeta,
-      result,
+      shutdownSignal,
+      ssh,
       state,
     })
-    if (state.stopRun === true) break
+    if (step.kind === "failed") return step.result
+    state = step.state
+    if (step.kind === "break") break
   }
 
   return {
@@ -169,6 +166,43 @@ async function applyConditionalModules(parameters: {
     meta: state.meta.length === 0 ? undefined : state.meta,
     status: state.status,
   }
+}
+
+async function applyConditionalModuleStep(parameters: {
+  currentModule: Module
+  dryRun: boolean
+  onChildStep?: ModuleApplyOptions["onChildStep"]
+  preserveControlPlaneMeta: boolean
+  shutdownSignal: () => NodeJS.Signals | null
+  ssh: null | SshConnection
+  state: ConditionalApplyState
+}): Promise<ConditionalApplyStepResult> {
+  if (parameters.shutdownSignal() != null) {
+    return { kind: "break", state: parameters.state }
+  }
+  const connection = getConditionalChildConnection(parameters.currentModule, parameters.ssh)
+  const checkResult = await parameters.currentModule.check(connection, parameters.state.environment)
+  if (checkResult === "ok") return { kind: "continue", state: parameters.state }
+  if (parameters.shutdownSignal() != null) return { kind: "break", state: parameters.state }
+  if (!shouldExecuteConditionalApply(parameters.currentModule, parameters.dryRun)) {
+    return { kind: "continue", state: markConditionalApplyChanged(parameters.state) }
+  }
+  const result = await executeConditionalApply({
+    dryRun: parameters.dryRun,
+    environment: parameters.state.environment,
+    module: parameters.currentModule,
+    onChildStep: parameters.onChildStep,
+    shutdownSignal: parameters.shutdownSignal,
+    ssh: connection,
+  })
+  if (result.status === "failed") return { kind: "failed", result }
+  const state = await processConditionalApplyResult({
+    onChildStep: parameters.onChildStep,
+    preserveControlPlaneMeta: parameters.preserveControlPlaneMeta,
+    result,
+    state: parameters.state,
+  })
+  return { kind: state.stopRun === true ? "break" : "continue", state }
 }
 
 function shouldExecuteConditionalDryRun(module: Module): boolean {
@@ -251,6 +285,7 @@ export function createConditionalModule(parameters: {
         environment,
         modules: parameters.modules,
         onChildStep: options?.onChildStep,
+        shutdownSignal: options?.shutdownSignal,
         ssh,
       })
     },

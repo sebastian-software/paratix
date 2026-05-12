@@ -215,9 +215,13 @@ async function applyRecipeChild(parameters: {
     })
   }
 
-  if (parameters.targetModule._supportsChildStepHook === true && parameters.onChildStep != null) {
+  if (
+    parameters.targetModule._supportsChildStepHook === true &&
+    (parameters.onChildStep != null || parameters.shutdownSignal != null)
+  ) {
     return parameters.targetModule.apply(parameters.connection, parameters.currentEnvironment, {
       onChildStep: parameters.onChildStep,
+      shutdownSignal: parameters.shutdownSignal,
     })
   }
 

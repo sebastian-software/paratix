@@ -30,9 +30,11 @@ async function executeDryRunBlockingModule(parameters: {
   childModule: RecipeModule["_modules"][number]
   connection: null | SshConnection
   environment: Environment
+  shutdownSignal: () => NodeJS.Signals | null
   verbose: boolean
 }): Promise<StepResult> {
   const { childModule, connection, environment, verbose } = parameters
+  if (parameters.shutdownSignal() != null) return { env: environment, shouldBreak: true }
   startModuleSpinner(childModule.name)
   const result =
     childModule._applyDryRun == null
@@ -56,15 +58,24 @@ async function executeDryRunBlockingModule(parameters: {
 async function executeDryRunChildModule(parameters: {
   childModule: RecipeModule["_modules"][number]
   environment: Environment
+  shutdownSignal: () => NodeJS.Signals | null
   ssh: null | SshConnection
   verbose: boolean
 }): Promise<StepResult> {
   const { childModule, environment, ssh, verbose } = parameters
+  if (parameters.shutdownSignal() != null) return { env: environment, shouldBreak: true }
   const connection = childModule.local === true ? null : ssh
   startModuleSpinner(childModule.name)
   const checkResult = await childModule.check(connection, environment)
+  if (parameters.shutdownSignal() != null) return { env: environment, shouldBreak: true }
   if (checkResult !== "ok" && shouldExecuteApplyDuringDryRun(childModule)) {
-    return executeDryRunBlockingModule({ childModule, connection, environment, verbose })
+    return executeDryRunBlockingModule({
+      childModule,
+      connection,
+      environment,
+      shutdownSignal: parameters.shutdownSignal,
+      verbose,
+    })
   }
   const status = checkResult === "ok" ? "ok" : "changed"
   const suffix = checkResult === "ok" ? undefined : "(dry-run)"
@@ -78,6 +89,7 @@ export async function dryRunRecipeModule(parameters: {
     verbose?: boolean
   }
   recipeModule: RecipeModule
+  shutdownSignal?: () => NodeJS.Signals | null
   ssh: null | SshConnection
 }): Promise<StepResult> {
   return withRecipeOutputScope(async () => {
@@ -86,13 +98,16 @@ export async function dryRunRecipeModule(parameters: {
     let aggregatedStatus: "changed" | "ok" = "ok"
     const aggregatedMeta: ModuleMetaEntry[] = []
     let currentEnvironment = environment
+    const shutdownSignal = parameters.shutdownSignal ?? (() => null)
     const verbose = parameters.options?.verbose ?? false
 
     for (const childModule of recipeModule._modules) {
+      if (shutdownSignal() != null) return { env: currentEnvironment, shouldBreak: true }
       // eslint-disable-next-line no-await-in-loop
       const result = await executeDryRunChildModule({
         childModule,
         environment: currentEnvironment,
+        shutdownSignal,
         ssh,
         verbose,
       })

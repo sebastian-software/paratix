@@ -326,6 +326,7 @@ async function applyCheckedModule(parameters: {
   return applyModule({
     currentEnvironment: parameters.currentEnvironment,
     dryRun: parameters.dryRun,
+    shutdownSignal: parameters.shutdownSignal,
     ssh: parameters.ssh,
     targetModule: parameters.targetModule,
     verbose: parameters.verbose,
@@ -482,12 +483,14 @@ async function runDryRunRecipeModule(
   recipeModule: RecipeModule,
   environment: Environment,
   ssh: SshConnectionImpl,
+  shutdownSignal: () => NodeJS.Signals | null,
   verbose: boolean
 ): Promise<StepResult> {
   return dryRunRecipeModule({
     environment,
     options: { verbose },
     recipeModule,
+    shutdownSignal,
     ssh,
   })
 }
@@ -503,7 +506,9 @@ async function runRecipeModule(
   shutdownSignal: () => NodeJS.Signals | null
 ): Promise<StepResult> {
   try {
-    if (dryRun) return await runDryRunRecipeModule(recipeModule, environment, ssh, verbose)
+    if (dryRun) {
+      return await runDryRunRecipeModule(recipeModule, environment, ssh, shutdownSignal, verbose)
+    }
 
     // check() iterates all child modules; apply() checks them again internally via executeModules().
     startModuleSpinner(recipeModule.name)
@@ -546,6 +551,7 @@ async function runRecipeModule(
 async function applyModule(parameters: {
   currentEnvironment: Environment
   dryRun?: boolean
+  shutdownSignal: () => NodeJS.Signals | null
   ssh: SshConnectionImpl
   targetModule: Module
   verbose: boolean
@@ -560,6 +566,7 @@ async function applyModule(parameters: {
       async onChildStep(step) {
         await applyRunnerControlPlaneMeta(ssh, step)
       },
+      shutdownSignal: parameters.shutdownSignal,
     })
   } else {
     result = await targetModule.apply(connection, currentEnvironment)

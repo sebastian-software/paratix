@@ -105,6 +105,7 @@ export type OrchestrationStep = {
  */
 export type ModuleApplyOptions = {
   onChildStep?: (step: OrchestrationStep) => Promise<void>
+  shutdownSignal?: () => NodeJS.Signals | null
 }
 
 /**
