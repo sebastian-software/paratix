@@ -32,6 +32,7 @@ export function makeMockSshClass(
   capturedConfigs: unknown[],
   overrides?: {
     addPort?: ReturnType<typeof vi.fn>
+    connect?: ReturnType<typeof vi.fn>
     disconnect?: ReturnType<typeof vi.fn>
     exec?: ReturnType<typeof vi.fn>
     getConnectionInfo?: ReturnType<typeof vi.fn>
@@ -46,7 +47,7 @@ export function makeMockSshClass(
 ): new (host: string, config: unknown) => unknown {
   return class MockSshConnectionImpl {
     public addPort = overrides?.addPort ?? vi.fn().mockReturnValue(true)
-    public connect = vi.fn().mockResolvedValue(null)
+    public connect = overrides?.connect ?? vi.fn().mockResolvedValue(null)
     public disconnect = overrides?.disconnect ?? vi.fn()
     public downloadFile = vi.fn().mockRejectedValue(rejectUnstubbedSshMethod("downloadFile"))
     public exec = overrides?.exec ?? vi.fn().mockRejectedValue(rejectUnstubbedSshMethod("exec"))

@@ -46,6 +46,32 @@ describe("runPlaybook runtime module validation", () => {
     )
     expect(capturedConfigs).toStrictEqual([])
   })
+
+  it("disconnects the SSH connection when initial connect rejects", async () => {
+    const capturedConfigs: unknown[] = []
+    const disconnect = vi.fn()
+
+    vi.doMock("../src/ssh.js", () => ({
+      shellQuote: (s: string) => `'${s}'`,
+      SshConnectionImpl: makeMockSshClass(capturedConfigs, {
+        connect: vi.fn().mockRejectedValue(new Error("connect refused")),
+        disconnect,
+      }),
+    }))
+
+    const { runPlaybook } = await import("../src/runner.js")
+
+    const definition: ServerDefinition = {
+      host: "1.2.3.4",
+      name: "test-server",
+      run: [],
+      ssh: { ports: [22], privateKey: "~/.ssh/id", user: "root" },
+    }
+
+    await expect(runPlaybook(definition)).rejects.toThrow("connect refused")
+
+    expect(disconnect).toHaveBeenCalledOnce()
+  })
 })
 
 // Bug regression: when sshd.port and system.reboot are both set, reconnect must only be called once

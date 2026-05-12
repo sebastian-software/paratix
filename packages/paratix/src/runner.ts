@@ -1040,7 +1040,10 @@ export async function runPlaybook(
       definition,
       options,
       promptAbortSignal,
-      setSsh,
+      setSsh(connection) {
+        ssh = connection
+        setSsh(connection)
+      },
       shutdownSignal,
     })
     await executeRun({ definition, dryRun, environment, shutdownSignal, ssh, stats, verbose })
