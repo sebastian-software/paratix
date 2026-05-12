@@ -1,4 +1,3 @@
-# Rename this file to `integration-check.yml` to activate it on GitHub Actions.
 name: Integration Check
 
 on:
