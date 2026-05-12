@@ -18,7 +18,7 @@ export function exitWithMessage(message: string): never {
   // tests observe `console.error` exactly as before. The follow-up cleanup
   // and exit-code assignment is centralised in `handleCliExit`.
   console.error(escapeCliControlCharacters(message))
-  throw new CliExitError(message)
+  throw new CliExitError(message, 1, { reported: true })
 }
 
 /**
@@ -49,15 +49,18 @@ export function restoreInteractiveTerminal(): void {
 /**
  * R-0000189: top-level handler that converts a thrown CliExitError into the
  * intended exit code while running interactive cleanup. Other thrown errors
- * are still surfaced as a generic CLI error. CliExitError already emits the
- * user-visible message via exitWithMessage, so this handler does not print
- * it a second time.
+ * are still surfaced as a generic CLI error. CliExitError instances thrown
+ * directly from prompt paths have not necessarily emitted their user-visible
+ * message yet, so this handler prints only unreported CliExitError messages.
  *
  * @param error - The error caught from the CLI pipeline.
  */
 export function handleCliExit(error: unknown): void {
   restoreInteractiveTerminal()
   if (error instanceof CliExitError) {
+    if (!error.reported) {
+      console.error(escapeCliControlCharacters(error.cliMessage))
+    }
     process.exitCode = error.exitCode
     return
   }

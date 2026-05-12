@@ -959,6 +959,44 @@ describe("CliExitError + handleCliExit", () => {
     expect(caught).toBeInstanceOf(CliExitError)
     expect((caught as CliExitError).exitCode).toBe(1)
     expect((caught as CliExitError).cliMessage).toContain("Error: Invalid host")
+    expect((caught as CliExitError).reported).toBe(true)
+  })
+
+  it("handleCliExit prints directly thrown CliExitError messages once", () => {
+    const errorSpy = vi.spyOn(console, "error").mockImplementation((...args) => {
+      void args
+    })
+
+    try {
+      handleCliExit(new CliExitError("Error: direct prompt abort", 7))
+      expect(process.exitCode).toBe(7)
+      expect(errorSpy).toHaveBeenCalledTimes(1)
+      expect(errorSpy).toHaveBeenCalledWith("Error: direct prompt abort")
+    } finally {
+      process.exitCode = 0
+    }
+  })
+
+  it("handleCliExit does not duplicate messages already printed by exitWithMessage", () => {
+    const errorSpy = vi.spyOn(console, "error").mockImplementation((...args) => {
+      void args
+    })
+
+    try {
+      try {
+        validateHost(" bad host ")
+      } catch (error) {
+        handleCliExit(error)
+      }
+
+      expect(process.exitCode).toBe(1)
+      expect(errorSpy).toHaveBeenCalledTimes(1)
+      expect(errorSpy).toHaveBeenCalledWith(
+        'Error: Invalid host " bad host " — use a domain name, IPv4, or IPv6 address without spaces.'
+      )
+    } finally {
+      process.exitCode = 0
+    }
   })
 
   it("handleCliExit assigns exitCode and runs terminal cleanup for CliExitError", () => {
@@ -978,7 +1016,7 @@ describe("CliExitError + handleCliExit", () => {
     const stdoutWriteSpy = vi.spyOn(process.stdout, "write").mockImplementation(() => true)
 
     try {
-      handleCliExit(new CliExitError("boom", 7))
+      handleCliExit(new CliExitError("boom", 7, { reported: true }))
       expect(process.exitCode).toBe(7)
       expect(stdoutWriteSpy).toHaveBeenCalledWith("\x1B[?25h")
       expect(setRawModeCalls).toContain(false)

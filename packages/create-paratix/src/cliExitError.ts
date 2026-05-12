@@ -12,11 +12,13 @@
 export class CliExitError extends Error {
   public readonly cliMessage: string
   public readonly exitCode: number
+  public readonly reported: boolean
 
-  public constructor(message: string, exitCode = 1) {
+  public constructor(message: string, exitCode = 1, options?: { reported?: boolean }) {
     super(message)
     this.name = "CliExitError"
     this.cliMessage = message
     this.exitCode = exitCode
+    this.reported = options?.reported ?? false
   }
 }
