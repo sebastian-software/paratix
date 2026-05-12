@@ -69,15 +69,15 @@ describe("promptTerminal", () => {
   // prompt question and discards the echoed input.
   it("uses a custom Writable as output when hidden mode is enabled", async () => {
     vi.resetModules()
-    const createInterfaceSpy = vi.fn((args: { output: NodeJS.WritableStream }) => {
+    let capturedOutput: NodeJS.WritableStream | undefined
+    const createInterfaceSpy = vi.fn((arg: { output: NodeJS.WritableStream }) => {
+      capturedOutput = arg.output
       const rl = new MockReadline()
       vi.spyOn(rl, "question").mockImplementation((_question, callback) => {
         queueMicrotask(() => {
           callback("secret")
         })
       })
-      // Expose the output stream so the test can probe it.
-      ;(rl as unknown as { __output: NodeJS.WritableStream }).__output = args.output
       return rl
     })
     vi.doMock("node:readline", () => ({ createInterface: createInterfaceSpy }))
@@ -87,8 +87,8 @@ describe("promptTerminal", () => {
 
     expect(answer).toBe("secret")
     expect(createInterfaceSpy).toHaveBeenCalledOnce()
-    const args = createInterfaceSpy.mock.calls[0]?.[0]
-    expect(args?.output).not.toBe(process.stderr)
-    expect(typeof (args?.output as NodeJS.WritableStream).write).toBe("function")
+    expect(capturedOutput).toBeDefined()
+    expect(capturedOutput).not.toBe(process.stderr)
+    expect(typeof capturedOutput?.write).toBe("function")
   })
 })

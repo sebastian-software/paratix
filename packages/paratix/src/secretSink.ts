@@ -129,6 +129,30 @@ function isModuleResult(value: unknown): value is ModuleResult {
   )
 }
 
+function maskCauseValue(cause: unknown, secrets: readonly string[], secretList: string[]): unknown {
+  if (cause === undefined) return undefined
+  if (cause instanceof Error) return maskScopedError(cause, secrets)
+  return maskSecrets(stringifyCause(cause), secretList)
+}
+
+function buildMaskedErrorClone(error: Error, maskedMessage: string, secretList: string[]): Error {
+  if (error instanceof CommandError) {
+    return new CommandError(
+      maskedMessage,
+      maskSecrets(error.fullStdout, secretList),
+      maskSecrets(error.fullStderr, secretList)
+    )
+  }
+  // eslint-disable-next-line @typescript-eslint/no-unsafe-type-assertion -- preserving Error subclass prototype without re-running its constructor; Object.create is the standard pattern.
+  const clone: Error = Object.create(Object.getPrototypeOf(error) as object) as Error
+  Object.defineProperty(clone, "message", {
+    configurable: true,
+    value: maskedMessage,
+    writable: true,
+  })
+  return clone
+}
+
 // R-0000259: return a masked clone instead of mutating the original Error.
 // Mutating the original made the redaction irreversible — consumers outside
 // the scope (test frameworks, parallel loggers) still saw the masked values
@@ -141,31 +165,10 @@ function maskScopedError(error: unknown, secrets: readonly string[]): Error {
 
   const secretList = [...secrets]
   const maskedMessage = maskSecrets(error.message, secretList)
-  const maskedStack = error.stack != null ? maskSecrets(error.stack, secretList) : undefined
-  const cause = error.cause
-  const maskedCause =
-    cause === undefined
-      ? undefined
-      : cause instanceof Error
-        ? maskScopedError(cause, secrets)
-        : maskSecrets(stringifyCause(cause), secretList)
+  const maskedStack = error.stack == null ? undefined : maskSecrets(error.stack, secretList)
+  const maskedCause = maskCauseValue(error.cause, secrets, secretList)
 
-  const clone =
-    error instanceof CommandError
-      ? new CommandError(
-          maskedMessage,
-          maskSecrets(error.fullStdout, secretList),
-          maskSecrets(error.fullStderr, secretList)
-        )
-      : (Object.create(Object.getPrototypeOf(error) as object) as Error)
-
-  if (!(error instanceof CommandError)) {
-    Object.defineProperty(clone, "message", {
-      configurable: true,
-      value: maskedMessage,
-      writable: true,
-    })
-  }
+  const clone = buildMaskedErrorClone(error, maskedMessage, secretList)
   clone.name = error.name
   if (maskedStack != null) {
     Object.defineProperty(clone, "stack", {

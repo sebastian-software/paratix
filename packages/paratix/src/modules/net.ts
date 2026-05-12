@@ -754,9 +754,7 @@ async function applyPresentRoute(
   // atomic write would silently break it. compose/apt/aptKeyHelpers use the
   // same guard for predictable system paths.
   if (await isSymlink(conn, dropinPath)) {
-    return failed(
-      `[net.route: ${destination}] refuses to write through symlink at ${dropinPath}`
-    )
+    return failed(`[net.route: ${destination}] refuses to write through symlink at ${dropinPath}`)
   }
   const dropinContent = buildRouteDropin(destination, gateway, device)
   await conn.writeFile(dropinPath, dropinContent, { mode: NET_CONFIG_FILE_MODE })

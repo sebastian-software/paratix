@@ -45,9 +45,7 @@ function validateCloneReference(reference: string | undefined): void {
     )
   }
   if (CLONE_REFERENCE_DISALLOWED_PATTERN.test(reference)) {
-    throw new Error(
-      "git.clone ref must not contain whitespace, backslashes, or '..' sequences."
-    )
+    throw new Error("git.clone ref must not contain whitespace, backslashes, or '..' sequences.")
   }
 }
 
@@ -209,10 +207,7 @@ async function readOriginUrl(conn: SshConnection, destination: string): Promise<
 // update would not actually move the checkout. EXEC_OPTS keeps a missing or
 // detached HEAD from throwing; we only need the commit hash for the
 // idempotency comparison.
-async function readWorktreeHead(
-  conn: SshConnection,
-  destination: string
-): Promise<null | string> {
+async function readWorktreeHead(conn: SshConnection, destination: string): Promise<null | string> {
   const result = await conn.exec(`git -C ${shellQuote(destination)} rev-parse HEAD`, EXEC_OPTS)
   if (result.code !== 0) return null
   const head = result.stdout.trim()

@@ -16,13 +16,13 @@ const originUrlCommand = `git -C '${destination}' remote get-url origin`
 const createMockSsh: typeof createBaseMockSsh = (responses, options) =>
   createBaseMockSsh(
     {
-      [originUrlCommand]: { code: 0, stdout: repo },
       // R-0000279: apply now reads HEAD before and after `updateRepo` to
       // detect no-op runs. Default the probe to "no HEAD readable" so
       // existing fixtures (which expect "changed") keep passing. Tests that
       // exercise the idempotency path override these with explicit stable-SHA
       // stubs.
       [`git -C '${destination}' rev-parse HEAD`]: { code: 1, stdout: "" },
+      [originUrlCommand]: { code: 0, stdout: repo },
       ...responses,
     },
     options
