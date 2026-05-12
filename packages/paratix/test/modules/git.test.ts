@@ -17,6 +17,12 @@ const createMockSsh: typeof createBaseMockSsh = (responses, options) =>
   createBaseMockSsh(
     {
       [originUrlCommand]: { code: 0, stdout: repo },
+      // R-0000279: apply now reads HEAD before and after `updateRepo` to
+      // detect no-op runs. Default the probe to "no HEAD readable" so
+      // existing fixtures (which expect "changed") keep passing. Tests that
+      // exercise the idempotency path override these with explicit stable-SHA
+      // stubs.
+      [`git -C '${destination}' rev-parse HEAD`]: { code: 1, stdout: "" },
       ...responses,
     },
     options
@@ -368,6 +374,37 @@ describe("git.clone — apply", () => {
     expect(result.status).toBe("changed")
     expect(mockSsh.calls).toContain(`git -C '${destination}' fetch origin HEAD`)
     expect(mockSsh.calls).toContain(`git -C '${destination}' reset --hard FETCH_HEAD`)
+  })
+
+  // R-0000279: when a `fetch + reset --hard` rerun lands on the same HEAD
+  // the apply path must report "ok" instead of "changed" so downstream
+  // signals (service.reload, ...) only fire on real updates.
+  it("returns ok when fetch + reset --hard leaves HEAD unchanged", async () => {
+    const sha = "1234567890abcdef1234567890abcdef12345678"
+    const mockSsh = createGitApplyMockSsh({
+      [`git -C '${destination}' fetch origin HEAD`]: { code: 0 },
+      [`git -C '${destination}' reset --hard FETCH_HEAD`]: { code: 0 },
+      [`git -C '${destination}' rev-parse HEAD`]: { code: 0, stdout: `${sha}\n` },
+      [`test -d '${gitDir}'`]: { code: 0 },
+    })
+    const mod = git.clone(repo, destination)
+    const result = await mod.apply(mockSsh, emptyEnv)
+    expect(result.status).toBe("ok")
+  })
+
+  it("returns changed when fetch + reset --hard moves HEAD to a new commit", async () => {
+    // Stable stub returning the same SHA every call would yield "ok"; here we
+    // intentionally do NOT stub rev-parse HEAD so it falls through to the
+    // default (code: 1, stdout: "") and the comparison short-circuits to
+    // "changed". This matches the existing apply fixtures.
+    const mockSsh = createGitApplyMockSsh({
+      [`git -C '${destination}' fetch origin HEAD`]: { code: 0 },
+      [`git -C '${destination}' reset --hard FETCH_HEAD`]: { code: 0 },
+      [`test -d '${gitDir}'`]: { code: 0 },
+    })
+    const mod = git.clone(repo, destination)
+    const result = await mod.apply(mockSsh, emptyEnv)
+    expect(result.status).toBe("changed")
   })
 
   it("updates the origin URL before resetting to remote HEAD when an existing checkout drifted", async () => {

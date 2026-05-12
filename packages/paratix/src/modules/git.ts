@@ -205,6 +205,20 @@ async function readOriginUrl(conn: SshConnection, destination: string): Promise<
   return remoteUrl.length === 0 ? null : remoteUrl
 }
 
+// R-0000279: read the current worktree HEAD so apply can detect when an
+// update would not actually move the checkout. EXEC_OPTS keeps a missing or
+// detached HEAD from throwing; we only need the commit hash for the
+// idempotency comparison.
+async function readWorktreeHead(
+  conn: SshConnection,
+  destination: string
+): Promise<null | string> {
+  const result = await conn.exec(`git -C ${shellQuote(destination)} rev-parse HEAD`, EXEC_OPTS)
+  if (result.code !== 0) return null
+  const head = result.stdout.trim()
+  return head.length === 0 ? null : head
+}
+
 async function ensureOriginUrl(
   conn: SshConnection,
   parameters: GitCloneParameters
@@ -319,13 +333,31 @@ export const git = {
         if (!conn) return failed(`[git.clone: ${destination}] SSH connection is required`)
 
         const directoryExists = await conn.test(`test -d ${shellQuote(gitDirectory)}`)
-        const success = await (directoryExists
-          ? (await ensureOriginUrl(conn, parameters)) && (await updateRepo(conn, parameters))
-          : cloneRepo(conn, parameters))
+        if (!directoryExists) {
+          const cloned = await cloneRepo(conn, parameters)
+          return cloned
+            ? { status: "changed" }
+            : failed(`[git.clone: ${destination}] git clone or update failed`)
+        }
 
-        return success
-          ? { status: "changed" }
-          : failed(`[git.clone: ${destination}] git clone or update failed`)
+        // R-0000279: differentiate a true update from a no-op rerun. `updateRepo`
+        // performs `fetch + reset --hard`, which always succeeds even when the
+        // worktree was already at the desired commit. Without a HEAD comparison
+        // every apply would announce `changed` and uselessly fire downstream
+        // signals (service.reload, ...). compose.up:composeUpReportedChange
+        // follows the same pattern.
+        const originReady = await ensureOriginUrl(conn, parameters)
+        if (!originReady) return failed(`[git.clone: ${destination}] git clone or update failed`)
+
+        const previousHead = await readWorktreeHead(conn, destination)
+        const updated = await updateRepo(conn, parameters)
+        if (!updated) return failed(`[git.clone: ${destination}] git clone or update failed`)
+
+        const currentHead = await readWorktreeHead(conn, destination)
+        if (previousHead !== null && currentHead !== null && previousHead === currentHead) {
+          return { status: "ok" }
+        }
+        return { status: "changed" }
       },
       async check(conn: null | SshConnection): Promise<"needs-apply" | "ok"> {
         if (!conn) return NEEDS_APPLY
