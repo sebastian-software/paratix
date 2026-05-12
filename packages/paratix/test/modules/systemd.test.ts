@@ -243,6 +243,29 @@ describe("systemd.unit", () => {
     expect(writeFile).toHaveBeenNthCalledWith(2, filePath, previousContent, { mode: "600" })
   })
 
+  it("restores an existing unit file when daemon-reload flag persistence fails", async () => {
+    const previousContent = "[Unit]\nDescription=Previous\n"
+    const ssh = createMockSsh({
+      [`[ -e '${filePath}' ]`]: { code: 0 },
+      [`cat '${filePath}'`]: { stdout: previousContent },
+      [`stat -c '%a' '${filePath}'`]: { code: 0, stdout: "600\n" },
+      "mkdir -p /var/lib/paratix/flags": { code: 0 },
+      [reloadFlagSet]: {
+        code: 1,
+        stderr:
+          "touch: cannot touch '/var/lib/paratix/flags/systemd-unit-marker': Permission denied\n",
+      },
+      "systemctl daemon-reload": { code: 0 },
+    })
+    const writeFile = vi.spyOn(ssh, "writeFile").mockResolvedValue()
+    const mod = systemd.unit(unitName, unitContent)
+    const result = await mod.apply(ssh, emptyEnv)
+    expect(result.status).toBe("failed")
+    expect(String(result.error)).toContain("failed to persist versioned flag")
+    expect(writeFile).toHaveBeenNthCalledWith(1, filePath, unitContent, { mode: "0644" })
+    expect(writeFile).toHaveBeenNthCalledWith(2, filePath, previousContent, { mode: "600" })
+  })
+
   // R-0000211: writeFile can throw (SFTP error after a partial write,
   // permission denied, network drop). Without the try/catch around the
   // writeFile call, the unit file would stay half-written and the captured
