@@ -53,6 +53,22 @@ describe("server", () => {
     )
   })
 
+  it("throws when signals is not an array in an untyped JS playbook", () => {
+    expect(() =>
+      server(validConfig({ signals: validModule }) as unknown as Parameters<typeof server>[0])
+    ).toThrow("ServerDefinition: signals must be an array of modules")
+  })
+
+  it("throws when signals contains a malformed module in an untyped JS playbook", () => {
+    expect(() =>
+      server(
+        validConfig({
+          signals: [{ ...validModule, name: "" }],
+        }) as unknown as Parameters<typeof server>[0]
+      )
+    ).toThrow("ServerDefinition: signals[0] must be a module with name, check, and apply")
+  })
+
   it("throws when ssh.ports is empty", () => {
     expect(() =>
       server(validConfig({ ssh: { ...validSsh, ports: [] } }) as Parameters<typeof server>[0])
