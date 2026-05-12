@@ -129,46 +129,59 @@ function isModuleResult(value: unknown): value is ModuleResult {
   )
 }
 
+// R-0000259: return a masked clone instead of mutating the original Error.
+// Mutating the original made the redaction irreversible — consumers outside
+// the scope (test frameworks, parallel loggers) still saw the masked values
+// after `withRegisteredSecrets` returned. Cloning leaves the caller's Error
+// untouched and keeps the scope-local masking semantics intact.
 function maskScopedError(error: unknown, secrets: readonly string[]): Error {
   if (!(error instanceof Error) || secrets.length === 0) {
     return error instanceof Error ? error : new Error(maskSecrets(String(error), [...secrets]))
   }
 
-  const maskedError = error
-  Object.defineProperty(maskedError, "message", {
-    configurable: true,
-    value: maskSecrets(maskedError.message, [...secrets]),
-    writable: true,
-  })
-  if (maskedError.stack != null) {
-    Object.defineProperty(maskedError, "stack", {
+  const secretList = [...secrets]
+  const maskedMessage = maskSecrets(error.message, secretList)
+  const maskedStack = error.stack != null ? maskSecrets(error.stack, secretList) : undefined
+  const cause = error.cause
+  const maskedCause =
+    cause === undefined
+      ? undefined
+      : cause instanceof Error
+        ? maskScopedError(cause, secrets)
+        : maskSecrets(stringifyCause(cause), secretList)
+
+  const clone =
+    error instanceof CommandError
+      ? new CommandError(
+          maskedMessage,
+          maskSecrets(error.fullStdout, secretList),
+          maskSecrets(error.fullStderr, secretList)
+        )
+      : (Object.create(Object.getPrototypeOf(error) as object) as Error)
+
+  if (!(error instanceof CommandError)) {
+    Object.defineProperty(clone, "message", {
       configurable: true,
-      value: maskSecrets(maskedError.stack, [...secrets]),
+      value: maskedMessage,
       writable: true,
     })
   }
-  const cause = maskedError.cause
-  if (cause !== undefined) {
-    Object.defineProperty(maskedError, "cause", {
+  clone.name = error.name
+  if (maskedStack != null) {
+    Object.defineProperty(clone, "stack", {
       configurable: true,
-      value:
-        cause instanceof Error
-          ? maskScopedError(cause, secrets)
-          : maskSecrets(stringifyCause(cause), [...secrets]),
+      value: maskedStack,
       writable: true,
     })
   }
-  if (maskedError instanceof CommandError) {
-    Object.defineProperty(maskedError, "fullStdout", {
+  if (maskedCause !== undefined) {
+    Object.defineProperty(clone, "cause", {
       configurable: true,
-      value: maskSecrets(maskedError.fullStdout, [...secrets]),
-    })
-    Object.defineProperty(maskedError, "fullStderr", {
-      configurable: true,
-      value: maskSecrets(maskedError.fullStderr, [...secrets]),
+      value: maskedCause,
+      writable: true,
     })
   }
-  return maskedError
+  return clone
 }
 
 function stringifyCause(cause: unknown): string {

@@ -103,6 +103,30 @@ describe("withRegisteredSecrets", () => {
     expect(getRegisteredSecrets()).toStrictEqual([])
   })
 
+  // R-0000259: maskScopedError now returns a clone instead of mutating the
+  // caller's Error instance, so an outer consumer that retains the original
+  // reference (a test framework, a logger registered before the scope) still
+  // sees the unredacted message after the scope exits.
+  it("leaves the original error instance untouched while masking the rethrown clone", async () => {
+    const original = new Error("boom alpha")
+    let thrown: unknown
+    try {
+      await withRegisteredSecrets(["alpha"], async () => {
+        await Promise.resolve()
+        throw original
+      })
+    } catch (error) {
+      thrown = error
+    }
+
+    expect(thrown).toBeInstanceOf(Error)
+    expect((thrown as Error).message).toBe("boom [REDACTED]")
+    expect(thrown).not.toBe(original)
+    // The caller's original instance keeps the unredacted message.
+    expect(original.message).toBe("boom alpha")
+    expect(getRegisteredSecrets()).toStrictEqual([])
+  })
+
   it("masks scoped secrets on primitive error causes before unregistering", async () => {
     await expect(
       withRegisteredSecrets(["primitive-cause-secret"], async () => {
