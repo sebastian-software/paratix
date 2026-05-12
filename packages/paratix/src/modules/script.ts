@@ -68,9 +68,8 @@ async function runScriptOnce(parameters: {
   if (typeof allocation !== "string") return allocation
   const remotePath = allocation
 
-  await ssh.uploadFile(localPath, remotePath)
-
   try {
+    await ssh.uploadFile(localPath, remotePath)
     return await runScriptOnceBody({
       flagName,
       flagPrefix,

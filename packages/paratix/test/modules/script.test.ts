@@ -195,6 +195,25 @@ describe("script.once — apply", () => {
     expect(mockSsh.calls).toContain(`rm -f '${remotePath}'`)
   })
 
+  it("still cleans up temp file when uploadFile throws after mktemp", async () => {
+    const remotePath = makeRemoteScriptPath("setup")
+    const mockSsh = createScriptMockSsh()
+    mockSsh.uploadFile = async (localPath, uploadRemotePath, options) => {
+      mockSsh.uploadFileCalls.push({ localPath, options, remotePath: uploadRemotePath })
+      await Promise.resolve()
+      throw new Error("upload failed")
+    }
+    const mod = script.once("setup", "/local/setup.sh")
+
+    await expect(mod.apply(mockSsh, emptyEnv)).rejects.toThrow("upload failed")
+
+    expect(mockSsh.calls).toContain(`rm -f '${remotePath}'`)
+    expect(mockSsh.calls).not.toContain(`chmod +x '${remotePath}'`)
+    expect(mockSsh.calls).not.toContain(`'${remotePath}'`)
+    const flagCall = mockSsh.calls.find((c) => c.includes("touch"))
+    expect(flagCall).toBeUndefined()
+  })
+
   it("does not set flag when script exits non-zero", async () => {
     const remotePath = makeRemoteScriptPath("setup")
     const mockSsh = createScriptMockSsh({
