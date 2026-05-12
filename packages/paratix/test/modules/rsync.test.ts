@@ -2,9 +2,10 @@ import { spawn } from "node:child_process"
 import { randomUUID } from "node:crypto"
 import { unlinkSync, writeFileSync } from "node:fs"
 import { EventEmitter, Readable } from "node:stream"
-import { beforeEach, describe, expect, it, vi } from "vitest"
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 
 import { rsync } from "../../src/modules/rsync.js"
+import { setRunnerAbortSignal } from "../../src/runnerAbortSignal.js"
 import { CommandError } from "../../src/sshHelpers.js"
 import { createMockSsh } from "../helpers/mockSsh.js"
 
@@ -87,6 +88,30 @@ function makeFakeRsyncChild(parameters: {
   })
 
   return child
+}
+
+function makeHangingRsyncChild(): {
+  child: {
+    kill: (signal: NodeJS.Signals) => boolean
+    stderr: Readable
+    stdout: Readable
+  } & EventEmitter
+  killCalls: NodeJS.Signals[]
+} {
+  const killCalls: NodeJS.Signals[] = []
+  const child = new EventEmitter() as {
+    kill: (signal: NodeJS.Signals) => boolean
+    stderr: Readable
+    stdout: Readable
+  } & EventEmitter
+  child.stdout = new Readable({ read: noopRead })
+  child.stderr = new Readable({ read: noopRead })
+  Object.defineProperty(child, "exitCode", { value: null })
+  child.kill = (signal: NodeJS.Signals): boolean => {
+    killCalls.push(signal)
+    return true
+  }
+  return { child, killCalls }
 }
 
 function mockSuccess(stdout = ""): void {
@@ -196,6 +221,11 @@ describe("rsync.sync — check", () => {
 describe("rsync.sync — apply", () => {
   beforeEach(() => {
     mockSpawn.mockReset()
+  })
+
+  afterEach(() => {
+    setRunnerAbortSignal(undefined)
+    vi.useRealTimers()
   })
 
   it("returns failed when ssh is null", async () => {
@@ -336,6 +366,46 @@ describe("rsync.sync — apply", () => {
     const result = await mod.apply(mockSsh, emptyEnv)
 
     expect(result.status).toBe("changed")
+  })
+
+  it("kills and fails a hanging rsync child when the timeout expires", async () => {
+    vi.useFakeTimers()
+    const { child, killCalls } = makeHangingRsyncChild()
+    mockSpawn.mockReturnValue(child as never)
+    const mockSsh = createMockSsh()
+    const mod = rsync.sync({ dest: "/remote/dest", src: "/local/src", timeout: 25 })
+
+    const resultPromise = mod.apply(mockSsh, emptyEnv)
+    await vi.advanceTimersByTimeAsync(25)
+    const result = await resultPromise
+
+    expect(result.status).toBe("failed")
+    expect(result.error?.message).toContain("rsync timed out after 25ms")
+    expect(killCalls).toStrictEqual(["SIGTERM"])
+
+    await vi.advanceTimersByTimeAsync(1000)
+    expect(killCalls).toStrictEqual(["SIGTERM", "SIGKILL"])
+  })
+
+  it("kills and fails a hanging rsync child when the runner abort signal fires", async () => {
+    vi.useFakeTimers()
+    const { child, killCalls } = makeHangingRsyncChild()
+    mockSpawn.mockReturnValue(child as never)
+    const controller = new AbortController()
+    setRunnerAbortSignal(controller.signal)
+    const mockSsh = createMockSsh()
+    const mod = rsync.sync({ dest: "/remote/dest", src: "/local/src", timeout: 10_000 })
+
+    const resultPromise = mod.apply(mockSsh, emptyEnv)
+    controller.abort()
+    const result = await resultPromise
+
+    expect(result.status).toBe("failed")
+    expect(result.error?.message).toContain("rsync aborted")
+    expect(killCalls).toStrictEqual(["SIGTERM"])
+
+    await vi.advanceTimersByTimeAsync(1000)
+    expect(killCalls).toStrictEqual(["SIGTERM", "SIGKILL"])
   })
 })
 

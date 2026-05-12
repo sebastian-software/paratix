@@ -1,4 +1,3 @@
-import { spawn } from "node:child_process"
 import { randomUUID } from "node:crypto"
 import { unlinkSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
@@ -8,13 +7,11 @@ import { failed } from "../moduleFailure.js"
 import { shellQuote } from "../ssh.js"
 import { CommandError } from "../sshHelpers.js"
 import { type Module, type ModuleResult, NEEDS_APPLY, type SshConnection } from "../types.js"
+import { DEFAULT_RSYNC_TIMEOUT_MILLISECONDS, runRsyncProcess } from "./rsyncProcess.js"
 import { validateRsyncPath, validateStrictHostKeyChecking } from "./rsyncValidation.js"
 
 type RsyncPhase = "apply" | "check"
 const DEFAULT_SSH_PORT = 22
-const BYTES_PER_KIB = 1024
-const RSYNC_OUTPUT_CAPTURE_LIMIT_KIB = 64
-const RSYNC_OUTPUT_CAPTURE_LIMIT = RSYNC_OUTPUT_CAPTURE_LIMIT_KIB * BYTES_PER_KIB
 
 type SyncOptions = {
   /** Permission mode applied via `--chmod`, e.g. `"Du=rwx,go=rx,Fu=rw,go=r"`. */
@@ -41,6 +38,8 @@ type SyncOptions = {
    * (not recommended for production).
    */
   strictHostKeyChecking?: "accept-new" | "no" | "off" | "yes"
+  /** Maximum runtime for a single rsync process in milliseconds. */
+  timeout?: number
 }
 
 /**
@@ -242,93 +241,6 @@ function createRsyncError(
   )
 }
 
-type BoundedOutputCapture = {
-  append: (chunk: string) => void
-  hasNonWhitespace: () => boolean
-  text: () => string
-}
-
-function createBoundedOutputCapture(streamName: "stderr" | "stdout"): BoundedOutputCapture {
-  const truncationMarker = `\n[paratix] rsync ${streamName} truncated after ${String(
-    RSYNC_OUTPUT_CAPTURE_LIMIT
-  )} characters\n`
-  let captured = ""
-  let hasOutput = false
-  let truncated = false
-
-  return {
-    append(chunk: string): void {
-      if (/\S/v.test(chunk)) hasOutput = true
-      if (truncated) return
-
-      const remaining = RSYNC_OUTPUT_CAPTURE_LIMIT - captured.length
-      if (chunk.length <= remaining) {
-        captured += chunk
-        return
-      }
-
-      captured += chunk.slice(0, Math.max(0, remaining)) + truncationMarker
-      truncated = true
-    },
-    hasNonWhitespace(): boolean {
-      return hasOutput
-    },
-    text(): string {
-      return captured
-    },
-  }
-}
-
-/**
- * Run `rsync` and stream stdout/stderr into bounded diagnostic buffers.
- * R-0000040: replaces the previous `execFile` runner whose default 1 MiB
- * stdout buffer could trip `ERR_CHILD_PROCESS_STDIO_MAXBUFFER` on large
- * `--itemize-changes` outputs.
- *
- * @param rsyncArguments - The fully-built argv for the rsync invocation.
- * @returns The captured stdout, stderr, and exit code.
- */
-async function runRsyncProcess(rsyncArguments: string[]): Promise<{
-  code: null | number
-  hasStdout: boolean
-  spawnError?: Error
-  stderr: string
-  stdout: string
-}> {
-  return new Promise((resolve) => {
-    const child = spawn("rsync", rsyncArguments, { stdio: ["ignore", "pipe", "pipe"] })
-    const stdout = createBoundedOutputCapture("stdout")
-    const stderr = createBoundedOutputCapture("stderr")
-
-    child.stdout.setEncoding("utf8")
-    child.stderr.setEncoding("utf8")
-    child.stdout.on("data", (chunk: string) => {
-      stdout.append(chunk)
-    })
-    child.stderr.on("data", (chunk: string) => {
-      stderr.append(chunk)
-    })
-
-    child.on("error", (error: Error) => {
-      resolve({
-        code: null,
-        hasStdout: stdout.hasNonWhitespace(),
-        spawnError: error,
-        stderr: stderr.text(),
-        stdout: stdout.text(),
-      })
-    })
-    child.on("close", (code: null | number) => {
-      resolve({
-        code,
-        hasStdout: stdout.hasNonWhitespace(),
-        stderr: stderr.text(),
-        stdout: stdout.text(),
-      })
-    })
-  })
-}
-
 async function executeRsync(parameters: {
   dryRun: boolean
   options: SyncOptions
@@ -351,7 +263,10 @@ async function executeRsync(parameters: {
   })
 
   try {
-    const result = await runRsyncProcess(rsyncArguments)
+    const result = await runRsyncProcess(
+      rsyncArguments,
+      options.timeout ?? DEFAULT_RSYNC_TIMEOUT_MILLISECONDS
+    )
     if (result.spawnError != null) {
       throw createRsyncError(options, phase, {
         code: undefined,
