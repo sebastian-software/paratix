@@ -365,6 +365,7 @@ export class SshConnectionImpl implements SshConnection {
     return {
       agentSocket: this.authMethod === "agent" ? (this.agentSocket ?? undefined) : undefined,
       authMethod: this.authMethod ?? undefined,
+      configuredPorts: [...this.config.ports],
       host: this.runtime.host,
       port: this.connectedPort,
       privateKeyPath:

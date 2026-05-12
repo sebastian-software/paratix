@@ -7,6 +7,8 @@ import type { Module, ModuleMetaEntry, ModuleResult } from "../../src/types.js"
 import { createTestSignalBus, resetSignalBus, setSignalBus } from "../../src/signalBus.js"
 
 let signalBus: TestSignalBus
+const DEFAULT_SSH_PORT = 22
+const DEFAULT_CONFIGURED_PORTS = [DEFAULT_SSH_PORT]
 
 export function installRunnerTestHooks(): void {
   // Vitest supports file-scope hooks; each split runner test file gets an isolated bus.
@@ -54,9 +56,13 @@ export function makeMockSshClass(
     public exists = vi.fn().mockRejectedValue(rejectUnstubbedSshMethod("exists"))
     public getConnectionInfo =
       overrides?.getConnectionInfo ??
-      vi
-        .fn()
-        .mockReturnValue({ host: "1.2.3.4", port: 22, privateKeyPath: "~/.ssh/id", user: "root" })
+      vi.fn().mockReturnValue({
+        configuredPorts: DEFAULT_CONFIGURED_PORTS,
+        host: "1.2.3.4",
+        port: 22,
+        privateKeyPath: "~/.ssh/id",
+        user: "root",
+      })
     public lines = vi.fn().mockRejectedValue(rejectUnstubbedSshMethod("lines"))
     public output =
       overrides?.output ?? vi.fn().mockRejectedValue(rejectUnstubbedSshMethod("output"))

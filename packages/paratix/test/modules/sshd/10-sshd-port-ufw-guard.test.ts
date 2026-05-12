@@ -42,8 +42,8 @@ const UFW_STATUS_ACTIVE_PORT_2222_BOTH_FAMILIES = [
   "2222 (v6)                  ALLOW       Anywhere (v6)",
 ].join("\n")
 
-const createMockSsh: typeof createBaseMockSsh = (responses, options) =>
-  createBaseMockSsh(responses, {
+const createMockSsh: typeof createBaseMockSsh = (responses, options) => {
+  const ssh = createBaseMockSsh(responses, {
     ...options,
     allowWrites: [
       { options: { mode: "0644" }, remotePath: /^\/tmp\/paratix-sshd-dry-run-/v },
@@ -67,6 +67,12 @@ const createMockSsh: typeof createBaseMockSsh = (responses, options) =>
       ...(options?.responseStubs ?? []),
     ],
   })
+  vi.spyOn(ssh, "getConnectionInfo").mockReturnValue({
+    ...ssh.getConnectionInfo(),
+    configuredPorts: [22, 2222],
+  })
+  return ssh
+}
 
 const emptyEnv = {}
 

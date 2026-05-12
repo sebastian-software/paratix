@@ -551,6 +551,13 @@ describe("runPlaybook dry-run recipe behaviour", () => {
       SshConnectionImpl: makeMockSshClass(capturedConfigs, {
         addPort,
         exec,
+        getConnectionInfo: vi.fn().mockReturnValue({
+          configuredPorts: [22, 2222],
+          host: "1.2.3.4",
+          port: 22,
+          privateKeyPath: "~/.ssh/id",
+          user: "root",
+        }),
         readFile: vi.fn().mockResolvedValue("Port 22\n"),
         reconnect,
         writeFile: vi.fn().mockResolvedValue(null),
@@ -569,7 +576,7 @@ describe("runPlaybook dry-run recipe behaviour", () => {
       host: "1.2.3.4",
       name: "test-server",
       run: [sshd.port(2222)],
-      ssh: { ports: [22], privateKey: "~/.ssh/id", user: "root" },
+      ssh: { ports: [22, 2222], privateKey: "~/.ssh/id", user: "root" },
     }
 
     await runPlaybook(definition, { dryRun: true })

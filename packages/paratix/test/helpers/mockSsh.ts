@@ -11,6 +11,7 @@ import {
 } from "./mockSshSideEffects.js"
 
 type MockResponses = Record<string, Partial<ExecResult>>
+const DEFAULT_SSH_PORT = 22
 
 type MockResponseStub = {
   command: RegExp | string
@@ -23,21 +24,13 @@ type MockSshOptions = {
   allowUnstubbedTest?: string[]
   /**
    * Result returned by `ssh.exec()` for unstubbed commands.
-   * By default, unstubbed calls reject. Set this to a partial `ExecResult`
-   * when a test intentionally does not care about a specific command.
    */
   defaultExecResult?: "throw" | Partial<ExecResult>
   /**
    * Result returned by `ssh.output()` for unstubbed commands.
-   * By default, unstubbed calls reject. Set this when a test intentionally
-   * does not care about a specific output command.
    */
   defaultOutputResult?: string
-  /**
-   * Result returned by `ssh.test()` for unstubbed commands.
-   * By default, unstubbed calls reject. Set this when a test intentionally
-   * treats unspecified predicates as true or false.
-   */
+  /** Result returned by `ssh.test()` for unstubbed commands. */
   defaultTestResult?: boolean
   /**
    * When `false`, `ssh.exec()` and `ssh.output()` return non-zero results by
@@ -296,6 +289,7 @@ function createRecordingSpies(): RecordingSpies {
 function getMockConnectionInfo(): ReturnType<SshConnection["getConnectionInfo"]> {
   return {
     authMethod: "privateKey",
+    configuredPorts: [DEFAULT_SSH_PORT],
     host: "1.2.3.4",
     port: 22,
     privateKeyPath: "~/.ssh/id",
@@ -342,8 +336,7 @@ export function createMockSsh(responses?: MockResponses, options?: MockSshOption
     async sha256(path) {
       const exists = await this.test(`[ -f ${shellQuote(path)} ]`)
       if (!exists) return null
-      const command = `sha256sum ${shellQuote(path)}`
-      const output = await this.output(command)
+      const output = await this.output(`sha256sum ${shellQuote(path)}`)
       return output.split(/\s+/v)[0] ?? null
     },
     test: createTest(calls, responses, options),

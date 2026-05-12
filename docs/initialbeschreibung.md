@@ -433,8 +433,10 @@ einem Service-Restart wirksam — der Reconnect erfolgt automatisch, wenn die
 bestehende Verbindung dabei abbricht.
 
 **Sicherheitsprüfung:** Das `sshd.port`-Modul validiert vor der Umlegung, dass
-der Zielport in der `ssh.ports`-Liste der Serverdefinition eingetragen ist.
-Andernfalls würde Paratix sich nach einem Reboot nicht mehr verbinden können.
+der Zielport in der statischen `ssh.ports`-Liste der Serverdefinition
+eingetragen ist. Diese Prüfung läuft auch im Dry-Run vor Schreib-,
+Validierungs- und Restart-Schritten. Andernfalls würde Paratix sich nach einem
+Reboot nicht mehr verbinden können.
 
 **Fehlerfall:** Wenn der Reconnect auf dem neuen Port fehlschlaegt (Timeout
 erreicht), bricht der gesamte Run mit einem Fehler ab.
@@ -1342,6 +1344,7 @@ Zwischenspeichern, kein Cleanup noetig.
 ```typescript
 interface SshConfig {
   user: string
+  /** Statische Port-Kandidaten; sshd.port-Zielports müssen hier eingetragen sein. */
   ports: number[]
   /** Private-Key-Pfad. Optional; ohne Wert nutzt Paratix SSH_AUTH_SOCK. */
   privateKey?: string

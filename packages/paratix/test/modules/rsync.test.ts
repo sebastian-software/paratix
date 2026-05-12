@@ -497,6 +497,7 @@ describe("rsync.sync — argument building", () => {
   it("uses a temporary verified known_hosts file for a pinned session host key", async () => {
     const mockSsh = createMockSsh()
     vi.spyOn(mockSsh, "getConnectionInfo").mockReturnValue({
+      configuredPorts: [22],
       host: "1.2.3.4",
       port: 22,
       privateKeyPath: "~/.ssh/id",
@@ -527,6 +528,7 @@ describe("rsync.sync — argument building", () => {
   it("wraps privateKeyPath with single quotes to prevent shell expansion of special characters", async () => {
     const mockSsh = createMockSsh()
     vi.spyOn(mockSsh, "getConnectionInfo").mockReturnValue({
+      configuredPorts: [22],
       host: "1.2.3.4",
       port: 22,
       privateKeyPath: "$HOME/.ssh/deploy key",
@@ -584,6 +586,7 @@ describe("rsync.sync — argument building", () => {
   it("does not rely on a local known_hosts entry when the session exports a verified host key", async () => {
     const mockSsh = createMockSsh()
     vi.spyOn(mockSsh, "getConnectionInfo").mockReturnValue({
+      configuredPorts: [22],
       host: "fresh-host.example",
       port: 22,
       privateKeyPath: "~/.ssh/id",
@@ -722,6 +725,7 @@ describe("rsync.sync — argument building", () => {
   it("builds IPv6 remote destination in bracketed form", async () => {
     const mockSsh = createMockSsh()
     vi.spyOn(mockSsh, "getConnectionInfo").mockReturnValue({
+      configuredPorts: [22],
       host: "2001:db8::10",
       port: 22,
       privateKeyPath: "~/.ssh/id",
@@ -748,6 +752,7 @@ describe("rsync.sync — SSH auth method in transport flag", () => {
     const mockSsh = createMockSsh()
     vi.spyOn(mockSsh, "getConnectionInfo").mockReturnValue({
       agentSocket: "/run/user/1000/gnupg/S.gpg-agent.ssh",
+      configuredPorts: [22],
       host: "1.2.3.4",
       port: 22,
       user: "root",
@@ -767,6 +772,7 @@ describe("rsync.sync — SSH auth method in transport flag", () => {
     const mockSsh = createMockSsh()
     vi.spyOn(mockSsh, "getConnectionInfo").mockReturnValue({
       agentSocket: "/tmp/ssh-agent $USER.sock",
+      configuredPorts: [22],
       host: "1.2.3.4",
       port: 22,
       user: "root",
@@ -785,6 +791,7 @@ describe("rsync.sync — SSH auth method in transport flag", () => {
     const mockSsh = createMockSsh()
     vi.spyOn(mockSsh, "getConnectionInfo").mockReturnValue({
       agentSocket: "/run/user/1000/gnupg/S.gpg-agent.ssh",
+      configuredPorts: [22],
       host: "1.2.3.4",
       port: 22,
       privateKeyPath: "~/.ssh/deploy_key",
@@ -803,6 +810,7 @@ describe("rsync.sync — SSH auth method in transport flag", () => {
   it("sets -i <keypath> when only privateKeyPath is provided (backwards compatibility)", async () => {
     const mockSsh = createMockSsh()
     vi.spyOn(mockSsh, "getConnectionInfo").mockReturnValue({
+      configuredPorts: [22],
       host: "1.2.3.4",
       port: 22,
       privateKeyPath: "~/.ssh/id",
@@ -821,6 +829,7 @@ describe("rsync.sync — SSH auth method in transport flag", () => {
   it("regression: appends -o IdentitiesOnly=yes whenever privateKeyPath is set", async () => {
     const mockSsh = createMockSsh()
     vi.spyOn(mockSsh, "getConnectionInfo").mockReturnValue({
+      configuredPorts: [22],
       host: "1.2.3.4",
       port: 22,
       privateKeyPath: "~/.ssh/id",
@@ -842,6 +851,7 @@ describe("rsync.sync — SSH auth method in transport flag", () => {
     const mockSsh = createMockSsh()
     vi.spyOn(mockSsh, "getConnectionInfo").mockReturnValue({
       agentSocket: "/run/user/1000/ssh-agent.sock",
+      configuredPorts: [22],
       host: "1.2.3.4",
       port: 22,
       user: "root",
@@ -861,6 +871,7 @@ describe("rsync.sync — SSH auth method in transport flag", () => {
   it("includes no identity flag when neither privateKeyPath nor agentSocket is provided", async () => {
     const mockSsh = createMockSsh()
     vi.spyOn(mockSsh, "getConnectionInfo").mockReturnValue({
+      configuredPorts: [22],
       host: "1.2.3.4",
       port: 22,
       user: "root",
@@ -879,6 +890,7 @@ describe("rsync.sync — SSH auth method in transport flag", () => {
     const mockSsh = createMockSsh()
     vi.spyOn(mockSsh, "getConnectionInfo").mockReturnValue({
       authMethod: "password",
+      configuredPorts: [22],
       host: "1.2.3.4",
       port: 22,
       user: "root",

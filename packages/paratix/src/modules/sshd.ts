@@ -550,6 +550,9 @@ async function applySshdPortWhenConfigUnchanged(
 }
 
 async function applySshdPort(ssh: SshConnection, targetPort: number): Promise<ModuleResult> {
+  const configuredPortGuard = rejectWhenTargetPortIsNotConfigured(ssh, targetPort)
+  if (configuredPortGuard != null) return configuredPortGuard
+
   const ufwGuard = await rejectWhenUfwBlocksTargetPort(ssh, targetPort)
   if (ufwGuard != null) return ufwGuard
 
@@ -579,6 +582,18 @@ async function applySshdPort(ssh: SshConnection, targetPort: number): Promise<Mo
     meta: [sshdPortMeta(targetPort)],
     status: "changed",
   }
+}
+
+function rejectWhenTargetPortIsNotConfigured(
+  ssh: SshConnection,
+  targetPort: number
+): ModuleResult | null {
+  const { configuredPorts } = ssh.getConnectionInfo()
+  if (configuredPorts.includes(targetPort)) return null
+  return failed(
+    `[sshd.port: ${String(targetPort)}] target port is not listed in static ssh.ports ` +
+      `configuration; add ${String(targetPort)} to ssh.ports before changing sshd_config`
+  )
 }
 
 /**
@@ -682,6 +697,9 @@ export const sshd = {
     return {
       async _applyDryRun(ssh: null | SshConnection): Promise<ModuleResult> {
         if (!ssh) return failed(`[sshd.port: ${targetPort}] SSH connection is required`)
+
+        const configuredPortGuard = rejectWhenTargetPortIsNotConfigured(ssh, targetPort)
+        if (configuredPortGuard != null) return configuredPortGuard
 
         const ufwGuard = await rejectWhenUfwBlocksTargetPort(ssh, targetPort)
         if (ufwGuard != null) return ufwGuard

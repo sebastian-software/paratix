@@ -6,8 +6,8 @@ import { isSshdPortMetaEntry } from "../../../src/meta.js"
 import { sshd } from "../../../src/modules/sshd.js"
 import { createMockSsh as createBaseMockSsh } from "../../helpers/mockSsh.js"
 
-const createMockSsh: typeof createBaseMockSsh = (responses, options) =>
-  createBaseMockSsh(responses, {
+const createMockSsh: typeof createBaseMockSsh = (responses, options) => {
+  const ssh = createBaseMockSsh(responses, {
     ...options,
     allowWrites: [
       { options: { mode: "0644" }, remotePath: /^\/tmp\/paratix-sshd-dry-run-/v },
@@ -39,6 +39,12 @@ const createMockSsh: typeof createBaseMockSsh = (responses, options) =>
       ...(options?.responseStubs ?? []),
     ],
   })
+  vi.spyOn(ssh, "getConnectionInfo").mockReturnValue({
+    ...ssh.getConnectionInfo(),
+    configuredPorts: [22, 2222],
+  })
+  return ssh
+}
 
 const emptyEnv = {}
 const SSHD_CONFIG = "/etc/ssh/sshd_config"
@@ -142,6 +148,26 @@ function mockSshdDryRunExecValidationFailure(mockSsh: ReturnType<typeof createMo
 // ─── sshd.config — apply ──────────────────────────────────────────────────────
 
 describe("sshd.port — apply: validation and rollback", () => {
+  it("fails before validation or restart when target port is not statically configured", async () => {
+    const mockSsh = createMockSsh({
+      [CAT_SSHD]: { stdout: "Port 22" },
+    })
+    vi.spyOn(mockSsh, "getConnectionInfo").mockReturnValue({
+      ...mockSsh.getConnectionInfo(),
+      configuredPorts: [22],
+    })
+    const writtenFiles = trackWriteFile(mockSsh)
+    const execSpy = vi.spyOn(mockSsh, "exec")
+
+    const mod = sshd.port(2222)
+    const result = await mod.apply(mockSsh, emptyEnv)
+
+    expect(result.status).toBe("failed")
+    expect(result.error?.message).toContain("static ssh.ports")
+    expect(writtenFiles).toHaveLength(0)
+    expect(execSpy).not.toHaveBeenCalled()
+  })
+
   it("rolls back config and does NOT restart sshd when sshd -t fails", async () => {
     // readFile internally calls output() which trims whitespace — use a value without trailing newline
     const originalConfig = "Port 22"

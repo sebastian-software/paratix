@@ -88,10 +88,10 @@ idempotent, sofern nicht anders vermerkt.
 
 ## sshd — SSH-Server-Konfiguration
 
-| Modul         | Beschreibung                                                                                                                                                                                                                         | Check-Strategie                             | Aufwand |
-| ------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------- | ------- |
-| `sshd.port`   | Aendert den SSH-Port in der `sshd_config`. Validiert, dass der Zielport in der `ssh.ports`-Liste der Serverdefinition eingetragen ist. Schreibt `sshd.port` in Meta, wodurch Paratix die SSH-Verbindung auf den neuen Port umstellt. | `sshd_config` auslesen und Port vergleichen | einfach |
-| `sshd.config` | Setzt einzelne Konfigurationsoptionen in `sshd_config` (z.B. `PermitRootLogin`, `PasswordAuthentication`). Akzeptiert Key-Value-Paare.                                                                                               | `sshd_config` parsen, Werte vergleichen     | einfach |
+| Modul         | Beschreibung                                                                                                                                                                                                                                                   | Check-Strategie                             | Aufwand |
+| ------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------- | ------- |
+| `sshd.port`   | Ändert den SSH-Port in der `sshd_config`. Validiert auch im Dry-Run, dass der Zielport in der statischen `ssh.ports`-Liste der Serverdefinition eingetragen ist. Schreibt `sshd.port` in Meta, wodurch Paratix die SSH-Verbindung auf den neuen Port umstellt. | `sshd_config` auslesen und Port vergleichen | einfach |
+| `sshd.config` | Setzt einzelne Konfigurationsoptionen in `sshd_config` (z.B. `PermitRootLogin`, `PasswordAuthentication`). Akzeptiert Key-Value-Paare.                                                                                                                         | `sshd_config` parsen, Werte vergleichen     | einfach |
 
 ---
 

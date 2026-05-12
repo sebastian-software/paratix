@@ -14,6 +14,7 @@ function createMockSshOnPort(
   const ssh = createMockSsh(responses)
   ssh.getConnectionInfo = () => ({
     authMethod: "privateKey",
+    configuredPorts: [22],
     host: "1.2.3.4",
     port,
     privateKeyPath: "~/.ssh/id",
