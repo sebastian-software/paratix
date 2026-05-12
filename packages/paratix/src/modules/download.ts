@@ -608,13 +608,16 @@ async function writeUnverifiedHashMarker(conn: SshConnection, destination: strin
   const hash = await conn.sha256(destination)
   if (hash == null || hash.length === 0) return
   const markerPath = unverifiedHashMarkerPath(destination)
+  if (await conn.test(`[ -L ${shellQuote(markerPath)} ]`)) return
   // Atomic single-line write — no shell expansion of the hash, no risk of
   // partial writes contaminating later checks. The marker only needs read
   // access for sha256sum -c to consume it, so 0644 is acceptable.
-  await conn.exec(`printf '%s\\n' ${shellQuote(hash)} > ${shellQuote(markerPath)}`, {
-    ignoreExitCode: true,
-    silent: true,
-  })
+  try {
+    await conn.writeFile(markerPath, `${hash}\n`, { mode: "0644" })
+  } catch {
+    // Best-effort marker: a failed marker write only causes the next check to
+    // re-apply, while the downloaded payload itself has already converged.
+  }
 }
 
 /**
@@ -632,6 +635,7 @@ async function compareUnverifiedHashMarker(
   destination: string
 ): Promise<"drift" | "match" | "missing"> {
   const markerPath = unverifiedHashMarkerPath(destination)
+  if (await conn.test(`[ -L ${shellQuote(markerPath)} ]`)) return "drift"
   if (!(await conn.test(`[ -f ${shellQuote(markerPath)} ]`))) return "missing"
   const markerContent = await conn.readFile(markerPath)
   const recordedHash = markerContent.trim()

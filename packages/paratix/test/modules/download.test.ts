@@ -9,6 +9,10 @@ import { createMockSsh as createBaseMockSsh, type ExecCall } from "../helpers/mo
 const createMockSsh: typeof createBaseMockSsh = (responses, options) =>
   createBaseMockSsh(responses, {
     ...options,
+    allowWrites: [
+      { options: { mode: "0644" }, remotePath: /^.*\.sha256$/v },
+      ...(options?.allowWrites ?? []),
+    ],
     responseStubs: [
       { command: /^\[ -e '\/(?:opt|usr)\//v, result: { code: 1 } },
       { command: /^\[ -d '\/(?:opt|tmp|usr|var)\//v, result: { code: 1 } },
@@ -36,14 +40,14 @@ const createMockSsh: typeof createBaseMockSsh = (responses, options) =>
         result: { code: 0 },
       },
       // R-0000167: download.url's hash marker write is best-effort. The
-      // sha256 probe / printf marker write stubs let pre-marker tests
+      // sha256 probe / writeFile allowlist lets pre-marker tests
       // succeed without stubbing every post-mv destination probe. The
       // marker file probe is stubbed false so legacy tests that do not
       // exercise the marker take the "missing marker" path.
+      { command: /^\[ -L '[^']*\.sha256' \]$/v, result: { code: 1 } },
       { command: /^\[ -f '[^']*\.sha256' \]$/v, result: { code: 1 } },
       { command: /^\[ -f '\/tmp\/file' \]$/v, result: { code: 0 } },
       { command: /^sha256sum '\/tmp\/file'$/v, result: { stdout: `${"0".repeat(64)}  /tmp/file` } },
-      { command: /^printf '%s\\n' '[\da-f]{64}' > '[^']*\.sha256'$/v, result: { code: 0 } },
       { command: /^cat '[^']*\.sha256'$/v, result: { stdout: "" } },
       ...(options?.responseStubs ?? []),
     ],
@@ -246,6 +250,21 @@ describe("download.url", () => {
       const mod = download.url(destination, url, allowUnverifiedDownload)
       const result = await mod.check(mockSsh, emptyEnv)
       expect(result).toBe("ok")
+    })
+
+    it("returns needs-apply when the marker path is a symlink", async () => {
+      const recordedHash = "aabbccddaabbccddaabbccddaabbccddaabbccddaabbccddaabbccdd"
+      const mockSsh = createMockSsh({
+        [`[ -f '${destination}.sha256' ]`]: { code: 0 },
+        [`[ -f '${destination}' ]`]: { code: 0 },
+        [`[ -L '${destination}.sha256' ]`]: { code: 0 },
+        [`cat '${destination}.sha256'`]: { stdout: `${recordedHash}\n` },
+        [`sha256sum '${destination}'`]: { stdout: `${recordedHash}  ${destination}` },
+      })
+      const mod = download.url(destination, url, allowUnverifiedDownload)
+      const result = await mod.check(mockSsh, emptyEnv)
+      expect(result).toBe("needs-apply")
+      expect(mockSsh.calls).not.toContain(`cat '${destination}.sha256'`)
     })
 
     it("returns needs-apply when marker file is missing (no sha256)", async () => {
@@ -671,6 +690,49 @@ describe("download.url", () => {
       expect(curlCall?.options?.input).toBe(
         `url = "${url}"\nheader = "Accept: application/octet-stream"\nheader = "User-Agent: paratix/1.0"\n`
       )
+    })
+
+    it("writes the unverified hash marker through writeFile", async () => {
+      const recordedHash = "aabbccddaabbccddaabbccddaabbccddaabbccddaabbccddaabbccdd"
+      const mockSsh = createMockSsh({
+        [`[ -f '${destination}' ]`]: { code: 0 },
+        [`[ -L '${destination}.sha256' ]`]: { code: 1 },
+        [`mktemp "$(dirname '${destination}')/.paratix-download.XXXXXX"`]: {
+          stdout: `${temporaryDestination}\n`,
+        },
+        [`sha256sum '${destination}'`]: { stdout: `${recordedHash}  ${destination}` },
+      })
+      const mod = download.url(destination, url, allowUnverifiedDownload)
+      const result = await mod.apply(mockSsh, emptyEnv)
+
+      expect(result.status).toBe("changed")
+      expect(mockSsh.writeFileCalls).toStrictEqual([
+        {
+          content: `${recordedHash}\n`,
+          options: { mode: "0644" },
+          remotePath: `${destination}.sha256`,
+        },
+      ])
+      expect(mockSsh.calls).not.toContain(
+        `printf '%s\\n' '${recordedHash}' > '${destination}.sha256'`
+      )
+    })
+
+    it("does not write the unverified hash marker through a symlink", async () => {
+      const recordedHash = "aabbccddaabbccddaabbccddaabbccddaabbccddaabbccddaabbccdd"
+      const mockSsh = createMockSsh({
+        [`[ -f '${destination}' ]`]: { code: 0 },
+        [`[ -L '${destination}.sha256' ]`]: { code: 0 },
+        [`mktemp "$(dirname '${destination}')/.paratix-download.XXXXXX"`]: {
+          stdout: `${temporaryDestination}\n`,
+        },
+        [`sha256sum '${destination}'`]: { stdout: `${recordedHash}  ${destination}` },
+      })
+      const mod = download.url(destination, url, allowUnverifiedDownload)
+      const result = await mod.apply(mockSsh, emptyEnv)
+
+      expect(result.status).toBe("changed")
+      expect(mockSsh.writeFileCalls).toStrictEqual([])
     })
 
     it("verifies SHA-256 after download and returns changed on match", async () => {
