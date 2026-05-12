@@ -21,6 +21,7 @@ export type EnvironmentMetaEntry = {
   name: string
   resolve: () => Promise<boolean | number | string>
   valueType: "boolean" | "number" | "string"
+  valueTypeExplicit?: boolean
 }
 
 /** Runner control-plane meta entry emitted when sshd changed its listen port. */

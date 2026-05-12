@@ -13,6 +13,7 @@ import { isValidTcpPort } from "./serverDefinitionValidation.js"
 
 const SYSTEM_HOST_KIND = "system.host"
 const SYSTEM_REBOOT_KIND = "system.reboot"
+type MetaValueType = "boolean" | "number" | "string"
 
 export type BooleanEnvironmentMetaEntry = { valueType: "boolean" } & EnvironmentMetaEntry
 export type LazyEnvironmentMetaEntry = EnvironmentMetaEntry
@@ -25,12 +26,35 @@ function hasValidMetaName(name: unknown): name is string {
 
 function inferMetaValueType(
   value: MetaEnvironmentValue,
-  explicitValueType?: "boolean" | "number" | "string"
-): "boolean" | "number" | "string" {
+  explicitValueType?: MetaValueType
+): MetaValueType {
   if (explicitValueType != null) return explicitValueType
   if (typeof value === "boolean") return "boolean"
   if (typeof value === "number") return "number"
   return "string"
+}
+
+function isMetaValueType(value: string): value is MetaValueType {
+  return value === "boolean" || value === "number" || value === "string"
+}
+
+function validateResolvedMetaValue(parameters: {
+  actualType: string
+  declaredValueType: MetaValueType
+  enforceDeclaredValueType: boolean
+  entryKey: string
+}): void {
+  const { actualType, declaredValueType, enforceDeclaredValueType, entryKey } = parameters
+  if (!isMetaValueType(actualType)) {
+    throw new TypeError(
+      `Env meta entry ${JSON.stringify(entryKey)} resolved to typeof ${actualType}, expected boolean, number, or string`
+    )
+  }
+  if (enforceDeclaredValueType && actualType !== declaredValueType) {
+    throw new TypeError(
+      `Env meta entry ${JSON.stringify(entryKey)} resolved to typeof ${actualType}, expected ${declaredValueType}`
+    )
+  }
 }
 
 function normalizeMetaValueResolver(
@@ -85,7 +109,7 @@ function assertValidSystemHostMetaEntry(candidate: Record<string, unknown>): voi
 export function environmentMeta(
   name: string,
   value: MetaEnvironmentValue,
-  valueType?: "boolean" | "number" | "string"
+  valueType?: MetaValueType
 ): EnvironmentMetaEntry {
   if (!hasValidMetaName(name)) {
     throw new TypeError("Meta env entry name must be a non-empty string")
@@ -95,6 +119,7 @@ export function environmentMeta(
     name,
     resolve: normalizeMetaValueResolver(value),
     valueType: inferMetaValueType(value, valueType),
+    valueTypeExplicit: valueType != null,
   }
 }
 
@@ -197,6 +222,56 @@ export function assertValidModuleMetaEntries(entries: ModuleMetaEntry[] | undefi
   }
 }
 
+function assertAllowedEnvironmentMetaName(name: string): void {
+  if (ENVIRONMENT_FORBIDDEN_KEYS.has(name)) {
+    throw new Error(
+      `Forbidden env meta entry name: ${JSON.stringify(name)} (reserved JavaScript identifier)`
+    )
+  }
+}
+
+function createMemoizedEnvironmentResolver(
+  entry: EnvironmentMetaEntry
+): () => Promise<boolean | number | string> {
+  // R-0000206: memoize the resolved promise per entry so security-sensitive
+  // providers (e.g. 1Password CLI) are not re-invoked for every consumer
+  // of the same env key. Multiple modules reading the same key now share
+  // a single round-trip. A rejection clears the cache so a later access
+  // can retry once the underlying issue is resolved. Callers that need
+  // fresh values on every access (one-time passwords) must register a
+  // new meta entry for each access instead of reusing one.
+  let cachedResolution: null | Promise<boolean | number | string> = null
+  const declaredValueType = entry.valueType
+  const enforceDeclaredValueType = entry.valueTypeExplicit !== false
+  const entryKey = entry.name
+  return async (): Promise<boolean | number | string> => {
+    if (cachedResolution != null) return cachedResolution
+    // R-0000264: validate the resolved value against the entry's declared
+    // valueType so a provider that drifts (e.g. starts returning a number
+    // for a "string"-typed key, or a null/object) fails fast at the
+    // boundary instead of leaking an untyped value into resolveEnvironment
+    // and downstream consumers. The error must not poison the cache so a
+    // subsequent retry (after the provider is fixed) can succeed.
+    const pending = entry
+      .resolve()
+      .then((resolved): boolean | number | string => {
+        validateResolvedMetaValue({
+          actualType: typeof resolved,
+          declaredValueType,
+          enforceDeclaredValueType,
+          entryKey,
+        })
+        return resolved
+      })
+      .catch((error: unknown) => {
+        cachedResolution = null
+        throw error
+      })
+    cachedResolution = pending
+    return pending
+  }
+}
+
 export async function mergeEnvironmentFromMeta(
   environment: Environment,
   entries: ModuleMetaEntry[] | undefined
@@ -214,48 +289,8 @@ export async function mergeEnvironmentFromMeta(
   const nextEnvironment = Object.assign(createNullPrototypeEnvironment(), environment)
   for (const entry of entries) {
     if (!isEnvironmentMetaEntry(entry)) continue
-    if (ENVIRONMENT_FORBIDDEN_KEYS.has(entry.name)) {
-      throw new Error(
-        `Forbidden env meta entry name: ${JSON.stringify(entry.name)} (reserved JavaScript identifier)`
-      )
-    }
-    // R-0000206: memoize the resolved promise per entry so security-sensitive
-    // providers (e.g. 1Password CLI) are not re-invoked for every consumer
-    // of the same env key. Multiple modules reading the same key now share
-    // a single round-trip. A rejection clears the cache so a later access
-    // can retry once the underlying issue is resolved. Callers that need
-    // fresh values on every access (one-time passwords) must register a
-    // new meta entry for each access instead of reusing one.
-    let cachedResolution: null | Promise<boolean | number | string> = null
-    const expectedValueType = entry.valueType
-    const entryKey = entry.name
-    const resolveOnce = async (): Promise<boolean | number | string> => {
-      if (cachedResolution != null) return cachedResolution
-      // R-0000264: validate the resolved value against the entry's declared
-      // valueType so a provider that drifts (e.g. starts returning a number
-      // for a "string"-typed key, or a null/object) fails fast at the
-      // boundary instead of leaking an untyped value into resolveEnvironment
-      // and downstream consumers. The error must not poison the cache so a
-      // subsequent retry (after the provider is fixed) can succeed.
-      const pending = entry
-        .resolve()
-        .then((resolved): boolean | number | string => {
-          const actualType = typeof resolved
-          if (actualType !== expectedValueType) {
-            throw new TypeError(
-              `Env meta entry ${JSON.stringify(entryKey)} resolved to typeof ${actualType}, expected ${expectedValueType}`
-            )
-          }
-          return resolved
-        })
-        .catch((error: unknown) => {
-          cachedResolution = null
-          throw error
-        })
-      cachedResolution = pending
-      return pending
-    }
-    nextEnvironment[entry.name] = resolveOnce
+    assertAllowedEnvironmentMetaName(entry.name)
+    nextEnvironment[entry.name] = createMemoizedEnvironmentResolver(entry)
   }
   await Promise.resolve()
   return nextEnvironment

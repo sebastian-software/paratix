@@ -66,6 +66,16 @@ describe("mergeEnvironmentFromMeta", () => {
     await expect(resolveEnvironment(environment, "OTP")).resolves.toBe("654321")
   })
 
+  it("accepts lazy number and boolean env entries without an explicit valueType", async () => {
+    const environment = await mergeEnvironmentFromMeta({}, [
+      meta.env("LAZY_PORT", () => 3000),
+      meta.env("LAZY_FEATURE_ENABLED", () => true),
+    ])
+
+    await expect(resolveEnvironment(environment, "LAZY_PORT")).resolves.toBe(3000)
+    await expect(resolveEnvironment(environment, "LAZY_FEATURE_ENABLED")).resolves.toBe(true)
+  })
+
   it("ignores control-plane entries when materializing the runtime environment", async () => {
     const environment = await mergeEnvironmentFromMeta({ EXISTING: "value" }, [
       meta.sshdPort(2222),
@@ -183,6 +193,20 @@ describe("mergeEnvironmentFromMeta", () => {
     await expect(resolveEnvironment(environment, "DRIFT_KEY")).rejects.toThrow(/"DRIFT_KEY"/v)
     await expect(resolveEnvironment(environment, "DRIFT_KEY")).rejects.toThrow(/typeof number/v)
     await expect(resolveEnvironment(environment, "DRIFT_KEY")).rejects.toThrow(/expected string/v)
+  })
+
+  it("rejects lazy number and boolean values when an incompatible valueType was explicit", async () => {
+    const environment = await mergeEnvironmentFromMeta({}, [
+      meta.env("NUMBER_DRIFT", () => 42, "string"),
+      meta.env("BOOLEAN_DRIFT", () => true, "number"),
+    ])
+
+    await expect(resolveEnvironment(environment, "NUMBER_DRIFT")).rejects.toThrow(
+      /typeof number, expected string/v
+    )
+    await expect(resolveEnvironment(environment, "BOOLEAN_DRIFT")).rejects.toThrow(
+      /typeof boolean, expected number/v
+    )
   })
 
   it("does not poison the resolver cache when valueType validation fails", async () => {
