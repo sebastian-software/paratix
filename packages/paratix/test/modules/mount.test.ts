@@ -35,6 +35,7 @@ const findmntTestCmd = `findmnt --noheadings '${mountPath}'`
 const mountCmd = `mount -t '${mountFstype}' -o '${mountOpts}' -- '${mountSrc}' '${mountPath}'`
 const umountCmd = `umount '${mountPath}'`
 const mkdirCmd = `mkdir -p '${mountPath}'`
+const mountPathRealpathCmd = `readlink -f -- '${mountPath}' 2>/dev/null || printf '%s\\n' '${mountPath}'`
 const mountPathSymlinkGuardCmd = [
   `mount_path='${mountPath}'`,
   'current="$mount_path"',
@@ -585,9 +586,8 @@ describe("mount.present — apply", () => {
   // If readlink resolves to a different path the mountpoint was likely
   // swapped between the guard and the mount call (TOCTOU).
   it("R-0000224: returns failed when readlink reports a TOCTOU swap", async () => {
-    const realpathCmd = `readlink -f -- '${mountPath}' 2>/dev/null || printf '%s\\n' '${mountPath}'`
     const mockSsh = createMountApplyMockSsh({
-      [realpathCmd]: { code: 0, stdout: "/srv/attacker-controlled\n" },
+      [mountPathRealpathCmd]: { code: 0, stdout: "/srv/attacker-controlled\n" },
     })
     const mod = mount.present({
       fstype: mountFstype,
@@ -1078,6 +1078,26 @@ describe("mount.absent — apply", () => {
     )
     expect(mockSsh.calls).not.toContain(findmntTestCmd)
     expect(mockSsh.calls).not.toContain(umountCmd)
+  })
+
+  it("returns failed before findmnt, umount, or fstab when readlink reports a TOCTOU swap", async () => {
+    const mockSsh = createMountApplyMockSsh({
+      [mountPathRealpathCmd]: { code: 0, stdout: "/srv/attacker-controlled\n" },
+    })
+    const mod = mount.absent({ path: mountPath })
+    const result = await mod.apply(mockSsh, emptyEnv)
+    expect(result.status).toBe("failed")
+    expect(result.error?.message).toContain("resolved path differs after symlink guard")
+    expect(result.error?.message).toContain("/srv/attacker-controlled")
+    expect(mockSsh.calls).toContain(mountPathSymlinkGuardCmd)
+    expect(mockSsh.calls).toContain(mountPathRealpathCmd)
+    expect(mockSsh.calls.indexOf(mountPathSymlinkGuardCmd)).toBeLessThan(
+      mockSsh.calls.indexOf(mountPathRealpathCmd)
+    )
+    expect(mockSsh.calls).not.toContain(findmntTestCmd)
+    expect(mockSsh.calls).not.toContain(umountCmd)
+    expect(mockSsh.calls).not.toContain("cat '/etc/fstab'")
+    expect(mockSsh.writeFileCalls).toHaveLength(0)
   })
 
   it("returns failed when umount fails", async () => {
