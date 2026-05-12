@@ -29,7 +29,7 @@ function assertValidUid(uid: number): void {
 }
 
 function assertValidPasswordHash(password: string): void {
-  if (/[:\r\n]/v.test(password)) {
+  if (password.length === 0 || /[:\r\n]/v.test(password)) {
     throw new Error("password hash is invalid")
   }
 }
