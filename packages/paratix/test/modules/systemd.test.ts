@@ -15,6 +15,25 @@ const createMockSsh: typeof createBaseMockSsh = (responses, options) =>
     ],
   })
 
+function mockDaemonReloadSequence(
+  ssh: ReturnType<typeof createMockSsh>,
+  results: Array<{ code: number; stderr: string; stdout: string }>
+): void {
+  const originalExec = ssh.exec.bind(ssh)
+  const reloadResults = [...results]
+  vi.spyOn(ssh, "exec").mockImplementation(async (command, options) => {
+    const handlers: Record<string, () => ReturnType<typeof ssh.exec>> = {
+      "systemctl daemon-reload": async () => {
+        await Promise.resolve()
+        ssh.calls.push(command)
+        ssh.execCalls.push({ command, options })
+        return reloadResults.shift() ?? { code: 0, stderr: "", stdout: "" }
+      },
+    }
+    return (handlers[command] ?? (async () => originalExec(command, options)))()
+  })
+}
+
 describe("systemd.daemonReload", () => {
   it("check always returns needs-apply with a valid ssh connection", async () => {
     const ssh = createMockSsh()
@@ -264,6 +283,36 @@ describe("systemd.unit", () => {
     expect(String(result.error)).toContain("failed to persist versioned flag")
     expect(writeFile).toHaveBeenNthCalledWith(1, filePath, unitContent, { mode: "0644" })
     expect(writeFile).toHaveBeenNthCalledWith(2, filePath, previousContent, { mode: "600" })
+    expect(ssh.calls.filter((call) => call === "systemctl daemon-reload")).toHaveLength(2)
+  })
+
+  it("reports rollback daemon-reload failure after restoring a loaded unit file", async () => {
+    const previousContent = "[Unit]\nDescription=Previous\n"
+    const ssh = createMockSsh({
+      [`[ -e '${filePath}' ]`]: { code: 0 },
+      [`cat '${filePath}'`]: { stdout: previousContent },
+      [`stat -c '%a' '${filePath}'`]: { code: 0, stdout: "600\n" },
+      "mkdir -p /var/lib/paratix/flags": { code: 0 },
+      [reloadFlagSet]: {
+        code: 1,
+        stderr:
+          "touch: cannot touch '/var/lib/paratix/flags/systemd-unit-marker': Permission denied\n",
+      },
+    })
+    mockDaemonReloadSequence(ssh, [
+      { code: 0, stderr: "", stdout: "" },
+      { code: 1, stderr: "daemon reload failed\n", stdout: "" },
+    ])
+    const writeFile = vi.spyOn(ssh, "writeFile").mockResolvedValue()
+    const mod = systemd.unit(unitName, unitContent)
+    const result = await mod.apply(ssh, emptyEnv)
+
+    expect(result.status).toBe("failed")
+    expect(String(result.error)).toContain("rollback systemctl daemon-reload failed")
+    expect(String(result.error)).toContain("daemon reload failed")
+    expect(writeFile).toHaveBeenNthCalledWith(1, filePath, unitContent, { mode: "0644" })
+    expect(writeFile).toHaveBeenNthCalledWith(2, filePath, previousContent, { mode: "600" })
+    expect(ssh.calls.filter((call) => call === "systemctl daemon-reload")).toHaveLength(2)
   })
 
   // R-0000211: writeFile can throw (SFTP error after a partial write,

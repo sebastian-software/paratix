@@ -1,6 +1,12 @@
 import { failed, failedCommand } from "../moduleFailure.js"
 import { shellQuote } from "../ssh.js"
-import { type Module, type ModuleResult, NEEDS_APPLY, type SshConnection } from "../types.js"
+import {
+  type ExecResult,
+  type Module,
+  type ModuleResult,
+  NEEDS_APPLY,
+  type SshConnection,
+} from "../types.js"
 import { sha256String } from "./fileHelpers.js"
 import { hasFlag, setVersionedFlag } from "./moduleHelpers.js"
 
@@ -104,6 +110,32 @@ async function writeSystemdUnitFile(parameters: {
   }
 }
 
+async function reloadSystemdDaemon(ssh: SshConnection): Promise<ExecResult> {
+  return ssh.exec(`${SYSTEMCTL} daemon-reload`, {
+    ignoreExitCode: true,
+    silent: true,
+  })
+}
+
+async function rollbackUnitAfterFlagPersistenceFailure(parameters: {
+  filePath: string
+  flagFailure: ModuleResult
+  name: string
+  snapshot: UnitFileSnapshot
+  ssh: SshConnection
+}): Promise<ModuleResult> {
+  const { filePath, flagFailure, name, snapshot, ssh } = parameters
+  await restoreUnitFileSnapshot(ssh, filePath, snapshot)
+  const rollbackReload = await reloadSystemdDaemon(ssh)
+  if (rollbackReload.code !== 0) {
+    return failedCommand(
+      `[systemd.unit: ${name}] rollback systemctl daemon-reload failed after flag persistence failure`,
+      rollbackReload
+    )
+  }
+  return flagFailure
+}
+
 /**
  * Apply a systemd unit file write + daemon-reload pipeline with rollback on
  * any intermediate failure (write, reload, flag persist).
@@ -129,10 +161,7 @@ async function applySystemdUnit(parameters: {
   const snapshot = await snapshotUnitFile(ssh, filePath)
   const writeFailure = await writeSystemdUnitFile({ content, filePath, name, snapshot, ssh })
   if (writeFailure) return writeFailure
-  const result = await ssh.exec(`${SYSTEMCTL} daemon-reload`, {
-    ignoreExitCode: true,
-    silent: true,
-  })
+  const result = await reloadSystemdDaemon(ssh)
   if (result.code !== 0) {
     await restoreUnitFileSnapshot(ssh, filePath, snapshot)
     return failedCommand(`[systemd.unit: ${name}] systemctl daemon-reload failed`, result)
@@ -141,8 +170,7 @@ async function applySystemdUnit(parameters: {
   // the failedCommand path; the helper no longer throws.
   const flagFailure = await setVersionedFlag(ssh, reloadFlag.flagName, reloadFlag.flagPrefix)
   if (flagFailure) {
-    await restoreUnitFileSnapshot(ssh, filePath, snapshot)
-    return flagFailure
+    return rollbackUnitAfterFlagPersistenceFailure({ filePath, flagFailure, name, snapshot, ssh })
   }
   return { status: "changed" }
 }
