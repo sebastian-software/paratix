@@ -49,6 +49,34 @@ describe("git.clone — validation", () => {
     expect(() => git.clone(repo, destination, { ref: "" })).not.toThrow()
   })
 
+  // R-0000278: shellQuote stops shell metacharacter injection, but newlines
+  // and backslashes still corrupt `output.split("\n")` and downstream
+  // consumers. Defense-in-depth ensures these refs are rejected at module
+  // construction time.
+  it("rejects refs containing newline characters", () => {
+    expect(() => git.clone(repo, destination, { ref: "main\nrm -rf /" })).toThrow(
+      "whitespace, backslashes, or '..' sequences"
+    )
+  })
+
+  it("rejects refs containing whitespace", () => {
+    expect(() => git.clone(repo, destination, { ref: "release v1" })).toThrow(
+      "whitespace, backslashes, or '..' sequences"
+    )
+  })
+
+  it("rejects refs containing backslashes", () => {
+    expect(() => git.clone(repo, destination, { ref: "main\\branch" })).toThrow(
+      "whitespace, backslashes, or '..' sequences"
+    )
+  })
+
+  it("rejects refs containing parent-directory sequences", () => {
+    expect(() => git.clone(repo, destination, { ref: "main/../etc" })).toThrow(
+      "whitespace, backslashes, or '..' sequences"
+    )
+  })
+
   it("rejects HTTPS repo URLs with only a username", () => {
     expect(() => git.clone("https://token@example.com/org/repo.git", destination)).toThrow(
       "must not embed credentials"
@@ -246,7 +274,7 @@ describe("git.clone — check", () => {
   it("quotes adversarial destination and ref values during check", async () => {
     const adversarialRepo = "git@example.com:team/repo '$(touch repo-check)'.git"
     const adversarialDestination = "/opt/my app/it's $(touch dest-check)"
-    const adversarialRef = "release/it's $(touch ref-check)"
+    const adversarialRef = "release/it's;$(touch_ref-check)"
     const adversarialGitDir = `${adversarialDestination}/.git`
     const quotedDestination = shellQuote(adversarialDestination)
     const quotedRef = shellQuote(adversarialRef)
@@ -305,7 +333,7 @@ describe("git.clone — apply", () => {
   it("quotes adversarial repo, destination, and ref values when cloning", async () => {
     const adversarialRepo = "git@example.com:team/repo '$(touch repo-apply)'.git"
     const adversarialDestination = "/opt/my app/it's $(touch dest-apply)"
-    const adversarialRef = "release/it's $(touch ref-apply)"
+    const adversarialRef = "release/it's;$(touch_ref-apply)"
     const adversarialGitDir = `${adversarialDestination}/.git`
     const expectedCommand = [
       "git clone --branch",

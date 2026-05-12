@@ -29,10 +29,24 @@ function validateCloneRepo(repo: string): void {
   }
 }
 
+// R-0000278: defense-in-depth — refuse refs that contain whitespace, control
+// characters, backslashes, or `..` sequences in addition to the leading-`-`
+// rule. shellQuote already neutralises shell metacharacters at the exec
+// boundary, but newlines in a ref still corrupt `output.split("\n")` and a
+// backslash can fool downstream consumers. The pattern below mirrors the
+// strictness applied to apt resource names and POSIX user/group names.
+const CLONE_REFERENCE_DISALLOWED_PATTERN = /[\s\\]|\.\./v
+
 function validateCloneReference(reference: string | undefined): void {
-  if (reference !== undefined && reference !== "" && reference.startsWith("-")) {
+  if (reference === undefined || reference === "") return
+  if (reference.startsWith("-")) {
     throw new Error(
       "git.clone ref must not start with '-' because Git could parse it as an option."
+    )
+  }
+  if (CLONE_REFERENCE_DISALLOWED_PATTERN.test(reference)) {
+    throw new Error(
+      "git.clone ref must not contain whitespace, backslashes, or '..' sequences."
     )
   }
 }
