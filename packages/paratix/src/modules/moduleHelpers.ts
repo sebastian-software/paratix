@@ -134,23 +134,27 @@ async function writeFlagLockHolderMarker(ssh: SshConnection, lockName: string): 
   })
 }
 
-async function acquireFlagLock(ssh: SshConnection, lockName: string): Promise<boolean> {
+type FlagLockAcquireResult =
+  | { failure: ModuleResult; kind: "failed" }
+  | { kind: "acquired" }
+  | { kind: "contended" }
+
+async function acquireFlagLock(
+  ssh: SshConnection,
+  lockName: string
+): Promise<FlagLockAcquireResult> {
   validateFlagName(lockName, "lockName")
-  // R-0000273: ensureFlagsDirectory now returns a typed failure instead of
-  // throwing. The lock acquire path treats a directory-create failure as a
-  // missed acquisition (`return false`); callers fall through to the wait /
-  // reclaim machinery and surface a `failedCommand` from there.
   const ensureFailure = await ensureFlagsDirectory(ssh)
-  if (ensureFailure) return false
+  if (ensureFailure) return { failure: ensureFailure, kind: "failed" }
   const result = await ssh.exec(`mkdir ${flagPath(lockName)}`, {
     ignoreExitCode: true,
     silent: true,
   })
   if (result.code === 0) {
     await writeFlagLockHolderMarker(ssh, lockName)
-    return true
+    return { kind: "acquired" }
   }
-  return false
+  return { kind: "contended" }
 }
 
 async function releaseFlagLock(ssh: SshConnection, lockName: string): Promise<void> {
@@ -303,12 +307,24 @@ async function acquireMutexAndRun<TValue>(
     waitSeconds?: number
   }
 ): Promise<MutexRunResult<TValue>> {
-  if (await acquireFlagLock(ssh, parameters.lockName)) {
+  const acquireResult = await acquireFlagLock(ssh, parameters.lockName)
+  if (acquireResult.kind === "failed") return moduleFailureToMutexError(acquireResult.failure)
+  if (acquireResult.kind === "acquired") {
     return runMutexSection(ssh, parameters)
   }
   const waitResult = await waitForMutexLockRelease(ssh, parameters)
   if (waitResult.kind !== "resolved") return waitResult
   return acquireMutexAndRun(ssh, parameters)
+}
+
+function moduleFailureToMutexError(result: ModuleResult): MutexRunResult<never> {
+  if (result.status !== "failed") {
+    return { error: "[moduleHelpers] failed to acquire mutex lock", kind: "error" }
+  }
+  return {
+    error: result.error?.message ?? "[moduleHelpers] failed to acquire mutex lock",
+    kind: "error",
+  }
 }
 
 async function runMutexSection<TValue>(
@@ -390,7 +406,9 @@ async function tryApplyWithFlagLock(
 ): Promise<ModuleResult> {
   if (!(await shouldRunFlagApply(ssh, parameters))) return { status: "ok" }
 
-  if (await acquireFlagLock(ssh, parameters.lockName)) {
+  const acquireResult = await acquireFlagLock(ssh, parameters.lockName)
+  if (acquireResult.kind === "failed") return acquireResult.failure
+  if (acquireResult.kind === "acquired") {
     return runLockedFlagApply(ssh, parameters)
   }
 

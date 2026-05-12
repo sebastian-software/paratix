@@ -374,6 +374,38 @@ function createStaleLockSsh(
 }
 
 describe("applyWithFlagLock – stale lock recovery", () => {
+  it("returns the flag directory creation failure without entering the contention loop", async () => {
+    const flagName = "lock-dir-failure"
+    const ssh = createMockSsh({
+      [`[ -f ${FLAGS_DIRECTORY}/'${flagName}' ]`]: { code: 1 },
+      "mkdir -p /var/lib/paratix/flags": {
+        code: 1,
+        stderr: "mkdir: cannot create directory '/var/lib/paratix/flags': Permission denied\n",
+      },
+    })
+    let applyCalls = 0
+
+    const result = await applyWithFlagLock(ssh, {
+      async apply() {
+        applyCalls += 1
+        await Promise.resolve()
+        return { status: "changed" }
+      },
+      flagName,
+      waitSeconds: 1,
+    })
+
+    expect(result).toMatchObject({
+      error: expect.objectContaining({
+        message: expect.stringContaining("failed to create /var/lib/paratix/flags"),
+      }),
+      status: "failed",
+    })
+    expect(applyCalls).toBe(0)
+    expect(ssh.calls).not.toContain(`mkdir ${FLAGS_DIRECTORY}/'${flagName}.lock'`)
+    expect(ssh.calls.some((call) => call.startsWith("i=0; while [ -d"))).toBe(false)
+  })
+
   it("reclaims a stale lock after the wait window expires and reruns apply", async () => {
     const flagName = "stale-lock-flag"
     const { ssh, state } = createStaleLockSsh(flagName, "stale")
@@ -545,6 +577,31 @@ function createSharedMutexMockSsh(lockName: string): ReturnType<typeof createMoc
 }
 
 describe("withMutexLock", () => {
+  it("throws the flag directory creation failure without entering the contention loop", async () => {
+    const lockName = "mutex-dir-failure"
+    const ssh = createMockSsh({
+      "mkdir -p /var/lib/paratix/flags": {
+        code: 1,
+        stderr: "mkdir: cannot create directory '/var/lib/paratix/flags': Permission denied\n",
+      },
+    })
+    let sectionCalls = 0
+
+    await expect(
+      withMutexLock(ssh, {
+        lockName,
+        async section() {
+          sectionCalls += 1
+          await Promise.resolve()
+        },
+      })
+    ).rejects.toThrow(/failed to create \/var\/lib\/paratix\/flags/v)
+
+    expect(sectionCalls).toBe(0)
+    expect(ssh.calls).not.toContain(`mkdir ${FLAGS_DIRECTORY}/'${lockName}'`)
+    expect(ssh.calls.some((call) => call.startsWith("i=0; while [ -d"))).toBe(false)
+  })
+
   it("acquires the lock, runs the section and releases the lock", async () => {
     const lockName = "etc-hosts-mutex"
     const ssh = createSharedMutexMockSsh(lockName)
