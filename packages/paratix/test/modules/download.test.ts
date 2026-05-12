@@ -945,6 +945,30 @@ describe("download.url", () => {
         expect(mockSsh.calls.every((c) => !c.startsWith("curl"))).toBe(true)
       })
 
+      it("returns failed when sha256 matches but an ancestor is a symlink", async () => {
+        const mockSsh = createMockSsh({
+          [`[ -e '${destination}' ]`]: { code: 0 },
+          [`[ -f '${destination}' ]`]: { code: 0 },
+          [`[ -L '/usr/local/bin' ]`]: { code: 0 },
+          [`sha256sum '${destination}'`]: { stdout: `${sha256}  ${destination}` },
+          [`stat -c '%a %U %G' '${destination}'`]: { stdout: "644 root staff" },
+        })
+        const mod = download.url(destination, url, {
+          group: "staff",
+          mode: "0755",
+          owner: "deploy",
+          sha256,
+        })
+        const result = await mod.apply(mockSsh, emptyEnv)
+        expect(result.status).toBe("failed")
+        expect(result.error?.message).toContain("is a symlink: /usr/local/bin")
+        expect(mockSsh.calls).toContain(`[ -L '/usr/local/bin' ]`)
+        expect(mockSsh.calls.every((c) => !c.startsWith("chmod"))).toBe(true)
+        expect(mockSsh.calls.every((c) => !c.startsWith("chown"))).toBe(true)
+        expect(mockSsh.calls.every((c) => !c.startsWith("curl"))).toBe(true)
+        expect(mockSsh.calls.every((c) => !c.startsWith("mktemp"))).toBe(true)
+      })
+
       it("heals mode drift via chmod only when sha256 matches and destination exists", async () => {
         // Existing destination already matches the expected sha256 — only
         // mode drifted. Apply must chmod and skip curl entirely.

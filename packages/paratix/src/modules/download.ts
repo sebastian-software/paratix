@@ -671,6 +671,11 @@ async function performDownload(
     // This honors download.large's "fetched once" contract even when the
     // operator drifted mode/owner/group out-of-band.
     if (parameters.force !== true && (await destinationContentMatchesSha256(conn, parameters))) {
+      const symlinkFailure = await ensureDownloadDestinationNotSymlinked(
+        conn,
+        parameters.destination
+      )
+      if (symlinkFailure != null) return symlinkFailure
       const drift = await applyDriftedFileAttributes(conn, parameters)
       if (drift.failure) return drift.failure
       return { status: drift.changed ? "changed" : "ok" }
