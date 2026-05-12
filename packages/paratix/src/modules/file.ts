@@ -24,7 +24,7 @@ import {
   renderChownCommand,
   resolveWriteMode,
 } from "./fileMetadataHelpers.js"
-import { isRegularFileWithoutSymlink } from "./remoteFileChecks.js"
+import { isRegularFileWithoutSymlink, isSymlink } from "./remoteFileChecks.js"
 
 export type { BlockOptions } from "./fileExtra.js"
 
@@ -236,6 +236,9 @@ export const file = {
     return {
       async apply(ssh: null | SshConnection): Promise<ModuleResult> {
         if (!ssh) return failed(`[file.copy: ${remotePath}] SSH connection is required`)
+        if (await isSymlink(ssh, remotePath)) {
+          return failed(`[file.copy: ${remotePath}] path must not be a symlink`)
+        }
         // Forward the resolved mode (caller-supplied or default 0644) so the
         // remote file's permissions are predictable regardless of the
         // ssh.uploadFile temp-mode default.
@@ -383,6 +386,9 @@ export const file = {
     return {
       async apply(ssh: null | SshConnection, environment: Environment): Promise<ModuleResult> {
         if (!ssh) return failed(`[file.template: ${remotePath}] SSH connection is required`)
+        if (await isSymlink(ssh, remotePath)) {
+          return failed(`[file.template: ${remotePath}] path must not be a symlink`)
+        }
 
         const templateContent = await getTemplateContent()
         const rendered = await renderTemplate(templateContent, environment, {

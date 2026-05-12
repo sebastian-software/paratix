@@ -803,6 +803,28 @@ describe("file.copy", () => {
     }
   })
 
+  it("apply fails without uploading when the target is a symlink", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "paratix-test-"))
+    try {
+      const localPath = join(dir, "source.txt")
+      writeFileSync(localPath, "hello world")
+
+      const ssh = createMockSsh({
+        "[ -L '/remote/file.txt' ]": { code: 0 },
+      })
+      vi.spyOn(ssh, "uploadFile").mockResolvedValue()
+
+      const mod = file.copy("/remote/file.txt", localPath)
+      const result = await mod.apply(ssh, emptyEnv)
+
+      expect(result.status).toBe("failed")
+      expect(result.error?.message).toContain("path must not be a symlink")
+      expect(ssh.uploadFile).not.toHaveBeenCalled()
+    } finally {
+      rmSync(dir, { recursive: true })
+    }
+  })
+
   it("apply preserves unicode content and paths and forwards the default mode", async () => {
     const dir = mkdtempSync(join(tmpdir(), "paratix-test-"))
     try {
@@ -1552,6 +1574,28 @@ describe("file.template", () => {
 
       expect(result.status).toBe("changed")
       expect(writtenFiles).toStrictEqual([{ content: "Hello World", path: "/remote/out.txt" }])
+    } finally {
+      rmSync(dir, { recursive: true })
+    }
+  })
+
+  it("apply fails without writing when the rendered target is a symlink", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "paratix-test-"))
+    try {
+      const templatePath = join(dir, "template.txt")
+      writeFileSync(templatePath, "Hello {{name}}")
+
+      const ssh = createMockSsh({
+        "[ -L '/remote/out.txt' ]": { code: 0 },
+      })
+      vi.spyOn(ssh, "writeFile").mockResolvedValue()
+
+      const mod = file.template("/remote/out.txt", templatePath, { strict: false })
+      const result = await mod.apply(ssh, { name: "World" })
+
+      expect(result.status).toBe("failed")
+      expect(result.error?.message).toContain("path must not be a symlink")
+      expect(ssh.writeFile).not.toHaveBeenCalled()
     } finally {
       rmSync(dir, { recursive: true })
     }
