@@ -13,6 +13,10 @@ vi.mock("node:fs/promises", async (importOriginal) => {
 const emptyEnv = {}
 
 const projectDirectory = "/opt/app"
+const remotePath = `${projectDirectory}/compose.yml`
+const stagingPath = `${projectDirectory}/.compose.yml.paratix-staging.ABCDEF`
+const secondStagingPath = `${projectDirectory}/.compose.yml.paratix-staging.SECOND`
+const mktempCommand = `mktemp '${projectDirectory}/.compose.yml.paratix-staging.XXXXXX'`
 
 // Helper: build the compose command prefix for a given runtime
 function composeCmd(runtime: "docker" | "podman"): string {
@@ -28,6 +32,7 @@ function createComposeMockSsh(
         { code: 0 },
       "[ -f '/opt/app/compose.yml' ] && [ ! -L '/opt/app/compose.yml' ]": { code: 0 },
       "command -v podman": { code: 0 },
+      [mktempCommand]: { code: 0, stdout: `${stagingPath}\n` },
       ...responses,
     },
     {
@@ -41,13 +46,16 @@ function createComposeMockSsh(
           // R-0000228: src is uploaded to the staging path, not directly to compose.yml.
           localPath: /.+/v,
           options: { mode: "0600" },
-          remotePath: "/opt/app/compose.yml.paratix-staging",
+          remotePath: /^\/opt\/app\/\.compose\.yml\.paratix-staging\..+$/v,
         },
       ],
       allowWrites: [
         { options: { mode: "0600" }, remotePath: "/opt/app/compose.yml" },
         // R-0000228: validation runs against a staging file before atomic mv.
-        { options: { mode: "0600" }, remotePath: "/opt/app/compose.yml.paratix-staging" },
+        {
+          options: { mode: "0600" },
+          remotePath: /^\/opt\/app\/\.compose\.yml\.paratix-staging\..+$/v,
+        },
         { options: { mode: "0644" }, remotePath: /^\/etc\/systemd\/system\/.+$/v },
       ],
     }
@@ -564,10 +572,6 @@ describe("compose.down — name", () => {
 
 // ─── compose.config ───────────────────────────────────────────────────────────
 
-const remotePath = `${projectDirectory}/compose.yml`
-// R-0000228: applyComposeConfig writes/validates against this staging path
-// before atomically renaming over compose.yml.
-const stagingPath = `${remotePath}.paratix-staging`
 const sampleContent = "services:\n  web:\n    image: nginx\n"
 
 describe("compose.config — check", () => {
@@ -698,6 +702,47 @@ describe("compose.config — apply", () => {
     expect(mockSsh.calls).toContain(`${composeCmd("podman")} -f '${stagingPath}' config --quiet`)
     expect(mockSsh.calls).toContain(`mv -T '${stagingPath}' '${remotePath}'`)
     expect(mockSsh.calls).toContain(`rm -f '${stagingPath}'`)
+  })
+
+  it("uses a distinct mktemp staging path for parallel applies", async () => {
+    const mockSsh = createComposeMockSsh({
+      [`[ -e '${remotePath}' ]`]: { code: 1 },
+      [`${composeCmd("podman")} -f '${secondStagingPath}' config --quiet`]: { code: 0 },
+      [`${composeCmd("podman")} -f '${stagingPath}' config --quiet`]: { code: 0 },
+      [`mv -T '${secondStagingPath}' '${remotePath}'`]: { code: 0 },
+      [`mv -T '${stagingPath}' '${remotePath}'`]: { code: 0 },
+      [`rm -f '${secondStagingPath}'`]: { code: 0 },
+      [`rm -f '${stagingPath}'`]: { code: 0 },
+    })
+    const outputMock = vi
+      .spyOn(mockSsh, "output")
+      .mockResolvedValueOnce(stagingPath)
+      .mockResolvedValueOnce(secondStagingPath)
+
+    const first = compose.config({ content: sampleContent, projectDirectory })
+    const second = compose.config({
+      content: "services:\n  api:\n    image: caddy\n",
+      projectDirectory,
+    })
+
+    const results = await Promise.all([
+      first.apply(mockSsh, emptyEnv),
+      second.apply(mockSsh, emptyEnv),
+    ])
+
+    expect(results).toStrictEqual([{ status: "changed" }, { status: "changed" }])
+    expect(mockSsh.writeFileCalls.map((call) => call.remotePath)).toStrictEqual([
+      stagingPath,
+      secondStagingPath,
+    ])
+    expect(outputMock).toHaveBeenNthCalledWith(1, mktempCommand)
+    expect(outputMock).toHaveBeenNthCalledWith(2, mktempCommand)
+    expect(mockSsh.calls).toContain(`${composeCmd("podman")} -f '${stagingPath}' config --quiet`)
+    expect(mockSsh.calls).toContain(
+      `${composeCmd("podman")} -f '${secondStagingPath}' config --quiet`
+    )
+    expect(mockSsh.calls).toContain(`rm -f '${stagingPath}'`)
+    expect(mockSsh.calls).toContain(`rm -f '${secondStagingPath}'`)
   })
 
   it("uploads src file with the explicit COMPOSE_CONFIG_MODE and validates", async () => {

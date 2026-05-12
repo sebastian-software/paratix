@@ -3,13 +3,14 @@ import { readFile } from "node:fs/promises"
 import { basename } from "node:path"
 
 import { failed, failedCommand } from "../moduleFailure.js"
-import { shellQuote } from "../ssh.js"
+import { shellQuote, validateMktempPath } from "../ssh.js"
 import { type Module, type ModuleResult, NEEDS_APPLY, type SshConnection } from "../types.js"
 import { isRegularFileWithoutSymlink, isSymlink } from "./remoteFileChecks.js"
 
 const EXEC_OPTS = { ignoreExitCode: true, silent: true } as const
 const UNIT_NAME_PATTERN = /^[\w@.\-]+$/v
 const COMPOSE_CONFIG_MODE = "0600"
+const COMPOSE_CONFIG_STAGING_PREFIX = ".compose.yml.paratix-staging"
 const SYSTEMD_UNIT_MODE = "0644"
 
 type ComposeRuntime = "docker" | "podman"
@@ -580,6 +581,15 @@ async function removeComposeStagingFile(ssh: SshConnection, stagingPath: string)
   await ssh.exec(`rm -f ${shellQuote(stagingPath)}`, EXEC_OPTS)
 }
 
+async function createComposeStagingPath(parameters: {
+  projectDirectory: string
+  ssh: SshConnection
+}): Promise<string> {
+  const template = `${parameters.projectDirectory}/${COMPOSE_CONFIG_STAGING_PREFIX}.XXXXXX`
+  const stagingPath = await parameters.ssh.output(`mktemp ${shellQuote(template)}`)
+  return validateMktempPath(parameters.projectDirectory, stagingPath, COMPOSE_CONFIG_STAGING_PREFIX)
+}
+
 async function applyComposeConfig(parameters: {
   options: { content?: string; src?: string }
   projectDirectory: string
@@ -588,12 +598,12 @@ async function applyComposeConfig(parameters: {
   ssh: SshConnection
 }): Promise<ModuleResult> {
   const { options, projectDirectory, remotePath, runtime, ssh } = parameters
-  const stagingPath = `${remotePath}.paratix-staging`
+  const stagingPath = await createComposeStagingPath({ projectDirectory, ssh })
 
   // R-0000228: write into a staging file (not into compose.yml). The active
   // compose.yml is only replaced after validation succeeds, so a parallel
   // `compose up` cannot pick up an unvalidated config. The staging file is
-  // also cleaned up if validation or anything else throws.
+  // also unique per apply and cleaned up if validation or anything else throws.
   try {
     await writeComposeStagingFile(ssh, stagingPath, options)
     const validationFailure = await validateStagedComposeFile({
