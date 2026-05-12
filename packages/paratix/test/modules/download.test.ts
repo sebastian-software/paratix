@@ -175,6 +175,34 @@ function createMockSshWithFailingCurl(parameters: {
   }
 }
 
+function createMockSshWithDestinationSymlinkAfterFirstProbe(parameters: {
+  destination: string
+  temporaryDestination: string
+}): ReturnType<typeof createMockSsh> {
+  const base = createMockSsh(
+    downloadMktempStub(parameters.destination, parameters.temporaryDestination)
+  )
+  let destinationSymlinkChecks = 0
+  const baseTest = base.test.bind(base)
+
+  return {
+    ...base,
+    async test(command: string) {
+      if (command === `[ -L '${parameters.destination}' ]`) {
+        base.calls.push(command)
+        destinationSymlinkChecks += 1
+        return destinationSymlinkChecks > 1
+      }
+
+      return baseTest(command)
+    },
+  }
+}
+
+function commandIndexes(calls: string[], expectedCommand: string): number[] {
+  return calls.flatMap((command, index) => (command === expectedCommand ? [index] : []))
+}
+
 describe("download.url", () => {
   const destination = "/usr/local/bin/mytool"
   const temporaryDestination = "/usr/local/bin/.paratix-download.ABC123"
@@ -360,6 +388,31 @@ describe("download.url", () => {
       expect(result.status).toBe("failed")
       expect(result.error?.message).toContain("is a symlink: /usr/local/bin")
       expect(mockSsh.calls.every((c) => !c.startsWith("curl"))).toBe(true)
+    })
+
+    it("returns failed when destination becomes a symlink after curl but before mv", async () => {
+      const mockSsh = createMockSshWithDestinationSymlinkAfterFirstProbe({
+        destination,
+        temporaryDestination,
+      })
+      const curlCommand = `curl -fsSL -o '${temporaryDestination}' ${httpsOnlyCurlProtocolFlags} --config -`
+      const mvCommand = `mv -T -- '${temporaryDestination}' '${destination}'`
+
+      const mod = download.url(destination, url, allowUnverifiedDownload)
+      const result = await mod.apply(mockSsh, emptyEnv)
+
+      expect(result.status).toBe("failed")
+      expect(result.error?.message).toContain("destination is a symlink")
+      expect(mockSsh.calls).toContain(curlCommand)
+      expect(mockSsh.calls).not.toContain(mvCommand)
+      expect(mockSsh.calls).toContain(`rm -f '${temporaryDestination}'`)
+      const destinationSymlinkProbeIndexes = commandIndexes(
+        mockSsh.calls,
+        `[ -L '${destination}' ]`
+      )
+      expect(destinationSymlinkProbeIndexes).toHaveLength(2)
+      expect(destinationSymlinkProbeIndexes[0]).toBeLessThan(mockSsh.calls.indexOf(curlCommand))
+      expect(mockSsh.calls.indexOf(curlCommand)).toBeLessThan(destinationSymlinkProbeIndexes[1])
     })
 
     it("downloads file via curl --config from stdin and returns changed", async () => {
