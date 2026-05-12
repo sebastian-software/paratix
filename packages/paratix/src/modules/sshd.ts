@@ -514,10 +514,25 @@ async function restartAndVerifySshdPort(
   parameters: { originalConfig: string; originalPort: number; targetPort: number }
 ): Promise<ModuleResult | undefined> {
   const outcome = await restartSshdOnNewPort(ssh, parameters.targetPort, parameters.originalConfig)
-  // R-0000283: skip the live verification when the restart aborted the SSH
-  // session — the runner reconnects on the new port and re-running the
-  // module after reconnect catches any drift.
-  if (outcome !== "completed") return undefined
+  // A restart may close the current SSH session even when systemd accepted
+  // the command. Reconnect immediately and run the same live-port verification
+  // before reporting success; otherwise the runner could switch to an
+  // unreachable target port with no rollback chance.
+  if (outcome !== "completed") {
+    try {
+      await ssh.reconnect()
+    } catch (error) {
+      try {
+        ssh.removePort(parameters.targetPort)
+      } catch {
+        // ssh.removePort is in-memory bookkeeping; never mask the reconnect failure.
+      }
+      return failed(
+        `[sshd.port: ${String(parameters.targetPort)}] sshd restart disconnected the SSH ` +
+          `session before the target port could be verified; reconnect failed: ${String(error)}`
+      )
+    }
+  }
   return verifyLiveSshdPortOrRollback(ssh, parameters)
 }
 

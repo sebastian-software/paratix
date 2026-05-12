@@ -334,6 +334,9 @@ export function createMockSsh(responses?: MockResponses, options?: MockSshOption
       const result = await exec(`cat ${shellQuote(path)}`, { silent: true })
       return result.stdout
     },
+    async reconnect() {
+      await Promise.resolve()
+    },
     removePort: spies.removePort,
     removePortCalls: spies.removePortCalls,
     async sha256(path) {

@@ -457,13 +457,14 @@ describe("sshd.port — apply: validation and rollback", () => {
     expect(removePortSpy).toHaveBeenCalledWith(2222)
   })
 
-  it("regression — keeps added port when restart aborts the SSH session", async () => {
+  it("reconnects and live-verifies the target port when restart aborts the SSH session", async () => {
     const mockSsh = createMockSsh({
       [CAT_SSHD]: { stdout: "Port 22" },
     })
     trackWriteFile(mockSsh)
     const execSpy = vi.spyOn(mockSsh, "exec")
     const addPortSpy = vi.spyOn(mockSsh, "addPort")
+    const reconnectSpy = vi.spyOn(mockSsh, "reconnect")
     const removePortSpy = vi.spyOn(mockSsh, "removePort")
 
     execSpy
@@ -473,6 +474,7 @@ describe("sshd.port — apply: validation and rollback", () => {
       .mockResolvedValueOnce({ code: 0, stderr: "", stdout: "" }) // sshd.service exists
       .mockResolvedValueOnce({ code: 0, stderr: "", stdout: "" }) // sshd.service enabled
       .mockRejectedValueOnce(new Error("SSH connection closed unexpectedly"))
+      .mockResolvedValueOnce({ code: 0, stderr: "", stdout: SS_PROBE_LISTENING_STDOUT })
 
     const mod = sshd.port(2222)
     const result = await mod.apply(mockSsh, emptyEnv)
@@ -482,15 +484,19 @@ describe("sshd.port — apply: validation and rollback", () => {
       status: "changed",
     })
     expect(addPortSpy).toHaveBeenCalledWith(2222)
+    expect(reconnectSpy).toHaveBeenCalledOnce()
     expect(removePortSpy).not.toHaveBeenCalled()
   })
 
-  it("returns reconnect meta when restart resets the SSH session", async () => {
+  it("returns failed and removes the target port when reconnect after restart disconnect fails", async () => {
     const mockSsh = createMockSsh({
       [CAT_SSHD]: { stdout: "Port 22" },
     })
     trackWriteFile(mockSsh)
     const execSpy = vi.spyOn(mockSsh, "exec")
+    const reconnectError = new Error("reconnect refused")
+    vi.spyOn(mockSsh, "reconnect").mockRejectedValue(reconnectError)
+    const removePortSpy = vi.spyOn(mockSsh, "removePort")
 
     execSpy
       .mockResolvedValueOnce({ code: 0, stderr: "", stdout: "" }) // mkdir -p /run/sshd
@@ -503,10 +509,10 @@ describe("sshd.port — apply: validation and rollback", () => {
     const mod = sshd.port(2222)
     const result = await mod.apply(mockSsh, emptyEnv)
 
-    expect(result).toMatchObject({
-      meta: [{ kind: "sshd.port", port: 2222 }],
-      status: "changed",
-    })
+    expect(result.status).toBe("failed")
+    expect(result.error?.message).toContain("before the target port could be verified")
+    expect(result.error?.message).toContain("reconnect refused")
+    expect(removePortSpy).toHaveBeenCalledWith(2222)
   })
 
   it("falls back to ssh.service for restart on Ubuntu-style systems", async () => {

@@ -236,6 +236,8 @@ export type SshConnection = {
   probeSudo: () => Promise<void>
   /** Read the full contents of a remote file as a string. */
   readFile: (remotePath: string) => Promise<string>
+  /** Reconnect the SSH session using the current host and registered port candidates. */
+  reconnect: () => Promise<void>
   /** Remove a previously registered port from the reconnect candidate list. */
   removePort: (port: number) => void
   /** Return the SHA-256 hex digest of a remote file, or `null` if not found. */
