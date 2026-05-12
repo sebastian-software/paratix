@@ -768,6 +768,41 @@ describe("recipe", () => {
     expect(blocker.apply).not.toHaveBeenCalled()
   })
 
+  it("propagates shutdownSignal into nested recipe dry-run loops", async () => {
+    let receivedSignal: NodeJS.Signals | null = null
+    const innerFirst: Module = {
+      _dryRunBlocker: true,
+      // eslint-disable-next-line @typescript-eslint/require-await -- Interface requires async
+      async apply() {
+        receivedSignal = "SIGINT"
+        return { status: "changed" }
+      },
+      // eslint-disable-next-line @typescript-eslint/require-await -- Interface requires async
+      async check() {
+        return "needs-apply"
+      },
+      name: "inner-first",
+    }
+    const innerSecond: Module = {
+      _dryRunBlocker: true,
+      apply: vi.fn().mockResolvedValue({ status: "changed" }),
+      check: vi.fn().mockResolvedValue("needs-apply"),
+      name: "inner-second",
+    }
+    const outerRecipe = recipe("outer-recipe", [recipe("inner-recipe", [innerFirst, innerSecond])])
+
+    const result = await dryRunRecipeModule({
+      environment: emptyEnv,
+      recipeModule: outerRecipe,
+      shutdownSignal: () => receivedSignal,
+      ssh: createMockSsh(),
+    })
+
+    expect(result.status).toBe("changed")
+    expect(innerSecond.check).not.toHaveBeenCalled()
+    expect(innerSecond.apply).not.toHaveBeenCalled()
+  })
+
   it("check propagates exceptions from child module check()", async () => {
     const failing: Module = {
       apply: vi.fn().mockResolvedValue({ status: "ok" }),

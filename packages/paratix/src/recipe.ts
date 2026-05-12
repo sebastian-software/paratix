@@ -526,7 +526,13 @@ function createRecipeDryRunApply(
   needsDryRunApply: boolean
 ): Module["_applyDryRun"] | undefined {
   if (!needsDryRunApply) return undefined
-  return async (ssh: null | SshConnection, environment: Environment): Promise<ModuleResult> => {
+  return async (
+    ssh: null | SshConnection,
+    environment: Environment,
+    parameters?: {
+      shutdownSignal?: () => NodeJS.Signals | null
+    }
+  ): Promise<ModuleResult> => {
     const result = await dryRunRecipeModule({
       environment,
       recipeModule: {
@@ -542,6 +548,7 @@ function createRecipeDryRunApply(
         },
         name,
       },
+      shutdownSignal: parameters?.shutdownSignal,
       ssh,
     })
 

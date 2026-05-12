@@ -560,7 +560,9 @@ async function applyModule(parameters: {
   const connection = targetModule.local === true ? null : ssh
   let result: ModuleResult
   if (dryRun && targetModule._applyDryRun != null) {
-    result = await targetModule._applyDryRun(connection, currentEnvironment)
+    result = await targetModule._applyDryRun(connection, currentEnvironment, {
+      shutdownSignal: parameters.shutdownSignal,
+    })
   } else if (targetModule._supportsChildStepHook === true) {
     result = await targetModule.apply(connection, currentEnvironment, {
       async onChildStep(step) {

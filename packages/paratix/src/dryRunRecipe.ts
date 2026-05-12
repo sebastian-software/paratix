@@ -18,6 +18,19 @@ type StepResult = {
   stopRun?: true
 }
 
+function interruptedDryRunResult(parameters: {
+  aggregatedMeta: ModuleMetaEntry[]
+  aggregatedStatus: "changed" | "ok"
+  currentEnvironment: Environment
+}): StepResult {
+  return {
+    env: parameters.currentEnvironment,
+    meta: parameters.aggregatedMeta.length === 0 ? undefined : parameters.aggregatedMeta,
+    shouldBreak: true,
+    status: parameters.aggregatedStatus === "changed" ? "changed" : undefined,
+  }
+}
+
 function shouldExecuteApplyDuringDryRun(module: RecipeModule["_modules"][number]): boolean {
   return (
     module._applyDryRun != null ||
@@ -39,7 +52,9 @@ async function executeDryRunBlockingModule(parameters: {
   const result =
     childModule._applyDryRun == null
       ? await childModule.apply(connection, environment)
-      : await childModule._applyDryRun(connection, environment)
+      : await childModule._applyDryRun(connection, environment, {
+          shutdownSignal: parameters.shutdownSignal,
+        })
   const nextEnvironment =
     result.meta == null ? environment : await mergeEnvironmentFromMeta(environment, result.meta)
   printModuleResult(childModule.name, result.status, result._dryRunDetail ?? "(dry-run)")
@@ -99,17 +114,22 @@ export async function dryRunRecipeModule(parameters: {
     const aggregatedMeta: ModuleMetaEntry[] = []
     let currentEnvironment = environment
     const shutdownSignal = parameters.shutdownSignal ?? (() => null)
-    const verbose = parameters.options?.verbose ?? false
 
     for (const childModule of recipeModule._modules) {
-      if (shutdownSignal() != null) return { env: currentEnvironment, shouldBreak: true }
+      if (shutdownSignal() != null) {
+        return interruptedDryRunResult({
+          aggregatedMeta,
+          aggregatedStatus,
+          currentEnvironment,
+        })
+      }
       // eslint-disable-next-line no-await-in-loop
       const result = await executeDryRunChildModule({
         childModule,
         environment: currentEnvironment,
         shutdownSignal,
         ssh,
-        verbose,
+        verbose: parameters.options?.verbose ?? false,
       })
       if (result.shouldBreak) return result
       currentEnvironment = result.env

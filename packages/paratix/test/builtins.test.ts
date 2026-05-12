@@ -581,9 +581,13 @@ describe("when", () => {
     await mod._applyDryRun?.(mockSsh, emptyEnv)
 
     expect(localModule.check).toHaveBeenCalledWith(null, expect.any(Object))
-    expect(localModule._applyDryRun).toHaveBeenCalledWith(null, expect.any(Object))
+    expect(localModule._applyDryRun).toHaveBeenCalledWith(null, expect.any(Object), {
+      shutdownSignal: expect.any(Function),
+    })
     expect(remoteModule.check).toHaveBeenCalledWith(mockSsh, expect.any(Object))
-    expect(remoteModule._applyDryRun).toHaveBeenCalledWith(mockSsh, expect.any(Object))
+    expect(remoteModule._applyDryRun).toHaveBeenCalledWith(mockSsh, expect.any(Object), {
+      shutdownSignal: expect.any(Function),
+    })
   })
 
   it("apply propagates error details when an inner module returns failed", async () => {

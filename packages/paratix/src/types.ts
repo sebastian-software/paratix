@@ -118,7 +118,11 @@ export type Module = {
    * execution semantics beyond the generic blocker/meta-producer markers.
    * @internal
    */
-  _applyDryRun?: (ssh: null | SshConnection, environment: Environment) => Promise<ModuleResult>
+  _applyDryRun?: (
+    ssh: null | SshConnection,
+    environment: Environment,
+    options?: ModuleApplyOptions
+  ) => Promise<ModuleResult>
   /**
    * Internal marker for modules that must still execute their apply step in dry-run mode
    * because they act as run blockers rather than mutating state.

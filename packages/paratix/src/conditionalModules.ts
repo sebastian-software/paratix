@@ -51,7 +51,9 @@ async function executeConditionalApply(parameters: {
 }): Promise<ModuleResult> {
   const { dryRun, environment, module, ssh } = parameters
   if (dryRun && module._applyDryRun != null) {
-    return module._applyDryRun(ssh, environment)
+    return module._applyDryRun(ssh, environment, {
+      shutdownSignal: parameters.shutdownSignal,
+    })
   }
   if (module._supportsChildStepHook === true) {
     return module.apply(ssh, environment, {
@@ -242,13 +244,23 @@ function createWhenDryRunApply(
   condition: Condition,
   modules: Module[],
   needsDryRunApply: boolean
-): ((ssh: null | SshConnection, environment: Environment) => Promise<ModuleResult>) | undefined {
+): Module["_applyDryRun"] | undefined {
   if (!needsDryRunApply) return undefined
-  return async (ssh: null | SshConnection, environment: Environment) => {
+  return async (
+    ssh: null | SshConnection,
+    environment: Environment,
+    options?: ModuleApplyOptions
+  ) => {
     if (!(await condition(ssh, environment))) {
       return { status: "skipped" as const }
     }
-    return applyConditionalModules({ dryRun: true, environment, modules, ssh })
+    return applyConditionalModules({
+      dryRun: true,
+      environment,
+      modules,
+      shutdownSignal: options?.shutdownSignal,
+      ssh,
+    })
   }
 }
 
