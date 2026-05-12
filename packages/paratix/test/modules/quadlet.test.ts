@@ -227,6 +227,41 @@ describe("quadlet.container", () => {
     expect(ssh.calls).toContain(`rm -f '${quadletFilePath}'`)
   })
 
+  it("apply returns failed without rollback when persisting the reload flag fails", async () => {
+    const flagCommand = `find /var/lib/paratix/flags -maxdepth 1 -name '${traefikReloadFlagPrefix}*' ! -name '*.lock' -delete && touch /var/lib/paratix/flags/'${buildReloadFlag("traefik", expectedQuadletContent())}'`
+    const ssh = createMockSsh({
+      [`[ -e '${quadletFilePath}' ]`]: { code: 1 },
+      [flagCommand]: { code: 1, stderr: "read-only file system" },
+      "mkdir -p '/etc/containers/systemd'": { code: 0 },
+      "mkdir -p /var/lib/paratix/flags": { code: 0 },
+      "systemctl daemon-reload": { code: 0 },
+    })
+    const order: string[] = []
+    const originalExec = ssh.exec.bind(ssh)
+    vi.spyOn(ssh, "exec").mockImplementation(async (command, options) => {
+      order.push(command)
+      return originalExec(command, options)
+    })
+    const writeFile = vi.spyOn(ssh, "writeFile").mockImplementation(async () => {
+      await Promise.resolve()
+      order.push("writeFile")
+    })
+
+    const result = await createQuadletModule().apply(ssh, emptyEnv)
+
+    expect(result.status).toBe("failed")
+    expect(result.error?.message).toContain("failed to persist versioned flag")
+    expect(writeFile).toHaveBeenCalledWith(quadletFilePath, expectedQuadletContent(), {
+      mode: "0644",
+    })
+    expect(order).toContain("writeFile")
+    expect(order).toContain("systemctl daemon-reload")
+    expect(order).toContain(flagCommand)
+    expect(order.indexOf("writeFile")).toBeLessThan(order.indexOf("systemctl daemon-reload"))
+    expect(order.indexOf("systemctl daemon-reload")).toBeLessThan(order.indexOf(flagCommand))
+    expect(ssh.calls).not.toContain(`rm -f '${quadletFilePath}'`)
+  })
+
   it("R-0000182: restores snapshot and returns failed when writeFile throws", async () => {
     const previousContent = "[Container]\nImage=docker.io/library/traefik:v3.2\n"
     const ssh = createMockSsh({
