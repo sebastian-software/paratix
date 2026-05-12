@@ -55,6 +55,10 @@ function describeSpawnError(command: string, error: unknown): Error {
   return error instanceof Error ? error : new Error(String(error))
 }
 
+function childHasExited(child: ChildProcess): boolean {
+  return child.exitCode !== null || child.signalCode !== null
+}
+
 /**
  * Force-kill a hung child by escalating SIGTERM → SIGKILL after a short
  * grace period. Used when the runner is shutting down or when the per-call
@@ -63,14 +67,14 @@ function describeSpawnError(command: string, error: unknown): Error {
  * @param child - The spawned child process to terminate.
  */
 function killChildEscalating(child: ChildProcess): void {
-  if (child.killed || child.exitCode !== null) return
+  if (childHasExited(child)) return
   try {
     child.kill("SIGTERM")
   } catch {
     // ignored — child may have exited between the guard and kill
   }
   setTimeout(() => {
-    if (child.killed || child.exitCode !== null) return
+    if (childHasExited(child)) return
     try {
       child.kill("SIGKILL")
     } catch {

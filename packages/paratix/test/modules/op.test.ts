@@ -601,6 +601,7 @@ describe("op.resolve — runner abort and timeout (R-0000220)", () => {
     Object.defineProperty(child, "stdout", { value: new EventEmitter() })
     Object.defineProperty(child, "stderr", { value: new EventEmitter() })
     Object.defineProperty(child, "exitCode", { value: null })
+    Object.defineProperty(child, "signalCode", { value: null })
     Object.defineProperty(child, "killed", { value: false })
     ;(child as unknown as { kill: (signal: NodeJS.Signals) => void }).kill = (
       signal: NodeJS.Signals
@@ -647,6 +648,7 @@ describe("op.resolve — runner abort and timeout (R-0000220)", () => {
     Object.defineProperty(child, "stdout", { value: new EventEmitter() })
     Object.defineProperty(child, "stderr", { value: new EventEmitter() })
     Object.defineProperty(child, "exitCode", { value: null })
+    Object.defineProperty(child, "signalCode", { value: null })
     Object.defineProperty(child, "killed", { value: false })
     ;(child as unknown as { kill: (signal: NodeJS.Signals) => void }).kill = (
       signal: NodeJS.Signals
@@ -679,5 +681,52 @@ describe("op.resolve — runner abort and timeout (R-0000220)", () => {
     expect(result.error?.message).toContain("Failed to resolve 1Password references")
     expect(result.error?.message).toContain("op timed out after 60000ms")
     expect(killCalls).toContain("SIGTERM")
+  })
+
+  it("escalates to SIGKILL after SIGTERM when the child has not exited", async () => {
+    vi.useFakeTimers()
+    const killCalls: NodeJS.Signals[] = []
+    let killed = false
+    const child = new EventEmitter() as MockChildProcess
+    Object.defineProperty(child, "stdout", { value: new EventEmitter() })
+    Object.defineProperty(child, "stderr", { value: new EventEmitter() })
+    Object.defineProperty(child, "exitCode", { value: null })
+    Object.defineProperty(child, "signalCode", { value: null })
+    Object.defineProperty(child, "killed", {
+      get() {
+        return killed
+      },
+    })
+    ;(child as unknown as { kill: (signal: NodeJS.Signals) => void }).kill = (
+      signal: NodeJS.Signals
+    ) => {
+      killCalls.push(signal)
+      killed = true
+    }
+    child.stdin = Object.assign(new EventEmitter(), {
+      end: vi.fn(),
+      once: vi.fn(function once(
+        this: EventEmitter,
+        eventName: string,
+        listener: (...arguments_: unknown[]) => void
+      ) {
+        EventEmitter.prototype.once.call(this, eventName, listener)
+        return this
+      }),
+    })
+    mockedSpawnFn.mockImplementation((command: string, args: readonly string[]) => {
+      trackSpawn(command, args)
+      return child as never
+    })
+
+    const module_ = op.resolve({ password: "op://vault/item/password" })
+    // eslint-disable-next-line prefer-spread -- Module.apply, not Function.prototype.apply
+    const applyPromise = module_.apply(null, emptyEnv)
+    await vi.advanceTimersByTimeAsync(60_000)
+    const result = await applyPromise
+    await vi.advanceTimersByTimeAsync(1000)
+
+    expect(result.status).toBe("failed")
+    expect(killCalls).toStrictEqual(["SIGTERM", "SIGKILL"])
   })
 })
