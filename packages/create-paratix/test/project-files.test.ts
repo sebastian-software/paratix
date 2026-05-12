@@ -50,6 +50,35 @@ function linkGeneratedProjectDependency(projectDirectory: string, dependencyName
   symlinkSync(dependencyTarget, dependencyLink)
 }
 
+function expectGeneratedServerToTypecheck(projectDirectory: string): void {
+  writeFileSync(
+    join(projectDirectory, "tsconfig.typecheck.json"),
+    `${JSON.stringify(
+      {
+        compilerOptions: {
+          baseUrl: ".",
+          ignoreDeprecations: "6.0",
+          paths: {
+            paratix: [paratixIndexPath],
+            "paratix/modules": [paratixModulesPath],
+          },
+          typeRoots: [join(packageRoot, "node_modules", "@types")],
+        },
+        extends: "./tsconfig.json",
+        include: ["server.ts"],
+      },
+      null,
+      2
+    )}\n`
+  )
+
+  const typecheck = spawnSync(tscBinaryPath, ["--noEmit", "--project", "tsconfig.typecheck.json"], {
+    cwd: projectDirectory,
+    encoding: "utf8",
+  })
+  expect(typecheck.status, `${typecheck.stdout}\n${typecheck.stderr}`).toBe(0)
+}
+
 describe("writeProjectFiles", () => {
   beforeEach(() => {
     TEST_DIR = mkdtempSync(join(tmpdir(), "create-paratix-test-"))
@@ -204,36 +233,16 @@ describe("writeProjectFiles", () => {
   it("generated server.ts typechecks against the local paratix package types", () => {
     writeProjectFiles(TEST_DIR)
 
-    writeFileSync(
-      join(TEST_DIR, "tsconfig.typecheck.json"),
-      `${JSON.stringify(
-        {
-          compilerOptions: {
-            baseUrl: ".",
-            ignoreDeprecations: "6.0",
-            paths: {
-              paratix: [paratixIndexPath],
-              "paratix/modules": [paratixModulesPath],
-            },
-            typeRoots: [join(packageRoot, "node_modules", "@types")],
-          },
-          extends: "./tsconfig.json",
-          include: ["server.ts"],
-        },
-        null,
-        2
-      )}\n`
-    )
+    expectGeneratedServerToTypecheck(TEST_DIR)
+  })
 
-    const typecheck = spawnSync(
-      tscBinaryPath,
-      ["--noEmit", "--project", "tsconfig.typecheck.json"],
-      {
-        cwd: TEST_DIR,
-        encoding: "utf8",
-      }
-    )
-    expect(typecheck.status, `${typecheck.stdout}\n${typecheck.stderr}`).toBe(0)
+  it("generated root-bootstrap server.ts typechecks against the local paratix package types", () => {
+    writeProjectFiles(TEST_DIR, {
+      adminPublicKey: TEST_ADMIN_PUBLIC_KEY,
+      initialUser: { kind: "root" },
+    })
+
+    expectGeneratedServerToTypecheck(TEST_DIR)
   })
 
   it("writes a Prettier config matching the scaffold default", () => {
