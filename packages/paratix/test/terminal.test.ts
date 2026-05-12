@@ -64,10 +64,7 @@ describe("promptTerminal", () => {
     expect(closeSpies[0]).toHaveBeenCalledOnce()
   })
 
-  // R-0000263: hidden mode no longer monkey-patches readline internals; it
-  // must instead hand a custom Writable to createInterface that forwards the
-  // prompt question and discards the echoed input.
-  it("uses a custom Writable as output when hidden mode is enabled", async () => {
+  it("uses a TTY-compatible Writable as output when hidden mode is enabled", async () => {
     vi.resetModules()
     let capturedOutput: NodeJS.WritableStream | undefined
     const createInterfaceSpy = vi.fn((arg: { output: NodeJS.WritableStream }) => {
@@ -90,5 +87,38 @@ describe("promptTerminal", () => {
     expect(capturedOutput).toBeDefined()
     expect(capturedOutput).not.toBe(process.stderr)
     expect(typeof capturedOutput?.write).toBe("function")
+    expect(typeof (capturedOutput as { cursorTo?: unknown } | undefined)?.cursorTo).toBe("function")
+  })
+
+  it("does not leak hidden input through simulated readline output writes", async () => {
+    vi.resetModules()
+    const secret = "sudo-password-123"
+    let capturedOutput: NodeJS.WritableStream | undefined
+    const stderrWrites: string[] = []
+    const stderrWriteSpy = vi.spyOn(process.stderr, "write").mockImplementation((chunk) => {
+      stderrWrites.push(String(chunk))
+      return true
+    })
+    const createInterfaceSpy = vi.fn((arg: { output: NodeJS.WritableStream }) => {
+      capturedOutput = arg.output
+      const rl = new MockReadline()
+      vi.spyOn(rl, "question").mockImplementation((_question, callback) => {
+        capturedOutput?.write(`Password: ${secret}`)
+        capturedOutput?.write(secret)
+        queueMicrotask(() => {
+          callback(secret)
+        })
+      })
+      return rl
+    })
+    vi.doMock("node:readline", () => ({ createInterface: createInterfaceSpy }))
+
+    const { promptTerminal } = await import("../src/terminal.js")
+    const answer = await promptTerminal("Password: ", true)
+
+    expect(answer).toBe(secret)
+    expect(stderrWriteSpy).toHaveBeenCalled()
+    expect(stderrWrites.join("")).toContain("Password: ")
+    expect(stderrWrites.join("")).not.toContain(secret)
   })
 })

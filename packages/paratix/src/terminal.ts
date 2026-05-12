@@ -5,20 +5,69 @@ function normalizePromptAbortReason(reason: unknown): Error {
   return reason instanceof Error ? reason : new Error(String(reason))
 }
 
-// R-0000263: render the password prompt without echoing typed characters by
-// supplying a custom Writable to readline rather than monkey-patching the
-// internal `_writeToOutput`. The wrapper forwards the prompt question once
-// (so the operator sees the question) and discards everything readline would
-// otherwise echo back. This avoids the readline private-API dependency and
-// the type-cast through `unknown`.
-function createHiddenPromptOutput(question: string, target: NodeJS.WritableStream): Writable {
-  return new Writable({
-    write(chunk: Buffer | string, encoding, callback) {
-      const text = typeof chunk === "string" ? chunk : chunk.toString("utf8")
-      if (text.includes(question)) target.write(text, encoding, callback)
-      else callback()
-    },
-  })
+// Hidden prompts need a TTY-shaped output so readline keeps terminal-mode
+// behavior, but all redraw/echo chunks must be discarded to avoid leaking
+// typed secrets. Only the prompt question itself is forwarded once.
+class HiddenPromptOutput extends Writable {
+  public readonly columns: number | undefined
+  public readonly rows: number | undefined
+
+  private promptWritten = false
+
+  public constructor(
+    private readonly question: string,
+    private readonly target: NodeJS.WriteStream
+  ) {
+    super()
+    this.columns = target.columns
+    this.rows = target.rows
+    Object.defineProperty(this, "isTTY", { value: target.isTTY })
+  }
+
+  public override _write(
+    chunk: Buffer | string,
+    encoding: BufferEncoding,
+    callback: (error?: Error | null) => void
+  ): void {
+    const text = typeof chunk === "string" ? chunk : chunk.toString("utf8")
+    if (!this.promptWritten && text.includes(this.question)) {
+      this.promptWritten = true
+      this.target.write(this.question, encoding, callback)
+      return
+    }
+
+    callback()
+  }
+
+  public clearLine(...parameters: Parameters<NodeJS.WriteStream["clearLine"]>): boolean {
+    return this.target.clearLine(...parameters)
+  }
+
+  public clearScreenDown(
+    ...parameters: Parameters<NodeJS.WriteStream["clearScreenDown"]>
+  ): boolean {
+    return this.target.clearScreenDown(...parameters)
+  }
+
+  public cursorTo(...parameters: Parameters<NodeJS.WriteStream["cursorTo"]>): boolean {
+    return this.target.cursorTo(...parameters)
+  }
+
+  public getColorDepth(...parameters: Parameters<NodeJS.WriteStream["getColorDepth"]>): number {
+    return this.target.getColorDepth(...parameters)
+  }
+
+  public hasColors(...parameters: Parameters<NodeJS.WriteStream["hasColors"]>): boolean {
+    return this.target.hasColors(...parameters)
+  }
+
+  public moveCursor(...parameters: Parameters<NodeJS.WriteStream["moveCursor"]>): boolean {
+    return this.target.moveCursor(...parameters)
+  }
+}
+
+function createHiddenPromptOutput(question: string, target: NodeJS.WriteStream): Writable {
+  return new HiddenPromptOutput(question, target)
 }
 
 function createPromptAbortHandler(parameters: {
