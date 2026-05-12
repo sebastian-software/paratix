@@ -1294,6 +1294,7 @@ export class SshConnectionImpl implements SshConnection {
     }
 
     const directory = posix.dirname(remotePath)
+    await this.assertDirnameHasNoSymlinkComponent(directory, remotePath)
     const basename = posix.basename(remotePath)
     const finalTemplate = `${directory}/.${basename}.paratix.XXXXXX`
     const finalizeScript = `
