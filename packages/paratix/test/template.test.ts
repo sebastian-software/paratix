@@ -137,6 +137,14 @@ describe("renderTemplate", () => {
     await expect(renderTemplate("{{A}}", env)).rejects.toThrow(/Strict mode.*explicit modifier/v)
   })
 
+  it("does not resolve lazy env values before default strict mode rejects", async () => {
+    const lazy = vi.fn(() => "x")
+    const env: Environment = { A: lazy }
+
+    await expect(renderTemplate("{{A}}", env)).rejects.toThrow(/Strict mode.*explicit modifier/v)
+    expect(lazy).not.toHaveBeenCalled()
+  })
+
   it("works with strict explicitly set to false", async () => {
     const env: Environment = { A: "x" }
     const view = await renderTemplate("{{A}}", env, { strict: false })
