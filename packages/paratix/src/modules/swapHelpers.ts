@@ -172,7 +172,8 @@ async function rollbackManagedSwapBackup(
   // restore the backup, and try to re-enable swap on it. A failure inside
   // the rollback is surfaced because operators must know if the host is
   // left in a divergent state.
-  await disableSwap(ssh, options.path)
+  const disableResult = await disableSwap(ssh, options.path)
+  if (typeof disableResult !== "boolean") return disableResult
   const restoreResult = await restoreSwapBackup(ssh, options.path, backupPath)
   if (restoreResult !== true) return restoreResult
   const reEnable = await enableSwap(ssh, options.path)

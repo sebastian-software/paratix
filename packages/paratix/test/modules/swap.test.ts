@@ -382,6 +382,40 @@ describe("swap.file — apply", () => {
     expect(ssh.calls).not.toContain(`rm -f '${swapBackupPath}'`)
   })
 
+  it("returns rollback swapoff failure before restoring the backup", async () => {
+    const ssh = createMockSsh({
+      [`[ -e '${swapPath}' ]`]: { code: 0 },
+      [`[ -f '${swapPath}' ]`]: { code: 0 },
+      [`[ -L '${swapPath}' ]`]: { code: 1 },
+      [`cat '${swapPath}'`]: { stdout: "existing swap bytes" },
+      [`chmod '0600' '${swapTempPath}'`]: { code: 0 },
+      [`mkdir -p '/'`]: { code: 0 },
+      [`mkswap '${swapTempPath}'`]: { code: 0 },
+      [`stat -c %s '${swapPath}'`]: { stdout: "1073741824" },
+      [`swaplabel '${swapPath}' >/dev/null 2>&1`]: { code: 0 },
+      [`swapoff '${swapPath}'`]: { code: 1, stderr: "swapoff failed" },
+      [`swapon '${swapPath}'`]: { code: 1, stderr: "swapon failed" },
+      [backupSwapCommand]: { code: 0 },
+      [createSwapTempCommand]: { code: 0 },
+      [mktempSwapCommand]: { code: 0, stdout: `${swapTempPath}\n` },
+      [publishSwapCommand]: { code: 0 },
+      [safeSwapParentCommand]: { code: 0, stdout: "/\n" },
+    })
+    vi.spyOn(ssh, "lines")
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([swapPath])
+      .mockResolvedValue([])
+
+    const mod = swap.file({ path: swapPath, size: swapSize })
+    const result = await mod.apply(ssh, emptyEnv)
+
+    expect(result.status).toBe("failed")
+    expect(result.error?.message).toContain("swapoff failed")
+    expect(ssh.calls).not.toContain(restoreSwapCommand)
+    expect(ssh.calls).not.toContain(`rm -f '${swapBackupPath}'`)
+  })
+
   it("does not swapoff the existing swap file when replacement creation fails", async () => {
     const ssh = createMockSsh({
       [`[ -e '${swapPath}' ]`]: { code: 0 },
