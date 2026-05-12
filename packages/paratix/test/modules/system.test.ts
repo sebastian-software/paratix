@@ -100,7 +100,8 @@ describe("system.reboot — apply", () => {
     expect(result.status).toBe("failed")
     expect(result.error?.message).toContain("[system.reboot] resolveHost failed")
     expect(result.error?.message).toContain("DNS failed")
-    expect(result.meta).toBeUndefined()
+    expect(result.meta?.some(isSystemRebootMetaEntry)).toBe(true)
+    expect(result.meta?.some(isSystemHostMetaEntry)).toBe(false)
   })
 
   // R-0000243: a resolver that never settles must not stall the runner.
@@ -121,6 +122,8 @@ describe("system.reboot — apply", () => {
       expect(result.status).toBe("failed")
       expect(result.error?.message).toContain("[system.reboot] resolveHost failed")
       expect(result.error?.message).toContain("timed out after 25ms")
+      expect(result.meta?.some(isSystemRebootMetaEntry)).toBe(true)
+      expect(result.meta?.some(isSystemHostMetaEntry)).toBe(false)
     } finally {
       vi.useRealTimers()
     }

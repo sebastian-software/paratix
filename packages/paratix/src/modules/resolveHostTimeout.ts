@@ -56,7 +56,9 @@ export async function resolveHostWithTimeout(
  * Build the `[system.reboot, system.host?]` meta entry list and bound the
  * optional resolver in {@link resolveHostWithTimeout} so failures surface
  * as a {@link ModuleResult} with `status: "failed"` instead of propagating
- * as unhandled rejections.
+ * as unhandled rejections. Resolver failures preserve the `system.reboot`
+ * meta entry because the reboot trigger already succeeded before host
+ * resolution runs.
  *
  * @param options - Caller-supplied resolver, error label and override.
  * @param options.failurePrefix - Module label prepended to the failure message.
@@ -77,6 +79,9 @@ export async function buildRebootMetaEntriesWithTimeout(options: {
     return entries
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error)
-    return failed(`${options.failurePrefix} resolveHost failed\n${message}`)
+    return {
+      ...failed(`${options.failurePrefix} resolveHost failed\n${message}`),
+      meta: entries,
+    }
   }
 }

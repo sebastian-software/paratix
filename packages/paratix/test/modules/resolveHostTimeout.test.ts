@@ -114,5 +114,7 @@ describe("buildRebootMetaEntriesWithTimeout — failure", () => {
     expect(result.status).toBe("failed")
     expect(result.error?.message).toContain("[demo] resolveHost failed")
     expect(result.error?.message).toContain("timed out after 25ms")
+    expect(result.meta?.some((entry) => isSystemRebootMetaEntry(entry))).toBe(true)
+    expect(result.meta?.some((entry) => isSystemHostMetaEntry(entry))).toBe(false)
   })
 })

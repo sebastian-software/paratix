@@ -1005,7 +1005,8 @@ describe("releaseUpgrade.upgrade — apply (general)", () => {
     expect(result.status).toBe("failed")
     expect(result.error?.message).toContain("[releaseUpgrade.upgrade] resolveHost failed")
     expect(result.error?.message).toContain("DNS timeout")
-    expect(result.meta).toBeUndefined()
+    expect(result.meta?.some(isSystemRebootMetaEntry)).toBe(true)
+    expect(result.meta?.some(isSystemHostMetaEntry)).toBe(false)
   })
 
   // R-0000243: a hanging resolver must not stall the playbook indefinitely.
@@ -1029,7 +1030,8 @@ describe("releaseUpgrade.upgrade — apply (general)", () => {
       expect(result.status).toBe("failed")
       expect(result.error?.message).toContain("[releaseUpgrade.upgrade] resolveHost failed")
       expect(result.error?.message).toContain("timed out after 25ms")
-      expect(result.meta).toBeUndefined()
+      expect(result.meta?.some(isSystemRebootMetaEntry)).toBe(true)
+      expect(result.meta?.some(isSystemHostMetaEntry)).toBe(false)
     } finally {
       vi.useRealTimers()
     }
