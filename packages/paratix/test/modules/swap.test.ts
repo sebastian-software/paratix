@@ -14,7 +14,7 @@ const fstabLine = `${swapPath} none swap sw 0 0`
 const swapTempPath = "/.swapfile.paratix.ABC123"
 const swapBackupPath = `${swapPath}.paratix-backup`
 const safeSwapParentCommand = "find '/' -maxdepth 0 -type d -user root ! -perm /022 | grep -Fx '/'"
-const createSwapTempCommand = `fallocate -l '${swapSize}' '${swapTempPath}' || dd if=/dev/zero of='${swapTempPath}' bs=1M count=2048 status=none`
+const createSwapTempCommand = `fallocate -l '${swapSize}' '${swapTempPath}' || { dd if=/dev/zero of='${swapTempPath}' bs=1M count=2048 status=none && truncate -s 2147483648 '${swapTempPath}'; }`
 const mktempSwapCommand = "mktemp -p '/' '.swapfile.paratix.XXXXXX'"
 const publishSwapCommand = `find '/' -maxdepth 0 -type d -user root ! -perm /022 | grep -Fx '/' && mv -T -n '${swapTempPath}' '${swapPath}'`
 const backupSwapCommand = `mv -T -n '${swapPath}' '${swapBackupPath}'`
@@ -550,6 +550,7 @@ describe("swap.file — apply", () => {
 
   it("uses 1M block size in dd fallback regardless of swap size", async () => {
     const smallSize = "512M"
+    const createSmallSwapTempCommand = `fallocate -l '${smallSize}' '${swapTempPath}' || { dd if=/dev/zero of='${swapTempPath}' bs=1M count=512 status=none && truncate -s 536870912 '${swapTempPath}'; }`
     const writtenFiles: Array<{ content: string; path: string }> = []
     const ssh = createMockSsh({
       [`[ -e '${swapPath}' ]`]: { code: 1 },
@@ -557,11 +558,10 @@ describe("swap.file — apply", () => {
       [`cat '/etc/fstab'`]: { stdout: "# fstab\n" },
       [`cat '${swapPath}'`]: { code: 1, stdout: "" },
       [`chmod '0600' '${swapTempPath}'`]: { code: 0 },
-      [`fallocate -l '${smallSize}' '${swapTempPath}' || dd if=/dev/zero of='${swapTempPath}' bs=1M count=512 status=none`]:
-        { code: 0 },
       [`mkdir -p '/'`]: { code: 0 },
       [`mkswap '${swapTempPath}'`]: { code: 0 },
       [`swapon '${swapPath}'`]: { code: 0 },
+      [createSmallSwapTempCommand]: { code: 0 },
       [mktempSwapCommand]: { code: 0, stdout: `${swapTempPath}\n` },
       [publishSwapCommand]: { code: 0 },
       [safeSwapParentCommand]: { code: 0, stdout: "/\n" },
@@ -576,11 +576,41 @@ describe("swap.file — apply", () => {
     const result = await mod.apply(ssh, emptyEnv)
 
     expect(result.status).toBe("changed")
-    expect(ssh.calls).toContain(
-      `fallocate -l '${smallSize}' '${swapTempPath}' || dd if=/dev/zero of='${swapTempPath}' bs=1M count=512 status=none`
-    )
+    expect(ssh.calls).toContain(createSmallSwapTempCommand)
     // The fallback writes the desired fstab line; confirm no other writes
     // leaked through the writeFile spy.
+    expect(writtenFiles.map((entry) => entry.path)).toStrictEqual(["/etc/fstab"])
+  })
+
+  it("trims the dd fallback to the exact requested byte size for unaligned sizes", async () => {
+    const unalignedSize = "1537K"
+    const createUnalignedSwapTempCommand = `fallocate -l '${unalignedSize}' '${swapTempPath}' || { dd if=/dev/zero of='${swapTempPath}' bs=1M count=2 status=none && truncate -s 1573888 '${swapTempPath}'; }`
+    const writtenFiles: Array<{ content: string; path: string }> = []
+    const ssh = createMockSsh({
+      [`[ -e '${swapPath}' ]`]: { code: 1 },
+      [`[ -L '${swapPath}' ]`]: { code: 1 },
+      [`cat '/etc/fstab'`]: { stdout: "# fstab\n" },
+      [`cat '${swapPath}'`]: { code: 1, stdout: "" },
+      [`chmod '0600' '${swapTempPath}'`]: { code: 0 },
+      [`mkdir -p '/'`]: { code: 0 },
+      [`mkswap '${swapTempPath}'`]: { code: 0 },
+      [`swapon '${swapPath}'`]: { code: 0 },
+      [createUnalignedSwapTempCommand]: { code: 0 },
+      [mktempSwapCommand]: { code: 0, stdout: `${swapTempPath}\n` },
+      [publishSwapCommand]: { code: 0 },
+      [safeSwapParentCommand]: { code: 0, stdout: "/\n" },
+      "swapon --show=NAME --noheadings": { stdout: "" },
+    })
+    // eslint-disable-next-line @typescript-eslint/require-await -- mock implementation
+    ssh.writeFile = async (path: string, content: string): Promise<void> => {
+      writtenFiles.push({ content, path })
+    }
+
+    const mod = swap.file({ path: swapPath, size: unalignedSize })
+    const result = await mod.apply(ssh, emptyEnv)
+
+    expect(result.status).toBe("changed")
+    expect(ssh.calls).toContain(createUnalignedSwapTempCommand)
     expect(writtenFiles.map((entry) => entry.path)).toStrictEqual(["/etc/fstab"])
   })
 

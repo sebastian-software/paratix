@@ -91,8 +91,9 @@ async function initializeSwapTemporaryFile(
   temporaryPath: string
 ): Promise<ModuleResult | true> {
   const ddBlockCount = Math.ceil(parameters.sizeBytes / MEBI)
+  const quotedTemporaryPath = shellQuote(temporaryPath)
   const createFileResult = await parameters.ssh.exec(
-    `fallocate -l ${shellQuote(parameters.size)} ${shellQuote(temporaryPath)} || dd if=/dev/zero of=${shellQuote(temporaryPath)} bs=1M count=${String(ddBlockCount)} status=none`,
+    `fallocate -l ${shellQuote(parameters.size)} ${quotedTemporaryPath} || { dd if=/dev/zero of=${quotedTemporaryPath} bs=1M count=${String(ddBlockCount)} status=none && truncate -s ${String(parameters.sizeBytes)} ${quotedTemporaryPath}; }`,
     EXEC_OPTS
   )
   if (createFileResult.code !== 0) {
