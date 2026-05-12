@@ -6,6 +6,8 @@ const NISTP256_UNCOMPRESSED_POINT_BYTE_LENGTH = 65
 const NISTP384_UNCOMPRESSED_POINT_BYTE_LENGTH = 97
 const NISTP521_UNCOMPRESSED_POINT_BYTE_LENGTH = 133
 const UNCOMPRESSED_EC_POINT_PREFIX = 0x04
+const PRINTABLE_ASCII_MIN = 0x20
+const PRINTABLE_ASCII_MAX = 0x7e
 
 const ECDSA_CURVE_NAMES = new Map([
   ["ecdsa-sha2-nistp256", "nistp256"],
@@ -44,6 +46,10 @@ function throwInvalidHostKeyBlob(algorithm: string, detail: string): never {
     `Refusing to capture host fingerprint: malformed "${algorithm}" host key blob (${detail}). ` +
       `This may indicate a man-in-the-middle attack or a broken SSH peer.`
   )
+}
+
+function isPrintableAsciiByte(byte: number): boolean {
+  return byte >= PRINTABLE_ASCII_MIN && byte <= PRINTABLE_ASCII_MAX
 }
 
 function validateEd25519HostKeyBlob(keyBuffer: Buffer, offset: number, algorithm: string): void {
@@ -99,6 +105,11 @@ function readEcdsaCurveName(parameters: EcdsaCurveNameReadParameters): WireReadR
   const curveName = readWireString(keyBuffer, offset)
   if (curveName == null) {
     throwInvalidHostKeyBlob(algorithm, "missing or truncated curve identifier")
+  }
+  for (const byte of curveName.value) {
+    if (!isPrintableAsciiByte(byte)) {
+      throwInvalidHostKeyBlob(algorithm, "curve identifier contains non-printable bytes")
+    }
   }
   const curveNameValue = curveName.value.toString("ascii")
   if (curveNameValue !== expectedCurveName) {

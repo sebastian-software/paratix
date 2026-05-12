@@ -295,6 +295,31 @@ describe("readHostFingerprintViaSsh2", () => {
     ).rejects.toThrow(/curve identifier "nistp384" does not match "nistp256"/v)
   })
 
+  it("rejects ECDSA host keys whose curve identifier contains non-printable bytes", async () => {
+    const point = buildEcdsaPointFromGeneratedKey("P-256")
+    const tamperedCurveName = Buffer.from(
+      [...Buffer.from("nistp256", "ascii")].map((byte) => byte | 0x80)
+    )
+    const hostKey = Buffer.concat([
+      createWireString("ecdsa-sha2-nistp256"),
+      createWireString(tamperedCurveName),
+      createWireString(point),
+    ])
+
+    const fakeClient = createFakeHostKeyClient((config, client) => {
+      callHostVerifier(config, hostKey)
+      setImmediate(() => {
+        client.handlers.error(new Error("Host denied"))
+      })
+    })
+
+    await expect(
+      readHostFingerprintViaSsh2("example.com", {
+        clientFactory: () => useFakeHostKeyClient(fakeClient),
+      })
+    ).rejects.toThrow(/curve identifier contains non-printable bytes/v)
+  })
+
   it("rejects ECDSA host keys whose EC point is the wrong length", async () => {
     const wrongLengthPoint = Buffer.concat([
       Buffer.from([UNCOMPRESSED_EC_POINT_PREFIX]),
