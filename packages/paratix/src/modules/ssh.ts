@@ -225,6 +225,43 @@ async function getKnownHostLines(
   return parseHostKeyLines(result.stdout)
 }
 
+async function hasKnownHostEntry(
+  conn: SshConnection,
+  host: string,
+  options?: KnownHostsOptions
+): Promise<boolean> {
+  const result = await conn.exec(
+    `ssh-keygen -F ${shellQuote(knownHostsLookupTarget(host, options))}`,
+    {
+      ignoreExitCode: true,
+      silent: true,
+    }
+  )
+  if (result.code === 1) return false
+  if (!isExpectedSshKeygenLookupExitCode(result.code)) {
+    throw new SshKeygenLookupError(host, result.code, result.stderr)
+  }
+  return true
+}
+
+async function resolveKnownHostsAbsentLookup(
+  conn: SshConnection,
+  host: string,
+  options?: KnownHostsOptions
+): Promise<{ failure: ModuleResult; known: null } | { failure: null; known: boolean }> {
+  try {
+    return { failure: null, known: await hasKnownHostEntry(conn, host, options) }
+  } catch (error) {
+    if (isSshKeygenLookupError(error)) {
+      return {
+        failure: failed(`[ssh.knownHosts: ${host} (absent)] ${error.message}`),
+        known: null,
+      }
+    }
+    throw error
+  }
+}
+
 function isSshKeygenLookupError(error: unknown): error is SshKeygenLookupError {
   return error instanceof SshKeygenLookupError
 }
@@ -529,7 +566,9 @@ export const ssh = {
           return applyKnownHostsPresent(conn, { host, options })
         }
 
-        const hostKnownBefore = await conn.test(`ssh-keygen -F ${shellQuote(lookupTarget)}`)
+        const lookup = await resolveKnownHostsAbsentLookup(conn, host, options)
+        if (lookup.failure != null) return lookup.failure
+        const hostKnownBefore = lookup.known
         if (!hostKnownBefore) {
           return { status: "ok" }
         }
@@ -559,7 +598,10 @@ export const ssh = {
             : NEEDS_APPLY
         }
 
-        const hostKnown = await conn.test(`ssh-keygen -F ${shellQuote(lookupTarget)}`)
+        const hostKnown =
+          state === "absent"
+            ? await hasKnownHostEntry(conn, host, options)
+            : await conn.test(`ssh-keygen -F ${shellQuote(lookupTarget)}`)
 
         if (state === "present") {
           return hostKnown ? "ok" : NEEDS_APPLY

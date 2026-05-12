@@ -318,6 +318,20 @@ describe("ssh.knownHosts", () => {
     expect(result).toBe("needs-apply")
   })
 
+  it("check surfaces ssh-keygen lookup failures for absent state", async () => {
+    const mockSsh = createMockSsh({
+      "ssh-keygen -F 'github.com'": {
+        code: 255,
+        stderr: "ssh-keygen: failed to parse known_hosts: corrupt entry\n",
+      },
+    })
+    const mod = ssh.knownHosts("github.com", { state: "absent" })
+
+    await expect(mod.check(mockSsh, emptyEnv)).rejects.toThrow(
+      "ssh-keygen -F exited with unexpected code 255"
+    )
+  })
+
   it("apply verifies a scanned host key against the expected fingerprint before appending it", async () => {
     const mockSsh = createSshApplyMockSsh({
       [`grep -qxF '${scannedLine}' ~/.ssh/known_hosts`]: { code: 1 },
@@ -555,6 +569,22 @@ describe("ssh.knownHosts", () => {
     const result = await mod.apply(mockSsh, emptyEnv)
 
     expect(result.status).toBe("ok")
+    expect(mockSsh.calls).not.toContain("ssh-keygen -R 'github.com'")
+  })
+
+  it("apply returns failed and skips ssh-keygen -R when absent lookup fails", async () => {
+    const mockSsh = createSshApplyMockSsh({
+      "ssh-keygen -F 'github.com'": {
+        code: 255,
+        stderr: "ssh-keygen: failed to parse known_hosts: corrupt entry\n",
+      },
+    })
+    const mod = ssh.knownHosts("github.com", { state: "absent" })
+
+    const result = await mod.apply(mockSsh, emptyEnv)
+
+    expect(result.status).toBe("failed")
+    expect(result.error?.message).toContain("ssh-keygen -F exited with unexpected code 255")
     expect(mockSsh.calls).not.toContain("ssh-keygen -R 'github.com'")
   })
 
