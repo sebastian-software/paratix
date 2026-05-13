@@ -298,7 +298,7 @@ async function readPropertiesState(
   remotePath: string
 ): Promise<{ group: string; mode: string; owner: string }> {
   const raw = await ssh.output(`stat -c '%a %U %G' ${shellQuote(remotePath)}`)
-  const [mode = "", owner = "", group = ""] = raw.trim().split(" ")
+  const [mode = "", owner = "", group = ""] = raw.trim().split(/\s+/v)
   return { group, mode, owner }
 }
 
@@ -576,7 +576,7 @@ export function stat(remotePath: string): Module {
       if (!ssh) return failed(`[file.stat: ${remotePath}] SSH connection is required`)
 
       const raw = await ssh.output(`stat -c '%s %a %U %G %F %Y' ${shellQuote(remotePath)}`)
-      const parts = raw.trim().split(" ")
+      const parts = raw.trim().split(/\s+/v)
       const [size, mode, owner, group] = parts
       const mtime = parts.at(-1)
       const type = parts.slice(STAT_TYPE_START_INDEX, -1).join(" ")

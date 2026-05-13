@@ -2448,6 +2448,19 @@ describe("file.properties", () => {
     expect(result).toBe("needs-apply")
   })
 
+  it("check handles stat ownership output with repeated whitespace", async () => {
+    const ssh = createMockSsh({
+      "stat -c '%a %U %G' '/var/app'": { stdout: "644   www-data\twww-data" },
+    })
+    const mod = file.properties("/var/app", {
+      group: "www-data",
+      mode: "0644",
+      owner: "www-data",
+    })
+    const result = await mod.check(ssh, emptyEnv)
+    expect(result).toBe("ok")
+  })
+
   it("R-0000268: returns failed when chmod exits non-zero (read-only fs)", async () => {
     // chmod on a read-only mount must surface as a maskable failedCommand
     // ModuleResult instead of an unguarded CommandError that bypasses the
@@ -2660,6 +2673,26 @@ describe("file.stat", () => {
     const ssh = createMockSsh({
       "stat -c '%s %a %U %G %F %Y' '/var/app/file.txt'": {
         stdout: "1234 644 www-data www-data regular file 1700000000",
+      },
+    })
+
+    const mod = file.stat("/var/app/file.txt")
+    const result = await mod.apply(ssh, emptyEnv)
+
+    expect(result.status).toBe("ok")
+    const environment = await mergeEnvironmentFromMeta({}, result.meta)
+    await expect(resolveEnvironment(environment, "file.stat.group")).resolves.toBe("www-data")
+    await expect(resolveEnvironment(environment, "file.stat.mode")).resolves.toBe("644")
+    await expect(resolveEnvironment(environment, "file.stat.mtime")).resolves.toBe("1700000000")
+    await expect(resolveEnvironment(environment, "file.stat.owner")).resolves.toBe("www-data")
+    await expect(resolveEnvironment(environment, "file.stat.size")).resolves.toBe("1234")
+    await expect(resolveEnvironment(environment, "file.stat.type")).resolves.toBe("regular file")
+  })
+
+  it("apply parses metadata when stat separates fields with repeated whitespace", async () => {
+    const ssh = createMockSsh({
+      "stat -c '%s %a %U %G %F %Y' '/var/app/file.txt'": {
+        stdout: "1234\t644   www-data\twww-data   regular file  1700000000",
       },
     })
 

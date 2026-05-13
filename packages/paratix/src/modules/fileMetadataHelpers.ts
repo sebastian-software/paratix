@@ -48,7 +48,7 @@ export async function readOwnership(
   remotePath: string
 ): Promise<FileOwnership> {
   const raw = await ssh.output(`stat -c '%a %U %G' ${shellQuote(remotePath)}`)
-  const [mode = "", owner = "", group = ""] = raw.trim().split(" ")
+  const [mode = "", owner = "", group = ""] = raw.trim().split(/\s+/v)
   return { group, mode, owner }
 }
 
