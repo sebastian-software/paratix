@@ -273,6 +273,27 @@ describe("net.interface — apply", () => {
     expect(mockSsh.calls).toContain(`rm -f '${netplanPath}'`)
   })
 
+  it("returns failed when removing a newly-created Netplan config fails during rollback", async () => {
+    const netplanPath = "/etc/netplan/60-paratix-eth0.yaml"
+    const mockSsh = createMockSsh(
+      {
+        [`rm -f '${netplanPath}'`]: { code: 1, stderr: "permission denied" },
+        [`test -f '${netplanPath}'`]: { code: 1 },
+        "netplan apply": { code: 1, stderr: "bad netplan" },
+        "test -d '/etc/netplan'": { code: 0 },
+      },
+      APPLY_TO_NEW_FILE_OPTIONS
+    )
+    const mod = net.interface("eth0", { dhcp: true })
+
+    const result = await mod.apply(mockSsh, emptyEnv)
+
+    expect(result.status).toBe("failed")
+    expect(String(result.error)).toContain("rollback removal failed")
+    expect(String(result.error)).toContain(netplanPath)
+    expect(String(result.error)).toContain("permission denied")
+  })
+
   it("returns changed in networkd mode", async () => {
     const mockSsh = createMockSsh(
       {
