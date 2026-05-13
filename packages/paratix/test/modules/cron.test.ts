@@ -2,7 +2,9 @@ import { createHash } from "node:crypto"
 import { describe, expect, it } from "vitest"
 
 import { cron } from "../../src/modules/cron.js"
+import { FLAGS_DIRECTORY } from "../../src/modules/moduleHelpers.js"
 import { createMockSsh as createBaseMockSsh } from "../helpers/mockSsh.js"
+import { isFlagLockInternalSuccessCommand } from "../helpers/mockSshFlagLock.js"
 
 /**
  * R-0000168: replicate the marker comment cron.ts writes (legacy form
@@ -23,6 +25,14 @@ const createMockSsh: typeof createBaseMockSsh = (responses, options) =>
     ...options,
     responseStubs: [
       ...(options?.responseStubs ?? []),
+      {
+        command: /^mkdir \/var\/lib\/paratix\/flags\/'cron-crontab-[\da-f]+'/v,
+        result: { code: 0 },
+      },
+      {
+        command: /^rmdir \/var\/lib\/paratix\/flags\/'cron-crontab-[\da-f]+'/v,
+        result: { code: 0 },
+      },
       { command: /^crontab -u '[^']+' /v, result: { code: 0 } },
     ],
   })
@@ -42,6 +52,135 @@ const emptyEnv = {}
 const crontabWriteFailureStub = {
   command: "crontab -u 'alice' -",
   result: { code: 1, stderr: "install failed\n" },
+}
+const CRONTAB_LOCK_DIGEST_LENGTH = 16
+
+function deferred(): { promise: Promise<void>; resolve: () => void } {
+  let resolvePromise: (() => void) | undefined
+  const promise = new Promise<void>((resolve) => {
+    resolvePromise = resolve
+  })
+  return {
+    promise,
+    resolve() {
+      resolvePromise?.()
+    },
+  }
+}
+
+function crontabLockName(user: string): string {
+  const digest = createHash("sha256")
+    .update(user)
+    .digest("hex")
+    .slice(0, CRONTAB_LOCK_DIGEST_LENGTH)
+  return `cron-crontab-${digest}`
+}
+
+type SharedCrontabBlocker = {
+  allow: Promise<void>
+  observed: () => void
+  text: string
+}
+type SharedCrontabExecResult = Awaited<ReturnType<MockSsh["exec"]>>
+
+function createSharedCrontabMockSsh(
+  user: string,
+  initialCrontab: string,
+  options?: { blockFirstWriteContaining?: SharedCrontabBlocker }
+): MockSsh {
+  const base = createMockSsh(
+    {},
+    {
+      allowUnstubbedDefaults: true,
+      defaultExecResult: { code: 0 },
+    }
+  )
+  const lockName = crontabLockName(user)
+  const lockMkdirCommand = `mkdir ${FLAGS_DIRECTORY}/'${lockName}'`
+  const lockRmdirCommand = `rmdir ${FLAGS_DIRECTORY}/'${lockName}'`
+  const readCommand = `crontab -u '${user}' -l`
+  const writeCommand = `crontab -u '${user}' -`
+  const removeCommand = `crontab -u '${user}' -r`
+  let crontab = initialCrontab
+  let lockExists = false
+  let consumedWriteBlocker = false
+  const waiters: Array<() => void> = []
+
+  function resolveWaiters(): void {
+    for (const resolve of waiters.splice(0)) resolve()
+  }
+
+  const handlers = new Map<
+    string,
+    (
+      execOptions?: Parameters<MockSsh["exec"]>[1]
+    ) => Promise<SharedCrontabExecResult> | SharedCrontabExecResult
+  >([
+    [
+      lockMkdirCommand,
+      () => {
+        if (lockExists) return { code: 1, stderr: "", stdout: "" }
+        lockExists = true
+        return { code: 0, stderr: "", stdout: "" }
+      },
+    ],
+    [
+      lockRmdirCommand,
+      () => {
+        lockExists = false
+        resolveWaiters()
+        return { code: 0, stderr: "", stdout: "" }
+      },
+    ],
+    [
+      readCommand,
+      () =>
+        crontab === ""
+          ? { code: 1, stderr: `no crontab for ${user}\n`, stdout: "" }
+          : { code: 0, stderr: "", stdout: crontab },
+    ],
+    [
+      removeCommand,
+      () => {
+        crontab = ""
+        return { code: 0, stderr: "", stdout: "" }
+      },
+    ],
+    [
+      writeCommand,
+      async (execOptions) => {
+        const input = execOptions?.input ?? ""
+        const blocker = options?.blockFirstWriteContaining
+        if (!consumedWriteBlocker && blocker && input.includes(blocker.text)) {
+          consumedWriteBlocker = true
+          blocker.observed()
+          await blocker.allow
+        }
+        crontab = input
+        return { code: 0, stderr: "", stdout: "" }
+      },
+    ],
+  ])
+
+  return {
+    ...base,
+    async exec(command, execOptions) {
+      base.calls.push(command)
+      base.execCalls.push({ command, options: execOptions })
+      const handler = handlers.get(command)
+      if (handler) return handler(execOptions)
+      if (command.startsWith("i=0; while [ -d")) {
+        if (lockExists) {
+          await new Promise<void>((resolve) => {
+            waiters.push(resolve)
+          })
+        }
+        return { code: 0, stderr: "", stdout: "" }
+      }
+      if (isFlagLockInternalSuccessCommand(command)) return { code: 0, stderr: "", stdout: "" }
+      throw new Error(`unexpected shared crontab exec command: ${command}`)
+    },
+  }
 }
 
 describe("cron.job", () => {
@@ -317,6 +456,47 @@ describe("cron.job", () => {
     const result = await mod.apply(mockSsh, emptyEnv)
     expect(result.status).toBe("ok")
     expect(findCrontabWriteCall(mockSsh)).toBeUndefined()
+  })
+
+  it("serializes parallel apply calls for the same user and preserves both mutations", async () => {
+    const user = "alice"
+    const firstWriteObserved = deferred()
+    const allowFirstWriteToFinish = deferred()
+    const mockSsh = createSharedCrontabMockSsh(user, "0 5 * * * /other.sh\n", {
+      blockFirstWriteContaining: {
+        allow: allowFirstWriteToFinish.promise,
+        observed: firstWriteObserved.resolve,
+        text: "/backup.sh",
+      },
+    })
+
+    const backup = cron.job(user, "backup", { job: "0 3 * * * /backup.sh" })
+    const cleanup = cron.job(user, "cleanup", { job: "30 4 * * * /cleanup.sh" })
+    const first = backup.apply(mockSsh, emptyEnv)
+    await firstWriteObserved.promise
+    const second = cleanup.apply(mockSsh, emptyEnv)
+
+    allowFirstWriteToFinish.resolve()
+    const results = await Promise.all([first, second])
+
+    expect(results).toStrictEqual([{ status: "changed" }, { status: "changed" }])
+    const writes = mockSsh.execCalls.filter((call) => call.command === "crontab -u 'alice' -")
+    expect(writes).toHaveLength(2)
+    expect(writes[1]?.options?.input).toContain("/other.sh")
+    expect(writes[1]?.options?.input).toContain("/backup.sh")
+    expect(writes[1]?.options?.input).toContain("/cleanup.sh")
+  })
+
+  it("uses independent crontab mutexes for different users", async () => {
+    const aliceSsh = createSharedCrontabMockSsh("alice", "")
+    const bobSsh = createSharedCrontabMockSsh("bob", "")
+
+    await cron.job("alice", "backup", { job: "0 3 * * * /backup.sh" }).apply(aliceSsh, emptyEnv)
+    await cron.job("bob", "backup", { job: "0 3 * * * /backup.sh" }).apply(bobSsh, emptyEnv)
+
+    expect(aliceSsh.calls).toContain(`mkdir ${FLAGS_DIRECTORY}/'${crontabLockName("alice")}'`)
+    expect(bobSsh.calls).toContain(`mkdir ${FLAGS_DIRECTORY}/'${crontabLockName("bob")}'`)
+    expect(crontabLockName("alice")).not.toBe(crontabLockName("bob"))
   })
 
   // R-0000168: when the on-disk marker is the legacy untagged form, apply

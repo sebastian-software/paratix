@@ -9,6 +9,7 @@ import {
   NEEDS_APPLY,
   type SshConnection,
 } from "../types.js"
+import { withMutexLock } from "./moduleHelpers.js"
 
 /**
  * R-0000272: typed result for {@link readCrontab}. The success arm carries the
@@ -115,6 +116,15 @@ function cronJobDigest(cronJob: string): string {
 
 const MARKER_HASH_TAG = " sha256="
 const MARKER_PREFIX = "# paratix: "
+const CRONTAB_LOCK_DIGEST_LENGTH = 16
+
+function crontabMutexLockName(user: string): string {
+  const digest = createHash("sha256")
+    .update(user)
+    .digest("hex")
+    .slice(0, CRONTAB_LOCK_DIGEST_LENGTH)
+  return `cron-crontab-${digest}`
+}
 
 /**
  * R-0000168: render the marker comment that precedes a managed cron job.
@@ -303,6 +313,53 @@ function computeCronJobMutation(parameters: {
   return nextLines
 }
 
+async function applyCronJobState(parameters: {
+  cronJob: string
+  marker: string
+  name: string
+  ssh: SshConnection
+  state: "absent" | "present"
+  user: string
+}): Promise<ModuleResult> {
+  const { cronJob, marker, name, ssh, state, user } = parameters
+
+  try {
+    return await withMutexLock(ssh, {
+      lockName: crontabMutexLockName(user),
+      async section() {
+        const readResult = await readCrontab(ssh, user)
+        // R-0000272: surface crontab-read failures as a structured
+        // failedCommand result instead of throwing — see the matching
+        // change in cron.absent.apply for the full rationale.
+        if (readResult.kind === "error") {
+          return failedCommand(
+            `[cron.job: ${name} (${user})] crontab read failed`,
+            readResult.result
+          )
+        }
+        const lines = readResult.lines
+        const markerIndex = findMarkerIndex(lines, name)
+
+        const nextLines = computeCronJobMutation({ cronJob, lines, marker, markerIndex, state })
+        if (nextLines === null) return { status: "ok" }
+
+        const failure = await writeCrontab({
+          failureMessage: `[cron.job: ${name} (${user})] crontab removal failed`,
+          lines: nextLines,
+          ssh,
+          user,
+        })
+        if (failure) return failure
+        return { status: "changed" }
+      },
+    })
+  } catch (error) {
+    return failed(
+      `[cron.job: ${name} (${user})] aborted: ${error instanceof Error ? error.message : String(error)}`
+    )
+  }
+}
+
 /**
  * Apply the cron.absent mutation against an already-read crontab.
  *
@@ -448,30 +505,7 @@ export const cron = {
       async apply(ssh: null | SshConnection): Promise<ModuleResult> {
         if (!ssh) return failed(`[cron.job: ${name} (${user})] SSH connection is required`)
 
-        const readResult = await readCrontab(ssh, user)
-        // R-0000272: surface crontab-read failures as a structured
-        // failedCommand result instead of throwing — see the matching
-        // change in cron.absent.apply for the full rationale.
-        if (readResult.kind === "error") {
-          return failedCommand(
-            `[cron.job: ${name} (${user})] crontab read failed`,
-            readResult.result
-          )
-        }
-        const lines = readResult.lines
-        const markerIndex = findMarkerIndex(lines, name)
-
-        const nextLines = computeCronJobMutation({ cronJob, lines, marker, markerIndex, state })
-        if (nextLines === null) return { status: "ok" }
-
-        const failure = await writeCrontab({
-          failureMessage: `[cron.job: ${name} (${user})] crontab removal failed`,
-          lines: nextLines,
-          ssh,
-          user,
-        })
-        if (failure) return failure
-        return { status: "changed" }
+        return applyCronJobState({ cronJob, marker, name, ssh, state, user })
       },
 
       async check(ssh: null | SshConnection): Promise<"needs-apply" | "ok"> {
