@@ -214,11 +214,11 @@ describe("net.hosts — apply", () => {
     expect(mockSsh.calls).toContain("cat '/etc/hosts'")
   })
 
-  // R-0000101: hosts entries are normalized by IP. When `state: "present"`
-  // is applied for an IP that already has a different hostname set on disk,
-  // the stale line must be replaced rather than left next to the new entry,
-  // so resolution is unambiguous after apply.
-  it("replaces a stale entry for the same IP instead of duplicating it (state: present)", async () => {
+  // Hosts entries are normalized by IP. When `state: "present"` is applied
+  // for an IP that already has a different hostname set on disk, the existing
+  // hostnames are preserved and the desired hostnames are added to the same
+  // consolidated line.
+  it("merges a stale entry for the same IP instead of duplicating it (state: present)", async () => {
     const mockSsh = createMockSsh({
       "cat '/etc/hosts'": { stdout: "127.0.0.1 localhost\n192.168.1.1 host1\n" },
     })
@@ -233,9 +233,45 @@ describe("net.hosts — apply", () => {
 
     expect(result.status).toBe("changed")
     expect(writes).toHaveLength(1)
-    expect(writes[0]?.content).toBe("127.0.0.1 localhost\n192.168.1.1 host2\n")
-    // The previous host1 entry must be gone, not coexist with host2.
-    expect(writes[0]?.content).not.toContain("host1")
+    expect(writes[0]?.content).toBe("127.0.0.1 localhost\n192.168.1.1 host1 host2\n")
+  })
+
+  it("preserves foreign hostnames on the same IP when adding a hostname (state: present)", async () => {
+    const mockSsh = createMockSsh({
+      "cat '/etc/hosts'": { stdout: "127.0.0.1 localhost\n" },
+    })
+    const writes: Array<{ content: string; mode: string; path: string }> = []
+    mockSsh.writeFile = async (path, content, options) => {
+      writes.push({ content, mode: options.mode, path })
+      await Promise.resolve()
+    }
+
+    const mod = net.hosts("127.0.0.1", ["app.local"])
+    const result = await mod.apply(mockSsh, emptyEnv)
+
+    expect(result.status).toBe("changed")
+    expect(writes).toHaveLength(1)
+    expect(writes[0]?.content).toBe("127.0.0.1 localhost app.local\n")
+  })
+
+  it("consolidates multiple same-IP lines while preserving hostname order (state: present)", async () => {
+    const mockSsh = createMockSsh({
+      "cat '/etc/hosts'": {
+        stdout: "127.0.0.1 localhost\n10.0.0.1 api\n10.0.0.1 db api\n",
+      },
+    })
+    const writes: Array<{ content: string; mode: string; path: string }> = []
+    mockSsh.writeFile = async (path, content, options) => {
+      writes.push({ content, mode: options.mode, path })
+      await Promise.resolve()
+    }
+
+    const mod = net.hosts("10.0.0.1", ["web", "api"])
+    const result = await mod.apply(mockSsh, emptyEnv)
+
+    expect(result.status).toBe("changed")
+    expect(writes).toHaveLength(1)
+    expect(writes[0]?.content).toBe("127.0.0.1 localhost\n10.0.0.1 api db web\n")
   })
 
   // R-0000101: matching for `state: "absent"` must be tolerant of whitespace

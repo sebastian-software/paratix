@@ -169,6 +169,24 @@ describe("net.hosts — check", () => {
     expect(result).toBe("needs-apply")
   })
 
+  it("returns ok when desired and foreign hostnames are already consolidated", async () => {
+    const mockSsh = createMockSsh({
+      "cat '/etc/hosts'": { stdout: "127.0.0.1 localhost app.local\n" },
+    })
+    const mod = net.hosts("127.0.0.1", ["app.local"])
+    const result = await mod.check(mockSsh, emptyEnv)
+    expect(result).toBe("ok")
+  })
+
+  it("returns needs-apply when same-IP hostnames are split across multiple lines", async () => {
+    const mockSsh = createMockSsh({
+      "cat '/etc/hosts'": { stdout: "10.0.0.1 api\n10.0.0.1 db\n" },
+    })
+    const mod = net.hosts("10.0.0.1", ["web"])
+    const result = await mod.check(mockSsh, emptyEnv)
+    expect(result).toBe("needs-apply")
+  })
+
   it("reads /etc/hosts via cat command", async () => {
     const mockSsh = createMockSsh({
       "cat '/etc/hosts'": { stdout: "1.2.3.4 myhost\n" },

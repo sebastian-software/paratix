@@ -304,6 +304,30 @@ function hostnameSetsEqual(actual: string[], expected: string[]): boolean {
   return true
 }
 
+function mergeHostnames(existing: string[], desired: string[]): string[] {
+  const merged: string[] = []
+  const seen = new Set<string>()
+  for (const hostname of [...existing, ...desired]) {
+    if (seen.has(hostname)) continue
+    seen.add(hostname)
+    merged.push(hostname)
+  }
+  return merged
+}
+
+function buildMergedHostsLine(
+  lines: string[],
+  parameters: Pick<HostsStateParameters, "desiredHostnames" | "expectedLine" | "isSameIpLine">
+): string {
+  const existingHostnames = lines.flatMap((line) => {
+    if (!parameters.isSameIpLine(line)) return []
+    return parseHostsLine(line)?.hostnames ?? []
+  })
+  if (existingHostnames.length === 0) return parameters.expectedLine
+  const [ip] = parameters.expectedLine.split(" ")
+  return buildHostsLine(ip, mergeHostnames(existingHostnames, parameters.desiredHostnames))
+}
+
 /**
  * Generate the content of a resolv.conf file.
  *
@@ -857,6 +881,7 @@ async function applyRouteState(
 
 /** Shared parameters for the net.hosts apply/check helpers. */
 type HostsStateParameters = {
+  desiredHostnames: string[]
   expectedLine: string
   isSameIpLine: (line: string) => boolean
   matchesAbsentTarget: (line: string) => boolean
@@ -889,26 +914,25 @@ async function applyHostsPresent(
   parameters: HostsStateParameters,
   snapshot: HostsFileSnapshot
 ): Promise<ModuleResult> {
-  const { expectedLine, isSameIpLine } = parameters
+  const { isSameIpLine } = parameters
   const { content, existed, lines } = snapshot
+  const mergedLine = buildMergedHostsLine(lines, parameters)
   if (!existed) {
-    await conn.writeFile(HOSTS_FILE, `${expectedLine}\n`, { mode: HOSTS_FILE_MODE })
+    await conn.writeFile(HOSTS_FILE, `${mergedLine}\n`, { mode: HOSTS_FILE_MODE })
     return { status: "changed" }
   }
-  // The file is already canonical when there is exactly one line for
-  // this IP and it matches the desired byte sequence. Otherwise we
-  // strip every line whose first token equals `ip` and append the
-  // expected line, which collapses duplicates and replaces stale
-  // entries (e.g. `192.168.1.1 host1` -> `192.168.1.1 host2`).
+  // The file is canonical when all same-IP hostnames are consolidated
+  // into one stable line. Foreign hostnames already associated with the
+  // IP are preserved and desired hostnames are appended if missing.
   const sameIpLines = lines.filter((line) => isSameIpLine(line))
-  const alreadyCanonical = sameIpLines.length === 1 && sameIpLines[0]?.trim() === expectedLine
+  const alreadyCanonical = sameIpLines.length === 1 && sameIpLines[0]?.trim() === mergedLine
   if (alreadyCanonical) return { status: "ok" }
 
   const filtered = lines.filter((line) => !isSameIpLine(line))
   // Drop a single trailing blank introduced by `split("\n")` so we
   // do not accumulate empty lines on every replacement.
   if (filtered.length > 0 && filtered.at(-1) === "") filtered.pop()
-  filtered.push(expectedLine)
+  filtered.push(mergedLine)
   const newContent = `${filtered.join("\n")}\n`
   await guardedWriteFile(conn, {
     mode: HOSTS_FILE_MODE,
@@ -990,7 +1014,7 @@ async function checkHostsState(
   conn: SshConnection,
   parameters: HostsStateParameters
 ): Promise<"needs-apply" | "ok"> {
-  const { expectedLine, isSameIpLine, matchesAbsentTarget, state } = parameters
+  const { isSameIpLine, matchesAbsentTarget, state } = parameters
   // R-0000275: a missing /etc/hosts (fresh container/chroot) is a
   // needs-apply situation rather than a phase-level throw. The apply path
   // ensures the file exists, so check defers instead of escalating ENOENT.
@@ -1000,10 +1024,15 @@ async function checkHostsState(
 
   if (state === "present") {
     // Drift if there is more than one entry for this IP or if the
-    // single entry does not match the desired byte sequence — both
-    // would be reconciled by apply.
+    // single entry is not the stable merged representation that apply
+    // would write.
     const sameIpLines = lines.filter((line) => isSameIpLine(line))
-    if (sameIpLines.length === 1 && sameIpLines[0]?.trim() === expectedLine) return "ok"
+    if (
+      sameIpLines.length === 1 &&
+      sameIpLines[0]?.trim() === buildMergedHostsLine(lines, parameters)
+    ) {
+      return "ok"
+    }
     return NEEDS_APPLY
   }
 
@@ -1108,6 +1137,7 @@ export const net = {
           return failed(`[net.hosts: ${ip} ${hostnames.join(" ")}] SSH connection is required`)
         }
         return applyHostsState(conn, {
+          desiredHostnames: hostnames,
           expectedLine,
           isSameIpLine,
           matchesAbsentTarget,
@@ -1117,6 +1147,7 @@ export const net = {
       async check(conn: null | SshConnection): Promise<"needs-apply" | "ok"> {
         if (!conn) return NEEDS_APPLY
         return checkHostsState(conn, {
+          desiredHostnames: hostnames,
           expectedLine,
           isSameIpLine,
           matchesAbsentTarget,
