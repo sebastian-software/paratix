@@ -10,6 +10,7 @@ import {
   destinationPathWithAncestors,
   validateExtractDestination,
   validateNoSymlinkPaths,
+  validateResolvedDestinationPath,
 } from "./archiveDestinationValidation.js"
 import {
   type ArchiveMember,
@@ -209,7 +210,7 @@ async function moveExtractedContentsIntoDestination(
   // `cp -aT` treats the destination as the named target rather than placing
   // staging *inside* destination, so we copy the staging contents (via the
   // trailing `.`) merging into the existing destination tree.
-  const copyCommand = `cp -aT ${shellQuote(staging)} ${shellQuote(destination)}`
+  const copyCommand = `cp -aT --remove-destination ${shellQuote(staging)} ${shellQuote(destination)}`
   const copyResult = await conn.exec(copyCommand, EXEC_OPTS)
   if (copyResult.code !== 0) {
     return failedCommand(
@@ -383,6 +384,11 @@ async function prepareExtractDestination(
   })
   if (unsafeDestinationAncestor !== null) return unsafeDestinationAncestor
   await conn.exec(`mkdir -p ${shellQuote(validatedDestination.destination)}`, SILENT)
+  const unsafeResolvedDestination = await validateResolvedDestinationPath(conn, {
+    destination: validatedDestination.destination,
+    source: parameters.source,
+  })
+  if (unsafeResolvedDestination !== null) return unsafeResolvedDestination
   return validatedDestination
 }
 
@@ -398,6 +404,24 @@ async function validateMembersForExtraction(
     source,
   })
   return unsafeMemberPath ?? members
+}
+
+async function validateTargetsForStagingMerge(
+  conn: SshConnection,
+  parameters: { destination: string; members: ArchiveMember[]; source: string }
+): Promise<ModuleResult | null> {
+  const unsafeResolvedDestination = await validateResolvedDestinationPath(conn, {
+    destination: parameters.destination,
+    source: parameters.source,
+  })
+  if (unsafeResolvedDestination !== null) return unsafeResolvedDestination
+  return validateNoSymlinkPaths(conn, {
+    paths: [
+      ...destinationPathWithAncestors(parameters.destination),
+      ...archiveMemberPathsWithAncestors(parameters.destination, parameters.members),
+    ],
+    source: parameters.source,
+  })
 }
 
 /**
@@ -418,14 +442,20 @@ async function validateMembersForExtraction(
  * @param conn - The SSH connection.
  * @param parameters - Inputs for the staged extraction.
  * @param parameters.destination - The validated destination directory.
+ * @param parameters.members - The validated archive members.
  * @param parameters.remoteSource - The remote archive path (uploaded or original).
  * @param parameters.source - The source archive path (used for format detection).
  */
 async function extractViaStagingDirectory(
   conn: SshConnection,
-  parameters: { destination: string; remoteSource: string; source: string }
+  parameters: {
+    destination: string
+    members: ArchiveMember[]
+    remoteSource: string
+    source: string
+  }
 ): Promise<ModuleResult | null> {
-  const { destination, remoteSource, source } = parameters
+  const { destination, members, remoteSource, source } = parameters
 
   // The unsupported-format check happens before staging-dir allocation so we
   // never create (or have to clean up) a staging directory we can't use.
@@ -441,6 +471,13 @@ async function extractViaStagingDirectory(
     if (extractResult.code !== 0) {
       return failedCommand(`[archive.extract] failed to extract ${source}`, extractResult)
     }
+
+    const unsafeMergeTarget = await validateTargetsForStagingMerge(conn, {
+      destination,
+      members,
+      source,
+    })
+    if (unsafeMergeTarget !== null) return unsafeMergeTarget
 
     return await moveExtractedContentsIntoDestination(conn, staging, destination)
   } finally {
@@ -498,6 +535,7 @@ async function runExtraction(
 
   const stagedFailure = await extractViaStagingDirectory(conn, {
     destination: validatedDestination.destination,
+    members,
     remoteSource,
     source,
   })

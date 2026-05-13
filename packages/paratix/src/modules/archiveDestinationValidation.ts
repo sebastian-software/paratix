@@ -2,7 +2,7 @@ import { posix as pathPosix } from "node:path"
 
 import type { ModuleResult, SshConnection } from "../types.js"
 
-import { failed } from "../moduleFailure.js"
+import { failed, failedCommand } from "../moduleFailure.js"
 import { shellQuote } from "../ssh.js"
 import { type ArchiveMember, normalizeArchiveMemberPath } from "./archiveMemberValidation.js"
 
@@ -84,5 +84,26 @@ export async function validateNoSymlinkPaths(
   if (unsafe === undefined) return null
   return failed(
     `[archive.extract] refusing to extract ${parameters.source}: destination path ${JSON.stringify(unsafe.path)} is a symlink`
+  )
+}
+
+export async function validateResolvedDestinationPath(
+  conn: SshConnection,
+  parameters: { destination: string; source: string }
+): Promise<ModuleResult | null> {
+  const resolved = await conn.exec(
+    `readlink -f -- ${shellQuote(parameters.destination)}`,
+    EXEC_OPTS
+  )
+  if (resolved.code !== 0) {
+    return failedCommand(
+      `[archive.extract] failed to resolve destination path ${parameters.destination}`,
+      resolved
+    )
+  }
+  const resolvedPath = resolved.stdout.trim()
+  if (resolvedPath === parameters.destination) return null
+  return failed(
+    `[archive.extract] refusing to extract ${parameters.source}: destination path ${JSON.stringify(parameters.destination)} resolves to ${JSON.stringify(resolvedPath)}`
   )
 }

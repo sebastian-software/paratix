@@ -40,11 +40,12 @@ const archiveCleanupPaths = [
 // expectations.
 const archiveStageDirectory = "/opt/app/.paratix-stage.AbCdEfGh"
 const archiveStageMktempPattern = /^mktemp -d '\/opt\/app\/\.paratix-stage\.X{8}'$/v
-const archiveStageMovePattern = /^cp -aT '\/opt\/app\/\.paratix-stage\.[^']+' '\/opt\/app'$/v
+const archiveStageMovePattern =
+  /^cp -aT --remove-destination '\/opt\/app\/\.paratix-stage\.[^']+' '\/opt\/app'$/v
 const archiveStageCleanupPattern = /^rm -rf '\/opt\/app\/\.paratix-stage\.[^']+'$/v
 const archiveAlternateStageMktempPattern = /^mktemp -d '\/opt\/app-alt\/\.paratix-stage\.X{8}'$/v
 const archiveAlternateStageMovePattern =
-  /^cp -aT '\/opt\/app-alt\/\.paratix-stage\.[^']+' '\/opt\/app-alt'$/v
+  /^cp -aT --remove-destination '\/opt\/app-alt\/\.paratix-stage\.[^']+' '\/opt\/app-alt'$/v
 const archiveAlternateStageCleanupPattern = /^rm -rf '\/opt\/app-alt\/\.paratix-stage\.[^']+'$/v
 
 const archiveApplyResponseStubs: NonNullable<
@@ -55,6 +56,11 @@ const archiveApplyResponseStubs: NonNullable<
     result: { code: 0 },
   })),
   { command: `mkdir -p '${destination}'`, result: { code: 0 } },
+  { command: `readlink -f -- '${destination}'`, result: { code: 0, stdout: `${destination}\n` } },
+  {
+    command: `readlink -f -- '${alternateDestination}'`,
+    result: { code: 0, stdout: `${alternateDestination}\n` },
+  },
   { command: "mkdir -p '/var/lib/paratix/flags'", result: { code: 0 } },
   { command: archiveStageMktempPattern, result: { code: 0, stdout: archiveStageDirectory } },
   { command: archiveStageMovePattern, result: { code: 0 } },
@@ -138,6 +144,25 @@ function createOwnerChownExecTracker(mockSsh: MockSsh, originalExec: MockSsh["ex
     isTrackedCommand: (command) => command.startsWith("chown -h -- 'www-data:www-data' "),
     resultForCommand: () => ({ code: 0, stderr: "", stdout: "" }),
   })
+}
+
+function createSecondMatchingExecFailure(
+  mockSsh: MockSsh,
+  originalExec: MockSsh["exec"],
+  commandToFail: string
+): MockSsh["exec"] {
+  let matchingCalls = 0
+  return async (command, options) => {
+    if (command !== commandToFail) return originalExec(command, options)
+    matchingCalls += 1
+    mockSsh.calls.push(command)
+    mockSsh.execCalls.push({ command, options })
+    return {
+      code: matchingCalls === 2 ? 1 : 0,
+      stderr: "",
+      stdout: "",
+    }
+  }
 }
 
 function expectNoTarExtractCalls(mockSsh: MockSsh): void {
@@ -1288,6 +1313,54 @@ describe("archive.extract — apply", () => {
     expect(mockSsh.calls.some((c) => archiveStageCleanupPattern.test(c))).toBe(true)
   })
 
+  it("rejects a destination that resolves elsewhere after mkdir -p", async () => {
+    const mockSsh = createMockSsh(
+      {
+        [`tar -tvzf '${src}'`]: { code: 0, stdout: safeTarListing },
+      },
+      {
+        responseStubs: [
+          {
+            command: `readlink -f -- '${destination}'`,
+            result: { code: 0, stdout: "/tmp/attacker-target\n" },
+          },
+        ],
+      }
+    )
+
+    const mod = archive.extract(src, destination)
+    const result = await mod.apply(mockSsh, emptyEnv)
+
+    expect(result.status).toBe("failed")
+    expect(String(result.error)).toContain("destination path")
+    expect(String(result.error)).toContain("/tmp/attacker-target")
+    expectNoTarExtractCalls(mockSsh)
+  })
+
+  it("rechecks member destination symlinks immediately before staging merge", async () => {
+    const mockSsh = createMockSsh({
+      [`tar --no-same-owner --no-overwrite-dir -xzf '${src}' -C '${archiveStageDirectory}'`]: {
+        code: 0,
+      },
+      [`tar -tvzf '${src}'`]: { code: 0, stdout: safeTarListing },
+    })
+    const originalExec = mockSsh.exec.bind(mockSsh)
+    vi.spyOn(mockSsh, "exec").mockImplementation(
+      createSecondMatchingExecFailure(mockSsh, originalExec, `test ! -L '${destination}/app/file'`)
+    )
+
+    const mod = archive.extract(src, destination)
+    const result = await mod.apply(mockSsh, emptyEnv)
+
+    expect(result.status).toBe("failed")
+    expect(String(result.error)).toContain(`${destination}/app/file`)
+    expect(
+      mockSsh.calls.filter((command) => command === `test ! -L '${destination}/app/file'`)
+    ).toHaveLength(2)
+    expect(mockSsh.calls.some((c) => archiveStageMovePattern.test(c))).toBe(false)
+    expect(mockSsh.calls.some((c) => archiveStageCleanupPattern.test(c))).toBe(true)
+  })
+
   // R-0000221: per-entry `mv -f` cannot merge into a pre-existing destination
   // sub-directory; the first conflict aborts the move and the destination is
   // left in a partial state. `cp -aT staging/. destination/` recurses into
@@ -1305,9 +1378,28 @@ describe("archive.extract — apply", () => {
     const mod = archive.extract(src, destination)
     const result = await mod.apply(mockSsh, emptyEnv)
     expect(result.status).toBe("changed")
-    expect(mockSsh.calls.some((c) => c.startsWith("cp -aT "))).toBe(true)
+    expect(mockSsh.calls.some((c) => c.startsWith("cp -aT --remove-destination "))).toBe(true)
     expect(mockSsh.calls.some((c) => c.includes("find . -mindepth 1 -maxdepth 1"))).toBe(false)
     expect(mockSsh.calls.some((c) => c.includes("xargs -0 -I {} mv -f"))).toBe(false)
+  })
+
+  it("hardens the staging merge so existing destination symlinks are replaced", async () => {
+    const mockSsh = createMockSsh({
+      [`tar --no-same-owner --no-overwrite-dir -xzf '${src}' -C '${archiveStageDirectory}'`]: {
+        code: 0,
+      },
+      [`tar -tvzf '${src}'`]: { code: 0, stdout: safeTarListing },
+    })
+    vi.spyOn(mockSsh, "sha256").mockResolvedValue(archiveSha)
+    vi.spyOn(mockSsh, "writeFile").mockResolvedValue()
+
+    const mod = archive.extract(src, destination)
+    const result = await mod.apply(mockSsh, emptyEnv)
+
+    expect(result.status).toBe("changed")
+    expect(mockSsh.calls).toContain(
+      `cp -aT --remove-destination '${archiveStageDirectory}' '${destination}'`
+    )
   })
 
   // R-0000166: the owner-paths marker is now written for both upload and
