@@ -28,13 +28,6 @@ import { isRegularFileWithoutSymlink, isSymlink } from "./remoteFileChecks.js"
 
 export type { BlockOptions } from "./fileExtra.js"
 
-/**
- * Default file mode applied by {@link file.copy} when the caller does not
- * specify `options.mode`. Both `apply` and `check` use this value, so
- * subsequent runs detect mode drift even on the implicit-default path.
- */
-const FILE_COPY_DEFAULT_MODE = "0644"
-
 function splitLines(content: string): string[] {
   return content.split(/\r?\n/v)
 }
@@ -87,9 +80,6 @@ async function applyLineAppend(input: {
   remotePath: string
   ssh: SshConnection
 }): Promise<ModuleResult> {
-  // R-0000132: detect symlinks explicitly so dangling symlinks (where
-  // `[ -e path ]` is false) cannot bypass the regular-file guard and cause
-  // `cat >>` to follow the link and write through to the symlink target.
   const quotedPath = shellQuote(input.remotePath)
   if (await input.ssh.test(`[ -L ${quotedPath} ]`)) {
     return failed(`[file.line: ${input.remotePath}] path must be a regular file and not a symlink`)
@@ -98,30 +88,23 @@ async function applyLineAppend(input: {
   // R-0000108: short-circuit when the line is already present so apply does
   // not append duplicates on direct invocation (e.g. from signal targets that
   // bypass check). Mirrors the no-op return pattern from R-0000075/77/81/88.
-  const existsBeforeAppend = await input.ssh.exists(input.remotePath)
-  if (existsBeforeAppend) {
-    if (!(await isRegularFileWithoutSymlink(input.ssh, input.remotePath))) {
-      return failed(
-        `[file.line: ${input.remotePath}] path must be a regular file and not a symlink`
-      )
-    }
-    const existingContent = await input.ssh.readFile(input.remotePath)
-    if (splitLines(existingContent).includes(input.line)) return { status: "ok" }
+  if (!(await input.ssh.exists(input.remotePath))) {
+    await input.ssh.writeFile(input.remotePath, `${input.line}\n`, { mode: "0644" })
+    return { status: "changed" }
   }
-
-  // R-0000159: capture cat exit codes (ENOSPC, RO-FS, EACCES) as a
-  // failedCommand result so the caller sees a maskable failure with the
-  // captured stderr instead of an uncaught CommandError exception. Without
-  // this, partial-write or shell-environment errors could surface as a
-  // changed status while the line never made it to disk.
-  const result = await input.ssh.exec(`cat >> ${shellQuote(input.remotePath)}`, {
-    ignoreExitCode: true,
-    input: `${input.line}\n`,
-    silent: true,
+  if (!(await isRegularFileWithoutSymlink(input.ssh, input.remotePath))) {
+    return failed(`[file.line: ${input.remotePath}] path must be a regular file and not a symlink`)
+  }
+  const existingContent = await input.ssh.readFile(input.remotePath)
+  if (splitLines(existingContent).includes(input.line)) return { status: "ok" }
+  const ownership = await readOwnership(input.ssh, input.remotePath)
+  const separator = /\r?\n$/v.test(existingContent) || existingContent.length === 0 ? "" : "\n"
+  await guardedWriteFile(input.ssh, {
+    mode: normalizeMode(ownership.mode),
+    newContent: `${existingContent}${separator}${input.line}\n`,
+    originalContent: existingContent,
+    remotePath: input.remotePath,
   })
-  if (result.code !== 0) {
-    return failedCommand(`[file.line: ${input.remotePath}] cat append failed`, result)
-  }
   return { status: "changed" }
 }
 
@@ -232,14 +215,14 @@ export const file = {
    * @param localPath - Source path on the local filesystem.
    * @param options - Optional file attributes.
    * @param options.mode - Optional chmod mode string (e.g. `"0644"`). When omitted,
-   *   the file is created with the documented default {@link FILE_COPY_DEFAULT_MODE}
+   *   the file is created with the documented default `"0644"`
    *   (`"0644"`) instead of inheriting whatever default `ssh.uploadFile` happens
    *   to choose for its temp file.
    * @param options.owner - Optional chown owner string (e.g. `"www-data:www-data"`).
    * @returns A Module that copies the file to the remote host.
    */
   copy(remotePath: string, localPath: string, options?: { mode?: string; owner?: string }): Module {
-    const desiredMode = options?.mode ?? FILE_COPY_DEFAULT_MODE
+    const desiredMode = options?.mode ?? "0644"
     validateMode(desiredMode)
 
     return {

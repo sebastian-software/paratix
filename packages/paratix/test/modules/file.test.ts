@@ -1188,6 +1188,7 @@ describe("file.line — apply without options.match", () => {
     expect(result.status).toBe("failed")
     expect(result.error?.message).toContain("path must be a regular file and not a symlink")
     expect(ssh.calls).not.toContain("cat >> '/etc/config'")
+    expect(ssh.writeFileCalls).toStrictEqual([])
   })
 
   it("regression R-0000132 — apply rejects dangling symlinks before appending", async () => {
@@ -1206,100 +1207,106 @@ describe("file.line — apply without options.match", () => {
     expect(result.status).toBe("failed")
     expect(result.error?.message).toContain("path must be a regular file and not a symlink")
     expect(ssh.calls).not.toContain("cat >> '/etc/config'")
+    expect(ssh.writeFileCalls).toStrictEqual([])
   })
 
   it("regression R-0000108 — apply returns ok and does not append a duplicate when the line is already present", async () => {
-    const appendCalls: string[] = []
     const ssh = createMockSsh({
       "[ -e '/etc/config' ]": { code: 0 },
       "cat '/etc/config'": { stdout: "first-line\nmy-line\nlast-line\n" },
     })
-    const baseExec = ssh.exec
-    ssh.exec = async (command: string) => {
-      appendCalls.push(command)
-      return baseExec(command)
-    }
 
     const mod = file.line("/etc/config", "my-line")
     const result = await mod.apply(ssh, emptyEnv)
 
     expect(result.status).toBe("ok")
-    const appendIssued = appendCalls.some((command) => command === "cat >> '/etc/config'")
-    expect(appendIssued).toBe(false)
+    expect(ssh.calls).not.toContain("cat >> '/etc/config'")
+    expect(ssh.writeFileCalls).toStrictEqual([])
   })
 
   it("regression R-0000108 — second apply is a no-op once the line was appended", async () => {
     // Drive two consecutive applies against a mutable view of the remote
-    // file. After the first apply we manually flip the remote content to
-    // include "my-line" — this models the post-append filesystem state and
-    // proves that the second apply does not append a duplicate.
+    // file. The mocked write updates the content so the second apply sees
+    // the post-state and does not write a duplicate.
     const state = { content: "first-line\nlast-line\n" }
-    const appendCalls: string[] = []
     const ssh = createMockSsh()
     // eslint-disable-next-line @typescript-eslint/require-await -- Mock
     ssh.exists = async () => true
     // eslint-disable-next-line @typescript-eslint/require-await -- Mock
     ssh.readFile = async () => state.content
-    // eslint-disable-next-line @typescript-eslint/require-await -- Mock
-    ssh.exec = async (command: string) => {
-      appendCalls.push(command)
-      return { code: 0, stderr: "", stdout: "" }
+    // eslint-disable-next-line require-atomic-updates -- Test replaces the mock method before awaits.
+    ssh.writeFile = async (remotePath, content, options) => {
+      ssh.writeFileCalls.push({ content, options, remotePath })
+      state.content = content
+      await Promise.resolve()
     }
 
     const mod = file.line("/etc/config", "my-line")
     const firstResult = await mod.apply(ssh, emptyEnv)
-    // Reflect the append on the simulated remote so the second apply sees
-    // the post-state — exactly what would happen on a real remote.
-    state.content = `${state.content}my-line\n`
     const secondResult = await mod.apply(ssh, emptyEnv)
 
     expect(firstResult.status).toBe("changed")
     expect(secondResult.status).toBe("ok")
-    const appendCount = appendCalls.filter((command) => command === "cat >> '/etc/config'").length
-    expect(appendCount).toBe(1)
+    expect(ssh.calls).not.toContain("cat >> '/etc/config'")
+    expect(ssh.writeFileCalls).toHaveLength(1)
     // The remote view must contain "my-line" exactly once.
     const occurrences = state.content.match(/^my-line$/gmv)
     expect(occurrences).toStrictEqual(["my-line"])
   })
 
-  it("appends the line through stdin so secret content is not exposed in the SSH command", async () => {
+  it("writes the appended line without exposing secret content in SSH commands", async () => {
     const secretLine = "API_TOKEN=secret-token-with 'quotes' and spaces"
     const ssh = createMockSsh({
       "[ -e '/etc/config' ]": { code: 0 },
       "cat '/etc/config'": { stdout: "first-line\nlast-line\n" },
-      "cat >> '/etc/config'": { code: 0 },
     })
 
     const mod = file.line("/etc/config", secretLine)
     const result = await mod.apply(ssh, emptyEnv)
 
     expect(result.status).toBe("changed")
-    expect(ssh.execCalls).toContainEqual({
-      command: "cat >> '/etc/config'",
-      options: { ignoreExitCode: true, input: `${secretLine}\n`, silent: true },
+    expect(ssh.writeFileCalls).toContainEqual({
+      content: `first-line\nlast-line\n${secretLine}\n`,
+      options: { mode: "0644" },
+      remotePath: "/etc/config",
     })
     expect(ssh.execCalls.map((call) => call.command).join("\n")).not.toContain(secretLine)
+    expect(ssh.calls).not.toContain("cat >> '/etc/config'")
   })
 
-  // R-0000159: cat append failures (ENOSPC, RO-FS, EACCES) must surface as a
-  // failedCommand result with maskable stderr, not as an uncaught exception
-  // and not as a misleading "changed" status.
-  it("returns failed when cat >> exits non-zero (e.g. ENOSPC)", async () => {
+  it("creates a missing file with the appended line and an explicit mode", async () => {
     const ssh = createMockSsh({
-      "[ -e '/etc/config' ]": { code: 0 },
-      "cat '/etc/config'": { stdout: "first-line\n" },
-      "cat >> '/etc/config'": {
-        code: 1,
-        stderr: "cat: write error: No space left on device\n",
-      },
+      "[ -e '/etc/config' ]": { code: 1 },
     })
 
     const mod = file.line("/etc/config", "my-line")
     const result = await mod.apply(ssh, emptyEnv)
 
-    expect(result.status).toBe("failed")
-    expect(result.error?.message).toContain("[file.line: /etc/config] cat append failed")
-    expect(result.error?.message).toContain("No space left on device")
+    expect(result.status).toBe("changed")
+    expect(ssh.writeFileCalls).toStrictEqual([
+      { content: "my-line\n", options: { mode: "0644" }, remotePath: "/etc/config" },
+    ])
+    expect(ssh.calls).not.toContain("cat >> '/etc/config'")
+  })
+
+  it("detects content changes between read and append write", async () => {
+    const reads = ["first-line\n", "first-line\nrace-line\n"]
+    let readIndex = 0
+    const ssh = createMockSsh({
+      "[ -e '/etc/config' ]": { code: 0 },
+    })
+    ssh.readFile = async () => {
+      await Promise.resolve()
+      return reads[readIndex++]
+    }
+
+    const mod = file.line("/etc/config", "my-line")
+
+    await expect(mod.apply(ssh, emptyEnv)).rejects.toThrow(
+      "Concurrent modification detected on /etc/config"
+    )
+    expect(ssh.writeFileCalls).toStrictEqual([])
+    expect(ssh.calls).not.toContain("cat >> '/etc/config'")
   })
 })
 
