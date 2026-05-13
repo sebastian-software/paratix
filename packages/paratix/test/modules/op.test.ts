@@ -6,6 +6,7 @@ import { afterEach, beforeEach, describe, expect, it, type Mock, vi } from "vite
 import { resolveEnvironment } from "../../src/environment.js"
 import { mergeEnvironmentFromMeta } from "../../src/meta.js"
 import { op } from "../../src/modules/op.js"
+import { OP_OUTPUT_CAPTURE_LIMIT_BYTES } from "../../src/modules/opOutputCapture.js"
 import { setRunnerAbortSignal } from "../../src/runnerAbortSignal.js"
 import { clearRegisteredSecrets, getRegisteredSecrets } from "../../src/secretSink.js"
 
@@ -508,6 +509,64 @@ describe("op.resolve — error masking", () => {
 
     expect(result.status).toBe("failed")
     expect(result.error?.message).not.toContain("op signin")
+  })
+
+  it("bounds large op stderr while preserving the authentication hint", async () => {
+    const largeStderr = `[ERROR] You are not signed in to a 1Password account.\n${"x".repeat(
+      OP_OUTPUT_CAPTURE_LIMIT_BYTES * 2
+    )}`
+    mockSpawnWith("", 1, largeStderr)
+
+    const module_ = op.resolve({ password: "op://vault/item/password" })
+    // eslint-disable-next-line prefer-spread
+    const result = await module_.apply(null, emptyEnv)
+
+    expect(result.status).toBe("failed")
+    expect(result.error?.message).toContain("op stderr truncated")
+    expect(result.error?.message).toContain("op signin")
+    expect(result.error?.message.length).toBeLessThan(OP_OUTPUT_CAPTURE_LIMIT_BYTES + 500)
+  })
+
+  it("fails instead of returning a truncated secret when op stdout is too large", async () => {
+    const largeSecret = `secret-${"s".repeat(OP_OUTPUT_CAPTURE_LIMIT_BYTES * 2)}`
+    mockSpawnWith(`${largeSecret}\n`)
+
+    const module_ = op.resolve({ password: "op://vault/item/password" })
+    // eslint-disable-next-line prefer-spread
+    const result = await module_.apply(null, emptyEnv)
+
+    expect(result.status).toBe("failed")
+    expect(result.error?.message).toContain("refusing to return a truncated secret")
+    expect(result.error?.message).not.toContain(largeSecret.slice(0, 32))
+  })
+
+  it("masks known secret prefixes when stderr truncation cuts through a secret", async () => {
+    const resolvedValue = `boundary-secret-${"z".repeat(80)}`
+    const stderrPrelude = "failure "
+    const capturedSecretPrefixLength = 48
+    const stderrBeforeSecret = `${stderrPrelude}${"x".repeat(
+      OP_OUTPUT_CAPTURE_LIMIT_BYTES - stderrPrelude.length - capturedSecretPrefixLength
+    )}`
+    mockedSpawnFn.mockImplementationOnce(((command: string, args: readonly string[]) => {
+      trackSpawn(command, args)
+      return createMockChild(`${resolvedValue}\n`)
+    }) as never)
+    mockedSpawnFn.mockImplementationOnce(((command: string, args: readonly string[]) => {
+      trackSpawn(command, args)
+      return createMockChild("", 1, `${stderrBeforeSecret}${resolvedValue}`)
+    }) as never)
+
+    const module_ = op.resolve({
+      password: "op://vault/item/password",
+      token: "op://vault/item/one-time-password",
+    })
+    // eslint-disable-next-line prefer-spread
+    const result = await module_.apply(null, emptyEnv)
+
+    expect(result.status).toBe("failed")
+    expect(result.error?.message).toContain("op stderr truncated")
+    expect(result.error?.message).not.toContain(resolvedValue.slice(0, capturedSecretPrefixLength))
+    expect(result.error?.message).toContain("[REDACTED]")
   })
 })
 

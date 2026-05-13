@@ -8,6 +8,12 @@ import { getRunnerAbortSignal } from "../runnerAbortSignal.js"
 import { registerSecret } from "../secretSink.js"
 import { maskSecrets } from "../sshHelpers.js"
 import { generateTotpCode } from "../totp.js"
+import {
+  type BoundedOutputCapture,
+  createBoundedOutputCapture,
+  maskKnownSecretPrefixes,
+  OP_OUTPUT_CAPTURE_LIMIT_BYTES,
+} from "./opOutputCapture.js"
 
 /**
  * Default upper bound for a single `op` CLI invocation. The 1Password helper
@@ -158,7 +164,7 @@ type SpawnWithInputOptions = {
  * @returns The stdout output as a string.
  */
 /** Mutable IO state captured while a child is running. */
-type SpawnIoState = { stderr: string; stdout: string }
+type SpawnIoState = { stderr: BoundedOutputCapture; stdout: BoundedOutputCapture }
 
 /** Initial no-op detach used until {@link attachSpawnLifecycle} replaces it. */
 const NOOP_DETACH = (): void => {
@@ -185,21 +191,32 @@ function attachSpawnIoHandlers(parameters: {
 }): void {
   const { child, command, io, rejectOnce, resolveOnce } = parameters
   child.stdout?.on("data", (chunk: Buffer) => {
-    io.stdout += chunk.toString()
+    io.stdout.append(chunk)
   })
   child.stderr?.on("data", (chunk: Buffer) => {
-    io.stderr += chunk.toString()
+    io.stderr.append(chunk)
   })
   child.on("error", (error) => {
     rejectOnce(describeSpawnError(command, error))
   })
   child.on("close", (code) => {
     if (code === 0) {
-      resolveOnce(io.stdout)
+      if (io.stdout.exceededLimit()) {
+        rejectOnce(
+          new Error(
+            `${command} stdout exceeded ${String(
+              OP_OUTPUT_CAPTURE_LIMIT_BYTES
+            )} bytes; refusing to return a truncated secret`
+          )
+        )
+        return
+      }
+      resolveOnce(io.stdout.text())
       return
     }
-    const hint = isAuthFailure(io.stderr) ? ` ${OP_SIGNIN_HINT}` : ""
-    rejectOnce(new Error(`${command} exited with code ${String(code)}: ${io.stderr}${hint}`))
+    const stderr = io.stderr.text()
+    const hint = isAuthFailure(stderr) ? ` ${OP_SIGNIN_HINT}` : ""
+    rejectOnce(new Error(`${command} exited with code ${String(code)}: ${stderr}${hint}`))
   })
   child.stdin?.once("error", (error) => {
     rejectOnce(describeSpawnError(command, error))
@@ -221,7 +238,10 @@ async function spawnWithInput(
       stdio: ["pipe", "pipe", "pipe"],
     })
     let settled = false
-    const io: SpawnIoState = { stderr: "", stdout: "" }
+    const io: SpawnIoState = {
+      stderr: createBoundedOutputCapture("stderr"),
+      stdout: createBoundedOutputCapture("stdout"),
+    }
     let detachLifecycle: () => void = NOOP_DETACH
     const rejectOnce = (error: Error): void => {
       if (settled) return
@@ -432,7 +452,7 @@ export const op = {
         } catch (error) {
           const rawDetail = buildOpFailureDetail(error)
           const secrets = [...Object.values(references), ...leakedValues]
-          const detail = maskSecrets(rawDetail, secrets)
+          const detail = maskKnownSecretPrefixes(maskSecrets(rawDetail, secrets), secrets)
           // Register the leaked values for the duration of the run so the
           // shared stderr renderers redact them if the failure bubbles up
           // through unrelated catch sites.
