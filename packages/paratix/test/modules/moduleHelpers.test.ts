@@ -9,6 +9,7 @@ import {
   withMutexLock,
 } from "../../src/modules/moduleHelpers.js"
 import { createMockSsh as createBaseMockSsh } from "../helpers/mockSsh.js"
+import { isFlagLockInternalSuccessCommand } from "../helpers/mockSshFlagLock.js"
 
 const createMockSsh: typeof createBaseMockSsh = (responses, options) =>
   createBaseMockSsh(responses, options)
@@ -77,12 +78,14 @@ function createSharedFlagMockSsh(flagName: string): ReturnType<typeof createMock
         }
         return { code: 0, stderr: "", stdout: "" }
       }
-      return { code: 0, stderr: "", stdout: "" }
+      if (isFlagLockInternalSuccessCommand(command)) return { code: 0, stderr: "", stdout: "" }
+      throw new Error(`unexpected shared flag lock exec command: ${command}`)
     },
     async test(command) {
       await Promise.resolve()
       base.calls.push(command)
-      return command === flagTestCommand && flagExists
+      if (command === flagTestCommand) return flagExists
+      throw new Error(`unexpected shared flag lock test command: ${command}`)
     },
   }
 }
@@ -199,6 +202,14 @@ describe("setFlag – rejects path-traversal-like names", () => {
 })
 
 describe("applyWithFlagLock", () => {
+  it("shared flag lock mock rejects unexpected exec commands", async () => {
+    const ssh = createSharedFlagMockSsh("parallel-apply")
+
+    await expect(ssh.exec("echo unexpected")).rejects.toThrow(
+      "unexpected shared flag lock exec command: echo unexpected"
+    )
+  })
+
   it("skips apply when a direct apply call finds an existing flag", async () => {
     const flagName = "apply-once"
     const ssh = createMockSsh({
@@ -344,7 +355,8 @@ function createStaleLockSsh(
         return { code: 1, stderr: "", stdout: "" }
       }
       case LOCK_COMMAND_KIND.other: {
-        return { code: 0, stderr: "", stdout: "" }
+        if (isFlagLockInternalSuccessCommand(command)) return { code: 0, stderr: "", stdout: "" }
+        throw new Error(`unexpected stale flag lock command: ${command}`)
       }
       case LOCK_COMMAND_KIND.staleReclaim: {
         return handleStaleReclaim()
@@ -368,7 +380,8 @@ function createStaleLockSsh(
       await Promise.resolve()
       base.calls.push(command)
       const isFlagTest = classifyLockCommand(command, flagName) === "flag-test"
-      return isFlagTest && state.flagExists
+      if (isFlagTest) return state.flagExists
+      throw new Error(`unexpected stale flag lock test command: ${command}`)
     },
   }
 
@@ -376,6 +389,14 @@ function createStaleLockSsh(
 }
 
 describe("applyWithFlagLock – stale lock recovery", () => {
+  it("stale lock mock rejects unexpected exec commands", async () => {
+    const { ssh } = createStaleLockSsh("stale-lock-flag", "stale")
+
+    await expect(ssh.exec("echo unexpected")).rejects.toThrow(
+      "unexpected stale flag lock command: echo unexpected"
+    )
+  })
+
   it("returns the flag directory creation failure without entering the contention loop", async () => {
     const flagName = "lock-dir-failure"
     const ssh = createMockSsh({
@@ -574,12 +595,21 @@ function createSharedMutexMockSsh(lockName: string): ReturnType<typeof createMoc
         }
         return { code: 0, stderr: "", stdout: "" }
       }
-      return { code: 0, stderr: "", stdout: "" }
+      if (isFlagLockInternalSuccessCommand(command)) return { code: 0, stderr: "", stdout: "" }
+      throw new Error(`unexpected shared mutex exec command: ${command}`)
     },
   }
 }
 
 describe("withMutexLock", () => {
+  it("shared mutex mock rejects unexpected exec commands", async () => {
+    const ssh = createSharedMutexMockSsh("etc-hosts-mutex")
+
+    await expect(ssh.exec("echo unexpected")).rejects.toThrow(
+      "unexpected shared mutex exec command: echo unexpected"
+    )
+  })
+
   it("throws the flag directory creation failure without entering the contention loop", async () => {
     const lockName = "mutex-dir-failure"
     const ssh = createMockSsh({
