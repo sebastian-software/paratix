@@ -916,18 +916,32 @@ export const download = {
       headers.Accept = "application/octet-stream"
     }
 
-    const { group, mode, owner, sha256 } = options
+    const { allowUnverifiedDownload, group, mode, owner, sha256 } = options
     const downloadParameters: DownloadParameters = {
-      ...buildDownloadParameters(destination, { group, headers, mode, owner, sha256 }, url),
+      ...buildDownloadParameters(
+        destination,
+        { allowUnverifiedDownload, group, headers, mode, owner, sha256 },
+        url
+      ),
       secrets: options.token == null ? undefined : [options.token, ...extractUrlSecrets(url)],
     }
+    const usesUnverifiedHashMarker = sha256 == null && options.allowUnverifiedDownload === true
 
     return {
       async apply(conn: null | SshConnection): Promise<ModuleResult> {
-        return performDownload(conn, downloadParameters)
+        const result = await performDownload(conn, downloadParameters)
+        if (result.status !== "changed") return result
+        if (!usesUnverifiedHashMarker || !conn) return result
+        await writeUnverifiedHashMarker(conn, destination)
+        return result
       },
       async check(conn: null | SshConnection): Promise<"needs-apply" | "ok"> {
-        return checkDownload(conn, destination, options)
+        const baseResult = await checkDownload(conn, destination, options)
+        if (baseResult === NEEDS_APPLY) return baseResult
+        if (!usesUnverifiedHashMarker || !conn) return baseResult
+        return (await compareUnverifiedHashMarker(conn, destination)) === "match"
+          ? "ok"
+          : NEEDS_APPLY
       },
       name: `download.github: ${options.repo}@${options.tag}/${options.asset}`,
     }

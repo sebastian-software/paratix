@@ -1330,13 +1330,41 @@ describe("download.github", () => {
   const sha256 = "cafecafecafecafecafecafecafecafecafecafecafecafecafecafecafecafe"
 
   describe("check", () => {
-    it("returns ok when file exists (no sha256)", async () => {
+    it("returns needs-apply when marker file is missing (no sha256)", async () => {
       const mockSsh = createMockSsh({
+        [`[ -f '${destination}.sha256' ]`]: { code: 1 },
         [`[ -f '${destination}' ]`]: { code: 0 },
       })
       const mod = download.github(destination, { ...allowUnverifiedDownload, asset, repo, tag })
       const result = await mod.check(mockSsh, emptyEnv)
+      expect(result).toBe("needs-apply")
+    })
+
+    it("returns ok when file and marker hash match (no sha256)", async () => {
+      const recordedHash = "aabbccddaabbccddaabbccddaabbccddaabbccddaabbccddaabbccddaabbccdd"
+      const mockSsh = createMockSsh({
+        [`[ -f '${destination}.sha256' ]`]: { code: 0 },
+        [`[ -f '${destination}' ]`]: { code: 0 },
+        [`cat '${destination}.sha256'`]: { stdout: `${recordedHash}\n` },
+        [`sha256sum '${destination}'`]: { stdout: `${recordedHash}  ${destination}` },
+      })
+      const mod = download.github(destination, { ...allowUnverifiedDownload, asset, repo, tag })
+      const result = await mod.check(mockSsh, emptyEnv)
       expect(result).toBe("ok")
+    })
+
+    it("returns needs-apply when marker hash differs from current file hash (no sha256)", async () => {
+      const recordedHash = "aabbccddaabbccddaabbccddaabbccddaabbccddaabbccddaabbccddaabbccdd"
+      const tamperedHash = "1111111111111111111111111111111111111111111111111111111111111111"
+      const mockSsh = createMockSsh({
+        [`[ -f '${destination}.sha256' ]`]: { code: 0 },
+        [`[ -f '${destination}' ]`]: { code: 0 },
+        [`cat '${destination}.sha256'`]: { stdout: `${recordedHash}\n` },
+        [`sha256sum '${destination}'`]: { stdout: `${tamperedHash}  ${destination}` },
+      })
+      const mod = download.github(destination, { ...allowUnverifiedDownload, asset, repo, tag })
+      const result = await mod.check(mockSsh, emptyEnv)
+      expect(result).toBe("needs-apply")
     })
 
     it("returns needs-apply when file path is a symlink to a regular file", async () => {
@@ -1485,6 +1513,27 @@ describe("download.github", () => {
       expect(curlCall).toBeDefined()
       expect(curlCall?.command).not.toContain("Authorization")
       expect(curlCall?.options?.input).not.toContain("Authorization")
+    })
+
+    it("writes the unverified hash marker through writeFile", async () => {
+      const recordedHash = "aabbccddaabbccddaabbccddaabbccddaabbccddaabbccddaabbccddaabbccdd"
+      const mockSsh = createMockSsh({
+        [`[ -f '${destination}' ]`]: { code: 0 },
+        [`[ -L '${destination}.sha256' ]`]: { code: 1 },
+        ...downloadMktempStub(destination, temporaryDestination),
+        [`sha256sum '${destination}'`]: { stdout: `${recordedHash}  ${destination}` },
+      })
+      const mod = download.github(destination, { ...allowUnverifiedDownload, asset, repo, tag })
+      const result = await mod.apply(mockSsh, emptyEnv)
+
+      expect(result.status).toBe("changed")
+      expect(mockSsh.writeFileCalls).toStrictEqual([
+        {
+          content: `${recordedHash}\n`,
+          options: { mode: "0644" },
+          remotePath: `${destination}.sha256`,
+        },
+      ])
     })
 
     it("returns failed when ssh is null", async () => {
