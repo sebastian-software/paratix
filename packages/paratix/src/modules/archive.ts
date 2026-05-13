@@ -269,18 +269,29 @@ async function resolveRemoteSource(
  * @param remoteSource - The remote archive path.
  * @param options - Marker path.
  * @param options.marker - The marker file path.
- * @returns True if the marker was written successfully.
+ * @returns Null when the marker was written, otherwise a structured failure.
  */
 async function writeMarker(
   conn: SshConnection,
   remoteSource: string,
   options: { marker: string }
-): Promise<boolean> {
+): Promise<ModuleResult | null> {
   const sha = await conn.sha256(remoteSource)
-  if (sha === null) return false
-  await conn.exec(`mkdir -p ${shellQuote(FLAGS_DIR)}`, SILENT)
-  await conn.writeFile(options.marker, sha, { mode: ARCHIVE_MARKER_MODE })
-  return true
+  if (sha === null) return failed(`[archive.extract] failed to calculate marker hash`)
+  const flagsDirectory = await conn.exec(`mkdir -p ${shellQuote(FLAGS_DIR)}`, EXEC_OPTS)
+  if (flagsDirectory.code !== 0) {
+    return failedCommand(
+      `[archive.extract] failed to create archive marker directory`,
+      flagsDirectory
+    )
+  }
+  try {
+    await conn.writeFile(options.marker, sha, { mode: ARCHIVE_MARKER_MODE })
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : String(error)
+    return failed(`[archive.extract] failed to write archive marker ${options.marker}: ${reason}`)
+  }
+  return null
 }
 
 /** Parameters for the apply helper. */
@@ -365,8 +376,8 @@ async function writeOwnerPathsMarker(
     owner?: string
     upload: boolean
   }
-): Promise<void> {
-  if (parameters.owner == null || parameters.owner === "") return
+): Promise<ModuleResult | null> {
+  if (parameters.owner == null || parameters.owner === "") return null
   // R-0000166: persist the member list in *both* upload and non-upload mode.
   // The previous implementation only stored the list when `upload === true`
   // and re-derived it from the live archive (`tar -tvzf <source>`) in the
@@ -377,9 +388,16 @@ async function writeOwnerPathsMarker(
   // file list. Writing the marker on every successful apply ties the owner
   // re-check to the same paths the extract actually touched.
   const paths = archiveMemberDestinationPaths(parameters.destination, parameters.members)
-  await conn.writeFile(ownerPathsMarkerPath(parameters.marker), JSON.stringify(paths), {
-    mode: ARCHIVE_MARKER_MODE,
-  })
+  const marker = ownerPathsMarkerPath(parameters.marker)
+  try {
+    await conn.writeFile(marker, JSON.stringify(paths), {
+      mode: ARCHIVE_MARKER_MODE,
+    })
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : String(error)
+    return failed(`[archive.extract] failed to write archive owner marker ${marker}: ${reason}`)
+  }
+  return null
 }
 
 function extractedArchiveMembers(
@@ -400,12 +418,19 @@ function extractedArchiveMembers(
 async function writeMembersMarker(
   conn: SshConnection,
   parameters: { destination: string; marker: string; members: ArchiveMember[] }
-): Promise<void> {
-  await conn.writeFile(
-    membersMarkerPath(parameters.marker),
-    JSON.stringify(extractedArchiveMembers(parameters.destination, parameters.members)),
-    { mode: ARCHIVE_MARKER_MODE }
-  )
+): Promise<ModuleResult | null> {
+  const marker = membersMarkerPath(parameters.marker)
+  try {
+    await conn.writeFile(
+      marker,
+      JSON.stringify(extractedArchiveMembers(parameters.destination, parameters.members)),
+      { mode: ARCHIVE_MARKER_MODE }
+    )
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : String(error)
+    return failed(`[archive.extract] failed to write archive members marker ${marker}: ${reason}`)
+  }
+  return null
 }
 
 async function prepareExtractDestination(
@@ -535,16 +560,18 @@ async function finalizeExtraction(
   })
   if (ownerFailure !== null) return ownerFailure
 
-  const markerWritten = await writeMarker(conn, remoteSource, { marker })
-  if (!markerWritten) return failed(`[archive.extract] failed to write marker for ${source}`)
-  await writeMembersMarker(conn, { destination, marker, members })
-  await writeOwnerPathsMarker(conn, {
+  const markerFailure = await writeMarker(conn, remoteSource, { marker })
+  if (markerFailure !== null) return markerFailure
+  const membersMarkerFailure = await writeMembersMarker(conn, { destination, marker, members })
+  if (membersMarkerFailure !== null) return membersMarkerFailure
+  const ownerPathsMarkerFailure = await writeOwnerPathsMarker(conn, {
     destination,
     marker,
     members,
     owner,
     upload: parameters.upload,
   })
+  if (ownerPathsMarkerFailure !== null) return ownerPathsMarkerFailure
   return { status: "changed" }
 }
 

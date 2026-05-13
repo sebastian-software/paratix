@@ -1091,6 +1091,94 @@ describe("archive.extract — apply", () => {
     expect(result.status).toBe("failed")
   })
 
+  it("returns failed when the archive marker directory cannot be created", async () => {
+    const mockSsh = createMockSsh(
+      {
+        [`tar --no-same-owner --no-overwrite-dir -xzf '${src}' -C '${archiveStageDirectory}'`]: {
+          code: 0,
+        },
+        [`tar -tvzf '${src}'`]: { code: 0, stdout: safeTarListing },
+      },
+      {
+        responseStubs: [
+          {
+            command: "mkdir -p '/var/lib/paratix/flags'",
+            result: { code: 1, stderr: "mkdir: permission denied" },
+          },
+        ],
+      }
+    )
+    vi.spyOn(mockSsh, "sha256").mockResolvedValue(archiveSha)
+    vi.spyOn(mockSsh, "writeFile").mockResolvedValue()
+
+    const mod = archive.extract(src, destination)
+    const result = await mod.apply(mockSsh, emptyEnv)
+
+    expect(result.status).toBe("failed")
+    expect(String(result.error)).toContain("failed to create archive marker directory")
+    expect(mockSsh.writeFile).not.toHaveBeenCalled()
+  })
+
+  it("returns failed when writing the archive content marker fails", async () => {
+    const mockSsh = createMockSsh({
+      [`tar --no-same-owner --no-overwrite-dir -xzf '${src}' -C '${archiveStageDirectory}'`]: {
+        code: 0,
+      },
+      [`tar -tvzf '${src}'`]: { code: 0, stdout: safeTarListing },
+    })
+    vi.spyOn(mockSsh, "sha256").mockResolvedValue(archiveSha)
+    vi.spyOn(mockSsh, "writeFile").mockRejectedValueOnce(new Error("disk full"))
+
+    const mod = archive.extract(src, destination)
+    const result = await mod.apply(mockSsh, emptyEnv)
+
+    expect(result.status).toBe("failed")
+    expect(String(result.error)).toContain("failed to write archive marker")
+    expect(String(result.error)).toContain("disk full")
+  })
+
+  it("returns failed when writing the extracted members marker fails", async () => {
+    const mockSsh = createMockSsh({
+      [`tar --no-same-owner --no-overwrite-dir -xzf '${src}' -C '${archiveStageDirectory}'`]: {
+        code: 0,
+      },
+      [`tar -tvzf '${src}'`]: { code: 0, stdout: safeTarListing },
+    })
+    vi.spyOn(mockSsh, "sha256").mockResolvedValue(archiveSha)
+    vi.spyOn(mockSsh, "writeFile")
+      .mockResolvedValueOnce()
+      .mockRejectedValueOnce(new Error("quota exceeded"))
+
+    const mod = archive.extract(src, destination)
+    const result = await mod.apply(mockSsh, emptyEnv)
+
+    expect(result.status).toBe("failed")
+    expect(String(result.error)).toContain("failed to write archive members marker")
+    expect(String(result.error)).toContain("quota exceeded")
+  })
+
+  it("returns failed when writing the owner paths marker fails", async () => {
+    const mockSsh = createMockSsh({
+      [`chown -h -- 'www-data:www-data' '${destination}/app/file'`]: { code: 0 },
+      [`tar --no-same-owner --no-overwrite-dir -xzf '${src}' -C '${archiveStageDirectory}'`]: {
+        code: 0,
+      },
+      [`tar -tvzf '${src}'`]: { code: 0, stdout: safeTarListing },
+    })
+    vi.spyOn(mockSsh, "sha256").mockResolvedValue(archiveSha)
+    vi.spyOn(mockSsh, "writeFile")
+      .mockResolvedValueOnce()
+      .mockResolvedValueOnce()
+      .mockRejectedValueOnce(new Error("read-only file system"))
+
+    const mod = archive.extract(src, destination, { owner: "www-data:www-data" })
+    const result = await mod.apply(mockSsh, emptyEnv)
+
+    expect(result.status).toBe("failed")
+    expect(String(result.error)).toContain("failed to write archive owner marker")
+    expect(String(result.error)).toContain("read-only file system")
+  })
+
   // R-0000067 regression: archive.extract must list members and reject any
   // path that escapes the destination via `..` or absolute paths, before
   // running the actual extract command. This prevents zip-slip / tar-slip
