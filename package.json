@@ -36,7 +36,10 @@
       "cpu-features",
       "esbuild",
       "ssh2"
-    ]
+    ],
+    "overrides": {
+      "vite": "7.3.3"
+    }
   },
   "devDependencies": {
     "@cspell/dict-de-de": "^4.1.2",
