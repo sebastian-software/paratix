@@ -110,6 +110,10 @@ describe("service.enabled", () => {
     const mod = service.enabled("nginx")
     const result = await mod.apply(ssh, emptyEnv)
     expect(result.status).toBe("changed")
+    expect(ssh.calls).toStrictEqual([
+      "systemctl is-enabled --quiet -- 'nginx'",
+      "systemctl enable -- 'nginx'",
+    ])
   })
 
   it("apply returns ok without enabling when the service is already enabled", async () => {
@@ -149,6 +153,10 @@ describe("service.running apply", () => {
     const mod = service.running("nginx")
     const result = await mod.apply(ssh, emptyEnv)
     expect(result.status).toBe("changed")
+    expect(ssh.calls).toStrictEqual([
+      "systemctl is-active --quiet -- 'nginx'",
+      "systemctl start -- 'nginx'",
+    ])
   })
 
   it("apply returns ok without starting when the service is already active", async () => {
@@ -212,6 +220,10 @@ describe("service.stopped", () => {
     const mod = service.stopped("nginx")
     const result = await mod.apply(ssh, emptyEnv)
     expect(result.status).toBe("changed")
+    expect(ssh.calls).toStrictEqual([
+      "systemctl is-active --quiet -- 'nginx'",
+      "systemctl stop -- 'nginx'",
+    ])
   })
 
   it("apply returns ok without stopping when the service is already inactive", async () => {
@@ -275,6 +287,10 @@ describe("service.disabled", () => {
     const mod = service.disabled("nginx")
     const result = await mod.apply(ssh, emptyEnv)
     expect(result.status).toBe("changed")
+    expect(ssh.calls).toStrictEqual([
+      "systemctl is-enabled --quiet -- 'nginx'",
+      "systemctl disable -- 'nginx'",
+    ])
   })
 
   it("apply returns ok without disabling when the service is already disabled", async () => {
@@ -319,6 +335,7 @@ describe("service.restart", () => {
     const mod = service.restart("nginx")
     const result = await mod.apply(ssh, emptyEnv)
     expect(result.status).toBe("changed")
+    expect(ssh.calls).toStrictEqual(["systemctl restart -- 'nginx'"])
   })
 
   it("apply returns failed when systemctl restart exits with non-zero code", async () => {
@@ -352,6 +369,7 @@ describe("service.reload", () => {
     const mod = service.reload("nginx")
     const result = await mod.apply(ssh, emptyEnv)
     expect(result.status).toBe("changed")
+    expect(ssh.calls).toStrictEqual(["systemctl reload -- 'nginx'"])
   })
 
   it("apply returns failed when systemctl reload exits with non-zero code", async () => {
