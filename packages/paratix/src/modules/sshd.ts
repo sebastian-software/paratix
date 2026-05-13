@@ -20,7 +20,7 @@ import {
   findNonMatchingEffectiveSshdSetting,
   sshdSettingMatchesEverywhere,
 } from "./sshdConfigHelpers.js"
-import { classifyUfwAccess } from "./ufwStatus.js"
+import { classifyUfwAccessOrUnknown } from "./ufwStatus.js"
 
 const DEFAULT_SSH_PORT = 22
 const PRIVILEGE_SEPARATION_DIRECTORY = "/run/sshd"
@@ -680,12 +680,20 @@ function ufwBlocksPortFailure(targetPort: number): ModuleResult {
   )
 }
 
+function unknownUfwStatusFailure(targetPort: number): ModuleResult {
+  return failed(
+    `[sshd.port: ${String(targetPort)}] could not determine ufw status; verify the firewall ` +
+      `state or add 'ufw.rule("allow", ${String(targetPort)})' before sshd.port to avoid lockout`
+  )
+}
+
 async function rejectWhenUfwBlocksTargetPort(
   ssh: SshConnection,
   targetPort: number
 ): Promise<ModuleResult | undefined> {
-  const access = await classifyUfwAccess(ssh, targetPort)
+  const access = await classifyUfwAccessOrUnknown(ssh, targetPort)
   if (access === "blocked") return ufwBlocksPortFailure(targetPort)
+  if (access === "unknown") return unknownUfwStatusFailure(targetPort)
   return undefined
 }
 

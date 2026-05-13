@@ -13,6 +13,8 @@ const createMockSsh: typeof createBaseMockSsh = (responses, options) => {
       ...(options?.allowWrites ?? []),
     ],
     responseStubs: [
+      ...(options?.responseStubs ?? []),
+      { command: "ufw status", result: { stdout: "Status: inactive" } },
       { command: "mkdir -p '/run/sshd'", result: { code: 0 } },
       { command: "sshd -t", result: { code: 0 } },
       { command: SYSTEMCTL_CAT_SSHD, result: { code: 0 } },
@@ -28,7 +30,6 @@ const createMockSsh: typeof createBaseMockSsh = (responses, options) => {
       { command: "systemctl enable --now ssh.socket", result: { code: 0 } },
       { command: "systemctl restart sshd", result: { code: 0 } },
       { command: /^rm -f '\/tmp\/paratix-sshd-dry-run-.+\.conf'$/v, result: { code: 0 } },
-      ...(options?.responseStubs ?? []),
     ],
   })
   vi.spyOn(ssh, "getConnectionInfo").mockReturnValue({

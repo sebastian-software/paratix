@@ -187,6 +187,28 @@ describe("sshd.port — apply: ufw lockout guard", () => {
     expect(execCommands).not.toContain("sshd -t")
   })
 
+  it("fails-closed when ufw status cannot be read", async () => {
+    const ssh = createMockSsh({
+      [CAT_SSHD]: { stdout: "Port 22\n" },
+      "ufw status": { code: 1, stderr: "ERROR: problem running ufw" },
+    })
+    const writtenFiles = trackWriteFile(ssh)
+    const execSpy = vi.spyOn(ssh, "exec")
+    const addPortSpy = vi.spyOn(ssh, "addPort")
+
+    const mod = sshd.port(2222)
+    const result = await mod.apply(ssh, emptyEnv)
+
+    expect(result.status).toBe("failed")
+    expect(result.error?.message).toContain("could not determine ufw status")
+    expect(writtenFiles).toHaveLength(0)
+    expect(addPortSpy).not.toHaveBeenCalled()
+    const execCommands = execSpy.mock.calls.map((args) => args[0])
+    expect(execCommands).not.toContain("systemctl restart sshd")
+    expect(execCommands).not.toContain("sshd -t")
+    expect(execCommands.every((command) => !command.startsWith("sshd -t -f "))).toBe(true)
+  })
+
   it("fails-closed when ufw is active, IPv6 rules are reported, but only IPv4 allows the target port", async () => {
     const ssh = createMockSsh({
       [CAT_SSHD]: { stdout: "Port 22\n" },
@@ -373,6 +395,28 @@ describe("sshd.port — dry-run: ufw lockout guard", () => {
     expect(result?.error?.message).toContain("ufw is active")
     expect(writtenFiles).toHaveLength(0)
     const execCommands = execSpy.mock.calls.map((args) => args[0])
+    expect(execCommands.every((command) => !command.startsWith("sshd -t -f "))).toBe(true)
+  })
+
+  it("fails-closed during dry-run when ufw status cannot be read", async () => {
+    const ssh = createMockSsh({
+      [CAT_SSHD]: { stdout: "Port 22\n" },
+      "ufw status": { code: 1, stderr: "ERROR: problem running ufw" },
+    })
+    const writtenFiles = trackWriteFile(ssh)
+    const execSpy = vi.spyOn(ssh, "exec")
+    const addPortSpy = vi.spyOn(ssh, "addPort")
+
+    const mod = sshd.port(2222)
+    const result = await mod._applyDryRun?.(ssh, emptyEnv)
+
+    expect(result?.status).toBe("failed")
+    expect(result?.error?.message).toContain("could not determine ufw status")
+    expect(writtenFiles).toHaveLength(0)
+    expect(addPortSpy).not.toHaveBeenCalled()
+    const execCommands = execSpy.mock.calls.map((args) => args[0])
+    expect(execCommands).not.toContain("systemctl restart sshd")
+    expect(execCommands).not.toContain("sshd -t")
     expect(execCommands.every((command) => !command.startsWith("sshd -t -f "))).toBe(true)
   })
 })

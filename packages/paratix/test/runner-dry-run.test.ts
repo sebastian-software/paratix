@@ -558,6 +558,7 @@ describe("runPlaybook dry-run recipe behaviour", () => {
           privateKeyPath: "~/.ssh/id",
           user: "root",
         }),
+        output: vi.fn().mockResolvedValue("Status: inactive"),
         readFile: vi.fn().mockResolvedValue("Port 22\n"),
         reconnect,
         writeFile: vi.fn().mockResolvedValue(null),

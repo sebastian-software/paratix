@@ -14,6 +14,8 @@ const createMockSsh: typeof createBaseMockSsh = (responses, options) => {
       ...(options?.allowWrites ?? []),
     ],
     responseStubs: [
+      ...(options?.responseStubs ?? []),
+      { command: "ufw status", result: { stdout: "Status: inactive" } },
       { command: "mkdir -p '/run/sshd'", result: { code: 0 } },
       { command: "sshd -t", result: { code: 0 } },
       { command: SYSTEMCTL_CAT_SSHD, result: { code: 0 } },
@@ -36,7 +38,6 @@ const createMockSsh: typeof createBaseMockSsh = (responses, options) => {
         command: /^ss -H -ltnp 'sport = :\d+'$/v,
         result: { code: 0, stdout: 'LISTEN 0 128 0.0.0.0:2222 users:(("sshd",pid=1,fd=3))\n' },
       },
-      ...(options?.responseStubs ?? []),
     ],
   })
   vi.spyOn(ssh, "getConnectionInfo").mockReturnValue({

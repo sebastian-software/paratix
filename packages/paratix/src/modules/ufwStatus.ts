@@ -118,6 +118,7 @@ export async function readUfwStatus(ssh: SshConnection): Promise<null | string> 
 }
 
 type UfwAccess = "allowed" | "blocked" | "inactive"
+type UfwAccessProbe = "unknown" | UfwAccess
 
 function hasTcpRelevantDenyRule(status: string, targetPort: number): boolean {
   const ipv6Rules = statusIncludesIpv6Rules(status)
@@ -181,5 +182,24 @@ export async function classifyUfwAccess(
 ): Promise<"allowed" | "blocked" | "inactive"> {
   const status = await readUfwStatus(ssh)
   if (status == null) return "inactive"
+  return classifyUfwStatusTcpAccess(status, targetPort)
+}
+
+/**
+ * Decide whether the live UFW configuration would let traffic reach
+ * `targetPort`, preserving an unreadable status as `"unknown"` for callers
+ * that must fail closed instead of treating it like an inactive firewall.
+ *
+ * @param ssh - The remote SSH connection.
+ * @param targetPort - The port whose reachability should be classified.
+ * @returns The current access classification for `targetPort`, or
+ *   `"unknown"` when `ufw status` cannot be read.
+ */
+export async function classifyUfwAccessOrUnknown(
+  ssh: SshConnection,
+  targetPort: number
+): Promise<UfwAccessProbe> {
+  const status = await readUfwStatus(ssh)
+  if (status == null) return "unknown"
   return classifyUfwStatusTcpAccess(status, targetPort)
 }
