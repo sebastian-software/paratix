@@ -440,22 +440,35 @@ export const cron = {
       async apply(ssh: null | SshConnection): Promise<ModuleResult> {
         if (!ssh) return failed(`[cron.absent: ${name} (${user})] SSH connection is required`)
 
-        const readResult = await readCrontab(ssh, user)
-        // R-0000272: surface crontab-read failures as a structured
-        // failedCommand result instead of throwing — the runner can then
-        // render masked stdout/stderr through CommandError like every
-        // other apply failure path.
-        if (readResult.kind === "error") {
-          return failedCommand(
-            `[cron.absent: ${name} (${user})] crontab read failed`,
-            readResult.result
+        try {
+          return await withMutexLock(ssh, {
+            lockName: crontabMutexLockName(user),
+            async section() {
+              const readResult = await readCrontab(ssh, user)
+              // R-0000272: surface crontab-read failures as a structured
+              // failedCommand result instead of throwing — the runner can then
+              // render masked stdout/stderr through CommandError like every
+              // other apply failure path.
+              if (readResult.kind === "error") {
+                return failedCommand(
+                  `[cron.absent: ${name} (${user})] crontab read failed`,
+                  readResult.result
+                )
+              }
+              const lines = readResult.lines
+              const markerIndex = findMarkerIndex(lines, name)
+              if (markerIndex === -1) return { status: "ok" }
+
+              return applyCronAbsentMutation({ lines, markerIndex, name, ssh, user })
+            },
+          })
+        } catch (error) {
+          return failed(
+            `[cron.absent: ${name} (${user})] aborted: ${
+              error instanceof Error ? error.message : String(error)
+            }`
           )
         }
-        const lines = readResult.lines
-        const markerIndex = findMarkerIndex(lines, name)
-        if (markerIndex === -1) return { status: "ok" }
-
-        return applyCronAbsentMutation({ lines, markerIndex, name, ssh, user })
       },
 
       async check(ssh: null | SshConnection): Promise<"needs-apply" | "ok"> {

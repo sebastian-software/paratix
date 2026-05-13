@@ -47,6 +47,29 @@ function findCrontabWriteInput(mockSsh: MockSsh): string | undefined {
   return findCrontabWriteCall(mockSsh)?.options?.input
 }
 
+async function waitForCrontabWriteContaining(mockSsh: MockSsh, text: string): Promise<boolean> {
+  const deadline = Date.now() + 20
+
+  return new Promise<boolean>((resolve) => {
+    const poll = (): void => {
+      const found = mockSsh.execCalls.some(
+        (call) => call.command === "crontab -u 'alice' -" && call.options?.input?.includes(text)
+      )
+      if (found) {
+        resolve(true)
+        return
+      }
+      if (Date.now() >= deadline) {
+        resolve(false)
+        return
+      }
+      setTimeout(poll, 1)
+    }
+
+    poll()
+  })
+}
+
 const emptyEnv = {}
 
 const crontabWriteFailureStub = {
@@ -826,6 +849,45 @@ describe("cron.absent", () => {
     expect(writeInput).not.toContain("# paratix: backup")
     expect(writeInput).not.toContain("0 3 * * * /backup.sh")
     expect(writeInput).toContain("0 5 * * * /other.sh")
+  })
+
+  it("serializes apply with parallel crontab mutations and preserves both changes", async () => {
+    const user = "alice"
+    const backupJob = "0 3 * * * /backup.sh"
+    const firstWriteObserved = deferred()
+    const allowFirstWriteToFinish = deferred()
+    const mockSsh = createSharedCrontabMockSsh(
+      user,
+      `0 5 * * * /other.sh\n${taggedMarker("backup", backupJob)}\n${backupJob}\n`,
+      {
+        blockFirstWriteContaining: {
+          allow: allowFirstWriteToFinish.promise,
+          observed: firstWriteObserved.resolve,
+          text: "/other.sh",
+        },
+      }
+    )
+
+    const removeBackup = cron.absent(user, "backup")
+    const cleanup = cron.job(user, "cleanup", { job: "30 4 * * * /cleanup.sh" })
+    const first = removeBackup.apply(mockSsh, emptyEnv)
+    await firstWriteObserved.promise
+    const second = cleanup.apply(mockSsh, emptyEnv)
+    const cleanupWroteBeforeAbsentFinished = await waitForCrontabWriteContaining(
+      mockSsh,
+      "/cleanup.sh"
+    )
+
+    allowFirstWriteToFinish.resolve()
+    const results = await Promise.all([first, second])
+    const finalCrontab = await mockSsh.exec(`crontab -u '${user}' -l`)
+
+    expect(results).toStrictEqual([{ status: "changed" }, { status: "changed" }])
+    expect(cleanupWroteBeforeAbsentFinished).toBe(false)
+    expect(finalCrontab.stdout).toContain("/other.sh")
+    expect(finalCrontab.stdout).toContain("/cleanup.sh")
+    expect(finalCrontab.stdout).not.toContain("# paratix: backup")
+    expect(finalCrontab.stdout).not.toContain("/backup.sh")
   })
 
   // R-0000168: when the marker carries a sha256 hash and the line below it
