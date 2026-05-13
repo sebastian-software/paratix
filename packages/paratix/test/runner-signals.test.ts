@@ -73,8 +73,9 @@ describe("runPlaybook signal handling", () => {
       check: vi
         .fn()
         .mockImplementationOnce(async () => {
-          await Promise.resolve()
           getSignalBus().emit("SIGINT")
+          await Promise.resolve()
+          expect(disconnectFn).toHaveBeenCalledOnce()
           return "needs-apply" as const
         })
         .mockResolvedValue("needs-apply"),
@@ -91,8 +92,8 @@ describe("runPlaybook signal handling", () => {
     await runPlaybook(definition)
 
     expect(process.exitCode).toBe(130)
-    // disconnect is called by the signal handler and again in the finally block
-    expect(disconnectFn).toHaveBeenCalled()
+    // The signal handler disconnects first; teardown disconnects again.
+    expect(disconnectFn).toHaveBeenCalledTimes(2)
   })
 
   it("defers ssh.disconnect() to a microtask so the signal handler returns before disconnectTransport iterates pendingRejects (R-0000257 regression)", async () => {
