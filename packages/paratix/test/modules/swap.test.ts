@@ -12,11 +12,14 @@ const swapSize = "2G"
 const swapSizeBytes = "2147483648"
 const fstabLine = `${swapPath} none swap sw 0 0`
 const swapTempPath = "/.swapfile.paratix.ABC123"
+const swapTempIdentity = "2050:12345"
 const swapBackupPath = `${swapPath}.paratix-backup`
 const safeSwapParentCommand = "find '/' -maxdepth 0 -type d -user root ! -perm /022 | grep -Fx '/'"
 const createSwapTempCommand = `fallocate -l '${swapSize}' '${swapTempPath}' || { dd if=/dev/zero of='${swapTempPath}' bs=1M count=2048 status=none && truncate -s 2147483648 '${swapTempPath}'; }`
 const mktempSwapCommand = "mktemp -p '/' '.swapfile.paratix.XXXXXX'"
 const publishSwapCommand = `find '/' -maxdepth 0 -type d -user root ! -perm /022 | grep -Fx '/' && mv -T -n '${swapTempPath}' '${swapPath}'`
+const statSwapTempIdentityCommand = `stat -c '%d:%i' '${swapTempPath}'`
+const verifyPublishedSwapCommand = `[ ! -e '${swapTempPath}' ] && find '${swapPath}' -maxdepth 0 -type f | grep -Fx '${swapPath}' && [ "$(stat -c '%d:%i' '${swapPath}')" = '${swapTempIdentity}' ] && swaplabel '${swapPath}' >/dev/null 2>&1`
 const backupSwapCommand = `mv -T -n '${swapPath}' '${swapBackupPath}'`
 const verifySwapBackupCommand = `[ ! -e '${swapPath}' ] && [ -f '${swapBackupPath}' ] && swaplabel '${swapBackupPath}' >/dev/null 2>&1`
 const restoreSwapCommand = `mv -T -- '${swapBackupPath}' '${swapPath}'`
@@ -167,7 +170,9 @@ describe("swap.file — apply", () => {
       [mktempSwapCommand]: { code: 0, stdout: `${swapTempPath}\n` },
       [publishSwapCommand]: { code: 0 },
       [safeSwapParentCommand]: { code: 0, stdout: "/\n" },
+      [statSwapTempIdentityCommand]: { code: 0, stdout: `${swapTempIdentity}\n` },
       "swapon --show=NAME --noheadings": { stdout: "" },
+      [verifyPublishedSwapCommand]: { code: 0 },
     })
     // eslint-disable-next-line @typescript-eslint/require-await -- mock implementation
     ssh.writeFile = async (path: string, content: string): Promise<void> => {
@@ -184,6 +189,7 @@ describe("swap.file — apply", () => {
     expect(ssh.calls).toContain(`chmod '0600' '${swapTempPath}'`)
     expect(ssh.calls).toContain(`mkswap '${swapTempPath}'`)
     expect(ssh.calls).toContain(publishSwapCommand)
+    expect(ssh.calls).toContain(verifyPublishedSwapCommand)
     expect(ssh.calls).toContain(`swapon '${swapPath}'`)
     expect(writtenFiles).toStrictEqual([{ content: `# fstab\n${fstabLine}\n`, path: "/etc/fstab" }])
   })
@@ -222,6 +228,7 @@ describe("swap.file — apply", () => {
       [mktempSwapCommand]: { code: 0, stdout: `${swapTempPath}\n` },
       [publishSwapCommand]: { code: 1 },
       [safeSwapParentCommand]: { code: 0, stdout: "/\n" },
+      [statSwapTempIdentityCommand]: { code: 0, stdout: `${swapTempIdentity}\n` },
       "swapon --show=NAME --noheadings": { stdout: "" },
     })
 
@@ -230,6 +237,36 @@ describe("swap.file — apply", () => {
 
     expect(result.status).toBe("failed")
     expect(result.error?.message).toContain("swap file publish failed")
+    expect(ssh.calls).toContain(`rm -f '${swapTempPath}'`)
+    expect(ssh.calls).not.toContain(`swapon '${swapPath}'`)
+    expect(ssh.calls).not.toContain(`cat '/etc/fstab'`)
+  })
+
+  it("fails, cleans up, and does not enable swap when mv -n skips publishing the temp file", async () => {
+    const ssh = createMockSsh({
+      [`[ -e '${swapPath}' ]`]: { code: 1 },
+      [`[ -L '${swapPath}' ]`]: { code: 1 },
+      [`cat '${swapPath}'`]: { code: 1, stdout: "" },
+      [`chmod '0600' '${swapTempPath}'`]: { code: 0 },
+      [`mkdir -p '/'`]: { code: 0 },
+      [`mkswap '${swapTempPath}'`]: { code: 0 },
+      [`rm -f '${swapTempPath}'`]: { code: 0 },
+      [createSwapTempCommand]: { code: 0 },
+      [mktempSwapCommand]: { code: 0, stdout: `${swapTempPath}\n` },
+      [publishSwapCommand]: { code: 0 },
+      [safeSwapParentCommand]: { code: 0, stdout: "/\n" },
+      [statSwapTempIdentityCommand]: { code: 0, stdout: `${swapTempIdentity}\n` },
+      "swapon --show=NAME --noheadings": { stdout: "" },
+      [verifyPublishedSwapCommand]: { code: 1 },
+    })
+
+    const mod = swap.file({ path: swapPath, size: swapSize })
+    const result = await mod.apply(ssh, emptyEnv)
+
+    expect(result.status).toBe("failed")
+    expect(result.error?.message).toContain("swap file publish verification failed")
+    expect(ssh.calls).toContain(publishSwapCommand)
+    expect(ssh.calls).toContain(verifyPublishedSwapCommand)
     expect(ssh.calls).toContain(`rm -f '${swapTempPath}'`)
     expect(ssh.calls).not.toContain(`swapon '${swapPath}'`)
     expect(ssh.calls).not.toContain(`cat '/etc/fstab'`)
@@ -257,6 +294,8 @@ describe("swap.file — apply", () => {
       [mktempSwapCommand]: { code: 0, stdout: `${swapTempPath}\n` },
       [publishSwapCommand]: { code: 0 },
       [safeSwapParentCommand]: { code: 0, stdout: "/\n" },
+      [statSwapTempIdentityCommand]: { code: 0, stdout: `${swapTempIdentity}\n` },
+      [verifyPublishedSwapCommand]: { code: 0 },
       [verifySwapBackupCommand]: { code: 0 },
     })
     // eslint-disable-next-line @typescript-eslint/require-await -- mock implementation
@@ -366,6 +405,7 @@ describe("swap.file — apply", () => {
       [publishSwapCommand]: { code: 1, stderr: "publish failed" },
       [restoreSwapCommand]: { code: 0 },
       [safeSwapParentCommand]: { code: 0, stdout: "/\n" },
+      [statSwapTempIdentityCommand]: { code: 0, stdout: `${swapTempIdentity}\n` },
       [verifySwapBackupCommand]: { code: 0 },
     })
     vi.spyOn(ssh, "lines")
@@ -407,6 +447,8 @@ describe("swap.file — apply", () => {
       [publishSwapCommand]: { code: 0 },
       [restoreSwapCommand]: { code: 0 },
       [safeSwapParentCommand]: { code: 0, stdout: "/\n" },
+      [statSwapTempIdentityCommand]: { code: 0, stdout: `${swapTempIdentity}\n` },
+      [verifyPublishedSwapCommand]: { code: 0 },
       [verifySwapBackupCommand]: { code: 0 },
     })
     vi.spyOn(ssh, "lines")
@@ -443,6 +485,8 @@ describe("swap.file — apply", () => {
       [mktempSwapCommand]: { code: 0, stdout: `${swapTempPath}\n` },
       [publishSwapCommand]: { code: 0 },
       [safeSwapParentCommand]: { code: 0, stdout: "/\n" },
+      [statSwapTempIdentityCommand]: { code: 0, stdout: `${swapTempIdentity}\n` },
+      [verifyPublishedSwapCommand]: { code: 0 },
       [verifySwapBackupCommand]: { code: 0 },
     })
     vi.spyOn(ssh, "lines")
@@ -609,7 +653,9 @@ describe("swap.file — apply", () => {
       [mktempSwapCommand]: { code: 0, stdout: `${swapTempPath}\n` },
       [publishSwapCommand]: { code: 0 },
       [safeSwapParentCommand]: { code: 0, stdout: "/\n" },
+      [statSwapTempIdentityCommand]: { code: 0, stdout: `${swapTempIdentity}\n` },
       "swapon --show=NAME --noheadings": { stdout: "" },
+      [verifyPublishedSwapCommand]: { code: 0 },
     })
     // eslint-disable-next-line @typescript-eslint/require-await -- mock implementation
     ssh.writeFile = async (path: string, content: string): Promise<void> => {
@@ -643,7 +689,9 @@ describe("swap.file — apply", () => {
       [mktempSwapCommand]: { code: 0, stdout: `${swapTempPath}\n` },
       [publishSwapCommand]: { code: 0 },
       [safeSwapParentCommand]: { code: 0, stdout: "/\n" },
+      [statSwapTempIdentityCommand]: { code: 0, stdout: `${swapTempIdentity}\n` },
       "swapon --show=NAME --noheadings": { stdout: "" },
+      [verifyPublishedSwapCommand]: { code: 0 },
     })
     // eslint-disable-next-line @typescript-eslint/require-await -- mock implementation
     ssh.writeFile = async (path: string, content: string): Promise<void> => {

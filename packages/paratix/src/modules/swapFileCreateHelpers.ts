@@ -124,6 +124,19 @@ async function publishSwapTemporaryFile(
   parentDirectory: string,
   temporaryPath: string
 ): Promise<ModuleResult | true> {
+  const temporaryIdentityResult = await parameters.ssh.exec(
+    `stat -c '%d:%i' ${shellQuote(temporaryPath)}`,
+    EXEC_OPTS
+  )
+  if (temporaryIdentityResult.code !== 0) {
+    await cleanupSwapTemporaryPath(parameters.ssh, temporaryPath)
+    return failedCommand(
+      `[swap.file: ${parameters.path}] swap temp file identity failed`,
+      temporaryIdentityResult
+    )
+  }
+
+  const temporaryIdentity = temporaryIdentityResult.stdout.trim()
   // R-0000180: `mv -T -n` performs an atomic rename(2) that REFUSES to
   // overwrite an existing target. The previous `[ ! -e ] && mv -T` had a
   // TOCTOU window where another process could place a file at the
@@ -133,9 +146,22 @@ async function publishSwapTemporaryFile(
     `${safeParentCommand(parentDirectory)} && mv -T -n ${shellQuote(temporaryPath)} ${shellQuote(parameters.path)}`,
     EXEC_OPTS
   )
-  if (publishResult.code === 0) return true
+  if (publishResult.code !== 0) {
+    await cleanupSwapTemporaryPath(parameters.ssh, temporaryPath)
+    return failedCommand(`[swap.file: ${parameters.path}] swap file publish failed`, publishResult)
+  }
+
+  const verificationResult = await parameters.ssh.exec(
+    `[ ! -e ${shellQuote(temporaryPath)} ] && find ${shellQuote(parameters.path)} -maxdepth 0 -type f | grep -Fx ${shellQuote(parameters.path)} && [ "$(stat -c '%d:%i' ${shellQuote(parameters.path)})" = ${shellQuote(temporaryIdentity)} ] && swaplabel ${shellQuote(parameters.path)} >/dev/null 2>&1`,
+    EXEC_OPTS
+  )
+  if (verificationResult.code === 0) return true
+
   await cleanupSwapTemporaryPath(parameters.ssh, temporaryPath)
-  return failedCommand(`[swap.file: ${parameters.path}] swap file publish failed`, publishResult)
+  return failedCommand(
+    `[swap.file: ${parameters.path}] swap file publish verification failed`,
+    verificationResult
+  )
 }
 
 export type InitializedSwapTemporaryFile = {
