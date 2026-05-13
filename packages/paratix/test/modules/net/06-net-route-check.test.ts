@@ -12,7 +12,8 @@ const NET_WRITE_ALLOWLIST = [
   { options: { mode: "0644" }, remotePath: /^\/etc\/netplan\/60-paratix-.+\.yaml$/v },
   {
     options: { mode: "0644" },
-    remotePath: /^\/etc\/systemd\/network\/50-paratix-route-.+\.network$/v,
+    remotePath:
+      /^\/etc\/systemd\/network\/60-paratix-[^\/]+\.network\.d\/50-paratix-route-.+\.conf$/v,
   },
   { options: { mode: "0644" }, remotePath: /^\/etc\/systemd\/network\/60-paratix-.+\.network$/v },
 ] as const
@@ -24,7 +25,9 @@ const createMockSsh: typeof createBaseMockSsh = (responses, options) =>
   })
 
 const emptyEnv = {}
-const routeDropinPath = "/etc/systemd/network/50-paratix-route-10.0.0.0-24.network"
+const routeDropinPath =
+  "/etc/systemd/network/60-paratix-eth0.network.d/50-paratix-route-10.0.0.0-24.conf"
+const legacyRouteDropinPath = "/etc/systemd/network/50-paratix-route-10.0.0.0-24.network"
 const SUCCESSFUL_ROUTE_APPLY_OPTIONS = {
   responseStubs: [
     { command: /^ip route replace '[^']+' via '[^']+'$/v, result: { code: 0 } },
@@ -71,7 +74,7 @@ function buildRouteReloadFlagCheck(input: {
   gateway: string
 }): string {
   const routeKey = `${input.destination}\n${input.gateway}\n${input.device ?? ""}`
-  const dropin = `[Match]\nName=${input.device ?? "*"}\n\n[Route]\nDestination=${input.destination}\nGateway=${input.gateway}\n`
+  const dropin = `[Route]\nDestination=${input.destination}\nGateway=${input.gateway}\n`
   const flagName = `net-route-${sha256String(routeKey).slice(0, 16)}-${sha256String(dropin).slice(0, 16)}`
   return `[ -f /var/lib/paratix/flags/'${flagName}' ]`
 }
@@ -93,8 +96,8 @@ describe("net.route — check", () => {
   })
 
   it("returns ok when route is present (state: present)", async () => {
-    const dropinPath = "/etc/systemd/network/50-paratix-route-10.0.0.0-24.network"
-    const expectedDropin = `[Match]\nName=eth0\n\n[Route]\nDestination=10.0.0.0/24\nGateway=192.168.1.1\n`
+    const dropinPath = routeDropinPath
+    const expectedDropin = `[Route]\nDestination=10.0.0.0/24\nGateway=192.168.1.1\n`
     const mockSsh = createMockSsh({
       [`cat '${dropinPath}'`]: { stdout: expectedDropin },
       [`test -f '${dropinPath}'`]: { code: 0 },
@@ -115,18 +118,19 @@ describe("net.route — check", () => {
       [`test -f '${routeDropinPath}'`]: { code: 1 },
       "ip route show '10.0.0.0/24'": { stdout: "" },
     })
-    const mod = net.route("10.0.0.0/24", "192.168.1.1")
+    const mod = net.route("10.0.0.0/24", "192.168.1.1", { device: "eth0" })
     const result = await mod.check(mockSsh, emptyEnv)
     expect(result).toBe("needs-apply")
   })
 
   it("returns ok when route is absent (state: absent) and drop-in is gone", async () => {
-    const dropinPath = "/etc/systemd/network/50-paratix-route-10.0.0.0-24.network"
+    const dropinPath = routeDropinPath
     const mockSsh = createMockSsh({
       [`test -f '${dropinPath}'`]: { code: 1 },
+      [`test -f '${legacyRouteDropinPath}'`]: { code: 1 },
       "ip route show '10.0.0.0/24'": { stdout: "" },
     })
-    const mod = net.route("10.0.0.0/24", "192.168.1.1", { state: "absent" })
+    const mod = net.route("10.0.0.0/24", "192.168.1.1", { device: "eth0", state: "absent" })
     const result = await mod.check(mockSsh, emptyEnv)
     expect(result).toBe("ok")
   })
@@ -136,7 +140,7 @@ describe("net.route — check", () => {
       [`test -f '${routeDropinPath}'`]: { code: 1 },
       "ip route show '10.0.0.0/24'": { stdout: "10.0.0.0/24 via 192.168.1.1 dev eth0" },
     })
-    const mod = net.route("10.0.0.0/24", "192.168.1.1", { state: "absent" })
+    const mod = net.route("10.0.0.0/24", "192.168.1.1", { device: "eth0", state: "absent" })
     const result = await mod.check(mockSsh, emptyEnv)
     expect(result).toBe("needs-apply")
   })
@@ -146,7 +150,7 @@ describe("net.route — check", () => {
       [`test -f '${routeDropinPath}'`]: { code: 1 },
       "ip route show '10.0.0.0/24'": { stdout: "10.0.0.0/24 via 192.168.1.254 dev eth0" },
     })
-    const mod = net.route("10.0.0.0/24", "192.168.1.1")
+    const mod = net.route("10.0.0.0/24", "192.168.1.1", { device: "eth0" })
     const result = await mod.check(mockSsh, emptyEnv)
     expect(result).toBe("needs-apply")
   })
@@ -156,14 +160,14 @@ describe("net.route — check", () => {
       [`test -f '${routeDropinPath}'`]: { code: 1 },
       "ip route show '10.0.0.0/24'": { stdout: "10.0.0.0/24 via 192.168.1.1" },
     })
-    const mod = net.route("10.0.0.0/24", "192.168.1.1")
+    const mod = net.route("10.0.0.0/24", "192.168.1.1", { device: "eth0" })
     await mod.check(mockSsh, emptyEnv)
     expect(mockSsh.calls).toContain("ip route show '10.0.0.0/24'")
   })
 
   // R-0000061: persistent drop-in must be validated alongside live route.
   it("returns needs-apply when live route matches but drop-in is missing (state: present)", async () => {
-    const dropinPath = "/etc/systemd/network/50-paratix-route-10.0.0.0-24.network"
+    const dropinPath = routeDropinPath
     const mockSsh = createMockSsh({
       [`test -f '${dropinPath}'`]: { code: 1 },
       "ip route show '10.0.0.0/24'": { stdout: "10.0.0.0/24 via 192.168.1.1 dev eth0" },
@@ -174,8 +178,8 @@ describe("net.route — check", () => {
   })
 
   it("returns needs-apply when drop-in has a stale gateway (state: present)", async () => {
-    const dropinPath = "/etc/systemd/network/50-paratix-route-10.0.0.0-24.network"
-    const staleDropin = `[Match]\nName=eth0\n\n[Route]\nDestination=10.0.0.0/24\nGateway=192.168.1.254\n`
+    const dropinPath = routeDropinPath
+    const staleDropin = `[Route]\nDestination=10.0.0.0/24\nGateway=192.168.1.254\n`
     const mockSsh = createMockSsh({
       [`cat '${dropinPath}'`]: { stdout: staleDropin },
       [`test -f '${dropinPath}'`]: { code: 0 },
@@ -187,8 +191,8 @@ describe("net.route — check", () => {
   })
 
   it("returns needs-apply when live route uses the wrong device (state: present)", async () => {
-    const dropinPath = "/etc/systemd/network/50-paratix-route-10.0.0.0-24.network"
-    const expectedDropin = `[Match]\nName=eth0\n\n[Route]\nDestination=10.0.0.0/24\nGateway=192.168.1.1\n`
+    const dropinPath = routeDropinPath
+    const expectedDropin = `[Route]\nDestination=10.0.0.0/24\nGateway=192.168.1.1\n`
     const mockSsh = createMockSsh({
       [`cat '${dropinPath}'`]: { stdout: expectedDropin },
       [`test -f '${dropinPath}'`]: { code: 0 },
@@ -200,8 +204,8 @@ describe("net.route — check", () => {
   })
 
   it("returns needs-apply when live route gateway only has a prefix match", async () => {
-    const dropinPath = "/etc/systemd/network/50-paratix-route-10.0.0.0-24.network"
-    const expectedDropin = `[Match]\nName=eth0\n\n[Route]\nDestination=10.0.0.0/24\nGateway=10.0.0.1\n`
+    const dropinPath = routeDropinPath
+    const expectedDropin = `[Route]\nDestination=10.0.0.0/24\nGateway=10.0.0.1\n`
     const mockSsh = createMockSsh({
       [`cat '${dropinPath}'`]: { stdout: expectedDropin },
       [`test -f '${dropinPath}'`]: { code: 0 },
@@ -218,8 +222,8 @@ describe("net.route — check", () => {
   })
 
   it("returns needs-apply when live route device only has a prefix match", async () => {
-    const dropinPath = "/etc/systemd/network/50-paratix-route-10.0.0.0-24.network"
-    const expectedDropin = `[Match]\nName=eth0\n\n[Route]\nDestination=10.0.0.0/24\nGateway=192.168.1.1\n`
+    const dropinPath = routeDropinPath
+    const expectedDropin = `[Route]\nDestination=10.0.0.0/24\nGateway=192.168.1.1\n`
     const mockSsh = createMockSsh({
       [`cat '${dropinPath}'`]: { stdout: expectedDropin },
       [`test -f '${dropinPath}'`]: { code: 0 },
@@ -238,34 +242,35 @@ describe("net.route — check", () => {
   })
 
   it("returns needs-apply when live route is gone but drop-in still exists (state: absent)", async () => {
-    const dropinPath = "/etc/systemd/network/50-paratix-route-10.0.0.0-24.network"
-    const expectedDropin = `[Match]\nName=*\n\n[Route]\nDestination=10.0.0.0/24\nGateway=192.168.1.1\n`
+    const dropinPath = routeDropinPath
+    const expectedDropin = `[Route]\nDestination=10.0.0.0/24\nGateway=192.168.1.1\n`
     const mockSsh = createMockSsh({
       [`cat '${dropinPath}'`]: { stdout: expectedDropin },
       [`test -f '${dropinPath}'`]: { code: 0 },
       "ip route show '10.0.0.0/24'": { stdout: "" },
     })
-    const mod = net.route("10.0.0.0/24", "192.168.1.1", { state: "absent" })
+    const mod = net.route("10.0.0.0/24", "192.168.1.1", { device: "eth0", state: "absent" })
     const result = await mod.check(mockSsh, emptyEnv)
     expect(result).toBe("needs-apply")
   })
 
   it("returns ok when live route is gone and a foreign drop-in with the same destination exists", async () => {
-    const dropinPath = "/etc/systemd/network/50-paratix-route-10.0.0.0-24.network"
+    const dropinPath = legacyRouteDropinPath
     const foreignDropin = `[Match]\nName=eth1\n\n[Route]\nDestination=10.0.0.0/24\nGateway=192.168.1.254\n`
     const mockSsh = createMockSsh({
       [`cat '${dropinPath}'`]: { stdout: foreignDropin },
       [`test -f '${dropinPath}'`]: { code: 0 },
+      [`test -f '${routeDropinPath}'`]: { code: 1 },
       "ip route show '10.0.0.0/24'": { stdout: "" },
     })
-    const mod = net.route("10.0.0.0/24", "192.168.1.1", { state: "absent" })
+    const mod = net.route("10.0.0.0/24", "192.168.1.1", { device: "eth0", state: "absent" })
     const result = await mod.check(mockSsh, emptyEnv)
     expect(result).toBe("ok")
   })
 
   it("returns ok when both live route and drop-in match (state: present)", async () => {
-    const dropinPath = "/etc/systemd/network/50-paratix-route-10.0.0.0-24.network"
-    const expectedDropin = `[Match]\nName=eth0\n\n[Route]\nDestination=10.0.0.0/24\nGateway=192.168.1.1\n`
+    const dropinPath = routeDropinPath
+    const expectedDropin = `[Route]\nDestination=10.0.0.0/24\nGateway=192.168.1.1\n`
     const mockSsh = createMockSsh({
       [`cat '${dropinPath}'`]: { stdout: expectedDropin },
       [`test -f '${dropinPath}'`]: { code: 0 },
@@ -282,8 +287,8 @@ describe("net.route — check", () => {
   })
 
   it("returns needs-apply when route and drop-in match but reload marker is missing", async () => {
-    const dropinPath = "/etc/systemd/network/50-paratix-route-10.0.0.0-24.network"
-    const expectedDropin = `[Match]\nName=eth0\n\n[Route]\nDestination=10.0.0.0/24\nGateway=192.168.1.1\n`
+    const dropinPath = routeDropinPath
+    const expectedDropin = `[Route]\nDestination=10.0.0.0/24\nGateway=192.168.1.1\n`
     const mockSsh = createMockSsh({
       [`cat '${dropinPath}'`]: { stdout: expectedDropin },
       [`test -f '${dropinPath}'`]: { code: 0 },

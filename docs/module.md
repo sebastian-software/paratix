@@ -183,14 +183,14 @@ laufen nur mit `allowInsecureHttp: true`.
 
 ## net — Netzwerk-Konfiguration
 
-| Modul           | Beschreibung                                                                                                                                                                                                                                                      | Check-Strategie                                                      | Aufwand |
-| --------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------- | ------- |
-| `net.hosts`     | Verwaltet Eintraege in `/etc/hosts`. Fuegt eine IP-Hostname-Zuordnung hinzu oder entfernt sie. Akzeptiert eine IP-Adresse, eine Liste von Hostnamen und ein optionales `state`-Flag (`"present"` oder `"absent"`, Standard: `"present"`).                         | `/etc/hosts` lesen, nach erwarteter Zeile suchen                     | einfach |
-| `net.interface` | Konfiguriert eine Netzwerkschnittstelle via Netplan (wenn `/etc/netplan/` vorhanden) oder systemd-networkd. Erkennt automatisch, welche Methode aktiv ist, und schreibt die Konfigurationsdatei in den passenden Pfad. Wendet die Konfiguration danach direkt an. | Konfigurationsdatei lesen und mit Sollzustand vergleichen            | mittel  |
-| `net.resolv`    | Verwaltet `/etc/resolv.conf` (Nameserver und Suchdomaenen). Entfernt vorhandene Symlinks (z.B. von systemd-resolved) und schreibt die Datei direkt.                                                                                                               | `/etc/resolv.conf` lesen und mit Sollinhalt vergleichen              | einfach |
-| `net.route`     | Verwaltet persistente statische Routen. Wendet die Route sofort via `ip route replace` an und persistiert sie als systemd-networkd Drop-in unter `/etc/systemd/network/`. Unterstuetzt `state: "absent"` zum Entfernen.                                           | `ip route show <destination>` ausfuehren und Gateway-Eintrag pruefen | einfach |
-| `net.waitFor`   | Wartet darauf, dass eine Bedingung erfuellt ist: Port offen, Datei vorhanden, oder String in Datei. Nützlich nach Service-Starts oder Deployments. Polling-Intervall: 2s (konfigurierbar). Default-Timeout: 60s (konfigurierbar).                                 | Polling mit Timeout                                                  | mittel  |
-| `net.request`   | Fuehrt einen HTTP-Request vom Server aus und prueft die Antwort (Statuscode, Body). Nützlich fuer Health-Checks.                                                                                                                                                  | HTTP-Statuscode und optionaler Body-Check                            | mittel  |
+| Modul           | Beschreibung                                                                                                                                                                                                                                                                                          | Check-Strategie                                                                        | Aufwand |
+| --------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------- | ------- |
+| `net.hosts`     | Verwaltet Eintraege in `/etc/hosts`. Fuegt eine IP-Hostname-Zuordnung hinzu oder entfernt sie. Akzeptiert eine IP-Adresse, eine Liste von Hostnamen und ein optionales `state`-Flag (`"present"` oder `"absent"`, Standard: `"present"`).                                                             | `/etc/hosts` lesen, nach erwarteter Zeile suchen                                       | einfach |
+| `net.interface` | Konfiguriert eine Netzwerkschnittstelle via Netplan (wenn `/etc/netplan/` vorhanden) oder systemd-networkd. Erkennt automatisch, welche Methode aktiv ist, und schreibt die Konfigurationsdatei in den passenden Pfad. Wendet die Konfiguration danach direkt an.                                     | Konfigurationsdatei lesen und mit Sollzustand vergleichen                              | mittel  |
+| `net.resolv`    | Verwaltet `/etc/resolv.conf` (Nameserver und Suchdomaenen). Entfernt vorhandene Symlinks (z.B. von systemd-resolved) und schreibt die Datei direkt.                                                                                                                                                   | `/etc/resolv.conf` lesen und mit Sollinhalt vergleichen                                | einfach |
+| `net.route`     | Verwaltet persistente statische Routen. Erfordert `options.device`, wendet die Route sofort via `ip route replace` an und persistiert sie als systemd-networkd Drop-in am Paratix-Interface unter `/etc/systemd/network/60-paratix-<device>.network.d/`. Unterstützt `state: "absent"` zum Entfernen. | `ip route show <destination>` ausführen, Gateway/Device prüfen und Drop-in vergleichen | einfach |
+| `net.waitFor`   | Wartet darauf, dass eine Bedingung erfuellt ist: Port offen, Datei vorhanden, oder String in Datei. Nützlich nach Service-Starts oder Deployments. Polling-Intervall: 2s (konfigurierbar). Default-Timeout: 60s (konfigurierbar).                                                                     | Polling mit Timeout                                                                    | mittel  |
+| `net.request`   | Fuehrt einen HTTP-Request vom Server aus und prueft die Antwort (Statuscode, Body). Nützlich fuer Health-Checks.                                                                                                                                                                                      | HTTP-Statuscode und optionaler Body-Check                                              | mittel  |
 
 **`net.hosts` — Beispiel:**
 
@@ -232,7 +232,7 @@ net.resolv({
 net.route("10.0.0.0/24", "192.168.1.1", { device: "eth0" })
 
 // Route entfernen
-net.route("10.0.0.0/24", "192.168.1.1", { state: "absent" })
+net.route("10.0.0.0/24", "192.168.1.1", { device: "eth0", state: "absent" })
 ```
 
 **`net.waitFor` — Beispiel:**
@@ -270,8 +270,13 @@ net.request("http://localhost/api/ping", {
 > **Hinweis:** `net.interface` schreibt bei Netplan nach
 > `/etc/netplan/60-paratix-<name>.yaml` und fuehrt `netplan apply` aus.
 > Bei systemd-networkd wird `/etc/systemd/network/60-paratix-<name>.network`
-> geschrieben und `networkctl reload` ausgefuehrt. `net.route` schreibt Drop-ins
-> nach `/etc/systemd/network/50-paratix-route-<destination>.network`.
+> geschrieben und `networkctl reload` ausgefuehrt. `net.route` schreibt
+> `[Route]`-Drop-ins in
+> `/etc/systemd/network/60-paratix-<device>.network.d/50-paratix-route-<destination>.conf`.
+> Alte Paratix-Standalone-Dateien unter
+> `/etc/systemd/network/50-paratix-route-<destination>.network` werden beim
+> Entfernen nur gelöscht, wenn der Inhalt exakt dem früheren Paratix-Inhalt
+> entspricht.
 
 ---
 

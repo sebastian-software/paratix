@@ -351,10 +351,14 @@ function buildResolvConfig(nameservers: string[], search?: string[]): string {
  *
  * @param destination - The route destination CIDR.
  * @param gateway - The gateway IP address.
- * @param device - Optional network device name.
  * @returns The drop-in file content.
  */
-function buildRouteDropin(destination: string, gateway: string, device?: string): string {
+function buildRouteDropin(destination: string, gateway: string): string {
+  const lines = ["[Route]", `Destination=${destination}`, `Gateway=${gateway}`]
+  return `${lines.join("\n")}\n`
+}
+
+function buildLegacyRouteNetwork(destination: string, gateway: string, device?: string): string {
   const lines = [
     "[Match]",
     `Name=${device ?? "*"}`,
@@ -622,6 +626,7 @@ type RouteCheckParameters = {
   device?: string
   dropinPath: string
   gateway: string
+  legacyDropinPath: string
   state: "absent" | "present"
 }
 
@@ -635,7 +640,7 @@ function buildRouteReloadFlag(parameters: RouteParameters): {
   const routeHash = sha256String(routeKey).slice(0, NET_RELOAD_HASH_LENGTH)
   const flagPrefix = `net-route-${routeHash}-`
   const dropinHash = sha256String(
-    buildRouteDropin(parameters.destination, parameters.gateway, parameters.device)
+    buildRouteDropin(parameters.destination, parameters.gateway)
   ).slice(0, NET_RELOAD_HASH_LENGTH)
   return {
     flagName: `${flagPrefix}${dropinHash}`,
@@ -714,8 +719,22 @@ async function routeDropinMatchesExpected(
   parameters: RouteParameters
 ): Promise<boolean> {
   if (!(await routeDropinExists(conn, parameters.dropinPath))) return false
-  const expected = buildRouteDropin(parameters.destination, parameters.gateway, parameters.device)
+  const expected = buildRouteDropin(parameters.destination, parameters.gateway)
   const current = await conn.readFile(parameters.dropinPath)
+  return current.trim() === expected.trim()
+}
+
+async function legacyRouteDropinMatchesExpected(
+  conn: SshConnection,
+  parameters: RouteParameters
+): Promise<boolean> {
+  if (!(await routeDropinExists(conn, parameters.legacyDropinPath))) return false
+  const expected = buildLegacyRouteNetwork(
+    parameters.destination,
+    parameters.gateway,
+    parameters.device
+  )
+  const current = await conn.readFile(parameters.legacyDropinPath)
   return current.trim() === expected.trim()
 }
 
@@ -740,7 +759,7 @@ async function checkRouteState(
   if (state === "present") {
     return checkPresentRouteState(
       conn,
-      { destination, device, dropinPath, gateway },
+      { destination, device, dropinPath, gateway, legacyDropinPath: parameters.legacyDropinPath },
       {
         dropinPresent,
         live,
@@ -752,10 +771,8 @@ async function checkRouteState(
   // A drop-in at the same path with different content is foreign state and
   // must not be treated as ours to delete.
   if (live) return NEEDS_APPLY
-  if (!dropinPresent) return "ok"
-  return (await routeDropinMatchesExpected(conn, { destination, device, dropinPath, gateway }))
-    ? NEEDS_APPLY
-    : "ok"
+  if (dropinPresent && (await routeDropinMatchesExpected(conn, parameters))) return NEEDS_APPLY
+  return (await legacyRouteDropinMatchesExpected(conn, parameters)) ? NEEDS_APPLY : "ok"
 }
 
 async function checkPresentRouteState(
@@ -765,7 +782,7 @@ async function checkPresentRouteState(
 ): Promise<"needs-apply" | "ok"> {
   if (!state.live) return NEEDS_APPLY
   if (!state.dropinPresent) return NEEDS_APPLY
-  const expected = buildRouteDropin(parameters.destination, parameters.gateway, parameters.device)
+  const expected = buildRouteDropin(parameters.destination, parameters.gateway)
   const current = await conn.readFile(parameters.dropinPath)
   if (current.trim() !== expected.trim()) return NEEDS_APPLY
   const reloadFlag = buildRouteReloadFlag(parameters)
@@ -791,7 +808,9 @@ async function applyPresentRoute(
   if (await isSymlink(conn, dropinPath)) {
     return failed(`[net.route: ${destination}] refuses to write through symlink at ${dropinPath}`)
   }
-  const dropinContent = buildRouteDropin(destination, gateway, device)
+  const mkdirFailure = await ensureRouteDropinDirectory(conn, parameters)
+  if (mkdirFailure != null) return mkdirFailure
+  const dropinContent = buildRouteDropin(destination, gateway)
   try {
     await conn.writeFile(dropinPath, dropinContent, { mode: NET_CONFIG_FILE_MODE })
   } catch (error: unknown) {
@@ -803,6 +822,20 @@ async function applyPresentRoute(
   return null
 }
 
+async function ensureRouteDropinDirectory(
+  conn: SshConnection,
+  parameters: RouteParameters
+): Promise<ModuleResult | null> {
+  const directory = parameters.dropinPath.slice(0, parameters.dropinPath.lastIndexOf("/"))
+  const mkdirResult = await conn.exec(`mkdir -p ${shellQuote(directory)}`, EXEC_OPTS)
+  return mkdirResult.code === 0
+    ? null
+    : failedCommand(
+        `[net.route: ${parameters.destination}] drop-in directory creation failed`,
+        mkdirResult
+      )
+}
+
 /** Result of an apply step that may or may not have mutated host state. */
 type RouteApplyOutcome =
   | { changed: boolean; failure: null }
@@ -812,7 +845,7 @@ async function applyAbsentRoute(
   conn: SshConnection,
   parameters: RouteParameters
 ): Promise<RouteApplyOutcome> {
-  const { destination, device, dropinPath, gateway } = parameters
+  const { destination, device, gateway } = parameters
   let changed = false
   if (await hasLiveRoute(conn, { destination, device, gateway })) {
     const devicePart = device !== undefined && device !== "" ? ` dev ${shellQuote(device)}` : ""
@@ -828,17 +861,53 @@ async function applyAbsentRoute(
     }
     changed = true
   }
-  if (await routeDropinMatchesExpected(conn, parameters)) {
-    const removeResult = await conn.exec(`rm -f ${shellQuote(dropinPath)}`, EXEC_OPTS)
-    if (removeResult.code !== 0) {
-      return {
-        changed: false,
-        failure: failedCommand(`[net.route: ${destination}] drop-in removal failed`, removeResult),
-      }
-    }
-    changed = true
-  }
+  const dropinOutcome = await removeRouteDropinIfExpected(conn, parameters)
+  if (dropinOutcome.failure != null) return dropinOutcome
+  if (dropinOutcome.changed) changed = true
+  const legacyDropinOutcome = await removeLegacyRouteDropinIfExpected(conn, parameters)
+  if (legacyDropinOutcome.failure != null) return legacyDropinOutcome
+  if (legacyDropinOutcome.changed) changed = true
   return { changed, failure: null }
+}
+
+async function removeRouteDropinIfExpected(
+  conn: SshConnection,
+  parameters: RouteParameters
+): Promise<RouteApplyOutcome> {
+  if (!(await routeDropinMatchesExpected(conn, parameters)))
+    return { changed: false, failure: null }
+  const removeResult = await conn.exec(`rm -f ${shellQuote(parameters.dropinPath)}`, EXEC_OPTS)
+  return removeResult.code === 0
+    ? { changed: true, failure: null }
+    : {
+        changed: false,
+        failure: failedCommand(
+          `[net.route: ${parameters.destination}] drop-in removal failed`,
+          removeResult
+        ),
+      }
+}
+
+async function removeLegacyRouteDropinIfExpected(
+  conn: SshConnection,
+  parameters: RouteParameters
+): Promise<RouteApplyOutcome> {
+  if (!(await legacyRouteDropinMatchesExpected(conn, parameters))) {
+    return { changed: false, failure: null }
+  }
+  const removeResult = await conn.exec(
+    `rm -f ${shellQuote(parameters.legacyDropinPath)}`,
+    EXEC_OPTS
+  )
+  return removeResult.code === 0
+    ? { changed: true, failure: null }
+    : {
+        changed: false,
+        failure: failedCommand(
+          `[net.route: ${parameters.destination}] legacy drop-in removal failed`,
+          removeResult
+        ),
+      }
 }
 
 async function reloadNetworkctlForRoute(
@@ -888,6 +957,11 @@ async function applyRouteState(
   conn: SshConnection,
   parameters: RouteCheckParameters
 ): Promise<ModuleResult> {
+  if (parameters.device === undefined || parameters.device === "") {
+    return failed(
+      `[net.route: ${parameters.destination}] persistent systemd-networkd routes require options.device so the route can be attached to a specific interface drop-in`
+    )
+  }
   return parameters.state === "present"
     ? applyPresentRouteState(conn, parameters)
     : applyAbsentRouteState(conn, parameters)
@@ -1376,7 +1450,11 @@ export const net = {
     const device = options?.device
     validateRouteOptions({ destination, device, gateway })
     const sanitized = sanitizeForFilename(destination)
-    const dropinPath = `/etc/systemd/network/50-paratix-route-${sanitized}.network`
+    const dropinPath =
+      device == null
+        ? ""
+        : `/etc/systemd/network/60-paratix-${device}.network.d/50-paratix-route-${sanitized}.conf`
+    const legacyDropinPath = `/etc/systemd/network/50-paratix-route-${sanitized}.network`
 
     return {
       async apply(conn: null | SshConnection): Promise<ModuleResult> {
@@ -1386,11 +1464,26 @@ export const net = {
           )
         }
 
-        return applyRouteState(conn, { destination, device, dropinPath, gateway, state })
+        return applyRouteState(conn, {
+          destination,
+          device,
+          dropinPath,
+          gateway,
+          legacyDropinPath,
+          state,
+        })
       },
       async check(conn: null | SshConnection): Promise<"needs-apply" | "ok"> {
         if (!conn) return NEEDS_APPLY
-        return checkRouteState(conn, { destination, device, dropinPath, gateway, state })
+        if (device == null) return NEEDS_APPLY
+        return checkRouteState(conn, {
+          destination,
+          device,
+          dropinPath,
+          gateway,
+          legacyDropinPath,
+          state,
+        })
       },
       name: `net.route: ${state} ${destination} via ${gateway}`,
     }
