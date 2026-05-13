@@ -976,4 +976,46 @@ describe("runPlaybook happy-path lifecycle (check → apply → signals)", () =>
 
     expect(process.exitCode).toBe(0)
   })
+
+  it("resets a previous failed run exitCode after a subsequent successful run", async () => {
+    vi.doMock("../src/ssh.js", () => ({
+      shellQuote: (s: string) => `'${s}'`,
+      SshConnectionImpl: makeMockSshClass(capturedConfigs),
+    }))
+
+    const { runPlaybook } = await import("../src/runner.js")
+
+    const failingModule: Module = {
+      apply: vi.fn().mockResolvedValue({
+        error: new Error("apply failed"),
+        status: "failed",
+      } satisfies ModuleResult),
+      check: vi.fn().mockResolvedValue("needs-apply"),
+      name: "failing-module",
+    }
+    const successfulModule: Module = {
+      apply: vi.fn().mockResolvedValue({ status: "changed" } satisfies ModuleResult),
+      check: vi.fn().mockResolvedValue("ok"),
+      name: "successful-module",
+    }
+
+    const failedDefinition: ServerDefinition = {
+      host: "1.2.3.4",
+      name: "test-server",
+      run: [failingModule],
+      ssh: { ports: [22], privateKey: "~/.ssh/id", user: "root" },
+    }
+    const successfulDefinition: ServerDefinition = {
+      host: "1.2.3.4",
+      name: "test-server",
+      run: [successfulModule],
+      ssh: { ports: [22], privateKey: "~/.ssh/id", user: "root" },
+    }
+
+    await runPlaybook(failedDefinition)
+    expect(process.exitCode).toBe(1)
+
+    await runPlaybook(successfulDefinition)
+    expect(process.exitCode).toBe(0)
+  })
 })

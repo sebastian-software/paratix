@@ -30,5 +30,7 @@ export function resolveExitCode(
     process.exitCode = signalExitCode(shutdownSignal)
   } else if (stats.failed > 0) {
     process.exitCode = 1
+  } else {
+    process.exitCode = 0
   }
 }
