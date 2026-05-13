@@ -248,26 +248,38 @@ function removeFstabEntry(fstabContent: string, path: string): string {
   return `${result.join("\n")}\n`
 }
 
-async function removePersistedMountIfPresent(ssh: SshConnection, path: string): Promise<boolean> {
+function fstabMutationFailure(moduleName: string, path: string, error: unknown): ModuleResult {
+  const reason = error instanceof Error ? error.message : String(error)
+  return failed(`[${moduleName}: ${path}] failed to update ${FSTAB_PATH}: ${reason}`)
+}
+
+async function removePersistedMountIfPresent(
+  ssh: SshConnection,
+  path: string
+): Promise<boolean | ModuleResult> {
   // R-0000169: serialize read-modify-write on /etc/fstab so concurrent
   // Paratix runs cannot lose competing fstab edits between the read and the
   // write step.
-  return withMutexLock(ssh, {
-    lockName: FSTAB_FILE_MUTEX,
-    async section() {
-      const fstabContent = await ssh.readFile(FSTAB_PATH)
-      const entry = findFstabEntry(fstabContent, path)
-      if (entry === null) return false
-      const newContent = removeFstabEntry(fstabContent, path)
-      await guardedWriteFile(ssh, {
-        mode: FSTAB_MODE,
-        newContent,
-        originalContent: fstabContent,
-        remotePath: FSTAB_PATH,
-      })
-      return true
-    },
-  })
+  try {
+    return await withMutexLock(ssh, {
+      lockName: FSTAB_FILE_MUTEX,
+      async section() {
+        const fstabContent = await ssh.readFile(FSTAB_PATH)
+        const entry = findFstabEntry(fstabContent, path)
+        if (entry === null) return false
+        const newContent = removeFstabEntry(fstabContent, path)
+        await guardedWriteFile(ssh, {
+          mode: FSTAB_MODE,
+          newContent,
+          originalContent: fstabContent,
+          remotePath: FSTAB_PATH,
+        })
+        return true
+      },
+    })
+  } catch (error) {
+    return fstabMutationFailure(MOUNT_ABSENT, path, error)
+  }
 }
 
 type EnsureLiveMountParameters = {
@@ -331,32 +343,37 @@ async function unmountIfNeeded(ssh: SshConnection, path: string): Promise<boolea
  * @param ssh - The SSH connection to the remote host.
  * @param path - The mountpoint to match against.
  * @param desiredLine - The expected fstab line.
- * @returns `true` if the fstab was updated, `false` if it already matched.
+ * @returns `true` if the fstab was updated, `false` if it already matched,
+ *   or a failed ModuleResult when the locked mutation failed.
  */
 async function ensureFstabEntry(
   ssh: SshConnection,
   path: string,
   desiredLine: string
-): Promise<boolean> {
+): Promise<boolean | ModuleResult> {
   // R-0000169: serialize read-modify-write on /etc/fstab so concurrent
   // Paratix runs cannot lose competing fstab edits between the read and the
   // write step.
-  return withMutexLock(ssh, {
-    lockName: FSTAB_FILE_MUTEX,
-    async section() {
-      const fstabContent = await ssh.readFile(FSTAB_PATH)
-      const existingEntry = findFstabEntry(fstabContent, path)
-      if (existingEntry === desiredLine) return false
-      const newContent = upsertFstabEntry(fstabContent, path, desiredLine)
-      await guardedWriteFile(ssh, {
-        mode: FSTAB_MODE,
-        newContent,
-        originalContent: fstabContent,
-        remotePath: FSTAB_PATH,
-      })
-      return true
-    },
-  })
+  try {
+    return await withMutexLock(ssh, {
+      lockName: FSTAB_FILE_MUTEX,
+      async section() {
+        const fstabContent = await ssh.readFile(FSTAB_PATH)
+        const existingEntry = findFstabEntry(fstabContent, path)
+        if (existingEntry === desiredLine) return false
+        const newContent = upsertFstabEntry(fstabContent, path, desiredLine)
+        await guardedWriteFile(ssh, {
+          mode: FSTAB_MODE,
+          newContent,
+          originalContent: fstabContent,
+          remotePath: FSTAB_PATH,
+        })
+        return true
+      },
+    })
+  } catch (error) {
+    return fstabMutationFailure(MOUNT_PRESENT, path, error)
+  }
 }
 
 /**
@@ -437,7 +454,6 @@ export const mount = {
       async apply(ssh: null | SshConnection): Promise<ModuleResult> {
         if (!ssh) return failed(`[mount.absent: ${path}] SSH connection is required`)
 
-        let changed = false
         const symlinkFailure = await ensureNoMountPathSymlink(ssh, MOUNT_ABSENT, path)
         if (symlinkFailure != null) return symlinkFailure
         // R-0000224: defense-in-depth realpath re-check between the guard and
@@ -446,15 +462,13 @@ export const mount = {
         if (realpathFailure != null) return realpathFailure
 
         const unmountResult = await unmountIfNeeded(ssh, path)
-        if (typeof unmountResult !== "boolean") {
-          return unmountResult
-        }
-        if (unmountResult) {
-          changed = true
-        }
+        if (typeof unmountResult !== "boolean") return unmountResult
+        let changed = unmountResult
 
-        if (persist && (await removePersistedMountIfPresent(ssh, path))) {
-          changed = true
+        if (persist) {
+          const fstabResult = await removePersistedMountIfPresent(ssh, path)
+          if (typeof fstabResult !== "boolean") return fstabResult
+          changed ||= fstabResult
         }
 
         return { status: changed ? "changed" : "ok" }
@@ -523,7 +537,9 @@ export const mount = {
 
         if (persist) {
           const desiredLine = buildFstabLine({ fstype, opts, path, src })
-          if (await ensureFstabEntry(ssh, path, desiredLine)) changed = true
+          const fstabResult = await ensureFstabEntry(ssh, path, desiredLine)
+          if (typeof fstabResult !== "boolean") return fstabResult
+          if (fstabResult) changed = true
         }
 
         return { status: changed ? "changed" : "ok" }

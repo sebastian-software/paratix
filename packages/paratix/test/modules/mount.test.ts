@@ -48,10 +48,18 @@ const mountPathSymlinkGuardCmd = [
   'current=$(dirname "$current")',
   "done",
 ].join("; ")
+const flagsDirectoryCreateCmd = "mkdir -p /var/lib/paratix/flags"
 
 // findmnt --output stdout for a live mount whose source/fstype/options
 // match the desired values exactly.
 const liveMountStdout = `${mountSrc} ${mountFstype} ${mountOpts}`
+
+function expectFstabFailure(
+  result: Awaited<ReturnType<ReturnType<typeof mount.present>["apply"]>>
+) {
+  expect(result.status).toBe("failed")
+  expect(result.error?.message).toContain(`failed to update /etc/fstab`)
+}
 
 // ─── path validation ──────────────────────────────────────────────────────────
 
@@ -696,6 +704,64 @@ describe("mount.present — apply", () => {
     expect(mockSsh.calls).toContain("cat '/etc/fstab'")
   })
 
+  it("returns failed instead of rejecting when the fstab mutex lock cannot be acquired", async () => {
+    const mockSsh = createMountApplyMockSsh({
+      "cat '/etc/fstab'": { stdout: "# /etc/fstab\n" },
+      [findmntCheckCmd]: { code: 0, stdout: liveMountStdout },
+      [flagsDirectoryCreateCmd]: { code: 1, stderr: "read-only filesystem" },
+    })
+    const mod = mount.present({
+      fstype: mountFstype,
+      opts: mountOpts,
+      path: mountPath,
+      src: mountSrc,
+    })
+    const result = await mod.apply(mockSsh, emptyEnv)
+    expectFstabFailure(result)
+    expect(result.error?.message).toContain("[mount.present: /mnt/data]")
+    expect(result.error?.message).toContain("read-only filesystem")
+  })
+
+  it("returns failed instead of rejecting when guarded fstab write detects a concurrent change", async () => {
+    const mockSsh = createMountApplyMockSsh({
+      [findmntCheckCmd]: { code: 0, stdout: liveMountStdout },
+    })
+    const fstabReads = ["# /etc/fstab\n", "# /etc/fstab\n# changed\n"]
+    // eslint-disable-next-line @typescript-eslint/require-await -- Mock implementation
+    mockSsh.readFile = async (): Promise<string> => fstabReads.shift()!
+    const mod = mount.present({
+      fstype: mountFstype,
+      opts: mountOpts,
+      path: mountPath,
+      src: mountSrc,
+    })
+    const result = await mod.apply(mockSsh, emptyEnv)
+    expectFstabFailure(result)
+    expect(result.error?.message).toContain("[mount.present: /mnt/data]")
+    expect(result.error?.message).toContain("Concurrent modification detected on /etc/fstab")
+    expect(mockSsh.writeFileCalls).toHaveLength(0)
+  })
+
+  it("returns failed instead of rejecting when writing the fstab entry throws", async () => {
+    const mockSsh = createMountApplyMockSsh({
+      "cat '/etc/fstab'": { stdout: "# /etc/fstab\n" },
+      [findmntCheckCmd]: { code: 0, stdout: liveMountStdout },
+    })
+    mockSsh.writeFile = async (): Promise<void> => {
+      await Promise.reject(new Error("sftp write failed"))
+    }
+    const mod = mount.present({
+      fstype: mountFstype,
+      opts: mountOpts,
+      path: mountPath,
+      src: mountSrc,
+    })
+    const result = await mod.apply(mockSsh, emptyEnv)
+    expectFstabFailure(result)
+    expect(result.error?.message).toContain("[mount.present: /mnt/data]")
+    expect(result.error?.message).toContain("sftp write failed")
+  })
+
   it("runs mount command when not already mounted", async () => {
     const mockSsh = createMountApplyMockSsh({
       "cat '/etc/fstab'": { stdout: `${fstabLine}\n` },
@@ -1128,6 +1194,49 @@ describe("mount.absent — apply", () => {
     const fstabWrite = writtenFiles.find((f) => f.path === "/etc/fstab")
     expect(fstabWrite).toBeDefined()
     expect(fstabWrite?.content).not.toContain(mountPath)
+  })
+
+  it("returns failed instead of rejecting when the fstab mutex lock cannot be acquired", async () => {
+    const mockSsh = createMountApplyMockSsh({
+      "cat '/etc/fstab'": { stdout: `${fstabLine}\n` },
+      [findmntTestCmd]: { code: 1 },
+      [flagsDirectoryCreateCmd]: { code: 1, stderr: "read-only filesystem" },
+    })
+    const mod = mount.absent({ path: mountPath })
+    const result = await mod.apply(mockSsh, emptyEnv)
+    expectFstabFailure(result)
+    expect(result.error?.message).toContain("[mount.absent: /mnt/data]")
+    expect(result.error?.message).toContain("read-only filesystem")
+  })
+
+  it("returns failed instead of rejecting when guarded fstab write detects a concurrent change", async () => {
+    const mockSsh = createMountApplyMockSsh({
+      [findmntTestCmd]: { code: 1 },
+    })
+    const fstabReads = [`${fstabLine}\n`, `${fstabLine}\n# changed\n`]
+    // eslint-disable-next-line @typescript-eslint/require-await -- Mock implementation
+    mockSsh.readFile = async (): Promise<string> => fstabReads.shift()!
+    const mod = mount.absent({ path: mountPath })
+    const result = await mod.apply(mockSsh, emptyEnv)
+    expectFstabFailure(result)
+    expect(result.error?.message).toContain("[mount.absent: /mnt/data]")
+    expect(result.error?.message).toContain("Concurrent modification detected on /etc/fstab")
+    expect(mockSsh.writeFileCalls).toHaveLength(0)
+  })
+
+  it("returns failed instead of rejecting when removing the fstab entry throws", async () => {
+    const mockSsh = createMountApplyMockSsh({
+      "cat '/etc/fstab'": { stdout: `${fstabLine}\n` },
+      [findmntTestCmd]: { code: 1 },
+    })
+    mockSsh.writeFile = async (): Promise<void> => {
+      await Promise.reject(new Error("sftp write failed"))
+    }
+    const mod = mount.absent({ path: mountPath })
+    const result = await mod.apply(mockSsh, emptyEnv)
+    expectFstabFailure(result)
+    expect(result.error?.message).toContain("[mount.absent: /mnt/data]")
+    expect(result.error?.message).toContain("sftp write failed")
   })
 
   it("returns ok when nothing to do (not mounted, no fstab entry)", async () => {
