@@ -339,6 +339,23 @@ describe("sysctl.set — name", () => {
 // ─── sysctl.set — validation ──────────────────────────────────────────────────
 
 describe("sysctl.set — validation", () => {
+  it("throws when runtime state is an unknown string", () => {
+    expect(() => sysctl.set(KEY, VALUE, { state: "removed" as "present" })).toThrow(
+      'sysctl.set: state must be "present" or "absent"'
+    )
+  })
+
+  it("throws when runtime state is not a string", () => {
+    expect(() => sysctl.set(KEY, VALUE, { state: 1 as unknown as "present" })).toThrow(
+      'sysctl.set: state must be "present" or "absent"'
+    )
+  })
+
+  it("accepts valid runtime states", () => {
+    expect(() => sysctl.set(KEY, VALUE, { state: "present" })).not.toThrow()
+    expect(() => sysctl.set(KEY, VALUE, { state: "absent" })).not.toThrow()
+  })
+
   it("throws when key is empty", () => {
     expect(() => sysctl.set("", VALUE)).toThrow(/key must not be empty/v)
   })

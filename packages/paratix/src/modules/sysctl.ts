@@ -62,6 +62,12 @@ function validateValue(value: string): void {
   }
 }
 
+function validateState(state: unknown): asserts state is "absent" | "present" {
+  if (state !== "present" && state !== "absent") {
+    throw new Error('sysctl.set: state must be "present" or "absent"')
+  }
+}
+
 /**
  * Build the content of a sysctl.d configuration file.
  * The trailing newline is required by the sysctl.d(5) format.
@@ -317,6 +323,7 @@ export const sysctl = {
     validateKey(key)
     validateValue(value)
     const state = options?.state ?? "present"
+    validateState(state)
     const resetValue = options?.resetValue
     if (resetValue !== undefined) {
       validateValue(resetValue)
