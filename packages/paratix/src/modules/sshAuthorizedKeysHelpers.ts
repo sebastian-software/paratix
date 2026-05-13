@@ -222,6 +222,7 @@ async function replaceAuthorizedKeysAtomically(
   const quotedSshDirectoryPath = shellQuote(sshDirectoryPath)
   const quotedAuthorizedKeysPath = shellQuote(authorizedKeysPath)
   const expectedSshDirectoryState = shellQuote(`700 ${user} ${primaryGroup} directory`)
+  const expectedAuthorizedKeysState = shellQuote(`600 ${user} ${primaryGroup} regular file`)
 
   // R-0000285: harden the final rename against a symlink race. The plain
   // `mv -T` previously overwrote the target unconditionally; an attacker who
@@ -232,8 +233,13 @@ async function replaceAuthorizedKeysAtomically(
   // even if a symlink is recreated in the gap the rename refuses to clobber
   // it. The combined `--` end-of-options markers guard against pathological
   // names beginning with `-`.
+  //
+  // GNU `mv -n` may report success when it skipped the rename. Keep the
+  // expected temp-file digest and verify, in the same final shell block, that
+  // the temp path disappeared and the destination is the exact regular file
+  // we staged.
   const replace = await conn.exec(
-    `chmod 600 ${quotedTemporaryPath} && chown ${shellQuote(user)}:${shellQuote(primaryGroup)} ${quotedTemporaryPath} && { [ ! -L ${quotedSshDirectoryPath} ] || { echo '.ssh must not be a symlink' >&2; exit 1; }; [ -d ${quotedSshDirectoryPath} ] || { echo '.ssh must be a directory' >&2; exit 1; }; ssh_directory_state=$(stat -c '%a %U %G %F' ${quotedSshDirectoryPath}) || exit $?; [ "$ssh_directory_state" = ${expectedSshDirectoryState} ] || { echo '.ssh ownership changed before authorized_keys replace' >&2; exit 1; }; [ ! -L ${quotedAuthorizedKeysPath} ] || { echo 'authorized_keys must not be a symlink' >&2; exit 1; }; if [ -e ${quotedAuthorizedKeysPath} ]; then [ -f ${quotedAuthorizedKeysPath} ] || { echo 'authorized_keys must be a regular file' >&2; exit 1; }; rm -f -- ${quotedAuthorizedKeysPath}; fi; mv -T -n -- ${quotedTemporaryPath} ${quotedAuthorizedKeysPath} || { echo 'authorized_keys was recreated during replace; refusing to clobber' >&2; exit 1; }; }`,
+    `chmod 600 ${quotedTemporaryPath} && chown ${shellQuote(user)}:${shellQuote(primaryGroup)} ${quotedTemporaryPath} && { expected_authorized_keys_hash=$(sha256sum ${quotedTemporaryPath} | cut -d' ' -f1) || exit $?; [ ! -L ${quotedSshDirectoryPath} ] || { echo '.ssh must not be a symlink' >&2; exit 1; }; [ -d ${quotedSshDirectoryPath} ] || { echo '.ssh must be a directory' >&2; exit 1; }; ssh_directory_state=$(stat -c '%a %U %G %F' ${quotedSshDirectoryPath}) || exit $?; [ "$ssh_directory_state" = ${expectedSshDirectoryState} ] || { echo '.ssh ownership changed before authorized_keys replace' >&2; exit 1; }; [ ! -L ${quotedAuthorizedKeysPath} ] || { echo 'authorized_keys must not be a symlink' >&2; exit 1; }; if [ -e ${quotedAuthorizedKeysPath} ]; then [ -f ${quotedAuthorizedKeysPath} ] || { echo 'authorized_keys must be a regular file' >&2; exit 1; }; rm -f -- ${quotedAuthorizedKeysPath}; fi; mv -T -n -- ${quotedTemporaryPath} ${quotedAuthorizedKeysPath} || { echo 'authorized_keys was recreated during replace; refusing to clobber' >&2; exit 1; }; [ ! -e ${quotedTemporaryPath} ] || { echo 'authorized_keys replace did not consume temporary file' >&2; exit 1; }; [ ! -L ${quotedAuthorizedKeysPath} ] || { echo 'authorized_keys must not be a symlink' >&2; exit 1; }; [ -f ${quotedAuthorizedKeysPath} ] || { echo 'authorized_keys must be a regular file' >&2; exit 1; }; authorized_keys_state=$(stat -c '%a %U %G %F' ${quotedAuthorizedKeysPath}) || exit $?; [ "$authorized_keys_state" = ${expectedAuthorizedKeysState} ] || { echo 'authorized_keys metadata changed during replace' >&2; exit 1; }; authorized_keys_hash=$(sha256sum ${quotedAuthorizedKeysPath} | cut -d' ' -f1) || exit $?; [ "$authorized_keys_hash" = "$expected_authorized_keys_hash" ] || { echo 'authorized_keys content changed during replace' >&2; exit 1; }; }`,
     MUTATION_EXEC_OPTS
   )
   if (replace.code !== 0) {

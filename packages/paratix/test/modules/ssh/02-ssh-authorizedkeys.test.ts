@@ -120,7 +120,7 @@ function authorizedKeysFinalReplaceCommand(parameters: {
     temporaryPath,
     user,
   } = parameters
-  return `chmod 600 '${temporaryPath}' && chown '${user}':'${group}' '${temporaryPath}' && { [ ! -L ${sshDirectoryPath} ] || { echo '.ssh must not be a symlink' >&2; exit 1; }; [ -d ${sshDirectoryPath} ] || { echo '.ssh must be a directory' >&2; exit 1; }; ssh_directory_state=$(stat -c '%a %U %G %F' ${sshDirectoryPath}) || exit $?; [ "$ssh_directory_state" = '${expectedSshDirectoryState}' ] || { echo '.ssh ownership changed before authorized_keys replace' >&2; exit 1; }; [ ! -L ${authorizedKeysPath} ] || { echo 'authorized_keys must not be a symlink' >&2; exit 1; }; if [ -e ${authorizedKeysPath} ]; then [ -f ${authorizedKeysPath} ] || { echo 'authorized_keys must be a regular file' >&2; exit 1; }; rm -f -- ${authorizedKeysPath}; fi; mv -T -n -- '${temporaryPath}' ${authorizedKeysPath} || { echo 'authorized_keys was recreated during replace; refusing to clobber' >&2; exit 1; }; }`
+  return `chmod 600 '${temporaryPath}' && chown '${user}':'${group}' '${temporaryPath}' && { expected_authorized_keys_hash=$(sha256sum '${temporaryPath}' | cut -d' ' -f1) || exit $?; [ ! -L ${sshDirectoryPath} ] || { echo '.ssh must not be a symlink' >&2; exit 1; }; [ -d ${sshDirectoryPath} ] || { echo '.ssh must be a directory' >&2; exit 1; }; ssh_directory_state=$(stat -c '%a %U %G %F' ${sshDirectoryPath}) || exit $?; [ "$ssh_directory_state" = '${expectedSshDirectoryState}' ] || { echo '.ssh ownership changed before authorized_keys replace' >&2; exit 1; }; [ ! -L ${authorizedKeysPath} ] || { echo 'authorized_keys must not be a symlink' >&2; exit 1; }; if [ -e ${authorizedKeysPath} ]; then [ -f ${authorizedKeysPath} ] || { echo 'authorized_keys must be a regular file' >&2; exit 1; }; rm -f -- ${authorizedKeysPath}; fi; mv -T -n -- '${temporaryPath}' ${authorizedKeysPath} || { echo 'authorized_keys was recreated during replace; refusing to clobber' >&2; exit 1; }; [ ! -e '${temporaryPath}' ] || { echo 'authorized_keys replace did not consume temporary file' >&2; exit 1; }; [ ! -L ${authorizedKeysPath} ] || { echo 'authorized_keys must not be a symlink' >&2; exit 1; }; [ -f ${authorizedKeysPath} ] || { echo 'authorized_keys must be a regular file' >&2; exit 1; }; authorized_keys_state=$(stat -c '%a %U %G %F' ${authorizedKeysPath}) || exit $?; [ "$authorized_keys_state" = '600 ${user} ${group} regular file' ] || { echo 'authorized_keys metadata changed during replace' >&2; exit 1; }; authorized_keys_hash=$(sha256sum ${authorizedKeysPath} | cut -d' ' -f1) || exit $?; [ "$authorized_keys_hash" = "$expected_authorized_keys_hash" ] || { echo 'authorized_keys content changed during replace' >&2; exit 1; }; }`
 }
 
 /**
@@ -627,6 +627,31 @@ describe("ssh.authorizedKeys", () => {
 
     expect(result.status).toBe("failed")
     expect(String(result.error)).toContain("authorized_keys was recreated during replace")
+    expect(mockSsh.calls).toContain(aliceFinalReplaceCommand)
+  })
+
+  it("regression: returns failed when mv -n reports success without replacing authorized_keys", async () => {
+    const mockSsh = createMockSsh(
+      aliceResponses({
+        [aliceFinalReplaceCommand]: {
+          code: 1,
+          stderr: "authorized_keys replace did not consume temporary file",
+        },
+        [aliceMktempPattern]: { stdout: tempPath },
+      }),
+      successfulSshApplyOptions
+    )
+    const mod = ssh.authorizedKeys("alice", testKey)
+
+    const result = await mod.apply(mockSsh, emptyEnv)
+
+    expect(result.status).toBe("failed")
+    expect(String(result.error)).toContain("authorized_keys replace did not consume temporary file")
+    expect(aliceFinalReplaceCommand).toContain(`expected_authorized_keys_hash=$(sha256sum`)
+    expect(aliceFinalReplaceCommand).toContain(`[ ! -e '${tempPath}' ]`)
+    expect(aliceFinalReplaceCommand).toContain(
+      `authorized_keys_hash=$(sha256sum ${aliceKeys} | cut -d' ' -f1)`
+    )
     expect(mockSsh.calls).toContain(aliceFinalReplaceCommand)
   })
 
