@@ -206,6 +206,37 @@ describe("net.request — check", () => {
     ).not.toThrow()
   })
 
+  it("rejects http URLs that carry user info", () => {
+    expect(() => net.request("http://deploy:s3cr3t@example.com/health")).toThrow(
+      /refusing to send sensitive URL credentials or query parameters over plaintext http: http:\/\/REDACTED:REDACTED@example.com\/health/v
+    )
+  })
+
+  it.each([
+    ["token", "http://example.com/health?token=REDACTED"],
+    ["api_key", "http://example.com/health?api_key=REDACTED"],
+    ["apiKey", "http://example.com/health?apiKey=REDACTED"],
+    ["password", "http://example.com/health?password=REDACTED"],
+  ])(
+    "rejects http URLs that carry a sensitive %s query parameter",
+    (parameterName, expectedDisplayUrl) => {
+      expect(() => net.request(`http://example.com/health?${parameterName}=s3cr3t`)).toThrow(
+        `refusing to send sensitive URL credentials or query parameters over plaintext http: ${expectedDisplayUrl}`
+      )
+    }
+  )
+
+  it("allows http URLs with non-sensitive query parameters", () => {
+    expect(() => net.request("http://example.com/health?monkey=banana&download=true")).not.toThrow()
+  })
+
+  it("allows https URLs with URL secrets and masks them in the module name", () => {
+    const mod = net.request("https://deploy:s3cr3t@example.com/health?token=abc&download=true")
+    expect(mod.name).toBe(
+      "net.request: GET https://REDACTED:REDACTED@example.com/health?token=REDACTED&download=true"
+    )
+  })
+
   it("allows https URLs with sensitive headers without an opt-in", () => {
     expect(() =>
       net.request("https://example.com/health", {

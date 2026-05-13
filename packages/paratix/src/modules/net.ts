@@ -13,7 +13,11 @@ import {
   NEEDS_APPLY,
   type SshConnection,
 } from "../types.js"
-import { hasSensitiveHeaders } from "./curlHelpers.js"
+import {
+  hasSensitiveHeaders,
+  hasSensitiveQueryParameters,
+  redactUrlForDisplay,
+} from "./curlHelpers.js"
 import { sha256String } from "./fileHelpers.js"
 import { hasFlag, setVersionedFlag, withMutexLock } from "./moduleHelpers.js"
 import {
@@ -1038,6 +1042,32 @@ function rejectSensitiveHeadersOverHttp(
   )
 }
 
+function urlHasCredentials(url: URL): boolean {
+  return url.username.length > 0 || url.password.length > 0
+}
+
+/**
+ * Reject plaintext HTTP requests whose URL itself carries credentials. Unlike
+ * header-based credentials, these values cannot be made safe with curl stdin:
+ * they are still transmitted over the network without TLS.
+ *
+ * @param url - The already-validated request URL.
+ */
+function rejectSensitiveUrlSecretsOverHttp(url: string): void {
+  let parsed: URL
+  try {
+    parsed = new URL(url)
+  } catch {
+    return
+  }
+  if (parsed.protocol !== "http:") return
+  if (!urlHasCredentials(parsed) && !hasSensitiveQueryParameters(parsed)) return
+
+  throw new Error(
+    `[net.request] refusing to send sensitive URL credentials or query parameters over plaintext http: ${redactUrlForDisplay(parsed)}; switch to https`
+  )
+}
+
 /**
  * Modules for managing network configuration on the remote host.
  */
@@ -1191,6 +1221,7 @@ export const net = {
   ): Module {
     validateHttpUrl(url, { allowHttp: true })
     rejectSensitiveHeadersOverHttp(url, options?.headers, options?.allowInsecureHttpHeaders)
+    rejectSensitiveUrlSecretsOverHttp(url)
     const method = options?.method ?? "GET"
     const parameters: HttpCheckParameters = buildHttpCheckParameters({
       body: options?.body,
