@@ -69,7 +69,12 @@ async function runScriptOnce(parameters: {
   const remotePath = allocation
 
   try {
-    await ssh.uploadFile(localPath, remotePath)
+    try {
+      await ssh.uploadFile(localPath, remotePath)
+    } catch (error) {
+      const reason = error instanceof Error ? error.message : String(error)
+      return failed(`[script.once: ${name}] upload failed: ${reason}`)
+    }
     return await runScriptOnceBody({
       flagName,
       flagPrefix,

@@ -195,7 +195,7 @@ describe("script.once — apply", () => {
     expect(mockSsh.calls).toContain(`rm -f '${remotePath}'`)
   })
 
-  it("still cleans up temp file when uploadFile throws after mktemp", async () => {
+  it("returns failed and cleans up temp file when uploadFile throws after mktemp", async () => {
     const remotePath = makeRemoteScriptPath("setup")
     const mockSsh = createScriptMockSsh()
     mockSsh.uploadFile = async (localPath, uploadRemotePath, options) => {
@@ -205,8 +205,11 @@ describe("script.once — apply", () => {
     }
     const mod = script.once("setup", "/local/setup.sh")
 
-    await expect(mod.apply(mockSsh, emptyEnv)).rejects.toThrow("upload failed")
+    const result = await mod.apply(mockSsh, emptyEnv)
 
+    expect(result.status).toBe("failed")
+    expect(String(result.error)).toContain("[script.once: setup] upload failed")
+    expect(String(result.error)).toContain("upload failed")
     expect(mockSsh.calls).toContain(`rm -f '${remotePath}'`)
     expect(mockSsh.calls).not.toContain(`chmod +x '${remotePath}'`)
     expect(mockSsh.calls).not.toContain(`'${remotePath}'`)
