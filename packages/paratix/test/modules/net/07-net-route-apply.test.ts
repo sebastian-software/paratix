@@ -270,6 +270,31 @@ describe("net.route — apply", () => {
     expect(mockSsh.calls.some((call) => call.includes("/var/lib/paratix/flags"))).toBe(false)
   })
 
+  it("refuses a symlinked persistent route drop-in without reload or flag writes", async () => {
+    const mockSsh = createMockSsh(
+      {},
+      {
+        ...SUCCESSFUL_ROUTE_APPLY_OPTIONS,
+        responseStubs: [
+          {
+            command: `[ -L '${routeDropinPath}' ]`,
+            result: { code: 0 },
+          },
+          ...SUCCESSFUL_ROUTE_APPLY_OPTIONS.responseStubs,
+        ],
+      }
+    )
+    const mod = net.route("10.0.0.0/24", "192.168.1.1", { device: "eth0" })
+
+    const result = await mod.apply(mockSsh, emptyEnv)
+
+    expect(result.status).toBe("failed")
+    expect(String(result.error)).toContain("symlink")
+    expect(mockSsh.writeFileCalls).toHaveLength(0)
+    expect(mockSsh.calls).not.toContain("networkctl reload")
+    expect(mockSsh.calls.some((call) => call.includes("/var/lib/paratix/flags"))).toBe(false)
+  })
+
   it("reloads networkctl after adding route (state: present)", async () => {
     const mockSsh = createMockSsh({}, SUCCESSFUL_ROUTE_APPLY_OPTIONS)
     const mod = net.route("10.0.0.0/24", "192.168.1.1", { device: "eth0" })
