@@ -550,6 +550,31 @@ describe("ssh.knownHosts", () => {
     expect(() => ssh.knownHosts("github.com", { state: "absent" })).not.toThrow()
   })
 
+  it("accepts known_hosts present state", () => {
+    expect(() =>
+      ssh.knownHosts("github.com", { expectedFingerprint: hostFingerprint, state: "present" })
+    ).not.toThrow()
+  })
+
+  it("accepts known_hosts absent state", () => {
+    expect(() => ssh.knownHosts("github.com", { state: "absent" })).not.toThrow()
+  })
+
+  it.each(["remove", "", "present "] as const)(
+    "rejects invalid known_hosts string state: %s",
+    (state) => {
+      expect(() => ssh.knownHosts("github.com", { state: state as never })).toThrow(
+        'ssh.knownHosts state must be "present" or "absent"'
+      )
+    }
+  )
+
+  it.each([false, 0, null] as const)("rejects non-string known_hosts state: %s", (state) => {
+    expect(() => ssh.knownHosts("github.com", { state: state as never })).toThrow(
+      'ssh.knownHosts state must be "present" or "absent"'
+    )
+  })
+
   it("apply removes host via ssh-keygen -R (state: absent)", async () => {
     const mockSsh = createSshApplyMockSsh({
       "ssh-keygen -F 'github.com'": { code: 0 },

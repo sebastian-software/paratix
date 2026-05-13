@@ -12,9 +12,10 @@ type KnownHostsOptions = {
   expectedFingerprint?: string
   port?: number
   publicKey?: string
-  state?: "absent" | "present"
+  state?: KnownHostsState
 }
 
+type KnownHostsState = "absent" | "present"
 type AuthorizedKeysState = "absent" | "present"
 
 type AuthorizedKeysOptions = {
@@ -34,6 +35,20 @@ function assertAuthorizedKeysState(state: unknown): asserts state is AuthorizedK
 function resolveAuthorizedKeysState(options?: AuthorizedKeysOptions): AuthorizedKeysState {
   const state = options?.state ?? "present"
   assertAuthorizedKeysState(state)
+  return state
+}
+
+function assertKnownHostsState(state: unknown): asserts state is KnownHostsState {
+  if (state === "absent" || state === "present") return
+  throw new Error('ssh.knownHosts state must be "present" or "absent"')
+}
+
+function resolveKnownHostsState(options?: KnownHostsOptions): KnownHostsState {
+  let state: unknown = "present"
+  if (options?.state !== undefined) {
+    state = options.state
+  }
+  assertKnownHostsState(state)
   return state
 }
 
@@ -562,7 +577,7 @@ export const ssh = {
   knownHosts(host: string, options?: KnownHostsOptions): Module {
     assertKnownHostsHost(host)
     assertKnownHostsPort(host, options)
-    const state = options?.state ?? "present"
+    const state = resolveKnownHostsState(options)
     const lookupTarget = knownHostsLookupTarget(host, options)
 
     if (state === "present" && !hasKnownHostsTrustAnchor(options)) {
