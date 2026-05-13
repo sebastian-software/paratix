@@ -198,6 +198,38 @@ describe("sshd.port — apply: validation and rollback", () => {
     expect(execCommands).not.toContain("systemctl restart sshd")
   })
 
+  it("rolls back and returns failed when the initial port write reports failure after remote replacement", async () => {
+    const originalConfig = "Port 22"
+    const newConfig = "Port 2222"
+    const mockSsh = createMockSsh({
+      [CAT_SSHD]: { stdout: originalConfig },
+    })
+    vi.spyOn(mockSsh, "readFile")
+      .mockResolvedValueOnce(originalConfig)
+      .mockResolvedValueOnce(originalConfig)
+      .mockResolvedValueOnce(newConfig)
+    const writeFileSpy = vi
+      .spyOn(mockSsh, "writeFile")
+      .mockRejectedValueOnce(new Error("SFTP write failed"))
+      .mockResolvedValueOnce(undefined)
+    const execSpy = vi.spyOn(mockSsh, "exec")
+    const addPortSpy = vi.spyOn(mockSsh, "addPort")
+
+    const mod = sshd.port(2222)
+    const result = await mod.apply(mockSsh, emptyEnv)
+
+    expect(result.status).toBe("failed")
+    expect(result.error?.message).toContain("sshd config write failed")
+    expect(result.error?.message).toContain("SFTP write failed")
+    expect(writeFileSpy.mock.calls).toStrictEqual([
+      [SSHD_CONFIG, newConfig, { mode: "0644" }],
+      [SSHD_CONFIG, originalConfig, { mode: "0644" }],
+    ])
+    expect(execSpy.mock.calls.map((args) => args[0])).not.toContain("sshd -t")
+    expect(execSpy.mock.calls.map((args) => args[0])).not.toContain("systemctl restart sshd")
+    expect(addPortSpy).not.toHaveBeenCalled()
+  })
+
   it("writes new port config and restarts sshd when sshd -t succeeds", async () => {
     const originalConfig = "Port 22"
     const mockSsh = createMockSsh({

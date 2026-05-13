@@ -533,15 +533,53 @@ function buildSshdConfigContent(
 
 async function writeSshdConfigIfChanged(
   ssh: SshConnection,
-  parameters: { didChange: boolean; newContent: string; originalConfig: string }
-): Promise<void> {
-  if (!parameters.didChange) return
-  await guardedWriteFile(ssh, {
-    mode: SSHD_CONFIG_MODE,
-    newContent: parameters.newContent,
-    originalContent: parameters.originalConfig,
-    remotePath: SSHD_CONFIG_PATH,
-  })
+  parameters: {
+    didChange: boolean
+    newContent: string
+    originalConfig: string
+    settingNames: string
+  }
+): Promise<ModuleResult | undefined> {
+  if (!parameters.didChange) return undefined
+  try {
+    await guardedWriteFile(ssh, {
+      mode: SSHD_CONFIG_MODE,
+      newContent: parameters.newContent,
+      originalContent: parameters.originalConfig,
+      remotePath: SSHD_CONFIG_PATH,
+    })
+    return undefined
+  } catch (error) {
+    const writeMessage = error instanceof Error ? error.message : String(error)
+    const rollbackDetail = await rollbackSshdConfigAfterWriteFailure(ssh, parameters)
+    return failed(
+      `[sshd.config: ${parameters.settingNames}] sshd config write failed; ` +
+        `${rollbackDetail}: ${writeMessage}`
+    )
+  }
+}
+
+async function rollbackSshdConfigAfterWriteFailure(
+  ssh: SshConnection,
+  parameters: { newContent: string; originalConfig: string }
+): Promise<string> {
+  try {
+    const currentConfig = await ssh.readFile(SSHD_CONFIG_PATH)
+    if (currentConfig !== parameters.newContent) {
+      return "remote config did not match the requested content after the failed write"
+    }
+  } catch (error) {
+    const readMessage = error instanceof Error ? error.message : String(error)
+    return `could not verify remote config after the failed write: ${readMessage}`
+  }
+
+  try {
+    await ssh.writeFile(SSHD_CONFIG_PATH, parameters.originalConfig, { mode: SSHD_CONFIG_MODE })
+    return "rolled back to previous config"
+  } catch (error) {
+    const rollbackMessage = error instanceof Error ? error.message : String(error)
+    return `rollback also failed: ${rollbackMessage}`
+  }
 }
 
 async function preflightSshdReloadUnitIfChanged(
@@ -589,7 +627,13 @@ async function applySshdConfig(
   })
   if (serviceUnit != null && typeof serviceUnit !== "string") return serviceUnit
 
-  await writeSshdConfigIfChanged(ssh, { didChange, newContent, originalConfig })
+  const writeFailure = await writeSshdConfigIfChanged(ssh, {
+    didChange,
+    newContent,
+    originalConfig,
+    settingNames: parameters.settingNames,
+  })
+  if (writeFailure != null) return writeFailure
 
   const validationFailure = await validateSshdConfig(ssh, originalConfig)
   if (validationFailure != null) return validationFailure
@@ -710,6 +754,37 @@ async function applySshdPortWhenConfigUnchanged(
   }
 }
 
+async function applyChangedSshdPort(
+  ssh: SshConnection,
+  parameters: {
+    newContent: string
+    originalConfig: string
+    originalPort: number
+    targetPort: number
+  }
+): Promise<ModuleResult> {
+  const writeFailure = await writeSshdConfigIfChanged(ssh, {
+    didChange: true,
+    newContent: parameters.newContent,
+    originalConfig: parameters.originalConfig,
+    settingNames: `Port ${String(parameters.targetPort)}`,
+  })
+  if (writeFailure != null) return writeFailure
+  const validationFailure = await validateSshdConfig(ssh, parameters.originalConfig)
+  if (validationFailure != null) return validationFailure
+  const verificationFailure = await restartAndVerifySshdPort(ssh, {
+    originalConfig: parameters.originalConfig,
+    originalPort: parameters.originalPort,
+    targetPort: parameters.targetPort,
+  })
+  if (verificationFailure != null) return verificationFailure
+
+  return {
+    meta: [sshdPortMeta(parameters.targetPort)],
+    status: "changed",
+  }
+}
+
 async function applySshdPort(ssh: SshConnection, targetPort: number): Promise<ModuleResult> {
   const configuredPortGuard = rejectWhenTargetPortIsNotConfigured(ssh, targetPort)
   if (configuredPortGuard != null) return configuredPortGuard
@@ -724,25 +799,12 @@ async function applySshdPort(ssh: SshConnection, targetPort: number): Promise<Mo
     return applySshdPortWhenConfigUnchanged(ssh, { originalConfig, originalPort, targetPort })
   }
 
-  await guardedWriteFile(ssh, {
-    mode: SSHD_CONFIG_MODE,
+  return applyChangedSshdPort(ssh, {
     newContent,
-    originalContent: originalConfig,
-    remotePath: SSHD_CONFIG_PATH,
-  })
-  const validationFailure = await validateSshdConfig(ssh, originalConfig)
-  if (validationFailure != null) return validationFailure
-  const verificationFailure = await restartAndVerifySshdPort(ssh, {
     originalConfig,
     originalPort,
     targetPort,
   })
-  if (verificationFailure != null) return verificationFailure
-
-  return {
-    meta: [sshdPortMeta(targetPort)],
-    status: "changed",
-  }
 }
 
 function rejectWhenTargetPortIsNotConfigured(

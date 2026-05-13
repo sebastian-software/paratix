@@ -142,6 +142,36 @@ describe("sshd.config — apply: validation and rollback", () => {
     expect(result.error?.message).toContain("SFTP rollback failed")
   })
 
+  it("rolls back and returns failed when the initial config write reports failure after remote replacement", async () => {
+    const originalConfig = "PasswordAuthentication yes"
+    const newConfig = "PasswordAuthentication no"
+    const mockSsh = createMockSsh({
+      [CAT_SSHD]: { stdout: originalConfig },
+    })
+    vi.spyOn(mockSsh, "readFile")
+      .mockResolvedValueOnce(originalConfig)
+      .mockResolvedValueOnce(originalConfig)
+      .mockResolvedValueOnce(newConfig)
+    const writeFileSpy = vi
+      .spyOn(mockSsh, "writeFile")
+      .mockRejectedValueOnce(new Error("SFTP write failed"))
+      .mockResolvedValueOnce(undefined)
+    const execSpy = vi.spyOn(mockSsh, "exec")
+
+    const mod = sshd.config({ PasswordAuthentication: "no" })
+    const result = await mod.apply(mockSsh, emptyEnv)
+
+    expect(result.status).toBe("failed")
+    expect(result.error?.message).toContain("sshd config write failed")
+    expect(result.error?.message).toContain("SFTP write failed")
+    expect(writeFileSpy.mock.calls).toStrictEqual([
+      [SSHD_CONFIG, newConfig, { mode: "0644" }],
+      [SSHD_CONFIG, originalConfig, { mode: "0644" }],
+    ])
+    expect(execSpy.mock.calls.map((args) => args[0])).not.toContain("sshd -t")
+    expect(execSpy.mock.calls.map((args) => args[0])).not.toContain("systemctl reload sshd")
+  })
+
   it("writes new config and reloads sshd without rollback when validation succeeds", async () => {
     const originalConfig = "PasswordAuthentication yes"
     const mockSsh = createMockSsh({
