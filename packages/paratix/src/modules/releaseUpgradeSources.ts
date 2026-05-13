@@ -1,3 +1,5 @@
+import { posix as pathPosix } from "node:path"
+
 // R-0000184: cap the wall-clock duration of every release-upgrade step at
 // 30 minutes by default. Long-running upgrades (e.g. cross-version Ubuntu)
 // can override this via the public `timeout` option, but unbounded runs
@@ -22,13 +24,13 @@ const ASCII_DEL_CODE_POINT = 0x7f
  *   carries no ASCII control characters that would break downstream tooling.
  */
 export function isAcceptableSourcesPath(filePath: string): boolean {
-  if (!filePath.startsWith(APT_SOURCES_LIST_DIRECTORY)) return false
   for (let index = 0; index < filePath.length; index++) {
     const code = filePath.codePointAt(index)
     if (code === undefined) continue
     if (code < ASCII_CONTROL_BOUNDARY || code === ASCII_DEL_CODE_POINT) return false
   }
-  return true
+  const normalizedPath = pathPosix.normalize(filePath)
+  return normalizedPath.startsWith(APT_SOURCES_LIST_DIRECTORY)
 }
 
 // R-0000240: a sources file enumerated by `find -print0` may vanish or

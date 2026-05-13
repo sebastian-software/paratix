@@ -654,6 +654,25 @@ describe("releaseUpgrade.upgrade — apply (Debian)", () => {
       expect(writes.find((w) => w.path === escapingPath)).toBeUndefined()
     })
 
+    it("skips sources.list.d traversal paths after POSIX normalization", async () => {
+      const traversalPath = "/etc/apt/sources.list.d/../../passwd"
+      const ssh = createMockSsh(
+        debianApplyResponses("bookworm", "trixie", {
+          [`cat '${traversalPath}'`]: {
+            code: 0,
+            stdout: "deb http://example.com/repo bookworm main",
+          },
+          "find /etc/apt/sources.list.d/ \\( -name '*.list' -o -name '*.sources' \\) -type f -print0":
+            { code: 0, stdout: `${traversalPath}\0` },
+        })
+      )
+      const mod = releaseUpgrade.upgrade()
+      const result = await mod.apply(ssh, emptyEnv)
+      expect(result.status).toBe("changed")
+      expect(ssh.calls).not.toContain(`cat '${traversalPath}'`)
+      expect(ssh.writeFileCalls.find((w) => w.remotePath === traversalPath)).toBeUndefined()
+    })
+
     it("R-0000172: skips paths containing newlines or NUL-like control chars", async () => {
       // Even when -print0 keeps the NUL boundaries clean, an embedded
       // newline in a filename could still break downstream tooling.

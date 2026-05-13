@@ -1,3 +1,5 @@
+import { posix as pathPosix } from "node:path"
+
 import type { SshConnection } from "../../src/types.js"
 
 export type DownloadFileCall = { localPath: string; remotePath: string }
@@ -68,7 +70,10 @@ function sameWriteOptions(
 }
 
 function matchesPath(actual: string, expected: PathAllowlistEntry): boolean {
-  return typeof expected === "string" ? actual === expected : expected.test(actual)
+  const normalizedActual = pathPosix.normalize(actual)
+  return typeof expected === "string"
+    ? normalizedActual === pathPosix.normalize(expected)
+    : expected.test(normalizedActual)
 }
 
 function assertAllowed(input: {
