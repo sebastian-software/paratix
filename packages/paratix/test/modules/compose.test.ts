@@ -779,6 +779,46 @@ describe("compose.config — apply", () => {
     expect(mockSsh.calls).toContain(`mv -T '${stagingPath}' '${remotePath}'`)
   })
 
+  it.each([
+    {
+      name: "content path rejects multiline mktemp output",
+      options: { content: sampleContent, projectDirectory },
+      stdout: `mktemp: warning: locale failed\n${stagingPath}\n`,
+    },
+    {
+      name: "content path rejects mktemp output outside the project directory",
+      options: {
+        content: sampleContent,
+        projectDirectory,
+      },
+      stdout: "/tmp/.compose.yml.paratix-staging.ABCDEF\n",
+    },
+    {
+      name: "src path rejects multiline mktemp output",
+      options: { projectDirectory, src: "/local/compose.yml" },
+      stdout: `mktemp: warning: locale failed\n${stagingPath}\n`,
+    },
+    {
+      name: "src path rejects mktemp output outside the project directory",
+      options: { projectDirectory, src: "/local/compose.yml" },
+      stdout: "/tmp/.compose.yml.paratix-staging.ABCDEF\n",
+    },
+  ])("$name", async ({ options, stdout }) => {
+    const mockSsh = createComposeMockSsh({
+      [mktempCommand]: { code: 0, stdout },
+    })
+
+    const mod = compose.config(options)
+    await expect(mod.apply(mockSsh, emptyEnv)).rejects.toThrow("Unexpected mktemp output")
+
+    expect(mockSsh.writeFileCalls).toHaveLength(0)
+    expect(mockSsh.uploadFileCalls).toHaveLength(0)
+    expect(mockSsh.calls).not.toContain(
+      `${composeCmd("podman")} -f '${stagingPath}' config --quiet`
+    )
+    expect(mockSsh.calls).not.toContain(`mv -T '${stagingPath}' '${remotePath}'`)
+  })
+
   it("returns failed when validation fails and never activates the staging file", async () => {
     const mockSsh = createComposeMockSsh({
       [`[ -e '${remotePath}' ]`]: { code: 1 },
