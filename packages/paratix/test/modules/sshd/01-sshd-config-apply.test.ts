@@ -15,6 +15,19 @@ const createMockSsh: typeof createBaseMockSsh = (responses, options) =>
     responseStubs: [
       { command: "mkdir -p '/run/sshd'", result: { code: 0 } },
       { command: "sshd -t", result: { code: 0 } },
+      {
+        command: "sshd -T",
+        result: {
+          code: 0,
+          stdout: [
+            "passwordauthentication no",
+            "permitrootlogin no",
+            "x11forwarding no",
+            "allowusers admin*",
+            "authorizedkeysfile /etc/ssh/authorized_keys/%u",
+          ].join("\n"),
+        },
+      },
       { command: SYSTEMCTL_CAT_SSHD, result: { code: 0 } },
       { command: SYSTEMCTL_CAT_SSH, result: { code: 1 } },
       { command: "systemctl is-enabled --quiet sshd.service", result: { code: 0 } },

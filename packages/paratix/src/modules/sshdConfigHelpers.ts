@@ -122,6 +122,43 @@ export function collectTopLevelSshdDirectiveValues(content: string, key: string)
 }
 
 /**
+ * Collect values from `sshd -T` output. OpenSSH emits the effective global
+ * configuration as one lower-case `directive value` line per setting; compare
+ * directive names case-insensitively so callers can keep sshd_config casing.
+ *
+ * @param content - The full stdout from `sshd -T`.
+ * @param key - The directive name to scan for (case-insensitive).
+ * @returns The trimmed values for each effective occurrence.
+ */
+export function collectEffectiveSshdDirectiveValues(content: string, key: string): string[] {
+  const expectedKeyLower = key.toLowerCase()
+  const values: string[] = []
+
+  for (const rawLine of content.split(/\r?\n/v)) {
+    const parsed = parseSshdConfigLine(rawLine)
+    if (parsed == null) continue
+    if (parsed.directive.toLowerCase() !== expectedKeyLower) continue
+
+    values.push(parsed.value)
+  }
+
+  return values
+}
+
+export function findNonMatchingEffectiveSshdSetting(
+  effectiveConfig: string,
+  settings: Record<string, string>
+): string | undefined {
+  for (const [key, value] of Object.entries(settings)) {
+    const desiredValue = value.trim()
+    const values = collectEffectiveSshdDirectiveValues(effectiveConfig, key)
+    if (values.length === 0) return key
+    if (values.some((currentValue) => currentValue !== desiredValue)) return key
+  }
+  return undefined
+}
+
+/**
  * Check whether every top-level active occurrence of `key` in the sshd_config
  * `content` has the given `value`. An "active" occurrence is a non-comment
  * line whose first token equals `key` (case-insensitive, leading whitespace

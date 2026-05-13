@@ -35,6 +35,7 @@ const createMockSsh: typeof createBaseMockSsh = (responses, options) =>
 const emptyEnv = {}
 const SSHD_CONFIG = "/etc/ssh/sshd_config"
 const CAT_SSHD = `cat '${SSHD_CONFIG}'`
+const SSHD_T = "sshd -T"
 const SYSTEMCTL_CAT_SSH = "systemctl cat ssh.service >/dev/null 2>&1"
 const SYSTEMCTL_CAT_SSHD = "systemctl cat sshd.service >/dev/null 2>&1"
 
@@ -85,10 +86,21 @@ describe("sshd.config — check", () => {
   it("returns ok when all settings are present in sshd_config", async () => {
     const mockSsh = createMockSsh({
       [CAT_SSHD]: { stdout: "PasswordAuthentication no\nPermitRootLogin no\n" },
+      [SSHD_T]: { stdout: "passwordauthentication no\npermitrootlogin no\n" },
     })
     const mod = sshd.config({ PasswordAuthentication: "no", PermitRootLogin: "no" })
     const result = await mod.check(mockSsh, emptyEnv)
     expect(result).toBe("ok")
+  })
+
+  it("returns needs-apply when sshd -T reports an included override with a different value", async () => {
+    const mockSsh = createMockSsh({
+      [CAT_SSHD]: { stdout: "Include /etc/ssh/sshd_config.d/*.conf\nPasswordAuthentication no\n" },
+      [SSHD_T]: { stdout: "passwordauthentication yes\n" },
+    })
+    const mod = sshd.config({ PasswordAuthentication: "no" })
+    const result = await mod.check(mockSsh, emptyEnv)
+    expect(result).toBe("needs-apply")
   })
 
   it("returns needs-apply when a setting has a different value", async () => {
@@ -121,6 +133,7 @@ describe("sshd.config — check", () => {
   it("reads sshd_config via cat command", async () => {
     const mockSsh = createMockSsh({
       [CAT_SSHD]: { stdout: "PasswordAuthentication no\n" },
+      [SSHD_T]: { stdout: "passwordauthentication no\n" },
     })
     const mod = sshd.config({ PasswordAuthentication: "no" })
     await mod.check(mockSsh, emptyEnv)
@@ -149,6 +162,7 @@ describe("sshd.config — check", () => {
   it("regression — exact value with RegExp special chars matches correctly", async () => {
     const mockSsh = createMockSsh({
       [CAT_SSHD]: { stdout: "AllowUsers admin*\n" },
+      [SSHD_T]: { stdout: "allowusers admin*\n" },
     })
     const mod = sshd.config({ AllowUsers: "admin*" })
     const result = await mod.check(mockSsh, emptyEnv)
@@ -182,6 +196,7 @@ describe("sshd.config — check", () => {
           "    AuthorizedKeysFile /etc/ssh/admin_authorized_keys",
         ].join("\n"),
       },
+      [SSHD_T]: { stdout: "authorizedkeysfile .ssh/authorized_keys\n" },
     })
     const mod = sshd.config({ AuthorizedKeysFile: ".ssh/authorized_keys" })
     const result = await mod.check(mockSsh, emptyEnv)
@@ -200,6 +215,7 @@ describe("sshd.config — check", () => {
           "    PasswordAuthentication no",
         ].join("\n"),
       },
+      [SSHD_T]: { stdout: "passwordauthentication no\n" },
     })
     const mod = sshd.config({ PasswordAuthentication: "no" })
     const result = await mod.check(mockSsh, emptyEnv)
@@ -216,6 +232,7 @@ describe("sshd.config — check", () => {
           "  # PasswordAuthentication yes",
         ].join("\n"),
       },
+      [SSHD_T]: { stdout: "passwordauthentication no\n" },
     })
     const mod = sshd.config({ PasswordAuthentication: "no" })
     const result = await mod.check(mockSsh, emptyEnv)

@@ -35,6 +35,7 @@ const createMockSsh: typeof createBaseMockSsh = (responses, options) =>
 const emptyEnv = {}
 const SSHD_CONFIG = "/etc/ssh/sshd_config"
 const CAT_SSHD = `cat '${SSHD_CONFIG}'`
+const SSHD_T = "sshd -T"
 const SYSTEMCTL_CAT_SSH = "systemctl cat ssh.service >/dev/null 2>&1"
 const SYSTEMCTL_CAT_SSHD = "systemctl cat sshd.service >/dev/null 2>&1"
 
@@ -146,6 +147,8 @@ describe("sshd.config — apply: validation and rollback", () => {
     execSpy
       .mockResolvedValueOnce({ code: 0, stderr: "", stdout: "" })
       .mockResolvedValueOnce({ code: 0, stderr: "", stdout: "" })
+      .mockResolvedValueOnce({ code: 0, stderr: "", stdout: "" })
+      .mockResolvedValueOnce({ code: 0, stderr: "", stdout: "passwordauthentication no\n" })
 
     const mod = sshd.config({ PasswordAuthentication: "no" })
     const result = await mod.apply(mockSsh, emptyEnv)
@@ -157,8 +160,38 @@ describe("sshd.config — apply: validation and rollback", () => {
     expect(execSpy.mock.calls.map((args) => args[0])).toStrictEqual([
       "mkdir -p '/run/sshd'",
       "sshd -t",
+      "mkdir -p '/run/sshd'",
+      SSHD_T,
       SYSTEMCTL_CAT_SSHD,
       "systemctl reload sshd",
+    ])
+  })
+
+  it("rolls back and returns failed when sshd -T reports an included override after validation", async () => {
+    const originalConfig = "Include /etc/ssh/sshd_config.d/*.conf\nPasswordAuthentication yes"
+    const mockSsh = createMockSsh({
+      [CAT_SSHD]: { stdout: originalConfig },
+    })
+    const writtenFiles = trackWriteFile(mockSsh)
+    const execSpy = vi.spyOn(mockSsh, "exec")
+
+    execSpy
+      .mockResolvedValueOnce({ code: 0, stderr: "", stdout: "" })
+      .mockResolvedValueOnce({ code: 0, stderr: "", stdout: "" })
+      .mockResolvedValueOnce({ code: 0, stderr: "", stdout: "" })
+      .mockResolvedValueOnce({ code: 0, stderr: "", stdout: "passwordauthentication yes\n" })
+
+    const mod = sshd.config({ PasswordAuthentication: "no" })
+    const result = await mod.apply(mockSsh, emptyEnv)
+
+    expect(result.status).toBe("failed")
+    expect(result.error?.message).toContain("effective sshd configuration does not match")
+    expect(writtenFiles.at(-1)).toStrictEqual({ content: originalConfig, path: SSHD_CONFIG })
+    expect(execSpy.mock.calls.map((args) => args[0])).toStrictEqual([
+      "mkdir -p '/run/sshd'",
+      "sshd -t",
+      "mkdir -p '/run/sshd'",
+      SSHD_T,
     ])
   })
 
@@ -174,6 +207,8 @@ describe("sshd.config — apply: validation and rollback", () => {
       .mockResolvedValueOnce({ code: 0, stderr: "", stdout: "" })
       .mockResolvedValueOnce({ code: 0, stderr: "", stdout: "" })
       .mockResolvedValueOnce({ code: 0, stderr: "", stdout: "" })
+      .mockResolvedValueOnce({ code: 0, stderr: "", stdout: "passwordauthentication no\n" })
+      .mockResolvedValueOnce({ code: 0, stderr: "", stdout: "" })
       .mockResolvedValueOnce({ code: 1, stderr: "reload failed", stdout: "" })
 
     const mod = sshd.config({ PasswordAuthentication: "no" })
@@ -183,6 +218,8 @@ describe("sshd.config — apply: validation and rollback", () => {
     expect(execSpy.mock.calls.map((args) => args[0])).toStrictEqual([
       "mkdir -p '/run/sshd'",
       "sshd -t",
+      "mkdir -p '/run/sshd'",
+      SSHD_T,
       SYSTEMCTL_CAT_SSHD,
       "systemctl reload sshd",
     ])
@@ -200,6 +237,8 @@ describe("sshd.config — apply: validation and rollback", () => {
     execSpy
       .mockResolvedValueOnce({ code: 0, stderr: "", stdout: "" })
       .mockResolvedValueOnce({ code: 0, stderr: "", stdout: "" })
+      .mockResolvedValueOnce({ code: 0, stderr: "", stdout: "" })
+      .mockResolvedValueOnce({ code: 0, stderr: "", stdout: "passwordauthentication no\n" })
       .mockResolvedValueOnce({ code: 1, stderr: "", stdout: "" })
       .mockResolvedValueOnce({ code: 0, stderr: "", stdout: "" })
       .mockResolvedValueOnce({ code: 0, stderr: "", stdout: "" })
@@ -211,6 +250,8 @@ describe("sshd.config — apply: validation and rollback", () => {
     expect(execSpy.mock.calls.map((args) => args[0])).toStrictEqual([
       "mkdir -p '/run/sshd'",
       "sshd -t",
+      "mkdir -p '/run/sshd'",
+      SSHD_T,
       SYSTEMCTL_CAT_SSHD,
       SYSTEMCTL_CAT_SSH,
       "systemctl reload ssh",
@@ -228,6 +269,8 @@ describe("sshd.config — apply: validation and rollback", () => {
     execSpy
       .mockResolvedValueOnce({ code: 0, stderr: "", stdout: "" })
       .mockResolvedValueOnce({ code: 0, stderr: "", stdout: "" })
+      .mockResolvedValueOnce({ code: 0, stderr: "", stdout: "" })
+      .mockResolvedValueOnce({ code: 0, stderr: "", stdout: "passwordauthentication no\n" })
       .mockResolvedValueOnce({ code: 1, stderr: "", stdout: "" })
       .mockResolvedValueOnce({ code: 1, stderr: "", stdout: "" })
 
@@ -239,6 +282,8 @@ describe("sshd.config — apply: validation and rollback", () => {
     expect(execSpy.mock.calls.map((args) => args[0])).toStrictEqual([
       "mkdir -p '/run/sshd'",
       "sshd -t",
+      "mkdir -p '/run/sshd'",
+      SSHD_T,
       SYSTEMCTL_CAT_SSHD,
       SYSTEMCTL_CAT_SSH,
     ])
@@ -261,6 +306,8 @@ describe("sshd.config — apply: validation and rollback", () => {
     execSpy
       .mockResolvedValueOnce({ code: 0, stderr: "", stdout: "" }) // mkdir -p /run/sshd
       .mockResolvedValueOnce({ code: 0, stderr: "", stdout: "" }) // sshd -t
+      .mockResolvedValueOnce({ code: 0, stderr: "", stdout: "" }) // mkdir -p /run/sshd for sshd -T
+      .mockResolvedValueOnce({ code: 0, stderr: "", stdout: "passwordauthentication no\n" }) // sshd -T
       .mockResolvedValueOnce({ code: 0, stderr: "", stdout: "" }) // systemctl cat sshd.service
       .mockResolvedValueOnce({ code: 1, stderr: "reload failed", stdout: "" }) // systemctl reload sshd
 

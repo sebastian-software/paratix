@@ -6,6 +6,7 @@ import { failed, failedCommand } from "../moduleFailure.js"
 import { isValidTcpPort } from "../serverDefinitionValidation.js"
 import { shellQuote } from "../sshHelpers.js"
 import {
+  type ExecResult,
   guardedWriteFile,
   type Module,
   type ModuleResult,
@@ -16,6 +17,7 @@ import {
   applySshdSettingToContent,
   collectTopLevelSshdDirectiveValues,
   findContradictingSshdMatchBlockOverride,
+  findNonMatchingEffectiveSshdSetting,
   sshdSettingMatchesEverywhere,
 } from "./sshdConfigHelpers.js"
 import { classifyUfwAccess } from "./ufwStatus.js"
@@ -24,6 +26,7 @@ const DEFAULT_SSH_PORT = 22
 const PRIVILEGE_SEPARATION_DIRECTORY = "/run/sshd"
 const SSHD_CONFIG_PATH = "/etc/ssh/sshd_config"
 const SSHD_CONFIG_MODE = "0644"
+const SSHD_EFFECTIVE_CONFIG_COMMAND = "sshd -T"
 const SYSTEMCTL = "systemctl"
 
 type SshSocketState = { active: boolean; enabled: boolean; exists: true } | { exists: false }
@@ -79,6 +82,60 @@ async function validateSshdConfig(
       ? "rolled back to previous config"
       : `rollback also failed: ${rollbackMessage}`
   return failed(`sshd config validation failed (sshd -t), ${rollbackSuffix}:\n${result.stderr}`)
+}
+
+async function readEffectiveSshdConfig(ssh: SshConnection): Promise<ExecResult> {
+  await ensurePrivilegeSeparationDirectory(ssh)
+  return ssh.exec(SSHD_EFFECTIVE_CONFIG_COMMAND, { ignoreExitCode: true, silent: true })
+}
+
+async function findEffectiveSshdConfigMismatch(
+  ssh: SshConnection,
+  settings: Record<string, string>
+): Promise<string | undefined> {
+  const result = await readEffectiveSshdConfig(ssh)
+  if (result.code !== 0) return Object.keys(settings)[0]
+  return findNonMatchingEffectiveSshdSetting(result.stdout, settings)
+}
+
+async function rollbackSshdConfigAfterEffectiveMismatch(
+  ssh: SshConnection,
+  parameters: { directive: string; originalConfig: string }
+): Promise<ModuleResult> {
+  try {
+    await ssh.writeFile(SSHD_CONFIG_PATH, parameters.originalConfig, { mode: SSHD_CONFIG_MODE })
+    return failed(
+      `[sshd.config: ${parameters.directive}] effective sshd configuration does not match ` +
+        "the requested value after parsing includes; rolled back to previous config"
+    )
+  } catch (rollbackError) {
+    const rollbackMessage =
+      rollbackError instanceof Error ? rollbackError.message : String(rollbackError)
+    return failed(
+      `[sshd.config: ${parameters.directive}] effective sshd configuration does not match ` +
+        `the requested value after parsing includes; rollback also failed: ${rollbackMessage}`
+    )
+  }
+}
+
+async function rejectNonMatchingEffectiveSshdConfig(
+  ssh: SshConnection,
+  parameters: { didChange: boolean; originalConfig: string; settings: Record<string, string> }
+): Promise<ModuleResult | undefined> {
+  const directive = await findEffectiveSshdConfigMismatch(ssh, parameters.settings)
+  if (directive == null) return undefined
+
+  if (!parameters.didChange) {
+    return failed(
+      `[sshd.config: ${directive}] effective sshd configuration ` +
+        "does not match the requested value after parsing includes"
+    )
+  }
+
+  return rollbackSshdConfigAfterEffectiveMismatch(ssh, {
+    directive,
+    originalConfig: parameters.originalConfig,
+  })
 }
 
 async function ensurePrivilegeSeparationDirectory(ssh: SshConnection): Promise<void> {
@@ -449,6 +506,19 @@ function buildSshdConfigContent(
   return { didChange: newContent !== originalConfig, newContent }
 }
 
+async function writeSshdConfigIfChanged(
+  ssh: SshConnection,
+  parameters: { didChange: boolean; newContent: string; originalConfig: string }
+): Promise<void> {
+  if (!parameters.didChange) return
+  await guardedWriteFile(ssh, {
+    mode: SSHD_CONFIG_MODE,
+    newContent: parameters.newContent,
+    originalContent: parameters.originalConfig,
+    remotePath: SSHD_CONFIG_PATH,
+  })
+}
+
 function buildSshdPortContent(
   originalConfig: string,
   targetPort: number
@@ -639,17 +709,17 @@ export const sshd = {
           settings
         )
         if (nonConvergingMatchOverride != null) return nonConvergingMatchOverride
-        if (didChange) {
-          await guardedWriteFile(ssh, {
-            mode: SSHD_CONFIG_MODE,
-            newContent,
-            originalContent: originalConfig,
-            remotePath: SSHD_CONFIG_PATH,
-          })
-        }
+        await writeSshdConfigIfChanged(ssh, { didChange, newContent, originalConfig })
 
         const validationFailure = await validateSshdConfig(ssh, originalConfig)
         if (validationFailure != null) return validationFailure
+
+        const effectiveConfigFailure = await rejectNonMatchingEffectiveSshdConfig(ssh, {
+          didChange,
+          originalConfig,
+          settings,
+        })
+        if (effectiveConfigFailure != null) return effectiveConfigFailure
 
         if (!didChange) {
           return { status: "ok" }
@@ -672,6 +742,8 @@ export const sshd = {
             return NEEDS_APPLY
           }
         }
+        const mismatchingEffectiveDirective = await findEffectiveSshdConfigMismatch(ssh, settings)
+        if (mismatchingEffectiveDirective != null) return NEEDS_APPLY
         return "ok"
       },
       name: `sshd.config: ${settingNames}`,
