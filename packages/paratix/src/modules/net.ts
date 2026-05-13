@@ -50,6 +50,7 @@ const MAX_HOSTNAME_LENGTH = 253
 const MAX_HOSTNAME_LABEL_LENGTH = 63
 const HOSTNAME_LABEL_CHARS_PATTERN = /^[a-z0-9\x2d]+$/iv
 const HOSTNAME_LABEL_EDGE_PATTERN = /^[a-z0-9]$/iv
+const NETWORK_INTERFACE_NAME_PATTERN = /^[A-Za-z0-9][\w.\-]*$/v
 
 function validateWaitForTimingOption(label: string, value: number): void {
   if (Number.isFinite(value) && value > 0) return
@@ -169,6 +170,14 @@ function validateInterfaceOptions(options: InterfaceOptions): void {
   if (options.gateway != null) validateSingleLineNetworkValue("interface gateway", options.gateway)
 }
 
+function validateNetworkInterfaceName(label: string, value: string): void {
+  if (!NETWORK_INTERFACE_NAME_PATTERN.test(value)) {
+    throw new Error(
+      `[net] invalid ${label}: ${JSON.stringify(value)} — must match /^[A-Za-z0-9][\\w.\\-]*$/`
+    )
+  }
+}
+
 function validateResolvOptions(options: { nameservers: string[]; search?: string[] }): void {
   validateSingleLineNetworkValues("resolv nameserver", options.nameservers)
   validateSingleLineNetworkValues("resolv search domain", options.search)
@@ -205,7 +214,10 @@ function validateRouteOptions(parameters: {
 }): void {
   validateSingleLineNetworkValue("route destination", parameters.destination)
   validateSingleLineNetworkValue("route gateway", parameters.gateway)
-  if (parameters.device != null) validateSingleLineNetworkValue("route device", parameters.device)
+  if (parameters.device != null) {
+    validateSingleLineNetworkValue("route device", parameters.device)
+    validateNetworkInterfaceName("route device", parameters.device)
+  }
 }
 
 function validateHostsToken(label: string, value: string): void {
@@ -1268,12 +1280,7 @@ export const net = {
     // intended directory and overwrite arbitrary files. The regex enforces a
     // POSIX-compatible interface-name shape (alphanumeric start, then word
     // characters plus dot and dash).
-    if (!/^[A-Za-z0-9][\w.\-]*$/v.test(name)) {
-      throw new Error(
-        `[net.interface] invalid interface name: ${JSON.stringify(name)} ` +
-          `— must match /^[A-Za-z0-9][\\w.\\-]*$/`
-      )
-    }
+    validateNetworkInterfaceName("interface name", name)
     validateInterfaceOptions(options)
     const netplanPath = `/etc/netplan/60-paratix-${name}.yaml`
     const networkdPath = `/etc/systemd/network/60-paratix-${name}.network`
