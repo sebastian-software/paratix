@@ -32,6 +32,10 @@ const CONNECTION_TIMEOUT = 10_000
 export const DEFAULT_MAX_OUTPUT_BYTES = Number("1048576")
 const CAPTURE_TRUNCATION_MARKER = "\n[output truncated]"
 
+function ignoreTeardownError(): void {
+  /* teardown sink: late ssh2 errors after cleanup must not crash Node */
+}
+
 /**
  * Maximum number of characters included in a {@link CommandError} message
  * before the output is truncated. Output beyond this limit is still available
@@ -506,10 +510,20 @@ export function cleanupFailedSshClient(client: Client): void {
   } catch {
     /* removeAllListeners must not throw under any circumstance */
   }
+  attachSshClientTeardownErrorSink(client)
   try {
     client.end()
   } catch {
     /* end() may throw when the underlying socket has already been destroyed */
+  }
+}
+
+export function attachSshClientTeardownErrorSink(client: Client): void {
+  try {
+    client.removeListener("error", ignoreTeardownError)
+    client.on("error", ignoreTeardownError)
+  } catch {
+    /* installing the best-effort teardown sink must not mask cleanup */
   }
 }
 

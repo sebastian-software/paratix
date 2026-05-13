@@ -1133,7 +1133,10 @@ describe("tryConnectOnPort", () => {
     await expect(promise).rejects.toThrow("Permission denied")
     expect(client.end).toHaveBeenCalledOnce()
     expect(client.listenerCount("ready")).toBe(0)
-    expect(client.listenerCount("error")).toBe(0)
+    expect(client.listenerCount("error")).toBe(1)
+    expect(() => {
+      client.emit("error", new Error("late cleanup error"))
+    }).not.toThrow()
   })
 
   it("cleans up the client when the connect attempt times out", async () => {
@@ -1159,7 +1162,10 @@ describe("tryConnectOnPort", () => {
     })
     expect(client.end).toHaveBeenCalledOnce()
     expect(client.listenerCount("ready")).toBe(0)
-    expect(client.listenerCount("error")).toBe(0)
+    expect(client.listenerCount("error")).toBe(1)
+    expect(() => {
+      client.emit("error", new Error("late cleanup error"))
+    }).not.toThrow()
   })
 
   it("uses a bounded ready timeout for ssh2 and the local connect timer", async () => {
@@ -1195,7 +1201,10 @@ describe("tryConnectOnPort", () => {
     })
     expect(client.end).toHaveBeenCalledOnce()
     expect(client.listenerCount("ready")).toBe(0)
-    expect(client.listenerCount("error")).toBe(0)
+    expect(client.listenerCount("error")).toBe(1)
+    expect(() => {
+      client.emit("error", new Error("late cleanup error"))
+    }).not.toThrow()
   })
 
   it("cleans up the client and timer when the connect attempt is aborted", async () => {
@@ -1216,7 +1225,10 @@ describe("tryConnectOnPort", () => {
     await expect(promise).rejects.toThrow("Interrupted by SIGINT")
     expect(client.end).toHaveBeenCalledOnce()
     expect(client.listenerCount("ready")).toBe(0)
-    expect(client.listenerCount("error")).toBe(0)
+    expect(client.listenerCount("error")).toBe(1)
+    expect(() => {
+      client.emit("error", new Error("late cleanup error"))
+    }).not.toThrow()
     expect(vi.getTimerCount()).toBe(0)
   })
 
@@ -1237,7 +1249,10 @@ describe("tryConnectOnPort", () => {
     await expect(promise).rejects.toThrow("Cannot parse privateKey")
     expect(client.end).toHaveBeenCalledOnce()
     expect(client.listenerCount("ready")).toBe(0)
-    expect(client.listenerCount("error")).toBe(0)
+    expect(client.listenerCount("error")).toBe(1)
+    expect(() => {
+      client.emit("error", new Error("late cleanup error"))
+    }).not.toThrow()
     expect(vi.getTimerCount()).toBe(0)
   })
 })

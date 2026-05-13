@@ -84,6 +84,7 @@ vi.mock("../src/sftp.js", () => ({
 vi.mock("../src/sshHelpers.js", async () => {
   const actual = await vi.importActual<typeof SshHelpers>("../src/sshHelpers.js")
   return {
+    attachSshClientTeardownErrorSink: actual.attachSshClientTeardownErrorSink,
     cleanupFailedSshClient: vi.fn(actual.cleanupFailedSshClient),
     collectStreamOutput: vi.fn(actual.collectStreamOutput),
     // R-0000146: secretSink.maskScopedError performs `instanceof CommandError`
@@ -518,6 +519,48 @@ describe("SshConnectionImpl", () => {
       oldClientEmitter.emit("close")
 
       // Allow microtasks to settle.
+      await Promise.resolve()
+      await Promise.resolve()
+
+      expect(rejected).toBe(false)
+    })
+
+    it("does not reject pending operations of a fresh client when an old client emits a delayed 'error' event after disconnect", async () => {
+      const oldClientEmitter = new EventEmitter()
+      const oldClient = Object.assign(oldClientEmitter, {
+        end: vi.fn(),
+        exec: vi.fn(),
+        sftp: vi.fn(),
+      }) as unknown as Client & EventEmitter
+
+      const ssh = makeConnectedSshWithCloseListener(oldClient, {})
+
+      ssh.disconnect()
+
+      const newExecSpy = vi.fn().mockImplementation((_command: string, callback: ExecCallback) => {
+        const stream = makeStream()
+        callback(undefined, stream)
+      })
+      const newClientEmitter = new EventEmitter()
+      const newClient = Object.assign(newClientEmitter, {
+        end: vi.fn(),
+        exec: newExecSpy,
+        sftp: vi.fn(),
+      }) as unknown as Client & EventEmitter
+      ;(
+        ssh as unknown as { registerConnectedClient: (client: Client, port: number) => void }
+      ).registerConnectedClient(newClient, 22)
+
+      const execPromise = ssh.exec("sleep infinity")
+      let rejected = false
+      execPromise.catch(() => {
+        rejected = true
+      })
+      await Promise.resolve()
+
+      expect(() => {
+        oldClientEmitter.emit("error", new Error("late teardown error"))
+      }).not.toThrow()
       await Promise.resolve()
       await Promise.resolve()
 

@@ -18,6 +18,7 @@ import {
 import { getRegisteredSecrets, withRegisteredSecrets } from "./secretSink.js"
 import { SFTP_TIMEOUT, sftpDownload, sftpUpload, sftpUploadContent } from "./sftp.js"
 import {
+  attachSshClientTeardownErrorSink,
   cleanupFailedSshClient,
   collectStreamOutput,
   DEFAULT_MAX_OUTPUT_BYTES,
@@ -145,6 +146,11 @@ type HostKeyAttempt = {
   hostVerifier: (key: Buffer) => boolean
 }
 
+type ClientLifecycleListeners = {
+  close: () => void
+  error: (error: Error) => void
+}
+
 type SshRuntimeState = {
   host: string
   ports: number[]
@@ -232,6 +238,7 @@ export class SshConnectionImpl implements SshConnection {
    */
   private cachedSudoPassword: Buffer | null = null
   private client: Client | null = null
+  private readonly clientLifecycleListeners = new WeakMap<Client, ClientLifecycleListeners>()
   private readonly config: SshConfig
   private connectedPort = 0
   /**
@@ -988,15 +995,14 @@ export class SshConnectionImpl implements SshConnection {
    * @param closing - The ssh2 client whose lifecycle listeners should be removed.
    */
   private detachClientLifecycleListeners(closing: Client): void {
+    const listeners = this.clientLifecycleListeners.get(closing)
+    if (listeners == null) return
     try {
-      closing.removeAllListeners("close")
+      closing.removeListener("close", listeners.close)
+      closing.removeListener("error", listeners.error)
+      this.clientLifecycleListeners.delete(closing)
     } catch {
-      // removeAllListeners must never propagate from the disconnect path.
-    }
-    try {
-      closing.removeAllListeners("error")
-    } catch {
-      // removeAllListeners must never propagate from the disconnect path.
+      // removeListener must never propagate from the disconnect path.
     }
   }
 
@@ -1049,6 +1055,7 @@ export class SshConnectionImpl implements SshConnection {
 
   private tearDownClient(closing: Client): void {
     this.detachClientLifecycleListeners(closing)
+    attachSshClientTeardownErrorSink(closing)
     try {
       closing.end()
     } catch {
@@ -1437,6 +1444,12 @@ trap - EXIT
       }
       this.pendingRejects.clear()
     }
+    const closeListener = (): void => {
+      rejectPending(new Error("SSH connection closed unexpectedly"))
+    }
+    const errorListener = (error: Error): void => {
+      rejectPending(error)
+    }
     // R-0000143: ssh2 emits both `close` and `error` for a single
     // disconnect event (e.g. error escalation followed by close). Use
     // `once` for the close handler so the cleanup logic and stderr
@@ -1444,12 +1457,9 @@ trap - EXIT
     // for the operator. `rejectPending` itself is idempotent (it clears
     // the set after calling), but the handler is also responsible for
     // diagnostics that should not be repeated.
-    client.once("close", () => {
-      rejectPending(new Error("SSH connection closed unexpectedly"))
-    })
-    client.on("error", (error) => {
-      rejectPending(error)
-    })
+    client.once("close", closeListener)
+    client.on("error", errorListener)
+    this.clientLifecycleListeners.set(client, { close: closeListener, error: errorListener })
     this.client = client
     this.connectedPort = port
   }
