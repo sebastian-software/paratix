@@ -33,7 +33,6 @@ jobs:
           if-no-files-found: error
 
   release-please:
-    needs: validate
     runs-on: ubuntu-latest
     permissions:
       contents: write
