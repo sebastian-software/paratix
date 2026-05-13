@@ -272,7 +272,9 @@ net.request("http://localhost/api/ping", {
 > Bei systemd-networkd wird `/etc/systemd/network/60-paratix-<name>.network`
 > geschrieben und `networkctl reload` ausgefuehrt. `net.route` schreibt
 > `[Route]`-Drop-ins in
-> `/etc/systemd/network/60-paratix-<device>.network.d/50-paratix-route-<destination>.conf`.
+> `/etc/systemd/network/60-paratix-<device>.network.d/50-paratix-route-<destination>-<route-hash>.conf`.
+> Der Hash enthält Destination, Gateway und Device, damit mehrere Routen zur
+> gleichen Destination nicht kollidieren.
 > Alte Paratix-Standalone-Dateien unter
 > `/etc/systemd/network/50-paratix-route-<destination>.network` werden beim
 > Entfernen nur gelöscht, wenn der Inhalt exakt dem früheren Paratix-Inhalt

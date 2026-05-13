@@ -25,8 +25,23 @@ const createMockSsh: typeof createBaseMockSsh = (responses, options) =>
   })
 
 const emptyEnv = {}
-const routeDropinPath =
-  "/etc/systemd/network/60-paratix-eth0.network.d/50-paratix-route-10.0.0.0-24.conf"
+
+function buildRouteDropinPath(input: {
+  destination: string
+  device: string
+  gateway: string
+}): string {
+  const routeKey = `${input.destination}\n${input.gateway}\n${input.device}`
+  const routeHash = sha256String(routeKey).slice(0, 16)
+  const sanitized = input.destination.replaceAll("/", "-").replaceAll(":", "-").replace(/^-+/v, "")
+  return `/etc/systemd/network/60-paratix-${input.device}.network.d/50-paratix-route-${sanitized}-${routeHash}.conf`
+}
+
+const routeDropinPath = buildRouteDropinPath({
+  destination: "10.0.0.0/24",
+  device: "eth0",
+  gateway: "192.168.1.1",
+})
 const legacyRouteDropinPath = "/etc/systemd/network/50-paratix-route-10.0.0.0-24.network"
 const SUCCESSFUL_ROUTE_APPLY_OPTIONS = {
   responseStubs: [
@@ -204,7 +219,11 @@ describe("net.route — check", () => {
   })
 
   it("returns needs-apply when live route gateway only has a prefix match", async () => {
-    const dropinPath = routeDropinPath
+    const dropinPath = buildRouteDropinPath({
+      destination: "10.0.0.0/24",
+      device: "eth0",
+      gateway: "10.0.0.1",
+    })
     const expectedDropin = `[Route]\nDestination=10.0.0.0/24\nGateway=10.0.0.1\n`
     const mockSsh = createMockSsh({
       [`cat '${dropinPath}'`]: { stdout: expectedDropin },

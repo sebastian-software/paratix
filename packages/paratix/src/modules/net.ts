@@ -636,8 +636,7 @@ function buildRouteReloadFlag(parameters: RouteParameters): {
   flagName: string
   flagPrefix: string
 } {
-  const routeKey = `${parameters.destination}\n${parameters.gateway}\n${parameters.device ?? ""}`
-  const routeHash = sha256String(routeKey).slice(0, NET_RELOAD_HASH_LENGTH)
+  const routeHash = buildRoutePersistenceHash(parameters)
   const flagPrefix = `net-route-${routeHash}-`
   const dropinHash = sha256String(
     buildRouteDropin(parameters.destination, parameters.gateway)
@@ -646,6 +645,15 @@ function buildRouteReloadFlag(parameters: RouteParameters): {
     flagName: `${flagPrefix}${dropinHash}`,
     flagPrefix,
   }
+}
+
+function buildRoutePersistenceHash(parameters: {
+  destination: string
+  device?: string
+  gateway: string
+}): string {
+  const routeKey = `${parameters.destination}\n${parameters.gateway}\n${parameters.device ?? ""}`
+  return sha256String(routeKey).slice(0, NET_RELOAD_HASH_LENGTH)
 }
 
 /**
@@ -1450,10 +1458,11 @@ export const net = {
     const device = options?.device
     validateRouteOptions({ destination, device, gateway })
     const sanitized = sanitizeForFilename(destination)
+    const routeHash = buildRoutePersistenceHash({ destination, device, gateway })
     const dropinPath =
       device == null
         ? ""
-        : `/etc/systemd/network/60-paratix-${device}.network.d/50-paratix-route-${sanitized}.conf`
+        : `/etc/systemd/network/60-paratix-${device}.network.d/50-paratix-route-${sanitized}-${routeHash}.conf`
     const legacyDropinPath = `/etc/systemd/network/50-paratix-route-${sanitized}.network`
 
     return {

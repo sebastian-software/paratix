@@ -37,8 +37,23 @@ const createMockSsh: typeof createBaseMockSsh = (responses, options) =>
   })
 
 const emptyEnv = {}
-const routeDropinPath =
-  "/etc/systemd/network/60-paratix-eth0.network.d/50-paratix-route-10.0.0.0-24.conf"
+
+function buildRouteDropinPath(input: {
+  destination: string
+  device: string
+  gateway: string
+}): string {
+  const routeKey = `${input.destination}\n${input.gateway}\n${input.device}`
+  const routeHash = sha256String(routeKey).slice(0, 16)
+  const sanitized = input.destination.replaceAll("/", "-").replaceAll(":", "-").replace(/^-+/v, "")
+  return `/etc/systemd/network/60-paratix-${input.device}.network.d/50-paratix-route-${sanitized}-${routeHash}.conf`
+}
+
+const routeDropinPath = buildRouteDropinPath({
+  destination: "10.0.0.0/24",
+  device: "eth0",
+  gateway: "192.168.1.1",
+})
 const legacyRouteDropinPath = "/etc/systemd/network/50-paratix-route-10.0.0.0-24.network"
 const SUCCESSFUL_ROUTE_APPLY_OPTIONS = {
   responseStubs: [
@@ -181,6 +196,48 @@ describe("net.route — apply", () => {
       options: { mode: "0644" },
       path: routeDropinPath,
     })
+  })
+
+  it("uses distinct drop-in paths for the same destination with different gateways", async () => {
+    const firstPath = buildRouteDropinPath({
+      destination: "10.0.0.0/24",
+      device: "eth0",
+      gateway: "192.168.1.1",
+    })
+    const secondPath = buildRouteDropinPath({
+      destination: "10.0.0.0/24",
+      device: "eth0",
+      gateway: "192.168.1.254",
+    })
+    const mockSsh = createMockSsh({}, SUCCESSFUL_ROUTE_APPLY_OPTIONS)
+
+    await net.route("10.0.0.0/24", "192.168.1.1", { device: "eth0" }).apply(mockSsh, emptyEnv)
+    await net.route("10.0.0.0/24", "192.168.1.254", { device: "eth0" }).apply(mockSsh, emptyEnv)
+
+    expect(firstPath).not.toBe(secondPath)
+    expect(mockSsh.writeFileCalls.map((call) => call.remotePath)).toContain(firstPath)
+    expect(mockSsh.writeFileCalls.map((call) => call.remotePath)).toContain(secondPath)
+  })
+
+  it("uses distinct drop-in paths for the same destination and gateway with different devices", async () => {
+    const firstPath = buildRouteDropinPath({
+      destination: "10.0.0.0/24",
+      device: "eth0",
+      gateway: "192.168.1.1",
+    })
+    const secondPath = buildRouteDropinPath({
+      destination: "10.0.0.0/24",
+      device: "eth1",
+      gateway: "192.168.1.1",
+    })
+    const mockSsh = createMockSsh({}, SUCCESSFUL_ROUTE_APPLY_OPTIONS)
+
+    await net.route("10.0.0.0/24", "192.168.1.1", { device: "eth0" }).apply(mockSsh, emptyEnv)
+    await net.route("10.0.0.0/24", "192.168.1.1", { device: "eth1" }).apply(mockSsh, emptyEnv)
+
+    expect(firstPath).not.toBe(secondPath)
+    expect(mockSsh.writeFileCalls.map((call) => call.remotePath)).toContain(firstPath)
+    expect(mockSsh.writeFileCalls.map((call) => call.remotePath)).toContain(secondPath)
   })
 
   it("fails closed when no persistent target device is given", async () => {
@@ -411,8 +468,11 @@ describe("net.route — apply", () => {
 
   it("sanitizes destination with colons for drop-in filename", async () => {
     // IPv6 destination: colons replaced with dashes
-    const dropinPath =
-      "/etc/systemd/network/60-paratix-eth0.network.d/50-paratix-route-fd00---64.conf"
+    const dropinPath = buildRouteDropinPath({
+      destination: "fd00::/64",
+      device: "eth0",
+      gateway: "fe80::1",
+    })
     const expectedDropin = `[Route]\nDestination=fd00::/64\nGateway=fe80::1\n`
     const mockSsh = createMockSsh(
       {

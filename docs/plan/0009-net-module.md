@@ -45,7 +45,7 @@ type InterfaceOptions = {
 
 - Check via `ip route show <destination>` — prüft ob Gateway im Output vorkommt.
 - Apply via `ip route replace` (present) oder `ip route del` (absent).
-- Persistenz: systemd-networkd `[Route]`-Drop-in unter `/etc/systemd/network/60-paratix-<device>.network.d/50-paratix-route-<sanitized-dest>.conf`; `device` ist erforderlich, damit die Route nicht als eigenständige `.network`-Datei andere Interface-Konfigurationen verdrängt.
+- Persistenz: systemd-networkd `[Route]`-Drop-in unter `/etc/systemd/network/60-paratix-<device>.network.d/50-paratix-route-<sanitized-dest>-<route-hash>.conf`; `device` ist erforderlich, damit die Route nicht als eigenständige `.network`-Datei andere Interface-Konfigurationen verdrängt. Der Route-Hash enthält Destination, Gateway und Device, damit mehrere Routen zur gleichen Destination eindeutige Drop-in-Pfade erhalten.
 - `sanitizeForFilename()` ersetzt `/` und `:` durch `-` für sichere Dateinamen (IPv4 + IPv6).
 
 ### net.interface()
