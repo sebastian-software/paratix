@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto"
 import { describe, expect, it, vi } from "vitest"
 
-import { readHostFingerprintViaSsh2 } from "../src/hostFingerprintBootstrap.js"
+import { readHostFingerprintViaSsh2 as readRawHostFingerprintViaSsh2 } from "../src/hostFingerprintBootstrap.js"
 import {
   buildEcdsaHostKeyBuffer,
   buildEcdsaPointFromGeneratedKey,
@@ -45,7 +45,27 @@ function computeExpectedFingerprint(buffer: Buffer): string {
   return `SHA256:${hash.replaceAll("=", "")}`
 }
 
+async function readHostFingerprintViaSsh2(
+  host: string,
+  options: Parameters<typeof readRawHostFingerprintViaSsh2>[1] = {}
+): ReturnType<typeof readRawHostFingerprintViaSsh2> {
+  return readRawHostFingerprintViaSsh2(host, { allowSsh2HostKeyScan: true, ...options })
+}
+
 describe("readHostFingerprintViaSsh2", () => {
+  it("fails closed unless the caller explicitly opts into a live ssh2 scan", async () => {
+    const fakeClient = createFakeHostKeyClient(() => {
+      throw new Error("scan should not start")
+    })
+
+    await expect(
+      readRawHostFingerprintViaSsh2("example.com", {
+        clientFactory: () => useFakeHostKeyClient(fakeClient),
+      })
+    ).rejects.toThrow(/without explicit opt-in/v)
+    expect(fakeClient.connect).not.toHaveBeenCalled()
+  })
+
   it("derives the OpenSSH fingerprint from the ssh2 hostVerifier key", async () => {
     const hostKey = buildEd25519HostKeyBuffer()
     const fakeClient = createFakeHostKeyClient((config, client) => {

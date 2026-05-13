@@ -44,6 +44,10 @@ function createMockClient(): MockClient {
   return client
 }
 
+function trustedHostVerifier(): boolean {
+  return true
+}
+
 type CollectResult = Promise<{ code: number; stderr: string; stdout: string }>
 
 async function runCollect(
@@ -1097,6 +1101,7 @@ describe("tryConnectOnPort", () => {
     const promise = tryConnectOnPort({
       client,
       host: "example.test",
+      hostVerifier: trustedHostVerifier,
       port: 22,
       username: "root",
     })
@@ -1124,6 +1129,7 @@ describe("tryConnectOnPort", () => {
     const promise = tryConnectOnPort({
       client,
       host: "example.test",
+      hostVerifier: trustedHostVerifier,
       port: 22,
       username: "root",
     })
@@ -1145,6 +1151,7 @@ describe("tryConnectOnPort", () => {
     const promise = tryConnectOnPort({
       client,
       host: "example.test",
+      hostVerifier: trustedHostVerifier,
       port: 2222,
       username: "root",
     })
@@ -1174,6 +1181,7 @@ describe("tryConnectOnPort", () => {
     const promise = tryConnectOnPort({
       client,
       host: "example.test",
+      hostVerifier: trustedHostVerifier,
       port: 2222,
       readyTimeout: 1500,
       username: "root",
@@ -1216,6 +1224,7 @@ describe("tryConnectOnPort", () => {
       abortSignal: abortController.signal,
       client,
       host: "example.test",
+      hostVerifier: trustedHostVerifier,
       port: 2222,
       username: "root",
     })
@@ -1242,6 +1251,7 @@ describe("tryConnectOnPort", () => {
     const promise = tryConnectOnPort({
       client,
       host: "example.test",
+      hostVerifier: trustedHostVerifier,
       port: 22,
       username: "root",
     })
@@ -1254,6 +1264,22 @@ describe("tryConnectOnPort", () => {
       client.emit("error", new Error("late cleanup error"))
     }).not.toThrow()
     expect(vi.getTimerCount()).toBe(0)
+  })
+
+  it("fails closed before connecting when no host-key verifier is configured", async () => {
+    const client = createMockClient()
+
+    await expect(
+      tryConnectOnPort({
+        client,
+        host: "example.test",
+        port: 22,
+        username: "root",
+      })
+    ).rejects.toThrow(/without a host-key verifier/v)
+
+    expect(client.connect).not.toHaveBeenCalled()
+    expect(client.end).toHaveBeenCalledOnce()
   })
 })
 

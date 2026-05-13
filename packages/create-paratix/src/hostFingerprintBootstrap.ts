@@ -7,6 +7,7 @@ type HostKeyClient = Pick<Client, "connect" | "end" | "on" | "removeAllListeners
 type HostKeyClientFactory = () => HostKeyClient
 
 type HostFingerprintBootstrapOptions = {
+  allowSsh2HostKeyScan?: boolean
   clientFactory?: HostKeyClientFactory
   port?: number
   readyTimeoutMs?: number
@@ -323,6 +324,12 @@ export async function readHostFingerprintViaSsh2(
   host: string,
   options: HostFingerprintBootstrapOptions = {}
 ): Promise<HostFingerprintScanResult> {
+  if (options.allowSsh2HostKeyScan !== true) {
+    throw new Error(
+      "Refusing to start ssh2 host-key scan without explicit opt-in. " +
+        "Pass allowSsh2HostKeyScan: true only after the operator requested a live SSH scan."
+    )
+  }
   const { client, port, readyTimeoutMs } = resolveBootstrapOptions(options)
   return readFingerprintFromClient(client, { host, port, readyTimeoutMs })
 }

@@ -232,6 +232,10 @@ export async function promptForAdminPublicKey(
 // internal call sites strongly typed.
 type HostFingerprintSelectValue = "discard" | "pin" | "placeholder" | "scan"
 
+async function scanHostFingerprint(host: string): Promise<HostFingerprintScanResult> {
+  return readHostFingerprintViaSsh2(host, { allowSsh2HostKeyScan: true })
+}
+
 /**
  * Run a typed select on a chooser parameterised over a wider value set.
  * The chooser is contravariant in `TValue` for the options parameter, so
@@ -340,7 +344,7 @@ async function scanAndConfirmFingerprint(parameters: {
 export async function promptForHostFingerprint(
   host: string,
   select?: SelectFunction<HostFingerprintSelectValue>,
-  scanner: (host: string) => Promise<HostFingerprintScanResult> = readHostFingerprintViaSsh2
+  scanner: (host: string) => Promise<HostFingerprintScanResult> = scanHostFingerprint
 ): Promise<string | undefined> {
   const terminalSelect = select == null ? createTerminalSelect() : null
   const choose = select ?? terminalSelect?.select

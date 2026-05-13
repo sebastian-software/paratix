@@ -541,6 +541,13 @@ function getConnectAbortReason(signal: AbortSignal): Error {
  */
 export async function tryConnectOnPort(parameters: ConnectParameters): Promise<void> {
   const { abortSignal, client, port } = parameters
+  if (parameters.hostVerifier == null) {
+    cleanupFailedSshClient(client)
+    throw new Error(
+      "Refusing to start ssh2 without a host-key verifier. " +
+        "Use buildHostVerifier and pass the resulting hostVerifier, or explicitly configure a safe host-key policy."
+    )
+  }
   const connectConfig = buildConnectConfig(parameters)
   const readyTimeout = resolveReadyTimeout(parameters)
   return new Promise((resolve, reject) => {
