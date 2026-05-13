@@ -152,22 +152,34 @@ describe("releaseUpgrade.upgrade — check", () => {
     expect(ssh.calls).toContain("do-release-upgrade -c")
   })
 
-  it("R-0000239: Debian fork detected via ID_LIKE fallback", async () => {
+  it("does not treat Debian derivatives from ID_LIKE as supported Debian hosts", async () => {
     const ssh = createMockSsh({
       "cat '/etc/os-release'": {
         code: 0,
         stdout: "ID=raspbian\nID_LIKE=debian\nVERSION_CODENAME=bookworm\n",
       },
-      "curl --max-time 30 -fsSL https://deb.debian.org/debian/dists/stable/Release": {
-        code: 0,
-        stdout: DEBIAN_STABLE_RELEASE_CURL,
-      },
-      "lsb_release -cs": { code: 0, stdout: "bookworm\n" },
     })
     const mod = releaseUpgrade.upgrade()
     const result = await mod.check(ssh, emptyEnv)
     expect(result).toBe("needs-apply")
-    expect(ssh.calls).toContain("lsb_release -cs")
+    expect(ssh.calls).not.toContain("lsb_release -cs")
+    expect(ssh.calls).not.toContain(
+      "curl --max-time 30 -fsSL https://deb.debian.org/debian/dists/stable/Release"
+    )
+  })
+
+  it("fails apply for Debian derivatives that only declare Debian via ID_LIKE", async () => {
+    const ssh = createMockSsh({
+      "cat '/etc/os-release'": {
+        code: 0,
+        stdout: "ID=raspbian\nID_LIKE=debian\nVERSION_CODENAME=bookworm\n",
+      },
+    })
+    const mod = releaseUpgrade.upgrade()
+    const result = await mod.apply(ssh, emptyEnv)
+    expect(result.status).toBe("failed")
+    expect(String(result.error)).toContain("Unsupported distribution")
+    expect(ssh.calls).not.toContain("lsb_release -cs")
   })
 
   it("no SSH connection → needs-apply", async () => {

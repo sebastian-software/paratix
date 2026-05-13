@@ -20,14 +20,14 @@ describe("parseOsReleaseDistro", () => {
     expect(parseOsReleaseDistro('ID="Ubuntu"\nVERSION_ID="22.04"\n')).toBe("ubuntu")
   })
 
-  it("R-0000239: falls back to ID_LIKE when the ID is a Debian-derived fork", () => {
+  it("returns null for a Debian-derived fork that only declares Debian via ID_LIKE", () => {
     const osRelease = ["ID=raspbian", "ID_LIKE=debian", "VERSION_CODENAME=bookworm"].join("\n")
-    expect(parseOsReleaseDistro(osRelease)).toBe("debian")
+    expect(parseOsReleaseDistro(osRelease)).toBeNull()
   })
 
-  it("R-0000239: falls back to ID_LIKE when the ID is an Ubuntu-derived fork", () => {
+  it("returns null for an Ubuntu-derived fork that only declares Ubuntu via ID_LIKE", () => {
     const osRelease = ["ID=mint", 'ID_LIKE="ubuntu debian"', 'VERSION_ID="22"'].join("\n")
-    expect(parseOsReleaseDistro(osRelease)).toBe("ubuntu")
+    expect(parseOsReleaseDistro(osRelease)).toBeNull()
   })
 
   it("returns null for entirely unsupported distributions", () => {

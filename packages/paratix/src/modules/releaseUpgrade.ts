@@ -59,7 +59,7 @@ type ReleaseUpgradeOptions = {
 /**
  * Detect the Linux distribution of the remote host by reading
  * `/etc/os-release`. See {@link parseOsReleaseDistro} for the comparison
- * rules (case-insensitive `ID=`, `ID_LIKE=` fallback per R-0000239).
+ * rules (case-insensitive explicit `ID=` only).
  *
  * @param ssh - Active SSH connection to the remote host.
  * @returns `"debian"`, `"ubuntu"`, or `null` when the distribution cannot be
