@@ -138,6 +138,48 @@ describe("withRegisteredSecrets", () => {
     expect(getRegisteredSecrets()).toStrictEqual([])
   })
 
+  it("redacts Buffer values in scoped object causes before they serialize as bytes", async () => {
+    const secret = "buffer-cause-secret"
+    let thrown: unknown
+    try {
+      await withRegisteredSecrets([secret], async () => {
+        await Promise.resolve()
+        throw Object.assign(new Error("boom"), { cause: { payload: Buffer.from(secret) } })
+      })
+    } catch (error) {
+      thrown = error
+    }
+
+    expect(thrown).toBeInstanceOf(Error)
+    expect((thrown as Error).cause).toBe(`{"payload":"${REDACTED}"}`)
+    expect((thrown as Error).cause).not.toContain(secret.charCodeAt(0).toString())
+    expect(getRegisteredSecrets()).toStrictEqual([])
+  })
+
+  it("redacts obvious secret fields in scoped object causes", async () => {
+    let thrown: unknown
+    try {
+      await withRegisteredSecrets(["registered-secret"], async () => {
+        await Promise.resolve()
+        throw Object.assign(new Error("boom"), {
+          cause: {
+            authorization: "Bearer unregistered-token",
+            nested: { privateKey: "unregistered-private-key" },
+          },
+        })
+      })
+    } catch (error) {
+      thrown = error
+    }
+
+    expect(thrown).toBeInstanceOf(Error)
+    expect((thrown as Error).cause).toBe(
+      `{"authorization":"${REDACTED}","nested":{"privateKey":"${REDACTED}"}}`
+    )
+    expect((thrown as Error).cause).not.toContain("unregistered")
+    expect(getRegisteredSecrets()).toStrictEqual([])
+  })
+
   it("masks scoped secrets on failed module results before unregistering", async () => {
     const result = await withRegisteredSecrets(["alpha"], async () => {
       await Promise.resolve()

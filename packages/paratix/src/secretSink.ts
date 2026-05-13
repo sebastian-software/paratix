@@ -27,6 +27,15 @@ import { CommandError, maskSecrets } from "./sshHelpers.js"
  */
 const secretCounts = new Map<string, number>()
 const REDACTED_PLACEHOLDER = "[REDACTED]"
+const CIRCULAR_PLACEHOLDER = "[Circular]"
+const SECRET_CAUSE_FIELD_NAMES = new Set([
+  "authorization",
+  "key",
+  "password",
+  "privatekey",
+  "secret",
+  "token",
+])
 
 function assertRegistrableSecret(secret: string): void {
   if (secret.includes(REDACTED_PLACEHOLDER)) {
@@ -132,7 +141,7 @@ function isModuleResult(value: unknown): value is ModuleResult {
 function maskCauseValue(cause: unknown, secrets: readonly string[], secretList: string[]): unknown {
   if (cause === undefined) return undefined
   if (cause instanceof Error) return maskScopedError(cause, secrets)
-  return maskSecrets(stringifyCause(cause), secretList)
+  return maskSecrets(stringifyCause(cause, secretList), secretList)
 }
 
 function buildMaskedErrorClone(error: Error, maskedMessage: string, secretList: string[]): Error {
@@ -187,7 +196,7 @@ function maskScopedError(error: unknown, secrets: readonly string[]): Error {
   return clone
 }
 
-function stringifyCause(cause: unknown): string {
+function stringifyCause(cause: unknown, secretList: string[]): string {
   if (typeof cause === "string") return cause
   if (typeof cause === "function")
     return cause.name.length > 0 ? `[Function: ${cause.name}]` : "[Function]"
@@ -197,16 +206,75 @@ function stringifyCause(cause: unknown): string {
   if (typeof cause === "symbol") return String(cause)
   if (cause === undefined) return String(cause)
   if (cause === null) return "null"
-  return stringifyObjectCause(cause)
+  return stringifyObjectCause(cause, secretList)
 }
 
-function stringifyObjectCause(cause: object): string {
+function stringifyObjectCause(cause: object, secretList: string[]): string {
   try {
-    const serialized = JSON.stringify(cause) as string | undefined
+    const serialized = JSON.stringify(normalizeObjectCause(cause, secretList, new WeakSet())) as
+      | string
+      | undefined
     return serialized ?? Object.prototype.toString.call(cause)
   } catch {
     return Object.prototype.toString.call(cause)
   }
+}
+
+function normalizeObjectCause(cause: object, secretList: string[], seen: WeakSet<object>): unknown {
+  if (isBinaryCauseValue(cause)) return REDACTED_PLACEHOLDER
+  if (cause instanceof Date) return cause.toJSON()
+  if (seen.has(cause)) return CIRCULAR_PLACEHOLDER
+  seen.add(cause)
+  try {
+    if (Array.isArray(cause)) {
+      return cause.map((value) => normalizeCausePropertyValue(value, secretList, seen))
+    }
+
+    const normalized: Record<string, unknown> = {}
+    for (const [key, value] of Object.entries(cause)) {
+      if (isSecretCauseField(key)) {
+        normalized[key] = REDACTED_PLACEHOLDER
+        continue
+      }
+      normalized[key] = normalizeCausePropertyValue(value, secretList, seen)
+    }
+    return normalized
+  } finally {
+    seen.delete(cause)
+  }
+}
+
+function normalizeCausePropertyValue(
+  value: unknown,
+  secretList: string[],
+  seen: WeakSet<object>
+): unknown {
+  if (value === null) return null
+  if (typeof value === "bigint") return String(value)
+  if (typeof value !== "object") return value
+  return normalizeObjectCause(value, secretList, seen)
+}
+
+function isBinaryCauseValue(value: object): boolean {
+  return value instanceof ArrayBuffer || ArrayBuffer.isView(value)
+}
+
+function isSecretCauseField(key: string): boolean {
+  let normalized = ""
+  for (const character of key.toLowerCase()) {
+    if (isAsciiAlphaNumeric(character)) normalized += character
+  }
+  return (
+    SECRET_CAUSE_FIELD_NAMES.has(normalized) ||
+    normalized.endsWith("token") ||
+    normalized.endsWith("password") ||
+    normalized.endsWith("secret") ||
+    normalized.endsWith("privatekey")
+  )
+}
+
+function isAsciiAlphaNumeric(character: string): boolean {
+  return (character >= "0" && character <= "9") || (character >= "a" && character <= "z")
 }
 
 /**
