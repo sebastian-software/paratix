@@ -12,10 +12,41 @@ import {
 
 const UFW = "ufw"
 
+function hasProtocolAgnosticDenyRule(status: string, port: number): boolean {
+  const ipv6Rules = statusIncludesIpv6Rules(status)
+  return (
+    hasProtocolAgnosticRule(status, port, "DENY") ||
+    (ipv6Rules && hasProtocolAgnosticIpv6Rule(status, port, "DENY"))
+  )
+}
+
+function currentSshPortNeedsAllowRule(status: string, port: number): boolean {
+  const ipv6Rules = statusIncludesIpv6Rules(status)
+  if (hasProtocolAgnosticDenyRule(status, port)) return true
+  if (!hasProtocolAgnosticRule(status, port, "ALLOW")) return true
+  return ipv6Rules && !hasProtocolAgnosticIpv6Rule(status, port, "ALLOW")
+}
+
 async function allowCurrentSshPort(ssh: SshConnection): Promise<ModuleResult | null> {
   const { port } = ssh.getConnectionInfo()
   if (!isValidTcpPort(port)) {
     return failed(`[ufw.enabled] current SSH port is invalid: ${String(port)}`)
+  }
+  const status = await readUfwStatus(ssh)
+  if (status != null && hasProtocolAgnosticDenyRule(status, port)) {
+    const deleteResult = await ssh.exec(
+      `${UFW} delete ${shellQuote("deny")} ${shellQuote(String(port))}`,
+      {
+        ignoreExitCode: true,
+        silent: true,
+      }
+    )
+    if (deleteResult.code !== 0) {
+      return failedCommand(
+        `[ufw.enabled] ufw delete deny failed for current SSH port ${String(port)}`,
+        deleteResult
+      )
+    }
   }
   const result = await ssh.exec(`${UFW} allow ${shellQuote(String(port))}`, {
     ignoreExitCode: true,
@@ -253,13 +284,7 @@ export const ufw = {
         const { port } = ssh.getConnectionInfo()
         if (!isValidTcpPort(port)) return NEEDS_APPLY
 
-        if (!hasProtocolAgnosticRule(status, port, "ALLOW")) return NEEDS_APPLY
-        if (
-          statusIncludesIpv6Rules(status) &&
-          !hasProtocolAgnosticIpv6Rule(status, port, "ALLOW")
-        ) {
-          return NEEDS_APPLY
-        }
+        if (currentSshPortNeedsAllowRule(status, port)) return NEEDS_APPLY
         return "ok"
       },
       name: "ufw.enabled",

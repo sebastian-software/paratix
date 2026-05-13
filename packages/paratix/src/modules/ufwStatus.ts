@@ -83,7 +83,8 @@ export async function readUfwStatus(ssh: SshConnection): Promise<null | string> 
  * - `"allowed"` when ufw is active and a protocol-agnostic ALLOW rule for
  *   `targetPort` is present (including the IPv6 variant when IPv6 rules are
  *   reported).
- * - `"blocked"` when ufw is active but no such ALLOW rule exists.
+ * - `"blocked"` when ufw is active but no such ALLOW rule exists, or when a
+ *   contradictory DENY rule for `targetPort` is present.
  *
  * @param ssh - The remote SSH connection.
  * @param targetPort - The port whose reachability should be classified.
@@ -96,6 +97,10 @@ export async function classifyUfwAccess(
   const status = await readUfwStatus(ssh)
   if (status == null) return "inactive"
   if (!statusReportsActive(status)) return "inactive"
+  if (hasProtocolAgnosticRule(status, targetPort, "DENY")) return "blocked"
+  if (statusIncludesIpv6Rules(status) && hasProtocolAgnosticIpv6Rule(status, targetPort, "DENY")) {
+    return "blocked"
+  }
   if (!hasProtocolAgnosticRule(status, targetPort, "ALLOW")) return "blocked"
   if (
     statusIncludesIpv6Rules(status) &&
