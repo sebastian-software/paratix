@@ -8,7 +8,11 @@ import { createMockSsh as createBaseMockSsh } from "../helpers/mockSsh.js"
 const emptyEnv = {}
 
 const createMockSsh: typeof createBaseMockSsh = (responses, options) =>
-  createBaseMockSsh(responses, { defaultTestResult: false, ...options })
+  createBaseMockSsh(responses, {
+    allowUnstubbedDefaults: true,
+    defaultTestResult: false,
+    ...options,
+  })
 
 // ---------------------------------------------------------------------------
 // Helpers: mock responses for package manager detection

@@ -10,6 +10,7 @@ const createMockSsh: typeof createBaseMockSsh = (responses, options) =>
   createBaseMockSsh({ [mountPathSymlinkGuardCmd]: { code: 0 }, ...responses }, options)
 
 const successfulMountApplyOptions: MockSshOptions = {
+  allowUnstubbedDefaults: true,
   allowWrites: [{ options: { mode: "0644" }, remotePath: "/etc/fstab" }],
   defaultExecResult: { code: 0 },
 }

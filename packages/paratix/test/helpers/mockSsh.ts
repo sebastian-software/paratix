@@ -19,6 +19,12 @@ type MockResponseStub = {
 }
 
 type MockSshOptions = {
+  /**
+   * When `true`, explicit default results may answer otherwise unstubbed
+   * commands. Leave unset to keep strict mocks fail-closed even when defaults
+   * are configured.
+   */
+  allowUnstubbedDefaults?: boolean
   allowUnstubbedExec?: string[]
   allowUnstubbedOutput?: string[]
   allowUnstubbedTest?: string[]
@@ -156,14 +162,14 @@ function getMockResponse(input: {
   const match = findExplicitMatch(input)
   if (match) return match
 
+  const internal = getFlagLockInternalDefault(input.command, input.kind)
+  if (internal) return internal
+
   const hasExplicitDefault = hasExplicitDefaultForKind(input.kind, input.options)
-  if (!hasExplicitDefault) {
-    const internal = getFlagLockInternalDefault(input.command, input.kind)
-    if (internal) return internal
-  }
 
   const strict = input.options?.strict ?? true
-  if (strict && !hasExplicitDefault && !isStrictlyAllowed(input)) {
+  const canUseDefault = hasExplicitDefault && input.options?.allowUnstubbedDefaults === true
+  if (strict && !canUseDefault && !isStrictlyAllowed(input)) {
     throw buildUnstubbedCommandError(input.kind, input.command)
   }
 

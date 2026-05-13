@@ -73,6 +73,7 @@ function createSuccessfulApplySsh() {
       "systemctl daemon-reload": { code: 0 },
     },
     {
+      allowUnstubbedDefaults: true,
       defaultExecResult: { code: 0 },
       responseStubs: [
         {

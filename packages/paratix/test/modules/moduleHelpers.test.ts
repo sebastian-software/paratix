@@ -30,6 +30,7 @@ function createSharedFlagMockSsh(flagName: string): ReturnType<typeof createMock
   const base = createMockSsh(
     {},
     {
+      allowUnstubbedDefaults: true,
       defaultExecResult: { code: 0 },
       defaultOutputResult: "",
       defaultTestResult: false,
@@ -301,6 +302,7 @@ function createStaleLockSsh(
   const base = createMockSsh(
     {},
     {
+      allowUnstubbedDefaults: true,
       defaultExecResult: { code: 0 },
       defaultOutputResult: "",
       defaultTestResult: false,
@@ -533,6 +535,7 @@ function createSharedMutexMockSsh(lockName: string): ReturnType<typeof createMoc
   const base = createMockSsh(
     {},
     {
+      allowUnstubbedDefaults: true,
       defaultExecResult: { code: 0 },
       defaultOutputResult: "",
       defaultTestResult: false,

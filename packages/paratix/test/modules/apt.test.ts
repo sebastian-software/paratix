@@ -903,7 +903,7 @@ describe("apt.repository (standard form)", () => {
         [`[ -L '${filePath}' ]`]: { code: 1 },
         "DEBIAN_FRONTEND=noninteractive apt-get update": { code: 0 },
       },
-      { defaultExecResult: SUCCESSFUL_EXEC_DEFAULT }
+      { allowUnstubbedDefaults: true, defaultExecResult: SUCCESSFUL_EXEC_DEFAULT }
     )
     const mod = apt.repository("docker", source)
     const result = await mod.apply(ssh, emptyEnv)
@@ -1185,7 +1185,7 @@ describe("apt.debconf", () => {
           stdout: "0 string\n",
         },
       },
-      { defaultExecResult: SUCCESSFUL_EXEC_DEFAULT }
+      { allowUnstubbedDefaults: true, defaultExecResult: SUCCESSFUL_EXEC_DEFAULT }
     )
     const mod = apt.debconf("pkg", { "pkg/dash-value": "-n" })
     const result = await mod.apply(ssh, emptyEnv)
@@ -1210,7 +1210,7 @@ describe("apt.debconf", () => {
           stdout: "0 string\n",
         },
       },
-      { defaultExecResult: SUCCESSFUL_EXEC_DEFAULT }
+      { allowUnstubbedDefaults: true, defaultExecResult: SUCCESSFUL_EXEC_DEFAULT }
     )
     const mod = apt.debconf("pkg", { "pkg/backslash-value": String.raw`a\tb\nc` })
     const result = await mod.apply(ssh, emptyEnv)
@@ -1283,7 +1283,7 @@ describe("apt.debconf", () => {
           stdout: "0 string\n",
         },
       },
-      { defaultExecResult: SUCCESSFUL_EXEC_DEFAULT }
+      { allowUnstubbedDefaults: true, defaultExecResult: SUCCESSFUL_EXEC_DEFAULT }
     )
     expect(await mod.apply(ssh2, emptyEnv)).toStrictEqual({ status: "changed" })
     expect(ssh2.calls).toContain(

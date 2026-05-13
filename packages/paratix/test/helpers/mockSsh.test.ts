@@ -103,8 +103,16 @@ describe("createMockSsh", () => {
     )
   })
 
-  it("returns the configured defaultTestResult for unstubbed test calls", async () => {
+  it("rejects unstubbed test calls when only defaultTestResult is configured", async () => {
     const ssh = createMockSsh({}, { defaultTestResult: false })
+
+    await expect(ssh.test("test -f /tmp/missing")).rejects.toThrow(
+      "createMockSsh: unstubbed test call: test -f /tmp/missing"
+    )
+  })
+
+  it("returns the configured defaultTestResult for unstubbed test calls with explicit opt-in", async () => {
+    const ssh = createMockSsh({}, { allowUnstubbedDefaults: true, defaultTestResult: false })
 
     await expect(ssh.test("test -f /tmp/missing")).resolves.toBe(false)
   })
@@ -113,7 +121,9 @@ describe("createMockSsh", () => {
     const ssh = createMockSsh({ "test -f /tmp/exists": { code: 0 } }, { defaultTestResult: false })
 
     await expect(ssh.test("test -f /tmp/exists")).resolves.toBe(true)
-    await expect(ssh.test("test -f /tmp/missing")).resolves.toBe(false)
+    await expect(ssh.test("test -f /tmp/missing")).rejects.toThrow(
+      "createMockSsh: unstubbed test call: test -f /tmp/missing"
+    )
   })
 
   it("warns about unstubbed test calls when warnOnUnstubbedTest is enabled", async () => {
@@ -130,10 +140,24 @@ describe("createMockSsh", () => {
     }
   })
 
-  it("rejects the configured defaultExecResult when it has a non-zero exit code", async () => {
+  it("rejects unstubbed exec calls when only defaultExecResult is configured", async () => {
     const ssh = createMockSsh(
       {},
       { defaultExecResult: { code: 1, stderr: "command not found", stdout: "" } }
+    )
+
+    await expect(ssh.exec("rename-me")).rejects.toThrow(
+      "createMockSsh: unstubbed exec call: rename-me"
+    )
+  })
+
+  it("rejects the configured defaultExecResult when opt-in allows it and it has a non-zero exit code", async () => {
+    const ssh = createMockSsh(
+      {},
+      {
+        allowUnstubbedDefaults: true,
+        defaultExecResult: { code: 1, stderr: "command not found", stdout: "" },
+      }
     )
 
     await expect(ssh.exec("rename-me")).rejects.toThrow(
@@ -159,6 +183,7 @@ describe("createMockSsh", () => {
     const ssh = createMockSsh(
       {},
       {
+        allowUnstubbedDefaults: true,
         defaultExecResult: { code: 1, stderr: "command not found", stdout: "" },
         rejectNonZeroExit: false,
       }
@@ -191,8 +216,19 @@ describe("createMockSsh", () => {
     )
   })
 
-  it("returns the configured defaultOutputResult for unstubbed output calls", async () => {
+  it("rejects unstubbed output calls when only defaultOutputResult is configured", async () => {
     const ssh = createMockSsh({}, { defaultOutputResult: "legacy output" })
+
+    await expect(ssh.output("stat /tmp/file")).rejects.toThrow(
+      "createMockSsh: unstubbed output call: stat /tmp/file"
+    )
+  })
+
+  it("returns the configured defaultOutputResult for unstubbed output calls with explicit opt-in", async () => {
+    const ssh = createMockSsh(
+      {},
+      { allowUnstubbedDefaults: true, defaultOutputResult: "legacy output" }
+    )
 
     await expect(ssh.output("stat /tmp/file")).resolves.toBe("legacy output")
   })
@@ -204,7 +240,9 @@ describe("createMockSsh", () => {
     )
 
     await expect(ssh.output("cat /tmp/file")).resolves.toBe("stubbed")
-    await expect(ssh.output("stat /tmp/file")).resolves.toBe("legacy output")
+    await expect(ssh.output("stat /tmp/file")).rejects.toThrow(
+      "createMockSsh: unstubbed output call: stat /tmp/file"
+    )
   })
 
   it("rejects output calls with non-zero exit codes by default", async () => {
