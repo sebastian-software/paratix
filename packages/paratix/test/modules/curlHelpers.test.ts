@@ -77,11 +77,21 @@ describe("hasSensitiveHeaders", () => {
     expect(hasSensitiveHeaders({ "Proxy-Authorization": "Basic abc" })).toBe(true)
   })
 
+  it("matches custom credential header name tokens", () => {
+    expect(hasSensitiveHeaders({ "X-Client-Token": "token" })).toBe(true)
+    expect(hasSensitiveHeaders({ XServiceAuth: "auth" })).toBe(true)
+    expect(hasSensitiveHeaders({ "X-Signing-Signature": "sig" })).toBe(true)
+    expect(hasSensitiveHeaders({ "X-Api-Secret": "secret" })).toBe(true)
+    expect(hasSensitiveHeaders({ "X-Credential-Id": "credential" })).toBe(true)
+  })
+
   it("returns false for non-sensitive headers", () => {
     expect(
       hasSensitiveHeaders({
         Accept: "application/json",
         "Content-Type": "application/json",
+        "X-Authored-By": "deploy",
+        "X-Monkey": "banana",
         "X-Trace-Id": "abc",
       })
     ).toBe(false)

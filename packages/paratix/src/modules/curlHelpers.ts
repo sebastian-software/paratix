@@ -19,6 +19,15 @@ const SENSITIVE_HEADER_NAMES = new Set([
   "set-cookie",
   "x-api-key",
 ])
+const SENSITIVE_HEADER_TOKENS = new Set([
+  "auth",
+  "credential",
+  "key",
+  "secret",
+  "signature",
+  "token",
+])
+const HEADER_NAME_SEPARATORS = new Set(HTTP_HEADER_NAME_SPECIAL_CHARS)
 const QUERY_PARAMETER_SEPARATORS = new Set(["_", "-", "."])
 const REDACTED_URL_VALUE = "REDACTED"
 
@@ -114,6 +123,22 @@ function tokenizeQueryParameterName(name: string): string[] {
   return tokens
 }
 
+function tokenizeHeaderName(name: string): string[] {
+  const tokens: string[] = []
+  let current = ""
+  for (let index = 0; index < name.length; index++) {
+    const char = name.charAt(index)
+    if (HEADER_NAME_SEPARATORS.has(char)) {
+      current = appendQueryParameterToken(tokens, current)
+      continue
+    }
+    if (isCamelCaseBoundary(name, index)) current = appendQueryParameterToken(tokens, current)
+    current += char
+  }
+  appendQueryParameterToken(tokens, current)
+  return tokens
+}
+
 /**
  * Check whether a query parameter name looks sensitive.
  *
@@ -139,6 +164,7 @@ export function isSensitiveQueryParameterName(name: string): boolean {
 export function hasSensitiveHeaders(headers: Record<string, string>): boolean {
   for (const name of Object.keys(headers)) {
     if (SENSITIVE_HEADER_NAMES.has(name.toLowerCase())) return true
+    if (tokenizeHeaderName(name).some((part) => SENSITIVE_HEADER_TOKENS.has(part))) return true
   }
   return false
 }

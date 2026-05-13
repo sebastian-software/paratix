@@ -197,6 +197,14 @@ describe("net.request — check", () => {
     ).toThrow(/refusing to send sensitive headers .* over plaintext http/v)
   })
 
+  it("rejects http URLs that carry custom credential-like headers", () => {
+    expect(() =>
+      net.request("http://example.com/health", {
+        headers: { "X-Webhook-Signature": "sig" },
+      })
+    ).toThrow(/refusing to send sensitive headers .* over plaintext http/v)
+  })
+
   it("allows http URLs with sensitive headers when allowInsecureHttpHeaders is true", () => {
     expect(() =>
       net.request("http://example.com/health", {

@@ -1251,6 +1251,16 @@ describe("download.url", () => {
       ).toThrow(/refusing to send sensitive headers .* over plaintext http/v)
     })
 
+    it("rejects http:// URL with custom credential-like headers", () => {
+      expect(() =>
+        download.url(destination, "http://example.com/file", {
+          ...allowUnverifiedDownload,
+          allowInsecureHttp: true,
+          headers: { "X-Client-Token": "abc" },
+        })
+      ).toThrow(/refusing to send sensitive headers .* over plaintext http/v)
+    })
+
     it("allows http:// URL with sensitive headers when allowInsecureHttpHeaders is true", () => {
       expect(() =>
         download.url(destination, "http://example.com/file", {
@@ -2187,6 +2197,16 @@ describe("download.large", () => {
           ...allowUnverifiedDownload,
           allowInsecureHttp: true,
           headers: { "proxy-authorization": "Basic abc" },
+        })
+      ).toThrow(/refusing to send sensitive headers .* over plaintext http/v)
+    })
+
+    it("rejects http:// URL with custom credential-like headers", () => {
+      expect(() =>
+        download.large(destination, "http://example.com/file", {
+          ...allowUnverifiedDownload,
+          allowInsecureHttp: true,
+          headers: { XServiceAuth: "abc" },
         })
       ).toThrow(/refusing to send sensitive headers .* over plaintext http/v)
     })
