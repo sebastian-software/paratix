@@ -1,6 +1,7 @@
 import { failed, failedCommand } from "../moduleFailure.js"
 import { shellQuote } from "../ssh.js"
 import { type ModuleResult, NEEDS_APPLY, type SshConnection } from "../types.js"
+import { moveSwapToBackup } from "./swapBackupHelpers.js"
 import {
   classifySwapFilePath,
   cleanupSwapTemporaryFile,
@@ -67,21 +68,11 @@ async function disableAndRemoveSwapForReplacement(
   }
 
   const backupPath = `${path}.paratix-backup`
-  // R-0000246: `mv -T -n` performs an atomic rename(2) that refuses to
-  // overwrite an existing destination, closing the TOCTOU window present
-  // in the previous `[ ! -e backup ] && mv -T` form. Mirrors R-0000180 in
-  // swapFileCreateHelpers.
-  const backupResult = await ssh.exec(
-    `mv -T -n ${shellQuote(path)} ${shellQuote(backupPath)}`,
-    EXEC_OPTS
-  )
-  if (backupResult.code !== 0) {
+  const backupResult = await moveSwapToBackup(ssh, path, backupPath)
+  if (backupResult !== true) {
     await cleanupSwapTemporaryFile(ssh, temporaryPath)
-    if (disableResult) {
-      const enableResult = await enableSwap(ssh, path)
-      if (typeof enableResult !== "boolean") return enableResult
-    }
-    return failedCommand(`[swap.file: ${path}] swap backup failed`, backupResult)
+    if (disableResult) await enableSwap(ssh, path)
+    return backupResult
   }
   return { backupPath, disabledSwap: disableResult }
 }

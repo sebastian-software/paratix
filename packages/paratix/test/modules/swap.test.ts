@@ -18,6 +18,7 @@ const createSwapTempCommand = `fallocate -l '${swapSize}' '${swapTempPath}' || {
 const mktempSwapCommand = "mktemp -p '/' '.swapfile.paratix.XXXXXX'"
 const publishSwapCommand = `find '/' -maxdepth 0 -type d -user root ! -perm /022 | grep -Fx '/' && mv -T -n '${swapTempPath}' '${swapPath}'`
 const backupSwapCommand = `mv -T -n '${swapPath}' '${swapBackupPath}'`
+const verifySwapBackupCommand = `[ ! -e '${swapPath}' ] && [ -f '${swapBackupPath}' ] && swaplabel '${swapBackupPath}' >/dev/null 2>&1`
 const restoreSwapCommand = `mv -T -- '${swapBackupPath}' '${swapPath}'`
 
 describe("swap.file — check", () => {
@@ -256,6 +257,7 @@ describe("swap.file — apply", () => {
       [mktempSwapCommand]: { code: 0, stdout: `${swapTempPath}\n` },
       [publishSwapCommand]: { code: 0 },
       [safeSwapParentCommand]: { code: 0, stdout: "/\n" },
+      [verifySwapBackupCommand]: { code: 0 },
     })
     // eslint-disable-next-line @typescript-eslint/require-await -- mock implementation
     ssh.writeFile = async (path: string, content: string): Promise<void> => {
@@ -276,6 +278,45 @@ describe("swap.file — apply", () => {
     expect(ssh.calls).toContain(`mkswap '${swapTempPath}'`)
     expect(ssh.calls).toContain(`swapon '${swapPath}'`)
     expect(writtenFiles).toStrictEqual([])
+  })
+
+  it("fails and re-enables swap when backup move is skipped by an existing backup", async () => {
+    const ssh = createMockSsh({
+      [`[ -e '${swapPath}' ]`]: { code: 0 },
+      [`[ -f '${swapPath}' ]`]: { code: 0 },
+      [`[ -L '${swapPath}' ]`]: { code: 1 },
+      [`cat '${swapPath}'`]: { stdout: "existing swap bytes" },
+      [`chmod '0600' '${swapTempPath}'`]: { code: 0 },
+      [`mkdir -p '/'`]: { code: 0 },
+      [`mkswap '${swapTempPath}'`]: { code: 0 },
+      [`rm -f '${swapTempPath}'`]: { code: 0 },
+      [`stat -c %s '${swapPath}'`]: { stdout: "1073741824" },
+      [`swaplabel '${swapPath}' >/dev/null 2>&1`]: { code: 0 },
+      [`swapoff '${swapPath}'`]: { code: 0 },
+      [`swapon '${swapPath}'`]: { code: 0 },
+      [backupSwapCommand]: { code: 0 },
+      [createSwapTempCommand]: { code: 0 },
+      [mktempSwapCommand]: { code: 0, stdout: `${swapTempPath}\n` },
+      [safeSwapParentCommand]: { code: 0, stdout: "/\n" },
+      [verifySwapBackupCommand]: { code: 1 },
+    })
+    vi.spyOn(ssh, "lines")
+      .mockResolvedValueOnce([swapPath])
+      .mockResolvedValueOnce([])
+      .mockResolvedValue([])
+
+    const mod = swap.file({ path: swapPath, size: swapSize })
+    const result = await mod.apply(ssh, emptyEnv)
+
+    expect(result.status).toBe("failed")
+    expect(result.error?.message).toContain("swap backup verification failed")
+    expect(ssh.calls).toContain(backupSwapCommand)
+    expect(ssh.calls).toContain(verifySwapBackupCommand)
+    expect(ssh.calls).toContain(`rm -f '${swapTempPath}'`)
+    expect(ssh.calls).toContain(`swapon '${swapPath}'`)
+    expect(ssh.calls).not.toContain(publishSwapCommand)
+    expect(ssh.calls).not.toContain(restoreSwapCommand)
+    expect(ssh.calls).not.toContain(`rm -f '${swapBackupPath}'`)
   })
 
   it("converges mode drift without recreating an otherwise valid active swap file", async () => {
@@ -325,6 +366,7 @@ describe("swap.file — apply", () => {
       [publishSwapCommand]: { code: 1, stderr: "publish failed" },
       [restoreSwapCommand]: { code: 0 },
       [safeSwapParentCommand]: { code: 0, stdout: "/\n" },
+      [verifySwapBackupCommand]: { code: 0 },
     })
     vi.spyOn(ssh, "lines")
       .mockResolvedValueOnce([swapPath])
@@ -365,6 +407,7 @@ describe("swap.file — apply", () => {
       [publishSwapCommand]: { code: 0 },
       [restoreSwapCommand]: { code: 0 },
       [safeSwapParentCommand]: { code: 0, stdout: "/\n" },
+      [verifySwapBackupCommand]: { code: 0 },
     })
     vi.spyOn(ssh, "lines")
       .mockResolvedValueOnce([swapPath])
@@ -400,6 +443,7 @@ describe("swap.file — apply", () => {
       [mktempSwapCommand]: { code: 0, stdout: `${swapTempPath}\n` },
       [publishSwapCommand]: { code: 0 },
       [safeSwapParentCommand]: { code: 0, stdout: "/\n" },
+      [verifySwapBackupCommand]: { code: 0 },
     })
     vi.spyOn(ssh, "lines")
       .mockResolvedValueOnce([])
