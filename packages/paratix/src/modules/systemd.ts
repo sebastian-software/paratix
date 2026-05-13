@@ -77,6 +77,20 @@ async function restoreUnitFileSnapshot(
   await ssh.exec(`rm -f ${shellQuote(filePath)}`, { ignoreExitCode: true, silent: true })
 }
 
+async function restoreUnitFileSnapshotIfCurrentMatches(parameters: {
+  expectedCurrentContent: string
+  filePath: string
+  snapshot: UnitFileSnapshot
+  ssh: SshConnection
+}): Promise<boolean> {
+  const { expectedCurrentContent, filePath, snapshot, ssh } = parameters
+  if (!(await ssh.exists(filePath))) return false
+  const currentContent = await ssh.readFile(filePath)
+  if (currentContent !== expectedCurrentContent) return false
+  await restoreUnitFileSnapshot(ssh, filePath, snapshot)
+  return true
+}
+
 /**
  * Write a systemd unit file with rollback on writeFile failure.
  *
@@ -118,14 +132,21 @@ async function reloadSystemdDaemon(ssh: SshConnection): Promise<ExecResult> {
 }
 
 async function rollbackUnitAfterFlagPersistenceFailure(parameters: {
+  content: string
   filePath: string
   flagFailure: ModuleResult
   name: string
   snapshot: UnitFileSnapshot
   ssh: SshConnection
 }): Promise<ModuleResult> {
-  const { filePath, flagFailure, name, snapshot, ssh } = parameters
-  await restoreUnitFileSnapshot(ssh, filePath, snapshot)
+  const { content, filePath, flagFailure, name, snapshot, ssh } = parameters
+  const didRollback = await restoreUnitFileSnapshotIfCurrentMatches({
+    expectedCurrentContent: content,
+    filePath,
+    snapshot,
+    ssh,
+  })
+  if (!didRollback) return flagFailure
   const rollbackReload = await reloadSystemdDaemon(ssh)
   if (rollbackReload.code !== 0) {
     return failedCommand(
@@ -163,14 +184,26 @@ async function applySystemdUnit(parameters: {
   if (writeFailure) return writeFailure
   const result = await reloadSystemdDaemon(ssh)
   if (result.code !== 0) {
-    await restoreUnitFileSnapshot(ssh, filePath, snapshot)
+    await restoreUnitFileSnapshotIfCurrentMatches({
+      expectedCurrentContent: content,
+      filePath,
+      snapshot,
+      ssh,
+    })
     return failedCommand(`[systemd.unit: ${name}] systemctl daemon-reload failed`, result)
   }
   // R-0000273: surface flag-persist failures (EROFS/EPERM/ENOSPC) through
   // the failedCommand path; the helper no longer throws.
   const flagFailure = await setVersionedFlag(ssh, reloadFlag.flagName, reloadFlag.flagPrefix)
   if (flagFailure) {
-    return rollbackUnitAfterFlagPersistenceFailure({ filePath, flagFailure, name, snapshot, ssh })
+    return rollbackUnitAfterFlagPersistenceFailure({
+      content,
+      filePath,
+      flagFailure,
+      name,
+      snapshot,
+      ssh,
+    })
   }
   return { status: "changed" }
 }

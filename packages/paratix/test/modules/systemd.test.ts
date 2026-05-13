@@ -239,6 +239,8 @@ describe("systemd.unit", () => {
       [`rm -f '${filePath}'`]: { code: 0 },
       "systemctl daemon-reload": { code: 1 },
     })
+    vi.spyOn(ssh, "exists").mockResolvedValueOnce(false).mockResolvedValueOnce(true)
+    vi.spyOn(ssh, "readFile").mockResolvedValueOnce(unitContent)
     const mod = systemd.unit(unitName, unitContent)
     const result = await mod.apply(ssh, emptyEnv)
     expect(result.status).toBe("failed")
@@ -254,6 +256,9 @@ describe("systemd.unit", () => {
       [`stat -c '%a' '${filePath}'`]: { code: 0, stdout: "600\n" },
       "systemctl daemon-reload": { code: 1 },
     })
+    vi.spyOn(ssh, "readFile")
+      .mockResolvedValueOnce(previousContent)
+      .mockResolvedValueOnce(unitContent)
     const writeFile = vi.spyOn(ssh, "writeFile").mockResolvedValue()
     const mod = systemd.unit(unitName, unitContent)
     const result = await mod.apply(ssh, emptyEnv)
@@ -276,6 +281,9 @@ describe("systemd.unit", () => {
       },
       "systemctl daemon-reload": { code: 0 },
     })
+    vi.spyOn(ssh, "readFile")
+      .mockResolvedValueOnce(previousContent)
+      .mockResolvedValueOnce(unitContent)
     const writeFile = vi.spyOn(ssh, "writeFile").mockResolvedValue()
     const mod = systemd.unit(unitName, unitContent)
     const result = await mod.apply(ssh, emptyEnv)
@@ -299,6 +307,9 @@ describe("systemd.unit", () => {
           "touch: cannot touch '/var/lib/paratix/flags/systemd-unit-marker': Permission denied\n",
       },
     })
+    vi.spyOn(ssh, "readFile")
+      .mockResolvedValueOnce(previousContent)
+      .mockResolvedValueOnce(unitContent)
     mockDaemonReloadSequence(ssh, [
       { code: 0, stderr: "", stdout: "" },
       { code: 1, stderr: "daemon reload failed\n", stdout: "" },
@@ -313,6 +324,52 @@ describe("systemd.unit", () => {
     expect(writeFile).toHaveBeenNthCalledWith(1, filePath, unitContent, { mode: "0644" })
     expect(writeFile).toHaveBeenNthCalledWith(2, filePath, previousContent, { mode: "600" })
     expect(ssh.calls.filter((call) => call === "systemctl daemon-reload")).toHaveLength(2)
+  })
+
+  it("does not overwrite a concurrently changed unit file when daemon-reload fails", async () => {
+    const previousContent = "[Unit]\nDescription=Previous\n"
+    const concurrentContent = "[Unit]\nDescription=Concurrent\n"
+    const ssh = createMockSsh({
+      [`[ -e '${filePath}' ]`]: { code: 0 },
+      [`cat '${filePath}'`]: { stdout: previousContent },
+      [`stat -c '%a' '${filePath}'`]: { code: 0, stdout: "600\n" },
+      "systemctl daemon-reload": { code: 1 },
+    })
+    vi.spyOn(ssh, "readFile")
+      .mockResolvedValueOnce(previousContent)
+      .mockResolvedValueOnce(concurrentContent)
+    const writeFile = vi.spyOn(ssh, "writeFile").mockResolvedValue()
+    const mod = systemd.unit(unitName, unitContent)
+    const result = await mod.apply(ssh, emptyEnv)
+
+    expect(result.status).toBe("failed")
+    expect(writeFile).toHaveBeenCalledTimes(1)
+    expect(writeFile).toHaveBeenNthCalledWith(1, filePath, unitContent, { mode: "0644" })
+  })
+
+  it("does not delete a concurrently created unit file when daemon-reload flag persistence fails", async () => {
+    const concurrentContent = "[Unit]\nDescription=Concurrent\n"
+    const ssh = createMockSsh({
+      "mkdir -p /var/lib/paratix/flags": { code: 0 },
+      [reloadFlagSet]: {
+        code: 1,
+        stderr:
+          "touch: cannot touch '/var/lib/paratix/flags/systemd-unit-marker': Permission denied\n",
+      },
+      "systemctl daemon-reload": { code: 0 },
+    })
+    vi.spyOn(ssh, "exists").mockResolvedValueOnce(false).mockResolvedValueOnce(true)
+    vi.spyOn(ssh, "readFile").mockResolvedValueOnce(concurrentContent)
+    const writeFile = vi.spyOn(ssh, "writeFile").mockResolvedValue()
+    const mod = systemd.unit(unitName, unitContent)
+    const result = await mod.apply(ssh, emptyEnv)
+
+    expect(result.status).toBe("failed")
+    expect(String(result.error)).toContain("failed to persist versioned flag")
+    expect(writeFile).toHaveBeenCalledTimes(1)
+    expect(writeFile).toHaveBeenNthCalledWith(1, filePath, unitContent, { mode: "0644" })
+    expect(ssh.calls).not.toContain(`rm -f '${filePath}'`)
+    expect(ssh.calls.filter((call) => call === "systemctl daemon-reload")).toHaveLength(1)
   })
 
   // R-0000211: writeFile can throw (SFTP error after a partial write,
