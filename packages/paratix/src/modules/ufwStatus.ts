@@ -65,6 +65,21 @@ export function hasTcpIpv6Rule(status: string, port: number, action: "ALLOW" | "
   return new RegExp(`^${port}/tcp\\s+\\(v6\\)\\s+${action}\\b`, "mv").test(status)
 }
 
+export function tcpRelevantRuleDeletePorts(input: {
+  action: "ALLOW" | "DENY"
+  includeIpv6: boolean
+  port: number
+  status: string
+}): string[] {
+  const { action, includeIpv6, port, status } = input
+  const rulePorts = new Set<string>()
+  if (hasProtocolAgnosticRule(status, port, action)) rulePorts.add(String(port))
+  if (includeIpv6 && hasProtocolAgnosticIpv6Rule(status, port, action)) rulePorts.add(String(port))
+  if (hasTcpRule(status, port, action)) rulePorts.add(`${String(port)}/tcp`)
+  if (includeIpv6 && hasTcpIpv6Rule(status, port, action)) rulePorts.add(`${String(port)}/tcp`)
+  return [...rulePorts]
+}
+
 /**
  * @param status - The captured `ufw status` output.
  * @returns `true` when the output reports any IPv6 rules.

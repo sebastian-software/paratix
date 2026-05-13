@@ -11,6 +11,7 @@ import {
   hasTcpRule,
   readUfwStatus,
   statusIncludesIpv6Rules,
+  tcpRelevantRuleDeletePorts,
 } from "./ufwStatus.js"
 
 const UFW = "ufw"
@@ -88,17 +89,6 @@ function ufwRuleApplyChanged(stdout: string): boolean {
 type UfwRuleAction = "allow" | "deny"
 type UfwRuleKeyword = "ALLOW" | "DENY"
 
-function hasOppositeRule(input: {
-  ipv6Rules: boolean
-  oppositeKeyword: UfwRuleKeyword
-  port: number
-  status: string
-}): boolean {
-  const { ipv6Rules, oppositeKeyword, port, status } = input
-  if (hasProtocolAgnosticRule(status, port, oppositeKeyword)) return true
-  return ipv6Rules && hasProtocolAgnosticIpv6Rule(status, port, oppositeKeyword)
-}
-
 // Apply phase helper for `ufw.rule`: when a contradictory `allow`/`deny`
 // rule for the port still exists, delete it before adding the desired
 // rule. Returns a `ModuleResult` only on failure; otherwise reports
@@ -114,24 +104,27 @@ async function deleteOppositeRule(input: {
   status: string
 }): Promise<{ changed: boolean; failure: ModuleResult | null }> {
   const { action, ipv6Rules, oppositeAction, oppositeKeyword, port, portList, ssh, status } = input
-  if (!hasOppositeRule({ ipv6Rules, oppositeKeyword, port, status })) {
-    return { changed: false, failure: null }
-  }
-  // ufw does not expose a separate IPv6 delete; deleting the
-  // protocol-agnostic opposite rule clears both families. The same
-  // command therefore covers the IPv4-only and IPv6-only variants of the
-  // contradictory entry.
-  const deleteResult = await ssh.exec(
-    `${UFW} delete ${shellQuote(oppositeAction)} ${shellQuote(String(port))}`,
-    { ignoreExitCode: true, silent: true }
-  )
-  if (deleteResult.code !== 0) {
-    return {
-      changed: false,
-      failure: failedCommand(
-        `[ufw.rule: ${action} ${portList.join(",")}] ufw delete ${oppositeAction} failed for port ${String(port)}`,
-        deleteResult
-      ),
+  const deleteRulePorts = tcpRelevantRuleDeletePorts({
+    action: oppositeKeyword,
+    includeIpv6: ipv6Rules,
+    port,
+    status,
+  })
+  if (deleteRulePorts.length === 0) return { changed: false, failure: null }
+  for (const rulePort of deleteRulePorts) {
+    // eslint-disable-next-line no-await-in-loop -- keep ufw mutations sequential to avoid firewall lock races
+    const deleteResult = await ssh.exec(
+      `${UFW} delete ${shellQuote(oppositeAction)} ${shellQuote(rulePort)}`,
+      { ignoreExitCode: true, silent: true }
+    )
+    if (deleteResult.code !== 0) {
+      return {
+        changed: false,
+        failure: failedCommand(
+          `[ufw.rule: ${action} ${portList.join(",")}] ufw delete ${oppositeAction} failed for port ${rulePort}`,
+          deleteResult
+        ),
+      }
     }
   }
   return { changed: true, failure: null }
@@ -210,11 +203,17 @@ function checkUfwRulePort(input: {
   if (requireIpv6Rule && !hasProtocolAgnosticIpv6Rule(status, port, expectedAction)) {
     return NEEDS_APPLY
   }
-  // R-0000174: a contradictory leftover rule (`allow` when we want
-  // `deny`, or vice versa) is drift even when the desired rule is
+  // R-0000174: contradictory leftover rules are drift even when the desired rule is
   // also present. ufw evaluates rules in order, so the older opposite
   // entry can shadow the new one. Force apply to remove it.
-  if (hasOppositeRule({ ipv6Rules: requireIpv6Rule, oppositeKeyword, port, status })) {
+  if (
+    tcpRelevantRuleDeletePorts({
+      action: oppositeKeyword,
+      includeIpv6: requireIpv6Rule,
+      port,
+      status,
+    }).length > 0
+  ) {
     return NEEDS_APPLY
   }
   return "ok"
@@ -388,13 +387,12 @@ export const ufw = {
         // error).
         const status = await readUfwStatus(ssh)
         if (status == null) return NEEDS_APPLY
-        const requireIpv6Rule = statusIncludesIpv6Rules(status)
         for (const port of portList) {
           const portResult = checkUfwRulePort({
             expectedAction,
             oppositeKeyword,
             port,
-            requireIpv6Rule,
+            requireIpv6Rule: statusIncludesIpv6Rules(status),
             status,
           })
           if (portResult === NEEDS_APPLY) return NEEDS_APPLY
