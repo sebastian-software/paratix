@@ -67,8 +67,13 @@ function validateAbsentPath(remotePath: string): void {
     throw new Error(`file.absent: remotePath must be an absolute path: ${remotePath}`)
   }
 
-  if (posix.normalize(trimmedPath) === "/") {
+  const normalizedPath = posix.normalize(trimmedPath)
+  if (normalizedPath === "/") {
     throw new Error(`file.absent: refusing to remove destructive path: ${remotePath}`)
+  }
+
+  if (trimmedPath !== normalizedPath) {
+    throw new Error(`file.absent: remotePath must be normalized: ${remotePath}`)
   }
 }
 

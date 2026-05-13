@@ -307,6 +307,32 @@ describe("file.absent", () => {
     )
   })
 
+  it.each([
+    ["/srv/app/../important", "parent traversal"],
+    ["/srv/app/.", "dot segment"],
+    ["/tmp//old-file", "duplicate slash"],
+  ])("rejects non-normalized absolute paths with %s (%s)", (remotePath) => {
+    expect(() => file.absent(remotePath)).toThrow(
+      `file.absent: remotePath must be normalized: ${remotePath}`
+    )
+  })
+
+  it("accepts paths with internal whitespace", async () => {
+    const remotePath = "/tmp/old file"
+    const ssh = createMockSsh({
+      "[ -e '/tmp/old file' ] || [ -L '/tmp/old file' ]": { code: 0 },
+      "rm -rf '/tmp/old file'": { code: 0 },
+    })
+    const mod = file.absent(remotePath)
+    const result = await mod.apply(ssh, emptyEnv)
+
+    expect(result.status).toBe("changed")
+    expect(ssh.execCalls).toContainEqual({
+      command: "rm -rf '/tmp/old file'",
+      options: { ignoreExitCode: true, silent: true },
+    })
+  })
+
   it("check returns ok when the path does not exist", async () => {
     const ssh = createMockSsh({
       "[ -e '/tmp/old-file' ] || [ -L '/tmp/old-file' ]": { code: 1 },
