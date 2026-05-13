@@ -170,6 +170,25 @@ describe("net.interface — apply", () => {
     expect(String(result.error)).toContain("netplan apply failed")
   })
 
+  it("returns failed when writing the initial Netplan config fails", async () => {
+    const netplanPath = "/etc/netplan/60-paratix-eth0.yaml"
+    const mockSsh = createMockSsh({
+      [`test -f '${netplanPath}'`]: { code: 1 },
+      "test -d '/etc/netplan'": { code: 0 },
+    })
+    const writeError = new Error("disk full")
+    vi.spyOn(mockSsh, "writeFile").mockRejectedValue(writeError)
+    const mod = net.interface("eth0", { dhcp: true })
+
+    const result = await mod.apply(mockSsh, emptyEnv)
+
+    expect(result.status).toBe("failed")
+    expect(String(result.error)).toContain(`write failed for ${netplanPath}`)
+    expect(String(result.error)).toContain("netplan apply was not run")
+    expect(String(result.error)).toContain("disk full")
+    expect(mockSsh.calls).not.toContain("netplan apply")
+  })
+
   it("restores the previous Netplan config when netplan apply fails", async () => {
     const netplanPath = "/etc/netplan/60-paratix-eth0.yaml"
     const previousConfig = "network:\n  version: 2\n"
@@ -330,6 +349,25 @@ describe("net.interface — apply", () => {
     const result = await mod.apply(mockSsh, emptyEnv)
     expect(result.status).toBe("failed")
     expect(String(result.error)).toContain("networkctl reload failed")
+  })
+
+  it("returns failed when writing the initial networkd config fails", async () => {
+    const networkdPath = "/etc/systemd/network/60-paratix-eth0.network"
+    const mockSsh = createMockSsh({
+      [`test -f '${networkdPath}'`]: { code: 1 },
+      "test -d '/etc/netplan'": { code: 1 },
+    })
+    const writeError = new Error("read-only filesystem")
+    vi.spyOn(mockSsh, "writeFile").mockRejectedValue(writeError)
+    const mod = net.interface("eth0", { dhcp: false })
+
+    const result = await mod.apply(mockSsh, emptyEnv)
+
+    expect(result.status).toBe("failed")
+    expect(String(result.error)).toContain(`write failed for ${networkdPath}`)
+    expect(String(result.error)).toContain("networkctl reload was not run")
+    expect(String(result.error)).toContain("read-only filesystem")
+    expect(mockSsh.calls).not.toContain("networkctl reload")
   })
 
   it("restores the previous networkd config when networkctl reload fails", async () => {

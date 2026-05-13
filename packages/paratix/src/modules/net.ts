@@ -448,9 +448,16 @@ async function writeAndApplyInterfaceConfig(parameters: {
     )
   }
   const snapshot = await captureInterfaceConfigSnapshot(parameters.ssh, parameters.path)
-  await parameters.ssh.writeFile(parameters.path, parameters.content, {
-    mode: NET_CONFIG_FILE_MODE,
-  })
+  try {
+    await parameters.ssh.writeFile(parameters.path, parameters.content, {
+      mode: NET_CONFIG_FILE_MODE,
+    })
+  } catch (error: unknown) {
+    const reason = error instanceof Error ? error.message : String(error)
+    return failed(
+      `[net.interface] write failed for ${parameters.path}; ${parameters.applyCommand} was not run: ${reason}`
+    )
+  }
   const result = await parameters.ssh.exec(parameters.applyCommand, EXEC_OPTS)
   if (result.code === 0) return { status: "changed" }
 
