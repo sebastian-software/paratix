@@ -92,6 +92,11 @@ describe("sshd.config — input validation", () => {
     )
   })
 
+  it("rejects Port directives case-insensitively because sshd.port handles port changes", () => {
+    expect(() => sshd.config({ Port: "2222" })).toThrow(/use sshd\.port\(\.\.\.\)/v)
+    expect(() => sshd.config({ pOrT: "2222" })).toThrow(/use sshd\.port\(\.\.\.\)/v)
+  })
+
   it("rejects values containing a newline (which would inject extra directives)", () => {
     expect(() => sshd.config({ AllowUsers: "admin\nPermitRootLogin yes" })).toThrow(
       /value for AllowUsers must not contain newline characters/v

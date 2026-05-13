@@ -48,6 +48,12 @@ function validateSshdSettings(settings: Record<string, string>): void {
           `(expected an alphabetic ASCII identifier, e.g. "PasswordAuthentication")`
       )
     }
+    if (key.toLowerCase() === "port") {
+      throw new Error(
+        `sshd.config: directive ${JSON.stringify(key)} is managed by sshd.port(...); ` +
+          "use sshd.port(...) to change the SSH listen port safely"
+      )
+    }
     if (/[\n\r]/v.test(value)) {
       throw new Error(
         `sshd.config: value for ${key} must not contain newline characters: ${JSON.stringify(value)}`
