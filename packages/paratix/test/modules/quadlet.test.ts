@@ -7,7 +7,6 @@ import { createMockSsh } from "../helpers/mockSsh.js"
 const emptyEnv = {}
 
 const quadletFilePath = "/etc/containers/systemd/traefik.container"
-const traefikReloadFlagPrefix = `quadlet-container-${sha256String("traefik").slice(0, 16)}-`
 
 function buildReloadFlag(name: string, content: string): string {
   return `quadlet-container-${sha256String(name).slice(0, 16)}-${sha256String(content).slice(0, 16)}`
@@ -15,6 +14,11 @@ function buildReloadFlag(name: string, content: string): string {
 
 function buildReloadFlagCheck(name: string, content: string): string {
   return `[ -f /var/lib/paratix/flags/'${buildReloadFlag(name, content)}' ]`
+}
+
+function buildReloadFlagPersistCommand(name: string, content: string): string {
+  const flagPrefix = `quadlet-container-${sha256String(name).slice(0, 16)}-`
+  return `find /var/lib/paratix/flags -maxdepth 1 -name '${flagPrefix}*' ! -name '*.lock' -delete && touch /var/lib/paratix/flags/'${buildReloadFlag(name, content)}'`
 }
 
 function expectedQuadletContent(): string {
@@ -70,15 +74,19 @@ function createSuccessfulApplySsh() {
   return createMockSsh(
     {
       "mkdir -p '/etc/containers/systemd'": { code: 0 },
+      "mkdir -p /var/lib/paratix/flags": { code: 0 },
       "systemctl daemon-reload": { code: 0 },
     },
     {
-      allowUnstubbedDefaults: true,
-      defaultExecResult: { code: 0 },
       responseStubs: [
         {
           command: /^\[ -e '\/etc\/containers\/systemd\/[^']+\.container' \]$/v,
           result: { code: 1 },
+        },
+        {
+          command:
+            /^find \/var\/lib\/paratix\/flags -maxdepth 1 -name 'quadlet-container-[0-9a-f]{16}-\*' ! -name '\*\.lock' -delete && touch \/var\/lib\/paratix\/flags\/'quadlet-container-[0-9a-f]{16}-[0-9a-f]{16}'$/v,
+          result: { code: 0 },
         },
       ],
     }
@@ -177,10 +185,10 @@ describe("quadlet.container", () => {
   })
 
   it("apply creates the quadlet directory, writes the file, and reloads systemd", async () => {
+    const flagCommand = buildReloadFlagPersistCommand("traefik", expectedQuadletContent())
     const ssh = createMockSsh({
       [`[ -e '${quadletFilePath}' ]`]: { code: 1 },
-      [`find /var/lib/paratix/flags -maxdepth 1 -name '${traefikReloadFlagPrefix}*' ! -name '*.lock' -delete && touch /var/lib/paratix/flags/'${buildReloadFlag("traefik", expectedQuadletContent())}'`]:
-        { code: 0 },
+      [flagCommand]: { code: 0 },
       "mkdir -p '/etc/containers/systemd'": { code: 0 },
       "mkdir -p /var/lib/paratix/flags": { code: 0 },
       "systemctl daemon-reload": { code: 0 },
@@ -192,12 +200,22 @@ describe("quadlet.container", () => {
     expect(result.status).toBe("changed")
     expect(ssh.calls).toContain("mkdir -p '/etc/containers/systemd'")
     expect(ssh.calls).toContain("systemctl daemon-reload")
-    expect(ssh.calls).toContain(
-      `find /var/lib/paratix/flags -maxdepth 1 -name '${traefikReloadFlagPrefix}*' ! -name '*.lock' -delete && touch /var/lib/paratix/flags/'${buildReloadFlag("traefik", expectedQuadletContent())}'`
-    )
+    expect(ssh.calls).toContain(flagCommand)
     expect(writeFile).toHaveBeenCalledWith(quadletFilePath, expectedQuadletContent(), {
       mode: "0644",
     })
+  })
+
+  it("apply rejects an unstubbed apply exec", async () => {
+    const ssh = createMockSsh({
+      [`[ -e '${quadletFilePath}' ]`]: { code: 1 },
+      "mkdir -p '/etc/containers/systemd'": { code: 0 },
+    })
+    vi.spyOn(ssh, "writeFile").mockResolvedValue()
+
+    await expect(createQuadletModule().apply(ssh, emptyEnv)).rejects.toThrow(
+      "createMockSsh: unstubbed exec call: systemctl daemon-reload"
+    )
   })
 
   it("apply returns failed when creating the quadlet directory fails", async () => {
@@ -209,7 +227,7 @@ describe("quadlet.container", () => {
 
     expect(result.status).toBe("failed")
     expect(ssh.calls).not.toContain(
-      `find /var/lib/paratix/flags -maxdepth 1 -name '${traefikReloadFlagPrefix}*' ! -name '*.lock' -delete && touch /var/lib/paratix/flags/'${buildReloadFlag("traefik", expectedQuadletContent())}'`
+      buildReloadFlagPersistCommand("traefik", expectedQuadletContent())
     )
   })
 
@@ -229,7 +247,7 @@ describe("quadlet.container", () => {
   })
 
   it("apply returns failed without rollback when persisting the reload flag fails", async () => {
-    const flagCommand = `find /var/lib/paratix/flags -maxdepth 1 -name '${traefikReloadFlagPrefix}*' ! -name '*.lock' -delete && touch /var/lib/paratix/flags/'${buildReloadFlag("traefik", expectedQuadletContent())}'`
+    const flagCommand = buildReloadFlagPersistCommand("traefik", expectedQuadletContent())
     const ssh = createMockSsh({
       [`[ -e '${quadletFilePath}' ]`]: { code: 1 },
       [flagCommand]: { code: 1, stderr: "read-only file system" },
