@@ -16,6 +16,7 @@ const archiveOwnerMemberConcurrencyLimit = 8
 // Stable hash of `${src}\n${destination}` for marker file naming.
 const srcHash = "2889be4b654d6b7f7922971e7fb3fdf1c5ebd92b9c52462be2683a735c7562ef"
 const marker = `/var/lib/paratix/flags/archive-${srcHash}.sha256`
+const membersMarker = `${marker}.members`
 const archiveSha = "abc123def456"
 
 const archiveSymlinkCheckPaths = [
@@ -47,10 +48,13 @@ const archiveAlternateStageMktempPattern = /^mktemp -d '\/opt\/app-alt\/\.parati
 const archiveAlternateStageMovePattern =
   /^cp -aT --remove-destination '\/opt\/app-alt\/\.paratix-stage\.[^']+' '\/opt\/app-alt'$/v
 const archiveAlternateStageCleanupPattern = /^rm -rf '\/opt\/app-alt\/\.paratix-stage\.[^']+'$/v
+const archiveMembersMarkerPattern =
+  /^cat '\/var\/lib\/paratix\/flags\/archive-[a-f0-9]+\.sha256\.members'$/v
 
 const archiveApplyResponseStubs: NonNullable<
   Parameters<typeof createBaseMockSsh>[1]
 >["responseStubs"] = [
+  { command: archiveMembersMarkerPattern, result: { code: 1, stderr: "cat: No such file" } },
   ...archiveSymlinkCheckPaths.map((path) => ({
     command: `test ! -L '${path}'`,
     result: { code: 0 },
@@ -228,7 +232,56 @@ describe("archive.extract — check", () => {
 
   it("returns ok when marker matches remote archive sha256", async () => {
     const mockSsh = createMockSsh({
+      [`[ -f '${destination}/app/file' ] && [ ! -L '${destination}/app/file' ]`]: { code: 0 },
       [`cat '${marker}'`]: { code: 0, stdout: archiveSha },
+      [`cat '${membersMarker}'`]: {
+        code: 0,
+        stdout: JSON.stringify([{ kind: "file", path: `${destination}/app/file` }]),
+      },
+      [`test -d '${destination}'`]: { code: 0 },
+      [`test -f '${marker}'`]: { code: 0 },
+    })
+    vi.spyOn(mockSsh, "sha256").mockResolvedValue(archiveSha)
+    const mod = archive.extract(src, destination)
+    const result = await mod.check(mockSsh, emptyEnv)
+    expect(result).toBe("ok")
+  })
+
+  it("returns needs-apply when an extracted member was deleted after extraction", async () => {
+    const mockSsh = createMockSsh({
+      [`[ -f '${destination}/app/file' ] && [ ! -L '${destination}/app/file' ]`]: { code: 1 },
+      [`cat '${membersMarker}'`]: {
+        code: 0,
+        stdout: JSON.stringify([{ kind: "file", path: `${destination}/app/file` }]),
+      },
+      [`test -d '${destination}'`]: { code: 0 },
+      [`test -f '${marker}'`]: { code: 0 },
+    })
+    const mod = archive.extract(src, destination)
+    const result = await mod.check(mockSsh, emptyEnv)
+    expect(result).toBe("needs-apply")
+    expect(mockSsh.calls).not.toContain(`cat '${marker}'`)
+  })
+
+  it("returns needs-apply when an extracted directory was replaced by a symlink", async () => {
+    const mockSsh = createMockSsh({
+      [`[ -d '${destination}/app' ] && [ ! -L '${destination}/app' ]`]: { code: 1 },
+      [`cat '${membersMarker}'`]: {
+        code: 0,
+        stdout: JSON.stringify([{ kind: "directory", path: `${destination}/app` }]),
+      },
+      [`test -d '${destination}'`]: { code: 0 },
+      [`test -f '${marker}'`]: { code: 0 },
+    })
+    const mod = archive.extract(src, destination)
+    const result = await mod.check(mockSsh, emptyEnv)
+    expect(result).toBe("needs-apply")
+  })
+
+  it("keeps legacy content markers without member metadata compatible", async () => {
+    const mockSsh = createMockSsh({
+      [`cat '${marker}'`]: { code: 0, stdout: archiveSha },
+      [`cat '${membersMarker}'`]: { code: 1, stderr: "cat: No such file or directory" },
       [`test -d '${destination}'`]: { code: 0 },
       [`test -f '${marker}'`]: { code: 0 },
     })
@@ -242,7 +295,12 @@ describe("archive.extract — check", () => {
     const ownerPathsMarker = `${marker}.owner-paths`
     const mockSsh = createMockSsh({
       [`[ -e '${destination}/app/file' ] || [ -L '${destination}/app/file' ]`]: { code: 0 },
+      [`[ -f '${destination}/app/file' ] && [ ! -L '${destination}/app/file' ]`]: { code: 0 },
       [`cat '${marker}'`]: { code: 0, stdout: archiveSha },
+      [`cat '${membersMarker}'`]: {
+        code: 0,
+        stdout: JSON.stringify([{ kind: "file", path: `${destination}/app/file` }]),
+      },
       [`cat '${ownerPathsMarker}'`]: {
         code: 0,
         stdout: JSON.stringify([`${destination}/app/file`]),
@@ -524,8 +582,12 @@ describe("archive.extract — apply", () => {
     expect(mockSsh.calls).not.toContain(
       `tar --no-same-owner --no-overwrite-dir -xzf '${src}' -C '${destination}'`
     )
-    expect(mockSsh.writeFile).toHaveBeenCalledOnce()
     expect(mockSsh.writeFile).toHaveBeenCalledWith(marker, archiveSha, { mode: "0644" })
+    expect(mockSsh.writeFile).toHaveBeenCalledWith(
+      membersMarker,
+      JSON.stringify([{ kind: "file", path: `${destination}/app/file` }]),
+      { mode: "0644" }
+    )
   })
 
   it("extracts .tar archive", async () => {
@@ -810,6 +872,11 @@ describe("archive.extract — apply", () => {
 
     expect(result.status).toBe("changed")
     expect(mockSsh.writeFile).toHaveBeenCalledWith(localMarker, archiveSha, { mode: "0644" })
+    expect(mockSsh.writeFile).toHaveBeenCalledWith(
+      `${localMarker}.members`,
+      JSON.stringify([{ kind: "file", path: `${destination}/app/file` }]),
+      { mode: "0644" }
+    )
     expect(mockSsh.writeFile).toHaveBeenCalledWith(
       ownerPathsMarker,
       JSON.stringify([`${destination}/app/file`]),
@@ -1423,6 +1490,11 @@ describe("archive.extract — apply", () => {
 
     expect(result.status).toBe("changed")
     expect(mockSsh.writeFile).toHaveBeenCalledWith(marker, archiveSha, { mode: "0644" })
+    expect(mockSsh.writeFile).toHaveBeenCalledWith(
+      membersMarker,
+      JSON.stringify([{ kind: "file", path: `${destination}/app/file` }]),
+      { mode: "0644" }
+    )
     expect(mockSsh.writeFile).toHaveBeenCalledWith(
       ownerPathsMarker,
       JSON.stringify([`${destination}/app/file`]),

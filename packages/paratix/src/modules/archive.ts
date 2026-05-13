@@ -16,6 +16,7 @@ import {
   type ArchiveMember,
   archiveMemberUnsafeReason,
   listArchiveMembers,
+  normalizeArchiveMemberPath,
 } from "./archiveMemberValidation.js"
 import { localSha256, sha256String } from "./fileHelpers.js"
 import { renderChownSymlinkCommand } from "./fileMetadataHelpers.js"
@@ -68,6 +69,15 @@ function markerPath(source: string, destination: string): string {
 
 function ownerPathsMarkerPath(marker: string): string {
   return `${marker}.owner-paths`
+}
+
+function membersMarkerPath(marker: string): string {
+  return `${marker}.members`
+}
+
+type ExtractedArchiveMember = {
+  kind: "directory" | "file" | "hardlink" | "symlink"
+  path: string
 }
 
 /**
@@ -372,6 +382,32 @@ async function writeOwnerPathsMarker(
   })
 }
 
+function extractedArchiveMembers(
+  destination: string,
+  members: ArchiveMember[]
+): ExtractedArchiveMember[] {
+  const extractedMembers = new Map<string, ExtractedArchiveMember>()
+  for (const member of members) {
+    const memberPath = normalizeArchiveMemberPath(member.path)
+    if (memberPath === null) continue
+    const path = memberPath === "" ? destination : `${destination}/${memberPath}`
+    if (member.kind === "special") continue
+    extractedMembers.set(path, { kind: member.kind, path })
+  }
+  return [...extractedMembers.values()]
+}
+
+async function writeMembersMarker(
+  conn: SshConnection,
+  parameters: { destination: string; marker: string; members: ArchiveMember[] }
+): Promise<void> {
+  await conn.writeFile(
+    membersMarkerPath(parameters.marker),
+    JSON.stringify(extractedArchiveMembers(parameters.destination, parameters.members)),
+    { mode: ARCHIVE_MARKER_MODE }
+  )
+}
+
 async function prepareExtractDestination(
   conn: SshConnection,
   parameters: { destination: string; source: string }
@@ -501,6 +537,7 @@ async function finalizeExtraction(
 
   const markerWritten = await writeMarker(conn, remoteSource, { marker })
   if (!markerWritten) return failed(`[archive.extract] failed to write marker for ${source}`)
+  await writeMembersMarker(conn, { destination, marker, members })
   await writeOwnerPathsMarker(conn, {
     destination,
     marker,
@@ -644,6 +681,64 @@ async function archiveOwnerMatches(
   })
 }
 
+function isExtractedArchiveMember(value: unknown): value is ExtractedArchiveMember {
+  if (typeof value !== "object" || value === null) return false
+  const member = value as { kind?: unknown; path?: unknown }
+  return (
+    typeof member.path === "string" &&
+    (member.kind === "directory" ||
+      member.kind === "file" ||
+      member.kind === "hardlink" ||
+      member.kind === "symlink")
+  )
+}
+
+async function readMembersMarker(
+  conn: SshConnection,
+  marker: string
+): Promise<ExtractedArchiveMember[] | null> {
+  const markerResult = await conn.exec(`cat ${shellQuote(membersMarkerPath(marker))}`, EXEC_OPTS)
+  if (markerResult.code !== 0) return null
+  try {
+    const members: unknown = JSON.parse(markerResult.stdout)
+    return Array.isArray(members) && members.every((member) => isExtractedArchiveMember(member))
+      ? members
+      : []
+  } catch {
+    return []
+  }
+}
+
+function memberTypeCheckCommand(member: ExtractedArchiveMember): string {
+  const path = shellQuote(member.path)
+  switch (member.kind) {
+    case "directory": {
+      return `[ -d ${path} ] && [ ! -L ${path} ]`
+    }
+    case "file":
+    case "hardlink": {
+      return `[ -f ${path} ] && [ ! -L ${path} ]`
+    }
+    case "symlink": {
+      return `[ -L ${path} ]`
+    }
+  }
+}
+
+async function extractedMembersMatch(conn: SshConnection, marker: string): Promise<boolean> {
+  const members = await readMembersMarker(conn, marker)
+  if (members === null) return true
+  const matches = await mapWithConcurrencyLimit(
+    members,
+    ARCHIVE_OWNER_MEMBER_CONCURRENCY,
+    async (member) => {
+      const result = await conn.exec(memberTypeCheckCommand(member), EXEC_OPTS)
+      return result.code === 0
+    }
+  )
+  return matches.every(Boolean)
+}
+
 async function ownerMatchesPaths(
   conn: SshConnection,
   parameters: { owner: string; paths: string[] }
@@ -752,6 +847,7 @@ export const archive = {
         // 2. Does the marker file exist?
         const markerExists = await conn.test(`test -f ${shellQuote(marker)}`)
         if (!markerExists) return NEEDS_APPLY
+        if (!(await extractedMembersMatch(conn, marker))) return NEEDS_APPLY
         if (
           !(await archiveOwnerMatches(conn, {
             destination: normalizedDestination,
