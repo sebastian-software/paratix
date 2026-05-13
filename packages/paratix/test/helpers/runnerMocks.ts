@@ -50,19 +50,20 @@ export function makeMockSshClass(
   return class MockSshConnectionImpl {
     public addPort = overrides?.addPort ?? vi.fn().mockReturnValue(true)
     public connect = overrides?.connect ?? vi.fn().mockResolvedValue(null)
+    public currentHost = ""
     public disconnect = overrides?.disconnect ?? vi.fn()
     public downloadFile = vi.fn().mockRejectedValue(rejectUnstubbedSshMethod("downloadFile"))
     public exec = overrides?.exec ?? vi.fn().mockRejectedValue(rejectUnstubbedSshMethod("exec"))
     public exists = vi.fn().mockRejectedValue(rejectUnstubbedSshMethod("exists"))
     public getConnectionInfo =
       overrides?.getConnectionInfo ??
-      vi.fn().mockReturnValue({
+      vi.fn(() => ({
         configuredPorts: DEFAULT_CONFIGURED_PORTS,
-        host: "1.2.3.4",
+        host: this.currentHost,
         port: 22,
         privateKeyPath: "~/.ssh/id",
         user: "root",
-      })
+      }))
     public lines = vi.fn().mockRejectedValue(rejectUnstubbedSshMethod("lines"))
     public output =
       overrides?.output ?? vi.fn().mockRejectedValue(rejectUnstubbedSshMethod("output"))
@@ -74,12 +75,17 @@ export function makeMockSshClass(
     public removePort = overrides?.removePort ?? vi.fn()
     public sha256 = vi.fn().mockRejectedValue(rejectUnstubbedSshMethod("sha256"))
     public test = vi.fn().mockRejectedValue(rejectUnstubbedSshMethod("test"))
-    public updateHost = overrides?.updateHost ?? vi.fn()
+    public updateHost =
+      overrides?.updateHost ??
+      vi.fn((host: string) => {
+        this.currentHost = host
+      })
     public uploadFile = vi.fn().mockRejectedValue(rejectUnstubbedSshMethod("uploadFile"))
     public writeFile =
       overrides?.writeFile ?? vi.fn().mockRejectedValue(rejectUnstubbedSshMethod("writeFile"))
 
-    public constructor(_host: string, config: unknown) {
+    public constructor(host: string, config: unknown) {
+      this.currentHost = host
       capturedConfigs.push(config)
     }
   }

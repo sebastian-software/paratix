@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 
-import type { Module, ModuleResult, ServerDefinition } from "../src/types.js"
+import type { Module, ModuleResult, ServerDefinition, SshConnection } from "../src/types.js"
 
 import { when } from "../src/builtins.js"
 import { meta } from "../src/meta.js"
@@ -500,6 +500,74 @@ describe("runPlaybook SSH config immutability", () => {
       user: "root",
     })
     expect(definition.ssh.ports).toStrictEqual([22])
+  })
+
+  it("exposes the definition host through the runner SSH mock connection info", async () => {
+    const capturedConfigs: unknown[] = []
+
+    vi.doMock("../src/ssh.js", () => ({
+      shellQuote: (s: string) => `'${s}'`,
+      SshConnectionImpl: makeMockSshClass(capturedConfigs),
+    }))
+
+    const { runPlaybook } = await import("../src/runner.js")
+
+    const hostCheckingModule: Module = {
+      apply: vi.fn().mockResolvedValue({ status: "ok" } satisfies ModuleResult),
+      check: vi.fn(async (ssh: null | SshConnection) => {
+        await Promise.resolve()
+        expect(ssh?.getConnectionInfo().host).toBe("203.0.113.10")
+        return "ok" as const
+      }),
+      name: "host-check",
+    }
+    const definition: ServerDefinition = {
+      host: "203.0.113.10",
+      name: "test-server",
+      run: [hostCheckingModule],
+      ssh: { ports: [22], privateKey: "~/.ssh/id", user: "root" },
+    }
+
+    await runPlaybook(definition)
+
+    expect(hostCheckingModule.check).toHaveBeenCalledOnce()
+  })
+
+  it("exposes runtime host updates through the runner SSH mock connection info", async () => {
+    const capturedConfigs: unknown[] = []
+    const reconnect = vi.fn().mockResolvedValue(null)
+
+    vi.doMock("../src/ssh.js", () => ({
+      shellQuote: (s: string) => `'${s}'`,
+      SshConnectionImpl: makeMockSshClass(capturedConfigs, { reconnect }),
+    }))
+
+    const { runPlaybook } = await import("../src/runner.js")
+
+    const updatingModule = makeModuleWithMeta([
+      meta.systemHost("203.0.113.42"),
+      meta.systemReboot(),
+    ])
+    const hostCheckingModule: Module = {
+      apply: vi.fn().mockResolvedValue({ status: "ok" } satisfies ModuleResult),
+      check: vi.fn(async (ssh: null | SshConnection) => {
+        await Promise.resolve()
+        expect(ssh?.getConnectionInfo().host).toBe("203.0.113.42")
+        return "ok" as const
+      }),
+      name: "updated-host-check",
+    }
+    const definition: ServerDefinition = {
+      host: "203.0.113.10",
+      name: "test-server",
+      run: [updatingModule, hostCheckingModule],
+      ssh: { ports: [22], privateKey: "~/.ssh/id", user: "root" },
+    }
+
+    await runPlaybook(definition, { rebootGraceSeconds: 0 })
+
+    expect(hostCheckingModule.check).toHaveBeenCalledOnce()
+    expect(reconnect).toHaveBeenCalledOnce()
   })
 })
 
