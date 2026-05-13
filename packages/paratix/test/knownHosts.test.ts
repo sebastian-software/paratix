@@ -268,9 +268,23 @@ describe("lookupHostKey", () => {
     expect(result).toStrictEqual(edKey)
   })
 
+  it("matches plain hostname entries case-insensitively", () => {
+    const mixedCaseEntries = [{ algo: "ssh-ed25519", host: "Example.COM", key: edKey }]
+
+    expect(lookupHostKey(mixedCaseEntries, "example.com", 22)).toStrictEqual(edKey)
+    expect(lookupHostKey(mixedCaseEntries, "EXAMPLE.COM", 22)).toStrictEqual(edKey)
+  })
+
   it("finds key for [host]:port format on non-standard port", () => {
     const result = lookupHostKey(entries, "example.com", 2222)
     expect(result).toStrictEqual(rsaKey)
+  })
+
+  it("matches bracketed non-standard port entries case-insensitively", () => {
+    const mixedCaseEntries = [{ algo: "ssh-ed25519", host: "[Example.COM]:2222", key: rsaKey }]
+
+    expect(lookupHostKey(mixedCaseEntries, "example.com", 2222)).toStrictEqual(rsaKey)
+    expect(lookupHostKey(mixedCaseEntries, "EXAMPLE.COM", 2222)).toStrictEqual(rsaKey)
   })
 
   it("finds key for a hashed host entry", () => {
@@ -281,10 +295,24 @@ describe("lookupHostKey", () => {
     expect(result).toStrictEqual(edKey)
   })
 
+  it("keeps hashed host entries matched against the original host spelling", () => {
+    const hashedEntries = [
+      { algo: "ssh-ed25519", host: makeHashedHostPattern("example.com"), key: edKey },
+    ]
+
+    expect(lookupHostKey(hashedEntries, "EXAMPLE.COM", 22)).toBeNull()
+  })
+
   it("finds key for a wildcard host pattern", () => {
     const wildcardEntries = [{ algo: "ssh-ed25519", host: "*.example.com", key: edKey }]
     expect(lookupHostKey(wildcardEntries, "app.example.com", 22)).toStrictEqual(edKey)
     expect(lookupHostKey(wildcardEntries, "example.com", 22)).toBeNull()
+  })
+
+  it("matches wildcard host patterns case-insensitively", () => {
+    const wildcardEntries = [{ algo: "ssh-ed25519", host: "*.Example.COM", key: edKey }]
+
+    expect(lookupHostKey(wildcardEntries, "APP.example.com", 22)).toStrictEqual(edKey)
   })
 
   it("honors negated patterns in a comma-separated host list", () => {
@@ -296,11 +324,27 @@ describe("lookupHostKey", () => {
     expect(lookupHostKey(patternEntries, "blocked.example.com", 22)).toBeNull()
   })
 
+  it("honors negated patterns case-insensitively", () => {
+    const patternEntries = parseKnownHosts(
+      `*.example.com,!Blocked.Example.COM ssh-ed25519 ${edKey.toString("base64")}`
+    )
+
+    expect(lookupHostKey(patternEntries, "APP.example.com", 22)).toStrictEqual(edKey)
+    expect(lookupHostKey(patternEntries, "blocked.example.com", 22)).toBeNull()
+    expect(lookupHostKey(patternEntries, "BLOCKED.EXAMPLE.COM", 22)).toBeNull()
+  })
+
   it("matches wildcard patterns for bracketed non-standard ports", () => {
     const wildcardEntries = [{ algo: "ssh-ed25519", host: "[*.example.com]:2222", key: rsaKey }]
 
     expect(lookupHostKey(wildcardEntries, "app.example.com", 2222)).toStrictEqual(rsaKey)
     expect(lookupHostKey(wildcardEntries, "app.example.com", 22)).toBeNull()
+  })
+
+  it("matches bracketed wildcard patterns case-insensitively", () => {
+    const wildcardEntries = [{ algo: "ssh-ed25519", host: "[*.Example.COM]:2222", key: rsaKey }]
+
+    expect(lookupHostKey(wildcardEntries, "APP.example.com", 2222)).toStrictEqual(rsaKey)
   })
 
   it("returns null when host is not found", () => {
@@ -700,6 +744,19 @@ describe("buildHostVerifier", () => {
     expect(appendFileMock).not.toHaveBeenCalled()
   })
 
+  it("mode 'accept-new' matches a known host case-insensitively without appending", async () => {
+    readFileSyncMock.mockReturnValue(makeKnownHostsContent("example.com", 22, ed25519Key))
+
+    const { hostVerifier } = await buildHostVerifier("accept-new", {
+      host: "EXAMPLE.COM",
+      port: 22,
+    })
+    expect(hostVerifier).toBeDefined()
+
+    expect(hostVerifier!(ed25519Key)).toBe(true)
+    expect(appendFileMock).not.toHaveBeenCalled()
+  })
+
   it("mode 'accept-new' with known host and wrong key: hostVerifier throws Error", async () => {
     readFileSyncMock.mockReturnValue(makeKnownHostsContent("example.com", 22, ed25519Key))
 
@@ -737,6 +794,15 @@ describe("buildHostVerifier", () => {
 
     const result = hostVerifier!(ed25519Key)
     expect(result).toBe(true)
+  })
+
+  it("mode 'yes' matches a known host case-insensitively", async () => {
+    readFileSyncMock.mockReturnValue(makeKnownHostsContent("example.com", 22, ed25519Key))
+
+    const { hostVerifier } = await buildHostVerifier("yes", { host: "EXAMPLE.COM", port: 22 })
+    expect(hostVerifier).toBeDefined()
+
+    expect(hostVerifier!(ed25519Key)).toBe(true)
   })
 
   it("regression — mode 'yes' accepts a matching key when known_hosts contains multiple algorithms for the same host", async () => {

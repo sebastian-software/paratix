@@ -15,12 +15,17 @@ export function matchesKnownHostPatternList(patterns: string[], needle: string):
     const negated = rawPattern.startsWith("!")
     const pattern = negated ? rawPattern.slice(1) : rawPattern
     if (pattern.length === 0) continue
-    const matched = matchesHashedHost(pattern, needle) || matchesHostPattern(pattern, needle)
+    const matched = matchesHashedHost(pattern, needle) || matchesPlainHostPattern(pattern, needle)
     if (!matched) continue
     if (negated) return false
     matchedPositivePattern = true
   }
   return matchedPositivePattern
+}
+
+function matchesPlainHostPattern(pattern: string, needle: string): boolean {
+  if (pattern.startsWith("|1|")) return false
+  return matchesHostPattern(pattern.toLowerCase(), needle.toLowerCase())
 }
 
 function matchesHashedHost(pattern: string, needle: string): boolean {
