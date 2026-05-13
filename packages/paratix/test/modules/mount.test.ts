@@ -9,16 +9,6 @@ type MockSshResponses = Parameters<typeof createBaseMockSsh>[0]
 const createMockSsh: typeof createBaseMockSsh = (responses, options) =>
   createBaseMockSsh({ [mountPathSymlinkGuardCmd]: { code: 0 }, ...responses }, options)
 
-const successfulMountApplyOptions: MockSshOptions = {
-  allowUnstubbedDefaults: true,
-  allowWrites: [{ options: { mode: "0644" }, remotePath: "/etc/fstab" }],
-  defaultExecResult: { code: 0 },
-}
-
-function createMountApplyMockSsh(responses: MockSshResponses = {}) {
-  return createMockSsh(responses, successfulMountApplyOptions)
-}
-
 const emptyEnv = {}
 
 const mountPath = "/mnt/data"
@@ -49,6 +39,19 @@ const mountPathSymlinkGuardCmd = [
   "done",
 ].join("; ")
 const flagsDirectoryCreateCmd = "mkdir -p /var/lib/paratix/flags"
+
+const successfulMountApplyOptions: MockSshOptions = {
+  allowWrites: [{ options: { mode: "0644" }, remotePath: "/etc/fstab" }],
+  responseStubs: [
+    { command: mountPathSymlinkGuardCmd, result: { code: 0 } },
+    { command: mkdirCmd, result: { code: 0 } },
+    { command: mountPathRealpathCmd, result: { code: 0, stdout: `${mountPath}\n` } },
+  ],
+}
+
+function createMountApplyMockSsh(responses: MockSshResponses = {}) {
+  return createMockSsh(responses, successfulMountApplyOptions)
+}
 
 // findmnt --output stdout for a live mount whose source/fstype/options
 // match the desired values exactly.
@@ -558,6 +561,14 @@ describe("mount.present — apply", () => {
     expect(result.error).toBeInstanceOf(Error)
   })
 
+  it("fails closed for unstubbed apply commands", async () => {
+    const mockSsh = createMountApplyMockSsh()
+
+    await expect(mockSsh.exec("unexpected mount helper")).rejects.toThrow(
+      "createMockSsh: unstubbed exec call: unexpected mount helper"
+    )
+  })
+
   it("creates mountpoint with mkdir -p", async () => {
     const mockSsh = createMountApplyMockSsh({
       [findmntCheckCmd]: { code: 0, stdout: liveMountStdout },
@@ -766,6 +777,7 @@ describe("mount.present — apply", () => {
     const mockSsh = createMountApplyMockSsh({
       "cat '/etc/fstab'": { stdout: `${fstabLine}\n` },
       [findmntCheckCmd]: { code: 1 },
+      [mountCmd]: { code: 0 },
     })
     const mod = mount.present({
       fstype: mountFstype,
@@ -816,6 +828,7 @@ describe("mount.present — apply", () => {
     const mockSsh = createMountApplyMockSsh({
       "cat '/etc/fstab'": { stdout: "# /etc/fstab\n" },
       [findmntCheckCmd]: { code: 1 },
+      [mountCmd]: { code: 0 },
     })
     const mod = mount.present({
       fstype: mountFstype,
@@ -1126,6 +1139,7 @@ describe("mount.absent — apply", () => {
     const mockSsh = createMountApplyMockSsh({
       "cat '/etc/fstab'": { stdout: "# /etc/fstab\n" },
       [findmntTestCmd]: { code: 0 },
+      [umountCmd]: { code: 0 },
     })
     const mod = mount.absent({ path: mountPath })
     await mod.apply(mockSsh, emptyEnv)
@@ -1253,6 +1267,7 @@ describe("mount.absent — apply", () => {
     const mockSsh = createMountApplyMockSsh({
       "cat '/etc/fstab'": { stdout: "# /etc/fstab\n" },
       [findmntTestCmd]: { code: 0 },
+      [umountCmd]: { code: 0 },
     })
     const mod = mount.absent({ path: mountPath })
     const result = await mod.apply(mockSsh, emptyEnv)
