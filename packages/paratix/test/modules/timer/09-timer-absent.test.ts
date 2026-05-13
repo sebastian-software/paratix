@@ -155,6 +155,20 @@ describe("timer.absent", () => {
     expect(result.status).toBe("failed")
   })
 
+  it("restores an enabled active timer when rm fails after disable", async () => {
+    const ssh = createAbsentApplyWithExistingUnitsMockSsh({
+      [`rm -f '${TIMER_PATH}' '${SERVICE_PATH}'`]: { code: 1, stderr: "EACCES" },
+      "systemctl enable --now -- 'backup.timer'": { code: 0 },
+      "systemctl is-active --quiet -- 'backup.timer'": { code: 0 },
+      "systemctl is-enabled --quiet -- 'backup.timer'": { code: 0 },
+    })
+    const mod = timer.absent("backup")
+    const result = await mod.apply(ssh, emptyEnv)
+    expect(result.status).toBe("failed")
+    expect(ssh.calls).toContain("systemctl disable --now -- 'backup.timer'")
+    expect(ssh.calls).toContain("systemctl enable --now -- 'backup.timer'")
+  })
+
   it("apply returns failed when daemon-reload fails", async () => {
     const ssh = createAbsentApplyWithExistingUnitsMockSsh({
       [`cat '${SERVICE_PATH}'`]: { stdout: existingServiceContent },
@@ -176,6 +190,19 @@ describe("timer.absent", () => {
         remotePath: TIMER_PATH,
       },
     ])
+  })
+
+  it("restores an enabled inactive timer when daemon-reload fails after disable", async () => {
+    const ssh = createAbsentApplyWithExistingUnitsMockSsh({
+      "systemctl daemon-reload": { code: 1, stderr: "boom" },
+      "systemctl enable -- 'backup.timer'": { code: 0 },
+      "systemctl is-active --quiet -- 'backup.timer'": { code: 1 },
+      "systemctl is-enabled --quiet -- 'backup.timer'": { code: 0 },
+    })
+    const mod = timer.absent("backup")
+    const result = await mod.apply(ssh, emptyEnv)
+    expect(result.status).toBe("failed")
+    expect(ssh.calls).toContain("systemctl enable -- 'backup.timer'")
   })
 
   it("apply returns ok when neither unit file exists (idempotent no-op)", async () => {

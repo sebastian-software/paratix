@@ -272,6 +272,63 @@ async function applyPresent(
 
 type AbsentContext = { locations: TimerLocations; module: string; name: string }
 
+type TimerActivationSnapshot = {
+  active: boolean
+  enabled: boolean
+}
+
+async function readTimerActivationSnapshot(
+  ssh: SshConnection,
+  timerUnit: string
+): Promise<TimerActivationSnapshot> {
+  const enabled = await ssh.test(`${SYSTEMCTL} is-enabled --quiet -- ${shellQuote(timerUnit)}`)
+  const active = await ssh.test(`${SYSTEMCTL} is-active --quiet -- ${shellQuote(timerUnit)}`)
+  return { active, enabled }
+}
+
+async function runTimerActivationRollback(
+  ssh: SshConnection,
+  context: AbsentContext,
+  parameters: { action: string; command: string }
+): Promise<ModuleResult | null> {
+  const restore = await ssh.exec(parameters.command, {
+    ignoreExitCode: true,
+    silent: true,
+  })
+  if (restore.code === 0) return null
+  return failedCommand(
+    `[${context.module}: ${context.name}] systemctl ${parameters.action} rollback failed`,
+    restore
+  )
+}
+
+async function restoreTimerActivationForAbsent(
+  ssh: SshConnection,
+  context: AbsentContext,
+  snapshot: TimerActivationSnapshot
+): Promise<ModuleResult | null> {
+  const { locations } = context
+  if (snapshot.enabled && snapshot.active) {
+    return runTimerActivationRollback(ssh, context, {
+      action: "enable --now",
+      command: `${SYSTEMCTL} enable --now -- ${shellQuote(locations.timerUnit)}`,
+    })
+  }
+  if (snapshot.enabled) {
+    return runTimerActivationRollback(ssh, context, {
+      action: "enable",
+      command: `${SYSTEMCTL} enable -- ${shellQuote(locations.timerUnit)}`,
+    })
+  }
+  if (snapshot.active) {
+    return runTimerActivationRollback(ssh, context, {
+      action: "start",
+      command: `${SYSTEMCTL} start -- ${shellQuote(locations.timerUnit)}`,
+    })
+  }
+  return null
+}
+
 async function disableTimerForAbsent(
   ssh: SshConnection,
   context: AbsentContext
@@ -325,7 +382,8 @@ async function applyAbsent(ssh: SshConnection, context: AbsentContext): Promise<
   // up unless systemd still has residual active/enabled state for the timer.
   const serviceExists = await ssh.exists(locations.servicePath)
   const timerExists = await ssh.exists(locations.timerPath)
-  const residualState = await hasResidualTimerState(ssh, locations.timerUnit)
+  const activationSnapshot = await readTimerActivationSnapshot(ssh, locations.timerUnit)
+  const residualState = activationSnapshot.enabled || activationSnapshot.active
   if (!serviceExists && !timerExists && !residualState) return { status: "ok" }
 
   const disableFailure = await disableTimerForAbsent(ssh, context)
@@ -335,7 +393,14 @@ async function applyAbsent(ssh: SshConnection, context: AbsentContext): Promise<
     service: serviceExists,
     timer: timerExists,
   })
-  if (removeFailure) return removeFailure
+  if (removeFailure) {
+    const activationRestoreFailure = await restoreTimerActivationForAbsent(
+      ssh,
+      context,
+      activationSnapshot
+    )
+    return activationRestoreFailure ?? removeFailure
+  }
   return { status: "changed" }
 }
 

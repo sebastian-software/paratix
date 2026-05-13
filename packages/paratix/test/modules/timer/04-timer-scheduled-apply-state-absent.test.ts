@@ -131,4 +131,17 @@ describe("timer.scheduled — apply (state: absent)", () => {
     const result = await mod.apply(ssh, emptyEnv)
     expect(result.status).toBe("failed")
   })
+
+  it("restores an active timer when cleanup fails after disable", async () => {
+    const ssh = createAbsentApplyWithExistingUnitsMockSsh({
+      [`rm -f '${TIMER_PATH}' '${SERVICE_PATH}'`]: { code: 1, stderr: "EACCES" },
+      "systemctl is-active --quiet -- 'backup.timer'": { code: 0 },
+      "systemctl is-enabled --quiet -- 'backup.timer'": { code: 1 },
+      "systemctl start -- 'backup.timer'": { code: 0 },
+    })
+    const mod = timer.scheduled("backup", { ...baseOptions, state: "absent" })
+    const result = await mod.apply(ssh, emptyEnv)
+    expect(result.status).toBe("failed")
+    expect(ssh.calls).toContain("systemctl start -- 'backup.timer'")
+  })
 })
