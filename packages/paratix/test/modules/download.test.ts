@@ -21,12 +21,7 @@ const createMockSsh: typeof createBaseMockSsh = (responses, options) =>
       { command: /^\[ -L '\/(?:opt|tmp|usr|var)(?:\/[^']*)?' \]$/v, result: { code: 1 } },
       { command: /^stat -c '%a %U %G' '\/(?:opt|usr)\//v, result: { stdout: "644 root root" } },
       { command: /^mkdir -p /v, result: { code: 0 } },
-      { command: /^mktemp /v, result: { stdout: "/tmp/.paratix-download.stub" } },
-      { command: /^curl /v, result: { code: 0 } },
-      { command: /^chmod /v, result: { code: 0 } },
-      { command: /^chown /v, result: { code: 0 } },
-      { command: /^mv /v, result: { code: 0 } },
-      { command: /^rm -f /v, result: { code: 0 } },
+      ...buildSafeDownloadApplyStubs(),
       { command: /^\[ -f \/var\/lib\/paratix\/flags\//v, result: { code: 1 } },
       { command: /^mkdir \/var\/lib\/paratix\/flags\/.*\.lock'/v, result: { code: 0 } },
       { command: /^rmdir \/var\/lib\/paratix\/flags\/.*\.lock'/v, result: { code: 0 } },
@@ -57,6 +52,41 @@ const emptyEnv = {}
 const allowUnverifiedDownload = { allowUnverifiedDownload: true } as const
 const httpsOnlyCurlProtocolFlags = "--proto '=https' --proto-redir '=https'"
 const insecureHttpCurlProtocolFlags = "--proto '=http,https' --proto-redir '=http,https'"
+
+function buildSafeDownloadApplyStubs(): NonNullable<
+  NonNullable<Parameters<typeof createBaseMockSsh>[1]>["responseStubs"]
+> {
+  return [
+    {
+      command:
+        // eslint-disable-next-line security/detect-unsafe-regex -- bounded mock command regex, not user input
+        /^curl -fsSL -o '\/(?:opt|tmp|usr|var)(?:\/[^\/']+)*\/\.paratix-download\.[^\/']+' --proto '=(?:https|http,https)' --proto-redir '=(?:https|http,https)' --config -$/v,
+      result: { code: 0 },
+    },
+    {
+      // eslint-disable-next-line security/detect-unsafe-regex -- bounded mock command regex, not user input
+      command: /^chmod '[0-7]{3,4}' '\/(?:opt|tmp|usr|var)(?:\/[^\/']+)*'$/v,
+      result: { code: 0 },
+    },
+    {
+      command:
+        // eslint-disable-next-line security/detect-unsafe-regex -- bounded mock command regex, not user input
+        /^chown -- '(?:\w[\w.\-]*)?:(?:\w[\w.\-]*)?' '\/(?:opt|tmp|usr|var)(?:\/[^\/']+)*'$/v,
+      result: { code: 0 },
+    },
+    {
+      command:
+        // eslint-disable-next-line security/detect-unsafe-regex -- bounded mock command regex, not user input
+        /^mv -T -- '\/(?:opt|tmp|usr|var)(?:\/[^\/']+)*\/\.paratix-download\.[^\/']+' '\/(?:opt|tmp|usr|var)(?:\/[^\/']+)*'$/v,
+      result: { code: 0 },
+    },
+    {
+      // eslint-disable-next-line security/detect-unsafe-regex -- bounded mock command regex, not user input
+      command: /^rm -f '\/(?:opt|tmp|usr|var)(?:\/[^\/']+)*\/\.paratix-download\.[^\/']+'$/v,
+      result: { code: 0 },
+    },
+  ]
+}
 
 // R-0000274: keep this helper aligned with `buildLargeDownloadFlagInfo` in
 // download.ts: a destination-keyed prefix wraps the URL/headers-keyed
@@ -201,6 +231,30 @@ function createMockSshWithDestinationSymlinkAfterFirstProbe(parameters: {
       return baseTest(command)
     },
   }
+}
+
+function expectSafeCurlDownloadPipeline(parameters: {
+  destination: string
+  mockSsh: ReturnType<typeof createMockSsh>
+  protocolFlags?: string
+  temporaryDestination: string
+  urlInput: string
+}): void {
+  const protocolFlags = parameters.protocolFlags ?? httpsOnlyCurlProtocolFlags
+  const curlCommand = `curl -fsSL -o '${parameters.temporaryDestination}' ${protocolFlags} --config -`
+  const moveCommand = `mv -T -- '${parameters.temporaryDestination}' '${parameters.destination}'`
+  const cleanupCommand = `rm -f '${parameters.temporaryDestination}'`
+  const curlCall = parameters.mockSsh.execCalls.find((entry) => entry.command === curlCommand)
+
+  expect(parameters.mockSsh.calls).toContain(
+    `mktemp "$(dirname '${parameters.destination}')/.paratix-download.XXXXXX"`
+  )
+  expect(curlCall).toBeDefined()
+  expect(curlCall?.command).not.toContain(parameters.urlInput)
+  expect(curlCall?.options?.input).toBe(`url = "${parameters.urlInput}"\n`)
+  expect(parameters.mockSsh.calls).toContain(moveCommand)
+  expect(parameters.mockSsh.calls).toContain(cleanupCommand)
+  expect(parameters.mockSsh.calls).not.toContain(`rm -f '${parameters.destination}'`)
 }
 
 function commandIndexes(calls: string[], expectedCommand: string): number[] {
@@ -462,15 +516,12 @@ describe("download.url", () => {
       const mod = download.url(destination, url, allowUnverifiedDownload)
       const result = await mod.apply(mockSsh, emptyEnv)
       expect(result.status).toBe("changed")
-      expect(mockSsh.calls).toContain(
-        `curl -fsSL -o '${temporaryDestination}' ${httpsOnlyCurlProtocolFlags} --config -`
-      )
-      // The URL must not be on argv any more.
-      expect(mockSsh.calls.every((c) => !c.includes(url))).toBe(true)
-      // The URL must be delivered via stdin instead.
-      const curlCall = mockSsh.execCalls.find((entry) => entry.command.startsWith("curl -fsSL"))
-      expect(curlCall?.options?.input).toBe(`url = "${url}"\n`)
-      expect(mockSsh.calls).toContain(`mv -T -- '${temporaryDestination}' '${destination}'`)
+      expectSafeCurlDownloadPipeline({
+        destination,
+        mockSsh,
+        temporaryDestination,
+        urlInput: url,
+      })
     })
 
     it("cleans up the temporary file and leaves destination untouched when curl fails", async () => {
@@ -1361,12 +1412,12 @@ describe("download.github", () => {
       const mod = download.github(destination, { ...allowUnverifiedDownload, asset, repo, tag })
       const result = await mod.apply(mockSsh, emptyEnv)
       expect(result.status).toBe("changed")
-      expect(mockSsh.calls).toContain(
-        `curl -fsSL -o '${temporaryDestination}' ${httpsOnlyCurlProtocolFlags} --config -`
-      )
-      const curlCall = mockSsh.execCalls.find((entry) => entry.command.startsWith("curl -fsSL"))
-      expect(curlCall?.options?.input).toBe(`url = "${expectedUrl}"\n`)
-      expect(mockSsh.calls).toContain(`mv -T -- '${temporaryDestination}' '${destination}'`)
+      expectSafeCurlDownloadPipeline({
+        destination,
+        mockSsh,
+        temporaryDestination,
+        urlInput: expectedUrl,
+      })
     })
 
     it("cleans up the temporary file and leaves destination untouched when curl fails", async () => {
@@ -1861,12 +1912,12 @@ describe("download.large", () => {
       const mod = download.large(destination, url, allowUnverifiedDownload)
       const result = await mod.apply(mockSsh, emptyEnv)
       expect(result.status).toBe("changed")
-      expect(mockSsh.calls).toContain(
-        `curl -fsSL -o '${temporaryDestination}' ${httpsOnlyCurlProtocolFlags} --config -`
-      )
-      const curlCall = mockSsh.execCalls.find((entry) => entry.command.startsWith("curl -fsSL"))
-      expect(curlCall?.options?.input).toBe(`url = "${url}"\n`)
-      expect(mockSsh.calls).toContain(`mv -T -- '${temporaryDestination}' '${destination}'`)
+      expectSafeCurlDownloadPipeline({
+        destination,
+        mockSsh,
+        temporaryDestination,
+        urlInput: url,
+      })
       expect(mockSsh.calls).toContain(
         buildLargeDownloadVersionedFlagCommand({ destination, flagName })
       )
