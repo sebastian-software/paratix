@@ -82,11 +82,25 @@ async function runCollect(
 async function getErrorMessage(promise: Promise<unknown>): Promise<string> {
   try {
     await promise
-    throw new Error("Expected promise to reject")
   } catch (error) {
     return (error as Error).message
   }
+  throw new Error("Expected promise to reject")
 }
+
+describe("rejection test helpers", () => {
+  it("fails when getErrorMessage receives a resolved promise", async () => {
+    await expect(getErrorMessage(Promise.resolve("ok"))).rejects.toThrow(
+      "Expected promise to reject"
+    )
+  })
+
+  it("fails when getCommandError receives a resolved promise", async () => {
+    await expect(getCommandError(Promise.resolve("ok"))).rejects.toThrow(
+      "Expected promise to reject"
+    )
+  })
+})
 
 // ---------------------------------------------------------------------------
 // createStreamMasker
@@ -848,10 +862,10 @@ describe("live-output masking via process.stdout/stderr.write", () => {
 async function getCommandError(promise: Promise<unknown>): Promise<CommandError> {
   try {
     await promise
-    throw new Error("Expected promise to reject")
   } catch (error) {
     return error as CommandError
   }
+  throw new Error("Expected promise to reject")
 }
 
 describe("CommandError and truncation", () => {
