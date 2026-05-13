@@ -1,5 +1,5 @@
 import { createHash, timingSafeEqual } from "node:crypto"
-import { readFile } from "node:fs/promises"
+import { createReadStream } from "node:fs"
 
 /**
  * Constant-time comparison of two hex-encoded hashes.
@@ -16,9 +16,13 @@ export function hexHashesEqual(a: null | string, b: string): boolean {
 }
 
 export async function localSha256(filePath: string): Promise<string> {
+  const hash = createHash("sha256")
   // eslint-disable-next-line security/detect-non-literal-fs-filename
-  const content = await readFile(filePath)
-  return createHash("sha256").update(content).digest("hex")
+  const stream = createReadStream(filePath) as AsyncIterable<Buffer>
+  for await (const chunk of stream) {
+    hash.update(chunk)
+  }
+  return hash.digest("hex")
 }
 
 export function sha256String(content: string): string {
