@@ -7,6 +7,35 @@ import { shellQuote } from "../ssh.js"
 import { type ArchiveMember, normalizeArchiveMemberPath } from "./archiveMemberValidation.js"
 
 const EXEC_OPTS = { ignoreExitCode: true, silent: true } as const
+const SYMLINK_CHECK_CONCURRENCY = 8
+
+async function mapWithConcurrencyLimit<TItem, TResult>(
+  items: TItem[],
+  limit: number,
+  mapper: (item: TItem, index: number) => Promise<TResult>
+): Promise<TResult[]> {
+  if (items.length === 0) return []
+
+  const results: TResult[] = []
+  let nextIndex = 0
+
+  async function worker(): Promise<void> {
+    for (;;) {
+      const index = nextIndex
+      nextIndex += 1
+      if (index >= items.length) return
+      // eslint-disable-next-line no-await-in-loop -- each worker intentionally runs one bounded queue slot at a time
+      results[index] = await mapper(items[index], index)
+    }
+  }
+
+  await Promise.all(
+    Array.from({ length: Math.min(limit, items.length) }, async () => {
+      await worker()
+    })
+  )
+  return results
+}
 
 export function validateExtractDestination(
   destination: string
@@ -77,8 +106,10 @@ export async function validateNoSymlinkPaths(
   parameters: { paths: string[]; source: string }
 ): Promise<ModuleResult | null> {
   const paths = [...new Set(parameters.paths)]
-  const symlinkChecks = await Promise.all(
-    paths.map(async (path) => ({ path, symlink: await pathIsSymlink(conn, path) }))
+  const symlinkChecks = await mapWithConcurrencyLimit(
+    paths,
+    SYMLINK_CHECK_CONCURRENCY,
+    async (path) => ({ path, symlink: await pathIsSymlink(conn, path) })
   )
   const unsafe = symlinkChecks.find((check) => check.symlink)
   if (unsafe === undefined) return null

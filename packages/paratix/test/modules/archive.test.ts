@@ -12,6 +12,7 @@ const destination = "/opt/app"
 const alternateDestination = "/opt/app-alt"
 const safeTarListing = "-rw-r--r-- root/root 0 1970-01-01 00:00 app/file"
 const archiveOwnerMemberConcurrencyLimit = 8
+const archiveSymlinkCheckConcurrencyLimit = 8
 
 // Stable hash of `${src}\n${destination}` for marker file naming.
 const srcHash = "2889be4b654d6b7f7922971e7fb3fdf1c5ebd92b9c52462be2683a735c7562ef"
@@ -146,6 +147,16 @@ function createOwnerCheckExecTracker(mockSsh: MockSsh, originalExec: MockSsh["ex
 function createOwnerChownExecTracker(mockSsh: MockSsh, originalExec: MockSsh["exec"]): ExecTracker {
   return createTrackedExec(mockSsh, originalExec, {
     isTrackedCommand: (command) => command.startsWith("chown -h -- 'www-data:www-data' "),
+    resultForCommand: () => ({ code: 0, stderr: "", stdout: "" }),
+  })
+}
+
+function createSymlinkCheckExecTracker(
+  mockSsh: MockSsh,
+  originalExec: MockSsh["exec"]
+): ExecTracker {
+  return createTrackedExec(mockSsh, originalExec, {
+    isTrackedCommand: (command) => command.startsWith("test ! -L "),
     resultForCommand: () => ({ code: 0, stderr: "", stdout: "" }),
   })
 }
@@ -728,6 +739,31 @@ describe("archive.extract — apply", () => {
       mockSsh.calls.filter((command) => command.startsWith("chown -h -- 'www-data:www-data' "))
     ).toHaveLength(memberPaths.length)
     expect(chownExecTracker.maxActive()).toBeLessThanOrEqual(archiveOwnerMemberConcurrencyLimit)
+  })
+
+  it("limits concurrent symlink checks across archive destination paths", async () => {
+    const memberPaths = Array.from({ length: 24 }, (_value, index) => `app/file-${String(index)}`)
+    const mockSsh = createMockSsh({
+      [`tar --no-same-owner --no-overwrite-dir -xzf '${src}' -C '${archiveStageDirectory}'`]: {
+        code: 0,
+      },
+      [`tar -tvzf '${src}'`]: { code: 0, stdout: tarListingForMemberPaths(memberPaths) },
+    })
+    const originalExec = mockSsh.exec.bind(mockSsh)
+    const symlinkExecTracker = createSymlinkCheckExecTracker(mockSsh, originalExec)
+
+    vi.spyOn(mockSsh, "exec").mockImplementation(symlinkExecTracker.exec)
+    vi.spyOn(mockSsh, "sha256").mockResolvedValue(archiveSha)
+    vi.spyOn(mockSsh, "writeFile").mockResolvedValue()
+
+    const mod = archive.extract(src, destination)
+    const result = await mod.apply(mockSsh, emptyEnv)
+
+    expect(result.status).toBe("changed")
+    expect(
+      mockSsh.calls.filter((command) => command.startsWith("test ! -L ")).length
+    ).toBeGreaterThan(memberPaths.length)
+    expect(symlinkExecTracker.maxActive()).toBeLessThanOrEqual(archiveSymlinkCheckConcurrencyLimit)
   })
 
   it("R-0000267: returns failed when chown of an extracted member fails", async () => {
