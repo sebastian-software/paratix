@@ -322,12 +322,18 @@ export const file = {
    * with the new `line` value instead of appending.
    *
    * @param remotePath - Path to the file on the remote host.
-   * @param line - The exact line content to ensure is present.
+   * @param line - The exact single-line content to ensure is present.
    * @param options - Optional match configuration.
    * @param options.match - A regex pattern; when matched, the line is replaced rather than appended.
    * @returns A Module that ensures the line is present.
    */
   line(remotePath: string, line: string, options?: { match?: string }): Module {
+    if (/[\r\n]/v.test(line)) {
+      throw new Error(
+        "file.line: line must not contain CR/LF; use file.block() for multi-line content"
+      )
+    }
+
     return {
       async apply(ssh: null | SshConnection): Promise<ModuleResult> {
         if (!ssh) return failed(`[file.line: ${remotePath}] SSH connection is required`)
@@ -340,8 +346,7 @@ export const file = {
       },
       async check(ssh: null | SshConnection): Promise<"needs-apply" | "ok"> {
         if (!ssh) return NEEDS_APPLY
-        const exists = await ssh.exists(remotePath)
-        if (!exists) return NEEDS_APPLY
+        if (!(await ssh.exists(remotePath))) return NEEDS_APPLY
         if (!(await isRegularFileWithoutSymlink(ssh, remotePath))) return NEEDS_APPLY
 
         const content = await ssh.readFile(remotePath)

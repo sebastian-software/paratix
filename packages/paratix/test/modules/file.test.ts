@@ -1051,6 +1051,30 @@ describe("file.copy", () => {
 })
 
 describe("file.line", () => {
+  it("rejects LF in append line values", () => {
+    expect(() => file.line("/etc/config", "first-line\nsecond-line")).toThrow(
+      "file.line: line must not contain CR/LF; use file.block() for multi-line content"
+    )
+  })
+
+  it("rejects CR in append line values", () => {
+    expect(() => file.line("/etc/config", "first-line\rsecond-line")).toThrow(
+      "file.line: line must not contain CR/LF; use file.block() for multi-line content"
+    )
+  })
+
+  it("rejects LF in replacement line values", () => {
+    expect(() => file.line("/etc/config", "KEY=value\nNEXT=value", { match: "KEY=.*" })).toThrow(
+      "file.line: line must not contain CR/LF; use file.block() for multi-line content"
+    )
+  })
+
+  it("rejects CR in replacement line values", () => {
+    expect(() => file.line("/etc/config", "KEY=value\rNEXT=value", { match: "KEY=.*" })).toThrow(
+      "file.line: line must not contain CR/LF; use file.block() for multi-line content"
+    )
+  })
+
   it("check returns ok when line exists (without match)", async () => {
     const ssh = createMockSsh({
       "cat '/etc/config'": { stdout: "some-line\nmy-line\nother-line" },

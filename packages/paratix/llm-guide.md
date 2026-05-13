@@ -211,6 +211,8 @@ plaintext HTTP unless `allowInsecureHttpHeaders: true` is also set.
 
 **Hinweis zu `file.copy` und Default-Mode:** Wenn `options.mode` weggelassen wird, setzt `file.copy` den Modus auf den dokumentierten Default `0644`. Der Modus wird sowohl beim Hochladen (`uploadFile` mit `{ mode }`) als auch in `check` gegen den Soll-Wert verglichen, damit nachfolgende Läufe Mode-Drift (z. B. manuelles `chmod 0600`) als `needs-apply` erkennen. Wer ein restriktiveres Recht braucht (z. B. für Secrets), übergibt explizit `{ mode: "0600" }`.
 
+**Hinweis zu `file.line`:** Der `line`-Wert muss eine einzelne Zeile ohne CR/LF sein. Für mehrzeilige Inhalte `file.block` verwenden.
+
 ### `git`
 
 | Method      | Signature                                                                 | Idempotent |
