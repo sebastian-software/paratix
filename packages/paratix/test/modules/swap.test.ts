@@ -820,6 +820,31 @@ describe("swap.file — option validation", () => {
     expect(() => swap.file({ path: swapPath, priority: 32_767, size: swapSize })).not.toThrow()
   })
 
+  it("accepts valid swap file states", () => {
+    expect(() => swap.file({ path: swapPath, size: swapSize, state: "present" })).not.toThrow()
+    expect(() => swap.file({ path: swapPath, size: swapSize, state: "absent" })).not.toThrow()
+  })
+
+  it("rejects invalid swap file state strings", () => {
+    for (const state of ["", "enabled", "ABSENT"]) {
+      expect(() =>
+        swap.file({ path: swapPath, size: swapSize, state: state as "absent" | "present" })
+      ).toThrow('swap.file state must be "present" or "absent"')
+    }
+  })
+
+  it("rejects non-string swap file states", () => {
+    for (const state of [null, false, 1] as unknown[]) {
+      expect(() =>
+        swap.file({
+          path: swapPath,
+          size: swapSize,
+          state: state as "absent" | "present",
+        })
+      ).toThrow('swap.file state must be "present" or "absent"')
+    }
+  })
+
   it("rejects unsafe swap file paths", () => {
     for (const path of ["", "swapfile", "/", "/var/../swapfile", "/swap file", "/swapfile\n"]) {
       expect(() => swap.file({ path, size: swapSize })).toThrow(/swap\.file: path/v)

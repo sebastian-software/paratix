@@ -128,6 +128,12 @@ function validateSwapPriority(priority: number | undefined): void {
   }
 }
 
+function validateSwapFileState(state: unknown): asserts state is "absent" | "present" {
+  if (state !== "present" && state !== "absent") {
+    throw new Error('swap.file state must be "present" or "absent"')
+  }
+}
+
 function findFstabEntry(fstabContent: string, path: string): null | string {
   for (const line of fstabContent.split("\n")) {
     const trimmed = line.trim()
@@ -244,6 +250,7 @@ export function normalizeSwapFileOptions(options: {
   size: number | string
   state?: "absent" | "present"
 }): NormalizedSwapFileOptions {
+  if (options.state !== undefined) validateSwapFileState(options.state)
   const state = options.state ?? "present"
   const mode = options.mode ?? "0600"
   validateSwapFilePath(options.path)
