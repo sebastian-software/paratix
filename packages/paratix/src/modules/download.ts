@@ -663,7 +663,12 @@ async function compareUnverifiedHashMarker(
   const markerPath = unverifiedHashMarkerPath(destination)
   if (await conn.test(`[ -L ${shellQuote(markerPath)} ]`)) return "drift"
   if (!(await conn.test(`[ -f ${shellQuote(markerPath)} ]`))) return "missing"
-  const markerContent = await conn.readFile(markerPath)
+  const markerRead = await conn.exec(`cat ${shellQuote(markerPath)}`, {
+    ignoreExitCode: true,
+    silent: true,
+  })
+  if (markerRead.code !== 0) return "drift"
+  const markerContent = markerRead.stdout
   const recordedHash = markerContent.trim()
   if (recordedHash.length === 0) return "drift"
   const actualHash = await conn.sha256(destination)

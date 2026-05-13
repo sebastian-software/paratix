@@ -297,6 +297,21 @@ describe("download.url", () => {
       expect(result).toBe("needs-apply")
     })
 
+    it("returns needs-apply when the marker cannot be read", async () => {
+      const mockSsh = createMockSsh({
+        [`[ -f '${destination}.sha256' ]`]: { code: 0 },
+        [`[ -f '${destination}' ]`]: { code: 0 },
+        [`cat '${destination}.sha256'`]: { code: 13, stderr: "cat: Permission denied\n" },
+      })
+      const mod = download.url(destination, url, allowUnverifiedDownload)
+      const result = await mod.check(mockSsh, emptyEnv)
+      expect(result).toBe("needs-apply")
+      expect(mockSsh.execCalls).toContainEqual({
+        command: `cat '${destination}.sha256'`,
+        options: { ignoreExitCode: true, silent: true },
+      })
+    })
+
     it("returns needs-apply when file path is a symlink to a regular file", async () => {
       const mockSsh = createMockSsh({
         [`[ -f '${destination}' ]`]: { code: 0 },
