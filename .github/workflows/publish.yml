@@ -46,6 +46,8 @@ jobs:
       - uses: googleapis/release-please-action@0dfd8538845b8e92600d271a895a5372865d4062
         id: release
         with:
+          # Use a PAT so release-please PRs trigger downstream workflows.
+          token: ${{ secrets.RELEASE_PLEASE_TOKEN }}
           config-file: release-please-config.json
           manifest-file: .release-please-manifest.json
 
