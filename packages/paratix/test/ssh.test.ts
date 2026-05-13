@@ -17,6 +17,7 @@ import { SshConnectionImpl, validateMktempPath } from "../src/ssh.js"
 import {
   cleanupFailedSshClient,
   collectStreamOutput,
+  DEFAULT_MAX_OUTPUT_BYTES,
   shellQuote,
   tryConnectOnPort,
 } from "../src/sshHelpers.js"
@@ -89,6 +90,7 @@ vi.mock("../src/sshHelpers.js", async () => {
     // when masking thrown errors via withRegisteredSecrets, so the mock must
     // re-export the real class.
     CommandError: actual.CommandError,
+    DEFAULT_MAX_OUTPUT_BYTES: actual.DEFAULT_MAX_OUTPUT_BYTES,
     maskPreparedSecrets: actual.maskPreparedSecrets,
     maskSecrets: actual.maskSecrets,
     normalizeSshCloseCode: actual.normalizeSshCloseCode,
@@ -3748,6 +3750,28 @@ describe("SshConnectionImpl", () => {
       await expect(
         (ssh as unknown as PrivateSshConnection).execWithoutSudo("true")
       ).rejects.toThrow("Command failed with signal SIGKILL")
+    })
+
+    it("rejects and closes execRaw streams when stdout exceeds the capture limit", async () => {
+      let stream: StreamWithStderr | undefined
+      const execSpy = vi.fn().mockImplementation((_command: string, callback: ExecCallback) => {
+        stream = makeStream()
+        callback(undefined, stream)
+        stream.emit("data", Buffer.alloc(DEFAULT_MAX_OUTPUT_BYTES + 1, "a"))
+      })
+
+      const client = makeClientWithExecSpy(execSpy)
+      const ssh = makeConnectedSsh(client, { sudoPassword: null, user: "deploy" })
+
+      const error = await expectRejectedError(
+        (ssh as unknown as PrivateSshConnection).outputWithoutSudo("printf large-output")
+      )
+
+      expect(error.message).toContain(`Command stdout exceeded ${DEFAULT_MAX_OUTPUT_BYTES} bytes`)
+      expect(error.message).toContain("stdout: ")
+      expect(error.message).toContain("…(truncated)")
+      expect(error.message.length).toBeLessThan(1000)
+      expect(stream?.close).toHaveBeenCalledOnce()
     })
 
     it("treats undefined ssh2 close code as exit code 0 in outputWithoutSudo (regression)", async () => {

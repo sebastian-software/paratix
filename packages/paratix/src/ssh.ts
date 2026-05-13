@@ -20,6 +20,7 @@ import { SFTP_TIMEOUT, sftpDownload, sftpUpload, sftpUploadContent } from "./sft
 import {
   cleanupFailedSshClient,
   collectStreamOutput,
+  DEFAULT_MAX_OUTPUT_BYTES,
   maskPreparedSecrets,
   maskSecrets,
   normalizeSshCloseCode,
@@ -128,6 +129,7 @@ const JITTER_BASE = 0.75
 const JITTER_RANGE = 0.5
 const RECONNECT_BASE_DELAY = 1000
 const RECONNECT_MAX_DELAY = 30_000
+const RAW_OUTPUT_ERROR_SNIPPET_LENGTH = 500
 
 type AuthMethod = "agent" | "password" | "privateKey" | null
 type PromptOptions = { abortSignal?: AbortSignal }
@@ -150,6 +152,19 @@ type SshRuntimeState = {
 
 function getAbortReason(signal: AbortSignal): Error {
   return signal.reason instanceof Error ? signal.reason : new Error("SSH operation aborted")
+}
+
+function truncateRawOutputErrorSnippet(text: string): string {
+  let count = 0
+  let sliceEnd = 0
+  for (const char of text) {
+    if (count >= RAW_OUTPUT_ERROR_SNIPPET_LENGTH) {
+      return `${text.slice(0, sliceEnd)}…(truncated)`
+    }
+    sliceEnd += char.length
+    count++
+  }
+  return text
 }
 
 function hasReconnectDeadlineExpired(reconnectDeadline?: number): boolean {
@@ -1236,7 +1251,33 @@ export class SshConnectionImpl implements SshConnection {
         }
         activeStream = stream
         const chunks: Buffer[] = []
+        let stdoutBytes = 0
         stream.on("data", (chunk: Buffer) => {
+          if (stdoutBytes > DEFAULT_MAX_OUTPUT_BYTES) return
+          stdoutBytes += chunk.length
+          if (stdoutBytes > DEFAULT_MAX_OUTPUT_BYTES) {
+            const remainingBytes = Math.max(
+              0,
+              DEFAULT_MAX_OUTPUT_BYTES - (stdoutBytes - chunk.length)
+            )
+            if (remainingBytes > 0) {
+              chunks.push(chunk.subarray(0, remainingBytes))
+            }
+            const capturedStdout = Buffer.concat(chunks).toString("utf8")
+            const secrets = prepareSecrets(this.buildSecrets())
+            activeStream?.close()
+            wrappedReject(
+              new Error(
+                `Command stdout exceeded ${DEFAULT_MAX_OUTPUT_BYTES} bytes: ${maskPreparedSecrets(
+                  command,
+                  secrets
+                )}\nstdout: ${truncateRawOutputErrorSnippet(
+                  maskPreparedSecrets(capturedStdout, secrets)
+                )}`
+              )
+            )
+            return
+          }
           chunks.push(chunk)
         })
         stream.on("close", (code: null | number | undefined, signal?: null | string) => {
