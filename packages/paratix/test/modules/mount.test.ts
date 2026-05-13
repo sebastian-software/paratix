@@ -7,7 +7,10 @@ type MockSshOptions = NonNullable<Parameters<typeof createBaseMockSsh>[1]>
 type MockSshResponses = Parameters<typeof createBaseMockSsh>[0]
 
 const createMockSsh: typeof createBaseMockSsh = (responses, options) =>
-  createBaseMockSsh({ [mountPathSymlinkGuardCmd]: { code: 0 }, ...responses }, options)
+  createBaseMockSsh(
+    { [mountPathSymlinkGuardCmd]: { code: 0 }, ...responses },
+    { ...options, allowFlagLockInternalDefaults: true }
+  )
 
 const emptyEnv = {}
 

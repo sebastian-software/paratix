@@ -20,6 +20,7 @@ const NET_WRITE_ALLOWLIST = [
 const createMockSsh: typeof createBaseMockSsh = (responses, options) =>
   createBaseMockSsh(responses, {
     ...options,
+    allowFlagLockInternalDefaults: true,
     allowWrites: [...NET_WRITE_ALLOWLIST, ...(options?.allowWrites ?? [])],
     // R-0000275: net.hosts.check now probes /etc/hosts existence before reading.
     // Default to "file exists" so apply-path fixtures (which return the cat

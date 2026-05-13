@@ -216,6 +216,35 @@ describe("createMockSsh", () => {
     )
   })
 
+  it("rejects unstubbed flag-lock internal exec calls by default", async () => {
+    const ssh = createMockSsh()
+
+    await expect(ssh.exec("mkdir -p /var/lib/paratix/flags")).rejects.toThrow(
+      "createMockSsh: unstubbed exec call: mkdir -p /var/lib/paratix/flags"
+    )
+    await expect(ssh.exec("mkdir /var/lib/paratix/flags/'etc-hosts-mutex'")).rejects.toThrow(
+      "createMockSsh: unstubbed exec call: mkdir /var/lib/paratix/flags/'etc-hosts-mutex'"
+    )
+  })
+
+  it("supports explicit flag-lock internal defaults", async () => {
+    const reclaimProbe =
+      "if [ -d /var/lib/paratix/flags/'etc-hosts-mutex' ]; then " +
+      "if [ -f /var/lib/paratix/flags/'etc-hosts-mutex'/holder ]; then " +
+      "if find /var/lib/paratix/flags/'etc-hosts-mutex'/holder -maxdepth 0 -mmin +0 -print -quit | grep -q .; then " +
+      "rm -f /var/lib/paratix/flags/'etc-hosts-mutex'/holder && rmdir /var/lib/paratix/flags/'etc-hosts-mutex'; " +
+      "else exit 1; fi; else exit 1; fi; else exit 1; fi"
+    const ssh = createMockSsh({}, { allowFlagLockInternalDefaults: true })
+
+    await expect(ssh.exec("mkdir -p /var/lib/paratix/flags")).resolves.toMatchObject({ code: 0 })
+    await expect(ssh.exec("mkdir /var/lib/paratix/flags/'etc-hosts-mutex'")).resolves.toMatchObject(
+      { code: 0 }
+    )
+    await expect(
+      ssh.exec(reclaimProbe, { ignoreExitCode: true, silent: true })
+    ).resolves.toMatchObject({ code: 1 })
+  })
+
   it("rejects unstubbed output calls when only defaultOutputResult is configured", async () => {
     const ssh = createMockSsh({}, { defaultOutputResult: "legacy output" })
 

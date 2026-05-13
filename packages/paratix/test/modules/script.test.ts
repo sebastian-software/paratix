@@ -57,6 +57,7 @@ function createScriptMockSsh(options?: {
       ...options?.responses,
     },
     {
+      allowFlagLockInternalDefaults: true,
       allowUploads: [
         {
           localPath: "/local/setup.sh",

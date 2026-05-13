@@ -9,6 +9,7 @@ import { createMockSsh as createBaseMockSsh, type ExecCall } from "../helpers/mo
 const createMockSsh: typeof createBaseMockSsh = (responses, options) =>
   createBaseMockSsh(responses, {
     ...options,
+    allowFlagLockInternalDefaults: true,
     allowWrites: [
       { options: { mode: "0644" }, remotePath: /^.*\.sha256$/v },
       ...(options?.allowWrites ?? []),

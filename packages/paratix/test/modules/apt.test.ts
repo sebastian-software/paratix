@@ -8,6 +8,7 @@ import { createMockSsh as createBaseMockSsh } from "../helpers/mockSsh.js"
 const createMockSsh: typeof createBaseMockSsh = (responses, options) =>
   createBaseMockSsh(responses, {
     ...options,
+    allowFlagLockInternalDefaults: true,
     allowWrites: [
       { options: { mode: "0644" }, remotePath: /^\/etc\/apt\/sources\.list\.d\/.+\.list$/v },
       ...(options?.allowWrites ?? []),

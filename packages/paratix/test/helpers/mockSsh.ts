@@ -13,12 +13,10 @@ import {
 type MockResponses = Record<string, Partial<ExecResult>>
 const DEFAULT_SSH_PORT = 22
 
-type MockResponseStub = {
-  command: RegExp | string
-  result: Partial<ExecResult>
-}
+type MockResponseStub = { command: RegExp | string; result: Partial<ExecResult> }
 
 type MockSshOptions = {
+  allowFlagLockInternalDefaults?: boolean
   /**
    * When `true`, explicit default results may answer otherwise unstubbed
    * commands. Leave unset to keep strict mocks fail-closed even when defaults
@@ -131,14 +129,17 @@ function findExplicitMatch(input: {
 
 function getFlagLockInternalDefault(
   command: string,
-  kind: "exec" | "output" | "test"
+  kind: "exec" | "output" | "test",
+  options: MockSshOptions | undefined
 ): Partial<ExecResult> | undefined {
   if (kind !== "exec") return undefined
+  if (options?.allowFlagLockInternalDefaults !== true) return undefined
   if (isFlagLockReclaimProbe(command)) {
-    // Default the reclaim probe to "no stale lock" so untouched tests
-    // do not silently change behaviour.
+    // Default the reclaim probe to "no stale lock" only for tests that opt
+    // into mock flag-lock internals.
     return { code: 1 }
   }
+  if (isFlagLockInternalSuccessCommand(command)) return { code: 0 }
   return undefined
 }
 
@@ -148,9 +149,7 @@ function isStrictlyAllowed(input: {
   options?: MockSshOptions
 }): boolean {
   const allowlist = getAllowlistForKind(input.kind, input.options)
-  if (isAllowed(input.command, allowlist)) return true
-  if (input.kind === "exec" && isFlagLockInternalSuccessCommand(input.command)) return true
-  return false
+  return isAllowed(input.command, allowlist)
 }
 
 function getMockResponse(input: {
@@ -162,7 +161,7 @@ function getMockResponse(input: {
   const match = findExplicitMatch(input)
   if (match) return match
 
-  const internal = getFlagLockInternalDefault(input.command, input.kind)
+  const internal = getFlagLockInternalDefault(input.command, input.kind, input.options)
   if (internal) return internal
 
   const hasExplicitDefault = hasExplicitDefaultForKind(input.kind, input.options)

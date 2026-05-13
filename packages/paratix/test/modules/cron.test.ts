@@ -26,7 +26,20 @@ const createMockSsh: typeof createBaseMockSsh = (responses, options) =>
     responseStubs: [
       ...(options?.responseStubs ?? []),
       {
+        command: "mkdir -p /var/lib/paratix/flags",
+        result: { code: 0 },
+      },
+      {
         command: /^mkdir \/var\/lib\/paratix\/flags\/'cron-crontab-[\da-f]+'/v,
+        result: { code: 0 },
+      },
+      {
+        command:
+          /^printf '%s@%s %s\\n' "\$\$" "\$\(hostname\)" "\$\(date \+%s\)" > \/var\/lib\/paratix\/flags\/'cron-crontab-[\da-f]+'\/holder$/v,
+        result: { code: 0 },
+      },
+      {
+        command: /^rm -f \/var\/lib\/paratix\/flags\/'cron-crontab-[\da-f]+'\/holder$/v,
         result: { code: 0 },
       },
       {
