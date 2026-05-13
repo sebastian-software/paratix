@@ -38,6 +38,7 @@ export function makeMockSshClass(
     disconnect?: ReturnType<typeof vi.fn>
     exec?: ReturnType<typeof vi.fn>
     getConnectionInfo?: ReturnType<typeof vi.fn>
+    lifecycle?: "fail-closed" | "permissive"
     output?: ReturnType<typeof vi.fn>
     probeSudo?: ReturnType<typeof vi.fn>
     readFile?: ReturnType<typeof vi.fn>
@@ -47,11 +48,29 @@ export function makeMockSshClass(
     writeFile?: ReturnType<typeof vi.fn>
   }
 ): new (host: string, config: unknown) => unknown {
+  const hasPermissiveLifecycle = overrides?.lifecycle === "permissive"
+
   return class MockSshConnectionImpl {
-    public addPort = overrides?.addPort ?? vi.fn().mockReturnValue(true)
-    public connect = overrides?.connect ?? vi.fn().mockResolvedValue(null)
+    public addPort =
+      overrides?.addPort ??
+      (hasPermissiveLifecycle
+        ? vi.fn().mockReturnValue(true)
+        : vi.fn(() => {
+            throw rejectUnstubbedSshMethod("addPort")
+          }))
+    public connect =
+      overrides?.connect ??
+      (hasPermissiveLifecycle
+        ? vi.fn().mockResolvedValue(null)
+        : vi.fn().mockRejectedValue(rejectUnstubbedSshMethod("connect")))
     public currentHost = ""
-    public disconnect = overrides?.disconnect ?? vi.fn()
+    public disconnect =
+      overrides?.disconnect ??
+      (hasPermissiveLifecycle
+        ? vi.fn()
+        : vi.fn(() => {
+            throw rejectUnstubbedSshMethod("disconnect")
+          }))
     public downloadFile = vi.fn().mockRejectedValue(rejectUnstubbedSshMethod("downloadFile"))
     public exec = overrides?.exec ?? vi.fn().mockRejectedValue(rejectUnstubbedSshMethod("exec"))
     public exists = vi.fn().mockRejectedValue(rejectUnstubbedSshMethod("exists"))
@@ -71,15 +90,29 @@ export function makeMockSshClass(
       overrides?.probeSudo ?? vi.fn().mockRejectedValue(rejectUnstubbedSshMethod("probeSudo"))
     public readFile =
       overrides?.readFile ?? vi.fn().mockRejectedValue(rejectUnstubbedSshMethod("readFile"))
-    public reconnect = overrides?.reconnect ?? vi.fn().mockResolvedValue(null)
-    public removePort = overrides?.removePort ?? vi.fn()
+    public reconnect =
+      overrides?.reconnect ??
+      (hasPermissiveLifecycle
+        ? vi.fn().mockResolvedValue(null)
+        : vi.fn().mockRejectedValue(rejectUnstubbedSshMethod("reconnect")))
+    public removePort =
+      overrides?.removePort ??
+      (hasPermissiveLifecycle
+        ? vi.fn()
+        : vi.fn(() => {
+            throw rejectUnstubbedSshMethod("removePort")
+          }))
     public sha256 = vi.fn().mockRejectedValue(rejectUnstubbedSshMethod("sha256"))
     public test = vi.fn().mockRejectedValue(rejectUnstubbedSshMethod("test"))
     public updateHost =
       overrides?.updateHost ??
-      vi.fn((host: string) => {
-        this.currentHost = host
-      })
+      (hasPermissiveLifecycle
+        ? vi.fn((host: string) => {
+            this.currentHost = host
+          })
+        : vi.fn(() => {
+            throw rejectUnstubbedSshMethod("updateHost")
+          }))
     public uploadFile = vi.fn().mockRejectedValue(rejectUnstubbedSshMethod("uploadFile"))
     public writeFile =
       overrides?.writeFile ?? vi.fn().mockRejectedValue(rejectUnstubbedSshMethod("writeFile"))

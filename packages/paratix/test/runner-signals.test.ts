@@ -39,7 +39,10 @@ describe("runPlaybook signal handling", () => {
   it("registers SIGINT and SIGTERM listeners during runPlaybook and removes them after completion", async () => {
     vi.doMock("../src/ssh.js", () => ({
       shellQuote: (s: string) => `'${s}'`,
-      SshConnectionImpl: makeMockSshClass(capturedConfigs, { disconnect: disconnectFn }),
+      SshConnectionImpl: makeMockSshClass(capturedConfigs, {
+        disconnect: disconnectFn,
+        lifecycle: "permissive",
+      }),
     }))
 
     const { runPlaybook } = await import("../src/runner.js")
@@ -63,7 +66,10 @@ describe("runPlaybook signal handling", () => {
   it("calls ssh.disconnect() and sets exitCode to 130 when SIGINT is received during runPlaybook", async () => {
     vi.doMock("../src/ssh.js", () => ({
       shellQuote: (s: string) => `'${s}'`,
-      SshConnectionImpl: makeMockSshClass(capturedConfigs, { disconnect: disconnectFn }),
+      SshConnectionImpl: makeMockSshClass(capturedConfigs, {
+        disconnect: disconnectFn,
+        lifecycle: "permissive",
+      }),
     }))
 
     const { runPlaybook } = await import("../src/runner.js")
@@ -112,7 +118,7 @@ describe("runPlaybook signal handling", () => {
 
     vi.doMock("../src/ssh.js", () => ({
       shellQuote: (s: string) => `'${s}'`,
-      SshConnectionImpl: makeMockSshClass(capturedConfigs, { disconnect }),
+      SshConnectionImpl: makeMockSshClass(capturedConfigs, { disconnect, lifecycle: "permissive" }),
     }))
 
     const { runPlaybook } = await import("../src/runner.js")
@@ -151,7 +157,10 @@ describe("runPlaybook signal handling", () => {
   it("sets exitCode to 143 when SIGTERM is received during runPlaybook", async () => {
     vi.doMock("../src/ssh.js", () => ({
       shellQuote: (s: string) => `'${s}'`,
-      SshConnectionImpl: makeMockSshClass(capturedConfigs, { disconnect: disconnectFn }),
+      SshConnectionImpl: makeMockSshClass(capturedConfigs, {
+        disconnect: disconnectFn,
+        lifecycle: "permissive",
+      }),
     }))
 
     const { runPlaybook } = await import("../src/runner.js")
@@ -184,7 +193,10 @@ describe("runPlaybook signal handling", () => {
   it("does not run signals when a shutdown signal was received before signal execution", async () => {
     vi.doMock("../src/ssh.js", () => ({
       shellQuote: (s: string) => `'${s}'`,
-      SshConnectionImpl: makeMockSshClass(capturedConfigs, { disconnect: disconnectFn }),
+      SshConnectionImpl: makeMockSshClass(capturedConfigs, {
+        disconnect: disconnectFn,
+        lifecycle: "permissive",
+      }),
     }))
 
     const { runPlaybook } = await import("../src/runner.js")
@@ -227,7 +239,10 @@ describe("runPlaybook signal handling", () => {
 
     vi.doMock("../src/ssh.js", () => ({
       shellQuote: (s: string) => `'${s}'`,
-      SshConnectionImpl: makeMockSshClass(capturedConfigs, { disconnect: disconnectFn }),
+      SshConnectionImpl: makeMockSshClass(capturedConfigs, {
+        disconnect: disconnectFn,
+        lifecycle: "permissive",
+      }),
     }))
     vi.spyOn(console, "log").mockImplementation((...args) => {
       consoleLogs.push(args.join(" "))
@@ -265,7 +280,10 @@ describe("runPlaybook signal handling", () => {
 
     vi.doMock("../src/ssh.js", () => ({
       shellQuote: (s: string) => `'${s}'`,
-      SshConnectionImpl: makeMockSshClass(capturedConfigs, { disconnect: disconnectFn }),
+      SshConnectionImpl: makeMockSshClass(capturedConfigs, {
+        disconnect: disconnectFn,
+        lifecycle: "permissive",
+      }),
     }))
     vi.spyOn(console, "log").mockImplementation((...args) => {
       consoleLogs.push(args.join(" "))
@@ -303,7 +321,7 @@ describe("runPlaybook signal handling", () => {
   it("does not run top-level signals when the module loop ended with both changed and failed results", async () => {
     vi.doMock("../src/ssh.js", () => ({
       shellQuote: (s: string) => `'${s}'`,
-      SshConnectionImpl: makeMockSshClass(capturedConfigs),
+      SshConnectionImpl: makeMockSshClass(capturedConfigs, { lifecycle: "permissive" }),
     }))
 
     const { runPlaybook } = await import("../src/runner.js")
@@ -350,7 +368,10 @@ describe("runPlaybook signal handling", () => {
     async (signalName, expectedExitCode) => {
       vi.doMock("../src/ssh.js", () => ({
         shellQuote: (s: string) => `'${s}'`,
-        SshConnectionImpl: makeMockSshClass(capturedConfigs, { disconnect: disconnectFn }),
+        SshConnectionImpl: makeMockSshClass(capturedConfigs, {
+          disconnect: disconnectFn,
+          lifecycle: "permissive",
+        }),
       }))
 
       const { runPlaybook } = await import("../src/runner.js")
@@ -397,7 +418,10 @@ describe("runPlaybook signal handling", () => {
   it("does not set signal exitCode when runPlaybook completes normally without any signal", async () => {
     vi.doMock("../src/ssh.js", () => ({
       shellQuote: (s: string) => `'${s}'`,
-      SshConnectionImpl: makeMockSshClass(capturedConfigs, { disconnect: disconnectFn }),
+      SshConnectionImpl: makeMockSshClass(capturedConfigs, {
+        disconnect: disconnectFn,
+        lifecycle: "permissive",
+      }),
     }))
 
     const { runPlaybook } = await import("../src/runner.js")
@@ -420,6 +444,7 @@ describe("runPlaybook signal handling", () => {
       shellQuote: (s: string) => `'${s}'`,
       SshConnectionImpl: makeMockSshClass(capturedConfigs, {
         disconnect: disconnectFn,
+        lifecycle: "permissive",
         reconnect: vi.fn().mockImplementation(async () => {
           await Promise.resolve()
           getSignalBus().emit("SIGINT")
@@ -459,7 +484,10 @@ describe("runPlaybook signal handling", () => {
   it("skips remaining modules when shutdown signal was received during a successful module", async () => {
     vi.doMock("../src/ssh.js", () => ({
       shellQuote: (s: string) => `'${s}'`,
-      SshConnectionImpl: makeMockSshClass(capturedConfigs, { disconnect: disconnectFn }),
+      SshConnectionImpl: makeMockSshClass(capturedConfigs, {
+        disconnect: disconnectFn,
+        lifecycle: "permissive",
+      }),
     }))
 
     const { runPlaybook } = await import("../src/runner.js")
@@ -677,7 +705,7 @@ describe("runPlaybook shutdown handler leak on SSH connection failure", () => {
 
     vi.doMock("../src/ssh.js", () => ({
       shellQuote: (s: string) => `'${s}'`,
-      SshConnectionImpl: makeMockSshClass(capturedConfigs),
+      SshConnectionImpl: makeMockSshClass(capturedConfigs, { lifecycle: "permissive" }),
     }))
     vi.spyOn(console, "log").mockImplementation((...args) => {
       consoleLogs.push(args.join(" "))
@@ -945,7 +973,7 @@ describe("runPlaybook shutdown handler leak on SSH connection failure", () => {
 
     vi.doMock("../src/ssh.js", () => ({
       shellQuote: (s: string) => `'${s}'`,
-      SshConnectionImpl: makeMockSshClass(capturedConfigs),
+      SshConnectionImpl: makeMockSshClass(capturedConfigs, { lifecycle: "permissive" }),
     }))
 
     const { runPlaybook } = await import("../src/runner.js")
@@ -1001,7 +1029,7 @@ describe("runPlaybook local signal module behaviour", () => {
 
     vi.doMock("../src/ssh.js", () => ({
       shellQuote: (s: string) => `'${s}'`,
-      SshConnectionImpl: makeMockSshClass(capturedConfigs),
+      SshConnectionImpl: makeMockSshClass(capturedConfigs, { lifecycle: "permissive" }),
     }))
 
     const { runPlaybook } = await import("../src/runner.js")
@@ -1062,7 +1090,7 @@ describe("runPlaybook runSignals stats.incrementSignals on failure", () => {
 
     vi.doMock("../src/ssh.js", () => ({
       shellQuote: (s: string) => `'${s}'`,
-      SshConnectionImpl: makeMockSshClass(capturedConfigs),
+      SshConnectionImpl: makeMockSshClass(capturedConfigs, { lifecycle: "permissive" }),
     }))
 
     const consoleLogs: unknown[][] = []
@@ -1124,7 +1152,7 @@ describe("runSignals stats tracking", () => {
   it("increments stats.failed and sets exitCode to 1 when a signal module throws an exception", async () => {
     vi.doMock("../src/ssh.js", () => ({
       shellQuote: (s: string) => `'${s}'`,
-      SshConnectionImpl: makeMockSshClass(capturedConfigs),
+      SshConnectionImpl: makeMockSshClass(capturedConfigs, { lifecycle: "permissive" }),
     }))
 
     const { runPlaybook } = await import("../src/runner.js")
@@ -1158,7 +1186,7 @@ describe("runSignals stats tracking", () => {
   it("increments stats.failed and sets exitCode to 1 when a signal module returns { status: 'failed' }", async () => {
     vi.doMock("../src/ssh.js", () => ({
       shellQuote: (s: string) => `'${s}'`,
-      SshConnectionImpl: makeMockSshClass(capturedConfigs),
+      SshConnectionImpl: makeMockSshClass(capturedConfigs, { lifecycle: "permissive" }),
     }))
 
     const { runPlaybook } = await import("../src/runner.js")
@@ -1192,7 +1220,7 @@ describe("runSignals stats tracking", () => {
   it("increments stats.changed and does not set exitCode to 1 when a signal module returns { status: 'changed' }", async () => {
     vi.doMock("../src/ssh.js", () => ({
       shellQuote: (s: string) => `'${s}'`,
-      SshConnectionImpl: makeMockSshClass(capturedConfigs),
+      SshConnectionImpl: makeMockSshClass(capturedConfigs, { lifecycle: "permissive" }),
     }))
 
     const { runPlaybook } = await import("../src/runner.js")

@@ -29,7 +29,7 @@ describe("runPlaybook runtime module validation", () => {
 
     vi.doMock("../src/ssh.js", () => ({
       shellQuote: (s: string) => `'${s}'`,
-      SshConnectionImpl: makeMockSshClass(capturedConfigs),
+      SshConnectionImpl: makeMockSshClass(capturedConfigs, { lifecycle: "permissive" }),
     }))
 
     const { runPlaybook } = await import("../src/runner.js")
@@ -56,6 +56,7 @@ describe("runPlaybook runtime module validation", () => {
       SshConnectionImpl: makeMockSshClass(capturedConfigs, {
         connect: vi.fn().mockRejectedValue(new Error("connect refused")),
         disconnect,
+        lifecycle: "permissive",
       }),
     }))
 
@@ -98,7 +99,7 @@ describe("runPlaybook recipe exception handling", () => {
 
     vi.doMock("../src/ssh.js", () => ({
       shellQuote: (s: string) => `'${s}'`,
-      SshConnectionImpl: makeMockSshClass(capturedConfigs),
+      SshConnectionImpl: makeMockSshClass(capturedConfigs, { lifecycle: "permissive" }),
     }))
 
     const { runPlaybook } = await import("../src/runner.js")
@@ -132,7 +133,7 @@ describe("runPlaybook recipe exception handling", () => {
 
     vi.doMock("../src/ssh.js", () => ({
       shellQuote: (s: string) => `'${s}'`,
-      SshConnectionImpl: makeMockSshClass(capturedConfigs),
+      SshConnectionImpl: makeMockSshClass(capturedConfigs, { lifecycle: "permissive" }),
     }))
 
     const consoleErrors: unknown[][] = []
@@ -173,7 +174,7 @@ describe("runPlaybook recipe exception handling", () => {
 
     vi.doMock("../src/ssh.js", () => ({
       shellQuote: (s: string) => `'${s}'`,
-      SshConnectionImpl: makeMockSshClass(capturedConfigs),
+      SshConnectionImpl: makeMockSshClass(capturedConfigs, { lifecycle: "permissive" }),
     }))
 
     const { runPlaybook } = await import("../src/runner.js")
@@ -215,7 +216,7 @@ describe("runPlaybook recipe exception handling", () => {
 
     vi.doMock("../src/ssh.js", () => ({
       shellQuote: (s: string) => `'${s}'`,
-      SshConnectionImpl: makeMockSshClass(capturedConfigs),
+      SshConnectionImpl: makeMockSshClass(capturedConfigs, { lifecycle: "permissive" }),
     }))
     vi.spyOn(console, "log").mockImplementation((...args) => {
       consoleLogs.push(args.join(" "))
@@ -261,7 +262,7 @@ describe("runPlaybook recipe exception handling", () => {
 
     vi.doMock("../src/ssh.js", () => ({
       shellQuote: (s: string) => `'${s}'`,
-      SshConnectionImpl: makeMockSshClass(capturedConfigs),
+      SshConnectionImpl: makeMockSshClass(capturedConfigs, { lifecycle: "permissive" }),
     }))
     vi.spyOn(console, "log").mockImplementation((...args) => {
       consoleLogs.push(args.join(" "))
@@ -322,7 +323,7 @@ describe("runPlaybook failed result diagnostics", () => {
 
     vi.doMock("../src/ssh.js", () => ({
       shellQuote: (s: string) => `'${s}'`,
-      SshConnectionImpl: makeMockSshClass(capturedConfigs),
+      SshConnectionImpl: makeMockSshClass(capturedConfigs, { lifecycle: "permissive" }),
     }))
     vi.spyOn(console, "log").mockImplementation(() => {
       /* noop */
@@ -366,6 +367,7 @@ describe("runPlaybook failed result diagnostics", () => {
       shellQuote: (s: string) => `'${s}'`,
       SshConnectionImpl: makeMockSshClass(capturedConfigs, {
         exec: vi.fn().mockResolvedValue({ code: 1, stderr: "permission denied", stdout: "" }),
+        lifecycle: "permissive",
         output: vi.fn().mockResolvedValue("old-hostname"),
       }),
     }))
@@ -400,7 +402,7 @@ describe("runPlaybook failed result diagnostics", () => {
 
     vi.doMock("../src/ssh.js", () => ({
       shellQuote: (s: string) => `'${s}'`,
-      SshConnectionImpl: makeMockSshClass(capturedConfigs),
+      SshConnectionImpl: makeMockSshClass(capturedConfigs, { lifecycle: "permissive" }),
     }))
     vi.spyOn(console, "log").mockImplementation((...args) => {
       consoleLogs.push(args.join(" "))
@@ -449,6 +451,7 @@ describe("runPlaybook failed result diagnostics", () => {
       shellQuote: (s: string) => `'${s}'`,
       SshConnectionImpl: makeMockSshClass(capturedConfigs, {
         exec: vi.fn().mockResolvedValue({ code: 1, stderr: "permission denied", stdout: "" }),
+        lifecycle: "permissive",
         output: vi.fn().mockResolvedValue("old-hostname"),
       }),
     }))
@@ -483,7 +486,7 @@ describe("runPlaybook failed result diagnostics", () => {
 
     vi.doMock("../src/ssh.js", () => ({
       shellQuote: (s: string) => `'${s}'`,
-      SshConnectionImpl: makeMockSshClass(capturedConfigs),
+      SshConnectionImpl: makeMockSshClass(capturedConfigs, { lifecycle: "permissive" }),
     }))
     vi.spyOn(console, "error").mockImplementation((...args) => {
       consoleErrors.push(args.join(" "))
@@ -533,7 +536,7 @@ describe("runPlaybook failed result diagnostics", () => {
 
     vi.doMock("../src/ssh.js", () => ({
       shellQuote: (s: string) => `'${s}'`,
-      SshConnectionImpl: makeMockSshClass(capturedConfigs),
+      SshConnectionImpl: makeMockSshClass(capturedConfigs, { lifecycle: "permissive" }),
     }))
     vi.spyOn(console, "error").mockImplementation((...args) => {
       consoleErrors.push(args.join(" "))
@@ -588,7 +591,7 @@ describe("runPlaybook failed result diagnostics", () => {
 
     vi.doMock("../src/ssh.js", () => ({
       shellQuote: (s: string) => `'${s}'`,
-      SshConnectionImpl: makeMockSshClass(capturedConfigs),
+      SshConnectionImpl: makeMockSshClass(capturedConfigs, { lifecycle: "permissive" }),
     }))
     vi.spyOn(console, "error").mockImplementation((...args) => {
       consoleErrors.push(args.join(" "))
@@ -642,7 +645,7 @@ describe("runPlaybook failed result diagnostics", () => {
 
     vi.doMock("../src/ssh.js", () => ({
       shellQuote: (s: string) => `'${s}'`,
-      SshConnectionImpl: makeMockSshClass(capturedConfigs),
+      SshConnectionImpl: makeMockSshClass(capturedConfigs, { lifecycle: "permissive" }),
     }))
     vi.spyOn(console, "log").mockImplementation((...args) => {
       consoleLogs.push(args.join(" "))
@@ -701,7 +704,7 @@ describe("runPlaybook local module behaviour", () => {
 
     vi.doMock("../src/ssh.js", () => ({
       shellQuote: (s: string) => `'${s}'`,
-      SshConnectionImpl: makeMockSshClass(capturedConfigs),
+      SshConnectionImpl: makeMockSshClass(capturedConfigs, { lifecycle: "permissive" }),
     }))
 
     const { runPlaybook } = await import("../src/runner.js")
@@ -736,7 +739,7 @@ describe("runPlaybook local module behaviour", () => {
 
     vi.doMock("../src/ssh.js", () => ({
       shellQuote: (s: string) => `'${s}'`,
-      SshConnectionImpl: makeMockSshClass(capturedConfigs),
+      SshConnectionImpl: makeMockSshClass(capturedConfigs, { lifecycle: "permissive" }),
     }))
 
     const { runPlaybook } = await import("../src/runner.js")
@@ -813,7 +816,7 @@ describe("runPlaybook rsync check error handling", () => {
     }))
     vi.doMock("../src/ssh.js", () => ({
       shellQuote: (s: string) => `'${s}'`,
-      SshConnectionImpl: makeMockSshClass(capturedConfigs),
+      SshConnectionImpl: makeMockSshClass(capturedConfigs, { lifecycle: "permissive" }),
     }))
 
     const [{ runPlaybook }, { rsync }] = await Promise.all([
@@ -875,7 +878,7 @@ describe("runPlaybook happy-path lifecycle (check → apply → signals)", () =>
   it("calls check on every module, applies only needs-apply modules, triggers signals, and exits cleanly", async () => {
     vi.doMock("../src/ssh.js", () => ({
       shellQuote: (s: string) => `'${s}'`,
-      SshConnectionImpl: makeMockSshClass(capturedConfigs),
+      SshConnectionImpl: makeMockSshClass(capturedConfigs, { lifecycle: "permissive" }),
     }))
 
     const { runPlaybook } = await import("../src/runner.js")
@@ -934,7 +937,7 @@ describe("runPlaybook happy-path lifecycle (check → apply → signals)", () =>
   it("does not trigger signals when all modules return ok from check", async () => {
     vi.doMock("../src/ssh.js", () => ({
       shellQuote: (s: string) => `'${s}'`,
-      SshConnectionImpl: makeMockSshClass(capturedConfigs),
+      SshConnectionImpl: makeMockSshClass(capturedConfigs, { lifecycle: "permissive" }),
     }))
 
     const { runPlaybook } = await import("../src/runner.js")
@@ -980,7 +983,7 @@ describe("runPlaybook happy-path lifecycle (check → apply → signals)", () =>
   it("resets a previous failed run exitCode after a subsequent successful run", async () => {
     vi.doMock("../src/ssh.js", () => ({
       shellQuote: (s: string) => `'${s}'`,
-      SshConnectionImpl: makeMockSshClass(capturedConfigs),
+      SshConnectionImpl: makeMockSshClass(capturedConfigs, { lifecycle: "permissive" }),
     }))
 
     const { runPlaybook } = await import("../src/runner.js")

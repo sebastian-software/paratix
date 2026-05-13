@@ -38,6 +38,7 @@ describe("runPlaybook reconnect failure propagation", () => {
     vi.doMock("../src/ssh.js", () => ({
       shellQuote: (s: string) => `'${s}'`,
       SshConnectionImpl: makeMockSshClass(capturedConfigs, {
+        lifecycle: "permissive",
         reconnect: vi.fn().mockRejectedValue(reconnectError),
       }),
     }))
@@ -70,6 +71,7 @@ describe("runPlaybook reconnect failure propagation", () => {
     vi.doMock("../src/ssh.js", () => ({
       shellQuote: (s: string) => `'${s}'`,
       SshConnectionImpl: makeMockSshClass(capturedConfigs, {
+        lifecycle: "permissive",
         reconnect: vi.fn().mockRejectedValue(reconnectError),
       }),
     }))
@@ -102,6 +104,7 @@ describe("runPlaybook reconnect failure propagation", () => {
     vi.doMock("../src/ssh.js", () => ({
       shellQuote: (s: string) => `'${s}'`,
       SshConnectionImpl: makeMockSshClass(capturedConfigs, {
+        lifecycle: "permissive",
         reconnect: vi.fn().mockRejectedValue(reconnectError),
       }),
     }))
@@ -141,6 +144,7 @@ describe("runPlaybook reconnect failure propagation", () => {
         getConnectionInfo: vi
           .fn()
           .mockReturnValue({ host: "1.2.3.4", port: 0, privateKeyPath: "~/.ssh/id", user: "root" }),
+        lifecycle: "permissive",
         reconnect: vi.fn().mockRejectedValue(reconnectError),
         removePort,
       }),
@@ -180,6 +184,7 @@ describe("runPlaybook reconnect failure propagation", () => {
         getConnectionInfo: vi
           .fn()
           .mockReturnValue({ host: "1.2.3.4", port: 0, privateKeyPath: "~/.ssh/id", user: "root" }),
+        lifecycle: "permissive",
         reconnect: vi.fn().mockRejectedValue(reconnectError),
         removePort,
       }),
@@ -229,6 +234,7 @@ describe("runPlaybook reconnect failure propagation", () => {
         getConnectionInfo: vi
           .fn()
           .mockReturnValue({ host: "1.2.3.4", port: 0, privateKeyPath: "~/.ssh/id", user: "root" }),
+        lifecycle: "permissive",
         reconnect: vi.fn().mockRejectedValue(reconnectError),
         removePort: vi.fn(),
       }),
@@ -277,6 +283,7 @@ describe("runPlaybook reconnect failure propagation", () => {
           privateKeyPath: "~/.ssh/id",
           user: "root",
         }),
+        lifecycle: "permissive",
         reconnect: vi.fn().mockRejectedValue(commitError),
         removePort,
       }),
@@ -307,6 +314,7 @@ describe("runPlaybook reconnect failure propagation", () => {
     vi.doMock("../src/ssh.js", () => ({
       shellQuote: (s: string) => `'${s}'`,
       SshConnectionImpl: makeMockSshClass(capturedConfigs, {
+        lifecycle: "permissive",
         reconnect: vi.fn().mockRejectedValue(reconnectError),
       }),
     }))
@@ -343,6 +351,7 @@ describe("runPlaybook reconnect failure propagation", () => {
     vi.doMock("../src/ssh.js", () => ({
       shellQuote: (s: string) => `'${s}'`,
       SshConnectionImpl: makeMockSshClass(capturedConfigs, {
+        lifecycle: "permissive",
         reconnect: vi.fn().mockRejectedValue(reconnectError),
       }),
     }))
@@ -383,7 +392,7 @@ describe("runPlaybook reconnect failure propagation", () => {
 
     vi.doMock("../src/ssh.js", () => ({
       shellQuote: (value: string) => `'${value}'`,
-      SshConnectionImpl: makeMockSshClass(capturedConfigs),
+      SshConnectionImpl: makeMockSshClass(capturedConfigs, { lifecycle: "permissive" }),
     }))
 
     const { runPlaybook } = await import("../src/runner.js")
@@ -416,7 +425,7 @@ describe("runPlaybook reconnect failure propagation", () => {
 
     vi.doMock("../src/ssh.js", () => ({
       shellQuote: (value: string) => `'${value}'`,
-      SshConnectionImpl: makeMockSshClass(capturedConfigs),
+      SshConnectionImpl: makeMockSshClass(capturedConfigs, { lifecycle: "permissive" }),
     }))
 
     const { runPlaybook } = await import("../src/runner.js")
@@ -465,7 +474,7 @@ describe("runPlaybook SSH config immutability", () => {
 
     vi.doMock("../src/ssh.js", () => ({
       shellQuote: (s: string) => `'${s}'`,
-      SshConnectionImpl: makeMockSshClass(capturedConfigs),
+      SshConnectionImpl: makeMockSshClass(capturedConfigs, { lifecycle: "permissive" }),
     }))
 
     const { runPlaybook } = await import("../src/runner.js")
@@ -507,7 +516,7 @@ describe("runPlaybook SSH config immutability", () => {
 
     vi.doMock("../src/ssh.js", () => ({
       shellQuote: (s: string) => `'${s}'`,
-      SshConnectionImpl: makeMockSshClass(capturedConfigs),
+      SshConnectionImpl: makeMockSshClass(capturedConfigs, { lifecycle: "permissive" }),
     }))
 
     const { runPlaybook } = await import("../src/runner.js")
@@ -539,7 +548,7 @@ describe("runPlaybook SSH config immutability", () => {
 
     vi.doMock("../src/ssh.js", () => ({
       shellQuote: (s: string) => `'${s}'`,
-      SshConnectionImpl: makeMockSshClass(capturedConfigs, { reconnect }),
+      SshConnectionImpl: makeMockSshClass(capturedConfigs, { lifecycle: "permissive", reconnect }),
     }))
 
     const { runPlaybook } = await import("../src/runner.js")
@@ -594,7 +603,7 @@ describe("runPlaybook handlePortChange + handleReboot interaction", () => {
 
     vi.doMock("../src/ssh.js", () => ({
       shellQuote: (s: string) => `'${s}'`,
-      SshConnectionImpl: makeMockSshClass(capturedConfigs, { reconnect }),
+      SshConnectionImpl: makeMockSshClass(capturedConfigs, { lifecycle: "permissive", reconnect }),
     }))
 
     const { runPlaybook } = await import("../src/runner.js")
@@ -620,7 +629,7 @@ describe("runPlaybook handlePortChange + handleReboot interaction", () => {
 
     vi.doMock("../src/ssh.js", () => ({
       shellQuote: (s: string) => `'${s}'`,
-      SshConnectionImpl: makeMockSshClass(capturedConfigs, { reconnect }),
+      SshConnectionImpl: makeMockSshClass(capturedConfigs, { lifecycle: "permissive", reconnect }),
     }))
 
     const { runPlaybook } = await import("../src/runner.js")
@@ -655,6 +664,7 @@ describe("runPlaybook handlePortChange + handleReboot interaction", () => {
           privateKeyPath: "~/.ssh/id",
           user: "root",
         }),
+        lifecycle: "permissive",
         reconnect,
       }),
     }))
@@ -683,7 +693,11 @@ describe("runPlaybook handlePortChange + handleReboot interaction", () => {
 
     vi.doMock("../src/ssh.js", () => ({
       shellQuote: (s: string) => `'${s}'`,
-      SshConnectionImpl: makeMockSshClass(capturedConfigs, { addPort, reconnect }),
+      SshConnectionImpl: makeMockSshClass(capturedConfigs, {
+        addPort,
+        lifecycle: "permissive",
+        reconnect,
+      }),
     }))
 
     const { runPlaybook } = await import("../src/runner.js")
@@ -734,7 +748,11 @@ describe("runPlaybook recipe child control-plane processing", () => {
 
     vi.doMock("../src/ssh.js", () => ({
       shellQuote: (s: string) => `'${s}'`,
-      SshConnectionImpl: makeMockSshClass(capturedConfigs, { addPort, reconnect }),
+      SshConnectionImpl: makeMockSshClass(capturedConfigs, {
+        addPort,
+        lifecycle: "permissive",
+        reconnect,
+      }),
     }))
 
     const { runPlaybook } = await import("../src/runner.js")
@@ -777,7 +795,11 @@ describe("runPlaybook recipe child control-plane processing", () => {
 
     vi.doMock("../src/ssh.js", () => ({
       shellQuote: (s: string) => `'${s}'`,
-      SshConnectionImpl: makeMockSshClass(capturedConfigs, { reconnect, updateHost }),
+      SshConnectionImpl: makeMockSshClass(capturedConfigs, {
+        lifecycle: "permissive",
+        reconnect,
+        updateHost,
+      }),
     }))
 
     const { runPlaybook } = await import("../src/runner.js")
@@ -838,7 +860,7 @@ describe("runPlaybook handleReboot grace period (R-0000153)", () => {
 
     vi.doMock("../src/ssh.js", () => ({
       shellQuote: (s: string) => `'${s}'`,
-      SshConnectionImpl: makeMockSshClass(capturedConfigs, { reconnect }),
+      SshConnectionImpl: makeMockSshClass(capturedConfigs, { lifecycle: "permissive", reconnect }),
     }))
 
     const { runPlaybook } = await import("../src/runner.js")
@@ -866,7 +888,7 @@ describe("runPlaybook handleReboot grace period (R-0000153)", () => {
 
     vi.doMock("../src/ssh.js", () => ({
       shellQuote: (s: string) => `'${s}'`,
-      SshConnectionImpl: makeMockSshClass(capturedConfigs, { reconnect }),
+      SshConnectionImpl: makeMockSshClass(capturedConfigs, { lifecycle: "permissive", reconnect }),
     }))
 
     const { runPlaybook } = await import("../src/runner.js")
@@ -893,7 +915,7 @@ describe("runPlaybook handleReboot grace period (R-0000153)", () => {
 
     vi.doMock("../src/ssh.js", () => ({
       shellQuote: (s: string) => `'${s}'`,
-      SshConnectionImpl: makeMockSshClass(capturedConfigs, { reconnect }),
+      SshConnectionImpl: makeMockSshClass(capturedConfigs, { lifecycle: "permissive", reconnect }),
     }))
 
     const { runPlaybook } = await import("../src/runner.js")
@@ -921,7 +943,7 @@ describe("runPlaybook handleReboot grace period (R-0000153)", () => {
 
     vi.doMock("../src/ssh.js", () => ({
       shellQuote: (s: string) => `'${s}'`,
-      SshConnectionImpl: makeMockSshClass(capturedConfigs, { reconnect }),
+      SshConnectionImpl: makeMockSshClass(capturedConfigs, { lifecycle: "permissive", reconnect }),
     }))
 
     const { runPlaybook } = await import("../src/runner.js")
@@ -978,7 +1000,11 @@ describe("runPlaybook conditional child control-plane processing", () => {
 
     vi.doMock("../src/ssh.js", () => ({
       shellQuote: (s: string) => `'${s}'`,
-      SshConnectionImpl: makeMockSshClass(capturedConfigs, { addPort, reconnect }),
+      SshConnectionImpl: makeMockSshClass(capturedConfigs, {
+        addPort,
+        lifecycle: "permissive",
+        reconnect,
+      }),
     }))
 
     const { runPlaybook } = await import("../src/runner.js")
@@ -1028,7 +1054,11 @@ describe("runPlaybook conditional child control-plane processing", () => {
 
     vi.doMock("../src/ssh.js", () => ({
       shellQuote: (s: string) => `'${s}'`,
-      SshConnectionImpl: makeMockSshClass(capturedConfigs, { addPort, reconnect }),
+      SshConnectionImpl: makeMockSshClass(capturedConfigs, {
+        addPort,
+        lifecycle: "permissive",
+        reconnect,
+      }),
     }))
 
     const { runPlaybook } = await import("../src/runner.js")
@@ -1085,7 +1115,7 @@ describe("runPlaybook reconnectTimeout", () => {
 
     vi.doMock("../src/ssh.js", () => ({
       shellQuote: (s: string) => `'${s}'`,
-      SshConnectionImpl: makeMockSshClass(capturedConfigs),
+      SshConnectionImpl: makeMockSshClass(capturedConfigs, { lifecycle: "permissive" }),
     }))
 
     const { runPlaybook } = await import("../src/runner.js")
@@ -1112,7 +1142,7 @@ describe("runPlaybook reconnectTimeout", () => {
 
     vi.doMock("../src/ssh.js", () => ({
       shellQuote: (s: string) => `'${s}'`,
-      SshConnectionImpl: makeMockSshClass(capturedConfigs),
+      SshConnectionImpl: makeMockSshClass(capturedConfigs, { lifecycle: "permissive" }),
     }))
 
     const { runPlaybook } = await import("../src/runner.js")

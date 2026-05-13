@@ -37,7 +37,7 @@ describe("runPlaybook secret sink cleanup", () => {
     const capturedConfigs: unknown[] = []
     vi.doMock("../src/ssh.js", () => ({
       shellQuote: (s: string) => `'${s}'`,
-      SshConnectionImpl: makeMockSshClass(capturedConfigs),
+      SshConnectionImpl: makeMockSshClass(capturedConfigs, { lifecycle: "permissive" }),
     }))
 
     const [{ runPlaybook }, { getRegisteredSecrets, registerSecret }] = await Promise.all([
@@ -70,7 +70,7 @@ describe("runPlaybook secret sink cleanup", () => {
     const capturedConfigs: unknown[] = []
     vi.doMock("../src/ssh.js", () => ({
       shellQuote: (s: string) => `'${s}'`,
-      SshConnectionImpl: makeMockSshClass(capturedConfigs),
+      SshConnectionImpl: makeMockSshClass(capturedConfigs, { lifecycle: "permissive" }),
     }))
 
     const [{ runPlaybook }, { getRegisteredSecrets, registerSecret }] = await Promise.all([
@@ -128,7 +128,7 @@ describe("runPlaybook op.resolve integration", () => {
     }))
     vi.doMock("../src/ssh.js", () => ({
       shellQuote: (s: string) => `'${s}'`,
-      SshConnectionImpl: makeMockSshClass(capturedConfigs),
+      SshConnectionImpl: makeMockSshClass(capturedConfigs, { lifecycle: "permissive" }),
     }))
 
     const [{ runPlaybook }, { op }] = await Promise.all([
@@ -188,7 +188,7 @@ describe("runPlaybook environment merge priority", () => {
 
     vi.doMock("../src/ssh.js", () => ({
       shellQuote: (s: string) => `'${s}'`,
-      SshConnectionImpl: makeMockSshClass(capturedConfigs),
+      SshConnectionImpl: makeMockSshClass(capturedConfigs, { lifecycle: "permissive" }),
     }))
 
     const { runPlaybook } = await import("../src/runner.js")
@@ -222,7 +222,7 @@ describe("runPlaybook environment merge priority", () => {
 
     vi.doMock("../src/ssh.js", () => ({
       shellQuote: (s: string) => `'${s}'`,
-      SshConnectionImpl: makeMockSshClass(capturedConfigs),
+      SshConnectionImpl: makeMockSshClass(capturedConfigs, { lifecycle: "permissive" }),
     }))
 
     const { runPlaybook } = await import("../src/runner.js")

@@ -30,7 +30,7 @@ describe("runPlaybook meta validation", () => {
 
     vi.doMock("../src/ssh.js", () => ({
       shellQuote: (s: string) => `'${s}'`,
-      SshConnectionImpl: makeMockSshClass(capturedConfigs),
+      SshConnectionImpl: makeMockSshClass(capturedConfigs, { lifecycle: "permissive" }),
     }))
 
     const { runPlaybook } = await import("../src/runner.js")
@@ -68,7 +68,7 @@ describe("runPlaybook meta validation", () => {
 
     vi.doMock("../src/ssh.js", () => ({
       shellQuote: (s: string) => `'${s}'`,
-      SshConnectionImpl: makeMockSshClass(capturedConfigs),
+      SshConnectionImpl: makeMockSshClass(capturedConfigs, { lifecycle: "permissive" }),
     }))
     vi.spyOn(console, "log").mockImplementation((...args) => {
       consoleLogs.push(args.join(" "))
@@ -125,7 +125,12 @@ describe("runPlaybook failed result control-plane meta", () => {
 
     vi.doMock("../src/ssh.js", () => ({
       shellQuote: (s: string) => `'${s}'`,
-      SshConnectionImpl: makeMockSshClass(capturedConfigs, { addPort, reconnect, removePort }),
+      SshConnectionImpl: makeMockSshClass(capturedConfigs, {
+        addPort,
+        lifecycle: "permissive",
+        reconnect,
+        removePort,
+      }),
     }))
 
     const { runPlaybook } = await import("../src/runner.js")
@@ -161,7 +166,11 @@ describe("runPlaybook failed result control-plane meta", () => {
 
     vi.doMock("../src/ssh.js", () => ({
       shellQuote: (s: string) => `'${s}'`,
-      SshConnectionImpl: makeMockSshClass(capturedConfigs, { reconnect, updateHost }),
+      SshConnectionImpl: makeMockSshClass(capturedConfigs, {
+        lifecycle: "permissive",
+        reconnect,
+        updateHost,
+      }),
     }))
 
     const { runPlaybook } = await import("../src/runner.js")
@@ -212,7 +221,7 @@ describe("runPlaybook signal meta propagation", () => {
 
     vi.doMock("../src/ssh.js", () => ({
       shellQuote: (s: string) => `'${s}'`,
-      SshConnectionImpl: makeMockSshClass(capturedConfigs),
+      SshConnectionImpl: makeMockSshClass(capturedConfigs, { lifecycle: "permissive" }),
     }))
 
     const { runPlaybook } = await import("../src/runner.js")
@@ -258,7 +267,11 @@ describe("runPlaybook signal meta propagation", () => {
 
     vi.doMock("../src/ssh.js", () => ({
       shellQuote: (s: string) => `'${s}'`,
-      SshConnectionImpl: makeMockSshClass(capturedConfigs, { addPort, reconnect }),
+      SshConnectionImpl: makeMockSshClass(capturedConfigs, {
+        addPort,
+        lifecycle: "permissive",
+        reconnect,
+      }),
     }))
 
     const { runPlaybook } = await import("../src/runner.js")
@@ -307,7 +320,11 @@ describe("runPlaybook signal meta propagation", () => {
 
     vi.doMock("../src/ssh.js", () => ({
       shellQuote: (s: string) => `'${s}'`,
-      SshConnectionImpl: makeMockSshClass(capturedConfigs, { reconnect, updateHost }),
+      SshConnectionImpl: makeMockSshClass(capturedConfigs, {
+        lifecycle: "permissive",
+        reconnect,
+        updateHost,
+      }),
     }))
 
     const { runPlaybook } = await import("../src/runner.js")
