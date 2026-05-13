@@ -6,7 +6,7 @@ TODO.md
 review-report-*.md
 .wisdom-accumulation-*.tmp.md
 .sf-memory.json
-.claude/settings.local.json
+.claude/*
 tmp/
 sebastian-gmbh-paratix-test
 packages/paratix/src/output.ts
