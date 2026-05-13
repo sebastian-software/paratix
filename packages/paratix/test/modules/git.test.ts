@@ -144,6 +144,18 @@ describe("git.clone — check", () => {
     expect(result).toBe("needs-apply")
   })
 
+  it("returns needs-apply when the existing checkout HEAD is unreadable", async () => {
+    const mockSsh = createMockSsh({
+      [`git -C '${destination}' rev-parse HEAD`]: { code: 1, stdout: "" },
+      [`test -d '${gitDir}'`]: { code: 0 },
+    })
+    const mod = git.clone(repo, destination)
+
+    const result = await mod.check(mockSsh, emptyEnv)
+
+    expect(result).toBe("needs-apply")
+  })
+
   it("returns needs-apply when the existing checkout points at a different origin URL", async () => {
     const sha = "abc1234567890"
     const mockSsh = createMockSsh({

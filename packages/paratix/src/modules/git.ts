@@ -3,7 +3,6 @@ import { shellQuote } from "../ssh.js"
 import { type Module, type ModuleResult, NEEDS_APPLY, type SshConnection } from "../types.js"
 
 const EXEC_OPTS = { ignoreExitCode: true, silent: true } as const
-const SILENT = { silent: true } as const
 
 function validateCloneRepo(repo: string): void {
   if (repo.startsWith("-")) {
@@ -365,11 +364,8 @@ export const git = {
         const currentOrigin = await readOriginUrl(conn, destination)
         if (currentOrigin !== repo) return NEEDS_APPLY
 
-        const headResult = await conn.exec(
-          `git -C ${shellQuote(destination)} rev-parse HEAD`,
-          SILENT
-        )
-        const head = headResult.stdout.trim()
+        const head = await readWorktreeHead(conn, destination)
+        if (head === null) return NEEDS_APPLY
 
         if (reference === undefined || reference === "") {
           const remoteHead = await resolveRemoteHead(conn, destination)
