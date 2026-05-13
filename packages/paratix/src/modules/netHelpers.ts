@@ -96,7 +96,7 @@ export function buildWaitForTestCommand(
     return `nc -z -w ${timeout} ${shellQuote(host)} ${shellQuote(String(options.port))}`
   }
   if (options.file != null && options.contains != null) {
-    return `grep -q ${shellQuote(options.contains)} ${shellQuote(options.file)}`
+    return `grep -Fq -- ${shellQuote(options.contains)} ${shellQuote(options.file)}`
   }
   if (options.file != null) {
     return `test -f ${shellQuote(options.file)}`

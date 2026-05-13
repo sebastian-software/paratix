@@ -158,9 +158,9 @@ describe("net.waitFor — check", () => {
     expect(result).toBe("needs-apply")
   })
 
-  it("returns ok when file contains expected string (grep -q)", async () => {
+  it("returns ok when file contains expected string (grep -Fq)", async () => {
     const mockSsh = createMockSsh({
-      "grep -q 'READY' '/tmp/status'": { code: 0 },
+      "grep -Fq -- 'READY' '/tmp/status'": { code: 0 },
     })
     const mod = net.waitFor({ contains: "READY", file: "/tmp/status" })
     const result = await mod.check(mockSsh, emptyEnv)
@@ -169,11 +169,29 @@ describe("net.waitFor — check", () => {
 
   it("returns needs-apply when file does not contain expected string", async () => {
     const mockSsh = createMockSsh({
-      "grep -q 'READY' '/tmp/status'": { code: 1 },
+      "grep -Fq -- 'READY' '/tmp/status'": { code: 1 },
     })
     const mod = net.waitFor({ contains: "READY", file: "/tmp/status" })
     const result = await mod.check(mockSsh, emptyEnv)
     expect(result).toBe("needs-apply")
+  })
+
+  it("treats contains as a fixed string when it has regex metacharacters", async () => {
+    const mockSsh = createMockSsh({
+      "grep -Fq -- 'READY.*[done]' '/tmp/status'": { code: 0 },
+    })
+    const mod = net.waitFor({ contains: "READY.*[done]", file: "/tmp/status" })
+    const result = await mod.check(mockSsh, emptyEnv)
+    expect(result).toBe("ok")
+  })
+
+  it("treats a leading dash in contains as data instead of a grep option", async () => {
+    const mockSsh = createMockSsh({
+      "grep -Fq -- '-READY' '/tmp/status'": { code: 0 },
+    })
+    const mod = net.waitFor({ contains: "-READY", file: "/tmp/status" })
+    const result = await mod.check(mockSsh, emptyEnv)
+    expect(result).toBe("ok")
   })
 
   it("has correct name format for port wait", async () => {

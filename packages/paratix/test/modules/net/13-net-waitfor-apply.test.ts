@@ -130,6 +130,19 @@ describe("net.waitFor — apply", () => {
     expect(result.status).toBe("failed")
   })
 
+  it("polls file contains checks as a fixed string with grep option termination", async () => {
+    const mockSsh = createMockSsh({
+      "grep -Fq -- '-READY.*[done]' '/tmp/status'": { code: 0 },
+    })
+    const mod = net.waitFor({
+      contains: "-READY.*[done]",
+      file: "/tmp/status",
+      timeout: 10,
+    })
+    const result = await mod.apply(mockSsh, emptyEnv)
+    expect(result.status).toBe("changed")
+  })
+
   it("caps poll delays to the remaining timeout budget", async () => {
     const mockSsh = createMockSsh({
       "nc -z -w '1' '127.0.0.1' '9999'": { code: 1 },
