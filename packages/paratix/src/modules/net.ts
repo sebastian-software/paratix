@@ -792,7 +792,14 @@ async function applyPresentRoute(
     return failed(`[net.route: ${destination}] refuses to write through symlink at ${dropinPath}`)
   }
   const dropinContent = buildRouteDropin(destination, gateway, device)
-  await conn.writeFile(dropinPath, dropinContent, { mode: NET_CONFIG_FILE_MODE })
+  try {
+    await conn.writeFile(dropinPath, dropinContent, { mode: NET_CONFIG_FILE_MODE })
+  } catch (error: unknown) {
+    const reason = error instanceof Error ? error.message : String(error)
+    return failed(
+      `[net.route: ${destination}] persistent drop-in write failed after ip route replace; live route may now differ from persistent configuration: ${reason}`
+    )
+  }
   return null
 }
 

@@ -1,6 +1,6 @@
 /* oxlint-disable no-unused-vars -- shared fixtures are duplicated by the mechanical test split */
 
-import { describe, expect, it } from "vitest"
+import { describe, expect, it, vi } from "vitest"
 
 import { net } from "../../../src/index.js"
 import { sha256String } from "../../../src/modules/fileHelpers.js"
@@ -168,6 +168,24 @@ describe("net.route — apply", () => {
       options: { mode: "0644" },
       path: "/etc/systemd/network/50-paratix-route-10.0.0.0-24.network",
     })
+  })
+
+  it("returns failed without reload when the persistent route drop-in cannot be written", async () => {
+    const mockSsh = createMockSsh({}, SUCCESSFUL_ROUTE_APPLY_OPTIONS)
+    vi.spyOn(mockSsh, "writeFile").mockRejectedValue(new Error("disk full"))
+    const mod = net.route("10.0.0.0/24", "192.168.1.1")
+
+    const result = await mod.apply(mockSsh, emptyEnv)
+
+    expect(result.status).toBe("failed")
+    expect(String(result.error)).toContain("persistent drop-in write failed")
+    expect(String(result.error)).toContain(
+      "live route may now differ from persistent configuration"
+    )
+    expect(String(result.error)).toContain("disk full")
+    expect(mockSsh.calls).toContain("ip route replace '10.0.0.0/24' via '192.168.1.1'")
+    expect(mockSsh.calls).not.toContain("networkctl reload")
+    expect(mockSsh.calls.some((call) => call.includes("/var/lib/paratix/flags"))).toBe(false)
   })
 
   it("reloads networkctl after adding route (state: present)", async () => {
