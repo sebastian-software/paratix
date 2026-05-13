@@ -392,7 +392,7 @@ async function restartSshdOnNewPort(
   ssh: SshConnection,
   targetPort: number,
   originalConfig: string
-): Promise<SshdRestartOutcome> {
+): Promise<ModuleResult | SshdRestartOutcome> {
   ssh.addPort(targetPort)
   let socketState: SshSocketState = { exists: false }
   let serviceUnit: SshdServiceUnit | undefined
@@ -415,7 +415,11 @@ async function restartSshdOnNewPort(
       socketState,
       targetPort,
     })
-    throw error
+    const message = error instanceof Error ? error.message : String(error)
+    return failed(
+      `[sshd.port: ${String(targetPort)}] sshd restart failed; ` +
+        `rolled back to previous config and port: ${message}`
+    )
   }
 }
 
@@ -670,6 +674,7 @@ async function restartAndVerifySshdPort(
   parameters: { originalConfig: string; originalPort: number; targetPort: number }
 ): Promise<ModuleResult | undefined> {
   const outcome = await restartSshdOnNewPort(ssh, parameters.targetPort, parameters.originalConfig)
+  if (typeof outcome !== "string") return outcome
   // A restart may close the current SSH session even when systemd accepted
   // the command. Reconnect immediately and run the same live-port verification
   // before reporting success; otherwise the runner could switch to an

@@ -412,8 +412,11 @@ describe("sshd.port — apply: validation and rollback", () => {
       .mockRejectedValueOnce(new Error("systemctl restart sshd failed")) // systemctl restart
 
     const mod = sshd.port(2222)
-    await expect(mod.apply(mockSsh, emptyEnv)).rejects.toThrow("systemctl restart sshd failed")
+    const result = await mod.apply(mockSsh, emptyEnv)
 
+    expect(result.status).toBe("failed")
+    expect(result.error?.message).toContain("sshd restart failed")
+    expect(result.error?.message).toContain("systemctl restart sshd failed")
     expect(addPortSpy).toHaveBeenCalledWith(2222)
     expect(removePortSpy).toHaveBeenCalledWith(2222)
     expect(writtenFiles.at(-1)?.content).toBe("Port 22")
@@ -441,8 +444,11 @@ describe("sshd.port — apply: validation and rollback", () => {
       .mockResolvedValueOnce({ code: 0, stderr: "", stdout: "" }) // enable --now ssh.socket
 
     const mod = sshd.port(2222)
-    await expect(mod.apply(mockSsh, emptyEnv)).rejects.toThrow("systemctl restart sshd failed")
+    const result = await mod.apply(mockSsh, emptyEnv)
 
+    expect(result.status).toBe("failed")
+    expect(result.error?.message).toContain("sshd restart failed")
+    expect(result.error?.message).toContain("systemctl restart sshd failed")
     const execCommands = execSpy.mock.calls.map((args) => args[0])
     expect(execCommands).toContain("systemctl disable --now ssh.socket")
     expect(execCommands).toContain("systemctl enable --now ssh.socket")
@@ -475,8 +481,11 @@ describe("sshd.port — apply: validation and rollback", () => {
       .mockRejectedValueOnce(new Error("systemctl restart sshd failed"))
 
     const mod = sshd.port(2222)
-    await expect(mod.apply(mockSsh, emptyEnv)).rejects.toThrow("systemctl restart sshd failed")
+    const result = await mod.apply(mockSsh, emptyEnv)
 
+    expect(result.status).toBe("failed")
+    expect(result.error?.message).toContain("sshd restart failed")
+    expect(result.error?.message).toContain("systemctl restart sshd failed")
     // Even though the rollback writeFile threw, removePort must still have been called
     // so the runner reverts to the previous port instead of staying on the new one.
     expect(addPortSpy).toHaveBeenCalledWith(2222)
