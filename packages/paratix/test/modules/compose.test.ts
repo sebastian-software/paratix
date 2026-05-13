@@ -1246,12 +1246,13 @@ describe("compose.systemd — apply", () => {
   })
 
   it("writes unit file and runs daemon-reload", async () => {
+    const expectedUnit = expectedPodmanUnit(projectDirectory, defaultServiceName)
     const writtenFiles: Array<{ content: string; path: string }> = []
     const mockSsh = createComposeMockSsh({
       ...composeSystemdRecoveryResponses(),
       [`cat '${unitFilePath}'`]: {
         code: 0,
-        stdout: expectedPodmanUnit(projectDirectory, defaultServiceName),
+        stdout: expectedUnit,
       },
       "systemctl daemon-reload": { code: 0 },
     })
@@ -1263,10 +1264,7 @@ describe("compose.systemd — apply", () => {
     const mod = compose.systemd({ projectDirectory })
     const result = await mod.apply(mockSsh, emptyEnv)
     expect(result.status).toBe("changed")
-    expect(writtenFiles[0]?.path).toBe(unitFilePath)
-    expect(writtenFiles[0]?.content).toBeTruthy()
-    expect(writtenFiles[0]?.content).toContain("[Unit]")
-    expect(writtenFiles[0]?.content).toContain("[Service]")
+    expect(writtenFiles).toStrictEqual([{ content: expectedUnit, path: unitFilePath }])
     expect(mockSsh.calls).toContain("systemctl daemon-reload")
     // R-0000164: apply must run `chown root:root` on the unit after the
     // writeFile, because the writeFile path only sets the mode and would
