@@ -198,14 +198,14 @@ async function allocateExtractStagingDirectory(
 
 /**
  * Move the extracted archive contents from the paratix-controlled staging
- * directory into the destination using `cp -aT` so existing destination
- * directories are merged conflict-free. R-0000221: per-entry `mv -f` cannot
- * merge into pre-existing subdirectories with the same name and aborts mid-way
- * on the first conflict, leaving the destination in a partial state. Using
- * `cp -aT staging/. destination/` recurses into existing entries, replacing
- * regular files in place while preserving owner/group/mode/timestamps. The
- * staging directory itself is removed by {@link cleanupStagingDirectory} after
- * this helper returns successfully.
+ * directory into the destination using per-entry `cp -aT` so existing
+ * destination directories are merged conflict-free. R-0000221: per-entry
+ * `mv -f` cannot merge into pre-existing subdirectories with the same name and
+ * aborts mid-way on the first conflict, leaving the destination in a partial
+ * state. Copying each top-level staging entry with `cp -aT` recurses into
+ * existing entries, replacing regular files in place while preserving
+ * owner/group/mode/timestamps. The staging directory itself is removed by
+ * {@link cleanupStagingDirectory} after this helper returns successfully.
  *
  * @param conn - The SSH connection.
  * @param staging - The staging directory holding the freshly extracted files.
@@ -217,10 +217,16 @@ async function moveExtractedContentsIntoDestination(
   staging: string,
   destination: string
 ): Promise<ModuleResult | null> {
-  // `cp -aT` treats the destination as the named target rather than placing
-  // staging *inside* destination, so we copy the staging contents (via the
-  // trailing `.`) merging into the existing destination tree.
-  const copyCommand = `cp -aT --remove-destination ${shellQuote(staging)} ${shellQuote(destination)}`
+  const copyCommand = [
+    `find ${shellQuote(staging)} -mindepth 1 -maxdepth 1 -exec sh -c`,
+    shellQuote(
+      'destination=$1; shift; for source_path do target_path="$destination/$' +
+        '{source_path##*/}"; cp -aT --remove-destination "$source_path" "$target_path" || exit $?; done'
+    ),
+    "sh",
+    shellQuote(destination),
+    "{} +",
+  ].join(" ")
   const copyResult = await conn.exec(copyCommand, EXEC_OPTS)
   if (copyResult.code !== 0) {
     return failedCommand(

@@ -43,11 +43,11 @@ const archiveCleanupPaths = [
 const archiveStageDirectory = "/opt/app/.paratix-stage.AbCdEfGh"
 const archiveStageMktempPattern = /^mktemp -d '\/opt\/app\/\.paratix-stage\.X{8}'$/v
 const archiveStageMovePattern =
-  /^cp -aT --remove-destination '\/opt\/app\/\.paratix-stage\.[^']+' '\/opt\/app'$/v
+  /^find '\/opt\/app\/\.paratix-stage\.[^']+' -mindepth 1 -maxdepth 1 -exec sh -c 'destination=\$1; shift; for source_path do target_path="\$destination\/\$\{source_path##\*\/\}"; cp -aT --remove-destination "\$source_path" "\$target_path" \|\| exit \$\?; done' sh '\/opt\/app' \{\} \+$/v
 const archiveStageCleanupPattern = /^rm -rf '\/opt\/app\/\.paratix-stage\.[^']+'$/v
 const archiveAlternateStageMktempPattern = /^mktemp -d '\/opt\/app-alt\/\.paratix-stage\.X{8}'$/v
 const archiveAlternateStageMovePattern =
-  /^cp -aT --remove-destination '\/opt\/app-alt\/\.paratix-stage\.[^']+' '\/opt\/app-alt'$/v
+  /^find '\/opt\/app-alt\/\.paratix-stage\.[^']+' -mindepth 1 -maxdepth 1 -exec sh -c 'destination=\$1; shift; for source_path do target_path="\$destination\/\$\{source_path##\*\/\}"; cp -aT --remove-destination "\$source_path" "\$target_path" \|\| exit \$\?; done' sh '\/opt\/app-alt' \{\} \+$/v
 const archiveAlternateStageCleanupPattern = /^rm -rf '\/opt\/app-alt\/\.paratix-stage\.[^']+'$/v
 const archiveMembersMarkerPattern =
   /^cat '\/var\/lib\/paratix\/flags\/archive-[a-f0-9]+\.sha256\.members'$/v
@@ -1554,9 +1554,8 @@ describe("archive.extract — apply", () => {
 
   // R-0000221: per-entry `mv -f` cannot merge into a pre-existing destination
   // sub-directory; the first conflict aborts the move and the destination is
-  // left in a partial state. `cp -aT staging/. destination/` recurses into
-  // existing entries and merges conflict-free, then the staging directory is
-  // removed wholesale.
+  // left in a partial state. Per-entry `cp -aT` recurses into existing entries
+  // and merges conflict-free, then the staging directory is removed wholesale.
   it("R-0000221: uses cp -aT to merge into existing destination directories conflict-free", async () => {
     const mockSsh = createMockSsh({
       [`tar --no-same-owner --no-overwrite-dir -xzf '${src}' -C '${archiveStageDirectory}'`]: {
@@ -1569,9 +1568,30 @@ describe("archive.extract — apply", () => {
     const mod = archive.extract(src, destination)
     const result = await mod.apply(mockSsh, emptyEnv)
     expect(result.status).toBe("changed")
-    expect(mockSsh.calls.some((c) => c.startsWith("cp -aT --remove-destination "))).toBe(true)
-    expect(mockSsh.calls.some((c) => c.includes("find . -mindepth 1 -maxdepth 1"))).toBe(false)
+    const mergeCommand = mockSsh.calls.find((c) => archiveStageMovePattern.test(c))
+    expect(mergeCommand).toBeDefined()
+    expect(mergeCommand).toContain("cp -aT --remove-destination")
     expect(mockSsh.calls.some((c) => c.includes("xargs -0 -I {} mv -f"))).toBe(false)
+  })
+
+  it("preserves existing destination directory metadata while merging staged contents", async () => {
+    const mockSsh = createMockSsh({
+      [`tar --no-same-owner --no-overwrite-dir -xzf '${src}' -C '${archiveStageDirectory}'`]: {
+        code: 0,
+      },
+      [`tar -tvzf '${src}'`]: { code: 0, stdout: safeTarListing },
+    })
+    vi.spyOn(mockSsh, "sha256").mockResolvedValue(archiveSha)
+    vi.spyOn(mockSsh, "writeFile").mockResolvedValue()
+
+    const mod = archive.extract(src, destination)
+    const result = await mod.apply(mockSsh, emptyEnv)
+
+    expect(result.status).toBe("changed")
+    expect(mockSsh.calls).not.toContain(
+      `cp -aT --remove-destination '${archiveStageDirectory}' '${destination}'`
+    )
+    expect(mockSsh.calls.some((c) => archiveStageMovePattern.test(c))).toBe(true)
   })
 
   it("hardens the staging merge so existing destination symlinks are replaced", async () => {
@@ -1588,9 +1608,9 @@ describe("archive.extract — apply", () => {
     const result = await mod.apply(mockSsh, emptyEnv)
 
     expect(result.status).toBe("changed")
-    expect(mockSsh.calls).toContain(
-      `cp -aT --remove-destination '${archiveStageDirectory}' '${destination}'`
-    )
+    const mergeCommand = mockSsh.calls.find((c) => archiveStageMovePattern.test(c))
+    expect(mergeCommand).toContain("cp -aT --remove-destination")
+    expect(mergeCommand).toContain("--remove-destination")
   })
 
   // R-0000166: the owner-paths marker is now written for both upload and
