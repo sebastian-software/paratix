@@ -178,17 +178,19 @@ the idiomatic way to ensure a previously installed cron job is gone.
 
 ### `download`
 
-| Method            | Signature                                                                                                                                                                                                                                     | Idempotent |
-| ----------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------- |
-| `download.url`    | `(destination: string, url: string, options?: { allowInsecureHttp?: boolean; allowUnverifiedDownload?: boolean; force?: boolean; headers?: Record<string, string>; sha256?: string; mode?: string; owner?: string; group?: string }): Module` | Yes        |
-| `download.github` | `(destination: string, options: { repo: string; tag: string; asset: string; token?: string; allowUnverifiedDownload?: boolean; sha256?: string; mode?: string; owner?: string; group?: string }): Module`                                     | Yes        |
-| `download.large`  | `(destination: string, url: string, options?: { allowInsecureHttp?: boolean; allowUnverifiedDownload?: boolean; group?: string; headers?: Record<string, string>; mode?: string; owner?: string; sha256?: string }): Module`                  | Yes (flag) |
+| Method            | Signature                                                                                                                                                                                                                                                                         | Idempotent |
+| ----------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------- |
+| `download.url`    | `(destination: string, url: string, options?: { allowInsecureHttp?: boolean; allowInsecureHttpHeaders?: boolean; allowUnverifiedDownload?: boolean; force?: boolean; headers?: Record<string, string>; sha256?: string; mode?: string; owner?: string; group?: string }): Module` | Yes        |
+| `download.github` | `(destination: string, options: { repo: string; tag: string; asset: string; token?: string; allowUnverifiedDownload?: boolean; sha256?: string; mode?: string; owner?: string; group?: string }): Module`                                                                         | Yes        |
+| `download.large`  | `(destination: string, url: string, options?: { allowInsecureHttp?: boolean; allowInsecureHttpHeaders?: boolean; allowUnverifiedDownload?: boolean; group?: string; headers?: Record<string, string>; mode?: string; owner?: string; sha256?: string }): Module`                  | Yes (flag) |
 
 Downloads require an explicit integrity decision at runtime: provide `sha256`
 for verification, or set `allowUnverifiedDownload: true` when the remote
 artifact is intentionally trusted without a pinned digest. `download.url` and
 `download.large` allow only HTTPS by default; set `allowInsecureHttp: true`
-only when an `http://` source or redirect is intentional.
+only when an `http://` source or redirect is intentional. Sensitive headers
+such as `Authorization`, `Cookie`, and `X-Api-Key` are still rejected over
+plaintext HTTP unless `allowInsecureHttpHeaders: true` is also set.
 
 ### `file`
 

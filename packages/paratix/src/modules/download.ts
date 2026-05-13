@@ -10,6 +10,7 @@ import { type Module, type ModuleResult, NEEDS_APPLY, type SshConnection } from 
 import {
   buildCurlArgvHeaderFlags,
   buildCurlConfigPayload as buildSharedCurlConfigPayload,
+  hasSensitiveHeaders,
   hasSensitiveQueryParameters,
 } from "./curlHelpers.js"
 import { renderChownCommand } from "./fileMetadataHelpers.js"
@@ -39,6 +40,8 @@ type BaseDownloadOptions = {
  * Combines {@link BaseDownloadOptions} with the required download coordinates.
  */
 type DownloadParameters = {
+  /** Allow sending sensitive headers over unencrypted `http://` explicitly. */
+  allowInsecureHttpHeaders?: boolean
   /** Absolute path on the remote server where the file is written. */
   destination: string
   /** Force a fresh transfer even when the destination already matches sha256. */
@@ -131,6 +134,29 @@ function validateIntegrityConfiguration(
   throw new Error(
     `${moduleName} requires options.sha256 for integrity verification. ` +
       "If you intentionally trust the remote artifact, set allowUnverifiedDownload: true explicitly."
+  )
+}
+
+function rejectSensitiveHeadersOverHttp(parameters: {
+  allowInsecureHttpHeaders: boolean | undefined
+  headers: Record<string, string> | undefined
+  moduleName: "download.large" | "download.url"
+  url: string
+}): void {
+  const { allowInsecureHttpHeaders, headers, moduleName, url } = parameters
+  if (allowInsecureHttpHeaders === true) return
+  if (headers === undefined || !hasSensitiveHeaders(headers)) return
+
+  let parsed: URL
+  try {
+    parsed = new URL(url)
+  } catch {
+    return
+  }
+  if (parsed.protocol !== "http:") return
+
+  throw new Error(
+    `[${moduleName}] refusing to send sensitive headers (Authorization, Cookie, X-Api-Key, ...) over plaintext http; switch to https or pass allowInsecureHttpHeaders: true to opt in`
   )
 }
 
@@ -914,6 +940,7 @@ export const download = {
    * @param url - The URL to download from.
    * @param options - Optional settings for ownership, permissions, and headers.
    * @param options.allowInsecureHttp - Allow unencrypted `http://` downloads explicitly.
+   * @param options.allowInsecureHttpHeaders - Allow sending sensitive headers over unencrypted `http://` explicitly.
    * @param options.group - Group owner to set on the downloaded file via `chown`.
    * @param options.mode - File mode to set via `chmod` (e.g. `"0755"`).
    * @param options.owner - User owner to set on the downloaded file via `chown`.
@@ -928,6 +955,8 @@ export const download = {
     options?: {
       /** Allow unencrypted `http://` downloads explicitly. */
       allowInsecureHttp?: boolean
+      /** Allow sending sensitive headers over unencrypted `http://` explicitly. */
+      allowInsecureHttpHeaders?: boolean
       /** Explicitly opt out of integrity verification for trusted sources. */
       allowUnverifiedDownload?: boolean
       /** Group owner to set on the downloaded file via `chown`. */
@@ -944,6 +973,12 @@ export const download = {
   ): Module {
     const resolvedOptions = options ?? {}
     validateHttpUrl(url, { allowHttp: resolvedOptions.allowInsecureHttp })
+    rejectSensitiveHeadersOverHttp({
+      allowInsecureHttpHeaders: resolvedOptions.allowInsecureHttpHeaders,
+      headers: resolvedOptions.headers,
+      moduleName: "download.large",
+      url,
+    })
     if (resolvedOptions.sha256 != null) validateSha256(resolvedOptions.sha256)
     validateIntegrityConfiguration("download.large", resolvedOptions)
     const downloadParameters = buildDownloadParameters(destination, resolvedOptions, url)
@@ -1010,6 +1045,8 @@ export const download = {
    * @param destination - Absolute path on the remote server where the file is saved.
    * @param url - The URL to download from.
    * @param options - Optional settings for integrity, ownership, and headers.
+   * @param options.allowInsecureHttp - Allow unencrypted `http://` downloads explicitly.
+   * @param options.allowInsecureHttpHeaders - Allow sending sensitive headers over unencrypted `http://` explicitly.
    * @param options.allowUnverifiedDownload - Explicitly opt out of integrity verification.
    * @returns A Module that manages the file download.
    */
@@ -1019,6 +1056,8 @@ export const download = {
     options?: {
       /** Allow unencrypted `http://` downloads explicitly. */
       allowInsecureHttp?: boolean
+      /** Allow sending sensitive headers over unencrypted `http://` explicitly. */
+      allowInsecureHttpHeaders?: boolean
       /** Explicitly opt out of integrity verification for trusted sources. */
       allowUnverifiedDownload?: boolean
       /** Force re-download even if the file already exists. */
@@ -1027,9 +1066,15 @@ export const download = {
       headers?: Record<string, string>
     } & BaseDownloadOptions
   ): Module {
-    validateHttpUrl(url, { allowHttp: options?.allowInsecureHttp })
-    if (options?.sha256 != null) validateSha256(options.sha256)
     const resolvedOptions = options ?? {}
+    validateHttpUrl(url, { allowHttp: resolvedOptions.allowInsecureHttp })
+    rejectSensitiveHeadersOverHttp({
+      allowInsecureHttpHeaders: resolvedOptions.allowInsecureHttpHeaders,
+      headers: resolvedOptions.headers,
+      moduleName: "download.url",
+      url,
+    })
+    if (resolvedOptions.sha256 != null) validateSha256(resolvedOptions.sha256)
     validateIntegrityConfiguration("download.url", resolvedOptions)
     const downloadParameters = buildDownloadParameters(destination, resolvedOptions, url)
     // R-0000167: when the operator opted into unverified downloads (no a-priori

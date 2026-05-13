@@ -1165,6 +1165,47 @@ describe("download.url", () => {
       ).not.toThrow()
     })
 
+    it("rejects http:// URL with sensitive headers unless separately opted in", () => {
+      expect(() =>
+        download.url(destination, "http://example.com/file", {
+          ...allowUnverifiedDownload,
+          allowInsecureHttp: true,
+          headers: { Authorization: "Bearer token" },
+        })
+      ).toThrow(/refusing to send sensitive headers .* over plaintext http/v)
+    })
+
+    it("matches sensitive download.url headers case-insensitively", () => {
+      expect(() =>
+        download.url(destination, "http://example.com/file", {
+          ...allowUnverifiedDownload,
+          allowInsecureHttp: true,
+          headers: { COOKIE: "session=abc" },
+        })
+      ).toThrow(/refusing to send sensitive headers .* over plaintext http/v)
+    })
+
+    it("allows http:// URL with sensitive headers when allowInsecureHttpHeaders is true", () => {
+      expect(() =>
+        download.url(destination, "http://example.com/file", {
+          ...allowUnverifiedDownload,
+          allowInsecureHttp: true,
+          allowInsecureHttpHeaders: true,
+          headers: { Authorization: "Bearer token" },
+        })
+      ).not.toThrow()
+    })
+
+    it("allows http:// URL with non-sensitive headers", () => {
+      expect(() =>
+        download.url(destination, "http://example.com/file", {
+          ...allowUnverifiedDownload,
+          allowInsecureHttp: true,
+          headers: { "X-Trace-Id": "abc" },
+        })
+      ).not.toThrow()
+    })
+
     it("rejects URLs with embedded credentials", () => {
       expect(() =>
         download.url(destination, "https://user:secret@example.com/file", allowUnverifiedDownload)
@@ -2013,6 +2054,47 @@ describe("download.large", () => {
       expect(() => download.large(destination, secretUrl, allowUnverifiedDownload)).not.toThrow(
         /user|s3cr3t|abc123/v
       )
+    })
+
+    it("rejects http:// URL with sensitive headers unless separately opted in", () => {
+      expect(() =>
+        download.large(destination, "http://example.com/file", {
+          ...allowUnverifiedDownload,
+          allowInsecureHttp: true,
+          headers: { "X-Api-Key": "k123" },
+        })
+      ).toThrow(/refusing to send sensitive headers .* over plaintext http/v)
+    })
+
+    it("matches sensitive download.large headers case-insensitively", () => {
+      expect(() =>
+        download.large(destination, "http://example.com/file", {
+          ...allowUnverifiedDownload,
+          allowInsecureHttp: true,
+          headers: { "proxy-authorization": "Basic abc" },
+        })
+      ).toThrow(/refusing to send sensitive headers .* over plaintext http/v)
+    })
+
+    it("allows http:// URL with sensitive headers when allowInsecureHttpHeaders is true", () => {
+      expect(() =>
+        download.large(destination, "http://example.com/file", {
+          ...allowUnverifiedDownload,
+          allowInsecureHttp: true,
+          allowInsecureHttpHeaders: true,
+          headers: { "X-Api-Key": "k123" },
+        })
+      ).not.toThrow()
+    })
+
+    it("allows http:// URL with non-sensitive headers", () => {
+      expect(() =>
+        download.large(destination, "http://example.com/file", {
+          ...allowUnverifiedDownload,
+          allowInsecureHttp: true,
+          headers: { "X-Trace-Id": "abc" },
+        })
+      ).not.toThrow()
     })
   })
 
