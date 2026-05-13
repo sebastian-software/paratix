@@ -483,6 +483,7 @@ describe("SshConnectionImpl.writeFile — large content (> 64 KB)", () => {
     const remotePath = "/etc/systemd/system/regression-stdin.service"
     // Use a 200 KB payload — well above the typical printf argv ceiling.
     const largeContent = "x".repeat(200_000)
+    const fallbackInputStream = Object.assign(makeStream(), { end: vi.fn() })
 
     const stdinFallbackExecSpy = vi
       .fn()
@@ -520,9 +521,8 @@ describe("SshConnectionImpl.writeFile — large content (> 64 KB)", () => {
         stream.emit("close", 0)
       })
       .mockImplementationOnce((_cmd: string, cb: ExecCallback) => {
-        const stream = makeStream()
-        cb(undefined, stream)
-        stream.emit("close", 0)
+        cb(undefined, fallbackInputStream)
+        fallbackInputStream.emit("close", 0)
       })
       .mockImplementationOnce((_cmd: string, cb: ExecCallback) => {
         const stream = makeStream()
@@ -572,6 +572,11 @@ describe("SshConnectionImpl.writeFile — large content (> 64 KB)", () => {
     expect(fallbackCommand!.length).toBeLessThan(1000)
     // No emitted command should embed the payload.
     expect(executedCommands.some((command) => command.includes(largeContent))).toBe(false)
+    expect(fallbackInputStream.end).toHaveBeenCalledExactlyOnceWith(
+      Buffer.from(largeContent, "utf8").toString("base64")
+    )
+    const [fallbackInput] = fallbackInputStream.end.mock.calls[0] as [string]
+    expect(Buffer.from(fallbackInput, "base64").toString("utf8")).toBe(largeContent)
   })
 
   // ---------------------------------------------------------------------------
