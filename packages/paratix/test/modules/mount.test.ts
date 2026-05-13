@@ -64,6 +64,10 @@ function expectFstabFailure(
   expect(result.error?.message).toContain(`failed to update /etc/fstab`)
 }
 
+function countCalls(calls: string[], command: string): number {
+  return calls.filter((call) => call === command).length
+}
+
 // ─── path validation ──────────────────────────────────────────────────────────
 
 describe("mount.absent — path validation", () => {
@@ -731,6 +735,101 @@ describe("mount.present — apply", () => {
     expectFstabFailure(result)
     expect(result.error?.message).toContain("[mount.present: /mnt/data]")
     expect(result.error?.message).toContain("read-only filesystem")
+  })
+
+  it("unmounts a new live mount when fstab persistence fails", async () => {
+    const mockSsh = createMountApplyMockSsh({
+      "cat '/etc/fstab'": { stdout: "# /etc/fstab\n" },
+      [findmntCheckCmd]: { code: 1 },
+      [flagsDirectoryCreateCmd]: { code: 1, stderr: "read-only filesystem" },
+      [mountCmd]: { code: 0 },
+      [umountCmd]: { code: 0 },
+    })
+    const mod = mount.present({
+      fstype: mountFstype,
+      opts: mountOpts,
+      path: mountPath,
+      src: mountSrc,
+    })
+
+    const result = await mod.apply(mockSsh, emptyEnv)
+
+    expectFstabFailure(result)
+    expect(mockSsh.calls).toContain(umountCmd)
+    expect(mockSsh.calls.indexOf(flagsDirectoryCreateCmd)).toBeLessThan(
+      mockSsh.calls.indexOf(umountCmd)
+    )
+  })
+
+  it("restores the previous live mount when fstab persistence fails after replacement", async () => {
+    const liveSource = "/dev/sdb1"
+    const liveFstype = "ext4"
+    const liveOptions = "rw,noexec"
+    const restoreMountCmd = `mount -t '${liveFstype}' -o '${liveOptions}' -- '${liveSource}' '${mountPath}'`
+    const mockSsh = createMountApplyMockSsh({
+      "cat '/etc/fstab'": { stdout: "# /etc/fstab\n" },
+      [findmntCheckCmd]: { code: 0, stdout: `${liveSource} ${liveFstype} ${liveOptions}` },
+      [flagsDirectoryCreateCmd]: { code: 1, stderr: "read-only filesystem" },
+      [mountCmd]: { code: 0 },
+      [restoreMountCmd]: { code: 0 },
+      [umountCmd]: { code: 0 },
+    })
+    const mod = mount.present({
+      fstype: mountFstype,
+      opts: mountOpts,
+      path: mountPath,
+      src: mountSrc,
+    })
+
+    const result = await mod.apply(mockSsh, emptyEnv)
+
+    expectFstabFailure(result)
+    expect(countCalls(mockSsh.calls, umountCmd)).toBe(2)
+    expect(mockSsh.calls).toContain(restoreMountCmd)
+    expect(mockSsh.calls.indexOf(flagsDirectoryCreateCmd)).toBeLessThan(
+      mockSsh.calls.indexOf(restoreMountCmd)
+    )
+  })
+
+  it("reports rollback failure when unmounting a new live mount fails after fstab failure", async () => {
+    const mockSsh = createMountApplyMockSsh({
+      "cat '/etc/fstab'": { stdout: "# /etc/fstab\n" },
+      [findmntCheckCmd]: { code: 1 },
+      [flagsDirectoryCreateCmd]: { code: 1, stderr: "read-only filesystem" },
+      [mountCmd]: { code: 0 },
+      [umountCmd]: { code: 32, stderr: "target is busy" },
+    })
+    const mod = mount.present({
+      fstype: mountFstype,
+      opts: mountOpts,
+      path: mountPath,
+      src: mountSrc,
+    })
+
+    const result = await mod.apply(mockSsh, emptyEnv)
+
+    expectFstabFailure(result)
+    expect(result.error?.message).toContain("failed to roll back live mount")
+    expect(result.error?.message).toContain("target is busy")
+  })
+
+  it("does not roll back when fstab persistence fails without a live mount change", async () => {
+    const mockSsh = createMountApplyMockSsh({
+      "cat '/etc/fstab'": { stdout: "# /etc/fstab\n" },
+      [findmntCheckCmd]: { code: 0, stdout: liveMountStdout },
+      [flagsDirectoryCreateCmd]: { code: 1, stderr: "read-only filesystem" },
+    })
+    const mod = mount.present({
+      fstype: mountFstype,
+      opts: mountOpts,
+      path: mountPath,
+      src: mountSrc,
+    })
+
+    const result = await mod.apply(mockSsh, emptyEnv)
+
+    expectFstabFailure(result)
+    expect(mockSsh.calls).not.toContain(umountCmd)
   })
 
   it("returns failed instead of rejecting when guarded fstab write detects a concurrent change", async () => {

@@ -289,6 +289,83 @@ type EnsureLiveMountParameters = {
   src: string
 }
 
+type EnsureLiveMountResult = {
+  changed: boolean
+  previousLive: LiveMount | null
+}
+
+function buildMountCommand(parameters: {
+  fstype: string
+  opts: string
+  path: string
+  src: string
+}): string {
+  return `mount -t ${shellQuote(parameters.fstype)} -o ${shellQuote(parameters.opts)} -- ${shellQuote(parameters.src)} ${shellQuote(parameters.path)}`
+}
+
+function appendLiveRollbackFailure(
+  fstabFailure: ModuleResult,
+  rollbackFailure: ModuleResult | null
+): ModuleResult {
+  if (rollbackFailure == null) return fstabFailure
+  const fstabMessage = fstabFailure.error?.message ?? "failed to update /etc/fstab"
+  const rollbackMessage =
+    rollbackFailure.error?.message ?? "failed to roll back live mount after fstab update failure"
+  return failed(`${fstabMessage}\n${rollbackMessage}`)
+}
+
+async function rollbackLiveMountAfterFstabFailure(
+  ssh: SshConnection,
+  path: string,
+  previousLive: LiveMount | null
+): Promise<ModuleResult | null> {
+  const unmountResult = await ssh.exec(`umount ${shellQuote(path)}`, EXEC_OPTS)
+  if (unmountResult.code !== 0) {
+    return failedCommand(
+      `[${MOUNT_PRESENT}: ${path}] failed to roll back live mount after fstab update failure`,
+      unmountResult
+    )
+  }
+
+  if (previousLive == null) return null
+
+  const restoreResult = await ssh.exec(
+    buildMountCommand({
+      fstype: previousLive.fstype,
+      opts: previousLive.options,
+      path,
+      src: previousLive.source,
+    }),
+    EXEC_OPTS
+  )
+  return restoreResult.code === 0
+    ? null
+    : failedCommand(
+        `[${MOUNT_PRESENT}: ${path}] failed to restore previous live mount after fstab update failure`,
+        restoreResult
+      )
+}
+
+async function ensurePersistedMountAfterLiveChange(
+  ssh: SshConnection,
+  parameters: {
+    desiredLine: string
+    liveResult: EnsureLiveMountResult
+    path: string
+  }
+): Promise<boolean | ModuleResult> {
+  const fstabResult = await ensureFstabEntry(ssh, parameters.path, parameters.desiredLine)
+  if (typeof fstabResult === "boolean") return fstabResult
+  if (!parameters.liveResult.changed) return fstabResult
+
+  const rollbackFailure = await rollbackLiveMountAfterFstabFailure(
+    ssh,
+    parameters.path,
+    parameters.liveResult.previousLive
+  )
+  return appendLiveRollbackFailure(fstabResult, rollbackFailure)
+}
+
 /**
  * Ensure the live mount at `path` matches the desired source / fstype /
  * options. Mounts when nothing is mounted yet, remounts when only options
@@ -302,27 +379,26 @@ type EnsureLiveMountParameters = {
 async function ensureLiveMount(
   ssh: SshConnection,
   parameters: EnsureLiveMountParameters
-): Promise<boolean | ModuleResult> {
+): Promise<EnsureLiveMountResult | ModuleResult> {
   const { fstype, opts, path, src } = parameters
   const live = await readLiveMount(ssh, path)
 
   if (live == null) {
-    const mountResult = await ssh.exec(
-      `mount -t ${shellQuote(fstype)} -o ${shellQuote(opts)} -- ${shellQuote(src)} ${shellQuote(path)}`,
-      EXEC_OPTS
-    )
+    const mountResult = await ssh.exec(buildMountCommand({ fstype, opts, path, src }), EXEC_OPTS)
     if (mountResult.code !== 0) {
       return failedCommand(`[mount.present: ${path}] mount failed`, mountResult)
     }
-    return true
+    return { changed: true, previousLive: null }
   }
 
-  if (liveMountMatchesDesired(live, { fstype, opts, src })) return false
+  if (liveMountMatchesDesired(live, { fstype, opts, src })) {
+    return { changed: false, previousLive: live }
+  }
 
   // R-0000049: live mount drifted — converge via remount or umount + mount.
   const failure = await applyMountConvergence(ssh, { fstype, live, opts, path, src })
   if (failure != null) return failure
-  return true
+  return { changed: true, previousLive: live }
 }
 
 async function unmountIfNeeded(ssh: SshConnection, path: string): Promise<boolean | ModuleResult> {
@@ -532,13 +608,19 @@ export const mount = {
 
         let changed = false
         const liveResult = await ensureLiveMount(ssh, { fstype, opts, path, src })
-        if (typeof liveResult !== "boolean") return liveResult
-        if (liveResult) changed = true
+        if ("status" in liveResult) return liveResult
+        if (liveResult.changed) changed = true
 
         if (persist) {
           const desiredLine = buildFstabLine({ fstype, opts, path, src })
-          const fstabResult = await ensureFstabEntry(ssh, path, desiredLine)
-          if (typeof fstabResult !== "boolean") return fstabResult
+          const fstabResult = await ensurePersistedMountAfterLiveChange(ssh, {
+            desiredLine,
+            liveResult,
+            path,
+          })
+          if (typeof fstabResult !== "boolean") {
+            return fstabResult
+          }
           if (fstabResult) changed = true
         }
 
