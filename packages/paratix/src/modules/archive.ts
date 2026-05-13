@@ -450,7 +450,16 @@ async function prepareExtractDestination(
     source: parameters.source,
   })
   if (unsafeDestinationAncestor !== null) return unsafeDestinationAncestor
-  await conn.exec(`mkdir -p ${shellQuote(validatedDestination.destination)}`, SILENT)
+  const createDestination = await conn.exec(
+    `mkdir -p ${shellQuote(validatedDestination.destination)}`,
+    EXEC_OPTS
+  )
+  if (createDestination.code !== 0) {
+    return failedCommand(
+      `[archive.extract] failed to create destination directory ${validatedDestination.destination}`,
+      createDestination
+    )
+  }
   const unsafeResolvedDestination = await validateResolvedDestinationPath(conn, {
     destination: validatedDestination.destination,
     source: parameters.source,

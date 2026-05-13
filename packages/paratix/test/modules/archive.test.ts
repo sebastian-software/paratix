@@ -1076,6 +1076,41 @@ describe("archive.extract — apply", () => {
     expect(mockSsh.calls).toContain(`rm -f '${remoteTmp}'`)
   })
 
+  it("returns failed and stops when creating the destination directory fails", async () => {
+    const localFile = "/local/app.tar.gz"
+    const remoteTmp = "/tmp/paratix-upload.AbCdEfGh"
+    const mockSsh = createMockSsh(
+      {
+        "mktemp /tmp/paratix-upload.XXXXXXXX": { code: 0, stdout: remoteTmp },
+      },
+      {
+        responseStubs: [
+          {
+            command: `mkdir -p '${destination}'`,
+            result: { code: 1, stderr: "mkdir: cannot create directory: Permission denied" },
+          },
+        ],
+      }
+    )
+    vi.spyOn(mockSsh, "uploadFile").mockResolvedValue()
+    vi.spyOn(mockSsh, "writeFile").mockResolvedValue()
+
+    const mod = archive.extract(localFile, destination, { upload: true })
+    const result = await mod.apply(mockSsh, emptyEnv)
+
+    expect(result.status).toBe("failed")
+    expect(String(result.error)).toContain("failed to create destination directory")
+    expect(mockSsh.uploadFile).toHaveBeenCalledWith(localFile, remoteTmp)
+    expect(mockSsh.calls).toContain(`rm -f '${remoteTmp}'`)
+    expect(mockSsh.calls).not.toContain(`tar -tvzf '${remoteTmp}'`)
+    expect(mockSsh.calls).not.toContain(
+      `tar --no-same-owner --no-overwrite-dir -xzf '${remoteTmp}' -C '${archiveStageDirectory}'`
+    )
+    expect(mockSsh.calls.some((command) => archiveStageMktempPattern.test(command))).toBe(false)
+    expect(mockSsh.calls.some((command) => archiveStageMovePattern.test(command))).toBe(false)
+    expectNoArchiveMarkerWrite(mockSsh)
+  })
+
   it("returns failed when sha256 of remote archive is null", async () => {
     const mockSsh = createMockSsh({
       [`tar --no-same-owner --no-overwrite-dir -xzf '${src}' -C '${archiveStageDirectory}'`]: {
