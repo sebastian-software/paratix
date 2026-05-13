@@ -429,6 +429,7 @@ async function resolveDebconfType(ssh: SshConnection, question: string): Promise
 
 const BRACKETED_SOURCE_RE = /^(?<prefix>deb(?:-src)?)\s+\[(?<opts>[^\]]*)\](?<rest>.*)$/v
 const PLAIN_SOURCE_RE = /^(?<prefix>deb(?:-src)?)\s(?<rest>.+)$/v
+const SIGNED_BY_OPTION_RE = /(?:^|\s)signed-by=\S+/v
 
 function validateRepositorySourceLine(sourceLine: string): string {
   if (APT_SOURCE_LINE_BREAK_PATTERN.test(sourceLine)) {
@@ -455,8 +456,13 @@ function validateRepositorySourceLine(sourceLine: string): string {
 function injectSignedBy(sourceLine: string, keyPath: string): string {
   const withBrackets = BRACKETED_SOURCE_RE.exec(sourceLine)
   if (withBrackets?.groups) {
-    if (withBrackets.groups.opts.includes("signed-by=")) return sourceLine
-    return `${withBrackets.groups.prefix} [${withBrackets.groups.opts} signed-by=${keyPath}]${withBrackets.groups.rest}`
+    const options = SIGNED_BY_OPTION_RE.test(withBrackets.groups.opts)
+      ? withBrackets.groups.opts.replace(SIGNED_BY_OPTION_RE, (match) => {
+          const prefix = match.startsWith(" ") ? " " : ""
+          return `${prefix}signed-by=${keyPath}`
+        })
+      : `${withBrackets.groups.opts} signed-by=${keyPath}`
+    return `${withBrackets.groups.prefix} [${options}]${withBrackets.groups.rest}`
   }
   const withoutBrackets = PLAIN_SOURCE_RE.exec(sourceLine)
   if (withoutBrackets?.groups) {

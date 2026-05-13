@@ -779,6 +779,44 @@ describe("apt.repository (standard form)", () => {
     expect(result).toBe("ok")
   })
 
+  it("check returns needs-apply when bracketed content uses a different signed-by path", async () => {
+    const sourceWithForeignSignedBy =
+      "deb [arch=amd64 signed-by=/etc/apt/keyrings/foreign.gpg] https://download.docker.com/linux/ubuntu noble stable"
+    const ssh = createMockSsh({
+      [`[ -f '${filePath}' ] && [ ! -L '${filePath}' ]`]: { code: 0 },
+      [`cat '${filePath}'`]: { stdout: sourceWithForeignSignedBy },
+    })
+    const mod = apt.repository("docker", source)
+    const result = await mod.check(ssh, emptyEnv)
+    expect(result).toBe("needs-apply")
+  })
+
+  it("apply replaces a foreign signed-by path in bracketed source content", async () => {
+    const sourceWithForeignSignedBy =
+      "deb [arch=amd64 signed-by=/etc/apt/keyrings/foreign.gpg] https://download.docker.com/linux/ubuntu noble stable"
+    const expectedContent =
+      "deb [arch=amd64 signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu noble stable"
+    const expectedFlag = `apt-repository-${sha256String("docker").slice(0, 16)}-${sha256String(expectedContent).slice(0, 16)}`
+    const ssh = createMockSsh({
+      [`[ -f '${filePath}' ] && [ ! -L '${filePath}' ]`]: { code: 1 },
+      [`[ -L '${filePath}' ]`]: { code: 1 },
+      [`find /var/lib/paratix/flags -maxdepth 1 -name 'apt-repository-${sha256String("docker").slice(0, 16)}-*' ! -name '*.lock' -delete && touch /var/lib/paratix/flags/'${expectedFlag}'`]:
+        { code: 0 },
+      "DEBIAN_FRONTEND=noninteractive apt-get update": { code: 0 },
+    })
+    const mod = apt.repository("docker", sourceWithForeignSignedBy)
+    const result = await mod.apply(ssh, emptyEnv)
+
+    expect(result.status).toBe("changed")
+    expect(ssh.writeFileCalls).toStrictEqual([
+      {
+        content: `${expectedContent}\n`,
+        options: { mode: "0644" },
+        remotePath: filePath,
+      },
+    ])
+  })
+
   // R-0000051 regression: tabs / multiple spaces / trailing whitespace are
   // semantically equivalent to single-space-separated fields in apt source
   // lines and must not flap the check between `ok` and `needs-apply`.
