@@ -312,10 +312,9 @@ export function isDirectCliExecution(moduleUrl: string, candidateEntryScript?: s
  * {@link FIRST_RUN_ENV_NAME} from `process.env` directly.
  *
  * The companion {@link withCliProcessEnvironment} mutates the global
- * `process.env` only for the duration of the playbook's top-level
+ * `process.env` only for the duration of the serialized playbook
  * `import()` so playbooks can read `process.env.PARATIX_FIRST_RUN` at module
- * scope. See that function's documentation for the cross-contamination
- * caveat (R-0000208).
+ * scope without contaminating another concurrent playbook import.
  *
  * @param environment - The base environment supplied by the caller.
  * @param options - Overrides derived from CLI flags.
@@ -419,12 +418,10 @@ function enterCliProcessEnvironmentFrame(options: { firstRun: boolean }): () => 
  *   ECMAScript module loader has no per-import override; there is no other
  *   way for a freshly imported playbook to read the value at module scope.
  * - While `body` is running, every other code path in the same Node
- *   process — including unrelated worker tasks, vitest worker-pool
- *   fixtures, or async initializers triggered by other imports — will
- *   observe `PARATIX_FIRST_RUN === "true"`. Embedding paratix in a host
- *   application that runs concurrent first-run loads is therefore not
- *   supported; serialize the calls or run each load in a separate Node
- *   process / worker thread.
+ *   process — including unrelated worker tasks or vitest worker-pool
+ *   fixtures — can observe `PARATIX_FIRST_RUN === "true"`. Production
+ *   playbook loading serializes imports around this helper so another
+ *   concurrent playbook import does not see the synthetic first-run flag.
  * - Reentrant CLI calls are supported: the snapshot taken on the outermost
  *   invocation always wins, so nested calls cannot overwrite the genuine
  *   pre-CLI value with the synthetic `"true"` an outer call installed.
@@ -471,6 +468,23 @@ export async function withCliProcessEnvironment<T>(
  * (e.g. after the operator installs tsx).
  */
 let tsxRegistrationPromise: null | Promise<void> = null
+let playbookImportQueue: Promise<void> = Promise.resolve()
+
+async function withSerializedPlaybookImport<T>(body: () => Promise<T>): Promise<T> {
+  const previousImport = playbookImportQueue
+  let releaseCurrentImport!: () => void
+  playbookImportQueue = new Promise<void>((resolveQueue) => {
+    releaseCurrentImport = resolveQueue
+  })
+
+  await previousImport
+
+  try {
+    return await body()
+  } finally {
+    releaseCurrentImport()
+  }
+}
 
 /**
  * Resets the cached tsx registration promise. Exported so tests can
@@ -524,24 +538,26 @@ export async function loadServerDefinitionFromFile(
   const fileUrl = pathToFileURL(filePath).href
   const isTypeScriptEntry = TYPESCRIPT_ENTRY_EXTENSIONS.has(extname(filePath).toLowerCase())
 
-  return withCliProcessEnvironment(options, async () => {
-    // Register tsx for TypeScript imports.
-    // R-0000071: narrow the catch so only a genuine missing-tsx error is
-    // routed through handleTsxLoadFailure. Any other error from the dynamic
-    // import (incompatible Node, broken install, OOM, transitive dep
-    // missing) is rethrown with the original cause so the CLI exit handler
-    // surfaces the real loader failure instead of falsely reporting that
-    // tsx is not installed.
-    if (isTypeScriptEntry) await registerTsxForTypeScriptEntry(filePath)
+  return withSerializedPlaybookImport(async () =>
+    withCliProcessEnvironment(options, async () => {
+      // Register tsx for TypeScript imports.
+      // R-0000071: narrow the catch so only a genuine missing-tsx error is
+      // routed through handleTsxLoadFailure. Any other error from the dynamic
+      // import (incompatible Node, broken install, OOM, transitive dep
+      // missing) is rethrown with the original cause so the CLI exit handler
+      // surfaces the real loader failure instead of falsely reporting that
+      // tsx is not installed.
+      if (isTypeScriptEntry) await registerTsxForTypeScriptEntry(filePath)
 
-    // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment -- Dynamic import has unknown shape
-    const imported = await import(fileUrl)
-    // eslint-disable-next-line @typescript-eslint/no-unsafe-member-access, @typescript-eslint/no-unsafe-type-assertion -- Accessing .default on dynamic import
-    const definition = (imported.default ?? imported) as ServerDefinition
+      // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment -- Dynamic import has unknown shape
+      const imported = await import(fileUrl)
+      // eslint-disable-next-line @typescript-eslint/no-unsafe-member-access, @typescript-eslint/no-unsafe-type-assertion -- Accessing .default on dynamic import
+      const definition = (imported.default ?? imported) as ServerDefinition
 
-    validateServerDefinition(definition, filePath)
-    return definition
-  })
+      validateServerDefinition(definition, filePath)
+      return definition
+    })
+  )
 }
 
 type ApplyCommandOptions = {

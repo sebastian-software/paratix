@@ -1,5 +1,13 @@
 import { execFileSync } from "node:child_process"
-import { mkdtempSync, readFileSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs"
+import {
+  existsSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  symlinkSync,
+  unlinkSync,
+  writeFileSync,
+} from "node:fs"
 import { tmpdir } from "node:os"
 import { join, resolve } from "node:path"
 import { pathToFileURL } from "node:url"
@@ -54,6 +62,24 @@ async function captureAsyncError(promise: Promise<unknown>): Promise<Error> {
   }
 
   throw new Error("Expected promise to fail")
+}
+
+async function waitForFile(path: string): Promise<void> {
+  const deadline = Date.now() + 1000
+  await new Promise<void>((resolveWait, rejectWait) => {
+    const check = (): void => {
+      if (existsSync(path)) {
+        resolveWait()
+        return
+      }
+      if (Date.now() >= deadline) {
+        rejectWait(new Error(`Timed out waiting for ${path}`))
+        return
+      }
+      setTimeout(check, 10)
+    }
+    check()
+  })
 }
 
 describe("PACKAGE_VERSION", () => {
@@ -1702,23 +1728,24 @@ describe("CLI entrypoint", () => {
     }
   })
 
-  // R-0000208: withCliProcessEnvironment intentionally mutates the global
-  // process.env so the playbook's top-level import() can observe the
-  // first-run flag. While the synthetic "true" is installed, every other
-  // code path in the same process sees it — concurrent embedded runners
-  // therefore cross-contaminate. The companion typed Environment returned
-  // by applyCliEnvironmentOverrides remains pure and is the value the
-  // runner consumes; the global is only there for module-scope statements.
-  it("documents that concurrent first-run loads share the global process.env flag", async () => {
-    const tempDirectory = mkdtempSync(join(tmpdir(), "paratix-cli-first-run-shared-"))
+  it("serializes concurrent playbook imports so first-run env does not cross-contaminate", async () => {
+    const tempDirectory = mkdtempSync(join(tmpdir(), "paratix-cli-first-run-serialized-"))
     const firstRunPlaybookPath = join(tempDirectory, "first.mjs")
     const observerPlaybookPath = join(tempDirectory, "observer.mjs")
-    let observerFirstRunSeen: string | undefined
+    const leaderStartedPath = join(tempDirectory, "leader-started.txt")
+    const releaseLeaderPath = join(tempDirectory, "release-leader")
 
     try {
       writeFileSync(
         firstRunPlaybookPath,
         [
+          "import { existsSync, writeFileSync } from 'node:fs'",
+          `const leaderStartedPath = ${JSON.stringify(leaderStartedPath)}`,
+          `const releaseLeaderPath = ${JSON.stringify(releaseLeaderPath)}`,
+          "writeFileSync(leaderStartedPath, process.env['PARATIX_FIRST_RUN'] ?? 'missing')",
+          "while (!existsSync(releaseLeaderPath)) {",
+          "  await new Promise((resolveWait) => setTimeout(resolveWait, 10))",
+          "}",
           "export default {",
           "  name: 'leader',",
           "  host: '1.2.3.4',",
@@ -1734,24 +1761,24 @@ describe("CLI entrypoint", () => {
           "  name: 'observer',",
           "  host: '1.2.3.5',",
           "  ssh: { user: 'root', ports: [22] },",
-          "  run: ['ok'],",
+          "  run: [process.env['PARATIX_FIRST_RUN'] ?? 'missing'],",
           "}",
         ].join("\n")
       )
 
       const leaderPromise = loadServerDefinitionFromFile(firstRunPlaybookPath, { firstRun: true })
-      // While the leader's import is in-flight, an unrelated observer reads
-      // process.env and sees the synthetic "true". This is the documented
-      // caveat from R-0000208.
-      observerFirstRunSeen = process.env.PARATIX_FIRST_RUN
+      await waitForFile(leaderStartedPath)
+      expect(readFileSync(leaderStartedPath, "utf8")).toBe("true")
+
       const observerPromise = loadServerDefinitionFromFile(observerPlaybookPath, {
         firstRun: false,
       })
+      writeFileSync(releaseLeaderPath, "go")
 
-      const [leader] = await Promise.all([leaderPromise, observerPromise])
+      const [leader, observer] = await Promise.all([leaderPromise, observerPromise])
 
       expect(leader.run).toStrictEqual(["true"])
-      expect(observerFirstRunSeen).toBe("true")
+      expect(observer.run).toStrictEqual(["missing"])
       // Once both loads complete the global is fully restored.
       expect(process.env.PARATIX_FIRST_RUN).toBeUndefined()
     } finally {
