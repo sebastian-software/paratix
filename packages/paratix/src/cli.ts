@@ -583,8 +583,9 @@ export async function runApplyCommand(
 
 export function exitAfterApplyError(error: unknown, verbose: boolean): never {
   printExceptionError(error, verbose)
+  const exitCode = process.exitCode === undefined || process.exitCode === 0 ? 2 : process.exitCode
   // eslint-disable-next-line node/no-process-exit
-  process.exit(process.exitCode ?? 2)
+  process.exit(exitCode)
 }
 
 const program = new Command()

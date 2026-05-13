@@ -1900,7 +1900,30 @@ describe("CLI entrypoint", () => {
     }
   })
 
-  it("preserves an exit code set by the runner when the apply action fails", () => {
+  it.each([1, 130, 143])(
+    "preserves exit code %i set by the runner when the apply action fails",
+    (exitCode) => {
+      const exitSpy = vi.spyOn(process, "exit").mockImplementation(() => {
+        throw new Error("process.exit")
+      })
+      const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {
+        /* suppress expected error */
+      })
+      const previousExitCode = process.exitCode
+
+      try {
+        process.exitCode = exitCode
+        expect(() => exitAfterApplyError(new Error("module failed"), false)).toThrow("process.exit")
+        expect(exitSpy).toHaveBeenCalledWith(exitCode)
+      } finally {
+        process.exitCode = previousExitCode
+        exitSpy.mockRestore()
+        errorSpy.mockRestore()
+      }
+    }
+  )
+
+  it("falls back to exit code 2 when the apply failure left exit code 0", () => {
     const exitSpy = vi.spyOn(process, "exit").mockImplementation(() => {
       throw new Error("process.exit")
     })
@@ -1910,9 +1933,9 @@ describe("CLI entrypoint", () => {
     const previousExitCode = process.exitCode
 
     try {
-      process.exitCode = 1
+      process.exitCode = 0
       expect(() => exitAfterApplyError(new Error("module failed"), false)).toThrow("process.exit")
-      expect(exitSpy).toHaveBeenCalledWith(1)
+      expect(exitSpy).toHaveBeenCalledWith(2)
     } finally {
       process.exitCode = previousExitCode
       exitSpy.mockRestore()
