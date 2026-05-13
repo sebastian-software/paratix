@@ -1,7 +1,13 @@
 /* eslint-disable max-lines -- timer module keeps related lifecycle helpers (sync, restart, absent) together for cohesion */
 import { failed, failedCommand } from "../moduleFailure.js"
 import { shellQuote } from "../ssh.js"
-import { type Module, type ModuleResult, NEEDS_APPLY, type SshConnection } from "../types.js"
+import {
+  type ExecResult,
+  type Module,
+  type ModuleResult,
+  NEEDS_APPLY,
+  type SshConnection,
+} from "../types.js"
 import { readFileSnapshot, restoreUnitFileSnapshots } from "./timerFileSnapshots.js"
 import {
   assertTimerName,
@@ -88,6 +94,34 @@ type SyncOutcome =
 
 type SnapshotPair = Parameters<typeof restoreUnitFileSnapshots>[2]
 
+function describeError(error: unknown): string {
+  return error instanceof Error ? error.message : String(error)
+}
+
+function describeExecResult(result: ExecResult): string {
+  const detail = result.stderr.trim() || result.stdout.trim()
+  return detail === "" ? `exit code ${String(result.code)}` : detail
+}
+
+async function restoreUnitFileSnapshotsAfterReloadFailure(
+  ssh: SshConnection,
+  parameters: {
+    message: string
+    paths: Pick<TimerPaths, "servicePath" | "timerPath">
+    reload: ExecResult
+    snapshots: SnapshotPair
+  }
+): Promise<ModuleResult> {
+  try {
+    await restoreUnitFileSnapshots(ssh, parameters.paths, parameters.snapshots)
+  } catch (error) {
+    return failed(
+      `${parameters.message}; rollback of timer unit files also failed: ${describeError(error)}; original daemon-reload failure: ${describeExecResult(parameters.reload)}`
+    )
+  }
+  return failedCommand(parameters.message, parameters.reload)
+}
+
 // R-0000216: writeFile can throw (SFTP error after a partial write,
 // permission denied, network drop). Wrap both writes in a shared
 // try/catch so a throw on the second writeFile cannot leave the first
@@ -128,11 +162,12 @@ async function reloadDaemonAfterTimerSync(
     silent: true,
   })
   if (reload.code === 0) return null
-  await restoreUnitFileSnapshots(ssh, parameters.paths, parameters.snapshots)
-  return failedCommand(
-    `[timer.scheduled: ${parameters.name}] systemctl daemon-reload failed`,
-    reload
-  )
+  return restoreUnitFileSnapshotsAfterReloadFailure(ssh, {
+    message: `[timer.scheduled: ${parameters.name}] systemctl daemon-reload failed`,
+    paths: parameters.paths,
+    reload,
+    snapshots: parameters.snapshots,
+  })
 }
 
 async function syncUnitFiles(
@@ -371,8 +406,12 @@ async function removeAbsentUnitFiles(
     silent: true,
   })
   if (reload.code === 0) return null
-  await restoreUnitFileSnapshots(ssh, locations, snapshots)
-  return failedCommand(`[${module}: ${name}] systemctl daemon-reload failed`, reload)
+  return restoreUnitFileSnapshotsAfterReloadFailure(ssh, {
+    message: `[${module}: ${name}] systemctl daemon-reload failed`,
+    paths: locations,
+    reload,
+    snapshots,
+  })
 }
 
 async function applyAbsent(ssh: SshConnection, context: AbsentContext): Promise<ModuleResult> {

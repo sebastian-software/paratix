@@ -1,6 +1,6 @@
 /* oxlint-disable no-unused-vars -- shared fixtures are duplicated by the mechanical test split */
 
-import { describe, expect, it } from "vitest"
+import { describe, expect, it, vi } from "vitest"
 
 import { timer } from "../../../src/modules/timer.js"
 import { createMockSsh as createBaseMockSsh } from "../../helpers/mockSsh.js"
@@ -203,6 +203,23 @@ describe("timer.absent", () => {
     const result = await mod.apply(ssh, emptyEnv)
     expect(result.status).toBe("failed")
     expect(ssh.calls).toContain("systemctl enable -- 'backup.timer'")
+  })
+
+  it("returns a structured failure when daemon-reload rollback fails", async () => {
+    const ssh = createAbsentApplyWithExistingUnitsMockSsh({
+      "systemctl daemon-reload": { code: 1, stderr: "reload boom" },
+      "systemctl enable -- 'backup.timer'": { code: 0 },
+      "systemctl is-active --quiet -- 'backup.timer'": { code: 1 },
+      "systemctl is-enabled --quiet -- 'backup.timer'": { code: 0 },
+    })
+    vi.spyOn(ssh, "writeFile").mockRejectedValueOnce(new Error("restore denied"))
+    const mod = timer.absent("backup")
+    const result = await mod.apply(ssh, emptyEnv)
+    expect(result.status).toBe("failed")
+    expect(String(result.error)).toContain("systemctl daemon-reload failed")
+    expect(String(result.error)).toContain("rollback of timer unit files also failed")
+    expect(String(result.error)).toContain("restore denied")
+    expect(String(result.error)).toContain("reload boom")
   })
 
   it("apply returns ok when neither unit file exists (idempotent no-op)", async () => {

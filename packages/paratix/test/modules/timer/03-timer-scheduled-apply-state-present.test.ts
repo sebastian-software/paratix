@@ -121,6 +121,31 @@ describe("timer.scheduled — apply (state: present)", () => {
     expect(ssh.writeFileCalls.at(-1)?.content).toBe(previousTimer)
   })
 
+  it("returns a structured failure when daemon-reload rollback fails", async () => {
+    const previousService = "[Unit]\nDescription=old service\n"
+    const previousTimer = "[Unit]\nDescription=old timer\n"
+    const ssh = createTimerApplyMockSsh({
+      [`[ -e '${SERVICE_PATH}' ]`]: { code: 0 },
+      [`[ -e '${TIMER_PATH}' ]`]: { code: 0 },
+      [`cat '${SERVICE_PATH}'`]: { stdout: previousService },
+      [`cat '${TIMER_PATH}'`]: { stdout: previousTimer },
+      [`stat -c '%a' '${SERVICE_PATH}'`]: { stdout: "0644" },
+      [`stat -c '%a' '${TIMER_PATH}'`]: { stdout: "0644" },
+      "systemctl daemon-reload": { code: 1, stderr: "reload boom" },
+    })
+    vi.spyOn(ssh, "writeFile")
+      .mockResolvedValueOnce()
+      .mockResolvedValueOnce()
+      .mockRejectedValueOnce(new Error("restore denied"))
+    const mod = timer.scheduled("backup", baseOptions)
+    const result = await mod.apply(ssh, emptyEnv)
+    expect(result.status).toBe("failed")
+    expect(String(result.error)).toContain("systemctl daemon-reload failed")
+    expect(String(result.error)).toContain("rollback of timer unit files also failed")
+    expect(String(result.error)).toContain("restore denied")
+    expect(String(result.error)).toContain("reload boom")
+  })
+
   // R-0000217: timer snapshots must capture the existing unit-file mode so
   // the rollback restores the operator's manual chmod (e.g. 0600 because of
   // an EnvironmentFile reference). The previous implementation hardcoded
