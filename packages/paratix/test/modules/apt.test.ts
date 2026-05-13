@@ -897,21 +897,24 @@ describe("apt.repository (standard form)", () => {
   })
 
   it("apply sets update marker only after apt-get update succeeds", async () => {
-    const ssh = createMockSsh(
-      {
-        [`[ -f '${filePath}' ] && [ ! -L '${filePath}' ]`]: { code: 1 },
-        [`[ -L '${filePath}' ]`]: { code: 1 },
-        "DEBIAN_FRONTEND=noninteractive apt-get update": { code: 0 },
-      },
-      { allowUnstubbedDefaults: true, defaultExecResult: SUCCESSFUL_EXEC_DEFAULT }
-    )
+    const markerCommand = `find /var/lib/paratix/flags -maxdepth 1 -name 'apt-repository-${sha256String("docker").slice(0, 16)}-*' ! -name '*.lock' -delete && touch /var/lib/paratix/flags/'${updateFlag}'`
+    const updateCommand = "DEBIAN_FRONTEND=noninteractive apt-get update"
+    const ssh = createMockSsh({
+      [`[ -f '${filePath}' ] && [ ! -L '${filePath}' ]`]: { code: 1 },
+      [`[ -L '${filePath}' ]`]: { code: 1 },
+      [markerCommand]: { code: 0 },
+      "mkdir -p /var/lib/paratix/flags": { code: 0 },
+      [updateCommand]: { code: 0 },
+    })
     const mod = apt.repository("docker", source)
     const result = await mod.apply(ssh, emptyEnv)
+    const updateIndex = ssh.calls.indexOf(updateCommand)
+    const markerIndex = ssh.calls.indexOf(markerCommand)
 
     expect(result.status).toBe("changed")
-    expect(ssh.calls).toContain(
-      `find /var/lib/paratix/flags -maxdepth 1 -name 'apt-repository-${sha256String("docker").slice(0, 16)}-*' ! -name '*.lock' -delete && touch /var/lib/paratix/flags/'${updateFlag}'`
-    )
+    expect(updateIndex).toBeGreaterThan(-1)
+    expect(markerIndex).toBeGreaterThan(-1)
+    expect(updateIndex).toBeLessThan(markerIndex)
   })
 
   it("apply does not set update marker when apt-get update fails", async () => {
