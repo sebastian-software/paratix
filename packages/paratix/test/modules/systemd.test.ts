@@ -267,6 +267,33 @@ describe("systemd.unit", () => {
     expect(writeFile).toHaveBeenNthCalledWith(2, filePath, previousContent, { mode: "600" })
   })
 
+  it("reports daemon-reload and rollback write failures when both fail", async () => {
+    const previousContent = "[Unit]\nDescription=Previous\n"
+    const ssh = createMockSsh({
+      [`[ -e '${filePath}' ]`]: { code: 0 },
+      [`cat '${filePath}'`]: { stdout: previousContent },
+      [`stat -c '%a' '${filePath}'`]: { code: 0, stdout: "600\n" },
+      "systemctl daemon-reload": { code: 1, stderr: "daemon reload failed\n" },
+    })
+    vi.spyOn(ssh, "readFile")
+      .mockResolvedValueOnce(previousContent)
+      .mockResolvedValueOnce(unitContent)
+    const writeFile = vi
+      .spyOn(ssh, "writeFile")
+      .mockResolvedValueOnce()
+      .mockRejectedValueOnce(new Error("rollback write failed: ENOSPC"))
+    const mod = systemd.unit(unitName, unitContent)
+    const result = await mod.apply(ssh, emptyEnv)
+
+    expect(result.status).toBe("failed")
+    expect(String(result.error)).toContain("systemctl daemon-reload failed")
+    expect(String(result.error)).toContain("daemon reload failed")
+    expect(String(result.error)).toContain("rollback failed")
+    expect(String(result.error)).toContain("ENOSPC")
+    expect(writeFile).toHaveBeenNthCalledWith(1, filePath, unitContent, { mode: "0644" })
+    expect(writeFile).toHaveBeenNthCalledWith(2, filePath, previousContent, { mode: "600" })
+  })
+
   it("restores an existing unit file when daemon-reload flag persistence fails", async () => {
     const previousContent = "[Unit]\nDescription=Previous\n"
     const ssh = createMockSsh({

@@ -157,6 +157,35 @@ async function rollbackUnitAfterFlagPersistenceFailure(parameters: {
   return flagFailure
 }
 
+async function rollbackUnitAfterDaemonReloadFailure(parameters: {
+  content: string
+  filePath: string
+  name: string
+  reloadFailure: ExecResult
+  snapshot: UnitFileSnapshot
+  ssh: SshConnection
+}): Promise<ModuleResult> {
+  const { content, filePath, name, reloadFailure, snapshot, ssh } = parameters
+  const result = failedCommand(
+    `[systemd.unit: ${name}] systemctl daemon-reload failed`,
+    reloadFailure
+  )
+  try {
+    await restoreUnitFileSnapshotIfCurrentMatches({
+      expectedCurrentContent: content,
+      filePath,
+      snapshot,
+      ssh,
+    })
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : String(error)
+    return failed(
+      `${result.error?.message ?? "systemctl daemon-reload failed"}\nrollback failed: ${reason}`
+    )
+  }
+  return result
+}
+
 /**
  * Apply a systemd unit file write + daemon-reload pipeline with rollback on
  * any intermediate failure (write, reload, flag persist).
@@ -184,13 +213,14 @@ async function applySystemdUnit(parameters: {
   if (writeFailure) return writeFailure
   const result = await reloadSystemdDaemon(ssh)
   if (result.code !== 0) {
-    await restoreUnitFileSnapshotIfCurrentMatches({
-      expectedCurrentContent: content,
+    return rollbackUnitAfterDaemonReloadFailure({
+      content,
       filePath,
+      name,
+      reloadFailure: result,
       snapshot,
       ssh,
     })
-    return failedCommand(`[systemd.unit: ${name}] systemctl daemon-reload failed`, result)
   }
   // R-0000273: surface flag-persist failures (EROFS/EPERM/ENOSPC) through
   // the failedCommand path; the helper no longer throws.
