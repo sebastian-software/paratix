@@ -1,4 +1,4 @@
-import { failed, failedCommand } from "../moduleFailure.js"
+import { failed, failedCommand, withRollbackFailure } from "../moduleFailure.js"
 import { shellQuote } from "../ssh.js"
 import { type Module, type ModuleResult, NEEDS_APPLY, type SshConnection } from "../types.js"
 import { sha256String } from "./fileHelpers.js"
@@ -98,8 +98,6 @@ function generateContainerQuadlet(options: QuadletContainerOptions): string {
   return sections.join("\n").trimEnd()
 }
 
-type ExecResultLike = Awaited<ReturnType<SshConnection["exec"]>>
-
 type QuadletImageUpdateParameters = {
   image: string
   inspectCommand: string
@@ -109,20 +107,16 @@ type QuadletImageUpdateParameters = {
   ssh: SshConnection
 }
 
-async function createQuadletDirectory(ssh: SshConnection): Promise<ExecResultLike> {
-  return ssh.exec(CONTAINERS_SYSTEMD_DIRECTORY_COMMAND, {
-    ignoreExitCode: true,
-    silent: true,
-  })
-}
-
 async function applyQuadletFile(parameters: {
   content: string
   filePath: string
   name: string
   ssh: SshConnection
 }): Promise<ModuleResult> {
-  const mkdirResult = await createQuadletDirectory(parameters.ssh)
+  const mkdirResult = await parameters.ssh.exec(CONTAINERS_SYSTEMD_DIRECTORY_COMMAND, {
+    ignoreExitCode: true,
+    silent: true,
+  })
   if (mkdirResult.code !== 0) {
     return failedCommand(
       `[quadlet.container: ${parameters.name}] failed to create quadlet directory`,
@@ -131,20 +125,19 @@ async function applyQuadletFile(parameters: {
   }
 
   const snapshot = await snapshotQuadletFile(parameters.ssh, parameters.filePath)
-  // R-0000182: writeFile can throw (SFTP error after a partial write,
-  // permission denied, network drop). Catch the throw, restore the
-  // pre-existing snapshot if one was captured, and surface a `failed`
-  // result instead of leaking the exception to the runner.
+  const restoreSnapshot = async (): Promise<void> => {
+    await restoreQuadletFileSnapshot(parameters.ssh, parameters.filePath, snapshot)
+  }
   try {
     await parameters.ssh.writeFile(parameters.filePath, parameters.content, {
       mode: QUADLET_FILE_MODE,
     })
   } catch (error) {
-    await restoreQuadletFileSnapshot(parameters.ssh, parameters.filePath, snapshot)
-    return failed(
-      `[quadlet.container: ${parameters.name}] failed to write quadlet file: ${
-        error instanceof Error ? error.message : String(error)
-      }`
+    const reason = error instanceof Error ? error.message : String(error)
+    return withRollbackFailure(
+      failed(`[quadlet.container: ${parameters.name}] failed to write quadlet file: ${reason}`),
+      restoreSnapshot,
+      "quadlet apply failed"
     )
   }
 
@@ -153,10 +146,13 @@ async function applyQuadletFile(parameters: {
     silent: true,
   })
   if (daemonReload.code === 0) return { status: "changed" }
-  await restoreQuadletFileSnapshot(parameters.ssh, parameters.filePath, snapshot)
-  return failedCommand(
-    `[quadlet.container: ${parameters.name}] systemctl daemon-reload failed`,
-    daemonReload
+  return withRollbackFailure(
+    failedCommand(
+      `[quadlet.container: ${parameters.name}] systemctl daemon-reload failed`,
+      daemonReload
+    ),
+    restoreSnapshot,
+    "quadlet apply failed"
   )
 }
 

@@ -307,6 +307,27 @@ describe("quadlet.container", () => {
     })
   })
 
+  it("reports write and rollback failures when writeFile and restore both fail", async () => {
+    const previousContent = "[Container]\nImage=docker.io/library/traefik:v3.2\n"
+    const ssh = createMockSsh({
+      [`[ -e '${quadletFilePath}' ]`]: { code: 0 },
+      [`cat '${quadletFilePath}'`]: { stdout: previousContent },
+      [`stat -c '%a' '${quadletFilePath}'`]: { code: 0, stdout: "600\n" },
+      "mkdir -p '/etc/containers/systemd'": { code: 0 },
+    })
+    vi.spyOn(ssh, "writeFile")
+      .mockRejectedValueOnce(new Error("SFTP partial write"))
+      .mockRejectedValueOnce(new Error("rollback write failed: ENOSPC"))
+
+    const result = await createQuadletModule().apply(ssh, emptyEnv)
+
+    expect(result.status).toBe("failed")
+    expect(result.error?.message).toContain("failed to write quadlet file")
+    expect(result.error?.message).toContain("SFTP partial write")
+    expect(result.error?.message).toContain("rollback failed")
+    expect(result.error?.message).toContain("rollback write failed: ENOSPC")
+  })
+
   it("restores an existing quadlet when systemctl daemon-reload fails", async () => {
     const previousContent = "[Container]\nImage=docker.io/library/traefik:v3.2\n"
     const ssh = createMockSsh({
@@ -327,6 +348,28 @@ describe("quadlet.container", () => {
     expect(writeFile).toHaveBeenNthCalledWith(2, quadletFilePath, previousContent, {
       mode: "600",
     })
+  })
+
+  it("reports daemon-reload and rollback failures when both fail", async () => {
+    const previousContent = "[Container]\nImage=docker.io/library/traefik:v3.2\n"
+    const ssh = createMockSsh({
+      [`[ -e '${quadletFilePath}' ]`]: { code: 0 },
+      [`cat '${quadletFilePath}'`]: { stdout: previousContent },
+      [`stat -c '%a' '${quadletFilePath}'`]: { code: 0, stdout: "600\n" },
+      "mkdir -p '/etc/containers/systemd'": { code: 0 },
+      "systemctl daemon-reload": { code: 1, stderr: "reload failed" },
+    })
+    vi.spyOn(ssh, "writeFile")
+      .mockResolvedValueOnce()
+      .mockRejectedValueOnce(new Error("rollback write failed: ENOSPC"))
+
+    const result = await createQuadletModule().apply(ssh, emptyEnv)
+
+    expect(result.status).toBe("failed")
+    expect(result.error?.message).toContain("systemctl daemon-reload failed")
+    expect(result.error?.message).toContain("reload failed")
+    expect(result.error?.message).toContain("rollback failed")
+    expect(result.error?.message).toContain("rollback write failed: ENOSPC")
   })
 
   it("generates EnvironmentFile and Healthcheck directives", async () => {

@@ -46,3 +46,17 @@ export function failedCommand(
     status: "failed",
   }
 }
+
+export async function withRollbackFailure(
+  failure: ModuleResult,
+  rollback: () => Promise<void>,
+  fallbackMessage = "operation failed"
+): Promise<ModuleResult> {
+  try {
+    await rollback()
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : String(error)
+    return failed(`${failure.error?.message ?? fallbackMessage}\nrollback failed: ${reason}`)
+  }
+  return failure
+}
