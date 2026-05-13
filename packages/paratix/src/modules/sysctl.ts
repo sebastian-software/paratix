@@ -132,6 +132,30 @@ type ApplyPresentStateInput = {
   value: string
 }
 
+async function readLiveValueBeforeApply(
+  conn: SshConnection,
+  key: string
+): Promise<ModuleResult | string> {
+  const previous = await conn.exec(`sysctl -n ${shellQuote(key)}`, EXEC_OPTS)
+  if (previous.code !== 0) {
+    return failedCommand(`[sysctl.set: ${key}] failed to read live value before applying`, previous)
+  }
+  return previous.stdout.trim()
+}
+
+async function rollbackLiveValue(
+  conn: SshConnection,
+  key: string,
+  previousValue: string
+): Promise<string> {
+  const rollbackAssignment = `${key}=${previousValue}`
+  const rollback = await conn.exec(`sysctl -w ${shellQuote(rollbackAssignment)}`, EXEC_OPTS)
+  if (rollback.code === 0) {
+    return `rolled back live value to ${JSON.stringify(previousValue)}`
+  }
+  return `rollback to ${JSON.stringify(previousValue)} failed: ${rollback.stderr || rollback.stdout}`
+}
+
 /**
  * Apply the `present` state: write the live value via `sysctl -w` and
  * persist the configuration file.
@@ -147,6 +171,8 @@ async function applyPresentState(
   input: ApplyPresentStateInput
 ): Promise<ModuleResult> {
   const { configPath, expectedContent, key, value } = input
+  const previousValue = await readLiveValueBeforeApply(conn, key)
+  if (typeof previousValue !== "string") return previousValue
   const assignment = `${key}=${value}`
   const result = await conn.exec(`sysctl -w ${shellQuote(assignment)}`, EXEC_OPTS)
   if (result.code !== 0) {
@@ -162,8 +188,9 @@ async function applyPresentState(
     await conn.writeFile(configPath, expectedContent, { mode: SYSCTL_CONFIG_MODE })
   } catch (error) {
     const reason = error instanceof Error ? error.message : String(error)
+    const rollbackStatus = await rollbackLiveValue(conn, key, previousValue)
     return failed(
-      `[sysctl.set: ${key}] failed to persist config to ${configPath}: ${reason}; live value already set via sysctl -w`
+      `[sysctl.set: ${key}] failed to persist config to ${configPath}: ${reason}; ${rollbackStatus}`
     )
   }
   return { status: "changed" }

@@ -143,23 +143,37 @@ describe("sysctl.set — check", () => {
 describe("sysctl.set — apply", () => {
   it("returns changed and executes sysctl -w and writes config file (state: present)", async () => {
     const mockSsh = createMockSsh({
+      [`sysctl -n '${KEY}'`]: { code: 0, stdout: "0" },
       [`sysctl -w '${KEY}=${VALUE}'`]: { code: 0 },
     })
     const writeFileSpy = vi.spyOn(mockSsh, "writeFile")
     const mod = sysctl.set(KEY, VALUE)
     const result = await mod.apply(mockSsh, emptyEnv)
     expect(result.status).toBe("changed")
+    expect(mockSsh.calls).toContain(`sysctl -n '${KEY}'`)
     expect(mockSsh.calls).toContain(`sysctl -w '${KEY}=${VALUE}'`)
     expect(writeFileSpy).toHaveBeenCalledWith(CONF_PATH, CONF_CONTENT, { mode: "0644" })
   })
 
   it("returns failed when sysctl -w fails (state: present)", async () => {
     const mockSsh = createMockSsh({
+      [`sysctl -n '${KEY}'`]: { code: 0, stdout: "0" },
       [`sysctl -w '${KEY}=${VALUE}'`]: { code: 1 },
     })
     const mod = sysctl.set(KEY, VALUE)
     const result = await mod.apply(mockSsh, emptyEnv)
     expect(result.status).toBe("failed")
+  })
+
+  it("returns failed when the previous live value cannot be read (state: present)", async () => {
+    const mockSsh = createMockSsh({
+      [`sysctl -n '${KEY}'`]: { code: 255, stderr: "unknown key" },
+    })
+    const mod = sysctl.set(KEY, VALUE)
+    const result = await mod.apply(mockSsh, emptyEnv)
+    expect(result.status).toBe("failed")
+    expect(String(result.error)).toContain("failed to read live value before applying")
+    expect(mockSsh.calls).not.toContain(`sysctl -w '${KEY}=${VALUE}'`)
   })
 
   // R-0000242 regression: when the persistence write throws (read-only
@@ -170,7 +184,9 @@ describe("sysctl.set — apply", () => {
   // paths.
   it("R-0000242: returns failed when the persistence writeFile throws (state: present)", async () => {
     const mockSsh = createMockSsh({
+      [`sysctl -n '${KEY}'`]: { code: 0, stdout: "0" },
       [`sysctl -w '${KEY}=${VALUE}'`]: { code: 0 },
+      [`sysctl -w '${KEY}=0'`]: { code: 0 },
     })
     vi.spyOn(mockSsh, "writeFile").mockRejectedValueOnce(
       new Error("SFTP write failed: read-only file system")
@@ -180,7 +196,28 @@ describe("sysctl.set — apply", () => {
     expect(result.status).toBe("failed")
     expect(String(result.error)).toContain("failed to persist config to")
     expect(String(result.error)).toContain("read-only file system")
-    expect(String(result.error)).toContain("live value already set via sysctl -w")
+    expect(String(result.error)).toContain('rolled back live value to "0"')
+    expect(mockSsh.calls).toStrictEqual([
+      `sysctl -n '${KEY}'`,
+      `sysctl -w '${KEY}=${VALUE}'`,
+      `sysctl -w '${KEY}=0'`,
+    ])
+  })
+
+  it("returns failed and reports rollback failure when writeFile and rollback fail", async () => {
+    const mockSsh = createMockSsh({
+      [`sysctl -n '${KEY}'`]: { code: 0, stdout: "0" },
+      [`sysctl -w '${KEY}=${VALUE}'`]: { code: 0 },
+      [`sysctl -w '${KEY}=0'`]: { code: 1, stderr: "permission denied" },
+    })
+    vi.spyOn(mockSsh, "writeFile").mockRejectedValueOnce(
+      new Error("SFTP write failed: read-only file system")
+    )
+    const mod = sysctl.set(KEY, VALUE)
+    const result = await mod.apply(mockSsh, emptyEnv)
+    expect(result.status).toBe("failed")
+    expect(String(result.error)).toContain("failed to persist config to")
+    expect(String(result.error)).toContain('rollback to "0" failed: permission denied')
   })
 
   it("returns failed when conn is null (state: present)", async () => {
@@ -265,6 +302,8 @@ describe("sysctl.set — config path", () => {
     const dottedPath = configPathForKey(dottedKey)
     const hyphenatedPath = configPathForKey(hyphenatedKey)
     const mockSsh = createMockSsh({
+      [`sysctl -n '${dottedKey}'`]: { code: 0, stdout: "0" },
+      [`sysctl -n '${hyphenatedKey}'`]: { code: 0, stdout: "0" },
       [`sysctl -w '${dottedKey}=1'`]: { code: 0 },
       [`sysctl -w '${hyphenatedKey}=1'`]: { code: 0 },
     })
