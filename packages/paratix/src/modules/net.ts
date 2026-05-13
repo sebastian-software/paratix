@@ -397,7 +397,14 @@ async function rollbackInterfaceConfig(
   snapshot: InterfaceConfigSnapshot
 ): Promise<ModuleResult | null> {
   if (snapshot.existed) {
-    await conn.writeFile(snapshot.path, snapshot.previousContent, { mode: NET_CONFIG_FILE_MODE })
+    try {
+      await conn.writeFile(snapshot.path, snapshot.previousContent, { mode: NET_CONFIG_FILE_MODE })
+    } catch (error: unknown) {
+      const reason = error instanceof Error ? error.message : String(error)
+      return failed(
+        `[net.interface] rollback restore failed for ${snapshot.path}; network configuration was not restored: ${reason}`
+      )
+    }
     return null
   }
 

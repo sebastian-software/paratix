@@ -190,6 +190,27 @@ describe("net.interface — apply", () => {
     })
   })
 
+  it("returns failed when restoring the previous Netplan config cannot be written", async () => {
+    const netplanPath = "/etc/netplan/60-paratix-eth0.yaml"
+    const previousConfig = "network:\n  version: 2\n"
+    const mockSsh = createMockSsh({
+      [`cat '${netplanPath}'`]: { stdout: previousConfig },
+      [`test -f '${netplanPath}'`]: { code: 0 },
+      "netplan apply": { code: 1, stderr: "bad netplan" },
+      "test -d '/etc/netplan'": { code: 0 },
+    })
+    const writeError = new Error("read-only filesystem")
+    vi.spyOn(mockSsh, "writeFile").mockResolvedValueOnce().mockRejectedValueOnce(writeError)
+    const mod = net.interface("eth0", { dhcp: true })
+
+    const result = await mod.apply(mockSsh, emptyEnv)
+
+    expect(result.status).toBe("failed")
+    expect(String(result.error)).toContain("rollback restore failed")
+    expect(String(result.error)).toContain("network configuration was not restored")
+    expect(String(result.error)).toContain("read-only filesystem")
+  })
+
   it("re-runs netplan apply after restoring the previous config (live state recovery)", async () => {
     const netplanPath = "/etc/netplan/60-paratix-eth0.yaml"
     const previousConfig = "network:\n  version: 2\n"
