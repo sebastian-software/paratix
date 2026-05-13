@@ -290,8 +290,11 @@ async function rollbackSshdConfigAfterReloadFailure(
   }
 }
 
-async function reloadSshd(ssh: SshConnection): Promise<ModuleResult> {
-  const serviceUnit = await resolveSshServiceUnit(ssh)
+async function reloadSshd(
+  ssh: SshConnection,
+  preflightServiceUnit?: SshdServiceUnit
+): Promise<ModuleResult> {
+  const serviceUnit = preflightServiceUnit ?? (await resolveSshServiceUnit(ssh))
   const result = await ssh.exec(`${SYSTEMCTL} reload ${serviceUnit}`, {
     ignoreExitCode: true,
     silent: true,
@@ -299,6 +302,18 @@ async function reloadSshd(ssh: SshConnection): Promise<ModuleResult> {
   return result.code === 0
     ? { status: "changed" }
     : failedCommand(`[sshd.config] systemctl reload ${serviceUnit} failed`, result)
+}
+
+async function preflightSshdReloadUnit(
+  ssh: SshConnection,
+  settingNames: string
+): Promise<ModuleResult | SshdServiceUnit> {
+  try {
+    return await resolveSshServiceUnit(ssh)
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error)
+    return failed(`[sshd.config: ${settingNames}] ${message}`)
+  }
 }
 
 async function liveSshdPortMatches(ssh: SshConnection, targetPort: number): Promise<boolean> {
@@ -525,6 +540,71 @@ async function writeSshdConfigIfChanged(
   })
 }
 
+async function preflightSshdReloadUnitIfChanged(
+  ssh: SshConnection,
+  parameters: { didChange: boolean; settingNames: string }
+): Promise<ModuleResult | SshdServiceUnit | undefined> {
+  if (!parameters.didChange) return undefined
+  return preflightSshdReloadUnit(ssh, parameters.settingNames)
+}
+
+async function reloadChangedSshdConfig(
+  ssh: SshConnection,
+  parameters: {
+    didChange: boolean
+    originalConfig: string
+    serviceUnit?: SshdServiceUnit
+    settingNames: string
+  }
+): Promise<ModuleResult> {
+  if (!parameters.didChange) return { status: "ok" }
+  const reloadResult = await reloadSshd(ssh, parameters.serviceUnit)
+  if (reloadResult.status !== "failed") return reloadResult
+  return rollbackSshdConfigAfterReloadFailure(ssh, {
+    originalConfig: parameters.originalConfig,
+    reloadResult,
+    settingNames: parameters.settingNames,
+  })
+}
+
+async function applySshdConfig(
+  ssh: SshConnection,
+  parameters: { settingNames: string; settings: Record<string, string> }
+): Promise<ModuleResult> {
+  const originalConfig = await ssh.readFile(SSHD_CONFIG_PATH)
+  const { didChange, newContent } = buildSshdConfigContent(originalConfig, parameters.settings)
+  const nonConvergingMatchOverride = rejectNonConvergingSshdMatchOverrides(
+    newContent,
+    parameters.settings
+  )
+  if (nonConvergingMatchOverride != null) return nonConvergingMatchOverride
+
+  const serviceUnit = await preflightSshdReloadUnitIfChanged(ssh, {
+    didChange,
+    settingNames: parameters.settingNames,
+  })
+  if (serviceUnit != null && typeof serviceUnit !== "string") return serviceUnit
+
+  await writeSshdConfigIfChanged(ssh, { didChange, newContent, originalConfig })
+
+  const validationFailure = await validateSshdConfig(ssh, originalConfig)
+  if (validationFailure != null) return validationFailure
+
+  const effectiveConfigFailure = await rejectNonMatchingEffectiveSshdConfig(ssh, {
+    didChange,
+    originalConfig,
+    settings: parameters.settings,
+  })
+  if (effectiveConfigFailure != null) return effectiveConfigFailure
+
+  return reloadChangedSshdConfig(ssh, {
+    didChange,
+    originalConfig,
+    serviceUnit,
+    settingNames: parameters.settingNames,
+  })
+}
+
 function buildSshdPortContent(
   originalConfig: string,
   targetPort: number
@@ -707,37 +787,7 @@ export const sshd = {
       },
       async apply(ssh: null | SshConnection): Promise<ModuleResult> {
         if (!ssh) return failed(`[sshd.config: ${settingNames}] SSH connection is required`)
-
-        const originalConfig = await ssh.readFile(SSHD_CONFIG_PATH)
-        const { didChange, newContent } = buildSshdConfigContent(originalConfig, settings)
-        const nonConvergingMatchOverride = rejectNonConvergingSshdMatchOverrides(
-          newContent,
-          settings
-        )
-        if (nonConvergingMatchOverride != null) return nonConvergingMatchOverride
-        await writeSshdConfigIfChanged(ssh, { didChange, newContent, originalConfig })
-
-        const validationFailure = await validateSshdConfig(ssh, originalConfig)
-        if (validationFailure != null) return validationFailure
-
-        const effectiveConfigFailure = await rejectNonMatchingEffectiveSshdConfig(ssh, {
-          didChange,
-          originalConfig,
-          settings,
-        })
-        if (effectiveConfigFailure != null) return effectiveConfigFailure
-
-        if (!didChange) {
-          return { status: "ok" }
-        }
-
-        const reloadResult = await reloadSshd(ssh)
-        if (reloadResult.status !== "failed") return reloadResult
-        return rollbackSshdConfigAfterReloadFailure(ssh, {
-          originalConfig,
-          reloadResult,
-          settingNames,
-        })
+        return applySshdConfig(ssh, { settingNames, settings })
       },
       async check(ssh: null | SshConnection): Promise<"needs-apply" | "ok"> {
         if (!ssh) return NEEDS_APPLY
