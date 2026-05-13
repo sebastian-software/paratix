@@ -810,7 +810,10 @@ describe("ssh.authorizedKeys", () => {
     )
     const mod = ssh.authorizedKeys("alice", testKey)
 
-    await expect(mod.apply(mockSsh, emptyEnv)).rejects.toThrow("Unexpected mktemp output")
+    const result = await mod.apply(mockSsh, emptyEnv)
+
+    expect(result.status).toBe("failed")
+    expect(result.error?.message).toContain("Unexpected mktemp output")
     expect(mockSsh.calls).not.toContain(
       presentAuthorizedKeysRewriteCommand(aliceKeys, foreignPath, testKey)
     )
@@ -857,7 +860,10 @@ describe("ssh.authorizedKeys", () => {
     })
     const mod = ssh.authorizedKeys("ghost", testKey)
 
-    await expect(mod.apply(mockSsh, emptyEnv)).rejects.toThrow(
+    const result = await mod.apply(mockSsh, emptyEnv)
+
+    expect(result.status).toBe("failed")
+    expect(result.error?.message).toContain(
       "[ssh.authorizedKeys: ghost] failed to resolve a safe home directory"
     )
     expect(mockSsh.calls).not.toContain(

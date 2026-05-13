@@ -1426,7 +1426,12 @@ export const net = {
 
         // writeFile uses atomic mv-replace, so a failed write leaves the
         // previous file intact and the host's resolver configuration usable.
-        await conn.writeFile(resolvPath, expectedContent, { mode: NET_CONFIG_FILE_MODE })
+        try {
+          await conn.writeFile(resolvPath, expectedContent, { mode: NET_CONFIG_FILE_MODE })
+        } catch (error) {
+          const reason = error instanceof Error ? error.message : String(error)
+          return failed(`[net.resolv] failed to write ${resolvPath}: ${reason}`)
+        }
 
         return { status: "changed" }
       },

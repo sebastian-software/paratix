@@ -40,10 +40,18 @@ async function resolvePrimaryGroup(conn: SshConnection, user: string): Promise<s
   return primaryGroup
 }
 
-function isUnsafeAuthorizedKeysHomeError(error: unknown, user: string): boolean {
+function isUnsafeAuthorizedKeysHomeError(error: unknown, user: string): error is Error {
   return (
     error instanceof Error &&
     error.message === `[ssh.authorizedKeys: ${user}] failed to resolve a safe home directory`
+  )
+}
+
+function isAuthorizedKeysMktempValidationError(error: unknown): error is Error {
+  return (
+    error instanceof Error &&
+    (error.message.startsWith("Unexpected mktemp output:") ||
+      error.message.startsWith("Unexpected mktemp directory:"))
   )
 }
 
@@ -53,12 +61,16 @@ async function resolveApplyHome(
     state: "absent" | "present"
     user: string
   }
-): Promise<null | string> {
+): Promise<{ failure: ModuleResult | null; home: null | string }> {
   const { state, user } = parameters
   try {
-    return await resolveHome(conn, user)
+    return { failure: null, home: await resolveHome(conn, user) }
   } catch (error) {
-    if (state === "absent" && isUnsafeAuthorizedKeysHomeError(error, user)) return null
+    if (isUnsafeAuthorizedKeysHomeError(error, user)) {
+      return state === "absent"
+        ? { failure: null, home: null }
+        : { failure: failed(error.message), home: null }
+    }
     throw error
   }
 }
@@ -266,7 +278,15 @@ async function rewriteAuthorizedKeys(
   // R-0000181: temp file lives in the same filesystem as the destination so
   // `mv -T` is atomic (single rename(2)) and so NFS root_squash hosts do not
   // hit cross-filesystem copy fallbacks.
-  const temporaryPath = await createAuthorizedKeysTemporaryPath(conn, sshDirectoryPath)
+  let temporaryPath: string
+  try {
+    temporaryPath = await createAuthorizedKeysTemporaryPath(conn, sshDirectoryPath)
+  } catch (error) {
+    if (isAuthorizedKeysMktempValidationError(error)) {
+      return failed(`[ssh.authorizedKeys: ${user} (${state})] ${error.message}`)
+    }
+    throw error
+  }
 
   try {
     const stageFailure = await stageAuthorizedKeysContent(conn, {
@@ -355,7 +375,8 @@ export async function applyAuthorizedKeys(
     return failed(`[ssh.authorizedKeys: ${user} (${state})] SSH connection is required`)
   }
 
-  const home = await resolveApplyHome(conn, { state, user })
+  const { failure: homeFailure, home } = await resolveApplyHome(conn, { state, user })
+  if (homeFailure) return homeFailure
   if (home == null) return { status: "ok" }
 
   // R-0000065: resolve the primary group exactly once for the duration of

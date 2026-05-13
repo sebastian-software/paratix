@@ -144,7 +144,11 @@ describe("net.resolv — apply", () => {
     }
     const mod = net.resolv({ nameservers: ["1.1.1.1"] })
 
-    await expect(mod.apply(mockSsh, emptyEnv)).rejects.toThrow(writeFileError)
+    const result = await mod.apply(mockSsh, emptyEnv)
+
+    expect(result.status).toBe("failed")
+    expect(result.error?.message).toContain("failed to write /etc/resolv.conf")
+    expect(result.error?.message).toContain(writeFileError.message)
 
     // No destructive action occurred against /etc/resolv.conf before the failed write.
     expect(mockSsh.calls).not.toContain("rm -f /etc/resolv.conf")
