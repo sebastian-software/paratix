@@ -227,7 +227,9 @@ async function applyAbsentSwapFile(
     if (typeof removeResult !== "boolean") return removeResult
     if (removeResult) swapChanged = true
   }
-  if (await ensureSwapFstabState({ desiredLine: null, path: options.path, ssh })) swapChanged = true
+  const fstabResult = await ensureSwapFstabState({ desiredLine: null, path: options.path, ssh })
+  if (typeof fstabResult !== "boolean") return fstabResult
+  swapChanged ||= fstabResult
   return { status: swapChanged ? "changed" : "ok" }
 }
 
@@ -278,11 +280,14 @@ async function runApplyPresentPipeline(
   if (typeof enableResult !== "boolean")
     return rollbackOrFail(ssh, { failure: enableResult, options, pending })
   if (enableResult) swapChanged = true
-  if (
-    await ensureSwapFstabState({ desiredLine: options.expectedFstabLine, path: options.path, ssh })
-  ) {
-    swapChanged = true
-  }
+  const fstabResult = await ensureSwapFstabState({
+    desiredLine: options.expectedFstabLine,
+    path: options.path,
+    ssh,
+  })
+  if (typeof fstabResult !== "boolean")
+    return rollbackOrFail(ssh, { failure: fstabResult, options, pending })
+  if (fstabResult) swapChanged = true
   // R-0000175: every step succeeded — only now is it safe to discard the
   // backup created by replaceManagedSwapFile.
   if (pending.backupPath != null) await finalizeManagedSwapBackup(ssh, pending.backupPath)

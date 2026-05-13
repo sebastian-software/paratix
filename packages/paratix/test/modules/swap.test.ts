@@ -467,6 +467,50 @@ describe("swap.file — apply", () => {
     expect(ssh.calls).not.toContain(`rm -f '${swapBackupPath}'`)
   })
 
+  it("rolls back replacement and returns failed when persisting fstab throws", async () => {
+    const ssh = createMockSsh({
+      [`[ -e '${swapPath}' ]`]: { code: 0 },
+      [`[ -f '${swapPath}' ]`]: { code: 0 },
+      [`[ -L '${swapPath}' ]`]: { code: 1 },
+      [`cat '/etc/fstab'`]: { stdout: "# fstab\n" },
+      [`cat '${swapPath}'`]: { stdout: "existing swap bytes" },
+      [`chmod '0600' '${swapTempPath}'`]: { code: 0 },
+      [`mkdir -p '/'`]: { code: 0 },
+      [`mkswap '${swapTempPath}'`]: { code: 0 },
+      [`stat -c %s '${swapPath}'`]: { stdout: "1073741824" },
+      [`swaplabel '${swapPath}' >/dev/null 2>&1`]: { code: 0 },
+      [`swapoff '${swapPath}'`]: { code: 0 },
+      [`swapon '${swapPath}'`]: { code: 0 },
+      [backupSwapCommand]: { code: 0 },
+      [createSwapTempCommand]: { code: 0 },
+      [mktempSwapCommand]: { code: 0, stdout: `${swapTempPath}\n` },
+      [publishSwapCommand]: { code: 0 },
+      [restoreSwapCommand]: { code: 0 },
+      [safeSwapParentCommand]: { code: 0, stdout: "/\n" },
+      [statSwapTempIdentityCommand]: { code: 0, stdout: `${swapTempIdentity}\n` },
+      [verifyPublishedSwapCommand]: { code: 0 },
+      [verifySwapBackupCommand]: { code: 0 },
+    })
+    // eslint-disable-next-line @typescript-eslint/require-await -- mock implementation
+    ssh.writeFile = async (): Promise<void> => {
+      throw new Error("fstab write failed")
+    }
+    vi.spyOn(ssh, "lines")
+      .mockResolvedValueOnce([swapPath])
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([swapPath])
+      .mockResolvedValue([])
+
+    const mod = swap.file({ path: swapPath, size: swapSize })
+    const result = await mod.apply(ssh, emptyEnv)
+
+    expect(result.status).toBe("failed")
+    expect(result.error?.message).toContain("failed to update /etc/fstab")
+    expect(result.error?.message).toContain("fstab write failed")
+    expect(ssh.calls).toContain(restoreSwapCommand)
+    expect(ssh.calls).not.toContain(`rm -f '${swapBackupPath}'`)
+  })
+
   it("returns rollback swapoff failure before restoring the backup", async () => {
     const ssh = createMockSsh({
       [`[ -e '${swapPath}' ]`]: { code: 0 },

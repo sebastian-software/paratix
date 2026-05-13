@@ -1,6 +1,6 @@
 import { posix as posixPath } from "node:path"
 
-import { failedCommand } from "../moduleFailure.js"
+import { failed, failedCommand } from "../moduleFailure.js"
 import { shellQuote, validateMode } from "../ssh.js"
 import { guardedWriteFile, type ModuleResult, type SshConnection } from "../types.js"
 
@@ -205,31 +205,36 @@ export async function ensureSwapFstabState(parameters: {
   desiredLine: null | string
   path: string
   ssh: SshConnection
-}): Promise<boolean> {
-  const fstabContent = await parameters.ssh.readFile(FSTAB_PATH)
-  const currentEntry = findFstabEntry(fstabContent, parameters.path)
+}): Promise<boolean | ModuleResult> {
+  try {
+    const fstabContent = await parameters.ssh.readFile(FSTAB_PATH)
+    const currentEntry = findFstabEntry(fstabContent, parameters.path)
 
-  if (parameters.desiredLine == null) {
-    if (currentEntry == null) return false
-    const removedContent = removeFstabEntry(fstabContent, parameters.path)
+    if (parameters.desiredLine == null) {
+      if (currentEntry == null) return false
+      const removedContent = removeFstabEntry(fstabContent, parameters.path)
+      await guardedWriteFile(parameters.ssh, {
+        mode: FSTAB_MODE,
+        newContent: removedContent,
+        originalContent: fstabContent,
+        remotePath: FSTAB_PATH,
+      })
+      return true
+    }
+
+    if (currentEntry === parameters.desiredLine) return false
+    const updatedContent = upsertFstabEntry(fstabContent, parameters.path, parameters.desiredLine)
     await guardedWriteFile(parameters.ssh, {
       mode: FSTAB_MODE,
-      newContent: removedContent,
+      newContent: updatedContent,
       originalContent: fstabContent,
       remotePath: FSTAB_PATH,
     })
     return true
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : String(error)
+    return failed(`[swap.file: ${parameters.path}] failed to update ${FSTAB_PATH}: ${reason}`)
   }
-
-  if (currentEntry === parameters.desiredLine) return false
-  const updatedContent = upsertFstabEntry(fstabContent, parameters.path, parameters.desiredLine)
-  await guardedWriteFile(parameters.ssh, {
-    mode: FSTAB_MODE,
-    newContent: updatedContent,
-    originalContent: fstabContent,
-    remotePath: FSTAB_PATH,
-  })
-  return true
 }
 
 export function normalizeSwapFileOptions(options: {
