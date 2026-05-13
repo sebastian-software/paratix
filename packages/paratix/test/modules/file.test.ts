@@ -1718,6 +1718,33 @@ describe("file.template", () => {
     }
   })
 
+  it("returns failed without chmod when the template target becomes a symlink after writing", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "paratix-test-"))
+    try {
+      const templatePath = join(dir, "template.txt")
+      writeFileSync(templatePath, "Hello")
+
+      const ssh = createMockSsh()
+      const symlinkCheck = vi
+        .spyOn(ssh, "test")
+        .mockResolvedValueOnce(false)
+        .mockResolvedValueOnce(true)
+      vi.spyOn(ssh, "writeFile").mockResolvedValue()
+
+      const mod = file.template("/remote/out.txt", templatePath, { mode: "0600" })
+      const result = await mod.apply(ssh, emptyEnv)
+
+      expect(result.status).toBe("failed")
+      expect(result.error?.message).toContain("refuses to operate through symlink")
+      expect(symlinkCheck).toHaveBeenNthCalledWith(1, "[ -L '/remote/out.txt' ]")
+      expect(symlinkCheck).toHaveBeenNthCalledWith(2, "[ -L '/remote/out.txt' ]")
+      expect(ssh.writeFile).toHaveBeenCalledWith("/remote/out.txt", "Hello", { mode: "0600" })
+      expect(ssh.calls).not.toContain("chmod '0600' '/remote/out.txt'")
+    } finally {
+      rmSync(dir, { recursive: true })
+    }
+  })
+
   it("R-0000269: returns failed when chown after template write exits non-zero", async () => {
     const dir = mkdtempSync(join(tmpdir(), "paratix-test-"))
     try {

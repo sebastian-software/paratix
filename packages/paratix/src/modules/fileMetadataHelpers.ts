@@ -94,7 +94,7 @@ export async function applyFileMetadata(
   // of the symlink target — which is almost never the intent and may cross
   // privilege boundaries.
   if (await isSymlink(ssh, remotePath)) {
-    throw new Error(
+    return failed(
       `[file metadata: ${remotePath}] refuses to operate through symlink — chmod/chown would follow the link`
     )
   }
