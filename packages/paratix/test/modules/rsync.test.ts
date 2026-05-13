@@ -435,7 +435,7 @@ describe("rsync.sync — path validation", () => {
 
   it("R-0000179: rejects NUL byte in dest", () => {
     expect(() => {
-      rsync.sync({ dest: "/remote/dest nul", src: "/local/src" })
+      rsync.sync({ dest: "/remote/dest\0nul", src: "/local/src" })
     }).toThrow(/dest must not contain ASCII control characters/v)
   })
 

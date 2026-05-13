@@ -451,7 +451,7 @@ describe("quadlet.container", () => {
   it("throws when the image contains a NUL byte", () => {
     expect(() => {
       quadlet.container({
-        image: "docker.io/library/nginx:latest ",
+        image: "docker.io/library/nginx:latest\0",
         name: "nginx",
       })
     }).toThrow(/image must match/v)
