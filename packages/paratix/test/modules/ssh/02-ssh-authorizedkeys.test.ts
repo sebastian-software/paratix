@@ -46,6 +46,10 @@ const successfulSshApplyOptions: MockSshOptions = {
       command: /^mktemp '[^']+\/\.ssh\/\.paratix-authorized-keys\.X{6}'$/v,
       result: { stdout: "/home/alice/.ssh/.paratix-authorized-keys.STUB" },
     },
+    {
+      command: /^\[ -e '[^']+\/\.ssh\/authorized_keys' \]$/v,
+      result: { code: 1 },
+    },
   ],
 }
 
@@ -422,6 +426,7 @@ describe("ssh.authorizedKeys", () => {
   it("apply creates directory, adds key with correct permissions (state: present)", async () => {
     const mockSsh = createSshApplyMockSsh(
       aliceResponses({
+        "[ -e '/home/alice/.ssh/authorized_keys' ]": { code: 1 },
         [aliceMktempPattern]: { stdout: tempPath },
       })
     )
@@ -439,6 +444,30 @@ describe("ssh.authorizedKeys", () => {
     expect(mockSsh.calls).not.toContain(`printf '%s\\n' '${testKey}' >> ${aliceKeys}`)
     expect(mockSsh.calls).toContain(aliceFinalReplaceCommand)
     expect(mockSsh.calls).toContain(`rm -f '${tempPath}'`)
+  })
+
+  it("apply returns ok without rewriting when present state is already converged", async () => {
+    const mockSsh = createSshApplyMockSsh(
+      aliceResponses({
+        "[ -e '/home/alice/.ssh/authorized_keys' ]": { code: 0 },
+        "[ -L '/home/alice/.ssh/authorized_keys' ]": { code: 1 },
+        [`grep -qxF -- '${testKey}' ${aliceKeys}`]: { code: 0 },
+        "stat -c '%a %U %G %F' '/home/alice/.ssh'": { stdout: "700 alice alice directory" },
+        "stat -c '%a %U %G %F' '/home/alice/.ssh/authorized_keys'": {
+          stdout: "600 alice alice regular file",
+        },
+      })
+    )
+    const mod = ssh.authorizedKeys("alice", testKey)
+
+    const result = await mod.apply(mockSsh, emptyEnv)
+
+    expect(result.status).toBe("ok")
+    expect(mockSsh.calls).not.toContain(aliceMktempPattern)
+    expect(mockSsh.calls).not.toContain(
+      presentAuthorizedKeysRewriteCommand(aliceKeys, tempPath, testKey)
+    )
+    expect(mockSsh.calls).not.toContain(aliceFinalReplaceCommand)
   })
 
   it("regression: apply does not append a duplicate key when only permissions have drifted", async () => {
@@ -508,7 +537,14 @@ describe("ssh.authorizedKeys", () => {
   it("apply removes key with grep -vxF and preserves filter errors (state: absent)", async () => {
     const mockSsh = createSshApplyMockSsh(
       aliceResponses({
+        "[ -e '/home/alice/.ssh/authorized_keys' ]": { code: 0 },
+        "[ -L '/home/alice/.ssh/authorized_keys' ]": { code: 1 },
+        [`grep -qxF -- '${testKey}' ${aliceKeys}`]: { code: 0 },
         [aliceMktempPattern]: { stdout: tempPath },
+        "stat -c '%a %U %G %F' '/home/alice/.ssh'": { stdout: "700 alice alice directory" },
+        "stat -c '%a %U %G %F' '/home/alice/.ssh/authorized_keys'": {
+          stdout: "600 alice alice regular file",
+        },
       })
     )
     const mod = ssh.authorizedKeys("alice", testKey, { state: "absent" })
@@ -521,10 +557,36 @@ describe("ssh.authorizedKeys", () => {
     )
   })
 
+  it("apply returns ok without rewriting when absent state is already converged", async () => {
+    const mockSsh = createSshApplyMockSsh(
+      aliceResponses({
+        "[ -e '/home/alice/.ssh/authorized_keys' ]": { code: 0 },
+        "[ -L '/home/alice/.ssh/authorized_keys' ]": { code: 1 },
+        [`grep -qxF -- '${testKey}' ${aliceKeys}`]: { code: 1 },
+        "stat -c '%a %U %G %F' '/home/alice/.ssh'": { stdout: "700 alice alice directory" },
+        "stat -c '%a %U %G %F' '/home/alice/.ssh/authorized_keys'": {
+          stdout: "600 alice alice regular file",
+        },
+      })
+    )
+    const mod = ssh.authorizedKeys("alice", testKey, { state: "absent" })
+
+    const result = await mod.apply(mockSsh, emptyEnv)
+
+    expect(result.status).toBe("ok")
+    expect(mockSsh.calls).not.toContain(aliceMktempPattern)
+    expect(mockSsh.calls).not.toContain(
+      absentAuthorizedKeysRewriteCommand(aliceKeys, tempPath, testKey)
+    )
+    expect(mockSsh.calls).not.toContain(aliceFinalReplaceCommand)
+  })
+
   it("regression: absent rewrite fails closed on grep errors and does not replace the target", async () => {
     const rewriteCommand = absentAuthorizedKeysRewriteCommand(aliceKeys, tempPath, testKey)
     const mockSsh = createMockSsh(
       aliceResponses({
+        "[ -e '/home/alice/.ssh/authorized_keys' ]": { code: 0 },
+        [`grep -qxF -- '${testKey}' ${aliceKeys}`]: { code: 0 },
         [aliceMktempPattern]: { stdout: tempPath },
         [rewriteCommand]: { code: 2, stderr: "grep: read error" },
       }),
@@ -560,6 +622,8 @@ describe("ssh.authorizedKeys", () => {
 
     const mockSsh = createSshApplyMockSsh(
       aliceResponses({
+        "[ -e '/home/alice/.ssh/authorized_keys' ]": { code: 0 },
+        [`grep -qxF -- '${testKey}' ${aliceKeys}`]: { code: 0 },
         [aliceMktempPattern]: { stdout: tempPath },
       })
     )
@@ -576,6 +640,8 @@ describe("ssh.authorizedKeys", () => {
   it("regression: apply resets ownership and mode after removing a key (state: absent)", async () => {
     const mockSsh = createSshApplyMockSsh(
       aliceResponses({
+        "[ -e '/home/alice/.ssh/authorized_keys' ]": { code: 0 },
+        [`grep -qxF -- '${testKey}' ${aliceKeys}`]: { code: 0 },
         [aliceMktempPattern]: { stdout: tempPath },
       })
     )
@@ -714,6 +780,8 @@ describe("ssh.authorizedKeys", () => {
   it("stages the authorized_keys rewrite inside <home>/.ssh on the destination filesystem", async () => {
     const mockSsh = createSshApplyMockSsh(
       aliceResponses({
+        "[ -e '/home/alice/.ssh/authorized_keys' ]": { code: 0 },
+        [`grep -qxF -- '${testKey}' ${aliceKeys}`]: { code: 1 },
         [aliceMktempPattern]: { stdout: tempPath },
       })
     )
@@ -762,6 +830,8 @@ describe("ssh.authorizedKeys", () => {
   it("stages absent-state rewrites inside <home>/.ssh as well", async () => {
     const mockSsh = createSshApplyMockSsh(
       aliceResponses({
+        "[ -e '/home/alice/.ssh/authorized_keys' ]": { code: 0 },
+        [`grep -qxF -- '${testKey}' ${aliceKeys}`]: { code: 0 },
         [aliceMktempPattern]: { stdout: tempPath },
       })
     )

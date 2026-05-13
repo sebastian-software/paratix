@@ -291,6 +291,57 @@ async function rewriteAuthorizedKeys(
   }
 }
 
+async function authorizedKeysApplyIsConverged(
+  conn: SshConnection,
+  parameters: {
+    authorizedKeysPath: string
+    key: string
+    primaryGroup: string
+    sshDirectoryPath: string
+    state: "absent" | "present"
+    user: string
+  }
+): Promise<boolean> {
+  const { authorizedKeysPath, key, primaryGroup, sshDirectoryPath, state, user } = parameters
+  const authorizedKeysExists = await conn.exists(authorizedKeysPath)
+  if (!authorizedKeysExists) return state === "absent"
+
+  const keyExists = await conn.test(
+    `grep -qxF -- ${shellQuote(key)} ${shellQuote(authorizedKeysPath)}`
+  )
+  if (state === "present" && !keyExists) return false
+  if (state === "absent" && keyExists) return false
+
+  const securityStateIsValid = await authorizedKeysSecurityStateIsValid(conn, {
+    authorizedKeysPath,
+    primaryGroup,
+    sshDirectoryPath,
+    user,
+  })
+
+  return finalizeAuthorizedKeysCheck(state, keyExists, securityStateIsValid) === "ok"
+}
+
+async function rewriteAuthorizedKeysWhenNeeded(
+  conn: SshConnection,
+  parameters: {
+    authorizedKeysPath: string
+    key: string
+    primaryGroup: string
+    sshDirectoryPath: string
+    state: "absent" | "present"
+    user: string
+  }
+): Promise<ModuleResult> {
+  const applyIsConverged = await authorizedKeysApplyIsConverged(conn, parameters)
+  if (applyIsConverged) return { status: "ok" }
+
+  const rewriteFailure = await rewriteAuthorizedKeys(conn, parameters)
+  if (rewriteFailure) return rewriteFailure
+
+  return { status: "changed" }
+}
+
 export async function applyAuthorizedKeys(
   conn: null | SshConnection,
   parameters: {
@@ -329,7 +380,7 @@ export async function applyAuthorizedKeys(
   })
   if (symlinkFailure) return symlinkFailure
 
-  const rewriteFailure = await rewriteAuthorizedKeys(conn, {
+  return rewriteAuthorizedKeysWhenNeeded(conn, {
     authorizedKeysPath,
     key,
     primaryGroup,
@@ -337,9 +388,6 @@ export async function applyAuthorizedKeys(
     state,
     user,
   })
-  if (rewriteFailure) return rewriteFailure
-
-  return { status: "changed" }
 }
 
 function checkMissingAuthorizedKeysUser(
