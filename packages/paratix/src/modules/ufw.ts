@@ -4,8 +4,11 @@ import { shellQuote } from "../ssh.js"
 import { type Module, type ModuleResult, NEEDS_APPLY, type SshConnection } from "../types.js"
 import { detectPackageManager, isPackageInstalled } from "./package.js"
 import {
+  classifyUfwStatusTcpAccess,
   hasProtocolAgnosticIpv6Rule,
   hasProtocolAgnosticRule,
+  hasTcpIpv6Rule,
+  hasTcpRule,
   readUfwStatus,
   statusIncludesIpv6Rules,
 } from "./ufwStatus.js"
@@ -22,9 +25,36 @@ function hasProtocolAgnosticDenyRule(status: string, port: number): boolean {
 
 function currentSshPortNeedsAllowRule(status: string, port: number): boolean {
   const ipv6Rules = statusIncludesIpv6Rules(status)
-  if (hasProtocolAgnosticDenyRule(status, port)) return true
+  if (classifyUfwStatusTcpAccess(status, port) === "blocked") return true
   if (!hasProtocolAgnosticRule(status, port, "ALLOW")) return true
   return ipv6Rules && !hasProtocolAgnosticIpv6Rule(status, port, "ALLOW")
+}
+
+async function deleteDenyRulesForCurrentSshPort(
+  ssh: SshConnection,
+  status: string,
+  port: number
+): Promise<ModuleResult | null> {
+  const ipv6Rules = statusIncludesIpv6Rules(status)
+  const denyRulePorts: string[] = []
+  if (hasProtocolAgnosticDenyRule(status, port)) denyRulePorts.push(String(port))
+  if (hasTcpRule(status, port, "DENY") || (ipv6Rules && hasTcpIpv6Rule(status, port, "DENY"))) {
+    denyRulePorts.push(`${String(port)}/tcp`)
+  }
+  for (const rulePort of denyRulePorts) {
+    // eslint-disable-next-line no-await-in-loop -- keep ufw mutations sequential to avoid firewall lock races
+    const result = await ssh.exec(`${UFW} delete ${shellQuote("deny")} ${shellQuote(rulePort)}`, {
+      ignoreExitCode: true,
+      silent: true,
+    })
+    if (result.code !== 0) {
+      return failedCommand(
+        `[ufw.enabled] ufw delete deny failed for current SSH port ${String(port)}`,
+        result
+      )
+    }
+  }
+  return null
 }
 
 async function allowCurrentSshPort(ssh: SshConnection): Promise<ModuleResult | null> {
@@ -33,20 +63,9 @@ async function allowCurrentSshPort(ssh: SshConnection): Promise<ModuleResult | n
     return failed(`[ufw.enabled] current SSH port is invalid: ${String(port)}`)
   }
   const status = await readUfwStatus(ssh)
-  if (status != null && hasProtocolAgnosticDenyRule(status, port)) {
-    const deleteResult = await ssh.exec(
-      `${UFW} delete ${shellQuote("deny")} ${shellQuote(String(port))}`,
-      {
-        ignoreExitCode: true,
-        silent: true,
-      }
-    )
-    if (deleteResult.code !== 0) {
-      return failedCommand(
-        `[ufw.enabled] ufw delete deny failed for current SSH port ${String(port)}`,
-        deleteResult
-      )
-    }
+  if (status != null) {
+    const deleteFailure = await deleteDenyRulesForCurrentSshPort(ssh, status, port)
+    if (deleteFailure !== null) return deleteFailure
   }
   const result = await ssh.exec(`${UFW} allow ${shellQuote(String(port))}`, {
     ignoreExitCode: true,

@@ -31,6 +31,24 @@ const UFW_STATUS_ACTIVE_PORT_2222_ALLOW_AND_DENY = [
   "2222                       ALLOW       Anywhere",
   "2222                       DENY        Anywhere",
 ].join("\n")
+const UFW_STATUS_ACTIVE_PORT_2222_TCP_ALLOWED = [
+  "Status: active",
+  "",
+  "To                         Action      From",
+  "--                         ------      ----",
+  "22                         ALLOW       Anywhere",
+  "2222/tcp                   ALLOW       Anywhere",
+].join("\n")
+const UFW_STATUS_ACTIVE_PORT_2222_TCP_ALLOW_AND_DENY = [
+  "Status: active",
+  "",
+  "To                         Action      From",
+  "--                         ------      ----",
+  "22                         ALLOW       Anywhere",
+  "2222                       ALLOW       Anywhere",
+  "2222/tcp                   ALLOW       Anywhere",
+  "2222/tcp                   DENY        Anywhere",
+].join("\n")
 const UFW_STATUS_ACTIVE_PORT_2222_IPV4_ONLY = [
   "Status: active",
   "",
@@ -50,6 +68,16 @@ const UFW_STATUS_ACTIVE_PORT_2222_BOTH_FAMILIES = [
   "2222                       ALLOW       Anywhere",
   "2222 (v6)                  ALLOW       Anywhere (v6)",
 ].join("\n")
+const UFW_STATUS_ACTIVE_PORT_2222_TCP_BOTH_FAMILIES = [
+  "Status: active",
+  "",
+  "To                         Action      From",
+  "--                         ------      ----",
+  "22                         ALLOW       Anywhere",
+  "22 (v6)                    ALLOW       Anywhere (v6)",
+  "2222/tcp                   ALLOW       Anywhere",
+  "2222/tcp (v6)              ALLOW       Anywhere (v6)",
+].join("\n")
 const UFW_STATUS_ACTIVE_PORT_2222_ALLOW_AND_IPV6_DENY = [
   "Status: active",
   "",
@@ -60,6 +88,17 @@ const UFW_STATUS_ACTIVE_PORT_2222_ALLOW_AND_IPV6_DENY = [
   "2222                       ALLOW       Anywhere",
   "2222 (v6)                  ALLOW       Anywhere (v6)",
   "2222 (v6)                  DENY        Anywhere (v6)",
+].join("\n")
+const UFW_STATUS_ACTIVE_PORT_2222_ALLOW_AND_IPV6_TCP_DENY = [
+  "Status: active",
+  "",
+  "To                         Action      From",
+  "--                         ------      ----",
+  "22                         ALLOW       Anywhere",
+  "22 (v6)                    ALLOW       Anywhere (v6)",
+  "2222                       ALLOW       Anywhere",
+  "2222 (v6)                  ALLOW       Anywhere (v6)",
+  "2222/tcp (v6)              DENY        Anywhere (v6)",
 ].join("\n")
 
 const createMockSsh: typeof createBaseMockSsh = (responses, options) => {
@@ -183,10 +222,46 @@ describe("sshd.port — apply: ufw lockout guard", () => {
     expect(execCommands).not.toContain("systemctl restart sshd")
   })
 
+  it("fails-closed when ufw has TCP allow and TCP deny rules for the target port", async () => {
+    const ssh = createMockSsh({
+      [CAT_SSHD]: { stdout: "Port 22\n" },
+      "ufw status": { stdout: UFW_STATUS_ACTIVE_PORT_2222_TCP_ALLOW_AND_DENY },
+    })
+    const writtenFiles = trackWriteFile(ssh)
+    const execSpy = vi.spyOn(ssh, "exec")
+
+    const mod = sshd.port(2222)
+    const result = await mod.apply(ssh, emptyEnv)
+
+    expect(result.status).toBe("failed")
+    expect(result.error?.message).toContain("ufw is active")
+    expect(writtenFiles).toHaveLength(0)
+    const execCommands = execSpy.mock.calls.map((args) => args[0])
+    expect(execCommands).not.toContain("systemctl restart sshd")
+  })
+
   it("fails-closed when ufw has an IPv6 deny rule alongside target port allows", async () => {
     const ssh = createMockSsh({
       [CAT_SSHD]: { stdout: "Port 22\n" },
       "ufw status": { stdout: UFW_STATUS_ACTIVE_PORT_2222_ALLOW_AND_IPV6_DENY },
+    })
+    const writtenFiles = trackWriteFile(ssh)
+    const execSpy = vi.spyOn(ssh, "exec")
+
+    const mod = sshd.port(2222)
+    const result = await mod.apply(ssh, emptyEnv)
+
+    expect(result.status).toBe("failed")
+    expect(result.error?.message).toContain("ufw is active")
+    expect(writtenFiles).toHaveLength(0)
+    const execCommands = execSpy.mock.calls.map((args) => args[0])
+    expect(execCommands).not.toContain("systemctl restart sshd")
+  })
+
+  it("fails-closed when ufw has an IPv6 TCP deny rule alongside target port allows", async () => {
+    const ssh = createMockSsh({
+      [CAT_SSHD]: { stdout: "Port 22\n" },
+      "ufw status": { stdout: UFW_STATUS_ACTIVE_PORT_2222_ALLOW_AND_IPV6_TCP_DENY },
     })
     const writtenFiles = trackWriteFile(ssh)
     const execSpy = vi.spyOn(ssh, "exec")
@@ -217,10 +292,42 @@ describe("sshd.port — apply: ufw lockout guard", () => {
     expect(execCommands).toContain("systemctl restart sshd")
   })
 
+  it("proceeds when ufw is active and the target port is allowed for TCP", async () => {
+    const ssh = createMockSsh({
+      [CAT_SSHD]: { stdout: "Port 22\n" },
+      "ufw status": { stdout: UFW_STATUS_ACTIVE_PORT_2222_TCP_ALLOWED },
+    })
+    trackWriteFile(ssh)
+    const execSpy = spyExecSuccessAcceptingSsProbe(ssh)
+
+    const mod = sshd.port(2222)
+    const result = await mod.apply(ssh, emptyEnv)
+
+    expect(result.status).toBe("changed")
+    const execCommands = execSpy.mock.calls.map((args) => args[0])
+    expect(execCommands).toContain("systemctl restart sshd")
+  })
+
   it("proceeds when ufw is active and the target port is allowed for both IPv4 and IPv6", async () => {
     const ssh = createMockSsh({
       [CAT_SSHD]: { stdout: "Port 22\n" },
       "ufw status": { stdout: UFW_STATUS_ACTIVE_PORT_2222_BOTH_FAMILIES },
+    })
+    trackWriteFile(ssh)
+    const execSpy = spyExecSuccessAcceptingSsProbe(ssh)
+
+    const mod = sshd.port(2222)
+    const result = await mod.apply(ssh, emptyEnv)
+
+    expect(result.status).toBe("changed")
+    const execCommands = execSpy.mock.calls.map((args) => args[0])
+    expect(execCommands).toContain("systemctl restart sshd")
+  })
+
+  it("proceeds when ufw is active and the target port is allowed for TCP on both address families", async () => {
+    const ssh = createMockSsh({
+      [CAT_SSHD]: { stdout: "Port 22\n" },
+      "ufw status": { stdout: UFW_STATUS_ACTIVE_PORT_2222_TCP_BOTH_FAMILIES },
     })
     trackWriteFile(ssh)
     const execSpy = spyExecSuccessAcceptingSsProbe(ssh)

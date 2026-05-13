@@ -175,6 +175,24 @@ describe("ufw.enabled", () => {
     expect(result).toBe("needs-apply")
   })
 
+  it("check returns needs-apply when the current SSH port has a TCP deny rule", async () => {
+    const ssh = createMockSsh({
+      "ufw status": {
+        stdout: [
+          "Status: active",
+          "",
+          "To                         Action      From",
+          "--                         ------      ----",
+          "22                         ALLOW       Anywhere",
+          "22/tcp                     DENY        Anywhere",
+        ].join("\n"),
+      },
+    })
+    const mod = ufw.enabled()
+    const result = await mod.check(ssh, emptyEnv)
+    expect(result).toBe("needs-apply")
+  })
+
   it("check returns needs-apply when the current SSH port has both allow and deny rules", async () => {
     const ssh = createMockSsh({
       "ufw status": {
@@ -204,6 +222,25 @@ describe("ufw.enabled", () => {
           "22                         ALLOW       Anywhere",
           "22 (v6)                    ALLOW       Anywhere (v6)",
           "22 (v6)                    DENY        Anywhere (v6)",
+        ].join("\n"),
+      },
+    })
+    const mod = ufw.enabled()
+    const result = await mod.check(ssh, emptyEnv)
+    expect(result).toBe("needs-apply")
+  })
+
+  it("check returns needs-apply when IPv6 has a TCP deny rule for the current SSH port", async () => {
+    const ssh = createMockSsh({
+      "ufw status": {
+        stdout: [
+          "Status: active",
+          "",
+          "To                         Action      From",
+          "--                         ------      ----",
+          "22                         ALLOW       Anywhere",
+          "22 (v6)                    ALLOW       Anywhere (v6)",
+          "22/tcp (v6)                DENY        Anywhere (v6)",
         ].join("\n"),
       },
     })
@@ -330,6 +367,33 @@ describe("ufw.enabled", () => {
     ])
   })
 
+  it("apply deletes a TCP deny rule for the current SSH port before enabling", async () => {
+    const ssh = createMockSsh({
+      "ufw --force enable": { code: 0 },
+      "ufw allow '22'": { code: 0 },
+      "ufw delete 'deny' '22/tcp'": { code: 0 },
+      "ufw status": {
+        stdout: [
+          "Status: active",
+          "",
+          "To                         Action      From",
+          "--                         ------      ----",
+          "22                         ALLOW       Anywhere",
+          "22/tcp                     DENY        Anywhere",
+        ].join("\n"),
+      },
+    })
+    const mod = ufw.enabled()
+    const result = await mod.apply(ssh, emptyEnv)
+    expect(result.status).toBe("changed")
+    expect(ssh.calls).toStrictEqual([
+      "ufw status",
+      "ufw delete 'deny' '22/tcp'",
+      "ufw allow '22'",
+      "ufw --force enable",
+    ])
+  })
+
   it("apply deletes an IPv6 deny rule for the current SSH port before enabling", async () => {
     const ssh = createMockSsh({
       "ufw --force enable": { code: 0 },
@@ -353,6 +417,34 @@ describe("ufw.enabled", () => {
     expect(ssh.calls).toStrictEqual([
       "ufw status",
       "ufw delete 'deny' '22'",
+      "ufw allow '22'",
+      "ufw --force enable",
+    ])
+  })
+
+  it("apply deletes an IPv6 TCP deny rule for the current SSH port before enabling", async () => {
+    const ssh = createMockSsh({
+      "ufw --force enable": { code: 0 },
+      "ufw allow '22'": { code: 0 },
+      "ufw delete 'deny' '22/tcp'": { code: 0 },
+      "ufw status": {
+        stdout: [
+          "Status: active",
+          "",
+          "To                         Action      From",
+          "--                         ------      ----",
+          "22                         ALLOW       Anywhere",
+          "22 (v6)                    ALLOW       Anywhere (v6)",
+          "22/tcp (v6)                DENY        Anywhere (v6)",
+        ].join("\n"),
+      },
+    })
+    const mod = ufw.enabled()
+    const result = await mod.apply(ssh, emptyEnv)
+    expect(result.status).toBe("changed")
+    expect(ssh.calls).toStrictEqual([
+      "ufw status",
+      "ufw delete 'deny' '22/tcp'",
       "ufw allow '22'",
       "ufw --force enable",
     ])

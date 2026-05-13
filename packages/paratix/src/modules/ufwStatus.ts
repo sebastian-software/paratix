@@ -40,6 +40,32 @@ export function hasProtocolAgnosticIpv6Rule(
 }
 
 /**
+ * Match the TCP-specific form `<port>/tcp ACTION`.
+ *
+ * @param status - The captured `ufw status` output.
+ * @param port - The port number to look for at the start of a rule line.
+ * @param action - The expected ufw action keyword.
+ * @returns `true` when a matching TCP-specific line is present.
+ */
+export function hasTcpRule(status: string, port: number, action: "ALLOW" | "DENY"): boolean {
+  // eslint-disable-next-line security/detect-non-literal-regexp
+  return new RegExp(`^${port}/tcp\\s+${action}\\b`, "mv").test(status)
+}
+
+/**
+ * Match the IPv6 TCP-specific form `<port>/tcp (v6) ACTION`.
+ *
+ * @param status - The captured `ufw status` output.
+ * @param port - The port number to look for at the start of a rule line.
+ * @param action - The expected ufw action keyword.
+ * @returns `true` when a matching IPv6 TCP-specific line is present.
+ */
+export function hasTcpIpv6Rule(status: string, port: number, action: "ALLOW" | "DENY"): boolean {
+  // eslint-disable-next-line security/detect-non-literal-regexp
+  return new RegExp(`^${port}/tcp\\s+\\(v6\\)\\s+${action}\\b`, "mv").test(status)
+}
+
+/**
  * @param status - The captured `ufw status` output.
  * @returns `true` when the output reports any IPv6 rules.
  */
@@ -76,15 +102,59 @@ export async function readUfwStatus(ssh: SshConnection): Promise<null | string> 
   }
 }
 
+type UfwAccess = "allowed" | "blocked" | "inactive"
+
+function hasTcpRelevantDenyRule(status: string, targetPort: number): boolean {
+  const ipv6Rules = statusIncludesIpv6Rules(status)
+  return (
+    hasProtocolAgnosticRule(status, targetPort, "DENY") ||
+    hasTcpRule(status, targetPort, "DENY") ||
+    (ipv6Rules &&
+      (hasProtocolAgnosticIpv6Rule(status, targetPort, "DENY") ||
+        hasTcpIpv6Rule(status, targetPort, "DENY")))
+  )
+}
+
+function hasTcpRelevantAllowRule(status: string, targetPort: number): boolean {
+  return (
+    hasProtocolAgnosticRule(status, targetPort, "ALLOW") || hasTcpRule(status, targetPort, "ALLOW")
+  )
+}
+
+function hasTcpRelevantIpv6AllowRule(status: string, targetPort: number): boolean {
+  return (
+    hasProtocolAgnosticIpv6Rule(status, targetPort, "ALLOW") ||
+    hasTcpIpv6Rule(status, targetPort, "ALLOW")
+  )
+}
+
+/**
+ * Classify whether a captured UFW status allows SSH/TCP traffic to
+ * `targetPort`. TCP-specific entries count for reachability; explicit DENY
+ * entries win over ALLOW entries.
+ *
+ * @param status - The captured `ufw status` output.
+ * @param targetPort - The SSH/TCP port whose reachability should be classified.
+ * @returns The current access classification for `targetPort`.
+ */
+export function classifyUfwStatusTcpAccess(status: string, targetPort: number): UfwAccess {
+  if (!statusReportsActive(status)) return "inactive"
+  if (hasTcpRelevantDenyRule(status, targetPort)) return "blocked"
+  if (!hasTcpRelevantAllowRule(status, targetPort)) return "blocked"
+  if (statusIncludesIpv6Rules(status) && !hasTcpRelevantIpv6AllowRule(status, targetPort)) {
+    return "blocked"
+  }
+  return "allowed"
+}
+
 /**
  * Decide whether the live UFW configuration would let traffic reach
  * `targetPort`. Returns:
  * - `"inactive"` when ufw is not installed or not currently enabled.
- * - `"allowed"` when ufw is active and a protocol-agnostic ALLOW rule for
- *   `targetPort` is present (including the IPv6 variant when IPv6 rules are
- *   reported).
+ * - `"allowed"` when ufw is active and an ALLOW rule reaches `targetPort`
+ *   over TCP (including the IPv6 variant when IPv6 rules are reported).
  * - `"blocked"` when ufw is active but no such ALLOW rule exists, or when a
- *   contradictory DENY rule for `targetPort` is present.
+ *   TCP-relevant DENY rule for `targetPort` is present.
  *
  * @param ssh - The remote SSH connection.
  * @param targetPort - The port whose reachability should be classified.
@@ -96,17 +166,5 @@ export async function classifyUfwAccess(
 ): Promise<"allowed" | "blocked" | "inactive"> {
   const status = await readUfwStatus(ssh)
   if (status == null) return "inactive"
-  if (!statusReportsActive(status)) return "inactive"
-  if (hasProtocolAgnosticRule(status, targetPort, "DENY")) return "blocked"
-  if (statusIncludesIpv6Rules(status) && hasProtocolAgnosticIpv6Rule(status, targetPort, "DENY")) {
-    return "blocked"
-  }
-  if (!hasProtocolAgnosticRule(status, targetPort, "ALLOW")) return "blocked"
-  if (
-    statusIncludesIpv6Rules(status) &&
-    !hasProtocolAgnosticIpv6Rule(status, targetPort, "ALLOW")
-  ) {
-    return "blocked"
-  }
-  return "allowed"
+  return classifyUfwStatusTcpAccess(status, targetPort)
 }
