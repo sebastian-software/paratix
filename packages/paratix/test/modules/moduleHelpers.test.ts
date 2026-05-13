@@ -1,5 +1,7 @@
 import { describe, expect, it } from "vitest"
 
+import type { ExecOptions, ExecResult } from "../../src/types.js"
+
 import {
   applyWithFlagLock,
   FLAGS_DIRECTORY,
@@ -13,6 +15,21 @@ import { isFlagLockInternalSuccessCommand } from "../helpers/mockSshFlagLock.js"
 
 const createMockSsh: typeof createBaseMockSsh = (responses, options) =>
   createBaseMockSsh(responses, options)
+
+function expectLockExecOptions(options: ExecOptions | undefined): void {
+  expect(options).toStrictEqual({ ignoreExitCode: true, silent: true })
+}
+
+function nonZeroLockExecResult(command: string, options: ExecOptions | undefined): ExecResult {
+  const result = { code: 1, stderr: "", stdout: "" }
+  if (options?.ignoreExitCode !== true) {
+    throw new Error(
+      `Command failed with exit code ${String(result.code)}: ${command}\nstdout: ${result.stdout}\nstderr: ${result.stderr}`
+    )
+  }
+  expectLockExecOptions(options)
+  return result
+}
 
 function deferred(): { promise: Promise<void>; resolve: () => void } {
   let resolvePromise: (() => void) | undefined
@@ -56,11 +73,13 @@ function createSharedFlagMockSsh(flagName: string): ReturnType<typeof createMock
       base.calls.push(command)
       base.execCalls.push({ command, options })
       if (command === lockMkdirCommand) {
-        if (lockExists) return { code: 1, stderr: "", stdout: "" }
+        if (lockExists) return nonZeroLockExecResult(command, options)
+        expectLockExecOptions(options)
         lockExists = true
         return { code: 0, stderr: "", stdout: "" }
       }
       if (command === lockRmdirCommand) {
+        expectLockExecOptions(options)
         lockExists = false
         resolveWaiters()
         return { code: 0, stderr: "", stdout: "" }
@@ -76,6 +95,7 @@ function createSharedFlagMockSsh(flagName: string): ReturnType<typeof createMock
             waiters.push(resolve)
           })
         }
+        expectLockExecOptions(options)
         return { code: 0, stderr: "", stdout: "" }
       }
       if (isFlagLockInternalSuccessCommand(command)) return { code: 0, stderr: "", stdout: "" }
@@ -325,41 +345,44 @@ function createStaleLockSsh(
     staleReclaimCalls: 0,
   }
 
-  function handleStaleReclaim(): { code: number; stderr: string; stdout: string } {
+  function handleStaleReclaim(command: string, options: ExecOptions | undefined): ExecResult {
     state.staleReclaimCalls += 1
-    if (reclaim === "fresh") return { code: 1, stderr: "", stdout: "" }
+    if (reclaim === "fresh") return nonZeroLockExecResult(command, options)
+    expectLockExecOptions(options)
     state.lockExists = false
     return { code: 0, stderr: "", stdout: "" }
   }
 
-  function handleLockMkdir(): { code: number; stderr: string; stdout: string } {
-    if (state.lockExists) return { code: 1, stderr: "", stdout: "" }
+  function handleLockMkdir(command: string, options: ExecOptions | undefined): ExecResult {
+    if (state.lockExists) return nonZeroLockExecResult(command, options)
+    expectLockExecOptions(options)
     state.lockExists = true
     return { code: 0, stderr: "", stdout: "" }
   }
 
-  function handleCommand(command: string): { code: number; stderr: string; stdout: string } {
+  function handleCommand(command: string, options: ExecOptions | undefined): ExecResult {
     const kind = classifyLockCommand(command, flagName)
     switch (kind) {
       case LOCK_COMMAND_KIND.flagTest: {
         return { code: state.flagExists ? 0 : 1, stderr: "", stdout: "" }
       }
       case LOCK_COMMAND_KIND.lockMkdir: {
-        return handleLockMkdir()
+        return handleLockMkdir(command, options)
       }
       case LOCK_COMMAND_KIND.lockRmdir: {
+        expectLockExecOptions(options)
         state.lockExists = false
         return { code: 0, stderr: "", stdout: "" }
       }
       case LOCK_COMMAND_KIND.lockWait: {
-        return { code: 1, stderr: "", stdout: "" }
+        return nonZeroLockExecResult(command, options)
       }
       case LOCK_COMMAND_KIND.other: {
         if (isFlagLockInternalSuccessCommand(command)) return { code: 0, stderr: "", stdout: "" }
         throw new Error(`unexpected stale flag lock command: ${command}`)
       }
       case LOCK_COMMAND_KIND.staleReclaim: {
-        return handleStaleReclaim()
+        return handleStaleReclaim(command, options)
       }
       case LOCK_COMMAND_KIND.touchFlag: {
         state.flagExists = true
@@ -374,7 +397,7 @@ function createStaleLockSsh(
       base.calls.push(command)
       base.execCalls.push({ command, options })
       await Promise.resolve()
-      return handleCommand(command)
+      return handleCommand(command, options)
     },
     async test(command) {
       await Promise.resolve()
@@ -578,11 +601,13 @@ function createSharedMutexMockSsh(lockName: string): ReturnType<typeof createMoc
       base.calls.push(command)
       base.execCalls.push({ command, options })
       if (command === lockMkdirCommand) {
-        if (lockExists) return { code: 1, stderr: "", stdout: "" }
+        if (lockExists) return nonZeroLockExecResult(command, options)
+        expectLockExecOptions(options)
         lockExists = true
         return { code: 0, stderr: "", stdout: "" }
       }
       if (command === lockRmdirCommand) {
+        expectLockExecOptions(options)
         lockExists = false
         resolveWaiters()
         return { code: 0, stderr: "", stdout: "" }
@@ -593,6 +618,7 @@ function createSharedMutexMockSsh(lockName: string): ReturnType<typeof createMoc
             waiters.push(resolve)
           })
         }
+        expectLockExecOptions(options)
         return { code: 0, stderr: "", stdout: "" }
       }
       if (isFlagLockInternalSuccessCommand(command)) return { code: 0, stderr: "", stdout: "" }
