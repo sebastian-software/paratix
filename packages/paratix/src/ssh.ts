@@ -167,6 +167,15 @@ function truncateRawOutputErrorSnippet(text: string): string {
   return text
 }
 
+function toError(error: unknown): Error {
+  return error instanceof Error ? error : new Error(String(error))
+}
+
+function closeClientChannel(channel: ClientChannel | null): void {
+  if (channel == null) return
+  channel.close()
+}
+
 function hasReconnectDeadlineExpired(reconnectDeadline?: number): boolean {
   return reconnectDeadline != null && reconnectDeadline <= Date.now()
 }
@@ -1187,32 +1196,38 @@ export class SshConnectionImpl implements SshConnection {
           )
         )
       }, timeout)
-      client.exec(cmd, (error: Error | undefined, stream: ClientChannel) => {
-        if (error) {
-          clearTimeout(timer)
-          wrappedReject(error)
-          return
-        }
-        // If the timer already fired (or the promise was otherwise settled) before
-        // ssh2 invoked this callback, we must not attach listeners that can never
-        // resolve the already-rejected promise. Close the stream immediately so
-        // ssh2 releases the channel and discards any buffered data.
-        if (isSettled()) {
-          stream.close()
-          return
-        }
-        activeStream = stream
-        collectStreamOutput({
-          command,
-          options,
-          reject: wrappedReject,
-          resolve: wrappedResolve,
-          secrets,
-          stream,
-          timer,
+      try {
+        client.exec(cmd, (error: Error | undefined, stream: ClientChannel) => {
+          if (error) {
+            clearTimeout(timer)
+            wrappedReject(error)
+            return
+          }
+          // If the timer already fired (or the promise was otherwise settled) before
+          // ssh2 invoked this callback, we must not attach listeners that can never
+          // resolve the already-rejected promise. Close the stream immediately so
+          // ssh2 releases the channel and discards any buffered data.
+          if (isSettled()) {
+            stream.close()
+            return
+          }
+          activeStream = stream
+          collectStreamOutput({
+            command,
+            options,
+            reject: wrappedReject,
+            resolve: wrappedResolve,
+            secrets,
+            stream,
+            timer,
+          })
+          this.writeStreamInput(stream, needsPassword, options.input)
         })
-        this.writeStreamInput(stream, needsPassword, options.input)
-      })
+      } catch (error) {
+        clearTimeout(timer)
+        closeClientChannel(activeStream)
+        wrappedReject(toError(error))
+      }
     })
   }
 
@@ -1235,78 +1250,84 @@ export class SshConnectionImpl implements SshConnection {
         activeStream?.close()
         wrappedReject(new Error(`Command timed out after ${COMMAND_TIMEOUT}ms: ${command}`))
       }, COMMAND_TIMEOUT)
-      client.exec(command, (error: Error | undefined, stream: ClientChannel) => {
-        if (error) {
-          clearTimeout(timer)
-          wrappedReject(error)
-          return
-        }
-        // If the timer already fired (or the promise was otherwise settled) before
-        // ssh2 invoked this callback, we must not attach listeners that can never
-        // resolve the already-rejected promise. Close the stream immediately so
-        // ssh2 releases the channel and discards any buffered data.
-        if (isSettled()) {
-          stream.close()
-          return
-        }
-        activeStream = stream
-        const chunks: Buffer[] = []
-        let stdoutBytes = 0
-        stream.on("data", (chunk: Buffer) => {
-          if (stdoutBytes > DEFAULT_MAX_OUTPUT_BYTES) return
-          stdoutBytes += chunk.length
-          if (stdoutBytes > DEFAULT_MAX_OUTPUT_BYTES) {
-            const remainingBytes = Math.max(
-              0,
-              DEFAULT_MAX_OUTPUT_BYTES - (stdoutBytes - chunk.length)
-            )
-            if (remainingBytes > 0) {
-              chunks.push(chunk.subarray(0, remainingBytes))
-            }
-            const capturedStdout = Buffer.concat(chunks).toString("utf8")
-            const secrets = prepareSecrets(this.buildSecrets())
-            activeStream?.close()
-            wrappedReject(
-              new Error(
-                `Command stdout exceeded ${DEFAULT_MAX_OUTPUT_BYTES} bytes: ${maskPreparedSecrets(
-                  command,
-                  secrets
-                )}\nstdout: ${truncateRawOutputErrorSnippet(
-                  maskPreparedSecrets(capturedStdout, secrets)
-                )}`
+      try {
+        client.exec(command, (error: Error | undefined, stream: ClientChannel) => {
+          if (error) {
+            clearTimeout(timer)
+            wrappedReject(error)
+            return
+          }
+          // If the timer already fired (or the promise was otherwise settled) before
+          // ssh2 invoked this callback, we must not attach listeners that can never
+          // resolve the already-rejected promise. Close the stream immediately so
+          // ssh2 releases the channel and discards any buffered data.
+          if (isSettled()) {
+            stream.close()
+            return
+          }
+          activeStream = stream
+          const chunks: Buffer[] = []
+          let stdoutBytes = 0
+          stream.on("data", (chunk: Buffer) => {
+            if (stdoutBytes > DEFAULT_MAX_OUTPUT_BYTES) return
+            stdoutBytes += chunk.length
+            if (stdoutBytes > DEFAULT_MAX_OUTPUT_BYTES) {
+              const remainingBytes = Math.max(
+                0,
+                DEFAULT_MAX_OUTPUT_BYTES - (stdoutBytes - chunk.length)
               )
-            )
-            return
-          }
-          chunks.push(chunk)
-        })
-        stream.on("close", (code: null | number | undefined, signal?: null | string) => {
-          clearTimeout(timer)
-          if (signal != null && signal !== "") {
-            wrappedReject(new Error(`Command failed with signal ${signal}: ${command}`))
-            return
-          }
-          wrappedResolve({
-            exitCode: normalizeSshCloseCode(code),
-            stdout: Buffer.concat(chunks).toString("utf8"),
+              if (remainingBytes > 0) {
+                chunks.push(chunk.subarray(0, remainingBytes))
+              }
+              const capturedStdout = Buffer.concat(chunks).toString("utf8")
+              const secrets = prepareSecrets(this.buildSecrets())
+              activeStream?.close()
+              wrappedReject(
+                new Error(
+                  `Command stdout exceeded ${DEFAULT_MAX_OUTPUT_BYTES} bytes: ${maskPreparedSecrets(
+                    command,
+                    secrets
+                  )}\nstdout: ${truncateRawOutputErrorSnippet(
+                    maskPreparedSecrets(capturedStdout, secrets)
+                  )}`
+                )
+              )
+              return
+            }
+            chunks.push(chunk)
+          })
+          stream.on("close", (code: null | number | undefined, signal?: null | string) => {
+            clearTimeout(timer)
+            if (signal != null && signal !== "") {
+              wrappedReject(new Error(`Command failed with signal ${signal}: ${command}`))
+              return
+            }
+            wrappedResolve({
+              exitCode: normalizeSshCloseCode(code),
+              stdout: Buffer.concat(chunks).toString("utf8"),
+            })
+          })
+          // R-0000089: attach error listeners on both the stream and its stderr
+          // channel. ssh2 emits `error` (e.g. EPIPE during the sudo probe path)
+          // synchronously and an unhandled `error` on a ClientChannel crashes
+          // the process. Pattern mirrors `collectStreamOutput` in sshHelpers.ts.
+          stream.on("error", (error: Error) => {
+            clearTimeout(timer)
+            wrappedReject(error)
+          })
+          stream.stderr.on("data", () => {
+            // discard stderr
+          })
+          stream.stderr.on("error", (error: Error) => {
+            clearTimeout(timer)
+            wrappedReject(error)
           })
         })
-        // R-0000089: attach error listeners on both the stream and its stderr
-        // channel. ssh2 emits `error` (e.g. EPIPE during the sudo probe path)
-        // synchronously and an unhandled `error` on a ClientChannel crashes
-        // the process. Pattern mirrors `collectStreamOutput` in sshHelpers.ts.
-        stream.on("error", (error: Error) => {
-          clearTimeout(timer)
-          wrappedReject(error)
-        })
-        stream.stderr.on("data", () => {
-          // discard stderr
-        })
-        stream.stderr.on("error", (error: Error) => {
-          clearTimeout(timer)
-          wrappedReject(error)
-        })
-      })
+      } catch (error) {
+        clearTimeout(timer)
+        closeClientChannel(activeStream)
+        wrappedReject(toError(error))
+      }
     })
   }
 

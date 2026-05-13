@@ -2041,6 +2041,24 @@ describe("SshConnectionImpl", () => {
       await expect(ssh.exec("whoami")).rejects.toThrow("SSH channel open failed")
     })
 
+    it("cleans up timeout and pending reject when client.exec throws synchronously", async () => {
+      vi.useFakeTimers()
+
+      const execSpy = vi.fn().mockImplementation(() => {
+        throw new Error("ssh2 exec failed before callback")
+      })
+      const client = makeClientWithExecSpy(execSpy)
+      const ssh = makeConnectedSsh(client)
+      const pendingRejects = (ssh as unknown as Record<string, unknown>).pendingRejects as Set<
+        (reason: Error) => void
+      >
+
+      await expect(ssh.exec("whoami")).rejects.toThrow("ssh2 exec failed before callback")
+
+      expect(pendingRejects.size).toBe(0)
+      expect(vi.getTimerCount()).toBe(0)
+    })
+
     it("registers the close handler exactly once even on error+close double-fire (R-0000143 regression)", async () => {
       // Regression: ssh2 emits both `error` and `close` for one disconnect
       // (e.g. error escalation followed by close). The close handler used to
@@ -4091,6 +4109,24 @@ describe("SshConnectionImpl", () => {
       expect(lateStream.close).toHaveBeenCalledOnce()
       expect(dataListenerSpy).not.toHaveBeenCalled()
       expect(stderrListenerSpy).not.toHaveBeenCalled()
+    })
+
+    it("cleans up timeout and pending reject when execRaw client.exec throws synchronously", async () => {
+      vi.useFakeTimers()
+
+      const execSpy = vi.fn().mockImplementation(() => {
+        throw new Error("ssh2 exec failed before callback")
+      })
+      const client = makeClientWithExecSpy(execSpy)
+      const ssh = makeConnectedSsh(client, { sudoPassword: null, user: "deploy" })
+      const pendingRejects = (ssh as unknown as Record<string, unknown>).pendingRejects as Set<
+        (reason: Error) => void
+      >
+
+      await expect(ssh.probeSudo()).rejects.toThrow("ssh2 exec failed before callback")
+
+      expect(pendingRejects.size).toBe(0)
+      expect(vi.getTimerCount()).toBe(0)
     })
 
     it("rejects immediately when disconnectTransport() is called while execRaw is pending — R-005 regression", async () => {
