@@ -15,10 +15,27 @@ type KnownHostsOptions = {
   state?: "absent" | "present"
 }
 
+type AuthorizedKeysState = "absent" | "present"
+
+type AuthorizedKeysOptions = {
+  state?: AuthorizedKeysState
+}
+
 const SSH_KEYSCAN_MIN_FIELDS = 3
 const DEFAULT_SSH_PORT = 22
 const ASCII_SPACE_CODE_POINT = 0x20
 const ASCII_DELETE_CODE_POINT = 0x7f
+
+function assertAuthorizedKeysState(state: unknown): asserts state is AuthorizedKeysState {
+  if (state === "absent" || state === "present") return
+  throw new Error('ssh.authorizedKeys state must be "present" or "absent"')
+}
+
+function resolveAuthorizedKeysState(options?: AuthorizedKeysOptions): AuthorizedKeysState {
+  const state = options?.state ?? "present"
+  assertAuthorizedKeysState(state)
+  return state
+}
 
 function normalizePublicKey(publicKey: string): string {
   const parts = publicKey.trim().split(/\s+/v)
@@ -514,10 +531,10 @@ export const ssh = {
    * @param options.state - Whether the key should be `"present"` or `"absent"`. Defaults to `"present"`.
    * @returns A Module that manages the authorized key entry.
    */
-  authorizedKeys(user: string, key: string, options?: { state?: "absent" | "present" }): Module {
+  authorizedKeys(user: string, key: string, options?: AuthorizedKeysOptions): Module {
     assertValidUserName(user)
     assertAuthorizedKeyValue(key)
-    const state = options?.state ?? "present"
+    const state = resolveAuthorizedKeysState(options)
 
     return {
       async apply(conn: null | SshConnection): Promise<ModuleResult> {

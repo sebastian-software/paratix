@@ -214,6 +214,26 @@ describe("ssh.authorizedKeys", () => {
     }).toThrow("unsupported public key algorithm")
   })
 
+  it.each(["present", "absent"] as const)("accepts state at construction time: %s", (state) => {
+    expect(() => ssh.authorizedKeys("alice", testKey, { state })).not.toThrow()
+  })
+
+  it("rejects unknown string states at construction time", () => {
+    expect(() => {
+      ssh.authorizedKeys("alice", testKey, {
+        state: "remove",
+      } as unknown as { state: "absent" | "present" })
+    }).toThrow('ssh.authorizedKeys state must be "present" or "absent"')
+  })
+
+  it("rejects non-string states at construction time", () => {
+    expect(() => {
+      ssh.authorizedKeys("alice", testKey, {
+        state: false,
+      } as unknown as { state: "absent" | "present" })
+    }).toThrow('ssh.authorizedKeys state must be "present" or "absent"')
+  })
+
   it("check returns ok when key exists in authorized_keys (state: present)", async () => {
     const mockSsh = createMockSsh(
       aliceResponses({
