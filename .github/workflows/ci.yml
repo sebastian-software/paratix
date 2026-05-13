@@ -14,6 +14,8 @@ jobs:
     steps:
       # actions/checkout@v6
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+        with:
+          persist-credentials: false
       # pnpm/action-setup@v6
       - uses: pnpm/action-setup@5d6f3fe6c685be83c141aea1141d8a825903c82a
       # actions/setup-node@v6
