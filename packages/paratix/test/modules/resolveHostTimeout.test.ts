@@ -1,3 +1,4 @@
+import { spawn } from "node:child_process"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 
 import type { ModuleMetaEntry, ModuleResult } from "../../src/types.js"
@@ -28,6 +29,37 @@ async function resolveNeverSettling(): Promise<string> {
 async function resolveTo99(): Promise<string> {
   await Promise.resolve()
   return "10.0.0.99"
+}
+
+async function runNodeScript(script: string): Promise<{
+  exitCode: null | number
+  stderr: string
+  stdout: string
+}> {
+  return new Promise((resolve, reject) => {
+    const child = spawn(
+      process.execPath,
+      ["--import", "tsx", "--input-type=module", "-e", script],
+      {
+        cwd: new URL("../..", import.meta.url),
+        stdio: ["ignore", "pipe", "pipe"],
+      }
+    )
+    let stdout = ""
+    let stderr = ""
+    child.stdout.setEncoding("utf8")
+    child.stderr.setEncoding("utf8")
+    child.stdout.on("data", (chunk: string) => {
+      stdout += chunk
+    })
+    child.stderr.on("data", (chunk: string) => {
+      stderr += chunk
+    })
+    child.on("error", reject)
+    child.on("close", (exitCode) => {
+      resolve({ exitCode, stderr, stdout })
+    })
+  })
 }
 
 function expectMetaEntries(
@@ -70,6 +102,25 @@ describe("resolveHostWithTimeout — timeout", () => {
     await vi.advanceTimersByTimeAsync(50)
     const captured = await asserted
     expect(String(captured)).toMatch(/timed out after 50ms/v)
+  })
+
+  it("keeps a real Node process alive until a hanging resolver times out", async () => {
+    const moduleUrl = new URL("../../src/modules/resolveHostTimeout.ts", import.meta.url).href
+    const result = await runNodeScript(`
+      const { resolveHostWithTimeout } = await import(${JSON.stringify(moduleUrl)})
+      try {
+        await resolveHostWithTimeout(() => new Promise(() => {}), 50)
+        console.error("resolveHostWithTimeout resolved unexpectedly")
+        process.exitCode = 2
+      } catch (error) {
+        console.log(error instanceof Error ? error.message : String(error))
+      }
+    `)
+    expect(result).toStrictEqual({
+      exitCode: 0,
+      stderr: "",
+      stdout: "resolveHost timed out after 50ms\n",
+    })
   })
 })
 

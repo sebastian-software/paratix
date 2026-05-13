@@ -37,8 +37,6 @@ export async function resolveHostWithTimeout(
     const timer = setTimeout(() => {
       reject(new Error(`resolveHost timed out after ${String(timeoutMs)}ms`))
     }, timeoutMs)
-    // Do not keep the event loop alive solely for the timeout.
-    timer.unref()
     resolveHost().then(
       (value) => {
         clearTimeout(timer)
