@@ -40,6 +40,12 @@ const DEBIAN_STABLE_RELEASE_CURL = "Origin: Debian\nCodename: trixie\nSuite: sta
 const FIND_SOURCES_EMPTY = { code: 0, stdout: "" }
 
 type WriteCapture = { content: string; path: string }
+type WriteStep = (path: string, content: string) => Promise<void>
+
+async function rejectSourcesRestoreWrite(): Promise<void> {
+  await Promise.resolve()
+  throw new Error("permission denied")
+}
 
 // Helper: build responses for Ubuntu check/apply
 function ubuntuResponses(
@@ -989,6 +995,52 @@ describe("releaseUpgrade.upgrade — apply (Debian)", () => {
       // captured 0640 mode rather than overwriting it with the 0644 default.
       expect(sourcesWrites.at(-1)?.content).toBe(originalSources)
       expect(sourcesWrites.at(-1)?.mode).toBe("0640")
+    })
+
+    it("reports restore failures while still attempting the remaining sources rollbacks", async () => {
+      const extraPath = "/etc/apt/sources.list.d/extra.list"
+      const originalExtraSources = "deb http://example.com/repo bookworm contrib"
+      const writes: WriteCapture[] = []
+      const ssh = createMockSsh(
+        debianApplyResponses("bookworm", "trixie", {
+          [`cat '${extraPath}'`]: { code: 0, stdout: originalExtraSources },
+          "DEBIAN_FRONTEND=noninteractive apt-get update": {
+            code: 1,
+            stderr: "E: target suite unavailable",
+          },
+          "find /etc/apt/sources.list.d/ \\( -name '*.list' -o -name '*.sources' \\) -type f -print0":
+            {
+              code: 0,
+              stdout: `${extraPath}\0`,
+            },
+        })
+      )
+      const captureWrite: WriteStep = async (path, content) => {
+        writes.push({ content, path })
+        await Promise.resolve()
+      }
+      const writeSteps: WriteStep[] = [
+        captureWrite,
+        captureWrite,
+        rejectSourcesRestoreWrite,
+        captureWrite,
+      ]
+      let writeIndex = 0
+      const replacement: WriteStep = async (path, content) => {
+        const writeStep = writeSteps[writeIndex]
+        writeIndex += 1
+        await writeStep(path, content)
+      }
+      Object.assign(ssh, { writeFile: replacement })
+
+      const mod = releaseUpgrade.upgrade()
+      const result = await mod.apply(ssh, emptyEnv)
+
+      expect(result.status).toBe("failed")
+      expect(result.error?.message).toContain("apt-get update failed")
+      expect(result.error?.message).toContain("sources rollback failed for 1 file(s)")
+      expect(result.error?.message).toContain("/etc/apt/sources.list: permission denied")
+      expect(writes).toContainEqual({ content: originalExtraSources, path: extraPath })
     })
   })
 })

@@ -1,3 +1,4 @@
+/* eslint-disable max-lines -- releaseUpgrade keeps distro-specific upgrade flow in one module. */
 import { failed, failedCommand } from "../moduleFailure.js"
 import { shellQuote } from "../ssh.js"
 import {
@@ -125,6 +126,11 @@ const APT_SOURCES_LIST = "/etc/apt/sources.list"
 type SourcesSnapshot = {
   mode: string
   originalContent: string
+  remotePath: string
+}
+
+type RestoreSourcesFailure = {
+  error: unknown
   remotePath: string
 }
 
@@ -259,11 +265,13 @@ async function replaceCodenameInSourcesList(
  *
  * @param ssh - Active SSH connection to the remote host.
  * @param snapshots - The snapshots to restore, in any order.
+ * @returns Restore failures collected while attempting all snapshots.
  */
 async function restoreSourcesSnapshots(
   ssh: SshConnection,
   snapshots: SourcesSnapshot[]
-): Promise<void> {
+): Promise<RestoreSourcesFailure[]> {
+  const failures: RestoreSourcesFailure[] = []
   for (const snapshot of snapshots) {
     try {
       // Intentional: unguarded write — restoring the original sources is
@@ -277,12 +285,33 @@ async function restoreSourcesSnapshots(
       await ssh.writeFile(snapshot.remotePath, snapshot.originalContent, {
         mode: snapshot.mode,
       })
-    } catch {
+    } catch (error) {
       // Best-effort: if a single file cannot be restored, keep going so the
-      // remaining snapshots still revert. The original failure is what the
-      // caller surfaces — this rollback only widens the recovery window.
+      // remaining snapshots still revert. The caller appends these failures
+      // to the original apt error so incomplete rollbacks remain visible.
+      failures.push({ error, remotePath: snapshot.remotePath })
     }
   }
+  return failures
+}
+
+function formatRestoreSourcesFailure(failure: RestoreSourcesFailure): string {
+  const reason = failure.error instanceof Error ? failure.error.message : String(failure.error)
+  return `${failure.remotePath}: ${reason}`
+}
+
+function appendRestoreSourcesFailures(
+  pipelineFailure: ModuleResult,
+  restoreFailures: RestoreSourcesFailure[]
+): ModuleResult {
+  if (restoreFailures.length === 0) return pipelineFailure
+  const pipelineMessage = pipelineFailure.error?.message ?? "[releaseUpgrade.upgrade] failed"
+  const restoreMessage = restoreFailures
+    .map((failure) => formatRestoreSourcesFailure(failure))
+    .join("; ")
+  return failed(
+    `${pipelineMessage}\nsources rollback failed for ${String(restoreFailures.length)} file(s): ${restoreMessage}`
+  )
 }
 
 /**
@@ -471,8 +500,8 @@ async function applyDebian(
 
   const pipelineFailure = await runDebianUpgradePipeline(ssh, options)
   if (pipelineFailure != null) {
-    await restoreSourcesSnapshots(ssh, snapshots)
-    return pipelineFailure
+    const restoreFailures = await restoreSourcesSnapshots(ssh, snapshots)
+    return appendRestoreSourcesFailures(pipelineFailure, restoreFailures)
   }
 
   const entries = await buildRebootMeta(options)
