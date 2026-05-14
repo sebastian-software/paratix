@@ -1240,6 +1240,7 @@ describe("mount.absent — apply", () => {
   it("runs umount when mounted", async () => {
     const mockSsh = createMountApplyMockSsh({
       "cat '/etc/fstab'": { stdout: "# /etc/fstab\n" },
+      [findmntCheckCmd]: { code: 0, stdout: liveMountStdout },
       [findmntTestCmd]: { code: 0 },
       [umountCmd]: { code: 0 },
     })
@@ -1285,6 +1286,7 @@ describe("mount.absent — apply", () => {
 
   it("returns failed when umount fails", async () => {
     const mockSsh = createMountApplyMockSsh({
+      [findmntCheckCmd]: { code: 0, stdout: liveMountStdout },
       [findmntTestCmd]: { code: 0 },
       [umountCmd]: { code: 1, stderr: "umount failed" },
     })
@@ -1323,6 +1325,45 @@ describe("mount.absent — apply", () => {
     expectFstabFailure(result)
     expect(result.error?.message).toContain("[mount.absent: /mnt/data]")
     expect(result.error?.message).toContain("read-only filesystem")
+  })
+
+  it("restores the live mount when removing the fstab entry fails after umount", async () => {
+    const mockSsh = createMountApplyMockSsh({
+      "cat '/etc/fstab'": { stdout: `${fstabLine}\n` },
+      [findmntCheckCmd]: { code: 0, stdout: liveMountStdout },
+      [findmntTestCmd]: { code: 0 },
+      [flagsDirectoryCreateCmd]: { code: 1, stderr: "read-only filesystem" },
+      [mountCmd]: { code: 0 },
+      [umountCmd]: { code: 0 },
+    })
+    const mod = mount.absent({ path: mountPath })
+
+    const result = await mod.apply(mockSsh, emptyEnv)
+
+    expectFstabFailure(result)
+    expect(mockSsh.calls).toContain(umountCmd)
+    expect(mockSsh.calls).toContain(mountCmd)
+    expect(mockSsh.calls.indexOf(umountCmd)).toBeLessThan(mockSsh.calls.indexOf(mountCmd))
+  })
+
+  it("reports rollback failure when restoring the live mount fails after fstab failure", async () => {
+    const mockSsh = createMountApplyMockSsh({
+      "cat '/etc/fstab'": { stdout: `${fstabLine}\n` },
+      [findmntCheckCmd]: { code: 0, stdout: liveMountStdout },
+      [findmntTestCmd]: { code: 0 },
+      [flagsDirectoryCreateCmd]: { code: 1, stderr: "read-only filesystem" },
+      [mountCmd]: { code: 32, stderr: "restore failed" },
+      [umountCmd]: { code: 0 },
+    })
+    const mod = mount.absent({ path: mountPath })
+
+    const result = await mod.apply(mockSsh, emptyEnv)
+
+    expectFstabFailure(result)
+    expect(result.error?.message).toContain(
+      "[mount.absent: /mnt/data] failed to restore live mount after fstab update failure"
+    )
+    expect(result.error?.message).toContain("restore failed")
   })
 
   it("returns failed instead of rejecting when guarded fstab write detects a concurrent change", async () => {
@@ -1368,6 +1409,7 @@ describe("mount.absent — apply", () => {
   it("returns changed when umount was needed", async () => {
     const mockSsh = createMountApplyMockSsh({
       "cat '/etc/fstab'": { stdout: "# /etc/fstab\n" },
+      [findmntCheckCmd]: { code: 0, stdout: liveMountStdout },
       [findmntTestCmd]: { code: 0 },
       [umountCmd]: { code: 0 },
     })

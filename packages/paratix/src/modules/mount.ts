@@ -294,6 +294,11 @@ type EnsureLiveMountResult = {
   previousLive: LiveMount | null
 }
 
+type UnmountIfNeededResult = {
+  changed: boolean
+  previousLive: LiveMount | null
+}
+
 function buildMountCommand(parameters: {
   fstype: string
   opts: string
@@ -346,6 +351,28 @@ async function rollbackLiveMountAfterFstabFailure(
       )
 }
 
+async function restoreLiveMountAfterFstabFailure(
+  ssh: SshConnection,
+  path: string,
+  previousLive: LiveMount
+): Promise<ModuleResult | null> {
+  const restoreResult = await ssh.exec(
+    buildMountCommand({
+      fstype: previousLive.fstype,
+      opts: previousLive.options,
+      path,
+      src: previousLive.source,
+    }),
+    EXEC_OPTS
+  )
+  return restoreResult.code === 0
+    ? null
+    : failedCommand(
+        `[${MOUNT_ABSENT}: ${path}] failed to restore live mount after fstab update failure`,
+        restoreResult
+      )
+}
+
 async function ensurePersistedMountAfterLiveChange(
   ssh: SshConnection,
   parameters: {
@@ -363,6 +390,21 @@ async function ensurePersistedMountAfterLiveChange(
     parameters.path,
     parameters.liveResult.previousLive
   )
+  return appendLiveRollbackFailure(fstabResult, rollbackFailure)
+}
+
+async function removePersistedMountAfterLiveChange(
+  ssh: SshConnection,
+  path: string,
+  unmountResult: UnmountIfNeededResult
+): Promise<boolean | ModuleResult> {
+  const fstabResult = await removePersistedMountIfPresent(ssh, path)
+  if (typeof fstabResult === "boolean") return fstabResult
+
+  const rollbackFailure =
+    unmountResult.changed && unmountResult.previousLive != null
+      ? await restoreLiveMountAfterFstabFailure(ssh, path, unmountResult.previousLive)
+      : null
   return appendLiveRollbackFailure(fstabResult, rollbackFailure)
 }
 
@@ -401,15 +443,27 @@ async function ensureLiveMount(
   return { changed: true, previousLive: live }
 }
 
-async function unmountIfNeeded(ssh: SshConnection, path: string): Promise<boolean | ModuleResult> {
+async function unmountIfNeeded(
+  ssh: SshConnection,
+  path: string,
+  snapshotLiveMount: boolean
+): Promise<ModuleResult | UnmountIfNeededResult> {
   const isMounted = await ssh.test(`findmnt --noheadings ${shellQuote(path)}`)
-  if (!isMounted) return false
+  if (!isMounted) return { changed: false, previousLive: null }
+
+  let previousLive: LiveMount | null = null
+  if (snapshotLiveMount) {
+    previousLive = await readLiveMount(ssh, path)
+    if (previousLive == null) {
+      return failed(`[${MOUNT_ABSENT}: ${path}] failed to snapshot live mount before unmount`)
+    }
+  }
 
   const umountResult = await ssh.exec(`umount ${shellQuote(path)}`, EXEC_OPTS)
   if (umountResult.code !== 0) {
     return failedCommand(`[mount.absent: ${path}] umount failed`, umountResult)
   }
-  return true
+  return { changed: true, previousLive }
 }
 
 /**
@@ -466,6 +520,16 @@ async function ensureFstabEntry(
 // has enough fields to populate every LiveMount property.
 const LIVE_MOUNT_FIELD_COUNT = 3
 
+function parseLiveMount(stdout: string): LiveMount | null {
+  const fields = stdout.trim().split(/\s+/v)
+  if (fields.length < LIVE_MOUNT_FIELD_COUNT) return null
+  return {
+    fstype: fields[1] ?? "",
+    options: fields[2] ?? "",
+    source: fields[0] ?? "",
+  }
+}
+
 async function readLiveMount(ssh: SshConnection, path: string): Promise<LiveMount | null> {
   const findmntResult = await ssh.exec(
     `findmnt --noheadings --output SOURCE,FSTYPE,OPTIONS ${shellQuote(path)}`,
@@ -474,13 +538,7 @@ async function readLiveMount(ssh: SshConnection, path: string): Promise<LiveMoun
   if (findmntResult.code !== 0) return null
 
   // findmnt prints SOURCE FSTYPE OPTIONS separated by whitespace.
-  const fields = findmntResult.stdout.trim().split(/\s+/v)
-  if (fields.length < LIVE_MOUNT_FIELD_COUNT) return null
-  return {
-    fstype: fields[1] ?? "",
-    options: fields[2] ?? "",
-    source: fields[0] ?? "",
-  }
+  return parseLiveMount(findmntResult.stdout)
 }
 
 /**
@@ -537,12 +595,12 @@ export const mount = {
         const realpathFailure = await ensureMountPathRealpathMatches(ssh, MOUNT_ABSENT, path)
         if (realpathFailure != null) return realpathFailure
 
-        const unmountResult = await unmountIfNeeded(ssh, path)
-        if (typeof unmountResult !== "boolean") return unmountResult
-        let changed = unmountResult
+        const unmountResult = await unmountIfNeeded(ssh, path, persist)
+        if ("status" in unmountResult) return unmountResult
+        let changed = unmountResult.changed
 
         if (persist) {
-          const fstabResult = await removePersistedMountIfPresent(ssh, path)
+          const fstabResult = await removePersistedMountAfterLiveChange(ssh, path, unmountResult)
           if (typeof fstabResult !== "boolean") return fstabResult
           changed ||= fstabResult
         }
