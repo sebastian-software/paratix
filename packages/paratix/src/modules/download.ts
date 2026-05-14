@@ -1013,10 +1013,12 @@ export const download = {
    * @param options - Optional settings for ownership, permissions, and headers.
    * @param options.allowInsecureHttp - Allow unencrypted `http://` downloads explicitly.
    * @param options.allowInsecureHttpHeaders - Allow sending sensitive headers over unencrypted `http://` explicitly.
+   * @param options.connectTimeout - Maximum time to establish the curl connection, in milliseconds.
    * @param options.group - Group owner to set on the downloaded file via `chown`.
    * @param options.mode - File mode to set via `chmod` (e.g. `"0755"`).
    * @param options.owner - User owner to set on the downloaded file via `chown`.
    * @param options.sha256 - Expected SHA-256 hex digest for integrity verification.
+   * @param options.timeout - Maximum time for the full curl transfer, in milliseconds.
    * @param options.allowUnverifiedDownload - Explicitly opt out of integrity verification.
    * @param options.headers - Additional HTTP headers sent with the curl request.
    * @returns A Module that manages the large file download.
@@ -1031,6 +1033,8 @@ export const download = {
       allowInsecureHttpHeaders?: boolean
       /** Explicitly opt out of integrity verification for trusted sources. */
       allowUnverifiedDownload?: boolean
+      /** Maximum time to establish the curl connection, in milliseconds. */
+      connectTimeout?: number
       /** Group owner to set on the downloaded file via `chown`. */
       group?: string
       /** Additional HTTP headers sent with the curl request. */
@@ -1041,6 +1045,8 @@ export const download = {
       owner?: string
       /** Expected SHA-256 hex digest for integrity verification. */
       sha256?: string
+      /** Maximum time for the full curl transfer, in milliseconds. */
+      timeout?: number
     }
   ): Module {
     const resolvedOptions = options ?? {}

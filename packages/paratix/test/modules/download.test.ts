@@ -2062,6 +2062,29 @@ describe("download.large", () => {
       )
     })
 
+    it("passes custom curl timeout flags and SSH exec timeout", async () => {
+      const curlCommand = `curl -fsSL -o '${temporaryDestination}' --connect-timeout '2.5' --max-time '15' --proto '=https' --proto-redir '=https' --config -`
+      const mockSsh = createMockSsh(
+        {
+          [`mktemp "$(dirname '${destination}')/.paratix-download.XXXXXX"`]: {
+            stdout: `${temporaryDestination}\n`,
+          },
+        },
+        {
+          responseStubs: [{ command: curlCommand, result: { code: 0 } }],
+        }
+      )
+      const mod = download.large(destination, url, {
+        ...allowUnverifiedDownload,
+        connectTimeout: 2500,
+        timeout: 15_000,
+      })
+      const result = await mod.apply(mockSsh, emptyEnv)
+      const curlCall = mockSsh.execCalls.find((entry) => entry.command === curlCommand)
+      expect(result.status).toBe("changed")
+      expect(curlCall?.options?.timeout).toBe(15_000)
+    })
+
     it("returns failedCommand and aborts before mktemp or flag writes when target directory creation fails", async () => {
       const mkdirCommand = `mkdir -p "$(dirname '${destination}')"`
       const mockSsh = createMockSsh({
