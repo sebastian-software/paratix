@@ -4,7 +4,13 @@ import { basename } from "node:path"
 
 import { failed, failedCommand } from "../moduleFailure.js"
 import { shellQuote, validateMktempPath } from "../ssh.js"
-import { type Module, type ModuleResult, NEEDS_APPLY, type SshConnection } from "../types.js"
+import {
+  type ExecResult,
+  type Module,
+  type ModuleResult,
+  NEEDS_APPLY,
+  type SshConnection,
+} from "../types.js"
 import { isRegularFileWithoutSymlink, isSymlink } from "./remoteFileChecks.js"
 
 const EXEC_OPTS = { ignoreExitCode: true, silent: true } as const
@@ -12,6 +18,22 @@ const UNIT_NAME_PATTERN = /^[\w@.\-]+$/v
 const COMPOSE_CONFIG_MODE = "0600"
 const COMPOSE_CONFIG_STAGING_PREFIX = ".compose.yml.paratix-staging"
 const SYSTEMD_UNIT_MODE = "0644"
+
+type ComposeSystemdMaskSnapshot = "masked" | "unmasked"
+
+type ComposeSystemdUnitFileSnapshot =
+  | {
+      content: string
+      exists: true
+      mode: string
+      owner: string
+    }
+  | { exists: false }
+
+type ComposeSystemdTargetSnapshot = {
+  mask: ComposeSystemdMaskSnapshot
+  unitFile: ComposeSystemdUnitFileSnapshot
+}
 
 type ComposeRuntime = "docker" | "podman"
 
@@ -61,6 +83,10 @@ function validateComposeUpServices(services: string[] | undefined): void {
       throw new Error(`compose.up service names must not start with "-", got ${service}`)
     }
   }
+}
+
+function formatCaughtError(error: unknown): string {
+  return error instanceof Error ? error.message : String(error)
 }
 
 /**
@@ -316,9 +342,21 @@ async function applyComposeSystemdUnit(parameters: {
   filePath: string
   unitFileName: string
 }): Promise<ModuleResult> {
-  await prepareComposeSystemdTarget(parameters)
+  const snapshot = await snapshotComposeSystemdTarget(parameters)
+  if ("status" in snapshot) return snapshot
+
+  const prepareFailure = await prepareComposeSystemdTarget(parameters)
+  if (prepareFailure != null) return prepareFailure
+
   const writeFailure = await writeComposeSystemdUnitFile(parameters)
-  if (writeFailure != null) return writeFailure
+  if (writeFailure != null) {
+    return rollbackComposeSystemdTargetAfterFailure({
+      ...parameters,
+      needsDaemonReload: false,
+      originalFailure: writeFailure,
+      snapshot,
+    })
+  }
 
   // R-0000164: writeFile sets the file mode but not its owner/group, so an
   // owner drift introduced by a previous manual `chown` would persist. The
@@ -330,16 +368,31 @@ async function applyComposeSystemdUnit(parameters: {
     EXEC_OPTS
   )
   if (ownerResult.code !== 0) {
-    return failedCommand(
+    const ownerFailure = failedCommand(
       `[compose.systemd] failed to set owner root:root on ${parameters.unitFileName}`,
       ownerResult
     )
+    return rollbackComposeSystemdTargetAfterFailure({
+      ...parameters,
+      needsDaemonReload: false,
+      originalFailure: ownerFailure,
+      snapshot,
+    })
   }
 
   const result = await parameters.connection.exec("systemctl daemon-reload", EXEC_OPTS)
-  return result.code === 0
-    ? { status: "changed" }
-    : failedCommand(`[compose.systemd] daemon-reload failed for ${parameters.unitFileName}`, result)
+  if (result.code === 0) return { status: "changed" }
+
+  const reloadFailure = failedCommand(
+    `[compose.systemd] daemon-reload failed for ${parameters.unitFileName}`,
+    result
+  )
+  return rollbackComposeSystemdTargetAfterFailure({
+    ...parameters,
+    needsDaemonReload: true,
+    originalFailure: reloadFailure,
+    snapshot,
+  })
 }
 
 async function checkComposeSystemdUnit(parameters: {
@@ -407,14 +460,183 @@ function resolveComposeSystemdIdentity(options: { name?: string; projectDirector
   }
 }
 
+async function snapshotComposeSystemdMaskState(parameters: {
+  connection: SshConnection
+  unitFileName: string
+}): Promise<ComposeSystemdMaskSnapshot> {
+  const result = await parameters.connection.exec(
+    `systemctl is-enabled -- ${shellQuote(parameters.unitFileName)}`,
+    EXEC_OPTS
+  )
+  return result.stdout.trim().includes("masked") ? "masked" : "unmasked"
+}
+
+async function snapshotComposeSystemdUnitFile(parameters: {
+  connection: SshConnection
+  filePath: string
+  unitFileName: string
+}): Promise<ComposeSystemdUnitFileSnapshot | ModuleResult> {
+  if (!(await parameters.connection.exists(parameters.filePath))) return { exists: false }
+  if (await isSymlink(parameters.connection, parameters.filePath)) return { exists: false }
+
+  const content = await parameters.connection.readFile(parameters.filePath)
+  const modeResult = await parameters.connection.exec(
+    `stat -c '%a' ${shellQuote(parameters.filePath)}`,
+    EXEC_OPTS
+  )
+  if (modeResult.code !== 0) {
+    return failedCommand(
+      `[compose.systemd] failed to snapshot mode for ${parameters.unitFileName}`,
+      modeResult
+    )
+  }
+
+  const ownerResult = await parameters.connection.exec(
+    `stat -c '%U:%G' ${shellQuote(parameters.filePath)}`,
+    EXEC_OPTS
+  )
+  if (ownerResult.code !== 0) {
+    return failedCommand(
+      `[compose.systemd] failed to snapshot owner for ${parameters.unitFileName}`,
+      ownerResult
+    )
+  }
+
+  return {
+    content,
+    exists: true,
+    mode: modeResult.stdout.trim(),
+    owner: ownerResult.stdout.trim(),
+  }
+}
+
+async function snapshotComposeSystemdTarget(parameters: {
+  connection: SshConnection
+  filePath: string
+  unitFileName: string
+}): Promise<ComposeSystemdTargetSnapshot | ModuleResult> {
+  const unitFile = await snapshotComposeSystemdUnitFile(parameters)
+  if ("status" in unitFile) return unitFile
+  const mask = await snapshotComposeSystemdMaskState(parameters)
+  return { mask, unitFile }
+}
+
 async function prepareComposeSystemdTarget(parameters: {
   connection: SshConnection
   unitFileName: string
+}): Promise<ModuleResult | null> {
+  const result = await parameters.connection.exec(
+    `systemctl unmask -- ${shellQuote(parameters.unitFileName)}`,
+    EXEC_OPTS
+  )
+  return result.code === 0
+    ? null
+    : failedCommand(
+        `[compose.systemd] systemctl unmask failed for ${parameters.unitFileName}`,
+        result
+      )
+}
+
+async function restoreComposeSystemdUnitFileSnapshot(parameters: {
+  connection: SshConnection
+  filePath: string
+  snapshot: ComposeSystemdUnitFileSnapshot
+}): Promise<boolean> {
+  if (parameters.snapshot.exists) {
+    await parameters.connection.writeFile(parameters.filePath, parameters.snapshot.content, {
+      mode: parameters.snapshot.mode,
+    })
+    const ownerResult = await parameters.connection.exec(
+      `chown ${shellQuote(parameters.snapshot.owner)} ${shellQuote(parameters.filePath)}`,
+      EXEC_OPTS
+    )
+    if (ownerResult.code !== 0) {
+      throw new Error(
+        failedCommand(`[compose.systemd] rollback chown failed`, ownerResult).error?.message ??
+          "rollback chown failed"
+      )
+    }
+    return true
+  }
+
+  const removeResult = await parameters.connection.exec(
+    `rm -f ${shellQuote(parameters.filePath)}`,
+    EXEC_OPTS
+  )
+  if (removeResult.code !== 0) {
+    throw new Error(
+      failedCommand(`[compose.systemd] rollback remove failed`, removeResult).error?.message ??
+        "rollback remove failed"
+    )
+  }
+  return true
+}
+
+async function restoreComposeSystemdMaskSnapshot(parameters: {
+  connection: SshConnection
+  snapshot: ComposeSystemdMaskSnapshot
+  unitFileName: string
 }): Promise<void> {
-  await parameters.connection.exec(`systemctl unmask -- ${shellQuote(parameters.unitFileName)}`, {
-    ignoreExitCode: true,
-    silent: true,
-  })
+  if (parameters.snapshot !== "masked") return
+
+  const result = await parameters.connection.exec(
+    `systemctl mask -- ${shellQuote(parameters.unitFileName)}`,
+    EXEC_OPTS
+  )
+  if (result.code !== 0) {
+    throw new Error(
+      failedCommand(`[compose.systemd] rollback systemctl mask failed`, result).error?.message ??
+        "rollback systemctl mask failed"
+    )
+  }
+}
+
+function failedWithComposeSystemdRollbackFailure(
+  originalFailure: ModuleResult,
+  rollbackError: unknown
+): ModuleResult {
+  return failed(
+    `${originalFailure.error?.message ?? "[compose.systemd] failed"}\nrollback failed: ${formatCaughtError(rollbackError)}`
+  )
+}
+
+async function rollbackComposeSystemdTargetAfterFailure(parameters: {
+  connection: SshConnection
+  filePath: string
+  needsDaemonReload: boolean
+  originalFailure: ModuleResult
+  snapshot: ComposeSystemdTargetSnapshot
+  unitFileName: string
+}): Promise<ModuleResult> {
+  try {
+    const restoredUnitFile = await restoreComposeSystemdUnitFileSnapshot({
+      connection: parameters.connection,
+      filePath: parameters.filePath,
+      snapshot: parameters.snapshot.unitFile,
+    })
+    await restoreComposeSystemdMaskSnapshot({
+      connection: parameters.connection,
+      snapshot: parameters.snapshot.mask,
+      unitFileName: parameters.unitFileName,
+    })
+
+    if (parameters.needsDaemonReload || restoredUnitFile) {
+      const reloadResult: ExecResult = await parameters.connection.exec(
+        "systemctl daemon-reload",
+        EXEC_OPTS
+      )
+      if (reloadResult.code !== 0) {
+        throw new Error(
+          failedCommand(`[compose.systemd] rollback daemon-reload failed`, reloadResult).error
+            ?.message ?? "rollback daemon-reload failed"
+        )
+      }
+    }
+  } catch (rollbackError) {
+    return failedWithComposeSystemdRollbackFailure(parameters.originalFailure, rollbackError)
+  }
+
+  return parameters.originalFailure
 }
 
 /**

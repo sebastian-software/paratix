@@ -1133,9 +1133,14 @@ function composeSystemdRecoveryResponses(
   filePath = unitFilePath
 ): Record<string, { code: number; stdout?: string }> {
   return {
+    [`[ -e '${filePath}' ]`]: { code: 0 },
     [`[ -L '${filePath}' ]`]: { code: 1 },
+    [`cat '${filePath}'`]: { code: 0, stdout: "[Unit]\nDescription=previous\n" },
     [`chown 'root:root' '${filePath}'`]: { code: 0 },
     [`rm -f '${filePath}'`]: { code: 0 },
+    [`stat -c '%a' '${filePath}'`]: { code: 0, stdout: "644" },
+    [`stat -c '%U:%G' '${filePath}'`]: { code: 0, stdout: "root:root" },
+    [`systemctl is-enabled -- '${serviceName}.service'`]: { code: 0, stdout: "masked\n" },
     [`systemctl unmask -- '${serviceName}.service'`]: { code: 0 },
   }
 }
@@ -1341,6 +1346,117 @@ describe("compose.systemd — apply", () => {
     expect(mockSsh.calls).not.toContain("systemctl daemon-reload")
   })
 
+  it("returns failed when unmasking the unit fails", async () => {
+    const expectedUnit = expectedPodmanUnit(projectDirectory, defaultServiceName)
+    const mockSsh = createComposeMockSsh({
+      ...composeSystemdRecoveryResponses(),
+      [`cat '${unitFilePath}'`]: {
+        code: 0,
+        stdout: expectedUnit,
+      },
+      [`systemctl unmask -- '${defaultServiceName}.service'`]: {
+        code: 1,
+        stderr: "failed to unmask",
+      },
+      "systemctl daemon-reload": { code: 0 },
+    })
+
+    const mod = compose.systemd({ projectDirectory })
+    const result = await mod.apply(mockSsh, emptyEnv)
+
+    expect(result.status).toBe("failed")
+    expect(String(result.error)).toContain("systemctl unmask failed")
+    expect(mockSsh.calls).not.toContain("systemctl daemon-reload")
+  })
+
+  it("restores the previous masked state when writing the unit fails after unmask", async () => {
+    const mockSsh = createComposeMockSsh({
+      ...composeSystemdRecoveryResponses(),
+      [`systemctl mask -- '${defaultServiceName}.service'`]: { code: 0 },
+    })
+    vi.spyOn(mockSsh, "writeFile")
+      .mockRejectedValueOnce(new Error("disk full"))
+      .mockResolvedValueOnce(undefined)
+
+    const mod = compose.systemd({ projectDirectory })
+    const result = await mod.apply(mockSsh, emptyEnv)
+
+    expect(result.status).toBe("failed")
+    expect(mockSsh.calls).toContain(`systemctl mask -- '${defaultServiceName}.service'`)
+    expect(mockSsh.calls.filter((call) => call === "systemctl daemon-reload")).toHaveLength(1)
+  })
+
+  it("restores the previous unit file and mask state when chown fails", async () => {
+    const previousUnit = "[Unit]\nDescription=previous\n"
+    const expectedUnit = expectedPodmanUnit(projectDirectory, defaultServiceName)
+    const writtenFiles: Array<{ content: string; mode?: string; path: string }> = []
+    const mockSsh = createComposeMockSsh({
+      ...composeSystemdRecoveryResponses(),
+      [`chown 'root:root' '${unitFilePath}'`]: {
+        code: 1,
+        stderr: "chown failed",
+      },
+      [`chown 'svc:svc' '${unitFilePath}'`]: { code: 0 },
+      [`stat -c '%a' '${unitFilePath}'`]: { code: 0, stdout: "600" },
+      [`stat -c '%U:%G' '${unitFilePath}'`]: { code: 0, stdout: "svc:svc" },
+      [`systemctl mask -- '${defaultServiceName}.service'`]: { code: 0 },
+    })
+    vi.spyOn(mockSsh, "readFile")
+      .mockResolvedValueOnce(previousUnit)
+      .mockResolvedValue(expectedUnit)
+    vi.spyOn(mockSsh, "writeFile").mockImplementation(async (path, content, options) => {
+      writtenFiles.push({ content, mode: options.mode, path })
+      await Promise.resolve()
+    })
+
+    const mod = compose.systemd({ projectDirectory })
+    const result = await mod.apply(mockSsh, emptyEnv)
+
+    expect(result.status).toBe("failed")
+    expect(writtenFiles).toContainEqual({
+      content: previousUnit,
+      mode: "600",
+      path: unitFilePath,
+    })
+    expect(mockSsh.calls).toContain(`chown 'svc:svc' '${unitFilePath}'`)
+    expect(mockSsh.calls).toContain(`systemctl mask -- '${defaultServiceName}.service'`)
+    expect(mockSsh.calls.filter((call) => call === "systemctl daemon-reload")).toHaveLength(1)
+  })
+
+  it("restores the previous unit file and mask state when daemon-reload fails", async () => {
+    const previousUnit = "[Unit]\nDescription=previous\n"
+    const expectedUnit = expectedPodmanUnit(projectDirectory, defaultServiceName)
+    const writtenFiles: Array<{ content: string; mode?: string; path: string }> = []
+    const mockSsh = createComposeMockSsh({
+      ...composeSystemdRecoveryResponses(),
+      [`chown 'svc:svc' '${unitFilePath}'`]: { code: 0 },
+      [`stat -c '%a' '${unitFilePath}'`]: { code: 0, stdout: "600" },
+      [`stat -c '%U:%G' '${unitFilePath}'`]: { code: 0, stdout: "svc:svc" },
+      [`systemctl mask -- '${defaultServiceName}.service'`]: { code: 0 },
+      "systemctl daemon-reload": { code: 1, stderr: "reload failed" },
+    })
+    vi.spyOn(mockSsh, "readFile")
+      .mockResolvedValueOnce(previousUnit)
+      .mockResolvedValue(expectedUnit)
+    vi.spyOn(mockSsh, "writeFile").mockImplementation(async (path, content, options) => {
+      writtenFiles.push({ content, mode: options.mode, path })
+      await Promise.resolve()
+    })
+
+    const mod = compose.systemd({ projectDirectory })
+    const result = await mod.apply(mockSsh, emptyEnv)
+
+    expect(result.status).toBe("failed")
+    expect(writtenFiles).toContainEqual({
+      content: previousUnit,
+      mode: "600",
+      path: unitFilePath,
+    })
+    expect(mockSsh.calls).toContain(`chown 'svc:svc' '${unitFilePath}'`)
+    expect(mockSsh.calls).toContain(`systemctl mask -- '${defaultServiceName}.service'`)
+    expect(mockSsh.calls.filter((call) => call === "systemctl daemon-reload")).toHaveLength(2)
+  })
+
   it("returns failed when daemon-reload fails", async () => {
     const mockSsh = createComposeMockSsh({
       ...composeSystemdRecoveryResponses(),
@@ -1471,7 +1587,10 @@ describe("compose.systemd — apply", () => {
       "rm -f '/etc/systemd/system/compose-app.service'": { code: 0 },
       "systemctl daemon-reload": { code: 0 },
     })
-    vi.spyOn(mockSsh, "readFile").mockResolvedValueOnce("").mockResolvedValueOnce(expectedUnit)
+    vi.spyOn(mockSsh, "readFile")
+      .mockResolvedValueOnce("[Unit]\nDescription=previous\n")
+      .mockResolvedValueOnce("")
+      .mockResolvedValueOnce(expectedUnit)
 
     const mod = compose.systemd({ projectDirectory })
     const result = await mod.apply(mockSsh, emptyEnv)
@@ -1535,9 +1654,7 @@ describe("compose.systemd — apply", () => {
         path: serviceUnitPath,
       },
     ])
-    expect(mockSsh.calls.indexOf("systemctl unmask -- 'mailcow.service'")).toBeLessThan(
-      mockSsh.calls.indexOf("cat '/etc/systemd/system/mailcow.service'")
-    )
+    expect(mockSsh.calls).toContain("systemctl unmask -- 'mailcow.service'")
     expect(mockSsh.calls).not.toContain("rm -f '/etc/systemd/system/mailcow.service'")
     expect(mockSsh.calls).toContain("systemctl daemon-reload")
   })
