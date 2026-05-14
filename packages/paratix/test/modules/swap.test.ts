@@ -4,7 +4,7 @@ import { swap } from "../../src/modules/swap.js"
 import { createMockSsh as createBaseMockSsh } from "../helpers/mockSsh.js"
 
 const createMockSsh: typeof createBaseMockSsh = (responses, options) =>
-  createBaseMockSsh(responses, options)
+  createBaseMockSsh(responses, { ...options, allowFlagLockInternalDefaults: true })
 
 const emptyEnv = {}
 const swapPath = "/swapfile"
@@ -23,6 +23,9 @@ const verifyPublishedSwapCommand = `[ ! -e '${swapTempPath}' ] && find '${swapPa
 const backupSwapCommand = `mv -T -n '${swapPath}' '${swapBackupPath}'`
 const verifySwapBackupCommand = `[ ! -e '${swapPath}' ] && [ -f '${swapBackupPath}' ] && swaplabel '${swapBackupPath}' >/dev/null 2>&1`
 const restoreSwapCommand = `mv -T -- '${swapBackupPath}' '${swapPath}'`
+const flagsDirectoryCreateCommand = "mkdir -p /var/lib/paratix/flags"
+const fstabLockMkdirCommand = "mkdir /var/lib/paratix/flags/'etc-fstab-mutex'"
+const fstabLockRmdirCommand = "rmdir /var/lib/paratix/flags/'etc-fstab-mutex'"
 
 describe("swap.file — check", () => {
   it("returns needs-apply when ssh is null", async () => {
@@ -192,6 +195,69 @@ describe("swap.file — apply", () => {
     expect(ssh.calls).toContain(verifyPublishedSwapCommand)
     expect(ssh.calls).toContain(`swapon '${swapPath}'`)
     expect(writtenFiles).toStrictEqual([{ content: `# fstab\n${fstabLine}\n`, path: "/etc/fstab" }])
+  })
+
+  it("acquires and releases the etc-fstab mutex lock around present-state fstab writes", async () => {
+    const ssh = createMockSsh({
+      [`[ -e '${swapPath}' ]`]: { code: 1 },
+      [`[ -L '${swapPath}' ]`]: { code: 1 },
+      [`cat '/etc/fstab'`]: { stdout: "# fstab\n" },
+      [`cat '${swapPath}'`]: { code: 1, stdout: "" },
+      [`chmod '0600' '${swapTempPath}'`]: { code: 0 },
+      [`mkdir -p '/'`]: { code: 0 },
+      [`mkswap '${swapTempPath}'`]: { code: 0 },
+      [`swapon '${swapPath}'`]: { code: 0 },
+      [createSwapTempCommand]: { code: 0 },
+      [mktempSwapCommand]: { code: 0, stdout: `${swapTempPath}\n` },
+      [publishSwapCommand]: { code: 0 },
+      [safeSwapParentCommand]: { code: 0, stdout: "/\n" },
+      [statSwapTempIdentityCommand]: { code: 0, stdout: `${swapTempIdentity}\n` },
+      "swapon --show=NAME --noheadings": { stdout: "" },
+      [verifyPublishedSwapCommand]: { code: 0 },
+    })
+    ssh.writeFile = async (): Promise<void> => {
+      await Promise.resolve()
+    }
+
+    const mod = swap.file({ path: swapPath, size: swapSize })
+    const result = await mod.apply(ssh, emptyEnv)
+
+    expect(result.status).toBe("changed")
+    expect(ssh.calls).toContain(fstabLockMkdirCommand)
+    expect(ssh.calls).toContain(fstabLockRmdirCommand)
+    const acquireIndex = ssh.calls.indexOf(fstabLockMkdirCommand)
+    const fstabReadIndex = ssh.calls.indexOf(`cat '/etc/fstab'`)
+    const releaseIndex = ssh.calls.indexOf(fstabLockRmdirCommand)
+    expect(acquireIndex).toBeLessThan(fstabReadIndex)
+    expect(fstabReadIndex).toBeLessThan(releaseIndex)
+  })
+
+  it("returns failed instead of rejecting when the fstab mutex lock cannot be acquired", async () => {
+    const ssh = createMockSsh({
+      [`[ -e '${swapPath}' ]`]: { code: 1 },
+      [`[ -L '${swapPath}' ]`]: { code: 1 },
+      [`cat '${swapPath}'`]: { code: 1, stdout: "" },
+      [`chmod '0600' '${swapTempPath}'`]: { code: 0 },
+      [`mkdir -p '/'`]: { code: 0 },
+      [`mkswap '${swapTempPath}'`]: { code: 0 },
+      [`swapon '${swapPath}'`]: { code: 0 },
+      [createSwapTempCommand]: { code: 0 },
+      [flagsDirectoryCreateCommand]: { code: 1, stderr: "read-only filesystem" },
+      [mktempSwapCommand]: { code: 0, stdout: `${swapTempPath}\n` },
+      [publishSwapCommand]: { code: 0 },
+      [safeSwapParentCommand]: { code: 0, stdout: "/\n" },
+      [statSwapTempIdentityCommand]: { code: 0, stdout: `${swapTempIdentity}\n` },
+      "swapon --show=NAME --noheadings": { stdout: "" },
+      [verifyPublishedSwapCommand]: { code: 0 },
+    })
+
+    const mod = swap.file({ path: swapPath, size: swapSize })
+    const result = await mod.apply(ssh, emptyEnv)
+
+    expect(result.status).toBe("failed")
+    expect(result.error?.message).toContain("failed to update /etc/fstab")
+    expect(result.error?.message).toContain("read-only filesystem")
+    expect(ssh.calls).not.toContain(`cat '/etc/fstab'`)
   })
 
   it("refuses to create a swap file in a writable parent directory", async () => {
@@ -775,6 +841,35 @@ describe("swap.file — apply", () => {
     expect(ssh.calls).toContain(`swapoff '${swapPath}'`)
     expect(ssh.calls).toContain(`rm -f '${swapPath}'`)
     expect(writtenFiles).toStrictEqual([{ content: "\n", path: "/etc/fstab" }])
+  })
+
+  it("acquires and releases the etc-fstab mutex lock around absent-state fstab writes", async () => {
+    const ssh = createMockSsh({
+      [`[ -e '${swapPath}' ]`]: { code: 0 },
+      [`[ -f '${swapPath}' ]`]: { code: 0 },
+      [`[ -L '${swapPath}' ]`]: { code: 1 },
+      [`cat '/etc/fstab'`]: { stdout: `${fstabLine}\n` },
+      [`cat '${swapPath}'`]: { stdout: "existing swap bytes" },
+      [`rm -f '${swapPath}'`]: { code: 0 },
+      [`swaplabel '${swapPath}' >/dev/null 2>&1`]: { code: 0 },
+      [`swapoff '${swapPath}'`]: { code: 0 },
+      "swapon --show=NAME --noheadings": { stdout: `${swapPath}\n` },
+    })
+    ssh.writeFile = async (): Promise<void> => {
+      await Promise.resolve()
+    }
+
+    const mod = swap.file({ path: swapPath, size: swapSize, state: "absent" })
+    const result = await mod.apply(ssh, emptyEnv)
+
+    expect(result.status).toBe("changed")
+    expect(ssh.calls).toContain(fstabLockMkdirCommand)
+    expect(ssh.calls).toContain(fstabLockRmdirCommand)
+    const acquireIndex = ssh.calls.indexOf(fstabLockMkdirCommand)
+    const fstabReadIndex = ssh.calls.indexOf(`cat '/etc/fstab'`)
+    const releaseIndex = ssh.calls.indexOf(fstabLockRmdirCommand)
+    expect(acquireIndex).toBeLessThan(fstabReadIndex)
+    expect(fstabReadIndex).toBeLessThan(releaseIndex)
   })
 
   // R-0000287: when removeSwapFile fails (permission denied, file busy), the
