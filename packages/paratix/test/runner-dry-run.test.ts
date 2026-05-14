@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import type { Environment, Module, ModuleResult, ServerDefinition } from "../src/types.js"
 
 import { resolveEnvironment } from "../src/environment.js"
+import { meta } from "../src/meta.js"
 import {
   createMockSpawnChild,
   createSuccessfulSshdDryRunExecMock,
@@ -703,6 +704,67 @@ describe("runPlaybook dry-run recipe behaviour", () => {
 
     expect(receivedEnvInCheck).toBeDefined()
     await expect(resolveEnvironment(receivedEnvInCheck!, "SECRET")).resolves.toBe("resolved-secret")
+    expect(dependentModule.apply).not.toHaveBeenCalled()
+  })
+
+  it("merges env meta from generic dry-run results without applying control-plane meta", async () => {
+    const capturedConfigs: unknown[] = []
+    const addPort = vi.fn().mockReturnValue(true)
+    const reconnect = vi.fn().mockResolvedValue(null)
+    const updateHost = vi.fn()
+
+    vi.doMock("../src/ssh.js", () => ({
+      shellQuote: (s: string) => `'${s}'`,
+      SshConnectionImpl: makeMockSshClass(capturedConfigs, {
+        addPort,
+        lifecycle: "permissive",
+        reconnect,
+        updateHost,
+      }),
+    }))
+
+    const { runPlaybook } = await import("../src/runner.js")
+
+    const dryRunMetaModule: Module = {
+      _applyDryRun: vi.fn().mockResolvedValue({
+        meta: [
+          meta.env("DRY_RUN_TOKEN", "visible"),
+          meta.sshdPort(2222),
+          meta.systemHost("10.0.0.42"),
+          meta.systemReboot(),
+        ],
+        status: "changed",
+      } satisfies ModuleResult),
+      apply: vi.fn().mockResolvedValue({ status: "changed" } satisfies ModuleResult),
+      check: vi.fn().mockResolvedValue("needs-apply"),
+      name: "generic-dry-run-meta",
+    }
+
+    let receivedEnvInCheck: Environment | undefined
+    const dependentModule: Module = {
+      apply: vi.fn().mockResolvedValue({ status: "ok" } satisfies ModuleResult),
+      check: vi.fn().mockImplementation(async (_ssh, env: Environment) => {
+        await Promise.resolve()
+        receivedEnvInCheck = env
+        return "ok" as const
+      }),
+      name: "dependent-module",
+    }
+
+    const definition: ServerDefinition = {
+      host: "1.2.3.4",
+      name: "test-server",
+      run: [dryRunMetaModule, dependentModule],
+      ssh: { ports: [22], privateKey: "~/.ssh/id", user: "root" },
+    }
+
+    await runPlaybook(definition, { dryRun: true, rebootGraceSeconds: 0 })
+
+    expect(receivedEnvInCheck).toBeDefined()
+    await expect(resolveEnvironment(receivedEnvInCheck!, "DRY_RUN_TOKEN")).resolves.toBe("visible")
+    expect(addPort).not.toHaveBeenCalled()
+    expect(updateHost).not.toHaveBeenCalled()
+    expect(reconnect).not.toHaveBeenCalled()
     expect(dependentModule.apply).not.toHaveBeenCalled()
   })
 

@@ -480,16 +480,20 @@ async function applyRunnerControlPlaneMeta(
   await handleReboot(ssh, step.meta)
 }
 
-async function handleMetaAndBuildResult(
-  ssh: SshConnectionImpl,
-  environment: Environment,
+async function handleMetaAndBuildResult(parameters: {
+  dryRun?: boolean
+  environment: Environment
   result: ModuleResult
-): Promise<StepResult> {
+  ssh: SshConnectionImpl
+}): Promise<StepResult> {
+  const { dryRun, environment, result, ssh } = parameters
   let currentEnvironment = environment
 
   if (result.meta != null) {
     currentEnvironment = await mergeEnvironmentFromMeta(currentEnvironment, result.meta)
-    await applyRunnerControlPlaneMeta(ssh, { meta: result.meta, status: result.status })
+    if (dryRun !== true) {
+      await applyRunnerControlPlaneMeta(ssh, { meta: result.meta, status: result.status })
+    }
   }
 
   return {
@@ -559,7 +563,7 @@ async function runRecipeModule(
       },
       verbose,
     })
-    return await handleMetaAndBuildResult(ssh, environment, result)
+    return await handleMetaAndBuildResult({ environment, result, ssh })
   } catch (error) {
     return handleCaughtStepError({
       environment,
@@ -596,7 +600,12 @@ async function applyModule(parameters: {
   } else {
     result = await targetModule.apply(connection, currentEnvironment)
   }
-  const stepResult = await handleMetaAndBuildResult(ssh, currentEnvironment, result)
+  const stepResult = await handleMetaAndBuildResult({
+    dryRun,
+    environment: currentEnvironment,
+    result,
+    ssh,
+  })
   const detail = dryRun ? (result._dryRunDetail ?? "(dry-run)") : result.detail
   printModuleResult(targetModule.name, result.status, detail)
   if (result.status === "failed" && result.error != null) {
