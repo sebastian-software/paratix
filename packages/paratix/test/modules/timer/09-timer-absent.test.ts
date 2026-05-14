@@ -153,6 +153,50 @@ describe("timer.absent", () => {
     const mod = timer.absent("backup")
     const result = await mod.apply(ssh, emptyEnv)
     expect(result.status).toBe("failed")
+    expect(ssh.writeFileCalls).toStrictEqual([
+      {
+        content: existingServiceContent,
+        options: { mode: "0644" },
+        remotePath: SERVICE_PATH,
+      },
+      {
+        content: existingTimerContent,
+        options: { mode: "0644" },
+        remotePath: TIMER_PATH,
+      },
+    ])
+    expect(ssh.calls).toContain("systemctl daemon-reload")
+  })
+
+  it("reports rollback failures when rm fails after partially deleting unit files", async () => {
+    const ssh = createAbsentApplyWithExistingUnitsMockSsh({
+      [`rm -f '${TIMER_PATH}' '${SERVICE_PATH}'`]: { code: 1, stderr: "EACCES" },
+    })
+    vi.spyOn(ssh, "writeFile").mockRejectedValueOnce(new Error("restore denied"))
+
+    const mod = timer.absent("backup")
+    const result = await mod.apply(ssh, emptyEnv)
+
+    expect(result.status).toBe("failed")
+    expect(String(result.error)).toContain("failed to remove unit files")
+    expect(String(result.error)).toContain("EACCES")
+    expect(String(result.error)).toContain("rollback of timer unit files also failed")
+    expect(String(result.error)).toContain("restore denied")
+  })
+
+  it("reports daemon-reload failures after restoring unit files for rm failure", async () => {
+    const ssh = createAbsentApplyWithExistingUnitsMockSsh({
+      [`rm -f '${TIMER_PATH}' '${SERVICE_PATH}'`]: { code: 1, stderr: "EACCES" },
+      "systemctl daemon-reload": { code: 1, stderr: "reload failed" },
+    })
+
+    const mod = timer.absent("backup")
+    const result = await mod.apply(ssh, emptyEnv)
+
+    expect(result.status).toBe("failed")
+    expect(String(result.error)).toContain("failed to remove unit files")
+    expect(String(result.error)).toContain("daemon-reload after unit-file rollback also failed")
+    expect(String(result.error)).toContain("reload failed")
   })
 
   it("restores an enabled active timer when rm fails after disable", async () => {

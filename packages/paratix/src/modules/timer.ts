@@ -422,7 +422,30 @@ async function removeAbsentUnitFiles(
       { ignoreExitCode: true, silent: true }
     )
     if (remove.code !== 0) {
-      return failedCommand(`[${module}: ${name}] failed to remove unit files`, remove)
+      const message = `[${module}: ${name}] failed to remove unit files`
+      try {
+        await restoreUnitFileSnapshots(ssh, locations, snapshots)
+      } catch (error) {
+        return failed(
+          `${message}: ${describeExecResult(
+            remove
+          )}; rollback of timer unit files also failed: ${describeError(error)}`
+        )
+      }
+      const reloadAfterRestore = await ssh.exec(`${SYSTEMCTL} daemon-reload`, {
+        ignoreExitCode: true,
+        silent: true,
+      })
+      if (reloadAfterRestore.code !== 0) {
+        return failed(
+          `${message}: ${describeExecResult(
+            remove
+          )}; daemon-reload after unit-file rollback also failed: ${describeExecResult(
+            reloadAfterRestore
+          )}`
+        )
+      }
+      return failedCommand(message, remove)
     }
   }
   const reload = await ssh.exec(`${SYSTEMCTL} daemon-reload`, {
