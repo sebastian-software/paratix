@@ -1523,9 +1523,11 @@ export const net = {
    * @param options - Optional request settings.
    * @param options.allowInsecureHttpHeaders - When `true`, allow sending sensitive headers (e.g. `Authorization`, `Cookie`) over plaintext `http://`. Default `false` rejects such combinations to prevent credential leakage.
    * @param options.body - Expected string in the response body.
+   * @param options.connectTimeout - Maximum time to establish the curl connection, in milliseconds.
    * @param options.headers - Additional HTTP headers.
    * @param options.method - HTTP method (default: `"GET"`).
    * @param options.status - Expected HTTP status code (default: `200`).
+   * @param options.timeout - Maximum time for the full curl request, in milliseconds.
    * @returns A Module that checks the HTTP endpoint.
    */
   request(
@@ -1533,20 +1535,29 @@ export const net = {
     options?: {
       allowInsecureHttpHeaders?: boolean
       body?: string
+      connectTimeout?: number
       headers?: Record<string, string>
       method?: string
       status?: number
+      timeout?: number
     }
   ): Module {
     validateHttpUrl(url, { allowHttp: true })
-    rejectSensitiveHeadersOverHttp(url, options?.headers, options?.allowInsecureHttpHeaders)
+    const resolvedOptions = options ?? {}
+    rejectSensitiveHeadersOverHttp(
+      url,
+      resolvedOptions.headers,
+      resolvedOptions.allowInsecureHttpHeaders
+    )
     rejectSensitiveUrlSecretsOverHttp(url)
-    const method = options?.method ?? "GET"
+    const method = resolvedOptions.method ?? "GET"
     const parameters: HttpCheckParameters = buildHttpCheckParameters({
-      body: options?.body,
-      headers: options?.headers,
+      body: resolvedOptions.body,
+      connectTimeout: resolvedOptions.connectTimeout,
+      headers: resolvedOptions.headers,
       method,
-      status: options?.status ?? DEFAULT_EXPECTED_STATUS,
+      status: resolvedOptions.status ?? DEFAULT_EXPECTED_STATUS,
+      timeout: resolvedOptions.timeout,
       url,
     })
     const displayUrl = parameters.displayUrl

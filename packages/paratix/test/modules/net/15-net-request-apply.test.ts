@@ -95,7 +95,8 @@ describe("net.request — apply", () => {
 
   it("returns ok when request succeeds", async () => {
     const mockSsh = createMockSsh({
-      "curl -s -o /dev/null -w '%{http_code}' 'https://example.com/health'": { stdout: "200" },
+      "curl -s -o /dev/null -w '%{http_code}' --connect-timeout '10' --max-time '300' 'https://example.com/health'":
+        { stdout: "200" },
     })
     const mod = net.request("https://example.com/health")
     const result = await mod.apply(mockSsh, emptyEnv)
@@ -104,7 +105,8 @@ describe("net.request — apply", () => {
 
   it("returns failed when request fails (wrong status)", async () => {
     const mockSsh = createMockSsh({
-      "curl -s -o /dev/null -w '%{http_code}' 'https://example.com/health'": { stdout: "503" },
+      "curl -s -o /dev/null -w '%{http_code}' --connect-timeout '10' --max-time '300' 'https://example.com/health'":
+        { stdout: "503" },
     })
     const mod = net.request("https://example.com/health")
     const result = await mod.apply(mockSsh, emptyEnv)

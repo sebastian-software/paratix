@@ -178,11 +178,11 @@ the idiomatic way to ensure a previously installed cron job is gone.
 
 ### `download`
 
-| Method            | Signature                                                                                                                                                                                                                                                                         | Idempotent |
-| ----------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------- |
-| `download.url`    | `(destination: string, url: string, options?: { allowInsecureHttp?: boolean; allowInsecureHttpHeaders?: boolean; allowUnverifiedDownload?: boolean; force?: boolean; headers?: Record<string, string>; sha256?: string; mode?: string; owner?: string; group?: string }): Module` | Yes        |
-| `download.github` | `(destination: string, options: { repo: string; tag: string; asset: string; token?: string; allowUnverifiedDownload?: boolean; sha256?: string; mode?: string; owner?: string; group?: string }): Module`                                                                         | Yes        |
-| `download.large`  | `(destination: string, url: string, options?: { allowInsecureHttp?: boolean; allowInsecureHttpHeaders?: boolean; allowUnverifiedDownload?: boolean; group?: string; headers?: Record<string, string>; mode?: string; owner?: string; sha256?: string }): Module`                  | Yes (flag) |
+| Method            | Signature                                                                                                                                                                                                                                                                                                                    | Idempotent |
+| ----------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------- |
+| `download.url`    | `(destination: string, url: string, options?: { allowInsecureHttp?: boolean; allowInsecureHttpHeaders?: boolean; allowUnverifiedDownload?: boolean; connectTimeout?: number; force?: boolean; headers?: Record<string, string>; sha256?: string; mode?: string; owner?: string; group?: string; timeout?: number }): Module` | Yes        |
+| `download.github` | `(destination: string, options: { repo: string; tag: string; asset: string; token?: string; allowUnverifiedDownload?: boolean; connectTimeout?: number; sha256?: string; mode?: string; owner?: string; group?: string; timeout?: number }): Module`                                                                         | Yes        |
+| `download.large`  | `(destination: string, url: string, options?: { allowInsecureHttp?: boolean; allowInsecureHttpHeaders?: boolean; allowUnverifiedDownload?: boolean; connectTimeout?: number; group?: string; headers?: Record<string, string>; mode?: string; owner?: string; sha256?: string; timeout?: number }): Module`                  | Yes (flag) |
 
 Downloads require an explicit integrity decision at runtime: provide `sha256`
 for verification, or set `allowUnverifiedDownload: true` when the remote
@@ -191,6 +191,9 @@ artifact is intentionally trusted without a pinned digest. `download.url` and
 only when an `http://` source or redirect is intentional. Sensitive headers
 such as `Authorization`, `Cookie`, and `X-Api-Key` are still rejected over
 plaintext HTTP unless `allowInsecureHttpHeaders: true` is also set.
+Curl-based downloads use bounded transfer timing by default (`connectTimeout:
+10000`, `timeout: 300000`, both in milliseconds). Override these options for
+very slow artifact hosts or large downloads.
 
 ### `file`
 
@@ -241,14 +244,18 @@ plaintext HTTP unless `allowInsecureHttpHeaders: true` is also set.
 
 ### `net`
 
-| Method          | Signature                                                                                                                                                    | Idempotent |
-| --------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------ | ---------- |
-| `net.hosts`     | `(ip: string, hostnames: string[], options?: { state?: "absent" \| "present" }): Module`                                                                     | Yes        |
-| `net.interface` | `(name: string, options: InterfaceOptions): Module`                                                                                                          | Yes        |
-| `net.request`   | `(url: string, options?: { allowInsecureHttpHeaders?: boolean; body?: string; headers?: Record<string, string>; method?: string; status?: number }): Module` | Yes        |
-| `net.resolv`    | `(options: { nameservers: string[]; search?: string[] }): Module`                                                                                            | Yes        |
-| `net.route`     | `(destination: string, gateway: string, options?: { device?: string; state?: "absent" \| "present" }): Module`                                               | Yes        |
-| `net.waitFor`   | `(options: WaitForOptions): Module`                                                                                                                          | Yes        |
+| Method          | Signature                                                                                                                                                                                               | Idempotent |
+| --------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------- |
+| `net.hosts`     | `(ip: string, hostnames: string[], options?: { state?: "absent" \| "present" }): Module`                                                                                                                | Yes        |
+| `net.interface` | `(name: string, options: InterfaceOptions): Module`                                                                                                                                                     | Yes        |
+| `net.request`   | `(url: string, options?: { allowInsecureHttpHeaders?: boolean; body?: string; connectTimeout?: number; headers?: Record<string, string>; method?: string; status?: number; timeout?: number }): Module` | Yes        |
+| `net.resolv`    | `(options: { nameservers: string[]; search?: string[] }): Module`                                                                                                                                       | Yes        |
+| `net.route`     | `(destination: string, gateway: string, options?: { device?: string; state?: "absent" \| "present" }): Module`                                                                                          | Yes        |
+| `net.waitFor`   | `(options: WaitForOptions): Module`                                                                                                                                                                     | Yes        |
+
+`net.request` uses bounded curl timing by default (`connectTimeout: 10000`,
+`timeout: 300000`, both in milliseconds). Override these values for endpoints
+that are expected to respond more slowly.
 
 ### `op`
 

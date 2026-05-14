@@ -25,6 +25,8 @@ type BaseDownloadOptions = {
   allowInsecureHttp?: boolean
   /** Explicitly opt out of integrity verification for trusted sources. */
   allowUnverifiedDownload?: boolean
+  /** Maximum time to establish the curl connection, in milliseconds. */
+  connectTimeout?: number
   /** Group owner to set on the downloaded file via `chown`. */
   group?: string
   /** File mode to set via `chmod` (e.g. `"0755"`). */
@@ -33,6 +35,8 @@ type BaseDownloadOptions = {
   owner?: string
   /** Expected SHA-256 hex digest for integrity verification. */
   sha256?: string
+  /** Maximum time for the full curl transfer, in milliseconds. */
+  timeout?: number
 }
 
 /**
@@ -58,6 +62,35 @@ type DownloadOwnership = {
   group: string
   mode: string
   owner: string
+}
+
+const DEFAULT_CURL_CONNECT_TIMEOUT_MS = 10_000
+const DEFAULT_CURL_TIMEOUT_MS = 300_000
+const MS_PER_SECOND = 1000
+
+function validateCurlTimeoutOption(label: string, value: number): void {
+  if (Number.isFinite(value) && value > 0) return
+  throw new Error(`[download] invalid ${label}: value must be a finite positive number`)
+}
+
+function resolveCurlTimeouts(options: { connectTimeout?: number; timeout?: number }): {
+  connectTimeout: number
+  timeout: number
+} {
+  const connectTimeout = options.connectTimeout ?? DEFAULT_CURL_CONNECT_TIMEOUT_MS
+  const timeout = options.timeout ?? DEFAULT_CURL_TIMEOUT_MS
+  validateCurlTimeoutOption("connectTimeout", connectTimeout)
+  validateCurlTimeoutOption("timeout", timeout)
+  return { connectTimeout, timeout }
+}
+
+function formatCurlTimeoutSeconds(milliseconds: number): string {
+  return String(milliseconds / MS_PER_SECOND)
+}
+
+function buildCurlTimeoutFlags(options: { connectTimeout?: number; timeout?: number }): string {
+  const { connectTimeout, timeout } = resolveCurlTimeouts(options)
+  return `--connect-timeout ${shellQuote(formatCurlTimeoutSeconds(connectTimeout))} --max-time ${shellQuote(formatCurlTimeoutSeconds(timeout))}`
 }
 
 function extractUrlSecrets(url: string): string[] {
@@ -399,8 +432,9 @@ function buildCurlCommand(parameters: DownloadParameters): {
   })
   const headerPart = buildCurlArgvHeaderFlags(argvHeaders)
   const protocolFlags = buildCurlProtocolFlags(parameters)
+  const timeoutFlags = buildCurlTimeoutFlags(parameters)
   return {
-    command: `curl -fsSL -o ${shellQuote(parameters.destination)} ${protocolFlags} ${headerPart}--config -`,
+    command: `curl -fsSL -o ${shellQuote(parameters.destination)} ${timeoutFlags} ${protocolFlags} ${headerPart}--config -`,
     input: configInput,
   }
 }
@@ -584,6 +618,7 @@ async function executeCurlDownload(
     input: curlConfig,
     secrets: downloadParameters.secrets,
     silent: true,
+    timeout: resolveCurlTimeouts(downloadParameters).timeout,
   })
   if (result.code !== 0) {
     return failedCommand(

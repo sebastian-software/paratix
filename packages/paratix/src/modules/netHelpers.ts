@@ -33,6 +33,8 @@ export type WaitForOptions = {
 export type HttpCheckParameters = {
   /** Stdin payload for `curl --config -` carrying the URL when sensitive and any headers. Empty string when no stdin payload is needed. */
   configInput: string
+  /** Maximum time to establish the curl connection, in milliseconds. */
+  connectTimeout: number
   /** URL safe for module names and user-visible errors. Sensitive query values are redacted. */
   displayUrl: string
   /** Expected substring in the response body, or `undefined` to skip body verification. */
@@ -45,6 +47,8 @@ export type HttpCheckParameters = {
   methodFlag: string
   /** Strings (header values, signed URLs) registered as secrets so they are masked in CommandError stack traces. */
   secrets: string[]
+  /** Maximum time for the full curl request, in milliseconds. */
+  timeout: number
   /** The URL to request. Only inlined onto argv when `urlOnArgv` is `true`. */
   url: string
   /** When `true`, the URL is appended to the curl argv. When `false`, it must be supplied via the stdin config payload. */
@@ -54,6 +58,9 @@ export type HttpCheckParameters = {
 const HTTP_STATUS_MARKER = "\n__PARATIX_HTTP_STATUS__:"
 const ASCII_SPACE_CODE_POINT = 0x20
 const ASCII_DELETE_CODE_POINT = 0x7f
+const DEFAULT_CURL_CONNECT_TIMEOUT_MS = 10_000
+const DEFAULT_CURL_TIMEOUT_MS = 300_000
+const MS_PER_SECOND = 1000
 
 export function validateWaitForHost(host: string): void {
   if (host.length === 0 || host.startsWith("-") || hasWaitForHostUnsafeCharacter(host)) {
@@ -154,6 +161,35 @@ function redactUrlForDisplay(url: string, parsedUrl: URL): string {
   return redactParsedUrlForDisplay(parsedUrl)
 }
 
+function validateCurlTimingOption(label: string, value: number): void {
+  if (Number.isFinite(value) && value > 0) return
+  throw new Error(`[net.request] invalid ${label}: value must be a finite positive number`)
+}
+
+function resolveCurlTimingOptions(options: { connectTimeout?: number; timeout?: number }): {
+  connectTimeout: number
+  timeout: number
+} {
+  const connectTimeout = options.connectTimeout ?? DEFAULT_CURL_CONNECT_TIMEOUT_MS
+  const timeout = options.timeout ?? DEFAULT_CURL_TIMEOUT_MS
+  validateCurlTimingOption("connectTimeout", connectTimeout)
+  validateCurlTimingOption("timeout", timeout)
+  return { connectTimeout, timeout }
+}
+
+function formatCurlTimeoutSeconds(milliseconds: number): string {
+  return String(milliseconds / MS_PER_SECOND)
+}
+
+function buildCurlTimeoutFlags(parameters: HttpCheckParameters): string {
+  return [
+    "--connect-timeout",
+    shellQuote(formatCurlTimeoutSeconds(parameters.connectTimeout)),
+    "--max-time",
+    shellQuote(formatCurlTimeoutSeconds(parameters.timeout)),
+  ].join(" ")
+}
+
 /**
  * Build the curl invocation parts for an HTTP request check.
  *
@@ -164,23 +200,28 @@ function redactUrlForDisplay(url: string, parsedUrl: URL): string {
  *
  * @param options - The HTTP request configuration.
  * @param options.body - Expected substring in the response body.
+ * @param options.connectTimeout - Maximum time to establish the curl connection, in milliseconds.
  * @param options.headers - Additional HTTP headers.
  * @param options.method - HTTP method (default: `"GET"`).
  * @param options.status - Expected HTTP status code (default: `200`).
+ * @param options.timeout - Maximum time for the full curl request, in milliseconds.
  * @param options.url - The URL to request.
  * @returns The precomputed curl parts plus the secrets to register.
  */
 export function buildHttpCheckParameters(options: {
   body?: string
+  connectTimeout?: number
   headers?: Record<string, string>
   method?: string
   status: number
+  timeout?: number
   url: string
 }): HttpCheckParameters {
   const headers = options.headers ?? {}
   const method = options.method ?? "GET"
   const parsedUrl = new URL(options.url)
   const urlIsSensitive = hasSensitiveQueryParameters(parsedUrl) || hasUrlCredentials(parsedUrl)
+  const timing = resolveCurlTimingOptions(options)
 
   const { argvHeaders, configInput } = buildCurlConfigPayload({
     headers,
@@ -197,12 +238,14 @@ export function buildHttpCheckParameters(options: {
 
   return {
     configInput,
+    connectTimeout: timing.connectTimeout,
     displayUrl: redactUrlForDisplay(options.url, parsedUrl),
     expectedBody: options.body,
     expectedStatus: options.status,
     headerFlags: buildCurlArgvHeaderFlags(argvHeaders),
     methodFlag: method === "GET" ? "" : `-X ${shellQuote(method)} `,
     secrets,
+    timeout: timing.timeout,
     url: options.url,
     urlOnArgv: !urlIsSensitive,
   }
@@ -259,6 +302,7 @@ async function execCurl(
 ): Promise<string> {
   const command = joinCurlSegments([
     argvBase,
+    buildCurlTimeoutFlags(parameters),
     parameters.methodFlag.trim(),
     parameters.headerFlags.trim(),
     buildCurlUrlArgvSegment(parameters),
@@ -268,6 +312,7 @@ async function execCurl(
     input: parameters.configInput.length > 0 ? parameters.configInput : undefined,
     secrets: parameters.secrets,
     silent: true,
+    timeout: parameters.timeout,
   })
   return result.stdout.trim()
 }

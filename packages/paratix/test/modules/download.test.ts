@@ -51,8 +51,9 @@ const createMockSsh: typeof createBaseMockSsh = (responses, options) =>
 
 const emptyEnv = {}
 const allowUnverifiedDownload = { allowUnverifiedDownload: true } as const
-const httpsOnlyCurlProtocolFlags = "--proto '=https' --proto-redir '=https'"
-const insecureHttpCurlProtocolFlags = "--proto '=http,https' --proto-redir '=http,https'"
+const defaultCurlTimeoutFlags = "--connect-timeout '10' --max-time '300'"
+const httpsOnlyCurlProtocolFlags = `${defaultCurlTimeoutFlags} --proto '=https' --proto-redir '=https'`
+const insecureHttpCurlProtocolFlags = `${defaultCurlTimeoutFlags} --proto '=http,https' --proto-redir '=http,https'`
 
 function buildSafeDownloadApplyStubs(): NonNullable<
   NonNullable<Parameters<typeof createBaseMockSsh>[1]>["responseStubs"]
@@ -61,7 +62,7 @@ function buildSafeDownloadApplyStubs(): NonNullable<
     {
       command:
         // eslint-disable-next-line security/detect-unsafe-regex -- bounded mock command regex, not user input
-        /^curl -fsSL -o '\/(?:opt|tmp|usr|var)(?:\/[^\/']+)*\/\.paratix-download\.[^\/']+' --proto '=(?:https|http,https)' --proto-redir '=(?:https|http,https)' --config -$/v,
+        /^curl -fsSL -o '\/(?:opt|tmp|usr|var)(?:\/[^\/']+)*\/\.paratix-download\.[^\/']+' --connect-timeout '10' --max-time '300' --proto '=(?:https|http,https)' --proto-redir '=(?:https|http,https)' --config -$/v,
       result: { code: 0 },
     },
     {
@@ -523,6 +524,29 @@ describe("download.url", () => {
         temporaryDestination,
         urlInput: url,
       })
+    })
+
+    it("passes custom curl timeout flags and SSH exec timeout", async () => {
+      const curlCommand = `curl -fsSL -o '${temporaryDestination}' --connect-timeout '2.5' --max-time '15' --proto '=https' --proto-redir '=https' --config -`
+      const mockSsh = createMockSsh(
+        {
+          [`mktemp "$(dirname '${destination}')/.paratix-download.XXXXXX"`]: {
+            stdout: `${temporaryDestination}\n`,
+          },
+        },
+        {
+          responseStubs: [{ command: curlCommand, result: { code: 0 } }],
+        }
+      )
+      const mod = download.url(destination, url, {
+        ...allowUnverifiedDownload,
+        connectTimeout: 2500,
+        timeout: 15_000,
+      })
+      const result = await mod.apply(mockSsh, emptyEnv)
+      const curlCall = mockSsh.execCalls.find((entry) => entry.command === curlCommand)
+      expect(result.status).toBe("changed")
+      expect(curlCall?.options?.timeout).toBe(15_000)
     })
 
     it("cleans up the temporary file and leaves destination untouched when curl fails", async () => {

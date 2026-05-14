@@ -179,7 +179,8 @@ describe("net.request — header masking", () => {
     // Pre-register an unrelated value to confirm we never rely on a leftover.
     registerSecret("unrelated-secret-marker")
     const mockSsh = createMockSsh({
-      "curl -s -o /dev/null -w '%{http_code}' 'https://example.com/health'": { stdout: "200" },
+      "curl -s -o /dev/null -w '%{http_code}' --connect-timeout '10' --max-time '300' 'https://example.com/health'":
+        { stdout: "200" },
     })
     const mod = net.request("https://example.com/health")
     await mod.apply(mockSsh, emptyEnv)
