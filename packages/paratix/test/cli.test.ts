@@ -1787,6 +1787,58 @@ describe("CLI entrypoint", () => {
     }
   })
 
+  it("allows reentrant playbook imports inside the same import call tree", async () => {
+    const tempDirectory = mkdtempSync(join(tmpdir(), "paratix-cli-reentrant-import-"))
+    const parentPlaybookPath = join(tempDirectory, "parent.mjs")
+    const childPlaybookPath = join(tempDirectory, "child.mjs")
+    const cliSourceUrl = pathToFileURL(
+      resolve(new URL("../src/cli.ts", import.meta.url).pathname)
+    ).href
+
+    try {
+      writeFileSync(
+        childPlaybookPath,
+        [
+          "export default {",
+          "  name: 'child',",
+          "  host: '1.2.3.5',",
+          "  ssh: { user: 'root', ports: [22] },",
+          "  run: [process.env['PARATIX_FIRST_RUN'] ?? 'missing'],",
+          "}",
+        ].join("\n")
+      )
+      writeFileSync(
+        parentPlaybookPath,
+        [
+          `import { loadServerDefinitionFromFile } from ${JSON.stringify(cliSourceUrl)}`,
+          `const child = await loadServerDefinitionFromFile(${JSON.stringify(childPlaybookPath)}, { firstRun: false })`,
+          "export default {",
+          "  name: 'parent',",
+          "  host: '1.2.3.4',",
+          "  ssh: { user: 'root', ports: [22] },",
+          "  run: ['parent', child.name, child.run[0], process.env['PARATIX_FIRST_RUN'] ?? 'missing'],",
+          "}",
+        ].join("\n")
+      )
+
+      const timeout = new Promise<never>((_resolve, reject) => {
+        setTimeout(() => {
+          reject(new Error("Timed out waiting for reentrant playbook import"))
+        }, 1000)
+      })
+      const definition = await Promise.race([
+        loadServerDefinitionFromFile(parentPlaybookPath, { firstRun: true }),
+        timeout,
+      ])
+
+      expect(definition.run).toStrictEqual(["parent", "child", "true", "true"])
+      expect(process.env.PARATIX_FIRST_RUN).toBeUndefined()
+    } finally {
+      rmSync(tempDirectory, { force: true, recursive: true })
+      delete process.env.PARATIX_FIRST_RUN
+    }
+  })
+
   it("does not leak PARATIX_FIRST_RUN into a later playbook load", async () => {
     const tempDirectory = mkdtempSync(join(tmpdir(), "paratix-cli-first-run-leak-"))
     const firstRunPlaybookPath = join(tempDirectory, "first-run.mjs")

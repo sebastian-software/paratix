@@ -1,5 +1,6 @@
 /* eslint-disable max-lines -- CLI entrypoint co-locates parsers, validators, and command wiring */
 import { Command } from "commander"
+import { AsyncLocalStorage } from "node:async_hooks"
 import { realpathSync } from "node:fs"
 import { extname, resolve } from "node:path"
 import { fileURLToPath, pathToFileURL } from "node:url"
@@ -469,8 +470,13 @@ export async function withCliProcessEnvironment<T>(
  */
 let tsxRegistrationPromise: null | Promise<void> = null
 let playbookImportQueue: Promise<void> = Promise.resolve()
+const playbookImportContext = new AsyncLocalStorage<boolean>()
 
 async function withSerializedPlaybookImport<T>(body: () => Promise<T>): Promise<T> {
+  if (playbookImportContext.getStore() === true) {
+    return body()
+  }
+
   const previousImport = playbookImportQueue
   let releaseCurrentImport!: () => void
   playbookImportQueue = new Promise<void>((resolveQueue) => {
@@ -480,7 +486,7 @@ async function withSerializedPlaybookImport<T>(body: () => Promise<T>): Promise<
   await previousImport
 
   try {
-    return await body()
+    return await playbookImportContext.run(true, body)
   } finally {
     releaseCurrentImport()
   }
