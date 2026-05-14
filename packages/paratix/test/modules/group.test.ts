@@ -1,9 +1,32 @@
 import { describe, expect, it } from "vitest"
 
+import type { ExecResult } from "../../src/types.js"
+
 import { group } from "../../src/modules/group.js"
 import { createMockSsh } from "../helpers/mockSsh.js"
 
 const emptyEnv = {}
+
+function createGroupLookupSequenceSsh(
+  lookups: Array<Partial<ExecResult>>,
+  responses: Parameters<typeof createMockSsh>[0]
+): ReturnType<typeof createMockSsh> {
+  const ssh = createMockSsh(responses)
+  const exec = ssh.exec.bind(ssh)
+  ssh.exec = async (command, options) => {
+    if (command !== "getent group 'deploy'") return exec(command, options)
+
+    ssh.calls.push(command)
+    ssh.execCalls.push({ command, options })
+    const lookup = lookups.shift()
+    return {
+      code: lookup?.code ?? 0,
+      stderr: lookup?.stderr ?? "",
+      stdout: lookup?.stdout ?? "",
+    }
+  }
+  return ssh
+}
 
 describe("group.present", () => {
   it("check returns ok when the group exists (no GID requested)", async () => {
@@ -81,6 +104,53 @@ describe("group.present", () => {
     const mod = group.present("deploy", { gid: 1200 })
     const result = await mod.apply(ssh, emptyEnv)
     expect(result.status).toBe("failed")
+  })
+
+  it("apply returns ok when a parallel run creates the group after the initial probe", async () => {
+    const ssh = createGroupLookupSequenceSsh([{ code: 1 }, { code: 0, stdout: "deploy:x:1234:" }], {
+      "groupadd -- 'deploy'": { code: 9, stderr: "groupadd: group 'deploy' already exists" },
+    })
+    const mod = group.present("deploy")
+    const result = await mod.apply(ssh, emptyEnv)
+    expect(result.status).toBe("ok")
+    expect(ssh.calls.filter((c) => c === "getent group 'deploy'")).toHaveLength(2)
+  })
+
+  it("apply returns ok when a parallel run creates the group with the desired GID", async () => {
+    const ssh = createGroupLookupSequenceSsh([{ code: 1 }, { code: 0, stdout: "deploy:x:1200:" }], {
+      "groupadd --gid 1200 -- 'deploy'": {
+        code: 9,
+        stderr: "groupadd: group 'deploy' already exists",
+      },
+    })
+    const mod = group.present("deploy", { gid: 1200 })
+    const result = await mod.apply(ssh, emptyEnv)
+    expect(result.status).toBe("ok")
+    expect(ssh.calls.some((c) => c.startsWith("groupmod"))).toBe(false)
+  })
+
+  it("apply heals GID drift when a parallel run creates the group with the wrong GID", async () => {
+    const ssh = createGroupLookupSequenceSsh([{ code: 1 }, { code: 0, stdout: "deploy:x:1234:" }], {
+      "groupadd --gid 1200 -- 'deploy'": {
+        code: 9,
+        stderr: "groupadd: group 'deploy' already exists",
+      },
+      "groupmod -g 1200 -- 'deploy'": { code: 0 },
+    })
+    const mod = group.present("deploy", { gid: 1200 })
+    const result = await mod.apply(ssh, emptyEnv)
+    expect(result.status).toBe("changed")
+    expect(ssh.calls).toContain("groupmod -g 1200 -- 'deploy'")
+  })
+
+  it("apply returns the original groupadd failure when the group is still missing", async () => {
+    const ssh = createGroupLookupSequenceSsh([{ code: 1 }, { code: 1 }], {
+      "groupadd --gid 1200 -- 'deploy'": { code: 1, stderr: "permission denied" },
+    })
+    const mod = group.present("deploy", { gid: 1200 })
+    const result = await mod.apply(ssh, emptyEnv)
+    expect(result.status).toBe("failed")
+    expect(ssh.calls.filter((c) => c === "getent group 'deploy'")).toHaveLength(2)
   })
 
   // R-0000048 regression: an existing group with a matching GID converges

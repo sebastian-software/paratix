@@ -23,6 +23,43 @@ function assertValidGid(gid: number): void {
   }
 }
 
+async function healGidDrift(ssh: SshConnection, name: string, gid: number): Promise<ModuleResult> {
+  const groupmodResult = await ssh.exec(`groupmod -g ${String(gid)} -- ${shellQuote(name)}`, {
+    ignoreExitCode: true,
+    silent: true,
+  })
+  return groupmodResult.code === 0
+    ? { status: "changed" }
+    : failedCommand(`[group.present: ${name}] groupmod failed`, groupmodResult)
+}
+
+async function convergeExistingGroup(input: {
+  existingGid: string
+  gid: number | undefined
+  name: string
+  ssh: SshConnection
+}): Promise<ModuleResult> {
+  const { existingGid, gid, name, ssh } = input
+  if (gid == null || existingGid === String(gid)) return { status: "ok" }
+  // R-0000048: group exists but GID drifted — heal it via groupmod
+  // so the drift becomes recoverable instead of blocking on
+  // `groupadd: group already exists`.
+  return healGidDrift(ssh, name, gid)
+}
+
+async function handleFailedGroupadd(input: {
+  gid: number | undefined
+  name: string
+  result: Awaited<ReturnType<SshConnection["exec"]>>
+  ssh: SshConnection
+}): Promise<ModuleResult> {
+  const { gid, name, result, ssh } = input
+  const concurrentGid = await readGroupGid(ssh, name)
+  if (concurrentGid == null)
+    return failedCommand(`[group.present: ${name}] groupadd failed`, result)
+  return convergeExistingGroup({ existingGid: concurrentGid, gid, name, ssh })
+}
+
 /**
  * Read the GID of an existing group via `getent group <name>`. Returns the
  * GID as the string it appears in `/etc/group` (third colon-separated
@@ -111,27 +148,11 @@ export const group = {
             ignoreExitCode: true,
             silent: true,
           })
-          return result.code === 0
-            ? { status: "changed" }
-            : failedCommand(`[group.present: ${name}] groupadd failed`, result)
+          if (result.code === 0) return { status: "changed" }
+          return handleFailedGroupadd({ gid: options?.gid, name, result, ssh })
         }
 
-        if (options?.gid == null || existingGid === String(options.gid)) {
-          // Group exists with the desired GID (or no GID was requested) —
-          // nothing to do.
-          return { status: "ok" }
-        }
-
-        // R-0000048: group exists but GID drifted — heal it via groupmod
-        // so the drift becomes recoverable instead of blocking on
-        // `groupadd: group already exists`.
-        const groupmodResult = await ssh.exec(
-          `groupmod -g ${String(options.gid)} -- ${shellQuote(name)}`,
-          { ignoreExitCode: true, silent: true }
-        )
-        return groupmodResult.code === 0
-          ? { status: "changed" }
-          : failedCommand(`[group.present: ${name}] groupmod failed`, groupmodResult)
+        return convergeExistingGroup({ existingGid, gid: options?.gid, name, ssh })
       },
       async check(ssh: null | SshConnection): Promise<"needs-apply" | "ok"> {
         if (!ssh) return NEEDS_APPLY
