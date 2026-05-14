@@ -10,22 +10,20 @@ import {
   symlinkSync,
   writeFileSync,
 } from "node:fs"
+import { createRequire } from "node:module"
 import { tmpdir } from "node:os"
 import { delimiter, join, resolve } from "node:path"
 import { describe, expect, it } from "vitest"
 
 import { TEST_ADMIN_PUBLIC_KEY, TEST_HOST_FINGERPRINT } from "../helpers.js"
 
+const require = createRequire(import.meta.url)
 const packageRootDirectory = resolve(import.meta.dirname, "../..")
 const CLI_COMMAND_TIMEOUT_MS = 30_000
 
 describe("dist CLI", () => {
   it("runs the published binary target for an early usage error", () => {
-    const packageJson = JSON.parse(
-      readFileSync(resolve(packageRootDirectory, "package.json"), "utf8")
-    ) as {
-      bin: { "create-paratix": string }
-    }
+    const packageJson = readPackageJson()
     expect(packageJson.bin["create-paratix"]).toBe("./dist/index.js")
 
     const distCliPath = resolve(packageRootDirectory, packageJson.bin["create-paratix"])
@@ -44,12 +42,103 @@ describe("dist CLI", () => {
     expect(result.stderr).toContain("Usage: create-paratix <project-name>")
   })
 
-  it("runs when invoked through an npm-style bin symlink", () => {
-    const packageJson = JSON.parse(
-      readFileSync(resolve(packageRootDirectory, "package.json"), "utf8")
-    ) as {
-      bin: { "create-paratix": string }
+  it("exposes the published dist entry point to ESM consumers", () => {
+    const packageJson = readPackageJson()
+    expect(packageJson.main).toBe("./dist/index.js")
+    expect(packageJson.types).toBe("./dist/index.d.ts")
+    expect(packageJson.exports["."]).toStrictEqual({
+      import: "./dist/index.js",
+      types: "./dist/index.d.ts",
+    })
+
+    const tempDirectory = mkdtempSync(join(tmpdir(), "create-paratix-runtime-consumer-"))
+    const nodeModulesDirectory = join(tempDirectory, "node_modules")
+
+    try {
+      mkdirSync(nodeModulesDirectory)
+      symlinkSync(packageRootDirectory, join(nodeModulesDirectory, "create-paratix"))
+
+      const result = spawnSync(
+        process.execPath,
+        [
+          "--input-type=module",
+          "-e",
+          'import("create-paratix").then((mod) => console.log(typeof mod.scaffoldProject))',
+        ],
+        {
+          cwd: tempDirectory,
+          encoding: "utf8",
+          killSignal: "SIGTERM",
+          timeout: CLI_COMMAND_TIMEOUT_MS,
+        }
+      )
+
+      expect(result.status).toBe(0)
+      expect(result.stderr).toBe("")
+      expect(result.stdout).toBe("function\n")
+    } finally {
+      rmSync(tempDirectory, { force: true, recursive: true })
     }
+  })
+
+  it("exposes the published declaration entry point to TypeScript consumers", () => {
+    const tempDirectory = mkdtempSync(join(tmpdir(), "create-paratix-types-consumer-"))
+    const nodeModulesDirectory = join(tempDirectory, "node_modules")
+    const tscPath = require.resolve("typescript/bin/tsc")
+
+    try {
+      mkdirSync(nodeModulesDirectory)
+      symlinkSync(packageRootDirectory, join(nodeModulesDirectory, "create-paratix"))
+      writeFileSync(
+        join(tempDirectory, "package.json"),
+        `${JSON.stringify({ private: true, type: "module" }, null, 2)}\n`
+      )
+      writeFileSync(
+        join(tempDirectory, "tsconfig.json"),
+        `${JSON.stringify(
+          {
+            compilerOptions: {
+              module: "NodeNext",
+              moduleResolution: "NodeNext",
+              noEmit: true,
+              strict: true,
+              target: "ES2022",
+            },
+            files: ["index.ts"],
+          },
+          null,
+          2
+        )}\n`
+      )
+      writeFileSync(
+        join(tempDirectory, "index.ts"),
+        [
+          'import { scaffoldProject, type ScaffoldOptions } from "create-paratix"',
+          "",
+          "const options: ScaffoldOptions = { installer: () => true }",
+          'const didScaffold: boolean = scaffoldProject("typed-consumer-project", { command: "pnpm", name: "pnpm" }, options)',
+          "void didScaffold",
+          "",
+        ].join("\n")
+      )
+
+      const result = spawnSync(process.execPath, [tscPath, "--project", "tsconfig.json"], {
+        cwd: tempDirectory,
+        encoding: "utf8",
+        killSignal: "SIGTERM",
+        timeout: CLI_COMMAND_TIMEOUT_MS,
+      })
+
+      expect(result.status).toBe(0)
+      expect(result.stdout).toBe("")
+      expect(result.stderr).toBe("")
+    } finally {
+      rmSync(tempDirectory, { force: true, recursive: true })
+    }
+  })
+
+  it("runs when invoked through an npm-style bin symlink", () => {
+    const packageJson = readPackageJson()
     const distCliPath = resolve(packageRootDirectory, packageJson.bin["create-paratix"])
     const tempDirectory = mkdtempSync(join(tmpdir(), "create-paratix-bin-smoke-"))
     const linkedCliPath = join(tempDirectory, "create-paratix")
@@ -72,11 +161,7 @@ describe("dist CLI", () => {
   })
 
   it("scaffolds a project through the published dist CLI in non-interactive mode", () => {
-    const packageJson = JSON.parse(
-      readFileSync(resolve(packageRootDirectory, "package.json"), "utf8")
-    ) as {
-      bin: { "create-paratix": string }
-    }
+    const packageJson = readPackageJson()
     const distCliPath = resolve(packageRootDirectory, packageJson.bin["create-paratix"])
     const tempDirectory = mkdtempSync(join(tmpdir(), "create-paratix-dist-success-"))
     const binDirectory = join(tempDirectory, "bin")
@@ -167,3 +252,17 @@ describe("dist CLI", () => {
     }
   })
 })
+
+function readPackageJson(): {
+  bin: { "create-paratix": string }
+  exports: { ".": { import: string; types: string } }
+  main: string
+  types: string
+} {
+  return JSON.parse(readFileSync(resolve(packageRootDirectory, "package.json"), "utf8")) as {
+    bin: { "create-paratix": string }
+    exports: { ".": { import: string; types: string } }
+    main: string
+    types: string
+  }
+}

@@ -55,7 +55,7 @@ export {
 } from "./scaffoldConfig.js"
 export type { InitialUserConfig } from "./templates.js"
 
-type ScaffoldOptions = {
+export type ScaffoldOptions = {
   adminPublicKey?: string
   expectedHostFingerprint?: string
   host?: string
