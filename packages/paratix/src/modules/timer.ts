@@ -122,6 +122,27 @@ async function restoreUnitFileSnapshotsAfterReloadFailure(
   return failedCommand(parameters.message, parameters.reload)
 }
 
+async function restoreUnitFileSnapshotsAfterWriteFailure(
+  ssh: SshConnection,
+  parameters: {
+    message: string
+    paths: Pick<TimerPaths, "servicePath" | "timerPath">
+    snapshots: SnapshotPair
+    writeError: unknown
+  }
+): Promise<ModuleResult> {
+  try {
+    await restoreUnitFileSnapshots(ssh, parameters.paths, parameters.snapshots)
+  } catch (restoreError) {
+    return failed(
+      `${parameters.message}: ${describeError(
+        parameters.writeError
+      )}; rollback of timer unit files also failed: ${describeError(restoreError)}`
+    )
+  }
+  return failed(`${parameters.message}: ${describeError(parameters.writeError)}`)
+}
+
 // R-0000216: writeFile can throw (SFTP error after a partial write,
 // permission denied, network drop). Wrap both writes in a shared
 // try/catch so a throw on the second writeFile cannot leave the first
@@ -147,9 +168,12 @@ async function writeTimerUnitFiles(
     }
     return null
   } catch (error) {
-    await restoreUnitFileSnapshots(ssh, paths, snapshots)
-    const reason = error instanceof Error ? error.message : String(error)
-    return failed(`[timer.scheduled: ${name}] failed to write timer unit files: ${reason}`)
+    return restoreUnitFileSnapshotsAfterWriteFailure(ssh, {
+      message: `[timer.scheduled: ${name}] failed to write timer unit files`,
+      paths,
+      snapshots,
+      writeError: error,
+    })
   }
 }
 

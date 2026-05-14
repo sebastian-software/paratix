@@ -226,6 +226,33 @@ describe("timer.scheduled — apply (state: present)", () => {
     expect(ssh.calls).not.toContain("systemctl daemon-reload")
   })
 
+  it("returns a structured failure when write rollback also fails", async () => {
+    const previousService = "[Unit]\nDescription=old service\n"
+    const previousTimer = "[Unit]\nDescription=old timer\n"
+    const ssh = createTimerApplyMockSsh({
+      [`[ -e '${SERVICE_PATH}' ]`]: { code: 0 },
+      [`[ -e '${TIMER_PATH}' ]`]: { code: 0 },
+      [`cat '${SERVICE_PATH}'`]: { stdout: previousService },
+      [`cat '${TIMER_PATH}'`]: { stdout: previousTimer },
+      [`stat -c '%a' '${SERVICE_PATH}'`]: { stdout: "0644" },
+      [`stat -c '%a' '${TIMER_PATH}'`]: { stdout: "0644" },
+    })
+    vi.spyOn(ssh, "writeFile")
+      .mockResolvedValueOnce()
+      .mockRejectedValueOnce(new Error("timer write failed: ENOSPC"))
+      .mockRejectedValueOnce(new Error("restore denied"))
+
+    const mod = timer.scheduled("backup", baseOptions)
+    const result = await mod.apply(ssh, emptyEnv)
+
+    expect(result.status).toBe("failed")
+    expect(String(result.error)).toContain("failed to write timer unit files")
+    expect(String(result.error)).toContain("timer write failed")
+    expect(String(result.error)).toContain("rollback of timer unit files also failed")
+    expect(String(result.error)).toContain("restore denied")
+    expect(ssh.calls).not.toContain("systemctl daemon-reload")
+  })
+
   it("returns failed when enable --now fails", async () => {
     const ssh = createTimerApplyMockSsh({
       [`[ -e '${SERVICE_PATH}' ]`]: { code: 1 },
