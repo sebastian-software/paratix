@@ -64,6 +64,7 @@ type MockSsh = {
   downloadFileCalls: DownloadFileCall[]
   execCalls: ExecCall[]
   probeSudoCalls: Array<Record<never, never>>
+  reconnectCalls: Array<Record<never, never>>
   removePortCalls: number[]
   updateHostCalls: string[]
   uploadFileCalls: UploadFileCall[]
@@ -333,9 +334,8 @@ export function createMockSsh(responses?: MockResponses, options?: MockSshOption
       const result = await exec(`cat ${shellQuote(path)}`, { silent: true })
       return result.stdout
     },
-    async reconnect() {
-      await Promise.resolve()
-    },
+    reconnect: sideEffects.reconnect,
+    reconnectCalls: sideEffects.reconnectCalls,
     removePort: spies.removePort,
     removePortCalls: spies.removePortCalls,
     async sha256(path) {

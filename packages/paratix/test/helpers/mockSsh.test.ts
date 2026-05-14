@@ -16,6 +16,9 @@ describe("createMockSsh", () => {
     expect(() => {
       ssh.disconnect()
     }).toThrow("createMockSsh: unstubbed disconnect call: disconnect()")
+    await expect(ssh.reconnect()).rejects.toThrow(
+      "createMockSsh: unstubbed reconnect call: reconnect()"
+    )
     await expect(ssh.downloadFile("/remote/file", "/local/file")).rejects.toThrow(
       "createMockSsh: unstubbed downloadFile call: /remote/file -> /local/file"
     )
@@ -39,6 +42,7 @@ describe("createMockSsh", () => {
     expect(() => {
       ssh.disconnect()
     }).not.toThrow()
+    await expect(ssh.reconnect()).resolves.toBeUndefined()
     await expect(ssh.downloadFile("/remote/file", "/local/file")).resolves.toBeUndefined()
     await expect(ssh.uploadFile("/local/file", "/remote/file")).resolves.toBeUndefined()
     await expect(
@@ -68,6 +72,7 @@ describe("createMockSsh", () => {
         allowDisconnect: true,
         allowDownloads: [{ localPath: "/local/file", remotePath: "/remote/file" }],
         allowProbeSudo: true,
+        allowReconnect: true,
         allowUploads: [
           { localPath: "/local/input", options: { mode: "0644" }, remotePath: "/remote/input" },
         ],
@@ -80,6 +85,7 @@ describe("createMockSsh", () => {
     await ssh.uploadFile("/local/input", "/remote/input", { mode: "0644" })
     await ssh.writeFile("/remote/output", "secret content", { mode: "0600" })
     await ssh.probeSudo()
+    await ssh.reconnect()
 
     expect(ssh.disconnectCalls).toHaveLength(1)
     expect(ssh.downloadFileCalls).toStrictEqual([
@@ -92,6 +98,7 @@ describe("createMockSsh", () => {
       { content: "secret content", options: { mode: "0600" }, remotePath: "/remote/output" },
     ])
     expect(ssh.probeSudoCalls).toHaveLength(1)
+    expect(ssh.reconnectCalls).toHaveLength(1)
   })
 
   it("does not include writeFile content in strict error messages", async () => {
@@ -352,6 +359,7 @@ describe("createStrictMockSsh", () => {
         allowDisconnect: true,
         allowDownloads: [{ localPath: "/local/file", remotePath: "/remote/file" }],
         allowProbeSudo: true,
+        allowReconnect: true,
         allowUnstubbedExec: ["echo ok"],
         allowUnstubbedOutput: ["cat /tmp/file"],
         allowUnstubbedTest: ["test -f /tmp/file"],
@@ -374,5 +382,6 @@ describe("createStrictMockSsh", () => {
       ssh.writeFile("/remote/file", "content", { mode: "0600" })
     ).resolves.toBeUndefined()
     await expect(ssh.probeSudo()).resolves.toBeUndefined()
+    await expect(ssh.reconnect()).resolves.toBeUndefined()
   })
 })

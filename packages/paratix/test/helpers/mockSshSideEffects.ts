@@ -33,6 +33,7 @@ export type SideEffectOptions = {
   allowDisconnect?: boolean
   allowDownloads?: DownloadFileAllowlistEntry[]
   allowProbeSudo?: boolean
+  allowReconnect?: boolean
   allowUploads?: UploadFileAllowlistEntry[]
   allowWrites?: WriteFileAllowlistEntry[]
   strict?: boolean
@@ -45,6 +46,8 @@ export type SideEffectRecorder = {
   downloadFileCalls: DownloadFileCall[]
   probeSudo: SshConnection["probeSudo"]
   probeSudoCalls: Array<Record<never, never>>
+  reconnect: SshConnection["reconnect"]
+  reconnectCalls: Array<Record<never, never>>
   uploadFile: SshConnection["uploadFile"]
   uploadFileCalls: UploadFileCall[]
   writeFile: SshConnection["writeFile"]
@@ -157,6 +160,7 @@ export function createSideEffectRecorder(options?: SideEffectOptions): SideEffec
   const disconnectCalls: Array<Record<never, never>> = []
   const downloadFileCalls: DownloadFileCall[] = []
   const probeSudoCalls: Array<Record<never, never>> = []
+  const reconnectCalls: Array<Record<never, never>> = []
   const uploadFileCalls: UploadFileCall[] = []
   const writeFileCalls: WriteFileCall[] = []
   return {
@@ -183,6 +187,17 @@ export function createSideEffectRecorder(options?: SideEffectOptions): SideEffec
       await Promise.resolve()
     },
     probeSudoCalls,
+    async reconnect() {
+      reconnectCalls.push({})
+      assertAllowed({
+        allowed: options?.allowReconnect === true,
+        kind: "reconnect",
+        options,
+        summary: "reconnect()",
+      })
+      await Promise.resolve()
+    },
+    reconnectCalls,
     uploadFile: createUploadFile(uploadFileCalls, options),
     uploadFileCalls,
     writeFile: createWriteFile(writeFileCalls, options),

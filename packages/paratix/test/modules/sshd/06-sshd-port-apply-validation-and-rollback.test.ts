@@ -526,9 +526,12 @@ describe("sshd.port — apply: validation and rollback", () => {
   })
 
   it("reconnects and live-verifies the target port when restart aborts the SSH session", async () => {
-    const mockSsh = createMockSsh({
-      [CAT_SSHD]: { stdout: "Port 22" },
-    })
+    const mockSsh = createMockSsh(
+      {
+        [CAT_SSHD]: { stdout: "Port 22" },
+      },
+      { allowReconnect: true }
+    )
     trackWriteFile(mockSsh)
     const execSpy = vi.spyOn(mockSsh, "exec")
     const addPortSpy = vi.spyOn(mockSsh, "addPort")
