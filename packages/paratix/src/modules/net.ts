@@ -820,6 +820,8 @@ async function applyPresentRoute(
   conn: SshConnection,
   parameters: RouteParameters
 ): Promise<ModuleResult | null> {
+  const preflight = await preparePresentRouteMutation(conn, parameters)
+  if (preflight.failure != null) return preflight.failure
   const { destination, device, dropinPath, gateway } = parameters
   const devicePart = device !== undefined && device !== "" ? ` dev ${shellQuote(device)}` : ""
   const routeResult = await conn.exec(
@@ -829,24 +831,113 @@ async function applyPresentRoute(
   if (routeResult.code !== 0) {
     return failedCommand(`[net.route: ${destination}] ip route replace failed`, routeResult)
   }
-  // R-0000277: defense-in-depth — refuse a symlinked dropin path before the
-  // atomic write would silently break it. compose/apt/aptKeyHelpers use the
-  // same guard for predictable system paths.
-  if (await isSymlink(conn, dropinPath)) {
-    return failed(`[net.route: ${destination}] refuses to write through symlink at ${dropinPath}`)
-  }
-  const mkdirFailure = await ensureRouteDropinDirectory(conn, parameters)
-  if (mkdirFailure != null) return mkdirFailure
   const dropinContent = buildRouteDropin(destination, gateway)
   try {
     await conn.writeFile(dropinPath, dropinContent, { mode: NET_CONFIG_FILE_MODE })
   } catch (error: unknown) {
     const reason = error instanceof Error ? error.message : String(error)
-    return failed(
-      `[net.route: ${destination}] persistent drop-in write failed after ip route replace; live route may now differ from persistent configuration: ${reason}`
-    )
+    return rollbackLiveRouteAfterFailure({
+      conn,
+      message: `[net.route: ${destination}] persistent drop-in write failed after ip route replace: ${reason}`,
+      parameters,
+      snapshot: preflight.snapshot,
+    })
   }
   return null
+}
+
+async function preparePresentRouteMutation(
+  conn: SshConnection,
+  parameters: RouteParameters
+): Promise<LiveRouteSnapshotOutcome> {
+  const { destination, dropinPath } = parameters
+  // R-0000277: defense-in-depth — refuse a symlinked dropin path before the
+  // atomic write would silently break it. compose/apt/aptKeyHelpers use the
+  // same guard for predictable system paths.
+  if (await isSymlink(conn, dropinPath)) {
+    return {
+      failure: failed(
+        `[net.route: ${destination}] refuses to write through symlink at ${dropinPath}`
+      ),
+      snapshot: null,
+    }
+  }
+  const mkdirFailure = await ensureRouteDropinDirectory(conn, parameters)
+  if (mkdirFailure != null) return { failure: mkdirFailure, snapshot: null }
+  return captureLiveRouteSnapshot(conn, destination)
+}
+
+type LiveRouteSnapshot = {
+  line: null | string
+}
+
+type LiveRouteSnapshotOutcome =
+  | { failure: ModuleResult; snapshot: null }
+  | { failure: null; snapshot: LiveRouteSnapshot }
+
+async function captureLiveRouteSnapshot(
+  conn: SshConnection,
+  destination: string
+): Promise<LiveRouteSnapshotOutcome> {
+  const result = await conn.exec(`ip route show ${shellQuote(destination)}`, EXEC_OPTS)
+  if (result.code !== 0) {
+    return {
+      failure: failedCommand(`[net.route: ${destination}] live route snapshot failed`, result),
+      snapshot: null,
+    }
+  }
+  const line = result.stdout
+    .split("\n")
+    .map((entry) => entry.trim())
+    .find((entry) => entry.length > 0)
+  return { failure: null, snapshot: { line: line ?? null } }
+}
+
+function routeLineCommand(line: string): string {
+  return line
+    .split(/\s+/v)
+    .filter((token) => token.length > 0)
+    .map((token) => shellQuote(token))
+    .join(" ")
+}
+
+async function rollbackLiveRoute(
+  conn: SshConnection,
+  parameters: RouteParameters,
+  snapshot: LiveRouteSnapshot
+): Promise<ModuleResult | null> {
+  const { destination, device, gateway } = parameters
+  const devicePart = device !== undefined && device !== "" ? ` dev ${shellQuote(device)}` : ""
+  const command =
+    snapshot.line == null
+      ? `ip route del ${shellQuote(destination)} via ${shellQuote(gateway)}${devicePart}`
+      : `ip route replace ${routeLineCommand(snapshot.line)}`
+  const result = await conn.exec(command, EXEC_OPTS)
+  if (result.code === 0) return null
+  return failedCommand(`[net.route: ${destination}] live route rollback failed`, result)
+}
+
+type LiveRouteRollbackContext = {
+  conn: SshConnection
+  message: string
+  parameters: RouteParameters
+  snapshot: LiveRouteSnapshot
+}
+
+async function rollbackLiveRouteAfterFailure(
+  context: LiveRouteRollbackContext
+): Promise<ModuleResult> {
+  const rollbackFailure = await rollbackLiveRoute(
+    context.conn,
+    context.parameters,
+    context.snapshot
+  )
+  if (rollbackFailure != null) {
+    return failed(
+      `${context.message}; rollback failed: ${rollbackFailure.error?.message ?? "unknown error"}`
+    )
+  }
+  return failed(`${context.message}; live route was rolled back`)
 }
 
 async function ensureRouteDropinDirectory(
@@ -868,33 +959,90 @@ type RouteApplyOutcome =
   | { changed: boolean; failure: null }
   | { changed: false; failure: ModuleResult }
 
+type LiveRouteDeleteOutcome =
+  | { changed: false; failure: ModuleResult; snapshot: null }
+  | { changed: false; failure: null; snapshot: null }
+  | { changed: true; failure: null; snapshot: LiveRouteSnapshot }
+
 async function applyAbsentRoute(
   conn: SshConnection,
   parameters: RouteParameters
 ): Promise<RouteApplyOutcome> {
+  const liveRoute = await deleteLiveRouteIfPresent(conn, parameters)
+  if (liveRoute.failure != null) return { changed: false, failure: liveRoute.failure }
+  const dropinOutcome = await removeRouteDropinIfExpected(conn, parameters)
+  if (dropinOutcome.failure != null)
+    return rollbackAbsentRouteOnPersistenceFailure({
+      conn,
+      liveRoute,
+      parameters,
+      persistenceOutcome: dropinOutcome,
+    })
+  const legacyDropinOutcome = await removeLegacyRouteDropinIfExpected(conn, parameters)
+  if (legacyDropinOutcome.failure != null)
+    return rollbackAbsentRouteOnPersistenceFailure({
+      conn,
+      liveRoute,
+      parameters,
+      persistenceOutcome: legacyDropinOutcome,
+    })
+  return {
+    changed: liveRoute.changed || dropinOutcome.changed || legacyDropinOutcome.changed,
+    failure: null,
+  }
+}
+
+async function deleteLiveRouteIfPresent(
+  conn: SshConnection,
+  parameters: RouteParameters
+): Promise<LiveRouteDeleteOutcome> {
   const { destination, device, gateway } = parameters
-  let changed = false
-  if (await hasLiveRoute(conn, { destination, device, gateway })) {
-    const devicePart = device !== undefined && device !== "" ? ` dev ${shellQuote(device)}` : ""
-    const routeResult = await conn.exec(
-      `ip route del ${shellQuote(destination)} via ${shellQuote(gateway)}${devicePart}`,
-      EXEC_OPTS
-    )
-    if (routeResult.code !== 0) {
-      return {
+  if (!(await hasLiveRoute(conn, { destination, device, gateway }))) {
+    return { changed: false, failure: null, snapshot: null }
+  }
+  const snapshot = await captureLiveRouteSnapshot(conn, destination)
+  if (snapshot.failure != null) return { changed: false, failure: snapshot.failure, snapshot: null }
+  const devicePart = device !== undefined && device !== "" ? ` dev ${shellQuote(device)}` : ""
+  const routeResult = await conn.exec(
+    `ip route del ${shellQuote(destination)} via ${shellQuote(gateway)}${devicePart}`,
+    EXEC_OPTS
+  )
+  return routeResult.code === 0
+    ? { changed: true, failure: null, snapshot: snapshot.snapshot }
+    : {
         changed: false,
         failure: failedCommand(`[net.route: ${destination}] ip route del failed`, routeResult),
+        snapshot: null,
       }
-    }
-    changed = true
+}
+
+type AbsentRouteRollbackContext = {
+  conn: SshConnection
+  liveRoute: LiveRouteDeleteOutcome
+  parameters: RouteParameters
+  persistenceOutcome: RouteApplyOutcome
+}
+
+async function rollbackAbsentRouteOnPersistenceFailure({
+  conn,
+  liveRoute,
+  parameters,
+  persistenceOutcome,
+}: AbsentRouteRollbackContext): Promise<RouteApplyOutcome> {
+  if (persistenceOutcome.failure == null) return persistenceOutcome
+  if (liveRoute.snapshot == null) return persistenceOutcome
+  const message =
+    persistenceOutcome.failure.error?.message ??
+    `[net.route: ${parameters.destination}] persistent route cleanup failed`
+  return {
+    changed: false,
+    failure: await rollbackLiveRouteAfterFailure({
+      conn,
+      message,
+      parameters,
+      snapshot: liveRoute.snapshot,
+    }),
   }
-  const dropinOutcome = await removeRouteDropinIfExpected(conn, parameters)
-  if (dropinOutcome.failure != null) return dropinOutcome
-  if (dropinOutcome.changed) changed = true
-  const legacyDropinOutcome = await removeLegacyRouteDropinIfExpected(conn, parameters)
-  if (legacyDropinOutcome.failure != null) return legacyDropinOutcome
-  if (legacyDropinOutcome.changed) changed = true
-  return { changed, failure: null }
 }
 
 async function removeRouteDropinIfExpected(

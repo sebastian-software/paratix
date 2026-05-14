@@ -261,11 +261,10 @@ describe("net.route — apply", () => {
 
     expect(result.status).toBe("failed")
     expect(String(result.error)).toContain("persistent drop-in write failed")
-    expect(String(result.error)).toContain(
-      "live route may now differ from persistent configuration"
-    )
+    expect(String(result.error)).toContain("live route was rolled back")
     expect(String(result.error)).toContain("disk full")
     expect(mockSsh.calls).toContain("ip route replace '10.0.0.0/24' via '192.168.1.1' dev 'eth0'")
+    expect(mockSsh.calls).toContain("ip route del '10.0.0.0/24' via '192.168.1.1' dev 'eth0'")
     expect(mockSsh.calls).not.toContain("networkctl reload")
     expect(mockSsh.calls.some((call) => call.includes("/var/lib/paratix/flags"))).toBe(false)
   })
@@ -303,16 +302,19 @@ describe("net.route — apply", () => {
   })
 
   it("returns failed when ip route replace fails (state: present)", async () => {
-    const mockSsh = createMockSsh({
-      "ip route replace '10.0.0.0/24' via '192.168.1.1'": {
-        code: 2,
-        stderr: "Nexthop has invalid gateway",
+    const mockSsh = createMockSsh(
+      {
+        "ip route replace '10.0.0.0/24' via '192.168.1.1'": {
+          code: 2,
+          stderr: "Nexthop has invalid gateway",
+        },
+        "ip route replace '10.0.0.0/24' via '192.168.1.1' dev 'eth0'": {
+          code: 2,
+          stderr: "Nexthop has invalid gateway",
+        },
       },
-      "ip route replace '10.0.0.0/24' via '192.168.1.1' dev 'eth0'": {
-        code: 2,
-        stderr: "Nexthop has invalid gateway",
-      },
-    })
+      SUCCESSFUL_ROUTE_APPLY_OPTIONS
+    )
     const mod = net.route("10.0.0.0/24", "192.168.1.1", { device: "eth0" })
     const result = await mod.apply(mockSsh, emptyEnv)
     expect(result.status).toBe("failed")
@@ -446,6 +448,32 @@ describe("net.route — apply", () => {
     const result = await mod.apply(mockSsh, emptyEnv)
     expect(result.status).toBe("failed")
     expect(String(result.error)).toContain("drop-in removal failed")
+    expect(mockSsh.calls).not.toContain("networkctl reload")
+  })
+
+  it("rolls the live route back when drop-in removal fails after deleting the route", async () => {
+    const dropinPath = routeDropinPath
+    const expectedDropin = `[Route]\nDestination=10.0.0.0/24\nGateway=192.168.1.1\n`
+    const mockSsh = createMockSsh(
+      {
+        [`cat '${dropinPath}'`]: { stdout: expectedDropin },
+        [`rm -f '${dropinPath}'`]: { code: 1, stderr: "permission denied" },
+        [`test -f '${dropinPath}'`]: { code: 0 },
+        "ip route replace '10.0.0.0/24' 'via' '192.168.1.1' 'dev' 'eth0'": { code: 0 },
+        [routeShowCommand]: { code: 0, stdout: liveRouteOutput },
+      },
+      SUCCESSFUL_ROUTE_APPLY_OPTIONS
+    )
+    const mod = net.route("10.0.0.0/24", "192.168.1.1", { device: "eth0", state: "absent" })
+    const result = await mod.apply(mockSsh, emptyEnv)
+
+    expect(result.status).toBe("failed")
+    expect(String(result.error)).toContain("drop-in removal failed")
+    expect(String(result.error)).toContain("live route was rolled back")
+    expect(mockSsh.calls).toContain("ip route del '10.0.0.0/24' via '192.168.1.1' dev 'eth0'")
+    expect(mockSsh.calls).toContain(
+      "ip route replace '10.0.0.0/24' 'via' '192.168.1.1' 'dev' 'eth0'"
+    )
     expect(mockSsh.calls).not.toContain("networkctl reload")
   })
 
