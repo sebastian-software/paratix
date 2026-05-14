@@ -1,4 +1,4 @@
-import { mkdirSync, writeFileSync } from "node:fs"
+import { existsSync, mkdirSync, writeFileSync } from "node:fs"
 import { basename, join, resolve } from "node:path"
 
 import { formatCliValue } from "./cliFormat.js"
@@ -108,6 +108,45 @@ function writeScaffoldSupportFiles(projectDirectory: string, initialUser: Initia
   )
 }
 
+function getManagedScaffoldPaths(
+  projectDirectory: string,
+  initialUser: InitialUserConfig
+): string[] {
+  const managedPaths = [
+    "package.json",
+    "server.ts",
+    "tsconfig.json",
+    ".gitignore",
+    ".prettierrc",
+    ".prettierignore",
+    "eslint.config.ts",
+    ".env.example",
+    join("files", ".gitkeep"),
+    join("files", "20auto-upgrades"),
+    join("files", "50unattended-upgrades"),
+  ]
+
+  if (initialUser.kind === "root") {
+    managedPaths.push(join("files", "admin-nopasswd-sudoers"))
+  }
+
+  return managedPaths.map((managedPath) => join(projectDirectory, managedPath))
+}
+
+function assertManagedScaffoldPathsAvailable(
+  projectDirectory: string,
+  initialUser: InitialUserConfig
+): void {
+  for (const managedPath of getManagedScaffoldPaths(projectDirectory, initialUser)) {
+    // eslint-disable-next-line security/detect-non-literal-fs-filename
+    if (existsSync(managedPath)) {
+      throw new Error(
+        `Error: Scaffold file ${formatCliValue(managedPath)} already exists; refusing to overwrite it.`
+      )
+    }
+  }
+}
+
 function normalizeProgrammaticInitialUserConfig(
   initialUser?: InitialUserConfig
 ): InitialUserConfig {
@@ -156,6 +195,7 @@ export function writeProjectFiles(projectDirectory: string, options?: ScaffoldOp
       `Error: Invalid project directory ${formatCliValue(projectDirectory)} — the derived package name contains control or bidi codepoints.`
     )
   }
+  assertManagedScaffoldPathsAvailable(projectDirectory, initialUser)
 
   // eslint-disable-next-line security/detect-non-literal-fs-filename
   mkdirSync(projectDirectory, { recursive: true })

@@ -213,6 +213,18 @@ describe("writeProjectFiles", () => {
     expect(existsSync(join(TEST_DIR, "server.ts"))).toBe(true)
   })
 
+  it("does not overwrite an existing managed project file", () => {
+    const existingPackageJson = '{"name":"keep-me"}\n'
+    writeFileSync(join(TEST_DIR, "package.json"), existingPackageJson)
+
+    expect(() => {
+      writeProjectFiles(TEST_DIR)
+    }).toThrow(/already exists/v)
+
+    expect(readFileSync(join(TEST_DIR, "package.json"), "utf8")).toBe(existingPackageJson)
+    expect(existsSync(join(TEST_DIR, "server.ts"))).toBe(false)
+  })
+
   it("generated tsconfig.json uses the DX-oriented ESNext/Bundler defaults", () => {
     writeProjectFiles(TEST_DIR)
 
