@@ -1,0 +1,16 @@
+{
+  "applyReview": {
+    "defaultCommitStrategy": "worktrees",
+    "finalValidation": "full",
+    "worktree": {
+      "baseDir": ".sf-plugin/.worktrees",
+      "setup": "auto"
+    }
+  },
+  "review": {
+    "profile": "focused",
+    "autoConfirmScope": true,
+    "designDecisionSources": "standard",
+    "validation": "full"
+  }
+}
