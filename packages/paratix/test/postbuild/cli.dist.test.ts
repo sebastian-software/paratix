@@ -134,6 +134,22 @@ export default {
     ).resolves.toBe("resolved-secret")
   })
 
+  it("re-exports every built-in module from the published package entry point", async () => {
+    const distIndexUrl = pathToFileURL(resolve(packageRootDirectory, "dist/index.js")).href
+    const distModulesUrl = pathToFileURL(
+      resolve(packageRootDirectory, "dist/modules/index.js")
+    ).href
+    const packageApi = (await import(distIndexUrl)) as Record<string, unknown>
+    const moduleApi = (await import(distModulesUrl)) as Record<string, unknown>
+
+    for (const [exportName, exportValue] of Object.entries(moduleApi)) {
+      expect(packageApi, `missing dist root built-in export: ${exportName}`).toHaveProperty(
+        exportName
+      )
+      expect(packageApi[exportName]).toBe(exportValue)
+    }
+  })
+
   it("supports package specifier imports from a consumer project", () => {
     const tempDirectory = mkdtempSync(join(tmpdir(), "paratix-consumer-dist-"))
     const nodeModulesDirectory = join(tempDirectory, "node_modules")
@@ -202,7 +218,8 @@ export default {
         consumerScriptPath,
         `
 import { resolveEnvironment } from "paratix"
-import { file, package as pkg, service } from "paratix/modules"
+import { file, package as pkg, service, swap, timer } from "paratix/modules"
+import { swap as rootSwap, timer as rootTimer } from "paratix"
 
 if (typeof resolveEnvironment !== "function") {
   throw new Error("paratix did not export resolveEnvironment")
@@ -215,6 +232,12 @@ if (typeof pkg?.installed !== "function") {
 }
 if (typeof service?.enabled !== "function") {
   throw new Error("paratix/modules did not export service.enabled")
+}
+if (rootSwap !== swap || typeof rootSwap?.file !== "function") {
+  throw new Error("paratix did not re-export swap from paratix/modules")
+}
+if (rootTimer !== timer || typeof rootTimer?.scheduled !== "function") {
+  throw new Error("paratix did not re-export timer from paratix/modules")
 }
 
 const resolved = await resolveEnvironment({ async SECRET() { return "resolved-secret" } }, "SECRET")

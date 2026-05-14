@@ -43,9 +43,11 @@ export {
   service,
   ssh,
   sshd,
+  swap,
   sysctl,
   system,
   systemd,
+  timer,
   ufw,
   user,
 } from "./modules/index.js"
