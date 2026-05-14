@@ -206,6 +206,11 @@ async function enableSwap(ssh: SshConnection, path: string): Promise<boolean | M
   return result.code === 0 ? true : failedCommand(`[swap.file: ${path}] swapon failed`, result)
 }
 
+async function reactivateSwap(ssh: SshConnection, path: string): Promise<ModuleResult | true> {
+  const result = await ssh.exec(`swapon ${shellQuote(path)}`, EXEC_OPTS)
+  return result.code === 0 ? true : failedCommand(`[swap.file: ${path}] swapon failed`, result)
+}
+
 async function applyAbsentSwapFile(
   ssh: SshConnection,
   options: NormalizedSwapFileOptions
@@ -224,7 +229,18 @@ async function applyAbsentSwapFile(
   // intact, preserving the chance to recover state on the next run.
   if (safeRemoval === "ok") {
     const removeResult = await removeSwapFile(ssh, options.path)
-    if (typeof removeResult !== "boolean") return removeResult
+    if (typeof removeResult !== "boolean") {
+      if (!disableResult) return removeResult
+      const reenableResult = await reactivateSwap(ssh, options.path)
+      if (reenableResult !== true) {
+        return failed(
+          `${removeResult.error?.message ?? "swap file removal failed"}; rollback swapon failed: ${
+            reenableResult.error?.message ?? "unknown error"
+          }`
+        )
+      }
+      return removeResult
+    }
     if (removeResult) swapChanged = true
   }
   const fstabResult = await ensureSwapFstabState({ desiredLine: null, path: options.path, ssh })

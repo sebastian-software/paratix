@@ -792,6 +792,7 @@ describe("swap.file — apply", () => {
       [`rm -f '${swapPath}'`]: { code: 1, stderr: "rm: cannot remove: Permission denied" },
       [`swaplabel '${swapPath}' >/dev/null 2>&1`]: { code: 0 },
       [`swapoff '${swapPath}'`]: { code: 0 },
+      [`swapon '${swapPath}'`]: { code: 0 },
       "swapon --show=NAME --noheadings": { stdout: `${swapPath}\n` },
     })
     // eslint-disable-next-line @typescript-eslint/require-await -- mock implementation
@@ -805,8 +806,39 @@ describe("swap.file — apply", () => {
     expect(result.status).toBe("failed")
     expect(result.error?.message).toContain("rm failed")
     expect(ssh.calls).toContain(`rm -f '${swapPath}'`)
+    expect(ssh.calls).toContain(`swapon '${swapPath}'`)
     // fstab must NOT have been rewritten — the entry stays so the next run
     // can recover.
+    expect(writtenFiles).toStrictEqual([])
+  })
+
+  it("re-enables swap and reports both failures when absent removal rollback fails", async () => {
+    const writtenFiles: Array<{ content: string; path: string }> = []
+    const ssh = createMockSsh({
+      [`[ -e '${swapPath}' ]`]: { code: 0 },
+      [`[ -f '${swapPath}' ]`]: { code: 0 },
+      [`[ -L '${swapPath}' ]`]: { code: 1 },
+      [`cat '/etc/fstab'`]: { stdout: `${fstabLine}\n` },
+      [`cat '${swapPath}'`]: { stdout: "existing swap bytes" },
+      [`rm -f '${swapPath}'`]: { code: 1, stderr: "rm: cannot remove: Permission denied" },
+      [`swaplabel '${swapPath}' >/dev/null 2>&1`]: { code: 0 },
+      [`swapoff '${swapPath}'`]: { code: 0 },
+      [`swapon '${swapPath}'`]: { code: 1, stderr: "swapon: failed" },
+      "swapon --show=NAME --noheadings": { stdout: `${swapPath}\n` },
+    })
+    // eslint-disable-next-line @typescript-eslint/require-await -- mock implementation
+    ssh.writeFile = async (path: string, content: string): Promise<void> => {
+      writtenFiles.push({ content, path })
+    }
+
+    const mod = swap.file({ path: swapPath, size: swapSize, state: "absent" })
+    const result = await mod.apply(ssh, emptyEnv)
+
+    expect(result.status).toBe("failed")
+    expect(result.error?.message).toContain("rm failed")
+    expect(result.error?.message).toContain("rollback swapon failed")
+    expect(result.error?.message).toContain("swapon failed")
+    expect(ssh.calls).toContain(`swapon '${swapPath}'`)
     expect(writtenFiles).toStrictEqual([])
   })
 })
