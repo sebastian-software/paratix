@@ -54,7 +54,7 @@ function makeStream(): StreamWithStderr {
 
 // R-0000141: extract the literal directory argument that the dirname-symlink
 // probe passed to `realpath -m --`. The probe shape is:
-//     realpath -m -- '<dir>' 2>/dev/null || printf '%s' '<dir>'
+//     realpath -m -- '<dir>'
 // Mock helpers must echo `<dir>` back so the equality check passes.
 const REALPATH_DIRECTORY_PATTERN = /realpath -m -- '(?<directory>[^']*)'/v
 function extractRealpathDirectory(command: string): string {
@@ -186,12 +186,30 @@ describe("SshConnectionImpl.writeFile — small content", () => {
     expect(executedCommands.some((cmd) => cmd.includes("mktemp"))).toBe(true)
     expect(executedCommands.some((cmd) => cmd.includes("mv"))).toBe(true)
 
-    // printf/tee must NOT be used to transport content. The dirname-symlink
-    // probe (R-0000141) uses `printf '%s'` only as a fallback for the
-    // directory string when realpath is unavailable; that is not a content
-    // transport pipeline.
+    // printf/tee must NOT be used to transport content.
     expect(executedCommands.some((cmd) => isContentTransportPrintf(cmd))).toBe(false)
     expect(executedCommands.some((cmd) => cmd.includes("tee"))).toBe(false)
+  })
+
+  it("fails closed when the dirname realpath probe fails", async () => {
+    const realpathFailureExecSpy = vi
+      .fn()
+      .mockImplementationOnce((cmd: string, cb: ExecCallback) => {
+        const stream = makeStream()
+        cb(undefined, stream)
+        expect(cmd).toBe("realpath -m -- '/etc'")
+        stream.stderr.emit("data", Buffer.from("realpath: command not found"))
+        stream.emit("close", 127)
+      })
+    const client = makeClientWithExecSpy(realpathFailureExecSpy)
+    const ssh = makeConnectedSsh(client)
+
+    await expect(
+      ssh.writeFile("/etc/config", makeSmallContent(), { mode: "0600" })
+    ).rejects.toThrow("realpath -m -- '/etc'")
+
+    expect(vi.mocked(sftpUploadContent)).not.toHaveBeenCalled()
+    expect(vi.mocked(writeFileSync)).not.toHaveBeenCalled()
   })
 
   it("throws a clear validation error when options.mode is missing instead of crashing with a TypeError", async () => {

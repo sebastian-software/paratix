@@ -294,8 +294,7 @@ function makeWriteFileExecSpy(
 }
 
 // R-0000141: helper that checks whether a command transports content via
-// `printf` (legacy payload pipeline) — not the realpath dirname-symlink
-// probe that uses `printf '%s'` only as a fallback for the directory string.
+// `printf` (legacy payload pipeline) — not unrelated validation commands.
 function isContentTransportPrintf(command: string): boolean {
   return command.includes("printf") && !command.includes("realpath")
 }
@@ -3223,9 +3222,7 @@ describe("SshConnectionImpl", () => {
       expect(vi.mocked(sftpUploadContent)).toHaveBeenCalledOnce()
 
       // printf must NOT have been used as the content-write path (i.e.
-      // `printf '%s' '<base64-or-payload>'`). The realpath dirname-symlink
-      // probe uses `printf '%s'` only as a fallback for the directory string,
-      // which is part of validation rather than payload transport.
+      // `printf '%s' '<base64-or-payload>'`).
       expect(executedCommands.some((cmd) => isContentTransportPrintf(cmd))).toBe(false)
 
       // mktemp and mv confirm atomic write path

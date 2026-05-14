@@ -695,9 +695,7 @@ export class SshConnectionImpl implements SshConnection {
     remotePath: string
   ): Promise<void> {
     if (directory === "" || directory === "/") return
-    const result = await this.output(
-      `realpath -m -- ${shellQuote(directory)} 2>/dev/null || printf '%s' ${shellQuote(directory)}`
-    )
+    const result = await this.output(`realpath -m -- ${shellQuote(directory)}`)
     const resolved = result.trim()
     if (resolved !== directory) {
       throw new Error(
