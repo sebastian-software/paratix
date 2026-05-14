@@ -95,42 +95,26 @@ function createProcessResult(parameters: {
 
 function attachProcessLifecycle(parameters: {
   child: ChildProcess
-  resolveOnce: (result: RsyncProcessResult) => void
-  stderr: BoundedOutputCapture
-  stdout: BoundedOutputCapture
+  failOnClose: (error: Error) => void
   timeoutMs: number
 }): () => void {
-  const { child, resolveOnce, stderr, stdout, timeoutMs } = parameters
+  const { child, failOnClose, timeoutMs } = parameters
   let timeoutHandle: NodeJS.Timeout | undefined
   const abortSignal = getRunnerAbortSignal()
   let abortListener: (() => void) | undefined
 
   if (timeoutMs > 0) {
     timeoutHandle = setTimeout(() => {
+      failOnClose(new Error(`rsync timed out after ${String(timeoutMs)}ms`))
       killRsyncChildEscalating(child)
-      resolveOnce(
-        createProcessResult({
-          code: null,
-          spawnError: new Error(`rsync timed out after ${String(timeoutMs)}ms`),
-          stderr,
-          stdout,
-        })
-      )
     }, timeoutMs)
     timeoutHandle.unref()
   }
 
   if (abortSignal !== undefined) {
     abortListener = (): void => {
+      failOnClose(new Error("rsync aborted — runner shutdown in progress"))
       killRsyncChildEscalating(child)
-      resolveOnce(
-        createProcessResult({
-          code: null,
-          spawnError: new Error("rsync aborted — runner shutdown in progress"),
-          stderr,
-          stdout,
-        })
-      )
     }
     if (abortSignal.aborted) {
       abortListener()
@@ -172,12 +156,17 @@ export async function runRsyncProcess(
     const stderr = createBoundedOutputCapture("stderr")
     let settled = false
     let detachLifecycle = NOOP_DETACH
+    let pendingTerminationError: Error | undefined
 
     const resolveOnce = (result: RsyncProcessResult): void => {
       if (settled) return
       settled = true
       detachLifecycle()
       resolve(result)
+    }
+
+    const failOnClose = (error: Error): void => {
+      pendingTerminationError ??= error
     }
 
     child.stdout.setEncoding("utf8")
@@ -193,9 +182,11 @@ export async function runRsyncProcess(
       resolveOnce(createProcessResult({ code: null, spawnError: error, stderr, stdout }))
     })
     child.on("close", (code: null | number) => {
-      resolveOnce(createProcessResult({ code, stderr, stdout }))
+      resolveOnce(
+        createProcessResult({ code, spawnError: pendingTerminationError, stderr, stdout })
+      )
     })
 
-    detachLifecycle = attachProcessLifecycle({ child, resolveOnce, stderr, stdout, timeoutMs })
+    detachLifecycle = attachProcessLifecycle({ child, failOnClose, timeoutMs })
   })
 }

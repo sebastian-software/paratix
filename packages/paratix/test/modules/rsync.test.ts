@@ -376,15 +376,22 @@ describe("rsync.sync — apply", () => {
     const mod = rsync.sync({ dest: "/remote/dest", src: "/local/src", timeout: 25 })
 
     const resultPromise = mod.apply(mockSsh, emptyEnv)
+    let resolved = false
+    void resultPromise.then(() => {
+      resolved = true
+    })
     await vi.advanceTimersByTimeAsync(25)
-    const result = await resultPromise
 
-    expect(result.status).toBe("failed")
-    expect(result.error?.message).toContain("rsync timed out after 25ms")
+    expect(resolved).toBe(false)
     expect(killCalls).toStrictEqual(["SIGTERM"])
 
     await vi.advanceTimersByTimeAsync(1000)
     expect(killCalls).toStrictEqual(["SIGTERM", "SIGKILL"])
+
+    child.emit("close", 137)
+    const result = await resultPromise
+    expect(result.status).toBe("failed")
+    expect(result.error?.message).toContain("rsync timed out after 25ms")
   })
 
   it("kills and fails a hanging rsync child when the runner abort signal fires", async () => {
@@ -397,15 +404,23 @@ describe("rsync.sync — apply", () => {
     const mod = rsync.sync({ dest: "/remote/dest", src: "/local/src", timeout: 10_000 })
 
     const resultPromise = mod.apply(mockSsh, emptyEnv)
+    let resolved = false
+    void resultPromise.then(() => {
+      resolved = true
+    })
     controller.abort()
-    const result = await resultPromise
 
-    expect(result.status).toBe("failed")
-    expect(result.error?.message).toContain("rsync aborted")
+    await vi.advanceTimersByTimeAsync(0)
+    expect(resolved).toBe(false)
     expect(killCalls).toStrictEqual(["SIGTERM"])
 
     await vi.advanceTimersByTimeAsync(1000)
     expect(killCalls).toStrictEqual(["SIGTERM", "SIGKILL"])
+
+    child.emit("close", 143)
+    const result = await resultPromise
+    expect(result.status).toBe("failed")
+    expect(result.error?.message).toContain("rsync aborted")
   })
 })
 
