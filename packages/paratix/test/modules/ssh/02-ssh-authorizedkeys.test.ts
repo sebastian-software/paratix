@@ -31,7 +31,7 @@ const successfulSshApplyOptions: MockSshOptions = {
       result: { code: 0 },
     },
     {
-      command: /^\{ if \[ -f '[^']+\/\.ssh\/authorized_keys' \]; then .+; fi; \}$/v,
+      command: /^\{ if \[ -e '[^']+\/\.ssh\/authorized_keys' \]; then .+; fi; \}$/v,
       result: { code: 0 },
     },
     {
@@ -97,7 +97,7 @@ function presentAuthorizedKeysRewriteCommand(
   temporaryPath: string,
   key: string
 ): string {
-  return `{ if [ -f ${authorizedKeysPath} ]; then awk '1' ${authorizedKeysPath} > '${temporaryPath}' || exit $?; grep -qxF -- '${key}' ${authorizedKeysPath}; grep_status=$?; if [ "$grep_status" -eq 0 ]; then :; elif [ "$grep_status" -eq 1 ]; then printf '%s\\n' '${key}' >> '${temporaryPath}'; else exit "$grep_status"; fi; else printf '%s\\n' '${key}' > '${temporaryPath}'; fi; }`
+  return `{ if [ -e ${authorizedKeysPath} ]; then [ ! -L ${authorizedKeysPath} ] || { echo 'authorized_keys must not be a symlink' >&2; exit 1; }; [ -f ${authorizedKeysPath} ] || { echo 'authorized_keys must be a regular file' >&2; exit 1; }; awk '1' ${authorizedKeysPath} > '${temporaryPath}' || exit $?; grep -qxF -- '${key}' '${temporaryPath}'; grep_status=$?; if [ "$grep_status" -eq 0 ]; then :; elif [ "$grep_status" -eq 1 ]; then printf '%s\\n' '${key}' >> '${temporaryPath}'; else exit "$grep_status"; fi; else printf '%s\\n' '${key}' > '${temporaryPath}'; fi; }`
 }
 
 function absentAuthorizedKeysRewriteCommand(
@@ -105,7 +105,7 @@ function absentAuthorizedKeysRewriteCommand(
   temporaryPath: string,
   key: string
 ): string {
-  return `{ if [ -f ${authorizedKeysPath} ]; then grep -vxF -- '${key}' ${authorizedKeysPath} > '${temporaryPath}'; grep_status=$?; if [ "$grep_status" -eq 0 ] || [ "$grep_status" -eq 1 ]; then :; else exit "$grep_status"; fi; else : > '${temporaryPath}'; fi; }`
+  return `{ if [ -e ${authorizedKeysPath} ]; then [ ! -L ${authorizedKeysPath} ] || { echo 'authorized_keys must not be a symlink' >&2; exit 1; }; [ -f ${authorizedKeysPath} ] || { echo 'authorized_keys must be a regular file' >&2; exit 1; }; grep -vxF -- '${key}' ${authorizedKeysPath} > '${temporaryPath}'; grep_status=$?; if [ "$grep_status" -eq 0 ] || [ "$grep_status" -eq 1 ]; then :; else exit "$grep_status"; fi; else : > '${temporaryPath}'; fi; }`
 }
 
 function authorizedKeysFinalReplaceCommand(parameters: {
@@ -534,6 +534,31 @@ describe("ssh.authorizedKeys", () => {
     expect(mockSsh.calls).not.toContain(aliceFinalReplaceCommand)
   })
 
+  it("regression: present rewrite fails closed when authorized_keys is recreated as a symlink during staging", async () => {
+    const rewriteCommand = presentAuthorizedKeysRewriteCommand(aliceKeys, tempPath, testKey)
+    const mockSsh = createMockSsh(
+      aliceResponses({
+        [aliceMktempPattern]: { stdout: tempPath },
+        [rewriteCommand]: {
+          code: 1,
+          stderr: "authorized_keys must not be a symlink",
+        },
+      }),
+      successfulSshApplyOptions
+    )
+    const mod = ssh.authorizedKeys("alice", testKey)
+
+    const result = await mod.apply(mockSsh, emptyEnv)
+
+    expect(result.status).toBe("failed")
+    expect(String(result.error)).toContain("authorized_keys must not be a symlink")
+    expect(rewriteCommand).toContain(`[ ! -L ${aliceKeys} ]`)
+    expect(rewriteCommand).toContain(`grep -qxF -- '${testKey}' '${tempPath}'`)
+    expect(rewriteCommand).not.toContain(`grep -qxF -- '${testKey}' ${aliceKeys}`)
+    expect(mockSsh.calls).toContain(rewriteCommand)
+    expect(mockSsh.calls).not.toContain(aliceFinalReplaceCommand)
+  })
+
   it("apply removes key with grep -vxF and preserves filter errors (state: absent)", async () => {
     const mockSsh = createSshApplyMockSsh(
       aliceResponses({
@@ -599,6 +624,31 @@ describe("ssh.authorizedKeys", () => {
     const result = await mod.apply(mockSsh, emptyEnv)
     expect(result.status).toBe("failed")
     expect(String(result.error)).toContain("grep: read error")
+    expect(mockSsh.calls).toContain(rewriteCommand)
+    expect(mockSsh.calls).not.toContain(aliceFinalReplaceCommand)
+  })
+
+  it("regression: absent rewrite fails closed when authorized_keys is recreated as a symlink during staging", async () => {
+    const rewriteCommand = absentAuthorizedKeysRewriteCommand(aliceKeys, tempPath, testKey)
+    const mockSsh = createMockSsh(
+      aliceResponses({
+        "[ -e '/home/alice/.ssh/authorized_keys' ]": { code: 0 },
+        [`grep -qxF -- '${testKey}' ${aliceKeys}`]: { code: 0 },
+        [aliceMktempPattern]: { stdout: tempPath },
+        [rewriteCommand]: {
+          code: 1,
+          stderr: "authorized_keys must not be a symlink",
+        },
+      }),
+      successfulSshApplyOptions
+    )
+    const mod = ssh.authorizedKeys("alice", testKey, { state: "absent" })
+
+    const result = await mod.apply(mockSsh, emptyEnv)
+
+    expect(result.status).toBe("failed")
+    expect(String(result.error)).toContain("authorized_keys must not be a symlink")
+    expect(rewriteCommand).toContain(`[ ! -L ${aliceKeys} ]`)
     expect(mockSsh.calls).toContain(rewriteCommand)
     expect(mockSsh.calls).not.toContain(aliceFinalReplaceCommand)
   })

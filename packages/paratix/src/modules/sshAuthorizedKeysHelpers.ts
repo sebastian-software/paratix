@@ -188,10 +188,13 @@ async function stageAuthorizedKeysContent(
   }
 ): Promise<ModuleResult | null> {
   const { authorizedKeysPath, key, state, temporaryPath, user } = parameters
+  const quotedAuthorizedKeysPath = shellQuote(authorizedKeysPath)
+  const quotedTemporaryPath = shellQuote(temporaryPath)
+  const existingAuthorizedKeysGuard = `[ ! -L ${quotedAuthorizedKeysPath} ] || { echo 'authorized_keys must not be a symlink' >&2; exit 1; }; [ -f ${quotedAuthorizedKeysPath} ] || { echo 'authorized_keys must be a regular file' >&2; exit 1; }`
   const stage =
     state === "present"
       ? await conn.exec(
-          `{ if [ -f ${shellQuote(authorizedKeysPath)} ]; then awk '1' ${shellQuote(authorizedKeysPath)} > ${shellQuote(temporaryPath)} || exit $?; grep -qxF -- ${shellQuote(key)} ${shellQuote(authorizedKeysPath)}; grep_status=$?; if [ "$grep_status" -eq 0 ]; then :; elif [ "$grep_status" -eq 1 ]; then printf '%s\\n' ${shellQuote(key)} >> ${shellQuote(temporaryPath)}; else exit "$grep_status"; fi; else printf '%s\\n' ${shellQuote(key)} > ${shellQuote(temporaryPath)}; fi; }`,
+          `{ if [ -e ${quotedAuthorizedKeysPath} ]; then ${existingAuthorizedKeysGuard}; awk '1' ${quotedAuthorizedKeysPath} > ${quotedTemporaryPath} || exit $?; grep -qxF -- ${shellQuote(key)} ${quotedTemporaryPath}; grep_status=$?; if [ "$grep_status" -eq 0 ]; then :; elif [ "$grep_status" -eq 1 ]; then printf '%s\\n' ${shellQuote(key)} >> ${quotedTemporaryPath}; else exit "$grep_status"; fi; else printf '%s\\n' ${shellQuote(key)} > ${quotedTemporaryPath}; fi; }`,
           MUTATION_EXEC_OPTS
         )
       : // R-0000044: use `grep -vxF` (whole-line match) to mirror the present
@@ -199,7 +202,7 @@ async function stageAuthorizedKeysContent(
         // body is a substring of the key being deleted (e.g. a key appearing
         // again with options-prefix or a different comment).
         await conn.exec(
-          `{ if [ -f ${shellQuote(authorizedKeysPath)} ]; then grep -vxF -- ${shellQuote(key)} ${shellQuote(authorizedKeysPath)} > ${shellQuote(temporaryPath)}; grep_status=$?; if [ "$grep_status" -eq 0 ] || [ "$grep_status" -eq 1 ]; then :; else exit "$grep_status"; fi; else : > ${shellQuote(temporaryPath)}; fi; }`,
+          `{ if [ -e ${quotedAuthorizedKeysPath} ]; then ${existingAuthorizedKeysGuard}; grep -vxF -- ${shellQuote(key)} ${quotedAuthorizedKeysPath} > ${quotedTemporaryPath}; grep_status=$?; if [ "$grep_status" -eq 0 ] || [ "$grep_status" -eq 1 ]; then :; else exit "$grep_status"; fi; else : > ${quotedTemporaryPath}; fi; }`,
           MUTATION_EXEC_OPTS
         )
   if (stage.code !== 0) {
