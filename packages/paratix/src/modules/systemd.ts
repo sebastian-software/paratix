@@ -48,6 +48,13 @@ type UnitFileSnapshot =
     }
   | { exists: false }
 
+const formatCaughtError = (error: unknown): string =>
+  error instanceof Error ? error.message : String(error)
+
+function failedWithRollbackFailure(message: string, rollbackError: unknown): ModuleResult {
+  return failed(`${message}\nrollback failed: ${formatCaughtError(rollbackError)}`)
+}
+
 async function snapshotUnitFile(ssh: SshConnection, filePath: string): Promise<UnitFileSnapshot> {
   if (!(await ssh.exists(filePath))) return { exists: false }
   const content = await ssh.readFile(filePath)
@@ -118,9 +125,13 @@ async function writeSystemdUnitFile(parameters: {
     await ssh.writeFile(filePath, content, { mode: SYSTEMD_UNIT_MODE })
     return null
   } catch (error) {
-    await restoreUnitFileSnapshot(ssh, filePath, snapshot)
-    const reason = error instanceof Error ? error.message : String(error)
-    return failed(`[systemd.unit: ${name}] failed to write unit file: ${reason}`)
+    const message = `[systemd.unit: ${name}] failed to write unit file: ${formatCaughtError(error)}`
+    try {
+      await restoreUnitFileSnapshot(ssh, filePath, snapshot)
+    } catch (rollbackError) {
+      return failedWithRollbackFailure(message, rollbackError)
+    }
+    return failed(message)
   }
 }
 
@@ -178,9 +189,9 @@ async function rollbackUnitAfterDaemonReloadFailure(parameters: {
       ssh,
     })
   } catch (error) {
-    const reason = error instanceof Error ? error.message : String(error)
-    return failed(
-      `${result.error?.message ?? "systemctl daemon-reload failed"}\nrollback failed: ${reason}`
+    return failedWithRollbackFailure(
+      result.error?.message ?? "systemctl daemon-reload failed",
+      error
     )
   }
   return result

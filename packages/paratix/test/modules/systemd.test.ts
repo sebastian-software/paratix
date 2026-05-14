@@ -425,6 +425,30 @@ describe("systemd.unit", () => {
     expect(ssh.calls).not.toContain("systemctl daemon-reload")
   })
 
+  it("reports writeFile and rollback failures when both fail", async () => {
+    const previousContent = "[Unit]\nDescription=Previous\n"
+    const ssh = createMockSsh({
+      [`[ -e '${filePath}' ]`]: { code: 0 },
+      [`cat '${filePath}'`]: { stdout: previousContent },
+      [`stat -c '%a' '${filePath}'`]: { code: 0, stdout: "600\n" },
+    })
+    const writeFile = vi
+      .spyOn(ssh, "writeFile")
+      .mockRejectedValueOnce(new Error("SFTP write failed: ENOSPC"))
+      .mockRejectedValueOnce(new Error("rollback write failed: EROFS"))
+    const mod = systemd.unit(unitName, unitContent)
+    const result = await mod.apply(ssh, emptyEnv)
+
+    expect(result.status).toBe("failed")
+    expect(String(result.error)).toContain("failed to write unit file")
+    expect(String(result.error)).toContain("ENOSPC")
+    expect(String(result.error)).toContain("rollback failed")
+    expect(String(result.error)).toContain("EROFS")
+    expect(writeFile).toHaveBeenNthCalledWith(1, filePath, unitContent, { mode: "0644" })
+    expect(writeFile).toHaveBeenNthCalledWith(2, filePath, previousContent, { mode: "600" })
+    expect(ssh.calls).not.toContain("systemctl daemon-reload")
+  })
+
   // R-0000211: when the file did not exist before, the snapshot is "absent"
   // and the rollback path removes the freshly-written file via `rm -f`.
   it("R-0000211: removes a freshly-written unit file when writeFile throws and snapshot is absent", async () => {
