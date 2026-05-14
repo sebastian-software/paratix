@@ -76,13 +76,19 @@ async function runOneSignal(parameters: {
   currentEnvironment: Environment
   hooks?: SignalHooks
   onSignalStep?: (step: OrchestrationStep) => Promise<void>
+  shutdownSignal?: () => NodeJS.Signals | null
   signal: Module
   ssh: null | SshConnection
   verbose: boolean
 }): Promise<{ nextEnvironment: Environment; status: SignalRunStatus }> {
   const connection = parameters.signal.local === true ? null : parameters.ssh
   startModuleSpinner(`signal: ${parameters.signal.name}`)
-  const result = await parameters.signal.apply(connection, parameters.currentEnvironment)
+  const result =
+    parameters.shutdownSignal == null
+      ? await parameters.signal.apply(connection, parameters.currentEnvironment)
+      : await parameters.signal.apply(connection, parameters.currentEnvironment, {
+          shutdownSignal: parameters.shutdownSignal,
+        })
   const nextEnvironment = await applySignalMeta({
     currentEnvironment: parameters.currentEnvironment,
     onSignalStep: parameters.onSignalStep,
@@ -114,6 +120,7 @@ export async function runSignalModules(parameters: SignalRunParameters): Promise
         currentEnvironment,
         hooks: parameters.hooks,
         onSignalStep: parameters.onSignalStep,
+        shutdownSignal: parameters.shutdownSignal,
         signal,
         ssh: parameters.ssh,
         verbose,

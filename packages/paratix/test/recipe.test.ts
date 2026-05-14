@@ -11,6 +11,7 @@ import { CommandError } from "../src/sshHelpers.js"
 import { createMockSsh } from "./helpers/mockSsh.js"
 
 const emptyEnv: Environment = {}
+const noShutdownSignal = () => null
 
 function makeModule(
   checkResult: "needs-apply" | "ok",
@@ -512,6 +513,29 @@ describe("recipe", () => {
       expect(secondSignal.apply).not.toHaveBeenCalled()
     }
   )
+
+  it("passes shutdownSignal to recipe signal apply options", async () => {
+    let capturedShutdownSignal: (() => NodeJS.Signals | null) | undefined
+    const signal: Module = {
+      // eslint-disable-next-line @typescript-eslint/require-await -- Interface requires async
+      async apply(_ssh, _environment, options) {
+        capturedShutdownSignal = options?.shutdownSignal
+        return { status: "changed" }
+      },
+      // eslint-disable-next-line @typescript-eslint/require-await -- Interface requires async
+      async check() {
+        return "needs-apply"
+      },
+      name: "signal-module",
+    }
+
+    const mod = makeModule("needs-apply", "changed")
+    const r = recipe("test-recipe", [mod], { signals: [signal] })
+    await r.apply(null, emptyEnv, { shutdownSignal: noShutdownSignal })
+
+    expect(capturedShutdownSignal).toBe(noShutdownSignal)
+    expect(capturedShutdownSignal?.()).toBeNull()
+  })
 
   it("check returns ok for a recipe with no child modules", async () => {
     const r = recipe("empty", [])

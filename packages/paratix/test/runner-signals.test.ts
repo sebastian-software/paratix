@@ -1066,6 +1066,47 @@ describe("runPlaybook local signal module behaviour", () => {
     // A local signal module must receive null instead of an SSH connection
     expect(capturedSshInSignalApply).toBeNull()
   })
+
+  it("passes shutdownSignal to top-level signal apply options", async () => {
+    const capturedConfigs: unknown[] = []
+
+    vi.doMock("../src/ssh.js", () => ({
+      shellQuote: (s: string) => `'${s}'`,
+      SshConnectionImpl: makeMockSshClass(capturedConfigs, { lifecycle: "permissive" }),
+    }))
+
+    const { runPlaybook } = await import("../src/runner.js")
+
+    let capturedShutdownSignal: NodeJS.Signals | null | undefined
+    const signalModule: Module = {
+      async apply(_ssh, _environment, options) {
+        await Promise.resolve()
+        getSignalBus().emit("SIGTERM")
+        capturedShutdownSignal = options?.shutdownSignal?.()
+        return { status: "changed" } satisfies ModuleResult
+      },
+      check: vi.fn().mockResolvedValue("needs-apply" as const),
+      name: "signal-module",
+    }
+
+    const changingModule: Module = {
+      apply: vi.fn().mockResolvedValue({ status: "changed" } satisfies ModuleResult),
+      check: vi.fn().mockResolvedValue("needs-apply" as const),
+      name: "changing-module",
+    }
+
+    const definition: ServerDefinition = {
+      host: "1.2.3.4",
+      name: "test-server",
+      run: [changingModule],
+      signals: [signalModule],
+      ssh: { ports: [22], privateKey: "~/.ssh/id", user: "root" },
+    }
+
+    await runPlaybook(definition)
+
+    expect(capturedShutdownSignal).toBe("SIGTERM")
+  })
 })
 
 describe("runPlaybook runSignals stats.incrementSignals on failure", () => {
