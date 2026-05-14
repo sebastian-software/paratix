@@ -11,6 +11,7 @@ import {
   NEEDS_APPLY,
   type SshConnection,
 } from "../types.js"
+import { withMutexLock } from "./moduleHelpers.js"
 import { type Distro, parseOsReleaseDistro } from "./releaseUpgradeDistro.js"
 import {
   isAcceptableSourcesPath,
@@ -26,6 +27,7 @@ import { buildRebootMetaEntriesWithTimeout } from "./resolveHostTimeout.js"
 const NONINTERACTIVE = "DEBIAN_FRONTEND=noninteractive"
 const CODENAME_RE = /^[a-z]{3,20}$/v
 const NO_UBUNTU_RELEASE_PATTERN = /no new release (?:found|available)/iv
+const DEBIAN_RELEASE_UPGRADE_MUTEX = "release-upgrade-mutex"
 function isNoUbuntuReleaseAvailable(result: ExecResult): boolean {
   if (result.code === 0) return false
   return NO_UBUNTU_RELEASE_PATTERN.test(`${result.stdout}\n${result.stderr}`)
@@ -492,6 +494,64 @@ async function runDebianUpgradePipeline(
   return null
 }
 
+async function runDebianUpgradeCriticalSection(parameters: {
+  options: ReleaseUpgradeOptions
+  ssh: SshConnection
+  targetCodename: string
+}): Promise<ModuleResult> {
+  const { options, ssh, targetCodename } = parameters
+  const currentCodename = await getDebianCurrentCodename(ssh)
+  if (currentCodename === targetCodename) return { status: "ok" }
+
+  if (!isSupportedDebianUpgradePath(currentCodename, targetCodename)) {
+    return failed(
+      `[releaseUpgrade.upgrade] unsupported Debian release upgrade path: ${currentCodename} -> ${targetCodename}`
+    )
+  }
+
+  // R-0000046: snapshot every sources file before rewriting it so a
+  // downstream apt failure can roll the sources back to the original suite.
+  // Without rollback, a partial failure would leave the host pointing at the
+  // new suite while no upgrade has actually completed — the next apt run
+  // would then operate on a half-migrated system.
+  const snapshots = await replaceCodenameInSourcesList(ssh, currentCodename, targetCodename)
+
+  const pipelineFailure = await runDebianUpgradePipeline(ssh, options)
+  if (pipelineFailure != null) {
+    return handleDebianPipelineFailure({ options, pipelineFailure, snapshots, ssh })
+  }
+
+  const entries = await buildRebootMeta(options)
+  if (!Array.isArray(entries)) return entries
+  return { meta: entries, status: "changed" }
+}
+
+function isMutexLockFailure(error: unknown): boolean {
+  if (!(error instanceof Error)) return false
+  return (
+    error.message.includes("[moduleHelpers]") ||
+    error.message.includes(DEBIAN_RELEASE_UPGRADE_MUTEX) ||
+    error.message.includes("/var/lib/paratix/flags")
+  )
+}
+
+async function runDebianUpgradeWithMutex(parameters: {
+  options: ReleaseUpgradeOptions
+  ssh: SshConnection
+  targetCodename: string
+}): Promise<ModuleResult> {
+  try {
+    return await withMutexLock(parameters.ssh, {
+      lockName: DEBIAN_RELEASE_UPGRADE_MUTEX,
+      section: async () => runDebianUpgradeCriticalSection(parameters),
+    })
+  } catch (error) {
+    if (!isMutexLockFailure(error)) throw error
+    const reason = error instanceof Error ? error.message : String(error)
+    return failed(`[releaseUpgrade.upgrade] failed to acquire release upgrade mutex: ${reason}`)
+  }
+}
+
 /**
  * Run the Debian release upgrade by rewriting sources and running
  * `apt-get full-upgrade`.
@@ -529,21 +589,7 @@ async function applyDebian(
     )
   }
 
-  // R-0000046: snapshot every sources file before rewriting it so a
-  // downstream apt failure can roll the sources back to the original suite.
-  // Without rollback, a partial failure would leave the host pointing at the
-  // new suite while no upgrade has actually completed — the next apt run
-  // would then operate on a half-migrated system.
-  const snapshots = await replaceCodenameInSourcesList(ssh, currentCodename, targetCodename)
-
-  const pipelineFailure = await runDebianUpgradePipeline(ssh, options)
-  if (pipelineFailure != null) {
-    return handleDebianPipelineFailure({ options, pipelineFailure, snapshots, ssh })
-  }
-
-  const entries = await buildRebootMeta(options)
-  if (!Array.isArray(entries)) return entries
-  return { meta: entries, status: "changed" }
+  return runDebianUpgradeWithMutex({ options, ssh, targetCodename })
 }
 
 /**

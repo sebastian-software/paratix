@@ -11,6 +11,7 @@ const emptyEnv = {}
 const createMockSsh: typeof createBaseMockSsh = (responses, options) =>
   createBaseMockSsh(responses, {
     ...options,
+    allowFlagLockInternalDefaults: true,
     allowWrites: [
       { options: { mode: "0644" }, remotePath: "/etc/apt/sources.list" },
       { options: { mode: "0644" }, remotePath: /^\/etc\/apt\/sources\.list\.d\/.+$/v },
@@ -59,6 +60,8 @@ function installSequencedExec(
   let calls = 0
   const exec: typeof ssh.exec = async (nextCommand, options) => {
     if (nextCommand !== command) return originalExec(nextCommand, options)
+    ssh.calls.push(nextCommand)
+    ssh.execCalls.push({ command: nextCommand, options })
     const response = responses[calls] ?? responses.at(-1)!
     calls += 1
     return {
@@ -68,6 +71,23 @@ function installSequencedExec(
     }
   }
   Object.assign(ssh, { exec })
+  return { callCount: () => calls }
+}
+
+function installSequencedOutput(
+  ssh: ReturnType<typeof createMockSsh>,
+  command: string,
+  outputs: string[]
+): { callCount: () => number } {
+  const originalOutput = ssh.output.bind(ssh)
+  let calls = 0
+  const output: typeof ssh.output = async (nextCommand) => {
+    if (nextCommand !== command) return originalOutput(nextCommand)
+    const response = outputs[calls] ?? outputs.at(-1)!
+    calls += 1
+    return response
+  }
+  Object.assign(ssh, { output })
   return { callCount: () => calls }
 }
 
@@ -352,6 +372,57 @@ describe("releaseUpgrade.upgrade — apply (Debian)", () => {
     expect(ssh.calls).toContain("DEBIAN_FRONTEND=noninteractive apt-get autoremove -y")
   })
 
+  it("acquires and releases the release-upgrade mutex around Debian sources rewrite and pipeline", async () => {
+    const ssh = createMockSsh(debianApplyResponses("bookworm", "trixie"))
+    const mod = releaseUpgrade.upgrade()
+    const result = await mod.apply(ssh, emptyEnv)
+
+    expect(result.status).toBe("changed")
+    const lockMkdir = "mkdir /var/lib/paratix/flags/'release-upgrade-mutex'"
+    const lockRmdir = "rmdir /var/lib/paratix/flags/'release-upgrade-mutex'"
+    expect(ssh.calls).toContain(lockMkdir)
+    expect(ssh.calls).toContain(lockRmdir)
+    expect(ssh.calls.indexOf(lockMkdir)).toBeLessThan(ssh.calls.lastIndexOf("lsb_release -cs"))
+    expect(ssh.calls.indexOf(lockMkdir)).toBeLessThan(
+      ssh.calls.indexOf("cat '/etc/apt/sources.list'")
+    )
+    expect(ssh.calls.indexOf("DEBIAN_FRONTEND=noninteractive apt-get autoremove -y")).toBeLessThan(
+      ssh.calls.indexOf(lockRmdir)
+    )
+  })
+
+  it("rechecks the Debian codename after acquiring the mutex and skips stale work", async () => {
+    const ssh = createMockSsh(debianApplyResponses("bookworm", "trixie"))
+    const codenameProbe = installSequencedOutput(ssh, "lsb_release -cs", ["bookworm", "trixie"])
+    const mod = releaseUpgrade.upgrade()
+    const result = await mod.apply(ssh, emptyEnv)
+
+    expect(result.status).toBe("ok")
+    expect(codenameProbe.callCount()).toBe(2)
+    expect(ssh.calls).toContain("mkdir /var/lib/paratix/flags/'release-upgrade-mutex'")
+    expect(ssh.calls).not.toContain("cat '/etc/apt/sources.list'")
+    expect(ssh.calls).not.toContain("DEBIAN_FRONTEND=noninteractive apt-get update")
+    expect(ssh.calls).toContain("rmdir /var/lib/paratix/flags/'release-upgrade-mutex'")
+  })
+
+  it("returns failed when the release-upgrade mutex cannot be acquired", async () => {
+    const ssh = createMockSsh(
+      debianApplyResponses("bookworm", "trixie", {
+        "mkdir -p /var/lib/paratix/flags": {
+          code: 1,
+          stderr: "mkdir: cannot create directory '/var/lib/paratix/flags': Permission denied\n",
+        },
+      })
+    )
+    const mod = releaseUpgrade.upgrade()
+    const result = await mod.apply(ssh, emptyEnv)
+
+    expect(result.status).toBe("failed")
+    expect(String(result.error)).toContain("failed to acquire release upgrade mutex")
+    expect(ssh.calls).not.toContain("cat '/etc/apt/sources.list'")
+    expect(ssh.calls).not.toContain("DEBIAN_FRONTEND=noninteractive apt-get update")
+  })
+
   it("passes timeout to Debian upgrade pipeline commands", async () => {
     const ssh = createMockSsh(debianApplyResponses("bookworm", "trixie"))
     const mod = releaseUpgrade.upgrade({ timeout: 1_200_000 })
@@ -582,6 +653,34 @@ describe("releaseUpgrade.upgrade — apply (Debian)", () => {
       const sourcesWrites = writes.filter((w) => w.path === "/etc/apt/sources.list")
       expect(sourcesWrites.length).toBeGreaterThan(0)
       expect(sourcesWrites.at(-1)?.content).toBe(originalSources)
+    })
+
+    it("keeps rollback and restored-cache refresh inside the release-upgrade mutex", async () => {
+      const originalSources = "deb http://deb.debian.org/debian bookworm main\n"
+      const ssh = createMockSsh(debianApplyResponses("bookworm", "trixie"))
+      installSequencedExec(ssh, "DEBIAN_FRONTEND=noninteractive apt-get update", [
+        { code: 1 },
+        { code: 0 },
+      ])
+      const writes = captureWriteFile(ssh)
+      const mod = releaseUpgrade.upgrade()
+      const result = await mod.apply(ssh, emptyEnv)
+
+      expect(result.status).toBe("failed")
+      const lockMkdir = "mkdir /var/lib/paratix/flags/'release-upgrade-mutex'"
+      const lockRmdir = "rmdir /var/lib/paratix/flags/'release-upgrade-mutex'"
+      const releaseIndex = ssh.calls.indexOf(lockRmdir)
+      const updateIndexes = ssh.calls
+        .map((call, index) => ({ call, index }))
+        .filter((entry) => entry.call === "DEBIAN_FRONTEND=noninteractive apt-get update")
+        .map((entry) => entry.index)
+      expect(ssh.calls.indexOf(lockMkdir)).toBeLessThan(updateIndexes[0])
+      expect(updateIndexes).toHaveLength(2)
+      expect(updateIndexes[1]).toBeLessThan(releaseIndex)
+      expect(writes.at(-1)).toMatchObject({
+        content: originalSources,
+        path: "/etc/apt/sources.list",
+      })
     })
 
     it("dpkg --configure -a fails → restores the original sources content", async () => {
