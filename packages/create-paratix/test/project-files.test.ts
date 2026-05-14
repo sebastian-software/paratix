@@ -225,6 +225,32 @@ describe("writeProjectFiles", () => {
     expect(existsSync(join(TEST_DIR, "server.ts"))).toBe(false)
   })
 
+  it("rejects a dangling symlink at a managed project file path", () => {
+    const symlinkTarget = join(TEST_DIR, "outside-target")
+    const symlinkPath = join(TEST_DIR, "server.ts")
+    symlinkSync(symlinkTarget, symlinkPath)
+
+    expect(() => {
+      writeProjectFiles(TEST_DIR)
+    }).toThrow(/already exists/v)
+
+    expect(existsSync(symlinkTarget)).toBe(false)
+  })
+
+  it("rejects a symlinked files directory before writing support files", () => {
+    const symlinkTarget = join(TEST_DIR, "outside-files")
+    const symlinkPath = join(TEST_DIR, "files")
+    mkdirSync(symlinkTarget)
+    symlinkSync(symlinkTarget, symlinkPath, "dir")
+
+    expect(() => {
+      writeProjectFiles(TEST_DIR)
+    }).toThrow(/already exists/v)
+
+    expect(existsSync(join(symlinkTarget, ".gitkeep"))).toBe(false)
+    expect(existsSync(join(symlinkTarget, "20auto-upgrades"))).toBe(false)
+  })
+
   it("generated tsconfig.json uses the DX-oriented ESNext/Bundler defaults", () => {
     writeProjectFiles(TEST_DIR)
 

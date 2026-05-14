@@ -1,5 +1,6 @@
-import { existsSync, mkdirSync, writeFileSync } from "node:fs"
-import { basename, join, resolve } from "node:path"
+import { basename, resolve } from "node:path"
+
+import type { InitialUserConfig } from "./templates.js"
 
 import { formatCliValue } from "./cliFormat.js"
 import {
@@ -10,7 +11,6 @@ import {
   resolveCliOrPromptAdminPublicKey,
   resolveCliOrPromptHost,
 } from "./cliValidation.js"
-import { deriveParatixDependencyRange } from "./dependencyRange.js"
 import { isDirectExecution } from "./directExecution.js"
 import { promptForHostFingerprint, promptForInitialUserConfig } from "./interactivePrompts.js"
 import { createProjectDirectoryAtomically } from "./projectDirectory.js"
@@ -18,6 +18,7 @@ import {
   normalizeProgrammaticScaffoldStringOptions,
   parseInitialUserConfig as parseScaffoldInitialUserConfig,
 } from "./scaffoldConfig.js"
+import { writeScaffoldFiles } from "./scaffoldFiles.js"
 import {
   detectPackageManager,
   installDependencies,
@@ -25,19 +26,6 @@ import {
   printPartialSuccessMessage,
   printSuccessMessage,
 } from "./scaffoldRuntime.js"
-import {
-  AUTO_UPGRADES_20_TEMPLATE,
-  createAdminNopasswdSudoersContent,
-  createServerTemplate,
-  ENV_EXAMPLE_TEMPLATE,
-  ESLINT_CONFIG_TEMPLATE,
-  GITIGNORE_TEMPLATE,
-  type InitialUserConfig,
-  PRETTIER_IGNORE_TEMPLATE,
-  PRETTIER_RC_TEMPLATE,
-  TSCONFIG_TEMPLATE,
-  UNATTENDED_UPGRADES_50_TEMPLATE,
-} from "./templates.js"
 import { containsUnsafeCodepoint } from "./unsafeCodepoints.js"
 
 export {
@@ -73,78 +61,6 @@ type ScaffoldOptions = {
   host?: string
   initialUser?: InitialUserConfig
   installer?: (projectDirectory: string, packageManager: PackageManager) => boolean
-}
-
-function writeSharedScaffoldFiles(projectDirectory: string): void {
-  // eslint-disable-next-line security/detect-non-literal-fs-filename
-  writeFileSync(join(projectDirectory, "tsconfig.json"), TSCONFIG_TEMPLATE)
-  // eslint-disable-next-line security/detect-non-literal-fs-filename
-  writeFileSync(join(projectDirectory, ".gitignore"), GITIGNORE_TEMPLATE)
-  // eslint-disable-next-line security/detect-non-literal-fs-filename
-  writeFileSync(join(projectDirectory, ".prettierrc"), PRETTIER_RC_TEMPLATE)
-  // eslint-disable-next-line security/detect-non-literal-fs-filename
-  writeFileSync(join(projectDirectory, ".prettierignore"), PRETTIER_IGNORE_TEMPLATE)
-  // eslint-disable-next-line security/detect-non-literal-fs-filename
-  writeFileSync(join(projectDirectory, "eslint.config.ts"), ESLINT_CONFIG_TEMPLATE)
-  // eslint-disable-next-line security/detect-non-literal-fs-filename
-  writeFileSync(join(projectDirectory, ".env.example"), ENV_EXAMPLE_TEMPLATE)
-}
-
-function writeScaffoldSupportFiles(projectDirectory: string, initialUser: InitialUserConfig): void {
-  // eslint-disable-next-line security/detect-non-literal-fs-filename
-  writeFileSync(join(projectDirectory, "files", ".gitkeep"), "")
-  // eslint-disable-next-line security/detect-non-literal-fs-filename
-  writeFileSync(join(projectDirectory, "files", "20auto-upgrades"), AUTO_UPGRADES_20_TEMPLATE)
-  // eslint-disable-next-line security/detect-non-literal-fs-filename
-  writeFileSync(
-    join(projectDirectory, "files", "50unattended-upgrades"),
-    UNATTENDED_UPGRADES_50_TEMPLATE
-  )
-  if (initialUser.kind !== "root") return
-  // eslint-disable-next-line security/detect-non-literal-fs-filename
-  writeFileSync(
-    join(projectDirectory, "files", "admin-nopasswd-sudoers"),
-    createAdminNopasswdSudoersContent("paratix")
-  )
-}
-
-function getManagedScaffoldPaths(
-  projectDirectory: string,
-  initialUser: InitialUserConfig
-): string[] {
-  const managedPaths = [
-    "package.json",
-    "server.ts",
-    "tsconfig.json",
-    ".gitignore",
-    ".prettierrc",
-    ".prettierignore",
-    "eslint.config.ts",
-    ".env.example",
-    join("files", ".gitkeep"),
-    join("files", "20auto-upgrades"),
-    join("files", "50unattended-upgrades"),
-  ]
-
-  if (initialUser.kind === "root") {
-    managedPaths.push(join("files", "admin-nopasswd-sudoers"))
-  }
-
-  return managedPaths.map((managedPath) => join(projectDirectory, managedPath))
-}
-
-function assertManagedScaffoldPathsAvailable(
-  projectDirectory: string,
-  initialUser: InitialUserConfig
-): void {
-  for (const managedPath of getManagedScaffoldPaths(projectDirectory, initialUser)) {
-    // eslint-disable-next-line security/detect-non-literal-fs-filename
-    if (existsSync(managedPath)) {
-      throw new Error(
-        `Error: Scaffold file ${formatCliValue(managedPath)} already exists; refusing to overwrite it.`
-      )
-    }
-  }
 }
 
 function normalizeProgrammaticInitialUserConfig(
@@ -195,52 +111,13 @@ export function writeProjectFiles(projectDirectory: string, options?: ScaffoldOp
       `Error: Invalid project directory ${formatCliValue(projectDirectory)} — the derived package name contains control or bidi codepoints.`
     )
   }
-  assertManagedScaffoldPathsAvailable(projectDirectory, initialUser)
-
-  // eslint-disable-next-line security/detect-non-literal-fs-filename
-  mkdirSync(projectDirectory, { recursive: true })
-  // eslint-disable-next-line security/detect-non-literal-fs-filename
-  mkdirSync(join(projectDirectory, "files"), { recursive: true })
-
-  const packageJson = {
-    dependencies: {
-      paratix: deriveParatixDependencyRange(),
-    },
-    devDependencies: {
-      "@types/node": "^24.5.2",
-      eslint: "^10.0.3",
-      "eslint-config-setup": "^0.3.3",
-      jiti: "^2.6.1",
-      prettier: "^3.6.2",
-      tsx: "^4.20.6",
-      typescript: "^5.9.2",
-    },
-    engines: {
-      node: ">=24.0.0",
-    },
-    name: packageName,
-    private: true,
-    scripts: {
-      apply: "paratix apply server.ts",
-      "apply:dry": "paratix apply server.ts --dry-run",
-      "apply:first-run": "paratix apply server.ts --first-run",
-      "apply:first-run:dry": "paratix apply server.ts --dry-run --first-run",
-      "format:check": "prettier --check .",
-      "format:fix": "prettier --write .",
-      lint: "eslint .",
-    },
-    type: "module",
-  }
-
-  // eslint-disable-next-line security/detect-non-literal-fs-filename
-  writeFileSync(join(projectDirectory, "package.json"), `${JSON.stringify(packageJson, null, 2)}\n`)
-  // eslint-disable-next-line security/detect-non-literal-fs-filename
-  writeFileSync(
-    join(projectDirectory, "server.ts"),
-    createServerTemplate({ adminPublicKey, expectedHostFingerprint, host, initialUser })
-  )
-  writeSharedScaffoldFiles(projectDirectory)
-  writeScaffoldSupportFiles(projectDirectory, initialUser)
+  writeScaffoldFiles(projectDirectory, {
+    adminPublicKey,
+    expectedHostFingerprint,
+    host,
+    initialUser,
+    packageName,
+  })
 }
 
 export function isValidProjectName(name: string): boolean {
