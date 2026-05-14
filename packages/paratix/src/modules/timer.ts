@@ -406,6 +406,39 @@ async function disableTimerForAbsent(
   return failedCommand(`[${module}: ${name}] systemctl disable --now failed`, disable)
 }
 
+async function handleAbsentUnitRemovalFailure(
+  ssh: SshConnection,
+  parameters: {
+    message: string
+    paths: Pick<TimerPaths, "servicePath" | "timerPath">
+    remove: ExecResult
+    snapshots: SnapshotPair
+  }
+): Promise<ModuleResult> {
+  const { message, paths, remove, snapshots } = parameters
+  try {
+    await restoreUnitFileSnapshots(ssh, paths, snapshots)
+  } catch (error) {
+    return failed(
+      `${message}: ${describeExecResult(
+        remove
+      )}; rollback of timer unit files also failed: ${describeError(error)}`
+    )
+  }
+  const reloadAfterRestore = await ssh.exec(`${SYSTEMCTL} daemon-reload`, {
+    ignoreExitCode: true,
+    silent: true,
+  })
+  if (reloadAfterRestore.code === 0) return failedCommand(message, remove)
+  return failed(
+    `${message}: ${describeExecResult(
+      remove
+    )}; daemon-reload after unit-file rollback also failed: ${describeExecResult(
+      reloadAfterRestore
+    )}`
+  )
+}
+
 async function removeAbsentUnitFiles(
   ssh: SshConnection,
   context: AbsentContext,
@@ -422,30 +455,12 @@ async function removeAbsentUnitFiles(
       { ignoreExitCode: true, silent: true }
     )
     if (remove.code !== 0) {
-      const message = `[${module}: ${name}] failed to remove unit files`
-      try {
-        await restoreUnitFileSnapshots(ssh, locations, snapshots)
-      } catch (error) {
-        return failed(
-          `${message}: ${describeExecResult(
-            remove
-          )}; rollback of timer unit files also failed: ${describeError(error)}`
-        )
-      }
-      const reloadAfterRestore = await ssh.exec(`${SYSTEMCTL} daemon-reload`, {
-        ignoreExitCode: true,
-        silent: true,
+      return handleAbsentUnitRemovalFailure(ssh, {
+        message: `[${module}: ${name}] failed to remove unit files`,
+        paths: locations,
+        remove,
+        snapshots,
       })
-      if (reloadAfterRestore.code !== 0) {
-        return failed(
-          `${message}: ${describeExecResult(
-            remove
-          )}; daemon-reload after unit-file rollback also failed: ${describeExecResult(
-            reloadAfterRestore
-          )}`
-        )
-      }
-      return failedCommand(message, remove)
     }
   }
   const reload = await ssh.exec(`${SYSTEMCTL} daemon-reload`, {

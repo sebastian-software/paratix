@@ -1,6 +1,7 @@
 import { failed, failedCommand } from "../moduleFailure.js"
 import { shellQuote } from "../ssh.js"
 import { type ModuleResult, NEEDS_APPLY, type SshConnection } from "../types.js"
+import { enableSwap, handleAbsentSwapRemovalFailure } from "./swapAbsentRollbackHelpers.js"
 import { moveSwapToBackup } from "./swapBackupHelpers.js"
 import {
   classifySwapFilePath,
@@ -200,17 +201,6 @@ async function recreateSwapFile(
   return { kind: "result", ...created }
 }
 
-async function enableSwap(ssh: SshConnection, path: string): Promise<boolean | ModuleResult> {
-  if (await isSwapActive(ssh, path)) return false
-  const result = await ssh.exec(`swapon ${shellQuote(path)}`, EXEC_OPTS)
-  return result.code === 0 ? true : failedCommand(`[swap.file: ${path}] swapon failed`, result)
-}
-
-async function reactivateSwap(ssh: SshConnection, path: string): Promise<ModuleResult | true> {
-  const result = await ssh.exec(`swapon ${shellQuote(path)}`, EXEC_OPTS)
-  return result.code === 0 ? true : failedCommand(`[swap.file: ${path}] swapon failed`, result)
-}
-
 async function applyAbsentSwapFile(
   ssh: SshConnection,
   options: NormalizedSwapFileOptions
@@ -221,25 +211,16 @@ async function applyAbsentSwapFile(
   const disableResult = await disableSwap(ssh, options.path)
   if (typeof disableResult !== "boolean") return disableResult
   if (disableResult) swapChanged = true
-  // R-0000287: remove the swap file before pruning the fstab entry. If the
-  // file removal fails (permission, busy), the previous order left the
-  // fstab line gone but the swap file orphaned on disk — the next mount run
-  // would no longer activate it but it still consumed space. Removing the
-  // file first means a failed rm aborts the apply with the fstab entry
-  // intact, preserving the chance to recover state on the next run.
+  // Remove the swap file before pruning fstab so failed removal leaves
+  // persistence intact for the next recovery run.
   if (safeRemoval === "ok") {
     const removeResult = await removeSwapFile(ssh, options.path)
     if (typeof removeResult !== "boolean") {
-      if (!disableResult) return removeResult
-      const reenableResult = await reactivateSwap(ssh, options.path)
-      if (reenableResult !== true) {
-        return failed(
-          `${removeResult.error?.message ?? "swap file removal failed"}; rollback swapon failed: ${
-            reenableResult.error?.message ?? "unknown error"
-          }`
-        )
-      }
-      return removeResult
+      return handleAbsentSwapRemovalFailure(ssh, {
+        disabledSwap: disableResult,
+        path: options.path,
+        removeFailure: removeResult,
+      })
     }
     if (removeResult) swapChanged = true
   }

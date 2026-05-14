@@ -11,6 +11,7 @@ const eslintConfig: Linter.Config[] = [
       "**/node_modules/**",
       "**/dist/**",
       ".claude/**",
+      ".sf-plugin/**",
       ".wisdom-*",
       "**/*.md",
       "**/*.json",

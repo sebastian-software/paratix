@@ -9,6 +9,7 @@ export default defineConfig({
   ignorePatterns: [
     "**/node_modules/**",
     "**/dist/**",
+    ".sf-plugin/**",
     "sebastian-gmbh-paratix-test/**",
     "packages/create-paratix/create-paratix-scaffold-test/**",
   ],
