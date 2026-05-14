@@ -1294,6 +1294,48 @@ describe("runSignals stats tracking", () => {
     // The signal module result "changed" must be reflected in the summary stats
     expect(successSignal.apply).toHaveBeenCalledOnce()
   })
+
+  it("does not propagate env meta from a failed signal to following signals", async () => {
+    const { runSignalModules } = await import("../src/signalOrchestration.js")
+
+    const signalSteps: Array<{ env: Record<string, unknown>; status: string }> = []
+    const failingSignal: Module = {
+      apply: vi.fn().mockResolvedValue({
+        meta: [meta.env("LEAKED", "yes")],
+        status: "failed",
+      } satisfies ModuleResult),
+      check: vi.fn().mockResolvedValue("needs-apply"),
+      name: "failing-signal",
+    }
+
+    let followingSignalLeakedValue: unknown = "NOT_SET"
+    const followingSignal: Module = {
+      apply: vi.fn().mockImplementation(async (_ssh, environment) => {
+        await Promise.resolve()
+        followingSignalLeakedValue = environment.LEAKED
+        return { status: "changed" } satisfies ModuleResult
+      }),
+      check: vi.fn().mockResolvedValue("needs-apply"),
+      name: "following-signal",
+    }
+
+    const status = await runSignalModules({
+      environment: {},
+      async onSignalStep(step) {
+        await Promise.resolve()
+        signalSteps.push({ env: step.env, status: step.status })
+      },
+      signals: [failingSignal, followingSignal],
+      ssh: null,
+    })
+
+    expect(status).toBe("failed")
+    expect(failingSignal.apply).toHaveBeenCalledOnce()
+    expect(followingSignal.apply).toHaveBeenCalledOnce()
+    expect(followingSignalLeakedValue).toBeUndefined()
+    expect(signalSteps[0]?.status).toBe("failed")
+    expect(signalSteps[0]?.env.LEAKED).toBeUndefined()
+  })
 })
 
 describe("runPlaybook second-signal best-effort cleanup", () => {

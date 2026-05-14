@@ -60,10 +60,10 @@ async function applySignalMeta(parameters: {
   result: Awaited<ReturnType<Module["apply"]>>
 }): Promise<Environment> {
   assertValidModuleMetaEntries(parameters.result.meta)
-  const nextEnvironment = await mergeEnvironmentFromMeta(
-    parameters.currentEnvironment,
-    parameters.result.meta
-  )
+  const nextEnvironment =
+    parameters.result.status === "failed"
+      ? parameters.currentEnvironment
+      : await mergeEnvironmentFromMeta(parameters.currentEnvironment, parameters.result.meta)
   await parameters.onSignalStep?.({
     env: nextEnvironment,
     meta: parameters.result.meta,
