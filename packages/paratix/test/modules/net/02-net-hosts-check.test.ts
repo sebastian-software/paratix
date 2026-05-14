@@ -169,6 +169,24 @@ describe("net.hosts — check", () => {
     expect(result).toBe("needs-apply")
   })
 
+  it("returns needs-apply when the desired hostname appears only in an inline comment", async () => {
+    const mockSsh = createMockSsh({
+      "cat '/etc/hosts'": { stdout: "10.0.0.1 # web1\n" },
+    })
+    const mod = net.hosts("10.0.0.1", ["web1"])
+    const result = await mod.check(mockSsh, emptyEnv)
+    expect(result).toBe("needs-apply")
+  })
+
+  it("returns ok when the desired hostname appears before an inline comment", async () => {
+    const mockSsh = createMockSsh({
+      "cat '/etc/hosts'": { stdout: "10.0.0.1 web1 # managed host\n" },
+    })
+    const mod = net.hosts("10.0.0.1", ["web1"])
+    const result = await mod.check(mockSsh, emptyEnv)
+    expect(result).toBe("ok")
+  })
+
   it("returns ok when desired and foreign hostnames are already consolidated", async () => {
     const mockSsh = createMockSsh({
       "cat '/etc/hosts'": { stdout: "127.0.0.1 localhost app.local\n" },

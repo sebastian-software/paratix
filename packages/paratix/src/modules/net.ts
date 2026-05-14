@@ -268,10 +268,18 @@ function validateHostsOptions(ip: string, hostnames: string[]): void {
  *
  * @param ip - The IP address.
  * @param hostnames - The hostnames to associate.
+ * @param comment - Optional inline comment to append after the hostnames.
  * @returns The formatted hosts line.
  */
-function buildHostsLine(ip: string, hostnames: string[]): string {
-  return `${ip} ${hostnames.join(" ")}`
+function buildHostsLine(ip: string, hostnames: string[], comment?: string): string {
+  const entry = `${ip} ${hostnames.join(" ")}`
+  return comment === undefined ? entry : `${entry} ${comment}`
+}
+
+type ParsedHostsLine = {
+  comment?: string
+  hostnames: string[]
+  ip: string
 }
 
 /**
@@ -283,8 +291,11 @@ function buildHostsLine(ip: string, hostnames: string[]): string {
  * @returns The parsed IP and hostname tokens, or `undefined` for blanks
  *   and comment lines.
  */
-function parseHostsLine(line: string): { hostnames: string[]; ip: string } | undefined {
-  const trimmed = line.trim()
+function parseHostsLine(line: string): ParsedHostsLine | undefined {
+  const commentIndex = line.indexOf("#")
+  const content = commentIndex === -1 ? line : line.slice(0, commentIndex)
+  const comment = commentIndex === -1 ? undefined : line.slice(commentIndex).trim()
+  const trimmed = content.trim()
   if (trimmed === "" || trimmed.startsWith("#")) return undefined
   const tokens = trimmed.split(/\s+/v)
   const [ip, ...hostnames] = tokens
@@ -292,7 +303,7 @@ function parseHostsLine(line: string): { hostnames: string[]; ip: string } | und
   // always yields at least one element, so `ip` is a string. Empty-string
   // protection guards against pathological inputs.
   if (ip === "") return undefined
-  return { hostnames, ip }
+  return { comment, hostnames, ip }
 }
 
 /**
@@ -331,13 +342,18 @@ function buildMergedHostsLine(
   lines: string[],
   parameters: Pick<HostsStateParameters, "desiredHostnames" | "expectedLine" | "isSameIpLine">
 ): string {
-  const existingHostnames = lines.flatMap((line) => {
-    if (!parameters.isSameIpLine(line)) return []
-    return parseHostsLine(line)?.hostnames ?? []
-  })
-  if (existingHostnames.length === 0) return parameters.expectedLine
+  const sameIpEntries = lines
+    .filter((line) => parameters.isSameIpLine(line))
+    .flatMap((line) => {
+      const parsed = parseHostsLine(line)
+      return parsed === undefined ? [] : [parsed]
+    })
+  const existingHostnames = sameIpEntries.flatMap((entry) => entry.hostnames)
   const [ip] = parameters.expectedLine.split(" ")
-  return buildHostsLine(ip, mergeHostnames(existingHostnames, parameters.desiredHostnames))
+  const comment = sameIpEntries.find((entry) => entry.comment !== undefined)?.comment
+  if (existingHostnames.length === 0)
+    return buildHostsLine(ip, parameters.desiredHostnames, comment)
+  return buildHostsLine(ip, mergeHostnames(existingHostnames, parameters.desiredHostnames), comment)
 }
 
 /**

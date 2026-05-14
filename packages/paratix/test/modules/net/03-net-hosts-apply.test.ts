@@ -237,6 +237,42 @@ describe("net.hosts — apply", () => {
     expect(writes[0]?.content).toBe("127.0.0.1 localhost\n192.168.1.1 host1 host2\n")
   })
 
+  it("places desired hostnames before an existing inline comment", async () => {
+    const mockSsh = createMockSsh({
+      "cat '/etc/hosts'": { stdout: "127.0.0.1 localhost\n192.168.1.1 # old alias\n" },
+    })
+    const writes: Array<{ content: string; mode: string; path: string }> = []
+    mockSsh.writeFile = async (path, content, options) => {
+      writes.push({ content, mode: options.mode, path })
+      await Promise.resolve()
+    }
+
+    const mod = net.hosts("192.168.1.1", ["host2"])
+    const result = await mod.apply(mockSsh, emptyEnv)
+
+    expect(result.status).toBe("changed")
+    expect(writes).toHaveLength(1)
+    expect(writes[0]?.content).toBe("127.0.0.1 localhost\n192.168.1.1 host2 # old alias\n")
+  })
+
+  it("preserves an inline comment when merging same-IP hostnames", async () => {
+    const mockSsh = createMockSsh({
+      "cat '/etc/hosts'": { stdout: "127.0.0.1 localhost\n192.168.1.1 host1 # keep\n" },
+    })
+    const writes: Array<{ content: string; mode: string; path: string }> = []
+    mockSsh.writeFile = async (path, content, options) => {
+      writes.push({ content, mode: options.mode, path })
+      await Promise.resolve()
+    }
+
+    const mod = net.hosts("192.168.1.1", ["host2"])
+    const result = await mod.apply(mockSsh, emptyEnv)
+
+    expect(result.status).toBe("changed")
+    expect(writes).toHaveLength(1)
+    expect(writes[0]?.content).toBe("127.0.0.1 localhost\n192.168.1.1 host1 host2 # keep\n")
+  })
+
   it("preserves foreign hostnames on the same IP when adding a hostname (state: present)", async () => {
     const mockSsh = createMockSsh({
       "cat '/etc/hosts'": { stdout: "127.0.0.1 localhost\n" },
