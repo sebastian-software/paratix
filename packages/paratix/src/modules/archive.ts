@@ -8,6 +8,7 @@ import {
   archiveMemberDestinationPaths,
   archiveMemberPathsWithAncestors,
   destinationPathWithAncestors,
+  validateExistingExtractDestination,
   validateExtractDestination,
   validateNoSymlinkPaths,
   validateResolvedDestinationPath,
@@ -882,11 +883,12 @@ export const archive = {
       async check(conn: null | SshConnection): Promise<"needs-apply" | "ok"> {
         if (!conn) return NEEDS_APPLY
 
-        // 1. Does the destination directory exist?
-        const destinationExists = await conn.test(`test -d ${shellQuote(normalizedDestination)}`)
-        if (!destinationExists) return NEEDS_APPLY
+        const unsafeDestination = await validateExistingExtractDestination(conn, {
+          destination: normalizedDestination,
+          source,
+        })
+        if (unsafeDestination !== null) return NEEDS_APPLY
 
-        // 2. Does the marker file exist?
         const markerExists = await conn.test(`test -f ${shellQuote(marker)}`)
         if (!markerExists) return NEEDS_APPLY
         if (!(await extractedMembersMatch(conn, marker))) return NEEDS_APPLY

@@ -138,3 +138,32 @@ export async function validateResolvedDestinationPath(
     `[archive.extract] refusing to extract ${parameters.source}: destination path ${JSON.stringify(parameters.destination)} resolves to ${JSON.stringify(resolvedPath)}`
   )
 }
+
+export async function validateExistingExtractDestination(
+  conn: SshConnection,
+  parameters: { destination: string; source: string }
+): Promise<ModuleResult | null> {
+  const validatedDestination = validateExtractDestination(parameters.destination)
+  if ("status" in validatedDestination) return validatedDestination
+
+  const destinationExists = await conn.exec(
+    `[ -d ${shellQuote(validatedDestination.destination)} ] && [ ! -L ${shellQuote(validatedDestination.destination)} ]`,
+    EXEC_OPTS
+  )
+  if (destinationExists.code !== 0) {
+    return failed(
+      `[archive.extract] destination path ${JSON.stringify(validatedDestination.destination)} is not an existing non-symlink directory`
+    )
+  }
+
+  const unsafeDestinationAncestor = await validateNoSymlinkPaths(conn, {
+    paths: destinationPathWithAncestors(validatedDestination.destination),
+    source: parameters.source,
+  })
+  if (unsafeDestinationAncestor !== null) return unsafeDestinationAncestor
+
+  return validateResolvedDestinationPath(conn, {
+    destination: validatedDestination.destination,
+    source: parameters.source,
+  })
+}

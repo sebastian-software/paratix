@@ -23,6 +23,7 @@ const archiveSha = "abc123def456"
 const archiveSymlinkCheckPaths = [
   "/opt",
   destination,
+  alternateDestination,
   `${destination}/app`,
   `${destination}/app/file`,
   ...Array.from({ length: 24 }, (_value, index) => `${destination}/app/file-${String(index)}`),
@@ -60,6 +61,14 @@ const archiveApplyResponseStubs: NonNullable<
     command: `test ! -L '${path}'`,
     result: { code: 0 },
   })),
+  {
+    command: `[ -d '${destination}' ] && [ ! -L '${destination}' ]`,
+    result: { code: 0 },
+  },
+  {
+    command: `[ -d '${alternateDestination}' ] && [ ! -L '${alternateDestination}' ]`,
+    result: { code: 0 },
+  },
   { command: `mkdir -p '${destination}'`, result: { code: 0 } },
   { command: `readlink -f -- '${destination}'`, result: { code: 0, stdout: `${destination}\n` } },
   {
@@ -223,12 +232,60 @@ describe("archive.extract — check", () => {
   })
 
   it("returns needs-apply when destination does not exist", async () => {
-    const mockSsh = createMockSsh({
-      [`test -d '${destination}'`]: { code: 1 },
-    })
+    const mockSsh = createMockSsh(
+      {},
+      {
+        responseStubs: [
+          {
+            command: `[ -d '${destination}' ] && [ ! -L '${destination}' ]`,
+            result: { code: 1 },
+          },
+        ],
+      }
+    )
     const mod = archive.extract(src, destination)
     const result = await mod.check(mockSsh, emptyEnv)
     expect(result).toBe("needs-apply")
+  })
+
+  it("returns needs-apply when destination is a symlink to a directory", async () => {
+    const mockSsh = createMockSsh(
+      {
+        [`test -f '${marker}'`]: { code: 0 },
+      },
+      {
+        responseStubs: [
+          {
+            command: `[ -d '${destination}' ] && [ ! -L '${destination}' ]`,
+            result: { code: 1 },
+          },
+        ],
+      }
+    )
+    const mod = archive.extract(src, destination)
+    const result = await mod.check(mockSsh, emptyEnv)
+    expect(result).toBe("needs-apply")
+    expect(mockSsh.calls).not.toContain(`cat '${marker}'`)
+  })
+
+  it("returns needs-apply when destination resolves elsewhere", async () => {
+    const mockSsh = createMockSsh(
+      {
+        [`test -f '${marker}'`]: { code: 0 },
+      },
+      {
+        responseStubs: [
+          {
+            command: `readlink -f -- '${destination}'`,
+            result: { code: 0, stdout: "/tmp/attacker-target\n" },
+          },
+        ],
+      }
+    )
+    const mod = archive.extract(src, destination)
+    const result = await mod.check(mockSsh, emptyEnv)
+    expect(result).toBe("needs-apply")
+    expect(mockSsh.calls).not.toContain(`cat '${marker}'`)
   })
 
   it("returns needs-apply when marker file does not exist", async () => {
