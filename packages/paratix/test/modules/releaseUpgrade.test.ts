@@ -1,5 +1,7 @@
 import { describe, expect, it, vi } from "vitest"
 
+import type { ExecResult } from "../../src/types.js"
+
 import { isSystemHostMetaEntry, isSystemRebootMetaEntry } from "../../src/meta.js"
 import { releaseUpgrade } from "../../src/modules/releaseUpgrade.js"
 import { createMockSsh as createBaseMockSsh } from "../helpers/mockSsh.js"
@@ -35,6 +37,7 @@ const UNKNOWN_OS_RELEASE = "ID=arch\n"
 
 // Debian stable codename response from curl
 const DEBIAN_STABLE_RELEASE_CURL = "Origin: Debian\nCodename: trixie\nSuite: stable\n"
+const APT_UPDATE_COMMAND = "DEBIAN_FRONTEND=noninteractive apt-get update"
 
 // Default find response for sources.list.d (empty = no extra files)
 const FIND_SOURCES_EMPTY = { code: 0, stdout: "" }
@@ -45,6 +48,27 @@ type WriteStep = (path: string, content: string) => Promise<void>
 async function rejectSourcesRestoreWrite(): Promise<void> {
   await Promise.resolve()
   throw new Error("permission denied")
+}
+
+function installSequencedExec(
+  ssh: ReturnType<typeof createMockSsh>,
+  command: string,
+  responses: Array<Partial<ExecResult>>
+): { callCount: () => number } {
+  const originalExec = ssh.exec.bind(ssh)
+  let calls = 0
+  const exec: typeof ssh.exec = async (nextCommand, options) => {
+    if (nextCommand !== command) return originalExec(nextCommand, options)
+    const response = responses[calls] ?? responses.at(-1)!
+    calls += 1
+    return {
+      code: response.code ?? 0,
+      stderr: response.stderr ?? "",
+      stdout: response.stdout ?? "",
+    }
+  }
+  Object.assign(ssh, { exec })
+  return { callCount: () => calls }
 }
 
 // Helper: build responses for Ubuntu check/apply
@@ -78,6 +102,7 @@ function debianApplyResponses(
 ) {
   return {
     "[ -e '/etc/apt/sources.list' ]": { code: 0 },
+    [APT_UPDATE_COMMAND]: { code: 0 },
     "cat '/etc/apt/sources.list'": {
       code: 0,
       stdout: `deb http://deb.debian.org/debian ${currentCodename} main\n`,
@@ -89,7 +114,6 @@ function debianApplyResponses(
     },
     "DEBIAN_FRONTEND=noninteractive apt-get autoremove -y": { code: 0 },
     "DEBIAN_FRONTEND=noninteractive apt-get full-upgrade -y": { code: 0 },
-    "DEBIAN_FRONTEND=noninteractive apt-get update": { code: 0 },
     "DEBIAN_FRONTEND=noninteractive dpkg --configure -a": { code: 0 },
     "find /etc/apt/sources.list.d/ \\( -name '*.list' -o -name '*.sources' \\) -type f -print0":
       FIND_SOURCES_EMPTY,
@@ -995,6 +1019,41 @@ describe("releaseUpgrade.upgrade — apply (Debian)", () => {
       // captured 0640 mode rather than overwriting it with the 0644 default.
       expect(sourcesWrites.at(-1)?.content).toBe(originalSources)
       expect(sourcesWrites.at(-1)?.mode).toBe("0640")
+    })
+
+    it("refreshes apt cache after a successful sources rollback", async () => {
+      const ssh = createMockSsh(debianApplyResponses("bookworm", "trixie"))
+      const sequencedUpdate = installSequencedExec(ssh, APT_UPDATE_COMMAND, [
+        { code: 1, stderr: "E: target suite unavailable" },
+        { code: 0 },
+      ])
+
+      const mod = releaseUpgrade.upgrade()
+      const result = await mod.apply(ssh, emptyEnv)
+
+      expect(result.status).toBe("failed")
+      expect(sequencedUpdate.callCount()).toBe(2)
+      expect(result.error?.message).toContain("apt-get update failed")
+      expect(result.error?.message).not.toContain("rollback succeeded but")
+    })
+
+    it("reports both errors when the post-rollback apt cache refresh fails", async () => {
+      const ssh = createMockSsh(debianApplyResponses("bookworm", "trixie"))
+      const sequencedUpdate = installSequencedExec(ssh, APT_UPDATE_COMMAND, [
+        { code: 1, stderr: "E: target suite unavailable" },
+        { code: 100, stderr: "E: restored suite metadata unavailable" },
+      ])
+
+      const mod = releaseUpgrade.upgrade()
+      const result = await mod.apply(ssh, emptyEnv)
+
+      expect(result.status).toBe("failed")
+      expect(sequencedUpdate.callCount()).toBe(2)
+      expect(result.error?.message).toContain("apt-get update failed")
+      expect(result.error?.message).toContain(
+        "rollback succeeded but [releaseUpgrade.upgrade] apt-get update on restored sources failed"
+      )
+      expect(result.error?.message).toContain("E: restored suite metadata unavailable")
     })
 
     it("reports restore failures while still attempting the remaining sources rollbacks", async () => {

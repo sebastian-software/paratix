@@ -314,6 +314,44 @@ function appendRestoreSourcesFailures(
   )
 }
 
+async function refreshAptCacheAfterSourcesRollback(
+  ssh: SshConnection,
+  options: ReleaseUpgradeOptions
+): Promise<ModuleResult | null> {
+  const result = await ssh.exec(
+    `${NONINTERACTIVE} apt-get update`,
+    releaseUpgradeExecOptions(options)
+  )
+  if (result.code === 0) return null
+  return failedCommand("[releaseUpgrade.upgrade] apt-get update on restored sources failed", result)
+}
+
+function appendRollbackRefreshFailure(
+  pipelineFailure: ModuleResult,
+  refreshFailure: ModuleResult | null
+): ModuleResult {
+  if (refreshFailure == null) return pipelineFailure
+  const pipelineMessage = pipelineFailure.error?.message ?? "[releaseUpgrade.upgrade] failed"
+  const refreshMessage =
+    refreshFailure.error?.message ?? "apt-get update on restored sources failed"
+  return failed(`${pipelineMessage}\nrollback succeeded but ${refreshMessage}`)
+}
+
+async function handleDebianPipelineFailure(parameters: {
+  options: ReleaseUpgradeOptions
+  pipelineFailure: ModuleResult
+  snapshots: SourcesSnapshot[]
+  ssh: SshConnection
+}): Promise<ModuleResult> {
+  const { options, pipelineFailure, snapshots, ssh } = parameters
+  const restoreFailures = await restoreSourcesSnapshots(ssh, snapshots)
+  if (restoreFailures.length > 0) {
+    return appendRestoreSourcesFailures(pipelineFailure, restoreFailures)
+  }
+  const refreshFailure = await refreshAptCacheAfterSourcesRollback(ssh, options)
+  return appendRollbackRefreshFailure(pipelineFailure, refreshFailure)
+}
+
 /**
  * Build the meta signal map that triggers a runner reboot and optional host
  * re-resolution after the upgrade completes.
@@ -500,8 +538,7 @@ async function applyDebian(
 
   const pipelineFailure = await runDebianUpgradePipeline(ssh, options)
   if (pipelineFailure != null) {
-    const restoreFailures = await restoreSourcesSnapshots(ssh, snapshots)
-    return appendRestoreSourcesFailures(pipelineFailure, restoreFailures)
+    return handleDebianPipelineFailure({ options, pipelineFailure, snapshots, ssh })
   }
 
   const entries = await buildRebootMeta(options)
