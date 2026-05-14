@@ -43,6 +43,34 @@ export function renderChownSymlinkCommand(ownerSpec: string, remotePath: string)
   return `chown -h -- ${shellQuote(ownerSpec)} ${shellQuote(remotePath)}`
 }
 
+function renderGuardedMetadataCommand(
+  kind: "chmod" | "chown",
+  remotePath: string,
+  value: string
+): string {
+  if (kind === "chown") assertValidChownOwnershipSpec(value)
+
+  const operation =
+    kind === "chmod"
+      ? `chmod -- ${shellQuote(value)} "$path"`
+      : `chown -- ${shellQuote(value)} "$path"`
+
+  return [
+    `path=${shellQuote(remotePath)}`,
+    `before=$(stat -c '%d:%i:%F' -- "$path") || exit $?`,
+    `if [ -L "$path" ]; then`,
+    `  printf '%s\\n' 'refuses to operate through symlink' >&2`,
+    `  exit 1`,
+    `fi`,
+    `after=$(stat -c '%d:%i:%F' -- "$path") || exit $?`,
+    `if [ "$before" != "$after" ]; then`,
+    `  printf '%s\\n' 'metadata target changed before ${kind}' >&2`,
+    `  exit 1`,
+    `fi`,
+    operation,
+  ].join("\n")
+}
+
 export async function readOwnership(
   ssh: SshConnection,
   remotePath: string
@@ -107,7 +135,7 @@ export async function applyFileMetadata(
     // through the runner pipeline instead of letting an unguarded
     // CommandError propagate.
     const chmodResult = await ssh.exec(
-      `chmod ${shellQuote(options.mode)} ${shellQuote(remotePath)}`,
+      renderGuardedMetadataCommand("chmod", remotePath, options.mode),
       EXEC_OPTS
     )
     if (chmodResult.code !== 0) {
@@ -116,7 +144,10 @@ export async function applyFileMetadata(
   }
 
   if (options.owner != null) {
-    const chownResult = await ssh.exec(renderChownCommand(options.owner, remotePath), EXEC_OPTS)
+    const chownResult = await ssh.exec(
+      renderGuardedMetadataCommand("chown", remotePath, options.owner),
+      EXEC_OPTS
+    )
     if (chownResult.code !== 0) {
       return failedCommand(`[file metadata: ${remotePath}] chown failed`, chownResult)
     }
@@ -163,8 +194,8 @@ export function createMetadataModule(
 
       const command =
         kind === "chmod"
-          ? `chmod ${shellQuote(value)} ${shellQuote(remotePath)}`
-          : renderChownCommand(value, remotePath)
+          ? renderGuardedMetadataCommand("chmod", remotePath, value)
+          : renderGuardedMetadataCommand("chown", remotePath, value)
       // R-0000269: capture chmod/chown exit codes so failures surface as a
       // failedCommand ModuleResult instead of an unguarded CommandError.
       const result = await ssh.exec(command, EXEC_OPTS)

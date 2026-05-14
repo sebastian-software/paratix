@@ -23,6 +23,7 @@ const createMockSsh: typeof createBaseMockSsh = (responses, options) =>
       ...(options?.allowWrites ?? []),
     ],
     responseStubs: [
+      ...(options?.responseStubs ?? []),
       {
         command: /^stat -c '%a %U %G' '\/(?:etc|remote|var)\//v,
         result: { stdout: "644 root root" },
@@ -48,11 +49,12 @@ const createMockSsh: typeof createBaseMockSsh = (responses, options) =>
       { command: /^mkdir -p '\/(?:remote|var)\//v, result: { code: 0 } },
       { command: /^chmod '[0-7]+' '\/(?:remote|var)\//v, result: { code: 0 } },
       { command: /^chmod -- '[0-7]+' '\/(?:remote|var)\//v, result: { code: 0 } },
+      { command: /\nchmod -- '[0-7]+' "\$path"$/v, result: { code: 0 } },
       { command: /^chown '[^']+' '\/(?:remote|var)\//v, result: { code: 0 } },
       { command: /^chown -- '[^']+' '\/(?:remote|var)\//v, result: { code: 0 } },
+      { command: /\nchown -- '[^']+' "\$path"$/v, result: { code: 0 } },
       { command: /^chgrp '[^']+' '\/(?:remote|var)\//v, result: { code: 0 } },
       { command: /^chgrp -- '[^']+' '\/(?:remote|var)\//v, result: { code: 0 } },
-      ...(options?.responseStubs ?? []),
     ],
   })
 
@@ -468,7 +470,8 @@ describe("file.chmod", () => {
     const result = await mod.apply(ssh, emptyEnv)
 
     expect(result.status).toBe("changed")
-    expect(ssh.calls).toContain("chmod '0644' '/var/app/config.yml'")
+    expect(ssh.calls).toContainEqual(expect.stringContaining("chmod -- '0644' \"$path\""))
+    expect(ssh.calls).toContainEqual(expect.stringContaining("stat -c '%d:%i:%F' -- \"$path\""))
   })
 
   it("regression R-0000133 — apply refuses to chmod through a symlink", async () => {
@@ -483,7 +486,7 @@ describe("file.chmod", () => {
 
     expect(result.status).toBe("failed")
     expect(result.error?.message).toContain("refuses to operate through symlink")
-    expect(ssh.calls).not.toContain("chmod '0644' '/var/app/config.yml'")
+    expect(ssh.calls).not.toContainEqual(expect.stringContaining("chmod -- '0644' \"$path\""))
   })
 
   it("regression R-0000133 — check returns needs-apply when the target is a symlink", async () => {
@@ -499,18 +502,54 @@ describe("file.chmod", () => {
   it("R-0000269: returns failed when chmod exits non-zero", async () => {
     // chmod failures (read-only fs, EPERM) must surface as failedCommand
     // ModuleResults instead of unguarded CommandError exceptions.
-    const ssh = createMockSsh({
-      "[ -L '/var/app/config.yml' ]": { code: 1 },
-      "chmod '0644' '/var/app/config.yml'": {
-        code: 1,
-        stderr: "chmod: changing permissions of '/var/app/config.yml': Read-only file system",
+    const ssh = createMockSsh(
+      {
+        "[ -L '/var/app/config.yml' ]": { code: 1 },
       },
-    })
+      {
+        responseStubs: [
+          {
+            command: /\nchmod -- '0644' "\$path"$/v,
+            result: {
+              code: 1,
+              stderr: "chmod: changing permissions of '/var/app/config.yml': Read-only file system",
+            },
+          },
+        ],
+      }
+    )
     const mod = file.chmod("/var/app/config.yml", "0644")
     const result = await mod.apply(ssh, emptyEnv)
 
     expect(result.status).toBe("failed")
     expect(String(result.error)).toContain("chmod failed")
+  })
+
+  it("returns failed when the chmod target identity changes before mutation", async () => {
+    const ssh = createMockSsh(
+      {
+        "[ -L '/var/app/config.yml' ]": { code: 1 },
+      },
+      {
+        responseStubs: [
+          {
+            command: /\nchmod -- '0644' "\$path"$/v,
+            result: {
+              code: 1,
+              stderr: "metadata target changed before chmod",
+            },
+          },
+        ],
+      }
+    )
+    const mod = file.chmod("/var/app/config.yml", "0644")
+    const result = await mod.apply(ssh, emptyEnv)
+
+    expect(result.status).toBe("failed")
+    expect(String(result.error)).toContain("metadata target changed before chmod")
+    expect(ssh.calls).toContainEqual(expect.stringContaining("before=$(stat -c '%d:%i:%F'"))
+    expect(ssh.calls).toContainEqual(expect.stringContaining('if [ "$before" != "$after" ]'))
+    expect(ssh.calls).toContainEqual(expect.stringContaining("chmod -- '0644' \"$path\""))
   })
 })
 
@@ -575,7 +614,10 @@ describe("file.chown", () => {
     const result = await mod.apply(ssh, emptyEnv)
 
     expect(result.status).toBe("changed")
-    expect(ssh.calls).toContain("chown -- 'www-data:www-data' '/var/app/config.yml'")
+    expect(ssh.calls).toContainEqual(
+      expect.stringContaining("chown -- 'www-data:www-data' \"$path\"")
+    )
+    expect(ssh.calls).toContainEqual(expect.stringContaining("stat -c '%d:%i:%F' -- \"$path\""))
   })
 
   it("renders -- before normal and numeric owner specs", async () => {
@@ -584,7 +626,7 @@ describe("file.chown", () => {
     const result = await mod.apply(ssh, emptyEnv)
 
     expect(result.status).toBe("changed")
-    expect(ssh.calls).toContain("chown -- '1000:1000' '/var/app/config.yml'")
+    expect(ssh.calls).toContainEqual(expect.stringContaining("chown -- '1000:1000' \"$path\""))
   })
 
   it("rejects owner specs whose group component starts with a dash", async () => {
@@ -607,7 +649,9 @@ describe("file.chown", () => {
 
     expect(result.status).toBe("failed")
     expect(result.error?.message).toContain("refuses to operate through symlink")
-    expect(ssh.calls).not.toContain("chown -- 'www-data:www-data' '/var/app/config.yml'")
+    expect(ssh.calls).not.toContainEqual(
+      expect.stringContaining("chown -- 'www-data:www-data' \"$path\"")
+    )
   })
 
   it("regression R-0000133 — check returns needs-apply when the target is a symlink", async () => {
@@ -621,18 +665,53 @@ describe("file.chown", () => {
   })
 
   it("R-0000269: returns failed when chown exits non-zero", async () => {
-    const ssh = createMockSsh({
-      "[ -L '/var/app/config.yml' ]": { code: 1 },
-      "chown -- 'www-data:www-data' '/var/app/config.yml'": {
-        code: 1,
-        stderr: "chown: invalid user: 'www-data:www-data'",
+    const ssh = createMockSsh(
+      {
+        "[ -L '/var/app/config.yml' ]": { code: 1 },
       },
-    })
+      {
+        responseStubs: [
+          {
+            command: /\nchown -- 'w{3}-data:w{3}-data' "\$path"$/v,
+            result: { code: 1, stderr: "chown: invalid user: 'www-data:www-data'" },
+          },
+        ],
+      }
+    )
     const mod = file.chown("/var/app/config.yml", "www-data:www-data")
     const result = await mod.apply(ssh, emptyEnv)
 
     expect(result.status).toBe("failed")
     expect(String(result.error)).toContain("chown failed")
+  })
+
+  it("returns failed when the chown target identity changes before mutation", async () => {
+    const ssh = createMockSsh(
+      {
+        "[ -L '/var/app/config.yml' ]": { code: 1 },
+      },
+      {
+        responseStubs: [
+          {
+            command: /\nchown -- 'w{3}-data:w{3}-data' "\$path"$/v,
+            result: {
+              code: 1,
+              stderr: "metadata target changed before chown",
+            },
+          },
+        ],
+      }
+    )
+    const mod = file.chown("/var/app/config.yml", "www-data:www-data")
+    const result = await mod.apply(ssh, emptyEnv)
+
+    expect(result.status).toBe("failed")
+    expect(String(result.error)).toContain("metadata target changed before chown")
+    expect(ssh.calls).toContainEqual(expect.stringContaining("before=$(stat -c '%d:%i:%F'"))
+    expect(ssh.calls).toContainEqual(expect.stringContaining('if [ "$before" != "$after" ]'))
+    expect(ssh.calls).toContainEqual(
+      expect.stringContaining("chown -- 'www-data:www-data' \"$path\"")
+    )
   })
 })
 
@@ -1706,13 +1785,22 @@ describe("file.template", () => {
       const templatePath = join(dir, "template.txt")
       writeFileSync(templatePath, "Hello")
 
-      const ssh = createMockSsh({
-        "[ -L '/remote/out.txt' ]": { code: 1 },
-        "chmod '0600' '/remote/out.txt'": {
-          code: 1,
-          stderr: "chmod: changing permissions of '/remote/out.txt': Read-only file system",
+      const ssh = createMockSsh(
+        {
+          "[ -L '/remote/out.txt' ]": { code: 1 },
         },
-      })
+        {
+          responseStubs: [
+            {
+              command: /\nchmod -- '0600' "\$path"$/v,
+              result: {
+                code: 1,
+                stderr: "chmod: changing permissions of '/remote/out.txt': Read-only file system",
+              },
+            },
+          ],
+        }
+      )
       vi.spyOn(ssh, "writeFile").mockResolvedValue()
 
       const mod = file.template("/remote/out.txt", templatePath, { mode: "0600" })
@@ -1746,7 +1834,7 @@ describe("file.template", () => {
       expect(symlinkCheck).toHaveBeenNthCalledWith(1, "[ -L '/remote/out.txt' ]")
       expect(symlinkCheck).toHaveBeenNthCalledWith(2, "[ -L '/remote/out.txt' ]")
       expect(ssh.writeFile).toHaveBeenCalledWith("/remote/out.txt", "Hello", { mode: "0600" })
-      expect(ssh.calls).not.toContain("chmod '0600' '/remote/out.txt'")
+      expect(ssh.calls).not.toContainEqual(expect.stringContaining("chmod -- '0600' \"$path\""))
     } finally {
       rmSync(dir, { recursive: true })
     }
@@ -1758,13 +1846,19 @@ describe("file.template", () => {
       const templatePath = join(dir, "template.txt")
       writeFileSync(templatePath, "Hello")
 
-      const ssh = createMockSsh({
-        "[ -L '/remote/out.txt' ]": { code: 1 },
-        "chown -- 'www-data' '/remote/out.txt'": {
-          code: 1,
-          stderr: "chown: invalid user: 'www-data'",
+      const ssh = createMockSsh(
+        {
+          "[ -L '/remote/out.txt' ]": { code: 1 },
         },
-      })
+        {
+          responseStubs: [
+            {
+              command: /\nchown -- 'w{3}-data' "\$path"$/v,
+              result: { code: 1, stderr: "chown: invalid user: 'www-data'" },
+            },
+          ],
+        }
+      )
       vi.spyOn(ssh, "writeFile").mockResolvedValue()
 
       const mod = file.template("/remote/out.txt", templatePath, { owner: "www-data" })
