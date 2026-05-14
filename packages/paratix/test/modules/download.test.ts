@@ -563,6 +563,30 @@ describe("download.url", () => {
       expect(mockSsh.calls).toContain(`mkdir -p "$(dirname '${destination}')"`)
     })
 
+    it("returns failedCommand and aborts before mktemp when target directory creation fails", async () => {
+      const mkdirCommand = `mkdir -p "$(dirname '${destination}')"`
+      const mockSsh = createMockSsh({
+        [mkdirCommand]: { code: 1, stderr: "mkdir: Permission denied\n" },
+      })
+      const mod = download.url(destination, url, allowUnverifiedDownload)
+      const result = await mod.apply(mockSsh, emptyEnv)
+      expect(result.status).toBe("failed")
+      expect(result.error?.message).toContain("failed to create target directory")
+      expect(result.error?.message).toContain("Permission denied")
+      expect(
+        mockSsh.execCalls.find((entry) => entry.command === mkdirCommand)?.options
+      ).toMatchObject({
+        ignoreExitCode: true,
+        secrets: [],
+        silent: true,
+      })
+      expect(mockSsh.calls).not.toContain(
+        `mktemp "$(dirname '${destination}')/.paratix-download.XXXXXX"`
+      )
+      expect(mockSsh.calls.every((command) => !command.startsWith("curl"))).toBe(true)
+      expect(mockSsh.calls).not.toContain(`rm -f '${temporaryDestination}'`)
+    })
+
     // R-0000158: curl/mv/chmod/chown failures must surface as failedCommand
     // results instead of throwing, so callers see maskable errors with the
     // captured stdout/stderr.
@@ -1459,6 +1483,37 @@ describe("download.github", () => {
       })
     })
 
+    it("returns failedCommand and aborts before mktemp when target directory creation fails", async () => {
+      const mkdirCommand = `mkdir -p "$(dirname '${destination}')"`
+      const token = "ghp_secret_token"
+      const mockSsh = createMockSsh({
+        [mkdirCommand]: { code: 1, stderr: "mkdir: Read-only file system\n" },
+      })
+      const mod = download.github(destination, {
+        ...allowUnverifiedDownload,
+        asset,
+        repo,
+        tag,
+        token,
+      })
+      const result = await mod.apply(mockSsh, emptyEnv)
+      expect(result.status).toBe("failed")
+      expect(result.error?.message).toContain("failed to create target directory")
+      expect(result.error?.message).toContain("Read-only file system")
+      expect(
+        mockSsh.execCalls.find((entry) => entry.command === mkdirCommand)?.options
+      ).toMatchObject({
+        ignoreExitCode: true,
+        secrets: [token],
+        silent: true,
+      })
+      expect(mockSsh.calls).not.toContain(
+        `mktemp "$(dirname '${destination}')/.paratix-download.XXXXXX"`
+      )
+      expect(mockSsh.calls.every((command) => !command.startsWith("curl"))).toBe(true)
+      expect(mockSsh.calls).not.toContain(`rm -f '${temporaryDestination}'`)
+    })
+
     it("cleans up the temporary file and leaves destination untouched when curl fails", async () => {
       const curlCommand = `curl -fsSL -o '${temporaryDestination}' ${httpsOnlyCurlProtocolFlags} --config -`
       const curlError = new Error("curl failed")
@@ -1979,6 +2034,32 @@ describe("download.large", () => {
         urlInput: url,
       })
       expect(mockSsh.calls).toContain(
+        buildLargeDownloadVersionedFlagCommand({ destination, flagName })
+      )
+    })
+
+    it("returns failedCommand and aborts before mktemp or flag writes when target directory creation fails", async () => {
+      const mkdirCommand = `mkdir -p "$(dirname '${destination}')"`
+      const mockSsh = createMockSsh({
+        [mkdirCommand]: { code: 1, stderr: "mkdir: No space left on device\n" },
+      })
+      const mod = download.large(destination, url, allowUnverifiedDownload)
+      const result = await mod.apply(mockSsh, emptyEnv)
+      expect(result.status).toBe("failed")
+      expect(result.error?.message).toContain("failed to create target directory")
+      expect(result.error?.message).toContain("No space left on device")
+      expect(
+        mockSsh.execCalls.find((entry) => entry.command === mkdirCommand)?.options
+      ).toMatchObject({
+        ignoreExitCode: true,
+        secrets: [],
+        silent: true,
+      })
+      expect(mockSsh.calls).not.toContain(
+        `mktemp "$(dirname '${destination}')/.paratix-download.XXXXXX"`
+      )
+      expect(mockSsh.calls.every((command) => !command.startsWith("curl"))).toBe(true)
+      expect(mockSsh.calls).not.toContain(
         buildLargeDownloadVersionedFlagCommand({ destination, flagName })
       )
     })

@@ -278,9 +278,6 @@ async function allocateTemporaryDownloadParameters(
   conn: SshConnection,
   parameters: DownloadParameters
 ): Promise<DownloadParameters> {
-  await conn.exec(`mkdir -p "$(dirname ${shellQuote(parameters.destination)})"`, {
-    silent: true,
-  })
   const rawTemporaryDestination = await conn.output(
     buildTemporaryDownloadPathCommand(parameters.destination)
   )
@@ -289,6 +286,25 @@ async function allocateTemporaryDownloadParameters(
     rawTemporaryDestination
   )
   return { ...parameters, destination: temporaryDestination }
+}
+
+async function createDownloadTargetDirectory(
+  conn: SshConnection,
+  parameters: DownloadParameters
+): Promise<ModuleResult | undefined> {
+  const result = await conn.exec(`mkdir -p "$(dirname ${shellQuote(parameters.destination)})"`, {
+    ignoreExitCode: true,
+    secrets: parameters.secrets,
+    silent: true,
+  })
+  if (result.code !== 0) {
+    return failedCommand(
+      `[download] failed to create target directory for ${parameters.destination}`,
+      result,
+      parameters.secrets
+    )
+  }
+  return undefined
 }
 
 async function destinationHashMatches(
@@ -763,6 +779,8 @@ async function runCurlDownload(
   // toward an attacker-controlled target.
   const symlinkFailure = await ensureDownloadDestinationNotSymlinked(conn, parameters.destination)
   if (symlinkFailure != null) return symlinkFailure
+  const targetDirectoryFailure = await createDownloadTargetDirectory(conn, parameters)
+  if (targetDirectoryFailure != null) return targetDirectoryFailure
   // R-0000107: validate the mktemp output before any subcommand consumes
   // it. Reuses the shared validateMktempPath helper from ssh.ts (already
   // applied in aptKeyHelpers.ts and archive.ts/allocateRemoteUploadPath).
