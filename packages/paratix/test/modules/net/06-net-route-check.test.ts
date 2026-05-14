@@ -26,6 +26,10 @@ const createMockSsh: typeof createBaseMockSsh = (responses, options) =>
 
 const emptyEnv = {}
 
+function regularFileCheck(remotePath: string): string {
+  return `[ -f '${remotePath}' ] && [ ! -L '${remotePath}' ]`
+}
+
 function buildRouteDropinPath(input: {
   destination: string
   device: string
@@ -115,13 +119,13 @@ describe("net.route — check", () => {
     const expectedDropin = `[Route]\nDestination=10.0.0.0/24\nGateway=192.168.1.1\n`
     const mockSsh = createMockSsh({
       [`cat '${dropinPath}'`]: { stdout: expectedDropin },
-      [`test -f '${dropinPath}'`]: { code: 0 },
       [buildRouteReloadFlagCheck({
         destination: "10.0.0.0/24",
         device: "eth0",
         gateway: "192.168.1.1",
       })]: { code: 0 },
       "ip route show '10.0.0.0/24'": { stdout: "10.0.0.0/24 via 192.168.1.1 dev eth0" },
+      [regularFileCheck(dropinPath)]: { code: 0 },
     })
     const mod = net.route("10.0.0.0/24", "192.168.1.1", { device: "eth0" })
     const result = await mod.check(mockSsh, emptyEnv)
@@ -130,8 +134,8 @@ describe("net.route — check", () => {
 
   it("returns needs-apply when route is absent (state: present)", async () => {
     const mockSsh = createMockSsh({
-      [`test -f '${routeDropinPath}'`]: { code: 1 },
       "ip route show '10.0.0.0/24'": { stdout: "" },
+      [regularFileCheck(routeDropinPath)]: { code: 1 },
     })
     const mod = net.route("10.0.0.0/24", "192.168.1.1", { device: "eth0" })
     const result = await mod.check(mockSsh, emptyEnv)
@@ -141,9 +145,9 @@ describe("net.route — check", () => {
   it("returns ok when route is absent (state: absent) and drop-in is gone", async () => {
     const dropinPath = routeDropinPath
     const mockSsh = createMockSsh({
-      [`test -f '${dropinPath}'`]: { code: 1 },
-      [`test -f '${legacyRouteDropinPath}'`]: { code: 1 },
       "ip route show '10.0.0.0/24'": { stdout: "" },
+      [regularFileCheck(dropinPath)]: { code: 1 },
+      [regularFileCheck(legacyRouteDropinPath)]: { code: 1 },
     })
     const mod = net.route("10.0.0.0/24", "192.168.1.1", { device: "eth0", state: "absent" })
     const result = await mod.check(mockSsh, emptyEnv)
@@ -152,8 +156,8 @@ describe("net.route — check", () => {
 
   it("returns needs-apply when route is present (state: absent)", async () => {
     const mockSsh = createMockSsh({
-      [`test -f '${routeDropinPath}'`]: { code: 1 },
       "ip route show '10.0.0.0/24'": { stdout: "10.0.0.0/24 via 192.168.1.1 dev eth0" },
+      [regularFileCheck(routeDropinPath)]: { code: 1 },
     })
     const mod = net.route("10.0.0.0/24", "192.168.1.1", { device: "eth0", state: "absent" })
     const result = await mod.check(mockSsh, emptyEnv)
@@ -162,8 +166,8 @@ describe("net.route — check", () => {
 
   it("returns needs-apply when route via different gateway (state: present)", async () => {
     const mockSsh = createMockSsh({
-      [`test -f '${routeDropinPath}'`]: { code: 1 },
       "ip route show '10.0.0.0/24'": { stdout: "10.0.0.0/24 via 192.168.1.254 dev eth0" },
+      [regularFileCheck(routeDropinPath)]: { code: 1 },
     })
     const mod = net.route("10.0.0.0/24", "192.168.1.1", { device: "eth0" })
     const result = await mod.check(mockSsh, emptyEnv)
@@ -172,8 +176,8 @@ describe("net.route — check", () => {
 
   it("checks route via ip route show command", async () => {
     const mockSsh = createMockSsh({
-      [`test -f '${routeDropinPath}'`]: { code: 1 },
       "ip route show '10.0.0.0/24'": { stdout: "10.0.0.0/24 via 192.168.1.1" },
+      [regularFileCheck(routeDropinPath)]: { code: 1 },
     })
     const mod = net.route("10.0.0.0/24", "192.168.1.1", { device: "eth0" })
     await mod.check(mockSsh, emptyEnv)
@@ -184,8 +188,26 @@ describe("net.route — check", () => {
   it("returns needs-apply when live route matches but drop-in is missing (state: present)", async () => {
     const dropinPath = routeDropinPath
     const mockSsh = createMockSsh({
-      [`test -f '${dropinPath}'`]: { code: 1 },
       "ip route show '10.0.0.0/24'": { stdout: "10.0.0.0/24 via 192.168.1.1 dev eth0" },
+      [regularFileCheck(dropinPath)]: { code: 1 },
+    })
+    const mod = net.route("10.0.0.0/24", "192.168.1.1", { device: "eth0" })
+    const result = await mod.check(mockSsh, emptyEnv)
+    expect(result).toBe("needs-apply")
+  })
+
+  it("returns needs-apply when drop-in is a symlink even if target content matches", async () => {
+    const dropinPath = routeDropinPath
+    const expectedDropin = `[Route]\nDestination=10.0.0.0/24\nGateway=192.168.1.1\n`
+    const mockSsh = createMockSsh({
+      [`cat '${dropinPath}'`]: { stdout: expectedDropin },
+      [buildRouteReloadFlagCheck({
+        destination: "10.0.0.0/24",
+        device: "eth0",
+        gateway: "192.168.1.1",
+      })]: { code: 0 },
+      "ip route show '10.0.0.0/24'": { stdout: "10.0.0.0/24 via 192.168.1.1 dev eth0" },
+      [regularFileCheck(dropinPath)]: { code: 1 },
     })
     const mod = net.route("10.0.0.0/24", "192.168.1.1", { device: "eth0" })
     const result = await mod.check(mockSsh, emptyEnv)
@@ -197,8 +219,8 @@ describe("net.route — check", () => {
     const staleDropin = `[Route]\nDestination=10.0.0.0/24\nGateway=192.168.1.254\n`
     const mockSsh = createMockSsh({
       [`cat '${dropinPath}'`]: { stdout: staleDropin },
-      [`test -f '${dropinPath}'`]: { code: 0 },
       "ip route show '10.0.0.0/24'": { stdout: "10.0.0.0/24 via 192.168.1.1 dev eth0" },
+      [regularFileCheck(dropinPath)]: { code: 0 },
     })
     const mod = net.route("10.0.0.0/24", "192.168.1.1", { device: "eth0" })
     const result = await mod.check(mockSsh, emptyEnv)
@@ -210,8 +232,8 @@ describe("net.route — check", () => {
     const expectedDropin = `[Route]\nDestination=10.0.0.0/24\nGateway=192.168.1.1\n`
     const mockSsh = createMockSsh({
       [`cat '${dropinPath}'`]: { stdout: expectedDropin },
-      [`test -f '${dropinPath}'`]: { code: 0 },
       "ip route show '10.0.0.0/24'": { stdout: "10.0.0.0/24 via 192.168.1.1 dev eth1" },
+      [regularFileCheck(dropinPath)]: { code: 0 },
     })
     const mod = net.route("10.0.0.0/24", "192.168.1.1", { device: "eth0" })
     const result = await mod.check(mockSsh, emptyEnv)
@@ -227,13 +249,13 @@ describe("net.route — check", () => {
     const expectedDropin = `[Route]\nDestination=10.0.0.0/24\nGateway=10.0.0.1\n`
     const mockSsh = createMockSsh({
       [`cat '${dropinPath}'`]: { stdout: expectedDropin },
-      [`test -f '${dropinPath}'`]: { code: 0 },
       [buildRouteReloadFlagCheck({
         destination: "10.0.0.0/24",
         device: "eth0",
         gateway: "10.0.0.1",
       })]: { code: 0 },
       "ip route show '10.0.0.0/24'": { stdout: "10.0.0.0/24 via 10.0.0.10 dev eth0" },
+      [regularFileCheck(dropinPath)]: { code: 0 },
     })
     const mod = net.route("10.0.0.0/24", "10.0.0.1", { device: "eth0" })
     const result = await mod.check(mockSsh, emptyEnv)
@@ -245,7 +267,6 @@ describe("net.route — check", () => {
     const expectedDropin = `[Route]\nDestination=10.0.0.0/24\nGateway=192.168.1.1\n`
     const mockSsh = createMockSsh({
       [`cat '${dropinPath}'`]: { stdout: expectedDropin },
-      [`test -f '${dropinPath}'`]: { code: 0 },
       [buildRouteReloadFlagCheck({
         destination: "10.0.0.0/24",
         device: "eth0",
@@ -254,6 +275,7 @@ describe("net.route — check", () => {
       "ip route show '10.0.0.0/24'": {
         stdout: "10.0.0.0/24 via 192.168.1.1 dev eth0.10",
       },
+      [regularFileCheck(dropinPath)]: { code: 0 },
     })
     const mod = net.route("10.0.0.0/24", "192.168.1.1", { device: "eth0" })
     const result = await mod.check(mockSsh, emptyEnv)
@@ -265,8 +287,8 @@ describe("net.route — check", () => {
     const expectedDropin = `[Route]\nDestination=10.0.0.0/24\nGateway=192.168.1.1\n`
     const mockSsh = createMockSsh({
       [`cat '${dropinPath}'`]: { stdout: expectedDropin },
-      [`test -f '${dropinPath}'`]: { code: 0 },
       "ip route show '10.0.0.0/24'": { stdout: "" },
+      [regularFileCheck(dropinPath)]: { code: 0 },
     })
     const mod = net.route("10.0.0.0/24", "192.168.1.1", { device: "eth0", state: "absent" })
     const result = await mod.check(mockSsh, emptyEnv)
@@ -278,9 +300,9 @@ describe("net.route — check", () => {
     const foreignDropin = `[Match]\nName=eth1\n\n[Route]\nDestination=10.0.0.0/24\nGateway=192.168.1.254\n`
     const mockSsh = createMockSsh({
       [`cat '${dropinPath}'`]: { stdout: foreignDropin },
-      [`test -f '${dropinPath}'`]: { code: 0 },
-      [`test -f '${routeDropinPath}'`]: { code: 1 },
       "ip route show '10.0.0.0/24'": { stdout: "" },
+      [regularFileCheck(dropinPath)]: { code: 0 },
+      [regularFileCheck(routeDropinPath)]: { code: 1 },
     })
     const mod = net.route("10.0.0.0/24", "192.168.1.1", { device: "eth0", state: "absent" })
     const result = await mod.check(mockSsh, emptyEnv)
@@ -292,13 +314,13 @@ describe("net.route — check", () => {
     const expectedDropin = `[Route]\nDestination=10.0.0.0/24\nGateway=192.168.1.1\n`
     const mockSsh = createMockSsh({
       [`cat '${dropinPath}'`]: { stdout: expectedDropin },
-      [`test -f '${dropinPath}'`]: { code: 0 },
       [buildRouteReloadFlagCheck({
         destination: "10.0.0.0/24",
         device: "eth0",
         gateway: "192.168.1.1",
       })]: { code: 0 },
       "ip route show '10.0.0.0/24'": { stdout: "10.0.0.0/24 via 192.168.1.1 dev eth0" },
+      [regularFileCheck(dropinPath)]: { code: 0 },
     })
     const mod = net.route("10.0.0.0/24", "192.168.1.1", { device: "eth0" })
     const result = await mod.check(mockSsh, emptyEnv)
@@ -310,13 +332,13 @@ describe("net.route — check", () => {
     const expectedDropin = `[Route]\nDestination=10.0.0.0/24\nGateway=192.168.1.1\n`
     const mockSsh = createMockSsh({
       [`cat '${dropinPath}'`]: { stdout: expectedDropin },
-      [`test -f '${dropinPath}'`]: { code: 0 },
       [buildRouteReloadFlagCheck({
         destination: "10.0.0.0/24",
         device: "eth0",
         gateway: "192.168.1.1",
       })]: { code: 1 },
       "ip route show '10.0.0.0/24'": { stdout: "10.0.0.0/24 via 192.168.1.1 dev eth0" },
+      [regularFileCheck(dropinPath)]: { code: 0 },
     })
     const mod = net.route("10.0.0.0/24", "192.168.1.1", { device: "eth0" })
     const result = await mod.check(mockSsh, emptyEnv)

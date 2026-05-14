@@ -31,7 +31,7 @@ import {
   validateWaitForHost,
   type WaitForOptions,
 } from "./netHelpers.js"
-import { isSymlink } from "./remoteFileChecks.js"
+import { isRegularFileWithoutSymlink, isSymlink } from "./remoteFileChecks.js"
 
 const EXEC_OPTS = { ignoreExitCode: true, silent: true } as const
 const HOSTS_FILE = "/etc/hosts"
@@ -757,11 +757,17 @@ async function routeDropinExists(conn: SshConnection, dropinPath: string): Promi
   return result.code === 0
 }
 
+async function routeDropinIsRegularFile(conn: SshConnection, dropinPath: string): Promise<boolean> {
+  return isRegularFileWithoutSymlink(conn, dropinPath)
+}
+
 async function routeDropinMatchesExpected(
   conn: SshConnection,
-  parameters: RouteParameters
+  parameters: RouteParameters,
+  options?: { withoutSymlink?: boolean }
 ): Promise<boolean> {
-  if (!(await routeDropinExists(conn, parameters.dropinPath))) return false
+  const exists = options?.withoutSymlink === true ? routeDropinIsRegularFile : routeDropinExists
+  if (!(await exists(conn, parameters.dropinPath))) return false
   const expected = buildRouteDropin(parameters.destination, parameters.gateway)
   const current = await conn.readFile(parameters.dropinPath)
   return current.trim() === expected.trim()
@@ -769,9 +775,11 @@ async function routeDropinMatchesExpected(
 
 async function legacyRouteDropinMatchesExpected(
   conn: SshConnection,
-  parameters: RouteParameters
+  parameters: RouteParameters,
+  options?: { withoutSymlink?: boolean }
 ): Promise<boolean> {
-  if (!(await routeDropinExists(conn, parameters.legacyDropinPath))) return false
+  const exists = options?.withoutSymlink === true ? routeDropinIsRegularFile : routeDropinExists
+  if (!(await exists(conn, parameters.legacyDropinPath))) return false
   const expected = buildLegacyRouteNetwork(
     parameters.destination,
     parameters.gateway,
@@ -797,7 +805,7 @@ async function checkRouteState(
 ): Promise<"needs-apply" | "ok"> {
   const { destination, device, dropinPath, gateway, state } = parameters
   const live = await hasLiveRoute(conn, { destination, device, gateway })
-  const dropinPresent = await routeDropinExists(conn, dropinPath)
+  const dropinPresent = await routeDropinIsRegularFile(conn, dropinPath)
 
   if (state === "present") {
     return checkPresentRouteState(
@@ -814,8 +822,15 @@ async function checkRouteState(
   // A drop-in at the same path with different content is foreign state and
   // must not be treated as ours to delete.
   if (live) return NEEDS_APPLY
-  if (dropinPresent && (await routeDropinMatchesExpected(conn, parameters))) return NEEDS_APPLY
-  return (await legacyRouteDropinMatchesExpected(conn, parameters)) ? NEEDS_APPLY : "ok"
+  if (
+    dropinPresent &&
+    (await routeDropinMatchesExpected(conn, parameters, { withoutSymlink: true }))
+  ) {
+    return NEEDS_APPLY
+  }
+  return (await legacyRouteDropinMatchesExpected(conn, parameters, { withoutSymlink: true }))
+    ? NEEDS_APPLY
+    : "ok"
 }
 
 async function checkPresentRouteState(
@@ -1490,8 +1505,7 @@ export const net = {
           ? buildNetplanYaml(name, options)
           : buildNetworkdConfig(name, options)
 
-        const existsResult = await conn.exec(`test -f ${shellQuote(configPath)}`, EXEC_OPTS)
-        if (existsResult.code !== 0) return NEEDS_APPLY
+        if (!(await isRegularFileWithoutSymlink(conn, configPath))) return NEEDS_APPLY
 
         const currentContent = await conn.readFile(configPath)
         if (currentContent.trim() !== expectedContent.trim()) return NEEDS_APPLY

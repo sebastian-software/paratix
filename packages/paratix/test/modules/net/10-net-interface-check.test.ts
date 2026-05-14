@@ -24,6 +24,11 @@ const createMockSsh: typeof createBaseMockSsh = (responses, options) =>
   })
 
 const emptyEnv = {}
+
+function regularFileCheck(remotePath: string): string {
+  return `[ -f '${remotePath}' ] && [ ! -L '${remotePath}' ]`
+}
+
 const routeDropinPath = "/etc/systemd/network/50-paratix-route-10.0.0.0-24.network"
 const SUCCESSFUL_ROUTE_APPLY_OPTIONS = {
   responseStubs: [
@@ -102,8 +107,8 @@ describe("net.interface — check", () => {
     ].join("\n")
     const mockSsh = createMockSsh({
       "cat '/etc/netplan/60-paratix-eth0.yaml'": { stdout: `${expectedYaml}\n` },
+      [regularFileCheck("/etc/netplan/60-paratix-eth0.yaml")]: { code: 0 },
       "test -d '/etc/netplan'": { code: 0 },
-      "test -f '/etc/netplan/60-paratix-eth0.yaml'": { code: 0 },
     })
     const mod = net.interface("eth0", { dhcp: true })
     const result = await mod.check(mockSsh, emptyEnv)
@@ -114,8 +119,8 @@ describe("net.interface — check", () => {
     const expectedConfig = ["[Match]", "Name=eth0", "", "[Network]", "DHCP=yes"].join("\n")
     const mockSsh = createMockSsh({
       "cat '/etc/systemd/network/60-paratix-eth0.network'": { stdout: `${expectedConfig}\n` },
+      [regularFileCheck("/etc/systemd/network/60-paratix-eth0.network")]: { code: 0 },
       "test -d '/etc/netplan'": { code: 1 },
-      "test -f '/etc/systemd/network/60-paratix-eth0.network'": { code: 0 },
     })
     const mod = net.interface("eth0", { dhcp: true })
     const result = await mod.check(mockSsh, emptyEnv)
@@ -143,8 +148,8 @@ describe("net.interface — check", () => {
       "ip route show default dev 'eth0'": {
         stdout: "default via 192.168.1.1 dev eth0 proto static\n",
       },
+      [regularFileCheck("/etc/systemd/network/60-paratix-eth0.network")]: { code: 0 },
       "test -d '/etc/netplan'": { code: 1 },
-      "test -f '/etc/systemd/network/60-paratix-eth0.network'": { code: 0 },
     })
     const mod = net.interface("eth0", {
       addresses: ["192.168.1.10/24"],
@@ -175,8 +180,8 @@ describe("net.interface — check", () => {
       "ip route show default dev 'eth0'": {
         stdout: "default via 10.0.0.10 dev eth0 proto static\n",
       },
+      [regularFileCheck("/etc/systemd/network/60-paratix-eth0.network")]: { code: 0 },
       "test -d '/etc/netplan'": { code: 1 },
-      "test -f '/etc/systemd/network/60-paratix-eth0.network'": { code: 0 },
     })
     const mod = net.interface("eth0", {
       addresses: ["10.0.0.20/24"],
@@ -201,8 +206,8 @@ describe("net.interface — check", () => {
         stdout: "2: eth0    inet 192.168.1.11/24 brd 192.168.1.255 scope global eth0\n",
       },
       "ip link show dev 'eth0'": { code: 0 },
+      [regularFileCheck("/etc/systemd/network/60-paratix-eth0.network")]: { code: 0 },
       "test -d '/etc/netplan'": { code: 1 },
-      "test -f '/etc/systemd/network/60-paratix-eth0.network'": { code: 0 },
     })
     const mod = net.interface("eth0", { addresses: ["192.168.1.10/24"] })
     const result = await mod.check(mockSsh, emptyEnv)
@@ -224,8 +229,8 @@ describe("net.interface — check", () => {
         stdout: "2: eth0    inet 110.0.0.1/24 brd 110.0.0.255 scope global eth0\n",
       },
       "ip link show dev 'eth0'": { code: 0 },
+      [regularFileCheck("/etc/systemd/network/60-paratix-eth0.network")]: { code: 0 },
       "test -d '/etc/netplan'": { code: 1 },
-      "test -f '/etc/systemd/network/60-paratix-eth0.network'": { code: 0 },
     })
     const mod = net.interface("eth0", { addresses: ["10.0.0.1/24"] })
     const result = await mod.check(mockSsh, emptyEnv)
@@ -234,10 +239,28 @@ describe("net.interface — check", () => {
 
   it("returns needs-apply when Netplan config does not exist", async () => {
     const mockSsh = createMockSsh({
+      [regularFileCheck("/etc/netplan/60-paratix-eth0.yaml")]: { code: 1 },
       "test -d '/etc/netplan'": { code: 0 },
-      "test -f '/etc/netplan/60-paratix-eth0.yaml'": { code: 1 },
     })
     const mod = net.interface("eth0", {})
+    const result = await mod.check(mockSsh, emptyEnv)
+    expect(result).toBe("needs-apply")
+  })
+
+  it("returns needs-apply when Netplan config is a symlink even if target content matches", async () => {
+    const expectedYaml = [
+      "network:",
+      "  version: 2",
+      "  ethernets:",
+      "    eth0:",
+      "      dhcp4: true",
+    ].join("\n")
+    const mockSsh = createMockSsh({
+      "cat '/etc/netplan/60-paratix-eth0.yaml'": { stdout: `${expectedYaml}\n` },
+      [regularFileCheck("/etc/netplan/60-paratix-eth0.yaml")]: { code: 1 },
+      "test -d '/etc/netplan'": { code: 0 },
+    })
+    const mod = net.interface("eth0", { dhcp: true })
     const result = await mod.check(mockSsh, emptyEnv)
     expect(result).toBe("needs-apply")
   })
@@ -245,8 +268,8 @@ describe("net.interface — check", () => {
   it("returns needs-apply when Netplan config content differs", async () => {
     const mockSsh = createMockSsh({
       "cat '/etc/netplan/60-paratix-eth0.yaml'": { stdout: "network:\n  version: 1\n" },
+      [regularFileCheck("/etc/netplan/60-paratix-eth0.yaml")]: { code: 0 },
       "test -d '/etc/netplan'": { code: 0 },
-      "test -f '/etc/netplan/60-paratix-eth0.yaml'": { code: 0 },
     })
     const mod = net.interface("eth0", {})
     const result = await mod.check(mockSsh, emptyEnv)
@@ -255,10 +278,22 @@ describe("net.interface — check", () => {
 
   it("returns needs-apply when networkd config does not exist (no Netplan)", async () => {
     const mockSsh = createMockSsh({
+      [regularFileCheck("/etc/systemd/network/60-paratix-eth0.network")]: { code: 1 },
       "test -d '/etc/netplan'": { code: 1 },
-      "test -f '/etc/systemd/network/60-paratix-eth0.network'": { code: 1 },
     })
     const mod = net.interface("eth0", {})
+    const result = await mod.check(mockSsh, emptyEnv)
+    expect(result).toBe("needs-apply")
+  })
+
+  it("returns needs-apply when networkd config is a symlink even if target content matches", async () => {
+    const expectedConfig = ["[Match]", "Name=eth0", "", "[Network]", "DHCP=yes"].join("\n")
+    const mockSsh = createMockSsh({
+      "cat '/etc/systemd/network/60-paratix-eth0.network'": { stdout: `${expectedConfig}\n` },
+      [regularFileCheck("/etc/systemd/network/60-paratix-eth0.network")]: { code: 1 },
+      "test -d '/etc/netplan'": { code: 1 },
+    })
+    const mod = net.interface("eth0", { dhcp: true })
     const result = await mod.check(mockSsh, emptyEnv)
     expect(result).toBe("needs-apply")
   })
@@ -266,8 +301,8 @@ describe("net.interface — check", () => {
   it("returns needs-apply when networkd config content differs (no Netplan)", async () => {
     const mockSsh = createMockSsh({
       "cat '/etc/systemd/network/60-paratix-eth0.network'": { stdout: "[Match]\nName=wrong\n" },
+      [regularFileCheck("/etc/systemd/network/60-paratix-eth0.network")]: { code: 0 },
       "test -d '/etc/netplan'": { code: 1 },
-      "test -f '/etc/systemd/network/60-paratix-eth0.network'": { code: 0 },
     })
     const mod = net.interface("eth0", {})
     const result = await mod.check(mockSsh, emptyEnv)
@@ -276,28 +311,30 @@ describe("net.interface — check", () => {
 
   it("uses Netplan config path when /etc/netplan/ directory exists", async () => {
     const mockSsh = createMockSsh({
+      [regularFileCheck("/etc/netplan/60-paratix-eth0.yaml")]: { code: 1 },
       "test -d '/etc/netplan'": { code: 0 },
-      "test -f '/etc/netplan/60-paratix-eth0.yaml'": { code: 1 },
     })
     const mod = net.interface("eth0", {})
     await mod.check(mockSsh, emptyEnv)
-    expect(mockSsh.calls).toContain("test -f '/etc/netplan/60-paratix-eth0.yaml'")
+    expect(mockSsh.calls).toContain(regularFileCheck("/etc/netplan/60-paratix-eth0.yaml"))
   })
 
   it("uses networkd config path when /etc/netplan/ directory is absent", async () => {
     const mockSsh = createMockSsh({
+      [regularFileCheck("/etc/systemd/network/60-paratix-eth0.network")]: { code: 1 },
       "test -d '/etc/netplan'": { code: 1 },
-      "test -f '/etc/systemd/network/60-paratix-eth0.network'": { code: 1 },
     })
     const mod = net.interface("eth0", {})
     await mod.check(mockSsh, emptyEnv)
-    expect(mockSsh.calls).toContain("test -f '/etc/systemd/network/60-paratix-eth0.network'")
+    expect(mockSsh.calls).toContain(
+      regularFileCheck("/etc/systemd/network/60-paratix-eth0.network")
+    )
   })
 
   it("checks for /etc/netplan directory to detect Netplan", async () => {
     const mockSsh = createMockSsh({
+      [regularFileCheck("/etc/systemd/network/60-paratix-eth0.network")]: { code: 1 },
       "test -d '/etc/netplan'": { code: 1 },
-      "test -f '/etc/systemd/network/60-paratix-eth0.network'": { code: 1 },
     })
     const mod = net.interface("eth0", {})
     await mod.check(mockSsh, emptyEnv)
@@ -306,11 +343,13 @@ describe("net.interface — check", () => {
 
   it("does not check networkd path when Netplan is detected", async () => {
     const mockSsh = createMockSsh({
+      [regularFileCheck("/etc/netplan/60-paratix-eth0.yaml")]: { code: 1 },
       "test -d '/etc/netplan'": { code: 0 },
-      "test -f '/etc/netplan/60-paratix-eth0.yaml'": { code: 1 },
     })
     const mod = net.interface("eth0", {})
     await mod.check(mockSsh, emptyEnv)
-    expect(mockSsh.calls).not.toContain("test -f '/etc/systemd/network/60-paratix-eth0.network'")
+    expect(mockSsh.calls).not.toContain(
+      regularFileCheck("/etc/systemd/network/60-paratix-eth0.network")
+    )
   })
 })
