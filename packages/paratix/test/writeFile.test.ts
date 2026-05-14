@@ -41,12 +41,13 @@ function isBase64FallbackCommand(command: string, tmpPath: string): boolean {
   return command.includes("base64 -d") && command.includes(tmpPath)
 }
 
-type StreamWithStderr = { stderr: EventEmitter } & EventEmitter
+type StreamWithStderr = { close: () => void; stderr: EventEmitter } & EventEmitter
 
 type ExecCallback = (err: Error | undefined, stream: StreamWithStderr) => void
 
 function makeStream(): StreamWithStderr {
   const stream = new EventEmitter() as StreamWithStderr
+  stream.close = (): void => undefined
   stream.stderr = new EventEmitter()
   return stream
 }
@@ -335,6 +336,60 @@ describe("SshConnectionImpl.writeFile — large content (> 64 KB)", () => {
     )
   })
 
+  it("checks the staged remote tmp size before finalizing the target", async () => {
+    const remoteTmpPath = "/etc/paratix-write.STAGING0"
+    const remotePath = "/etc/large-config"
+    const stagingMismatchExecSpy = vi
+      .fn()
+      .mockImplementationOnce(realpathProbeHandler)
+      .mockImplementationOnce((_cmd: string, cb: ExecCallback) => {
+        const stream = makeStream()
+        cb(undefined, stream)
+        stream.emit("data", Buffer.from(remoteTmpPath))
+        stream.emit("close", 0)
+      })
+      .mockImplementationOnce((_cmd: string, cb: ExecCallback) => {
+        const stream = makeStream()
+        cb(undefined, stream)
+        stream.emit("close", 0)
+      })
+      .mockImplementationOnce((_cmd: string, cb: ExecCallback) => {
+        const stream = makeStream()
+        cb(undefined, stream)
+        stream.emit("data", Buffer.from("0"))
+        stream.emit("close", 0)
+      })
+      .mockImplementationOnce((_cmd: string, cb: ExecCallback) => {
+        const stream = makeStream()
+        cb(undefined, stream)
+        stream.emit(
+          "data",
+          Buffer.from(
+            "Filesystem     1024-blocks    Used Available Capacity Mounted on\n/dev/sda1        10000000  5000000   5000000      50% /"
+          )
+        )
+        stream.emit("close", 0)
+      })
+      .mockImplementationOnce((_cmd: string, cb: ExecCallback) => {
+        const stream = makeStream()
+        cb(undefined, stream)
+        stream.emit("close", 0)
+      })
+    const client = makeClientWithExecSpy(stagingMismatchExecSpy)
+    const ssh = makeConnectedSsh(client)
+    const content = makeLargeContent()
+
+    await expect(ssh.writeFile(remotePath, content, { mode: "0600" })).rejects.toThrow(
+      /remote file size mismatch/v
+    )
+
+    const executedCommands = (
+      stagingMismatchExecSpy.mock.calls as Array<[string, ...unknown[]]>
+    ).map(([cmd]) => cmd)
+    expect(executedCommands).toContain(`rm -f '${remoteTmpPath}'`)
+    expect(executedCommands.join("\n")).not.toContain(`mv -T -- '${remoteTmpPath}' '${remotePath}'`)
+  })
+
   it("swallows an error thrown by the remote rm -f cleanup (best-effort)", async () => {
     // Arrange: content upload succeeds, but rm -f in the finally block throws
     const remoteTmpPath = "/etc/paratix-write.CLEANUP2"
@@ -358,20 +413,27 @@ describe("SshConnectionImpl.writeFile — large content (> 64 KB)", () => {
         stream.emit("close", 0)
       })
       .mockImplementationOnce((_cmd: string, cb: ExecCallback) => {
-        // Third call is mv — succeeds
-        const stream = makeStream()
-        cb(undefined, stream)
-        stream.emit("close", 0)
-      })
-      .mockImplementationOnce((_cmd: string, cb: ExecCallback) => {
-        // Fourth call is the size verification — succeeds
+        // Third call is the staged temp size verification — succeeds
         const stream = makeStream()
         cb(undefined, stream)
         stream.emit("data", Buffer.from("100000"))
         stream.emit("close", 0)
       })
       .mockImplementationOnce((_cmd: string, cb: ExecCallback) => {
-        // Fifth call is rm -f — simulates a failure (e.g. permission denied)
+        // Fourth call is mv — succeeds
+        const stream = makeStream()
+        cb(undefined, stream)
+        stream.emit("close", 0)
+      })
+      .mockImplementationOnce((_cmd: string, cb: ExecCallback) => {
+        // Fifth call is the final target size verification — succeeds
+        const stream = makeStream()
+        cb(undefined, stream)
+        stream.emit("data", Buffer.from("100000"))
+        stream.emit("close", 0)
+      })
+      .mockImplementationOnce((_cmd: string, cb: ExecCallback) => {
+        // Sixth call is rm -f — simulates a failure (e.g. permission denied)
         cb(new Error("rm -f failed unexpectedly"), makeStream())
       })
 
@@ -391,7 +453,6 @@ describe("SshConnectionImpl.writeFile — large content (> 64 KB)", () => {
     const remotePath = "/etc/systemd/system/example.service"
     const emptyFileExecSpy = vi
       .fn()
-      // R-0000141: realpath probe before the initial mktemp.
       .mockImplementationOnce(realpathProbeHandler)
       .mockImplementationOnce((_cmd: string, cb: ExecCallback) => {
         const stream = makeStream()
@@ -407,6 +468,12 @@ describe("SshConnectionImpl.writeFile — large content (> 64 KB)", () => {
       .mockImplementationOnce((_cmd: string, cb: ExecCallback) => {
         const stream = makeStream()
         cb(undefined, stream)
+        stream.emit("data", Buffer.from("12"))
+        stream.emit("close", 0)
+      })
+      .mockImplementationOnce((_cmd: string, cb: ExecCallback) => {
+        const stream = makeStream()
+        cb(undefined, stream)
         stream.emit("close", 0)
       })
       .mockImplementationOnce((_cmd: string, cb: ExecCallback) => {
@@ -415,7 +482,6 @@ describe("SshConnectionImpl.writeFile — large content (> 64 KB)", () => {
         stream.emit("data", Buffer.from("0"))
         stream.emit("close", 0)
       })
-      // R-0000141: realpath probe before the privileged shell-fallback mktemp
       .mockImplementationOnce(realpathProbeHandler)
       .mockImplementationOnce((_cmd: string, cb: ExecCallback) => {
         const stream = makeStream()
@@ -424,7 +490,7 @@ describe("SshConnectionImpl.writeFile — large content (> 64 KB)", () => {
         stream.emit("close", 0)
       })
       .mockImplementationOnce((_cmd: string, cb: ExecCallback) => {
-        const stream = makeStream()
+        const stream = Object.assign(makeStream(), { end: vi.fn() })
         cb(undefined, stream)
         stream.emit("close", 0)
       })
@@ -498,6 +564,12 @@ describe("SshConnectionImpl.writeFile — large content (> 64 KB)", () => {
       .mockImplementationOnce((_cmd: string, cb: ExecCallback) => {
         const stream = makeStream()
         cb(undefined, stream)
+        stream.emit("close", 0)
+      })
+      .mockImplementationOnce((_cmd: string, cb: ExecCallback) => {
+        const stream = makeStream()
+        cb(undefined, stream)
+        stream.emit("data", Buffer.from(String(largeContent.length)))
         stream.emit("close", 0)
       })
       .mockImplementationOnce((_cmd: string, cb: ExecCallback) => {
@@ -607,7 +679,7 @@ describe("SshConnectionImpl.writeFile — large content (> 64 KB)", () => {
     vi.mocked(sftpUploadContent).mockResolvedValue()
 
     await expect(ssh.writeFile(remotePath, "unit-content", { mode: "0644" })).rejects.toThrow(
-      /remote file is empty/v
+      /remote file size mismatch/v
     )
   })
 
@@ -640,20 +712,27 @@ describe("SshConnectionImpl.writeFile — large content (> 64 KB)", () => {
         stream.emit("close", 0)
       })
       .mockImplementationOnce((_cmd: string, cb: ExecCallback) => {
-        // Third call: mv — succeeds
-        const stream = makeStream()
-        cb(undefined, stream)
-        stream.emit("close", 0)
-      })
-      .mockImplementationOnce((_cmd: string, cb: ExecCallback) => {
-        // Fourth call: the size verification — succeeds
+        // Third call: staged temp size verification — succeeds
         const stream = makeStream()
         cb(undefined, stream)
         stream.emit("data", Buffer.from("100000"))
         stream.emit("close", 0)
       })
       .mockImplementationOnce((_cmd: string, cb: ExecCallback) => {
-        // Fifth call: rm -f — fails with an error whose message contains the password
+        // Fourth call: mv — succeeds
+        const stream = makeStream()
+        cb(undefined, stream)
+        stream.emit("close", 0)
+      })
+      .mockImplementationOnce((_cmd: string, cb: ExecCallback) => {
+        // Fifth call: the final target size verification — succeeds
+        const stream = makeStream()
+        cb(undefined, stream)
+        stream.emit("data", Buffer.from("100000"))
+        stream.emit("close", 0)
+      })
+      .mockImplementationOnce((_cmd: string, cb: ExecCallback) => {
+        // Sixth call: rm -f — fails with an error whose message contains the password
         cb(
           new Error(`permission denied: echo ${sudoPassword} | sudo rm -f ${remoteTmpPath}`),
           makeStream()

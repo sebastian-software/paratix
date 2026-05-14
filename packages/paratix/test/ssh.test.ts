@@ -255,6 +255,13 @@ function makeWriteFileExecSpy(
       callback(undefined, stream)
       stream.emit("close", 0)
     })
+    .mockImplementationOnce((_command: string, callback: ExecCallback) => {
+      const stream = makeStream()
+      executedCommands.push(_command)
+      callback(undefined, stream)
+      stream.emit("data", Buffer.from("11"))
+      stream.emit("close", 0)
+    })
   if (options.finalizeRealpathDirectory != null) {
     spy.mockImplementationOnce((_command: string, callback: ExecCallback) => {
       const stream = makeStream()
@@ -3122,24 +3129,26 @@ describe("SshConnectionImpl", () => {
 
       expect(executedCommands[0]).toBe("mktemp '/tmp/paratix-write.XXXXXX'")
       expect(executedCommands[1]).toBe(`chmod '0600' '${tempPath}'`)
-      expect(executedCommands[2]).toContain("realpath -m --")
-      expect(executedCommands[2]).toContain("/etc/systemd/system")
-      expect(executedCommands[3]).toMatch(/^sudo bash -c /v)
-      expect(executedCommands[3]).toContain(tempPath)
-      expect(executedCommands[3]).toContain("target_temp=$(mktemp")
-      expect(executedCommands[3]).toContain("/etc/systemd/system/.my-app.service.paratix.XXXXXX")
-      expect(executedCommands[3]).toContain("[ ! -d")
-      expect(executedCommands[3]).toContain("[ ! -L")
-      expect(executedCommands[3]).toContain("mv -T -- ")
-      expect(executedCommands[3]).toContain(`'${tempPath}'`)
-      expect(executedCommands[3]).toContain('"$target_temp"')
-      expect(executedCommands[3]).toContain("chmod ")
-      expect(executedCommands[3]).toContain("'0600'")
-      expect(executedCommands[3]).toContain('chown "$target_owner" "$target_temp"')
-      expect(executedCommands[3]).toContain(`'${remotePath}'`)
-      expect(executedCommands[4]).toContain("stat -c")
-      expect(executedCommands[4]).toContain(remotePath)
-      expect(executedCommands[5]).toBe(`rm -f '${tempPath}'`)
+      expect(executedCommands[2]).toContain("stat -c")
+      expect(executedCommands[2]).toContain(tempPath)
+      expect(executedCommands[3]).toContain("realpath -m --")
+      expect(executedCommands[3]).toContain("/etc/systemd/system")
+      expect(executedCommands[4]).toMatch(/^sudo bash -c /v)
+      expect(executedCommands[4]).toContain(tempPath)
+      expect(executedCommands[4]).toContain("target_temp=$(mktemp")
+      expect(executedCommands[4]).toContain("/etc/systemd/system/.my-app.service.paratix.XXXXXX")
+      expect(executedCommands[4]).toContain("[ ! -d")
+      expect(executedCommands[4]).toContain("[ ! -L")
+      expect(executedCommands[4]).toContain("mv -T -- ")
+      expect(executedCommands[4]).toContain(`'${tempPath}'`)
+      expect(executedCommands[4]).toContain('"$target_temp"')
+      expect(executedCommands[4]).toContain("chmod ")
+      expect(executedCommands[4]).toContain("'0600'")
+      expect(executedCommands[4]).toContain('chown "$target_owner" "$target_temp"')
+      expect(executedCommands[4]).toContain(`'${remotePath}'`)
+      expect(executedCommands[5]).toContain("stat -c")
+      expect(executedCommands[5]).toContain(remotePath)
+      expect(executedCommands[6]).toBe(`rm -f '${tempPath}'`)
       expect(vi.mocked(sftpUploadContent)).toHaveBeenCalledOnce()
     })
 
@@ -3163,7 +3172,7 @@ describe("SshConnectionImpl", () => {
         /at least one path component is a symbolic link/v
       )
 
-      expect(executedCommands[2]).toContain("realpath -m --")
+      expect(executedCommands[3]).toContain("realpath -m --")
       expect(executedCommands.some((cmd) => cmd.includes("target_temp=$(mktemp"))).toBe(false)
       expect(executedCommands).toContain(`rm -f '${tempPath}'`)
       expect(vi.mocked(sftpUploadContent)).toHaveBeenCalledOnce()
@@ -3266,6 +3275,7 @@ describe("SshConnectionImpl", () => {
       const commandStdout = [
         initialTempPath,
         "",
+        "11",
         destinationDirectory,
         "",
         "0",
@@ -3299,17 +3309,17 @@ describe("SshConnectionImpl", () => {
       ).resolves.toBeUndefined()
 
       // R-0000141: a realpath probe runs before the privileged mktemp
-      expect(executedCommands[2]).toContain("realpath -m --")
-      expect(executedCommands[2]).toContain(destinationDirectory)
-      expect(executedCommands[5]).toContain("realpath -m --")
-      expect(executedCommands[5]).toContain(destinationDirectory)
-      expect(executedCommands[6]).toMatch(/^sudo bash -c /v)
-      expect(executedCommands[6]).toContain("/etc/apt/sources.list.d/paratix-write.XXXXXX")
-      expect(executedCommands[7]).toContain(fallbackTempPath)
-      expect(executedCommands[7]).not.toContain(initialTempPath)
-      expect(executedCommands[9]).toContain("realpath -m --")
-      expect(executedCommands[9]).toContain(destinationDirectory)
-      expect(executedCommands[13]).toBe(`rm -f '${initialTempPath}'`)
+      expect(executedCommands[3]).toContain("realpath -m --")
+      expect(executedCommands[3]).toContain(destinationDirectory)
+      expect(executedCommands[6]).toContain("realpath -m --")
+      expect(executedCommands[6]).toContain(destinationDirectory)
+      expect(executedCommands[7]).toMatch(/^sudo bash -c /v)
+      expect(executedCommands[7]).toContain("/etc/apt/sources.list.d/paratix-write.XXXXXX")
+      expect(executedCommands[8]).toContain(fallbackTempPath)
+      expect(executedCommands[8]).not.toContain(initialTempPath)
+      expect(executedCommands[10]).toContain("realpath -m --")
+      expect(executedCommands[10]).toContain(destinationDirectory)
+      expect(executedCommands[14]).toBe(`rm -f '${initialTempPath}'`)
     })
 
     it("rejects writeFile when a destination dirname component is a symlink (R-0000141 regression)", async () => {

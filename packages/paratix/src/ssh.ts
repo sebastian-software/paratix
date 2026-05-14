@@ -570,6 +570,7 @@ export class SshConnectionImpl implements SshConnection {
         this.connectionAbortController.signal
       )
       await this.setRemoteTempMode(remoteTemporary, temporaryMode)
+      await this.assertRemoteFileSize(remoteTemporary, expectedSize, "writeFile")
       await this.finalizeRemoteTempFile(remoteTemporary, remotePath, temporaryMode)
       await this.ensureRemoteWriteFile({
         content,
@@ -582,7 +583,11 @@ export class SshConnectionImpl implements SshConnection {
     }
   }
 
-  private async assertRemoteFileSize(remotePath: string, expectedSize: number): Promise<void> {
+  private async assertRemoteFileSize(
+    remotePath: string,
+    expectedSize: number,
+    operation: "uploadFile" | "writeFile" = "uploadFile"
+  ): Promise<void> {
     // R-0000266: the upload temp path is owned by the connecting user (mktemp
     // staged it under /tmp without sudo). Reading the size through `output`
     // would funnel the call through `ensureSudoReady` and could fail with a
@@ -598,7 +603,7 @@ export class SshConnectionImpl implements SshConnection {
 
     if (!Number.isFinite(actualSize)) {
       throw new TypeError(
-        `[ssh.uploadFile: ${remotePath}] could not determine remote file size after upload`
+        `[ssh.${operation}: ${remotePath}] could not determine remote file size after upload`
       )
     }
 
@@ -606,14 +611,14 @@ export class SshConnectionImpl implements SshConnection {
       const diskInfo = await this.checkRemoteDiskSpace(remotePath)
       if (diskInfo != null && diskInfo.availableBytes < expectedSize) {
         throw new Error(
-          `[ssh.uploadFile: ${remotePath}] disk full – ${diskInfo.availableBytes} bytes available on ${diskInfo.mountpoint}; the file was written as 0 bytes because there is no space left on the device`
+          `[ssh.${operation}: ${remotePath}] disk full – ${diskInfo.availableBytes} bytes available on ${diskInfo.mountpoint}; the file was written as 0 bytes because there is no space left on the device`
         )
       }
     }
 
     if (actualSize !== expectedSize) {
       throw new Error(
-        `[ssh.uploadFile: ${remotePath}] remote file size mismatch after upload; expected ${expectedSize} bytes, got ${actualSize}`
+        `[ssh.${operation}: ${remotePath}] remote file size mismatch after upload; expected ${expectedSize} bytes, got ${actualSize}`
       )
     }
   }
