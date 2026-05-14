@@ -1615,6 +1615,8 @@ export const net = {
         // rather than escalate readFile's ENOENT into a Paratix run failure.
         if (!(await conn.exists(resolvPath))) return NEEDS_APPLY
 
+        if (await isSymlink(conn, resolvPath)) return NEEDS_APPLY
+
         const content = await conn.readFile(resolvPath)
         return content.trim() === expectedContent.trim() ? "ok" : NEEDS_APPLY
       },

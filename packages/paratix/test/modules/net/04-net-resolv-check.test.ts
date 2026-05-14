@@ -28,6 +28,7 @@ const createMockSsh: typeof createBaseMockSsh = (responses, options) =>
     responseStubs: [
       ...(options?.responseStubs ?? []),
       { command: "[ -e '/etc/resolv.conf' ]", result: { code: 0 } },
+      { command: "[ -L '/etc/resolv.conf' ]", result: { code: 1 } },
     ],
   })
 
@@ -116,6 +117,20 @@ describe("net.resolv — check", () => {
       {},
       {
         responseStubs: [{ command: "[ -e '/etc/resolv.conf' ]", result: { code: 1 } }],
+      }
+    )
+    const mod = net.resolv({ nameservers: ["1.1.1.1"] })
+    const result = await mod.check(mockSsh, emptyEnv)
+    expect(result).toBe("needs-apply")
+  })
+
+  it("returns needs-apply when resolv.conf is a symlink even if target content matches", async () => {
+    const mockSsh = createMockSsh(
+      {
+        "cat '/etc/resolv.conf'": { stdout: "nameserver 1.1.1.1\n" },
+      },
+      {
+        responseStubs: [{ command: "[ -L '/etc/resolv.conf' ]", result: { code: 0 } }],
       }
     )
     const mod = net.resolv({ nameservers: ["1.1.1.1"] })
