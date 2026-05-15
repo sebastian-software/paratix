@@ -745,6 +745,20 @@ export const apt = {
         // `writeFile` follows symlinks and would mutate whatever the link
         // target points at. Mirrors the apt.key (R-0000134) and
         // compose.systemd (R-0000192) hardening.
+        //
+        // R-0000531: this `isSymlink` check is a fail-fast guard only; it is
+        // intentionally racy on its own. The atomic write guarantee comes
+        // from `ssh.writeFile` itself, which routes through
+        // `finalizeRemoteTempFile` (mktemp -> SFTP stream -> chmod -> chown
+        // -> `mv -T -- temp final`) with an in-shell guard
+        // `[ ! -d final ] && [ ! -L final ]` evaluated in the same shell
+        // invocation as the final `mv -T`. A symlink swap between this
+        // pre-check and the final `mv` is therefore detected by the
+        // in-shell guard, which aborts before the rename. The pre-check
+        // exists so the operator sees a clean
+        // `apt.repository refuses to write through symlink` diagnostic for
+        // the common (non-adversarial) case where a stale symlink is left
+        // behind, instead of the lower-level finalize error.
         if (await isSymlink(ssh, filePath)) {
           return failed(`[apt.repository] refuses to write through symlink at ${filePath}`)
         }
