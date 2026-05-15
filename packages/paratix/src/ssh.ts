@@ -866,6 +866,11 @@ export class SshConnectionImpl implements SshConnection {
     }
     // eslint-disable-next-line security/detect-non-literal-fs-filename
     const privateKey = await readFile(expandHomePath(privateKeyPath))
+    // R-0000521: do not zero the buffer in the success path. ssh2 keeps an
+    // internal reference to the same Buffer object, so a re-key or reconnect
+    // would access a zeroed buffer. The GC reclaims the buffer once all
+    // references are dropped. Only scrub the bytes on the error path for
+    // defensive security hygiene.
     try {
       if (
         await this.tryConnectOnPorts({
@@ -877,11 +882,13 @@ export class SshConnectionImpl implements SshConnection {
         return
       }
       if (await this.tryPrivateKeyPasswordFallback(privateKey, options)) return
+      privateKey.fill(0)
       throw new Error(
         `Failed to connect to ${this.runtime.host} on ports: ${this.runtime.ports.join(", ")}`
       )
-    } finally {
+    } catch (error) {
       privateKey.fill(0)
+      throw error
     }
   }
 
