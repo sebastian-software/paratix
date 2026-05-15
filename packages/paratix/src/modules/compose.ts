@@ -1,6 +1,6 @@
 /* eslint-disable max-lines -- compose module intentionally keeps related lifecycle helpers together */
 import { readFile } from "node:fs/promises"
-import { basename, dirname } from "node:path"
+import { basename, dirname, posix } from "node:path"
 
 import { failed, failedCommand } from "../moduleFailure.js"
 import { shellQuote, validateMktempPath } from "../ssh.js"
@@ -283,13 +283,27 @@ function parseContainerStates(stdout: string): string[] {
 }
 
 /**
- * Strip newline characters from a value to prevent injection in systemd unit files.
+ * Strip injection-relevant characters from a value used inside a systemd unit
+ * file. Removes:
+ *
+ * - all C0 control characters (`U+0000`–`U+001F`)
+ * - the DEL control character (`U+007F`)
+ *
+ * Newlines and carriage returns are part of the C0 range, so they are
+ * still removed alongside the rest of the control characters.
+ *
+ * R-0000562: additionally escape `%` so systemd specifiers like `%n`, `%t`,
+ * `%h` or `%i` cannot be smuggled through a project directory or service
+ * name and expanded by the unit parser. The systemd documented escape is
+ * doubling: `%` becomes `%%`.
  *
  * @param value - The string to sanitize.
- * @returns The sanitized string with all newline characters removed.
+ * @returns The sanitized string, ready to be placed inside a unit value.
  */
 function sanitizeUnitValue(value: string): string {
-  return value.replaceAll(/[\n\r]/gv, "")
+  // eslint-disable-next-line no-control-regex -- explicit C0 + DEL control-character strip
+  const withoutControlChars = value.replaceAll(/[\u0000-\u001F\u007F]/gv, "")
+  return withoutControlChars.replaceAll("%", "%%")
 }
 
 function validateGeneratedSystemdUnitContent(
@@ -304,6 +318,26 @@ function validateGeneratedSystemdUnitContent(
     return failed(`[compose.systemd] generated invalid unit content for ${unitFileName}`)
   }
 
+  return null
+}
+
+/**
+ * R-0000562: refuse to generate a systemd unit when `projectDirectory` is not
+ * an absolute POSIX path. systemd's `WorkingDirectory=` requires an absolute
+ * path; a relative path would resolve against the runtime's working
+ * directory at ExecStart time and silently break the unit — or, with a
+ * crafted prefix like `../../tmp`, point ExecStart at a directory the
+ * operator never intended.
+ */
+function validateComposeProjectDirectory(
+  projectDirectory: string,
+  unitFileName: string
+): ModuleResult | null {
+  if (!posix.isAbsolute(projectDirectory)) {
+    return failed(
+      `[compose.systemd] projectDirectory must be an absolute path for ${unitFileName}, got: ${projectDirectory}`
+    )
+  }
   return null
 }
 
@@ -1243,6 +1277,12 @@ export const compose = {
           ssh: connection,
         })
         if (typeof runtime !== "string") return runtime
+
+        // R-0000562: refuse non-absolute projectDirectory values before
+        // generating the unit, so a relative path like `./srv` never
+        // reaches `WorkingDirectory=` in a written unit file.
+        const directoryFailure = validateComposeProjectDirectory(projectDirectory, unitFileName)
+        if (directoryFailure != null) return directoryFailure
 
         const content = generateSystemdUnit(projectDirectory, serviceName, { detached, runtime })
         const validationFailure = validateGeneratedSystemdUnitContent(content, unitFileName)
