@@ -46,6 +46,9 @@ function createComposeMockSsh(
       "[ -f '/etc/systemd/system/compose-app.service' ] && [ ! -L '/etc/systemd/system/compose-app.service' ]":
         { code: 0 },
       "[ -f '/opt/app/compose.yml' ] && [ ! -L '/opt/app/compose.yml' ]": { code: 0 },
+      // R-0000530: isSymlink probes for projectDirectory and its ancestors
+      "[ -L '/opt/app' ]": { code: 1 },
+      "[ -L '/opt' ]": { code: 1 },
       "command -v podman": { code: 0 },
       [mktempCommand]: { code: 0, stdout: `${stagingPath}\n` },
       ...responses,
