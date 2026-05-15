@@ -72,7 +72,18 @@ async function disableAndRemoveSwapForReplacement(
   const backupResult = await moveSwapToBackup(ssh, path, backupPath)
   if (backupResult !== true) {
     await cleanupSwapTemporaryFile(ssh, temporaryPath)
-    if (disableResult) await enableSwap(ssh, path)
+    if (disableResult) {
+      // R-0000548: surface enableSwap rollback failures so operators know
+      // the host is now without an active swap area. Merge the rollback
+      // failure into the original backup failure message so both causes
+      // remain attributable in a single ModuleResult.
+      const reEnableResult = await enableSwap(ssh, path)
+      if (typeof reEnableResult !== "boolean") {
+        const backupMessage = backupResult.error?.message ?? "swap backup failed"
+        const reEnableMessage = reEnableResult.error?.message ?? "unknown error"
+        return failed(`${backupMessage}; rollback enableSwap failed: ${reEnableMessage}`)
+      }
+    }
     return backupResult
   }
   return { backupPath, disabledSwap: disableResult }
