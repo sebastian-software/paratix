@@ -1578,8 +1578,7 @@ trap - EXIT
         hostKeyAttempt.commit()
         // Ensure the host key is persisted to disk before returning.
         // eslint-disable-next-line no-await-in-loop
-        await this.commitAcceptedHostKey(verifier)
-        this.registerConnectedClient(client, port)
+        await this.commitAcceptedHostKeyAndRegisterClient(client, verifier, port)
         registered = true
         return true
       } catch (error) {
@@ -1687,6 +1686,25 @@ trap - EXIT
       return
     }
     if (verifier.pendingPersist != null) await verifier.pendingPersist
+  }
+
+  private async commitAcceptedHostKeyAndRegisterClient(
+    client: Client,
+    verifier: HostVerifierResult,
+    port: number
+  ): Promise<void> {
+    const transitionState: { error?: Error } = {}
+    const handleTransitionError = (error: Error): void => {
+      transitionState.error ??= error
+    }
+    client.on("error", handleTransitionError)
+    try {
+      await this.commitAcceptedHostKey(verifier)
+      if (transitionState.error != null) throw transitionState.error
+      this.registerConnectedClient(client, port)
+    } finally {
+      client.removeListener("error", handleTransitionError)
+    }
   }
 
   /**

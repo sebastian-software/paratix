@@ -4591,6 +4591,40 @@ describe("SshConnectionImpl", () => {
       expect(connected).toBe(true)
     })
 
+    it("handles client error events while persisting an accepted host key", async () => {
+      const { buildHostVerifier } = await import("../src/knownHosts.js")
+      const transitionError = new Error("socket closed during host-key persist")
+      let emitThrew = false
+      const commitAcceptedHostKey = vi.fn(async () => {
+        const [{ client }] = vi.mocked(tryConnectOnPort).mock.calls[0]
+        try {
+          client.emit("error", transitionError)
+        } catch {
+          emitThrew = true
+        }
+        await Promise.resolve()
+      })
+      vi.mocked(buildHostVerifier)
+        .mockResolvedValueOnce({
+          commitAcceptedHostKey,
+          hostVerifier: vi.fn().mockReturnValue(true),
+        })
+        .mockResolvedValueOnce({
+          commitAcceptedHostKey: vi.fn().mockResolvedValue(undefined),
+          hostVerifier: vi.fn().mockReturnValue(true),
+        })
+      vi.mocked(tryConnectOnPort).mockResolvedValue()
+      vi.mocked(cleanupFailedSshClient).mockClear()
+
+      const ssh = makeSshInstance({ host: "1.2.3.4", ports: [22, 2222] })
+      await ssh.connect()
+
+      expect(emitThrew).toBe(false)
+      expect(commitAcceptedHostKey).toHaveBeenCalledOnce()
+      expect(tryConnectOnPort).toHaveBeenCalledTimes(2)
+      expect(cleanupFailedSshClient).toHaveBeenCalledOnce()
+    })
+
     it("commits host-key trust only for the port that completes the SSH handshake", async () => {
       const firstKey = makeWireHostKey("ssh-ed25519", "failed-port-key")
       const secondKey = makeWireHostKey("ssh-ed25519", "successful-port-key")
