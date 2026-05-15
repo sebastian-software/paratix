@@ -285,7 +285,14 @@ export function buildQuadletInstallSection(options: QuadletContainerOptions): st
 export function buildQuadletImagePullCommand(options: QuadletImageUpdateOptions): string {
   const authFileFlag =
     options.authFile == null ? "" : ` --authfile ${shellQuoteForQuadlet(options.authFile)}`
-  return `podman pull${authFileFlag} -- ${shellQuoteForQuadlet(options.image)} 2>&1`
+  // R-0000569: do NOT redirect stderr into stdout. podman emits
+  // registry/auth/transport diagnostics on stderr; merging them into stdout
+  // would route sensitive credentials material into `failedCommand`'s
+  // command-output buffer alongside the pull progress lines we parse with
+  // `quadletPullOutputIndicatesChange`. Keep stderr separate; the change
+  // heuristic also consults `result.stderr` so progress markers emitted on
+  // stderr still flip the changed flag.
+  return `podman pull${authFileFlag} -- ${shellQuoteForQuadlet(options.image)}`
 }
 
 export function getQuadletContainerFilePath(name: string): string {
@@ -296,8 +303,14 @@ export function getQuadletContainerServiceName(options: QuadletImageUpdateOption
   return options.serviceName ?? options.name
 }
 
-export function quadletPullOutputIndicatesChange(output: string): boolean {
-  return QUADLET_PULL_CHANGED_OUTPUT_PATTERNS.some((pattern) => output.includes(pattern))
+export function quadletPullOutputIndicatesChange(...outputs: string[]): boolean {
+  // R-0000569: stderr is no longer folded into stdout by the pull command,
+  // so callers must pass both streams here. Accept a variadic list so the
+  // heuristic stays oblivious to the source stream and continues to work
+  // when podman emits progress markers on either channel.
+  return outputs.some((output) =>
+    QUADLET_PULL_CHANGED_OUTPUT_PATTERNS.some((pattern) => output.includes(pattern))
+  )
 }
 
 function shellQuoteForQuadlet(value: string): string {

@@ -157,7 +157,10 @@ async function applyQuadletImageUpdate(
   const idChanged =
     previousImageId == null ||
     previousImageId !== imageId ||
-    quadletPullOutputIndicatesChange(pullResult.stdout)
+    // R-0000569: stderr is now kept separate from stdout, so feed both
+    // streams to the change heuristic. podman emits progress lines on
+    // either channel depending on terminal detection.
+    quadletPullOutputIndicatesChange(pullResult.stdout, pullResult.stderr)
   if (!idChanged) return { status: "ok" }
 
   return restartQuadletService({
