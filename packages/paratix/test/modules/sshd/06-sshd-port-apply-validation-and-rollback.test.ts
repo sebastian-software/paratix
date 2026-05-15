@@ -22,11 +22,23 @@ const createMockSsh: typeof createBaseMockSsh = (responses, options) => {
       { command: SYSTEMCTL_CAT_SSH, result: { code: 1 } },
       { command: "systemctl is-enabled --quiet sshd.service", result: { code: 0 } },
       { command: "systemctl is-enabled --quiet ssh.service", result: { code: 0 } },
+      // R-0000496: sshd.config probes for ExecReload before reloading.
+      {
+        command: "systemctl cat 'sshd' | grep -E '^ExecReload='",
+        result: { code: 0, stdout: "ExecReload=/bin/kill -HUP $MAINPID\n" },
+      },
+      {
+        command: "systemctl cat 'ssh' | grep -E '^ExecReload='",
+        result: { code: 0, stdout: "ExecReload=/bin/kill -HUP $MAINPID\n" },
+      },
       { command: "systemctl reload sshd", result: { code: 0 } },
       { command: "systemctl reload ssh", result: { code: 0 } },
-      { command: "systemctl cat ssh.socket >/dev/null 2>&1", result: { code: 1 } },
-      { command: "systemctl is-enabled ssh.socket >/dev/null 2>&1", result: { code: 1 } },
-      { command: "systemctl is-active ssh.socket >/dev/null 2>&1", result: { code: 1 } },
+      { command: "systemctl reload-or-restart sshd", result: { code: 0 } },
+      { command: "systemctl reload-or-restart ssh", result: { code: 0 } },
+      // R-0000492: socket-state probes no longer use shell redirects.
+      { command: "systemctl cat ssh.socket", result: { code: 1 } },
+      { command: "systemctl is-enabled --quiet ssh.socket", result: { code: 1 } },
+      { command: "systemctl is-active --quiet ssh.socket", result: { code: 1 } },
       { command: "systemctl disable --now ssh.socket", result: { code: 0 } },
       { command: "systemctl enable --now ssh.socket", result: { code: 0 } },
       { command: "systemctl restart sshd", result: { code: 0 } },
@@ -50,8 +62,9 @@ const createMockSsh: typeof createBaseMockSsh = (responses, options) => {
 const emptyEnv = {}
 const SSHD_CONFIG = "/etc/ssh/sshd_config"
 const CAT_SSHD = `cat '${SSHD_CONFIG}'`
-const SYSTEMCTL_CAT_SSH = "systemctl cat ssh.service >/dev/null 2>&1"
-const SYSTEMCTL_CAT_SSHD = "systemctl cat sshd.service >/dev/null 2>&1"
+// R-0000492: shell redirects removed from resolveSshServiceUnit.
+const SYSTEMCTL_CAT_SSH = "systemctl cat ssh.service"
+const SYSTEMCTL_CAT_SSHD = "systemctl cat sshd.service"
 
 function trackWriteFile(
   mockSsh: ReturnType<typeof createMockSsh>
@@ -254,7 +267,8 @@ describe("sshd.port — apply: validation and rollback", () => {
 
     const execCommands = execSpy.mock.calls.map((args) => args[0])
     expect(execCommands).toContain("mkdir -p '/run/sshd'")
-    expect(execCommands).toContain("systemctl cat ssh.socket >/dev/null 2>&1")
+    // R-0000492: socket-state probes no longer use shell redirects.
+    expect(execCommands).toContain("systemctl cat ssh.socket")
     expect(execCommands).toContain("systemctl disable --now ssh.socket")
     expect(execCommands).toContain("systemctl restart sshd")
     expect(addPortSpy).toHaveBeenCalledWith(2222)
@@ -326,7 +340,8 @@ describe("sshd.port — apply: validation and rollback", () => {
     await mod.apply(mockSsh, emptyEnv)
 
     const execCommands = execSpy.mock.calls.map((args) => args[0])
-    expect(execCommands).toContain("systemctl cat ssh.socket >/dev/null 2>&1")
+    // R-0000492: socket-state probes no longer use shell redirects.
+    expect(execCommands).toContain("systemctl cat ssh.socket")
     expect(execCommands).not.toContain("systemctl disable --now ssh.socket")
     expect(execCommands).toContain("systemctl restart sshd")
   })
