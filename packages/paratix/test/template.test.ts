@@ -145,6 +145,32 @@ describe("renderTemplate", () => {
     expect(lazy).not.toHaveBeenCalled()
   })
 
+  it.each(["{{TOKEN|raw", "{{BAD-NAME|raw}}", "{{TOKEN|raw!}}", "{{TOKEN||raw}}"])(
+    "throws in strict mode when placeholder syntax is malformed: %s",
+    async (template) => {
+      const env: Environment = { BAD: "bad", TOKEN: "token" }
+      await expect(renderTemplate(template, env, { strict: true })).rejects.toThrow(
+        /Malformed template placeholder near/v
+      )
+    }
+  )
+
+  it("does not resolve lazy env values before strict mode rejects malformed syntax", async () => {
+    const lazy = vi.fn(() => "token")
+    const env: Environment = { TOKEN: lazy }
+
+    await expect(renderTemplate("{{TOKEN|raw!", env)).rejects.toThrow(
+      /Malformed template placeholder near/v
+    )
+    expect(lazy).not.toHaveBeenCalled()
+  })
+
+  it("keeps malformed placeholder-like text literal when strict mode is disabled", async () => {
+    const env: Environment = {}
+    const view = await renderTemplate("Value: {{BAD-NAME|raw}}", env, { strict: false })
+    expect(view).toBe("Value: {{BAD-NAME|raw}}")
+  })
+
   it("works with strict explicitly set to false", async () => {
     const env: Environment = { A: "x" }
     const view = await renderTemplate("{{A}}", env, { strict: false })

@@ -15,6 +15,8 @@ const modifiers: Partial<Record<string, (value: string) => string>> = {
   shell: shellQuote,
 }
 
+const MALFORMED_PLACEHOLDER_SNIPPET_LIMIT = 40
+
 /** Token kinds emitted by the template tokenizer. */
 type Token =
   | { kind: "escaped" }
@@ -37,11 +39,13 @@ const placeholderPattern = /\{\{(?<varName>\w+(?:\.\w+)*)(?:\|(?<modifier>\w*))?
 class TemplateTokenizer {
   private cursor = 0
   private literalBuffer = ""
+  private readonly strict: boolean
   private readonly template: string
   private readonly tokens: Token[] = []
 
-  public constructor(template: string) {
+  public constructor(template: string, strict: boolean) {
     this.template = template
+    this.strict = strict
   }
 
   public tokenize(): Token[] {
@@ -67,7 +71,10 @@ class TemplateTokenizer {
     if (!this.template.startsWith("{{", this.cursor)) return false
     placeholderPattern.lastIndex = this.cursor
     const match = placeholderPattern.exec(this.template)
-    if (match === null) return false
+    if (match === null) {
+      if (this.strict) throw new Error(this.formatMalformedPlaceholderError())
+      return false
+    }
     this.flushLiteral()
     this.tokens.push({
       kind: "placeholder",
@@ -84,6 +91,17 @@ class TemplateTokenizer {
       this.literalBuffer = ""
     }
   }
+
+  private formatMalformedPlaceholderError(): string {
+    const closingIndex = this.template.indexOf("}}", this.cursor + "{{".length)
+    const endIndex =
+      closingIndex === -1
+        ? Math.min(this.template.length, this.cursor + MALFORMED_PLACEHOLDER_SNIPPET_LIMIT)
+        : closingIndex + "}}".length
+    const snippet = this.template.slice(this.cursor, endIndex)
+    const suffix = endIndex < this.template.length && closingIndex === -1 ? "..." : ""
+    return `Malformed template placeholder near "${snippet}${suffix}"`
+  }
 }
 
 /**
@@ -94,10 +112,11 @@ class TemplateTokenizer {
  * into a single `literal` token to keep the resulting list small.
  *
  * @param template - The raw template string to tokenize.
+ * @param strict - When `true`, malformed unescaped placeholder syntax throws.
  * @returns An ordered list of tokens that, when rendered, reproduces the template.
  */
-function tokenizeTemplate(template: string): Token[] {
-  return new TemplateTokenizer(template).tokenize()
+function tokenizeTemplate(template: string, strict: boolean): Token[] {
+  return new TemplateTokenizer(template, strict).tokenize()
 }
 
 /**
@@ -165,11 +184,12 @@ export async function renderTemplate(
   environment: Environment,
   options?: RenderOptions
 ): Promise<string> {
-  const tokens = tokenizeTemplate(template)
+  const strict = options?.strict ?? true
+  const tokens = tokenizeTemplate(template, strict)
 
   // In strict mode, validate that all placeholders have explicit modifiers
   // before resolving any values.
-  if (options?.strict ?? true) enforceStrictModifiers(tokens)
+  if (strict) enforceStrictModifiers(tokens)
 
   // Resolve all placeholder values concurrently, preserving token order.
   const placeholderTokens = tokens.filter(
