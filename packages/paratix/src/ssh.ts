@@ -1664,6 +1664,12 @@ trap - EXIT
     // when the program is otherwise idle, it can exit and the GC will
     // reclaim the socket.
     fallback.unref()
+    // R-0000524: when `end()` completes a clean shutdown before the fallback
+    // fires, cancel the pending `destroy()` so it does not run on an already
+    // closed socket.
+    closing.once("close", () => {
+      clearTimeout(fallback)
+    })
   }
 
   private async tryConnectOnPorts(options: TryConnectOnPortsOptions = {}): Promise<boolean> {
