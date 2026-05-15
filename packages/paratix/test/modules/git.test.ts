@@ -89,8 +89,22 @@ describe("git.clone — validation", () => {
     )
   })
 
+  it.each([
+    ["token", "https://example.com/org/repo.git?token=abc123"],
+    ["signature", "https://example.com/org/repo.git?signature=sig456"],
+    ["password", "https://example.com/org/repo.git?password=secret"],
+  ])("rejects HTTPS repo URLs with sensitive %s query parameters", (_name, url) => {
+    expect(() => git.clone(url, destination)).toThrow("sensitive query parameters")
+  })
+
   it("accepts HTTPS repo URLs without credentials", () => {
     expect(() => git.clone("https://github.com/example/repo.git", destination)).not.toThrow()
+  })
+
+  it("accepts HTTPS repo URLs with non-sensitive query parameters", () => {
+    expect(() =>
+      git.clone("https://github.com/example/repo.git?ref=main&download=true", destination)
+    ).not.toThrow()
   })
 
   it("accepts SCP-like and SSH repo URLs", () => {

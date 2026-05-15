@@ -1,6 +1,7 @@
 import { failed } from "../moduleFailure.js"
 import { shellQuote } from "../ssh.js"
 import { type Module, type ModuleResult, NEEDS_APPLY, type SshConnection } from "../types.js"
+import { hasSensitiveQueryParameters } from "./curlHelpers.js"
 
 const EXEC_OPTS = { ignoreExitCode: true, silent: true } as const
 
@@ -24,6 +25,15 @@ function validateCloneRepo(repo: string): void {
   ) {
     throw new Error(
       "git.clone repo URLs must not embed credentials. Use SSH with deploy keys or an SSH agent instead."
+    )
+  }
+
+  if (
+    (parsed.protocol === "http:" || parsed.protocol === "https:") &&
+    hasSensitiveQueryParameters(parsed)
+  ) {
+    throw new Error(
+      "git.clone repo URLs must not contain sensitive query parameters. Use SSH with deploy keys or an SSH agent instead."
     )
   }
 }
