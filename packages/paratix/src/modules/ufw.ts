@@ -237,6 +237,14 @@ export const ufw = {
           return { status: "ok" }
         }
 
+        // R-0000489: short-circuit when ufw is already inactive so apply
+        // does not emit `changed` for a converged state. Mirrors the
+        // pre-check used in ufw.enabled.apply.
+        const status = await readUfwStatus(ssh)
+        if (status != null && status.includes("Status: inactive")) {
+          return { status: "ok" }
+        }
+
         const result = await ssh.exec(`${UFW} --force disable`, {
           ignoreExitCode: true,
           silent: true,
