@@ -47,7 +47,12 @@ function buildUserArguments(mode: "useradd" | "usermod", options?: UserOptions):
   if (options?.uid != null) flags.push(`--uid ${String(options.uid)}`)
   if (options?.shell != null) flags.push(`--shell ${shellQuote(options.shell)}`)
   if (options?.home != null) flags.push(`--home ${shellQuote(options.home)}`)
-  if (options?.groups != null) {
+  // R-0000546: `--groups ''` is rejected by useradd/usermod with
+  // "invalid argument", which would surface as a generic failedCommand
+  // even though the corresponding `check` reports the empty list as
+  // already satisfied. Skip the flag entirely when no groups are
+  // requested so empty arrays behave idempotently across check/apply.
+  if (options?.groups != null && options.groups.length > 0) {
     // For `usermod`, emit `--append --groups` so unrelated supplementary group
     // memberships (sudo, docker, manually added groups) are preserved across
     // re-applies. `useradd` does not accept `--append` and the new account has
