@@ -737,6 +737,14 @@ describe("rsync.sync — argument building", () => {
     expect(getArgs()).toContain("root@1.2.3.4:'/var/www/releases/app $(date); touch bad'")
   })
 
+  it("escapes embedded single quotes in remote destinations using the '\\'' pattern", async () => {
+    const mockSsh = createMockSsh()
+    const mod = rsync.sync({ dest: "/var/www/it's", src: "/local/src" })
+    await mod.apply(mockSsh, emptyEnv)
+
+    expect(getArgs()).toContain("root@1.2.3.4:'/var/www/it'\\''s'")
+  })
+
   it("builds IPv6 remote destination in bracketed form", async () => {
     const mockSsh = createMockSsh()
     vi.spyOn(mockSsh, "getConnectionInfo").mockReturnValue({
