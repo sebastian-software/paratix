@@ -902,16 +902,30 @@ export const ssh = {
       async check(conn: null | SshConnection): Promise<"needs-apply" | "ok"> {
         if (!conn) return NEEDS_APPLY
 
+        // R-0000550: route the check through the same known_hosts path that
+        // apply uses. Without forwarding `knownHostsPath`, `ssh-keygen -F`
+        // would default to `$HOME/.ssh/known_hosts`, which can diverge from
+        // the path resolved in the apply path (e.g. when running with a
+        // different effective HOME). The lookup must operate on the file
+        // that apply would actually mutate.
+        const knownHostsPath = (await resolveKnownHostsPaths(conn)).knownHostsPath
+
         if (state === "present" && hasKnownHostsTrustAnchor(options)) {
-          return (await hasMatchingKnownHostTrustAnchor(conn, { host, options: options ?? {} }))
+          return (await hasMatchingKnownHostTrustAnchor(conn, {
+            host,
+            knownHostsPath,
+            options: options ?? {},
+          }))
             ? "ok"
             : NEEDS_APPLY
         }
 
         const hostKnown =
           state === "absent"
-            ? await hasKnownHostEntry(conn, { host, options })
-            : await conn.test(`ssh-keygen -F ${shellQuote(knownHostsLookupTarget(host, options))}`)
+            ? await hasKnownHostEntry(conn, { host, knownHostsPath, options })
+            : await conn.test(
+                `ssh-keygen -F ${shellQuote(knownHostsLookupTarget(host, options))} -f ${shellQuote(knownHostsPath)}`
+              )
 
         if (state === "present") {
           return hostKnown ? "ok" : NEEDS_APPLY
