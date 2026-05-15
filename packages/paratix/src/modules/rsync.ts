@@ -7,8 +7,24 @@ import { failed } from "../moduleFailure.js"
 import { shellQuote } from "../ssh.js"
 import { CommandError } from "../sshHelpers.js"
 import { type Module, type ModuleResult, NEEDS_APPLY, type SshConnection } from "../types.js"
+import { assertValidGroupName, assertValidUserName } from "./posixNames.js"
 import { DEFAULT_RSYNC_TIMEOUT_MILLISECONDS, runRsyncProcess } from "./rsyncProcess.js"
 import { validateRsyncPath, validateStrictHostKeyChecking } from "./rsyncValidation.js"
+
+// R-0000487: rsync's `--chmod=` accepts the same symbolic and octal mode
+// expressions as chmod(1). Allow letters (rwxXstugo), digits (octal modes),
+// permission operators (`=`, `+`, `-`), and the comma separator that joins
+// multiple clauses. Reject anything else so that invalid expressions surface
+// at module construction time instead of as opaque rsync failures.
+const RSYNC_CHMOD_PATTERN = /^[A-Za-z0-9=+,\-]+$/v
+
+function validateRsyncChmod(value: string): void {
+  if (!RSYNC_CHMOD_PATTERN.test(value)) {
+    throw new Error(
+      `[rsync.sync] invalid chmod ${JSON.stringify(value)}: value must contain only letters, digits, '=', '+', '-' and ','`
+    )
+  }
+}
 
 type RsyncPhase = "apply" | "check"
 const DEFAULT_SSH_PORT = 22
@@ -82,12 +98,19 @@ function buildOwnershipArguments(options: SyncOptions): string[] {
   const result: string[] = []
 
   if (options.owner != null || options.group != null) {
+    // R-0000487: validate owner/group with the POSIX whitelist used by the
+    // user/group modules. Without this guard, embedded spaces, colons, or
+    // other shell-significant characters silently flow into rsync's
+    // `--chown=` flag and produce opaque failures.
     const ownerPart = options.owner ?? ""
+    if (ownerPart !== "") assertValidUserName(ownerPart)
     const groupPart = options.group ?? options.owner ?? ""
+    if (groupPart !== "") assertValidGroupName(groupPart)
     result.push(`--chown=${ownerPart}:${groupPart}`)
   }
 
   if (options.chmod != null) {
+    validateRsyncChmod(options.chmod)
     result.push(`--chmod=${options.chmod}`)
   }
 
