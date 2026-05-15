@@ -89,6 +89,12 @@ async function applyLineAppend(input: {
   // not append duplicates on direct invocation (e.g. from signal targets that
   // bypass check). Mirrors the no-op return pattern from R-0000075/77/81/88.
   if (!(await input.ssh.exists(input.remotePath))) {
+    // R-0000525: no separate isSymlink check is needed before this writeFile.
+    // ssh.writeFile finalizes via finalizeRemoteTempFile which evaluates a
+    // `[ ! -d ... ] && [ ! -L ... ]` guard at mv-time, atomically refusing to
+    // replace a path that has become a symlink between the earlier `[ -L ]`
+    // test and the actual rename. The TOCTOU window is therefore closed at
+    // the SSH layer rather than by an additional round-trip here.
     await input.ssh.writeFile(input.remotePath, `${input.line}\n`, { mode: "0644" })
     return { status: "changed" }
   }
