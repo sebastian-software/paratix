@@ -21,6 +21,7 @@ import {
   type ModuleStatus,
   NEEDS_APPLY,
   type OrchestrationStep,
+  type ShutdownSignal,
   type SshConnection,
 } from "./types.js"
 
@@ -39,7 +40,7 @@ export type RecipeModule = {
     options?: {
       onChildStep?: (step: OrchestrationStep) => Promise<void>
       onSignalStep?: (step: OrchestrationStep) => Promise<void>
-      shutdownSignal?: () => NodeJS.Signals | null
+      shutdownSignal?: () => null | ShutdownSignal
       signalHooks?: SignalHooks
       verbose?: boolean
     }
@@ -58,7 +59,7 @@ type ExecuteModulesParameters = {
   environment: Environment
   onChildStep?: (step: OrchestrationStep) => Promise<void>
   onSignalStep?: (step: OrchestrationStep) => Promise<void>
-  shutdownSignal?: () => NodeJS.Signals | null
+  shutdownSignal?: () => null | ShutdownSignal
   signalHooks?: SignalHooks
   signals?: Module[]
   verbose?: boolean
@@ -136,7 +137,7 @@ async function executeOneModule(parameters: {
   currentEnvironment: Environment
   onChildStep?: (step: OrchestrationStep) => Promise<void>
   onSignalStep?: (step: OrchestrationStep) => Promise<void>
-  shutdownSignal?: () => NodeJS.Signals | null
+  shutdownSignal?: () => null | ShutdownSignal
   signalHooks?: SignalHooks
   ssh: null | SshConnection
   targetModule: Module
@@ -200,7 +201,7 @@ async function applyRecipeChild(parameters: {
   currentEnvironment: Environment
   onChildStep?: (step: OrchestrationStep) => Promise<void>
   onSignalStep?: (step: OrchestrationStep) => Promise<void>
-  shutdownSignal?: () => NodeJS.Signals | null
+  shutdownSignal?: () => null | ShutdownSignal
   signalHooks?: SignalHooks
   targetModule: Module
   verbose: boolean
@@ -279,7 +280,7 @@ async function executeRecipeChildStep(parameters: {
   currentEnvironment: Environment
   onChildStep?: (step: OrchestrationStep) => Promise<void>
   onSignalStep?: (step: OrchestrationStep) => Promise<void>
-  shutdownSignal: () => NodeJS.Signals | null
+  shutdownSignal: () => null | ShutdownSignal
   signalHooks?: SignalHooks
   ssh: null | SshConnection
   targetModule: Module
@@ -301,7 +302,7 @@ async function processRecipeStep(parameters: {
   onChildStep?: (step: OrchestrationStep) => Promise<void>
   onSignalStep?: (step: OrchestrationStep) => Promise<void>
   preserveControlPlaneMeta: boolean
-  shutdownSignal: () => NodeJS.Signals | null
+  shutdownSignal: () => null | ShutdownSignal
   signalHooks?: SignalHooks
   signals?: Module[]
   ssh: null | SshConnection
@@ -402,7 +403,7 @@ async function executeModules(
 async function triggerSignals(parameters: {
   environment: Environment
   onSignalStep?: (step: OrchestrationStep) => Promise<void>
-  shutdownSignal?: () => NodeJS.Signals | null
+  shutdownSignal?: () => null | ShutdownSignal
   signalHooks?: SignalHooks
   signals: Module[]
   ssh: null | SshConnection
@@ -447,7 +448,7 @@ function applyRecipeSignalStatus(
 async function flushPendingRecipeSignals(parameters: {
   environment: Environment
   onSignalStep?: (step: OrchestrationStep) => Promise<void>
-  shutdownSignal?: () => NodeJS.Signals | null
+  shutdownSignal?: () => null | ShutdownSignal
   signalHooks?: SignalHooks
   signals: Module[]
   ssh: null | SshConnection
@@ -463,7 +464,7 @@ async function applyRecipe(parameters: {
   options?: {
     onChildStep?: (step: OrchestrationStep) => Promise<void>
     onSignalStep?: (step: OrchestrationStep) => Promise<void>
-    shutdownSignal?: () => NodeJS.Signals | null
+    shutdownSignal?: () => null | ShutdownSignal
     signalHooks?: SignalHooks
     verbose?: boolean
   }
@@ -530,7 +531,7 @@ function createRecipeDryRunApply(
     ssh: null | SshConnection,
     environment: Environment,
     parameters?: {
-      shutdownSignal?: () => NodeJS.Signals | null
+      shutdownSignal?: () => null | ShutdownSignal
     }
   ): Promise<ModuleResult> => {
     const result = await dryRunRecipeModule({
@@ -609,7 +610,7 @@ export function recipe(
       parameters?: {
         onChildStep?: (step: OrchestrationStep) => Promise<void>
         onSignalStep?: (step: OrchestrationStep) => Promise<void>
-        shutdownSignal?: () => NodeJS.Signals | null
+        shutdownSignal?: () => null | ShutdownSignal
         signalHooks?: SignalHooks
         verbose?: boolean
       }

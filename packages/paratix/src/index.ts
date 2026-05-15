@@ -75,6 +75,7 @@ export type {
   ModuleMetaEntry,
   ModuleResult,
   ServerDefinition,
+  ShutdownSignal,
   SshConfig,
   SshConnection,
   SshdPortMetaEntry,

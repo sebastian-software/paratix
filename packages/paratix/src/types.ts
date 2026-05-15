@@ -106,8 +106,54 @@ export type OrchestrationStep = {
  */
 export type ModuleApplyOptions = {
   onChildStep?: (step: OrchestrationStep) => Promise<void>
-  shutdownSignal?: () => NodeJS.Signals | null
+  shutdownSignal?: () => null | ShutdownSignal
 }
+
+/**
+ * Shutdown signal names observed by Paratix orchestration hooks.
+ *
+ * This intentionally mirrors Node's process signal strings without referencing
+ * the ambient `NodeJS` namespace, so published declarations remain usable in
+ * consumers that do not install `@types/node`.
+ */
+export type ShutdownSignal =
+  | "SIGABRT"
+  | "SIGALRM"
+  | "SIGBREAK"
+  | "SIGBUS"
+  | "SIGCHLD"
+  | "SIGCONT"
+  | "SIGFPE"
+  | "SIGHUP"
+  | "SIGILL"
+  | "SIGINFO"
+  | "SIGINT"
+  | "SIGIO"
+  | "SIGIOT"
+  | "SIGKILL"
+  | "SIGLOST"
+  | "SIGPIPE"
+  | "SIGPOLL"
+  | "SIGPROF"
+  | "SIGPWR"
+  | "SIGQUIT"
+  | "SIGSEGV"
+  | "SIGSTKFLT"
+  | "SIGSTOP"
+  | "SIGSYS"
+  | "SIGTERM"
+  | "SIGTRAP"
+  | "SIGTSTP"
+  | "SIGTTIN"
+  | "SIGTTOU"
+  | "SIGUNUSED"
+  | "SIGURG"
+  | "SIGUSR1"
+  | "SIGUSR2"
+  | "SIGVTALRM"
+  | "SIGWINCH"
+  | "SIGXCPU"
+  | "SIGXFSZ"
 
 /**
  * A single idempotent unit of work that can be checked and applied.
