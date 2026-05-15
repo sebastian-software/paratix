@@ -1319,7 +1319,15 @@ export class SshConnectionImpl implements SshConnection {
     await this.assertDirnameHasNoSymlinkComponent(directory, remotePath)
     const basename = posix.basename(remotePath)
     const finalTemplate = `${directory}/.${basename}.paratix.XXXXXX`
-    const finalizeScript = `
+    // R-0000517: enable strict shell error handling. Without `set -eu` a
+    // failed `mktemp` would leave `$target_temp` empty, the subsequent
+    // `mv`/`chmod`/`chown` would silently misbehave, and `trap - EXIT` would
+    // produce exit code 0 — letting `uploadFile`/`writeFile` believe the
+    // finalize succeeded even though the destination was never written.
+    // Guarding `target_temp` immediately after `mktemp` makes any failure
+    // surface as a non-zero exit code that `ssh.exec` translates into a
+    // `CommandError`.
+    const finalizeScript = `set -eu
 if ! ${targetGuard}; then
   printf '%s\n' 'target path must not be a directory or symlink' >&2
   exit 1
@@ -1333,6 +1341,7 @@ cleanup() {
 }
 trap cleanup EXIT
 target_temp=$(mktemp ${shellQuote(finalTemplate)})
+[ -n "$target_temp" ] || exit 1
 mv -T -- ${shellQuote(temporaryPath)} "$target_temp"
 chmod ${shellQuote(mode)} "$target_temp"
 chown "$target_owner" "$target_temp"
