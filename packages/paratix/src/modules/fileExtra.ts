@@ -28,6 +28,29 @@ async function concatFragments(fragments: string[]): Promise<string> {
   return contents.join("")
 }
 
+/**
+ * R-0000527: surface fragment-read failures (ENOENT, EACCES, EISDIR, …) as a
+ * failed module result instead of letting the raw `fs.readFile` rejection
+ * propagate out of `assemble.apply` / `assemble.check`. The caller passes a
+ * label describing the failing operation so the message identifies the
+ * remote target without leaking secrets.
+ *
+ * @param remotePath - Remote destination path used to scope the message.
+ * @param fragments - Local fragment paths to concatenate.
+ * @returns Either the concatenated content or a failed {@link ModuleResult}.
+ */
+async function concatFragmentsSafely(
+  remotePath: string,
+  fragments: string[]
+): Promise<ModuleResult | { content: string }> {
+  try {
+    return { content: await concatFragments(fragments) }
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : String(error)
+    return failed(`[file.assemble: ${remotePath}] reading fragment failed: ${reason}`)
+  }
+}
+
 function normalizeMode(mode: string): string {
   return mode.startsWith("0") ? mode : `0${mode}`
 }
@@ -162,7 +185,12 @@ export function assemble(
         )
       }
 
-      await ssh.writeFile(remotePath, await concatFragments(fragments), {
+      // R-0000527: surface fragment read errors (ENOENT, EACCES, EISDIR, …)
+      // as a failed module result instead of letting the raw fs rejection
+      // bubble out of apply.
+      const concatResult = await concatFragmentsSafely(remotePath, fragments)
+      if ("status" in concatResult) return concatResult
+      await ssh.writeFile(remotePath, concatResult.content, {
         mode: await resolveWriteMode(ssh, remotePath, options?.mode),
       })
 
@@ -193,7 +221,13 @@ export function assemble(
       if (!ssh) return NEEDS_APPLY
       if (!(await isRegularFileWithoutSymlink(ssh, remotePath))) return NEEDS_APPLY
 
-      const localHash = sha256String(await concatFragments(fragments))
+      // R-0000527: when a fragment cannot be read in check (ENOENT, EACCES,
+      // …) we cannot compute the desired hash. Defer the failure to apply by
+      // returning NEEDS_APPLY so apply surfaces the same condition as a
+      // properly formatted failed module result.
+      const concatResult = await concatFragmentsSafely(remotePath, fragments)
+      if ("status" in concatResult) return NEEDS_APPLY
+      const localHash = sha256String(concatResult.content)
       const remoteHash = await ssh.sha256(remotePath)
       if (!hexHashesEqual(remoteHash, localHash)) return NEEDS_APPLY
 
