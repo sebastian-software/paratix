@@ -29,6 +29,12 @@ const QUADLET_IMAGE_VALUE_MAX_LENGTH = 512
 // Permitted characters: ASCII letters/digits, _ . : @ / -. Rejects
 // whitespace, NUL, newlines and other control codes.
 const QUADLET_IMAGE_VALUE_PATTERN = /^[\w.:@\-\/]+$/v
+// R-0000572: auth-file paths are filesystem paths, not OCI references.
+// Reuse of QUADLET_IMAGE_VALUE_PATTERN would permit `@`, `:` and Unicode
+// word characters that have no business in a credentials file path.
+// Restrict to absolute ASCII paths composed of letters, digits, `_`,
+// `.`, `-` and `/` exclusively.
+const QUADLET_AUTH_FILE_PATH_PATTERN = /^\/[\w.\-\/]+$/v
 
 export function validateQuadletImageValue(field: string, value: string): void {
   if (value.length === 0) throw new Error(`quadlet: ${field} must not be empty`)
@@ -84,9 +90,13 @@ export function validateQuadletAuthFilePath(field: string, value: string): void 
       `quadlet: ${field} must be an absolute path starting with '/', got: ${JSON.stringify(value)}`
     )
   }
-  if (!QUADLET_IMAGE_VALUE_PATTERN.test(value)) {
+  // R-0000572: enforce the strict auth-file pattern rather than the
+  // permissive OCI image pattern. The image pattern allowed `@`, `:` and
+  // Unicode word characters, none of which belong in a credentials file
+  // path.
+  if (!QUADLET_AUTH_FILE_PATH_PATTERN.test(value)) {
     throw new Error(
-      `quadlet: ${field} must match ${String(QUADLET_IMAGE_VALUE_PATTERN)}, got: ${JSON.stringify(value)}`
+      `quadlet: ${field} must match ${String(QUADLET_AUTH_FILE_PATH_PATTERN)}, got: ${JSON.stringify(value)}`
     )
   }
   for (const segment of value.split("/")) {
