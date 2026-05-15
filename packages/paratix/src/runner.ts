@@ -176,39 +176,31 @@ export const DEFAULT_REBOOT_GRACE_SECONDS = 15
 const REBOOT_GRACE_SECONDS_TO_MS = 1000
 
 /**
- * Process-scoped holder for the configured reboot grace period. Set once per
- * `runPlaybook` invocation and cleared in teardown so a subsequent run
- * starts from defaults.
+ * Per-`runPlaybook` reboot grace state. Bundling the grace duration, the
+ * shutdown getter, and the abort signal in a single context keeps the
+ * state out of module scope so concurrent runs cannot race on shared
+ * mutable values. The context is created in
+ * {@link initializeRunPlaybookContext} and threaded through every call
+ * site that may schedule a reboot grace sleep (mirroring how
+ * {@link ShutdownState} already flows through the runner).
  */
-let rebootGraceMs: number = DEFAULT_REBOOT_GRACE_SECONDS * REBOOT_GRACE_SECONDS_TO_MS
-
-/**
- * Process-scoped getter for the runner's shutdown signal so the reboot
- * grace sleep can return early when SIGINT/SIGTERM arrives without
- * threading the getter through every call site of
- * {@link applyRunnerControlPlaneMeta}.
- *
- * @returns The active shutdown signal, or `null` when no shutdown is in progress.
- */
-let rebootShutdownSignal: () => NodeJS.Signals | null = () => null
-
-/**
- * R-0000203: process-scoped {@link AbortSignal} mirroring the runner's
- * shutdown handler. Set during {@link initializeRunPlaybookContext} and
- * cleared in {@link resetRebootGrace} so the reboot grace sleep can break
- * out of the timer the moment SIGINT/SIGTERM arrives.
- */
-let rebootAbortSignal: AbortSignal | undefined
-
-function setRebootGraceFromOptions(options: RunOptions): void {
-  const seconds = options.rebootGraceSeconds ?? DEFAULT_REBOOT_GRACE_SECONDS
-  rebootGraceMs = Math.max(0, seconds) * REBOOT_GRACE_SECONDS_TO_MS
+type RebootGraceContext = {
+  abortSignal: AbortSignal | undefined
+  graceMs: number
+  shutdownSignal: () => NodeJS.Signals | null
 }
 
-function resetRebootGrace(): void {
-  rebootGraceMs = DEFAULT_REBOOT_GRACE_SECONDS * REBOOT_GRACE_SECONDS_TO_MS
-  rebootShutdownSignal = () => null
-  rebootAbortSignal = undefined
+function createRebootGraceContext(
+  options: RunOptions,
+  shutdownSignal: () => NodeJS.Signals | null,
+  abortSignal: AbortSignal
+): RebootGraceContext {
+  const seconds = options.rebootGraceSeconds ?? DEFAULT_REBOOT_GRACE_SECONDS
+  return {
+    abortSignal,
+    graceMs: Math.max(0, seconds) * REBOOT_GRACE_SECONDS_TO_MS,
+    shutdownSignal,
+  }
 }
 
 /**
@@ -312,6 +304,7 @@ function interruptedBeforeApply(
 async function applyCheckedModule(parameters: {
   currentEnvironment: Environment
   dryRun?: boolean
+  rebootGrace: RebootGraceContext
   shutdownSignal: () => NodeJS.Signals | null
   ssh: SshConnectionImpl
   targetModule: Module
@@ -326,6 +319,7 @@ async function applyCheckedModule(parameters: {
   return applyModule({
     currentEnvironment: parameters.currentEnvironment,
     dryRun: parameters.dryRun,
+    rebootGrace: parameters.rebootGrace,
     shutdownSignal: parameters.shutdownSignal,
     ssh: parameters.ssh,
     targetModule: parameters.targetModule,
@@ -445,7 +439,8 @@ async function handlePortChange(
 
 async function handleReboot(
   ssh: SshConnectionImpl,
-  metaEntries: ModuleResult["meta"]
+  metaEntries: ModuleResult["meta"],
+  rebootGrace: RebootGraceContext
 ): Promise<void> {
   if (!(metaEntries?.some((entry) => isSystemRebootMetaEntry(entry)) ?? false)) return
 
@@ -459,7 +454,11 @@ async function handleReboot(
   // wait short-circuits when a shutdown signal arrives — both via the
   // synchronous shutdown getter (already set when this is reached) and via
   // the AbortSignal that fires on a fresh SIGINT/SIGTERM mid-sleep.
-  await sleepRespectingShutdown(rebootGraceMs, rebootShutdownSignal, rebootAbortSignal)
+  await sleepRespectingShutdown(
+    rebootGrace.graceMs,
+    rebootGrace.shutdownSignal,
+    rebootGrace.abortSignal
+  )
 
   try {
     await ssh.reconnect()
@@ -471,28 +470,34 @@ async function handleReboot(
 
 async function applyRunnerControlPlaneMeta(
   ssh: SshConnectionImpl,
-  step: Pick<OrchestrationStep, "meta" | "status">
+  step: Pick<OrchestrationStep, "meta" | "status">,
+  rebootGrace: RebootGraceContext
 ): Promise<void> {
   if (step.status === "failed") return
   if (step.meta == null) return
   assertValidModuleMetaEntries(step.meta)
   await handlePortChange(ssh, step.meta)
-  await handleReboot(ssh, step.meta)
+  await handleReboot(ssh, step.meta, rebootGrace)
 }
 
 async function handleMetaAndBuildResult(parameters: {
   dryRun?: boolean
   environment: Environment
+  rebootGrace: RebootGraceContext
   result: ModuleResult
   ssh: SshConnectionImpl
 }): Promise<StepResult> {
-  const { dryRun, environment, result, ssh } = parameters
+  const { dryRun, environment, rebootGrace, result, ssh } = parameters
   let currentEnvironment = environment
 
   if (result.meta != null) {
     currentEnvironment = await mergeEnvironmentFromMeta(currentEnvironment, result.meta)
     if (dryRun !== true) {
-      await applyRunnerControlPlaneMeta(ssh, { meta: result.meta, status: result.status })
+      await applyRunnerControlPlaneMeta(
+        ssh,
+        { meta: result.meta, status: result.status },
+        rebootGrace
+      )
     }
   }
 
@@ -505,36 +510,43 @@ async function handleMetaAndBuildResult(parameters: {
   }
 }
 
-// eslint-disable-next-line max-params -- verbose and dryRun flags need to be threaded through
-async function runDryRunRecipeModule(
-  recipeModule: RecipeModule,
-  environment: Environment,
-  ssh: SshConnectionImpl,
-  shutdownSignal: () => NodeJS.Signals | null,
+async function runDryRunRecipeModule(parameters: {
+  environment: Environment
+  recipeModule: RecipeModule
+  shutdownSignal: () => NodeJS.Signals | null
+  ssh: SshConnectionImpl
   verbose: boolean
-): Promise<StepResult> {
+}): Promise<StepResult> {
   return dryRunRecipeModule({
-    environment,
-    options: { verbose },
-    recipeModule,
-    shutdownSignal,
-    ssh,
+    environment: parameters.environment,
+    options: { verbose: parameters.verbose },
+    recipeModule: parameters.recipeModule,
+    shutdownSignal: parameters.shutdownSignal,
+    ssh: parameters.ssh,
   })
 }
 
-// eslint-disable-next-line max-params -- verbose and dryRun flags need to be threaded through
-async function runRecipeModule(
-  recipeModule: RecipeModule,
-  environment: Environment,
-  ssh: SshConnectionImpl,
-  stats: RunStats,
-  verbose: boolean,
-  dryRun: boolean,
+async function runRecipeModule(parameters: {
+  dryRun: boolean
+  environment: Environment
+  rebootGrace: RebootGraceContext
+  recipeModule: RecipeModule
   shutdownSignal: () => NodeJS.Signals | null
-): Promise<StepResult> {
+  ssh: SshConnectionImpl
+  stats: RunStats
+  verbose: boolean
+}): Promise<StepResult> {
+  const { dryRun, environment, rebootGrace, recipeModule, shutdownSignal, ssh, stats, verbose } =
+    parameters
   try {
     if (dryRun) {
-      return await runDryRunRecipeModule(recipeModule, environment, ssh, shutdownSignal, verbose)
+      return await runDryRunRecipeModule({
+        environment,
+        recipeModule,
+        shutdownSignal,
+        ssh,
+        verbose,
+      })
     }
 
     // check() iterates all child modules; apply() checks them again internally via executeModules().
@@ -547,10 +559,10 @@ async function runRecipeModule(
 
     const result = await recipeModule.apply(ssh, environment, {
       async onChildStep(step) {
-        await applyRunnerControlPlaneMeta(ssh, step)
+        await applyRunnerControlPlaneMeta(ssh, step, rebootGrace)
       },
       async onSignalStep(step) {
-        await applyRunnerControlPlaneMeta(ssh, step)
+        await applyRunnerControlPlaneMeta(ssh, step, rebootGrace)
       },
       shutdownSignal,
       signalHooks: {
@@ -563,7 +575,7 @@ async function runRecipeModule(
       },
       verbose,
     })
-    return await handleMetaAndBuildResult({ environment, result, ssh })
+    return await handleMetaAndBuildResult({ environment, rebootGrace, result, ssh })
   } catch (error) {
     return handleCaughtStepError({
       environment,
@@ -578,12 +590,13 @@ async function runRecipeModule(
 async function applyModule(parameters: {
   currentEnvironment: Environment
   dryRun?: boolean
+  rebootGrace: RebootGraceContext
   shutdownSignal: () => NodeJS.Signals | null
   ssh: SshConnectionImpl
   targetModule: Module
   verbose: boolean
 }): Promise<StepResult> {
-  const { currentEnvironment, dryRun = false, ssh, targetModule, verbose } = parameters
+  const { currentEnvironment, dryRun = false, rebootGrace, ssh, targetModule, verbose } = parameters
   const connection = targetModule.local === true ? null : ssh
   let result: ModuleResult
   if (dryRun && targetModule._applyDryRun != null) {
@@ -593,7 +606,7 @@ async function applyModule(parameters: {
   } else if (targetModule._supportsChildStepHook === true) {
     result = await targetModule.apply(connection, currentEnvironment, {
       async onChildStep(step) {
-        await applyRunnerControlPlaneMeta(ssh, step)
+        await applyRunnerControlPlaneMeta(ssh, step, rebootGrace)
       },
       shutdownSignal: parameters.shutdownSignal,
     })
@@ -603,6 +616,7 @@ async function applyModule(parameters: {
   const stepResult = await handleMetaAndBuildResult({
     dryRun,
     environment: currentEnvironment,
+    rebootGrace,
     result,
     ssh,
   })
@@ -632,6 +646,7 @@ function buildDryRunChangedResult(environment: Environment): StepResult {
 type RegularModuleArguments = {
   dryRun: boolean
   env: Environment
+  rebootGrace: RebootGraceContext
   shutdownSignal: () => NodeJS.Signals | null
   ssh: SshConnectionImpl
   targetModule: Module
@@ -639,7 +654,7 @@ type RegularModuleArguments = {
 }
 
 async function runRegularModule(parameters: RegularModuleArguments): Promise<StepResult> {
-  const { dryRun, env, ssh, targetModule, verbose } = parameters
+  const { dryRun, env, rebootGrace, ssh, targetModule, verbose } = parameters
   const shutdownSignal = parameters.shutdownSignal
 
   try {
@@ -655,6 +670,7 @@ async function runRegularModule(parameters: RegularModuleArguments): Promise<Ste
         return await applyCheckedModule({
           currentEnvironment: env,
           dryRun: true,
+          rebootGrace,
           shutdownSignal,
           ssh,
           targetModule,
@@ -668,6 +684,7 @@ async function runRegularModule(parameters: RegularModuleArguments): Promise<Ste
     return await applyCheckedModule({
       currentEnvironment: env,
       dryRun: false,
+      rebootGrace,
       shutdownSignal,
       ssh,
       targetModule,
@@ -689,6 +706,7 @@ type LoopArguments = {
   dryRun: boolean
   env: Environment
   modules: Module[]
+  rebootGrace: RebootGraceContext
   shutdownSignal: () => NodeJS.Signals | null
   ssh: SshConnectionImpl
   stats: RunStats
@@ -739,6 +757,7 @@ function shouldFlushTopLevelSignals(input: {
 async function flushPendingTopLevelSignals(input: {
   currentEnvironment: Environment
   definitionSignals: Module[]
+  rebootGrace: RebootGraceContext
   shutdownSignal: () => NodeJS.Signals | null
   ssh: SshConnectionImpl
   stats: RunStats
@@ -746,6 +765,7 @@ async function flushPendingTopLevelSignals(input: {
 }): Promise<SignalRunStatus> {
   return runSignals({
     env: input.currentEnvironment,
+    rebootGrace: input.rebootGrace,
     shutdownSignal: input.shutdownSignal,
     signals: input.definitionSignals,
     ssh: input.ssh,
@@ -774,6 +794,7 @@ async function flushTopLevelSignalsIfRequested(parameters: {
   definitionSignals?: Module[]
   dryRun: boolean
   loopState: ModuleLoopState
+  rebootGrace: RebootGraceContext
   result: StepResult
   shutdownSignal: () => NodeJS.Signals | null
   ssh: SshConnectionImpl
@@ -800,6 +821,7 @@ async function flushTopLevelSignalsIfRequested(parameters: {
   const signalStatus = await flushPendingTopLevelSignals({
     currentEnvironment: parameters.loopState.currentEnvironment,
     definitionSignals,
+    rebootGrace: parameters.rebootGrace,
     shutdownSignal: parameters.shutdownSignal,
     ssh: parameters.ssh,
     stats: parameters.stats,
@@ -815,27 +837,38 @@ async function createModuleStepPromise(parameters: {
   currentEnvironment: Environment
   currentModule: Module
   dryRun: boolean
+  rebootGrace: RebootGraceContext
   shutdownSignal: () => NodeJS.Signals | null
   ssh: SshConnectionImpl
   stats: RunStats
   verbose: boolean
 }): Promise<StepResult> {
-  const { currentEnvironment, currentModule, dryRun, shutdownSignal, ssh, stats, verbose } =
-    parameters
+  const {
+    currentEnvironment,
+    currentModule,
+    dryRun,
+    rebootGrace,
+    shutdownSignal,
+    ssh,
+    stats,
+    verbose,
+  } = parameters
 
   return isRecipe(currentModule)
-    ? runRecipeModule(
-        currentModule,
-        currentEnvironment,
+    ? runRecipeModule({
+        dryRun,
+        environment: currentEnvironment,
+        rebootGrace,
+        recipeModule: currentModule,
+        shutdownSignal,
         ssh,
         stats,
         verbose,
-        dryRun,
-        shutdownSignal
-      )
+      })
     : runRegularModule({
         dryRun,
         env: currentEnvironment,
+        rebootGrace,
         shutdownSignal,
         ssh,
         targetModule: currentModule,
@@ -848,7 +881,8 @@ async function runModuleLoop(parameters: LoopArguments): Promise<{
   signalsPending: boolean
   stopRun?: true
 }> {
-  const { definitionSignals, dryRun, modules, shutdownSignal, ssh, stats, verbose } = parameters
+  const { definitionSignals, dryRun, modules, rebootGrace, shutdownSignal, ssh, stats, verbose } =
+    parameters
   const loopState: ModuleLoopState = {
     currentEnvironment: parameters.env,
     signalsPending: false,
@@ -863,6 +897,7 @@ async function runModuleLoop(parameters: LoopArguments): Promise<{
       currentEnvironment: loopState.currentEnvironment,
       currentModule,
       dryRun,
+      rebootGrace,
       shutdownSignal,
       ssh,
       stats,
@@ -878,6 +913,7 @@ async function runModuleLoop(parameters: LoopArguments): Promise<{
       definitionSignals,
       dryRun,
       loopState,
+      rebootGrace,
       result,
       shutdownSignal,
       ssh,
@@ -898,6 +934,7 @@ async function runModuleLoop(parameters: LoopArguments): Promise<{
 
 type SignalArguments = {
   env: Environment
+  rebootGrace: RebootGraceContext
   shutdownSignal: () => NodeJS.Signals | null
   signals: Module[]
   ssh: SshConnectionImpl
@@ -906,7 +943,7 @@ type SignalArguments = {
 }
 
 async function runSignals(parameters: SignalArguments): Promise<SignalRunStatus> {
-  const { env, shutdownSignal, signals, ssh, stats, verbose } = parameters
+  const { env, rebootGrace, shutdownSignal, signals, ssh, stats, verbose } = parameters
   return runSignalModules({
     environment: env,
     hooks: {
@@ -918,7 +955,7 @@ async function runSignals(parameters: SignalArguments): Promise<SignalRunStatus>
       },
     },
     async onSignalStep(step) {
-      await applyRunnerControlPlaneMeta(ssh, step)
+      await applyRunnerControlPlaneMeta(ssh, step, rebootGrace)
     },
     shutdownSignal,
     signals,
@@ -958,6 +995,7 @@ type ExecuteRunArguments = {
   definition: ServerDefinition
   dryRun: boolean
   environment: Environment
+  rebootGrace: RebootGraceContext
   shutdownSignal: () => NodeJS.Signals | null
   ssh: SshConnectionImpl
   stats: RunStats
@@ -965,7 +1003,8 @@ type ExecuteRunArguments = {
 }
 
 async function executeRun(parameters: ExecuteRunArguments): Promise<void> {
-  const { definition, dryRun, environment, shutdownSignal, ssh, stats, verbose } = parameters
+  const { definition, dryRun, environment, rebootGrace, shutdownSignal, ssh, stats, verbose } =
+    parameters
 
   printRecipeHeader(definition.name)
   const loopResult = await runModuleLoop({
@@ -973,6 +1012,7 @@ async function executeRun(parameters: ExecuteRunArguments): Promise<void> {
     dryRun,
     env: environment,
     modules: definition.run,
+    rebootGrace,
     shutdownSignal,
     ssh,
     stats,
@@ -989,6 +1029,7 @@ async function executeRun(parameters: ExecuteRunArguments): Promise<void> {
   )
     await runSignals({
       env: finalEnvironment,
+      rebootGrace,
       shutdownSignal,
       signals: definition.signals,
       ssh,
@@ -1023,30 +1064,24 @@ function teardownPlaybookResources(parameters: {
     getSignalBus().off(signal, parameters.handleShutdownSignal)
   setRunnerAbortSignal(undefined)
   clearRegisteredSecrets()
-  // Restore the default reboot grace so a subsequent run starts from a known
-  // baseline instead of inheriting the previous run's value.
-  resetRebootGrace()
   parameters.ssh?.disconnect()
 }
 
 function initializeRunPlaybookContext(options: RunOptions): {
   handleShutdownSignal: (signal: NodeJS.Signals) => void
   promptAbortSignal: AbortSignal
+  rebootGrace: RebootGraceContext
   setSsh: (connection: SshConnectionImpl) => void
   shutdownSignal: () => NodeJS.Signals | null
 } {
   const { handleShutdownSignal, promptAbortSignal, setSsh, shutdownAbortSignal, shutdownSignal } =
     setupShutdownHandlers()
   setRunnerAbortSignal(promptAbortSignal)
-  setRebootGraceFromOptions(options)
-  // Expose the shutdown getter so the reboot grace sleep can return early
-  // when SIGINT/SIGTERM arrives mid-grace.
-  rebootShutdownSignal = shutdownSignal
-  // R-0000203: also expose the AbortSignal so an in-flight grace sleep ends
-  // synchronously the moment the shutdown handler aborts it, instead of
-  // running its full duration.
-  rebootAbortSignal = shutdownAbortSignal
-  return { handleShutdownSignal, promptAbortSignal, setSsh, shutdownSignal }
+  // R-0000203: scope the reboot grace state (duration, shutdown getter, abort
+  // signal) to this invocation so concurrent `runPlaybook` calls cannot race
+  // on shared mutable values.
+  const rebootGrace = createRebootGraceContext(options, shutdownSignal, shutdownAbortSignal)
+  return { handleShutdownSignal, promptAbortSignal, rebootGrace, setSsh, shutdownSignal }
 }
 
 export async function runPlaybook(
@@ -1056,7 +1091,7 @@ export async function runPlaybook(
   validateServerDefinition(definition, { allowEmptyRun: true })
   const { dryRun = false, verbose = false } = options
   const environment = await initializeEnvironment(options, definition)
-  const { handleShutdownSignal, promptAbortSignal, setSsh, shutdownSignal } =
+  const { handleShutdownSignal, promptAbortSignal, rebootGrace, setSsh, shutdownSignal } =
     initializeRunPlaybookContext(options)
   const stats = new RunStats()
   let ssh: SshConnectionImpl | undefined
@@ -1080,7 +1115,16 @@ export async function runPlaybook(
       },
       shutdownSignal,
     })
-    await executeRun({ definition, dryRun, environment, shutdownSignal, ssh, stats, verbose })
+    await executeRun({
+      definition,
+      dryRun,
+      environment,
+      rebootGrace,
+      shutdownSignal,
+      ssh,
+      stats,
+      verbose,
+    })
   } catch (error) {
     rethrowIfNotShutdown(error, shutdownSignal)
   } finally {
