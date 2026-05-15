@@ -79,7 +79,17 @@ export type QuadletImageUpdateOptions = {
 
 const CONTAINERS_SYSTEMD_DIRECTORY = "/etc/containers/systemd"
 const QUADLET_ENVIRONMENT_KEY_PATTERN = /^[A-Za-z_]\w*$/v
-const QUADLET_SAFE_ENVIRONMENT_VALUE_PATTERN = /^[\w@%+=:,\x2e\/\-]*$/v
+// R-0000590: drop `%` from the safe set. systemd treats `%x` sequences as
+// unit-file specifiers (`%h`, `%t`, `%n`, …), and the previous safe set
+// allowed values such as `%h/foo` through unescaped. Routing any value
+// containing `%` through the quoting path lets us emit `%%` so systemd
+// resolves the literal `%` instead of expanding the specifier.
+const QUADLET_SAFE_ENVIRONMENT_VALUE_PATTERN = /^[\w@+=:,\x2e\/\-]*$/v
+// R-0000590: reject ASCII control characters in environment values that
+// take the quoting path. The safe pattern already excludes them; this
+// catches them on the slow path before they ever reach the quoted output.
+// eslint-disable-next-line regexp/no-control-character -- intentional control-character class for defense-in-depth
+const QUADLET_CONTROL_CHARACTER_PATTERN = /[\x00-\x1F\x7F]/v
 const QUADLET_PULL_CHANGED_OUTPUT_PATTERNS = [
   "Copying blob",
   "Copying config",
@@ -216,7 +226,29 @@ function quoteQuadletEnvironmentValue(value: string): string {
     throw new Error("quadlet.container environment values must not contain newlines")
   }
   if (QUADLET_SAFE_ENVIRONMENT_VALUE_PATTERN.test(value)) return value
-  return `"${value.replaceAll("\\", "\\\\").replaceAll('"', '\\"')}"`
+  // R-0000590: defense-in-depth before emitting the quoted form.
+  //   1. Reject any ASCII control character (NUL through \x1F plus DEL).
+  //      systemd would otherwise see backslash sequences such as `\t`/`\n`
+  //      and decode them into actual control characters inside the unit.
+  //   2. Reject backslash escapes that systemd would interpret (\x, \t,
+  //      \n, …). The legitimate use case is opaque opaque values; an
+  //      operator who needs a literal newline should reach for a different
+  //      mechanism.
+  //   3. Double every `%` so systemd does not expand it as a specifier
+  //      (`%h`, `%t`, `%n`, …) inside the resulting Environment= line.
+  if (QUADLET_CONTROL_CHARACTER_PATTERN.test(value)) {
+    throw new Error("quadlet.container environment values must not contain control characters")
+  }
+  if (/\\[xtnr0abfv"\\]/v.test(value)) {
+    throw new Error(
+      "quadlet.container environment values must not contain systemd backslash escapes"
+    )
+  }
+  const escaped = value
+    .replaceAll("%", "%%")
+    .replaceAll("\\", "\\\\")
+    .replaceAll('"', '\\"')
+  return `"${escaped}"`
 }
 
 function renderQuadletEnvironmentLine(key: string, value: string): string {
