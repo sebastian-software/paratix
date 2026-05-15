@@ -16,7 +16,7 @@ import {
   validateAptKeyUrl,
   verifyAptKeyFingerprint,
 } from "./aptKeyHelpers.js"
-import { sha256String } from "./fileHelpers.js"
+import { hexHashesEqual, sha256String } from "./fileHelpers.js"
 import { applyWithFlagLock, hasFlag, setVersionedFlag } from "./moduleHelpers.js"
 import { isSymlink } from "./remoteFileChecks.js"
 
@@ -123,6 +123,52 @@ async function rollbackRepositoryAfterUpdateFailure(
     )
   }
   return failedCommand(failureMessage, updateResult)
+}
+
+/**
+ * R-0000566: ensure the sources.list content on disk still matches the
+ * snapshot captured a moment earlier in `apply`. Without this guard a
+ * concurrent writer could mutate the file between `snapshotAptRepository`
+ * (read) and the subsequent `ssh.writeFile` (write), so a later rollback
+ * would restore the *snapshot* content — not the actual pre-mutation state
+ * the operator observed — and silently mask the concurrent change.
+ *
+ * @param parameters - Integrity-check context.
+ * @param parameters.filePath - The sources.list path on the remote host.
+ * @param parameters.name - The repository name, used in failure messages.
+ * @param parameters.snapshot - The snapshot taken at the start of apply.
+ * @param parameters.ssh - The active SSH connection.
+ * @returns A failed {@link ModuleResult} when the on-disk state diverges
+ *   from the snapshot, otherwise `null`.
+ */
+async function ensureAptRepositorySnapshotStillCurrent(parameters: {
+  filePath: string
+  name: string
+  snapshot: AptRepositorySnapshot
+  ssh: SshConnection
+}): Promise<ModuleResult | null> {
+  const { filePath, name, snapshot, ssh } = parameters
+  const currentRemoteHash = await ssh.sha256(filePath)
+  if (snapshot.exists) {
+    if (currentRemoteHash === null) {
+      return failed(
+        `[apt.repository] sources.list disappeared between snapshot and write for ${name} at ${filePath}; refusing to proceed`
+      )
+    }
+    const expectedSnapshotHash = sha256String(snapshot.content)
+    if (!hexHashesEqual(currentRemoteHash, expectedSnapshotHash)) {
+      return failed(
+        `[apt.repository] sources.list changed between snapshot and write for ${name} at ${filePath}; refusing to proceed`
+      )
+    }
+    return null
+  }
+  if (currentRemoteHash !== null) {
+    return failed(
+      `[apt.repository] sources.list appeared between snapshot and write for ${name} at ${filePath}; refusing to proceed`
+    )
+  }
+  return null
 }
 
 async function restoreAptRepository(
@@ -763,6 +809,19 @@ export const apt = {
           return failed(`[apt.repository] refuses to write through symlink at ${filePath}`)
         }
         const previousRepository = await snapshotAptRepository(ssh, filePath)
+        // R-0000566: close the read/write race window. If the sources.list
+        // changed on disk between `snapshotAptRepository` (the readFile
+        // above) and this point, a later rollback would restore the wrong
+        // (older) content. Verify the on-disk SHA-256 matches the snapshot
+        // before writing; on mismatch abort apply *before* `apt-get update`
+        // runs so the operator can re-run after investigating.
+        const integrityFailure = await ensureAptRepositorySnapshotStillCurrent({
+          filePath,
+          name,
+          snapshot: previousRepository,
+          ssh,
+        })
+        if (integrityFailure) return integrityFailure
         await ssh.writeFile(filePath, `${expectedContent}\n`, { mode: APT_REPOSITORY_MODE })
         const result = await ssh.exec(`${NONINTERACTIVE} apt-get update`, {
           ignoreExitCode: true,
