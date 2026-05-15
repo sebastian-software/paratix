@@ -805,9 +805,12 @@ describe("cron.job", () => {
   // input validation
   // ---------------------------------------------------------------------------
 
+  // R-0000532: name validation switched from newline-only check to a strict
+  // pattern that rejects whitespace, colons, equals signs and other characters
+  // that could collide with the marker format.
   it("throws when name contains a newline", () => {
     expect(() => cron.job("alice", "bad\nname", { job: "0 3 * * * /backup.sh" })).toThrow(
-      "must not contain newlines"
+      "must match"
     )
   })
 
@@ -1032,8 +1035,9 @@ describe("cron.absent", () => {
     expect(writeInput).toContain("0 5 * * * /other.sh")
   })
 
+  // R-0000532: name validation now uses a strict pattern check.
   it("throws when name contains a newline", () => {
-    expect(() => cron.absent("alice", "bad\nname")).toThrow("must not contain newlines")
+    expect(() => cron.absent("alice", "bad\nname")).toThrow("must match")
   })
 
   // R-0000272: cron.absent uses the same readCrontab helper as cron.job.
