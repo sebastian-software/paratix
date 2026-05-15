@@ -908,7 +908,8 @@ export const ssh = {
         // the path resolved in the apply path (e.g. when running with a
         // different effective HOME). The lookup must operate on the file
         // that apply would actually mutate.
-        const knownHostsPath = (await resolveKnownHostsPaths(conn)).knownHostsPath
+        const knownHostsPaths = await resolveKnownHostsPaths(conn)
+        const knownHostsPath = knownHostsPaths.knownHostsPath
 
         if (state === "present" && hasKnownHostsTrustAnchor(options)) {
           return (await hasMatchingKnownHostTrustAnchor(conn, {

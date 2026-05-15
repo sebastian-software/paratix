@@ -76,7 +76,9 @@ async function validateProspectiveSshdConfigOrFailed(
   const failure = await validateProspectiveSshdConfig(ssh, parameters.newContent)
   if (failure == null) return undefined
   const stderr =
-    failure.error instanceof CommandError ? failure.error.fullStderr : (failure.error?.message ?? "")
+    failure.error instanceof CommandError
+      ? failure.error.fullStderr
+      : (failure.error?.message ?? "")
   return failed(
     `[sshd.config: ${parameters.settingNames}] sshd config validation failed ` +
       `(sshd -t against prospective config); not written:\n${stderr}`
@@ -107,19 +109,29 @@ const SSHD_PERMISSION_ERROR_PATTERNS: RegExp[] = [
   /operation not permitted/iv,
 ]
 
+// `ssh` itself uses exit code 255 to signal connection or transport errors
+// (the wrapped remote command never gets to choose this code). When `sshd -T`
+// fails with 255 plus a non-empty stderr, the runner reached the host but the
+// privileged sub-shell was rejected; treat it as a permission error.
+const SSH_TRANSPORT_FAILURE_EXIT_CODE = 255
+
 function sshdEffectiveConfigPermissionError(result: ExecResult): string | undefined {
   const haystack = `${result.stderr}\n${result.stdout}`
-  if (result.code === 255 && result.stderr.trim() !== "") return result.stderr.trim()
+  if (result.code === SSH_TRANSPORT_FAILURE_EXIT_CODE && result.stderr.trim() !== "") {
+    return result.stderr.trim()
+  }
   for (const pattern of SSHD_PERMISSION_ERROR_PATTERNS) {
     if (pattern.test(haystack)) return result.stderr.trim() || result.stdout.trim()
   }
   return undefined
 }
 
+const PERMISSION_ERROR_KIND = "permission-error" as const
+
 type EffectiveSshdConfigMismatch =
-  | { kind: "match" }
+  | { detail: string; kind: typeof PERMISSION_ERROR_KIND }
   | { directive: string; kind: "mismatch" }
-  | { detail: string; kind: "permission-error" }
+  | { kind: "match" }
 
 async function findEffectiveSshdConfigMismatch(
   ssh: SshConnection,
@@ -129,7 +141,7 @@ async function findEffectiveSshdConfigMismatch(
   if (result.code !== 0) {
     const permissionDetail = sshdEffectiveConfigPermissionError(result)
     if (permissionDetail != null) {
-      return { detail: permissionDetail, kind: "permission-error" }
+      return { detail: permissionDetail, kind: PERMISSION_ERROR_KIND }
     }
     const firstDirective = Object.keys(settings)[0] ?? ""
     return { directive: firstDirective, kind: "mismatch" }
@@ -195,14 +207,11 @@ async function rollbackSshdConfigAfterEffectiveMismatch(
   // divergence loudly otherwise.
   const writeError = await writeSshdRollbackWithRetry(ssh, parameters.originalConfig)
   if (writeError != null) {
-    return failedCommand(
-      `${baseMessage}; rollback write to ${SSHD_CONFIG_PATH} failed`,
-      {
-        code: -1,
-        stderr: writeError,
-        stdout: "",
-      }
-    )
+    return failedCommand(`${baseMessage}; rollback write to ${SSHD_CONFIG_PATH} failed`, {
+      code: -1,
+      stderr: writeError,
+      stdout: "",
+    })
   }
   const verifyError = await verifySshdConfigMatchesRollback(ssh, parameters.originalConfig)
   if (verifyError != null) {
@@ -224,7 +233,7 @@ async function rejectNonMatchingEffectiveSshdConfig(
 ): Promise<ModuleResult | undefined> {
   const mismatch = await findEffectiveSshdConfigMismatch(ssh, parameters.settings)
   if (mismatch.kind === "match") return undefined
-  if (mismatch.kind === "permission-error") {
+  if (mismatch.kind === PERMISSION_ERROR_KIND) {
     // R-0000553: `sshd -T` could not be evaluated (typically because the
     // operator lacks the privileges to read host keys). Surface the failure
     // explicitly so the apply loop terminates instead of repeatedly writing
@@ -455,13 +464,13 @@ async function preflightSshdReloadUnit(
 // real sshd is bound. Only `sshd` (direct service) and `systemd` (socket
 // activation hands the listening socket to systemd-pid-1) are accepted as
 // owners.
-const SS_USERS_PROCESS_PATTERN = /users:\(\(("([^"\\]+)")[^)]*\)/gv
+const SS_USERS_PROCESS_PATTERN = /users:\(\("(?<name>[^"]+)"[^\)]*\)/gv
 const SSHD_OWNER_NAMES = new Set(["sshd", "systemd"])
 
 function extractSsListenerProcessNames(output: string): string[] {
   const names: string[] = []
   for (const match of output.matchAll(SS_USERS_PROCESS_PATTERN)) {
-    const name = match[2]
+    const name = match.groups?.name
     if (name != null) names.push(name)
   }
   return names
@@ -1076,7 +1085,7 @@ export const sshd = {
         }
         const effectiveMismatch = await findEffectiveSshdConfigMismatch(ssh, settings)
         if (effectiveMismatch.kind === "match") return "ok"
-        if (effectiveMismatch.kind === "permission-error") {
+        if (effectiveMismatch.kind === PERMISSION_ERROR_KIND) {
           // R-0000553: surface the permission failure once during check so the
           // operator sees why apply will hard-fail instead of silently spinning
           // through the apply path.

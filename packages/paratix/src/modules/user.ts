@@ -42,24 +42,29 @@ function assertValidUserOptions(options: UserOptions): void {
   if (options.password != null) assertValidPasswordHash(options.password)
 }
 
+// R-0000546: `--groups ''` is rejected by useradd/usermod with
+// "invalid argument", which would surface as a generic failedCommand
+// even though the corresponding `check` reports the empty list as
+// already satisfied. Skip the flag entirely when no groups are
+// requested so empty arrays behave idempotently across check/apply.
+function buildGroupsFlags(mode: "useradd" | "usermod", groups: string[] | undefined): string[] {
+  if (groups == null || groups.length === 0) return []
+  const flags: string[] = []
+  // For `usermod`, emit `--append --groups` so unrelated supplementary group
+  // memberships (sudo, docker, manually added groups) are preserved across
+  // re-applies. `useradd` does not accept `--append` and the new account has
+  // no preexisting supplementary memberships to preserve.
+  if (mode === "usermod") flags.push("--append")
+  flags.push(`--groups ${shellQuote(groups.join(","))}`)
+  return flags
+}
+
 function buildUserArguments(mode: "useradd" | "usermod", options?: UserOptions): string[] {
   const flags: string[] = []
   if (options?.uid != null) flags.push(`--uid ${String(options.uid)}`)
   if (options?.shell != null) flags.push(`--shell ${shellQuote(options.shell)}`)
   if (options?.home != null) flags.push(`--home ${shellQuote(options.home)}`)
-  // R-0000546: `--groups ''` is rejected by useradd/usermod with
-  // "invalid argument", which would surface as a generic failedCommand
-  // even though the corresponding `check` reports the empty list as
-  // already satisfied. Skip the flag entirely when no groups are
-  // requested so empty arrays behave idempotently across check/apply.
-  if (options?.groups != null && options.groups.length > 0) {
-    // For `usermod`, emit `--append --groups` so unrelated supplementary group
-    // memberships (sudo, docker, manually added groups) are preserved across
-    // re-applies. `useradd` does not accept `--append` and the new account has
-    // no preexisting supplementary memberships to preserve.
-    if (mode === "usermod") flags.push("--append")
-    flags.push(`--groups ${shellQuote(options.groups.join(","))}`)
-  }
+  flags.push(...buildGroupsFlags(mode, options?.groups))
   return flags
 }
 

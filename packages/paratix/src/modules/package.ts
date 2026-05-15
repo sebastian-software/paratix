@@ -157,6 +157,64 @@ export async function isPackageInstalled(
   }
 }
 
+async function hasAnyMissingPackage(
+  ssh: SshConnection,
+  pm: PackageManager,
+  packages: readonly string[]
+): Promise<boolean> {
+  for (const packageName of packages) {
+    // eslint-disable-next-line no-await-in-loop -- probe packages sequentially to avoid SSH-channel pressure
+    if (!(await isPackageInstalled(ssh, pm, packageName))) return true
+  }
+  return false
+}
+
+// R-0000535: a zero exit code from the package-manager install
+// is not sufficient evidence that every requested package is
+// actually present (e.g. apt-get can "succeed" with partial
+// installs, virtual packages can resolve to nothing, mirrors can
+// skip packages without erroring). Re-check each requested
+// package individually and surface the still-missing names as a
+// failed result instead of optimistically reporting `changed`.
+async function collectStillMissingPackages(
+  ssh: SshConnection,
+  pm: PackageManager,
+  packages: readonly string[]
+): Promise<string[]> {
+  const stillMissing: string[] = []
+  for (const verifyName of packages) {
+    // eslint-disable-next-line no-await-in-loop -- post-install verification per package
+    if (!(await isPackageInstalled(ssh, pm, verifyName))) {
+      stillMissing.push(verifyName)
+    }
+  }
+  return stillMissing
+}
+
+async function runInstallAndVerify(parameters: {
+  options: undefined | UpgradeOptions
+  packages: readonly string[]
+  pm: PackageManager
+  ssh: SshConnection
+}): Promise<ModuleResult> {
+  const { options, packages, pm, ssh } = parameters
+  const quoted = packages.map((p) => shellQuote(p)).join(" ")
+  const result = await ssh.exec(INSTALL_COMMANDS[pm](quoted), execOptions(options))
+  if (result.code !== 0) {
+    return failedCommand(
+      `[package.installed: ${packages.join(", ")}] package installation failed`,
+      result
+    )
+  }
+  const stillMissing = await collectStillMissingPackages(ssh, pm, packages)
+  if (stillMissing.length > 0) {
+    return failed(
+      `[package.installed: ${packages.join(", ")}] packages still missing after install: ${stillMissing.join(", ")}`
+    )
+  }
+  return { status: "changed" }
+}
+
 /**
  * Distro-agnostic package management module.
  *
@@ -263,41 +321,9 @@ export const pkg = {
         }
         const pm = await detectPackageManager(ssh)
         if (!pm) return missingPackageManager(`package.installed: ${packages.join(", ")}`)
-        for (const packageName of packages) {
-          // eslint-disable-next-line no-await-in-loop
-          if (!(await isPackageInstalled(ssh, pm, packageName))) {
-            const quoted = packages.map((p) => shellQuote(p)).join(" ")
-            // eslint-disable-next-line no-await-in-loop -- install runs only after finding first missing package
-            const result = await ssh.exec(INSTALL_COMMANDS[pm](quoted), execOptions(options))
-            if (result.code !== 0) {
-              return failedCommand(
-                `[package.installed: ${packages.join(", ")}] package installation failed`,
-                result
-              )
-            }
-            // R-0000535: a zero exit code from the package-manager install
-            // is not sufficient evidence that every requested package is
-            // actually present (e.g. apt-get can "succeed" with partial
-            // installs, virtual packages can resolve to nothing, mirrors can
-            // skip packages without erroring). Re-check each requested
-            // package individually and surface the still-missing names as a
-            // failed result instead of optimistically reporting `changed`.
-            const stillMissing: string[] = []
-            for (const verifyName of packages) {
-              // eslint-disable-next-line no-await-in-loop -- post-install verification per package
-              if (!(await isPackageInstalled(ssh, pm, verifyName))) {
-                stillMissing.push(verifyName)
-              }
-            }
-            if (stillMissing.length > 0) {
-              return failed(
-                `[package.installed: ${packages.join(", ")}] packages still missing after install: ${stillMissing.join(", ")}`
-              )
-            }
-            return { status: "changed" }
-          }
-        }
-        return { status: "ok" }
+        const anyMissing = await hasAnyMissingPackage(ssh, pm, packages)
+        if (!anyMissing) return { status: "ok" }
+        return runInstallAndVerify({ options, packages, pm, ssh })
       },
       async check(ssh: null | SshConnection): Promise<"needs-apply" | "ok"> {
         if (!ssh) return NEEDS_APPLY

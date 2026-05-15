@@ -42,7 +42,7 @@ async function concatFragments(fragments: string[]): Promise<string> {
 async function concatFragmentsSafely(
   remotePath: string,
   fragments: string[]
-): Promise<ModuleResult | { content: string }> {
+): Promise<{ content: string } | ModuleResult> {
   try {
     return { content: await concatFragments(fragments) }
   } catch (error) {
@@ -154,6 +154,80 @@ export type BlockOptions = {
   prefix?: string
 }
 
+// R-0000268: chmod failures (read-only fs, EPERM after a SELinux
+// relabel, immutable bits) must not bubble out of apply as an
+// unguarded CommandError. Capture the exit code and return a
+// failedCommand result so the runner can report stdout/stderr.
+async function applyAssembleChmod(
+  ssh: SshConnection,
+  remotePath: string,
+  mode: string
+): Promise<ModuleResult | null> {
+  validateMode(mode)
+  const chmodResult = await ssh.exec(
+    `chmod ${shellQuote(mode)} ${shellQuote(remotePath)}`,
+    EXEC_OPTS
+  )
+  if (chmodResult.code !== 0) {
+    return failedCommand(`[file.assemble: ${remotePath}] chmod failed`, chmodResult)
+  }
+  return null
+}
+
+async function applyAssembleChown(
+  ssh: SshConnection,
+  remotePath: string,
+  owner: string
+): Promise<ModuleResult | null> {
+  const chownResult = await ssh.exec(renderChownCommand(owner, remotePath), EXEC_OPTS)
+  if (chownResult.code !== 0) {
+    return failedCommand(`[file.assemble: ${remotePath}] chown failed`, chownResult)
+  }
+  return null
+}
+
+// Symmetric symlink-guard with check() (which uses isRegularFileWithoutSymlink).
+// Refuse to write through a symlink — would silently overwrite the link target
+// with attacker-controlled content. Aligned with R-0000192 (compose) and R-0000134
+// (apt.key).
+//
+// R-0000527: surface fragment read errors (ENOENT, EACCES, EISDIR, …)
+// as a failed module result instead of letting the raw fs rejection
+// bubble out of apply.
+async function writeAssembledFragments(
+  ssh: SshConnection,
+  parameters: { fragments: string[]; mode?: string; remotePath: string }
+): Promise<ModuleResult | null> {
+  const { fragments, mode, remotePath } = parameters
+  if (await isSymlink(ssh, remotePath)) {
+    return failed(
+      `[file.assemble: ${remotePath}] refuses to write through symlink — path must be a regular file`
+    )
+  }
+  const concatResult = await concatFragmentsSafely(remotePath, fragments)
+  if ("status" in concatResult) return concatResult
+  await ssh.writeFile(remotePath, concatResult.content, {
+    mode: await resolveWriteMode(ssh, remotePath, mode),
+  })
+  return null
+}
+
+async function finalizeAssembledFile(
+  ssh: SshConnection,
+  parameters: { options?: { mode?: string; owner?: string }; remotePath: string }
+): Promise<ModuleResult> {
+  const { options, remotePath } = parameters
+  if (options?.mode != null) {
+    const chmodFailure = await applyAssembleChmod(ssh, remotePath, options.mode)
+    if (chmodFailure) return chmodFailure
+  }
+  if (options?.owner != null) {
+    const chownFailure = await applyAssembleChown(ssh, remotePath, options.owner)
+    if (chownFailure) return chownFailure
+  }
+  return { status: "changed" }
+}
+
 /**
  * Concatenate local fragment files and write the result to the remote host.
  * The file is only transferred when the remote SHA-256 differs from the
@@ -174,48 +248,13 @@ export function assemble(
   return {
     async apply(ssh: null | SshConnection): Promise<ModuleResult> {
       if (!ssh) return failed(`[file.assemble: ${remotePath}] SSH connection is required`)
-
-      // Symmetric symlink-guard with check() (which uses isRegularFileWithoutSymlink).
-      // Refuse to write through a symlink — would silently overwrite the link target
-      // with attacker-controlled content. Aligned with R-0000192 (compose) and R-0000134
-      // (apt.key).
-      if (await isSymlink(ssh, remotePath)) {
-        return failed(
-          `[file.assemble: ${remotePath}] refuses to write through symlink — path must be a regular file`
-        )
-      }
-
-      // R-0000527: surface fragment read errors (ENOENT, EACCES, EISDIR, …)
-      // as a failed module result instead of letting the raw fs rejection
-      // bubble out of apply.
-      const concatResult = await concatFragmentsSafely(remotePath, fragments)
-      if ("status" in concatResult) return concatResult
-      await ssh.writeFile(remotePath, concatResult.content, {
-        mode: await resolveWriteMode(ssh, remotePath, options?.mode),
+      const writeFailure = await writeAssembledFragments(ssh, {
+        fragments,
+        mode: options?.mode,
+        remotePath,
       })
-
-      if (options?.mode != null) {
-        validateMode(options.mode)
-        // R-0000268: chmod failures (read-only fs, EPERM after a SELinux
-        // relabel, immutable bits) must not bubble out of apply as an
-        // unguarded CommandError. Capture the exit code and return a
-        // failedCommand result so the runner can report stdout/stderr.
-        const chmodResult = await ssh.exec(
-          `chmod ${shellQuote(options.mode)} ${shellQuote(remotePath)}`,
-          EXEC_OPTS
-        )
-        if (chmodResult.code !== 0) {
-          return failedCommand(`[file.assemble: ${remotePath}] chmod failed`, chmodResult)
-        }
-      }
-      if (options?.owner != null) {
-        const chownResult = await ssh.exec(renderChownCommand(options.owner, remotePath), EXEC_OPTS)
-        if (chownResult.code !== 0) {
-          return failedCommand(`[file.assemble: ${remotePath}] chown failed`, chownResult)
-        }
-      }
-
-      return { status: "changed" }
+      if (writeFailure) return writeFailure
+      return finalizeAssembledFile(ssh, { options, remotePath })
     },
     async check(ssh: null | SshConnection): Promise<"needs-apply" | "ok"> {
       if (!ssh) return NEEDS_APPLY

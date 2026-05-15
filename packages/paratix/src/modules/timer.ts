@@ -476,6 +476,31 @@ async function removeAbsentUnitFiles(
   })
 }
 
+// R-0000552: previously the `??` fallback caused a rollback failure to
+// completely shadow the original `removeFailure` message. Chain both
+// errors instead so the primary failure (unit-file removal) stays
+// visible alongside the follow-up rollback failure.
+async function handleAbsentRemoveFailure(
+  ssh: SshConnection,
+  context: AbsentContext,
+  parameters: {
+    activationSnapshot: TimerActivationSnapshot
+    removeFailure: ModuleResult
+  }
+): Promise<ModuleResult> {
+  const { activationSnapshot, removeFailure } = parameters
+  const activationRestoreFailure = await restoreTimerActivationForAbsent(
+    ssh,
+    context,
+    activationSnapshot
+  )
+  if (!activationRestoreFailure) return removeFailure
+  const removeMessage = removeFailure.error?.message ?? "timer unit-file removal failed"
+  const restoreMessage =
+    activationRestoreFailure.error?.message ?? "timer activation rollback failed"
+  return failed(`${removeMessage}; rollback enable failed: ${restoreMessage}`)
+}
+
 async function applyAbsent(ssh: SshConnection, context: AbsentContext): Promise<ModuleResult> {
   const { locations } = context
 
@@ -495,22 +520,7 @@ async function applyAbsent(ssh: SshConnection, context: AbsentContext): Promise<
     timer: timerExists,
   })
   if (removeFailure) {
-    const activationRestoreFailure = await restoreTimerActivationForAbsent(
-      ssh,
-      context,
-      activationSnapshot
-    )
-    // R-0000552: previously the `??` fallback caused a rollback failure to
-    // completely shadow the original `removeFailure` message. Chain both
-    // errors instead so the primary failure (unit-file removal) stays
-    // visible alongside the follow-up rollback failure.
-    if (activationRestoreFailure) {
-      const removeMessage = removeFailure.error?.message ?? "timer unit-file removal failed"
-      const restoreMessage =
-        activationRestoreFailure.error?.message ?? "timer activation rollback failed"
-      return failed(`${removeMessage}; rollback enable failed: ${restoreMessage}`)
-    }
-    return removeFailure
+    return handleAbsentRemoveFailure(ssh, context, { activationSnapshot, removeFailure })
   }
   return { status: "changed" }
 }

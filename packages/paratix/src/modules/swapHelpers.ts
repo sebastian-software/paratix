@@ -1,8 +1,17 @@
 import { failed, failedCommand } from "../moduleFailure.js"
 import { shellQuote } from "../ssh.js"
 import { type ModuleResult, NEEDS_APPLY, type SshConnection } from "../types.js"
-import { enableSwap, handleAbsentSwapRemovalFailure } from "./swapAbsentRollbackHelpers.js"
-import { moveSwapToBackup } from "./swapBackupHelpers.js"
+import {
+  disableSwap,
+  enableSwap,
+  handleAbsentSwapRemovalFailure,
+} from "./swapAbsentRollbackHelpers.js"
+import {
+  finalizeManagedSwapBackup,
+  moveSwapToBackup,
+  restoreSwapBackup,
+  rollbackManagedSwapBackup,
+} from "./swapBackupHelpers.js"
 import {
   classifySwapFilePath,
   cleanupSwapTemporaryFile,
@@ -31,12 +40,6 @@ async function ensureSafeSwapRemoval(
   return failed(`[swap.file: ${path}] refusing to remove unsafe path: ${classification.reason}`)
 }
 
-async function disableSwap(ssh: SshConnection, path: string): Promise<boolean | ModuleResult> {
-  if (!(await isSwapActive(ssh, path))) return false
-  const result = await ssh.exec(`swapoff ${shellQuote(path)}`, EXEC_OPTS)
-  return result.code === 0 ? true : failedCommand(`[swap.file: ${path}] swapoff failed`, result)
-}
-
 async function removeSwapFile(ssh: SshConnection, path: string): Promise<boolean | ModuleResult> {
   if (!(await ssh.exists(path))) return false
   const result = await ssh.exec(`rm -f ${shellQuote(path)}`, EXEC_OPTS)
@@ -57,6 +60,29 @@ async function createMissingSwapFile(
   return createResult === true ? "changed" : createResult
 }
 
+// R-0000548: surface enableSwap rollback failures so operators know
+// the host is now without an active swap area. Merge the rollback
+// failure into the original backup failure message so both causes
+// remain attributable in a single ModuleResult.
+async function handleSwapBackupFailure(
+  ssh: SshConnection,
+  parameters: {
+    backupResult: ModuleResult
+    disabledSwap: boolean
+    path: string
+    temporaryPath: string
+  }
+): Promise<ModuleResult> {
+  const { backupResult, disabledSwap, path, temporaryPath } = parameters
+  await cleanupSwapTemporaryFile(ssh, temporaryPath)
+  if (!disabledSwap) return backupResult
+  const reEnableResult = await enableSwap(ssh, path)
+  if (typeof reEnableResult === "boolean") return backupResult
+  const backupMessage = backupResult.error?.message ?? "swap backup failed"
+  const reEnableMessage = reEnableResult.error?.message ?? "unknown error"
+  return failed(`${backupMessage}; rollback enableSwap failed: ${reEnableMessage}`)
+}
+
 async function disableAndRemoveSwapForReplacement(
   ssh: SshConnection,
   path: string,
@@ -71,46 +97,14 @@ async function disableAndRemoveSwapForReplacement(
   const backupPath = `${path}.paratix-backup`
   const backupResult = await moveSwapToBackup(ssh, path, backupPath)
   if (backupResult !== true) {
-    await cleanupSwapTemporaryFile(ssh, temporaryPath)
-    if (disableResult) {
-      // R-0000548: surface enableSwap rollback failures so operators know
-      // the host is now without an active swap area. Merge the rollback
-      // failure into the original backup failure message so both causes
-      // remain attributable in a single ModuleResult.
-      const reEnableResult = await enableSwap(ssh, path)
-      if (typeof reEnableResult !== "boolean") {
-        const backupMessage = backupResult.error?.message ?? "swap backup failed"
-        const reEnableMessage = reEnableResult.error?.message ?? "unknown error"
-        return failed(`${backupMessage}; rollback enableSwap failed: ${reEnableMessage}`)
-      }
-    }
-    return backupResult
+    return handleSwapBackupFailure(ssh, {
+      backupResult,
+      disabledSwap: disableResult,
+      path,
+      temporaryPath,
+    })
   }
   return { backupPath, disabledSwap: disableResult }
-}
-
-async function restoreSwapBackup(
-  ssh: SshConnection,
-  path: string,
-  backupPath: string
-): Promise<ModuleResult | true> {
-  // R-0000246: the restore path intentionally allows overwriting the
-  // current target. We are recovering from a publish/replace failure where
-  // a partial new swap file may have been written at `path`; the goal is
-  // to put the operator-managed backup back in place and restart swap.
-  // This is the inverse of the backup creation (which uses `mv -T -n` to
-  // refuse overwriting a stale backup).
-  const restoreResult = await ssh.exec(
-    `mv -T -- ${shellQuote(backupPath)} ${shellQuote(path)}`,
-    EXEC_OPTS
-  )
-  return restoreResult.code === 0
-    ? true
-    : failedCommand(`[swap.file: ${path}] swap restore failed`, restoreResult)
-}
-
-async function removeSwapBackup(ssh: SshConnection, backupPath: string): Promise<void> {
-  await ssh.exec(`rm -f ${shellQuote(backupPath)}`, EXEC_OPTS)
 }
 
 type ManagedReplacementOutcome =
@@ -160,32 +154,6 @@ async function replaceManagedSwapFile(
   // + fstab update) finishes. The caller is responsible for invoking
   // {@link finalizeManagedSwapBackup} or {@link rollbackManagedSwapBackup}.
   return { backupPath: replacementState.backupPath, kind: "changed" }
-}
-
-async function rollbackManagedSwapBackup(
-  ssh: SshConnection,
-  parameters: {
-    backupPath: string
-    failureResult: ModuleResult
-    options: NormalizedSwapFileOptions
-  }
-): Promise<ModuleResult> {
-  const { backupPath, failureResult, options } = parameters
-  // Best-effort rollback: stop the (possibly active) swap on the new file,
-  // restore the backup, and try to re-enable swap on it. A failure inside
-  // the rollback is surfaced because operators must know if the host is
-  // left in a divergent state.
-  const disableResult = await disableSwap(ssh, options.path)
-  if (typeof disableResult !== "boolean") return disableResult
-  const restoreResult = await restoreSwapBackup(ssh, options.path, backupPath)
-  if (restoreResult !== true) return restoreResult
-  const reEnable = await enableSwap(ssh, options.path)
-  if (typeof reEnable !== "boolean") return reEnable
-  return failureResult
-}
-
-async function finalizeManagedSwapBackup(ssh: SshConnection, backupPath: string): Promise<void> {
-  await removeSwapBackup(ssh, backupPath)
 }
 
 type RecreateOutcome =

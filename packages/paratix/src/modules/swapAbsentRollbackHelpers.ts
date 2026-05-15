@@ -15,6 +15,15 @@ export async function enableSwap(
   return result.code === 0 ? true : failedCommand(`[swap.file: ${path}] swapon failed`, result)
 }
 
+export async function disableSwap(
+  ssh: SshConnection,
+  path: string
+): Promise<boolean | ModuleResult> {
+  if (!(await isSwapActive(ssh, path))) return false
+  const result = await ssh.exec(`swapoff ${shellQuote(path)}`, EXEC_OPTS)
+  return result.code === 0 ? true : failedCommand(`[swap.file: ${path}] swapoff failed`, result)
+}
+
 async function reactivateSwap(ssh: SshConnection, path: string): Promise<ModuleResult | true> {
   const result = await ssh.exec(`swapon ${shellQuote(path)}`, EXEC_OPTS)
   return result.code === 0 ? true : failedCommand(`[swap.file: ${path}] swapon failed`, result)
