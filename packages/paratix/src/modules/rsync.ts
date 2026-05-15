@@ -346,8 +346,16 @@ export const rsync = {
       async check(ssh: null | SshConnection): Promise<"needs-apply" | "ok"> {
         if (!ssh) return NEEDS_APPLY
 
-        const stdout = await executeRsync({ dryRun: true, options, phase: "check", ssh })
-        return stdout.trim().length > 0 ? NEEDS_APPLY : "ok"
+        // R-0000484: tolerate executeRsync failures during check so that
+        // transient auth errors or non-zero rsync exits do not abort the
+        // playbook before apply has had a chance to run with full error
+        // handling.
+        try {
+          const stdout = await executeRsync({ dryRun: true, options, phase: "check", ssh })
+          return stdout.trim().length > 0 ? NEEDS_APPLY : "ok"
+        } catch {
+          return NEEDS_APPLY
+        }
       },
       name: `rsync.sync: ${options.src} -> ${options.dest}`,
     }
