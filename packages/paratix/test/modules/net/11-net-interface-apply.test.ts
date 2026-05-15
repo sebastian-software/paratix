@@ -376,18 +376,52 @@ describe("net.interface — apply", () => {
     const mockSsh = createMockSsh({
       [`cat '${networkdPath}'`]: { stdout: previousConfig },
       [`test -f '${networkdPath}'`]: { code: 0 },
-      "networkctl reload": { code: 1, stderr: "reload failed" },
       "test -d '/etc/netplan'": { code: 1 },
     })
     const writeFile = vi.spyOn(mockSsh, "writeFile").mockResolvedValue()
+    const exec = vi
+      .spyOn(mockSsh, "exec")
+      .mockResolvedValueOnce({ code: 1, stderr: "reload failed", stdout: "" })
+      .mockResolvedValueOnce({ code: 0, stderr: "", stdout: "" })
     const mod = net.interface("eth0", { dhcp: false })
 
     const result = await mod.apply(mockSsh, emptyEnv)
 
     expect(result.status).toBe("failed")
+    expect(String(result.error)).toContain("networkctl reload failed")
+    expect(String(result.error)).not.toContain("diverges")
     expect(writeFile).toHaveBeenLastCalledWith(networkdPath, previousConfig, {
       mode: "0644",
     })
+    const reloadCalls = exec.mock.calls.filter(([cmd]) => cmd === "networkctl reload")
+    expect(reloadCalls).toHaveLength(2)
+  })
+
+  it("reports live divergence when re-applying the previous networkd config also fails", async () => {
+    const networkdPath = "/etc/systemd/network/60-paratix-eth0.network"
+    const previousConfig = "[Match]\nName=eth0\n\n[Network]\nDHCP=yes\n"
+    const mockSsh = createMockSsh({
+      [`cat '${networkdPath}'`]: { stdout: previousConfig },
+      [`test -f '${networkdPath}'`]: { code: 0 },
+      "test -d '/etc/netplan'": { code: 1 },
+    })
+    vi.spyOn(mockSsh, "writeFile").mockResolvedValue()
+    const exec = vi
+      .spyOn(mockSsh, "exec")
+      .mockResolvedValueOnce({ code: 1, stderr: "reload failed", stdout: "" })
+      .mockResolvedValueOnce({ code: 1, stderr: "still broken", stdout: "" })
+    const mod = net.interface("eth0", { dhcp: false })
+
+    const result = await mod.apply(mockSsh, emptyEnv)
+
+    expect(result.status).toBe("failed")
+    expect(String(result.error)).toContain("networkctl reload failed")
+    expect(String(result.error)).toContain("rollback restored the configuration file")
+    expect(String(result.error)).toContain("re-applying the previous configuration also failed")
+    expect(String(result.error)).toContain("diverges")
+    expect(String(result.error)).toContain("still broken")
+    const reloadCalls = exec.mock.calls.filter(([cmd]) => cmd === "networkctl reload")
+    expect(reloadCalls).toHaveLength(2)
   })
 
   it("does not run netplan apply in networkd mode", async () => {
