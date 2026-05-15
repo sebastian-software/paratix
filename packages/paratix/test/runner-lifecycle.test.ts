@@ -789,7 +789,10 @@ describe("runPlaybook rsync check error handling", () => {
     process.exitCode = 0
   })
 
-  it("marks the run as failed when rsync check throws instead of masking it as needs-apply", async () => {
+  it("marks the run as failed when rsync apply fails after check returned needs-apply", async () => {
+    // R-0000484: rsync.sync.check now swallows executeRsync failures and
+    // reports needs-apply, so the runner proceeds to apply where the rsync
+    // failure surfaces with the apply-error message instead.
     const capturedConfigs: unknown[] = []
     const consoleError = vi.spyOn(console, "error").mockImplementation(() => {
       /* noop */
@@ -843,7 +846,7 @@ describe("runPlaybook rsync check error handling", () => {
     expect(process.exitCode).toBe(1)
     expect(consoleError).toHaveBeenCalledWith(
       expect.stringContaining(
-        "[rsync.sync] check failed for /local/src -> /remote/dest (exit code 23)"
+        "[rsync.sync] apply failed for /local/src -> /remote/dest (exit code 23)"
       )
     )
     expect(consoleError).toHaveBeenCalledWith(
