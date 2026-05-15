@@ -1049,8 +1049,8 @@ function rethrowIfNotShutdown(error: unknown, shutdownSignal: () => NodeJS.Signa
  * signal, and the ssh connection.
  *
  * R-0000518: the process-scoped secret sink is NOT cleared here. The sink in
- * `secretSink.ts` is reference-counted via {@link withRegisteredSecrets} /
- * {@link registerSecret} / {@link unregisterSecret}: every module that
+ * `secretSink.ts` is reference-counted via `withRegisteredSecrets` /
+ * `registerSecret` / `unregisterSecret`: every module that
  * registers a secret also releases it through `try/finally`, so the sink
  * drains on its own once each scope closes. Calling
  * `clearRegisteredSecrets()` unconditionally on teardown would wipe secrets

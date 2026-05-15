@@ -113,9 +113,7 @@ export async function withRegisteredSecrets<T>(
   body: () => Promise<T>
 ): Promise<T> {
   const registered: string[] = []
-  const registerableSecrets = secrets.filter(
-    (secret) => secret.length >= MINIMUM_SECRET_LENGTH
-  )
+  const registerableSecrets = secrets.filter((secret) => secret.length >= MINIMUM_SECRET_LENGTH)
   // R-0000195: Validate up-front so the register loop only runs on inputs
   // that are guaranteed registrable. The register loop and the body are then
   // both protected by the same try/finally — if a future API extension

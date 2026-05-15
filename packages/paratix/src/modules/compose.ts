@@ -873,9 +873,7 @@ async function ensureComposeProjectDirectoryNotSymlinked(
   projectDirectory: string
 ): Promise<ModuleResult | null> {
   if (await isSymlink(ssh, projectDirectory)) {
-    return failed(
-      `[compose.config] projectDirectory is a symbolic link: ${projectDirectory}`
-    )
+    return failed(`[compose.config] projectDirectory is a symbolic link: ${projectDirectory}`)
   }
   let ancestor = dirname(projectDirectory)
   const seen = new Set<string>()

@@ -100,16 +100,16 @@ export function statusReportsActive(status: string): boolean {
  * Tagged result returned by {@link readUfwStatusDetailed}. Distinguishes the
  * three relevant outcomes so callers can produce accurate diagnostics:
  *
- *   * `ok` — `ufw status` returned and the trimmed output is in `status`.
- *   * `missing` — `ufw` is not on PATH (binary not installed).
- *   * `unreadable` — `ufw` exists but `ufw status` failed (typically a
+ *   `ok` — `ufw status` returned and the trimmed output is in `status`.
+ *   `missing` — `ufw` is not on PATH (binary not installed).
+ *   `unreadable` — `ufw` exists but `ufw status` failed (typically a
  *     permission error or a transient race). The original error message is
  *     preserved in `detail` for surfacing to the operator.
  */
 export type UfwStatusReadResult =
+  | { detail: string; kind: "unreadable" }
   | { kind: "missing" }
   | { kind: "ok"; status: string }
-  | { detail: string; kind: "unreadable" }
 
 // R-0000551: probe `ufw` separately from `ufw status` so the two failure modes
 // can be distinguished. `ssh.test` returns a plain boolean; checking
