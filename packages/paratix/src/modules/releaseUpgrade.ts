@@ -22,7 +22,11 @@ import {
   rewriteAptSourcesContent,
   wrapMissingSourcesFileError,
 } from "./releaseUpgradeSources.js"
-import { buildRebootMetaEntriesWithTimeout } from "./resolveHostTimeout.js"
+import { isSymlink } from "./remoteFileChecks.js"
+import {
+  buildRebootMetaEntriesWithTimeout,
+  type ResolveHostCallback,
+} from "./resolveHostTimeout.js"
 
 const NONINTERACTIVE = "DEBIAN_FRONTEND=noninteractive"
 const CODENAME_RE = /^[a-z]{3,20}$/v
@@ -47,8 +51,12 @@ type ReleaseUpgradeOptions = {
    * post-upgrade reboot. Useful when the server's IP address may change
    * (e.g. DHCP or cloud environments). The resolved value is emitted as
    * `system.host` meta so the runner can reconnect to the correct address.
+   *
+   * R-0000575: the callback receives an `AbortSignal` that fires when the
+   * configured timeout elapses. Honoring the signal lets DNS/cloud lookups
+   * abort their in-flight work promptly.
    */
-  resolveHost?: () => Promise<string>
+  resolveHost?: ResolveHostCallback
   /**
    * Wall-clock timeout (ms) applied to {@link ReleaseUpgradeOptions.resolveHost}.
    * Defaults to 30 seconds (R-0000243) so a hanging DNS/cloud lookup cannot
@@ -192,6 +200,32 @@ async function snapshotSourcesFileSafely(
   }
 }
 
+// R-0000571: defend against a TOCTOU window between `find -type f` and the
+// subsequent read/write by re-probing each path immediately before reading.
+// Extracted into a helper to keep `replaceCodenameInSourcesList`'s cognitive
+// complexity within the project limit while keeping the symlink guard close
+// to the per-file read.
+async function snapshotEnumeratedSourcesFile(parameters: {
+  currentCodename: string
+  filePath: string
+  ssh: SshConnection
+  targetCodename: string
+}): Promise<null | SourcesSnapshot> {
+  if (parameters.filePath.length === 0 || !isAcceptableSourcesPath(parameters.filePath)) return null
+  // Even though `find` already excludes symlinks (it runs with the default
+  // `-P`), an attacker with write access to `/etc/apt/sources.list.d/` could
+  // swap the regular file for a symlink between enumeration and the per-file
+  // `readFile`/`writeFile` calls. Skip when the target is now a symbolic
+  // link so we never follow it into an arbitrary location.
+  if (await isSymlink(parameters.ssh, parameters.filePath)) return null
+  return snapshotSourcesFileSafely({
+    currentCodename: parameters.currentCodename,
+    remotePath: parameters.filePath,
+    ssh: parameters.ssh,
+    targetCodename: parameters.targetCodename,
+  })
+}
+
 /**
  * Replace all occurrences of `currentCodename` with `targetCodename` in
  * `/etc/apt/sources.list` and every `.list` and `.sources` file under
@@ -240,11 +274,10 @@ async function replaceCodenameInSourcesList(
   // R-0000172: defense-in-depth — paths that escape the sources directory or
   // carry ASCII control characters are skipped before readFile / writeFile.
   for (const filePath of listFilesResult.stdout.split("\0")) {
-    if (filePath.length === 0 || !isAcceptableSourcesPath(filePath)) continue
     // eslint-disable-next-line no-await-in-loop
-    const snapshot = await snapshotSourcesFileSafely({
+    const snapshot = await snapshotEnumeratedSourcesFile({
       currentCodename,
-      remotePath: filePath,
+      filePath,
       ssh,
       targetCodename,
     })
