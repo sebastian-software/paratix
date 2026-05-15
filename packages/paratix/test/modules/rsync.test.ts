@@ -181,13 +181,14 @@ describe("rsync.sync — check", () => {
     expect(result).toBe("ok")
   })
 
-  it("throws a descriptive error when the rsync dry-run command fails", async () => {
+  it("returns needs-apply when the rsync dry-run command fails", async () => {
+    // R-0000484: executeRsync failures during check are swallowed and reported
+    // as needs-apply so the playbook can run apply with full error handling.
     mockFailureWithStderr({ code: 23, stderr: "Permission denied (publickey)." })
     const mockSsh = createMockSsh()
     const mod = rsync.sync({ dest: "/remote/dest", src: "/local/src" })
-    await expect(mod.check(mockSsh, emptyEnv)).rejects.toThrow(
-      "[rsync.sync] check failed for /local/src -> /remote/dest (exit code 23)\nPermission denied (publickey)."
-    )
+    const result = await mod.check(mockSsh, emptyEnv)
+    expect(result).toBe("needs-apply")
   })
 
   it("passes correct args to rsync", async () => {
@@ -909,7 +910,9 @@ describe("rsync.sync — SSH auth method in transport flag", () => {
     expect(transportArg).not.toContain("-o IdentityAgent=")
   })
 
-  it("throws a clear error for password-authenticated sessions", async () => {
+  it("returns needs-apply for password-authenticated sessions", async () => {
+    // R-0000484: check tolerates executeRsync failures (including the
+    // password-auth guard) and reports needs-apply instead of throwing.
     const mockSsh = createMockSsh()
     vi.spyOn(mockSsh, "getConnectionInfo").mockReturnValue({
       authMethod: "password",
@@ -920,9 +923,8 @@ describe("rsync.sync — SSH auth method in transport flag", () => {
     })
     const mod = rsync.sync({ dest: "/remote/dest", src: "/local/src" })
 
-    await expect(mod.check(mockSsh, emptyEnv)).rejects.toThrow(
-      "[rsync.sync] check requires agent or private-key SSH authentication; password fallback sessions are not supported"
-    )
+    const result = await mod.check(mockSsh, emptyEnv)
+    expect(result).toBe("needs-apply")
 
     expect(mockSpawn).not.toHaveBeenCalled()
   })
