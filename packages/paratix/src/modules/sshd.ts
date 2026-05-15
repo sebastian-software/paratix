@@ -195,11 +195,8 @@ async function verifySshdConfigMatchesRollback(
 
 async function rollbackSshdConfigAfterEffectiveMismatch(
   ssh: SshConnection,
-  parameters: { directive: string; originalConfig: string }
+  parameters: { baseMessage: string; originalConfig: string }
 ): Promise<ModuleResult> {
-  const baseMessage =
-    `[sshd.config: ${parameters.directive}] effective sshd configuration does not match ` +
-    "the requested value after parsing includes"
   // R-0000542: previously this performed a single best-effort rollback write
   // with no verification. A second SFTP failure left sshd_config diverged
   // without surfacing the breakage. Retry the write a few times and then
@@ -207,16 +204,20 @@ async function rollbackSshdConfigAfterEffectiveMismatch(
   // divergence loudly otherwise.
   const writeError = await writeSshdRollbackWithRetry(ssh, parameters.originalConfig)
   if (writeError != null) {
-    return failedCommand(`${baseMessage}; rollback write to ${SSHD_CONFIG_PATH} failed`, {
-      code: -1,
-      stderr: writeError,
-      stdout: "",
-    })
+    return failedCommand(
+      `${parameters.baseMessage}; rollback write to ${SSHD_CONFIG_PATH} failed`,
+      {
+        code: -1,
+        stderr: writeError,
+        stdout: "",
+      }
+    )
   }
   const verifyError = await verifySshdConfigMatchesRollback(ssh, parameters.originalConfig)
   if (verifyError != null) {
     return failedCommand(
-      `${baseMessage}; rollback wrote but verification failed (sshd_config may be diverged)`,
+      `${parameters.baseMessage}; rollback wrote but verification failed ` +
+        "(sshd_config may be diverged)",
       {
         code: -1,
         stderr: verifyError,
@@ -224,7 +225,7 @@ async function rollbackSshdConfigAfterEffectiveMismatch(
       }
     )
   }
-  return failed(`${baseMessage}; rolled back to previous config`)
+  return failed(`${parameters.baseMessage}; rolled back to previous config`)
 }
 
 async function rejectNonMatchingEffectiveSshdConfig(
@@ -239,21 +240,32 @@ async function rejectNonMatchingEffectiveSshdConfig(
     // explicitly so the apply loop terminates instead of repeatedly writing
     // and rolling back the same config.
     const settingNames = Object.keys(parameters.settings).join(", ")
-    return failed(
+    const permissionMessage =
       `[sshd.config: ${settingNames}] could not verify effective sshd configuration via ` +
-        `\`${SSHD_EFFECTIVE_CONFIG_COMMAND}\` (insufficient privileges?): ${mismatch.detail}`
-    )
+      `\`${SSHD_EFFECTIVE_CONFIG_COMMAND}\` (insufficient privileges?): ${mismatch.detail}`
+    if (!parameters.didChange) {
+      return failed(permissionMessage)
+    }
+    // R-0000585: the prospective config has already been written to
+    // /etc/ssh/sshd_config (`didChange === true`). Returning `failed(...)`
+    // without rolling back would leave the new content active and the next
+    // sshd reload would pick it up. Mirror the mismatch branch and restore
+    // `originalConfig` first, then surface the permission failure.
+    return rollbackSshdConfigAfterEffectiveMismatch(ssh, {
+      baseMessage: permissionMessage,
+      originalConfig: parameters.originalConfig,
+    })
   }
 
+  const mismatchMessage =
+    `[sshd.config: ${mismatch.directive}] effective sshd configuration ` +
+    "does not match the requested value after parsing includes"
   if (!parameters.didChange) {
-    return failed(
-      `[sshd.config: ${mismatch.directive}] effective sshd configuration ` +
-        "does not match the requested value after parsing includes"
-    )
+    return failed(mismatchMessage)
   }
 
   return rollbackSshdConfigAfterEffectiveMismatch(ssh, {
-    directive: mismatch.directive,
+    baseMessage: mismatchMessage,
     originalConfig: parameters.originalConfig,
   })
 }
