@@ -274,9 +274,19 @@ type CronJobOptions = {
   state?: "absent" | "present"
 }
 
+// R-0000532: restrict cron marker names to a strict pattern so values
+// containing whitespace, `:`, `=` or the literal ` sha256=` segment cannot
+// collide with the marker format `# paratix: <name> sha256=<digest>`. Without
+// this, a crafted name could cause `findMarkerIndex` to match a foreign
+// marker and `cron.absent` to delete an unrelated managed job. Mirrors the
+// strict resource-name validation used by `validateAptResourceName`.
+const CRON_NAME_PATTERN = /^[\w.\-]+$/v
+
 function assertCronName(name: string): void {
-  if (/[\n\r]/v.test(name)) {
-    throw new Error(`cron: name must not contain newlines: ${JSON.stringify(name)}`)
+  if (name.length === 0 || !CRON_NAME_PATTERN.test(name)) {
+    throw new Error(
+      `cron: name must match ${String(CRON_NAME_PATTERN)}, got: ${JSON.stringify(name)}`
+    )
   }
 }
 
