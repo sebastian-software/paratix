@@ -194,19 +194,19 @@ describe("collectEnvironment", () => {
 
   it("parses a simple KEY=value pair", () => {
     const result = collectEnvironment("KEY=value", {})
-    expect(result).toEqual({ KEY: "value" })
+    expect({ ...result }).toStrictEqual({ KEY: "value" })
     expect(Object.getPrototypeOf(result)).toBeNull()
   })
 
   it("splits only at the first equals sign when value contains equals signs", () => {
     const result = collectEnvironment("KEY=val=with=equals", {})
-    expect(result).toEqual({ KEY: "val=with=equals" })
+    expect({ ...result }).toStrictEqual({ KEY: "val=with=equals" })
     expect(Object.getPrototypeOf(result)).toBeNull()
   })
 
   it("accepts an empty value after the equals sign", () => {
     const result = collectEnvironment("KEY=", {})
-    expect(result).toEqual({ KEY: "" })
+    expect({ ...result }).toStrictEqual({ KEY: "" })
     expect(Object.getPrototypeOf(result)).toBeNull()
   })
 
@@ -297,14 +297,14 @@ describe("collectEnvironment", () => {
   it("accumulates multiple entries into the previous object", () => {
     const first = collectEnvironment("FOO=bar", {})
     const second = collectEnvironment("BAZ=qux", first)
-    expect(second).toEqual({ BAZ: "qux", FOO: "bar" })
+    expect({ ...second }).toStrictEqual({ BAZ: "qux", FOO: "bar" })
     expect(Object.getPrototypeOf(second)).toBeNull()
   })
 
   it("overwrites an existing key when the same key is provided again", () => {
     const first = collectEnvironment("KEY=original", {})
     const second = collectEnvironment("KEY=updated", first)
-    expect(second).toEqual({ KEY: "updated" })
+    expect({ ...second }).toStrictEqual({ KEY: "updated" })
     expect(Object.getPrototypeOf(second)).toBeNull()
   })
 })

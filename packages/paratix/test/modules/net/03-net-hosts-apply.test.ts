@@ -36,8 +36,7 @@ const createMockSsh: typeof createBaseMockSsh = (responses, options) =>
       // command substitution, which is no longer matched by the default
       // flag-lock allowlist pattern.
       {
-        command:
-          /^printf '%s@%s %s\\n' "\$\$" '[^']*' "\$\(date \+%s\)" > \S+\/holder$/v,
+        command: /^printf '%s@%s %s\\n' "\$\$" '[^']*' "\$\(date \+%s\)" > \S+\/holder$/v,
         result: { code: 0 },
       },
     ],

@@ -160,6 +160,9 @@ describe("writeProjectFiles", () => {
   })
 
   it("derives package.json name correctly from a Windows-style absolute path", () => {
+    // R-0000498 hardened assertWritableScaffoldDirectory to mkdir { recursive: false },
+    // so the intermediate parent must be created explicitly first.
+    mkdirSync(join(TEST_DIR, "windows"), { recursive: true })
     const windowsPath = join(TEST_DIR, "windows", "C:\\tmp\\windows-project")
     writeProjectFiles(windowsPath)
 
@@ -170,6 +173,7 @@ describe("writeProjectFiles", () => {
   })
 
   it("derives package.json name correctly from a backslash-separated relative path", () => {
+    mkdirSync(join(TEST_DIR, "windows"), { recursive: true })
     const windowsRelativePath = join(TEST_DIR, "windows", "tmp\\nested\\mixed-project")
     writeProjectFiles(windowsRelativePath)
 

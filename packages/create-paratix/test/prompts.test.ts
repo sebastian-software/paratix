@@ -336,14 +336,15 @@ describe("promptForAdminPublicKey", () => {
     )
   })
 
-  it("does not claim placeholder fallback for root bootstrap when no local keys exist", async () => {
+  it("throws a CliExitError for root bootstrap when no local keys exist", async () => {
+    // R-0000497: root-bootstrap with no local keys must surface an actionable
+    // CliExitError pointing to --admin-public-key / --admin-public-key-file
+    // instead of silently returning undefined and letting a generic stack
+    // trace propagate later.
     const select = vi.fn().mockResolvedValueOnce("local")
 
-    await expect(
-      promptForAdminPublicKey(select, [], { allowPlaceholder: false })
-    ).resolves.toBeUndefined()
-    expect(console.error).toHaveBeenCalledWith(
-      "No readable public keys were found in ~/.ssh. Root bootstrap requires an admin public key."
+    await expect(promptForAdminPublicKey(select, [], { allowPlaceholder: false })).rejects.toThrow(
+      /Root bootstrap requires an admin SSH public key/v
     )
   })
 })
