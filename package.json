@@ -13,6 +13,7 @@
     "lint": "concurrently --kill-others-on-fail --passthrough-arguments --names lint:oxlint,lint:eslint 'pnpm lint:oxlint' 'pnpm lint:eslint'",
     "lint:oxlint": "oxlint -c oxlint.config.ts",
     "lint:eslint": "eslint --max-warnings=0",
+    "e18e:analyze": "pnpx @e18e/cli analyze",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
     "agent:check": "pnpm lint && pnpm format:check && pnpm typecheck && pnpm build && pnpm test",
