@@ -14,6 +14,7 @@ import {
   maskKnownSecretPrefixes,
   OP_OUTPUT_CAPTURE_LIMIT_BYTES,
 } from "./opOutputCapture.js"
+import { collectOpFailureOutputs, OpSpawnError } from "./opSpawnError.js"
 
 /**
  * Default upper bound for a single `op` CLI invocation. The 1Password helper
@@ -215,8 +216,16 @@ function attachSpawnIoHandlers(parameters: {
       return
     }
     const stderr = io.stderr.text()
+    const stdoutText = io.stdout.text()
     const hint = isAuthFailure(stderr) ? ` ${OP_SIGNIN_HINT}` : ""
-    rejectOnce(new Error(`${command} exited with code ${String(code)}: ${stderr}${hint}`))
+    // R-0000589: attach the captured streams to the rejection so the
+    // resolve failure path can fold them into the maskSecrets call.
+    rejectOnce(
+      new OpSpawnError(`${command} exited with code ${String(code)}: ${stderr}${hint}`, {
+        stderr,
+        stdout: stdoutText,
+      })
+    )
   })
   child.stdin?.once("error", (error) => {
     rejectOnce(describeSpawnError(command, error))
@@ -489,7 +498,15 @@ export const op = {
           }
         } catch (error) {
           const rawDetail = buildOpFailureDetail(error)
-          const secrets = [...Object.values(references), ...leakedValues]
+          // R-0000589: also feed the per-line captured stdout/stderr of the
+          // failing op invocation into the secret list. A partial stdout
+          // buffer (e.g. half a secret value) that ended up embedded in the
+          // error message is then redacted as defense-in-depth.
+          const secrets = [
+            ...Object.values(references),
+            ...leakedValues,
+            ...collectOpFailureOutputs(error),
+          ]
           const detail = maskKnownSecretPrefixes(maskSecrets(rawDetail, secrets), secrets)
           // Register the leaked values for the duration of the run so the
           // shared stderr renderers redact them if the failure bubbles up
