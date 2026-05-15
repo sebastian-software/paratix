@@ -56,15 +56,19 @@ type PackageManager = "apk" | "apt" | "dnf" | "yum"
 /** Per-connection cache for the detected package manager (avoids repeated SSH roundtrips). */
 const pmCache = new WeakMap<SshConnection, null | PackageManager>()
 
+// R-0000534: pass `--` as the argument-list terminator for every supported
+// package manager (including apk) so package names that look like options
+// can never be interpreted as flags. Defense-in-depth alongside the strict
+// package-name validation in `validatePackageNames`.
 const INSTALL_COMMANDS = {
-  apk: (pkgs: string) => `apk add ${pkgs}`,
+  apk: (pkgs: string) => `apk add -- ${pkgs}`,
   apt: (pkgs: string) => `DEBIAN_FRONTEND=noninteractive apt-get install -y -- ${pkgs}`,
   dnf: (pkgs: string) => `dnf install -y -- ${pkgs}`,
   yum: (pkgs: string) => `yum install -y -- ${pkgs}`,
 } as const
 
 const REMOVE_COMMANDS = {
-  apk: (pkgs: string) => `apk del ${pkgs}`,
+  apk: (pkgs: string) => `apk del -- ${pkgs}`,
   apt: (pkgs: string) => `DEBIAN_FRONTEND=noninteractive apt-get remove -y -- ${pkgs}`,
   dnf: (pkgs: string) => `dnf remove -y -- ${pkgs}`,
   yum: (pkgs: string) => `yum remove -y -- ${pkgs}`,
