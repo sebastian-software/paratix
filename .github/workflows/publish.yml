@@ -98,4 +98,4 @@ jobs:
         with:
           name: package-dist
           path: packages
-      - run: pnpm -r publish --no-git-checks --provenance
+      - run: node scripts/publishWorkspacePackages.mjs
