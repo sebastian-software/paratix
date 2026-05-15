@@ -61,25 +61,35 @@ describe("git.clone — validation", () => {
   // construction time.
   it("rejects refs containing newline characters", () => {
     expect(() => git.clone(repo, destination, { ref: "main\nrm -rf /" })).toThrow(
-      "whitespace, backslashes, or '..' sequences"
+      "whitespace, backslashes, apostrophes, or '..' sequences"
     )
   })
 
   it("rejects refs containing whitespace", () => {
     expect(() => git.clone(repo, destination, { ref: "release v1" })).toThrow(
-      "whitespace, backslashes, or '..' sequences"
+      "whitespace, backslashes, apostrophes, or '..' sequences"
     )
   })
 
   it("rejects refs containing backslashes", () => {
     expect(() => git.clone(repo, destination, { ref: "main\\branch" })).toThrow(
-      "whitespace, backslashes, or '..' sequences"
+      "whitespace, backslashes, apostrophes, or '..' sequences"
     )
   })
 
   it("rejects refs containing parent-directory sequences", () => {
     expect(() => git.clone(repo, destination, { ref: "main/../etc" })).toThrow(
-      "whitespace, backslashes, or '..' sequences"
+      "whitespace, backslashes, apostrophes, or '..' sequences"
+    )
+  })
+
+  // R-0000482: updateRepo and isRemoteTrackingBranch build
+  // `origin/${shellQuote(reference)}` paths via concatenation, so a single
+  // quote inside the reference would otherwise corrupt the resulting shell
+  // token. Reject apostrophes at module construction time.
+  it("rejects refs containing apostrophes", () => {
+    expect(() => git.clone(repo, destination, { ref: "main'branch" })).toThrow(
+      "whitespace, backslashes, apostrophes, or '..' sequences"
     )
   })
 

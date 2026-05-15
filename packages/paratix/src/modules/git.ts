@@ -44,7 +44,10 @@ function validateCloneRepo(repo: string): void {
 // boundary, but newlines in a ref still corrupt `output.split("\n")` and a
 // backslash can fool downstream consumers. The pattern below mirrors the
 // strictness applied to apt resource names and POSIX user/group names.
-const CLONE_REFERENCE_DISALLOWED_PATTERN = /[\s\\]|\.\./v
+// R-0000482: also reject apostrophes. `updateRepo` and `isRemoteTrackingBranch`
+// build `origin/${shellQuote(reference)}` paths via concatenation, so a single
+// quote inside the reference would otherwise corrupt the resulting shell token.
+const CLONE_REFERENCE_DISALLOWED_PATTERN = /[\s\\']|\.\./v
 
 function validateCloneReference(reference: string | undefined): void {
   if (reference === undefined || reference === "") return
@@ -54,7 +57,9 @@ function validateCloneReference(reference: string | undefined): void {
     )
   }
   if (CLONE_REFERENCE_DISALLOWED_PATTERN.test(reference)) {
-    throw new Error("git.clone ref must not contain whitespace, backslashes, or '..' sequences.")
+    throw new Error(
+      "git.clone ref must not contain whitespace, backslashes, apostrophes, or '..' sequences."
+    )
   }
 }
 
