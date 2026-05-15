@@ -109,7 +109,11 @@ function getFirstCurlExecCall(mockSsh: ReturnType<typeof createMockSsh>) {
 
 describe("net.route — check", () => {
   it("returns needs-apply when conn is null", async () => {
-    const mod = net.route("10.0.0.0/24", "192.168.1.1")
+    // R-0000486: `net.route` now requires `options.device` at construction
+    // time when `state` defaults to "present", so this conn-null fixture
+    // must provide a device even though the check short-circuits before
+    // touching it.
+    const mod = net.route("10.0.0.0/24", "192.168.1.1", { device: "eth0" })
     const result = await mod.check(null, emptyEnv)
     expect(result).toBe("needs-apply")
   })
