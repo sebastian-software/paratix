@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto"
 import { unlinkSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
@@ -45,7 +46,7 @@ describe("loadDotEnvironment", () => {
   let tmpFile: string
 
   beforeEach(() => {
-    tmpFile = join(tmpdir(), `paratix-test-${Date.now()}.env`)
+    tmpFile = join(tmpdir(), `paratix-test-${randomUUID()}.env`)
   })
 
   afterEach(() => {
