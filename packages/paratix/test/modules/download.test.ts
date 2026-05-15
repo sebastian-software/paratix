@@ -296,11 +296,14 @@ describe("download.url", () => {
       // R-0000167: with allowUnverifiedDownload + no sha256, the check now
       // requires `<destination>.sha256` to exist and to match the actual
       // file digest. Existence alone is not sufficient any more.
+      // R-0000529: symlink guard and read are fused into a single shell command.
       const recordedHash = "aabbccddaabbccddaabbccddaabbccddaabbccddaabbccddaabbccddaabbccdd"
+      const markerPath = `${destination}.sha256`
+      const fusedMarkerCommand = `[ ! -L '${markerPath}' ] && [ -f '${markerPath}' ] && cat -- '${markerPath}'`
       const mockSsh = createMockSsh({
-        [`[ -f '${destination}.sha256' ]`]: { code: 0 },
+        [`[ -f '${markerPath}' ]`]: { code: 0 },
         [`[ -f '${destination}' ]`]: { code: 0 },
-        [`cat '${destination}.sha256'`]: { stdout: `${recordedHash}\n` },
+        [fusedMarkerCommand]: { code: 0, stdout: `${recordedHash}\n` },
         [`sha256sum '${destination}'`]: { stdout: `${recordedHash}  ${destination}` },
       })
       const mod = download.url(destination, url, allowUnverifiedDownload)
@@ -309,18 +312,20 @@ describe("download.url", () => {
     })
 
     it("returns needs-apply when the marker path is a symlink", async () => {
-      const recordedHash = "aabbccddaabbccddaabbccddaabbccddaabbccddaabbccddaabbccdd"
+      // R-0000529: the fused command `[ ! -L p ] && [ -f p ] && cat -- p`
+      // exits non-zero when the marker is a symlink (first guard fails),
+      // so compareUnverifiedHashMarker returns "drift".
+      const markerPath = `${destination}.sha256`
+      const fusedMarkerCommand = `[ ! -L '${markerPath}' ] && [ -f '${markerPath}' ] && cat -- '${markerPath}'`
       const mockSsh = createMockSsh({
-        [`[ -f '${destination}.sha256' ]`]: { code: 0 },
+        [`[ -f '${markerPath}' ]`]: { code: 0 },
         [`[ -f '${destination}' ]`]: { code: 0 },
-        [`[ -L '${destination}.sha256' ]`]: { code: 0 },
-        [`cat '${destination}.sha256'`]: { stdout: `${recordedHash}\n` },
-        [`sha256sum '${destination}'`]: { stdout: `${recordedHash}  ${destination}` },
+        [fusedMarkerCommand]: { code: 1 },
       })
       const mod = download.url(destination, url, allowUnverifiedDownload)
       const result = await mod.check(mockSsh, emptyEnv)
       expect(result).toBe("needs-apply")
-      expect(mockSsh.calls).not.toContain(`cat '${destination}.sha256'`)
+      expect(mockSsh.calls).not.toContain(`cat '${markerPath}'`)
     })
 
     it("returns needs-apply when marker file is missing (no sha256)", async () => {
@@ -340,12 +345,15 @@ describe("download.url", () => {
       // R-0000167: post-write tampering (or a stale URL update) flips the
       // file digest while the marker stays at the previous value. Check
       // must surface that as needs-apply so apply re-downloads.
+      // R-0000529: symlink guard and read are fused into a single shell command.
       const recordedHash = "aabbccddaabbccddaabbccddaabbccddaabbccddaabbccddaabbccddaabbccdd"
       const tamperedHash = "1111111111111111111111111111111111111111111111111111111111111111"
+      const markerPath = `${destination}.sha256`
+      const fusedMarkerCommand = `[ ! -L '${markerPath}' ] && [ -f '${markerPath}' ] && cat -- '${markerPath}'`
       const mockSsh = createMockSsh({
-        [`[ -f '${destination}.sha256' ]`]: { code: 0 },
+        [`[ -f '${markerPath}' ]`]: { code: 0 },
         [`[ -f '${destination}' ]`]: { code: 0 },
-        [`cat '${destination}.sha256'`]: { stdout: `${recordedHash}\n` },
+        [fusedMarkerCommand]: { code: 0, stdout: `${recordedHash}\n` },
         [`sha256sum '${destination}'`]: { stdout: `${tamperedHash}  ${destination}` },
       })
       const mod = download.url(destination, url, allowUnverifiedDownload)
@@ -354,16 +362,21 @@ describe("download.url", () => {
     })
 
     it("returns needs-apply when the marker cannot be read", async () => {
+      // R-0000529: symlink guard and read are fused; a non-zero exit code
+      // (e.g. permission error or symlink) causes compareUnverifiedHashMarker
+      // to return "drift" → needs-apply.
+      const markerPath = `${destination}.sha256`
+      const fusedMarkerCommand = `[ ! -L '${markerPath}' ] && [ -f '${markerPath}' ] && cat -- '${markerPath}'`
       const mockSsh = createMockSsh({
-        [`[ -f '${destination}.sha256' ]`]: { code: 0 },
+        [`[ -f '${markerPath}' ]`]: { code: 0 },
         [`[ -f '${destination}' ]`]: { code: 0 },
-        [`cat '${destination}.sha256'`]: { code: 13, stderr: "cat: Permission denied\n" },
+        [fusedMarkerCommand]: { code: 13, stderr: "cat: Permission denied\n" },
       })
       const mod = download.url(destination, url, allowUnverifiedDownload)
       const result = await mod.check(mockSsh, emptyEnv)
       expect(result).toBe("needs-apply")
       expect(mockSsh.execCalls).toContainEqual({
-        command: `cat '${destination}.sha256'`,
+        command: fusedMarkerCommand,
         options: { ignoreExitCode: true, silent: true },
       })
     })
@@ -1400,11 +1413,14 @@ describe("download.github", () => {
     })
 
     it("returns ok when file and marker hash match (no sha256)", async () => {
+      // R-0000529: symlink guard and read are fused into a single shell command.
       const recordedHash = "aabbccddaabbccddaabbccddaabbccddaabbccddaabbccddaabbccddaabbccdd"
+      const markerPath = `${destination}.sha256`
+      const fusedMarkerCommand = `[ ! -L '${markerPath}' ] && [ -f '${markerPath}' ] && cat -- '${markerPath}'`
       const mockSsh = createMockSsh({
-        [`[ -f '${destination}.sha256' ]`]: { code: 0 },
+        [`[ -f '${markerPath}' ]`]: { code: 0 },
         [`[ -f '${destination}' ]`]: { code: 0 },
-        [`cat '${destination}.sha256'`]: { stdout: `${recordedHash}\n` },
+        [fusedMarkerCommand]: { code: 0, stdout: `${recordedHash}\n` },
         [`sha256sum '${destination}'`]: { stdout: `${recordedHash}  ${destination}` },
       })
       const mod = download.github(destination, { ...allowUnverifiedDownload, asset, repo, tag })
@@ -1413,12 +1429,15 @@ describe("download.github", () => {
     })
 
     it("returns needs-apply when marker hash differs from current file hash (no sha256)", async () => {
+      // R-0000529: symlink guard and read are fused into a single shell command.
       const recordedHash = "aabbccddaabbccddaabbccddaabbccddaabbccddaabbccddaabbccddaabbccdd"
       const tamperedHash = "1111111111111111111111111111111111111111111111111111111111111111"
+      const markerPath = `${destination}.sha256`
+      const fusedMarkerCommand = `[ ! -L '${markerPath}' ] && [ -f '${markerPath}' ] && cat -- '${markerPath}'`
       const mockSsh = createMockSsh({
-        [`[ -f '${destination}.sha256' ]`]: { code: 0 },
+        [`[ -f '${markerPath}' ]`]: { code: 0 },
         [`[ -f '${destination}' ]`]: { code: 0 },
-        [`cat '${destination}.sha256'`]: { stdout: `${recordedHash}\n` },
+        [fusedMarkerCommand]: { code: 0, stdout: `${recordedHash}\n` },
         [`sha256sum '${destination}'`]: { stdout: `${tamperedHash}  ${destination}` },
       })
       const mod = download.github(destination, { ...allowUnverifiedDownload, asset, repo, tag })
