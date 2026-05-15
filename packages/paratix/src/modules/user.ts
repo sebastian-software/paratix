@@ -257,6 +257,11 @@ export const user = {
     // status ok as a defensive fallback when the user is removed between
     // the probe and the userdel call.
     const USERDEL_NOT_FOUND_EXIT_CODE = 6
+    // R-0000545: userdel exits with 8 ("user currently logged in" /
+    // "user has active processes") when the kernel still has running
+    // processes owned by the target uid. The raw shadow/utmp message is
+    // not actionable, so the runner surfaces an explicit hint instead.
+    const USERDEL_USER_BUSY_EXIT_CODE = 8
     return {
       async apply(ssh: null | SshConnection): Promise<ModuleResult> {
         if (!ssh) return failed(`[user.absent: ${name}] SSH connection is required`)
@@ -268,6 +273,12 @@ export const user = {
         })
         if (result.code === 0) return { status: "changed" }
         if (result.code === USERDEL_NOT_FOUND_EXIT_CODE) return { status: "ok" }
+        if (result.code === USERDEL_USER_BUSY_EXIT_CODE) {
+          return failed(
+            `[user.absent: ${name}] userdel reported user has active processes; ` +
+              `stop them (e.g. via 'pkill -KILL -u ${name}') before removing the account`
+          )
+        }
         return failedCommand(`[user.absent: ${name}] userdel failed`, result)
       },
       async check(ssh: null | SshConnection): Promise<"needs-apply" | "ok"> {
