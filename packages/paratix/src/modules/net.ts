@@ -1700,6 +1700,11 @@ export const net = {
   ): Module {
     const state = options?.state ?? "present"
     const device = options?.device
+    // R-0000486: surface the missing-device error at construction time
+    // instead of letting check() report needs-apply and apply() then fail.
+    if (state === "present" && device == null) {
+      throw new Error("[net.route] options.device is required when state is 'present'")
+    }
     validateRouteOptions({ destination, device, gateway })
     const sanitized = sanitizeForFilename(destination)
     const routeHash = buildRoutePersistenceHash({ destination, device, gateway })
