@@ -500,7 +500,17 @@ async function applyAbsent(ssh: SshConnection, context: AbsentContext): Promise<
       context,
       activationSnapshot
     )
-    return activationRestoreFailure ?? removeFailure
+    // R-0000552: previously the `??` fallback caused a rollback failure to
+    // completely shadow the original `removeFailure` message. Chain both
+    // errors instead so the primary failure (unit-file removal) stays
+    // visible alongside the follow-up rollback failure.
+    if (activationRestoreFailure) {
+      const removeMessage = removeFailure.error?.message ?? "timer unit-file removal failed"
+      const restoreMessage =
+        activationRestoreFailure.error?.message ?? "timer activation rollback failed"
+      return failed(`${removeMessage}; rollback enable failed: ${restoreMessage}`)
+    }
+    return removeFailure
   }
   return { status: "changed" }
 }
