@@ -141,8 +141,8 @@ function createFirewallRecipe(): string {
       ufw.rule("allow", firewallTcpPorts),
       when(
         (env) => env["FIRST_RUN"] !== true,
-        command.shell("ufw --force delete allow 22", {
-          check: "! ufw status | grep -Eq '^22[[:space:]]+(\\\\(v6\\\\)[[:space:]]+)?ALLOW'",
+        command.shell("ufw --force delete allow 22 || true; ufw --force delete allow 22/tcp || true; ! ufw status | grep -Eq '^22(/tcp)?[[:space:]]+(\\\\(v6\\\\)[[:space:]]+)?ALLOW'", {
+          check: "! ufw status | grep -Eq '^22(/tcp)?[[:space:]]+(\\\\(v6\\\\)[[:space:]]+)?ALLOW'",
           name: "remove bootstrap ssh firewall rule",
         })
       ),

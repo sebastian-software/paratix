@@ -611,10 +611,39 @@ describe("writeProjectFiles", () => {
     expect(content).toContain("ports: sshPorts")
     expect(content).toContain('ufw.rule("allow", firewallTcpPorts)')
     expect(content).toContain('(env) => env["FIRST_RUN"] !== true')
-    expect(content).toContain('command.shell("ufw --force delete allow 22", {')
+    expect(content).toContain("ufw --force delete allow 22 || true")
+    expect(content).toContain("ufw --force delete allow 22/tcp || true")
     expect(content).toContain(
-      "check: \"! ufw status | grep -Eq '^22[[:space:]]+(\\\\(v6\\\\)[[:space:]]+)?ALLOW'\""
+      "check: \"! ufw status | grep -Eq '^22(/tcp)?[[:space:]]+(\\\\(v6\\\\)[[:space:]]+)?ALLOW'\""
     )
+  })
+
+  it("generated server.ts recognizes protocol-specific port 22 ufw status lines", () => {
+    writeProjectFiles(TEST_DIR)
+
+    const content = readFileSync(join(TEST_DIR, "server.ts"), "utf8")
+
+    expect(content).toContain("grep -Eq '^22(/tcp)?[[:space:]]+(\\\\(v6\\\\)[[:space:]]+)?ALLOW'")
+
+    const cleanupPattern = "^22(/tcp)?[[:space:]]+(\\(v6\\)[[:space:]]+)?ALLOW"
+
+    expect(
+      spawnSync("grep", ["-Eq", cleanupPattern], { input: "22 ALLOW IN Anywhere" }).status
+    ).toBe(0)
+    expect(
+      spawnSync("grep", ["-Eq", cleanupPattern], { input: "22 (v6) ALLOW IN Anywhere (v6)" }).status
+    ).toBe(0)
+    expect(
+      spawnSync("grep", ["-Eq", cleanupPattern], { input: "22/tcp ALLOW IN Anywhere" }).status
+    ).toBe(0)
+    expect(
+      spawnSync("grep", ["-Eq", cleanupPattern], {
+        input: "22/tcp (v6) ALLOW IN Anywhere (v6)",
+      }).status
+    ).toBe(0)
+    expect(
+      spawnSync("grep", ["-Eq", cleanupPattern], { input: "2222/tcp ALLOW IN Anywhere" }).status
+    ).toBe(1)
   })
 
   it("generated server.ts keeps port 22 open during first run before removing it later", () => {
