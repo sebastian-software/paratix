@@ -280,12 +280,17 @@ type CronJobOptions = {
 // this, a crafted name could cause `findMarkerIndex` to match a foreign
 // marker and `cron.absent` to delete an unrelated managed job. Mirrors the
 // strict resource-name validation used by `validateAptResourceName`.
+//
+// R-0000561: explicitly reject `..` so traversal-style names cannot slip
+// through the character-class form `[\w.\-]+`. Mirrors the explicit `..`
+// reject in `validateAptResourceName` (apt.ts) so cron names follow the
+// same hardening contract.
 const CRON_NAME_PATTERN = /^[\w.\-]+$/v
 
 function assertCronName(name: string): void {
-  if (name.length === 0 || !CRON_NAME_PATTERN.test(name)) {
+  if (name.length === 0 || name.includes("..") || !CRON_NAME_PATTERN.test(name)) {
     throw new Error(
-      `cron: name must match ${String(CRON_NAME_PATTERN)}, got: ${JSON.stringify(name)}`
+      `cron: name must match ${String(CRON_NAME_PATTERN)} and must not contain '..', got: ${JSON.stringify(name)}`
     )
   }
 }
