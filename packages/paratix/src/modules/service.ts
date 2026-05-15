@@ -4,11 +4,17 @@ import { shellQuote } from "../ssh.js"
 import { type Module, type ModuleResult, NEEDS_APPLY, type SshConnection } from "../types.js"
 
 const SYSTEMCTL = "systemctl"
-const SYSTEMD_UNIT_NAME_PATTERN = /^[\w.@:\-]+$/v
+// R-0000538: keep the unit-name whitelist in sync with `validateQuadletName`
+// (quadletHelpers.ts), which rejects `:`. Permitting `:` here was an
+// asymmetric inconsistency between two validators that govern overlapping
+// systemd unit-name surfaces.
+const SYSTEMD_UNIT_NAME_PATTERN = /^[\w.@\-]+$/v
 
 function validateUnitName(name: string): string {
   if (!name || name.startsWith("-") || !SYSTEMD_UNIT_NAME_PATTERN.test(name)) {
-    throw new Error(`Invalid systemd unit name: ${name}`)
+    throw new Error(
+      `Invalid systemd unit name: ${JSON.stringify(name)} (must match ${String(SYSTEMD_UNIT_NAME_PATTERN)} and not start with '-')`
+    )
   }
   return name
 }
