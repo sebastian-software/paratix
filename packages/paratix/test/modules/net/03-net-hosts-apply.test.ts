@@ -28,6 +28,18 @@ const createMockSsh: typeof createBaseMockSsh = (responses, options) =>
     responseStubs: [
       ...(options?.responseStubs ?? []),
       { command: "[ -e '/etc/hosts' ]", result: { code: 0 } },
+      // R-0000494: the flag-lock holder marker is now written with the
+      // hostname captured via `ssh.output("hostname")` and interpolated
+      // through `shellQuote(...)`. The resulting `printf` form uses a literal
+      // single-quoted token (often empty in tests that do not stub
+      // `output("hostname")`) instead of the previous `"$(hostname)"`
+      // command substitution, which is no longer matched by the default
+      // flag-lock allowlist pattern.
+      {
+        command:
+          /^printf '%s@%s %s\\n' "\$\$" '[^']*' "\$\(date \+%s\)" > \S+\/holder$/v,
+        result: { code: 0 },
+      },
     ],
   })
 
