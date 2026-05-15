@@ -356,7 +356,10 @@ async function cleanupComposeSystemdTemporaryPath(parameters: {
   connection: SshConnection
   temporaryPath: string
 }): Promise<void> {
-  await parameters.connection.exec(`rm -f ${shellQuote(parameters.temporaryPath)}`, {
+  // R-0000565: pass `--` so a future refactor that loosens the staging prefix
+  // cannot let an attacker-controlled path that starts with `-` be
+  // interpreted as an `rm` option.
+  await parameters.connection.exec(`rm -f -- ${shellQuote(parameters.temporaryPath)}`, {
     ignoreExitCode: true,
     silent: true,
   })
@@ -368,8 +371,14 @@ async function allocateComposeSystemdTemporaryPath(parameters: {
   unitFileName: string
 }): Promise<ModuleResult | string> {
   const directory = dirname(parameters.filePath)
-  const template = `${directory}/${SYSTEMD_UNIT_STAGING_PREFIX}.XXXXXX`
-  const result = await parameters.connection.exec(`mktemp ${shellQuote(template)}`, EXEC_OPTS)
+  // R-0000565: pass the staging directory via `-p` and separate the template
+  // with `--` so a future refactor that loosens the staging prefix cannot let
+  // an attacker-controlled value be interpreted as a `mktemp` option.
+  const template = `${SYSTEMD_UNIT_STAGING_PREFIX}.XXXXXX`
+  const result = await parameters.connection.exec(
+    `mktemp -p ${shellQuote(directory)} -- ${shellQuote(template)}`,
+    EXEC_OPTS
+  )
   if (result.code !== 0) {
     return failedCommand(`[compose.systemd] mktemp failed for ${parameters.unitFileName}`, result)
   }
@@ -392,8 +401,10 @@ async function rewriteComposeSystemdUnitViaShell(parameters: {
   const temporaryPath = await allocateComposeSystemdTemporaryPath(parameters)
   if (typeof temporaryPath !== "string") return temporaryPath
 
+  // R-0000565: pass `--` to both `rm -f` invocations inside the shell
+  // pipeline so the temporary path cannot be parsed as an `rm` option.
   const result = await parameters.connection.exec(
-    `{ printf '%s' ${shellQuote(encodedContent)} | base64 -d > ${shellQuote(temporaryPath)} && chmod ${shellQuote(SYSTEMD_UNIT_MODE)} ${shellQuote(temporaryPath)} && chown ${shellQuote("root:root")} ${shellQuote(temporaryPath)} && if [ -L ${shellQuote(parameters.filePath)} ]; then rm -f ${shellQuote(temporaryPath)}; exit 73; fi && mv -f -T ${shellQuote(temporaryPath)} ${shellQuote(parameters.filePath)}; } || { status=$?; rm -f ${shellQuote(temporaryPath)}; exit "$status"; }`,
+    `{ printf '%s' ${shellQuote(encodedContent)} | base64 -d > ${shellQuote(temporaryPath)} && chmod ${shellQuote(SYSTEMD_UNIT_MODE)} ${shellQuote(temporaryPath)} && chown ${shellQuote("root:root")} ${shellQuote(temporaryPath)} && if [ -L ${shellQuote(parameters.filePath)} ]; then rm -f -- ${shellQuote(temporaryPath)}; exit 73; fi && mv -f -T ${shellQuote(temporaryPath)} ${shellQuote(parameters.filePath)}; } || { status=$?; rm -f -- ${shellQuote(temporaryPath)}; exit "$status"; }`,
     EXEC_OPTS
   )
   if (result.code !== 0) {
@@ -677,8 +688,10 @@ async function restoreComposeSystemdUnitFileSnapshot(parameters: {
     return "restored"
   }
 
+  // R-0000565: pass `--` so the rollback path cannot be parsed as an `rm`
+  // option after a future refactor that loosens the file-path validation.
   const removeResult = await parameters.connection.exec(
-    `rm -f ${shellQuote(parameters.filePath)}`,
+    `rm -f -- ${shellQuote(parameters.filePath)}`,
     EXEC_OPTS
   )
   if (removeResult.code !== 0) {
@@ -941,15 +954,22 @@ async function activateStagedComposeFile(
 }
 
 async function removeComposeStagingFile(ssh: SshConnection, stagingPath: string): Promise<void> {
-  await ssh.exec(`rm -f ${shellQuote(stagingPath)}`, EXEC_OPTS)
+  // R-0000565: pass `--` so the staging path cannot be parsed as an `rm`
+  // option if a future refactor weakens the staging-prefix validation.
+  await ssh.exec(`rm -f -- ${shellQuote(stagingPath)}`, EXEC_OPTS)
 }
 
 async function createComposeStagingPath(parameters: {
   projectDirectory: string
   ssh: SshConnection
 }): Promise<string> {
-  const template = `${parameters.projectDirectory}/${COMPOSE_CONFIG_STAGING_PREFIX}.XXXXXX`
-  const stagingPath = await parameters.ssh.output(`mktemp ${shellQuote(template)}`)
+  // R-0000565: pass the project directory via `-p` and separate the template
+  // with `--` so a future refactor that loosens the staging prefix cannot let
+  // an attacker-controlled value be interpreted as a `mktemp` option.
+  const template = `${COMPOSE_CONFIG_STAGING_PREFIX}.XXXXXX`
+  const stagingPath = await parameters.ssh.output(
+    `mktemp -p ${shellQuote(parameters.projectDirectory)} -- ${shellQuote(template)}`
+  )
   return validateMktempPath(parameters.projectDirectory, stagingPath, COMPOSE_CONFIG_STAGING_PREFIX)
 }
 

@@ -103,8 +103,13 @@ async function createAuthorizedKeysTemporaryPath(
   conn: SshConnection,
   sshDirectoryPath: string
 ): Promise<string> {
-  const template = `${sshDirectoryPath}/${AUTHORIZED_KEYS_TEMPORARY_PREFIX}.XXXXXX`
-  const temporaryPath = await conn.output(`mktemp ${shellQuote(template)}`)
+  // R-0000565: pass the staging directory via `-p` and separate the template
+  // with `--` so a future refactor that loosens the prefix cannot let an
+  // attacker-controlled value be interpreted as a `mktemp` option.
+  const template = `${AUTHORIZED_KEYS_TEMPORARY_PREFIX}.XXXXXX`
+  const temporaryPath = await conn.output(
+    `mktemp -p ${shellQuote(sshDirectoryPath)} -- ${shellQuote(template)}`
+  )
   return validateMktempPath(sshDirectoryPath, temporaryPath, AUTHORIZED_KEYS_TEMPORARY_PREFIX)
 }
 
@@ -319,7 +324,9 @@ async function rewriteAuthorizedKeys(
       user,
     })
   } finally {
-    await conn.exec(`rm -f ${shellQuote(temporaryPath)}`, MUTATION_EXEC_OPTS)
+    // R-0000565: pass `--` so the staging path cannot be parsed as an `rm`
+    // option after a future refactor that loosens the prefix validation.
+    await conn.exec(`rm -f -- ${shellQuote(temporaryPath)}`, MUTATION_EXEC_OPTS)
   }
 }
 

@@ -21,7 +21,13 @@ async function allocateRemoteScriptPath(
   name: string
 ): Promise<ModuleResult | string> {
   const template = `paratix-script-${name}.XXXXXX`
-  const mktempResult = await ssh.exec(`mktemp -p /tmp ${shellQuote(template)}`, EXEC_OPTS)
+  // R-0000565: separate the template from the option list with `--` so a
+  // future refactor that loosens the name validation cannot let the template
+  // be interpreted as a `mktemp` option.
+  const mktempResult = await ssh.exec(
+    `mktemp -p /tmp -- ${shellQuote(template)}`,
+    EXEC_OPTS
+  )
   if (mktempResult.code !== 0) {
     return failedCommand(`[script.once: ${name}] mktemp failed`, mktempResult)
   }
@@ -89,7 +95,9 @@ async function runScriptOnce(parameters: {
     // mirrors the cleanup-rm convention used in quadlet/swap*Helpers/timer:
     // a non-zero `rm -f` (e.g. /tmp briefly read-only, SFTP transport blip)
     // must not overwrite the structured ModuleResult of a successful run.
-    await ssh.exec(`rm -f ${shellQuote(remotePath)}`, { ignoreExitCode: true, silent: true })
+    // R-0000565: pass `--` so the mktemp-allocated path cannot be parsed as
+    // an `rm` option after a future refactor that loosens the name pattern.
+    await ssh.exec(`rm -f -- ${shellQuote(remotePath)}`, { ignoreExitCode: true, silent: true })
   }
 }
 

@@ -261,7 +261,10 @@ async function moveExtractedContentsIntoDestination(
 
 async function cleanupStagingDirectory(conn: SshConnection, staging: string): Promise<void> {
   try {
-    await conn.exec(`rm -rf ${shellQuote(staging)}`, SILENT)
+    // R-0000565: pass `--` so a refactor that loosens the staging prefix
+    // cannot let an attacker-controlled path that starts with `-` be
+    // interpreted as an `rm` option.
+    await conn.exec(`rm -rf -- ${shellQuote(staging)}`, SILENT)
   } catch {
     // best effort: cleanup must not mask the original result
   }
@@ -682,7 +685,9 @@ async function applyExtract(
   } finally {
     if (upload) {
       try {
-        await conn.exec(`rm -f ${shellQuote(remoteSource)}`, SILENT)
+        // R-0000565: pass `--` so the uploaded archive path cannot be
+        // misinterpreted as an `rm` option after a future refactor.
+        await conn.exec(`rm -f -- ${shellQuote(remoteSource)}`, SILENT)
       } catch {
         // best effort: cleanup must not mask the original result
       }

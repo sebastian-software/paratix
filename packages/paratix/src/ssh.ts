@@ -392,8 +392,10 @@ export class SshConnectionImpl implements SshConnection {
     let sourcePath = remotePath
     try {
       if (this.config.user !== "root") {
+        // R-0000565: pass `/tmp` via `-p` and the template via `--` so the
+        // prefix cannot be parsed as a `mktemp` option.
         sourcePath = await this.createRemoteTempPath(
-          "mktemp /tmp/paratix-download.XXXXXX",
+          "mktemp -p /tmp -- paratix-download.XXXXXX",
           "paratix-download"
         )
         await this.exec(`cat ${shellQuote(remotePath)} > ${shellQuote(sourcePath)}`, {
@@ -787,7 +789,9 @@ export class SshConnectionImpl implements SshConnection {
   }
 
   private async cleanupPrivilegedRemoteTempFile(remotePath: string): Promise<void> {
-    await this.exec(`rm -f ${shellQuote(remotePath)}`, {
+    // R-0000565: pass `--` so the mktemp-allocated path cannot be parsed as
+    // an `rm` option after a future refactor that loosens the prefix.
+    await this.exec(`rm -f -- ${shellQuote(remotePath)}`, {
       ignoreExitCode: true,
       silent: true,
     })
@@ -799,7 +803,10 @@ export class SshConnectionImpl implements SshConnection {
     // original diagnostic with a misleading rm-failure trace. Mirror the
     // ignoreExitCode pattern used by cleanupPrivilegedRemoteTempFile and
     // emit a masked warning to stderr instead of throwing.
-    const command = `rm -f ${shellQuote(remotePath)}`
+    //
+    // R-0000565: pass `--` so the mktemp-allocated path cannot be parsed as
+    // an `rm` option after a future refactor that loosens the prefix.
+    const command = `rm -f -- ${shellQuote(remotePath)}`
     try {
       if (this.config.user === "root") {
         await this.exec(command, { ignoreExitCode: true, silent: true })
@@ -982,8 +989,13 @@ export class SshConnectionImpl implements SshConnection {
     // destination is a symlink and an attacker could redirect the privileged
     // temp file (and the subsequent `mv -T`) into a location they control.
     await this.assertDirnameHasNoSymlinkComponent(directory, remotePath)
-    const template = `${directory}/${prefix}.XXXXXX`
-    const path = await this.output(`mktemp ${shellQuote(template)}`)
+    // R-0000565: pass the directory via `-p` and separate the template with
+    // `--` so a future refactor that loosens the prefix cannot let an
+    // attacker-controlled value be interpreted as a `mktemp` option.
+    const template = `${prefix}.XXXXXX`
+    const path = await this.output(
+      `mktemp -p ${shellQuote(directory)} -- ${shellQuote(template)}`
+    )
     return validateMktempPath(directory, path, prefix)
   }
 
@@ -1002,8 +1014,11 @@ export class SshConnectionImpl implements SshConnection {
     const directory = posix.dirname(remotePath)
     // R-0000141: same dirname-symlink protection as for the privileged path.
     await this.assertDirnameHasNoSymlinkComponent(directory, remotePath)
-    const template = `${directory}/${prefix}.XXXXXX`
-    const command = `mktemp ${shellQuote(template)}`
+    // R-0000565: pass the directory via `-p` and separate the template with
+    // `--` so the prefix cannot be parsed as a `mktemp` option after a future
+    // refactor that loosens the prefix validation.
+    const template = `${prefix}.XXXXXX`
+    const command = `mktemp -p ${shellQuote(directory)} -- ${shellQuote(template)}`
     const path =
       this.config.user === "root"
         ? await this.output(command)
@@ -1015,7 +1030,13 @@ export class SshConnectionImpl implements SshConnection {
     if (this.config.user === "root") {
       return this.createRemoteTempPathInDestination(remotePath, prefix)
     }
-    return this.createRemoteTempPath(`mktemp '/tmp/${prefix}.XXXXXX'`, prefix)
+    // R-0000565: pass `/tmp` via `-p` and the template via `--` so the prefix
+    // cannot be parsed as a `mktemp` option after a future refactor that
+    // loosens the prefix validation.
+    return this.createRemoteTempPath(
+      `mktemp -p /tmp -- ${shellQuote(`${prefix}.XXXXXX`)}`,
+      prefix
+    )
   }
 
   private createSettledCallbacks<T>(
@@ -1352,7 +1373,11 @@ export class SshConnectionImpl implements SshConnection {
     const directory = posix.dirname(remotePath)
     await this.assertDirnameHasNoSymlinkComponent(directory, remotePath)
     const basename = posix.basename(remotePath)
-    const finalTemplate = `${directory}/.${basename}.paratix.XXXXXX`
+    // R-0000565: pass the directory via `-p` and separate the template with
+    // `--` so the prefix cannot be parsed as a `mktemp` option after a future
+    // refactor that loosens the basename validation. Same `--` for the
+    // `rm -f` cleanup so `$target_temp` cannot be parsed as an `rm` option.
+    const finalTemplate = `.${basename}.paratix.XXXXXX`
     // R-0000517: enable strict shell error handling. Without `set -eu` a
     // failed `mktemp` would leave `$target_temp` empty, the subsequent
     // `mv`/`chmod`/`chown` would silently misbehave, and `trap - EXIT` would
@@ -1370,11 +1395,11 @@ target_owner=$(stat -c '%u:%g' ${shellQuote(remotePath)} 2>/dev/null || printf '
 target_temp=''
 cleanup() {
   if [ -n "$target_temp" ]; then
-    rm -f "$target_temp"
+    rm -f -- "$target_temp"
   fi
 }
 trap cleanup EXIT
-target_temp=$(mktemp ${shellQuote(finalTemplate)})
+target_temp=$(mktemp -p ${shellQuote(directory)} -- ${shellQuote(finalTemplate)})
 [ -n "$target_temp" ] || exit 1
 mv -T -- ${shellQuote(temporaryPath)} "$target_temp"
 chmod ${shellQuote(mode)} "$target_temp"

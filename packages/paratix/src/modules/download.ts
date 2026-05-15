@@ -596,7 +596,10 @@ async function cleanupTemporaryDownloadFile(
   parameters: Pick<DownloadParameters, "destination" | "secrets">
 ): Promise<void> {
   try {
-    await conn.exec(`rm -f ${shellQuote(parameters.destination)}`, { silent: true })
+    // R-0000565: pass `--` so a future refactor that loosens the staging
+    // prefix cannot turn the destination into an `rm` flag (e.g. an
+    // attacker-controlled path starting with `-`).
+    await conn.exec(`rm -f -- ${shellQuote(parameters.destination)}`, { silent: true })
   } catch (cleanupError) {
     process.stderr.write(
       `Warning: failed to remove temp file ${parameters.destination}: ${maskSecrets(String(cleanupError), parameters.secrets ?? [])}\n`
