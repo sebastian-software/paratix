@@ -189,7 +189,7 @@ export const file = {
       },
       async check(ssh: null | SshConnection): Promise<"needs-apply" | "ok"> {
         if (!ssh) return NEEDS_APPLY
-        return (await absentPathExists(ssh, remotePath)) ? "needs-apply" : "ok"
+        return (await absentPathExists(ssh, remotePath)) ? NEEDS_APPLY : "ok"
       },
       name: `file.absent: ${remotePath}`,
     }
