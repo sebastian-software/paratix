@@ -1,4 +1,5 @@
-import { execFileSync } from "node:child_process"
+import { execFile, type ExecFileOptionsWithStringEncoding, execFileSync } from "node:child_process"
+import { generateKeyPairSync } from "node:crypto"
 import {
   mkdirSync,
   mkdtempSync,
@@ -11,12 +12,93 @@ import {
 import { tmpdir } from "node:os"
 import { dirname, join, resolve } from "node:path"
 import { pathToFileURL } from "node:url"
+import { Server, type ServerChannel } from "ssh2"
 import { describe, expect, it } from "vitest"
 
 const packageRootDirectory = resolve(import.meta.dirname, "../..")
 const CLI_COMMAND_TIMEOUT_MS = 30_000
 const CLI_COMMAND_MAX_BUFFER = 10 * 1024 * 1024
 const PACKAGE_COMMAND_TIMEOUT_MS = 60_000
+
+type CommandResponse = {
+  code: number
+  stdout?: string
+}
+
+type TestSshServer = {
+  close: () => Promise<void>
+  port: number
+  privateKey: string
+}
+
+function endExecStream(stream: ServerChannel, response: CommandResponse): void {
+  if (response.stdout != null) stream.write(response.stdout)
+  stream.exit(response.code)
+  stream.end()
+}
+
+async function execFileBuffered(
+  file: string,
+  args: string[],
+  options: ExecFileOptionsWithStringEncoding
+): Promise<string> {
+  return new Promise<string>((resolveExec, rejectExec) => {
+    execFile(file, args, options, (error, stdout) => {
+      if (error == null) resolveExec(stdout)
+      else rejectExec(new Error(error.message, { cause: error }))
+    })
+  })
+}
+
+async function startTestSshServer(
+  handleCommand: (command: string) => CommandResponse
+): Promise<TestSshServer> {
+  const { privateKey } = generateKeyPairSync("rsa", {
+    modulusLength: 2048,
+    privateKeyEncoding: { format: "pem", type: "pkcs1" },
+    publicKeyEncoding: { format: "pem", type: "spki" },
+  })
+  const server = new Server({ hostKeys: [privateKey] }, (client) => {
+    client.on("authentication", (context) => {
+      if (context.method === "publickey") context.accept()
+      else context.reject()
+    })
+    client.on("ready", () => {
+      client.on("session", (accept) => {
+        const session = accept()
+        session.on("exec", (acceptExec, _rejectExec, info) => {
+          endExecStream(acceptExec(), handleCommand(info.command))
+        })
+      })
+    })
+  })
+
+  await new Promise<void>((resolveListen, rejectListen) => {
+    server.once("error", rejectListen)
+    server.listen(0, "127.0.0.1", () => {
+      server.off("error", rejectListen)
+      resolveListen()
+    })
+  })
+
+  const address = server.address()
+  if (address == null || typeof address === "string") {
+    throw new Error("test SSH server did not expose a TCP address")
+  }
+
+  return {
+    async close() {
+      await new Promise<void>((resolveClose, rejectClose) => {
+        server.close((error) => {
+          if (error == null) resolveClose()
+          else rejectClose(error)
+        })
+      })
+    },
+    port: address.port,
+    privateKey,
+  }
+}
 
 describe("dist CLI", () => {
   it("runs the published CLI for version and apply validation errors", () => {
@@ -59,7 +141,7 @@ describe("dist CLI", () => {
     }
   })
 
-  it("loads a valid playbook through the published apply CLI", () => {
+  it("reports authentication errors for a valid playbook before apply can run", () => {
     const packageJson = JSON.parse(
       readFileSync(join(packageRootDirectory, "package.json"), "utf8")
     ) as {
@@ -111,6 +193,90 @@ export default {
         })
       ).toThrow(/No privateKey configured and SSH_AUTH_SOCK is not set/v)
     } finally {
+      rmSync(tempDirectory, { force: true, recursive: true })
+    }
+  })
+
+  it("applies a valid playbook through the published apply CLI", async () => {
+    const packageJson = JSON.parse(
+      readFileSync(join(packageRootDirectory, "package.json"), "utf8")
+    ) as {
+      bin: { paratix: string }
+    }
+    const distCliPath = resolve(packageRootDirectory, packageJson.bin.paratix)
+    const tempDirectory = mkdtempSync(join(tmpdir(), "paratix-cli-apply-dist-"))
+    const privateKeyPath = join(tempDirectory, "id_rsa")
+    const playbookPath = join(tempDirectory, "valid-playbook.mjs")
+    const markerPath = join(tempDirectory, "remote-marker.txt")
+    const seenCommands: string[] = []
+    const checkCommand = `test -f ${JSON.stringify(markerPath)}`
+    const applyCommand = `printf 'changed\\n' > ${JSON.stringify(markerPath)}`
+    const commandHandlers = new Map<string, () => CommandResponse>([
+      [
+        applyCommand,
+        () => {
+          writeFileSync(markerPath, "changed\n")
+          return { code: 0 }
+        },
+      ],
+      [checkCommand, () => ({ code: 1 })],
+    ])
+
+    const testServer = await startTestSshServer((command) => {
+      seenCommands.push(command)
+      return commandHandlers.get(command)!()
+    })
+
+    try {
+      writeFileSync(privateKeyPath, testServer.privateKey, { mode: 0o600 })
+      writeFileSync(
+        playbookPath,
+        `
+export default {
+  name: "dist-apply-success",
+  host: "127.0.0.1",
+  ssh: {
+    ports: [${String(testServer.port)}],
+    privateKey: ${JSON.stringify(privateKeyPath)},
+    strictHostKeyChecking: "no",
+    user: "root",
+  },
+  run: [
+    {
+      name: "dist remote apply module",
+      async check(ssh) {
+        const result = await ssh.exec(${JSON.stringify(checkCommand)}, { ignoreExitCode: true, silent: true })
+        return result.code === 0 ? "ok" : "needs-apply"
+      },
+      async apply(ssh) {
+        await ssh.exec(${JSON.stringify(applyCommand)}, { silent: true })
+        return { status: "changed", detail: "remote smoke" }
+      },
+    },
+  ],
+}
+`
+      )
+
+      const stdout = await execFileBuffered(
+        process.execPath,
+        [distCliPath, "apply", playbookPath],
+        {
+          cwd: packageRootDirectory,
+          encoding: "utf8",
+          env: { ...process.env, SSH_AUTH_SOCK: "" },
+          killSignal: "SIGTERM",
+          maxBuffer: CLI_COMMAND_MAX_BUFFER,
+          timeout: CLI_COMMAND_TIMEOUT_MS,
+        }
+      )
+
+      expect(stdout).toContain("dist remote apply module")
+      expect(stdout).toContain("changed")
+      expect(readFileSync(markerPath, "utf8")).toBe("changed\n")
+      expect(seenCommands).toStrictEqual([checkCommand, applyCommand])
+    } finally {
+      await testServer.close()
       rmSync(tempDirectory, { force: true, recursive: true })
     }
   })
