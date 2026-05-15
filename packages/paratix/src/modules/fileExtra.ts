@@ -251,6 +251,13 @@ export function block(remotePath: string, options: BlockOptions): Module {
         })
         if (failure != null) return failure
       } else {
+        // R-0000526: no separate isSymlink check is needed before this
+        // writeFile. ssh.writeFile finalizes via finalizeRemoteTempFile which
+        // evaluates a `[ ! -d ... ] && [ ! -L ... ]` guard at mv-time,
+        // atomically refusing to replace a path that became a symlink between
+        // the earlier `ssh.exists` probe and the actual rename. The TOCTOU
+        // window is therefore closed at the SSH layer rather than by an
+        // additional round-trip here.
         await ssh.writeFile(remotePath, `${fullBlock}\n`, {
           mode: await resolveWriteMode(ssh, remotePath),
         })
