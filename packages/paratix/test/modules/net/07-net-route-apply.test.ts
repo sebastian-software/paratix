@@ -240,16 +240,12 @@ describe("net.route — apply", () => {
     expect(mockSsh.writeFileCalls.map((call) => call.remotePath)).toContain(secondPath)
   })
 
-  it("fails closed when no persistent target device is given", async () => {
-    const mockSsh = createMockSsh({}, SUCCESSFUL_ROUTE_APPLY_OPTIONS)
-    const mod = net.route("10.0.0.0/24", "192.168.1.1")
-
-    const result = await mod.apply(mockSsh, emptyEnv)
-
-    expect(result.status).toBe("failed")
-    expect(String(result.error)).toContain("options.device")
-    expect(mockSsh.calls).not.toContain("networkctl reload")
-    expect(mockSsh.writeFileCalls).toHaveLength(0)
+  it("fails closed when no persistent target device is given", () => {
+    // R-0000486: `net.route` now surfaces the missing-device error at
+    // construction time instead of letting `check()` report `needs-apply`
+    // and `apply()` then fail. The fixture must therefore assert that the
+    // factory throws synchronously and never reaches a mock SSH connection.
+    expect(() => net.route("10.0.0.0/24", "192.168.1.1")).toThrow(/options\.device/v)
   })
 
   it("returns failed without reload when the persistent route drop-in cannot be written", async () => {
