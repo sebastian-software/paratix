@@ -9,7 +9,8 @@ const createMockSsh: typeof createBaseMockSsh = (responses, options) =>
   createBaseMockSsh(responses, {
     ...options,
     allowWrites: [
-      { options: { mode: "0644" }, remotePath: /^\/tmp\/paratix-sshd-dry-run-/v },
+      // R-0000587: dry-run tempfiles carry restrictive 0600 permissions.
+      { options: { mode: "0600" }, remotePath: /^\/tmp\/paratix-sshd-dry-run-/v },
       ...(options?.allowWrites ?? []),
     ],
     responseStubs: [

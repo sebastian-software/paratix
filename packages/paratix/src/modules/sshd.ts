@@ -699,13 +699,23 @@ async function rollbackSshdPortAfterFailedVerification(
 //     `finally` block removes it again.
 // The dry-run entry point (`dryRunSshdConfig`) must not perform either
 // mutation — see `validateProspectiveSshdConfigForDryRun` below.
+// R-0000587: prospective sshd_config tempfiles are created in world-readable
+// `/tmp`. The live `/etc/ssh/sshd_config` is conventionally 0644, but the
+// prospective copy may carry unreleased `AllowUsers` / `Match` /
+// `AuthorizedKeysCommand` etc. directives that should not leak to other local
+// users for the short window before the `rm -f` in the `finally` block runs.
+// Pin the tempfile mode to 0600 so only root (and the writing identity) can
+// read it; the live config keeps the conventional 0644 mode in
+// guardedWriteFile callers.
+const SSHD_DRY_RUN_TEMP_MODE = "0600"
+
 async function validateProspectiveSshdConfig(
   ssh: SshConnection,
   content: string
 ): Promise<ModuleResult | undefined> {
   const temporaryConfigPath = `/tmp/paratix-sshd-dry-run-${randomUUID()}.conf`
   try {
-    await ssh.writeFile(temporaryConfigPath, content, { mode: SSHD_CONFIG_MODE })
+    await ssh.writeFile(temporaryConfigPath, content, { mode: SSHD_DRY_RUN_TEMP_MODE })
     await ensurePrivilegeSeparationDirectory(ssh)
     const result = await ssh.exec(`sshd -t -f ${shellQuote(temporaryConfigPath)}`, {
       ignoreExitCode: true,
@@ -754,7 +764,8 @@ async function validateProspectiveSshdConfigForDryRun(
   }
   const temporaryConfigPath = `/tmp/paratix-sshd-dry-run-${randomUUID()}.conf`
   try {
-    await ssh.writeFile(temporaryConfigPath, content, { mode: SSHD_CONFIG_MODE })
+    // R-0000587: same `0600` restriction as `validateProspectiveSshdConfig`.
+    await ssh.writeFile(temporaryConfigPath, content, { mode: SSHD_DRY_RUN_TEMP_MODE })
     const result = await ssh.exec(`sshd -t -f ${shellQuote(temporaryConfigPath)}`, {
       ignoreExitCode: true,
       silent: true,
