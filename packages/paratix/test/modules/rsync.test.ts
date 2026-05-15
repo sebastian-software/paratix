@@ -456,7 +456,7 @@ describe("rsync.sync — path validation", () => {
 
   it("R-0000179: rejects DEL byte in src", () => {
     expect(() => {
-      rsync.sync({ dest: "/remote/dest", src: "/local/src" })
+      rsync.sync({ dest: "/remote/dest", src: "/local/src\x7fbreak" })
     }).toThrow(/src must not contain ASCII control characters/v)
   })
 
