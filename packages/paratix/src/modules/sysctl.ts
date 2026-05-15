@@ -190,6 +190,16 @@ async function applyPresentState(
   // would propagate as an unstructured exception while the live kernel
   // value already drifted via `sysctl -w`. Mirrors the R-0000182 fix in
   // similar persist-after-mutation paths.
+  //
+  // R-0000549: no explicit cleanup of `configPath` is needed before the
+  // rollback. `ssh.writeFile` is atomic via `finalizeRemoteTempFile`
+  // (mktemp + chmod + chown + `mv -T` into place) with a `try/finally`
+  // that runs `cleanupWriteFileTemporaryPath` on every failure path.
+  // The final destination is therefore never observable in a partially
+  // written state: on failure, `configPath` is either still the previous
+  // content (untouched) or non-existent. A `rm -f -- configPath` here
+  // could only delete a pre-existing, untouched file and would mask the
+  // intended atomic semantics, so we deliberately do not remove it.
   try {
     await conn.writeFile(configPath, expectedContent, { mode: SYSCTL_CONFIG_MODE })
   } catch (error) {
