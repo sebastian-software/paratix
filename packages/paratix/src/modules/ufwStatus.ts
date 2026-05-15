@@ -97,6 +97,56 @@ export function statusReportsActive(status: string): boolean {
 }
 
 /**
+ * Tagged result returned by {@link readUfwStatusDetailed}. Distinguishes the
+ * three relevant outcomes so callers can produce accurate diagnostics:
+ *
+ *   * `ok` — `ufw status` returned and the trimmed output is in `status`.
+ *   * `missing` — `ufw` is not on PATH (binary not installed).
+ *   * `unreadable` — `ufw` exists but `ufw status` failed (typically a
+ *     permission error or a transient race). The original error message is
+ *     preserved in `detail` for surfacing to the operator.
+ */
+export type UfwStatusReadResult =
+  | { kind: "missing" }
+  | { kind: "ok"; status: string }
+  | { detail: string; kind: "unreadable" }
+
+// R-0000551: probe `ufw` separately from `ufw status` so the two failure modes
+// can be distinguished. `ssh.test` returns a plain boolean; checking
+// `command -v ufw` keeps the probe portable across shells.
+async function isUfwInstalled(ssh: SshConnection): Promise<boolean> {
+  try {
+    return await ssh.test(`command -v ${UFW}`)
+  } catch {
+    // If even the probe blows up (network glitch, sudo failure), assume the
+    // binary is present and let the actual `ufw status` call surface the real
+    // error — better to over-report the unreadable path than to misclassify
+    // the host as not having ufw installed.
+    return true
+  }
+}
+
+/**
+ * Read `ufw status` and classify the result. Unlike {@link readUfwStatus} the
+ * caller can tell whether `ufw` is missing entirely versus simply unreadable
+ * (permission denied, transient race, etc.).
+ *
+ * @param ssh - The remote SSH connection.
+ * @returns The classified read result.
+ */
+export async function readUfwStatusDetailed(ssh: SshConnection): Promise<UfwStatusReadResult> {
+  const installed = await isUfwInstalled(ssh)
+  if (!installed) return { kind: "missing" }
+  try {
+    const status = await ssh.output(`${UFW} status`)
+    return { kind: "ok", status }
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error)
+    return { detail, kind: "unreadable" }
+  }
+}
+
+/**
  * Read `ufw status` once. Returns the captured output when ufw is installed
  * and reachable, or `null` when the command is not available (typical when
  * ufw is not installed). Callers can treat `null` as "no firewall guard
@@ -106,15 +156,15 @@ export function statusReportsActive(status: string): boolean {
  * `ufw.disabled.check` module uses; failures (such as a missing `ufw` binary
  * or a non-zero exit) are reported as `null` instead of bubbling up.
  *
+ * Prefer {@link readUfwStatusDetailed} when the caller needs to distinguish
+ * "ufw is not installed" from "ufw is installed but unreadable".
+ *
  * @param ssh - The remote SSH connection.
  * @returns The trimmed `ufw status` output, or `null` when ufw is unavailable.
  */
 export async function readUfwStatus(ssh: SshConnection): Promise<null | string> {
-  try {
-    return await ssh.output(`${UFW} status`)
-  } catch {
-    return null
-  }
+  const detailed = await readUfwStatusDetailed(ssh)
+  return detailed.kind === "ok" ? detailed.status : null
 }
 
 type UfwAccess = "allowed" | "blocked" | "inactive"

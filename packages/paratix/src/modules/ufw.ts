@@ -10,6 +10,7 @@ import {
   hasTcpIpv6Rule,
   hasTcpRule,
   readUfwStatus,
+  readUfwStatusDetailed,
   statusIncludesIpv6Rules,
   tcpRelevantRuleDeletePorts,
 } from "./ufwStatus.js"
@@ -358,12 +359,21 @@ export const ufw = {
         // (or vice versa) can shadow the new rule. Probing the status first
         // lets us avoid issuing `ufw delete` for ports with no contradictory
         // entry, which keeps the apply quiet on steady state.
-        const status = await readUfwStatus(ssh)
-        if (status == null) {
+        // R-0000551: use the detailed reader so a permission denied on
+        // `ufw status` is not misreported as "ufw is not installed".
+        const statusRead = await readUfwStatusDetailed(ssh)
+        if (statusRead.kind === "missing") {
           return failed(
             `[ufw.rule: ${action} ${portList.join(",")}] ufw is not installed; install ufw before adding rules`
           )
         }
+        if (statusRead.kind === "unreadable") {
+          return failed(
+            `[ufw.rule: ${action} ${portList.join(",")}] could not read ufw status ` +
+              `(ufw binary present but \`ufw status\` failed): ${statusRead.detail}`
+          )
+        }
+        const status = statusRead.status
         const ipv6Rules = statusIncludesIpv6Rules(status)
 
         let anyChanged = false
