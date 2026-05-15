@@ -198,7 +198,7 @@ describe("sshd.port — apply: validation and rollback", () => {
 
     // mkdir -p /run/sshd succeeds (dry-run), then sshd -t -f <tmpfile> fails.
     execSpy
-      .mockResolvedValueOnce({ code: 0, stderr: "", stdout: "" })  // mkdir -p /run/sshd (dry-run)
+      .mockResolvedValueOnce({ code: 0, stderr: "", stdout: "" }) // mkdir -p /run/sshd (dry-run)
       .mockResolvedValueOnce({ code: 1, stderr: "sshd: invalid port", stdout: "" }) // sshd -t -f
 
     const mod = sshd.port(2222)
@@ -225,15 +225,15 @@ describe("sshd.port — apply: validation and rollback", () => {
     // R-0000539: readFile sequence — initial read, guard read (guardedWriteFile),
     // rollback check read. Rollback check sees newContent so rollback write is triggered.
     vi.spyOn(mockSsh, "readFile")
-      .mockResolvedValueOnce(originalConfig)  // initial read in applySshdPort
-      .mockResolvedValueOnce(originalConfig)  // guard read in guardedWriteFile
-      .mockResolvedValueOnce(newConfig)       // rollback check: current == newConfig → rollback
+      .mockResolvedValueOnce(originalConfig) // initial read in applySshdPort
+      .mockResolvedValueOnce(originalConfig) // guard read in guardedWriteFile
+      .mockResolvedValueOnce(newConfig) // rollback check: current == newConfig → rollback
     // R-0000539: writeFile sequence: tmpfile (dry-run), live SSHD_CONFIG (fails), rollback.
     const writeFileSpy = vi
       .spyOn(mockSsh, "writeFile")
-      .mockResolvedValueOnce(undefined)                        // tmpfile dry-run write
-      .mockRejectedValueOnce(new Error("SFTP write failed"))  // live config write fails
-      .mockResolvedValueOnce(undefined)                        // rollback write succeeds
+      .mockResolvedValueOnce(undefined) // tmpfile dry-run write
+      .mockRejectedValueOnce(new Error("SFTP write failed")) // live config write fails
+      .mockResolvedValueOnce(undefined) // rollback write succeeds
     const execSpy = vi.spyOn(mockSsh, "exec")
     const addPortSpy = vi.spyOn(mockSsh, "addPort")
 
@@ -319,8 +319,8 @@ describe("sshd.port — apply: validation and rollback", () => {
     // R-0000539: spy on readFile to prevent exec from being called for guard reads,
     // which keeps the exec spy chain simple and aligned with real exec calls only.
     vi.spyOn(mockSsh, "readFile")
-      .mockResolvedValueOnce(originalConfig)  // initial read in applySshdPort
-      .mockResolvedValueOnce(originalConfig)  // guard read in guardedWriteFile
+      .mockResolvedValueOnce(originalConfig) // initial read in applySshdPort
+      .mockResolvedValueOnce(originalConfig) // guard read in guardedWriteFile
     const execSpy = vi.spyOn(mockSsh, "exec")
 
     execSpy
@@ -352,8 +352,8 @@ describe("sshd.port — apply: validation and rollback", () => {
     trackWriteFile(mockSsh)
     // R-0000539: spy on readFile to prevent exec from being called for guard reads.
     vi.spyOn(mockSsh, "readFile")
-      .mockResolvedValueOnce(originalConfig)  // initial read in applySshdPort
-      .mockResolvedValueOnce(originalConfig)  // guard read in guardedWriteFile
+      .mockResolvedValueOnce(originalConfig) // initial read in applySshdPort
+      .mockResolvedValueOnce(originalConfig) // guard read in guardedWriteFile
     const execSpy = vi.spyOn(mockSsh, "exec")
 
     execSpy
@@ -385,8 +385,8 @@ describe("sshd.port — apply: validation and rollback", () => {
     // R-0000539: spy on readFile so exec is not called for internal guard reads,
     // making exec call ordering assertions independent of cat readFile calls.
     vi.spyOn(mockSsh, "readFile")
-      .mockResolvedValueOnce(originalConfig)  // initial read in applySshdPort
-      .mockResolvedValueOnce(originalConfig)  // guard read in guardedWriteFile
+      .mockResolvedValueOnce(originalConfig) // initial read in applySshdPort
+      .mockResolvedValueOnce(originalConfig) // guard read in guardedWriteFile
     const execSpy = vi.spyOn(mockSsh, "exec")
 
     mockExecResolvedValue(execSpy, { code: 0 })
@@ -400,7 +400,7 @@ describe("sshd.port — apply: validation and rollback", () => {
     expect(execCommands[0]).toBe("mkdir -p '/run/sshd'")
     const mkdirIndex = execCommands.indexOf("mkdir -p '/run/sshd'")
     const dryRunIndex = execCommands.findIndex((cmd) =>
-      /^sshd -t -f '\/tmp\/paratix-sshd-dry-run-/v.test(cmd)
+      cmd.startsWith("sshd -t -f '/tmp/paratix-sshd-dry-run-")
     )
     expect(mkdirIndex).toBeGreaterThanOrEqual(0)
     expect(dryRunIndex).toBeGreaterThan(mkdirIndex)
@@ -524,8 +524,8 @@ describe("sshd.port — apply: validation and rollback", () => {
     const writtenFiles = trackWriteFile(mockSsh)
     // R-0000539: spy on readFile to prevent exec from being called for guard reads.
     vi.spyOn(mockSsh, "readFile")
-      .mockResolvedValueOnce(originalConfig)  // initial read in applySshdPort
-      .mockResolvedValueOnce(originalConfig)  // guard read in guardedWriteFile
+      .mockResolvedValueOnce(originalConfig) // initial read in applySshdPort
+      .mockResolvedValueOnce(originalConfig) // guard read in guardedWriteFile
     const execSpy = vi.spyOn(mockSsh, "exec")
     const removePortSpy = vi.spyOn(mockSsh, "removePort")
 
@@ -565,17 +565,17 @@ describe("sshd.port — apply: validation and rollback", () => {
     })
     // R-0000539: spy on readFile to prevent exec from being called for guard reads.
     vi.spyOn(mockSsh, "readFile")
-      .mockResolvedValueOnce(originalConfig)  // initial read in applySshdPort
-      .mockResolvedValueOnce(originalConfig)  // guard read in guardedWriteFile
+      .mockResolvedValueOnce(originalConfig) // initial read in applySshdPort
+      .mockResolvedValueOnce(originalConfig) // guard read in guardedWriteFile
     const execSpy = vi.spyOn(mockSsh, "exec")
     const addPortSpy = vi.spyOn(mockSsh, "addPort")
     const removePortSpy = vi.spyOn(mockSsh, "removePort")
     // R-0000539: writeFile sequence: tmpfile (dry-run), new config (succeeds),
     // rollback (fails after restart error).
     vi.spyOn(mockSsh, "writeFile")
-      .mockResolvedValueOnce(undefined)                               // tmpfile dry-run
-      .mockResolvedValueOnce(undefined)                               // live config write succeeds
-      .mockRejectedValueOnce(new Error("SFTP rollback failed"))      // rollback write fails
+      .mockResolvedValueOnce(undefined) // tmpfile dry-run
+      .mockResolvedValueOnce(undefined) // live config write succeeds
+      .mockRejectedValueOnce(new Error("SFTP rollback failed")) // rollback write fails
 
     execSpy
       .mockResolvedValueOnce({ code: 0, stderr: "", stdout: "" }) // mkdir -p /run/sshd (dry-run)
@@ -667,8 +667,8 @@ describe("sshd.port — apply: validation and rollback", () => {
     trackWriteFile(mockSsh)
     // R-0000539: spy on readFile to prevent exec from being called for guard reads.
     vi.spyOn(mockSsh, "readFile")
-      .mockResolvedValueOnce(originalConfig)  // initial read in applySshdPort
-      .mockResolvedValueOnce(originalConfig)  // guard read in guardedWriteFile
+      .mockResolvedValueOnce(originalConfig) // initial read in applySshdPort
+      .mockResolvedValueOnce(originalConfig) // guard read in guardedWriteFile
     const execSpy = vi.spyOn(mockSsh, "exec")
 
     execSpy
@@ -722,9 +722,9 @@ describe("sshd.port — apply: validation and rollback", () => {
     // then rollback write (after ss-verify timeout) fails.
     const writeFileSpy = vi
       .spyOn(mockSsh, "writeFile")
-      .mockResolvedValueOnce(undefined)                               // tmpfile dry-run write
-      .mockResolvedValueOnce(undefined)                               // live config write succeeds
-      .mockRejectedValueOnce(new Error("SFTP rollback failed"))      // rollback write fails
+      .mockResolvedValueOnce(undefined) // tmpfile dry-run write
+      .mockResolvedValueOnce(undefined) // live config write succeeds
+      .mockRejectedValueOnce(new Error("SFTP rollback failed")) // rollback write fails
     const originalExec = mockSsh.exec.bind(mockSsh)
     vi.spyOn(mockSsh, "exec").mockImplementation(buildExecWithSsOverride(originalExec, { code: 0 }))
 

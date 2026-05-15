@@ -90,6 +90,22 @@ function mockSshdDryRunExecValidationFailure(mockSsh: ReturnType<typeof createMo
     })
 }
 
+// R-0000539: helper for the failing-dry-run interceptor — kept outside the test
+// body so the conditional branching satisfies vitest's no-conditional-in-test.
+function createDryRunFailingExec(
+  mockSsh: ReturnType<typeof createMockSsh>,
+  originalExec: typeof mockSsh.exec,
+  dryRunFailPattern: RegExp
+): typeof mockSsh.exec {
+  return async (command, options) => {
+    if (dryRunFailPattern.test(command)) {
+      mockSsh.calls.push(command)
+      return { code: 1, stderr: "sshd: bad config", stdout: "" }
+    }
+    return originalExec(command, options)
+  }
+}
+
 // ─── sshd.config — apply ──────────────────────────────────────────────────────
 
 describe("sshd.config — apply: validation and rollback", () => {
@@ -109,13 +125,9 @@ describe("sshd.config — apply: validation and rollback", () => {
     const writtenFiles = trackWriteFile(mockSsh)
     // Capture the original stub-based exec before overriding.
     const originalExec = mockSsh.exec.bind(mockSsh)
-    const execSpy = vi.spyOn(mockSsh, "exec").mockImplementation(async (command, options) => {
-      if (dryRunFailPattern.test(command)) {
-        mockSsh.calls.push(command)
-        return { code: 1, stderr: "sshd: bad config", stdout: "" }
-      }
-      return originalExec(command, options)
-    })
+    const execSpy = vi
+      .spyOn(mockSsh, "exec")
+      .mockImplementation(createDryRunFailingExec(mockSsh, originalExec, dryRunFailPattern))
 
     const mod = sshd.config({ PasswordAuthentication: "no" })
     const result = await mod.apply(mockSsh, emptyEnv)
@@ -142,14 +154,14 @@ describe("sshd.config — apply: validation and rollback", () => {
     // rollback write path is entered (simulates a partial SFTP write that committed
     // the new content before the connection dropped).
     vi.spyOn(mockSsh, "readFile")
-      .mockResolvedValueOnce(originalConfig)  // initial read in applySshdConfig
-      .mockResolvedValueOnce(originalConfig)  // guard read in guardedWriteFile
-      .mockResolvedValueOnce(newConfig)       // rollback check: current == newConfig → rollback
+      .mockResolvedValueOnce(originalConfig) // initial read in applySshdConfig
+      .mockResolvedValueOnce(originalConfig) // guard read in guardedWriteFile
+      .mockResolvedValueOnce(newConfig) // rollback check: current == newConfig → rollback
     // writeFile sequence: tmpfile (dry-run), live SSHD_CONFIG (fails), rollback (fails).
     vi.spyOn(mockSsh, "writeFile")
-      .mockResolvedValueOnce(undefined)                               // tmpfile dry-run write
-      .mockRejectedValueOnce(new Error("SFTP write failed"))         // live config write fails
-      .mockRejectedValueOnce(new Error("SFTP rollback failed"))      // rollback write fails
+      .mockResolvedValueOnce(undefined) // tmpfile dry-run write
+      .mockRejectedValueOnce(new Error("SFTP write failed")) // live config write fails
+      .mockRejectedValueOnce(new Error("SFTP rollback failed")) // rollback write fails
 
     const mod = sshd.config({ PasswordAuthentication: "no" })
     const result = await mod.apply(mockSsh, emptyEnv)
@@ -167,16 +179,16 @@ describe("sshd.config — apply: validation and rollback", () => {
       [CAT_SSHD]: { stdout: originalConfig },
     })
     vi.spyOn(mockSsh, "readFile")
-      .mockResolvedValueOnce(originalConfig)  // initial read in applySshdConfig
-      .mockResolvedValueOnce(originalConfig)  // guard read in guardedWriteFile
-      .mockResolvedValueOnce(newConfig)       // rollback check: current == newConfig → rollback
+      .mockResolvedValueOnce(originalConfig) // initial read in applySshdConfig
+      .mockResolvedValueOnce(originalConfig) // guard read in guardedWriteFile
+      .mockResolvedValueOnce(newConfig) // rollback check: current == newConfig → rollback
     // R-0000539: first writeFile is the temp file for prospective validation (succeeds),
     // second is the live SSHD_CONFIG write (fails), third is the rollback write (succeeds).
     const writeFileSpy = vi
       .spyOn(mockSsh, "writeFile")
-      .mockResolvedValueOnce(undefined)                        // tmpfile dry-run write succeeds
-      .mockRejectedValueOnce(new Error("SFTP write failed"))  // live config write fails
-      .mockResolvedValueOnce(undefined)                        // rollback write succeeds
+      .mockResolvedValueOnce(undefined) // tmpfile dry-run write succeeds
+      .mockRejectedValueOnce(new Error("SFTP write failed")) // live config write fails
+      .mockResolvedValueOnce(undefined) // rollback write succeeds
     const execSpy = vi.spyOn(mockSsh, "exec")
 
     const mod = sshd.config({ PasswordAuthentication: "no" })
@@ -187,9 +199,7 @@ describe("sshd.config — apply: validation and rollback", () => {
     expect(result.error?.message).toContain("SFTP write failed")
     // The live config writes: first fails, second is the rollback.
     // Filter out the tmpfile write (dynamic UUID path) to check only live config writes.
-    const liveConfigWrites = writeFileSpy.mock.calls.filter(
-      ([path]) => path === SSHD_CONFIG
-    )
+    const liveConfigWrites = writeFileSpy.mock.calls.filter(([path]) => path === SSHD_CONFIG)
     expect(liveConfigWrites).toStrictEqual([
       [SSHD_CONFIG, newConfig, { mode: "0644" }],
       [SSHD_CONFIG, originalConfig, { mode: "0644" }],
@@ -236,7 +246,7 @@ describe("sshd.config — apply: validation and rollback", () => {
     expect(execCommands).toContain("systemctl cat 'sshd' | grep -E '^ExecReload='")
     expect(execCommands).toContain("systemctl reload sshd")
     // Dry-run temp file must have been cleaned up.
-    expect(execCommands.some((cmd) => /^rm -f '\/tmp\/paratix-sshd-dry-run-/v.test(cmd))).toBe(
+    expect(execCommands.some((cmd) => cmd.startsWith("rm -f '/tmp/paratix-sshd-dry-run-"))).toBe(
       true
     )
   })
@@ -321,20 +331,18 @@ describe("sshd.config — apply: validation and rollback", () => {
     // SYSTEMCTL_CAT_SSHD is set via responses (highest priority) to fail (code 1),
     // forcing fallback to ssh.service. ExecReload probe for ssh returns empty stdout
     // so the module uses `reload-or-restart` instead of `reload`.
-    const mockSsh = createMockSsh(
-      {
-        [CAT_SSHD]: { stdout: originalConfig },
-        // Responses take priority over responseStubs; override service unit probes:
-        // sshd.service fails → forces fallback to ssh.service which succeeds.
-        [SYSTEMCTL_CAT_SSHD]: { code: 1 },
-        [SYSTEMCTL_CAT_SSH]: { code: 0 },
-        // R-0000496: override ExecReload probe for ssh to return empty stdout
-        // → sshdUnitDefinesExecReload returns false → action becomes reload-or-restart.
-        "systemctl cat 'ssh' | grep -E '^ExecReload='": { code: 0, stdout: "" },
-        // sshd -T returns match so that effective config check passes.
-        "sshd -T": { code: 0, stdout: "passwordauthentication no\n" },
-      }
-    )
+    const mockSsh = createMockSsh({
+      [CAT_SSHD]: { stdout: originalConfig },
+      // sshd -T returns match so that effective config check passes.
+      "sshd -T": { code: 0, stdout: "passwordauthentication no\n" },
+      // Responses take priority over responseStubs; override service unit probes:
+      // sshd.service fails → forces fallback to ssh.service which succeeds.
+      [SYSTEMCTL_CAT_SSH]: { code: 0 },
+      [SYSTEMCTL_CAT_SSHD]: { code: 1 },
+      // R-0000496: override ExecReload probe for ssh to return empty stdout
+      // → sshdUnitDefinesExecReload returns false → action becomes reload-or-restart.
+      "systemctl cat 'ssh' | grep -E '^ExecReload='": { code: 0, stdout: "" },
+    })
     trackWriteFile(mockSsh)
     const execSpy = vi.spyOn(mockSsh, "exec")
 
@@ -404,9 +412,9 @@ describe("sshd.config — apply: validation and rollback", () => {
     // R-0000539: tmpfile write (call 1) and new config write (call 2) succeed;
     // rollback write (call 3) fails.
     vi.spyOn(mockSsh, "writeFile")
-      .mockResolvedValueOnce(undefined)                               // tmpfile dry-run write
-      .mockResolvedValueOnce(undefined)                               // live config write succeeds
-      .mockRejectedValueOnce(new Error("SFTP rollback failed"))      // rollback write fails
+      .mockResolvedValueOnce(undefined) // tmpfile dry-run write
+      .mockResolvedValueOnce(undefined) // live config write succeeds
+      .mockRejectedValueOnce(new Error("SFTP rollback failed")) // rollback write fails
 
     const mod = sshd.config({ PasswordAuthentication: "no" })
     const result = await mod.apply(mockSsh, emptyEnv)

@@ -301,10 +301,10 @@ describe("download.url", () => {
       const markerPath = `${destination}.sha256`
       const fusedMarkerCommand = `[ ! -L '${markerPath}' ] && [ -f '${markerPath}' ] && cat -- '${markerPath}'`
       const mockSsh = createMockSsh({
-        [`[ -f '${markerPath}' ]`]: { code: 0 },
         [`[ -f '${destination}' ]`]: { code: 0 },
-        [fusedMarkerCommand]: { code: 0, stdout: `${recordedHash}\n` },
+        [`[ -f '${markerPath}' ]`]: { code: 0 },
         [`sha256sum '${destination}'`]: { stdout: `${recordedHash}  ${destination}` },
+        [fusedMarkerCommand]: { code: 0, stdout: `${recordedHash}\n` },
       })
       const mod = download.url(destination, url, allowUnverifiedDownload)
       const result = await mod.check(mockSsh, emptyEnv)
@@ -318,8 +318,8 @@ describe("download.url", () => {
       const markerPath = `${destination}.sha256`
       const fusedMarkerCommand = `[ ! -L '${markerPath}' ] && [ -f '${markerPath}' ] && cat -- '${markerPath}'`
       const mockSsh = createMockSsh({
-        [`[ -f '${markerPath}' ]`]: { code: 0 },
         [`[ -f '${destination}' ]`]: { code: 0 },
+        [`[ -f '${markerPath}' ]`]: { code: 0 },
         [fusedMarkerCommand]: { code: 1 },
       })
       const mod = download.url(destination, url, allowUnverifiedDownload)
@@ -351,10 +351,10 @@ describe("download.url", () => {
       const markerPath = `${destination}.sha256`
       const fusedMarkerCommand = `[ ! -L '${markerPath}' ] && [ -f '${markerPath}' ] && cat -- '${markerPath}'`
       const mockSsh = createMockSsh({
-        [`[ -f '${markerPath}' ]`]: { code: 0 },
         [`[ -f '${destination}' ]`]: { code: 0 },
-        [fusedMarkerCommand]: { code: 0, stdout: `${recordedHash}\n` },
+        [`[ -f '${markerPath}' ]`]: { code: 0 },
         [`sha256sum '${destination}'`]: { stdout: `${tamperedHash}  ${destination}` },
+        [fusedMarkerCommand]: { code: 0, stdout: `${recordedHash}\n` },
       })
       const mod = download.url(destination, url, allowUnverifiedDownload)
       const result = await mod.check(mockSsh, emptyEnv)
@@ -368,8 +368,8 @@ describe("download.url", () => {
       const markerPath = `${destination}.sha256`
       const fusedMarkerCommand = `[ ! -L '${markerPath}' ] && [ -f '${markerPath}' ] && cat -- '${markerPath}'`
       const mockSsh = createMockSsh({
-        [`[ -f '${markerPath}' ]`]: { code: 0 },
         [`[ -f '${destination}' ]`]: { code: 0 },
+        [`[ -f '${markerPath}' ]`]: { code: 0 },
         [fusedMarkerCommand]: { code: 13, stderr: "cat: Permission denied\n" },
       })
       const mod = download.url(destination, url, allowUnverifiedDownload)
@@ -1418,10 +1418,10 @@ describe("download.github", () => {
       const markerPath = `${destination}.sha256`
       const fusedMarkerCommand = `[ ! -L '${markerPath}' ] && [ -f '${markerPath}' ] && cat -- '${markerPath}'`
       const mockSsh = createMockSsh({
-        [`[ -f '${markerPath}' ]`]: { code: 0 },
         [`[ -f '${destination}' ]`]: { code: 0 },
-        [fusedMarkerCommand]: { code: 0, stdout: `${recordedHash}\n` },
+        [`[ -f '${markerPath}' ]`]: { code: 0 },
         [`sha256sum '${destination}'`]: { stdout: `${recordedHash}  ${destination}` },
+        [fusedMarkerCommand]: { code: 0, stdout: `${recordedHash}\n` },
       })
       const mod = download.github(destination, { ...allowUnverifiedDownload, asset, repo, tag })
       const result = await mod.check(mockSsh, emptyEnv)
@@ -1435,10 +1435,10 @@ describe("download.github", () => {
       const markerPath = `${destination}.sha256`
       const fusedMarkerCommand = `[ ! -L '${markerPath}' ] && [ -f '${markerPath}' ] && cat -- '${markerPath}'`
       const mockSsh = createMockSsh({
-        [`[ -f '${markerPath}' ]`]: { code: 0 },
         [`[ -f '${destination}' ]`]: { code: 0 },
-        [fusedMarkerCommand]: { code: 0, stdout: `${recordedHash}\n` },
+        [`[ -f '${markerPath}' ]`]: { code: 0 },
         [`sha256sum '${destination}'`]: { stdout: `${tamperedHash}  ${destination}` },
+        [fusedMarkerCommand]: { code: 0, stdout: `${recordedHash}\n` },
       })
       const mod = download.github(destination, { ...allowUnverifiedDownload, asset, repo, tag })
       const result = await mod.check(mockSsh, emptyEnv)

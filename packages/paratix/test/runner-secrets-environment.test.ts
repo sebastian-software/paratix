@@ -50,12 +50,16 @@ describe("runPlaybook secret sink cleanup", () => {
     const secret = "runner-success-secret"
     const module: Module = {
       apply: vi.fn(),
-      check: vi.fn().mockImplementation(async () => {
-        return withRegisteredSecrets([secret], async () => {
-          expect(getRegisteredSecrets()).toContain(secret)
-          return "ok" as const
-        })
-      }),
+      check: vi.fn().mockImplementation(async () =>
+        withRegisteredSecrets(
+          [secret],
+          // eslint-disable-next-line @typescript-eslint/require-await -- withRegisteredSecrets expects an async-shaped callback; the body is intentionally synchronous.
+          async () => {
+            expect(getRegisteredSecrets()).toContain(secret)
+            return "ok" as const
+          }
+        )
+      ),
       name: "secret-check",
     }
     const definition: ServerDefinition = {
@@ -85,12 +89,16 @@ describe("runPlaybook secret sink cleanup", () => {
     ])
     const secret = "runner-failure-secret"
     const module: Module = {
-      apply: vi.fn().mockImplementation(async () => {
-        return withRegisteredSecrets([secret], async () => {
-          expect(getRegisteredSecrets()).toContain(secret)
-          return { error: new Error("module failed"), status: "failed" } satisfies ModuleResult
-        })
-      }),
+      apply: vi.fn().mockImplementation(async () =>
+        withRegisteredSecrets(
+          [secret],
+          // eslint-disable-next-line @typescript-eslint/require-await -- withRegisteredSecrets expects an async-shaped callback; the body is intentionally synchronous.
+          async () => {
+            expect(getRegisteredSecrets()).toContain(secret)
+            return { error: new Error("module failed"), status: "failed" } satisfies ModuleResult
+          }
+        )
+      ),
       check: vi.fn().mockResolvedValue("needs-apply"),
       name: "secret-apply",
     }

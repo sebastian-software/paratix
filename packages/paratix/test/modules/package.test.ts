@@ -1,6 +1,8 @@
 /* eslint-disable no-template-curly-in-string -- Shell dpkg-query format strings, not JS templates */
 import { describe, expect, it } from "vitest"
 
+import type { ExecOptions } from "../../src/types.js"
+
 import { pkg } from "../../src/modules/package.js"
 import { CommandError } from "../../src/sshHelpers.js"
 import { createMockSsh as createBaseMockSsh } from "../helpers/mockSsh.js"
@@ -50,6 +52,77 @@ const NO_PM = {
   "which apt-get": { code: 1 },
   "which dnf": { code: 1 },
   "which yum": { code: 1 },
+}
+
+// ---------------------------------------------------------------------------
+// Helpers: stateful exec/test overrides for apply() flows
+//
+// R-0000535: runInstallAndVerify re-checks each package after install. We
+// need to model the transition from "missing" (pre-install) to "installed"
+// (post-install) without conditionals inside the test bodies, which are
+// forbidden by `eslint-plugin-vitest(no-conditional-in-test)`. The helpers
+// below encapsulate the branching outside the it() blocks.
+// ---------------------------------------------------------------------------
+
+type MockSsh = ReturnType<typeof createMockSsh>
+type InstallTrackingOverrides = {
+  exec: MockSsh["exec"]
+  test: MockSsh["test"]
+}
+
+// `await Promise.resolve()` in each branch satisfies @typescript-eslint/require-await
+// and yields once to the microtask queue, matching the original mocks' timing.
+
+const reportMissingProbe = async () => {
+  await Promise.resolve()
+  return false
+}
+
+// Build paired exec()/test() overrides that record install execution and flip
+// the listed package-status probes from "missing" to "installed" once the
+// install command has run.
+function makeInstallTrackingOverrides(
+  ssh: MockSsh,
+  installCommand: string,
+  missingProbes: readonly string[]
+): InstallTrackingOverrides {
+  const originalExec = ssh.exec.bind(ssh)
+  const originalTest = ssh.test.bind(ssh)
+  const installCommands = new Set([installCommand])
+  const tracked = new Set(missingProbes)
+  let installExecuted = false
+  const runInstall = async (command: string, options?: ExecOptions) => {
+    await Promise.resolve()
+    installExecuted = true
+    ssh.calls.push(command)
+    ssh.execCalls.push({ command, options })
+    return { code: 0, stderr: "", stdout: "" }
+  }
+  return {
+    async exec(command, options) {
+      return installCommands.has(command)
+        ? runInstall(command, options)
+        : originalExec(command, options)
+    },
+    async test(command) {
+      return tracked.has(command) && !installExecuted ? reportMissingProbe() : originalTest(command)
+    },
+  }
+}
+
+// Build a test() override that returns false exactly once for the configured
+// command (modelling the pre-install probe), then forwards to the underlying
+// test() handler.
+function makeOneShotMissingTest(ssh: MockSsh, missingCommand: string): MockSsh["test"] {
+  const originalTest = ssh.test.bind(ssh)
+  let consumed = false
+  const reportMissingOnce = async () => {
+    await Promise.resolve()
+    consumed = true
+    return false
+  }
+  return async (command) =>
+    command === missingCommand && !consumed ? reportMissingOnce() : originalTest(command)
 }
 
 // ---------------------------------------------------------------------------
@@ -127,44 +200,36 @@ describe("pkg.installed", () => {
     // We use a sequential mock for the dpkg-query test calls: the first call
     // per package returns false (not installed → proceed to install), subsequent
     // calls return true (installed → verify passes → changed).
-    const dpkgNginx = "dpkg-query -W -f='${Status}' 'nginx' 2>/dev/null | grep -q 'install ok installed'"
-    const dpkgCurl = "dpkg-query -W -f='${Status}' 'curl' 2>/dev/null | grep -q 'install ok installed'"
-    // Track whether install has been executed to distinguish pre/post checks.
-    let installExecuted = false
+    const dpkgNginx =
+      "dpkg-query -W -f='${Status}' 'nginx' 2>/dev/null | grep -q 'install ok installed'"
+    const dpkgCurl =
+      "dpkg-query -W -f='${Status}' 'curl' 2>/dev/null | grep -q 'install ok installed'"
     const ssh = createMockSsh(
       {
         ...APT_FOUND,
       },
       { defaultTestResult: true }
     )
-    // Override exec() to intercept the install command and set the flag.
-    const originalExec = ssh.exec.bind(ssh)
-    ssh.exec = async (command: string, options?: import("../../src/types.js").ExecOptions) => {
-      if (command === "DEBIAN_FRONTEND=noninteractive apt-get install -y -- 'nginx' 'curl'") {
-        installExecuted = true
-        ssh.calls.push(command)
-        ssh.execCalls.push({ command, options })
-        return { code: 0, stderr: "", stdout: "" }
-      }
-      return originalExec(command, options)
-    }
-    // Override test() to return false (missing) before install, true after.
-    const originalTest = ssh.test.bind(ssh)
-    ssh.test = async (command: string) => {
-      if ((command === dpkgNginx || command === dpkgCurl) && !installExecuted) {
-        return false
-      }
-      return originalTest(command)
-    }
+    // Override exec()/test() so that probes report "missing" until the install
+    // command has run, then report "installed" via the underlying defaults.
+    const overrides = makeInstallTrackingOverrides(
+      ssh,
+      "DEBIAN_FRONTEND=noninteractive apt-get install -y -- 'nginx' 'curl'",
+      [dpkgNginx, dpkgCurl]
+    )
+    ssh.exec = overrides.exec
+    ssh.test = overrides.test
     const mod = pkg.installed("nginx", "curl")
     expect(await mod.apply(ssh, emptyEnv)).toStrictEqual({ status: "changed" })
-    expect(ssh.calls).toContain("DEBIAN_FRONTEND=noninteractive apt-get install -y -- 'nginx' 'curl'")
+    expect(ssh.calls).toContain(
+      "DEBIAN_FRONTEND=noninteractive apt-get install -y -- 'nginx' 'curl'"
+    )
   })
 
   it("apply forwards options.timeout when last argument is an options object", async () => {
     // R-0000535: runInstallAndVerify re-checks each package after install.
-    const dpkgTexlive = "dpkg-query -W -f='${Status}' 'texlive-full' 2>/dev/null | grep -q 'install ok installed'"
-    const preInstallDone = { value: false }
+    const dpkgTexlive =
+      "dpkg-query -W -f='${Status}' 'texlive-full' 2>/dev/null | grep -q 'install ok installed'"
     const ssh = createMockSsh(
       {
         ...APT_FOUND,
@@ -172,14 +237,7 @@ describe("pkg.installed", () => {
       },
       { defaultTestResult: true }
     )
-    const originalTest = ssh.test.bind(ssh)
-    ssh.test = async (command: string) => {
-      if (command === dpkgTexlive && !preInstallDone.value) {
-        preInstallDone.value = true
-        return false
-      }
-      return originalTest(command)
-    }
+    ssh.test = makeOneShotMissingTest(ssh, dpkgTexlive)
     const mod = pkg.installed("texlive-full", { timeout: 600_000 })
     const result = await mod.apply(ssh, emptyEnv)
     expect(result).toStrictEqual({ status: "changed" })
