@@ -4,7 +4,7 @@ import { randomUUID } from "node:crypto"
 import { sshdPortMeta } from "../meta.js"
 import { failed, failedCommand } from "../moduleFailure.js"
 import { isValidTcpPort } from "../serverDefinitionValidation.js"
-import { shellQuote } from "../sshHelpers.js"
+import { CommandError, shellQuote } from "../sshHelpers.js"
 import {
   type ExecResult,
   guardedWriteFile,
@@ -62,32 +62,25 @@ function validateSshdSettings(settings: Record<string, string>): void {
   }
 }
 
-async function validateSshdConfig(
+// R-0000539: validate the prospective sshd_config before /etc/ssh/sshd_config
+// is overwritten. The previous flow wrote the new file first and ran `sshd -t`
+// against it, then rolled back with a second write on failure. That approach
+// is not atomic, has no mutex, and could leave the live config diverged when
+// the rollback write itself failed (e.g. SFTP disconnect). Running
+// `sshd -t -f <tempfile>` up front lets us reject syntactically invalid
+// configurations without ever touching `/etc/ssh/sshd_config`.
+async function validateProspectiveSshdConfigOrFailed(
   ssh: SshConnection,
-  originalConfig: string
+  parameters: { newContent: string; settingNames: string }
 ): Promise<ModuleResult | undefined> {
-  await ensurePrivilegeSeparationDirectory(ssh)
-  const result = await ssh.exec("sshd -t", { ignoreExitCode: true, silent: true })
-  if (result.code === 0) return undefined
-
-  // Best-effort rollback: if the recovery write itself fails (e.g. SFTP error),
-  // we still want to surface the original validation failure rather than
-  // letting the recovery error mask it or leave the apply path throwing.
-  let rollbackError: unknown
-  try {
-    // Intentional: unguarded write — restoring the original config is more
-    // important than concurrency safety during a failed validation rollback.
-    await ssh.writeFile(SSHD_CONFIG_PATH, originalConfig, { mode: SSHD_CONFIG_MODE })
-  } catch (error) {
-    rollbackError = error
-  }
-  const rollbackMessage =
-    rollbackError instanceof Error ? rollbackError.message : String(rollbackError)
-  const rollbackSuffix =
-    rollbackError == null
-      ? "rolled back to previous config"
-      : `rollback also failed: ${rollbackMessage}`
-  return failed(`sshd config validation failed (sshd -t), ${rollbackSuffix}:\n${result.stderr}`)
+  const failure = await validateProspectiveSshdConfig(ssh, parameters.newContent)
+  if (failure == null) return undefined
+  const stderr =
+    failure.error instanceof CommandError ? failure.error.fullStderr : (failure.error?.message ?? "")
+  return failed(
+    `[sshd.config: ${parameters.settingNames}] sshd config validation failed ` +
+      `(sshd -t against prospective config); not written:\n${stderr}`
+  )
 }
 
 async function readEffectiveSshdConfig(ssh: SshConnection): Promise<ExecResult> {
@@ -728,6 +721,18 @@ async function applySshdConfig(
   })
   if (serviceUnit != null && typeof serviceUnit !== "string") return serviceUnit
 
+  // R-0000539: validate the prospective config (in a tempfile) before
+  // overwriting `/etc/ssh/sshd_config`. A syntactically invalid config is
+  // rejected without ever touching the live file, eliminating the post-write
+  // rollback path.
+  if (didChange) {
+    const prospectiveFailure = await validateProspectiveSshdConfigOrFailed(ssh, {
+      newContent,
+      settingNames: parameters.settingNames,
+    })
+    if (prospectiveFailure != null) return prospectiveFailure
+  }
+
   const writeFailure = await writeSshdConfigIfChanged(ssh, {
     didChange,
     newContent,
@@ -735,9 +740,6 @@ async function applySshdConfig(
     settingNames: parameters.settingNames,
   })
   if (writeFailure != null) return writeFailure
-
-  const validationFailure = await validateSshdConfig(ssh, originalConfig)
-  if (validationFailure != null) return validationFailure
 
   const effectiveConfigFailure = await rejectNonMatchingEffectiveSshdConfig(ssh, {
     didChange,
@@ -872,15 +874,22 @@ async function applyChangedSshdPort(
     targetPort: number
   }
 ): Promise<ModuleResult> {
+  const settingNames = `Port ${String(parameters.targetPort)}`
+  // R-0000539: validate the prospective config (in a tempfile) before
+  // overwriting `/etc/ssh/sshd_config` so a malformed port directive is
+  // rejected without rollback.
+  const prospectiveFailure = await validateProspectiveSshdConfigOrFailed(ssh, {
+    newContent: parameters.newContent,
+    settingNames,
+  })
+  if (prospectiveFailure != null) return prospectiveFailure
   const writeFailure = await writeSshdConfigIfChanged(ssh, {
     didChange: true,
     newContent: parameters.newContent,
     originalConfig: parameters.originalConfig,
-    settingNames: `Port ${String(parameters.targetPort)}`,
+    settingNames,
   })
   if (writeFailure != null) return writeFailure
-  const validationFailure = await validateSshdConfig(ssh, parameters.originalConfig)
-  if (validationFailure != null) return validationFailure
   const verificationFailure = await restartAndVerifySshdPort(ssh, {
     originalConfig: parameters.originalConfig,
     originalPort: parameters.originalPort,
