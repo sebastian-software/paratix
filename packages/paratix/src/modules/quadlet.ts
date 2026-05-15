@@ -15,6 +15,7 @@ import {
   type QuadletImageUpdateOptions,
   quadletPullOutputIndicatesChange,
   renderQuadletSection,
+  validateQuadletAuthFilePath,
   validateQuadletImageValue,
   validateQuadletName,
 } from "./quadletHelpers.js"
@@ -337,7 +338,10 @@ export const quadlet = {
     validateQuadletName(options.name)
     if (options.serviceName != null) validateQuadletName(options.serviceName)
     validateQuadletImageValue("image", options.image)
-    if (options.authFile != null) validateQuadletImageValue("authFile", options.authFile)
+    // R-0000537: `authFile` must point at a real on-disk credentials file;
+    // use the strict validator that requires an absolute path and rejects
+    // `..` traversal segments.
+    if (options.authFile != null) validateQuadletAuthFilePath("authFile", options.authFile)
 
     const pullCommand = buildQuadletImagePullCommand(options)
     const inspectCommand = buildQuadletImageInspectCommand(options.image)
