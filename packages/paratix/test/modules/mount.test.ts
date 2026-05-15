@@ -8,8 +8,21 @@ type MockSshResponses = Parameters<typeof createBaseMockSsh>[0]
 
 const createMockSsh: typeof createBaseMockSsh = (responses, options) =>
   createBaseMockSsh(
-    { [mountPathSymlinkGuardCmd]: { code: 0 }, ...responses },
-    { ...options, allowFlagLockInternalDefaults: true }
+    { hostname: { code: 0, stdout: "" }, [mountPathSymlinkGuardCmd]: { code: 0 }, ...responses },
+    {
+      ...options,
+      allowFlagLockInternalDefaults: true,
+      responseStubs: [
+        // R-0000494: holder marker now uses shellQuote(hostname) so the printf
+        // form differs from the legacy `"$(hostname)"` pattern recognized by
+        // the flag-lock internal defaults.
+        {
+          command: /^printf '%s@%s %s\\n' "\$\$" '' "\$\(date \+%s\)" > \S+\/holder$/v,
+          result: { code: 0 },
+        },
+        ...(options?.responseStubs ?? []),
+      ],
+    }
   )
 
 const emptyEnv = {}
