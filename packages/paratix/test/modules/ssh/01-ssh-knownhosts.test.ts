@@ -9,9 +9,6 @@ import { createMockSsh as createBaseMockSsh } from "../../helpers/mockSsh.js"
 type MockSshOptions = NonNullable<Parameters<typeof createBaseMockSsh>[1]>
 type MockSshResponses = Parameters<typeof createBaseMockSsh>[0]
 
-const createMockSsh: typeof createBaseMockSsh = (responses, options) =>
-  createBaseMockSsh(responses, options)
-
 const knownHostsHome = "/home/paratix"
 const knownHostsSshDirectory = `${knownHostsHome}/.ssh`
 const knownHostsPath = `${knownHostsSshDirectory}/known_hosts`
@@ -90,6 +87,19 @@ const successfulSshApplyResponseStubs: NonNullable<MockSshOptions["responseStubs
 const successfulSshApplyOptions: MockSshOptions = {
   responseStubs: successfulSshApplyResponseStubs,
 }
+
+// R-0000: resolveKnownHostsPaths now queries the remote $HOME via
+// `printf '%s' "$HOME"`. Inject a default stub so individual tests do not
+// have to repeat this boilerplate. Caller-provided responseStubs are merged
+// after the default and take precedence on their own commands.
+const createMockSsh: typeof createBaseMockSsh = (responses, options) =>
+  createBaseMockSsh(responses, {
+    ...options,
+    responseStubs: [
+      { command: "printf '%s' \"$HOME\"", result: { stdout: knownHostsHome } },
+      ...(options?.responseStubs ?? []),
+    ],
+  })
 
 function createSshApplyMockSsh(responses: MockSshResponses = {}) {
   return createMockSsh(responses, successfulSshApplyOptions)
@@ -206,7 +216,7 @@ describe("ssh.knownHosts", () => {
 
   it("check returns ok when host is already known and trust anchor matches (state: present)", async () => {
     const mockSsh = createMockSsh({
-      "ssh-keygen -F 'github.com'": { code: 0, stdout: `${scannedLine}\n` },
+      [`ssh-keygen -F 'github.com' -f '${knownHostsPath}'`]: { code: 0, stdout: `${scannedLine}\n` },
     })
     const mod = ssh.knownHosts("github.com", { expectedFingerprint: hostFingerprint })
     const result = await mod.check(mockSsh, emptyEnv)
@@ -215,7 +225,7 @@ describe("ssh.knownHosts", () => {
 
   it("check returns ok when the known_hosts entry matches the expected fingerprint", async () => {
     const mockSsh = createMockSsh({
-      "ssh-keygen -F 'github.com'": { code: 0, stdout: `${scannedLine}\n` },
+      [`ssh-keygen -F 'github.com' -f '${knownHostsPath}'`]: { code: 0, stdout: `${scannedLine}\n` },
     })
     const mod = ssh.knownHosts("github.com", { expectedFingerprint: hostFingerprint })
 
@@ -228,7 +238,7 @@ describe("ssh.knownHosts", () => {
     const mismatchedKey = makeHostKeyBuffer("ssh-ed25519", Buffer.from("different-host-key"))
     const mismatchedLine = `|1|hashed-host|hashed-value ssh-ed25519 ${mismatchedKey.toString("base64")}`
     const mockSsh = createMockSsh({
-      "ssh-keygen -F 'github.com'": { code: 0, stdout: `${mismatchedLine}\n` },
+      [`ssh-keygen -F 'github.com' -f '${knownHostsPath}'`]: { code: 0, stdout: `${mismatchedLine}\n` },
     })
     const mod = ssh.knownHosts("github.com", { publicKey: hostPublicKey })
 
@@ -241,7 +251,7 @@ describe("ssh.knownHosts", () => {
     const driftedKey = makeHostKeyBuffer("ssh-ed25519", Buffer.from("drifted-host-key"))
     const driftedLine = `|1|hashed-host|hashed-value ssh-ed25519 ${driftedKey.toString("base64")}`
     const mockSsh = createMockSsh({
-      "ssh-keygen -F 'github.com'": { code: 0, stdout: `${driftedLine}\n` },
+      [`ssh-keygen -F 'github.com' -f '${knownHostsPath}'`]: { code: 0, stdout: `${driftedLine}\n` },
     })
     const mod = ssh.knownHosts("github.com", { expectedFingerprint: hostFingerprint })
 
@@ -254,7 +264,7 @@ describe("ssh.knownHosts", () => {
     const extraKey = makeHostKeyBuffer("ssh-rsa", Buffer.from("extra-host-key"))
     const extraLine = `|1|hashed-host|hashed-extra ssh-rsa ${extraKey.toString("base64")}`
     const mockSsh = createMockSsh({
-      "ssh-keygen -F 'github.com'": { code: 0, stdout: `${scannedLine}\n${extraLine}\n` },
+      [`ssh-keygen -F 'github.com' -f '${knownHostsPath}'`]: { code: 0, stdout: `${scannedLine}\n${extraLine}\n` },
     })
     const mod = ssh.knownHosts("github.com", { expectedFingerprint: hostFingerprint })
 
@@ -267,7 +277,7 @@ describe("ssh.knownHosts", () => {
     const driftedKey = makeHostKeyBuffer("ssh-ed25519", Buffer.from("drifted-host-key"))
     const driftedLine = `|1|hashed-host|hashed-old ssh-ed25519 ${driftedKey.toString("base64")}`
     const mockSsh = createMockSsh({
-      "ssh-keygen -F 'github.com'": { code: 0, stdout: `${driftedLine}\n${scannedLine}\n` },
+      [`ssh-keygen -F 'github.com' -f '${knownHostsPath}'`]: { code: 0, stdout: `${driftedLine}\n${scannedLine}\n` },
     })
     const mod = ssh.knownHosts("github.com", { expectedFingerprint: hostFingerprint })
 
@@ -280,7 +290,7 @@ describe("ssh.knownHosts", () => {
     const extraKey = makeHostKeyBuffer("ssh-rsa", Buffer.from("legacy-rsa-key"))
     const extraLine = `|1|hashed-host|hashed-rsa ssh-rsa ${extraKey.toString("base64")}`
     const mockSsh = createMockSsh({
-      "ssh-keygen -F 'github.com'": { code: 0, stdout: `${extraLine}\n${scannedLine}\n` },
+      [`ssh-keygen -F 'github.com' -f '${knownHostsPath}'`]: { code: 0, stdout: `${extraLine}\n${scannedLine}\n` },
     })
     const mod = ssh.knownHosts("github.com", { publicKey: hostPublicKey })
 
@@ -299,7 +309,7 @@ describe("ssh.knownHosts", () => {
   it("R-0000252: check returns needs-apply when a known_hosts line is malformed", async () => {
     const malformedLine = "garbage-only-one-field"
     const mockSsh = createMockSsh({
-      "ssh-keygen -F 'github.com'": {
+      [`ssh-keygen -F 'github.com' -f '${knownHostsPath}'`]: {
         code: 0,
         stdout: `${malformedLine}\n${scannedLine}\n`,
       },
@@ -315,7 +325,7 @@ describe("ssh.knownHosts", () => {
   // lines) must also resolve to a boolean needs-apply rather than throwing.
   it("R-0000252: check returns needs-apply when every known_hosts line is malformed", async () => {
     const mockSsh = createMockSsh({
-      "ssh-keygen -F 'github.com'": {
+      [`ssh-keygen -F 'github.com' -f '${knownHostsPath}'`]: {
         code: 0,
         stdout: "garbage\nmore garbage\n",
       },
@@ -329,7 +339,7 @@ describe("ssh.knownHosts", () => {
 
   it("check uses a bracketed known_hosts lookup target for non-standard ports", async () => {
     const mockSsh = createMockSsh({
-      "ssh-keygen -F '[github.com]:2222'": { code: 0, stdout: `${scannedLine}\n` },
+      [`ssh-keygen -F '[github.com]:2222' -f '${knownHostsPath}'`]: { code: 0, stdout: `${scannedLine}\n` },
     })
     const mod = ssh.knownHosts("github.com", {
       expectedFingerprint: hostFingerprint,
@@ -343,13 +353,13 @@ describe("ssh.knownHosts", () => {
 
   it("check returns needs-apply when host is not known (state: present)", async () => {
     const mockSsh = createMockSsh({
-      "ssh-keygen -F 'github.com'": { code: 1 },
+      [`ssh-keygen -F 'github.com' -f '${knownHostsPath}'`]: { code: 1 },
     })
     const mod = ssh.knownHosts("github.com", { expectedFingerprint: hostFingerprint })
     const result = await mod.check(mockSsh, emptyEnv)
     expect(result).toBe("needs-apply")
     expect(mockSsh.execCalls).toContainEqual({
-      command: "ssh-keygen -F 'github.com'",
+      command: `ssh-keygen -F 'github.com' -f '${knownHostsPath}'`,
       options: { ignoreExitCode: true, silent: true },
     })
   })
@@ -362,7 +372,7 @@ describe("ssh.knownHosts", () => {
 
   it("check returns ok when host is not known (state: absent)", async () => {
     const mockSsh = createMockSsh({
-      "ssh-keygen -F 'github.com'": { code: 1 },
+      [`ssh-keygen -F 'github.com' -f '${knownHostsPath}'`]: { code: 1 },
     })
     const mod = ssh.knownHosts("github.com", { state: "absent" })
     const result = await mod.check(mockSsh, emptyEnv)
@@ -371,7 +381,7 @@ describe("ssh.knownHosts", () => {
 
   it("check returns needs-apply when host is known (state: absent)", async () => {
     const mockSsh = createMockSsh({
-      "ssh-keygen -F 'github.com'": { code: 0 },
+      [`ssh-keygen -F 'github.com' -f '${knownHostsPath}'`]: { code: 0 },
     })
     const mod = ssh.knownHosts("github.com", { state: "absent" })
     const result = await mod.check(mockSsh, emptyEnv)
@@ -380,7 +390,7 @@ describe("ssh.knownHosts", () => {
 
   it("check surfaces ssh-keygen lookup failures for absent state", async () => {
     const mockSsh = createMockSsh({
-      "ssh-keygen -F 'github.com'": {
+      [`ssh-keygen -F 'github.com' -f '${knownHostsPath}'`]: {
         code: 255,
         stderr: "ssh-keygen: failed to parse known_hosts: corrupt entry\n",
       },
@@ -864,7 +874,7 @@ describe("ssh.knownHosts", () => {
     expect(String(result.error)).toContain("failed to prepare .ssh directory")
     // Neither the trust-anchor lookup nor the append should run after the
     // mkdir failure.
-    expect(mockSsh.calls).not.toContain("ssh-keygen -F 'github.com'")
+    expect(mockSsh.calls).not.toContain(`ssh-keygen -F 'github.com' -f '${knownHostsPath}'`)
     expect(mockSsh.calls.some((c) => c.startsWith("printf '%s\\n'"))).toBe(false)
   })
 
