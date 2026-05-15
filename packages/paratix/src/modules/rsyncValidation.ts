@@ -35,3 +35,34 @@ export function validateRsyncPath(value: string, field: "dest" | "src"): void {
     }
   }
 }
+
+/**
+ * R-0000536: reject rsync filter patterns that contain ASCII control characters.
+ *
+ * `--include`/`--exclude` patterns flow into rsync's filter-rule parser as
+ * separate argv entries. rsync itself however accepts multi-line filter rules
+ * inside merge files and shares its rule-parsing code across forms; embedded
+ * newlines (`\n`), carriage returns or NUL bytes in user-supplied patterns
+ * are a strong code smell and have historically led to additional, unintended
+ * rules being injected — particularly dangerous when paired with `--delete`.
+ *
+ * Mirrors the control-character whitelist used by `validateRsyncPath`.
+ *
+ * @param value - The filter pattern to validate.
+ * @param field - The argument name (`"include"` or `"exclude"`) used in the
+ *   error message.
+ */
+export function validateRsyncFilterPattern(value: string, field: "exclude" | "include"): void {
+  if (value.length === 0) {
+    throw new Error(`[rsync.sync] ${field} pattern must not be empty`)
+  }
+  for (let index = 0; index < value.length; index++) {
+    const code = value.codePointAt(index)
+    if (code === undefined) continue
+    if (code < RSYNC_PATH_CONTROL_BOUNDARY || code === RSYNC_PATH_DEL_CODE_POINT) {
+      throw new Error(
+        `[rsync.sync] ${field} pattern must not contain ASCII control characters (NUL, newline, tab, ...)`
+      )
+    }
+  }
+}

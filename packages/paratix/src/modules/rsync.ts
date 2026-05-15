@@ -9,7 +9,11 @@ import { CommandError } from "../sshHelpers.js"
 import { type Module, type ModuleResult, NEEDS_APPLY, type SshConnection } from "../types.js"
 import { assertValidGroupName, assertValidUserName } from "./posixNames.js"
 import { DEFAULT_RSYNC_TIMEOUT_MILLISECONDS, runRsyncProcess } from "./rsyncProcess.js"
-import { validateRsyncPath, validateStrictHostKeyChecking } from "./rsyncValidation.js"
+import {
+  validateRsyncFilterPattern,
+  validateRsyncPath,
+  validateStrictHostKeyChecking,
+} from "./rsyncValidation.js"
 
 // R-0000487: rsync's `--chmod=` accepts the same symbolic and octal mode
 // expressions as chmod(1). Allow letters (rwxXstugo), digits (octal modes),
@@ -70,11 +74,17 @@ type SyncOptions = {
 function buildFilterArguments(options: SyncOptions): string[] {
   const result: string[] = []
 
+  // R-0000536: re-validate include/exclude patterns at argv construction
+  // time. The validation also runs at module construction (see `rsync.sync`
+  // below); this second pass is defense-in-depth in case `options` is mutated
+  // between construction and execution.
   for (const pattern of options.include ?? []) {
+    validateRsyncFilterPattern(pattern, "include")
     result.push("--include", pattern)
   }
 
   for (const pattern of options.exclude ?? []) {
+    validateRsyncFilterPattern(pattern, "exclude")
     result.push("--exclude", pattern)
   }
 
@@ -351,6 +361,15 @@ export const rsync = {
     validateStrictHostKeyChecking(options.strictHostKeyChecking)
     validateRsyncPath(options.src, "src")
     validateRsyncPath(options.dest, "dest")
+    // R-0000536: surface filter-pattern validation errors at module
+    // construction time so playbook authors see them up-front instead of
+    // during apply.
+    for (const pattern of options.include ?? []) {
+      validateRsyncFilterPattern(pattern, "include")
+    }
+    for (const pattern of options.exclude ?? []) {
+      validateRsyncFilterPattern(pattern, "exclude")
+    }
 
     return {
       async apply(ssh: null | SshConnection): Promise<ModuleResult> {
