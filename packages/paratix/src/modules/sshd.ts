@@ -513,7 +513,23 @@ async function restoreSshdPortRestartFailure(
   })
 }
 
-type SshdRestartOutcome = "completed" | "disconnected"
+// R-0000557: a successful `systemctl restart` may still fail the post-restart
+// live-port verification (`waitForLiveSshdPort`). On socket-activated hosts
+// the restart path has already disabled `ssh.socket` and, if necessary,
+// enabled the service for boot. The verification rollback therefore needs the
+// same `socketState`/`serviceBootState`/`serviceUnit` snapshot as
+// `recoverFromRestartFailure` so it can restore all three layers — failing to
+// do so leaves `ssh.socket` permanently disabled on Debian 12 / Ubuntu 22.04
+// LTS and produces a reboot-time SSH lockout.
+type SshdRestartSnapshot = {
+  serviceBootState?: SshdServiceBootState
+  serviceUnit?: SshdServiceUnit
+  socketState: SshSocketState
+}
+
+type SshdRestartOutcome =
+  | { kind: "completed"; snapshot: SshdRestartSnapshot }
+  | { kind: "disconnected"; snapshot: SshdRestartSnapshot }
 
 async function recoverFromRestartFailure(
   ssh: SshConnection,
@@ -564,12 +580,20 @@ async function restartSshdOnNewPort(
     serviceUnit = await resolveSshServiceUnit(ssh)
     serviceBootState = await ensureSshServiceBootEnabled(ssh, { serviceUnit, socketState })
     await ssh.exec(`${SYSTEMCTL} restart ${serviceUnit}`, { silent: true })
-    return "completed"
+    return {
+      kind: "completed",
+      snapshot: { serviceBootState, serviceUnit, socketState },
+    }
   } catch (error) {
     // R-0000283: when the restart aborted the SSH session itself, treat the
     // disconnect as a successful restart. The runner reconnects on the new
     // port; downstream live-verification cannot run on a dead connection.
-    if (isRestartDisconnect(error)) return "disconnected"
+    if (isRestartDisconnect(error)) {
+      return {
+        kind: "disconnected",
+        snapshot: { serviceBootState, serviceUnit, socketState },
+      }
+    }
     await recoverFromRestartFailure(ssh, {
       originalConfig,
       serviceBootState,
@@ -611,6 +635,7 @@ async function rollbackSshdPortAfterFailedVerification(
   parameters: {
     originalConfig: string
     originalPort: number
+    snapshot: SshdRestartSnapshot
     targetPort: number
   }
 ): Promise<string | undefined> {
@@ -624,8 +649,27 @@ async function rollbackSshdPortAfterFailedVerification(
   } catch (error) {
     return error instanceof Error ? error.message : String(error)
   }
+  // R-0000557: `restartSshdOnNewPort` has already mutated `ssh.socket`
+  // (disabled it) and may have flipped the service unit's boot state. The
+  // post-restart verification rollback must restore both, otherwise a host
+  // running socket-activated ssh (Debian 12, Ubuntu 22.04 LTS) reboots into a
+  // disabled ssh.socket and locks the operator out. Mirror the recovery shape
+  // used by `recoverFromRestartFailure` so all three rollback layers
+  // (sshd_config, socket-state, service-boot-state) land before we kick the
+  // service.
   try {
-    const serviceUnit = await resolveSshServiceUnit(ssh)
+    await restoreSshServiceBootState(ssh, parameters.snapshot.serviceBootState)
+  } catch (error) {
+    return error instanceof Error ? error.message : String(error)
+  }
+  try {
+    await restoreSocketActivatedSsh(ssh, parameters.snapshot.socketState)
+  } catch (error) {
+    return error instanceof Error ? error.message : String(error)
+  }
+  try {
+    const serviceUnit =
+      parameters.snapshot.serviceUnit ?? (await resolveSshServiceUnit(ssh))
     await ssh.exec(`${SYSTEMCTL} restart ${serviceUnit}`, { ignoreExitCode: true, silent: true })
   } catch (error) {
     return error instanceof Error ? error.message : String(error)
@@ -873,6 +917,7 @@ async function verifyLiveSshdPortOrRollback(
   parameters: {
     originalConfig: string
     originalPort: number
+    snapshot: SshdRestartSnapshot
     targetPort: number
   }
 ): Promise<ModuleResult | undefined> {
@@ -897,12 +942,12 @@ async function restartAndVerifySshdPort(
   parameters: { originalConfig: string; originalPort: number; targetPort: number }
 ): Promise<ModuleResult | undefined> {
   const outcome = await restartSshdOnNewPort(ssh, parameters.targetPort, parameters.originalConfig)
-  if (typeof outcome !== "string") return outcome
+  if (!isSshdRestartOutcome(outcome)) return outcome
   // A restart may close the current SSH session even when systemd accepted
   // the command. Reconnect immediately and run the same live-port verification
   // before reporting success; otherwise the runner could switch to an
   // unreachable target port with no rollback chance.
-  if (outcome !== "completed") {
+  if (outcome.kind !== "completed") {
     try {
       await ssh.reconnect()
     } catch (error) {
@@ -917,7 +962,21 @@ async function restartAndVerifySshdPort(
       )
     }
   }
-  return verifyLiveSshdPortOrRollback(ssh, parameters)
+  // R-0000557: hand the restart snapshot (socket-state, service-boot-state,
+  // service-unit) through to the verification rollback so it can restore the
+  // same three layers that `recoverFromRestartFailure` does. Without this,
+  // verification rollback restores only `sshd_config` and silently leaves
+  // `ssh.socket` disabled on socket-activated hosts.
+  return verifyLiveSshdPortOrRollback(ssh, { ...parameters, snapshot: outcome.snapshot })
+}
+
+function isSshdRestartOutcome(
+  candidate: ModuleResult | SshdRestartOutcome
+): candidate is SshdRestartOutcome {
+  // `ModuleResult` carries a `status` field, `SshdRestartOutcome` carries a
+  // `snapshot` field — disambiguate on `snapshot` to keep the discriminant
+  // independent of any future `kind` additions to `ModuleResult`.
+  return typeof candidate === "object" && candidate !== null && "snapshot" in candidate
 }
 
 async function applySshdPortWhenConfigUnchanged(
