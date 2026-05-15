@@ -25,6 +25,13 @@ export function validateRsyncPath(value: string, field: "dest" | "src"): void {
   if (value.length === 0) {
     throw new Error(`[rsync.sync] ${field} must not be empty`)
   }
+  // R-0000574: defense-in-depth — rsync passes positional path arguments to
+  // its argv parser, where a leading dash would be interpreted as an option
+  // flag. The caller already prefixes with `--` separators elsewhere, but
+  // reject the input here so a misuse cannot lead to flag injection.
+  if (value.startsWith("-")) {
+    throw new Error(`[rsync.sync] ${field} must not start with '-'`)
+  }
   for (let index = 0; index < value.length; index++) {
     const code = value.codePointAt(index)
     if (code === undefined) continue
