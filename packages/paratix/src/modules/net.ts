@@ -248,6 +248,20 @@ function validateRouteOptions(parameters: {
 }): void {
   validateSingleLineNetworkValue("route destination", parameters.destination)
   validateSingleLineNetworkValue("route gateway", parameters.gateway)
+  // R-0000488: route destinations and gateways are interpolated into ini
+  // dropins. Require CIDR notation for the destination (with "default" as an
+  // explicit alias for the default route) and require a literal IP for the
+  // gateway so that malformed tokens cannot inject configuration lines.
+  if (parameters.destination !== "default" && !isValidCidr(parameters.destination)) {
+    throw new Error(
+      `[net.route] invalid destination ${JSON.stringify(parameters.destination)}: value must be "default" or a CIDR (e.g. 10.0.0.0/8 or 2001:db8::/32)`
+    )
+  }
+  if (isIP(parameters.gateway) === 0) {
+    throw new Error(
+      `[net.route] invalid gateway ${JSON.stringify(parameters.gateway)}: value must be a valid IPv4 or IPv6 address`
+    )
+  }
   if (parameters.device != null) {
     validateSingleLineNetworkValue("route device", parameters.device)
     validateNetworkInterfaceName("route device", parameters.device)
