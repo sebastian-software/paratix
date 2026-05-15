@@ -30,12 +30,21 @@ async function resolveHome(conn: SshConnection, user: string): Promise<string> {
  * preserves the legacy behaviour for the historically common
  * user-private-group setup.
  *
+ * R-0000554: route the lookup through `conn.exec` with `ignoreExitCode` so a
+ * non-zero exit from `id -gn` (e.g. when the target user does not exist on
+ * the remote host) does not surface as an unstructured exception. The
+ * username fallback already mirrors the user-private-group default on Linux
+ * and matches the behaviour expected by callers in
+ * `ensureAuthorizedKeysOwnership`.
+ *
  * @param conn - The active SSH connection.
  * @param user - The target user.
  * @returns The user's primary group name.
  */
 async function resolvePrimaryGroup(conn: SshConnection, user: string): Promise<string> {
-  const primaryGroup = await conn.output(`id -gn ${shellQuote(user)}`)
+  const result = await conn.exec(`id -gn ${shellQuote(user)}`, MUTATION_EXEC_OPTS)
+  if (result.code !== 0) return user
+  const primaryGroup = result.stdout.trim()
   if (primaryGroup.length === 0) return user
   return primaryGroup
 }
