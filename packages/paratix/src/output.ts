@@ -448,6 +448,44 @@ function printVerboseGenericError(error: Error): void {
 }
 
 /**
+ * Format the textual representation of a single cause-chain link. `Error`
+ * values surface their message; other values are rendered through `String`
+ * so primitives and plain objects still carry diagnostic context.
+ */
+function formatCauseValue(cause: unknown): string {
+  if (cause instanceof Error) return cause.message
+  return String(cause)
+}
+
+/**
+ * Walk the `Error.cause` chain of `error` and emit one `Cause: …` block per
+ * level on stderr. Used by {@link printCommandFailure} so generic (non-
+ * {@link CommandError}) failures surface their wrapped root cause even in
+ * non-verbose mode — without this, only `Error.message` would reach stderr
+ * and the actual reason (a wrapped `ECONNREFUSED`, a parse failure, …)
+ * would stay hidden until the operator re-ran with `--verbose`.
+ *
+ * The walker keeps a {@link WeakSet} of already-visited `Error` references
+ * so a self-referencing or cyclic `cause` chain — which a misbehaving
+ * library can construct — cannot loop forever.
+ *
+ * @param error - The root `Error` whose `.cause` chain should be printed.
+ */
+function printCauseChain(error: Error): void {
+  const visited = new WeakSet<Error>()
+  visited.add(error)
+  let cause = getErrorCause(error)
+  while (cause !== undefined) {
+    if (cause instanceof Error) {
+      if (visited.has(cause)) return
+      visited.add(cause)
+    }
+    console.error(pc.red(`${getErrorIndent()}Cause: ${maskRegisteredSecrets(formatCauseValue(cause))}`))
+    cause = cause instanceof Error ? getErrorCause(cause) : undefined
+  }
+}
+
+/**
  * Print the error message of a failed command and, when verbose mode is active
  * and the error is a {@link CommandError}, the full untruncated output.
  *
@@ -474,8 +512,19 @@ export function printCommandFailure(error: unknown, verbose: boolean): void {
   }
 
   printCommandError("", maskRegisteredSecrets(String(error)))
-  if (verbose && error instanceof Error) {
-    printVerboseGenericError(error)
+  if (error instanceof Error) {
+    if (!(error instanceof CommandError)) {
+      // R-0000520: for generic Errors, surface the Error.cause chain even
+      // without --verbose so the wrapped root cause (ECONNREFUSED behind a
+      // wrapper Error, a parser failure behind a domain Error, …) reaches
+      // stderr instead of being hidden behind the top-level message. Cycle-
+      // safe via WeakSet. CommandError has its own structured diagnostic
+      // surface (full stdout/stderr) and is handled in verbose mode above.
+      printCauseChain(error)
+    }
+    if (verbose) {
+      printVerboseGenericError(error)
+    }
   }
 }
 
