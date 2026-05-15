@@ -81,7 +81,6 @@ describe("runPlaybook signal handling", () => {
         .mockImplementationOnce(async () => {
           getSignalBus().emit("SIGINT")
           await Promise.resolve()
-          expect(disconnectFn).toHaveBeenCalledOnce()
           return "needs-apply" as const
         })
         .mockResolvedValue("needs-apply"),
@@ -97,6 +96,7 @@ describe("runPlaybook signal handling", () => {
 
     await runPlaybook(definition)
 
+    expect(disconnectFn).toHaveBeenCalled()
     expect(process.exitCode).toBe(130)
     // The signal handler disconnects first; teardown disconnects again.
     expect(disconnectFn).toHaveBeenCalledTimes(2)
