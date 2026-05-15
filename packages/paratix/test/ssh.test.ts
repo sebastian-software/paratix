@@ -4506,21 +4506,22 @@ describe("SshConnectionImpl", () => {
         "yes",
         { host: "1.2.3.4", port: 22 },
         {
+          // R-0000479: SshConnectionImpl threads its per-instance HostKeyCache
+          // through the options bag rather than as a separate argument.
+          cache: expect.any(Map),
           expectedHostFingerprint: undefined,
           expectedHostPublicKey: undefined,
-        },
-        // R-0000479: SshConnectionImpl threads its per-instance HostKeyCache.
-        expect.any(Map)
+        }
       )
       expect(buildHostVerifier).toHaveBeenNthCalledWith(
         2,
         "yes",
         { host: "1.2.3.4", port: 2222 },
         {
+          cache: expect.any(Map),
           expectedHostFingerprint: undefined,
           expectedHostPublicKey: undefined,
-        },
-        expect.any(Map)
+        }
       )
     })
 
