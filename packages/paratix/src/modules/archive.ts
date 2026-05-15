@@ -236,7 +236,12 @@ async function moveExtractedContentsIntoDestination(
         'printf "%s\\n" "$guard_paths" | while IFS= read -r guarded_path; do [ -z "$guarded_path" ] && continue; if [ -L "$guarded_path" ]; then echo "[archive.extract] refusing staging merge: destination path $guarded_path is a symlink" >&2; exit 64; fi; done || exit $?; ' +
         'target_path="$destination/${source_path##' +
         '*/}"; if [ -L "$target_path" ]; then echo "[archive.extract] refusing staging merge: destination path $target_path is a symlink" >&2; exit 64; fi; ' +
-        'cp -aT --remove-destination "$source_path" "$target_path" || exit $?; done'
+        // R-0000563: copy with `--no-dereference` so a symlink that is
+        // planted at any ancestor of `target_path` between the guard
+        // checks above and the `cp` invocation is preserved (and thus
+        // refused by the in-tree handling) instead of being silently
+        // followed to an attacker-controlled location.
+        'cp -aT --no-dereference --remove-destination "$source_path" "$target_path" || exit $?; done'
     ),
     "sh",
     shellQuote(destination),
