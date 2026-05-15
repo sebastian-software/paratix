@@ -1,7 +1,7 @@
 /* eslint-disable max-lines -- SSH transport methods keep callback wiring local */
 import type { Stats } from "node:fs"
 
-import { timingSafeEqual } from "node:crypto"
+import { createHash, timingSafeEqual } from "node:crypto"
 import { readFile, stat } from "node:fs/promises"
 import { homedir } from "node:os"
 import { join, posix } from "node:path"
@@ -125,6 +125,12 @@ function resolveWriteFileMode(
 const COMMAND_TIMEOUT = 120_000
 const DEFAULT_MAX_RECONNECT_ATTEMPTS = 10
 const DEFAULT_RECONNECT_TIMEOUT = 120_000
+// SHA-256 of an empty byte sequence. Used by `verifyRemoteWriteFile` to detect
+// a remote file that was finalized as 0 bytes (e.g. disk full) — when the
+// expected content hash is anything other than this constant and the remote
+// hash matches it, we know the destination is empty even without rerunning a
+// separate `stat` call. The literal must match `sha256("")` exactly.
+const EMPTY_FILE_SHA256 = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
 // R-0000209: how long to wait for `client.end()` to complete before
 // forcibly destroying the underlying socket.
 const DISCONNECT_DESTROY_FALLBACK_MS = 5000
@@ -181,12 +187,16 @@ function toError(error: unknown): Error {
 
 /**
  * Signals that `verifyRemoteWriteFile` could not evaluate the remote
- * `stat` call (non-zero exit code, unparseable size output, transport
- * hiccup). Surfacing the failure as a dedicated error lets the caller
- * distinguish it from a real size mismatch: a transient verification
- * failure must propagate so the run can retry, never trigger the
- * Shell-Fallback that would overwrite a file that may well be finalized
- * correctly on disk.
+ * verification command (non-zero exit code, unparseable hash output,
+ * transport hiccup). Surfacing the failure as a dedicated error lets the
+ * caller distinguish it from a real content mismatch: a transient
+ * verification failure must propagate so the run can retry, never trigger
+ * the Shell-Fallback that would overwrite a file that may well be finalized
+ * correctly on disk. R-0000522: the verification now hashes the remote
+ * file via `sha256sum` instead of comparing sizes, closing the TOCTOU
+ * window where an attacker could swap the file content without changing
+ * its byte length. The class name is preserved for backward-compatibility
+ * with existing callers that import the symbol.
  */
 export class RemoteStatTransientError extends Error {
   public constructor(message: string, options?: { cause?: unknown }) {
@@ -588,6 +598,12 @@ export class SshConnectionImpl implements SshConnection {
     const remoteTemporary = await this.createRemoteWritableTempPath(remotePath, "paratix-write")
     const temporaryMode = resolveWriteFileMode(remotePath, options)
     const expectedSize = Buffer.byteLength(content, "utf8")
+    // R-0000522: pre-compute the SHA-256 of the local content so the
+    // post-finalize verification can compare hashes instead of byte counts.
+    // The content is already fully in memory (writeFile takes a `string`),
+    // so a one-shot `update()` is sufficient — no need for a streaming
+    // hash.
+    const expectedHash = createHash("sha256").update(content, "utf8").digest("hex")
     try {
       await sftpUploadContent(
         client,
@@ -597,10 +613,17 @@ export class SshConnectionImpl implements SshConnection {
         this.connectionAbortController.signal
       )
       await this.setRemoteTempMode(remoteTemporary, temporaryMode)
+      // R-0000150: the pre-finalize size check on the staged temp file is a
+      // cheap smoke-test that catches obvious upload failures (0-byte writes,
+      // truncated transfers) before we ever move the file into place. The
+      // post-finalize verification below tightens this to a full SHA-256
+      // comparison so a same-length TOCTOU swap of the finalized inode
+      // cannot slip past.
       await this.assertRemoteFileSize(remoteTemporary, expectedSize, "writeFile")
       await this.finalizeRemoteTempFile(remoteTemporary, remotePath, temporaryMode)
       await this.ensureRemoteWriteFile({
         content,
+        expectedHash,
         expectedSize,
         mode: temporaryMode,
         remotePath,
@@ -1067,24 +1090,28 @@ export class SshConnectionImpl implements SshConnection {
 
   private async ensureRemoteWriteFile(options: {
     content: string
+    expectedHash: string
     expectedSize: number
     mode: string
     remotePath: string
   }): Promise<void> {
-    // R-0000476: `verifyRemoteWriteFile` reports the size verdict
-    // ("matches" / "empty" / "size-mismatch") and throws
-    // `RemoteStatTransientError` when the underlying `stat` call cannot be
-    // evaluated. The Shell-Fallback only fires for an explicit "needs
-    // rewrite" verdict — transient stat failures propagate so callers can
-    // retry instead of overwriting a remote file that may already be
-    // finalized correctly.
-    const verification = await this.verifyRemoteWriteFile(options.remotePath, options.expectedSize)
+    // R-0000476: `verifyRemoteWriteFile` reports the content verdict
+    // ("matches" / "empty" / "hash-mismatch") and throws
+    // `RemoteStatTransientError` when the underlying verification command
+    // cannot be evaluated. The Shell-Fallback only fires for an explicit
+    // "needs rewrite" verdict — transient verification failures propagate so
+    // callers can retry instead of overwriting a remote file that may
+    // already be finalized correctly.
+    // R-0000522: the verification compares SHA-256 hashes instead of byte
+    // counts so an attacker with write access to the destination directory
+    // cannot TOCTOU-swap the file content past the verify call.
+    const verification = await this.verifyRemoteWriteFile(options.remotePath, options.expectedHash)
     if (verification === "matches") return
 
     await this.rewriteRemoteFileViaShell(options.remotePath, options.content, options.mode)
     const fallbackVerification = await this.verifyRemoteWriteFile(
       options.remotePath,
-      options.expectedSize
+      options.expectedHash
     )
     if (fallbackVerification === "matches") return
     if (fallbackVerification === "empty") {
@@ -1099,7 +1126,7 @@ export class SshConnectionImpl implements SshConnection {
       )
     }
     throw new Error(
-      `[ssh.writeFile: ${options.remotePath}] remote file size mismatch after upload/finalize and shell fallback; expected ${options.expectedSize} bytes`
+      `[ssh.writeFile: ${options.remotePath}] remote file hash mismatch after upload/finalize and shell fallback; expected ${options.expectedSize} bytes with SHA-256 ${options.expectedHash}`
     )
   }
 
@@ -1753,33 +1780,46 @@ trap - EXIT
 
   private async verifyRemoteWriteFile(
     remotePath: string,
-    expectedSize: number
-  ): Promise<"empty" | "matches" | "size-mismatch"> {
-    let rawSize: string
+    expectedHash: string
+  ): Promise<"empty" | "hash-mismatch" | "matches"> {
+    // R-0000522: verify the post-finalize remote file via SHA-256 instead of
+    // a plain byte-count comparison. A size-only check left a TOCTOU window
+    // where an attacker with write access to the destination directory could
+    // swap the finalized inode with a different file of the same length and
+    // our verification would still report "matches". Hashing the actual byte
+    // contents closes that window because SHA-256 is collision-resistant.
+    let rawHash: string
     try {
-      rawSize = await this.output(`stat -c '%s' ${shellQuote(remotePath)}`)
+      rawHash = await this.output(`sha256sum -- ${shellQuote(remotePath)}`)
     } catch (error) {
-      // R-0000476: a transient `stat` failure (non-zero exit code, channel
-      // error, sudo hiccup) must not look like a size mismatch. Surfacing it
-      // as a dedicated transient error stops the caller from entering the
-      // Shell-Fallback and overwriting a remote file that may well be
-      // finalized correctly on disk.
+      // R-0000476: a transient verification failure (non-zero exit code,
+      // channel error, sudo hiccup) must not look like a content mismatch.
+      // Surfacing it as a dedicated transient error stops the caller from
+      // entering the Shell-Fallback and overwriting a remote file that may
+      // well be finalized correctly on disk.
       throw new RemoteStatTransientError(
-        `[ssh.writeFile: ${remotePath}] could not stat remote file after upload/finalize`,
+        `[ssh.writeFile: ${remotePath}] could not hash remote file after upload/finalize`,
         { cause: error }
       )
     }
-    const actualSize = Number(rawSize.trim())
+    // `sha256sum -- <file>` prints `<64-hex>  <filename>` on success. Split
+    // on whitespace and take the first token so a stray newline or filename
+    // that contains whitespace cannot confuse the parser.
+    const actualHash = rawHash.trim().split(/\s+/v)[0]?.toLowerCase() ?? ""
 
-    if (!Number.isFinite(actualSize)) {
+    if (!/^[0-9a-f]{64}$/v.test(actualHash)) {
       throw new RemoteStatTransientError(
-        `[ssh.writeFile: ${remotePath}] could not determine remote file size after upload/finalize`
+        `[ssh.writeFile: ${remotePath}] could not determine remote file hash after upload/finalize`
       )
     }
 
-    if (expectedSize === 0 && actualSize === 0) return "matches"
-    if (actualSize === 0) return "empty"
-    return actualSize === expectedSize ? "matches" : "size-mismatch"
+    const expected = expectedHash.toLowerCase()
+    if (actualHash === expected) return "matches"
+    // Disk-full indicator: the remote file hashes to the canonical empty
+    // SHA-256 even though we expected non-empty content. Caller uses this
+    // verdict to surface a precise "disk full" diagnostic when df agrees.
+    if (actualHash === EMPTY_FILE_SHA256 && expected !== EMPTY_FILE_SHA256) return "empty"
+    return "hash-mismatch"
   }
 
   /**

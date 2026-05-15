@@ -1,6 +1,7 @@
 import type { Client, SFTPWrapper } from "ssh2"
 
 import { execFile } from "node:child_process"
+import { createHash } from "node:crypto"
 import { EventEmitter } from "node:events"
 import { stat } from "node:fs/promises"
 import { homedir } from "node:os"
@@ -227,6 +228,21 @@ function makeWireHostKey(algorithmName: string, payload: string): Buffer {
   return Buffer.concat([algorithmLength, algorithm, Buffer.from(payload)])
 }
 
+// R-0000522: tests that exercise `writeFile` always call it with the literal
+// string "hello world" (size 11). Precomputing the SHA-256 here lets the
+// shared mock helper emit a matching `sha256sum -- '<path>'` response so the
+// production code's post-finalize verification reaches the "matches" verdict
+// without each call site having to recompute the hash.
+const HELLO_WORLD_SHA256_HEX = createHash("sha256").update("hello world", "utf8").digest("hex")
+
+// R-0000522: extract the path argument from a `sha256sum -- '<path>'`
+// invocation so the mock can echo back the canonical `<hash>  <filename>`
+// shape that the production parser expects.
+const SHA256SUM_PATH_PATTERN = /sha256sum -- '(?<path>[^']*)'/v
+function extractSha256SumPath(command: string): string {
+  return SHA256SUM_PATH_PATTERN.exec(command)?.groups?.path ?? ""
+}
+
 function makeWriteFileExecSpy(
   executedCommands: string[],
   tempPath: string,
@@ -282,11 +298,15 @@ function makeWriteFileExecSpy(
       callback(undefined, stream)
       stream.emit("close", 0)
     })
-    .mockImplementationOnce((_command: string, callback: ExecCallback) => {
+    .mockImplementationOnce((cmd: string, callback: ExecCallback) => {
+      // R-0000522: post-finalize verification — emit the canonical
+      // `sha256sum -- <file>` output so verifyRemoteWriteFile returns
+      // "matches" and writeFile resolves before the shell fallback is
+      // consulted.
       const stream = makeStream()
-      executedCommands.push(_command)
+      executedCommands.push(cmd)
       callback(undefined, stream)
-      stream.emit("data", Buffer.from("11"))
+      stream.emit("data", Buffer.from(`${HELLO_WORLD_SHA256_HEX}  ${extractSha256SumPath(cmd)}\n`))
       stream.emit("close", 0)
     })
     .mockImplementationOnce((_command: string, callback: ExecCallback) => {
@@ -3159,7 +3179,11 @@ describe("SshConnectionImpl", () => {
       expect(executedCommands[4]).toContain("'0600'")
       expect(executedCommands[4]).toContain('chown "$target_owner" "$target_temp"')
       expect(executedCommands[4]).toContain(`'${remotePath}'`)
-      expect(executedCommands[5]).toContain("stat -c")
+      // R-0000522: the post-finalize verification hashes the remote file
+      // via sha256sum instead of comparing sizes — closes the TOCTOU
+      // window where an attacker could swap the inode for a same-length
+      // file past the verify call.
+      expect(executedCommands[5]).toContain("sha256sum --")
       expect(executedCommands[5]).toContain(remotePath)
       expect(executedCommands[6]).toBe(`rm -f '${tempPath}'`)
       expect(vi.mocked(sftpUploadContent)).toHaveBeenCalledOnce()
@@ -3283,29 +3307,37 @@ describe("SshConnectionImpl", () => {
       const destinationDirectory = "/etc/apt/sources.list.d"
       const executedCommands: string[] = []
 
-      const commandStdout = [
-        initialTempPath,
-        "",
-        "11",
-        destinationDirectory,
-        "",
-        "0",
-        destinationDirectory,
-        fallbackTempPath,
-        "",
-        "",
-        destinationDirectory,
-        "",
-        "",
-        "11",
-        "",
+      // R-0000522: positions 5 and 13 now respond to `sha256sum -- '<path>'`
+      // instead of `stat -c '%s'`. Slot 5 echoes the canonical empty-file
+      // SHA-256 so verifyRemoteWriteFile reports "empty" and the shell
+      // fallback runs. Slot 13 echoes the hash of "hello world" so the
+      // post-fallback verification settles on "matches" and writeFile
+      // resolves.
+      const emptySha256 = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      const helloWorldSha256 = HELLO_WORLD_SHA256_HEX
+      const commandStdout: Array<(command: string) => string> = [
+        () => initialTempPath,
+        () => "",
+        () => "11",
+        () => destinationDirectory,
+        () => "",
+        (command) => `${emptySha256}  ${extractSha256SumPath(command)}\n`,
+        () => destinationDirectory,
+        () => fallbackTempPath,
+        () => "",
+        () => "",
+        () => destinationDirectory,
+        () => "",
+        () => "",
+        (command) => `${helloWorldSha256}  ${extractSha256SumPath(command)}\n`,
+        () => "",
       ]
       let commandIndex = 0
-      const execSpy = vi.fn().mockImplementation((_command: string, callback: ExecCallback) => {
+      const execSpy = vi.fn().mockImplementation((command: string, callback: ExecCallback) => {
         const stream = makeStream()
-        executedCommands.push(_command)
+        executedCommands.push(command)
         callback(undefined, stream)
-        stream.emit("data", Buffer.from(commandStdout[commandIndex]))
+        stream.emit("data", Buffer.from(commandStdout[commandIndex](command)))
         commandIndex += 1
         stream.emit("close", 0)
       })

@@ -1,5 +1,6 @@
 import type { Client, SFTPWrapper } from "ssh2"
 
+import { createHash } from "node:crypto"
 import { EventEmitter } from "node:events"
 import { writeFileSync } from "node:fs"
 import { stat } from "node:fs/promises"
@@ -7,6 +8,26 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 
 import { sftpUpload, sftpUploadContent } from "../src/sftp.js"
 import { SshConnectionImpl } from "../src/ssh.js"
+
+// R-0000522: SHA-256 over an empty byte sequence — what `sha256sum` prints
+// when the remote file was finalized as 0 bytes (e.g. after a disk-full
+// truncation). Tests use it to drive the "empty" verdict in
+// `verifyRemoteWriteFile` while exercising the shell fallback / disk-full
+// branches.
+const EMPTY_FILE_SHA256_HEX = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+
+function sha256Hex(content: string): string {
+  return createHash("sha256").update(content, "utf8").digest("hex")
+}
+
+// `sha256sum -- <file>` prints `<64-hex>  <filename>` to stdout. The
+// production parser splits on whitespace and takes the first token, so the
+// trailing filename is mostly cosmetic — but we keep it so tests mirror
+// real-world output and would catch a regression that depended on the
+// filename column being present.
+function sha256SumOutput(hexHash: string, filename: string): string {
+  return `${hexHash}  ${filename}\n`
+}
 
 // vi.mock is hoisted to the top of the file by vitest before any imports are
 // evaluated, so the module under test receives the mocked version.
@@ -75,19 +96,49 @@ function realpathProbeHandler(cmd: string, cb: ExecCallback): void {
   stream.emit("close", 0)
 }
 
+// R-0000522: extract the path argument from `sha256sum -- '<path>'` so the
+// mock can echo back the conventional `<hash>  <filename>` output. The
+// helper always returns a string (empty when no match) so callers can pass
+// it straight into `sha256SumOutput` without inline conditionals — eslint
+// flags `?? ""` ternaries in test bodies as "no-conditional-in-test".
+const SHA256SUM_PATH_PATTERN = /sha256sum -- '(?<path>[^']*)'/v
+function extractSha256SumPath(command: string): string {
+  return SHA256SUM_PATH_PATTERN.exec(command)?.groups?.path ?? ""
+}
+
+// R-0000522: convenience emitter used by sequence-based mocks — calls the
+// exec callback, emits the canonical `<hash>  <filename>` line on stdout,
+// and closes the channel with exit 0.
+function emitSha256SumResponse(cmd: string, cb: ExecCallback, hexHash: string): void {
+  const stream = makeStream()
+  cb(undefined, stream)
+  stream.emit("data", Buffer.from(sha256SumOutput(hexHash, extractSha256SumPath(cmd))))
+  stream.emit("close", 0)
+}
+
 function makeDiskCheckExecSpy(prefix: string, dfOutput: string): ReturnType<typeof vi.fn> {
   let counter = 0
   return vi.fn().mockImplementation((cmd: string, cb: ExecCallback) => {
     const stream = makeStream()
     cb(undefined, stream)
     const realpathDirectory = extractRealpathDirectory(cmd)
+    const sha256SumPath = extractSha256SumPath(cmd)
     if (realpathDirectory !== "") {
       stream.emit("data", Buffer.from(realpathDirectory))
     } else if (cmd.includes("mktemp")) {
       counter++
       stream.emit("data", Buffer.from(`/etc/systemd/system/paratix-write.${prefix}${counter}`))
     } else if (cmd.includes("stat -c '%s'")) {
+      // The disk-check helper still drives the pre-finalize `stat` smoke
+      // test through the 0-byte branch — the post-finalize verification
+      // below now uses sha256sum instead.
       stream.emit("data", Buffer.from("0"))
+    } else if (sha256SumPath !== "") {
+      // R-0000522: emit the canonical empty-file SHA-256 so
+      // `verifyRemoteWriteFile` reports the "empty" verdict and the
+      // disk-full / generic-empty branches in ensureRemoteWriteFile fire
+      // exactly as before.
+      stream.emit("data", Buffer.from(sha256SumOutput(EMPTY_FILE_SHA256_HEX, sha256SumPath)))
     } else if (cmd.includes("df -P")) {
       stream.emit("data", Buffer.from(dfOutput))
     }
@@ -95,17 +146,29 @@ function makeDiskCheckExecSpy(prefix: string, dfOutput: string): ReturnType<type
   })
 }
 
-function makeExecSpy(mktempResult: string, verifiedSize = 100_000): ReturnType<typeof vi.fn> {
+function makeExecSpy(
+  mktempResult: string,
+  verifiedSize = 100_000,
+  // R-0000522: the post-finalize verification now hashes the remote file.
+  // Tests that drive the matching path supply the hex hash the production
+  // code computed from the same content; defaulting to "" makes the mock
+  // emit nothing for `sha256sum`, which mirrors the older "size only"
+  // behaviour for tests that never get that far down the pipeline.
+  verifiedHash = ""
+): ReturnType<typeof vi.fn> {
   return vi.fn().mockImplementation((cmd: string, cb: ExecCallback) => {
     const stream = makeStream()
     cb(undefined, stream)
     const realpathDirectory = extractRealpathDirectory(cmd)
+    const sha256SumPath = extractSha256SumPath(cmd)
     if (realpathDirectory !== "") {
       stream.emit("data", Buffer.from(realpathDirectory))
     } else if (cmd.includes("mktemp")) {
       stream.emit("data", Buffer.from(mktempResult))
     } else if (cmd.includes("stat -c '%s'")) {
       stream.emit("data", Buffer.from(String(verifiedSize)))
+    } else if (sha256SumPath !== "" && verifiedHash !== "") {
+      stream.emit("data", Buffer.from(sha256SumOutput(verifiedHash, sha256SumPath)))
     }
     stream.emit("close", 0)
   })
@@ -159,7 +222,7 @@ describe("SshConnectionImpl.writeFile — small content", () => {
   let execSpy: ReturnType<typeof vi.fn>
 
   beforeEach(() => {
-    execSpy = makeExecSpy("/etc/paratix-write.SMALL", 11)
+    execSpy = makeExecSpy("/etc/paratix-write.SMALL", 11, sha256Hex(makeSmallContent()))
     vi.mocked(sftpUploadContent).mockResolvedValue()
   })
 
@@ -241,7 +304,7 @@ describe("SshConnectionImpl.writeFile — large content (> 64 KB)", () => {
   let execSpy: ReturnType<typeof vi.fn>
 
   beforeEach(() => {
-    execSpy = makeExecSpy("/etc/paratix-write.ABCDEF", 100_000)
+    execSpy = makeExecSpy("/etc/paratix-write.ABCDEF", 100_000, sha256Hex(makeLargeContent()))
     vi.mocked(sftpUploadContent).mockResolvedValue()
   })
 
@@ -443,12 +506,12 @@ describe("SshConnectionImpl.writeFile — large content (> 64 KB)", () => {
         cb(undefined, stream)
         stream.emit("close", 0)
       })
-      .mockImplementationOnce((_cmd: string, cb: ExecCallback) => {
-        // Fifth call is the final target size verification — succeeds
-        const stream = makeStream()
-        cb(undefined, stream)
-        stream.emit("data", Buffer.from("100000"))
-        stream.emit("close", 0)
+      .mockImplementationOnce((cmd: string, cb: ExecCallback) => {
+        // R-0000522: Fifth call is the post-finalize SHA-256 verification —
+        // emit the canonical `<hash>  <filename>` shape with the precomputed
+        // expected hash so the verdict is "matches" and writeFile returns
+        // before the shell fallback is consulted.
+        emitSha256SumResponse(cmd, cb, sha256Hex(makeLargeContent()))
       })
       .mockImplementationOnce((_cmd: string, cb: ExecCallback) => {
         // Sixth call is rm -f — simulates a failure (e.g. permission denied)
@@ -469,71 +532,83 @@ describe("SshConnectionImpl.writeFile — large content (> 64 KB)", () => {
     const remoteTmpPath = "/etc/systemd/system/paratix-write.EMPTY"
     const fallbackTmpPath = "/etc/systemd/system/paratix-write.FALLBACK"
     const remotePath = "/etc/systemd/system/example.service"
+    const writtenContent = "unit-content"
+    const expectedHash = sha256Hex(writtenContent)
     const emptyFileExecSpy = vi
       .fn()
       .mockImplementationOnce(realpathProbeHandler)
       .mockImplementationOnce((_cmd: string, cb: ExecCallback) => {
+        // [2] mktemp → staged tmp path
         const stream = makeStream()
         cb(undefined, stream)
         stream.emit("data", Buffer.from(remoteTmpPath))
         stream.emit("close", 0)
       })
       .mockImplementationOnce((_cmd: string, cb: ExecCallback) => {
+        // [3] chmod
         const stream = makeStream()
         cb(undefined, stream)
         stream.emit("close", 0)
       })
       .mockImplementationOnce((_cmd: string, cb: ExecCallback) => {
+        // [4] stat -c '%s' on staged tmp (pre-finalize smoke test) → matches
         const stream = makeStream()
         cb(undefined, stream)
-        stream.emit("data", Buffer.from("12"))
+        stream.emit("data", Buffer.from(String(writtenContent.length)))
         stream.emit("close", 0)
       })
       .mockImplementationOnce((_cmd: string, cb: ExecCallback) => {
+        // [5] mv (finalize)
         const stream = makeStream()
         cb(undefined, stream)
         stream.emit("close", 0)
       })
-      .mockImplementationOnce((_cmd: string, cb: ExecCallback) => {
-        const stream = makeStream()
-        cb(undefined, stream)
-        stream.emit("data", Buffer.from("0"))
-        stream.emit("close", 0)
+      .mockImplementationOnce((cmd: string, cb: ExecCallback) => {
+        // [6] R-0000522: post-finalize SHA-256 verification — emit the
+        // canonical empty-file hash so verifyRemoteWriteFile returns
+        // "empty" and ensureRemoteWriteFile enters the shell fallback.
+        emitSha256SumResponse(cmd, cb, EMPTY_FILE_SHA256_HEX)
       })
       .mockImplementationOnce(realpathProbeHandler)
       .mockImplementationOnce((_cmd: string, cb: ExecCallback) => {
+        // [8] mktemp for privileged shell-fallback temp
         const stream = makeStream()
         cb(undefined, stream)
         stream.emit("data", Buffer.from(fallbackTmpPath))
         stream.emit("close", 0)
       })
       .mockImplementationOnce((_cmd: string, cb: ExecCallback) => {
+        // [9] base64 -d (content payload via stdin)
         const stream = Object.assign(makeStream(), { end: vi.fn() })
         cb(undefined, stream)
         stream.emit("close", 0)
       })
       .mockImplementationOnce((_cmd: string, cb: ExecCallback) => {
+        // [10] chmod on fallback tmp
         const stream = makeStream()
         cb(undefined, stream)
         stream.emit("close", 0)
       })
       .mockImplementationOnce((_cmd: string, cb: ExecCallback) => {
+        // [11] privileged mv finalize for fallback tmp
         const stream = makeStream()
         cb(undefined, stream)
         stream.emit("close", 0)
       })
       .mockImplementationOnce((_cmd: string, cb: ExecCallback) => {
+        // [12] cleanup of fallback tmp (rm -f)
         const stream = makeStream()
         cb(undefined, stream)
         stream.emit("close", 0)
       })
-      .mockImplementationOnce((_cmd: string, cb: ExecCallback) => {
-        const stream = makeStream()
-        cb(undefined, stream)
-        stream.emit("data", Buffer.from("12"))
-        stream.emit("close", 0)
+      .mockImplementationOnce((cmd: string, cb: ExecCallback) => {
+        // [13] R-0000522: post-fallback SHA-256 verification — emit the
+        // hash of the originally requested content so the verdict is
+        // "matches" and writeFile resolves cleanly.
+        emitSha256SumResponse(cmd, cb, expectedHash)
       })
       .mockImplementationOnce((_cmd: string, cb: ExecCallback) => {
+        // [14] cleanup of the initial staged tmp (rm -f)
         const stream = makeStream()
         cb(undefined, stream)
         stream.emit("close", 0)
@@ -544,7 +619,7 @@ describe("SshConnectionImpl.writeFile — large content (> 64 KB)", () => {
     vi.mocked(sftpUploadContent).mockResolvedValue()
 
     await expect(
-      ssh.writeFile(remotePath, "unit-content", { mode: "0644" })
+      ssh.writeFile(remotePath, writtenContent, { mode: "0644" })
     ).resolves.toBeUndefined()
 
     const executedCommands = (emptyFileExecSpy.mock.calls as Array<[string, ...unknown[]]>).map(
@@ -553,6 +628,11 @@ describe("SshConnectionImpl.writeFile — large content (> 64 KB)", () => {
     expect(executedCommands.some((command) => command.includes("base64 -d"))).toBe(true)
     expect(executedCommands).toContain(`rm -f '${remoteTmpPath}'`)
     expect(executedCommands).toContain(`rm -f '${fallbackTmpPath}'`)
+    // R-0000522: the verify step must hash the remote file instead of running stat on it.
+    expect(executedCommands.some((command) => command.includes("sha256sum --"))).toBe(true)
+    expect(
+      executedCommands.some((command) => command.includes(`stat -c '%s' '${remotePath}'`))
+    ).toBe(false)
   })
 
   it("streams shell-fallback content via stdin instead of argv to avoid ARG_MAX (R-0000093 regression)", async () => {
@@ -569,73 +649,82 @@ describe("SshConnectionImpl.writeFile — large content (> 64 KB)", () => {
     const largeContent = "x".repeat(200_000)
     const fallbackInputStream = Object.assign(makeStream(), { end: vi.fn() })
 
+    const expectedHash = sha256Hex(largeContent)
     const stdinFallbackExecSpy = vi
       .fn()
       // R-0000141: realpath probe before the initial mktemp.
       .mockImplementationOnce(realpathProbeHandler)
       .mockImplementationOnce((_cmd: string, cb: ExecCallback) => {
+        // [2] mktemp → staged tmp path
         const stream = makeStream()
         cb(undefined, stream)
         stream.emit("data", Buffer.from(remoteTmpPath))
         stream.emit("close", 0)
       })
       .mockImplementationOnce((_cmd: string, cb: ExecCallback) => {
+        // [3] chmod
         const stream = makeStream()
         cb(undefined, stream)
         stream.emit("close", 0)
       })
       .mockImplementationOnce((_cmd: string, cb: ExecCallback) => {
+        // [4] stat -c '%s' on staged tmp (pre-finalize smoke test) → matches
         const stream = makeStream()
         cb(undefined, stream)
         stream.emit("data", Buffer.from(String(largeContent.length)))
         stream.emit("close", 0)
       })
       .mockImplementationOnce((_cmd: string, cb: ExecCallback) => {
+        // [5] mv (finalize)
         const stream = makeStream()
         cb(undefined, stream)
         stream.emit("close", 0)
       })
-      .mockImplementationOnce((_cmd: string, cb: ExecCallback) => {
-        const stream = makeStream()
-        cb(undefined, stream)
-        // Verify the empty-file path so the shell fallback is exercised.
-        stream.emit("data", Buffer.from("0"))
-        stream.emit("close", 0)
+      .mockImplementationOnce((cmd: string, cb: ExecCallback) => {
+        // [6] R-0000522: post-finalize SHA-256 verification — return the
+        // empty-file hash so the shell fallback is exercised.
+        emitSha256SumResponse(cmd, cb, EMPTY_FILE_SHA256_HEX)
       })
       // R-0000141: realpath probe before the privileged shell-fallback mktemp
       .mockImplementationOnce(realpathProbeHandler)
       .mockImplementationOnce((_cmd: string, cb: ExecCallback) => {
+        // [8] mktemp for privileged shell-fallback temp
         const stream = makeStream()
         cb(undefined, stream)
         stream.emit("data", Buffer.from(fallbackTmpPath))
         stream.emit("close", 0)
       })
       .mockImplementationOnce((_cmd: string, cb: ExecCallback) => {
+        // [9] base64 -d (content payload via stdin)
         cb(undefined, fallbackInputStream)
         fallbackInputStream.emit("close", 0)
       })
       .mockImplementationOnce((_cmd: string, cb: ExecCallback) => {
+        // [10] chmod on fallback tmp
         const stream = makeStream()
         cb(undefined, stream)
         stream.emit("close", 0)
       })
       .mockImplementationOnce((_cmd: string, cb: ExecCallback) => {
+        // [11] privileged mv finalize for fallback tmp
         const stream = makeStream()
         cb(undefined, stream)
         stream.emit("close", 0)
       })
       .mockImplementationOnce((_cmd: string, cb: ExecCallback) => {
+        // [12] cleanup of fallback tmp (rm -f)
         const stream = makeStream()
         cb(undefined, stream)
         stream.emit("close", 0)
       })
-      .mockImplementationOnce((_cmd: string, cb: ExecCallback) => {
-        const stream = makeStream()
-        cb(undefined, stream)
-        stream.emit("data", Buffer.from(String(largeContent.length)))
-        stream.emit("close", 0)
+      .mockImplementationOnce((cmd: string, cb: ExecCallback) => {
+        // [13] R-0000522: post-fallback SHA-256 verification — emit the
+        // hash of the originally requested content so the verdict is
+        // "matches" and writeFile resolves cleanly.
+        emitSha256SumResponse(cmd, cb, expectedHash)
       })
       .mockImplementationOnce((_cmd: string, cb: ExecCallback) => {
+        // [14] cleanup of the initial staged tmp (rm -f)
         const stream = makeStream()
         cb(undefined, stream)
         stream.emit("close", 0)
@@ -742,12 +831,12 @@ describe("SshConnectionImpl.writeFile — large content (> 64 KB)", () => {
         cb(undefined, stream)
         stream.emit("close", 0)
       })
-      .mockImplementationOnce((_cmd: string, cb: ExecCallback) => {
-        // Fifth call: the final target size verification — succeeds
-        const stream = makeStream()
-        cb(undefined, stream)
-        stream.emit("data", Buffer.from("100000"))
-        stream.emit("close", 0)
+      .mockImplementationOnce((cmd: string, cb: ExecCallback) => {
+        // R-0000522: Fifth call — post-finalize SHA-256 verification.
+        // Emit the precomputed hash of the original content so the
+        // verdict is "matches" and writeFile resolves before the shell
+        // fallback is consulted.
+        emitSha256SumResponse(cmd, cb, sha256Hex(makeLargeContent()))
       })
       .mockImplementationOnce((_cmd: string, cb: ExecCallback) => {
         // Sixth call: rm -f — fails with an error whose message contains the password
