@@ -76,7 +76,15 @@ async function requireComposeRuntime(parameters: {
   return assertComposeRuntime(runtime, parameters.action)
 }
 
-const COMPOSE_UP_ACTION_KEYWORDS = ["Creating", "Recreating", "Starting", "Started", "Pulling"]
+// R-0000560: anchor compose action keywords at the start of a line. The
+// previous `composeOutput.includes("Pulling")` matched anywhere in the
+// merged stdout+stderr stream, so image names, registry paths or
+// container logs containing words like `Creating`, `Starting` or
+// `Pulling` produced false-positive "changed" results. compose prints
+// action keywords as the first token of a log line, so we keep the
+// `2>&1` capture and only tighten the keyword search to line starts via
+// a multi-line regex.
+const COMPOSE_UP_ACTION_KEYWORDS_REGEX = /^(Creating|Recreating|Starting|Started|Pulling)\s/mv
 
 /**
  * R-0000078: when every service was already running, `compose up -d`
@@ -84,10 +92,21 @@ const COMPOSE_UP_ACTION_KEYWORDS = ["Creating", "Recreating", "Starting", "Start
  * status ok so apply does not always report "changed".
  *
  * @param composeOutput - The combined stdout/stderr returned by `compose up`.
- * @returns `true` when at least one action keyword was emitted.
+ * @returns `true` when at least one action keyword was emitted at the
+ *   start of a line.
  */
 function composeUpReportedChange(composeOutput: string): boolean {
-  return COMPOSE_UP_ACTION_KEYWORDS.some((keyword) => composeOutput.includes(keyword))
+  return COMPOSE_UP_ACTION_KEYWORDS_REGEX.test(composeOutput)
+}
+
+// R-0000560: same anchoring for `compose pull`. The previous
+// `output.includes("Pulling") || output.includes("Downloaded")` matched
+// any substring in image names or container logs and produced false
+// "changed" results when no image was actually pulled.
+const COMPOSE_PULL_ACTION_REGEX = /^(Pulling|Downloaded)\s/mv
+
+function composePullReportedChange(composeOutput: string): boolean {
+  return COMPOSE_PULL_ACTION_REGEX.test(composeOutput)
 }
 
 function validateComposeUpServices(services: string[] | undefined): void {
@@ -1136,11 +1155,7 @@ export const compose = {
         if (result.code !== 0)
           return failedCommand(`[compose.pull] failed for ${projectDirectory}`, result)
 
-        const output = result.stdout
-        if (output.includes("Pulling") || output.includes("Downloaded")) {
-          return { status: "changed" }
-        }
-        return { status: "ok" }
+        return { status: composePullReportedChange(result.stdout) ? "changed" : "ok" }
       },
       // eslint-disable-next-line @typescript-eslint/require-await -- Interface requires async
       async check(): Promise<"needs-apply" | "ok"> {
