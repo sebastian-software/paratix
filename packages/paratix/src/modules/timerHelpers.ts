@@ -12,6 +12,11 @@ const POSIX_USER_GROUP_PATTERN = /^[a-z_][a-z0-9_\-]*\$?$/v
 // also enforced upstream by `assertNoNewline`; this regex additionally
 // catches `#` and ensures the path is anchored at the filesystem root.
 const ABSOLUTE_PATH_PATTERN = /^\/[^\n\r#]*$/v
+// R-0000493: pattern for `ExecStart=` values. Same shape as
+// `ABSOLUTE_PATH_PATTERN` (anchored at `/`, rejects `#`/`\n`/`\r`) but kept
+// as a dedicated identifier so future relaxations on either side stay
+// independent.
+const EXEC_VALUE_PATTERN = /^\/[^\n\r#]*$/v
 // Strict whitelist for environment values that may be embedded unquoted into
 // `Environment=KEY=...`. Anything outside this set -- including whitespace,
 // quotes, backslashes, shell metacharacters like `$(...)`, and non-ASCII or
@@ -109,6 +114,19 @@ function assertAbsolutePath(field: string, value: string): void {
   }
 }
 
+// R-0000493: validate that the rendered `ExecStart=` line cannot be
+// truncated by a systemd comment marker. The value must start with `/`
+// (absolute command path) and must not contain `#`, `\n` or `\r` -- a
+// stray `#` would terminate the directive in the rendered unit file.
+function assertExecValue(value: string): void {
+  if (!EXEC_VALUE_PATTERN.test(value)) {
+    throw new Error(
+      `timer.scheduled: exec must be an absolute command path without '#', '\\n' or '\\r' ` +
+        `(systemd treats '#' as a comment marker and would truncate the directive), got: ${JSON.stringify(value)}`
+    )
+  }
+}
+
 function renderServiceUnit(name: string, options: TimerScheduledOptions): string {
   const description = options.description ?? `Paratix scheduled task: ${name}`
   const lines: string[] = ["[Unit]", `Description=${description}`, "", "[Service]", "Type=oneshot"]
@@ -171,6 +189,7 @@ function validateServiceDirectiveValues(options: TimerScheduledOptions): void {
 export function validatePresentOptions(options: TimerScheduledOptions): void {
   assertNoNewline("exec", options.exec)
   assertNotBlank("exec", options.exec)
+  assertExecValue(options.exec)
   const optionalStringFields: ReadonlyArray<readonly [string, string | undefined]> = [
     ["description", options.description],
     ["user", options.user],
