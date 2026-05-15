@@ -1,4 +1,5 @@
 const UNIT_NAME_PATTERN = /^[\w@.\-]+$/v
+const UNIT_NAME_ALL_DOTS_PATTERN = /^\.+$/v
 
 export function validateQuadletName(name: string): void {
   if (name.startsWith("-")) {
@@ -6,6 +7,18 @@ export function validateQuadletName(name: string): void {
   }
   if (!UNIT_NAME_PATTERN.test(name)) {
     throw new Error(`quadlet: name must match ${String(UNIT_NAME_PATTERN)}, got: ${name}`)
+  }
+  // R-0000568: the unit-name pattern above permits sequences composed
+  // entirely of dots (e.g. `"."`, `".."`, `"..."`). `validateQuadletName`
+  // is reused for the systemd `serviceName` in `quadlet.updateImage`, and
+  // also flows into `getQuadletContainerFilePath` as a basename — both
+  // contexts treat `.` and `..` as traversal segments. Reject the purely
+  // punctuated form so neither the file path nor the systemd unit name can
+  // ever degenerate into a traversal element.
+  if (UNIT_NAME_ALL_DOTS_PATTERN.test(name)) {
+    throw new Error(
+      `quadlet: name must not consist solely of '.' characters, got: ${JSON.stringify(name)}`
+    )
   }
 }
 
