@@ -95,13 +95,55 @@ async function readEffectiveSshdConfig(ssh: SshConnection): Promise<ExecResult> 
   return ssh.exec(SSHD_EFFECTIVE_CONFIG_COMMAND, { ignoreExitCode: true, silent: true })
 }
 
+// R-0000553: `sshd -T` aborts with non-zero exit codes for two very different
+// classes of failure:
+//   * Real drift: a syntax error or directive value sshd refuses to load.
+//   * Permission denied: a non-root operator cannot read the host keys or the
+//     privilege-separation directory.
+// Silently mapping both to "first directive does not match" caused endless
+// apply loops on hosts the runner could not properly inspect. Detect the
+// permission-denied family up front so callers can surface it as a hard
+// failure with a useful diagnostic instead of pretending the config drifted.
+const SSHD_PERMISSION_ERROR_PATTERNS: RegExp[] = [
+  /permission denied/iv,
+  /must be run as root/iv,
+  /could not (?:open|read).+host key/iv,
+  /unable to open host key/iv,
+  /unable to read.+host key/iv,
+  /you are not root/iv,
+  /operation not permitted/iv,
+]
+
+function sshdEffectiveConfigPermissionError(result: ExecResult): string | undefined {
+  const haystack = `${result.stderr}\n${result.stdout}`
+  if (result.code === 255 && result.stderr.trim() !== "") return result.stderr.trim()
+  for (const pattern of SSHD_PERMISSION_ERROR_PATTERNS) {
+    if (pattern.test(haystack)) return result.stderr.trim() || result.stdout.trim()
+  }
+  return undefined
+}
+
+type EffectiveSshdConfigMismatch =
+  | { kind: "match" }
+  | { directive: string; kind: "mismatch" }
+  | { detail: string; kind: "permission-error" }
+
 async function findEffectiveSshdConfigMismatch(
   ssh: SshConnection,
   settings: Record<string, string>
-): Promise<string | undefined> {
+): Promise<EffectiveSshdConfigMismatch> {
   const result = await readEffectiveSshdConfig(ssh)
-  if (result.code !== 0) return Object.keys(settings)[0]
-  return findNonMatchingEffectiveSshdSetting(result.stdout, settings)
+  if (result.code !== 0) {
+    const permissionDetail = sshdEffectiveConfigPermissionError(result)
+    if (permissionDetail != null) {
+      return { detail: permissionDetail, kind: "permission-error" }
+    }
+    const firstDirective = Object.keys(settings)[0] ?? ""
+    return { directive: firstDirective, kind: "mismatch" }
+  }
+  const directive = findNonMatchingEffectiveSshdSetting(result.stdout, settings)
+  if (directive == null) return { kind: "match" }
+  return { directive, kind: "mismatch" }
 }
 
 async function rollbackSshdConfigAfterEffectiveMismatch(
@@ -128,18 +170,29 @@ async function rejectNonMatchingEffectiveSshdConfig(
   ssh: SshConnection,
   parameters: { didChange: boolean; originalConfig: string; settings: Record<string, string> }
 ): Promise<ModuleResult | undefined> {
-  const directive = await findEffectiveSshdConfigMismatch(ssh, parameters.settings)
-  if (directive == null) return undefined
+  const mismatch = await findEffectiveSshdConfigMismatch(ssh, parameters.settings)
+  if (mismatch.kind === "match") return undefined
+  if (mismatch.kind === "permission-error") {
+    // R-0000553: `sshd -T` could not be evaluated (typically because the
+    // operator lacks the privileges to read host keys). Surface the failure
+    // explicitly so the apply loop terminates instead of repeatedly writing
+    // and rolling back the same config.
+    const settingNames = Object.keys(parameters.settings).join(", ")
+    return failed(
+      `[sshd.config: ${settingNames}] could not verify effective sshd configuration via ` +
+        `\`${SSHD_EFFECTIVE_CONFIG_COMMAND}\` (insufficient privileges?): ${mismatch.detail}`
+    )
+  }
 
   if (!parameters.didChange) {
     return failed(
-      `[sshd.config: ${directive}] effective sshd configuration ` +
+      `[sshd.config: ${mismatch.directive}] effective sshd configuration ` +
         "does not match the requested value after parsing includes"
     )
   }
 
   return rollbackSshdConfigAfterEffectiveMismatch(ssh, {
-    directive,
+    directive: mismatch.directive,
     originalConfig: parameters.originalConfig,
   })
 }
@@ -934,9 +987,19 @@ export const sshd = {
             return NEEDS_APPLY
           }
         }
-        const mismatchingEffectiveDirective = await findEffectiveSshdConfigMismatch(ssh, settings)
-        if (mismatchingEffectiveDirective != null) return NEEDS_APPLY
-        return "ok"
+        const effectiveMismatch = await findEffectiveSshdConfigMismatch(ssh, settings)
+        if (effectiveMismatch.kind === "match") return "ok"
+        if (effectiveMismatch.kind === "permission-error") {
+          // R-0000553: surface the permission failure once during check so the
+          // operator sees why apply will hard-fail instead of silently spinning
+          // through the apply path.
+          process.stderr.write(
+            `Warning: [sshd.config: ${settingNames}] could not verify effective sshd ` +
+              `configuration via \`${SSHD_EFFECTIVE_CONFIG_COMMAND}\` ` +
+              `(insufficient privileges?): ${effectiveMismatch.detail}\n`
+          )
+        }
+        return NEEDS_APPLY
       },
       name: `sshd.config: ${settingNames}`,
     }
