@@ -249,6 +249,16 @@ export async function expectProcessExit(
   expect(cliExitError?.exitCode).toBe(expectedCode)
 }
 
+/**
+ * Test stub for `exitWithMessage`.
+ *
+ * Unlike the production implementation, this stub intentionally skips
+ * `escapeCliControlCharacters` so test bodies can assert on the raw,
+ * un-escaped message. Callers that do not silence `console.error`
+ * themselves will see the message leak to stderr, so most test bodies
+ * should `vi.spyOn(console, "error").mockImplementation(() => {})` before
+ * triggering the stub.
+ */
 export function throwExitError(message: string): never {
   console.error(message)
   throw new Error(message)
