@@ -1127,6 +1127,10 @@ function expectedDetachedPodmanUnit(dir: string, name: string): string {
 
 const defaultServiceName = "compose-app"
 const unitFilePath = `/etc/systemd/system/${defaultServiceName}.service`
+const systemdUnitFallbackTempPath =
+  "/etc/systemd/system/.compose-systemd-unit.paratix-staging.ABCDEF"
+const systemdUnitFallbackMktempCommand =
+  "mktemp '/etc/systemd/system/.compose-systemd-unit.paratix-staging.XXXXXX'"
 
 function composeSystemdRecoveryResponses(
   serviceName = defaultServiceName,
@@ -1145,9 +1149,13 @@ function composeSystemdRecoveryResponses(
   }
 }
 
-function buildComposeSystemdShellFallbackCommand(filePath: string, content: string): string {
+function buildComposeSystemdShellFallbackCommand(
+  filePath: string,
+  content: string,
+  temporaryPath = systemdUnitFallbackTempPath
+): string {
   const encodedContent = Buffer.from(content, "utf8").toString("base64")
-  return `printf '%s' '${encodedContent}' | base64 -d > '${filePath}' && chmod '0644' '${filePath}' && chown 'root:root' '${filePath}'`
+  return `{ printf '%s' '${encodedContent}' | base64 -d > '${temporaryPath}' && chmod '0644' '${temporaryPath}' && chown 'root:root' '${temporaryPath}' && if [ -L '${filePath}' ]; then rm -f '${temporaryPath}'; exit 73; fi && mv -f -T '${temporaryPath}' '${filePath}'; } || { status=$?; rm -f '${temporaryPath}'; exit "$status"; }`
 }
 
 describe("compose.systemd — check", () => {
@@ -1584,8 +1592,8 @@ describe("compose.systemd — apply", () => {
     const mockSsh = createComposeMockSsh({
       ...composeSystemdRecoveryResponses(),
       [buildComposeSystemdShellFallbackCommand(unitFilePath, expectedUnit)]: { code: 0 },
-      "rm -f '/etc/systemd/system/compose-app.service'": { code: 0 },
       "systemctl daemon-reload": { code: 0 },
+      [systemdUnitFallbackMktempCommand]: { code: 0, stdout: `${systemdUnitFallbackTempPath}\n` },
     })
     vi.spyOn(mockSsh, "readFile")
       .mockResolvedValueOnce("[Unit]\nDescription=previous\n")
@@ -1596,7 +1604,8 @@ describe("compose.systemd — apply", () => {
     const result = await mod.apply(mockSsh, emptyEnv)
 
     expect(result.status).toBe("changed")
-    expect(mockSsh.calls).toContain("rm -f '/etc/systemd/system/compose-app.service'")
+    expect(mockSsh.calls).not.toContain("rm -f '/etc/systemd/system/compose-app.service'")
+    expect(mockSsh.calls).toContain(systemdUnitFallbackMktempCommand)
     expect(mockSsh.calls).toContain(
       buildComposeSystemdShellFallbackCommand(unitFilePath, expectedUnit)
     )
@@ -1608,7 +1617,7 @@ describe("compose.systemd — apply", () => {
     const mockSsh = createComposeMockSsh({
       ...composeSystemdRecoveryResponses(),
       [buildComposeSystemdShellFallbackCommand(unitFilePath, expectedUnit)]: { code: 0 },
-      "rm -f '/etc/systemd/system/compose-app.service'": { code: 0 },
+      [systemdUnitFallbackMktempCommand]: { code: 0, stdout: `${systemdUnitFallbackTempPath}\n` },
     })
     vi.spyOn(mockSsh, "readFile").mockResolvedValue("")
 
@@ -1617,6 +1626,31 @@ describe("compose.systemd — apply", () => {
 
     expect(result.status).toBe("failed")
     expect(String(result.error)).toContain("even after shell fallback")
+    expect(mockSsh.calls).not.toContain("systemctl daemon-reload")
+  })
+
+  it("returns failed when the unit path becomes a symlink before the shell fallback move", async () => {
+    const expectedUnit = expectedPodmanUnit(projectDirectory, defaultServiceName)
+    const fallbackCommand = buildComposeSystemdShellFallbackCommand(unitFilePath, expectedUnit)
+    const mockSsh = createComposeMockSsh({
+      ...composeSystemdRecoveryResponses(),
+      [`rm -f '${systemdUnitFallbackTempPath}'`]: { code: 0 },
+      [fallbackCommand]: { code: 73, stderr: "unit path became a symlink" },
+      [systemdUnitFallbackMktempCommand]: { code: 0, stdout: `${systemdUnitFallbackTempPath}\n` },
+    })
+    vi.spyOn(mockSsh, "readFile")
+      .mockResolvedValueOnce("[Unit]\nDescription=previous\n")
+      .mockResolvedValueOnce("")
+
+    const mod = compose.systemd({ projectDirectory })
+    const result = await mod.apply(mockSsh, emptyEnv)
+
+    expect(result.status).toBe("failed")
+    expect(String(result.error)).toContain("shell fallback write failed")
+    expect(mockSsh.calls).toContain(fallbackCommand)
+    expect(mockSsh.calls).not.toContain(
+      `printf '%s' '${Buffer.from(expectedUnit, "utf8").toString("base64")}' | base64 -d > '${unitFilePath}' && chmod '0644' '${unitFilePath}' && chown 'root:root' '${unitFilePath}'`
+    )
     expect(mockSsh.calls).not.toContain("systemctl daemon-reload")
   })
 

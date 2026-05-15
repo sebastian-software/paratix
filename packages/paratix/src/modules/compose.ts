@@ -1,6 +1,6 @@
 /* eslint-disable max-lines -- compose module intentionally keeps related lifecycle helpers together */
 import { readFile } from "node:fs/promises"
-import { basename } from "node:path"
+import { basename, dirname } from "node:path"
 
 import { failed, failedCommand } from "../moduleFailure.js"
 import { shellQuote, validateMktempPath } from "../ssh.js"
@@ -18,6 +18,7 @@ const UNIT_NAME_PATTERN = /^[\w@.\-]+$/v
 const COMPOSE_CONFIG_MODE = "0600"
 const COMPOSE_CONFIG_STAGING_PREFIX = ".compose.yml.paratix-staging"
 const SYSTEMD_UNIT_MODE = "0644"
+const SYSTEMD_UNIT_STAGING_PREFIX = ".compose-systemd-unit.paratix-staging"
 
 type ComposeSystemdMaskSnapshot = "masked" | "unmasked"
 
@@ -264,14 +265,34 @@ async function verifyNonEmptySystemdUnit(parameters: {
   return writtenContent.trim() === parameters.content.trim() ? "matches" : "unexpected"
 }
 
-async function cleanupComposeSystemdTarget(parameters: {
+async function cleanupComposeSystemdTemporaryPath(parameters: {
   connection: SshConnection
-  filePath: string
+  temporaryPath: string
 }): Promise<void> {
-  await parameters.connection.exec(`rm -f ${shellQuote(parameters.filePath)}`, {
+  await parameters.connection.exec(`rm -f ${shellQuote(parameters.temporaryPath)}`, {
     ignoreExitCode: true,
     silent: true,
   })
+}
+
+async function allocateComposeSystemdTemporaryPath(parameters: {
+  connection: SshConnection
+  filePath: string
+  unitFileName: string
+}): Promise<ModuleResult | string> {
+  const directory = dirname(parameters.filePath)
+  const template = `${directory}/${SYSTEMD_UNIT_STAGING_PREFIX}.XXXXXX`
+  const result = await parameters.connection.exec(`mktemp ${shellQuote(template)}`, EXEC_OPTS)
+  if (result.code !== 0) {
+    return failedCommand(`[compose.systemd] mktemp failed for ${parameters.unitFileName}`, result)
+  }
+
+  try {
+    return validateMktempPath(directory, result.stdout.trim(), SYSTEMD_UNIT_STAGING_PREFIX)
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : String(error)
+    return failed(`[compose.systemd] mktemp produced an unexpected path: ${reason}`)
+  }
 }
 
 async function rewriteComposeSystemdUnitViaShell(parameters: {
@@ -281,12 +302,15 @@ async function rewriteComposeSystemdUnitViaShell(parameters: {
   unitFileName: string
 }): Promise<ModuleResult | null> {
   const encodedContent = Buffer.from(parameters.content, "utf8").toString("base64")
-  await cleanupComposeSystemdTarget(parameters)
+  const temporaryPath = await allocateComposeSystemdTemporaryPath(parameters)
+  if (typeof temporaryPath !== "string") return temporaryPath
+
   const result = await parameters.connection.exec(
-    `printf '%s' ${shellQuote(encodedContent)} | base64 -d > ${shellQuote(parameters.filePath)} && chmod ${shellQuote(SYSTEMD_UNIT_MODE)} ${shellQuote(parameters.filePath)} && chown ${shellQuote("root:root")} ${shellQuote(parameters.filePath)}`,
+    `{ printf '%s' ${shellQuote(encodedContent)} | base64 -d > ${shellQuote(temporaryPath)} && chmod ${shellQuote(SYSTEMD_UNIT_MODE)} ${shellQuote(temporaryPath)} && chown ${shellQuote("root:root")} ${shellQuote(temporaryPath)} && if [ -L ${shellQuote(parameters.filePath)} ]; then rm -f ${shellQuote(temporaryPath)}; exit 73; fi && mv -f -T ${shellQuote(temporaryPath)} ${shellQuote(parameters.filePath)}; } || { status=$?; rm -f ${shellQuote(temporaryPath)}; exit "$status"; }`,
     EXEC_OPTS
   )
   if (result.code !== 0) {
+    await cleanupComposeSystemdTemporaryPath({ connection: parameters.connection, temporaryPath })
     return failedCommand(
       `[compose.systemd] shell fallback write failed for ${parameters.unitFileName}`,
       result
@@ -296,7 +320,6 @@ async function rewriteComposeSystemdUnitViaShell(parameters: {
   const fallbackVerification = await verifyNonEmptySystemdUnit(parameters)
   if (fallbackVerification === "matches") return null
 
-  await cleanupComposeSystemdTarget(parameters)
   if (fallbackVerification === "empty") {
     return failed(
       `[compose.systemd] wrote empty unit file for ${parameters.unitFileName} even after shell fallback`
