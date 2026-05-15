@@ -102,6 +102,7 @@ describe("printModuleResult", () => {
       expect(writes.some((entry) => entry.includes("running"))).toBe(true)
       expect(writes.some((entry) => entry.includes("changed"))).toBe(true)
     } finally {
+      stopLiveModuleOutput(true)
       Object.defineProperty(process.stdout, "isTTY", {
         configurable: true,
         value: originalIsTTY,
@@ -151,6 +152,7 @@ describe("printModuleResult", () => {
       expect(output).not.toContain(secret)
       expect(output).toContain("[REDACTED]")
     } finally {
+      stopLiveModuleOutput(true)
       Object.defineProperty(process.stdout, "isTTY", {
         configurable: true,
         value: originalIsTTY,
@@ -222,6 +224,7 @@ describe("printModuleResult", () => {
       expect(writes.some((entry) => entry.includes("docker-compose-plugin"))).toBe(false)
       expect(writes.some((entry) => entry.includes("ca-certificates, podman"))).toBe(false)
     } finally {
+      stopLiveModuleOutput(true)
       Object.defineProperty(process.stdout, "isTTY", {
         configurable: true,
         value: originalIsTTY,
@@ -389,6 +392,7 @@ describe("printRecipeHeader", () => {
       expect(clearLine).toHaveBeenCalledTimes(2)
       expect(cursorTo).toHaveBeenCalledTimes(2)
     } finally {
+      stopLiveModuleOutput(true)
       Object.defineProperty(process.stdout, "isTTY", {
         configurable: true,
         value: originalIsTTY,
