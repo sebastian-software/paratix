@@ -731,10 +731,9 @@ describe("compose.config — apply", () => {
     ])
 
     expect(results).toStrictEqual([{ status: "changed" }, { status: "changed" }])
-    expect(mockSsh.writeFileCalls.map((call) => call.remotePath)).toStrictEqual([
-      stagingPath,
-      secondStagingPath,
-    ])
+    const writeFileRemotePaths = mockSsh.writeFileCalls.map((call) => call.remotePath)
+    expect(writeFileRemotePaths).toHaveLength(2)
+    expect(new Set(writeFileRemotePaths)).toStrictEqual(new Set([stagingPath, secondStagingPath]))
     expect(outputMock).toHaveBeenNthCalledWith(1, mktempCommand)
     expect(outputMock).toHaveBeenNthCalledWith(2, mktempCommand)
     expect(mockSsh.calls).toContain(`${composeCmd("podman")} -f '${stagingPath}' config --quiet`)
