@@ -44,16 +44,29 @@ function assertRegistrableSecret(secret: string): void {
 }
 
 /**
+ * Minimum length of a secret string that will be accepted by
+ * {@link registerSecret}. Values shorter than this are silently ignored so a
+ * stray one- or two-character token (a single TOTP digit, a partially
+ * extracted PIN, …) cannot turn every byte of diagnostic output into the
+ * redaction marker via `replaceAll`.
+ */
+const MINIMUM_SECRET_LENGTH = 4
+
+/**
  * Register a secret string for redaction in subsequent diagnostic output.
  *
- * Empty strings are ignored to keep `replaceAll(value, REDACTED)` from
- * accidentally turning every byte into the redaction marker.
+ * Values shorter than {@link MINIMUM_SECRET_LENGTH} characters are silently
+ * ignored to keep `replaceAll(value, REDACTED)` from accidentally turning
+ * every byte of the diagnostic output into the redaction marker. The
+ * registration is optimistic — callers do not learn that a short secret was
+ * dropped because the sink is shared process-wide and an error here would
+ * abort the workload that produced the value.
  *
  * @param secret - The sensitive value to mask in stderr output. Ignored when
- *   empty.
+ *   shorter than {@link MINIMUM_SECRET_LENGTH} characters.
  */
 export function registerSecret(secret: string): void {
-  if (secret.length === 0) return
+  if (secret.length < MINIMUM_SECRET_LENGTH) return
   assertRegistrableSecret(secret)
   secretCounts.set(secret, (secretCounts.get(secret) ?? 0) + 1)
 }
@@ -69,7 +82,7 @@ export function registerSecret(secret: string): void {
  * @param secret - The previously registered value.
  */
 export function unregisterSecret(secret: string): void {
-  if (secret.length === 0) return
+  if (secret.length < MINIMUM_SECRET_LENGTH) return
   const current = secretCounts.get(secret)
   if (current == null) return
   if (current <= 1) {
@@ -89,7 +102,9 @@ export function unregisterSecret(secret: string): void {
  * code that may throw — it keeps the sink balanced even when the caller
  * does not own the error.
  *
- * @param secrets - The values to register. Empty strings are ignored.
+ * @param secrets - The values to register. Values shorter than
+ *   {@link MINIMUM_SECRET_LENGTH} characters are ignored, mirroring the
+ *   behaviour of {@link registerSecret}.
  * @param body - The async unit of work whose failures must be redacted.
  * @returns Whatever `body` resolves to.
  */
@@ -98,7 +113,9 @@ export async function withRegisteredSecrets<T>(
   body: () => Promise<T>
 ): Promise<T> {
   const registered: string[] = []
-  const registerableSecrets = secrets.filter((secret) => secret.length > 0)
+  const registerableSecrets = secrets.filter(
+    (secret) => secret.length >= MINIMUM_SECRET_LENGTH
+  )
   // R-0000195: Validate up-front so the register loop only runs on inputs
   // that are guaranteed registrable. The register loop and the body are then
   // both protected by the same try/finally — if a future API extension
