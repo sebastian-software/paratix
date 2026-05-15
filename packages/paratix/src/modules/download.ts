@@ -197,12 +197,22 @@ async function readDownloadOwnership(
   conn: SshConnection,
   destination: string
 ): Promise<DownloadOwnership> {
-  const raw = await conn.output(`stat -c '%a %U %G' ${shellQuote(destination)}`)
+  // R-0000558: route the stat call through ssh.exec with ignoreExitCode so a
+  // transient stat failure (file removed between an earlier existence probe
+  // and the metadata read, EACCES, EIO, …) does not propagate as a raw
+  // CommandError out of check/apply. Empty fields make the subsequent
+  // drift-comparison treat the file as needing re-apply, mirroring the
+  // crontab/R-0000272 pattern.
+  const result = await conn.exec(`stat -c '%a %U %G' ${shellQuote(destination)}`, {
+    ignoreExitCode: true,
+    silent: true,
+  })
+  if (result.code !== 0) return { group: "", mode: "", owner: "" }
   // R-0000253: split on any whitespace run (mirrors mount.ts/archive.ts)
   // because BusyBox/POSIX `stat` implementations may emit tabs or multiple
   // spaces between the columns, which broke the previous single-space
   // split and produced empty owner/group fields.
-  const [mode = "", owner = "", group = ""] = raw.trim().split(/\s+/v)
+  const [mode = "", owner = "", group = ""] = result.stdout.trim().split(/\s+/v)
   return { group, mode, owner }
 }
 

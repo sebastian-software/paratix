@@ -865,8 +865,14 @@ function createComposeConfigCheck(
     // Detect manual mode drift (e.g. an operator ran `chmod 0644 compose.yml`):
     // even when the content matches, the apply path would re-set the mode,
     // so check must report needs-apply to keep the run idempotent.
-    const rawMode = await ssh.output(`stat -c '%a' ${shellQuote(remotePath)}`)
-    const remoteMode = rawMode.trim()
+    //
+    // R-0000558: route the stat call through ssh.exec with ignoreExitCode so
+    // a transient stat failure (file removed mid-check, EACCES, EIO, …)
+    // collapses to NEEDS_APPLY instead of throwing a raw CommandError out of
+    // check. Mirrors the crontab/R-0000272 pattern.
+    const modeResult = await ssh.exec(`stat -c '%a' ${shellQuote(remotePath)}`, EXEC_OPTS)
+    if (modeResult.code !== 0) return NEEDS_APPLY
+    const remoteMode = modeResult.stdout.trim()
     return remoteMode === COMPOSE_CONFIG_MODE.replace(/^0+/v, "") ? "ok" : NEEDS_APPLY
   }
 }

@@ -807,8 +807,18 @@ export const apt = {
           return NEEDS_APPLY
         }
 
-        const mode = await ssh.output(`stat -c '%a' ${shellQuote(filePath)}`)
-        if (mode.trim() !== APT_REPOSITORY_MODE.replace(/^0+/v, "")) return NEEDS_APPLY
+        // R-0000558: use ssh.exec with ignoreExitCode so a transient stat
+        // failure (file removed between the symlink probe and the mode read,
+        // EACCES, EIO, …) becomes NEEDS_APPLY instead of throwing a raw
+        // CommandError out of check. Mirrors the crontab/R-0000272 pattern.
+        const modeResult = await ssh.exec(
+          `stat -c '%a' ${shellQuote(filePath)}`,
+          APT_BASE_EXEC_OPTS
+        )
+        if (modeResult.code !== 0) return NEEDS_APPLY
+        if (modeResult.stdout.trim() !== APT_REPOSITORY_MODE.replace(/^0+/v, "")) {
+          return NEEDS_APPLY
+        }
 
         return (await hasFlag(ssh, updateFlag.flagName)) ? "ok" : NEEDS_APPLY
       },

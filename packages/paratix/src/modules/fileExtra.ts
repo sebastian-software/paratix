@@ -63,8 +63,13 @@ async function resolveWriteMode(
   if (explicitMode != null) return explicitMode
   const exists = await ssh.exists(remotePath)
   if (!exists) return DEFAULT_FILE_WRITE_MODE
-  const mode = await ssh.output(`stat -c '%a' ${shellQuote(remotePath)}`)
-  return normalizeMode(mode.trim())
+  // R-0000558: route the stat call through ssh.exec with ignoreExitCode so a
+  // race between the existence probe and the mode read (file unlinked,
+  // EACCES, EIO, …) does not surface as a raw CommandError. Fall back to the
+  // default write mode in that case, matching the "no existing file" branch.
+  const result = await ssh.exec(`stat -c '%a' ${shellQuote(remotePath)}`, EXEC_OPTS)
+  if (result.code !== 0) return DEFAULT_FILE_WRITE_MODE
+  return normalizeMode(result.stdout.trim())
 }
 
 type BlockMarkers = { begin: string; end: string; full: string }
@@ -377,8 +382,14 @@ async function readPropertiesState(
   ssh: SshConnection,
   remotePath: string
 ): Promise<{ group: string; mode: string; owner: string }> {
-  const raw = await ssh.output(`stat -c '%a %U %G' ${shellQuote(remotePath)}`)
-  const [mode = "", owner = "", group = ""] = raw.trim().split(/\s+/v)
+  // R-0000558: route the stat call through ssh.exec with ignoreExitCode so a
+  // transient stat failure (file removed between the symlink probe and the
+  // metadata read, EACCES, EIO, …) does not propagate as a raw CommandError
+  // out of check/apply. Empty fields make the subsequent drift-comparison
+  // treat the file as needing re-apply, mirroring crontab/R-0000272.
+  const result = await ssh.exec(`stat -c '%a %U %G' ${shellQuote(remotePath)}`, EXEC_OPTS)
+  if (result.code !== 0) return { group: "", mode: "", owner: "" }
+  const [mode = "", owner = "", group = ""] = result.stdout.trim().split(/\s+/v)
   return { group, mode, owner }
 }
 
