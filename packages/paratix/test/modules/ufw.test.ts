@@ -14,7 +14,7 @@ function createMockSshOnPort(
   const ssh = createMockSsh(responses)
   ssh.getConnectionInfo = () => ({
     authMethod: "privateKey",
-    configuredPorts: [22],
+    configuredPorts: [port],
     host: "1.2.3.4",
     port,
     privateKeyPath: "~/.ssh/id",
@@ -293,7 +293,12 @@ describe("ufw.enabled", () => {
     const mod = ufw.enabled()
     const result = await mod.apply(ssh, emptyEnv)
     expect(result.status).toBe("changed")
-    expect(ssh.calls).toStrictEqual(["ufw status", "ufw allow '22'", "ufw --force enable"])
+    expect(ssh.calls).toStrictEqual([
+      "command -v ufw",
+      "ufw status",
+      "ufw allow '22'",
+      "ufw --force enable",
+    ])
     expect(ssh.calls).toContain("ufw --force enable")
     expect(ssh.calls).not.toContain("echo 'y' | ufw enable")
   })
@@ -312,7 +317,12 @@ describe("ufw.enabled", () => {
     const result = await mod.apply(ssh, emptyEnv)
 
     expect(result.status).toBe("changed")
-    expect(ssh.calls).toStrictEqual(["ufw status", "ufw allow '2222'", "ufw --force enable"])
+    expect(ssh.calls).toStrictEqual([
+      "command -v ufw",
+      "ufw status",
+      "ufw allow '2222'",
+      "ufw --force enable",
+    ])
   })
 
   it("apply fails without enabling when allowing the active SSH port fails", async () => {
@@ -326,7 +336,7 @@ describe("ufw.enabled", () => {
     const result = await mod.apply(ssh, emptyEnv)
 
     expect(result.status).toBe("failed")
-    expect(ssh.calls).toStrictEqual(["ufw status", "ufw allow '22'"])
+    expect(ssh.calls).toStrictEqual(["command -v ufw", "ufw status", "ufw allow '22'"])
   })
 
   it("apply returns failed when ufw --force enable exits with non-zero code", async () => {
@@ -360,6 +370,7 @@ describe("ufw.enabled", () => {
     const result = await mod.apply(ssh, emptyEnv)
     expect(result.status).toBe("changed")
     expect(ssh.calls).toStrictEqual([
+      "command -v ufw",
       "ufw status",
       "ufw delete 'deny' '22'",
       "ufw allow '22'",
@@ -387,6 +398,7 @@ describe("ufw.enabled", () => {
     const result = await mod.apply(ssh, emptyEnv)
     expect(result.status).toBe("changed")
     expect(ssh.calls).toStrictEqual([
+      "command -v ufw",
       "ufw status",
       "ufw delete 'deny' '22/tcp'",
       "ufw allow '22'",
@@ -415,6 +427,7 @@ describe("ufw.enabled", () => {
     const result = await mod.apply(ssh, emptyEnv)
     expect(result.status).toBe("changed")
     expect(ssh.calls).toStrictEqual([
+      "command -v ufw",
       "ufw status",
       "ufw delete 'deny' '22'",
       "ufw allow '22'",
@@ -443,6 +456,7 @@ describe("ufw.enabled", () => {
     const result = await mod.apply(ssh, emptyEnv)
     expect(result.status).toBe("changed")
     expect(ssh.calls).toStrictEqual([
+      "command -v ufw",
       "ufw status",
       "ufw delete 'deny' '22/tcp'",
       "ufw allow '22'",
@@ -470,7 +484,7 @@ describe("ufw.enabled", () => {
     const result = await mod.apply(ssh, emptyEnv)
     expect(result.status).toBe("failed")
     expect(result.error?.message).toContain("ufw delete deny failed")
-    expect(ssh.calls).toStrictEqual(["ufw status", "ufw delete 'deny' '22'"])
+    expect(ssh.calls).toStrictEqual(["command -v ufw", "ufw status", "ufw delete 'deny' '22'"])
   })
 
   it("apply returns failed when ssh is null", async () => {
@@ -566,7 +580,15 @@ describe("ufw.disabled", () => {
 describe("ufw.rule", () => {
   it("check returns ok for an allow rule on a single port", async () => {
     const ssh = createMockSsh({
-      "ufw status": { stdout: "80                         ALLOW       Anywhere" },
+      "ufw status": {
+        stdout: [
+          "Status: active",
+          "",
+          "To                         Action      From",
+          "--                         ------      ----",
+          "80                         ALLOW       Anywhere",
+        ].join("\n"),
+      },
     })
     const mod = ufw.rule("allow", 80)
     const result = await mod.check(ssh, emptyEnv)
@@ -575,7 +597,15 @@ describe("ufw.rule", () => {
 
   it("check returns ok for a deny rule on a single port", async () => {
     const ssh = createMockSsh({
-      "ufw status": { stdout: "22                         DENY        Anywhere" },
+      "ufw status": {
+        stdout: [
+          "Status: active",
+          "",
+          "To                         Action      From",
+          "--                         ------      ----",
+          "22                         DENY        Anywhere",
+        ].join("\n"),
+      },
     })
     const mod = ufw.rule("deny", 22)
     const result = await mod.check(ssh, emptyEnv)
@@ -655,6 +685,7 @@ describe("ufw.rule", () => {
     const result = await mod.apply(ssh, emptyEnv)
     expect(result.status).toBe("changed")
     expect(ssh.calls).toStrictEqual([
+      "command -v ufw",
       "ufw status",
       "ufw 'allow' '80'",
       "ufw 'allow' '443'",
@@ -675,7 +706,12 @@ describe("ufw.rule", () => {
     const mod = ufw.rule("allow", [80, 443])
     const result = await mod.apply(ssh, emptyEnv)
     expect(result.status).toBe("ok")
-    expect(ssh.calls).toStrictEqual(["ufw status", "ufw 'allow' '80'", "ufw 'allow' '443'"])
+    expect(ssh.calls).toStrictEqual([
+      "command -v ufw",
+      "ufw status",
+      "ufw 'allow' '80'",
+      "ufw 'allow' '443'",
+    ])
   })
 
   it("apply returns changed when ufw adds every rule fresh", async () => {
@@ -735,7 +771,12 @@ describe("ufw.rule", () => {
     const mod = ufw.rule("deny", [22, 25, 465])
     const result = await mod.apply(ssh, emptyEnv)
     expect(result.status).toBe("failed")
-    expect(ssh.calls).toStrictEqual(["ufw status", "ufw 'deny' '22'", "ufw 'deny' '25'"])
+    expect(ssh.calls).toStrictEqual([
+      "command -v ufw",
+      "ufw status",
+      "ufw 'deny' '22'",
+      "ufw 'deny' '25'",
+    ])
   })
 
   it("apply returns failed when ssh is null", async () => {
@@ -1004,7 +1045,12 @@ describe("ufw.rule", () => {
     const mod = ufw.rule("deny", 22)
     const result = await mod.apply(ssh, emptyEnv)
     expect(result.status).toBe("changed")
-    expect(ssh.calls).toStrictEqual(["ufw status", "ufw delete 'allow' '22'", "ufw 'deny' '22'"])
+    expect(ssh.calls).toStrictEqual([
+      "command -v ufw",
+      "ufw status",
+      "ufw delete 'allow' '22'",
+      "ufw 'deny' '22'",
+    ])
   })
 
   it("apply deletes contradictory TCP and protocol-agnostic allow rules before adding the deny rule", async () => {
@@ -1035,6 +1081,7 @@ describe("ufw.rule", () => {
     const result = await mod.apply(ssh, emptyEnv)
     expect(result.status).toBe("changed")
     expect(ssh.calls).toStrictEqual([
+      "command -v ufw",
       "ufw status",
       "ufw delete 'allow' '22'",
       "ufw delete 'allow' '22/tcp'",
@@ -1062,6 +1109,7 @@ describe("ufw.rule", () => {
     const result = await mod.apply(ssh, emptyEnv)
     expect(result.status).toBe("changed")
     expect(ssh.calls).toStrictEqual([
+      "command -v ufw",
       "ufw status",
       "ufw delete 'deny' '80/tcp'",
       "ufw 'allow' '80'",
@@ -1086,7 +1134,12 @@ describe("ufw.rule", () => {
     const mod = ufw.rule("allow", 80)
     const result = await mod.apply(ssh, emptyEnv)
     expect(result.status).toBe("changed")
-    expect(ssh.calls).toStrictEqual(["ufw status", "ufw delete 'deny' '80'", "ufw 'allow' '80'"])
+    expect(ssh.calls).toStrictEqual([
+      "command -v ufw",
+      "ufw status",
+      "ufw delete 'deny' '80'",
+      "ufw 'allow' '80'",
+    ])
   })
 
   it("apply does not call delete when no contradictory rule exists", async () => {
@@ -1108,7 +1161,7 @@ describe("ufw.rule", () => {
     const mod = ufw.rule("deny", 22)
     const result = await mod.apply(ssh, emptyEnv)
     expect(result.status).toBe("changed")
-    expect(ssh.calls).toStrictEqual(["ufw status", "ufw 'deny' '22'"])
+    expect(ssh.calls).toStrictEqual(["command -v ufw", "ufw status", "ufw 'deny' '22'"])
   })
 
   it("apply deletes the opposite IPv6 rule even when the IPv4 entry is already gone", async () => {
@@ -1131,7 +1184,12 @@ describe("ufw.rule", () => {
     const mod = ufw.rule("deny", 22)
     const result = await mod.apply(ssh, emptyEnv)
     expect(result.status).toBe("changed")
-    expect(ssh.calls).toStrictEqual(["ufw status", "ufw delete 'allow' '22'", "ufw 'deny' '22'"])
+    expect(ssh.calls).toStrictEqual([
+      "command -v ufw",
+      "ufw status",
+      "ufw delete 'allow' '22'",
+      "ufw 'deny' '22'",
+    ])
   })
 
   it("apply returns failed when the opposite rule delete exits with non-zero code", async () => {
@@ -1153,7 +1211,7 @@ describe("ufw.rule", () => {
     const mod = ufw.rule("deny", 22)
     const result = await mod.apply(ssh, emptyEnv)
     expect(result.status).toBe("failed")
-    expect(ssh.calls).toStrictEqual(["ufw status", "ufw delete 'allow' '22'"])
+    expect(ssh.calls).toStrictEqual(["command -v ufw", "ufw status", "ufw delete 'allow' '22'"])
   })
 
   // R-0000281: route the apply/check status read through `readUfwStatus` so a
@@ -1161,13 +1219,13 @@ describe("ufw.rule", () => {
   // unstructured `ssh.output` rejection.
   it("R-0000281: apply returns failed when ufw status throws (ufw missing)", async () => {
     const ssh = createMockSsh({
-      "ufw status": { code: 127, stderr: "ufw: not found" },
+      "command -v ufw": { code: 1 },
     })
     const mod = ufw.rule("allow", 80)
     const result = await mod.apply(ssh, emptyEnv)
     expect(result.status).toBe("failed")
     expect(result.error?.message).toContain("ufw is not installed")
-    expect(ssh.calls).toStrictEqual(["ufw status"])
+    expect(ssh.calls).toStrictEqual(["command -v ufw"])
   })
 
   it("R-0000281: check returns needs-apply when ufw status throws (ufw missing)", async () => {
@@ -1188,7 +1246,7 @@ describe("ufw.rule", () => {
     const mod = ufw.rule("deny", 22)
     const result = await mod.apply(ssh, emptyEnv)
     expect(result.status).toBe("failed")
-    expect(result.error?.message).toContain("refuses to deny current SSH port")
+    expect(result.error?.message).toContain("refuses to deny SSH reconnect port(s)")
     expect(ssh.calls).toStrictEqual([])
   })
 
@@ -1197,7 +1255,7 @@ describe("ufw.rule", () => {
     const mod = ufw.rule("deny", [25, 2222, 465])
     const result = await mod.apply(ssh, emptyEnv)
     expect(result.status).toBe("failed")
-    expect(result.error?.message).toContain("refuses to deny current SSH port")
+    expect(result.error?.message).toContain("refuses to deny SSH reconnect port(s)")
     expect(result.error?.message).toContain("2222")
     expect(ssh.calls).toStrictEqual([])
   })
