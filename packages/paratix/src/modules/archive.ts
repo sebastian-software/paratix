@@ -28,6 +28,12 @@ const FLAGS_DIR = "/var/lib/paratix/flags"
 const ARCHIVE_MARKER_MODE = "0644"
 const ARCHIVE_OWNER_MEMBER_CONCURRENCY = 8
 
+type StagingMergeParameters = {
+  destination: string
+  guardPaths: string[]
+  staging: string
+}
+
 async function mapWithConcurrencyLimit<TItem, TResult>(
   items: TItem[],
   limit: number,
@@ -209,23 +215,33 @@ async function allocateExtractStagingDirectory(
  * {@link cleanupStagingDirectory} after this helper returns successfully.
  *
  * @param conn - The SSH connection.
- * @param staging - The staging directory holding the freshly extracted files.
- * @param destination - The final destination directory.
+ * @param parameters - Staging merge inputs.
+ * @param parameters.destination - The final destination directory.
+ * @param parameters.guardPaths - Destination paths that must not be symlinks during merge.
+ * @param parameters.staging - The staging directory holding the freshly extracted files.
  * @returns Either a failure {@link ModuleResult} or null on success.
  */
 async function moveExtractedContentsIntoDestination(
   conn: SshConnection,
-  staging: string,
-  destination: string
+  parameters: StagingMergeParameters
 ): Promise<ModuleResult | null> {
+  const { destination, staging } = parameters
+  const guardPaths = [...new Set(parameters.guardPaths)].join("\n")
   const copyCommand = [
     `find ${shellQuote(staging)} -mindepth 1 -maxdepth 1 -exec sh -c`,
     shellQuote(
-      'destination=$1; shift; for source_path do target_path="$destination/$' +
-        '{source_path##*/}"; cp -aT --remove-destination "$source_path" "$target_path" || exit $?; done'
+      "destination=$1; expected_destination=$2; guard_paths=$3; shift 3; for source_path do " +
+        'resolved_destination=$(readlink -f -- "$destination") || { echo "[archive.extract] failed to resolve destination path $destination before staging merge" >&2; exit 64; }; ' +
+        'if [ "$resolved_destination" != "$expected_destination" ]; then echo "[archive.extract] refusing staging merge: destination path $destination resolves to $resolved_destination" >&2; exit 64; fi; ' +
+        'printf "%s\\n" "$guard_paths" | while IFS= read -r guarded_path; do [ -z "$guarded_path" ] && continue; if [ -L "$guarded_path" ]; then echo "[archive.extract] refusing staging merge: destination path $guarded_path is a symlink" >&2; exit 64; fi; done || exit $?; ' +
+        'target_path="$destination/${source_path##' +
+        '*/}"; if [ -L "$target_path" ]; then echo "[archive.extract] refusing staging merge: destination path $target_path is a symlink" >&2; exit 64; fi; ' +
+        'cp -aT --remove-destination "$source_path" "$target_path" || exit $?; done'
     ),
     "sh",
     shellQuote(destination),
+    shellQuote(destination),
+    shellQuote(guardPaths),
     "{} +",
   ].join(" ")
   const copyResult = await conn.exec(copyCommand, EXEC_OPTS)
@@ -556,7 +572,14 @@ async function extractViaStagingDirectory(
     })
     if (unsafeMergeTarget !== null) return unsafeMergeTarget
 
-    return await moveExtractedContentsIntoDestination(conn, staging, destination)
+    return await moveExtractedContentsIntoDestination(conn, {
+      destination,
+      guardPaths: [
+        ...destinationPathWithAncestors(destination),
+        ...archiveMemberPathsWithAncestors(destination, members),
+      ],
+      staging,
+    })
   } finally {
     await cleanupStagingDirectory(conn, staging)
   }

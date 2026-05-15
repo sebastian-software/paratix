@@ -44,11 +44,11 @@ const archiveCleanupPaths = [
 const archiveStageDirectory = "/opt/app/.paratix-stage.AbCdEfGh"
 const archiveStageMktempPattern = /^mktemp -d '\/opt\/app\/\.paratix-stage\.X{8}'$/v
 const archiveStageMovePattern =
-  /^find '\/opt\/app\/\.paratix-stage\.[^']+' -mindepth 1 -maxdepth 1 -exec sh -c 'destination=\$1; shift; for source_path do target_path="\$destination\/\$\{source_path##\*\/\}"; cp -aT --remove-destination "\$source_path" "\$target_path" \|\| exit \$\?; done' sh '\/opt\/app' \{\} \+$/v
+  /^find '\/opt\/app\/\.paratix-stage\.[^']+' -mindepth 1 -maxdepth 1 -exec sh -c '.*cp -aT --remove-destination "\$source_path" "\$target_path" \|\| exit \$\?; done' sh '\/opt\/app' '\/opt\/app' '[^']*' \{\} \+$/sv
 const archiveStageCleanupPattern = /^rm -rf '\/opt\/app\/\.paratix-stage\.[^']+'$/v
 const archiveAlternateStageMktempPattern = /^mktemp -d '\/opt\/app-alt\/\.paratix-stage\.X{8}'$/v
 const archiveAlternateStageMovePattern =
-  /^find '\/opt\/app-alt\/\.paratix-stage\.[^']+' -mindepth 1 -maxdepth 1 -exec sh -c 'destination=\$1; shift; for source_path do target_path="\$destination\/\$\{source_path##\*\/\}"; cp -aT --remove-destination "\$source_path" "\$target_path" \|\| exit \$\?; done' sh '\/opt\/app-alt' \{\} \+$/v
+  /^find '\/opt\/app-alt\/\.paratix-stage\.[^']+' -mindepth 1 -maxdepth 1 -exec sh -c '.*cp -aT --remove-destination "\$source_path" "\$target_path" \|\| exit \$\?; done' sh '\/opt\/app-alt' '\/opt\/app-alt' '[^']*' \{\} \+$/sv
 const archiveAlternateStageCleanupPattern = /^rm -rf '\/opt\/app-alt\/\.paratix-stage\.[^']+'$/v
 const archiveMembersMarkerPattern =
   /^cat '\/var\/lib\/paratix\/flags\/archive-[a-f0-9]+\.sha256\.members'$/v
@@ -1596,6 +1596,39 @@ describe("archive.extract — apply", () => {
     expect(mockSsh.calls.some((c) => archiveStageCleanupPattern.test(c))).toBe(true)
   })
 
+  it("fails closed when the in-merge symlink guard rejects a swapped destination path", async () => {
+    const mockSsh = createMockSsh(
+      {
+        [`tar --no-same-owner --no-overwrite-dir -xzf '${src}' -C '${archiveStageDirectory}'`]: {
+          code: 0,
+        },
+        [`tar -tvzf '${src}'`]: { code: 0, stdout: safeTarListing },
+      },
+      {
+        responseStubs: [
+          {
+            command: archiveStageMovePattern,
+            result: {
+              code: 64,
+              stderr: `[archive.extract] refusing staging merge: destination path ${destination}/app/file is a symlink`,
+            },
+          },
+        ],
+      }
+    )
+    vi.spyOn(mockSsh, "sha256").mockResolvedValue(archiveSha)
+    vi.spyOn(mockSsh, "writeFile").mockResolvedValue()
+
+    const mod = archive.extract(src, destination)
+    const result = await mod.apply(mockSsh, emptyEnv)
+
+    expect(result.status).toBe("failed")
+    expect(String(result.error)).toContain("failed to copy extracted files")
+    expect(String(result.error)).toContain("refusing staging merge")
+    expect(mockSsh.writeFile).not.toHaveBeenCalled()
+    expect(mockSsh.calls.some((c) => archiveStageCleanupPattern.test(c))).toBe(true)
+  })
+
   it("rejects a destination that resolves elsewhere after mkdir -p", async () => {
     const mockSsh = createMockSsh(
       {
@@ -1702,6 +1735,9 @@ describe("archive.extract — apply", () => {
     expect(result.status).toBe("changed")
     const mergeCommand = mockSsh.calls.find((c) => archiveStageMovePattern.test(c))
     expect(mergeCommand).toContain("cp -aT --remove-destination")
+    expect(mergeCommand).toContain('readlink -f -- "$destination"')
+    expect(mergeCommand).toContain('[ -L "$guarded_path" ]')
+    expect(mergeCommand).toContain('[ -L "$target_path" ]')
     expect(mergeCommand).toContain("--remove-destination")
   })
 
