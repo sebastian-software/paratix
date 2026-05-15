@@ -4,6 +4,7 @@ import { basename, join, resolve } from "node:path"
 
 import type { SelectFunction, SelectOption } from "./promptUi.js"
 
+import { CliExitError } from "./cliExitError.js"
 import { hasValidOpenSshPublicKeyWireBlob } from "./openSshPublicKeyWire.js"
 import { containsUnsafeCodepoint } from "./unsafeCodepoints.js"
 
@@ -304,11 +305,9 @@ function createPublicKeyModeOptions(
   return PUBLIC_KEY_PROMPT_OPTIONS.filter((option) => option.value !== "placeholder")
 }
 
-function printNoLocalPublicKeysMessage(allowPlaceholder: boolean): void {
+function printNoLocalPublicKeysMessage(): void {
   console.error(
-    allowPlaceholder
-      ? "No readable public keys were found in ~/.ssh. Keeping the placeholder in server.ts."
-      : "No readable public keys were found in ~/.ssh. Root bootstrap requires an admin public key."
+    "No readable public keys were found in ~/.ssh. Keeping the placeholder in server.ts."
   )
 }
 
@@ -328,7 +327,12 @@ export async function promptForAdminPublicKey(
   }
 
   if (publicKeys.length === 0) {
-    printNoLocalPublicKeysMessage(allowPlaceholder)
+    if (!allowPlaceholder) {
+      throw new CliExitError(
+        "Error: Root bootstrap requires an admin SSH public key, but no readable public keys were found in ~/.ssh. Provide one via --admin-public-key or --admin-public-key-file."
+      )
+    }
+    printNoLocalPublicKeysMessage()
     return undefined
   }
 
