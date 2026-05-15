@@ -275,6 +275,25 @@ export const pkg = {
                 result
               )
             }
+            // R-0000535: a zero exit code from the package-manager install
+            // is not sufficient evidence that every requested package is
+            // actually present (e.g. apt-get can "succeed" with partial
+            // installs, virtual packages can resolve to nothing, mirrors can
+            // skip packages without erroring). Re-check each requested
+            // package individually and surface the still-missing names as a
+            // failed result instead of optimistically reporting `changed`.
+            const stillMissing: string[] = []
+            for (const verifyName of packages) {
+              // eslint-disable-next-line no-await-in-loop -- post-install verification per package
+              if (!(await isPackageInstalled(ssh, pm, verifyName))) {
+                stillMissing.push(verifyName)
+              }
+            }
+            if (stillMissing.length > 0) {
+              return failed(
+                `[package.installed: ${packages.join(", ")}] packages still missing after install: ${stillMissing.join(", ")}`
+              )
+            }
             return { status: "changed" }
           }
         }
