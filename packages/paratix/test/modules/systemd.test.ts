@@ -111,6 +111,7 @@ describe("systemd.masked", () => {
 
   it("apply executes systemctl mask and returns changed on success", async () => {
     const ssh = createMockSsh({
+      "systemctl is-enabled -- 'apt-daily.timer'": { code: 0, stdout: "enabled\n" },
       "systemctl mask -- 'apt-daily.timer'": { code: 0 },
     })
     const mod = systemd.masked("apt-daily.timer")
@@ -121,6 +122,7 @@ describe("systemd.masked", () => {
 
   it("apply returns failed when systemctl mask exits with non-zero code", async () => {
     const ssh = createMockSsh({
+      "systemctl is-enabled -- 'apt-daily.timer'": { code: 0, stdout: "enabled\n" },
       "systemctl mask -- 'apt-daily.timer'": { code: 1 },
     })
     const mod = systemd.masked("apt-daily.timer")
@@ -575,6 +577,7 @@ describe("systemd.unmasked", () => {
 
   it("apply executes systemctl unmask and returns changed on success", async () => {
     const ssh = createMockSsh({
+      "systemctl is-enabled -- 'apt-daily.timer'": { code: 1, stdout: "masked\n" },
       "systemctl unmask -- 'apt-daily.timer'": { code: 0 },
     })
     const mod = systemd.unmasked("apt-daily.timer")
@@ -585,6 +588,7 @@ describe("systemd.unmasked", () => {
 
   it("apply returns failed when systemctl unmask exits with non-zero code", async () => {
     const ssh = createMockSsh({
+      "systemctl is-enabled -- 'apt-daily.timer'": { code: 1, stdout: "masked\n" },
       "systemctl unmask -- 'apt-daily.timer'": { code: 1 },
     })
     const mod = systemd.unmasked("apt-daily.timer")
