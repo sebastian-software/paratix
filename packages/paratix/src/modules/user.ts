@@ -141,9 +141,33 @@ async function shadowHashMatches(
   name: string,
   password: string
 ): Promise<boolean> {
-  const shadowEntry = await ssh.output(`getent shadow ${shellQuote(name)}`)
-  const currentHash = shadowEntry.split(":")[1] ?? ""
-  return currentHash === password
+  // R-0000544: compare the shadow hash server-side so the raw hash never
+  // travels back as stdout (where it could land in failure snippets or
+  // verbose-error output). The new hash is streamed in via stdin (masked as
+  // a secret) and the comparison is performed in a tiny bash script: extract
+  // the stored hash with `getent shadow | cut -d: -f2`, then `cmp -s` it
+  // against the stdin payload via process substitution. Only the exit code
+  // (0 = match, non-zero = mismatch/error) flows back over SSH; the raw
+  // hashes never appear in stdout or stderr.
+  registerSecret(password)
+  try {
+    // Run the comparison through `bash -c` so process substitution `<()` is
+    // available regardless of the login shell of the remote user. `getent
+    // shadow` terminates its line with a newline that `cut` preserves, so
+    // the caller-provided hash is forwarded with a trailing newline to keep
+    // both inputs byte-for-byte comparable.
+    const compareScript = `set -o pipefail
+cmp -s <(getent shadow ${shellQuote(name)} | cut -d: -f2) -`
+    const result = await ssh.exec(`bash -c ${shellQuote(compareScript)}`, {
+      ignoreExitCode: true,
+      input: `${password}\n`,
+      secrets: [password],
+      silent: true,
+    })
+    return result.code === 0
+  } finally {
+    unregisterSecret(password)
+  }
 }
 
 type UserMutationContext = {
