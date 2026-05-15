@@ -293,6 +293,14 @@ export const systemd = {
     return {
       async apply(ssh: null | SshConnection): Promise<ModuleResult> {
         if (!ssh) return failed(`[systemd.masked: ${name}] SSH connection is required`)
+        // R-0000490: short-circuit when the unit is already masked. Mirrors
+        // the `is-enabled` probe used in the check function so apply does
+        // not emit `changed` for a converged state.
+        const probe = await ssh.exec(`${SYSTEMCTL} is-enabled -- ${shellQuote(unitName)}`, {
+          ignoreExitCode: true,
+          silent: true,
+        })
+        if (probe.stdout.trim().includes("masked")) return { status: "ok" }
         const result = await ssh.exec(`${SYSTEMCTL} mask -- ${shellQuote(unitName)}`, {
           ignoreExitCode: true,
           silent: true,
@@ -363,6 +371,14 @@ export const systemd = {
     return {
       async apply(ssh: null | SshConnection): Promise<ModuleResult> {
         if (!ssh) return failed(`[systemd.unmasked: ${name}] SSH connection is required`)
+        // R-0000490: short-circuit when the unit is already unmasked. Mirrors
+        // the `is-enabled` probe used in the check function so apply does
+        // not emit `changed` for a converged state.
+        const probe = await ssh.exec(`${SYSTEMCTL} is-enabled -- ${shellQuote(unitName)}`, {
+          ignoreExitCode: true,
+          silent: true,
+        })
+        if (!probe.stdout.trim().includes("masked")) return { status: "ok" }
         const result = await ssh.exec(`${SYSTEMCTL} unmask -- ${shellQuote(unitName)}`, {
           ignoreExitCode: true,
           silent: true,
