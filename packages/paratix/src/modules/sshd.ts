@@ -152,7 +152,11 @@ async function ensurePrivilegeSeparationDirectory(ssh: SshConnection): Promise<v
 }
 
 async function captureSshSocketState(ssh: SshConnection): Promise<SshSocketState> {
-  const socketExists = await ssh.exec("systemctl cat ssh.socket >/dev/null 2>&1", {
+  // R-0000492: rely on `silent: true` to swallow stdout/stderr instead of
+  // embedding shell redirects in the command string. Keeps the helper
+  // consistent with the rest of the codebase and avoids shell-metacharacter
+  // surprises.
+  const socketExists = await ssh.exec("systemctl cat ssh.socket", {
     ignoreExitCode: true,
     silent: true,
   })
@@ -203,7 +207,9 @@ async function restoreSocketActivatedSsh(
 }
 
 async function resolveSshServiceUnit(ssh: SshConnection): Promise<SshdServiceUnit> {
-  const sshdExists = await ssh.exec(`${SYSTEMCTL} cat sshd.service >/dev/null 2>&1`, {
+  // R-0000492: drop shell redirects and rely on `silent: true` for output
+  // suppression, matching the codebase convention.
+  const sshdExists = await ssh.exec(`${SYSTEMCTL} cat sshd.service`, {
     ignoreExitCode: true,
     silent: true,
   })
@@ -211,7 +217,7 @@ async function resolveSshServiceUnit(ssh: SshConnection): Promise<SshdServiceUni
     return "sshd"
   }
 
-  const sshExists = await ssh.exec(`${SYSTEMCTL} cat ssh.service >/dev/null 2>&1`, {
+  const sshExists = await ssh.exec(`${SYSTEMCTL} cat ssh.service`, {
     ignoreExitCode: true,
     silent: true,
   })
