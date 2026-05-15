@@ -121,19 +121,65 @@ describe("pkg.installed", () => {
   // apply
 
   it("apply returns changed when install succeeds (apt)", async () => {
-    const ssh = createMockSsh({
-      ...APT_FOUND,
-      "DEBIAN_FRONTEND=noninteractive apt-get install -y -- 'nginx' 'curl'": { code: 0 },
-    })
+    // R-0000535: runInstallAndVerify re-checks each package after install.
+    // apply() first calls hasAnyMissingPackage (pre-install), then runs the
+    // install, then calls collectStillMissingPackages (post-install verify).
+    // We use a sequential mock for the dpkg-query test calls: the first call
+    // per package returns false (not installed → proceed to install), subsequent
+    // calls return true (installed → verify passes → changed).
+    const dpkgNginx = "dpkg-query -W -f='${Status}' 'nginx' 2>/dev/null | grep -q 'install ok installed'"
+    const dpkgCurl = "dpkg-query -W -f='${Status}' 'curl' 2>/dev/null | grep -q 'install ok installed'"
+    // Track whether install has been executed to distinguish pre/post checks.
+    let installExecuted = false
+    const ssh = createMockSsh(
+      {
+        ...APT_FOUND,
+      },
+      { defaultTestResult: true }
+    )
+    // Override exec() to intercept the install command and set the flag.
+    const originalExec = ssh.exec.bind(ssh)
+    ssh.exec = async (command: string, options?: import("../../src/types.js").ExecOptions) => {
+      if (command === "DEBIAN_FRONTEND=noninteractive apt-get install -y -- 'nginx' 'curl'") {
+        installExecuted = true
+        ssh.calls.push(command)
+        ssh.execCalls.push({ command, options })
+        return { code: 0, stderr: "", stdout: "" }
+      }
+      return originalExec(command, options)
+    }
+    // Override test() to return false (missing) before install, true after.
+    const originalTest = ssh.test.bind(ssh)
+    ssh.test = async (command: string) => {
+      if ((command === dpkgNginx || command === dpkgCurl) && !installExecuted) {
+        return false
+      }
+      return originalTest(command)
+    }
     const mod = pkg.installed("nginx", "curl")
     expect(await mod.apply(ssh, emptyEnv)).toStrictEqual({ status: "changed" })
+    expect(ssh.calls).toContain("DEBIAN_FRONTEND=noninteractive apt-get install -y -- 'nginx' 'curl'")
   })
 
   it("apply forwards options.timeout when last argument is an options object", async () => {
-    const ssh = createMockSsh({
-      ...APT_FOUND,
-      "DEBIAN_FRONTEND=noninteractive apt-get install -y -- 'texlive-full'": { code: 0 },
-    })
+    // R-0000535: runInstallAndVerify re-checks each package after install.
+    const dpkgTexlive = "dpkg-query -W -f='${Status}' 'texlive-full' 2>/dev/null | grep -q 'install ok installed'"
+    const preInstallDone = { value: false }
+    const ssh = createMockSsh(
+      {
+        ...APT_FOUND,
+        "DEBIAN_FRONTEND=noninteractive apt-get install -y -- 'texlive-full'": { code: 0 },
+      },
+      { defaultTestResult: true }
+    )
+    const originalTest = ssh.test.bind(ssh)
+    ssh.test = async (command: string) => {
+      if (command === dpkgTexlive && !preInstallDone.value) {
+        preInstallDone.value = true
+        return false
+      }
+      return originalTest(command)
+    }
     const mod = pkg.installed("texlive-full", { timeout: 600_000 })
     const result = await mod.apply(ssh, emptyEnv)
     expect(result).toStrictEqual({ status: "changed" })
@@ -656,13 +702,15 @@ describe("package manager detection", () => {
   })
 
   it("uses apk when apt-get, dnf and yum are absent but apk is present", async () => {
+    // R-0000: apk add now uses the argument terminator `--` to prevent
+    // package names starting with `-` from being interpreted as flags.
     const ssh = createMockSsh({
       ...APK_FOUND,
-      "apk add 'nginx'": { code: 0 },
+      "apk add -- 'nginx'": { code: 0 },
     })
     const mod = pkg.installed("nginx")
     await mod.apply(ssh, emptyEnv)
-    expect(ssh.calls).toContain("apk add 'nginx'")
+    expect(ssh.calls).toContain("apk add -- 'nginx'")
   })
 
   it("uses correct remove command for dnf", async () => {
@@ -677,14 +725,15 @@ describe("package manager detection", () => {
   })
 
   it("uses correct remove command for apk", async () => {
+    // R-0000: apk del now uses the argument terminator `--`.
     const ssh = createMockSsh({
       ...APK_FOUND,
-      "apk del 'nginx'": { code: 0 },
+      "apk del -- 'nginx'": { code: 0 },
       "apk info -e 'nginx'": { code: 0 },
     })
     const mod = pkg.absent("nginx")
     await mod.apply(ssh, emptyEnv)
-    expect(ssh.calls).toContain("apk del 'nginx'")
+    expect(ssh.calls).toContain("apk del -- 'nginx'")
   })
 
   it("uses correct update command for dnf (makecache)", async () => {
