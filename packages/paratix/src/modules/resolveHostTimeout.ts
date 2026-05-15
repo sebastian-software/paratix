@@ -18,11 +18,28 @@ const SECONDS_PER_HALF_MINUTE = 30
 export const RESOLVE_HOST_DEFAULT_TIMEOUT_MS = SECONDS_PER_HALF_MINUTE * MILLISECONDS_PER_SECOND
 
 /**
+ * R-0000575: callable shape for `resolveHost`. The optional `AbortSignal`
+ * argument lets callers like `resolveHostWithTimeout` signal cancellation
+ * when the wall-clock timeout elapses, so a long-running DNS/cloud lookup
+ * can drop its in-flight work instead of running to completion in the
+ * background. The argument is optional to keep existing zero-arg callbacks
+ * source-compatible — callers that don't care can keep their current
+ * signature.
+ */
+export type ResolveHostCallback = (signal?: AbortSignal) => Promise<string>
+
+/**
  * Run `resolveHost` with a wall-clock timeout. Rejects with a descriptive
  * Error when the resolver does not settle in time so callers can surface a
  * `failed` module result instead of stalling.
  *
- * @param resolveHost - The user-supplied resolver callback.
+ * R-0000575: the resolver receives an `AbortSignal` which is aborted when
+ * the timeout fires. Resolver implementations that honor the signal can
+ * release any in-flight resources (DNS queries, HTTP requests) instead of
+ * running to completion in the background.
+ *
+ * @param resolveHost - The user-supplied resolver callback. Will be invoked
+ *   with an `AbortSignal` that fires once the timeout elapses.
  * @param timeoutMs - Optional override; defaults to
  *   {@link RESOLVE_HOST_DEFAULT_TIMEOUT_MS}.
  * @returns The resolved host string.
@@ -30,14 +47,21 @@ export const RESOLVE_HOST_DEFAULT_TIMEOUT_MS = SECONDS_PER_HALF_MINUTE * MILLISE
  *   before the resolver settles.
  */
 export async function resolveHostWithTimeout(
-  resolveHost: () => Promise<string>,
+  resolveHost: ResolveHostCallback,
   timeoutMs: number = RESOLVE_HOST_DEFAULT_TIMEOUT_MS
 ): Promise<string> {
   return new Promise<string>((resolve, reject) => {
+    const controller = new AbortController()
     const timer = setTimeout(() => {
+      // R-0000575: signal cancellation to the resolver before rejecting so
+      // any abortable work (DNS, HTTP) tied to the supplied signal stops
+      // promptly. Resolvers that ignore the signal still get the historical
+      // behaviour: they keep running, just without anyone observing the
+      // eventual result.
+      controller.abort()
       reject(new Error(`resolveHost timed out after ${String(timeoutMs)}ms`))
     }, timeoutMs)
-    resolveHost().then(
+    resolveHost(controller.signal).then(
       (value) => {
         clearTimeout(timer)
         resolve(value)
@@ -66,7 +90,7 @@ export async function resolveHostWithTimeout(
  */
 export async function buildRebootMetaEntriesWithTimeout(options: {
   failurePrefix: string
-  resolveHost?: () => Promise<string>
+  resolveHost?: ResolveHostCallback
   timeoutMs?: number
 }): Promise<ModuleMetaEntry[] | ModuleResult> {
   const entries: ModuleMetaEntry[] = [meta.systemReboot()]

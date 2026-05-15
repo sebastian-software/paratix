@@ -7,7 +7,10 @@ import {
   NEEDS_APPLY,
   type SshConnection,
 } from "../types.js"
-import { buildRebootMetaEntriesWithTimeout } from "./resolveHostTimeout.js"
+import {
+  buildRebootMetaEntriesWithTimeout,
+  type ResolveHostCallback,
+} from "./resolveHostTimeout.js"
 
 /**
  * Options for the reboot module.
@@ -16,8 +19,12 @@ export type RebootOptions = {
   /**
    * Optional async function to resolve the new host address after a reboot.
    * Useful when the server's IP address may change (e.g. DHCP or cloud environments).
+   *
+   * R-0000575: the callback receives an `AbortSignal` that fires when the
+   * configured timeout elapses. Honoring the signal lets DNS/cloud lookups
+   * abort their in-flight work promptly.
    */
-  resolveHost?: () => Promise<string>
+  resolveHost?: ResolveHostCallback
   /**
    * Wall-clock timeout (ms) applied to {@link RebootOptions.resolveHost}.
    * Defaults to 30 seconds. Mirrors R-0000243 in
