@@ -717,7 +717,9 @@ export function collectEnvironment(
   // R-0000478: use a null-prototype accumulator so the merged environment
   // never inherits keys like `__proto__` or `toString` from Object.prototype.
   // Mirrors the shape produced by `loadDotEnvironment` / `mergeEnvironment`.
-  return Object.assign(Object.create(null) as Record<string, string>, previous, { [key]: value_ })
+  // eslint-disable-next-line @typescript-eslint/no-unsafe-type-assertion -- intentional: Object.create(null) is the prototype-pollution defense
+  const accumulator = Object.create(null) as Record<string, string>
+  return Object.assign(accumulator, previous, { [key]: value_ })
 }
 
 // Only parse when executed directly, not when imported (e.g. in tests)

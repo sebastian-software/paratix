@@ -233,18 +233,10 @@ export const ufw = {
       async apply(ssh: null | SshConnection): Promise<ModuleResult> {
         if (!ssh) return failed("[ufw.disabled] SSH connection is required")
         const pm = await detectPackageManager(ssh)
-        if (pm == null || !(await isPackageInstalled(ssh, pm, UFW))) {
-          return { status: "ok" }
-        }
-
-        // R-0000489: short-circuit when ufw is already inactive so apply
-        // does not emit `changed` for a converged state. Mirrors the
-        // pre-check used in ufw.enabled.apply.
+        if (pm == null || !(await isPackageInstalled(ssh, pm, UFW))) return { status: "ok" }
+        // R-0000489: skip the disable when ufw is already inactive.
         const status = await readUfwStatus(ssh)
-        if (status != null && status.includes("Status: inactive")) {
-          return { status: "ok" }
-        }
-
+        if (status?.includes("Status: inactive")) return { status: "ok" }
         const result = await ssh.exec(`${UFW} --force disable`, {
           ignoreExitCode: true,
           silent: true,

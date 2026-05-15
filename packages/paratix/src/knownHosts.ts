@@ -38,6 +38,7 @@ async function withKnownHostsLock<T>(operation: () => Promise<T> | T): Promise<T
 }
 
 type HostVerifierOptions = {
+  cache?: HostKeyCache
   expectedHostFingerprint?: string
   expectedHostPublicKey?: string
 }
@@ -128,6 +129,8 @@ const defaultHostKeyCache: HostKeyCache = new Map<string, Buffer>()
  * / reconnect attempt; that keeps the in-memory trust state scoped to the
  * owning connection while preserving process-lifetime caching across
  * reconnects of the same instance.
+ *
+ * @returns A fresh, empty per-connection host key cache.
  */
 export function createHostKeyCache(): HostKeyCache {
   return new Map<string, Buffer>()
@@ -426,17 +429,17 @@ function loadKnownHostEntries(): KnownHostEntry[] {
  * disk fails, a recovery hint with the equivalent `ssh-keyscan` command is
  * printed to stderr.
  *
- * @param host - The hostname or IP of the remote host.
- * @param port - The SSH port of the remote host.
+ * @param location - The target host and SSH port to persist the key for.
  * @param key - The raw public key buffer presented by the remote host.
+ * @param cache - The per-connection in-memory host key cache to update.
  * @returns A promise that resolves once the key has been written to disk (or the write error has been handled).
  */
 async function acceptAndPersistHostKey(
-  host: string,
-  port: number,
+  location: HostLocation,
   key: Buffer,
   cache: HostKeyCache
 ): Promise<void> {
+  const { host, port } = location
   try {
     const algo = extractAlgoFromKey(key)
     const fingerprint = computeFingerprint(key)
@@ -562,7 +565,7 @@ function verifyPinnedHostKey(host: string, key: Buffer, options: HostVerifierOpt
  *
  * @param mode - The host key verification strategy.
  * @param location - The target host and SSH port.
- * @param options - Optional pinned trust anchors for the remote host.
+ * @param options - Optional pinned trust anchors and per-connection cache override.
  * @returns An object with `hostVerifier` set (or empty for mode `"no"`).
  * @throws {Error} When a known host key does not match the presented key (all modes except `"no"`).
  * @throws {Error} When no known_hosts entry exists for the host and mode is `"yes"`.
@@ -570,9 +573,9 @@ function verifyPinnedHostKey(host: string, key: Buffer, options: HostVerifierOpt
 export async function buildHostVerifier(
   mode: "accept-new" | "no" | "yes",
   location: HostLocation,
-  options: HostVerifierOptions = {},
-  cache: HostKeyCache = defaultHostKeyCache
+  options: HostVerifierOptions = {}
 ): Promise<HostVerifierResult> {
+  const cache = options.cache ?? defaultHostKeyCache
   const { host, port } = location
   if (mode === "no" && !hasPinnedHostTrustAnchor(options)) return {}
 
@@ -583,7 +586,7 @@ export async function buildHostVerifier(
 
   const result: { hostVerifier: (key: Buffer) => boolean } & HostVerifierResult = {
     async commitAcceptedHostKey(): Promise<void> {
-      if (acceptedHostKey != null) await acceptAndPersistHostKey(host, port, acceptedHostKey, cache)
+      if (acceptedHostKey != null) await acceptAndPersistHostKey(location, acceptedHostKey, cache)
     },
     hostVerifier(key: Buffer): boolean {
       if (

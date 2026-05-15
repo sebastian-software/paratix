@@ -69,7 +69,7 @@ function sameWriteOptions(
   actual: WriteFileCall["options"],
   expected: WriteFileCall["options"]
 ): boolean {
-  return (actual?.mode ?? null) === (expected?.mode ?? null)
+  return actual.mode === expected.mode
 }
 
 function matchesPath(actual: string, expected: PathAllowlistEntry): boolean {

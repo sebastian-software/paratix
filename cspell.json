@@ -24,6 +24,7 @@
     "debian",
     "debconf",
     "dpkg",
+    "dropins",
     "fallocate",
     "findmnt",
     "fstab",
@@ -93,6 +94,7 @@
     "passwordless",
     "podman",
     "quadlet",
+    "recognisable",
     "recognised",
     "recognises",
     "redir",
@@ -126,6 +128,7 @@
     "uids",
     "umount",
     "uninitialised",
+    "unparseable",
     "unredacted",
     "unstubbed",
     "unvalidated",
@@ -136,6 +139,7 @@
     "userdel",
     "userlist",
     "usermod",
-    "worktree"
+    "worktree",
+    "Xstugo"
   ]
 }

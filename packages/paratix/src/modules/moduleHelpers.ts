@@ -124,27 +124,15 @@ function flagLockName(flagName: string): string {
 }
 
 async function writeFlagLockHolderMarker(ssh: SshConnection, lockName: string): Promise<void> {
+  // R-0000494: capture hostname via ssh.output (not inline `$(hostname)`).
+  const hostname = await ssh
+    .output("hostname")
+    .then((rawHostname) => rawHostname.trim())
+    .catch(() => "")
   const markerPath = `${flagPath(lockName)}/${HOLDER_MARKER_NAME}`
-  // R-0000494: capture hostname via a dedicated `ssh.output` call instead of
-  // an inline `$(hostname)` substitution so unusual remote hostnames (quotes,
-  // shell metacharacters) cannot break the marker write. The marker is
-  // informational only — if the hostname lookup fails or returns empty, fall
-  // back to an empty string. Staleness is decided via the marker's mtime.
-  let hostname = ""
-  try {
-    hostname = (await ssh.output("hostname")).trim()
-  } catch {
-    hostname = ""
-  }
-  // The marker captures pid, hostname and unix timestamp so an operator can
-  // identify a stale lock holder. The exact contents are informational only —
-  // staleness is decided via the marker's mtime.
   await ssh.exec(
     `printf '%s@%s %s\\n' "$$" ${shellQuote(hostname)} "$(date +%s)" > ${markerPath}`,
-    {
-      ignoreExitCode: true,
-      silent: true,
-    }
+    { ignoreExitCode: true, silent: true }
   )
 }
 

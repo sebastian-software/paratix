@@ -2,6 +2,8 @@ import type * as NodeFsPromises from "node:fs/promises"
 
 import { describe, expect, it, vi } from "vitest"
 
+import type { SshConnection } from "../../src/types.js"
+
 import { compose } from "../../src/index.js"
 import { createStrictMockSsh } from "../helpers/mockSsh.js"
 
@@ -21,6 +23,19 @@ const mktempCommand = `mktemp '${projectDirectory}/.compose.yml.paratix-staging.
 // Helper: build the compose command prefix for a given runtime
 function composeCmd(runtime: "docker" | "podman"): string {
   return `${runtime} compose --project-directory '${projectDirectory}'`
+}
+
+type ExecLike = SshConnection["exec"]
+
+function buildValidationFailingExec(
+  originalExec: ExecLike,
+  validationError: Error,
+  triggerFragment: string
+): ExecLike {
+  return async (command, options) =>
+    command.includes(triggerFragment)
+      ? Promise.reject(validationError)
+      : originalExec(command, options)
 }
 
 function createComposeMockSsh(
@@ -733,7 +748,7 @@ describe("compose.config — apply", () => {
     expect(results).toStrictEqual([{ status: "changed" }, { status: "changed" }])
     const writeFileRemotePaths = mockSsh.writeFileCalls.map((call) => call.remotePath)
     expect(writeFileRemotePaths).toHaveLength(2)
-    expect(new Set(writeFileRemotePaths)).toStrictEqual(new Set([stagingPath, secondStagingPath]))
+    expect(new Set(writeFileRemotePaths)).toStrictEqual(new Set([secondStagingPath, stagingPath]))
     expect(outputMock).toHaveBeenNthCalledWith(1, mktempCommand)
     expect(outputMock).toHaveBeenNthCalledWith(2, mktempCommand)
     expect(mockSsh.calls).toContain(`${composeCmd("podman")} -f '${stagingPath}' config --quiet`)
@@ -894,12 +909,9 @@ describe("compose.config — apply", () => {
     // call order: only throw when the validation command (`config --quiet`) is
     // executed, otherwise delegate to the original mockSsh.exec implementation.
     const originalExec = mockSsh.exec.bind(mockSsh)
-    vi.spyOn(mockSsh, "exec").mockImplementation(async (command, options) => {
-      if (command.includes("config --quiet")) {
-        throw validationError
-      }
-      return originalExec(command, options)
-    })
+    vi.spyOn(mockSsh, "exec").mockImplementation(
+      buildValidationFailingExec(originalExec, validationError, "config --quiet")
+    )
     mockSsh.writeFile = async (
       path: string,
       content: string,

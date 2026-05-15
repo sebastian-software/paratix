@@ -258,6 +258,8 @@ export async function expectProcessExit(
  * themselves will see the message leak to stderr, so most test bodies
  * should `vi.spyOn(console, "error").mockImplementation(() => {})` before
  * triggering the stub.
+ *
+ * @param message - The raw error message to emit and throw.
  */
 export function throwExitError(message: string): never {
   console.error(message)

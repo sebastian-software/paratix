@@ -164,17 +164,18 @@ function validateSingleLineNetworkValues(label: string, values?: string[]): void
   }
 }
 
-// R-0000485 / R-0000488: addresses are written into netplan YAML or
-// networkd ini files. A bare IP without prefix length or a malformed token
-// can inject configuration lines, so enforce a strict CIDR shape and verify
-// the IP portion with `node:net`'s `isIP()`.
-const CIDR_PATTERN = /^(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}|[0-9a-fA-F:]+)\/\d{1,3}$/v
+// R-0000485 / R-0000488: addresses are written into netplan YAML or networkd
+// ini files. A bare IP without a prefix length or a malformed token can inject
+// configuration lines, so enforce a strict CIDR shape (IP portion plus a small
+// integer prefix length) and verify the IP portion with `node:net`'s `isIP()`.
+const PREFIX_LENGTH_PATTERN = /^\d{1,3}$/v
 
 function isValidCidr(value: string): boolean {
-  const match = CIDR_PATTERN.exec(value)
-  if (match === null) return false
-  const ipPortion = match[1]
-  if (ipPortion === undefined) return false
+  const slashIndex = value.lastIndexOf("/")
+  if (slashIndex === -1) return false
+  const ipPortion = value.slice(0, slashIndex)
+  const prefixPortion = value.slice(slashIndex + 1)
+  if (!PREFIX_LENGTH_PATTERN.test(prefixPortion)) return false
   return isIP(ipPortion) !== 0
 }
 
@@ -190,7 +191,9 @@ function validateInterfaceAddress(value: string): void {
 function validateInterfaceIpToken(label: string, value: string): void {
   validateSingleLineNetworkValue(label, value)
   if (isIP(value) === 0) {
-    throw new Error(`[net.interface] invalid ${label} ${JSON.stringify(value)}: value must be a valid IPv4 or IPv6 address`)
+    throw new Error(
+      `[net.interface] invalid ${label} ${JSON.stringify(value)}: value must be a valid IPv4 or IPv6 address`
+    )
   }
 }
 

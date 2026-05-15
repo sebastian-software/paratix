@@ -269,15 +269,6 @@ export class SshConnectionImpl implements SshConnection {
    */
   private connectionAbortController: AbortController = new AbortController()
   /**
-   * R-0000479: per-instance in-memory cache for host keys accepted via
-   * accept-new TOFU. Scoping the map to the connection prevents two parallel
-   * SshConnectionImpl instances pointed at the same `[host]:port` from
-   * overwriting each other's pinned keys. The cache survives reconnects of
-   * the same instance, preserving the original process-lifetime caching
-   * behavior expected by the reconnect path.
-   */
-  private readonly hostKeyCache: HostKeyCache = createHostKeyCache()
-  /**
    * Tracks whether the remote host's sudo timestamp has been primed so that
    * subsequent `sudo -n` calls can succeed without prompting. Set to `true`
    * once `cacheAndValidateSudoPassword` has authenticated via `sudo -S` and
@@ -289,6 +280,15 @@ export class SshConnectionImpl implements SshConnection {
    * payload, so the previous fail-closed branch becomes a working path.
    */
   private credentialCachePrimed = false
+  /**
+   * R-0000479: per-instance in-memory cache for host keys accepted via
+   * accept-new TOFU. Scoping the map to the connection prevents two parallel
+   * SshConnectionImpl instances pointed at the same `[host]:port` from
+   * overwriting each other's pinned keys. The cache survives reconnects of
+   * the same instance, preserving the original process-lifetime caching
+   * behavior expected by the reconnect path.
+   */
+  private readonly hostKeyCache: HostKeyCache = createHostKeyCache()
   /**
    * Tracks whether the remote host accepts passwordless sudo for the configured
    * user. Set to `true` after a successful `sudo -n true` probe (see
@@ -610,6 +610,40 @@ export class SshConnectionImpl implements SshConnection {
     }
   }
 
+  private async agentSocketExists(agent: string): Promise<boolean> {
+    try {
+      // eslint-disable-next-line security/detect-non-literal-fs-filename -- agent is validated from SSH_AUTH_SOCK env var
+      await stat(agent)
+      return true
+    } catch {
+      return false
+    }
+  }
+
+  /**
+   * Reject any destination directory whose path contains a symbolic link
+   * component. Resolving via `realpath -m` lets the check tolerate trailing
+   * components that do not yet exist while still detecting symlinks earlier
+   * in the path.
+   *
+   * @param directory - The destination directory derived from `posix.dirname`.
+   * @param remotePath - Original remote path (used for the diagnostic message).
+   * @throws {Error} when at least one component of `directory` is a symlink.
+   */
+  private async assertDirnameHasNoSymlinkComponent(
+    directory: string,
+    remotePath: string
+  ): Promise<void> {
+    if (directory === "" || directory === "/") return
+    const result = await this.output(`realpath -m -- ${shellQuote(directory)}`)
+    const resolved = result.trim()
+    if (resolved !== directory) {
+      throw new Error(
+        `[ssh.mktemp: ${remotePath}] destination directory ${directory} resolves to ${resolved}; refusing to mktemp because at least one path component is a symbolic link`
+      )
+    }
+  }
+
   private async assertRemoteFileSize(
     remotePath: string,
     expectedSize: number,
@@ -648,125 +682,6 @@ export class SshConnectionImpl implements SshConnection {
         `[ssh.${operation}: ${remotePath}] remote file size mismatch after upload; expected ${expectedSize} bytes, got ${actualSize}`
       )
     }
-  }
-
-  private async checkRemoteDiskSpace(
-    remotePath: string
-  ): Promise<{ availableBytes: number; mountpoint: string } | null> {
-    const DF_MIN_COLUMNS = 6
-    const DF_AVAILABLE_INDEX = 3
-    const DF_MOUNTPOINT_INDEX = 5
-    const KB_TO_BYTES = 1024
-    try {
-      const directory = remotePath.includes("/")
-        ? remotePath.slice(0, remotePath.lastIndexOf("/")) || "/"
-        : "."
-      const dfOutput = await this.output(`df -P ${shellQuote(directory)}`)
-      const lines = dfOutput.trim().split("\n")
-      if (lines.length < 2) return null
-      const columns = lines[1].split(/\s+/v)
-      if (columns.length < DF_MIN_COLUMNS) return null
-      const availableKb = Number(columns[DF_AVAILABLE_INDEX])
-      if (!Number.isFinite(availableKb)) return null
-      return { availableBytes: availableKb * KB_TO_BYTES, mountpoint: columns[DF_MOUNTPOINT_INDEX] }
-    } catch {
-      return null
-    }
-  }
-
-  /* eslint-disable perfectionist/sort-classes -- writeFile recovery helpers stay grouped for this fix */
-  private async cleanupWriteFileTemporaryPath(remoteTemporary: string): Promise<void> {
-    try {
-      await this.cleanupRemoteTempFile(remoteTemporary)
-    } catch (cleanupError) {
-      process.stderr.write(
-        `Warning: failed to remove temp file ${remoteTemporary}: ${maskSecrets(String(cleanupError), this.buildSecrets())}\n`
-      )
-    }
-  }
-
-  private async cleanupPrivilegedRemoteTempFile(remotePath: string): Promise<void> {
-    await this.exec(`rm -f ${shellQuote(remotePath)}`, {
-      ignoreExitCode: true,
-      silent: true,
-    })
-  }
-
-  private async createRemotePrivilegedTempPathInDestination(
-    remotePath: string,
-    prefix: string
-  ): Promise<string> {
-    const directory = posix.dirname(remotePath)
-    // R-0000141: refuse to mktemp into a directory whose resolved path differs
-    // from the literal one — that means at least one component of the
-    // destination is a symlink and an attacker could redirect the privileged
-    // temp file (and the subsequent `mv -T`) into a location they control.
-    await this.assertDirnameHasNoSymlinkComponent(directory, remotePath)
-    const template = `${directory}/${prefix}.XXXXXX`
-    const path = await this.output(`mktemp ${shellQuote(template)}`)
-    return validateMktempPath(directory, path, prefix)
-  }
-
-  /**
-   * Reject any destination directory whose path contains a symbolic link
-   * component. Resolving via `realpath -m` lets the check tolerate trailing
-   * components that do not yet exist while still detecting symlinks earlier
-   * in the path.
-   *
-   * @param directory - The destination directory derived from `posix.dirname`.
-   * @param remotePath - Original remote path (used for the diagnostic message).
-   * @throws {Error} when at least one component of `directory` is a symlink.
-   */
-  private async assertDirnameHasNoSymlinkComponent(
-    directory: string,
-    remotePath: string
-  ): Promise<void> {
-    if (directory === "" || directory === "/") return
-    const result = await this.output(`realpath -m -- ${shellQuote(directory)}`)
-    const resolved = result.trim()
-    if (resolved !== directory) {
-      throw new Error(
-        `[ssh.mktemp: ${remotePath}] destination directory ${directory} resolves to ${resolved}; refusing to mktemp because at least one path component is a symbolic link`
-      )
-    }
-  }
-
-  private async ensureRemoteWriteFile(options: {
-    content: string
-    expectedSize: number
-    mode: string
-    remotePath: string
-  }): Promise<void> {
-    // R-0000476: `verifyRemoteWriteFile` reports the size verdict
-    // ("matches" / "empty" / "size-mismatch") and throws
-    // `RemoteStatTransientError` when the underlying `stat` call cannot be
-    // evaluated. The Shell-Fallback only fires for an explicit "needs
-    // rewrite" verdict — transient stat failures propagate so callers can
-    // retry instead of overwriting a remote file that may already be
-    // finalized correctly.
-    const verification = await this.verifyRemoteWriteFile(options.remotePath, options.expectedSize)
-    if (verification === "matches") return
-
-    await this.rewriteRemoteFileViaShell(options.remotePath, options.content, options.mode)
-    const fallbackVerification = await this.verifyRemoteWriteFile(
-      options.remotePath,
-      options.expectedSize
-    )
-    if (fallbackVerification === "matches") return
-    if (fallbackVerification === "empty") {
-      const diskInfo = await this.checkRemoteDiskSpace(options.remotePath)
-      if (diskInfo != null && diskInfo.availableBytes < options.expectedSize) {
-        throw new Error(
-          `[ssh.writeFile: ${options.remotePath}] disk full – ${diskInfo.availableBytes} bytes available on ${diskInfo.mountpoint}; the file was written as 0 bytes because there is no space left on the device`
-        )
-      }
-      throw new Error(
-        `[ssh.writeFile: ${options.remotePath}] remote file is empty after upload/finalize and shell fallback; refusing successful write result`
-      )
-    }
-    throw new Error(
-      `[ssh.writeFile: ${options.remotePath}] remote file size mismatch after upload/finalize and shell fallback; expected ${options.expectedSize} bytes`
-    )
   }
 
   private buildEnvPrefix(environment?: Record<string, string>): string {
@@ -824,6 +739,37 @@ export class SshConnectionImpl implements SshConnection {
     }
   }
 
+  private async checkRemoteDiskSpace(
+    remotePath: string
+  ): Promise<{ availableBytes: number; mountpoint: string } | null> {
+    const DF_MIN_COLUMNS = 6
+    const DF_AVAILABLE_INDEX = 3
+    const DF_MOUNTPOINT_INDEX = 5
+    const KB_TO_BYTES = 1024
+    try {
+      const directory = remotePath.includes("/")
+        ? remotePath.slice(0, remotePath.lastIndexOf("/")) || "/"
+        : "."
+      const dfOutput = await this.output(`df -P ${shellQuote(directory)}`)
+      const lines = dfOutput.trim().split("\n")
+      if (lines.length < 2) return null
+      const columns = lines[1].split(/\s+/v)
+      if (columns.length < DF_MIN_COLUMNS) return null
+      const availableKb = Number(columns[DF_AVAILABLE_INDEX])
+      if (!Number.isFinite(availableKb)) return null
+      return { availableBytes: availableKb * KB_TO_BYTES, mountpoint: columns[DF_MOUNTPOINT_INDEX] }
+    } catch {
+      return null
+    }
+  }
+
+  private async cleanupPrivilegedRemoteTempFile(remotePath: string): Promise<void> {
+    await this.exec(`rm -f ${shellQuote(remotePath)}`, {
+      ignoreExitCode: true,
+      silent: true,
+    })
+  }
+
   private async cleanupRemoteTempFile(remotePath: string): Promise<void> {
     // R-0000196: best-effort cleanup must not propagate errors — a transient
     // SSH failure in a `finally` block would otherwise overwrite the
@@ -844,6 +790,16 @@ export class SshConnectionImpl implements SshConnection {
     }
   }
 
+  private async cleanupWriteFileTemporaryPath(remoteTemporary: string): Promise<void> {
+    try {
+      await this.cleanupRemoteTempFile(remoteTemporary)
+    } catch (cleanupError) {
+      process.stderr.write(
+        `Warning: failed to remove temp file ${remoteTemporary}: ${maskSecrets(String(cleanupError), this.buildSecrets())}\n`
+      )
+    }
+  }
+
   private clearCachedPassword(): void {
     if (this.cachedSudoPassword != null) {
       this.cachedSudoPassword.fill(0)
@@ -855,13 +811,30 @@ export class SshConnectionImpl implements SshConnection {
     this.credentialCachePrimed = false
   }
 
-  private async agentSocketExists(agent: string): Promise<boolean> {
+  private async commitAcceptedHostKey(verifier: HostVerifierResult): Promise<void> {
+    if (verifier.commitAcceptedHostKey != null) {
+      await verifier.commitAcceptedHostKey()
+      return
+    }
+    if (verifier.pendingPersist != null) await verifier.pendingPersist
+  }
+
+  private async commitAcceptedHostKeyAndRegisterClient(
+    client: Client,
+    verifier: HostVerifierResult,
+    port: number
+  ): Promise<void> {
+    const transitionState: { error?: Error } = {}
+    const handleTransitionError = (error: Error): void => {
+      transitionState.error ??= error
+    }
+    client.on("error", handleTransitionError)
     try {
-      // eslint-disable-next-line security/detect-non-literal-fs-filename -- agent is validated from SSH_AUTH_SOCK env var
-      await stat(agent)
-      return true
-    } catch {
-      return false
+      await this.commitAcceptedHostKey(verifier)
+      if (transitionState.error != null) throw transitionState.error
+      this.registerConnectedClient(client, port)
+    } finally {
+      client.removeListener("error", handleTransitionError)
     }
   }
 
@@ -883,24 +856,6 @@ export class SshConnectionImpl implements SshConnection {
     if (await this.tryPasswordFallback(options, agent)) return
     throw new Error(
       `Could not connect to ${this.runtime.host} via SSH agent on ports ${this.runtime.ports.join(", ")}`
-    )
-  }
-
-  /**
-   * Handle the no-agent / no-private-key configuration. When `SSH_AUTH_SOCK`
-   * is unset and `passwordFallback` is enabled, attempt the password path and
-   * surface a diagnostic that names both root causes (missing agent + failed
-   * password auth) instead of a generic "Failed to connect on ports" message.
-   *
-   * @param options - Prompt options forwarded from `connect()`.
-   */
-  private async connectWithoutAgentSocket(options?: ConnectOptions): Promise<void> {
-    if (!this.config.passwordFallback) {
-      throw new Error("No privateKey configured and SSH_AUTH_SOCK is not set")
-    }
-    if (await this.tryPasswordFallback(options)) return
-    throw new Error(
-      `No SSH agent (SSH_AUTH_SOCK is not set) and password authentication failed for ${this.config.user}@${this.runtime.host}`
     )
   }
 
@@ -931,35 +886,75 @@ export class SshConnectionImpl implements SshConnection {
   }
 
   /**
-   * Prompt for a password and retry the connect using both the loaded
-   * private key and the prompt response. R-0000095: the prompt response is
-   * registered in the process-wide secret sink for the duration of the
-   * connect attempt so any thrown diagnostic masks the credential.
+   * Handle the no-agent / no-private-key configuration. When `SSH_AUTH_SOCK`
+   * is unset and `passwordFallback` is enabled, attempt the password path and
+   * surface a diagnostic that names both root causes (missing agent + failed
+   * password auth) instead of a generic "Failed to connect on ports" message.
    *
-   * @param privateKey - The loaded private key buffer to combine with the prompt response.
-   * @param options - Prompt options (e.g. abort signal) forwarded from `connect()`.
-   * @returns `true` when the password attempt succeeded, `false` when the fallback was disabled or all ports refused the credential.
+   * @param options - Prompt options forwarded from `connect()`.
    */
-  private async tryPrivateKeyPasswordFallback(
-    privateKey: Buffer,
-    options?: ConnectOptions
-  ): Promise<boolean> {
-    if (!this.config.passwordFallback) return false
-    const password = await promptTerminal(
-      `Password for ${this.config.user}@${this.runtime.host}: `,
-      true,
-      options
+  private async connectWithoutAgentSocket(options?: ConnectOptions): Promise<void> {
+    if (!this.config.passwordFallback) {
+      throw new Error("No privateKey configured and SSH_AUTH_SOCK is not set")
+    }
+    if (await this.tryPasswordFallback(options)) return
+    throw new Error(
+      `No SSH agent (SSH_AUTH_SOCK is not set) and password authentication failed for ${this.config.user}@${this.runtime.host}`
     )
-    const accepted = await withRegisteredSecrets([password], async () =>
-      this.tryConnectOnPorts({
-        password,
-        privateKey,
-        reconnectDeadline: options?.reconnectDeadline,
-      })
-    )
-    if (!accepted) return false
-    this.authMethod = "password"
-    return true
+  }
+
+  /**
+   * Create a host-key verification attempt that only commits accepted trust
+   * state after the SSH handshake succeeds.
+   *
+   * @param original - The original verifier from `buildHostVerifier`, if any.
+   * @returns A verifier and commit callback for host-key pinning.
+   */
+  private createHostKeyAttempt(original?: (key: Buffer) => boolean): HostKeyAttempt {
+    let acceptedPinnedHostKey: Buffer | null = null
+    let acceptedVerifiedHostKey: Buffer | null = null
+
+    return {
+      commit: (): void => {
+        if (acceptedVerifiedHostKey != null) this.verifiedHostKey ??= acceptedVerifiedHostKey
+        if (acceptedPinnedHostKey != null) this.pinnedHostKey ??= acceptedPinnedHostKey
+      },
+      hostVerifier: (key: Buffer): boolean => {
+        if (
+          this.pinnedHostKey != null &&
+          (this.pinnedHostKey.length !== key.length || !timingSafeEqual(this.pinnedHostKey, key))
+        ) {
+          this.clearCachedPassword()
+          throw new HostKeyVerificationError(
+            `HOST KEY CHANGED on reconnect to ${this.runtime.host}: ` +
+              "the remote host key does not match the key from the initial connection. " +
+              "This could indicate a man-in-the-middle attack."
+          )
+        }
+        if (original != null) {
+          const accepted = original(key)
+          if (!accepted) return false
+          acceptedVerifiedHostKey ??= Buffer.from(key)
+        }
+        acceptedPinnedHostKey ??= Buffer.from(key)
+        return true
+      },
+    }
+  }
+
+  private async createRemotePrivilegedTempPathInDestination(
+    remotePath: string,
+    prefix: string
+  ): Promise<string> {
+    const directory = posix.dirname(remotePath)
+    // R-0000141: refuse to mktemp into a directory whose resolved path differs
+    // from the literal one — that means at least one component of the
+    // destination is a symlink and an attacker could redirect the privileged
+    // temp file (and the subsequent `mv -T`) into a location they control.
+    await this.assertDirnameHasNoSymlinkComponent(directory, remotePath)
+    const template = `${directory}/${prefix}.XXXXXX`
+    const path = await this.output(`mktemp ${shellQuote(template)}`)
+    return validateMktempPath(directory, path, prefix)
   }
 
   private async createRemoteTempPath(command: string, prefix: string): Promise<string> {
@@ -1043,74 +1038,6 @@ export class SshConnectionImpl implements SshConnection {
     }
   }
 
-  /**
-   * Tear down the SSH transport without touching the cached sudo password.
-   *
-   * R-0000209: `client.end()` initiates a graceful disconnect, which can
-   * hang on TCP half-open until the OS keepalive expires (default ~2 hours).
-   * Schedule a `client.destroy()` fallback so test runners and reconnect
-   * loops do not leak sockets when the peer never replies.
-   */
-  /**
-   * Reset connection-derived state that must not survive a transport teardown.
-   *
-   * - R-0000236 clears the identity fields (connectedPort, authMethod,
-   *   agentSocket) so getConnectionInfo() does not return stale values that
-   *   would mislead reconnect-rollback logic.
-   * - R-0000258 clears the sudo-related state (sudoProbeFailedReason,
-   *   sudoReady, credentialCachePrimed, passwordlessSudo) so reconnect()/
-   *   updateHost paths start with a fresh sudo reality and do not re-throw a
-   *   cached probe failure from the previous host.
-   */
-  private resetTransportDerivedState(): void {
-    this.connectedPort = 0
-    this.authMethod = null
-    this.agentSocket = null
-    this.sudoProbeFailedReason = null
-    this.sudoReady = false
-    this.credentialCachePrimed = false
-    this.passwordlessSudo = false
-  }
-
-  /**
-   * R-0000255: fire the SFTP-coupled abort signal so any in-flight SFTP
-   * operations stop waiting on their dedicated channels immediately. The
-   * new AbortController replaces the old one unconditionally so subsequent
-   * connect()s expose a fresh, non-aborted signal that future SFTP operations
-   * can subscribe to.
-   */
-  private rotateConnectionAbortController(): void {
-    const previousConnectionAbort = this.connectionAbortController
-    this.connectionAbortController = new AbortController()
-    try {
-      previousConnectionAbort.abort(new Error("ssh disconnect"))
-    } catch {
-      // AbortController.abort never throws on modern runtimes; defense in
-      // depth only.
-    }
-  }
-
-  private tearDownClient(closing: Client): void {
-    this.detachClientLifecycleListeners(closing)
-    attachSshClientTeardownErrorSink(closing)
-    try {
-      closing.end()
-    } catch {
-      // end() may throw when the underlying socket has already been destroyed
-    }
-    const fallback = setTimeout(() => {
-      try {
-        closing.destroy()
-      } catch {
-        // destroy() must never propagate from a best-effort fallback
-      }
-    }, DISCONNECT_DESTROY_FALLBACK_MS)
-    // Do not keep the event loop alive solely for the destroy fallback —
-    // when the program is otherwise idle, it can exit and the GC will
-    // reclaim the socket.
-    fallback.unref()
-  }
-
   private disconnectTransport(): void {
     this.rotateConnectionAbortController()
     if (this.client) {
@@ -1129,6 +1056,44 @@ export class SshConnectionImpl implements SshConnection {
   private ensureClient(): Client {
     if (!this.client) throw new Error("SSH not connected")
     return this.client
+  }
+
+  private async ensureRemoteWriteFile(options: {
+    content: string
+    expectedSize: number
+    mode: string
+    remotePath: string
+  }): Promise<void> {
+    // R-0000476: `verifyRemoteWriteFile` reports the size verdict
+    // ("matches" / "empty" / "size-mismatch") and throws
+    // `RemoteStatTransientError` when the underlying `stat` call cannot be
+    // evaluated. The Shell-Fallback only fires for an explicit "needs
+    // rewrite" verdict — transient stat failures propagate so callers can
+    // retry instead of overwriting a remote file that may already be
+    // finalized correctly.
+    const verification = await this.verifyRemoteWriteFile(options.remotePath, options.expectedSize)
+    if (verification === "matches") return
+
+    await this.rewriteRemoteFileViaShell(options.remotePath, options.content, options.mode)
+    const fallbackVerification = await this.verifyRemoteWriteFile(
+      options.remotePath,
+      options.expectedSize
+    )
+    if (fallbackVerification === "matches") return
+    if (fallbackVerification === "empty") {
+      const diskInfo = await this.checkRemoteDiskSpace(options.remotePath)
+      if (diskInfo != null && diskInfo.availableBytes < options.expectedSize) {
+        throw new Error(
+          `[ssh.writeFile: ${options.remotePath}] disk full – ${diskInfo.availableBytes} bytes available on ${diskInfo.mountpoint}; the file was written as 0 bytes because there is no space left on the device`
+        )
+      }
+      throw new Error(
+        `[ssh.writeFile: ${options.remotePath}] remote file is empty after upload/finalize and shell fallback; refusing successful write result`
+      )
+    }
+    throw new Error(
+      `[ssh.writeFile: ${options.remotePath}] remote file size mismatch after upload/finalize and shell fallback; expected ${options.expectedSize} bytes`
+    )
   }
 
   /** Verify that `sudo` is available on the remote host. */
@@ -1164,55 +1129,6 @@ export class SshConnectionImpl implements SshConnection {
       // Cache the failure so further `exec` calls do not re-trigger a prompt.
       this.sudoProbeFailedReason = error instanceof Error ? error : new Error(String(error))
       throw error
-    }
-  }
-
-  /**
-   * Forward sudo password / `options.input` to a stream while tolerating
-   * EPIPE errors that may arrive between the `isSettled()` check and the
-   * actual write call (R-0000054). The stream is owned by ssh2 and may
-   * have been closed by the timeout path; emitting an `error` event on a
-   * closed channel without a listener would crash the process.
-   *
-   * @param stream - The ssh2 channel that just became available.
-   * @param needsPassword - Whether the command needs a sudo password.
-   * @param input - Optional stdin payload from the caller.
-   */
-  private writeStreamInput(
-    stream: ClientChannel,
-    needsPassword: boolean,
-    input: ExecOptions["input"]
-  ): void {
-    // R-0000054: attach an EPIPE-safe error handler before any subsequent
-    // write to the stream. The settle path (timeout / remote close)
-    // already owns the rejection reason; later stream errors are dropped.
-    stream.once("error", () => {
-      // Defensive no-op.
-    })
-    // R-0000140: ssh2 emits stderr `error` events (e.g. EPIPE during the
-    // sudo password write) on the stderr channel separately from the main
-    // stream. `collectStreamOutput` only attaches its own stderr listener
-    // *after* `writeStreamInput` returns, so a synchronous stderr EPIPE
-    // emitted while the password is being written would have no listener
-    // and the channel could hang silently until the 120s watchdog fires.
-    // Install a defensive stderr listener so the event is always consumed.
-    stream.stderr.once("error", () => {
-      // Defensive no-op — collectStreamOutput owns the actual rejection path.
-    })
-    if (needsPassword && this.cachedSudoPassword != null) {
-      try {
-        this.writeSudoPassword(stream)
-      } catch {
-        // Defense in depth: a synchronous EPIPE during write must not
-        // propagate — the timer / remote-close path owns the rejection.
-      }
-    }
-    if (input != null) {
-      try {
-        stream.end(input)
-      } catch {
-        // Defense in depth: same as writeSudoPassword above.
-      }
     }
   }
 
@@ -1426,6 +1342,32 @@ trap - EXIT
     await this.exec(finalizeScript, { silent: true })
   }
 
+  private handleTryConnectError(parameters: {
+    client: Client
+    error: unknown
+    registered: boolean
+    tryConnectResolved: boolean
+  }): void {
+    const { client, error, registered, tryConnectResolved } = parameters
+    // Only release the client when nothing else has taken responsibility:
+    // tryConnectOnPort cleans up internally on rejection, and a registered
+    // client is owned by `this` and must not be force-closed mid-iteration.
+    if (tryConnectResolved && !registered) cleanupFailedSshClient(client)
+    // R-0000256: rethrow HostKeyVerificationError before any abort handling
+    // so the caller sees the verification failure verbatim. When the abort
+    // fired simultaneously with a post-handshake commit failure, surface the
+    // commit-failure cause via a new Error preserving the original message
+    // instead of falling through to the abort path.
+    if (error instanceof HostKeyVerificationError) throw error
+    if (tryConnectResolved && this.promptAbortSignal?.aborted === true) {
+      throw error instanceof Error
+        ? new Error(error.message, { cause: error })
+        : new Error(String(error))
+    }
+    if (this.promptAbortSignal?.aborted === true) throw getAbortReason(this.promptAbortSignal)
+    // Otherwise fall through to try the next port.
+  }
+
   /**
    * Probe whether passwordless sudo is available without provoking an
    * interactive prompt in the SSH channel.
@@ -1465,6 +1407,42 @@ trap - EXIT
     return result.stdout.trim()
   }
 
+  private async performConnectAttemptOnPort(parameters: {
+    client: Client
+    options: TryConnectOnPortsOptions
+    port: number
+    state: { registered: boolean; tryConnectResolved: boolean }
+  }): Promise<void> {
+    const { client, options, port, state } = parameters
+    const verifier = await buildHostVerifier(
+      this.config.strictHostKeyChecking ?? "yes",
+      { host: this.runtime.host, port },
+      {
+        cache: this.hostKeyCache,
+        expectedHostFingerprint: this.config.expectedHostFingerprint,
+        expectedHostPublicKey: this.config.expectedHostPublicKey,
+      }
+    )
+    const hostKeyAttempt = this.createHostKeyAttempt(verifier.hostVerifier)
+    await tryConnectOnPort({
+      abortSignal: this.promptAbortSignal,
+      agent: options.agent,
+      agentForward: this.config.agentForward,
+      client,
+      host: this.runtime.host,
+      hostVerifier: hostKeyAttempt.hostVerifier,
+      password: options.password,
+      port,
+      privateKey: options.privateKey,
+      readyTimeout: getRemainingReconnectTimeout(options.reconnectDeadline),
+      username: this.config.user,
+    })
+    state.tryConnectResolved = true
+    hostKeyAttempt.commit()
+    await this.commitAcceptedHostKeyAndRegisterClient(client, verifier, port)
+    state.registered = true
+  }
+
   private async promptAndCacheSudoPassword(): Promise<void> {
     const password = await promptTerminal(
       `[sudo] password for ${this.config.user}@${this.runtime.host}: `,
@@ -1499,6 +1477,104 @@ trap - EXIT
     this.clientLifecycleListeners.set(client, { close: closeListener, error: errorListener })
     this.client = client
     this.connectedPort = port
+  }
+
+  /**
+   * Tear down the SSH transport without touching the cached sudo password.
+   *
+   * R-0000209: `client.end()` initiates a graceful disconnect, which can
+   * hang on TCP half-open until the OS keepalive expires (default ~2 hours).
+   * Schedule a `client.destroy()` fallback so test runners and reconnect
+   * loops do not leak sockets when the peer never replies.
+   */
+  /**
+   * Reset connection-derived state that must not survive a transport teardown.
+   *
+   * - R-0000236 clears the identity fields (connectedPort, authMethod,
+   *   agentSocket) so getConnectionInfo() does not return stale values that
+   *   would mislead reconnect-rollback logic.
+   * - R-0000258 clears the sudo-related state (sudoProbeFailedReason,
+   *   sudoReady, credentialCachePrimed, passwordlessSudo) so reconnect()/
+   *   updateHost paths start with a fresh sudo reality and do not re-throw a
+   *   cached probe failure from the previous host.
+   */
+  private resetTransportDerivedState(): void {
+    this.connectedPort = 0
+    this.authMethod = null
+    this.agentSocket = null
+    this.sudoProbeFailedReason = null
+    this.sudoReady = false
+    this.credentialCachePrimed = false
+    this.passwordlessSudo = false
+  }
+
+  private async rewriteRemoteFileViaShell(
+    remotePath: string,
+    content: string,
+    mode: string
+  ): Promise<void> {
+    const remoteTemporary = await this.createRemotePrivilegedTempPathInDestination(
+      remotePath,
+      "paratix-write"
+    )
+    // R-0000093: stream the encoded payload over stdin instead of passing it
+    // as a shell argument. The previous `printf '%s' '<encodedContent>'`
+    // pipeline placed the entire base64 blob on the argv list, where it was
+    // capped by the kernel `ARG_MAX` limit and a real-world write of a few
+    // hundred KB would fail with E2BIG. Reading from stdin removes the cap
+    // and matches the sudo-stdin pattern used elsewhere in this class.
+    const encodedContent = Buffer.from(content, "utf8").toString("base64")
+
+    try {
+      await this.exec(`base64 -d > ${shellQuote(remoteTemporary)}`, {
+        input: encodedContent,
+        silent: true,
+      })
+      await this.exec(`chmod ${shellQuote(mode)} ${shellQuote(remoteTemporary)}`, { silent: true })
+      await this.finalizeRemoteTempFile(remoteTemporary, remotePath, mode)
+    } catch (error) {
+      const reason = error instanceof Error ? error.message : String(error)
+      throw new Error(`[ssh.writeFile: ${remotePath}] shell fallback write failed: ${reason}`, {
+        cause: error,
+      })
+    } finally {
+      try {
+        await this.cleanupPrivilegedRemoteTempFile(remoteTemporary)
+      } catch (cleanupError) {
+        process.stderr.write(
+          `Warning: failed to remove temp file ${remoteTemporary}: ${maskSecrets(String(cleanupError), this.buildSecrets())}\n`
+        )
+      }
+    }
+  }
+
+  /**
+   * Iterate over `config.ports` and attempt a connection on each one.
+   *
+   * @param options - Auth parameters and optional reconnect deadline for bounded per-port attempts.
+   * @returns `true` if a port connected successfully, `false` if all ports failed.
+   */
+  // R-0000139: iterate on a snapshot of `runtime.ports` so that concurrent
+  // `addPort`/`removePort` calls (e.g. from `handlePortChange` rollback in
+  // runner.ts) cannot mutate the array mid-iteration and cause skipped or
+  // re-visited entries.
+
+  /**
+   * R-0000255: fire the SFTP-coupled abort signal so any in-flight SFTP
+   * operations stop waiting on their dedicated channels immediately. The
+   * new AbortController replaces the old one unconditionally so subsequent
+   * connect()s expose a fresh, non-aborted signal that future SFTP operations
+   * can subscribe to.
+   */
+  private rotateConnectionAbortController(): void {
+    const previousConnectionAbort = this.connectionAbortController
+    this.connectionAbortController = new AbortController()
+    try {
+      previousConnectionAbort.abort(new Error("ssh disconnect"))
+    } catch {
+      // AbortController.abort never throws on modern runtimes; defense in
+      // depth only.
+    }
   }
 
   private async setRemoteTempMode(remotePath: string, mode: string): Promise<void> {
@@ -1553,99 +1629,45 @@ trap - EXIT
     return { command: `sudo bash -c ${quoted}`, needsPassword: false }
   }
 
-  /**
-   * Iterate over `config.ports` and attempt a connection on each one.
-   *
-   * @param options - Auth parameters and optional reconnect deadline for bounded per-port attempts.
-   * @returns `true` if a port connected successfully, `false` if all ports failed.
-   */
-  // R-0000139: iterate on a snapshot of `runtime.ports` so that concurrent
-  // `addPort`/`removePort` calls (e.g. from `handlePortChange` rollback in
-  // runner.ts) cannot mutate the array mid-iteration and cause skipped or
-  // re-visited entries.
-  /* eslint-disable max-statements, sonarjs/cognitive-complexity, complexity -- port fallback, host-key errors, and abort handling belong together */
+  private tearDownClient(closing: Client): void {
+    this.detachClientLifecycleListeners(closing)
+    attachSshClientTeardownErrorSink(closing)
+    try {
+      closing.end()
+    } catch {
+      // end() may throw when the underlying socket has already been destroyed
+    }
+    const fallback = setTimeout(() => {
+      try {
+        closing.destroy()
+      } catch {
+        // destroy() must never propagate from a best-effort fallback
+      }
+    }, DISCONNECT_DESTROY_FALLBACK_MS)
+    // Do not keep the event loop alive solely for the destroy fallback —
+    // when the program is otherwise idle, it can exit and the GC will
+    // reclaim the socket.
+    fallback.unref()
+  }
+
   private async tryConnectOnPorts(options: TryConnectOnPortsOptions = {}): Promise<boolean> {
     const ports: number[] = [...this.runtime.ports]
     for (const port of ports) {
       if (hasReconnectDeadlineExpired(options.reconnectDeadline)) return false
-      // R-0000039: keep the Client reference outside the try-block so the
-      // catch path can close it explicitly. ssh2's Client retains internal
-      // sockets, buffers, and listeners after a failed connect; without an
-      // explicit cleanup, lingering FDs and listeners accumulate across
-      // reconnect attempts.
+      // R-0000039 / R-0000198: keep the Client reference outside the try-block so
+      // the catch path can close it explicitly when ownership did not transfer.
       const client = new Client()
-      // R-0000198: tryConnectOnPort cleans the client up on every internal
-      // failure path (handleAbort, handleError, handleTimeout). The outer
-      // catch must therefore only clean up when the inner connect already
-      // resolved — i.e. when a downstream step (commitAcceptedHostKey, etc.)
-      // throws on an established client. registerConnectedClient adopts the
-      // client into `this.client`, so a registered client must never be
-      // cleaned up here either.
-      let tryConnectResolved = false
-      let registered = false
+      const state = { registered: false, tryConnectResolved: false }
       try {
         // eslint-disable-next-line no-await-in-loop -- buildHostVerifier serializes the known_hosts read; sequential per-port is intentional.
-        const verifier = await buildHostVerifier(
-          this.config.strictHostKeyChecking ?? "yes",
-          { host: this.runtime.host, port },
-          {
-            expectedHostFingerprint: this.config.expectedHostFingerprint,
-            expectedHostPublicKey: this.config.expectedHostPublicKey,
-          },
-          this.hostKeyCache
-        )
-        const hostKeyAttempt = this.createHostKeyAttempt(verifier.hostVerifier)
-        // eslint-disable-next-line no-await-in-loop
-        await tryConnectOnPort({
-          abortSignal: this.promptAbortSignal,
-          agent: options.agent,
-          agentForward: this.config.agentForward,
-          client,
-          host: this.runtime.host,
-          hostVerifier: hostKeyAttempt.hostVerifier,
-          password: options.password,
-          port,
-          privateKey: options.privateKey,
-          readyTimeout: getRemainingReconnectTimeout(options.reconnectDeadline),
-          username: this.config.user,
-        })
-        tryConnectResolved = true
-        hostKeyAttempt.commit()
-        // Ensure the host key is persisted to disk before returning.
-        // eslint-disable-next-line no-await-in-loop
-        await this.commitAcceptedHostKeyAndRegisterClient(client, verifier, port)
-        registered = true
+        await this.performConnectAttemptOnPort({ client, options, port, state })
         return true
       } catch (error) {
-        // Only release the client when nothing else has taken responsibility:
-        // tryConnectOnPort cleans up internally on rejection, and a
-        // registered client is owned by `this` and must not be force-closed
-        // mid-iteration.
-        if (tryConnectResolved && !registered) {
-          cleanupFailedSshClient(client)
-        }
-        // R-0000256: when a downstream commit step (commitAcceptedHostKey,
-        // persist) threw AFTER the SSH handshake resolved, a concurrent
-        // shutdown abort would otherwise overwrite the diagnostic with
-        // "SSH operation aborted" — losing the actual TOFU/persist failure.
-        // Rethrow HostKeyVerificationError before any abort handling so the
-        // caller sees the verification failure verbatim. When the abort fired
-        // simultaneously with a post-handshake commit failure, surface the
-        // commit-failure cause via a new Error whose message preserves the
-        // original diagnostic, instead of falling through to the abort path.
-        if (error instanceof HostKeyVerificationError) throw error
-        if (tryConnectResolved && this.promptAbortSignal?.aborted === true) {
-          throw error instanceof Error
-            ? new Error(error.message, { cause: error })
-            : new Error(String(error))
-        }
-        if (this.promptAbortSignal?.aborted === true) throw getAbortReason(this.promptAbortSignal)
-        // Try next port
+        this.handleTryConnectError({ client, error, ...state })
       }
     }
     return false
   }
-  /* eslint-enable max-statements, sonarjs/cognitive-complexity, complexity */
 
   private async tryPasswordFallback(options?: ConnectOptions, agent?: string): Promise<boolean> {
     if (!this.config.passwordFallback) return false
@@ -1675,110 +1697,36 @@ trap - EXIT
     })
   }
 
-  private async rewriteRemoteFileViaShell(
-    remotePath: string,
-    content: string,
-    mode: string
-  ): Promise<void> {
-    const remoteTemporary = await this.createRemotePrivilegedTempPathInDestination(
-      remotePath,
-      "paratix-write"
-    )
-    // R-0000093: stream the encoded payload over stdin instead of passing it
-    // as a shell argument. The previous `printf '%s' '<encodedContent>'`
-    // pipeline placed the entire base64 blob on the argv list, where it was
-    // capped by the kernel `ARG_MAX` limit and a real-world write of a few
-    // hundred KB would fail with E2BIG. Reading from stdin removes the cap
-    // and matches the sudo-stdin pattern used elsewhere in this class.
-    const encodedContent = Buffer.from(content, "utf8").toString("base64")
-
-    try {
-      await this.exec(`base64 -d > ${shellQuote(remoteTemporary)}`, {
-        input: encodedContent,
-        silent: true,
-      })
-      await this.exec(`chmod ${shellQuote(mode)} ${shellQuote(remoteTemporary)}`, { silent: true })
-      await this.finalizeRemoteTempFile(remoteTemporary, remotePath, mode)
-    } catch (error) {
-      const reason = error instanceof Error ? error.message : String(error)
-      throw new Error(`[ssh.writeFile: ${remotePath}] shell fallback write failed: ${reason}`, {
-        cause: error,
-      })
-    } finally {
-      try {
-        await this.cleanupPrivilegedRemoteTempFile(remoteTemporary)
-      } catch (cleanupError) {
-        process.stderr.write(
-          `Warning: failed to remove temp file ${remoteTemporary}: ${maskSecrets(String(cleanupError), this.buildSecrets())}\n`
-        )
-      }
-    }
-  }
-
-  private async commitAcceptedHostKey(verifier: HostVerifierResult): Promise<void> {
-    if (verifier.commitAcceptedHostKey != null) {
-      await verifier.commitAcceptedHostKey()
-      return
-    }
-    if (verifier.pendingPersist != null) await verifier.pendingPersist
-  }
-
-  private async commitAcceptedHostKeyAndRegisterClient(
-    client: Client,
-    verifier: HostVerifierResult,
-    port: number
-  ): Promise<void> {
-    const transitionState: { error?: Error } = {}
-    const handleTransitionError = (error: Error): void => {
-      transitionState.error ??= error
-    }
-    client.on("error", handleTransitionError)
-    try {
-      await this.commitAcceptedHostKey(verifier)
-      if (transitionState.error != null) throw transitionState.error
-      this.registerConnectedClient(client, port)
-    } finally {
-      client.removeListener("error", handleTransitionError)
-    }
-  }
-
   /**
-   * Create a host-key verification attempt that only commits accepted trust
-   * state after the SSH handshake succeeds.
+   * Prompt for a password and retry the connect using both the loaded
+   * private key and the prompt response. R-0000095: the prompt response is
+   * registered in the process-wide secret sink for the duration of the
+   * connect attempt so any thrown diagnostic masks the credential.
    *
-   * @param original - The original verifier from `buildHostVerifier`, if any.
-   * @returns A verifier and commit callback for host-key pinning.
+   * @param privateKey - The loaded private key buffer to combine with the prompt response.
+   * @param options - Prompt options (e.g. abort signal) forwarded from `connect()`.
+   * @returns `true` when the password attempt succeeded, `false` when the fallback was disabled or all ports refused the credential.
    */
-  private createHostKeyAttempt(original?: (key: Buffer) => boolean): HostKeyAttempt {
-    let acceptedPinnedHostKey: Buffer | null = null
-    let acceptedVerifiedHostKey: Buffer | null = null
-
-    return {
-      commit: (): void => {
-        if (acceptedVerifiedHostKey != null) this.verifiedHostKey ??= acceptedVerifiedHostKey
-        if (acceptedPinnedHostKey != null) this.pinnedHostKey ??= acceptedPinnedHostKey
-      },
-      hostVerifier: (key: Buffer): boolean => {
-        if (
-          this.pinnedHostKey != null &&
-          (this.pinnedHostKey.length !== key.length || !timingSafeEqual(this.pinnedHostKey, key))
-        ) {
-          this.clearCachedPassword()
-          throw new HostKeyVerificationError(
-            `HOST KEY CHANGED on reconnect to ${this.runtime.host}: ` +
-              "the remote host key does not match the key from the initial connection. " +
-              "This could indicate a man-in-the-middle attack."
-          )
-        }
-        if (original != null) {
-          const accepted = original(key)
-          if (!accepted) return false
-          acceptedVerifiedHostKey ??= Buffer.from(key)
-        }
-        acceptedPinnedHostKey ??= Buffer.from(key)
-        return true
-      },
-    }
+  private async tryPrivateKeyPasswordFallback(
+    privateKey: Buffer,
+    options?: ConnectOptions
+  ): Promise<boolean> {
+    if (!this.config.passwordFallback) return false
+    const password = await promptTerminal(
+      `Password for ${this.config.user}@${this.runtime.host}: `,
+      true,
+      options
+    )
+    const accepted = await withRegisteredSecrets([password], async () =>
+      this.tryConnectOnPorts({
+        password,
+        privateKey,
+        reconnectDeadline: options?.reconnectDeadline,
+      })
+    )
+    if (!accepted) return false
+    this.authMethod = "password"
+    return true
   }
 
   private async verifyRemoteWriteFile(
@@ -1811,7 +1759,55 @@ trap - EXIT
     if (actualSize === 0) return "empty"
     return actualSize === expectedSize ? "matches" : "size-mismatch"
   }
-  /* eslint-enable perfectionist/sort-classes */
+
+  /**
+   * Forward sudo password / `options.input` to a stream while tolerating
+   * EPIPE errors that may arrive between the `isSettled()` check and the
+   * actual write call (R-0000054). The stream is owned by ssh2 and may
+   * have been closed by the timeout path; emitting an `error` event on a
+   * closed channel without a listener would crash the process.
+   *
+   * @param stream - The ssh2 channel that just became available.
+   * @param needsPassword - Whether the command needs a sudo password.
+   * @param input - Optional stdin payload from the caller.
+   */
+  private writeStreamInput(
+    stream: ClientChannel,
+    needsPassword: boolean,
+    input: ExecOptions["input"]
+  ): void {
+    // R-0000054: attach an EPIPE-safe error handler before any subsequent
+    // write to the stream. The settle path (timeout / remote close)
+    // already owns the rejection reason; later stream errors are dropped.
+    stream.once("error", () => {
+      // Defensive no-op.
+    })
+    // R-0000140: ssh2 emits stderr `error` events (e.g. EPIPE during the
+    // sudo password write) on the stderr channel separately from the main
+    // stream. `collectStreamOutput` only attaches its own stderr listener
+    // *after* `writeStreamInput` returns, so a synchronous stderr EPIPE
+    // emitted while the password is being written would have no listener
+    // and the channel could hang silently until the 120s watchdog fires.
+    // Install a defensive stderr listener so the event is always consumed.
+    stream.stderr.once("error", () => {
+      // Defensive no-op — collectStreamOutput owns the actual rejection path.
+    })
+    if (needsPassword && this.cachedSudoPassword != null) {
+      try {
+        this.writeSudoPassword(stream)
+      } catch {
+        // Defense in depth: a synchronous EPIPE during write must not
+        // propagate — the timer / remote-close path owns the rejection.
+      }
+    }
+    if (input != null) {
+      try {
+        stream.end(input)
+      } catch {
+        // Defense in depth: same as writeSudoPassword above.
+      }
+    }
+  }
 
   /**
    * Write the cached sudo password followed by a newline to the given stream.

@@ -7,11 +7,11 @@ import { promisify } from "node:util"
 
 const execFileAsync = promisify(execFile)
 
-function readEnvAvailabilityRetries() {
+function readEnvironmentAvailabilityRetries() {
   const rawValue = process.env.PARATIX_PUBLISH_AVAILABILITY_RETRIES
-  if (rawValue == null || rawValue === "") return undefined
+  if (rawValue == null || rawValue === "") return
   const parsedValue = Number.parseInt(rawValue, 10)
-  if (!Number.isFinite(parsedValue) || parsedValue <= 0) return undefined
+  if (!Number.isFinite(parsedValue) || parsedValue <= 0) return
   return parsedValue
 }
 
@@ -19,7 +19,7 @@ function readEnvAvailabilityRetries() {
 // registry has enough time to expose paratix before we attempt to publish
 // create-paratix. Operators can override the value via
 // PARATIX_PUBLISH_AVAILABILITY_RETRIES when the registry is unusually slow.
-const DEFAULT_AVAILABILITY_RETRIES = readEnvAvailabilityRetries() ?? 24
+const DEFAULT_AVAILABILITY_RETRIES = readEnvironmentAvailabilityRetries() ?? 24
 const DEFAULT_AVAILABILITY_DELAY_MS = 10_000
 
 const packages = [
@@ -194,6 +194,7 @@ export async function publishWorkspacePackages({
 function isDirectExecution(moduleUrl, argv1) {
   if (argv1 == null) return false
   try {
+    // eslint-disable-next-line security/detect-non-literal-fs-filename -- argv1 is process.argv[1] (the invoking script path), not user input
     return fileURLToPath(moduleUrl) === realpathSync(argv1)
   } catch {
     return false

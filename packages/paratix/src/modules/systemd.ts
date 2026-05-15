@@ -14,12 +14,21 @@ const SYSTEMCTL = "systemctl"
 const UNIT_NAME_PATTERN = /^[\w@.\-]+$/v
 const SYSTEMD_UNIT_MODE = "0644"
 const SYSTEMD_UNIT_RELOAD_HASH_LENGTH = 16
+const SILENT_EXEC_OPTS = { ignoreExitCode: true, silent: true } as const
 
 function validateUnitName(name: string): string {
   if (!name || name.startsWith("-") || !UNIT_NAME_PATTERN.test(name)) {
     throw new Error(`Invalid systemd unit name: ${name}`)
   }
   return name
+}
+
+async function isUnitMasked(ssh: SshConnection, unitName: string): Promise<boolean> {
+  const probe = await ssh.exec(
+    `${SYSTEMCTL} is-enabled -- ${shellQuote(unitName)}`,
+    SILENT_EXEC_OPTS
+  )
+  return probe.stdout.trim().includes("masked")
 }
 
 function normalizeMode(mode: string): string {
@@ -58,10 +67,7 @@ function failedWithRollbackFailure(message: string, rollbackError: unknown): Mod
 async function snapshotUnitFile(ssh: SshConnection, filePath: string): Promise<UnitFileSnapshot> {
   if (!(await ssh.exists(filePath))) return { exists: false }
   const content = await ssh.readFile(filePath)
-  const modeResult = await ssh.exec(`stat -c '%a' ${shellQuote(filePath)}`, {
-    ignoreExitCode: true,
-    silent: true,
-  })
+  const modeResult = await ssh.exec(`stat -c '%a' ${shellQuote(filePath)}`, SILENT_EXEC_OPTS)
   return {
     content,
     exists: true,
@@ -136,10 +142,7 @@ async function writeSystemdUnitFile(parameters: {
 }
 
 async function reloadSystemdDaemon(ssh: SshConnection): Promise<ExecResult> {
-  return ssh.exec(`${SYSTEMCTL} daemon-reload`, {
-    ignoreExitCode: true,
-    silent: true,
-  })
+  return ssh.exec(`${SYSTEMCTL} daemon-reload`, SILENT_EXEC_OPTS)
 }
 
 async function rollbackUnitAfterFlagPersistenceFailure(parameters: {
@@ -266,10 +269,7 @@ export const systemd = {
     return {
       async apply(ssh: null | SshConnection): Promise<ModuleResult> {
         if (!ssh) return failed("[systemd.daemonReload] SSH connection is required")
-        const result = await ssh.exec(`${SYSTEMCTL} daemon-reload`, {
-          ignoreExitCode: true,
-          silent: true,
-        })
+        const result = await ssh.exec(`${SYSTEMCTL} daemon-reload`, SILENT_EXEC_OPTS)
         return result.code === 0
           ? { status: "changed" }
           : failedCommand("[systemd.daemonReload] systemctl daemon-reload failed", result)
@@ -293,29 +293,19 @@ export const systemd = {
     return {
       async apply(ssh: null | SshConnection): Promise<ModuleResult> {
         if (!ssh) return failed(`[systemd.masked: ${name}] SSH connection is required`)
-        // R-0000490: short-circuit when the unit is already masked. Mirrors
-        // the `is-enabled` probe used in the check function so apply does
-        // not emit `changed` for a converged state.
-        const probe = await ssh.exec(`${SYSTEMCTL} is-enabled -- ${shellQuote(unitName)}`, {
-          ignoreExitCode: true,
-          silent: true,
-        })
-        if (probe.stdout.trim().includes("masked")) return { status: "ok" }
-        const result = await ssh.exec(`${SYSTEMCTL} mask -- ${shellQuote(unitName)}`, {
-          ignoreExitCode: true,
-          silent: true,
-        })
+        // R-0000490: skip the mask call when the unit is already masked.
+        if (await isUnitMasked(ssh, unitName)) return { status: "ok" }
+        const result = await ssh.exec(
+          `${SYSTEMCTL} mask -- ${shellQuote(unitName)}`,
+          SILENT_EXEC_OPTS
+        )
         return result.code === 0
           ? { status: "changed" }
           : failedCommand(`[systemd.masked: ${name}] systemctl mask failed`, result)
       },
       async check(ssh: null | SshConnection): Promise<"needs-apply" | "ok"> {
         if (!ssh) return NEEDS_APPLY
-        const result = await ssh.exec(`${SYSTEMCTL} is-enabled -- ${shellQuote(unitName)}`, {
-          ignoreExitCode: true,
-          silent: true,
-        })
-        return result.stdout.trim().includes("masked") ? "ok" : NEEDS_APPLY
+        return (await isUnitMasked(ssh, unitName)) ? "ok" : NEEDS_APPLY
       },
       name: `systemd.masked: ${name}`,
     }
@@ -347,10 +337,7 @@ export const systemd = {
         if (!exists) return NEEDS_APPLY
         const remoteContent = await ssh.readFile(filePath)
         if (remoteContent.trim() !== content.trim()) return NEEDS_APPLY
-        const modeResult = await ssh.exec(`stat -c '%a' ${shellQuote(filePath)}`, {
-          ignoreExitCode: true,
-          silent: true,
-        })
+        const modeResult = await ssh.exec(`stat -c '%a' ${shellQuote(filePath)}`, SILENT_EXEC_OPTS)
         if (modeResult.code !== 0) return NEEDS_APPLY
         const currentMode = modeResult.stdout.trim()
         if (currentMode === "") return NEEDS_APPLY
@@ -371,29 +358,19 @@ export const systemd = {
     return {
       async apply(ssh: null | SshConnection): Promise<ModuleResult> {
         if (!ssh) return failed(`[systemd.unmasked: ${name}] SSH connection is required`)
-        // R-0000490: short-circuit when the unit is already unmasked. Mirrors
-        // the `is-enabled` probe used in the check function so apply does
-        // not emit `changed` for a converged state.
-        const probe = await ssh.exec(`${SYSTEMCTL} is-enabled -- ${shellQuote(unitName)}`, {
-          ignoreExitCode: true,
-          silent: true,
-        })
-        if (!probe.stdout.trim().includes("masked")) return { status: "ok" }
-        const result = await ssh.exec(`${SYSTEMCTL} unmask -- ${shellQuote(unitName)}`, {
-          ignoreExitCode: true,
-          silent: true,
-        })
+        // R-0000490: skip the unmask call when the unit is not currently masked.
+        if (!(await isUnitMasked(ssh, unitName))) return { status: "ok" }
+        const result = await ssh.exec(
+          `${SYSTEMCTL} unmask -- ${shellQuote(unitName)}`,
+          SILENT_EXEC_OPTS
+        )
         return result.code === 0
           ? { status: "changed" }
           : failedCommand(`[systemd.unmasked: ${name}] systemctl unmask failed`, result)
       },
       async check(ssh: null | SshConnection): Promise<"needs-apply" | "ok"> {
         if (!ssh) return NEEDS_APPLY
-        const result = await ssh.exec(`${SYSTEMCTL} is-enabled -- ${shellQuote(unitName)}`, {
-          ignoreExitCode: true,
-          silent: true,
-        })
-        return result.stdout.trim().includes("masked") ? NEEDS_APPLY : "ok"
+        return (await isUnitMasked(ssh, unitName)) ? NEEDS_APPLY : "ok"
       },
       name: `systemd.unmasked: ${name}`,
     }

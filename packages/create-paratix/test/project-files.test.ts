@@ -629,35 +629,35 @@ describe("writeProjectFiles", () => {
 
     const grepResult1 = spawnSync("grep", ["-Eq", cleanupPattern], {
       input: "22 ALLOW IN Anywhere",
-      timeout: 5_000,
+      timeout: 5000,
     })
     expect(grepResult1.error).toBeUndefined()
     expect(grepResult1.status).toBe(0)
 
     const grepResult2 = spawnSync("grep", ["-Eq", cleanupPattern], {
       input: "22 (v6) ALLOW IN Anywhere (v6)",
-      timeout: 5_000,
+      timeout: 5000,
     })
     expect(grepResult2.error).toBeUndefined()
     expect(grepResult2.status).toBe(0)
 
     const grepResult3 = spawnSync("grep", ["-Eq", cleanupPattern], {
       input: "22/tcp ALLOW IN Anywhere",
-      timeout: 5_000,
+      timeout: 5000,
     })
     expect(grepResult3.error).toBeUndefined()
     expect(grepResult3.status).toBe(0)
 
     const grepResult4 = spawnSync("grep", ["-Eq", cleanupPattern], {
       input: "22/tcp (v6) ALLOW IN Anywhere (v6)",
-      timeout: 5_000,
+      timeout: 5000,
     })
     expect(grepResult4.error).toBeUndefined()
     expect(grepResult4.status).toBe(0)
 
     const grepResult5 = spawnSync("grep", ["-Eq", cleanupPattern], {
       input: "2222/tcp ALLOW IN Anywhere",
-      timeout: 5_000,
+      timeout: 5000,
     })
     expect(grepResult5.error).toBeUndefined()
     expect(grepResult5.status).toBe(1)

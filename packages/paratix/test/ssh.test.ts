@@ -67,6 +67,8 @@ vi.mock("../src/knownHosts.js", async () => {
     appendHostKey: vi.fn().mockResolvedValue(null),
     // Default: resolve to an empty object (no hostVerifier) so ssh.ts can safely destructure after resetAllMocks.
     buildHostVerifier: vi.fn().mockResolvedValue({}),
+    // R-0000479: SshConnectionImpl allocates a per-instance HostKeyCache via this factory.
+    createHostKeyCache: actual.createHostKeyCache,
     extractAlgoFromKey: actual.extractAlgoFromKey,
     HostKeyVerificationError: actual.HostKeyVerificationError,
     lookupHostKey: actual.lookupHostKey,
@@ -4359,11 +4361,11 @@ describe("SshConnectionImpl", () => {
         "yes",
         { host: "1.2.3.4", port: 22 },
         {
+          // R-0000479: SshConnectionImpl threads its per-instance HostKeyCache.
+          cache: expect.any(Map),
           expectedHostFingerprint: undefined,
           expectedHostPublicKey: undefined,
-        },
-        // R-0000479: SshConnectionImpl threads its per-instance HostKeyCache.
-        expect.any(Map)
+        }
       )
     })
 
@@ -4383,10 +4385,10 @@ describe("SshConnectionImpl", () => {
         "no",
         { host: "1.2.3.4", port: 22 },
         {
+          cache: expect.any(Map),
           expectedHostFingerprint: undefined,
           expectedHostPublicKey: undefined,
-        },
-        expect.any(Map)
+        }
       )
     })
 
@@ -4406,10 +4408,10 @@ describe("SshConnectionImpl", () => {
         "yes",
         { host: "1.2.3.4", port: 22 },
         {
+          cache: expect.any(Map),
           expectedHostFingerprint: undefined,
           expectedHostPublicKey: undefined,
-        },
-        expect.any(Map)
+        }
       )
     })
 
@@ -4429,10 +4431,10 @@ describe("SshConnectionImpl", () => {
         "yes",
         { host: "1.2.3.4", port: 22 },
         {
+          cache: expect.any(Map),
           expectedHostFingerprint: "SHA256:trusted-fingerprint",
           expectedHostPublicKey: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAItrusted",
-        },
-        expect.any(Map)
+        }
       )
     })
 

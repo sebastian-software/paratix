@@ -180,45 +180,62 @@ function validateProjectName(name: string | undefined): string {
   return normalizedName
 }
 
-export function scaffoldProject(
-  projectName: string,
-  pm: PackageManager,
-  options?: ScaffoldOptions
-): boolean {
+type PreparedScaffold = {
+  initialUser: ReturnType<typeof normalizeProgrammaticInitialUserConfig>
+  normalizedProjectName: string
+  normalizedStringOptions: ReturnType<typeof normalizeProgrammaticScaffoldStringOptions>
+  projectDirectory: string
+}
+
+function prepareScaffold(projectName: string, options?: ScaffoldOptions): PreparedScaffold {
   const normalizedProjectName = validateProjectName(projectName)
   const projectDirectory = resolve(normalizedProjectName)
   const initialUser = normalizeProgrammaticInitialUserConfig(options?.initialUser)
   const normalizedStringOptions = normalizeProgrammaticScaffoldStringOptions(options)
   validateRootBootstrapConfiguration(initialUser, normalizedStringOptions.adminPublicKey)
   createProjectDirectoryAtomically(projectDirectory, normalizedProjectName)
+  return { initialUser, normalizedProjectName, normalizedStringOptions, projectDirectory }
+}
 
-  console.log(`Creating Paratix project in ${projectDirectory}...`)
-
-  // R-0000499: if writeProjectFiles or the installer throws after we have
-  // already created the empty project directory, leaving the half-built
-  // directory behind blocks any retry with the same name. Remove the
-  // directory before rethrowing so the operator can run create-paratix again
-  // without manually cleaning up. The non-throwing installer return value
-  // (false) signals a partial success — the scaffold files are valid, only
-  // the install step failed — so we do NOT remove the directory in that
-  // branch.
-  let installerSucceeded: boolean
+// R-0000499: if writeProjectFiles or the installer throws after the empty
+// project directory has been created, leaving the half-built directory behind
+// would block retries with the same name. Remove the directory before
+// rethrowing. A non-throwing installer return value (`false`) signals partial
+// success — scaffold files are valid, only the install step failed — and the
+// directory is preserved in that branch.
+function runScaffoldOrCleanup(
+  prepared: PreparedScaffold,
+  pm: PackageManager,
+  options: ScaffoldOptions | undefined
+): boolean {
   try {
-    writeProjectFiles(projectDirectory, { ...options, ...normalizedStringOptions, initialUser })
+    writeProjectFiles(prepared.projectDirectory, {
+      ...options,
+      ...prepared.normalizedStringOptions,
+      initialUser: prepared.initialUser,
+    })
     const installer = options?.installer ?? installDependencies
-    installerSucceeded = installer(projectDirectory, pm)
+    return installer(prepared.projectDirectory, pm)
   } catch (error) {
-    rmSync(projectDirectory, { force: true, recursive: true })
+    rmSync(prepared.projectDirectory, { force: true, recursive: true })
     throw error
   }
+}
 
+export function scaffoldProject(
+  projectName: string,
+  pm: PackageManager,
+  options?: ScaffoldOptions
+): boolean {
+  const prepared = prepareScaffold(projectName, options)
+  console.log(`Creating Paratix project in ${prepared.projectDirectory}...`)
+  const installerSucceeded = runScaffoldOrCleanup(prepared, pm, options)
   if (!installerSucceeded) {
     process.exitCode = 1
-    printPartialSuccessMessage(normalizedProjectName, pm)
+    printPartialSuccessMessage(prepared.normalizedProjectName, pm)
     return false
   }
-
-  printSuccessMessage(normalizedProjectName, pm)
+  printSuccessMessage(prepared.normalizedProjectName, pm)
   return true
 }
 
