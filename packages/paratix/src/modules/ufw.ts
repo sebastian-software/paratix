@@ -134,6 +134,10 @@ async function deleteOppositeRule(input: {
 // `applyUfwRulePort` deletes the contradictory `allow` entry before adding the
 // `deny`, which on the live SSH port would immediately lock out the runner.
 // Mirrors the lockout guard in `sshd.port` (`ufwBlocksPortFailure`).
+// R-0000543: also refuse to deny any port that ssh.ports is configured to
+// reconnect through. A reconnect attempt after sshd.port or a network blip
+// would otherwise pick a port that ufw now blocks and lose the session
+// permanently.
 function rejectWhenDenyingCurrentSshPort(input: {
   action: UfwRuleAction
   portList: number[]
@@ -141,11 +145,15 @@ function rejectWhenDenyingCurrentSshPort(input: {
 }): ModuleResult | null {
   const { action, portList, ssh } = input
   if (action !== "deny") return null
-  const { port: currentSshPort } = ssh.getConnectionInfo()
-  if (!portList.includes(currentSshPort)) return null
+  const { configuredPorts, port: currentSshPort } = ssh.getConnectionInfo()
+  const protectedPorts = new Set<number>([currentSshPort, ...configuredPorts])
+  const conflictingPorts = portList.filter((port) => protectedPorts.has(port))
+  if (conflictingPorts.length === 0) return null
   return failed(
-    `[ufw.rule: ${action} ${portList.join(",")}] refuses to deny current SSH port ` +
-      `${String(currentSshPort)}; would lock the runner out`
+    `[ufw.rule: ${action} ${portList.join(",")}] refuses to deny SSH reconnect port(s) ` +
+      `${conflictingPorts.join(",")} ` +
+      `(current: ${String(currentSshPort)}, configured: ${configuredPorts.join(",")}); ` +
+      "would lock the runner out"
   )
 }
 
