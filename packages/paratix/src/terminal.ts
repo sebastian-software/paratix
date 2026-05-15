@@ -7,17 +7,17 @@ function normalizePromptAbortReason(reason: unknown): Error {
 
 // Hidden prompts need a TTY-shaped output so readline keeps terminal-mode
 // behavior, but all redraw/echo chunks must be discarded to avoid leaking
-// typed secrets. Only the prompt question itself is forwarded once.
+// typed secrets. The prompt text itself is written directly to the target
+// stream by promptTerminal before rl.question is invoked, so _write
+// suppresses every chunk readline would emit. Chunk-based detection of the
+// prompt text is unreliable because readline may split the prompt across
+// multiple _write invocations, in which case a substring check would
+// suppress the chunk that actually carries the prompt.
 class HiddenPromptOutput extends Writable {
   public readonly columns: number | undefined
   public readonly rows: number | undefined
 
-  private promptWritten = false
-
-  public constructor(
-    private readonly question: string,
-    private readonly target: NodeJS.WriteStream
-  ) {
+  public constructor(private readonly target: NodeJS.WriteStream) {
     super()
     this.columns = target.columns
     this.rows = target.rows
@@ -25,17 +25,10 @@ class HiddenPromptOutput extends Writable {
   }
 
   public override _write(
-    chunk: Buffer | string,
-    encoding: BufferEncoding,
+    _chunk: Buffer | string,
+    _encoding: BufferEncoding,
     callback: (error?: Error | null) => void
   ): void {
-    const text = typeof chunk === "string" ? chunk : chunk.toString("utf8")
-    if (!this.promptWritten && text.includes(this.question)) {
-      this.promptWritten = true
-      this.target.write(this.question, encoding, callback)
-      return
-    }
-
     callback()
   }
 
@@ -66,8 +59,8 @@ class HiddenPromptOutput extends Writable {
   }
 }
 
-function createHiddenPromptOutput(question: string, target: NodeJS.WriteStream): Writable {
-  return new HiddenPromptOutput(question, target)
+function createHiddenPromptOutput(target: NodeJS.WriteStream): Writable {
+  return new HiddenPromptOutput(target)
 }
 
 function createPromptAbortHandler(parameters: {
@@ -108,9 +101,17 @@ export async function promptTerminal(
   hidden = false,
   options?: { abortSignal?: AbortSignal }
 ): Promise<string> {
-  const output = hidden ? createHiddenPromptOutput(question, process.stderr) : process.stderr
+  const output = hidden ? createHiddenPromptOutput(process.stderr) : process.stderr
   const rl = createInterface({ input: process.stdin, output })
   const abortSignal = options?.abortSignal
+
+  if (hidden) {
+    // Write the prompt exactly once directly to stderr; readline's own
+    // prompt emission is suppressed by HiddenPromptOutput._write because
+    // chunk-based detection of the prompt text is unreliable when readline
+    // splits the prompt across multiple writes.
+    process.stderr.write(question)
+  }
 
   return new Promise((resolve, reject) => {
     let settled = false
