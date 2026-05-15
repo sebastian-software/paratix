@@ -72,12 +72,12 @@ describe("withRegisteredSecrets", () => {
   })
   it("registers and unregisters secrets around the body", async () => {
     let observedDuringBody: string[] = []
-    await withRegisteredSecrets(["one", "two"], async () => {
+    await withRegisteredSecrets(["secret-one", "secret-two"], async () => {
       observedDuringBody = getRegisteredSecrets()
       await Promise.resolve()
     })
 
-    expect(new Set(observedDuringBody)).toStrictEqual(new Set(["one", "two"]))
+    expect(new Set(observedDuringBody)).toStrictEqual(new Set(["secret-one", "secret-two"]))
     expect(getRegisteredSecrets()).toStrictEqual([])
   })
 
