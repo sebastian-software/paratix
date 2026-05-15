@@ -4,7 +4,8 @@
   "private": true,
   "scripts": {
     "build": "pnpm -r build",
-    "test": "pnpm -r test",
+    "test": "pnpm -r test && pnpm test:scripts",
+    "test:scripts": "node --test scripts/*.test.mjs",
     "test:integration": "pnpm --filter paratix test:integration",
     "typecheck": "pnpm typecheck:root && pnpm typecheck:packages",
     "typecheck:root": "tsc -p tsconfig.root.json --noEmit",
