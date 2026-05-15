@@ -4,7 +4,23 @@ import { swap } from "../../src/modules/swap.js"
 import { createMockSsh as createBaseMockSsh } from "../helpers/mockSsh.js"
 
 const createMockSsh: typeof createBaseMockSsh = (responses, options) =>
-  createBaseMockSsh(responses, { ...options, allowFlagLockInternalDefaults: true })
+  createBaseMockSsh(
+    { hostname: { code: 0, stdout: "" }, ...responses },
+    {
+      ...options,
+      allowFlagLockInternalDefaults: true,
+      responseStubs: [
+        // R-0000494: holder marker now uses shellQuote(hostname) so the printf
+        // form differs from the legacy `"$(hostname)"` pattern recognized by
+        // the flag-lock internal defaults.
+        {
+          command: /^printf '%s@%s %s\\n' "\$\$" '' "\$\(date \+%s\)" > \S+\/holder$/v,
+          result: { code: 0 },
+        },
+        ...(options?.responseStubs ?? []),
+      ],
+    }
+  )
 
 const emptyEnv = {}
 const swapPath = "/swapfile"
