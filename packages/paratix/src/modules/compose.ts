@@ -594,11 +594,22 @@ async function prepareComposeSystemdTarget(parameters: {
       )
 }
 
+/**
+ * R-0000559: return rollback failures as regular `ModuleResult` values
+ * (instead of throwing). When a rollback step fails, the structured
+ * `CommandError` carrying stdout/stderr propagates through the normal
+ * `failed`-path so the central secret-masking still applies and the
+ * stream payload is not flattened into the thrown `Error.message`.
+ *
+ * @returns `null` when the snapshot was restored, a failed `ModuleResult`
+ *   when the rollback itself failed, and `"removed"`/`"restored"` so the
+ *   caller knows whether a `daemon-reload` is required.
+ */
 async function restoreComposeSystemdUnitFileSnapshot(parameters: {
   connection: SshConnection
   filePath: string
   snapshot: ComposeSystemdUnitFileSnapshot
-}): Promise<boolean> {
+}): Promise<ModuleResult | "removed" | "restored"> {
   if (parameters.snapshot.exists) {
     await parameters.connection.writeFile(parameters.filePath, parameters.snapshot.content, {
       mode: parameters.snapshot.mode,
@@ -608,12 +619,9 @@ async function restoreComposeSystemdUnitFileSnapshot(parameters: {
       EXEC_OPTS
     )
     if (ownerResult.code !== 0) {
-      throw new Error(
-        failedCommand(`[compose.systemd] rollback chown failed`, ownerResult).error?.message ??
-          "rollback chown failed"
-      )
+      return failedCommand(`[compose.systemd] rollback chown failed`, ownerResult)
     }
-    return true
+    return "restored"
   }
 
   const removeResult = await parameters.connection.exec(
@@ -621,39 +629,39 @@ async function restoreComposeSystemdUnitFileSnapshot(parameters: {
     EXEC_OPTS
   )
   if (removeResult.code !== 0) {
-    throw new Error(
-      failedCommand(`[compose.systemd] rollback remove failed`, removeResult).error?.message ??
-        "rollback remove failed"
-    )
+    return failedCommand(`[compose.systemd] rollback remove failed`, removeResult)
   }
-  return true
+  return "removed"
 }
 
 async function restoreComposeSystemdMaskSnapshot(parameters: {
   connection: SshConnection
   snapshot: ComposeSystemdMaskSnapshot
   unitFileName: string
-}): Promise<void> {
-  if (parameters.snapshot !== "masked") return
+}): Promise<ModuleResult | null> {
+  if (parameters.snapshot !== "masked") return null
 
   const result = await parameters.connection.exec(
     `systemctl mask -- ${shellQuote(parameters.unitFileName)}`,
     EXEC_OPTS
   )
   if (result.code !== 0) {
-    throw new Error(
-      failedCommand(`[compose.systemd] rollback systemctl mask failed`, result).error?.message ??
-        "rollback systemctl mask failed"
-    )
+    return failedCommand(`[compose.systemd] rollback systemctl mask failed`, result)
   }
+  return null
 }
 
-function failedWithComposeSystemdRollbackFailure(
+function combineComposeSystemdRollbackFailure(
   originalFailure: ModuleResult,
-  rollbackError: unknown
+  rollbackFailure: ModuleResult
 ): ModuleResult {
+  // R-0000559: combine messages so the operator sees both the original
+  // failure context and the rollback failure context. The structured
+  // `CommandError` of the rollback failure is otherwise dropped, so we
+  // append its rendered message — secret masking has already been applied
+  // by `failedCommand` when the caller forwarded a `secrets` list.
   return failed(
-    `${originalFailure.error?.message ?? "[compose.systemd] failed"}\nrollback failed: ${formatCaughtError(rollbackError)}`
+    `${originalFailure.error?.message ?? "[compose.systemd] failed"}\nrollback failed: ${rollbackFailure.error?.message ?? "rollback failed"}`
   )
 }
 
@@ -666,31 +674,48 @@ async function rollbackComposeSystemdTargetAfterFailure(parameters: {
   unitFileName: string
 }): Promise<ModuleResult> {
   try {
-    const restoredUnitFile = await restoreComposeSystemdUnitFileSnapshot({
+    const unitFileOutcome = await restoreComposeSystemdUnitFileSnapshot({
       connection: parameters.connection,
       filePath: parameters.filePath,
       snapshot: parameters.snapshot.unitFile,
     })
-    await restoreComposeSystemdMaskSnapshot({
+    if (typeof unitFileOutcome !== "string") {
+      return combineComposeSystemdRollbackFailure(parameters.originalFailure, unitFileOutcome)
+    }
+    const maskOutcome = await restoreComposeSystemdMaskSnapshot({
       connection: parameters.connection,
       snapshot: parameters.snapshot.mask,
       unitFileName: parameters.unitFileName,
     })
+    if (maskOutcome != null) {
+      return combineComposeSystemdRollbackFailure(parameters.originalFailure, maskOutcome)
+    }
 
-    if (parameters.needsDaemonReload || restoredUnitFile) {
+    // unitFileOutcome is "restored" or "removed" at this point (the
+    // failure branch returns early above). In both cases the on-disk
+    // unit file changed, so we need a `daemon-reload` for systemd to
+    // pick up the rollback — equivalent to the previous behaviour
+    // where the helper returned `true` on every successful restore.
+    const needsReload =
+      parameters.needsDaemonReload ||
+      unitFileOutcome === "restored" ||
+      unitFileOutcome === "removed"
+    if (needsReload) {
       const reloadResult: ExecResult = await parameters.connection.exec(
         "systemctl daemon-reload",
         EXEC_OPTS
       )
       if (reloadResult.code !== 0) {
-        throw new Error(
-          failedCommand(`[compose.systemd] rollback daemon-reload failed`, reloadResult).error
-            ?.message ?? "rollback daemon-reload failed"
+        return combineComposeSystemdRollbackFailure(
+          parameters.originalFailure,
+          failedCommand(`[compose.systemd] rollback daemon-reload failed`, reloadResult)
         )
       }
     }
   } catch (rollbackError) {
-    return failedWithComposeSystemdRollbackFailure(parameters.originalFailure, rollbackError)
+    return failed(
+      `${parameters.originalFailure.error?.message ?? "[compose.systemd] failed"}\nrollback failed: ${formatCaughtError(rollbackError)}`
+    )
   }
 
   return parameters.originalFailure
