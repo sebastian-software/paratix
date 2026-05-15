@@ -689,6 +689,16 @@ async function rollbackSshdPortAfterFailedVerification(
   return undefined
 }
 
+// R-0000586: known remote-mutation side-effects of the apply-time variant
+// of this helper:
+//   * `ensurePrivilegeSeparationDirectory` runs `mkdir -p /run/sshd` so
+//     `sshd -t -f` can verify the privilege-separation directory exists. The
+//     apply path is allowed to perform this (it is about to write the live
+//     config anyway), and Debian/Ubuntu sshd packaging owns the directory.
+//   * `ssh.writeFile` creates `/tmp/paratix-sshd-dry-run-<uuid>.conf`; the
+//     `finally` block removes it again.
+// The dry-run entry point (`dryRunSshdConfig`) must not perform either
+// mutation — see `validateProspectiveSshdConfigForDryRun` below.
 async function validateProspectiveSshdConfig(
   ssh: SshConnection,
   content: string
@@ -713,12 +723,60 @@ async function validateProspectiveSshdConfig(
   }
 }
 
+// R-0000586: probe whether `/run/sshd` already exists without mutating the
+// remote filesystem. Used by the dry-run path so we never invoke `mkdir -p`
+// from a non-mutating planning step.
+async function privilegeSeparationDirectoryExists(ssh: SshConnection): Promise<boolean> {
+  const result = await ssh.exec(`test -d ${shellQuote(PRIVILEGE_SEPARATION_DIRECTORY)}`, {
+    ignoreExitCode: true,
+    silent: true,
+  })
+  return result.code === 0
+}
+
+// R-0000586: dry-run-safe variant of `validateProspectiveSshdConfig`. The
+// regular variant performs `mkdir -p /run/sshd` to ensure sshd -t can read
+// the privilege-separation directory. Dry-run must not mutate the host:
+// probe `/run/sshd` non-destructively and skip the sshd -t step when it is
+// absent, returning a `skipped` status so the operator sees the dry-run
+// cannot verify the prospective config under the current host state.
+async function validateProspectiveSshdConfigForDryRun(
+  ssh: SshConnection,
+  content: string
+): Promise<ModuleResult | undefined> {
+  if (!(await privilegeSeparationDirectoryExists(ssh))) {
+    return {
+      _dryRunDetail:
+        "(dry-run skipped: /run/sshd missing — `sshd -t` cannot run without the " +
+        "privilege-separation directory; not creating it from a dry-run)",
+      status: "skipped",
+    }
+  }
+  const temporaryConfigPath = `/tmp/paratix-sshd-dry-run-${randomUUID()}.conf`
+  try {
+    await ssh.writeFile(temporaryConfigPath, content, { mode: SSHD_CONFIG_MODE })
+    const result = await ssh.exec(`sshd -t -f ${shellQuote(temporaryConfigPath)}`, {
+      ignoreExitCode: true,
+      silent: true,
+    })
+    if (result.code === 0) {
+      return undefined
+    }
+    return failedCommand("[sshd dry-run] sshd -t failed for prospective config", result)
+  } finally {
+    await ssh.exec(`rm -f ${shellQuote(temporaryConfigPath)}`, {
+      ignoreExitCode: true,
+      silent: true,
+    })
+  }
+}
+
 async function dryRunSshdConfig(
   ssh: SshConnection,
   newContent: string,
   successDetail: string
 ): Promise<ModuleResult> {
-  const validationFailure = await validateProspectiveSshdConfig(ssh, newContent)
+  const validationFailure = await validateProspectiveSshdConfigForDryRun(ssh, newContent)
   if (validationFailure != null) {
     return validationFailure
   }
