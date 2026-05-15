@@ -350,15 +350,27 @@ async function resolveRegularReferences(
 /**
  * Resolve OTP 1Password references into lazy TOTP code generators.
  *
- * Each reference is resolved immediately via `op read` to obtain the
- * `otpauth://totp/...` URI, then wrapped in a lazy function so the TOTP
- * code is computed fresh on every access.
+ * Each reference is resolved exactly once via `op read` to obtain the
+ * `otpauth://totp/...` URI, then wrapped in a lazy function so the
+ * time-based TOTP **code** is recomputed on every access.
+ *
+ * Note: only the TOTP code rotates per call — the underlying seed (the
+ * `secret=` parameter of the otpauth URI) is captured by the returned
+ * closure and is NOT refetched. A seed rotation in 1Password during a
+ * running playbook is therefore not observable until the next `runPlaybook`
+ * invocation re-resolves the reference. This is a deliberate design
+ * decision: resolving the seed on every access would invoke `op read`
+ * (and potentially a 1Password authentication pop-up / biometric prompt)
+ * for every module evaluation, which is unacceptable for both performance
+ * and interactive UX. Use a fresh playbook run when a seed has been
+ * rotated.
  *
  * @param entries - Map of logical names to OTP 1Password references.
  * @param leakedValues - Mutable sink that captures every resolved otpauth URI.
  *   The caller uses it to feed `maskSecrets` on failure paths so the
  *   `secret=` parameter in the URI is redacted from any user-visible output.
- * @returns Map of logical names to lazy functions that compute fresh TOTP codes.
+ * @returns Map of logical names to lazy functions that compute a fresh TOTP
+ *   code (from the captured seed) on every call.
  * @throws {Error} If the `op` CLI is not available or the session is not authenticated.
  */
 async function resolveOtpReferences(
