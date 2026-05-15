@@ -142,6 +142,7 @@ function makeClientWithEnd(endSpy: ReturnType<typeof vi.fn>): Client {
       callback(undefined, stream)
       stream.emit("close", 0)
     }),
+    once: vi.fn(),
     sftp: vi.fn().mockImplementation((callback: Parameters<Client["sftp"]>[0]) => {
       callback(undefined, {} as SFTPWrapper)
     }),
@@ -152,6 +153,7 @@ function makeClientWithExecSpy(execSpy: ReturnType<typeof vi.fn>): Client {
   return {
     end: vi.fn(),
     exec: execSpy,
+    once: vi.fn(),
     sftp: vi.fn().mockImplementation((callback: Parameters<Client["sftp"]>[0]) => {
       callback(undefined, {} as SFTPWrapper)
     }),
@@ -396,6 +398,10 @@ describe("SshConnectionImpl", () => {
         destroy: destroySpy,
         end: endSpy,
         exec: vi.fn(),
+        // once("close", ...) is called by tearDownClient to cancel the fallback
+        // when end() completes cleanly. In this test we never emit the close event
+        // so the handler is registered but never invoked — the timeout fires.
+        once: vi.fn(),
         sftp: vi.fn(),
       } as unknown as Client
       const ssh = makeConnectedSsh(client)
@@ -457,6 +463,7 @@ describe("SshConnectionImpl", () => {
       const client = {
         end: vi.fn(),
         exec: execSpy,
+        once: vi.fn(),
         sftp: vi.fn(),
       } as unknown as Client
 
@@ -1462,7 +1469,11 @@ describe("SshConnectionImpl", () => {
       expect(calledOptions).toBeUndefined()
     })
 
-    it("zeroes the private key Buffer after a successful connection (finally-block)", async () => {
+    // R-0000521: ssh2 retains an internal reference to the private key Buffer
+    // for re-key / reconnect operations. Zeroing the buffer in the success path
+    // would corrupt ssh2's internal state. The buffer is only zeroed on the
+    // error path — see the corresponding error-path test below.
+    it("does NOT zero the private key Buffer after a successful connection (finally-block)", async () => {
       // Arrange
       const { readFile } = await import("node:fs/promises")
       const fakeKeyBuffer = Buffer.from("sensitive-private-key")
@@ -1474,8 +1485,9 @@ describe("SshConnectionImpl", () => {
       // Act
       await ssh.connect()
 
-      // Assert: every byte of the buffer must be 0 after connect() resolves
-      expect(fakeKeyBuffer.every((byte) => byte === 0)).toBe(true)
+      // Assert: buffer must NOT be zeroed in the success path — ssh2 needs the
+      // reference intact for re-keying and reconnect operations.
+      expect(fakeKeyBuffer.every((byte) => byte === 0)).toBe(false)
     })
 
     it("zeroes the private key Buffer even when the connection fails (finally-block on error)", async () => {
