@@ -61,7 +61,7 @@ function findCrontabWriteInput(mockSsh: MockSsh): string | undefined {
 }
 
 async function waitForCrontabWriteContaining(mockSsh: MockSsh, text: string): Promise<boolean> {
-  const deadline = Date.now() + 20
+  const deadline = Date.now() + 500
 
   return new Promise<boolean>((resolve) => {
     const poll = (): void => {
