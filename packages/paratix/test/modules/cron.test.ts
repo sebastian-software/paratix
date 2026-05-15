@@ -34,8 +34,11 @@ const createMockSsh: typeof createBaseMockSsh = (responses, options) =>
         result: { code: 0 },
       },
       {
+        // R-0000494: hostname is now captured via `ssh.output("hostname")`
+        // before the marker write, so the shell-quoted hostname (or `''` from
+        // the catch fallback) is interpolated into the printf.
         command:
-          /^printf '%s@%s %s\\n' "\$\$" "\$\(hostname\)" "\$\(date \+%s\)" > \/var\/lib\/paratix\/flags\/'cron-crontab-[\da-f]+'\/holder$/v,
+          /^printf '%s@%s %s\\n' "\$\$" [^"]+ "\$\(date \+%s\)" > \/var\/lib\/paratix\/flags\/'cron-crontab-[\da-f]+'\/holder$/v,
         result: { code: 0 },
       },
       {
