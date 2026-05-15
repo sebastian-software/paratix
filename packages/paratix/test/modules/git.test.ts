@@ -316,7 +316,9 @@ describe("git.clone — check", () => {
   it("quotes adversarial destination and ref values during check", async () => {
     const adversarialRepo = "git@example.com:team/repo '$(touch repo-check)'.git"
     const adversarialDestination = "/opt/my app/it's $(touch dest-check)"
-    const adversarialRef = "release/it's;$(touch_ref-check)"
+    // R-0000482: refs may no longer contain apostrophes. The remaining
+    // metacharacters still exercise shell-quote on the command boundary.
+    const adversarialRef = "release/x;$(touch_ref-check)"
     const adversarialGitDir = `${adversarialDestination}/.git`
     const quotedDestination = shellQuote(adversarialDestination)
     const quotedRef = shellQuote(adversarialRef)
@@ -376,7 +378,9 @@ describe("git.clone — apply", () => {
   it("quotes adversarial repo, destination, and ref values when cloning", async () => {
     const adversarialRepo = "git@example.com:team/repo '$(touch repo-apply)'.git"
     const adversarialDestination = "/opt/my app/it's $(touch dest-apply)"
-    const adversarialRef = "release/it's;$(touch_ref-apply)"
+    // R-0000482: refs may no longer contain apostrophes. The remaining
+    // metacharacters still exercise shell-quote on the command boundary.
+    const adversarialRef = "release/x;$(touch_ref-apply)"
     const adversarialGitDir = `${adversarialDestination}/.git`
     const expectedCommand = [
       "git clone --branch",
