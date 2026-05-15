@@ -1,3 +1,4 @@
+import { rmSync } from "node:fs"
 import { basename, resolve } from "node:path"
 
 import type { InitialUserConfig } from "./templates.js"
@@ -193,9 +194,25 @@ export function scaffoldProject(
 
   console.log(`Creating Paratix project in ${projectDirectory}...`)
 
-  writeProjectFiles(projectDirectory, { ...options, ...normalizedStringOptions, initialUser })
-  const installer = options?.installer ?? installDependencies
-  if (!installer(projectDirectory, pm)) {
+  // R-0000499: if writeProjectFiles or the installer throws after we have
+  // already created the empty project directory, leaving the half-built
+  // directory behind blocks any retry with the same name. Remove the
+  // directory before rethrowing so the operator can run create-paratix again
+  // without manually cleaning up. The non-throwing installer return value
+  // (false) signals a partial success — the scaffold files are valid, only
+  // the install step failed — so we do NOT remove the directory in that
+  // branch.
+  let installerSucceeded: boolean
+  try {
+    writeProjectFiles(projectDirectory, { ...options, ...normalizedStringOptions, initialUser })
+    const installer = options?.installer ?? installDependencies
+    installerSucceeded = installer(projectDirectory, pm)
+  } catch (error) {
+    rmSync(projectDirectory, { force: true, recursive: true })
+    throw error
+  }
+
+  if (!installerSucceeded) {
     process.exitCode = 1
     printPartialSuccessMessage(normalizedProjectName, pm)
     return false
