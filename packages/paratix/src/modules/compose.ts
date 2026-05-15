@@ -182,6 +182,25 @@ async function checkComposeDownNoContainers(parameters: {
   return (await composeProjectVolumesExist(parameters)) ? NEEDS_APPLY : "ok"
 }
 
+// R-0000483: a non-existing compose project (missing compose.yml /
+// project-directory absent) should be treated as already-down. Both Docker
+// Compose and Podman Compose report different but consistently descriptive
+// errors when the project cannot be located. The patterns below are
+// conservative: they require a recognisable absent-signal in the failure
+// output before we treat the failure as "project does not exist".
+const COMPOSE_ABSENT_PROJECT_PATTERNS = [
+  /no configuration file provided/iv,
+  /no such file or directory/iv,
+  /no such project/iv,
+  /can't find a suitable configuration file/iv,
+  /not found/iv,
+]
+
+function isComposeAbsentProject(parameters: { stderr: string; stdout: string }): boolean {
+  const combined = `${parameters.stdout}\n${parameters.stderr}`
+  return COMPOSE_ABSENT_PROJECT_PATTERNS.some((pattern) => pattern.test(combined))
+}
+
 async function resolveDesiredComposeContent(options: {
   content?: string
   src?: string
@@ -960,9 +979,13 @@ export const compose = {
           `${composeCommand(runtime, projectDirectory)} down${volumesFlag}`,
           EXEC_OPTS
         )
-        return result.code === 0
-          ? { status: "changed" }
-          : failedCommand(`[compose.down] failed for ${projectDirectory}`, result)
+        if (result.code === 0) return { status: "changed" }
+        // R-0000483: a non-existing compose project is equivalent to
+        // already-down. The runtime exits non-zero with a recognisable
+        // absent-signal — treat that as a successful no-op rather than a
+        // failure that aborts the playbook.
+        if (isComposeAbsentProject(result)) return { status: "ok" }
+        return failedCommand(`[compose.down] failed for ${projectDirectory}`, result)
       },
       async check(ssh: null | SshConnection): Promise<"needs-apply" | "ok"> {
         if (!ssh) return NEEDS_APPLY
@@ -974,7 +997,13 @@ export const compose = {
           `${composeCommand(rt, projectDirectory)} ps --format json`,
           EXEC_OPTS
         )
-        if (result.code !== 0) return NEEDS_APPLY
+        if (result.code !== 0) {
+          // R-0000483: treat a non-existing compose project as already-down so
+          // the subsequent apply does not also fail. Without this guard a
+          // missing compose.yml leaves apply to throw a hard failure.
+          if (isComposeAbsentProject(result)) return "ok"
+          return NEEDS_APPLY
+        }
 
         const stdout = result.stdout.trim()
         if (stdout === "") {
