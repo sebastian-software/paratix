@@ -343,6 +343,25 @@ async function preflightSshdReloadUnit(
   }
 }
 
+// R-0000541: parse the `users:(("PROC",...))` entries from `ss -ltnp` instead
+// of running a bare substring match against the entire row. Without the
+// structural parse a user-level process called `sshd-fake` or a comment
+// containing the literal text `sshd` would satisfy the regex even though no
+// real sshd is bound. Only `sshd` (direct service) and `systemd` (socket
+// activation hands the listening socket to systemd-pid-1) are accepted as
+// owners.
+const SS_USERS_PROCESS_PATTERN = /users:\(\(("([^"\\]+)")[^)]*\)/gv
+const SSHD_OWNER_NAMES = new Set(["sshd", "systemd"])
+
+function extractSsListenerProcessNames(output: string): string[] {
+  const names: string[] = []
+  for (const match of output.matchAll(SS_USERS_PROCESS_PATTERN)) {
+    const name = match[2]
+    if (name != null) names.push(name)
+  }
+  return names
+}
+
 async function liveSshdPortMatches(ssh: SshConnection, targetPort: number): Promise<boolean> {
   const result = await ssh.exec(`ss -H -ltnp 'sport = :${String(targetPort)}'`, {
     ignoreExitCode: true,
@@ -351,7 +370,9 @@ async function liveSshdPortMatches(ssh: SshConnection, targetPort: number): Prom
   if (result.code !== 0) return false
   const output = result.stdout.trim()
   if (output === "") return false
-  return /\b(?:sshd|ssh\.socket)\b/v.test(output)
+  const processNames = extractSsListenerProcessNames(output)
+  if (processNames.length === 0) return false
+  return processNames.some((name) => SSHD_OWNER_NAMES.has(name))
 }
 
 async function sshdPortConfigMatchesLive(ssh: SshConnection, targetPort: number): Promise<boolean> {
