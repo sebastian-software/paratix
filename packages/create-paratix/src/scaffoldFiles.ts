@@ -49,21 +49,23 @@ function throwScaffoldPathAlreadyExists(path: string): never {
 }
 
 function assertWritableScaffoldDirectory(path: string): void {
-  const stats = lstatPathIfExists(path)
-
-  if (stats == null) {
+  // Atomic create-or-detect: mkdirSync with recursive:false either creates the
+  // directory or throws EEXIST. After either outcome, we lstat the path and
+  // reject symlinks or non-directories. Replacing the prior
+  // lstat -> mkdir -> lstat sequence closes the TOCTOU window in which an
+  // attacker could swap the path for a symlink between the existence check
+  // and the directory creation.
+  try {
     // eslint-disable-next-line security/detect-non-literal-fs-filename
-    mkdirSync(path, { recursive: true })
-    const createdStats = lstatPathIfExists(path)
-
-    if (createdStats == null || !createdStats.isDirectory() || createdStats.isSymbolicLink()) {
-      throwScaffoldPathAlreadyExists(path)
+    mkdirSync(path, { recursive: false })
+  } catch (error: unknown) {
+    if (!hasErrorCode(error, "EEXIST")) {
+      throw error
     }
-
-    return
   }
 
-  if (!stats.isDirectory() || stats.isSymbolicLink()) {
+  const stats = lstatPathIfExists(path)
+  if (stats == null || !stats.isDirectory() || stats.isSymbolicLink()) {
     throwScaffoldPathAlreadyExists(path)
   }
 }
