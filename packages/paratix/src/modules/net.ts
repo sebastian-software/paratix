@@ -164,10 +164,44 @@ function validateSingleLineNetworkValues(label: string, values?: string[]): void
   }
 }
 
+// R-0000485 / R-0000488: addresses are written into netplan YAML or
+// networkd ini files. A bare IP without prefix length or a malformed token
+// can inject configuration lines, so enforce a strict CIDR shape and verify
+// the IP portion with `node:net`'s `isIP()`.
+const CIDR_PATTERN = /^(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}|[0-9a-fA-F:]+)\/\d{1,3}$/v
+
+function isValidCidr(value: string): boolean {
+  const match = CIDR_PATTERN.exec(value)
+  if (match === null) return false
+  const ipPortion = match[1]
+  if (ipPortion === undefined) return false
+  return isIP(ipPortion) !== 0
+}
+
+function validateInterfaceAddress(value: string): void {
+  validateSingleLineNetworkValue("interface address", value)
+  if (!isValidCidr(value)) {
+    throw new Error(
+      `[net.interface] invalid address ${JSON.stringify(value)}: value must be in CIDR notation (e.g. 192.0.2.10/24 or 2001:db8::1/64)`
+    )
+  }
+}
+
+function validateInterfaceIpToken(label: string, value: string): void {
+  validateSingleLineNetworkValue(label, value)
+  if (isIP(value) === 0) {
+    throw new Error(`[net.interface] invalid ${label} ${JSON.stringify(value)}: value must be a valid IPv4 or IPv6 address`)
+  }
+}
+
 function validateInterfaceOptions(options: InterfaceOptions): void {
-  validateSingleLineNetworkValues("interface address", options.addresses)
-  validateSingleLineNetworkValues("interface nameserver", options.nameservers)
-  if (options.gateway != null) validateSingleLineNetworkValue("interface gateway", options.gateway)
+  for (const address of options.addresses ?? []) {
+    validateInterfaceAddress(address)
+  }
+  for (const nameserver of options.nameservers ?? []) {
+    validateInterfaceIpToken("nameserver", nameserver)
+  }
+  if (options.gateway != null) validateInterfaceIpToken("gateway", options.gateway)
 }
 
 function validateNetworkInterfaceName(label: string, value: string): void {
