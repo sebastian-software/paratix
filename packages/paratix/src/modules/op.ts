@@ -257,8 +257,17 @@ async function spawnWithInput(
     }
     attachSpawnIoHandlers({ child, command, io, rejectOnce, resolveOnce })
     detachLifecycle = attachSpawnLifecycle({ child, command, rejectOnce, timeoutMs })
+    // R-0000573: when the child exits before its stdin pipe is wired up
+    // (e.g. spawn raced a SIGKILL or the binary refused exec) `child.stdin`
+    // is null. The previous `child.stdin?.end(input)` would then silently
+    // no-op and the promise would hang because neither `error` nor `close`
+    // had fired yet. Surface the failure explicitly instead.
+    if (child.stdin == null) {
+      rejectOnce(new Error(`${command} spawn failed: stdin unavailable`))
+      return
+    }
     try {
-      child.stdin?.end(input)
+      child.stdin.end(input)
     } catch (error) {
       rejectOnce(describeSpawnError(command, error))
     }
