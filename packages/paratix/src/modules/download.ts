@@ -723,12 +723,29 @@ async function compareUnverifiedHashMarker(
   destination: string
 ): Promise<"drift" | "match" | "missing"> {
   const markerPath = unverifiedHashMarkerPath(destination)
-  if (await conn.test(`[ -L ${shellQuote(markerPath)} ]`)) return "drift"
-  if (!(await conn.test(`[ -f ${shellQuote(markerPath)} ]`))) return "missing"
-  const markerRead = await conn.exec(`cat ${shellQuote(markerPath)}`, {
-    ignoreExitCode: true,
-    silent: true,
-  })
+  const quotedMarkerPath = shellQuote(markerPath)
+  // Pre-existence probe purely to distinguish the legacy "no marker yet"
+  // state (→ "missing", triggers a clean re-record) from active drift
+  // (→ "missing" would silently hide tampering). The probe is racy on its
+  // own, but every TOCTOU outcome of this branch funnels into the atomic
+  // symlink-guarded read below.
+  if (!(await conn.test(`[ -f ${quotedMarkerPath} ]`))) return "missing"
+  // R-0000529: fuse the symlink test and the marker read into a single
+  // shell invocation (`[ ! -L p ] && [ -f p ] && cat -- p`). Splitting
+  // them across two SSH round-trips opens a TOCTOU window where an
+  // attacker can swap the marker for a symlink after the `[ -L ]` probe
+  // but before `cat` runs, defeating the drift detection. Combining the
+  // checks pins both decisions to the same remote shell process so the
+  // symlink guard and the read observe the same inode without an
+  // intermediate network gap. `cat --` defends against marker paths that
+  // begin with `-` after destination-derived prefixes.
+  const markerRead = await conn.exec(
+    `[ ! -L ${quotedMarkerPath} ] && [ -f ${quotedMarkerPath} ] && cat -- ${quotedMarkerPath}`,
+    {
+      ignoreExitCode: true,
+      silent: true,
+    }
+  )
   if (markerRead.code !== 0) return "drift"
   const markerContent = markerRead.stdout
   const recordedHash = markerContent.trim()
