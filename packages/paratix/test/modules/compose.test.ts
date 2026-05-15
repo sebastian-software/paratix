@@ -890,9 +890,15 @@ describe("compose.config — apply", () => {
       [`[ -e '${remotePath}' ]`]: { code: 0 },
       [`rm -f '${stagingPath}'`]: { code: 0 },
     })
-    // The first exec call after writeFile is the compose validation; reject it.
-    vi.spyOn(mockSsh, "exec").mockImplementationOnce(() => {
-      throw validationError
+    // Target the compose validation command explicitly rather than relying on
+    // call order: only throw when the validation command (`config --quiet`) is
+    // executed, otherwise delegate to the original mockSsh.exec implementation.
+    const originalExec = mockSsh.exec.bind(mockSsh)
+    vi.spyOn(mockSsh, "exec").mockImplementation(async (command, options) => {
+      if (command.includes("config --quiet")) {
+        throw validationError
+      }
+      return originalExec(command, options)
     })
     mockSsh.writeFile = async (
       path: string,
