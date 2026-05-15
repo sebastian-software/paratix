@@ -12,6 +12,7 @@ import {
   readUfwStatus,
   readUfwStatusDetailed,
   statusIncludesIpv6Rules,
+  statusReportsActive,
   tcpRelevantRuleDeletePorts,
 } from "./ufwStatus.js"
 
@@ -190,6 +191,36 @@ async function applyUfwRulePort(input: {
   // emitted family lines are skips; a mixed skip/add output still
   // means one family was repaired.
   return { changed: deleteOutcome.changed || ufwRuleApplyChanged(result.stdout), failure: null }
+}
+
+// R-0000555: when ufw is inactive the rules table is missing from
+// `ufw status`. `ufw show added` lists rules that have been queued but are
+// not yet enforced, which lets the check distinguish "rule was added but ufw
+// is disabled" from "rule does not exist at all".
+async function readUfwShowAdded(ssh: SshConnection): Promise<null | string> {
+  try {
+    return await ssh.output(`${UFW} show added`)
+  } catch {
+    return null
+  }
+}
+
+function hasAddedUfwRule(output: string, action: UfwRuleAction, port: number): boolean {
+  // `ufw show added` emits commands like `ufw allow 22` or `ufw deny 22/tcp`.
+  // Match the action keyword followed by the bare port (protocol-agnostic) at
+  // a word boundary so port 22 does not match 5022 or 22000.
+  // eslint-disable-next-line security/detect-non-literal-regexp
+  return new RegExp(`\\b${action}\\s+${port}(?:\\b|/)`, "v").test(output)
+}
+
+function checkInactiveUfwRulePort(input: {
+  action: UfwRuleAction
+  addedOutput: null | string
+  port: number
+}): "needs-apply" | "ok" {
+  const { action, addedOutput, port } = input
+  if (addedOutput == null) return NEEDS_APPLY
+  return hasAddedUfwRule(addedOutput, action, port) ? "ok" : NEEDS_APPLY
 }
 
 function checkUfwRulePort(input: {
@@ -405,6 +436,24 @@ export const ufw = {
         // error).
         const status = await readUfwStatus(ssh)
         if (status == null) return NEEDS_APPLY
+        // R-0000555: when ufw is inactive the rules table is absent, so the
+        // protocol-agnostic match against `ufw status` always returns
+        // NEEDS_APPLY and apply would loop forever. Fall back to
+        // `ufw show added`, which lists queued rules even while ufw is
+        // disabled, and warn the operator that `ufw.enabled` is missing.
+        if (!statusReportsActive(status)) {
+          process.stderr.write(
+            `Warning: [ufw.rule: ${action} ${portList.join(",")}] ufw is inactive; ` +
+              "rules are saved but not enforced until ufw.enabled() runs. " +
+              "Verifying rule presence via `ufw show added`.\n"
+          )
+          const addedOutput = await readUfwShowAdded(ssh)
+          for (const port of portList) {
+            const portResult = checkInactiveUfwRulePort({ action, addedOutput, port })
+            if (portResult === NEEDS_APPLY) return NEEDS_APPLY
+          }
+          return "ok"
+        }
         for (const port of portList) {
           const portResult = checkUfwRulePort({
             expectedAction,
