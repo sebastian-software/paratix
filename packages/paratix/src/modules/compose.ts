@@ -46,6 +46,21 @@ function requireComposeSsh(
   return ssh ?? failed(`[compose.${action}] SSH connection is required for ${projectDirectory}`)
 }
 
+function assertComposeRuntime(runtime: unknown, action: string): ComposeRuntime {
+  // R-0000556: TypeScript only enforces the `ComposeRuntime` union at compile
+  // time. A JavaScript caller — or any path that bypasses the union — could
+  // smuggle an attacker-controlled string like `"docker; rm -rf /"` into
+  // `composeCommand`, which would then land verbatim in a shell command and
+  // enable arbitrary remote code execution. Re-check the value against the
+  // runtime whitelist before it can reach any shell expansion.
+  if (runtime !== "docker" && runtime !== "podman") {
+    throw new Error(
+      `[compose.${action}] invalid container runtime: ${typeof runtime === "string" ? runtime : String(runtime)}`
+    )
+  }
+  return runtime
+}
+
 async function requireComposeRuntime(parameters: {
   action: string
   explicitRuntime?: ComposeRuntime
@@ -53,12 +68,12 @@ async function requireComposeRuntime(parameters: {
   ssh: SshConnection
 }): Promise<ComposeRuntime | ModuleResult> {
   const runtime = await getRuntime(parameters.ssh, parameters.explicitRuntime)
-  return (
-    runtime ??
-    failed(
+  if (runtime === null) {
+    return failed(
       `[compose.${parameters.action}] no container runtime found for ${parameters.projectDirectory}`
     )
-  )
+  }
+  return assertComposeRuntime(runtime, parameters.action)
 }
 
 const COMPOSE_UP_ACTION_KEYWORDS = ["Creating", "Recreating", "Starting", "Started", "Pulling"]
