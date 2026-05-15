@@ -43,10 +43,7 @@ import {
 let TEST_DIR = ""
 
 describe("isValidProjectName", () => {
-  // These tests document that invalid project names must be rejected.
-  // Currently no validation exists in main() beyond a falsy-check, so
-  // isValidProjectName is not yet exported. All tests in this block will
-  // fail until the validation function is implemented and exported.
+  // Verify the project name validation rules.
 
   it("accepts a simple lowercase name", () => {
     expect(isValidProjectName("my-project")).toBe(true)
