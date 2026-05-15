@@ -685,6 +685,17 @@ async function writeUnverifiedHashMarker(conn: SshConnection, destination: strin
   const hash = await conn.sha256(destination)
   if (hash == null || hash.length === 0) return
   const markerPath = unverifiedHashMarkerPath(destination)
+  // R-0000528: the `[ -L ]` probe and the subsequent `conn.writeFile` run in
+  // separate SSH round-trips, so this test alone cannot close the TOCTOU
+  // window where an attacker swaps the marker for a symlink in between.
+  // We keep the probe purely as fail-fast diagnostic so the common case
+  // ("marker is already a symlink from a prior compromise") short-circuits
+  // before we stage a temp file. The final atomicity guarantee comes from
+  // `conn.writeFile` itself: it streams to a temporary path via SFTP and
+  // hands off to `finalizeRemoteTempFile`, which evaluates the symlink
+  // guard (`[ ! -L target ] && [ ! -d target ]`) and the atomic
+  // `mv -T -- temp target` inside a single remote shell invocation, so the
+  // actual finalize step is symlink-safe regardless of the outcome here.
   if (await conn.test(`[ -L ${shellQuote(markerPath)} ]`)) return
   // Atomic single-line write — no shell expansion of the hash, no risk of
   // partial writes contaminating later checks. The marker only needs read
