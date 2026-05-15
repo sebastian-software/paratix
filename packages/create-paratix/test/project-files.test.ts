@@ -627,23 +627,40 @@ describe("writeProjectFiles", () => {
 
     const cleanupPattern = "^22(/tcp)?[[:space:]]+(\\(v6\\)[[:space:]]+)?ALLOW"
 
-    expect(
-      spawnSync("grep", ["-Eq", cleanupPattern], { input: "22 ALLOW IN Anywhere" }).status
-    ).toBe(0)
-    expect(
-      spawnSync("grep", ["-Eq", cleanupPattern], { input: "22 (v6) ALLOW IN Anywhere (v6)" }).status
-    ).toBe(0)
-    expect(
-      spawnSync("grep", ["-Eq", cleanupPattern], { input: "22/tcp ALLOW IN Anywhere" }).status
-    ).toBe(0)
-    expect(
-      spawnSync("grep", ["-Eq", cleanupPattern], {
-        input: "22/tcp (v6) ALLOW IN Anywhere (v6)",
-      }).status
-    ).toBe(0)
-    expect(
-      spawnSync("grep", ["-Eq", cleanupPattern], { input: "2222/tcp ALLOW IN Anywhere" }).status
-    ).toBe(1)
+    const grepResult1 = spawnSync("grep", ["-Eq", cleanupPattern], {
+      input: "22 ALLOW IN Anywhere",
+      timeout: 5_000,
+    })
+    expect(grepResult1.error).toBeUndefined()
+    expect(grepResult1.status).toBe(0)
+
+    const grepResult2 = spawnSync("grep", ["-Eq", cleanupPattern], {
+      input: "22 (v6) ALLOW IN Anywhere (v6)",
+      timeout: 5_000,
+    })
+    expect(grepResult2.error).toBeUndefined()
+    expect(grepResult2.status).toBe(0)
+
+    const grepResult3 = spawnSync("grep", ["-Eq", cleanupPattern], {
+      input: "22/tcp ALLOW IN Anywhere",
+      timeout: 5_000,
+    })
+    expect(grepResult3.error).toBeUndefined()
+    expect(grepResult3.status).toBe(0)
+
+    const grepResult4 = spawnSync("grep", ["-Eq", cleanupPattern], {
+      input: "22/tcp (v6) ALLOW IN Anywhere (v6)",
+      timeout: 5_000,
+    })
+    expect(grepResult4.error).toBeUndefined()
+    expect(grepResult4.status).toBe(0)
+
+    const grepResult5 = spawnSync("grep", ["-Eq", cleanupPattern], {
+      input: "2222/tcp ALLOW IN Anywhere",
+      timeout: 5_000,
+    })
+    expect(grepResult5.error).toBeUndefined()
+    expect(grepResult5.status).toBe(1)
   })
 
   it("generated server.ts keeps port 22 open during first run before removing it later", () => {
