@@ -142,9 +142,14 @@ describe("user.present check", () => {
     expect(result).toBe("needs-apply")
   })
 
+  // R-0000544: shadow hash comparison is now done server-side via bash -c with
+  // cmp -s to avoid sending the raw hash back over stdout. The exec call uses
+  // ignoreExitCode:true and returns code 0 for match, non-zero for mismatch.
   it("returns needs-apply when shadow hash does not match password", async () => {
+    const compareCommand =
+      "bash -c 'set -o pipefail\ncmp -s <(getent shadow '\\''alice'\\'' | cut -d: -f2) -'"
     const ssh = createMockSsh({
-      "getent shadow 'alice'": { code: 0, stdout: "alice:$6$oldhash:19000:0:99999:7:::" },
+      [compareCommand]: { code: 1 },
       "id 'alice'": { code: 0 },
     })
     const mod = user.present("alice", { password: "$6$newhash" })
@@ -153,8 +158,10 @@ describe("user.present check", () => {
   })
 
   it("returns ok when shadow hash matches password", async () => {
+    const compareCommand =
+      "bash -c 'set -o pipefail\ncmp -s <(getent shadow '\\''alice'\\'' | cut -d: -f2) -'"
     const ssh = createMockSsh({
-      "getent shadow 'alice'": { code: 0, stdout: "alice:$6$hash:19000:0:99999:7:::" },
+      [compareCommand]: { code: 0 },
       "id 'alice'": { code: 0 },
     })
     const mod = user.present("alice", { password: "$6$hash" })
