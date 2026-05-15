@@ -1407,6 +1407,23 @@ describe("file.line — sed-Escaping Regression (apply with options.match)", () 
     expect(writtenFiles).toStrictEqual([])
   })
 
+  it("detects content changes between matched line read and replace write", async () => {
+    const reads = ["OTHER=foo\nKEY=old\nEND=bar\n", "OTHER=foo\nKEY=race\nEND=bar\n"]
+    let readIndex = 0
+    const ssh = createMockSsh()
+    ssh.readFile = async () => {
+      await Promise.resolve()
+      return reads[readIndex++]
+    }
+
+    const mod = file.line("/etc/config", "KEY=value", { match: "KEY=.*" })
+
+    await expect(mod.apply(ssh, emptyEnv)).rejects.toThrow(
+      "Concurrent modification detected on /etc/config"
+    )
+    expect(ssh.writeFileCalls).toStrictEqual([])
+  })
+
   it("regression — apply replaces the full matching line, not only the matched substring", async () => {
     const writtenFiles: Array<{ content: string; path: string }> = []
     const ssh = createMockSsh({
@@ -2332,6 +2349,30 @@ describe("file.block", () => {
     expect(writtenFiles[0]?.content).not.toContain("old content")
   })
 
+  it("detects content changes between block read and write", async () => {
+    const beginMarker = "# BEGIN paratix: myblock"
+    const endMarker = "# END paratix: myblock"
+    const reads = [
+      `before\n${beginMarker}\nold content\n${endMarker}\nafter`,
+      `before\n${beginMarker}\nrace content\n${endMarker}\nafter`,
+    ]
+    let readIndex = 0
+    const ssh = createMockSsh({
+      "[ -e '/etc/hosts' ]": { code: 0 },
+    })
+    ssh.readFile = async () => {
+      await Promise.resolve()
+      return reads[readIndex++]
+    }
+
+    const mod = file.block("/etc/hosts", { content: "new content", name: "myblock" })
+
+    await expect(mod.apply(ssh, emptyEnv)).rejects.toThrow(
+      "Concurrent modification detected on /etc/hosts"
+    )
+    expect(ssh.writeFileCalls).toStrictEqual([])
+  })
+
   it("apply fails without writing when block end marker is missing", async () => {
     const beginMarker = "# BEGIN paratix: myblock"
     const existingContent = `before\n${beginMarker}\nold content\nafter`
@@ -2748,6 +2789,23 @@ describe("file.replace", () => {
 
     expect(result.status).toBe("ok")
     expect(writtenFiles).toStrictEqual([])
+  })
+
+  it("detects content changes between replace read and write", async () => {
+    const reads = ["foo old-value bar", "foo race-value bar"]
+    let readIndex = 0
+    const ssh = createMockSsh()
+    ssh.readFile = async () => {
+      await Promise.resolve()
+      return reads[readIndex++]
+    }
+
+    const mod = file.replace("/etc/config", "old-value", "new-value")
+
+    await expect(mod.apply(ssh, emptyEnv)).rejects.toThrow(
+      "Concurrent modification detected on /etc/config"
+    )
+    expect(ssh.writeFileCalls).toStrictEqual([])
   })
 })
 
