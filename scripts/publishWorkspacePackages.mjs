@@ -1,6 +1,8 @@
 import { execFile, spawn } from "node:child_process"
+import { realpathSync } from "node:fs"
 import { readFile } from "node:fs/promises"
 import { join } from "node:path"
+import { fileURLToPath } from "node:url"
 import { promisify } from "node:util"
 
 const execFileAsync = promisify(execFile)
@@ -174,6 +176,15 @@ export async function publishWorkspacePackages({
   await publishPackage(createParatixPackage, commandRunner)
 }
 
-if (import.meta.url === `file://${process.argv[1]}`) {
+function isDirectExecution(moduleUrl, argv1) {
+  if (argv1 == null) return false
+  try {
+    return fileURLToPath(moduleUrl) === realpathSync(argv1)
+  } catch {
+    return false
+  }
+}
+
+if (isDirectExecution(import.meta.url, process.argv[1])) {
   await publishWorkspacePackages()
 }
