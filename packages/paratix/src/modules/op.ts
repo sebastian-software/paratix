@@ -399,12 +399,29 @@ async function resolveOtpReferences(
       // it is resolved so an exception thrown later (e.g. from a follow-up
       // op invocation or from generateTotpCode) cannot leak the URI's
       // `secret=` parameter through stack traces or shared error renderers.
+      //
+      // R-0000576: register the URI BEFORE the closure is defined so the
+      // sink is already populated when the lazy callback runs. A third-party
+      // catch site that stringifies the thrown error would otherwise see the
+      // raw URI before the sink masks it.
       registerSecret(otpauthUri)
     }
     result[name] = () => {
-      const code = generateTotpCode(otpauthUri)
-      registerSecret(code)
-      return code
+      // R-0000576: the captured `otpauthUri` is closed over and would show
+      // up in V8 stack traces if `generateTotpCode` throws synchronously.
+      // Rethrow a sanitized Error whose message contains only the logical
+      // reference name; the original error is kept in `cause` so callers
+      // who carefully render `cause` keep diagnostic detail, while the
+      // top-level message stays free of the secret.
+      try {
+        const code = generateTotpCode(otpauthUri)
+        registerSecret(code)
+        return code
+      } catch (error) {
+        throw new Error(`Failed to generate TOTP code for ${JSON.stringify(name)}`, {
+          cause: error,
+        })
+      }
     }
   }
 
