@@ -4,7 +4,10 @@
  * without making strict mocks globally permissive.
  */
 const FLAG_LOCK_INTERNAL_SUCCESS_PATTERNS: RegExp[] = [
-  /^printf '%s@%s %s\\n' "\$\$" "\$\(hostname\)" "\$\(date \+%s\)" > \S+\/holder$/v,
+  // R-0000494: hostname is now captured via `ssh.output("hostname")` before the
+  // marker write, so the literal hostname is shell-quoted into the printf. The
+  // captured value may be empty (catch fallback) or any non-double-quote string.
+  /^printf '%s@%s %s\\n' "\$\$" [^"]+ "\$\(date \+%s\)" > \S+\/holder$/v,
   /^rm -f \S+\/holder$/v,
   // Mutex-lock acquire and release commands target lock directories whose
   // last path segment ends in the `-mutex` suffix.
