@@ -287,16 +287,32 @@ export async function needsSwapRecreation(
   return !(await hasSwapSignature(ssh, options.path))
 }
 
+/**
+ * R-0000495: serialize fstab reads from the check path with the same mutex
+ * that protects {@link ensureSwapFstabState}. Without this lock, a check
+ * running concurrently with an apply could observe a half-written `/etc/fstab`
+ * (or race the file replace performed by `guardedWriteFile`). Single-host
+ * single-run behavior is unchanged; the mutex only serializes concurrent runs.
+ */
+export async function readFstabUnderLock(ssh: SshConnection): Promise<string> {
+  return withMutexLock(ssh, {
+    lockName: FSTAB_FILE_MUTEX,
+    async section() {
+      return ssh.readFile(FSTAB_PATH)
+    },
+  })
+}
+
 export async function hasSwapFstabEntry(
   ssh: SshConnection,
   options: NormalizedSwapFileOptions
 ): Promise<boolean> {
-  const currentFstabContent = await ssh.readFile(FSTAB_PATH)
+  const currentFstabContent = await readFstabUnderLock(ssh)
   return findFstabEntry(currentFstabContent, options.path) === options.expectedFstabLine
 }
 
 export async function hasNoSwapFstabEntry(ssh: SshConnection, path: string): Promise<boolean> {
-  const currentFstabContent = await ssh.readFile(FSTAB_PATH)
+  const currentFstabContent = await readFstabUnderLock(ssh)
   return findFstabEntry(currentFstabContent, path) == null
 }
 
