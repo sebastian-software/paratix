@@ -177,6 +177,22 @@ function toError(error: unknown): Error {
   return error instanceof Error ? error : new Error(String(error))
 }
 
+/**
+ * Signals that `verifyRemoteWriteFile` could not evaluate the remote
+ * `stat` call (non-zero exit code, unparseable size output, transport
+ * hiccup). Surfacing the failure as a dedicated error lets the caller
+ * distinguish it from a real size mismatch: a transient verification
+ * failure must propagate so the run can retry, never trigger the
+ * Shell-Fallback that would overwrite a file that may well be finalized
+ * correctly on disk.
+ */
+export class RemoteStatTransientError extends Error {
+  public constructor(message: string, options?: { cause?: unknown }) {
+    super(message, options)
+    this.name = "RemoteStatTransientError"
+  }
+}
+
 function closeClientChannel(channel: ClientChannel | null): void {
   if (channel == null) return
   channel.close()
@@ -710,6 +726,13 @@ export class SshConnectionImpl implements SshConnection {
     mode: string
     remotePath: string
   }): Promise<void> {
+    // R-0000476: `verifyRemoteWriteFile` reports the size verdict
+    // ("matches" / "empty" / "size-mismatch") and throws
+    // `RemoteStatTransientError` when the underlying `stat` call cannot be
+    // evaluated. The Shell-Fallback only fires for an explicit "needs
+    // rewrite" verdict — transient stat failures propagate so callers can
+    // retry instead of overwriting a remote file that may already be
+    // finalized correctly.
     const verification = await this.verifyRemoteWriteFile(options.remotePath, options.expectedSize)
     if (verification === "matches") return
 
@@ -1750,11 +1773,24 @@ trap - EXIT
     remotePath: string,
     expectedSize: number
   ): Promise<"empty" | "matches" | "size-mismatch"> {
-    const rawSize = await this.output(`stat -c '%s' ${shellQuote(remotePath)}`)
+    let rawSize: string
+    try {
+      rawSize = await this.output(`stat -c '%s' ${shellQuote(remotePath)}`)
+    } catch (error) {
+      // R-0000476: a transient `stat` failure (non-zero exit code, channel
+      // error, sudo hiccup) must not look like a size mismatch. Surfacing it
+      // as a dedicated transient error stops the caller from entering the
+      // Shell-Fallback and overwriting a remote file that may well be
+      // finalized correctly on disk.
+      throw new RemoteStatTransientError(
+        `[ssh.writeFile: ${remotePath}] could not stat remote file after upload/finalize`,
+        { cause: error }
+      )
+    }
     const actualSize = Number(rawSize.trim())
 
     if (!Number.isFinite(actualSize)) {
-      throw new TypeError(
+      throw new RemoteStatTransientError(
         `[ssh.writeFile: ${remotePath}] could not determine remote file size after upload/finalize`
       )
     }
