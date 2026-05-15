@@ -11,7 +11,9 @@ import type { ExecOptions, ExecResult, SshConfig, SshConnection } from "./types.
 
 import {
   buildHostVerifier,
+  createHostKeyCache,
   extractAlgoFromKey,
+  type HostKeyCache,
   HostKeyVerificationError,
   type HostVerifierResult,
 } from "./knownHosts.js"
@@ -266,6 +268,15 @@ export class SshConnectionImpl implements SshConnection {
    * `disconnectTransport()` call so future transfers can subscribe again.
    */
   private connectionAbortController: AbortController = new AbortController()
+  /**
+   * R-0000479: per-instance in-memory cache for host keys accepted via
+   * accept-new TOFU. Scoping the map to the connection prevents two parallel
+   * SshConnectionImpl instances pointed at the same `[host]:port` from
+   * overwriting each other's pinned keys. The cache survives reconnects of
+   * the same instance, preserving the original process-lifetime caching
+   * behavior expected by the reconnect path.
+   */
+  private readonly hostKeyCache: HostKeyCache = createHostKeyCache()
   /**
    * Tracks whether the remote host's sudo timestamp has been primed so that
    * subsequent `sudo -n` calls can succeed without prompting. Set to `true`
@@ -1580,7 +1591,8 @@ trap - EXIT
           {
             expectedHostFingerprint: this.config.expectedHostFingerprint,
             expectedHostPublicKey: this.config.expectedHostPublicKey,
-          }
+          },
+          this.hostKeyCache
         )
         const hostKeyAttempt = this.createHostKeyAttempt(verifier.hostVerifier)
         // eslint-disable-next-line no-await-in-loop

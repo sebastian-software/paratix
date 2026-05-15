@@ -109,14 +109,37 @@ const CERT_AUTHORITY_MESSAGE =
 /**
  * In-memory cache for accepted host keys that could not be persisted to disk.
  * Keyed by the formatted host needle (e.g. `"example.com"` or `"[example.com]:2222"`).
+ *
+ * R-0000479: the cache is no longer a hidden module-level singleton. Each
+ * `SshConnectionImpl` instance owns its own {@link HostKeyCache} so that two
+ * parallel SSH connections to the same `[host]:port` cannot overwrite each
+ * other's pinned host keys. The exported {@link createHostKeyCache} factory
+ * builds a fresh per-instance cache; callers that omit the argument (only the
+ * legacy test helpers do this) fall back to the module-level
+ * {@link defaultHostKeyCache} so existing fixtures keep working.
  */
-const inMemoryHostKeys = new Map<string, Buffer>()
+export type HostKeyCache = Map<string, Buffer>
+
+const defaultHostKeyCache: HostKeyCache = new Map<string, Buffer>()
 
 /**
- * Clear the in-memory host key cache. Intended for use in tests.
+ * Build a fresh per-connection host key cache. Each `SshConnectionImpl`
+ * allocates one and passes it to {@link buildHostVerifier} for every connect
+ * / reconnect attempt; that keeps the in-memory trust state scoped to the
+ * owning connection while preserving process-lifetime caching across
+ * reconnects of the same instance.
+ */
+export function createHostKeyCache(): HostKeyCache {
+  return new Map<string, Buffer>()
+}
+
+/**
+ * Clear the module-level default host key cache. Intended for use in tests
+ * that do not allocate their own {@link HostKeyCache}; tests with explicit
+ * caches simply discard them between cases.
  */
 export function clearHostKeyCache(): void {
-  inMemoryHostKeys.clear()
+  defaultHostKeyCache.clear()
 }
 
 /**
@@ -408,7 +431,12 @@ function loadKnownHostEntries(): KnownHostEntry[] {
  * @param key - The raw public key buffer presented by the remote host.
  * @returns A promise that resolves once the key has been written to disk (or the write error has been handled).
  */
-async function acceptAndPersistHostKey(host: string, port: number, key: Buffer): Promise<void> {
+async function acceptAndPersistHostKey(
+  host: string,
+  port: number,
+  key: Buffer,
+  cache: HostKeyCache
+): Promise<void> {
   try {
     const algo = extractAlgoFromKey(key)
     const fingerprint = computeFingerprint(key)
@@ -419,7 +447,7 @@ async function acceptAndPersistHostKey(host: string, port: number, key: Buffer):
   } catch {
     process.stderr.write(`WARNING: Permanently added '${host}' to the list of known hosts.\n`)
   }
-  inMemoryHostKeys.set(formatHostNeedle(host, port), key)
+  cache.set(formatHostNeedle(host, port), key)
   try {
     await appendHostKey(host, port, key)
   } catch (error: unknown) {
@@ -542,19 +570,20 @@ function verifyPinnedHostKey(host: string, key: Buffer, options: HostVerifierOpt
 export async function buildHostVerifier(
   mode: "accept-new" | "no" | "yes",
   location: HostLocation,
-  options: HostVerifierOptions = {}
+  options: HostVerifierOptions = {},
+  cache: HostKeyCache = defaultHostKeyCache
 ): Promise<HostVerifierResult> {
   const { host, port } = location
   if (mode === "no" && !hasPinnedHostTrustAnchor(options)) return {}
 
   const entries = await withKnownHostsLock(loadKnownHostEntries)
   const fileEntries = findMatchingEntries(entries, host, port)
-  const cachedKey = inMemoryHostKeys.get(formatHostNeedle(host, port)) ?? null
+  const cachedKey = cache.get(formatHostNeedle(host, port)) ?? null
   let acceptedHostKey: Buffer | null = null
 
   const result: { hostVerifier: (key: Buffer) => boolean } & HostVerifierResult = {
     async commitAcceptedHostKey(): Promise<void> {
-      if (acceptedHostKey != null) await acceptAndPersistHostKey(host, port, acceptedHostKey)
+      if (acceptedHostKey != null) await acceptAndPersistHostKey(host, port, acceptedHostKey, cache)
     },
     hostVerifier(key: Buffer): boolean {
       if (

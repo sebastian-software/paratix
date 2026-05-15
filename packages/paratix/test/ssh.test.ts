@@ -4361,7 +4361,9 @@ describe("SshConnectionImpl", () => {
         {
           expectedHostFingerprint: undefined,
           expectedHostPublicKey: undefined,
-        }
+        },
+        // R-0000479: SshConnectionImpl threads its per-instance HostKeyCache.
+        expect.any(Map)
       )
     })
 
@@ -4383,7 +4385,8 @@ describe("SshConnectionImpl", () => {
         {
           expectedHostFingerprint: undefined,
           expectedHostPublicKey: undefined,
-        }
+        },
+        expect.any(Map)
       )
     })
 
@@ -4405,7 +4408,8 @@ describe("SshConnectionImpl", () => {
         {
           expectedHostFingerprint: undefined,
           expectedHostPublicKey: undefined,
-        }
+        },
+        expect.any(Map)
       )
     })
 
@@ -4427,7 +4431,8 @@ describe("SshConnectionImpl", () => {
         {
           expectedHostFingerprint: "SHA256:trusted-fingerprint",
           expectedHostPublicKey: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAItrusted",
-        }
+        },
+        expect.any(Map)
       )
     })
 
@@ -4501,7 +4506,9 @@ describe("SshConnectionImpl", () => {
         {
           expectedHostFingerprint: undefined,
           expectedHostPublicKey: undefined,
-        }
+        },
+        // R-0000479: SshConnectionImpl threads its per-instance HostKeyCache.
+        expect.any(Map)
       )
       expect(buildHostVerifier).toHaveBeenNthCalledWith(
         2,
@@ -4510,7 +4517,8 @@ describe("SshConnectionImpl", () => {
         {
           expectedHostFingerprint: undefined,
           expectedHostPublicKey: undefined,
-        }
+        },
+        expect.any(Map)
       )
     })
 
