@@ -1333,6 +1333,7 @@ describe("runSignals stats tracking", () => {
     expect(failingSignal.apply).toHaveBeenCalledOnce()
     expect(followingSignal.apply).toHaveBeenCalledOnce()
     expect(followingSignalLeakedValue).toBeUndefined()
+    expect(signalSteps).toHaveLength(2)
     expect(signalSteps[0]?.status).toBe("failed")
     expect(signalSteps[0]?.env.LEAKED).toBeUndefined()
   })
