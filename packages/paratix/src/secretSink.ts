@@ -124,9 +124,25 @@ export async function withRegisteredSecrets<T>(
 }
 
 function maskScopedResult<T>(result: T, secrets: readonly string[]): T {
-  if (secrets.length === 0 || !isModuleResult(result) || result.status !== "failed") return result
-  if (result.error == null) return result
-  return { ...result, error: maskScopedError(result.error, secrets) }
+  if (secrets.length === 0 || !isModuleResult(result)) return result
+  // R-0000477: mask `detail` for every status — a module that returns
+  // `status: "ok"` (or "changed" / "skipped") with secrets embedded in the
+  // detail string would otherwise leak the registered material through the
+  // module summary line. The `error` mask remains conditional on the failed
+  // status because that field is only populated on failure.
+  const secretList = [...secrets]
+  let next: ModuleResult | T = result
+  if (result.detail != null) {
+    const maskedDetail = maskSecrets(result.detail, secretList)
+    if (maskedDetail !== result.detail) {
+      next = { ...result, detail: maskedDetail }
+    }
+  }
+  if (isModuleResult(next) && next.status === "failed" && next.error != null) {
+    next = { ...next, error: maskScopedError(next.error, secrets) }
+  }
+  // eslint-disable-next-line @typescript-eslint/no-unsafe-type-assertion -- preserved at runtime: we only ever clone the same ModuleResult shape that the type guard already verified.
+  return next as T
 }
 
 function isModuleResult(value: unknown): value is ModuleResult {
