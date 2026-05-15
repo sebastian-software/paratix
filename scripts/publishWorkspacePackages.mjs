@@ -7,7 +7,19 @@ import { promisify } from "node:util"
 
 const execFileAsync = promisify(execFile)
 
-const DEFAULT_AVAILABILITY_RETRIES = 12
+function readEnvAvailabilityRetries() {
+  const rawValue = process.env.PARATIX_PUBLISH_AVAILABILITY_RETRIES
+  if (rawValue == null || rawValue === "") return undefined
+  const parsedValue = Number.parseInt(rawValue, 10)
+  if (!Number.isFinite(parsedValue) || parsedValue <= 0) return undefined
+  return parsedValue
+}
+
+// R-0000501: doubled the prior 12 × 10s (= 2 min) budget to ~4 min so the
+// registry has enough time to expose paratix before we attempt to publish
+// create-paratix. Operators can override the value via
+// PARATIX_PUBLISH_AVAILABILITY_RETRIES when the registry is unusually slow.
+const DEFAULT_AVAILABILITY_RETRIES = readEnvAvailabilityRetries() ?? 24
 const DEFAULT_AVAILABILITY_DELAY_MS = 10_000
 
 const packages = [
@@ -79,7 +91,10 @@ async function waitForPublishedPackage(parameters, attempt = 1) {
 
   if (attempt >= retries) {
     throw new Error(
-      `${packageName}@${version} was not visible in the npm registry after ${retries} attempts.`
+      `${packageName}@${version} was not visible in the npm registry after ${retries} attempts. ` +
+        `Re-run this script once ${packageName}@${version} is visible on the registry; the existing ` +
+        "manual-recovery branch will then resume and publish create-paratix automatically. " +
+        "Set PARATIX_PUBLISH_AVAILABILITY_RETRIES to extend the wait budget further if needed."
     )
   }
 
