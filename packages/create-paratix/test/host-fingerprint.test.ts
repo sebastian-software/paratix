@@ -502,6 +502,14 @@ describe("readHostFingerprintViaSsh2", () => {
   // client.end() (half-closed socket, ssh2-layer throws) do not bubble up
   // as uncaught errors and crash the process.
   it("absorbs late error events emitted during client.end()", async () => {
+    // FakeHostKeyClient.handlers is a plain dictionary keyed by event name,
+    // not a real EventEmitter listener list. This test therefore only
+    // validates the removeAllListeners() + no-op registration sequence and
+    // dictionary-slot semantics: cleanupClient must reach removeAllListeners
+    // and then register a no-op error handler that survives a late emit.
+    // A fuller test of actual listener-list cleanup (multiple listeners,
+    // ordering, real EventEmitter teardown) would require an
+    // EventEmitter-based fake instead of this dictionary stub.
     const hostKey = buildEd25519HostKeyBuffer()
     const fakeClient = createFakeHostKeyClient((config, client) => {
       callHostVerifier(config, hostKey)
