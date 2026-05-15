@@ -868,6 +868,19 @@ export const sshd = {
         if (!ssh) return NEEDS_APPLY
 
         const content = await ssh.readFile(SSHD_CONFIG_PATH)
+        // R-0000491: surface contradicting Match-block overrides during
+        // check so the operator sees the cause of the eventual apply
+        // failure (`rejectNonConvergingSshdMatchOverrides`) ahead of time
+        // instead of only at apply.
+        const conflictingDirective = findContradictingSshdMatchBlockOverride(content, settings)
+        if (conflictingDirective != null) {
+          process.stderr.write(
+            `Warning: [sshd.config: ${conflictingDirective}] conflicting security-relevant ` +
+              "Match-block override detected; apply will fail unless the override is updated " +
+              "or removed manually\n"
+          )
+          return NEEDS_APPLY
+        }
         for (const [key, value] of Object.entries(settings)) {
           if (!sshdSettingMatchesEverywhere(content, key, value)) {
             return NEEDS_APPLY
