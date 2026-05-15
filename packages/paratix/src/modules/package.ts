@@ -53,8 +53,15 @@ function validatePackageNames(moduleName: string, packages: readonly string[]): 
 /** Supported system package managers. */
 type PackageManager = "apk" | "apt" | "dnf" | "yum"
 
-/** Per-connection cache for the detected package manager (avoids repeated SSH roundtrips). */
-const pmCache = new WeakMap<SshConnection, null | PackageManager>()
+/**
+ * Per-connection cache for the detected package manager (avoids repeated SSH
+ * roundtrips).
+ *
+ * R-0000577: only successful detections are written here. A `null` outcome
+ * (no PM found) is intentionally NOT cached so a bootstrap playbook that
+ * installs a package manager mid-run can be picked up on the next probe.
+ */
+const pmCache = new WeakMap<SshConnection, PackageManager>()
 
 // R-0000534: pass `--` as the argument-list terminator for every supported
 // package manager (including apk) so package names that look like options
@@ -122,7 +129,12 @@ export async function detectPackageManager(ssh: SshConnection): Promise<null | P
   else if (await ssh.test("which yum")) result = "yum"
   else if (await ssh.test("which apk")) result = "apk"
 
-  pmCache.set(ssh, result)
+  // R-0000577: only persist a successful detection. Caching the negative
+  // result would lock a bootstrap-style playbook into "no package manager"
+  // forever, even after an earlier step installs one. Re-detecting on every
+  // miss is cheap (four `test` invocations on the SSH layer) and avoids
+  // that trap.
+  if (result !== null) pmCache.set(ssh, result)
   return result
 }
 
