@@ -136,6 +136,39 @@ function attachProcessLifecycle(parameters: {
   }
 }
 
+type WireRsyncChildParameters = {
+  child: ChildProcess
+  getPendingTerminationError: () => Error | undefined
+  resolveOnce: (result: RsyncProcessResult) => void
+  stderr: BoundedOutputCapture
+  stdout: BoundedOutputCapture
+}
+
+function wireRsyncChildHandlers(parameters: WireRsyncChildParameters): void {
+  const { child, getPendingTerminationError, resolveOnce, stderr, stdout } = parameters
+  child.stdout?.setEncoding("utf8")
+  child.stderr?.setEncoding("utf8")
+  child.stdout?.on("data", (chunk: string) => {
+    stdout.append(chunk)
+  })
+  child.stderr?.on("data", (chunk: string) => {
+    stderr.append(chunk)
+  })
+  child.on("error", (error: Error) => {
+    resolveOnce(createProcessResult({ code: null, spawnError: error, stderr, stdout }))
+  })
+  child.on("close", (code: null | number) => {
+    resolveOnce(
+      createProcessResult({
+        code,
+        spawnError: getPendingTerminationError(),
+        stderr,
+        stdout,
+      })
+    )
+  })
+}
+
 /**
  * Run `rsync` and stream stdout/stderr into bounded diagnostic buffers.
  * R-0000040: replaces the previous `execFile` runner whose default 1 MiB
@@ -169,24 +202,31 @@ export async function runRsyncProcess(
       pendingTerminationError ??= error
     }
 
-    child.stdout.setEncoding("utf8")
-    child.stderr.setEncoding("utf8")
-    child.stdout.on("data", (chunk: string) => {
-      stdout.append(chunk)
-    })
-    child.stderr.on("data", (chunk: string) => {
-      stderr.append(chunk)
-    })
-
-    child.on("error", (error: Error) => {
-      resolveOnce(createProcessResult({ code: null, spawnError: error, stderr, stdout }))
-    })
-    child.on("close", (code: null | number) => {
-      resolveOnce(
-        createProcessResult({ code, spawnError: pendingTerminationError, stderr, stdout })
-      )
+    wireRsyncChildHandlers({
+      child,
+      getPendingTerminationError: () => pendingTerminationError,
+      resolveOnce,
+      stderr,
+      stdout,
     })
 
     detachLifecycle = attachProcessLifecycle({ child, failOnClose, timeoutMs })
+
+    // R-0000570: when the runner is already aborted at spawn time,
+    // `attachProcessLifecycle` schedules the abort listener which only flags
+    // `pendingTerminationError` and kills the child. If `kill` fails and no
+    // `error`/`close` event ever fires, the surrounding Promise would hang.
+    // `resolveOnce` is idempotent, so calling it here is safe even though
+    // a subsequent `close` event would otherwise have ended the wait.
+    if (pendingTerminationError !== undefined) {
+      resolveOnce(
+        createProcessResult({
+          code: null,
+          spawnError: pendingTerminationError,
+          stderr,
+          stdout,
+        })
+      )
+    }
   })
 }
