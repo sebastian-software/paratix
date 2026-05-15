@@ -139,24 +139,83 @@ async function findEffectiveSshdConfigMismatch(
   return { directive, kind: "mismatch" }
 }
 
+// R-0000542: retry the rollback write a small number of times so a single
+// transient SFTP hiccup does not leave `/etc/ssh/sshd_config` diverged. Mirrors
+// the lightweight retry shape used in other apply-then-rollback paths.
+const SSHD_ROLLBACK_WRITE_ATTEMPTS = 3
+const SSHD_ROLLBACK_WRITE_BACKOFF_MS = 200
+
+async function writeSshdRollbackWithRetry(
+  ssh: SshConnection,
+  originalConfig: string
+): Promise<string | undefined> {
+  let lastError: unknown
+  for (let attempt = 1; attempt <= SSHD_ROLLBACK_WRITE_ATTEMPTS; attempt += 1) {
+    try {
+      // eslint-disable-next-line no-await-in-loop -- sequential retry by design
+      await ssh.writeFile(SSHD_CONFIG_PATH, originalConfig, { mode: SSHD_CONFIG_MODE })
+      return undefined
+    } catch (error) {
+      lastError = error
+      if (attempt === SSHD_ROLLBACK_WRITE_ATTEMPTS) break
+      // eslint-disable-next-line no-await-in-loop -- sequential retry by design
+      await new Promise<void>((resolve) => {
+        setTimeout(resolve, SSHD_ROLLBACK_WRITE_BACKOFF_MS)
+      })
+    }
+  }
+  return lastError instanceof Error ? lastError.message : String(lastError)
+}
+
+async function verifySshdConfigMatchesRollback(
+  ssh: SshConnection,
+  originalConfig: string
+): Promise<string | undefined> {
+  try {
+    const current = await ssh.readFile(SSHD_CONFIG_PATH)
+    if (current === originalConfig) return undefined
+    return "remote sshd_config content does not match the previous configuration after rollback"
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error)
+    return `could not verify rollback content: ${message}`
+  }
+}
+
 async function rollbackSshdConfigAfterEffectiveMismatch(
   ssh: SshConnection,
   parameters: { directive: string; originalConfig: string }
 ): Promise<ModuleResult> {
-  try {
-    await ssh.writeFile(SSHD_CONFIG_PATH, parameters.originalConfig, { mode: SSHD_CONFIG_MODE })
-    return failed(
-      `[sshd.config: ${parameters.directive}] effective sshd configuration does not match ` +
-        "the requested value after parsing includes; rolled back to previous config"
-    )
-  } catch (rollbackError) {
-    const rollbackMessage =
-      rollbackError instanceof Error ? rollbackError.message : String(rollbackError)
-    return failed(
-      `[sshd.config: ${parameters.directive}] effective sshd configuration does not match ` +
-        `the requested value after parsing includes; rollback also failed: ${rollbackMessage}`
+  const baseMessage =
+    `[sshd.config: ${parameters.directive}] effective sshd configuration does not match ` +
+    "the requested value after parsing includes"
+  // R-0000542: previously this performed a single best-effort rollback write
+  // with no verification. A second SFTP failure left sshd_config diverged
+  // without surfacing the breakage. Retry the write a few times and then
+  // re-read the file to confirm the rollback actually landed; surface the
+  // divergence loudly otherwise.
+  const writeError = await writeSshdRollbackWithRetry(ssh, parameters.originalConfig)
+  if (writeError != null) {
+    return failedCommand(
+      `${baseMessage}; rollback write to ${SSHD_CONFIG_PATH} failed`,
+      {
+        code: -1,
+        stderr: writeError,
+        stdout: "",
+      }
     )
   }
+  const verifyError = await verifySshdConfigMatchesRollback(ssh, parameters.originalConfig)
+  if (verifyError != null) {
+    return failedCommand(
+      `${baseMessage}; rollback wrote but verification failed (sshd_config may be diverged)`,
+      {
+        code: -1,
+        stderr: verifyError,
+        stdout: "",
+      }
+    )
+  }
+  return failed(`${baseMessage}; rolled back to previous config`)
 }
 
 async function rejectNonMatchingEffectiveSshdConfig(
