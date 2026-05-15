@@ -15,6 +15,9 @@ const createMockSsh: typeof createBaseMockSsh = (responses, options) =>
     responseStubs: [
       { command: "mkdir -p '/run/sshd'", result: { code: 0 } },
       { command: "sshd -t", result: { code: 0 } },
+      // R-0000: validateProspectiveSshdConfig writes a temp file and validates
+      // it with `sshd -t -f <UUID>.conf` before overwriting the live config.
+      { command: /^sshd -t -f '\/tmp\/paratix-sshd-dry-run-[^']+\.conf'$/v, result: { code: 0 } },
       {
         command: "sshd -T",
         result: {
@@ -186,10 +189,12 @@ describe("sshd.config — apply", () => {
     const result = await mod.apply(mockSsh, emptyEnv)
 
     expect(result.status).toBe("changed")
-    // All settings are applied in one write (single readFile + single guardedWriteFile)
-    expect(writtenFiles).toHaveLength(1)
-    expect(writtenFiles[0]?.content).toContain("PasswordAuthentication no")
-    expect(writtenFiles[0]?.content).toContain("PermitRootLogin no")
+    // All settings are applied in one write (single readFile + single guardedWriteFile).
+    // validateProspectiveSshdConfig writes a temp file first; filter it out.
+    const configWrites = writtenFiles.filter((f) => f.path === SSHD_CONFIG)
+    expect(configWrites).toHaveLength(1)
+    expect(configWrites[0]?.content).toContain("PasswordAuthentication no")
+    expect(configWrites[0]?.content).toContain("PermitRootLogin no")
   })
 
   // R-0000114: directive names are validated up-front, so no caller can
@@ -209,8 +214,10 @@ describe("sshd.config — apply", () => {
     // Value with a shell glob — previously could cause RegExp errors or injection
     const mod = sshd.config({ AllowUsers: "admin*" })
     await expect(mod.apply(mockSsh, emptyEnv)).resolves.not.toThrow()
-    expect(writtenFiles).toHaveLength(1)
-    expect(writtenFiles[0]?.content).toContain("AllowUsers admin*")
+    // validateProspectiveSshdConfig writes a temp file; filter to config writes only.
+    const configWrites = writtenFiles.filter((f) => f.path === SSHD_CONFIG)
+    expect(configWrites).toHaveLength(1)
+    expect(configWrites[0]?.content).toContain("AllowUsers admin*")
   })
 
   it("bug — replaces ALL occurrences of a duplicate directive, not only the first", async () => {
