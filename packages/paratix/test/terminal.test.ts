@@ -20,21 +20,23 @@ async function loadPromptTerminalWithMockedReadline() {
   const interfaces: MockReadline[] = []
   const questionCallbacks: QuestionCallback[] = []
   const closeSpies: Array<ReturnType<typeof vi.spyOn>> = []
+  const questionSpies: Array<ReturnType<typeof vi.spyOn>> = []
 
   vi.doMock("node:readline", () => ({
     createInterface: vi.fn(() => {
       const rl = new MockReadline()
       closeSpies.push(vi.spyOn(rl, "close"))
-      vi.spyOn(rl, "question").mockImplementation((_question, callback) => {
+      const questionSpy = vi.spyOn(rl, "question").mockImplementation((_question, callback) => {
         questionCallbacks.push(callback)
       })
+      questionSpies.push(questionSpy)
       interfaces.push(rl)
       return rl
     }),
   }))
 
   const { promptTerminal } = await import("../src/terminal.js")
-  return { closeSpies, interfaces, promptTerminal, questionCallbacks }
+  return { closeSpies, interfaces, promptTerminal, questionCallbacks, questionSpies }
 }
 
 describe("promptTerminal", () => {
@@ -61,6 +63,45 @@ describe("promptTerminal", () => {
     questionCallbacks[0]?.("secret")
 
     await expect(prompt).resolves.toBe("secret")
+    expect(closeSpies[0]).toHaveBeenCalledOnce()
+  })
+
+  it("rejects an already aborted signal before asking the question", async () => {
+    const { closeSpies, promptTerminal, questionSpies } =
+      await loadPromptTerminalWithMockedReadline()
+    const controller = new AbortController()
+    const abortError = new Error("Prompt cancelled before start")
+    controller.abort(abortError)
+    const removeAbortListenerSpy = vi.spyOn(controller.signal, "removeEventListener")
+    const addAbortListenerSpy = vi.spyOn(controller.signal, "addEventListener")
+
+    await expect(
+      promptTerminal("Password: ", false, { abortSignal: controller.signal })
+    ).rejects.toBe(abortError)
+
+    expect(addAbortListenerSpy).not.toHaveBeenCalled()
+    expect(removeAbortListenerSpy).toHaveBeenCalledOnce()
+    expect(closeSpies[0]).toHaveBeenCalledOnce()
+    expect(questionSpies[0]).not.toHaveBeenCalled()
+  })
+
+  it("cleans up and ignores a late answer after aborting while question is pending", async () => {
+    const { closeSpies, promptTerminal, questionCallbacks } =
+      await loadPromptTerminalWithMockedReadline()
+    const controller = new AbortController()
+    const addAbortListenerSpy = vi.spyOn(controller.signal, "addEventListener")
+    const removeAbortListenerSpy = vi.spyOn(controller.signal, "removeEventListener")
+    const abortError = new Error("Prompt cancelled")
+
+    const prompt = promptTerminal("Password: ", false, { abortSignal: controller.signal })
+    controller.abort(abortError)
+
+    await expect(prompt).rejects.toBe(abortError)
+    questionCallbacks[0]?.("late answer")
+
+    expect(addAbortListenerSpy).toHaveBeenCalledOnce()
+    expect(removeAbortListenerSpy).toHaveBeenCalledOnce()
+    expect(removeAbortListenerSpy.mock.calls[0]?.[1]).toBe(addAbortListenerSpy.mock.calls[0]?.[1])
     expect(closeSpies[0]).toHaveBeenCalledOnce()
   })
 
@@ -120,5 +161,47 @@ describe("promptTerminal", () => {
     expect(stderrWriteSpy).toHaveBeenCalled()
     expect(stderrWrites.join("")).toContain("Password: ")
     expect(stderrWrites.join("")).not.toContain(secret)
+  })
+
+  it("writes the hidden prompt newline once when aborted while question is pending", async () => {
+    vi.resetModules()
+    let capturedOutput: NodeJS.WritableStream | undefined
+    let capturedCallback: QuestionCallback | undefined
+    const stderrWrites: string[] = []
+    const stderrWriteSpy = vi.spyOn(process.stderr, "write").mockImplementation((chunk) => {
+      stderrWrites.push(String(chunk))
+      return true
+    })
+    const closeSpies: Array<ReturnType<typeof vi.spyOn>> = []
+    vi.doMock("node:readline", () => ({
+      createInterface: vi.fn((arg: { output: NodeJS.WritableStream }) => {
+        capturedOutput = arg.output
+        const rl = new MockReadline()
+        closeSpies.push(vi.spyOn(rl, "close"))
+        vi.spyOn(rl, "question").mockImplementation((_question, callback) => {
+          capturedCallback = callback
+          capturedOutput?.write("Password: ")
+        })
+        return rl
+      }),
+    }))
+
+    const { promptTerminal } = await import("../src/terminal.js")
+    const controller = new AbortController()
+    const addAbortListenerSpy = vi.spyOn(controller.signal, "addEventListener")
+    const removeAbortListenerSpy = vi.spyOn(controller.signal, "removeEventListener")
+    const abortError = new Error("Hidden prompt cancelled")
+
+    const prompt = promptTerminal("Password: ", true, { abortSignal: controller.signal })
+    controller.abort(abortError)
+
+    await expect(prompt).rejects.toBe(abortError)
+    capturedCallback?.("late secret")
+
+    expect(addAbortListenerSpy).toHaveBeenCalledOnce()
+    expect(removeAbortListenerSpy).toHaveBeenCalledOnce()
+    expect(stderrWriteSpy).toHaveBeenCalled()
+    expect(stderrWrites.join("")).toBe("Password: \n")
+    expect(closeSpies[0]).toHaveBeenCalledOnce()
   })
 })
