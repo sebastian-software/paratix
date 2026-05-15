@@ -402,16 +402,25 @@ async function applyCronAbsentMutation(parameters: {
   // job was last installed. If a user replaced the managed job with
   // their own (and the marker still carries the old hash), we leave
   // their line untouched and only drop the marker.
-  // R-0000047: legacy markers (pre-R-0000168) have no recorded hash;
-  // fall back to the conservative "looks like a cron job line" rule so
-  // unrelated user content next to the marker is preserved.
+  // R-0000567: when the marker is a legacy marker without a recorded
+  // hash (pre-R-0000168), we cannot prove the follow-up line was the one
+  // paratix wrote. Keeping the legacy guess ("looks like a cron job
+  // line") would blindly delete the user's own cron line if it happened
+  // to sit below the marker. Be conservative instead: only remove the
+  // marker and preserve any follow-up content. Operators get a heads-up
+  // on stderr so they can clean up the orphaned job line manually.
   const recordedDigest = readMarkerDigest(lines[markerIndex] ?? "")
   const followLine = lines[markerIndex + 1] ?? ""
   const followLooksLikeJob = looksLikeCronJobLine(lines, markerIndex + 1)
   const followIsManagedJob =
     recordedDigest === null
-      ? followLooksLikeJob
+      ? false
       : followLooksLikeJob && cronJobDigest(followLine) === recordedDigest
+  if (recordedDigest === null && followLooksLikeJob) {
+    process.stderr.write(
+      `[cron.absent: ${name} (${user})] legacy marker without recorded digest — keeping follow-up line and removing only the marker\n`
+    )
+  }
   const removeCount = followIsManagedJob ? 2 : 1
   const nextLines = [...lines]
   nextLines.splice(markerIndex, removeCount)
