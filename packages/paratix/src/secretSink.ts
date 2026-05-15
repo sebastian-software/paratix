@@ -321,7 +321,16 @@ export function getRegisteredSecrets(): string[] {
 }
 
 /**
- * Clear the entire sink. Used by the runner during shutdown and by tests.
+ * Clear the entire sink. Used by the runner during a hard-exit shutdown
+ * (second SIGINT/SIGTERM) and by tests.
+ *
+ * R-0000518: do NOT call this on normal per-run teardown. The sink is
+ * reference-counted via {@link registerSecret} / {@link unregisterSecret},
+ * so balanced scopes (in particular {@link withRegisteredSecrets}) drain it
+ * automatically. Wiping the sink unconditionally between concurrent
+ * `runPlaybook` invocations sharing the same Node process would strip the
+ * redaction context of every still-running scope.
+ *
  * Intentionally NOT exported through the public package surface so playbooks
  * cannot accidentally drop the redaction context for the rest of the run.
  */

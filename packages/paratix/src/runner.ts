@@ -1046,10 +1046,18 @@ function rethrowIfNotShutdown(error: unknown, shutdownSignal: () => NodeJS.Signa
 
 /**
  * Tear down per-run resources: shutdown signal listeners, the runner abort
- * signal, the process-scoped secret sink, and the ssh connection. R-0000041:
- * `clearRegisteredSecrets` ensures op resolved values, sudo/user passwords,
- * and download URL tokens never bleed into a subsequent invocation that
- * shares the same Node process (e.g. tests, daemonized CLI).
+ * signal, and the ssh connection.
+ *
+ * R-0000518: the process-scoped secret sink is NOT cleared here. The sink in
+ * `secretSink.ts` is reference-counted via {@link withRegisteredSecrets} /
+ * {@link registerSecret} / {@link unregisterSecret}: every module that
+ * registers a secret also releases it through `try/finally`, so the sink
+ * drains on its own once each scope closes. Calling
+ * `clearRegisteredSecrets()` unconditionally on teardown would wipe secrets
+ * belonging to a concurrent `runPlaybook` invocation that shares the same
+ * Node process — a parallel run would lose its redaction context the moment
+ * the first run finishes. R-0000041's original goal (no bleed across runs)
+ * is preserved by the reference-counting protocol itself.
  *
  * @param parameters - Cleanup context.
  * @param parameters.handleShutdownSignal - Listener installed for SIGINT/SIGTERM.
@@ -1063,7 +1071,6 @@ function teardownPlaybookResources(parameters: {
   for (const signal of ["SIGINT", "SIGTERM"] as const)
     getSignalBus().off(signal, parameters.handleShutdownSignal)
   setRunnerAbortSignal(undefined)
-  clearRegisteredSecrets()
   parameters.ssh?.disconnect()
 }
 
