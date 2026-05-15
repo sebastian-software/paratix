@@ -22,7 +22,11 @@ const DIST_UPGRADE_FLAG = "apt-dist-upgrade-2024-01-15"
 function distUpgradeApplyLockResponses(): Record<string, { code?: number; stdout?: string }> {
   return {
     [`[ -f /var/lib/paratix/flags/'${DIST_UPGRADE_FLAG}' ]`]: { code: 1 },
+    hostname: { code: 0, stdout: "" },
     [`mkdir /var/lib/paratix/flags/'${DIST_UPGRADE_FLAG}.lock'`]: { code: 0 },
+    [`printf '%s@%s %s\\n' "$$" '' "$(date +%s)" > /var/lib/paratix/flags/'${DIST_UPGRADE_FLAG}.lock'/holder`]:
+      { code: 0 },
+    [`rm -f /var/lib/paratix/flags/'${DIST_UPGRADE_FLAG}.lock'/holder`]: { code: 0 },
     [`rmdir /var/lib/paratix/flags/'${DIST_UPGRADE_FLAG}.lock'`]: { code: 0 },
     "mkdir -p /var/lib/paratix/flags": { code: 0 },
   }
