@@ -857,7 +857,26 @@ async function applySshdPortWhenConfigUnchanged(
   parameters: { originalConfig: string; originalPort: number; targetPort: number }
 ): Promise<ModuleResult> {
   if (await liveSshdPortMatches(ssh, parameters.targetPort)) return { status: "ok" }
-  const verificationFailure = await restartAndVerifySshdPort(ssh, parameters)
+  // R-0000540: a TOCTOU gap exists between the first ufw guard run by
+  // `applySshdPort` and this restart path. If the matching allow rule was
+  // removed in between, restarting sshd onto the new port locks the runner
+  // out. Re-run the same guard right before the restart.
+  const ufwGuard = await rejectWhenUfwBlocksTargetPort(ssh, parameters.targetPort)
+  if (ufwGuard != null) return ufwGuard
+  // R-0000540: when sshd_config already contains the target port, the
+  // captured `originalConfig` would map the rollback back to the target port
+  // (identity rollback). Synthesise a rollback config that pins the live
+  // pre-restart port instead, so a failed verification can actually restore
+  // the previously listening port.
+  const { newContent: rollbackConfig } = buildSshdPortContent(
+    parameters.originalConfig,
+    parameters.originalPort
+  )
+  const verificationFailure = await restartAndVerifySshdPort(ssh, {
+    originalConfig: rollbackConfig,
+    originalPort: parameters.originalPort,
+    targetPort: parameters.targetPort,
+  })
   if (verificationFailure != null) return verificationFailure
   return {
     meta: [sshdPortMeta(parameters.targetPort)],
