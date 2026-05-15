@@ -33,6 +33,9 @@ describe("runPlaybook secret sink cleanup", () => {
     process.exitCode = 0
   })
 
+  // R-0000518: the runner no longer calls clearRegisteredSecrets() on teardown.
+  // Secrets are managed by reference-counting via withRegisteredSecrets. Modules
+  // that use withRegisteredSecrets drain the sink automatically on scope exit.
   it("clears registered secrets after a successful run", async () => {
     const capturedConfigs: unknown[] = []
     vi.doMock("../src/ssh.js", () => ({
@@ -40,17 +43,18 @@ describe("runPlaybook secret sink cleanup", () => {
       SshConnectionImpl: makeMockSshClass(capturedConfigs, { lifecycle: "permissive" }),
     }))
 
-    const [{ runPlaybook }, { getRegisteredSecrets, registerSecret }] = await Promise.all([
+    const [{ runPlaybook }, { getRegisteredSecrets, withRegisteredSecrets }] = await Promise.all([
       import("../src/runner.js"),
       import("../src/secretSink.js"),
     ])
     const secret = "runner-success-secret"
     const module: Module = {
       apply: vi.fn(),
-      check: vi.fn().mockImplementation(() => {
-        registerSecret(secret)
-        expect(getRegisteredSecrets()).toContain(secret)
-        return "ok"
+      check: vi.fn().mockImplementation(async () => {
+        return withRegisteredSecrets([secret], async () => {
+          expect(getRegisteredSecrets()).toContain(secret)
+          return "ok" as const
+        })
       }),
       name: "secret-check",
     }
@@ -66,6 +70,8 @@ describe("runPlaybook secret sink cleanup", () => {
     expect(getRegisteredSecrets()).toStrictEqual([])
   })
 
+  // R-0000518: same as above — withRegisteredSecrets drains the sink even when
+  // the module returns a failed result.
   it("clears registered secrets after a failed run", async () => {
     const capturedConfigs: unknown[] = []
     vi.doMock("../src/ssh.js", () => ({
@@ -73,16 +79,17 @@ describe("runPlaybook secret sink cleanup", () => {
       SshConnectionImpl: makeMockSshClass(capturedConfigs, { lifecycle: "permissive" }),
     }))
 
-    const [{ runPlaybook }, { getRegisteredSecrets, registerSecret }] = await Promise.all([
+    const [{ runPlaybook }, { getRegisteredSecrets, withRegisteredSecrets }] = await Promise.all([
       import("../src/runner.js"),
       import("../src/secretSink.js"),
     ])
     const secret = "runner-failure-secret"
     const module: Module = {
-      apply: vi.fn().mockImplementation(() => {
-        registerSecret(secret)
-        expect(getRegisteredSecrets()).toContain(secret)
-        return { error: new Error("module failed"), status: "failed" } satisfies ModuleResult
+      apply: vi.fn().mockImplementation(async () => {
+        return withRegisteredSecrets([secret], async () => {
+          expect(getRegisteredSecrets()).toContain(secret)
+          return { error: new Error("module failed"), status: "failed" } satisfies ModuleResult
+        })
       }),
       check: vi.fn().mockResolvedValue("needs-apply"),
       name: "secret-apply",
