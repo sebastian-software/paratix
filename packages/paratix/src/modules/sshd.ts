@@ -296,18 +296,39 @@ async function rollbackSshdConfigAfterReloadFailure(
   }
 }
 
+async function sshdUnitDefinesExecReload(
+  ssh: SshConnection,
+  serviceUnit: SshdServiceUnit
+): Promise<boolean> {
+  // `systemctl cat` prints the merged unit definition; grep for a top-level
+  // `ExecReload=` directive. The check is best-effort: any non-zero exit
+  // (e.g. the unit being absent) falls back to "no ExecReload".
+  const result = await ssh.exec(
+    `${SYSTEMCTL} cat ${shellQuote(serviceUnit)} | grep -E '^ExecReload='`,
+    { ignoreExitCode: true, silent: true }
+  )
+  return result.code === 0 && result.stdout.trim().length > 0
+}
+
 async function reloadSshd(
   ssh: SshConnection,
   preflightServiceUnit?: SshdServiceUnit
 ): Promise<ModuleResult> {
   const serviceUnit = preflightServiceUnit ?? (await resolveSshServiceUnit(ssh))
-  const result = await ssh.exec(`${SYSTEMCTL} reload ${serviceUnit}`, {
+  // R-0000496: when the unit has no `ExecReload=` directive, `systemctl reload`
+  // exits non-zero and would trigger an unnecessary rollback. Fall back to
+  // `reload-or-restart` so the daemon picks up the new config either way.
+  // The rollback semantics are kept in case `reload-or-restart` itself fails
+  // (e.g. sshd config syntax issue at startup).
+  const hasExecReload = await sshdUnitDefinesExecReload(ssh, serviceUnit)
+  const action = hasExecReload ? "reload" : "reload-or-restart"
+  const result = await ssh.exec(`${SYSTEMCTL} ${action} ${serviceUnit}`, {
     ignoreExitCode: true,
     silent: true,
   })
   return result.code === 0
     ? { status: "changed" }
-    : failedCommand(`[sshd.config] systemctl reload ${serviceUnit} failed`, result)
+    : failedCommand(`[sshd.config] systemctl ${action} ${serviceUnit} failed`, result)
 }
 
 async function preflightSshdReloadUnit(
