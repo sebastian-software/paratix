@@ -854,6 +854,44 @@ async function createComposeStagingPath(parameters: {
   return validateMktempPath(parameters.projectDirectory, stagingPath, COMPOSE_CONFIG_STAGING_PREFIX)
 }
 
+/**
+ * R-0000530: refuse to stage into a project directory whose own path or any
+ * ancestor is a symbolic link. Without this guard a symlinked
+ * `projectDirectory` (or any ancestor in between) would let `mktemp` and the
+ * subsequent `mv -T` write through the link, allowing an attacker who controls
+ * the link target to steer the staged compose file — and the activated
+ * compose.yml — into a directory of their choosing. Mirrors the ancestor
+ * walk performed by `ensureDownloadDestinationNotSymlinked` in
+ * `modules/download.ts`.
+ *
+ * @param ssh - The SSH connection.
+ * @param projectDirectory - The compose project directory on the remote host.
+ * @returns A failed ModuleResult on any symlink, or null when the path is safe.
+ */
+async function ensureComposeProjectDirectoryNotSymlinked(
+  ssh: SshConnection,
+  projectDirectory: string
+): Promise<ModuleResult | null> {
+  if (await isSymlink(ssh, projectDirectory)) {
+    return failed(
+      `[compose.config] projectDirectory is a symbolic link: ${projectDirectory}`
+    )
+  }
+  let ancestor = dirname(projectDirectory)
+  const seen = new Set<string>()
+  while (ancestor !== "/" && ancestor !== "." && !seen.has(ancestor)) {
+    seen.add(ancestor)
+    // eslint-disable-next-line no-await-in-loop -- ancestor walk is sequential by nature
+    if (await isSymlink(ssh, ancestor)) {
+      return failed(
+        `[compose.config] ancestor of projectDirectory ${projectDirectory} is a symbolic link: ${ancestor}`
+      )
+    }
+    ancestor = dirname(ancestor)
+  }
+  return null
+}
+
 async function applyComposeConfig(parameters: {
   options: { content?: string; src?: string }
   projectDirectory: string
@@ -862,6 +900,13 @@ async function applyComposeConfig(parameters: {
   ssh: SshConnection
 }): Promise<ModuleResult> {
   const { options, projectDirectory, remotePath, runtime, ssh } = parameters
+  // R-0000530: validate symlink-free projectDirectory BEFORE creating the
+  // staging path. createComposeStagingPath runs `mktemp` inside
+  // projectDirectory; if the directory (or an ancestor) is a symlink, the
+  // staging file lands in attacker-controlled territory and the subsequent
+  // `mv -T` activates an unverified compose.yml at that location.
+  const symlinkFailure = await ensureComposeProjectDirectoryNotSymlinked(ssh, projectDirectory)
+  if (symlinkFailure != null) return symlinkFailure
   const stagingPath = await createComposeStagingPath({ projectDirectory, ssh })
 
   // R-0000228: write into a staging file (not into compose.yml). The active
