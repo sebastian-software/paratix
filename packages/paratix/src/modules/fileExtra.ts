@@ -594,6 +594,12 @@ export function properties(remotePath: string, options: PropertiesOptions): Modu
  * @returns A Module that performs the substitution.
  */
 export function replace(remotePath: string, pattern: string, replacement: string): Module {
+  // R-0000564: `String.prototype.replaceAll` interprets `$1`, `$&`, `$$`
+  // etc. inside the replacement string as substitution patterns. Callers
+  // pass `replacement` as a literal substring and do not expect
+  // backreference evaluation. Escape every `$` to `$$` so the value is
+  // applied verbatim regardless of pattern captures.
+  const literalReplacement = replacement.replaceAll("$", "$$$$")
   return {
     async apply(ssh: null | SshConnection): Promise<ModuleResult> {
       if (!ssh) return failed(`[file.replace: ${remotePath}] SSH connection is required`)
@@ -603,7 +609,7 @@ export function replace(remotePath: string, pattern: string, replacement: string
 
       const content = await ssh.readFile(remotePath)
       // eslint-disable-next-line security/detect-non-literal-regexp -- pattern from module config, not user input
-      const updated = content.replaceAll(new RegExp(pattern, "gu"), replacement)
+      const updated = content.replaceAll(new RegExp(pattern, "gu"), literalReplacement)
       // R-0000075: short-circuit when the regex produces no replacement so
       // apply does not flag the run as "changed" or issue an unnecessary
       // SFTP write. Mirrors the no-op return that R-0000002 / R-0000013 /
@@ -628,7 +634,7 @@ export function replace(remotePath: string, pattern: string, replacement: string
 
       const content = await ssh.readFile(remotePath)
       // eslint-disable-next-line security/detect-non-literal-regexp -- pattern from module config, not user input
-      const updated = content.replaceAll(new RegExp(pattern, "gu"), replacement)
+      const updated = content.replaceAll(new RegExp(pattern, "gu"), literalReplacement)
       return updated === content ? "ok" : NEEDS_APPLY
     },
     name: `file.replace: ${remotePath}`,
