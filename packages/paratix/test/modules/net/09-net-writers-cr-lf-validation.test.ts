@@ -93,8 +93,12 @@ describe("net writers — CR/LF validation", () => {
   })
 
   it("rejects interface gateways containing line breaks", () => {
+    // R-0000485: the interface gateway now routes through the shared
+    // `validateInterfaceIpToken("gateway", ...)` helper, which surfaces the
+    // CR/LF error with the bare `gateway` label instead of the previous
+    // `interface gateway` label used by the dedicated writer.
     expect(() => net.interface("eth0", { gateway: "192.168.1.1\nDNS=1.1.1.1" })).toThrow(
-      /interface gateway.*CR or LF/v
+      /invalid gateway.*CR or LF/v
     )
   })
 
@@ -150,9 +154,13 @@ describe("net writers — CR/LF validation", () => {
   })
 
   it("rejects route destinations containing line breaks", () => {
-    expect(() => net.route("10.0.0.0/24\nGateway=1.2.3.4", "192.168.1.1")).toThrow(
-      /route destination.*CR or LF/v
-    )
+    // R-0000486: `net.route` requires `options.device` before validating the
+    // destination, so the fixture must provide a device so the CR/LF
+    // validation (R-0000488) is the assertion under test rather than the
+    // missing-device guard.
+    expect(() =>
+      net.route("10.0.0.0/24\nGateway=1.2.3.4", "192.168.1.1", { device: "eth0" })
+    ).toThrow(/route destination.*CR or LF/v)
   })
 
   it("rejects route devices containing line breaks", () => {
