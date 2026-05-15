@@ -117,7 +117,7 @@ export const group = {
       },
       async check(ssh: null | SshConnection): Promise<"needs-apply" | "ok"> {
         if (!ssh) return NEEDS_APPLY
-        return (await ssh.test(`${GETENT_GROUP} ${shellQuote(name)}`)) ? "needs-apply" : "ok"
+        return (await ssh.test(`${GETENT_GROUP} ${shellQuote(name)}`)) ? NEEDS_APPLY : "ok"
       },
       name: `group.absent: ${name}`,
     }
