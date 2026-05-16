@@ -75,8 +75,15 @@ export async function readOwnership(
   ssh: SshConnection,
   remotePath: string
 ): Promise<FileOwnership> {
-  const raw = await ssh.output(`stat -c '%a %U %G' ${shellQuote(remotePath)}`)
-  const [mode = "", owner = "", group = ""] = raw.trim().split(/\s+/v)
+  // R-0000558: route the stat call through ssh.exec with ignoreExitCode so a
+  // transient stat failure (file removed between the existence probe and the
+  // metadata read, EACCES, EIO, …) does not propagate as a raw CommandError
+  // out of check/apply. Empty fields make the subsequent drift-comparison
+  // treat the file as needing re-apply, mirroring fileExtra.ts:390-393 and
+  // download.ts:206-217.
+  const result = await ssh.exec(`stat -c '%a %U %G' ${shellQuote(remotePath)}`, EXEC_OPTS)
+  if (result.code !== 0) return { group: "", mode: "", owner: "" }
+  const [mode = "", owner = "", group = ""] = result.stdout.trim().split(/\s+/v)
   return { group, mode, owner }
 }
 
