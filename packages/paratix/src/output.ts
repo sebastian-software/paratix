@@ -1,4 +1,6 @@
 /* eslint-disable max-lines -- CLI output rendering is intentionally kept together */
+import { inspect } from "node:util"
+
 import pc from "picocolors"
 
 import type { ModuleStatus } from "./types.js"
@@ -6,6 +8,11 @@ import type { ModuleStatus } from "./types.js"
 import { fitAnimatedModuleLine, formatDisplayModule } from "./outputFormatting.js"
 import { maskRegisteredSecrets } from "./secretSink.js"
 import { CommandError } from "./sshHelpers.js"
+
+// R-0000580: bounds for `util.inspect` when rendering non-Error cause values so
+// a runaway plain object cannot dump unbounded text into stderr.
+const CAUSE_INSPECT_DEPTH = 2
+const CAUSE_INSPECT_MAX_STRING_LENGTH = 1024
 
 const MODULE_NAME_WIDTH = 56
 const MIN_MODULE_NAME_WIDTH = 12
@@ -449,12 +456,19 @@ function printVerboseGenericError(error: Error): void {
 
 /**
  * Format the textual representation of a single cause-chain link. `Error`
- * values surface their message; other values are rendered through `String`
- * so primitives and plain objects still carry diagnostic context.
+ * values surface their message; other values are rendered through
+ * {@link inspect} with bounded depth/string length so primitives and plain
+ * objects still carry diagnostic context without dumping unbounded text.
  */
 function formatCauseValue(cause: unknown): string {
   if (cause instanceof Error) return cause.message
-  return String(cause)
+  // R-0000580: replace `String(cause)` with `util.inspect` so plain objects
+  // produce useful output ("[object Object]" → `{ key: "…" }`) and the result
+  // is capped via depth/string-length bounds.
+  return inspect(cause, {
+    depth: CAUSE_INSPECT_DEPTH,
+    maxStringLength: CAUSE_INSPECT_MAX_STRING_LENGTH,
+  })
 }
 
 /**
@@ -481,6 +495,18 @@ function printCauseChain(error: Error): void {
       visited.add(cause)
     }
     console.error(pc.red(`${getErrorIndent()}Cause: ${maskRegisteredSecrets(formatCauseValue(cause))}`))
+    // R-0000580: when a `CommandError` appears as a cause it carries the full
+    // stdout/stderr of the failed remote command. Emit those streams the same
+    // way `printVerboseCommandError` does so the operator does not lose the
+    // command output once it has been wrapped into an outer error. Stdout and
+    // stderr go through `maskRegisteredSecrets` like the existing verbose path
+    // in `printCommandFailure`.
+    if (cause instanceof CommandError) {
+      printVerboseCommandError(
+        maskRegisteredSecrets(cause.fullStdout),
+        maskRegisteredSecrets(cause.fullStderr)
+      )
+    }
     cause = cause instanceof Error ? getErrorCause(cause) : undefined
   }
 }
