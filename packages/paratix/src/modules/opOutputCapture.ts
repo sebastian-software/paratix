@@ -1,6 +1,21 @@
 const BYTES_PER_KIB = 1024
 const OP_OUTPUT_CAPTURE_LIMIT_KIB = 64
-const MIN_MASKED_SECRET_PREFIX_LENGTH = 4
+/**
+ * Minimum length of a secret prefix that {@link maskKnownSecretPrefixes} will
+ * redact when the full secret is not present verbatim in the captured op
+ * output. Set high enough that:
+ *
+ * - 6-digit TOTP codes never leak two trailing digits (would otherwise reveal
+ *   ~7 bits of entropy per failure).
+ * - Base64 tokens with a fixed `eyJ`-style header still have at least the
+ *   first half of their unique tail covered before the prefix matcher
+ *   declines to redact.
+ *
+ * R-0000588: bumped from 4 to 8. A second defence layer that also masks
+ * sensitive suffixes could be added later; this value covers the prefix
+ * direction only.
+ */
+const MIN_MASKED_SECRET_PREFIX_LENGTH = 8
 
 export const OP_OUTPUT_CAPTURE_LIMIT_BYTES = OP_OUTPUT_CAPTURE_LIMIT_KIB * BYTES_PER_KIB
 
