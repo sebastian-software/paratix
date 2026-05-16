@@ -1803,6 +1803,33 @@ trap - EXIT
     return true
   }
 
+  /**
+   * R-0000581: read the SHA-256 output for the post-finalize verify step
+   * without going through `sudo` when possible. For non-root users the
+   * finalize step chowns the destination to the parent-directory owner, so
+   * the unprivileged user usually has read access; bypassing sudo avoids the
+   * worst-case command timeout if the sudo channel hangs. The privileged
+   * `output()` fallback runs only when the unprivileged attempt fails — for
+   * example because the destination directory denies traverse access to the
+   * connected user.
+   *
+   * @param hashCommand - The `sha256sum -- …` command to execute.
+   * @returns Raw stdout of the successful `sha256sum` invocation.
+   */
+  private async readSha256OutputForVerify(hashCommand: string): Promise<string> {
+    if (this.config.user === "root") {
+      return this.output(hashCommand)
+    }
+    try {
+      return await this.outputWithoutSudo(hashCommand)
+    } catch {
+      // Fall back to the privileged path when the unprivileged read fails
+      // (typically a permission error). `this.output` adds the same sudo
+      // wrapper used elsewhere so the caller still gets a stable result.
+      return this.output(hashCommand)
+    }
+  }
+
   private async verifyRemoteWriteFile(
     remotePath: string,
     expectedHash: string
@@ -1813,9 +1840,17 @@ trap - EXIT
     // swap the finalized inode with a different file of the same length and
     // our verification would still report "matches". Hashing the actual byte
     // contents closes that window because SHA-256 is collision-resistant.
+    // R-0000581: for non-root sessions try the unprivileged `sha256sum` path
+    // first. The finalize step chowns the destination to the parent-directory
+    // owner, so the connected user can usually read the file directly. This
+    // avoids running `sudo bash -c …` for the verify step, which would burn
+    // the full per-command timeout when a sudo prompt hangs (worst-case twice
+    // for upload + verify). Only fall back to the privileged `output()` path
+    // when the unprivileged read fails with a permission error.
+    const hashCommand = `sha256sum -- ${shellQuote(remotePath)}`
     let rawHash: string
     try {
-      rawHash = await this.output(`sha256sum -- ${shellQuote(remotePath)}`)
+      rawHash = await this.readSha256OutputForVerify(hashCommand)
     } catch (error) {
       // R-0000476: a transient verification failure (non-zero exit code,
       // channel error, sudo hiccup) must not look like a content mismatch.
