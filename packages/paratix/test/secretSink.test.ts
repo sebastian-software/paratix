@@ -200,8 +200,8 @@ describe("withRegisteredSecrets", () => {
   })
 
   // R-0000583: empty strings and values shorter than MINIMUM_SECRET_LENGTH (8)
-  // are both silently ignored by the sink. The bookkeeping bookkeeps must
-  // still leave the sink empty after the scope exits.
+  // are both silently ignored by the sink. The bookkeeping must still leave
+  // the sink empty after the scope exits.
   it("ignores empty strings without affecting the unregister bookkeeping", async () => {
     await withRegisteredSecrets(["", "long-enough-value"], async () => {
       await Promise.resolve()

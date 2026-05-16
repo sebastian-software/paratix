@@ -43,7 +43,6 @@ const successfulSshApplyOptions: MockSshOptions = {
       result: { code: 0 },
     },
     {
-      // eslint-disable-next-line security/detect-unsafe-regex -- bounded literal pattern matching the mktemp command issued by sshAuthorizedKeysHelpers
       command: /^mktemp -p '[^']+\/\.ssh' -- '\.paratix-authorized-keys\.X{6}'$/v,
       result: { stdout: "/home/alice/.ssh/.paratix-authorized-keys.STUB" },
     },
