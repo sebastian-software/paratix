@@ -1312,10 +1312,16 @@ async function applySshdPortWhenConfigUnchanged(
   // (identity rollback). Synthesise a rollback config that pins the live
   // pre-restart port instead, so a failed verification can actually restore
   // the previously listening port.
-  const { newContent: rollbackConfig } = buildSshdPortContent(
-    parameters.originalConfig,
-    parameters.originalPort
-  )
+  // R-0000612: only synthesise that rollback config when `originalPort` is a
+  // genuine fallback the runner can actually reach. If `originalPort` is not
+  // part of the static `configuredPorts` list, dialling it after a failed
+  // verification would still lock the runner out — leave `originalConfig`
+  // untouched in that case so the rollback restores whatever sshd_config the
+  // operator deployed instead of pinning a port we cannot reconnect to.
+  const { configuredPorts } = ssh.getConnectionInfo()
+  const rollbackConfig = configuredPorts.includes(parameters.originalPort)
+    ? buildSshdPortContent(parameters.originalConfig, parameters.originalPort).newContent
+    : parameters.originalConfig
   const verificationFailure = await restartAndVerifySshdPort(ssh, {
     originalConfig: rollbackConfig,
     originalPort: parameters.originalPort,

@@ -527,6 +527,43 @@ describe("sshd.port — apply: validation and rollback", () => {
     expect(addPortSpy).not.toHaveBeenCalled()
   })
 
+  // R-0000612: the no-change apply path used to synthesise a rollback config
+  // pinned to `originalPort` unconditionally. When `originalPort` is not part
+  // of the static `configuredPorts` list, dialling it after a failed verify
+  // would still lock the runner out — the rollback must therefore fall back
+  // to the captured `originalConfig` and leave the listening port to the
+  // operator's deployed config instead.
+  it("R-0000612: rolls back to originalConfig when originalPort is not configured", async () => {
+    // Config already has the target port; the live socket is not on it, so
+    // the no-change apply path runs the restart + verify dance. Configure the
+    // runner so `originalPort` (22) is NOT in the static `configuredPorts`
+    // list — only the target port 2222 is — so the rollback must use the
+    // captured `originalConfig` verbatim.
+    const originalConfig = "Port 2222\n"
+    const mockSsh = createMockSsh({
+      [CAT_SSHD]: { stdout: originalConfig },
+    })
+    vi.spyOn(mockSsh, "getConnectionInfo").mockReturnValue({
+      ...mockSsh.getConnectionInfo(),
+      configuredPorts: [2222],
+      port: 22,
+    })
+    const writtenFiles = trackWriteFile(mockSsh)
+    const originalExec = mockSsh.exec.bind(mockSsh)
+    vi.spyOn(mockSsh, "exec").mockImplementation(buildExecWithSsOverride(originalExec, { code: 0 }))
+
+    const mod = sshd.port(2222)
+    const result = await mod.apply(mockSsh, emptyEnv)
+
+    expect(result.status).toBe("failed")
+    expect(result.error?.message).toContain("no listener on port 2222")
+    expect(result.error?.message).toContain("rolled back")
+    // The rollback write must restore the captured `originalConfig` verbatim —
+    // never a synthetic config pinning `originalPort` 22.
+    expect(writtenFiles.at(-1)?.content).toBe(originalConfig)
+    expect(writtenFiles.at(-1)?.content).not.toContain("Port 22\n")
+  }, 10_000)
+
   it("restarts and emits reconnect meta when config matches but target port is not live", async () => {
     // R-0000283: live-verify probes `ss -H -ltnp` twice — once before the
     // restart (where the listener is not yet present) and once after (where
