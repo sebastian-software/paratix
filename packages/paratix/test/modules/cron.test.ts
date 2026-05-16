@@ -854,7 +854,10 @@ describe("cron.absent", () => {
     expect(await mod.check(null, emptyEnv)).toBe("needs-apply")
   })
 
-  it("apply removes marker and following job line from crontab", async () => {
+  // R-0000567: a legacy marker (without recorded digest) does not prove that
+  // the follow-up line was the one paratix wrote, so apply only removes the
+  // marker and intentionally leaves the orphaned job line in place.
+  it("apply removes legacy marker but preserves the follow-up line for manual cleanup", async () => {
     const mockSsh = createMockSsh({
       "crontab -u 'alice' -l": {
         code: 0,
@@ -866,7 +869,27 @@ describe("cron.absent", () => {
     expect(result.status).toBe("changed")
     const writeInput = findCrontabWriteInput(mockSsh)
     expect(writeInput).not.toContain("# paratix: backup")
-    expect(writeInput).not.toContain("0 3 * * * /backup.sh")
+    expect(writeInput).toContain("0 3 * * * /backup.sh")
+    expect(writeInput).toContain("0 5 * * * /other.sh")
+  })
+
+  // R-0000168: a marker that carries a recorded sha256 digest and a matching
+  // follow-up line is removed together so the managed job is fully purged.
+  it("apply removes marker and matching follow-up job line when the marker carries a digest", async () => {
+    const backupJob = "0 3 * * * /backup.sh"
+    const taggedBackupMarker = taggedMarker("backup", backupJob)
+    const mockSsh = createMockSsh({
+      "crontab -u 'alice' -l": {
+        code: 0,
+        stdout: `0 5 * * * /other.sh\n${taggedBackupMarker}\n${backupJob}\n`,
+      },
+    })
+    const mod = cron.absent("alice", "backup")
+    const result = await mod.apply(mockSsh, emptyEnv)
+    expect(result.status).toBe("changed")
+    const writeInput = findCrontabWriteInput(mockSsh)
+    expect(writeInput).not.toContain("paratix: backup")
+    expect(writeInput).not.toContain(backupJob)
     expect(writeInput).toContain("0 5 * * * /other.sh")
   })
 
@@ -944,11 +967,15 @@ describe("cron.absent", () => {
     expect(mockSsh.calls).toContain("crontab -u 'alice' -r")
   })
 
+  // R-0000168 / R-0000567: with a recorded digest the marker and its
+  // matching follow-up line are removed together; if that empties the
+  // crontab, the module deletes the crontab entirely via `crontab -r`.
   it("apply removes the crontab entirely when last managed entry is removed", async () => {
+    const backupJob = "0 3 * * * /backup.sh"
     const mockSsh = createMockSsh({
       "crontab -u 'alice' -l": {
         code: 0,
-        stdout: "# paratix: backup\n0 3 * * * /backup.sh\n",
+        stdout: `${taggedMarker("backup", backupJob)}\n${backupJob}\n`,
       },
     })
     const mod = cron.absent("alice", "backup")
@@ -958,10 +985,11 @@ describe("cron.absent", () => {
   })
 
   it("apply returns failed when crontab removal fails", async () => {
+    const backupJob = "0 3 * * * /backup.sh"
     const mockSsh = createMockSsh({
       "crontab -u 'alice' -l": {
         code: 0,
-        stdout: "# paratix: backup\n0 3 * * * /backup.sh\n",
+        stdout: `${taggedMarker("backup", backupJob)}\n${backupJob}\n`,
       },
       "crontab -u 'alice' -r": {
         code: 1,
@@ -1002,22 +1030,26 @@ describe("cron.absent", () => {
     expect(mod.name).toBe("cron.absent: backup (alice)")
   })
 
+  // R-0000168 / R-0000567: ensure only the targeted marker (and its
+  // matching follow-up line, when the digest still validates) is touched —
+  // other managed entries with their own digests must remain intact.
   it("only touches the targeted marker when multiple managed entries exist", async () => {
+    const backupJob = "0 3 * * * /backup.sh"
+    const cleanupJob = "0 1 * * * /cleanup.sh"
     const mockSsh = createMockSsh({
       "crontab -u 'alice' -l": {
         code: 0,
-        stdout:
-          "# paratix: cleanup\n0 1 * * * /cleanup.sh\n# paratix: backup\n0 3 * * * /backup.sh\n",
+        stdout: `${taggedMarker("cleanup", cleanupJob)}\n${cleanupJob}\n${taggedMarker("backup", backupJob)}\n${backupJob}\n`,
       },
     })
     const mod = cron.absent("alice", "backup")
     const result = await mod.apply(mockSsh, emptyEnv)
     expect(result.status).toBe("changed")
     const writeInput = findCrontabWriteInput(mockSsh)
-    expect(writeInput).toContain("# paratix: cleanup")
-    expect(writeInput).toContain("0 1 * * * /cleanup.sh")
-    expect(writeInput).not.toContain("# paratix: backup")
-    expect(writeInput).not.toContain("0 3 * * * /backup.sh")
+    expect(writeInput).toContain("paratix: cleanup")
+    expect(writeInput).toContain(cleanupJob)
+    expect(writeInput).not.toContain("paratix: backup")
+    expect(writeInput).not.toContain(backupJob)
   })
 
   it("apply removes a trailing marker without a following job line", async () => {
