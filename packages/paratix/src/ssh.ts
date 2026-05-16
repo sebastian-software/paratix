@@ -1698,8 +1698,13 @@ trap - EXIT
   }
 
   private tearDownClient(closing: Client): void {
-    this.detachClientLifecycleListeners(closing)
+    // R-0000582: attach the teardown error sink BEFORE detaching the lifecycle
+    // listeners so the client never goes without an `error` listener even for
+    // a single tick. Otherwise an `error` event emitted between the detach
+    // and the new sink registration would crash the process via Node's
+    // "unhandled error" path.
     attachSshClientTeardownErrorSink(closing)
+    this.detachClientLifecycleListeners(closing)
     try {
       closing.end()
     } catch {
