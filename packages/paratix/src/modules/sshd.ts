@@ -1039,15 +1039,13 @@ async function restartAndVerifySshdPort(
     try {
       await ssh.reconnect()
     } catch (error) {
-      try {
-        ssh.removePort(parameters.targetPort)
-      } catch {
-        // ssh.removePort is in-memory bookkeeping; never mask the reconnect failure.
-      }
-      return failed(
-        `[sshd.port: ${String(parameters.targetPort)}] sshd restart disconnected the SSH ` +
-          `session before the target port could be verified; reconnect failed: ${String(error)}`
-      )
+      return recoverFromReconnectFailureAfterDisconnect(ssh, {
+        originalConfig: parameters.originalConfig,
+        originalPort: parameters.originalPort,
+        reconnectError: error,
+        snapshot: outcome.snapshot,
+        targetPort: parameters.targetPort,
+      })
     }
   }
   // R-0000557: hand the restart snapshot (socket-state, service-boot-state,
@@ -1056,6 +1054,73 @@ async function restartAndVerifySshdPort(
   // verification rollback restores only `sshd_config` and silently leaves
   // `ssh.socket` disabled on socket-activated hosts.
   return verifyLiveSshdPortOrRollback(ssh, { ...parameters, snapshot: outcome.snapshot })
+}
+
+// R-0000593: when the restart aborted the session and the immediate reconnect
+// on the new candidate port fails, the previous behaviour returned `failed(...)`
+// after only calling `ssh.removePort(targetPort)`. That left the on-disk
+// `sshd_config`, the socket-state, and the service-boot-state pointing at the
+// new port even though the runner could no longer reach the host on it —
+// a near-certain lockout once systemd settles or the host reboots. We now
+// best-effort the reconnect over `originalPort` so the rollback path can talk
+// to the host again, then restore all three layers via the existing
+// verification-rollback helper. Both the reconnect attempt and the rollback
+// are best-effort; the original reconnect failure stays the primary error.
+async function recoverFromReconnectFailureAfterDisconnect(
+  ssh: SshConnection,
+  parameters: {
+    originalConfig: string
+    originalPort: number
+    reconnectError: unknown
+    snapshot: SshdRestartSnapshot
+    targetPort: number
+  }
+): Promise<ModuleResult> {
+  // Remove the target port from the candidate list before re-attempting the
+  // reconnect so the runner does not keep dialling the unreachable port we
+  // just failed to reach. `reconnect()` honours `runtime.ports`, so the next
+  // attempt iterates through the remaining (original) candidates.
+  try {
+    ssh.removePort(parameters.targetPort)
+  } catch {
+    // ssh.removePort is in-memory bookkeeping; never mask the reconnect failure.
+  }
+  // Ensure `originalPort` is on the candidate list; on the common case it is
+  // already part of the static `configuredPorts` and was therefore present
+  // before `addPort(targetPort)` ran, but a defensive re-add costs nothing and
+  // guards against future changes to the candidate management.
+  try {
+    ssh.addPort(parameters.originalPort)
+  } catch {
+    // ssh.addPort is in-memory bookkeeping; tolerate exotic implementations
+    // so the rollback path still runs.
+  }
+  const fallbackReconnectError = await runRollbackStep(async () => {
+    await ssh.reconnect()
+  })
+  // Drop the original port marker again once we are back on the host so the
+  // candidate list reflects the pre-apply state regardless of whether the
+  // fallback reconnect succeeded.
+  const reconnectErrorMessage = String(parameters.reconnectError)
+  const baseMessage =
+    `[sshd.port: ${String(parameters.targetPort)}] sshd restart disconnected the SSH ` +
+    `session before the target port could be verified; reconnect failed: ${reconnectErrorMessage}`
+  if (fallbackReconnectError != null) {
+    return failed(
+      `${baseMessage}; fallback reconnect on original port ${String(parameters.originalPort)} ` +
+        `also failed: ${fallbackReconnectError}`
+    )
+  }
+  const rollbackError = await rollbackSshdPortAfterFailedVerification(ssh, {
+    originalConfig: parameters.originalConfig,
+    originalPort: parameters.originalPort,
+    snapshot: parameters.snapshot,
+    targetPort: parameters.targetPort,
+  })
+  if (rollbackError == null) {
+    return failed(`${baseMessage}; rolled back to previous config and port`)
+  }
+  return failed(`${baseMessage}; rollback also failed: ${rollbackError}`)
 }
 
 function isSshdRestartOutcome(
