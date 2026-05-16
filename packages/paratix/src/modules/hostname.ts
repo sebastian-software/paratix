@@ -79,8 +79,17 @@ export const hostname = {
         // rather than the kernel-resolved hostname returned by `hostname`, which can
         // differ (e.g. FQDN vs. short name) depending on /etc/hosts and nsswitch.conf
         // and would otherwise cause check to report drift even after a successful apply.
-        const current = await ssh.output("hostnamectl --static")
-        return current === name ? "ok" : NEEDS_APPLY
+        // R-0000558: route through ssh.exec with ignoreExitCode so non-zero
+        // hostnamectl exits (systemd containers without DBus access, missing
+        // privileges, etc.) do not propagate a raw CommandError out of check.
+        // Treat any non-zero exit as drift so apply re-runs and surfaces the
+        // actionable hostnamectl failure via failedCommand.
+        const result = await ssh.exec("hostnamectl --static", {
+          ignoreExitCode: true,
+          silent: true,
+        })
+        if (result.code !== 0) return NEEDS_APPLY
+        return result.stdout.trim() === name ? "ok" : NEEDS_APPLY
       },
       name: `hostname.set: ${name}`,
     }
