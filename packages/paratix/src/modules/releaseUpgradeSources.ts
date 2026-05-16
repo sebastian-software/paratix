@@ -29,7 +29,16 @@ export function isAcceptableSourcesPath(filePath: string): boolean {
     if (code === undefined) continue
     if (code < ASCII_CONTROL_BOUNDARY || code === ASCII_DEL_CODE_POINT) return false
   }
+  // Reject trailing-slash paths up front. `pathPosix.normalize` collapses
+  // duplicate slashes but preserves a trailing separator, so a value like
+  // `/etc/apt/sources.list.d/` would otherwise satisfy the `startsWith`
+  // check and let callers issue `readFile`/`writeFile` against the
+  // directory itself.
+  if (filePath.endsWith("/")) return false
   const normalizedPath = pathPosix.normalize(filePath)
+  // Require a strictly longer path than the directory prefix so the bare
+  // directory path cannot pass the prefix check even after normalization.
+  if (normalizedPath.length <= APT_SOURCES_LIST_DIRECTORY.length) return false
   return normalizedPath.startsWith(APT_SOURCES_LIST_DIRECTORY)
 }
 
