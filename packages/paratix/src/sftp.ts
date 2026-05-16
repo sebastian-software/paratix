@@ -267,16 +267,6 @@ function wireStreams(options: {
     if (typeof writeStream.destroy === "function") writeStream.destroy()
     settlement.rejectOnce(new Error("SFTP transfer aborted: ssh disconnect"))
   }
-  if (connectionAbortSignal != null) {
-    if (connectionAbortSignal.aborted) {
-      // Schedule via microtask so the settlement is wired up before the
-      // synchronous abort handler fires; otherwise `settlement.rejectOnce`
-      // would run before the readStream/writeStream listeners are attached.
-      queueMicrotask(handleConnectionAbort)
-    } else {
-      connectionAbortSignal.addEventListener("abort", handleConnectionAbort, { once: true })
-    }
-  }
 
   for (const completionEvent of completionEvents) {
     writeStream.on(completionEvent, () => {
@@ -300,6 +290,22 @@ function wireStreams(options: {
     if (typeof writeStream.destroy === "function") writeStream.destroy()
     settlement.rejectOnce(readError)
   })
+
+  // R-0000584: handle the connection-abort signal AFTER the read/write
+  // listeners are attached but BEFORE `pipe` starts the transfer. When the
+  // signal is already aborted on entry we used to schedule the handler via
+  // `queueMicrotask`, but a synchronous `pipe` finish could call
+  // `resolveOnce` before that microtask ran and the abort would be swallowed.
+  // Invoking `handleConnectionAbort` synchronously here guarantees the abort
+  // is observed first, regardless of how quickly `pipe` settles.
+  if (connectionAbortSignal != null) {
+    if (connectionAbortSignal.aborted) {
+      handleConnectionAbort()
+    } else {
+      connectionAbortSignal.addEventListener("abort", handleConnectionAbort, { once: true })
+    }
+  }
+
   readStream.pipe(writeStream)
 }
 
