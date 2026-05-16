@@ -40,11 +40,19 @@ const createMockSsh: typeof createBaseMockSsh = (responses, options) => {
       { command: "systemctl reload-or-restart sshd", result: { code: 0 } },
       { command: "systemctl reload-or-restart ssh", result: { code: 0 } },
       // R-0000492: socket-state probes no longer use shell redirects.
+      // R-0000608: `captureSshSocketState` now probes both `ssh.socket`
+      // (Debian/Ubuntu) and `sshd.socket` (Fedora/RHEL); both default-miss
+      // here so the default Debian/Ubuntu service-restart path stays selected.
       { command: "systemctl cat ssh.socket", result: { code: 1 } },
+      { command: "systemctl cat sshd.socket", result: { code: 1 } },
       { command: "systemctl is-enabled --quiet ssh.socket", result: { code: 1 } },
       { command: "systemctl is-active --quiet ssh.socket", result: { code: 1 } },
+      { command: "systemctl is-enabled --quiet sshd.socket", result: { code: 1 } },
+      { command: "systemctl is-active --quiet sshd.socket", result: { code: 1 } },
       { command: "systemctl disable --now ssh.socket", result: { code: 0 } },
+      { command: "systemctl disable --now sshd.socket", result: { code: 0 } },
       { command: "systemctl enable --now ssh.socket", result: { code: 0 } },
+      { command: "systemctl enable --now sshd.socket", result: { code: 0 } },
       { command: "systemctl restart sshd", result: { code: 0 } },
       { command: /^rm -f '\/tmp\/paratix-sshd-dry-run-.+\.conf'$/v, result: { code: 0 } },
       // R-0000283: default the post-restart live verify to "listener present"
@@ -343,6 +351,92 @@ describe("sshd.port — apply: validation and rollback", () => {
 
     expect(result.status).toBe("changed")
     expect(execSpy.mock.calls.map((args) => args[0])).toContain("systemctl enable sshd.service")
+  })
+
+  // R-0000608: Fedora/RHEL ship socket activation as `sshd.socket` rather than
+  // the Debian/Ubuntu `ssh.socket`. The capture/restore helpers must follow the
+  // resolved unit name through enable/disable so socket-state rollback actually
+  // restores the unit that was present on the host.
+  it("R-0000608: disables sshd.socket before restarting sshd on Fedora-style hosts", async () => {
+    const originalConfig = "Port 22"
+    const mockSsh = createMockSsh({
+      [CAT_SSHD]: { stdout: originalConfig },
+    })
+    trackWriteFile(mockSsh)
+    vi.spyOn(mockSsh, "readFile")
+      .mockResolvedValueOnce(originalConfig) // initial read in applySshdPort
+      .mockResolvedValueOnce(originalConfig) // guard read in guardedWriteFile
+    const execSpy = vi.spyOn(mockSsh, "exec")
+
+    execSpy
+      .mockResolvedValueOnce({ code: 0, stderr: "", stdout: "" }) // mkdir -p /run/sshd (dry-run)
+      .mockResolvedValueOnce({ code: 0, stderr: "", stdout: "" }) // sshd -t -f <tmpfile>
+      .mockResolvedValueOnce({ code: 0, stderr: "", stdout: "" }) // rm -f <tmpfile>
+      .mockResolvedValueOnce({ code: 1, stderr: "", stdout: "" }) // systemctl cat ssh.socket → miss
+      .mockResolvedValueOnce({ code: 0, stderr: "", stdout: "" }) // systemctl cat sshd.socket → hit
+      .mockResolvedValueOnce({ code: 0, stderr: "", stdout: "" }) // is-enabled sshd.socket
+      .mockResolvedValueOnce({ code: 0, stderr: "", stdout: "" }) // is-active sshd.socket
+      .mockResolvedValueOnce({ code: 0, stderr: "", stdout: "" }) // disable --now sshd.socket
+      .mockResolvedValueOnce({ code: 0, stderr: "", stdout: "" }) // sshd.service exists
+      .mockResolvedValueOnce({ code: 0, stderr: "", stdout: "" }) // sshd.service is-enabled
+      .mockResolvedValueOnce({ code: 0, stderr: "", stdout: "" }) // systemctl restart sshd
+      .mockResolvedValueOnce({ code: 0, stderr: "", stdout: SS_PROBE_LISTENING_STDOUT }) // ss probe
+
+    const mod = sshd.port(2222)
+    const result = await mod.apply(mockSsh, emptyEnv)
+
+    expect(result.status).toBe("changed")
+    const execCommands = execSpy.mock.calls.map((args) => args[0])
+    expect(execCommands).toContain("systemctl cat sshd.socket")
+    expect(execCommands).toContain("systemctl disable --now sshd.socket")
+    expect(execCommands).not.toContain("systemctl disable --now ssh.socket")
+    const disableIndex = execCommands.indexOf("systemctl disable --now sshd.socket")
+    const restartIndex = execCommands.indexOf("systemctl restart sshd")
+    expect(disableIndex).toBeGreaterThanOrEqual(0)
+    expect(restartIndex).toBeGreaterThan(disableIndex)
+  })
+
+  // R-0000608: when the Fedora/RHEL `sshd.socket` rollback fires after a failed
+  // restart, the restore call must use the resolved unit name (`sshd.socket`).
+  // The previous hard-coded `systemctl enable --now ssh.socket` would no-op on
+  // such hosts and silently leave socket activation disabled across reboots.
+  it("R-0000608: restores sshd.socket on rollback when restart fails on Fedora-style hosts", async () => {
+    const originalConfig = "Port 22"
+    const mockSsh = createMockSsh({
+      [CAT_SSHD]: { stdout: originalConfig },
+    })
+    const writtenFiles = trackWriteFile(mockSsh)
+    vi.spyOn(mockSsh, "readFile")
+      .mockResolvedValueOnce(originalConfig) // initial read in applySshdPort
+      .mockResolvedValueOnce(originalConfig) // guard read in guardedWriteFile
+    const execSpy = vi.spyOn(mockSsh, "exec")
+
+    execSpy
+      .mockResolvedValueOnce({ code: 0, stderr: "", stdout: "" }) // mkdir -p /run/sshd (dry-run)
+      .mockResolvedValueOnce({ code: 0, stderr: "", stdout: "" }) // sshd -t -f <tmpfile>
+      .mockResolvedValueOnce({ code: 0, stderr: "", stdout: "" }) // rm -f <tmpfile>
+      .mockResolvedValueOnce({ code: 1, stderr: "", stdout: "" }) // systemctl cat ssh.socket → miss
+      .mockResolvedValueOnce({ code: 0, stderr: "", stdout: "" }) // systemctl cat sshd.socket → hit
+      .mockResolvedValueOnce({ code: 0, stderr: "", stdout: "" }) // is-enabled sshd.socket
+      .mockResolvedValueOnce({ code: 0, stderr: "", stdout: "" }) // is-active sshd.socket
+      .mockResolvedValueOnce({ code: 0, stderr: "", stdout: "" }) // disable --now sshd.socket
+      .mockResolvedValueOnce({ code: 0, stderr: "", stdout: "" }) // sshd.service exists
+      .mockResolvedValueOnce({ code: 0, stderr: "", stdout: "" }) // sshd.service is-enabled
+      .mockRejectedValueOnce(new Error("systemctl restart sshd failed")) // restart sshd fails
+      .mockResolvedValueOnce({ code: 0, stderr: "", stdout: "" }) // enable --now sshd.socket (restore)
+      .mockResolvedValueOnce({ code: 0, stderr: "", stdout: "" }) // restart sshd (best-effort restore)
+
+    const mod = sshd.port(2222)
+    const result = await mod.apply(mockSsh, emptyEnv)
+
+    expect(result.status).toBe("failed")
+    expect(result.error?.message).toContain("sshd restart failed")
+    const execCommands = execSpy.mock.calls.map((args) => args[0])
+    expect(execCommands).toContain("systemctl disable --now sshd.socket")
+    expect(execCommands).toContain("systemctl enable --now sshd.socket")
+    expect(execCommands).not.toContain("systemctl enable --now ssh.socket")
+    expect(writtenFiles.at(-1)?.content).toBe(originalConfig)
+    expect(writtenFiles.at(-1)?.path).toBe(SSHD_CONFIG)
   })
 
   it("keeps the previous restart path when ssh.socket does not exist", async () => {
@@ -676,7 +770,9 @@ describe("sshd.port — apply: validation and rollback", () => {
       .mockResolvedValueOnce({ code: 0, stderr: "", stdout: "" }) // mkdir -p /run/sshd (dry-run)
       .mockResolvedValueOnce({ code: 0, stderr: "", stdout: "" }) // sshd -t -f <tmpfile>
       .mockResolvedValueOnce({ code: 0, stderr: "", stdout: "" }) // rm -f <tmpfile>
+      // R-0000608: socket-state probes both `ssh.socket` and `sshd.socket`.
       .mockResolvedValueOnce({ code: 1, stderr: "", stdout: "" }) // ssh.socket missing
+      .mockResolvedValueOnce({ code: 1, stderr: "", stdout: "" }) // sshd.socket missing
       .mockResolvedValueOnce({ code: 1, stderr: "", stdout: "" }) // sshd.service not found
       .mockResolvedValueOnce({ code: 0, stderr: "", stdout: "" }) // ssh.service found
       .mockResolvedValueOnce({ code: 0, stderr: "", stdout: "" }) // ssh.service is-enabled

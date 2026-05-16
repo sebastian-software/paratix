@@ -29,7 +29,23 @@ const SSHD_CONFIG_MODE = "0644"
 const SSHD_EFFECTIVE_CONFIG_COMMAND = "sshd -T"
 const SYSTEMCTL = "systemctl"
 
-type SshSocketState = { active: boolean; enabled: boolean; exists: true } | { exists: false }
+// R-0000608: distribution-specific socket-activation units differ in name —
+// Debian/Ubuntu ship `ssh.socket`, while Fedora/RHEL ship `sshd.socket`. The
+// captured state therefore carries the resolved unit name so every downstream
+// enable/disable/start command operates on the unit we actually probed instead
+// of a hard-coded `ssh.socket` that may not exist on the host.
+type SshdSocketUnit = "ssh.socket" | "sshd.socket"
+
+type SshSocketState =
+  | { active: boolean; enabled: boolean; exists: true; unit: SshdSocketUnit }
+  | { exists: false }
+
+// Resolution order mirrors `resolveSshServiceUnit`: probe the unit name
+// commonly used by the matching service unit first, then fall back. Keep
+// `ssh.socket` first so existing Debian/Ubuntu hosts (the historic default
+// before R-0000608) keep the same probe-order they had before; Fedora/RHEL
+// hosts simply fall through to the second probe.
+const SSHD_SOCKET_UNIT_CANDIDATES: readonly SshdSocketUnit[] = ["ssh.socket", "sshd.socket"]
 
 type SshdServiceUnit = "ssh" | "sshd"
 
@@ -277,22 +293,39 @@ async function ensurePrivilegeSeparationDirectory(ssh: SshConnection): Promise<v
   })
 }
 
-async function captureSshSocketState(ssh: SshConnection): Promise<SshSocketState> {
-  // R-0000492: rely on `silent: true` to swallow stdout/stderr instead of
-  // embedding shell redirects in the command string. Keeps the helper
-  // consistent with the rest of the codebase and avoids shell-metacharacter
-  // surprises.
-  const socketExists = await ssh.exec("systemctl cat ssh.socket", {
-    ignoreExitCode: true,
-    silent: true,
-  })
-  if (socketExists.code !== 0) return { exists: false }
+// R-0000608: probe both `ssh.socket` (Debian/Ubuntu) and `sshd.socket`
+// (Fedora/RHEL) when capturing the socket-activation state. Returning the
+// resolved unit name lets `disableSocketActivatedSsh` and
+// `restoreSocketActivatedSsh` operate on the correct unit instead of
+// hard-coding `ssh.socket` and silently skipping rollback on hosts that ship
+// only `sshd.socket`.
+async function resolveExistingSshdSocketUnit(
+  ssh: SshConnection
+): Promise<SshdSocketUnit | undefined> {
+  for (const candidate of SSHD_SOCKET_UNIT_CANDIDATES) {
+    // R-0000492: rely on `silent: true` to swallow stdout/stderr instead of
+    // embedding shell redirects in the command string. Keeps the helper
+    // consistent with the rest of the codebase and avoids shell-metacharacter
+    // surprises.
+    // eslint-disable-next-line no-await-in-loop -- sequential systemctl probes by design
+    const exists = await ssh.exec(`systemctl cat ${candidate}`, {
+      ignoreExitCode: true,
+      silent: true,
+    })
+    if (exists.code === 0) return candidate
+  }
+  return undefined
+}
 
-  const enabled = await ssh.exec("systemctl is-enabled --quiet ssh.socket", {
+async function captureSshSocketState(ssh: SshConnection): Promise<SshSocketState> {
+  const unit = await resolveExistingSshdSocketUnit(ssh)
+  if (unit == null) return { exists: false }
+
+  const enabled = await ssh.exec(`systemctl is-enabled --quiet ${unit}`, {
     ignoreExitCode: true,
     silent: true,
   })
-  const active = await ssh.exec("systemctl is-active --quiet ssh.socket", {
+  const active = await ssh.exec(`systemctl is-active --quiet ${unit}`, {
     ignoreExitCode: true,
     silent: true,
   })
@@ -301,6 +334,7 @@ async function captureSshSocketState(ssh: SshConnection): Promise<SshSocketState
     active: active.code === 0,
     enabled: enabled.code === 0,
     exists: true,
+    unit,
   }
 }
 
@@ -308,7 +342,7 @@ async function disableSocketActivatedSsh(ssh: SshConnection): Promise<SshSocketS
   const socketState = await captureSshSocketState(ssh)
   if (!socketState.exists) return socketState
 
-  await ssh.exec("systemctl disable --now ssh.socket", {
+  await ssh.exec(`systemctl disable --now ${socketState.unit}`, {
     ignoreExitCode: false,
     silent: true,
   })
@@ -321,14 +355,23 @@ async function restoreSocketActivatedSsh(
 ): Promise<void> {
   if (!socketState.exists) return
   if (socketState.enabled && socketState.active) {
-    await ssh.exec("systemctl enable --now ssh.socket", { ignoreExitCode: false, silent: true })
+    await ssh.exec(`systemctl enable --now ${socketState.unit}`, {
+      ignoreExitCode: false,
+      silent: true,
+    })
     return
   }
   if (socketState.enabled) {
-    await ssh.exec("systemctl enable ssh.socket", { ignoreExitCode: false, silent: true })
+    await ssh.exec(`systemctl enable ${socketState.unit}`, {
+      ignoreExitCode: false,
+      silent: true,
+    })
   }
   if (socketState.active) {
-    await ssh.exec("systemctl start ssh.socket", { ignoreExitCode: false, silent: true })
+    await ssh.exec(`systemctl start ${socketState.unit}`, {
+      ignoreExitCode: false,
+      silent: true,
+    })
   }
 }
 

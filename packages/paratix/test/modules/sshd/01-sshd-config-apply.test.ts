@@ -52,11 +52,19 @@ const createMockSsh: typeof createBaseMockSsh = (responses, options) =>
       { command: "systemctl reload-or-restart ssh", result: { code: 0 } },
       // R-0000492: shell redirects removed from socket-state probes; the
       // source now relies on `silent: true` to swallow stdout/stderr.
+      // R-0000608: `captureSshSocketState` now probes both `ssh.socket`
+      // (Debian/Ubuntu) and `sshd.socket` (Fedora/RHEL); both default-miss
+      // here so the default Debian/Ubuntu service-restart path stays selected.
       { command: "systemctl cat ssh.socket", result: { code: 1 } },
+      { command: "systemctl cat sshd.socket", result: { code: 1 } },
       { command: "systemctl is-enabled --quiet ssh.socket", result: { code: 1 } },
       { command: "systemctl is-active --quiet ssh.socket", result: { code: 1 } },
+      { command: "systemctl is-enabled --quiet sshd.socket", result: { code: 1 } },
+      { command: "systemctl is-active --quiet sshd.socket", result: { code: 1 } },
       { command: "systemctl disable --now ssh.socket", result: { code: 0 } },
+      { command: "systemctl disable --now sshd.socket", result: { code: 0 } },
       { command: "systemctl enable --now ssh.socket", result: { code: 0 } },
+      { command: "systemctl enable --now sshd.socket", result: { code: 0 } },
       { command: "systemctl restart sshd", result: { code: 0 } },
       { command: /^rm -f '\/tmp\/paratix-sshd-dry-run-.+\.conf'$/v, result: { code: 0 } },
       ...(options?.responseStubs ?? []),
