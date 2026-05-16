@@ -1391,7 +1391,7 @@ if ! ${targetGuard}; then
   printf '%s\n' 'target path must not be a directory or symlink' >&2
   exit 1
 fi
-target_owner=$(stat -c '%u:%g' ${shellQuote(remotePath)} 2>/dev/null || printf '0:0')
+target_owner=$(stat -c '%u:%g' ${shellQuote(remotePath)} 2>/dev/null || stat -c '%u:%g' ${shellQuote(directory)} 2>/dev/null || printf '0:0')
 target_temp=''
 cleanup() {
   if [ -n "$target_temp" ]; then
