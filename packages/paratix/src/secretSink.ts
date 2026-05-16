@@ -49,8 +49,13 @@ function assertRegistrableSecret(secret: string): void {
  * stray one- or two-character token (a single TOTP digit, a partially
  * extracted PIN, …) cannot turn every byte of diagnostic output into the
  * redaction marker via `replaceAll`.
+ *
+ * R-0000583: kept at 8 so a 6-digit TOTP code cannot collide with arbitrary
+ * 6-digit substrings in diagnostic text, and so reference-counting via plain
+ * string identity does not get confused by short 4-character fragments that
+ * appear in many unrelated values.
  */
-const MINIMUM_SECRET_LENGTH = 4
+const MINIMUM_SECRET_LENGTH = 8
 
 /**
  * Register a secret string for redaction in subsequent diagnostic output.
