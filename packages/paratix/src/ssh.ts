@@ -2,9 +2,11 @@
 import type { Stats } from "node:fs"
 
 import { createHash, timingSafeEqual } from "node:crypto"
+import { createReadStream } from "node:fs"
 import { readFile, stat } from "node:fs/promises"
 import { homedir } from "node:os"
 import { join, posix } from "node:path"
+import { pipeline } from "node:stream/promises"
 import { Client, type ClientChannel } from "ssh2"
 
 import type { ExecOptions, ExecResult, SshConfig, SshConnection } from "./types.js"
@@ -40,6 +42,23 @@ export { shellQuote, validateMktempPath, validateMode }
 async function statLocalFile(path: string): Promise<Stats> {
   // eslint-disable-next-line security/detect-non-literal-fs-filename -- localPath is an explicit caller-provided upload source that must be stat'ed before transfer
   return stat(path)
+}
+
+/**
+ * Stream the local upload source through SHA-256 so the post-finalize
+ * verification can compare hashes instead of byte counts (R-0000599). Hashing
+ * via `createReadStream` keeps memory usage flat regardless of the file size
+ * — `uploadFile` may transfer arbitrarily large artifacts.
+ *
+ * @param path - Absolute or relative path to the local upload source.
+ * @returns Lowercase hex SHA-256 digest of the file contents.
+ */
+async function computeLocalFileSha256(path: string): Promise<string> {
+  const hash = createHash("sha256")
+  // eslint-disable-next-line security/detect-non-literal-fs-filename -- localPath is the caller-provided upload source that must be hashed before transfer
+  const readStream = createReadStream(path)
+  await pipeline(readStream, hash)
+  return hash.digest("hex")
 }
 
 /**
@@ -545,6 +564,12 @@ export class SshConnectionImpl implements SshConnection {
     const client = this.ensureClient()
     const localFileStats = await statLocalFile(localPath)
     const localFileSize = localFileStats.size
+    // R-0000599: pre-compute the SHA-256 of the local upload source so the
+    // post-finalize verification can compare hashes instead of byte counts —
+    // the same threat model that drove `writeFile` to a SHA-256 post-finalize
+    // check (R-0000522) applies here. Streaming via `createReadStream` keeps
+    // memory usage flat regardless of the uploaded file's size.
+    const expectedHash = await computeLocalFileSha256(localPath)
     const temporaryPath = await this.createRemoteWritableTempPath(remotePath, "paratix-upload")
     const temporaryMode = options?.mode ?? "0600"
     try {
@@ -568,6 +593,17 @@ export class SshConnectionImpl implements SshConnection {
       // sudo-auth error.
       await this.assertRemoteFileSize(temporaryPath, localFileSize)
       await this.finalizeRemoteTempFile(temporaryPath, remotePath, temporaryMode)
+      // R-0000599: re-hash the finalized destination so a same-length TOCTOU
+      // swap between the staged temp file and the privileged `mv -T` cannot
+      // slip past. Mirrors the post-finalize SHA-256 check `writeFile`
+      // performs via `ensureRemoteWriteFile`; the shell-fallback rewrite
+      // there is specific to in-memory content and does not apply to a
+      // streamed local upload source.
+      await this.ensureRemoteUploadFile({
+        expectedHash,
+        expectedSize: localFileSize,
+        remotePath,
+      })
     } finally {
       try {
         await this.cleanupRemoteTempFile(temporaryPath)
@@ -1103,6 +1139,46 @@ export class SshConnectionImpl implements SshConnection {
   private ensureClient(): Client {
     if (!this.client) throw new Error("SSH not connected")
     return this.client
+  }
+
+  /**
+   * R-0000599: post-finalize verification for `uploadFile`. Compares the
+   * SHA-256 of the finalized remote file against the streaming digest
+   * computed from `localPath`. Mirrors the verdict handling of
+   * {@link ensureRemoteWriteFile} ("matches" / "empty" / "hash-mismatch")
+   * but does not invoke the shell-fallback rewrite — that fallback is
+   * specific to in-memory `writeFile` content and cannot be reproduced for
+   * a streamed local upload source. A transient verification failure
+   * propagates as {@link RemoteStatTransientError} so the caller can retry
+   * instead of acting on a non-verdict result.
+   *
+   * @param options - Verification inputs.
+   * @param options.expectedHash - Lowercase hex SHA-256 digest of the local file.
+   * @param options.expectedSize - Byte length of the local file (used for disk-full diagnostics).
+   * @param options.remotePath - The finalized destination path on the remote host.
+   * @throws {Error} When the remote file is empty (disk-full) or its hash does not match.
+   */
+  private async ensureRemoteUploadFile(options: {
+    expectedHash: string
+    expectedSize: number
+    remotePath: string
+  }): Promise<void> {
+    const verification = await this.verifyRemoteWriteFile(options.remotePath, options.expectedHash)
+    if (verification === "matches") return
+    if (verification === "empty") {
+      const diskInfo = await this.checkRemoteDiskSpace(options.remotePath)
+      if (diskInfo != null && diskInfo.availableBytes < options.expectedSize) {
+        throw new Error(
+          `[ssh.uploadFile: ${options.remotePath}] disk full – ${diskInfo.availableBytes} bytes available on ${diskInfo.mountpoint}; the file was written as 0 bytes because there is no space left on the device`
+        )
+      }
+      throw new Error(
+        `[ssh.uploadFile: ${options.remotePath}] remote file is empty after upload/finalize; refusing successful upload result`
+      )
+    }
+    throw new Error(
+      `[ssh.uploadFile: ${options.remotePath}] remote file hash mismatch after upload/finalize; expected ${options.expectedSize} bytes with SHA-256 ${options.expectedHash}`
+    )
   }
 
   private async ensureRemoteWriteFile(options: {

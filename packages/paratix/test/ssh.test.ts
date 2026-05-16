@@ -47,11 +47,31 @@ vi.mock("node:child_process", () => ({
   execFile: vi.fn(),
 }))
 
-vi.mock("node:fs", () => ({
-  readFileSync: vi.fn().mockReturnValue(""),
-  unlinkSync: vi.fn(),
-  writeFileSync: vi.fn(),
-}))
+// R-0000599: the post-finalize upload verification streams the local source
+// through `createReadStream` + `crypto.createHash` to compute a SHA-256.
+// Tests cover the upload pipeline against a mocked filesystem, so the mock
+// returns a deterministic 11-byte payload that matches the `stat` mock's
+// reported `size: 11`. The constant is declared via `vi.hoisted` so the
+// hoisted `vi.mock` factory below can reference it without a TDZ violation.
+const { MOCK_LOCAL_UPLOAD_CONTENT, MOCK_LOCAL_UPLOAD_SHA256 } = vi.hoisted(() => {
+  const content = "hello world"
+  // SHA-256 of "hello world" — kept inline so tests can match the verify-
+  // step `sha256sum` output without re-hashing at runtime.
+  return {
+    MOCK_LOCAL_UPLOAD_CONTENT: content,
+    MOCK_LOCAL_UPLOAD_SHA256: "b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9",
+  }
+})
+
+vi.mock("node:fs", async () => {
+  const { Readable } = await import("node:stream")
+  return {
+    createReadStream: vi.fn(() => Readable.from([Buffer.from(MOCK_LOCAL_UPLOAD_CONTENT, "utf8")])),
+    readFileSync: vi.fn().mockReturnValue(""),
+    unlinkSync: vi.fn(),
+    writeFileSync: vi.fn(),
+  }
+})
 
 vi.mock("node:fs/promises", () => ({
   appendFile: vi.fn().mockResolvedValue(null),
@@ -2523,7 +2543,15 @@ describe("SshConnectionImpl", () => {
           callback(undefined, stream)
           stream.emit("close", 0)
         })
-        // [5] rm -f temp
+        // [5] R-0000599: post-finalize SHA-256 verification of remote file
+        .mockImplementationOnce((_command: string, callback: ExecCallback) => {
+          const stream = makeStream()
+          executedCommands.push(_command)
+          callback(undefined, stream)
+          stream.emit("data", Buffer.from(`${MOCK_LOCAL_UPLOAD_SHA256}  ${remotePath}\n`))
+          stream.emit("close", 0)
+        })
+        // [6] rm -f temp
         .mockImplementationOnce((_command: string, callback: ExecCallback) => {
           const stream = makeStream()
           executedCommands.push(_command)
@@ -2563,7 +2591,11 @@ describe("SshConnectionImpl", () => {
       expect(executedCommands[4]).toContain("'0600'")
       expect(executedCommands[4]).toContain('chown "$target_owner" "$target_temp"')
       expect(executedCommands[4]).toContain(`'${remotePath}'`)
-      expect(executedCommands[5]).toBe(`rm -f -- '${tempPath}'`)
+      // R-0000599: sha256sum verifies the finalized destination hash matches
+      // the local source.
+      expect(executedCommands[5]).toContain("sha256sum --")
+      expect(executedCommands[5]).toContain(remotePath)
+      expect(executedCommands[6]).toBe(`rm -f -- '${tempPath}'`)
       expect(vi.mocked(sftpUpload)).toHaveBeenCalledWith(
         client,
         "/local/file.txt",
@@ -2637,6 +2669,7 @@ describe("SshConnectionImpl", () => {
       vi.mocked(sftpUpload).mockResolvedValue()
 
       const tempPath = "/remote/paratix-upload.ABCDEF"
+      const remotePath = "/remote/path"
       const executedCommands: string[] = []
 
       const execSpy = vi
@@ -2677,6 +2710,14 @@ describe("SshConnectionImpl", () => {
           const stream = makeStream()
           executedCommands.push(_command)
           callback(undefined, stream)
+          stream.emit("close", 0)
+        })
+        // R-0000599: post-finalize SHA-256 verification of remote file
+        .mockImplementationOnce((_command: string, callback: ExecCallback) => {
+          const stream = makeStream()
+          executedCommands.push(_command)
+          callback(undefined, stream)
+          stream.emit("data", Buffer.from(`${MOCK_LOCAL_UPLOAD_SHA256}  ${remotePath}\n`))
           stream.emit("close", 0)
         })
         // rm
@@ -2690,12 +2731,12 @@ describe("SshConnectionImpl", () => {
       const client = makeClientWithExecSpy(execSpy)
       const ssh = makeConnectedSsh(client)
 
-      await ssh.uploadFile("/local/file.txt", "/remote/path")
+      await ssh.uploadFile("/local/file.txt", remotePath)
 
       expect(executedCommands).toContain(`chmod '0600' '${tempPath}'`)
       const chmodIndex = executedCommands.indexOf(`chmod '0600' '${tempPath}'`)
       const mvIndex = executedCommands.indexOf(
-        `[ ! -d '/remote/path' ] && [ ! -L '/remote/path' ] && mv -T -- '${tempPath}' '/remote/path'`
+        `[ ! -d '${remotePath}' ] && [ ! -L '${remotePath}' ] && mv -T -- '${tempPath}' '${remotePath}'`
       )
       expect(chmodIndex).toBeGreaterThan(-1)
       expect(chmodIndex).toBeLessThan(mvIndex)
@@ -2706,6 +2747,7 @@ describe("SshConnectionImpl", () => {
       vi.mocked(sftpUpload).mockResolvedValue()
 
       const tempPath = "/remote/paratix-upload.ABCDEF"
+      const remotePath = "/remote/path"
       const executedCommands: string[] = []
 
       const execSpy = vi
@@ -2748,6 +2790,14 @@ describe("SshConnectionImpl", () => {
           callback(undefined, stream)
           stream.emit("close", 0)
         })
+        // R-0000599: post-finalize SHA-256 verification of remote file
+        .mockImplementationOnce((_command: string, callback: ExecCallback) => {
+          const stream = makeStream()
+          executedCommands.push(_command)
+          callback(undefined, stream)
+          stream.emit("data", Buffer.from(`${MOCK_LOCAL_UPLOAD_SHA256}  ${remotePath}\n`))
+          stream.emit("close", 0)
+        })
         // rm -f (cleanup in finally)
         .mockImplementationOnce((_command: string, callback: ExecCallback) => {
           const stream = makeStream()
@@ -2759,7 +2809,7 @@ describe("SshConnectionImpl", () => {
       const client = makeClientWithExecSpy(execSpy)
       const ssh = makeConnectedSsh(client)
 
-      await ssh.uploadFile("/local/file.txt", "/remote/path", { mode: "0644" })
+      await ssh.uploadFile("/local/file.txt", remotePath, { mode: "0644" })
 
       const chmodCommand = executedCommands.find((cmd) => cmd.includes("chmod"))
       expect(chmodCommand).toBeDefined()
@@ -2776,6 +2826,7 @@ describe("SshConnectionImpl", () => {
       vi.mocked(sftpUpload).mockResolvedValue()
 
       const tempPath = "/remote/paratix-upload.ABCDEF"
+      const remotePath = "/remote/path"
       const executedCommands: string[] = []
 
       const execSpy = vi
@@ -2818,6 +2869,14 @@ describe("SshConnectionImpl", () => {
           callback(undefined, stream)
           stream.emit("close", 0)
         })
+        // R-0000599: post-finalize SHA-256 verification of remote file
+        .mockImplementationOnce((_command: string, callback: ExecCallback) => {
+          const stream = makeStream()
+          executedCommands.push(_command)
+          callback(undefined, stream)
+          stream.emit("data", Buffer.from(`${MOCK_LOCAL_UPLOAD_SHA256}  ${remotePath}\n`))
+          stream.emit("close", 0)
+        })
         // rm -f (cleanup in finally)
         .mockImplementationOnce((_command: string, callback: ExecCallback) => {
           const stream = makeStream()
@@ -2829,7 +2888,7 @@ describe("SshConnectionImpl", () => {
       const client = makeClientWithExecSpy(execSpy)
       const ssh = makeConnectedSsh(client)
 
-      await ssh.uploadFile("/local/file.txt", "/remote/path")
+      await ssh.uploadFile("/local/file.txt", remotePath)
 
       expect(executedCommands).toContain(`chmod '0600' '${tempPath}'`)
     })
@@ -3025,6 +3084,14 @@ describe("SshConnectionImpl", () => {
           callback(undefined, stream)
           stream.emit("close", 0)
         })
+        // R-0000599: post-finalize SHA-256 verification of remote file
+        .mockImplementationOnce((_command: string, callback: ExecCallback) => {
+          const stream = makeStream()
+          executedCommands.push(_command)
+          callback(undefined, stream)
+          stream.emit("data", Buffer.from(`${MOCK_LOCAL_UPLOAD_SHA256}  ${remotePath}\n`))
+          stream.emit("close", 0)
+        })
         // rm -f cleanup
         .mockImplementationOnce((_command: string, callback: ExecCallback) => {
           const stream = makeStream()
@@ -3105,7 +3172,15 @@ describe("SshConnectionImpl", () => {
           callback(undefined, stream)
           stream.emit("close", 0)
         })
-        // [5] rm -f temp
+        // [5] R-0000599: post-finalize SHA-256 verification of remote file
+        .mockImplementationOnce((_command: string, callback: ExecCallback) => {
+          const stream = makeStream()
+          executedCommands.push(_command)
+          callback(undefined, stream)
+          stream.emit("data", Buffer.from(`${MOCK_LOCAL_UPLOAD_SHA256}  ${remotePath}\n`))
+          stream.emit("close", 0)
+        })
+        // [6] rm -f temp
         .mockImplementationOnce((_command: string, callback: ExecCallback) => {
           const stream = makeStream()
           executedCommands.push(_command)

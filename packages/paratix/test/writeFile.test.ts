@@ -29,12 +29,29 @@ function sha256SumOutput(hexHash: string, filename: string): string {
   return `${hexHash}  ${filename}\n`
 }
 
+// R-0000599: the post-finalize upload verification streams the local source
+// through `createReadStream` + `crypto.createHash` to compute a SHA-256.
+// Tests cover the upload pipeline against a mocked filesystem, so the mock
+// returns a deterministic 11-byte payload that matches the `stat` mock's
+// reported `size: 11`. The constant is declared via `vi.hoisted` so the
+// hoisted `vi.mock` factory below can reference it without a TDZ violation.
+const { MOCK_LOCAL_UPLOAD_CONTENT, MOCK_LOCAL_UPLOAD_SHA256 } = vi.hoisted(() => ({
+  MOCK_LOCAL_UPLOAD_CONTENT: "hello world",
+  // SHA-256 of "hello world" — kept inline so tests can match the verify-
+  // step `sha256sum` output without re-hashing at runtime.
+  MOCK_LOCAL_UPLOAD_SHA256: "b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9",
+}))
+
 // vi.mock is hoisted to the top of the file by vitest before any imports are
 // evaluated, so the module under test receives the mocked version.
-vi.mock("node:fs", () => ({
-  readFileSync: vi.fn().mockReturnValue(""),
-  writeFileSync: vi.fn(),
-}))
+vi.mock("node:fs", async () => {
+  const { Readable } = await import("node:stream")
+  return {
+    createReadStream: vi.fn(() => Readable.from([Buffer.from(MOCK_LOCAL_UPLOAD_CONTENT, "utf8")])),
+    readFileSync: vi.fn().mockReturnValue(""),
+    writeFileSync: vi.fn(),
+  }
+})
 
 vi.mock("node:fs/promises", () => ({
   stat: vi.fn().mockResolvedValue({ size: 11 }),
@@ -913,6 +930,17 @@ describe("SshConnectionImpl.uploadFile — cleanup error secret masking", () => 
         // mv (finalize) — succeeds
         const stream = makeStream()
         cb(undefined, stream)
+        stream.emit("close", 0)
+      })
+      .mockImplementationOnce((cmd: string, cb: ExecCallback) => {
+        // R-0000599: post-finalize SHA-256 verification — echo the canonical
+        // `<hash>  <filename>` line so verifyRemoteWriteFile returns "matches".
+        const stream = makeStream()
+        cb(undefined, stream)
+        stream.emit(
+          "data",
+          Buffer.from(sha256SumOutput(MOCK_LOCAL_UPLOAD_SHA256, extractSha256SumPath(cmd)))
+        )
         stream.emit("close", 0)
       })
       .mockImplementationOnce((_cmd: string, cb: ExecCallback) => {
