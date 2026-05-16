@@ -21,11 +21,20 @@ const createMockSsh: typeof createBaseMockSsh = (responses, options) =>
     // capture the original mode. Default the stat probe to an empty stdout
     // (the rewrite then falls back to the historical 0644 default) unless an
     // individual test stubs it explicitly.
+    // R-0000571: every enumerated sources file is now re-probed via
+    // `[ -L <path> ]` immediately before reading to close the find/read
+    // TOCTOU window. Default these probes to "not a symlink" (exit 1) so
+    // tests that do not exercise the symlink-swap path keep working.
     responseStubs: [
       {
         // eslint-disable-next-line security/detect-unsafe-regex -- Bounded literal pattern matching the well-known apt sources stat command issued by the module under test.
         command: /^stat -c '%a' '\/etc\/apt\/sources\.list(?:\.d\/.+)?'$/v,
         result: { code: 0 },
+      },
+      {
+        // eslint-disable-next-line security/detect-unsafe-regex -- Bounded literal pattern matching the well-known apt sources symlink probe issued by the module under test.
+        command: /^\[ -L '\/etc\/apt\/sources\.list(?:\.d\/.+)?' \]$/v,
+        result: { code: 1 },
       },
       ...(options?.responseStubs ?? []),
     ],
