@@ -826,27 +826,56 @@ async function rollbackSshdPortAfterFailedVerification(
   // used by `recoverFromRestartFailure` so all three rollback layers
   // (sshd_config, socket-state, service-boot-state) land before we kick the
   // service.
-  const steps: Array<() => Promise<void>> = [
-    async () => {
-      await ssh.writeFile(SSHD_CONFIG_PATH, parameters.originalConfig, { mode: SSHD_CONFIG_MODE })
+  // R-0000614: previously the loop short-circuited on the first failing step,
+  // so a transient sshd_config write failure prevented the socket-state and
+  // service-boot-state rollback as well as the service restart from running.
+  // That left socket-activated hosts in a reboot-time lockout state because
+  // ssh.socket stayed disabled. The loop now runs every step, accumulates the
+  // failures, and surfaces the first failure as the primary error with the
+  // later failures attached as annexed messages.
+  const steps: Array<{ name: string; run: () => Promise<void> }> = [
+    {
+      name: "sshd_config rewrite",
+      async run() {
+        await ssh.writeFile(SSHD_CONFIG_PATH, parameters.originalConfig, {
+          mode: SSHD_CONFIG_MODE,
+        })
+      },
     },
-    async () => {
-      await restoreSshServiceBootState(ssh, parameters.snapshot.serviceBootState)
+    {
+      name: "service boot-state restore",
+      async run() {
+        await restoreSshServiceBootState(ssh, parameters.snapshot.serviceBootState)
+      },
     },
-    async () => {
-      await restoreSocketActivatedSsh(ssh, parameters.snapshot.socketState)
+    {
+      name: "socket activation restore",
+      async run() {
+        await restoreSocketActivatedSsh(ssh, parameters.snapshot.socketState)
+      },
     },
-    async () => {
-      const serviceUnit = parameters.snapshot.serviceUnit ?? (await resolveSshServiceUnit(ssh))
-      await ssh.exec(`${SYSTEMCTL} restart ${serviceUnit}`, { ignoreExitCode: true, silent: true })
+    {
+      name: "ssh service restart",
+      async run() {
+        const serviceUnit = parameters.snapshot.serviceUnit ?? (await resolveSshServiceUnit(ssh))
+        await ssh.exec(`${SYSTEMCTL} restart ${serviceUnit}`, {
+          ignoreExitCode: true,
+          silent: true,
+        })
+      },
     },
   ]
+  const failures: Array<{ message: string; name: string }> = []
   for (const step of steps) {
     // eslint-disable-next-line no-await-in-loop -- restore steps must run sequentially so each layer rolls back before the next.
-    const failure = await runRollbackStep(step)
-    if (failure !== undefined) return failure
+    const failure = await runRollbackStep(step.run)
+    if (failure !== undefined) failures.push({ message: failure, name: step.name })
   }
-  return undefined
+  if (failures.length === 0) return undefined
+  const formatted = failures.map((entry) => `${entry.name} failed: ${entry.message}`)
+  if (formatted.length === 1) return formatted[0]
+  const [primary, ...secondaries] = formatted
+  return `${primary}; further failures: ${secondaries.join("; ")}`
 }
 
 // R-0000586: known remote-mutation side-effects of the apply-time variant

@@ -926,6 +926,48 @@ describe("sshd.port — apply: validation and rollback", () => {
     expect(removePortSpy).toHaveBeenCalledWith(2222)
   })
 
+  // R-0000614: when the post-restart live-port verification fails the rollback
+  // path must keep trying every step instead of bailing on the first failure.
+  // Previously a transient sshd_config write error stopped the loop before
+  // `restoreSshServiceBootState`, `restoreSocketActivatedSsh`, and the ssh
+  // service restart ran — leaving socket-activated hosts in a reboot-time
+  // lockout state because `ssh.socket` stayed disabled.
+  it("R-0000614: keeps rolling back socket state when the config rewrite fails after verify timeout", async () => {
+    const originalConfig = "Port 22"
+    const mockSsh = createMockSsh({
+      [CAT_SSHD]: { stdout: originalConfig },
+    })
+    vi.spyOn(mockSsh, "readFile")
+      .mockResolvedValueOnce(originalConfig) // initial read in applySshdPort
+      .mockResolvedValueOnce(originalConfig) // guard read in guardedWriteFile
+    // writeFile sequence: tmpfile dry-run + live config succeed; the rollback
+    // write fails first try, but the rest of the rollback loop must continue.
+    const writeFileSpy = vi
+      .spyOn(mockSsh, "writeFile")
+      .mockResolvedValueOnce(undefined) // tmpfile dry-run
+      .mockResolvedValueOnce(undefined) // live config write
+      .mockRejectedValueOnce(new Error("SFTP rollback write failed"))
+    const removePortSpy = vi.spyOn(mockSsh, "removePort")
+    // The ss probe always returns "no listener" so the verify loop times out.
+    const originalExec = mockSsh.exec.bind(mockSsh)
+    const execSpy = vi.spyOn(mockSsh, "exec")
+    execSpy.mockImplementation(buildExecWithSsOverride(originalExec, { code: 0 }))
+
+    const mod = sshd.port(2222)
+    const result = await mod.apply(mockSsh, emptyEnv)
+
+    expect(result.status).toBe("failed")
+    expect(result.error?.message).toContain("no listener on port 2222")
+    expect(result.error?.message).toContain("sshd_config rewrite failed")
+    expect(result.error?.message).toContain("SFTP rollback write failed")
+    // Even though the rollback writeFile threw, the remaining rollback steps
+    // (socket activation restore + service restart) must still have run.
+    const execCommands = execSpy.mock.calls.map((args) => args[0])
+    expect(execCommands).toContain("systemctl restart sshd")
+    expect(removePortSpy).toHaveBeenCalledWith(2222)
+    expect(writeFileSpy).toHaveBeenCalled()
+  }, 10_000)
+
   // R-0000613: serialise read-modify-write cycles against /etc/ssh/sshd_config
   // by acquiring the `etc-ssh-sshd-config-mutex` lock around `sshd.port`. A
   // concurrent `sshd.config` apply on the same host shares the same mutex, so
