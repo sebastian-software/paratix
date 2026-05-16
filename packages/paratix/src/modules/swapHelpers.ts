@@ -8,8 +8,8 @@ import {
 } from "./swapAbsentRollbackHelpers.js"
 import {
   finalizeManagedSwapBackup,
+  handleSwapPublishFailure,
   moveSwapToBackup,
-  restoreSwapBackup,
   rollbackManagedSwapBackup,
 } from "./swapBackupHelpers.js"
 import {
@@ -142,13 +142,13 @@ async function replaceManagedSwapFile(
     replacementFile
   )
   if (publishResult !== true) {
-    const restoreResult = await restoreSwapBackup(ssh, options.path, replacementState.backupPath)
-    if (restoreResult !== true) return { kind: "result", ...restoreResult }
-    if (replacementState.disabledSwap) {
-      const enableResult = await enableSwap(ssh, options.path)
-      if (typeof enableResult !== "boolean") return { kind: "result", ...enableResult }
-    }
-    return { kind: "result", ...publishResult }
+    const rollbackResult = await handleSwapPublishFailure(ssh, {
+      backupPath: replacementState.backupPath,
+      disabledSwap: replacementState.disabledSwap,
+      path: options.path,
+      publishResult,
+    })
+    return { kind: "result", ...rollbackResult }
   }
   // R-0000175: keep the backup until the entire apply pipeline (mode + enable
   // + fstab update) finishes. The caller is responsible for invoking

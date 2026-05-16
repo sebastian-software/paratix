@@ -1,7 +1,7 @@
 import type { ModuleResult, SshConnection } from "../types.js"
 import type { NormalizedSwapFileOptions } from "./swapFileHelpers.js"
 
-import { failedCommand } from "../moduleFailure.js"
+import { failed, failedCommand } from "../moduleFailure.js"
 import { shellQuote } from "../ssh.js"
 import { disableSwap, enableSwap } from "./swapAbsentRollbackHelpers.js"
 
@@ -80,4 +80,35 @@ export async function finalizeManagedSwapBackup(
   backupPath: string
 ): Promise<void> {
   await removeSwapBackup(ssh, backupPath)
+}
+
+// R-0000611: chain the publish failure with any rollback failures so the
+// original cause stays attributable. Mirrors handleSwapBackupFailure
+// (R-0000548), which already chains backup + re-enable failures into a
+// single ModuleResult instead of letting the later rollback failure
+// shadow the original publish error.
+export async function handleSwapPublishFailure(
+  ssh: SshConnection,
+  parameters: {
+    backupPath: string
+    disabledSwap: boolean
+    path: string
+    publishResult: ModuleResult
+  }
+): Promise<ModuleResult> {
+  const { backupPath, disabledSwap, path, publishResult } = parameters
+  const publishMessage = publishResult.error?.message ?? "swap publish failed"
+  const restoreResult = await restoreSwapBackup(ssh, path, backupPath)
+  if (restoreResult !== true) {
+    const restoreMessage = restoreResult.error?.message ?? "unknown error"
+    return failed(`${publishMessage}; rollback restoreSwapBackup failed: ${restoreMessage}`)
+  }
+  if (disabledSwap) {
+    const enableResult = await enableSwap(ssh, path)
+    if (typeof enableResult !== "boolean") {
+      const enableMessage = enableResult.error?.message ?? "unknown error"
+      return failed(`${publishMessage}; rollback enableSwap failed: ${enableMessage}`)
+    }
+  }
+  return publishResult
 }
