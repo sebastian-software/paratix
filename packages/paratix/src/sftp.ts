@@ -30,6 +30,22 @@ function noopAbortCleanup(): void {
 }
 
 /**
+ * R-0000600: defensive noop installed in place of the real `error` listeners
+ * once a transfer has settled. Detaching the original handlers is what
+ * allows the closures over readStream/writeStream/sftp to be released, but a
+ * late `error` event emitted after settle (e.g. when both streams error
+ * back-to-back and the second emit races the cleanup) would otherwise
+ * become an unhandled `error` and crash the process. The noop swallows that
+ * straggler emit while still letting the original closures be GC'd. Hoisted
+ * to module scope so the same shared reference can be attached and later
+ * removed across every wireStreams invocation without capturing any
+ * per-call state.
+ */
+function noopStreamError(): void {
+  /* swallow late stream errors after the transfer has settled */
+}
+
+/**
  * R-0000255: short-circuit the openSftp wait when the SSH connection is torn
  * down externally (e.g. the SIGINT path in runner.ts). Without this, the
  * session-open promise would idle until the default timeout fires even
@@ -214,6 +230,126 @@ function openContentUploadStreams(
  * @param options.timeoutMessage - Error message to use when the transfer times out.
  * @param options.writeStream - The destination stream to write to.
  */
+type StreamListeners = {
+  onClose: () => void
+  onFinish: () => void
+  onReadError: (readError: Error) => void
+  onWriteError: (writeError: Error) => void
+}
+
+/**
+ * R-0000600: build the set of named stream listeners used by
+ * {@link wireStreams}. Extracted so the listener functions stay close
+ * together and `wireStreams` can simply attach and later `off(...)` them as
+ * a unit. The `getSettlement` indirection lets the listeners be created
+ * before the settlement holder is populated — the listeners are only
+ * invoked after `pipe()` starts the transfer, which always happens after
+ * the settlement has been assigned.
+ *
+ * @param parameters - Stream wiring inputs shared with `wireStreams`.
+ * @param parameters.getSettlement - Late binding for the `TransferSettlement`
+ *   that the listeners forward `resolveOnce` / `rejectOnce` calls to.
+ * @param parameters.prematureCloseMessage - Error message used by the close
+ *   listener when a premature close is observed. `undefined` disables it.
+ * @param parameters.readStream - The source stream to subscribe to for `error` events.
+ * @param parameters.writeStream - The destination stream to subscribe to for `error`
+ *   and completion events.
+ * @returns Named listener functions keyed by the event they handle.
+ */
+function buildStreamListeners(parameters: {
+  getSettlement: () => TransferSettlement
+  prematureCloseMessage: string | undefined
+  readStream: Readable
+  writeStream: Writable
+}): StreamListeners {
+  const { getSettlement, prematureCloseMessage, readStream, writeStream } = parameters
+  return {
+    onClose(): void {
+      if (prematureCloseMessage === undefined) return
+      readStream.destroy()
+      if (typeof writeStream.destroy === "function") writeStream.destroy()
+      getSettlement().rejectOnce(new Error(prematureCloseMessage))
+    },
+    onFinish(): void {
+      getSettlement().resolveOnce()
+    },
+    onReadError(readError: Error): void {
+      if (typeof readStream.destroy === "function") readStream.destroy()
+      if (typeof writeStream.destroy === "function") writeStream.destroy()
+      getSettlement().rejectOnce(readError)
+    },
+    onWriteError(writeError: Error): void {
+      readStream.destroy()
+      if (typeof writeStream.destroy === "function") writeStream.destroy()
+      getSettlement().rejectOnce(writeError)
+    },
+  }
+}
+
+/**
+ * R-0000600: detach the stream listeners attached by {@link attachStreamListeners}
+ * and replace the `error` handlers with the shared {@link noopStreamError} noop
+ * so a late stream error fired after settle does not crash the process.
+ *
+ * @param parameters - Stream and listener references mirroring the attach call.
+ * @param parameters.completionEvents - Events that mark a successful transfer
+ *   and were registered with `listeners.onFinish`.
+ * @param parameters.listeners - Listener bundle returned by {@link buildStreamListeners}.
+ * @param parameters.prematureCloseMessage - Same value supplied to the attach
+ *   call; controls whether `onClose` was registered.
+ * @param parameters.readStream - Source stream the read-side listeners were attached to.
+ * @param parameters.writeStream - Destination stream the write-side listeners were attached to.
+ */
+function detachStreamListeners(parameters: {
+  completionEvents: Array<"close" | "finish">
+  listeners: StreamListeners
+  prematureCloseMessage: string | undefined
+  readStream: Readable
+  writeStream: Writable
+}): void {
+  const { completionEvents, listeners, prematureCloseMessage, readStream, writeStream } = parameters
+  for (const completionEvent of completionEvents) {
+    writeStream.off(completionEvent, listeners.onFinish)
+  }
+  if (prematureCloseMessage !== undefined) {
+    writeStream.off("close", listeners.onClose)
+  }
+  writeStream.off("error", listeners.onWriteError)
+  readStream.off("error", listeners.onReadError)
+  writeStream.on("error", noopStreamError)
+  readStream.on("error", noopStreamError)
+}
+
+/**
+ * R-0000600: attach the stream listeners returned by {@link buildStreamListeners}
+ * onto the read/write streams.
+ *
+ * @param parameters - Stream and listener references.
+ * @param parameters.completionEvents - Stream events that mark a successful transfer.
+ * @param parameters.listeners - Listener bundle returned by {@link buildStreamListeners}.
+ * @param parameters.prematureCloseMessage - When defined, `onClose` is wired to
+ *   the write stream's `"close"` event.
+ * @param parameters.readStream - Source stream that receives the read-side `error` listener.
+ * @param parameters.writeStream - Destination stream that receives the write-side listeners.
+ */
+function attachStreamListeners(parameters: {
+  completionEvents: Array<"close" | "finish">
+  listeners: StreamListeners
+  prematureCloseMessage: string | undefined
+  readStream: Readable
+  writeStream: Writable
+}): void {
+  const { completionEvents, listeners, prematureCloseMessage, readStream, writeStream } = parameters
+  for (const completionEvent of completionEvents) {
+    writeStream.on(completionEvent, listeners.onFinish)
+  }
+  if (prematureCloseMessage !== undefined) {
+    writeStream.on("close", listeners.onClose)
+  }
+  writeStream.on("error", listeners.onWriteError)
+  readStream.on("error", listeners.onReadError)
+}
+
 function wireStreams(options: {
   completionEvents?: Array<"close" | "finish">
   connectionAbortSignal?: AbortSignal
@@ -244,9 +380,36 @@ function wireStreams(options: {
     writeStream.destroy()
     settlement.rejectOnce(new Error(timeoutMessage))
   }, timeout)
+  // R-0000600: keep the stream listeners as named functions so the settle
+  // path can detach them via `off(...)`. The previous inline-arrow form
+  // retained closure references on both readStream and writeStream long
+  // after the transfer had settled — for a long-lived SSH session holding
+  // many transient SFTP streams this leaked memory proportional to the
+  // number of completed transfers. The listeners read the settlement via a
+  // getter so the cyclic reference between `settlement.clearTimer` (which
+  // calls `off(...)` with these listeners) and the listeners themselves
+  // (which call `settlement.rejectOnce`) resolves without a `let`.
+  const listeners = buildStreamListeners({
+    getSettlement: () => settlement,
+    prematureCloseMessage,
+    readStream,
+    writeStream,
+  })
   const settlement = createTransferSettlement({
     clearTimer() {
       clearTimeout(timer)
+      // R-0000600: drop the listeners that were attached below so the
+      // closures over readStream/writeStream/sftp can be garbage-collected
+      // immediately after the transfer settles. A defensive
+      // `noopStreamError` replaces the real error listeners so a late
+      // `error` event still has a handler and does not crash the process.
+      detachStreamListeners({
+        completionEvents,
+        listeners,
+        prematureCloseMessage,
+        readStream,
+        writeStream,
+      })
       if (connectionAbortSignal != null) {
         connectionAbortSignal.removeEventListener("abort", handleConnectionAbort)
       }
@@ -268,27 +431,12 @@ function wireStreams(options: {
     settlement.rejectOnce(new Error("SFTP transfer aborted: ssh disconnect"))
   }
 
-  for (const completionEvent of completionEvents) {
-    writeStream.on(completionEvent, () => {
-      settlement.resolveOnce()
-    })
-  }
-  if (prematureCloseMessage !== undefined) {
-    writeStream.on("close", () => {
-      readStream.destroy()
-      if (typeof writeStream.destroy === "function") writeStream.destroy()
-      settlement.rejectOnce(new Error(prematureCloseMessage))
-    })
-  }
-  writeStream.on("error", (writeError: Error) => {
-    readStream.destroy()
-    if (typeof writeStream.destroy === "function") writeStream.destroy()
-    settlement.rejectOnce(writeError)
-  })
-  readStream.on("error", (readError: Error) => {
-    if (typeof readStream.destroy === "function") readStream.destroy()
-    if (typeof writeStream.destroy === "function") writeStream.destroy()
-    settlement.rejectOnce(readError)
+  attachStreamListeners({
+    completionEvents,
+    listeners,
+    prematureCloseMessage,
+    readStream,
+    writeStream,
   })
 
   // R-0000584: handle the connection-abort signal AFTER the read/write
