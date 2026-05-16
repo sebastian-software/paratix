@@ -107,6 +107,12 @@ function makeHangingRsyncChild(): {
   child.stdout = new Readable({ read: noopRead })
   child.stderr = new Readable({ read: noopRead })
   Object.defineProperty(child, "exitCode", { value: null })
+  // R-0000605: killRsyncChildEscalating probes both `exitCode` and
+  // `signalCode` via the shared `childHasExited` helper. A real Node.js
+  // ChildProcess seeds both to `null` until exit; mirror that here so the
+  // test mock does not look like an already-signal-terminated child and
+  // accidentally short-circuit the kill-escalation path.
+  Object.defineProperty(child, "signalCode", { value: null })
   child.kill = (signal: NodeJS.Signals): boolean => {
     killCalls.push(signal)
     return true

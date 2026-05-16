@@ -9,12 +9,14 @@ const OP_KILL_GRACE_MILLISECONDS = 1000
  * Whether `child` has already produced an `exit` event. Checks both
  * `exitCode` (process exited normally) and `signalCode` (process was
  * terminated by a signal) so a child that has been killed via SIGTERM is
- * not re-killed by a subsequent escalation pass.
+ * not re-killed by a subsequent escalation pass. R-0000605: shared with
+ * `rsyncProcess.killRsyncChildEscalating` so both kill-escalation paths use
+ * the same exited-already heuristic.
  *
  * @param child - The spawned child process to probe.
  * @returns `true` when the process has exited or been signal-terminated.
  */
-function childHasExited(child: ChildProcess): boolean {
+export function childHasExited(child: ChildProcess): boolean {
   return child.exitCode !== null || child.signalCode !== null
 }
 

@@ -1,6 +1,7 @@
 import { type ChildProcess, spawn } from "node:child_process"
 
 import { getRunnerAbortSignal } from "../runnerAbortSignal.js"
+import { childHasExited } from "./opSpawnLifecycle.js"
 
 const MILLISECONDS_PER_SECOND = 1000
 const SECONDS_PER_MINUTE = 60
@@ -61,14 +62,19 @@ function createBoundedOutputCapture(streamName: "stderr" | "stdout"): BoundedOut
 }
 
 function killRsyncChildEscalating(child: ChildProcess): void {
-  if (child.exitCode !== null) return
+  // R-0000605: probe both `exitCode` and `signalCode` so a child that was
+  // already terminated by an earlier signal (exitCode null, signalCode set)
+  // is not killed a second time. The previous `exitCode !== null` check
+  // missed signal-terminated children and surfaced an EPERM/ESRCH from the
+  // follow-up `child.kill` once the OS had reaped the pid.
+  if (childHasExited(child)) return
   try {
     child.kill("SIGTERM")
   } catch {
     // ignored — child may have exited between the guard and kill
   }
   setTimeout(() => {
-    if (child.exitCode !== null) return
+    if (childHasExited(child)) return
     try {
       child.kill("SIGKILL")
     } catch {
