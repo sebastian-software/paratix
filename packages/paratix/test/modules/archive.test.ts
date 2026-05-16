@@ -44,12 +44,12 @@ const archiveCleanupPaths = [
 const archiveStageDirectory = "/opt/app/.paratix-stage.AbCdEfGh"
 const archiveStageMktempPattern = /^mktemp -d '\/opt\/app\/\.paratix-stage\.X{8}'$/v
 const archiveStageMovePattern =
-  /^find '\/opt\/app\/\.paratix-stage\.[^']+' -mindepth 1 -maxdepth 1 -exec sh -c '.*cp -aT --remove-destination "\$source_path" "\$target_path" \|\| exit \$\?; done' sh '\/opt\/app' '\/opt\/app' '[^']*' \{\} \+$/sv
-const archiveStageCleanupPattern = /^rm -rf '\/opt\/app\/\.paratix-stage\.[^']+'$/v
+  /^find '\/opt\/app\/\.paratix-stage\.[^']+' -mindepth 1 -maxdepth 1 -exec sh -c '.*cp -aT --no-dereference --remove-destination "\$source_path" "\$target_path" \|\| exit \$\?; done' sh '\/opt\/app' '\/opt\/app' '[^']*' \{\} \+$/sv
+const archiveStageCleanupPattern = /^rm -rf -- '\/opt\/app\/\.paratix-stage\.[^']+'$/v
 const archiveAlternateStageMktempPattern = /^mktemp -d '\/opt\/app-alt\/\.paratix-stage\.X{8}'$/v
 const archiveAlternateStageMovePattern =
-  /^find '\/opt\/app-alt\/\.paratix-stage\.[^']+' -mindepth 1 -maxdepth 1 -exec sh -c '.*cp -aT --remove-destination "\$source_path" "\$target_path" \|\| exit \$\?; done' sh '\/opt\/app-alt' '\/opt\/app-alt' '[^']*' \{\} \+$/sv
-const archiveAlternateStageCleanupPattern = /^rm -rf '\/opt\/app-alt\/\.paratix-stage\.[^']+'$/v
+  /^find '\/opt\/app-alt\/\.paratix-stage\.[^']+' -mindepth 1 -maxdepth 1 -exec sh -c '.*cp -aT --no-dereference --remove-destination "\$source_path" "\$target_path" \|\| exit \$\?; done' sh '\/opt\/app-alt' '\/opt\/app-alt' '[^']*' \{\} \+$/sv
+const archiveAlternateStageCleanupPattern = /^rm -rf -- '\/opt\/app-alt\/\.paratix-stage\.[^']+'$/v
 const archiveMembersMarkerPattern =
   /^cat '\/var\/lib\/paratix\/flags\/archive-[a-f0-9]+\.sha256\.members'$/v
 
@@ -86,7 +86,7 @@ const archiveApplyResponseStubs: NonNullable<
   { command: archiveAlternateStageMovePattern, result: { code: 0 } },
   { command: archiveAlternateStageCleanupPattern, result: { code: 0 } },
   ...archiveCleanupPaths.map((path) => ({
-    command: `rm -f '${path}'`,
+    command: `rm -f -- '${path}'`,
     result: { code: 0 },
   })),
 ]
@@ -934,7 +934,7 @@ describe("archive.extract — apply", () => {
 
     expect(result.status).toBe("changed")
     expect(mockSsh.uploadFile).toHaveBeenCalledWith(localFile, remoteTmp)
-    expect(mockSsh.calls).toContain(`rm -f '${remoteTmp}'`)
+    expect(mockSsh.calls).toContain(`rm -f -- '${remoteTmp}'`)
   })
 
   it("persists extracted owner paths for upload archives with owner", async () => {
@@ -1017,8 +1017,8 @@ describe("archive.extract — apply", () => {
     expect(mockSsh.uploadFile).toHaveBeenNthCalledWith(1, localFile, firstRemoteTmp)
     expect(mockSsh.uploadFile).toHaveBeenNthCalledWith(2, localFile, secondRemoteTmp)
     expect(firstRemoteTmp).not.toBe(secondRemoteTmp)
-    expect(mockSsh.calls).toContain(`rm -f '${firstRemoteTmp}'`)
-    expect(mockSsh.calls).toContain(`rm -f '${secondRemoteTmp}'`)
+    expect(mockSsh.calls).toContain(`rm -f -- '${firstRemoteTmp}'`)
+    expect(mockSsh.calls).toContain(`rm -f -- '${secondRemoteTmp}'`)
   })
 
   it("regression: rejects with a clear error when mktemp returns an empty string", async () => {
@@ -1130,7 +1130,7 @@ describe("archive.extract — apply", () => {
 
     expect(result.status).toBe("failed")
     // Cleanup must remove the same mktemp-allocated path that was used for the upload.
-    expect(mockSsh.calls).toContain(`rm -f '${remoteTmp}'`)
+    expect(mockSsh.calls).toContain(`rm -f -- '${remoteTmp}'`)
   })
 
   it("returns failed and stops when creating the destination directory fails", async () => {
@@ -1158,7 +1158,7 @@ describe("archive.extract — apply", () => {
     expect(result.status).toBe("failed")
     expect(String(result.error)).toContain("failed to create destination directory")
     expect(mockSsh.uploadFile).toHaveBeenCalledWith(localFile, remoteTmp)
-    expect(mockSsh.calls).toContain(`rm -f '${remoteTmp}'`)
+    expect(mockSsh.calls).toContain(`rm -f -- '${remoteTmp}'`)
     expect(mockSsh.calls).not.toContain(`tar -tvzf '${remoteTmp}'`)
     expect(mockSsh.calls).not.toContain(
       `tar --no-same-owner --no-overwrite-dir -xzf '${remoteTmp}' -C '${archiveStageDirectory}'`
@@ -1695,7 +1695,7 @@ describe("archive.extract — apply", () => {
     expect(result.status).toBe("changed")
     const mergeCommand = mockSsh.calls.find((c) => archiveStageMovePattern.test(c))
     expect(mergeCommand).toBeDefined()
-    expect(mergeCommand).toContain("cp -aT --remove-destination")
+    expect(mergeCommand).toContain("cp -aT --no-dereference --remove-destination")
     expect(mockSsh.calls.some((c) => c.includes("xargs -0 -I {} mv -f"))).toBe(false)
   })
 
@@ -1714,7 +1714,7 @@ describe("archive.extract — apply", () => {
 
     expect(result.status).toBe("changed")
     expect(mockSsh.calls).not.toContain(
-      `cp -aT --remove-destination '${archiveStageDirectory}' '${destination}'`
+      `cp -aT --no-dereference --remove-destination '${archiveStageDirectory}' '${destination}'`
     )
     expect(mockSsh.calls.some((c) => archiveStageMovePattern.test(c))).toBe(true)
   })
@@ -1734,7 +1734,7 @@ describe("archive.extract — apply", () => {
 
     expect(result.status).toBe("changed")
     const mergeCommand = mockSsh.calls.find((c) => archiveStageMovePattern.test(c))
-    expect(mergeCommand).toContain("cp -aT --remove-destination")
+    expect(mergeCommand).toContain("cp -aT --no-dereference --remove-destination")
     expect(mergeCommand).toContain('readlink -f -- "$destination"')
     expect(mergeCommand).toContain('[ -L "$guarded_path" ]')
     expect(mergeCommand).toContain('[ -L "$target_path" ]')
