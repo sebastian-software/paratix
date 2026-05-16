@@ -1,7 +1,4 @@
-function shellQuoteForQuadletImageInspect(value: string): string {
-  const escapedQuote = "'\\''"
-  return `'${value.replaceAll("'", escapedQuote)}'`
-}
+import { shellQuoteForQuadlet } from "./quadletHelpers.js"
 
 // R-0000176: ask podman for a deterministic, line-oriented projection that
 // stays small even for images with multi-megabyte manifests. The first line
@@ -9,7 +6,9 @@ function shellQuoteForQuadletImageInspect(value: string): string {
 const QUADLET_INSPECT_FORMAT = "{{.Id}}\\n{{range .RepoDigests}}{{.}}\\n{{end}}"
 
 export function buildQuadletImageInspectCommand(image: string): string {
-  const quotedImage = shellQuoteForQuadletImageInspect(image)
+  // R-0000606: reuse the shared `shellQuoteForQuadlet` instead of redefining
+  // the same single-quote escape logic locally.
+  const quotedImage = shellQuoteForQuadlet(image)
   return `podman image inspect --format '${QUADLET_INSPECT_FORMAT}' -- ${quotedImage}`
 }
 

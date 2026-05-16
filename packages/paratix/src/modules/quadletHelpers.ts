@@ -342,7 +342,9 @@ export function quadletPullOutputIndicatesChange(...outputs: string[]): boolean 
   )
 }
 
-function shellQuoteForQuadlet(value: string): string {
+// R-0000606: shared shell quoter for every quadlet helper module so podman
+// command builders do not redefine the same POSIX single-quote escape logic.
+export function shellQuoteForQuadlet(value: string): string {
   const escapedQuote = "'\\''"
   return `'${value.replaceAll("'", escapedQuote)}'`
 }
