@@ -92,11 +92,14 @@ describe("withRegisteredSecrets", () => {
     expect(getRegisteredSecrets()).toStrictEqual([])
   })
 
+  // R-0000583: the minimum secret length was raised to 8 so short tokens
+  // can no longer turn every byte of diagnostic text into the redaction
+  // marker. The scoped secrets used here are therefore at least 8 chars.
   it("masks scoped secrets on errors before unregistering", async () => {
     await expect(
-      withRegisteredSecrets(["alpha"], async () => {
+      withRegisteredSecrets(["alphabet"], async () => {
         await Promise.resolve()
-        throw new Error("boom alpha")
+        throw new Error("boom alphabet")
       })
     ).rejects.toThrow("boom [REDACTED]")
 
@@ -108,10 +111,10 @@ describe("withRegisteredSecrets", () => {
   // reference (a test framework, a logger registered before the scope) still
   // sees the unredacted message after the scope exits.
   it("leaves the original error instance untouched while masking the rethrown clone", async () => {
-    const original = new Error("boom alpha")
+    const original = new Error("boom alphabet")
     let thrown: unknown
     try {
-      await withRegisteredSecrets(["alpha"], async () => {
+      await withRegisteredSecrets(["alphabet"], async () => {
         await Promise.resolve()
         throw original
       })
@@ -123,7 +126,7 @@ describe("withRegisteredSecrets", () => {
     expect((thrown as Error).message).toBe("boom [REDACTED]")
     expect(thrown).not.toBe(original)
     // The caller's original instance keeps the unredacted message.
-    expect(original.message).toBe("boom alpha")
+    expect(original.message).toBe("boom alphabet")
     expect(getRegisteredSecrets()).toStrictEqual([])
   })
 
@@ -181,10 +184,10 @@ describe("withRegisteredSecrets", () => {
   })
 
   it("masks scoped secrets on failed module results before unregistering", async () => {
-    const result = await withRegisteredSecrets(["alpha"], async () => {
+    const result = await withRegisteredSecrets(["alphabet"], async () => {
       await Promise.resolve()
       return {
-        error: new CommandError("failed alpha", "stdout alpha", "stderr alpha"),
+        error: new CommandError("failed alphabet", "stdout alphabet", "stderr alphabet"),
         status: "failed" as const,
       }
     })
@@ -196,10 +199,13 @@ describe("withRegisteredSecrets", () => {
     expect(getRegisteredSecrets()).toStrictEqual([])
   })
 
+  // R-0000583: empty strings and values shorter than MINIMUM_SECRET_LENGTH (8)
+  // are both silently ignored by the sink. The bookkeeping bookkeeps must
+  // still leave the sink empty after the scope exits.
   it("ignores empty strings without affecting the unregister bookkeeping", async () => {
-    await withRegisteredSecrets(["", "value"], async () => {
+    await withRegisteredSecrets(["", "long-enough-value"], async () => {
       await Promise.resolve()
-      expect(getRegisteredSecrets()).toStrictEqual(["value"])
+      expect(getRegisteredSecrets()).toStrictEqual(["long-enough-value"])
     })
     expect(getRegisteredSecrets()).toStrictEqual([])
   })
@@ -220,6 +226,8 @@ describe("withRegisteredSecrets", () => {
     // the body so a throw between two registrations releases everything.
     // Force a throw mid-registration by spying on Map.prototype.set and
     // failing the second call.
+    // R-0000583: secrets must be at least 8 characters or the sink silently
+    // drops them and Map.set is never called, breaking this spy setup.
     // eslint-disable-next-line @typescript-eslint/unbound-method -- bound to Map instance via call() below
     const originalSet = Map.prototype.set
     const setSpy = vi
@@ -232,7 +240,7 @@ describe("withRegisteredSecrets", () => {
       })
 
     await expect(
-      withRegisteredSecrets(["alpha", "beta"], async () => {
+      withRegisteredSecrets(["alphabet", "betalong"], async () => {
         await Promise.resolve()
       })
     ).rejects.toThrow("simulated register failure")
