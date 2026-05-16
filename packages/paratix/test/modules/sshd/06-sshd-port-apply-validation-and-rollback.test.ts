@@ -810,6 +810,62 @@ describe("sshd.port — apply: validation and rollback", () => {
     expect(removePortSpy).toHaveBeenCalledWith(2222)
   }, 10_000)
 
+  // R-0000609: `ss` failures from a missing binary or permission denial used
+  // to be swallowed as "no listener yet", which spun the verify loop until
+  // timeout and then rolled back even though the restart actually succeeded.
+  // The probe now surfaces the environmental failure verbatim so the operator
+  // can react instead of chasing phantom restart issues.
+  it("R-0000609: surfaces ss command-not-found as a structured failure during live-port verify", async () => {
+    const originalConfig = "Port 22"
+    const mockSsh = createMockSsh({
+      [CAT_SSHD]: { stdout: originalConfig },
+    })
+    trackWriteFile(mockSsh)
+    const originalExec = mockSsh.exec.bind(mockSsh)
+    vi.spyOn(mockSsh, "exec").mockImplementation(
+      buildExecWithSsOverride(originalExec, {
+        code: 127,
+        stderr: "ss: command not found\n",
+      })
+    )
+
+    const mod = sshd.port(2222)
+    const result = await mod.apply(mockSsh, emptyEnv)
+
+    expect(result.status).toBe("failed")
+    expect(result.error?.message).toContain("live-port probe via `ss` failed")
+    expect(result.error?.message).toContain("command not found")
+    // The hard error must short-circuit the verify loop rather than running it
+    // out to LIVE_VERIFY_TIMEOUT_MS — the test would otherwise need a >5s
+    // timeout to complete.
+  })
+
+  // R-0000609: the no-change apply path probes `ss` before triggering a
+  // restart. A hard `ss` failure must surface immediately so the operator
+  // does not keep retrying a restart that cannot be verified.
+  it("R-0000609: returns failed when ss permission-denied blocks the no-change live-port probe", async () => {
+    const mockSsh = createMockSsh({
+      [CAT_SSHD]: { stdout: "Port 2222\n" },
+    })
+    const writtenFiles = trackWriteFile(mockSsh)
+    const originalExec = mockSsh.exec.bind(mockSsh)
+    vi.spyOn(mockSsh, "exec").mockImplementation(
+      buildExecWithSsOverride(originalExec, {
+        code: 1,
+        stderr: "ss: Permission denied\n",
+      })
+    )
+
+    const mod = sshd.port(2222)
+    const result = await mod.apply(mockSsh, emptyEnv)
+
+    expect(result.status).toBe("failed")
+    expect(result.error?.message).toContain("live-port probe via `ss` failed")
+    expect(result.error?.message).toContain("Permission denied")
+    // The no-change apply path must not write or restart when the probe fails.
+    expect(writtenFiles).toHaveLength(0)
+  })
+
   it("R-0000283: combines verify failure with rollback writeFile failure in the error message", async () => {
     const originalConfig = "Port 22"
     const mockSsh = createMockSsh({

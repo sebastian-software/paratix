@@ -531,22 +531,100 @@ function extractSsListenerProcessNames(output: string): string[] {
   return names
 }
 
-async function liveSshdPortMatches(ssh: SshConnection, targetPort: number): Promise<boolean> {
+// R-0000609: `ss` may fail for two very different reasons. A non-zero exit
+// with empty stdout normally just means the port has no listener yet (e.g.
+// during a slow systemd transition) — the verify loop should keep polling.
+// But a missing `ss` binary (`command not found`) or a permission denial
+// (`Operation not permitted`, `Permission denied`) is a hard environmental
+// failure: every probe will return the same non-zero code, the verify loop
+// would time out without ever seeing a listener, and the apply path would
+// then roll back even on a successful restart. Detect those families up
+// front so callers can surface them as a structured module error instead of
+// pretending the port silently lacks a listener.
+const SS_HARD_ERROR_PATTERNS: RegExp[] = [
+  /command not found/iv,
+  /no such file or directory/iv,
+  /permission denied/iv,
+  /operation not permitted/iv,
+  /must be run as root/iv,
+]
+
+type LiveSshdPortProbe =
+  | { kind: "hard-error"; stderr: string; stdout: string }
+  | { kind: "match"; matches: boolean }
+
+const LIVE_PORT_PROBE_MATCH_KIND = "match" as const
+const LIVE_PORT_PROBE_HARD_ERROR_KIND = "hard-error" as const
+
+function classifyLiveSshdPortProbe(result: ExecResult): LiveSshdPortProbe {
+  if (result.code !== 0) {
+    const haystack = `${result.stderr}\n${result.stdout}`
+    if (SS_HARD_ERROR_PATTERNS.some((pattern) => pattern.test(haystack))) {
+      return {
+        kind: LIVE_PORT_PROBE_HARD_ERROR_KIND,
+        stderr: result.stderr,
+        stdout: result.stdout,
+      }
+    }
+    return { kind: LIVE_PORT_PROBE_MATCH_KIND, matches: false }
+  }
+  const output = result.stdout.trim()
+  if (output === "") return { kind: LIVE_PORT_PROBE_MATCH_KIND, matches: false }
+  const processNames = extractSsListenerProcessNames(output)
+  if (processNames.length === 0) return { kind: LIVE_PORT_PROBE_MATCH_KIND, matches: false }
+  return {
+    kind: LIVE_PORT_PROBE_MATCH_KIND,
+    matches: processNames.some((name) => SSHD_OWNER_NAMES.has(name)),
+  }
+}
+
+class LiveSshdPortProbeError extends Error {
+  public constructor(targetPort: number, detail: string) {
+    super(
+      `[sshd.port: ${String(targetPort)}] live-port probe via \`ss\` failed (likely missing ` +
+        `\`ss\` binary or insufficient privileges): ${detail}`
+    )
+    this.name = "LiveSshdPortProbeError"
+  }
+}
+
+async function probeLiveSshdPort(
+  ssh: SshConnection,
+  targetPort: number
+): Promise<LiveSshdPortProbe> {
   const result = await ssh.exec(`ss -H -ltnp 'sport = :${String(targetPort)}'`, {
     ignoreExitCode: true,
     silent: true,
   })
-  if (result.code !== 0) return false
-  const output = result.stdout.trim()
-  if (output === "") return false
-  const processNames = extractSsListenerProcessNames(output)
-  if (processNames.length === 0) return false
-  return processNames.some((name) => SSHD_OWNER_NAMES.has(name))
+  return classifyLiveSshdPortProbe(result)
+}
+
+async function liveSshdPortMatches(ssh: SshConnection, targetPort: number): Promise<boolean> {
+  const probe = await probeLiveSshdPort(ssh, targetPort)
+  if (probe.kind === LIVE_PORT_PROBE_HARD_ERROR_KIND) {
+    // R-0000609: surface the hard environmental failure so callers stop
+    // pretending it is a quiet "no listener yet" signal that retries fix.
+    const stderrTrimmed = probe.stderr.trim()
+    const detail = stderrTrimmed === "" ? probe.stdout.trim() : stderrTrimmed
+    throw new LiveSshdPortProbeError(targetPort, detail === "" ? "no stderr captured" : detail)
+  }
+  return probe.matches
 }
 
 async function sshdPortConfigMatchesLive(ssh: SshConnection, targetPort: number): Promise<boolean> {
   if (await socketActivationBootPathNeedsApply(ssh)) return false
-  return liveSshdPortMatches(ssh, targetPort)
+  // R-0000609: the check-only path swallows the hard `ss` error and falls
+  // back to "needs-apply" so the warning is visible to the operator on the
+  // next apply pass instead of crashing the check run.
+  try {
+    return await liveSshdPortMatches(ssh, targetPort)
+  } catch (error) {
+    if (error instanceof LiveSshdPortProbeError) {
+      process.stderr.write(`Warning: ${error.message}\n`)
+      return false
+    }
+    throw error
+  }
 }
 
 async function restoreSshdPortRestartFailure(
@@ -672,12 +750,36 @@ async function restartSshdOnNewPort(
 const LIVE_VERIFY_TIMEOUT_MS = 5000
 const LIVE_VERIFY_BACKOFF_MS = 250
 
-async function waitForLiveSshdPort(ssh: SshConnection, targetPort: number): Promise<boolean> {
+const WAIT_FOR_LIVE_PORT_MATCHED_KIND = "matched" as const
+const WAIT_FOR_LIVE_PORT_TIMEOUT_KIND = "timeout" as const
+
+type WaitForLiveSshdPortOutcome =
+  | { kind: typeof LIVE_PORT_PROBE_HARD_ERROR_KIND; message: string }
+  | { kind: typeof WAIT_FOR_LIVE_PORT_MATCHED_KIND }
+  | { kind: typeof WAIT_FOR_LIVE_PORT_TIMEOUT_KIND }
+
+async function waitForLiveSshdPort(
+  ssh: SshConnection,
+  targetPort: number
+): Promise<WaitForLiveSshdPortOutcome> {
   const deadline = Date.now() + LIVE_VERIFY_TIMEOUT_MS
   for (;;) {
-    // eslint-disable-next-line no-await-in-loop -- sequential probes by design
-    if (await liveSshdPortMatches(ssh, targetPort)) return true
-    if (Date.now() >= deadline) return false
+    try {
+      // eslint-disable-next-line no-await-in-loop -- sequential probes by design
+      if (await liveSshdPortMatches(ssh, targetPort)) {
+        return { kind: WAIT_FOR_LIVE_PORT_MATCHED_KIND }
+      }
+    } catch (error) {
+      // R-0000609: a hard `ss` failure (binary missing, permission denied)
+      // returns the same non-zero exit on every retry. Stop polling and let
+      // the caller surface the environmental error so the apply path neither
+      // times out silently nor loops indefinitely.
+      if (error instanceof LiveSshdPortProbeError) {
+        return { kind: LIVE_PORT_PROBE_HARD_ERROR_KIND, message: error.message }
+      }
+      throw error
+    }
+    if (Date.now() >= deadline) return { kind: WAIT_FOR_LIVE_PORT_TIMEOUT_KIND }
     // eslint-disable-next-line no-await-in-loop -- sequential probes by design
     await new Promise<void>((resolve) => {
       setTimeout(resolve, LIVE_VERIFY_BACKOFF_MS)
@@ -1056,12 +1158,20 @@ async function verifyLiveSshdPortOrRollback(
   // changed when bind conflicts or external drop-ins kept sshd from listening
   // on `targetPort`. Without this guard the runner would reconnect into the
   // void.
-  if (await waitForLiveSshdPort(ssh, parameters.targetPort)) return undefined
+  const verifyOutcome = await waitForLiveSshdPort(ssh, parameters.targetPort)
+  if (verifyOutcome.kind === WAIT_FOR_LIVE_PORT_MATCHED_KIND) return undefined
 
   const rollbackError = await rollbackSshdPortAfterFailedVerification(ssh, parameters)
+  // R-0000609: a hard `ss` failure (binary missing, permission denied) must
+  // surface its own diagnostic so the operator sees the actionable error,
+  // not the generic "no listener after Xms" message that hides the real
+  // cause and triggers retry loops.
   const baseMessage =
-    `[sshd.port: ${String(parameters.targetPort)}] sshd restart succeeded but no listener ` +
-    `on port ${String(parameters.targetPort)} after ${String(LIVE_VERIFY_TIMEOUT_MS)}ms`
+    verifyOutcome.kind === LIVE_PORT_PROBE_HARD_ERROR_KIND
+      ? `${verifyOutcome.message}; sshd restart succeeded but the live-port verification ` +
+        "could not be evaluated"
+      : `[sshd.port: ${String(parameters.targetPort)}] sshd restart succeeded but no listener ` +
+        `on port ${String(parameters.targetPort)} after ${String(LIVE_VERIFY_TIMEOUT_MS)}ms`
   if (rollbackError == null) {
     return failed(`${baseMessage}; rolled back to previous config and port`)
   }
@@ -1181,7 +1291,16 @@ async function applySshdPortWhenConfigUnchanged(
   ssh: SshConnection,
   parameters: { originalConfig: string; originalPort: number; targetPort: number }
 ): Promise<ModuleResult> {
-  if (await liveSshdPortMatches(ssh, parameters.targetPort)) return { status: "ok" }
+  // R-0000609: surface hard `ss` failures (binary missing, permission denied)
+  // before triggering a needless restart — the same probe runs again during
+  // post-restart verification and would loop forever. Surfacing it here keeps
+  // the apply path idempotent and gives the operator an actionable error.
+  try {
+    if (await liveSshdPortMatches(ssh, parameters.targetPort)) return { status: "ok" }
+  } catch (error) {
+    if (error instanceof LiveSshdPortProbeError) return failed(error.message)
+    throw error
+  }
   // R-0000540: a TOCTOU gap exists between the first ufw guard run by
   // `applySshdPort` and this restart path. If the matching allow rule was
   // removed in between, restarting sshd onto the new port locks the runner
