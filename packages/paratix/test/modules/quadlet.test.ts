@@ -83,6 +83,13 @@ function createSuccessfulApplySsh() {
           command: /^\[ -e '\/etc\/containers\/systemd\/[^']+\.container' \]$/v,
           result: { code: 1 },
         },
+        // R-0000603: `applyQuadletFile` checks `isSymlink` before snapshot
+        // and writeFile to refuse following a planted symlink. The default
+        // for these tests is "not a symlink".
+        {
+          command: /^\[ -L '\/etc\/containers\/systemd\/[^']+\.container' \]$/v,
+          result: { code: 1 },
+        },
         {
           command:
             /^find \/var\/lib\/paratix\/flags -maxdepth 1 -name 'quadlet-container-[0-9a-f]{16}-\*' ! -name '\*\.lock' -delete && touch \/var\/lib\/paratix\/flags\/'quadlet-container-[0-9a-f]{16}-[0-9a-f]{16}'$/v,
@@ -188,6 +195,7 @@ describe("quadlet.container", () => {
     const flagCommand = buildReloadFlagPersistCommand("traefik", expectedQuadletContent())
     const ssh = createMockSsh({
       [`[ -e '${quadletFilePath}' ]`]: { code: 1 },
+      [`[ -L '${quadletFilePath}' ]`]: { code: 1 },
       [flagCommand]: { code: 0 },
       "mkdir -p '/etc/containers/systemd'": { code: 0 },
       "mkdir -p /var/lib/paratix/flags": { code: 0 },
@@ -209,6 +217,7 @@ describe("quadlet.container", () => {
   it("apply rejects an unstubbed apply exec", async () => {
     const ssh = createMockSsh({
       [`[ -e '${quadletFilePath}' ]`]: { code: 1 },
+      [`[ -L '${quadletFilePath}' ]`]: { code: 1 },
       "mkdir -p '/etc/containers/systemd'": { code: 0 },
     })
     vi.spyOn(ssh, "writeFile").mockResolvedValue()
@@ -234,6 +243,7 @@ describe("quadlet.container", () => {
   it("apply returns failed when systemctl daemon-reload exits with non-zero code", async () => {
     const ssh = createMockSsh({
       [`[ -e '${quadletFilePath}' ]`]: { code: 1 },
+      [`[ -L '${quadletFilePath}' ]`]: { code: 1 },
       [`rm -f '${quadletFilePath}'`]: { code: 0 },
       "mkdir -p '/etc/containers/systemd'": { code: 0 },
       "systemctl daemon-reload": { code: 1, stderr: "reload failed" },
@@ -250,6 +260,7 @@ describe("quadlet.container", () => {
     const flagCommand = buildReloadFlagPersistCommand("traefik", expectedQuadletContent())
     const ssh = createMockSsh({
       [`[ -e '${quadletFilePath}' ]`]: { code: 1 },
+      [`[ -L '${quadletFilePath}' ]`]: { code: 1 },
       [flagCommand]: { code: 1, stderr: "read-only file system" },
       "mkdir -p '/etc/containers/systemd'": { code: 0 },
       "mkdir -p /var/lib/paratix/flags": { code: 0 },
@@ -285,6 +296,7 @@ describe("quadlet.container", () => {
     const previousContent = "[Container]\nImage=docker.io/library/traefik:v3.2\n"
     const ssh = createMockSsh({
       [`[ -e '${quadletFilePath}' ]`]: { code: 0 },
+      [`[ -L '${quadletFilePath}' ]`]: { code: 1 },
       [`cat '${quadletFilePath}'`]: { stdout: previousContent },
       [`stat -c '%a' '${quadletFilePath}'`]: { code: 0, stdout: "600\n" },
       "mkdir -p '/etc/containers/systemd'": { code: 0 },
@@ -311,6 +323,7 @@ describe("quadlet.container", () => {
     const previousContent = "[Container]\nImage=docker.io/library/traefik:v3.2\n"
     const ssh = createMockSsh({
       [`[ -e '${quadletFilePath}' ]`]: { code: 0 },
+      [`[ -L '${quadletFilePath}' ]`]: { code: 1 },
       [`cat '${quadletFilePath}'`]: { stdout: previousContent },
       [`stat -c '%a' '${quadletFilePath}'`]: { code: 0, stdout: "600\n" },
       "mkdir -p '/etc/containers/systemd'": { code: 0 },
@@ -332,6 +345,7 @@ describe("quadlet.container", () => {
     const previousContent = "[Container]\nImage=docker.io/library/traefik:v3.2\n"
     const ssh = createMockSsh({
       [`[ -e '${quadletFilePath}' ]`]: { code: 0 },
+      [`[ -L '${quadletFilePath}' ]`]: { code: 1 },
       [`cat '${quadletFilePath}'`]: { stdout: previousContent },
       [`stat -c '%a' '${quadletFilePath}'`]: { code: 0, stdout: "600\n" },
       "mkdir -p '/etc/containers/systemd'": { code: 0 },
@@ -354,6 +368,7 @@ describe("quadlet.container", () => {
     const previousContent = "[Container]\nImage=docker.io/library/traefik:v3.2\n"
     const ssh = createMockSsh({
       [`[ -e '${quadletFilePath}' ]`]: { code: 0 },
+      [`[ -L '${quadletFilePath}' ]`]: { code: 1 },
       [`cat '${quadletFilePath}'`]: { stdout: previousContent },
       [`stat -c '%a' '${quadletFilePath}'`]: { code: 0, stdout: "600\n" },
       "mkdir -p '/etc/containers/systemd'": { code: 0 },
@@ -370,6 +385,23 @@ describe("quadlet.container", () => {
     expect(result.error?.message).toContain("reload failed")
     expect(result.error?.message).toContain("rollback failed")
     expect(result.error?.message).toContain("rollback write failed: ENOSPC")
+  })
+
+  it("R-0000603: refuses to apply when the quadlet path is a symlink", async () => {
+    const ssh = createMockSsh({
+      [`[ -L '${quadletFilePath}' ]`]: { code: 0 },
+      "mkdir -p '/etc/containers/systemd'": { code: 0 },
+    })
+    const writeFile = vi.spyOn(ssh, "writeFile").mockResolvedValue()
+
+    const result = await createQuadletModule().apply(ssh, emptyEnv)
+
+    expect(result.status).toBe("failed")
+    expect(result.error?.message).toContain("refuses to write through symlink")
+    expect(result.error?.message).toContain(quadletFilePath)
+    expect(writeFile).not.toHaveBeenCalled()
+    expect(ssh.calls).not.toContain(`cat '${quadletFilePath}'`)
+    expect(ssh.calls).not.toContain("systemctl daemon-reload")
   })
 
   it("generates EnvironmentFile and Healthcheck directives", async () => {

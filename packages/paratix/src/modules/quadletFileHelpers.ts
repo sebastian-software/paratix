@@ -1,6 +1,7 @@
 import { failed, failedCommand, withRollbackFailure } from "../moduleFailure.js"
 import { shellQuote } from "../ssh.js"
 import { type ModuleResult, NEEDS_APPLY, type SshConnection } from "../types.js"
+import { isSymlink } from "./remoteFileChecks.js"
 
 const CONTAINERS_SYSTEMD_DIRECTORY_COMMAND = "mkdir -p '/etc/containers/systemd'"
 const QUADLET_FILE_MODE = "0644"
@@ -44,6 +45,14 @@ async function restoreQuadletFileSnapshot(
   snapshot: QuadletFileSnapshot
 ): Promise<void> {
   if (snapshot.exists) {
+    // R-0000603: defense in depth — refuse to restore through a symlink that
+    // may have appeared between the apply-time guard and rollback. The apply
+    // guard runs once before the snapshot; a symlink that materializes
+    // afterwards must not let `ssh.writeFile` follow it to an arbitrary
+    // target during rollback.
+    if (await isSymlink(ssh, filePath)) {
+      throw new Error(`[quadlet.container] refuses to restore through symlink at ${filePath}`)
+    }
     await ssh.writeFile(filePath, snapshot.content, { mode: snapshot.mode })
     return
   }
@@ -64,6 +73,18 @@ export async function applyQuadletFile(parameters: {
     return failedCommand(
       `[quadlet.container: ${parameters.name}] failed to create quadlet directory`,
       mkdirResult
+    )
+  }
+
+  // R-0000603: refuse to apply through a symlinked quadlet file. Both
+  // `snapshotQuadletFile` (via `ssh.exists`/`ssh.readFile`) and
+  // `ssh.writeFile` follow symlinks; a planted symlink would otherwise let
+  // apply mutate an arbitrary file outside `/etc/containers/systemd/`.
+  // Mirrors the apt.repository (R-0000235) and net.dropin (R-0000526)
+  // hardening pattern.
+  if (await isSymlink(parameters.ssh, parameters.filePath)) {
+    return failed(
+      `[quadlet.container: ${parameters.name}] refuses to write through symlink at ${parameters.filePath}`
     )
   }
 
