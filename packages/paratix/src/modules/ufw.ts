@@ -10,6 +10,7 @@ import {
   readUfwRuleStatusForApply,
   readUfwShowAdded,
   rejectWhenDenyingCurrentSshPort,
+  rejectWhenDenyingLiveSshdPort,
   type UfwRuleAction,
   type UfwRuleKeyword,
 } from "./ufwRuleHelpers.js"
@@ -246,6 +247,13 @@ export const ufw = {
 
         const lockoutFailure = rejectWhenDenyingCurrentSshPort({ action, portList, ssh })
         if (lockoutFailure !== null) return lockoutFailure
+        // R-0000615: also probe live sshd listeners before applying a deny.
+        // The static check above only protects the SshConfig ports; this
+        // catches additional active listeners (e.g. a maintenance port, a
+        // socket-activated systemd listener, or a previous sshd.port apply
+        // that has not yet been picked up by SshConfig).
+        const liveSshdFailure = await rejectWhenDenyingLiveSshdPort({ action, portList, ssh })
+        if (liveSshdFailure !== null) return liveSshdFailure
 
         const statusOutcome = await readUfwRuleStatusForApply(ssh, { action, portList })
         if ("failure" in statusOutcome) return statusOutcome.failure

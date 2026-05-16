@@ -91,6 +91,59 @@ export function rejectWhenDenyingCurrentSshPort(input: {
   )
 }
 
+// R-0000615: the static `rejectWhenDenyingCurrentSshPort` check only protects
+// the SshConfig-declared ports. A live sshd bound to an additional port (for
+// example because a previous run set `sshd.port` to a different value, an
+// admin restarted sshd on a maintenance port, or socket-activation listeners
+// span multiple ports) would still be silently denied. Probe `ss -ltn` for an
+// active listener on each candidate port immediately before the deny is
+// applied and refuse the rule if any of them is currently serving traffic.
+// Mirrors the `liveSshdPortMatches` probe in `sshd.ts`.
+const SSHD_LISTENER_PROCESS_PATTERN = /users:\(\("(?<name>[^"]+)"[^\)]*\)/gv
+const SSHD_LISTENER_OWNER_NAMES = new Set(["sshd", "systemd"])
+
+function extractSshdListenerOwners(output: string): string[] {
+  const names: string[] = []
+  for (const match of output.matchAll(SSHD_LISTENER_PROCESS_PATTERN)) {
+    const name = match.groups?.name
+    if (name != null) names.push(name)
+  }
+  return names
+}
+
+async function isPortServingLiveSshd(ssh: SshConnection, port: number): Promise<boolean> {
+  const result = await ssh.exec(`ss -H -ltnp 'sport = :${String(port)}'`, {
+    ignoreExitCode: true,
+    silent: true,
+  })
+  if (result.code !== 0) return false
+  const output = result.stdout.trim()
+  if (output === "") return false
+  const owners = extractSshdListenerOwners(output)
+  if (owners.length === 0) return false
+  return owners.some((name) => SSHD_LISTENER_OWNER_NAMES.has(name))
+}
+
+export async function rejectWhenDenyingLiveSshdPort(input: {
+  action: UfwRuleAction
+  portList: number[]
+  ssh: SshConnection
+}): Promise<ModuleResult | null> {
+  const { action, portList, ssh } = input
+  if (action !== "deny") return null
+  const conflictingPorts: number[] = []
+  for (const port of portList) {
+    // eslint-disable-next-line no-await-in-loop -- probe ports sequentially; each call hits ss on the remote host
+    if (await isPortServingLiveSshd(ssh, port)) conflictingPorts.push(port)
+  }
+  if (conflictingPorts.length === 0) return null
+  return failed(
+    `[ufw.rule: ${action} ${portList.join(",")}] refuses to deny port(s) ` +
+      `${conflictingPorts.join(",")} ` +
+      "currently served by a live sshd listener; would lock the runner out"
+  )
+}
+
 async function applyUfwRulePort(input: {
   action: UfwRuleAction
   ipv6Rules: boolean

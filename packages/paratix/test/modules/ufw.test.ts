@@ -23,6 +23,19 @@ function createMockSshOnPort(
   return ssh
 }
 
+// R-0000615: stub the live sshd listener probe `ss -H -ltnp 'sport = :PORT'`
+// for the given ports. Tests that exercise `ufw.rule("deny", ports)` need to
+// stub this call so the apply path can prove the port is not currently served
+// by sshd before continuing. Empty stdout with code 1 mirrors the real ss
+// output when there is no listener on the queried port.
+function noLiveSshdProbe(...ports: number[]): Record<string, { code: number; stdout: string }> {
+  const stubs: Record<string, { code: number; stdout: string }> = {}
+  for (const port of ports) {
+    stubs[`ss -H -ltnp 'sport = :${String(port)}'`] = { code: 1, stdout: "" }
+  }
+  return stubs
+}
+
 describe("ufw.enabled", () => {
   it("check returns ok when ufw is active and the current SSH port is allowed", async () => {
     const ssh = createMockSshOnPort(
@@ -750,6 +763,7 @@ describe("ufw.rule", () => {
           stdout: "Skipping adding existing rule\nRule added (v6)\n",
         },
         "ufw status": { stdout: "Status: active" },
+        ...noLiveSshdProbe(22),
       },
       2222
     )
@@ -765,6 +779,7 @@ describe("ufw.rule", () => {
         "ufw 'deny' '25'": { code: 1 },
         "ufw 'deny' '465'": { code: 0 },
         "ufw status": { stdout: "Status: active" },
+        ...noLiveSshdProbe(22, 25, 465),
       },
       2222
     )
@@ -772,6 +787,9 @@ describe("ufw.rule", () => {
     const result = await mod.apply(ssh, emptyEnv)
     expect(result.status).toBe("failed")
     expect(ssh.calls).toStrictEqual([
+      "ss -H -ltnp 'sport = :22'",
+      "ss -H -ltnp 'sport = :25'",
+      "ss -H -ltnp 'sport = :465'",
       "command -v ufw",
       "ufw status",
       "ufw 'deny' '22'",
@@ -1039,6 +1057,7 @@ describe("ufw.rule", () => {
             "22 (v6)                    ALLOW       Anywhere (v6)",
           ].join("\n"),
         },
+        ...noLiveSshdProbe(22),
       },
       2222
     )
@@ -1046,6 +1065,7 @@ describe("ufw.rule", () => {
     const result = await mod.apply(ssh, emptyEnv)
     expect(result.status).toBe("changed")
     expect(ssh.calls).toStrictEqual([
+      "ss -H -ltnp 'sport = :22'",
       "command -v ufw",
       "ufw status",
       "ufw delete 'allow' '22'",
@@ -1074,6 +1094,7 @@ describe("ufw.rule", () => {
             "22/tcp (v6)                ALLOW       Anywhere (v6)",
           ].join("\n"),
         },
+        ...noLiveSshdProbe(22),
       },
       2222
     )
@@ -1081,6 +1102,7 @@ describe("ufw.rule", () => {
     const result = await mod.apply(ssh, emptyEnv)
     expect(result.status).toBe("changed")
     expect(ssh.calls).toStrictEqual([
+      "ss -H -ltnp 'sport = :22'",
       "command -v ufw",
       "ufw status",
       "ufw delete 'allow' '22'",
@@ -1155,13 +1177,19 @@ describe("ufw.rule", () => {
             "80                         ALLOW       Anywhere",
           ].join("\n"),
         },
+        ...noLiveSshdProbe(22),
       },
       2222
     )
     const mod = ufw.rule("deny", 22)
     const result = await mod.apply(ssh, emptyEnv)
     expect(result.status).toBe("changed")
-    expect(ssh.calls).toStrictEqual(["command -v ufw", "ufw status", "ufw 'deny' '22'"])
+    expect(ssh.calls).toStrictEqual([
+      "ss -H -ltnp 'sport = :22'",
+      "command -v ufw",
+      "ufw status",
+      "ufw 'deny' '22'",
+    ])
   })
 
   it("apply deletes the opposite IPv6 rule even when the IPv4 entry is already gone", async () => {
@@ -1178,6 +1206,7 @@ describe("ufw.rule", () => {
             "22 (v6)                    ALLOW       Anywhere (v6)",
           ].join("\n"),
         },
+        ...noLiveSshdProbe(22),
       },
       2222
     )
@@ -1185,6 +1214,7 @@ describe("ufw.rule", () => {
     const result = await mod.apply(ssh, emptyEnv)
     expect(result.status).toBe("changed")
     expect(ssh.calls).toStrictEqual([
+      "ss -H -ltnp 'sport = :22'",
       "command -v ufw",
       "ufw status",
       "ufw delete 'allow' '22'",
@@ -1205,13 +1235,19 @@ describe("ufw.rule", () => {
             "22                         ALLOW       Anywhere",
           ].join("\n"),
         },
+        ...noLiveSshdProbe(22),
       },
       2222
     )
     const mod = ufw.rule("deny", 22)
     const result = await mod.apply(ssh, emptyEnv)
     expect(result.status).toBe("failed")
-    expect(ssh.calls).toStrictEqual(["command -v ufw", "ufw status", "ufw delete 'allow' '22'"])
+    expect(ssh.calls).toStrictEqual([
+      "ss -H -ltnp 'sport = :22'",
+      "command -v ufw",
+      "ufw status",
+      "ufw delete 'allow' '22'",
+    ])
   })
 
   // R-0000281: route the apply/check status read through `readUfwStatus` so a
@@ -1265,6 +1301,7 @@ describe("ufw.rule", () => {
       {
         "ufw 'deny' '8080'": { code: 0 },
         "ufw status": { stdout: "Status: active" },
+        ...noLiveSshdProbe(8080),
       },
       22
     )
@@ -1282,6 +1319,65 @@ describe("ufw.rule", () => {
       22
     )
     const mod = ufw.rule("allow", 22)
+    const result = await mod.apply(ssh, emptyEnv)
+    expect(result.status).toBe("changed")
+  })
+
+  // R-0000615: the static ssh.getConnectionInfo() check only covers the
+  // SshConfig-declared ports. Probe `ss -ltn` for a live sshd listener on
+  // each candidate port immediately before applying the deny so additional
+  // active listeners (e.g. a previous sshd.port apply that has not yet been
+  // picked up by SshConfig, or a socket-activated systemd listener) are also
+  // rejected.
+  it("R-0000615: apply returns failed when denying a port served by a live sshd listener", async () => {
+    const ssh = createMockSshOnPort(
+      {
+        "ss -H -ltnp 'sport = :2222'": {
+          code: 0,
+          stdout: 'LISTEN 0 128 0.0.0.0:2222 0.0.0.0:* users:(("sshd",pid=123,fd=3))',
+        },
+      },
+      22
+    )
+    const mod = ufw.rule("deny", 2222)
+    const result = await mod.apply(ssh, emptyEnv)
+    expect(result.status).toBe("failed")
+    expect(result.error?.message).toContain("live sshd listener")
+    expect(result.error?.message).toContain("2222")
+  })
+
+  it("R-0000615: apply returns failed when a multi-port deny includes a live sshd port", async () => {
+    const ssh = createMockSshOnPort(
+      {
+        "ss -H -ltnp 'sport = :2222'": {
+          code: 0,
+          stdout: 'LISTEN 0 128 0.0.0.0:2222 0.0.0.0:* users:(("sshd",pid=123,fd=3))',
+        },
+        "ss -H -ltnp 'sport = :25'": { code: 1, stdout: "" },
+        "ss -H -ltnp 'sport = :465'": { code: 1, stdout: "" },
+      },
+      22
+    )
+    const mod = ufw.rule("deny", [25, 2222, 465])
+    const result = await mod.apply(ssh, emptyEnv)
+    expect(result.status).toBe("failed")
+    expect(result.error?.message).toContain("live sshd listener")
+    expect(result.error?.message).toContain("2222")
+  })
+
+  it("R-0000615: apply ignores non-sshd listeners on the queried port", async () => {
+    const ssh = createMockSshOnPort(
+      {
+        "ss -H -ltnp 'sport = :8080'": {
+          code: 0,
+          stdout: 'LISTEN 0 128 0.0.0.0:8080 0.0.0.0:* users:(("nginx",pid=999,fd=6))',
+        },
+        "ufw 'deny' '8080'": { code: 0 },
+        "ufw status": { stdout: "Status: active" },
+      },
+      22
+    )
+    const mod = ufw.rule("deny", 8080)
     const result = await mod.apply(ssh, emptyEnv)
     expect(result.status).toBe("changed")
   })
