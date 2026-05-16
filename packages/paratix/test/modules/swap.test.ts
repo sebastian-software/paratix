@@ -840,6 +840,10 @@ describe("swap.file — apply", () => {
       [`[ -L '${swapPath}' ]`]: { code: 1 },
       [`cat '/etc/fstab'`]: { stdout: `${fstabLine}\n` },
       [`cat '${swapPath}'`]: { stdout: "existing swap bytes" },
+      // R-0000618: snapshot the swap file before rm so a fstab-write failure
+      // can be rolled back.
+      [`ln -- '${swapPath}' '${swapPath}.paratix-absent-backup'`]: { code: 0 },
+      [`rm -f -- '${swapPath}.paratix-absent-backup'`]: { code: 0 },
       [`rm -f '${swapPath}'`]: { code: 0 },
       [`swaplabel '${swapPath}' >/dev/null 2>&1`]: { code: 0 },
       [`swapoff '${swapPath}'`]: { code: 0 },
@@ -866,6 +870,10 @@ describe("swap.file — apply", () => {
       [`[ -L '${swapPath}' ]`]: { code: 1 },
       [`cat '/etc/fstab'`]: { stdout: `${fstabLine}\n` },
       [`cat '${swapPath}'`]: { stdout: "existing swap bytes" },
+      // R-0000618: snapshot the swap file before rm so a fstab-write failure
+      // can be rolled back.
+      [`ln -- '${swapPath}' '${swapPath}.paratix-absent-backup'`]: { code: 0 },
+      [`rm -f -- '${swapPath}.paratix-absent-backup'`]: { code: 0 },
       [`rm -f '${swapPath}'`]: { code: 0 },
       [`swaplabel '${swapPath}' >/dev/null 2>&1`]: { code: 0 },
       [`swapoff '${swapPath}'`]: { code: 0 },
@@ -900,6 +908,10 @@ describe("swap.file — apply", () => {
       [`[ -L '${swapPath}' ]`]: { code: 1 },
       [`cat '/etc/fstab'`]: { stdout: `${fstabLine}\n` },
       [`cat '${swapPath}'`]: { stdout: "existing swap bytes" },
+      // R-0000618: snapshot the swap file before rm so a fstab-write failure
+      // can be rolled back.
+      [`ln -- '${swapPath}' '${swapPath}.paratix-absent-backup'`]: { code: 0 },
+      [`rm -f -- '${swapPath}.paratix-absent-backup'`]: { code: 0 },
       [`rm -f '${swapPath}'`]: { code: 1, stderr: "rm: cannot remove: Permission denied" },
       [`swaplabel '${swapPath}' >/dev/null 2>&1`]: { code: 0 },
       [`swapoff '${swapPath}'`]: { code: 0 },
@@ -923,6 +935,49 @@ describe("swap.file — apply", () => {
     expect(writtenFiles).toStrictEqual([])
   })
 
+  // R-0000618: when removeSwapFile succeeds but the subsequent fstab write
+  // fails, the absent flow must restore the swap file from a hardlink
+  // snapshot taken before the rm. Without the snapshot, the swap file would
+  // be gone while /etc/fstab still references it, and `swapon -a` on the
+  // next boot would fail.
+  it("R-0000618: restores swap file from snapshot when absent fstab write fails", async () => {
+    const ssh = createMockSsh({
+      [`[ -e '${swapPath}' ]`]: { code: 0 },
+      [`[ -f '${swapPath}' ]`]: { code: 0 },
+      [`[ -L '${swapPath}' ]`]: { code: 1 },
+      [`cat '/etc/fstab'`]: { stdout: `${fstabLine}\n` },
+      [`cat '${swapPath}'`]: { stdout: "existing swap bytes" },
+      [`ln -- '${swapPath}' '${swapPath}.paratix-absent-backup'`]: { code: 0 },
+      [`mv -T -- '${swapPath}.paratix-absent-backup' '${swapPath}'`]: { code: 0 },
+      [`rm -f -- '${swapPath}.paratix-absent-backup'`]: { code: 0 },
+      [`rm -f '${swapPath}'`]: { code: 0 },
+      [`swaplabel '${swapPath}' >/dev/null 2>&1`]: { code: 0 },
+      [`swapoff '${swapPath}'`]: { code: 0 },
+      [`swapon '${swapPath}'`]: { code: 0 },
+    })
+    // First `swapon --show` (initial isSwapActive in disableSwap) reports
+    // the swap active; the second call after the rollback (enableSwap →
+    // isSwapActive) reports it inactive so swapon is invoked.
+    vi.spyOn(ssh, "lines")
+      .mockResolvedValueOnce([swapPath])
+      .mockResolvedValueOnce([])
+      .mockResolvedValue([])
+    // eslint-disable-next-line @typescript-eslint/require-await -- intentionally synchronous reject
+    ssh.writeFile = async (): Promise<void> => {
+      throw new Error("fstab write blew up")
+    }
+
+    const mod = swap.file({ path: swapPath, size: swapSize, state: "absent" })
+    const result = await mod.apply(ssh, emptyEnv)
+
+    expect(result.status).toBe("failed")
+    expect(result.error?.message).toContain("restored from snapshot")
+    expect(ssh.calls).toContain(`ln -- '${swapPath}' '${swapPath}.paratix-absent-backup'`)
+    expect(ssh.calls).toContain(`rm -f '${swapPath}'`)
+    expect(ssh.calls).toContain(`mv -T -- '${swapPath}.paratix-absent-backup' '${swapPath}'`)
+    expect(ssh.calls).toContain(`swapon '${swapPath}'`)
+  })
+
   it("re-enables swap and reports both failures when absent removal rollback fails", async () => {
     const writtenFiles: Array<{ content: string; path: string }> = []
     const ssh = createMockSsh({
@@ -931,6 +986,10 @@ describe("swap.file — apply", () => {
       [`[ -L '${swapPath}' ]`]: { code: 1 },
       [`cat '/etc/fstab'`]: { stdout: `${fstabLine}\n` },
       [`cat '${swapPath}'`]: { stdout: "existing swap bytes" },
+      // R-0000618: snapshot the swap file before rm so a fstab-write failure
+      // can be rolled back.
+      [`ln -- '${swapPath}' '${swapPath}.paratix-absent-backup'`]: { code: 0 },
+      [`rm -f -- '${swapPath}.paratix-absent-backup'`]: { code: 0 },
       [`rm -f '${swapPath}'`]: { code: 1, stderr: "rm: cannot remove: Permission denied" },
       [`swaplabel '${swapPath}' >/dev/null 2>&1`]: { code: 0 },
       [`swapoff '${swapPath}'`]: { code: 0 },

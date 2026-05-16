@@ -1,11 +1,7 @@
-import { failed, failedCommand } from "../moduleFailure.js"
-import { shellQuote } from "../ssh.js"
+import { failed } from "../moduleFailure.js"
 import { type ModuleResult, NEEDS_APPLY, type SshConnection } from "../types.js"
-import {
-  disableSwap,
-  enableSwap,
-  handleAbsentSwapRemovalFailure,
-} from "./swapAbsentRollbackHelpers.js"
+import { applyAbsentSwapFile } from "./swapAbsentFlow.js"
+import { disableSwap, enableSwap } from "./swapAbsentRollbackHelpers.js"
 import {
   finalizeManagedSwapBackup,
   handleSwapPublishFailure,
@@ -28,9 +24,7 @@ import {
   swapFileModeMatches,
 } from "./swapFileHelpers.js"
 
-const EXEC_OPTS = { ignoreExitCode: true, silent: true } as const
-
-async function ensureSafeSwapRemoval(
+async function ensureSafeSwapRemovalForPresent(
   ssh: SshConnection,
   path: string
 ): Promise<"missing" | "ok" | ModuleResult> {
@@ -38,12 +32,6 @@ async function ensureSafeSwapRemoval(
   if (classification.state === "missing") return "missing"
   if (classification.state === "managed-swap-file") return "ok"
   return failed(`[swap.file: ${path}] refusing to remove unsafe path: ${classification.reason}`)
-}
-
-async function removeSwapFile(ssh: SshConnection, path: string): Promise<boolean | ModuleResult> {
-  if (!(await ssh.exists(path))) return false
-  const result = await ssh.exec(`rm -f ${shellQuote(path)}`, EXEC_OPTS)
-  return result.code === 0 ? true : failedCommand(`[swap.file: ${path}] rm failed`, result)
 }
 
 async function createMissingSwapFile(
@@ -167,7 +155,7 @@ async function recreateSwapFile(
 ): Promise<RecreateOutcome> {
   if (!(await needsSwapRecreation(ssh, options))) return "ok"
 
-  const safeRemoval = await ensureSafeSwapRemoval(ssh, options.path)
+  const safeRemoval = await ensureSafeSwapRemovalForPresent(ssh, options.path)
   if (typeof safeRemoval !== "string") return { kind: "result", ...safeRemoval }
 
   if (safeRemoval === "ok") {
@@ -178,58 +166,6 @@ async function recreateSwapFile(
   const created = await createMissingSwapFile(ssh, options)
   if (created === "changed") return { backupPath: null, kind: "changed" }
   return { kind: "result", ...created }
-}
-
-async function applyAbsentSwapFile(
-  ssh: SshConnection,
-  options: NormalizedSwapFileOptions
-): Promise<ModuleResult> {
-  // R-0000547: this pipeline is intentionally transactional:
-  //
-  //   1. ensureSafeSwapRemoval — refuse to touch unmanaged paths.
-  //   2. disableSwap — `swapoff` first so the kernel releases the file.
-  //      If this fails we return immediately *without* touching fstab so
-  //      the persistence entry is preserved for the next recovery run
-  //      (the operator can still re-mount swap from fstab on reboot).
-  //   3. removeSwapFile (only when the file actually exists). A failure
-  //      here re-enables swap via handleAbsentSwapRemovalFailure and
-  //      again leaves fstab untouched.
-  //   4. ensureSwapFstabState — only reached when the file is either
-  //      gone (safeRemoval === "missing") or has been successfully
-  //      removed. Pruning the fstab entry at this point is safe because
-  //      no swap file remains that the entry could refer to.
-  //
-  // Document carefully so future edits do not accidentally hoist the
-  // fstab mutation before the disable/remove steps.
-  let swapChanged = false
-  const safeRemoval = await ensureSafeSwapRemoval(ssh, options.path)
-  if (typeof safeRemoval !== "string") return safeRemoval
-  const disableResult = await disableSwap(ssh, options.path)
-  if (typeof disableResult !== "boolean") return disableResult
-  if (disableResult) swapChanged = true
-  // Remove the swap file before pruning fstab so failed removal leaves
-  // persistence intact for the next recovery run.
-  if (safeRemoval === "ok") {
-    const removeResult = await removeSwapFile(ssh, options.path)
-    if (typeof removeResult !== "boolean") {
-      return handleAbsentSwapRemovalFailure(ssh, {
-        disabledSwap: disableResult,
-        path: options.path,
-        removeFailure: removeResult,
-      })
-    }
-    if (removeResult) swapChanged = true
-  }
-  // Only reached on the happy paths (file already missing OR successfully
-  // removed). It is therefore safe to prune the fstab entry — there is no
-  // live swap file the entry could still reference. A guardedWriteFile
-  // failure inside ensureSwapFstabState propagates as a regular failed
-  // result; fstab itself remains consistent because guardedWriteFile
-  // writes atomically via the SSH-layer temp-file finalize.
-  const fstabResult = await ensureSwapFstabState({ desiredLine: null, path: options.path, ssh })
-  if (typeof fstabResult !== "boolean") return fstabResult
-  swapChanged ||= fstabResult
-  return { status: swapChanged ? "changed" : "ok" }
 }
 
 async function ensureExistingSwapFileMode(

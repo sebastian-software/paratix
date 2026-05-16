@@ -82,6 +82,30 @@ export async function finalizeManagedSwapBackup(
   await removeSwapBackup(ssh, backupPath)
 }
 
+// R-0000618: hardlink-based snapshot for the absent flow. The absent
+// pipeline removes the swap file *before* it updates fstab, so a failing
+// fstab write would otherwise leave the host with a stale fstab entry
+// pointing at a swap file that no longer exists — `swapon -a` on the next
+// boot would then fail with `swapon: cannot stat <path>` and miss this
+// swap area entirely. A hardlink under `<path>.paratix-absent-backup`
+// preserves the original inode (and therefore the file mode and the swap
+// header) at near-zero cost, so we can restore the original file via a
+// single atomic rename if a later step fails.
+export async function snapshotSwapFileForAbsentFlow(
+  ssh: SshConnection,
+  path: string,
+  backupPath: string
+): Promise<ModuleResult | true> {
+  // Remove any leftover backup from a prior aborted run before the link.
+  // `mv -T --` (used by the restore path) refuses to overwrite the
+  // destination otherwise.
+  await ssh.exec(`rm -f -- ${shellQuote(backupPath)}`, EXEC_OPTS)
+  const result = await ssh.exec(`ln -- ${shellQuote(path)} ${shellQuote(backupPath)}`, EXEC_OPTS)
+  return result.code === 0
+    ? true
+    : failedCommand(`[swap.file: ${path}] swap absent snapshot hardlink failed`, result)
+}
+
 // R-0000611: chain the publish failure with any rollback failures so the
 // original cause stays attributable. Mirrors handleSwapBackupFailure
 // (R-0000548), which already chains backup + re-enable failures into a
