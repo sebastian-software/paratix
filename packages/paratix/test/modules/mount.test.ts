@@ -47,7 +47,7 @@ const mountPathSymlinkGuardCmd = [
   `mount_path='${mountPath}'`,
   'current="$mount_path"',
   'while [ "$current" != "/" ]; do',
-  'if [ -e "$current" ] && [ -L "$current" ]; then',
+  'if [ -L "$current" ]; then',
   `printf '%s\\n' "mount path contains symlink: $current" >&2`,
   "exit 1",
   "fi",

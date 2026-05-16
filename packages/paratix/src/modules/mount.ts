@@ -59,11 +59,16 @@ function validateMountPath(caller: string, path: string): void {
 }
 
 function buildMountPathSymlinkGuard(path: string): string {
+  // R-0000596: probe the symlink with `[ -L "$current" ]` only. The previous
+  // `[ -e "$current" ] && [ -L "$current" ]` short-circuited via `[ -e ]`
+  // following symlinks, which returns false for dangling links and skipped
+  // the `[ -L ]` check entirely. Using `[ -L ]` alone matches both live and
+  // dangling symlinks without an exploitable TOCTOU gap.
   return [
     `mount_path=${shellQuote(path)}`,
     'current="$mount_path"',
     'while [ "$current" != "/" ]; do',
-    'if [ -e "$current" ] && [ -L "$current" ]; then',
+    'if [ -L "$current" ]; then',
     `printf '%s\\n' "mount path contains symlink: $current" >&2`,
     "exit 1",
     "fi",
