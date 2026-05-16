@@ -67,13 +67,13 @@ async function requireComposeRuntime(parameters: {
   projectDirectory: string
   ssh: SshConnection
 }): Promise<ComposeRuntime | ModuleResult> {
-  const runtime = await getRuntime(parameters.ssh, parameters.explicitRuntime)
+  const runtime = await getRuntime(parameters.ssh, parameters.action, parameters.explicitRuntime)
   if (runtime === null) {
     return failed(
       `[compose.${parameters.action}] no container runtime found for ${parameters.projectDirectory}`
     )
   }
-  return assertComposeRuntime(runtime, parameters.action)
+  return runtime
 }
 
 // R-0000560: anchor compose action keywords at the start of a line. The
@@ -140,15 +140,26 @@ async function detectRuntime(ssh: SshConnection): Promise<ComposeRuntime | null>
 /**
  * Resolve the container runtime to use, preferring the explicit override.
  *
+ * R-0000592: every caller — both apply and check pathways — must funnel the
+ * runtime value through `assertComposeRuntime` before it can reach the shell
+ * via `composeCommand`. Centralizing the whitelist check here closes the
+ * earlier gap where check-only callers (`checkComposeSystemdUnit`,
+ * `compose.down.check`, `compose.up.check`, `composeProjectVolumesExist`)
+ * bypassed validation and let a JavaScript caller smuggle a string like
+ * `"docker; rm -rf /"` into `${runtime} compose --project-directory …`.
+ *
  * @param ssh - The SSH connection to the remote host.
+ * @param action - The compose action name used in validation error messages.
  * @param explicit - An optional runtime override that skips auto-detection.
  * @returns The resolved runtime, or `null` if none could be determined.
  */
 async function getRuntime(
   ssh: SshConnection,
+  action: string,
   explicit?: ComposeRuntime
 ): Promise<ComposeRuntime | null> {
-  return explicit ?? (await detectRuntime(ssh))
+  if (explicit !== undefined) return assertComposeRuntime(explicit, action)
+  return detectRuntime(ssh)
 }
 
 /**
@@ -531,7 +542,7 @@ async function checkComposeSystemdUnit(parameters: {
   serviceName: string
   ssh: SshConnection
 }): Promise<"needs-apply" | "ok"> {
-  const runtime = await getRuntime(parameters.ssh, parameters.explicitRuntime)
+  const runtime = await getRuntime(parameters.ssh, "systemd", parameters.explicitRuntime)
   if (!runtime) return NEEDS_APPLY
 
   if (!(await isRegularFileWithoutSymlink(parameters.ssh, parameters.filePath))) {
@@ -1165,7 +1176,7 @@ export const compose = {
       async check(ssh: null | SshConnection): Promise<"needs-apply" | "ok"> {
         if (!ssh) return NEEDS_APPLY
 
-        const rt = await getRuntime(ssh, explicitRuntime)
+        const rt = await getRuntime(ssh, "down", explicitRuntime)
         if (!rt) return NEEDS_APPLY
 
         const result = await ssh.exec(
@@ -1396,7 +1407,7 @@ export const compose = {
       async check(ssh: null | SshConnection): Promise<"needs-apply" | "ok"> {
         if (!ssh) return NEEDS_APPLY
 
-        const rt = await getRuntime(ssh, explicitRuntime)
+        const rt = await getRuntime(ssh, "up", explicitRuntime)
         if (!rt) return NEEDS_APPLY
 
         const serviceFilter = services?.map((s) => shellQuote(s)).join(" ") ?? ""
