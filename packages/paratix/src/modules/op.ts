@@ -15,6 +15,7 @@ import {
   OP_OUTPUT_CAPTURE_LIMIT_BYTES,
 } from "./opOutputCapture.js"
 import { collectOpFailureOutputs, OpSpawnError } from "./opSpawnError.js"
+import { attachSpawnLifecycle } from "./opSpawnLifecycle.js"
 
 /**
  * Default upper bound for a single `op` CLI invocation. The 1Password helper
@@ -22,9 +23,6 @@ import { collectOpFailureOutputs, OpSpawnError } from "./opSpawnError.js"
  * child after this many milliseconds rather than hanging the runner. R-0000220.
  */
 const DEFAULT_OP_TIMEOUT_MILLISECONDS = 60_000
-
-/** Grace window between SIGTERM and SIGKILL when killing a hung `op` child. */
-const OP_KILL_GRACE_MILLISECONDS = 1000
 
 const OP_INSTALL_HINT =
   "Install it from https://1password.com/downloads/command-line/ and ensure it is on PATH."
@@ -60,83 +58,6 @@ function describeSpawnError(command: string, error: unknown): Error {
     return new Error(`${command} CLI is not installed or not on PATH. ${OP_INSTALL_HINT}`)
   }
   return error instanceof Error ? error : new Error(String(error))
-}
-
-function childHasExited(child: ChildProcess): boolean {
-  return child.exitCode !== null || child.signalCode !== null
-}
-
-/**
- * Force-kill a hung child by escalating SIGTERM → SIGKILL after a short
- * grace period. Used when the runner is shutting down or when the per-call
- * timeout fires (R-0000220).
- *
- * @param child - The spawned child process to terminate.
- */
-function killChildEscalating(child: ChildProcess): void {
-  if (childHasExited(child)) return
-  try {
-    child.kill("SIGTERM")
-  } catch {
-    // ignored — child may have exited between the guard and kill
-  }
-  setTimeout(() => {
-    if (childHasExited(child)) return
-    try {
-      child.kill("SIGKILL")
-    } catch {
-      // ignored — best-effort SIGKILL
-    }
-  }, OP_KILL_GRACE_MILLISECONDS).unref()
-}
-
-/**
- * Wire the per-call abort signal and timeout onto a spawned child so a stuck
- * `op` invocation cannot hang the runner.
- *
- * @param parameters - Wiring inputs.
- * @param parameters.child - The spawned child process.
- * @param parameters.command - The executable name used in error messages.
- * @param parameters.rejectOnce - Reject closure invoked when the timeout or
- *   abort signal fires.
- * @param parameters.timeoutMs - Timeout in milliseconds; <= 0 disables the timer.
- * @returns A `cleanup` function that detaches both the timer and the abort
- *   listener; safe to call multiple times.
- */
-function attachSpawnLifecycle(parameters: {
-  child: ChildProcess
-  command: string
-  rejectOnce: (error: Error) => void
-  timeoutMs: number
-}): () => void {
-  const { child, command, rejectOnce, timeoutMs } = parameters
-  let timeoutHandle: NodeJS.Timeout | undefined
-  if (timeoutMs > 0) {
-    timeoutHandle = setTimeout(() => {
-      killChildEscalating(child)
-      rejectOnce(new Error(`${command} timed out after ${String(timeoutMs)}ms`))
-    }, timeoutMs)
-    timeoutHandle.unref()
-  }
-  const abortSignal = getRunnerAbortSignal()
-  let abortListener: (() => void) | undefined
-  if (abortSignal !== undefined) {
-    abortListener = (): void => {
-      killChildEscalating(child)
-      rejectOnce(new Error(`${command} aborted — runner shutdown in progress`))
-    }
-    abortSignal.addEventListener("abort", abortListener, { once: true })
-  }
-  return (): void => {
-    if (timeoutHandle !== undefined) {
-      clearTimeout(timeoutHandle)
-      timeoutHandle = undefined
-    }
-    if (abortListener !== undefined && abortSignal !== undefined) {
-      abortSignal.removeEventListener("abort", abortListener)
-      abortListener = undefined
-    }
-  }
 }
 
 /** Options for {@link spawnWithInput}; extracted to keep the parameter count <= 3. */
