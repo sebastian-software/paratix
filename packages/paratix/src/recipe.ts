@@ -177,7 +177,13 @@ async function executeOneModule(parameters: {
     printCommandFailure(result.error, verbose)
   }
 
-  const environment = await mergeEnvironmentFromMeta(currentEnvironment, result.meta)
+  // R-0000579: mirror `applySignalMeta` (signalOrchestration.ts) and skip the
+  // env merge when the child failed, so the failure does not leak partial meta
+  // back into the recipe environment.
+  const environment =
+    result.status === "failed"
+      ? currentEnvironment
+      : await mergeEnvironmentFromMeta(currentEnvironment, result.meta)
   return {
     _flushSignals: result._flushSignals,
     _stopRun: result._stopRun,
