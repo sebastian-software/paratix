@@ -84,7 +84,7 @@ function buildSafeDownloadApplyStubs(): NonNullable<
     },
     {
       // eslint-disable-next-line security/detect-unsafe-regex -- bounded mock command regex, not user input
-      command: /^rm -f '\/(?:opt|tmp|usr|var)(?:\/[^\/']+)*\/\.paratix-download\.[^\/']+'$/v,
+      command: /^rm -f -- '\/(?:opt|tmp|usr|var)(?:\/[^\/']+)*\/\.paratix-download\.[^\/']+'$/v,
       result: { code: 0 },
     },
   ]
@@ -245,7 +245,7 @@ function expectSafeCurlDownloadPipeline(parameters: {
   const protocolFlags = parameters.protocolFlags ?? httpsOnlyCurlProtocolFlags
   const curlCommand = `curl -fsSL -o '${parameters.temporaryDestination}' ${protocolFlags} --config -`
   const moveCommand = `mv -T -- '${parameters.temporaryDestination}' '${parameters.destination}'`
-  const cleanupCommand = `rm -f '${parameters.temporaryDestination}'`
+  const cleanupCommand = `rm -f -- '${parameters.temporaryDestination}'`
   const curlCall = parameters.mockSsh.execCalls.find((entry) => entry.command === curlCommand)
 
   expect(parameters.mockSsh.calls).toContain(
@@ -256,7 +256,7 @@ function expectSafeCurlDownloadPipeline(parameters: {
   expect(curlCall?.options?.input).toBe(`url = "${parameters.urlInput}"\n`)
   expect(parameters.mockSsh.calls).toContain(moveCommand)
   expect(parameters.mockSsh.calls).toContain(cleanupCommand)
-  expect(parameters.mockSsh.calls).not.toContain(`rm -f '${parameters.destination}'`)
+  expect(parameters.mockSsh.calls).not.toContain(`rm -f -- '${parameters.destination}'`)
 }
 
 function commandIndexes(calls: string[], expectedCommand: string): number[] {
@@ -508,7 +508,7 @@ describe("download.url", () => {
       expect(result.error?.message).toContain("destination is a symlink")
       expect(mockSsh.calls).toContain(curlCommand)
       expect(mockSsh.calls).not.toContain(mvCommand)
-      expect(mockSsh.calls).toContain(`rm -f '${temporaryDestination}'`)
+      expect(mockSsh.calls).toContain(`rm -f -- '${temporaryDestination}'`)
       const destinationSymlinkProbeIndexes = commandIndexes(
         mockSsh.calls,
         `[ -L '${destination}' ]`
@@ -576,7 +576,7 @@ describe("download.url", () => {
       await expect(mod.apply(mockSsh, emptyEnv)).rejects.toBe(curlError)
 
       expect(mockSsh.calls).toContain(curlCommand)
-      expect(mockSsh.calls).toContain(`rm -f '${temporaryDestination}'`)
+      expect(mockSsh.calls).toContain(`rm -f -- '${temporaryDestination}'`)
       expect(mockSsh.calls).not.toContain(`mv -T -- '${temporaryDestination}' '${destination}'`)
     })
 
@@ -589,7 +589,7 @@ describe("download.url", () => {
       const result = await mod.apply(mockSsh, emptyEnv)
       expect(result.status).toBe("failed")
       expect(result.error?.message).toContain("destination is a directory")
-      expect(mockSsh.calls).toContain(`rm -f '${temporaryDestination}'`)
+      expect(mockSsh.calls).toContain(`rm -f -- '${temporaryDestination}'`)
       expect(mockSsh.calls).not.toContain(`mv -T -- '${temporaryDestination}' '${destination}'`)
     })
 
@@ -621,7 +621,7 @@ describe("download.url", () => {
         `mktemp "$(dirname '${destination}')/.paratix-download.XXXXXX"`
       )
       expect(mockSsh.calls.every((command) => !command.startsWith("curl"))).toBe(true)
-      expect(mockSsh.calls).not.toContain(`rm -f '${temporaryDestination}'`)
+      expect(mockSsh.calls).not.toContain(`rm -f -- '${temporaryDestination}'`)
     })
 
     // R-0000158: curl/mv/chmod/chown failures must surface as failedCommand
@@ -638,7 +638,7 @@ describe("download.url", () => {
       expect(result.status).toBe("failed")
       expect(result.error?.message).toContain("curl failed")
       expect(result.error?.message).toContain("HTTP error 404")
-      expect(mockSsh.calls).toContain(`rm -f '${temporaryDestination}'`)
+      expect(mockSsh.calls).toContain(`rm -f -- '${temporaryDestination}'`)
       expect(mockSsh.calls).not.toContain(`mv -T -- '${temporaryDestination}' '${destination}'`)
     })
 
@@ -653,7 +653,7 @@ describe("download.url", () => {
       expect(result.status).toBe("failed")
       expect(result.error?.message).toContain("mv into place failed")
       expect(result.error?.message).toContain("Permission denied")
-      expect(mockSsh.calls).toContain(`rm -f '${temporaryDestination}'`)
+      expect(mockSsh.calls).toContain(`rm -f -- '${temporaryDestination}'`)
     })
 
     it("returns failed when chmod exits non-zero", async () => {
@@ -903,8 +903,8 @@ describe("download.url", () => {
       })
       const mod = download.url(destination, url, { sha256 })
       await mod.apply(mockSsh, emptyEnv)
-      expect(mockSsh.calls).toContain(`rm -f '${temporaryDestination}'`)
-      expect(mockSsh.calls).not.toContain(`rm -f '${destination}'`)
+      expect(mockSsh.calls).toContain(`rm -f -- '${temporaryDestination}'`)
+      expect(mockSsh.calls).not.toContain(`rm -f -- '${destination}'`)
       expect(mockSsh.calls).not.toContain(`mv -T -- '${temporaryDestination}' '${destination}'`)
     })
 
@@ -969,7 +969,7 @@ describe("download.url", () => {
           },
         })
         const curlCommand = `curl -fsSL -o '${temporaryDestination}' ${httpsOnlyCurlProtocolFlags} --config -`
-        const cleanupCommand = `rm -f '${temporaryDestination}'`
+        const cleanupCommand = `rm -f -- '${temporaryDestination}'`
         const execMock = vi
           .fn<(command: string) => Promise<{ code: number; stderr: string; stdout: string }>>()
           .mockResolvedValueOnce({ code: 0, stderr: "", stdout: "" })
@@ -1554,7 +1554,7 @@ describe("download.github", () => {
         `mktemp "$(dirname '${destination}')/.paratix-download.XXXXXX"`
       )
       expect(mockSsh.calls.every((command) => !command.startsWith("curl"))).toBe(true)
-      expect(mockSsh.calls).not.toContain(`rm -f '${temporaryDestination}'`)
+      expect(mockSsh.calls).not.toContain(`rm -f -- '${temporaryDestination}'`)
     })
 
     it("cleans up the temporary file and leaves destination untouched when curl fails", async () => {
@@ -1571,7 +1571,7 @@ describe("download.github", () => {
       await expect(mod.apply(mockSsh, emptyEnv)).rejects.toBe(curlError)
 
       expect(mockSsh.calls).toContain(curlCommand)
-      expect(mockSsh.calls).toContain(`rm -f '${temporaryDestination}'`)
+      expect(mockSsh.calls).toContain(`rm -f -- '${temporaryDestination}'`)
       expect(mockSsh.calls).not.toContain(`mv -T -- '${temporaryDestination}' '${destination}'`)
     })
 
@@ -1584,7 +1584,7 @@ describe("download.github", () => {
       const result = await mod.apply(mockSsh, emptyEnv)
       expect(result.status).toBe("failed")
       expect(result.error?.message).toContain("destination is a directory")
-      expect(mockSsh.calls).toContain(`rm -f '${temporaryDestination}'`)
+      expect(mockSsh.calls).toContain(`rm -f -- '${temporaryDestination}'`)
       expect(mockSsh.calls).not.toContain(`mv -T -- '${temporaryDestination}' '${destination}'`)
     })
 
@@ -1677,8 +1677,8 @@ describe("download.github", () => {
       const result = await mod.apply(mockSsh, emptyEnv)
 
       expect(result.status).toBe("failed")
-      expect(mockSsh.calls).toContain(`rm -f '${temporaryDestination}'`)
-      expect(mockSsh.calls).not.toContain(`rm -f '${destination}'`)
+      expect(mockSsh.calls).toContain(`rm -f -- '${temporaryDestination}'`)
+      expect(mockSsh.calls).not.toContain(`rm -f -- '${destination}'`)
       expect(mockSsh.calls).not.toContain(`mv -T -- '${temporaryDestination}' '${destination}'`)
     })
   })
@@ -2144,7 +2144,7 @@ describe("download.large", () => {
       await expect(mod.apply(mockSsh, emptyEnv)).rejects.toBe(curlError)
 
       expect(mockSsh.calls).toContain(curlCommand)
-      expect(mockSsh.calls).toContain(`rm -f '${temporaryDestination}'`)
+      expect(mockSsh.calls).toContain(`rm -f -- '${temporaryDestination}'`)
       expect(mockSsh.calls).not.toContain(`mv -T -- '${temporaryDestination}' '${destination}'`)
       expect(mockSsh.calls).not.toContain(
         buildLargeDownloadVersionedFlagCommand({ destination, flagName })
@@ -2160,7 +2160,7 @@ describe("download.large", () => {
       const result = await mod.apply(mockSsh, emptyEnv)
       expect(result.status).toBe("failed")
       expect(result.error?.message).toContain("destination is a directory")
-      expect(mockSsh.calls).toContain(`rm -f '${temporaryDestination}'`)
+      expect(mockSsh.calls).toContain(`rm -f -- '${temporaryDestination}'`)
       expect(mockSsh.calls).not.toContain(`mv -T -- '${temporaryDestination}' '${destination}'`)
       expect(mockSsh.calls).not.toContain(
         buildLargeDownloadVersionedFlagCommand({ destination, flagName })
@@ -2217,8 +2217,8 @@ describe("download.large", () => {
       expect(mockSsh.calls).not.toContain(
         buildLargeDownloadVersionedFlagCommand({ destination, flagName })
       )
-      expect(mockSsh.calls).toContain(`rm -f '${temporaryDestination}'`)
-      expect(mockSsh.calls).not.toContain(`rm -f '${destination}'`)
+      expect(mockSsh.calls).toContain(`rm -f -- '${temporaryDestination}'`)
+      expect(mockSsh.calls).not.toContain(`rm -f -- '${destination}'`)
       expect(mockSsh.calls).not.toContain(`mv -T -- '${temporaryDestination}' '${destination}'`)
     })
 
