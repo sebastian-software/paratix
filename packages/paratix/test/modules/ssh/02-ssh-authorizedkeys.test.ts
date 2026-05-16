@@ -39,11 +39,12 @@ const successfulSshApplyOptions: MockSshOptions = {
       result: { code: 0 },
     },
     {
-      command: /^rm -f '[^']+\/\.ssh\/\.paratix-authorized-keys\.[^']+'$/v,
+      command: /^rm -f -- '[^']+\/\.ssh\/\.paratix-authorized-keys\.[^']+'$/v,
       result: { code: 0 },
     },
     {
-      command: /^mktemp '[^']+\/\.ssh\/\.paratix-authorized-keys\.X{6}'$/v,
+      // eslint-disable-next-line security/detect-unsafe-regex -- bounded literal pattern matching the mktemp command issued by sshAuthorizedKeysHelpers
+      command: /^mktemp -p '[^']+\/\.ssh' -- '\.paratix-authorized-keys\.X{6}'$/v,
       result: { stdout: "/home/alice/.ssh/.paratix-authorized-keys.STUB" },
     },
     {
@@ -173,7 +174,7 @@ describe("ssh.authorizedKeys", () => {
   const aliceKeys = `'/home/alice/.ssh/authorized_keys'`
   // R-0000181: temp file lives in <home>/.ssh on the destination filesystem
   // so `mv -T` is atomic (single rename(2)) and avoids cross-FS copies.
-  const aliceMktempPattern = "mktemp '/home/alice/.ssh/.paratix-authorized-keys.XXXXXX'"
+  const aliceMktempPattern = "mktemp -p '/home/alice/.ssh' -- '.paratix-authorized-keys.XXXXXX'"
   const tempPath = "/home/alice/.ssh/.paratix-authorized-keys.ABCDEF"
   const aliceSshDirectoryGuard =
     "[ ! -L '/home/alice/.ssh' ] || { echo '.ssh must not be a symlink' >&2; exit 1; }; if [ -e '/home/alice/.ssh' ]; then [ -d '/home/alice/.ssh' ] || { echo '.ssh must be a directory' >&2; exit 1; }; else mkdir -p '/home/alice/.ssh'; fi; [ -d '/home/alice/.ssh' ] && [ ! -L '/home/alice/.ssh' ] || { echo '.ssh must be a real directory' >&2; exit 1; }; chmod 700 '/home/alice/.ssh' && chown 'alice':'alice' '/home/alice/.ssh'"
@@ -443,7 +444,7 @@ describe("ssh.authorizedKeys", () => {
     )
     expect(mockSsh.calls).not.toContain(`printf '%s\\n' '${testKey}' >> ${aliceKeys}`)
     expect(mockSsh.calls).toContain(aliceFinalReplaceCommand)
-    expect(mockSsh.calls).toContain(`rm -f '${tempPath}'`)
+    expect(mockSsh.calls).toContain(`rm -f -- '${tempPath}'`)
   })
 
   it("apply returns ok without rewriting when present state is already converged", async () => {
@@ -821,7 +822,7 @@ describe("ssh.authorizedKeys", () => {
       presentAuthorizedKeysRewriteCommand(aliceKeys, tempPath, testKey)
     )
     expect(mockSsh.calls).toContain(aliceFinalReplaceCommand)
-    expect(mockSsh.calls).toContain(`rm -f '${tempPath}'`)
+    expect(mockSsh.calls).toContain(`rm -f -- '${tempPath}'`)
   })
 
   // R-0000181: temp file must live in <home>/.ssh, on the same filesystem
@@ -877,7 +878,7 @@ describe("ssh.authorizedKeys", () => {
         user: "alice",
       })
     )
-    expect(mockSsh.calls).not.toContain(`rm -f '${foreignPath}'`)
+    expect(mockSsh.calls).not.toContain(`rm -f -- '${foreignPath}'`)
   })
 
   it("stages absent-state rewrites inside <home>/.ssh as well", async () => {
@@ -985,7 +986,7 @@ describe("ssh.authorizedKeys", () => {
 
   it("regression: home path with spaces is correctly shell-quoted in apply", async () => {
     const spaceyHome = "/home/my user"
-    const spaceyMktemp = "mktemp '/home/my user/.ssh/.paratix-authorized-keys.XXXXXX'"
+    const spaceyMktemp = "mktemp -p '/home/my user/.ssh' -- '.paratix-authorized-keys.XXXXXX'"
     const spaceyTemp = "/home/my user/.ssh/.paratix-authorized-keys.SPACEY"
     const mockSsh = createSshApplyMockSsh({
       "getent passwd 'alice' | cut -d: -f6": { stdout: spaceyHome },
@@ -1029,7 +1030,7 @@ describe("ssh.authorizedKeys", () => {
   // a stable check-ok state is reachable without overwriting the
   // semantically correct group ownership.
   it("R-0000065: apply uses the user's resolved primary group for chown when it differs from the username", async () => {
-    const deployMktemp = "mktemp '/home/deploy/.ssh/.paratix-authorized-keys.XXXXXX'"
+    const deployMktemp = "mktemp -p '/home/deploy/.ssh' -- '.paratix-authorized-keys.XXXXXX'"
     const deployTemp = "/home/deploy/.ssh/.paratix-authorized-keys.DEPLOY"
     const mockSsh = createSshApplyMockSsh({
       [deployMktemp]: { stdout: deployTemp },
