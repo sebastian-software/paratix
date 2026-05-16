@@ -362,12 +362,13 @@ describe("sshd.config — apply: validation and rollback", () => {
   it("returns failed when sshd reload fails after successful validation", async () => {
     const originalConfig = "PasswordAuthentication yes"
     // R-0000539: responseStubs handle exec calls including dry-run tempfile validation.
-    // Override reload to fail via responses (highest priority over responseStubs defaults).
+    // R-0000616: after the failed reload + rollback write the module triggers
+    // a second `systemctl reload sshd` so the daemon reverts to the original
+    // config on disk. Wrap the real mock-exec with a call counter so the first
+    // reload fails and the second one succeeds.
     const mockSsh = createMockSsh(
       {
         [CAT_SSHD]: { stdout: originalConfig },
-        // Responses take priority; override reload to fail.
-        "systemctl reload sshd": { code: 1, stderr: "reload failed" },
       },
       {
         responseStubs: [
@@ -379,7 +380,24 @@ describe("sshd.config — apply: validation and rollback", () => {
       }
     )
     const writtenFiles = trackWriteFile(mockSsh)
-    const execSpy = vi.spyOn(mockSsh, "exec")
+    const originalExec = mockSsh.exec.bind(mockSsh)
+    // R-0000616: scripted queue so the first `systemctl reload sshd` call
+    // surfaces the original reload failure and the second one (the
+    // post-rollback reload introduced by R-0000616) succeeds. Wrapping the
+    // dispatch inside the spy implementation is the canonical pattern for
+    // command-specific overrides in this file; oxlint's
+    // `vitest/no-conditional-in-test` flags the necessary branch — disable
+    // it locally rather than reshape the dispatch into a parallel test case.
+    const reloadResults: Array<{ code: number; stderr: string; stdout: string }> = [
+      { code: 1, stderr: "reload failed", stdout: "" },
+      { code: 0, stderr: "", stdout: "" },
+    ]
+    /* oxlint-disable vitest/no-conditional-in-test -- command dispatch is the test fixture, not test logic */
+    const execSpy = vi.spyOn(mockSsh, "exec").mockImplementation(async (command, options) => {
+      const queued = command === "systemctl reload sshd" ? reloadResults.shift() : undefined
+      return queued ?? originalExec(command, options)
+    })
+    /* oxlint-enable vitest/no-conditional-in-test */
 
     const mod = sshd.config({ PasswordAuthentication: "no" })
     const result = await mod.apply(mockSsh, emptyEnv)
@@ -393,6 +411,10 @@ describe("sshd.config — apply: validation and rollback", () => {
     // R-0000496: ExecReload probe must run before the reload action.
     expect(execCommands).toContain("systemctl cat 'sshd' | grep -E '^ExecReload='")
     expect(execCommands).toContain("systemctl reload sshd")
+    // R-0000616: the post-rollback reload must run a second time after the
+    // rollback write so sshd actually picks up the restored config.
+    const reloadCalls = execCommands.filter((cmd) => cmd === "systemctl reload sshd")
+    expect(reloadCalls).toHaveLength(2)
     // Last write: rollback to original config after reload failure.
     const liveConfigWrites = writtenFiles.filter((f) => f.path === SSHD_CONFIG)
     expect(liveConfigWrites.at(-1)).toStrictEqual({ content: originalConfig, path: SSHD_CONFIG })

@@ -457,20 +457,42 @@ async function socketActivationBootPathNeedsApply(ssh: SshConnection): Promise<b
 // instead of letting the rollback exception bubble up.
 async function rollbackSshdConfigAfterReloadFailure(
   ssh: SshConnection,
-  parameters: { originalConfig: string; reloadResult: ModuleResult; settingNames: string }
+  parameters: {
+    originalConfig: string
+    reloadResult: ModuleResult
+    serviceUnit?: SshdServiceUnit
+    settingNames: string
+  }
 ): Promise<ModuleResult> {
+  const originalReloadMessage = parameters.reloadResult.error?.message ?? "sshd reload failed"
   try {
     await ssh.writeFile(SSHD_CONFIG_PATH, parameters.originalConfig, { mode: SSHD_CONFIG_MODE })
-    return parameters.reloadResult
   } catch (rollbackError) {
-    const reloadMessage = parameters.reloadResult.error?.message ?? "sshd reload failed"
     const rollbackMessage =
       rollbackError instanceof Error ? rollbackError.message : String(rollbackError)
     return failed(
       `[sshd.config: ${parameters.settingNames}] sshd reload failed; rollback also failed: ` +
-        `${rollbackMessage}\n${reloadMessage}`
+        `${rollbackMessage}\n${originalReloadMessage}`
     )
   }
+  // R-0000616: writing the original config back is necessary but not
+  // sufficient — sshd is still running with the partially-loaded new content.
+  // Reload the daemon again so the on-disk rollback actually becomes the live
+  // config; otherwise the operator sees a "rolled back" status while sshd
+  // continues to enforce the broken settings until the next manual reload.
+  const restoreReloadResult = await reloadSshd(ssh, parameters.serviceUnit)
+  if (restoreReloadResult.status === "failed") {
+    const restoreReloadMessage =
+      restoreReloadResult.error?.message ?? "post-rollback sshd reload failed"
+    return failed(
+      `[sshd.config: ${parameters.settingNames}] sshd reload failed and the post-rollback ` +
+        `reload also failed: ${restoreReloadMessage}\n${originalReloadMessage}`
+    )
+  }
+  // Surface the original reload failure even though the rollback succeeded
+  // and the daemon is now back on `originalConfig`. The operator must still
+  // know the requested change did not land.
+  return parameters.reloadResult
 }
 
 async function sshdUnitDefinesExecReload(
@@ -1081,6 +1103,7 @@ async function reloadChangedSshdConfig(
   return rollbackSshdConfigAfterReloadFailure(ssh, {
     originalConfig: parameters.originalConfig,
     reloadResult,
+    serviceUnit: parameters.serviceUnit,
     settingNames: parameters.settingNames,
   })
 }
