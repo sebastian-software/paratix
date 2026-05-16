@@ -6,70 +6,91 @@ import { sshd } from "../../../src/modules/sshd.js"
 import { createMockSsh as createBaseMockSsh } from "../../helpers/mockSsh.js"
 
 const createMockSsh: typeof createBaseMockSsh = (responses, options) =>
-  createBaseMockSsh(responses, {
-    ...options,
-    allowWrites: [
-      // R-0000587: dry-run tempfiles carry restrictive 0600 permissions.
-      { options: { mode: "0600" }, remotePath: /^\/tmp\/paratix-sshd-dry-run-/v },
-      ...(options?.allowWrites ?? []),
-    ],
-    responseStubs: [
-      { command: "mkdir -p '/run/sshd'", result: { code: 0 } },
-      { command: "sshd -t", result: { code: 0 } },
-      // R-0000: validateProspectiveSshdConfig writes a temp file and validates
-      // it with `sshd -t -f <UUID>.conf` before overwriting the live config.
-      { command: /^sshd -t -f '\/tmp\/paratix-sshd-dry-run-[^']+\.conf'$/v, result: { code: 0 } },
-      {
-        command: "sshd -T",
-        result: {
-          code: 0,
-          stdout: [
-            "passwordauthentication no",
-            "permitrootlogin no",
-            "x11forwarding no",
-            "allowusers admin*",
-            "authorizedkeysfile /etc/ssh/authorized_keys/%u",
-          ].join("\n"),
+  createBaseMockSsh(
+    // R-0000613: the flag-lock holder marker uses `ssh.output("hostname")`;
+    // stub the lookup with an empty string so the printf form matches the
+    // default flag-lock allow list.
+    { hostname: { code: 0, stdout: "" }, ...responses },
+    {
+      ...options,
+      // R-0000613: sshd.config apply paths now serialise through a shared
+      // `/etc/ssh/sshd_config` mutex; opt into the default flag-lock internal
+      // stubs so the tests do not need to spell out every mkdir/rmdir.
+      allowFlagLockInternalDefaults: true,
+      allowWrites: [
+        // R-0000587: dry-run tempfiles carry restrictive 0600 permissions.
+        { options: { mode: "0600" }, remotePath: /^\/tmp\/paratix-sshd-dry-run-/v },
+        ...(options?.allowWrites ?? []),
+      ],
+      responseStubs: [
+        // R-0000613: the holder-printf shell command writes the lock marker
+        // file; the mutex helper invokes it after the hostname lookup.
+        {
+          command: /^printf '%s@%s %s\\n' "\$\$" '' "\$\(date \+%s\)" > \S+\/holder$/v,
+          result: { code: 0 },
         },
-      },
-      { command: SYSTEMCTL_CAT_SSHD, result: { code: 0 } },
-      { command: SYSTEMCTL_CAT_SSH, result: { code: 1 } },
-      { command: "systemctl is-enabled --quiet sshd.service", result: { code: 0 } },
-      { command: "systemctl is-enabled --quiet ssh.service", result: { code: 0 } },
-      // R-0000496: sshd.config probes for an ExecReload directive before
-      // deciding between `reload` and `reload-or-restart`.
-      {
-        command: "systemctl cat 'sshd' | grep -E '^ExecReload='",
-        result: { code: 0, stdout: "ExecReload=/bin/kill -HUP $MAINPID\n" },
-      },
-      {
-        command: "systemctl cat 'ssh' | grep -E '^ExecReload='",
-        result: { code: 0, stdout: "ExecReload=/bin/kill -HUP $MAINPID\n" },
-      },
-      { command: "systemctl reload sshd", result: { code: 0 } },
-      { command: "systemctl reload ssh", result: { code: 0 } },
-      { command: "systemctl reload-or-restart sshd", result: { code: 0 } },
-      { command: "systemctl reload-or-restart ssh", result: { code: 0 } },
-      // R-0000492: shell redirects removed from socket-state probes; the
-      // source now relies on `silent: true` to swallow stdout/stderr.
-      // R-0000608: `captureSshSocketState` now probes both `ssh.socket`
-      // (Debian/Ubuntu) and `sshd.socket` (Fedora/RHEL); both default-miss
-      // here so the default Debian/Ubuntu service-restart path stays selected.
-      { command: "systemctl cat ssh.socket", result: { code: 1 } },
-      { command: "systemctl cat sshd.socket", result: { code: 1 } },
-      { command: "systemctl is-enabled --quiet ssh.socket", result: { code: 1 } },
-      { command: "systemctl is-active --quiet ssh.socket", result: { code: 1 } },
-      { command: "systemctl is-enabled --quiet sshd.socket", result: { code: 1 } },
-      { command: "systemctl is-active --quiet sshd.socket", result: { code: 1 } },
-      { command: "systemctl disable --now ssh.socket", result: { code: 0 } },
-      { command: "systemctl disable --now sshd.socket", result: { code: 0 } },
-      { command: "systemctl enable --now ssh.socket", result: { code: 0 } },
-      { command: "systemctl enable --now sshd.socket", result: { code: 0 } },
-      { command: "systemctl restart sshd", result: { code: 0 } },
-      { command: /^rm -f '\/tmp\/paratix-sshd-dry-run-.+\.conf'$/v, result: { code: 0 } },
-      ...(options?.responseStubs ?? []),
-    ],
-  })
+        { command: "mkdir -p '/run/sshd'", result: { code: 0 } },
+        { command: "sshd -t", result: { code: 0 } },
+        // R-0000: validateProspectiveSshdConfig writes a temp file and
+        // validates it with `sshd -t -f <UUID>.conf` before overwriting the
+        // live config.
+        {
+          command: /^sshd -t -f '\/tmp\/paratix-sshd-dry-run-[^']+\.conf'$/v,
+          result: { code: 0 },
+        },
+        {
+          command: "sshd -T",
+          result: {
+            code: 0,
+            stdout: [
+              "passwordauthentication no",
+              "permitrootlogin no",
+              "x11forwarding no",
+              "allowusers admin*",
+              "authorizedkeysfile /etc/ssh/authorized_keys/%u",
+            ].join("\n"),
+          },
+        },
+        { command: SYSTEMCTL_CAT_SSHD, result: { code: 0 } },
+        { command: SYSTEMCTL_CAT_SSH, result: { code: 1 } },
+        { command: "systemctl is-enabled --quiet sshd.service", result: { code: 0 } },
+        { command: "systemctl is-enabled --quiet ssh.service", result: { code: 0 } },
+        // R-0000496: sshd.config probes for an ExecReload directive before
+        // deciding between `reload` and `reload-or-restart`.
+        {
+          command: "systemctl cat 'sshd' | grep -E '^ExecReload='",
+          result: { code: 0, stdout: "ExecReload=/bin/kill -HUP $MAINPID\n" },
+        },
+        {
+          command: "systemctl cat 'ssh' | grep -E '^ExecReload='",
+          result: { code: 0, stdout: "ExecReload=/bin/kill -HUP $MAINPID\n" },
+        },
+        { command: "systemctl reload sshd", result: { code: 0 } },
+        { command: "systemctl reload ssh", result: { code: 0 } },
+        { command: "systemctl reload-or-restart sshd", result: { code: 0 } },
+        { command: "systemctl reload-or-restart ssh", result: { code: 0 } },
+        // R-0000492: shell redirects removed from socket-state probes; the
+        // source now relies on `silent: true` to swallow stdout/stderr.
+        // R-0000608: `captureSshSocketState` now probes both `ssh.socket`
+        // (Debian/Ubuntu) and `sshd.socket` (Fedora/RHEL); both default-miss
+        // here so the default Debian/Ubuntu service-restart path stays
+        // selected.
+        { command: "systemctl cat ssh.socket", result: { code: 1 } },
+        { command: "systemctl cat sshd.socket", result: { code: 1 } },
+        { command: "systemctl is-enabled --quiet ssh.socket", result: { code: 1 } },
+        { command: "systemctl is-active --quiet ssh.socket", result: { code: 1 } },
+        { command: "systemctl is-enabled --quiet sshd.socket", result: { code: 1 } },
+        { command: "systemctl is-active --quiet sshd.socket", result: { code: 1 } },
+        { command: "systemctl disable --now ssh.socket", result: { code: 0 } },
+        { command: "systemctl disable --now sshd.socket", result: { code: 0 } },
+        { command: "systemctl enable --now ssh.socket", result: { code: 0 } },
+        { command: "systemctl enable --now sshd.socket", result: { code: 0 } },
+        { command: "systemctl restart sshd", result: { code: 0 } },
+        { command: /^rm -f '\/tmp\/paratix-sshd-dry-run-.+\.conf'$/v, result: { code: 0 } },
+        ...(options?.responseStubs ?? []),
+      ],
+    }
+  )
 
 const emptyEnv = {}
 const SSHD_CONFIG = "/etc/ssh/sshd_config"

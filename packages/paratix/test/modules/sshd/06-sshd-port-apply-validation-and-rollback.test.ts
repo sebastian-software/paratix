@@ -7,63 +7,87 @@ import { sshd } from "../../../src/modules/sshd.js"
 import { createMockSsh as createBaseMockSsh } from "../../helpers/mockSsh.js"
 
 const createMockSsh: typeof createBaseMockSsh = (responses, options) => {
-  const ssh = createBaseMockSsh(responses, {
-    ...options,
-    allowWrites: [
-      // R-0000587: dry-run tempfiles carry restrictive 0600 permissions.
-      { options: { mode: "0600" }, remotePath: /^\/tmp\/paratix-sshd-dry-run-/v },
-      ...(options?.allowWrites ?? []),
-    ],
-    responseStubs: [
-      ...(options?.responseStubs ?? []),
-      { command: "ufw status", result: { stdout: "Status: inactive" } },
-      { command: "mkdir -p '/run/sshd'", result: { code: 0 } },
-      { command: "sshd -t", result: { code: 0 } },
-      // R-0000539: validateProspectiveSshdConfig writes a temp file and validates
-      // it with `sshd -t -f <UUID>.conf` before overwriting the live config.
-      { command: /^sshd -t -f '\/tmp\/paratix-sshd-dry-run-[^']+\.conf'$/v, result: { code: 0 } },
-      { command: SYSTEMCTL_CAT_SSHD, result: { code: 0 } },
-      { command: SYSTEMCTL_CAT_SSH, result: { code: 1 } },
-      { command: "systemctl is-enabled --quiet sshd.service", result: { code: 0 } },
-      { command: "systemctl is-enabled --quiet ssh.service", result: { code: 0 } },
-      // R-0000496: sshd.config probes for ExecReload before reloading.
-      {
-        command: "systemctl cat 'sshd' | grep -E '^ExecReload='",
-        result: { code: 0, stdout: "ExecReload=/bin/kill -HUP $MAINPID\n" },
-      },
-      {
-        command: "systemctl cat 'ssh' | grep -E '^ExecReload='",
-        result: { code: 0, stdout: "ExecReload=/bin/kill -HUP $MAINPID\n" },
-      },
-      { command: "systemctl reload sshd", result: { code: 0 } },
-      { command: "systemctl reload ssh", result: { code: 0 } },
-      { command: "systemctl reload-or-restart sshd", result: { code: 0 } },
-      { command: "systemctl reload-or-restart ssh", result: { code: 0 } },
-      // R-0000492: socket-state probes no longer use shell redirects.
-      // R-0000608: `captureSshSocketState` now probes both `ssh.socket`
-      // (Debian/Ubuntu) and `sshd.socket` (Fedora/RHEL); both default-miss
-      // here so the default Debian/Ubuntu service-restart path stays selected.
-      { command: "systemctl cat ssh.socket", result: { code: 1 } },
-      { command: "systemctl cat sshd.socket", result: { code: 1 } },
-      { command: "systemctl is-enabled --quiet ssh.socket", result: { code: 1 } },
-      { command: "systemctl is-active --quiet ssh.socket", result: { code: 1 } },
-      { command: "systemctl is-enabled --quiet sshd.socket", result: { code: 1 } },
-      { command: "systemctl is-active --quiet sshd.socket", result: { code: 1 } },
-      { command: "systemctl disable --now ssh.socket", result: { code: 0 } },
-      { command: "systemctl disable --now sshd.socket", result: { code: 0 } },
-      { command: "systemctl enable --now ssh.socket", result: { code: 0 } },
-      { command: "systemctl enable --now sshd.socket", result: { code: 0 } },
-      { command: "systemctl restart sshd", result: { code: 0 } },
-      { command: /^rm -f '\/tmp\/paratix-sshd-dry-run-.+\.conf'$/v, result: { code: 0 } },
-      // R-0000283: default the post-restart live verify to "listener present"
-      // so existing fixtures keep passing. Tests that exercise the missing
-      // listener path stub `ss` explicitly with a non-zero exit.
-      {
-        command: /^ss -H -ltnp 'sport = :\d+'$/v,
-        result: { code: 0, stdout: 'LISTEN 0 128 0.0.0.0:2222 users:(("sshd",pid=1,fd=3))\n' },
-      },
-    ],
-  })
+  const ssh = createBaseMockSsh(
+    // R-0000613: the flag-lock holder marker uses `ssh.output("hostname")`;
+    // stub the lookup with an empty string so the printf form matches the
+    // default flag-lock allow list.
+    { hostname: { code: 0, stdout: "" }, ...responses },
+    {
+      ...options,
+      // R-0000613: sshd.port apply paths now serialise through a shared
+      // `/etc/ssh/sshd_config` mutex; opt into the default flag-lock internal
+      // stubs so the tests do not need to spell out every mkdir/rmdir.
+      allowFlagLockInternalDefaults: true,
+      allowWrites: [
+        // R-0000587: dry-run tempfiles carry restrictive 0600 permissions.
+        { options: { mode: "0600" }, remotePath: /^\/tmp\/paratix-sshd-dry-run-/v },
+        ...(options?.allowWrites ?? []),
+      ],
+      responseStubs: [
+        ...(options?.responseStubs ?? []),
+        // R-0000613: the holder-printf shell command writes the lock marker
+        // file; the mutex helper invokes it after the hostname lookup.
+        {
+          command: /^printf '%s@%s %s\\n' "\$\$" '' "\$\(date \+%s\)" > \S+\/holder$/v,
+          result: { code: 0 },
+        },
+        { command: "ufw status", result: { stdout: "Status: inactive" } },
+        { command: "mkdir -p '/run/sshd'", result: { code: 0 } },
+        { command: "sshd -t", result: { code: 0 } },
+        // R-0000539: validateProspectiveSshdConfig writes a temp file and
+        // validates it with `sshd -t -f <UUID>.conf` before overwriting the
+        // live config.
+        {
+          command: /^sshd -t -f '\/tmp\/paratix-sshd-dry-run-[^']+\.conf'$/v,
+          result: { code: 0 },
+        },
+        { command: SYSTEMCTL_CAT_SSHD, result: { code: 0 } },
+        { command: SYSTEMCTL_CAT_SSH, result: { code: 1 } },
+        { command: "systemctl is-enabled --quiet sshd.service", result: { code: 0 } },
+        { command: "systemctl is-enabled --quiet ssh.service", result: { code: 0 } },
+        // R-0000496: sshd.config probes for ExecReload before reloading.
+        {
+          command: "systemctl cat 'sshd' | grep -E '^ExecReload='",
+          result: { code: 0, stdout: "ExecReload=/bin/kill -HUP $MAINPID\n" },
+        },
+        {
+          command: "systemctl cat 'ssh' | grep -E '^ExecReload='",
+          result: { code: 0, stdout: "ExecReload=/bin/kill -HUP $MAINPID\n" },
+        },
+        { command: "systemctl reload sshd", result: { code: 0 } },
+        { command: "systemctl reload ssh", result: { code: 0 } },
+        { command: "systemctl reload-or-restart sshd", result: { code: 0 } },
+        { command: "systemctl reload-or-restart ssh", result: { code: 0 } },
+        // R-0000492: socket-state probes no longer use shell redirects.
+        // R-0000608: `captureSshSocketState` now probes both `ssh.socket`
+        // (Debian/Ubuntu) and `sshd.socket` (Fedora/RHEL); both default-miss
+        // here so the default Debian/Ubuntu service-restart path stays
+        // selected.
+        { command: "systemctl cat ssh.socket", result: { code: 1 } },
+        { command: "systemctl cat sshd.socket", result: { code: 1 } },
+        { command: "systemctl is-enabled --quiet ssh.socket", result: { code: 1 } },
+        { command: "systemctl is-active --quiet ssh.socket", result: { code: 1 } },
+        { command: "systemctl is-enabled --quiet sshd.socket", result: { code: 1 } },
+        { command: "systemctl is-active --quiet sshd.socket", result: { code: 1 } },
+        { command: "systemctl disable --now ssh.socket", result: { code: 0 } },
+        { command: "systemctl disable --now sshd.socket", result: { code: 0 } },
+        { command: "systemctl enable --now ssh.socket", result: { code: 0 } },
+        { command: "systemctl enable --now sshd.socket", result: { code: 0 } },
+        { command: "systemctl restart sshd", result: { code: 0 } },
+        { command: /^rm -f '\/tmp\/paratix-sshd-dry-run-.+\.conf'$/v, result: { code: 0 } },
+        // R-0000283: default the post-restart live verify to "listener
+        // present" so existing fixtures keep passing. Tests that exercise the
+        // missing listener path stub `ss` explicitly with a non-zero exit.
+        {
+          command: /^ss -H -ltnp 'sport = :\d+'$/v,
+          result: {
+            code: 0,
+            stdout: 'LISTEN 0 128 0.0.0.0:2222 users:(("sshd",pid=1,fd=3))\n',
+          },
+        },
+      ],
+    }
+  )
   vi.spyOn(ssh, "getConnectionInfo").mockReturnValue({
     ...ssh.getConnectionInfo(),
     configuredPorts: [22, 2222],
@@ -126,6 +150,56 @@ function buildExecWithSsOverride(
       stderr: ssResponse.stderr ?? "",
       stdout: ssResponse.stdout ?? "",
     }
+  }
+}
+
+// R-0000613: sshd.config/sshd.port apply paths acquire the
+// `/etc/ssh/sshd_config` mutex via `withMutexLock` before reading any
+// domain-specific files. Tests that drive the exec spy through a strict
+// `mockResolvedValueOnce` queue need to skip those mutex bookkeeping calls so
+// the queue stays aligned with the production logic the test is actually
+// asserting against. Pattern set mirrors `mockSshFlagLock.isFlagLockInternalSuccessCommand`.
+const MUTEX_BOOKKEEPING_PATTERNS: RegExp[] = [
+  /^mkdir -p \/var\/lib\/paratix\/flags$/v,
+  /^mkdir \/var\/lib\/paratix\/flags\/'[\w.\-]+-mutex'$/v,
+  /^rmdir \/var\/lib\/paratix\/flags\/'[\w.\-]+-mutex'$/v,
+  /^rm -f \/var\/lib\/paratix\/flags\/'[\w.\-]+-mutex'\/holder$/v,
+  /^printf '%s@%s %s\\n' "\$\$" '[^']*' "\$\(date \+%s\)" > \/var\/lib\/paratix\/flags\/'[\w.\-]+-mutex'\/holder$/v,
+  /^if \[ -d \/var\/lib\/paratix\/flags\/'[\w.\-]+-mutex' \]/v,
+  /^i=0; while \[ -d \/var\/lib\/paratix\/flags\/'[\w.\-]+-mutex' \]/v,
+  /^hostname$/v,
+]
+
+function isMutexBookkeepingCommand(command: string): boolean {
+  return MUTEX_BOOKKEEPING_PATTERNS.some((pattern) => pattern.test(command))
+}
+
+// R-0000613: build an exec implementation that consumes the mutex bookkeeping
+// commands with a default success result and dispatches every other call to a
+// scripted sequence. Mirrors the historic `mockResolvedValueOnce` shape so
+// existing tests can describe their domain-call sequence without counting the
+// new mutex acquire/release commands.
+type ScriptedExecStep =
+  | { code: number; stderr?: string; stdout?: string }
+  | { kind: "reject"; reason: Error }
+
+function buildMutexAwareExecSequence(
+  steps: readonly ScriptedExecStep[]
+): ReturnType<typeof createMockSsh>["exec"] {
+  let cursor = 0
+  return async (command) => {
+    if (isMutexBookkeepingCommand(command)) {
+      await Promise.resolve()
+      return { code: 0, stderr: "", stdout: "" }
+    }
+    const step = steps[cursor] ?? { code: 0, stderr: "", stdout: "" }
+    cursor += 1
+    if ("kind" in step) {
+      await Promise.resolve()
+      throw step.reason
+    }
+    await Promise.resolve()
+    return { code: step.code, stderr: step.stderr ?? "", stdout: step.stdout ?? "" }
   }
 }
 
@@ -205,10 +279,15 @@ describe("sshd.port — apply: validation and rollback", () => {
     const writtenFiles = trackWriteFile(mockSsh)
     const execSpy = vi.spyOn(mockSsh, "exec")
 
-    // mkdir -p /run/sshd succeeds (dry-run), then sshd -t -f <tmpfile> fails.
-    execSpy
-      .mockResolvedValueOnce({ code: 0, stderr: "", stdout: "" }) // mkdir -p /run/sshd (dry-run)
-      .mockResolvedValueOnce({ code: 1, stderr: "sshd: invalid port", stdout: "" }) // sshd -t -f
+    // R-0000613: bypass mutex bookkeeping commands so the scripted sequence
+    // matches the domain calls only. mkdir -p /run/sshd succeeds (dry-run),
+    // then sshd -t -f <tmpfile> fails.
+    execSpy.mockImplementation(
+      buildMutexAwareExecSequence([
+        { code: 0 }, // mkdir -p /run/sshd (dry-run)
+        { code: 1, stderr: "sshd: invalid port" }, // sshd -t -f
+      ])
+    )
 
     const mod = sshd.port(2222)
     const result = await mod.apply(mockSsh, emptyEnv)
@@ -332,19 +411,24 @@ describe("sshd.port — apply: validation and rollback", () => {
       .mockResolvedValueOnce(originalConfig) // guard read in guardedWriteFile
     const execSpy = vi.spyOn(mockSsh, "exec")
 
-    execSpy
-      .mockResolvedValueOnce({ code: 0, stderr: "", stdout: "" }) // mkdir -p /run/sshd (dry-run)
-      .mockResolvedValueOnce({ code: 0, stderr: "", stdout: "" }) // sshd -t -f <tmpfile>
-      .mockResolvedValueOnce({ code: 0, stderr: "", stdout: "" }) // rm -f <tmpfile>
-      .mockResolvedValueOnce({ code: 0, stderr: "", stdout: "" }) // ssh.socket exists
-      .mockResolvedValueOnce({ code: 0, stderr: "", stdout: "" }) // ssh.socket enabled
-      .mockResolvedValueOnce({ code: 0, stderr: "", stdout: "" }) // ssh.socket active
-      .mockResolvedValueOnce({ code: 0, stderr: "", stdout: "" }) // disable --now ssh.socket
-      .mockResolvedValueOnce({ code: 0, stderr: "", stdout: "" }) // sshd.service exists
-      .mockResolvedValueOnce({ code: 1, stderr: "", stdout: "" }) // sshd.service disabled
-      .mockResolvedValueOnce({ code: 0, stderr: "", stdout: "" }) // enable sshd.service
-      .mockResolvedValueOnce({ code: 0, stderr: "", stdout: "" }) // restart sshd
-      .mockResolvedValueOnce({ code: 0, stderr: "", stdout: SS_PROBE_LISTENING_STDOUT }) // ss probe
+    // R-0000613: bypass mutex bookkeeping commands so the scripted sequence
+    // matches the domain calls only.
+    execSpy.mockImplementation(
+      buildMutexAwareExecSequence([
+        { code: 0 }, // mkdir -p /run/sshd (dry-run)
+        { code: 0 }, // sshd -t -f <tmpfile>
+        { code: 0 }, // rm -f <tmpfile>
+        { code: 0 }, // ssh.socket exists
+        { code: 0 }, // ssh.socket enabled
+        { code: 0 }, // ssh.socket active
+        { code: 0 }, // disable --now ssh.socket
+        { code: 0 }, // sshd.service exists
+        { code: 1 }, // sshd.service disabled
+        { code: 0 }, // enable sshd.service
+        { code: 0 }, // restart sshd
+        { code: 0, stdout: SS_PROBE_LISTENING_STDOUT }, // ss probe
+      ])
+    )
 
     const mod = sshd.port(2222)
     const result = await mod.apply(mockSsh, emptyEnv)
@@ -368,19 +452,24 @@ describe("sshd.port — apply: validation and rollback", () => {
       .mockResolvedValueOnce(originalConfig) // guard read in guardedWriteFile
     const execSpy = vi.spyOn(mockSsh, "exec")
 
-    execSpy
-      .mockResolvedValueOnce({ code: 0, stderr: "", stdout: "" }) // mkdir -p /run/sshd (dry-run)
-      .mockResolvedValueOnce({ code: 0, stderr: "", stdout: "" }) // sshd -t -f <tmpfile>
-      .mockResolvedValueOnce({ code: 0, stderr: "", stdout: "" }) // rm -f <tmpfile>
-      .mockResolvedValueOnce({ code: 1, stderr: "", stdout: "" }) // systemctl cat ssh.socket → miss
-      .mockResolvedValueOnce({ code: 0, stderr: "", stdout: "" }) // systemctl cat sshd.socket → hit
-      .mockResolvedValueOnce({ code: 0, stderr: "", stdout: "" }) // is-enabled sshd.socket
-      .mockResolvedValueOnce({ code: 0, stderr: "", stdout: "" }) // is-active sshd.socket
-      .mockResolvedValueOnce({ code: 0, stderr: "", stdout: "" }) // disable --now sshd.socket
-      .mockResolvedValueOnce({ code: 0, stderr: "", stdout: "" }) // sshd.service exists
-      .mockResolvedValueOnce({ code: 0, stderr: "", stdout: "" }) // sshd.service is-enabled
-      .mockResolvedValueOnce({ code: 0, stderr: "", stdout: "" }) // systemctl restart sshd
-      .mockResolvedValueOnce({ code: 0, stderr: "", stdout: SS_PROBE_LISTENING_STDOUT }) // ss probe
+    // R-0000613: bypass mutex bookkeeping commands so the scripted sequence
+    // matches the domain calls only.
+    execSpy.mockImplementation(
+      buildMutexAwareExecSequence([
+        { code: 0 }, // mkdir -p /run/sshd (dry-run)
+        { code: 0 }, // sshd -t -f <tmpfile>
+        { code: 0 }, // rm -f <tmpfile>
+        { code: 1 }, // systemctl cat ssh.socket → miss
+        { code: 0 }, // systemctl cat sshd.socket → hit
+        { code: 0 }, // is-enabled sshd.socket
+        { code: 0 }, // is-active sshd.socket
+        { code: 0 }, // disable --now sshd.socket
+        { code: 0 }, // sshd.service exists
+        { code: 0 }, // sshd.service is-enabled
+        { code: 0 }, // systemctl restart sshd
+        { code: 0, stdout: SS_PROBE_LISTENING_STDOUT }, // ss probe
+      ])
+    )
 
     const mod = sshd.port(2222)
     const result = await mod.apply(mockSsh, emptyEnv)
@@ -411,20 +500,25 @@ describe("sshd.port — apply: validation and rollback", () => {
       .mockResolvedValueOnce(originalConfig) // guard read in guardedWriteFile
     const execSpy = vi.spyOn(mockSsh, "exec")
 
-    execSpy
-      .mockResolvedValueOnce({ code: 0, stderr: "", stdout: "" }) // mkdir -p /run/sshd (dry-run)
-      .mockResolvedValueOnce({ code: 0, stderr: "", stdout: "" }) // sshd -t -f <tmpfile>
-      .mockResolvedValueOnce({ code: 0, stderr: "", stdout: "" }) // rm -f <tmpfile>
-      .mockResolvedValueOnce({ code: 1, stderr: "", stdout: "" }) // systemctl cat ssh.socket → miss
-      .mockResolvedValueOnce({ code: 0, stderr: "", stdout: "" }) // systemctl cat sshd.socket → hit
-      .mockResolvedValueOnce({ code: 0, stderr: "", stdout: "" }) // is-enabled sshd.socket
-      .mockResolvedValueOnce({ code: 0, stderr: "", stdout: "" }) // is-active sshd.socket
-      .mockResolvedValueOnce({ code: 0, stderr: "", stdout: "" }) // disable --now sshd.socket
-      .mockResolvedValueOnce({ code: 0, stderr: "", stdout: "" }) // sshd.service exists
-      .mockResolvedValueOnce({ code: 0, stderr: "", stdout: "" }) // sshd.service is-enabled
-      .mockRejectedValueOnce(new Error("systemctl restart sshd failed")) // restart sshd fails
-      .mockResolvedValueOnce({ code: 0, stderr: "", stdout: "" }) // enable --now sshd.socket (restore)
-      .mockResolvedValueOnce({ code: 0, stderr: "", stdout: "" }) // restart sshd (best-effort restore)
+    // R-0000613: bypass mutex bookkeeping commands so the scripted sequence
+    // matches the domain calls only.
+    execSpy.mockImplementation(
+      buildMutexAwareExecSequence([
+        { code: 0 }, // mkdir -p /run/sshd (dry-run)
+        { code: 0 }, // sshd -t -f <tmpfile>
+        { code: 0 }, // rm -f <tmpfile>
+        { code: 1 }, // systemctl cat ssh.socket → miss
+        { code: 0 }, // systemctl cat sshd.socket → hit
+        { code: 0 }, // is-enabled sshd.socket
+        { code: 0 }, // is-active sshd.socket
+        { code: 0 }, // disable --now sshd.socket
+        { code: 0 }, // sshd.service exists
+        { code: 0 }, // sshd.service is-enabled
+        { kind: "reject", reason: new Error("systemctl restart sshd failed") }, // restart sshd fails
+        { code: 0 }, // enable --now sshd.socket (restore)
+        { code: 0 }, // restart sshd (best-effort restore)
+      ])
+    )
 
     const mod = sshd.port(2222)
     const result = await mod.apply(mockSsh, emptyEnv)
@@ -451,15 +545,21 @@ describe("sshd.port — apply: validation and rollback", () => {
       .mockResolvedValueOnce(originalConfig) // guard read in guardedWriteFile
     const execSpy = vi.spyOn(mockSsh, "exec")
 
-    execSpy
-      .mockResolvedValueOnce({ code: 0, stderr: "", stdout: "" }) // mkdir -p /run/sshd (dry-run)
-      .mockResolvedValueOnce({ code: 0, stderr: "", stdout: "" }) // sshd -t -f <tmpfile>
-      .mockResolvedValueOnce({ code: 0, stderr: "", stdout: "" }) // rm -f <tmpfile>
-      .mockResolvedValueOnce({ code: 1, stderr: "", stdout: "" }) // ssh.socket missing
-      .mockResolvedValueOnce({ code: 0, stderr: "", stdout: "" }) // sshd.service exists
-      .mockResolvedValueOnce({ code: 0, stderr: "", stdout: "" }) // sshd.service enabled
-      .mockResolvedValueOnce({ code: 0, stderr: "", stdout: "" }) // restart sshd
-      .mockResolvedValueOnce({ code: 0, stderr: "", stdout: SS_PROBE_LISTENING_STDOUT }) // ss probe
+    // R-0000613: bypass mutex bookkeeping commands so the scripted sequence
+    // matches the domain calls only.
+    execSpy.mockImplementation(
+      buildMutexAwareExecSequence([
+        { code: 0 }, // mkdir -p /run/sshd (dry-run)
+        { code: 0 }, // sshd -t -f <tmpfile>
+        { code: 0 }, // rm -f <tmpfile>
+        { code: 1 }, // ssh.socket missing
+        { code: 1 }, // sshd.socket missing
+        { code: 0 }, // sshd.service exists
+        { code: 0 }, // sshd.service enabled
+        { code: 0 }, // restart sshd
+        { code: 0, stdout: SS_PROBE_LISTENING_STDOUT }, // ss probe
+      ])
+    )
 
     const mod = sshd.port(2222)
     await mod.apply(mockSsh, emptyEnv)
@@ -492,7 +592,10 @@ describe("sshd.port — apply: validation and rollback", () => {
     const execCommands = execSpy.mock.calls.map((args) => args[0])
     // R-0000539: dry-run validation uses `sshd -t -f <tmpfile>` (not plain `sshd -t`).
     // mkdir -p '/run/sshd' must run immediately before `sshd -t -f`.
-    expect(execCommands[0]).toBe("mkdir -p '/run/sshd'")
+    // R-0000613: filter mutex bookkeeping commands so the ordering assertion
+    // sees only the domain calls.
+    const firstDomainCommand = execCommands.find((cmd) => !isMutexBookkeepingCommand(cmd))
+    expect(firstDomainCommand).toBe("mkdir -p '/run/sshd'")
     const mkdirIndex = execCommands.indexOf("mkdir -p '/run/sshd'")
     const dryRunIndex = execCommands.findIndex((cmd) =>
       cmd.startsWith("sshd -t -f '/tmp/paratix-sshd-dry-run-")
@@ -627,14 +730,21 @@ describe("sshd.port — apply: validation and rollback", () => {
     const addPortSpy = vi.spyOn(mockSsh, "addPort")
     const removePortSpy = vi.spyOn(mockSsh, "removePort")
 
-    // sshd -t succeeds, then systemctl restart sshd fails
-    execSpy
-      .mockResolvedValueOnce({ code: 0, stderr: "", stdout: "" }) // mkdir -p /run/sshd
-      .mockResolvedValueOnce({ code: 0, stderr: "", stdout: "" }) // sshd -t
-      .mockResolvedValueOnce({ code: 1, stderr: "", stdout: "" }) // ssh.socket missing
-      .mockResolvedValueOnce({ code: 0, stderr: "", stdout: "" }) // sshd.service exists
-      .mockResolvedValueOnce({ code: 0, stderr: "", stdout: "" }) // sshd.service enabled
-      .mockRejectedValueOnce(new Error("systemctl restart sshd failed")) // systemctl restart
+    // R-0000613: bypass mutex bookkeeping commands so the scripted sequence
+    // matches the domain calls only. sshd -t succeeds, then `systemctl restart
+    // sshd` fails.
+    execSpy.mockImplementation(
+      buildMutexAwareExecSequence([
+        { code: 0 }, // mkdir -p /run/sshd
+        { code: 0 }, // sshd -t
+        { code: 0 }, // rm -f <tmpfile>
+        { code: 1 }, // ssh.socket missing
+        { code: 1 }, // sshd.socket missing
+        { code: 0 }, // sshd.service exists
+        { code: 0 }, // sshd.service enabled
+        { kind: "reject", reason: new Error("systemctl restart sshd failed") }, // systemctl restart
+      ])
+    )
 
     const mod = sshd.port(2222)
     const result = await mod.apply(mockSsh, emptyEnv)
@@ -661,19 +771,24 @@ describe("sshd.port — apply: validation and rollback", () => {
     const execSpy = vi.spyOn(mockSsh, "exec")
     const removePortSpy = vi.spyOn(mockSsh, "removePort")
 
-    execSpy
-      .mockResolvedValueOnce({ code: 0, stderr: "", stdout: "" }) // mkdir -p /run/sshd (dry-run)
-      .mockResolvedValueOnce({ code: 0, stderr: "", stdout: "" }) // sshd -t -f <tmpfile>
-      .mockResolvedValueOnce({ code: 0, stderr: "", stdout: "" }) // rm -f <tmpfile>
-      .mockResolvedValueOnce({ code: 0, stderr: "", stdout: "" }) // ssh.socket exists
-      .mockResolvedValueOnce({ code: 0, stderr: "", stdout: "" }) // ssh.socket enabled
-      .mockResolvedValueOnce({ code: 0, stderr: "", stdout: "" }) // ssh.socket active
-      .mockResolvedValueOnce({ code: 0, stderr: "", stdout: "" }) // disable --now ssh.socket
-      .mockResolvedValueOnce({ code: 0, stderr: "", stdout: "" }) // sshd.service exists
-      .mockResolvedValueOnce({ code: 0, stderr: "", stdout: "" }) // sshd.service enabled
-      .mockRejectedValueOnce(new Error("systemctl restart sshd failed")) // systemctl restart fails
-      .mockResolvedValueOnce({ code: 0, stderr: "", stdout: "" }) // enable --now ssh.socket (restore)
-      .mockResolvedValueOnce({ code: 0, stderr: "", stdout: "" }) // systemctl restart sshd (restore)
+    // R-0000613: bypass mutex bookkeeping commands so the scripted sequence
+    // matches the domain calls only.
+    execSpy.mockImplementation(
+      buildMutexAwareExecSequence([
+        { code: 0 }, // mkdir -p /run/sshd (dry-run)
+        { code: 0 }, // sshd -t -f <tmpfile>
+        { code: 0 }, // rm -f <tmpfile>
+        { code: 0 }, // ssh.socket exists
+        { code: 0 }, // ssh.socket enabled
+        { code: 0 }, // ssh.socket active
+        { code: 0 }, // disable --now ssh.socket
+        { code: 0 }, // sshd.service exists
+        { code: 0 }, // sshd.service enabled
+        { kind: "reject", reason: new Error("systemctl restart sshd failed") }, // systemctl restart fails
+        { code: 0 }, // enable --now ssh.socket (restore)
+        { code: 0 }, // systemctl restart sshd (restore)
+      ])
+    )
 
     const mod = sshd.port(2222)
     const result = await mod.apply(mockSsh, emptyEnv)
@@ -709,14 +824,20 @@ describe("sshd.port — apply: validation and rollback", () => {
       .mockResolvedValueOnce(undefined) // live config write succeeds
       .mockRejectedValueOnce(new Error("SFTP rollback failed")) // rollback write fails
 
-    execSpy
-      .mockResolvedValueOnce({ code: 0, stderr: "", stdout: "" }) // mkdir -p /run/sshd (dry-run)
-      .mockResolvedValueOnce({ code: 0, stderr: "", stdout: "" }) // sshd -t -f <tmpfile>
-      .mockResolvedValueOnce({ code: 0, stderr: "", stdout: "" }) // rm -f <tmpfile>
-      .mockResolvedValueOnce({ code: 1, stderr: "", stdout: "" }) // ssh.socket missing
-      .mockResolvedValueOnce({ code: 0, stderr: "", stdout: "" }) // sshd.service exists
-      .mockResolvedValueOnce({ code: 0, stderr: "", stdout: "" }) // sshd.service enabled
-      .mockRejectedValueOnce(new Error("systemctl restart sshd failed")) // restart fails
+    // R-0000613: bypass mutex bookkeeping commands so the scripted sequence
+    // matches the domain calls only.
+    execSpy.mockImplementation(
+      buildMutexAwareExecSequence([
+        { code: 0 }, // mkdir -p /run/sshd (dry-run)
+        { code: 0 }, // sshd -t -f <tmpfile>
+        { code: 0 }, // rm -f <tmpfile>
+        { code: 1 }, // ssh.socket missing
+        { code: 1 }, // sshd.socket missing
+        { code: 0 }, // sshd.service exists
+        { code: 0 }, // sshd.service enabled
+        { kind: "reject", reason: new Error("systemctl restart sshd failed") }, // restart fails
+      ])
+    )
 
     const mod = sshd.port(2222)
     const result = await mod.apply(mockSsh, emptyEnv)
@@ -743,14 +864,21 @@ describe("sshd.port — apply: validation and rollback", () => {
     const reconnectSpy = vi.spyOn(mockSsh, "reconnect")
     const removePortSpy = vi.spyOn(mockSsh, "removePort")
 
-    execSpy
-      .mockResolvedValueOnce({ code: 0, stderr: "", stdout: "" }) // mkdir -p /run/sshd
-      .mockResolvedValueOnce({ code: 0, stderr: "", stdout: "" }) // sshd -t
-      .mockResolvedValueOnce({ code: 1, stderr: "", stdout: "" }) // ssh.socket missing
-      .mockResolvedValueOnce({ code: 0, stderr: "", stdout: "" }) // sshd.service exists
-      .mockResolvedValueOnce({ code: 0, stderr: "", stdout: "" }) // sshd.service enabled
-      .mockRejectedValueOnce(new Error("SSH connection closed unexpectedly"))
-      .mockResolvedValueOnce({ code: 0, stderr: "", stdout: SS_PROBE_LISTENING_STDOUT })
+    // R-0000613: bypass mutex bookkeeping commands so the scripted sequence
+    // matches the domain calls only.
+    execSpy.mockImplementation(
+      buildMutexAwareExecSequence([
+        { code: 0 }, // mkdir -p /run/sshd
+        { code: 0 }, // sshd -t
+        { code: 0 }, // rm -f <tmpfile>
+        { code: 1 }, // ssh.socket missing
+        { code: 1 }, // sshd.socket missing
+        { code: 0 }, // sshd.service exists
+        { code: 0 }, // sshd.service enabled
+        { kind: "reject", reason: new Error("SSH connection closed unexpectedly") },
+        { code: 0, stdout: SS_PROBE_LISTENING_STDOUT },
+      ])
+    )
 
     const mod = sshd.port(2222)
     const result = await mod.apply(mockSsh, emptyEnv)
@@ -774,13 +902,20 @@ describe("sshd.port — apply: validation and rollback", () => {
     vi.spyOn(mockSsh, "reconnect").mockRejectedValue(reconnectError)
     const removePortSpy = vi.spyOn(mockSsh, "removePort")
 
-    execSpy
-      .mockResolvedValueOnce({ code: 0, stderr: "", stdout: "" }) // mkdir -p /run/sshd
-      .mockResolvedValueOnce({ code: 0, stderr: "", stdout: "" }) // sshd -t
-      .mockResolvedValueOnce({ code: 1, stderr: "", stdout: "" }) // ssh.socket missing
-      .mockResolvedValueOnce({ code: 0, stderr: "", stdout: "" }) // sshd.service exists
-      .mockResolvedValueOnce({ code: 0, stderr: "", stdout: "" }) // sshd.service enabled
-      .mockRejectedValueOnce(new Error("ECONNRESET"))
+    // R-0000613: bypass mutex bookkeeping commands so the scripted sequence
+    // matches the domain calls only.
+    execSpy.mockImplementation(
+      buildMutexAwareExecSequence([
+        { code: 0 }, // mkdir -p /run/sshd
+        { code: 0 }, // sshd -t
+        { code: 0 }, // rm -f <tmpfile>
+        { code: 1 }, // ssh.socket missing
+        { code: 1 }, // sshd.socket missing
+        { code: 0 }, // sshd.service exists
+        { code: 0 }, // sshd.service enabled
+        { kind: "reject", reason: new Error("ECONNRESET") },
+      ])
+    )
 
     const mod = sshd.port(2222)
     const result = await mod.apply(mockSsh, emptyEnv)
@@ -789,6 +924,39 @@ describe("sshd.port — apply: validation and rollback", () => {
     expect(result.error?.message).toContain("before the target port could be verified")
     expect(result.error?.message).toContain("reconnect refused")
     expect(removePortSpy).toHaveBeenCalledWith(2222)
+  })
+
+  // R-0000613: serialise read-modify-write cycles against /etc/ssh/sshd_config
+  // by acquiring the `etc-ssh-sshd-config-mutex` lock around `sshd.port`. A
+  // concurrent `sshd.config` apply on the same host shares the same mutex, so
+  // neither apply can stomp on the other's snapshot.
+  it("R-0000613: acquires the etc-ssh-sshd-config-mutex around the sshd.port apply path", async () => {
+    const mockSsh = createMockSsh({
+      [CAT_SSHD]: { stdout: "Port 22" },
+    })
+    trackWriteFile(mockSsh)
+    const execSpy = vi.spyOn(mockSsh, "exec")
+    mockExecResolvedValue(execSpy, { code: 0 })
+
+    const mod = sshd.port(2222)
+    const result = await mod.apply(mockSsh, emptyEnv)
+
+    expect(result.status).toBe("changed")
+    const execCommands = execSpy.mock.calls.map((args) => args[0])
+    expect(execCommands).toContain("mkdir /var/lib/paratix/flags/'etc-ssh-sshd-config-mutex'")
+    expect(execCommands).toContain("rmdir /var/lib/paratix/flags/'etc-ssh-sshd-config-mutex'")
+    // The mutex must be acquired before any sshd_config writes / restarts and
+    // released only after the apply has finished.
+    const acquireIndex = execCommands.indexOf(
+      "mkdir /var/lib/paratix/flags/'etc-ssh-sshd-config-mutex'"
+    )
+    const restartIndex = execCommands.indexOf("systemctl restart sshd")
+    const releaseIndex = execCommands.indexOf(
+      "rmdir /var/lib/paratix/flags/'etc-ssh-sshd-config-mutex'"
+    )
+    expect(acquireIndex).toBeGreaterThanOrEqual(0)
+    expect(restartIndex).toBeGreaterThan(acquireIndex)
+    expect(releaseIndex).toBeGreaterThan(restartIndex)
   })
 
   it("falls back to ssh.service for restart on Ubuntu-style systems", async () => {
@@ -803,18 +971,23 @@ describe("sshd.port — apply: validation and rollback", () => {
       .mockResolvedValueOnce(originalConfig) // guard read in guardedWriteFile
     const execSpy = vi.spyOn(mockSsh, "exec")
 
-    execSpy
-      .mockResolvedValueOnce({ code: 0, stderr: "", stdout: "" }) // mkdir -p /run/sshd (dry-run)
-      .mockResolvedValueOnce({ code: 0, stderr: "", stdout: "" }) // sshd -t -f <tmpfile>
-      .mockResolvedValueOnce({ code: 0, stderr: "", stdout: "" }) // rm -f <tmpfile>
-      // R-0000608: socket-state probes both `ssh.socket` and `sshd.socket`.
-      .mockResolvedValueOnce({ code: 1, stderr: "", stdout: "" }) // ssh.socket missing
-      .mockResolvedValueOnce({ code: 1, stderr: "", stdout: "" }) // sshd.socket missing
-      .mockResolvedValueOnce({ code: 1, stderr: "", stdout: "" }) // sshd.service not found
-      .mockResolvedValueOnce({ code: 0, stderr: "", stdout: "" }) // ssh.service found
-      .mockResolvedValueOnce({ code: 0, stderr: "", stdout: "" }) // ssh.service is-enabled
-      .mockResolvedValueOnce({ code: 0, stderr: "", stdout: "" }) // systemctl restart ssh
-      .mockResolvedValueOnce({ code: 0, stderr: "", stdout: SS_PROBE_LISTENING_STDOUT }) // ss probe
+    // R-0000613: bypass mutex bookkeeping commands so the scripted sequence
+    // matches the domain calls only.
+    execSpy.mockImplementation(
+      buildMutexAwareExecSequence([
+        { code: 0 }, // mkdir -p /run/sshd (dry-run)
+        { code: 0 }, // sshd -t -f <tmpfile>
+        { code: 0 }, // rm -f <tmpfile>
+        // R-0000608: socket-state probes both `ssh.socket` and `sshd.socket`.
+        { code: 1 }, // ssh.socket missing
+        { code: 1 }, // sshd.socket missing
+        { code: 1 }, // sshd.service not found
+        { code: 0 }, // ssh.service found
+        { code: 0 }, // ssh.service is-enabled
+        { code: 0 }, // systemctl restart ssh
+        { code: 0, stdout: SS_PROBE_LISTENING_STDOUT }, // ss probe
+      ])
+    )
 
     const mod = sshd.port(2222)
     const result = await mod.apply(mockSsh, emptyEnv)

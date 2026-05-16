@@ -13,6 +13,7 @@ import {
   NEEDS_APPLY,
   type SshConnection,
 } from "../types.js"
+import { withMutexLock } from "./moduleHelpers.js"
 import {
   applySshdSettingToContent,
   collectTopLevelSshdDirectiveValues,
@@ -28,6 +29,13 @@ const SSHD_CONFIG_PATH = "/etc/ssh/sshd_config"
 const SSHD_CONFIG_MODE = "0644"
 const SSHD_EFFECTIVE_CONFIG_COMMAND = "sshd -T"
 const SYSTEMCTL = "systemctl"
+// R-0000613: serialise all read-modify-write cycles against /etc/ssh/sshd_config
+// so concurrent `sshd.config(...)` / `sshd.port(...)` applies cannot observe
+// each other's intermediate writes. Without the mutex, a rollback in one apply
+// can stomp on a successful write from a parallel apply (the rollback uses the
+// previously captured `originalConfig`, not the now-current file content). The
+// lock name mirrors `FSTAB_FILE_MUTEX` in `swapFileHelpers.ts`.
+const SSHD_CONFIG_FILE_MUTEX = "etc-ssh-sshd-config-mutex"
 
 // R-0000608: distribution-specific socket-activation units differ in name —
 // Debian/Ubuntu ship `ssh.socket`, while Fedora/RHEL ship `sshd.socket`. The
@@ -1052,6 +1060,21 @@ async function applySshdConfig(
   ssh: SshConnection,
   parameters: { settingNames: string; settings: Record<string, string> }
 ): Promise<ModuleResult> {
+  // R-0000613: hold the sshd_config mutex across the full read-modify-write
+  // cycle so a concurrent `sshd.port(...)` or `sshd.config(...)` apply on the
+  // same host cannot interleave with our write or with the rollback path. The
+  // mutex helper wraps both successful and failed sections with cleanup, so
+  // the lock is released even when an inner step throws.
+  return withMutexLock(ssh, {
+    lockName: SSHD_CONFIG_FILE_MUTEX,
+    section: async () => applySshdConfigUnderLock(ssh, parameters),
+  })
+}
+
+async function applySshdConfigUnderLock(
+  ssh: SshConnection,
+  parameters: { settingNames: string; settings: Record<string, string> }
+): Promise<ModuleResult> {
   const originalConfig = await ssh.readFile(SSHD_CONFIG_PATH)
   const { didChange, newContent } = buildSshdConfigContent(originalConfig, parameters.settings)
   const nonConvergingMatchOverride = rejectNonConvergingSshdMatchOverrides(
@@ -1373,12 +1396,29 @@ async function applyChangedSshdPort(
 }
 
 async function applySshdPort(ssh: SshConnection, targetPort: number): Promise<ModuleResult> {
+  // Reject obviously unsafe targets before acquiring the sshd_config mutex —
+  // these guards do not touch the file at all and surface a meaningful error
+  // even when the lockdir cannot be created (e.g. read-only /var/lib).
   const configuredPortGuard = rejectWhenTargetPortIsNotConfigured(ssh, targetPort)
   if (configuredPortGuard != null) return configuredPortGuard
 
   const ufwGuard = await rejectWhenUfwBlocksTargetPort(ssh, targetPort)
   if (ufwGuard != null) return ufwGuard
 
+  // R-0000613: share the same `/etc/ssh/sshd_config` mutex with `sshd.config`
+  // so two parallel apply paths cannot race on the read-modify-write cycle.
+  // The lock is released through the helper's finally block, including when
+  // the inner restart path throws or rolls back.
+  return withMutexLock(ssh, {
+    lockName: SSHD_CONFIG_FILE_MUTEX,
+    section: async () => applySshdPortUnderLock(ssh, targetPort),
+  })
+}
+
+async function applySshdPortUnderLock(
+  ssh: SshConnection,
+  targetPort: number
+): Promise<ModuleResult> {
   const { port: originalPort } = ssh.getConnectionInfo()
   const originalConfig = await ssh.readFile(SSHD_CONFIG_PATH)
   const { didChange, newContent } = buildSshdPortContent(originalConfig, targetPort)

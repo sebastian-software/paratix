@@ -6,55 +6,76 @@ import { sshd } from "../../../src/modules/sshd.js"
 import { createMockSsh as createBaseMockSsh } from "../../helpers/mockSsh.js"
 
 const createMockSsh: typeof createBaseMockSsh = (responses, options) =>
-  createBaseMockSsh(responses, {
-    ...options,
-    allowWrites: [
-      // R-0000587: dry-run tempfiles carry restrictive 0600 permissions.
-      { options: { mode: "0600" }, remotePath: /^\/tmp\/paratix-sshd-dry-run-/v },
-      ...(options?.allowWrites ?? []),
-    ],
-    responseStubs: [
-      { command: "mkdir -p '/run/sshd'", result: { code: 0 } },
-      { command: "sshd -t", result: { code: 0 } },
-      // R-0000539: validateProspectiveSshdConfig writes a temp file and validates
-      // it with `sshd -t -f <UUID>.conf` before overwriting the live config.
-      { command: /^sshd -t -f '\/tmp\/paratix-sshd-dry-run-[^']+\.conf'$/v, result: { code: 0 } },
-      { command: SYSTEMCTL_CAT_SSHD, result: { code: 0 } },
-      { command: SYSTEMCTL_CAT_SSH, result: { code: 1 } },
-      { command: "systemctl is-enabled --quiet sshd.service", result: { code: 0 } },
-      { command: "systemctl is-enabled --quiet ssh.service", result: { code: 0 } },
-      // R-0000496: sshd.config probes for ExecReload before reloading.
-      {
-        command: "systemctl cat 'sshd' | grep -E '^ExecReload='",
-        result: { code: 0, stdout: "ExecReload=/bin/kill -HUP $MAINPID\n" },
-      },
-      {
-        command: "systemctl cat 'ssh' | grep -E '^ExecReload='",
-        result: { code: 0, stdout: "ExecReload=/bin/kill -HUP $MAINPID\n" },
-      },
-      { command: "systemctl reload sshd", result: { code: 0 } },
-      { command: "systemctl reload ssh", result: { code: 0 } },
-      { command: "systemctl reload-or-restart sshd", result: { code: 0 } },
-      { command: "systemctl reload-or-restart ssh", result: { code: 0 } },
-      // R-0000492: socket-state probes no longer use shell redirects.
-      // R-0000608: `captureSshSocketState` now probes both `ssh.socket`
-      // (Debian/Ubuntu) and `sshd.socket` (Fedora/RHEL); both default-miss
-      // here so the default Debian/Ubuntu service-restart path stays selected.
-      { command: "systemctl cat ssh.socket", result: { code: 1 } },
-      { command: "systemctl cat sshd.socket", result: { code: 1 } },
-      { command: "systemctl is-enabled --quiet ssh.socket", result: { code: 1 } },
-      { command: "systemctl is-active --quiet ssh.socket", result: { code: 1 } },
-      { command: "systemctl is-enabled --quiet sshd.socket", result: { code: 1 } },
-      { command: "systemctl is-active --quiet sshd.socket", result: { code: 1 } },
-      { command: "systemctl disable --now ssh.socket", result: { code: 0 } },
-      { command: "systemctl disable --now sshd.socket", result: { code: 0 } },
-      { command: "systemctl enable --now ssh.socket", result: { code: 0 } },
-      { command: "systemctl enable --now sshd.socket", result: { code: 0 } },
-      { command: "systemctl restart sshd", result: { code: 0 } },
-      { command: /^rm -f '\/tmp\/paratix-sshd-dry-run-.+\.conf'$/v, result: { code: 0 } },
-      ...(options?.responseStubs ?? []),
-    ],
-  })
+  createBaseMockSsh(
+    // R-0000613: the flag-lock holder marker uses `ssh.output("hostname")`;
+    // stub the lookup with an empty string so the printf form matches the
+    // default flag-lock allow list.
+    { hostname: { code: 0, stdout: "" }, ...responses },
+    {
+      ...options,
+      // R-0000613: sshd.config and sshd.port apply paths now serialise through
+      // a shared `/etc/ssh/sshd_config` mutex; opt into the default flag-lock
+      // internal stubs so the tests do not need to spell out every mkdir/rmdir.
+      allowFlagLockInternalDefaults: true,
+      allowWrites: [
+        // R-0000587: dry-run tempfiles carry restrictive 0600 permissions.
+        { options: { mode: "0600" }, remotePath: /^\/tmp\/paratix-sshd-dry-run-/v },
+        ...(options?.allowWrites ?? []),
+      ],
+      responseStubs: [
+        // R-0000613: the holder-printf shell command writes the lock marker
+        // file; the mutex helper invokes it after the hostname lookup.
+        {
+          command: /^printf '%s@%s %s\\n' "\$\$" '' "\$\(date \+%s\)" > \S+\/holder$/v,
+          result: { code: 0 },
+        },
+        { command: "mkdir -p '/run/sshd'", result: { code: 0 } },
+        { command: "sshd -t", result: { code: 0 } },
+        // R-0000539: validateProspectiveSshdConfig writes a temp file and
+        // validates it with `sshd -t -f <UUID>.conf` before overwriting the
+        // live config.
+        {
+          command: /^sshd -t -f '\/tmp\/paratix-sshd-dry-run-[^']+\.conf'$/v,
+          result: { code: 0 },
+        },
+        { command: SYSTEMCTL_CAT_SSHD, result: { code: 0 } },
+        { command: SYSTEMCTL_CAT_SSH, result: { code: 1 } },
+        { command: "systemctl is-enabled --quiet sshd.service", result: { code: 0 } },
+        { command: "systemctl is-enabled --quiet ssh.service", result: { code: 0 } },
+        // R-0000496: sshd.config probes for ExecReload before reloading.
+        {
+          command: "systemctl cat 'sshd' | grep -E '^ExecReload='",
+          result: { code: 0, stdout: "ExecReload=/bin/kill -HUP $MAINPID\n" },
+        },
+        {
+          command: "systemctl cat 'ssh' | grep -E '^ExecReload='",
+          result: { code: 0, stdout: "ExecReload=/bin/kill -HUP $MAINPID\n" },
+        },
+        { command: "systemctl reload sshd", result: { code: 0 } },
+        { command: "systemctl reload ssh", result: { code: 0 } },
+        { command: "systemctl reload-or-restart sshd", result: { code: 0 } },
+        { command: "systemctl reload-or-restart ssh", result: { code: 0 } },
+        // R-0000492: socket-state probes no longer use shell redirects.
+        // R-0000608: `captureSshSocketState` now probes both `ssh.socket`
+        // (Debian/Ubuntu) and `sshd.socket` (Fedora/RHEL); both default-miss
+        // here so the default Debian/Ubuntu service-restart path stays
+        // selected.
+        { command: "systemctl cat ssh.socket", result: { code: 1 } },
+        { command: "systemctl cat sshd.socket", result: { code: 1 } },
+        { command: "systemctl is-enabled --quiet ssh.socket", result: { code: 1 } },
+        { command: "systemctl is-active --quiet ssh.socket", result: { code: 1 } },
+        { command: "systemctl is-enabled --quiet sshd.socket", result: { code: 1 } },
+        { command: "systemctl is-active --quiet sshd.socket", result: { code: 1 } },
+        { command: "systemctl disable --now ssh.socket", result: { code: 0 } },
+        { command: "systemctl disable --now sshd.socket", result: { code: 0 } },
+        { command: "systemctl enable --now ssh.socket", result: { code: 0 } },
+        { command: "systemctl enable --now sshd.socket", result: { code: 0 } },
+        { command: "systemctl restart sshd", result: { code: 0 } },
+        { command: /^rm -f '\/tmp\/paratix-sshd-dry-run-.+\.conf'$/v, result: { code: 0 } },
+        ...(options?.responseStubs ?? []),
+      ],
+    }
+  )
 
 const emptyEnv = {}
 const SSHD_CONFIG = "/etc/ssh/sshd_config"
@@ -74,6 +95,49 @@ function trackWriteFile(
     return Promise.resolve()
   })
   return writtenFiles
+}
+
+// R-0000613: sshd.config now serialises through a shared `/etc/ssh/sshd_config`
+// mutex; tests using a strict `mockResolvedValueOnce` sequence need to skip the
+// mutex bookkeeping commands so the queue stays aligned with the production
+// domain calls being asserted.
+const MUTEX_BOOKKEEPING_PATTERNS_05: RegExp[] = [
+  /^mkdir -p \/var\/lib\/paratix\/flags$/v,
+  /^mkdir \/var\/lib\/paratix\/flags\/'[\w.\-]+-mutex'$/v,
+  /^rmdir \/var\/lib\/paratix\/flags\/'[\w.\-]+-mutex'$/v,
+  /^rm -f \/var\/lib\/paratix\/flags\/'[\w.\-]+-mutex'\/holder$/v,
+  /^printf '%s@%s %s\\n' "\$\$" '[^']*' "\$\(date \+%s\)" > \/var\/lib\/paratix\/flags\/'[\w.\-]+-mutex'\/holder$/v,
+  /^if \[ -d \/var\/lib\/paratix\/flags\/'[\w.\-]+-mutex' \]/v,
+  /^i=0; while \[ -d \/var\/lib\/paratix\/flags\/'[\w.\-]+-mutex' \]/v,
+  /^hostname$/v,
+]
+
+function isMutexBookkeepingCommand05(command: string): boolean {
+  return MUTEX_BOOKKEEPING_PATTERNS_05.some((pattern) => pattern.test(command))
+}
+
+type ScriptedExecStep05 =
+  | { code: number; stderr?: string; stdout?: string }
+  | { kind: "reject"; reason: Error }
+
+function buildMutexAwareExecSequence05(
+  steps: readonly ScriptedExecStep05[]
+): ReturnType<typeof createMockSsh>["exec"] {
+  let cursor = 0
+  return async (command) => {
+    if (isMutexBookkeepingCommand05(command)) {
+      await Promise.resolve()
+      return { code: 0, stderr: "", stdout: "" }
+    }
+    const step = steps[cursor] ?? { code: 0, stderr: "", stdout: "" }
+    cursor += 1
+    if ("kind" in step) {
+      await Promise.resolve()
+      throw step.reason
+    }
+    await Promise.resolve()
+    return { code: step.code, stderr: step.stderr ?? "", stdout: step.stdout ?? "" }
+  }
 }
 
 function mockSshdDryRunExecSuccess(mockSsh: ReturnType<typeof createMockSsh>) {
@@ -379,9 +443,9 @@ describe("sshd.config — apply: validation and rollback", () => {
     const writtenFiles = trackWriteFile(mockSsh)
     const execSpy = vi.spyOn(mockSsh, "exec")
 
-    execSpy
-      .mockResolvedValueOnce({ code: 1, stderr: "", stdout: "" })
-      .mockResolvedValueOnce({ code: 1, stderr: "", stdout: "" })
+    // R-0000613: bypass mutex bookkeeping commands so the scripted sequence
+    // matches the domain calls only.
+    execSpy.mockImplementation(buildMutexAwareExecSequence05([{ code: 1 }, { code: 1 }]))
 
     const mod = sshd.config({ PasswordAuthentication: "no" })
     const result = await mod.apply(mockSsh, emptyEnv)
@@ -389,10 +453,12 @@ describe("sshd.config — apply: validation and rollback", () => {
     expect(result.status).toBe("failed")
     expect(result.error?.message).toContain("could not find a systemd SSH service unit")
     expect(writtenFiles).toHaveLength(0)
-    expect(execSpy.mock.calls.map((args) => args[0])).toStrictEqual([
-      SYSTEMCTL_CAT_SSHD,
-      SYSTEMCTL_CAT_SSH,
-    ])
+    // R-0000613: filter mutex bookkeeping commands so the strict ordering
+    // assertion sees only the domain calls.
+    const domainCommands = execSpy.mock.calls
+      .map((args) => args[0])
+      .filter((cmd) => !isMutexBookkeepingCommand05(cmd))
+    expect(domainCommands).toStrictEqual([SYSTEMCTL_CAT_SSHD, SYSTEMCTL_CAT_SSH])
   })
 
   // R-0000284: a reload failure followed by a failing rollback writeFile
