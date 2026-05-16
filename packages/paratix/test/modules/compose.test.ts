@@ -18,7 +18,7 @@ const projectDirectory = "/opt/app"
 const remotePath = `${projectDirectory}/compose.yml`
 const stagingPath = `${projectDirectory}/.compose.yml.paratix-staging.ABCDEF`
 const secondStagingPath = `${projectDirectory}/.compose.yml.paratix-staging.SECOND`
-const mktempCommand = `mktemp '${projectDirectory}/.compose.yml.paratix-staging.XXXXXX'`
+const mktempCommand = `mktemp -p '${projectDirectory}' -- '.compose.yml.paratix-staging.XXXXXX'`
 
 // Helper: build the compose command prefix for a given runtime
 function composeCmd(runtime: "docker" | "podman"): string {
@@ -705,7 +705,7 @@ describe("compose.config — apply", () => {
       [`[ -e '${remotePath}' ]`]: { code: 1 },
       [`${composeCmd("podman")} -f '${stagingPath}' config --quiet`]: { code: 0 },
       [`mv -T '${stagingPath}' '${remotePath}'`]: { code: 0 },
-      [`rm -f '${stagingPath}'`]: { code: 0 },
+      [`rm -f -- '${stagingPath}'`]: { code: 0 },
     })
     // eslint-disable-next-line @typescript-eslint/require-await -- Mock implementation
     mockSsh.writeFile = async (path: string, content: string): Promise<void> => {
@@ -719,7 +719,7 @@ describe("compose.config — apply", () => {
     expect(writtenFiles[0]?.content).toBe(sampleContent)
     expect(mockSsh.calls).toContain(`${composeCmd("podman")} -f '${stagingPath}' config --quiet`)
     expect(mockSsh.calls).toContain(`mv -T '${stagingPath}' '${remotePath}'`)
-    expect(mockSsh.calls).toContain(`rm -f '${stagingPath}'`)
+    expect(mockSsh.calls).toContain(`rm -f -- '${stagingPath}'`)
   })
 
   it("uses a distinct mktemp staging path for parallel applies", async () => {
@@ -729,8 +729,8 @@ describe("compose.config — apply", () => {
       [`${composeCmd("podman")} -f '${stagingPath}' config --quiet`]: { code: 0 },
       [`mv -T '${secondStagingPath}' '${remotePath}'`]: { code: 0 },
       [`mv -T '${stagingPath}' '${remotePath}'`]: { code: 0 },
-      [`rm -f '${secondStagingPath}'`]: { code: 0 },
-      [`rm -f '${stagingPath}'`]: { code: 0 },
+      [`rm -f -- '${secondStagingPath}'`]: { code: 0 },
+      [`rm -f -- '${stagingPath}'`]: { code: 0 },
     })
     const outputMock = vi
       .spyOn(mockSsh, "output")
@@ -758,8 +758,8 @@ describe("compose.config — apply", () => {
     expect(mockSsh.calls).toContain(
       `${composeCmd("podman")} -f '${secondStagingPath}' config --quiet`
     )
-    expect(mockSsh.calls).toContain(`rm -f '${stagingPath}'`)
-    expect(mockSsh.calls).toContain(`rm -f '${secondStagingPath}'`)
+    expect(mockSsh.calls).toContain(`rm -f -- '${stagingPath}'`)
+    expect(mockSsh.calls).toContain(`rm -f -- '${secondStagingPath}'`)
   })
 
   it("uploads src file with the explicit COMPOSE_CONFIG_MODE and validates", async () => {
@@ -772,7 +772,7 @@ describe("compose.config — apply", () => {
       [`[ -e '${remotePath}' ]`]: { code: 1 },
       [`${composeCmd("podman")} -f '${stagingPath}' config --quiet`]: { code: 0 },
       [`mv -T '${stagingPath}' '${remotePath}'`]: { code: 0 },
-      [`rm -f '${stagingPath}'`]: { code: 0 },
+      [`rm -f -- '${stagingPath}'`]: { code: 0 },
     })
     mockSsh.uploadFile = async (
       src: string,
@@ -840,13 +840,13 @@ describe("compose.config — apply", () => {
     const mockSsh = createComposeMockSsh({
       [`[ -e '${remotePath}' ]`]: { code: 1 },
       [`${composeCmd("podman")} -f '${stagingPath}' config --quiet`]: { code: 1 },
-      [`rm -f '${stagingPath}'`]: { code: 0 },
+      [`rm -f -- '${stagingPath}'`]: { code: 0 },
     })
     const mod = compose.config({ content: sampleContent, projectDirectory })
     const result = await mod.apply(mockSsh, emptyEnv)
     expect(result.status).toBe("failed")
     // R-0000228: the staging file is cleaned up but never moved over compose.yml.
-    expect(mockSsh.calls).toContain(`rm -f '${stagingPath}'`)
+    expect(mockSsh.calls).toContain(`rm -f -- '${stagingPath}'`)
     expect(mockSsh.calls).not.toContain(`mv -T '${stagingPath}' '${remotePath}'`)
   })
 
@@ -871,7 +871,7 @@ describe("compose.config — apply", () => {
       [`[ -e '${remotePath}' ]`]: { code: 0 },
       [`${composeCmd("podman")} -f '${stagingPath}' config --quiet`]: { code: 1 },
       [`cat '${remotePath}'`]: { code: 0, stdout: priorContent },
-      [`rm -f '${stagingPath}'`]: { code: 0 },
+      [`rm -f -- '${stagingPath}'`]: { code: 0 },
     })
     mockSsh.writeFile = async (
       path: string,
@@ -892,7 +892,7 @@ describe("compose.config — apply", () => {
     expect(writtenFiles[0]?.path).toBe(stagingPath)
     expect(writtenFiles[0]?.content).toBe("broken: yaml: [\n")
     expect(mockSsh.calls).not.toContain(`mv -T '${stagingPath}' '${remotePath}'`)
-    expect(mockSsh.calls).toContain(`rm -f '${stagingPath}'`)
+    expect(mockSsh.calls).toContain(`rm -f -- '${stagingPath}'`)
   })
 
   // R-0000228: when validation throws (e.g. compose CLI itself crashes),
@@ -906,7 +906,7 @@ describe("compose.config — apply", () => {
     }> = []
     const mockSsh = createComposeMockSsh({
       [`[ -e '${remotePath}' ]`]: { code: 0 },
-      [`rm -f '${stagingPath}'`]: { code: 0 },
+      [`rm -f -- '${stagingPath}'`]: { code: 0 },
     })
     // Target the compose validation command explicitly rather than relying on
     // call order: only throw when the validation command (`config --quiet`) is
@@ -930,7 +930,7 @@ describe("compose.config — apply", () => {
     // The staging write happened, validation threw, finally removed staging.
     expect(writtenFiles).toHaveLength(1)
     expect(writtenFiles[0]?.path).toBe(stagingPath)
-    expect(mockSsh.calls).toContain(`rm -f '${stagingPath}'`)
+    expect(mockSsh.calls).toContain(`rm -f -- '${stagingPath}'`)
     expect(mockSsh.calls).not.toContain(`mv -T '${stagingPath}' '${remotePath}'`)
   })
 
@@ -955,7 +955,7 @@ describe("compose.config — apply", () => {
       [`[ -e '${remotePath}' ]`]: { code: 0 },
       [`${composeCmd("podman")} -f '${stagingPath}' config --quiet`]: { code: 1 },
       [`cat '${remotePath}'`]: { code: 0, stdout: priorContent },
-      [`rm -f '${stagingPath}'`]: { code: 0 },
+      [`rm -f -- '${stagingPath}'`]: { code: 0 },
     })
     mockSsh.uploadFile = async (
       src: string,
@@ -985,7 +985,7 @@ describe("compose.config — apply", () => {
     expect(uploadedFiles[0]?.dest).toBe(stagingPath)
     expect(writtenFiles).toHaveLength(0)
     expect(mockSsh.calls).not.toContain(`mv -T '${stagingPath}' '${remotePath}'`)
-    expect(mockSsh.calls).toContain(`rm -f '${stagingPath}'`)
+    expect(mockSsh.calls).toContain(`rm -f -- '${stagingPath}'`)
   })
 
   it("removes the staging file on validation failure when no prior file existed", async () => {
@@ -993,7 +993,7 @@ describe("compose.config — apply", () => {
     const mockSsh = createComposeMockSsh({
       [`[ -e '${remotePath}' ]`]: { code: 1 },
       [`${composeCmd("podman")} -f '${stagingPath}' config --quiet`]: { code: 1 },
-      [`rm -f '${stagingPath}'`]: { code: 0 },
+      [`rm -f -- '${stagingPath}'`]: { code: 0 },
     })
     // eslint-disable-next-line @typescript-eslint/require-await -- Mock implementation
     mockSsh.writeFile = async (path: string, content: string): Promise<void> => {
@@ -1007,7 +1007,7 @@ describe("compose.config — apply", () => {
     // Only the staging write happened; cleanup removed it.
     expect(writtenFiles).toHaveLength(1)
     expect(writtenFiles[0]?.path).toBe(stagingPath)
-    expect(mockSsh.calls).toContain(`rm -f '${stagingPath}'`)
+    expect(mockSsh.calls).toContain(`rm -f -- '${stagingPath}'`)
   })
 })
 
@@ -1150,7 +1150,7 @@ const unitFilePath = `/etc/systemd/system/${defaultServiceName}.service`
 const systemdUnitFallbackTempPath =
   "/etc/systemd/system/.compose-systemd-unit.paratix-staging.ABCDEF"
 const systemdUnitFallbackMktempCommand =
-  "mktemp '/etc/systemd/system/.compose-systemd-unit.paratix-staging.XXXXXX'"
+  "mktemp -p '/etc/systemd/system' -- '.compose-systemd-unit.paratix-staging.XXXXXX'"
 
 function composeSystemdRecoveryResponses(
   serviceName = defaultServiceName,
@@ -1161,7 +1161,7 @@ function composeSystemdRecoveryResponses(
     [`[ -L '${filePath}' ]`]: { code: 1 },
     [`cat '${filePath}'`]: { code: 0, stdout: "[Unit]\nDescription=previous\n" },
     [`chown 'root:root' '${filePath}'`]: { code: 0 },
-    [`rm -f '${filePath}'`]: { code: 0 },
+    [`rm -f -- '${filePath}'`]: { code: 0 },
     [`stat -c '%a' '${filePath}'`]: { code: 0, stdout: "644" },
     [`stat -c '%U:%G' '${filePath}'`]: { code: 0, stdout: "root:root" },
     [`systemctl is-enabled -- '${serviceName}.service'`]: { code: 0, stdout: "masked\n" },
@@ -1175,7 +1175,7 @@ function buildComposeSystemdShellFallbackCommand(
   temporaryPath = systemdUnitFallbackTempPath
 ): string {
   const encodedContent = Buffer.from(content, "utf8").toString("base64")
-  return `{ printf '%s' '${encodedContent}' | base64 -d > '${temporaryPath}' && chmod '0644' '${temporaryPath}' && chown 'root:root' '${temporaryPath}' && if [ -L '${filePath}' ]; then rm -f '${temporaryPath}'; exit 73; fi && mv -f -T '${temporaryPath}' '${filePath}'; } || { status=$?; rm -f '${temporaryPath}'; exit "$status"; }`
+  return `{ printf '%s' '${encodedContent}' | base64 -d > '${temporaryPath}' && chmod '0644' '${temporaryPath}' && chown 'root:root' '${temporaryPath}' && if [ -L '${filePath}' ]; then rm -f -- '${temporaryPath}'; exit 73; fi && mv -f -T '${temporaryPath}' '${filePath}'; } || { status=$?; rm -f -- '${temporaryPath}'; exit "$status"; }`
 }
 
 describe("compose.systemd — check", () => {
@@ -1537,7 +1537,7 @@ describe("compose.systemd — apply", () => {
     expect(result.status).toBe("failed")
     expect(String(result.error)).toContain("atomic write failed")
     expect(mockSsh.calls).toContain("systemctl unmask -- 'compose-app.service'")
-    expect(mockSsh.calls).not.toContain("rm -f '/etc/systemd/system/compose-app.service'")
+    expect(mockSsh.calls).not.toContain("rm -f -- '/etc/systemd/system/compose-app.service'")
     expect(mockSsh.calls).not.toContain("systemctl daemon-reload")
   })
 
@@ -1624,7 +1624,7 @@ describe("compose.systemd — apply", () => {
     const result = await mod.apply(mockSsh, emptyEnv)
 
     expect(result.status).toBe("changed")
-    expect(mockSsh.calls).not.toContain("rm -f '/etc/systemd/system/compose-app.service'")
+    expect(mockSsh.calls).not.toContain("rm -f -- '/etc/systemd/system/compose-app.service'")
     expect(mockSsh.calls).toContain(systemdUnitFallbackMktempCommand)
     expect(mockSsh.calls).toContain(
       buildComposeSystemdShellFallbackCommand(unitFilePath, expectedUnit)
@@ -1654,7 +1654,7 @@ describe("compose.systemd — apply", () => {
     const fallbackCommand = buildComposeSystemdShellFallbackCommand(unitFilePath, expectedUnit)
     const mockSsh = createComposeMockSsh({
       ...composeSystemdRecoveryResponses(),
-      [`rm -f '${systemdUnitFallbackTempPath}'`]: { code: 0 },
+      [`rm -f -- '${systemdUnitFallbackTempPath}'`]: { code: 0 },
       [fallbackCommand]: { code: 73, stderr: "unit path became a symlink" },
       [systemdUnitFallbackMktempCommand]: { code: 0, stdout: `${systemdUnitFallbackTempPath}\n` },
     })
@@ -1709,7 +1709,7 @@ describe("compose.systemd — apply", () => {
       },
     ])
     expect(mockSsh.calls).toContain("systemctl unmask -- 'mailcow.service'")
-    expect(mockSsh.calls).not.toContain("rm -f '/etc/systemd/system/mailcow.service'")
+    expect(mockSsh.calls).not.toContain("rm -f -- '/etc/systemd/system/mailcow.service'")
     expect(mockSsh.calls).toContain("systemctl daemon-reload")
   })
 })
