@@ -124,7 +124,12 @@ function authorizedKeysFinalReplaceCommand(parameters: {
     temporaryPath,
     user,
   } = parameters
-  return `chmod 600 '${temporaryPath}' && chown '${user}':'${group}' '${temporaryPath}' && { expected_authorized_keys_hash=$(sha256sum '${temporaryPath}' | cut -d' ' -f1) || exit $?; [ ! -L ${sshDirectoryPath} ] || { echo '.ssh must not be a symlink' >&2; exit 1; }; [ -d ${sshDirectoryPath} ] || { echo '.ssh must be a directory' >&2; exit 1; }; ssh_directory_state=$(stat -c '%a %U %G %F' ${sshDirectoryPath}) || exit $?; [ "$ssh_directory_state" = '${expectedSshDirectoryState}' ] || { echo '.ssh ownership changed before authorized_keys replace' >&2; exit 1; }; [ ! -L ${authorizedKeysPath} ] || { echo 'authorized_keys must not be a symlink' >&2; exit 1; }; if [ -e ${authorizedKeysPath} ]; then [ -f ${authorizedKeysPath} ] || { echo 'authorized_keys must be a regular file' >&2; exit 1; }; rm -f -- ${authorizedKeysPath}; fi; mv -T -n -- '${temporaryPath}' ${authorizedKeysPath} || { echo 'authorized_keys was recreated during replace; refusing to clobber' >&2; exit 1; }; [ ! -e '${temporaryPath}' ] || { echo 'authorized_keys replace did not consume temporary file' >&2; exit 1; }; [ ! -L ${authorizedKeysPath} ] || { echo 'authorized_keys must not be a symlink' >&2; exit 1; }; [ -f ${authorizedKeysPath} ] || { echo 'authorized_keys must be a regular file' >&2; exit 1; }; authorized_keys_state=$(stat -c '%a %U %G %F' ${authorizedKeysPath}) || exit $?; [ "$authorized_keys_state" = '600 ${user} ${group} regular file' ] || { echo 'authorized_keys metadata changed during replace' >&2; exit 1; }; authorized_keys_hash=$(sha256sum ${authorizedKeysPath} | cut -d' ' -f1) || exit $?; [ "$authorized_keys_hash" = "$expected_authorized_keys_hash" ] || { echo 'authorized_keys content changed during replace' >&2; exit 1; }; }`
+  // R-0000610: hardlink-backup variant. The pre-existing destination is
+  // hardlinked to `<authorized_keys>.paratix-backup` before the atomic
+  // rename, so a failing `mv` can restore the original via a second
+  // atomic rename. The backup is removed once verification succeeds.
+  const backupPath = `${authorizedKeysPath.slice(0, -1)}.paratix-backup'`
+  return `chmod 600 '${temporaryPath}' && chown '${user}':'${group}' '${temporaryPath}' && { expected_authorized_keys_hash=$(sha256sum '${temporaryPath}' | cut -d' ' -f1) || exit $?; [ ! -L ${sshDirectoryPath} ] || { echo '.ssh must not be a symlink' >&2; exit 1; }; [ -d ${sshDirectoryPath} ] || { echo '.ssh must be a directory' >&2; exit 1; }; ssh_directory_state=$(stat -c '%a %U %G %F' ${sshDirectoryPath}) || exit $?; [ "$ssh_directory_state" = '${expectedSshDirectoryState}' ] || { echo '.ssh ownership changed before authorized_keys replace' >&2; exit 1; }; [ ! -L ${authorizedKeysPath} ] || { echo 'authorized_keys must not be a symlink' >&2; exit 1; }; rm -f -- ${backupPath}; backup_created=0; if [ -e ${authorizedKeysPath} ]; then [ -f ${authorizedKeysPath} ] || { echo 'authorized_keys must be a regular file' >&2; exit 1; }; ln -- ${authorizedKeysPath} ${backupPath} || { echo 'failed to create authorized_keys backup hardlink' >&2; exit 1; }; backup_created=1; fi; [ ! -L ${authorizedKeysPath} ] || { rm -f -- ${backupPath}; echo 'authorized_keys must not be a symlink' >&2; exit 1; }; if ! mv -T -- '${temporaryPath}' ${authorizedKeysPath}; then if [ "$backup_created" = 1 ]; then mv -T -- ${backupPath} ${authorizedKeysPath} || echo 'authorized_keys backup restore failed; backup is at '${backupPath} >&2; fi; echo 'authorized_keys replace failed' >&2; exit 1; fi; [ ! -e '${temporaryPath}' ] || { rm -f -- ${backupPath}; echo 'authorized_keys replace did not consume temporary file' >&2; exit 1; }; [ ! -L ${authorizedKeysPath} ] || { rm -f -- ${backupPath}; echo 'authorized_keys must not be a symlink' >&2; exit 1; }; [ -f ${authorizedKeysPath} ] || { rm -f -- ${backupPath}; echo 'authorized_keys must be a regular file' >&2; exit 1; }; authorized_keys_state=$(stat -c '%a %U %G %F' ${authorizedKeysPath}) || { rm -f -- ${backupPath}; exit 1; }; [ "$authorized_keys_state" = '600 ${user} ${group} regular file' ] || { rm -f -- ${backupPath}; echo 'authorized_keys metadata changed during replace' >&2; exit 1; }; authorized_keys_hash=$(sha256sum ${authorizedKeysPath} | cut -d' ' -f1) || { rm -f -- ${backupPath}; exit 1; }; [ "$authorized_keys_hash" = "$expected_authorized_keys_hash" ] || { rm -f -- ${backupPath}; echo 'authorized_keys content changed during replace' >&2; exit 1; }; rm -f -- ${backupPath}; }`
 }
 
 /**
@@ -722,16 +727,18 @@ describe("ssh.authorizedKeys", () => {
     expect(mockSsh.calls).not.toContain(aliceMktempPattern)
   })
 
-  // R-0000285: harden the final rename against a symlink race. When the
-  // shell pipeline as a whole reports failure (e.g. because `mv -T -n`
-  // refused to clobber a recreated symlink), apply must surface a
-  // structured failure rather than letting the mutation throw.
+  // R-0000285 / R-0000610: harden the final rename against a symlink race.
+  // The shell now hardlinks the existing authorized_keys to a sibling
+  // backup before the rename and re-checks `[ ! -L ]` immediately after,
+  // so a destination that turns into a symlink during the race window is
+  // caught by the post-`ln` symlink guard. Apply must surface that as a
+  // structured failure instead of letting the mutation throw.
   it("R-0000285: returns failed when authorized_keys was recreated as a symlink during replace", async () => {
     const mockSsh = createMockSsh(
       aliceResponses({
         [aliceFinalReplaceCommand]: {
           code: 1,
-          stderr: "authorized_keys was recreated during replace; refusing to clobber",
+          stderr: "authorized_keys must not be a symlink",
         },
         [aliceMktempPattern]: { stdout: tempPath },
       }),
@@ -742,7 +749,7 @@ describe("ssh.authorizedKeys", () => {
     const result = await mod.apply(mockSsh, emptyEnv)
 
     expect(result.status).toBe("failed")
-    expect(String(result.error)).toContain("authorized_keys was recreated during replace")
+    expect(String(result.error)).toContain("authorized_keys must not be a symlink")
     expect(mockSsh.calls).toContain(aliceFinalReplaceCommand)
   })
 

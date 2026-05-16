@@ -39,6 +39,7 @@
     "groupadd",
     "groupdel",
     "hardlink",
+    "hardlinked",
     "hardlinks",
     "hashicorp",
     "healthcheck",

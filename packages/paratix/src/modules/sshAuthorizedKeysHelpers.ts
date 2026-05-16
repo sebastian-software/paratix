@@ -257,18 +257,31 @@ async function replaceAuthorizedKeysAtomically(
   // `mv -T` previously overwrote the target unconditionally; an attacker who
   // could win the race between the `[ ! -L ]` probe and the move could
   // redirect the write through a malicious symlink. We now (1) reject
-  // symlinks up front, (2) explicitly unlink the existing regular file via
-  // `rm -f --` while still holding the directory, and (3) run `mv -T -n` so
-  // even if a symlink is recreated in the gap the rename refuses to clobber
-  // it. The combined `--` end-of-options markers guard against pathological
-  // names beginning with `-`.
+  // symlinks up front, (2) keep a hardlink backup of the existing regular
+  // file in the same directory so the original `authorized_keys` content is
+  // recoverable even if the rename fails, and (3) run `mv -T --` so the
+  // rename(2) call atomically replaces the destination (regular file) in a
+  // single step instead of going through a `rm + mv` window during which the
+  // user has no authorized_keys at all. The combined `--` end-of-options
+  // markers guard against pathological names beginning with `-`.
   //
-  // GNU `mv -n` may report success when it skipped the rename. Keep the
-  // expected temp-file digest and verify, in the same final shell block, that
-  // the temp path disappeared and the destination is the exact regular file
-  // we staged.
+  // R-0000610: the previous `rm -f -- $auth_keys; mv -T -n -- $tmp
+  // $auth_keys` sequence could leave the user without any authorized_keys
+  // (and thus locked out) when `rm` succeeded but the subsequent `mv -T -n`
+  // failed — e.g. because the destination reappeared as a symlink in the
+  // race window, or because the rename hit ENOSPC/ENOMEM. We now keep a
+  // hardlink under `<authorized_keys>.paratix-backup` for the duration of
+  // the rename. If `mv` fails, we restore the backup back to
+  // `authorized_keys` via a second atomic rename; if it succeeds, we delete
+  // the backup at the end of the shell block. The hardlink lives on the
+  // same filesystem and the same directory as the destination, so both
+  // renames remain atomic.
+  //
+  // Keep the expected temp-file digest and verify, in the same final shell
+  // block, that the destination is the exact regular file we staged.
+  const quotedBackupPath = shellQuote(`${authorizedKeysPath}.paratix-backup`)
   const replace = await conn.exec(
-    `chmod 600 ${quotedTemporaryPath} && chown ${shellQuote(user)}:${shellQuote(primaryGroup)} ${quotedTemporaryPath} && { expected_authorized_keys_hash=$(sha256sum ${quotedTemporaryPath} | cut -d' ' -f1) || exit $?; [ ! -L ${quotedSshDirectoryPath} ] || { echo '.ssh must not be a symlink' >&2; exit 1; }; [ -d ${quotedSshDirectoryPath} ] || { echo '.ssh must be a directory' >&2; exit 1; }; ssh_directory_state=$(stat -c '%a %U %G %F' ${quotedSshDirectoryPath}) || exit $?; [ "$ssh_directory_state" = ${expectedSshDirectoryState} ] || { echo '.ssh ownership changed before authorized_keys replace' >&2; exit 1; }; [ ! -L ${quotedAuthorizedKeysPath} ] || { echo 'authorized_keys must not be a symlink' >&2; exit 1; }; if [ -e ${quotedAuthorizedKeysPath} ]; then [ -f ${quotedAuthorizedKeysPath} ] || { echo 'authorized_keys must be a regular file' >&2; exit 1; }; rm -f -- ${quotedAuthorizedKeysPath}; fi; mv -T -n -- ${quotedTemporaryPath} ${quotedAuthorizedKeysPath} || { echo 'authorized_keys was recreated during replace; refusing to clobber' >&2; exit 1; }; [ ! -e ${quotedTemporaryPath} ] || { echo 'authorized_keys replace did not consume temporary file' >&2; exit 1; }; [ ! -L ${quotedAuthorizedKeysPath} ] || { echo 'authorized_keys must not be a symlink' >&2; exit 1; }; [ -f ${quotedAuthorizedKeysPath} ] || { echo 'authorized_keys must be a regular file' >&2; exit 1; }; authorized_keys_state=$(stat -c '%a %U %G %F' ${quotedAuthorizedKeysPath}) || exit $?; [ "$authorized_keys_state" = ${expectedAuthorizedKeysState} ] || { echo 'authorized_keys metadata changed during replace' >&2; exit 1; }; authorized_keys_hash=$(sha256sum ${quotedAuthorizedKeysPath} | cut -d' ' -f1) || exit $?; [ "$authorized_keys_hash" = "$expected_authorized_keys_hash" ] || { echo 'authorized_keys content changed during replace' >&2; exit 1; }; }`,
+    `chmod 600 ${quotedTemporaryPath} && chown ${shellQuote(user)}:${shellQuote(primaryGroup)} ${quotedTemporaryPath} && { expected_authorized_keys_hash=$(sha256sum ${quotedTemporaryPath} | cut -d' ' -f1) || exit $?; [ ! -L ${quotedSshDirectoryPath} ] || { echo '.ssh must not be a symlink' >&2; exit 1; }; [ -d ${quotedSshDirectoryPath} ] || { echo '.ssh must be a directory' >&2; exit 1; }; ssh_directory_state=$(stat -c '%a %U %G %F' ${quotedSshDirectoryPath}) || exit $?; [ "$ssh_directory_state" = ${expectedSshDirectoryState} ] || { echo '.ssh ownership changed before authorized_keys replace' >&2; exit 1; }; [ ! -L ${quotedAuthorizedKeysPath} ] || { echo 'authorized_keys must not be a symlink' >&2; exit 1; }; rm -f -- ${quotedBackupPath}; backup_created=0; if [ -e ${quotedAuthorizedKeysPath} ]; then [ -f ${quotedAuthorizedKeysPath} ] || { echo 'authorized_keys must be a regular file' >&2; exit 1; }; ln -- ${quotedAuthorizedKeysPath} ${quotedBackupPath} || { echo 'failed to create authorized_keys backup hardlink' >&2; exit 1; }; backup_created=1; fi; [ ! -L ${quotedAuthorizedKeysPath} ] || { rm -f -- ${quotedBackupPath}; echo 'authorized_keys must not be a symlink' >&2; exit 1; }; if ! mv -T -- ${quotedTemporaryPath} ${quotedAuthorizedKeysPath}; then if [ "$backup_created" = 1 ]; then mv -T -- ${quotedBackupPath} ${quotedAuthorizedKeysPath} || echo 'authorized_keys backup restore failed; backup is at '${quotedBackupPath} >&2; fi; echo 'authorized_keys replace failed' >&2; exit 1; fi; [ ! -e ${quotedTemporaryPath} ] || { rm -f -- ${quotedBackupPath}; echo 'authorized_keys replace did not consume temporary file' >&2; exit 1; }; [ ! -L ${quotedAuthorizedKeysPath} ] || { rm -f -- ${quotedBackupPath}; echo 'authorized_keys must not be a symlink' >&2; exit 1; }; [ -f ${quotedAuthorizedKeysPath} ] || { rm -f -- ${quotedBackupPath}; echo 'authorized_keys must be a regular file' >&2; exit 1; }; authorized_keys_state=$(stat -c '%a %U %G %F' ${quotedAuthorizedKeysPath}) || { rm -f -- ${quotedBackupPath}; exit 1; }; [ "$authorized_keys_state" = ${expectedAuthorizedKeysState} ] || { rm -f -- ${quotedBackupPath}; echo 'authorized_keys metadata changed during replace' >&2; exit 1; }; authorized_keys_hash=$(sha256sum ${quotedAuthorizedKeysPath} | cut -d' ' -f1) || { rm -f -- ${quotedBackupPath}; exit 1; }; [ "$authorized_keys_hash" = "$expected_authorized_keys_hash" ] || { rm -f -- ${quotedBackupPath}; echo 'authorized_keys content changed during replace' >&2; exit 1; }; rm -f -- ${quotedBackupPath}; }`,
     MUTATION_EXEC_OPTS
   )
   if (replace.code !== 0) {
