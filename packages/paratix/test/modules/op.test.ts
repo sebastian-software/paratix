@@ -216,7 +216,12 @@ describe("op.resolve — apply", () => {
     expect(code).toMatch(/^\d{6}$/v)
   })
 
-  it("registers each generated OTP code in the secret sink", async () => {
+  // R-0000576: the otpauth URI carrying the shared `secret=` is registered
+  // in the secret sink up-front so a third-party error renderer cannot leak
+  // it. R-0000583 raised the minimum secret length to 8 characters, so the
+  // 6-digit generated TOTP code is intentionally NOT registered to prevent
+  // a 6-digit substring of unrelated diagnostic text from being masked.
+  it("registers the otpauth URI in the secret sink and intentionally skips the short OTP", async () => {
     const otpauthUri =
       "otpauth://totp/Test?secret=GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ&period=30&digits=6"
     mockSpawnWith(`${otpauthUri}\n`)
@@ -230,7 +235,8 @@ describe("op.resolve — apply", () => {
     const code = await resolveEnvironment(metaEnvironment, "token")
 
     expect(code).toMatch(/^\d{6}$/v)
-    expect(getRegisteredSecrets()).toContain(code)
+    expect(getRegisteredSecrets()).toContain(otpauthUri)
+    expect(getRegisteredSecrets()).not.toContain(code)
   })
 
   it("recognises OTP fields by /one-time-password suffix", async () => {
@@ -511,6 +517,11 @@ describe("op.resolve — error masking", () => {
     expect(result.error?.message).not.toContain("op signin")
   })
 
+  // R-0000589 + R-0000588: the captured stderr is now treated as a secret
+  // and its prefixes are redacted by `maskKnownSecretPrefixes`. The
+  // truncation marker is therefore covered by the masked prefix, but the
+  // remaining authentication hint (which sits after the masked prefix) and
+  // the overall length bound must still hold.
   it("bounds large op stderr while preserving the authentication hint", async () => {
     const largeStderr = `[ERROR] You are not signed in to a 1Password account.\n${"x".repeat(
       OP_OUTPUT_CAPTURE_LIMIT_BYTES * 2
@@ -522,8 +533,8 @@ describe("op.resolve — error masking", () => {
     const result = await module_.apply(null, emptyEnv)
 
     expect(result.status).toBe("failed")
-    expect(result.error?.message).toContain("op stderr truncated")
     expect(result.error?.message).toContain("op signin")
+    expect(result.error?.message).toContain("[REDACTED]")
     expect(result.error?.message.length).toBeLessThan(OP_OUTPUT_CAPTURE_LIMIT_BYTES + 500)
   })
 
@@ -563,8 +574,11 @@ describe("op.resolve — error masking", () => {
     // eslint-disable-next-line prefer-spread
     const result = await module_.apply(null, emptyEnv)
 
+    // R-0000589 + R-0000588: the captured stderr (which now carries the
+    // truncated secret prefix) is treated as a secret. The truncation
+    // marker is therefore covered by the redacted prefix; the test still
+    // asserts that the resolved secret is masked.
     expect(result.status).toBe("failed")
-    expect(result.error?.message).toContain("op stderr truncated")
     expect(result.error?.message).not.toContain(resolvedValue.slice(0, capturedSecretPrefixLength))
     expect(result.error?.message).toContain("[REDACTED]")
   })
