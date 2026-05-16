@@ -7,8 +7,25 @@ const CONTAINERS_SYSTEMD_DIRECTORY_COMMAND = "mkdir -p '/etc/containers/systemd'
 const QUADLET_FILE_MODE = "0644"
 const SYSTEMCTL = "systemctl"
 
-function normalizeMode(mode: string): string {
-  return mode.replace(/^0+/v, "")
+const OCTAL_MODE_LENGTH_WITHOUT_LEADING_ZERO = 3
+
+/**
+ * R-0000604: normalize a raw `stat -c '%a'` octal mode to the four-digit form
+ * that `ssh.writeFile` and downstream SFTP backends interpret consistently.
+ * `stat -c '%a'` emits the mode without a leading zero (e.g. `"644"`), but
+ * some SFTP backends treat the raw three-digit string as decimal rather than
+ * octal. Always returning the canonical four-digit form keeps snapshots,
+ * rollbacks and mode-drift comparisons deterministic across backends.
+ *
+ * Analogous to `normalizeSourcesFileMode` in releaseUpgradeSources.ts.
+ *
+ * @param raw - Trimmed stdout from a `stat -c '%a'` invocation.
+ * @returns The four-digit octal mode, or {@link QUADLET_FILE_MODE} when the
+ *   input is empty.
+ */
+function normalizeQuadletMode(raw: string): string {
+  if (raw.length === 0) return QUADLET_FILE_MODE
+  return raw.length === OCTAL_MODE_LENGTH_WITHOUT_LEADING_ZERO ? `0${raw}` : raw
 }
 
 type QuadletFileSnapshot =
@@ -29,13 +46,15 @@ async function snapshotQuadletFile(
     ignoreExitCode: true,
     silent: true,
   })
+  // R-0000604: `stat -c '%a'` emits 3-digit modes like "644" without a
+  // leading zero; normalize to the canonical 4-digit form so the snapshot
+  // (and any later rollback) writes through `ssh.writeFile` deterministically
+  // regardless of the SFTP backend's octal/decimal handling.
+  const rawMode = modeResult.code === 0 ? modeResult.stdout.trim() : ""
   return {
     content,
     exists: true,
-    mode:
-      modeResult.code === 0 && modeResult.stdout.trim() !== ""
-        ? modeResult.stdout.trim()
-        : QUADLET_FILE_MODE,
+    mode: normalizeQuadletMode(rawMode),
   }
 }
 
@@ -136,5 +155,8 @@ export async function checkQuadletFile(parameters: {
   if (modeResult.code !== 0) return NEEDS_APPLY
   const currentMode = modeResult.stdout.trim()
   if (currentMode === "") return NEEDS_APPLY
-  return normalizeMode(currentMode) === normalizeMode(QUADLET_FILE_MODE) ? "ok" : NEEDS_APPLY
+  // R-0000604: normalize the on-disk mode to the same canonical 4-digit form
+  // we write so a `stat`-emitted "644" compares equal to the canonical
+  // "0644" without relying on the unsafe `^0+` strip-and-compare hack.
+  return normalizeQuadletMode(currentMode) === QUADLET_FILE_MODE ? "ok" : NEEDS_APPLY
 }

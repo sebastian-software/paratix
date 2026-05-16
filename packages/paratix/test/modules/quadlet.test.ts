@@ -311,11 +311,13 @@ describe("quadlet.container", () => {
     expect(result.status).toBe("failed")
     expect(result.error?.message).toContain("SFTP partial write")
     // First call: the new content; second: the restore from snapshot.
+    // R-0000604: snapshot mode is normalized to the canonical 4-digit form
+    // (`"600"` -> `"0600"`) before it is handed to `ssh.writeFile`.
     expect(writeFile).toHaveBeenNthCalledWith(1, quadletFilePath, expectedQuadletContent(), {
       mode: "0644",
     })
     expect(writeFile).toHaveBeenNthCalledWith(2, quadletFilePath, previousContent, {
-      mode: "600",
+      mode: "0600",
     })
   })
 
@@ -359,8 +361,10 @@ describe("quadlet.container", () => {
     expect(writeFile).toHaveBeenNthCalledWith(1, quadletFilePath, expectedQuadletContent(), {
       mode: "0644",
     })
+    // R-0000604: snapshot mode is normalized to the canonical 4-digit form
+    // (`"600"` -> `"0600"`) before it is handed to `ssh.writeFile`.
     expect(writeFile).toHaveBeenNthCalledWith(2, quadletFilePath, previousContent, {
-      mode: "600",
+      mode: "0600",
     })
   })
 
