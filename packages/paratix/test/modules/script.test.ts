@@ -37,7 +37,7 @@ function createScriptMockSsh(options?: {
   const name = options?.name ?? "setup"
   const version = options?.version ?? "1"
   const remotePath = makeRemoteScriptPath(name, options?.remoteSuffix)
-  const mktempCmd = `mktemp -p /tmp 'paratix-script-${name}.XXXXXX'`
+  const mktempCmd = `mktemp -p /tmp -- 'paratix-script-${name}.XXXXXX'`
   const scriptCommand = buildScriptCommand(remotePath, options?.args)
   const flagName = `script-${name}-${version}`
   const lockName = `${flagName}.lock`
@@ -49,7 +49,7 @@ function createScriptMockSsh(options?: {
       [`chmod +x '${remotePath}'`]: { code: 0 },
       [`mkdir -p ${FLAGS_DIRECTORY}`]: { code: 0 },
       [`mkdir ${FLAGS_DIRECTORY}/'${lockName}'`]: { code: 0 },
-      [`rm -f '${remotePath}'`]: { code: 0 },
+      [`rm -f -- '${remotePath}'`]: { code: 0 },
       [`rmdir ${FLAGS_DIRECTORY}/'${lockName}'`]: { code: 0 },
       [flagCommand]: { code: 0 },
       [mktempCmd]: { code: 0, stdout: `${remotePath}\n` },
@@ -132,7 +132,7 @@ describe("script.once — apply", () => {
     expect(mockSsh.calls).toContain(`'${remotePath}'`)
 
     // cleanup of per-run temp file
-    expect(mockSsh.calls).toContain(`rm -f '${remotePath}'`)
+    expect(mockSsh.calls).toContain(`rm -f -- '${remotePath}'`)
 
     // flag set
     expect(mockSsh.calls).toContain(
@@ -152,7 +152,7 @@ describe("script.once — apply", () => {
     const flagIdx = mockSsh.calls.indexOf(
       `find ${FLAGS_DIRECTORY} -maxdepth 1 -name 'script-setup-*' ! -name '*.lock' -delete && touch ${FLAGS_DIRECTORY}/'script-setup-1'`
     )
-    const rmIdx = mockSsh.calls.indexOf(`rm -f '${remotePath}'`)
+    const rmIdx = mockSsh.calls.indexOf(`rm -f -- '${remotePath}'`)
 
     expect(chmodIdx).toBeLessThan(execIdx)
     expect(mkdirIdx).toBeLessThan(chmodIdx)
@@ -193,7 +193,7 @@ describe("script.once — apply", () => {
     })
     const mod = script.once("setup", "/local/setup.sh")
     await mod.apply(mockSsh, emptyEnv)
-    expect(mockSsh.calls).toContain(`rm -f '${remotePath}'`)
+    expect(mockSsh.calls).toContain(`rm -f -- '${remotePath}'`)
   })
 
   it("returns failed and cleans up temp file when uploadFile throws after mktemp", async () => {
@@ -211,7 +211,7 @@ describe("script.once — apply", () => {
     expect(result.status).toBe("failed")
     expect(String(result.error)).toContain("[script.once: setup] upload failed")
     expect(String(result.error)).toContain("upload failed")
-    expect(mockSsh.calls).toContain(`rm -f '${remotePath}'`)
+    expect(mockSsh.calls).toContain(`rm -f -- '${remotePath}'`)
     expect(mockSsh.calls).not.toContain(`chmod +x '${remotePath}'`)
     expect(mockSsh.calls).not.toContain(`'${remotePath}'`)
     const flagCall = mockSsh.calls.find((c) => c.includes("touch"))
@@ -248,7 +248,7 @@ describe("script.once — apply", () => {
     expect(String(result.error)).toContain("Read-only file system")
     // Script body must not run when chmod failed; cleanup still happens.
     expect(mockSsh.calls).not.toContain(`'${remotePath}'`)
-    expect(mockSsh.calls).toContain(`rm -f '${remotePath}'`)
+    expect(mockSsh.calls).toContain(`rm -f -- '${remotePath}'`)
     const flagCall = mockSsh.calls.find((c) => c.includes("touch"))
     expect(flagCall).toBeUndefined()
   })
@@ -257,7 +257,7 @@ describe("script.once — apply", () => {
     const remotePath = makeRemoteScriptPath("setup")
     const mockSsh = createScriptMockSsh({
       responses: {
-        [`rm -f '${remotePath}'`]: { code: 1, stderr: "rm: read-only file system" },
+        [`rm -f -- '${remotePath}'`]: { code: 1, stderr: "rm: read-only file system" },
       },
     })
     const mod = script.once("setup", "/local/setup.sh")
@@ -265,7 +265,7 @@ describe("script.once — apply", () => {
 
     // The rm cleanup ran with ignoreExitCode, so the successful run is preserved.
     expect(result.status).toBe("changed")
-    expect(mockSsh.calls).toContain(`rm -f '${remotePath}'`)
+    expect(mockSsh.calls).toContain(`rm -f -- '${remotePath}'`)
     // Versioned flag must still be set so the next run skips re-execution.
     const flagCall = mockSsh.calls.find((c) => c.includes("touch"))
     expect(flagCall).toBeDefined()
@@ -280,7 +280,7 @@ describe("script.once — apply", () => {
 
     expect(result).toStrictEqual({ status: "ok" })
     expect(mockSsh.uploadFileCalls).toHaveLength(0)
-    expect(mockSsh.calls).not.toContain("mktemp -p /tmp 'paratix-script-setup.XXXXXX'")
+    expect(mockSsh.calls).not.toContain("mktemp -p /tmp -- 'paratix-script-setup.XXXXXX'")
     expect(mockSsh.calls).not.toContain(`mkdir ${FLAGS_DIRECTORY}/'script-setup-1.lock'`)
   })
 
@@ -344,7 +344,7 @@ describe("script.once — apply", () => {
     const mockSsh = createScriptMockSsh()
     const mod = script.once("setup", "/local/setup.sh")
     await mod.apply(mockSsh, emptyEnv)
-    expect(mockSsh.calls).toContain("mktemp -p /tmp 'paratix-script-setup.XXXXXX'")
+    expect(mockSsh.calls).toContain("mktemp -p /tmp -- 'paratix-script-setup.XXXXXX'")
   })
 
   it.each([
@@ -356,7 +356,7 @@ describe("script.once — apply", () => {
     const safePath = makeRemoteScriptPath("setup")
     const mockSsh = createScriptMockSsh({
       responses: {
-        "mktemp -p /tmp 'paratix-script-setup.XXXXXX'": { code: 0, stdout },
+        "mktemp -p /tmp -- 'paratix-script-setup.XXXXXX'": { code: 0, stdout },
       },
     })
     const mod = script.once("setup", "/local/setup.sh")
@@ -366,7 +366,7 @@ describe("script.once — apply", () => {
     expect(result.status).toBe("failed")
     expect(mockSsh.calls).not.toContain(`chmod +x '${safePath}'`)
     expect(mockSsh.calls).not.toContain(`'${safePath}'`)
-    expect(mockSsh.calls).not.toContain(`rm -f '${safePath}'`)
+    expect(mockSsh.calls).not.toContain(`rm -f -- '${safePath}'`)
     expect(mockSsh.calls).not.toContain(
       `find ${FLAGS_DIRECTORY} -maxdepth 1 -name 'script-setup-*' ! -name '*.lock' -delete && touch ${FLAGS_DIRECTORY}/'script-setup-1'`
     )
