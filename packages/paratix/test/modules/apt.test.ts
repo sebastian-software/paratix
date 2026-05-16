@@ -804,6 +804,7 @@ describe("apt.repository (standard form)", () => {
     const expectedFlag = `apt-repository-${sha256String("docker").slice(0, 16)}-${sha256String(expectedContent).slice(0, 16)}`
     const ssh = createMockSsh({
       [`[ -f '${filePath}' ] && [ ! -L '${filePath}' ]`]: { code: 1 },
+      [`[ -f '${filePath}' ]`]: { code: 1 },
       [`[ -L '${filePath}' ]`]: { code: 1 },
       [`find /var/lib/paratix/flags -maxdepth 1 -name 'apt-repository-${sha256String("docker").slice(0, 16)}-*' ! -name '*.lock' -delete && touch /var/lib/paratix/flags/'${expectedFlag}'`]:
         { code: 0 },
@@ -906,6 +907,7 @@ describe("apt.repository (standard form)", () => {
     const updateCommand = "DEBIAN_FRONTEND=noninteractive apt-get update"
     const ssh = createMockSsh({
       [`[ -f '${filePath}' ] && [ ! -L '${filePath}' ]`]: { code: 1 },
+      [`[ -f '${filePath}' ]`]: { code: 1 },
       [`[ -L '${filePath}' ]`]: { code: 1 },
       [markerCommand]: { code: 0 },
       "mkdir -p /var/lib/paratix/flags": { code: 0 },
@@ -925,6 +927,7 @@ describe("apt.repository (standard form)", () => {
   it("apply does not set update marker when apt-get update fails", async () => {
     const ssh = createMockSsh({
       [`[ -f '${filePath}' ] && [ ! -L '${filePath}' ]`]: { code: 1 },
+      [`[ -f '${filePath}' ]`]: { code: 1 },
       [`[ -L '${filePath}' ]`]: { code: 1 },
       [`rm -f '${filePath}'`]: { code: 0 },
       "DEBIAN_FRONTEND=noninteractive apt-get update": { code: 1 },
@@ -940,10 +943,13 @@ describe("apt.repository (standard form)", () => {
 
   it("apply rolls back the repository file when apt-get update fails", async () => {
     const previousContent = "deb https://download.docker.com/linux/ubuntu jammy stable\n"
+    const previousContentSha = sha256String(previousContent)
     const ssh = createMockSsh({
       [`[ -f '${filePath}' ] && [ ! -L '${filePath}' ]`]: { code: 0 },
+      [`[ -f '${filePath}' ]`]: { code: 0 },
       [`[ -L '${filePath}' ]`]: { code: 1 },
       [`cat '${filePath}'`]: { stdout: previousContent },
+      [`sha256sum '${filePath}'`]: { stdout: `${previousContentSha}  ${filePath}\n` },
       "DEBIAN_FRONTEND=noninteractive apt-get update": { code: 1 },
     })
     const mod = apt.repository("docker", source)
@@ -970,10 +976,13 @@ describe("apt.repository (standard form)", () => {
   // sync with the restored source list.
   it("R-0000163: re-runs apt-get update after a successful rollback to refresh the cache", async () => {
     const previousContent = "deb https://download.docker.com/linux/ubuntu jammy stable\n"
+    const previousContentSha = sha256String(previousContent)
     const ssh = createMockSsh({
       [`[ -f '${filePath}' ] && [ ! -L '${filePath}' ]`]: { code: 0 },
+      [`[ -f '${filePath}' ]`]: { code: 0 },
       [`[ -L '${filePath}' ]`]: { code: 1 },
       [`cat '${filePath}'`]: { stdout: previousContent },
+      [`sha256sum '${filePath}'`]: { stdout: `${previousContentSha}  ${filePath}\n` },
     })
     // Override apt-get update so the first invocation (with the new repo)
     // fails and the second (post-rollback, with the restored sources)
@@ -993,10 +1002,13 @@ describe("apt.repository (standard form)", () => {
 
   it("R-0000163: surfaces both errors when the post-rollback apt-get update also fails", async () => {
     const previousContent = "deb https://download.docker.com/linux/ubuntu jammy stable\n"
+    const previousContentSha = sha256String(previousContent)
     const ssh = createMockSsh({
       [`[ -f '${filePath}' ] && [ ! -L '${filePath}' ]`]: { code: 0 },
+      [`[ -f '${filePath}' ]`]: { code: 0 },
       [`[ -L '${filePath}' ]`]: { code: 1 },
       [`cat '${filePath}'`]: { stdout: previousContent },
+      [`sha256sum '${filePath}'`]: { stdout: `${previousContentSha}  ${filePath}\n` },
       "DEBIAN_FRONTEND=noninteractive apt-get update": {
         code: 100,
         stderr: "E: Could not resolve 'broken.example.com'",
