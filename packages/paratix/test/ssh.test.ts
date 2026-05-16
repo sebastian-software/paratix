@@ -2540,7 +2540,7 @@ describe("SshConnectionImpl", () => {
 
       // R-0000150: size verification runs on the staged temp path BEFORE the
       // privileged finalize/mv to avoid TOCTOU on the destination.
-      expect(executedCommands[0]).toBe("mktemp '/tmp/paratix-upload.XXXXXX'")
+      expect(executedCommands[0]).toBe("mktemp -p /tmp -- 'paratix-upload.XXXXXX'")
       expect(executedCommands[1]).toBe(`chmod '0600' '${tempPath}'`)
       expect(executedCommands[2]).toContain("stat -c")
       expect(executedCommands[2]).toContain(tempPath)
@@ -2549,7 +2549,11 @@ describe("SshConnectionImpl", () => {
       expect(executedCommands[4]).toMatch(/^sudo bash -c /v)
       expect(executedCommands[4]).toContain(tempPath)
       expect(executedCommands[4]).toContain("target_temp=$(mktemp")
-      expect(executedCommands[4]).toContain("/etc/my-app/.config.yml.paratix.XXXXXX")
+      // R-0000565: directory and template are now passed via `mktemp -p <dir> -- <template>`,
+      // so the assertion checks for both segments separately instead of the legacy
+      // joined-path style that placed the template under the directory.
+      expect(executedCommands[4]).toContain("'/etc/my-app'")
+      expect(executedCommands[4]).toContain("'.config.yml.paratix.XXXXXX'")
       expect(executedCommands[4]).toContain("[ ! -d")
       expect(executedCommands[4]).toContain("[ ! -L")
       expect(executedCommands[4]).toContain("mv -T -- ")
@@ -2559,7 +2563,7 @@ describe("SshConnectionImpl", () => {
       expect(executedCommands[4]).toContain("'0600'")
       expect(executedCommands[4]).toContain('chown "$target_owner" "$target_temp"')
       expect(executedCommands[4]).toContain(`'${remotePath}'`)
-      expect(executedCommands[5]).toBe(`rm -f '${tempPath}'`)
+      expect(executedCommands[5]).toBe(`rm -f -- '${tempPath}'`)
       expect(vi.mocked(sftpUpload)).toHaveBeenCalledWith(
         client,
         "/local/file.txt",
@@ -2625,7 +2629,7 @@ describe("SshConnectionImpl", () => {
 
       expect(executedCommands[3]).toContain("realpath -m --")
       expect(executedCommands.some((cmd) => cmd.includes("target_temp=$(mktemp"))).toBe(false)
-      expect(executedCommands).toContain(`rm -f '${tempPath}'`)
+      expect(executedCommands).toContain(`rm -f -- '${tempPath}'`)
     })
 
     it("applies restrictive mode 0600 to the temp file before mv when no mode option is provided", async () => {
@@ -3160,7 +3164,7 @@ describe("SshConnectionImpl", () => {
 
       await ssh.writeFile(remotePath, "hello world", { mode: "0600" })
 
-      expect(executedCommands[0]).toBe("mktemp '/tmp/paratix-write.XXXXXX'")
+      expect(executedCommands[0]).toBe("mktemp -p /tmp -- 'paratix-write.XXXXXX'")
       expect(executedCommands[1]).toBe(`chmod '0600' '${tempPath}'`)
       expect(executedCommands[2]).toContain("stat -c")
       expect(executedCommands[2]).toContain(tempPath)
@@ -3169,7 +3173,9 @@ describe("SshConnectionImpl", () => {
       expect(executedCommands[4]).toMatch(/^sudo bash -c /v)
       expect(executedCommands[4]).toContain(tempPath)
       expect(executedCommands[4]).toContain("target_temp=$(mktemp")
-      expect(executedCommands[4]).toContain("/etc/systemd/system/.my-app.service.paratix.XXXXXX")
+      // R-0000565: directory and template are now passed via `mktemp -p <dir> -- <template>`.
+      expect(executedCommands[4]).toContain("'/etc/systemd/system'")
+      expect(executedCommands[4]).toContain("'.my-app.service.paratix.XXXXXX'")
       expect(executedCommands[4]).toContain("[ ! -d")
       expect(executedCommands[4]).toContain("[ ! -L")
       expect(executedCommands[4]).toContain("mv -T -- ")
@@ -3185,7 +3191,7 @@ describe("SshConnectionImpl", () => {
       // file past the verify call.
       expect(executedCommands[5]).toContain("sha256sum --")
       expect(executedCommands[5]).toContain(remotePath)
-      expect(executedCommands[6]).toBe(`rm -f '${tempPath}'`)
+      expect(executedCommands[6]).toBe(`rm -f -- '${tempPath}'`)
       expect(vi.mocked(sftpUploadContent)).toHaveBeenCalledOnce()
     })
 
@@ -3211,7 +3217,7 @@ describe("SshConnectionImpl", () => {
 
       expect(executedCommands[3]).toContain("realpath -m --")
       expect(executedCommands.some((cmd) => cmd.includes("target_temp=$(mktemp"))).toBe(false)
-      expect(executedCommands).toContain(`rm -f '${tempPath}'`)
+      expect(executedCommands).toContain(`rm -f -- '${tempPath}'`)
       expect(vi.mocked(sftpUploadContent)).toHaveBeenCalledOnce()
     })
 
@@ -3357,12 +3363,16 @@ describe("SshConnectionImpl", () => {
       expect(executedCommands[6]).toContain("realpath -m --")
       expect(executedCommands[6]).toContain(destinationDirectory)
       expect(executedCommands[7]).toMatch(/^sudo bash -c /v)
-      expect(executedCommands[7]).toContain("/etc/apt/sources.list.d/paratix-write.XXXXXX")
+      // R-0000565: the privileged mktemp is now `mktemp -p <dir> -- <template>`,
+      // so directory and template are separate segments instead of a joined
+      // path. Assert both are present in the sudo-bash command.
+      expect(executedCommands[7]).toContain("'/etc/apt/sources.list.d'")
+      expect(executedCommands[7]).toContain("'paratix-write.XXXXXX'")
       expect(executedCommands[8]).toContain(fallbackTempPath)
       expect(executedCommands[8]).not.toContain(initialTempPath)
       expect(executedCommands[10]).toContain("realpath -m --")
       expect(executedCommands[10]).toContain(destinationDirectory)
-      expect(executedCommands[14]).toBe(`rm -f '${initialTempPath}'`)
+      expect(executedCommands[14]).toBe(`rm -f -- '${initialTempPath}'`)
     })
 
     it("rejects writeFile when a destination dirname component is a symlink (R-0000141 regression)", async () => {
@@ -3467,12 +3477,12 @@ describe("SshConnectionImpl", () => {
 
       await ssh.downloadFile("/var/log/secure", "/tmp/local-secure")
 
-      expect(executedCommands[0]).toBe("mktemp /tmp/paratix-download.XXXXXX")
+      expect(executedCommands[0]).toBe("mktemp -p /tmp -- paratix-download.XXXXXX")
       expect(executedCommands[1]).toMatch(/^(?:SUDO_PROMPT='' sudo -S|sudo) bash -c /v)
       expect(executedCommands[1]).toContain("cat ")
       expect(executedCommands[1]).toContain("/var/log/secure")
       expect(executedCommands[1]).toContain(mktempOutput)
-      expect(executedCommands[2]).toBe(`rm -f '${mktempOutput}'`)
+      expect(executedCommands[2]).toBe(`rm -f -- '${mktempOutput}'`)
     })
 
     it("uses user-owned temp file plus sudo copy, sftp, and user cleanup for non-root user", async () => {
@@ -3493,7 +3503,7 @@ describe("SshConnectionImpl", () => {
 
       await ssh.downloadFile("/var/log/secure", "/tmp/local-secure")
 
-      expect(executedCommands[0]).toBe("mktemp /tmp/paratix-download.XXXXXX")
+      expect(executedCommands[0]).toBe("mktemp -p /tmp -- paratix-download.XXXXXX")
       expect(executedCommands[1]).toMatch(/^(?:SUDO_PROMPT='' sudo -S|sudo) bash -c /v)
       expect(executedCommands[1]).toContain("cat ")
       expect(vi.mocked(sftpDownload)).toHaveBeenCalledWith(
@@ -3503,7 +3513,7 @@ describe("SshConnectionImpl", () => {
         expect.any(Number),
         expect.any(AbortSignal)
       )
-      expect(executedCommands[2]).toBe(`rm -f '${mktempOutput}'`)
+      expect(executedCommands[2]).toBe(`rm -f -- '${mktempOutput}'`)
     })
 
     it("cleans up the remote temp file even when sftpDownload rejects (regression)", async () => {
@@ -3561,7 +3571,7 @@ describe("SshConnectionImpl", () => {
       })
 
       const stderrOutput = stderrSpy.mock.calls.map((args) => String(args[0])).join("")
-      expect(executedCommands[2]).toBe(`rm -f '${mktempOutput}'`)
+      expect(executedCommands[2]).toBe(`rm -f -- '${mktempOutput}'`)
       expect(stderrOutput).toContain(`failed to remove temp file ${mktempOutput}`)
       expect(stderrOutput).not.toContain("sudo")
 
