@@ -24,10 +24,7 @@ async function allocateRemoteScriptPath(
   // R-0000565: separate the template from the option list with `--` so a
   // future refactor that loosens the name validation cannot let the template
   // be interpreted as a `mktemp` option.
-  const mktempResult = await ssh.exec(
-    `mktemp -p /tmp -- ${shellQuote(template)}`,
-    EXEC_OPTS
-  )
+  const mktempResult = await ssh.exec(`mktemp -p /tmp -- ${shellQuote(template)}`, EXEC_OPTS)
   if (mktempResult.code !== 0) {
     return failedCommand(`[script.once: ${name}] mktemp failed`, mktempResult)
   }

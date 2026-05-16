@@ -84,7 +84,7 @@ async function requireComposeRuntime(parameters: {
 // action keywords as the first token of a log line, so we keep the
 // `2>&1` capture and only tighten the keyword search to line starts via
 // a multi-line regex.
-const COMPOSE_UP_ACTION_KEYWORDS_REGEX = /^(Creating|Recreating|Starting|Started|Pulling)\s/mv
+const COMPOSE_UP_ACTION_KEYWORDS_REGEX = /^(?:Creating|Recreating|Starting|Started|Pulling)\s/mv
 
 /**
  * R-0000078: when every service was already running, `compose up -d`
@@ -103,7 +103,7 @@ function composeUpReportedChange(composeOutput: string): boolean {
 // `output.includes("Pulling") || output.includes("Downloaded")` matched
 // any substring in image names or container logs and produced false
 // "changed" results when no image was actually pulled.
-const COMPOSE_PULL_ACTION_REGEX = /^(Pulling|Downloaded)\s/mv
+const COMPOSE_PULL_ACTION_REGEX = /^(?:Pulling|Downloaded)\s/mv
 
 function composePullReportedChange(composeOutput: string): boolean {
   return COMPOSE_PULL_ACTION_REGEX.test(composeOutput)
@@ -301,7 +301,7 @@ function parseContainerStates(stdout: string): string[] {
  * @returns The sanitized string, ready to be placed inside a unit value.
  */
 function sanitizeUnitValue(value: string): string {
-  // eslint-disable-next-line no-control-regex -- explicit C0 + DEL control-character strip
+  /* eslint-disable-next-line regexp/no-control-character -- intentional C0 + DEL strip for defense-in-depth */ /* oxlint-disable-next-line no-control-regex */
   const withoutControlChars = value.replaceAll(/[\u0000-\u001F\u007F]/gv, "")
   return withoutControlChars.replaceAll("%", "%%")
 }
@@ -328,6 +328,13 @@ function validateGeneratedSystemdUnitContent(
  * directory at ExecStart time and silently break the unit — or, with a
  * crafted prefix like `../../tmp`, point ExecStart at a directory the
  * operator never intended.
+ *
+ * @param projectDirectory - The directory passed by the caller to be used
+ *   as `WorkingDirectory=` in the generated unit.
+ * @param unitFileName - The unit filename, used in the failure message so
+ *   the operator can identify which unit triggered the validation.
+ * @returns A failed `ModuleResult` when the path is not absolute, otherwise
+ *   `null` to signal that the value is acceptable.
  */
 function validateComposeProjectDirectory(
   projectDirectory: string,
@@ -665,15 +672,22 @@ async function prepareComposeSystemdTarget(parameters: {
  * `failed`-path so the central secret-masking still applies and the
  * stream payload is not flattened into the thrown `Error.message`.
  *
- * @returns `null` when the snapshot was restored, a failed `ModuleResult`
- *   when the rollback itself failed, and `"removed"`/`"restored"` so the
- *   caller knows whether a `daemon-reload` is required.
+ * @param parameters - Bundle carrying the rollback inputs.
+ * @param parameters.connection - The active SSH connection used to write
+ *   or remove the unit file on the remote host.
+ * @param parameters.filePath - Absolute path of the systemd unit file to
+ *   restore.
+ * @param parameters.snapshot - Captured snapshot describing the previous
+ *   on-disk state of the unit file.
+ * @returns A failed `ModuleResult` when the rollback itself failed, or one
+ *   of the literals `"restored"` / `"removed"` so the caller knows whether
+ *   a `daemon-reload` is required.
  */
 async function restoreComposeSystemdUnitFileSnapshot(parameters: {
   connection: SshConnection
   filePath: string
   snapshot: ComposeSystemdUnitFileSnapshot
-}): Promise<ModuleResult | "removed" | "restored"> {
+}): Promise<"removed" | "restored" | ModuleResult> {
   if (parameters.snapshot.exists) {
     await parameters.connection.writeFile(parameters.filePath, parameters.snapshot.content, {
       mode: parameters.snapshot.mode,
@@ -759,24 +773,23 @@ async function rollbackComposeSystemdTargetAfterFailure(parameters: {
 
     // unitFileOutcome is "restored" or "removed" at this point (the
     // failure branch returns early above). In both cases the on-disk
-    // unit file changed, so we need a `daemon-reload` for systemd to
-    // pick up the rollback — equivalent to the previous behaviour
-    // where the helper returned `true` on every successful restore.
-    const needsReload =
-      parameters.needsDaemonReload ||
-      unitFileOutcome === "restored" ||
-      unitFileOutcome === "removed"
-    if (needsReload) {
-      const reloadResult: ExecResult = await parameters.connection.exec(
-        "systemctl daemon-reload",
-        EXEC_OPTS
+    // unit file changed, so a `daemon-reload` is required for systemd to
+    // pick up the rollback — equivalent to the previous behaviour where
+    // the helper returned `true` on every successful restore. The
+    // `parameters.needsDaemonReload` hint stays in the signature so callers
+    // continue to document whether the failing branch had already mutated
+    // systemd, but it is currently subsumed by the unit-file outcome.
+    void parameters.needsDaemonReload
+    void unitFileOutcome
+    const reloadResult: ExecResult = await parameters.connection.exec(
+      "systemctl daemon-reload",
+      EXEC_OPTS
+    )
+    if (reloadResult.code !== 0) {
+      return combineComposeSystemdRollbackFailure(
+        parameters.originalFailure,
+        failedCommand(`[compose.systemd] rollback daemon-reload failed`, reloadResult)
       )
-      if (reloadResult.code !== 0) {
-        return combineComposeSystemdRollbackFailure(
-          parameters.originalFailure,
-          failedCommand(`[compose.systemd] rollback daemon-reload failed`, reloadResult)
-        )
-      }
     }
   } catch (rollbackError) {
     return failed(

@@ -88,7 +88,7 @@ const QUADLET_SAFE_ENVIRONMENT_VALUE_PATTERN = /^[\w@+=:,\x2e\/\-]*$/v
 // R-0000590: reject ASCII control characters in environment values that
 // take the quoting path. The safe pattern already excludes them; this
 // catches them on the slow path before they ever reach the quoted output.
-// eslint-disable-next-line regexp/no-control-character -- intentional control-character class for defense-in-depth
+/* eslint-disable-next-line regexp/no-control-character -- intentional control-character class for defense-in-depth */ /* oxlint-disable-next-line no-control-regex */
 const QUADLET_CONTROL_CHARACTER_PATTERN = /[\x00-\x1F\x7F]/v
 const QUADLET_PULL_CHANGED_OUTPUT_PATTERNS = [
   "Copying blob",
@@ -244,10 +244,7 @@ function quoteQuadletEnvironmentValue(value: string): string {
       "quadlet.container environment values must not contain systemd backslash escapes"
     )
   }
-  const escaped = value
-    .replaceAll("%", "%%")
-    .replaceAll("\\", "\\\\")
-    .replaceAll('"', '\\"')
+  const escaped = value.replaceAll("%", "%%").replaceAll("\\", "\\\\").replaceAll('"', '\\"')
   return `"${escaped}"`
 }
 

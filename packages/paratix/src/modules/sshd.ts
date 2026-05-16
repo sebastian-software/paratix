@@ -642,6 +642,15 @@ async function waitForLiveSshdPort(ssh: SshConnection, targetPort: number): Prom
   }
 }
 
+async function runRollbackStep(step: () => Promise<void>): Promise<string | undefined> {
+  try {
+    await step()
+    return undefined
+  } catch (error) {
+    return error instanceof Error ? error.message : String(error)
+  }
+}
+
 async function rollbackSshdPortAfterFailedVerification(
   ssh: SshConnection,
   parameters: {
@@ -656,11 +665,6 @@ async function rollbackSshdPortAfterFailedVerification(
   } catch {
     // ssh.removePort is in-memory bookkeeping; never block rollback.
   }
-  try {
-    await ssh.writeFile(SSHD_CONFIG_PATH, parameters.originalConfig, { mode: SSHD_CONFIG_MODE })
-  } catch (error) {
-    return error instanceof Error ? error.message : String(error)
-  }
   // R-0000557: `restartSshdOnNewPort` has already mutated `ssh.socket`
   // (disabled it) and may have flipped the service unit's boot state. The
   // post-restart verification rollback must restore both, otherwise a host
@@ -669,22 +673,25 @@ async function rollbackSshdPortAfterFailedVerification(
   // used by `recoverFromRestartFailure` so all three rollback layers
   // (sshd_config, socket-state, service-boot-state) land before we kick the
   // service.
-  try {
-    await restoreSshServiceBootState(ssh, parameters.snapshot.serviceBootState)
-  } catch (error) {
-    return error instanceof Error ? error.message : String(error)
-  }
-  try {
-    await restoreSocketActivatedSsh(ssh, parameters.snapshot.socketState)
-  } catch (error) {
-    return error instanceof Error ? error.message : String(error)
-  }
-  try {
-    const serviceUnit =
-      parameters.snapshot.serviceUnit ?? (await resolveSshServiceUnit(ssh))
-    await ssh.exec(`${SYSTEMCTL} restart ${serviceUnit}`, { ignoreExitCode: true, silent: true })
-  } catch (error) {
-    return error instanceof Error ? error.message : String(error)
+  const steps: Array<() => Promise<void>> = [
+    async () => {
+      await ssh.writeFile(SSHD_CONFIG_PATH, parameters.originalConfig, { mode: SSHD_CONFIG_MODE })
+    },
+    async () => {
+      await restoreSshServiceBootState(ssh, parameters.snapshot.serviceBootState)
+    },
+    async () => {
+      await restoreSocketActivatedSsh(ssh, parameters.snapshot.socketState)
+    },
+    async () => {
+      const serviceUnit = parameters.snapshot.serviceUnit ?? (await resolveSshServiceUnit(ssh))
+      await ssh.exec(`${SYSTEMCTL} restart ${serviceUnit}`, { ignoreExitCode: true, silent: true })
+    },
+  ]
+  for (const step of steps) {
+    // eslint-disable-next-line no-await-in-loop -- restore steps must run sequentially so each layer rolls back before the next.
+    const failure = await runRollbackStep(step)
+    if (failure !== undefined) return failure
   }
   return undefined
 }
@@ -1056,8 +1063,10 @@ function isSshdRestartOutcome(
 ): candidate is SshdRestartOutcome {
   // `ModuleResult` carries a `status` field, `SshdRestartOutcome` carries a
   // `snapshot` field — disambiguate on `snapshot` to keep the discriminant
-  // independent of any future `kind` additions to `ModuleResult`.
-  return typeof candidate === "object" && candidate !== null && "snapshot" in candidate
+  // independent of any future `kind` additions to `ModuleResult`. Both
+  // union members are non-null object types, so a `typeof` / null guard
+  // would be flagged as unnecessary by `@typescript-eslint`.
+  return "snapshot" in candidate
 }
 
 async function applySshdPortWhenConfigUnchanged(

@@ -1,6 +1,5 @@
 /* eslint-disable max-lines -- CLI output rendering is intentionally kept together */
 import { inspect } from "node:util"
-
 import pc from "picocolors"
 
 import type { ModuleStatus } from "./types.js"

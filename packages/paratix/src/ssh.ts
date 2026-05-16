@@ -993,9 +993,7 @@ export class SshConnectionImpl implements SshConnection {
     // `--` so a future refactor that loosens the prefix cannot let an
     // attacker-controlled value be interpreted as a `mktemp` option.
     const template = `${prefix}.XXXXXX`
-    const path = await this.output(
-      `mktemp -p ${shellQuote(directory)} -- ${shellQuote(template)}`
-    )
+    const path = await this.output(`mktemp -p ${shellQuote(directory)} -- ${shellQuote(template)}`)
     return validateMktempPath(directory, path, prefix)
   }
 
@@ -1033,10 +1031,8 @@ export class SshConnectionImpl implements SshConnection {
     // R-0000565: pass `/tmp` via `-p` and the template via `--` so the prefix
     // cannot be parsed as a `mktemp` option after a future refactor that
     // loosens the prefix validation.
-    return this.createRemoteTempPath(
-      `mktemp -p /tmp -- ${shellQuote(`${prefix}.XXXXXX`)}`,
-      prefix
-    )
+    const template = `${prefix}.XXXXXX`
+    return this.createRemoteTempPath(`mktemp -p /tmp -- ${shellQuote(template)}`, prefix)
   }
 
   private createSettledCallbacks<T>(
@@ -1520,6 +1516,33 @@ trap - EXIT
     await this.cacheAndValidateSudoPassword(password)
   }
 
+  /**
+   * R-0000581: read the SHA-256 output for the post-finalize verify step
+   * without going through `sudo` when possible. For non-root users the
+   * finalize step chowns the destination to the parent-directory owner, so
+   * the unprivileged user usually has read access; bypassing sudo avoids the
+   * worst-case command timeout if the sudo channel hangs. The privileged
+   * `output()` fallback runs only when the unprivileged attempt fails — for
+   * example because the destination directory denies traverse access to the
+   * connected user.
+   *
+   * @param hashCommand - The `sha256sum -- …` command to execute.
+   * @returns Raw stdout of the successful `sha256sum` invocation.
+   */
+  private async readSha256OutputForVerify(hashCommand: string): Promise<string> {
+    if (this.config.user === "root") {
+      return this.output(hashCommand)
+    }
+    try {
+      return await this.outputWithoutSudo(hashCommand)
+    } catch {
+      // Fall back to the privileged path when the unprivileged read fails
+      // (typically a permission error). `this.output` adds the same sudo
+      // wrapper used elsewhere so the caller still gets a stable result.
+      return this.output(hashCommand)
+    }
+  }
+
   private registerConnectedClient(client: Client, port: number): void {
     const rejectPending = (error: Error): void => {
       for (const rejectFunction of this.pendingRejects) {
@@ -1615,17 +1638,6 @@ trap - EXIT
       }
     }
   }
-
-  /**
-   * Iterate over `config.ports` and attempt a connection on each one.
-   *
-   * @param options - Auth parameters and optional reconnect deadline for bounded per-port attempts.
-   * @returns `true` if a port connected successfully, `false` if all ports failed.
-   */
-  // R-0000139: iterate on a snapshot of `runtime.ports` so that concurrent
-  // `addPort`/`removePort` calls (e.g. from `handlePortChange` rollback in
-  // runner.ts) cannot mutate the array mid-iteration and cause skipped or
-  // re-visited entries.
 
   /**
    * R-0000255: fire the SFTP-coupled abort signal so any in-flight SFTP
@@ -1729,6 +1741,16 @@ trap - EXIT
     })
   }
 
+  /**
+   * Iterate over `config.ports` and attempt a connection on each one.
+   *
+   * @param options - Auth parameters and optional reconnect deadline for bounded per-port attempts.
+   * @returns `true` if a port connected successfully, `false` if all ports failed.
+   */
+  // R-0000139: iterate on a snapshot of `runtime.ports` so that concurrent
+  // `addPort`/`removePort` calls (e.g. from `handlePortChange` rollback in
+  // runner.ts) cannot mutate the array mid-iteration and cause skipped or
+  // re-visited entries.
   private async tryConnectOnPorts(options: TryConnectOnPortsOptions = {}): Promise<boolean> {
     const ports: number[] = [...this.runtime.ports]
     for (const port of ports) {
@@ -1806,33 +1828,6 @@ trap - EXIT
     if (!accepted) return false
     this.authMethod = "password"
     return true
-  }
-
-  /**
-   * R-0000581: read the SHA-256 output for the post-finalize verify step
-   * without going through `sudo` when possible. For non-root users the
-   * finalize step chowns the destination to the parent-directory owner, so
-   * the unprivileged user usually has read access; bypassing sudo avoids the
-   * worst-case command timeout if the sudo channel hangs. The privileged
-   * `output()` fallback runs only when the unprivileged attempt fails — for
-   * example because the destination directory denies traverse access to the
-   * connected user.
-   *
-   * @param hashCommand - The `sha256sum -- …` command to execute.
-   * @returns Raw stdout of the successful `sha256sum` invocation.
-   */
-  private async readSha256OutputForVerify(hashCommand: string): Promise<string> {
-    if (this.config.user === "root") {
-      return this.output(hashCommand)
-    }
-    try {
-      return await this.outputWithoutSudo(hashCommand)
-    } catch {
-      // Fall back to the privileged path when the unprivileged read fails
-      // (typically a permission error). `this.output` adds the same sudo
-      // wrapper used elsewhere so the caller still gets a stable result.
-      return this.output(hashCommand)
-    }
   }
 
   private async verifyRemoteWriteFile(
