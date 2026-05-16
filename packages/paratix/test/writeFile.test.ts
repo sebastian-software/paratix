@@ -413,7 +413,7 @@ describe("SshConnectionImpl.writeFile — large content (> 64 KB)", () => {
     const calls = remoteCleanupSpy.mock.calls as Array<[string, ...unknown[]]>
     const executedCommands = calls.map(([cmd]) => cmd)
     expect(executedCommands).toStrictEqual(
-      expect.arrayContaining([expect.stringContaining(`rm -f '${remoteTmpPath}'`)])
+      expect.arrayContaining([expect.stringContaining(`rm -f -- '${remoteTmpPath}'`)])
     )
   })
 
@@ -467,7 +467,7 @@ describe("SshConnectionImpl.writeFile — large content (> 64 KB)", () => {
     const executedCommands = (
       stagingMismatchExecSpy.mock.calls as Array<[string, ...unknown[]]>
     ).map(([cmd]) => cmd)
-    expect(executedCommands).toContain(`rm -f '${remoteTmpPath}'`)
+    expect(executedCommands).toContain(`rm -f -- '${remoteTmpPath}'`)
     expect(executedCommands.join("\n")).not.toContain(`mv -T -- '${remoteTmpPath}' '${remotePath}'`)
   })
 
@@ -626,8 +626,8 @@ describe("SshConnectionImpl.writeFile — large content (> 64 KB)", () => {
       ([command]) => command
     )
     expect(executedCommands.some((command) => command.includes("base64 -d"))).toBe(true)
-    expect(executedCommands).toContain(`rm -f '${remoteTmpPath}'`)
-    expect(executedCommands).toContain(`rm -f '${fallbackTmpPath}'`)
+    expect(executedCommands).toContain(`rm -f -- '${remoteTmpPath}'`)
+    expect(executedCommands).toContain(`rm -f -- '${fallbackTmpPath}'`)
     // R-0000522: the verify step must hash the remote file instead of running stat on it.
     expect(executedCommands.some((command) => command.includes("sha256sum --"))).toBe(true)
     expect(
