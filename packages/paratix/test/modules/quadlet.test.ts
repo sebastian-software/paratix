@@ -644,7 +644,11 @@ describe("quadlet.container", () => {
     const content = writeFile.mock.calls[0][1]
     expect(content).toContain('Environment=APP_GREETING="hello \\"world\\""')
     expect(content).toContain('Environment=APP_PATH="C:\\\\Program Files\\\\App"')
-    expect(content).toContain("Environment=APP_TOKEN=abc-123_./:@%+=")
+    // R-0000562: literal `%` now triggers the safe-quoting path (so an
+    // attacker-controlled value cannot smuggle a systemd specifier like
+    // `%n`/`%t`/`%h`/`%i` past the value parser), and the doubled `%%`
+    // tells systemd to render a literal `%` instead of expanding it.
+    expect(content).toContain('Environment=APP_TOKEN="abc-123_./:@%%+="')
   })
 
   it("rejects invalid Environment keys", () => {
@@ -772,7 +776,7 @@ describe("quadlet.updateImage", () => {
           code: 0,
           stdout: "sha256:local-image-id\ndocker.io/library/traefik@sha256:registry-digest\n",
         },
-      "podman pull -- 'docker.io/library/traefik:v3.3' 2>&1": {
+      "podman pull -- 'docker.io/library/traefik:v3.3'": {
         code: 0,
         stdout: "Copying blob sha256:123\nWriting manifest to image destination\n",
       },
@@ -793,7 +797,7 @@ describe("quadlet.updateImage", () => {
     expect(ssh.calls).toContain(
       "podman image inspect --format '{{.Id}}\\n{{range .RepoDigests}}{{.}}\\n{{end}}' -- 'docker.io/library/traefik:v3.3'"
     )
-    expect(ssh.calls).toContain("podman pull -- 'docker.io/library/traefik:v3.3' 2>&1")
+    expect(ssh.calls).toContain("podman pull -- 'docker.io/library/traefik:v3.3'")
     expect(ssh.calls).toContain("systemctl restart -- 'traefik'")
   })
 
@@ -804,7 +808,7 @@ describe("quadlet.updateImage", () => {
     const ssh = createMockSsh({
       "podman image inspect --format '{{.Id}}\\n{{range .RepoDigests}}{{.}}\\n{{end}}' -- 'docker.io/library/traefik:v3.3'":
         { code: 0, stdout: inspectStdout },
-      "podman pull -- 'docker.io/library/traefik:v3.3' 2>&1": {
+      "podman pull -- 'docker.io/library/traefik:v3.3'": {
         code: 0,
         stdout: "Image is up to date",
       },
@@ -832,7 +836,7 @@ describe("quadlet.updateImage", () => {
       "sha256:new-local-id\ndocker.io/library/traefik@sha256:new-digest\n",
     ]
     const ssh = createMockSsh({
-      "podman pull -- 'docker.io/library/traefik:v3.3' 2>&1": {
+      "podman pull -- 'docker.io/library/traefik:v3.3'": {
         code: 0,
         stdout: "Lade BLOB sha256:abc\nManifest wird gespeichert\n",
       },
@@ -853,7 +857,7 @@ describe("quadlet.updateImage", () => {
 
   it("passes authFile to podman pull for private registries", async () => {
     const authFilePullCommand =
-      "podman pull --authfile '/run/containers/auth.json' -- 'ghcr.io/acme/private-app:latest' 2>&1"
+      "podman pull --authfile '/run/containers/auth.json' -- 'ghcr.io/acme/private-app:latest'"
     const ssh = createMockSsh({
       [authFilePullCommand]: {
         code: 0,
@@ -920,7 +924,7 @@ describe("quadlet.updateImage", () => {
           stdout:
             "sha256:canary-local-id\nghcr.io/acme/private-app@sha256:canary-registry-digest\n",
         },
-      "podman pull -- 'ghcr.io/acme/private-app:latest' 2>&1": {
+      "podman pull -- 'ghcr.io/acme/private-app:latest'": {
         code: 0,
         stdout: "Storing signatures\n",
       },
@@ -949,7 +953,7 @@ describe("quadlet.updateImage", () => {
           code: 125,
           stderr: "inspect failed",
         },
-      "podman pull -- 'docker.io/library/traefik:v3.3' 2>&1": {
+      "podman pull -- 'docker.io/library/traefik:v3.3'": {
         code: 0,
         stdout: "Copying config sha256:abc\n",
       },
@@ -973,7 +977,7 @@ describe("quadlet.updateImage", () => {
           code: 0,
           stdout: "",
         },
-      "podman pull -- 'docker.io/library/traefik:v3.3' 2>&1": {
+      "podman pull -- 'docker.io/library/traefik:v3.3'": {
         code: 0,
         stdout: "Copying config sha256:abc\n",
       },
@@ -996,7 +1000,7 @@ describe("quadlet.updateImage", () => {
           code: 0,
           stdout: "sha256:local-only-id\n",
         },
-      "podman pull -- 'docker.io/library/traefik:v3.3' 2>&1": {
+      "podman pull -- 'docker.io/library/traefik:v3.3'": {
         code: 0,
         stdout: "Copying config sha256:abc\n",
       },
@@ -1020,7 +1024,7 @@ describe("quadlet.updateImage", () => {
     const ssh = createMockSsh({
       "podman image inspect --format '{{.Id}}\\n{{range .RepoDigests}}{{.}}\\n{{end}}' -- 'docker.io/library/traefik:v3.3'":
         { code: 1, stderr: "no such image" },
-      "podman pull -- 'docker.io/library/traefik:v3.3' 2>&1": {
+      "podman pull -- 'docker.io/library/traefik:v3.3'": {
         code: 125,
         stderr: "pull failed",
       },
@@ -1044,7 +1048,7 @@ describe("quadlet.updateImage", () => {
           stdout:
             "sha256:restart-local-id\ndocker.io/library/traefik@sha256:restart-registry-digest\n",
         },
-      "podman pull -- 'docker.io/library/traefik:v3.3' 2>&1": {
+      "podman pull -- 'docker.io/library/traefik:v3.3'": {
         code: 0,
         stdout: "Copying config sha256:abc\n",
       },
