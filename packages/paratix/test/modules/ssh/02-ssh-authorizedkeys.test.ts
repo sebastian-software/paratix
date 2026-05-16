@@ -39,7 +39,10 @@ const successfulSshApplyOptions: MockSshOptions = {
       result: { code: 0 },
     },
     {
-      command: /^rm -f -- '[^']+\/\.ssh\/\.paratix-authorized-keys\.[^']+'$/v,
+      // R-0000617: cleanup also removes the sibling `.filter` scratch file
+      // used by the absent-state rewrite.
+      command:
+        /^rm -f -- '[^']+\/\.ssh\/\.paratix-authorized-keys\.[^']+' '[^']+\/\.ssh\/\.paratix-authorized-keys\.[^']+\.filter'$/v,
       result: { code: 0 },
     },
     {
@@ -97,7 +100,10 @@ function presentAuthorizedKeysRewriteCommand(
   temporaryPath: string,
   key: string
 ): string {
-  return `{ if [ -e ${authorizedKeysPath} ]; then [ ! -L ${authorizedKeysPath} ] || { echo 'authorized_keys must not be a symlink' >&2; exit 1; }; [ -f ${authorizedKeysPath} ] || { echo 'authorized_keys must be a regular file' >&2; exit 1; }; awk '1' ${authorizedKeysPath} > '${temporaryPath}' || exit $?; grep -qxF -- '${key}' '${temporaryPath}'; grep_status=$?; if [ "$grep_status" -eq 0 ]; then :; elif [ "$grep_status" -eq 1 ]; then printf '%s\\n' '${key}' >> '${temporaryPath}'; else exit "$grep_status"; fi; else printf '%s\\n' '${key}' > '${temporaryPath}'; fi; }`
+  // R-0000617: existing authorized_keys is read via `dd ... iflag=nofollow`
+  // so the open(2) call uses O_NOFOLLOW, collapsing the TOCTOU window where
+  // a symlink could otherwise be swapped in after the `[ ! -L ]` guard.
+  return `{ if [ -e ${authorizedKeysPath} ]; then [ ! -L ${authorizedKeysPath} ] || { echo 'authorized_keys must not be a symlink' >&2; exit 1; }; [ -f ${authorizedKeysPath} ] || { echo 'authorized_keys must be a regular file' >&2; exit 1; }; dd if=${authorizedKeysPath} iflag=nofollow status=none of='${temporaryPath}' || exit $?; grep -qxF -- '${key}' '${temporaryPath}'; grep_status=$?; if [ "$grep_status" -eq 0 ]; then :; elif [ "$grep_status" -eq 1 ]; then printf '%s\\n' '${key}' >> '${temporaryPath}'; else exit "$grep_status"; fi; else printf '%s\\n' '${key}' > '${temporaryPath}'; fi; }`
 }
 
 function absentAuthorizedKeysRewriteCommand(
@@ -105,7 +111,11 @@ function absentAuthorizedKeysRewriteCommand(
   temporaryPath: string,
   key: string
 ): string {
-  return `{ if [ -e ${authorizedKeysPath} ]; then [ ! -L ${authorizedKeysPath} ] || { echo 'authorized_keys must not be a symlink' >&2; exit 1; }; [ -f ${authorizedKeysPath} ] || { echo 'authorized_keys must be a regular file' >&2; exit 1; }; grep -vxF -- '${key}' ${authorizedKeysPath} > '${temporaryPath}'; grep_status=$?; if [ "$grep_status" -eq 0 ] || [ "$grep_status" -eq 1 ]; then :; else exit "$grep_status"; fi; else : > '${temporaryPath}'; fi; }`
+  // R-0000617: stage the existing file via `dd ... iflag=nofollow` and then
+  // filter it in-place via grep -v on the staged copy. This avoids opening
+  // the authorized_keys path itself with grep, which would otherwise follow
+  // a symlink swapped in between the `[ ! -L ]` guard and the read.
+  return `{ if [ -e ${authorizedKeysPath} ]; then [ ! -L ${authorizedKeysPath} ] || { echo 'authorized_keys must not be a symlink' >&2; exit 1; }; [ -f ${authorizedKeysPath} ] || { echo 'authorized_keys must be a regular file' >&2; exit 1; }; dd if=${authorizedKeysPath} iflag=nofollow status=none of='${temporaryPath}' || exit $?; grep -vxF -- '${key}' '${temporaryPath}' > '${temporaryPath}.filter'; grep_status=$?; if [ "$grep_status" -eq 0 ] || [ "$grep_status" -eq 1 ]; then mv -T -- '${temporaryPath}.filter' '${temporaryPath}' || exit $?; else rm -f -- '${temporaryPath}.filter'; exit "$grep_status"; fi; else : > '${temporaryPath}'; fi; }`
 }
 
 function authorizedKeysFinalReplaceCommand(parameters: {
@@ -448,7 +458,7 @@ describe("ssh.authorizedKeys", () => {
     )
     expect(mockSsh.calls).not.toContain(`printf '%s\\n' '${testKey}' >> ${aliceKeys}`)
     expect(mockSsh.calls).toContain(aliceFinalReplaceCommand)
-    expect(mockSsh.calls).toContain(`rm -f -- '${tempPath}'`)
+    expect(mockSsh.calls).toContain(`rm -f -- '${tempPath}' '${tempPath}.filter'`)
   })
 
   it("apply returns ok without rewriting when present state is already converged", async () => {
@@ -828,7 +838,7 @@ describe("ssh.authorizedKeys", () => {
       presentAuthorizedKeysRewriteCommand(aliceKeys, tempPath, testKey)
     )
     expect(mockSsh.calls).toContain(aliceFinalReplaceCommand)
-    expect(mockSsh.calls).toContain(`rm -f -- '${tempPath}'`)
+    expect(mockSsh.calls).toContain(`rm -f -- '${tempPath}' '${tempPath}.filter'`)
   })
 
   // R-0000181: temp file must live in <home>/.ssh, on the same filesystem
@@ -884,7 +894,7 @@ describe("ssh.authorizedKeys", () => {
         user: "alice",
       })
     )
-    expect(mockSsh.calls).not.toContain(`rm -f -- '${foreignPath}'`)
+    expect(mockSsh.calls).not.toContain(`rm -f -- '${foreignPath}' '${foreignPath}.filter'`)
   })
 
   it("stages absent-state rewrites inside <home>/.ssh as well", async () => {

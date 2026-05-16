@@ -41,6 +41,7 @@
     "hardlink",
     "hardlinked",
     "hardlinks",
+    "iflag",
     "hashicorp",
     "healthcheck",
     "hotp",

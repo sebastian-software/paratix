@@ -204,19 +204,36 @@ async function stageAuthorizedKeysContent(
   const { authorizedKeysPath, key, state, temporaryPath, user } = parameters
   const quotedAuthorizedKeysPath = shellQuote(authorizedKeysPath)
   const quotedTemporaryPath = shellQuote(temporaryPath)
+  const filterScratchPath = `${temporaryPath}.filter`
+  const quotedFilterScratchPath = shellQuote(filterScratchPath)
+  const quotedKey = shellQuote(key)
   const existingAuthorizedKeysGuard = `[ ! -L ${quotedAuthorizedKeysPath} ] || { echo 'authorized_keys must not be a symlink' >&2; exit 1; }; [ -f ${quotedAuthorizedKeysPath} ] || { echo 'authorized_keys must be a regular file' >&2; exit 1; }`
+  // R-0000617: read the existing authorized_keys via `dd ... iflag=nofollow`
+  // so the open(2) on the path uses `O_NOFOLLOW`. The previous `awk '1'
+  // $auth_keys` and `grep -vxF -- key $auth_keys` calls opened the file
+  // without `O_NOFOLLOW`, leaving a TOCTOU window between the `[ ! -L ]`
+  // probe and the read where an attacker with write access to `~/.ssh`
+  // could swap the file for a symlink and redirect the read into an
+  // arbitrary location (privilege escalation). `dd iflag=nofollow` fails
+  // with ELOOP at open(2) time when the path is a symlink, collapsing the
+  // race window.
+  const readExistingAuthorizedKeys = `dd if=${quotedAuthorizedKeysPath} iflag=nofollow status=none of=${quotedTemporaryPath}`
   const stage =
     state === "present"
       ? await conn.exec(
-          `{ if [ -e ${quotedAuthorizedKeysPath} ]; then ${existingAuthorizedKeysGuard}; awk '1' ${quotedAuthorizedKeysPath} > ${quotedTemporaryPath} || exit $?; grep -qxF -- ${shellQuote(key)} ${quotedTemporaryPath}; grep_status=$?; if [ "$grep_status" -eq 0 ]; then :; elif [ "$grep_status" -eq 1 ]; then printf '%s\\n' ${shellQuote(key)} >> ${quotedTemporaryPath}; else exit "$grep_status"; fi; else printf '%s\\n' ${shellQuote(key)} > ${quotedTemporaryPath}; fi; }`,
+          `{ if [ -e ${quotedAuthorizedKeysPath} ]; then ${existingAuthorizedKeysGuard}; ${readExistingAuthorizedKeys} || exit $?; grep -qxF -- ${quotedKey} ${quotedTemporaryPath}; grep_status=$?; if [ "$grep_status" -eq 0 ]; then :; elif [ "$grep_status" -eq 1 ]; then printf '%s\\n' ${quotedKey} >> ${quotedTemporaryPath}; else exit "$grep_status"; fi; else printf '%s\\n' ${quotedKey} > ${quotedTemporaryPath}; fi; }`,
           MUTATION_EXEC_OPTS
         )
       : // R-0000044: use `grep -vxF` (whole-line match) to mirror the present
         // branch's `grep -qxF` and avoid removing collateral entries whose key
         // body is a substring of the key being deleted (e.g. a key appearing
         // again with options-prefix or a different comment).
+        // R-0000617: stage via `dd ... iflag=nofollow` first (no-follow at
+        // open(2) time), then read back from the staged copy. Avoids the
+        // TOCTOU where the path could become a symlink between the
+        // `[ ! -L ]` guard and grep's open() call.
         await conn.exec(
-          `{ if [ -e ${quotedAuthorizedKeysPath} ]; then ${existingAuthorizedKeysGuard}; grep -vxF -- ${shellQuote(key)} ${quotedAuthorizedKeysPath} > ${quotedTemporaryPath}; grep_status=$?; if [ "$grep_status" -eq 0 ] || [ "$grep_status" -eq 1 ]; then :; else exit "$grep_status"; fi; else : > ${quotedTemporaryPath}; fi; }`,
+          `{ if [ -e ${quotedAuthorizedKeysPath} ]; then ${existingAuthorizedKeysGuard}; ${readExistingAuthorizedKeys} || exit $?; grep -vxF -- ${quotedKey} ${quotedTemporaryPath} > ${quotedFilterScratchPath}; grep_status=$?; if [ "$grep_status" -eq 0 ] || [ "$grep_status" -eq 1 ]; then mv -T -- ${quotedFilterScratchPath} ${quotedTemporaryPath} || exit $?; else rm -f -- ${quotedFilterScratchPath}; exit "$grep_status"; fi; else : > ${quotedTemporaryPath}; fi; }`,
           MUTATION_EXEC_OPTS
         )
   if (stage.code !== 0) {
@@ -339,7 +356,14 @@ async function rewriteAuthorizedKeys(
   } finally {
     // R-0000565: pass `--` so the staging path cannot be parsed as an `rm`
     // option after a future refactor that loosens the prefix validation.
-    await conn.exec(`rm -f -- ${shellQuote(temporaryPath)}`, MUTATION_EXEC_OPTS)
+    // R-0000617: also remove the sibling `.filter` scratch file used by the
+    // absent-state branch in stageAuthorizedKeysContent, in case the rewrite
+    // failed before the rename consumed it.
+    const filterScratchPath = `${temporaryPath}.filter`
+    await conn.exec(
+      `rm -f -- ${shellQuote(temporaryPath)} ${shellQuote(filterScratchPath)}`,
+      MUTATION_EXEC_OPTS
+    )
   }
 }
 
