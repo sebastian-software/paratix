@@ -561,8 +561,17 @@ async function checkComposeSystemdUnit(parameters: {
   // apply path would re-set the mode to SYSTEMD_UNIT_MODE, so check must
   // report needs-apply to keep the run idempotent — mirroring the same
   // pattern used by createComposeConfigCheck.
-  const rawMode = await parameters.ssh.output(`stat -c '%a' ${shellQuote(parameters.filePath)}`)
-  const remoteMode = rawMode.trim()
+  //
+  // R-0000595: route the stat call through ssh.exec with ignoreExitCode so a
+  // transient stat failure (file removed mid-check, EACCES, EIO, …) collapses
+  // to NEEDS_APPLY instead of throwing a raw CommandError out of check.
+  // Matches the R-0000558 pattern used by createComposeConfigCheck.
+  const modeResult = await parameters.ssh.exec(
+    `stat -c '%a' ${shellQuote(parameters.filePath)}`,
+    EXEC_OPTS
+  )
+  if (modeResult.code !== 0) return NEEDS_APPLY
+  const remoteMode = modeResult.stdout.trim()
   if (remoteMode !== SYSTEMD_UNIT_MODE.replace(/^0+/v, "")) return NEEDS_APPLY
 
   // R-0000164: detect manual owner/group drift (e.g. an operator ran
@@ -570,8 +579,16 @@ async function checkComposeSystemdUnit(parameters: {
   // `chown root:root` on the unit, so a check that ignored ownership would
   // report "ok" while apply silently kept rewriting the unit on every run.
   // A non-root owner of a system-wide unit is also a hardening regression.
-  const rawOwner = await parameters.ssh.output(`stat -c '%U %G' ${shellQuote(parameters.filePath)}`)
-  if (rawOwner.trim() !== "root root") return NEEDS_APPLY
+  //
+  // R-0000595: same ignoreExitCode routing as the mode probe above so check
+  // never throws a raw CommandError when the unit file disappears or stat
+  // fails for a transient reason.
+  const ownerResult = await parameters.ssh.exec(
+    `stat -c '%U %G' ${shellQuote(parameters.filePath)}`,
+    EXEC_OPTS
+  )
+  if (ownerResult.code !== 0) return NEEDS_APPLY
+  if (ownerResult.stdout.trim() !== "root root") return NEEDS_APPLY
 
   return "ok"
 }
