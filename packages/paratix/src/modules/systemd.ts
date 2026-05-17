@@ -17,6 +17,17 @@ const SYSTEMD_UNIT_RELOAD_HASH_LENGTH = 16
 const SILENT_EXEC_OPTS = { ignoreExitCode: true, silent: true } as const
 
 function validateUnitName(name: string): string {
+  // R-0000659: the unit-name pattern `^[\w@.\-]+$` lets `.` and `..` slip
+  // through because both are non-empty matches of `[\w@.\-]+`. When used
+  // as `${unitName}` inside paths like `/etc/systemd/system/${unitName}`
+  // they would resolve to the unit directory itself (`/etc/systemd/system/`
+  // or `/etc/systemd/`), turning an `ssh.writeFile` into a write to a
+  // directory and an `rm -f` into a no-op on the parent dir. Reject the
+  // two values up front, before the regex check, to keep the path
+  // interpolation safe.
+  if (name === "." || name === "..") {
+    throw new Error(`Invalid systemd unit name: ${name}`)
+  }
   if (!name || name.startsWith("-") || !UNIT_NAME_PATTERN.test(name)) {
     throw new Error(`Invalid systemd unit name: ${name}`)
   }

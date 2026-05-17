@@ -504,6 +504,23 @@ describe("systemd.unit — input validation", () => {
     }
   })
 
+  // R-0000659: the regex `^[\w@.\-]+$` accepts the bare values "." and
+  // ".." because both match `[\w@.\-]+`. Used as `${name}` inside a path
+  // like `/etc/systemd/system/${name}` they would resolve to the unit
+  // directory itself (a writeFile to a directory, or `rm -f` against the
+  // parent). Reject them before the regex check.
+  it("throws when name is a bare dot (.)", () => {
+    for (const createModule of factories) {
+      expect(() => createModule(".")).toThrow(/Invalid systemd unit name/v)
+    }
+  })
+
+  it("throws when name is a bare double-dot (..)", () => {
+    for (const createModule of factories) {
+      expect(() => createModule("..")).toThrow(/Invalid systemd unit name/v)
+    }
+  })
+
   it("throws when name contains a forward slash (foo/bar.service)", () => {
     for (const createModule of factories) {
       expect(() => createModule("foo/bar.service")).toThrow(/Invalid systemd unit name/v)
