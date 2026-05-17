@@ -144,4 +144,46 @@ describe("timer.scheduled — apply (state: absent)", () => {
     expect(result.status).toBe("failed")
     expect(ssh.calls).toContain("systemctl start -- 'backup.timer'")
   })
+
+  // R-0000655: when the post-rm daemon-reload fails, we restore the unit
+  // files and then must run another daemon-reload + replay the original
+  // enable/active state. Without these two follow-up steps the timer
+  // would end up in "files present but disabled" — files back on disk
+  // but systemd thinks they are gone and the timer no longer fires.
+  it("R-0000655: reloads daemon and restores activation after post-rm daemon-reload fails", async () => {
+    const ssh = createAbsentApplyWithExistingUnitsMockSsh({
+      "systemctl daemon-reload": { code: 1, stderr: "boom" },
+      // Pre-apply state: timer was enabled and active.
+      "systemctl enable --now -- 'backup.timer'": { code: 0 },
+      "systemctl is-active --quiet -- 'backup.timer'": { code: 0 },
+      "systemctl is-enabled --quiet -- 'backup.timer'": { code: 0 },
+    })
+    const mod = timer.scheduled("backup", { ...baseOptions, state: "absent" })
+    const result = await mod.apply(ssh, emptyEnv)
+    expect(result.status).toBe("failed")
+    // The rollback path must re-issue daemon-reload after the unit-file
+    // restore so systemd sees the restored content, and replay the
+    // enable+active state via `enable --now`.
+    expect(ssh.calls.filter((c) => c === "systemctl daemon-reload").length).toBeGreaterThanOrEqual(2)
+    expect(ssh.calls).toContain("systemctl enable --now -- 'backup.timer'")
+  })
+
+  // R-0000655: when the second daemon-reload (after restore) also fails,
+  // the failure message must surface both the original reload failure
+  // and the rollback-reload failure so an operator can diagnose them.
+  it("R-0000655: surfaces both failures when the post-restore daemon-reload also fails", async () => {
+    const ssh = createAbsentApplyWithExistingUnitsMockSsh({
+      "systemctl daemon-reload": { code: 1, stderr: "boom" },
+      // Pre-apply: timer not enabled, not active, so no activation
+      // rollback is attempted — the test focuses on the daemon-reload
+      // chain only.
+      "systemctl is-active --quiet -- 'backup.timer'": { code: 1 },
+      "systemctl is-enabled --quiet -- 'backup.timer'": { code: 1 },
+    })
+    const mod = timer.scheduled("backup", { ...baseOptions, state: "absent" })
+    const result = await mod.apply(ssh, emptyEnv)
+    expect(result.status).toBe("failed")
+    expect(result.error?.message).toContain("daemon-reload")
+    expect(result.error?.message).toContain("rollback")
+  })
 })

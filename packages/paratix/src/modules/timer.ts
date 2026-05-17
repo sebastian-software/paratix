@@ -103,9 +103,23 @@ function describeExecResult(result: ExecResult): string {
   return detail === "" ? `exit code ${String(result.code)}` : detail
 }
 
+// R-0000655: optional activation context. When present, after a successful
+// `restoreUnitFileSnapshots` the helper additionally performs a second
+// `systemctl daemon-reload` (so systemd picks up the restored unit files
+// on disk) and replays the pre-apply enable/active state through
+// `restoreTimerActivationForAbsent`. Without these two steps the absent
+// path could leave the timer in "files present but disabled" — the unit
+// files would be back on disk but systemd would still believe they had
+// been removed and the timer would no longer fire.
+type ReloadFailureRollbackActivationContext = {
+  context: AbsentContext
+  snapshot: TimerActivationSnapshot
+}
+
 async function restoreUnitFileSnapshotsAfterReloadFailure(
   ssh: SshConnection,
   parameters: {
+    activation?: ReloadFailureRollbackActivationContext
     message: string
     paths: Pick<TimerPaths, "servicePath" | "timerPath">
     reload: ExecResult
@@ -119,7 +133,38 @@ async function restoreUnitFileSnapshotsAfterReloadFailure(
       `${parameters.message}; rollback of timer unit files also failed: ${describeError(error)}; original daemon-reload failure: ${describeExecResult(parameters.reload)}`
     )
   }
-  return failedCommand(parameters.message, parameters.reload)
+  // R-0000655: when invoked from the absent path, additionally tell
+  // systemd about the restored files (mirrors the post-rollback
+  // daemon-reload in `handleAbsentUnitRemovalFailure` lines 428-439)
+  // and replay the pre-apply enable/active state so the timer ends up
+  // in its original state, not "files present but disabled". The
+  // present path leaves `activation` undefined and keeps the historic
+  // failedCommand behaviour.
+  const baseFailure = failedCommand(parameters.message, parameters.reload)
+  const { activation } = parameters
+  if (activation == null) return baseFailure
+  const reloadAfterRestore = await ssh.exec(`${SYSTEMCTL} daemon-reload`, {
+    ignoreExitCode: true,
+    silent: true,
+  })
+  if (reloadAfterRestore.code !== 0) {
+    return failed(
+      `${parameters.message}: ${describeExecResult(
+        parameters.reload
+      )}; daemon-reload after unit-file rollback also failed: ${describeExecResult(
+        reloadAfterRestore
+      )}`
+    )
+  }
+  const activationFailure = await restoreTimerActivationForAbsent(
+    ssh,
+    activation.context,
+    activation.snapshot
+  )
+  if (activationFailure == null) return baseFailure
+  const baseMessage = baseFailure.error?.message ?? parameters.message
+  const restoreMessage = activationFailure.error?.message ?? "timer activation rollback failed"
+  return failed(`${baseMessage}; ${restoreMessage}`)
 }
 
 async function restoreUnitFileSnapshotsAfterWriteFailure(
@@ -442,9 +487,13 @@ async function handleAbsentUnitRemovalFailure(
 async function removeAbsentUnitFiles(
   ssh: SshConnection,
   context: AbsentContext,
-  existing: { service: boolean; timer: boolean }
+  parameters: {
+    activationSnapshot: TimerActivationSnapshot
+    existing: { service: boolean; timer: boolean }
+  }
 ): Promise<ModuleResult | null> {
   const { locations, module, name } = context
+  const { activationSnapshot, existing } = parameters
   const snapshots = {
     service: existing.service ? await readFileSnapshot(ssh, locations.servicePath) : undefined,
     timer: existing.timer ? await readFileSnapshot(ssh, locations.timerPath) : undefined,
@@ -468,7 +517,13 @@ async function removeAbsentUnitFiles(
     silent: true,
   })
   if (reload.code === 0) return null
+  // R-0000655: when the post-rm daemon-reload fails, restoring the unit
+  // files must be followed by another daemon-reload (so systemd
+  // re-reads them) and by `restoreTimerActivationForAbsent` (so the
+  // pre-apply enable/active state comes back). Without the second
+  // step the timer would end up in "files present but disabled".
   return restoreUnitFileSnapshotsAfterReloadFailure(ssh, {
+    activation: { context, snapshot: activationSnapshot },
     message: `[${module}: ${name}] systemctl daemon-reload failed`,
     paths: locations,
     reload,
@@ -516,8 +571,8 @@ async function applyAbsent(ssh: SshConnection, context: AbsentContext): Promise<
   if (disableFailure) return disableFailure
 
   const removeFailure = await removeAbsentUnitFiles(ssh, context, {
-    service: serviceExists,
-    timer: timerExists,
+    activationSnapshot,
+    existing: { service: serviceExists, timer: timerExists },
   })
   if (removeFailure) {
     return handleAbsentRemoveFailure(ssh, context, { activationSnapshot, removeFailure })
