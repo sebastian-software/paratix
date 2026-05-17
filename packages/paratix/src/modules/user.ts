@@ -146,19 +146,38 @@ async function passwdAttributesMatch(
   return true
 }
 
+// R-0000657: result of the server-side shadow-hash comparison. `cmp` reports
+// exit 0 when the hashes match byte-for-byte, exit 1 when they differ, and
+// exit ≥ 2 for hard errors (missing input file, unreadable shadow line, etc.).
+// A failed `bash -c` invocation — missing `bash`, broken process substitution,
+// or a permission error reading `/etc/shadow` — manifests as an exit code
+// outside the 0/1 set or as an exception from `ssh.exec`. Treating any
+// non-zero exit as "mismatch" caused the module to re-set the password on
+// every run when the toolchain was broken; differentiate the three outcomes
+// so the caller can react accordingly.
+type ShadowHashCompareResult =
+  | { kind: "match" }
+  | { kind: "mismatch" }
+  | { failure: ModuleResult; kind: "toolchain-error" }
+
 async function shadowHashMatches(
   ssh: SshConnection,
   name: string,
   password: string
-): Promise<boolean> {
+): Promise<ShadowHashCompareResult> {
   // R-0000544: compare the shadow hash server-side so the raw hash never
   // travels back as stdout (where it could land in failure snippets or
   // verbose-error output). The new hash is streamed in via stdin (masked as
   // a secret) and the comparison is performed in a tiny bash script: extract
   // the stored hash with `getent shadow | cut -d: -f2`, then `cmp -s` it
   // against the stdin payload via process substitution. Only the exit code
-  // (0 = match, non-zero = mismatch/error) flows back over SSH; the raw
-  // hashes never appear in stdout or stderr.
+  // flows back over SSH; the raw hashes never appear in stdout or stderr.
+  //
+  // R-0000657: distinguish three exit-code classes — 0 (match), 1 (mismatch),
+  // ≥ 2 or spawn error (toolchain problem). For the toolchain class, surface
+  // a structured failure instead of silently falling back to "mismatch" so
+  // idempotency is preserved when bash, getent, cmp, or process substitution
+  // is unavailable.
   registerSecret(password)
   try {
     // Run the comparison through `bash -c` so process substitution `<()` is
@@ -168,13 +187,36 @@ async function shadowHashMatches(
     // both inputs byte-for-byte comparable.
     const compareScript = `set -o pipefail
 cmp -s <(getent shadow ${shellQuote(name)} | cut -d: -f2) -`
-    const result = await ssh.exec(`bash -c ${shellQuote(compareScript)}`, {
-      ignoreExitCode: true,
-      input: `${password}\n`,
-      secrets: [password],
-      silent: true,
-    })
-    return result.code === 0
+    let result: Awaited<ReturnType<typeof ssh.exec>>
+    try {
+      result = await ssh.exec(`bash -c ${shellQuote(compareScript)}`, {
+        ignoreExitCode: true,
+        input: `${password}\n`,
+        secrets: [password],
+        silent: true,
+      })
+    } catch (error) {
+      // A thrown exception here means the SSH transport rejected the command
+      // outright (network drop, spawn failure) — treat as a toolchain error
+      // so the caller can fail fast instead of looping over a doomed apply.
+      const detail = error instanceof Error ? error.message : String(error)
+      return {
+        failure: failed(
+          `[user.present: ${name}] shadow hash comparison failed: ${detail}`
+        ),
+        kind: "toolchain-error",
+      }
+    }
+    if (result.code === 0) return { kind: "match" }
+    if (result.code === 1) return { kind: "mismatch" }
+    return {
+      failure: failedCommand(
+        `[user.present: ${name}] shadow hash comparison toolchain error`,
+        result,
+        [password]
+      ),
+      kind: "toolchain-error",
+    }
   } finally {
     unregisterSecret(password)
   }
@@ -225,23 +267,38 @@ async function applyUserMutation(context: UserMutationContext): Promise<UserMuta
   return { kind: "changed" }
 }
 
+// R-0000657: discriminated outcome of `attributesMatch`. The toolchain-error
+// variant lets the caller distinguish "the shadow hash compare blew up" from
+// the regular match/mismatch verdict so check phase can surface a structured
+// failure instead of falsely returning `needs-apply`.
+type AttributesMatchOutcome =
+  | { kind: "match" }
+  | { kind: "mismatch" }
+  | { failure: ModuleResult; kind: "toolchain-error" }
+
 async function attributesMatch(
   ssh: SshConnection,
   name: string,
   options: UserOptions
-): Promise<boolean> {
-  if (options.password != null && !(await shadowHashMatches(ssh, name, options.password))) {
-    return false
+): Promise<AttributesMatchOutcome> {
+  if (options.password != null) {
+    const shadow = await shadowHashMatches(ssh, name, options.password)
+    if (shadow.kind === "toolchain-error") {
+      return { failure: shadow.failure, kind: "toolchain-error" }
+    }
+    if (shadow.kind === "mismatch") return { kind: "mismatch" }
   }
 
   const needsPasswdCheck = options.uid != null || options.shell != null || options.home != null
-  if (needsPasswdCheck && !(await passwdAttributesMatch(ssh, name, options))) return false
-
-  if (options.groups != null && !(await supplementaryGroupsMatch(ssh, name, options.groups))) {
-    return false
+  if (needsPasswdCheck && !(await passwdAttributesMatch(ssh, name, options))) {
+    return { kind: "mismatch" }
   }
 
-  return true
+  if (options.groups != null && !(await supplementaryGroupsMatch(ssh, name, options.groups))) {
+    return { kind: "mismatch" }
+  }
+
+  return { kind: "match" }
 }
 
 /**
@@ -358,7 +415,18 @@ export const user = {
       async check(ssh: null | SshConnection): Promise<"needs-apply" | "ok"> {
         if (!ssh) return NEEDS_APPLY
         if (!(await ssh.test(`${ID_CMD} ${shellQuote(name)}`))) return NEEDS_APPLY
-        if (options != null && !(await attributesMatch(ssh, name, options))) return NEEDS_APPLY
+        if (options != null) {
+          const outcome = await attributesMatch(ssh, name, options)
+          // R-0000657: surface a shadow-hash comparison toolchain failure
+          // (missing cmp, broken bash process substitution, permission
+          // error) as a structured runner error instead of looping the
+          // module through `needs-apply` -> apply -> setPassword on every
+          // run when the compare cannot be executed.
+          if (outcome.kind === "toolchain-error") {
+            throw outcome.failure.error ?? new Error(`[user.present: ${name}] shadow hash comparison failed`)
+          }
+          if (outcome.kind === "mismatch") return NEEDS_APPLY
+        }
         return "ok"
       },
       name: `user.present: ${name}`,

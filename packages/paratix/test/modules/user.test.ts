@@ -168,6 +168,53 @@ describe("user.present check", () => {
     const result = await mod.check(ssh, emptyEnv)
     expect(result).toBe("ok")
   })
+
+  // R-0000657: cmp exits 1 to signal a clean mismatch. That must remain
+  // `needs-apply` so apply runs and updates the hash.
+  it("returns needs-apply when cmp reports exit code 1 (clean mismatch)", async () => {
+    const compareCommand =
+      "bash -c 'set -o pipefail\ncmp -s <(getent shadow '\\''alice'\\'' | cut -d: -f2) -'"
+    const ssh = createMockSsh({
+      [compareCommand]: { code: 1 },
+      "id 'alice'": { code: 0 },
+    })
+    const mod = user.present("alice", { password: "$6$hash" })
+    const result = await mod.check(ssh, emptyEnv)
+    expect(result).toBe("needs-apply")
+  })
+
+  // R-0000657: cmp/bash exit codes ≥ 2 signal a toolchain or environmental
+  // problem (missing cmp, getent failure, broken process substitution,
+  // permission denial reading /etc/shadow). The check must surface a
+  // structured failure instead of silently re-running setPassword on every
+  // run by reporting `needs-apply`.
+  it("throws a toolchain failure when cmp exits with code 2 (hard error)", async () => {
+    const compareCommand =
+      "bash -c 'set -o pipefail\ncmp -s <(getent shadow '\\''alice'\\'' | cut -d: -f2) -'"
+    const ssh = createMockSsh({
+      [compareCommand]: { code: 2, stderr: "cmp: invalid option" },
+      "id 'alice'": { code: 0 },
+    })
+    const mod = user.present("alice", { password: "$6$hash" })
+    await expect(mod.check(ssh, emptyEnv)).rejects.toThrow(
+      /shadow hash comparison toolchain error/v
+    )
+  })
+
+  // R-0000657: a 127 exit (bash: command not found) must also be classified
+  // as a toolchain error, not a hash mismatch.
+  it("throws a toolchain failure when bash returns 127 (cmp missing)", async () => {
+    const compareCommand =
+      "bash -c 'set -o pipefail\ncmp -s <(getent shadow '\\''alice'\\'' | cut -d: -f2) -'"
+    const ssh = createMockSsh({
+      [compareCommand]: { code: 127, stderr: "bash: cmp: command not found" },
+      "id 'alice'": { code: 0 },
+    })
+    const mod = user.present("alice", { password: "$6$hash" })
+    await expect(mod.check(ssh, emptyEnv)).rejects.toThrow(
+      /shadow hash comparison toolchain error/v
+    )
+  })
 })
 
 describe("user.present apply", () => {
