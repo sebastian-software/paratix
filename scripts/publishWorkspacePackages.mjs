@@ -105,6 +105,30 @@ async function waitForPublishedPackage(parameters, attempt = 1) {
   await waitForPublishedPackage(parameters, attempt + 1)
 }
 
+// R-0000660: `pnpm publish` defaults to the `latest` dist-tag regardless of
+// any prerelease suffix on the version, so a 1.2.3-beta.1 publish would
+// silently overwrite the `latest` tag and offer an unstable build to every
+// `pnpm install paratix` user. Inspect the version for a SemVer prerelease
+// component (the segment after the first `-`, before any `+build` metadata)
+// and pin the dist-tag accordingly: prereleases publish under `next`,
+// stable versions explicitly under `latest`.
+//
+// The split mirrors `isValidSemverVersion` in
+// packages/create-paratix/src/dependencyRange.ts: SemVer 2.0.0 separates
+// the prerelease (after `-`) from the build metadata (after `+`), and the
+// dist-tag decision must look at the prerelease, not at the (rarely used)
+// build metadata. Stripping the build segment first keeps the check
+// resilient to versions like `1.2.3+build.5` or `1.2.3-rc.1+sha.abc`.
+function hasPrereleaseSuffix(version) {
+  const buildSeparatorIndex = version.indexOf("+")
+  const withoutBuild = buildSeparatorIndex === -1 ? version : version.slice(0, buildSeparatorIndex)
+  return withoutBuild.includes("-")
+}
+
+function publishDistributionTag(version) {
+  return hasPrereleaseSuffix(version) ? "next" : "latest"
+}
+
 async function publishPackage(packageInfo, commandRunner) {
   if (await isPublished(packageInfo.name, packageInfo.version, commandRunner)) {
     console.log(
@@ -113,13 +137,18 @@ async function publishPackage(packageInfo, commandRunner) {
     return
   }
 
-  console.log(`Publishing ${packageInfo.name}@${packageInfo.version}.`)
+  const distributionTag = publishDistributionTag(packageInfo.version)
+  console.log(
+    `Publishing ${packageInfo.name}@${packageInfo.version} under --tag ${distributionTag}.`
+  )
   await commandRunner.spawn("pnpm", [
     "--dir",
     packageInfo.directory,
     "publish",
     "--no-git-checks",
     "--provenance",
+    "--tag",
+    distributionTag,
   ])
 }
 
