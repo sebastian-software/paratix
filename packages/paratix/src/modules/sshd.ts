@@ -1398,16 +1398,29 @@ async function applySshdPortWhenConfigUnchanged(
   // (identity rollback). Synthesise a rollback config that pins the live
   // pre-restart port instead, so a failed verification can actually restore
   // the previously listening port.
-  // R-0000612: only synthesise that rollback config when `originalPort` is a
-  // genuine fallback the runner can actually reach. If `originalPort` is not
-  // part of the static `configuredPorts` list, dialling it after a failed
-  // verification would still lock the runner out — leave `originalConfig`
-  // untouched in that case so the rollback restores whatever sshd_config the
-  // operator deployed instead of pinning a port we cannot reconnect to.
+  // R-0000620: when `originalPort` is not part of the static `configuredPorts`
+  // list, the synthesised rollback config would have to fall back to the
+  // captured `originalConfig` — which already pins `targetPort` here (we are
+  // on the no-change apply path because the file already lists the target
+  // port). That "rollback" would therefore not change anything and the runner
+  // could not reach the host on `originalPort` either, leaving us with a
+  // misleading "rolled back" status while the verification failure is
+  // effectively unrecoverable. Refuse to restart sshd up front in that case
+  // so the operator sees an actionable error before we touch the daemon.
   const { configuredPorts } = ssh.getConnectionInfo()
-  const rollbackConfig = configuredPorts.includes(parameters.originalPort)
-    ? buildSshdPortContent(parameters.originalConfig, parameters.originalPort).newContent
-    : parameters.originalConfig
+  if (!configuredPorts.includes(parameters.originalPort)) {
+    return failed(
+      `[sshd.port: ${String(parameters.targetPort)}] sshd_config already lists ` +
+        `Port ${String(parameters.targetPort)} but the live socket is not on it; ` +
+        `original port ${String(parameters.originalPort)} is not in the static ` +
+        "ssh.ports configuration so we cannot synthesise a usable rollback port; " +
+        "refusing to restart sshd because a verification failure would not be recoverable"
+    )
+  }
+  const rollbackConfig = buildSshdPortContent(
+    parameters.originalConfig,
+    parameters.originalPort
+  ).newContent
   const verificationFailure = await restartAndVerifySshdPort(ssh, {
     originalConfig: rollbackConfig,
     originalPort: parameters.originalPort,

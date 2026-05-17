@@ -630,18 +630,18 @@ describe("sshd.port — apply: validation and rollback", () => {
     expect(addPortSpy).not.toHaveBeenCalled()
   })
 
-  // R-0000612: the no-change apply path used to synthesise a rollback config
-  // pinned to `originalPort` unconditionally. When `originalPort` is not part
-  // of the static `configuredPorts` list, dialling it after a failed verify
-  // would still lock the runner out — the rollback must therefore fall back
-  // to the captured `originalConfig` and leave the listening port to the
-  // operator's deployed config instead.
-  it("R-0000612: rolls back to originalConfig when originalPort is not configured", async () => {
-    // Config already has the target port; the live socket is not on it, so
-    // the no-change apply path runs the restart + verify dance. Configure the
+  // R-0000620: when sshd_config already lists the target port but the live
+  // socket is not on it, the no-change apply path previously called the
+  // restart-and-verify helper with `rollbackConfig === originalConfig` (which
+  // already pinned `targetPort`). A verification failure would then surface a
+  // misleading "rolled back" status although nothing actually changed and the
+  // runner could not reach `originalPort` either. Refuse to restart sshd up
+  // front so the operator sees an actionable error before we touch the daemon.
+  it("R-0000620: refuses to restart sshd when originalPort is not configured", async () => {
+    // Config already has the target port; the live socket is not on it. The
     // runner so `originalPort` (22) is NOT in the static `configuredPorts`
-    // list — only the target port 2222 is — so the rollback must use the
-    // captured `originalConfig` verbatim.
+    // list — only the target port 2222 is — so we cannot synthesise a usable
+    // rollback port.
     const originalConfig = "Port 2222\n"
     const mockSsh = createMockSsh({
       [CAT_SSHD]: { stdout: originalConfig },
@@ -653,18 +653,21 @@ describe("sshd.port — apply: validation and rollback", () => {
     })
     const writtenFiles = trackWriteFile(mockSsh)
     const originalExec = mockSsh.exec.bind(mockSsh)
-    vi.spyOn(mockSsh, "exec").mockImplementation(buildExecWithSsOverride(originalExec, { code: 0 }))
+    const execSpy = vi
+      .spyOn(mockSsh, "exec")
+      .mockImplementation(buildExecWithSsOverride(originalExec, { code: 0 }))
 
     const mod = sshd.port(2222)
     const result = await mod.apply(mockSsh, emptyEnv)
 
     expect(result.status).toBe("failed")
-    expect(result.error?.message).toContain("no listener on port 2222")
-    expect(result.error?.message).toContain("rolled back")
-    // The rollback write must restore the captured `originalConfig` verbatim —
-    // never a synthetic config pinning `originalPort` 22.
-    expect(writtenFiles.at(-1)?.content).toBe(originalConfig)
-    expect(writtenFiles.at(-1)?.content).not.toContain("Port 22\n")
+    expect(result.error?.message).toContain("refusing to restart sshd")
+    expect(result.error?.message).toContain("cannot synthesise a usable rollback port")
+    expect(result.error?.message).toContain("verification failure would not be recoverable")
+    // No restart and no sshd_config rewrite must have happened — the guard
+    // runs strictly before any state change.
+    expect(writtenFiles).toHaveLength(0)
+    expect(execSpy.mock.calls.map((args) => args[0])).not.toContain("systemctl restart sshd")
   }, 10_000)
 
   it("restarts and emits reconnect meta when config matches but target port is not live", async () => {
