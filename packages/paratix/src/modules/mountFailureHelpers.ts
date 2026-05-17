@@ -28,7 +28,8 @@ export async function restorePreviousMountAfterFailure(parameters: {
     originalDetail.length > 0 ? `; original mount failure: ${originalDetail}` : ""
   return failedCommand(
     `[mount.present: ${parameters.path}] mount after umount failed and ` +
-      `restoring previous mount failed${restoreSummary}${originalSummary}`,
-    restoreResult
+      `restoring previous mount failed (restore exit code ${String(restoreResult.code)})` +
+      `${restoreSummary}${originalSummary}`,
+    parameters.mountFailure
   )
 }
