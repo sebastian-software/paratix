@@ -28,6 +28,11 @@ const createMockSsh: typeof createBaseMockSsh = (responses, options) =>
     responseStubs: [
       ...(options?.responseStubs ?? []),
       { command: "[ -e '/etc/hosts' ]", result: { code: 0 } },
+      // R-0000645: applyHostsPresent now probes `[ -L '/etc/hosts' ]`
+      // (isSymlink) before writing in the create path. Default to
+      // "not a symlink" so existing fixtures keep passing; the
+      // symlink-refusal regression stubs `{ code: 0 }` explicitly.
+      { command: "[ -L '/etc/hosts' ]", result: { code: 1 } },
       // R-0000494: the flag-lock holder marker is now written with the
       // hostname captured via `ssh.output("hostname")` and interpolated
       // through `shellQuote(...)`. The resulting `printf` form uses a literal
@@ -180,6 +185,29 @@ describe("net.hosts — apply", () => {
         remotePath: "/etc/hosts",
       },
     ])
+  })
+
+  // R-0000645: defense-in-depth — if /etc/hosts is missing but the path is
+  // a (dangling) symlink, the create path must refuse the write so the
+  // atomic mv-replace inside writeFile cannot silently follow the link.
+  it("refuses to create /etc/hosts when the path is a symlink (state: present)", async () => {
+    const mockSsh = createMockSsh(
+      {
+        "cat '/etc/hosts'": { code: 1, stderr: "cat: /etc/hosts: No such file or directory" },
+      },
+      {
+        responseStubs: [
+          { command: "[ -e '/etc/hosts' ]", result: { code: 1 } },
+          { command: "[ -L '/etc/hosts' ]", result: { code: 0 } },
+        ],
+      }
+    )
+
+    const mod = net.hosts("1.2.3.4", ["myhost"])
+    const result = await mod.apply(mockSsh, emptyEnv)
+
+    expect(result.status).toBe("failed")
+    expect(mockSsh.writeFileCalls).toHaveLength(0)
   })
 
   it("returns ok without writing when /etc/hosts is missing (state: absent)", async () => {

@@ -1263,6 +1263,15 @@ async function applyHostsPresent(
   const { content, existed, lines } = snapshot
   const mergedLine = buildMergedHostsLine(lines, parameters)
   if (!existed) {
+    // R-0000277: defense-in-depth — refuse to write through a planted
+    // symlink at /etc/hosts before the atomic mv-replace inside writeFile
+    // would silently break it. Matches the guards in net.resolv,
+    // net.interface and net.route.
+    if (await isSymlink(conn, HOSTS_FILE)) {
+      return failed(
+        `[net.hosts] refuses to write through symlink at ${HOSTS_FILE}`
+      )
+    }
     await conn.writeFile(HOSTS_FILE, `${mergedLine}\n`, { mode: HOSTS_FILE_MODE })
     return { status: "changed" }
   }
