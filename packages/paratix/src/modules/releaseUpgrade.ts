@@ -14,6 +14,7 @@ import { withMutexLock } from "./moduleHelpers.js"
 import { type Distro, parseOsReleaseDistro } from "./releaseUpgradeDistro.js"
 import {
   isAcceptableSourcesPath,
+  isAllowedDebianStableTargetCodename,
   isSupportedDebianUpgradePath,
   isVanishedSourcesFileError,
   readSourcesFileMode,
@@ -98,7 +99,11 @@ async function getDebianCurrentCodename(ssh: SshConnection): Promise<string> {
  *
  * @param ssh - Active SSH connection.
  * @returns The stable codename (e.g. `"bookworm"`).
- * @throws {Error} When the `Codename:` field is absent.
+ * @throws {Error} When the `Codename:` field is absent or when the codename
+ *   does not match the basic shape expected for a Debian suite. Suites that
+ *   pass the shape check but are not on the allowlist of legitimate stable
+ *   upgrade targets (R-0000632) are returned unchanged here so callers can
+ *   surface a `failed(...)` ModuleResult instead of an uncaught throw.
  */
 async function getDebianStableCodename(ssh: SshConnection): Promise<string> {
   // R-0000177: --max-time bounds the wall-clock duration of the request.
@@ -683,6 +688,20 @@ async function applyDebian(
   const targetCodename = await getDebianStableCodename(ssh)
 
   if (options.dryRun === true || currentCodename === targetCodename) return { status: "ok" }
+
+  // R-0000632: the Release file fetched by `getDebianStableCodename` is
+  // unsigned, so a TLS-MITM or CDN-hijack could replace its body with
+  // `Codename: sid` / `experimental` / `forky` / any other suite that
+  // satisfies the basic shape check. Reject codenames that
+  // `isAllowedDebianStableTargetCodename` does not recognise as a
+  // legitimate stable upgrade target before any apt source is rewritten.
+  // The pair-level `isSupportedDebianUpgradePath` check below still runs
+  // as defense-in-depth.
+  if (!isAllowedDebianStableTargetCodename(targetCodename)) {
+    return failed(
+      `[releaseUpgrade.upgrade] unexpected Debian stable codename from mirrors: ${JSON.stringify(targetCodename)}`
+    )
+  }
 
   if (!isSupportedDebianUpgradePath(currentCodename, targetCodename)) {
     return failed(

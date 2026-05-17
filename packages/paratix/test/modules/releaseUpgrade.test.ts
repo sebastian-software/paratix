@@ -567,6 +567,35 @@ describe("releaseUpgrade.upgrade — apply (Debian)", () => {
     expect(ssh.calls).not.toContain("DEBIAN_FRONTEND=noninteractive apt-get update")
   })
 
+  // R-0000632: the codename pulled from the unsigned Release file is the
+  // only string the apt rewrite trusts when picking the new suite. A
+  // TLS-MITM or CDN-hijack could replace the body with a development
+  // suite name that satisfies CODENAME_RE; the apply path must refuse
+  // every codename that isAllowedDebianStableTargetCodename does not
+  // recognise as a legitimate stable target, before any sources file is
+  // touched.
+  // `rcbuggy` stands in for the literal `rc-buggy` suite shipped by Debian
+  // during the freeze period: it is shape-valid for CODENAME_RE but never a
+  // legitimate `Codename:` of `dists/stable/Release`, so an MITM injecting
+  // it must be refused.
+  it.each(["sid", "experimental", "forky", "rcbuggy"])(
+    "R-0000632: rejects unexpected Debian stable codename '%s' from mirrors",
+    async (maliciousCodename) => {
+      const ssh = createMockSsh(debianApplyResponses("bookworm", maliciousCodename))
+      const mod = releaseUpgrade.upgrade()
+      const result = await mod.apply(ssh, emptyEnv)
+
+      expect(result.status).toBe("failed")
+      expect(String(result.error)).toContain("unexpected Debian stable codename from mirrors")
+      expect(String(result.error)).toContain(JSON.stringify(maliciousCodename))
+      // No sources file may be read, written or refreshed against the
+      // hijacked suite.
+      expect(ssh.calls).not.toContain(readSourcesCommand("/etc/apt/sources.list"))
+      expect(ssh.calls).not.toContain("DEBIAN_FRONTEND=noninteractive apt-get update")
+      expect(ssh.writeFileCalls).toHaveLength(0)
+    }
+  )
+
   it("apt-get update fails → failed", async () => {
     const ssh = createMockSsh(
       debianApplyResponses("bookworm", "trixie", {

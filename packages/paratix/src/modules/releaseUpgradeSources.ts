@@ -198,6 +198,38 @@ export function isSupportedDebianUpgradePath(
   }
 }
 
+/**
+ * Allowlist check for the codename advertised by the Debian stable
+ * mirrors. R-0000632: the codename is parsed out of the unsigned
+ * `dists/stable/Release` body returned by curl. A TLS-MITM or
+ * CDN-hijack could replace the body with `Codename: sid` (or
+ * `experimental`, `forky`, …) so the host's apt sources get rewritten
+ * to point at a development suite. The downstream
+ * {@link isSupportedDebianUpgradePath} check rejects such mismatches,
+ * but it runs only just before the rewrite — keeping a dedicated
+ * target-only allowlist next to it lets callers refuse the suite as
+ * early as the curl response is parsed, without having to fabricate a
+ * `currentCodename` to feed into the pair check.
+ *
+ * The allowlist intentionally tracks
+ * {@link isSupportedDebianUpgradePath}'s switch: any codename that
+ * `isSupportedDebianUpgradePath` recognises as a legitimate upgrade
+ * target is also accepted here.
+ */
+export function isAllowedDebianStableTargetCodename(targetCodename: string): boolean {
+  switch (targetCodename) {
+    case "bookworm":
+    case "bullseye":
+    case "buster":
+    case "trixie": {
+      return true
+    }
+    default: {
+      return false
+    }
+  }
+}
+
 export function rewriteAptSourcesContent(parameters: {
   currentCodename: string
   originalContent: string
