@@ -1,6 +1,7 @@
 import { failed, failedCommand } from "../moduleFailure.js"
 import { shellQuote } from "../ssh.js"
 import { type ModuleResult, NEEDS_APPLY, type SshConnection } from "../types.js"
+import { liveSshdPortMatches, LiveSshdPortProbeError } from "./sshdPortLivenessProbe.js"
 import {
   hasProtocolAgnosticIpv6Rule,
   hasProtocolAgnosticRule,
@@ -98,32 +99,17 @@ export function rejectWhenDenyingCurrentSshPort(input: {
 // span multiple ports) would still be silently denied. Probe `ss -ltn` for an
 // active listener on each candidate port immediately before the deny is
 // applied and refuse the rule if any of them is currently serving traffic.
-// Mirrors the `liveSshdPortMatches` probe in `sshd.ts`.
-const SSHD_LISTENER_PROCESS_PATTERN = /users:\(\("(?<name>[^"]+)"[^\)]*\)/gv
-const SSHD_LISTENER_OWNER_NAMES = new Set(["sshd", "systemd"])
-
-function extractSshdListenerOwners(output: string): string[] {
-  const names: string[] = []
-  for (const match of output.matchAll(SSHD_LISTENER_PROCESS_PATTERN)) {
-    const name = match.groups?.name
-    if (name != null) names.push(name)
-  }
-  return names
-}
-
-async function isPortServingLiveSshd(ssh: SshConnection, port: number): Promise<boolean> {
-  const result = await ssh.exec(`ss -H -ltnp 'sport = :${String(port)}'`, {
-    ignoreExitCode: true,
-    silent: true,
-  })
-  if (result.code !== 0) return false
-  const output = result.stdout.trim()
-  if (output === "") return false
-  const owners = extractSshdListenerOwners(output)
-  if (owners.length === 0) return false
-  return owners.some((name) => SSHD_LISTENER_OWNER_NAMES.has(name))
-}
-
+//
+// R-0000625: route the probe through the shared
+// `liveSshdPortMatches`/`LiveSshdPortProbeError` pair in
+// `sshdPortLivenessProbe.ts` instead of duplicating the `ss` parser. The
+// duplicate previously treated *every* non-zero `ss` exit as "no listener"
+// (fail-open) and would therefore silently allow a deny on the live SSH
+// port whenever `ss` was missing or returned a permission denied. The
+// shared helper distinguishes "no listener yet" (continue) from "hard
+// environmental failure" (`LiveSshdPortProbeError`, surface as a structured
+// failure) so the R-0000615 lockout guard cannot be bypassed by an absent
+// or unprivileged `ss` binary on the target host.
 export async function rejectWhenDenyingLiveSshdPort(input: {
   action: UfwRuleAction
   portList: number[]
@@ -132,9 +118,23 @@ export async function rejectWhenDenyingLiveSshdPort(input: {
   const { action, portList, ssh } = input
   if (action !== "deny") return null
   const conflictingPorts: number[] = []
+  const tag = `ufw.rule: ${action} ${portList.join(",")}`
   for (const port of portList) {
-    // eslint-disable-next-line no-await-in-loop -- probe ports sequentially; each call hits ss on the remote host
-    if (await isPortServingLiveSshd(ssh, port)) conflictingPorts.push(port)
+    try {
+      // eslint-disable-next-line no-await-in-loop -- probe ports sequentially; each call hits ss on the remote host
+      const matched = await liveSshdPortMatches(ssh, { tag, targetPort: port })
+      if (matched) conflictingPorts.push(port)
+    } catch (error) {
+      if (error instanceof LiveSshdPortProbeError) {
+        // R-0000625: a missing `ss` binary or a permission denial would
+        // otherwise let the deny through (the old duplicate parser
+        // returned `false` on every non-zero exit). Surface the
+        // environmental failure as a structured module error so the
+        // lockout guard from R-0000615 keeps its teeth.
+        return failed(error.message)
+      }
+      throw error
+    }
   }
   if (conflictingPorts.length === 0) return null
   return failed(
