@@ -109,7 +109,9 @@ function mockSpawnByReference(outputs: Record<string, string>): void {
   mockedSpawnFn.mockImplementation((command: string, args?: readonly string[]) => {
     const argsList = args ?? []
     trackSpawn(command, argsList)
-    const reference = argsList[1] ?? ""
+    // R-0000643: the op invocation is `op read -- <reference>`; the
+    // end-of-options separator sits at args[1] so the reference is at args[2].
+    const reference = argsList[2] ?? ""
     const output = outputs[reference] ?? ""
     return createMockChild(output) as never
   })
@@ -318,9 +320,38 @@ describe("op.resolve — apply", () => {
 
     expect(spawnCalls).toHaveLength(2)
     expect(spawnCalls.map((call) => call.args)).toStrictEqual([
-      ["read", "op://vault/item/api-key"],
-      ["read", "op://vault/item/db-password"],
+      ["read", "--", "op://vault/item/api-key"],
+      ["read", "--", "op://vault/item/db-password"],
     ])
+  })
+
+  // R-0000643: defense-in-depth alignment with package.ts and git.ts — even
+  // though `validateReferences` enforces an op:// prefix today, the explicit
+  // end-of-options separator keeps the CLI invocation safe if validation is
+  // ever relaxed. Assert the separator on both the regular-secret and OTP
+  // paths.
+  it("R-0000643: passes -- before the regular reference argument", async () => {
+    mockSpawnWith("secret123\n")
+
+    const module_ = op.resolve({ password: "op://vault/item/password" })
+    // eslint-disable-next-line prefer-spread
+    await module_.apply(null, emptyEnv)
+
+    expect(spawnCalls).toHaveLength(1)
+    expect(spawnCalls[0].args).toStrictEqual(["read", "--", "op://vault/item/password"])
+  })
+
+  it("R-0000643: passes -- before the OTP reference argument", async () => {
+    const otpauthUri =
+      "otpauth://totp/Test?secret=GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ&period=30&digits=6"
+    mockSpawnWith(`${otpauthUri}\n`)
+
+    const module_ = op.resolve({ token: "op://vault/item/one-time-password" })
+    // eslint-disable-next-line prefer-spread
+    await module_.apply(null, emptyEnv)
+
+    expect(spawnCalls).toHaveLength(1)
+    expect(spawnCalls[0].args).toStrictEqual(["read", "--", "op://vault/item/one-time-password"])
   })
 
   it("does not call op read for regular references when only OTP fields are present", async () => {

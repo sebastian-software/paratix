@@ -275,7 +275,7 @@ async function resolveRegularReferences(
 
   for (const [name, reference] of Object.entries(entries)) {
     // eslint-disable-next-line no-await-in-loop
-    const stdout = await spawnWithInput("op", ["read", reference], { input: "" })
+    const stdout = await spawnWithInput("op", ["read", "--", reference], { input: "" })
     const value = stripTrailingCliNewline(stdout)
     if (value.length > 0) {
       leakedValues.push(value)
@@ -326,7 +326,7 @@ async function resolveOtpReferences(
 
   for (const [name, reference] of Object.entries(entries)) {
     // eslint-disable-next-line no-await-in-loop
-    const stdout = await spawnWithInput("op", ["read", reference], { input: "" })
+    const stdout = await spawnWithInput("op", ["read", "--", reference], { input: "" })
 
     const otpauthUri = stripTrailingCliNewline(stdout).trim()
     if (otpauthUri.length > 0) {
