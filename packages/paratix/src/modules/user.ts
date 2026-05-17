@@ -1,3 +1,4 @@
+/* eslint-disable max-lines -- user module keeps account validation, mutation and home-mode enforcement together for cohesion */
 import { failed, failedCommand } from "../moduleFailure.js"
 import { registerSecret, unregisterSecret } from "../secretSink.js"
 import { shellQuote } from "../ssh.js"
@@ -7,10 +8,28 @@ import { assertValidGroupName, assertValidUserName } from "./posixNames.js"
 type UserOptions = {
   groups?: string[]
   home?: string
+  // R-0000656: dot-files inside a freshly created home directory inherit the
+  // mode determined by `useradd`'s `HOME_MODE` setting in /etc/login.defs,
+  // which defaults to `0755` on Debian/Ubuntu. That leaves user secrets like
+  // `~/.ssh/authorized_keys` readable by other local accounts on the same
+  // host. Accept an explicit per-user mode and enforce it after useradd /
+  // usermod so the result does not depend on the runner host's login.defs.
+  homeMode?: string
   password?: string
   shell?: string
   uid?: number
 }
+
+// R-0000656: chmod accepts octal permissions in 3- or 4-digit form
+// (e.g. `0700`, `750`). Reject anything else so a typo cannot reach
+// `chmod` and silently apply a wrong mode (or no mode at all because
+// chmod parses the leading characters and ignores trailing garbage).
+const HOME_MODE_PATTERN = /^0?[0-7]{3}$/v
+
+// R-0000656: when the caller does not specify a mode we still want
+// to enforce a safe default so an unrelated /etc/login.defs change on
+// the runner host cannot widen permissions of all managed homes.
+const DEFAULT_HOME_MODE = "0700"
 
 const ID_CMD = "id"
 
@@ -53,14 +72,38 @@ function assertValidHomePath(home: string): void {
   }
 }
 
+// R-0000656: limit `homeMode` to the octal triplets chmod accepts so a
+// typo cannot reach the remote shell. `0` prefix is optional.
+function assertValidHomeMode(mode: string): void {
+  if (!HOME_MODE_PATTERN.test(mode)) {
+    throw new Error(`home mode ${JSON.stringify(mode)} is invalid`)
+  }
+}
+
 function assertValidUserOptions(options: UserOptions): void {
   if (options.uid != null) assertValidUid(options.uid)
   if (options.shell != null) assertValidShellPath(options.shell)
   if (options.home != null) assertValidHomePath(options.home)
+  if (options.homeMode != null) {
+    assertValidHomeMode(options.homeMode)
+    // R-0000656: `homeMode` is only meaningful when we know the home path
+    // (so we can `chmod` it). Reject the orphan combination at construction
+    // time instead of silently ignoring the mode at apply time.
+    if (options.home == null) {
+      throw new Error("homeMode requires home to be set")
+    }
+  }
   if (options.groups != null) {
     for (const group of options.groups) assertValidGroupName(group)
   }
   if (options.password != null) assertValidPasswordHash(options.password)
+}
+
+// R-0000656: strip a single leading `0` so values like `"0700"` and `"700"`
+// compare equal. Mirrors the `normalizeMode` helper used in the timer and
+// systemd modules.
+function normalizeHomeMode(mode: string): string {
+  return mode.replace(/^0+/v, "")
 }
 
 // R-0000546: `--groups ''` is rejected by useradd/usermod with
@@ -84,7 +127,17 @@ function buildUserArguments(mode: "useradd" | "usermod", options?: UserOptions):
   const flags: string[] = []
   if (options?.uid != null) flags.push(`--uid ${String(options.uid)}`)
   if (options?.shell != null) flags.push(`--shell ${shellQuote(options.shell)}`)
-  if (options?.home != null) flags.push(`--home ${shellQuote(options.home)}`)
+  if (options?.home != null) {
+    flags.push(`--home ${shellQuote(options.home)}`)
+    // R-0000656: `usermod --home /new/path` rewrites only the passwd entry
+    // and leaves the previous home directory and its contents in place,
+    // so the user ends up pointing at an empty directory. Combine with
+    // `--move-home` so the existing contents (dot-files, mail spool,
+    // installed user data) follow the account to the new location.
+    // `useradd --create-home` already populates the new home, so the
+    // flag is only emitted for usermod.
+    if (mode === "usermod") flags.push("--move-home")
+  }
   flags.push(...buildGroupsFlags(mode, options?.groups))
   return flags
 }
@@ -176,10 +229,15 @@ async function passwdAttributesMatch(
 // non-zero exit as "mismatch" caused the module to re-set the password on
 // every run when the toolchain was broken; differentiate the three outcomes
 // so the caller can react accordingly.
+// R-0000657: shared discriminator for the toolchain-error variant so the
+// literal lives in one place and the sonarjs duplicate-string rule does
+// not flag every occurrence.
+const TOOLCHAIN_ERROR = "toolchain-error" as const
+
 type ShadowHashCompareResult =
+  | { failure: ModuleResult; kind: typeof TOOLCHAIN_ERROR }
   | { kind: "match" }
   | { kind: "mismatch" }
-  | { failure: ModuleResult; kind: "toolchain-error" }
 
 async function shadowHashMatches(
   ssh: SshConnection,
@@ -225,7 +283,7 @@ cmp -s <(getent shadow ${shellQuote(name)} | cut -d: -f2) -`
         failure: failed(
           `[user.present: ${name}] shadow hash comparison failed: ${detail}`
         ),
-        kind: "toolchain-error",
+        kind: TOOLCHAIN_ERROR,
       }
     }
     if (result.code === 0) return { kind: "match" }
@@ -236,7 +294,7 @@ cmp -s <(getent shadow ${shellQuote(name)} | cut -d: -f2) -`
         result,
         [password]
       ),
-      kind: "toolchain-error",
+      kind: TOOLCHAIN_ERROR,
     }
   } finally {
     unregisterSecret(password)
@@ -293,33 +351,173 @@ async function applyUserMutation(context: UserMutationContext): Promise<UserMuta
 // the regular match/mismatch verdict so check phase can surface a structured
 // failure instead of falsely returning `needs-apply`.
 type AttributesMatchOutcome =
+  | { failure: ModuleResult; kind: typeof TOOLCHAIN_ERROR }
   | { kind: "match" }
   | { kind: "mismatch" }
-  | { failure: ModuleResult; kind: "toolchain-error" }
 
 async function attributesMatch(
   ssh: SshConnection,
   name: string,
   options: UserOptions
 ): Promise<AttributesMatchOutcome> {
-  if (options.password != null) {
-    const shadow = await shadowHashMatches(ssh, name, options.password)
-    if (shadow.kind === "toolchain-error") {
-      return { failure: shadow.failure, kind: "toolchain-error" }
-    }
-    if (shadow.kind === "mismatch") return { kind: "mismatch" }
-  }
-
-  const needsPasswdCheck = options.uid != null || options.shell != null || options.home != null
-  if (needsPasswdCheck && !(await passwdAttributesMatch(ssh, name, options))) {
-    return { kind: "mismatch" }
-  }
-
-  if (options.groups != null && !(await supplementaryGroupsMatch(ssh, name, options.groups))) {
-    return { kind: "mismatch" }
-  }
-
+  const passwordOutcome = await passwordHashOutcome(ssh, name, options)
+  if (passwordOutcome != null) return passwordOutcome
+  if (!(await passwdAndGroupsMatch(ssh, name, options))) return { kind: "mismatch" }
+  // R-0000656: when a home directory is being managed, the mode on disk
+  // must also match the (default or explicit) homeMode; otherwise an
+  // earlier apply that ran on a host with HOME_MODE=0755 in
+  // /etc/login.defs would leave dot-files world-readable until the next
+  // mismatch on another attribute forces a reapply.
+  if (!(await managedHomeModeMatches(ssh, options))) return { kind: "mismatch" }
   return { kind: "match" }
+}
+
+async function passwordHashOutcome(
+  ssh: SshConnection,
+  name: string,
+  options: UserOptions
+): Promise<AttributesMatchOutcome | null> {
+  if (options.password == null) return null
+  const shadow = await shadowHashMatches(ssh, name, options.password)
+  if (shadow.kind === TOOLCHAIN_ERROR) {
+    return { failure: shadow.failure, kind: TOOLCHAIN_ERROR }
+  }
+  if (shadow.kind === "mismatch") return { kind: "mismatch" }
+  return null
+}
+
+async function passwdAndGroupsMatch(
+  ssh: SshConnection,
+  name: string,
+  options: UserOptions
+): Promise<boolean> {
+  const needsPasswdCheck = options.uid != null || options.shell != null || options.home != null
+  if (needsPasswdCheck && !(await passwdAttributesMatch(ssh, name, options))) return false
+  if (options.groups != null && !(await supplementaryGroupsMatch(ssh, name, options.groups))) {
+    return false
+  }
+  return true
+}
+
+async function managedHomeModeMatches(ssh: SshConnection, options: UserOptions): Promise<boolean> {
+  if (options.home == null) return true
+  const desiredMode = options.homeMode ?? DEFAULT_HOME_MODE
+  return homeModeMatches(ssh, options.home, desiredMode)
+}
+
+// R-0000656: `stat -c '%a' <path>` reports octal permission bits without
+// leading zeros. A failure to read the mode (missing directory, stat error,
+// empty output) counts as mismatch so apply can recreate or fix the home.
+async function homeModeMatches(
+  ssh: SshConnection,
+  home: string,
+  desiredMode: string
+): Promise<boolean> {
+  const modeResult = await ssh.exec(`stat -c '%a' ${shellQuote(home)}`, {
+    ignoreExitCode: true,
+    silent: true,
+  })
+  if (modeResult.code !== 0) return false
+  const currentMode = modeResult.stdout.trim()
+  if (currentMode === "") return false
+  return normalizeHomeMode(currentMode) === normalizeHomeMode(desiredMode)
+}
+
+// R-0000656: enforce the desired home mode after useradd/usermod so the
+// permission bits do not depend on the runner host's HOME_MODE setting in
+// /etc/login.defs. `chmod` is idempotent; running it on a home that
+// already matches is harmless.
+async function applyHomeMode(
+  ssh: SshConnection,
+  parameters: { home: string; mode: string; name: string }
+): Promise<ModuleResult | null> {
+  const { home, mode, name } = parameters
+  const result = await ssh.exec(`chmod ${shellQuote(mode)} ${shellQuote(home)}`, {
+    ignoreExitCode: true,
+    silent: true,
+  })
+  if (result.code === 0) return null
+  return failedCommand(`[user.present: ${name}] chmod home failed`, result)
+}
+
+// R-0000656: pre-check the home mode and chmod only when it differs so
+// steady-state applies do not flip status from "ok" to "changed".
+async function ensureHomeMode(
+  ssh: SshConnection,
+  parameters: { home: string; mode: string; name: string }
+): Promise<{ kind: "changed" } | { kind: "failed"; result: ModuleResult } | { kind: "noop" }> {
+  if (await homeModeMatches(ssh, parameters.home, parameters.mode)) {
+    return { kind: "noop" }
+  }
+  const failure = await applyHomeMode(ssh, parameters)
+  if (failure != null) return { kind: "failed", result: failure }
+  return { kind: "changed" }
+}
+
+type PresentMutationStep =
+  | { failure: ModuleResult; kind: "failed" }
+  | { kind: "changed" }
+  | { kind: "noop" }
+
+async function runUserMutationStep(
+  ssh: SshConnection,
+  parameters: { name: string; options: undefined | UserOptions }
+): Promise<PresentMutationStep> {
+  const { name, options } = parameters
+  const exists = await ssh.test(`${ID_CMD} ${shellQuote(name)}`)
+  const flags = buildUserArguments(exists ? "usermod" : "useradd", options)
+  const outcome = await applyUserMutation({ exists, flags, name, ssh })
+  if (outcome.kind === "failed") return { failure: outcome.result, kind: "failed" }
+  return outcome.kind === "changed" ? { kind: "changed" } : { kind: "noop" }
+}
+
+// R-0000656: enforce homeMode after useradd/usermod has settled the home
+// path so the result is independent of the runner host's HOME_MODE in
+// /etc/login.defs.
+async function runHomeModeStep(
+  ssh: SshConnection,
+  parameters: { name: string; options: undefined | UserOptions }
+): Promise<PresentMutationStep> {
+  const { name, options } = parameters
+  if (options?.home == null) return { kind: "noop" }
+  const outcome = await ensureHomeMode(ssh, {
+    home: options.home,
+    mode: options.homeMode ?? DEFAULT_HOME_MODE,
+    name,
+  })
+  if (outcome.kind === "failed") return { failure: outcome.result, kind: "failed" }
+  return outcome.kind === "changed" ? { kind: "changed" } : { kind: "noop" }
+}
+
+async function runPasswordStep(
+  ssh: SshConnection,
+  parameters: { name: string; options: undefined | UserOptions }
+): Promise<PresentMutationStep> {
+  const { name, options } = parameters
+  if (options?.password == null) return { kind: "noop" }
+  // setPassword has no pre-check, so any invocation is treated as a
+  // mutation even when the resulting hash matches the existing one.
+  const failure = await setPassword(ssh, name, options.password)
+  if (failure != null) return { failure, kind: "failed" }
+  return { kind: "changed" }
+}
+
+async function applyPresentMutations(
+  ssh: SshConnection,
+  parameters: { name: string; options: undefined | UserOptions }
+): Promise<ModuleResult> {
+  // R-0000088: track whether a mutating command actually ran so the no-op
+  // path (user exists, no flags differ, no password set) returns status
+  // "ok" instead of falsely reporting "changed".
+  let mutationOccurred = false
+  const steps = [runUserMutationStep, runHomeModeStep, runPasswordStep] as const
+  for (const step of steps) {
+    // eslint-disable-next-line no-await-in-loop -- steps mutate remote state and must run sequentially
+    const outcome = await step(ssh, parameters)
+    if (outcome.kind === "failed") return outcome.failure
+    if (outcome.kind === "changed") mutationOccurred = true
+  }
+  return mutationOccurred ? { status: "changed" } : { status: "ok" }
 }
 
 /**
@@ -388,11 +586,21 @@ export const user = {
    * option therefore expresses "ensure the user is a member of these groups",
    * not "the user must be a member of exactly these supplementary groups".
    *
+   * When `home` is provided, `usermod --move-home` migrates the existing
+   * contents to the new path (instead of leaving the user pointing at an
+   * empty directory with the old contents stranded on disk). The home
+   * directory's permission bits are then enforced via `chmod`; the default
+   * mode is `0700` so dot-files in a freshly created home cannot be read
+   * by other local accounts even on hosts where `/etc/login.defs` sets
+   * `HOME_MODE=0755`.
+   *
    * @param name - The username.
    * @param options - Optional user account configuration.
    * @param options.uid - Desired numeric UID.
    * @param options.shell - Login shell path (e.g. `"/bin/bash"`).
    * @param options.home - Home directory path.
+   * @param options.homeMode - Octal permission bits for the home directory
+   *   (e.g. `"0700"`, `"750"`). Requires `home`. Defaults to `"0700"`.
    * @param options.groups - Supplementary groups to add the user to (additive).
    * @param options.password - Pre-hashed password (e.g. SHA-512 `$6$...`) set via `chpasswd -e`.
    * @returns A Module that ensures the user account is present.
@@ -410,28 +618,7 @@ export const user = {
     return {
       async apply(ssh: null | SshConnection): Promise<ModuleResult> {
         if (!ssh) return failed(`[user.present: ${name}] SSH connection is required`)
-
-        const exists = await ssh.test(`${ID_CMD} ${shellQuote(name)}`)
-        const flags = buildUserArguments(exists ? "usermod" : "useradd", options)
-
-        // R-0000088: track whether a mutating command actually ran so the
-        // no-op path (user exists, no flags differ, no password set) returns
-        // status "ok" instead of falsely reporting "changed".
-        let mutationOccurred = false
-
-        const mutationOutcome = await applyUserMutation({ exists, flags, name, ssh })
-        if (mutationOutcome.kind === "failed") return mutationOutcome.result
-        if (mutationOutcome.kind === "changed") mutationOccurred = true
-
-        if (options?.password != null) {
-          // setPassword has no pre-check, so any invocation is treated as a
-          // mutation even when the resulting hash matches the existing one.
-          const failure = await setPassword(ssh, name, options.password)
-          if (failure != null) return failure
-          mutationOccurred = true
-        }
-
-        return mutationOccurred ? { status: "changed" } : { status: "ok" }
+        return applyPresentMutations(ssh, { name, options })
       },
       async check(ssh: null | SshConnection): Promise<"needs-apply" | "ok"> {
         if (!ssh) return NEEDS_APPLY
@@ -443,7 +630,7 @@ export const user = {
           // error) as a structured runner error instead of looping the
           // module through `needs-apply` -> apply -> setPassword on every
           // run when the compare cannot be executed.
-          if (outcome.kind === "toolchain-error") {
+          if (outcome.kind === TOOLCHAIN_ERROR) {
             throw outcome.failure.error ?? new Error(`[user.present: ${name}] shadow hash comparison failed`)
           }
           if (outcome.kind === "mismatch") return NEEDS_APPLY

@@ -88,6 +88,8 @@ describe("user.present check", () => {
     const ssh = createMockSsh({
       "getent passwd 'alice'": { code: 0, stdout: "alice:x:1001:1001::/home/alice:/bin/sh" },
       "id 'alice'": { code: 0 },
+      // R-0000656: check now also enforces the home directory mode.
+      "stat -c '%a' '/home/alice'": { code: 0, stdout: "700" },
     })
     const mod = user.present("alice", { home: "/home/alice" })
     const result = await mod.check(ssh, emptyEnv)
@@ -617,5 +619,157 @@ describe("validation", () => {
 
   it("user.present throws when home is not an absolute path", () => {
     expect(() => user.present("alice", { home: "home/alice" })).toThrow("home path")
+  })
+
+  // R-0000656: homeMode without home cannot be applied (we would not know
+  // which path to chmod), so reject the orphan combination up front.
+  it("user.present throws when homeMode is set without home", () => {
+    expect(() => user.present("alice", { homeMode: "0700" })).toThrow(
+      "homeMode requires home to be set"
+    )
+  })
+
+  it("user.present throws when homeMode contains non-octal digits", () => {
+    expect(() => user.present("alice", { home: "/home/alice", homeMode: "0800" })).toThrow(
+      "home mode"
+    )
+  })
+
+  it("user.present throws when homeMode has the wrong length", () => {
+    expect(() => user.present("alice", { home: "/home/alice", homeMode: "00700" })).toThrow(
+      "home mode"
+    )
+  })
+
+  it("user.present throws when homeMode contains letters", () => {
+    expect(() => user.present("alice", { home: "/home/alice", homeMode: "rwx" })).toThrow(
+      "home mode"
+    )
+  })
+})
+
+// R-0000656: when `home` is updated on an existing account, `usermod` must
+// receive `--move-home` so the old contents follow the user to the new
+// location. Without the flag the passwd entry is rewritten but the previous
+// home (with all its dot-files) is left behind. The home mode is also
+// enforced post-mutation so the result does not depend on the runner host's
+// HOME_MODE setting in /etc/login.defs.
+describe("user.present home migration and mode (R-0000656)", () => {
+  it("emits usermod --home with --move-home so existing home contents follow the user", async () => {
+    const ssh = createMockSsh({
+      // chmod runs after usermod regardless of pre-check (stat fails -> mismatch),
+      // so include the chmod stub for the default 0700 mode.
+      "chmod '0700' '/srv/alice'": { code: 0 },
+      "id 'alice'": { code: 0 },
+      "stat -c '%a' '/srv/alice'": { code: 1 },
+      "usermod --home '/srv/alice' --move-home 'alice'": { code: 0 },
+    })
+    const mod = user.present("alice", { home: "/srv/alice" })
+    const result = await mod.apply(ssh, emptyEnv)
+    expect(result.status).toBe("changed")
+    expect(ssh.calls).toContain("usermod --home '/srv/alice' --move-home 'alice'")
+  })
+
+  it("does not emit --move-home when creating a new account with home via useradd", async () => {
+    const ssh = createMockSsh({
+      "chmod '0700' '/srv/bob'": { code: 0 },
+      "id 'bob'": { code: 1 },
+      "stat -c '%a' '/srv/bob'": { code: 0, stdout: "755" },
+      "useradd --home '/srv/bob' --create-home 'bob'": { code: 0 },
+    })
+    const mod = user.present("bob", { home: "/srv/bob" })
+    const result = await mod.apply(ssh, emptyEnv)
+    expect(result.status).toBe("changed")
+    const useraddCall = ssh.calls.find((c) => c.startsWith("useradd"))
+    expect(useraddCall).toBeDefined()
+    expect(useraddCall).not.toContain("--move-home")
+  })
+
+  it("runs chmod with default mode 0700 after useradd when home is set", async () => {
+    const ssh = createMockSsh({
+      "chmod '0700' '/home/alice'": { code: 0 },
+      "id 'alice'": { code: 1 },
+      "stat -c '%a' '/home/alice'": { code: 0, stdout: "755" },
+      "useradd --home '/home/alice' --create-home 'alice'": { code: 0 },
+    })
+    const mod = user.present("alice", { home: "/home/alice" })
+    const result = await mod.apply(ssh, emptyEnv)
+    expect(result.status).toBe("changed")
+    expect(ssh.calls).toContain("chmod '0700' '/home/alice'")
+  })
+
+  it("runs chmod with the explicit homeMode when provided", async () => {
+    const ssh = createMockSsh({
+      "chmod '0750' '/home/alice'": { code: 0 },
+      "id 'alice'": { code: 1 },
+      "stat -c '%a' '/home/alice'": { code: 0, stdout: "755" },
+      "useradd --home '/home/alice' --create-home 'alice'": { code: 0 },
+    })
+    const mod = user.present("alice", { home: "/home/alice", homeMode: "0750" })
+    const result = await mod.apply(ssh, emptyEnv)
+    expect(result.status).toBe("changed")
+    expect(ssh.calls).toContain("chmod '0750' '/home/alice'")
+  })
+
+  it("returns failed when chmod on the home directory fails", async () => {
+    const ssh = createMockSsh({
+      "chmod '0700' '/home/alice'": { code: 1, stderr: "chmod: cannot access" },
+      "id 'alice'": { code: 1 },
+      "stat -c '%a' '/home/alice'": { code: 1 },
+      "useradd --home '/home/alice' --create-home 'alice'": { code: 0 },
+    })
+    const mod = user.present("alice", { home: "/home/alice" })
+    const result = await mod.apply(ssh, emptyEnv)
+    expect(result.status).toBe("failed")
+    expect(result.error?.message).toContain("chmod home failed")
+  })
+
+  it("skips the chmod call when the current home mode already matches the default", async () => {
+    // Apply path: user exists. Because `home` is set, usermod runs with
+    // --home/--move-home, then the home mode is checked. With stat
+    // reporting 700, chmod must NOT run and the post-mutation result is
+    // "changed" because usermod itself was invoked.
+    const ssh = createMockSsh({
+      "id 'alice'": { code: 0 },
+      "stat -c '%a' '/home/alice'": { code: 0, stdout: "700" },
+      "usermod --home '/home/alice' --move-home 'alice'": { code: 0 },
+    })
+    const mod = user.present("alice", { home: "/home/alice" })
+    const result = await mod.apply(ssh, emptyEnv)
+    expect(result.status).toBe("changed")
+    expect(ssh.calls.some((c) => c.startsWith("chmod"))).toBe(false)
+  })
+
+  it("check returns needs-apply when the home mode does not match the default", async () => {
+    const ssh = createMockSsh({
+      "getent passwd 'alice'": { code: 0, stdout: "alice:x:1001:1001::/home/alice:/bin/sh" },
+      "id 'alice'": { code: 0 },
+      "stat -c '%a' '/home/alice'": { code: 0, stdout: "755" },
+    })
+    const mod = user.present("alice", { home: "/home/alice" })
+    const result = await mod.check(ssh, emptyEnv)
+    expect(result).toBe("needs-apply")
+  })
+
+  it("check returns ok when the home mode matches the default 0700", async () => {
+    const ssh = createMockSsh({
+      "getent passwd 'alice'": { code: 0, stdout: "alice:x:1001:1001::/home/alice:/bin/sh" },
+      "id 'alice'": { code: 0 },
+      "stat -c '%a' '/home/alice'": { code: 0, stdout: "700" },
+    })
+    const mod = user.present("alice", { home: "/home/alice" })
+    const result = await mod.check(ssh, emptyEnv)
+    expect(result).toBe("ok")
+  })
+
+  it("check returns needs-apply when stat reports a missing home directory", async () => {
+    const ssh = createMockSsh({
+      "getent passwd 'alice'": { code: 0, stdout: "alice:x:1001:1001::/home/alice:/bin/sh" },
+      "id 'alice'": { code: 0 },
+      "stat -c '%a' '/home/alice'": { code: 1, stderr: "No such file" },
+    })
+    const mod = user.present("alice", { home: "/home/alice" })
+    const result = await mod.check(ssh, emptyEnv)
+    expect(result).toBe("needs-apply")
   })
 })
