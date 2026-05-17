@@ -115,10 +115,23 @@ export async function snapshotSwapFileForAbsentFlow(
   path: string,
   backupPath: string
 ): Promise<ModuleResult | true> {
+  // R-0000649: refuse to `rm -f` a backupPath that is currently a symlink.
+  // Without the guard the unconditional `rm -f -- <backupPath>` opened a
+  // race window: an attacker with write access to the parent directory
+  // could plant a symlink at backupPath between this rm and the subsequent
+  // `[ ! -L ]` guard inside the ln statement. By keeping the symlink probe
+  // and the rm in a single shell statement the rm never operates on a
+  // freshly planted symlink, and the same combined statement is the only
+  // path that removes the previous backup before the snapshot link.
+  const quotedPath = shellQuote(path)
+  const quotedBackup = shellQuote(backupPath)
   // Remove any leftover backup from a prior aborted run before the link.
   // `mv -T --` (used by the restore path) refuses to overwrite the
   // destination otherwise.
-  await ssh.exec(`rm -f -- ${shellQuote(backupPath)}`, EXEC_OPTS)
+  await ssh.exec(
+    `[ ! -L ${quotedBackup} ] || { echo 'swap backup must not be a symlink' >&2; exit 1; }; rm -f -- ${quotedBackup}`,
+    EXEC_OPTS
+  )
   // R-0000624: build the snapshot inside a single shell statement that
   // re-checks `[ ! -L ]` on both `$path` and `$backupPath` immediately
   // before the link and uses `ln -P --` (no-deref) so a last-instant
@@ -130,8 +143,6 @@ export async function snapshotSwapFileForAbsentFlow(
   // planted symlink and created the backup as a hardlink to e.g.
   // `/etc/shadow`. The doubled `[ ! -L ]` guard collapses the TOCTOU
   // window between the `rm -f` above and the link below.
-  const quotedPath = shellQuote(path)
-  const quotedBackup = shellQuote(backupPath)
   const result = await ssh.exec(
     `[ ! -L ${quotedPath} ] || { echo 'swap path must not be a symlink' >&2; exit 1; }; [ ! -L ${quotedBackup} ] || { echo 'swap backup must not be a symlink' >&2; exit 1; }; ln -P -- ${quotedPath} ${quotedBackup}`,
     EXEC_OPTS
