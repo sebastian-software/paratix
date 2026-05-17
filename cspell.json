@@ -35,6 +35,7 @@
     "enoent",
     "epipe",
     "EPIPE",
+    "gecos",
     "getent",
     "groupadd",
     "groupdel",

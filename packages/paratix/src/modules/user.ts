@@ -34,8 +34,29 @@ function assertValidPasswordHash(password: string): void {
   }
 }
 
+// R-0000652: both `--shell` and `--home` end up as fields in `/etc/passwd`, a
+// colon-separated record terminated by a newline. A newline in either value
+// would split the passwd entry and corrupt the file format; a colon would
+// shift subsequent fields (uid, gid, gecos, ...) by one column. useradd does
+// not perform this validation itself, so reject control characters and
+// relative paths at construction time before the strings reach the argument
+// vector.
+function assertValidShellPath(shell: string): void {
+  if (!shell.startsWith("/") || /[:\r\n]/v.test(shell)) {
+    throw new Error(`shell path ${JSON.stringify(shell)} is invalid`)
+  }
+}
+
+function assertValidHomePath(home: string): void {
+  if (!home.startsWith("/") || /[:\r\n]/v.test(home)) {
+    throw new Error(`home path ${JSON.stringify(home)} is invalid`)
+  }
+}
+
 function assertValidUserOptions(options: UserOptions): void {
   if (options.uid != null) assertValidUid(options.uid)
+  if (options.shell != null) assertValidShellPath(options.shell)
+  if (options.home != null) assertValidHomePath(options.home)
   if (options.groups != null) {
     for (const group of options.groups) assertValidGroupName(group)
   }

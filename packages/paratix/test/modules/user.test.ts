@@ -579,4 +579,43 @@ describe("validation", () => {
   it("user.present throws when a password hash contains a colon", () => {
     expect(() => user.present("alice", { password: "$6$hash:extra" })).toThrow("password hash")
   })
+
+  // R-0000652: /etc/passwd is a colon-separated record terminated by a
+  // newline. A newline or colon embedded in --shell would split the passwd
+  // entry and corrupt the file format. useradd performs no such check itself,
+  // so reject control characters and non-absolute paths at construction time.
+  it("user.present throws when shell contains a newline", () => {
+    expect(() => user.present("alice", { shell: "/bin/bash\nfoo" })).toThrow("shell path")
+  })
+
+  it("user.present throws when shell contains a carriage return", () => {
+    expect(() => user.present("alice", { shell: "/bin/bash\rfoo" })).toThrow("shell path")
+  })
+
+  it("user.present throws when shell contains a colon", () => {
+    expect(() => user.present("alice", { shell: "/bin/bash:extra" })).toThrow("shell path")
+  })
+
+  it("user.present throws when shell is not an absolute path", () => {
+    expect(() => user.present("alice", { shell: "bin/bash" })).toThrow("shell path")
+  })
+
+  // R-0000652: home directories share the same passwd-record constraint as
+  // shell paths; control characters or relative paths must be rejected before
+  // they reach useradd/usermod.
+  it("user.present throws when home contains a newline", () => {
+    expect(() => user.present("alice", { home: "/home/alice\nfoo" })).toThrow("home path")
+  })
+
+  it("user.present throws when home contains a carriage return", () => {
+    expect(() => user.present("alice", { home: "/home/alice\rfoo" })).toThrow("home path")
+  })
+
+  it("user.present throws when home contains a colon", () => {
+    expect(() => user.present("alice", { home: "/home/alice:extra" })).toThrow("home path")
+  })
+
+  it("user.present throws when home is not an absolute path", () => {
+    expect(() => user.present("alice", { home: "home/alice" })).toThrow("home path")
+  })
 })
