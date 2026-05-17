@@ -111,10 +111,34 @@ function missingPackageManager(moduleName: string): ModuleResult {
 }
 
 /**
+ * Probe whether a single package-manager binary is on `PATH` using
+ * `ssh.exec`. R-0000646: `ssh.test` collapses a non-zero exit (the binary is
+ * missing) and a transport-level failure into the same `false`. Using
+ * `ssh.exec` with `ignoreExitCode: true` keeps the two cases distinct —
+ * connection-level errors propagate as exceptions while a missing binary
+ * surfaces as a non-zero exit code that we translate into `false`.
+ *
+ * @param ssh - Active SSH connection to the remote host.
+ * @param binary - The package-manager binary to probe (e.g. `"apt-get"`).
+ * @returns `true` when `which` reported the binary as present, otherwise `false`.
+ */
+async function probePackageManagerBinary(
+  ssh: SshConnection,
+  binary: string
+): Promise<boolean> {
+  const result = await ssh.exec(`which ${binary}`, EXEC_OPTS)
+  return result.code === 0
+}
+
+/**
  * Detect the system package manager by probing for known binaries.
  *
  * Checks in order: apt, dnf, yum, apk. The result is cached per
  * {@link SshConnection} instance so subsequent calls avoid extra SSH roundtrips.
+ *
+ * R-0000646: probes use `ssh.exec` with explicit exit-code handling so a
+ * flaky SSH transport during detection bubbles up as an exception instead of
+ * being silently misinterpreted as "no package manager found".
  *
  * @param ssh - Active SSH connection to the remote host.
  * @returns The detected package manager, or `null` when none is found.
@@ -124,15 +148,15 @@ export async function detectPackageManager(ssh: SshConnection): Promise<null | P
   if (cached !== undefined) return cached
 
   let result: null | PackageManager = null
-  if (await ssh.test("which apt-get")) result = "apt"
-  else if (await ssh.test("which dnf")) result = "dnf"
-  else if (await ssh.test("which yum")) result = "yum"
-  else if (await ssh.test("which apk")) result = "apk"
+  if (await probePackageManagerBinary(ssh, "apt-get")) result = "apt"
+  else if (await probePackageManagerBinary(ssh, "dnf")) result = "dnf"
+  else if (await probePackageManagerBinary(ssh, "yum")) result = "yum"
+  else if (await probePackageManagerBinary(ssh, "apk")) result = "apk"
 
   // R-0000577: only persist a successful detection. Caching the negative
   // result would lock a bootstrap-style playbook into "no package manager"
   // forever, even after an earlier step installs one. Re-detecting on every
-  // miss is cheap (four `test` invocations on the SSH layer) and avoids
+  // miss is cheap (four `exec` invocations on the SSH layer) and avoids
   // that trap.
   if (result !== null) pmCache.set(ssh, result)
   return result
