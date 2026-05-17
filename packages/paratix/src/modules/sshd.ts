@@ -13,7 +13,7 @@ import {
   NEEDS_APPLY,
   type SshConnection,
 } from "../types.js"
-import { withMutexLock } from "./moduleHelpers.js"
+import { flagLockDisplayPath, withMutexLock } from "./moduleHelpers.js"
 import {
   applySshdSettingToContent,
   collectTopLevelSshdDirectiveValues,
@@ -1334,9 +1334,20 @@ async function recoverFromReconnectFailureAfterDisconnect(
     `[sshd.port: ${String(parameters.targetPort)}] sshd restart disconnected the SSH ` +
     `session before the target port could be verified; reconnect failed: ${reconnectErrorMessage}`
   if (fallbackReconnectError != null) {
+    // R-0000619: both the target-port reconnect and the fallback reconnect on
+    // `originalPort` failed. The outer `withMutexLock` finally cannot release
+    // the `/etc/ssh/sshd_config` mutex over the dead transport, so the lock
+    // directory stays in place until the 4h stale-lock detection reclaims it.
+    // Surface the on-host lock path in the operator-facing failure so the
+    // operator can clean it up manually before that window expires — without
+    // this hint the next `sshd.config`/`sshd.port` apply blocks for hours.
+    const staleLockHint =
+      `lock directory likely left behind at ${flagLockDisplayPath(SSHD_CONFIG_FILE_MUTEX)} ` +
+      "on the remote host (release runs over the failed connection); remove it manually " +
+      "before the next sshd apply if you cannot wait for the 4h stale-lock reclaim"
     return failed(
       `${baseMessage}; fallback reconnect on original port ${String(parameters.originalPort)} ` +
-        `also failed: ${fallbackReconnectError}`
+        `also failed: ${fallbackReconnectError}; ${staleLockHint}`
     )
   }
   const rollbackError = await rollbackSshdPortAfterFailedVerification(ssh, {
