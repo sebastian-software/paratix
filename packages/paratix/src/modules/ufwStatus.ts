@@ -240,6 +240,20 @@ export async function classifyUfwAccess(
  * `targetPort`, preserving an unreadable status as `"unknown"` for callers
  * that must fail closed instead of treating it like an inactive firewall.
  *
+ * Routes through {@link readUfwStatusDetailed} so the two failure modes can
+ * be distinguished:
+ *   - `missing` (ufw binary not installed) → `"inactive"` — no firewall is
+ *     enforcing rules, so the lockout-guard does not need to fire.
+ *   - `unreadable` (ufw installed but `ufw status` failed, typically a
+ *     permission error or transient race) → `"unknown"` — caller must
+ *     fail closed because we cannot confirm the rule state.
+ *   - `ok` → classify the captured status via
+ *     {@link classifyUfwStatusTcpAccess}.
+ *
+ * R-0000627: previously this collapsed both `missing` and `unreadable` to
+ * `null` via {@link readUfwStatus}, which forced `sshd.port` to hard-fail
+ * with `unknownUfwStatusFailure` on every host without ufw installed.
+ *
  * @param ssh - The remote SSH connection.
  * @param targetPort - The port whose reachability should be classified.
  * @returns The current access classification for `targetPort`, or
@@ -249,7 +263,8 @@ export async function classifyUfwAccessOrUnknown(
   ssh: SshConnection,
   targetPort: number
 ): Promise<UfwAccessProbe> {
-  const status = await readUfwStatus(ssh)
-  if (status == null) return "unknown"
-  return classifyUfwStatusTcpAccess(status, targetPort)
+  const statusRead = await readUfwStatusDetailed(ssh)
+  if (statusRead.kind === "missing") return "inactive"
+  if (statusRead.kind === "unreadable") return "unknown"
+  return classifyUfwStatusTcpAccess(statusRead.status, targetPort)
 }
