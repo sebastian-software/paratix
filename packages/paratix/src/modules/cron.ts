@@ -416,11 +416,14 @@ async function applyCronAbsentMutation(parameters: {
     recordedDigest === null
       ? false
       : followLooksLikeJob && cronJobDigest(followLine) === recordedDigest
-  if (recordedDigest === null && followLooksLikeJob) {
-    process.stderr.write(
-      `[cron.absent: ${name} (${user})] legacy marker without recorded digest — keeping follow-up line and removing only the marker\n`
-    )
-  }
+  // R-0000635: surface the legacy-marker warning through the returned
+  // ModuleResult so the runner can render and mask it consistently. The
+  // previous direct write to `process.stderr` bypassed the secret-masking
+  // pipeline and never appeared in structured logs.
+  const legacyMarkerWarning =
+    recordedDigest === null && followLooksLikeJob
+      ? `legacy marker without recorded digest — keeping follow-up line and removing only the marker`
+      : null
   const removeCount = followIsManagedJob ? 2 : 1
   const nextLines = [...lines]
   nextLines.splice(markerIndex, removeCount)
@@ -431,7 +434,9 @@ async function applyCronAbsentMutation(parameters: {
     user,
   })
   if (failure) return failure
-  return { status: "changed" }
+  return legacyMarkerWarning === null
+    ? { status: "changed" }
+    : { detail: legacyMarkerWarning, status: "changed" }
 }
 
 /**

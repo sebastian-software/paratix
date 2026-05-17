@@ -183,14 +183,6 @@ function createSharedCrontabMockSsh(
       },
     ],
     [
-      verifiedReleaseCommand,
-      () => {
-        lockExists = false
-        resolveWaiters()
-        return { code: 0, stderr: "", stdout: "" }
-      },
-    ],
-    [
       readCommand,
       () =>
         crontab === ""
@@ -201,6 +193,14 @@ function createSharedCrontabMockSsh(
       removeCommand,
       () => {
         crontab = ""
+        return { code: 0, stderr: "", stdout: "" }
+      },
+    ],
+    [
+      verifiedReleaseCommand,
+      () => {
+        lockExists = false
+        resolveWaiters()
         return { code: 0, stderr: "", stdout: "" }
       },
     ],
@@ -890,6 +890,41 @@ describe("cron.absent", () => {
     expect(writeInput).not.toContain("# paratix: backup")
     expect(writeInput).toContain("0 3 * * * /backup.sh")
     expect(writeInput).toContain("0 5 * * * /other.sh")
+  })
+
+  // R-0000635: when a legacy marker is encountered, the warning that was
+  // previously written directly to `process.stderr` now flows through
+  // ModuleResult.detail so the runner can render and mask it consistently.
+  it("apply surfaces the legacy-marker warning through ModuleResult.detail", async () => {
+    const mockSsh = createMockSsh({
+      "crontab -u 'alice' -l": {
+        code: 0,
+        stdout: "0 5 * * * /other.sh\n# paratix: backup\n0 3 * * * /backup.sh\n",
+      },
+    })
+    const mod = cron.absent("alice", "backup")
+    const result = await mod.apply(mockSsh, emptyEnv)
+    expect(result.status).toBe("changed")
+    expect(result.detail).toBe(
+      "legacy marker without recorded digest — keeping follow-up line and removing only the marker"
+    )
+  })
+
+  // R-0000635: a tagged marker whose follow-up line matches the recorded
+  // digest must not produce the legacy-marker warning detail.
+  it("apply does not attach a legacy-marker detail when the marker carries a digest", async () => {
+    const backupJob = "0 3 * * * /backup.sh"
+    const taggedBackupMarker = taggedMarker("backup", backupJob)
+    const mockSsh = createMockSsh({
+      "crontab -u 'alice' -l": {
+        code: 0,
+        stdout: `0 5 * * * /other.sh\n${taggedBackupMarker}\n${backupJob}\n`,
+      },
+    })
+    const mod = cron.absent("alice", "backup")
+    const result = await mod.apply(mockSsh, emptyEnv)
+    expect(result.status).toBe("changed")
+    expect(result.detail).toBeUndefined()
   })
 
   // R-0000168: a marker that carries a recorded sha256 digest and a matching
