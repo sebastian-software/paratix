@@ -604,6 +604,45 @@ export function properties(remotePath: string, options: PropertiesOptions): Modu
  * @param replacement - Replacement string.
  * @returns A Module that performs the substitution.
  */
+/**
+ * R-0000639: hard cap on the regex pattern length accepted by `file.replace`.
+ * Real-world playbook patterns easily fit into a few dozen characters; any
+ * pattern far longer than this is almost certainly attacker-influenced input
+ * (e.g. an unsanitized template variable) and would let a malicious actor
+ * trigger pathological RegExp compilation. Rejecting oversized patterns
+ * upfront keeps the failure deterministic and the error message readable.
+ */
+const FILE_REPLACE_MAX_PATTERN_LENGTH = 1024
+
+/**
+ * R-0000639: compile the user-provided pattern once and wrap the `RegExp`
+ * constructor in try/catch so a malformed pattern surfaces as a structured
+ * `ModuleResult` failure instead of an uncaught `SyntaxError` propagating
+ * out of `apply`/`check`. Returns either the compiled regex or a `failed`
+ * result the caller forwards to the runner pipeline.
+ *
+ * @param remotePath - Remote file path used in the failure message prefix.
+ * @param pattern - Raw pattern string from the playbook.
+ * @returns Either the compiled `RegExp` or a `failed` {@link ModuleResult}.
+ */
+function compileReplacePattern(
+  remotePath: string,
+  pattern: string
+): ModuleResult | RegExp {
+  if (pattern.length > FILE_REPLACE_MAX_PATTERN_LENGTH) {
+    return failed(
+      `[file.replace: ${remotePath}] pattern exceeds maximum length of ${String(FILE_REPLACE_MAX_PATTERN_LENGTH)} characters: got ${String(pattern.length)}`
+    )
+  }
+  try {
+    // eslint-disable-next-line security/detect-non-literal-regexp -- pattern from module config, not user input
+    return new RegExp(pattern, "gu")
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : String(error)
+    return failed(`[file.replace: ${remotePath}] invalid regex pattern: ${reason}`)
+  }
+}
+
 export function replace(remotePath: string, pattern: string, replacement: string): Module {
   // R-0000564: `String.prototype.replaceAll` interprets `$1`, `$&`, `$$`
   // etc. inside the replacement string as substitution patterns. Callers
@@ -614,13 +653,17 @@ export function replace(remotePath: string, pattern: string, replacement: string
   return {
     async apply(ssh: null | SshConnection): Promise<ModuleResult> {
       if (!ssh) return failed(`[file.replace: ${remotePath}] SSH connection is required`)
+      // R-0000639: validate the regex before any remote round-trip so a
+      // syntactically invalid pattern fails fast with a clear ModuleResult
+      // instead of crashing apply after the existence/symlink probe.
+      const compiled = compileReplacePattern(remotePath, pattern)
+      if (!(compiled instanceof RegExp)) return compiled
       if (!(await isRegularFileWithoutSymlink(ssh, remotePath))) {
         return failed(`[file.replace: ${remotePath}] path must be a regular file and not a symlink`)
       }
 
       const content = await ssh.readFile(remotePath)
-      // eslint-disable-next-line security/detect-non-literal-regexp -- pattern from module config, not user input
-      const updated = content.replaceAll(new RegExp(pattern, "gu"), literalReplacement)
+      const updated = content.replaceAll(compiled, literalReplacement)
       // R-0000075: short-circuit when the regex produces no replacement so
       // apply does not flag the run as "changed" or issue an unnecessary
       // SFTP write. Mirrors the no-op return that R-0000002 / R-0000013 /
@@ -638,14 +681,18 @@ export function replace(remotePath: string, pattern: string, replacement: string
     },
     async check(ssh: null | SshConnection): Promise<"needs-apply" | "ok"> {
       if (!ssh) return NEEDS_APPLY
+      // R-0000639: when the pattern is invalid we report needs-apply so the
+      // runner invokes apply, where the structured failure is surfaced.
+      // Reporting "ok" here would silently hide the misconfiguration.
+      const compiled = compileReplacePattern(remotePath, pattern)
+      if (!(compiled instanceof RegExp)) return NEEDS_APPLY
 
       const exists = await ssh.exists(remotePath)
       if (!exists) return NEEDS_APPLY
       if (!(await isRegularFileWithoutSymlink(ssh, remotePath))) return NEEDS_APPLY
 
       const content = await ssh.readFile(remotePath)
-      // eslint-disable-next-line security/detect-non-literal-regexp -- pattern from module config, not user input
-      const updated = content.replaceAll(new RegExp(pattern, "gu"), literalReplacement)
+      const updated = content.replaceAll(compiled, literalReplacement)
       return updated === content ? "ok" : NEEDS_APPLY
     },
     name: `file.replace: ${remotePath}`,

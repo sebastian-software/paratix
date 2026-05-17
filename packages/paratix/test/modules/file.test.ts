@@ -2847,6 +2847,45 @@ describe("file.replace", () => {
     )
     expect(ssh.writeFileCalls).toStrictEqual([])
   })
+
+  // R-0000639: a malformed regex pattern must surface as a structured
+  // ModuleResult failure so the runner can render the cause. Without the
+  // try/catch around the RegExp constructor, the SyntaxError would propagate
+  // out of apply/check as an unstructured exception and bypass the failure
+  // pipeline.
+  it("R-0000639: apply returns failed without remote IO when the pattern is invalid", async () => {
+    const ssh = createMockSsh()
+    const mod = file.replace("/etc/config", "[unterminated", "replacement")
+    const result = await mod.apply(ssh, emptyEnv)
+
+    expect(result.status).toBe("failed")
+    expect(result.error?.message).toContain("invalid regex pattern")
+    expect(ssh.calls).not.toContain(`cat '/etc/config'`)
+    expect(ssh.writeFileCalls).toStrictEqual([])
+  })
+
+  it("R-0000639: check returns needs-apply when the pattern is invalid", async () => {
+    // Reporting `ok` here would silently mask a misconfiguration. Funnel the
+    // failure through apply so the runner renders the structured cause.
+    const ssh = createMockSsh()
+    const mod = file.replace("/etc/config", "[unterminated", "replacement")
+    const result = await mod.check(ssh, emptyEnv)
+
+    expect(result).toBe("needs-apply")
+    expect(ssh.calls).not.toContain(`cat '/etc/config'`)
+  })
+
+  it("R-0000639: apply returns failed when the pattern exceeds the maximum length", async () => {
+    const ssh = createMockSsh()
+    const oversizedPattern = "a".repeat(1025)
+    const mod = file.replace("/etc/config", oversizedPattern, "replacement")
+    const result = await mod.apply(ssh, emptyEnv)
+
+    expect(result.status).toBe("failed")
+    expect(result.error?.message).toContain("pattern exceeds maximum length")
+    expect(ssh.calls).not.toContain(`cat '/etc/config'`)
+    expect(ssh.writeFileCalls).toStrictEqual([])
+  })
 })
 
 describe("file.stat", () => {
