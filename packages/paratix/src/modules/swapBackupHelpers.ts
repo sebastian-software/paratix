@@ -40,8 +40,17 @@ export async function restoreSwapBackup(
   // to put the operator-managed backup back in place and restart swap.
   // This is the inverse of the backup creation (which uses `mv -T -n` to
   // refuse overwriting a stale backup).
+  // R-0000624: refuse the restore if either `$path` or `$backupPath` has
+  // been turned into a symlink while the absent flow was running. Without
+  // these guards an attacker with write access to the parent directory
+  // could replace the hardlink backup with a symlink to e.g.
+  // `/etc/shadow`; `mv -T --` would then rename that symlink onto
+  // `$path`, leaving the host with a swap-managed path that follows an
+  // attacker-controlled target on the next `swapon`.
+  const quotedPath = shellQuote(path)
+  const quotedBackup = shellQuote(backupPath)
   const restoreResult = await ssh.exec(
-    `mv -T -- ${shellQuote(backupPath)} ${shellQuote(path)}`,
+    `[ ! -L ${quotedBackup} ] || { echo 'swap backup must not be a symlink' >&2; exit 1; }; [ ! -L ${quotedPath} ] || { echo 'swap path must not be a symlink' >&2; exit 1; }; mv -T -- ${quotedBackup} ${quotedPath}`,
     EXEC_OPTS
   )
   return restoreResult.code === 0
@@ -100,7 +109,23 @@ export async function snapshotSwapFileForAbsentFlow(
   // `mv -T --` (used by the restore path) refuses to overwrite the
   // destination otherwise.
   await ssh.exec(`rm -f -- ${shellQuote(backupPath)}`, EXEC_OPTS)
-  const result = await ssh.exec(`ln -- ${shellQuote(path)} ${shellQuote(backupPath)}`, EXEC_OPTS)
+  // R-0000624: build the snapshot inside a single shell statement that
+  // re-checks `[ ! -L ]` on both `$path` and `$backupPath` immediately
+  // before the link and uses `ln -P --` (no-deref) so a last-instant
+  // symlink swap on either path cannot produce a hardlink that points at
+  // an attacker-controlled target outside the swap parent directory.
+  // `swap.file({ path: "/home/foo/swap" })` is a realistic configuration
+  // where the parent directory is writable by an unprivileged user, so
+  // the plain `ln --` previously here would have followed a freshly
+  // planted symlink and created the backup as a hardlink to e.g.
+  // `/etc/shadow`. The doubled `[ ! -L ]` guard collapses the TOCTOU
+  // window between the `rm -f` above and the link below.
+  const quotedPath = shellQuote(path)
+  const quotedBackup = shellQuote(backupPath)
+  const result = await ssh.exec(
+    `[ ! -L ${quotedPath} ] || { echo 'swap path must not be a symlink' >&2; exit 1; }; [ ! -L ${quotedBackup} ] || { echo 'swap backup must not be a symlink' >&2; exit 1; }; ln -P -- ${quotedPath} ${quotedBackup}`,
+    EXEC_OPTS
+  )
   return result.code === 0
     ? true
     : failedCommand(`[swap.file: ${path}] swap absent snapshot hardlink failed`, result)

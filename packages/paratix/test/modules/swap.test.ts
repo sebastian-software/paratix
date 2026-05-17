@@ -38,7 +38,10 @@ const statSwapTempIdentityCommand = `stat -c '%d:%i' '${swapTempPath}'`
 const verifyPublishedSwapCommand = `[ ! -e '${swapTempPath}' ] && find '${swapPath}' -maxdepth 0 -type f | grep -Fx '${swapPath}' && [ "$(stat -c '%d:%i' '${swapPath}')" = '${swapTempIdentity}' ] && swaplabel '${swapPath}' >/dev/null 2>&1`
 const backupSwapCommand = `mv -T -n '${swapPath}' '${swapBackupPath}'`
 const verifySwapBackupCommand = `[ ! -e '${swapPath}' ] && [ -f '${swapBackupPath}' ] && swaplabel '${swapBackupPath}' >/dev/null 2>&1`
-const restoreSwapCommand = `mv -T -- '${swapBackupPath}' '${swapPath}'`
+// R-0000624: the restore path now refuses to overwrite a symlink-shaped
+// `$path` or `$backupPath`; the mock has to mirror the doubled `[ ! -L ]`
+// guard the production code emits.
+const restoreSwapCommand = `[ ! -L '${swapBackupPath}' ] || { echo 'swap backup must not be a symlink' >&2; exit 1; }; [ ! -L '${swapPath}' ] || { echo 'swap path must not be a symlink' >&2; exit 1; }; mv -T -- '${swapBackupPath}' '${swapPath}'`
 const flagsDirectoryCreateCommand = "mkdir -p /var/lib/paratix/flags"
 const fstabLockMkdirCommand = "mkdir /var/lib/paratix/flags/'etc-fstab-mutex'"
 const fstabLockRmdirCommand = "rmdir /var/lib/paratix/flags/'etc-fstab-mutex'"
@@ -838,11 +841,12 @@ describe("swap.file — apply", () => {
       [`[ -e '${swapPath}' ]`]: { code: 0 },
       [`[ -f '${swapPath}' ]`]: { code: 0 },
       [`[ -L '${swapPath}' ]`]: { code: 1 },
-      [`cat '/etc/fstab'`]: { stdout: `${fstabLine}\n` },
-      [`cat '${swapPath}'`]: { stdout: "existing swap bytes" },
       // R-0000618: snapshot the swap file before rm so a fstab-write failure
       // can be rolled back.
-      [`ln -- '${swapPath}' '${swapPath}.paratix-absent-backup'`]: { code: 0 },
+      [`[ ! -L '${swapPath}' ] || { echo 'swap path must not be a symlink' >&2; exit 1; }; [ ! -L '${swapPath}.paratix-absent-backup' ] || { echo 'swap backup must not be a symlink' >&2; exit 1; }; ln -P -- '${swapPath}' '${swapPath}.paratix-absent-backup'`]:
+        { code: 0 },
+      [`cat '/etc/fstab'`]: { stdout: `${fstabLine}\n` },
+      [`cat '${swapPath}'`]: { stdout: "existing swap bytes" },
       [`rm -f -- '${swapPath}.paratix-absent-backup'`]: { code: 0 },
       [`rm -f '${swapPath}'`]: { code: 0 },
       [`swaplabel '${swapPath}' >/dev/null 2>&1`]: { code: 0 },
@@ -868,11 +872,12 @@ describe("swap.file — apply", () => {
       [`[ -e '${swapPath}' ]`]: { code: 0 },
       [`[ -f '${swapPath}' ]`]: { code: 0 },
       [`[ -L '${swapPath}' ]`]: { code: 1 },
-      [`cat '/etc/fstab'`]: { stdout: `${fstabLine}\n` },
-      [`cat '${swapPath}'`]: { stdout: "existing swap bytes" },
       // R-0000618: snapshot the swap file before rm so a fstab-write failure
       // can be rolled back.
-      [`ln -- '${swapPath}' '${swapPath}.paratix-absent-backup'`]: { code: 0 },
+      [`[ ! -L '${swapPath}' ] || { echo 'swap path must not be a symlink' >&2; exit 1; }; [ ! -L '${swapPath}.paratix-absent-backup' ] || { echo 'swap backup must not be a symlink' >&2; exit 1; }; ln -P -- '${swapPath}' '${swapPath}.paratix-absent-backup'`]:
+        { code: 0 },
+      [`cat '/etc/fstab'`]: { stdout: `${fstabLine}\n` },
+      [`cat '${swapPath}'`]: { stdout: "existing swap bytes" },
       [`rm -f -- '${swapPath}.paratix-absent-backup'`]: { code: 0 },
       [`rm -f '${swapPath}'`]: { code: 0 },
       [`swaplabel '${swapPath}' >/dev/null 2>&1`]: { code: 0 },
@@ -906,11 +911,12 @@ describe("swap.file — apply", () => {
       [`[ -e '${swapPath}' ]`]: { code: 0 },
       [`[ -f '${swapPath}' ]`]: { code: 0 },
       [`[ -L '${swapPath}' ]`]: { code: 1 },
-      [`cat '/etc/fstab'`]: { stdout: `${fstabLine}\n` },
-      [`cat '${swapPath}'`]: { stdout: "existing swap bytes" },
       // R-0000618: snapshot the swap file before rm so a fstab-write failure
       // can be rolled back.
-      [`ln -- '${swapPath}' '${swapPath}.paratix-absent-backup'`]: { code: 0 },
+      [`[ ! -L '${swapPath}' ] || { echo 'swap path must not be a symlink' >&2; exit 1; }; [ ! -L '${swapPath}.paratix-absent-backup' ] || { echo 'swap backup must not be a symlink' >&2; exit 1; }; ln -P -- '${swapPath}' '${swapPath}.paratix-absent-backup'`]:
+        { code: 0 },
+      [`cat '/etc/fstab'`]: { stdout: `${fstabLine}\n` },
+      [`cat '${swapPath}'`]: { stdout: "existing swap bytes" },
       [`rm -f -- '${swapPath}.paratix-absent-backup'`]: { code: 0 },
       [`rm -f '${swapPath}'`]: { code: 1, stderr: "rm: cannot remove: Permission denied" },
       [`swaplabel '${swapPath}' >/dev/null 2>&1`]: { code: 0 },
@@ -945,10 +951,12 @@ describe("swap.file — apply", () => {
       [`[ -e '${swapPath}' ]`]: { code: 0 },
       [`[ -f '${swapPath}' ]`]: { code: 0 },
       [`[ -L '${swapPath}' ]`]: { code: 1 },
+      [`[ ! -L '${swapPath}.paratix-absent-backup' ] || { echo 'swap backup must not be a symlink' >&2; exit 1; }; [ ! -L '${swapPath}' ] || { echo 'swap path must not be a symlink' >&2; exit 1; }; mv -T -- '${swapPath}.paratix-absent-backup' '${swapPath}'`]:
+        { code: 0 },
+      [`[ ! -L '${swapPath}' ] || { echo 'swap path must not be a symlink' >&2; exit 1; }; [ ! -L '${swapPath}.paratix-absent-backup' ] || { echo 'swap backup must not be a symlink' >&2; exit 1; }; ln -P -- '${swapPath}' '${swapPath}.paratix-absent-backup'`]:
+        { code: 0 },
       [`cat '/etc/fstab'`]: { stdout: `${fstabLine}\n` },
       [`cat '${swapPath}'`]: { stdout: "existing swap bytes" },
-      [`ln -- '${swapPath}' '${swapPath}.paratix-absent-backup'`]: { code: 0 },
-      [`mv -T -- '${swapPath}.paratix-absent-backup' '${swapPath}'`]: { code: 0 },
       [`rm -f -- '${swapPath}.paratix-absent-backup'`]: { code: 0 },
       [`rm -f '${swapPath}'`]: { code: 0 },
       [`swaplabel '${swapPath}' >/dev/null 2>&1`]: { code: 0 },
@@ -972,9 +980,13 @@ describe("swap.file — apply", () => {
 
     expect(result.status).toBe("failed")
     expect(result.error?.message).toContain("restored from snapshot")
-    expect(ssh.calls).toContain(`ln -- '${swapPath}' '${swapPath}.paratix-absent-backup'`)
+    expect(ssh.calls).toContain(
+      `[ ! -L '${swapPath}' ] || { echo 'swap path must not be a symlink' >&2; exit 1; }; [ ! -L '${swapPath}.paratix-absent-backup' ] || { echo 'swap backup must not be a symlink' >&2; exit 1; }; ln -P -- '${swapPath}' '${swapPath}.paratix-absent-backup'`
+    )
     expect(ssh.calls).toContain(`rm -f '${swapPath}'`)
-    expect(ssh.calls).toContain(`mv -T -- '${swapPath}.paratix-absent-backup' '${swapPath}'`)
+    expect(ssh.calls).toContain(
+      `[ ! -L '${swapPath}.paratix-absent-backup' ] || { echo 'swap backup must not be a symlink' >&2; exit 1; }; [ ! -L '${swapPath}' ] || { echo 'swap path must not be a symlink' >&2; exit 1; }; mv -T -- '${swapPath}.paratix-absent-backup' '${swapPath}'`
+    )
     expect(ssh.calls).toContain(`swapon '${swapPath}'`)
   })
 
@@ -984,11 +996,12 @@ describe("swap.file — apply", () => {
       [`[ -e '${swapPath}' ]`]: { code: 0 },
       [`[ -f '${swapPath}' ]`]: { code: 0 },
       [`[ -L '${swapPath}' ]`]: { code: 1 },
-      [`cat '/etc/fstab'`]: { stdout: `${fstabLine}\n` },
-      [`cat '${swapPath}'`]: { stdout: "existing swap bytes" },
       // R-0000618: snapshot the swap file before rm so a fstab-write failure
       // can be rolled back.
-      [`ln -- '${swapPath}' '${swapPath}.paratix-absent-backup'`]: { code: 0 },
+      [`[ ! -L '${swapPath}' ] || { echo 'swap path must not be a symlink' >&2; exit 1; }; [ ! -L '${swapPath}.paratix-absent-backup' ] || { echo 'swap backup must not be a symlink' >&2; exit 1; }; ln -P -- '${swapPath}' '${swapPath}.paratix-absent-backup'`]:
+        { code: 0 },
+      [`cat '/etc/fstab'`]: { stdout: `${fstabLine}\n` },
+      [`cat '${swapPath}'`]: { stdout: "existing swap bytes" },
       [`rm -f -- '${swapPath}.paratix-absent-backup'`]: { code: 0 },
       [`rm -f '${swapPath}'`]: { code: 1, stderr: "rm: cannot remove: Permission denied" },
       [`swaplabel '${swapPath}' >/dev/null 2>&1`]: { code: 0 },
