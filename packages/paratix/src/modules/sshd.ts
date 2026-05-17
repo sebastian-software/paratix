@@ -480,19 +480,72 @@ async function rollbackSshdConfigAfterReloadFailure(
   // Reload the daemon again so the on-disk rollback actually becomes the live
   // config; otherwise the operator sees a "rolled back" status while sshd
   // continues to enforce the broken settings until the next manual reload.
-  const restoreReloadResult = await reloadSshd(ssh, parameters.serviceUnit)
+  // R-0000621: restrict the post-rollback reload to pure `systemctl reload`
+  // semantics — never fall back to `reload-or-restart`. The fallback would
+  // kill the live SSH session on units without `ExecReload=` (e.g. Debian's
+  // historical sshd.service), which is unacceptable in a rollback path that
+  // the operator did not explicitly opt into to interrupt the session.
+  return runPostRollbackReloadOrSurfaceManualRestart(ssh, {
+    originalReloadMessage,
+    originalReloadResult: parameters.reloadResult,
+    serviceUnit: parameters.serviceUnit,
+    settingNames: parameters.settingNames,
+  })
+}
+
+async function runPostRollbackReloadOrSurfaceManualRestart(
+  ssh: SshConnection,
+  parameters: {
+    originalReloadMessage: string
+    originalReloadResult: ModuleResult
+    serviceUnit?: SshdServiceUnit
+    settingNames: string
+  }
+): Promise<ModuleResult> {
+  // R-0000621: probe `ExecReload=` so we can fail loudly when the unit has no
+  // reload semantics at all. Falling back to `reload-or-restart` here would
+  // disconnect the SSH session as a side-effect of an unattended rollback.
+  const serviceUnit = parameters.serviceUnit ?? (await resolveSshServiceUnit(ssh))
+  const hasExecReload = await sshdUnitDefinesExecReload(ssh, serviceUnit)
+  if (!hasExecReload) {
+    return failed(
+      `[sshd.config: ${parameters.settingNames}] sshd_config rolled back on disk, but the ` +
+        `live daemon (unit ${serviceUnit}) defines no \`ExecReload=\` directive so the ` +
+        "post-rollback reload could not run without restarting the service and killing the " +
+        "active SSH session; manual `systemctl restart sshd` is required to make the rollback " +
+        `take effect.\n${parameters.originalReloadMessage}`
+    )
+  }
+  const restoreReloadResult = await reloadSshdWithoutRestartFallback(ssh, serviceUnit)
   if (restoreReloadResult.status === "failed") {
     const restoreReloadMessage =
       restoreReloadResult.error?.message ?? "post-rollback sshd reload failed"
     return failed(
       `[sshd.config: ${parameters.settingNames}] sshd reload failed and the post-rollback ` +
-        `reload also failed: ${restoreReloadMessage}\n${originalReloadMessage}`
+        `reload also failed: ${restoreReloadMessage}\n${parameters.originalReloadMessage}`
     )
   }
   // Surface the original reload failure even though the rollback succeeded
   // and the daemon is now back on `originalConfig`. The operator must still
   // know the requested change did not land.
-  return parameters.reloadResult
+  return parameters.originalReloadResult
+}
+
+// R-0000621: pure `systemctl reload` variant used by the post-rollback path.
+// Unlike `reloadSshd` we never fall back to `reload-or-restart` here — the
+// rollback caller must not terminate the live SSH session as a side-effect of
+// the cleanup step.
+async function reloadSshdWithoutRestartFallback(
+  ssh: SshConnection,
+  serviceUnit: SshdServiceUnit
+): Promise<ModuleResult> {
+  const result = await ssh.exec(`${SYSTEMCTL} reload ${serviceUnit}`, {
+    ignoreExitCode: true,
+    silent: true,
+  })
+  return result.code === 0
+    ? { status: "changed" }
+    : failedCommand(`[sshd.config] systemctl reload ${serviceUnit} failed`, result)
 }
 
 async function sshdUnitDefinesExecReload(

@@ -483,6 +483,60 @@ describe("sshd.config — apply: validation and rollback", () => {
     expect(domainCommands).toStrictEqual([SYSTEMCTL_CAT_SSHD, SYSTEMCTL_CAT_SSH])
   })
 
+  // R-0000621: when the original reload fails and the rollback path lands on
+  // a unit without `ExecReload=`, the post-rollback reload must NOT fall back
+  // to `reload-or-restart` (the fallback would kill the live SSH session as a
+  // side-effect of an unattended rollback). The module surfaces a manual
+  // `systemctl restart sshd` instruction instead.
+  it("R-0000621: surfaces manual restart when post-rollback reload has no ExecReload", async () => {
+    const originalConfig = "PasswordAuthentication yes"
+    // Unit has no ExecReload: `sshdUnitDefinesExecReload` returns false during
+    // both the apply-time reload AND the post-rollback reload. The apply-time
+    // `reloadSshd` falls back to `reload-or-restart`; we make that fail so the
+    // rollback path triggers. The post-rollback reload (my fix) must NOT fall
+    // back to `reload-or-restart` and must surface a manual-restart message.
+    const mockSsh = createMockSsh(
+      {
+        [CAT_SSHD]: { stdout: originalConfig },
+        // Unit has no ExecReload — the rollback path must refuse the
+        // reload-or-restart fallback rather than risk killing the session.
+        "systemctl cat 'sshd' | grep -E '^ExecReload='": { code: 0, stdout: "" },
+        // Apply-time `reload-or-restart` fails → rollback path runs.
+        "systemctl reload-or-restart sshd": { code: 1, stderr: "reload-or-restart failed" },
+      },
+      {
+        responseStubs: [
+          {
+            command: "sshd -T",
+            result: { code: 0, stdout: "passwordauthentication no\n" },
+          },
+        ],
+      }
+    )
+    const writtenFiles = trackWriteFile(mockSsh)
+    const execSpy = vi.spyOn(mockSsh, "exec")
+
+    const mod = sshd.config({ PasswordAuthentication: "no" })
+    const result = await mod.apply(mockSsh, emptyEnv)
+
+    expect(result.status).toBe("failed")
+    // The rollback write itself must have landed.
+    const liveConfigWrites = writtenFiles.filter((f) => f.path === SSHD_CONFIG)
+    expect(liveConfigWrites.at(-1)).toStrictEqual({ content: originalConfig, path: SSHD_CONFIG })
+    // The error must surface the manual-restart instruction instead of the
+    // session-killing `reload-or-restart` fallback.
+    expect(result.error?.message).toContain("manual `systemctl restart sshd` is required")
+    expect(result.error?.message).toContain("rolled back on disk")
+    // Critically: the dangerous `reload-or-restart` action must run only once
+    // (the apply-time reload that triggered the rollback), never again from
+    // the post-rollback reload path.
+    const execCommands = execSpy.mock.calls.map((args) => args[0])
+    const reloadOrRestartCalls = execCommands.filter(
+      (cmd) => cmd === "systemctl reload-or-restart sshd"
+    )
+    expect(reloadOrRestartCalls).toHaveLength(1)
+  })
+
   // R-0000284: a reload failure followed by a failing rollback writeFile
   // (e.g. SFTP error) must surface a combined error that names both causes.
   // Without the try/catch the rollback exception bubbled up and masked the
