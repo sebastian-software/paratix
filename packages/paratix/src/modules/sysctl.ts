@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto"
 
 import { failed, failedCommand } from "../moduleFailure.js"
+import { registerSecret, unregisterSecret } from "../secretSink.js"
 import { shellQuote } from "../ssh.js"
 import { type Module, type ModuleResult, NEEDS_APPLY, type SshConnection } from "../types.js"
 
@@ -155,17 +156,36 @@ async function readLiveValueBeforeApply(
   return previous.stdout.trim()
 }
 
+// R-0000651: the live previousValue is captured from `sysctl -n` and may be
+// security sensitive (crypto parameters, hashing rounds, network secrets
+// embedded as kernel state). Register it with the process-scoped secret
+// sink for the duration of the rollback so any stderr/stdout that
+// `failedCommand` lifts into the rendered error message is masked, and
+// keep the user-visible message abstract — the operator still sees that
+// the rollback failed without learning the previous value verbatim.
 async function rollbackLiveValue(
   conn: SshConnection,
   key: string,
   previousValue: string
-): Promise<string> {
-  const rollbackAssignment = `${key}=${previousValue}`
-  const rollback = await conn.exec(`sysctl -w ${shellQuote(rollbackAssignment)}`, EXEC_OPTS)
-  if (rollback.code === 0) {
-    return `rolled back live value to ${JSON.stringify(previousValue)}`
+): Promise<ModuleResult | string> {
+  registerSecret(previousValue)
+  try {
+    const rollbackAssignment = `${key}=${previousValue}`
+    const rollback = await conn.exec(`sysctl -w ${shellQuote(rollbackAssignment)}`, {
+      ...EXEC_OPTS,
+      secrets: [previousValue],
+    })
+    if (rollback.code === 0) {
+      return "rolled back live value to previous value"
+    }
+    return failedCommand(
+      `[sysctl.set: ${key}] rollback to previous value failed`,
+      rollback,
+      [previousValue]
+    )
+  } finally {
+    unregisterSecret(previousValue)
   }
-  return `rollback to ${JSON.stringify(previousValue)} failed: ${rollback.stderr || rollback.stdout}`
 }
 
 /**
@@ -211,6 +231,16 @@ async function applyPresentState(
   } catch (error) {
     const reason = error instanceof Error ? error.message : String(error)
     const rollbackStatus = await rollbackLiveValue(conn, key, previousValue)
+    if (typeof rollbackStatus !== "string") {
+      // R-0000651: chain the rollback failure (already routed through
+      // failedCommand with `previousValue` registered as a secret) into the
+      // persistence-failure message so the operator sees both causes
+      // without the raw previousValue leaking through the rollback diagnostic.
+      const rollbackMessage = rollbackStatus.error?.message ?? "rollback to previous value failed"
+      return failed(
+        `[sysctl.set: ${key}] failed to persist config to ${configPath}: ${reason}; ${rollbackMessage}`
+      )
+    }
     return failed(
       `[sysctl.set: ${key}] failed to persist config to ${configPath}: ${reason}; ${rollbackStatus}`
     )

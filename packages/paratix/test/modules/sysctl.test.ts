@@ -199,7 +199,11 @@ describe("sysctl.set — apply", () => {
     expect(result.status).toBe("failed")
     expect(String(result.error)).toContain("failed to persist config to")
     expect(String(result.error)).toContain("read-only file system")
-    expect(String(result.error)).toContain('rolled back live value to "0"')
+    // R-0000651: the previousValue is no longer interpolated into the
+    // rollback success message — operators see the abstract phrasing
+    // instead so the value cannot leak through the rendered error.
+    expect(String(result.error)).toContain("rolled back live value to previous value")
+    expect(String(result.error)).not.toContain('"0"')
     expect(mockSsh.calls).toStrictEqual([
       `sysctl -n '${KEY}'`,
       `sysctl -w '${KEY}=${VALUE}'`,
@@ -220,7 +224,37 @@ describe("sysctl.set — apply", () => {
     const result = await mod.apply(mockSsh, emptyEnv)
     expect(result.status).toBe("failed")
     expect(String(result.error)).toContain("failed to persist config to")
-    expect(String(result.error)).toContain('rollback to "0" failed: permission denied')
+    // R-0000651: the rollback failure now flows through `failedCommand`
+    // with previousValue registered as a secret, so the rendered message
+    // is abstract — the verbatim previous value does not appear.
+    expect(String(result.error)).toContain("rollback to previous value failed")
+    expect(String(result.error)).toContain("permission denied")
+    expect(String(result.error)).not.toContain('"0"')
+  })
+
+  // R-0000651: when the previous live value is sensitive (e.g. a crypto
+  // tuning parameter that exposes platform configuration) it must not
+  // appear verbatim in the rollback diagnostic. The secret sink masks any
+  // occurrence of the value that bubbles up through stderr.
+  it("R-0000651: masks the previousValue when sysctl -w echoes it on failure", async () => {
+    const sensitivePrevious = "supersecret-crypto-param-42"
+    const mockSsh = createMockSsh({
+      [`sysctl -n '${KEY}'`]: { code: 0, stdout: sensitivePrevious },
+      [`sysctl -w '${KEY}=${VALUE}'`]: { code: 0 },
+      [`sysctl -w '${KEY}=${sensitivePrevious}'`]: {
+        code: 1,
+        stderr: `sysctl: failed to write ${sensitivePrevious}`,
+      },
+    })
+    vi.spyOn(mockSsh, "writeFile").mockRejectedValueOnce(
+      new Error("SFTP write failed: read-only file system")
+    )
+    const mod = sysctl.set(KEY, VALUE)
+    const result = await mod.apply(mockSsh, emptyEnv)
+    expect(result.status).toBe("failed")
+    const rendered = String(result.error)
+    expect(rendered).toContain("rollback to previous value failed")
+    expect(rendered).not.toContain(sensitivePrevious)
   })
 
   it("returns failed when conn is null (state: present)", async () => {
