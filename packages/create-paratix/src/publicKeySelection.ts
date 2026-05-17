@@ -1,4 +1,4 @@
-import { readdirSync, readFileSync, statSync } from "node:fs"
+import { lstatSync, readdirSync, readFileSync, realpathSync, statSync } from "node:fs"
 import { homedir } from "node:os"
 import { basename, join, resolve } from "node:path"
 
@@ -228,6 +228,32 @@ export function readAdminPublicKeyFile(exitWithMessage: ExitWithMessage, path: s
     throw new Error(`Error: Failed to read admin public key file.`)
   }
 
+  // R-0000665: probe with `lstatSync` first so a symlinked path is
+  // detected without following it. `statSync` later follows the link to
+  // validate the eventual file's size/isFile, but the operator-facing
+  // log line below names the real target so a planted link in a shared
+  // CI home cannot embed a different key into server.ts without the
+  // operator noticing.
+  const linkStat = (() => {
+    try {
+      // eslint-disable-next-line security/detect-non-literal-fs-filename
+      return lstatSync(resolvedPath)
+    } catch {
+      return failWithReadError()
+    }
+  })()
+  if (linkStat.isSymbolicLink()) {
+    try {
+      // eslint-disable-next-line security/detect-non-literal-fs-filename
+      const realPath = realpathSync(resolvedPath)
+      console.log(`Reading public key from ${realPath} (symlink target of ${resolvedPath}).`)
+    } catch {
+      // A dangling or unreadable symlink falls through to the regular
+      // statSync read path, which will surface the failure via
+      // failWithReadError below.
+    }
+  }
+
   // R-0000186: statSync follows symbolic links so that legitimate operator
   // setups (e.g. ~/.ssh/id_ed25519.pub linked into a password-manager vault)
   // are accepted. The downstream readFileSync also follows the link, so the
@@ -257,6 +283,29 @@ export function readAdminPublicKeyFile(exitWithMessage: ExitWithMessage, path: s
   return validateAdminPublicKey(exitWithMessage, value, "--admin-public-key-file")
 }
 
+// R-0000665: build the operator-facing label for a discovered public key
+// so symlinked entries reveal the realpath alongside the basename. A
+// planted link under a shared CI home (e.g. /tmp/-style `.ssh/`) would
+// otherwise show only `id_ed25519.pub` while the underlying file lives
+// in an attacker-controlled directory.
+function buildLocalPublicKeyLabel(entry: string, path: string): string {
+  try {
+    // eslint-disable-next-line security/detect-non-literal-fs-filename
+    const linkStat = lstatSync(path)
+    if (!linkStat.isSymbolicLink()) return basename(entry)
+    // eslint-disable-next-line security/detect-non-literal-fs-filename
+    const realPath = realpathSync(path)
+    if (realPath === path) return basename(entry)
+    return `${basename(entry)} -> ${realPath}`
+  } catch {
+    // lstat/realpath failures are non-fatal here: fall back to the bare
+    // basename so the operator still sees the entry. The downstream
+    // statSync below will surface unrecoverable read errors via the
+    // catch arm that drops the entry from the discovery list.
+    return basename(entry)
+  }
+}
+
 export function discoverLocalPublicKeys(sshDirectory = join(homedir(), ".ssh")): LocalPublicKey[] {
   try {
     // eslint-disable-next-line security/detect-non-literal-fs-filename
@@ -280,7 +329,10 @@ export function discoverLocalPublicKeys(sshDirectory = join(homedir(), ".ssh")):
             return []
           }
 
-          return [{ key, label: basename(entry), path }]
+          // R-0000665: surface the symlink-target via the label so the
+          // operator can see the effective file at a glance during the
+          // interactive prompt.
+          return [{ key, label: buildLocalPublicKeyLabel(entry, path), path }]
         } catch {
           return []
         }

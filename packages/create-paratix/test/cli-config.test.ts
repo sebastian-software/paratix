@@ -691,7 +691,49 @@ describe("admin public key validation", () => {
     expect(readAdminPublicKeyFile(throwExitError, linkFile)).toBe(publicKey)
   })
 
-  it("discovers public keys reached through a symbolic link in ~/.ssh", () => {
+  // R-0000665: when --admin-public-key-file points at a symlink, the
+  // operator-facing log line must name the realpath so a planted link in
+  // a shared CI home cannot silently embed a different key into
+  // server.ts.
+  it("R-0000665: logs the resolved realpath when the admin public key file is a symlink", () => {
+    mkdirSync(TEST_DIR, { recursive: true })
+    const publicKey = createEd25519PublicKey("user@example")
+    const targetFile = join(TEST_DIR, "vault-admin.pub")
+    const linkFile = join(TEST_DIR, "linked-admin-log.pub")
+    writeFileSync(targetFile, `${publicKey}\n`)
+    symlinkSync(targetFile, linkFile)
+    const logSpy = vi.spyOn(console, "log").mockImplementation(() => undefined)
+    try {
+      expect(readAdminPublicKeyFile(throwExitError, linkFile)).toBe(publicKey)
+      const logged = logSpy.mock.calls.flat().join(" ")
+      expect(logged).toContain("Reading public key from")
+      expect(logged).toContain("vault-admin.pub")
+      expect(logged).toContain("(symlink target of")
+    } finally {
+      logSpy.mockRestore()
+    }
+  })
+
+  it("R-0000665: does not log a symlink-target line for a regular admin public key file", () => {
+    mkdirSync(TEST_DIR, { recursive: true })
+    const publicKey = createEd25519PublicKey("user@example")
+    const regularFile = join(TEST_DIR, "regular-admin.pub")
+    writeFileSync(regularFile, `${publicKey}\n`)
+    const logSpy = vi.spyOn(console, "log").mockImplementation(() => undefined)
+    try {
+      expect(readAdminPublicKeyFile(throwExitError, regularFile)).toBe(publicKey)
+      const logged = logSpy.mock.calls.flat().join(" ")
+      expect(logged).not.toContain("Reading public key from")
+    } finally {
+      logSpy.mockRestore()
+    }
+  })
+
+  // R-0000665: when an entry under ~/.ssh is a symlink, the operator-facing
+  // label now reveals the realpath alongside the basename so a planted
+  // link in a shared CI home cannot silently embed a key from an
+  // attacker-controlled directory.
+  it("R-0000665: discovers public keys reached through a symbolic link and surfaces the realpath", () => {
     mkdirSync(TEST_DIR, { recursive: true })
     const realDir = join(TEST_DIR, "real")
     const sshDir = join(TEST_DIR, "ssh")
@@ -704,13 +746,13 @@ describe("admin public key validation", () => {
     writeFileSync(targetFile, `${publicKey}\n`)
     symlinkSync(targetFile, linkFile)
 
-    expect(discoverLocalPublicKeys(sshDir)).toStrictEqual([
-      {
-        key: publicKey,
-        label: "id_ed25519.pub",
-        path: linkFile,
-      },
-    ])
+    const discovered = discoverLocalPublicKeys(sshDir)
+    expect(discovered).toHaveLength(1)
+    const [entry] = discovered as [(typeof discovered)[number]]
+    expect(entry.key).toBe(publicKey)
+    expect(entry.path).toBe(linkFile)
+    expect(entry.label.startsWith("id_ed25519.pub -> ")).toBe(true)
+    expect(entry.label).toContain("real/id_ed25519.pub")
   })
 
   it("omits discovered local public keys with embedded carriage returns", () => {
