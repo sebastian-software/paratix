@@ -1,6 +1,12 @@
 import { describe, expect, it } from "vitest"
 
 import { ufw } from "../../src/modules/ufw.js"
+import {
+  hasProtocolAgnosticIpv6Rule,
+  hasProtocolAgnosticRule,
+  hasTcpIpv6Rule,
+  hasTcpRule,
+} from "../../src/modules/ufwStatus.js"
 import { createMockSsh } from "../helpers/mockSsh.js"
 
 const emptyEnv = {}
@@ -666,11 +672,11 @@ describe("ufw.enabled", () => {
             result: {
               get code(): number {
                 statusCallCount += 1
-                // eslint-disable-next-line vitest/no-conditional-in-test -- stateful mock sequencing
+                // oxlint-disable-next-line no-conditional-in-test
                 return statusCallCount === 1 ? 0 : 1
               },
               get stdout(): string {
-                // eslint-disable-next-line vitest/no-conditional-in-test -- stateful mock sequencing
+                // oxlint-disable-next-line no-conditional-in-test
                 return statusCallCount === 1 ? "Status: inactive" : ""
               },
             },
@@ -1559,4 +1565,50 @@ describe("ufw.rule", () => {
     const result = await mod.apply(ssh, emptyEnv)
     expect(result.status).toBe("changed")
   })
+})
+
+// R-0000654: defense-in-depth port validation before regex interpolation.
+// Callers are expected to validate via `isValidTcpPort` first, but a future
+// caller could still pass NaN, Infinity, a fractional or out-of-range
+// value. The in-helper assertion rejects those before they reach
+// `new RegExp(...)` and produce a broken or over-permissive pattern.
+describe("R-0000654 port regex guards", () => {
+  const STATUS = "Status: active\n22                         ALLOW       Anywhere\n"
+
+  for (const helper of [
+    { fn: hasProtocolAgnosticRule, name: "hasProtocolAgnosticRule" },
+    { fn: hasProtocolAgnosticIpv6Rule, name: "hasProtocolAgnosticIpv6Rule" },
+    { fn: hasTcpRule, name: "hasTcpRule" },
+    { fn: hasTcpIpv6Rule, name: "hasTcpIpv6Rule" },
+  ]) {
+    it(`${helper.name} throws when port is NaN`, () => {
+      expect(() => helper.fn(STATUS, Number.NaN, "ALLOW")).toThrow(/invalid/v)
+    })
+
+    it(`${helper.name} throws when port is Infinity`, () => {
+      expect(() => helper.fn(STATUS, Number.POSITIVE_INFINITY, "ALLOW")).toThrow(/invalid/v)
+    })
+
+    it(`${helper.name} throws when port is fractional`, () => {
+      expect(() => helper.fn(STATUS, 22.5, "ALLOW")).toThrow(/invalid/v)
+    })
+
+    it(`${helper.name} throws when port is below 1`, () => {
+      expect(() => helper.fn(STATUS, 0, "ALLOW")).toThrow(/invalid/v)
+    })
+
+    it(`${helper.name} throws when port is above 65535`, () => {
+      expect(() => helper.fn(STATUS, 65_536, "ALLOW")).toThrow(/invalid/v)
+    })
+
+    it(`${helper.name} throws when port is negative`, () => {
+      expect(() => helper.fn(STATUS, -1, "ALLOW")).toThrow(/invalid/v)
+    })
+
+    it(`${helper.name} accepts valid TCP ports`, () => {
+      expect(() => helper.fn(STATUS, 22, "ALLOW")).not.toThrow()
+      expect(() => helper.fn(STATUS, 1, "ALLOW")).not.toThrow()
+      expect(() => helper.fn(STATUS, 65_535, "ALLOW")).not.toThrow()
+    })
+  }
 })

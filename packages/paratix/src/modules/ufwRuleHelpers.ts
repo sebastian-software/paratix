@@ -256,7 +256,26 @@ export async function readUfwShowAdded(ssh: SshConnection): Promise<null | strin
   }
 }
 
+// R-0000654: defense-in-depth port validation before regex interpolation.
+// `ufw.rule` already validates ports via `isValidTcpPort` at construction
+// time, but a future caller could still pass NaN, Infinity, a fractional
+// or out-of-range value into the helper. NaN/Infinity stringify into the
+// regex and break the match; a negative or fractional value would build
+// a surprising pattern. Reject anything outside [1, 65535] before
+// interpolation as a fail-fast guard.
+const TCP_PORT_MIN = 1
+const TCP_PORT_MAX = 65_535
+
+function assertTcpPortForRegex(port: number): void {
+  if (!Number.isInteger(port) || port < TCP_PORT_MIN || port > TCP_PORT_MAX) {
+    throw new Error(
+      `ufw rule port ${JSON.stringify(port)} is invalid; expected integer in [${String(TCP_PORT_MIN)}, ${String(TCP_PORT_MAX)}]`
+    )
+  }
+}
+
 function hasAddedUfwRule(output: string, action: UfwRuleAction, port: number): boolean {
+  assertTcpPortForRegex(port)
   // `ufw show added` emits commands like `ufw allow 22` or `ufw deny 22/tcp`.
   // Match the action keyword followed by the bare port (protocol-agnostic) at
   // a word boundary so port 22 does not match 5022 or 22000.

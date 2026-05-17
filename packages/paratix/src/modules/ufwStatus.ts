@@ -2,6 +2,26 @@ import type { SshConnection } from "../types.js"
 
 const UFW = "ufw"
 
+// R-0000654: defense-in-depth port validation before regex interpolation.
+// Callers are already expected to validate ports via `isValidTcpPort`
+// (e.g. `ufw.rule` rejects out-of-range values at construction time), but
+// a future caller could still pass NaN, Infinity, a non-integer, or a
+// value outside [1, 65535]. NaN/Infinity stringify to "NaN" / "Infinity"
+// inside the regex and break the match; a negative number or fractional
+// value would produce a broken or surprisingly permissive pattern. This
+// in-helper assertion is a fail-fast belt-and-braces guard rather than
+// the primary validation layer.
+const TCP_PORT_MIN = 1
+const TCP_PORT_MAX = 65_535
+
+function assertTcpPortForRegex(port: number): void {
+  if (!Number.isInteger(port) || port < TCP_PORT_MIN || port > TCP_PORT_MAX) {
+    throw new Error(
+      `ufw status port ${JSON.stringify(port)} is invalid; expected integer in [${String(TCP_PORT_MIN)}, ${String(TCP_PORT_MAX)}]`
+    )
+  }
+}
+
 /**
  * Match only the protocol-agnostic form `<port> ACTION`. Protocol-specific
  * entries like `22/tcp ALLOW`, opposite actions, and similar ports must not
@@ -17,6 +37,7 @@ export function hasProtocolAgnosticRule(
   port: number,
   action: "ALLOW" | "DENY"
 ): boolean {
+  assertTcpPortForRegex(port)
   // eslint-disable-next-line security/detect-non-literal-regexp
   return new RegExp(`^${port}\\s+${action}\\b`, "mv").test(status)
 }
@@ -35,6 +56,7 @@ export function hasProtocolAgnosticIpv6Rule(
   port: number,
   action: "ALLOW" | "DENY"
 ): boolean {
+  assertTcpPortForRegex(port)
   // eslint-disable-next-line security/detect-non-literal-regexp
   return new RegExp(`^${port}\\s+\\(v6\\)\\s+${action}\\b`, "mv").test(status)
 }
@@ -48,6 +70,7 @@ export function hasProtocolAgnosticIpv6Rule(
  * @returns `true` when a matching TCP-specific line is present.
  */
 export function hasTcpRule(status: string, port: number, action: "ALLOW" | "DENY"): boolean {
+  assertTcpPortForRegex(port)
   // eslint-disable-next-line security/detect-non-literal-regexp
   return new RegExp(`^${port}/tcp\\s+${action}\\b`, "mv").test(status)
 }
@@ -61,6 +84,7 @@ export function hasTcpRule(status: string, port: number, action: "ALLOW" | "DENY
  * @returns `true` when a matching IPv6 TCP-specific line is present.
  */
 export function hasTcpIpv6Rule(status: string, port: number, action: "ALLOW" | "DENY"): boolean {
+  assertTcpPortForRegex(port)
   // eslint-disable-next-line security/detect-non-literal-regexp
   return new RegExp(`^${port}/tcp\\s+\\(v6\\)\\s+${action}\\b`, "mv").test(status)
 }
