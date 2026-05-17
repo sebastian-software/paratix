@@ -8,8 +8,47 @@ import { createMockSsh as createBaseMockSsh } from "../helpers/mockSsh.js"
 
 const emptyEnv = {}
 
+// R-0000629: the production code now reads sources files via a single
+// shell statement that combines the `[ -L ]` symlink guard with
+// `dd … iflag=nofollow` to close the find/read TOCTOU window. The test
+// stubs continue to be expressed as `cat '<path>': { stdout }` for
+// readability and rewriting effort — this helper duplicates each such
+// `cat` stub under the new dd-shaped key so existing tests keep matching
+// without rewriting every response map. ENOENT-shaped failures (exit code
+// non-zero) are mapped to dd's typical stderr so the production code's
+// vanished-file detection (which goes through wrapMissingSourcesFileError)
+// recognises them just as it would have for cat.
+const CAT_SOURCES_PREFIX = "cat '"
+function ddNoFollowCommandFor(quotedPath: string): string {
+  return `{ if [ -L ${quotedPath} ]; then exit 200; fi; dd if=${quotedPath} iflag=nofollow status=none; }`
+}
+
+function ddStderrFor(catStderr: string, quotedPath: string): string {
+  if (catStderr.length === 0) return ""
+  return catStderr.replace(/^cat: /v, `dd: failed to open ${quotedPath}: `)
+}
+
+function bridgeCatSourcesStubsToDdNoFollow(
+  responses: Record<string, Partial<ExecResult>> | undefined
+): Record<string, Partial<ExecResult>> | undefined {
+  if (!responses) return responses
+  const bridged: Record<string, Partial<ExecResult>> = { ...responses }
+  for (const [command, result] of Object.entries(responses)) {
+    if (!command.startsWith(CAT_SOURCES_PREFIX)) continue
+    const quotedPath = command.slice("cat ".length)
+    const ddCommand = ddNoFollowCommandFor(quotedPath)
+    if (ddCommand in bridged) continue
+    bridged[ddCommand] = {
+      code: result.code,
+      stderr: ddStderrFor(result.stderr ?? "", quotedPath),
+      stdout: result.stdout,
+    }
+  }
+  return bridged
+}
+
 const createMockSsh: typeof createBaseMockSsh = (responses, options) =>
-  createBaseMockSsh(responses, {
+  createBaseMockSsh(bridgeCatSourcesStubsToDdNoFollow(responses), {
     ...options,
     allowFlagLockInternalDefaults: true,
     allowWrites: [
@@ -21,24 +60,23 @@ const createMockSsh: typeof createBaseMockSsh = (responses, options) =>
     // capture the original mode. Default the stat probe to an empty stdout
     // (the rewrite then falls back to the historical 0644 default) unless an
     // individual test stubs it explicitly.
-    // R-0000571: every enumerated sources file is now re-probed via
-    // `[ -L <path> ]` immediately before reading to close the find/read
-    // TOCTOU window. Default these probes to "not a symlink" (exit 1) so
-    // tests that do not exercise the symlink-swap path keep working.
     responseStubs: [
       {
         // eslint-disable-next-line security/detect-unsafe-regex -- Bounded literal pattern matching the well-known apt sources stat command issued by the module under test.
         command: /^stat -c '%a' '\/etc\/apt\/sources\.list(?:\.d\/.+)?'$/v,
         result: { code: 0 },
       },
-      {
-        // eslint-disable-next-line security/detect-unsafe-regex -- Bounded literal pattern matching the well-known apt sources symlink probe issued by the module under test.
-        command: /^\[ -L '\/etc\/apt\/sources\.list(?:\.d\/.+)?' \]$/v,
-        result: { code: 1 },
-      },
       ...(options?.responseStubs ?? []),
     ],
   })
+
+// R-0000629: shorthand to build the dd-shaped read command for a given
+// path so assertions can check both the legacy `cat` form is absent and
+// the new fused-statement form is present (or absent). The quoting must
+// match `shellQuote` from src/ssh.ts as used by the production code.
+function readSourcesCommand(path: string): string {
+  return `{ if [ -L '${path}' ]; then exit 200; fi; dd if='${path}' iflag=nofollow status=none; }`
+}
 
 // os-release content helpers
 const UBUNTU_OS_RELEASE = 'ID=ubuntu\nVERSION_ID="22.04"\n'
@@ -393,7 +431,7 @@ describe("releaseUpgrade.upgrade — apply (Debian)", () => {
     expect(ssh.calls).toContain(lockRmdir)
     expect(ssh.calls.indexOf(lockMkdir)).toBeLessThan(ssh.calls.lastIndexOf("lsb_release -cs"))
     expect(ssh.calls.indexOf(lockMkdir)).toBeLessThan(
-      ssh.calls.indexOf("cat '/etc/apt/sources.list'")
+      ssh.calls.indexOf(readSourcesCommand("/etc/apt/sources.list"))
     )
     expect(ssh.calls.indexOf("DEBIAN_FRONTEND=noninteractive apt-get autoremove -y")).toBeLessThan(
       ssh.calls.indexOf(lockRmdir)
@@ -409,7 +447,7 @@ describe("releaseUpgrade.upgrade — apply (Debian)", () => {
     expect(result.status).toBe("ok")
     expect(codenameProbe.callCount()).toBe(2)
     expect(ssh.calls).toContain("mkdir /var/lib/paratix/flags/'release-upgrade-mutex'")
-    expect(ssh.calls).not.toContain("cat '/etc/apt/sources.list'")
+    expect(ssh.calls).not.toContain(readSourcesCommand("/etc/apt/sources.list"))
     expect(ssh.calls).not.toContain("DEBIAN_FRONTEND=noninteractive apt-get update")
     expect(ssh.calls).toContain("rmdir /var/lib/paratix/flags/'release-upgrade-mutex'")
   })
@@ -428,7 +466,7 @@ describe("releaseUpgrade.upgrade — apply (Debian)", () => {
 
     expect(result.status).toBe("failed")
     expect(String(result.error)).toContain("failed to acquire release upgrade mutex")
-    expect(ssh.calls).not.toContain("cat '/etc/apt/sources.list'")
+    expect(ssh.calls).not.toContain(readSourcesCommand("/etc/apt/sources.list"))
     expect(ssh.calls).not.toContain("DEBIAN_FRONTEND=noninteractive apt-get update")
   })
 
@@ -502,7 +540,7 @@ describe("releaseUpgrade.upgrade — apply (Debian)", () => {
 
     expect(result.status).toBe("ok")
     expect(result.meta).toBeUndefined()
-    expect(ssh.calls).not.toContain("cat /etc/apt/sources.list")
+    expect(ssh.calls).not.toContain(readSourcesCommand("/etc/apt/sources.list"))
     expect(ssh.calls).not.toContain("DEBIAN_FRONTEND=noninteractive apt-get update")
     expect(ssh.calls).not.toContain("DEBIAN_FRONTEND=noninteractive apt-get full-upgrade -y")
   })
@@ -514,7 +552,7 @@ describe("releaseUpgrade.upgrade — apply (Debian)", () => {
 
     expect(result.status).toBe("failed")
     expect(String(result.error)).toContain("unsupported Debian release upgrade path")
-    expect(ssh.calls).not.toContain("cat '/etc/apt/sources.list'")
+    expect(ssh.calls).not.toContain(readSourcesCommand("/etc/apt/sources.list"))
     expect(ssh.calls).not.toContain("DEBIAN_FRONTEND=noninteractive apt-get update")
   })
 
@@ -525,7 +563,7 @@ describe("releaseUpgrade.upgrade — apply (Debian)", () => {
 
     expect(result.status).toBe("failed")
     expect(String(result.error)).toContain("unsupported Debian release upgrade path")
-    expect(ssh.calls).not.toContain("cat '/etc/apt/sources.list'")
+    expect(ssh.calls).not.toContain(readSourcesCommand("/etc/apt/sources.list"))
     expect(ssh.calls).not.toContain("DEBIAN_FRONTEND=noninteractive apt-get update")
   })
 
@@ -570,8 +608,8 @@ describe("releaseUpgrade.upgrade — apply (Debian)", () => {
     const result = await mod.apply(ssh, emptyEnv)
 
     expect(result.status).toBe("changed")
-    expect(ssh.calls).not.toContain("cat '/etc/apt/sources.list'")
-    expect(ssh.calls).toContain(`cat '${sourcesPath}'`)
+    expect(ssh.calls).not.toContain(readSourcesCommand("/etc/apt/sources.list"))
+    expect(ssh.calls).toContain(readSourcesCommand(sourcesPath))
     expect(ssh.calls).toContain("DEBIAN_FRONTEND=noninteractive apt-get update")
     const written = writes.find((write) => write.path === sourcesPath)?.content
     expect(written).toContain("Suites: trixie trixie-updates")
@@ -807,7 +845,7 @@ describe("releaseUpgrade.upgrade — apply (Debian)", () => {
       const mod = releaseUpgrade.upgrade()
       const result = await mod.apply(ssh, emptyEnv)
       expect(result.status).toBe("changed")
-      expect(ssh.calls).not.toContain(`cat '${traversalPath}'`)
+      expect(ssh.calls).not.toContain(readSourcesCommand(traversalPath))
       expect(ssh.writeFileCalls.find((w) => w.remotePath === traversalPath)).toBeUndefined()
     })
 
@@ -916,6 +954,78 @@ describe("releaseUpgrade.upgrade — apply (Debian)", () => {
       // to swallow them and lets the exception propagate so the runner can
       // surface the failure with the original cause attached.
       await expect(mod.apply(ssh, emptyEnv)).rejects.toThrow(/Permission denied/v)
+    })
+
+    // R-0000629: the symlink probe and the read must share a single shell
+    // statement that uses `dd … iflag=nofollow`, so an attacker cannot
+    // swap the regular file for a symlink between a `[ -L ]` probe and a
+    // subsequent `cat`/`readFile`.
+    it("R-0000629: reads sources files via a single `[ -L ] + dd iflag=nofollow` statement", async () => {
+      const extraPath = "/etc/apt/sources.list.d/extra.list"
+      const ssh = createMockSsh(
+        debianApplyResponses("bookworm", "trixie", {
+          [`cat '${extraPath}'`]: {
+            code: 0,
+            stdout: "deb http://example.com/repo bookworm main",
+          },
+          "find /etc/apt/sources.list.d/ \\( -name '*.list' -o -name '*.sources' \\) -type f -print0":
+            { code: 0, stdout: `${extraPath}\0` },
+        })
+      )
+      const mod = releaseUpgrade.upgrade()
+      const result = await mod.apply(ssh, emptyEnv)
+
+      expect(result.status).toBe("changed")
+      // The fused read replaces both the separate `[ -L ]` probe and the
+      // `cat` read. Neither legacy call shape may appear on the wire.
+      expect(ssh.calls).toContain(readSourcesCommand(extraPath))
+      expect(ssh.calls).toContain(readSourcesCommand("/etc/apt/sources.list"))
+      expect(ssh.calls).not.toContain(`cat '${extraPath}'`)
+      expect(ssh.calls).not.toContain("cat '/etc/apt/sources.list'")
+      expect(ssh.calls).not.toContain(`[ -L '${extraPath}' ]`)
+      expect(ssh.calls).not.toContain("[ -L '/etc/apt/sources.list' ]")
+    })
+
+    // R-0000629: a sources file that becomes a symlink between `find` and
+    // the read (exit 200 from the fused statement) must be skipped without
+    // following the link, the same way the previous standalone `[ -L ]`
+    // probe did.
+    it("R-0000629: skips a sources file that is a symlink at read time", async () => {
+      const symlinkPath = "/etc/apt/sources.list.d/swapped.list"
+      const cleanPath = "/etc/apt/sources.list.d/clean.list"
+      const ssh = createMockSsh(
+        debianApplyResponses("bookworm", "trixie", {
+          [`cat '${cleanPath}'`]: { code: 0, stdout: "deb http://example.com/repo bookworm main" },
+          "find /etc/apt/sources.list.d/ \\( -name '*.list' -o -name '*.sources' \\) -type f -print0":
+            { code: 0, stdout: `${symlinkPath}\0${cleanPath}\0` },
+          [readSourcesCommand(symlinkPath)]: { code: 200 },
+        })
+      )
+      const writes = captureWriteFile(ssh)
+      const mod = releaseUpgrade.upgrade()
+      const result = await mod.apply(ssh, emptyEnv)
+      expect(result.status).toBe("changed")
+      expect(writes.find((w) => w.path === symlinkPath)).toBeUndefined()
+      expect(writes.find((w) => w.path === cleanPath)).toBeDefined()
+    })
+
+    // R-0000629: a real ELOOP-shaped failure (the kernel rejected the
+    // open(2) because `iflag=nofollow` saw a symlink between the probe and
+    // the read) must surface rather than being silently swallowed.
+    it("R-0000629: surfaces dd ELOOP failures from a planted symlink", async () => {
+      const symlinkPath = "/etc/apt/sources.list.d/late-swap.list"
+      const ssh = createMockSsh(
+        debianApplyResponses("bookworm", "trixie", {
+          "find /etc/apt/sources.list.d/ \\( -name '*.list' -o -name '*.sources' \\) -type f -print0":
+            { code: 0, stdout: `${symlinkPath}\0` },
+          [readSourcesCommand(symlinkPath)]: {
+            code: 1,
+            stderr: `dd: failed to open '${symlinkPath}': Too many levels of symbolic links`,
+          },
+        })
+      )
+      const mod = releaseUpgrade.upgrade()
+      await expect(mod.apply(ssh, emptyEnv)).rejects.toThrow(/Too many levels of symbolic links/v)
     })
 
     it("processes a sources.list.d filename containing whitespace via -print0", async () => {

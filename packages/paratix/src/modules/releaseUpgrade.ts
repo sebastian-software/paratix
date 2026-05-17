@@ -4,7 +4,6 @@ import { shellQuote } from "../ssh.js"
 import {
   type ExecOptions,
   type ExecResult,
-  guardedWriteFile,
   type Module,
   type ModuleMetaEntry,
   type ModuleResult,
@@ -22,7 +21,6 @@ import {
   rewriteAptSourcesContent,
   wrapMissingSourcesFileError,
 } from "./releaseUpgradeSources.js"
-import { isSymlink } from "./remoteFileChecks.js"
 import {
   buildRebootMetaEntriesWithTimeout,
   type ResolveHostCallback,
@@ -169,16 +167,84 @@ async function rewriteSourcesFile(
   // R-0000241: capture the original mode before overwriting so the rollback
   // can restore the operator's exact permissions instead of forcing 0644.
   const mode = await readSourcesFileMode(ssh, remotePath, shellQuote)
-  await guardedWriteFile(ssh, {
-    mode,
-    newContent: updatedContent,
-    originalContent,
-    remotePath,
-  })
+  // R-0000629: re-read through the fused `[ -L ] + dd iflag=nofollow`
+  // statement before writing, mirroring `guardedWriteFile`'s
+  // concurrent-modification check but keeping the no-follow guarantee on
+  // the re-read open(2). A plain `ssh.readFile` would briefly drop the
+  // O_NOFOLLOW guarantee that `readSourcesFileNoFollow` provides on the
+  // original snapshot read, reintroducing the very TOCTOU window we are
+  // closing here.
+  const currentContent = await readSourcesFileNoFollow(ssh, remotePath)
+  if (currentContent === null) {
+    // The file vanished or turned into a symlink between the snapshot read
+    // and the rewrite. Abort this file's rewrite so we never overwrite a
+    // symlink target or recreate a vanished file with stale content.
+    return null
+  }
+  if (currentContent !== originalContent) {
+    throw new Error(
+      `Concurrent modification detected on ${remotePath}: ` +
+        "file content changed between read and write. Aborting to prevent data loss."
+    )
+  }
+  await ssh.writeFile(remotePath, updatedContent, { mode })
   return { mode, originalContent, remotePath }
 }
 
 type SnapshotSourcesParameters = Omit<RewriteSourcesParameters, "originalContent">
+
+// R-0000629: marker exit code used by the combined symlink-guard + nofollow
+// read to signal "the path is (or became) a symbolic link between
+// enumeration and read". Picked outside the normal dd/test exit-code range
+// (1, 2, 124, 126/127) so the symlink branch is distinguishable from a
+// genuine dd error or a shell command-not-found.
+const SOURCES_FILE_SYMLINK_EXIT_CODE = 200
+
+// R-0000629: read an apt sources file with the symlink probe and the read
+// fused into a single shell statement. The previous flow ran `[ -L ]` and
+// `readFile` (which expands to `cat`) in separate ssh rounds, leaving a
+// TOCTOU window where an attacker with write access to
+// `/etc/apt/sources.list.d/` could swap the regular file for a symlink
+// between the probe and the read. Combining the `[ -L ]` guard with
+// `dd if=<path> iflag=nofollow status=none` collapses the race window:
+// even if the path becomes a symlink between the `[ -L ]` check and the dd
+// open(2), `iflag=nofollow` makes dd fail with ELOOP at open(2) time so we
+// never follow the link.
+//
+// The shell statement returns:
+//   - exit 0 with stdout = file content when the path is a regular file
+//   - exit 200 when the path is a symlink at the time of the `[ -L ]`
+//     probe (skip)
+//   - dd's natural non-zero exit (typically 1) with an ENOENT-shaped
+//     stderr when the file vanished between enumeration and read (skip)
+//   - any other non-zero exit re-throws so genuine read failures
+//     (permission denied, ELOOP from a planted symlink, …) stay visible
+async function readSourcesFileNoFollow(
+  ssh: SshConnection,
+  remotePath: string
+): Promise<null | string> {
+  const quotedPath = shellQuote(remotePath)
+  // The `{ … }` group runs the symlink probe and dd in the same shell so
+  // the exit code reported back to ssh.exec is the exit code of whichever
+  // branch was taken. `iflag=nofollow` is the load-bearing flag — it makes
+  // dd fail with ELOOP when the file is a symlink at open(2) time, closing
+  // the residual race that the `[ -L ]` guard alone cannot.
+  const command = `{ if [ -L ${quotedPath} ]; then exit ${String(SOURCES_FILE_SYMLINK_EXIT_CODE)}; fi; dd if=${quotedPath} iflag=nofollow status=none; }`
+  const result = await ssh.exec(command, { ignoreExitCode: true, silent: true })
+  if (result.code === 0) return result.stdout
+  if (result.code === SOURCES_FILE_SYMLINK_EXIT_CODE) return null
+  // dd's stderr looks like `dd: failed to open '<path>': No such file or
+  // directory`. Funnel the message through `wrapMissingSourcesFileError`
+  // so the ENOENT detection — including localized variants — stays
+  // centralized in releaseUpgradeSources.ts. Anything else (permission
+  // denied, ELOOP from a planted symlink, …) re-throws so the runner sees
+  // it.
+  const decorated = wrapMissingSourcesFileError(
+    new Error(`reading ${remotePath} failed (exit code ${String(result.code)}): ${result.stderr}`)
+  )
+  if (isVanishedSourcesFileError(decorated)) return null
+  throw decorated
+}
 
 // R-0000240: a sources file enumerated by `find -print0` may vanish between
 // enumeration and the subsequent read. Skip ENOENT-style errors so a single
@@ -187,11 +253,18 @@ type SnapshotSourcesParameters = Omit<RewriteSourcesParameters, "originalContent
 // R-0000286: decorate the raw error with `code: "ENOENT"` so downstream
 // detection can rely on the structured field rather than scanning the
 // (possibly localized) message text.
+//
+// R-0000629: the read itself now goes through `readSourcesFileNoFollow`
+// so the `[ -L ]` symlink probe and the `dd … iflag=nofollow` read share a
+// single shell statement. A symlink at the path surfaces here as a `null`
+// return from `readSourcesFileNoFollow`, replacing the previous separate
+// `isSymlink` probe.
 async function snapshotSourcesFileSafely(
   parameters: SnapshotSourcesParameters
 ): Promise<null | SourcesSnapshot> {
   try {
-    const originalContent = await parameters.ssh.readFile(parameters.remotePath)
+    const originalContent = await readSourcesFileNoFollow(parameters.ssh, parameters.remotePath)
+    if (originalContent === null) return null
     return await rewriteSourcesFile({ ...parameters, originalContent })
   } catch (error) {
     const decorated = wrapMissingSourcesFileError(error)
@@ -200,11 +273,12 @@ async function snapshotSourcesFileSafely(
   }
 }
 
-// R-0000571: defend against a TOCTOU window between `find -type f` and the
-// subsequent read/write by re-probing each path immediately before reading.
-// Extracted into a helper to keep `replaceCodenameInSourcesList`'s cognitive
-// complexity within the project limit while keeping the symlink guard close
-// to the per-file read.
+// R-0000571 / R-0000629: defend against a TOCTOU window between `find
+// -type f` and the subsequent read by performing the symlink probe and
+// the read in the same shell statement (see `readSourcesFileNoFollow`).
+// The path allowlist still runs first so an enumerated path that escapes
+// the apt sources directory or carries ASCII control characters is
+// rejected before any shell command is issued.
 async function snapshotEnumeratedSourcesFile(parameters: {
   currentCodename: string
   filePath: string
@@ -212,12 +286,6 @@ async function snapshotEnumeratedSourcesFile(parameters: {
   targetCodename: string
 }): Promise<null | SourcesSnapshot> {
   if (parameters.filePath.length === 0 || !isAcceptableSourcesPath(parameters.filePath)) return null
-  // Even though `find` already excludes symlinks (it runs with the default
-  // `-P`), an attacker with write access to `/etc/apt/sources.list.d/` could
-  // swap the regular file for a symlink between enumeration and the per-file
-  // `readFile`/`writeFile` calls. Skip when the target is now a symbolic
-  // link so we never follow it into an arbitrary location.
-  if (await isSymlink(parameters.ssh, parameters.filePath)) return null
   return snapshotSourcesFileSafely({
     currentCodename: parameters.currentCodename,
     remotePath: parameters.filePath,
