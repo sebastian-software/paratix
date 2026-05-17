@@ -546,6 +546,72 @@ describe("promptForHostFingerprint", () => {
   })
 })
 
+// R-0000664: prompts that drive createTerminalSelect()/setRawMode must
+// fail fast with CliExitError when invoked outside a TTY. Otherwise a CI
+// runner (no stdin TTY) crashes inside setRawMode and leaves the
+// terminal in an unknown state. The check runs only when the caller
+// uses the default select; tests and other consumers that inject their
+// own select keep working unchanged.
+describe("R-0000664: TTY gate on default-select prompts", () => {
+  afterEach(() => {
+    vi.restoreAllMocks()
+  })
+
+  it("promptForAdminPublicKey rejects without a stdin TTY", async () => {
+    const restoreTty = setProcessTtyForTest(false, true)
+    try {
+      await expect(promptForAdminPublicKey()).rejects.toThrow(/Interactive prompt requires a TTY/v)
+    } finally {
+      restoreTty()
+    }
+  })
+
+  it("promptForAdminPublicKey rejects without a stdout TTY", async () => {
+    const restoreTty = setProcessTtyForTest(true, false)
+    try {
+      await expect(promptForAdminPublicKey()).rejects.toThrow(/Interactive prompt requires a TTY/v)
+    } finally {
+      restoreTty()
+    }
+  })
+
+  it("promptForHostFingerprint rejects without a TTY", async () => {
+    const restoreTty = setProcessTtyForTest(false, false)
+    try {
+      await expect(promptForHostFingerprint("example.com")).rejects.toThrow(
+        /Interactive prompt requires a TTY/v
+      )
+    } finally {
+      restoreTty()
+    }
+  })
+
+  it("promptForAdminPublicKey skips the TTY gate when a select is injected", async () => {
+    const restoreTty = setProcessTtyForTest(false, false)
+    const select = vi.fn().mockResolvedValueOnce("placeholder")
+    try {
+      await expect(promptForAdminPublicKey(select)).resolves.toBeUndefined()
+      expect(select).toHaveBeenCalledTimes(1)
+    } finally {
+      restoreTty()
+    }
+  })
+
+  it("promptForHostFingerprint skips the TTY gate when a select is injected", async () => {
+    const restoreTty = setProcessTtyForTest(false, false)
+    const select = vi.fn().mockResolvedValueOnce("placeholder")
+    const scanner = vi.fn()
+    try {
+      await expect(
+        promptForHostFingerprint("example.com", select, scanner)
+      ).resolves.toBeUndefined()
+      expect(scanner).not.toHaveBeenCalled()
+    } finally {
+      restoreTty()
+    }
+  })
+})
+
 // R-0000190: cleanupSelectInput must not call setRawMode on non-TTY stdin
 // (test harness, piped input). The original implementation defaulted
 // previousRawMode to `false`, which would either throw or silently mutate

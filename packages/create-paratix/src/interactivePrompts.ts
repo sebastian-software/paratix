@@ -25,6 +25,24 @@ const UNAVAILABLE_SELECT = (() => {
   throw new Error(INTERACTIVE_SELECTION_UNAVAILABLE)
 }) as SelectFunction<"admin" | "root">
 
+// R-0000664: refuse to run any prompt that drives `createTerminalSelect()`
+// (or any other readline/setRawMode flow) outside an attached TTY.
+// Previously the TTY check lived one level up in cliValidation.ts, so any
+// caller that imported the prompts directly — or a CI runner whose
+// `process.stdin.isTTY` returned `undefined` — would still try to flip
+// stdin into raw mode and crash with `setRawMode is not a function`.
+// Surfacing a CliExitError before the readline interface is ever opened
+// keeps the failure mode deterministic and the terminal state intact.
+function ensureInteractivePromptTty(): void {
+  if (process.stdin.isTTY && process.stdout.isTTY) return
+  throw new CliExitError(
+    "Interactive prompt requires a TTY. Pass --admin-public-key/--admin-public-key-file " +
+      "and --expected-host-fingerprint (or run create-paratix from an interactive shell) " +
+      "to skip the prompt.",
+    1
+  )
+}
+
 const INITIAL_USER_OPTIONS: Array<SelectOption<"admin" | "root">> = [
   {
     description:
@@ -213,6 +231,12 @@ export async function promptForAdminPublicKey(
   publicKeys?: Array<{ key: string; label: string; path: string }>,
   options?: { allowPlaceholder?: boolean }
 ): Promise<string | undefined> {
+  // R-0000664: refuse non-TTY callers before `createTerminalSelect()`
+  // opens a readline interface and calls `setRawMode` on stdin. Tests
+  // and other consumers that inject their own `select` argument bypass
+  // both the TTY guard and the terminal-select setup, so the check only
+  // runs on the default path.
+  if (select == null) ensureInteractivePromptTty()
   const terminalSelect = select == null ? createTerminalSelect() : null
   const choose = select ?? terminalSelect?.select
 
@@ -346,6 +370,12 @@ export async function promptForHostFingerprint(
   select?: SelectFunction<HostFingerprintSelectValue>,
   scanner: (host: string) => Promise<HostFingerprintScanResult> = scanHostFingerprint
 ): Promise<string | undefined> {
+  // R-0000664: refuse non-TTY callers before `createTerminalSelect()`
+  // opens a readline interface and calls `setRawMode` on stdin. Tests
+  // and other consumers that inject their own `select` argument bypass
+  // both the TTY guard and the terminal-select setup, so the check only
+  // runs on the default path.
+  if (select == null) ensureInteractivePromptTty()
   const terminalSelect = select == null ? createTerminalSelect() : null
   const choose = select ?? terminalSelect?.select
 
