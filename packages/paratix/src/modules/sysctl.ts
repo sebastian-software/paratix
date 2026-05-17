@@ -7,7 +7,13 @@ import { type Module, type ModuleResult, NEEDS_APPLY, type SshConnection } from 
 const EXEC_OPTS = { ignoreExitCode: true, silent: true } as const
 const SYSCTL_DIR = "/etc/sysctl.d"
 const SYSCTL_CONFIG_MODE = "0644"
-const SYSCTL_KEY_HASH_LENGTH = 12
+// R-0000650: keep 24 hex digits (96 bits) so two sysctl entries that share
+// the same sanitized prefix but differ in their suffix cannot collide on the
+// persistence-file path. A 12-hex (48 bit) digest hits the birthday bound
+// around 2^24 keys, well inside the parameter space of a realistic playbook
+// that manages dozens of kernel parameters; 24 hex digits push the bound
+// past 2^48 while staying comfortably below the 255-byte filename limit.
+const SYSCTL_KEY_HASH_LENGTH = 24
 const SYSCTL_KEY_PATTERN = /^\w[\w.\-]*$/iv
 
 /**

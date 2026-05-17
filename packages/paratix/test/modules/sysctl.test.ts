@@ -20,9 +20,12 @@ const VALUE = "1"
 const CONF_PATH = configPathForKey(KEY)
 const CONF_CONTENT = "net.ipv4.ip_forward = 1\n"
 
+// R-0000650: mirror the production-side digest width (96 bits / 24 hex
+// digits) so the test helper stays in sync with the live persistence-path
+// derivation in `sysctl.set`.
 function configPathForKey(key: string): string {
   const sanitizedKey = key.replaceAll(".", "-")
-  const hash = createHash("sha256").update(key).digest("hex").slice(0, 12)
+  const hash = createHash("sha256").update(key).digest("hex").slice(0, 24)
   return `/etc/sysctl.d/99-paratix-${sanitizedKey}-${hash}.conf`
 }
 
@@ -319,6 +322,36 @@ describe("sysctl.set — config path", () => {
     expect(writeFileSpy).toHaveBeenCalledWith(hyphenatedPath, `${hyphenatedKey} = 1\n`, {
       mode: "0644",
     })
+  })
+
+  // R-0000650: with a 48-bit (12-hex) digest two sysctl entries that share
+  // the same sanitized prefix and only differ in their suffix could land on
+  // the same persistence-file path after a single hash collision. The 96-bit
+  // digest keeps the persistence-file path unique for keys that sanitize to
+  // the same prefix but carry a different suffix.
+  it("R-0000650: produces distinct paths for keys that share the sanitized prefix", async () => {
+    const firstKey = "net.ipv4.tcp_rmem-alpha"
+    const secondKey = "net.ipv4.tcp_rmem-beta"
+    const firstPath = configPathForKey(firstKey)
+    const secondPath = configPathForKey(secondKey)
+    expect(firstPath).not.toBe(secondPath)
+    // Both paths must share the sanitized prefix (the `.`->`-` transform is
+    // identical for both keys) but the trailing hash component differs.
+    const sanitizedFirst = firstKey.replaceAll(".", "-")
+    const sanitizedSecond = secondKey.replaceAll(".", "-")
+    expect(firstPath.startsWith(`/etc/sysctl.d/99-paratix-${sanitizedFirst}-`)).toBe(true)
+    expect(secondPath.startsWith(`/etc/sysctl.d/99-paratix-${sanitizedSecond}-`)).toBe(true)
+  })
+
+  // R-0000650: regression guard for the digest width itself. Truncating to
+  // 12 hex digits (48 bits) hits the birthday bound around 2^24 keys, which
+  // is reachable by realistic playbooks; 24 hex digits (96 bits) push the
+  // bound past 2^48 and keep the filename well below the 255-byte limit.
+  it("R-0000650: persistence path embeds a 24-hex-digit (96-bit) digest", async () => {
+    const path = configPathForKey(KEY)
+    const match = /-paratix-net-ipv4-ip_forward-(?<hash>[0-9a-f]+)\.conf$/v.exec(path)
+    expect(match?.groups?.hash).toBeDefined()
+    expect(match?.groups?.hash?.length).toBe(24)
   })
 })
 
