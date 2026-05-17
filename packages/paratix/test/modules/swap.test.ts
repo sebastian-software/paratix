@@ -36,7 +36,10 @@ const mktempSwapCommand = "mktemp -p '/' '.swapfile.paratix.XXXXXX'"
 const publishSwapCommand = `find '/' -maxdepth 0 -type d -user root ! -perm /022 | grep -Fx '/' && mv -T -n '${swapTempPath}' '${swapPath}'`
 const statSwapTempIdentityCommand = `stat -c '%d:%i' '${swapTempPath}'`
 const verifyPublishedSwapCommand = `[ ! -e '${swapTempPath}' ] && find '${swapPath}' -maxdepth 0 -type f | grep -Fx '${swapPath}' && [ "$(stat -c '%d:%i' '${swapPath}')" = '${swapTempIdentity}' ] && swaplabel '${swapPath}' >/dev/null 2>&1`
-const backupSwapCommand = `mv -T -n '${swapPath}' '${swapBackupPath}'`
+// R-0000647: moveSwapToBackup now refuses symlinks at `$path` and `$backupPath`
+// before issuing the rename. The mock has to match the combined statement the
+// production code emits.
+const backupSwapCommand = `[ ! -L '${swapBackupPath}' ] || { echo 'swap backup must not be a symlink' >&2; exit 1; }; [ ! -L '${swapPath}' ] || { echo 'swap path must not be a symlink' >&2; exit 1; }; mv -T -n -- '${swapPath}' '${swapBackupPath}'`
 const verifySwapBackupCommand = `[ ! -e '${swapPath}' ] && [ -f '${swapBackupPath}' ] && swaplabel '${swapBackupPath}' >/dev/null 2>&1`
 // R-0000624: the restore path now refuses to overwrite a symlink-shaped
 // `$path` or `$backupPath`; the mock has to mirror the doubled `[ ! -L ]`
@@ -849,6 +852,7 @@ describe("swap.file — apply", () => {
       [`cat '${swapPath}'`]: { stdout: "existing swap bytes" },
       [`rm -f -- '${swapPath}.paratix-absent-backup'`]: { code: 0 },
       [`rm -f '${swapPath}'`]: { code: 0 },
+      [safeSwapParentCommand]: { code: 0, stdout: "/\n" },
       [`swaplabel '${swapPath}' >/dev/null 2>&1`]: { code: 0 },
       [`swapoff '${swapPath}'`]: { code: 0 },
       "swapon --show=NAME --noheadings": { stdout: `${swapPath}\n` },
@@ -880,6 +884,7 @@ describe("swap.file — apply", () => {
       [`cat '${swapPath}'`]: { stdout: "existing swap bytes" },
       [`rm -f -- '${swapPath}.paratix-absent-backup'`]: { code: 0 },
       [`rm -f '${swapPath}'`]: { code: 0 },
+      [safeSwapParentCommand]: { code: 0, stdout: "/\n" },
       [`swaplabel '${swapPath}' >/dev/null 2>&1`]: { code: 0 },
       [`swapoff '${swapPath}'`]: { code: 0 },
       "swapon --show=NAME --noheadings": { stdout: `${swapPath}\n` },
@@ -919,6 +924,7 @@ describe("swap.file — apply", () => {
       [`cat '${swapPath}'`]: { stdout: "existing swap bytes" },
       [`rm -f -- '${swapPath}.paratix-absent-backup'`]: { code: 0 },
       [`rm -f '${swapPath}'`]: { code: 1, stderr: "rm: cannot remove: Permission denied" },
+      [safeSwapParentCommand]: { code: 0, stdout: "/\n" },
       [`swaplabel '${swapPath}' >/dev/null 2>&1`]: { code: 0 },
       [`swapoff '${swapPath}'`]: { code: 0 },
       [`swapon '${swapPath}'`]: { code: 0 },
@@ -959,6 +965,7 @@ describe("swap.file — apply", () => {
       [`cat '${swapPath}'`]: { stdout: "existing swap bytes" },
       [`rm -f -- '${swapPath}.paratix-absent-backup'`]: { code: 0 },
       [`rm -f '${swapPath}'`]: { code: 0 },
+      [safeSwapParentCommand]: { code: 0, stdout: "/\n" },
       [`swaplabel '${swapPath}' >/dev/null 2>&1`]: { code: 0 },
       [`swapoff '${swapPath}'`]: { code: 0 },
       [`swapon '${swapPath}'`]: { code: 0 },
@@ -1004,6 +1011,7 @@ describe("swap.file — apply", () => {
       [`cat '${swapPath}'`]: { stdout: "existing swap bytes" },
       [`rm -f -- '${swapPath}.paratix-absent-backup'`]: { code: 0 },
       [`rm -f '${swapPath}'`]: { code: 1, stderr: "rm: cannot remove: Permission denied" },
+      [safeSwapParentCommand]: { code: 0, stdout: "/\n" },
       [`swaplabel '${swapPath}' >/dev/null 2>&1`]: { code: 0 },
       [`swapoff '${swapPath}'`]: { code: 0 },
       [`swapon '${swapPath}'`]: { code: 1, stderr: "swapon: failed" },

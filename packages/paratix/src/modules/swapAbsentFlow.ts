@@ -1,3 +1,5 @@
+import { posix as posixPath } from "node:path"
+
 import type { ModuleResult, SshConnection } from "../types.js"
 
 import { failed, failedCommand } from "../moduleFailure.js"
@@ -8,6 +10,7 @@ import {
   handleAbsentSwapRemovalFailure,
 } from "./swapAbsentRollbackHelpers.js"
 import { restoreSwapBackup, snapshotSwapFileForAbsentFlow } from "./swapBackupHelpers.js"
+import { safeParentCommand } from "./swapFileCreateHelpers.js"
 import {
   classifySwapFilePath,
   ensureSwapFstabState,
@@ -87,6 +90,23 @@ async function performAbsentSwapRemoval(
       kind: "continue",
       snapshotCreated: false,
       swapChangedDelta: false,
+    }
+  }
+  // R-0000647: refuse the snapshot when the parent directory is not root-owned
+  // and group/other writable. `moveSwapToBackup` now rejects symlinks on the
+  // destination as well, but the absent flow operates with the same threat
+  // model (a writable parent lets an attacker plant a fresh symlink between
+  // the classify probe and the `ln -P`). Re-using `safeParentCommand` here
+  // keeps the present and absent paths symmetric.
+  const parentDirectory = posixPath.dirname(options.path)
+  const safeParentResult = await ssh.exec(safeParentCommand(parentDirectory), EXEC_OPTS)
+  if (safeParentResult.code !== 0) {
+    return {
+      kind: "done",
+      result: failedCommand(
+        `[swap.file: ${options.path}] parent directory is not safe for swap absent snapshot`,
+        safeParentResult
+      ),
     }
   }
   const snapshotResult = await snapshotSwapFileForAbsentFlow(ssh, options.path, snapshotPath)

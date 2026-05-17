@@ -12,8 +12,18 @@ export async function moveSwapToBackup(
   path: string,
   backupPath: string
 ): Promise<ModuleResult | true> {
+  // R-0000647: `mv -T -n` itself does not follow symlinks on the destination,
+  // but a symlink that materializes at `$backupPath` between an earlier probe
+  // and the rename would still let an attacker steer the swap content onto an
+  // operator-controlled target (e.g. `/etc/shadow`). Guard both `$path` and
+  // `$backupPath` with a `[ ! -L ]` check inside the same shell statement so
+  // the renaming kernel call only ever runs when neither side is a symlink,
+  // and pass `--` to terminate option parsing for `mv`. Mirrors the doubled
+  // symlink probe in restoreSwapBackup / snapshotSwapFileForAbsentFlow.
+  const quotedPath = shellQuote(path)
+  const quotedBackup = shellQuote(backupPath)
   const backupResult = await ssh.exec(
-    `mv -T -n ${shellQuote(path)} ${shellQuote(backupPath)}`,
+    `[ ! -L ${quotedBackup} ] || { echo 'swap backup must not be a symlink' >&2; exit 1; }; [ ! -L ${quotedPath} ] || { echo 'swap path must not be a symlink' >&2; exit 1; }; mv -T -n -- ${quotedPath} ${quotedBackup}`,
     EXEC_OPTS
   )
   if (backupResult.code !== 0) {
@@ -21,7 +31,7 @@ export async function moveSwapToBackup(
   }
 
   const result = await ssh.exec(
-    `[ ! -e ${shellQuote(path)} ] && [ -f ${shellQuote(backupPath)} ] && swaplabel ${shellQuote(backupPath)} >/dev/null 2>&1`,
+    `[ ! -e ${quotedPath} ] && [ -f ${quotedBackup} ] && swaplabel ${quotedBackup} >/dev/null 2>&1`,
     EXEC_OPTS
   )
   return result.code === 0

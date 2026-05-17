@@ -17,7 +17,7 @@ type SwapFileCreationParameters = {
   ssh: SshConnection
 }
 
-function safeParentCommand(parentDirectory: string): string {
+export function safeParentCommand(parentDirectory: string): string {
   return `find ${shellQuote(parentDirectory)} -maxdepth 0 -type d -user root ! -perm /022 | grep -Fx ${shellQuote(parentDirectory)}`
 }
 
