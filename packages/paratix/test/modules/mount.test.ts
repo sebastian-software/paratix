@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest"
 
 import { mount } from "../../src/modules/mount.js"
 import { createMockSsh as createBaseMockSsh } from "../helpers/mockSsh.js"
+import { makeIsVerifiedReleaseCall } from "../helpers/mockSshFlagLock.js"
 
 type MockSshOptions = NonNullable<Parameters<typeof createBaseMockSsh>[1]>
 type MockSshResponses = Parameters<typeof createBaseMockSsh>[0]
@@ -710,12 +711,14 @@ describe("mount.present — apply", () => {
     })
     await mod.apply(mockSsh, emptyEnv)
     const lockMkdir = "mkdir /var/lib/paratix/flags/'etc-fstab-mutex'"
-    const lockRmdir = "rmdir /var/lib/paratix/flags/'etc-fstab-mutex'"
+    // R-0000634: release is now a single shell statement (ownership check
+    // + marker removal + rmdir); the shared helper centralises the match.
+    const isVerifiedRelease = makeIsVerifiedReleaseCall("etc-fstab-mutex")
     expect(mockSsh.calls).toContain(lockMkdir)
-    expect(mockSsh.calls).toContain(lockRmdir)
+    expect(mockSsh.calls.some(isVerifiedRelease)).toBe(true)
     const acquireIndex = mockSsh.calls.indexOf(lockMkdir)
     const fstabReadIndex = mockSsh.calls.indexOf("cat '/etc/fstab'")
-    const releaseIndex = mockSsh.calls.indexOf(lockRmdir)
+    const releaseIndex = mockSsh.calls.findIndex(isVerifiedRelease)
     expect(acquireIndex).toBeLessThan(fstabReadIndex)
     expect(fstabReadIndex).toBeLessThan(releaseIndex)
   })

@@ -79,7 +79,7 @@ export function flagLockName(flagName: string): string {
   return `${flagName}.lock`
 }
 
-async function writeFlagLockHolderMarker(ssh: SshConnection, lockName: string): Promise<void> {
+async function writeFlagLockHolderMarker(ssh: SshConnection, lockName: string): Promise<string> {
   // R-0000494: capture hostname via ssh.output (not inline `$(hostname)`).
   const hostname = await ssh
     .output("hostname")
@@ -90,11 +90,20 @@ async function writeFlagLockHolderMarker(ssh: SshConnection, lockName: string): 
     `printf '%s@%s %s\\n' "$$" ${shellQuote(hostname)} "$(date +%s)" > ${markerPath}`,
     { ignoreExitCode: true, silent: true }
   )
+  // R-0000634: read back the `pid@hostname` token from the marker so
+  // releaseFlagLock can verify ownership before removing the lock. Falling
+  // back to an empty string disables the verified-release fast path on read
+  // failures — releaseFlagLock then refuses to remove the lock and waits for
+  // the stale-lock detector to reclaim it on the next run.
+  return ssh
+    .output(`awk 'NR==1{print $1}' ${markerPath}`)
+    .then((token) => token.trim())
+    .catch(() => "")
 }
 
 export type FlagLockAcquireResult =
   | { failure: ModuleResult; kind: "failed" }
-  | { kind: "acquired" }
+  | { holderToken: string; kind: "acquired" }
   | { kind: "contended" }
 
 export async function acquireFlagLock(
@@ -109,20 +118,52 @@ export async function acquireFlagLock(
     silent: true,
   })
   if (result.code === 0) {
-    await writeFlagLockHolderMarker(ssh, lockName)
-    return { kind: "acquired" }
+    const holderToken = await writeFlagLockHolderMarker(ssh, lockName)
+    return { holderToken, kind: "acquired" }
   }
   return { kind: "contended" }
 }
 
-export async function releaseFlagLock(ssh: SshConnection, lockName: string): Promise<void> {
+/**
+ * Release a previously acquired flag lock.
+ *
+ * R-0000634: the release is gated on the holder marker's `pid@hostname`
+ * token matching the value captured at acquire time. Without that check, a
+ * delayed release whose holder was already declared stale and replaced by
+ * another acquirer would silently break mutual exclusion. The compare,
+ * marker removal and `rmdir` run in a single shell statement so the check
+ * cannot race against a concurrent reclaim.
+ *
+ * An empty `holderToken` short-circuits the release: if the acquire-time
+ * read-back failed (e.g. transient shell error), we cannot prove ownership
+ * and therefore must let the stale-lock detector clean up.
+ *
+ * @param ssh - The active SSH connection.
+ * @param lockName - The validated lock identifier used for the directory name.
+ * @param holderToken - The `pid@hostname` value returned by
+ *   {@link acquireFlagLock}'s `acquired` result.
+ */
+export async function releaseFlagLock(
+  ssh: SshConnection,
+  lockName: string,
+  holderToken: string
+): Promise<void> {
   validateFlagName(lockName, "lockName")
-  // Remove the holder marker first (if present) so `rmdir` succeeds. The
-  // ignoreExitCode keeps the cleanup tolerant when the marker was already
-  // removed (e.g. by a stale-lock recovery path).
-  const markerPath = `${flagPath(lockName)}/${HOLDER_MARKER_NAME}`
-  await ssh.exec(`rm -f ${markerPath}`, { ignoreExitCode: true, silent: true })
-  await ssh.exec(`rmdir ${flagPath(lockName)}`, { ignoreExitCode: true, silent: true })
+  if (holderToken.length === 0) {
+    // No verifiable ownership — refuse to touch the lock so a concurrent
+    // holder that successfully reclaimed it is not silently evicted.
+    return
+  }
+  const lock = flagPath(lockName)
+  const markerPath = `${lock}/${HOLDER_MARKER_NAME}`
+  // Single atomic shell statement so the ownership check, marker removal
+  // and `rmdir` cannot interleave with a stale-lock reclaim that already
+  // handed the lock to another acquirer.
+  const command =
+    `[ "$(awk 'NR==1{print $1}' ${markerPath} 2>/dev/null)" = ${shellQuote(holderToken)} ] && ` +
+    `rm -f ${markerPath} && ` +
+    `rmdir ${lock}`
+  await ssh.exec(command, { ignoreExitCode: true, silent: true })
 }
 
 /**

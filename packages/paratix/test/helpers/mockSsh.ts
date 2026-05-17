@@ -1,7 +1,12 @@
 import type { ExecOptions, ExecResult, SshConnection } from "../../src/types.js"
 
 import { shellQuote } from "../../src/ssh.js"
-import { isFlagLockInternalSuccessCommand, isFlagLockReclaimProbe } from "./mockSshFlagLock.js"
+import {
+  isFlagLockHolderReadback,
+  isFlagLockInternalSuccessCommand,
+  isFlagLockReclaimProbe,
+  MOCK_FLAG_LOCK_HOLDER_TOKEN,
+} from "./mockSshFlagLock.js"
 import {
   createSideEffectRecorder,
   type DownloadFileCall,
@@ -92,17 +97,9 @@ function hasExplicitDefaultForKind(
   kind: "exec" | "output" | "test",
   options: MockSshOptions | undefined
 ): boolean {
-  switch (kind) {
-    case "exec": {
-      return options?.defaultExecResult !== undefined
-    }
-    case "output": {
-      return options?.defaultOutputResult !== undefined
-    }
-    case "test": {
-      return options?.defaultTestResult !== undefined
-    }
-  }
+  if (kind === "exec") return options?.defaultExecResult !== undefined
+  if (kind === "output") return options?.defaultOutputResult !== undefined
+  return options?.defaultTestResult !== undefined
 }
 
 function matchesResponseStub(command: string, stub: MockResponseStub): boolean {
@@ -133,13 +130,12 @@ function getFlagLockInternalDefault(
   kind: "exec" | "output" | "test",
   options: MockSshOptions | undefined
 ): Partial<ExecResult> | undefined {
-  if (kind !== "exec") return undefined
   if (options?.allowFlagLockInternalDefaults !== true) return undefined
-  if (isFlagLockReclaimProbe(command)) {
-    // Default the reclaim probe to "no stale lock" only for tests that opt
-    // into mock flag-lock internals.
-    return { code: 1 }
-  }
+  // R-0000634: holder readback (via `ssh.output`) returns the deterministic
+  // token so the verified-release command can be matched.
+  if (isFlagLockHolderReadback(command)) return { code: 0, stdout: MOCK_FLAG_LOCK_HOLDER_TOKEN }
+  if (kind !== "exec") return undefined
+  if (isFlagLockReclaimProbe(command)) return { code: 1 }
   if (isFlagLockInternalSuccessCommand(command)) return { code: 0 }
   return undefined
 }

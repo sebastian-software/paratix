@@ -5,6 +5,7 @@ import { describe, expect, it } from "vitest"
 import { net } from "../../../src/index.js"
 import { sha256String } from "../../../src/modules/fileHelpers.js"
 import { createMockSsh as createBaseMockSsh } from "../../helpers/mockSsh.js"
+import { makeIsVerifiedReleaseCall } from "../../helpers/mockSshFlagLock.js"
 
 const NET_WRITE_ALLOWLIST = [
   { options: { mode: "0644" }, remotePath: "/etc/hosts" },
@@ -417,12 +418,14 @@ describe("net.hosts — apply", () => {
 
     expect(result.status).toBe("changed")
     const lockMkdir = "mkdir /var/lib/paratix/flags/'etc-hosts-mutex'"
-    const lockRmdir = "rmdir /var/lib/paratix/flags/'etc-hosts-mutex'"
+    // R-0000634: release is now a single shell statement (ownership check +
+    // marker removal + rmdir); match it via the shared helper.
+    const isVerifiedRelease = makeIsVerifiedReleaseCall("etc-hosts-mutex")
     expect(mockSsh.calls).toContain(lockMkdir)
-    expect(mockSsh.calls).toContain(lockRmdir)
+    expect(mockSsh.calls.some(isVerifiedRelease)).toBe(true)
     const acquireIndex = mockSsh.calls.indexOf(lockMkdir)
     const writeReadIndex = mockSsh.calls.indexOf("cat '/etc/hosts'")
-    const releaseIndex = mockSsh.calls.indexOf(lockRmdir)
+    const releaseIndex = mockSsh.calls.findIndex(isVerifiedRelease)
     expect(acquireIndex).toBeLessThan(writeReadIndex)
     expect(writeReadIndex).toBeLessThan(releaseIndex)
   })
@@ -458,7 +461,9 @@ describe("net.hosts — apply", () => {
     expect(writes).toHaveLength(0)
     // The mutex lock must still be released even when the guarded write
     // refuses, otherwise the next run would hang forever.
-    expect(mockSsh.calls).toContain("rmdir /var/lib/paratix/flags/'etc-hosts-mutex'")
+    // R-0000634: release is now a single shell statement.
+    const isVerifiedRelease = makeIsVerifiedReleaseCall("etc-hosts-mutex")
+    expect(mockSsh.calls.some(isVerifiedRelease)).toBe(true)
   })
 })
 

@@ -107,6 +107,11 @@ const MUTEX_BOOKKEEPING_PATTERNS_05: RegExp[] = [
   /^rmdir \/var\/lib\/paratix\/flags\/'[\w.\-]+-mutex'$/v,
   /^rm -f \/var\/lib\/paratix\/flags\/'[\w.\-]+-mutex'\/holder$/v,
   /^printf '%s@%s %s\\n' "\$\$" '[^']*' "\$\(date \+%s\)" > \/var\/lib\/paratix\/flags\/'[\w.\-]+-mutex'\/holder$/v,
+  // R-0000634: acquire reads back the holder token via `ssh.output`; release
+  // is now a single atomic shell statement (ownership check + marker remove
+  // + rmdir).
+  /^awk 'NR==1\{print \$1\}' \/var\/lib\/paratix\/flags\/'[\w.\-]+-mutex'\/holder$/v,
+  /^\[ "\$\(awk 'NR==1\{print \$1\}' \/var\/lib\/paratix\/flags\/'[\w.\-]+-mutex'\/holder 2>\/dev\/null\)" = '[^']*' \] && rm -f \/var\/lib\/paratix\/flags\/'[\w.\-]+-mutex'\/holder && rmdir \/var\/lib\/paratix\/flags\/'[\w.\-]+-mutex'$/v,
   /^if \[ -d \/var\/lib\/paratix\/flags\/'[\w.\-]+-mutex' \]/v,
   /^i=0; while \[ -d \/var\/lib\/paratix\/flags\/'[\w.\-]+-mutex' \]/v,
   /^hostname$/v,

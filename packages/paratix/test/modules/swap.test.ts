@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest"
 
 import { swap } from "../../src/modules/swap.js"
 import { createMockSsh as createBaseMockSsh } from "../helpers/mockSsh.js"
+import { makeIsVerifiedReleaseCall } from "../helpers/mockSshFlagLock.js"
 
 const createMockSsh: typeof createBaseMockSsh = (responses, options) =>
   createBaseMockSsh(
@@ -47,7 +48,9 @@ const verifySwapBackupCommand = `[ ! -e '${swapPath}' ] && [ -f '${swapBackupPat
 const restoreSwapCommand = `[ ! -L '${swapBackupPath}' ] || { echo 'swap backup must not be a symlink' >&2; exit 1; }; [ ! -L '${swapPath}' ] || { echo 'swap path must not be a symlink' >&2; exit 1; }; mv -T -- '${swapBackupPath}' '${swapPath}'`
 const flagsDirectoryCreateCommand = "mkdir -p /var/lib/paratix/flags"
 const fstabLockMkdirCommand = "mkdir /var/lib/paratix/flags/'etc-fstab-mutex'"
-const fstabLockRmdirCommand = "rmdir /var/lib/paratix/flags/'etc-fstab-mutex'"
+// R-0000634: release is now a single shell statement; tests use the shared
+// helper to recognise the combined ownership-check + rmdir command.
+const isFstabVerifiedReleaseCall = makeIsVerifiedReleaseCall("etc-fstab-mutex")
 
 describe("swap.file — check", () => {
   it("returns needs-apply when ssh is null", async () => {
@@ -316,10 +319,10 @@ describe("swap.file — apply", () => {
 
     expect(result.status).toBe("changed")
     expect(ssh.calls).toContain(fstabLockMkdirCommand)
-    expect(ssh.calls).toContain(fstabLockRmdirCommand)
+    expect(ssh.calls.some(isFstabVerifiedReleaseCall)).toBe(true)
     const acquireIndex = ssh.calls.indexOf(fstabLockMkdirCommand)
     const fstabReadIndex = ssh.calls.indexOf(`cat '/etc/fstab'`)
-    const releaseIndex = ssh.calls.indexOf(fstabLockRmdirCommand)
+    const releaseIndex = ssh.calls.findIndex(isFstabVerifiedReleaseCall)
     expect(acquireIndex).toBeLessThan(fstabReadIndex)
     expect(fstabReadIndex).toBeLessThan(releaseIndex)
   })
@@ -980,10 +983,10 @@ describe("swap.file — apply", () => {
 
     expect(result.status).toBe("changed")
     expect(ssh.calls).toContain(fstabLockMkdirCommand)
-    expect(ssh.calls).toContain(fstabLockRmdirCommand)
+    expect(ssh.calls.some(isFstabVerifiedReleaseCall)).toBe(true)
     const acquireIndex = ssh.calls.indexOf(fstabLockMkdirCommand)
     const fstabReadIndex = ssh.calls.indexOf(`cat '/etc/fstab'`)
-    const releaseIndex = ssh.calls.indexOf(fstabLockRmdirCommand)
+    const releaseIndex = ssh.calls.findIndex(isFstabVerifiedReleaseCall)
     expect(acquireIndex).toBeLessThan(fstabReadIndex)
     expect(fstabReadIndex).toBeLessThan(releaseIndex)
   })

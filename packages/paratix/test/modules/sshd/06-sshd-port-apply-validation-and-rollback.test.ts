@@ -5,6 +5,7 @@ import { describe, expect, it, vi } from "vitest"
 import { isSshdPortMetaEntry } from "../../../src/meta.js"
 import { sshd } from "../../../src/modules/sshd.js"
 import { createMockSsh as createBaseMockSsh } from "../../helpers/mockSsh.js"
+import { makeIsVerifiedReleaseCall } from "../../helpers/mockSshFlagLock.js"
 
 const createMockSsh: typeof createBaseMockSsh = (responses, options) => {
   const ssh = createBaseMockSsh(
@@ -165,6 +166,11 @@ const MUTEX_BOOKKEEPING_PATTERNS: RegExp[] = [
   /^rmdir \/var\/lib\/paratix\/flags\/'[\w.\-]+-mutex'$/v,
   /^rm -f \/var\/lib\/paratix\/flags\/'[\w.\-]+-mutex'\/holder$/v,
   /^printf '%s@%s %s\\n' "\$\$" '[^']*' "\$\(date \+%s\)" > \/var\/lib\/paratix\/flags\/'[\w.\-]+-mutex'\/holder$/v,
+  // R-0000634: acquire reads back the holder token via `ssh.output`; release
+  // is now a single atomic shell statement (ownership check + marker remove
+  // + rmdir).
+  /^awk 'NR==1\{print \$1\}' \/var\/lib\/paratix\/flags\/'[\w.\-]+-mutex'\/holder$/v,
+  /^\[ "\$\(awk 'NR==1\{print \$1\}' \/var\/lib\/paratix\/flags\/'[\w.\-]+-mutex'\/holder 2>\/dev\/null\)" = '[^']*' \] && rm -f \/var\/lib\/paratix\/flags\/'[\w.\-]+-mutex'\/holder && rmdir \/var\/lib\/paratix\/flags\/'[\w.\-]+-mutex'$/v,
   /^if \[ -d \/var\/lib\/paratix\/flags\/'[\w.\-]+-mutex' \]/v,
   /^i=0; while \[ -d \/var\/lib\/paratix\/flags\/'[\w.\-]+-mutex' \]/v,
   /^hostname$/v,
@@ -1037,16 +1043,17 @@ describe("sshd.port — apply: validation and rollback", () => {
     expect(result.status).toBe("changed")
     const execCommands = execSpy.mock.calls.map((args) => args[0])
     expect(execCommands).toContain("mkdir /var/lib/paratix/flags/'etc-ssh-sshd-config-mutex'")
-    expect(execCommands).toContain("rmdir /var/lib/paratix/flags/'etc-ssh-sshd-config-mutex'")
+    // R-0000634: release is a single shell statement (ownership check +
+    // marker removal + rmdir). The shared helper centralises the match.
+    const isVerifiedRelease = makeIsVerifiedReleaseCall("etc-ssh-sshd-config-mutex")
+    expect(execCommands.some((call) => isVerifiedRelease(call))).toBe(true)
     // The mutex must be acquired before any sshd_config writes / restarts and
     // released only after the apply has finished.
     const acquireIndex = execCommands.indexOf(
       "mkdir /var/lib/paratix/flags/'etc-ssh-sshd-config-mutex'"
     )
     const restartIndex = execCommands.indexOf("systemctl restart sshd")
-    const releaseIndex = execCommands.indexOf(
-      "rmdir /var/lib/paratix/flags/'etc-ssh-sshd-config-mutex'"
-    )
+    const releaseIndex = execCommands.findIndex((call) => isVerifiedRelease(call))
     expect(acquireIndex).toBeGreaterThanOrEqual(0)
     expect(restartIndex).toBeGreaterThan(acquireIndex)
     expect(releaseIndex).toBeGreaterThan(restartIndex)

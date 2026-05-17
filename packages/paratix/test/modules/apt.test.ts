@@ -4,6 +4,7 @@ import { describe, expect, it } from "vitest"
 import { apt } from "../../src/modules/apt.js"
 import { sha256String } from "../../src/modules/fileHelpers.js"
 import { createMockSsh as createBaseMockSsh } from "../helpers/mockSsh.js"
+import { MOCK_FLAG_LOCK_HOLDER_TOKEN } from "../helpers/mockSshFlagLock.js"
 
 const createMockSsh: typeof createBaseMockSsh = (responses, options) =>
   createBaseMockSsh(responses, {
@@ -20,13 +21,25 @@ const SUCCESSFUL_EXEC_DEFAULT = { code: 0 } as const
 const DIST_UPGRADE_FLAG = "apt-dist-upgrade-2024-01-15"
 
 function distUpgradeApplyLockResponses(): Record<string, { code?: number; stdout?: string }> {
+  const markerPath = `/var/lib/paratix/flags/'${DIST_UPGRADE_FLAG}.lock'/holder`
+  const lockPath = `/var/lib/paratix/flags/'${DIST_UPGRADE_FLAG}.lock'`
+  // R-0000634: acquire reads the marker token back via `ssh.output`; release
+  // is now a single shell statement that verifies ownership before removing
+  // the marker and lock directory.
+  const verifiedReleaseCommand =
+    `[ "$(awk 'NR==1{print $1}' ${markerPath} 2>/dev/null)" = ` +
+    `'${MOCK_FLAG_LOCK_HOLDER_TOKEN}' ] && ` +
+    `rm -f ${markerPath} && ` +
+    `rmdir ${lockPath}`
   return {
     [`[ -f /var/lib/paratix/flags/'${DIST_UPGRADE_FLAG}' ]`]: { code: 1 },
     [`mkdir /var/lib/paratix/flags/'${DIST_UPGRADE_FLAG}.lock'`]: { code: 0 },
-    [`printf '%s@%s %s\\n' "$$" '' "$(date +%s)" > /var/lib/paratix/flags/'${DIST_UPGRADE_FLAG}.lock'/holder`]:
-      { code: 0 },
-    [`rm -f /var/lib/paratix/flags/'${DIST_UPGRADE_FLAG}.lock'/holder`]: { code: 0 },
-    [`rmdir /var/lib/paratix/flags/'${DIST_UPGRADE_FLAG}.lock'`]: { code: 0 },
+    [`printf '%s@%s %s\\n' "$$" '' "$(date +%s)" > ${markerPath}`]: { code: 0 },
+    [`awk 'NR==1{print $1}' ${markerPath}`]: {
+      code: 0,
+      stdout: MOCK_FLAG_LOCK_HOLDER_TOKEN,
+    },
+    [verifiedReleaseCommand]: { code: 0 },
     hostname: { code: 0, stdout: "" },
     "mkdir -p /var/lib/paratix/flags": { code: 0 },
   }

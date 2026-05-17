@@ -4,7 +4,10 @@ import { describe, expect, it } from "vitest"
 import { cron } from "../../src/modules/cron.js"
 import { FLAGS_DIRECTORY } from "../../src/modules/moduleHelpers.js"
 import { createMockSsh as createBaseMockSsh } from "../helpers/mockSsh.js"
-import { isFlagLockInternalSuccessCommand } from "../helpers/mockSshFlagLock.js"
+import {
+  isFlagLockInternalSuccessCommand,
+  MOCK_FLAG_LOCK_HOLDER_TOKEN,
+} from "../helpers/mockSshFlagLock.js"
 
 /**
  * R-0000168: replicate the marker comment cron.ts writes (legacy form
@@ -42,11 +45,18 @@ const createMockSsh: typeof createBaseMockSsh = (responses, options) =>
         result: { code: 0 },
       },
       {
-        command: /^rm -f \/var\/lib\/paratix\/flags\/'cron-crontab-[\da-f]+'\/holder$/v,
-        result: { code: 0 },
+        // R-0000634: acquire reads back the `pid@hostname` token via
+        // `ssh.output` so release can verify ownership; the stub returns the
+        // shared mock token used by `mockSshFlagLock`.
+        command:
+          /^awk 'NR==1\{print \$1\}' \/var\/lib\/paratix\/flags\/'cron-crontab-[\da-f]+'\/holder$/v,
+        result: { code: 0, stdout: MOCK_FLAG_LOCK_HOLDER_TOKEN },
       },
       {
-        command: /^rmdir \/var\/lib\/paratix\/flags\/'cron-crontab-[\da-f]+'/v,
+        // R-0000634: release is a single shell statement that runs the
+        // ownership check, marker removal and `rmdir` atomically.
+        command:
+          /^\[ "\$\(awk 'NR==1\{print \$1\}' \/var\/lib\/paratix\/flags\/'cron-crontab-[\da-f]+'\/holder 2>\/dev\/null\)" = '[^']*' \] && rm -f \/var\/lib\/paratix\/flags\/'cron-crontab-[\da-f]+'\/holder && rmdir \/var\/lib\/paratix\/flags\/'cron-crontab-[\da-f]+'$/v,
         result: { code: 0 },
       },
       { command: /^crontab -u '[^']+' /v, result: { code: 0 } },
@@ -136,7 +146,16 @@ function createSharedCrontabMockSsh(
   )
   const lockName = crontabLockName(user)
   const lockMkdirCommand = `mkdir ${FLAGS_DIRECTORY}/'${lockName}'`
-  const lockRmdirCommand = `rmdir ${FLAGS_DIRECTORY}/'${lockName}'`
+  // R-0000634: release is a single shell statement (ownership check + marker
+  // removal + rmdir). The mock recognises the deterministic token returned
+  // by the holder readback stub in `createMockSsh`.
+  const markerPath = `${FLAGS_DIRECTORY}/'${lockName}'/holder`
+  const lockPath = `${FLAGS_DIRECTORY}/'${lockName}'`
+  const verifiedReleaseCommand =
+    `[ "$(awk 'NR==1{print $1}' ${markerPath} 2>/dev/null)" = ` +
+    `'${MOCK_FLAG_LOCK_HOLDER_TOKEN}' ] && ` +
+    `rm -f ${markerPath} && ` +
+    `rmdir ${lockPath}`
   const readCommand = `crontab -u '${user}' -l`
   const writeCommand = `crontab -u '${user}' -`
   const removeCommand = `crontab -u '${user}' -r`
@@ -164,7 +183,7 @@ function createSharedCrontabMockSsh(
       },
     ],
     [
-      lockRmdirCommand,
+      verifiedReleaseCommand,
       () => {
         lockExists = false
         resolveWaiters()

@@ -11,7 +11,10 @@ import {
   withMutexLock,
 } from "../../src/modules/moduleHelpers.js"
 import { createMockSsh as createBaseMockSsh } from "../helpers/mockSsh.js"
-import { isFlagLockInternalSuccessCommand } from "../helpers/mockSshFlagLock.js"
+import {
+  isFlagLockInternalSuccessCommand,
+  makeIsVerifiedReleaseCall,
+} from "../helpers/mockSshFlagLock.js"
 
 const createMockSsh: typeof createBaseMockSsh = (responses, options) =>
   createBaseMockSsh(responses, options)
@@ -29,6 +32,22 @@ function nonZeroLockExecResult(command: string, options: ExecOptions | undefined
   }
   expectLockExecOptions(options)
   return result
+}
+
+/**
+ * R-0000634: assert that a command is the verified-release shell statement
+ * for the given lock. Tests use this instead of a plain `rmdir` match
+ * because release is now a single atomic shell statement. The predicate is
+ * built via the shared helper so the test never composes the
+ * prefix/suffix check inline (eslint-plugin-vitest forbids logical
+ * operators in tests).
+ *
+ * @param call - The recorded shell command to inspect.
+ * @param lockName - The validated lock identifier (without quotes).
+ * @returns `true` when `call` is the verified-release command for `lockName`.
+ */
+function isVerifiedReleaseCall(call: string, lockName: string): boolean {
+  return makeIsVerifiedReleaseCall(lockName)(call)
 }
 
 function deferred(): { promise: Promise<void>; resolve: () => void } {
@@ -575,6 +594,13 @@ describe("setVersionedFlag – rejects shell-special characters", () => {
   })
 })
 
+// R-0000634: the shared mutex mock fakes a holder marker so the verified
+// release path can run end-to-end. The marker `awk` readback (via
+// `ssh.output`) returns this token, and the combined release command (the
+// single shell statement that performs the ownership check, marker removal
+// and `rmdir`) is recognised against the same token.
+const FAKE_HOLDER_TOKEN = "12345@mockhost"
+
 function createSharedMutexMockSsh(lockName: string): ReturnType<typeof createMockSsh> {
   const base = createMockSsh(
     {},
@@ -593,7 +619,12 @@ function createSharedMutexMockSsh(lockName: string): ReturnType<typeof createMoc
   }
 
   const lockMkdirCommand = `mkdir ${FLAGS_DIRECTORY}/'${lockName}'`
-  const lockRmdirCommand = `rmdir ${FLAGS_DIRECTORY}/'${lockName}'`
+  const markerAwkReadCommand = `awk 'NR==1{print $1}' ${FLAGS_DIRECTORY}/'${lockName}'/holder`
+  const verifiedReleaseCommand =
+    `[ "$(awk 'NR==1{print $1}' ${FLAGS_DIRECTORY}/'${lockName}'/holder 2>/dev/null)" = ` +
+    `'${FAKE_HOLDER_TOKEN}' ] && ` +
+    `rm -f ${FLAGS_DIRECTORY}/'${lockName}'/holder && ` +
+    `rmdir ${FLAGS_DIRECTORY}/'${lockName}'`
 
   return {
     ...base,
@@ -606,7 +637,7 @@ function createSharedMutexMockSsh(lockName: string): ReturnType<typeof createMoc
         lockExists = true
         return { code: 0, stderr: "", stdout: "" }
       }
-      if (command === lockRmdirCommand) {
+      if (command === verifiedReleaseCommand) {
         expectLockExecOptions(options)
         lockExists = false
         resolveWaiters()
@@ -623,6 +654,17 @@ function createSharedMutexMockSsh(lockName: string): ReturnType<typeof createMoc
       }
       if (isFlagLockInternalSuccessCommand(command)) return { code: 0, stderr: "", stdout: "" }
       throw new Error(`unexpected shared mutex exec command: ${command}`)
+    },
+    // R-0000634: `writeFlagLockHolderMarker` calls `ssh.output` to read the
+    // marker's `pid@hostname` token back after writing. Returning a
+    // deterministic token here lets the subsequent verified-release
+    // command match `verifiedReleaseCommand` above.
+    async output(command) {
+      base.calls.push(command)
+      if (command === markerAwkReadCommand) {
+        return FAKE_HOLDER_TOKEN
+      }
+      return base.output(command)
     },
   }
 }
@@ -678,7 +720,9 @@ describe("withMutexLock", () => {
     expect(result).toBe("value")
     expect(sectionCalls).toBe(1)
     expect(ssh.calls).toContain(`mkdir ${FLAGS_DIRECTORY}/'${lockName}'`)
-    expect(ssh.calls).toContain(`rmdir ${FLAGS_DIRECTORY}/'${lockName}'`)
+    // R-0000634: release is now a single shell statement that runs the
+    // ownership check, marker removal and `rmdir` atomically.
+    expect(ssh.calls.some((call) => isVerifiedReleaseCall(call, lockName))).toBe(true)
   })
 
   it("releases the lock even when the section throws", async () => {
@@ -696,7 +740,9 @@ describe("withMutexLock", () => {
       })
     ).rejects.toBe(error)
 
-    expect(ssh.calls).toContain(`rmdir ${FLAGS_DIRECTORY}/'${lockName}'`)
+    // R-0000634: release is now a single shell statement that runs the
+    // ownership check, marker removal and `rmdir` atomically.
+    expect(ssh.calls.some((call) => isVerifiedReleaseCall(call, lockName))).toBe(true)
   })
 
   it("serialises two parallel callers competing for the same mutex", async () => {

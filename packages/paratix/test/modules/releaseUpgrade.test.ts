@@ -5,6 +5,7 @@ import type { ExecResult } from "../../src/types.js"
 import { isSystemHostMetaEntry, isSystemRebootMetaEntry } from "../../src/meta.js"
 import { releaseUpgrade } from "../../src/modules/releaseUpgrade.js"
 import { createMockSsh as createBaseMockSsh } from "../helpers/mockSsh.js"
+import { makeIsVerifiedReleaseCall } from "../helpers/mockSshFlagLock.js"
 
 const emptyEnv = {}
 
@@ -77,6 +78,11 @@ const createMockSsh: typeof createBaseMockSsh = (responses, options) =>
 function readSourcesCommand(path: string): string {
   return `{ if [ -L '${path}' ]; then exit 200; fi; dd if='${path}' iflag=nofollow status=none; }`
 }
+
+// R-0000634: release is now a single shell statement (ownership check +
+// marker removal + rmdir); recognise it via the shared helper so tests no
+// longer reference the legacy standalone `rmdir` call.
+const isReleaseUpgradeVerifiedRelease = makeIsVerifiedReleaseCall("release-upgrade-mutex")
 
 // os-release content helpers
 const UBUNTU_OS_RELEASE = 'ID=ubuntu\nVERSION_ID="22.04"\n'
@@ -426,15 +432,14 @@ describe("releaseUpgrade.upgrade — apply (Debian)", () => {
 
     expect(result.status).toBe("changed")
     const lockMkdir = "mkdir /var/lib/paratix/flags/'release-upgrade-mutex'"
-    const lockRmdir = "rmdir /var/lib/paratix/flags/'release-upgrade-mutex'"
     expect(ssh.calls).toContain(lockMkdir)
-    expect(ssh.calls).toContain(lockRmdir)
+    expect(ssh.calls.some((call) => isReleaseUpgradeVerifiedRelease(call))).toBe(true)
     expect(ssh.calls.indexOf(lockMkdir)).toBeLessThan(ssh.calls.lastIndexOf("lsb_release -cs"))
     expect(ssh.calls.indexOf(lockMkdir)).toBeLessThan(
       ssh.calls.indexOf(readSourcesCommand("/etc/apt/sources.list"))
     )
     expect(ssh.calls.indexOf("DEBIAN_FRONTEND=noninteractive apt-get autoremove -y")).toBeLessThan(
-      ssh.calls.indexOf(lockRmdir)
+      ssh.calls.findIndex((call) => isReleaseUpgradeVerifiedRelease(call))
     )
   })
 
@@ -449,7 +454,7 @@ describe("releaseUpgrade.upgrade — apply (Debian)", () => {
     expect(ssh.calls).toContain("mkdir /var/lib/paratix/flags/'release-upgrade-mutex'")
     expect(ssh.calls).not.toContain(readSourcesCommand("/etc/apt/sources.list"))
     expect(ssh.calls).not.toContain("DEBIAN_FRONTEND=noninteractive apt-get update")
-    expect(ssh.calls).toContain("rmdir /var/lib/paratix/flags/'release-upgrade-mutex'")
+    expect(ssh.calls.some((call) => isReleaseUpgradeVerifiedRelease(call))).toBe(true)
   })
 
   it("returns failed when the release-upgrade mutex cannot be acquired", async () => {
@@ -744,8 +749,7 @@ describe("releaseUpgrade.upgrade — apply (Debian)", () => {
 
       expect(result.status).toBe("failed")
       const lockMkdir = "mkdir /var/lib/paratix/flags/'release-upgrade-mutex'"
-      const lockRmdir = "rmdir /var/lib/paratix/flags/'release-upgrade-mutex'"
-      const releaseIndex = ssh.calls.indexOf(lockRmdir)
+      const releaseIndex = ssh.calls.findIndex((call) => isReleaseUpgradeVerifiedRelease(call))
       const updateIndexes = ssh.calls
         .map((call, index) => ({ call, index }))
         .filter((entry) => entry.call === "DEBIAN_FRONTEND=noninteractive apt-get update")

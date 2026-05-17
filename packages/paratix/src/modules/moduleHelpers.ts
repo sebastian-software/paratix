@@ -156,7 +156,7 @@ async function acquireMutexAndRun<TValue>(
   const acquireResult = await acquireFlagLock(ssh, parameters.lockName)
   if (acquireResult.kind === "failed") return moduleFailureToMutexError(acquireResult.failure)
   if (acquireResult.kind === "acquired") {
-    return runMutexSection(ssh, parameters)
+    return runMutexSection(ssh, { ...parameters, holderToken: acquireResult.holderToken })
   }
   const waitResult = await waitForMutexLockRelease(ssh, parameters)
   if (waitResult.kind !== "resolved") return waitResult
@@ -175,7 +175,7 @@ function moduleFailureToMutexError(result: ModuleResult): MutexRunResult<never> 
 
 async function runMutexSection<TValue>(
   ssh: SshConnection,
-  parameters: { lockName: string; section: () => Promise<TValue> }
+  parameters: { holderToken: string; lockName: string; section: () => Promise<TValue> }
 ): Promise<MutexRunResult<TValue>> {
   try {
     const value = await parameters.section()
@@ -190,8 +190,10 @@ async function runMutexSection<TValue>(
     // stale-lock detection on the next run, and callers that need to surface
     // the stale-lock path do so via `flagLockDisplayPath` from their own
     // error-handling path.
+    // R-0000634: pass the acquire-time holder token so release only removes
+    // the lock when the marker still belongs to us.
     try {
-      await releaseFlagLock(ssh, parameters.lockName)
+      await releaseFlagLock(ssh, parameters.lockName, parameters.holderToken)
     } catch {
       // Best-effort cleanup; never override the section result.
     }
@@ -229,6 +231,7 @@ async function runLockedFlagApply(
   parameters: {
     apply: () => Promise<ModuleResult>
     flagName: string
+    holderToken: string
     lockName: string
     shouldApply?: () => Promise<boolean>
   }
@@ -239,8 +242,10 @@ async function runLockedFlagApply(
   } finally {
     // R-0000619: mirror `runMutexSection` — a release failure (e.g. broken
     // SSH transport after a restart) must not replace the apply result.
+    // R-0000634: pass the acquire-time holder token so release only removes
+    // the lock when the marker still belongs to us.
     try {
-      await releaseFlagLock(ssh, parameters.lockName)
+      await releaseFlagLock(ssh, parameters.lockName, parameters.holderToken)
     } catch {
       // Best-effort cleanup; stale-lock detection reclaims the directory on
       // the next run.
@@ -275,7 +280,7 @@ async function tryApplyWithFlagLock(
   const acquireResult = await acquireFlagLock(ssh, parameters.lockName)
   if (acquireResult.kind === "failed") return acquireResult.failure
   if (acquireResult.kind === "acquired") {
-    return runLockedFlagApply(ssh, parameters)
+    return runLockedFlagApply(ssh, { ...parameters, holderToken: acquireResult.holderToken })
   }
 
   const staleSeconds = parameters.staleSeconds ?? FLAG_LOCK_STALE_SECONDS
