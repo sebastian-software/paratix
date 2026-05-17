@@ -1,7 +1,11 @@
 import assert from "node:assert/strict"
+import { mkdtempSync, realpathSync, symlinkSync, writeFileSync } from "node:fs"
+import { tmpdir } from "node:os"
+import { join } from "node:path"
 import { describe, it } from "node:test"
+import { pathToFileURL } from "node:url"
 
-import { publishWorkspacePackages } from "./publishWorkspacePackages.mjs"
+import { isDirectExecution, publishWorkspacePackages } from "./publishWorkspacePackages.mjs"
 
 const DEFAULT_STABLE_VERSION = "1.2.3"
 const CREATE_PARATIX_NAME = "create-paratix"
@@ -321,6 +325,62 @@ describe("publishWorkspacePackages", () => {
     )
 
     assert.equal(hasCommandCall(commandRunner.calls, "pnpm"), false)
+  })
+})
+
+// R-0000662: the previous direct-execution check normalized only one side
+// of the comparison, so invoking the script through a workspace symlink
+// (e.g. a pnpm-managed bin shim) compared a non-realpath module URL
+// against a realpath argv1 and the publish branch never fired. The test
+// constructs a temporary directory tree with a symlinked script and
+// verifies that the symlinked invocation still matches the canonical
+// module URL.
+function createSymlinkedScriptFixture() {
+  // Realpath the temp directory before composing child paths so the
+  // canonical script path stays stable on platforms where the OS tmpdir
+  // already includes symlinks (e.g. macOS `/var/folders` → `/private/var`).
+  /* eslint-disable security/detect-non-literal-fs-filename -- Paths are derived from the OS tmpdir; this fixture intentionally creates files under the controlled scratch directory. */
+  const temporaryDirectory = realpathSync(mkdtempSync(join(tmpdir(), "publish-script-")))
+  const scriptPath = join(temporaryDirectory, "real-script.mjs")
+  writeFileSync(scriptPath, "// test fixture", "utf8")
+  const symlinkScriptPath = join(temporaryDirectory, "linked-script.mjs")
+  symlinkSync(scriptPath, symlinkScriptPath)
+  /* eslint-enable security/detect-non-literal-fs-filename */
+  return { scriptPath, symlinkScriptPath }
+}
+
+describe("isDirectExecution", () => {
+  it("returns false when argv1 is null", () => {
+    assert.equal(isDirectExecution("file:///some/module.js", null), false)
+  })
+
+  it("returns false when argv1 is undefined", () => {
+    assert.equal(isDirectExecution("file:///some/module.js", undefined), false)
+  })
+
+  it("returns false when the module url does not match argv1", () => {
+    assert.equal(isDirectExecution("file:///project/a.mjs", "/project/b.mjs"), false)
+  })
+
+  it("returns true when both sides point at the same canonical path", () => {
+    const moduleUrl = pathToFileURL("/project/script.mjs").href
+    assert.equal(isDirectExecution(moduleUrl, "/project/script.mjs"), true)
+  })
+
+  it("R-0000662: returns true when argv1 reaches the script via a symlink", () => {
+    const { scriptPath, symlinkScriptPath } = createSymlinkedScriptFixture()
+    const moduleUrl = pathToFileURL(scriptPath).href
+    // argv1 reaches the script through the symlink shim; the canonical
+    // module URL points at the real path. With the old asymmetric
+    // implementation the two sides would diverge after realpathSync; the
+    // symmetric helper must normalize both sides and still report a match.
+    assert.equal(isDirectExecution(moduleUrl, symlinkScriptPath), true)
+  })
+
+  it("R-0000662: returns true when the module url uses the symlink path", () => {
+    const { scriptPath, symlinkScriptPath } = createSymlinkedScriptFixture()
+    const moduleUrl = pathToFileURL(symlinkScriptPath).href
+    assert.equal(isDirectExecution(moduleUrl, scriptPath), true)
   })
 })
 

@@ -1,7 +1,7 @@
 import { execFile, spawn } from "node:child_process"
 import { realpathSync } from "node:fs"
 import { readdir, readFile, stat } from "node:fs/promises"
-import { join } from "node:path"
+import { join, resolve } from "node:path"
 import { fileURLToPath } from "node:url"
 import { promisify } from "node:util"
 
@@ -326,11 +326,32 @@ export async function publishWorkspacePackages({
   await publishPackage(createParatixPackage, commandRunner)
 }
 
-function isDirectExecution(moduleUrl, argv1) {
+// R-0000662: resolve a filesystem path through `realpathSync` with a safe
+// fallback to the lexical resolution so symlinked invocations still
+// compare equal. Mirrors `normalizeExecutionPath` in
+// packages/create-paratix/src/directExecution.ts so the
+// direct-execution check stays symmetric between the two sides.
+function normalizeExecutionPath(path) {
+  const resolvedPath = resolve(path)
+  try {
+    return realpathSync.native(resolvedPath)
+  } catch {
+    return resolvedPath
+  }
+}
+
+// R-0000662: the previous implementation compared `fileURLToPath(moduleUrl)`
+// directly against `realpathSync(argv1)`, so a workspace symlink that
+// pointed at the script (e.g. when pnpm installed it via a hoisted bin
+// shim) would normalize one side but not the other and the publish
+// branch would never fire. Normalize both sides through the same helper
+// so symlinked and non-symlinked invocations behave identically. Exported
+// so the regression test in publishWorkspacePackages.test.mjs can exercise
+// the comparison without spawning the script.
+export function isDirectExecution(moduleUrl, argv1) {
   if (argv1 == null) return false
   try {
-    // eslint-disable-next-line security/detect-non-literal-fs-filename -- argv1 is process.argv[1] (the invoking script path), not user input
-    return fileURLToPath(moduleUrl) === realpathSync(argv1)
+    return normalizeExecutionPath(fileURLToPath(moduleUrl)) === normalizeExecutionPath(argv1)
   } catch {
     return false
   }
