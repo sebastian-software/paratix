@@ -159,6 +159,49 @@ function buildLargeDownloadFlagInfo(
   }
 }
 
+/**
+ * Validate the download destination path before any shell helper consumes it.
+ *
+ * Mirrors `validateAbsentPath` from `file.ts`: the destination must be a
+ * non-empty, absolute, normalized POSIX path that does not start with `-`
+ * (so a future refactor cannot turn it into a CLI flag for `rm`, `curl`, …)
+ * and that is not padded with whitespace. Without this guard a relative or
+ * whitespace-padded value would reach `path.dirname` and downstream
+ * `shellQuote`/`mktemp` calls and land the download at an unexpected
+ * location.
+ *
+ * @param moduleName - Module label used in the error message prefix.
+ * @param destination - The destination path to validate.
+ * @throws {Error} When the destination violates any of the rules above.
+ */
+function validateDownloadDestination(
+  moduleName: "download.github" | "download.large" | "download.url",
+  destination: string
+): void {
+  const trimmedDestination = destination.trim()
+  if (trimmedDestination.length === 0) {
+    throw new Error(`[${moduleName}] destination must not be empty`)
+  }
+  if (trimmedDestination !== destination) {
+    throw new Error(
+      `[${moduleName}] destination must not start or end with whitespace: ${destination}`
+    )
+  }
+  if (trimmedDestination.startsWith("-")) {
+    throw new Error(`[${moduleName}] destination must not start with "-": ${destination}`)
+  }
+  if (!path.isAbsolute(trimmedDestination)) {
+    throw new Error(`[${moduleName}] destination must be an absolute path: ${destination}`)
+  }
+  const normalizedDestination = path.normalize(trimmedDestination)
+  if (normalizedDestination === "/") {
+    throw new Error(`[${moduleName}] refusing to use root path as destination: ${destination}`)
+  }
+  if (trimmedDestination !== normalizedDestination) {
+    throw new Error(`[${moduleName}] destination must be normalized: ${destination}`)
+  }
+}
+
 function validateIntegrityConfiguration(
   moduleName: "download.github" | "download.large" | "download.url",
   options: BaseDownloadOptions
@@ -998,6 +1041,7 @@ export const download = {
       token?: string
     } & BaseDownloadOptions
   ): Module {
+    validateDownloadDestination("download.github", destination)
     const parts = validateGithubOptions(options)
     if (options.sha256 != null) validateSha256(options.sha256)
     validateIntegrityConfiguration("download.github", options)
@@ -1090,16 +1134,18 @@ export const download = {
       timeout?: number
     }
   ): Module {
+    const moduleName = "download.large"
+    validateDownloadDestination(moduleName, destination)
     const resolvedOptions = options ?? {}
     validateHttpUrl(url, { allowHttp: resolvedOptions.allowInsecureHttp })
     rejectSensitiveHeadersOverHttp({
       allowInsecureHttpHeaders: resolvedOptions.allowInsecureHttpHeaders,
       headers: resolvedOptions.headers,
-      moduleName: "download.large",
+      moduleName,
       url,
     })
     if (resolvedOptions.sha256 != null) validateSha256(resolvedOptions.sha256)
-    validateIntegrityConfiguration("download.large", resolvedOptions)
+    validateIntegrityConfiguration(moduleName, resolvedOptions)
     const downloadParameters = buildDownloadParameters(destination, resolvedOptions, url)
     // R-0000274: use a destination-keyed prefix so older flag files for the
     // same destination (older URLs/headers) get pruned automatically by
@@ -1185,16 +1231,18 @@ export const download = {
       headers?: Record<string, string>
     } & BaseDownloadOptions
   ): Module {
+    const moduleName = "download.url"
+    validateDownloadDestination(moduleName, destination)
     const resolvedOptions = options ?? {}
     validateHttpUrl(url, { allowHttp: resolvedOptions.allowInsecureHttp })
     rejectSensitiveHeadersOverHttp({
       allowInsecureHttpHeaders: resolvedOptions.allowInsecureHttpHeaders,
       headers: resolvedOptions.headers,
-      moduleName: "download.url",
+      moduleName,
       url,
     })
     if (resolvedOptions.sha256 != null) validateSha256(resolvedOptions.sha256)
-    validateIntegrityConfiguration("download.url", resolvedOptions)
+    validateIntegrityConfiguration(moduleName, resolvedOptions)
     const downloadParameters = buildDownloadParameters(destination, resolvedOptions, url)
     // R-0000167: when the operator opted into unverified downloads (no a-priori
     // sha256 digest), Paratix records `<destination>.sha256` after a

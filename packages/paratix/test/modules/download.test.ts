@@ -1349,6 +1349,54 @@ describe("download.url", () => {
         download.url(destination, "https://user:secret@example.com/file", allowUnverifiedDownload)
       ).toThrow("must not embed credentials")
     })
+
+    it("rejects an empty destination path", () => {
+      expect(() => download.url("", url, allowUnverifiedDownload)).toThrow(
+        "[download.url] destination must not be empty"
+      )
+    })
+
+    it("rejects destinations padded with whitespace", () => {
+      expect(() => download.url(" /tmp/file", url, allowUnverifiedDownload)).toThrow(
+        "[download.url] destination must not start or end with whitespace:  /tmp/file"
+      )
+      expect(() => download.url("/tmp/file\n", url, allowUnverifiedDownload)).toThrow(
+        "[download.url] destination must not start or end with whitespace: /tmp/file\n"
+      )
+    })
+
+    it("rejects destinations that start with a dash", () => {
+      expect(() => download.url("-rf", url, allowUnverifiedDownload)).toThrow(
+        '[download.url] destination must not start with "-": -rf'
+      )
+    })
+
+    it("rejects relative destination paths", () => {
+      expect(() => download.url("tmp/file", url, allowUnverifiedDownload)).toThrow(
+        "[download.url] destination must be an absolute path: tmp/file"
+      )
+      expect(() => download.url(".", url, allowUnverifiedDownload)).toThrow(
+        "[download.url] destination must be an absolute path: ."
+      )
+    })
+
+    it("rejects the root path as destination", () => {
+      expect(() => download.url("/", url, allowUnverifiedDownload)).toThrow(
+        "[download.url] refusing to use root path as destination: /"
+      )
+    })
+
+    it("rejects destinations that are not normalized", () => {
+      expect(() => download.url("/tmp//file", url, allowUnverifiedDownload)).toThrow(
+        "[download.url] destination must be normalized: /tmp//file"
+      )
+      expect(() => download.url("/tmp/./file", url, allowUnverifiedDownload)).toThrow(
+        "[download.url] destination must be normalized: /tmp/./file"
+      )
+      expect(() => download.url("/tmp/../file", url, allowUnverifiedDownload)).toThrow(
+        "[download.url] destination must be normalized: /tmp/../file"
+      )
+    })
   })
 
   describe("secrets propagation", () => {
@@ -1730,6 +1778,38 @@ describe("download.github", () => {
       expect(() => download.github(destination, { asset: "", repo, tag })).toThrow(
         "Invalid GitHub release asset"
       )
+    })
+
+    it("rejects an empty destination path", () => {
+      expect(() =>
+        download.github("", { ...allowUnverifiedDownload, asset, repo, tag })
+      ).toThrow("[download.github] destination must not be empty")
+    })
+
+    it("rejects destinations padded with whitespace", () => {
+      expect(() =>
+        download.github(" /tmp/asset", { ...allowUnverifiedDownload, asset, repo, tag })
+      ).toThrow(
+        "[download.github] destination must not start or end with whitespace:  /tmp/asset"
+      )
+    })
+
+    it("rejects destinations that start with a dash", () => {
+      expect(() =>
+        download.github("-rf", { ...allowUnverifiedDownload, asset, repo, tag })
+      ).toThrow('[download.github] destination must not start with "-": -rf')
+    })
+
+    it("rejects relative destination paths", () => {
+      expect(() =>
+        download.github("tmp/asset", { ...allowUnverifiedDownload, asset, repo, tag })
+      ).toThrow("[download.github] destination must be an absolute path: tmp/asset")
+    })
+
+    it("rejects destinations that are not normalized", () => {
+      expect(() =>
+        download.github("/tmp//asset", { ...allowUnverifiedDownload, asset, repo, tag })
+      ).toThrow("[download.github] destination must be normalized: /tmp//asset")
     })
   })
 
@@ -2378,6 +2458,36 @@ describe("download.large", () => {
           headers: { "X-Trace-Id": "abc" },
         })
       ).not.toThrow()
+    })
+
+    it("rejects an empty destination path", () => {
+      expect(() => download.large("", url, allowUnverifiedDownload)).toThrow(
+        "[download.large] destination must not be empty"
+      )
+    })
+
+    it("rejects destinations padded with whitespace", () => {
+      expect(() => download.large(" /opt/data/large-file.iso", url, allowUnverifiedDownload)).toThrow(
+        "[download.large] destination must not start or end with whitespace:  /opt/data/large-file.iso"
+      )
+    })
+
+    it("rejects destinations that start with a dash", () => {
+      expect(() => download.large("-rf", url, allowUnverifiedDownload)).toThrow(
+        '[download.large] destination must not start with "-": -rf'
+      )
+    })
+
+    it("rejects relative destination paths", () => {
+      expect(() => download.large("opt/data/file", url, allowUnverifiedDownload)).toThrow(
+        "[download.large] destination must be an absolute path: opt/data/file"
+      )
+    })
+
+    it("rejects destinations that are not normalized", () => {
+      expect(() => download.large("/opt//data/file", url, allowUnverifiedDownload)).toThrow(
+        "[download.large] destination must be normalized: /opt//data/file"
+      )
     })
   })
 
