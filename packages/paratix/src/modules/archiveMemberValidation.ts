@@ -220,6 +220,17 @@ function parseZipListing(stdout: string): ArchiveListing {
   return { members }
 }
 
+// R-0000636: control characters (\x00-\x1F) in archive member paths are
+// rejected before any further validation. A literal `\n` in an entry name
+// would otherwise split the guard-paths list that
+// `moveExtractedContentsIntoDestination` feeds back into the symlink walk
+// and let a crafted archive bypass the per-ancestor symlink check. NUL
+// would terminate a path early when interpolated into a shell argument.
+// Carriage returns and other control bytes serve no legitimate purpose in
+// POSIX paths, so we reject them across the board.
+/* eslint-disable-next-line regexp/no-control-character -- matching control characters is the explicit purpose of this guard */ /* oxlint-disable-next-line no-control-regex */
+const ARCHIVE_MEMBER_CONTROL_CHARACTER_PATTERN = /[\x00-\x1F]/v
+
 /**
  * Normalize a POSIX-style path for traversal validation.
  *
@@ -228,12 +239,19 @@ function parseZipListing(stdout: string): ArchiveListing {
  * the canonical relative form used by {@link memberEscapesDestination}.
  *
  * Returns null when the path tries to escape the root via `..` segments at
- * the top level, in which case the caller must reject the member.
+ * the top level, or when the input contains control characters
+ * (`\x00`–`\x1F`) that would let a crafted archive smuggle newlines or NUL
+ * bytes through the downstream guard-paths processing.
  *
  * @param input - The raw path string from the archive listing.
  * @returns The normalized relative path, or null on traversal escape.
  */
 export function normalizeArchiveMemberPath(input: string): null | string {
+  // R-0000636: refuse paths containing control characters before splitting on
+  // `/`. Performing the check up front means every downstream user of
+  // `normalizeArchiveMemberPath` (path validation, link-target validation)
+  // inherits the guard without each call having to remember it.
+  if (ARCHIVE_MEMBER_CONTROL_CHARACTER_PATTERN.test(input)) return null
   const segments = input.split("/")
   const stack: string[] = []
   for (const segment of segments) {
@@ -282,6 +300,20 @@ export function archiveMemberUnsafeReason(member: ArchiveMember): null | string 
   }
   if (member.kind === "special") {
     return `member ${JSON.stringify(member.path)} is a special file`
+  }
+  // R-0000636: report control-character members with a dedicated reason so
+  // the failure surface clearly identifies the cause instead of conflating
+  // it with traversal escapes. The check runs before
+  // `memberEscapesDestination` so even paths that would otherwise look
+  // benign (no leading `/`, no `..`) are still rejected.
+  if (ARCHIVE_MEMBER_CONTROL_CHARACTER_PATTERN.test(member.path)) {
+    return `member ${JSON.stringify(member.path)} contains control characters`
+  }
+  if (
+    member.linkTarget !== null &&
+    ARCHIVE_MEMBER_CONTROL_CHARACTER_PATTERN.test(member.linkTarget)
+  ) {
+    return `member ${JSON.stringify(member.path)} -> ${JSON.stringify(member.linkTarget)} link target contains control characters`
   }
   if (!memberEscapesDestination(member)) return null
   const detail =

@@ -1442,6 +1442,66 @@ describe("archive.extract — apply", () => {
     expectNoArchiveMarkerWrite(mockSsh)
   })
 
+  // R-0000636: control characters in archive member paths must be rejected
+  // before they reach moveExtractedContentsIntoDestination, where a literal
+  // newline could split the guard-paths list and bypass the per-ancestor
+  // symlink protection. A NUL byte would silently terminate a path argument
+  // when interpolated into a shell command. The tests use JavaScript escape
+  // sequences (\x00, \x01) instead of literal control bytes so the source
+  // stays grep-friendly and the intent of each test is explicit.
+  it("rejects a tar archive whose member name contains a NUL byte", async () => {
+    const tarListing = `-rw-r--r-- root/root 0 1970-01-01 00:00 app\x00file\n`
+    const mockSsh = createMockSsh({
+      [`tar -tvzf '${src}'`]: { code: 0, stdout: tarListing },
+    })
+
+    const mod = archive.extract(src, destination)
+    const result = await mod.apply(mockSsh, emptyEnv)
+
+    expect(result.status).toBe("failed")
+    expect(String(result.error)).toContain("contains control characters")
+    expect(mockSsh.calls).toContain(`tar -tvzf '${src}'`)
+    expectNoTarExtractCalls(mockSsh)
+    expectNoArchiveMarkerWrite(mockSsh)
+  })
+
+  it("rejects a tar archive whose member name contains a SOH control byte", async () => {
+    // We use \x01 (start of heading) as a representative low-control byte
+    // that survives parseTarVerboseLine (carriage returns are already
+    // rejected as unparseable because `.` in the listing regex excludes
+    // line terminators). The control-character guard must catch \x01,
+    // \x02, \t, … before they reach downstream guards or shell helpers.
+    const tarListing = `-rw-r--r-- root/root 0 1970-01-01 00:00 app\x01file\n`
+    const mockSsh = createMockSsh({
+      [`tar -tvzf '${src}'`]: { code: 0, stdout: tarListing },
+    })
+
+    const mod = archive.extract(src, destination)
+    const result = await mod.apply(mockSsh, emptyEnv)
+
+    expect(result.status).toBe("failed")
+    expect(String(result.error)).toContain("contains control characters")
+    expect(mockSsh.calls).toContain(`tar -tvzf '${src}'`)
+    expectNoTarExtractCalls(mockSsh)
+    expectNoArchiveMarkerWrite(mockSsh)
+  })
+
+  it("rejects a tar archive whose symlink target contains a NUL byte", async () => {
+    const tarListing = `lrwxrwxrwx root/root 0 1970-01-01 00:00 link -> target\x00evil\n`
+    const mockSsh = createMockSsh({
+      [`tar -tvzf '${src}'`]: { code: 0, stdout: tarListing },
+    })
+
+    const mod = archive.extract(src, destination)
+    const result = await mod.apply(mockSsh, emptyEnv)
+
+    expect(result.status).toBe("failed")
+    expect(String(result.error)).toContain("link target contains control characters")
+    expect(mockSsh.calls).toContain(`tar -tvzf '${src}'`)
+    expectNoTarExtractCalls(mockSsh)
+    expectNoArchiveMarkerWrite(mockSsh)
+  })
+
   it("rejects a zip archive that contains a `/etc/passwd` member without invoking unzip -o", async () => {
     const zipSrc = "/tmp/app.zip"
     const mockSsh = createMockSsh({
@@ -1494,6 +1554,49 @@ describe("archive.extract — apply", () => {
 
     expect(result.status).toBe("failed")
     expect(String(result.error)).toContain("is a symlink")
+    expect(mockSsh.calls).toContain(`unzip -Zs '${zipSrc}'`)
+    expectNoUnzipExtractCalls(mockSsh)
+    expectNoArchiveMarkerWrite(mockSsh)
+  })
+
+  // R-0000636: zip members with control characters in their names must be
+  // rejected before unzip restores them, mirroring the tar guard. NUL bytes
+  // would silently truncate downstream shell arguments; carriage returns and
+  // other low control bytes would let crafted archives smuggle entries past
+  // the per-member guard list used by moveExtractedContentsIntoDestination.
+  it("rejects a zip archive whose member name contains a NUL byte", async () => {
+    const zipSrc = "/tmp/app.zip"
+    const mockSsh = createMockSsh({
+      [`unzip -Zs '${zipSrc}'`]: {
+        code: 0,
+        stdout: "-rw-r--r--  2.0 unx        0 b- defN 26-May-04 00:00 app\x00file\n",
+      },
+    })
+
+    const mod = archive.extract(zipSrc, destination)
+    const result = await mod.apply(mockSsh, emptyEnv)
+
+    expect(result.status).toBe("failed")
+    expect(String(result.error)).toContain("contains control characters")
+    expect(mockSsh.calls).toContain(`unzip -Zs '${zipSrc}'`)
+    expectNoUnzipExtractCalls(mockSsh)
+    expectNoArchiveMarkerWrite(mockSsh)
+  })
+
+  it("rejects a zip archive whose member name contains a SOH control byte", async () => {
+    const zipSrc = "/tmp/app.zip"
+    const mockSsh = createMockSsh({
+      [`unzip -Zs '${zipSrc}'`]: {
+        code: 0,
+        stdout: "-rw-r--r--  2.0 unx        0 b- defN 26-May-04 00:00 app\x01file\n",
+      },
+    })
+
+    const mod = archive.extract(zipSrc, destination)
+    const result = await mod.apply(mockSsh, emptyEnv)
+
+    expect(result.status).toBe("failed")
+    expect(String(result.error)).toContain("contains control characters")
     expect(mockSsh.calls).toContain(`unzip -Zs '${zipSrc}'`)
     expectNoUnzipExtractCalls(mockSsh)
     expectNoArchiveMarkerWrite(mockSsh)
