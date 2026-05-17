@@ -129,7 +129,18 @@ async function cloneRepo(conn: SshConnection, parameters: GitCloneParameters): P
       `git -C ${shellQuote(destination)} checkout ${shellQuote(reference)}`,
       EXEC_OPTS
     )
-    return checkout.code === 0
+    if (checkout.code === 0) return true
+    // R-0000642: the fallback clone left a worktree on the requested
+    // destination at the repository's default branch, but the subsequent
+    // checkout to the caller-provided reference failed. Without cleanup the
+    // host is left in a state the caller never asked for. Only remove the
+    // directory when this apply created it; if the path existed beforehand
+    // (e.g. a user staged work in it) the original cleanup guard already
+    // skipped removal and we mirror that decision here.
+    if (!destinationExistedBeforeClone) {
+      await cleanupFailedCloneDestination(conn, destination)
+    }
+    return false
   }
   const cloneResult = await conn.exec(
     `git clone -- ${shellQuote(repo)} ${shellQuote(destination)}`,

@@ -637,6 +637,60 @@ describe("git.clone — apply", () => {
     expect(mockSsh.calls).toContain(`git clone -- '${repo}' '${destination}'`)
   })
 
+  // R-0000642: when the initial `git clone --branch <ref>` fails and the
+  // unconstrained fallback succeeds, but the subsequent `git checkout <ref>`
+  // fails, the host is left with a partial clone at the repository's default
+  // branch — a state the caller never requested. Ensure the fallback path
+  // cleans up the destination it created so the host stays in the original
+  // state.
+  it("R-0000642: removes the fallback clone when checkout fails and destination did not exist", async () => {
+    const sha = "abc123def456"
+    const mockSsh = createGitApplyMockSsh({
+      [`git -C '${destination}' checkout '${sha}'`]: { code: 1 },
+      [`git clone -- '${repo}' '${destination}'`]: { code: 0 },
+      [`git clone --branch '${sha}' -- '${repo}' '${destination}'`]: { code: 128 },
+      [`rm -rf -- '${destination}'`]: { code: 0 },
+      [`test -d '${gitDir}'`]: { code: 1 },
+      [`test -e '${destination}'`]: { code: 1 },
+    })
+    const mod = git.clone(repo, destination, { ref: sha })
+
+    const result = await mod.apply(mockSsh, emptyEnv)
+
+    expect(result.status).toBe("failed")
+    // Two rm calls: one before the fallback clone (R-0000223), one after the
+    // failed checkout (R-0000642). Both must be present, and the post-checkout
+    // cleanup must follow the failed checkout.
+    const cleanupCalls = mockSsh.calls.filter((c) => c === `rm -rf -- '${destination}'`)
+    expect(cleanupCalls.length).toBeGreaterThanOrEqual(2)
+    const checkoutIndex = mockSsh.calls.indexOf(`git -C '${destination}' checkout '${sha}'`)
+    const lastCleanupIndex = mockSsh.calls.lastIndexOf(`rm -rf -- '${destination}'`)
+    expect(checkoutIndex).toBeGreaterThanOrEqual(0)
+    expect(lastCleanupIndex).toBeGreaterThan(checkoutIndex)
+  })
+
+  // R-0000642: the cleanup must NOT remove a destination that already existed
+  // before apply ran. This mirrors the R-0000223 cleanup guard for the
+  // pre-fallback-clone branch so the module never deletes user-staged work.
+  it("R-0000642: preserves a pre-existing destination when fallback checkout fails", async () => {
+    const sha = "abc123def456"
+    const mockSsh = createGitApplyMockSsh({
+      [`git -C '${destination}' checkout '${sha}'`]: { code: 1 },
+      [`git clone -- '${repo}' '${destination}'`]: { code: 0 },
+      [`git clone --branch '${sha}' -- '${repo}' '${destination}'`]: { code: 128 },
+      [`test -d '${gitDir}'`]: { code: 1 },
+      [`test -e '${destination}'`]: { code: 0 },
+    })
+    const mod = git.clone(repo, destination, { ref: sha })
+
+    const result = await mod.apply(mockSsh, emptyEnv)
+
+    expect(result.status).toBe("failed")
+    // destinationExistedBeforeClone is true; neither cleanup branch is allowed
+    // to run because the caller's pre-existing files would be destroyed.
+    expect(mockSsh.calls).not.toContain(`rm -rf -- '${destination}'`)
+  })
+
   it("returns failed when clone fails", async () => {
     const mockSsh = createMockSsh({
       [`git clone -- '${repo}' '${destination}'`]: { code: 128 },
