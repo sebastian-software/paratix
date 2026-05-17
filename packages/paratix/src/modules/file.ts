@@ -183,7 +183,7 @@ export const file = {
         if (!ssh) return failed(`[file.absent: ${remotePath}] SSH connection is required`)
         if (!(await absentPathExists(ssh, remotePath))) return { status: "ok" }
 
-        const result = await ssh.exec(`rm -rf ${shellQuote(remotePath)}`, {
+        const result = await ssh.exec(`rm -rf -- ${shellQuote(remotePath)}`, {
           ignoreExitCode: true,
           silent: true,
         })

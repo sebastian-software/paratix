@@ -323,14 +323,14 @@ describe("file.absent", () => {
     const remotePath = "/tmp/old file"
     const ssh = createMockSsh({
       "[ -e '/tmp/old file' ] || [ -L '/tmp/old file' ]": { code: 0 },
-      "rm -rf '/tmp/old file'": { code: 0 },
+      "rm -rf -- '/tmp/old file'": { code: 0 },
     })
     const mod = file.absent(remotePath)
     const result = await mod.apply(ssh, emptyEnv)
 
     expect(result.status).toBe("changed")
     expect(ssh.execCalls).toContainEqual({
-      command: "rm -rf '/tmp/old file'",
+      command: "rm -rf -- '/tmp/old file'",
       options: { ignoreExitCode: true, silent: true },
     })
   })
@@ -383,21 +383,21 @@ describe("file.absent", () => {
     const result = await mod.apply(ssh, emptyEnv)
 
     expect(result.status).toBe("ok")
-    expect(ssh.calls).not.toContain("rm -rf '/tmp/old-file'")
+    expect(ssh.calls).not.toContain("rm -rf -- '/tmp/old-file'")
   })
 
   it("apply removes an existing path with shell quoting", async () => {
     const remotePath = "/tmp/old file's dir"
     const ssh = createMockSsh({
       "[ -e '/tmp/old file'\\''s dir' ] || [ -L '/tmp/old file'\\''s dir' ]": { code: 0 },
-      "rm -rf '/tmp/old file'\\''s dir'": { code: 0 },
+      "rm -rf -- '/tmp/old file'\\''s dir'": { code: 0 },
     })
     const mod = file.absent(remotePath)
     const result = await mod.apply(ssh, emptyEnv)
 
     expect(result.status).toBe("changed")
     expect(ssh.execCalls).toContainEqual({
-      command: "rm -rf '/tmp/old file'\\''s dir'",
+      command: "rm -rf -- '/tmp/old file'\\''s dir'",
       options: { ignoreExitCode: true, silent: true },
     })
   })
@@ -405,14 +405,14 @@ describe("file.absent", () => {
   it("apply removes a dangling symlink", async () => {
     const ssh = createMockSsh({
       "[ -e '/tmp/dangling-link' ] || [ -L '/tmp/dangling-link' ]": { code: 0 },
-      "rm -rf '/tmp/dangling-link'": { code: 0 },
+      "rm -rf -- '/tmp/dangling-link'": { code: 0 },
     })
     const mod = file.absent("/tmp/dangling-link")
     const result = await mod.apply(ssh, emptyEnv)
 
     expect(result.status).toBe("changed")
     expect(ssh.execCalls).toContainEqual({
-      command: "rm -rf '/tmp/dangling-link'",
+      command: "rm -rf -- '/tmp/dangling-link'",
       options: { ignoreExitCode: true, silent: true },
     })
   })
@@ -420,7 +420,7 @@ describe("file.absent", () => {
   it("apply returns failed when rm exits non-zero", async () => {
     const ssh = createMockSsh({
       "[ -e '/tmp/stubborn' ] || [ -L '/tmp/stubborn' ]": { code: 0 },
-      "rm -rf '/tmp/stubborn'": { code: 1, stderr: "permission denied" },
+      "rm -rf -- '/tmp/stubborn'": { code: 1, stderr: "permission denied" },
     })
     const mod = file.absent("/tmp/stubborn")
     const result = await mod.apply(ssh, emptyEnv)
