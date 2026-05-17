@@ -632,6 +632,71 @@ async function sshdPortConfigMatchesLive(ssh: SshConnection, targetPort: number)
   }
 }
 
+// R-0000628: run every restart-failure rollback step even if an earlier step
+// fails, mirroring the per-step accumulator that
+// `executeSshdPortRollbackSteps` already uses for the post-verification
+// rollback path. Previously the four steps (sshd_config rewrite, service
+// boot-state restore, socket-activation restore, systemctl restart) ran
+// sequentially with no error accumulator; a failure in the first write threw
+// past the remaining layers and `recoverFromRestartFailure` then swallowed
+// the exception, leaving `ssh.socket` permanently disabled on socket-
+// activated hosts and producing a reboot-time SSH lockout. Accumulate
+// failures per step and return them to the caller so the apply-time error
+// message can surface the secondary rollback failure alongside the primary
+// restart failure.
+type RestartFailureRollbackStep = { name: string; run: () => Promise<void> }
+
+function buildRestartFailureRollbackSteps(
+  ssh: SshConnection,
+  parameters: {
+    originalConfig: string
+    serviceBootState?: SshdServiceBootState
+    serviceUnit?: SshdServiceUnit
+    socketState: SshSocketState
+  }
+): RestartFailureRollbackStep[] {
+  const steps: RestartFailureRollbackStep[] = [
+    {
+      name: "sshd_config rewrite",
+      async run() {
+        await ssh.writeFile(SSHD_CONFIG_PATH, parameters.originalConfig, {
+          mode: SSHD_CONFIG_MODE,
+        })
+      },
+    },
+    {
+      name: "service boot-state restore",
+      async run() {
+        await restoreSshServiceBootState(ssh, parameters.serviceBootState)
+      },
+    },
+    {
+      name: "socket activation restore",
+      async run() {
+        await restoreSocketActivatedSsh(ssh, parameters.socketState)
+      },
+    },
+  ]
+  // The post-rollback `systemctl restart` only runs when the restart path
+  // had already resolved the service unit. Without it we have no unit name
+  // to restart against; the other three layers still run unconditionally so
+  // sshd_config, the service boot state, and ssh.socket land back on their
+  // pre-apply values.
+  if (parameters.serviceUnit != null) {
+    const serviceUnit = parameters.serviceUnit
+    steps.push({
+      name: "ssh service restart",
+      async run() {
+        await ssh.exec(`${SYSTEMCTL} restart ${serviceUnit}`, {
+          ignoreExitCode: true,
+          silent: true,
+        })
+      },
+    })
+  }
+  return steps
+}
+
 async function restoreSshdPortRestartFailure(
   ssh: SshConnection,
   parameters: {
@@ -640,15 +705,19 @@ async function restoreSshdPortRestartFailure(
     serviceUnit?: SshdServiceUnit
     socketState: SshSocketState
   }
-): Promise<void> {
-  await ssh.writeFile(SSHD_CONFIG_PATH, parameters.originalConfig, { mode: SSHD_CONFIG_MODE })
-  await restoreSshServiceBootState(ssh, parameters.serviceBootState)
-  await restoreSocketActivatedSsh(ssh, parameters.socketState)
-  if (parameters.serviceUnit == null) return
-  await ssh.exec(`${SYSTEMCTL} restart ${parameters.serviceUnit}`, {
-    ignoreExitCode: true,
-    silent: true,
-  })
+): Promise<string | undefined> {
+  const steps = buildRestartFailureRollbackSteps(ssh, parameters)
+  const failures: Array<{ message: string; name: string }> = []
+  for (const step of steps) {
+    // eslint-disable-next-line no-await-in-loop -- restore steps must run sequentially so each layer rolls back before the next.
+    const failure = await runRollbackStep(step.run)
+    if (failure !== undefined) failures.push({ message: failure, name: step.name })
+  }
+  if (failures.length === 0) return undefined
+  const formatted = failures.map((entry) => `${entry.name} failed: ${entry.message}`)
+  if (formatted.length === 1) return formatted[0]
+  const [primary, ...secondaries] = formatted
+  return `${primary}; further failures: ${secondaries.join("; ")}`
 }
 
 // R-0000557: a successful `systemctl restart` may still fail the post-restart
@@ -678,7 +747,7 @@ async function recoverFromRestartFailure(
     socketState: SshSocketState
     targetPort: number
   }
-): Promise<void> {
+): Promise<string | undefined> {
   // Drop the port marker first and unconditionally: if any subsequent restore
   // step throws (e.g. SFTP failure rewriting sshd_config), the runner still
   // needs to fall back to the previous port instead of staying on the new one
@@ -690,18 +759,20 @@ async function recoverFromRestartFailure(
     // swallow defensively so an exotic implementation never blocks the
     // remaining restore steps.
   }
-  try {
-    await restoreSshdPortRestartFailure(ssh, {
-      originalConfig: parameters.originalConfig,
-      serviceBootState: parameters.serviceBootState,
-      serviceUnit: parameters.serviceUnit,
-      socketState: parameters.socketState,
-    })
-  } catch {
-    // Best-effort recovery: the original restart failure (re-thrown by the
-    // caller) is the actionable error. A nested restore failure must not
-    // mask it nor leave the port marker in place.
-  }
+  // R-0000628: surface a rollback failure to the caller instead of swallowing
+  // it. The previous best-effort catch let a first-step write failure abort
+  // the remaining socket-state / service-boot-state / restart layers without
+  // any operator-visible warning, locking socket-activated hosts out at the
+  // next reboot. The per-step accumulator in `restoreSshdPortRestartFailure`
+  // now keeps every layer running even when an earlier step fails; the
+  // returned message lists every failure so the caller can merge them into
+  // the apply-time error.
+  return restoreSshdPortRestartFailure(ssh, {
+    originalConfig: parameters.originalConfig,
+    serviceBootState: parameters.serviceBootState,
+    serviceUnit: parameters.serviceUnit,
+    socketState: parameters.socketState,
+  })
 }
 
 async function restartSshdOnNewPort(
@@ -723,28 +794,65 @@ async function restartSshdOnNewPort(
       snapshot: { serviceBootState, serviceUnit, socketState },
     }
   } catch (error) {
-    // R-0000283: when the restart aborted the SSH session itself, treat the
-    // disconnect as a successful restart. The runner reconnects on the new
-    // port; downstream live-verification cannot run on a dead connection.
-    if (isRestartDisconnect(error)) {
-      return {
-        kind: "disconnected",
-        snapshot: { serviceBootState, serviceUnit, socketState },
-      }
-    }
-    await recoverFromRestartFailure(ssh, {
+    return handleRestartSshdOnNewPortFailure(ssh, {
+      error,
       originalConfig,
       serviceBootState,
       serviceUnit,
       socketState,
       targetPort,
     })
-    const message = error instanceof Error ? error.message : String(error)
+  }
+}
+
+async function handleRestartSshdOnNewPortFailure(
+  ssh: SshConnection,
+  parameters: {
+    error: unknown
+    originalConfig: string
+    serviceBootState?: SshdServiceBootState
+    serviceUnit?: SshdServiceUnit
+    socketState: SshSocketState
+    targetPort: number
+  }
+): Promise<ModuleResult | SshdRestartOutcome> {
+  // R-0000283: when the restart aborted the SSH session itself, treat the
+  // disconnect as a successful restart. The runner reconnects on the new
+  // port; downstream live-verification cannot run on a dead connection.
+  if (isRestartDisconnect(parameters.error)) {
+    return {
+      kind: "disconnected",
+      snapshot: {
+        serviceBootState: parameters.serviceBootState,
+        serviceUnit: parameters.serviceUnit,
+        socketState: parameters.socketState,
+      },
+    }
+  }
+  const rollbackFailure = await recoverFromRestartFailure(ssh, {
+    originalConfig: parameters.originalConfig,
+    serviceBootState: parameters.serviceBootState,
+    serviceUnit: parameters.serviceUnit,
+    socketState: parameters.socketState,
+    targetPort: parameters.targetPort,
+  })
+  const message =
+    parameters.error instanceof Error ? parameters.error.message : String(parameters.error)
+  // R-0000628: surface a rollback failure alongside the primary restart
+  // failure instead of pretending the rollback succeeded. A nested failure
+  // (e.g. SFTP refusing the sshd_config rewrite) used to be swallowed and
+  // reported as "rolled back to previous config and port", hiding the
+  // lockout-critical state from the operator.
+  if (rollbackFailure == null) {
     return failed(
-      `[sshd.port: ${String(targetPort)}] sshd restart failed; ` +
+      `[sshd.port: ${String(parameters.targetPort)}] sshd restart failed; ` +
         `rolled back to previous config and port: ${message}`
     )
   }
+  return failed(
+    `[sshd.port: ${String(parameters.targetPort)}] sshd restart failed; ` +
+      `rollback also failed: ${rollbackFailure}: ${message}`
+  )
 }
 
 // R-0000283: poll `liveSshdPortMatches` for a short window so a slow systemd
