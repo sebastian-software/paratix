@@ -69,6 +69,39 @@ async function deleteDenyRulesForCurrentSshPort(
   return null
 }
 
+// R-0000653: lockout guard between `ufw allow ${port}` and `ufw --force
+// enable`. Re-read `ufw status` and confirm the current SSH port is
+// `allowed` according to `classifyUfwStatusTcpAccess`. A `blocked`
+// classification means a concurrent process re-inserted a contradictory
+// deny rule (or our allow did not land); fail before flipping ufw active
+// so the runner does not lock itself out. An `inactive` classification is
+// expected when the firewall is still off — the enable that follows is
+// the activating step and there is no race window with already-enforced
+// rules. An `unknown`/`null` status (transient `ufw status` failure) is
+// also treated as fail-closed because we cannot prove the rule landed.
+async function reverifyCurrentSshAllowedBeforeEnable(
+  ssh: SshConnection
+): Promise<ModuleResult | null> {
+  const { port } = ssh.getConnectionInfo()
+  if (!isValidTcpPort(port)) {
+    return failed(`[ufw.enabled] current SSH port is invalid: ${String(port)}`)
+  }
+  const status = await readUfwStatus(ssh)
+  if (status == null) {
+    return failed(
+      `[ufw.enabled] could not re-read ufw status before enable; refusing to enable ` +
+        `to avoid locking out the current SSH port ${String(port)}`
+    )
+  }
+  const access = classifyUfwStatusTcpAccess(status, port)
+  if (access === "allowed" || access === "inactive") return null
+  return failed(
+    `[ufw.enabled] re-verification before enable: current SSH port ${String(port)} ` +
+      `is not allowed (classification: ${access}); a concurrent deny rule may have ` +
+      "been inserted, refusing to enable to avoid locking the runner out"
+  )
+}
+
 async function allowCurrentSshPort(ssh: SshConnection): Promise<ModuleResult | null> {
   const { port } = ssh.getConnectionInfo()
   if (!isValidTcpPort(port)) {
@@ -185,6 +218,16 @@ export const ufw = {
         if (!ssh) return failed("[ufw.enabled] SSH connection is required")
         const allowResult = await allowCurrentSshPort(ssh)
         if (allowResult !== null) return allowResult
+        // R-0000653: a concurrent process could insert a `deny` rule for
+        // the active SSH port between the initial `ufw status` read in
+        // `allowCurrentSshPort` and the `ufw allow` that follows. ufw
+        // evaluates rules in insertion order, so a deny appended after
+        // we deleted the older ones (or before our allow) would survive
+        // `--force enable` and lock the runner out. Re-read the status
+        // and abort before enable when the SSH port is not reachable
+        // through the rule set.
+        const reverifyFailure = await reverifyCurrentSshAllowedBeforeEnable(ssh)
+        if (reverifyFailure !== null) return reverifyFailure
         // R-0000064: use the officially supported `--force` flag for
         // non-interactive enable instead of piping `y` into stdin. Mirrors
         // the call shape used by ufw.disabled.apply and avoids relying on
