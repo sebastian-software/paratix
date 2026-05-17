@@ -879,6 +879,16 @@ async function runRollbackStep(step: () => Promise<void>): Promise<string | unde
   }
 }
 
+// R-0000623: track whether the rollback path actually triggered another
+// `systemctl restart` so callers reached via the R-0000593 fresh-reconnect
+// path can warn the operator about a possible second disconnect, and so the
+// normal verification-rollback caller can keep its existing "rolled back"
+// language when no restart was needed.
+type SshdPortRollbackOutcome = {
+  error?: string
+  restarted: boolean
+}
+
 async function rollbackSshdPortAfterFailedVerification(
   ssh: SshConnection,
   parameters: {
@@ -887,12 +897,31 @@ async function rollbackSshdPortAfterFailedVerification(
     snapshot: SshdRestartSnapshot
     targetPort: number
   }
-): Promise<string | undefined> {
+): Promise<SshdPortRollbackOutcome> {
   try {
     ssh.removePort(parameters.targetPort)
   } catch {
     // ssh.removePort is in-memory bookkeeping; never block rollback.
   }
+  // R-0000557 / R-0000614 / R-0000623: see `buildSshdPortRollbackSteps` for
+  // the rationale behind the per-layer rollback ordering and the live-port
+  // probe that gates the final `systemctl restart`.
+  const steps = buildSshdPortRollbackSteps(ssh, parameters)
+  return executeSshdPortRollbackSteps(steps)
+}
+
+type SshdPortRollbackStep =
+  | { kind: "restart"; name: string; run: () => Promise<RestartRollbackResult> }
+  | { kind: "void"; name: string; run: () => Promise<void> }
+
+function buildSshdPortRollbackSteps(
+  ssh: SshConnection,
+  parameters: {
+    originalConfig: string
+    originalPort: number
+    snapshot: SshdRestartSnapshot
+  }
+): SshdPortRollbackStep[] {
   // R-0000557: `restartSshdOnNewPort` has already mutated `ssh.socket`
   // (disabled it) and may have flipped the service unit's boot state. The
   // post-restart verification rollback must restore both, otherwise a host
@@ -901,15 +930,18 @@ async function rollbackSshdPortAfterFailedVerification(
   // used by `recoverFromRestartFailure` so all three rollback layers
   // (sshd_config, socket-state, service-boot-state) land before we kick the
   // service.
-  // R-0000614: previously the loop short-circuited on the first failing step,
-  // so a transient sshd_config write failure prevented the socket-state and
-  // service-boot-state rollback as well as the service restart from running.
-  // That left socket-activated hosts in a reboot-time lockout state because
-  // ssh.socket stayed disabled. The loop now runs every step, accumulates the
-  // failures, and surfaces the first failure as the primary error with the
-  // later failures attached as annexed messages.
-  const steps: Array<{ name: string; run: () => Promise<void> }> = [
+  // R-0000623: the final restart step now consults the live socket first and
+  // only fires when sshd is actually drifted away from `originalPort`. When
+  // sshd already listens on `originalPort` (e.g. because the previous restart
+  // already settled, or because `restartSshdOnNewPort` never managed to swap
+  // the port in the first place), another `systemctl restart` would re-kill
+  // the freshly recovered SSH session for no functional benefit. The
+  // "restart" step communicates whether the restart actually fired through a
+  // dedicated `RestartRollbackResult` so callers can warn the operator about
+  // the second session teardown on the R-0000593 reconnect path.
+  return [
     {
+      kind: "void",
       name: "sshd_config rewrite",
       async run() {
         await ssh.writeFile(SSHD_CONFIG_PATH, parameters.originalConfig, {
@@ -918,39 +950,131 @@ async function rollbackSshdPortAfterFailedVerification(
       },
     },
     {
+      kind: "void",
       name: "service boot-state restore",
       async run() {
         await restoreSshServiceBootState(ssh, parameters.snapshot.serviceBootState)
       },
     },
     {
+      kind: "void",
       name: "socket activation restore",
       async run() {
         await restoreSocketActivatedSsh(ssh, parameters.snapshot.socketState)
       },
     },
     {
+      kind: "restart",
       name: "ssh service restart",
       async run() {
-        const serviceUnit = parameters.snapshot.serviceUnit ?? (await resolveSshServiceUnit(ssh))
-        await ssh.exec(`${SYSTEMCTL} restart ${serviceUnit}`, {
-          ignoreExitCode: true,
-          silent: true,
+        return restartSshdIfNotAlreadyOnOriginalPort(ssh, {
+          originalPort: parameters.originalPort,
+          serviceUnit: parameters.snapshot.serviceUnit,
         })
       },
     },
   ]
+}
+
+// R-0000614: run every rollback step even if an earlier step failed, so a
+// transient sshd_config write failure cannot prevent the socket-state and
+// service-boot-state rollback (or the gated service restart) from running.
+// Accumulate failures and surface the first failure as the primary error,
+// with any subsequent failures attached as annexed messages.
+async function executeSshdPortRollbackSteps(
+  steps: readonly SshdPortRollbackStep[]
+): Promise<SshdPortRollbackOutcome> {
+  let restartedDuringRollback = false
   const failures: Array<{ message: string; name: string }> = []
   for (const step of steps) {
-    // eslint-disable-next-line no-await-in-loop -- restore steps must run sequentially so each layer rolls back before the next.
-    const failure = await runRollbackStep(step.run)
-    if (failure !== undefined) failures.push({ message: failure, name: step.name })
+    if (step.kind === "void") {
+      // eslint-disable-next-line no-await-in-loop -- restore steps must run sequentially so each layer rolls back before the next.
+      const failure = await runRollbackStep(step.run)
+      if (failure !== undefined) failures.push({ message: failure, name: step.name })
+      continue
+    }
+    // eslint-disable-next-line no-await-in-loop -- restart step must observe the prior layers landing.
+    const outcome = await runRestartRollbackStep(step.run)
+    if (outcome.failure !== undefined) {
+      failures.push({ message: outcome.failure, name: step.name })
+    }
+    if (outcome.restarted) restartedDuringRollback = true
   }
-  if (failures.length === 0) return undefined
+  return formatSshdPortRollbackOutcome(failures, restartedDuringRollback)
+}
+
+function formatSshdPortRollbackOutcome(
+  failures: ReadonlyArray<{ message: string; name: string }>,
+  restartedDuringRollback: boolean
+): SshdPortRollbackOutcome {
+  if (failures.length === 0) return { restarted: restartedDuringRollback }
   const formatted = failures.map((entry) => `${entry.name} failed: ${entry.message}`)
-  if (formatted.length === 1) return formatted[0]
+  if (formatted.length === 1) {
+    return { error: formatted[0], restarted: restartedDuringRollback }
+  }
   const [primary, ...secondaries] = formatted
-  return `${primary}; further failures: ${secondaries.join("; ")}`
+  return {
+    error: `${primary}; further failures: ${secondaries.join("; ")}`,
+    restarted: restartedDuringRollback,
+  }
+}
+
+// R-0000623: structured outcome of the rollback restart step. `restarted`
+// signals whether `systemctl restart` actually fired; callers use it to warn
+// the operator about a possible second SSH disconnect on the recovered
+// session.
+type RestartRollbackResult = { restarted: boolean }
+
+async function runRestartRollbackStep(
+  step: () => Promise<RestartRollbackResult>
+): Promise<{ failure?: string; restarted: boolean }> {
+  try {
+    const result = await step()
+    return { restarted: result.restarted }
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error)
+    return { failure: message, restarted: false }
+  }
+}
+
+// R-0000623: probe whether sshd is already listening on `originalPort` and
+// skip the rollback restart in that case. Issuing another `systemctl restart`
+// when sshd already serves the original port costs us another SSH session
+// teardown (the runner reconnected after the previous restart) without
+// changing the daemon state. `liveSshdPortMatches` may throw on a hard `ss`
+// failure (binary missing, permission denied); in that case we conservatively
+// fall back to the restart so the rollback still converges.
+async function restartSshdIfNotAlreadyOnOriginalPort(
+  ssh: SshConnection,
+  parameters: {
+    originalPort: number
+    serviceUnit?: SshdServiceUnit
+  }
+): Promise<RestartRollbackResult> {
+  const alreadyOnOriginalPort = await probeAlreadyOnOriginalPortBestEffort(
+    ssh,
+    parameters.originalPort
+  )
+  if (alreadyOnOriginalPort) return { restarted: false }
+  const serviceUnit = parameters.serviceUnit ?? (await resolveSshServiceUnit(ssh))
+  await ssh.exec(`${SYSTEMCTL} restart ${serviceUnit}`, {
+    ignoreExitCode: true,
+    silent: true,
+  })
+  return { restarted: true }
+}
+
+async function probeAlreadyOnOriginalPortBestEffort(
+  ssh: SshConnection,
+  originalPort: number
+): Promise<boolean> {
+  try {
+    return await liveSshdPortMatches(ssh, originalPort)
+  } catch {
+    // Best-effort probe; on hard ss failures fall through to the restart so
+    // the rollback path still drives sshd back to the rolled-back config.
+    return false
+  }
 }
 
 // R-0000586: known remote-mutation side-effects of the apply-time variant
@@ -1289,7 +1413,7 @@ async function verifyLiveSshdPortOrRollback(
   const verifyOutcome = await waitForLiveSshdPort(ssh, parameters.targetPort)
   if (verifyOutcome.kind === WAIT_FOR_LIVE_PORT_MATCHED_KIND) return undefined
 
-  const rollbackError = await rollbackSshdPortAfterFailedVerification(ssh, parameters)
+  const rollbackOutcome = await rollbackSshdPortAfterFailedVerification(ssh, parameters)
   // R-0000609: a hard `ss` failure (binary missing, permission denied) must
   // surface its own diagnostic so the operator sees the actionable error,
   // not the generic "no listener after Xms" message that hides the real
@@ -1300,10 +1424,10 @@ async function verifyLiveSshdPortOrRollback(
         "could not be evaluated"
       : `[sshd.port: ${String(parameters.targetPort)}] sshd restart succeeded but no listener ` +
         `on port ${String(parameters.targetPort)} after ${String(LIVE_VERIFY_TIMEOUT_MS)}ms`
-  if (rollbackError == null) {
+  if (rollbackOutcome.error == null) {
     return failed(`${baseMessage}; rolled back to previous config and port`)
   }
-  return failed(`${baseMessage}; rollback also failed: ${rollbackError}`)
+  return failed(`${baseMessage}; rollback also failed: ${rollbackOutcome.error}`)
 }
 
 async function restartAndVerifySshdPort(
@@ -1403,16 +1527,29 @@ async function recoverFromReconnectFailureAfterDisconnect(
         `also failed: ${fallbackReconnectError}; ${staleLockHint}`
     )
   }
-  const rollbackError = await rollbackSshdPortAfterFailedVerification(ssh, {
+  const rollbackOutcome = await rollbackSshdPortAfterFailedVerification(ssh, {
     originalConfig: parameters.originalConfig,
     originalPort: parameters.originalPort,
     snapshot: parameters.snapshot,
     targetPort: parameters.targetPort,
   })
-  if (rollbackError == null) {
-    return failed(`${baseMessage}; rolled back to previous config and port`)
+  // R-0000623: the rollback path ends with `systemctl restart` when sshd is
+  // not already on `originalPort`. On the R-0000593 fresh-reconnect branch
+  // that restart may disconnect the just-recovered session a second time.
+  // Surface that risk in the operator-facing message rather than dressing the
+  // outcome up as a clean "rolled back" status. When the rollback skipped the
+  // restart (sshd was already on `originalPort`), the message stays the
+  // historic "rolled back to previous config and port" wording.
+  const disconnectWarning = rollbackOutcome.restarted
+    ? " (rollback issued a second sshd restart from the recovered session; the SSH session " +
+      "may disconnect again — reconnect manually on the original port if it does)"
+    : ""
+  if (rollbackOutcome.error == null) {
+    return failed(`${baseMessage}; rolled back to previous config and port${disconnectWarning}`)
   }
-  return failed(`${baseMessage}; rollback also failed: ${rollbackError}`)
+  return failed(
+    `${baseMessage}; rollback also failed: ${rollbackOutcome.error}${disconnectWarning}`
+  )
 }
 
 function isSshdRestartOutcome(
