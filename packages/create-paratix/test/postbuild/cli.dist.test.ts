@@ -116,7 +116,7 @@ describe("dist CLI", () => {
           'import { scaffoldProject, type ScaffoldOptions } from "create-paratix"',
           "",
           "const options: ScaffoldOptions = { installer: () => true }",
-          'const didScaffold: boolean = scaffoldProject("typed-consumer-project", { command: "pnpm", name: "pnpm" }, options)',
+          'const didScaffold: boolean = scaffoldProject("typed-consumer-project", { command: { args: ["install"], executable: "pnpm" }, name: "pnpm" }, options)',
           "void didScaffold",
           "",
         ].join("\n")

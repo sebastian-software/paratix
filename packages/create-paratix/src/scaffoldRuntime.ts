@@ -1,42 +1,90 @@
-import { execSync } from "node:child_process"
+import { spawnSync } from "node:child_process"
 
 const MS_PER_MINUTE = 60_000
 const INSTALL_TIMEOUT_MS = 120_000
 
-export type PackageManager = { command: string; name: string }
+// R-0000663: model the install command as `{ executable, args }` so the
+// caller can invoke `spawnSync` with `shell: false` and an argv array
+// instead of feeding a single string through `execSync`. The previous
+// `execSync("pnpm install", …)` shape resolves the command through
+// `/bin/sh -c`, which would interpret shell metacharacters in any
+// dynamically constructed command — a hidden shell-injection hazard if
+// future code paths ever derived the executable or its arguments from
+// user input. Splitting the command and forcing `shell: false` removes
+// the `/bin/sh -c` step entirely so no shell parsing can be reintroduced
+// by accident.
+export type PackageManagerCommand = {
+  args: readonly string[]
+  executable: string
+}
+
+export type PackageManager = {
+  command: PackageManagerCommand
+  name: string
+}
+
+const PNPM_INSTALL: PackageManagerCommand = { args: ["install"], executable: "pnpm" }
+const YARN_INSTALL: PackageManagerCommand = { args: ["install"], executable: "yarn" }
+const BUN_INSTALL: PackageManagerCommand = { args: ["install"], executable: "bun" }
+const NPM_INSTALL: PackageManagerCommand = { args: ["install"], executable: "npm" }
 
 export function detectPackageManager(): PackageManager {
   const agent = process.env.npm_config_user_agent ?? ""
 
   if (agent.startsWith("pnpm")) {
-    return { command: "pnpm install", name: "pnpm" }
+    return { command: PNPM_INSTALL, name: "pnpm" }
   }
   if (agent.startsWith("yarn")) {
-    return { command: "yarn install", name: "yarn" }
+    return { command: YARN_INSTALL, name: "yarn" }
   }
   if (agent.startsWith("bun")) {
-    return { command: "bun install", name: "bun" }
+    return { command: BUN_INSTALL, name: "bun" }
   }
-  return { command: "npm install", name: "npm" }
+  return { command: NPM_INSTALL, name: "npm" }
+}
+
+const RUN_INSTALL_MANUALLY_HINT = "Run install manually."
+
+function reportInstallFailure(message: string): false {
+  console.error(`Failed to install dependencies: ${message}`)
+  console.error(RUN_INSTALL_MANUALLY_HINT)
+  return false
+}
+
+function reportInstallTimeout(): false {
+  console.error(
+    `Installation timed out after ${Math.round(INSTALL_TIMEOUT_MS / MS_PER_MINUTE)} minutes.`
+  )
+  console.error(RUN_INSTALL_MANUALLY_HINT)
+  return false
 }
 
 export function installDependencies(projectDirectory: string, pm: PackageManager): boolean {
   console.log(`Installing dependencies with ${pm.name}...`)
-  try {
-    execSync(pm.command, { cwd: projectDirectory, stdio: "inherit", timeout: INSTALL_TIMEOUT_MS })
-    return true
-  } catch (error) {
-    if (error instanceof Error && "signal" in error && error.signal === "SIGTERM") {
-      console.error(
-        `Installation timed out after ${Math.round(INSTALL_TIMEOUT_MS / MS_PER_MINUTE)} minutes.`
-      )
-    } else {
-      const message = error instanceof Error ? error.message : String(error)
-      console.error(`Failed to install dependencies: ${message}`)
-    }
-    console.error("Run install manually.")
-    return false
+  // R-0000663: `shell: false` is the load-bearing flag — it pins
+  // `spawnSync` to the direct-exec path so the executable and its
+  // arguments are never re-parsed by `/bin/sh`. The argv array is
+  // forwarded verbatim to the OS-level spawn primitive.
+  const result = spawnSync(pm.command.executable, [...pm.command.args], {
+    cwd: projectDirectory,
+    shell: false,
+    stdio: "inherit",
+    timeout: INSTALL_TIMEOUT_MS,
+  })
+  if (result.error) {
+    return reportInstallFailure(
+      result.error instanceof Error ? result.error.message : String(result.error)
+    )
   }
+  if (result.signal === "SIGTERM") {
+    return reportInstallTimeout()
+  }
+  if (result.status !== 0) {
+    return reportInstallFailure(
+      `${pm.command.executable} exited with status ${String(result.status)}`
+    )
+  }
+  return true
 }
 
 function getCommandPrefix(pm: PackageManager): string {

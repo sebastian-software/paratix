@@ -58,7 +58,7 @@ describe("scaffoldProject", () => {
 
     const result = scaffoldProject(
       projectName,
-      { command: "pnpm install", name: "pnpm" },
+      { command: { args: ["install"], executable: "pnpm" }, name: "pnpm" },
       {
         adminPublicKey: TEST_ADMIN_PUBLIC_KEY,
         host: "example.com",
@@ -69,7 +69,7 @@ describe("scaffoldProject", () => {
 
     expect(result).toBe(true)
     expect(installer).toHaveBeenCalledWith(projectDirectory, {
-      command: "pnpm install",
+      command: { args: ["install"], executable: "pnpm" },
       name: "pnpm",
     })
     expect(console.log).toHaveBeenCalledWith(`Creating Paratix project in ${projectDirectory}...`)
@@ -91,7 +91,7 @@ describe("scaffoldProject", () => {
 
     const result = scaffoldProject(
       projectName,
-      { command: "pnpm install", name: "pnpm" },
+      { command: { args: ["install"], executable: "pnpm" }, name: "pnpm" },
       { host: "deploy.example.com", initialUser: { kind: "admin", user: "deploy" }, installer }
     )
 
@@ -114,7 +114,7 @@ describe("scaffoldProject", () => {
 
     scaffoldProject(
       projectName,
-      { command: "npm install", name: "npm" },
+      { command: { args: ["install"], executable: "npm" }, name: "npm" },
       {
         host: "example.com",
         installer,
@@ -132,7 +132,7 @@ describe("scaffoldProject", () => {
 
     scaffoldProject(
       projectName,
-      { command: "pnpm install", name: "pnpm" },
+      { command: { args: ["install"], executable: "pnpm" }, name: "pnpm" },
       {
         host: "example.com",
         installer,
@@ -164,7 +164,7 @@ describe("scaffoldProject", () => {
     expect(() => {
       scaffoldProject(
         missingKeyProjectName,
-        { command: "pnpm install", name: "pnpm" },
+        { command: { args: ["install"], executable: "pnpm" }, name: "pnpm" },
         { host: "example.com", initialUser: { kind: "root" }, installer }
       )
     }).toThrow(/Root bootstrap requires --admin-public-key or --admin-public-key-file/v)
@@ -182,7 +182,7 @@ describe("scaffoldProject", () => {
     expect(() => {
       scaffoldProject(
         invalidHostProjectName,
-        { command: "pnpm install", name: "pnpm" },
+        { command: { args: ["install"], executable: "pnpm" }, name: "pnpm" },
         {
           host: "bad host",
           initialUser: { kind: "admin", user: "deploy" },
@@ -203,7 +203,7 @@ describe("scaffoldProject", () => {
     expect(() => {
       scaffoldProject(
         invalidAdminKeyProjectName,
-        { command: "pnpm install", name: "pnpm" },
+        { command: { args: ["install"], executable: "pnpm" }, name: "pnpm" },
         {
           adminPublicKey: "invalid-key",
           host: "example.com",
@@ -225,7 +225,7 @@ describe("scaffoldProject", () => {
     expect(() => {
       scaffoldProject(
         invalidFingerprintProjectName,
-        { command: "pnpm install", name: "pnpm" },
+        { command: { args: ["install"], executable: "pnpm" }, name: "pnpm" },
         {
           expectedHostFingerprint: "SHA256:trusted-host-fingerprint",
           host: "example.com",
@@ -247,7 +247,7 @@ describe("scaffoldProject", () => {
     expect(() => {
       scaffoldProject(
         missingKeyProjectName,
-        { command: "pnpm install", name: "pnpm" },
+        { command: { args: ["install"], executable: "pnpm" }, name: "pnpm" },
         {
           host: "example.com",
           initialUser: { kind: "admin", user: "Deploy" },
@@ -275,7 +275,7 @@ describe("scaffoldProject", () => {
     await expectProcessExit(() => {
       scaffoldProject(
         projectName,
-        { command: "pnpm install", name: "pnpm" },
+        { command: { args: ["install"], executable: "pnpm" }, name: "pnpm" },
         {
           adminPublicKey: TEST_ADMIN_PUBLIC_KEY,
           host: "example.com",
@@ -297,7 +297,7 @@ describe("scaffoldProject", () => {
     await expectProcessExit(() => {
       scaffoldProject(
         "../create-paratix-invalid",
-        { command: "pnpm install", name: "pnpm" },
+        { command: { args: ["install"], executable: "pnpm" }, name: "pnpm" },
         {
           host: "example.com",
           installer,
@@ -323,7 +323,7 @@ describe("scaffoldProject", () => {
     await expectProcessExit(() => {
       scaffoldProject(
         "",
-        { command: "pnpm install", name: "pnpm" },
+        { command: { args: ["install"], executable: "pnpm" }, name: "pnpm" },
         { host: "example.com", installer }
       )
     })
@@ -337,7 +337,7 @@ describe("scaffoldProject", () => {
 
     const result = scaffoldProject(
       paddedProjectName,
-      { command: "pnpm install", name: "pnpm" },
+      { command: { args: ["install"], executable: "pnpm" }, name: "pnpm" },
       { host: "example.com", installer }
     )
 
