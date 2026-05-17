@@ -2,8 +2,11 @@ import { posix as posixPath } from "node:path"
 
 import { failed, failedCommand } from "../moduleFailure.js"
 import { shellQuote, validateMode } from "../ssh.js"
-import { guardedWriteFile, type ModuleResult, type SshConnection } from "../types.js"
-import { withMutexLock } from "./moduleHelpers.js"
+import type { ModuleResult, SshConnection } from "../types.js"
+import type {
+  NormalizedSwapFileOptions,
+  SwapFilePathClassification,
+} from "./swapFileTypes.js"
 
 export {
   cleanupSwapTemporaryFile,
@@ -11,11 +14,14 @@ export {
   ensureSwapFilePresent,
   publishInitializedSwapTemporaryFile,
 } from "./swapFileCreateHelpers.js"
+export {
+  ensureSwapFstabState,
+  hasNoSwapFstabEntry,
+  hasSwapFstabEntry,
+} from "./swapFstabHelpers.js"
+export type { NormalizedSwapFileOptions, SwapFilePathClassification } from "./swapFileTypes.js"
 
 const EXEC_OPTS = { ignoreExitCode: true, silent: true } as const
-const FSTAB_PATH = "/etc/fstab"
-const FSTAB_MODE = "0644"
-const FSTAB_FILE_MUTEX = "etc-fstab-mutex"
 const KIBI = 1024
 const POWER_0 = 0
 const POWER_1 = 1
@@ -37,20 +43,6 @@ const MAX_SWAP_PRIORITY = 32_767
 function isSizeUnit(unit: string): unit is keyof typeof SIZE_POWERS {
   return Object.hasOwn(SIZE_POWERS, unit)
 }
-
-export type NormalizedSwapFileOptions = {
-  expectedFstabLine: null | string
-  mode: string
-  path: string
-  sizeBytes: number
-  sizeForCommand: string
-  state: "absent" | "present"
-}
-
-export type SwapFilePathClassification =
-  | { reason: string; state: "unsafe" }
-  | { state: "managed-swap-file" }
-  | { state: "missing" }
 
 function parseSizeString(size: string): { unit: keyof typeof SIZE_POWERS; value: string } {
   const match = /^(?<value>\d+)(?<unit>[KMGTP]?)$/iv.exec(size.trim())
@@ -136,48 +128,6 @@ function validateSwapFileState(state: unknown): asserts state is "absent" | "pre
   }
 }
 
-function findFstabEntry(fstabContent: string, path: string): null | string {
-  for (const line of fstabContent.split("\n")) {
-    const trimmed = line.trim()
-    if (trimmed === "" || trimmed.startsWith("#")) continue
-    const fields = trimmed.split(/\s+/v)
-    if (fields[0] === path) return trimmed
-  }
-  return null
-}
-
-function upsertFstabEntry(fstabContent: string, path: string, newLine: string): string {
-  const lines = fstabContent.split("\n")
-  const index = lines.findIndex((line) => {
-    const trimmed = line.trim()
-    if (trimmed === "" || trimmed.startsWith("#")) return false
-    const fields = trimmed.split(/\s+/v)
-    return fields[0] === path
-  })
-
-  if (index === -1) {
-    while (lines.length > 0 && lines.at(-1)?.trim() === "") {
-      lines.pop()
-    }
-    lines.push(newLine)
-  } else {
-    lines[index] = newLine
-  }
-
-  return `${lines.join("\n")}\n`
-}
-
-function removeFstabEntry(fstabContent: string, path: string): string {
-  const lines = fstabContent.split("\n")
-  const result = lines.filter((line) => {
-    const trimmed = line.trim()
-    if (trimmed === "" || trimmed.startsWith("#")) return true
-    const fields = trimmed.split(/\s+/v)
-    return fields[0] !== path
-  })
-  return `${result.join("\n")}\n`
-}
-
 export async function isSwapActive(ssh: SshConnection, path: string): Promise<boolean> {
   const activeSwaps = await ssh.lines("swapon --show=NAME --noheadings")
   return activeSwaps.some((line) => line.trim() === path)
@@ -227,51 +177,6 @@ export async function classifySwapFilePath(
   return { state: "managed-swap-file" }
 }
 
-export async function ensureSwapFstabState(parameters: {
-  desiredLine: null | string
-  path: string
-  ssh: SshConnection
-}): Promise<boolean | ModuleResult> {
-  try {
-    return await withMutexLock(parameters.ssh, {
-      lockName: FSTAB_FILE_MUTEX,
-      async section() {
-        const fstabContent = await parameters.ssh.readFile(FSTAB_PATH)
-        const currentEntry = findFstabEntry(fstabContent, parameters.path)
-
-        if (parameters.desiredLine == null) {
-          if (currentEntry == null) return false
-          const removedContent = removeFstabEntry(fstabContent, parameters.path)
-          await guardedWriteFile(parameters.ssh, {
-            mode: FSTAB_MODE,
-            newContent: removedContent,
-            originalContent: fstabContent,
-            remotePath: FSTAB_PATH,
-          })
-          return true
-        }
-
-        if (currentEntry === parameters.desiredLine) return false
-        const updatedContent = upsertFstabEntry(
-          fstabContent,
-          parameters.path,
-          parameters.desiredLine
-        )
-        await guardedWriteFile(parameters.ssh, {
-          mode: FSTAB_MODE,
-          newContent: updatedContent,
-          originalContent: fstabContent,
-          remotePath: FSTAB_PATH,
-        })
-        return true
-      },
-    })
-  } catch (error) {
-    const reason = error instanceof Error ? error.message : String(error)
-    return failed(`[swap.file: ${parameters.path}] failed to update ${FSTAB_PATH}: ${reason}`)
-  }
-}
-
 export function normalizeSwapFileOptions(options: {
   mode?: string
   path: string
@@ -310,44 +215,6 @@ export async function needsSwapRecreation(
   if (typeof sizeResult !== "number") return sizeResult
   if (sizeResult !== options.sizeBytes) return true
   return !(await hasSwapSignature(ssh, options.path))
-}
-
-// R-0000495: read /etc/fstab under the same mutex that protects writes so
-// concurrent runs never observe a partially written file.
-// R-0000648: surface read failures as a structured ModuleResult instead of
-// letting the underlying `ssh.readFile` reject. The withMutexLock wrapper
-// still owns lock acquisition/release; only the inner readFile is allowed
-// to fail soft via try/catch so the lock is always released.
-async function readFstabUnderLock(ssh: SshConnection): Promise<ModuleResult | string> {
-  return withMutexLock(ssh, {
-    lockName: FSTAB_FILE_MUTEX,
-    section: async () => {
-      try {
-        return await ssh.readFile(FSTAB_PATH)
-      } catch (error) {
-        const reason = error instanceof Error ? error.message : String(error)
-        return failed(`[swap.file] failed to read ${FSTAB_PATH}: ${reason}`)
-      }
-    },
-  })
-}
-
-export async function hasSwapFstabEntry(
-  ssh: SshConnection,
-  options: NormalizedSwapFileOptions
-): Promise<boolean | ModuleResult> {
-  const fstab = await readFstabUnderLock(ssh)
-  if (typeof fstab !== "string") return fstab
-  return findFstabEntry(fstab, options.path) === options.expectedFstabLine
-}
-
-export async function hasNoSwapFstabEntry(
-  ssh: SshConnection,
-  path: string
-): Promise<boolean | ModuleResult> {
-  const fstab = await readFstabUnderLock(ssh)
-  if (typeof fstab !== "string") return fstab
-  return findFstabEntry(fstab, path) == null
 }
 
 function normalizeMode(mode: string): string {
