@@ -4,6 +4,8 @@
   "import": ["@cspell/dict-de-de/cspell-ext.json"],
   "words": [
     "alice",
+    "artefact",
+    "artefacts",
     "autoremove",
     "authfile",
     "badname",
@@ -69,6 +71,8 @@
     "mmin",
     "mpint",
     "mountpoint",
+    "mtime",
+    "mtimes",
     "myblock",
     "mytoken",
     "nameserver",

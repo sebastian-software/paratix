@@ -1,6 +1,6 @@
 import { execFile, spawn } from "node:child_process"
 import { realpathSync } from "node:fs"
-import { readFile } from "node:fs/promises"
+import { readdir, readFile, stat } from "node:fs/promises"
 import { join } from "node:path"
 import { fileURLToPath } from "node:url"
 import { promisify } from "node:util"
@@ -46,8 +46,18 @@ async function readPackageJson(directory, fs = { readFile }) {
     throw new Error(`${directory}/package.json must contain a package name and version.`)
   }
 
+  // R-0000661: capture the `files` allowlist so the publish prelude can
+  // confirm every artefact npm would ship actually exists and is at least
+  // as fresh as the source tree. The `files` field is optional in npm but
+  // mandatory for our workspace packages — an empty/missing list would
+  // publish a tarball without any dist artefacts at all.
+  const files = Array.isArray(packageJson.files)
+    ? packageJson.files.filter((value) => typeof value === "string")
+    : []
+
   return {
     directory,
+    files,
     name: packageJson.name,
     version: packageJson.version,
   }
@@ -129,6 +139,94 @@ function publishDistributionTag(version) {
   return hasPrereleaseSuffix(version) ? "next" : "latest"
 }
 
+// R-0000661: maximum mtime captured under `directory`. Walking the tree
+// (rather than stat-ing the directory itself) is necessary because
+// directory mtimes only change when entries are added/removed, not when
+// the contents of existing files are edited. The recursion follows
+// regular files only and skips symlinks so a malicious symlink under
+// the directory cannot stat its target and lift the dist freshness bar.
+async function maxMtimeMillisecondsUnder(directory, filesystem) {
+  const entries = await filesystem.readdir(directory, { withFileTypes: true })
+  const childMtimes = await Promise.all(
+    entries.map(async (entry) => {
+      if (entry.isSymbolicLink()) return 0
+      const entryPath = join(directory, entry.name)
+      if (entry.isDirectory()) {
+        // Recurse so deep edits (e.g. `src/modules/<module>.ts`) are visible.
+        return maxMtimeMillisecondsUnder(entryPath, filesystem)
+      }
+      if (!entry.isFile()) return 0
+      const stats = await filesystem.stat(entryPath)
+      return stats.mtimeMs
+    })
+  )
+  return childMtimes.reduce((max, mtime) => (mtime > max ? mtime : max), 0)
+}
+
+async function mtimeMillisecondsForFileEntry(directory, fileEntry, filesystem) {
+  const absolutePath = join(directory, fileEntry)
+  const stats = await filesystem.stat(absolutePath)
+  if (stats.isDirectory()) {
+    return maxMtimeMillisecondsUnder(absolutePath, filesystem)
+  }
+  return stats.mtimeMs
+}
+
+// R-0000661: lift the most recent mtime across every entry referenced by
+// `files`. Treats directories like `src/` does — walking the tree so the
+// freshness signal reflects file edits, not directory churn.
+async function maxMtimeMillisecondsForFiles(directory, files, filesystem) {
+  const fileMtimes = await Promise.all(
+    files.map((fileEntry) => mtimeMillisecondsForFileEntry(directory, fileEntry, filesystem))
+  )
+  return fileMtimes.reduce((max, mtime) => (mtime > max ? mtime : max), 0)
+}
+
+async function ensureFilesEntryExists(packageInfo, fileEntry, filesystem) {
+  const absolutePath = join(packageInfo.directory, fileEntry)
+  try {
+    await filesystem.stat(absolutePath)
+  } catch (error) {
+    if (error?.code === "ENOENT") {
+      throw new Error(
+        `${packageInfo.name}: ${fileEntry} referenced by package.json#files is missing under ${packageInfo.directory}. Run the build before publishing.`,
+        { cause: error }
+      )
+    }
+    throw error
+  }
+}
+
+// R-0000661: confirm every artefact npm would ship actually exists and is
+// at least as fresh as the source tree before pnpm publish runs. Without
+// this guard a skipped build would publish empty or stale dist files under
+// `--provenance`, which cannot easily be retracted from the registry once
+// the manifest is signed.
+async function verifyDistributionArtefacts(packageInfo, filesystem) {
+  if (packageInfo.files.length === 0) {
+    throw new Error(
+      `${packageInfo.directory}/package.json must declare a "files" allowlist before publish.`
+    )
+  }
+
+  await Promise.all(
+    packageInfo.files.map((fileEntry) => ensureFilesEntryExists(packageInfo, fileEntry, filesystem))
+  )
+
+  const sourceDirectory = join(packageInfo.directory, "src")
+  const sourceMtime = await maxMtimeMillisecondsUnder(sourceDirectory, filesystem)
+  const filesMtime = await maxMtimeMillisecondsForFiles(
+    packageInfo.directory,
+    packageInfo.files,
+    filesystem
+  )
+  if (filesMtime < sourceMtime) {
+    throw new Error(
+      `${packageInfo.name}: package.json#files mtime (${new Date(filesMtime).toISOString()}) is older than ${packageInfo.directory}/src mtime (${new Date(sourceMtime).toISOString()}). Run the build before publishing.`
+    )
+  }
+}
+
 async function publishPackage(packageInfo, commandRunner) {
   if (await isPublished(packageInfo.name, packageInfo.version, commandRunner)) {
     console.log(
@@ -193,10 +291,18 @@ export async function publishWorkspacePackages({
         })
       }),
   },
-  fs = { readFile },
+  fs = { readdir, readFile, stat },
+  filesystem = fs,
 } = {}) {
   const [paratixPackage, createParatixPackage] = await readWorkspacePackages(fs)
   validateWorkspacePackages([paratixPackage, createParatixPackage])
+
+  // R-0000661: verify every package's dist artefacts before issuing the
+  // first pnpm publish. Splitting the verification out of `publishPackage`
+  // keeps the abort point well before any registry side effects so a
+  // missing or stale artefact never produces a half-published workspace.
+  await verifyDistributionArtefacts(paratixPackage, filesystem)
+  await verifyDistributionArtefacts(createParatixPackage, filesystem)
 
   if (
     (await isPublished(createParatixPackage.name, createParatixPackage.version, commandRunner)) &&

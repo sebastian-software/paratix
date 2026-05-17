@@ -12,21 +12,88 @@ const BOTH_PACKAGE_SPECIFIERS = [CREATE_PARATIX_SPECIFIER, PARATIX_SPECIFIER]
 const BETA_PRERELEASE_VERSION = `${DEFAULT_STABLE_VERSION}-beta.1`
 const STABLE_BUILD_METADATA_VERSION = `${DEFAULT_STABLE_VERSION}+build.5`
 
+// R-0000661: the publish flow now reads package.json#files and verifies
+// that each entry exists with an mtime newer than the src/ tree. Default
+// the in-memory mock filesystem to a healthy state (dist + llm-guide.md
+// for paratix, dist for create-paratix, both freshly built) so existing
+// tests do not need to wire the new probes; tests that exercise the
+// freshness/missing-artefact branches override these defaults via
+// `createFs({ paratixFiles, createParatixFiles, mtimes })`.
+const FRESH_DIST_MTIME = 2_000
+const STALE_SOURCE_MTIME = 1_000
+const DEFAULT_PARATIX_FILES = ["dist", "llm-guide.md"]
+const DEFAULT_CREATE_PARATIX_FILES = ["dist"]
+
 function createFs({
+  createParatixFiles = DEFAULT_CREATE_PARATIX_FILES,
   createParatixVersion = DEFAULT_STABLE_VERSION,
+  mtimes: mtimeOverrides = {},
+  paratixFiles = DEFAULT_PARATIX_FILES,
   paratixVersion = DEFAULT_STABLE_VERSION,
 } = {}) {
+  const defaultMtimes = {
+    "packages/create-paratix/dist": FRESH_DIST_MTIME,
+    "packages/create-paratix/dist/index.js": FRESH_DIST_MTIME,
+    "packages/create-paratix/src": STALE_SOURCE_MTIME,
+    "packages/create-paratix/src/index.ts": STALE_SOURCE_MTIME,
+    "packages/paratix/dist": FRESH_DIST_MTIME,
+    "packages/paratix/dist/index.js": FRESH_DIST_MTIME,
+    "packages/paratix/llm-guide.md": FRESH_DIST_MTIME,
+    "packages/paratix/src": STALE_SOURCE_MTIME,
+    "packages/paratix/src/index.ts": STALE_SOURCE_MTIME,
+  }
+  const mtimes = { ...defaultMtimes, ...mtimeOverrides }
+  const directories = {
+    "packages/create-paratix/dist": ["index.js"],
+    "packages/create-paratix/src": ["index.ts"],
+    "packages/paratix/dist": ["index.js"],
+    "packages/paratix/src": ["index.ts"],
+  }
   return {
+    async readdir(path, options) {
+      const entries = directories[path]
+      if (!entries) {
+        throw Object.assign(new Error(`ENOENT readdir ${path}`), { code: "ENOENT" })
+      }
+      if (options?.withFileTypes !== true) return [...entries]
+      return entries.map((name) => ({
+        isDirectory: () => false,
+        isFile: () => true,
+        isSymbolicLink: () => false,
+        name,
+      }))
+    },
     async readFile(path) {
       if (path === "packages/paratix/package.json") {
-        return JSON.stringify({ name: "paratix", version: paratixVersion })
+        return JSON.stringify({
+          files: paratixFiles,
+          name: PARATIX_NAME,
+          version: paratixVersion,
+        })
       }
 
       if (path === "packages/create-paratix/package.json") {
-        return JSON.stringify({ name: CREATE_PARATIX_NAME, version: createParatixVersion })
+        return JSON.stringify({
+          files: createParatixFiles,
+          name: CREATE_PARATIX_NAME,
+          version: createParatixVersion,
+        })
       }
 
       throw new Error(`Unexpected path: ${path}`)
+    },
+    async stat(path) {
+      const mtime = mtimes[path]
+      if (mtime === undefined) {
+        throw Object.assign(new Error(`ENOENT stat ${path}`), { code: "ENOENT" })
+      }
+      const isDirectory = directories[path] !== undefined
+      return {
+        isDirectory: () => isDirectory,
+        isFile: () => !isDirectory,
+        isSymbolicLink: () => false,
+        mtimeMs: mtime,
+      }
     },
   }
 }
@@ -189,6 +256,71 @@ describe("publishWorkspacePackages", () => {
       expectedTag: "latest",
       version: STABLE_BUILD_METADATA_VERSION,
     })
+  })
+
+  // R-0000661: refuse to invoke pnpm publish when dist artefacts referenced
+  // by package.json#files are missing. Without the guard, a skipped build
+  // would publish empty or stale tarballs under --provenance, and signed
+  // bad artefacts cannot easily be retracted from the registry.
+  it("R-0000661: aborts when a dist artefact referenced by files is missing", async () => {
+    const commandRunner = createCommandRunner()
+    const fs = createFs({
+      mtimes: {
+        "packages/paratix/dist": undefined,
+        "packages/paratix/dist/index.js": undefined,
+      },
+    })
+
+    await assertRejectsWithMessage(
+      publishWorkspacePackages({
+        availabilityDelayMilliseconds: 0,
+        commandRunner,
+        fs,
+      }),
+      "package.json#files is missing"
+    )
+
+    assert.equal(hasCommandCall(commandRunner.calls, "pnpm"), false)
+  })
+
+  it("R-0000661: aborts when a dist artefact mtime is older than the src tree", async () => {
+    const commandRunner = createCommandRunner()
+    const fs = createFs({
+      mtimes: {
+        "packages/paratix/dist": 500,
+        "packages/paratix/dist/index.js": 500,
+        "packages/paratix/llm-guide.md": 500,
+        "packages/paratix/src": 5_000,
+        "packages/paratix/src/index.ts": 5_000,
+      },
+    })
+
+    await assertRejectsWithMessage(
+      publishWorkspacePackages({
+        availabilityDelayMilliseconds: 0,
+        commandRunner,
+        fs,
+      }),
+      "is older than"
+    )
+
+    assert.equal(hasCommandCall(commandRunner.calls, "pnpm"), false)
+  })
+
+  it("R-0000661: aborts when package.json#files is empty", async () => {
+    const commandRunner = createCommandRunner()
+    const fs = createFs({ paratixFiles: [] })
+
+    await assertRejectsWithMessage(
+      publishWorkspacePackages({
+        availabilityDelayMilliseconds: 0,
+        commandRunner,
+        fs,
+      }),
+      'must declare a "files" allowlist'
+    )
+
+    assert.equal(hasCommandCall(commandRunner.calls, "pnpm"), false)
   })
 })
 
