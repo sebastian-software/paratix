@@ -387,7 +387,7 @@ async function checkLargeDownload(
 const DOWNLOAD_TEMPORARY_PREFIX = ".paratix-download"
 
 function buildTemporaryDownloadPathCommand(destination: string): string {
-  return `mktemp "$(dirname ${shellQuote(destination)})/${DOWNLOAD_TEMPORARY_PREFIX}.XXXXXX"`
+  return `mktemp "$(dirname -- ${shellQuote(destination)})/${DOWNLOAD_TEMPORARY_PREFIX}.XXXXXX"`
 }
 
 /**
