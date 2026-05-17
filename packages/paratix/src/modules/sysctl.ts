@@ -189,6 +189,35 @@ async function rollbackLiveValue(
 }
 
 /**
+ * Build the persistence-failure ModuleResult, chaining the rollback outcome
+ * (success message or masked rollback failure) into a single user-visible
+ * diagnostic. R-0000651: the previousValue itself never appears verbatim —
+ * the rollback failure is routed through `failedCommand`, which respects
+ * the registered secret sink.
+ *
+ * @param input - The sysctl key, persistence-file path, captured writeFile
+ *   error reason, and the rollback outcome to chain into the final message.
+ * @returns A failed ModuleResult that chains both causes.
+ */
+function buildPersistenceFailureResult(input: {
+  configPath: string
+  key: string
+  rollbackStatus: ModuleResult | string
+  writeReason: string
+}): ModuleResult {
+  const { configPath, key, rollbackStatus, writeReason } = input
+  if (typeof rollbackStatus !== "string") {
+    const rollbackMessage = rollbackStatus.error?.message ?? "rollback to previous value failed"
+    return failed(
+      `[sysctl.set: ${key}] failed to persist config to ${configPath}: ${writeReason}; ${rollbackMessage}`
+    )
+  }
+  return failed(
+    `[sysctl.set: ${key}] failed to persist config to ${configPath}: ${writeReason}; ${rollbackStatus}`
+  )
+}
+
+/**
  * Apply the `present` state: write the live value via `sysctl -w` and
  * persist the configuration file.
  *
@@ -198,6 +227,7 @@ async function rollbackLiveValue(
  * @returns A `ModuleResult` indicating success (`changed`) or a command
  *   failure.
  */
+
 async function applyPresentState(
   conn: SshConnection,
   input: ApplyPresentStateInput
@@ -231,19 +261,12 @@ async function applyPresentState(
   } catch (error) {
     const reason = error instanceof Error ? error.message : String(error)
     const rollbackStatus = await rollbackLiveValue(conn, key, previousValue)
-    if (typeof rollbackStatus !== "string") {
-      // R-0000651: chain the rollback failure (already routed through
-      // failedCommand with `previousValue` registered as a secret) into the
-      // persistence-failure message so the operator sees both causes
-      // without the raw previousValue leaking through the rollback diagnostic.
-      const rollbackMessage = rollbackStatus.error?.message ?? "rollback to previous value failed"
-      return failed(
-        `[sysctl.set: ${key}] failed to persist config to ${configPath}: ${reason}; ${rollbackMessage}`
-      )
-    }
-    return failed(
-      `[sysctl.set: ${key}] failed to persist config to ${configPath}: ${reason}; ${rollbackStatus}`
-    )
+    return buildPersistenceFailureResult({
+      configPath,
+      key,
+      rollbackStatus,
+      writeReason: reason,
+    })
   }
   return { status: "changed" }
 }
@@ -290,27 +313,101 @@ type AbsentStateInput = {
 }
 
 /**
+ * Capture the current content of the sysctl persistence file so the absent
+ * flow can roll it back when the subsequent live-reset fails. R-0000658:
+ * without the snapshot, a failed `sysctl -w` left the host with neither the
+ * persistence entry nor a converged live value, and the next reboot
+ * silently loaded the kernel default. A missing file is reported as `null`
+ * so the rollback path can distinguish "nothing to restore" from a
+ * captured snapshot.
+ *
+ * @param conn - The SSH connection to the remote host.
+ * @param configPath - The persistence-file path the absent flow will remove.
+ * @returns The captured file contents, or `null` when the file was already
+ *   absent or unreadable.
+ */
+async function snapshotPersistenceFile(
+  conn: SshConnection,
+  configPath: string
+): Promise<null | string> {
+  const exists = await conn.exec(`test -f ${shellQuote(configPath)}`, EXEC_OPTS)
+  if (exists.code !== 0) return null
+  try {
+    return await conn.readFile(configPath)
+  } catch {
+    // A race where the file vanished between `test -f` and `readFile`
+    // (or a permission error on the read) is treated like "absent" — the
+    // rollback would have nothing useful to restore anyway, so we let the
+    // remove + reset path proceed normally.
+    return null
+  }
+}
+
+/**
+ * Restore the sysctl persistence file from a previously captured snapshot.
+ * R-0000658: invoked when the absent flow already removed the file but the
+ * subsequent `sysctl -w` reset failed, leaving the host out of spec on the
+ * next reboot. Failures inside the rollback are returned as a human-readable
+ * status string so the caller can chain it into the original reset failure
+ * without throwing.
+ *
+ * @param conn - The SSH connection to the remote host.
+ * @param configPath - The persistence-file path to restore into.
+ * @param snapshot - The previously captured content (or `null` when the
+ *   file did not exist at the start of the absent flow).
+ * @returns A short status string describing the rollback outcome.
+ */
+async function restorePersistenceFile(
+  conn: SshConnection,
+  configPath: string,
+  snapshot: null | string
+): Promise<string> {
+  if (snapshot == null) {
+    return "no persistence-file snapshot to restore"
+  }
+  try {
+    await conn.writeFile(configPath, snapshot, { mode: SYSCTL_CONFIG_MODE })
+    return "persistence file restored from snapshot"
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : String(error)
+    return `persistence file restore failed: ${reason}`
+  }
+}
+
+/**
  * Apply the `absent` state: remove the persistence file and, if a
- * `resetValue` is given, restore the live runtime value.
+ * `resetValue` is given, restore the live runtime value. R-0000658: the
+ * persistence file is snapshotted before the rm so a failing live-reset
+ * can roll it back, instead of leaving the host with neither persistence
+ * nor a converged live value.
  *
  * @param conn - The SSH connection to the remote host.
  * @param input - The persistence file location, the sysctl key, and the
  *   optional `resetValue` to restore on the live system.
  * @returns A `ModuleResult` indicating success (`changed`) or a command
- *   failure.
+ *   failure (possibly chained with the rollback outcome).
  */
 async function applyAbsentState(
   conn: SshConnection,
   input: AbsentStateInput
 ): Promise<ModuleResult> {
   const { configPath, key, resetValue } = input
+  const snapshot = await snapshotPersistenceFile(conn, configPath)
   const removeResult = await conn.exec(`rm -f ${shellQuote(configPath)}`, EXEC_OPTS)
   if (removeResult.code !== 0) {
     return failedCommand(`[sysctl.set: ${key}] failed to remove config file`, removeResult)
   }
   if (resetValue !== undefined) {
     const resetFailure = await resetLiveValue(conn, key, resetValue)
-    if (resetFailure) return resetFailure
+    if (resetFailure) {
+      // R-0000658: chain the rollback outcome into the reset failure so the
+      // operator sees both the original reset error and the rollback status
+      // in a single ModuleResult. Mirrors the chained-rollback messages in
+      // applyPresentState (R-0000242) and the swap absent-flow recovery.
+      const rollbackStatus = await restorePersistenceFile(conn, configPath, snapshot)
+      const resetMessage = resetFailure.error?.message ?? "live reset failed"
+      return failed(`${resetMessage}; ${rollbackStatus}`)
+    }
   }
   return { status: "changed" }
 }

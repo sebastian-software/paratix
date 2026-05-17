@@ -266,6 +266,9 @@ describe("sysctl.set — apply", () => {
 
   it("returns changed and removes config file (state: absent)", async () => {
     const mockSsh = createMockSsh({
+      // R-0000658: the absent flow snapshots the persistence file before
+      // rm so a failing live-reset can roll the file back.
+      [`test -f '${CONF_PATH}'`]: { code: 1 },
       [`rm -f '${CONF_PATH}'`]: { code: 0 },
     })
     const mod = sysctl.set(KEY, VALUE, { state: "absent" })
@@ -276,6 +279,7 @@ describe("sysctl.set — apply", () => {
 
   it("returns failed when removing config file fails (state: absent)", async () => {
     const mockSsh = createMockSsh({
+      [`test -f '${CONF_PATH}'`]: { code: 1 },
       [`rm -f '${CONF_PATH}'`]: { code: 1, stderr: "read-only file system" },
     })
     const mod = sysctl.set(KEY, VALUE, { state: "absent" })
@@ -286,6 +290,7 @@ describe("sysctl.set — apply", () => {
 
   it("removes file and writes resetValue to live kernel (state: absent + resetValue)", async () => {
     const mockSsh = createMockSsh({
+      [`test -f '${CONF_PATH}'`]: { code: 1 },
       [`rm -f '${CONF_PATH}'`]: { code: 0 },
       [`sysctl -n '${KEY}'`]: { code: 0, stdout: "0" },
       [`sysctl -w '${KEY}=0'`]: { code: 0 },
@@ -300,6 +305,7 @@ describe("sysctl.set — apply", () => {
 
   it("returns failed when sysctl -w fails during reset (state: absent + resetValue)", async () => {
     const mockSsh = createMockSsh({
+      [`test -f '${CONF_PATH}'`]: { code: 1 },
       [`rm -f '${CONF_PATH}'`]: { code: 0 },
       [`sysctl -w '${KEY}=0'`]: { code: 1, stderr: "permission denied" },
     })
@@ -311,6 +317,7 @@ describe("sysctl.set — apply", () => {
 
   it("returns failed when live value did not converge after reset (state: absent + resetValue)", async () => {
     const mockSsh = createMockSsh({
+      [`test -f '${CONF_PATH}'`]: { code: 1 },
       [`rm -f '${CONF_PATH}'`]: { code: 0 },
       [`sysctl -n '${KEY}'`]: { code: 0, stdout: "1" },
       [`sysctl -w '${KEY}=0'`]: { code: 0 },
@@ -323,12 +330,76 @@ describe("sysctl.set — apply", () => {
 
   it("does not run sysctl -w when resetValue is not given (state: absent)", async () => {
     const mockSsh = createMockSsh({
+      [`test -f '${CONF_PATH}'`]: { code: 1 },
       [`rm -f '${CONF_PATH}'`]: { code: 0 },
     })
     const mod = sysctl.set(KEY, VALUE, { state: "absent" })
     const result = await mod.apply(mockSsh, emptyEnv)
     expect(result.status).toBe("changed")
     expect(mockSsh.calls).not.toContain(`sysctl -w '${KEY}=${VALUE}'`)
+  })
+
+  // R-0000658: when the persistence file is removed but the subsequent
+  // live-reset fails, the absent flow must restore the persistence file
+  // from a content snapshot so the next reboot does not load the kernel
+  // default. Mirrors the rollbackUnitAfterFlagPersistenceFailure pattern
+  // in systemd.ts.
+  it("R-0000658: restores persistence file when sysctl -w fails during reset", async () => {
+    const previousFileContent = `${KEY} = 1\n`
+    const mockSsh = createMockSsh({
+      [`test -f '${CONF_PATH}'`]: { code: 0 },
+      [`cat '${CONF_PATH}'`]: { code: 0, stdout: previousFileContent },
+      [`rm -f '${CONF_PATH}'`]: { code: 0 },
+      [`sysctl -w '${KEY}=0'`]: { code: 1, stderr: "permission denied" },
+    })
+    const writeFileSpy = vi.spyOn(mockSsh, "writeFile")
+    const mod = sysctl.set(KEY, VALUE, { resetValue: "0", state: "absent" })
+    const result = await mod.apply(mockSsh, emptyEnv)
+    expect(result.status).toBe("failed")
+    expect(String(result.error)).toContain("sysctl -w failed while resetting live value")
+    expect(String(result.error)).toContain("persistence file restored from snapshot")
+    expect(writeFileSpy).toHaveBeenCalledWith(CONF_PATH, previousFileContent, { mode: "0644" })
+  })
+
+  // R-0000658: when the persistence file did not exist at the start of
+  // the absent flow there is nothing to restore. The apply must still
+  // report the original reset failure, but the rollback message reflects
+  // the missing snapshot so operators do not chase a phantom restore.
+  it("R-0000658: reports missing snapshot when persistence file was already absent", async () => {
+    const mockSsh = createMockSsh({
+      [`test -f '${CONF_PATH}'`]: { code: 1 },
+      [`rm -f '${CONF_PATH}'`]: { code: 0 },
+      [`sysctl -w '${KEY}=0'`]: { code: 1, stderr: "permission denied" },
+    })
+    const writeFileSpy = vi.spyOn(mockSsh, "writeFile")
+    const mod = sysctl.set(KEY, VALUE, { resetValue: "0", state: "absent" })
+    const result = await mod.apply(mockSsh, emptyEnv)
+    expect(result.status).toBe("failed")
+    expect(String(result.error)).toContain("sysctl -w failed while resetting live value")
+    expect(String(result.error)).toContain("no persistence-file snapshot to restore")
+    expect(writeFileSpy).not.toHaveBeenCalled()
+  })
+
+  // R-0000658: when both the live-reset and the rollback writeFile fail
+  // the apply must surface both failures so operators see the full
+  // breakage chain.
+  it("R-0000658: chains rollback writeFile failures into the reset failure", async () => {
+    const previousFileContent = `${KEY} = 1\n`
+    const mockSsh = createMockSsh({
+      [`test -f '${CONF_PATH}'`]: { code: 0 },
+      [`cat '${CONF_PATH}'`]: { code: 0, stdout: previousFileContent },
+      [`rm -f '${CONF_PATH}'`]: { code: 0 },
+      [`sysctl -w '${KEY}=0'`]: { code: 1, stderr: "permission denied" },
+    })
+    vi.spyOn(mockSsh, "writeFile").mockRejectedValueOnce(
+      new Error("SFTP write failed: read-only file system")
+    )
+    const mod = sysctl.set(KEY, VALUE, { resetValue: "0", state: "absent" })
+    const result = await mod.apply(mockSsh, emptyEnv)
+    expect(result.status).toBe("failed")
+    expect(String(result.error)).toContain("sysctl -w failed while resetting live value")
+    expect(String(result.error)).toContain("persistence file restore failed")
+    expect(String(result.error)).toContain("read-only file system")
   })
 })
 
