@@ -133,6 +133,7 @@ describe("file.directory", () => {
   it("regression R-0000109 — apply returns ok and skips mkdir/chmod/chown when directory matches desired state", async () => {
     const ssh = createMockSsh({
       "[ -d '/var/app' ]": { code: 0 },
+      "[ -L '/var' ]": { code: 1 },
       "[ -L '/var/app' ]": { code: 1 },
       "stat -c '%a %U %G' '/var/app'": { stdout: "755 www-data www-data" },
     })
@@ -149,6 +150,7 @@ describe("file.directory", () => {
   it("regression R-0000109 — apply returns changed and only issues mkdir when directory is missing", async () => {
     const ssh = createMockSsh({
       "[ -d '/var/app' ]": { code: 1 },
+      "[ -L '/var' ]": { code: 1 },
       "[ -L '/var/app' ]": { code: 1 },
     })
 
@@ -162,6 +164,7 @@ describe("file.directory", () => {
   it("regression R-0000109 — apply returns changed and only issues chmod when only mode drifted", async () => {
     const ssh = createMockSsh({
       "[ -d '/var/app' ]": { code: 0 },
+      "[ -L '/var' ]": { code: 1 },
       "[ -L '/var/app' ]": { code: 1 },
       "stat -c '%a %U %G' '/var/app'": { stdout: "700 www-data www-data" },
     })
@@ -178,6 +181,7 @@ describe("file.directory", () => {
   it("regression R-0000109 — apply returns changed and only issues chown when only owner drifted", async () => {
     const ssh = createMockSsh({
       "[ -d '/var/app' ]": { code: 0 },
+      "[ -L '/var' ]": { code: 1 },
       "[ -L '/var/app' ]": { code: 1 },
       "stat -c '%a %U %G' '/var/app'": { stdout: "755 root root" },
     })
@@ -194,6 +198,7 @@ describe("file.directory", () => {
   it("rejects option-like owner components before directory chown", async () => {
     const ssh = createMockSsh({
       "[ -d '/var/app' ]": { code: 0 },
+      "[ -L '/var' ]": { code: 1 },
       "[ -L '/var/app' ]": { code: 1 },
       "stat -c '%a %U %G' '/var/app'": { stdout: "755 root root" },
     })
@@ -217,12 +222,45 @@ describe("file.directory", () => {
     expect(ssh.calls).not.toContain("chown -- 'www-data:www-data' '/var/app'")
   })
 
+  // R-0000637: a symlink in any ancestor of remotePath would let `mkdir -p`
+  // follow the link and create the target inside an attacker-controlled
+  // directory. The ancestor walk must reject this before mkdir runs.
+  it("R-0000637: apply fails without mkdir when an ancestor directory is a symlink", async () => {
+    const ssh = createMockSsh({
+      "[ -L '/var/app' ]": { code: 0 },
+      "[ -L '/var/app/data' ]": { code: 1 },
+    })
+    const mod = file.directory("/var/app/data", { mode: "0755", owner: "www-data:www-data" })
+    const result = await mod.apply(ssh, emptyEnv)
+
+    expect(result.status).toBe("failed")
+    expect(result.error?.message).toContain("ancestor must not be a symlink: /var/app")
+    expect(ssh.calls).not.toContain("mkdir -p '/var/app/data'")
+    expect(ssh.calls).not.toContain("chmod '0755' '/var/app/data'")
+    expect(ssh.calls).not.toContain("chown -- 'www-data:www-data' '/var/app/data'")
+  })
+
+  it("R-0000637: apply fails without mkdir when a higher ancestor directory is a symlink", async () => {
+    const ssh = createMockSsh({
+      "[ -L '/var' ]": { code: 0 },
+      "[ -L '/var/app' ]": { code: 1 },
+      "[ -L '/var/app/data' ]": { code: 1 },
+    })
+    const mod = file.directory("/var/app/data")
+    const result = await mod.apply(ssh, emptyEnv)
+
+    expect(result.status).toBe("failed")
+    expect(result.error?.message).toContain("ancestor must not be a symlink: /var")
+    expect(ssh.calls).not.toContain("mkdir -p '/var/app/data'")
+  })
+
   it("R-0000270: returns failed when mkdir on a read-only filesystem exits non-zero", async () => {
     // mkdir failures (read-only mount, EACCES on a guarded mount) must
     // propagate as a failedCommand ModuleResult so the runner reports the
     // captured stderr instead of an unguarded CommandError exception.
     const ssh = createMockSsh({
       "[ -d '/var/app' ]": { code: 1 },
+      "[ -L '/var' ]": { code: 1 },
       "[ -L '/var/app' ]": { code: 1 },
       "mkdir -p '/var/app'": {
         code: 1,
@@ -239,6 +277,7 @@ describe("file.directory", () => {
   it("R-0000270: returns failed when chmod on an existing directory exits non-zero", async () => {
     const ssh = createMockSsh({
       "[ -d '/var/app' ]": { code: 0 },
+      "[ -L '/var' ]": { code: 1 },
       "[ -L '/var/app' ]": { code: 1 },
       "chmod '0755' '/var/app'": {
         code: 1,
@@ -256,6 +295,7 @@ describe("file.directory", () => {
   it("R-0000270: returns failed when chown on an existing directory exits non-zero", async () => {
     const ssh = createMockSsh({
       "[ -d '/var/app' ]": { code: 0 },
+      "[ -L '/var' ]": { code: 1 },
       "[ -L '/var/app' ]": { code: 1 },
       "chown -- 'www-data' '/var/app'": {
         code: 1,

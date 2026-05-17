@@ -8,6 +8,7 @@ import {
   readOwnership,
   renderChownCommand,
 } from "./fileMetadataHelpers.js"
+import { findSymlinkInAncestorWalk } from "./remoteFileChecks.js"
 
 const EXEC_OPTS = { ignoreExitCode: true, silent: true } as const
 
@@ -156,8 +157,20 @@ export async function applyDirectoryState(input: {
   remotePath: string
   ssh: SshConnection
 }): Promise<ModuleResult> {
-  if (await input.ssh.test(`[ -L ${shellQuote(input.remotePath)} ]`)) {
+  // R-0000637: walk every existing ancestor of remotePath in addition to the
+  // leaf itself. Without this walk, a symlinked intermediate directory (e.g.
+  // /opt -> /tmp/attacker) would let the subsequent `mkdir -p` create the
+  // target underneath an attacker-controlled tree. Mirrors the ancestor walks
+  // performed by `ensureComposeProjectDirectoryNotSymlinked` (compose.ts) and
+  // `ensureDownloadDestinationNotSymlinked` (download.ts).
+  const symlinkProbe = await findSymlinkInAncestorWalk(input.ssh, input.remotePath)
+  if (symlinkProbe?.kind === "leaf") {
     return failed(`[file.directory: ${input.remotePath}] path must not be a symlink`)
+  }
+  if (symlinkProbe?.kind === "ancestor") {
+    return failed(
+      `[file.directory: ${input.remotePath}] ancestor must not be a symlink: ${symlinkProbe.path}`
+    )
   }
   const exists = await input.ssh.test(`[ -d ${shellQuote(input.remotePath)} ]`)
   const mkdirResult = await ensureDirectoryExists({
