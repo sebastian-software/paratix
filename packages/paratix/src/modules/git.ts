@@ -90,6 +90,49 @@ async function cleanupFailedCloneDestination(
 }
 
 /**
+ * Run the fallback path of a referenced clone: plain `git clone` followed by
+ * `git checkout <reference>`. Used after `git clone --branch <ref>` fails
+ * (e.g. because the ref is a bare commit SHA). R-0000642: when the clone
+ * succeeds but the checkout fails, the worktree is at the repository's
+ * default branch instead of the requested reference; remove the destination
+ * the apply just created so the host stays in the original state.
+ *
+ * @param conn - The SSH connection to the remote host.
+ * @param parameters - Clone parameters including destination, reference, and repo.
+ * @param destinationExistedBeforeClone - Whether the destination existed before this apply.
+ * @returns A promise that resolves to `true` when the fallback clone + checkout succeeded.
+ */
+async function cloneRepoFallback(
+  conn: SshConnection,
+  parameters: { reference: string } & GitCloneParameters,
+  destinationExistedBeforeClone: boolean
+): Promise<boolean> {
+  const { destination, reference, repo } = parameters
+  // Fallback: clone without --branch then checkout (handles bare commit SHAs).
+  const fallback = await conn.exec(
+    `git clone -- ${shellQuote(repo)} ${shellQuote(destination)}`,
+    EXEC_OPTS
+  )
+  if (fallback.code !== 0) return false
+  const checkout = await conn.exec(
+    `git -C ${shellQuote(destination)} checkout ${shellQuote(reference)}`,
+    EXEC_OPTS
+  )
+  if (checkout.code === 0) return true
+  // R-0000642: the fallback clone left a worktree on the requested
+  // destination at the repository's default branch, but the subsequent
+  // checkout to the caller-provided reference failed. Without cleanup the
+  // host is left in a state the caller never asked for. Only remove the
+  // directory when this apply created it; if the path existed beforehand
+  // (e.g. a user staged work in it) the original cleanup guard already
+  // skipped removal and we mirror that decision here.
+  if (!destinationExistedBeforeClone) {
+    await cleanupFailedCloneDestination(conn, destination)
+  }
+  return false
+}
+
+/**
  * Clone a repository into a new directory, optionally at a specific ref.
  *
  * When `reference` is non-empty the implementation first attempts a single
@@ -119,28 +162,7 @@ async function cloneRepo(conn: SshConnection, parameters: GitCloneParameters): P
     if (!destinationExistedBeforeClone) {
       await cleanupFailedCloneDestination(conn, destination)
     }
-    // Fallback: clone without --branch then checkout (handles bare commit SHAs).
-    const fallback = await conn.exec(
-      `git clone -- ${shellQuote(repo)} ${shellQuote(destination)}`,
-      EXEC_OPTS
-    )
-    if (fallback.code !== 0) return false
-    const checkout = await conn.exec(
-      `git -C ${shellQuote(destination)} checkout ${shellQuote(reference)}`,
-      EXEC_OPTS
-    )
-    if (checkout.code === 0) return true
-    // R-0000642: the fallback clone left a worktree on the requested
-    // destination at the repository's default branch, but the subsequent
-    // checkout to the caller-provided reference failed. Without cleanup the
-    // host is left in a state the caller never asked for. Only remove the
-    // directory when this apply created it; if the path existed beforehand
-    // (e.g. a user staged work in it) the original cleanup guard already
-    // skipped removal and we mirror that decision here.
-    if (!destinationExistedBeforeClone) {
-      await cleanupFailedCloneDestination(conn, destination)
-    }
-    return false
+    return cloneRepoFallback(conn, { destination, reference, repo }, destinationExistedBeforeClone)
   }
   const cloneResult = await conn.exec(
     `git clone -- ${shellQuote(repo)} ${shellQuote(destination)}`,

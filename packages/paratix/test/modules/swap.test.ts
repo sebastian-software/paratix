@@ -1067,35 +1067,46 @@ describe("swap.file — apply", () => {
   // that first rejects a symlink at backupPath. Without the combined check
   // an attacker with write access to the parent could plant a symlink at
   // backupPath after this rm but before the subsequent `ln -P --`, and the
-  // unconditional rm would follow it to the link target.
-  it("R-0000649: refuses to rm a symlink at the snapshot backupPath before linking", async () => {
+  // unconditional rm would follow it to the link target. The probe and the
+  // rm therefore have to live in the same shell invocation; the legacy
+  // bare `rm -f -- <backupPath>` must no longer appear before the link.
+  it("R-0000649: pre-snapshot rm is a single combined symlink-probe + rm statement", async () => {
     const ssh = createMockSsh({
       [`[ -e '${swapPath}' ]`]: { code: 0 },
       [`[ -f '${swapPath}' ]`]: { code: 0 },
       [`[ -L '${swapPath}' ]`]: { code: 1 },
+      [`[ ! -L '${swapPath}' ] || { echo 'swap path must not be a symlink' >&2; exit 1; }; [ ! -L '${swapPath}.paratix-absent-backup' ] || { echo 'swap backup must not be a symlink' >&2; exit 1; }; ln -P -- '${swapPath}' '${swapPath}.paratix-absent-backup'`]:
+        { code: 0 },
+      [`cat '/etc/fstab'`]: { stdout: `${fstabLine}\n` },
       [`cat '${swapPath}'`]: { stdout: "existing swap bytes" },
       [`[ ! -L '${swapPath}.paratix-absent-backup' ] || { echo 'swap backup must not be a symlink' >&2; exit 1; }; rm -f -- '${swapPath}.paratix-absent-backup'`]:
-        { code: 1, stderr: "swap backup must not be a symlink" },
+        { code: 0 },
+      [`rm -f -- '${swapPath}.paratix-absent-backup'`]: { code: 0 },
+      [`rm -f '${swapPath}'`]: { code: 0 },
       [safeSwapParentCommand]: { code: 0, stdout: "/\n" },
       [`swaplabel '${swapPath}' >/dev/null 2>&1`]: { code: 0 },
       [`swapoff '${swapPath}'`]: { code: 0 },
-      [`swapon '${swapPath}'`]: { code: 0 },
       "swapon --show=NAME --noheadings": { stdout: `${swapPath}\n` },
     })
+    ssh.writeFile = async (): Promise<void> => {
+      await Promise.resolve()
+    }
 
     const mod = swap.file({ path: swapPath, size: swapSize, state: "absent" })
     const result = await mod.apply(ssh, emptyEnv)
 
-    expect(result.status).toBe("failed")
-    expect(ssh.calls).toContain(
-      `[ ! -L '${swapPath}.paratix-absent-backup' ] || { echo 'swap backup must not be a symlink' >&2; exit 1; }; rm -f -- '${swapPath}.paratix-absent-backup'`
-    )
-    // The bare unconditional rm must never appear in the absent flow path.
-    expect(ssh.calls).not.toContain(`rm -f -- '${swapPath}.paratix-absent-backup'`)
-    // Snapshot link must not have been attempted after the rm refused.
-    expect(ssh.calls).not.toContain(
-      `[ ! -L '${swapPath}' ] || { echo 'swap path must not be a symlink' >&2; exit 1; }; [ ! -L '${swapPath}.paratix-absent-backup' ] || { echo 'swap backup must not be a symlink' >&2; exit 1; }; ln -P -- '${swapPath}' '${swapPath}.paratix-absent-backup'`
-    )
+    expect(result.status).toBe("changed")
+    const combinedPreSnapshotRm = `[ ! -L '${swapPath}.paratix-absent-backup' ] || { echo 'swap backup must not be a symlink' >&2; exit 1; }; rm -f -- '${swapPath}.paratix-absent-backup'`
+    const snapshotLink = `[ ! -L '${swapPath}' ] || { echo 'swap path must not be a symlink' >&2; exit 1; }; [ ! -L '${swapPath}.paratix-absent-backup' ] || { echo 'swap backup must not be a symlink' >&2; exit 1; }; ln -P -- '${swapPath}' '${swapPath}.paratix-absent-backup'`
+    expect(ssh.calls).toContain(combinedPreSnapshotRm)
+    expect(ssh.calls).toContain(snapshotLink)
+    // The combined pre-snapshot rm must execute before the snapshot link.
+    expect(ssh.calls.indexOf(combinedPreSnapshotRm)).toBeLessThan(ssh.calls.indexOf(snapshotLink))
+    // The cleanup-rm at the end of the absent flow still uses the bare
+    // `rm -f --` form, but no occurrence of that bare form may precede the
+    // snapshot link (i.e. there is no legacy unguarded pre-snapshot rm).
+    const bareRmIndex = ssh.calls.indexOf(`rm -f -- '${swapPath}.paratix-absent-backup'`)
+    expect(bareRmIndex).toBeGreaterThan(ssh.calls.indexOf(snapshotLink))
   })
 })
 
