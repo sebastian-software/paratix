@@ -188,9 +188,9 @@ function knownHostsLookupTarget(host: string, options?: KnownHostsOptions): stri
 function sshKeyscanCommand(host: string, options?: KnownHostsOptions): string {
   const port = options?.port
   if (port == null || port === DEFAULT_SSH_PORT) {
-    return `ssh-keyscan -H ${shellQuote(host)} 2>/dev/null`
+    return `ssh-keyscan -H ${shellQuote(host)}`
   }
-  return `ssh-keyscan -p ${port} -H ${shellQuote(host)} 2>/dev/null`
+  return `ssh-keyscan -p ${port} -H ${shellQuote(host)}`
 }
 
 function sshKeygenKnownHostsFileArgument(knownHostsPath?: string): string {

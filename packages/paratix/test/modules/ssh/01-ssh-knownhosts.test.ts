@@ -432,7 +432,7 @@ describe("ssh.knownHosts", () => {
   it("apply verifies a scanned host key against the expected fingerprint before appending it", async () => {
     const mockSsh = createSshApplyMockSsh({
       [`grep -qxF '${scannedLine}' '/home/paratix/.ssh/known_hosts'`]: { code: 1 },
-      "ssh-keyscan -H 'github.com' 2>/dev/null": { stdout: `${scannedLine}\n` },
+      "ssh-keyscan -H 'github.com'": { stdout: `${scannedLine}\n` },
     })
     const mod = ssh.knownHosts("github.com", { expectedFingerprint: hostFingerprint })
     const result = await mod.apply(mockSsh, emptyEnv)
@@ -441,7 +441,7 @@ describe("ssh.knownHosts", () => {
     expect(mockSsh.calls).toContain(
       "[ ! -L '/home/paratix/.ssh' ] || { echo '.ssh must not be a symlink' >&2; exit 1; }; if [ -e '/home/paratix/.ssh' ]; then [ -d '/home/paratix/.ssh' ] || { echo '.ssh must be a directory' >&2; exit 1; }; else mkdir -p '/home/paratix/.ssh'; fi; [ -d '/home/paratix/.ssh' ] && [ ! -L '/home/paratix/.ssh' ] || { echo '.ssh must be a real directory' >&2; exit 1; }; chmod 700 '/home/paratix/.ssh'"
     )
-    expect(mockSsh.calls).toContain("ssh-keyscan -H 'github.com' 2>/dev/null")
+    expect(mockSsh.calls).toContain("ssh-keyscan -H 'github.com'")
     expect(mockSsh.calls.some(isKnownHostsRewriteStage)).toBe(true)
     expect(mockSsh.calls.some(isKnownHostsFinalReplace)).toBe(true)
   })
@@ -449,7 +449,7 @@ describe("ssh.knownHosts", () => {
   it("apply verifies a scanned host key against the expected public key before appending it", async () => {
     const mockSsh = createSshApplyMockSsh({
       [`grep -qxF '${scannedLine}' '/home/paratix/.ssh/known_hosts'`]: { code: 1 },
-      "ssh-keyscan -H 'github.com' 2>/dev/null": { stdout: `${scannedLine}\n` },
+      "ssh-keyscan -H 'github.com'": { stdout: `${scannedLine}\n` },
     })
     const mod = ssh.knownHosts("github.com", { publicKey: `${hostPublicKey} github.com` })
     const result = await mod.apply(mockSsh, emptyEnv)
@@ -462,7 +462,7 @@ describe("ssh.knownHosts", () => {
   it("apply scans the configured non-standard port before appending a verified host key", async () => {
     const mockSsh = createSshApplyMockSsh({
       [`grep -qxF '${scannedLine}' '/home/paratix/.ssh/known_hosts'`]: { code: 1 },
-      "ssh-keyscan -p 2222 -H 'github.com' 2>/dev/null": { stdout: `${scannedLine}\n` },
+      "ssh-keyscan -p 2222 -H 'github.com'": { stdout: `${scannedLine}\n` },
     })
     const mod = ssh.knownHosts("github.com", {
       expectedFingerprint: hostFingerprint,
@@ -472,7 +472,7 @@ describe("ssh.knownHosts", () => {
     const result = await mod.apply(mockSsh, emptyEnv)
 
     expect(result.status).toBe("changed")
-    expect(mockSsh.calls).toContain("ssh-keyscan -p 2222 -H 'github.com' 2>/dev/null")
+    expect(mockSsh.calls).toContain("ssh-keyscan -p 2222 -H 'github.com'")
     expect(mockSsh.calls.some(isKnownHostsRewriteStage)).toBe(true)
     expect(mockSsh.calls.some(isKnownHostsFinalReplace)).toBe(true)
   })
@@ -482,7 +482,7 @@ describe("ssh.knownHosts", () => {
     const extraLine = `|1|hashed-host|hashed-extra ssh-rsa ${extraKey.toString("base64")}`
     const mockSsh = createSshApplyMockSsh({
       [`grep -qxF '${scannedLine}' '/home/paratix/.ssh/known_hosts'`]: { code: 1 },
-      "ssh-keyscan -H 'github.com' 2>/dev/null": { stdout: `${scannedLine}\n${extraLine}\n` },
+      "ssh-keyscan -H 'github.com'": { stdout: `${scannedLine}\n${extraLine}\n` },
     })
     const mod = ssh.knownHosts("github.com", { expectedFingerprint: hostFingerprint })
 
@@ -502,7 +502,7 @@ describe("ssh.knownHosts", () => {
         code: 0,
         stdout: `${driftedLine}\n${scannedLine}\n`,
       },
-      "ssh-keyscan -H 'github.com' 2>/dev/null": { stdout: `${scannedLine}\n` },
+      "ssh-keyscan -H 'github.com'": { stdout: `${scannedLine}\n` },
     })
     const mod = ssh.knownHosts("github.com", { expectedFingerprint: hostFingerprint })
 
@@ -521,7 +521,7 @@ describe("ssh.knownHosts", () => {
     // duplicates nor a second `printf >> known_hosts` call, and reports ok.
     const mockSsh = createSshApplyMockSsh({
       [`grep -qxF '${scannedLine}' '/home/paratix/.ssh/known_hosts'`]: { code: 0 },
-      "ssh-keyscan -H 'github.com' 2>/dev/null": { stdout: `${scannedLine}\n` },
+      "ssh-keyscan -H 'github.com'": { stdout: `${scannedLine}\n` },
     })
     const mod = ssh.knownHosts("github.com", { expectedFingerprint: hostFingerprint })
 
@@ -538,7 +538,7 @@ describe("ssh.knownHosts", () => {
     // detect the line as already present and skip the append, so each line
     // appears exactly once across runs.
     const mockSsh = createKnownHostsTrackingMock(scannedLine, {
-      "ssh-keyscan -H 'github.com' 2>/dev/null": { stdout: `${scannedLine}\n` },
+      "ssh-keyscan -H 'github.com'": { stdout: `${scannedLine}\n` },
     })
 
     const mod = ssh.knownHosts("github.com", { expectedFingerprint: hostFingerprint })
@@ -564,7 +564,7 @@ describe("ssh.knownHosts", () => {
         code: 255,
         stderr: "ssh-keygen: failed to parse known_hosts: corrupt entry\n",
       },
-      "ssh-keyscan -H 'github.com' 2>/dev/null": { stdout: `${scannedLine}\n` },
+      "ssh-keyscan -H 'github.com'": { stdout: `${scannedLine}\n` },
     })
     const mod = ssh.knownHosts("github.com", {
       expectedFingerprint: hostFingerprint,
@@ -579,7 +579,7 @@ describe("ssh.knownHosts", () => {
   // failure consistent with other modules.
   it("apply returns failed when scanned keys do not match the expected fingerprint", async () => {
     const mockSsh = createSshApplyMockSsh({
-      "ssh-keyscan -H 'github.com' 2>/dev/null": { stdout: `${scannedLine}\n` },
+      "ssh-keyscan -H 'github.com'": { stdout: `${scannedLine}\n` },
     })
     const mod = ssh.knownHosts("github.com", {
       expectedFingerprint: "SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
@@ -769,7 +769,7 @@ describe("ssh.knownHosts", () => {
     const mockSsh = createMockSsh(
       {
         [`grep -qxF '${scannedLine}' '/home/paratix/.ssh/known_hosts'`]: { code: 1 },
-        "ssh-keyscan -H 'github.com' 2>/dev/null": { stdout: `${scannedLine}\n` },
+        "ssh-keyscan -H 'github.com'": { stdout: `${scannedLine}\n` },
       },
       {
         responseStubs: [
@@ -802,7 +802,7 @@ describe("ssh.knownHosts", () => {
           stderr: "known_hosts must not be a symlink",
         },
       [`grep -qxF '${scannedLine}' '/home/paratix/.ssh/known_hosts'`]: { code: 1 },
-      "ssh-keyscan -H 'github.com' 2>/dev/null": { stdout: `${scannedLine}\n` },
+      "ssh-keyscan -H 'github.com'": { stdout: `${scannedLine}\n` },
     })
     const mod = ssh.knownHosts("github.com", { expectedFingerprint: hostFingerprint })
 
@@ -820,7 +820,7 @@ describe("ssh.knownHosts", () => {
           code: 1,
           stderr: ".ssh must not be a symlink",
         },
-      "ssh-keyscan -H 'github.com' 2>/dev/null": { stdout: `${scannedLine}\n` },
+      "ssh-keyscan -H 'github.com'": { stdout: `${scannedLine}\n` },
     })
     const mod = ssh.knownHosts("github.com", { expectedFingerprint: hostFingerprint })
 
@@ -835,7 +835,7 @@ describe("ssh.knownHosts", () => {
     const mockSsh = createMockSsh(
       {
         [`grep -qxF '${scannedLine}' '/home/paratix/.ssh/known_hosts'`]: { code: 1 },
-        "ssh-keyscan -H 'github.com' 2>/dev/null": { stdout: `${scannedLine}\n` },
+        "ssh-keyscan -H 'github.com'": { stdout: `${scannedLine}\n` },
       },
       {
         responseStubs: [
@@ -865,7 +865,7 @@ describe("ssh.knownHosts", () => {
   // diagnostic. Surface a failedCommand result instead.
   it("R-0000214: apply returns failedCommand when ssh-keyscan exits non-zero", async () => {
     const mockSsh = createSshApplyMockSsh({
-      "ssh-keyscan -H 'github.com' 2>/dev/null": {
+      "ssh-keyscan -H 'github.com'": {
         code: 1,
         stderr: "ssh-keyscan: getaddrinfo: github.com: Name or service not known",
       },
@@ -890,7 +890,7 @@ describe("ssh.knownHosts", () => {
           code: 1,
           stderr: "mkdir: cannot create directory '/home/user/.ssh': Permission denied",
         },
-      "ssh-keyscan -H 'github.com' 2>/dev/null": { stdout: `${scannedLine}\n` },
+      "ssh-keyscan -H 'github.com'": { stdout: `${scannedLine}\n` },
     })
     const mod = ssh.knownHosts("github.com", { expectedFingerprint: hostFingerprint })
 
