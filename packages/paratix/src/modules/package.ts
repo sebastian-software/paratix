@@ -122,10 +122,7 @@ function missingPackageManager(moduleName: string): ModuleResult {
  * @param binary - The package-manager binary to probe (e.g. `"apt-get"`).
  * @returns `true` when `which` reported the binary as present, otherwise `false`.
  */
-async function probePackageManagerBinary(
-  ssh: SshConnection,
-  binary: string
-): Promise<boolean> {
+async function probePackageManagerBinary(ssh: SshConnection, binary: string): Promise<boolean> {
   const result = await ssh.exec(`which ${binary}`, EXEC_OPTS)
   return result.code === 0
 }
