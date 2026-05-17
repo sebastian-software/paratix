@@ -280,9 +280,7 @@ cmp -s <(getent shadow ${shellQuote(name)} | cut -d: -f2) -`
       // so the caller can fail fast instead of looping over a doomed apply.
       const detail = error instanceof Error ? error.message : String(error)
       return {
-        failure: failed(
-          `[user.present: ${name}] shadow hash comparison failed: ${detail}`
-        ),
+        failure: failed(`[user.present: ${name}] shadow hash comparison failed: ${detail}`),
         kind: TOOLCHAIN_ERROR,
       }
     }
@@ -631,7 +629,10 @@ export const user = {
           // module through `needs-apply` -> apply -> setPassword on every
           // run when the compare cannot be executed.
           if (outcome.kind === TOOLCHAIN_ERROR) {
-            throw outcome.failure.error ?? new Error(`[user.present: ${name}] shadow hash comparison failed`)
+            throw (
+              outcome.failure.error ??
+              new Error(`[user.present: ${name}] shadow hash comparison failed`)
+            )
           }
           if (outcome.kind === "mismatch") return NEEDS_APPLY
         }

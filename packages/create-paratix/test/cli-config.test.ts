@@ -702,7 +702,9 @@ describe("admin public key validation", () => {
     const linkFile = join(TEST_DIR, "linked-admin-log.pub")
     writeFileSync(targetFile, `${publicKey}\n`)
     symlinkSync(targetFile, linkFile)
-    const logSpy = vi.spyOn(console, "log").mockImplementation(() => undefined)
+    const logSpy = vi.spyOn(console, "log").mockImplementation(() => {
+      // suppress log output during the test
+    })
     try {
       expect(readAdminPublicKeyFile(throwExitError, linkFile)).toBe(publicKey)
       const logged = logSpy.mock.calls.flat().join(" ")
@@ -719,7 +721,9 @@ describe("admin public key validation", () => {
     const publicKey = createEd25519PublicKey("user@example")
     const regularFile = join(TEST_DIR, "regular-admin.pub")
     writeFileSync(regularFile, `${publicKey}\n`)
-    const logSpy = vi.spyOn(console, "log").mockImplementation(() => undefined)
+    const logSpy = vi.spyOn(console, "log").mockImplementation(() => {
+      // suppress log output during the test
+    })
     try {
       expect(readAdminPublicKeyFile(throwExitError, regularFile)).toBe(publicKey)
       const logged = logSpy.mock.calls.flat().join(" ")

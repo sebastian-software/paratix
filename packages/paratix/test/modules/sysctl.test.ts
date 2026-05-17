@@ -240,11 +240,11 @@ describe("sysctl.set — apply", () => {
     const sensitivePrevious = "supersecret-crypto-param-42"
     const mockSsh = createMockSsh({
       [`sysctl -n '${KEY}'`]: { code: 0, stdout: sensitivePrevious },
-      [`sysctl -w '${KEY}=${VALUE}'`]: { code: 0 },
       [`sysctl -w '${KEY}=${sensitivePrevious}'`]: {
         code: 1,
         stderr: `sysctl: failed to write ${sensitivePrevious}`,
       },
+      [`sysctl -w '${KEY}=${VALUE}'`]: { code: 0 },
     })
     vi.spyOn(mockSsh, "writeFile").mockRejectedValueOnce(
       new Error("SFTP write failed: read-only file system")
@@ -266,10 +266,10 @@ describe("sysctl.set — apply", () => {
 
   it("returns changed and removes config file (state: absent)", async () => {
     const mockSsh = createMockSsh({
+      [`rm -f '${CONF_PATH}'`]: { code: 0 },
       // R-0000658: the absent flow snapshots the persistence file before
       // rm so a failing live-reset can roll the file back.
       [`test -f '${CONF_PATH}'`]: { code: 1 },
-      [`rm -f '${CONF_PATH}'`]: { code: 0 },
     })
     const mod = sysctl.set(KEY, VALUE, { state: "absent" })
     const result = await mod.apply(mockSsh, emptyEnv)
@@ -279,8 +279,8 @@ describe("sysctl.set — apply", () => {
 
   it("returns failed when removing config file fails (state: absent)", async () => {
     const mockSsh = createMockSsh({
-      [`test -f '${CONF_PATH}'`]: { code: 1 },
       [`rm -f '${CONF_PATH}'`]: { code: 1, stderr: "read-only file system" },
+      [`test -f '${CONF_PATH}'`]: { code: 1 },
     })
     const mod = sysctl.set(KEY, VALUE, { state: "absent" })
     const result = await mod.apply(mockSsh, emptyEnv)
@@ -290,10 +290,10 @@ describe("sysctl.set — apply", () => {
 
   it("removes file and writes resetValue to live kernel (state: absent + resetValue)", async () => {
     const mockSsh = createMockSsh({
-      [`test -f '${CONF_PATH}'`]: { code: 1 },
       [`rm -f '${CONF_PATH}'`]: { code: 0 },
       [`sysctl -n '${KEY}'`]: { code: 0, stdout: "0" },
       [`sysctl -w '${KEY}=0'`]: { code: 0 },
+      [`test -f '${CONF_PATH}'`]: { code: 1 },
     })
     const mod = sysctl.set(KEY, VALUE, { resetValue: "0", state: "absent" })
     const result = await mod.apply(mockSsh, emptyEnv)
@@ -305,9 +305,9 @@ describe("sysctl.set — apply", () => {
 
   it("returns failed when sysctl -w fails during reset (state: absent + resetValue)", async () => {
     const mockSsh = createMockSsh({
-      [`test -f '${CONF_PATH}'`]: { code: 1 },
       [`rm -f '${CONF_PATH}'`]: { code: 0 },
       [`sysctl -w '${KEY}=0'`]: { code: 1, stderr: "permission denied" },
+      [`test -f '${CONF_PATH}'`]: { code: 1 },
     })
     const mod = sysctl.set(KEY, VALUE, { resetValue: "0", state: "absent" })
     const result = await mod.apply(mockSsh, emptyEnv)
@@ -317,10 +317,10 @@ describe("sysctl.set — apply", () => {
 
   it("returns failed when live value did not converge after reset (state: absent + resetValue)", async () => {
     const mockSsh = createMockSsh({
-      [`test -f '${CONF_PATH}'`]: { code: 1 },
       [`rm -f '${CONF_PATH}'`]: { code: 0 },
       [`sysctl -n '${KEY}'`]: { code: 0, stdout: "1" },
       [`sysctl -w '${KEY}=0'`]: { code: 0 },
+      [`test -f '${CONF_PATH}'`]: { code: 1 },
     })
     const mod = sysctl.set(KEY, VALUE, { resetValue: "0", state: "absent" })
     const result = await mod.apply(mockSsh, emptyEnv)
@@ -330,8 +330,8 @@ describe("sysctl.set — apply", () => {
 
   it("does not run sysctl -w when resetValue is not given (state: absent)", async () => {
     const mockSsh = createMockSsh({
-      [`test -f '${CONF_PATH}'`]: { code: 1 },
       [`rm -f '${CONF_PATH}'`]: { code: 0 },
+      [`test -f '${CONF_PATH}'`]: { code: 1 },
     })
     const mod = sysctl.set(KEY, VALUE, { state: "absent" })
     const result = await mod.apply(mockSsh, emptyEnv)
@@ -347,10 +347,10 @@ describe("sysctl.set — apply", () => {
   it("R-0000658: restores persistence file when sysctl -w fails during reset", async () => {
     const previousFileContent = `${KEY} = 1\n`
     const mockSsh = createMockSsh({
-      [`test -f '${CONF_PATH}'`]: { code: 0 },
       [`cat '${CONF_PATH}'`]: { code: 0, stdout: previousFileContent },
       [`rm -f '${CONF_PATH}'`]: { code: 0 },
       [`sysctl -w '${KEY}=0'`]: { code: 1, stderr: "permission denied" },
+      [`test -f '${CONF_PATH}'`]: { code: 0 },
     })
     const writeFileSpy = vi.spyOn(mockSsh, "writeFile")
     const mod = sysctl.set(KEY, VALUE, { resetValue: "0", state: "absent" })
@@ -367,9 +367,9 @@ describe("sysctl.set — apply", () => {
   // the missing snapshot so operators do not chase a phantom restore.
   it("R-0000658: reports missing snapshot when persistence file was already absent", async () => {
     const mockSsh = createMockSsh({
-      [`test -f '${CONF_PATH}'`]: { code: 1 },
       [`rm -f '${CONF_PATH}'`]: { code: 0 },
       [`sysctl -w '${KEY}=0'`]: { code: 1, stderr: "permission denied" },
+      [`test -f '${CONF_PATH}'`]: { code: 1 },
     })
     const writeFileSpy = vi.spyOn(mockSsh, "writeFile")
     const mod = sysctl.set(KEY, VALUE, { resetValue: "0", state: "absent" })
@@ -386,10 +386,10 @@ describe("sysctl.set — apply", () => {
   it("R-0000658: chains rollback writeFile failures into the reset failure", async () => {
     const previousFileContent = `${KEY} = 1\n`
     const mockSsh = createMockSsh({
-      [`test -f '${CONF_PATH}'`]: { code: 0 },
       [`cat '${CONF_PATH}'`]: { code: 0, stdout: previousFileContent },
       [`rm -f '${CONF_PATH}'`]: { code: 0 },
       [`sysctl -w '${KEY}=0'`]: { code: 1, stderr: "permission denied" },
+      [`test -f '${CONF_PATH}'`]: { code: 0 },
     })
     vi.spyOn(mockSsh, "writeFile").mockRejectedValueOnce(
       new Error("SFTP write failed: read-only file system")
@@ -434,7 +434,7 @@ describe("sysctl.set — config path", () => {
   // the same persistence-file path after a single hash collision. The 96-bit
   // digest keeps the persistence-file path unique for keys that sanitize to
   // the same prefix but carry a different suffix.
-  it("R-0000650: produces distinct paths for keys that share the sanitized prefix", async () => {
+  it("R-0000650: produces distinct paths for keys that share the sanitized prefix", () => {
     const firstKey = "net.ipv4.tcp_rmem-alpha"
     const secondKey = "net.ipv4.tcp_rmem-beta"
     const firstPath = configPathForKey(firstKey)
@@ -452,11 +452,11 @@ describe("sysctl.set — config path", () => {
   // 12 hex digits (48 bits) hits the birthday bound around 2^24 keys, which
   // is reachable by realistic playbooks; 24 hex digits (96 bits) push the
   // bound past 2^48 and keep the filename well below the 255-byte limit.
-  it("R-0000650: persistence path embeds a 24-hex-digit (96-bit) digest", async () => {
+  it("R-0000650: persistence path embeds a 24-hex-digit (96-bit) digest", () => {
     const path = configPathForKey(KEY)
     const match = /-paratix-net-ipv4-ip_forward-(?<hash>[0-9a-f]+)\.conf$/v.exec(path)
     expect(match?.groups?.hash).toBeDefined()
-    expect(match?.groups?.hash?.length).toBe(24)
+    expect(match?.groups?.hash.length).toBe(24)
   })
 })
 

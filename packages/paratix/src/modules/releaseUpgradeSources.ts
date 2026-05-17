@@ -215,6 +215,10 @@ export function isSupportedDebianUpgradePath(
  * {@link isSupportedDebianUpgradePath}'s switch: any codename that
  * `isSupportedDebianUpgradePath` recognises as a legitimate upgrade
  * target is also accepted here.
+ *
+ * @param targetCodename - Codename extracted from `Codename:` in the
+ *   upstream Debian `Release` file.
+ * @returns `true` when the codename is a recognised stable upgrade target.
  */
 export function isAllowedDebianStableTargetCodename(targetCodename: string): boolean {
   switch (targetCodename) {

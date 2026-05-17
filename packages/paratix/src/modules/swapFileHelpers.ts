@@ -1,12 +1,10 @@
 import { posix as posixPath } from "node:path"
 
+import type { ModuleResult, SshConnection } from "../types.js"
+import type { NormalizedSwapFileOptions, SwapFilePathClassification } from "./swapFileTypes.js"
+
 import { failed, failedCommand } from "../moduleFailure.js"
 import { shellQuote, validateMode } from "../ssh.js"
-import type { ModuleResult, SshConnection } from "../types.js"
-import type {
-  NormalizedSwapFileOptions,
-  SwapFilePathClassification,
-} from "./swapFileTypes.js"
 
 export {
   cleanupSwapTemporaryFile,
@@ -14,12 +12,8 @@ export {
   ensureSwapFilePresent,
   publishInitializedSwapTemporaryFile,
 } from "./swapFileCreateHelpers.js"
-export {
-  ensureSwapFstabState,
-  hasNoSwapFstabEntry,
-  hasSwapFstabEntry,
-} from "./swapFstabHelpers.js"
 export type { NormalizedSwapFileOptions, SwapFilePathClassification } from "./swapFileTypes.js"
+export { ensureSwapFstabState, hasNoSwapFstabEntry, hasSwapFstabEntry } from "./swapFstabHelpers.js"
 
 const EXEC_OPTS = { ignoreExitCode: true, silent: true } as const
 const KIBI = 1024

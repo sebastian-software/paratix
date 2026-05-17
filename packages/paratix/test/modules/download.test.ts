@@ -1781,17 +1781,15 @@ describe("download.github", () => {
     })
 
     it("rejects an empty destination path", () => {
-      expect(() =>
-        download.github("", { ...allowUnverifiedDownload, asset, repo, tag })
-      ).toThrow("[download.github] destination must not be empty")
+      expect(() => download.github("", { ...allowUnverifiedDownload, asset, repo, tag })).toThrow(
+        "[download.github] destination must not be empty"
+      )
     })
 
     it("rejects destinations padded with whitespace", () => {
       expect(() =>
         download.github(" /tmp/asset", { ...allowUnverifiedDownload, asset, repo, tag })
-      ).toThrow(
-        "[download.github] destination must not start or end with whitespace:  /tmp/asset"
-      )
+      ).toThrow("[download.github] destination must not start or end with whitespace:  /tmp/asset")
     })
 
     it("rejects destinations that start with a dash", () => {
@@ -2467,7 +2465,9 @@ describe("download.large", () => {
     })
 
     it("rejects destinations padded with whitespace", () => {
-      expect(() => download.large(" /opt/data/large-file.iso", url, allowUnverifiedDownload)).toThrow(
+      expect(() =>
+        download.large(" /opt/data/large-file.iso", url, allowUnverifiedDownload)
+      ).toThrow(
         "[download.large] destination must not start or end with whitespace:  /opt/data/large-file.iso"
       )
     })

@@ -154,6 +154,7 @@
     "unredacted",
     "unstubbed",
     "unvalidated",
+    "upserted",
     "dearmored",
     "gnupg",
     "trustdb",

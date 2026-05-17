@@ -164,7 +164,9 @@ describe("timer.scheduled — apply (state: absent)", () => {
     // The rollback path must re-issue daemon-reload after the unit-file
     // restore so systemd sees the restored content, and replay the
     // enable+active state via `enable --now`.
-    expect(ssh.calls.filter((c) => c === "systemctl daemon-reload").length).toBeGreaterThanOrEqual(2)
+    expect(ssh.calls.filter((c) => c === "systemctl daemon-reload").length).toBeGreaterThanOrEqual(
+      2
+    )
     expect(ssh.calls).toContain("systemctl enable --now -- 'backup.timer'")
   })
 

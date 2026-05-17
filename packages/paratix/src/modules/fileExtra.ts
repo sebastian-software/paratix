@@ -625,10 +625,7 @@ const FILE_REPLACE_MAX_PATTERN_LENGTH = 1024
  * @param pattern - Raw pattern string from the playbook.
  * @returns Either the compiled `RegExp` or a `failed` {@link ModuleResult}.
  */
-function compileReplacePattern(
-  remotePath: string,
-  pattern: string
-): ModuleResult | RegExp {
+function compileReplacePattern(remotePath: string, pattern: string): ModuleResult | RegExp {
   if (pattern.length > FILE_REPLACE_MAX_PATTERN_LENGTH) {
     return failed(
       `[file.replace: ${remotePath}] pattern exceeds maximum length of ${String(FILE_REPLACE_MAX_PATTERN_LENGTH)} characters: got ${String(pattern.length)}`

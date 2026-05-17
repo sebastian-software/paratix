@@ -33,15 +33,15 @@ function distUpgradeApplyLockResponses(): Record<string, { code?: number; stdout
     `rmdir ${lockPath}`
   return {
     [`[ -f /var/lib/paratix/flags/'${DIST_UPGRADE_FLAG}' ]`]: { code: 1 },
-    [`mkdir /var/lib/paratix/flags/'${DIST_UPGRADE_FLAG}.lock'`]: { code: 0 },
-    [`printf '%s@%s %s\\n' "$$" '' "$(date +%s)" > ${markerPath}`]: { code: 0 },
     [`awk 'NR==1{print $1}' ${markerPath}`]: {
       code: 0,
       stdout: MOCK_FLAG_LOCK_HOLDER_TOKEN,
     },
-    [verifiedReleaseCommand]: { code: 0 },
+    [`mkdir /var/lib/paratix/flags/'${DIST_UPGRADE_FLAG}.lock'`]: { code: 0 },
+    [`printf '%s@%s %s\\n' "$$" '' "$(date +%s)" > ${markerPath}`]: { code: 0 },
     hostname: { code: 0, stdout: "" },
     "mkdir -p /var/lib/paratix/flags": { code: 0 },
+    [verifiedReleaseCommand]: { code: 0 },
   }
 }
 

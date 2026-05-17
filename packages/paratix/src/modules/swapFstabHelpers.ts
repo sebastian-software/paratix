@@ -64,6 +64,10 @@ function removeFstabEntry(fstabContent: string, path: string): string {
  * atomically only when the precondition (current content) still holds.
  *
  * @param parameters - The desired entry, the swap path, and the SSH handle.
+ * @param parameters.desiredLine - The new fstab line for the swap entry, or
+ *   `null` to remove the entry entirely.
+ * @param parameters.path - Absolute path of the swap file the entry refers to.
+ * @param parameters.ssh - SSH connection used for the read-modify-write cycle.
  * @returns `true` when fstab was modified, `false` when it was already
  *   converged, or a `failed` `ModuleResult` when the write rejected.
  */

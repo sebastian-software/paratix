@@ -178,11 +178,9 @@ async function rollbackLiveValue(
     if (rollback.code === 0) {
       return "rolled back live value to previous value"
     }
-    return failedCommand(
-      `[sysctl.set: ${key}] rollback to previous value failed`,
-      rollback,
-      [previousValue]
-    )
+    return failedCommand(`[sysctl.set: ${key}] rollback to previous value failed`, rollback, [
+      previousValue,
+    ])
   } finally {
     unregisterSecret(previousValue)
   }
@@ -197,6 +195,11 @@ async function rollbackLiveValue(
  *
  * @param input - The sysctl key, persistence-file path, captured writeFile
  *   error reason, and the rollback outcome to chain into the final message.
+ * @param input.configPath - The persistence-file path under /etc/sysctl.d/.
+ * @param input.key - The sysctl key whose write failed.
+ * @param input.rollbackStatus - Either the success message string or the
+ *   failed ModuleResult from `rollbackLiveValue`.
+ * @param input.writeReason - The captured writeFile error reason.
  * @returns A failed ModuleResult that chains both causes.
  */
 function buildPersistenceFailureResult(input: {

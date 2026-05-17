@@ -1254,6 +1254,28 @@ async function captureHostsFileSnapshot(conn: SshConnection): Promise<HostsFileS
  * @param snapshot - The current /etc/hosts content and its lines.
  * @returns The module result for the apply operation.
  */
+/**
+ * Create `/etc/hosts` from scratch, rejecting a planted symlink at the
+ * target path before the write.
+ *
+ * @param conn - The SSH connection.
+ * @param mergedLine - The single canonical line to write into the new file.
+ */
+async function createHostsFileWithSymlinkGuard(
+  conn: SshConnection,
+  mergedLine: string
+): Promise<ModuleResult> {
+  // R-0000277: defense-in-depth — refuse to write through a planted
+  // symlink at /etc/hosts before the atomic mv-replace inside writeFile
+  // would silently break it. Matches the guards in net.resolv,
+  // net.interface and net.route.
+  if (await isSymlink(conn, HOSTS_FILE)) {
+    return failed(`[net.hosts] refuses to write through symlink at ${HOSTS_FILE}`)
+  }
+  await conn.writeFile(HOSTS_FILE, `${mergedLine}\n`, { mode: HOSTS_FILE_MODE })
+  return { status: "changed" }
+}
+
 async function applyHostsPresent(
   conn: SshConnection,
   parameters: HostsStateParameters,
@@ -1262,19 +1284,7 @@ async function applyHostsPresent(
   const { isSameIpLine } = parameters
   const { content, existed, lines } = snapshot
   const mergedLine = buildMergedHostsLine(lines, parameters)
-  if (!existed) {
-    // R-0000277: defense-in-depth — refuse to write through a planted
-    // symlink at /etc/hosts before the atomic mv-replace inside writeFile
-    // would silently break it. Matches the guards in net.resolv,
-    // net.interface and net.route.
-    if (await isSymlink(conn, HOSTS_FILE)) {
-      return failed(
-        `[net.hosts] refuses to write through symlink at ${HOSTS_FILE}`
-      )
-    }
-    await conn.writeFile(HOSTS_FILE, `${mergedLine}\n`, { mode: HOSTS_FILE_MODE })
-    return { status: "changed" }
-  }
+  if (!existed) return createHostsFileWithSymlinkGuard(conn, mergedLine)
   // The file is canonical when all same-IP hostnames are consolidated
   // into one stable line. Foreign hostnames already associated with the
   // IP are preserved and desired hostnames are appended if missing.

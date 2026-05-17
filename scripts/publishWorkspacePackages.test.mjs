@@ -23,8 +23,8 @@ const STABLE_BUILD_METADATA_VERSION = `${DEFAULT_STABLE_VERSION}+build.5`
 // tests do not need to wire the new probes; tests that exercise the
 // freshness/missing-artefact branches override these defaults via
 // `createFs({ paratixFiles, createParatixFiles, mtimes })`.
-const FRESH_DIST_MTIME = 2_000
-const STALE_SOURCE_MTIME = 1_000
+const FRESH_DIST_MTIME = 2000
+const STALE_SOURCE_MTIME = 1000
 const DEFAULT_PARATIX_FILES = ["dist", "llm-guide.md"]
 const DEFAULT_CREATE_PARATIX_FILES = ["dist"]
 
@@ -294,8 +294,8 @@ describe("publishWorkspacePackages", () => {
         "packages/paratix/dist": 500,
         "packages/paratix/dist/index.js": 500,
         "packages/paratix/llm-guide.md": 500,
-        "packages/paratix/src": 5_000,
-        "packages/paratix/src/index.ts": 5_000,
+        "packages/paratix/src": 5000,
+        "packages/paratix/src/index.ts": 5000,
       },
     })
 

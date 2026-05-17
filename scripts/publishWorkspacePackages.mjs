@@ -160,7 +160,7 @@ async function maxMtimeMillisecondsUnder(directory, filesystem) {
       return stats.mtimeMs
     })
   )
-  return childMtimes.reduce((max, mtime) => (mtime > max ? mtime : max), 0)
+  return childMtimes.length > 0 ? Math.max(...childMtimes) : 0
 }
 
 async function mtimeMillisecondsForFileEntry(directory, fileEntry, filesystem) {
@@ -179,7 +179,7 @@ async function maxMtimeMillisecondsForFiles(directory, files, filesystem) {
   const fileMtimes = await Promise.all(
     files.map((fileEntry) => mtimeMillisecondsForFileEntry(directory, fileEntry, filesystem))
   )
-  return fileMtimes.reduce((max, mtime) => (mtime > max ? mtime : max), 0)
+  return fileMtimes.length > 0 ? Math.max(...fileMtimes) : 0
 }
 
 async function ensureFilesEntryExists(packageInfo, fileEntry, filesystem) {

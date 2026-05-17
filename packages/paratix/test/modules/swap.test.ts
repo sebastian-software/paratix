@@ -917,23 +917,23 @@ describe("swap.file — apply", () => {
       [`[ -e '${swapPath}' ]`]: { code: 0 },
       [`[ -f '${swapPath}' ]`]: { code: 0 },
       [`[ -L '${swapPath}' ]`]: { code: 1 },
-      // R-0000618: snapshot the swap file before rm so a fstab-write failure
-      // can be rolled back.
-      [`[ ! -L '${swapPath}' ] || { echo 'swap path must not be a symlink' >&2; exit 1; }; [ ! -L '${swapPath}.paratix-absent-backup' ] || { echo 'swap backup must not be a symlink' >&2; exit 1; }; ln -P -- '${swapPath}' '${swapPath}.paratix-absent-backup'`]:
-        { code: 0 },
-      [`cat '/etc/fstab'`]: { stdout: `${fstabLine}\n` },
-      [`cat '${swapPath}'`]: { stdout: "existing swap bytes" },
       // R-0000649: the pre-snapshot rm now refuses to operate on a symlink,
       // so the production code emits a combined `[ ! -L ] || exit 1; rm -f`
       // statement. The cleanup-rm after a successful snapshot still uses the
       // bare `rm -f --` form.
       [`[ ! -L '${swapPath}.paratix-absent-backup' ] || { echo 'swap backup must not be a symlink' >&2; exit 1; }; rm -f -- '${swapPath}.paratix-absent-backup'`]:
         { code: 0 },
+      // R-0000618: snapshot the swap file before rm so a fstab-write failure
+      // can be rolled back.
+      [`[ ! -L '${swapPath}' ] || { echo 'swap path must not be a symlink' >&2; exit 1; }; [ ! -L '${swapPath}.paratix-absent-backup' ] || { echo 'swap backup must not be a symlink' >&2; exit 1; }; ln -P -- '${swapPath}' '${swapPath}.paratix-absent-backup'`]:
+        { code: 0 },
+      [`cat '/etc/fstab'`]: { stdout: `${fstabLine}\n` },
+      [`cat '${swapPath}'`]: { stdout: "existing swap bytes" },
       [`rm -f -- '${swapPath}.paratix-absent-backup'`]: { code: 0 },
       [`rm -f '${swapPath}'`]: { code: 0 },
-      [safeSwapParentCommand]: { code: 0, stdout: "/\n" },
       [`swaplabel '${swapPath}' >/dev/null 2>&1`]: { code: 0 },
       [`swapoff '${swapPath}'`]: { code: 0 },
+      [safeSwapParentCommand]: { code: 0, stdout: "/\n" },
       "swapon --show=NAME --noheadings": { stdout: `${swapPath}\n` },
     })
     // eslint-disable-next-line @typescript-eslint/require-await -- mock implementation
@@ -955,23 +955,23 @@ describe("swap.file — apply", () => {
       [`[ -e '${swapPath}' ]`]: { code: 0 },
       [`[ -f '${swapPath}' ]`]: { code: 0 },
       [`[ -L '${swapPath}' ]`]: { code: 1 },
-      // R-0000618: snapshot the swap file before rm so a fstab-write failure
-      // can be rolled back.
-      [`[ ! -L '${swapPath}' ] || { echo 'swap path must not be a symlink' >&2; exit 1; }; [ ! -L '${swapPath}.paratix-absent-backup' ] || { echo 'swap backup must not be a symlink' >&2; exit 1; }; ln -P -- '${swapPath}' '${swapPath}.paratix-absent-backup'`]:
-        { code: 0 },
-      [`cat '/etc/fstab'`]: { stdout: `${fstabLine}\n` },
-      [`cat '${swapPath}'`]: { stdout: "existing swap bytes" },
       // R-0000649: the pre-snapshot rm now refuses to operate on a symlink,
       // so the production code emits a combined `[ ! -L ] || exit 1; rm -f`
       // statement. The cleanup-rm after a successful snapshot still uses the
       // bare `rm -f --` form.
       [`[ ! -L '${swapPath}.paratix-absent-backup' ] || { echo 'swap backup must not be a symlink' >&2; exit 1; }; rm -f -- '${swapPath}.paratix-absent-backup'`]:
         { code: 0 },
+      // R-0000618: snapshot the swap file before rm so a fstab-write failure
+      // can be rolled back.
+      [`[ ! -L '${swapPath}' ] || { echo 'swap path must not be a symlink' >&2; exit 1; }; [ ! -L '${swapPath}.paratix-absent-backup' ] || { echo 'swap backup must not be a symlink' >&2; exit 1; }; ln -P -- '${swapPath}' '${swapPath}.paratix-absent-backup'`]:
+        { code: 0 },
+      [`cat '/etc/fstab'`]: { stdout: `${fstabLine}\n` },
+      [`cat '${swapPath}'`]: { stdout: "existing swap bytes" },
       [`rm -f -- '${swapPath}.paratix-absent-backup'`]: { code: 0 },
       [`rm -f '${swapPath}'`]: { code: 0 },
-      [safeSwapParentCommand]: { code: 0, stdout: "/\n" },
       [`swaplabel '${swapPath}' >/dev/null 2>&1`]: { code: 0 },
       [`swapoff '${swapPath}'`]: { code: 0 },
+      [safeSwapParentCommand]: { code: 0, stdout: "/\n" },
       "swapon --show=NAME --noheadings": { stdout: `${swapPath}\n` },
     })
     ssh.writeFile = async (): Promise<void> => {
@@ -1001,24 +1001,24 @@ describe("swap.file — apply", () => {
       [`[ -e '${swapPath}' ]`]: { code: 0 },
       [`[ -f '${swapPath}' ]`]: { code: 0 },
       [`[ -L '${swapPath}' ]`]: { code: 1 },
-      // R-0000618: snapshot the swap file before rm so a fstab-write failure
-      // can be rolled back.
-      [`[ ! -L '${swapPath}' ] || { echo 'swap path must not be a symlink' >&2; exit 1; }; [ ! -L '${swapPath}.paratix-absent-backup' ] || { echo 'swap backup must not be a symlink' >&2; exit 1; }; ln -P -- '${swapPath}' '${swapPath}.paratix-absent-backup'`]:
-        { code: 0 },
-      [`cat '/etc/fstab'`]: { stdout: `${fstabLine}\n` },
-      [`cat '${swapPath}'`]: { stdout: "existing swap bytes" },
       // R-0000649: the pre-snapshot rm now refuses to operate on a symlink,
       // so the production code emits a combined `[ ! -L ] || exit 1; rm -f`
       // statement. The cleanup-rm after a successful snapshot still uses the
       // bare `rm -f --` form.
       [`[ ! -L '${swapPath}.paratix-absent-backup' ] || { echo 'swap backup must not be a symlink' >&2; exit 1; }; rm -f -- '${swapPath}.paratix-absent-backup'`]:
         { code: 0 },
+      // R-0000618: snapshot the swap file before rm so a fstab-write failure
+      // can be rolled back.
+      [`[ ! -L '${swapPath}' ] || { echo 'swap path must not be a symlink' >&2; exit 1; }; [ ! -L '${swapPath}.paratix-absent-backup' ] || { echo 'swap backup must not be a symlink' >&2; exit 1; }; ln -P -- '${swapPath}' '${swapPath}.paratix-absent-backup'`]:
+        { code: 0 },
+      [`cat '/etc/fstab'`]: { stdout: `${fstabLine}\n` },
+      [`cat '${swapPath}'`]: { stdout: "existing swap bytes" },
       [`rm -f -- '${swapPath}.paratix-absent-backup'`]: { code: 0 },
       [`rm -f '${swapPath}'`]: { code: 1, stderr: "rm: cannot remove: Permission denied" },
-      [safeSwapParentCommand]: { code: 0, stdout: "/\n" },
       [`swaplabel '${swapPath}' >/dev/null 2>&1`]: { code: 0 },
       [`swapoff '${swapPath}'`]: { code: 0 },
       [`swapon '${swapPath}'`]: { code: 0 },
+      [safeSwapParentCommand]: { code: 0, stdout: "/\n" },
       "swapon --show=NAME --noheadings": { stdout: `${swapPath}\n` },
     })
     // eslint-disable-next-line @typescript-eslint/require-await -- mock implementation
@@ -1050,22 +1050,22 @@ describe("swap.file — apply", () => {
       [`[ -L '${swapPath}' ]`]: { code: 1 },
       [`[ ! -L '${swapPath}.paratix-absent-backup' ] || { echo 'swap backup must not be a symlink' >&2; exit 1; }; [ ! -L '${swapPath}' ] || { echo 'swap path must not be a symlink' >&2; exit 1; }; mv -T -- '${swapPath}.paratix-absent-backup' '${swapPath}'`]:
         { code: 0 },
-      [`[ ! -L '${swapPath}' ] || { echo 'swap path must not be a symlink' >&2; exit 1; }; [ ! -L '${swapPath}.paratix-absent-backup' ] || { echo 'swap backup must not be a symlink' >&2; exit 1; }; ln -P -- '${swapPath}' '${swapPath}.paratix-absent-backup'`]:
-        { code: 0 },
-      [`cat '/etc/fstab'`]: { stdout: `${fstabLine}\n` },
-      [`cat '${swapPath}'`]: { stdout: "existing swap bytes" },
       // R-0000649: the pre-snapshot rm now refuses to operate on a symlink,
       // so the production code emits a combined `[ ! -L ] || exit 1; rm -f`
       // statement. The cleanup-rm after a successful snapshot still uses the
       // bare `rm -f --` form.
       [`[ ! -L '${swapPath}.paratix-absent-backup' ] || { echo 'swap backup must not be a symlink' >&2; exit 1; }; rm -f -- '${swapPath}.paratix-absent-backup'`]:
         { code: 0 },
+      [`[ ! -L '${swapPath}' ] || { echo 'swap path must not be a symlink' >&2; exit 1; }; [ ! -L '${swapPath}.paratix-absent-backup' ] || { echo 'swap backup must not be a symlink' >&2; exit 1; }; ln -P -- '${swapPath}' '${swapPath}.paratix-absent-backup'`]:
+        { code: 0 },
+      [`cat '/etc/fstab'`]: { stdout: `${fstabLine}\n` },
+      [`cat '${swapPath}'`]: { stdout: "existing swap bytes" },
       [`rm -f -- '${swapPath}.paratix-absent-backup'`]: { code: 0 },
       [`rm -f '${swapPath}'`]: { code: 0 },
-      [safeSwapParentCommand]: { code: 0, stdout: "/\n" },
       [`swaplabel '${swapPath}' >/dev/null 2>&1`]: { code: 0 },
       [`swapoff '${swapPath}'`]: { code: 0 },
       [`swapon '${swapPath}'`]: { code: 0 },
+      [safeSwapParentCommand]: { code: 0, stdout: "/\n" },
     })
     // First `swapon --show` (initial isSwapActive in disableSwap) reports
     // the swap active; the second call after the rollback (enableSwap →
@@ -1100,24 +1100,24 @@ describe("swap.file — apply", () => {
       [`[ -e '${swapPath}' ]`]: { code: 0 },
       [`[ -f '${swapPath}' ]`]: { code: 0 },
       [`[ -L '${swapPath}' ]`]: { code: 1 },
-      // R-0000618: snapshot the swap file before rm so a fstab-write failure
-      // can be rolled back.
-      [`[ ! -L '${swapPath}' ] || { echo 'swap path must not be a symlink' >&2; exit 1; }; [ ! -L '${swapPath}.paratix-absent-backup' ] || { echo 'swap backup must not be a symlink' >&2; exit 1; }; ln -P -- '${swapPath}' '${swapPath}.paratix-absent-backup'`]:
-        { code: 0 },
-      [`cat '/etc/fstab'`]: { stdout: `${fstabLine}\n` },
-      [`cat '${swapPath}'`]: { stdout: "existing swap bytes" },
       // R-0000649: the pre-snapshot rm now refuses to operate on a symlink,
       // so the production code emits a combined `[ ! -L ] || exit 1; rm -f`
       // statement. The cleanup-rm after a successful snapshot still uses the
       // bare `rm -f --` form.
       [`[ ! -L '${swapPath}.paratix-absent-backup' ] || { echo 'swap backup must not be a symlink' >&2; exit 1; }; rm -f -- '${swapPath}.paratix-absent-backup'`]:
         { code: 0 },
+      // R-0000618: snapshot the swap file before rm so a fstab-write failure
+      // can be rolled back.
+      [`[ ! -L '${swapPath}' ] || { echo 'swap path must not be a symlink' >&2; exit 1; }; [ ! -L '${swapPath}.paratix-absent-backup' ] || { echo 'swap backup must not be a symlink' >&2; exit 1; }; ln -P -- '${swapPath}' '${swapPath}.paratix-absent-backup'`]:
+        { code: 0 },
+      [`cat '/etc/fstab'`]: { stdout: `${fstabLine}\n` },
+      [`cat '${swapPath}'`]: { stdout: "existing swap bytes" },
       [`rm -f -- '${swapPath}.paratix-absent-backup'`]: { code: 0 },
       [`rm -f '${swapPath}'`]: { code: 1, stderr: "rm: cannot remove: Permission denied" },
-      [safeSwapParentCommand]: { code: 0, stdout: "/\n" },
       [`swaplabel '${swapPath}' >/dev/null 2>&1`]: { code: 0 },
       [`swapoff '${swapPath}'`]: { code: 0 },
       [`swapon '${swapPath}'`]: { code: 1, stderr: "swapon: failed" },
+      [safeSwapParentCommand]: { code: 0, stdout: "/\n" },
       "swapon --show=NAME --noheadings": { stdout: `${swapPath}\n` },
     })
     // eslint-disable-next-line @typescript-eslint/require-await -- mock implementation
@@ -1148,17 +1148,17 @@ describe("swap.file — apply", () => {
       [`[ -e '${swapPath}' ]`]: { code: 0 },
       [`[ -f '${swapPath}' ]`]: { code: 0 },
       [`[ -L '${swapPath}' ]`]: { code: 1 },
+      [`[ ! -L '${swapPath}.paratix-absent-backup' ] || { echo 'swap backup must not be a symlink' >&2; exit 1; }; rm -f -- '${swapPath}.paratix-absent-backup'`]:
+        { code: 0 },
       [`[ ! -L '${swapPath}' ] || { echo 'swap path must not be a symlink' >&2; exit 1; }; [ ! -L '${swapPath}.paratix-absent-backup' ] || { echo 'swap backup must not be a symlink' >&2; exit 1; }; ln -P -- '${swapPath}' '${swapPath}.paratix-absent-backup'`]:
         { code: 0 },
       [`cat '/etc/fstab'`]: { stdout: `${fstabLine}\n` },
       [`cat '${swapPath}'`]: { stdout: "existing swap bytes" },
-      [`[ ! -L '${swapPath}.paratix-absent-backup' ] || { echo 'swap backup must not be a symlink' >&2; exit 1; }; rm -f -- '${swapPath}.paratix-absent-backup'`]:
-        { code: 0 },
       [`rm -f -- '${swapPath}.paratix-absent-backup'`]: { code: 0 },
       [`rm -f '${swapPath}'`]: { code: 0 },
-      [safeSwapParentCommand]: { code: 0, stdout: "/\n" },
       [`swaplabel '${swapPath}' >/dev/null 2>&1`]: { code: 0 },
       [`swapoff '${swapPath}'`]: { code: 0 },
+      [safeSwapParentCommand]: { code: 0, stdout: "/\n" },
       "swapon --show=NAME --noheadings": { stdout: `${swapPath}\n` },
     })
     ssh.writeFile = async (): Promise<void> => {

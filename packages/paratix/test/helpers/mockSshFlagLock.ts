@@ -112,6 +112,7 @@ function escapeRegex(value: string): string {
 export function makeIsVerifiedReleaseCall(lockName: string): (call: string) => boolean {
   const markerPath = `/var/lib/paratix/flags/'${lockName}'/holder`
   const lockPath = `/var/lib/paratix/flags/'${lockName}'`
+  // eslint-disable-next-line security/detect-non-literal-regexp -- markerPath and lockPath are derived from a validated lockName and shell-escaped above
   const pattern = new RegExp(
     `^\\[ "\\$\\(awk 'NR==1\\{print \\$1\\}' ${escapeRegex(markerPath)} 2>/dev/null\\)" = '[^']*' \\] && rm -f ${escapeRegex(markerPath)} && rmdir ${escapeRegex(lockPath)}$`,
     "v"
