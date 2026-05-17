@@ -635,6 +635,51 @@ describe("op.resolve — local", () => {
 })
 
 // ---------------------------------------------------------------------------
+// R-0000641: null stdin terminates the orphaned op child
+// ---------------------------------------------------------------------------
+
+describe("op.resolve — null stdin (R-0000641)", () => {
+  beforeEach(() => {
+    vi.resetAllMocks()
+    clearRegisteredSecrets()
+    spawnCalls = []
+  })
+
+  afterEach(() => {
+    clearRegisteredSecrets()
+  })
+
+  it("kills the op child via SIGTERM when stdin is null and rejects", async () => {
+    const killCalls: NodeJS.Signals[] = []
+    const child = new EventEmitter() as MockChildProcess
+    Object.defineProperty(child, "stdout", { value: new EventEmitter() })
+    Object.defineProperty(child, "stderr", { value: new EventEmitter() })
+    Object.defineProperty(child, "exitCode", { value: null })
+    Object.defineProperty(child, "signalCode", { value: null })
+    Object.defineProperty(child, "stdin", { value: null })
+    ;(child as unknown as { kill: (signal: NodeJS.Signals) => void }).kill = (
+      signal: NodeJS.Signals
+    ) => {
+      killCalls.push(signal)
+    }
+    mockedSpawnFn.mockImplementation((command: string, args: readonly string[]) => {
+      trackSpawn(command, args)
+      return child as never
+    })
+
+    const module_ = op.resolve({ password: "op://vault/item/password" })
+    // eslint-disable-next-line prefer-spread -- Module.apply, not Function.prototype.apply
+    const result = await module_.apply(null, emptyEnv)
+
+    expect(result.status).toBe("failed")
+    expect(result.error?.message).toContain("stdin unavailable")
+    // Without an explicit kill the spawned ChildProcess would outlive the
+    // rejected promise; the fix sends SIGTERM as part of the escalation.
+    expect(killCalls).toContain("SIGTERM")
+  })
+})
+
+// ---------------------------------------------------------------------------
 // R-0000220: abort signal coupling + timeout
 // ---------------------------------------------------------------------------
 

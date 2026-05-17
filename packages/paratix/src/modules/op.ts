@@ -15,7 +15,7 @@ import {
   OP_OUTPUT_CAPTURE_LIMIT_BYTES,
 } from "./opOutputCapture.js"
 import { collectOpFailureOutputs, OpSpawnError } from "./opSpawnError.js"
-import { attachSpawnLifecycle } from "./opSpawnLifecycle.js"
+import { attachSpawnLifecycle, killChildEscalating } from "./opSpawnLifecycle.js"
 
 /**
  * Default upper bound for a single `op` CLI invocation. The 1Password helper
@@ -193,6 +193,12 @@ async function spawnWithInput(
     // no-op and the promise would hang because neither `error` nor `close`
     // had fired yet. Surface the failure explicitly instead.
     if (child.stdin == null) {
+      // R-0000641: without an active stdin pipe `rejectOnce` settles the
+      // promise but leaves the underlying ChildProcess running — Node.js
+      // does not implicitly terminate the spawned `op` process when the
+      // returned Promise rejects. Trigger SIGTERM with SIGKILL escalation
+      // so no orphaned 1Password CLI process can hang past this function.
+      killChildEscalating(child)
       rejectOnce(new Error(`${command} spawn failed: stdin unavailable`))
       return
     }

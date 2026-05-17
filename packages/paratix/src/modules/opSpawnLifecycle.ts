@@ -27,7 +27,7 @@ export function childHasExited(child: ChildProcess): boolean {
  *
  * @param child - The spawned child process to terminate.
  */
-function killChildEscalating(child: ChildProcess): void {
+export function killChildEscalating(child: ChildProcess): void {
   if (childHasExited(child)) return
   try {
     child.kill("SIGTERM")
