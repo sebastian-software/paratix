@@ -192,7 +192,10 @@ function createKnownHostsTrackingMock(
   baseResponses: Record<string, { code?: number; stderr?: string; stdout?: string }>
 ): ReturnType<typeof createMockSsh> {
   const grepCommand = `grep -qxF '${line}' '/home/paratix/.ssh/known_hosts'`
-  const stageCommand = `{ if [ -e '/home/paratix/.ssh/known_hosts' ]; then [ ! -L '/home/paratix/.ssh/known_hosts' ] || { echo 'known_hosts must not be a symlink' >&2; exit 1; }; [ -f '/home/paratix/.ssh/known_hosts' ] || { echo 'known_hosts must be a regular file' >&2; exit 1; }; awk '1' '/home/paratix/.ssh/known_hosts' > '/home/paratix/.ssh/.paratix-known-hosts.ABC123' || exit $?; else : > '/home/paratix/.ssh/.paratix-known-hosts.ABC123'; fi; grep -qxF '${line}' '/home/paratix/.ssh/.paratix-known-hosts.ABC123'; grep_status=$?; if [ "$grep_status" -eq 0 ]; then :; elif [ "$grep_status" -eq 1 ]; then printf '%s\\n' '${line}' >> '/home/paratix/.ssh/.paratix-known-hosts.ABC123'; else exit "$grep_status"; fi; }`
+  // R-0000626: the append-branch reads the existing known_hosts via
+  // `dd ... iflag=nofollow` so the open(2) uses `O_NOFOLLOW` and the
+  // TOCTOU window between the `[ ! -L ]` probe and the read is closed.
+  const stageCommand = `{ if [ -e '/home/paratix/.ssh/known_hosts' ]; then [ ! -L '/home/paratix/.ssh/known_hosts' ] || { echo 'known_hosts must not be a symlink' >&2; exit 1; }; [ -f '/home/paratix/.ssh/known_hosts' ] || { echo 'known_hosts must be a regular file' >&2; exit 1; }; dd if='/home/paratix/.ssh/known_hosts' iflag=nofollow status=none of='/home/paratix/.ssh/.paratix-known-hosts.ABC123' || exit $?; else : > '/home/paratix/.ssh/.paratix-known-hosts.ABC123'; fi; grep -qxF '${line}' '/home/paratix/.ssh/.paratix-known-hosts.ABC123'; grep_status=$?; if [ "$grep_status" -eq 0 ]; then :; elif [ "$grep_status" -eq 1 ]; then printf '%s\\n' '${line}' >> '/home/paratix/.ssh/.paratix-known-hosts.ABC123'; else exit "$grep_status"; fi; }`
   let present = false
   const base = createSshApplyMockSsh(baseResponses)
   return {

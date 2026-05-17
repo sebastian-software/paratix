@@ -673,7 +673,17 @@ function knownHostsStageCommand(parameters: {
         `grep -qxF ${shellQuote(line)} ${quotedTemporaryPath}; grep_status=$?; if [ "$grep_status" -eq 0 ]; then :; elif [ "$grep_status" -eq 1 ]; then printf '%s\\n' ${shellQuote(line)} >> ${quotedTemporaryPath}; else exit "$grep_status"; fi`
     )
     .join("; ")
-  return `{ if [ -e ${quotedKnownHostsPath} ]; then ${existingKnownHostsGuard}; awk '1' ${quotedKnownHostsPath} > ${quotedTemporaryPath} || exit $?; else : > ${quotedTemporaryPath}; fi; ${appendMissingLines}; }`
+  // R-0000626: read the existing known_hosts through `dd ... iflag=nofollow`
+  // so the open(2) at the staging step uses `O_NOFOLLOW`. The previous
+  // `awk '1' $knownHostsPath > $temporaryPath` opened the path without
+  // `O_NOFOLLOW`, leaving a TOCTOU window between the `[ ! -L ]` probe in
+  // `existingKnownHostsGuard` and the awk read where an attacker with
+  // write access to `~/.ssh` could swap the file for a symlink and
+  // redirect the read into an arbitrary file (e.g. a private key) which
+  // would then be staged into the appended known_hosts. `dd iflag=nofollow`
+  // fails with ELOOP at open(2) time when the path is a symlink, collapsing
+  // the race window (analog R-0000617 for authorized_keys).
+  return `{ if [ -e ${quotedKnownHostsPath} ]; then ${existingKnownHostsGuard}; dd if=${quotedKnownHostsPath} iflag=nofollow status=none of=${quotedTemporaryPath} || exit $?; else : > ${quotedTemporaryPath}; fi; ${appendMissingLines}; }`
 }
 
 async function stageKnownHostsContent(
