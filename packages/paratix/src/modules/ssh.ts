@@ -250,8 +250,16 @@ async function createKnownHostsTemporaryPath(
   conn: SshConnection,
   sshDirectoryPath: string
 ): Promise<string> {
-  const template = `${sshDirectoryPath}/${KNOWN_HOSTS_TEMPORARY_PREFIX}.XXXXXX`
-  const temporaryPath = await conn.output(`mktemp ${shellQuote(template)}`)
+  // R-0000565 hardening: pass the staging directory via `-p` and separate
+  // the template with `--`, mirroring `createAuthorizedKeysTemporaryPath`
+  // and `allocateRemoteScriptPath`. Defense-in-depth in case
+  // `validateKnownHostsHome` is ever loosened to accept paths without a
+  // leading slash, so a future caller-controlled value cannot be parsed
+  // as a `mktemp` option.
+  const template = `${KNOWN_HOSTS_TEMPORARY_PREFIX}.XXXXXX`
+  const temporaryPath = await conn.output(
+    `mktemp -p ${shellQuote(sshDirectoryPath)} -- ${shellQuote(template)}`
+  )
   return validateMktempPath(sshDirectoryPath, temporaryPath, KNOWN_HOSTS_TEMPORARY_PREFIX)
 }
 

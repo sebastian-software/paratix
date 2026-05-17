@@ -34,7 +34,7 @@ const successfulSshApplyResponseStubs: NonNullable<MockSshOptions["responseStubs
     result: { code: 1 },
   },
   {
-    command: "mktemp '/home/paratix/.ssh/.paratix-known-hosts.XXXXXX'",
+    command: "mktemp -p '/home/paratix/.ssh' -- '.paratix-known-hosts.XXXXXX'",
     result: { stdout: knownHostsTemporaryPath },
   },
   {
