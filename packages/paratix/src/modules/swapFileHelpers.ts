@@ -187,9 +187,27 @@ async function hasSwapSignature(ssh: SshConnection, path: string): Promise<boole
   return ssh.test(`swaplabel ${shellQuote(path)} >/dev/null 2>&1`)
 }
 
-async function readFileSizeInBytes(ssh: SshConnection, path: string): Promise<number> {
-  const output = await ssh.output(`stat -c %s ${shellQuote(path)}`)
-  return Number.parseInt(output.trim(), 10)
+// R-0000648: route stat through `ssh.exec(..., { ignoreExitCode: true })`
+// instead of `ssh.output`, which throws on a non-zero exit. A TOCTOU race
+// (the file is unlinked between `ssh.exists` and `stat`) or a permission
+// error must surface as a structured failure so callers can convert it to
+// NEEDS_APPLY (check path) or a failed ModuleResult (apply path) without
+// the rest of the module crashing with an unstructured exception.
+async function readFileSizeInBytes(
+  ssh: SshConnection,
+  path: string
+): Promise<ModuleResult | number> {
+  const result = await ssh.exec(`stat -c %s ${shellQuote(path)}`, EXEC_OPTS)
+  if (result.code !== 0) {
+    return failedCommand(`[swap.file: ${path}] stat failed while reading swap file size`, result)
+  }
+  const parsed = Number.parseInt(result.stdout.trim(), 10)
+  if (!Number.isFinite(parsed)) {
+    return failed(
+      `[swap.file: ${path}] stat returned a non-numeric size: ${JSON.stringify(result.stdout)}`
+    )
+  }
+  return parsed
 }
 
 export async function classifySwapFilePath(
@@ -278,34 +296,57 @@ export function normalizeSwapFileOptions(options: {
   }
 }
 
+// R-0000648: `needsSwapRecreation` may now report a structured failure when
+// the underlying `stat` call fails after `ssh.exists` reported the path as
+// present (typical TOCTOU symptom). Callers translate this failure into
+// NEEDS_APPLY on the check path and into a failed ModuleResult on the
+// apply path.
 export async function needsSwapRecreation(
   ssh: SshConnection,
   options: NormalizedSwapFileOptions
-): Promise<boolean> {
+): Promise<boolean | ModuleResult> {
   if (!(await ssh.exists(options.path))) return true
-  if ((await readFileSizeInBytes(ssh, options.path)) !== options.sizeBytes) return true
+  const sizeResult = await readFileSizeInBytes(ssh, options.path)
+  if (typeof sizeResult !== "number") return sizeResult
+  if (sizeResult !== options.sizeBytes) return true
   return !(await hasSwapSignature(ssh, options.path))
 }
 
 // R-0000495: read /etc/fstab under the same mutex that protects writes so
 // concurrent runs never observe a partially written file.
-async function readFstabUnderLock(ssh: SshConnection): Promise<string> {
+// R-0000648: surface read failures as a structured ModuleResult instead of
+// letting the underlying `ssh.readFile` reject. The withMutexLock wrapper
+// still owns lock acquisition/release; only the inner readFile is allowed
+// to fail soft via try/catch so the lock is always released.
+async function readFstabUnderLock(ssh: SshConnection): Promise<ModuleResult | string> {
   return withMutexLock(ssh, {
     lockName: FSTAB_FILE_MUTEX,
-    section: async () => ssh.readFile(FSTAB_PATH),
+    section: async () => {
+      try {
+        return await ssh.readFile(FSTAB_PATH)
+      } catch (error) {
+        const reason = error instanceof Error ? error.message : String(error)
+        return failed(`[swap.file] failed to read ${FSTAB_PATH}: ${reason}`)
+      }
+    },
   })
 }
 
 export async function hasSwapFstabEntry(
   ssh: SshConnection,
   options: NormalizedSwapFileOptions
-): Promise<boolean> {
+): Promise<boolean | ModuleResult> {
   const fstab = await readFstabUnderLock(ssh)
+  if (typeof fstab !== "string") return fstab
   return findFstabEntry(fstab, options.path) === options.expectedFstabLine
 }
 
-export async function hasNoSwapFstabEntry(ssh: SshConnection, path: string): Promise<boolean> {
+export async function hasNoSwapFstabEntry(
+  ssh: SshConnection,
+  path: string
+): Promise<boolean | ModuleResult> {
   const fstab = await readFstabUnderLock(ssh)
+  if (typeof fstab !== "string") return fstab
   return findFstabEntry(fstab, path) == null
 }
 

@@ -170,6 +170,60 @@ describe("swap.file — check", () => {
     const result = await mod.check(ssh, emptyEnv)
     expect(result).toBe("needs-apply")
   })
+
+  // R-0000648: a non-zero `stat -c %s` (e.g. the swap file vanished between
+  // `[ -e ]` and `stat`, or stat hit a permission error) used to propagate
+  // an unstructured exception out of `readFileSizeInBytes`. The check path
+  // now treats it as NEEDS_APPLY so the subsequent apply can produce a
+  // structured failed ModuleResult.
+  it("R-0000648: returns needs-apply when stat for the swap file size fails", async () => {
+    const ssh = createMockSsh({
+      [`[ -e '${swapPath}' ]`]: { code: 0 },
+      [`cat '${swapPath}'`]: { stdout: "existing swap bytes" },
+      [`stat -c %s '${swapPath}'`]: { code: 1, stderr: "stat: cannot stat: Permission denied" },
+    })
+    const mod = swap.file({ path: swapPath, size: swapSize })
+    const result = await mod.check(ssh, emptyEnv)
+    expect(result).toBe("needs-apply")
+  })
+
+  // R-0000648: when the fstab read fails inside `hasSwapFstabEntry` the
+  // check path now also reports NEEDS_APPLY (instead of crashing) so the
+  // apply path is reached and produces a structured failure.
+  it("R-0000648: returns needs-apply for present state when fstab read fails", async () => {
+    const ssh = createMockSsh({
+      [`[ -e '${swapPath}' ]`]: { code: 0 },
+      [`cat '${swapPath}'`]: { stdout: "existing swap bytes" },
+      [`stat -c %s '${swapPath}'`]: { code: 0, stdout: swapSizeBytes },
+      [`swaplabel '${swapPath}' >/dev/null 2>&1`]: { code: 0 },
+      "swapon --show=NAME --noheadings": { stdout: `${swapPath}\n` },
+    })
+    ssh.readFile = async (): Promise<string> => {
+      await Promise.resolve()
+      throw new Error("fstab read denied")
+    }
+    const mod = swap.file({ path: swapPath, size: swapSize })
+    const result = await mod.check(ssh, emptyEnv)
+    expect(result).toBe("needs-apply")
+  })
+
+  // R-0000648: absent-state check must also fall back to NEEDS_APPLY when
+  // the underlying fstab read fails, instead of misclassifying the host as
+  // converged.
+  it("R-0000648: returns needs-apply for absent state when fstab read fails", async () => {
+    const ssh = createMockSsh({
+      [`[ -e '${swapPath}' ]`]: { code: 1 },
+      [`[ -L '${swapPath}' ]`]: { code: 1 },
+      "swapon --show=NAME --noheadings": { stdout: "" },
+    })
+    ssh.readFile = async (): Promise<string> => {
+      await Promise.resolve()
+      throw new Error("fstab read denied")
+    }
+    const mod = swap.file({ path: swapPath, size: swapSize, state: "absent" })
+    const result = await mod.check(ssh, emptyEnv)
+    expect(result).toBe("needs-apply")
+  })
 })
 
 describe("swap.file — apply", () => {
@@ -178,6 +232,22 @@ describe("swap.file — apply", () => {
     const applyModule = mod.apply
     const result = await applyModule(null, emptyEnv)
     expect(result.status).toBe("failed")
+  })
+
+  // R-0000648: when `stat -c %s` exits non-zero during the
+  // needsSwapRecreation check inside apply, the helper must return a
+  // structured failed ModuleResult instead of throwing. Mirrors the
+  // R-0000648 check-side coverage above.
+  it("R-0000648: returns failed when stat fails during apply needsSwapRecreation", async () => {
+    const ssh = createMockSsh({
+      [`[ -e '${swapPath}' ]`]: { code: 0 },
+      [`cat '${swapPath}'`]: { stdout: "existing swap bytes" },
+      [`stat -c %s '${swapPath}'`]: { code: 1, stderr: "stat: Permission denied" },
+    })
+    const mod = swap.file({ path: swapPath, size: swapSize })
+    const result = await mod.apply(ssh, emptyEnv)
+    expect(result.status).toBe("failed")
+    expect(result.error?.message).toContain("stat failed while reading swap file size")
   })
 
   it("creates, initializes, enables, and persists a new swap file", async () => {

@@ -153,7 +153,13 @@ async function recreateSwapFile(
   ssh: SshConnection,
   options: NormalizedSwapFileOptions
 ): Promise<RecreateOutcome> {
-  if (!(await needsSwapRecreation(ssh, options))) return "ok"
+  // R-0000648: needsSwapRecreation now may report a structured failure
+  // (e.g. stat hit a permission error or the file vanished between the
+  // exists probe and the stat). Propagate that as a failed ModuleResult
+  // through the existing RecreateOutcome union.
+  const needsRecreation = await needsSwapRecreation(ssh, options)
+  if (typeof needsRecreation !== "boolean") return { kind: "result", ...needsRecreation }
+  if (!needsRecreation) return "ok"
 
   const safeRemoval = await ensureSafeSwapRemovalForPresent(ssh, options.path)
   if (typeof safeRemoval !== "string") return { kind: "result", ...safeRemoval }
@@ -259,16 +265,28 @@ async function checkAbsent(
 ): Promise<"needs-apply" | "ok"> {
   if (await ssh.exists(options.path)) return NEEDS_APPLY
   if (await isSwapActive(ssh, options.path)) return NEEDS_APPLY
-  return (await hasNoSwapFstabEntry(ssh, options.path)) ? "ok" : NEEDS_APPLY
+  // R-0000648: a soft-failure from hasNoSwapFstabEntry (e.g. `cat /etc/fstab`
+  // refused) cannot be classified as "absent has converged" — fall back to
+  // NEEDS_APPLY so the apply path produces a real diagnostic.
+  const hasNoEntry = await hasNoSwapFstabEntry(ssh, options.path)
+  if (typeof hasNoEntry !== "boolean") return NEEDS_APPLY
+  return hasNoEntry ? "ok" : NEEDS_APPLY
 }
 
 async function checkPresent(
   ssh: SshConnection,
   options: NormalizedSwapFileOptions
 ): Promise<"needs-apply" | "ok"> {
-  if (await needsSwapRecreation(ssh, options)) return NEEDS_APPLY
+  // R-0000648: soft-failures from the stat / fstab probes are treated as
+  // NEEDS_APPLY so the apply path takes over and emits a structured failed
+  // ModuleResult; only a confirmed convergence returns "ok".
+  const needsRecreation = await needsSwapRecreation(ssh, options)
+  if (typeof needsRecreation !== "boolean") return NEEDS_APPLY
+  if (needsRecreation) return NEEDS_APPLY
   if (!(await isSwapActive(ssh, options.path))) return NEEDS_APPLY
-  if (!(await hasSwapFstabEntry(ssh, options))) return NEEDS_APPLY
+  const hasEntry = await hasSwapFstabEntry(ssh, options)
+  if (typeof hasEntry !== "boolean") return NEEDS_APPLY
+  if (!hasEntry) return NEEDS_APPLY
   return (await swapFileModeMatches(ssh, options)) ? "ok" : NEEDS_APPLY
 }
 
