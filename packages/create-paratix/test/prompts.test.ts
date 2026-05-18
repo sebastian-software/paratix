@@ -610,6 +610,48 @@ describe("R-0000664: TTY gate on default-select prompts", () => {
       restoreTty()
     }
   })
+
+  // R-0000684: promptForInitialUserConfig previously relied on the generic
+  // Error from runTerminalSelect when invoked on a non-TTY caller, which
+  // skipped the CliExit cleanup and the --initial-user hint. The gate
+  // mirrors promptForAdminPublicKey/promptForHostFingerprint so the
+  // failure mode stays consistent across all three default-prompt paths.
+  it("promptForInitialUserConfig rejects without a stdin TTY", async () => {
+    const restoreTty = setProcessTtyForTest(false, true)
+    try {
+      await expect(promptForInitialUserConfig()).rejects.toMatchObject({
+        cliMessage: expect.stringContaining("--initial-user"),
+        name: "CliExitError",
+      })
+    } finally {
+      restoreTty()
+    }
+  })
+
+  it("promptForInitialUserConfig rejects without a stdout TTY", async () => {
+    const restoreTty = setProcessTtyForTest(true, false)
+    try {
+      await expect(promptForInitialUserConfig()).rejects.toMatchObject({
+        cliMessage: expect.stringContaining("Interactive prompt requires a TTY"),
+        name: "CliExitError",
+      })
+    } finally {
+      restoreTty()
+    }
+  })
+
+  it("promptForInitialUserConfig skips the TTY gate when prompt and select are injected", async () => {
+    const restoreTty = setProcessTtyForTest(false, false)
+    const prompt = vi.fn()
+    const select = vi.fn().mockResolvedValueOnce("root")
+    try {
+      await expect(promptForInitialUserConfig(prompt, select)).resolves.toStrictEqual({
+        kind: "root",
+      })
+    } finally {
+      restoreTty()
+    }
+  })
 })
 
 // R-0000190: cleanupSelectInput must not call setRawMode on non-TTY stdin

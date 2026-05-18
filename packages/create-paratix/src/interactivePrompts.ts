@@ -202,6 +202,25 @@ export async function promptForInitialUserConfig(
   select?: SelectFunction<"admin" | "root">,
   createSession: (prompt?: PromptFunction) => InitialUserPromptSession = createPromptSession
 ): Promise<InitialUserConfig> {
+  // R-0000684: refuse non-TTY callers before `createPromptSession()` opens
+  // a readline interface and `createTerminalSelect()` flips stdin into raw
+  // mode. Without this guard a non-TTY caller crashed inside
+  // `runTerminalSelect` with a generic Error that skipped the CliExit
+  // cleanup and the `--initial-user` hint. Tests and other consumers that
+  // inject a `createSession` factory bypass the terminal-select setup and
+  // keep working unchanged.
+  if (
+    prompt == null &&
+    select == null &&
+    createSession === createPromptSession &&
+    (!process.stdin.isTTY || !process.stdout.isTTY)
+  ) {
+    throw new CliExitError(
+      "Interactive prompt requires a TTY. Pass --initial-user <root|name> " +
+        "(or run create-paratix from an interactive shell) to skip the prompt.",
+      1
+    )
+  }
   const promptSession = createSession(prompt)
   const chooseInitialUser = select ?? promptSession.chooseInitialUser
 
