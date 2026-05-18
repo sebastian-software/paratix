@@ -209,6 +209,10 @@ describe("runPlaybook dry-run recipe behaviour", () => {
         readFile: vi.fn().mockResolvedValue("PasswordAuthentication yes\n"),
         writeFile: vi.fn().mockResolvedValue(null),
       }),
+      // R-0000766: sshd.ts now imports `validateMktempPath` to validate the
+      // dry-run tempfile path. Provide a permissive identity stub here so
+      // the runner-level doMock does not strip the export.
+      validateMktempPath: (_dir: string, path: string) => path,
     }))
     vi.spyOn(console, "log").mockImplementation((...args) => {
       consoleLogs.push(args.join(" "))
@@ -566,6 +570,9 @@ describe("runPlaybook dry-run recipe behaviour", () => {
         reconnect,
         writeFile: vi.fn().mockResolvedValue(null),
       }),
+      // R-0000766: sshd.ts now imports `validateMktempPath`; provide a
+      // permissive identity stub so the doMock keeps the export available.
+      validateMktempPath: (_dir: string, path: string) => path,
     }))
     vi.spyOn(console, "log").mockImplementation((...args) => {
       consoleLogs.push(args.join(" "))

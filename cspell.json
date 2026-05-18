@@ -160,6 +160,7 @@
     "unredacted",
     "unstubbed",
     "unvalidated",
+    "unwritable",
     "upserted",
     "ciphertext",
     "Clearsigned",

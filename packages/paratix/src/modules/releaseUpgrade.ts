@@ -172,6 +172,30 @@ function formatDebianInReleaseFailure(result: ExecResult): string {
 }
 
 /**
+ * R-0000764: extract the signed body lines of a cleartext PGP message.
+ * The cleartext PGP header ends at the first blank line; the signed body
+ * ends at the `-----BEGIN PGP SIGNATURE-----` marker. Lines outside that
+ * range must never feed back into downstream parsing, otherwise a quirky
+ * or hostile signer could plant an arbitrary `Codename:` line in the
+ * header and override the real signed value.
+ *
+ * @param body - The full cleartext `InRelease` body as returned by gpgv.
+ * @returns An array of lines that belong to the signed metadata body
+ *   (i.e. between the cleartext header's blank-line separator and the
+ *   signature marker), in their original order.
+ */
+function extractCleartextPgpBodyLines(body: string): string[] {
+  const lines = body.split("\n")
+  const headerEndIndex = lines.indexOf("")
+  if (headerEndIndex === -1) return []
+  const candidateBodyLines = lines.slice(headerEndIndex + 1)
+  const signatureIndex = candidateBodyLines.findIndex((line) =>
+    line.startsWith("-----BEGIN PGP SIGNATURE-----")
+  )
+  return signatureIndex === -1 ? candidateBodyLines : candidateBodyLines.slice(0, signatureIndex)
+}
+
+/**
  * R-0000716: parse the cleartext body of a verified `InRelease` file and
  * return the `Codename:` field. The body looks like:
  *
@@ -188,41 +212,27 @@ function formatDebianInReleaseFailure(result: ExecResult): string {
  * -----END PGP SIGNATURE-----
  * ```
  *
- * R-0000764: skip over the cleartext PGP header (the lines between
- * `-----BEGIN PGP SIGNED MESSAGE-----` and the first blank line) before
- * looking for `Codename:`. The PGP cleartext header may legitimately carry
- * arbitrary `Hash:`/`Comment:`/`Charset:` fields, and a hostile or quirky
- * signer could plant a `Codename: stretch` line in there. Starting the
- * scan only after the body separator guarantees we read the codename from
- * the signed metadata block. Scanning still stops at the
- * `-----BEGIN PGP SIGNATURE-----` marker so the lookup never matches
- * inside the signature block either.
+ * R-0000764: only scan the signed body (the lines between the cleartext
+ * header's blank-line separator and the signature marker) so that the
+ * PGP cleartext header — which may legitimately carry arbitrary
+ * `Hash:`/`Comment:`/`Charset:` fields — cannot smuggle a planted
+ * `Codename:` line past the verification. The body extraction is shared
+ * with future cleartext-PGP parsing helpers via
+ * {@link extractCleartextPgpBodyLines}.
  *
  * @param body - The full cleartext `InRelease` body as returned by gpgv.
  * @returns The codename extracted from the body.
  * @throws {Error} When the `Codename:` field is absent or invalid.
  */
 function parseDebianStableCodenameFromInRelease(body: string): string {
-  const lines = body.split("\n")
-  let inBody = false
-  for (const line of lines) {
-    if (!inBody) {
-      // R-0000764: the cleartext PGP header ends at the first blank line.
-      // Until then we ignore every line — including anything that happens to
-      // look like a `Codename:` field inside `Hash:`/`Comment:`/`Charset:`
-      // continuations.
-      if (line === "") inBody = true
-      continue
-    }
-    if (line.startsWith("-----BEGIN PGP SIGNATURE-----")) break
+  for (const line of extractCleartextPgpBodyLines(body)) {
     const match = /^Codename:\s+(?<name>\S+)$/v.exec(line)
-    if (match?.groups) {
-      const codename = match.groups.name
-      if (!CODENAME_RE.test(codename)) {
-        throw new Error(`Invalid stable codename from Debian mirrors: ${JSON.stringify(codename)}`)
-      }
-      return codename
+    if (!match?.groups) continue
+    const codename = match.groups.name
+    if (!CODENAME_RE.test(codename)) {
+      throw new Error(`Invalid stable codename from Debian mirrors: ${JSON.stringify(codename)}`)
     }
+    return codename
   }
   throw new Error("Could not determine Debian stable codename")
 }

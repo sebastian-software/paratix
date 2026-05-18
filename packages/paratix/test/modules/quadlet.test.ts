@@ -123,6 +123,8 @@ describe("quadlet.container", () => {
   it("check returns ok when the remote quadlet matches", async () => {
     const ssh = createMockSsh({
       [`[ -e '${quadletFilePath}' ]`]: { code: 0 },
+      // R-0000762: pin the symlink probe to "not a symlink".
+      [`[ -L '${quadletFilePath}' ]`]: { code: 1 },
       [`cat '${quadletFilePath}'`]: { code: 0, stdout: expectedQuadletContent() },
       [`stat -c '%a' '${quadletFilePath}'`]: { code: 0, stdout: "644\n" },
       [buildReloadFlagCheck("traefik", expectedQuadletContent())]: { code: 0 },
@@ -136,6 +138,8 @@ describe("quadlet.container", () => {
   it("check returns needs-apply when the quadlet is missing", async () => {
     const ssh = createMockSsh({
       [`[ -e '${quadletFilePath}' ]`]: { code: 1 },
+      // R-0000762: the symlink probe runs before the existence probe.
+      [`[ -L '${quadletFilePath}' ]`]: { code: 1 },
     })
 
     const result = await createQuadletModule().check(ssh, emptyEnv)
@@ -146,6 +150,9 @@ describe("quadlet.container", () => {
   it("check returns needs-apply when the quadlet content differs", async () => {
     const ssh = createMockSsh({
       [`[ -e '${quadletFilePath}' ]`]: { code: 0 },
+      // R-0000762: check refuses symlinks up front; pin to non-symlink so
+      // the content-drift assertion still exercises the real codepath.
+      [`[ -L '${quadletFilePath}' ]`]: { code: 1 },
       [`cat '${quadletFilePath}'`]: { code: 0, stdout: "[Unit]\nDescription=Old\n" },
     })
 
@@ -157,6 +164,9 @@ describe("quadlet.container", () => {
   it("check returns needs-apply when content matches but mode drifts to 0600", async () => {
     const ssh = createMockSsh({
       [`[ -e '${quadletFilePath}' ]`]: { code: 0 },
+      // R-0000762: pin the symlink probe to "not a symlink" so the mode
+      // drift branch is the assertion under test.
+      [`[ -L '${quadletFilePath}' ]`]: { code: 1 },
       [`cat '${quadletFilePath}'`]: { code: 0, stdout: expectedQuadletContent() },
       [`stat -c '%a' '${quadletFilePath}'`]: { code: 0, stdout: "600\n" },
     })
@@ -169,6 +179,8 @@ describe("quadlet.container", () => {
   it("check returns needs-apply when stat for the quadlet file mode fails", async () => {
     const ssh = createMockSsh({
       [`[ -e '${quadletFilePath}' ]`]: { code: 0 },
+      // R-0000762: pin the symlink probe to "not a symlink".
+      [`[ -L '${quadletFilePath}' ]`]: { code: 1 },
       [`cat '${quadletFilePath}'`]: { code: 0, stdout: expectedQuadletContent() },
       [`stat -c '%a' '${quadletFilePath}'`]: { code: 1, stdout: "" },
     })
@@ -181,9 +193,21 @@ describe("quadlet.container", () => {
   it("check returns needs-apply when daemon-reload marker is missing", async () => {
     const ssh = createMockSsh({
       [`[ -e '${quadletFilePath}' ]`]: { code: 0 },
+      // R-0000762: pin the symlink probe to "not a symlink".
+      [`[ -L '${quadletFilePath}' ]`]: { code: 1 },
       [`cat '${quadletFilePath}'`]: { code: 0, stdout: expectedQuadletContent() },
       [`stat -c '%a' '${quadletFilePath}'`]: { code: 0, stdout: "644\n" },
       [buildReloadFlagCheck("traefik", expectedQuadletContent())]: { code: 1 },
+    })
+
+    const result = await createQuadletModule().check(ssh, emptyEnv)
+
+    expect(result).toBe("needs-apply")
+  })
+
+  it("R-0000762: check returns needs-apply when the quadlet file is a symlink", async () => {
+    const ssh = createMockSsh({
+      [`[ -L '${quadletFilePath}' ]`]: { code: 0 },
     })
 
     const result = await createQuadletModule().check(ssh, emptyEnv)
@@ -446,6 +470,8 @@ describe("quadlet.container", () => {
     const filePath = "/etc/containers/systemd/pocket-id.container"
     const ssh = createMockSsh({
       [`[ -e '${filePath}' ]`]: { code: 0 },
+      // R-0000762: pin the symlink probe to "not a symlink".
+      [`[ -L '${filePath}' ]`]: { code: 1 },
       [`cat '${filePath}'`]: { code: 0, stdout: expectedContent },
       [`stat -c '%a' '${filePath}'`]: { code: 0, stdout: "644\n" },
       [buildReloadFlagCheck("pocket-id", expectedContent)]: { code: 0 },

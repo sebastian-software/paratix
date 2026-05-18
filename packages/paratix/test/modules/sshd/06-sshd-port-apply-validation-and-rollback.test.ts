@@ -194,6 +194,16 @@ function isMutexBookkeepingCommand(command: string): boolean {
   return MUTEX_BOOKKEEPING_PATTERNS.some((pattern) => pattern.test(command))
 }
 
+// R-0000766: treat the dry-run mktemp call as setup noise so ordering
+// assertions still see `mkdir -p '/run/sshd'` as the first domain call.
+function isDryRunMktempCommand(command: string): boolean {
+  return command === "mktemp -p /tmp -- 'paratix-sshd-dry-run.XXXXXX'"
+}
+
+function isSetupNoiseCommand(command: string): boolean {
+  return isMutexBookkeepingCommand(command) || isDryRunMktempCommand(command)
+}
+
 // R-0000613: build an exec implementation that consumes the mutex bookkeeping
 // commands with a default success result and dispatches every other call to a
 // scripted sequence. Mirrors the historic `mockResolvedValueOnce` shape so
@@ -625,16 +635,9 @@ describe("sshd.port — apply: validation and rollback", () => {
     const execCommands = execSpy.mock.calls.map((args) => args[0])
     // R-0000539: dry-run validation uses `sshd -t -f <tmpfile>` (not plain `sshd -t`).
     // mkdir -p '/run/sshd' must run immediately before `sshd -t -f`.
-    // R-0000613: filter mutex bookkeeping commands so the ordering assertion
-    // sees only the domain calls.
-    // R-0000766: the dry-run mktemp call now precedes mkdir; treat it as
-    // setup noise (analogous to the mutex bookkeeping filter) so the
-    // ordering assertion still sees `mkdir -p '/run/sshd'` first.
-    const isDryRunMktemp = (cmd: string): boolean =>
-      cmd === "mktemp -p /tmp -- 'paratix-sshd-dry-run.XXXXXX'"
-    const firstDomainCommand = execCommands.find(
-      (cmd) => !isMutexBookkeepingCommand(cmd) && !isDryRunMktemp(cmd)
-    )
+    // R-0000613/R-0000766: filter mutex bookkeeping and the dry-run mktemp
+    // call so the ordering assertion sees only the production-domain calls.
+    const firstDomainCommand = execCommands.find((cmd) => !isSetupNoiseCommand(cmd))
     expect(firstDomainCommand).toBe("mkdir -p '/run/sshd'")
     const mkdirIndex = execCommands.indexOf("mkdir -p '/run/sshd'")
     const dryRunIndex = execCommands.findIndex((cmd) =>

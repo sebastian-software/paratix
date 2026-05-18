@@ -164,6 +164,18 @@ export const setEncodingNoop = (): void => {
   /* setEncoding is a no-op on the simulated streams in runner tests */
 }
 
+// R-0000766: sshd dry-run now allocates its tmpfile via
+// `mktemp -p /tmp -- paratix-sshd-dry-run.XXXXXX`. The successful-dry-run
+// mock therefore needs to recognise that command and answer with a valid
+// path; the previous blanket `stdout: ""` answer was passed through to
+// validateProspectiveSshdConfig as an empty allocation and made the dry-run
+// fail before sshd -t ever ran.
 export function createSuccessfulSshdDryRunExecMock(): ReturnType<typeof vi.fn> {
-  return vi.fn().mockResolvedValue({ code: 0, stderr: "", stdout: "" })
+  return vi.fn().mockImplementation(async (command: string) => {
+    await Promise.resolve()
+    if (command === "mktemp -p /tmp -- 'paratix-sshd-dry-run.XXXXXX'") {
+      return { code: 0, stderr: "", stdout: "/tmp/paratix-sshd-dry-run.ABCDEF" }
+    }
+    return { code: 0, stderr: "", stdout: "" }
+  })
 }

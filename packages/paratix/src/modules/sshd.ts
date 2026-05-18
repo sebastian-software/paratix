@@ -2,8 +2,8 @@
 import { sshdPortMeta } from "../meta.js"
 import { failed, failedCommand } from "../moduleFailure.js"
 import { isValidTcpPort } from "../serverDefinitionValidation.js"
-import { CommandError, shellQuote } from "../sshHelpers.js"
 import { validateMktempPath } from "../ssh.js"
+import { CommandError, shellQuote } from "../sshHelpers.js"
 import {
   type ExecResult,
   guardedWriteFile,
@@ -118,16 +118,19 @@ async function validateProspectiveSshdConfigOrFailed(
 // non-zero. The wrapper keeps the historic `ExecResult` happy path so the
 // vast majority of call sites that already key off `result.code` continue
 // to work unchanged.
-type ReadEffectiveSshdConfigResult =
-  | { kind: "exec"; result: ExecResult }
-  | { failure: ModuleResult; kind: "privilege-separation-failure" }
+// R-0000768: tag used by both `ReadEffectiveSshdConfigResult` and
+// `EffectiveSshdConfigMismatch` so callers can route privilege-separation
+// directory failures into a structured `failed` ModuleResult.
+const PRIVILEGE_SEPARATION_FAILURE_KIND = "privilege-separation-failure" as const
 
-async function readEffectiveSshdConfig(
-  ssh: SshConnection
-): Promise<ReadEffectiveSshdConfigResult> {
+type ReadEffectiveSshdConfigResult =
+  | { failure: ModuleResult; kind: typeof PRIVILEGE_SEPARATION_FAILURE_KIND }
+  | { kind: "exec"; result: ExecResult }
+
+async function readEffectiveSshdConfig(ssh: SshConnection): Promise<ReadEffectiveSshdConfigResult> {
   const privilegeSeparationFailure = await ensurePrivilegeSeparationDirectory(ssh)
   if (privilegeSeparationFailure != null) {
-    return { failure: privilegeSeparationFailure, kind: "privilege-separation-failure" }
+    return { failure: privilegeSeparationFailure, kind: PRIVILEGE_SEPARATION_FAILURE_KIND }
   }
   const result = await ssh.exec(SSHD_EFFECTIVE_CONFIG_COMMAND, {
     ignoreExitCode: true,
@@ -177,7 +180,7 @@ const PERMISSION_ERROR_KIND = "permission-error" as const
 type EffectiveSshdConfigMismatch =
   | { detail: string; kind: typeof PERMISSION_ERROR_KIND }
   | { directive: string; kind: "mismatch" }
-  | { failure: ModuleResult; kind: "privilege-separation-failure" }
+  | { failure: ModuleResult; kind: typeof PRIVILEGE_SEPARATION_FAILURE_KIND }
   | { kind: "match" }
 
 async function findEffectiveSshdConfigMismatch(
@@ -188,8 +191,8 @@ async function findEffectiveSshdConfigMismatch(
   // structured channel so the caller can surface a `failed` ModuleResult
   // with stderr context instead of pretending the directive drifted.
   const readResult = await readEffectiveSshdConfig(ssh)
-  if (readResult.kind === "privilege-separation-failure") {
-    return { failure: readResult.failure, kind: "privilege-separation-failure" }
+  if (readResult.kind === PRIVILEGE_SEPARATION_FAILURE_KIND) {
+    return { failure: readResult.failure, kind: PRIVILEGE_SEPARATION_FAILURE_KIND }
   }
   const result = readResult.result
   if (result.code !== 0) {
@@ -291,10 +294,11 @@ async function rejectNonMatchingEffectiveSshdConfig(
   // R-0000768: surface privilege-separation-directory creation failures as a
   // structured `failed` ModuleResult so apply can terminate with stderr
   // context instead of throwing an unstructured CommandError mid-pipeline.
-  if (mismatch.kind === "privilege-separation-failure") {
+  if (mismatch.kind === PRIVILEGE_SEPARATION_FAILURE_KIND) {
     if (!parameters.didChange) return mismatch.failure
     return rollbackSshdConfigAfterEffectiveMismatch(ssh, {
-      baseMessage: mismatch.failure.error?.message ?? "[sshd] privilege separation directory failed",
+      baseMessage:
+        mismatch.failure.error?.message ?? "[sshd] privilege separation directory failed",
       originalConfig: parameters.originalConfig,
     })
   }
@@ -1916,7 +1920,7 @@ export const sshd = {
         }
         const effectiveMismatch = await findEffectiveSshdConfigMismatch(ssh, settings)
         if (effectiveMismatch.kind === "match") return "ok"
-        if (effectiveMismatch.kind === "privilege-separation-failure") {
+        if (effectiveMismatch.kind === PRIVILEGE_SEPARATION_FAILURE_KIND) {
           // R-0000768: warn once during check so the operator sees why apply
           // will fail before the apply path spins through the same mkdir
           // error a second time.
