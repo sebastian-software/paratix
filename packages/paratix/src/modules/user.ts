@@ -524,12 +524,40 @@ async function homeModeMatches(
 // `homeModeMatches` and `applyHomeMode` cannot redirect chmod onto the
 // symlink target (e.g. `/etc`). The guard runs in the same shell pipeline
 // as chmod, closing the TOCTOU window at the SSH layer.
+//
+// R-0000822: in addition to the symlink/directory guards, capture the
+// home directory's `<device>:<inode>` identity before and after the
+// chmod. Even with the same-pipeline TOCTOU guard, a race that swaps
+// the on-disk directory for an entirely new one (same name, different
+// inode) between the guard and the verifying read could otherwise let
+// the chmod land on a directory the operator never intended to manage.
+// A mismatch is reported as a structured failure so the operator can
+// investigate before re-running.
 async function applyHomeMode(
   ssh: SshConnection,
   parameters: { home: string; mode: string; name: string }
 ): Promise<ModuleResult | null> {
   const { home, mode, name } = parameters
   const quotedHome = shellQuote(home)
+  // R-0000822: pre-stat the home directory's device+inode pair so the
+  // post-chmod verification can prove that the directory `chmod` saw
+  // was the same one we inspected here. `stat -c '%d:%i'` follows
+  // symlinks but the guarded pipeline already refused symlinked homes
+  // (R-0000778).
+  const preStat = await ssh.exec(
+    `[ ! -L ${quotedHome} ] && [ -d ${quotedHome} ] && stat -c '%d:%i' ${quotedHome}`,
+    {
+      ignoreExitCode: true,
+      silent: true,
+    }
+  )
+  if (preStat.code !== 0) {
+    return failedCommand(`[user.present: ${name}] chmod home failed: pre-stat failed`, preStat)
+  }
+  const preIdentity = preStat.stdout.trim()
+  if (preIdentity === "") {
+    return failed(`[user.present: ${name}] chmod home failed: pre-stat returned empty identity`)
+  }
   const result = await ssh.exec(
     `[ ! -L ${quotedHome} ] && [ -d ${quotedHome} ] && chmod ${shellQuote(mode)} ${quotedHome}`,
     {
@@ -537,8 +565,34 @@ async function applyHomeMode(
       silent: true,
     }
   )
-  if (result.code === 0) return null
-  return failedCommand(`[user.present: ${name}] chmod home failed`, result)
+  if (result.code !== 0) {
+    return failedCommand(`[user.present: ${name}] chmod home failed`, result)
+  }
+  // R-0000822: verify the post-chmod inode identity matches the pre-stat
+  // snapshot. A mismatch means a concurrent rename/swap replaced the
+  // directory between the two stats — the chmod may have landed on a
+  // foreign target, so refuse to claim success.
+  const postStat = await ssh.exec(
+    `[ ! -L ${quotedHome} ] && [ -d ${quotedHome} ] && stat -c '%d:%i' ${quotedHome}`,
+    {
+      ignoreExitCode: true,
+      silent: true,
+    }
+  )
+  if (postStat.code !== 0) {
+    return failedCommand(
+      `[user.present: ${name}] chmod home failed: post-stat failed`,
+      postStat
+    )
+  }
+  const postIdentity = postStat.stdout.trim()
+  if (postIdentity !== preIdentity) {
+    return failed(
+      `[user.present: ${name}] chmod home failed: home directory inode changed during chmod ` +
+        `(pre=${preIdentity}, post=${postIdentity}); refusing to claim success`
+    )
+  }
+  return null
 }
 
 // R-0000656: pre-check the home mode and chmod only when it differs so
