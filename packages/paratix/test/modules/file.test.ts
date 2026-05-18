@@ -189,7 +189,7 @@ describe("file.directory", () => {
 
     expect(result.status).toBe("changed")
     expect(ssh.calls).not.toContain("mkdir -p '/var/app'")
-    expect(ssh.calls).toContain("chmod '0755' '/var/app'")
+    expect(ssh.calls).toContainEqual(expect.stringContaining("chmod -- '0755' \"$path\""))
     expect(ssh.calls).not.toContain("chown -- 'www-data:www-data' '/var/app'")
   })
 
@@ -207,7 +207,9 @@ describe("file.directory", () => {
     expect(result.status).toBe("changed")
     expect(ssh.calls).not.toContain("mkdir -p '/var/app'")
     expect(ssh.calls).not.toContain("chmod '0755' '/var/app'")
-    expect(ssh.calls).toContain("chown -- 'www-data:www-data' '/var/app'")
+    expect(ssh.calls).toContainEqual(
+      expect.stringContaining("chown -- 'www-data:www-data' \"$path\"")
+    )
   })
 
   it("rejects option-like owner components before directory chown", async () => {
@@ -393,16 +395,25 @@ describe("file.directory", () => {
   })
 
   it("R-0000270: returns failed when chmod on an existing directory exits non-zero", async () => {
-    const ssh = createMockSsh({
-      "[ -d '/var/app' ]": { code: 0 },
-      "[ -L '/var' ]": { code: 1 },
-      "[ -L '/var/app' ]": { code: 1 },
-      "chmod '0755' '/var/app'": {
-        code: 1,
-        stderr: "chmod: changing permissions of '/var/app': Operation not permitted",
+    const ssh = createMockSsh(
+      {
+        "[ -d '/var/app' ]": { code: 0 },
+        "[ -L '/var' ]": { code: 1 },
+        "[ -L '/var/app' ]": { code: 1 },
+        "stat -c '%a %U %G' '/var/app'": { stdout: "700 root root" },
       },
-      "stat -c '%a %U %G' '/var/app'": { stdout: "700 root root" },
-    })
+      {
+        responseStubs: [
+          {
+            command: /\nchmod -- '0755' "\$path"$/v,
+            result: {
+              code: 1,
+              stderr: "chmod: changing permissions of '/var/app': Operation not permitted",
+            },
+          },
+        ],
+      }
+    )
     const mod = file.directory("/var/app", { mode: "0755" })
     const result = await mod.apply(ssh, emptyEnv)
 
@@ -411,21 +422,77 @@ describe("file.directory", () => {
   })
 
   it("R-0000270: returns failed when chown on an existing directory exits non-zero", async () => {
-    const ssh = createMockSsh({
-      "[ -d '/var/app' ]": { code: 0 },
-      "[ -L '/var' ]": { code: 1 },
-      "[ -L '/var/app' ]": { code: 1 },
-      "chown -- 'www-data' '/var/app'": {
-        code: 1,
-        stderr: "chown: invalid user: 'www-data'",
+    const ssh = createMockSsh(
+      {
+        "[ -d '/var/app' ]": { code: 0 },
+        "[ -L '/var' ]": { code: 1 },
+        "[ -L '/var/app' ]": { code: 1 },
+        "stat -c '%a %U %G' '/var/app'": { stdout: "755 root root" },
       },
-      "stat -c '%a %U %G' '/var/app'": { stdout: "755 root root" },
-    })
+      {
+        responseStubs: [
+          {
+            command: /\nchown -- 'w{3}-data' "\$path"$/v,
+            result: { code: 1, stderr: "chown: invalid user: 'www-data'" },
+          },
+        ],
+      }
+    )
     const mod = file.directory("/var/app", { owner: "www-data" })
     const result = await mod.apply(ssh, emptyEnv)
 
     expect(result.status).toBe("failed")
     expect(String(result.error)).toContain("chown failed")
+  })
+
+  it("returns failed when the directory target changes before chmod after creation", async () => {
+    const ssh = createMockSsh(
+      {
+        "[ -d '/var/app' ]": { code: 1 },
+        "[ -L '/var' ]": { code: 1 },
+        "[ -L '/var/app' ]": { code: 1 },
+      },
+      {
+        responseStubs: [
+          {
+            command: /\nchmod -- '0755' "\$path"$/v,
+            result: { code: 1, stderr: "metadata target changed before chmod" },
+          },
+        ],
+      }
+    )
+    const mod = file.directory("/var/app", { mode: "0755" })
+    const result = await mod.apply(ssh, emptyEnv)
+
+    expect(result.status).toBe("failed")
+    expect(String(result.error)).toContain("metadata target changed before chmod")
+    expect(ssh.calls).toContainEqual(expect.stringContaining("before=$(stat -c '%d:%i:%F'"))
+    expect(ssh.calls).toContainEqual(expect.stringContaining("chmod -- '0755' \"$path\""))
+  })
+
+  it("returns failed when the directory target changes before chown after creation", async () => {
+    const ssh = createMockSsh(
+      {
+        "[ -d '/var/app' ]": { code: 1 },
+        "[ -L '/var' ]": { code: 1 },
+        "[ -L '/var/app' ]": { code: 1 },
+      },
+      {
+        responseStubs: [
+          {
+            command: /\nchown -- 'w{3}-data' "\$path"$/v,
+            result: { code: 1, stderr: "metadata target changed before chown" },
+          },
+        ],
+      }
+    )
+    const mod = file.directory("/var/app", { owner: "www-data" })
+    const result = await mod.apply(ssh, emptyEnv)
+
+    expect(result.status).toBe("failed")
+    expect(String(result.error)).toContain("metadata target changed before chown")
+    expect(ssh.calls).toContainEqual(expect.stringContaining("before=$(stat -c '%d:%i:%F'"))
+    expect(ssh.calls).toContainEqual(expect.stringContaining("chown -- 'www-data' \"$path\""))
   })
 })
 

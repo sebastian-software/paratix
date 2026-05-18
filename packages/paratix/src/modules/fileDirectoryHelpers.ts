@@ -8,7 +8,8 @@ import {
   type FileOwnership,
   ownershipMatches,
   readOwnership,
-  renderChownCommand,
+  renderGuardedChmodCommand,
+  renderGuardedChownCommand,
 } from "./fileMetadataHelpers.js"
 import { findSymlinkInAncestorWalk } from "./remoteFileChecks.js"
 
@@ -49,7 +50,7 @@ export async function applyDirectoryMode(input: {
   const modeAlreadyMatches = input.ownership?.mode === input.requestedMode.replace(/^0+/v, "")
   if (modeAlreadyMatches) return false
   const result = await input.ssh.exec(
-    `chmod ${shellQuote(input.requestedMode)} ${shellQuote(input.remotePath)}`,
+    renderGuardedChmodCommand(input.requestedMode, input.remotePath),
     EXEC_OPTS
   )
   if (result.code !== 0) {
@@ -84,7 +85,7 @@ export async function applyDirectoryOwner(input: {
     input.ownership != null && ownershipMatches(input.ownership, { owner: input.requestedOwner })
   if (ownerAlreadyMatches) return false
   const result = await input.ssh.exec(
-    renderChownCommand(input.requestedOwner, input.remotePath),
+    renderGuardedChownCommand(input.requestedOwner, input.remotePath),
     EXEC_OPTS
   )
   if (result.code !== 0) {
