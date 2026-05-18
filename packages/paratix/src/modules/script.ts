@@ -247,6 +247,18 @@ export const script = {
     if (!NAME_PATTERN.test(name)) {
       throw new Error(`script.once: name must match ${String(NAME_PATTERN)}, got: ${name}`)
     }
+    // R-0000767: the pattern above permits names composed entirely of dots
+    // (e.g. `"."`, `".."`, `"..."`). The name is embedded in the remote
+    // mktemp template `paratix-script-${name}.XXXXXX` and in the flag-file
+    // basename — both contexts treat `.` and `..` as path-traversal
+    // segments. Reject the purely punctuated form so the resolved paths
+    // can never degenerate into traversal elements. Mirrors the
+    // `UNIT_NAME_ALL_DOTS_PATTERN` rejection in `validateQuadletName`.
+    if (/^\.+$/v.test(name)) {
+      throw new Error(
+        `script.once: name must not consist solely of '.' characters, got: ${JSON.stringify(name)}`
+      )
+    }
 
     // R-0000717: validate the local script path and the argument list at
     // construction time so misconfigured playbooks fail fast instead of
