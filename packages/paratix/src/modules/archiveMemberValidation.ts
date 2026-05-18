@@ -58,6 +58,14 @@ export type ArchiveMember = {
   kind: "directory" | "file" | "hardlink" | "special" | "symlink"
   /** Resolved link target (relative or absolute) for symlinks/hardlinks, or null. */
   linkTarget: null | string
+  /**
+   * R-0000703: full ten-character symbolic mode string captured from the
+   * archive listing (`tar -tv…f` or `unzip -Zs`). The mode is required to
+   * detect setuid/setgid bits (`s`/`S` in the user- or group-execute slots)
+   * so the archive validator can reject privileged members before `cp -aT`
+   * propagates the elevated bits onto the destination.
+   */
+  mode: string
   /** Member path as recorded in the archive. */
   path: string
 }
@@ -115,7 +123,8 @@ function parseTarVerboseLine(line: string): ArchiveMemberParseResult {
       status: "invalid",
     }
   }
-  const kind = archiveMemberKindFromMode(match.groups.mode)
+  const mode = match.groups.mode
+  const kind = archiveMemberKindFromMode(mode)
   const rest = match.groups.rest
   const arrowIndex = rest.indexOf(TAR_LINK_ARROW)
   if (arrowIndex !== -1 && kind !== "file") {
@@ -124,6 +133,7 @@ function parseTarVerboseLine(line: string): ArchiveMemberParseResult {
         format: "tar",
         kind,
         linkTarget: rest.slice(arrowIndex + TAR_LINK_ARROW.length),
+        mode,
         path: rest.slice(0, arrowIndex),
       },
       status: "parsed",
@@ -136,6 +146,7 @@ function parseTarVerboseLine(line: string): ArchiveMemberParseResult {
         format: "tar",
         kind,
         linkTarget: rest.slice(hardlinkTargetIndex + TAR_HARDLINK_TARGET.length),
+        mode,
         path: rest.slice(0, hardlinkTargetIndex),
       },
       status: "parsed",
@@ -146,6 +157,7 @@ function parseTarVerboseLine(line: string): ArchiveMemberParseResult {
       format: "tar",
       kind,
       linkTarget: null,
+      mode,
       path: rest,
     },
     status: "parsed",
@@ -185,11 +197,13 @@ function parseZipInfoLine(line: string): ArchiveMemberParseResult {
       status: "invalid",
     }
   }
+  const mode = match.groups.mode
   return {
     member: {
       format: "zip",
-      kind: archiveMemberKindFromMode(match.groups.mode),
+      kind: archiveMemberKindFromMode(mode),
       linkTarget: null,
+      mode,
       path: match.groups.path,
     },
     status: "parsed",
@@ -289,6 +303,21 @@ export function memberEscapesDestination(member: ArchiveMember): boolean {
 }
 
 /**
+ * R-0000703: detect whether the symbolic mode string carries the setuid or
+ * setgid bit. Position 3 of the ten-character mode string encodes the
+ * setuid bit (lowercase `s` when also executable, uppercase `S` when not).
+ * Position 6 encodes the setgid bit using the same convention. Both must
+ * be rejected before `cp -aT --no-dereference` propagates them onto the
+ * destination filesystem; `tar`/`unzip` alone are happy to restore them.
+ *
+ * @param mode - The ten-character symbolic mode captured from the archive.
+ * @returns True when setuid or setgid is set.
+ */
+function modeHasSetuidOrSetgid(mode: string): boolean {
+  return mode[3] === "s" || mode[3] === "S" || mode[6] === "s" || mode[6] === "S"
+}
+
+/**
  * Return why an archive member is unsafe, or null when it may be extracted.
  *
  * @param member - A single parsed archive member.
@@ -300,6 +329,16 @@ export function archiveMemberUnsafeReason(member: ArchiveMember): null | string 
   }
   if (member.kind === "special") {
     return `member ${JSON.stringify(member.path)} is a special file`
+  }
+  // R-0000703: refuse archives carrying setuid/setgid members. Letting
+  // `cp -aT --no-dereference` propagate these bits onto the destination
+  // would yield a privileged binary owned by whoever the archive author
+  // chose, which is a textbook local privilege-escalation primitive when
+  // the archive originates from an untrusted source. Operators who need
+  // an explicit setuid binary should chmod it in a follow-up module so
+  // the change is visible in the playbook.
+  if (modeHasSetuidOrSetgid(member.mode)) {
+    return `member ${JSON.stringify(member.path)} has setuid or setgid bit set (mode ${member.mode})`
   }
   // R-0000636: report control-character members with a dedicated reason so
   // the failure surface clearly identifies the cause instead of conflating

@@ -1500,6 +1500,66 @@ describe("archive.extract — apply", () => {
     expectNoArchiveMarkerWrite(mockSsh)
   })
 
+  // R-0000703: tar members carrying setuid or setgid bits must be rejected
+  // before `cp -aT --no-dereference` propagates the elevated permission bits
+  // onto the destination filesystem. The archive validator looks at the
+  // ten-character symbolic mode string and refuses members with `s`/`S` in
+  // either the user- or group-execute slot. Operators who need a setuid
+  // binary should chmod it in a follow-up module so the change is visible
+  // in the playbook.
+  it("rejects a tar archive whose member has the setuid bit set", async () => {
+    const tarListing = "-rwsr-xr-x root/root 0 1970-01-01 00:00 app/suid-bin\n"
+    const mockSsh = createMockSsh({
+      [`tar -tvzf '${src}'`]: { code: 0, stdout: tarListing },
+    })
+
+    const mod = archive.extract(src, destination)
+    const result = await mod.apply(mockSsh, emptyEnv)
+
+    expect(result.status).toBe("failed")
+    expect(String(result.error)).toContain("setuid or setgid bit set")
+    expect(mockSsh.calls).toContain(`tar -tvzf '${src}'`)
+    expectNoTarExtractCalls(mockSsh)
+    expectNoArchiveMarkerWrite(mockSsh)
+  })
+
+  it("rejects a tar archive whose member has the setgid bit set", async () => {
+    const tarListing = "-rwxr-sr-x root/root 0 1970-01-01 00:00 app/sgid-bin\n"
+    const mockSsh = createMockSsh({
+      [`tar -tvzf '${src}'`]: { code: 0, stdout: tarListing },
+    })
+
+    const mod = archive.extract(src, destination)
+    const result = await mod.apply(mockSsh, emptyEnv)
+
+    expect(result.status).toBe("failed")
+    expect(String(result.error)).toContain("setuid or setgid bit set")
+    expect(mockSsh.calls).toContain(`tar -tvzf '${src}'`)
+    expectNoTarExtractCalls(mockSsh)
+    expectNoArchiveMarkerWrite(mockSsh)
+  })
+
+  // R-0000703: same guard for zip archives — unzip is just as willing to
+  // restore setuid/setgid bits when the Unix attributes are present.
+  it("rejects a zip archive whose member has the setuid bit set", async () => {
+    const zipSrc = "/tmp/app.zip"
+    const mockSsh = createMockSsh({
+      [`unzip -Zs '${zipSrc}'`]: {
+        code: 0,
+        stdout: "-rwsr-xr-x  2.0 unx        0 b- defN 26-May-04 00:00 app/suid-bin\n",
+      },
+    })
+
+    const mod = archive.extract(zipSrc, destination)
+    const result = await mod.apply(mockSsh, emptyEnv)
+
+    expect(result.status).toBe("failed")
+    expect(String(result.error)).toContain("setuid or setgid bit set")
+    expect(mockSsh.calls).toContain(`unzip -Zs '${zipSrc}'`)
+    expectNoUnzipExtractCalls(mockSsh)
+    expectNoArchiveMarkerWrite(mockSsh)
+  })
+
   it("rejects a zip archive that contains a `/etc/passwd` member without invoking unzip -o", async () => {
     const zipSrc = "/tmp/app.zip"
     const mockSsh = createMockSsh({
