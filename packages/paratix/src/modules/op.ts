@@ -149,6 +149,13 @@ function attachSpawnIoHandlers(parameters: {
     )
   })
   child.stdin?.once("error", (error) => {
+    // R-0000711: mirror the synchronous failure paths in `feedStdinOrFail`
+    // (R-0000573/R-0000641/R-0000678) — an async stdin `error` event (e.g. a
+    // late EPIPE after the pipe was wired up) settles the promise via
+    // `rejectOnce` but otherwise leaves the underlying ChildProcess running.
+    // Send SIGTERM with SIGKILL escalation first so no orphaned op CLI
+    // process outlives the rejected promise.
+    killChildEscalating(child)
     rejectOnce(describeSpawnError(command, error))
   })
 }
