@@ -1021,6 +1021,53 @@ describe("sshd.port — apply: validation and rollback", () => {
     expect(restartCalls).toHaveLength(1)
   }, 10_000)
 
+  // R-0000813: previously a hard `ss` failure during the rollback probe
+  // silently triggered a second `systemctl restart sshd`, tearing down the
+  // recovered SSH session on an unknown daemon state. The fix surfaces the
+  // probe failure as a structured warning in the rollback error message and
+  // suppresses the extra restart.
+  it("R-0000813: rollback skips final sshd restart when the live port probe fails", async () => {
+    const originalConfig = "Port 22"
+    const mockSsh = createMockSsh({
+      [CAT_SSHD]: { stdout: originalConfig },
+    })
+    trackWriteFile(mockSsh)
+    const originalExec = mockSsh.exec.bind(mockSsh)
+    // ss probes: target port 2222 returns "no listener" so verify fails; the
+    // rollback path then probes the original port 22, which fails hard
+    // ("Permission denied") so the rollback restart must be skipped and the
+    // outcome must include the probe error as a warning.
+    /* oxlint-disable vitest/no-conditional-in-test -- command dispatch is the test fixture, not test logic */
+    const execSpy = vi.spyOn(mockSsh, "exec").mockImplementation(async (command, options) => {
+      if (command === "ss -H -ltnp 'sport = :2222'") {
+        await Promise.resolve()
+        return { code: 0, stderr: "", stdout: "" }
+      }
+      if (command === "ss -H -ltnp 'sport = :22'") {
+        await Promise.resolve()
+        return { code: 1, stderr: "Permission denied", stdout: "" }
+      }
+      return originalExec(command, options)
+    })
+    /* oxlint-enable vitest/no-conditional-in-test */
+
+    const mod = sshd.port(2222)
+    const result = await mod.apply(mockSsh, emptyEnv)
+
+    expect(result.status).toBe("failed")
+    expect(result.error?.message).toContain("no listener on port 2222")
+    expect(result.error?.message).toContain("rolled back")
+    expect(result.error?.message).toContain("live sshd port probe failed")
+    expect(result.error?.message).toContain("skipping rollback restart")
+    // Only the initial `restartSshdOnNewPort` restart must have happened — the
+    // rollback path must NOT have issued another restart because the probe
+    // outcome is unknown.
+    const restartCalls = execSpy.mock.calls
+      .map((args) => args[0])
+      .filter((cmd) => cmd === "systemctl restart sshd")
+    expect(restartCalls).toHaveLength(1)
+  }, 10_000)
+
   // R-0000614: when the post-restart live-port verification fails the rollback
   // path must keep trying every step instead of bailing on the first failure.
   // Previously a transient sshd_config write error stopped the loop before

@@ -1126,9 +1126,17 @@ async function runRestartRollbackStep(
 // skip the rollback restart in that case. Issuing another `systemctl restart`
 // when sshd already serves the original port costs us another SSH session
 // teardown (the runner reconnected after the previous restart) without
-// changing the daemon state. `liveSshdPortMatches` may throw on a hard `ss`
-// failure (binary missing, permission denied); in that case we conservatively
-// fall back to the restart so the rollback still converges.
+// changing the daemon state.
+//
+// R-0000813: previously a hard `ss` failure (binary missing, permission
+// denied) raised a `LiveSshdPortProbeError` that we silently swallowed and
+// fell back to a full `systemctl restart`. That defeated the entire reason
+// for the probe — the rollback path may have just performed a restart and
+// firing another one tears down the operator's SSH session a second time on
+// a daemon state we cannot even observe. Instead of guessing, throw a
+// structured probe-error message so `runRestartRollbackStep` surfaces it
+// as a rollback failure with a clear warning; the operator can then
+// re-verify the daemon by hand.
 async function restartSshdIfNotAlreadyOnOriginalPort(
   ssh: SshConnection,
   parameters: {
@@ -1136,11 +1144,16 @@ async function restartSshdIfNotAlreadyOnOriginalPort(
     serviceUnit?: SshdServiceUnit
   }
 ): Promise<RestartRollbackResult> {
-  const alreadyOnOriginalPort = await probeAlreadyOnOriginalPortBestEffort(
-    ssh,
-    parameters.originalPort
-  )
-  if (alreadyOnOriginalPort) return { restarted: false }
+  const probe = await probeAlreadyOnOriginalPort(ssh, parameters.originalPort)
+  if (probe.kind === "matches") return { restarted: false }
+  if (probe.kind === "probe-failed") {
+    // R-0000813: skip the second restart since the probe outcome is unknown.
+    // Re-throw as a clear warning the rollback outcome can include verbatim
+    // — `runRestartRollbackStep` converts the throw into a `failure` entry.
+    throw new Error(
+      `live sshd port probe failed; skipping rollback restart to avoid a second SSH disconnect on an unknown daemon state — please verify sshd manually: ${probe.message}`
+    )
+  }
   const serviceUnit = parameters.serviceUnit ?? (await resolveSshServiceUnit(ssh))
   await ssh.exec(`${SYSTEMCTL} restart ${serviceUnit}`, {
     ignoreExitCode: true,
@@ -1149,16 +1162,28 @@ async function restartSshdIfNotAlreadyOnOriginalPort(
   return { restarted: true }
 }
 
-async function probeAlreadyOnOriginalPortBestEffort(
+// R-0000813: tri-state probe outcome. `matches` means sshd is already
+// listening on the original port (skip the restart). `mismatches` means we
+// observed a different listener and the rollback restart should proceed.
+// `probe-failed` carries the probe error message so the caller can surface
+// a single, structured warning instead of silently re-issuing a restart.
+type ProbeAlreadyOnOriginalPortResult =
+  | { kind: "matches" }
+  | { kind: "mismatches" }
+  | { kind: "probe-failed"; message: string }
+
+async function probeAlreadyOnOriginalPort(
   ssh: SshConnection,
   originalPort: number
-): Promise<boolean> {
+): Promise<ProbeAlreadyOnOriginalPortResult> {
   try {
-    return await liveSshdPortMatches(ssh, originalPort)
-  } catch {
-    // Best-effort probe; on hard ss failures fall through to the restart so
-    // the rollback path still drives sshd back to the rolled-back config.
-    return false
+    const matches = await liveSshdPortMatches(ssh, originalPort)
+    return matches ? { kind: "matches" } : { kind: "mismatches" }
+  } catch (error) {
+    if (error instanceof LiveSshdPortProbeError) {
+      return { kind: "probe-failed", message: error.message }
+    }
+    throw error
   }
 }
 
