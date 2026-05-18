@@ -298,22 +298,27 @@ export function readAdminPublicKeyFile(exitWithMessage: ExitWithMessage, path: s
 // so symlinked entries reveal the realpath alongside the basename. A
 // planted link under a shared CI home (e.g. /tmp/-style `.ssh/`) would
 // otherwise show only `id_ed25519.pub` while the underlying file lives
-// in an attacker-controlled directory.
-function buildLocalPublicKeyLabel(entry: string, path: string): string {
+// in an attacker-controlled directory. R-0000725: the caller resolves
+// the realpath once during discovery and threads it in here so the
+// label and the subsequent stat/readFile reference the same materialised
+// target — eliminating the TOCTOU window where the label could describe
+// a different file than the one whose contents were embedded.
+function buildLocalPublicKeyLabel(entry: string, path: string, realPath: string): string {
+  if (realPath === path) return basename(entry)
+  return `${basename(entry)} -> ${realPath}`
+}
+
+// R-0000725: resolve the entry through `realpathSync` once per discovery
+// loop and reuse the resulting path for stat, readFile and the operator
+// label. Falls back to the original path when `realpath` is unavailable
+// (dangling link, EACCES) so the downstream statSync still surfaces the
+// failure through the regular catch arm.
+function resolveDiscoveredEntryPath(path: string): string {
   try {
     // eslint-disable-next-line security/detect-non-literal-fs-filename
-    const linkStat = lstatSync(path)
-    if (!linkStat.isSymbolicLink()) return basename(entry)
-    // eslint-disable-next-line security/detect-non-literal-fs-filename
-    const realPath = realpathSync(path)
-    if (realPath === path) return basename(entry)
-    return `${basename(entry)} -> ${realPath}`
+    return realpathSync(path)
   } catch {
-    // lstat/realpath failures are non-fatal here: fall back to the bare
-    // basename so the operator still sees the entry. The downstream
-    // statSync below will surface unrecoverable read errors via the
-    // catch arm that drops the entry from the discovery list.
-    return basename(entry)
+    return path
   }
 }
 
@@ -327,23 +332,35 @@ export function discoverLocalPublicKeys(sshDirectory = join(homedir(), ".ssh")):
         const path = join(sshDirectory, entry)
 
         try {
+          // R-0000725: resolve the realpath once per entry and reuse it
+          // for the size/isFile guard, the file read, and the label
+          // below — eliminating the TOCTOU window where the label could
+          // describe a different file than the one whose contents were
+          // embedded into server.ts. Resolving unconditionally also
+          // surfaces ancestor symlinks (e.g. `~/.ssh -> /tmp/attacker-ssh`)
+          // in the operator-facing label even when the leaf entry itself
+          // is a regular file.
+          const resolvedPath = resolveDiscoveredEntryPath(path)
+
           // R-0000186: follow symlinks so ~/.ssh/*.pub entries that point to
           // a password-manager vault (or similar) are still discovered.
           // eslint-disable-next-line security/detect-non-literal-fs-filename
-          const stat = statSync(path)
+          const stat = statSync(resolvedPath)
           if (!stat.isFile() || stat.size > MAX_PUBLIC_KEY_FILE_BYTES) {
             return []
           }
           // eslint-disable-next-line security/detect-non-literal-fs-filename
-          const key = readFileSync(path, "utf8").trim()
+          const key = readFileSync(resolvedPath, "utf8").trim()
           if (!isValidAdminPublicKey(key)) {
             return []
           }
 
           // R-0000665: surface the symlink-target via the label so the
           // operator can see the effective file at a glance during the
-          // interactive prompt.
-          return [{ key, label: buildLocalPublicKeyLabel(entry, path), path }]
+          // interactive prompt. R-0000725: the label is derived from the
+          // already-resolved path so it stays in sync with the file the
+          // contents were read from.
+          return [{ key, label: buildLocalPublicKeyLabel(entry, path, resolvedPath), path }]
         } catch {
           return []
         }
