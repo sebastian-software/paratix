@@ -485,6 +485,25 @@ let tsxRegistrationPromise: null | Promise<void> = null
 let playbookImportQueue: Promise<void> = Promise.resolve()
 const playbookImportContext = new AsyncLocalStorage<boolean>()
 
+/**
+ * R-0000787: serialize playbook imports across the process so a TypeScript
+ * playbook's top-level `await import("./other-playbook.ts")` cannot deadlock
+ * against an outer `withSerializedPlaybookImport` that is still holding the
+ * lock. The AsyncLocalStorage-based reentrancy check below intentionally
+ * uses a boolean flag — every nested import inside the same async context
+ * bypasses the queue.
+ *
+ * WARNING for future maintainers: this reentrancy bypass is safe ONLY for
+ * playbook-to-playbook imports. The tsx ESM loader registration
+ * (`tsx.register()` in `registerTsxLoader`) and any other host-side
+ * machinery that runs underneath `withSerializedPlaybookImport` MUST NOT
+ * trigger a nested call into `withSerializedPlaybookImport`. If the loader
+ * ever needs to load a playbook itself, the boolean flag would cause that
+ * nested import to skip the queue and race with the outer lock, defeating
+ * the serialization contract that downstream callers rely on. Keep the tsx
+ * registration body free of `withSerializedPlaybookImport` calls or convert
+ * this guard into a fileUrl-keyed map of in-flight imports instead.
+ */
 export async function withSerializedPlaybookImport<T>(body: () => Promise<T>): Promise<T> {
   if (playbookImportContext.getStore() === true) {
     return body()
