@@ -8,8 +8,27 @@ import { rename, unlink } from "node:fs/promises"
 import { dirname, join } from "node:path"
 import { Readable } from "node:stream"
 
+import type { PreparedSecrets } from "./sshHelpers.js"
+
+import { maskPreparedSecrets } from "./sshHelpers.js"
+
 /** Default timeout for SFTP transfers in milliseconds (2 minutes). */
 export const SFTP_TIMEOUT = 120_000
+
+/**
+ * R-0000689: helper that masks a remote-path interpolation against the
+ * prepared secret variants. When `secrets` is `undefined` the input is
+ * returned unchanged so existing callers that do not know about the
+ * masking pipeline continue to receive the raw text.
+ *
+ * @param value - The string about to be embedded in an error message.
+ * @param secrets - Optional prepared secrets used to redact the text.
+ * @returns The masked variant or the original value when no secrets are set.
+ */
+function maskInterpolatedValue(value: string, secrets: PreparedSecrets | undefined): string {
+  if (secrets === undefined) return value
+  return maskPreparedSecrets(value, secrets)
+}
 
 type TransferSettlement = {
   rejectOnce: (reason: Error) => void
@@ -502,17 +521,23 @@ function wireStreams(options: {
  *   underlying SSH transport is torn down. Triggers immediate stream
  *   destruction (R-0000255) so a SIGINT-driven `ssh.disconnect()` does not
  *   leave the transfer waiting for the default 120 s timeout.
+ * @param secrets - R-0000689: optional prepared secrets routed through
+ *   `maskPreparedSecrets` for every error reason that interpolates the
+ *   remote path. Without this bridge an attacker-shaped remote path could
+ *   leak credentials embedded in path templates into operator logs.
  */
-// eslint-disable-next-line max-params -- timeout / abort parameters extend the existing signature; cleanup/finalize logic is intentionally kept together
+// eslint-disable-next-line max-params -- timeout / abort / secrets parameters extend the existing signature; cleanup/finalize logic is intentionally kept together
 export async function sftpDownload(
   client: Client,
   remotePath: string,
   localPath: string,
   timeout = SFTP_TIMEOUT,
-  connectionAbortSignal?: AbortSignal
+  connectionAbortSignal?: AbortSignal,
+  secrets?: PreparedSecrets
 ): Promise<void> {
   return new Promise((resolve, reject) => {
     const temporaryPath = join(dirname(localPath), `.paratix-download-${randomUUID()}.tmp`)
+    const maskedRemotePath = maskInterpolatedValue(remotePath, secrets)
     let shouldCleanupTemporaryFile = false
 
     const rejectWithCleanup = (reason: Error): void => {
@@ -571,13 +596,13 @@ export async function sftpDownload(
           },
           sftp,
           timeout,
-          timeoutMessage: `SFTP download timed out after ${timeout}ms: ${remotePath}`,
+          timeoutMessage: `SFTP download timed out after ${timeout}ms: ${maskedRemotePath}`,
           writeStream: streams.writeStream,
         })
       },
       reject: rejectWithCleanup,
       timeout,
-      timeoutMessage: `SFTP download session timed out after ${timeout}ms: ${remotePath}`,
+      timeoutMessage: `SFTP download session timed out after ${timeout}ms: ${maskedRemotePath}`,
     })
   })
 }
@@ -591,16 +616,21 @@ export async function sftpDownload(
  * @param timeout - Maximum time in ms before the transfer is aborted.
  * @param connectionAbortSignal - Optional abort signal that fires when the
  *   underlying SSH transport is torn down (R-0000255).
+ * @param secrets - R-0000689: optional prepared secrets routed through
+ *   `maskPreparedSecrets` for every error reason that interpolates the
+ *   remote path.
  */
-// eslint-disable-next-line max-params -- timeout / abort parameters extend the existing signature
+// eslint-disable-next-line max-params -- timeout / abort / secrets parameters extend the existing signature
 export async function sftpUpload(
   client: Client,
   localPath: string,
   remotePath: string,
   timeout = SFTP_TIMEOUT,
-  connectionAbortSignal?: AbortSignal
+  connectionAbortSignal?: AbortSignal,
+  secrets?: PreparedSecrets
 ): Promise<void> {
   return new Promise((resolve, reject) => {
+    const maskedRemotePath = maskInterpolatedValue(remotePath, secrets)
     openSftp({
       client,
       connectionAbortSignal,
@@ -618,19 +648,19 @@ export async function sftpUpload(
         wireStreams({
           completionEvents: ["finish"],
           connectionAbortSignal,
-          prematureCloseMessage: `SFTP upload closed before finish: ${remotePath}`,
+          prematureCloseMessage: `SFTP upload closed before finish: ${maskedRemotePath}`,
           readStream: streams.readStream,
           reject,
           resolve,
           sftp,
           timeout,
-          timeoutMessage: `SFTP upload timed out after ${timeout}ms: ${remotePath}`,
+          timeoutMessage: `SFTP upload timed out after ${timeout}ms: ${maskedRemotePath}`,
           writeStream: streams.writeStream,
         })
       },
       reject,
       timeout,
-      timeoutMessage: `SFTP upload session timed out after ${timeout}ms: ${remotePath}`,
+      timeoutMessage: `SFTP upload session timed out after ${timeout}ms: ${maskedRemotePath}`,
     })
   })
 }
@@ -644,16 +674,21 @@ export async function sftpUpload(
  * @param timeout - Maximum time in ms before the transfer is aborted.
  * @param connectionAbortSignal - Optional abort signal that fires when the
  *   underlying SSH transport is torn down (R-0000255).
+ * @param secrets - R-0000689: optional prepared secrets routed through
+ *   `maskPreparedSecrets` for every error reason that interpolates the
+ *   remote path.
  */
-// eslint-disable-next-line max-params -- timeout / abort parameters mirror sftpUpload
+// eslint-disable-next-line max-params -- timeout / abort / secrets parameters mirror sftpUpload
 export async function sftpUploadContent(
   client: Client,
   content: string,
   remotePath: string,
   timeout = SFTP_TIMEOUT,
-  connectionAbortSignal?: AbortSignal
+  connectionAbortSignal?: AbortSignal,
+  secrets?: PreparedSecrets
 ): Promise<void> {
   return new Promise((resolve, reject) => {
+    const maskedRemotePath = maskInterpolatedValue(remotePath, secrets)
     openSftp({
       client,
       connectionAbortSignal,
@@ -671,19 +706,19 @@ export async function sftpUploadContent(
         wireStreams({
           completionEvents: ["finish"],
           connectionAbortSignal,
-          prematureCloseMessage: `SFTP content upload closed before finish: ${remotePath}`,
+          prematureCloseMessage: `SFTP content upload closed before finish: ${maskedRemotePath}`,
           readStream: streams.readStream,
           reject,
           resolve,
           sftp,
           timeout,
-          timeoutMessage: `SFTP content upload timed out after ${timeout}ms: ${remotePath}`,
+          timeoutMessage: `SFTP content upload timed out after ${timeout}ms: ${maskedRemotePath}`,
           writeStream: streams.writeStream,
         })
       },
       reject,
       timeout,
-      timeoutMessage: `SFTP content upload session timed out after ${timeout}ms: ${remotePath}`,
+      timeoutMessage: `SFTP content upload session timed out after ${timeout}ms: ${maskedRemotePath}`,
     })
   })
 }

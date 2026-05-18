@@ -2650,7 +2650,10 @@ describe("SshConnectionImpl", () => {
         "/local/file.txt",
         tempPath,
         expect.any(Number),
-        expect.any(AbortSignal)
+        expect.any(AbortSignal),
+        // R-0000689: prepared-secret bridge for masking the remote-path
+        // interpolation in any sftp error reason.
+        expect.objectContaining({ variants: expect.any(Array) })
       )
     })
 
@@ -3561,7 +3564,10 @@ describe("SshConnectionImpl", () => {
         "/var/log/syslog",
         "/tmp/local-syslog",
         expect.any(Number),
-        expect.any(AbortSignal)
+        expect.any(AbortSignal),
+        // R-0000689: prepared-secret bridge for masking the remote-path
+        // interpolation in any sftp error reason.
+        expect.objectContaining({ variants: expect.any(Array) })
       )
       // No exec calls for cp/chmod/rm
       expect(execSpy).not.toHaveBeenCalled()
@@ -3635,7 +3641,10 @@ describe("SshConnectionImpl", () => {
         mktempOutput,
         "/tmp/local-secure",
         expect.any(Number),
-        expect.any(AbortSignal)
+        expect.any(AbortSignal),
+        // R-0000689: prepared-secret bridge for masking the remote-path
+        // interpolation in any sftp error reason.
+        expect.objectContaining({ variants: expect.any(Array) })
       )
       expect(executedCommands[2]).toBe(`rm -f -- '${mktempOutput}'`)
     })

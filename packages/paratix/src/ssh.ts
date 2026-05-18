@@ -432,7 +432,11 @@ export class SshConnectionImpl implements SshConnection {
         sourcePath,
         localPath,
         SFTP_TIMEOUT,
-        this.connectionAbortController.signal
+        this.connectionAbortController.signal,
+        // R-0000689: bridge the same prepared-secret variants that
+        // `exec`/`writeFile` already mask through so a tampered remote path
+        // cannot leak a registered secret into the SFTP error message.
+        prepareSecrets(this.buildSecrets())
       )
     } finally {
       if (sourcePath !== remotePath) {
@@ -604,7 +608,10 @@ export class SshConnectionImpl implements SshConnection {
         localPath,
         temporaryPath,
         SFTP_TIMEOUT,
-        this.connectionAbortController.signal
+        this.connectionAbortController.signal,
+        // R-0000689: mask registered secrets that could appear in the
+        // remote temp path before they reach an operator-visible error.
+        prepareSecrets(this.buildSecrets())
       )
       await this.setRemoteTempMode(temporaryPath, temporaryMode)
       // R-0000150: verify the size on the staged temp file BEFORE the
@@ -674,7 +681,11 @@ export class SshConnectionImpl implements SshConnection {
         content,
         remoteTemporary,
         SFTP_TIMEOUT,
-        this.connectionAbortController.signal
+        this.connectionAbortController.signal,
+        // R-0000689: same masking bridge as `uploadFile`; the remote
+        // temp path is derived from `remotePath` which may be templated
+        // with values registered in the secret sink.
+        prepareSecrets(this.buildSecrets())
       )
       await this.setRemoteTempMode(remoteTemporary, temporaryMode)
       // R-0000150: the pre-finalize size check on the staged temp file is a
