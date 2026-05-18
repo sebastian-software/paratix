@@ -215,14 +215,28 @@ function normalizeMode(mode: string): string {
   return mode.replace(/^0+/v, "")
 }
 
+// R-0000681: surface soft failures from the `stat` probe instead of folding
+// every non-zero exit into a plain `false`. Without this distinction
+// `checkPresent` cannot tell a permission denial or TOCTOU race apart from a
+// genuine mode mismatch, and `ensureSwapFileMode` would silently retry the
+// chmod whenever stat hit a transient error. The return shape mirrors
+// `needsSwapRecreation`: `boolean` for the converged answer, `ModuleResult`
+// for a structured failure that callers translate to NEEDS_APPLY (check)
+// or propagate as failed (apply).
 export async function swapFileModeMatches(
   ssh: SshConnection,
   options: NormalizedSwapFileOptions
-): Promise<boolean> {
+): Promise<boolean | ModuleResult> {
   const result = await ssh.exec(`stat -c '%a' ${shellQuote(options.path)}`, EXEC_OPTS)
-  if (result.code !== 0) return false
+  if (result.code !== 0) {
+    return failedCommand(`[swap.file: ${options.path}] stat failed while reading swap file mode`, result)
+  }
   const currentMode = result.stdout.trim()
-  if (currentMode === "") return false
+  if (currentMode === "") {
+    return failed(
+      `[swap.file: ${options.path}] stat returned an empty mode for ${options.path}`
+    )
+  }
   return normalizeMode(currentMode) === normalizeMode(options.mode)
 }
 
@@ -230,7 +244,12 @@ export async function ensureSwapFileMode(
   ssh: SshConnection,
   options: NormalizedSwapFileOptions
 ): Promise<boolean | ModuleResult> {
-  if (await swapFileModeMatches(ssh, options)) return false
+  // R-0000681: propagate a soft `stat` failure from `swapFileModeMatches` as
+  // a structured ModuleResult instead of retrying the chmod on a stale
+  // assumption that the mode mismatched.
+  const matches = await swapFileModeMatches(ssh, options)
+  if (typeof matches !== "boolean") return matches
+  if (matches) return false
   const result = await ssh.exec(
     `chmod ${shellQuote(options.mode)} ${shellQuote(options.path)}`,
     EXEC_OPTS

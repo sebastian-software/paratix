@@ -287,7 +287,13 @@ async function checkPresent(
   const hasEntry = await hasSwapFstabEntry(ssh, options)
   if (typeof hasEntry !== "boolean") return NEEDS_APPLY
   if (!hasEntry) return NEEDS_APPLY
-  return (await swapFileModeMatches(ssh, options)) ? "ok" : NEEDS_APPLY
+  // R-0000681: swapFileModeMatches now surfaces stat soft failures as a
+  // structured ModuleResult. Translate them into NEEDS_APPLY so the apply
+  // path emits the real diagnostic, exactly as `needsSwapRecreation` is
+  // handled above.
+  const modeMatches = await swapFileModeMatches(ssh, options)
+  if (typeof modeMatches !== "boolean") return NEEDS_APPLY
+  return modeMatches ? "ok" : NEEDS_APPLY
 }
 
 export async function checkSwapFile(

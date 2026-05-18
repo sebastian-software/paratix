@@ -590,6 +590,37 @@ describe("swap.file — apply", () => {
     expect(writtenFiles).toStrictEqual([])
   })
 
+  // R-0000681: a soft `stat -c '%a'` failure on the apply path must surface
+  // as a structured failed ModuleResult so the operator sees the real
+  // diagnostic. The legacy implementation collapsed every non-zero stat exit
+  // into a plain `false`, which made `ensureSwapFileMode` retry the chmod on
+  // a stale assumption that the mode mismatched.
+  it("R-0000681: surfaces stat soft failures from the swap file mode probe on apply", async () => {
+    const writtenFiles: Array<{ content: string; path: string }> = []
+    const ssh = createMockSsh({
+      [`[ -e '${swapPath}' ]`]: { code: 0 },
+      [`cat '/etc/fstab'`]: { stdout: `${fstabLine}\n` },
+      [`cat '${swapPath}'`]: { stdout: "existing swap bytes" },
+      [`stat -c '%a' '${swapPath}'`]: { code: 1, stderr: "stat: Permission denied" },
+      [`stat -c %s '${swapPath}'`]: { stdout: swapSizeBytes },
+      [`swaplabel '${swapPath}' >/dev/null 2>&1`]: { code: 0 },
+      "swapon --show=NAME --noheadings": { stdout: `${swapPath}\n` },
+    })
+    // eslint-disable-next-line @typescript-eslint/require-await -- mock implementation
+    ssh.writeFile = async (path: string, content: string): Promise<void> => {
+      writtenFiles.push({ content, path })
+    }
+
+    const mod = swap.file({ path: swapPath, size: swapSize })
+    const result = await mod.apply(ssh, emptyEnv)
+
+    expect(result.status).toBe("failed")
+    expect(result.error?.message).toContain("stat failed while reading swap file mode")
+    // The chmod must NOT have been retried on a stale assumption.
+    expect(ssh.calls).not.toContain(`chmod '0600' '${swapPath}'`)
+    expect(writtenFiles).toStrictEqual([])
+  })
+
   it("restores the old swap file and returns swapon failure when replacement publish fails", async () => {
     const ssh = createMockSsh({
       [`[ -e '${swapPath}' ]`]: { code: 0 },
