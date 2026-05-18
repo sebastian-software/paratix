@@ -1,4 +1,4 @@
-import { readFile } from "node:fs/promises"
+import { readFile, stat } from "node:fs/promises"
 
 import type { Environment } from "./types.js"
 
@@ -162,6 +162,10 @@ function validateDotEnvironmentValue(filePath: string, lineNumber: number, value
  */
 function assertDotEnvironmentFileSize(filePath: string, content: string): void {
   const fileByteLength = Buffer.byteLength(content, "utf8")
+  assertDotEnvironmentFileByteLength(filePath, fileByteLength)
+}
+
+function assertDotEnvironmentFileByteLength(filePath: string, fileByteLength: number): void {
   if (fileByteLength > ENVIRONMENT_FILE_BYTE_LIMIT) {
     throw new Error(
       `Refusing to load env file ${filePath}: size ${fileByteLength} bytes exceeds the ${ENVIRONMENT_FILE_BYTE_LIMIT}-byte cap`
@@ -169,13 +173,21 @@ function assertDotEnvironmentFileSize(filePath: string, content: string): void {
   }
 }
 
-export async function loadDotEnvironment(filePath: string): Promise<Environment> {
+async function readDotEnvironmentContent(filePath: string): Promise<string> {
+  // eslint-disable-next-line security/detect-non-literal-fs-filename
+  const stats = await stat(filePath)
+  assertDotEnvironmentFileByteLength(filePath, stats.size)
   // eslint-disable-next-line security/detect-non-literal-fs-filename
   const content = await readFile(filePath, "utf8")
   // R-0000843: enforce the upper bound on the read content before we
   // tokenise. Byte length is approximated via Buffer.byteLength so the
   // limit reflects the on-disk size, not the JS string length.
   assertDotEnvironmentFileSize(filePath, content)
+  return content
+}
+
+export async function loadDotEnvironment(filePath: string): Promise<Environment> {
+  const content = await readDotEnvironmentContent(filePath)
   // R-0000069/R-0000070: use a null-prototype object so a malicious
   // `__proto__` line cannot pollute the loaded map even before the
   // explicit reject below catches it. This complements the explicit

@@ -1,12 +1,29 @@
+import type * as FsPromises from "node:fs/promises"
+
 import { randomUUID } from "node:crypto"
 import { unlinkSync, writeFileSync } from "node:fs"
+import { readFile, stat } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { afterEach, beforeEach, describe, expect, it } from "vitest"
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 
 import type { Environment } from "../src/types.js"
 
-import { loadDotEnvironment, mergeEnvironment, resolveEnvironment } from "../src/environment.js"
+vi.mock("node:fs/promises", async () => {
+  const actual = await vi.importActual<typeof FsPromises>("node:fs/promises")
+  return {
+    ...actual,
+    readFile: vi.fn(actual.readFile),
+    stat: vi.fn(actual.stat),
+  }
+})
+
+const actualFsPromises = await vi.importActual<typeof FsPromises>("node:fs/promises")
+const mockedReadFile = vi.mocked(readFile)
+const mockedStat = vi.mocked(stat)
+
+const { ENVIRONMENT_FILE_BYTE_LIMIT, loadDotEnvironment, mergeEnvironment, resolveEnvironment } =
+  await import("../src/environment.js")
 
 describe("resolveEnvironment", () => {
   it("returns a string value directly", async () => {
@@ -47,9 +64,13 @@ describe("loadDotEnvironment", () => {
 
   beforeEach(() => {
     tmpFile = join(tmpdir(), `paratix-test-${randomUUID()}.env`)
+    mockedReadFile.mockImplementation(actualFsPromises.readFile)
+    mockedStat.mockImplementation(actualFsPromises.stat)
   })
 
   afterEach(() => {
+    mockedReadFile.mockReset()
+    mockedStat.mockReset()
     try {
       unlinkSync(tmpFile)
     } catch {
@@ -195,6 +216,16 @@ describe("loadDotEnvironment", () => {
     expect(env.HOST).toBe("example.com")
     expect(env._LEADING_UNDERSCORE).toBe("ok")
     expect(env.PORT_8080).toBe("8080")
+  })
+
+  it("rejects oversized env files before reading their contents", async () => {
+    const size = ENVIRONMENT_FILE_BYTE_LIMIT + 1
+    mockedStat.mockResolvedValueOnce({ size } as Awaited<ReturnType<typeof stat>>)
+
+    await expect(loadDotEnvironment(tmpFile)).rejects.toThrow(
+      `size ${size} bytes exceeds the ${ENVIRONMENT_FILE_BYTE_LIMIT}-byte cap`
+    )
+    expect(mockedReadFile).not.toHaveBeenCalled()
   })
 
   // R-0000747: NUL is used internally as a sentinel for escaped backslashes
