@@ -114,13 +114,28 @@ export async function loadDotEnvironment(filePath: string): Promise<Environment>
 
     const key = trimmed.slice(0, eqIndex).trim()
     validateDotEnvironmentKey(filePath, index + 1, key)
-    environment[key] = processValue(trimmed.slice(eqIndex + 1).trim())
+    environment[key] = processValue(trimmed.slice(eqIndex + 1).trim(), filePath, index + 1)
   }
 
   return environment
 }
 
-function processValue(raw: string): string {
+function processValue(raw: string, filePath: string, lineNumber: number): string {
+  // R-0000747: the double-quoted branch uses NUL (`\0`) as a temporary
+  // sentinel for escaped backslashes ("\\\\" → "\0" → "\\"). A literal NUL
+  // in the raw input would survive the sentinel swap and emerge as a
+  // backslash in the decoded value, silently corrupting the loaded
+  // environment. Refuse the file outright so the operator notices the
+  // unexpected byte instead of debugging a mangled secret hours later.
+  // The same byte is rejected for unquoted/single-quoted values because a
+  // downstream consumer (shell, sub-process spawn, system call) treats NUL
+  // as a string terminator and would silently truncate the value.
+  if (raw.includes("\0")) {
+    throw new Error(
+      `Invalid env value in ${filePath} line ${lineNumber}: contains a NUL byte`
+    )
+  }
+
   if (raw.length >= 2 && raw.startsWith('"') && raw.endsWith('"')) {
     // Double-quoted: strip quotes and process escape sequences.
     // Use \0 as sentinel for escaped backslashes — safe because .env files never contain null bytes.

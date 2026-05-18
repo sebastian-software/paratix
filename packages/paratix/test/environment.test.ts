@@ -196,6 +196,31 @@ describe("loadDotEnvironment", () => {
     expect(env._LEADING_UNDERSCORE).toBe("ok")
     expect(env.PORT_8080).toBe("8080")
   })
+
+  // R-0000747: NUL is used internally as a sentinel for escaped backslashes
+  // in double-quoted values, so a literal NUL in the raw input would survive
+  // the swap and corrupt the decoded value. NUL also terminates strings in
+  // shells and many syscalls, so any branch must refuse the file outright.
+  it("rejects unquoted values that contain a literal NUL byte", async () => {
+    writeFileSync(tmpFile, "TOKEN=before\0after\n")
+    await expect(loadDotEnvironment(tmpFile)).rejects.toThrow(/NUL byte/v)
+  })
+
+  it("rejects double-quoted values that contain a literal NUL byte", async () => {
+    writeFileSync(tmpFile, 'TOKEN="before\0after"\n')
+    await expect(loadDotEnvironment(tmpFile)).rejects.toThrow(/NUL byte/v)
+  })
+
+  it("rejects single-quoted values that contain a literal NUL byte", async () => {
+    writeFileSync(tmpFile, "TOKEN='before\0after'\n")
+    await expect(loadDotEnvironment(tmpFile)).rejects.toThrow(/NUL byte/v)
+  })
+
+  it("names the offending file and line number when refusing a NUL byte value", async () => {
+    writeFileSync(tmpFile, "OK=fine\nLEAK=before\0after\n")
+    await expect(loadDotEnvironment(tmpFile)).rejects.toThrow(/line 2/v)
+    await expect(loadDotEnvironment(tmpFile)).rejects.toThrow(tmpFile)
+  })
 })
 
 describe("mergeEnvironment", () => {
