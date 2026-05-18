@@ -126,11 +126,67 @@ async function ensureMountPathRealpathMatches(
 }
 
 /**
- * Run the symlink guard, ensure the mountpoint directory exists via
- * `mkdir -p`, then re-verify the resolved path with {@link
- * ensureMountPathRealpathMatches}. Used by {@link mount.present.apply} so the
- * pre-mount checks live in a single helper and the apply body stays under the
- * statement budget.
+ * R-0000755: build the shell snippet that creates one mountpoint component
+ * while keeping the symlink-guard semantics from R-0000673. The previous
+ * `mkdir -p` would silently follow an attacker-planted symlink at any
+ * not-yet-existing ancestor of the mountpoint and create directories outside
+ * the operator-supplied tree. Walking the path components top-down with this
+ * snippet ensures every level is either a real existing directory or freshly
+ * created with plain `mkdir` (no `-p`), and re-checks for symlinks both
+ * before and after the create to close the TOCTOU window.
+ *
+ * Output contract:
+ *   - exit 0 on success (component is now a real directory)
+ *   - exit 1 with a stderr message when the component is or becomes a symlink
+ *   - exit 1 with a stderr message when the component exists but is not a
+ *     directory or when `mkdir` failed
+ *
+ * @param component - Absolute path of the component to ensure.
+ * @returns The shell command string suitable for `ssh.exec`.
+ */
+function buildMountPathComponentMkdirCommand(component: string): string {
+  const quoted = shellQuote(component)
+  return (
+    `if [ -L ${quoted} ]; then ` +
+    `printf 'mount path component is symlink: %s\\n' ${quoted} >&2; exit 1; ` +
+    `fi; ` +
+    `if [ ! -e ${quoted} ]; then ` +
+    `mkdir -- ${quoted} || exit 1; ` +
+    `if [ -L ${quoted} ]; then ` +
+    `printf 'mount path component became symlink after mkdir: %s\\n' ${quoted} >&2; exit 1; ` +
+    `fi; ` +
+    `elif [ ! -d ${quoted} ]; then ` +
+    `printf 'mount path component exists but is not a directory: %s\\n' ${quoted} >&2; exit 1; ` +
+    `fi`
+  )
+}
+
+/**
+ * R-0000755: enumerate every path component of `mountPath`, top-down, so the
+ * caller can `mkdir` each one through the symlink-guarded shell snippet.
+ *
+ * @param mountPath - Absolute mountpoint path (already normalized).
+ * @returns The list of absolute path components from the topmost ancestor
+ *   below `/` down to (and including) `mountPath`.
+ */
+function mountPathComponentsTopDown(mountPath: string): string[] {
+  const components: string[] = []
+  let current = mountPath
+  const seen = new Set<string>()
+  while (current !== "/" && current !== "." && !seen.has(current)) {
+    seen.add(current)
+    components.push(current)
+    current = posix.dirname(current)
+  }
+  return components.reverse()
+}
+
+/**
+ * Run the symlink guard, ensure the mountpoint directory exists by walking
+ * its path components top-down with a per-step symlink recheck (R-0000755),
+ * then re-verify the resolved path with {@link ensureMountPathRealpathMatches}.
+ * Used by {@link mount.present.apply} so the pre-mount checks live in a
+ * single helper and the apply body stays under the statement budget.
  *
  * @param ssh - The SSH connection.
  * @param path - The configured mountpoint path.
@@ -143,17 +199,28 @@ async function preparePresentMountpoint(
   const symlinkFailure = await ensureNoMountPathSymlink(ssh, MOUNT_PRESENT, path)
   if (symlinkFailure != null) return symlinkFailure
 
-  const mkdirResult = await ssh.exec(`mkdir -p ${shellQuote(path)}`, EXEC_OPTS)
-  if (mkdirResult.code !== 0) {
-    return failedCommand(`[${MOUNT_PRESENT}: ${path}] mkdir -p failed`, mkdirResult)
+  // R-0000755: replace `mkdir -p` with a per-component top-down walk. The
+  // previous single-call `mkdir -p` would happily follow an attacker-planted
+  // symlink at any not-yet-existing ancestor and create directories outside
+  // the operator-supplied tree (the same hazard fixed for `download.large`
+  // ancestors in R-0000673). Walking explicitly with plain `mkdir` and a
+  // `[ ! -L ]` recheck per component keeps the create within the mountpoint
+  // tree and trips an early failure on a planted symlink.
+  for (const component of mountPathComponentsTopDown(path)) {
+    // eslint-disable-next-line no-await-in-loop -- component walk is sequential by nature
+    const mkdirResult = await ssh.exec(buildMountPathComponentMkdirCommand(component), EXEC_OPTS)
+    if (mkdirResult.code !== 0) {
+      return failedCommand(`[${MOUNT_PRESENT}: ${path}] mkdir at ${component} failed`, mkdirResult)
+    }
   }
 
-  // R-0000224: after `mkdir -p`, re-resolve the path via `readlink -f` and
-  // verify it still matches. Catches the TOCTOU window between the
-  // per-component symlink guard above and the mount() syscall below. This is
-  // best-effort defense in depth: a privileged attacker can still race between
-  // this check and the mount call. The residual risk is acceptable because
-  // mount.present is a privileged operator tool, not a sandboxed primitive.
+  // R-0000224: after the per-component walk, re-resolve the path via
+  // `readlink -f` and verify it still matches. Catches the TOCTOU window
+  // between the per-component symlink guard above and the mount() syscall
+  // below. This is best-effort defense in depth: a privileged attacker can
+  // still race between this check and the mount call. The residual risk is
+  // acceptable because mount.present is a privileged operator tool, not a
+  // sandboxed primitive.
   return ensureMountPathRealpathMatches(ssh, MOUNT_PRESENT, path)
 }
 

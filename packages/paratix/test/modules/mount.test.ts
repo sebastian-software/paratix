@@ -42,7 +42,29 @@ const findmntCheckCmd = `findmnt --noheadings --output SOURCE,FSTYPE,OPTIONS '${
 const findmntTestCmd = `findmnt --noheadings '${mountPath}'`
 const mountCmd = `mount -t '${mountFstype}' -o '${mountOpts}' -- '${mountSrc}' '${mountPath}'`
 const umountCmd = `umount '${mountPath}'`
-const mkdirCmd = `mkdir -p '${mountPath}'`
+// R-0000755: mount.present now walks each path component with a
+// symlink-guarded `mkdir` snippet instead of the previous `mkdir -p`. The
+// helper below mirrors `buildMountPathComponentMkdirCommand` so tests can
+// stub the per-component calls.
+function buildMountPathComponentMkdirCommand(component: string): string {
+  return (
+    `if [ -L '${component}' ]; then ` +
+    `printf 'mount path component is symlink: %s\\n' '${component}' >&2; exit 1; ` +
+    `fi; ` +
+    `if [ ! -e '${component}' ]; then ` +
+    `mkdir -- '${component}' || exit 1; ` +
+    `if [ -L '${component}' ]; then ` +
+    `printf 'mount path component became symlink after mkdir: %s\\n' '${component}' >&2; exit 1; ` +
+    `fi; ` +
+    `elif [ ! -d '${component}' ]; then ` +
+    `printf 'mount path component exists but is not a directory: %s\\n' '${component}' >&2; exit 1; ` +
+    `fi`
+  )
+}
+const mountPathMkdirCmds = ["/mnt", "/mnt/data"].map((component) =>
+  buildMountPathComponentMkdirCommand(component)
+)
+const mkdirCmd = mountPathMkdirCmds.at(-1) ?? ""
 const mountPathRealpathCmd = `readlink -f -- '${mountPath}' 2>/dev/null || printf '%s\\n' '${mountPath}'`
 const mountPathSymlinkGuardCmd = [
   `mount_path='${mountPath}'`,
@@ -61,7 +83,7 @@ const successfulMountApplyOptions: MockSshOptions = {
   allowWrites: [{ options: { mode: "0644" }, remotePath: "/etc/fstab" }],
   responseStubs: [
     { command: mountPathSymlinkGuardCmd, result: { code: 0 } },
-    { command: mkdirCmd, result: { code: 0 } },
+    ...mountPathMkdirCmds.map((command) => ({ command, result: { code: 0 } })),
     { command: mountPathRealpathCmd, result: { code: 0, stdout: `${mountPath}\n` } },
   ],
 }
@@ -590,7 +612,11 @@ describe("mount.present — apply", () => {
     )
   })
 
-  it("creates mountpoint with mkdir -p", async () => {
+  it("creates mountpoint via a top-down per-component mkdir walk", async () => {
+    // R-0000755: the previous single-call `mkdir -p` would silently follow
+    // an attacker-planted symlink at any not-yet-existing ancestor. The new
+    // walk issues one symlink-guarded `mkdir` per component (here `/mnt`
+    // and `/mnt/data`) so a planted link trips an early failure.
     const mockSsh = createMountApplyMockSsh({
       [findmntCheckCmd]: { code: 0, stdout: liveMountStdout },
     })
@@ -602,7 +628,11 @@ describe("mount.present — apply", () => {
       src: mountSrc,
     })
     await mod.apply(mockSsh, emptyEnv)
-    expect(mockSsh.calls).toContain(mkdirCmd)
+    const parentMkdir = buildMountPathComponentMkdirCommand("/mnt")
+    const leafMkdir = buildMountPathComponentMkdirCommand(mountPath)
+    expect(mockSsh.calls).toContain(parentMkdir)
+    expect(mockSsh.calls).toContain(leafMkdir)
+    expect(mockSsh.calls.indexOf(parentMkdir)).toBeLessThan(mockSsh.calls.indexOf(leafMkdir))
   })
 
   it("returns failed and skips mkdir when mount path contains a symlink", async () => {
@@ -644,7 +674,9 @@ describe("mount.present — apply", () => {
     expect(mockSsh.calls).not.toContain(mountCmd)
   })
 
-  it("returns failed and does not touch fstab or mount when mkdir -p fails", async () => {
+  it("returns failed and does not touch fstab or mount when a component mkdir fails", async () => {
+    // R-0000755: failures from any individual component mkdir surface as a
+    // structured failure whose message identifies the failing component.
     const writtenFiles: Array<{ content: string; path: string }> = []
     const mockSsh = createMountApplyMockSsh({
       "cat '/etc/fstab'": { stdout: "# /etc/fstab\n" },
@@ -664,7 +696,9 @@ describe("mount.present — apply", () => {
     const result = await mod.apply(mockSsh, emptyEnv)
 
     expect(result.status).toBe("failed")
-    expect(result.error?.message).toContain("[mount.present: /mnt/data] mkdir -p failed")
+    expect(result.error?.message).toContain(
+      `[mount.present: /mnt/data] mkdir at ${mountPath} failed`
+    )
     expect(mockSsh.calls).not.toContain("cat '/etc/fstab'")
     expect(mockSsh.calls).not.toContain(findmntCheckCmd)
     expect(mockSsh.calls).not.toContain(mountCmd)
