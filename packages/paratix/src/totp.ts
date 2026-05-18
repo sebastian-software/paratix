@@ -71,30 +71,26 @@ const SUPPORTED_ALGORITHMS: Record<string, string> = {
  * @returns A Buffer containing the decoded bytes.
  * @throws {Error} If the string contains a character outside the Base32 alphabet.
  */
-function decodeBase32(encoded: string): Buffer {
-  // R-0000792: refuse oversized inputs before any allocation work runs.
-  // Without this guard a malicious otpauth URI could supply megabytes of
-  // padding-stripped characters and trigger quadratic copy work.
-  if (encoded.length > MAX_BASE32_INPUT_LENGTH) {
-    throw new Error(
-      `Base32 input exceeds the ${MAX_BASE32_INPUT_LENGTH}-character limit (got ${encoded.length})`
-    )
-  }
-  const alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567"
-  const stripped = encoded.toUpperCase().replaceAll(/[=\s]/gv, "")
+const BASE32_ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567"
 
-  // R-0000792: accumulate bits into a numeric buffer instead of concatenating
-  // 5-character binary chunks onto a growing string. The previous shape was
-  // O(n^2) in the input length because each `bits += …` copied the entire
-  // running string. The numeric accumulator keeps work strictly linear and
-  // never holds more than 12 bits at once (5 just appended + up to 7 from
-  // the previous round). The `bitCount` tracks how many of the low-order
-  // bits inside `bitBuffer` are currently valid.
+/**
+ * R-0000792: accumulate bits into a numeric buffer instead of concatenating
+ * 5-character binary chunks onto a growing string. The previous shape was
+ * O(n^2) in the input length because each `bits += …` copied the entire
+ * running string. The numeric accumulator keeps work strictly linear and
+ * never holds more than 12 bits at once (5 just appended + up to 7 from
+ * the previous round). `bitCount` tracks how many of the low-order bits
+ * inside `bitBuffer` are currently valid.
+ *
+ * @param stripped - Padding/whitespace-free, upper-cased Base32 string.
+ * @returns Decoded byte sequence.
+ */
+function accumulateBase32Bytes(stripped: string): number[] {
   const bytes: number[] = []
   let bitBuffer = 0
   let bitCount = 0
   for (const character of stripped) {
-    const index = alphabet.indexOf(character)
+    const index = BASE32_ALPHABET.indexOf(character)
     if (index === -1) {
       throw new Error(`Invalid Base32 character: ${character}`)
     }
@@ -105,8 +101,20 @@ function decodeBase32(encoded: string): Buffer {
       bytes.push((bitBuffer >> bitCount) & BYTE_MASK)
     }
   }
+  return bytes
+}
 
-  return Buffer.from(bytes)
+function decodeBase32(encoded: string): Buffer {
+  // R-0000792: refuse oversized inputs before any allocation work runs.
+  // Without this guard a malicious otpauth URI could supply megabytes of
+  // padding-stripped characters and trigger quadratic copy work.
+  if (encoded.length > MAX_BASE32_INPUT_LENGTH) {
+    throw new Error(
+      `Base32 input exceeds the ${MAX_BASE32_INPUT_LENGTH}-character limit (got ${encoded.length})`
+    )
+  }
+  const stripped = encoded.toUpperCase().replaceAll(/[=\s]/gv, "")
+  return Buffer.from(accumulateBase32Bytes(stripped))
 }
 
 /**

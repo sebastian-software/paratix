@@ -882,8 +882,13 @@ export class SshConnectionImpl implements SshConnection {
     const previousPassword = this.cachedSudoPassword?.toString("utf8") ?? null
     this.cachedSudoPassword = Buffer.from(password)
     registerSecret(password)
+    // The comparisons below are not credential validations — they decide
+    // which sink registration to release after a rotation. Constant-time
+    // comparison would not change the security properties here, so the
+    // ESLint timing-attack heuristic is silenced for the whole branch.
     if (previousPassword != null && previousPassword !== password) {
       unregisterSecret(previousPassword)
+      // eslint-disable-next-line security/detect-possible-timing-attacks -- bookkeeping comparison, see note above
     } else if (previousPassword === password) {
       // The caller re-cached the same value (e.g. retry after a transient
       // failure). Drop the now-redundant registration so the counter stays

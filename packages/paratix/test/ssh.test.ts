@@ -4533,9 +4533,7 @@ describe("SshConnectionImpl", () => {
     // orphaned counter keeps masking the now-irrelevant old password while
     // the fresh value is missing from the sink, leaking through diagnostics.
     it("rotates the cached sudo password registration in the global secret sink (R-0000785)", async () => {
-      const { clearRegisteredSecrets, getRegisteredSecrets } = await import(
-        "../src/secretSink.js"
-      )
+      const { clearRegisteredSecrets, getRegisteredSecrets } = await import("../src/secretSink.js")
       clearRegisteredSecrets()
 
       const execSpy = vi.fn().mockImplementation((_command: string, callback: ExecCallback) => {

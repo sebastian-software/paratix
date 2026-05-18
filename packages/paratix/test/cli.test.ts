@@ -1494,7 +1494,7 @@ describe("printExceptionError", () => {
   // The fix adds every object-typed cause to the WeakSet so the cycle
   // detection fires regardless of which side of the chain is plain.
   it("detects cycles even when a plain-object wrapper points back into an Error cause (R-0000795)", () => {
-    const root: Error & { cause?: unknown } = new Error("root cause")
+    const root: { cause?: unknown } & Error = new Error("root cause")
     const wrapper: { cause?: unknown; kind: string } = { cause: root, kind: "wrapper" }
     root.cause = wrapper
     const top = new Error("top-level error", { cause: wrapper })
@@ -1943,12 +1943,12 @@ describe("CLI entrypoint", () => {
   })
 
   it("allows reentrant playbook imports inside the same import call tree", async () => {
-    // R-0000695: the AsyncLocalStorage frame is inherited by nested
-    // `import()` chains, so a child playbook loaded with `firstRun: false`
-    // still observes the outer flag because the import promise runs in
-    // the outer context. The previous design relied on process.env for
-    // the same observation; the async-local variant preserves the
-    // existing semantics.
+    // R-0000695 / R-0000796: nested `import()` chains share the outer
+    // AsyncLocalStorage frame by default, but a nested load that explicitly
+    // sets `firstRun: false` opens a dedicated clear-scope so the child
+    // observes `false` even when the outer scope set the flag to `true`.
+    // The outer parent body must still observe `true` once the nested load
+    // returns — only the nested body sees the override.
     const tempDirectory = mkdtempSync(join(tmpdir(), "paratix-cli-reentrant-import-"))
     const parentPlaybookPath = join(tempDirectory, "parent.mjs")
     const childPlaybookPath = join(tempDirectory, "child.mjs")
@@ -1993,7 +1993,12 @@ describe("CLI entrypoint", () => {
         timeout,
       ])
 
-      expect(definition.run).toStrictEqual(["parent", "child", "true", "true"])
+      // R-0000796: the child's `firstRun: false` opens a clear-scope so the
+      // child evaluates `isFirstRun()` as `false` ("missing") even though
+      // the parent's outer scope had set it to `true`. The parent's own
+      // body (last entry) still sees `true` because the clear-scope
+      // unwinds before the parent body runs.
+      expect(definition.run).toStrictEqual(["parent", "child", "missing", "true"])
       expect(process.env.PARATIX_FIRST_RUN).toBeUndefined()
     } finally {
       rmSync(tempDirectory, { force: true, recursive: true })

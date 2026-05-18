@@ -221,15 +221,18 @@ const REDACT_BUFFER_MAX_DEPTH = ERROR_INSPECT_DEPTH + 1
  * @returns A Buffer-free clone safe to feed into `util.inspect`.
  */
 
+// R-0000786: Buffer.isBuffer covers Node's pooled Buffer subclass but skips
+// raw TypedArrays (Uint8Array, Float32Array, …) and ArrayBuffer itself.
+// Those carry the same byte-leak risk as a Buffer once `util.inspect`
+// walks them, so collapse them to the same placeholder before recursing.
+function isBufferLikeView(value: unknown): boolean {
+  if (Buffer.isBuffer(value)) return true
+  if (value instanceof ArrayBuffer) return true
+  return ArrayBuffer.isView(value)
+}
+
 function redactBufferProperties(value: unknown, depth: number, seen: WeakSet<object>): unknown {
-  if (Buffer.isBuffer(value)) return REDACTED_BUFFER_PLACEHOLDER
-  // R-0000786: Buffer.isBuffer covers Node's pooled Buffer subclass but skips
-  // raw TypedArrays (Uint8Array, Float32Array, …) and ArrayBuffer itself.
-  // Those carry the same byte-leak risk as a Buffer once `util.inspect`
-  // walks them, so collapse them to the same placeholder before recursing.
-  if (value instanceof ArrayBuffer || ArrayBuffer.isView(value)) {
-    return REDACTED_BUFFER_PLACEHOLDER
-  }
+  if (isBufferLikeView(value)) return REDACTED_BUFFER_PLACEHOLDER
   if (value === null || typeof value !== "object") return value
   if (depth > REDACT_BUFFER_MAX_DEPTH) return value
   if (seen.has(value)) return "[Circular]"
@@ -301,6 +304,22 @@ function errorToString(value: unknown): string {
  *
  * @param error - The root `Error` whose `.cause` chain should be printed.
  */
+/**
+ * R-0000795: follow `.cause` on both Error instances and plain wrapper
+ * objects (e.g. `{ message, cause: realError }`) so a non-Error wrapper
+ * inserted in the middle of the chain does not silently truncate the walk.
+ *
+ * @param cause - The current node of the cause chain.
+ * @returns The next cause value, or `undefined` when the chain ends.
+ */
+function nextCauseValue(cause: unknown): unknown {
+  if (cause instanceof Error) return cause.cause
+  if (typeof cause === "object" && cause !== null && "cause" in cause) {
+    return (cause as { cause?: unknown }).cause
+  }
+  return undefined
+}
+
 function printCauseChain(error: Error): void {
   // R-0000795: track every object-typed cause — both `Error` instances and
   // plain objects — in the same WeakSet so a chain that mixes them cannot
@@ -320,18 +339,7 @@ function printCauseChain(error: Error): void {
       visitedCauses.add(cause)
     }
     console.error(`  Caused by: ${errorToString(cause)}`)
-    if (cause instanceof Error) {
-      cause = cause.cause
-      continue
-    }
-    // R-0000795: follow `.cause` on non-Error objects as well so a plain
-    // wrapper like `{ message, cause: realError }` does not silently truncate
-    // the chain. The cycle-detection above keeps the walk bounded.
-    if (typeof cause === "object" && "cause" in cause) {
-      cause = (cause as { cause?: unknown }).cause
-      continue
-    }
-    break
+    cause = nextCauseValue(cause)
   }
 }
 
@@ -524,6 +532,10 @@ const playbookImportContext = new AsyncLocalStorage<boolean>()
  * the serialization contract that downstream callers rely on. Keep the tsx
  * registration body free of `withSerializedPlaybookImport` calls or convert
  * this guard into a fileUrl-keyed map of in-flight imports instead.
+ *
+ * @param body - The async unit of work whose playbook import must be
+ *   serialized against every other playbook import in the process.
+ * @returns Whatever `body` resolves to.
  */
 export async function withSerializedPlaybookImport<T>(body: () => Promise<T>): Promise<T> {
   if (playbookImportContext.getStore() === true) {
