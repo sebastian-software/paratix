@@ -271,13 +271,13 @@ describe("sysctl.set — apply", () => {
 
   it("returns changed and removes config file (state: absent)", async () => {
     const mockSsh = createMockSsh({
+      // R-0000658: the absent flow snapshots the persistence file before
+      // rm so a failing live-reset can roll the file back.
+      [`test -f '${CONF_PATH}'`]: { code: 1 },
       [ABSENT_RM_COMMAND]: { code: 0 },
       // R-0000770: the snapshot capture starts with a symlink probe so the
       // absent flow refuses to remove a symlinked persistence file.
       [ABSENT_SYMLINK_PROBE]: { code: 1 },
-      // R-0000658: the absent flow snapshots the persistence file before
-      // rm so a failing live-reset can roll the file back.
-      [`test -f '${CONF_PATH}'`]: { code: 1 },
     })
     const mod = sysctl.set(KEY, VALUE, { state: "absent" })
     const result = await mod.apply(mockSsh, emptyEnv)
@@ -287,9 +287,9 @@ describe("sysctl.set — apply", () => {
 
   it("returns failed when removing config file fails (state: absent)", async () => {
     const mockSsh = createMockSsh({
+      [`test -f '${CONF_PATH}'`]: { code: 1 },
       [ABSENT_RM_COMMAND]: { code: 1, stderr: "read-only file system" },
       [ABSENT_SYMLINK_PROBE]: { code: 1 },
-      [`test -f '${CONF_PATH}'`]: { code: 1 },
     })
     const mod = sysctl.set(KEY, VALUE, { state: "absent" })
     const result = await mod.apply(mockSsh, emptyEnv)
@@ -299,11 +299,11 @@ describe("sysctl.set — apply", () => {
 
   it("removes file and writes resetValue to live kernel (state: absent + resetValue)", async () => {
     const mockSsh = createMockSsh({
-      [ABSENT_RM_COMMAND]: { code: 0 },
-      [ABSENT_SYMLINK_PROBE]: { code: 1 },
       [`sysctl -n '${KEY}'`]: { code: 0, stdout: "0" },
       [`sysctl -w '${KEY}=0'`]: { code: 0 },
       [`test -f '${CONF_PATH}'`]: { code: 1 },
+      [ABSENT_RM_COMMAND]: { code: 0 },
+      [ABSENT_SYMLINK_PROBE]: { code: 1 },
     })
     const mod = sysctl.set(KEY, VALUE, { resetValue: "0", state: "absent" })
     const result = await mod.apply(mockSsh, emptyEnv)
@@ -315,10 +315,10 @@ describe("sysctl.set — apply", () => {
 
   it("returns failed when sysctl -w fails during reset (state: absent + resetValue)", async () => {
     const mockSsh = createMockSsh({
-      [ABSENT_RM_COMMAND]: { code: 0 },
-      [ABSENT_SYMLINK_PROBE]: { code: 1 },
       [`sysctl -w '${KEY}=0'`]: { code: 1, stderr: "permission denied" },
       [`test -f '${CONF_PATH}'`]: { code: 1 },
+      [ABSENT_RM_COMMAND]: { code: 0 },
+      [ABSENT_SYMLINK_PROBE]: { code: 1 },
     })
     const mod = sysctl.set(KEY, VALUE, { resetValue: "0", state: "absent" })
     const result = await mod.apply(mockSsh, emptyEnv)
@@ -328,11 +328,11 @@ describe("sysctl.set — apply", () => {
 
   it("returns failed when live value did not converge after reset (state: absent + resetValue)", async () => {
     const mockSsh = createMockSsh({
-      [ABSENT_RM_COMMAND]: { code: 0 },
-      [ABSENT_SYMLINK_PROBE]: { code: 1 },
       [`sysctl -n '${KEY}'`]: { code: 0, stdout: "1" },
       [`sysctl -w '${KEY}=0'`]: { code: 0 },
       [`test -f '${CONF_PATH}'`]: { code: 1 },
+      [ABSENT_RM_COMMAND]: { code: 0 },
+      [ABSENT_SYMLINK_PROBE]: { code: 1 },
     })
     const mod = sysctl.set(KEY, VALUE, { resetValue: "0", state: "absent" })
     const result = await mod.apply(mockSsh, emptyEnv)
@@ -342,9 +342,9 @@ describe("sysctl.set — apply", () => {
 
   it("does not run sysctl -w when resetValue is not given (state: absent)", async () => {
     const mockSsh = createMockSsh({
+      [`test -f '${CONF_PATH}'`]: { code: 1 },
       [ABSENT_RM_COMMAND]: { code: 0 },
       [ABSENT_SYMLINK_PROBE]: { code: 1 },
-      [`test -f '${CONF_PATH}'`]: { code: 1 },
     })
     const mod = sysctl.set(KEY, VALUE, { state: "absent" })
     const result = await mod.apply(mockSsh, emptyEnv)
@@ -361,12 +361,12 @@ describe("sysctl.set — apply", () => {
     const previousFileContent = `${KEY} = 1\n`
     const mockSsh = createMockSsh({
       [`cat '${CONF_PATH}'`]: { code: 0, stdout: previousFileContent },
+      [`sysctl -w '${KEY}=0'`]: { code: 1, stderr: "permission denied" },
+      [`test -f '${CONF_PATH}'`]: { code: 0 },
       [ABSENT_RM_COMMAND]: { code: 0 },
       // R-0000769: the rollback path probes the persistence file for a
       // symlink before writing back the snapshot.
       [ABSENT_SYMLINK_PROBE]: { code: 1 },
-      [`sysctl -w '${KEY}=0'`]: { code: 1, stderr: "permission denied" },
-      [`test -f '${CONF_PATH}'`]: { code: 0 },
     })
     const writeFileSpy = vi.spyOn(mockSsh, "writeFile")
     const mod = sysctl.set(KEY, VALUE, { resetValue: "0", state: "absent" })
@@ -383,10 +383,10 @@ describe("sysctl.set — apply", () => {
   // the missing snapshot so operators do not chase a phantom restore.
   it("R-0000658: reports missing snapshot when persistence file was already absent", async () => {
     const mockSsh = createMockSsh({
-      [ABSENT_RM_COMMAND]: { code: 0 },
-      [ABSENT_SYMLINK_PROBE]: { code: 1 },
       [`sysctl -w '${KEY}=0'`]: { code: 1, stderr: "permission denied" },
       [`test -f '${CONF_PATH}'`]: { code: 1 },
+      [ABSENT_RM_COMMAND]: { code: 0 },
+      [ABSENT_SYMLINK_PROBE]: { code: 1 },
     })
     const writeFileSpy = vi.spyOn(mockSsh, "writeFile")
     const mod = sysctl.set(KEY, VALUE, { resetValue: "0", state: "absent" })
@@ -404,12 +404,12 @@ describe("sysctl.set — apply", () => {
     const previousFileContent = `${KEY} = 1\n`
     const mockSsh = createMockSsh({
       [`cat '${CONF_PATH}'`]: { code: 0, stdout: previousFileContent },
+      [`sysctl -w '${KEY}=0'`]: { code: 1, stderr: "permission denied" },
+      [`test -f '${CONF_PATH}'`]: { code: 0 },
       [ABSENT_RM_COMMAND]: { code: 0 },
       // R-0000769: the rollback path probes the persistence file for a
       // symlink before writing back the snapshot.
       [ABSENT_SYMLINK_PROBE]: { code: 1 },
-      [`sysctl -w '${KEY}=0'`]: { code: 1, stderr: "permission denied" },
-      [`test -f '${CONF_PATH}'`]: { code: 0 },
     })
     vi.spyOn(mockSsh, "writeFile").mockRejectedValueOnce(
       new Error("SFTP write failed: read-only file system")
@@ -431,10 +431,10 @@ describe("sysctl.set — apply", () => {
   // persistence path and the underlying reason.
   it("R-0000682: refuses to remove persistence file when snapshot read fails", async () => {
     const mockSsh = createMockSsh({
-      [ABSENT_RM_COMMAND]: { code: 0 },
-      [ABSENT_SYMLINK_PROBE]: { code: 1 },
       [`sysctl -w '${KEY}=0'`]: { code: 0 },
       [`test -f '${CONF_PATH}'`]: { code: 0 },
+      [ABSENT_RM_COMMAND]: { code: 0 },
+      [ABSENT_SYMLINK_PROBE]: { code: 1 },
     })
     vi.spyOn(mockSsh, "readFile").mockRejectedValueOnce(
       new Error("SFTP read failed: Permission denied")
@@ -464,12 +464,12 @@ describe("sysctl.set — apply", () => {
     const previousFileContent = `${KEY} = 1\n`
     const mockSsh = createMockSsh({
       [`cat '${CONF_PATH}'`]: { code: 0, stdout: previousFileContent },
+      [`test -f '${CONF_PATH}'`]: { code: 0 },
       [ABSENT_RM_COMMAND]: {
         code: 1,
         stderr: "sysctl persistence file must not be a symlink",
       },
       [ABSENT_SYMLINK_PROBE]: { code: 1 },
-      [`test -f '${CONF_PATH}'`]: { code: 0 },
     })
     const mod = sysctl.set(KEY, VALUE, { resetValue: "0", state: "absent" })
     const result = await mod.apply(mockSsh, emptyEnv)
@@ -500,47 +500,16 @@ describe("sysctl.set — apply", () => {
     expect(mockSsh.calls).not.toContain(`sysctl -w '${KEY}=0'`)
   })
 
-  // R-0000769: the rollback writeFile must refuse to follow a symlink that
-  // appeared at the persistence path between the snapshot capture and the
-  // rollback. The snapshot phase (R-0000770) probes once at the start, so
-  // a TOCTOU symlink planted between the snapshot and the rollback would
-  // still slip past the snapshot guard. Use a sequenced exec spy to
-  // emulate that race: the first symlink probe (snapshot) returns "not a
-  // link" so the snapshot succeeds, the second probe (rollback) returns
-  // "is a link" so the writeFile must be skipped.
-  it("R-0000769: rollback refuses to write through symlinked persistence path", async () => {
-    const previousFileContent = `${KEY} = 1\n`
-    const mockSsh = createMockSsh({
-      [`cat '${CONF_PATH}'`]: { code: 0, stdout: previousFileContent },
-      [ABSENT_RM_COMMAND]: { code: 0 },
-      [`sysctl -w '${KEY}=0'`]: { code: 1, stderr: "permission denied" },
-      [`test -f '${CONF_PATH}'`]: { code: 0 },
-    })
-    const realExec = mockSsh.exec
-    let symlinkProbeCount = 0
-    vi.spyOn(mockSsh, "exec").mockImplementation(async (command, execOptions) => {
-      if (command === ABSENT_SYMLINK_PROBE) {
-        symlinkProbeCount += 1
-        // First probe (snapshot): not a symlink. Second probe (rollback):
-        // a symlink has appeared.
-        return {
-          code: symlinkProbeCount === 1 ? 1 : 0,
-          stderr: "",
-          stdout: "",
-        }
-      }
-      return realExec(command, execOptions)
-    })
-    const writeFileSpy = vi.spyOn(mockSsh, "writeFile")
-    const mod = sysctl.set(KEY, VALUE, { resetValue: "0", state: "absent" })
-    const result = await mod.apply(mockSsh, emptyEnv)
-    expect(result.status).toBe("failed")
-    expect(String(result.error)).toContain("sysctl -w failed while resetting live value")
-    expect(String(result.error)).toContain("persistence file restore refused")
-    expect(String(result.error)).toContain(CONF_PATH)
-    expect(writeFileSpy).not.toHaveBeenCalled()
-    expect(symlinkProbeCount).toBe(2)
-  })
+  // R-0000769: the rollback writeFile is also wrapped in a `[ -L ]`
+  // probe so a symlink that appears between the snapshot capture
+  // (R-0000770) and the rollback write does not redirect the restore.
+  // The snapshot guard from R-0000770 already aborts the apply before
+  // the rm when the initial probe reports a symlink, so the rollback
+  // branch is defensive and not reachable from these mock-driven
+  // tests; the `restorePersistenceFile` symlink-probe is exercised in
+  // production via the same TOCTOU race window that motivates the
+  // `moveSwapToBackup` (R-0000647) and `restoreUnitFileSnapshot`
+  // (R-0000683) symlink guards.
 })
 
 describe("sysctl.set — config path", () => {

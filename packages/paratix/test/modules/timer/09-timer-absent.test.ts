@@ -490,11 +490,11 @@ describe("timer.absent", () => {
     const ssh = createMockSsh({
       [`[ -e '${SERVICE_PATH}' ]`]: { code: 1 },
       [`[ -e '${TIMER_PATH}' ]`]: { code: 1 },
-      "systemctl is-enabled --quiet -- 'backup.timer'": { code: 1 },
       "systemctl is-active --quiet -- 'backup.timer'": {
         code: 5,
         stderr: "Internal error",
       },
+      "systemctl is-enabled --quiet -- 'backup.timer'": { code: 1 },
     })
     const mod = timer.absent("backup")
     expect(await mod.check(ssh, emptyEnv)).toBe("needs-apply")

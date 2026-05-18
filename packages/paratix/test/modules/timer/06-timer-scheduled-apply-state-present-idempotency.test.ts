@@ -226,9 +226,7 @@ describe("timer.scheduled — apply (state: present, idempotency)", () => {
     const mod = timer.scheduled("backup", baseOptions)
     const result = await mod.apply(ssh, emptyEnv)
     expect(result.status).toBe("failed")
-    expect(String(result.error)).toContain(
-      "systemctl is-enabled failed while probing timer state"
-    )
+    expect(String(result.error)).toContain("systemctl is-enabled failed while probing timer state")
     expect(ssh.calls).not.toContain("systemctl enable --now -- 'backup.timer'")
   })
 })

@@ -278,8 +278,8 @@ describe("systemd.unit", () => {
     // via `isSymlink` before reading the current content.
     const guardedRmCommand = `[ ! -L '${filePath}' ] && [ -f '${filePath}' ] && rm -f '${filePath}' || [ ! -e '${filePath}' ]`
     const ssh = createMockSsh({
-      [`[ -L '${filePath}' ]`]: { code: 1 },
       [`[ -e '${filePath}' ]`]: { code: 1 },
+      [`[ -L '${filePath}' ]`]: { code: 1 },
       [guardedRmCommand]: { code: 0 },
       "systemctl daemon-reload": { code: 1 },
     })

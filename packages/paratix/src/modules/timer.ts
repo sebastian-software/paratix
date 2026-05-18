@@ -22,6 +22,7 @@ import {
 const SYSTEMCTL = "systemctl"
 const UNIT_FILE_MODE = "0644"
 const TIMER_ACTIVATION_ROLLBACK_FAILED = "timer activation rollback failed"
+const TIMER_SCHEDULED_MODULE_PATH = "timer.scheduled"
 
 function normalizeMode(mode: string): string {
   return mode.replace(/^0+/v, "")
@@ -339,8 +340,22 @@ function describeSnapshotPairFailure(
 // Higher codes (e.g. 4 == "no such unit", 5 == "internal error") are
 // reserved for genuine problems that should surface as a structured
 // failure rather than be quietly downgraded to "disabled/inactive".
-const WELL_FORMED_IS_ENABLED_CODES = new Set([0, 1, 2, 3])
-const WELL_FORMED_IS_ACTIVE_CODES = new Set([0, 1, 2, 3])
+const SYSTEMCTL_STATE_OK = 0
+const SYSTEMCTL_STATE_DISABLED_LIKE = 1
+const SYSTEMCTL_STATE_RUNTIME_LIKE = 2
+const SYSTEMCTL_STATE_INACTIVE_LIKE = 3
+const WELL_FORMED_IS_ENABLED_CODES = new Set([
+  SYSTEMCTL_STATE_DISABLED_LIKE,
+  SYSTEMCTL_STATE_INACTIVE_LIKE,
+  SYSTEMCTL_STATE_OK,
+  SYSTEMCTL_STATE_RUNTIME_LIKE,
+])
+const WELL_FORMED_IS_ACTIVE_CODES = new Set([
+  SYSTEMCTL_STATE_DISABLED_LIKE,
+  SYSTEMCTL_STATE_INACTIVE_LIKE,
+  SYSTEMCTL_STATE_OK,
+  SYSTEMCTL_STATE_RUNTIME_LIKE,
+])
 
 async function probeUnitEnabled(
   ssh: SshConnection,
@@ -450,6 +465,21 @@ async function restartTimerIfNeeded(
   return null
 }
 
+// R-0000773: probe whether a freshly-synced timer is already fully
+// active before deciding whether `enable --now` is required. Extracted
+// from applyPresent to keep the dispatcher below the max-statements
+// ceiling (oxlint).
+async function probeFullyActiveForPresent(
+  ssh: SshConnection,
+  parameters: { filesMatched: boolean; name: string; paths: TimerPaths }
+): Promise<boolean | ModuleResult> {
+  if (!parameters.filesMatched) return false
+  return isTimerFullyActive(ssh, parameters.paths.timerUnit, {
+    name: parameters.name,
+    path: TIMER_SCHEDULED_MODULE_PATH,
+  })
+}
+
 async function applyPresent(
   ssh: SshConnection,
   name: string,
@@ -459,20 +489,9 @@ async function applyPresent(
   if (!sync.ok) return sync.failure
 
   const filesMatched = sync.serviceMatched && sync.timerMatched
-  // R-0000773: a structured probe failure must surface as a failed
-  // ModuleResult instead of being silently downgraded to "not fully
-  // active". Without this guard a transient systemctl/binary error would
-  // trigger an unnecessary `enable --now` against a unit whose state is
-  // actually unknown.
-  let fullyActive = false
-  if (filesMatched) {
-    const probe = await isTimerFullyActive(ssh, paths.timerUnit, {
-      name,
-      path: "timer.scheduled",
-    })
-    if (typeof probe !== "boolean") return probe
-    fullyActive = probe
-  }
+  const fullyActiveProbe = await probeFullyActiveForPresent(ssh, { filesMatched, name, paths })
+  if (typeof fullyActiveProbe !== "boolean") return fullyActiveProbe
+  const fullyActive = fullyActiveProbe
 
   // If both files matched and the timer is already enabled and active, nothing
   // needs to change. Reporting `ok` here keeps direct apply calls (e.g. inside
@@ -762,6 +781,30 @@ async function handleAbsentRemoveFailure(
   return failed(`${removeMessage}; rollback enable failed: ${restoreMessage}`)
 }
 
+// R-0000774: chain a disable-time failure with the activation-snapshot
+// rollback so neither failure is silently dropped. Extracted from
+// applyAbsent to keep the dispatcher below the complexity ceiling
+// (oxlint complexity rule).
+async function handleAbsentDisableFailure(
+  ssh: SshConnection,
+  context: AbsentContext,
+  parameters: {
+    activationSnapshot: TimerActivationSnapshot
+    disableFailure: ModuleResult
+  }
+): Promise<ModuleResult> {
+  const { activationSnapshot, disableFailure } = parameters
+  const activationRestoreFailure = await restoreTimerActivationForAbsent(
+    ssh,
+    context,
+    activationSnapshot
+  )
+  if (activationRestoreFailure == null) return disableFailure
+  const disableMessage = disableFailure.error?.message ?? "systemctl disable --now failed"
+  const restoreMessage = activationRestoreFailure.error?.message ?? TIMER_ACTIVATION_ROLLBACK_FAILED
+  return failed(`${disableMessage}; rollback enable failed: ${restoreMessage}`)
+}
+
 async function applyAbsent(ssh: SshConnection, context: AbsentContext): Promise<ModuleResult> {
   const { locations } = context
 
@@ -775,26 +818,7 @@ async function applyAbsent(ssh: SshConnection, context: AbsentContext): Promise<
 
   const disableFailure = await disableTimerForAbsent(ssh, context)
   if (disableFailure) {
-    // R-0000774: when `disable --now` fails after partially mutating the
-    // timer's enable/active state (e.g. the disable side succeeded but
-    // the stop side did not), the activation snapshot captured above is
-    // still authoritative for the pre-apply state. Replay it through
-    // `restoreTimerActivationForAbsent` before returning so the timer
-    // ends up in its original state rather than "half-disabled while the
-    // unit files are still on disk". Chain the rollback outcome into
-    // the disable failure so neither error is silently dropped — mirrors
-    // the handleAbsentRemoveFailure (R-0000552) and reload-failure
-    // (R-0000655) chain patterns.
-    const activationRestoreFailure = await restoreTimerActivationForAbsent(
-      ssh,
-      context,
-      activationSnapshot
-    )
-    if (activationRestoreFailure == null) return disableFailure
-    const disableMessage = disableFailure.error?.message ?? "systemctl disable --now failed"
-    const restoreMessage =
-      activationRestoreFailure.error?.message ?? TIMER_ACTIVATION_ROLLBACK_FAILED
-    return failed(`${disableMessage}; rollback enable failed: ${restoreMessage}`)
+    return handleAbsentDisableFailure(ssh, context, { activationSnapshot, disableFailure })
   }
 
   const removeFailure = await removeAbsentUnitFiles(ssh, context, {
@@ -881,11 +905,11 @@ export const timer = {
       return {
         async apply(ssh: null | SshConnection): Promise<ModuleResult> {
           if (!ssh) return failed(`[timer.scheduled: ${name}] SSH connection is required`)
-          return applyAbsent(ssh, { locations, module: "timer.scheduled", name })
+          return applyAbsent(ssh, { locations, module: TIMER_SCHEDULED_MODULE_PATH, name })
         },
         async check(ssh: null | SshConnection): Promise<"needs-apply" | "ok"> {
           if (!ssh) return NEEDS_APPLY
-          return checkAbsent(ssh, locations, { name, path: "timer.scheduled" })
+          return checkAbsent(ssh, locations, { name, path: TIMER_SCHEDULED_MODULE_PATH })
         },
         name: `timer.scheduled: ${name}`,
       }

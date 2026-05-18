@@ -52,10 +52,7 @@ function validateUnitName(name: string): string {
 // possibly-already-masked unit (harmless) or skip `unmask` for a unit
 // that is actually masked (silent regression). Mirrors the structured
 // probe shape introduced for `isSwapActive` (R-0000722).
-async function isUnitMasked(
-  ssh: SshConnection,
-  unitName: string
-): Promise<boolean | ModuleResult> {
+async function isUnitMasked(ssh: SshConnection, unitName: string): Promise<boolean | ModuleResult> {
   const probe = await ssh.exec(
     `${SYSTEMCTL} is-enabled -- ${shellQuote(unitName)}`,
     SILENT_EXEC_OPTS
