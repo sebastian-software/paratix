@@ -238,10 +238,6 @@ describe("publishWorkspacePackages", () => {
         "--tag",
         "latest",
       ],
-      // R-0000741: immediate post-publish isPublished probe — aborts
-      // with a clear diagnostic when pnpm publish exits 0 but the
-      // version is not yet visible on the registry.
-      ["npm", "view", PARATIX_SPECIFIER, "version", "--json"],
       ["npm", "view", PARATIX_SPECIFIER, "version", "--json"],
       ["npm", "view", CREATE_PARATIX_SPECIFIER, "version", "--json"],
       [
@@ -316,31 +312,50 @@ describe("publishWorkspacePackages", () => {
     })
   })
 
-  // R-0000741: pnpm publish can exit 0 while the registry has not yet
-  // exposed the new version, or while a hook silently swallowed a 4xx.
-  // The publish flow probes the registry once immediately after the
-  // child exits so the operator sees a clear diagnostic instead of
-  // waiting through the ~4 minute waitForPublishedPackage budget.
-  it("R-0000741: aborts immediately when pnpm publish exits without exposing the version", async () => {
-    // The spawn override below stays silent (does not add to the
-    // `published` set), so the immediate post-publish isPublished probe
-    // returns false even though pnpm publish exited successfully.
+  // R-0000861: pnpm publish can exit 0 before the registry exposes the
+  // new version. The publish flow must spend the bounded propagation
+  // retry budget instead of treating the first missing `npm view` as a
+  // hard failure.
+  it("R-0000861: retries registry propagation after pnpm publish", async () => {
     const commandRunner = createCommandRunner()
+    const publishedBySpawn = new Set()
+    const viewCounts = new Map()
+    commandRunner.execFile = async (command, commandArguments) => {
+      commandRunner.calls.push([command, ...commandArguments])
+      const packageSpecifier = commandArguments[1]
+      const viewCount = (viewCounts.get(packageSpecifier) ?? 0) + 1
+      viewCounts.set(packageSpecifier, viewCount)
+
+      const isDelayedParatixAvailability =
+        packageSpecifier === PARATIX_SPECIFIER &&
+        publishedBySpawn.has(packageSpecifier) &&
+        viewCount >= 3
+      const isImmediatelyAvailableAfterPublish =
+        packageSpecifier === CREATE_PARATIX_SPECIFIER && publishedBySpawn.has(packageSpecifier)
+      if (isDelayedParatixAvailability || isImmediatelyAvailableAfterPublish) {
+        const version = packageSpecifier.slice(packageSpecifier.lastIndexOf("@") + 1)
+        return { stdout: JSON.stringify(version) }
+      }
+
+      throw createMissingPackageError()
+    }
     commandRunner.spawn = async (command, commandArguments) => {
       commandRunner.calls.push([command, ...commandArguments])
-      // Deliberately do not record the publish — simulate a successful
-      // exit that did not actually make the version visible.
+      const directory = commandArguments[1]
+      publishedBySpawn.add(
+        directory.endsWith(CREATE_PARATIX_NAME) ? CREATE_PARATIX_SPECIFIER : PARATIX_SPECIFIER
+      )
     }
 
-    await assertRejectsWithMessage(
-      publishWorkspacePackages({
-        availabilityDelayMilliseconds: 0,
-        availabilityRetries: 2,
-        commandRunner,
-        fs: createFs(),
-      }),
-      "did not become visible on the npm registry immediately after pnpm publish exited"
-    )
+    await publishWorkspacePackages({
+      availabilityDelayMilliseconds: 0,
+      availabilityRetries: 3,
+      commandRunner,
+      fs: createFs(),
+    })
+
+    assert.equal(viewCounts.get(PARATIX_SPECIFIER), 3)
+    assert.equal(hasCommandCall(commandRunner.calls, "pnpm"), true)
   })
 
   // R-0000661: refuse to invoke pnpm publish when dist artefacts referenced
