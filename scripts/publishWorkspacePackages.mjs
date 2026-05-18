@@ -139,6 +139,25 @@ function publishDistributionTag(version) {
   return hasPrereleaseSuffix(version) ? "next" : "latest"
 }
 
+// R-0000727: format a walker error so the operator sees the failing
+// path alongside the underlying error code and the standard "run pnpm
+// build before publishing" remediation. The wrapper keeps the `cause`
+// chain intact so the original stack stays available for debugging,
+// but the message is consistent regardless of whether the failure
+// surfaces from readdir, stat or lstat.
+function buildWalkerErrorMessage(packageName, path, error) {
+  const code = error?.code
+  if (code === "ENOENT") {
+    return `${packageName}: ${path} is missing — run pnpm build before publishing.`
+  }
+  const reason = error?.message ?? String(error)
+  return `${packageName}: failed to read ${path} (${reason}). Run pnpm build before publishing.`
+}
+
+function rethrowWalkerError(packageName, path, error) {
+  throw new Error(buildWalkerErrorMessage(packageName, path, error), { cause: error })
+}
+
 // R-0000685: both walkers must treat symlinks identically. Previously
 // `maxMtimeMillisecondsUnder` skipped symlinks via mtime 0 (driven by
 // Dirent.isSymbolicLink() which reflects lstat semantics) while
@@ -155,19 +174,34 @@ function publishDistributionTag(version) {
 // the contents of existing files are edited. The recursion follows
 // regular files only and skips symlinks so a malicious symlink under
 // the directory cannot stat its target and lift the dist freshness bar.
-async function maxMtimeMillisecondsUnder(directory, filesystem) {
-  const entries = await filesystem.readdir(directory, { withFileTypes: true })
+//
+// R-0000727: translate raw readdir/stat failures into operator-friendly
+// messages with the failing path and the build-before-publishing
+// remediation. The caller threads `packageName` through so missing
+// `src/`, missing `dist/` subtrees, and EACCES/EIO errors all surface
+// with the same shape ("<package>: <path> is missing — run pnpm build").
+async function maxMtimeMillisecondsUnder(packageName, directory, filesystem) {
+  let entries
+  try {
+    entries = await filesystem.readdir(directory, { withFileTypes: true })
+  } catch (error) {
+    rethrowWalkerError(packageName, directory, error)
+  }
   const childMtimes = await Promise.all(
     entries.map(async (entry) => {
       if (entry.isSymbolicLink()) return 0
       const entryPath = join(directory, entry.name)
       if (entry.isDirectory()) {
         // Recurse so deep edits (e.g. `src/modules/<module>.ts`) are visible.
-        return maxMtimeMillisecondsUnder(entryPath, filesystem)
+        return maxMtimeMillisecondsUnder(packageName, entryPath, filesystem)
       }
       if (!entry.isFile()) return 0
-      const stats = await filesystem.stat(entryPath)
-      return stats.mtimeMs
+      try {
+        const stats = await filesystem.stat(entryPath)
+        return stats.mtimeMs
+      } catch (error) {
+        rethrowWalkerError(packageName, entryPath, error)
+      }
     })
   )
   return childMtimes.length > 0 ? Math.max(...childMtimes) : 0
@@ -179,12 +213,22 @@ async function maxMtimeMillisecondsUnder(directory, filesystem) {
 // symlinked top-level `files` entry would lift the freshness bar via
 // the target while symlinked children of `src/` were treated as 0,
 // flipping the comparison in unpredictable ways.
-async function mtimeMillisecondsForFileEntry(directory, fileEntry, filesystem) {
+//
+// R-0000727: translate lstat failures into the same operator-friendly
+// shape used by the source walker so a missing `dist/` entry surfaces
+// with the failing path and the build-before-publishing remediation
+// instead of leaking the raw ENOENT from lstat.
+async function mtimeMillisecondsForFileEntry({ directory, fileEntry, filesystem, packageName }) {
   const absolutePath = join(directory, fileEntry)
-  const linkStats = await filesystem.lstat(absolutePath)
+  let linkStats
+  try {
+    linkStats = await filesystem.lstat(absolutePath)
+  } catch (error) {
+    rethrowWalkerError(packageName, absolutePath, error)
+  }
   if (linkStats.isSymbolicLink()) return 0
   if (linkStats.isDirectory()) {
-    return maxMtimeMillisecondsUnder(absolutePath, filesystem)
+    return maxMtimeMillisecondsUnder(packageName, absolutePath, filesystem)
   }
   return linkStats.mtimeMs
 }
@@ -192,9 +236,11 @@ async function mtimeMillisecondsForFileEntry(directory, fileEntry, filesystem) {
 // R-0000661: lift the most recent mtime across every entry referenced by
 // `files`. Treats directories like `src/` does — walking the tree so the
 // freshness signal reflects file edits, not directory churn.
-async function maxMtimeMillisecondsForFiles(directory, files, filesystem) {
+async function maxMtimeMillisecondsForFiles({ directory, files, filesystem, packageName }) {
   const fileMtimes = await Promise.all(
-    files.map((fileEntry) => mtimeMillisecondsForFileEntry(directory, fileEntry, filesystem))
+    files.map((fileEntry) =>
+      mtimeMillisecondsForFileEntry({ directory, fileEntry, filesystem, packageName })
+    )
   )
   return fileMtimes.length > 0 ? Math.max(...fileMtimes) : 0
 }
@@ -221,21 +267,13 @@ async function ensureFilesEntryExists(packageInfo, fileEntry, filesystem) {
 // obvious unless the operator already knows that the freshness check
 // walks `src/`. Map every error from the source walk to the same
 // build-before-publishing remediation so the message is consistent.
+//
+// R-0000727: the underlying walker now translates failures inline via
+// `rethrowWalkerError`, so this wrapper only needs to invoke the
+// recursion. Keeping the helper around documents the intent and gives
+// the verifyDistributionArtefacts call site a recognisable seam.
 async function readSourceMtime(packageInfo, sourceDirectory, filesystem) {
-  try {
-    return await maxMtimeMillisecondsUnder(sourceDirectory, filesystem)
-  } catch (error) {
-    if (error?.code === "ENOENT") {
-      throw new Error(
-        `${packageInfo.name}: ${sourceDirectory} is missing — run pnpm build before publishing.`,
-        { cause: error }
-      )
-    }
-    throw new Error(
-      `${packageInfo.name}: failed to read ${sourceDirectory} (${error?.message ?? String(error)}). Run pnpm build before publishing.`,
-      { cause: error }
-    )
-  }
+  return maxMtimeMillisecondsUnder(packageInfo.name, sourceDirectory, filesystem)
 }
 
 // R-0000661: confirm every artefact npm would ship actually exists and is
@@ -256,11 +294,12 @@ async function verifyDistributionArtefacts(packageInfo, filesystem) {
 
   const sourceDirectory = join(packageInfo.directory, "src")
   const sourceMtime = await readSourceMtime(packageInfo, sourceDirectory, filesystem)
-  const filesMtime = await maxMtimeMillisecondsForFiles(
-    packageInfo.directory,
-    packageInfo.files,
-    filesystem
-  )
+  const filesMtime = await maxMtimeMillisecondsForFiles({
+    directory: packageInfo.directory,
+    files: packageInfo.files,
+    filesystem,
+    packageName: packageInfo.name,
+  })
   if (filesMtime < sourceMtime) {
     throw new Error(
       `${packageInfo.name}: package.json#files mtime (${new Date(filesMtime).toISOString()}) is older than ${packageInfo.directory}/src mtime (${new Date(sourceMtime).toISOString()}). Run the build before publishing.`
