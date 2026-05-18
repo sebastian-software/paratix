@@ -873,12 +873,18 @@ describe("recipe", () => {
     expect(innerSecond.apply).not.toHaveBeenCalled()
   })
 
-  it("honors the runner abort signal between children in check (R-0000096)", async () => {
+  it("honors the runner abort signal between children in check (R-0000096 / R-0000797)", async () => {
     // R-0000096: recipe.check used to iterate every child synchronously
     // without observing the runner abort signal. When earlier check()
     // implementations are slow, SIGINT only takes effect after the whole
     // recipe finished checking. After the fix, the loop bails out as soon
-    // as the abort signal is set and reports "ok" so no apply runs.
+    // as the abort signal is set.
+    //
+    // R-0000797: an interrupted check now returns NEEDS_APPLY instead of
+    // "ok" so the caller can distinguish a partial check from a clean
+    // state. The previous "ok" sentinel made an interrupted check look
+    // indistinguishable from a successful clean recipe, silently skipping
+    // the apply that the partial check never reached.
     const controller = new AbortController()
     const firstChild: Module = {
       apply: vi.fn().mockResolvedValue({ status: "changed" }),
@@ -900,7 +906,7 @@ describe("recipe", () => {
       const r = recipe("test-recipe", [firstChild, secondChild])
       const result = await r.check(null, emptyEnv)
 
-      expect(result).toBe("ok")
+      expect(result).toBe("needs-apply")
       expect(secondChild.check).not.toHaveBeenCalled()
     } finally {
       setRunnerAbortSignal(undefined)

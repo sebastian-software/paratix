@@ -638,14 +638,20 @@ export function recipe(
       // Each child receives the original environment — no meta propagation,
       // because check() never calls apply() and therefore produces no meta.
       for (const childModule of modules) {
-        // R-0000096: cooperate with SIGINT/SIGTERM during long check phases.
-        // The runner installs the abort signal via setRunnerAbortSignal at
-        // the start of a run; honoring it here keeps recipe.check responsive
-        // when individual children have slow check implementations. We bail
-        // out with "ok" so no apply gets triggered for a partially checked
-        // recipe — the runner's outer loop will see the same shutdown signal
-        // and stop the run.
-        if (getRunnerAbortSignal()?.aborted === true) return "ok"
+        // R-0000096 / R-0000797: cooperate with SIGINT/SIGTERM during long
+        // check phases. The runner installs the abort signal via
+        // setRunnerAbortSignal at the start of a run; honoring it here keeps
+        // recipe.check responsive when individual children have slow check
+        // implementations.
+        //
+        // R-0000797: return NEEDS_APPLY (not "ok") on abort. The previous
+        // "ok" sentinel made an interrupted check indistinguishable from a
+        // successful clean state — the next run could observe the cached
+        // "ok" and skip the apply that the partial check never reached.
+        // Surfacing NEEDS_APPLY tells the caller that the check was
+        // incomplete and that an apply must still run after the shutdown
+        // unwinds.
+        if (getRunnerAbortSignal()?.aborted === true) return NEEDS_APPLY
         const connection = childModule.local === true ? null : ssh
         let result: "needs-apply" | "ok"
         try {
