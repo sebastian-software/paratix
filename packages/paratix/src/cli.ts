@@ -231,6 +231,15 @@ function isBufferLikeView(value: unknown): boolean {
   return ArrayBuffer.isView(value)
 }
 
+/**
+ * R-0000836: keys we must skip even if they appear as own properties so an
+ * attacker-controlled error graph cannot mutate the freshly created clone's
+ * prototype chain. `Object.create(null)` already removes Object.prototype,
+ * but explicit skip is cheap defence-in-depth for the rare case the clone
+ * gets re-rooted onto a non-null prototype downstream.
+ */
+const REDACT_FORBIDDEN_KEYS = new Set(["__proto__", "constructor", "prototype"])
+
 function redactBufferProperties(value: unknown, depth: number, seen: WeakSet<object>): unknown {
   if (isBufferLikeView(value)) return REDACTED_BUFFER_PLACEHOLDER
   if (value === null || typeof value !== "object") return value
@@ -242,20 +251,28 @@ function redactBufferProperties(value: unknown, depth: number, seen: WeakSet<obj
   }
   // eslint-disable-next-line @typescript-eslint/no-unsafe-type-assertion -- the prior `typeof value !== "object"` and `Array.isArray` guards above prove that `value` is a non-array plain-style object whose keys can be enumerated via Reflect.ownKeys
   const sourceRecord = value as Record<string, unknown>
-  const redacted: Record<string, unknown> = {}
+  // R-0000836: prototype-null clone so a `__proto__` key on a tampered cause
+  // graph cannot pollute Object.prototype during the assignment below.
+  const redacted: Record<string, unknown> = Object.create(null) as Record<string, unknown>
   // R-0000691: walk own-enumerable + own-symbol property names so a
   // `cause`-shaped Buffer that lives on an Error instance is still
   // captured. `inspect` later renders this plain object, which is fine
   // because the goal is to elide the Buffer payload — not to reproduce
   // the original prototype chain.
+  // R-0000836: read each property through its descriptor so a malicious
+  // getter does not execute during the walk. Accessor descriptors collapse
+  // to a static placeholder; only plain data values are recursed into.
   for (const key of Reflect.ownKeys(sourceRecord)) {
     const stringKey = typeof key === "symbol" ? key.toString() : key
-    redacted[stringKey] = redactBufferProperties(
-      // eslint-disable-next-line @typescript-eslint/no-unsafe-type-assertion -- Reflect.ownKeys returns the very keys present on sourceRecord, so indexing them as `keyof typeof sourceRecord` is sound and avoids an unnecessary intermediate variable
-      sourceRecord[key as keyof typeof sourceRecord],
-      depth + 1,
-      seen
-    )
+    if (REDACT_FORBIDDEN_KEYS.has(stringKey)) continue
+    // eslint-disable-next-line @typescript-eslint/no-unsafe-type-assertion -- Reflect.ownKeys returns the very keys present on sourceRecord, so indexing them as `keyof typeof sourceRecord` is sound and avoids an unnecessary intermediate variable
+    const descriptor = Object.getOwnPropertyDescriptor(sourceRecord, key as keyof typeof sourceRecord)
+    if (descriptor == null) continue
+    if (!("value" in descriptor)) {
+      redacted[stringKey] = "[Accessor]"
+      continue
+    }
+    redacted[stringKey] = redactBufferProperties(descriptor.value, depth + 1, seen)
   }
   return redacted
 }
