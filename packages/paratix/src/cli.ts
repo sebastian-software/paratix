@@ -592,17 +592,59 @@ async function performTsxRegistration(filePath: string): Promise<void> {
   }
 }
 
+/**
+ * R-0000692: tracks how many concurrent awaiters are still observing the
+ * cached registration promise. The promise can only be cleared after every
+ * waiter has settled — otherwise a parallel call would see `null` while
+ * the in-flight `.catch` handler is still propagating a rejection, race
+ * a fresh `performTsxRegistration`, and end up with the second registration
+ * out of sync with the first one's failure semantics.
+ */
+let tsxRegistrationWaiterCount = 0
+
 async function registerTsxForTypeScriptEntry(filePath: string): Promise<void> {
+  // R-0000692: when a cached promise exists, every parallel waiter must
+  // observe the same (success or rejection) terminal value before we drop
+  // the cache. Increment the waiter counter so a rejection cannot race a
+  // fresh registration while a sibling caller is still in `await`. The
+  // counter is decremented in the `finally` below regardless of the
+  // outcome.
   if (tsxRegistrationPromise != null) {
-    await tsxRegistrationPromise
+    tsxRegistrationWaiterCount += 1
+    try {
+      await tsxRegistrationPromise
+    } finally {
+      tsxRegistrationWaiterCount -= 1
+      // The originating caller is responsible for clearing the cache on
+      // failure (see catch-promise below). Sibling awaiters only need to
+      // release their hold so that clear-once-quiet logic can fire.
+    }
     return
   }
-  // Wrap the registration so a rejected promise also clears the cache before
-  // surfacing the error. This keeps the cache update synchronous with the
-  // rejection (so a later call can retry once tsx becomes available) without
-  // reassigning the module-level binding across an await boundary.
+  // Wrap the registration so a rejection also clears the cache — but only
+  // once every concurrent awaiter has observed the rejection. Holding the
+  // catch promise in the cache until the waiter count drops to zero means
+  // every parallel `await tsxRegistrationPromise` resolves against the
+  // same terminal state. After the cache clears, a later call can retry
+  // (e.g. once the operator installs tsx) by entering this branch and
+  // creating a fresh registration.
   const registration = performTsxRegistration(filePath).catch((error: unknown) => {
-    tsxRegistrationPromise = null
+    if (tsxRegistrationWaiterCount === 0) {
+      tsxRegistrationPromise = null
+    } else {
+      // Defer the cache clear until every parallel awaiter has settled.
+      // Each waiter decrements `tsxRegistrationWaiterCount` in its
+      // `finally`, so a microtask queued from the last awaiter performs
+      // the actual reset without overwriting the cache out from under
+      // an in-flight reader.
+      void Promise.resolve().then(function clearWhenQuiet(): void {
+        if (tsxRegistrationWaiterCount === 0) {
+          tsxRegistrationPromise = null
+          return
+        }
+        void Promise.resolve().then(clearWhenQuiet)
+      })
+    }
     throw error
   })
   tsxRegistrationPromise = registration
