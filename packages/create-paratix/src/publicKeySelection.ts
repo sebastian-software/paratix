@@ -132,7 +132,46 @@ export function validateAdminPublicKey(
   return normalizedValue
 }
 
+// R-0000831: PATH_MAX on Linux is 4096 bytes (sys/limits.h: PATH_MAX) and
+// the corresponding macOS limit is 1024 bytes; pick the higher value so the
+// pre-validation does not reject paths the OS would otherwise accept on
+// Linux. The literal is kept as a named constant to make the intent
+// obvious and to give a single place to revisit if the limit changes.
+const ADMIN_PUBLIC_KEY_FILE_PATH_MAX_BYTES = 4096
+
 export function readAdminPublicKeyFile(exitWithMessage: ExitWithMessage, path: string): string {
+  // R-0000831: validate the raw path bytes before handing them to
+  // `resolve` or any fs call. Two failure modes need a deterministic,
+  // operator-friendly error instead of the cryptic syscall message Node
+  // would produce later:
+  //   1. NUL byte in the path. Node's path APIs reject this with
+  //      `ERR_INVALID_ARG_VALUE`, but the message points at internal
+  //      argument indices rather than the offending option. Surfacing it
+  //      via CliExitError keeps the diagnostic actionable.
+  //   2. Path length above PATH_MAX. Even when Node accepts the string,
+  //      the underlying syscall (`open(2)`/`stat(2)`) will fail with
+  //      `ENAMETOOLONG`; rejecting it up front makes the cause obvious
+  //      and avoids exposing a partial buffer of a pathological input in
+  //      the eventual log line.
+  if (path.includes("\0")) {
+    exitWithMessage(
+      "Error: admin public key file path contains a NUL byte; provide a clean filesystem path."
+    )
+    throw new Error("admin public key file path contains a NUL byte")
+  }
+  // Byte length is the relevant comparand because PATH_MAX is a byte
+  // budget at the syscall boundary; a UTF-8 path with multi-byte code
+  // points may already exceed the limit while its character length is
+  // still well below 4096.
+  const pathByteLength = Buffer.byteLength(path, "utf8")
+  if (pathByteLength > ADMIN_PUBLIC_KEY_FILE_PATH_MAX_BYTES) {
+    exitWithMessage(
+      `Error: admin public key file path is too long (${String(pathByteLength)} bytes, ` +
+        `limit ${String(ADMIN_PUBLIC_KEY_FILE_PATH_MAX_BYTES)}); provide a shorter path.`
+    )
+    throw new Error("admin public key file path exceeds PATH_MAX")
+  }
+
   // R-0000126: resolve relative paths against cwd; emit neutral errors.
   const resolvedPath = resolve(path)
 
