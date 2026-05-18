@@ -751,6 +751,39 @@ describe("compose.config — apply", () => {
     expect(result.status).toBe("failed")
   })
 
+  it("returns failed without mutation when projectDirectory is a symlink", async () => {
+    const mockSsh = createComposeMockSsh({
+      "[ -L '/opt/app' ]": { code: 0 },
+    })
+    const mod = compose.config({ content: sampleContent, projectDirectory })
+    const result = await mod.apply(mockSsh, emptyEnv)
+
+    expect(result.status).toBe("failed")
+    expect(result.error?.message).toContain("projectDirectory is a symbolic link: /opt/app")
+    expect(mockSsh.calls).not.toContain(mktempCommand)
+    expect(mockSsh.calls).not.toContain(`mv -T '${stagingPath}' '${remotePath}'`)
+    expect(mockSsh.writeFileCalls).toHaveLength(0)
+    expect(mockSsh.uploadFileCalls).toHaveLength(0)
+  })
+
+  it("returns failed without mutation when a projectDirectory ancestor is a symlink", async () => {
+    const mockSsh = createComposeMockSsh({
+      "[ -L '/opt' ]": { code: 0 },
+      "[ -L '/opt/app' ]": { code: 1 },
+    })
+    const mod = compose.config({ content: sampleContent, projectDirectory })
+    const result = await mod.apply(mockSsh, emptyEnv)
+
+    expect(result.status).toBe("failed")
+    expect(result.error?.message).toContain(
+      "ancestor of projectDirectory /opt/app is a symbolic link: /opt"
+    )
+    expect(mockSsh.calls).not.toContain(mktempCommand)
+    expect(mockSsh.calls).not.toContain(`mv -T '${stagingPath}' '${remotePath}'`)
+    expect(mockSsh.writeFileCalls).toHaveLength(0)
+    expect(mockSsh.uploadFileCalls).toHaveLength(0)
+  })
+
   // R-0000228: writes go to a staging file, validation reads the staging file
   // via -f, and an atomic mv -T flips compose.yml to the validated revision
   // so a parallel compose invocation never sees an unvalidated config.
