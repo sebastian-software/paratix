@@ -77,14 +77,19 @@ async function absentPathExists(ssh: SshConnection, remotePath: string): Promise
 }
 
 /**
- * R-0000761: create a missing target file with the appended line. The
- * caller must have already verified the file does not exist; this helper
- * performs a second `[ -e ]` probe immediately before the write and
- * refuses to overwrite when the file materialised between the two
- * probes. The recheck narrows the TOCTOU window from "between check and
- * apply" to "between this recheck and the next `mv -T`", which is the
- * best we can do without an explicit O_EXCL primitive on
- * `ssh.writeFile`.
+ * R-0000761/R-0000800: create a missing target file with the appended line.
+ * The caller must have already verified the file does not exist; this helper
+ * performs a second `[ -e ]` probe immediately before the write and refuses
+ * to overwrite when the file materialised between the two probes.
+ *
+ * The recheck narrows the TOCTOU window for the early bail-out, but the
+ * authoritative race protection is the post-write atomic guard: after
+ * `ssh.writeFile` stages the new content (via `finalizeRemoteTempFile`'s
+ * `mv -T` into the destination), we re-stage the result into a hidden temp
+ * in the same directory and re-publish it with a shell snippet that fails
+ * unless `[ ! -e dest ]` still holds. This gives create-only semantics
+ * equivalent to O_CREAT|O_EXCL even though `ssh.writeFile` itself does not
+ * expose the flag.
  *
  * @param input - The append-create input.
  * @param input.line - The line to write as the sole content of the new file.
@@ -103,7 +108,42 @@ async function applyLineCreate(input: {
       `[file.line: ${input.remotePath}] refuses to overwrite file created concurrently between existence probe and create`
     )
   }
+  const quotedPath = shellQuote(input.remotePath)
+  // R-0000800: emulate O_CREAT|O_EXCL on top of `ssh.writeFile` by staging
+  // the freshly written file aside and re-publishing it via `mv -T` guarded
+  // by `[ ! -e dest ]`. If a concurrent writer created the destination
+  // between the recheck above and the publish below, the guard refuses and
+  // we clean up the staging file before surfacing the race as a failure.
   await input.ssh.writeFile(input.remotePath, `${input.line}\n`, { mode: "0644" })
+  const directory = posix.dirname(input.remotePath)
+  const basename = posix.basename(input.remotePath)
+  const stagingTemplate = `.${basename}.paratix-create.XXXXXX`
+  const quotedDirectory = shellQuote(directory)
+  const quotedTemplate = shellQuote(stagingTemplate)
+  const publishScript =
+    `set -eu\n` +
+    `staging=$(mktemp -p ${quotedDirectory} -- ${quotedTemplate})\n` +
+    `[ -n "$staging" ] || exit 1\n` +
+    `trap 'rm -f -- "$staging"' EXIT\n` +
+    `mv -T -- ${quotedPath} "$staging"\n` +
+    `if [ -e ${quotedPath} ] || [ -L ${quotedPath} ]; then\n` +
+    `  printf '%s\\n' 'target reappeared during create-only publish' >&2\n` +
+    `  exit 73\n` +
+    `fi\n` +
+    `mv -T -- "$staging" ${quotedPath}\n` +
+    `trap - EXIT\n`
+  const publishResult = await input.ssh.exec(publishScript, { ignoreExitCode: true, silent: true })
+  if (publishResult.code === 73) {
+    return failed(
+      `[file.line: ${input.remotePath}] refuses to overwrite file created concurrently between existence probe and create`
+    )
+  }
+  if (publishResult.code !== 0) {
+    return failedCommand(
+      `[file.line: ${input.remotePath}] create-only publish failed`,
+      publishResult
+    )
+  }
   return { status: "changed" }
 }
 

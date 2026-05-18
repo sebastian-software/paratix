@@ -1500,6 +1500,35 @@ describe("file.line — apply without options.match", () => {
     expect(ssh.writeFileCalls).toStrictEqual([])
     expect(ssh.calls).not.toContain("cat >> '/etc/config'")
   })
+
+  // R-0000800: the create-only branch finalises via a guarded `mv -T` shell
+  // snippet. When the guard's atomic publish fails because the destination
+  // reappeared, `apply` must surface the race as a `failed` ModuleResult
+  // instead of silently overwriting whoever else's bytes.
+  it("R-0000800: refuses to publish when the create-only guard reports the target reappeared", async () => {
+    const ssh = createMockSsh({
+      "[ -e '/etc/config' ]": { code: 1 },
+    })
+    let execIndex = 0
+    const baseExec = ssh.exec
+    ssh.exec = async (command: string, options) => {
+      const result = await baseExec(command, options)
+      execIndex += 1
+      if (command.includes("paratix-create")) {
+        return { ...result, code: 73, stderr: "target reappeared during create-only publish\n" }
+      }
+      return result
+    }
+
+    const mod = file.line("/etc/config", "my-line")
+    const result = await mod.apply(ssh, emptyEnv)
+
+    expect(result.status).toBe("failed")
+    expect(String(result.error)).toContain(
+      "refuses to overwrite file created concurrently between existence probe and create"
+    )
+    expect(execIndex).toBeGreaterThan(0)
+  })
 })
 
 describe("file.line — sed-Escaping Regression (apply with options.match)", () => {
