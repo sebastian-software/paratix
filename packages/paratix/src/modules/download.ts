@@ -841,9 +841,16 @@ async function writeUnverifiedHashMarker(conn: SshConnection, destination: strin
   if (await conn.test(`[ -L ${shellQuote(markerPath)} ]`)) return
   // Atomic single-line write — no shell expansion of the hash, no risk of
   // partial writes contaminating later checks. The marker only needs read
-  // access for sha256sum -c to consume it, so 0644 is acceptable.
+  // access for sha256sum -c to consume it.
+  // R-0000805: write the marker as 0o444 (read-only for owner/group/world)
+  // so an unprivileged process that already has write access to the
+  // destination directory cannot rewrite the hash record in place to mask a
+  // post-download tampering attempt. A future apply that needs to refresh
+  // the marker stages a fresh temp file via `finalizeRemoteTempFile`'s
+  // atomic `mv -T`, which replaces the read-only marker with a new
+  // owner-controlled file.
   try {
-    await conn.writeFile(markerPath, `${hash}\n`, { mode: "0644" })
+    await conn.writeFile(markerPath, `${hash}\n`, { mode: "0444" })
   } catch {
     // Best-effort marker: a failed marker write only causes the next check to
     // re-apply, while the downloaded payload itself has already converged.
@@ -1101,6 +1108,13 @@ export const download = {
    * Idempotency follows the same rules as {@link download.url}: SHA-256
    * comparison when a digest is given, otherwise file-existence check.
    *
+   * R-0000805: same caveat as `download.url` — `allowUnverifiedDownload`
+   * stores the post-download sha256 in a read-only sibling marker
+   * (`<destination>.sha256`, mode 0o444) to detect later tampering, but a
+   * root-equivalent attacker can replace both the payload and the marker
+   * together. Prefer providing an explicit `sha256` from the GitHub
+   * release notes whenever it is available.
+   *
    * @param destination - Absolute path on the remote server where the asset is saved.
    * @param options - Repository coordinates and optional download settings.
    * @param options.repo - GitHub repository in `owner/repo` format (e.g. `"hashicorp/terraform"`).
@@ -1319,6 +1333,18 @@ export const download = {
    * Idempotency is determined by SHA-256 comparison (when `sha256` is
    * provided), file existence (when no digest is given), or skipped entirely
    * when `force` is `true`.
+   *
+   * R-0000805: when `allowUnverifiedDownload: true` is set, paratix stores
+   * the sha256 of the downloaded payload in a sibling marker file
+   * `<destination>.sha256` (mode 0o444) and re-verifies the destination
+   * against the marker on subsequent runs. The marker is a tampering
+   * detector, not a tampering preventer: an attacker with write access to
+   * the destination directory and root privileges can swap both the
+   * payload and the marker simultaneously, and the next `check` will then
+   * conclude the file is "in sync". The read-only mode raises the bar for
+   * an unprivileged attacker but does not substitute for a verified
+   * `sha256` digest. Provide `sha256` whenever an authoritative digest is
+   * known.
    *
    * @param destination - Absolute path on the remote server where the file is saved.
    * @param url - The URL to download from.

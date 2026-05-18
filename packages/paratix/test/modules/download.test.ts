@@ -12,7 +12,8 @@ const createMockSsh: typeof createBaseMockSsh = (responses, options) =>
     ...options,
     allowFlagLockInternalDefaults: true,
     allowWrites: [
-      { options: { mode: "0644" }, remotePath: /^.*\.sha256$/v },
+      // R-0000805: the unverified hash marker is written as read-only (0o444).
+      { options: { mode: "0444" }, remotePath: /^.*\.sha256$/v },
       ...(options?.allowWrites ?? []),
     ],
     responseStubs: [
