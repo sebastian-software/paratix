@@ -251,6 +251,22 @@ export function scaffoldProject(
 }
 
 function main(): void {
+  // R-0000739: install global last-resort handlers so a rejection or
+  // throw that escapes the in-flight async pipeline (e.g. an `await`
+  // missed inside a prompt callback, or a synchronous throw inside a
+  // detached promise) is still funnelled through `handleCliExit`. The
+  // handler restores interactive terminal state and assigns the
+  // intended exit code instead of leaving Node to print the default
+  // unhandled-rejection / uncaught-exception trace with no terminal
+  // cleanup. Both listeners are installed once per `main()` invocation
+  // and remain in place for the lifetime of the process.
+  process.on("unhandledRejection", (reason) => {
+    handleCliExit(reason)
+  })
+  process.on("uncaughtException", (error) => {
+    handleCliExit(error)
+  })
+
   // R-0000189: synchronous validators (parseCliArguments, validateProjectName)
   // also throw CliExitError now. Wrap the whole pipeline in a single async
   // closure so a single .catch handler can run cleanup for both synchronous
