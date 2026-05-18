@@ -529,11 +529,11 @@ describe("git.clone — apply", () => {
     const mockSsh = createGitApplyMockSsh({
       [`git -C '${destination}' checkout 'main'`]: { code: 0 },
       [`git -C '${destination}' fetch origin --tags --force`]: { code: 0 },
-      [`git -C '${destination}' for-each-ref --format=%(refname) refs/remotes/origin/'main'`]: {
+      [`git -C '${destination}' for-each-ref --format=%(refname) 'refs/remotes/origin/main'`]: {
         code: 0,
         stdout: "refs/remotes/origin/main\n",
       },
-      [`git -C '${destination}' reset --hard origin/'main'`]: { code: 0 },
+      [`git -C '${destination}' reset --hard 'origin/main'`]: { code: 0 },
       [`test -d '${gitDir}'`]: { code: 0 },
     })
     const mod = git.clone(repo, destination, { ref: "main" })
@@ -541,7 +541,7 @@ describe("git.clone — apply", () => {
     expect(result.status).toBe("changed")
     expect(mockSsh.calls).toContain(`git -C '${destination}' fetch origin --tags --force`)
     expect(mockSsh.calls).toContain(`git -C '${destination}' checkout 'main'`)
-    expect(mockSsh.calls).toContain(`git -C '${destination}' reset --hard origin/'main'`)
+    expect(mockSsh.calls).toContain(`git -C '${destination}' reset --hard 'origin/main'`)
     expect(mockSsh.calls).not.toContain(`git -C '${destination}' reset --hard 'main'`)
   })
 
@@ -551,7 +551,7 @@ describe("git.clone — apply", () => {
     const mockSsh = createGitApplyMockSsh({
       [`git -C '${destination}' checkout 'v1.0.0'`]: { code: 0 },
       [`git -C '${destination}' fetch origin --tags --force`]: { code: 0 },
-      [`git -C '${destination}' for-each-ref --format=%(refname) refs/remotes/origin/'v1.0.0'`]: {
+      [`git -C '${destination}' for-each-ref --format=%(refname) 'refs/remotes/origin/v1.0.0'`]: {
         code: 0,
         stdout: "",
       },
@@ -562,7 +562,7 @@ describe("git.clone — apply", () => {
     const result = await mod.apply(mockSsh, emptyEnv)
     expect(result.status).toBe("changed")
     expect(mockSsh.calls).toContain(`git -C '${destination}' reset --hard 'v1.0.0'`)
-    expect(mockSsh.calls).not.toContain(`git -C '${destination}' reset --hard origin/'v1.0.0'`)
+    expect(mockSsh.calls).not.toContain(`git -C '${destination}' reset --hard 'origin/v1.0.0'`)
   })
 
   it("resets directly to <ref> when ref is a bare commit SHA", async () => {
@@ -570,7 +570,7 @@ describe("git.clone — apply", () => {
     const mockSsh = createGitApplyMockSsh({
       [`git -C '${destination}' checkout '${sha}'`]: { code: 0 },
       [`git -C '${destination}' fetch origin --tags --force`]: { code: 0 },
-      [`git -C '${destination}' for-each-ref --format=%(refname) refs/remotes/origin/'${sha}'`]: {
+      [`git -C '${destination}' for-each-ref --format=%(refname) 'refs/remotes/origin/${sha}'`]: {
         code: 0,
         stdout: "",
       },
@@ -581,18 +581,18 @@ describe("git.clone — apply", () => {
     const result = await mod.apply(mockSsh, emptyEnv)
     expect(result.status).toBe("changed")
     expect(mockSsh.calls).toContain(`git -C '${destination}' reset --hard '${sha}'`)
-    expect(mockSsh.calls).not.toContain(`git -C '${destination}' reset --hard origin/'${sha}'`)
+    expect(mockSsh.calls).not.toContain(`git -C '${destination}' reset --hard 'origin/${sha}'`)
   })
 
   it("returns failed when branch reset fails", async () => {
     const mockSsh = createGitApplyMockSsh({
       [`git -C '${destination}' checkout 'main'`]: { code: 0 },
       [`git -C '${destination}' fetch origin --tags --force`]: { code: 0 },
-      [`git -C '${destination}' for-each-ref --format=%(refname) refs/remotes/origin/'main'`]: {
+      [`git -C '${destination}' for-each-ref --format=%(refname) 'refs/remotes/origin/main'`]: {
         code: 0,
         stdout: "refs/remotes/origin/main\n",
       },
-      [`git -C '${destination}' reset --hard origin/'main'`]: { code: 1 },
+      [`git -C '${destination}' reset --hard 'origin/main'`]: { code: 1 },
       [`test -d '${gitDir}'`]: { code: 0 },
     })
     const mod = git.clone(repo, destination, { ref: "main" })
@@ -604,7 +604,7 @@ describe("git.clone — apply", () => {
     const mockSsh = createGitApplyMockSsh({
       [`git -C '${destination}' checkout 'v1.0.0'`]: { code: 0 },
       [`git -C '${destination}' fetch origin --tags --force`]: { code: 0 },
-      [`git -C '${destination}' for-each-ref --format=%(refname) refs/remotes/origin/'v1.0.0'`]: {
+      [`git -C '${destination}' for-each-ref --format=%(refname) 'refs/remotes/origin/v1.0.0'`]: {
         code: 0,
         stdout: "",
       },

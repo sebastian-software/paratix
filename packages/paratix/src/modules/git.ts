@@ -229,8 +229,14 @@ async function isRemoteTrackingBranch(
   destination: string,
   reference: string
 ): Promise<boolean> {
+  // R-0000802: shellQuote the full remote-tracking ref token rather than
+  // concatenating an unquoted prefix with `shellQuote(reference)`. The
+  // concat form lets a reference like `foo bar` smuggle a second argv item
+  // past the quote because the literal `refs/remotes/origin/` prefix is
+  // never inside the quoted span.
+  const remoteRef = `refs/remotes/origin/${reference}`
   const probe = await conn.exec(
-    `git -C ${shellQuote(destination)} for-each-ref --format=%(refname) refs/remotes/origin/${shellQuote(reference)}`,
+    `git -C ${shellQuote(destination)} for-each-ref --format=%(refname) ${shellQuote(remoteRef)}`,
     EXEC_OPTS
   )
   if (probe.code !== 0) return false
@@ -265,7 +271,12 @@ async function updateRepo(conn: SshConnection, parameters: GitCloneParameters): 
     )
     if (checkout.code !== 0) return false
     const isBranch = await isRemoteTrackingBranch(conn, destination, reference)
-    const resetTarget = isBranch ? `origin/${shellQuote(reference)}` : shellQuote(reference)
+    // R-0000802: shellQuote the full `origin/<reference>` token rather than
+    // concatenating an unquoted `origin/` prefix with `shellQuote(reference)`.
+    // The concat form leaves the literal prefix outside the quoted span, so
+    // any future relaxation of the reference validation could let the prefix
+    // collapse a multi-word reference into a second argv item.
+    const resetTarget = isBranch ? shellQuote(`origin/${reference}`) : shellQuote(reference)
     const reset = await conn.exec(
       `git -C ${shellQuote(destination)} reset --hard ${resetTarget}`,
       EXEC_OPTS
