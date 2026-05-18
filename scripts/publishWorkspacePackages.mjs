@@ -218,6 +218,13 @@ async function maxMtimeMillisecondsUnder(packageName, directory, filesystem) {
 // shape used by the source walker so a missing `dist/` entry surfaces
 // with the failing path and the build-before-publishing remediation
 // instead of leaking the raw ENOENT from lstat.
+//
+// R-0000728: also report which file paths were skipped because they
+// were symlinks. The freshness check intentionally treats symlinks as
+// mtime 0 (so a malicious link cannot lift the dist bar), but that
+// makes the staleness diagnostic confusing when a legitimate operator
+// has a symlinked artefact. The caller threads the symlink list into
+// the staleness diagnostic so the operator sees the actual trigger.
 async function mtimeMillisecondsForFileEntry({ directory, fileEntry, filesystem, packageName }) {
   const absolutePath = join(directory, fileEntry)
   let linkStats
@@ -226,23 +233,36 @@ async function mtimeMillisecondsForFileEntry({ directory, fileEntry, filesystem,
   } catch (error) {
     rethrowWalkerError(packageName, absolutePath, error)
   }
-  if (linkStats.isSymbolicLink()) return 0
-  if (linkStats.isDirectory()) {
-    return maxMtimeMillisecondsUnder(packageName, absolutePath, filesystem)
+  if (linkStats.isSymbolicLink()) {
+    return { mtime: 0, symlinkedEntries: [absolutePath] }
   }
-  return linkStats.mtimeMs
+  if (linkStats.isDirectory()) {
+    const childMtime = await maxMtimeMillisecondsUnder(packageName, absolutePath, filesystem)
+    return { mtime: childMtime, symlinkedEntries: [] }
+  }
+  return { mtime: linkStats.mtimeMs, symlinkedEntries: [] }
 }
 
 // R-0000661: lift the most recent mtime across every entry referenced by
 // `files`. Treats directories like `src/` does — walking the tree so the
 // freshness signal reflects file edits, not directory churn.
+//
+// R-0000728: also collect the list of file entries that were skipped as
+// symlinks so the staleness diagnostic can explain when the comparison
+// trips because a symlinked artefact (mtime 0) sat alongside regular
+// source files. Returning the list rather than just a flag keeps the
+// diagnostic actionable — the operator can see which specific entry
+// needs to be materialised before publish.
 async function maxMtimeMillisecondsForFiles({ directory, files, filesystem, packageName }) {
-  const fileMtimes = await Promise.all(
+  const fileResults = await Promise.all(
     files.map((fileEntry) =>
       mtimeMillisecondsForFileEntry({ directory, fileEntry, filesystem, packageName })
     )
   )
-  return fileMtimes.length > 0 ? Math.max(...fileMtimes) : 0
+  const mtimes = fileResults.map((result) => result.mtime)
+  const symlinkedEntries = fileResults.flatMap((result) => result.symlinkedEntries)
+  const maxMtime = mtimes.length > 0 ? Math.max(...mtimes) : 0
+  return { maxMtime, symlinkedEntries }
 }
 
 async function ensureFilesEntryExists(packageInfo, fileEntry, filesystem) {
@@ -294,7 +314,7 @@ async function verifyDistributionArtefacts(packageInfo, filesystem) {
 
   const sourceDirectory = join(packageInfo.directory, "src")
   const sourceMtime = await readSourceMtime(packageInfo, sourceDirectory, filesystem)
-  const filesMtime = await maxMtimeMillisecondsForFiles({
+  const { maxMtime: filesMtime, symlinkedEntries } = await maxMtimeMillisecondsForFiles({
     directory: packageInfo.directory,
     files: packageInfo.files,
     filesystem,
@@ -302,9 +322,33 @@ async function verifyDistributionArtefacts(packageInfo, filesystem) {
   })
   if (filesMtime < sourceMtime) {
     throw new Error(
-      `${packageInfo.name}: package.json#files mtime (${new Date(filesMtime).toISOString()}) is older than ${packageInfo.directory}/src mtime (${new Date(sourceMtime).toISOString()}). Run the build before publishing.`
+      buildStaleArtefactMessage({ filesMtime, packageInfo, sourceMtime, symlinkedEntries })
     )
   }
+}
+
+// R-0000728: explain a stale-freshness verdict that was triggered by a
+// symlinked artefact. The freshness check skips symlinks for safety
+// (an attacker-planted link could otherwise stat its target and lift
+// the dist mtime bar past the source tree), so a legitimate operator
+// who symlinked a top-level `files` entry would see a confusing
+// "mtime older than src" verdict even when the linked artefact is
+// newer. Surfacing the symlinked paths plus the materialise-before-
+// publishing remediation makes the trigger obvious without weakening
+// the safety guarantee.
+function buildStaleArtefactMessage({ filesMtime, packageInfo, sourceMtime, symlinkedEntries }) {
+  const baseMessage =
+    `${packageInfo.name}: package.json#files mtime (${new Date(filesMtime).toISOString()}) is ` +
+    `older than ${packageInfo.directory}/src mtime (${new Date(sourceMtime).toISOString()}). ` +
+    `Run the build before publishing.`
+  if (symlinkedEntries.length === 0) return baseMessage
+  const formattedEntries = symlinkedEntries.join(", ")
+  return (
+    `${baseMessage} The freshness check treats symlinks as mtime 0 for safety, so the comparison ` +
+    `tripped because the following package.json#files entries are symlinks rather than regular ` +
+    `artefacts: ${formattedEntries}. Materialize these artefacts (replace the link with the ` +
+    `built file) before publishing.`
+  )
 }
 
 async function publishPackage(packageInfo, commandRunner) {

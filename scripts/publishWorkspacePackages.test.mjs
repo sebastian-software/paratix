@@ -443,6 +443,44 @@ describe("publishWorkspacePackages", () => {
 
     assert.equal(hasCommandCall(commandRunner.calls, "pnpm"), false)
   })
+
+  // R-0000728: explain a stale-freshness verdict that was triggered by a
+  // symlinked artefact. The freshness check skips symlinks for safety
+  // (mtime 0), but that makes the staleness diagnostic confusing when a
+  // legitimate operator has a symlinked dist entry alongside a regular
+  // source tree. The error message must name the symlinked entry and
+  // direct the operator to materialise it before publishing.
+  it("R-0000728: explains stale freshness when triggered by a symlinked files entry", async () => {
+    const commandRunner = createCommandRunner()
+    const symlinkedDistributionPath = "packages/paratix/dist"
+    const fs = createFs({
+      mtimes: {
+        "packages/paratix/src": STALE_SOURCE_MTIME,
+        "packages/paratix/src/index.ts": 5000,
+        // dist is a symlink → mtime 0; src has a fresh regular file so the
+        // source mtime walks past 0.
+        [symlinkedDistributionPath]: 9999,
+      },
+      symlinks: [symlinkedDistributionPath],
+    })
+
+    let caught
+    try {
+      await publishWorkspacePackages({
+        availabilityDelayMilliseconds: 0,
+        commandRunner,
+        fs,
+      })
+    } catch (error) {
+      caught = error
+    }
+
+    assert.ok(caught, "publishWorkspacePackages should reject")
+    assert.equal(caught.message.includes("are symlinks"), true, caught.message)
+    assert.equal(caught.message.includes(symlinkedDistributionPath), true, caught.message)
+    assert.equal(caught.message.includes("Materialize"), true, caught.message)
+    assert.equal(hasCommandCall(commandRunner.calls, "pnpm"), false)
+  })
 })
 
 // R-0000662: the previous direct-execution check normalized only one side
