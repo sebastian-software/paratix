@@ -2,6 +2,12 @@ import { failed, failedCommand } from "../moduleFailure.js"
 import { maskSecrets } from "../sshHelpers.js"
 import { type Module, type ModuleResult, NEEDS_APPLY, type SshConnection } from "../types.js"
 
+function rejectControlCharacters(label: string, value: string): void {
+  if (value.includes("\0") || value.includes("\r") || value.includes("\n")) {
+    throw new Error(`${label} must not contain NUL, CR, or LF characters`)
+  }
+}
+
 async function commandCheckPassed(
   ssh: SshConnection,
   check: string,
@@ -26,6 +32,11 @@ export const command = {
    * with a shell expression that exits `0` when the desired state is already
    * present -- in that case the command is skipped.
    *
+   * Security: `cmd` and `options.check` are executed verbatim by the remote shell.
+   * Never interpolate untrusted input into these strings. NUL, CR, and LF are
+   * rejected up front because they can split or corrupt the line-based protocol
+   * between the orchestrator and the remote shell.
+   *
    * @param cmd - The shell command to execute.
    * @param options - Optional configuration for the command.
    * @param options.check - An optional shell expression used as the idempotency guard.
@@ -41,6 +52,10 @@ export const command = {
    * })
    */
   shell(cmd: string, options?: { check?: string; name?: string; secrets?: string[] }): Module {
+    rejectControlCharacters("command.shell cmd", cmd)
+    if (options?.check != null) {
+      rejectControlCharacters("command.shell options.check", options.check)
+    }
     return {
       async apply(ssh: null | SshConnection): Promise<ModuleResult> {
         const moduleName = options?.name ?? "command.shell"

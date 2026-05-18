@@ -224,6 +224,42 @@ describe("command.shell — check", () => {
 })
 
 // ---------------------------------------------------------------------------
+// control-character validation
+// ---------------------------------------------------------------------------
+
+describe("command.shell — control character rejection", () => {
+  it("throws when cmd contains a NUL byte", () => {
+    expect(() => command.shell("echo hello\0world")).toThrow(
+      /must not contain NUL, CR, or LF characters/
+    )
+  })
+
+  it("throws when cmd contains a carriage return", () => {
+    expect(() => command.shell("echo hello\rworld")).toThrow(
+      /must not contain NUL, CR, or LF characters/
+    )
+  })
+
+  it("throws when cmd contains a line feed", () => {
+    expect(() => command.shell("echo hello\nworld")).toThrow(
+      /must not contain NUL, CR, or LF characters/
+    )
+  })
+
+  it("throws when options.check contains a NUL byte", () => {
+    expect(() => command.shell("install-tool", { check: "which tool\0" })).toThrow(
+      /must not contain NUL, CR, or LF characters/
+    )
+  })
+
+  it("throws when options.check contains a line feed", () => {
+    expect(() => command.shell("install-tool", { check: "which tool\n" })).toThrow(
+      /must not contain NUL, CR, or LF characters/
+    )
+  })
+})
+
+// ---------------------------------------------------------------------------
 // name
 // ---------------------------------------------------------------------------
 
