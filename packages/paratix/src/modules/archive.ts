@@ -225,28 +225,26 @@ async function moveExtractedContentsIntoDestination(
 ): Promise<ModuleResult | null> {
   const { destination, staging } = parameters
   const guardPaths = [...new Set(parameters.guardPaths)].join("\n")
+  // R-0000801: the staging merge inspects unsafe attacker-controlled paths
+  // emitted by the archive. We assemble the shell snippet as a single
+  // String.raw template so the embedded quoting is readable, and we reject
+  // any extracted path that contains a literal newline before `cp` ever
+  // touches it. Newlines in extracted filenames are extremely unusual and
+  // would otherwise corrupt the `printf | while read` loop that processes
+  // `guard_paths`.
+  const mergeScript = String.raw`destination=$1; expected_destination=$2; guard_paths=$3; shift 3; for source_path do case "$source_path" in *"$(printf '\n')"*) echo "[archive.extract] refusing staging merge: extracted path contains a newline" >&2; exit 64;; esac; resolved_destination=$(readlink -f -- "$destination") || { echo "[archive.extract] failed to resolve destination path $destination before staging merge" >&2; exit 64; }; if [ "$resolved_destination" != "$expected_destination" ]; then echo "[archive.extract] refusing staging merge: destination path $destination resolves to $resolved_destination" >&2; exit 64; fi; printf "%s\n" "$guard_paths" | while IFS= read -r guarded_path; do [ -z "$guarded_path" ] && continue; if [ -L "$guarded_path" ]; then echo "[archive.extract] refusing staging merge: destination path $guarded_path is a symlink" >&2; exit 64; fi; done || exit $?; target_path="$destination/${source_path##*/}"; if [ -L "$target_path" ]; then echo "[archive.extract] refusing staging merge: destination path $target_path is a symlink" >&2; exit 64; fi; if [ -L "$target_path" ]; then echo "[archive.extract] refusing staging merge: destination path $target_path is a symlink" >&2; exit 64; fi; cp -aT --no-dereference --remove-destination "$source_path" "$target_path" || exit $?; done`
+  // R-0000751: defense-in-depth — `[ -L "$target_path" ]` runs immediately
+  // before the `cp -aT` so a symlink planted between the first probe and
+  // the copy cannot smuggle the merge through to an attacker-controlled
+  // location. Mirrors R-0000677's recheck-just-before-write pattern in
+  // net.ts.
+  // R-0000563: copy with `--no-dereference` so a symlink planted at any
+  // ancestor of `target_path` between the guard checks above and the `cp`
+  // invocation is preserved (and refused by the in-tree handling) instead
+  // of being silently followed to an attacker-controlled location.
   const copyCommand = [
     `find ${shellQuote(staging)} -mindepth 1 -maxdepth 1 -exec sh -c`,
-    shellQuote(
-      "destination=$1; expected_destination=$2; guard_paths=$3; shift 3; for source_path do " +
-        'resolved_destination=$(readlink -f -- "$destination") || { echo "[archive.extract] failed to resolve destination path $destination before staging merge" >&2; exit 64; }; ' +
-        'if [ "$resolved_destination" != "$expected_destination" ]; then echo "[archive.extract] refusing staging merge: destination path $destination resolves to $resolved_destination" >&2; exit 64; fi; ' +
-        'printf "%s\\n" "$guard_paths" | while IFS= read -r guarded_path; do [ -z "$guarded_path" ] && continue; if [ -L "$guarded_path" ]; then echo "[archive.extract] refusing staging merge: destination path $guarded_path is a symlink" >&2; exit 64; fi; done || exit $?; ' +
-        'target_path="$destination/${source_path##' +
-        '*/}"; if [ -L "$target_path" ]; then echo "[archive.extract] refusing staging merge: destination path $target_path is a symlink" >&2; exit 64; fi; ' +
-        // R-0000751: defense-in-depth — re-run `[ -L "$target_path" ]`
-        // immediately before the `cp -aT` so a symlink planted between
-        // the first probe and the copy cannot smuggle the merge through
-        // to an attacker-controlled location. Mirrors R-0000677's
-        // recheck-just-before-write pattern in net.ts.
-        'if [ -L "$target_path" ]; then echo "[archive.extract] refusing staging merge: destination path $target_path is a symlink" >&2; exit 64; fi; ' +
-        // R-0000563: copy with `--no-dereference` so a symlink that is
-        // planted at any ancestor of `target_path` between the guard
-        // checks above and the `cp` invocation is preserved (and thus
-        // refused by the in-tree handling) instead of being silently
-        // followed to an attacker-controlled location.
-        'cp -aT --no-dereference --remove-destination "$source_path" "$target_path" || exit $?; done'
-    ),
+    shellQuote(mergeScript),
     "sh",
     shellQuote(destination),
     shellQuote(destination),
