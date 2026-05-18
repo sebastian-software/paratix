@@ -6,6 +6,7 @@ import { shellQuote } from "../ssh.js"
 import { disableSwap, enableSwap } from "./swapAbsentRollbackHelpers.js"
 
 const EXEC_OPTS = { ignoreExitCode: true, silent: true } as const
+const UNKNOWN_ERROR = "unknown error"
 
 export async function moveSwapToBackup(
   ssh: SshConnection,
@@ -72,6 +73,19 @@ async function removeSwapBackup(ssh: SshConnection, backupPath: string): Promise
   await ssh.exec(`rm -f ${shellQuote(backupPath)}`, EXEC_OPTS)
 }
 
+// R-0000722: chain a rollback step failure with the original apply
+// failure message so neither cause is silently dropped. Mirrors the
+// chaining pattern in `handleSwapBackupFailure` (R-0000548) and
+// `handleSwapPublishFailure` (R-0000611).
+function chainRollbackFailure(
+  baseMessage: string,
+  stepLabel: string,
+  stepFailure: ModuleResult
+): ModuleResult {
+  const stepMessage = stepFailure.error?.message ?? UNKNOWN_ERROR
+  return failed(`${baseMessage}; ${stepLabel}: ${stepMessage}`)
+}
+
 export async function rollbackManagedSwapBackup(
   ssh: SshConnection,
   parameters: {
@@ -85,12 +99,25 @@ export async function rollbackManagedSwapBackup(
   // restore the backup, and try to re-enable swap on it. A failure inside
   // the rollback is surfaced because operators must know if the host is
   // left in a divergent state.
+  //
+  // R-0000722: chain every rollback failure with the original
+  // `failureResult` instead of returning it bare. Without the chain a
+  // structured probe failure from `disableSwap` / `enableSwap` (newly
+  // emitted by `isSwapActive`) would silently shadow the user-visible
+  // reason that triggered the rollback.
+  const baseMessage = failureResult.error?.message ?? "swap apply failed"
   const disableResult = await disableSwap(ssh, options.path)
-  if (typeof disableResult !== "boolean") return disableResult
+  if (typeof disableResult !== "boolean") {
+    return chainRollbackFailure(baseMessage, "rollback disableSwap failed", disableResult)
+  }
   const restoreResult = await restoreSwapBackup(ssh, options.path, backupPath)
-  if (restoreResult !== true) return restoreResult
+  if (restoreResult !== true) {
+    return chainRollbackFailure(baseMessage, "rollback restoreSwapBackup failed", restoreResult)
+  }
   const reEnable = await enableSwap(ssh, options.path)
-  if (typeof reEnable !== "boolean") return reEnable
+  if (typeof reEnable !== "boolean") {
+    return chainRollbackFailure(baseMessage, "rollback enableSwap failed", reEnable)
+  }
   return failureResult
 }
 
@@ -170,13 +197,13 @@ export async function handleSwapPublishFailure(
   const publishMessage = publishResult.error?.message ?? "swap publish failed"
   const restoreResult = await restoreSwapBackup(ssh, path, backupPath)
   if (restoreResult !== true) {
-    const restoreMessage = restoreResult.error?.message ?? "unknown error"
+    const restoreMessage = restoreResult.error?.message ?? UNKNOWN_ERROR
     return failed(`${publishMessage}; rollback restoreSwapBackup failed: ${restoreMessage}`)
   }
   if (disabledSwap) {
     const enableResult = await enableSwap(ssh, path)
     if (typeof enableResult !== "boolean") {
-      const enableMessage = enableResult.error?.message ?? "unknown error"
+      const enableMessage = enableResult.error?.message ?? UNKNOWN_ERROR
       return failed(`${publishMessage}; rollback enableSwap failed: ${enableMessage}`)
     }
   }

@@ -264,7 +264,12 @@ async function checkAbsent(
   options: NormalizedSwapFileOptions
 ): Promise<"needs-apply" | "ok"> {
   if (await ssh.exists(options.path)) return NEEDS_APPLY
-  if (await isSwapActive(ssh, options.path)) return NEEDS_APPLY
+  // R-0000722: soft-failures from `swapon --show` are now structured
+  // ModuleResults; treat them as NEEDS_APPLY so the apply path emits a
+  // real diagnostic instead of treating the probe outage as convergence.
+  const activeProbe = await isSwapActive(ssh, options.path)
+  if (typeof activeProbe !== "boolean") return NEEDS_APPLY
+  if (activeProbe) return NEEDS_APPLY
   // R-0000648: a soft-failure from hasNoSwapFstabEntry (e.g. `cat /etc/fstab`
   // refused) cannot be classified as "absent has converged" — fall back to
   // NEEDS_APPLY so the apply path produces a real diagnostic.
@@ -283,7 +288,12 @@ async function checkPresent(
   const needsRecreation = await needsSwapRecreation(ssh, options)
   if (typeof needsRecreation !== "boolean") return NEEDS_APPLY
   if (needsRecreation) return NEEDS_APPLY
-  if (!(await isSwapActive(ssh, options.path))) return NEEDS_APPLY
+  // R-0000722: see `checkAbsent` — translate the structured `swapon --show`
+  // probe failure into NEEDS_APPLY rather than letting a missing tool
+  // misclassify the host as already-converged.
+  const activeProbe = await isSwapActive(ssh, options.path)
+  if (typeof activeProbe !== "boolean") return NEEDS_APPLY
+  if (!activeProbe) return NEEDS_APPLY
   const hasEntry = await hasSwapFstabEntry(ssh, options)
   if (typeof hasEntry !== "boolean") return NEEDS_APPLY
   if (!hasEntry) return NEEDS_APPLY

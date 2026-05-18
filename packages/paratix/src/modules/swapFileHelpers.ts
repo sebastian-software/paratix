@@ -122,9 +122,29 @@ function validateSwapFileState(state: unknown): asserts state is "absent" | "pre
   }
 }
 
-export async function isSwapActive(ssh: SshConnection, path: string): Promise<boolean> {
-  const activeSwaps = await ssh.lines("swapon --show=NAME --noheadings")
-  return activeSwaps.some((line) => line.trim() === path)
+// R-0000722: route the `swapon --show` probe through
+// `ssh.exec(..., { ignoreExitCode: true, silent: true })` so a transient
+// failure (busy device, permission error, kernel oops) surfaces as a
+// structured `ModuleResult` instead of throwing out of `ssh.lines`. The
+// rollback paths in `swapAbsentRollbackHelpers.ts` and the apply paths in
+// `swapHelpers.ts` chain such soft failures into the primary apply
+// failure reason — without the structured return shape a probe error
+// would shadow the user-visible cause of the original apply failure.
+export async function isSwapActive(
+  ssh: SshConnection,
+  path: string
+): Promise<boolean | ModuleResult> {
+  const result = await ssh.exec("swapon --show=NAME --noheadings", EXEC_OPTS)
+  if (result.code !== 0) {
+    return failedCommand(
+      `[swap.file: ${path}] swapon --show failed while probing whether the swap is active`,
+      result
+    )
+  }
+  return result.stdout
+    .split("\n")
+    .map((line) => line.trim())
+    .some((line) => line === path)
 }
 
 async function hasSwapSignature(ssh: SshConnection, path: string): Promise<boolean> {

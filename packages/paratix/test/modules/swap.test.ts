@@ -57,6 +57,35 @@ const fstabLockMkdirCommand = "mkdir /var/lib/paratix/flags/'etc-fstab-mutex'"
 // helper to recognise the combined ownership-check + rmdir command.
 const isFstabVerifiedReleaseCall = makeIsVerifiedReleaseCall("etc-fstab-mutex")
 
+// R-0000722: `isSwapActive` now routes the `swapon --show` probe through
+// `ssh.exec(..., { ignoreExitCode: true, silent: true })` so a non-zero
+// exit surfaces as a structured ModuleResult instead of throwing. Tests
+// that previously seeded `vi.spyOn(ssh, "lines")` with a sequential
+// stdout pattern use this helper to seed the same sequence on the new
+// `exec` code path, while letting unrelated `ssh.exec` calls fall through
+// to the underlying mock harness.
+function mockSwapShowSequence(
+  ssh: ReturnType<typeof createMockSsh>,
+  sequence: Array<{ code?: number; stderr?: string; stdout: string }>
+): void {
+  const originalExec = ssh.exec.bind(ssh)
+  const probeResults = [...sequence]
+  vi.spyOn(ssh, "exec").mockImplementation(async (command, options) => {
+    if (command === "swapon --show=NAME --noheadings") {
+      await Promise.resolve()
+      ssh.calls.push(command)
+      ssh.execCalls.push({ command, options })
+      const next = probeResults.shift() ?? { code: 0, stdout: "" }
+      return {
+        code: next.code ?? 0,
+        stderr: next.stderr ?? "",
+        stdout: next.stdout,
+      }
+    }
+    return originalExec(command, options)
+  })
+}
+
 describe("swap.file — check", () => {
   it("returns needs-apply when ssh is null", async () => {
     const mod = swap.file({ path: swapPath, size: swapSize })
@@ -228,6 +257,42 @@ describe("swap.file — check", () => {
       await Promise.resolve()
       throw new Error("fstab read denied")
     }
+    const mod = swap.file({ path: swapPath, size: swapSize, state: "absent" })
+    const result = await mod.check(ssh, emptyEnv)
+    expect(result).toBe("needs-apply")
+  })
+
+  // R-0000722: a non-zero exit from `swapon --show=NAME --noheadings`
+  // (transient kernel issue, missing util-linux, permission denial) must
+  // no longer throw — `isSwapActive` returns a structured failure and
+  // `checkPresent`/`checkAbsent` fall back to NEEDS_APPLY so the apply
+  // path produces a real diagnostic.
+  it("R-0000722: returns needs-apply for present state when swapon --show fails", async () => {
+    const ssh = createMockSsh({
+      [`[ -e '${swapPath}' ]`]: { code: 0 },
+      [`cat '/etc/fstab'`]: { stdout: `${fstabLine}\n` },
+      [`stat -c '%a' '${swapPath}'`]: { code: 0, stdout: "0600" },
+      [`stat -c %s '${swapPath}'`]: { stdout: swapSizeBytes },
+      [`swaplabel '${swapPath}' >/dev/null 2>&1`]: { code: 0 },
+      "swapon --show=NAME --noheadings": {
+        code: 1,
+        stderr: "swapon: cannot open /proc/swaps: Permission denied",
+      },
+    })
+    const mod = swap.file({ path: swapPath, size: swapSize })
+    const result = await mod.check(ssh, emptyEnv)
+    expect(result).toBe("needs-apply")
+  })
+
+  it("R-0000722: returns needs-apply for absent state when swapon --show fails", async () => {
+    const ssh = createMockSsh({
+      [`[ -e '${swapPath}' ]`]: { code: 1 },
+      [`[ -L '${swapPath}' ]`]: { code: 1 },
+      "swapon --show=NAME --noheadings": {
+        code: 1,
+        stderr: "swapon: cannot open /proc/swaps: Permission denied",
+      },
+    })
     const mod = swap.file({ path: swapPath, size: swapSize, state: "absent" })
     const result = await mod.check(ssh, emptyEnv)
     expect(result).toBe("needs-apply")
@@ -507,10 +572,7 @@ describe("swap.file — apply", () => {
     ssh.writeFile = async (path: string, content: string): Promise<void> => {
       writtenFiles.push({ content, path })
     }
-    vi.spyOn(ssh, "lines")
-      .mockResolvedValueOnce([swapPath])
-      .mockResolvedValueOnce([])
-      .mockResolvedValue([])
+    mockSwapShowSequence(ssh, [{ stdout: `${swapPath}\n` }, { stdout: "" }])
 
     const mod = swap.file({ path: swapPath, size: swapSize })
     const result = await mod.apply(ssh, emptyEnv)
@@ -544,10 +606,7 @@ describe("swap.file — apply", () => {
       [safeSwapParentCommand]: { code: 0, stdout: "/\n" },
       [verifySwapBackupCommand]: { code: 1 },
     })
-    vi.spyOn(ssh, "lines")
-      .mockResolvedValueOnce([swapPath])
-      .mockResolvedValueOnce([])
-      .mockResolvedValue([])
+    mockSwapShowSequence(ssh, [{ stdout: `${swapPath}\n` }, { stdout: "" }])
 
     const mod = swap.file({ path: swapPath, size: swapSize })
     const result = await mod.apply(ssh, emptyEnv)
@@ -644,10 +703,7 @@ describe("swap.file — apply", () => {
       [statSwapTempIdentityCommand]: { code: 0, stdout: `${swapTempIdentity}\n` },
       [verifySwapBackupCommand]: { code: 0 },
     })
-    vi.spyOn(ssh, "lines")
-      .mockResolvedValueOnce([swapPath])
-      .mockResolvedValueOnce([])
-      .mockResolvedValue([])
+    mockSwapShowSequence(ssh, [{ stdout: `${swapPath}\n` }, { stdout: "" }])
 
     const mod = swap.file({ path: swapPath, size: swapSize })
     const result = await mod.apply(ssh, emptyEnv)
@@ -687,10 +743,7 @@ describe("swap.file — apply", () => {
       [verifyPublishedSwapCommand]: { code: 0 },
       [verifySwapBackupCommand]: { code: 0 },
     })
-    vi.spyOn(ssh, "lines")
-      .mockResolvedValueOnce([swapPath])
-      .mockResolvedValueOnce([])
-      .mockResolvedValue([])
+    mockSwapShowSequence(ssh, [{ stdout: `${swapPath}\n` }, { stdout: "" }])
 
     const mod = swap.file({ path: swapPath, size: swapSize })
     const result = await mod.apply(ssh, emptyEnv)
@@ -731,11 +784,11 @@ describe("swap.file — apply", () => {
     ssh.writeFile = async (): Promise<void> => {
       throw new Error("fstab write failed")
     }
-    vi.spyOn(ssh, "lines")
-      .mockResolvedValueOnce([swapPath])
-      .mockResolvedValueOnce([])
-      .mockResolvedValueOnce([swapPath])
-      .mockResolvedValue([])
+    mockSwapShowSequence(ssh, [
+      { stdout: `${swapPath}\n` },
+      { stdout: "" },
+      { stdout: `${swapPath}\n` },
+    ])
 
     const mod = swap.file({ path: swapPath, size: swapSize })
     const result = await mod.apply(ssh, emptyEnv)
@@ -745,6 +798,55 @@ describe("swap.file — apply", () => {
     expect(result.error?.message).toContain("fstab write failed")
     expect(ssh.calls).toContain(restoreSwapCommand)
     expect(ssh.calls).not.toContain(`rm -f '${swapBackupPath}'`)
+  })
+
+  // R-0000722: when the rollback path also trips on a `swapon --show` probe
+  // failure (e.g. /proc/swaps denied us read access during recovery), the
+  // structured probe failure must be chained with the primary swapon
+  // failure instead of silently replacing it. Without the chain the
+  // operator would lose the user-visible reason that triggered the
+  // rollback in the first place.
+  it("R-0000722: chains rollback probe failure with the original swapon failure", async () => {
+    const ssh = createMockSsh({
+      [`[ -e '${swapPath}' ]`]: { code: 0 },
+      [`[ -f '${swapPath}' ]`]: { code: 0 },
+      [`[ -L '${swapPath}' ]`]: { code: 1 },
+      [`cat '${swapPath}'`]: { stdout: "existing swap bytes" },
+      [`chmod '0600' '${swapTempPath}'`]: { code: 0 },
+      [`mkdir -p '/'`]: { code: 0 },
+      [`mkswap '${swapTempPath}'`]: { code: 0 },
+      [`stat -c %s '${swapPath}'`]: { stdout: "1073741824" },
+      [`swaplabel '${swapPath}' >/dev/null 2>&1`]: { code: 0 },
+      [`swapoff '${swapPath}'`]: { code: 0 },
+      [`swapon '${swapPath}'`]: { code: 1, stderr: "swapon failed" },
+      [backupSwapCommand]: { code: 0 },
+      [createSwapTempCommand]: { code: 0 },
+      [mktempSwapCommand]: { code: 0, stdout: `${swapTempPath}\n` },
+      [publishSwapCommand]: { code: 0 },
+      [safeSwapParentCommand]: { code: 0, stdout: "/\n" },
+      [statSwapTempIdentityCommand]: { code: 0, stdout: `${swapTempIdentity}\n` },
+      [verifyPublishedSwapCommand]: { code: 0 },
+      [verifySwapBackupCommand]: { code: 0 },
+    })
+    // Sequence:
+    //   1. disableSwap probe (recreate path) — swap IS active.
+    //   2. enableSwap probe (apply pipeline) — swap is NOT active.
+    //   3. rollback disableSwap probe — `swapon --show` itself fails.
+    mockSwapShowSequence(ssh, [
+      { stdout: `${swapPath}\n` },
+      { stdout: "" },
+      { code: 1, stderr: "swapon: /proc/swaps: Permission denied", stdout: "" },
+    ])
+
+    const mod = swap.file({ path: swapPath, size: swapSize })
+    const result = await mod.apply(ssh, emptyEnv)
+
+    expect(result.status).toBe("failed")
+    // The primary apply failure (swapon failed) must stay visible.
+    expect(result.error?.message).toContain("swapon failed")
+    // The probe failure must be chained with the rollback marker.
+    expect(result.error?.message).toContain("rollback disableSwap failed")
+    expect(result.error?.message).toContain("swapon --show failed")
   })
 
   it("returns rollback swapoff failure before restoring the backup", async () => {
@@ -769,11 +871,7 @@ describe("swap.file — apply", () => {
       [verifyPublishedSwapCommand]: { code: 0 },
       [verifySwapBackupCommand]: { code: 0 },
     })
-    vi.spyOn(ssh, "lines")
-      .mockResolvedValueOnce([])
-      .mockResolvedValueOnce([])
-      .mockResolvedValueOnce([swapPath])
-      .mockResolvedValue([])
+    mockSwapShowSequence(ssh, [{ stdout: "" }, { stdout: "" }, { stdout: `${swapPath}\n` }])
 
     const mod = swap.file({ path: swapPath, size: swapSize })
     const result = await mod.apply(ssh, emptyEnv)
@@ -1145,10 +1243,7 @@ describe("swap.file — apply", () => {
     // First `swapon --show` (initial isSwapActive in disableSwap) reports
     // the swap active; the second call after the rollback (enableSwap →
     // isSwapActive) reports it inactive so swapon is invoked.
-    vi.spyOn(ssh, "lines")
-      .mockResolvedValueOnce([swapPath])
-      .mockResolvedValueOnce([])
-      .mockResolvedValue([])
+    mockSwapShowSequence(ssh, [{ stdout: `${swapPath}\n` }, { stdout: "" }])
     // eslint-disable-next-line @typescript-eslint/require-await -- intentionally synchronous reject
     ssh.writeFile = async (): Promise<void> => {
       throw new Error("fstab write blew up")
@@ -1272,10 +1367,7 @@ describe("swap.file — apply", () => {
       [`swapon '${swapPath}'`]: { code: 0 },
       [safeSwapParentCommand]: { code: 1 },
     })
-    vi.spyOn(ssh, "lines")
-      .mockResolvedValueOnce([swapPath])
-      .mockResolvedValueOnce([])
-      .mockResolvedValue([])
+    mockSwapShowSequence(ssh, [{ stdout: `${swapPath}\n` }, { stdout: "" }])
     // eslint-disable-next-line @typescript-eslint/require-await -- mock implementation
     ssh.writeFile = async (path: string, content: string): Promise<void> => {
       writtenFiles.push({ content, path })
@@ -1312,10 +1404,7 @@ describe("swap.file — apply", () => {
       [safeSwapParentCommand]: { code: 0, stdout: "/\n" },
       [snapshotLink]: { code: 1, stderr: "ln: cannot create hard link" },
     })
-    vi.spyOn(ssh, "lines")
-      .mockResolvedValueOnce([swapPath])
-      .mockResolvedValueOnce([])
-      .mockResolvedValue([])
+    mockSwapShowSequence(ssh, [{ stdout: `${swapPath}\n` }, { stdout: "" }])
     // eslint-disable-next-line @typescript-eslint/require-await -- mock implementation
     ssh.writeFile = async (path: string, content: string): Promise<void> => {
       writtenFiles.push({ content, path })

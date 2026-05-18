@@ -10,7 +10,13 @@ export async function enableSwap(
   ssh: SshConnection,
   path: string
 ): Promise<boolean | ModuleResult> {
-  if (await isSwapActive(ssh, path)) return false
+  // R-0000722: a probe-error from `isSwapActive` no longer throws; chain it
+  // back to the caller so the swap apply path can fold the probe failure
+  // into the original apply failure reason instead of letting it shadow
+  // the primary cause.
+  const probeResult = await isSwapActive(ssh, path)
+  if (typeof probeResult !== "boolean") return probeResult
+  if (probeResult) return false
   const result = await ssh.exec(`swapon ${shellQuote(path)}`, EXEC_OPTS)
   return result.code === 0 ? true : failedCommand(`[swap.file: ${path}] swapon failed`, result)
 }
@@ -19,7 +25,12 @@ export async function disableSwap(
   ssh: SshConnection,
   path: string
 ): Promise<boolean | ModuleResult> {
-  if (!(await isSwapActive(ssh, path))) return false
+  // R-0000722: see `enableSwap` — propagate the structured probe failure
+  // through the disable path so the rollback layer can chain it with the
+  // primary failure reason.
+  const probeResult = await isSwapActive(ssh, path)
+  if (typeof probeResult !== "boolean") return probeResult
+  if (!probeResult) return false
   const result = await ssh.exec(`swapoff ${shellQuote(path)}`, EXEC_OPTS)
   return result.code === 0 ? true : failedCommand(`[swap.file: ${path}] swapoff failed`, result)
 }
