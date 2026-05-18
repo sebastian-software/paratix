@@ -2026,6 +2026,19 @@ trap - EXIT
         { cause: error }
       )
     }
+    // R-0000686: mirror the truncation detection from R-0000668 (sha256 /
+    // readFile) for the verify path. When the captured stdout is suffixed
+    // with `CAPTURE_TRUNCATION_MARKER`, the underlying exec hit the 1 MiB
+    // output cap and the trailing 64-hex digest may have been chopped off.
+    // Treat that as a transient verification failure so the caller can
+    // re-run the verify rather than mis-classifying a truncated reply as
+    // a content mismatch (which would then walk into the Shell-Fallback
+    // overwrite path).
+    if (rawHash.endsWith(CAPTURE_TRUNCATION_MARKER)) {
+      throw new RemoteStatTransientError(
+        `[ssh.writeFile: ${remotePath}] sha256sum output exceeds the captured-output cap of ${DEFAULT_MAX_OUTPUT_BYTES} bytes; refusing to derive a verdict from truncated output`
+      )
+    }
     // `sha256sum -- <file>` prints `<64-hex>  <filename>` on success. Split
     // on whitespace and take the first token so a stray newline or filename
     // that contains whitespace cannot confuse the parser.
