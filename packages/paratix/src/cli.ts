@@ -262,12 +262,27 @@ function redactBufferProperties(value: unknown, depth: number, seen: WeakSet<obj
   // R-0000836: read each property through its descriptor so a malicious
   // getter does not execute during the walk. Accessor descriptors collapse
   // to a static placeholder; only plain data values are recursed into.
-  for (const key of Reflect.ownKeys(sourceRecord)) {
-    const stringKey = typeof key === "symbol" ? key.toString() : key
-    if (REDACT_FORBIDDEN_KEYS.has(stringKey)) continue
-    // eslint-disable-next-line @typescript-eslint/no-unsafe-type-assertion -- Reflect.ownKeys returns the very keys present on sourceRecord, so indexing them as `keyof typeof sourceRecord` is sound and avoids an unnecessary intermediate variable
-    const descriptor = Object.getOwnPropertyDescriptor(sourceRecord, key as keyof typeof sourceRecord)
+  // R-0000837: split string vs. symbol iteration and prefix symbol keys so
+  // a Symbol whose description happens to match an existing string key (e.g.
+  // both `"cause"` and `Symbol("cause")`) cannot overwrite the string-keyed
+  // entry in the clone.
+  for (const key of Object.keys(sourceRecord)) {
+    if (REDACT_FORBIDDEN_KEYS.has(key)) continue
+    const descriptor = Object.getOwnPropertyDescriptor(sourceRecord, key)
     if (descriptor == null) continue
+    if (!("value" in descriptor)) {
+      redacted[key] = "[Accessor]"
+      continue
+    }
+    redacted[key] = redactBufferProperties(descriptor.value, depth + 1, seen)
+  }
+  for (const symbolKey of Object.getOwnPropertySymbols(sourceRecord)) {
+    const descriptor = Object.getOwnPropertyDescriptor(sourceRecord, symbolKey)
+    if (descriptor == null) continue
+    // Stable, unambiguous prefix so symbol keys never collide with string
+    // keys produced above (Symbols cannot themselves be JSON keys, and
+    // `inspect` happily renders the prefixed string).
+    const stringKey = `@@symbol:${symbolKey.toString()}`
     if (!("value" in descriptor)) {
       redacted[stringKey] = "[Accessor]"
       continue
