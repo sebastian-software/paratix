@@ -5,10 +5,9 @@ import {
   createReadStream,
   createWriteStream,
   type ReadStream,
-  unlinkSync,
   type WriteStream,
 } from "node:fs"
-import { rename } from "node:fs/promises"
+import { rename, unlink } from "node:fs/promises"
 import { Writable } from "node:stream"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 
@@ -19,12 +18,13 @@ import { sftpDownload, sftpUpload, sftpUploadContent } from "../src/sftp.js"
 vi.mock("node:fs", () => ({
   createReadStream: vi.fn(),
   createWriteStream: vi.fn(),
-  unlinkSync: vi.fn(),
 }))
 
 // R-0000148: sftpDownload finalizes via async fs/promises.rename instead of renameSync.
+// R-0000666: sftpDownload now cleans up the temp file via async fs/promises.unlink.
 vi.mock("node:fs/promises", () => ({
   rename: vi.fn().mockResolvedValue(undefined),
+  unlink: vi.fn().mockResolvedValue(undefined),
 }))
 
 // ---------------------------------------------------------------------------
@@ -105,6 +105,9 @@ describe("sftpDownload", () => {
     // R-0000148: keep the rename mock returning a resolved promise by default;
     // vi.resetAllMocks() in afterEach removes the implementation otherwise.
     vi.mocked(rename).mockResolvedValue(undefined)
+    // R-0000666: keep the async unlink cleanup mock returning a resolved
+    // promise by default for the same reason.
+    vi.mocked(unlink).mockResolvedValue(undefined)
   })
 
   it("rejects when the sftp callback returns an error", async () => {
@@ -194,7 +197,7 @@ describe("sftpDownload", () => {
     )
     expect(sftpEnd).toHaveBeenCalledOnce()
     expect(vi.mocked(createWriteStream)).not.toHaveBeenCalled()
-    expect(vi.mocked(unlinkSync)).not.toHaveBeenCalled()
+    expect(vi.mocked(unlink)).not.toHaveBeenCalled()
   })
 
   it("rejects, destroys the remote stream, and closes sftp when local write stream creation throws", async () => {
@@ -209,7 +212,7 @@ describe("sftpDownload", () => {
     )
     expect(sftpReadStream.destroy).toHaveBeenCalledOnce()
     expect(sftpEnd).toHaveBeenCalledOnce()
-    expect(vi.mocked(unlinkSync)).not.toHaveBeenCalled()
+    expect(vi.mocked(unlink)).not.toHaveBeenCalled()
   })
 
   it("does not remove the local path when the sftp session fails before creating the writeStream", async () => {
@@ -223,7 +226,7 @@ describe("sftpDownload", () => {
     await expect(sftpDownload(client, "/remote/file.txt", "/local/file.txt")).rejects.toThrow(
       "sftp session failed"
     )
-    expect(vi.mocked(unlinkSync)).not.toHaveBeenCalled()
+    expect(vi.mocked(unlink)).not.toHaveBeenCalled()
     expect(vi.mocked(createWriteStream)).not.toHaveBeenCalled()
   })
 
@@ -339,9 +342,9 @@ describe("sftpDownload", () => {
     localWriteStream.emit("error", new Error("local write stream broke"))
 
     await expect(promise).rejects.toThrow("local write stream broke")
-    expect(vi.mocked(unlinkSync)).toHaveBeenCalledOnce()
-    expect(vi.mocked(unlinkSync)).toHaveBeenCalledWith(tempPath)
-    expect(vi.mocked(unlinkSync)).not.toHaveBeenCalledWith("/local/file.txt")
+    expect(vi.mocked(unlink)).toHaveBeenCalledOnce()
+    expect(vi.mocked(unlink)).toHaveBeenCalledWith(tempPath)
+    expect(vi.mocked(unlink)).not.toHaveBeenCalledWith("/local/file.txt")
     expect(vi.mocked(rename)).not.toHaveBeenCalled()
   })
 
@@ -394,8 +397,8 @@ describe("sftpDownload", () => {
     localWriteStream.emit("finish")
 
     await expect(promise).rejects.toThrow("rename failed")
-    expect(vi.mocked(unlinkSync)).toHaveBeenCalledWith(tempPath)
-    expect(vi.mocked(unlinkSync)).not.toHaveBeenCalledWith("/local/file.txt")
+    expect(vi.mocked(unlink)).toHaveBeenCalledWith(tempPath)
+    expect(vi.mocked(unlink)).not.toHaveBeenCalledWith("/local/file.txt")
   })
 
   it("uses async rename and uses fs/promises.rename for finalization (R-0000148)", async () => {
@@ -438,13 +441,13 @@ describe("sftpDownload", () => {
     await expect(promise).resolves.toBeUndefined()
 
     // Reset call history so we can detect any unwanted late unlinks.
-    vi.mocked(unlinkSync).mockClear()
+    vi.mocked(unlink).mockClear()
 
     // After the rename succeeded, the cleanup flag must be false.
     // Even if some hypothetical late code path tries the same temp path,
     // there should be no unlink of the (now-renamed) final file.
-    expect(vi.mocked(unlinkSync)).not.toHaveBeenCalledWith(tempPath)
-    expect(vi.mocked(unlinkSync)).not.toHaveBeenCalledWith("/local/file.txt")
+    expect(vi.mocked(unlink)).not.toHaveBeenCalledWith(tempPath)
+    expect(vi.mocked(unlink)).not.toHaveBeenCalledWith("/local/file.txt")
   })
 
   // ---------------------------------------------------------------------------
@@ -593,8 +596,8 @@ describe("sftpDownload", () => {
 
     await expect(promise).rejects.toThrow("SFTP download timed out after 5000ms: /remote/file.txt")
     expect(vi.mocked(rename)).not.toHaveBeenCalled()
-    expect(vi.mocked(unlinkSync)).toHaveBeenCalledWith(tempPath)
-    expect(vi.mocked(unlinkSync)).not.toHaveBeenCalledWith("/local/file.txt")
+    expect(vi.mocked(unlink)).toHaveBeenCalledWith(tempPath)
+    expect(vi.mocked(unlink)).not.toHaveBeenCalledWith("/local/file.txt")
   })
 
   it("leaves the destination path untouched on stream errors", async () => {
@@ -610,8 +613,8 @@ describe("sftpDownload", () => {
 
     await expect(promise).rejects.toThrow("local write stream broke")
     expect(vi.mocked(rename)).not.toHaveBeenCalled()
-    expect(vi.mocked(unlinkSync)).toHaveBeenCalledWith(tempPath)
-    expect(vi.mocked(unlinkSync)).not.toHaveBeenCalledWith("/local/file.txt")
+    expect(vi.mocked(unlink)).toHaveBeenCalledWith(tempPath)
+    expect(vi.mocked(unlink)).not.toHaveBeenCalledWith("/local/file.txt")
   })
 
   it("destroys both streams and ends sftp session on timeout", async () => {
@@ -1196,6 +1199,9 @@ describe("SFTP connection abort signal", () => {
 
   beforeEach(() => {
     vi.mocked(rename).mockResolvedValue(undefined)
+    // R-0000666: async unlink cleanup must keep returning a resolved promise
+    // after vi.resetAllMocks() removes the implementation.
+    vi.mocked(unlink).mockResolvedValue(undefined)
   })
 
   it("rejects an in-flight sftpUpload immediately when the connection abort signal fires (R-0000255)", async () => {

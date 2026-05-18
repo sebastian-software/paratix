@@ -3,8 +3,8 @@ import type { Writable } from "node:stream"
 import type { Client, SFTPWrapper } from "ssh2"
 
 import { randomUUID } from "node:crypto"
-import { createReadStream, createWriteStream, unlinkSync } from "node:fs"
-import { rename } from "node:fs/promises"
+import { createReadStream, createWriteStream } from "node:fs"
+import { rename, unlink } from "node:fs/promises"
 import { dirname, join } from "node:path"
 import { Readable } from "node:stream"
 
@@ -483,12 +483,14 @@ export async function sftpDownload(
 
     const rejectWithCleanup = (reason: Error): void => {
       if (shouldCleanupTemporaryFile) {
-        try {
-          // eslint-disable-next-line security/detect-non-literal-fs-filename
-          unlinkSync(temporaryPath)
-        } catch {
+        // R-0000666: detach the temp-file unlink from the reject path so the
+        // rejection reason surfaces without waiting for the network filesystem
+        // (NFS/SMB) to ack the unlink. The previous sync unlinkSync blocked
+        // the event loop and accumulated under parallel sftpDownload failures.
+        // eslint-disable-next-line security/detect-non-literal-fs-filename
+        unlink(temporaryPath).catch(() => {
           // Best effort cleanup: preserve the original transfer error.
-        }
+        })
       }
       reject(reason)
     }
