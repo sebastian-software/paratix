@@ -4161,7 +4161,12 @@ describe("SshConnectionImpl", () => {
 
       // While the validation runs, the entered password sits in the sink.
       expect(registeredDuringProbe).toContain(password)
-      // After the probe resolves, the registration must be released.
+      // R-0000785: a successful probe caches the password; the rotation-aware
+      // sink registration keeps the value in place until the cache clears.
+      expect(getRegisteredSecrets()).toContain(password)
+
+      // Disconnecting clears the cached password and releases the sink entry.
+      ssh.disconnect()
       expect(getRegisteredSecrets()).not.toContain(password)
     })
 
@@ -4520,6 +4525,41 @@ describe("SshConnectionImpl", () => {
       const ssh = makeConnectedSsh(client)
 
       await expect(ssh.test("test -f /etc/passwd")).rejects.toThrow("channel open failed")
+    })
+
+    // R-0000785: when `cacheAndValidateSudoPassword` rotates the cached
+    // password, the previous registration in the process-wide secret sink
+    // must be released before the new value enters the sink. Otherwise the
+    // orphaned counter keeps masking the now-irrelevant old password while
+    // the fresh value is missing from the sink, leaking through diagnostics.
+    it("rotates the cached sudo password registration in the global secret sink (R-0000785)", async () => {
+      const { clearRegisteredSecrets, getRegisteredSecrets } = await import(
+        "../src/secretSink.js"
+      )
+      clearRegisteredSecrets()
+
+      const execSpy = vi.fn().mockImplementation((_command: string, callback: ExecCallback) => {
+        const stream = makeStream()
+        callback(undefined, stream)
+        stream.emit("close", 0)
+      })
+      const client = makeClientWithExecSpy(execSpy)
+      const ssh = makeConnectedSsh(client, { sudoPassword: null, user: "deploy" })
+      const internals = ssh as unknown as {
+        cacheAndValidateSudoPassword: (password: string) => Promise<void>
+        clearCachedPassword: () => void
+      }
+
+      await internals.cacheAndValidateSudoPassword("first-cached-password")
+      expect(getRegisteredSecrets()).toContain("first-cached-password")
+
+      await internals.cacheAndValidateSudoPassword("second-cached-password")
+      const afterRotation = getRegisteredSecrets()
+      expect(afterRotation).toContain("second-cached-password")
+      expect(afterRotation).not.toContain("first-cached-password")
+
+      internals.clearCachedPassword()
+      expect(getRegisteredSecrets()).not.toContain("second-cached-password")
     })
   })
 

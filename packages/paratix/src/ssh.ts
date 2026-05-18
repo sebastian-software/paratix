@@ -19,7 +19,12 @@ import {
   HostKeyVerificationError,
   type HostVerifierResult,
 } from "./knownHosts.js"
-import { getRegisteredSecrets, withRegisteredSecrets } from "./secretSink.js"
+import {
+  getRegisteredSecrets,
+  registerSecret,
+  unregisterSecret,
+  withRegisteredSecrets,
+} from "./secretSink.js"
 import { SFTP_TIMEOUT, sftpDownload, sftpUpload, sftpUploadContent } from "./sftp.js"
 import {
   attachSshClientTeardownErrorSink,
@@ -360,6 +365,14 @@ export class SshConnectionImpl implements SshConnection {
       throw new Error("Sudo password must not contain newline characters")
     }
     this.cachedSudoPassword = config.sudoPassword == null ? null : Buffer.from(config.sudoPassword)
+    // R-0000785: register the seeded sudo password in the process-wide secret
+    // sink so the rotation logic in `cacheAndValidateSudoPassword` can release
+    // it cleanly when the operator re-prompts. Without this seed registration
+    // the rotation path could not balance its `unregisterSecret(previous)`
+    // call when the constructor-supplied password is replaced.
+    if (config.sudoPassword != null) {
+      registerSecret(config.sudoPassword)
+    }
   }
 
   public addPort(port: number): boolean {
@@ -860,7 +873,23 @@ export class SshConnectionImpl implements SshConnection {
     if (password.includes("\n") || password.includes("\r")) {
       throw new Error("Sudo password must not contain newline characters")
     }
+    // R-0000785: when the cached password rotates (a previous probe primed the
+    // sink with an older value, or the caller re-runs `probeSudo` with a fresh
+    // prompt), release the old sink registration before overwriting the
+    // buffer. Otherwise the orphaned counter keeps masking the now-irrelevant
+    // value while the freshly cached password never enters the global sink at
+    // all, leaving its plaintext exposed in subsequent diagnostics.
+    const previousPassword = this.cachedSudoPassword?.toString("utf8") ?? null
     this.cachedSudoPassword = Buffer.from(password)
+    registerSecret(password)
+    if (previousPassword != null && previousPassword !== password) {
+      unregisterSecret(previousPassword)
+    } else if (previousPassword === password) {
+      // The caller re-cached the same value (e.g. retry after a transient
+      // failure). Drop the now-redundant registration so the counter stays
+      // balanced when `clearCachedPassword` releases it later.
+      unregisterSecret(password)
+    }
     // R-0000146: register the entered password in the process-wide secret
     // sink for the duration of the probe. Without this, a thrown
     // diagnostic—including the wrapping `cause` chain printed by
@@ -969,8 +998,14 @@ export class SshConnectionImpl implements SshConnection {
 
   private clearCachedPassword(): void {
     if (this.cachedSudoPassword != null) {
+      // R-0000785: release the sink registration before zeroing the buffer so
+      // a rotation that calls `cacheAndValidateSudoPassword` again later (or
+      // a final shutdown) cannot leave a dangling reference-counted entry in
+      // the process-wide secret sink.
+      const passwordValue = this.cachedSudoPassword.toString("utf8")
       this.cachedSudoPassword.fill(0)
       this.cachedSudoPassword = null
+      unregisterSecret(passwordValue)
     }
     // R-0000152: a cleared password invalidates our local view of the
     // remote sudo cred cache too — even if the remote timestamp lingers,
