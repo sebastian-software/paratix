@@ -247,32 +247,44 @@ export function readAdminPublicKeyFile(exitWithMessage: ExitWithMessage, path: s
   // surface in the operator-facing log even when the leaf entry itself
   // is a regular file. The previous implementation only logged when the
   // leaf was a symbolic link, leaving the ancestor-symlink case silent.
-  try {
-    // eslint-disable-next-line security/detect-non-literal-fs-filename
-    const realPath = realpathSync(resolvedPath)
-    if (realPath !== resolvedPath) {
-      if (linkStat.isSymbolicLink()) {
-        console.log(`Reading public key from ${realPath} (symlink target of ${resolvedPath}).`)
-      } else {
-        console.log(
-          `Reading public key from ${realPath} (resolved via ancestor symlink of ${resolvedPath}).`
-        )
+  // R-0000731: resolve the realpath once up front and reuse it for the
+  // subsequent stat/readFile calls so the link target cannot be swapped
+  // between the steps (TOCTOU). When realpath fails we fall back to the
+  // originally resolved path; the statSync below will then surface any
+  // remaining failure via failWithReadError.
+  const materialisedPath = (() => {
+    try {
+      // eslint-disable-next-line security/detect-non-literal-fs-filename
+      const realPath = realpathSync(resolvedPath)
+      if (realPath !== resolvedPath) {
+        if (linkStat.isSymbolicLink()) {
+          console.log(`Reading public key from ${realPath} (symlink target of ${resolvedPath}).`)
+        } else {
+          console.log(
+            `Reading public key from ${realPath} (resolved via ancestor symlink of ${resolvedPath}).`
+          )
+        }
       }
+      return realPath
+    } catch {
+      // A dangling or unreadable symlink falls through to the regular
+      // statSync read path, which will surface the failure via
+      // failWithReadError below.
+      return resolvedPath
     }
-  } catch {
-    // A dangling or unreadable symlink falls through to the regular
-    // statSync read path, which will surface the failure via
-    // failWithReadError below.
-  }
+  })()
 
   // R-0000186: statSync follows symbolic links so that legitimate operator
   // setups (e.g. ~/.ssh/id_ed25519.pub linked into a password-manager vault)
   // are accepted. The downstream readFileSync also follows the link, so the
   // size and isFile() guards remain meaningful for the eventual file.
+  // R-0000731: stat/readFile both operate on the already-resolved
+  // materialisedPath so the link target cannot be swapped between
+  // realpath and stat or between stat and readFile.
   const stat = (() => {
     try {
       // eslint-disable-next-line security/detect-non-literal-fs-filename
-      return statSync(resolvedPath)
+      return statSync(materialisedPath)
     } catch {
       return failWithReadError()
     }
@@ -285,7 +297,7 @@ export function readAdminPublicKeyFile(exitWithMessage: ExitWithMessage, path: s
   const value = (() => {
     try {
       // eslint-disable-next-line security/detect-non-literal-fs-filename
-      return readFileSync(resolvedPath, "utf8")
+      return readFileSync(materialisedPath, "utf8")
     } catch {
       return failWithReadError()
     }
