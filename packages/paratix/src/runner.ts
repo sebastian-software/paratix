@@ -194,7 +194,11 @@ const REBOOT_GRACE_SECONDS_TO_MS = 1000
  * {@link ShutdownState} already flows through the runner).
  */
 type RebootGraceContext = {
-  abortSignal: AbortSignal | undefined
+  // R-0000788: typed as a required `AbortSignal` because the only sleep that
+  // consumes this context (`sleepRespectingShutdown`) now requires the
+  // signal as well. Callers must thread a real shutdown-aware abort source
+  // through; passing `undefined` would silently downgrade to a plain timer.
+  abortSignal: AbortSignal
   graceMs: number
   shutdownSignal: () => NodeJS.Signals | null
 }
@@ -224,16 +228,19 @@ function createRebootGraceContext(
  *
  * @param durationMs - The maximum sleep duration in milliseconds.
  * @param shutdownSignal - Getter that returns the active shutdown signal, or `null`.
- * @param abortSignal - Optional `AbortSignal` that ends the sleep early.
+ * @param abortSignal - `AbortSignal` that ends the sleep early. Required so
+ *   every caller threads a shutdown-aware abort source through; a plain
+ *   `setTimeout`-style sleep that ignores Ctrl-C is intentionally not
+ *   supported here.
  */
 async function sleepRespectingShutdown(
   durationMs: number,
   shutdownSignal: () => NodeJS.Signals | null,
-  abortSignal?: AbortSignal
+  abortSignal: AbortSignal
 ): Promise<void> {
   if (durationMs <= 0) return
   if (shutdownSignal() != null) return
-  if (abortSignal?.aborted === true) return
+  if (abortSignal.aborted) return
   await new Promise<void>((resolve) => {
     const handleAbort = (): void => {
       clearTimeout(timer)
@@ -241,7 +248,7 @@ async function sleepRespectingShutdown(
       resolve()
     }
     const cleanup = (): void => {
-      abortSignal?.removeEventListener("abort", handleAbort)
+      abortSignal.removeEventListener("abort", handleAbort)
     }
     const timer = setTimeout(() => {
       cleanup()
@@ -249,7 +256,7 @@ async function sleepRespectingShutdown(
     }, durationMs)
     // Avoid keeping the event loop alive solely for this sleep.
     if (typeof timer.unref === "function") timer.unref()
-    abortSignal?.addEventListener("abort", handleAbort, { once: true })
+    abortSignal.addEventListener("abort", handleAbort, { once: true })
   })
 }
 
