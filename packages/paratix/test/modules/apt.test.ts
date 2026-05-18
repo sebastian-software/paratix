@@ -96,8 +96,14 @@ describe("apt.key", () => {
   const gpgHomedirCleanupCmd = `rm -rf -- '${gpgHomedir}'`
   const dearmorKeyringPath = "/etc/apt/keyrings/docker.gpg"
   const dearmorTempPath = "/tmp/apt-key-docker.ABCDEF"
-  const dearmorCommand = `gpg --no-default-keyring --no-options --homedir '${gpgHomedir}' --dearmor --yes -o '${dearmorKeyringPath}' '${dearmorTempPath}'`
-  const dearmorChmodCommand = `chmod 0644 '${dearmorKeyringPath}'`
+  // R-0000709: dearmor now writes to a staging file in the keyring directory,
+  // then publishes via `mv -T` with an inline symlink guard.
+  const dearmorStagingPath = "/etc/apt/keyrings/.apt-key.paratix-staging.ABCDEF"
+  const dearmorStagingMktempCmd = `mktemp -p '/etc/apt/keyrings' -- '.apt-key.paratix-staging.XXXXXX'`
+  const dearmorCommand = `gpg --no-default-keyring --no-options --homedir '${gpgHomedir}' --dearmor --yes -o '${dearmorStagingPath}' '${dearmorTempPath}'`
+  const dearmorChmodCommand = `chmod 0644 '${dearmorStagingPath}'`
+  const dearmorPublishCommand = `{ if [ -L '${dearmorKeyringPath}' ]; then rm -f -- '${dearmorStagingPath}'; exit 73; fi && mv -T -- '${dearmorStagingPath}' '${dearmorKeyringPath}'; } || { status=$?; rm -f -- '${dearmorStagingPath}'; exit "$status"; }`
+  const dearmorStagingCleanupCmd = `rm -f -- '${dearmorStagingPath}'`
 
   // R-0000704: `gpg --show-keys` is wrapped in a dedicated homedir scope just
   // like the dearmor command, so tests must reference the longer command form
@@ -109,6 +115,9 @@ describe("apt.key", () => {
   function aptKeyDearmorBaseStubs(): Record<string, { code?: number; stdout?: string }> {
     return {
       [dearmorChmodCommand]: { code: 0 },
+      [dearmorPublishCommand]: { code: 0 },
+      [dearmorStagingCleanupCmd]: { code: 0 },
+      [dearmorStagingMktempCmd]: { stdout: `${dearmorStagingPath}\n` },
       [gpgHomedirCleanupCmd]: { code: 0 },
       [gpgHomedirMktempCmd]: { stdout: `${gpgHomedir}\n` },
     }
@@ -499,6 +508,71 @@ describe("apt.key", () => {
       "[apt.key] refuses to write through symlink at /etc/apt/keyrings/docker.gpg"
     )
     expect(ssh.calls).not.toContain(dearmorCommand)
+  })
+
+  // R-0000709: dearmor must stage the keyring next to the final path, chmod
+  // the staging file, then publish atomically via `mv -T`. The shell guard
+  // also fails fast on a symlink swap that materialises between the apply-
+  // time `isSymlink` check and the publish step.
+  it("R-0000709: stages the keyring, chmods, then publishes atomically via mv -T", async () => {
+    const ssh = createMockSsh({
+      ...aptKeyDearmorBaseStubs(),
+      "[ -L '/etc/apt/keyrings/docker.gpg' ]": { code: 1 },
+      [dearmorCommand]: { code: 0 },
+      [downloadCommand]: { code: 0 },
+      [showKeysCommand("/tmp/apt-key-docker.ABCDEF")]: {
+        code: 0,
+        stdout: "pub:-:255:22:::\nfpr:::::::::1234567890ABCDEF1234567890ABCDEF12345678:\n",
+      },
+      "mkdir -p /etc/apt/keyrings": { code: 0 },
+      "mktemp '/tmp/apt-key-docker.XXXXXX'": { stdout: "/tmp/apt-key-docker.ABCDEF\n" },
+      "rm -f '/tmp/apt-key-docker.ABCDEF'": { code: 0 },
+    })
+    const mod = apt.key("docker", "https://download.docker.com/linux/ubuntu/gpg", { fingerprint })
+    const result = await mod.apply(ssh, emptyEnv)
+
+    expect(result).toStrictEqual({ status: "changed" })
+    const dearmorIndex = ssh.calls.indexOf(dearmorCommand)
+    const chmodIndex = ssh.calls.indexOf(dearmorChmodCommand)
+    const publishIndex = ssh.calls.indexOf(dearmorPublishCommand)
+    // dearmor → chmod on staging → atomic publish via mv -T
+    expect(dearmorIndex).toBeGreaterThan(-1)
+    expect(chmodIndex).toBeGreaterThan(dearmorIndex)
+    expect(publishIndex).toBeGreaterThan(chmodIndex)
+    // Direct chmod on the final keyring path must never run — the staging
+    // file already carried 0644 before the rename landed it.
+    expect(ssh.calls).not.toContain(`chmod 0644 '${dearmorKeyringPath}'`)
+  })
+
+  // R-0000709: when the inline publish guard detects a symlink that
+  // materialised after the apply-time check, the shell exits with code 73
+  // and the helper surfaces a clear "refuses to write through symlink"
+  // diagnostic.
+  it("R-0000709: surfaces refuse-symlink failure when the publish guard fires", async () => {
+    const ssh = createMockSsh({
+      ...aptKeyDearmorBaseStubs(),
+      "[ -L '/etc/apt/keyrings/docker.gpg' ]": { code: 1 },
+      [dearmorCommand]: { code: 0 },
+      // R-0000709: publish guard exits with code 73 when a symlink appeared
+      // between the apply-time check and the inline `[ -L … ]` probe inside
+      // the publish shell pipeline.
+      [dearmorPublishCommand]: { code: 73 },
+      [downloadCommand]: { code: 0 },
+      [showKeysCommand("/tmp/apt-key-docker.ABCDEF")]: {
+        code: 0,
+        stdout: "pub:-:255:22:::\nfpr:::::::::1234567890ABCDEF1234567890ABCDEF12345678:\n",
+      },
+      "mkdir -p /etc/apt/keyrings": { code: 0 },
+      "mktemp '/tmp/apt-key-docker.XXXXXX'": { stdout: "/tmp/apt-key-docker.ABCDEF\n" },
+      "rm -f '/tmp/apt-key-docker.ABCDEF'": { code: 0 },
+    })
+    const mod = apt.key("docker", "https://download.docker.com/linux/ubuntu/gpg", { fingerprint })
+    const result = await mod.apply(ssh, emptyEnv)
+
+    expect(result.status).toBe("failed")
+    expect(String(result.error)).toContain(
+      "[apt.key] refuses to write through symlink at /etc/apt/keyrings/docker.gpg"
+    )
   })
 })
 

@@ -1,3 +1,5 @@
+import { posix } from "node:path"
+
 import type { ModuleResult, SshConnection } from "../types.js"
 
 import { failed, failedCommand } from "../moduleFailure.js"
@@ -10,6 +12,11 @@ import {
 
 const OPENPGP_FINGERPRINT_RE = /^[A-F0-9]{40,64}$/v
 const REDACTED_URL_VALUE = "REDACTED"
+// R-0000709: staging-file prefix used in `<keyring-dir>/<prefix>.XXXXXX`. The
+// dot-prefix keeps the staging file out of routine `ls` output and the unique
+// `XXXXXX` suffix prevents collisions when two apt.key modules race for the
+// same keyring directory.
+const APT_KEY_STAGING_PREFIX = ".apt-key.paratix-staging"
 
 export function normalizeOpenPgpFingerprint(fingerprint: string): string {
   const normalized = fingerprint.replaceAll(/\s+/gv, "").toUpperCase()
@@ -204,7 +211,7 @@ async function allocateGpgHomedir(
 
 function buildDearmorCommand(parameters: {
   homedir: string
-  keyringPath: string
+  outputPath: string
   temporaryPath: string
 }): string {
   return [
@@ -216,9 +223,78 @@ function buildDearmorCommand(parameters: {
     "--dearmor",
     "--yes",
     "-o",
-    shellQuote(parameters.keyringPath),
+    shellQuote(parameters.outputPath),
     shellQuote(parameters.temporaryPath),
   ].join(" ")
+}
+
+/**
+ * R-0000709: allocate a per-keyring staging path next to `keyringPath`. The
+ * staging file lives in the same directory so the final atomic rename uses
+ * the same filesystem (a cross-device `mv -T` would otherwise fall back to a
+ * non-atomic copy + unlink). Returns a validated path or a `failed` result.
+ */
+async function allocateAptKeyStagingPath(
+  ssh: SshConnection,
+  name: string,
+  keyringPath: string
+): Promise<{ failure: ModuleResult } | { stagingPath: string }> {
+  const directory = posix.dirname(keyringPath)
+  const template = `${APT_KEY_STAGING_PREFIX}.XXXXXX`
+  const rawStagingPath = await ssh.output(
+    `mktemp -p ${shellQuote(directory)} -- ${shellQuote(template)}`
+  )
+  try {
+    return {
+      stagingPath: validateMktempPath(directory, rawStagingPath, APT_KEY_STAGING_PREFIX),
+    }
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : String(error)
+    return {
+      failure: failed(
+        `[apt.key] mktemp produced an unexpected keyring staging path for ${name}: ${reason}`
+      ),
+    }
+  }
+}
+
+async function cleanupAptKeyStagingPath(ssh: SshConnection, stagingPath: string): Promise<void> {
+  // R-0000709: pass `--` so a future refactor that loosens the staging prefix
+  // cannot let an attacker-controlled path that starts with `-` be parsed as
+  // an `rm` option.
+  await ssh.exec(`rm -f -- ${shellQuote(stagingPath)}`, { ignoreExitCode: true, silent: true })
+}
+
+/**
+ * R-0000709: publish the dearmored keyring atomically. The shell pipeline
+ * performs the symlink guard and the `mv -T -- staging final` in the same
+ * shell invocation so a symlink that materialises between an earlier
+ * `[ -L final ]` probe and the rename cannot redirect the write into an
+ * attacker-controlled target. The staging file is removed on any error so
+ * leftovers do not accumulate in the keyring directory.
+ *
+ * Exit codes:
+ * - `73` — final path turned into a symlink between snapshot and publish.
+ * - any other non-zero code — surfaced via `failedCommand` so the operator
+ *   sees the exact shell stderr.
+ */
+async function publishAptKeyStagingAtomically(
+  ssh: SshConnection,
+  parameters: { keyringPath: string; name: string; stagingPath: string }
+): Promise<ModuleResult | null> {
+  const { keyringPath, name, stagingPath } = parameters
+  const publish = await ssh.exec(
+    `{ if [ -L ${shellQuote(keyringPath)} ]; then rm -f -- ${shellQuote(stagingPath)}; exit 73; fi && mv -T -- ${shellQuote(stagingPath)} ${shellQuote(keyringPath)}; } || { status=$?; rm -f -- ${shellQuote(stagingPath)}; exit "$status"; }`,
+    { ignoreExitCode: true, silent: true }
+  )
+  if (publish.code === 0) return null
+  if (publish.code === 73) {
+    return failed(`[apt.key] refuses to write through symlink at ${keyringPath}`)
+  }
+  return failedCommand(
+    `[apt.key] failed to publish the keyring at ${keyringPath} for ${name}`,
+    publish
+  )
 }
 
 /**
@@ -227,6 +303,13 @@ function buildDearmorCommand(parameters: {
  * R-0000225: the previous implementation polluted the running user's home
  * with a `~/.gnupg/trustdb.gpg` and left the keyring at a default mode that
  * `_apt` could not always read.
+ *
+ * R-0000709: the dearmor output is written to a staging file in the same
+ * directory as the final keyring, then atomically promoted via `mv -T -- …`
+ * with an inline symlink guard. The previous implementation wrote `gpg
+ * --dearmor -o keyringPath` directly, so a symlink swap or a partial write
+ * could leave `_apt` reading either an attacker-controlled target or a
+ * half-written file between gpg's truncate and the subsequent `chmod`.
  *
  * @param ssh - The active SSH connection.
  * @param parameters - dearmor inputs.
@@ -244,27 +327,40 @@ async function dearmorAptKeyToKeyring(
   if ("failure" in homedirResult) return homedirResult.failure
   const { homedir } = homedirResult
   try {
-    const importResult = await ssh.exec(
-      buildDearmorCommand({ homedir, keyringPath, temporaryPath }),
-      { ignoreExitCode: true, silent: true }
-    )
-    if (importResult.code !== 0) {
-      return failedCommand(`[apt.key] failed to import ${name}`, importResult)
-    }
-    // R-0000225: gpg --dearmor leaves the keyring at the umask-default mode,
-    // which on systems with restrictive umasks renders it unreadable for the
-    // unprivileged `_apt` user. Force 0644 so apt can always read the keyring.
-    const chmodResult = await ssh.exec(`chmod 0644 ${shellQuote(keyringPath)}`, {
-      ignoreExitCode: true,
-      silent: true,
-    })
-    if (chmodResult.code !== 0) {
-      return failedCommand(
-        `[apt.key] failed to chmod 0644 the keyring at ${keyringPath}`,
-        chmodResult
+    const stagingResult = await allocateAptKeyStagingPath(ssh, name, keyringPath)
+    if ("failure" in stagingResult) return stagingResult.failure
+    const { stagingPath } = stagingResult
+    try {
+      const importResult = await ssh.exec(
+        buildDearmorCommand({ homedir, outputPath: stagingPath, temporaryPath }),
+        { ignoreExitCode: true, silent: true }
       )
+      if (importResult.code !== 0) {
+        await cleanupAptKeyStagingPath(ssh, stagingPath)
+        return failedCommand(`[apt.key] failed to import ${name}`, importResult)
+      }
+      // R-0000225: gpg --dearmor leaves the keyring at the umask-default mode,
+      // which on systems with restrictive umasks renders it unreadable for the
+      // unprivileged `_apt` user. Force 0644 on the staging file *before* the
+      // atomic publish so apt sees the final mode the moment the rename lands.
+      const chmodResult = await ssh.exec(`chmod 0644 ${shellQuote(stagingPath)}`, {
+        ignoreExitCode: true,
+        silent: true,
+      })
+      if (chmodResult.code !== 0) {
+        await cleanupAptKeyStagingPath(ssh, stagingPath)
+        return failedCommand(
+          `[apt.key] failed to chmod 0644 the keyring at ${keyringPath}`,
+          chmodResult
+        )
+      }
+      return await publishAptKeyStagingAtomically(ssh, { keyringPath, name, stagingPath })
+    } catch (error) {
+      // R-0000709: best-effort cleanup if any helper above throws; the
+      // staging file must never leak into the keyring directory.
+      await cleanupAptKeyStagingPath(ssh, stagingPath)
+      throw error
     }
-    return null
   } finally {
     await ssh.exec(`rm -rf -- ${shellQuote(homedir)}`, { ignoreExitCode: true, silent: true })
   }
