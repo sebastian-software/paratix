@@ -172,12 +172,21 @@ describe("mergeEnvironmentFromMeta", () => {
     )
   })
 
-  // R-0000745: meta-registered env names must satisfy the same allow-list
-  // the dotenv loader and `--env` parser enforce. Names with whitespace,
-  // leading digits, or punctuation must fail at the merge boundary instead
-  // of polluting the merged environment.
-  it.each(["foo bar", "123abc", "bad-name", "name.with.dots", "name$with$dollar"])(
-    "rejects meta entries whose name does not match the dotenv key pattern (%s)",
+  // R-0000745: meta-registered env names must satisfy a dot-aware extension
+  // of the dotenv key pattern. Names with whitespace, leading digits, or
+  // disallowed punctuation must fail at the merge boundary instead of
+  // polluting the merged environment.
+  it.each([
+    "foo bar",
+    "123abc",
+    "bad-name",
+    "name$with$dollar",
+    ".leading.dot",
+    "trailing.dot.",
+    "double..dot",
+    "name.with space",
+  ])(
+    "rejects meta entries whose name does not match the meta-name pattern (%s)",
     async (badName) => {
       await expect(mergeEnvironmentFromMeta({}, [meta.env(badName, "value")])).rejects.toThrow(
         /Invalid env meta name/v
@@ -191,6 +200,19 @@ describe("mergeEnvironmentFromMeta", () => {
   it("rejects empty meta entry names at the environmentMeta entry point", () => {
     expect(() => meta.env("", "value")).toThrow(/non-empty string/v)
   })
+
+  // R-0000745: dot-separated namespaces are part of the built-in meta
+  // surface (system.arch, system.os.codename, sshd.port) and must keep
+  // working unchanged. Pin this so a future tightening cannot regress the
+  // dotted form.
+  it.each(["FOO_BAR", "_LEADING", "system.arch", "system.os.codename", "sshd.port"])(
+    "accepts dot-namespaced meta entry names (%s)",
+    async (goodName) => {
+      await expect(
+        mergeEnvironmentFromMeta({}, [meta.env(goodName, "value")])
+      ).resolves.toBeDefined()
+    }
+  )
 
   // R-0000264: a provider that drifts away from its declared valueType (e.g.
   // a 1Password CLI that suddenly returns a number for a "string"-typed key,

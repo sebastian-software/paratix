@@ -8,11 +8,7 @@ import type {
   SystemRebootMetaEntry,
 } from "./types.js"
 
-import {
-  createNullPrototypeEnvironment,
-  ENVIRONMENT_FORBIDDEN_KEYS,
-  ENVIRONMENT_KEY_PATTERN,
-} from "./environment.js"
+import { createNullPrototypeEnvironment, ENVIRONMENT_FORBIDDEN_KEYS } from "./environment.js"
 import { isValidTcpPort } from "./serverDefinitionValidation.js"
 
 const SYSTEM_HOST_KIND = "system.host"
@@ -226,16 +222,37 @@ export function assertValidModuleMetaEntries(entries: ModuleMetaEntry[] | undefi
   }
 }
 
+/**
+ * R-0000745: meta env names follow the same allow-list that
+ * `loadDotEnvironment` and `cli.collectEnvironment` apply for dotenv keys,
+ * extended to permit dot-separated namespaces (`system.arch`,
+ * `system.os.codename`, `sshd.port`) that the built-in modules use to group
+ * related facts. The first segment must still start with a letter or
+ * underscore, every dot must be followed by a non-empty segment, and no
+ * other punctuation is accepted. This rejects values such as `"foo bar"`,
+ * `"123abc"`, `"bad-name"`, or the empty string at the merge boundary
+ * instead of letting them slip into the resolved environment.
+ */
+// Validate the meta name segment-by-segment with explicit string operations
+// so the regex engine never sees a nested quantifier (`(\w*)*`). The check
+// is linear in the name length and matches the documented pattern
+// `[A-Za-z_]\w*(\.[A-Za-z_]\w*)*` without exposing the lint to any
+// backtracking ambiguity.
+const META_ENV_SEGMENT_PATTERN = /^[A-Za-z_]\w*$/v
+
+function isAllowedMetaEnvironmentName(name: string): boolean {
+  if (name.length === 0) return false
+  const segments = name.split(".")
+  for (const segment of segments) {
+    if (!META_ENV_SEGMENT_PATTERN.test(segment)) return false
+  }
+  return true
+}
+
 function assertAllowedEnvironmentMetaName(name: string): void {
-  // R-0000745: enforce the same allow-list that `collectEnvironment` (CLI)
-  // and `loadDotEnvironment` already apply so a meta-registered name like
-  // "foo bar", "123abc", or "" fails fast at the registration boundary
-  // instead of slipping into the merged environment and then failing far
-  // away with a confusing downstream error. The exact pattern lives in
-  // environment.ts as the single source of truth.
-  if (!ENVIRONMENT_KEY_PATTERN.test(name)) {
+  if (!isAllowedMetaEnvironmentName(name)) {
     throw new Error(
-      `Invalid env meta name ${JSON.stringify(name)}: expected [A-Za-z_]\\w*`
+      `Invalid env meta name ${JSON.stringify(name)}: expected [A-Za-z_]\\w*(\\.[A-Za-z_]\\w*)*`
     )
   }
   if (ENVIRONMENT_FORBIDDEN_KEYS.has(name)) {

@@ -11,6 +11,7 @@ import type { Environment, ServerDefinition } from "./types.js"
 
 import { isMissingTsxDependencyError } from "./cliTsxHelpers.js"
 import { ENVIRONMENT_FORBIDDEN_KEYS } from "./environment.js"
+import { runWithFirstRunFlag } from "./firstRunContext.js"
 import { printCliHeader } from "./output.js"
 import { type RunOptions, runPlaybook } from "./runner.js"
 import { maskRegisteredSecrets } from "./secretSink.js"
@@ -403,48 +404,19 @@ export function applyCliEnvironmentOverrides(
 }
 
 /**
- * R-0000695: the first-run flag now propagates through an
- * {@link AsyncLocalStorage} context instead of mutating `process.env`. The
- * previous design wrote `PARATIX_FIRST_RUN=true` to the global environment
- * for the duration of `body` so that a playbook's top-level statements
- * could read it via `process.env`. Two real-world hazards came with that
- * approach:
- *
- * - Every other code path running in the same Node process — vitest
- *   worker-pool fixtures, embedded runners, unrelated tooling — observed
- *   the synthetic value too. Tests had to manually clean up
- *   `process.env.PARATIX_FIRST_RUN` to avoid cross-test contamination.
- * - The mutation/restore dance trusted every caller to wire up
- *   try/finally semantics correctly. A missed restore in any code path
- *   left the flag stuck on the process for the rest of its lifetime.
- *
- * The AsyncLocalStorage-based variant solves both problems: the value is
- * scoped to the async chain that owns `body` and is automatically released
- * when that chain finishes, regardless of how `body` resolves. Playbooks
- * now read the flag via the {@link isFirstRun} helper (exported as public
- * API) which queries the same async-local store.
+ * R-0000695 / R-0000729: the first-run AsyncLocalStorage now lives in
+ * `firstRunContext.ts` so the library entry `index.ts` can re-export
+ * `isFirstRun` without dragging `cli.ts` (with its `import.meta.url`
+ * direct-run guard) into the library bundle. The runtime semantics are
+ * unchanged: `isFirstRun()` reads the scoped flag, and
+ * {@link withCliProcessEnvironment} below installs it via
+ * {@link runWithFirstRunFlag}.
  */
-const firstRunContext = new AsyncLocalStorage<boolean>()
-
-/**
- * R-0000695: public API helper that returns the current first-run flag.
- * Returns `true` only when called from inside a
- * {@link withCliProcessEnvironment} body whose `firstRun` option was
- * `true`. Outside of a CLI invocation, or when the flag was not set, the
- * helper returns `false`. The helper is async-context aware: a playbook
- * that schedules its own microtasks/timers within the CLI body keeps
- * observing the same flag, while concurrent work outside that body sees
- * `false`.
- *
- * @returns `true` when the current async context is a first-run CLI body.
- */
-export function isFirstRun(): boolean {
-  return firstRunContext.getStore() === true
-}
+export { isFirstRun } from "./firstRunContext.js"
 
 /**
  * Runs `body` while the CLI-derived first-run flag is observable through
- * {@link isFirstRun} and guarantees the flag is cleared before returning,
+ * `isFirstRun` and guarantees the flag is cleared before returning,
  * regardless of whether `body` resolves or rejects.
  *
  * R-0000265: this helper replaces the previous `applyCliProcessEnvironment`
@@ -458,7 +430,7 @@ export function isFirstRun(): boolean {
  * {@link applyCliEnvironmentOverrides}, so business logic stays free of
  * implicit globals. Playbooks that previously read
  * `process.env.PARATIX_FIRST_RUN` at module scope should call
- * {@link isFirstRun} inside their async surface area
+ * `isFirstRun` inside their async surface area
  * (`init`/`apply`/`check`) instead — the flag is async-local, not global.
  *
  * Reentrant CLI calls are supported: a nested invocation that sets
@@ -484,7 +456,7 @@ export async function withCliProcessEnvironment<T>(
     // even though its enclosing CLI body legitimately set the flag.
     return body()
   }
-  return firstRunContext.run(true, body)
+  return runWithFirstRunFlag(body)
 }
 
 /**

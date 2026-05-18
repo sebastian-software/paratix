@@ -27,8 +27,8 @@ describe("runnerAbortSignal", () => {
   it("keeps parallel withRunnerAbortSignal scopes isolated", async () => {
     const controllerA = new AbortController()
     const controllerB = new AbortController()
-    const observedA: (AbortSignal | undefined)[] = []
-    const observedB: (AbortSignal | undefined)[] = []
+    const observedA: Array<AbortSignal | undefined> = []
+    const observedB: Array<AbortSignal | undefined> = []
 
     const runA = withRunnerAbortSignal(controllerA.signal, async () => {
       observedA.push(getRunnerAbortSignal())
@@ -70,7 +70,7 @@ describe("runnerAbortSignal", () => {
 
   it("propagates the scoped signal into nested async branches", async () => {
     const controller = new AbortController()
-    const observations: (AbortSignal | undefined)[] = []
+    const observations: Array<AbortSignal | undefined> = []
 
     await withRunnerAbortSignal(controller.signal, async () => {
       observations.push(getRunnerAbortSignal())

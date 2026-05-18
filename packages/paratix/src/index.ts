@@ -1,9 +1,13 @@
 export { assert, debug, fail, firstRun, pause, signals, when } from "./builtins.js"
+export { resolveEnvironment } from "./environment.js"
 // R-0000695: public helper that returns the async-local first-run flag.
 // Playbooks should call this from `init`/`apply`/`check` rather than
 // reading `process.env.PARATIX_FIRST_RUN`, which the CLI no longer mutates.
-export { isFirstRun } from "./cli.js"
-export { resolveEnvironment } from "./environment.js"
+// R-0000729: imported from the dedicated `firstRunContext` module instead
+// of `cli.ts` so the library bundle does not transitively pull `cli.ts`
+// (and its `import.meta.url` direct-run guard) which broke esbuild chunk
+// splitting for the published package entries.
+export { isFirstRun } from "./firstRunContext.js"
 export {
   assertValidModuleMetaEntries,
   assertValidModuleMetaEntry,

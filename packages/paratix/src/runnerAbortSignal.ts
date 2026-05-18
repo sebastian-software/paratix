@@ -37,7 +37,7 @@ const runnerAbortSignalStorage = new AsyncLocalStorage<AbortSignal | undefined>(
  * @param body - Async work that observes the scoped signal.
  * @returns The value resolved by `body`.
  */
-export function withRunnerAbortSignal<T>(
+export async function withRunnerAbortSignal<T>(
   signal: AbortSignal | undefined,
   body: () => Promise<T>
 ): Promise<T> {

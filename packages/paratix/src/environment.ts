@@ -8,10 +8,10 @@ import type { Environment } from "./types.js"
  * loaded from a `.env` file go through the same allow-list. Lifting the
  * pattern out of the loader keeps the failure message consistent.
  *
- * R-0000745: also re-used by `meta.assertAllowedEnvironmentMetaName` so a
- * `meta.env(name, …)` registration enforces the dotenv allow-list at the
- * source instead of waiting for the merged value to surface in a CLI parser
- * (where the pattern would otherwise re-fail with a less actionable error).
+ * R-0000745: exported so `meta.assertAllowedEnvironmentMetaName` can derive
+ * its own (dot-aware) variant from the same dotenv allow-list. The pattern
+ * itself stays strict here because dotenv keys must not contain dots — the
+ * dot-aware extension lives in meta.ts to keep dotenv parsing untouched.
  */
 export const ENVIRONMENT_KEY_PATTERN = /^[A-Za-z_]\w*$/v
 
@@ -131,9 +131,7 @@ function processValue(raw: string, filePath: string, lineNumber: number): string
   // downstream consumer (shell, sub-process spawn, system call) treats NUL
   // as a string terminator and would silently truncate the value.
   if (raw.includes("\0")) {
-    throw new Error(
-      `Invalid env value in ${filePath} line ${lineNumber}: contains a NUL byte`
-    )
+    throw new Error(`Invalid env value in ${filePath} line ${lineNumber}: contains a NUL byte`)
   }
 
   if (raw.length >= 2 && raw.startsWith('"') && raw.endsWith('"')) {

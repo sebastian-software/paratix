@@ -1727,7 +1727,7 @@ describe("CLI entrypoint", () => {
     // still resolve normally rather than hang or re-throw the previous
     // failure.
     const firstError = new Error("synthetic predecessor rejection")
-    const firstAttempt = withSerializedPlaybookImport<void>(async () => {
+    const firstAttempt = withSerializedPlaybookImport<never>(async () => {
       await Promise.resolve()
       throw firstError
     })

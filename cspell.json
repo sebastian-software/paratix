@@ -111,6 +111,7 @@
     "pipefail",
     "pkill",
     "podman",
+    "postbuild",
     "quadlet",
     "rcbuggy",
     "readback",

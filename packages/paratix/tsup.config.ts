@@ -75,6 +75,13 @@ export default defineConfig([
     },
     format: ["esm"],
     sourcemap: true,
+    // R-0000729: keep splitting on so the shared module surface lives in a
+    // single chunk and `paratix` / `paratix/modules` re-export the very
+    // same function references. The dist tests assert object identity
+    // (`packageApi[name] === moduleApi[name]`), which requires the two
+    // entries to share a chunk. The `cli.ts` `import.meta.url` reference
+    // is no longer pulled into the library bundle because `isFirstRun`
+    // now ships from the dedicated `firstRunContext` module.
     splitting: true,
     target: "node24",
   },
