@@ -48,6 +48,14 @@ function bridgeCatSourcesStubsToDdNoFollow(
   return bridged
 }
 
+// R-0000718: pattern that matches the NOFOLLOW write pipeline emitted by
+// `writeSourcesFileNoFollow` from the production module. Tests stub the
+// pipeline to succeed by default; the capture helper intercepts the
+// pipeline to record the new content for assertions.
+// eslint-disable-next-line security/detect-unsafe-regex -- Bounded literal pattern matching the well-known apt sources write command issued by the module under test.
+const NOFOLLOW_WRITE_COMMAND_PATTERN =
+  /^set -eu; \[ ! -L '(?<path>\/etc\/apt\/sources\.list(?:\.d\/[^']+)?)' \] \|\| exit 201; dd if=\/dev\/stdin of='(?:\/etc\/apt\/sources\.list(?:\.d\/[^']+)?)' conv=notrunc oflag=nofollow status=none; truncate -s \d+ '(?:\/etc\/apt\/sources\.list(?:\.d\/[^']+)?)'; chmod '(?<mode>[0-7]+)' '(?:\/etc\/apt\/sources\.list(?:\.d\/[^']+)?)' \|\| exit 202$/v
+
 const createMockSsh: typeof createBaseMockSsh = (responses, options) =>
   createBaseMockSsh(bridgeCatSourcesStubsToDdNoFollow(responses), {
     ...options,
@@ -65,6 +73,14 @@ const createMockSsh: typeof createBaseMockSsh = (responses, options) =>
       {
         // eslint-disable-next-line security/detect-unsafe-regex -- Bounded literal pattern matching the well-known apt sources stat command issued by the module under test.
         command: /^stat -c '%a' '\/etc\/apt\/sources\.list(?:\.d\/.+)?'$/v,
+        result: { code: 0 },
+      },
+      // R-0000718: default the NOFOLLOW write pipeline to success so
+      // existing tests that previously stubbed `ssh.writeFile` to succeed
+      // continue to work. Tests that need to simulate a write failure
+      // override the response via `responseStubs` or `installSequencedExec`.
+      {
+        command: NOFOLLOW_WRITE_COMMAND_PATTERN,
         result: { code: 0 },
       },
       ...(options?.responseStubs ?? []),
@@ -123,12 +139,6 @@ const APT_UPDATE_COMMAND = "DEBIAN_FRONTEND=noninteractive apt-get update"
 const FIND_SOURCES_EMPTY = { code: 0, stdout: "" }
 
 type WriteCapture = { content: string; path: string }
-type WriteStep = (path: string, content: string) => Promise<void>
-
-async function rejectSourcesRestoreWrite(): Promise<void> {
-  await Promise.resolve()
-  throw new Error("permission denied")
-}
 
 function installSequencedExec(
   ssh: ReturnType<typeof createMockSsh>,
@@ -743,9 +753,16 @@ describe("releaseUpgrade.upgrade — apply (Debian)", () => {
           },
       })
     )
-    ssh.writeFile = async (path, content): Promise<void> => {
-      await Promise.resolve()
-      writes.push({ content, path })
+    // R-0000718: writes go through the NOFOLLOW dd pipeline now; intercept
+    // `ssh.exec` calls that match the pipeline and record the input
+    // payload as the written content.
+    const originalExec = ssh.exec.bind(ssh)
+    ssh.exec = async (command, execOptions) => {
+      const match = NOFOLLOW_WRITE_COMMAND_PATTERN.exec(command)
+      if (match?.groups != null) {
+        writes.push({ content: execOptions?.input ?? "", path: match.groups.path })
+      }
+      return originalExec(command, execOptions)
     }
 
     const mod = releaseUpgrade.upgrade()
@@ -822,8 +839,22 @@ describe("releaseUpgrade.upgrade — apply (Debian)", () => {
         writes.push({ content, path })
       }
       // Override the noop `writeFile` so the test can observe what content
-      // (and in which order) was written to disk.
+      // (and in which order) was written to disk. R-0000718: production
+      // code now writes apt sources files via `ssh.exec` with the
+      // NOFOLLOW pipeline and the new content as stdin, so the same
+      // capture intercept must hook `ssh.exec` to record the input
+      // payload from the matching command.
       Object.assign(ssh, { writeFile: replacement })
+      const originalExec = ssh.exec.bind(ssh)
+      const interceptExec: typeof ssh.exec = async (command, execOptions) => {
+        const match = NOFOLLOW_WRITE_COMMAND_PATTERN.exec(command)
+        if (match?.groups != null) {
+          writes.push({ content: execOptions?.input ?? "", path: match.groups.path })
+          return originalExec(command, execOptions)
+        }
+        return originalExec(command, execOptions)
+      }
+      Object.assign(ssh, { exec: interceptExec })
       return writes
     }
 
@@ -1083,7 +1114,7 @@ describe("releaseUpgrade.upgrade — apply (Debian)", () => {
       expect(writes.find((w) => w.path === cleanPath)).toBeDefined()
     })
 
-    it("R-0000240: re-throws non-ENOENT readFile errors so they surface to the runner", async () => {
+    it("R-0000240: surfaces non-ENOENT readFile errors as a structured failed result", async () => {
       const protectedPath = "/etc/apt/sources.list.d/protected.list"
       const ssh = createMockSsh(
         debianApplyResponses("bookworm", "trixie", {
@@ -1093,10 +1124,14 @@ describe("releaseUpgrade.upgrade — apply (Debian)", () => {
         })
       )
       const mod = releaseUpgrade.upgrade()
-      // Permission errors are not transient absences — the upgrade refuses
-      // to swallow them and lets the exception propagate so the runner can
-      // surface the failure with the original cause attached.
-      await expect(mod.apply(ssh, emptyEnv)).rejects.toThrow(/Permission denied/v)
+      // R-0000240 / R-0000718: permission errors are not transient absences.
+      // The sources-rewrite step now converts them into a structured
+      // `failed(...)` ModuleResult so the runner can report the original
+      // cause without an uncaught exception. The original message is
+      // preserved in the failure error message.
+      const result = await mod.apply(ssh, emptyEnv)
+      expect(result.status).toBe("failed")
+      expect(String(result.error)).toContain("Permission denied")
     })
 
     // R-0000629: the symlink probe and the read must share a single shell
@@ -1155,7 +1190,7 @@ describe("releaseUpgrade.upgrade — apply (Debian)", () => {
     // R-0000629: a real ELOOP-shaped failure (the kernel rejected the
     // open(2) because `iflag=nofollow` saw a symlink between the probe and
     // the read) must surface rather than being silently swallowed.
-    it("R-0000629: surfaces dd ELOOP failures from a planted symlink", async () => {
+    it("R-0000629: surfaces dd ELOOP failures from a planted symlink as a structured failed result", async () => {
       const symlinkPath = "/etc/apt/sources.list.d/late-swap.list"
       const ssh = createMockSsh(
         debianApplyResponses("bookworm", "trixie", {
@@ -1168,7 +1203,13 @@ describe("releaseUpgrade.upgrade — apply (Debian)", () => {
         })
       )
       const mod = releaseUpgrade.upgrade()
-      await expect(mod.apply(ssh, emptyEnv)).rejects.toThrow(/Too many levels of symbolic links/v)
+      // R-0000629 / R-0000718: an ELOOP-shaped read failure is now
+      // converted into a structured `failed(...)` ModuleResult instead of
+      // an uncaught exception. The original message survives in the
+      // failure error.
+      const result = await mod.apply(ssh, emptyEnv)
+      expect(result.status).toBe("failed")
+      expect(String(result.error)).toContain("Too many levels of symbolic links")
     })
 
     it("processes a sources.list.d filename containing whitespace via -print0", async () => {
@@ -1351,6 +1392,9 @@ describe("releaseUpgrade.upgrade — apply (Debian)", () => {
 
     // R-0000241: the snapshot must capture the original mode so a rollback
     // restores the operator's exact permissions instead of forcing 0644.
+    // R-0000718: writes flow through the NOFOLLOW pipeline; the mode is
+    // embedded as the `chmod <mode> <path>` step of the pipeline, which we
+    // extract via `NOFOLLOW_WRITE_COMMAND_PATTERN`.
     it("R-0000241: rollback restores the operator-specified mode of /etc/apt/sources.list", async () => {
       type ModeWriteCapture = { content: string; mode: string | undefined; path: string }
       const originalSources = "deb http://deb.debian.org/debian bookworm main\n"
@@ -1361,15 +1405,18 @@ describe("releaseUpgrade.upgrade — apply (Debian)", () => {
         })
       )
       const writes: ModeWriteCapture[] = []
-      const replacement = async (
-        path: string,
-        content: string,
-        writeOptions?: { mode?: string }
-      ): Promise<void> => {
-        writes.push({ content, mode: writeOptions?.mode, path })
-        await Promise.resolve()
+      const originalExec = ssh.exec.bind(ssh)
+      ssh.exec = async (command, execOptions) => {
+        const match = NOFOLLOW_WRITE_COMMAND_PATTERN.exec(command)
+        if (match?.groups != null) {
+          writes.push({
+            content: execOptions?.input ?? "",
+            mode: match.groups.mode,
+            path: match.groups.path,
+          })
+        }
+        return originalExec(command, execOptions)
       }
-      Object.assign(ssh, { writeFile: replacement })
 
       const mod = releaseUpgrade.upgrade()
       const result = await mod.apply(ssh, emptyEnv)
@@ -1435,23 +1482,26 @@ describe("releaseUpgrade.upgrade — apply (Debian)", () => {
             },
         })
       )
-      const captureWrite: WriteStep = async (path, content) => {
-        writes.push({ content, path })
-        await Promise.resolve()
-      }
-      const writeSteps: WriteStep[] = [
-        captureWrite,
-        captureWrite,
-        rejectSourcesRestoreWrite,
-        captureWrite,
-      ]
+      // R-0000718: writes flow through the NOFOLLOW dd pipeline. Intercept
+      // `ssh.exec` calls that match the pipeline, capture the input
+      // payload, and simulate the third write (the rollback of
+      // /etc/apt/sources.list) throwing so the rollback aggregation logic
+      // surfaces a partial-rollback failure to the caller.
       let writeIndex = 0
-      const replacement: WriteStep = async (path, content) => {
-        const writeStep = writeSteps[writeIndex]
+      const originalExec = ssh.exec.bind(ssh)
+      ssh.exec = async (command, execOptions) => {
+        const match = NOFOLLOW_WRITE_COMMAND_PATTERN.exec(command)
+        if (match?.groups == null) return originalExec(command, execOptions)
+        const path = match.groups.path
+        const content = execOptions?.input ?? ""
+        const stepIndex = writeIndex
         writeIndex += 1
-        await writeStep(path, content)
+        if (stepIndex === 2) {
+          throw new Error("permission denied")
+        }
+        writes.push({ content, path })
+        return { code: 0, stderr: "", stdout: "" }
       }
-      Object.assign(ssh, { writeFile: replacement })
 
       const mod = releaseUpgrade.upgrade()
       const result = await mod.apply(ssh, emptyEnv)
@@ -1461,6 +1511,47 @@ describe("releaseUpgrade.upgrade — apply (Debian)", () => {
       expect(result.error?.message).toContain("sources rollback failed for 1 file(s)")
       expect(result.error?.message).toContain("/etc/apt/sources.list: permission denied")
       expect(writes).toContainEqual({ content: originalExtraSources, path: extraPath })
+    })
+
+    // R-0000718: sources writes (rewrite and rollback) must flow through
+    // the NOFOLLOW dd pipeline so a symlink swap at the target path cannot
+    // redirect the write to an attacker-controlled file. The pipeline
+    // surfaces the symlink case as a structured failure that aborts the
+    // upgrade rather than overwriting the symlink target.
+    it("R-0000718: rewrite issues a NOFOLLOW dd write command for /etc/apt/sources.list", async () => {
+      const ssh = createMockSsh(debianApplyResponses("bookworm", "trixie"))
+      const mod = releaseUpgrade.upgrade()
+      const result = await mod.apply(ssh, emptyEnv)
+
+      expect(result.status).toBe("changed")
+      const writeCall = ssh.calls.find((call) =>
+        NOFOLLOW_WRITE_COMMAND_PATTERN.test(call)
+      )
+      expect(writeCall).toBeDefined()
+      const match = NOFOLLOW_WRITE_COMMAND_PATTERN.exec(writeCall ?? "")
+      expect(match?.groups?.path).toBe("/etc/apt/sources.list")
+    })
+
+    it("R-0000718: rewrite fails closed when the sources file is a symlink at write time", async () => {
+      const ssh = createMockSsh(
+        debianApplyResponses("bookworm", "trixie", {
+          "DEBIAN_FRONTEND=noninteractive apt-get update": { code: 0 },
+        })
+      )
+      // Override the default response stub for the write pipeline so the
+      // symlink-guard branch reports exit 201 (NOFOLLOW symlink refusal).
+      const originalExec = ssh.exec.bind(ssh)
+      ssh.exec = async (command, execOptions) => {
+        if (NOFOLLOW_WRITE_COMMAND_PATTERN.test(command)) {
+          return { code: 201, stderr: "", stdout: "" }
+        }
+        return originalExec(command, execOptions)
+      }
+      const mod = releaseUpgrade.upgrade()
+      const result = await mod.apply(ssh, emptyEnv)
+
+      expect(result.status).toBe("failed")
+      expect(String(result.error)).toContain("path is a symbolic link (NOFOLLOW guard)")
     })
   })
 })

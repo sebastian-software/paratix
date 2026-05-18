@@ -313,7 +313,10 @@ async function rewriteSourcesFile(
         "file content changed between read and write. Aborting to prevent data loss."
     )
   }
-  await ssh.writeFile(remotePath, updatedContent, { mode })
+  // R-0000718: route the write through the NOFOLLOW pipeline so a
+  // symlink swap between the snapshot read above and this write step
+  // cannot redirect the rewrite to an attacker-controlled target.
+  await writeSourcesFileNoFollow(ssh, remotePath, updatedContent, mode)
   return { mode, originalContent, remotePath }
 }
 
@@ -325,6 +328,115 @@ type SnapshotSourcesParameters = Omit<RewriteSourcesParameters, "originalContent
 // (1, 2, 124, 126/127) so the symlink branch is distinguishable from a
 // genuine dd error or a shell command-not-found.
 const SOURCES_FILE_SYMLINK_EXIT_CODE = 200
+
+// R-0000718: marker exit codes used by the NOFOLLOW write pipeline. The
+// values mirror the no-follow read pattern in `readSourcesFileNoFollow`
+// (R-0000629) and are picked outside dd's normal exit-code range so the
+// symlink/chmod branches stay distinguishable from genuine dd or shell
+// failures.
+const SOURCES_FILE_WRITE_SYMLINK_EXIT_CODE = 201
+const SOURCES_FILE_WRITE_CHMOD_EXIT_CODE = 202
+
+// R-0000718: write an apt sources file with O_NOFOLLOW semantics so a
+// symlink swap between the snapshot read and the rewrite (or between the
+// pipeline failure and the rollback) cannot trick the writer into
+// overwriting an attacker-controlled target. The fused shell statement:
+//
+//   - probes `[ -L <path> ]` to reject the path early if it already is a
+//     symlink at the time of the probe, with exit code 201 so the caller
+//     can distinguish it from generic dd failures
+//   - opens the destination via `dd of=<path> conv=notrunc oflag=nofollow`
+//     so a TOCTOU symlink swap between the probe and the open fails with
+//     ELOOP at open(2) — the load-bearing guarantee that the `[ -L ]`
+//     check alone cannot provide
+//   - `conv=notrunc` keeps the destination's inode metadata stable: dd
+//     opens with `O_WRONLY | O_NOFOLLOW` without `O_TRUNC`, then we
+//     truncate to the new content length via `truncate` afterwards. This
+//     order matters because `O_TRUNC` would happen *before* the symlink
+//     check on dd's open(2) and undo any partial-write recovery
+//   - chmod the destination to restore the snapshot's recorded mode,
+//     reporting a dedicated exit code (202) when chmod fails so the
+//     caller can distinguish mode-restoration from write failures
+//
+// `set -eu` aborts the pipeline on the first non-zero step. `input` is
+// supplied by `ssh.exec` so the content is streamed to dd's stdin instead
+// of embedded in the argv (which would leak via `ps`).
+//
+// `truncate -s <size>` runs after the dd write so a shorter replacement
+// does not leave trailing bytes of the previous content. `wc -c` cannot
+// receive the input over the same stdin pipe, so the byte length is
+// passed via an explicit argument computed locally and embedded as a
+// numeric literal — the value is bounded by `Buffer.byteLength` on the
+// caller side so the embedded literal is always safe.
+function buildWriteSourcesFileNoFollowCommand(
+  remotePath: string,
+  byteLength: number,
+  mode: string
+): string {
+  const quotedPath = shellQuote(remotePath)
+  const quotedMode = shellQuote(mode)
+  const sizeLiteral = String(byteLength)
+  // `dd if=/dev/stdin` reads the new content from the stdin payload we
+  // pass via `ssh.exec({ input })`. `conv=notrunc` keeps the inode stable
+  // and `oflag=nofollow` makes open(2) fail with ELOOP if the path is a
+  // symlink.  The intermediate `truncate -s <bytes>` step matches the new
+  // payload length so a shorter rewrite does not leave stale tail bytes.
+  return [
+    "set -eu",
+    `[ ! -L ${quotedPath} ] || exit ${String(SOURCES_FILE_WRITE_SYMLINK_EXIT_CODE)}`,
+    `dd if=/dev/stdin of=${quotedPath} conv=notrunc oflag=nofollow status=none`,
+    `truncate -s ${sizeLiteral} ${quotedPath}`,
+    `chmod ${quotedMode} ${quotedPath} || exit ${String(SOURCES_FILE_WRITE_CHMOD_EXIT_CODE)}`,
+  ].join("; ")
+}
+
+/**
+ * R-0000718: write `content` to `remotePath` with O_NOFOLLOW semantics so
+ * a symlink swap cannot redirect the write to an attacker-controlled
+ * target. Used by the apt sources rewrite and the rollback path: both
+ * touch files under `/etc/apt/sources.list.d/`, a directory that a
+ * compromised process with limited write rights might briefly populate
+ * with symlinks pointing at sensitive files (e.g. `/etc/shadow`,
+ * `/root/.ssh/authorized_keys`) between the time Paratix reads the
+ * original content and the time it writes back. The fused
+ * `[ -L ] + dd oflag=nofollow` statement collapses that TOCTOU window.
+ *
+ * @param ssh - Active SSH connection to the remote host.
+ * @param remotePath - Absolute path of the apt sources file to write.
+ * @param content - The new content to write.
+ * @param mode - The desired filesystem mode (string with octal digits).
+ * @throws {Error} When the path is a symlink, when the NOFOLLOW open
+ *   fails (ELOOP), when dd reports a write failure, or when chmod fails
+ *   to restore the captured mode.
+ */
+async function writeSourcesFileNoFollow(
+  ssh: SshConnection,
+  remotePath: string,
+  content: string,
+  mode: string
+): Promise<void> {
+  const byteLength = Buffer.byteLength(content, "utf8")
+  const command = buildWriteSourcesFileNoFollowCommand(remotePath, byteLength, mode)
+  const result = await ssh.exec(command, {
+    ignoreExitCode: true,
+    input: content,
+    silent: true,
+  })
+  if (result.code === 0) return
+  if (result.code === SOURCES_FILE_WRITE_SYMLINK_EXIT_CODE) {
+    throw new Error(
+      `writing ${remotePath} refused: path is a symbolic link (NOFOLLOW guard)`
+    )
+  }
+  if (result.code === SOURCES_FILE_WRITE_CHMOD_EXIT_CODE) {
+    throw new Error(
+      `writing ${remotePath} succeeded but chmod to ${mode} failed: ${result.stderr.trim() || "no stderr"}`
+    )
+  }
+  throw new Error(
+    `writing ${remotePath} failed (exit code ${String(result.code)}): ${result.stderr.trim() || "no stderr"}`
+  )
+}
 
 // R-0000629: read an apt sources file with the symlink probe and the read
 // fused into a single shell statement. The previous flow ran `[ -L ]` and
@@ -510,10 +622,17 @@ async function restoreSourcesSnapshots(
       // in the snapshot is restored so operator-specific permissions
       // (e.g. `chmod 0640` for a sources file with secrets) survive the
       // rollback unchanged.
+      // R-0000718: route the rollback write through the NOFOLLOW pipeline
+      // so a symlink that appears between the failed upgrade and the
+      // rollback cannot trick the writer into restoring the original
+      // content into an attacker-controlled symlink target.
       // eslint-disable-next-line no-await-in-loop
-      await ssh.writeFile(snapshot.remotePath, snapshot.originalContent, {
-        mode: snapshot.mode,
-      })
+      await writeSourcesFileNoFollow(
+        ssh,
+        snapshot.remotePath,
+        snapshot.originalContent,
+        snapshot.mode
+      )
     } catch (error) {
       // Best-effort: if a single file cannot be restored, keep going so the
       // remaining snapshots still revert. The caller appends these failures
@@ -741,7 +860,19 @@ async function runDebianUpgradeCriticalSection(parameters: {
   // Without rollback, a partial failure would leave the host pointing at the
   // new suite while no upgrade has actually completed — the next apt run
   // would then operate on a half-migrated system.
-  const snapshots = await replaceCodenameInSourcesList(ssh, currentCodename, targetCodename)
+  //
+  // R-0000718: the NOFOLLOW write pipeline throws on symlink/dd/chmod
+  // failures (so the error message is preserved for the operator). Convert
+  // those throws into a structured `failed(...)` ModuleResult so the
+  // playbook runner reports them alongside the other apt failure modes
+  // instead of letting them escape as uncaught exceptions.
+  let snapshots: SourcesSnapshot[]
+  try {
+    snapshots = await replaceCodenameInSourcesList(ssh, currentCodename, targetCodename)
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : String(error)
+    return failed(`[releaseUpgrade.upgrade] sources rewrite failed: ${reason}`)
+  }
 
   const pipelineFailure = await runDebianUpgradePipeline(ssh, options)
   if (pipelineFailure != null) {
