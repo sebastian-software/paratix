@@ -14,6 +14,7 @@ import { createMockSsh as createBaseMockSsh } from "../helpers/mockSsh.js"
 import {
   isFlagLockInternalSuccessCommand,
   makeIsVerifiedReleaseCall,
+  MOCK_FLAG_LOCK_HOLDER_TOKEN,
 } from "../helpers/mockSshFlagLock.js"
 
 const createMockSsh: typeof createBaseMockSsh = (responses, options) =>
@@ -85,6 +86,17 @@ function createSharedFlagMockSsh(flagName: string): ReturnType<typeof createMock
   const lockMkdirCommand = `mkdir ${FLAGS_DIRECTORY}/'${flagName}.lock'`
   const lockRmdirCommand = `rmdir ${FLAGS_DIRECTORY}/'${flagName}.lock'`
   const touchFlagCommand = `touch ${FLAGS_DIRECTORY}/'${flagName}'`
+  // R-0000634: release is a single atomic shell statement combining the
+  // ownership check, marker removal and `rmdir`. The mock recognises the
+  // deterministic token returned by the holder-readback `output` stub.
+  const markerPath = `${FLAGS_DIRECTORY}/'${flagName}.lock'/holder`
+  const lockPath = `${FLAGS_DIRECTORY}/'${flagName}.lock'`
+  const verifiedReleaseCommand =
+    `[ "$(awk 'NR==1{print $1}' ${markerPath} 2>/dev/null)" = ` +
+    `'${MOCK_FLAG_LOCK_HOLDER_TOKEN}' ] && ` +
+    `rm -f ${markerPath} && ` +
+    `rmdir ${lockPath}`
+  const markerAwkReadCommand = `awk 'NR==1{print $1}' ${markerPath}`
 
   return {
     ...base,
@@ -97,7 +109,7 @@ function createSharedFlagMockSsh(flagName: string): ReturnType<typeof createMock
         lockExists = true
         return { code: 0, stderr: "", stdout: "" }
       }
-      if (command === lockRmdirCommand) {
+      if (command === lockRmdirCommand || command === verifiedReleaseCommand) {
         expectLockExecOptions(options)
         lockExists = false
         resolveWaiters()
@@ -119,6 +131,15 @@ function createSharedFlagMockSsh(flagName: string): ReturnType<typeof createMock
       }
       if (isFlagLockInternalSuccessCommand(command)) return { code: 0, stderr: "", stdout: "" }
       throw new Error(`unexpected shared flag lock exec command: ${command}`)
+    },
+    // R-0000670: writeFlagLockHolderMarker reads the `pid@hostname` token
+    // back via `ssh.output` and now fails the acquire if the readback is
+    // empty. Return the shared deterministic token so the lock is acquired
+    // normally and the release path matches `verifiedReleaseCommand`.
+    async output(command) {
+      base.calls.push(command)
+      if (command === markerAwkReadCommand) return MOCK_FLAG_LOCK_HOLDER_TOKEN
+      return base.output(command)
     },
     async test(command) {
       await Promise.resolve()
@@ -410,6 +431,8 @@ function createStaleLockSsh(
     }
   }
 
+  const markerAwkReadCommand = `awk 'NR==1{print $1}' ${FLAGS_DIRECTORY}/'${flagName}.lock'/holder`
+
   const ssh: typeof base = {
     ...base,
     async exec(command, options) {
@@ -417,6 +440,15 @@ function createStaleLockSsh(
       base.execCalls.push({ command, options })
       await Promise.resolve()
       return handleCommand(command, options)
+    },
+    // R-0000670: the acquire path now fails fast if the holder-marker
+    // readback yields an empty token. Return the shared deterministic
+    // token so the stale-lock recovery test keeps the lock acquired after
+    // reclaim succeeded.
+    async output(command) {
+      base.calls.push(command)
+      if (command === markerAwkReadCommand) return MOCK_FLAG_LOCK_HOLDER_TOKEN
+      return base.output(command)
     },
     async test(command) {
       await Promise.resolve()
@@ -491,6 +523,7 @@ describe("applyWithFlagLock – stale lock recovery", () => {
     expect(state.staleReclaimCalls).toBe(1)
     expect(applyCalls).toBe(1)
   })
+
 
   it("returns failedCommand when the lock is held but not stale", async () => {
     const flagName = "fresh-lock-flag"
@@ -881,5 +914,126 @@ describe("setVersionedFlag – persist failures surface as ModuleResult", () => 
     })
     const result = await setVersionedFlag(ssh, flagName, flagPrefix)
     expect(result).toBeNull()
+  })
+})
+
+// R-0000670: when the holder marker write fails (printf non-zero) or the
+// readback yields an empty token, acquireFlagLock now removes the lock
+// directory immediately and surfaces a structured failure. Without this,
+// the caller would enter the critical section with an unverifiable empty
+// holder token and the lock would sit untouched until the four-hour stale
+// threshold expired.
+describe("acquireFlagLock – holder marker write failures (R-0000670)", () => {
+  function buildHolderMarkerFailureSsh(
+    lockDirectoryName: string,
+    printfBehaviour: "fail" | "succeed-but-empty-readback"
+  ): ReturnType<typeof createMockSsh> {
+    const lockPath = `${FLAGS_DIRECTORY}/'${lockDirectoryName}'`
+    const markerPath = `${lockPath}/holder`
+    const printfFailureStderr = "printf: write error: No space left on device\n"
+    const mkdirCommand = `mkdir ${lockPath}`
+    const rmdirCommand = `rmdir ${lockPath}`
+    const rmMarkerCommand = `rm -f ${markerPath}`
+    const printfPattern = /^printf '%s@%s %s\\n' "\$\$" [^"]+ "\$\(date \+%s\)" > \S+\/holder$/v
+    return createMockSsh(
+      {},
+      {
+        allowUnstubbedDefaults: true,
+        defaultExecResult: { code: 0 },
+        defaultOutputResult: "",
+        defaultTestResult: false,
+        responseStubs: [
+          { command: "mkdir -p /var/lib/paratix/flags", result: { code: 0 } },
+          { command: mkdirCommand, result: { code: 0 } },
+          {
+            command: printfPattern,
+            result:
+              printfBehaviour === "fail"
+                ? { code: 1, stderr: printfFailureStderr, stdout: "" }
+                : { code: 0, stderr: "", stdout: "" },
+          },
+          { command: rmMarkerCommand, result: { code: 0 } },
+          { command: rmdirCommand, result: { code: 0 } },
+        ],
+      }
+    )
+  }
+
+  it("returns a failed ModuleResult and removes the lock when printf fails", async () => {
+    const flagName = "marker-write-failure"
+    const lockDirectoryName = `${flagName}.lock`
+    const ssh = buildHolderMarkerFailureSsh(lockDirectoryName, "fail")
+    let applyCalls = 0
+
+    const result = await applyWithFlagLock(ssh, {
+      async apply() {
+        applyCalls += 1
+        await Promise.resolve()
+        return { status: "changed" }
+      },
+      flagName,
+    })
+
+    expect(result).toMatchObject({
+      error: expect.objectContaining({
+        message: expect.stringContaining(
+          `failed to write flag lock holder marker for ${lockDirectoryName}`
+        ),
+      }),
+      status: "failed",
+    })
+    expect(applyCalls).toBe(0)
+    expect(ssh.calls).toContain(`rmdir ${FLAGS_DIRECTORY}/'${lockDirectoryName}'`)
+  })
+
+  it("returns a failed ModuleResult and removes the lock when readback is empty", async () => {
+    const flagName = "marker-readback-empty"
+    const lockDirectoryName = `${flagName}.lock`
+    // defaultOutputResult is "" so the holder-readback returns an empty
+    // token even though printf reported success.
+    const ssh = buildHolderMarkerFailureSsh(lockDirectoryName, "succeed-but-empty-readback")
+    let applyCalls = 0
+
+    const result = await applyWithFlagLock(ssh, {
+      async apply() {
+        applyCalls += 1
+        await Promise.resolve()
+        return { status: "changed" }
+      },
+      flagName,
+    })
+
+    expect(result).toMatchObject({
+      error: expect.objectContaining({
+        message: expect.stringContaining(
+          `flag lock holder marker for ${lockDirectoryName} is empty after write`
+        ),
+      }),
+      status: "failed",
+    })
+    expect(applyCalls).toBe(0)
+    expect(ssh.calls).toContain(`rm -f ${FLAGS_DIRECTORY}/'${lockDirectoryName}'/holder`)
+    expect(ssh.calls).toContain(`rmdir ${FLAGS_DIRECTORY}/'${lockDirectoryName}'`)
+  })
+
+  it("withMutexLock surfaces the marker-write failure instead of running the section", async () => {
+    const lockName = "marker-write-failure-mutex"
+    // withMutexLock uses `lockName` directly as the lock directory name
+    // (no `.lock` suffix), so the helper must be wired with the bare name.
+    const ssh = buildHolderMarkerFailureSsh(lockName, "fail")
+    let sectionCalls = 0
+
+    await expect(
+      withMutexLock(ssh, {
+        lockName,
+        async section() {
+          sectionCalls += 1
+          await Promise.resolve()
+        },
+      })
+    ).rejects.toThrow(/failed to write flag lock holder marker/v)
+
+    expect(sectionCalls).toBe(0)
+    expect(ssh.calls).toContain(`rmdir ${FLAGS_DIRECTORY}/'${lockName}'`)
   })
 })

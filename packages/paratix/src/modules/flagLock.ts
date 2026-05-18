@@ -1,6 +1,6 @@
 import type { ModuleResult, SshConnection } from "../types.js"
 
-import { failedCommand } from "../moduleFailure.js"
+import { failed, failedCommand } from "../moduleFailure.js"
 import { shellQuote } from "../ssh.js"
 
 export const FLAGS_DIRECTORY = "/var/lib/paratix/flags"
@@ -79,26 +79,88 @@ export function flagLockName(flagName: string): string {
   return `${flagName}.lock`
 }
 
-async function writeFlagLockHolderMarker(ssh: SshConnection, lockName: string): Promise<string> {
+/**
+ * Typed result of {@link writeFlagLockHolderMarker}: the success arm carries
+ * the readback token; the failure arm carries the raw `ExecResult` so callers
+ * can surface a `failedCommand(...)` ModuleResult with masked stdout/stderr.
+ */
+type WriteHolderMarkerResult =
+  | { failure: ModuleResult; kind: "failed" }
+  | { holderToken: string; kind: "ok" }
+
+/**
+ * Write the holder marker into the freshly acquired lock directory and read
+ * the `pid@hostname` token back so {@link releaseFlagLock} can verify
+ * ownership later.
+ *
+ * R-0000670: when the marker write fails (e.g. ENOSPC, EROFS, transient EIO)
+ * the previous `ignoreExitCode` swallow let an empty readback short-circuit
+ * the release path, leaving the lock directory behind for the full
+ * stale-lock threshold. Detect a missing marker explicitly (non-zero printf
+ * exit code, or an empty readback that indicates the marker is unreadable),
+ * remove the lock directory immediately, and surface a structured failure so
+ * the caller can react instead of silently entering the critical section
+ * without a verifiable holder token.
+ *
+ * @param ssh - The active SSH connection.
+ * @param lockName - The validated lock identifier.
+ * @returns The verified holder token, or a structured failure when the
+ *   marker could not be persisted or read back.
+ */
+async function writeFlagLockHolderMarker(
+  ssh: SshConnection,
+  lockName: string
+): Promise<WriteHolderMarkerResult> {
   // R-0000494: capture hostname via ssh.output (not inline `$(hostname)`).
   const hostname = await ssh
     .output("hostname")
     .then((rawHostname) => rawHostname.trim())
     .catch(() => "")
-  const markerPath = `${flagPath(lockName)}/${HOLDER_MARKER_NAME}`
-  await ssh.exec(
+  const lock = flagPath(lockName)
+  const markerPath = `${lock}/${HOLDER_MARKER_NAME}`
+  const printfResult = await ssh.exec(
     `printf '%s@%s %s\\n' "$$" ${shellQuote(hostname)} "$(date +%s)" > ${markerPath}`,
     { ignoreExitCode: true, silent: true }
   )
+  if (printfResult.code !== 0) {
+    // R-0000670: the marker write failed (ENOSPC, EROFS, transient EIO, ...).
+    // Without a marker the verified-release fast path cannot work, so the
+    // lock directory would sit until the four-hour stale-lock threshold
+    // expires. Drop the directory now so the next acquirer is not blocked.
+    await ssh.exec(`rmdir ${lock}`, { ignoreExitCode: true, silent: true })
+    return {
+      failure: failedCommand(
+        `[moduleHelpers] failed to write flag lock holder marker for ${lockName}`,
+        printfResult
+      ),
+      kind: "failed",
+    }
+  }
   // R-0000634: read back the `pid@hostname` token from the marker so
-  // releaseFlagLock can verify ownership before removing the lock. Falling
-  // back to an empty string disables the verified-release fast path on read
-  // failures — releaseFlagLock then refuses to remove the lock and waits for
-  // the stale-lock detector to reclaim it on the next run.
-  return ssh
+  // releaseFlagLock can verify ownership before removing the lock.
+  const holderToken = await ssh
     .output(`awk 'NR==1{print $1}' ${markerPath}`)
     .then((token) => token.trim())
     .catch(() => "")
+  if (holderToken.length === 0) {
+    // R-0000670: an empty readback means the marker is unreadable even
+    // though printf reported success — the readback exit code may have
+    // been suppressed by `.catch(...)` above, or the marker file ended up
+    // empty (race against an external truncate, EIO between write and
+    // read, ...). Without a verifiable token releaseFlagLock can never
+    // remove the directory, so we drop it eagerly here and surface a
+    // structured failure instead of silently entering the critical
+    // section with an unrecoverable lock.
+    await ssh.exec(`rm -f ${markerPath}`, { ignoreExitCode: true, silent: true })
+    await ssh.exec(`rmdir ${lock}`, { ignoreExitCode: true, silent: true })
+    return {
+      failure: failed(
+        `[moduleHelpers] flag lock holder marker for ${lockName} is empty after write`
+      ),
+      kind: "failed",
+    }
+  }
+  return { holderToken, kind: "ok" }
 }
 
 export type FlagLockAcquireResult =
@@ -118,8 +180,12 @@ export async function acquireFlagLock(
     silent: true,
   })
   if (result.code === 0) {
-    const holderToken = await writeFlagLockHolderMarker(ssh, lockName)
-    return { holderToken, kind: "acquired" }
+    // R-0000670: surface a failed marker-write as a structured ModuleResult
+    // failure. `writeFlagLockHolderMarker` already removed the lock
+    // directory in that case so the caller does not need to clean up.
+    const markerResult = await writeFlagLockHolderMarker(ssh, lockName)
+    if (markerResult.kind === "failed") return { failure: markerResult.failure, kind: "failed" }
+    return { holderToken: markerResult.holderToken, kind: "acquired" }
   }
   return { kind: "contended" }
 }
@@ -134,9 +200,12 @@ export async function acquireFlagLock(
  * marker removal and `rmdir` run in a single shell statement so the check
  * cannot race against a concurrent reclaim.
  *
- * An empty `holderToken` short-circuits the release: if the acquire-time
- * read-back failed (e.g. transient shell error), we cannot prove ownership
- * and therefore must let the stale-lock detector clean up.
+ * An empty `holderToken` short-circuits the release: with R-0000670 the
+ * acquire path now fails fast and removes the lock directory when the
+ * marker write or read-back did not yield a verifiable token, so callers
+ * normally never see an empty token here. The defensive check stays in
+ * place so that a manually-constructed empty token cannot evict a foreign
+ * holder that may have already reclaimed the lock.
  *
  * @param ssh - The active SSH connection.
  * @param lockName - The validated lock identifier used for the directory name.

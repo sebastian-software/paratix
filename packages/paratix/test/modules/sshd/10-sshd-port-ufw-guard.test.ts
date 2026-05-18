@@ -104,6 +104,11 @@ const UFW_STATUS_ACTIVE_PORT_2222_ALLOW_AND_IPV6_TCP_DENY = [
 const createMockSsh: typeof createBaseMockSsh = (responses, options) => {
   const ssh = createBaseMockSsh(responses, {
     ...options,
+    // R-0000670: acquireFlagLock now fails fast when the holder marker
+    // write/readback is empty, so the sshd-port mutex tests need the
+    // shared flag-lock internal defaults that supply a deterministic
+    // holder token via `ssh.output`.
+    allowFlagLockInternalDefaults: true,
     allowWrites: [
       // R-0000587: dry-run tempfiles carry restrictive 0600 permissions.
       { options: { mode: "0600" }, remotePath: /^\/tmp\/paratix-sshd-dry-run-/v },
