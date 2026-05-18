@@ -15,7 +15,7 @@ export async function restorePreviousMountAfterFailure(parameters: {
   const restoreResult = await parameters.ssh.exec(parameters.restoreCommand, EXEC_OPTS)
   if (restoreResult.code === 0) {
     return failedCommand(
-      `[mount.present: ${parameters.path}] mount after umount failed`,
+      `[mount.present: ${parameters.path}] mount failed, previous mount was restored`,
       parameters.mountFailure
     )
   }

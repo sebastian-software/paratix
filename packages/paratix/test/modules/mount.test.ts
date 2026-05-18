@@ -1158,7 +1158,9 @@ describe("mount.present — apply", () => {
     })
     const result = await mod.apply(mockSsh, emptyEnv)
     expect(result.status).toBe("failed")
-    expect(result.error?.message).toContain("[mount.present: /mnt/data] mount after umount failed")
+    expect(result.error?.message).toContain(
+      "[mount.present: /mnt/data] mount failed, previous mount was restored"
+    )
     expect(mockSsh.calls).toContain(restoreMountCmd)
     expect(mockSsh.calls.indexOf(mountCmd)).toBeLessThan(mockSsh.calls.indexOf(restoreMountCmd))
   })
