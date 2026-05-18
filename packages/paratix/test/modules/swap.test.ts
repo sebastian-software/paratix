@@ -36,7 +36,12 @@ const createSwapTempCommand = `fallocate -l '${swapSize}' '${swapTempPath}' || {
 const mktempSwapCommand = "mktemp -p '/' '.swapfile.paratix.XXXXXX'"
 const publishSwapCommand = `find '/' -maxdepth 0 -type d -user root ! -perm /022 | grep -Fx '/' && mv -T -n '${swapTempPath}' '${swapPath}'`
 const statSwapTempIdentityCommand = `stat -c '%d:%i' '${swapTempPath}'`
-const verifyPublishedSwapCommand = `[ ! -e '${swapTempPath}' ] && find '${swapPath}' -maxdepth 0 -type f | grep -Fx '${swapPath}' && [ "$(stat -c '%d:%i' '${swapPath}')" = '${swapTempIdentity}' ] && swaplabel '${swapPath}' >/dev/null 2>&1`
+// R-0000680: publishSwapTemporaryFile now prepends a `[ ! -L ]` guard on the
+// final swap path before running the `find -type f`/`swaplabel` verification,
+// mirroring the symlink-safe rename guards in `moveSwapToBackup` and
+// `restoreSwapBackup` (R-0000647). Tests have to match the combined statement
+// the production code emits.
+const verifyPublishedSwapCommand = `[ ! -L '${swapPath}' ] || { echo 'swap path must not be a symlink' >&2; exit 1; }; [ ! -e '${swapTempPath}' ] && find '${swapPath}' -maxdepth 0 -type f | grep -Fx '${swapPath}' && [ "$(stat -c '%d:%i' '${swapPath}')" = '${swapTempIdentity}' ] && swaplabel '${swapPath}' >/dev/null 2>&1`
 // R-0000647: moveSwapToBackup now refuses symlinks at `$path` and `$backupPath`
 // before issuing the rename. The mock has to match the combined statement the
 // production code emits.
@@ -431,6 +436,45 @@ describe("swap.file — apply", () => {
     expect(ssh.calls).toContain(`rm -f '${swapTempPath}'`)
     expect(ssh.calls).not.toContain(`swapon '${swapPath}'`)
     expect(ssh.calls).not.toContain(`cat '/etc/fstab'`)
+  })
+
+  // R-0000680: the post-publish verification must refuse to follow a symlink
+  // that was planted at the destination between `mv -T -n` and the
+  // `find -type f`/`swaplabel` check. The leading `[ ! -L ]` guard surfaces
+  // the failure via the standard publish-verification path so the temp file
+  // is cleaned up and swap is not enabled.
+  it("R-0000680: refuses publish verification when the destination is a symlink", async () => {
+    const ssh = createMockSsh({
+      [`[ -e '${swapPath}' ]`]: { code: 1 },
+      [`[ -L '${swapPath}' ]`]: { code: 1 },
+      [`cat '${swapPath}'`]: { code: 1, stdout: "" },
+      [`chmod '0600' '${swapTempPath}'`]: { code: 0 },
+      [`mkdir -p '/'`]: { code: 0 },
+      [`mkswap '${swapTempPath}'`]: { code: 0 },
+      [`rm -f '${swapTempPath}'`]: { code: 0 },
+      [createSwapTempCommand]: { code: 0 },
+      [mktempSwapCommand]: { code: 0, stdout: `${swapTempPath}\n` },
+      [publishSwapCommand]: { code: 0 },
+      [safeSwapParentCommand]: { code: 0, stdout: "/\n" },
+      [statSwapTempIdentityCommand]: { code: 0, stdout: `${swapTempIdentity}\n` },
+      "swapon --show=NAME --noheadings": { stdout: "" },
+      // The combined verification command fails because the leading
+      // `[ ! -L '${swapPath}' ]` guard exits non-zero when the destination
+      // was swapped to a symlink between the rename and the verification.
+      [verifyPublishedSwapCommand]: {
+        code: 1,
+        stderr: "swap path must not be a symlink",
+      },
+    })
+
+    const mod = swap.file({ path: swapPath, size: swapSize })
+    const result = await mod.apply(ssh, emptyEnv)
+
+    expect(result.status).toBe("failed")
+    expect(result.error?.message).toContain("swap file publish verification failed")
+    expect(ssh.calls).toContain(verifyPublishedSwapCommand)
+    expect(ssh.calls).toContain(`rm -f '${swapTempPath}'`)
+    expect(ssh.calls).not.toContain(`swapon '${swapPath}'`)
   })
 
   it("recreates the file when size changed and swap is active", async () => {

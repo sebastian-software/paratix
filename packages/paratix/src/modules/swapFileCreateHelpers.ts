@@ -151,8 +151,14 @@ async function publishSwapTemporaryFile(
     return failedCommand(`[swap.file: ${parameters.path}] swap file publish failed`, publishResult)
   }
 
+  // R-0000680: re-check that the final path is still a regular file and not
+  // a symlink before running `find -type f` / `swaplabel` against it. Without
+  // this leading `[ ! -L ]` guard the verification could follow a symlink
+  // planted between `mv -T -n` and stat — mirroring the paired
+  // `[ ! -L ]` checks `moveSwapToBackup` and `restoreSwapBackup` already
+  // emit on their destination paths (R-0000647).
   const verificationResult = await parameters.ssh.exec(
-    `[ ! -e ${shellQuote(temporaryPath)} ] && find ${shellQuote(parameters.path)} -maxdepth 0 -type f | grep -Fx ${shellQuote(parameters.path)} && [ "$(stat -c '%d:%i' ${shellQuote(parameters.path)})" = ${shellQuote(temporaryIdentity)} ] && swaplabel ${shellQuote(parameters.path)} >/dev/null 2>&1`,
+    `[ ! -L ${shellQuote(parameters.path)} ] || { echo 'swap path must not be a symlink' >&2; exit 1; }; [ ! -e ${shellQuote(temporaryPath)} ] && find ${shellQuote(parameters.path)} -maxdepth 0 -type f | grep -Fx ${shellQuote(parameters.path)} && [ "$(stat -c '%d:%i' ${shellQuote(parameters.path)})" = ${shellQuote(temporaryIdentity)} ] && swaplabel ${shellQuote(parameters.path)} >/dev/null 2>&1`,
     EXEC_OPTS
   )
   if (verificationResult.code === 0) return true
