@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs"
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
@@ -385,7 +385,13 @@ describe("parseCliArguments", () => {
 
 describe("admin public key validation", () => {
   beforeEach(() => {
-    TEST_DIR = mkdtempSync(join(tmpdir(), "create-paratix-test-"))
+    // R-0000726: `tmpdir()` already contains symlinks on macOS
+    // (`/var/folders` → `/private/var/folders`), and the unconditional
+    // realpath in `readAdminPublicKeyFile` now logs an ancestor-symlink
+    // line for every path under such a directory. Canonicalise the test
+    // root through realpathSync so the "regular file does not log"
+    // assertions stay stable across platforms.
+    TEST_DIR = realpathSync(mkdtempSync(join(tmpdir(), "create-paratix-test-")))
     vi.spyOn(console, "error").mockImplementation((...args) => {
       void args
     })
@@ -711,6 +717,35 @@ describe("admin public key validation", () => {
       expect(logged).toContain("Reading public key from")
       expect(logged).toContain("vault-admin.pub")
       expect(logged).toContain("(symlink target of")
+    } finally {
+      logSpy.mockRestore()
+    }
+  })
+
+  // R-0000726: closes the R-0000665 gap for ancestor symlinks. The
+  // leaf file is a regular `.pub`, but one of its parent directories is
+  // a symlink. The previous implementation only consulted the leaf's
+  // `lstat` and stayed silent in this case, so a planted directory link
+  // like `~/.ssh -> /tmp/attacker-ssh` could swap in a different key
+  // without the operator seeing the redirection in the prompt log.
+  it("R-0000726: logs the resolved realpath when an ancestor directory is a symlink", () => {
+    mkdirSync(TEST_DIR, { recursive: true })
+    const publicKey = createEd25519PublicKey("user@example")
+    const realDir = join(TEST_DIR, "real-ssh")
+    const linkedDir = join(TEST_DIR, "linked-ssh")
+    mkdirSync(realDir, { recursive: true })
+    const targetFile = join(realDir, "admin.pub")
+    writeFileSync(targetFile, `${publicKey}\n`)
+    symlinkSync(realDir, linkedDir)
+    const linkFile = join(linkedDir, "admin.pub")
+    const logSpy = vi.spyOn(console, "log").mockImplementation(() => {
+      // suppress log output during the test
+    })
+    try {
+      expect(readAdminPublicKeyFile(throwExitError, linkFile)).toBe(publicKey)
+      const logged = logSpy.mock.calls.flat().join(" ")
+      expect(logged).toContain("Reading public key from")
+      expect(logged).toContain("ancestor symlink")
     } finally {
       logSpy.mockRestore()
     }

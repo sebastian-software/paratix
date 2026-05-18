@@ -242,16 +242,27 @@ export function readAdminPublicKeyFile(exitWithMessage: ExitWithMessage, path: s
       return failWithReadError()
     }
   })()
-  if (linkStat.isSymbolicLink()) {
-    try {
-      // eslint-disable-next-line security/detect-non-literal-fs-filename
-      const realPath = realpathSync(resolvedPath)
-      console.log(`Reading public key from ${realPath} (symlink target of ${resolvedPath}).`)
-    } catch {
-      // A dangling or unreadable symlink falls through to the regular
-      // statSync read path, which will surface the failure via
-      // failWithReadError below.
+  // R-0000726 (was R-0000665): resolve the realpath unconditionally so
+  // ancestor symlinks (e.g. a planted `~/.ssh -> /tmp/attacker-ssh`)
+  // surface in the operator-facing log even when the leaf entry itself
+  // is a regular file. The previous implementation only logged when the
+  // leaf was a symbolic link, leaving the ancestor-symlink case silent.
+  try {
+    // eslint-disable-next-line security/detect-non-literal-fs-filename
+    const realPath = realpathSync(resolvedPath)
+    if (realPath !== resolvedPath) {
+      if (linkStat.isSymbolicLink()) {
+        console.log(`Reading public key from ${realPath} (symlink target of ${resolvedPath}).`)
+      } else {
+        console.log(
+          `Reading public key from ${realPath} (resolved via ancestor symlink of ${resolvedPath}).`
+        )
+      }
     }
+  } catch {
+    // A dangling or unreadable symlink falls through to the regular
+    // statSync read path, which will surface the failure via
+    // failWithReadError below.
   }
 
   // R-0000186: statSync follows symbolic links so that legitimate operator
