@@ -79,6 +79,54 @@ async function triggerReboot(ssh: SshConnection): Promise<ModuleResult | null> {
   return null
 }
 
+// R-0000782: defense-in-depth — the host string returned by `resolveHost` is
+// passed downstream to `updateHost` and ultimately back into the SSH layer
+// when the runner reconnects after a reboot. A malformed string (a URL, a
+// shell-quoted token, a typo with embedded whitespace) would otherwise reach
+// `ssh2` and either fail with an unstructured error or, worse, alter the
+// reconnect target in a surprising way. Accept conservative IPv4/IPv6 and
+// hostname patterns only; anything else is surfaced as a structured failure
+// that preserves the already-emitted `system.reboot` meta entry so the
+// operator can react.
+// Token must not contain whitespace before any further pattern is tried.
+// Bounded character classes plus pre-split label loops mirror the
+// `net.hosts` validation helpers and avoid catastrophic backtracking.
+const REBOOT_HOST_MAX_LENGTH = 253
+const REBOOT_HOST_MAX_LABEL_LENGTH = 63
+const REBOOT_HOST_HOSTNAME_LABEL_PATTERN = /^[a-z0-9\x2d]+$/iv
+const REBOOT_HOST_HOSTNAME_LABEL_EDGE_PATTERN = /^[a-z0-9]$/iv
+const REBOOT_HOST_IPV6_CHARSET_PATTERN = /^[0-9a-f:]+$/iv
+
+function isValidRebootHostLabel(label: string): boolean {
+  if (label === "" || label.length > REBOOT_HOST_MAX_LABEL_LENGTH) return false
+  if (!REBOOT_HOST_HOSTNAME_LABEL_PATTERN.test(label)) return false
+  const first = label.at(0)
+  const last = label.at(-1)
+  return (
+    first !== undefined &&
+    last !== undefined &&
+    REBOOT_HOST_HOSTNAME_LABEL_EDGE_PATTERN.test(first) &&
+    REBOOT_HOST_HOSTNAME_LABEL_EDGE_PATTERN.test(last)
+  )
+}
+
+function isValidRebootHost(host: string): boolean {
+  if (host.length === 0 || host.length > REBOOT_HOST_MAX_LENGTH) return false
+  if (/\s/v.test(host)) return false
+  // IPv6 is identified by the presence of `:`; strip optional brackets
+  // before checking the charset so `[2001:db8::1]` is accepted as well.
+  if (host.includes(":")) {
+    const stripped = host.startsWith("[") && host.endsWith("]") ? host.slice(1, -1) : host
+    return REBOOT_HOST_IPV6_CHARSET_PATTERN.test(stripped)
+  }
+  // Both IPv4 and hostnames are dot-separated label tokens. Validating each
+  // label individually rejects malformed octets (`999.0.0.10`), leading or
+  // trailing hyphens, and empty labels without an unbounded alternation in
+  // the regex engine.
+  const labels = host.split(".")
+  return labels.every((label) => isValidRebootHostLabel(label))
+}
+
 /**
  * Build the meta entries emitted on a successful reboot trigger.
  *
@@ -95,11 +143,30 @@ async function buildRebootMetaEntries(
   // R-0000243: bound the resolver with a wall-clock timeout so a hanging
   // DNS/cloud lookup surfaces as a `failed` result instead of stalling the
   // playbook forever.
-  return buildRebootMetaEntriesWithTimeout({
+  const result = await buildRebootMetaEntriesWithTimeout({
     failurePrefix: "[system.reboot]",
     resolveHost: options.resolveHost,
     timeoutMs: options.resolveHostTimeoutMs,
   })
+
+  // R-0000782: when `buildRebootMetaEntriesWithTimeout` returned an entries
+  // array (resolver succeeded), inspect the resolved host before letting it
+  // flow into reconnect. The helper appends a `system.host` entry as the
+  // last element on success; anything else is left untouched.
+  if (!Array.isArray(result)) return result
+  const lastEntry = result.at(-1)
+  if (lastEntry?.kind === "system.host") {
+    const host = lastEntry.host
+    if (!isValidRebootHost(host)) {
+      return {
+        ...failed(
+          `[system.reboot] resolveHost returned an invalid host that cannot be reconnected to: ${host}`
+        ),
+        meta: [result[0]],
+      }
+    }
+  }
+  return result
 }
 
 /**

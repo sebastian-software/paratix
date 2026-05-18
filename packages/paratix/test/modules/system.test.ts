@@ -92,6 +92,40 @@ describe("system.reboot — apply", () => {
     expect(result.meta).toBeUndefined()
   })
 
+  // R-0000782: validate the resolveHost return value against an
+  // IPv4/IPv6/hostname pattern. A string with embedded whitespace, a URL,
+  // or other shell-unsafe content must not reach reconnect; surface a
+  // structured failure but keep the `system.reboot` meta entry intact
+  // because the reboot trigger already succeeded.
+  it("R-0000782: returns failed when resolveHost returns an invalid host", async () => {
+    const ssh = createMockSsh(successfulRebootResponses)
+    const resolveHost = vi.fn().mockResolvedValue("not a host with spaces")
+    const mod = system.reboot({ resolveHost })
+    const result = await mod.apply(ssh, emptyEnv)
+    expect(result.status).toBe("failed")
+    expect(result.error?.message).toContain("invalid host")
+    expect(result.meta?.some(isSystemRebootMetaEntry)).toBe(true)
+    expect(result.meta?.some(isSystemHostMetaEntry)).toBe(false)
+  })
+
+  it("R-0000782: accepts plain IPv4 hosts from resolveHost", async () => {
+    const ssh = createMockSsh(successfulRebootResponses)
+    const resolveHost = vi.fn().mockResolvedValue("192.0.2.10")
+    const mod = system.reboot({ resolveHost })
+    const result = await mod.apply(ssh, emptyEnv)
+    expect(result.status).toBe("changed")
+    expect(result.meta?.find(isSystemHostMetaEntry)?.host).toBe("192.0.2.10")
+  })
+
+  it("R-0000782: accepts DNS-style hostnames from resolveHost", async () => {
+    const ssh = createMockSsh(successfulRebootResponses)
+    const resolveHost = vi.fn().mockResolvedValue("host.example.com")
+    const mod = system.reboot({ resolveHost })
+    const result = await mod.apply(ssh, emptyEnv)
+    expect(result.status).toBe("changed")
+    expect(result.meta?.find(isSystemHostMetaEntry)?.host).toBe("host.example.com")
+  })
+
   it("returns failed when resolveHost throws", async () => {
     const ssh = createMockSsh(successfulRebootResponses)
     const resolveHost = vi.fn().mockRejectedValue(new Error("DNS failed"))
