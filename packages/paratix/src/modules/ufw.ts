@@ -241,9 +241,10 @@ export const ufw = {
         // reverify step at line 229 below remains the last line of
         // defence against an externally-inserted deny rule landing right
         // before enable.
-        return withMutexLock(ssh, {
+        const mutexResult = await withMutexLock<ModuleResult>(ssh, {
+          failureMessage: "[ufw.enabled]",
           lockName: UFW_ENABLE_LOCK_NAME,
-          async section() {
+          async section(): Promise<ModuleResult> {
             const allowResult = await allowCurrentSshPort(ssh)
             if (allowResult !== null) return allowResult
             // R-0000653: a concurrent process could insert a `deny` rule for
@@ -270,6 +271,7 @@ export const ufw = {
               : failedCommand("[ufw.enabled] ufw enable failed", result)
           },
         })
+        return mutexResult.kind === "ok" ? mutexResult.value : mutexResult.failure
       },
       async check(ssh: null | SshConnection): Promise<"needs-apply" | "ok"> {
         if (!ssh) return NEEDS_APPLY
