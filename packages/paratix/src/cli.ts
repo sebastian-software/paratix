@@ -11,7 +11,7 @@ import type { Environment, ServerDefinition } from "./types.js"
 
 import { isMissingTsxDependencyError } from "./cliTsxHelpers.js"
 import { ENVIRONMENT_FORBIDDEN_KEYS } from "./environment.js"
-import { runWithFirstRunFlag } from "./firstRunContext.js"
+import { runWithFirstRunFlag, runWithoutFirstRunFlag } from "./firstRunContext.js"
 import { printCliHeader } from "./output.js"
 import { type RunOptions, runPlaybook } from "./runner.js"
 import { maskRegisteredSecrets } from "./secretSink.js"
@@ -474,11 +474,15 @@ export async function withCliProcessEnvironment<T>(
   body: () => Promise<T>
 ): Promise<T> {
   if (!options.firstRun) {
-    // R-0000695: when the caller explicitly disables firstRun, do not
-    // touch the surrounding async context. A nested call to a different
-    // helper that read `isFirstRun()` would otherwise observe `false`
-    // even though its enclosing CLI body legitimately set the flag.
-    return body()
+    // R-0000796: a nested invocation that explicitly disables firstRun must
+    // observe `false` even when the outer scope set the flag to `true`.
+    // Without a dedicated clear-scope the nested body would inherit the
+    // outer AsyncLocalStorage value and silently see `true`, contradicting
+    // the option the operator just passed. `runWithoutFirstRunFlag` opens
+    // a fresh `firstRunContext.run(false, body)` so `isFirstRun()` returns
+    // `false` for the entire async surface of `body` and reverts to the
+    // outer state when the scope exits.
+    return runWithoutFirstRunFlag(body)
   }
   return runWithFirstRunFlag(body)
 }

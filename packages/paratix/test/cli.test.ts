@@ -423,6 +423,35 @@ describe("withCliProcessEnvironment", () => {
     expect(isFirstRun()).toBe(false)
   })
 
+  // R-0000796: a nested invocation that explicitly sets `firstRun: false`
+  // must observe `false` even when the outer scope had set the flag to
+  // `true`. Without the dedicated clear-scope the nested body would inherit
+  // the outer AsyncLocalStorage value and silently see `true`, defeating
+  // the option the operator just passed. The outer flag must still be
+  // restored after the nested scope exits.
+  it("opens a clear-scope so a nested firstRun:false observes false (R-0000796)", async () => {
+    let outerBefore = false
+    let inner = true
+    let outerAfter = false
+
+    await withCliProcessEnvironment({ firstRun: true }, async () => {
+      outerBefore = isFirstRun()
+
+      await withCliProcessEnvironment({ firstRun: false }, async () => {
+        await Promise.resolve()
+        inner = isFirstRun()
+      })
+
+      outerAfter = isFirstRun()
+    })
+
+    expect(outerBefore).toBe(true)
+    expect(inner).toBe(false)
+    // The outer body's flag must be restored once the nested clear-scope exits.
+    expect(outerAfter).toBe(true)
+    expect(isFirstRun()).toBe(false)
+  })
+
   it("clears the flag for callers even when the body throws", async () => {
     // R-0000265: the wrapper must keep the cleanup discipline regardless
     // of how the body resolves. With AsyncLocalStorage the cleanup is

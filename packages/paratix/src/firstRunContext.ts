@@ -58,3 +58,19 @@ export function isFirstRun(): boolean {
 export async function runWithFirstRunFlag<T>(body: () => Promise<T>): Promise<T> {
   return firstRunContext.run(true, body)
 }
+
+/**
+ * R-0000796: open a dedicated clear-scope where {@link isFirstRun} observes
+ * `false` for the duration of `body`. Required when a nested CLI invocation
+ * sets `firstRun: false` while running inside an outer scope that had set
+ * it to `true`: without this helper the nested body would inherit the
+ * outer-context flag and silently observe `true` even though the operator
+ * explicitly disabled it. Mirrors the success-path of {@link runWithFirstRunFlag}
+ * but installs `false` instead of `true`.
+ *
+ * @param body - Async work to run while the flag is forced to `false`.
+ * @returns The value resolved by `body`.
+ */
+export async function runWithoutFirstRunFlag<T>(body: () => Promise<T>): Promise<T> {
+  return firstRunContext.run(false, body)
+}
