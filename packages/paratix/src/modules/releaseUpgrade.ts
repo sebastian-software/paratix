@@ -260,7 +260,38 @@ function parseDebianStableCodenameFromInRelease(body: string): string {
  *   codename is not on the allowlist of legitimate stable upgrade targets
  *   (R-0000632).
  */
+/**
+ * R-0000852: per-process cache for verified Debian stable codenames keyed by
+ * keyring path. `check` and `applyDebian` both call
+ * {@link getDebianStableCodename}, and a playbook that bundles several
+ * Debian-targeting modules can resolve the same codename multiple times in
+ * quick succession. Each resolution issues a remote `gpgv` round-trip, which
+ * is wasteful when the keyring (and therefore the trust root) has not
+ * changed.
+ *
+ * The cache key is the resolved keyring filesystem path so a future call site
+ * that overrides the path (e.g. a test harness pinning a different keyring)
+ * is automatically isolated from previously cached results. The TTL is kept
+ * intentionally short so operator-driven changes to the keyring or the
+ * upstream `InRelease` body are picked up on the next run without requiring
+ * a process restart.
+ */
+const DEBIAN_STABLE_CODENAME_CACHE_TTL_MS = 5 * 60 * 1000
+
+type DebianStableCodenameCacheEntry = {
+  codename: string
+  expiresAt: number
+}
+
+const debianStableCodenameCache = new Map<string, DebianStableCodenameCacheEntry>()
+
 async function getDebianStableCodename(ssh: SshConnection): Promise<string> {
+  const keyringPath = DEBIAN_ARCHIVE_KEYRING_PATH
+  const cached = debianStableCodenameCache.get(keyringPath)
+  const now = Date.now()
+  if (cached !== undefined && cached.expiresAt > now) {
+    return cached.codename
+  }
   const result = await ssh.exec(buildDebianInReleaseFetchAndVerifyCommand(), {
     ignoreExitCode: true,
     silent: true,
@@ -278,6 +309,13 @@ async function getDebianStableCodename(ssh: SshConnection): Promise<string> {
   if (!isAllowedDebianStableTargetCodename(codename)) {
     throw new Error(`unexpected Debian stable codename from mirrors: ${JSON.stringify(codename)}`)
   }
+  // R-0000852: only cache after every validation step has accepted the value
+  // so an invalid response cannot poison the cache for the remainder of the
+  // TTL window.
+  debianStableCodenameCache.set(keyringPath, {
+    codename,
+    expiresAt: now + DEBIAN_STABLE_CODENAME_CACHE_TTL_MS,
+  })
   return codename
 }
 
