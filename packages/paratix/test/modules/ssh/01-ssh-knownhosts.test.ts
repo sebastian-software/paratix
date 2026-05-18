@@ -886,6 +886,63 @@ describe("ssh.knownHosts", () => {
     expect(String(result.error)).toContain("failed to replace known_hosts")
   })
 
+  it("apply backs up known_hosts before the final replace", async () => {
+    const mockSsh = createSshApplyMockSsh({
+      "[ -e '/home/paratix/.ssh/known_hosts' ]": { code: 0 },
+      [`grep -qxF '${scannedLine}' '/home/paratix/.ssh/known_hosts'`]: { code: 1 },
+      "ssh-keygen -F 'github.com' -f '/home/paratix/.ssh/known_hosts'": { code: 1 },
+      "ssh-keyscan -H 'github.com'": { stdout: `${scannedLine}\n` },
+    })
+    const mod = ssh.knownHosts("github.com", { expectedFingerprint: hostFingerprint })
+
+    const result = await mod.apply(mockSsh, emptyEnv)
+
+    expect(result.status).toBe("changed")
+    const finalReplaceCommand = mockSsh.calls.find(isKnownHostsFinalReplace)
+    expect(finalReplaceCommand).toContain(
+      "known_hosts_backup='/home/paratix/.ssh/known_hosts'.paratix-backup.$$"
+    )
+    expect(finalReplaceCommand).toContain(
+      `mv -T -- '/home/paratix/.ssh/known_hosts' "$known_hosts_backup"`
+    )
+    expect(finalReplaceCommand).not.toContain("rm -f -- '/home/paratix/.ssh/known_hosts'")
+  })
+
+  it("apply rolls back the known_hosts backup when the final move fails", async () => {
+    const mockSsh = createMockSsh(
+      {
+        "[ -e '/home/paratix/.ssh/known_hosts' ]": { code: 0 },
+        [`grep -qxF '${scannedLine}' '/home/paratix/.ssh/known_hosts'`]: { code: 1 },
+        "ssh-keygen -F 'github.com' -f '/home/paratix/.ssh/known_hosts'": { code: 1 },
+        "ssh-keyscan -H 'github.com'": { stdout: `${scannedLine}\n` },
+      },
+      {
+        responseStubs: [
+          {
+            command:
+              /^chmod 600 '\/home\/paratix\/\.ssh\/\.paratix-known-hosts\.ABC123' && \{ expected_known_hosts_hash=/v,
+            result: {
+              code: 1,
+              stderr: "mv: cannot move staged known_hosts into place",
+            },
+          },
+          ...successfulSshApplyResponseStubs,
+        ],
+      }
+    )
+    const mod = ssh.knownHosts("github.com", { expectedFingerprint: hostFingerprint })
+
+    const result = await mod.apply(mockSsh, emptyEnv)
+
+    expect(result.status).toBe("failed")
+    expect(String(result.error)).toContain("failed to replace known_hosts")
+    const finalReplaceCommand = mockSsh.calls.find(isKnownHostsFinalReplace)
+    expect(finalReplaceCommand).toContain("rollback_known_hosts()")
+    expect(finalReplaceCommand).toContain(
+      `mv -T -- "$known_hosts_backup" '/home/paratix/.ssh/known_hosts'`
+    )
+  })
+
   // R-0000214: ssh-keyscan exits non-zero when the host is unreachable, the
   // port is closed, or DNS fails. The previous `conn.output` call propagated
   // that as an uncaught exception even though `2>/dev/null` suppressed the
