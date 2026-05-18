@@ -29,6 +29,7 @@ const createMockSsh: typeof createBaseMockSsh = (responses, options) =>
     responseStubs: [
       ...(options?.responseStubs ?? []),
       { command: "[ -e '/etc/hosts' ]", result: { code: 0 } },
+      { command: "[ -L '/etc/hosts' ]", result: { code: 1 } },
     ],
   })
 
@@ -122,6 +123,21 @@ describe("net.hosts — check", () => {
     const mod = net.hosts("1.2.3.4", ["myhost"])
     const result = await mod.check(mockSsh, emptyEnv)
     expect(result).toBe("needs-apply")
+  })
+
+  it("returns needs-apply without reading when /etc/hosts is a symlink", async () => {
+    const mockSsh = createMockSsh(
+      {
+        "cat '/etc/hosts'": { stdout: "1.2.3.4 myhost\n" },
+      },
+      {
+        responseStubs: [{ command: "[ -L '/etc/hosts' ]", result: { code: 0 } }],
+      }
+    )
+    const mod = net.hosts("1.2.3.4", ["myhost"])
+    const result = await mod.check(mockSsh, emptyEnv)
+    expect(result).toBe("needs-apply")
+    expect(mockSsh.calls).not.toContain("cat '/etc/hosts'")
   })
 
   it("returns needs-apply when the hosts line is absent (state: present)", async () => {

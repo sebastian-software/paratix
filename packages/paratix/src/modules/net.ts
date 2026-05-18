@@ -1474,6 +1474,7 @@ async function checkHostsState(
   // needs-apply situation rather than a phase-level throw. The apply path
   // ensures the file exists, so check defers instead of escalating ENOENT.
   if (!(await conn.exists(HOSTS_FILE))) return NEEDS_APPLY
+  if (await isSymlink(conn, HOSTS_FILE)) return NEEDS_APPLY
   const content = await conn.readFile(HOSTS_FILE)
   const lines = content.split("\n")
 
