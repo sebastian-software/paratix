@@ -506,7 +506,7 @@ let tsxRegistrationPromise: null | Promise<void> = null
 let playbookImportQueue: Promise<void> = Promise.resolve()
 const playbookImportContext = new AsyncLocalStorage<boolean>()
 
-async function withSerializedPlaybookImport<T>(body: () => Promise<T>): Promise<T> {
+export async function withSerializedPlaybookImport<T>(body: () => Promise<T>): Promise<T> {
   if (playbookImportContext.getStore() === true) {
     return body()
   }
@@ -517,7 +517,21 @@ async function withSerializedPlaybookImport<T>(body: () => Promise<T>): Promise<
     releaseCurrentImport = resolveQueue
   })
 
-  await previousImport
+  // R-0000746: swallow rejections from the previous queue head. A
+  // playbook import that fails (tsx registration error, dynamic import
+  // syntax error, runtime throw at module scope) currently produces a
+  // rejected promise here; without the catch a single failed import
+  // would freeze the lock for every subsequent caller because the
+  // `await previousImport` below would re-throw and skip the
+  // `releaseCurrentImport()` in `finally`. Analogous to the
+  // catch-and-ignore pattern in knownHosts.ts:31-38.
+  try {
+    await previousImport
+  } catch {
+    // The previous import already surfaced its failure to its own
+    // caller. The lock only cares that the prior holder is settled, so
+    // its outcome is intentionally discarded here.
+  }
 
   try {
     return await playbookImportContext.run(true, body)

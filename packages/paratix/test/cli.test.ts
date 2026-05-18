@@ -29,6 +29,7 @@ import {
   resetTsxRegistrationForTests,
   runApplyCommand,
   withCliProcessEnvironment,
+  withSerializedPlaybookImport,
 } from "../src/cli.js"
 import { printCliHeader } from "../src/output.js"
 import { clearRegisteredSecrets, registerSecret } from "../src/secretSink.js"
@@ -1713,6 +1714,41 @@ describe("CLI entrypoint", () => {
       vi.doUnmock("tsx/esm/api")
       rmSync(tempDirectory, { force: true, recursive: true })
     }
+  })
+
+  it("keeps the playbook-import lock alive when a previous import rejects (R-0000746)", async () => {
+    // R-0000746: a future code path that hands `withSerializedPlaybookImport`
+    // a rejecting predecessor (e.g. a deliberate rejected lock seed, or a
+    // pre-emptive `playbookImportQueue` slot whose body throws before
+    // `releaseCurrentImport` runs) must not freeze the lock for every
+    // subsequent caller. The helper now swallows that rejection so the
+    // queue head moves on. The test seeds a rejecting predecessor by
+    // running a first body that throws synchronously; the next call must
+    // still resolve normally rather than hang or re-throw the previous
+    // failure.
+    const firstError = new Error("synthetic predecessor rejection")
+    const firstAttempt = withSerializedPlaybookImport<void>(async () => {
+      await Promise.resolve()
+      throw firstError
+    })
+    await expect(firstAttempt).rejects.toBe(firstError)
+
+    const sentinel = Symbol("downstream import")
+    const followUp = withSerializedPlaybookImport(async () => {
+      await Promise.resolve()
+      return sentinel
+    })
+
+    await expect(
+      Promise.race([
+        followUp,
+        new Promise((_resolve, rejectRace) => {
+          setTimeout(() => {
+            rejectRace(new Error("playbook import lock froze after predecessor rejection"))
+          }, 1000)
+        }),
+      ])
+    ).resolves.toBe(sentinel)
   })
 
   it("exposes the first-run flag through isFirstRun() during playbook import when --first-run is passed", async () => {
