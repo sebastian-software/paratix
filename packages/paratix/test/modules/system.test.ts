@@ -377,6 +377,28 @@ describe("system.facts — apply", () => {
     await expect(resolveEnvironment(metaEnvironment, "system.ip.private")).resolves.toBe("10.0.1.5")
   })
 
+  // R-0000781: the `\d+\.\d+\.\d+\.\d+` regex in `findPrivateIp` accepts
+  // octets > 255 because `\d+` is unbounded. Without per-octet validation a
+  // captured string like `10.999.0.1` would pass the `startsWith("10.")`
+  // gate and surface as `system.ip.private`, polluting downstream meta. The
+  // first valid private IP later in the output must still win.
+  it("R-0000781: skips IPv4 captures with octets > 255 and falls through to the next valid private IP", async () => {
+    const ssh = createMockSsh({
+      ...FACTS_RESPONSES,
+      "ip -4 addr": {
+        code: 0,
+        stdout:
+          "2: eth0: <BROADCAST>\n    inet 10.999.0.1/24 scope global eth0\n    inet 192.168.1.42/24 scope global eth0\n",
+      },
+    })
+    const mod = system.facts()
+    const result = await mod.apply(ssh, emptyEnv)
+    const metaEnvironment = await mergeEnvironmentFromMeta({}, result.meta)
+    await expect(resolveEnvironment(metaEnvironment, "system.ip.private")).resolves.toBe(
+      "192.168.1.42"
+    )
+  })
+
   it("correctly extracts disk root from df output", async () => {
     const ssh = createMockSsh(FACTS_RESPONSES)
     const mod = system.facts()

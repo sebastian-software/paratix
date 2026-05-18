@@ -120,6 +120,19 @@ function parseOsRelease(content: string): Partial<Record<string, string>> {
   return result
 }
 
+// R-0000781: the inet pattern accepts any `\d+` per octet, so values like
+// `999.0.0.10` would match the regex and slip past the `startsWith("10.")`
+// prefix check (the literal string starts with "10."). Validate each octet
+// is ≤ 255 before reporting the IP so downstream consumers (env vars, meta
+// entries) cannot see a syntactically invalid address.
+function isValidIpv4Octets(ip: string): boolean {
+  return ip.split(".").every((octet) => {
+    if (octet.length === 0 || octet.length > 3) return false
+    const numeric = Number(octet)
+    return Number.isInteger(numeric) && numeric >= 0 && numeric <= 255
+  })
+}
+
 /**
  * Find the first RFC-1918 private IP address in `ip -4 addr` output.
  *
@@ -132,6 +145,7 @@ function findPrivateIp(output: string): string | undefined {
   while ((match = inetPattern.exec(output)) !== null) {
     const ip = match.groups?.addr
     if (ip == null) continue
+    if (!isValidIpv4Octets(ip)) continue
     if (
       ip.startsWith("10.") ||
       ip.startsWith("192.168.") ||
