@@ -214,10 +214,13 @@ export async function promptForInitialUserConfig(
   // `runTerminalSelect` with a generic Error that skipped the CliExit
   // cleanup and the `--initial-user` hint. Tests and other consumers that
   // inject a `createSession` factory bypass the terminal-select setup and
-  // keep working unchanged.
+  // keep working unchanged. R-0000724: the gate keys off `prompt` and the
+  // session factory only — the same shape as the sibling prompts that
+  // only check the single injected handle. A caller that wires up a
+  // custom prompt but lets `select` default would otherwise be denied
+  // here even though the default-select code path is never reached.
   if (
     prompt == null &&
-    select == null &&
     createSession === createPromptSession &&
     (!process.stdin.isTTY || !process.stdout.isTTY)
   ) {
