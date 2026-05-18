@@ -238,9 +238,15 @@ describe("createMockSsh", () => {
     const reclaimProbe =
       "if [ -d /var/lib/paratix/flags/'etc-hosts-mutex' ]; then " +
       "if [ -f /var/lib/paratix/flags/'etc-hosts-mutex'/holder ]; then " +
+      "STALE_TOKEN=\"$(awk 'NR==1{print $1}' -- '/var/lib/paratix/flags/etc-hosts-mutex/holder' 2>/dev/null)\"; " +
       "if find /var/lib/paratix/flags/'etc-hosts-mutex'/holder -maxdepth 0 -mmin +0 -print -quit | grep -q .; then " +
+      "[ \"$(awk 'NR==1{print $1}' -- '/var/lib/paratix/flags/etc-hosts-mutex/holder' 2>/dev/null)\" = \"$STALE_TOKEN\" ] && " +
       "rm -f -- /var/lib/paratix/flags/'etc-hosts-mutex'/holder && rmdir -- /var/lib/paratix/flags/'etc-hosts-mutex'; " +
-      "else exit 1; fi; else exit 1; fi; else exit 1; fi"
+      "else exit 1; fi; else " +
+      "if find /var/lib/paratix/flags/'etc-hosts-mutex' -maxdepth 0 -mmin +0 -print -quit | grep -q .; then " +
+      "find /var/lib/paratix/flags/'etc-hosts-mutex' -maxdepth 0 -mmin +0 -print -quit | grep -q . && " +
+      "rm -f -- /var/lib/paratix/flags/'etc-hosts-mutex'/holder && rmdir -- /var/lib/paratix/flags/'etc-hosts-mutex'; " +
+      "else exit 1; fi; fi; else exit 1; fi"
     const ssh = createMockSsh({}, { allowFlagLockInternalDefaults: true })
 
     await expect(ssh.exec("mkdir -p /var/lib/paratix/flags")).resolves.toMatchObject({ code: 0 })
@@ -250,6 +256,36 @@ describe("createMockSsh", () => {
     await expect(
       ssh.exec(reclaimProbe, { ignoreExitCode: true, silent: true })
     ).resolves.toMatchObject({ code: 1 })
+  })
+
+  it("rejects flag-lock reclaim probes without the token recheck", async () => {
+    const reclaimProbe =
+      "if [ -d /var/lib/paratix/flags/'etc-hosts-mutex' ]; then " +
+      "if [ -f /var/lib/paratix/flags/'etc-hosts-mutex'/holder ]; then " +
+      "STALE_TOKEN=\"$(awk 'NR==1{print $1}' -- '/var/lib/paratix/flags/etc-hosts-mutex/holder' 2>/dev/null)\"; " +
+      "if find /var/lib/paratix/flags/'etc-hosts-mutex'/holder -maxdepth 0 -mmin +0 -print -quit | grep -q .; then " +
+      "rm -f -- /var/lib/paratix/flags/'etc-hosts-mutex'/holder && rmdir -- /var/lib/paratix/flags/'etc-hosts-mutex'; " +
+      "else exit 1; fi; else exit 1; fi; else exit 1; fi"
+    const ssh = createMockSsh({}, { allowFlagLockInternalDefaults: true })
+
+    await expect(ssh.exec(reclaimProbe, { ignoreExitCode: true, silent: true })).rejects.toThrow(
+      "createMockSsh: unstubbed exec call"
+    )
+  })
+
+  it("rejects flag-lock reclaim probes without the marker removal sequence", async () => {
+    const reclaimProbe =
+      "if [ -d /var/lib/paratix/flags/'etc-hosts-mutex' ]; then " +
+      "if [ -f /var/lib/paratix/flags/'etc-hosts-mutex'/holder ]; then " +
+      "STALE_TOKEN=\"$(awk 'NR==1{print $1}' -- '/var/lib/paratix/flags/etc-hosts-mutex/holder' 2>/dev/null)\"; " +
+      "if find /var/lib/paratix/flags/'etc-hosts-mutex'/holder -maxdepth 0 -mmin +0 -print -quit | grep -q .; then " +
+      "[ \"$(awk 'NR==1{print $1}' -- '/var/lib/paratix/flags/etc-hosts-mutex/holder' 2>/dev/null)\" = \"$STALE_TOKEN\" ]; " +
+      "else exit 1; fi; else exit 1; fi; else exit 1; fi"
+    const ssh = createMockSsh({}, { allowFlagLockInternalDefaults: true })
+
+    await expect(ssh.exec(reclaimProbe, { ignoreExitCode: true, silent: true })).rejects.toThrow(
+      "createMockSsh: unstubbed exec call"
+    )
   })
 
   it("rejects unstubbed output calls when only defaultOutputResult is configured", async () => {

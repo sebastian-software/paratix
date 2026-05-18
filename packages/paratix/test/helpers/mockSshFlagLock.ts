@@ -63,8 +63,7 @@ const MUTEX_LOCK_WAIT_PATTERN =
 const FLAG_LOCK_RECLAIM_PATTERN =
   // R-0000803: the awk path is now shell-quoted as a single token, so allow
   // the optional trailing `'` after `/holder` in the STALE_TOKEN capture.
-  // eslint-disable-next-line security/detect-unsafe-regex -- mock-only pattern, anchored prefix bounds backtracking on test-controlled input
-  /^if \[ -d \S+ \]; then if \[ -f \S+\/holder \]; then (?:STALE_TOKEN="\$\(awk 'NR==1\{print \$1\}' -- \S+\/holder'? 2>\/dev\/null\)"; )?if find \S+\/holder -maxdepth 0 -mmin /v
+  /^if \[ -d \S+ \]; then if \[ -f \S+\/holder \]; then STALE_TOKEN="\$\(awk 'NR==1\{print \$1\}' -- \S+\/holder'? 2>\/dev\/null\)"; if find \S+\/holder -maxdepth 0 -mmin \+\d+ -print -quit \| grep -q \.; then \[ "\$\(awk 'NR==1\{print \$1\}' -- \S+\/holder'? 2>\/dev\/null\)" = "\$STALE_TOKEN" \] && rm -f -- \S+\/holder && rmdir -- \S+; else exit 1; fi; else if find \S+ -maxdepth 0 -mmin \+\d+ -print -quit \| grep -q \.; then find \S+ -maxdepth 0 -mmin \+\d+ -print -quit \| grep -q \. && rm -f -- \S+\/holder && rmdir -- \S+; else exit 1; fi; fi; else exit 1; fi$/v
 
 /**
  * @param command - The command intercepted by the mock.
