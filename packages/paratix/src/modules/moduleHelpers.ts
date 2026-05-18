@@ -57,7 +57,7 @@ export async function setVersionedFlag(
   if (ensureFailure) return ensureFailure
   const glob = shellQuote(`${flagPrefix}*`)
   const result = await ssh.exec(
-    `find ${FLAGS_DIRECTORY} -maxdepth 1 -name ${glob} ! -name '*.lock' -delete && touch ${FLAGS_DIRECTORY}/${shellQuote(flagName)}`,
+    `find ${FLAGS_DIRECTORY} -maxdepth 1 -type f -name ${glob} ! -name '*.lock' -delete && touch ${FLAGS_DIRECTORY}/${shellQuote(flagName)}`,
     { ignoreExitCode: true, silent: true }
   )
   if (result.code === 0) return null
