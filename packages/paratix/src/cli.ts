@@ -187,6 +187,71 @@ const ERROR_INSPECT_MAX_ARRAY_LENGTH = 32
 const ERROR_INSPECT_MAX_STRING_LENGTH = 1024
 
 /**
+ * R-0000691: token placed in the redacted graph wherever a Buffer-shaped
+ * value used to live. Mirrors the masking style used elsewhere in the CLI
+ * so a downstream operator can grep for "[REDACTED" and find every place
+ * a sensitive payload was elided.
+ */
+const REDACTED_BUFFER_PLACEHOLDER = "[REDACTED Buffer]"
+
+/**
+ * R-0000691: maximum recursion depth applied to the pre-inspect redaction
+ * walk. Stays one level beyond `ERROR_INSPECT_DEPTH` so a Buffer that
+ * `inspect` would still render is still elided. A bounded depth is
+ * mandatory: an attacker-controlled error graph could otherwise hang the
+ * walk on a cyclic reference.
+ */
+const REDACT_BUFFER_MAX_DEPTH = ERROR_INSPECT_DEPTH + 1
+
+/**
+ * R-0000691: recursively clone `value` while replacing every Buffer it
+ * contains with {@link REDACTED_BUFFER_PLACEHOLDER}. The `seen` WeakSet
+ * short-circuits cycles so the walk always terminates. The clone is
+ * intentionally shallow with respect to non-plain instances (Errors, Maps,
+ * Sets, Promises, …) — those are reproduced as plain objects describing
+ * their own keys so `inspect` can render them without re-following the
+ * original instance. A Buffer found at any nesting level — including
+ * `cause`, `data`, custom fields — collapses to the placeholder before
+ * `inspect` ever sees it, eliminating the byte-array leak window.
+ *
+ * @param value - The caught value whose graph should be Buffer-redacted.
+ * @param depth - Current recursion depth (callers should pass `0`).
+ * @param seen - Identity set tracking already-visited object references.
+ * @returns A Buffer-free clone safe to feed into `util.inspect`.
+ */
+// eslint-disable-next-line complexity -- the type-discriminated walk is intentionally inlined to keep the redaction predicate local
+function redactBufferProperties(
+  value: unknown,
+  depth: number,
+  seen: WeakSet<object>
+): unknown {
+  if (Buffer.isBuffer(value)) return REDACTED_BUFFER_PLACEHOLDER
+  if (value === null || typeof value !== "object") return value
+  if (depth > REDACT_BUFFER_MAX_DEPTH) return value
+  if (seen.has(value)) return "[Circular]"
+  seen.add(value)
+  if (Array.isArray(value)) {
+    return value.map((entry) => redactBufferProperties(entry, depth + 1, seen))
+  }
+  const sourceRecord = value as Record<string, unknown>
+  const redacted: Record<string, unknown> = {}
+  // R-0000691: walk own-enumerable + own-symbol property names so a
+  // `cause`-shaped Buffer that lives on an Error instance is still
+  // captured. `inspect` later renders this plain object, which is fine
+  // because the goal is to elide the Buffer payload — not to reproduce
+  // the original prototype chain.
+  for (const key of Reflect.ownKeys(sourceRecord)) {
+    const stringKey = typeof key === "symbol" ? key.toString() : key
+    redacted[stringKey] = redactBufferProperties(
+      sourceRecord[key as keyof typeof sourceRecord],
+      depth + 1,
+      seen
+    )
+  }
+  return redacted
+}
+
+/**
  * Returns a human-readable string for any caught value.
  * Uses `.message` for `Error` instances and falls back to the string
  * representation for primitives. For plain objects, `util.inspect` with
@@ -200,8 +265,16 @@ const ERROR_INSPECT_MAX_STRING_LENGTH = 1024
 function errorToString(value: unknown): string {
   if (value instanceof Error) return maskRegisteredSecrets(value.message)
   if (typeof value === "object" && value !== null) {
+    // R-0000691: pre-redact every nested Buffer to a static placeholder
+    // before `inspect` runs. `util.inspect` would otherwise render the
+    // Buffer bytes (subject to `maxArrayLength`) and a sensitive
+    // payload — private key, session secret, password ciphertext — could
+    // leak into stderr through any caught value with a Buffer-shaped
+    // cause / data field. The pre-pass clones the graph defensively so
+    // the original error object stays untouched for downstream consumers.
+    const sanitized = redactBufferProperties(value, 0, new WeakSet<object>())
     return maskRegisteredSecrets(
-      inspect(value, {
+      inspect(sanitized, {
         breakLength: Infinity,
         compact: true,
         depth: ERROR_INSPECT_DEPTH,

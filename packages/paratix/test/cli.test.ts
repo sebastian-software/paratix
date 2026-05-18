@@ -1362,9 +1362,32 @@ describe("printExceptionError", () => {
 
     const output = errorSpy.mock.calls.map((args) => String(args[0])).join("\n")
     expect(output).not.toContain("A".repeat(2048))
-    // The inspect output must still indicate truncation so operators see
-    // that the value was bounded (not silently elided).
-    expect(output).toMatch(/more (?:items|bytes|characters)/v)
+    // R-0000691: with the pre-inspect Buffer redaction in place the Buffer
+    // never reaches `inspect`, so the legacy "... more (items|bytes)"
+    // truncation marker no longer appears. Instead the redaction
+    // placeholder must be present and no individual Buffer byte may leak.
+    expect(output).toContain("[REDACTED Buffer]")
+  })
+
+  it("redacts Buffer properties hanging off a non-Error cause before inspect runs", () => {
+    // R-0000691: a thrown error whose `cause` is a plain object that
+    // carries a Buffer must never serialize the Buffer bytes into stderr.
+    // The pre-inspect walk replaces any nested Buffer with a static
+    // placeholder so a sensitive payload (private key, password
+    // ciphertext, signed token) can never leak through the cause-chain
+    // rendering path. The Buffer below is deliberately short so the
+    // previous code would have emitted the raw bytes; the new behavior
+    // must collapse it to "[REDACTED Buffer]".
+    const sensitive = Buffer.from("super-secret-payload", "utf8")
+    const error = new Error("top-level error")
+    error.cause = { detail: "transport failed", secret: sensitive }
+
+    printExceptionError(error, false)
+
+    const output = errorSpy.mock.calls.map((args) => String(args[0])).join("\n")
+    expect(output).toContain("  Caused by:")
+    expect(output).not.toContain("super-secret-payload")
+    expect(output).toContain("[REDACTED Buffer]")
   })
 
   it("prints a single cause when the error has one cause", () => {
