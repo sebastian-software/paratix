@@ -331,6 +331,36 @@ describe("cron.job", () => {
     expect(result).toBe("needs-apply")
   })
 
+  // R-0000760: when an orphan-job duplicate sits outside the managed pair
+  // (typically left behind by a legacy-marker cron.absent), check must
+  // report needs-apply so the runner schedules the consolidation that
+  // `computePresentMutation` performs.
+  it("R-0000760: check returns needs-apply when an orphan duplicate exists outside the marker pair (state: present)", async () => {
+    const job = "0 3 * * * /backup.sh"
+    const mockSsh = createMockSsh({
+      "crontab -u 'alice' -l": {
+        code: 0,
+        stdout: `${taggedMarker("backup", job)}\n${job}\n${job}\n`,
+      },
+    })
+    const mod = cron.job("alice", "backup", { job })
+    const result = await mod.check(mockSsh, emptyEnv)
+    expect(result).toBe("needs-apply")
+  })
+
+  it("R-0000760: check returns ok when the marker pair has no orphan duplicate (state: present)", async () => {
+    const job = "0 3 * * * /backup.sh"
+    const mockSsh = createMockSsh({
+      "crontab -u 'alice' -l": {
+        code: 0,
+        stdout: `${taggedMarker("backup", job)}\n${job}\n`,
+      },
+    })
+    const mod = cron.job("alice", "backup", { job })
+    const result = await mod.check(mockSsh, emptyEnv)
+    expect(result).toBe("ok")
+  })
+
   // ---------------------------------------------------------------------------
   // check (state: absent)
   // ---------------------------------------------------------------------------
@@ -838,11 +868,13 @@ describe("cron.job", () => {
     expect(writeInput).toContain("0 5 * * * /other.sh")
   })
 
-  // R-0000697: without the `adoptOrphans` opt-in, a pre-existing identical
-  // line must not be silently adopted. The present mutation appends a
-  // fresh marker + job pair and accepts the (visible) duplicate over
-  // taking over a user-authored line.
-  it("apply does not adopt an identical line without adoptOrphans (state: present)", async () => {
+  // R-0000760: a pre-existing identical line must NOT trigger a duplicate
+  // append. The previous R-0000697 behaviour appended a fresh marker + job
+  // pair and accepted the visible duplicate; R-0000760 strengthens the
+  // contract so the present mutation splices the marker in front of the
+  // existing exact-match line instead, leaving a single managed entry
+  // regardless of the `adoptOrphans` opt-in.
+  it("R-0000760: splices marker in front of existing exact match without adoptOrphans (state: present)", async () => {
     const job = "0 3 * * * /backup.sh"
     const mockSsh = createMockSsh({
       "crontab -u 'alice' -l": {
@@ -855,10 +887,10 @@ describe("cron.job", () => {
     expect(result.status).toBe("changed")
     const writeInput = findCrontabWriteInput(mockSsh)
     expect(writeInput).toBeDefined()
-    // The job line appears twice: the pre-existing user line plus the
-    // fresh paratix-managed line below the appended marker.
+    // The job line appears exactly once — the marker was spliced in front
+    // of the existing line rather than producing a parallel duplicate.
     const jobOccurrences = writeInput!.split("\n").filter((line) => line === job).length
-    expect(jobOccurrences).toBe(2)
+    expect(jobOccurrences).toBe(1)
     const expectedMarker = taggedMarker("backup", job)
     expect(writeInput).toContain(`${expectedMarker}\n${job}`)
     expect(writeInput).toContain("0 5 * * * /other.sh")

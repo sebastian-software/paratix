@@ -170,6 +170,34 @@ function hasMarkedJob(lines: string[], name: string, cronJob: string): boolean {
   return index !== -1 && index + 1 < lines.length && lines[index + 1] === cronJob
 }
 
+/**
+ * R-0000760: find an exact-match `cronJob` line that is NOT the managed
+ * follow-up of the active marker. Such a line is an orphan-job duplicate
+ * (typically left behind by a legacy-marker `cron.absent`) and must
+ * trigger NEEDS_APPLY so the present-state mutation can consolidate the
+ * crontab back to a single managed entry.
+ *
+ * The managed-follow-up index is excluded from the scan because the
+ * marker pair always carries one byte-identical `cronJob` line by design.
+ *
+ * @param lines - The current crontab lines.
+ * @param cronJob - The desired job line to compare against.
+ * @param markerIndex - The index of the active marker, or `-1` when no marker exists.
+ * @returns The index of the orphan duplicate, or `-1` when none is present.
+ */
+function findOrphanDuplicateIndex(
+  lines: string[],
+  cronJob: string,
+  markerIndex: number
+): number {
+  const managedJobIndex = markerIndex === -1 ? -1 : markerIndex + 1
+  for (let index = 0; index < lines.length; index += 1) {
+    if (index === managedJobIndex) continue
+    if (lines[index] === cronJob) return index
+  }
+  return -1
+}
+
 /** Options for `cron.job`. */
 type CronJobOptions = {
   /**
@@ -526,7 +554,19 @@ export const cron = {
           // the hash tag, so the upgraded marker lands on disk.
           if (!found) return NEEDS_APPLY
           if (markerIndex === -1) return NEEDS_APPLY
-          return lines[markerIndex] === marker ? "ok" : NEEDS_APPLY
+          if (lines[markerIndex] !== marker) return NEEDS_APPLY
+          // R-0000760: detect orphan-job duplicates that sit outside the
+          // marker pair. The managed pair occupies `markerIndex` and
+          // `markerIndex + 1`; any *other* line that exactly matches
+          // `cronJob` is an unmanaged duplicate that would run a second
+          // copy of the job until apply cleans it up. The
+          // `computePresentMutation` mutation now consolidates the
+          // duplicate by splicing the marker in front of the existing
+          // line, so reporting NEEDS_APPLY here guarantees the runner
+          // schedules that consolidation.
+          const orphanIndex = findOrphanDuplicateIndex(lines, cronJob, markerIndex)
+          if (orphanIndex !== -1) return NEEDS_APPLY
+          return "ok"
         }
 
         // state === "absent": ok when marker is not found
