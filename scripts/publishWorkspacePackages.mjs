@@ -329,10 +329,11 @@ async function maxMtimeMillisecondsForFiles({ directory, files, filesystem, pack
   return { maxMtime, symlinkedEntries }
 }
 
-async function ensureFilesEntryExists(packageInfo, fileEntry, filesystem) {
+async function assertFilesEntryIsPublishable(packageInfo, fileEntry, filesystem) {
   const absolutePath = join(packageInfo.directory, fileEntry)
+  let linkStats
   try {
-    await filesystem.stat(absolutePath)
+    linkStats = await filesystem.lstat(absolutePath)
   } catch (error) {
     if (error?.code === "ENOENT") {
       throw new Error(
@@ -341,6 +342,11 @@ async function ensureFilesEntryExists(packageInfo, fileEntry, filesystem) {
       )
     }
     throw error
+  }
+  if (linkStats.isSymbolicLink()) {
+    throw new Error(
+      `${packageInfo.name}: ${absolutePath} referenced by package.json#files is a symbolic link. Materialize the built artefact before publishing.`
+    )
   }
 }
 
@@ -373,7 +379,9 @@ async function verifyDistributionArtefacts(packageInfo, filesystem) {
   }
 
   await Promise.all(
-    packageInfo.files.map((fileEntry) => ensureFilesEntryExists(packageInfo, fileEntry, filesystem))
+    packageInfo.files.map((fileEntry) =>
+      assertFilesEntryIsPublishable(packageInfo, fileEntry, filesystem)
+    )
   )
 
   const sourceDirectory = join(packageInfo.directory, "src")

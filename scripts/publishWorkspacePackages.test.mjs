@@ -423,15 +423,12 @@ describe("publishWorkspacePackages", () => {
     assert.equal(hasCommandCall(commandRunner.calls, "pnpm"), false)
   })
 
-  // R-0000685: maxMtimeMillisecondsUnder discovered symlinks via
-  // Dirent.isSymbolicLink() (lstat semantics) and skipped them with mtime
-  // 0, while mtimeMillisecondsForFileEntry called `stat()` and silently
-  // followed the link. A symlinked `dist/` entry that pointed at a fresh
-  // tree would then be treated as 0, even though the matching source
-  // tree (also symlinked) was likewise skipped. Probing the entry with
-  // lstat keeps both walkers symmetric, so the freshness comparison
-  // succeeds when both sides are symlinks.
-  it("R-0000685: treats symlinked files entries the same as symlinked source children", async () => {
+  // R-0000862: top-level package.json#files entries must be materialised
+  // artefacts. A symlinked files entry would be treated as mtime 0 by the
+  // freshness walker and could let a package with no real publish
+  // artefact slip through when the source side is also skipped as a
+  // symlink. Reject it before any registry side effect.
+  it("R-0000862: aborts when a package.json#files entry is a symlink", async () => {
     const commandRunner = createCommandRunner()
     const fs = createFs({
       mtimes: {
@@ -442,18 +439,17 @@ describe("publishWorkspacePackages", () => {
       symlinks: ["packages/paratix/dist", "packages/paratix/src/index.ts"],
     })
 
-    await publishWorkspacePackages({
-      availabilityDelayMilliseconds: 0,
-      availabilityRetries: 2,
-      commandRunner,
-      fs,
-    })
+    await assertRejectsWithMessage(
+      publishWorkspacePackages({
+        availabilityDelayMilliseconds: 0,
+        availabilityRetries: 2,
+        commandRunner,
+        fs,
+      }),
+      "referenced by package.json#files is a symbolic link"
+    )
 
-    // Both walkers report mtime 0 for the symlinked entries, so the
-    // freshness comparison is satisfied (0 >= 0). Without symmetric
-    // symlink handling the dist side would be 0 while the src side
-    // walked through to mtime 9999 and the publish branch would refuse.
-    assert.equal(hasCommandCall(commandRunner.calls, "pnpm"), true)
+    assert.equal(hasCommandCall(commandRunner.calls, "pnpm"), false)
   })
 
   // R-0000685: a missing `src/` directory previously leaked the raw
@@ -503,13 +499,11 @@ describe("publishWorkspacePackages", () => {
     assert.equal(hasCommandCall(commandRunner.calls, "pnpm"), false)
   })
 
-  // R-0000728: explain a stale-freshness verdict that was triggered by a
-  // symlinked artefact. The freshness check skips symlinks for safety
-  // (mtime 0), but that makes the staleness diagnostic confusing when a
-  // legitimate operator has a symlinked dist entry alongside a regular
-  // source tree. The error message must name the symlinked entry and
-  // direct the operator to materialise it before publishing.
-  it("R-0000728: explains stale freshness when triggered by a symlinked files entry", async () => {
+  // R-0000862: the symlink rejection must happen before the freshness
+  // comparison, so even a symlinked dist entry beside a newer regular
+  // source tree gets a direct fail-closed diagnostic instead of a stale
+  // mtime explanation.
+  it("R-0000862: rejects symlinked files entries before freshness comparison", async () => {
     const commandRunner = createCommandRunner()
     const symlinkedDistributionPath = "packages/paratix/dist"
     const fs = createFs({
@@ -535,7 +529,11 @@ describe("publishWorkspacePackages", () => {
     }
 
     assert.ok(caught, "publishWorkspacePackages should reject")
-    assert.equal(caught.message.includes("are symlinks"), true, caught.message)
+    assert.equal(
+      caught.message.includes("referenced by package.json#files is a symbolic link"),
+      true,
+      caught.message
+    )
     assert.equal(caught.message.includes(symlinkedDistributionPath), true, caught.message)
     assert.equal(caught.message.includes("Materialize"), true, caught.message)
     assert.equal(hasCommandCall(commandRunner.calls, "pnpm"), false)
