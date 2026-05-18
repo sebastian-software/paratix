@@ -304,48 +304,44 @@ async function applyCronJobState(parameters: {
 }): Promise<ModuleResult> {
   const { adoptOrphans, cronJob, marker, name, ssh, state, user } = parameters
 
-  try {
-    return await withMutexLock(ssh, {
-      lockName: crontabMutexLockName(user),
-      async section() {
-        const readResult = await readCrontab(ssh, user)
-        // R-0000272: surface crontab-read failures as a structured
-        // failedCommand result instead of throwing — see the matching
-        // change in cron.absent.apply for the full rationale.
-        if (readResult.kind === "error") {
-          return failedCommand(
-            `[cron.job: ${name} (${user})] crontab read failed`,
-            readResult.result
-          )
-        }
-        const lines = readResult.lines
-        const markerIndex = findMarkerIndex(lines, name)
+  // R-0000757: `withMutexLock` now returns a structured result; the outer
+  // try/catch is replaced with a `kind === "failed"` branch so lock failures
+  // and unexpected section throws surface as typed ModuleResults.
+  const lockResult = await withMutexLock(ssh, {
+    failureMessage: `[cron.job: ${name} (${user})] aborted`,
+    lockName: crontabMutexLockName(user),
+    async section(): Promise<ModuleResult> {
+      const readResult = await readCrontab(ssh, user)
+      // R-0000272: surface crontab-read failures as a structured
+      // failedCommand result instead of throwing — see the matching
+      // change in cron.absent.apply for the full rationale.
+      if (readResult.kind === "error") {
+        return failedCommand(`[cron.job: ${name} (${user})] crontab read failed`, readResult.result)
+      }
+      const lines = readResult.lines
+      const markerIndex = findMarkerIndex(lines, name)
 
-        const nextLines = computeCronJobMutation({
-          adoptOrphans,
-          cronJob,
-          lines,
-          marker,
-          markerIndex,
-          state,
-        })
-        if (nextLines === null) return { status: "ok" }
+      const nextLines = computeCronJobMutation({
+        adoptOrphans,
+        cronJob,
+        lines,
+        marker,
+        markerIndex,
+        state,
+      })
+      if (nextLines === null) return { status: "ok" }
 
-        const failure = await writeCrontab({
-          failureMessage: `[cron.job: ${name} (${user})] crontab removal failed`,
-          lines: nextLines,
-          ssh,
-          user,
-        })
-        if (failure) return failure
-        return { status: "changed" }
-      },
-    })
-  } catch (error) {
-    return failed(
-      `[cron.job: ${name} (${user})] aborted: ${error instanceof Error ? error.message : String(error)}`
-    )
-  }
+      const failure = await writeCrontab({
+        failureMessage: `[cron.job: ${name} (${user})] crontab removal failed`,
+        lines: nextLines,
+        ssh,
+        user,
+      })
+      if (failure) return failure
+      return { status: "changed" }
+    },
+  })
+  return lockResult.kind === "ok" ? lockResult.value : lockResult.failure
 }
 
 /**
@@ -463,35 +459,32 @@ export const cron = {
       async apply(ssh: null | SshConnection): Promise<ModuleResult> {
         if (!ssh) return failed(`[cron.absent: ${name} (${user})] SSH connection is required`)
 
-        try {
-          return await withMutexLock(ssh, {
-            lockName: crontabMutexLockName(user),
-            async section() {
-              const readResult = await readCrontab(ssh, user)
-              // R-0000272: surface crontab-read failures as a structured
-              // failedCommand result instead of throwing — the runner can then
-              // render masked stdout/stderr through CommandError like every
-              // other apply failure path.
-              if (readResult.kind === "error") {
-                return failedCommand(
-                  `[cron.absent: ${name} (${user})] crontab read failed`,
-                  readResult.result
-                )
-              }
-              const lines = readResult.lines
-              const markerIndex = findMarkerIndex(lines, name)
-              if (markerIndex === -1) return { status: "ok" }
+        // R-0000757: `withMutexLock` now returns a structured result; the
+        // outer try/catch becomes a kind branch so lock failures and section
+        // throws surface as typed ModuleResults.
+        const lockResult = await withMutexLock(ssh, {
+          failureMessage: `[cron.absent: ${name} (${user})] aborted`,
+          lockName: crontabMutexLockName(user),
+          async section(): Promise<ModuleResult> {
+            const readResult = await readCrontab(ssh, user)
+            // R-0000272: surface crontab-read failures as a structured
+            // failedCommand result instead of throwing — the runner can then
+            // render masked stdout/stderr through CommandError like every
+            // other apply failure path.
+            if (readResult.kind === "error") {
+              return failedCommand(
+                `[cron.absent: ${name} (${user})] crontab read failed`,
+                readResult.result
+              )
+            }
+            const lines = readResult.lines
+            const markerIndex = findMarkerIndex(lines, name)
+            if (markerIndex === -1) return { status: "ok" }
 
-              return applyCronAbsentMutation({ lines, markerIndex, name, ssh, user })
-            },
-          })
-        } catch (error) {
-          return failed(
-            `[cron.absent: ${name} (${user})] aborted: ${
-              error instanceof Error ? error.message : String(error)
-            }`
-          )
-        }
+            return applyCronAbsentMutation({ lines, markerIndex, name, ssh, user })
+          },
+        })
+        return lockResult.kind === "ok" ? lockResult.value : lockResult.failure
       },
 
       async check(ssh: null | SshConnection): Promise<"needs-apply" | "ok"> {

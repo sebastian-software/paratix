@@ -758,7 +758,10 @@ describe("withMutexLock", () => {
     )
   })
 
-  it("throws the flag directory creation failure without entering the contention loop", async () => {
+  it("returns a structured failure when the flag directory cannot be created", async () => {
+    // R-0000757: `withMutexLock` no longer throws on lock-acquire failures
+    // — it returns `{ kind: "failed", failure }` carrying a typed
+    // `failed` ModuleResult so callers can propagate it without try/catch.
     const lockName = "mutex-dir-failure"
     const ssh = createMockSsh({
       "mkdir -p /var/lib/paratix/flags": {
@@ -768,16 +771,26 @@ describe("withMutexLock", () => {
     })
     let sectionCalls = 0
 
-    await expect(
-      withMutexLock(ssh, {
-        lockName,
-        async section() {
-          sectionCalls += 1
-          await Promise.resolve()
-        },
-      })
-    ).rejects.toThrow(/failed to create \/var\/lib\/paratix\/flags/v)
+    const result = await withMutexLock(ssh, {
+      failureMessage: "[test] failed to acquire mutex",
+      lockName,
+      async section() {
+        sectionCalls += 1
+        await Promise.resolve()
+      },
+    })
 
+    expect(result).toMatchObject({
+      failure: {
+        error: expect.objectContaining({
+          message: expect.stringMatching(
+            /\[test\] failed to acquire mutex: .*failed to create \/var\/lib\/paratix\/flags/v
+          ),
+        }),
+        status: "failed",
+      },
+      kind: "failed",
+    })
     expect(sectionCalls).toBe(0)
     expect(ssh.calls).not.toContain(`mkdir ${FLAGS_DIRECTORY}/'${lockName}'`)
     expect(ssh.calls.some((call) => call.startsWith("i=0; while [ -d"))).toBe(false)
@@ -789,6 +802,7 @@ describe("withMutexLock", () => {
     let sectionCalls = 0
 
     const result = await withMutexLock(ssh, {
+      failureMessage: "[test] mutex section failed",
       lockName,
       async section() {
         await Promise.resolve()
@@ -797,7 +811,7 @@ describe("withMutexLock", () => {
       },
     })
 
-    expect(result).toBe("value")
+    expect(result).toStrictEqual({ kind: "ok", value: "value" })
     expect(sectionCalls).toBe(1)
     expect(ssh.calls).toContain(`mkdir ${FLAGS_DIRECTORY}/'${lockName}'`)
     // R-0000634: release is now a single shell statement that runs the
@@ -805,14 +819,49 @@ describe("withMutexLock", () => {
     expect(ssh.calls.some((call) => isVerifiedReleaseCall(call, lockName))).toBe(true)
   })
 
-  it("releases the lock even when the section throws", async () => {
+  it("converts a section throw into a structured failure and still releases the lock", async () => {
+    // R-0000757: by default, section throws are captured and surfaced as a
+    // typed `failed` ModuleResult so callers can drop their try/catch
+    // wrappers. The lock release still runs in the `finally` path.
     const lockName = "etc-hosts-mutex"
     const ssh = createSharedMutexMockSsh(lockName)
-    const error = new Error("boom")
+
+    const result = await withMutexLock(ssh, {
+      failureMessage: "[test] mutex section failed",
+      lockName,
+      async section() {
+        await Promise.resolve()
+        throw new Error("boom")
+      },
+    })
+
+    expect(result).toMatchObject({
+      failure: {
+        error: expect.objectContaining({
+          message: "[test] mutex section failed: boom",
+        }),
+        status: "failed",
+      },
+      kind: "failed",
+    })
+    // R-0000634: release is now a single shell statement that runs the
+    // ownership check, marker removal and `rmdir` atomically.
+    expect(ssh.calls.some((call) => isVerifiedReleaseCall(call, lockName))).toBe(true)
+  })
+
+  it("rethrows section errors when propagateSectionThrows is set, after releasing the lock", async () => {
+    // R-0000757: callers that own reconnect/recovery (e.g. `sshd.port`) can
+    // opt into the legacy propagation semantics so the upstream apply path
+    // keeps seeing the underlying transport error verbatim.
+    const lockName = "etc-hosts-mutex"
+    const ssh = createSharedMutexMockSsh(lockName)
+    const error = new Error("transport boom")
 
     await expect(
       withMutexLock(ssh, {
+        failureMessage: "[test] should not be used",
         lockName,
+        propagateSectionThrows: true,
         async section() {
           await Promise.resolve()
           throw error
@@ -820,8 +869,6 @@ describe("withMutexLock", () => {
       })
     ).rejects.toBe(error)
 
-    // R-0000634: release is now a single shell statement that runs the
-    // ownership check, marker removal and `rmdir` atomically.
     expect(ssh.calls.some((call) => isVerifiedReleaseCall(call, lockName))).toBe(true)
   })
 
@@ -833,6 +880,7 @@ describe("withMutexLock", () => {
     const ordering: string[] = []
 
     const first = withMutexLock(ssh, {
+      failureMessage: "[test] mutex section failed",
       lockName,
       async section() {
         ordering.push("first-enter")
@@ -846,6 +894,7 @@ describe("withMutexLock", () => {
     await firstStarted.promise
 
     const second = withMutexLock(ssh, {
+      failureMessage: "[test] mutex section failed",
       lockName,
       async section() {
         ordering.push("second-enter")
@@ -858,14 +907,21 @@ describe("withMutexLock", () => {
     finishFirst.resolve()
     const results = await Promise.all([first, second])
 
-    expect(results).toStrictEqual([1, 2])
+    expect(results).toStrictEqual([
+      { kind: "ok", value: 1 },
+      { kind: "ok", value: 2 },
+    ])
     expect(ordering).toStrictEqual(["first-enter", "first-leave", "second-enter", "second-leave"])
   })
 
   it("rejects an invalid lockName", async () => {
+    // Validation errors are programmer mistakes and stay as synchronous
+    // throws — only runtime failures (acquire/wait/section-throw) are
+    // converted into the structured `MutexLockResult` shape.
     const ssh = createMockSsh()
     await expect(
       withMutexLock(ssh, {
+        failureMessage: "[test] mutex section failed",
         lockName: "bad lock",
         async section() {
           await Promise.resolve()
@@ -1066,22 +1122,32 @@ describe("acquireFlagLock – holder marker write failures (R-0000670)", () => {
   })
 
   it("withMutexLock surfaces the marker-write failure instead of running the section", async () => {
+    // R-0000757: lock-acquire failures (holder-marker write rejection) now
+    // surface as `{ kind: "failed", failure }` rather than a thrown error.
     const lockName = "marker-write-failure-mutex"
     // withMutexLock uses `lockName` directly as the lock directory name
     // (no `.lock` suffix), so the helper must be wired with the bare name.
     const ssh = buildHolderMarkerFailureSsh(lockName, "fail")
     let sectionCalls = 0
 
-    await expect(
-      withMutexLock(ssh, {
-        lockName,
-        async section() {
-          sectionCalls += 1
-          await Promise.resolve()
-        },
-      })
-    ).rejects.toThrow(/failed to write flag lock holder marker/v)
+    const result = await withMutexLock(ssh, {
+      failureMessage: "[test] mutex acquire failed",
+      lockName,
+      async section() {
+        sectionCalls += 1
+        await Promise.resolve()
+      },
+    })
 
+    expect(result).toMatchObject({
+      failure: {
+        error: expect.objectContaining({
+          message: expect.stringMatching(/failed to write flag lock holder marker/v),
+        }),
+        status: "failed",
+      },
+      kind: "failed",
+    })
     expect(sectionCalls).toBe(0)
     expect(ssh.calls).toContain(`rmdir -- ${FLAGS_DIRECTORY}/'${lockName}'`)
   })

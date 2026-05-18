@@ -1,6 +1,6 @@
 import type { ModuleResult, SshConnection } from "../types.js"
 
-import { failedCommand } from "../moduleFailure.js"
+import { failed, failedCommand } from "../moduleFailure.js"
 import { shellQuote } from "../ssh.js"
 import {
   acquireFlagLock,
@@ -106,6 +106,19 @@ export async function applyWithFlagLock(
 }
 
 /**
+ * Structured outcome of {@link withMutexLock}.
+ *
+ * R-0000757: lock acquisition failures, wait-timeouts, and unexpected throws
+ * from the critical section are surfaced as a structured `failed` ModuleResult
+ * via the `failed` variant. Successful sections expose their return value via
+ * the `ok` variant. Callers match on `kind` instead of catching thrown errors
+ * so the failure path stays symmetric with every other module helper.
+ */
+export type MutexLockResult<TValue> =
+  | { failure: ModuleResult; kind: "failed" }
+  | { kind: "ok"; value: TValue }
+
+/**
  * Run a critical section while holding a named mutex lock on the remote host.
  *
  * Unlike {@link applyWithFlagLock}, this helper does NOT consult or update a
@@ -117,85 +130,156 @@ export async function applyWithFlagLock(
  * and reuses the stale-reclaim and wait-with-backoff machinery so a crashed
  * holder cannot deadlock future runs.
  *
+ * R-0000757: returns a structured {@link MutexLockResult} so callers can
+ * branch on `kind` instead of wrapping the call in `try/catch`. Lock-acquire
+ * failures, wait timeouts, and unexpected throws from `section` are surfaced
+ * as a `failed` ModuleResult whose message is prefixed with
+ * `parameters.failureMessage`. Validation errors on the lock name remain
+ * synchronous throws because they indicate a programmer mistake.
+ *
+ * Callers that want section throws to propagate verbatim (typically when the
+ * underlying transport failure should bubble up to a higher recovery layer)
+ * can pass `propagateSectionThrows: true`; only lock-acquire and wait-timeout
+ * failures are then converted into a structured `{ kind: "failed" }` result.
+ *
  * @param ssh - The active SSH connection.
  * @param parameters - Lock and section parameters.
+ * @param parameters.failureMessage - Operator-facing prefix used when the lock
+ *   could not be acquired or when a section throw is converted (see
+ *   `propagateSectionThrows`). The underlying reason is appended after `: `.
  * @param parameters.lockName - Lock identifier; reused processes targeting the
  *   same resource must use the same name.
+ * @param parameters.propagateSectionThrows - When `true`, section throws are
+ *   rethrown instead of being converted into a `failed` ModuleResult. Defaults
+ *   to `false`.
  * @param parameters.section - Async function executed while holding the lock.
  * @param parameters.staleSeconds - Optional stale-lock reclaim threshold.
  * @param parameters.waitSeconds - Optional wait window when contended.
- * @returns The value returned by `section`.
+ * @returns Either `{ kind: "ok", value }` with the section's return value, or
+ *   `{ kind: "failed", failure }` carrying a failed `ModuleResult`.
  */
 export async function withMutexLock<TValue>(
   ssh: SshConnection,
   parameters: {
+    failureMessage: string
     lockName: string
+    propagateSectionThrows?: boolean
     section: () => Promise<TValue>
     /** Override the default stale-lock threshold (seconds) for tests. */
     staleSeconds?: number
     waitSeconds?: number
   }
-): Promise<TValue> {
+): Promise<MutexLockResult<TValue>> {
   validateFlagName(parameters.lockName, "lockName")
-  const result = await acquireMutexAndRun(ssh, parameters)
-  if (result.kind === "ok") return result.value
-  throw new Error(result.error)
+  return acquireMutexAndRun(ssh, parameters)
 }
-
-type MutexRunResult<TValue> = { error: string; kind: "error" } | { kind: "ok"; value: TValue }
 
 async function acquireMutexAndRun<TValue>(
   ssh: SshConnection,
   parameters: {
+    failureMessage: string
     lockName: string
+    propagateSectionThrows?: boolean
     section: () => Promise<TValue>
     staleSeconds?: number
     waitSeconds?: number
   }
-): Promise<MutexRunResult<TValue>> {
+): Promise<MutexLockResult<TValue>> {
   const acquireResult = await acquireFlagLock(ssh, parameters.lockName)
-  if (acquireResult.kind === "failed") return moduleFailureToMutexError(acquireResult.failure)
+  if (acquireResult.kind === "failed") {
+    return {
+      failure: prefixModuleFailure(parameters.failureMessage, acquireResult.failure),
+      kind: "failed",
+    }
+  }
   if (acquireResult.kind === "acquired") {
     return runMutexSection(ssh, { ...parameters, holderToken: acquireResult.holderToken })
   }
   const waitResult = await waitForMutexLockRelease(ssh, parameters)
-  if (waitResult.kind !== "resolved") return waitResult
+  if (waitResult.kind === "failed") return waitResult
   return acquireMutexAndRun(ssh, parameters)
 }
 
-function moduleFailureToMutexError(result: ModuleResult): MutexRunResult<never> {
-  if (result.status !== "failed") {
-    return { error: "[moduleHelpers] failed to acquire mutex lock", kind: "error" }
-  }
-  return {
-    error: result.error?.message ?? "[moduleHelpers] failed to acquire mutex lock",
-    kind: "error",
-  }
+/**
+ * Compose the operator-facing failure prefix with the underlying error message
+ * coming from {@link acquireFlagLock} or {@link waitForMutexLockRelease}.
+ *
+ * R-0000757: keeps the upstream `error` (typically a `CommandError` carrying
+ * stdout/stderr) attached to the wrapped failure so the runner can render the
+ * full diagnostic — only the leading message line is rewritten with the
+ * operator-facing context provided by the caller.
+ *
+ * @param prefix - The operator-facing message that contextualizes the failure.
+ * @param failure - The structured failure returned by `acquireFlagLock` or
+ *   `waitForMutexLockRelease`.
+ * @returns A `failed` ModuleResult whose error message starts with `prefix`
+ *   followed by `: ` and the underlying reason.
+ */
+function prefixModuleFailure(prefix: string, failure: ModuleResult): ModuleResult {
+  const reason = failure.error?.message ?? "unknown reason"
+  return failed(`${prefix}: ${reason}`)
 }
 
 async function runMutexSection<TValue>(
   ssh: SshConnection,
-  parameters: { holderToken: string; lockName: string; section: () => Promise<TValue> }
-): Promise<MutexRunResult<TValue>> {
+  parameters: {
+    failureMessage: string
+    holderToken: string
+    lockName: string
+    propagateSectionThrows?: boolean
+    section: () => Promise<TValue>
+  }
+): Promise<MutexLockResult<TValue>> {
+  const sectionOutcome = await runSectionCapturingErrors(parameters)
+  // R-0000619: a `releaseFlagLock` failure (typically because the SSH
+  // connection died during a sshd restart and was not recovered before the
+  // release ran) must not replace the section's own result. The release
+  // already uses `ignoreExitCode: true`, but the underlying `ssh.exec`
+  // implementation may still reject when the transport is gone. Swallow
+  // those failures here — the lock directory will be reclaimed by the
+  // stale-lock detection on the next run, and callers that need to surface
+  // the stale-lock path do so via `flagLockDisplayPath` from their own
+  // error-handling path.
+  // R-0000634: pass the acquire-time holder token so release only removes
+  // the lock when the marker still belongs to us.
+  try {
+    await releaseFlagLock(ssh, parameters.lockName, parameters.holderToken)
+  } catch {
+    // Best-effort cleanup; never override the section result.
+  }
+  // R-0000757: when the caller opted to propagate section throws, rethrow the
+  // captured error AFTER the release ran so the lock is always cleaned up.
+  if (sectionOutcome.kind === "threw") throw sectionOutcome.error
+  return sectionOutcome.result
+}
+
+type SectionCaptureOutcome<TValue> =
+  | { error: unknown; kind: "threw" }
+  | { kind: "captured"; result: MutexLockResult<TValue> }
+
+async function runSectionCapturingErrors<TValue>(parameters: {
+  failureMessage: string
+  propagateSectionThrows?: boolean
+  section: () => Promise<TValue>
+}): Promise<SectionCaptureOutcome<TValue>> {
   try {
     const value = await parameters.section()
-    return { kind: "ok", value }
-  } finally {
-    // R-0000619: a `releaseFlagLock` failure (typically because the SSH
-    // connection died during a sshd restart and was not recovered before the
-    // release ran) must not replace the section's own result. The release
-    // already uses `ignoreExitCode: true`, but the underlying `ssh.exec`
-    // implementation may still reject when the transport is gone. Swallow
-    // those failures here — the lock directory will be reclaimed by the
-    // stale-lock detection on the next run, and callers that need to surface
-    // the stale-lock path do so via `flagLockDisplayPath` from their own
-    // error-handling path.
-    // R-0000634: pass the acquire-time holder token so release only removes
-    // the lock when the marker still belongs to us.
-    try {
-      await releaseFlagLock(ssh, parameters.lockName, parameters.holderToken)
-    } catch {
-      // Best-effort cleanup; never override the section result.
+    return { kind: "captured", result: { kind: "ok", value } }
+  } catch (error) {
+    // R-0000757: convert section throws into a typed `failed` ModuleResult so
+    // callers no longer need a surrounding try/catch. Callers that explicitly
+    // opt out via `propagateSectionThrows` get the original throw back (see
+    // `releaseUpgrade.upgrade`, where the upstream layer owns recovery).
+    if (parameters.propagateSectionThrows === true) {
+      return { error, kind: "threw" }
+    }
+    const reason = error instanceof Error ? error.message : String(error)
+    return {
+      kind: "captured",
+      result: {
+        failure: failed(`${parameters.failureMessage}: ${reason}`),
+        kind: "failed",
+      },
     }
   }
 }
@@ -203,11 +287,12 @@ async function runMutexSection<TValue>(
 async function waitForMutexLockRelease(
   ssh: SshConnection,
   parameters: {
+    failureMessage: string
     lockName: string
     staleSeconds?: number
     waitSeconds?: number
   }
-): Promise<{ error: string; kind: "error" } | { kind: "resolved" }> {
+): Promise<{ failure: ModuleResult; kind: "failed" } | { kind: "resolved" }> {
   const lock = flagPath(parameters.lockName)
   const waitSeconds = String(parameters.waitSeconds ?? FLAG_LOCK_WAIT_SECONDS)
   const command =
@@ -221,8 +306,10 @@ async function waitForMutexLockRelease(
     return { kind: "resolved" }
   }
   return {
-    error: `[moduleHelpers] timed out waiting for mutex lock ${parameters.lockName}`,
-    kind: "error",
+    failure: failed(
+      `${parameters.failureMessage}: timed out waiting for mutex lock ${parameters.lockName}`
+    ),
+    kind: "failed",
   }
 }
 

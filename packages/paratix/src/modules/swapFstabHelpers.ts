@@ -76,44 +76,39 @@ export async function ensureSwapFstabState(parameters: {
   path: string
   ssh: SshConnection
 }): Promise<boolean | ModuleResult> {
-  try {
-    return await withMutexLock(parameters.ssh, {
-      lockName: FSTAB_FILE_MUTEX,
-      async section() {
-        const fstabContent = await parameters.ssh.readFile(FSTAB_PATH)
-        const currentEntry = findFstabEntry(fstabContent, parameters.path)
+  // R-0000757: `withMutexLock` now returns a structured `MutexLockResult`,
+  // so the outer try/catch is replaced with a `kind === "failed"` branch.
+  const lockResult = await withMutexLock(parameters.ssh, {
+    failureMessage: `[swap.file: ${parameters.path}] failed to update ${FSTAB_PATH}`,
+    lockName: FSTAB_FILE_MUTEX,
+    async section() {
+      const fstabContent = await parameters.ssh.readFile(FSTAB_PATH)
+      const currentEntry = findFstabEntry(fstabContent, parameters.path)
 
-        if (parameters.desiredLine == null) {
-          if (currentEntry == null) return false
-          const removedContent = removeFstabEntry(fstabContent, parameters.path)
-          await guardedWriteFile(parameters.ssh, {
-            mode: FSTAB_MODE,
-            newContent: removedContent,
-            originalContent: fstabContent,
-            remotePath: FSTAB_PATH,
-          })
-          return true
-        }
-
-        if (currentEntry === parameters.desiredLine) return false
-        const updatedContent = upsertFstabEntry(
-          fstabContent,
-          parameters.path,
-          parameters.desiredLine
-        )
+      if (parameters.desiredLine == null) {
+        if (currentEntry == null) return false
+        const removedContent = removeFstabEntry(fstabContent, parameters.path)
         await guardedWriteFile(parameters.ssh, {
           mode: FSTAB_MODE,
-          newContent: updatedContent,
+          newContent: removedContent,
           originalContent: fstabContent,
           remotePath: FSTAB_PATH,
         })
         return true
-      },
-    })
-  } catch (error) {
-    const reason = error instanceof Error ? error.message : String(error)
-    return failed(`[swap.file: ${parameters.path}] failed to update ${FSTAB_PATH}: ${reason}`)
-  }
+      }
+
+      if (currentEntry === parameters.desiredLine) return false
+      const updatedContent = upsertFstabEntry(fstabContent, parameters.path, parameters.desiredLine)
+      await guardedWriteFile(parameters.ssh, {
+        mode: FSTAB_MODE,
+        newContent: updatedContent,
+        originalContent: fstabContent,
+        remotePath: FSTAB_PATH,
+      })
+      return true
+    },
+  })
+  return lockResult.kind === "ok" ? lockResult.value : lockResult.failure
 }
 
 // R-0000495: read /etc/fstab under the same mutex that protects writes so
@@ -123,7 +118,13 @@ export async function ensureSwapFstabState(parameters: {
 // still owns lock acquisition/release; only the inner readFile is allowed
 // to fail soft via try/catch so the lock is always released.
 async function readFstabUnderLock(ssh: SshConnection): Promise<ModuleResult | string> {
-  return withMutexLock(ssh, {
+  // R-0000757: `withMutexLock` returns a structured result; lock-acquire
+  // failures surface via `kind === "failed"`. The section itself never
+  // throws (the inner `try/catch` already converts read failures into a
+  // typed `failed` ModuleResult), so the `ok` branch may carry either a
+  // string or a ModuleResult — both are valid return values for this helper.
+  const lockResult = await withMutexLock(ssh, {
+    failureMessage: `[swap.file] failed to read ${FSTAB_PATH}`,
     lockName: FSTAB_FILE_MUTEX,
     async section() {
       try {
@@ -134,6 +135,7 @@ async function readFstabUnderLock(ssh: SshConnection): Promise<ModuleResult | st
       }
     },
   })
+  return lockResult.kind === "ok" ? lockResult.value : lockResult.failure
 }
 
 /**

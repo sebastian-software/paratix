@@ -1324,10 +1324,17 @@ async function applySshdConfig(
   // same host cannot interleave with our write or with the rollback path. The
   // mutex helper wraps both successful and failed sections with cleanup, so
   // the lock is released even when an inner step throws.
-  return withMutexLock(ssh, {
+  // R-0000757: `withMutexLock` now returns a structured `MutexLockResult`.
+  // Section throws are intentionally propagated via `propagateSectionThrows`
+  // so the upstream apply layer can fall back to its reconnect/rollback path
+  // when the sshd restart breaks the SSH transport mid-section.
+  const lockResult = await withMutexLock(ssh, {
+    failureMessage: `[${parameters.settingNames}] failed to acquire sshd_config mutex`,
     lockName: SSHD_CONFIG_FILE_MUTEX,
+    propagateSectionThrows: true,
     section: async () => applySshdConfigUnderLock(ssh, parameters),
   })
+  return lockResult.kind === "ok" ? lockResult.value : lockResult.failure
 }
 
 async function applySshdConfigUnderLock(
@@ -1705,10 +1712,16 @@ async function applySshdPort(ssh: SshConnection, targetPort: number): Promise<Mo
   // so two parallel apply paths cannot race on the read-modify-write cycle.
   // The lock is released through the helper's finally block, including when
   // the inner restart path throws or rolls back.
-  return withMutexLock(ssh, {
+  // R-0000757: `withMutexLock` now returns a structured `MutexLockResult`.
+  // Section throws propagate via `propagateSectionThrows` so the upstream
+  // apply layer keeps owning reconnect / fallback recovery.
+  const lockResult = await withMutexLock(ssh, {
+    failureMessage: `[sshd.port: ${String(targetPort)}] failed to acquire sshd_config mutex`,
     lockName: SSHD_CONFIG_FILE_MUTEX,
+    propagateSectionThrows: true,
     section: async () => applySshdPortUnderLock(ssh, targetPort),
   })
+  return lockResult.kind === "ok" ? lockResult.value : lockResult.failure
 }
 
 async function applySshdPortUnderLock(

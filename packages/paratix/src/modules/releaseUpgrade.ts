@@ -914,30 +914,26 @@ async function runDebianUpgradeCriticalSection(parameters: {
   return runDebianAptPipelineAfterSourcesRewrite({ options, snapshots, ssh })
 }
 
-function isMutexLockFailure(error: unknown): boolean {
-  if (!(error instanceof Error)) return false
-  return (
-    error.message.includes("[moduleHelpers]") ||
-    error.message.includes(DEBIAN_RELEASE_UPGRADE_MUTEX) ||
-    error.message.includes("/var/lib/paratix/flags")
-  )
-}
-
 async function runDebianUpgradeWithMutex(parameters: {
   options: ReleaseUpgradeOptions
   ssh: SshConnection
   targetCodename: string
 }): Promise<ModuleResult> {
-  try {
-    return await withMutexLock(parameters.ssh, {
-      lockName: DEBIAN_RELEASE_UPGRADE_MUTEX,
-      section: async () => runDebianUpgradeCriticalSection(parameters),
-    })
-  } catch (error) {
-    if (!isMutexLockFailure(error)) throw error
-    const reason = error instanceof Error ? error.message : String(error)
-    return failed(`[releaseUpgrade.upgrade] failed to acquire release upgrade mutex: ${reason}`)
-  }
+  // R-0000757: `withMutexLock` now returns a structured `MutexLockResult`,
+  // so lock-acquire failures surface as typed `failed` ModuleResults via the
+  // `failed` variant. Section throws from `runDebianUpgradeCriticalSection`
+  // (e.g. a transport failure inside an apt pipeline step) intentionally
+  // propagate to the surrounding apply path via `propagateSectionThrows`,
+  // preserving the pre-R-0000757 separation between mutex failures and
+  // application-level errors that the previous `isMutexLockFailure` heuristic
+  // tried to distinguish.
+  const lockResult = await withMutexLock(parameters.ssh, {
+    failureMessage: "[releaseUpgrade.upgrade] failed to acquire release upgrade mutex",
+    lockName: DEBIAN_RELEASE_UPGRADE_MUTEX,
+    propagateSectionThrows: true,
+    section: async () => runDebianUpgradeCriticalSection(parameters),
+  })
+  return lockResult.kind === "ok" ? lockResult.value : lockResult.failure
 }
 
 /**

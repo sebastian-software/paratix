@@ -253,11 +253,6 @@ function removeFstabEntry(fstabContent: string, path: string): string {
   return `${result.join("\n")}\n`
 }
 
-function fstabMutationFailure(moduleName: string, path: string, error: unknown): ModuleResult {
-  const reason = error instanceof Error ? error.message : String(error)
-  return failed(`[${moduleName}: ${path}] failed to update ${FSTAB_PATH}: ${reason}`)
-}
-
 async function removePersistedMountIfPresent(
   ssh: SshConnection,
   path: string
@@ -265,26 +260,26 @@ async function removePersistedMountIfPresent(
   // R-0000169: serialize read-modify-write on /etc/fstab so concurrent
   // Paratix runs cannot lose competing fstab edits between the read and the
   // write step.
-  try {
-    return await withMutexLock(ssh, {
-      lockName: FSTAB_FILE_MUTEX,
-      async section() {
-        const fstabContent = await ssh.readFile(FSTAB_PATH)
-        const entry = findFstabEntry(fstabContent, path)
-        if (entry === null) return false
-        const newContent = removeFstabEntry(fstabContent, path)
-        await guardedWriteFile(ssh, {
-          mode: FSTAB_MODE,
-          newContent,
-          originalContent: fstabContent,
-          remotePath: FSTAB_PATH,
-        })
-        return true
-      },
-    })
-  } catch (error) {
-    return fstabMutationFailure(MOUNT_ABSENT, path, error)
-  }
+  // R-0000757: `withMutexLock` now returns a structured result, so the outer
+  // try/catch is replaced with a `kind === "failed"` branch.
+  const lockResult = await withMutexLock(ssh, {
+    failureMessage: `[${MOUNT_ABSENT}: ${path}] failed to update ${FSTAB_PATH}`,
+    lockName: FSTAB_FILE_MUTEX,
+    async section() {
+      const fstabContent = await ssh.readFile(FSTAB_PATH)
+      const entry = findFstabEntry(fstabContent, path)
+      if (entry === null) return false
+      const newContent = removeFstabEntry(fstabContent, path)
+      await guardedWriteFile(ssh, {
+        mode: FSTAB_MODE,
+        newContent,
+        originalContent: fstabContent,
+        remotePath: FSTAB_PATH,
+      })
+      return true
+    },
+  })
+  return lockResult.kind === "ok" ? lockResult.value : lockResult.failure
 }
 
 type EnsureLiveMountParameters = {
@@ -489,26 +484,26 @@ async function ensureFstabEntry(
   // R-0000169: serialize read-modify-write on /etc/fstab so concurrent
   // Paratix runs cannot lose competing fstab edits between the read and the
   // write step.
-  try {
-    return await withMutexLock(ssh, {
-      lockName: FSTAB_FILE_MUTEX,
-      async section() {
-        const fstabContent = await ssh.readFile(FSTAB_PATH)
-        const existingEntry = findFstabEntry(fstabContent, path)
-        if (existingEntry === desiredLine) return false
-        const newContent = upsertFstabEntry(fstabContent, path, desiredLine)
-        await guardedWriteFile(ssh, {
-          mode: FSTAB_MODE,
-          newContent,
-          originalContent: fstabContent,
-          remotePath: FSTAB_PATH,
-        })
-        return true
-      },
-    })
-  } catch (error) {
-    return fstabMutationFailure(MOUNT_PRESENT, path, error)
-  }
+  // R-0000757: `withMutexLock` now returns a structured result; the outer
+  // try/catch is replaced by a `kind === "failed"` branch.
+  const lockResult = await withMutexLock(ssh, {
+    failureMessage: `[${MOUNT_PRESENT}: ${path}] failed to update ${FSTAB_PATH}`,
+    lockName: FSTAB_FILE_MUTEX,
+    async section() {
+      const fstabContent = await ssh.readFile(FSTAB_PATH)
+      const existingEntry = findFstabEntry(fstabContent, path)
+      if (existingEntry === desiredLine) return false
+      const newContent = upsertFstabEntry(fstabContent, path, desiredLine)
+      await guardedWriteFile(ssh, {
+        mode: FSTAB_MODE,
+        newContent,
+        originalContent: fstabContent,
+        remotePath: FSTAB_PATH,
+      })
+      return true
+    },
+  })
+  return lockResult.kind === "ok" ? lockResult.value : lockResult.failure
 }
 
 /**
