@@ -872,13 +872,11 @@ describe("cron.job", () => {
     expect(writeInput).toContain("0 5 * * * /other.sh")
   })
 
-  // R-0000760: a pre-existing identical line must NOT trigger a duplicate
-  // append. The previous R-0000697 behaviour appended a fresh marker + job
-  // pair and accepted the visible duplicate; R-0000760 strengthens the
-  // contract so the present mutation splices the marker in front of the
-  // existing exact-match line instead, leaving a single managed entry
-  // regardless of the `adoptOrphans` opt-in.
-  it("R-0000760: splices marker in front of existing exact match without adoptOrphans (state: present)", async () => {
+  // R-0000864: without the `adoptOrphans` opt-in, a marker-less exact match
+  // may be user-authored and must not be silently adopted. Keep the conflict
+  // visible by appending the managed pair and leaving the original line
+  // untouched.
+  it("keeps an exact-match user line visible without adoptOrphans (state: present)", async () => {
     const job = "0 3 * * * /backup.sh"
     const mockSsh = createMockSsh({
       "crontab -u 'alice' -l": {
@@ -891,10 +889,9 @@ describe("cron.job", () => {
     expect(result.status).toBe("changed")
     const writeInput = findCrontabWriteInput(mockSsh)
     expect(writeInput).toBeDefined()
-    // The job line appears exactly once — the marker was spliced in front
-    // of the existing line rather than producing a parallel duplicate.
+    // The original user line remains and the managed pair is appended.
     const jobOccurrences = writeInput!.split("\n").filter((line) => line === job).length
-    expect(jobOccurrences).toBe(1)
+    expect(jobOccurrences).toBe(2)
     const expectedMarker = taggedMarker("backup", job)
     expect(writeInput).toContain(`${expectedMarker}\n${job}`)
     expect(writeInput).toContain("0 5 * * * /other.sh")

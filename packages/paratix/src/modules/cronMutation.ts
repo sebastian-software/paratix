@@ -61,11 +61,7 @@ export type PresentMutationArguments = {
  * @returns The new crontab lines, or `null` when no write is needed.
  */
 export function computePresentMutation(mutation: PresentMutationArguments): null | string[] {
-  // R-0000760: `adoptOrphans` no longer changes the marker-less code path
-  // (we always splice instead of producing a duplicate). It is consumed
-  // here only to keep the destructured signature stable for callers; the
-  // type field is still exported so future opt-ins can hook back in.
-  const { cronJob, lines, marker, markerIndex } = mutation
+  const { adoptOrphans, cronJob, lines, marker, markerIndex } = mutation
 
   // R-0000081: short-circuit when the marker already carries the desired
   // hash tag and the following line already matches the cron job. Without
@@ -98,19 +94,6 @@ export function computePresentMutation(mutation: PresentMutationArguments): null
     // flag explicitly. Without the flag, append a fresh marker + job and
     // accept the (visible) duplicate over silently grabbing a user line.
     //
-    // R-0000760: even without `adoptOrphans`, refuse to write a fresh
-    // marker + job pair when an exact-match line already exists in the
-    // crontab. The previous append-anyway behaviour produced two
-    // byte-identical job lines running side by side — a duplicate that
-    // a subsequent `check()` could not detect (the marker pair matched,
-    // the orphan elsewhere was invisible). The conservative remediation
-    // is to splice the marker in front of the existing line so the
-    // crontab ends up with a single managed entry: this differs from
-    // R-0000697 only in that the duplicate would have been *paratix's
-    // own work*, not a user-authored line — the line was already there
-    // before apply ran, so adopting it cannot delete user content that
-    // the previous behaviour would not also have left behind.
-    //
     // R-0000699: the orphan match uses a strict exact-string compare
     // (`lines.indexOf(cronJob)`) and intentionally does NOT normalize
     // whitespace, tabs vs spaces, leading/trailing spaces or interior
@@ -129,18 +112,18 @@ export function computePresentMutation(mutation: PresentMutationArguments): null
     const orphanIndex = lines.indexOf(cronJob)
     if (orphanIndex === -1) {
       next.push(marker, cronJob)
-    } else {
-      // R-0000760: splice the marker in front of the existing exact
-      // match instead of appending a fresh pair. The previous append
-      // path produced two byte-identical job lines that ran in
-      // parallel — and the duplicate could not be detected by a later
-      // `check()` because the appended marker + job pair always passed
-      // its own integrity probe. Adopting the existing line (the same
-      // operation R-0000697 gated behind `adoptOrphans`) is now
-      // unconditional: the line was already present before apply, so
-      // the duplicate would have been paratix's own residue from a
-      // legacy-marker `cron.absent` cycle.
+    } else if (adoptOrphans) {
+      // R-0000676/R-0000697: only the explicit opt-in may splice the
+      // marker in front of a marker-less exact-match line. Without that
+      // opt-in, the line could be user-authored and must not be silently
+      // taken over.
       next.splice(orphanIndex, 0, marker)
+    } else {
+      // R-0000864: keep the conflict visible instead of silently adopting
+      // the pre-existing line. The resulting duplicate is intentional:
+      // `check()` reports NEEDS_APPLY while the original user line remains
+      // untouched for operator review.
+      next.push(marker, cronJob)
     }
   } else if (looksLikeCronJobLine(next, markerIndex + 1)) {
     // R-0000047: only overwrite the next line when it actually looks
@@ -160,13 +143,10 @@ export function computePresentMutation(mutation: PresentMutationArguments): null
     next.splice(markerIndex + 1, 0, cronJob)
   }
 
-  // R-0000760: strip any remaining exact-match orphan that sits outside
-  // the managed pair so the resulting crontab has a single instance of
-  // `cronJob`. Without this, a legacy-marker cron.absent followed by a
-  // present-state re-apply would leave the original line behind (R-0000567
-  // preserved it as an orphan) and the present apply would keep adding
-  // duplicate copies on every run.
-  return removeOrphanDuplicates(next, cronJob, marker)
+  // R-0000760/R-0000864: orphan duplicate consolidation is only safe when
+  // the caller explicitly opted in to orphan adoption. Otherwise the
+  // duplicate is the visible conflict that prevents silent takeover.
+  return adoptOrphans ? removeOrphanDuplicates(next, cronJob, marker) : next
 }
 
 /**
