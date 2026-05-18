@@ -31,11 +31,27 @@ describe("createMockSsh", () => {
     await expect(ssh.probeSudo()).rejects.toThrow(
       "createMockSsh: unstubbed probeSudo call: probeSudo()"
     )
+    expect(() => {
+      ssh.addPort(2022)
+    }).toThrow("createMockSsh: unstubbed addPort call: addPort(2022)")
+    expect(() => {
+      ssh.removePort(2022)
+    }).toThrow("createMockSsh: unstubbed removePort call: removePort(2022)")
+    expect(() => {
+      ssh.updateHost("10.0.0.1")
+    }).toThrow("createMockSsh: unstubbed updateHost call: updateHost(10.0.0.1)")
   })
 
   it("supports explicit permissive legacy behavior", async () => {
     const ssh = createMockSsh({}, { strict: false })
 
+    expect(ssh.addPort(2022)).toBe(true)
+    expect(() => {
+      ssh.removePort(2022)
+    }).not.toThrow()
+    expect(() => {
+      ssh.updateHost("10.0.0.1")
+    }).not.toThrow()
     await expect(ssh.exec("echo ok")).resolves.toMatchObject({ code: 0, stderr: "", stdout: "" })
     await expect(ssh.output("cat /tmp/file")).resolves.toBe("")
     await expect(ssh.test("test -f /tmp/file")).resolves.toBe(true)
@@ -51,11 +67,18 @@ describe("createMockSsh", () => {
     await expect(ssh.probeSudo()).resolves.toBeUndefined()
   })
 
-  it("records addPort, removePort and updateHost invocations", () => {
-    const ssh = createMockSsh()
+  it("records explicitly allowed addPort, removePort and updateHost invocations", () => {
+    const ssh = createMockSsh(
+      {},
+      {
+        allowAddPorts: [2022, 8080],
+        allowRemovePorts: [2022],
+        allowUpdateHosts: ["10.0.0.1", "10.0.0.2"],
+      }
+    )
 
-    ssh.addPort(2022)
-    ssh.addPort(8080)
+    expect(ssh.addPort(2022)).toBe(true)
+    expect(ssh.addPort(8080)).toBe(true)
     ssh.removePort(2022)
     ssh.updateHost("10.0.0.1")
     ssh.updateHost("10.0.0.2")
@@ -63,6 +86,27 @@ describe("createMockSsh", () => {
     expect(ssh.addPortCalls).toStrictEqual([2022, 8080])
     expect(ssh.removePortCalls).toStrictEqual([2022])
     expect(ssh.updateHostCalls).toStrictEqual(["10.0.0.1", "10.0.0.2"])
+  })
+
+  it("rejects non-allowlisted addPort, removePort and updateHost values", () => {
+    const ssh = createMockSsh(
+      {},
+      { allowAddPorts: [2022], allowRemovePorts: [2022], allowUpdateHosts: ["10.0.0.1"] }
+    )
+
+    expect(() => {
+      ssh.addPort(8080)
+    }).toThrow("createMockSsh: unstubbed addPort call: addPort(8080)")
+    expect(() => {
+      ssh.removePort(8080)
+    }).toThrow("createMockSsh: unstubbed removePort call: removePort(8080)")
+    expect(() => {
+      ssh.updateHost("10.0.0.2")
+    }).toThrow("createMockSsh: unstubbed updateHost call: updateHost(10.0.0.2)")
+
+    expect(ssh.addPortCalls).toStrictEqual([8080])
+    expect(ssh.removePortCalls).toStrictEqual([8080])
+    expect(ssh.updateHostCalls).toStrictEqual(["10.0.0.2"])
   })
 
   it("records side-effect invocations", async () => {
@@ -419,13 +463,16 @@ describe("createStrictMockSsh", () => {
     const ssh = createStrictMockSsh(
       {},
       {
+        allowAddPorts: [2022],
         allowDisconnect: true,
         allowDownloads: [{ localPath: "/local/file", remotePath: "/remote/file" }],
         allowProbeSudo: true,
         allowReconnect: true,
+        allowRemovePorts: [2022],
         allowUnstubbedExec: ["echo ok"],
         allowUnstubbedOutput: ["cat /tmp/file"],
         allowUnstubbedTest: ["test -f /tmp/file"],
+        allowUpdateHosts: ["10.0.0.1"],
         allowUploads: [
           { localPath: "/local/file", options: undefined, remotePath: "/remote/file" },
         ],
@@ -434,6 +481,13 @@ describe("createStrictMockSsh", () => {
     )
 
     await expect(ssh.exec("echo ok")).resolves.toMatchObject({ code: 0, stderr: "", stdout: "" })
+    expect(ssh.addPort(2022)).toBe(true)
+    expect(() => {
+      ssh.removePort(2022)
+    }).not.toThrow()
+    expect(() => {
+      ssh.updateHost("10.0.0.1")
+    }).not.toThrow()
     await expect(ssh.output("cat /tmp/file")).resolves.toBe("")
     await expect(ssh.test("test -f /tmp/file")).resolves.toBe(true)
     expect(() => {

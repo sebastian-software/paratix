@@ -104,6 +104,7 @@ const UFW_STATUS_ACTIVE_PORT_2222_ALLOW_AND_IPV6_TCP_DENY = [
 const createMockSsh: typeof createBaseMockSsh = (responses, options) => {
   const ssh = createBaseMockSsh(responses, {
     ...options,
+    allowAddPorts: [2222, ...(options?.allowAddPorts ?? [])],
     // R-0000670: acquireFlagLock now fails fast when the holder marker
     // write/readback is empty, so the sshd-port mutex tests need the
     // shared flag-lock internal defaults that supply a deterministic

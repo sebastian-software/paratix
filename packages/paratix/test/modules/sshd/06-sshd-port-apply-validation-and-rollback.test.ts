@@ -15,10 +15,12 @@ const createMockSsh: typeof createBaseMockSsh = (responses, options) => {
     { hostname: { code: 0, stdout: "" }, ...responses },
     {
       ...options,
+      allowAddPorts: [2222, ...(options?.allowAddPorts ?? [])],
       // R-0000613: sshd.port apply paths now serialise through a shared
       // `/etc/ssh/sshd_config` mutex; opt into the default flag-lock internal
       // stubs so the tests do not need to spell out every mkdir/rmdir.
       allowFlagLockInternalDefaults: true,
+      allowRemovePorts: [2222, ...(options?.allowRemovePorts ?? [])],
       allowWrites: [
         // R-0000587: dry-run tempfiles carry restrictive 0600 permissions.
         { options: { mode: "0600" }, remotePath: /^\/tmp\/paratix-sshd-dry-run\./v },

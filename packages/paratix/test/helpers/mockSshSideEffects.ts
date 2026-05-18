@@ -28,10 +28,13 @@ export type WriteFileAllowlistEntry = {
 }
 
 export type SideEffectOptions = {
+  allowAddPorts?: number[]
   allowDisconnect?: boolean
   allowDownloads?: DownloadFileAllowlistEntry[]
   allowProbeSudo?: boolean
   allowReconnect?: boolean
+  allowRemovePorts?: number[]
+  allowUpdateHosts?: string[]
   allowUploads?: UploadFileAllowlistEntry[]
   allowWrites?: WriteFileAllowlistEntry[]
   strict?: boolean
@@ -51,6 +54,12 @@ export type SideEffectRecorder = {
   writeFile: SshConnection["writeFile"]
   writeFileCalls: WriteFileCall[]
 }
+
+export type RecordingSpies = {
+  addPortCalls: number[]
+  removePortCalls: number[]
+  updateHostCalls: string[]
+} & Pick<SshConnection, "addPort" | "removePort" | "updateHost">
 
 function unstubbed(kind: string, summary: string): Error {
   return new Error(`createMockSsh: unstubbed ${kind} call: ${summary}`)
@@ -72,6 +81,45 @@ function sameWriteOptions(
 
 function matchesPath(actual: string, expected: PathAllowlistEntry): boolean {
   return typeof expected === "string" ? actual === expected : expected.test(actual)
+}
+
+export function createRecordingSpies(options?: SideEffectOptions): RecordingSpies {
+  const addPortCalls: number[] = []
+  const removePortCalls: number[] = []
+  const updateHostCalls: string[] = []
+  return {
+    addPort(port) {
+      addPortCalls.push(port)
+      assertAllowed({
+        allowed: options?.allowAddPorts?.includes(port) === true,
+        kind: "addPort",
+        options,
+        summary: `addPort(${String(port)})`,
+      })
+      return true
+    },
+    addPortCalls,
+    removePort(port) {
+      removePortCalls.push(port)
+      assertAllowed({
+        allowed: options?.allowRemovePorts?.includes(port) === true,
+        kind: "removePort",
+        options,
+        summary: `removePort(${String(port)})`,
+      })
+    },
+    removePortCalls,
+    updateHost(host) {
+      updateHostCalls.push(host)
+      assertAllowed({
+        allowed: options?.allowUpdateHosts?.includes(host) === true,
+        kind: "updateHost",
+        options,
+        summary: `updateHost(${host})`,
+      })
+    },
+    updateHostCalls,
+  }
 }
 
 function assertAllowed(input: {
