@@ -52,9 +52,9 @@ function bridgeCatSourcesStubsToDdNoFollow(
 // `writeSourcesFileNoFollow` from the production module. Tests stub the
 // pipeline to succeed by default; the capture helper intercepts the
 // pipeline to record the new content for assertions.
-// eslint-disable-next-line security/detect-unsafe-regex -- Bounded literal pattern matching the well-known apt sources write command issued by the module under test.
 const NOFOLLOW_WRITE_COMMAND_PATTERN =
-  /^set -eu; \[ ! -L '(?<path>\/etc\/apt\/sources\.list(?:\.d\/[^']+)?)' \] \|\| exit 201; dd if=\/dev\/stdin of='(?:\/etc\/apt\/sources\.list(?:\.d\/[^']+)?)' conv=notrunc oflag=nofollow status=none; truncate -s \d+ '(?:\/etc\/apt\/sources\.list(?:\.d\/[^']+)?)'; chmod '(?<mode>[0-7]+)' '(?:\/etc\/apt\/sources\.list(?:\.d\/[^']+)?)' \|\| exit 202$/v
+  // eslint-disable-next-line security/detect-unsafe-regex -- Bounded literal pattern matching the well-known apt sources write command issued by the module under test.
+  /^set -eu; \[ ! -L '(?<path>\/etc\/apt\/sources\.list(?:\.d\/[^']+)?)' \] \|\| exit 201; dd if=\/dev\/stdin of='\/etc\/apt\/sources\.list(?:\.d\/[^']+)?' conv=notrunc oflag=nofollow status=none; truncate -s \d+ '\/etc\/apt\/sources\.list(?:\.d\/[^']+)?'; chmod '(?<mode>[0-7]+)' '\/etc\/apt\/sources\.list(?:\.d\/[^']+)?' \|\| exit 202$/v
 
 const createMockSsh: typeof createBaseMockSsh = (responses, options) =>
   createBaseMockSsh(bridgeCatSourcesStubsToDdNoFollow(responses), {
@@ -217,13 +217,13 @@ function debianApplyResponses(
       stdout: `deb http://deb.debian.org/debian ${currentCodename} main\n`,
     },
     "cat '/etc/os-release'": { code: 0, stdout: DEBIAN_OS_RELEASE },
+    "DEBIAN_FRONTEND=noninteractive apt-get autoremove -y": { code: 0 },
+    "DEBIAN_FRONTEND=noninteractive apt-get full-upgrade -y": { code: 0 },
+    "DEBIAN_FRONTEND=noninteractive dpkg --configure -a": { code: 0 },
     [DEBIAN_INRELEASE_VERIFY_COMMAND]: {
       code: 0,
       stdout: debianInReleaseClearsignedBody(targetCodename),
     },
-    "DEBIAN_FRONTEND=noninteractive apt-get autoremove -y": { code: 0 },
-    "DEBIAN_FRONTEND=noninteractive apt-get full-upgrade -y": { code: 0 },
-    "DEBIAN_FRONTEND=noninteractive dpkg --configure -a": { code: 0 },
     "find /etc/apt/sources.list.d/ \\( -name '*.list' -o -name '*.sources' \\) -type f -print0":
       FIND_SOURCES_EMPTY,
     "lsb_release -cs": { code: 0, stdout: `${currentCodename}\n` },
@@ -354,7 +354,7 @@ describe("releaseUpgrade.upgrade — check", () => {
     [12, "signature rejection"],
   ] as const)(
     "R-0000716: check returns needs-apply when InRelease verification fails with exit code %d (%s)",
-    async (exitCode) => {
+    async (exitCode, _label) => {
       const ssh = createMockSsh({
         "cat '/etc/os-release'": { code: 0, stdout: DEBIAN_OS_RELEASE },
         [DEBIAN_INRELEASE_VERIFY_COMMAND]: { code: exitCode },
@@ -759,7 +759,9 @@ describe("releaseUpgrade.upgrade — apply (Debian)", () => {
     const originalExec = ssh.exec.bind(ssh)
     ssh.exec = async (command, execOptions) => {
       const match = NOFOLLOW_WRITE_COMMAND_PATTERN.exec(command)
+      // oxlint-disable-next-line no-conditional-in-test -- exec interceptor records pipeline writes; conditional dispatches to capture vs passthrough
       if (match?.groups != null) {
+        // oxlint-disable-next-line no-conditional-in-test -- nullish coalescing default for the optional input payload of the recorded write
         writes.push({ content: execOptions?.input ?? "", path: match.groups.path })
       }
       return originalExec(command, execOptions)
@@ -1258,14 +1260,14 @@ describe("releaseUpgrade.upgrade — apply (Debian)", () => {
         "[ -e '/etc/apt/sources.list' ]": { code: 0 },
         "cat '/etc/apt/sources.list'": { code: 0, stdout: originalSources },
         "cat '/etc/os-release'": { code: 0, stdout: DEBIAN_OS_RELEASE },
-        [DEBIAN_INRELEASE_VERIFY_COMMAND]: {
-          code: 0,
-          stdout: debianInReleaseClearsignedBody(targetCodename),
-        },
         "DEBIAN_FRONTEND=noninteractive apt-get autoremove -y": { code: 0 },
         "DEBIAN_FRONTEND=noninteractive apt-get full-upgrade -y": { code: 0 },
         "DEBIAN_FRONTEND=noninteractive apt-get update": { code: 0 },
         "DEBIAN_FRONTEND=noninteractive dpkg --configure -a": { code: 0 },
+        [DEBIAN_INRELEASE_VERIFY_COMMAND]: {
+          code: 0,
+          stdout: debianInReleaseClearsignedBody(targetCodename),
+        },
         "find /etc/apt/sources.list.d/ \\( -name '*.list' -o -name '*.sources' \\) -type f -print0":
           FIND_SOURCES_EMPTY,
         "lsb_release -cs": { code: 0, stdout: `${currentCodename}\n` },
@@ -1312,14 +1314,14 @@ describe("releaseUpgrade.upgrade — apply (Debian)", () => {
         "[ -e '/etc/apt/sources.list' ]": { code: 0 },
         "cat '/etc/apt/sources.list'": { code: 0, stdout: originalSources },
         "cat '/etc/os-release'": { code: 0, stdout: DEBIAN_OS_RELEASE },
-        [DEBIAN_INRELEASE_VERIFY_COMMAND]: {
-          code: 0,
-          stdout: debianInReleaseClearsignedBody("trixie"),
-        },
         "DEBIAN_FRONTEND=noninteractive apt-get autoremove -y": { code: 0 },
         "DEBIAN_FRONTEND=noninteractive apt-get full-upgrade -y": { code: 0 },
         "DEBIAN_FRONTEND=noninteractive apt-get update": { code: 0 },
         "DEBIAN_FRONTEND=noninteractive dpkg --configure -a": { code: 0 },
+        [DEBIAN_INRELEASE_VERIFY_COMMAND]: {
+          code: 0,
+          stdout: debianInReleaseClearsignedBody("trixie"),
+        },
         "find /etc/apt/sources.list.d/ \\( -name '*.list' -o -name '*.sources' \\) -type f -print0":
           FIND_SOURCES_EMPTY,
         "lsb_release -cs": { code: 0, stdout: "bookworm\n" },
@@ -1408,8 +1410,10 @@ describe("releaseUpgrade.upgrade — apply (Debian)", () => {
       const originalExec = ssh.exec.bind(ssh)
       ssh.exec = async (command, execOptions) => {
         const match = NOFOLLOW_WRITE_COMMAND_PATTERN.exec(command)
+        // oxlint-disable-next-line no-conditional-in-test -- exec interceptor records pipeline writes; conditional dispatches to capture vs passthrough
         if (match?.groups != null) {
           writes.push({
+            // oxlint-disable-next-line no-conditional-in-test -- nullish coalescing default for the optional input payload of the recorded write
             content: execOptions?.input ?? "",
             mode: match.groups.mode,
             path: match.groups.path,
@@ -1491,11 +1495,14 @@ describe("releaseUpgrade.upgrade — apply (Debian)", () => {
       const originalExec = ssh.exec.bind(ssh)
       ssh.exec = async (command, execOptions) => {
         const match = NOFOLLOW_WRITE_COMMAND_PATTERN.exec(command)
+        // oxlint-disable-next-line no-conditional-in-test -- mock dispatcher: forward non-pipeline commands to the original implementation
         if (match?.groups == null) return originalExec(command, execOptions)
         const path = match.groups.path
+        // oxlint-disable-next-line no-conditional-in-test -- nullish coalescing default for the optional input payload
         const content = execOptions?.input ?? ""
         const stepIndex = writeIndex
         writeIndex += 1
+        // oxlint-disable-next-line no-conditional-in-test -- simulate the third write failing to drive the partial-rollback aggregation path
         if (stepIndex === 2) {
           throw new Error("permission denied")
         }
@@ -1524,10 +1531,9 @@ describe("releaseUpgrade.upgrade — apply (Debian)", () => {
       const result = await mod.apply(ssh, emptyEnv)
 
       expect(result.status).toBe("changed")
-      const writeCall = ssh.calls.find((call) =>
-        NOFOLLOW_WRITE_COMMAND_PATTERN.test(call)
-      )
+      const writeCall = ssh.calls.find((call) => NOFOLLOW_WRITE_COMMAND_PATTERN.test(call))
       expect(writeCall).toBeDefined()
+      // oxlint-disable-next-line no-conditional-in-test -- nullish fallback when the optional regex input is unavailable; assertion above guarantees a match
       const match = NOFOLLOW_WRITE_COMMAND_PATTERN.exec(writeCall ?? "")
       expect(match?.groups?.path).toBe("/etc/apt/sources.list")
     })
@@ -1542,6 +1548,7 @@ describe("releaseUpgrade.upgrade — apply (Debian)", () => {
       // symlink-guard branch reports exit 201 (NOFOLLOW symlink refusal).
       const originalExec = ssh.exec.bind(ssh)
       ssh.exec = async (command, execOptions) => {
+        // oxlint-disable-next-line no-conditional-in-test -- mock dispatcher returns exit 201 when the NOFOLLOW pipeline runs, otherwise falls through
         if (NOFOLLOW_WRITE_COMMAND_PATTERN.test(command)) {
           return { code: 201, stderr: "", stdout: "" }
         }

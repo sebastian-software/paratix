@@ -902,14 +902,11 @@ describe("archive.extract — apply", () => {
     ["carriage return", "/opt/app\r/etc"],
     ["NUL", "/opt/app /etc"],
     ["tab", "/opt/app\t/etc"],
-  ])(
-    "rejects destinations containing %s control characters",
-    (_label, destinationWithControl) => {
-      expect(() => archive.extract(src, destinationWithControl)).toThrow(
-        /must not contain control characters/v
-      )
-    }
-  )
+  ])("rejects destinations containing %s control characters", (_label, destinationWithControl) => {
+    expect(() => archive.extract(src, destinationWithControl)).toThrow(
+      /must not contain control characters/v
+    )
+  })
 
   it("uploads file via mktemp-allocated path and cleans up when upload is true", async () => {
     const localFile = "/local/app.tar.gz"

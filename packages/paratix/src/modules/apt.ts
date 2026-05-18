@@ -84,6 +84,10 @@ function firstNonEmptyApt(text: string): null | string {
  * Returns `null` when `stat` cannot produce the identity (non-zero exit,
  * empty stdout). Callers must treat `null` as "unknown" — the SHA-256 guard
  * remains the primary check.
+ *
+ * @param ssh - Active SSH connection to the remote host.
+ * @param filePath - Absolute path of the sources.list file to probe.
+ * @returns The `device:inode` identity string, or `null` when unavailable.
  */
 async function probeAptRepositoryInodeIdentity(
   ssh: SshConnection,
@@ -159,6 +163,53 @@ async function rollbackRepositoryAfterUpdateFailure(
 }
 
 /**
+ * Compare the live sources.list state against a snapshot that recorded an
+ * existing file. Surfaces the specific drift (disappeared, content changed,
+ * inode swap) so the caller can refuse to overwrite a mutated file.
+ *
+ * @param parameters - Comparison context.
+ * @param parameters.filePath - Absolute path of the sources.list on the remote host.
+ * @param parameters.name - Repository name used in failure messages.
+ * @param parameters.snapshot - The recorded snapshot content and inode identity.
+ * @param parameters.snapshot.content - Bytes captured from the file at snapshot time.
+ * @param parameters.snapshot.identity - `device:inode` identity captured at snapshot time, or `null` when unavailable.
+ * @param parameters.ssh - Active SSH connection to the remote host.
+ * @returns A failed ModuleResult on any divergence, otherwise `null`.
+ */
+async function ensureExistingSourcesListUnchanged(parameters: {
+  filePath: string
+  name: string
+  snapshot: { content: string; identity: null | string }
+  ssh: SshConnection
+}): Promise<ModuleResult | null> {
+  const { filePath, name, snapshot, ssh } = parameters
+  const currentRemoteHash = await ssh.sha256(filePath)
+  if (currentRemoteHash === null) {
+    return failed(
+      `[apt.repository] sources.list disappeared between snapshot and write for ${name} at ${filePath}; refusing to proceed`
+    )
+  }
+  const expectedSnapshotHash = sha256String(snapshot.content)
+  if (!hexHashesEqual(currentRemoteHash, expectedSnapshotHash)) {
+    return failed(
+      `[apt.repository] sources.list changed between snapshot and write for ${name} at ${filePath}; refusing to proceed`
+    )
+  }
+  // R-0000702: compare device:inode identity to detect a content-preserving
+  // inode swap. Skip the check when either side is `null` (older coreutils
+  // could not produce the identity) so benign environments are not blocked.
+  if (snapshot.identity !== null) {
+    const currentIdentity = await probeAptRepositoryInodeIdentity(ssh, filePath)
+    if (currentIdentity !== null && currentIdentity !== snapshot.identity) {
+      return failed(
+        `[apt.repository] sources.list inode changed between snapshot and write for ${name} at ${filePath}; refusing to proceed`
+      )
+    }
+  }
+  return null
+}
+
+/**
  * R-0000566: ensure the sources.list content on disk still matches the
  * snapshot captured a moment earlier in `apply`. Without this guard a
  * concurrent writer could mutate the file between `snapshotAptRepository`
@@ -199,32 +250,15 @@ async function ensureAptRepositorySnapshotStillCurrent(parameters: {
       `[apt.repository] sources.list became a symlink between snapshot and write for ${name} at ${filePath}; refusing to proceed`
     )
   }
-  const currentRemoteHash = await ssh.sha256(filePath)
   if (snapshot.exists) {
-    if (currentRemoteHash === null) {
-      return failed(
-        `[apt.repository] sources.list disappeared between snapshot and write for ${name} at ${filePath}; refusing to proceed`
-      )
-    }
-    const expectedSnapshotHash = sha256String(snapshot.content)
-    if (!hexHashesEqual(currentRemoteHash, expectedSnapshotHash)) {
-      return failed(
-        `[apt.repository] sources.list changed between snapshot and write for ${name} at ${filePath}; refusing to proceed`
-      )
-    }
-    // R-0000702: compare device:inode identity to detect a content-preserving
-    // inode swap. Skip the check when either side is `null` (older coreutils
-    // could not produce the identity) so benign environments are not blocked.
-    if (snapshot.identity !== null) {
-      const currentIdentity = await probeAptRepositoryInodeIdentity(ssh, filePath)
-      if (currentIdentity !== null && currentIdentity !== snapshot.identity) {
-        return failed(
-          `[apt.repository] sources.list inode changed between snapshot and write for ${name} at ${filePath}; refusing to proceed`
-        )
-      }
-    }
-    return null
+    return ensureExistingSourcesListUnchanged({
+      filePath,
+      name,
+      snapshot: { content: snapshot.content, identity: snapshot.identity },
+      ssh,
+    })
   }
+  const currentRemoteHash = await ssh.sha256(filePath)
   if (currentRemoteHash !== null) {
     return failed(
       `[apt.repository] sources.list appeared between snapshot and write for ${name} at ${filePath}; refusing to proceed`

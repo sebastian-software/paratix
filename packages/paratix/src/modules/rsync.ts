@@ -307,6 +307,47 @@ function createRsyncError(
   )
 }
 
+/**
+ * Run the prepared rsync process and translate spawn failures or non-zero
+ * exits into a structured {@link createRsyncError}.
+ *
+ * @param parameters - Bundle of the prepared rsync arguments and the context
+ *   needed to format any failure for the operator.
+ * @param parameters.options - Sync options describing the transfer for error messages.
+ * @param parameters.phase - Whether this invocation runs in the check or apply phase.
+ * @param parameters.rsyncArguments - Final argument list passed to the rsync binary.
+ * @returns The captured stdout (empty string when rsync produced no output).
+ * @throws {Error} An error created via {@link createRsyncError} when rsync fails to spawn or exits non-zero.
+ */
+async function runRsyncTransferProcess(parameters: {
+  options: SyncOptions
+  phase: RsyncPhase
+  rsyncArguments: string[]
+}): Promise<string> {
+  const { options, phase, rsyncArguments } = parameters
+  const result = await runRsyncProcess(
+    rsyncArguments,
+    options.timeout ?? DEFAULT_RSYNC_TIMEOUT_MILLISECONDS
+  )
+  if (result.spawnError != null) {
+    throw createRsyncError(options, phase, {
+      code: undefined,
+      error: result.spawnError,
+      stderr: result.stderr,
+      stdout: result.stdout,
+    })
+  }
+  if (result.code !== 0) {
+    throw createRsyncError(options, phase, {
+      code: result.code == null ? undefined : String(result.code),
+      error: new Error(`rsync exited with code ${String(result.code)}`),
+      stderr: result.stderr,
+      stdout: result.stdout,
+    })
+  }
+  return result.hasStdout ? result.stdout : ""
+}
+
 async function executeRsync(parameters: {
   dryRun: boolean
   options: SyncOptions
@@ -339,27 +380,7 @@ async function executeRsync(parameters: {
   })
 
   try {
-    const result = await runRsyncProcess(
-      rsyncArguments,
-      options.timeout ?? DEFAULT_RSYNC_TIMEOUT_MILLISECONDS
-    )
-    if (result.spawnError != null) {
-      throw createRsyncError(options, phase, {
-        code: undefined,
-        error: result.spawnError,
-        stderr: result.stderr,
-        stdout: result.stdout,
-      })
-    }
-    if (result.code !== 0) {
-      throw createRsyncError(options, phase, {
-        code: result.code == null ? undefined : String(result.code),
-        error: new Error(`rsync exited with code ${String(result.code)}`),
-        stderr: result.stderr,
-        stdout: result.stdout,
-      })
-    }
-    return result.hasStdout ? result.stdout : ""
+    return await runRsyncTransferProcess({ options, phase, rsyncArguments })
   } finally {
     cleanupVerifiedKnownHostsFile(verifiedKnownHostsPath)
   }

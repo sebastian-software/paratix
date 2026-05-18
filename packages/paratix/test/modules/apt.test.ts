@@ -50,9 +50,7 @@ function distUpgradeApplyLockResponses(): Record<string, { code?: number; stdout
 // Other commands raise so the override remains tightly scoped to the
 // repository-rollback assertion.
 function createSequencedAptGetUpdateExec(
-  passthroughExec?: (
-    command: string
-  ) => Promise<{ code: number; stderr: string; stdout: string }>
+  passthroughExec?: (command: string) => Promise<{ code: number; stderr: string; stdout: string }>
 ): {
   callCount: () => number
   exec: (command: string) => Promise<{ code: number; stderr: string; stdout: string }>
@@ -79,7 +77,7 @@ function createSequencedAptGetUpdateExec(
       if (passthroughExec) {
         return passthroughExec(command)
       }
-      return Promise.reject(new Error(`unexpected exec command in override: ${command}`))
+      throw new Error(`unexpected exec command in override: ${command}`)
     },
   }
 }
@@ -193,13 +191,13 @@ describe("apt.key", () => {
       [downloadCommand]: {
         code: 0,
       },
+      "mkdir -p /etc/apt/keyrings": { code: 0 },
+      "mktemp '/tmp/apt-key-docker.XXXXXX'": { stdout: "/tmp/apt-key-docker.ABCDEF\n" },
+      "rm -f '/tmp/apt-key-docker.ABCDEF'": { code: 0 },
       [showKeysCommand("/tmp/apt-key-docker.ABCDEF")]: {
         code: 0,
         stdout: "pub:-:255:22:::\nfpr:::::::::1234567890ABCDEF1234567890ABCDEF12345678:\n",
       },
-      "mkdir -p /etc/apt/keyrings": { code: 0 },
-      "mktemp '/tmp/apt-key-docker.XXXXXX'": { stdout: "/tmp/apt-key-docker.ABCDEF\n" },
-      "rm -f '/tmp/apt-key-docker.ABCDEF'": { code: 0 },
     })
     const mod = apt.key("docker", "https://download.docker.com/linux/ubuntu/gpg", { fingerprint })
     const result = await mod.apply(ssh, emptyEnv)
@@ -233,13 +231,13 @@ describe("apt.key", () => {
       [downloadCommand]: {
         code: 0,
       },
+      "mkdir -p /etc/apt/keyrings": { code: 0 },
+      "mktemp '/tmp/apt-key-docker.XXXXXX'": { stdout: "/tmp/apt-key-docker.ABCDEF\n" },
+      "rm -f '/tmp/apt-key-docker.ABCDEF'": { code: 0 },
       [showKeysCommand("/tmp/apt-key-docker.ABCDEF")]: {
         code: 0,
         stdout: "pub:-:255:22:::\nfpr:::::::::1234567890ABCDEF1234567890ABCDEF12345678:\n",
       },
-      "mkdir -p /etc/apt/keyrings": { code: 0 },
-      "mktemp '/tmp/apt-key-docker.XXXXXX'": { stdout: "/tmp/apt-key-docker.ABCDEF\n" },
-      "rm -f '/tmp/apt-key-docker.ABCDEF'": { code: 0 },
     })
     const mod = apt.key("docker", sensitiveUrl, { fingerprint })
     const result = await mod.apply(ssh, emptyEnv)
@@ -275,13 +273,13 @@ describe("apt.key", () => {
       },
       [gpgHomedirCleanupCmd]: { code: 0 },
       [gpgHomedirMktempCmd]: { stdout: `${gpgHomedir}\n` },
+      "mkdir -p /etc/apt/keyrings": { code: 0 },
+      "mktemp '/tmp/apt-key-docker.XXXXXX'": { stdout: "/tmp/apt-key-docker.ABCDEF\n" },
+      "rm -f '/tmp/apt-key-docker.ABCDEF'": { code: 0 },
       [showKeysCommand("/tmp/apt-key-docker.ABCDEF")]: {
         code: 0,
         stdout: "pub:-:255:22:::\nfpr:::::::::AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA:\n",
       },
-      "mkdir -p /etc/apt/keyrings": { code: 0 },
-      "mktemp '/tmp/apt-key-docker.XXXXXX'": { stdout: "/tmp/apt-key-docker.ABCDEF\n" },
-      "rm -f '/tmp/apt-key-docker.ABCDEF'": { code: 0 },
     })
     const mod = apt.key("docker", "https://download.docker.com/linux/ubuntu/gpg", { fingerprint })
     const result = await mod.apply(ssh, emptyEnv)
@@ -297,6 +295,9 @@ describe("apt.key", () => {
       },
       [gpgHomedirCleanupCmd]: { code: 0 },
       [gpgHomedirMktempCmd]: { stdout: `${gpgHomedir}\n` },
+      "mkdir -p /etc/apt/keyrings": { code: 0 },
+      "mktemp '/tmp/apt-key-docker.XXXXXX'": { stdout: "/tmp/apt-key-docker.ABCDEF\n" },
+      "rm -f '/tmp/apt-key-docker.ABCDEF'": { code: 0 },
       [showKeysCommand("/tmp/apt-key-docker.ABCDEF")]: {
         code: 0,
         stdout:
@@ -307,9 +308,6 @@ describe("apt.key", () => {
           "pub:-:255:22:::\n" +
           "fpr:::::::::AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA:\n",
       },
-      "mkdir -p /etc/apt/keyrings": { code: 0 },
-      "mktemp '/tmp/apt-key-docker.XXXXXX'": { stdout: "/tmp/apt-key-docker.ABCDEF\n" },
-      "rm -f '/tmp/apt-key-docker.ABCDEF'": { code: 0 },
     })
     const mod = apt.key("docker", "https://download.docker.com/linux/ubuntu/gpg", { fingerprint })
     const result = await mod.apply(ssh, emptyEnv)
@@ -331,13 +329,13 @@ describe("apt.key", () => {
       [downloadCommand]: {
         code: 0,
       },
+      "mkdir -p /etc/apt/keyrings": { code: 0 },
+      "mktemp '/tmp/apt-key-docker.XXXXXX'": { stdout: "/tmp/apt-key-docker.ABCDEF\n" },
+      "rm -f '/tmp/apt-key-docker.ABCDEF'": { code: 0 },
       [showKeysCommand("/tmp/apt-key-docker.ABCDEF")]: {
         code: 0,
         stdout: "pub:-:255:22:::\nfpr:::::::::1234567890ABCDEF1234567890ABCDEF12345678:\n",
       },
-      "mkdir -p /etc/apt/keyrings": { code: 0 },
-      "mktemp '/tmp/apt-key-docker.XXXXXX'": { stdout: "/tmp/apt-key-docker.ABCDEF\n" },
-      "rm -f '/tmp/apt-key-docker.ABCDEF'": { code: 0 },
     })
     const mod = apt.key("docker", "https://download.docker.com/linux/ubuntu/gpg", { fingerprint })
     const result = await mod.apply(ssh, emptyEnv)
@@ -357,13 +355,13 @@ describe("apt.key", () => {
       [downloadCommand]: {
         code: 0,
       },
+      "mkdir -p /etc/apt/keyrings": { code: 0 },
+      "mktemp '/tmp/apt-key-docker.XXXXXX'": { stdout: "/tmp/apt-key-docker.ABCDEF\n" },
+      "rm -f '/tmp/apt-key-docker.ABCDEF'": { code: 1 },
       [showKeysCommand("/tmp/apt-key-docker.ABCDEF")]: {
         code: 0,
         stdout: "pub:-:255:22:::\nfpr:::::::::1234567890ABCDEF1234567890ABCDEF12345678:\n",
       },
-      "mkdir -p /etc/apt/keyrings": { code: 0 },
-      "mktemp '/tmp/apt-key-docker.XXXXXX'": { stdout: "/tmp/apt-key-docker.ABCDEF\n" },
-      "rm -f '/tmp/apt-key-docker.ABCDEF'": { code: 1 },
     })
     const mod = apt.key("docker", "https://download.docker.com/linux/ubuntu/gpg", { fingerprint })
     const result = await mod.apply(ssh, emptyEnv)
@@ -493,13 +491,13 @@ describe("apt.key", () => {
       [downloadCommand]: { code: 0 },
       [gpgHomedirCleanupCmd]: { code: 0 },
       [gpgHomedirMktempCmd]: { stdout: `${gpgHomedir}\n` },
+      "mkdir -p /etc/apt/keyrings": { code: 0 },
+      "mktemp '/tmp/apt-key-docker.XXXXXX'": { stdout: "/tmp/apt-key-docker.ABCDEF\n" },
+      "rm -f '/tmp/apt-key-docker.ABCDEF'": { code: 0 },
       [showKeysCommand("/tmp/apt-key-docker.ABCDEF")]: {
         code: 0,
         stdout: "pub:-:255:22:::\nfpr:::::::::1234567890ABCDEF1234567890ABCDEF12345678:\n",
       },
-      "mkdir -p /etc/apt/keyrings": { code: 0 },
-      "mktemp '/tmp/apt-key-docker.XXXXXX'": { stdout: "/tmp/apt-key-docker.ABCDEF\n" },
-      "rm -f '/tmp/apt-key-docker.ABCDEF'": { code: 0 },
     })
     const mod = apt.key("docker", "https://download.docker.com/linux/ubuntu/gpg", { fingerprint })
     const result = await mod.apply(ssh, emptyEnv)
@@ -520,13 +518,13 @@ describe("apt.key", () => {
       "[ -L '/etc/apt/keyrings/docker.gpg' ]": { code: 1 },
       [dearmorCommand]: { code: 0 },
       [downloadCommand]: { code: 0 },
+      "mkdir -p /etc/apt/keyrings": { code: 0 },
+      "mktemp '/tmp/apt-key-docker.XXXXXX'": { stdout: "/tmp/apt-key-docker.ABCDEF\n" },
+      "rm -f '/tmp/apt-key-docker.ABCDEF'": { code: 0 },
       [showKeysCommand("/tmp/apt-key-docker.ABCDEF")]: {
         code: 0,
         stdout: "pub:-:255:22:::\nfpr:::::::::1234567890ABCDEF1234567890ABCDEF12345678:\n",
       },
-      "mkdir -p /etc/apt/keyrings": { code: 0 },
-      "mktemp '/tmp/apt-key-docker.XXXXXX'": { stdout: "/tmp/apt-key-docker.ABCDEF\n" },
-      "rm -f '/tmp/apt-key-docker.ABCDEF'": { code: 0 },
     })
     const mod = apt.key("docker", "https://download.docker.com/linux/ubuntu/gpg", { fingerprint })
     const result = await mod.apply(ssh, emptyEnv)
@@ -558,13 +556,13 @@ describe("apt.key", () => {
       // the publish shell pipeline.
       [dearmorPublishCommand]: { code: 73 },
       [downloadCommand]: { code: 0 },
+      "mkdir -p /etc/apt/keyrings": { code: 0 },
+      "mktemp '/tmp/apt-key-docker.XXXXXX'": { stdout: "/tmp/apt-key-docker.ABCDEF\n" },
+      "rm -f '/tmp/apt-key-docker.ABCDEF'": { code: 0 },
       [showKeysCommand("/tmp/apt-key-docker.ABCDEF")]: {
         code: 0,
         stdout: "pub:-:255:22:::\nfpr:::::::::1234567890ABCDEF1234567890ABCDEF12345678:\n",
       },
-      "mkdir -p /etc/apt/keyrings": { code: 0 },
-      "mktemp '/tmp/apt-key-docker.XXXXXX'": { stdout: "/tmp/apt-key-docker.ABCDEF\n" },
-      "rm -f '/tmp/apt-key-docker.ABCDEF'": { code: 0 },
     })
     const mod = apt.key("docker", "https://download.docker.com/linux/ubuntu/gpg", { fingerprint })
     const result = await mod.apply(ssh, emptyEnv)
@@ -1171,8 +1169,10 @@ describe("apt.repository (standard form)", () => {
     })
     const originalExec = ssh.exec
     ssh.exec = async (command, options) => {
+      // oxlint-disable-next-line no-conditional-in-test -- command dispatch in the mock; the test asserts the integrity check refuses on inode change
       if (command === `stat -c '%d:%i' '${filePath}'`) {
         statCallIndex += 1
+        // oxlint-disable-next-line no-conditional-in-test -- two sequential stat probes returning different inode identities is exactly the scenario under test
         return statCallIndex === 1
           ? { code: 0, stderr: "", stdout: "42:1234\n" }
           : { code: 0, stderr: "", stdout: "42:9999\n" }
@@ -1204,6 +1204,7 @@ describe("apt.repository (standard form)", () => {
     })
     const originalTest = ssh.test
     ssh.test = async (command) => {
+      // oxlint-disable-next-line no-conditional-in-test -- mock dispatcher selecting the symlink probe to flip on second call
       if (command === `[ -L '${filePath}' ]`) {
         symlinkCallIndex += 1
         // First probe (apply-time guard) reports no symlink, the second

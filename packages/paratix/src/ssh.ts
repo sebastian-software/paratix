@@ -412,28 +412,6 @@ export class SshConnectionImpl implements SshConnection {
     this.disconnectTransport()
   }
 
-  /**
-   * R-0000694: synchronous hard-stop used by the second-SIGINT path in
-   * `runner.ts`. The regular `disconnect()` is queued via a microtask so
-   * ssh2 stream internals have a coherent tick to drain; the second SIGINT
-   * arrives before that microtask runs and is followed immediately by
-   * `process.exit`, which leaves ssh2 cleanup in the middle of an
-   * outstanding stream operation. Calling `client.destroy()` synchronously
-   * tears the underlying socket down inside the same tick so no in-flight
-   * ssh2 callback survives the imminent exit.
-   */
-  public forceDestroy(): void {
-    if (this.client == null) return
-    const closing = this.client
-    this.client = null
-    try {
-      closing.destroy()
-    } catch {
-      // destroy() may throw if the socket has already been torn down. The
-      // hard-exit path cannot do anything useful with that error.
-    }
-  }
-
   public async downloadFile(remotePath: string, localPath: string): Promise<void> {
     const client = this.ensureClient()
     let sourcePath = remotePath
@@ -480,6 +458,28 @@ export class SshConnectionImpl implements SshConnection {
 
   public async exists(remotePath: string): Promise<boolean> {
     return this.test(`[ -e ${shellQuote(remotePath)} ]`)
+  }
+
+  /**
+   * R-0000694: synchronous hard-stop used by the second-SIGINT path in
+   * `runner.ts`. The regular `disconnect()` is queued via a microtask so
+   * ssh2 stream internals have a coherent tick to drain; the second SIGINT
+   * arrives before that microtask runs and is followed immediately by
+   * `process.exit`, which leaves ssh2 cleanup in the middle of an
+   * outstanding stream operation. Calling `client.destroy()` synchronously
+   * tears the underlying socket down inside the same tick so no in-flight
+   * ssh2 callback survives the imminent exit.
+   */
+  public forceDestroy(): void {
+    if (this.client == null) return
+    const closing = this.client
+    this.client = null
+    try {
+      closing.destroy()
+    } catch {
+      // destroy() may throw if the socket has already been torn down. The
+      // hard-exit path cannot do anything useful with that error.
+    }
   }
 
   public getConnectionInfo(): ReturnType<SshConnection["getConnectionInfo"]> {

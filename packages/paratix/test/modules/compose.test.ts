@@ -158,7 +158,7 @@ describe("compose.up — check", () => {
   // stack instead of forcing an unbounded JSON.parse on attacker-controlled
   // input.
   it("R-0000710: returns needs-apply when ps stdout exceeds the JSON size cap", async () => {
-    const oversized = `[${"\"x\",".repeat(2_700_000)}\"x\"]`
+    const oversized = `[${'"x",'.repeat(2_700_000)}"x"]`
     const mockSsh = createComposeMockSsh({
       [`${composeCmd("podman")} ps --format json`]: { code: 0, stdout: oversized },
     })

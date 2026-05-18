@@ -219,12 +219,8 @@ const REDACT_BUFFER_MAX_DEPTH = ERROR_INSPECT_DEPTH + 1
  * @param seen - Identity set tracking already-visited object references.
  * @returns A Buffer-free clone safe to feed into `util.inspect`.
  */
-// eslint-disable-next-line complexity -- the type-discriminated walk is intentionally inlined to keep the redaction predicate local
-function redactBufferProperties(
-  value: unknown,
-  depth: number,
-  seen: WeakSet<object>
-): unknown {
+
+function redactBufferProperties(value: unknown, depth: number, seen: WeakSet<object>): unknown {
   if (Buffer.isBuffer(value)) return REDACTED_BUFFER_PLACEHOLDER
   if (value === null || typeof value !== "object") return value
   if (depth > REDACT_BUFFER_MAX_DEPTH) return value
@@ -233,6 +229,7 @@ function redactBufferProperties(
   if (Array.isArray(value)) {
     return value.map((entry) => redactBufferProperties(entry, depth + 1, seen))
   }
+  // eslint-disable-next-line @typescript-eslint/no-unsafe-type-assertion -- the prior `typeof value !== "object"` and `Array.isArray` guards above prove that `value` is a non-array plain-style object whose keys can be enumerated via Reflect.ownKeys
   const sourceRecord = value as Record<string, unknown>
   const redacted: Record<string, unknown> = {}
   // R-0000691: walk own-enumerable + own-symbol property names so a
@@ -243,6 +240,7 @@ function redactBufferProperties(
   for (const key of Reflect.ownKeys(sourceRecord)) {
     const stringKey = typeof key === "symbol" ? key.toString() : key
     redacted[stringKey] = redactBufferProperties(
+      // eslint-disable-next-line @typescript-eslint/no-unsafe-type-assertion -- Reflect.ownKeys returns the very keys present on sourceRecord, so indexing them as `keyof typeof sourceRecord` is sound and avoids an unnecessary intermediate variable
       sourceRecord[key as keyof typeof sourceRecord],
       depth + 1,
       seen

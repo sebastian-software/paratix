@@ -116,6 +116,14 @@ const DEBIAN_INRELEASE_URL = "https://deb.debian.org/debian/dists/stable/InRelea
 const DEBIAN_INRELEASE_FETCH_FAILURE_PREFIX = "Failed to fetch signed Debian InRelease"
 const DEBIAN_INRELEASE_VERIFY_FAILURE_PREFIX = "Failed to verify signed Debian InRelease"
 
+// R-0000716: exit codes emitted by the InRelease fetch/verify shell pipeline.
+// Naming each code keeps {@link formatDebianInReleaseFailure} readable and
+// keeps the literal that lands in the shell command body in sync with the
+// JavaScript matcher.
+const DEBIAN_INRELEASE_FETCH_EXIT_CODE = 10
+const DEBIAN_INRELEASE_KEYRING_MISSING_EXIT_CODE = 11
+const DEBIAN_INRELEASE_SIGNATURE_REJECTED_EXIT_CODE = 12
+
 /**
  * R-0000716: build the shell pipeline that fetches `InRelease`, verifies it
  * with `gpgv` against the Debian archive keyring, and prints the cleartext
@@ -139,21 +147,23 @@ function buildDebianInReleaseFetchAndVerifyCommand(): string {
   const keyring = shellQuote(DEBIAN_ARCHIVE_KEYRING_PATH)
   return [
     "set -eu",
-    'tmpdir=$(mktemp -d -t paratix-inrelease.XXXXXX)',
-    'trap \'rm -rf -- "$tmpdir"\' EXIT',
-    `[ -r ${keyring} ] || exit 11`,
-    `curl --max-time 30 -fsSL ${url} -o "$tmpdir/InRelease" || exit 10`,
-    `gpgv --keyring ${keyring} "$tmpdir/InRelease" >/dev/null 2>&1 || exit 12`,
+    "tmpdir=$(mktemp -d -t paratix-inrelease.XXXXXX)",
+    "trap 'rm -rf -- \"$tmpdir\"' EXIT",
+    `[ -r ${keyring} ] || exit ${String(DEBIAN_INRELEASE_KEYRING_MISSING_EXIT_CODE)}`,
+    `curl --max-time 30 -fsSL ${url} -o "$tmpdir/InRelease" || exit ${String(DEBIAN_INRELEASE_FETCH_EXIT_CODE)}`,
+    `gpgv --keyring ${keyring} "$tmpdir/InRelease" >/dev/null 2>&1 || exit ${String(DEBIAN_INRELEASE_SIGNATURE_REJECTED_EXIT_CODE)}`,
     'cat -- "$tmpdir/InRelease"',
   ].join("; ")
 }
 
 function formatDebianInReleaseFailure(result: ExecResult): string {
-  if (result.code === 10) return `${DEBIAN_INRELEASE_FETCH_FAILURE_PREFIX} from ${DEBIAN_INRELEASE_URL}`
-  if (result.code === 11) {
+  if (result.code === DEBIAN_INRELEASE_FETCH_EXIT_CODE) {
+    return `${DEBIAN_INRELEASE_FETCH_FAILURE_PREFIX} from ${DEBIAN_INRELEASE_URL}`
+  }
+  if (result.code === DEBIAN_INRELEASE_KEYRING_MISSING_EXIT_CODE) {
     return `${DEBIAN_INRELEASE_VERIFY_FAILURE_PREFIX}: Debian archive keyring not found at ${DEBIAN_ARCHIVE_KEYRING_PATH}`
   }
-  if (result.code === 12) {
+  if (result.code === DEBIAN_INRELEASE_SIGNATURE_REJECTED_EXIT_CODE) {
     return `${DEBIAN_INRELEASE_VERIFY_FAILURE_PREFIX}: gpgv rejected the InRelease signature against ${DEBIAN_ARCHIVE_KEYRING_PATH}`
   }
   const stderr = result.stderr.trim()
@@ -316,7 +326,7 @@ async function rewriteSourcesFile(
   // R-0000718: route the write through the NOFOLLOW pipeline so a
   // symlink swap between the snapshot read above and this write step
   // cannot redirect the rewrite to an attacker-controlled target.
-  await writeSourcesFileNoFollow(ssh, remotePath, updatedContent, mode)
+  await writeSourcesFileNoFollow({ content: updatedContent, mode, remotePath, ssh })
   return { mode, originalContent, remotePath }
 }
 
@@ -401,20 +411,22 @@ function buildWriteSourcesFileNoFollowCommand(
  * original content and the time it writes back. The fused
  * `[ -L ] + dd oflag=nofollow` statement collapses that TOCTOU window.
  *
- * @param ssh - Active SSH connection to the remote host.
- * @param remotePath - Absolute path of the apt sources file to write.
- * @param content - The new content to write.
- * @param mode - The desired filesystem mode (string with octal digits).
+ * @param parameters - Bundle of inputs for the NOFOLLOW write.
+ * @param parameters.ssh - Active SSH connection to the remote host.
+ * @param parameters.remotePath - Absolute path of the apt sources file to write.
+ * @param parameters.content - The new content to write.
+ * @param parameters.mode - The desired filesystem mode (string with octal digits).
  * @throws {Error} When the path is a symlink, when the NOFOLLOW open
  *   fails (ELOOP), when dd reports a write failure, or when chmod fails
  *   to restore the captured mode.
  */
-async function writeSourcesFileNoFollow(
-  ssh: SshConnection,
-  remotePath: string,
-  content: string,
+async function writeSourcesFileNoFollow(parameters: {
+  content: string
   mode: string
-): Promise<void> {
+  remotePath: string
+  ssh: SshConnection
+}): Promise<void> {
+  const { content, mode, remotePath, ssh } = parameters
   const byteLength = Buffer.byteLength(content, "utf8")
   const command = buildWriteSourcesFileNoFollowCommand(remotePath, byteLength, mode)
   const result = await ssh.exec(command, {
@@ -424,9 +436,7 @@ async function writeSourcesFileNoFollow(
   })
   if (result.code === 0) return
   if (result.code === SOURCES_FILE_WRITE_SYMLINK_EXIT_CODE) {
-    throw new Error(
-      `writing ${remotePath} refused: path is a symbolic link (NOFOLLOW guard)`
-    )
+    throw new Error(`writing ${remotePath} refused: path is a symbolic link (NOFOLLOW guard)`)
   }
   if (result.code === SOURCES_FILE_WRITE_CHMOD_EXIT_CODE) {
     throw new Error(
@@ -627,12 +637,12 @@ async function restoreSourcesSnapshots(
       // rollback cannot trick the writer into restoring the original
       // content into an attacker-controlled symlink target.
       // eslint-disable-next-line no-await-in-loop
-      await writeSourcesFileNoFollow(
+      await writeSourcesFileNoFollow({
+        content: snapshot.originalContent,
+        mode: snapshot.mode,
+        remotePath: snapshot.remotePath,
         ssh,
-        snapshot.remotePath,
-        snapshot.originalContent,
-        snapshot.mode
-      )
+      })
     } catch (error) {
       // Best-effort: if a single file cannot be restored, keep going so the
       // remaining snapshots still revert. The caller appends these failures
@@ -840,6 +850,33 @@ async function runDebianUpgradePipeline(
   return null
 }
 
+/**
+ * Drive the apt pipeline for a Debian release upgrade once snapshots are in
+ * place. Translates pipeline failures into a rollback-aware ModuleResult and
+ * decorates the success case with reboot meta when applicable.
+ *
+ * @param parameters - Pipeline context.
+ * @param parameters.options - User-supplied release upgrade options.
+ * @param parameters.snapshots - Sources snapshots captured before the apt run.
+ * @param parameters.ssh - Active SSH connection to the remote host.
+ * @returns The terminal ModuleResult for the apt pipeline branch.
+ */
+async function runDebianAptPipelineAfterSourcesRewrite(parameters: {
+  options: ReleaseUpgradeOptions
+  snapshots: SourcesSnapshot[]
+  ssh: SshConnection
+}): Promise<ModuleResult> {
+  const { options, snapshots, ssh } = parameters
+  const pipelineFailure = await runDebianUpgradePipeline(ssh, options)
+  if (pipelineFailure != null) {
+    return handleDebianPipelineFailure({ options, pipelineFailure, snapshots, ssh })
+  }
+
+  const entries = await buildRebootMeta(options)
+  if (!Array.isArray(entries)) return entries
+  return { meta: entries, status: "changed" }
+}
+
 async function runDebianUpgradeCriticalSection(parameters: {
   options: ReleaseUpgradeOptions
   ssh: SshConnection
@@ -874,14 +911,7 @@ async function runDebianUpgradeCriticalSection(parameters: {
     return failed(`[releaseUpgrade.upgrade] sources rewrite failed: ${reason}`)
   }
 
-  const pipelineFailure = await runDebianUpgradePipeline(ssh, options)
-  if (pipelineFailure != null) {
-    return handleDebianPipelineFailure({ options, pipelineFailure, snapshots, ssh })
-  }
-
-  const entries = await buildRebootMeta(options)
-  if (!Array.isArray(entries)) return entries
-  return { meta: entries, status: "changed" }
+  return runDebianAptPipelineAfterSourcesRewrite({ options, snapshots, ssh })
 }
 
 function isMutexLockFailure(error: unknown): boolean {

@@ -1,7 +1,6 @@
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-
 import { describe, expect, it } from "vitest"
 
 import { script } from "../../src/index.js"
@@ -481,9 +480,7 @@ describe("script.once — input validation", () => {
   })
 
   it("R-0000717: throws when localPath is a directory", () => {
-    expect(() => script.once("setup", LOCAL_SCRIPT_DIRECTORY)).toThrow(
-      /expected a regular file/v
-    )
+    expect(() => script.once("setup", LOCAL_SCRIPT_DIRECTORY)).toThrow(/expected a regular file/v)
   })
 
   // R-0000717: cap the number of CLI arguments forwarded to the remote
