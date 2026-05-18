@@ -40,6 +40,18 @@ async function removeSwapFile(ssh: SshConnection, path: string): Promise<boolean
 // snapshot, re-enable swap if we had previously called `swapoff`, and
 // surface a chained failure message so the operator knows that both the
 // fstab edit and the recovery state are visible.
+//
+// R-0000851: the returned shape now reports whether the snapshot was
+// consumed by `restoreSwapBackup` (`mv -T --` moves the snapshot onto the
+// original path) so the caller can preserve the snapshot file on disk when
+// the restore itself failed. Without `snapshotConsumed = false` on the
+// failure path the surrounding `finally` would unlink the snapshot the
+// operator needs for manual reconciliation.
+type AbsentRollbackOutcome = {
+  result: ModuleResult
+  snapshotConsumed: boolean
+}
+
 async function rollbackAbsentSwapAfterFstabFailure(
   ssh: SshConnection,
   parameters: {
@@ -48,26 +60,40 @@ async function rollbackAbsentSwapAfterFstabFailure(
     path: string
     snapshotPath: string
   }
-): Promise<ModuleResult> {
+): Promise<AbsentRollbackOutcome> {
   const { disabledSwap, fstabFailure, path, snapshotPath } = parameters
   const fstabMessage = fstabFailure.error?.message ?? "swap fstab update failed"
   const restoreResult = await restoreSwapBackup(ssh, path, snapshotPath)
   if (restoreResult !== true) {
     const restoreMessage = restoreResult.error?.message ?? "unknown error"
-    return failed(
-      `${fstabMessage}; swap file already removed and rollback restoreSwapBackup failed: ${restoreMessage}; operator must reconcile ${path} and /etc/fstab manually`
-    )
+    // R-0000851: surface the on-disk snapshot path so the operator who
+    // performs the manual reconciliation can locate the preserved swap
+    // contents without having to reconstruct the naming scheme. The
+    // surrounding `finally` keeps the snapshot in place because
+    // `snapshotConsumed` is false on this branch.
+    return {
+      result: failed(
+        `${fstabMessage}; swap file already removed and rollback restoreSwapBackup failed: ${restoreMessage}; snapshot preserved at ${snapshotPath}; operator must reconcile ${path} and /etc/fstab manually`
+      ),
+      snapshotConsumed: false,
+    }
   }
   if (disabledSwap) {
     const enableResult = await enableSwap(ssh, path)
     if (typeof enableResult !== "boolean") {
       const enableMessage = enableResult.error?.message ?? "unknown error"
-      return failed(
-        `${fstabMessage}; swap file restored from snapshot but rollback swapon failed: ${enableMessage}`
-      )
+      return {
+        result: failed(
+          `${fstabMessage}; swap file restored from snapshot but rollback swapon failed: ${enableMessage}`
+        ),
+        snapshotConsumed: true,
+      }
     }
   }
-  return failed(`${fstabMessage}; swap file restored from snapshot, /etc/fstab left unchanged`)
+  return {
+    result: failed(`${fstabMessage}; swap file restored from snapshot, /etc/fstab left unchanged`),
+    snapshotConsumed: true,
+  }
 }
 
 type AbsentRemovalOutcome =
@@ -162,6 +188,17 @@ async function performAbsentSwapRemoval(
 // the swap file from the hardlink snapshot via
 // `rollbackAbsentSwapAfterFstabFailure` so the host is not left with
 // a stale fstab entry pointing at a missing file.
+// R-0000851: the result type now distinguishes between three outcomes so
+// the caller can keep the snapshot around on the rollback-failure branch:
+//   - `boolean`        — fstab pruning succeeded; nothing to roll back.
+//   - `ModuleResult` with `snapshotConsumed: true` — restore succeeded or no
+//     snapshot existed; the surrounding `finally` removes the snapshot.
+//   - `ModuleResult` with `snapshotConsumed: false` — restore failed; the
+//     snapshot stays on disk for manual reconciliation.
+type AbsentFstabOutcome =
+  | boolean
+  | { result: ModuleResult; snapshotConsumed: boolean }
+
 async function pruneSwapFstabAndRollbackOnFailure(
   ssh: SshConnection,
   parameters: {
@@ -170,7 +207,7 @@ async function pruneSwapFstabAndRollbackOnFailure(
     snapshotCreated: boolean
     snapshotPath: string
   }
-): Promise<boolean | ModuleResult> {
+): Promise<AbsentFstabOutcome> {
   const { disableResult, options, snapshotCreated, snapshotPath } = parameters
   const fstabResult = await ensureSwapFstabState({
     desiredLine: null,
@@ -178,7 +215,14 @@ async function pruneSwapFstabAndRollbackOnFailure(
     ssh,
   })
   if (typeof fstabResult === "boolean") return fstabResult
-  if (!snapshotCreated) return fstabResult
+  if (!snapshotCreated) {
+    // R-0000851: no snapshot was created (e.g. file was already missing),
+    // so there is nothing to consume — treat as consumed to avoid leaking
+    // a stale snapshot file. The `finally` block guards on
+    // `snapshotCreated` anyway, but signalling `snapshotConsumed: true`
+    // keeps the contract uniform.
+    return { result: fstabResult, snapshotConsumed: true }
+  }
   return rollbackAbsentSwapAfterFstabFailure(ssh, {
     disabledSwap: disableResult,
     fstabFailure: fstabResult,
@@ -219,6 +263,12 @@ export async function applyAbsentSwapFile(
   if (typeof disableResult !== "boolean") return disableResult
   const snapshotPath = `${options.path}.paratix-absent-backup`
   let snapshotCreated = false
+  // R-0000851: track whether the snapshot has been consumed (either by a
+  // successful `restoreSwapBackup` `mv -T --` or because there was nothing
+  // to restore) so the `finally` cleanup only unlinks it when it is no
+  // longer needed. A restore failure leaves the snapshot on disk for
+  // operator-driven reconciliation.
+  let snapshotConsumed = true
   try {
     const removalOutcome = await performAbsentSwapRemoval(ssh, {
       disableResult,
@@ -234,10 +284,15 @@ export async function applyAbsentSwapFile(
       snapshotCreated,
       snapshotPath,
     })
-    if (typeof fstabResult !== "boolean") return fstabResult
+    if (typeof fstabResult !== "boolean") {
+      snapshotConsumed = fstabResult.snapshotConsumed
+      return fstabResult.result
+    }
     const swapChanged = disableResult || removalOutcome.swapChangedDelta || fstabResult
     return { status: swapChanged ? "changed" : "ok" }
   } finally {
-    if (snapshotCreated) await cleanupAbsentSwapSnapshot(ssh, snapshotPath)
+    if (snapshotCreated && snapshotConsumed) {
+      await cleanupAbsentSwapSnapshot(ssh, snapshotPath)
+    }
   }
 }
