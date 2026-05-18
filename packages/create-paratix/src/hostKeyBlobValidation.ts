@@ -185,7 +185,28 @@ function validateEcdsaHostKeyBlob(keyBuffer: Buffer, offset: number, algorithm: 
  * @throws {Error} When the blob does not match the algorithm's expected structure.
  */
 export function validateHostKeyBlob(keyBuffer: Buffer, algorithm: string): void {
-  const payloadOffset = SSH_WIRE_LENGTH_FIELD_BYTES + Buffer.byteLength(algorithm, "ascii")
+  // R-0000732: derive the payload offset from the wire format itself
+  // rather than re-deriving it from the algorithm string. The previous
+  // implementation computed `payloadOffset = 4 + Buffer.byteLength(algorithm)`
+  // which assumes the wire-encoded algorithm length matches the
+  // expected algorithm name. A peer could place a longer algorithm
+  // string on the wire (e.g. padded with trailing bytes) and still
+  // bypass the algorithm check upstream if it normalises differently.
+  // Parsing the leading wire string here and comparing it byte-for-byte
+  // against the expected algorithm closes that gap and gives us the
+  // authoritative offset for the remainder of the payload.
+  const algorithmField = readWireString(keyBuffer, 0)
+  if (algorithmField == null) {
+    throwInvalidHostKeyBlob(algorithm, "missing or truncated algorithm field")
+  }
+  const wireAlgorithm = algorithmField.value.toString("ascii")
+  if (wireAlgorithm !== algorithm) {
+    throwInvalidHostKeyBlob(
+      algorithm,
+      `algorithm field "${wireAlgorithm}" does not match expected "${algorithm}"`
+    )
+  }
+  const payloadOffset = algorithmField.nextOffset
 
   if (algorithm === "ssh-ed25519") {
     validateEd25519HostKeyBlob(keyBuffer, payloadOffset, algorithm)
