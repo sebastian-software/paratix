@@ -480,15 +480,26 @@ async function managedHomeModeMatches(ssh: SshConnection, options: UserOptions):
 // R-0000656: `stat -c '%a' <path>` reports octal permission bits without
 // leading zeros. A failure to read the mode (missing directory, stat error,
 // empty output) counts as mismatch so apply can recreate or fix the home.
+//
+// R-0000778: refuse to compare or chmod a symlinked home directory. `stat -c
+// '%a'` follows symlinks, so a symlink at the home path would otherwise
+// report the mode of the target (e.g. `/etc`) and the subsequent `chmod`
+// would follow the symlink and clobber the target's permissions. Probe with
+// `[ -L <home> ]` first via a single shell pipeline; any symlink (or a
+// missing home) yields `false` so apply re-creates the home directory.
 async function homeModeMatches(
   ssh: SshConnection,
   home: string,
   desiredMode: string
 ): Promise<boolean> {
-  const modeResult = await ssh.exec(`stat -c '%a' ${shellQuote(home)}`, {
-    ignoreExitCode: true,
-    silent: true,
-  })
+  const quotedHome = shellQuote(home)
+  const modeResult = await ssh.exec(
+    `[ ! -L ${quotedHome} ] && [ -d ${quotedHome} ] && stat -c '%a' ${quotedHome}`,
+    {
+      ignoreExitCode: true,
+      silent: true,
+    }
+  )
   if (modeResult.code !== 0) return false
   const currentMode = modeResult.stdout.trim()
   if (currentMode === "") return false
@@ -499,15 +510,25 @@ async function homeModeMatches(
 // permission bits do not depend on the runner host's HOME_MODE setting in
 // /etc/login.defs. `chmod` is idempotent; running it on a home that
 // already matches is harmless.
+//
+// R-0000778: guard the chmod with `[ ! -L <home> ] && [ -d <home> ]` so a
+// race that replaces the home directory with a symlink between
+// `homeModeMatches` and `applyHomeMode` cannot redirect chmod onto the
+// symlink target (e.g. `/etc`). The guard runs in the same shell pipeline
+// as chmod, closing the TOCTOU window at the SSH layer.
 async function applyHomeMode(
   ssh: SshConnection,
   parameters: { home: string; mode: string; name: string }
 ): Promise<ModuleResult | null> {
   const { home, mode, name } = parameters
-  const result = await ssh.exec(`chmod ${shellQuote(mode)} ${shellQuote(home)}`, {
-    ignoreExitCode: true,
-    silent: true,
-  })
+  const quotedHome = shellQuote(home)
+  const result = await ssh.exec(
+    `[ ! -L ${quotedHome} ] && [ -d ${quotedHome} ] && chmod ${shellQuote(mode)} ${quotedHome}`,
+    {
+      ignoreExitCode: true,
+      silent: true,
+    }
+  )
   if (result.code === 0) return null
   return failedCommand(`[user.present: ${name}] chmod home failed`, result)
 }
