@@ -1,5 +1,6 @@
 import type { SshConnection } from "../types.js"
 
+import { maskRegisteredSecrets } from "../secretSink.js"
 import { shellQuote } from "../ssh.js"
 import {
   buildCurlArgvHeaderFlags,
@@ -347,8 +348,39 @@ export async function checkHttpCondition(
 
     const statusOutput = await execCurl(conn, "curl -s -o /dev/null -w '%{http_code}'", parameters)
     return statusOutput === String(parameters.expectedStatus)
-  } catch {
+  } catch (error) {
+    // R-0000853: an HTTP status mismatch surfaces as a `false` return inside
+    // the `try` block, so the `catch` branch only fires for transport- or
+    // spawn-level failures (ssh disconnect, curl missing, command timeout,
+    // etc.). Swallowing these silently used to make probe failures look
+    // identical to legitimately negative HTTP checks, which obscured real
+    // host problems. Emit a masked warning on stderr so the operator can
+    // diagnose without losing the boolean contract of the function.
+    const message = error instanceof Error ? error.message : String(error)
+    const displayUrl = redactCheckHttpUrlForDisplay(parameters.url)
+    process.stderr.write(
+      `[netHelpers.checkHttpCondition] http condition probe failed for ${displayUrl}: ${maskRegisteredSecrets(message)}\n`
+    )
     return false
+  }
+}
+
+/**
+ * R-0000853: best-effort redaction of the probe URL for the warning log.
+ * Mirrors {@link redactParsedUrlForDisplay} but tolerates malformed inputs by
+ * returning a placeholder rather than throwing — the warning path must never
+ * raise an additional error of its own.
+ *
+ * @param url - The URL string from the probe parameters (already validated by
+ *   {@link validateHttpUrl} at module construction time).
+ * @returns A redacted form suitable for display, or `<unparseable url>` when
+ *   `URL` parsing fails for an unexpected reason.
+ */
+function redactCheckHttpUrlForDisplay(url: string): string {
+  try {
+    return redactParsedUrlForDisplay(new URL(url))
+  } catch {
+    return "<unparseable url>"
   }
 }
 
