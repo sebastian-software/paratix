@@ -1181,6 +1181,81 @@ describe("swap.file — apply", () => {
     const bareRmIndex = ssh.calls.indexOf(`rm -f -- '${swapPath}.paratix-absent-backup'`)
     expect(bareRmIndex).toBeGreaterThan(ssh.calls.indexOf(snapshotLink))
   })
+
+  // R-0000679: when safeParentCommand fails after the swapoff already
+  // disabled swap, the absent flow must reactivate swap before surfacing
+  // the failure. Otherwise the host runs without swap until the next boot.
+  it("R-0000679: reactivates swap when absent safeParent probe fails after swapoff", async () => {
+    const writtenFiles: Array<{ content: string; path: string }> = []
+    const ssh = createMockSsh({
+      [`[ -e '${swapPath}' ]`]: { code: 0 },
+      [`[ -f '${swapPath}' ]`]: { code: 0 },
+      [`[ -L '${swapPath}' ]`]: { code: 1 },
+      [`cat '${swapPath}'`]: { stdout: "existing swap bytes" },
+      [`swaplabel '${swapPath}' >/dev/null 2>&1`]: { code: 0 },
+      [`swapoff '${swapPath}'`]: { code: 0 },
+      [`swapon '${swapPath}'`]: { code: 0 },
+      [safeSwapParentCommand]: { code: 1 },
+    })
+    vi.spyOn(ssh, "lines")
+      .mockResolvedValueOnce([swapPath])
+      .mockResolvedValueOnce([])
+      .mockResolvedValue([])
+    // eslint-disable-next-line @typescript-eslint/require-await -- mock implementation
+    ssh.writeFile = async (path: string, content: string): Promise<void> => {
+      writtenFiles.push({ content, path })
+    }
+
+    const mod = swap.file({ path: swapPath, size: swapSize, state: "absent" })
+    const result = await mod.apply(ssh, emptyEnv)
+
+    expect(result.status).toBe("failed")
+    expect(result.error?.message).toContain("parent directory is not safe")
+    expect(ssh.calls).toContain(`swapoff '${swapPath}'`)
+    expect(ssh.calls).toContain(`swapon '${swapPath}'`)
+    // No rm or fstab edit must have happened — the snapshot was never taken.
+    expect(ssh.calls).not.toContain(`rm -f '${swapPath}'`)
+    expect(writtenFiles).toStrictEqual([])
+  })
+
+  // R-0000679: when snapshotSwapFileForAbsentFlow fails after the swapoff
+  // already disabled swap, the absent flow must reactivate swap before
+  // surfacing the snapshot failure. Same rationale as the safeParent path.
+  it("R-0000679: reactivates swap when absent snapshot link fails after swapoff", async () => {
+    const writtenFiles: Array<{ content: string; path: string }> = []
+    const snapshotLink = `[ ! -L '${swapPath}' ] || { echo 'swap path must not be a symlink' >&2; exit 1; }; [ ! -L '${swapPath}.paratix-absent-backup' ] || { echo 'swap backup must not be a symlink' >&2; exit 1; }; ln -P -- '${swapPath}' '${swapPath}.paratix-absent-backup'`
+    const preSnapshotRm = `[ ! -L '${swapPath}.paratix-absent-backup' ] || { echo 'swap backup must not be a symlink' >&2; exit 1; }; rm -f -- '${swapPath}.paratix-absent-backup'`
+    const ssh = createMockSsh({
+      [`[ -e '${swapPath}' ]`]: { code: 0 },
+      [`[ -f '${swapPath}' ]`]: { code: 0 },
+      [`[ -L '${swapPath}' ]`]: { code: 1 },
+      [`cat '${swapPath}'`]: { stdout: "existing swap bytes" },
+      [`swaplabel '${swapPath}' >/dev/null 2>&1`]: { code: 0 },
+      [`swapoff '${swapPath}'`]: { code: 0 },
+      [`swapon '${swapPath}'`]: { code: 0 },
+      [preSnapshotRm]: { code: 0 },
+      [snapshotLink]: { code: 1, stderr: "ln: cannot create hard link" },
+      [safeSwapParentCommand]: { code: 0, stdout: "/\n" },
+    })
+    vi.spyOn(ssh, "lines")
+      .mockResolvedValueOnce([swapPath])
+      .mockResolvedValueOnce([])
+      .mockResolvedValue([])
+    // eslint-disable-next-line @typescript-eslint/require-await -- mock implementation
+    ssh.writeFile = async (path: string, content: string): Promise<void> => {
+      writtenFiles.push({ content, path })
+    }
+
+    const mod = swap.file({ path: swapPath, size: swapSize, state: "absent" })
+    const result = await mod.apply(ssh, emptyEnv)
+
+    expect(result.status).toBe("failed")
+    expect(ssh.calls).toContain(`swapoff '${swapPath}'`)
+    expect(ssh.calls).toContain(`swapon '${swapPath}'`)
+    // No rm or fstab edit must have happened — the snapshot link itself failed.
+    expect(ssh.calls).not.toContain(`rm -f '${swapPath}'`)
+    expect(writtenFiles).toStrictEqual([])
+  })
 })
 
 describe("swap.file — option validation", () => {

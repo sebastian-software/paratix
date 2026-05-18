@@ -101,16 +101,38 @@ async function performAbsentSwapRemoval(
   const parentDirectory = posixPath.dirname(options.path)
   const safeParentResult = await ssh.exec(safeParentCommand(parentDirectory), EXEC_OPTS)
   if (safeParentResult.code !== 0) {
+    // R-0000679: `disableSwap` has already called `swapoff` before reaching
+    // here. Without reactivating swap the host would run without swap until
+    // the next boot, contradicting the apply-failed semantics. Route the
+    // failure through `handleAbsentSwapRemovalFailure` so swap is restored
+    // on the same path the late-failure path uses.
+    const safeParentFailure = failedCommand(
+      `[swap.file: ${options.path}] parent directory is not safe for swap absent snapshot`,
+      safeParentResult
+    )
     return {
       kind: "done",
-      result: failedCommand(
-        `[swap.file: ${options.path}] parent directory is not safe for swap absent snapshot`,
-        safeParentResult
-      ),
+      result: await handleAbsentSwapRemovalFailure(ssh, {
+        disabledSwap: disableResult,
+        path: options.path,
+        removeFailure: safeParentFailure,
+      }),
     }
   }
   const snapshotResult = await snapshotSwapFileForAbsentFlow(ssh, options.path, snapshotPath)
-  if (snapshotResult !== true) return { kind: "done", result: snapshotResult }
+  if (snapshotResult !== true) {
+    // R-0000679: same rationale as the safeParentResult branch above —
+    // reactivate swap before surfacing the snapshot failure so the host
+    // does not silently run without swap until the next boot.
+    return {
+      kind: "done",
+      result: await handleAbsentSwapRemovalFailure(ssh, {
+        disabledSwap: disableResult,
+        path: options.path,
+        removeFailure: snapshotResult,
+      }),
+    }
+  }
   const removeResult = await removeSwapFile(ssh, options.path)
   if (typeof removeResult !== "boolean") {
     return {
