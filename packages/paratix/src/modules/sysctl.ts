@@ -116,8 +116,17 @@ async function checkPresentState(
   const configExists = await conn.exec(`test -f ${shellQuote(configPath)}`, EXEC_OPTS)
   if (configExists.code !== 0) return NEEDS_APPLY
 
-  const fileContent = await conn.readFile(configPath)
-  return fileContent.trim() === expectedContent.trim() ? "ok" : NEEDS_APPLY
+  // R-0000817: mirror the `snapshotPersistenceFile` pattern (R-0000682) and
+  // treat a transient readFile failure after a positive `test -f` as
+  // NEEDS_APPLY rather than letting the exception escape the check phase. A
+  // permission denial or SFTP hiccup must not crash the planner; the apply
+  // path is responsible for producing a structured diagnostic.
+  try {
+    const fileContent = await conn.readFile(configPath)
+    return fileContent.trim() === expectedContent.trim() ? "ok" : NEEDS_APPLY
+  } catch {
+    return NEEDS_APPLY
+  }
 }
 
 /**
