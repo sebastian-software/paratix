@@ -143,12 +143,13 @@ async function ensureSshDirectoryAndAuthorizedKeysAreNotSymlinks(
   const quotedUser = shellQuote(user)
   const quotedPrimaryGroup = shellQuote(primaryGroup)
 
-  // The pipeline below is the verbatim concatenation of the previous two
-  // helpers, wrapped in `set -e` so the first failing guard aborts the
-  // remainder of the script. Keeping the literal substrings intact (e.g.
-  // `[ ! -L … ] || { echo '.ssh must not be a symlink' >&2; exit 1; }`)
-  // preserves the test fixtures and operator-facing diagnostics.
-  const command = `set -e; [ ! -L ${directory} ] || { echo '.ssh must not be a symlink' >&2; exit 1; }; if [ -e ${directory} ]; then [ -d ${directory} ] || { echo '.ssh must be a directory' >&2; exit 1; }; else mkdir -p ${directory}; fi; [ -d ${directory} ] && [ ! -L ${directory} ] || { echo '.ssh must be a real directory' >&2; exit 1; }; chmod 700 ${directory} && chown ${quotedUser}:${quotedPrimaryGroup} ${directory}; [ ! -L ${keysPath} ] || { echo 'authorized_keys must not be a symlink' >&2; exit 1; }`
+  // The pipeline below keeps the .ssh directory guards and the
+  // authorized_keys symlink probe in one `set -e` script so the first failing
+  // guard aborts the remainder of the script. R-0000887 also snapshots the
+  // prepared directory's device+inode before chmod/chown and verifies it
+  // afterwards, so a concurrent swap to another real directory is reported
+  // before the authorized_keys rewrite continues.
+  const command = `set -e; [ ! -L ${directory} ] || { echo '.ssh must not be a symlink' >&2; exit 1; }; if [ -e ${directory} ]; then [ -d ${directory} ] || { echo '.ssh must be a directory' >&2; exit 1; }; else mkdir -p ${directory}; fi; [ -d ${directory} ] && [ ! -L ${directory} ] || { echo '.ssh must be a real directory' >&2; exit 1; }; ssh_directory_identity=$(stat -c '%d:%i' ${directory}) || exit $?; chmod 700 ${directory} && chown ${quotedUser}:${quotedPrimaryGroup} ${directory}; [ ! -L ${directory} ] && [ -d ${directory} ] || { echo '.ssh must be a real directory' >&2; exit 1; }; post_ssh_directory_identity=$(stat -c '%d:%i' ${directory}) || exit $?; [ "$post_ssh_directory_identity" = "$ssh_directory_identity" ] || { echo '.ssh directory changed during metadata update' >&2; exit 1; }; [ ! -L ${keysPath} ] || { echo 'authorized_keys must not be a symlink' >&2; exit 1; }`
 
   const result = await conn.exec(command, MUTATION_EXEC_OPTS)
   if (result.code !== 0) {

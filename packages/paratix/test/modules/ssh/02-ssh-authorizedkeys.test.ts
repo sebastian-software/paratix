@@ -25,7 +25,7 @@ const successfulSshApplyOptions: MockSshOptions = {
       // probe now run in a single `set -e` pipeline. The previous two
       // separate stub entries are replaced by the fused pattern below.
       command:
-        /^set -e; \[ ! -L '[^']+\/\.ssh' \] \|\| \{ echo '\.ssh must not be a symlink' >&2; exit 1; \}; if \[ -e '[^']+\/\.ssh' \]; then \[ -d '[^']+\/\.ssh' \] \|\| \{ echo '\.ssh must be a directory' >&2; exit 1; \}; else mkdir -p '[^']+\/\.ssh'; fi; \[ -d '[^']+\/\.ssh' \] && \[ ! -L '[^']+\/\.ssh' \] \|\| \{ echo '\.ssh must be a real directory' >&2; exit 1; \}; chmod 700 '[^']+\/\.ssh' && chown '[^']+':'[^']+' '[^']+\/\.ssh'; \[ ! -L '[^']+\/\.ssh\/authorized_keys' \] \|\| \{ echo 'authorized_keys must not be a symlink' >&2; exit 1; \}$/v,
+        /^set -e; \[ ! -L '[^']+\/\.ssh' \] \|\| \{ echo '\.ssh must not be a symlink' >&2; exit 1; \}; if \[ -e '[^']+\/\.ssh' \]; then \[ -d '[^']+\/\.ssh' \] \|\| \{ echo '\.ssh must be a directory' >&2; exit 1; \}; else mkdir -p '[^']+\/\.ssh'; fi; \[ -d '[^']+\/\.ssh' \] && \[ ! -L '[^']+\/\.ssh' \] \|\| \{ echo '\.ssh must be a real directory' >&2; exit 1; \}; ssh_directory_identity=\$\(stat -c '%d:%i' '[^']+\/\.ssh'\) \|\| exit \$\?; chmod 700 '[^']+\/\.ssh' && chown '[^']+':'[^']+' '[^']+\/\.ssh'; \[ ! -L '[^']+\/\.ssh' \] && \[ -d '[^']+\/\.ssh' \] \|\| \{ echo '\.ssh must be a real directory' >&2; exit 1; \}; post_ssh_directory_identity=\$\(stat -c '%d:%i' '[^']+\/\.ssh'\) \|\| exit \$\?; \[ "\$post_ssh_directory_identity" = "\$ssh_directory_identity" \] \|\| \{ echo '\.ssh directory changed during metadata update' >&2; exit 1; \}; \[ ! -L '[^']+\/\.ssh\/authorized_keys' \] \|\| \{ echo 'authorized_keys must not be a symlink' >&2; exit 1; \}$/v,
       result: { code: 0 },
     },
     {
@@ -116,6 +116,16 @@ function absentAuthorizedKeysRewriteCommand(
   return `{ if [ -e ${authorizedKeysPath} ]; then [ ! -L ${authorizedKeysPath} ] || { echo 'authorized_keys must not be a symlink' >&2; exit 1; }; [ -f ${authorizedKeysPath} ] || { echo 'authorized_keys must be a regular file' >&2; exit 1; }; dd if=${authorizedKeysPath} iflag=nofollow status=none of='${temporaryPath}' || exit $?; grep -vxF -- '${key}' '${temporaryPath}' > '${temporaryPath}.filter'; grep_status=$?; if [ "$grep_status" -eq 0 ] || [ "$grep_status" -eq 1 ]; then mv -T -- '${temporaryPath}.filter' '${temporaryPath}' || exit $?; else rm -f -- '${temporaryPath}.filter'; exit "$grep_status"; fi; else : > '${temporaryPath}'; fi; }`
 }
 
+function sshDirectoryGuardCommand(parameters: {
+  authorizedKeysPath: string
+  group: string
+  sshDirectoryPath: string
+  user: string
+}): string {
+  const { authorizedKeysPath, group, sshDirectoryPath, user } = parameters
+  return `set -e; [ ! -L ${sshDirectoryPath} ] || { echo '.ssh must not be a symlink' >&2; exit 1; }; if [ -e ${sshDirectoryPath} ]; then [ -d ${sshDirectoryPath} ] || { echo '.ssh must be a directory' >&2; exit 1; }; else mkdir -p ${sshDirectoryPath}; fi; [ -d ${sshDirectoryPath} ] && [ ! -L ${sshDirectoryPath} ] || { echo '.ssh must be a real directory' >&2; exit 1; }; ssh_directory_identity=$(stat -c '%d:%i' ${sshDirectoryPath}) || exit $?; chmod 700 ${sshDirectoryPath} && chown '${user}':'${group}' ${sshDirectoryPath}; [ ! -L ${sshDirectoryPath} ] && [ -d ${sshDirectoryPath} ] || { echo '.ssh must be a real directory' >&2; exit 1; }; post_ssh_directory_identity=$(stat -c '%d:%i' ${sshDirectoryPath}) || exit $?; [ "$post_ssh_directory_identity" = "$ssh_directory_identity" ] || { echo '.ssh directory changed during metadata update' >&2; exit 1; }; [ ! -L ${authorizedKeysPath} ] || { echo 'authorized_keys must not be a symlink' >&2; exit 1; }`
+}
+
 function authorizedKeysFinalReplaceCommand(parameters: {
   authorizedKeysPath: string
   expectedSshDirectoryState: string
@@ -195,8 +205,12 @@ describe("ssh.authorizedKeys", () => {
   const tempPath = "/home/alice/.ssh/.paratix-authorized-keys.ABCDEF"
   // R-0000765: the apply pipeline runs the .ssh-directory preparation and
   // the authorized_keys symlink probe in a single `set -e` shell exec.
-  const aliceSshDirectoryGuard =
-    "set -e; [ ! -L '/home/alice/.ssh' ] || { echo '.ssh must not be a symlink' >&2; exit 1; }; if [ -e '/home/alice/.ssh' ]; then [ -d '/home/alice/.ssh' ] || { echo '.ssh must be a directory' >&2; exit 1; }; else mkdir -p '/home/alice/.ssh'; fi; [ -d '/home/alice/.ssh' ] && [ ! -L '/home/alice/.ssh' ] || { echo '.ssh must be a real directory' >&2; exit 1; }; chmod 700 '/home/alice/.ssh' && chown 'alice':'alice' '/home/alice/.ssh'; [ ! -L '/home/alice/.ssh/authorized_keys' ] || { echo 'authorized_keys must not be a symlink' >&2; exit 1; }"
+  const aliceSshDirectoryGuard = sshDirectoryGuardCommand({
+    authorizedKeysPath: aliceKeys,
+    group: "alice",
+    sshDirectoryPath: aliceDir,
+    user: "alice",
+  })
   const aliceFinalReplaceCommand = authorizedKeysFinalReplaceCommand({
     authorizedKeysPath: aliceKeys,
     expectedSshDirectoryState: "700 alice alice directory",
@@ -826,6 +840,36 @@ describe("ssh.authorizedKeys", () => {
     expect(mockSsh.calls).not.toContain(aliceFinalReplaceCommand)
   })
 
+  it("regression: returns failed when .ssh is exchanged during metadata update", async () => {
+    const mockSsh = createMockSsh(
+      aliceResponses({
+        [aliceSshDirectoryGuard]: {
+          code: 1,
+          stderr: ".ssh directory changed during metadata update",
+        },
+      }),
+      successfulSshApplyOptions
+    )
+    const mod = ssh.authorizedKeys("alice", testKey)
+
+    const result = await mod.apply(mockSsh, emptyEnv)
+
+    expect(result.status).toBe("failed")
+    expect(String(result.error)).toContain(".ssh directory changed during metadata update")
+    expect(aliceSshDirectoryGuard).toContain(
+      "ssh_directory_identity=$(stat -c '%d:%i' '/home/alice/.ssh')"
+    )
+    expect(aliceSshDirectoryGuard).toContain(
+      "post_ssh_directory_identity=$(stat -c '%d:%i' '/home/alice/.ssh')"
+    )
+    expect(aliceSshDirectoryGuard).toContain(
+      '[ "$post_ssh_directory_identity" = "$ssh_directory_identity" ]'
+    )
+    expect(mockSsh.calls).toContain(aliceSshDirectoryGuard)
+    expect(mockSsh.calls).not.toContain(aliceMktempPattern)
+    expect(mockSsh.calls).not.toContain(aliceFinalReplaceCommand)
+  })
+
   it("regression: returns failed when .ssh is exchanged before the final authorized_keys replace", async () => {
     // R-0000244: mutation failures surface as a structured `failed`
     // ModuleResult instead of an unstructured exception.
@@ -1026,7 +1070,12 @@ describe("ssh.authorizedKeys", () => {
     // Directory creation must quote the space-containing path.
     // R-0000765: includes the fused authorized_keys symlink probe.
     expect(mockSsh.calls).toContain(
-      `set -e; [ ! -L '/home/my user/.ssh' ] || { echo '.ssh must not be a symlink' >&2; exit 1; }; if [ -e '/home/my user/.ssh' ]; then [ -d '/home/my user/.ssh' ] || { echo '.ssh must be a directory' >&2; exit 1; }; else mkdir -p '/home/my user/.ssh'; fi; [ -d '/home/my user/.ssh' ] && [ ! -L '/home/my user/.ssh' ] || { echo '.ssh must be a real directory' >&2; exit 1; }; chmod 700 '/home/my user/.ssh' && chown 'alice':'alice' '/home/my user/.ssh'; [ ! -L '/home/my user/.ssh/authorized_keys' ] || { echo 'authorized_keys must not be a symlink' >&2; exit 1; }`
+      sshDirectoryGuardCommand({
+        authorizedKeysPath: "'/home/my user/.ssh/authorized_keys'",
+        group: "alice",
+        sshDirectoryPath: "'/home/my user/.ssh'",
+        user: "alice",
+      })
     )
     // R-0000181: mktemp must operate inside <home>/.ssh on the destination filesystem.
     expect(mockSsh.calls).toContain(spaceyMktemp)
@@ -1073,7 +1122,12 @@ describe("ssh.authorizedKeys", () => {
     // Directory chown uses the resolved primary group, not the username.
     // R-0000765: includes the fused authorized_keys symlink probe.
     expect(mockSsh.calls).toContain(
-      `set -e; [ ! -L '/home/deploy/.ssh' ] || { echo '.ssh must not be a symlink' >&2; exit 1; }; if [ -e '/home/deploy/.ssh' ]; then [ -d '/home/deploy/.ssh' ] || { echo '.ssh must be a directory' >&2; exit 1; }; else mkdir -p '/home/deploy/.ssh'; fi; [ -d '/home/deploy/.ssh' ] && [ ! -L '/home/deploy/.ssh' ] || { echo '.ssh must be a real directory' >&2; exit 1; }; chmod 700 '/home/deploy/.ssh' && chown 'deploy':'users' '/home/deploy/.ssh'; [ ! -L '/home/deploy/.ssh/authorized_keys' ] || { echo 'authorized_keys must not be a symlink' >&2; exit 1; }`
+      sshDirectoryGuardCommand({
+        authorizedKeysPath: "'/home/deploy/.ssh/authorized_keys'",
+        group: "users",
+        sshDirectoryPath: "'/home/deploy/.ssh'",
+        user: "deploy",
+      })
     )
     // The authorized_keys chown must also use the resolved primary group.
     expect(mockSsh.calls).toContain(
