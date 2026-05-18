@@ -139,20 +139,20 @@ export function validateAdminPublicKey(
 // obvious and to give a single place to revisit if the limit changes.
 const ADMIN_PUBLIC_KEY_FILE_PATH_MAX_BYTES = 4096
 
-export function readAdminPublicKeyFile(exitWithMessage: ExitWithMessage, path: string): string {
-  // R-0000831: validate the raw path bytes before handing them to
-  // `resolve` or any fs call. Two failure modes need a deterministic,
-  // operator-friendly error instead of the cryptic syscall message Node
-  // would produce later:
-  //   1. NUL byte in the path. Node's path APIs reject this with
-  //      `ERR_INVALID_ARG_VALUE`, but the message points at internal
-  //      argument indices rather than the offending option. Surfacing it
-  //      via CliExitError keeps the diagnostic actionable.
-  //   2. Path length above PATH_MAX. Even when Node accepts the string,
-  //      the underlying syscall (`open(2)`/`stat(2)`) will fail with
-  //      `ENAMETOOLONG`; rejecting it up front makes the cause obvious
-  //      and avoids exposing a partial buffer of a pathological input in
-  //      the eventual log line.
+// R-0000831: validate the raw path bytes before handing them to
+// `resolve` or any fs call. Two failure modes need a deterministic,
+// operator-friendly error instead of the cryptic syscall message Node
+// would produce later:
+//   1. NUL byte in the path. Node's path APIs reject this with
+//      `ERR_INVALID_ARG_VALUE`, but the message points at internal
+//      argument indices rather than the offending option. Surfacing it
+//      via CliExitError keeps the diagnostic actionable.
+//   2. Path length above PATH_MAX. Even when Node accepts the string,
+//      the underlying syscall (`open(2)`/`stat(2)`) will fail with
+//      `ENAMETOOLONG`; rejecting it up front makes the cause obvious
+//      and avoids exposing a partial buffer of a pathological input in
+//      the eventual log line.
+function preValidateAdminPublicKeyFilePath(exitWithMessage: ExitWithMessage, path: string): void {
   if (path.includes("\0")) {
     exitWithMessage(
       "Error: admin public key file path contains a NUL byte; provide a clean filesystem path."
@@ -171,6 +171,10 @@ export function readAdminPublicKeyFile(exitWithMessage: ExitWithMessage, path: s
     )
     throw new Error("admin public key file path exceeds PATH_MAX")
   }
+}
+
+export function readAdminPublicKeyFile(exitWithMessage: ExitWithMessage, path: string): string {
+  preValidateAdminPublicKeyFilePath(exitWithMessage, path)
 
   // R-0000126: resolve relative paths against cwd; emit neutral errors.
   const resolvedPath = resolve(path)

@@ -187,8 +187,10 @@ function parseArgumentValue(
   // depend on the hook actually never returning. The explicit `throw`
   // turns failMissing into a deterministic `never`-returning function that
   // both the compiler and the runtime can rely on, even if a future
-  // refactor of exitWithMessage accidentally returned.
-  const failMissing = (message: string): never => {
+  // refactor of exitWithMessage accidentally returned. We declare it as a
+  // function declaration (rather than an arrow assigned to const) so its
+  // `never` return type participates in control-flow narrowing reliably.
+  function failMissing(message: string): never {
     parameters.exitWithMessage(message)
     throw new Error(message)
   }

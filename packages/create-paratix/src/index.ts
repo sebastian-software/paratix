@@ -251,6 +251,25 @@ export function scaffoldProject(
   return true
 }
 
+// R-0000829: after handleCliExit assigns process.exitCode, schedule an
+// explicit process.exit on the next macrotask. unhandledRejection and
+// uncaughtException fire after the main pipeline has already lost the
+// ability to short-circuit the event loop — without an explicit exit,
+// pending I/O (open stdin in raw mode, background promises) can keep
+// the process alive long enough to swallow the configured exit code or
+// emit additional output. setImmediate runs after handleCliExit returns
+// so the assigned exitCode is preserved, and any synchronous follow-up
+// listener still observes the original event.
+function forceExitAfterHandling(): void {
+  setImmediate(() => {
+    // The whole point of R-0000829 is to force the process to terminate
+    // after the late-error handler ran; throwing here would just be caught
+    // by the same handler chain we are trying to settle.
+    // eslint-disable-next-line node/no-process-exit
+    process.exit(process.exitCode ?? 1)
+  })
+}
+
 function main(): void {
   // R-0000739: install global last-resort handlers so a rejection or
   // throw that escapes the in-flight async pipeline (e.g. an `await`
@@ -261,20 +280,6 @@ function main(): void {
   // unhandled-rejection / uncaught-exception trace with no terminal
   // cleanup. Both listeners are installed once per `main()` invocation
   // and remain in place for the lifetime of the process.
-  // R-0000829: after handleCliExit assigns process.exitCode, schedule an
-  // explicit process.exit on the next macrotask. unhandledRejection and
-  // uncaughtException fire after the main pipeline has already lost the
-  // ability to short-circuit the event loop — without an explicit exit,
-  // pending I/O (open stdin in raw mode, background promises) can keep
-  // the process alive long enough to swallow the configured exit code or
-  // emit additional output. setImmediate runs after handleCliExit returns
-  // so the assigned exitCode is preserved, and any synchronous follow-up
-  // listener still observes the original event.
-  const forceExitAfterHandling = (): void => {
-    setImmediate(() => {
-      process.exit(process.exitCode ?? 1)
-    })
-  }
   process.on("unhandledRejection", (reason) => {
     handleCliExit(reason)
     forceExitAfterHandling()
