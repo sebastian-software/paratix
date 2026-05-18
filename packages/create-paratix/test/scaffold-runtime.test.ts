@@ -123,6 +123,24 @@ describe("scaffoldRuntime", () => {
     expect(console.error).toHaveBeenCalledWith("Run install manually.")
   })
 
+  it("returns false and prints a timeout message when spawnSync reports a timeout error", () => {
+    const timeoutError = Object.assign(new Error("spawnSync pnpm ETIMEDOUT"), {
+      code: "ETIMEDOUT",
+    })
+    spawnSyncMock.mockReturnValue(
+      buildSpawnResult({ error: timeoutError, signal: "SIGTERM", status: null })
+    )
+
+    const result = installDependencies("/tmp/generated-project", {
+      command: PNPM_INSTALL,
+      name: "pnpm",
+    })
+
+    expect(result).toBe(false)
+    expect(console.error).toHaveBeenCalledWith("Installation timed out after 2 minutes.")
+    expect(console.error).toHaveBeenCalledWith("Run install manually.")
+  })
+
   it("returns false when the install command exits non-zero", () => {
     spawnSyncMock.mockReturnValue(buildSpawnResult({ status: 1 }))
 

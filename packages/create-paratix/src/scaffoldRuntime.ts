@@ -73,13 +73,13 @@ export function installDependencies(projectDirectory: string, pm: PackageManager
     stdio: "inherit",
     timeout: INSTALL_TIMEOUT_MS,
   })
+  if (result.signal === "SIGTERM") {
+    return reportInstallTimeout()
+  }
   if (result.error) {
     return reportInstallFailure(
       result.error instanceof Error ? result.error.message : String(result.error)
     )
-  }
-  if (result.signal === "SIGTERM") {
-    return reportInstallTimeout()
   }
   if (result.status !== 0) {
     return reportInstallFailure(
