@@ -82,6 +82,12 @@ export function makeMockSshClass(
         port: 22,
         privateKeyPath: "~/.ssh/id",
         user: "root",
+        // R-0000714: rsync.sync now refuses to transfer without a verified
+        // host trust anchor. The runner-level lifecycle mocks default to a
+        // pinned key so existing runner tests cover the normal flow; tests
+        // that need the trust-anchor failure path override
+        // `getConnectionInfo` to drop `verifiedHostPublicKey`.
+        verifiedHostPublicKey: "ssh-ed25519 AAAAMOCKVERIFIEDKEY",
       }))
     public lines = vi.fn().mockRejectedValue(rejectUnstubbedSshMethod("lines"))
     public output =

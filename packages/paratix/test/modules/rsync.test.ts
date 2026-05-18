@@ -555,6 +555,10 @@ describe("rsync.sync — argument building", () => {
       port: 22,
       privateKeyPath: "$HOME/.ssh/deploy key",
       user: "root",
+      // R-0000714: rsync now refuses to transfer without a verified host
+      // trust anchor; supply one so the privateKey-quoting assertion can
+      // observe the constructed SSH transport string.
+      verifiedHostPublicKey: "ssh-ed25519 AAAAMOCKVERIFIEDKEY",
     })
     const mod = rsync.sync({ dest: "/remote/dest", src: "/local/src" })
     await mod.apply(mockSsh, emptyEnv)
@@ -567,8 +571,14 @@ describe("rsync.sync — argument building", () => {
     expect(transportArg).not.toContain('-i "$HOME/.ssh/deploy key"')
   })
 
+  // R-0000714: the rsync SSH transport now pins `StrictHostKeyChecking=yes`
+  // unconditionally and reuses the verified Paratix session host key via a
+  // temporary known_hosts file. Caller-supplied `strictHostKeyChecking` is
+  // accepted for API stability (and still validated at module construction)
+  // but no longer changes the argv: every transfer requires a trust anchor
+  // and a host-key mismatch must abort the rsync process.
   it.each(["accept-new", "no", "off", "yes"] as const)(
-    "uses custom StrictHostKeyChecking=%s when provided",
+    "always pins StrictHostKeyChecking=yes even when strictHostKeyChecking=%s is provided",
     async (strictHostKeyChecking) => {
       const mockSsh = createMockSsh()
       const mod = rsync.sync({ dest: "/remote/dest", src: "/local/src", strictHostKeyChecking })
@@ -577,9 +587,55 @@ describe("rsync.sync — argument building", () => {
       const args = getArgs()
       const eIdx = args.indexOf("-e")
       const transportArg = args[eIdx + 1]
-      expect(transportArg).toContain(`-o StrictHostKeyChecking=${strictHostKeyChecking}`)
+      expect(transportArg).toContain("-o StrictHostKeyChecking=yes")
     }
   )
+
+  // R-0000714: rsync refuses to transfer when the active Paratix SSH session
+  // never verified a host trust anchor. Without this guard, the external
+  // rsync SSH process would silently fall back to the system known_hosts
+  // file (or to caller-controlled `strictHostKeyChecking`), weakening the
+  // transport's host-key verification compared to the session that
+  // scheduled the transfer.
+  it("R-0000714: refuses to apply when the session has no verified host trust anchor", async () => {
+    const mockSsh = createMockSsh()
+    vi.spyOn(mockSsh, "getConnectionInfo").mockReturnValue({
+      configuredPorts: [22],
+      host: "1.2.3.4",
+      port: 22,
+      privateKeyPath: "~/.ssh/id",
+      user: "root",
+    })
+    const mod = rsync.sync({ dest: "/remote/dest", src: "/local/src" })
+    const result = await mod.apply(mockSsh, emptyEnv)
+
+    expect(result.status).toBe("failed")
+    expect(result.error?.message).toContain(
+      "refuses to transfer without a verified host trust anchor"
+    )
+    expect(mockSpawn).not.toHaveBeenCalled()
+    expect(mockWriteFileSync).not.toHaveBeenCalled()
+  })
+
+  // R-0000714: the same guard applies on the check path so dry-run never
+  // contacts the host with weakened host-key verification either. The
+  // existing `check` swallows failures and reports `needs-apply` so the
+  // playbook can still surface the issue from `apply`.
+  it("R-0000714: check returns needs-apply when the session has no verified host trust anchor", async () => {
+    const mockSsh = createMockSsh()
+    vi.spyOn(mockSsh, "getConnectionInfo").mockReturnValue({
+      configuredPorts: [22],
+      host: "1.2.3.4",
+      port: 22,
+      privateKeyPath: "~/.ssh/id",
+      user: "root",
+    })
+    const mod = rsync.sync({ dest: "/remote/dest", src: "/local/src" })
+    const result = await mod.check(mockSsh, emptyEnv)
+
+    expect(result).toBe("needs-apply")
+    expect(mockSpawn).not.toHaveBeenCalled()
+  })
 
   it("rejects invalid StrictHostKeyChecking strings at module construction", () => {
     expect(() =>
@@ -760,6 +816,7 @@ describe("rsync.sync — argument building", () => {
       port: 22,
       privateKeyPath: "~/.ssh/id",
       user: "root",
+      verifiedHostPublicKey: "ssh-ed25519 AAAAMOCKVERIFIEDKEY",
     })
     const mod = rsync.sync({ dest: "/var/www/html", src: "/local/src" })
     await mod.apply(mockSsh, emptyEnv)
@@ -786,6 +843,7 @@ describe("rsync.sync — SSH auth method in transport flag", () => {
       host: "1.2.3.4",
       port: 22,
       user: "root",
+      verifiedHostPublicKey: "ssh-ed25519 AAAAMOCKVERIFIEDKEY",
     })
     const mod = rsync.sync({ dest: "/remote/dest", src: "/local/src" })
     await mod.apply(mockSsh, emptyEnv)
@@ -806,6 +864,7 @@ describe("rsync.sync — SSH auth method in transport flag", () => {
       host: "1.2.3.4",
       port: 22,
       user: "root",
+      verifiedHostPublicKey: "ssh-ed25519 AAAAMOCKVERIFIEDKEY",
     })
     const mod = rsync.sync({ dest: "/remote/dest", src: "/local/src" })
     await mod.apply(mockSsh, emptyEnv)
@@ -826,6 +885,7 @@ describe("rsync.sync — SSH auth method in transport flag", () => {
       port: 22,
       privateKeyPath: "~/.ssh/deploy_key",
       user: "root",
+      verifiedHostPublicKey: "ssh-ed25519 AAAAMOCKVERIFIEDKEY",
     })
     const mod = rsync.sync({ dest: "/remote/dest", src: "/local/src" })
     await mod.apply(mockSsh, emptyEnv)
@@ -845,6 +905,7 @@ describe("rsync.sync — SSH auth method in transport flag", () => {
       port: 22,
       privateKeyPath: "~/.ssh/id",
       user: "root",
+      verifiedHostPublicKey: "ssh-ed25519 AAAAMOCKVERIFIEDKEY",
     })
     const mod = rsync.sync({ dest: "/remote/dest", src: "/local/src" })
     await mod.apply(mockSsh, emptyEnv)
@@ -864,6 +925,7 @@ describe("rsync.sync — SSH auth method in transport flag", () => {
       port: 22,
       privateKeyPath: "~/.ssh/id",
       user: "root",
+      verifiedHostPublicKey: "ssh-ed25519 AAAAMOCKVERIFIEDKEY",
     })
     const mod = rsync.sync({ dest: "/remote/dest", src: "/local/src" })
     await mod.apply(mockSsh, emptyEnv)
@@ -885,6 +947,7 @@ describe("rsync.sync — SSH auth method in transport flag", () => {
       host: "1.2.3.4",
       port: 22,
       user: "root",
+      verifiedHostPublicKey: "ssh-ed25519 AAAAMOCKVERIFIEDKEY",
     })
     const mod = rsync.sync({ dest: "/remote/dest", src: "/local/src" })
     await mod.apply(mockSsh, emptyEnv)
@@ -905,6 +968,7 @@ describe("rsync.sync — SSH auth method in transport flag", () => {
       host: "1.2.3.4",
       port: 22,
       user: "root",
+      verifiedHostPublicKey: "ssh-ed25519 AAAAMOCKVERIFIEDKEY",
     })
     const mod = rsync.sync({ dest: "/remote/dest", src: "/local/src" })
     await mod.apply(mockSsh, emptyEnv)

@@ -296,6 +296,14 @@ function getMockConnectionInfo(): ReturnType<SshConnection["getConnectionInfo"]>
     port: 22,
     privateKeyPath: "~/.ssh/id",
     user: "root",
+    // R-0000714: production SSH sessions used by Paratix always have a
+    // verified host trust anchor (`expectedHostFingerprint` /
+    // `expectedHostPublicKey`). The default mock advertises one so modules
+    // such as `rsync.sync` — which refuse to transfer without a trust
+    // anchor — can exercise their normal flow. Tests that need to cover
+    // the "no anchor" failure mode override `getConnectionInfo` to drop
+    // `verifiedHostPublicKey`.
+    verifiedHostPublicKey: "ssh-ed25519 AAAAMOCKVERIFIEDKEY",
   }
 }
 

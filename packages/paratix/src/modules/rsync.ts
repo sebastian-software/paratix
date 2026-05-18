@@ -144,12 +144,38 @@ function formatKnownHostsLabel(host: string, port: number): string {
   return port === DEFAULT_SSH_PORT ? host : `[${host}]:${port}`
 }
 
+// R-0000714: thrown when the active Paratix SSH session does not provide a
+// verified host trust anchor that rsync can reuse. Without one, the rsync
+// SSH process would fall back to the system `known_hosts` file (or to
+// `accept-new` / `no` host-key checking), which silently weakens the
+// transport's host-key verification compared to the Paratix session that
+// scheduled the transfer. Refusing the transfer surfaces the misconfiguration
+// to the operator instead of papering over it with an opaque trust downgrade.
+class RsyncMissingTrustAnchorError extends Error {
+  public constructor(phase: RsyncPhase) {
+    super(
+      `[rsync.sync] ${phase} refuses to transfer without a verified host trust anchor; ` +
+        "configure the Paratix SSH session with `expectedHostFingerprint` or `expectedHostPublicKey` " +
+        "so rsync can reuse the verified host key instead of falling back to the system known_hosts file"
+    )
+    this.name = "RsyncMissingTrustAnchorError"
+  }
+}
+
 function createVerifiedKnownHostsFile(connectionInfo: {
   host: string
   port: number
   verifiedHostPublicKey?: string
-}): null | string {
-  if (connectionInfo.verifiedHostPublicKey == null) return null
+}): string {
+  if (connectionInfo.verifiedHostPublicKey == null) {
+    // R-0000714: this is unreachable in normal flow — `executeRsync` checks
+    // for the trust anchor before calling here. The guard remains as
+    // defense-in-depth so a future caller that forgets the pre-check still
+    // fails closed instead of writing an empty trust anchor line.
+    throw new Error(
+      "[rsync.sync] createVerifiedKnownHostsFile invoked without a verified host public key"
+    )
+  }
 
   const filePath = join(tmpdir(), `paratix-rsync-known-hosts-${randomUUID()}`)
   const content = `${formatKnownHostsLabel(connectionInfo.host, connectionInfo.port)} ${connectionInfo.verifiedHostPublicKey}\n`
@@ -176,10 +202,15 @@ function cleanupVerifiedKnownHostsFile(path: null | string): void {
  * Assemble the full rsync argument list for a transfer.
  *
  * Always enables archive mode (`-a`), compression (`-z`), and itemized
- * output (`--itemize-changes`). The SSH transport is configured from
- * the connection info with host-key checking set to `yes` by default.
- * Use `strictHostKeyChecking: "accept-new"` for explicit TOFU when
- * first-time connections must be auto-accepted.
+ * output (`--itemize-changes`). The SSH transport is pinned to the
+ * verified host key written into `verifiedKnownHostsPath` and uses
+ * `StrictHostKeyChecking=yes` so a host-key mismatch aborts the transfer.
+ *
+ * R-0000714: callers must always supply `verifiedKnownHostsPath`; rsync no
+ * longer falls back to the system `known_hosts` file or to a caller-controlled
+ * `strictHostKeyChecking` option when the active Paratix SSH session never
+ * verified a host key. `executeRsync` enforces this precondition by raising
+ * `RsyncMissingTrustAnchorError` before invoking `buildArguments`.
  *
  * @param parameters - Argument bundle for the rsync command construction.
  * @param parameters.options - Sync options describing source, destination, and filters.
@@ -191,7 +222,7 @@ function cleanupVerifiedKnownHostsFile(path: null | string): void {
  * @param parameters.connectionInfo.privateKeyPath - Absolute path to the SSH private key.
  * @param parameters.connectionInfo.user - The SSH username.
  * @param parameters.dryRun - When `true`, adds `--dry-run` so no files are transferred.
- * @param parameters.verifiedKnownHostsPath - Optional temporary known_hosts file containing the verified session host key.
+ * @param parameters.verifiedKnownHostsPath - Required temporary known_hosts file containing the verified session host key.
  * @returns The complete list of arguments to pass to the `rsync` binary.
  */
 function buildArguments(parameters: {
@@ -205,7 +236,7 @@ function buildArguments(parameters: {
   }
   dryRun: boolean
   options: SyncOptions
-  verifiedKnownHostsPath?: string
+  verifiedKnownHostsPath: string
 }): string[] {
   const { connectionInfo, dryRun, options, verifiedKnownHostsPath } = parameters
   const result: string[] = ["-az", "--itemize-changes"]
@@ -224,15 +255,17 @@ function buildArguments(parameters: {
   } else if (connectionInfo.agentSocket != null) {
     sshFlags = ` -o IdentityAgent=${shellQuote(connectionInfo.agentSocket)}`
   }
-  const strictHostKeyChecking =
-    verifiedKnownHostsPath == null ? (options.strictHostKeyChecking ?? "yes") : "yes"
-  const knownHostsFlags =
-    verifiedKnownHostsPath == null
-      ? ""
-      : ` -o UserKnownHostsFile=${shellQuote(verifiedKnownHostsPath)} -o GlobalKnownHostsFile=/dev/null`
+  // R-0000714: rsync is only ever invoked with a pre-built trust-anchor
+  // known_hosts file written from the verified host key of the active
+  // Paratix SSH session. `executeRsync` raises a `RsyncMissingTrustAnchorError`
+  // before reaching this point if the session never verified a host key, so
+  // the fallback to `options.strictHostKeyChecking` / system known_hosts has
+  // been removed. StrictHostKeyChecking is always pinned to `yes` so a
+  // mismatched key aborts the transfer instead of being silently appended.
+  const knownHostsFlags = ` -o UserKnownHostsFile=${shellQuote(verifiedKnownHostsPath)} -o GlobalKnownHostsFile=/dev/null`
   result.push(
     "-e",
-    `ssh -p ${connectionInfo.port}${sshFlags}${knownHostsFlags} -o StrictHostKeyChecking=${strictHostKeyChecking}`
+    `ssh -p ${connectionInfo.port}${sshFlags}${knownHostsFlags} -o StrictHostKeyChecking=yes`
   )
   result.push(...buildFilterArguments(options))
   result.push(...buildOwnershipArguments(options))
@@ -287,12 +320,22 @@ async function executeRsync(parameters: {
       `[rsync.sync] ${phase} requires agent or private-key SSH authentication; password fallback sessions are not supported`
     )
   }
+  // R-0000714: refuse the transfer when the Paratix SSH session never
+  // verified a host trust anchor. Falling back to the system `known_hosts`
+  // file or to caller-supplied `strictHostKeyChecking` would silently weaken
+  // the transport's host-key verification compared to the SSH session that
+  // scheduled this rsync call. Surfacing the misconfiguration here keeps the
+  // host-key trust path consistent between the Paratix SSH session and the
+  // external rsync SSH process.
+  if (connectionInfo.verifiedHostPublicKey == null) {
+    throw new RsyncMissingTrustAnchorError(phase)
+  }
   const verifiedKnownHostsPath = createVerifiedKnownHostsFile(connectionInfo)
   const rsyncArguments = buildArguments({
     connectionInfo,
     dryRun,
     options,
-    verifiedKnownHostsPath: verifiedKnownHostsPath ?? undefined,
+    verifiedKnownHostsPath,
   })
 
   try {
