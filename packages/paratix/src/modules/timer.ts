@@ -21,6 +21,7 @@ import {
 
 const SYSTEMCTL = "systemctl"
 const UNIT_FILE_MODE = "0644"
+const TIMER_ACTIVATION_ROLLBACK_FAILED = "timer activation rollback failed"
 
 function normalizeMode(mode: string): string {
   return mode.replace(/^0+/v, "")
@@ -163,7 +164,7 @@ async function restoreUnitFileSnapshotsAfterReloadFailure(
   )
   if (activationFailure == null) return baseFailure
   const baseMessage = baseFailure.error?.message ?? parameters.message
-  const restoreMessage = activationFailure.error?.message ?? "timer activation rollback failed"
+  const restoreMessage = activationFailure.error?.message ?? TIMER_ACTIVATION_ROLLBACK_FAILED
   return failed(`${baseMessage}; ${restoreMessage}`)
 }
 
@@ -259,6 +260,13 @@ async function syncUnitFiles(
     timer: timerMatched ? undefined : await readFileSnapshot(ssh, paths.timerPath),
   }
 
+  // R-0000720: refuse to proceed when a pre-write snapshot capture failed.
+  // Without this guard `writeTimerUnitFiles` would overwrite the on-disk
+  // unit file while the rollback would have no usable snapshot to restore.
+  // Matches the systemd.unit snapshot contract from R-0000683.
+  const snapshotFailure = describeSnapshotPairFailure(name, paths, snapshots)
+  if (snapshotFailure != null) return { failure: snapshotFailure, ok: false }
+
   const writeFailure = await writeTimerUnitFiles(ssh, {
     name,
     paths,
@@ -273,6 +281,28 @@ async function syncUnitFiles(
   const reloadFailure = await reloadDaemonAfterTimerSync(ssh, { name, paths, snapshots })
   if (reloadFailure != null) return { failure: reloadFailure, ok: false }
   return { ok: true, serviceMatched, timerMatched }
+}
+
+// R-0000720: surface a failed snapshot capture as a structured ModuleResult
+// so neither the present-apply nor the absent-apply path mutates the live
+// unit files when the pre-write read could not complete. Returns `null`
+// when both snapshots are either healthy or skipped.
+function describeSnapshotPairFailure(
+  name: string,
+  paths: Pick<TimerPaths, "servicePath" | "timerPath">,
+  snapshots: SnapshotPair
+): ModuleResult | null {
+  if (snapshots.service != null && "kind" in snapshots.service) {
+    return failed(
+      `[timer.scheduled: ${name}] failed to snapshot timer unit file at ${paths.servicePath}: ${snapshots.service.reason}`
+    )
+  }
+  if (snapshots.timer != null && "kind" in snapshots.timer) {
+    return failed(
+      `[timer.scheduled: ${name}] failed to snapshot timer unit file at ${paths.timerPath}: ${snapshots.timer.reason}`
+    )
+  }
+  return null
 }
 
 async function isTimerFullyActive(ssh: SshConnection, timerUnit: string): Promise<boolean> {
@@ -498,6 +528,20 @@ async function removeAbsentUnitFiles(
     service: existing.service ? await readFileSnapshot(ssh, locations.servicePath) : undefined,
     timer: existing.timer ? await readFileSnapshot(ssh, locations.timerPath) : undefined,
   }
+  // R-0000720: refuse to delete the unit files when a pre-rm snapshot could
+  // not be captured. The disable step above already changed the timer's
+  // enable/active state, so a failed snapshot must trigger
+  // `restoreTimerActivationForAbsent` to re-establish the pre-apply state
+  // before bubbling the failure up. Otherwise the timer would be silently
+  // left disabled while the unit files remain on disk.
+  const snapshotFailure = await handleAbsentSnapshotFailure(ssh, context, {
+    activationSnapshot,
+    locations,
+    module,
+    name,
+    snapshots,
+  })
+  if (snapshotFailure != null) return snapshotFailure
   if (existing.service || existing.timer) {
     const remove = await ssh.exec(
       `rm -f ${shellQuote(locations.timerPath)} ${shellQuote(locations.servicePath)}`,
@@ -531,6 +575,49 @@ async function removeAbsentUnitFiles(
   })
 }
 
+// R-0000720: when a pre-rm snapshot read failed, the disable step from
+// `disableTimerForAbsent` already mutated the timer's enable/active state.
+// Replay `restoreTimerActivationForAbsent` so the pre-apply state comes
+// back, and chain a possible activation rollback failure into the final
+// ModuleResult so neither failure is silently dropped.
+async function handleAbsentSnapshotFailure(
+  ssh: SshConnection,
+  context: AbsentContext,
+  parameters: {
+    activationSnapshot: TimerActivationSnapshot
+    locations: TimerLocations
+    module: string
+    name: string
+    snapshots: SnapshotPair
+  }
+): Promise<ModuleResult | null> {
+  const { activationSnapshot, locations, module, name, snapshots } = parameters
+  const failedSnapshotPath = describeFailedSnapshotPath(locations, snapshots)
+  if (failedSnapshotPath == null) return null
+  const baseMessage = `[${module}: ${name}] failed to snapshot timer unit file at ${failedSnapshotPath.path}: ${failedSnapshotPath.reason}`
+  const activationRestoreFailure = await restoreTimerActivationForAbsent(
+    ssh,
+    context,
+    activationSnapshot
+  )
+  if (activationRestoreFailure == null) return failed(baseMessage)
+  const restoreMessage = activationRestoreFailure.error?.message ?? TIMER_ACTIVATION_ROLLBACK_FAILED
+  return failed(`${baseMessage}; rollback enable failed: ${restoreMessage}`)
+}
+
+function describeFailedSnapshotPath(
+  locations: Pick<TimerLocations, "servicePath" | "timerPath">,
+  snapshots: SnapshotPair
+): { path: string; reason: string } | null {
+  if (snapshots.service != null && "kind" in snapshots.service) {
+    return { path: locations.servicePath, reason: snapshots.service.reason }
+  }
+  if (snapshots.timer != null && "kind" in snapshots.timer) {
+    return { path: locations.timerPath, reason: snapshots.timer.reason }
+  }
+  return null
+}
+
 // R-0000552: previously the `??` fallback caused a rollback failure to
 // completely shadow the original `removeFailure` message. Chain both
 // errors instead so the primary failure (unit-file removal) stays
@@ -551,8 +638,7 @@ async function handleAbsentRemoveFailure(
   )
   if (!activationRestoreFailure) return removeFailure
   const removeMessage = removeFailure.error?.message ?? "timer unit-file removal failed"
-  const restoreMessage =
-    activationRestoreFailure.error?.message ?? "timer activation rollback failed"
+  const restoreMessage = activationRestoreFailure.error?.message ?? TIMER_ACTIVATION_ROLLBACK_FAILED
   return failed(`${removeMessage}; rollback enable failed: ${restoreMessage}`)
 }
 

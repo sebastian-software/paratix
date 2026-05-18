@@ -326,4 +326,60 @@ describe("timer.absent", () => {
   it("throws when name does not match the pattern", () => {
     expect(() => timer.absent("backup.daily")).toThrow(/name must match/v)
   })
+
+  // R-0000720: a pre-rm snapshot capture failure (transient SFTP error or
+  // permission denial between `ssh.exists` and `ssh.readFile`) must surface
+  // as a structured failed ModuleResult. Because `disableTimerForAbsent`
+  // already changed the timer's enable/active state, the rollback must
+  // replay `restoreTimerActivationForAbsent` before returning so the timer
+  // does not end up silently disabled.
+  it("R-0000720: rolls back activation when snapshot read fails", async () => {
+    const ssh = createTimerApplyMockSsh({
+      [`[ -e '${SERVICE_PATH}' ]`]: { code: 0 },
+      [`[ -e '${TIMER_PATH}' ]`]: { code: 0 },
+      "systemctl disable --now -- 'backup.timer'": { code: 0 },
+      "systemctl enable --now -- 'backup.timer'": { code: 0 },
+      "systemctl is-active --quiet -- 'backup.timer'": { code: 0 },
+      "systemctl is-enabled --quiet -- 'backup.timer'": { code: 0 },
+    })
+    vi.spyOn(ssh, "readFile").mockRejectedValueOnce(new Error("SFTP read failed: connection reset"))
+    const mod = timer.absent("backup")
+    const result = await mod.apply(ssh, emptyEnv)
+
+    expect(result.status).toBe("failed")
+    expect(String(result.error)).toContain("failed to snapshot timer unit file")
+    expect(String(result.error)).toContain("connection reset")
+    // Activation must have been replayed so the timer is back to enabled+active.
+    expect(ssh.calls).toContain("systemctl enable --now -- 'backup.timer'")
+    // The rm step must NOT have run because the snapshot capture refused
+    // to proceed.
+    expect(ssh.calls).not.toContain(`rm -f '${TIMER_PATH}' '${SERVICE_PATH}'`)
+  })
+
+  // R-0000720: chain the activation rollback failure into the snapshot
+  // failure message so both diagnostic strings remain visible. Without
+  // chaining the user would lose either the rollback reason or the
+  // original snapshot capture reason.
+  it("R-0000720: chains activation rollback failure into snapshot failure", async () => {
+    const ssh = createTimerApplyMockSsh({
+      [`[ -e '${SERVICE_PATH}' ]`]: { code: 0 },
+      [`[ -e '${TIMER_PATH}' ]`]: { code: 0 },
+      "systemctl disable --now -- 'backup.timer'": { code: 0 },
+      "systemctl enable --now -- 'backup.timer'": {
+        code: 1,
+        stderr: "enable rollback boom",
+      },
+      "systemctl is-active --quiet -- 'backup.timer'": { code: 0 },
+      "systemctl is-enabled --quiet -- 'backup.timer'": { code: 0 },
+    })
+    vi.spyOn(ssh, "readFile").mockRejectedValueOnce(new Error("SFTP read failed: connection reset"))
+    const mod = timer.absent("backup")
+    const result = await mod.apply(ssh, emptyEnv)
+
+    expect(result.status).toBe("failed")
+    expect(String(result.error)).toContain("failed to snapshot timer unit file")
+    expect(String(result.error)).toContain("connection reset")
+    expect(String(result.error)).toContain("rollback enable failed")
+    expect(String(result.error)).toContain("enable rollback boom")
+  })
 })

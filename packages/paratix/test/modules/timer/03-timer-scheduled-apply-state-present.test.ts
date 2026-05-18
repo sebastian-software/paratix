@@ -284,4 +284,37 @@ describe("timer.scheduled — apply (state: present)", () => {
     const result = await mod.apply(conn, emptyEnv)
     expect(result.status).toBe("failed")
   })
+
+  // R-0000720: a pre-write snapshot read failure (TOCTOU race, transient
+  // SFTP error, permission denial) must surface as a failed ModuleResult
+  // instead of bubbling an unstructured exception out of the module. The
+  // writeFile step must NOT run because the rollback would have no
+  // usable snapshot to restore.
+  it("R-0000720: refuses to write timer files when snapshot read fails", async () => {
+    const ssh = createTimerApplyMockSsh({
+      [`[ -e '${SERVICE_PATH}' ]`]: { code: 0 },
+      [`[ -e '${TIMER_PATH}' ]`]: { code: 0 },
+      [`stat -c '%a' '${SERVICE_PATH}'`]: { code: 0, stdout: "0644" },
+      [`stat -c '%a' '${TIMER_PATH}'`]: { code: 0, stdout: "0644" },
+    })
+    // `fileMatches` reads each path once during the diff (returns mismatching
+    // content), then `readFileSnapshot` reads each path once for the
+    // pre-write snapshot. The 3rd read (service snapshot) throws.
+    vi.spyOn(ssh, "readFile")
+      .mockResolvedValueOnce("[Unit]\nDescription=existing service\n")
+      .mockResolvedValueOnce("[Unit]\nDescription=existing timer\n")
+      .mockRejectedValueOnce(new Error("SFTP read failed: connection reset"))
+    const writeFile = vi.spyOn(ssh, "writeFile").mockResolvedValue()
+    const mod = timer.scheduled("backup", baseOptions)
+    const result = await mod.apply(ssh, emptyEnv)
+
+    expect(result.status).toBe("failed")
+    expect(String(result.error)).toContain("failed to snapshot timer unit file")
+    expect(String(result.error)).toContain(SERVICE_PATH)
+    expect(String(result.error)).toContain("connection reset")
+    // The writeFile must NOT have been issued — there is no recoverable
+    // snapshot, so the apply must abort before touching the live unit files.
+    expect(writeFile).not.toHaveBeenCalled()
+    expect(ssh.calls).not.toContain("systemctl daemon-reload")
+  })
 })
