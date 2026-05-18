@@ -1,9 +1,52 @@
+import { posix } from "node:path"
+
 import { failed } from "../moduleFailure.js"
 import { shellQuote } from "../ssh.js"
 import { type Module, type ModuleResult, NEEDS_APPLY, type SshConnection } from "../types.js"
 import { hasSensitiveQueryParameters } from "./curlHelpers.js"
 
 const EXEC_OPTS = { ignoreExitCode: true, silent: true } as const
+
+// R-0000730: `git.clone` invokes `rm -rf -- <destination>` during fallback
+// cleanup when the first clone attempt fails. Without strict validation of the
+// destination argument a caller could pass a path like "/", a relative path
+// that resolves unexpectedly, a leading "-" that Git would interpret as an
+// option, or whitespace-padded input that bypasses later checks. The pattern
+// mirrors `validateAbsentPath` in file.ts: trim, reject empty, require
+// absolute and normalised POSIX paths, refuse "/" outright, and reject leading
+// dashes. Validation runs synchronously in the module constructor so the
+// invariant is established before any async exec / rm -rf path can execute.
+function validateCloneDestination(destination: string): void {
+  const trimmedDestination = destination.trim()
+  if (trimmedDestination.length === 0) {
+    throw new Error("git.clone: destination must not be empty")
+  }
+
+  if (trimmedDestination !== destination) {
+    throw new Error(
+      `git.clone: destination must not start or end with whitespace: ${destination}`
+    )
+  }
+
+  if (trimmedDestination.startsWith("-")) {
+    throw new Error(
+      `git.clone: destination must not start with '-' because Git could parse it as an option: ${destination}`
+    )
+  }
+
+  if (!posix.isAbsolute(trimmedDestination)) {
+    throw new Error(`git.clone: destination must be an absolute path: ${destination}`)
+  }
+
+  const normalizedDestination = posix.normalize(trimmedDestination)
+  if (normalizedDestination === "/") {
+    throw new Error(`git.clone: refusing to use destructive destination path: ${destination}`)
+  }
+
+  if (trimmedDestination !== normalizedDestination) {
+    throw new Error(`git.clone: destination must be normalized: ${destination}`)
+  }
+}
 
 function validateCloneRepo(repo: string): void {
   if (repo.startsWith("-")) {
@@ -366,6 +409,10 @@ export const git = {
    * @returns A Module that manages the cloned repository.
    */
   clone(repo: string, destination: string, options?: { ref?: string }): Module {
+    // R-0000730: validate destination first because cleanup paths interpolate
+    // it directly into `rm -rf` invocations. Synchronous throw before any
+    // async work prevents a malformed path from reaching the SSH layer.
+    validateCloneDestination(destination)
     validateCloneRepo(repo)
 
     const reference = options?.ref

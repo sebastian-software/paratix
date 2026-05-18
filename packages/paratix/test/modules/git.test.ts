@@ -121,6 +121,45 @@ describe("git.clone — validation", () => {
     expect(() => git.clone("git@github.com:example/repo.git", destination)).not.toThrow()
     expect(() => git.clone("ssh://git@github.com/example/repo.git", destination)).not.toThrow()
   })
+
+  // R-0000730: `git.clone` interpolates the destination into `rm -rf --
+  // <destination>` during fallback cleanup. Reject inputs that could trigger a
+  // destructive operation before any async path executes.
+  it("rejects an empty destination", () => {
+    expect(() => git.clone(repo, "")).toThrow("destination must not be empty")
+  })
+
+  it("rejects a destination consisting only of whitespace", () => {
+    expect(() => git.clone(repo, "   ")).toThrow("destination must not be empty")
+  })
+
+  it("rejects a destination padded with whitespace", () => {
+    expect(() => git.clone(repo, " /opt/app")).toThrow(
+      "destination must not start or end with whitespace"
+    )
+  })
+
+  it("rejects the root destination", () => {
+    expect(() => git.clone(repo, "/")).toThrow("destructive destination path")
+  })
+
+  it("rejects a relative destination", () => {
+    expect(() => git.clone(repo, "opt/app")).toThrow("destination must be an absolute path")
+  })
+
+  it("rejects a destination starting with '-'", () => {
+    expect(() => git.clone(repo, "-rf")).toThrow(
+      "destination must not start with '-'"
+    )
+  })
+
+  it("rejects a non-normalised destination with '..' components", () => {
+    expect(() => git.clone(repo, "/opt/app/../etc")).toThrow("destination must be normalized")
+  })
+
+  it("rejects a non-normalised destination with redundant slashes", () => {
+    expect(() => git.clone(repo, "/opt//app")).toThrow("destination must be normalized")
+  })
 })
 
 describe("git.clone — check", () => {
