@@ -2741,49 +2741,51 @@ describe("buildCurlCommand — header name validation", () => {
   const url = "https://example.com/file"
   const stub = downloadMktempStub(destination, temporaryDestination)
 
-  it("throws when header name contains \\r\\n (CRLF injection)", async () => {
-    const mockSsh = createMockSsh(stub)
-    const mod = download.url(destination, url, {
-      ...allowUnverifiedDownload,
-      headers: { "X-Evil\r\nX-Injected": "value" },
-    })
-    await expect(mod.apply(mockSsh, emptyEnv)).rejects.toThrow("Invalid HTTP header name")
+  // R-0000701: header pairs are validated synchronously at module construction
+  // so malformed names/values fail fast before any apply work is scheduled.
+  it("throws when header name contains \\r\\n (CRLF injection)", () => {
+    expect(() =>
+      download.url(destination, url, {
+        ...allowUnverifiedDownload,
+        headers: { "X-Evil\r\nX-Injected": "value" },
+      })
+    ).toThrow("Invalid HTTP header name")
   })
 
-  it("throws when header name contains a bare \\n", async () => {
-    const mockSsh = createMockSsh(stub)
-    const mod = download.url(destination, url, {
-      ...allowUnverifiedDownload,
-      headers: { "X-Evil\nInjected": "value" },
-    })
-    await expect(mod.apply(mockSsh, emptyEnv)).rejects.toThrow("Invalid HTTP header name")
+  it("throws when header name contains a bare \\n", () => {
+    expect(() =>
+      download.url(destination, url, {
+        ...allowUnverifiedDownload,
+        headers: { "X-Evil\nInjected": "value" },
+      })
+    ).toThrow("Invalid HTTP header name")
   })
 
-  it("throws when header name contains a bare \\r", async () => {
-    const mockSsh = createMockSsh(stub)
-    const mod = download.url(destination, url, {
-      ...allowUnverifiedDownload,
-      headers: { "X-Evil\rInjected": "value" },
-    })
-    await expect(mod.apply(mockSsh, emptyEnv)).rejects.toThrow("Invalid HTTP header name")
+  it("throws when header name contains a bare \\r", () => {
+    expect(() =>
+      download.url(destination, url, {
+        ...allowUnverifiedDownload,
+        headers: { "X-Evil\rInjected": "value" },
+      })
+    ).toThrow("Invalid HTTP header name")
   })
 
-  it("throws when header name contains a control character (\\x01)", async () => {
-    const mockSsh = createMockSsh(stub)
-    const mod = download.url(destination, url, {
-      ...allowUnverifiedDownload,
-      headers: { "X-Bad\x01Name": "value" },
-    })
-    await expect(mod.apply(mockSsh, emptyEnv)).rejects.toThrow("Invalid HTTP header name")
+  it("throws when header name contains a control character (\\x01)", () => {
+    expect(() =>
+      download.url(destination, url, {
+        ...allowUnverifiedDownload,
+        headers: { "X-Bad\x01Name": "value" },
+      })
+    ).toThrow("Invalid HTTP header name")
   })
 
-  it("throws when header name contains a colon", async () => {
-    const mockSsh = createMockSsh(stub)
-    const mod = download.url(destination, url, {
-      ...allowUnverifiedDownload,
-      headers: { "X-Bad:Name": "value" },
-    })
-    await expect(mod.apply(mockSsh, emptyEnv)).rejects.toThrow("Invalid HTTP header name")
+  it("throws when header name contains a colon", () => {
+    expect(() =>
+      download.url(destination, url, {
+        ...allowUnverifiedDownload,
+        headers: { "X-Bad:Name": "value" },
+      })
+    ).toThrow("Invalid HTTP header name")
   })
 
   it("accepts a valid single-word header name (Authorization routed via stdin)", async () => {
@@ -2824,26 +2826,24 @@ describe("buildCurlCommand — header value validation", () => {
   const url = "https://example.com/file"
   const stub = downloadMktempStub(destination, temporaryDestination)
 
-  it("throws when header value contains \\r (CR injection)", async () => {
-    const mockSsh = createMockSsh(stub)
-    const mod = download.url(destination, url, {
-      ...allowUnverifiedDownload,
-      headers: { "X-Custom": "value\rX-Injected: injected" },
-    })
-    await expect(mod.apply(mockSsh, emptyEnv)).rejects.toThrow(
-      "Invalid HTTP header value for X-Custom: value contains newline characters"
-    )
+  // R-0000701: header pairs are validated synchronously at module construction
+  // so malformed values fail fast before any apply work is scheduled.
+  it("throws when header value contains \\r (CR injection)", () => {
+    expect(() =>
+      download.url(destination, url, {
+        ...allowUnverifiedDownload,
+        headers: { "X-Custom": "value\rX-Injected: injected" },
+      })
+    ).toThrow("Invalid HTTP header value for X-Custom: value contains newline characters")
   })
 
-  it("throws when header value contains \\n (LF injection)", async () => {
-    const mockSsh = createMockSsh(stub)
-    const mod = download.url(destination, url, {
-      ...allowUnverifiedDownload,
-      headers: { "X-Custom": "value\nX-Injected: injected" },
-    })
-    await expect(mod.apply(mockSsh, emptyEnv)).rejects.toThrow(
-      "Invalid HTTP header value for X-Custom: value contains newline characters"
-    )
+  it("throws when header value contains \\n (LF injection)", () => {
+    expect(() =>
+      download.url(destination, url, {
+        ...allowUnverifiedDownload,
+        headers: { "X-Custom": "value\nX-Injected: injected" },
+      })
+    ).toThrow("Invalid HTTP header value for X-Custom: value contains newline characters")
   })
 
   it("accepts a normal header value without newline characters", async () => {

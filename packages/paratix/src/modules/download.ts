@@ -11,6 +11,7 @@ import {
   buildCurlConfigPayload as buildSharedCurlConfigPayload,
   hasSensitiveHeaders,
   hasSensitiveQueryParameters,
+  validateHeaderPair,
 } from "./curlHelpers.js"
 import { renderChownCommand } from "./fileMetadataHelpers.js"
 import { applyWithFlagLock, hasFlag, setVersionedFlag } from "./moduleHelpers.js"
@@ -210,6 +211,22 @@ function validateIntegrityConfiguration(
     `${moduleName} requires options.sha256 for integrity verification. ` +
       "If you intentionally trust the remote artifact, set allowUnverifiedDownload: true explicitly."
   )
+}
+
+/**
+ * R-0000701: validate every supplied header name/value at module construction
+ * so newline-injection or otherwise malformed header pairs surface a clear
+ * synchronous error during playbook build, long before any async apply/check
+ * work runs. `validateHeaderPair` is also called later by `buildCurlConfigPayload`,
+ * but the second pass cannot help operators who pre-build hundreds of modules:
+ * a single bad header would otherwise only fail at runtime.
+ *
+ * @param headers - Optional header map, possibly undefined.
+ */
+function validateHeadersFailFast(headers: Record<string, string> | undefined): void {
+  for (const [name, value] of Object.entries(headers ?? {})) {
+    validateHeaderPair(name, value)
+  }
 }
 
 function rejectSensitiveHeadersOverHttp(parameters: {
@@ -1105,6 +1122,11 @@ export const download = {
       headers.Accept = "application/octet-stream"
     }
 
+    // R-0000701: surface newline-injection and other malformed header pairs
+    // synchronously at module construction so playbook build fails fast
+    // instead of only erroring once the deferred curl invocation runs.
+    validateHeadersFailFast(headers)
+
     const { allowUnverifiedDownload, group, mode, owner, sha256 } = options
     const downloadParameters: DownloadParameters = {
       ...buildDownloadParameters(
@@ -1195,6 +1217,9 @@ export const download = {
       moduleName,
       url,
     })
+    // R-0000701: validate header pairs synchronously at module construction
+    // so newline-injection attempts fail fast before any apply/check work runs.
+    validateHeadersFailFast(resolvedOptions.headers)
     if (resolvedOptions.sha256 != null) validateSha256(resolvedOptions.sha256)
     validateIntegrityConfiguration(moduleName, resolvedOptions)
     const downloadParameters = buildDownloadParameters(destination, resolvedOptions, url)
@@ -1292,6 +1317,9 @@ export const download = {
       moduleName,
       url,
     })
+    // R-0000701: validate header pairs synchronously at module construction
+    // so newline-injection attempts fail fast before any apply/check work runs.
+    validateHeadersFailFast(resolvedOptions.headers)
     if (resolvedOptions.sha256 != null) validateSha256(resolvedOptions.sha256)
     validateIntegrityConfiguration(moduleName, resolvedOptions)
     const downloadParameters = buildDownloadParameters(destination, resolvedOptions, url)
