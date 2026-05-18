@@ -913,6 +913,32 @@ describe("archive.extract — apply", () => {
     expect(mockSsh.calls).not.toContain(`mkdir -p '${relativeDestination}'`)
   })
 
+  // R-0000672: control characters in the extract destination must be rejected
+  // before moveExtractedContentsIntoDestination feeds the guard-paths list into
+  // the symlink walk. A literal `\n` in destination would split the list and
+  // bypass the per-ancestor symlink probes; `\x00` would terminate the path
+  // early when interpolated into a shell argument. Tests use JavaScript escape
+  // sequences instead of literal control bytes so the source stays
+  // grep-friendly and the intent of each case is explicit.
+  it.each([
+    ["newline", "/opt/app\n/etc"],
+    ["carriage return", "/opt/app\r/etc"],
+    ["NUL", "/opt/app /etc"],
+    ["tab", "/opt/app\t/etc"],
+  ])(
+    "rejects destinations containing %s control characters",
+    async (_label, destinationWithControl) => {
+      const mockSsh = createMockSsh({})
+
+      const mod = archive.extract(src, destinationWithControl)
+      const result = await mod.apply(mockSsh, emptyEnv)
+
+      expect(result.status).toBe("failed")
+      expect(String(result.error)).toContain("must not contain control characters")
+      expect(mockSsh.calls).not.toContain(`mkdir -p '${destinationWithControl}'`)
+    }
+  )
+
   it("uploads file via mktemp-allocated path and cleans up when upload is true", async () => {
     const localFile = "/local/app.tar.gz"
     const remoteTmp = "/tmp/paratix-upload.AbCdEfGh"

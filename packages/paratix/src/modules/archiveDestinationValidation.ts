@@ -37,9 +37,24 @@ async function mapWithConcurrencyLimit<TItem, TResult>(
   return results
 }
 
+// R-0000672: control characters (\x00-\x1F) in extract destinations are
+// rejected before any further validation. `moveExtractedContentsIntoDestination`
+// transports the guard-paths list as a newline-separated string, so a literal
+// `\n` in the destination would split that list and let a crafted invocation
+// bypass the symlink probes that protect ancestor paths. NUL would terminate
+// the path early when interpolated into a shell argument. Reject the full
+// control-character range up front, mirroring `archiveMemberValidation.ts`.
+/* eslint-disable-next-line regexp/no-control-character -- matching control characters is the explicit purpose of this guard */ /* oxlint-disable-next-line no-control-regex */
+const EXTRACT_DESTINATION_CONTROL_CHARACTER_PATTERN = /[\x00-\x1F]/v
+
 export function validateExtractDestination(
   destination: string
 ): { destination: string } | ModuleResult {
+  if (EXTRACT_DESTINATION_CONTROL_CHARACTER_PATTERN.test(destination)) {
+    return failed(
+      `[archive.extract] destination must not contain control characters: ${JSON.stringify(destination)}`
+    )
+  }
   if (!destination.startsWith("/")) {
     return failed(`[archive.extract] destination must be an absolute path: ${destination}`)
   }
