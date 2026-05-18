@@ -61,6 +61,11 @@ export async function resolveHostWithTimeout(
       controller.abort()
       reject(new Error(`resolveHost timed out after ${String(timeoutMs)}ms`))
     }, timeoutMs)
+    // R-0000849: allow the event loop to exit cleanly while the timer is
+    // pending. Without `unref`, a long timeout would keep the process alive
+    // even when the resolver has already settled via a different code path
+    // that does not run inside this Promise (e.g. process shutdown).
+    timer.unref()
     resolveHost(controller.signal).then(
       (value) => {
         clearTimeout(timer)
