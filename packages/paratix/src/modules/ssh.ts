@@ -920,40 +920,55 @@ export const ssh = {
       async check(conn: null | SshConnection): Promise<"needs-apply" | "ok"> {
         if (!conn) return NEEDS_APPLY
 
-        // R-0000550: route the check through the same known_hosts path that
-        // apply uses. Without forwarding `knownHostsPath`, `ssh-keygen -F`
-        // would default to `$HOME/.ssh/known_hosts`, which can diverge from
-        // the path resolved in the apply path (e.g. when running with a
-        // different effective HOME). The lookup must operate on the file
-        // that apply would actually mutate.
-        const knownHostsPaths = await resolveKnownHostsPaths(conn)
-        const knownHostsPath = knownHostsPaths.knownHostsPath
+        // R-0000835: wrap the entire check body in try/catch. The helpers
+        // below can throw `SshKeygenLookupError` (unexpected `ssh-keygen -F`
+        // exit code) or path-validation errors raised by
+        // `resolveKnownHostsPaths` (e.g. unsafe `$HOME`). Letting those
+        // exceptions escape from `check` would crash the runner; the apply
+        // path already converts them into failed `ModuleResult`s. Fail
+        // closed by returning NEEDS_APPLY so the apply path is responsible
+        // for surfacing the failure with full context.
+        try {
+          // R-0000550: route the check through the same known_hosts path that
+          // apply uses. Without forwarding `knownHostsPath`, `ssh-keygen -F`
+          // would default to `$HOME/.ssh/known_hosts`, which can diverge from
+          // the path resolved in the apply path (e.g. when running with a
+          // different effective HOME). The lookup must operate on the file
+          // that apply would actually mutate.
+          const knownHostsPaths = await resolveKnownHostsPaths(conn)
+          const knownHostsPath = knownHostsPaths.knownHostsPath
 
-        if (state === "present" && hasKnownHostsTrustAnchor(options)) {
-          return (await hasMatchingKnownHostTrustAnchor(conn, {
-            host,
-            knownHostsPath,
-            options: options ?? {},
-          }))
-            ? "ok"
-            : NEEDS_APPLY
+          if (state === "present" && hasKnownHostsTrustAnchor(options)) {
+            return (await hasMatchingKnownHostTrustAnchor(conn, {
+              host,
+              knownHostsPath,
+              options: options ?? {},
+            }))
+              ? "ok"
+              : NEEDS_APPLY
+          }
+
+          // R-0000713: defense-in-depth — `state === "present"` is rejected at
+          // module construction when no trust anchor is configured (see
+          // `hasKnownHostsTrustAnchor` guard above the returned module). If a
+          // future refactor or option mutation lets execution reach here with
+          // state="present" and no anchor, the bare `ssh-keygen -F` fallback
+          // below would happily report "ok" for any pre-existing entry —
+          // including a stale TOFU acceptance — without verifying the captured
+          // host key against the configured anchor. Fail closed by returning
+          // NEEDS_APPLY so apply re-runs the verification path.
+          if (state === "present") {
+            return NEEDS_APPLY
+          }
+
+          const hostKnown = await hasKnownHostEntry(conn, { host, knownHostsPath, options })
+          return hostKnown ? NEEDS_APPLY : "ok"
+        } catch (error) {
+          if (isSshKeygenLookupError(error) || isKnownHostsPathValidationError(error)) {
+            return NEEDS_APPLY
+          }
+          throw error
         }
-
-        // R-0000713: defense-in-depth — `state === "present"` is rejected at
-        // module construction when no trust anchor is configured (see
-        // `hasKnownHostsTrustAnchor` guard above the returned module). If a
-        // future refactor or option mutation lets execution reach here with
-        // state="present" and no anchor, the bare `ssh-keygen -F` fallback
-        // below would happily report "ok" for any pre-existing entry —
-        // including a stale TOFU acceptance — without verifying the captured
-        // host key against the configured anchor. Fail closed by returning
-        // NEEDS_APPLY so apply re-runs the verification path.
-        if (state === "present") {
-          return NEEDS_APPLY
-        }
-
-        const hostKnown = await hasKnownHostEntry(conn, { host, knownHostsPath, options })
-        return hostKnown ? NEEDS_APPLY : "ok"
       },
       name: `ssh.knownHosts: ${host} (${state})`,
     }
