@@ -869,48 +869,25 @@ describe("archive.extract — apply", () => {
     expect(mockSsh.calls).not.toContain(`chown -h -- '-R' '${destination}/app/file'`)
   })
 
-  it("rejects root destination before extracting when owner is specified", async () => {
-    const rootDestination = "/"
-    const mockSsh = createMockSsh({})
-
-    const mod = archive.extract(src, rootDestination, { owner: "www-data:www-data" })
-    const result = await mod.apply(mockSsh, emptyEnv)
-
-    expect(result.status).toBe("failed")
-    expect(String(result.error)).toContain("refusing to extract")
-    expect(mockSsh.calls).not.toContain(`mkdir -p '${rootDestination}'`)
-    expect(mockSsh.calls).not.toContain(
-      `tar --no-same-owner --no-overwrite-dir -xzf '${src}' -C '${rootDestination}'`
+  // R-0000700 / R-0000706: invalid destinations now fail fast at module
+  // construction so no apply/check work is ever scheduled. The tests below
+  // therefore assert that the constructor throws instead of yielding a
+  // `failed` ModuleResult.
+  it("rejects root destination before extracting when owner is specified", () => {
+    expect(() => archive.extract(src, "/", { owner: "www-data:www-data" })).toThrow(
+      /refusing to extract/v
     )
   })
 
   it.each(["/", "/tmp/..", "/var/.."])(
     "rejects destination %s after POSIX normalization",
-    async (rootLikeDestination) => {
-      const mockSsh = createMockSsh({})
-
-      const mod = archive.extract(src, rootLikeDestination)
-      const result = await mod.apply(mockSsh, emptyEnv)
-
-      expect(result.status).toBe("failed")
-      expect(String(result.error)).toContain("destructive destination /")
-      expect(mockSsh.calls).not.toContain("mkdir -p '/'")
-      expect(mockSsh.calls).not.toContain(
-        `tar --no-same-owner --no-overwrite-dir -xzf '${src}' -C '${archiveStageDirectory}'`
-      )
+    (rootLikeDestination) => {
+      expect(() => archive.extract(src, rootLikeDestination)).toThrow(/destructive destination \//v)
     }
   )
 
-  it("rejects relative destinations before extracting", async () => {
-    const relativeDestination = "opt/app"
-    const mockSsh = createMockSsh({})
-
-    const mod = archive.extract(src, relativeDestination)
-    const result = await mod.apply(mockSsh, emptyEnv)
-
-    expect(result.status).toBe("failed")
-    expect(String(result.error)).toContain("destination must be an absolute path")
-    expect(mockSsh.calls).not.toContain(`mkdir -p '${relativeDestination}'`)
+  it("rejects relative destinations before extracting", () => {
+    expect(() => archive.extract(src, "opt/app")).toThrow(/destination must be an absolute path/v)
   })
 
   // R-0000672: control characters in the extract destination must be rejected
@@ -927,15 +904,10 @@ describe("archive.extract — apply", () => {
     ["tab", "/opt/app\t/etc"],
   ])(
     "rejects destinations containing %s control characters",
-    async (_label, destinationWithControl) => {
-      const mockSsh = createMockSsh({})
-
-      const mod = archive.extract(src, destinationWithControl)
-      const result = await mod.apply(mockSsh, emptyEnv)
-
-      expect(result.status).toBe("failed")
-      expect(String(result.error)).toContain("must not contain control characters")
-      expect(mockSsh.calls).not.toContain(`mkdir -p '${destinationWithControl}'`)
+    (_label, destinationWithControl) => {
+      expect(() => archive.extract(src, destinationWithControl)).toThrow(
+        /must not contain control characters/v
+      )
     }
   )
 

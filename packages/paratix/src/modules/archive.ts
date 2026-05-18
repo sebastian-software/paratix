@@ -1,6 +1,4 @@
 /* eslint-disable max-lines -- archive module keeps extraction and idempotency helpers together */
-import { posix as pathPosix } from "node:path"
-
 import { failed, failedCommand } from "../moduleFailure.js"
 import { shellQuote, validateMktempPath } from "../ssh.js"
 import { type Module, type ModuleResult, NEEDS_APPLY, type SshConnection } from "../types.js"
@@ -892,9 +890,16 @@ export const archive = {
     destination: string,
     options?: { owner?: string; upload?: boolean }
   ): Module {
-    const normalizedDestination = destination.startsWith("/")
-      ? pathPosix.normalize(destination)
-      : destination
+    // R-0000700 / R-0000706: validate the destination synchronously at module
+    // construction so invalid destinations (control characters, relative
+    // paths, "/") fail fast before any marker path is derived or async
+    // apply/check work is scheduled.
+    const validatedDestination = validateExtractDestination(destination)
+    if ("status" in validatedDestination) {
+      const reason = validatedDestination.error?.message ?? "invalid destination"
+      throw new Error(reason)
+    }
+    const normalizedDestination = validatedDestination.destination
     const marker = markerPath(source, normalizedDestination)
     const upload = options?.upload === true
     const owner = options?.owner
