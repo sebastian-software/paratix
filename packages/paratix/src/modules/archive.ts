@@ -234,6 +234,12 @@ async function moveExtractedContentsIntoDestination(
         'printf "%s\\n" "$guard_paths" | while IFS= read -r guarded_path; do [ -z "$guarded_path" ] && continue; if [ -L "$guarded_path" ]; then echo "[archive.extract] refusing staging merge: destination path $guarded_path is a symlink" >&2; exit 64; fi; done || exit $?; ' +
         'target_path="$destination/${source_path##' +
         '*/}"; if [ -L "$target_path" ]; then echo "[archive.extract] refusing staging merge: destination path $target_path is a symlink" >&2; exit 64; fi; ' +
+        // R-0000751: defense-in-depth — re-run `[ -L "$target_path" ]`
+        // immediately before the `cp -aT` so a symlink planted between
+        // the first probe and the copy cannot smuggle the merge through
+        // to an attacker-controlled location. Mirrors R-0000677's
+        // recheck-just-before-write pattern in net.ts.
+        'if [ -L "$target_path" ]; then echo "[archive.extract] refusing staging merge: destination path $target_path is a symlink" >&2; exit 64; fi; ' +
         // R-0000563: copy with `--no-dereference` so a symlink that is
         // planted at any ancestor of `target_path` between the guard
         // checks above and the `cp` invocation is preserved (and thus

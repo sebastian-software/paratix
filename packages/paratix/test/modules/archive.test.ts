@@ -1899,6 +1899,33 @@ describe("archive.extract — apply", () => {
     expect(mergeCommand).toContain("--remove-destination")
   })
 
+  // R-0000751: the staging merge runs the `[ -L "$target_path" ]` probe
+  // twice — once as the long-standing guard, once again immediately before
+  // the `cp -aT` so a symlink planted in the TOCTOU window between probe
+  // and copy cannot smuggle the merge through. Mirrors R-0000677's
+  // recheck-just-before-write pattern in net.ts.
+  it("R-0000751: rechecks target_path symlink immediately before cp -aT", async () => {
+    const mockSsh = createMockSsh({
+      [`tar --no-same-owner --no-overwrite-dir -xzf '${src}' -C '${archiveStageDirectory}'`]: {
+        code: 0,
+      },
+      [`tar -tvzf '${src}'`]: { code: 0, stdout: safeTarListing },
+    })
+    vi.spyOn(mockSsh, "sha256").mockResolvedValue(archiveSha)
+    vi.spyOn(mockSsh, "writeFile").mockResolvedValue()
+
+    const mod = archive.extract(src, destination)
+    const result = await mod.apply(mockSsh, emptyEnv)
+
+    expect(result.status).toBe("changed")
+    const mergeCommand = mockSsh.calls.find((c) => archiveStageMovePattern.test(c))
+    expect(mergeCommand).toBeDefined()
+    // The shell text must contain at least two `[ -L "$target_path" ]`
+    // probes — the original guard plus the immediate-pre-`cp` recheck.
+    const targetSymlinkProbes = mergeCommand?.match(/\[ -L "\$target_path" \]/gv)
+    expect(targetSymlinkProbes?.length).toBeGreaterThanOrEqual(2)
+  })
+
   // R-0000166: the owner-paths marker is now written for both upload and
   // non-upload extracts, so the owner re-check stays deterministic even
   // when the source archive is mutated, replaced or removed between apply
