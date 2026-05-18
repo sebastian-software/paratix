@@ -39,17 +39,24 @@ const SECRET_CAUSE_FIELD_NAMES = new Set([
   "auth",
   "authorization",
   "bearer",
+  "cookie",
   "cred",
   "credential",
   "credentials",
+  "jwt",
   "key",
+  "mfa",
+  "otp",
   "pass",
   "passphrase",
   "passwd",
   "password",
+  "pin",
   "privatekey",
   "pwd",
   "secret",
+  "sessionkey",
+  "signature",
   "token",
 ])
 
@@ -321,7 +328,18 @@ function isSecretCauseField(key: string): boolean {
     normalized.endsWith("token") ||
     normalized.endsWith("password") ||
     normalized.endsWith("secret") ||
-    normalized.endsWith("privatekey")
+    normalized.endsWith("privatekey") ||
+    // R-0000844: cover additional credential synonyms that show up in
+    // third-party SDK error causes — session tokens, JWTs, signatures,
+    // PINs, MFA/OTP codes, and HTTP cookies all leak as plaintext if we
+    // only mask the historic four suffixes above.
+    normalized.endsWith("sessionkey") ||
+    normalized.endsWith("signature") ||
+    normalized.endsWith("jwt") ||
+    normalized.endsWith("pin") ||
+    normalized.endsWith("mfa") ||
+    normalized.endsWith("otp") ||
+    normalized.endsWith("cookie")
   )
 }
 
