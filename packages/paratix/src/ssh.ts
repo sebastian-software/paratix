@@ -890,6 +890,15 @@ export class SshConnectionImpl implements SshConnection {
   }
 
   private async cleanupRemoteTempFile(remotePath: string): Promise<void> {
+    // R-0000690: a concurrent disconnect (e.g. SIGINT) may null out
+    // `this.client` between the upload path completing and the `finally`
+    // cleanup running. Returning early when the transport is already gone
+    // avoids racing with `ensureClient()` and prevents `cleanupRemoteTempFile`
+    // from emitting a misleading "Warning: failed to remove temp file"
+    // line for what is really an in-flight shutdown. The original
+    // diagnostic from the failing upload / writeFile is preserved because
+    // we never enter `this.exec`.
+    if (this.client == null) return
     // R-0000196: best-effort cleanup must not propagate errors — a transient
     // SSH failure in a `finally` block would otherwise overwrite the
     // original diagnostic with a misleading rm-failure trace. Mirror the
@@ -913,6 +922,11 @@ export class SshConnectionImpl implements SshConnection {
   }
 
   private async cleanupWriteFileTemporaryPath(remoteTemporary: string): Promise<void> {
+    // R-0000690: short-circuit when the underlying client was nulled by
+    // a concurrent disconnect. Mirrors the guard in `cleanupRemoteTempFile`
+    // so the writeFile cleanup path stays silent during an in-flight
+    // shutdown rather than racing the disconnect logic.
+    if (this.client == null) return
     try {
       await this.cleanupRemoteTempFile(remoteTemporary)
     } catch (cleanupError) {
