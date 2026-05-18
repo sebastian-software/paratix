@@ -238,6 +238,10 @@ describe("publishWorkspacePackages", () => {
         "--tag",
         "latest",
       ],
+      // R-0000741: immediate post-publish isPublished probe — aborts
+      // with a clear diagnostic when pnpm publish exits 0 but the
+      // version is not yet visible on the registry.
+      ["npm", "view", PARATIX_SPECIFIER, "version", "--json"],
       ["npm", "view", PARATIX_SPECIFIER, "version", "--json"],
       ["npm", "view", CREATE_PARATIX_SPECIFIER, "version", "--json"],
       [
@@ -250,6 +254,7 @@ describe("publishWorkspacePackages", () => {
         "--tag",
         "latest",
       ],
+      ["npm", "view", CREATE_PARATIX_SPECIFIER, "version", "--json"],
     ])
   })
 
@@ -309,6 +314,33 @@ describe("publishWorkspacePackages", () => {
       expectedTag: "latest",
       version: STABLE_BUILD_METADATA_VERSION,
     })
+  })
+
+  // R-0000741: pnpm publish can exit 0 while the registry has not yet
+  // exposed the new version, or while a hook silently swallowed a 4xx.
+  // The publish flow probes the registry once immediately after the
+  // child exits so the operator sees a clear diagnostic instead of
+  // waiting through the ~4 minute waitForPublishedPackage budget.
+  it("R-0000741: aborts immediately when pnpm publish exits without exposing the version", async () => {
+    // The spawn override below stays silent (does not add to the
+    // `published` set), so the immediate post-publish isPublished probe
+    // returns false even though pnpm publish exited successfully.
+    const commandRunner = createCommandRunner()
+    commandRunner.spawn = async (command, commandArguments) => {
+      commandRunner.calls.push([command, ...commandArguments])
+      // Deliberately do not record the publish — simulate a successful
+      // exit that did not actually make the version visible.
+    }
+
+    await assertRejectsWithMessage(
+      publishWorkspacePackages({
+        availabilityDelayMilliseconds: 0,
+        availabilityRetries: 2,
+        commandRunner,
+        fs: createFs(),
+      }),
+      "did not become visible on the npm registry immediately after pnpm publish exited"
+    )
   })
 
   // R-0000661: refuse to invoke pnpm publish when dist artefacts referenced

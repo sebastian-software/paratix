@@ -413,6 +413,24 @@ async function publishPackage(packageInfo, commandRunner) {
     "--tag",
     distributionTag,
   ])
+
+  // R-0000741: `pnpm publish` can exit 0 while the upload silently
+  // succeeded server-side but did not yet expose the new version, or —
+  // in pathological cases — while the publish was rejected by the
+  // registry without surfacing a non-zero exit (e.g. a hook converted
+  // a 4xx response into a logged warning). Probe the registry once
+  // immediately after the child process exits and abort with a clear
+  // diagnostic when the version is still missing. This used to be
+  // covered only by `waitForPublishedPackage`, which would spend the
+  // full ~4 minute retry budget before reporting the failure.
+  if (!(await isPublished(packageInfo.name, packageInfo.version, commandRunner))) {
+    throw new Error(
+      `${packageInfo.name}@${packageInfo.version} did not become visible on the npm registry ` +
+        `immediately after pnpm publish exited. Check the publish output above for warnings, ` +
+        "verify registry credentials and provenance configuration, and re-run this script once " +
+        "the failure has been addressed."
+    )
+  }
 }
 
 async function readWorkspacePackages(fs) {
