@@ -1450,6 +1450,35 @@ describe("file.line — apply without options.match", () => {
     expect(ssh.calls).not.toContain("cat >> '/etc/config'")
   })
 
+  // R-0000761: when the target file materialises between the initial
+  // `[ -e ]` probe and the recheck immediately before the create, apply
+  // refuses to overwrite the concurrently-created file instead of
+  // clobbering whoever-else's bytes.
+  it("R-0000761: refuses to overwrite a file created concurrently between probe and create", async () => {
+    let existsCallIndex = 0
+    const ssh = createMockSsh()
+    ssh.exists = async (path: string) => {
+      await Promise.resolve()
+      existsCallIndex += 1
+      // First exists probe (file.line initial `ssh.exists`): not there.
+      // Second exists probe (R-0000761 recheck): it appeared.
+      return existsCallIndex >= 2
+    }
+    // `[ -L ]` symlink probe still returns false so we reach the create branch.
+    ssh.test = async () => {
+      await Promise.resolve()
+      return false
+    }
+
+    const mod = file.line("/etc/config", "my-line")
+    const result = await mod.apply(ssh, emptyEnv)
+    expect(result.status).toBe("failed")
+    expect(String(result.error)).toContain(
+      "refuses to overwrite file created concurrently between existence probe and create"
+    )
+    expect(ssh.writeFileCalls).toStrictEqual([])
+  })
+
   it("detects content changes between read and append write", async () => {
     const reads = ["first-line\n", "first-line\nrace-line\n"]
     let readIndex = 0

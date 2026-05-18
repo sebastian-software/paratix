@@ -96,6 +96,23 @@ async function applyLineAppend(input: {
     // replace a path that has become a symlink between the earlier `[ -L ]`
     // test and the actual rename. The TOCTOU window is therefore closed at
     // the SSH layer rather than by an additional round-trip here.
+    //
+    // R-0000761: the symlink/dir guard alone is not enough — a concurrent
+    // process could create the regular file between the `exists` probe and
+    // the writeFile, and writeFile's `mv -T` would happily overwrite the
+    // concurrently-created file. Re-run the `[ -e ]` probe immediately
+    // before the create and refuse when the file materialised in the
+    // window. The recheck does not fully close the TOCTOU race (the OS
+    // does not expose O_CREAT|O_EXCL through `ssh.writeFile`), but it
+    // narrows the window from "between check and apply" to "between this
+    // recheck and the next `mv -T`", which is the same shape `guarded­WriteFile`
+    // uses for content-update races and is the best we can do without
+    // teaching the SSH layer an explicit O_EXCL primitive.
+    if (await input.ssh.exists(input.remotePath)) {
+      return failed(
+        `[file.line: ${input.remotePath}] refuses to overwrite file created concurrently between existence probe and create`
+      )
+    }
     await input.ssh.writeFile(input.remotePath, `${input.line}\n`, { mode: "0644" })
     return { status: "changed" }
   }
