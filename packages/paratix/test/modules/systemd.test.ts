@@ -181,7 +181,7 @@ describe("systemd.unit", () => {
   const reloadFlag = `systemd-unit-${sha256String(unitName).slice(0, 16)}-${sha256String(unitContent).slice(0, 16)}`
   const reloadFlagCheck = `[ -f /var/lib/paratix/flags/'${reloadFlag}' ]`
   const reloadFlagSet =
-    `find /var/lib/paratix/flags -maxdepth 1 -name ` +
+    `find /var/lib/paratix/flags -maxdepth 1 -type f -name ` +
     `'systemd-unit-${sha256String(unitName).slice(0, 16)}-*' ! -name '*.lock' -delete && ` +
     `touch /var/lib/paratix/flags/'${reloadFlag}'`
 

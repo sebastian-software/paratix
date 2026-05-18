@@ -199,7 +199,7 @@ describe("setVersionedFlag – empty string validation", () => {
     const flagPrefix = "valid-prefix-"
     const flagName = "valid-prefix-1.0"
     const ssh = createMockSsh({
-      [`find ${FLAGS_DIRECTORY} -maxdepth 1 -name '${flagPrefix}*' ! -name '*.lock' -delete && touch ${FLAGS_DIRECTORY}/'${flagName}'`]:
+      [`find ${FLAGS_DIRECTORY} -maxdepth 1 -type f -name '${flagPrefix}*' ! -name '*.lock' -delete && touch ${FLAGS_DIRECTORY}/'${flagName}'`]:
         {
           code: 0,
         },
@@ -211,7 +211,7 @@ describe("setVersionedFlag – empty string validation", () => {
   it("calls find with the correct prefix glob to replace old versioned flags", async () => {
     const flagPrefix = "myapp-"
     const flagName = "myapp-2.0"
-    const expectedCommand = `find ${FLAGS_DIRECTORY} -maxdepth 1 -name '${flagPrefix}*' ! -name '*.lock' -delete && touch ${FLAGS_DIRECTORY}/'${flagName}'`
+    const expectedCommand = `find ${FLAGS_DIRECTORY} -maxdepth 1 -type f -name '${flagPrefix}*' ! -name '*.lock' -delete && touch ${FLAGS_DIRECTORY}/'${flagName}'`
     const ssh = createMockSsh({
       [expectedCommand]: { code: 0 },
       "mkdir -p /var/lib/paratix/flags": { code: 0 },
@@ -996,7 +996,7 @@ describe("setVersionedFlag – persist failures surface as ModuleResult", () => 
   it("returns a failed ModuleResult when find/touch fails with EPERM", async () => {
     const flagName = "versioned-flag-1.0"
     const flagPrefix = "versioned-flag-"
-    const findCommand = `find /var/lib/paratix/flags -maxdepth 1 -name '${flagPrefix}*' ! -name '*.lock' -delete && touch /var/lib/paratix/flags/'${flagName}'`
+    const findCommand = `find /var/lib/paratix/flags -maxdepth 1 -type f -name '${flagPrefix}*' ! -name '*.lock' -delete && touch /var/lib/paratix/flags/'${flagName}'`
     const ssh = createMockSsh({
       [findCommand]: {
         code: 1,
@@ -1017,7 +1017,7 @@ describe("setVersionedFlag – persist failures surface as ModuleResult", () => 
   it("returns null when find/touch succeeds", async () => {
     const flagName = "versioned-flag-2.0"
     const flagPrefix = "versioned-flag-"
-    const findCommand = `find /var/lib/paratix/flags -maxdepth 1 -name '${flagPrefix}*' ! -name '*.lock' -delete && touch /var/lib/paratix/flags/'${flagName}'`
+    const findCommand = `find /var/lib/paratix/flags -maxdepth 1 -type f -name '${flagPrefix}*' ! -name '*.lock' -delete && touch /var/lib/paratix/flags/'${flagName}'`
     const ssh = createMockSsh({
       [findCommand]: { code: 0 },
       "mkdir -p /var/lib/paratix/flags": { code: 0 },

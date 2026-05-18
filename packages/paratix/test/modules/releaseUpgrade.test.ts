@@ -1,11 +1,26 @@
-import { describe, expect, it, vi } from "vitest"
+import { beforeEach, describe, expect, it, vi } from "vitest"
 
 import type { ExecResult } from "../../src/types.js"
 
 import { isSystemHostMetaEntry, isSystemRebootMetaEntry } from "../../src/meta.js"
-import { releaseUpgrade } from "../../src/modules/releaseUpgrade.js"
+import {
+  clearDebianStableCodenameCacheForTests,
+  releaseUpgrade,
+} from "../../src/modules/releaseUpgrade.js"
 import { createMockSsh as createBaseMockSsh } from "../helpers/mockSsh.js"
 import { makeIsVerifiedReleaseCall } from "../helpers/mockSshFlagLock.js"
+
+// R-0000852: the production code now caches the verified Debian stable
+// codename per-keyring with a short TTL so back-to-back calls within the
+// same process do not re-issue the InRelease verify pipeline. Tests that
+// feed different mirror responses to the same keyring must start from an
+// empty cache so the second case actually executes the new pipeline
+// instead of returning the previously cached codename. We expose the
+// reset hook through a thin helper so per-suite `beforeEach` blocks can
+// register it without each call site importing the cache-internal symbol.
+function resetDebianStableCodenameCache(): void {
+  clearDebianStableCodenameCacheForTests()
+}
 
 const emptyEnv = {}
 
@@ -236,6 +251,8 @@ function debianApplyResponses(
 // ---------------------------------------------------------------------------
 
 describe("releaseUpgrade.upgrade — check", () => {
+  beforeEach(resetDebianStableCodenameCache)
+
   it("Ubuntu: do-release-upgrade -c exits 0 → needs-apply (upgrade available)", async () => {
     const ssh = createMockSsh(ubuntuResponses(0))
     const mod = releaseUpgrade.upgrade()
@@ -476,6 +493,8 @@ describe("releaseUpgrade.upgrade — check", () => {
 // ---------------------------------------------------------------------------
 
 describe("releaseUpgrade.upgrade — apply (Ubuntu)", () => {
+  beforeEach(resetDebianStableCodenameCache)
+
   it("runs apt-get update + do-release-upgrade and returns changed + reboot meta", async () => {
     const ssh = createMockSsh({
       "cat '/etc/os-release'": { code: 0, stdout: UBUNTU_OS_RELEASE },
@@ -593,6 +612,8 @@ describe("releaseUpgrade.upgrade — apply (Ubuntu)", () => {
 })
 
 describe("releaseUpgrade.upgrade — apply (Debian)", () => {
+  beforeEach(resetDebianStableCodenameCache)
+
   it("replaces codename in sources.list, runs full-upgrade + autoremove, returns changed + reboot meta", async () => {
     const ssh = createMockSsh(debianApplyResponses("bookworm", "trixie"))
     const mod = releaseUpgrade.upgrade()
@@ -1625,6 +1646,8 @@ describe("releaseUpgrade.upgrade — apply (Debian)", () => {
 })
 
 describe("releaseUpgrade.upgrade — apply (general)", () => {
+  beforeEach(resetDebianStableCodenameCache)
+
   it("no SSH connection → failed", async () => {
     const mod = releaseUpgrade.upgrade()
     // eslint-disable-next-line prefer-spread

@@ -61,7 +61,7 @@ const SUCCESSFUL_ROUTE_APPLY_OPTIONS = {
     { command: "mkdir -p /var/lib/paratix/flags", result: { code: 0 } },
     {
       command:
-        /^find \/var\/lib\/paratix\/flags -maxdepth 1 -name 'net-route-[^']+-\*' ! -name '\*\.lock' -delete && touch \/var\/lib\/paratix\/flags\/'net-route-[^']+'$/v,
+        /^find \/var\/lib\/paratix\/flags -maxdepth 1 -type f -name 'net-route-[^']+-\*' ! -name '\*\.lock' -delete && touch \/var\/lib\/paratix\/flags\/'net-route-[^']+'$/v,
       result: { code: 0 },
     },
     { command: /^ip route show '[^']+'$/v, result: { code: 0, stdout: "" } },

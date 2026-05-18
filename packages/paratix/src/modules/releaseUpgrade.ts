@@ -276,7 +276,7 @@ function parseDebianStableCodenameFromInRelease(body: string): string {
  * upstream `InRelease` body are picked up on the next run without requiring
  * a process restart.
  */
-const DEBIAN_STABLE_CODENAME_CACHE_TTL_MS = 5 * 60 * 1000
+const DEBIAN_STABLE_CODENAME_CACHE_TTL_MS = 300_000
 
 type DebianStableCodenameCacheEntry = {
   codename: string
@@ -284,6 +284,20 @@ type DebianStableCodenameCacheEntry = {
 }
 
 const debianStableCodenameCache = new Map<string, DebianStableCodenameCacheEntry>()
+
+/**
+ * R-0000852: test-only hook to clear the per-process codename cache between
+ * test cases. Tests that exercise different mirror responses against the same
+ * keyring (e.g. a benign run followed by a hijacked-codename run) must start
+ * from a clean cache so the second run actually issues the verify pipeline
+ * instead of returning the previously cached value. Production code never
+ * calls this — the cache is invalidated naturally by the TTL.
+ *
+ * @internal
+ */
+export function clearDebianStableCodenameCacheForTests(): void {
+  debianStableCodenameCache.clear()
+}
 
 async function getDebianStableCodename(ssh: SshConnection): Promise<string> {
   const keyringPath = DEBIAN_ARCHIVE_KEYRING_PATH

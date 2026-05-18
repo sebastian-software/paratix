@@ -513,7 +513,7 @@ describe("pkg.update", () => {
     const ssh = createMockSsh({
       ...APT_FOUND,
       "apt-get update": { code: 0 },
-      "find /var/lib/paratix/flags -maxdepth 1 -name 'package-update-*' ! -name '*.lock' -delete && touch /var/lib/paratix/flags/'package-update-2024-01-15'":
+      "find /var/lib/paratix/flags -maxdepth 1 -type f -name 'package-update-*' ! -name '*.lock' -delete && touch /var/lib/paratix/flags/'package-update-2024-01-15'":
         { code: 0 },
       "mkdir -p /var/lib/paratix/flags": { code: 0 },
     })
@@ -522,7 +522,7 @@ describe("pkg.update", () => {
     expect(result).toStrictEqual({ status: "changed" })
     expect(ssh.calls).toContain("apt-get update")
     expect(ssh.calls).toContain(
-      "find /var/lib/paratix/flags -maxdepth 1 -name 'package-update-*' ! -name '*.lock' -delete && touch /var/lib/paratix/flags/'package-update-2024-01-15'"
+      "find /var/lib/paratix/flags -maxdepth 1 -type f -name 'package-update-*' ! -name '*.lock' -delete && touch /var/lib/paratix/flags/'package-update-2024-01-15'"
     )
   })
 
@@ -530,7 +530,7 @@ describe("pkg.update", () => {
     const ssh = createMockSsh({
       ...APT_FOUND,
       "apt-get update": { code: 0 },
-      "find /var/lib/paratix/flags -maxdepth 1 -name 'package-update-*' ! -name '*.lock' -delete && touch /var/lib/paratix/flags/'package-update-2024-01-15'":
+      "find /var/lib/paratix/flags -maxdepth 1 -type f -name 'package-update-*' ! -name '*.lock' -delete && touch /var/lib/paratix/flags/'package-update-2024-01-15'":
         { code: 0 },
       "mkdir -p /var/lib/paratix/flags": { code: 0 },
     })
@@ -613,7 +613,7 @@ describe("pkg.upgrade", () => {
       "DEBIAN_FRONTEND=noninteractive apt-get update": { code: 0 },
       "DEBIAN_FRONTEND=noninteractive apt-get upgrade -y": { code: 0 },
       "DEBIAN_FRONTEND=noninteractive dpkg --configure -a": { code: 0 },
-      "find /var/lib/paratix/flags -maxdepth 1 -name 'package-upgrade-*' ! -name '*.lock' -delete && touch /var/lib/paratix/flags/'package-upgrade-2024-01-15'":
+      "find /var/lib/paratix/flags -maxdepth 1 -type f -name 'package-upgrade-*' ! -name '*.lock' -delete && touch /var/lib/paratix/flags/'package-upgrade-2024-01-15'":
         { code: 0 },
       "mkdir -p /var/lib/paratix/flags": { code: 0 },
     })
@@ -627,7 +627,7 @@ describe("pkg.upgrade", () => {
       "DEBIAN_FRONTEND=noninteractive dpkg --configure -a && DEBIAN_FRONTEND=noninteractive apt-get update && DEBIAN_FRONTEND=noninteractive apt-get upgrade -y"
     )
     expect(ssh.calls).toContain(
-      "find /var/lib/paratix/flags -maxdepth 1 -name 'package-upgrade-*' ! -name '*.lock' -delete && touch /var/lib/paratix/flags/'package-upgrade-2024-01-15'"
+      "find /var/lib/paratix/flags -maxdepth 1 -type f -name 'package-upgrade-*' ! -name '*.lock' -delete && touch /var/lib/paratix/flags/'package-upgrade-2024-01-15'"
     )
   })
 
@@ -637,7 +637,7 @@ describe("pkg.upgrade", () => {
       "DEBIAN_FRONTEND=noninteractive apt-get update": { code: 0 },
       "DEBIAN_FRONTEND=noninteractive apt-get upgrade -y": { code: 0 },
       "DEBIAN_FRONTEND=noninteractive dpkg --configure -a": { code: 0 },
-      "find /var/lib/paratix/flags -maxdepth 1 -name 'package-upgrade-*' ! -name '*.lock' -delete && touch /var/lib/paratix/flags/'package-upgrade-2024-01-15'":
+      "find /var/lib/paratix/flags -maxdepth 1 -type f -name 'package-upgrade-*' ! -name '*.lock' -delete && touch /var/lib/paratix/flags/'package-upgrade-2024-01-15'":
         { code: 0 },
       "mkdir -p /var/lib/paratix/flags": { code: 0 },
     })
@@ -657,7 +657,7 @@ describe("pkg.upgrade", () => {
       "DEBIAN_FRONTEND=noninteractive apt-get update": { code: 0 },
       "DEBIAN_FRONTEND=noninteractive apt-get upgrade -y": { code: 0 },
       "DEBIAN_FRONTEND=noninteractive dpkg --configure -a": { code: 0 },
-      "find /var/lib/paratix/flags -maxdepth 1 -name 'package-upgrade-*' ! -name '*.lock' -delete && touch /var/lib/paratix/flags/'package-upgrade-2026-05-01'":
+      "find /var/lib/paratix/flags -maxdepth 1 -type f -name 'package-upgrade-*' ! -name '*.lock' -delete && touch /var/lib/paratix/flags/'package-upgrade-2026-05-01'":
         { code: 0 },
       "mkdir -p /var/lib/paratix/flags": { code: 0 },
     })
@@ -683,7 +683,7 @@ describe("pkg.upgrade", () => {
       "DEBIAN_FRONTEND=noninteractive apt-get update": { code: 0 },
       "DEBIAN_FRONTEND=noninteractive apt-get upgrade -y": { code: 0 },
       "DEBIAN_FRONTEND=noninteractive dpkg --configure -a": { code: 0 },
-      "find /var/lib/paratix/flags -maxdepth 1 -name 'package-upgrade-*' ! -name '*.lock' -delete && touch /var/lib/paratix/flags/'package-upgrade-2024-01-15'":
+      "find /var/lib/paratix/flags -maxdepth 1 -type f -name 'package-upgrade-*' ! -name '*.lock' -delete && touch /var/lib/paratix/flags/'package-upgrade-2024-01-15'":
         { code: 0 },
       "mkdir -p /var/lib/paratix/flags": { code: 0 },
     })
@@ -812,7 +812,7 @@ describe("package manager detection", () => {
     const ssh = createMockSsh({
       ...DNF_FOUND,
       "dnf makecache": { code: 0 },
-      "find /var/lib/paratix/flags -maxdepth 1 -name 'package-update-*' ! -name '*.lock' -delete && touch /var/lib/paratix/flags/'package-update-2024-01-15'":
+      "find /var/lib/paratix/flags -maxdepth 1 -type f -name 'package-update-*' ! -name '*.lock' -delete && touch /var/lib/paratix/flags/'package-update-2024-01-15'":
         { code: 0 },
       "mkdir -p /var/lib/paratix/flags": { code: 0 },
     })
@@ -825,7 +825,7 @@ describe("package manager detection", () => {
     const ssh = createMockSsh({
       ...APK_FOUND,
       "apk update": { code: 0 },
-      "find /var/lib/paratix/flags -maxdepth 1 -name 'package-update-*' ! -name '*.lock' -delete && touch /var/lib/paratix/flags/'package-update-2024-01-15'":
+      "find /var/lib/paratix/flags -maxdepth 1 -type f -name 'package-update-*' ! -name '*.lock' -delete && touch /var/lib/paratix/flags/'package-update-2024-01-15'":
         { code: 0 },
       "mkdir -p /var/lib/paratix/flags": { code: 0 },
     })
@@ -839,7 +839,7 @@ describe("package manager detection", () => {
       ...APK_FOUND,
       "apk update": { code: 0 },
       "apk upgrade": { code: 0 },
-      "find /var/lib/paratix/flags -maxdepth 1 -name 'package-upgrade-*' ! -name '*.lock' -delete && touch /var/lib/paratix/flags/'package-upgrade-2024-01-15'":
+      "find /var/lib/paratix/flags -maxdepth 1 -type f -name 'package-upgrade-*' ! -name '*.lock' -delete && touch /var/lib/paratix/flags/'package-upgrade-2024-01-15'":
         { code: 0 },
       "mkdir -p /var/lib/paratix/flags": { code: 0 },
     })

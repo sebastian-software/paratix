@@ -18,7 +18,7 @@ function buildReloadFlagCheck(name: string, content: string): string {
 
 function buildReloadFlagPersistCommand(name: string, content: string): string {
   const flagPrefix = `quadlet-container-${sha256String(name).slice(0, 16)}-`
-  return `find /var/lib/paratix/flags -maxdepth 1 -name '${flagPrefix}*' ! -name '*.lock' -delete && touch /var/lib/paratix/flags/'${buildReloadFlag(name, content)}'`
+  return `find /var/lib/paratix/flags -maxdepth 1 -type f -name '${flagPrefix}*' ! -name '*.lock' -delete && touch /var/lib/paratix/flags/'${buildReloadFlag(name, content)}'`
 }
 
 function expectedQuadletContent(): string {
@@ -92,7 +92,7 @@ function createSuccessfulApplySsh() {
         },
         {
           command:
-            /^find \/var\/lib\/paratix\/flags -maxdepth 1 -name 'quadlet-container-[0-9a-f]{16}-\*' ! -name '\*\.lock' -delete && touch \/var\/lib\/paratix\/flags\/'quadlet-container-[0-9a-f]{16}-[0-9a-f]{16}'$/v,
+            /^find \/var\/lib\/paratix\/flags -maxdepth 1 -type f -name 'quadlet-container-[0-9a-f]{16}-\*' ! -name '\*\.lock' -delete && touch \/var\/lib\/paratix\/flags\/'quadlet-container-[0-9a-f]{16}-[0-9a-f]{16}'$/v,
           result: { code: 0 },
         },
       ],

@@ -604,7 +604,7 @@ describe("apt.distUpgrade", () => {
       "DEBIAN_FRONTEND=noninteractive apt-get dist-upgrade -y": { code: 0 },
       "DEBIAN_FRONTEND=noninteractive apt-get update": { code: 0 },
       "DEBIAN_FRONTEND=noninteractive dpkg --configure -a": { code: 0 },
-      "find /var/lib/paratix/flags -maxdepth 1 -name 'apt-dist-upgrade-*' ! -name '*.lock' -delete && touch /var/lib/paratix/flags/'apt-dist-upgrade-2024-01-15'":
+      "find /var/lib/paratix/flags -maxdepth 1 -type f -name 'apt-dist-upgrade-*' ! -name '*.lock' -delete && touch /var/lib/paratix/flags/'apt-dist-upgrade-2024-01-15'":
         { code: 0 },
       "mkdir -p /var/lib/paratix/flags": { code: 0 },
     })
@@ -627,7 +627,7 @@ describe("apt.distUpgrade", () => {
       "DEBIAN_FRONTEND=noninteractive apt-get dist-upgrade -y": { code: 0 },
       "DEBIAN_FRONTEND=noninteractive apt-get update": { code: 0 },
       "DEBIAN_FRONTEND=noninteractive dpkg --configure -a": { code: 0 },
-      "find /var/lib/paratix/flags -maxdepth 1 -name 'apt-dist-upgrade-*' ! -name '*.lock' -delete && touch /var/lib/paratix/flags/'apt-dist-upgrade-2024-01-15'":
+      "find /var/lib/paratix/flags -maxdepth 1 -type f -name 'apt-dist-upgrade-*' ! -name '*.lock' -delete && touch /var/lib/paratix/flags/'apt-dist-upgrade-2024-01-15'":
         { code: 0 },
       "mkdir -p /var/lib/paratix/flags": { code: 0 },
     })
@@ -651,7 +651,7 @@ describe("apt.distUpgrade", () => {
       "DEBIAN_FRONTEND=noninteractive apt-get dist-upgrade -y": { code: 0 },
       "DEBIAN_FRONTEND=noninteractive apt-get update": { code: 0 },
       "DEBIAN_FRONTEND=noninteractive dpkg --configure -a": { code: 0 },
-      "find /var/lib/paratix/flags -maxdepth 1 -name 'apt-dist-upgrade-*' ! -name '*.lock' -delete && touch /var/lib/paratix/flags/'apt-dist-upgrade-2024-01-15'":
+      "find /var/lib/paratix/flags -maxdepth 1 -type f -name 'apt-dist-upgrade-*' ! -name '*.lock' -delete && touch /var/lib/paratix/flags/'apt-dist-upgrade-2024-01-15'":
         { code: 0 },
       "mkdir -p /var/lib/paratix/flags": { code: 0 },
     })
@@ -669,7 +669,7 @@ describe("apt.distUpgrade", () => {
       "DEBIAN_FRONTEND=noninteractive apt-get dist-upgrade -y": { code: 0 },
       "DEBIAN_FRONTEND=noninteractive apt-get update": { code: 0 },
       "DEBIAN_FRONTEND=noninteractive dpkg --configure -a": { code: 0 },
-      "find /var/lib/paratix/flags -maxdepth 1 -name 'apt-dist-upgrade-*' ! -name '*.lock' -delete && touch /var/lib/paratix/flags/'apt-dist-upgrade-2024-01-15'":
+      "find /var/lib/paratix/flags -maxdepth 1 -type f -name 'apt-dist-upgrade-*' ! -name '*.lock' -delete && touch /var/lib/paratix/flags/'apt-dist-upgrade-2024-01-15'":
         { code: 0 },
       "mkdir -p /var/lib/paratix/flags": { code: 0 },
     })
@@ -694,7 +694,7 @@ describe("apt.distUpgrade", () => {
       "DEBIAN_FRONTEND=noninteractive apt-get dist-upgrade -y": { code: 0 },
       "DEBIAN_FRONTEND=noninteractive apt-get update": { code: 0 },
       "DEBIAN_FRONTEND=noninteractive dpkg --configure -a": { code: 0 },
-      "find /var/lib/paratix/flags -maxdepth 1 -name 'apt-dist-upgrade-*' ! -name '*.lock' -delete && touch /var/lib/paratix/flags/'apt-dist-upgrade-2024-01-15'":
+      "find /var/lib/paratix/flags -maxdepth 1 -type f -name 'apt-dist-upgrade-*' ! -name '*.lock' -delete && touch /var/lib/paratix/flags/'apt-dist-upgrade-2024-01-15'":
         { code: 0 },
       "mkdir -p /var/lib/paratix/flags": { code: 0 },
     })
@@ -927,7 +927,7 @@ describe("apt.repository (standard form)", () => {
       [`[ -f '${filePath}' ] && [ ! -L '${filePath}' ]`]: { code: 1 },
       [`[ -f '${filePath}' ]`]: { code: 1 },
       [`[ -L '${filePath}' ]`]: { code: 1 },
-      [`find /var/lib/paratix/flags -maxdepth 1 -name 'apt-repository-${sha256String("docker").slice(0, 16)}-*' ! -name '*.lock' -delete && touch /var/lib/paratix/flags/'${expectedFlag}'`]:
+      [`find /var/lib/paratix/flags -maxdepth 1 -type f -name 'apt-repository-${sha256String("docker").slice(0, 16)}-*' ! -name '*.lock' -delete && touch /var/lib/paratix/flags/'${expectedFlag}'`]:
         { code: 0 },
       "DEBIAN_FRONTEND=noninteractive apt-get update": { code: 0 },
     })
@@ -1024,7 +1024,7 @@ describe("apt.repository (standard form)", () => {
   })
 
   it("apply sets update marker only after apt-get update succeeds", async () => {
-    const markerCommand = `find /var/lib/paratix/flags -maxdepth 1 -name 'apt-repository-${sha256String("docker").slice(0, 16)}-*' ! -name '*.lock' -delete && touch /var/lib/paratix/flags/'${updateFlag}'`
+    const markerCommand = `find /var/lib/paratix/flags -maxdepth 1 -type f -name 'apt-repository-${sha256String("docker").slice(0, 16)}-*' ! -name '*.lock' -delete && touch /var/lib/paratix/flags/'${updateFlag}'`
     const updateCommand = "DEBIAN_FRONTEND=noninteractive apt-get update"
     const ssh = createMockSsh({
       [`[ -f '${filePath}' ] && [ ! -L '${filePath}' ]`]: { code: 1 },
@@ -1058,7 +1058,7 @@ describe("apt.repository (standard form)", () => {
 
     expect(result.status).toBe("failed")
     expect(ssh.calls).not.toContain(
-      `find /var/lib/paratix/flags -maxdepth 1 -name 'apt-repository-${sha256String("docker").slice(0, 16)}-*' ! -name '*.lock' -delete && touch /var/lib/paratix/flags/'${updateFlag}'`
+      `find /var/lib/paratix/flags -maxdepth 1 -type f -name 'apt-repository-${sha256String("docker").slice(0, 16)}-*' ! -name '*.lock' -delete && touch /var/lib/paratix/flags/'${updateFlag}'`
     )
   })
 
@@ -1591,7 +1591,7 @@ describe("apt.debconf", () => {
     )
     expect(await mod.apply(ssh2, emptyEnv)).toStrictEqual({ status: "changed" })
     expect(ssh2.calls).toContain(
-      `find /var/lib/paratix/flags -maxdepth 1 -name 'apt-debconf-${packageHash}-*' ! -name '*.lock' -delete && touch ${flagPath}`
+      `find /var/lib/paratix/flags -maxdepth 1 -type f -name 'apt-debconf-${packageHash}-*' ! -name '*.lock' -delete && touch ${flagPath}`
     )
 
     // Second check: package still not installed, marker flag exists →

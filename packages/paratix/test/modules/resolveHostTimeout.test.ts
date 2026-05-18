@@ -104,16 +104,29 @@ describe("resolveHostWithTimeout — timeout", () => {
     expect(String(captured)).toMatch(/timed out after 50ms/v)
   })
 
-  it("keeps a real Node process alive until a hanging resolver times out", async () => {
+  it("R-0000849: lets a hanging resolver block the event loop without the timer pinning the process", async () => {
+    // R-0000849: the internal `setTimeout` is now `unref`-ed so a timeout
+    // that is still pending cannot — by itself — keep a Node process alive.
+    // Real callers always pair the timeout with an in-flight resolver that
+    // owns its own keepalive (DNS lookup, HTTP request, etc.) and the
+    // returned promise; the rejection still arrives via that resolver's
+    // microtask queue when the timer fires. To verify that the rejection
+    // path still works under a real event loop (not vitest fake timers) we
+    // pair the unref-ed timer with an `Interval` that keeps the loop alive
+    // for the duration of the resolver. The interval is cleared as soon as
+    // the timeout rejection arrives so the process can exit cleanly.
     const moduleUrl = new URL("../../src/modules/resolveHostTimeout.ts", import.meta.url).href
     const result = await runNodeScript(`
       const { resolveHostWithTimeout } = await import(${JSON.stringify(moduleUrl)})
+      const keepAlive = setInterval(() => {}, 10_000)
       try {
         await resolveHostWithTimeout(() => new Promise(() => {}), 50)
         console.error("resolveHostWithTimeout resolved unexpectedly")
         process.exitCode = 2
       } catch (error) {
         console.log(error instanceof Error ? error.message : String(error))
+      } finally {
+        clearInterval(keepAlive)
       }
     `)
     expect(result).toStrictEqual({

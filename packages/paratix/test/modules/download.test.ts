@@ -43,7 +43,7 @@ const createMockSsh: typeof createBaseMockSsh = (responses, options) =>
       // Stub matches both download-large- and the legacy download- prefix.
       {
         command:
-          /^find \/var\/lib\/paratix\/flags -maxdepth 1 -name '[^']+' ! -name '\*\.lock' -delete && touch \/var\/lib\/paratix\/flags\//v,
+          /^find \/var\/lib\/paratix\/flags -maxdepth 1 -type f -name '[^']+' ! -name '\*\.lock' -delete && touch \/var\/lib\/paratix\/flags\//v,
         result: { code: 0 },
       },
       // R-0000167: download.url's hash marker write is best-effort. The
@@ -147,7 +147,7 @@ function buildLargeDownloadVersionedFlagCommand(parameters: {
   flagName: string
 }): string {
   const flagPrefix = buildLargeDownloadFlagPrefix(parameters.destination)
-  return `find /var/lib/paratix/flags -maxdepth 1 -name '${flagPrefix}*' ! -name '*.lock' -delete && touch /var/lib/paratix/flags/'${parameters.flagName}'`
+  return `find /var/lib/paratix/flags -maxdepth 1 -type f -name '${flagPrefix}*' ! -name '*.lock' -delete && touch /var/lib/paratix/flags/'${parameters.flagName}'`
 }
 
 type MockSshWithOptions = {
@@ -2761,7 +2761,7 @@ describe("download.large", () => {
       expect(firstFlagName).not.toBe(secondFlagName)
 
       const flagPrefix = buildLargeDownloadFlagPrefix(destination)
-      const findPrefix = `find /var/lib/paratix/flags -maxdepth 1 -name '${flagPrefix}*' ! -name '*.lock' -delete && touch /var/lib/paratix/flags/'${flagPrefix}`
+      const findPrefix = `find /var/lib/paratix/flags -maxdepth 1 -type f -name '${flagPrefix}*' ! -name '*.lock' -delete && touch /var/lib/paratix/flags/'${flagPrefix}`
       const isVersionedFlagCall = (call: string): boolean => call.startsWith(findPrefix)
 
       const firstMockSsh = createMockSsh({

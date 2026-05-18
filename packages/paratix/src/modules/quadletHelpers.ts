@@ -314,8 +314,7 @@ export function buildQuadletInstallSection(options: QuadletContainerOptions): st
 }
 
 export function buildQuadletImagePullCommand(options: QuadletImageUpdateOptions): string {
-  const authFileFlag =
-    options.authFile == null ? "" : ` --authfile ${shellQuote(options.authFile)}`
+  const authFileFlag = options.authFile == null ? "" : ` --authfile ${shellQuote(options.authFile)}`
   // R-0000569: do NOT redirect stderr into stdout. podman emits
   // registry/auth/transport diagnostics on stderr; merging them into stdout
   // would route sensitive credentials material into `failedCommand`'s

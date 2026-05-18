@@ -1899,12 +1899,15 @@ describe("archive.extract — apply", () => {
     expect(mergeCommand).toContain("--remove-destination")
   })
 
-  // R-0000751: the staging merge runs the `[ -L "$target_path" ]` probe
-  // twice — once as the long-standing guard, once again immediately before
-  // the `cp -aT` so a symlink planted in the TOCTOU window between probe
-  // and copy cannot smuggle the merge through. Mirrors R-0000677's
-  // recheck-just-before-write pattern in net.ts.
-  it("R-0000751: rechecks target_path symlink immediately before cp -aT", async () => {
+  // R-0000751 / R-0000847: the staging merge runs exactly one
+  // `[ -L "$target_path" ]` probe, placed immediately before `cp -aT` so a
+  // symlink planted in the TOCTOU window between any earlier guard and the
+  // copy cannot smuggle the merge through. R-0000847 removed a second
+  // identical probe that had no functional effect — the surviving probe
+  // sits as close to `cp` as the shell allows, which is the only window
+  // that matters for the recheck-just-before-write pattern documented in
+  // R-0000677.
+  it("R-0000847: keeps a single target_path symlink probe immediately before cp -aT", async () => {
     const mockSsh = createMockSsh({
       [`tar --no-same-owner --no-overwrite-dir -xzf '${src}' -C '${archiveStageDirectory}'`]: {
         code: 0,
@@ -1920,10 +1923,17 @@ describe("archive.extract — apply", () => {
     expect(result.status).toBe("changed")
     const mergeCommand = mockSsh.calls.find((c) => archiveStageMovePattern.test(c))
     expect(mergeCommand).toBeDefined()
-    // The shell text must contain at least two `[ -L "$target_path" ]`
-    // probes — the original guard plus the immediate-pre-`cp` recheck.
+    // The shell text must contain exactly one `[ -L "$target_path" ]` probe
+    // after R-0000847 removed the redundant duplicate.
     const targetSymlinkProbes = mergeCommand?.match(/\[ -L "\$target_path" \]/gv)
-    expect(targetSymlinkProbes?.length).toBeGreaterThanOrEqual(2)
+    expect(targetSymlinkProbes?.length).toBe(1)
+    // The single surviving probe must still sit directly before `cp -aT`
+    // so the recheck-just-before-write guarantee holds. We require the
+    // exact one-line shell sub-segment that runs the probe, prints the
+    // rejection message, closes the `if` and then invokes `cp -aT`.
+    expect(mergeCommand).toContain(
+      'if [ -L "$target_path" ]; then echo "[archive.extract] refusing staging merge: destination path $target_path is a symlink" >&2; exit 64; fi; cp -aT'
+    )
   })
 
   // R-0000166: the owner-paths marker is now written for both upload and
