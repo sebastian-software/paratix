@@ -9,6 +9,7 @@ import {
   NEEDS_APPLY,
   type SshConnection,
 } from "../types.js"
+import { computePresentMutation, looksLikeCronJobLine } from "./cronMutation.js"
 import { withMutexLock } from "./moduleHelpers.js"
 
 /**
@@ -181,105 +182,18 @@ function hasMarkedJob(lines: string[], name: string, cronJob: string): boolean {
   return index !== -1 && index + 1 < lines.length && lines[index + 1] === cronJob
 }
 
-/**
- * Decide whether the line at `index` looks like a previously managed cron
- * job that may safely be overwritten.
- *
- * "Safely overwritable" means: the line is not a comment (starts with `#`),
- * not empty, and not another paratix marker. This protects user-authored
- * lines that ended up between the marker and the original job from being
- * silently overwritten by `present` apply.
- *
- * @param lines - The full crontab line array.
- * @param index - The index of the line to inspect.
- * @returns `true` when the line at `index` is a real cron job line.
- */
-function looksLikeCronJobLine(lines: string[], index: number): boolean {
-  if (index < 0 || index >= lines.length) return false
-  const line = lines[index] ?? ""
-  const trimmed = line.trim()
-  if (trimmed.length === 0) return false
-  if (trimmed.startsWith("#")) return false
-  return true
-}
-
-/** Arguments for {@link computePresentMutation}. */
-type PresentMutationArguments = {
-  /** The desired cron job line. */
-  cronJob: string
-  /** The current crontab lines (not mutated). */
-  lines: string[]
-  /** The paratix marker comment with hash tag. */
-  marker: string
-  /** The current index of the marker, or `-1`. */
-  markerIndex: number
-}
-
-/**
- * Compute the new crontab lines required to make the `present` state hold.
- *
- * Returns `null` when no mutation is required (the marker already exists,
- * carries the matching hash tag, and is followed by the desired job line),
- * allowing the caller to short-circuit without writing the crontab.
- *
- * @param mutation - The mutation inputs (see {@link PresentMutationArguments}).
- * @returns The new crontab lines, or `null` when no write is needed.
- */
-function computePresentMutation(mutation: PresentMutationArguments): null | string[] {
-  const { cronJob, lines, marker, markerIndex } = mutation
-
-  // R-0000081: short-circuit when the marker already carries the desired
-  // hash tag and the following line already matches the cron job. Without
-  // this, apply would overwrite the line with the same value and re-write
-  // the crontab, reporting "changed" on every run when invoked directly
-  // (e.g. as a signal target). Mirrors the no-op returns that R-0000075
-  // added to file.replace.apply and R-0000077 added to user.absent.apply.
-  // R-0000168: legacy markers (no hash tag) drop into the rewrite path
-  // below so the upgraded tagged marker lands on disk.
-  if (markerIndex !== -1 && lines[markerIndex] === marker && lines[markerIndex + 1] === cronJob) {
-    return null
-  }
-
-  const next = [...lines]
-
-  if (markerIndex === -1) {
-    // R-0000676: cron.absent on a legacy marker preserves the follow-up
-    // line as an orphan (see R-0000567). Without duplicate detection, a
-    // later `state="present"` apply would append a fresh marker + job at
-    // the end, leaving the orphan line behind and resulting in two
-    // identical cron entries running side by side. Re-adopt an existing
-    // exact match instead: splice the marker directly in front of the
-    // first line that equals `cronJob`, so the line becomes managed
-    // again and no duplicate is created.
-    const orphanIndex = lines.indexOf(cronJob)
-    if (orphanIndex === -1) {
-      next.push(marker, cronJob)
-    } else {
-      next.splice(orphanIndex, 0, marker)
-    }
-  } else if (looksLikeCronJobLine(next, markerIndex + 1)) {
-    // R-0000047: only overwrite the next line when it actually looks
-    // like a managed cron job. This prevents user-authored comments /
-    // blanks that ended up between marker and previous job from being
-    // silently destroyed by a re-apply.
-    // R-0000168: refresh the marker line itself so it gains (or updates)
-    // the hash tag for the new cron job.
-    next[markerIndex] = marker
-    next[markerIndex + 1] = cronJob
-  } else {
-    // Marker is the last line, or the next line is a comment / blank
-    // that the user inserted — splice the new job in instead of
-    // overwriting unrelated content. R-0000168: refresh the marker line
-    // so the recorded hash tag reflects the cron job we splice in.
-    next[markerIndex] = marker
-    next.splice(markerIndex + 1, 0, cronJob)
-  }
-
-  return next
-}
-
 /** Options for `cron.job`. */
 type CronJobOptions = {
+  /**
+   * R-0000697: opt-in to splicing the marker in front of an existing
+   * crontab line that exactly matches `job` when no marker is present.
+   * Without this flag, `state="present"` appends a fresh marker + job
+   * and never silently adopts an identical user-authored line. Set this
+   * to `true` only when knowingly recovering from a `cron.absent` on a
+   * legacy marker that left the original job line as an orphan
+   * (R-0000567/R-0000676). Defaults to `false`.
+   */
+  adoptOrphans?: boolean
   /** The crontab line to manage (e.g. `"0 * * * * /usr/bin/backup"`). */
   job: string
   /** Whether the job should be `"present"` or `"absent"`. Defaults to `"present"`. */
@@ -311,6 +225,9 @@ function assertCronName(name: string): void {
  * Compute the mutated crontab lines for `cron.job.apply`.
  *
  * @param parameters - The mutation context.
+ * @param parameters.adoptOrphans - R-0000697 opt-in: when `true`, an existing
+ *   crontab line that exactly matches `cronJob` is adopted by splicing the
+ *   marker in front of it. When `false`, a duplicate is appended instead.
  * @param parameters.cronJob - The desired cron job line.
  * @param parameters.lines - The current crontab lines.
  * @param parameters.marker - The hash-tagged marker comment to write.
@@ -319,15 +236,16 @@ function assertCronName(name: string): void {
  * @returns The new crontab lines, or `null` when no write is needed.
  */
 function computeCronJobMutation(parameters: {
+  adoptOrphans: boolean
   cronJob: string
   lines: string[]
   marker: string
   markerIndex: number
   state: "absent" | "present"
 }): null | string[] {
-  const { cronJob, lines, marker, markerIndex, state } = parameters
+  const { adoptOrphans, cronJob, lines, marker, markerIndex, state } = parameters
   if (state === "present") {
-    return computePresentMutation({ cronJob, lines, marker, markerIndex })
+    return computePresentMutation({ adoptOrphans, cronJob, lines, marker, markerIndex })
   }
   if (markerIndex === -1) return null
   // R-0000047: only remove the line after the marker when it exactly
@@ -341,6 +259,7 @@ function computeCronJobMutation(parameters: {
 }
 
 async function applyCronJobState(parameters: {
+  adoptOrphans: boolean
   cronJob: string
   marker: string
   name: string
@@ -348,7 +267,7 @@ async function applyCronJobState(parameters: {
   state: "absent" | "present"
   user: string
 }): Promise<ModuleResult> {
-  const { cronJob, marker, name, ssh, state, user } = parameters
+  const { adoptOrphans, cronJob, marker, name, ssh, state, user } = parameters
 
   try {
     return await withMutexLock(ssh, {
@@ -367,7 +286,14 @@ async function applyCronJobState(parameters: {
         const lines = readResult.lines
         const markerIndex = findMarkerIndex(lines, name)
 
-        const nextLines = computeCronJobMutation({ cronJob, lines, marker, markerIndex, state })
+        const nextLines = computeCronJobMutation({
+          adoptOrphans,
+          cronJob,
+          lines,
+          marker,
+          markerIndex,
+          state,
+        })
         if (nextLines === null) return { status: "ok" }
 
         const failure = await writeCrontab({
@@ -540,6 +466,10 @@ export const cron = {
    * @param options - Job content and desired state.
    * @param options.job - The crontab line to manage (e.g. `"0 * * * * /usr/bin/backup"`).
    * @param options.state - Whether the job should be `"present"` or `"absent"`. Defaults to `"present"`.
+   * @param options.adoptOrphans - R-0000697: opt-in to splicing the marker
+   *   in front of an existing crontab line that exactly matches `job` when
+   *   no marker is present. Defaults to `false`. Set to `true` only when
+   *   knowingly recovering from a `cron.absent` on a legacy marker.
    * @returns A Module that manages the cron job entry.
    */
   job(user: string, name: string, options: CronJobOptions): Module {
@@ -550,6 +480,10 @@ export const cron = {
 
     const state = options.state ?? "present"
     const cronJob = options.job
+    // R-0000697: only adopt an identical existing crontab line when the
+    // caller opts in. Defaults to `false` so a user-authored line that
+    // happens to match `job` is never silently taken over.
+    const adoptOrphans = options.adoptOrphans ?? false
     // R-0000168: marker carries the sha256 of the cron job so cron.absent
     // (and `cron.job(state="absent")`) can match the line they wrote
     // and avoid deleting user-replaced follow-up content.
@@ -559,7 +493,7 @@ export const cron = {
       async apply(ssh: null | SshConnection): Promise<ModuleResult> {
         if (!ssh) return failed(`[cron.job: ${name} (${user})] SSH connection is required`)
 
-        return applyCronJobState({ cronJob, marker, name, ssh, state, user })
+        return applyCronJobState({ adoptOrphans, cronJob, marker, name, ssh, state, user })
       },
 
       async check(ssh: null | SshConnection): Promise<"needs-apply" | "ok"> {

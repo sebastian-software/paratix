@@ -805,9 +805,39 @@ describe("cron.job", () => {
 
   // R-0000676: when cron.absent left an orphan job line behind (legacy
   // marker without recorded digest), a subsequent state="present" apply
-  // must not append a duplicate. Re-adopt the orphan instead by splicing
-  // the marker in front of the existing line so the job stays single.
-  it("apply re-adopts an orphan job line instead of appending a duplicate (state: present)", async () => {
+  // with `adoptOrphans: true` re-adopts the orphan by splicing the marker
+  // in front of the existing line so the job stays single.
+  // R-0000697: the adoption now requires the `adoptOrphans` opt-in so an
+  // identical user-authored line that paratix never managed cannot be
+  // silently grabbed by the present mutation.
+  it("apply re-adopts an orphan job line when adoptOrphans is enabled (state: present)", async () => {
+    const job = "0 3 * * * /backup.sh"
+    const mockSsh = createMockSsh({
+      "crontab -u 'alice' -l": {
+        code: 0,
+        stdout: `0 5 * * * /other.sh\n${job}\n`,
+      },
+    })
+    const mod = cron.job("alice", "backup", { adoptOrphans: true, job })
+    const result = await mod.apply(mockSsh, emptyEnv)
+    expect(result.status).toBe("changed")
+    const writeInput = findCrontabWriteInput(mockSsh)
+    expect(writeInput).toBeDefined()
+    // The job must appear exactly once.
+    const jobOccurrences = writeInput!.split("\n").filter((line) => line === job).length
+    expect(jobOccurrences).toBe(1)
+    // The marker must sit immediately above the orphan line we adopted.
+    const expectedMarker = taggedMarker("backup", job)
+    expect(writeInput).toContain(`${expectedMarker}\n${job}`)
+    // The unrelated entry must remain.
+    expect(writeInput).toContain("0 5 * * * /other.sh")
+  })
+
+  // R-0000697: without the `adoptOrphans` opt-in, a pre-existing identical
+  // line must not be silently adopted. The present mutation appends a
+  // fresh marker + job pair and accepts the (visible) duplicate over
+  // taking over a user-authored line.
+  it("apply does not adopt an identical line without adoptOrphans (state: present)", async () => {
     const job = "0 3 * * * /backup.sh"
     const mockSsh = createMockSsh({
       "crontab -u 'alice' -l": {
@@ -820,13 +850,12 @@ describe("cron.job", () => {
     expect(result.status).toBe("changed")
     const writeInput = findCrontabWriteInput(mockSsh)
     expect(writeInput).toBeDefined()
-    // The job must appear exactly once.
+    // The job line appears twice: the pre-existing user line plus the
+    // fresh paratix-managed line below the appended marker.
     const jobOccurrences = writeInput!.split("\n").filter((line) => line === job).length
-    expect(jobOccurrences).toBe(1)
-    // The marker must sit immediately above the orphan line we adopted.
+    expect(jobOccurrences).toBe(2)
     const expectedMarker = taggedMarker("backup", job)
     expect(writeInput).toContain(`${expectedMarker}\n${job}`)
-    // The unrelated entry must remain.
     expect(writeInput).toContain("0 5 * * * /other.sh")
   })
 
