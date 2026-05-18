@@ -189,6 +189,12 @@ export async function promptForHost(
     }
   }
 
+  // R-0000664: refuse non-TTY callers before `createTerminalPrompt()`
+  // opens a readline interface on stdin. Tests and other consumers that
+  // inject their own `prompt` argument bypass the terminal setup, so the
+  // check only runs on the default path — mirroring the gate in
+  // promptForAdminPublicKey and promptForHostFingerprint.
+  ensureInteractivePromptTty()
   const terminalPrompt = createTerminalPrompt()
   try {
     return await promptForScaffoldHost(terminalPrompt.prompt)

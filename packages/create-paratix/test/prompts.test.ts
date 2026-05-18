@@ -586,6 +586,35 @@ describe("R-0000664: TTY gate on default-select prompts", () => {
     }
   })
 
+  it("promptForHost rejects without a stdin TTY", async () => {
+    const restoreTty = setProcessTtyForTest(false, true)
+    try {
+      await expect(promptForHost()).rejects.toThrow(/Interactive prompt requires a TTY/v)
+    } finally {
+      restoreTty()
+    }
+  })
+
+  it("promptForHost rejects without a stdout TTY", async () => {
+    const restoreTty = setProcessTtyForTest(true, false)
+    try {
+      await expect(promptForHost()).rejects.toThrow(/Interactive prompt requires a TTY/v)
+    } finally {
+      restoreTty()
+    }
+  })
+
+  it("promptForHost skips the TTY gate when a prompt is injected", async () => {
+    const restoreTty = setProcessTtyForTest(false, false)
+    const prompt = vi.fn().mockResolvedValueOnce("example.com")
+    try {
+      await expect(promptForHost(prompt)).resolves.toBe("example.com")
+      expect(prompt).toHaveBeenCalledTimes(1)
+    } finally {
+      restoreTty()
+    }
+  })
+
   it("promptForAdminPublicKey skips the TTY gate when a select is injected", async () => {
     const restoreTty = setProcessTtyForTest(false, false)
     const select = vi.fn().mockResolvedValueOnce("placeholder")
