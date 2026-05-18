@@ -154,8 +154,20 @@ function parseArgumentValue(
   }
 ): string {
   const value = argv.at(index + 1)
-  if (value == null || value.startsWith("--")) {
+  // R-0000734: distinguish between a truly missing argument (no token
+  // follows the option) and a token that looks like another long flag
+  // ("--something"). The previous implementation conflated both cases
+  // and emitted the same "Missing value" message, which made it hard
+  // for operators to spot whether they forgot the value entirely or
+  // accidentally passed a flag where a value belonged.
+  if (value == null) {
     parameters.exitWithMessage(`Error: Missing value for "${parameters.optionName}".`)
+  }
+  if (value.startsWith("--")) {
+    parameters.exitWithMessage(
+      `Error: Expected a value for "${parameters.optionName}" but got the flag "${value}". ` +
+        `If the value really starts with "--", separate it from the option with "--" or quote it explicitly.`
+    )
   }
   // R-0000129: After the missing-value/long-flag guard above, also reject
   // values that consist only of whitespace and values that span multiple
