@@ -29,10 +29,11 @@ const createMockSsh: typeof createBaseMockSsh = (responses, options) =>
     responseStubs: [
       ...(options?.responseStubs ?? []),
       { command: "[ -e '/etc/hosts' ]", result: { code: 0 } },
-      // R-0000645: applyHostsPresent now probes `[ -L '/etc/hosts' ]`
-      // (isSymlink) before writing in the create path. Default to
-      // "not a symlink" so existing fixtures keep passing; the
-      // symlink-refusal regression stubs `{ code: 0 }` explicitly.
+      // R-0000645/R-0000677: applyHostsPresent and applyHostsAbsent now
+      // probe `[ -L '/etc/hosts' ]` (isSymlink) before writing in both the
+      // create path and the existed path. Default to "not a symlink" so
+      // existing fixtures keep passing; the symlink-refusal regressions
+      // stub `{ code: 0 }` explicitly.
       { command: "[ -L '/etc/hosts' ]", result: { code: 1 } },
       // R-0000494: the flag-lock holder marker is now written with the
       // hostname captured via `ssh.output("hostname")` and interpolated
@@ -205,6 +206,46 @@ describe("net.hosts — apply", () => {
     )
 
     const mod = net.hosts("1.2.3.4", ["myhost"])
+    const result = await mod.apply(mockSsh, emptyEnv)
+
+    expect(result.status).toBe("failed")
+    expect(mockSsh.writeFileCalls).toHaveLength(0)
+  })
+
+  // R-0000677: defense-in-depth — when /etc/hosts already exists but the
+  // path is swapped to a symlink between the snapshot read and the write,
+  // the existed-path apply must refuse the write instead of routing through
+  // guardedWriteFile.
+  it("refuses to write /etc/hosts in the existed path when the path is a symlink (state: present)", async () => {
+    const mockSsh = createMockSsh(
+      {
+        "cat '/etc/hosts'": { stdout: "127.0.0.1 localhost\n" },
+      },
+      {
+        responseStubs: [{ command: "[ -L '/etc/hosts' ]", result: { code: 0 } }],
+      }
+    )
+
+    const mod = net.hosts("1.2.3.4", ["myhost"])
+    const result = await mod.apply(mockSsh, emptyEnv)
+
+    expect(result.status).toBe("failed")
+    expect(mockSsh.writeFileCalls).toHaveLength(0)
+  })
+
+  // R-0000677: same guard in the absent existed-path so a swap to a symlink
+  // between read and write cannot silently pass through guardedWriteFile.
+  it("refuses to write /etc/hosts in the existed path when the path is a symlink (state: absent)", async () => {
+    const mockSsh = createMockSsh(
+      {
+        "cat '/etc/hosts'": { stdout: "127.0.0.1 localhost\n1.2.3.4 myhost\n" },
+      },
+      {
+        responseStubs: [{ command: "[ -L '/etc/hosts' ]", result: { code: 0 } }],
+      }
+    )
+
+    const mod = net.hosts("1.2.3.4", ["myhost"], { state: "absent" })
     const result = await mod.apply(mockSsh, emptyEnv)
 
     expect(result.status).toBe("failed")

@@ -1298,6 +1298,15 @@ async function applyHostsPresent(
   if (filtered.length > 0 && filtered.at(-1) === "") filtered.pop()
   filtered.push(mergedLine)
   const newContent = `${filtered.join("\n")}\n`
+  // R-0000677: defense-in-depth — also refuse to write through a planted
+  // symlink in the existed path. The create path already guards via
+  // `createHostsFileWithSymlinkGuard`, but a swap between the snapshot
+  // read and the write here would otherwise pass through `guardedWriteFile`
+  // unchecked. Matches the guards in net.resolv, net.interface and
+  // net.route.
+  if (await isSymlink(conn, HOSTS_FILE)) {
+    return failed(`[net.hosts] refuses to write through symlink at ${HOSTS_FILE}`)
+  }
   await guardedWriteFile(conn, {
     mode: HOSTS_FILE_MODE,
     newContent,
@@ -1326,6 +1335,14 @@ async function applyHostsAbsent(
   const alreadyAbsent = !lines.some((line) => matchesAbsentTarget(line))
   if (alreadyAbsent) return { status: "ok" }
   const newContent = lines.filter((line) => !matchesAbsentTarget(line)).join("\n")
+  // R-0000677: defense-in-depth — also refuse to write through a planted
+  // symlink in the existed path. Without this guard a swap between the
+  // snapshot read and the write would otherwise pass through
+  // `guardedWriteFile` unchecked. Matches the guards in net.resolv,
+  // net.interface and net.route.
+  if (await isSymlink(conn, HOSTS_FILE)) {
+    return failed(`[net.hosts] refuses to write through symlink at ${HOSTS_FILE}`)
+  }
   await guardedWriteFile(conn, {
     mode: HOSTS_FILE_MODE,
     newContent,
