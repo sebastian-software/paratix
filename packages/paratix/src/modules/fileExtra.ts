@@ -15,7 +15,6 @@ import { compileUserRegex, hexHashesEqual, sha256String } from "./fileHelpers.js
 import {
   ownershipMatches,
   readOwnership,
-  renderChownCommand,
   renderGuardedChgrpCommand,
   renderGuardedChmodCommand,
   renderGuardedChownCommand,
@@ -161,11 +160,7 @@ async function applyAssembleChmod(
   remotePath: string,
   mode: string
 ): Promise<ModuleResult | null> {
-  validateMode(mode)
-  const chmodResult = await ssh.exec(
-    `chmod ${shellQuote(mode)} ${shellQuote(remotePath)}`,
-    EXEC_OPTS
-  )
+  const chmodResult = await ssh.exec(renderGuardedChmodCommand(mode, remotePath), EXEC_OPTS)
   if (chmodResult.code !== 0) {
     return failedCommand(`[file.assemble: ${remotePath}] chmod failed`, chmodResult)
   }
@@ -177,7 +172,7 @@ async function applyAssembleChown(
   remotePath: string,
   owner: string
 ): Promise<ModuleResult | null> {
-  const chownResult = await ssh.exec(renderChownCommand(owner, remotePath), EXEC_OPTS)
+  const chownResult = await ssh.exec(renderGuardedChownCommand(owner, remotePath), EXEC_OPTS)
   if (chownResult.code !== 0) {
     return failedCommand(`[file.assemble: ${remotePath}] chown failed`, chownResult)
   }

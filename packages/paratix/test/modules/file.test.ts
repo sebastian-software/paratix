@@ -2544,13 +2544,23 @@ describe("file.assemble", () => {
       const frag1 = join(dir, "frag1.txt")
       writeFileSync(frag1, "Hello")
 
-      const ssh = createMockSsh({
-        "[ -L '/remote/assembled.txt' ]": { code: 1 },
-        "chmod '0600' '/remote/assembled.txt'": {
-          code: 1,
-          stderr: "chmod: changing permissions of '/remote/assembled.txt': Read-only file system",
+      const ssh = createMockSsh(
+        {
+          "[ -L '/remote/assembled.txt' ]": { code: 1 },
         },
-      })
+        {
+          responseStubs: [
+            {
+              command: /\nchmod -- '0600' "\$path"$/v,
+              result: {
+                code: 1,
+                stderr:
+                  "chmod: changing permissions of '/remote/assembled.txt': Read-only file system",
+              },
+            },
+          ],
+        }
+      )
 
       const mod = file.assemble("/remote/assembled.txt", [frag1], { mode: "0600" })
       const result = await mod.apply(ssh, emptyEnv)
@@ -2568,19 +2578,87 @@ describe("file.assemble", () => {
       const frag1 = join(dir, "frag1.txt")
       writeFileSync(frag1, "Hello")
 
-      const ssh = createMockSsh({
-        "[ -L '/remote/assembled.txt' ]": { code: 1 },
-        "chown -- 'www-data' '/remote/assembled.txt'": {
-          code: 1,
-          stderr: "chown: invalid user: 'www-data'",
+      const ssh = createMockSsh(
+        {
+          "[ -L '/remote/assembled.txt' ]": { code: 1 },
         },
-      })
+        {
+          responseStubs: [
+            {
+              command: /\nchown -- 'w{3}-data' "\$path"$/v,
+              result: { code: 1, stderr: "chown: invalid user: 'www-data'" },
+            },
+          ],
+        }
+      )
 
       const mod = file.assemble("/remote/assembled.txt", [frag1], { owner: "www-data" })
       const result = await mod.apply(ssh, emptyEnv)
 
       expect(result.status).toBe("failed")
       expect(String(result.error)).toContain("chown failed")
+    } finally {
+      rmSync(dir, { recursive: true })
+    }
+  })
+
+  it("returns failed when the assembled target changes before chmod after write", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "paratix-test-"))
+    try {
+      const frag1 = join(dir, "frag1.txt")
+      writeFileSync(frag1, "Hello")
+
+      const ssh = createMockSsh(
+        {
+          "[ -L '/remote/assembled.txt' ]": { code: 1 },
+        },
+        {
+          responseStubs: [
+            {
+              command: /\nchmod -- '0600' "\$path"$/v,
+              result: { code: 1, stderr: "metadata target changed before chmod" },
+            },
+          ],
+        }
+      )
+      const mod = file.assemble("/remote/assembled.txt", [frag1], { mode: "0600" })
+      const result = await mod.apply(ssh, emptyEnv)
+
+      expect(result.status).toBe("failed")
+      expect(String(result.error)).toContain("metadata target changed before chmod")
+      expect(ssh.calls).toContainEqual(expect.stringContaining("before=$(stat -c '%d:%i:%F'"))
+      expect(ssh.calls).toContainEqual(expect.stringContaining("chmod -- '0600' \"$path\""))
+    } finally {
+      rmSync(dir, { recursive: true })
+    }
+  })
+
+  it("returns failed when the assembled target changes before chown after write", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "paratix-test-"))
+    try {
+      const frag1 = join(dir, "frag1.txt")
+      writeFileSync(frag1, "Hello")
+
+      const ssh = createMockSsh(
+        {
+          "[ -L '/remote/assembled.txt' ]": { code: 1 },
+        },
+        {
+          responseStubs: [
+            {
+              command: /\nchown -- 'w{3}-data' "\$path"$/v,
+              result: { code: 1, stderr: "metadata target changed before chown" },
+            },
+          ],
+        }
+      )
+      const mod = file.assemble("/remote/assembled.txt", [frag1], { owner: "www-data" })
+      const result = await mod.apply(ssh, emptyEnv)
+
+      expect(result.status).toBe("failed")
+      expect(String(result.error)).toContain("metadata target changed before chown")
+      expect(ssh.calls).toContainEqual(expect.stringContaining("before=$(stat -c '%d:%i:%F'"))
+      expect(ssh.calls).toContainEqual(expect.stringContaining("chown -- 'www-data' \"$path\""))
     } finally {
       rmSync(dir, { recursive: true })
     }
