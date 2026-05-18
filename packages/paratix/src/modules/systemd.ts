@@ -9,7 +9,15 @@ import {
 } from "../types.js"
 import { sha256String } from "./fileHelpers.js"
 import { hasFlag, setVersionedFlag } from "./moduleHelpers.js"
-import { isSymlink } from "./remoteFileChecks.js"
+import {
+  formatCaughtError,
+  restoreUnitFileSnapshot,
+  restoreUnitFileSnapshotIfCurrentMatches,
+  snapshotUnitFile,
+  type UnitFileSnapshot,
+} from "./systemdUnitSnapshot.js"
+// `isSymlink` is no longer imported here: the symlink guard moved into
+// `restoreUnitFileSnapshot` together with the snapshot helpers.
 
 const SYSTEMCTL = "systemctl"
 const UNIT_NAME_PATTERN = /^[\w@.\-]+$/v
@@ -61,90 +69,8 @@ function buildSystemdUnitReloadFlag(
   }
 }
 
-// R-0000683: a snapshot can now report a structured read failure so
-// `applySystemdUnit` aborts before the writeFile path discards the original
-// content. The `failed` variant mirrors the swap snapshot contract from
-// R-0000648 (sysctl moved to the same shape in R-0000682) and replaces the
-// implicit `throw` that bubbled out of `ssh.readFile`.
-type UnitFileSnapshot =
-  | {
-      content: string
-      exists: true
-      mode: string
-    }
-  | { exists: false }
-  | { kind: "failed"; reason: string }
-
-const formatCaughtError = (error: unknown): string =>
-  error instanceof Error ? error.message : String(error)
-
 function failedWithRollbackFailure(message: string, rollbackError: unknown): ModuleResult {
   return failed(`${message}\nrollback failed: ${formatCaughtError(rollbackError)}`)
-}
-
-async function snapshotUnitFile(ssh: SshConnection, filePath: string): Promise<UnitFileSnapshot> {
-  if (!(await ssh.exists(filePath))) return { exists: false }
-  // R-0000683: `ssh.readFile` can throw on transient SFTP errors or after a
-  // permission denial. Convert the throw into a structured failure so
-  // `applySystemdUnit` can return a failed ModuleResult instead of bubbling
-  // a raw exception out of the module — matches the swap snapshot contract
-  // established in R-0000648.
-  let content: string
-  try {
-    content = await ssh.readFile(filePath)
-  } catch (error) {
-    return { kind: "failed", reason: formatCaughtError(error) }
-  }
-  const modeResult = await ssh.exec(`stat -c '%a' ${shellQuote(filePath)}`, SILENT_EXEC_OPTS)
-  return {
-    content,
-    exists: true,
-    mode:
-      modeResult.code === 0 && modeResult.stdout.trim() !== ""
-        ? modeResult.stdout.trim()
-        : SYSTEMD_UNIT_MODE,
-  }
-}
-
-async function restoreUnitFileSnapshot(
-  ssh: SshConnection,
-  filePath: string,
-  snapshot: UnitFileSnapshot
-): Promise<void> {
-  if ("kind" in snapshot) {
-    // R-0000683: defensive guard — the apply path refuses to proceed when
-    // the snapshot capture failed, so the rollback should never observe
-    // this branch. If a future caller routes a failed snapshot here we
-    // intentionally do nothing rather than touch the live file on a
-    // partially-known state.
-    return
-  }
-  if (snapshot.exists) {
-    // R-0000683: refuse to write back through a symlink. Without the
-    // `[ -L ]` probe a swap between the snapshot read and the rollback
-    // would let `ssh.writeFile` follow the planted link to its target.
-    // Mirrors the swap restore guard added in R-0000647.
-    if (await isSymlink(ssh, filePath)) {
-      throw new Error(`refusing to restore through symlink at ${filePath}`)
-    }
-    await ssh.writeFile(filePath, snapshot.content, { mode: snapshot.mode })
-    return
-  }
-  await ssh.exec(`rm -f ${shellQuote(filePath)}`, { ignoreExitCode: true, silent: true })
-}
-
-async function restoreUnitFileSnapshotIfCurrentMatches(parameters: {
-  expectedCurrentContent: string
-  filePath: string
-  snapshot: UnitFileSnapshot
-  ssh: SshConnection
-}): Promise<boolean> {
-  const { expectedCurrentContent, filePath, snapshot, ssh } = parameters
-  if (!(await ssh.exists(filePath))) return false
-  const currentContent = await ssh.readFile(filePath)
-  if (currentContent !== expectedCurrentContent) return false
-  await restoreUnitFileSnapshot(ssh, filePath, snapshot)
-  return true
 }
 
 /**

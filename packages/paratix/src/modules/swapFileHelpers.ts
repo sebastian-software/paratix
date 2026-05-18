@@ -229,13 +229,14 @@ export async function swapFileModeMatches(
 ): Promise<boolean | ModuleResult> {
   const result = await ssh.exec(`stat -c '%a' ${shellQuote(options.path)}`, EXEC_OPTS)
   if (result.code !== 0) {
-    return failedCommand(`[swap.file: ${options.path}] stat failed while reading swap file mode`, result)
+    return failedCommand(
+      `[swap.file: ${options.path}] stat failed while reading swap file mode`,
+      result
+    )
   }
   const currentMode = result.stdout.trim()
   if (currentMode === "") {
-    return failed(
-      `[swap.file: ${options.path}] stat returned an empty mode for ${options.path}`
-    )
+    return failed(`[swap.file: ${options.path}] stat returned an empty mode for ${options.path}`)
   }
   return normalizeMode(currentMode) === normalizeMode(options.mode)
 }

@@ -1,12 +1,7 @@
 import type { Client, SFTPWrapper } from "ssh2"
 
 import { EventEmitter } from "node:events"
-import {
-  createReadStream,
-  createWriteStream,
-  type ReadStream,
-  type WriteStream,
-} from "node:fs"
+import { createReadStream, createWriteStream, type ReadStream, type WriteStream } from "node:fs"
 import { rename, unlink } from "node:fs/promises"
 import { Writable } from "node:stream"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"

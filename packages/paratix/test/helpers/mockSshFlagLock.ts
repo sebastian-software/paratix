@@ -49,6 +49,7 @@ const MUTEX_LOCK_WAIT_PATTERN =
  * `find ... -mmin` check, so the matcher must tolerate that prefix.
  */
 const FLAG_LOCK_RECLAIM_PATTERN =
+  // eslint-disable-next-line security/detect-unsafe-regex -- mock-only pattern, anchored prefix bounds backtracking on test-controlled input
   /^if \[ -d \S+ \]; then if \[ -f \S+\/holder \]; then (?:STALE_TOKEN="\$\(awk 'NR==1\{print \$1\}' \S+\/holder 2>\/dev\/null\)"; )?if find \S+\/holder -maxdepth 0 -mmin /v
 
 /**

@@ -1309,8 +1309,8 @@ describe("swap.file — apply", () => {
       [`swapoff '${swapPath}'`]: { code: 0 },
       [`swapon '${swapPath}'`]: { code: 0 },
       [preSnapshotRm]: { code: 0 },
-      [snapshotLink]: { code: 1, stderr: "ln: cannot create hard link" },
       [safeSwapParentCommand]: { code: 0, stdout: "/\n" },
+      [snapshotLink]: { code: 1, stderr: "ln: cannot create hard link" },
     })
     vi.spyOn(ssh, "lines")
       .mockResolvedValueOnce([swapPath])

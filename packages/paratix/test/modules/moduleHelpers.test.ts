@@ -546,9 +546,8 @@ describe("applyWithFlagLock – stale lock recovery", () => {
 
     const lockPath = `${FLAGS_DIRECTORY}/'${flagName}.lock'`
     const markerPath = `${lockPath}/holder`
-    const reclaimCall = ssh.calls.find(
-      (call) => call.startsWith("if [ -d ") && call.includes(`STALE_TOKEN=`)
-    )
+    const reclaimCallCandidates = ssh.calls.filter((call) => call.startsWith("if [ -d "))
+    const reclaimCall = reclaimCallCandidates.find((call) => call.includes(`STALE_TOKEN=`))
     expect(reclaimCall).toBeDefined()
     expect(reclaimCall).toContain(
       `STALE_TOKEN="$(awk 'NR==1{print $1}' ${markerPath} 2>/dev/null)"`
@@ -557,7 +556,6 @@ describe("applyWithFlagLock – stale lock recovery", () => {
       `[ "$(awk 'NR==1{print $1}' ${markerPath} 2>/dev/null)" = "$STALE_TOKEN" ] && rm -f ${markerPath} && rmdir ${lockPath}`
     )
   })
-
 
   it("returns failedCommand when the lock is held but not stale", async () => {
     const flagName = "fresh-lock-flag"

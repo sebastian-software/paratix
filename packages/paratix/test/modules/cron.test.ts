@@ -821,7 +821,7 @@ describe("cron.job", () => {
     const writeInput = findCrontabWriteInput(mockSsh)
     expect(writeInput).toBeDefined()
     // The job must appear exactly once.
-    const jobOccurrences = writeInput?.split("\n").filter((line) => line === job).length ?? 0
+    const jobOccurrences = writeInput!.split("\n").filter((line) => line === job).length
     expect(jobOccurrences).toBe(1)
     // The marker must sit immediately above the orphan line we adopted.
     const expectedMarker = taggedMarker("backup", job)

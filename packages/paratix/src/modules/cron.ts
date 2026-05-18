@@ -252,10 +252,10 @@ function computePresentMutation(mutation: PresentMutationArguments): null | stri
     // first line that equals `cronJob`, so the line becomes managed
     // again and no duplicate is created.
     const orphanIndex = lines.indexOf(cronJob)
-    if (orphanIndex !== -1) {
-      next.splice(orphanIndex, 0, marker)
-    } else {
+    if (orphanIndex === -1) {
       next.push(marker, cronJob)
+    } else {
+      next.splice(orphanIndex, 0, marker)
     }
   } else if (looksLikeCronJobLine(next, markerIndex + 1)) {
     // R-0000047: only overwrite the next line when it actually looks

@@ -771,17 +771,6 @@ export class SshConnectionImpl implements SshConnection {
     }
   }
 
-  private buildEnvPrefix(environment?: Record<string, string>): string {
-    if (environment == null) return ""
-    for (const key of Object.keys(environment)) {
-      if (!/^[A-Za-z_]\w*$/v.test(key)) {
-        throw new Error(`Invalid environment variable name: ${key}`)
-      }
-    }
-    const pairs = Object.entries(environment).map(([k, v]) => `${k}=${shellQuote(v)}`)
-    return `${pairs.join(" ")} `
-  }
-
   /**
    * R-0000669: build the abort signal that {@link tryConnectOnPort} subscribes
    * to. Combines the prompt-level abort signal (which fires from the SIGINT
@@ -798,7 +787,18 @@ export class SshConnectionImpl implements SshConnection {
   private buildConnectAbortSignal(): AbortSignal {
     const signals: AbortSignal[] = [this.connectionAbortController.signal]
     if (this.promptAbortSignal != null) signals.push(this.promptAbortSignal)
-    return signals.length === 1 ? (signals[0] as AbortSignal) : AbortSignal.any(signals)
+    return signals.length === 1 ? signals[0] : AbortSignal.any(signals)
+  }
+
+  private buildEnvPrefix(environment?: Record<string, string>): string {
+    if (environment == null) return ""
+    for (const key of Object.keys(environment)) {
+      if (!/^[A-Za-z_]\w*$/v.test(key)) {
+        throw new Error(`Invalid environment variable name: ${key}`)
+      }
+    }
+    const pairs = Object.entries(environment).map(([k, v]) => `${k}=${shellQuote(v)}`)
+    return `${pairs.join(" ")} `
   }
 
   private buildSecrets(extra?: string[]): SecretSource[] {

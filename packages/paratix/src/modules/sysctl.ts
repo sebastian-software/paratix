@@ -327,7 +327,7 @@ type AbsentStateInput = {
  * before the rm when the snapshot is uncertain.
  */
 type PersistenceFileSnapshot =
-  | { kind: "captured"; content: string }
+  | { content: string; kind: "captured" }
   | { kind: "failed"; reason: string }
   | { kind: "missing" }
 

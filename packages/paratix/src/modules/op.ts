@@ -153,6 +153,40 @@ function attachSpawnIoHandlers(parameters: {
   })
 }
 
+function feedStdinOrFail(parameters: {
+  child: ChildProcess
+  command: string
+  input: string
+  rejectOnce: (error: Error) => void
+}): void {
+  const { child, command, input, rejectOnce } = parameters
+  // R-0000573: when the child exits before its stdin pipe is wired up
+  // (e.g. spawn raced a SIGKILL or the binary refused exec) `child.stdin`
+  // is null. The previous `child.stdin?.end(input)` would then silently
+  // no-op and the promise would hang because neither `error` nor `close`
+  // had fired yet. Surface the failure explicitly instead.
+  if (child.stdin == null) {
+    // R-0000641: without an active stdin pipe `rejectOnce` settles the
+    // promise but leaves the underlying ChildProcess running. Trigger
+    // SIGTERM with SIGKILL escalation so no orphaned 1Password CLI process
+    // can hang past this function.
+    killChildEscalating(child)
+    rejectOnce(new Error(`${command} spawn failed: stdin unavailable`))
+    return
+  }
+  try {
+    child.stdin.end(input)
+  } catch (error) {
+    // R-0000678: mirror the null-stdin path above — if `stdin.end()` throws
+    // synchronously (e.g. EPIPE) `rejectOnce` settles the promise but
+    // leaves the underlying ChildProcess running. Send SIGTERM with
+    // SIGKILL escalation first so no orphaned op CLI process outlives
+    // the rejected promise.
+    killChildEscalating(child)
+    rejectOnce(describeSpawnError(command, error))
+  }
+}
+
 async function spawnWithInput(
   command: string,
   commandArguments: string[],
@@ -187,33 +221,7 @@ async function spawnWithInput(
     }
     attachSpawnIoHandlers({ child, command, io, rejectOnce, resolveOnce })
     detachLifecycle = attachSpawnLifecycle({ child, command, rejectOnce, timeoutMs })
-    // R-0000573: when the child exits before its stdin pipe is wired up
-    // (e.g. spawn raced a SIGKILL or the binary refused exec) `child.stdin`
-    // is null. The previous `child.stdin?.end(input)` would then silently
-    // no-op and the promise would hang because neither `error` nor `close`
-    // had fired yet. Surface the failure explicitly instead.
-    if (child.stdin == null) {
-      // R-0000641: without an active stdin pipe `rejectOnce` settles the
-      // promise but leaves the underlying ChildProcess running — Node.js
-      // does not implicitly terminate the spawned `op` process when the
-      // returned Promise rejects. Trigger SIGTERM with SIGKILL escalation
-      // so no orphaned 1Password CLI process can hang past this function.
-      killChildEscalating(child)
-      rejectOnce(new Error(`${command} spawn failed: stdin unavailable`))
-      return
-    }
-    try {
-      child.stdin.end(input)
-    } catch (error) {
-      // R-0000678: mirror the null-stdin path above — if `stdin.end()` throws
-      // synchronously (e.g. EPIPE on a child that exited between the
-      // null-check and the write) `rejectOnce` settles the promise but
-      // leaves the underlying ChildProcess running. Send SIGTERM with
-      // SIGKILL escalation first so no orphaned op CLI process outlives
-      // the rejected promise.
-      killChildEscalating(child)
-      rejectOnce(describeSpawnError(command, error))
-    }
+    feedStdinOrFail({ child, command, input, rejectOnce })
   })
 }
 
