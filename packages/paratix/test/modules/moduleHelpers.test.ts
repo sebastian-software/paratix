@@ -93,9 +93,13 @@ function createSharedFlagMockSsh(flagName: string): ReturnType<typeof createMock
   // arguments in awk / rm / rmdir invocations.
   const markerPath = `${FLAGS_DIRECTORY}/'${flagName}.lock'/holder`
   const lockPath = `${FLAGS_DIRECTORY}/'${flagName}.lock'`
+  // R-0000758: release captures the awk readback in `$awk_token` and uses
+  // the POSIX `x`-prefix comparison so unusual awk output cannot collide
+  // with `[` operator syntax.
   const verifiedReleaseCommand =
-    `[ "$(awk 'NR==1{print $1}' -- ${markerPath} 2>/dev/null)" = ` +
-    `'${MOCK_FLAG_LOCK_HOLDER_TOKEN}' ] && ` +
+    `awk_token=$(awk 'NR==1{print $1}' -- ${markerPath} 2>/dev/null); awk_status=$?; ` +
+    `[ "$awk_status" = 0 ] && ` +
+    `[ "x$awk_token" = 'x${MOCK_FLAG_LOCK_HOLDER_TOKEN}' ] && ` +
     `rm -f -- ${markerPath} && ` +
     `rmdir -- ${lockPath}`
   const markerAwkReadCommand = `awk 'NR==1{print $1}' -- ${markerPath}`
@@ -691,11 +695,14 @@ function createSharedMutexMockSsh(lockName: string): ReturnType<typeof createMoc
 
   // R-0000749: production code now emits the `--` separator before path
   // arguments in awk / rm / rmdir invocations.
+  // R-0000758: release captures the awk readback in `$awk_token` and uses
+  // the POSIX `x`-prefix comparison.
   const lockMkdirCommand = `mkdir ${FLAGS_DIRECTORY}/'${lockName}'`
   const markerAwkReadCommand = `awk 'NR==1{print $1}' -- ${FLAGS_DIRECTORY}/'${lockName}'/holder`
   const verifiedReleaseCommand =
-    `[ "$(awk 'NR==1{print $1}' -- ${FLAGS_DIRECTORY}/'${lockName}'/holder 2>/dev/null)" = ` +
-    `'${FAKE_HOLDER_TOKEN}' ] && ` +
+    `awk_token=$(awk 'NR==1{print $1}' -- ${FLAGS_DIRECTORY}/'${lockName}'/holder 2>/dev/null); awk_status=$?; ` +
+    `[ "$awk_status" = 0 ] && ` +
+    `[ "x$awk_token" = 'x${FAKE_HOLDER_TOKEN}' ] && ` +
     `rm -f -- ${FLAGS_DIRECTORY}/'${lockName}'/holder && ` +
     `rmdir -- ${FLAGS_DIRECTORY}/'${lockName}'`
 

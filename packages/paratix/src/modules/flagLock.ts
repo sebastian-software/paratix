@@ -238,8 +238,23 @@ export async function releaseFlagLock(
   // handed the lock to another acquirer.
   // R-0000749: `awk … --`, `rm -f --` and `rmdir --` so path arguments are
   // never mis-parsed as options.
+  // R-0000758: prefix both sides of the `=` with a literal `x` so an
+  // unusual awk output that begins with `-` (or expands to a `[`/`]`
+  // operator on a strict POSIX `[`) cannot turn the comparison itself
+  // into an option lookup. The `x`-prefix is the canonical POSIX idiom
+  // for "compare these two strings as opaque values" and is preserved
+  // by `shellQuote`'s single-quote wrapping.
+  // R-0000758: the holder readback is now captured in a shell variable
+  // so we can also check awk's exit code: `awk` may exit non-zero when
+  // the marker file disappeared between the `[ -d $lock ]` outer check
+  // and the readback, and a silently empty stdout would otherwise look
+  // like "no match" and skip the rm/rmdir branch — leaving the lock
+  // dangling. Capturing `awk_status=$?` lets the comparison short-circuit
+  // when awk failed, so the release attempt fails closed.
   const command =
-    `[ "$(awk 'NR==1{print $1}' -- ${markerPath} 2>/dev/null)" = ${shellQuote(holderToken)} ] && ` +
+    `awk_token=$(awk 'NR==1{print $1}' -- ${markerPath} 2>/dev/null); awk_status=$?; ` +
+    `[ "$awk_status" = 0 ] && ` +
+    `[ "x$awk_token" = ${shellQuote(`x${holderToken}`)} ] && ` +
     `rm -f -- ${markerPath} && ` +
     `rmdir -- ${lock}`
   await ssh.exec(command, { ignoreExitCode: true, silent: true })

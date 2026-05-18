@@ -56,7 +56,7 @@ const createMockSsh: typeof createBaseMockSsh = (responses, options) =>
         // R-0000634: release is a single shell statement that runs the
         // ownership check, marker removal and `rmdir` atomically.
         command:
-          /^\[ "\$\(awk 'NR==1\{print \$1\}' -- \/var\/lib\/paratix\/flags\/'cron-crontab-[\da-f]+'\/holder 2>\/dev\/null\)" = '[^']*' \] && rm -f -- \/var\/lib\/paratix\/flags\/'cron-crontab-[\da-f]+'\/holder && rmdir -- \/var\/lib\/paratix\/flags\/'cron-crontab-[\da-f]+'$/v,
+          /^awk_token=\$\(awk 'NR==1\{print \$1\}' -- \/var\/lib\/paratix\/flags\/'cron-crontab-[\da-f]+'\/holder 2>\/dev\/null\); awk_status=\$\?; \[ "\$awk_status" = 0 \] && \[ "x\$awk_token" = 'x[^']*' \] && rm -f -- \/var\/lib\/paratix\/flags\/'cron-crontab-[\da-f]+'\/holder && rmdir -- \/var\/lib\/paratix\/flags\/'cron-crontab-[\da-f]+'$/v,
         result: { code: 0 },
       },
       { command: /^crontab -u '[^']+' /v, result: { code: 0 } },
@@ -153,9 +153,12 @@ function createSharedCrontabMockSsh(
   const lockPath = `${FLAGS_DIRECTORY}/'${lockName}'`
   // R-0000749: production code now emits the `--` separator before path
   // arguments in awk / rm / rmdir invocations.
+  // R-0000758: release captures the awk readback in `$awk_token` and uses
+  // the POSIX `x`-prefix comparison.
   const verifiedReleaseCommand =
-    `[ "$(awk 'NR==1{print $1}' -- ${markerPath} 2>/dev/null)" = ` +
-    `'${MOCK_FLAG_LOCK_HOLDER_TOKEN}' ] && ` +
+    `awk_token=$(awk 'NR==1{print $1}' -- ${markerPath} 2>/dev/null); awk_status=$?; ` +
+    `[ "$awk_status" = 0 ] && ` +
+    `[ "x$awk_token" = 'x${MOCK_FLAG_LOCK_HOLDER_TOKEN}' ] && ` +
     `rm -f -- ${markerPath} && ` +
     `rmdir -- ${lockPath}`
   const readCommand = `crontab -u '${user}' -l`

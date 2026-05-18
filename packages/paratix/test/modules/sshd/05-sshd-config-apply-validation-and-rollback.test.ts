@@ -113,7 +113,7 @@ const MUTEX_BOOKKEEPING_PATTERNS_05: RegExp[] = [
   // R-0000749: production code now emits the `--` separator before path
   // arguments in awk / rm / rmdir invocations.
   /^awk 'NR==1\{print \$1\}' -- \/var\/lib\/paratix\/flags\/'[\w.\-]+-mutex'\/holder$/v,
-  /^\[ "\$\(awk 'NR==1\{print \$1\}' -- \/var\/lib\/paratix\/flags\/'[\w.\-]+-mutex'\/holder 2>\/dev\/null\)" = '[^']*' \] && rm -f -- \/var\/lib\/paratix\/flags\/'[\w.\-]+-mutex'\/holder && rmdir -- \/var\/lib\/paratix\/flags\/'[\w.\-]+-mutex'$/v,
+  /^awk_token=\$\(awk 'NR==1\{print \$1\}' -- \/var\/lib\/paratix\/flags\/'[\w.\-]+-mutex'\/holder 2>\/dev\/null\); awk_status=\$\?; \[ "\$awk_status" = 0 \] && \[ "x\$awk_token" = 'x[^']*' \] && rm -f -- \/var\/lib\/paratix\/flags\/'[\w.\-]+-mutex'\/holder && rmdir -- \/var\/lib\/paratix\/flags\/'[\w.\-]+-mutex'$/v,
   /^if \[ -d \/var\/lib\/paratix\/flags\/'[\w.\-]+-mutex' \]/v,
   /^i=0; while \[ -d \/var\/lib\/paratix\/flags\/'[\w.\-]+-mutex' \]/v,
   /^hostname$/v,

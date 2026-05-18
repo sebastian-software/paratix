@@ -28,9 +28,12 @@ function distUpgradeApplyLockResponses(): Record<string, { code?: number; stdout
   // the marker and lock directory.
   // R-0000749: production code now emits the `--` separator before path
   // arguments in awk / rm / rmdir invocations.
+  // R-0000758: release captures the awk readback in `$awk_token` and uses
+  // the POSIX `x`-prefix comparison.
   const verifiedReleaseCommand =
-    `[ "$(awk 'NR==1{print $1}' -- ${markerPath} 2>/dev/null)" = ` +
-    `'${MOCK_FLAG_LOCK_HOLDER_TOKEN}' ] && ` +
+    `awk_token=$(awk 'NR==1{print $1}' -- ${markerPath} 2>/dev/null); awk_status=$?; ` +
+    `[ "$awk_status" = 0 ] && ` +
+    `[ "x$awk_token" = 'x${MOCK_FLAG_LOCK_HOLDER_TOKEN}' ] && ` +
     `rm -f -- ${markerPath} && ` +
     `rmdir -- ${lockPath}`
   return {

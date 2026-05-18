@@ -22,7 +22,10 @@ const FLAG_LOCK_INTERNAL_SUCCESS_PATTERNS: RegExp[] = [
   // R-0000634: verified release combines the ownership check, marker
   // removal and `rmdir` into a single shell statement to keep the steps
   // atomic against a concurrent stale-lock reclaim.
-  /^\[ "\$\(awk 'NR==1\{print \$1\}' -- \S+\/holder 2>\/dev\/null\)" = '[^']*' \] && rm -f -- \S+\/holder && rmdir -- \S+$/v,
+  // R-0000758: release captures the awk readback into `$awk_token` so the
+  // awk exit code can be inspected; the comparison uses the POSIX
+  // `x`-prefix idiom on both sides of `=`.
+  /^awk_token=\$\(awk 'NR==1\{print \$1\}' -- \S+\/holder 2>\/dev\/null\); awk_status=\$\?; \[ "\$awk_status" = 0 \] && \[ "x\$awk_token" = 'x[^']*' \] && rm -f -- \S+\/holder && rmdir -- \S+$/v,
   // Mutex-lock acquire and release commands target lock directories whose
   // last path segment ends in the `-mutex` suffix.
   /^mkdir \/var\/lib\/paratix\/flags\/'[\w.\-]*-mutex'$/v,
@@ -124,8 +127,11 @@ export function makeIsVerifiedReleaseCall(lockName: string): (call: string) => b
   // eslint-disable-next-line security/detect-non-literal-regexp -- markerPath and lockPath are derived from a validated lockName and shell-escaped above
   // R-0000749: production code now emits the `--` separator before path
   // arguments in awk / rm / rmdir invocations.
+  // R-0000758: release captures the awk readback in `$awk_token` and uses
+  // the POSIX `x`-prefix comparison so unusual awk output cannot collide
+  // with `[` operator syntax.
   const pattern = new RegExp(
-    `^\\[ "\\$\\(awk 'NR==1\\{print \\$1\\}' -- ${escapeRegex(markerPath)} 2>/dev/null\\)" = '[^']*' \\] && rm -f -- ${escapeRegex(markerPath)} && rmdir -- ${escapeRegex(lockPath)}$`,
+    `^awk_token=\\$\\(awk 'NR==1\\{print \\$1\\}' -- ${escapeRegex(markerPath)} 2>/dev/null\\); awk_status=\\$\\?; \\[ "\\$awk_status" = 0 \\] && \\[ "x\\$awk_token" = 'x[^']*' \\] && rm -f -- ${escapeRegex(markerPath)} && rmdir -- ${escapeRegex(lockPath)}$`,
     "v"
   )
   return (call) => pattern.test(call)
