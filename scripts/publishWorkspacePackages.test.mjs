@@ -407,6 +407,30 @@ describe("publishWorkspacePackages", () => {
     assert.equal(hasCommandCall(commandRunner.calls, "pnpm"), false)
   })
 
+  it("aborts when stale dist output is masked by a fresh non-built file", async () => {
+    const commandRunner = createCommandRunner()
+    const fs = createFs({
+      mtimes: {
+        "packages/paratix/dist": 9000,
+        "packages/paratix/dist/index.js": 500,
+        "packages/paratix/llm-guide.md": 9000,
+        "packages/paratix/src": 5000,
+        "packages/paratix/src/index.ts": 5000,
+      },
+    })
+
+    await assertRejectsWithMessage(
+      publishWorkspacePackages({
+        availabilityDelayMilliseconds: 0,
+        commandRunner,
+        fs,
+      }),
+      "is older than"
+    )
+
+    assert.equal(hasCommandCall(commandRunner.calls, "pnpm"), false)
+  })
+
   it("R-0000661: aborts when package.json#files is empty", async () => {
     const commandRunner = createCommandRunner()
     const fs = createFs({ paratixFiles: [] })

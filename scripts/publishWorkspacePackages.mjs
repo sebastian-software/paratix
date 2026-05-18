@@ -222,16 +222,6 @@ function rethrowWalkerError(packageName, path, error) {
   throw new Error(buildWalkerErrorMessage(packageName, path, error), { cause: error })
 }
 
-// R-0000685: both walkers must treat symlinks identically. Previously
-// `maxMtimeMillisecondsUnder` skipped symlinks via mtime 0 (driven by
-// Dirent.isSymbolicLink() which reflects lstat semantics) while
-// `mtimeMillisecondsForFileEntry` used `stat` and silently followed the
-// link. A vendored source tree behind a symlink would then lift the
-// dist-freshness bar through the linked target while the matching
-// dist/ entries — also symlinked — were treated as mtime 0, producing
-// an artificially low freshness signal for the publishable artefact
-// set. Probing the entry with `lstat` keeps both walkers symmetric.
-//
 // R-0000661: maximum mtime captured under `directory`. Walking the tree
 // (rather than stat-ing the directory itself) is necessary because
 // directory mtimes only change when entries are added/removed, not when
@@ -271,62 +261,76 @@ async function maxMtimeMillisecondsUnder(packageName, directory, filesystem) {
   return childMtimes.length > 0 ? Math.max(...childMtimes) : 0
 }
 
-// R-0000685: probe the entry with `lstat` so a top-level symlink in
-// `files` is skipped the same way `maxMtimeMillisecondsUnder` skips
-// symlinks discovered during recursion. Without this symmetry a
-// symlinked top-level `files` entry would lift the freshness bar via
-// the target while symlinked children of `src/` were treated as 0,
-// flipping the comparison in unpredictable ways.
-//
-// R-0000727: translate lstat failures into the same operator-friendly
-// shape used by the source walker so a missing `dist/` entry surfaces
-// with the failing path and the build-before-publishing remediation
-// instead of leaking the raw ENOENT from lstat.
-//
-// R-0000728: also report which file paths were skipped because they
-// were symlinks. The freshness check intentionally treats symlinks as
-// mtime 0 (so a malicious link cannot lift the dist bar), but that
-// makes the staleness diagnostic confusing when a legitimate operator
-// has a symlinked artefact. The caller threads the symlink list into
-// the staleness diagnostic so the operator sees the actual trigger.
-async function mtimeMillisecondsForFileEntry({ directory, fileEntry, filesystem, packageName }) {
-  const absolutePath = join(directory, fileEntry)
-  let linkStats
+async function minMtimeMillisecondsUnder(packageName, directory, filesystem) {
+  let entries
   try {
-    linkStats = await filesystem.lstat(absolutePath)
+    entries = await filesystem.readdir(directory, { withFileTypes: true })
   } catch (error) {
-    rethrowWalkerError(packageName, absolutePath, error)
+    rethrowWalkerError(packageName, directory, error)
   }
-  if (linkStats.isSymbolicLink()) {
-    return { mtime: 0, symlinkedEntries: [absolutePath] }
+  const childResults = await Promise.all(
+    entries.map(async (entry) => {
+      const entryPath = join(directory, entry.name)
+      if (entry.isSymbolicLink()) {
+        return { minMtime: 0, regularFileCount: 0, symlinkedEntries: [entryPath] }
+      }
+      if (entry.isDirectory()) {
+        return minMtimeMillisecondsUnder(packageName, entryPath, filesystem)
+      }
+      if (!entry.isFile()) return { minMtime: Infinity, regularFileCount: 0, symlinkedEntries: [] }
+      try {
+        const stats = await filesystem.stat(entryPath)
+        return { minMtime: stats.mtimeMs, regularFileCount: 1, symlinkedEntries: [] }
+      } catch (error) {
+        rethrowWalkerError(packageName, entryPath, error)
+      }
+    })
+  )
+  const regularFileCount = childResults.reduce(
+    (count, result) => count + result.regularFileCount,
+    0
+  )
+  const symlinkedEntries = childResults.flatMap((result) => result.symlinkedEntries)
+  const minMtime = Math.min(...childResults.map((result) => result.minMtime))
+  return {
+    minMtime: Number.isFinite(minMtime) ? minMtime : 0,
+    regularFileCount,
+    symlinkedEntries,
   }
-  if (linkStats.isDirectory()) {
-    const childMtime = await maxMtimeMillisecondsUnder(packageName, absolutePath, filesystem)
-    return { mtime: childMtime, symlinkedEntries: [] }
-  }
-  return { mtime: linkStats.mtimeMs, symlinkedEntries: [] }
 }
 
-// R-0000661: lift the most recent mtime across every entry referenced by
-// `files`. Treats directories like `src/` does — walking the tree so the
-// freshness signal reflects file edits, not directory churn.
-//
-// R-0000728: also collect the list of file entries that were skipped as
-// symlinks so the staleness diagnostic can explain when the comparison
-// trips because a symlinked artefact (mtime 0) sat alongside regular
-// source files. Returning the list rather than just a flag keeps the
-// diagnostic actionable — the operator can see which specific entry
-// needs to be materialised before publish.
-async function maxMtimeMillisecondsForFiles({ directory, files, filesystem, packageName }) {
+function isBuildArtefactFilesEntry(fileEntry) {
+  return fileEntry === "dist" || fileEntry.startsWith("dist/")
+}
+
+async function minMtimeMillisecondsForBuildArtefacts({
+  directory,
+  files,
+  filesystem,
+  packageName,
+}) {
+  const buildArtefactEntries = files.filter((fileEntry) => isBuildArtefactFilesEntry(fileEntry))
   const fileResults = await Promise.all(
-    files.map((fileEntry) =>
-      mtimeMillisecondsForFileEntry({ directory, fileEntry, filesystem, packageName })
-    )
+    buildArtefactEntries.map(async (fileEntry) => {
+      const absolutePath = join(directory, fileEntry)
+      const linkStats = await filesystem.lstat(absolutePath)
+      if (linkStats.isSymbolicLink()) {
+        return { minMtime: 0, regularFileCount: 0, symlinkedEntries: [absolutePath] }
+      }
+      if (linkStats.isDirectory()) {
+        return minMtimeMillisecondsUnder(packageName, absolutePath, filesystem)
+      }
+      return { minMtime: linkStats.mtimeMs, regularFileCount: 1, symlinkedEntries: [] }
+    })
   )
-  const mtimes = fileResults.map((result) => result.mtime)
+  const regularFileCount = fileResults.reduce((count, result) => count + result.regularFileCount, 0)
   const symlinkedEntries = fileResults.flatMap((result) => result.symlinkedEntries)
-  const maxMtime = mtimes.length > 0 ? Math.max(...mtimes) : 0
-  return { maxMtime, symlinkedEntries }
+  const minMtime = Math.min(...fileResults.map((result) => result.minMtime))
+  return {
+    minMtime: Number.isFinite(minMtime) ? minMtime : 0,
+    regularFileCount,
+    symlinkedEntries,
+  }
 }
 
 async function assertFilesEntryIsPublishable(packageInfo, fileEntry, filesystem) {
@@ -386,15 +390,24 @@ async function verifyDistributionArtefacts(packageInfo, filesystem) {
 
   const sourceDirectory = join(packageInfo.directory, "src")
   const sourceMtime = await readSourceMtime(packageInfo, sourceDirectory, filesystem)
-  const { maxMtime: filesMtime, symlinkedEntries } = await maxMtimeMillisecondsForFiles({
+  const {
+    minMtime: buildArtefactsMtime,
+    regularFileCount,
+    symlinkedEntries,
+  } = await minMtimeMillisecondsForBuildArtefacts({
     directory: packageInfo.directory,
     files: packageInfo.files,
     filesystem,
     packageName: packageInfo.name,
   })
-  if (filesMtime < sourceMtime) {
+  if (regularFileCount === 0 || buildArtefactsMtime < sourceMtime) {
     throw new Error(
-      buildStaleArtefactMessage({ filesMtime, packageInfo, sourceMtime, symlinkedEntries })
+      buildStaleArtefactMessage({
+        buildArtefactsMtime,
+        packageInfo,
+        sourceMtime,
+        symlinkedEntries,
+      })
     )
   }
 }
@@ -408,9 +421,14 @@ async function verifyDistributionArtefacts(packageInfo, filesystem) {
 // newer. Surfacing the symlinked paths plus the materialise-before-
 // publishing remediation makes the trigger obvious without weakening
 // the safety guarantee.
-function buildStaleArtefactMessage({ filesMtime, packageInfo, sourceMtime, symlinkedEntries }) {
+function buildStaleArtefactMessage({
+  buildArtefactsMtime,
+  packageInfo,
+  sourceMtime,
+  symlinkedEntries,
+}) {
   const baseMessage =
-    `${packageInfo.name}: package.json#files mtime (${new Date(filesMtime).toISOString()}) is ` +
+    `${packageInfo.name}: build artefact mtime (${new Date(buildArtefactsMtime).toISOString()}) is ` +
     `older than ${packageInfo.directory}/src mtime (${new Date(sourceMtime).toISOString()}). ` +
     `Run the build before publishing.`
   if (symlinkedEntries.length === 0) return baseMessage
