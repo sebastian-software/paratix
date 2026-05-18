@@ -223,6 +223,13 @@ const REDACT_BUFFER_MAX_DEPTH = ERROR_INSPECT_DEPTH + 1
 
 function redactBufferProperties(value: unknown, depth: number, seen: WeakSet<object>): unknown {
   if (Buffer.isBuffer(value)) return REDACTED_BUFFER_PLACEHOLDER
+  // R-0000786: Buffer.isBuffer covers Node's pooled Buffer subclass but skips
+  // raw TypedArrays (Uint8Array, Float32Array, …) and ArrayBuffer itself.
+  // Those carry the same byte-leak risk as a Buffer once `util.inspect`
+  // walks them, so collapse them to the same placeholder before recursing.
+  if (value instanceof ArrayBuffer || ArrayBuffer.isView(value)) {
+    return REDACTED_BUFFER_PLACEHOLDER
+  }
   if (value === null || typeof value !== "object") return value
   if (depth > REDACT_BUFFER_MAX_DEPTH) return value
   if (seen.has(value)) return "[Circular]"

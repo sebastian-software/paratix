@@ -1356,6 +1356,45 @@ describe("printExceptionError", () => {
     expect(output).toContain("[REDACTED Buffer]")
   })
 
+  // R-0000786: TypedArrays (Uint8Array, …) and raw ArrayBuffer carry the
+  // same byte-leak risk as a Node Buffer but were not covered by
+  // `Buffer.isBuffer`. The pre-inspect redaction must collapse them to the
+  // same placeholder before `util.inspect` walks their entries (which
+  // otherwise emits the numeric byte sequence).
+  it("redacts TypedArray properties hanging off a non-Error cause before inspect runs (R-0000786)", () => {
+    // A Uint8Array carrying byte 0x42 ('B') sixteen times. Without the fix,
+    // `util.inspect` would emit `Uint8Array(16) [ 66, 66, … ]`. The redaction
+    // must elide that view before the inspector sees it.
+    const sensitiveBytes = new Uint8Array(16).fill(0x42)
+    const error = new Error("top-level error")
+    error.cause = { detail: "transport failed", secret: sensitiveBytes }
+
+    printExceptionError(error, false)
+
+    const output = errorSpy.mock.calls.map((args) => String(args[0])).join("\n")
+    expect(output).toContain("  Caused by:")
+    expect(output).toContain("[REDACTED Buffer]")
+    expect(output).not.toContain("Uint8Array")
+    expect(output).not.toMatch(/66, 66/v)
+  })
+
+  it("redacts ArrayBuffer properties hanging off a non-Error cause before inspect runs (R-0000786)", () => {
+    // Raw ArrayBuffer with detectable byteLength. Without the fix `inspect`
+    // emits `ArrayBuffer { byteLength: 32 }`; with the fix the entire view
+    // collapses to the static placeholder before the inspector runs.
+    const sensitiveBytes = new ArrayBuffer(32)
+    const error = new Error("top-level error")
+    error.cause = { detail: "transport failed", secret: sensitiveBytes }
+
+    printExceptionError(error, false)
+
+    const output = errorSpy.mock.calls.map((args) => String(args[0])).join("\n")
+    expect(output).toContain("  Caused by:")
+    expect(output).toContain("[REDACTED Buffer]")
+    expect(output).not.toContain("ArrayBuffer")
+    expect(output).not.toContain("byteLength")
+  })
+
   it("redacts Buffer properties hanging off a non-Error cause before inspect runs", () => {
     // R-0000691: a thrown error whose `cause` is a plain object that
     // carries a Buffer must never serialize the Buffer bytes into stderr.
