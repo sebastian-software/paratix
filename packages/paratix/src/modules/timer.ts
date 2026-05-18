@@ -578,10 +578,24 @@ async function restoreTimerActivationForAbsent(
   return null
 }
 
+// R-0000819: distinguish two failure shapes from `disableTimerForAbsent`:
+//   - `kind: "disable"` covers an actual `systemctl disable --now` failure;
+//     systemd may have mutated the timer's activation, so the apply path
+//     must replay `restoreTimerActivationForAbsent` afterwards.
+//   - `kind: "probe"` covers the missing-unit branch where the residual
+//     toolchain probe itself failed or where systemd contradicts the
+//     "no such unit" diagnostic with residual state. `disable --now`
+//     reported nothing-to-do in this case, so the apply path must surface
+//     the diagnostic verbatim without an activation rollback that could
+//     itself fail and obscure the real cause.
+type DisableAbsentFailure =
+  | { kind: "disable"; result: ModuleResult }
+  | { kind: "probe"; result: ModuleResult }
+
 async function disableTimerForAbsent(
   ssh: SshConnection,
   context: AbsentContext
-): Promise<ModuleResult | undefined> {
+): Promise<DisableAbsentFailure | undefined> {
   const { locations, module, name } = context
   // Run before deleting files so `disable --now` can remove the wants/ symlink.
   // Only tolerate missing-unit races; real disable failures may leave active state.
@@ -608,16 +622,32 @@ async function disableTimerForAbsent(
       name,
       path: module,
     })
-    if (typeof residualOrFailure !== "boolean") return residualOrFailure
+    // R-0000819: a structured probe failure is not a disable failure —
+    // `disable --now` already reported missing-unit, so tagging the
+    // outcome as `kind: "probe"` lets the apply path skip the
+    // activation rollback and surface the toolchain diagnostic
+    // verbatim.
+    if (typeof residualOrFailure !== "boolean") {
+      return { kind: "probe", result: residualOrFailure }
+    }
     if (residualOrFailure) {
-      return failedCommand(
-        `[${module}: ${name}] systemctl disable --now reported missing unit but the timer is still enabled or active`,
-        disable
-      )
+      // R-0000819: residual state contradicts the "no such unit"
+      // diagnostic but `disable --now` itself did not mutate
+      // activation — also a probe-side conclusion.
+      return {
+        kind: "probe",
+        result: failedCommand(
+          `[${module}: ${name}] systemctl disable --now reported missing unit but the timer is still enabled or active`,
+          disable
+        ),
+      }
     }
     return undefined
   }
-  return failedCommand(`[${module}: ${name}] systemctl disable --now failed`, disable)
+  return {
+    kind: "disable",
+    result: failedCommand(`[${module}: ${name}] systemctl disable --now failed`, disable),
+  }
 }
 
 async function handleAbsentUnitRemovalFailure(
@@ -843,7 +873,19 @@ async function applyAbsent(ssh: SshConnection, context: AbsentContext): Promise<
 
   const disableFailure = await disableTimerForAbsent(ssh, context)
   if (disableFailure) {
-    return handleAbsentDisableFailure(ssh, context, { activationSnapshot, disableFailure })
+    // R-0000819: `disable --now` returns a tagged failure. A probe-side
+    // failure (toolchain failure of `hasResidualTimerState` or contradictory
+    // residual state after a "no such unit" diagnostic) is forwarded
+    // without an activation rollback because `disable --now` reported
+    // nothing-to-do; running the rollback regardless would either fail
+    // because the unit truly is gone or obscure the original diagnostic.
+    // Only an actual disable failure routes through
+    // `handleAbsentDisableFailure`.
+    if (disableFailure.kind === "probe") return disableFailure.result
+    return handleAbsentDisableFailure(ssh, context, {
+      activationSnapshot,
+      disableFailure: disableFailure.result,
+    })
   }
 
   const removeFailure = await removeAbsentUnitFiles(ssh, context, {
