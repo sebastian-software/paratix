@@ -623,13 +623,14 @@ async function disableTimerForAbsent(
 async function handleAbsentUnitRemovalFailure(
   ssh: SshConnection,
   parameters: {
+    activation?: ReloadFailureRollbackActivationContext
     message: string
     paths: Pick<TimerPaths, "servicePath" | "timerPath">
     remove: ExecResult
     snapshots: SnapshotPair
   }
 ): Promise<ModuleResult> {
-  const { message, paths, remove, snapshots } = parameters
+  const { activation, message, paths, remove, snapshots } = parameters
   try {
     await restoreUnitFileSnapshots(ssh, paths, snapshots)
   } catch (error) {
@@ -643,14 +644,33 @@ async function handleAbsentUnitRemovalFailure(
     ignoreExitCode: true,
     silent: true,
   })
-  if (reloadAfterRestore.code === 0) return failedCommand(message, remove)
-  return failed(
-    `${message}: ${describeExecResult(
-      remove
-    )}; daemon-reload after unit-file rollback also failed: ${describeExecResult(
-      reloadAfterRestore
-    )}`
+  if (reloadAfterRestore.code !== 0) {
+    return failed(
+      `${message}: ${describeExecResult(
+        remove
+      )}; daemon-reload after unit-file rollback also failed: ${describeExecResult(
+        reloadAfterRestore
+      )}`
+    )
+  }
+  const baseFailure = failedCommand(message, remove)
+  // R-0000818: after restoring the snapshotted unit files and re-running
+  // `daemon-reload`, additionally replay the pre-apply enable/active state
+  // via `restoreTimerActivationForAbsent`. The disable step in
+  // `disableTimerForAbsent` already mutated the timer's activation, so a
+  // bare snapshot restore would otherwise leave the timer in
+  // "files present but disabled" — mirrors the post-rm reload failure path
+  // (R-0000655).
+  if (activation == null) return baseFailure
+  const activationFailure = await restoreTimerActivationForAbsent(
+    ssh,
+    activation.context,
+    activation.snapshot
   )
+  if (activationFailure == null) return baseFailure
+  const baseMessage = baseFailure.error?.message ?? message
+  const restoreMessage = activationFailure.error?.message ?? TIMER_ACTIVATION_ROLLBACK_FAILED
+  return failed(`${baseMessage}; ${restoreMessage}`)
 }
 
 async function removeAbsentUnitFiles(
@@ -688,6 +708,11 @@ async function removeAbsentUnitFiles(
     )
     if (remove.code !== 0) {
       return handleAbsentUnitRemovalFailure(ssh, {
+        // R-0000818: hand the pre-apply activation snapshot through so that
+        // after the unit-file rollback and `daemon-reload` the timer's
+        // enable/active state is also restored. Without this context the
+        // helper would leave the timer in "files present but disabled".
+        activation: { context, snapshot: activationSnapshot },
         message: `[${module}: ${name}] failed to remove unit files`,
         paths: locations,
         remove,
