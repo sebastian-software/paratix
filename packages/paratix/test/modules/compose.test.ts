@@ -694,7 +694,7 @@ describe("compose.config — check", () => {
       [`[ -e '${remotePath}' ]`]: { code: 0 },
       [`${composeCmd("podman")} -f '${stagingPath}' config --quiet`]: { code: 0 },
       [`cat '${remotePath}'`]: { code: 0, stdout: initialContent },
-      [`mv -T '${stagingPath}' '${remotePath}'`]: { code: 0 },
+      [`mv -T -- '${stagingPath}' '${remotePath}'`]: { code: 0 },
       [`rm -f -- '${stagingPath}'`]: { code: 0 },
       [`stat -c '%a' '${remotePath}'`]: { code: 0, stdout: "600" },
     })
@@ -761,7 +761,7 @@ describe("compose.config — apply", () => {
     expect(result.status).toBe("failed")
     expect(result.error?.message).toContain("projectDirectory is a symbolic link: /opt/app")
     expect(mockSsh.calls).not.toContain(mktempCommand)
-    expect(mockSsh.calls).not.toContain(`mv -T '${stagingPath}' '${remotePath}'`)
+    expect(mockSsh.calls).not.toContain(`mv -T -- '${stagingPath}' '${remotePath}'`)
     expect(mockSsh.writeFileCalls).toHaveLength(0)
     expect(mockSsh.uploadFileCalls).toHaveLength(0)
   })
@@ -779,20 +779,20 @@ describe("compose.config — apply", () => {
       "ancestor of projectDirectory /opt/app is a symbolic link: /opt"
     )
     expect(mockSsh.calls).not.toContain(mktempCommand)
-    expect(mockSsh.calls).not.toContain(`mv -T '${stagingPath}' '${remotePath}'`)
+    expect(mockSsh.calls).not.toContain(`mv -T -- '${stagingPath}' '${remotePath}'`)
     expect(mockSsh.writeFileCalls).toHaveLength(0)
     expect(mockSsh.uploadFileCalls).toHaveLength(0)
   })
 
   // R-0000228: writes go to a staging file, validation reads the staging file
-  // via -f, and an atomic mv -T flips compose.yml to the validated revision
+  // via -f, and an atomic mv -T -- flips compose.yml to the validated revision
   // so a parallel compose invocation never sees an unvalidated config.
-  it("writes content into staging, validates with -f, and activates with mv -T", async () => {
+  it("writes content into staging, validates with -f, and activates with mv -T --", async () => {
     const writtenFiles: Array<{ content: string; path: string }> = []
     const mockSsh = createComposeMockSsh({
       [`[ -e '${remotePath}' ]`]: { code: 1 },
       [`${composeCmd("podman")} -f '${stagingPath}' config --quiet`]: { code: 0 },
-      [`mv -T '${stagingPath}' '${remotePath}'`]: { code: 0 },
+      [`mv -T -- '${stagingPath}' '${remotePath}'`]: { code: 0 },
       [`rm -f -- '${stagingPath}'`]: { code: 0 },
     })
     // eslint-disable-next-line @typescript-eslint/require-await -- Mock implementation
@@ -806,8 +806,25 @@ describe("compose.config — apply", () => {
     expect(writtenFiles[0]?.path).toBe(stagingPath)
     expect(writtenFiles[0]?.content).toBe(sampleContent)
     expect(mockSsh.calls).toContain(`${composeCmd("podman")} -f '${stagingPath}' config --quiet`)
-    expect(mockSsh.calls).toContain(`mv -T '${stagingPath}' '${remotePath}'`)
+    expect(mockSsh.calls).toContain(`mv -T -- '${stagingPath}' '${remotePath}'`)
     expect(mockSsh.calls).toContain(`rm -f -- '${stagingPath}'`)
+  })
+
+  it("uses an options terminator when activating the staged compose file", async () => {
+    const mockSsh = createComposeMockSsh({
+      [`[ -e '${remotePath}' ]`]: { code: 1 },
+      [`${composeCmd("podman")} -f '${stagingPath}' config --quiet`]: { code: 0 },
+      [`mv -T -- '${stagingPath}' '${remotePath}'`]: { code: 0 },
+      [`rm -f -- '${stagingPath}'`]: { code: 0 },
+    })
+
+    const mod = compose.config({ content: sampleContent, projectDirectory })
+    const result = await mod.apply(mockSsh, emptyEnv)
+
+    expect(result.status).toBe("changed")
+    expect(mockSsh.calls.filter((call) => call.startsWith("mv -T"))).toStrictEqual([
+      `mv -T -- '${stagingPath}' '${remotePath}'`,
+    ])
   })
 
   it("uses a distinct mktemp staging path for parallel applies", async () => {
@@ -815,8 +832,8 @@ describe("compose.config — apply", () => {
       [`[ -e '${remotePath}' ]`]: { code: 1 },
       [`${composeCmd("podman")} -f '${secondStagingPath}' config --quiet`]: { code: 0 },
       [`${composeCmd("podman")} -f '${stagingPath}' config --quiet`]: { code: 0 },
-      [`mv -T '${secondStagingPath}' '${remotePath}'`]: { code: 0 },
-      [`mv -T '${stagingPath}' '${remotePath}'`]: { code: 0 },
+      [`mv -T -- '${secondStagingPath}' '${remotePath}'`]: { code: 0 },
+      [`mv -T -- '${stagingPath}' '${remotePath}'`]: { code: 0 },
       [`rm -f -- '${secondStagingPath}'`]: { code: 0 },
       [`rm -f -- '${stagingPath}'`]: { code: 0 },
     })
@@ -862,7 +879,7 @@ describe("compose.config — apply", () => {
     const mockSsh = createComposeMockSsh({
       [`[ -e '${remotePath}' ]`]: { code: 1 },
       [`${composeCmd("podman")} -f '${stagingPath}' config --quiet`]: { code: 0 },
-      [`mv -T '${stagingPath}' '${remotePath}'`]: { code: 0 },
+      [`mv -T -- '${stagingPath}' '${remotePath}'`]: { code: 0 },
       [`rm -f -- '${stagingPath}'`]: { code: 0 },
     })
 
@@ -879,7 +896,7 @@ describe("compose.config — apply", () => {
     expect(mockSsh.uploadFileCalls).toHaveLength(0)
     expect(mockSsh.calls).toContain(`${composeCmd("podman")} -f '${stagingPath}' config --quiet`)
     vi.mocked(readFile).mockRestore()
-    expect(mockSsh.calls).toContain(`mv -T '${stagingPath}' '${remotePath}'`)
+    expect(mockSsh.calls).toContain(`mv -T -- '${stagingPath}' '${remotePath}'`)
   })
 
   it.each([
@@ -919,7 +936,7 @@ describe("compose.config — apply", () => {
     expect(mockSsh.calls).not.toContain(
       `${composeCmd("podman")} -f '${stagingPath}' config --quiet`
     )
-    expect(mockSsh.calls).not.toContain(`mv -T '${stagingPath}' '${remotePath}'`)
+    expect(mockSsh.calls).not.toContain(`mv -T -- '${stagingPath}' '${remotePath}'`)
   })
 
   it("returns failed when validation fails and never activates the staging file", async () => {
@@ -933,7 +950,7 @@ describe("compose.config — apply", () => {
     expect(result.status).toBe("failed")
     // R-0000228: the staging file is cleaned up but never moved over compose.yml.
     expect(mockSsh.calls).toContain(`rm -f -- '${stagingPath}'`)
-    expect(mockSsh.calls).not.toContain(`mv -T '${stagingPath}' '${remotePath}'`)
+    expect(mockSsh.calls).not.toContain(`mv -T -- '${stagingPath}' '${remotePath}'`)
   })
 
   it("returns failed when neither src nor content is provided", async () => {
@@ -977,7 +994,7 @@ describe("compose.config — apply", () => {
     expect(writtenFiles).toHaveLength(1)
     expect(writtenFiles[0]?.path).toBe(stagingPath)
     expect(writtenFiles[0]?.content).toBe("broken: yaml: [\n")
-    expect(mockSsh.calls).not.toContain(`mv -T '${stagingPath}' '${remotePath}'`)
+    expect(mockSsh.calls).not.toContain(`mv -T -- '${stagingPath}' '${remotePath}'`)
     expect(mockSsh.calls).toContain(`rm -f -- '${stagingPath}'`)
   })
 
@@ -1017,7 +1034,7 @@ describe("compose.config — apply", () => {
     expect(writtenFiles).toHaveLength(1)
     expect(writtenFiles[0]?.path).toBe(stagingPath)
     expect(mockSsh.calls).toContain(`rm -f -- '${stagingPath}'`)
-    expect(mockSsh.calls).not.toContain(`mv -T '${stagingPath}' '${remotePath}'`)
+    expect(mockSsh.calls).not.toContain(`mv -T -- '${stagingPath}' '${remotePath}'`)
   })
 
   // R-0000228: the src path uploads to the staging file, validates with -f,
@@ -1049,7 +1066,7 @@ describe("compose.config — apply", () => {
     expect(mockSsh.writeFileCalls[0]?.remotePath).toBe(stagingPath)
     expect(mockSsh.writeFileCalls[0]?.content).toBe(newContent)
     expect(mockSsh.uploadFileCalls).toHaveLength(0)
-    expect(mockSsh.calls).not.toContain(`mv -T '${stagingPath}' '${remotePath}'`)
+    expect(mockSsh.calls).not.toContain(`mv -T -- '${stagingPath}' '${remotePath}'`)
     expect(mockSsh.calls).toContain(`rm -f -- '${stagingPath}'`)
   })
 

@@ -1060,9 +1060,10 @@ async function activateStagedComposeFile(
   // R-0000228: atomic rename so the active compose.yml flips from prior
   // to validated content in one syscall. mv -T refuses to descend into
   // an existing directory at remotePath, mirroring the safety we already
-  // require for download.url destinations.
+  // require for download.url destinations. The `--` stops option parsing
+  // before path operands that may begin with "-".
   const move = await ssh.exec(
-    `mv -T ${shellQuote(stagingPath)} ${shellQuote(remotePath)}`,
+    `mv -T -- ${shellQuote(stagingPath)} ${shellQuote(remotePath)}`,
     EXEC_OPTS
   )
   if (move.code === 0) return null
