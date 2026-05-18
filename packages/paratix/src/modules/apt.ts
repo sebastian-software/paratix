@@ -595,7 +595,37 @@ function validateRepositorySourceLine(sourceLine: string): string {
  * @param keyPath - Absolute path to the GPG keyring file on the remote host.
  * @returns The source line with the `signed-by` option inserted.
  */
+/**
+ * R-0000752: assert that the `signed-by` key path is safe to splice into an
+ * apt source line. The key path is concatenated verbatim into the bracketed
+ * options string, so a value containing `[`, `]` or whitespace would corrupt
+ * the option list (and could smuggle additional options through). A relative
+ * path would silently break apt's signed-by lookup because the value must be
+ * an absolute on-disk path to the keyring file. Today the caller derives the
+ * path from `validateAptResourceName`, but the defensive assertion guards
+ * against a future caller that passes user-controlled text directly.
+ *
+ * @param keyPath - The candidate signed-by path.
+ * @throws If `keyPath` is not absolute or contains bracket / whitespace
+ *   characters that would corrupt the apt source line.
+ */
+function assertSafeSignedByKeyPath(keyPath: string): void {
+  if (!keyPath.startsWith("/")) {
+    throw new Error(
+      `apt.repository: signed-by key path must be absolute, got: ${JSON.stringify(keyPath)}`
+    )
+  }
+  // R-0000752: `v` flag treats `[` and `]` as reserved inside character
+  // classes, so both must be backslash-escaped.
+  if (/[\[\]\s]/v.test(keyPath)) {
+    throw new Error(
+      `apt.repository: signed-by key path must not contain brackets or whitespace, got: ${JSON.stringify(keyPath)}`
+    )
+  }
+}
+
 function injectSignedBy(sourceLine: string, keyPath: string): string {
+  assertSafeSignedByKeyPath(keyPath)
   const withBrackets = BRACKETED_SOURCE_RE.exec(sourceLine)
   if (withBrackets?.groups) {
     const options = SIGNED_BY_OPTION_RE.test(withBrackets.groups.opts)
