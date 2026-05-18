@@ -590,7 +590,17 @@ export async function tryConnectOnPort(parameters: ConnectParameters): Promise<v
       resolve()
     }
 
+    // R-0000790: a synchronous throw out of `client.connect()` invokes
+    // `handleError` from the catch block, which detaches listeners and rejects.
+    // ssh2 may still queue a late `error` event before the next tick observes
+    // the detach, re-entering `handleError` for the same client. The `settled`
+    // flag keeps the rejection / cleanup chain idempotent so the duplicate
+    // event is a silent no-op instead of a double `cleanupFailedSshClient` /
+    // double `reject` call.
+    let settled = false
     const handleError = (error: Error): void => {
+      if (settled) return
+      settled = true
       clearTimeout(timeout)
       cleanupConnectListeners()
       cleanupFailedSshClient(client)
