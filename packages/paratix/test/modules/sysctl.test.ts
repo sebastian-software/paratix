@@ -1,6 +1,8 @@
 import { createHash } from "node:crypto"
 import { describe, expect, it, vi } from "vitest"
 
+import type { SshConnection } from "../../src/types.js"
+
 import { sysctl } from "../../src/modules/sysctl.js"
 import { createMockSsh as createBaseMockSsh } from "../helpers/mockSsh.js"
 
@@ -24,6 +26,24 @@ const CONF_CONTENT = "net.ipv4.ip_forward = 1\n"
 // unlink. The verification path expects the same single-shell statement.
 const ABSENT_RM_COMMAND = `[ ! -L '${CONF_PATH}' ] || { echo 'sysctl persistence file must not be a symlink' >&2; exit 1; }; rm -f '${CONF_PATH}'`
 const ABSENT_SYMLINK_PROBE = `[ -L '${CONF_PATH}' ]`
+type ExecLike = SshConnection["exec"]
+
+function buildSequentialRollbackSymlinkProbeExec(input: {
+  onSymlinkProbe: () => void
+  originalExec: ExecLike
+}): ExecLike {
+  const symlinkProbeResults = [
+    { code: 1, stderr: "", stdout: "" },
+    { code: 0, stderr: "", stdout: "" },
+  ]
+  return async (command, options) => {
+    if (command === ABSENT_SYMLINK_PROBE) {
+      input.onSymlinkProbe()
+      return symlinkProbeResults.shift() ?? { code: 0, stderr: "", stdout: "" }
+    }
+    return input.originalExec(command, options)
+  }
+}
 
 // R-0000650: mirror the production-side digest width (96 bits / 24 hex
 // digits) so the test helper stays in sync with the live persistence-path
@@ -375,6 +395,36 @@ describe("sysctl.set — apply", () => {
     expect(String(result.error)).toContain("sysctl -w failed while resetting live value")
     expect(String(result.error)).toContain("persistence file restored from snapshot")
     expect(writeFileSpy).toHaveBeenCalledWith(CONF_PATH, previousFileContent, { mode: "0644" })
+  })
+
+  it("R-0000769: refuses rollback write when persistence file becomes a symlink after reset failure", async () => {
+    const previousFileContent = `${KEY} = 1\n`
+    const mockSsh = createMockSsh({
+      [`cat '${CONF_PATH}'`]: { code: 0, stdout: previousFileContent },
+      [`sysctl -w '${KEY}=0'`]: { code: 1, stderr: "permission denied" },
+      [`test -f '${CONF_PATH}'`]: { code: 0 },
+      [ABSENT_RM_COMMAND]: { code: 0 },
+    })
+    const originalExec = mockSsh.exec
+    let symlinkProbeCount = 0
+    vi.spyOn(mockSsh, "exec").mockImplementation(
+      buildSequentialRollbackSymlinkProbeExec({
+        onSymlinkProbe() {
+          symlinkProbeCount += 1
+        },
+        originalExec,
+      })
+    )
+    const writeFileSpy = vi.spyOn(mockSsh, "writeFile")
+    const mod = sysctl.set(KEY, VALUE, { resetValue: "0", state: "absent" })
+    const result = await mod.apply(mockSsh, emptyEnv)
+
+    expect(result.status).toBe("failed")
+    expect(String(result.error)).toContain("sysctl -w failed while resetting live value")
+    expect(String(result.error)).toContain("persistence file restore refused")
+    expect(String(result.error)).toContain("is a symbolic link")
+    expect(symlinkProbeCount).toBe(2)
+    expect(writeFileSpy).not.toHaveBeenCalled()
   })
 
   // R-0000658: when the persistence file did not exist at the start of
