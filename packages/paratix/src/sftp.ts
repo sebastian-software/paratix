@@ -360,8 +360,15 @@ function detachStreamListeners(parameters: {
   }
   writeStream.off("error", listeners.onWriteError)
   readStream.off("error", listeners.onReadError)
-  writeStream.on("error", noopStreamError)
-  readStream.on("error", noopStreamError)
+  // R-0000841: register the post-settlement noop with `{ once: true }`.
+  // The previous persistent listener stayed attached for the lifetime of
+  // the underlying streams, which kept the streams (and their internal
+  // buffers) reachable long after the transfer had finished. Stream errors
+  // in this window are rare and only need to be absorbed once; further
+  // straggler emits would already pass through Node's normal unhandled
+  // error machinery after the stream has been destroyed and forgotten.
+  writeStream.once("error", noopStreamError)
+  readStream.once("error", noopStreamError)
 }
 
 /**
