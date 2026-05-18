@@ -18,6 +18,8 @@ const CLI_USAGE =
   "Usage: create-paratix <project-name> [--host <domain-or-ip>] [--initial-user <root|name>] [--expected-host-fingerprint <fingerprint>] [--admin-public-key <ssh-public-key>] [--admin-public-key-file <path>]"
 
 const OPENSSH_SHA256_FINGERPRINT_PATTERN = /^SHA256:[A-Za-z0-9+\/]{43}$/v
+const SHA256_FINGERPRINT_PREFIX = "SHA256:"
+const SHA256_FINGERPRINT_RAW_BYTE_LENGTH = 32
 
 export function getCliUsage(): string {
   return CLI_USAGE
@@ -72,7 +74,27 @@ export function validateHost(exitWithMessage: ExitWithMessage, value: string): s
 }
 
 export function isValidExpectedHostFingerprint(value: string): boolean {
-  return OPENSSH_SHA256_FINGERPRINT_PATTERN.test(value)
+  if (!OPENSSH_SHA256_FINGERPRINT_PATTERN.test(value)) {
+    return false
+  }
+  // R-0000737: a regex that matches 43 base64 characters is necessary
+  // but not sufficient: `[A-Za-z0-9+/]{43}` accepts canonical-length
+  // strings that decode to fewer than 32 raw bytes (e.g. when Node's
+  // base64 decoder silently tolerates a malformed trailing group).
+  // Decoding the payload and asserting exactly 32 bytes — and then
+  // re-encoding to confirm the input is the canonical representation —
+  // closes that gap so we cannot pin a fingerprint that does not round
+  // trip to a real SHA-256 digest.
+  const encoded = value.slice(SHA256_FINGERPRINT_PREFIX.length)
+  const decoded = Buffer.from(encoded, "base64")
+  if (decoded.length !== SHA256_FINGERPRINT_RAW_BYTE_LENGTH) {
+    return false
+  }
+  // ssh-keygen prints the SHA256 fingerprint without trailing `=`
+  // padding, so we compare against the stripped re-encoding to avoid
+  // accidentally accepting an alternate canonicalisation.
+  const reencoded = decoded.toString("base64").replace(/=+$/v, "")
+  return reencoded === encoded
 }
 
 export function validateExpectedHostFingerprint(

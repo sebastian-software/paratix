@@ -1038,6 +1038,20 @@ describe("expected host fingerprint parsing", () => {
     expect(isValidExpectedHostFingerprint("SHA256:trusted-host-fingerprint")).toBe(false)
   })
 
+  // R-0000737: a 43-character base64 string that passes the regex can
+  // still decode to a non-canonical 32-byte digest when its trailing
+  // base64 character does not have the lower two bits zeroed. Decoding
+  // and re-encoding asserts that the input is the canonical form of a
+  // real 32-byte SHA-256 digest.
+  it("rejects SHA256 fingerprints whose trailing base64 character is non-canonical", () => {
+    // Derived from TEST_HOST_FINGERPRINT by flipping the final base64
+    // character from `A` (000000) to `B` (000001). Both encode to a
+    // 32-byte buffer, but the latter re-encodes back to `A` so the
+    // roundtrip check exposes the non-canonical input.
+    const nonCanonicalFingerprint = `${TEST_HOST_FINGERPRINT.slice(0, -1)}B`
+    expect(isValidExpectedHostFingerprint(nonCanonicalFingerprint)).toBe(false)
+  })
+
   it("exits for invalid expected host fingerprints", async () => {
     vi.spyOn(console, "error").mockImplementation((...args) => {
       void args
