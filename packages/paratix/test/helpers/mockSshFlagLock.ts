@@ -43,9 +43,13 @@ const MUTEX_LOCK_WAIT_PATTERN =
 
 /**
  * Pattern matched by the stale-lock reclaim probe.
+ *
+ * R-0000671: the reclaim path now captures the stale holder token via an
+ * intermediate `STALE_TOKEN="$(...)";` shell statement before the
+ * `find ... -mmin` check, so the matcher must tolerate that prefix.
  */
 const FLAG_LOCK_RECLAIM_PATTERN =
-  /^if \[ -d \S+ \]; then if \[ -f \S+\/holder \]; then if find \S+\/holder -maxdepth 0 -mmin /v
+  /^if \[ -d \S+ \]; then if \[ -f \S+\/holder \]; then (?:STALE_TOKEN="\$\(awk 'NR==1\{print \$1\}' \S+\/holder 2>\/dev\/null\)"; )?if find \S+\/holder -maxdepth 0 -mmin /v
 
 /**
  * @param command - The command intercepted by the mock.

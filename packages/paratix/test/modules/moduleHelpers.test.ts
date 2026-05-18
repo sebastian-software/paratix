@@ -524,6 +524,40 @@ describe("applyWithFlagLock – stale lock recovery", () => {
     expect(applyCalls).toBe(1)
   })
 
+  // R-0000671: the reclaim shell statement must capture the stale holder
+  // token via `STALE_TOKEN="$(awk ...)"` before the `find -mmin` check and
+  // re-compare it against the marker contents before running `rm/rmdir`.
+  // Without that gate, a holder that became active again — or a fresh
+  // acquirer racing through the same window — would have its marker
+  // destroyed.
+  it("R-0000671: stale-lock reclaim verifies the holder token before removing the marker", async () => {
+    const flagName = "stale-lock-token-verified"
+    const { ssh } = createStaleLockSsh(flagName, "stale")
+
+    await applyWithFlagLock(ssh, {
+      async apply() {
+        await setFlag(ssh, flagName)
+        return { status: "changed" }
+      },
+      flagName,
+      staleSeconds: 60,
+      waitSeconds: 1,
+    })
+
+    const lockPath = `${FLAGS_DIRECTORY}/'${flagName}.lock'`
+    const markerPath = `${lockPath}/holder`
+    const reclaimCall = ssh.calls.find(
+      (call) => call.startsWith("if [ -d ") && call.includes(`STALE_TOKEN=`)
+    )
+    expect(reclaimCall).toBeDefined()
+    expect(reclaimCall).toContain(
+      `STALE_TOKEN="$(awk 'NR==1{print $1}' ${markerPath} 2>/dev/null)"`
+    )
+    expect(reclaimCall).toContain(
+      `[ "$(awk 'NR==1{print $1}' ${markerPath} 2>/dev/null)" = "$STALE_TOKEN" ] && rm -f ${markerPath} && rmdir ${lockPath}`
+    )
+  })
+
 
   it("returns failedCommand when the lock is held but not stale", async () => {
     const flagName = "fresh-lock-flag"

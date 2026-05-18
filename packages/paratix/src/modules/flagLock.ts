@@ -261,10 +261,25 @@ export async function tryReclaimStaleFlagLock(
   // back to the lock directory mtime when the marker is missing entirely.
   const staleMinutes = Math.max(1, Math.ceil(staleSeconds / SECONDS_PER_MINUTE))
   const mminThreshold = String(staleMinutes - 1)
+  // R-0000671: the reclaim is gated on the holder marker's token still
+  // matching the token observed when the marker was declared stale.
+  // Without this check, a holder that became active again between the
+  // stale probe and the rm — or a fresh acquirer racing into the same
+  // window — would have its marker destroyed. The token capture, stale
+  // probe, second-read comparison, marker removal and `rmdir` all run in
+  // a single shell statement so the entire sequence is atomic against
+  // concurrent acquirers, releasers and reclaimers. Mirrors the
+  // verified-release shell statement built by R-0000634.
+  //
+  // The missing-marker branch cannot apply a token check (there is no
+  // marker to read), so it keeps the previous behaviour: reclaim only
+  // when the lock directory itself is older than the threshold.
   const command =
     `if [ -d ${lock} ]; then ` +
     `if [ -f ${markerPath} ]; then ` +
+    `STALE_TOKEN="$(awk 'NR==1{print $1}' ${markerPath} 2>/dev/null)"; ` +
     `if find ${markerPath} -maxdepth 0 -mmin +${mminThreshold} -print -quit | grep -q .; then ` +
+    `[ "$(awk 'NR==1{print $1}' ${markerPath} 2>/dev/null)" = "$STALE_TOKEN" ] && ` +
     `rm -f ${markerPath} && rmdir ${lock}; ` +
     `else exit 1; fi; ` +
     `else ` +
