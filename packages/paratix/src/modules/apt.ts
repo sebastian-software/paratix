@@ -59,6 +59,11 @@ type AptRepositorySnapshot =
   | {
       content: string
       exists: true
+      // R-0000702: device:inode identity captured alongside the content hash.
+      // `null` when the stat probe failed (older coreutils variants, custom
+      // busybox without `-c`, …); the integrity check tolerates a missing
+      // identity rather than refusing to proceed on benign environments.
+      identity: null | string
     }
   | { exists: false }
 
@@ -68,6 +73,29 @@ function firstNonEmptyApt(text: string): null | string {
     if (trimmed.length > 0) return trimmed
   }
   return null
+}
+
+/**
+ * R-0000702: probe the device:inode pair of the sources.list. Combining this
+ * with the SHA-256 hash check in {@link ensureAptRepositorySnapshotStillCurrent}
+ * pins the integrity check to a concrete inode, so a swap that replaces the
+ * file with a fresh inode containing byte-identical content is detected.
+ *
+ * Returns `null` when `stat` cannot produce the identity (non-zero exit,
+ * empty stdout). Callers must treat `null` as "unknown" — the SHA-256 guard
+ * remains the primary check.
+ */
+async function probeAptRepositoryInodeIdentity(
+  ssh: SshConnection,
+  filePath: string
+): Promise<null | string> {
+  const result = await ssh.exec(`stat -c '%d:%i' ${shellQuote(filePath)}`, {
+    ignoreExitCode: true,
+    silent: true,
+  })
+  if (result.code !== 0) return null
+  const trimmed = result.stdout.trim()
+  return trimmed === "" ? null : trimmed
 }
 
 async function snapshotAptRepository(
@@ -83,7 +111,12 @@ async function snapshotAptRepository(
     `[ -f ${shellQuote(filePath)} ] && [ ! -L ${shellQuote(filePath)} ]`
   )
   if (!exists) return { exists: false }
-  return { content: await ssh.readFile(filePath), exists: true }
+  const content = await ssh.readFile(filePath)
+  // R-0000702: capture the device:inode pair so a concurrent swap that
+  // replaces the file with byte-identical content on a new inode is
+  // detected by `ensureAptRepositorySnapshotStillCurrent`.
+  const identity = await probeAptRepositoryInodeIdentity(ssh, filePath)
+  return { content, exists: true, identity }
 }
 
 type RepositoryRollbackParameters = {
@@ -133,6 +166,15 @@ async function rollbackRepositoryAfterUpdateFailure(
  * would restore the *snapshot* content — not the actual pre-mutation state
  * the operator observed — and silently mask the concurrent change.
  *
+ * R-0000702: in addition to comparing SHA-256 hashes, the on-disk
+ * device:inode identity is matched against the snapshot. A concurrent
+ * writer could otherwise atomically replace the file with byte-identical
+ * content sitting on a new inode (e.g. a freshly mounted overlay or a
+ * `mv -T` swap with a prepared duplicate) and slip past a hash-only
+ * guard. The symlink probe is also re-run so a fresh `[ -L ]` swap that
+ * appeared after the apply-time guard cannot smuggle a symlinked target
+ * into the subsequent `ssh.writeFile`.
+ *
  * @param parameters - Integrity-check context.
  * @param parameters.filePath - The sources.list path on the remote host.
  * @param parameters.name - The repository name, used in failure messages.
@@ -148,6 +190,15 @@ async function ensureAptRepositorySnapshotStillCurrent(parameters: {
   ssh: SshConnection
 }): Promise<ModuleResult | null> {
   const { filePath, name, snapshot, ssh } = parameters
+  // R-0000702: defense in depth — a symlink may have appeared between the
+  // apply-time `isSymlink` guard and this point. Re-check so a TOCTOU swap
+  // cannot let `ssh.writeFile` follow the link to an attacker-controlled
+  // target. Matches the second-guard pattern in compose.ts (R-0000677).
+  if (await isSymlink(ssh, filePath)) {
+    return failed(
+      `[apt.repository] sources.list became a symlink between snapshot and write for ${name} at ${filePath}; refusing to proceed`
+    )
+  }
   const currentRemoteHash = await ssh.sha256(filePath)
   if (snapshot.exists) {
     if (currentRemoteHash === null) {
@@ -160,6 +211,17 @@ async function ensureAptRepositorySnapshotStillCurrent(parameters: {
       return failed(
         `[apt.repository] sources.list changed between snapshot and write for ${name} at ${filePath}; refusing to proceed`
       )
+    }
+    // R-0000702: compare device:inode identity to detect a content-preserving
+    // inode swap. Skip the check when either side is `null` (older coreutils
+    // could not produce the identity) so benign environments are not blocked.
+    if (snapshot.identity !== null) {
+      const currentIdentity = await probeAptRepositoryInodeIdentity(ssh, filePath)
+      if (currentIdentity !== null && currentIdentity !== snapshot.identity) {
+        return failed(
+          `[apt.repository] sources.list inode changed between snapshot and write for ${name} at ${filePath}; refusing to proceed`
+        )
+      }
     }
     return null
   }

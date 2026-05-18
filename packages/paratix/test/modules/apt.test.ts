@@ -49,7 +49,11 @@ function distUpgradeApplyLockResponses(): Record<string, { code?: number; stdout
 // `apt-get update` returns failure and whose second invocation succeeds.
 // Other commands raise so the override remains tightly scoped to the
 // repository-rollback assertion.
-function createSequencedAptGetUpdateExec(): {
+function createSequencedAptGetUpdateExec(
+  passthroughExec?: (
+    command: string
+  ) => Promise<{ code: number; stderr: string; stdout: string }>
+): {
   callCount: () => number
   exec: (command: string) => Promise<{ code: number; stderr: string; stdout: string }>
 } {
@@ -63,11 +67,19 @@ function createSequencedAptGetUpdateExec(): {
     async exec(command) {
       const expectedCommand = "DEBIAN_FRONTEND=noninteractive apt-get update"
       const isExpected = command === expectedCommand
-      const next = responses[calls] ?? responses.at(-1)!
-      calls += 1
-      return isExpected
-        ? next
-        : Promise.reject(new Error(`unexpected exec command in override: ${command}`))
+      if (isExpected) {
+        const next = responses[calls] ?? responses.at(-1)!
+        calls += 1
+        return next
+      }
+      // R-0000702: the rollback path now also probes the device:inode pair
+      // via `stat -c '%d:%i'`. Defer to the supplied passthrough exec so
+      // those probes (and any other stubbed commands) still flow through
+      // the underlying mock instead of failing this override outright.
+      if (passthroughExec) {
+        return passthroughExec(command)
+      }
+      return Promise.reject(new Error(`unexpected exec command in override: ${command}`))
     },
   }
 }
@@ -963,6 +975,9 @@ describe("apt.repository (standard form)", () => {
       [`[ -L '${filePath}' ]`]: { code: 1 },
       [`cat '${filePath}'`]: { stdout: previousContent },
       [`sha256sum '${filePath}'`]: { stdout: `${previousContentSha}  ${filePath}\n` },
+      // R-0000702: stat probe reports a stable device:inode pair so the
+      // snapshot identity matches on re-probe inside the integrity check.
+      [`stat -c '%d:%i' '${filePath}'`]: { code: 0, stdout: "42:1234\n" },
       "DEBIAN_FRONTEND=noninteractive apt-get update": { code: 1 },
     })
     const mod = apt.repository("docker", source)
@@ -996,11 +1011,19 @@ describe("apt.repository (standard form)", () => {
       [`[ -L '${filePath}' ]`]: { code: 1 },
       [`cat '${filePath}'`]: { stdout: previousContent },
       [`sha256sum '${filePath}'`]: { stdout: `${previousContentSha}  ${filePath}\n` },
+      // R-0000702: stat probe reports a stable device:inode pair so the
+      // snapshot identity matches on re-probe inside the integrity check.
+      [`stat -c '%d:%i' '${filePath}'`]: { code: 0, stdout: "42:1234\n" },
     })
     // Override apt-get update so the first invocation (with the new repo)
     // fails and the second (post-rollback, with the restored sources)
     // succeeds — this is the precise sequence required by R-0000163.
-    const sequencedAptGetUpdate = createSequencedAptGetUpdateExec()
+    // The original mock exec is reused as passthrough so the stat probe
+    // (R-0000702) and other stubbed commands still resolve.
+    const originalExec = ssh.exec
+    const sequencedAptGetUpdate = createSequencedAptGetUpdateExec(async (command) =>
+      originalExec(command, { ignoreExitCode: true })
+    )
     ssh.exec = sequencedAptGetUpdate.exec
 
     const mod = apt.repository("docker", source)
@@ -1022,6 +1045,9 @@ describe("apt.repository (standard form)", () => {
       [`[ -L '${filePath}' ]`]: { code: 1 },
       [`cat '${filePath}'`]: { stdout: previousContent },
       [`sha256sum '${filePath}'`]: { stdout: `${previousContentSha}  ${filePath}\n` },
+      // R-0000702: stat probe reports a stable device:inode pair so the
+      // snapshot identity matches on re-probe inside the integrity check.
+      [`stat -c '%d:%i' '${filePath}'`]: { code: 0, stdout: "42:1234\n" },
       "DEBIAN_FRONTEND=noninteractive apt-get update": {
         code: 100,
         stderr: "E: Could not resolve 'broken.example.com'",
@@ -1035,6 +1061,73 @@ describe("apt.repository (standard form)", () => {
     expect(String(result.error)).toContain(
       "rollback succeeded but apt-get update on the restored sources also failed"
     )
+  })
+
+  // R-0000702: a concurrent writer could atomically replace the sources.list
+  // with byte-identical content sitting on a new inode (e.g. mktemp + mv -T).
+  // The hash-only guard would let this slip past — the inode comparison
+  // detects the swap and refuses to proceed.
+  it("R-0000702: refuses to proceed when the sources.list inode changed between snapshot and write", async () => {
+    const previousContent = "deb https://download.docker.com/linux/ubuntu jammy stable\n"
+    const previousContentSha = sha256String(previousContent)
+    let statCallIndex = 0
+    const ssh = createMockSsh({
+      [`[ -f '${filePath}' ] && [ ! -L '${filePath}' ]`]: { code: 0 },
+      [`[ -f '${filePath}' ]`]: { code: 0 },
+      [`[ -L '${filePath}' ]`]: { code: 1 },
+      [`cat '${filePath}'`]: { stdout: previousContent },
+      [`sha256sum '${filePath}'`]: { stdout: `${previousContentSha}  ${filePath}\n` },
+    })
+    const originalExec = ssh.exec
+    ssh.exec = async (command, options) => {
+      if (command === `stat -c '%d:%i' '${filePath}'`) {
+        statCallIndex += 1
+        return statCallIndex === 1
+          ? { code: 0, stderr: "", stdout: "42:1234\n" }
+          : { code: 0, stderr: "", stdout: "42:9999\n" }
+      }
+      return originalExec(command, options)
+    }
+    const mod = apt.repository("docker", source)
+    const result = await mod.apply(ssh, emptyEnv)
+
+    expect(result.status).toBe("failed")
+    expect(String(result.error)).toContain("inode changed between snapshot and write")
+    // The integrity check must abort before any write call.
+    expect(ssh.writeFileCalls).toStrictEqual([])
+  })
+
+  // R-0000702: a symlink that appears between the apply-time guard and the
+  // integrity re-check must abort apply rather than letting `ssh.writeFile`
+  // follow the link to an attacker-controlled target.
+  it("R-0000702: refuses to proceed when a symlink appears between snapshot and write", async () => {
+    const previousContent = "deb https://download.docker.com/linux/ubuntu jammy stable\n"
+    const previousContentSha = sha256String(previousContent)
+    let symlinkCallIndex = 0
+    const ssh = createMockSsh({
+      [`[ -f '${filePath}' ] && [ ! -L '${filePath}' ]`]: { code: 0 },
+      [`[ -f '${filePath}' ]`]: { code: 0 },
+      [`cat '${filePath}'`]: { stdout: previousContent },
+      [`sha256sum '${filePath}'`]: { stdout: `${previousContentSha}  ${filePath}\n` },
+      [`stat -c '%d:%i' '${filePath}'`]: { code: 0, stdout: "42:1234\n" },
+    })
+    const originalTest = ssh.test
+    ssh.test = async (command) => {
+      if (command === `[ -L '${filePath}' ]`) {
+        symlinkCallIndex += 1
+        // First probe (apply-time guard) reports no symlink, the second
+        // probe (inside ensureAptRepositorySnapshotStillCurrent) reports a
+        // freshly planted symlink — apply must refuse.
+        return symlinkCallIndex >= 2
+      }
+      return originalTest(command)
+    }
+    const mod = apt.repository("docker", source)
+    const result = await mod.apply(ssh, emptyEnv)
+
+    expect(result.status).toBe("failed")
+    expect(String(result.error)).toContain("became a symlink between snapshot and write")
+    expect(ssh.writeFileCalls).toStrictEqual([])
   })
 
   // R-0000098 regression: name lands directly in
