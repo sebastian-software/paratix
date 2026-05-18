@@ -1,6 +1,6 @@
 /* oxlint-disable no-unused-vars -- shared fixtures are duplicated by the mechanical test split */
 
-import { describe, expect, it } from "vitest"
+import { describe, expect, it, vi } from "vitest"
 
 import { timer } from "../../../src/modules/timer.js"
 import { createMockSsh as createBaseMockSsh } from "../../helpers/mockSsh.js"
@@ -146,6 +146,29 @@ describe("timer.scheduled — check (state: present)", () => {
       [`cat '${SERVICE_PATH}'`]: { code: 0, stdout: expectedServiceContent },
       [`stat -c '%a' '${SERVICE_PATH}'`]: { code: 0, stdout: "644\n" },
     })
+    const mod = timer.scheduled("backup", baseOptions)
+    expect(await mod.check(ssh, emptyEnv)).toBe("needs-apply")
+  })
+
+  it("returns needs-apply when reading the service unit fails", async () => {
+    const ssh = createMockSsh({
+      [`[ -e '${SERVICE_PATH}' ]`]: { code: 0 },
+    })
+    vi.spyOn(ssh, "readFile").mockRejectedValueOnce(new Error("SFTP read failed"))
+    const mod = timer.scheduled("backup", baseOptions)
+    expect(await mod.check(ssh, emptyEnv)).toBe("needs-apply")
+  })
+
+  it("returns needs-apply when reading the timer unit fails", async () => {
+    const ssh = createMockSsh({
+      [`[ -e '${SERVICE_PATH}' ]`]: { code: 0 },
+      [`[ -e '${TIMER_PATH}' ]`]: { code: 0 },
+      [`cat '${SERVICE_PATH}'`]: { code: 0, stdout: expectedServiceContent },
+      [`stat -c '%a' '${SERVICE_PATH}'`]: { code: 0, stdout: "644\n" },
+    })
+    vi.spyOn(ssh, "readFile")
+      .mockResolvedValueOnce(expectedServiceContent)
+      .mockRejectedValueOnce(new Error("SFTP read failed"))
     const mod = timer.scheduled("backup", baseOptions)
     expect(await mod.check(ssh, emptyEnv)).toBe("needs-apply")
   })

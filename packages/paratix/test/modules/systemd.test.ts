@@ -238,6 +238,16 @@ describe("systemd.unit", () => {
     expect(result).toBe("needs-apply")
   })
 
+  it("check returns needs-apply when reading the unit file fails", async () => {
+    const ssh = createMockSsh({
+      [`[ -e '${filePath}' ]`]: { code: 0 },
+    })
+    vi.spyOn(ssh, "readFile").mockRejectedValueOnce(new Error("SFTP read failed"))
+    const mod = systemd.unit(unitName, unitContent)
+    const result = await mod.check(ssh, emptyEnv)
+    expect(result).toBe("needs-apply")
+  })
+
   it("check returns needs-apply when daemon-reload marker is missing", async () => {
     const ssh = createMockSsh({
       [`[ -e '${filePath}' ]`]: { code: 0 },

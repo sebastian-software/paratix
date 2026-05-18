@@ -1,12 +1,6 @@
 import { failed, failedCommand } from "../moduleFailure.js"
 import { shellQuote } from "../ssh.js"
-import {
-  type ExecResult,
-  type Module,
-  type ModuleResult,
-  NEEDS_APPLY,
-  type SshConnection,
-} from "../types.js"
+import { type ExecResult, type Module, type ModuleResult, NEEDS_APPLY, type SshConnection } from "../types.js"
 import { sha256String } from "./fileHelpers.js"
 import { hasFlag, setVersionedFlag } from "./moduleHelpers.js"
 import {
@@ -16,8 +10,6 @@ import {
   snapshotUnitFile,
   type UnitFileSnapshot,
 } from "./systemdUnitSnapshot.js"
-// `isSymlink` is no longer imported here: the symlink guard moved into
-// `restoreUnitFileSnapshot` together with the snapshot helpers.
 
 const SYSTEMCTL = "systemctl"
 const UNIT_NAME_PATTERN = /^[\w@.\-]+$/v
@@ -45,13 +37,8 @@ function validateUnitName(name: string): string {
 
 // R-0000772: surface toolchain failures of the `systemctl is-enabled`
 // probe as a structured ModuleResult instead of blindly returning `false`.
-// Without this, an inaccessible systemd bus or a `systemctl` binary that
-// failed to launch (PATH issue, missing binary, transient sandbox error)
-// would render the unit as "not masked" — even though the real state is
-// unknown. The apply path would then either run `mask` against a
-// possibly-already-masked unit (harmless) or skip `unmask` for a unit
-// that is actually masked (silent regression). Mirrors the structured
-// probe shape introduced for `isSwapActive` (R-0000722).
+// Without this, an inaccessible systemd bus or broken `systemctl` would
+// render the unit as "not masked" even though the real state is unknown.
 async function isUnitMasked(ssh: SshConnection, unitName: string): Promise<boolean | ModuleResult> {
   const probe = await ssh.exec(
     `${SYSTEMCTL} is-enabled -- ${shellQuote(unitName)}`,
@@ -387,9 +374,13 @@ export const systemd = {
       },
       async check(ssh: null | SshConnection): Promise<"needs-apply" | "ok"> {
         if (!ssh) return NEEDS_APPLY
-        const exists = await ssh.exists(filePath)
-        if (!exists) return NEEDS_APPLY
-        const remoteContent = await ssh.readFile(filePath)
+        if (!(await ssh.exists(filePath))) return NEEDS_APPLY
+        let remoteContent: string
+        try {
+          remoteContent = await ssh.readFile(filePath)
+        } catch {
+          return NEEDS_APPLY
+        }
         if (remoteContent.trim() !== content.trim()) return NEEDS_APPLY
         const modeResult = await ssh.exec(`stat -c '%a' ${shellQuote(filePath)}`, SILENT_EXEC_OPTS)
         if (modeResult.code !== 0) return NEEDS_APPLY

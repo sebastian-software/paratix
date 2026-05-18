@@ -47,7 +47,12 @@ type FileMatchSpec = {
 // caller treats the file as needing apply.
 async function fileMatches(ssh: SshConnection, spec: FileMatchSpec): Promise<boolean> {
   if (!(await ssh.exists(spec.path))) return false
-  const remote = await ssh.readFile(spec.path)
+  let remote: string
+  try {
+    remote = await ssh.readFile(spec.path)
+  } catch {
+    return false
+  }
   if (remote.trim() !== spec.expected.trim()) return false
   if (spec.expectedMode === undefined) return true
   const modeResult = await ssh.exec(`stat -c '%a' ${shellQuote(spec.path)}`, {
