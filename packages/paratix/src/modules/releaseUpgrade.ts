@@ -95,49 +95,154 @@ async function getDebianCurrentCodename(ssh: SshConnection): Promise<string> {
 }
 
 /**
- * Fetch the codename of the current Debian stable release from the official mirrors.
- *
- * R-0000715: the allowlist enforced by
- * {@link isAllowedDebianStableTargetCodename} is applied directly here, before
- * the codename is returned to any caller. The previous flow only ran the
- * allowlist inside `applyDebian`; the `check` phase did not, so a TLS-MITM
- * or CDN-hijack returning `Codename: sid` / `experimental` would slip past
- * `check` and only fail at apply. Enforcing the allowlist at the single
- * extraction point keeps `check`, dry-run and apply consistent.
- *
- * @param ssh - Active SSH connection.
- * @returns The stable codename (e.g. `"bookworm"`).
- * @throws {Error} When the `Codename:` field is absent, when the codename
- *   does not match the basic shape expected for a Debian suite, or when the
- *   shape-valid codename is not on the allowlist of legitimate stable
- *   upgrade targets (R-0000632).
+ * R-0000716: pinned filesystem path of the Debian archive keyring shipped by
+ * the `debian-archive-keyring` package. `gpgv` verifies the inline signature
+ * of the `InRelease` file against the keys in this keyring; using the
+ * package-managed keyring ensures we trust the same set of release-signing
+ * keys that apt itself would trust on the same host.
  */
-async function getDebianStableCodename(ssh: SshConnection): Promise<string> {
-  // R-0000177: --max-time bounds the wall-clock duration of the request.
-  const result = await ssh.exec(
-    "curl --max-time 30 -fsSL https://deb.debian.org/debian/dists/stable/Release",
-    { ignoreExitCode: true, silent: true }
-  )
-  for (const line of result.stdout.split("\n")) {
+const DEBIAN_ARCHIVE_KEYRING_PATH = "/usr/share/keyrings/debian-archive-keyring.gpg"
+
+/**
+ * R-0000716: URL of the signed `InRelease` file from `dists/stable`. Unlike
+ * the unsigned `Release` file the previous flow fetched, `InRelease` is a
+ * clearsigned OpenPGP message: a TLS-MITM or CDN-hijack that swaps the body
+ * will invalidate the inline signature and `gpgv` will reject it before any
+ * codename is extracted. R-0000632/R-0000715 still apply as defense in depth
+ * even after the signature verification succeeds.
+ */
+const DEBIAN_INRELEASE_URL = "https://deb.debian.org/debian/dists/stable/InRelease"
+
+const DEBIAN_INRELEASE_FETCH_FAILURE_PREFIX = "Failed to fetch signed Debian InRelease"
+const DEBIAN_INRELEASE_VERIFY_FAILURE_PREFIX = "Failed to verify signed Debian InRelease"
+
+/**
+ * R-0000716: build the shell pipeline that fetches `InRelease`, verifies it
+ * with `gpgv` against the Debian archive keyring, and prints the cleartext
+ * body to stdout on success. The full pipeline runs in a single ssh round so
+ * that the body never lands on disk in an unverified state. `mktemp -d`
+ * provides an isolated workspace that `trap … EXIT` cleans up irrespective
+ * of where the pipeline fails, and `set -eu` makes any non-zero step abort
+ * the pipeline with a recognisable exit code.
+ *
+ * Output contract:
+ *   - exit 0 with stdout = cleartext body when verification succeeded
+ *   - exit 10 when the InRelease fetch failed (curl error / non-HTTP-200)
+ *   - exit 11 when the keyring is missing
+ *   - exit 12 when `gpgv` rejected the signature
+ *   - any other non-zero exit indicates an unexpected shell failure
+ *
+ * @returns The shell command string suitable for `ssh.exec`.
+ */
+function buildDebianInReleaseFetchAndVerifyCommand(): string {
+  const url = shellQuote(DEBIAN_INRELEASE_URL)
+  const keyring = shellQuote(DEBIAN_ARCHIVE_KEYRING_PATH)
+  return [
+    "set -eu",
+    'tmpdir=$(mktemp -d -t paratix-inrelease.XXXXXX)',
+    'trap \'rm -rf -- "$tmpdir"\' EXIT',
+    `[ -r ${keyring} ] || exit 11`,
+    `curl --max-time 30 -fsSL ${url} -o "$tmpdir/InRelease" || exit 10`,
+    `gpgv --keyring ${keyring} "$tmpdir/InRelease" >/dev/null 2>&1 || exit 12`,
+    'cat -- "$tmpdir/InRelease"',
+  ].join("; ")
+}
+
+function formatDebianInReleaseFailure(result: ExecResult): string {
+  if (result.code === 10) return `${DEBIAN_INRELEASE_FETCH_FAILURE_PREFIX} from ${DEBIAN_INRELEASE_URL}`
+  if (result.code === 11) {
+    return `${DEBIAN_INRELEASE_VERIFY_FAILURE_PREFIX}: Debian archive keyring not found at ${DEBIAN_ARCHIVE_KEYRING_PATH}`
+  }
+  if (result.code === 12) {
+    return `${DEBIAN_INRELEASE_VERIFY_FAILURE_PREFIX}: gpgv rejected the InRelease signature against ${DEBIAN_ARCHIVE_KEYRING_PATH}`
+  }
+  const stderr = result.stderr.trim()
+  const detail = stderr.length > 0 ? `: ${stderr}` : ""
+  return `${DEBIAN_INRELEASE_VERIFY_FAILURE_PREFIX} (exit code ${String(result.code)})${detail}`
+}
+
+/**
+ * R-0000716: parse the cleartext body of a verified `InRelease` file and
+ * return the `Codename:` field. The body looks like:
+ *
+ * ```
+ * -----BEGIN PGP SIGNED MESSAGE-----
+ * Hash: SHA256
+ *
+ * Origin: Debian
+ * Codename: trixie
+ * Suite: stable
+ * ...
+ * -----BEGIN PGP SIGNATURE-----
+ * ...
+ * -----END PGP SIGNATURE-----
+ * ```
+ *
+ * We ignore lines before the first blank line of the body (the PGP header)
+ * and stop scanning at the `-----BEGIN PGP SIGNATURE-----` marker so the
+ * `Codename:` lookup never accidentally matches inside the signature block.
+ *
+ * @param body - The full cleartext `InRelease` body as returned by gpgv.
+ * @returns The codename extracted from the body.
+ * @throws {Error} When the `Codename:` field is absent or invalid.
+ */
+function parseDebianStableCodenameFromInRelease(body: string): string {
+  for (const line of body.split("\n")) {
+    if (line.startsWith("-----BEGIN PGP SIGNATURE-----")) break
     const match = /^Codename:\s+(?<name>\S+)$/v.exec(line)
     if (match?.groups) {
       const codename = match.groups.name
       if (!CODENAME_RE.test(codename)) {
         throw new Error(`Invalid stable codename from Debian mirrors: ${JSON.stringify(codename)}`)
       }
-      // R-0000715: enforce the allowlist at the extraction point so check,
-      // dry-run and apply all reject untrusted codenames consistently.
-      // The unsigned `Release` file fetched above (see R-0000632) is the
-      // attacker-controllable input that motivates this guard.
-      if (!isAllowedDebianStableTargetCodename(codename)) {
-        throw new Error(
-          `unexpected Debian stable codename from mirrors: ${JSON.stringify(codename)}`
-        )
-      }
       return codename
     }
   }
   throw new Error("Could not determine Debian stable codename")
+}
+
+/**
+ * Fetch the codename of the current Debian stable release from the official
+ * mirrors and verify the response against the Debian archive keyring.
+ *
+ * R-0000716: replaces the previous unsigned `Release` fetch with a signed
+ * `InRelease` fetch verified by `gpgv` against
+ * `/usr/share/keyrings/debian-archive-keyring.gpg` on the target host. This
+ * closes the gap that R-0000632/R-0000715 only mitigated through the
+ * codename allowlist: a TLS-MITM or CDN-hijack now fails at signature
+ * verification before any codename is ever inspected.
+ *
+ * R-0000715: the allowlist enforced by
+ * {@link isAllowedDebianStableTargetCodename} still runs on the parsed
+ * codename as defense in depth, before the value is returned to any caller.
+ *
+ * @param ssh - Active SSH connection.
+ * @returns The stable codename (e.g. `"bookworm"`).
+ * @throws {Error} When the `InRelease` fetch or gpgv verification fails,
+ *   when the `Codename:` field is absent, when the codename does not match
+ *   the basic shape expected for a Debian suite, or when the shape-valid
+ *   codename is not on the allowlist of legitimate stable upgrade targets
+ *   (R-0000632).
+ */
+async function getDebianStableCodename(ssh: SshConnection): Promise<string> {
+  const result = await ssh.exec(buildDebianInReleaseFetchAndVerifyCommand(), {
+    ignoreExitCode: true,
+    silent: true,
+  })
+  if (result.code !== 0) {
+    throw new Error(formatDebianInReleaseFailure(result))
+  }
+  const codename = parseDebianStableCodenameFromInRelease(result.stdout)
+  // R-0000715: enforce the allowlist at the extraction point so check,
+  // dry-run and apply all reject untrusted codenames consistently — even
+  // when the gpgv signature verification accepted them. R-0000716 makes a
+  // forged codename much harder to deliver, but the allowlist remains as a
+  // last line of defense against a compromised release-signing key or a
+  // legitimate but unexpected upgrade target.
+  if (!isAllowedDebianStableTargetCodename(codename)) {
+    throw new Error(`unexpected Debian stable codename from mirrors: ${JSON.stringify(codename)}`)
+  }
+  return codename
 }
 
 const APT_SOURCES_LIST = "/etc/apt/sources.list"

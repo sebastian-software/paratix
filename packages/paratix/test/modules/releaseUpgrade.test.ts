@@ -89,8 +89,34 @@ const UBUNTU_OS_RELEASE = 'ID=ubuntu\nVERSION_ID="22.04"\n'
 const DEBIAN_OS_RELEASE = "ID=debian\nVERSION_CODENAME=bookworm\n"
 const UNKNOWN_OS_RELEASE = "ID=arch\n"
 
+// R-0000716: the production code now fetches the signed `InRelease` file
+// and verifies it with `gpgv` against the Debian archive keyring. The
+// pipeline runs as a single shell statement that mirrors
+// `buildDebianInReleaseFetchAndVerifyCommand` from the production module.
+// Tests stub the command verbatim and return a cleartext PGP-signed body so
+// the production code's `parseDebianStableCodenameFromInRelease` can extract
+// the codename.
+const DEBIAN_INRELEASE_VERIFY_COMMAND =
+  "set -eu; tmpdir=$(mktemp -d -t paratix-inrelease.XXXXXX); trap 'rm -rf -- \"$tmpdir\"' EXIT; [ -r '/usr/share/keyrings/debian-archive-keyring.gpg' ] || exit 11; curl --max-time 30 -fsSL 'https://deb.debian.org/debian/dists/stable/InRelease' -o \"$tmpdir/InRelease\" || exit 10; gpgv --keyring '/usr/share/keyrings/debian-archive-keyring.gpg' \"$tmpdir/InRelease\" >/dev/null 2>&1 || exit 12; cat -- \"$tmpdir/InRelease\""
+
+function debianInReleaseClearsignedBody(codename: string): string {
+  return [
+    "-----BEGIN PGP SIGNED MESSAGE-----",
+    "Hash: SHA256",
+    "",
+    "Origin: Debian",
+    `Codename: ${codename}`,
+    "Suite: stable",
+    "-----BEGIN PGP SIGNATURE-----",
+    "",
+    "ABCDEF",
+    "-----END PGP SIGNATURE-----",
+    "",
+  ].join("\n")
+}
+
 // Debian stable codename response from curl
-const DEBIAN_STABLE_RELEASE_CURL = "Origin: Debian\nCodename: trixie\nSuite: stable\n"
+const DEBIAN_STABLE_RELEASE_CURL = debianInReleaseClearsignedBody("trixie")
 const APT_UPDATE_COMMAND = "DEBIAN_FRONTEND=noninteractive apt-get update"
 
 // Default find response for sources.list.d (empty = no extra files)
@@ -159,9 +185,9 @@ function ubuntuResponses(
 function debianCheckResponses(currentCodename: string, stableCodename: string) {
   return {
     "cat '/etc/os-release'": { code: 0, stdout: DEBIAN_OS_RELEASE },
-    "curl --max-time 30 -fsSL https://deb.debian.org/debian/dists/stable/Release": {
+    [DEBIAN_INRELEASE_VERIFY_COMMAND]: {
       code: 0,
-      stdout: `Origin: Debian\nCodename: ${stableCodename}\nSuite: stable\n`,
+      stdout: debianInReleaseClearsignedBody(stableCodename),
     },
     "lsb_release -cs": { code: 0, stdout: `${currentCodename}\n` },
   }
@@ -181,9 +207,9 @@ function debianApplyResponses(
       stdout: `deb http://deb.debian.org/debian ${currentCodename} main\n`,
     },
     "cat '/etc/os-release'": { code: 0, stdout: DEBIAN_OS_RELEASE },
-    "curl --max-time 30 -fsSL https://deb.debian.org/debian/dists/stable/Release": {
+    [DEBIAN_INRELEASE_VERIFY_COMMAND]: {
       code: 0,
-      stdout: `Origin: Debian\nCodename: ${targetCodename}\nSuite: stable\n`,
+      stdout: debianInReleaseClearsignedBody(targetCodename),
     },
     "DEBIAN_FRONTEND=noninteractive apt-get autoremove -y": { code: 0 },
     "DEBIAN_FRONTEND=noninteractive apt-get full-upgrade -y": { code: 0 },
@@ -266,9 +292,7 @@ describe("releaseUpgrade.upgrade — check", () => {
     const result = await mod.check(ssh, emptyEnv)
     expect(result).toBe("needs-apply")
     expect(ssh.calls).not.toContain("lsb_release -cs")
-    expect(ssh.calls).not.toContain(
-      "curl --max-time 30 -fsSL https://deb.debian.org/debian/dists/stable/Release"
-    )
+    expect(ssh.calls).not.toContain(DEBIAN_INRELEASE_VERIFY_COMMAND)
   })
 
   it("fails apply for Debian derivatives that only declare Debian via ID_LIKE", async () => {
@@ -308,6 +332,72 @@ describe("releaseUpgrade.upgrade — check", () => {
       expect(result).toBe("needs-apply")
     }
   )
+
+  // R-0000716: the production code fetches the signed `InRelease` file and
+  // verifies it with `gpgv` against the Debian archive keyring. The check
+  // path tolerates fetch/verification failures by reporting `needs-apply`
+  // so apply can surface a structured error on the next pass; here we
+  // verify the verify-failure exit codes are recognised on the check path.
+  it.each([
+    [10, "fetch"],
+    [11, "missing keyring"],
+    [12, "signature rejection"],
+  ] as const)(
+    "R-0000716: check returns needs-apply when InRelease verification fails with exit code %d (%s)",
+    async (exitCode) => {
+      const ssh = createMockSsh({
+        "cat '/etc/os-release'": { code: 0, stdout: DEBIAN_OS_RELEASE },
+        [DEBIAN_INRELEASE_VERIFY_COMMAND]: { code: exitCode },
+        "lsb_release -cs": { code: 0, stdout: "bookworm\n" },
+      })
+      const mod = releaseUpgrade.upgrade()
+      const result = await mod.check(ssh, emptyEnv)
+      expect(result).toBe("needs-apply")
+    }
+  )
+
+  // R-0000716: apply must surface a structured `failed` ModuleResult with a
+  // human-readable error when gpgv rejects the InRelease signature so the
+  // operator can tell signature-verification failure apart from other
+  // failure modes (network, missing keyring, …).
+  it("R-0000716: apply fails with a gpgv-signature message when verification is rejected", async () => {
+    const ssh = createMockSsh({
+      "cat '/etc/os-release'": { code: 0, stdout: DEBIAN_OS_RELEASE },
+      [DEBIAN_INRELEASE_VERIFY_COMMAND]: { code: 12 },
+      "lsb_release -cs": { code: 0, stdout: "bookworm\n" },
+    })
+    const mod = releaseUpgrade.upgrade()
+    const result = await mod.apply(ssh, emptyEnv)
+    expect(result.status).toBe("failed")
+    expect(String(result.error)).toContain("Failed to verify signed Debian InRelease")
+    expect(String(result.error)).toContain("gpgv rejected the InRelease signature")
+  })
+
+  it("R-0000716: apply fails with a missing-keyring message when the keyring is absent", async () => {
+    const ssh = createMockSsh({
+      "cat '/etc/os-release'": { code: 0, stdout: DEBIAN_OS_RELEASE },
+      [DEBIAN_INRELEASE_VERIFY_COMMAND]: { code: 11 },
+      "lsb_release -cs": { code: 0, stdout: "bookworm\n" },
+    })
+    const mod = releaseUpgrade.upgrade()
+    const result = await mod.apply(ssh, emptyEnv)
+    expect(result.status).toBe("failed")
+    expect(String(result.error)).toContain("Debian archive keyring not found")
+    expect(String(result.error)).toContain("/usr/share/keyrings/debian-archive-keyring.gpg")
+  })
+
+  it("R-0000716: apply fails with a fetch message when the InRelease download fails", async () => {
+    const ssh = createMockSsh({
+      "cat '/etc/os-release'": { code: 0, stdout: DEBIAN_OS_RELEASE },
+      [DEBIAN_INRELEASE_VERIFY_COMMAND]: { code: 10 },
+      "lsb_release -cs": { code: 0, stdout: "bookworm\n" },
+    })
+    const mod = releaseUpgrade.upgrade()
+    const result = await mod.apply(ssh, emptyEnv)
+    expect(result.status).toBe("failed")
+    expect(String(result.error)).toContain("Failed to fetch signed Debian InRelease")
+    expect(String(result.error)).toContain("https://deb.debian.org/debian/dists/stable/InRelease")
+  })
 })
 
 // ---------------------------------------------------------------------------
@@ -520,7 +610,7 @@ describe("releaseUpgrade.upgrade — apply (Debian)", () => {
   it("R-0000177: stable codename curl uses --max-time 30", async () => {
     const ssh = createMockSsh({
       "cat '/etc/os-release'": { code: 0, stdout: DEBIAN_OS_RELEASE },
-      "curl --max-time 30 -fsSL https://deb.debian.org/debian/dists/stable/Release": {
+      [DEBIAN_INRELEASE_VERIFY_COMMAND]: {
         code: 0,
         stdout: DEBIAN_STABLE_RELEASE_CURL,
       },
@@ -528,15 +618,17 @@ describe("releaseUpgrade.upgrade — apply (Debian)", () => {
     })
     const mod = releaseUpgrade.upgrade({ dryRun: true })
     await mod.apply(ssh, emptyEnv)
-    expect(ssh.calls).toContain(
-      "curl --max-time 30 -fsSL https://deb.debian.org/debian/dists/stable/Release"
-    )
+    // R-0000716: the fetch is now embedded inside the gpgv-verified
+    // pipeline, but the `--max-time 30` budget still bounds the wall-clock
+    // duration of the curl call.
+    expect(ssh.calls).toContain(DEBIAN_INRELEASE_VERIFY_COMMAND)
+    expect(DEBIAN_INRELEASE_VERIFY_COMMAND).toContain("curl --max-time 30")
   })
 
   it("dryRun: no commands executed after codename lookup, returns ok", async () => {
     const ssh = createMockSsh({
       "cat '/etc/os-release'": { code: 0, stdout: DEBIAN_OS_RELEASE },
-      "curl --max-time 30 -fsSL https://deb.debian.org/debian/dists/stable/Release": {
+      [DEBIAN_INRELEASE_VERIFY_COMMAND]: {
         code: 0,
         stdout: DEBIAN_STABLE_RELEASE_CURL,
       },
@@ -552,7 +644,7 @@ describe("releaseUpgrade.upgrade — apply (Debian)", () => {
   it("returns ok without running the upgrade pipeline when Debian already uses the target codename", async () => {
     const ssh = createMockSsh({
       "cat '/etc/os-release'": { code: 0, stdout: DEBIAN_OS_RELEASE },
-      "curl --max-time 30 -fsSL https://deb.debian.org/debian/dists/stable/Release": {
+      [DEBIAN_INRELEASE_VERIFY_COMMAND]: {
         code: 0,
         stdout: DEBIAN_STABLE_RELEASE_CURL,
       },
@@ -1125,9 +1217,9 @@ describe("releaseUpgrade.upgrade — apply (Debian)", () => {
         "[ -e '/etc/apt/sources.list' ]": { code: 0 },
         "cat '/etc/apt/sources.list'": { code: 0, stdout: originalSources },
         "cat '/etc/os-release'": { code: 0, stdout: DEBIAN_OS_RELEASE },
-        "curl --max-time 30 -fsSL https://deb.debian.org/debian/dists/stable/Release": {
+        [DEBIAN_INRELEASE_VERIFY_COMMAND]: {
           code: 0,
-          stdout: `Origin: Debian\nCodename: ${targetCodename}\nSuite: stable\n`,
+          stdout: debianInReleaseClearsignedBody(targetCodename),
         },
         "DEBIAN_FRONTEND=noninteractive apt-get autoremove -y": { code: 0 },
         "DEBIAN_FRONTEND=noninteractive apt-get full-upgrade -y": { code: 0 },
@@ -1179,9 +1271,9 @@ describe("releaseUpgrade.upgrade — apply (Debian)", () => {
         "[ -e '/etc/apt/sources.list' ]": { code: 0 },
         "cat '/etc/apt/sources.list'": { code: 0, stdout: originalSources },
         "cat '/etc/os-release'": { code: 0, stdout: DEBIAN_OS_RELEASE },
-        "curl --max-time 30 -fsSL https://deb.debian.org/debian/dists/stable/Release": {
+        [DEBIAN_INRELEASE_VERIFY_COMMAND]: {
           code: 0,
-          stdout: "Origin: Debian\nCodename: trixie\nSuite: stable\n",
+          stdout: debianInReleaseClearsignedBody("trixie"),
         },
         "DEBIAN_FRONTEND=noninteractive apt-get autoremove -y": { code: 0 },
         "DEBIAN_FRONTEND=noninteractive apt-get full-upgrade -y": { code: 0 },
