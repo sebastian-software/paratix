@@ -165,6 +165,7 @@ async function runTerminalSelect<TValue extends string>(
   return new Promise<TValue>((resolve, reject) => {
     const cleanup = (): void => {
       process.stdin.removeListener("keypress", onKeypress)
+      process.stdin.removeListener("error", onStdinError)
       cleanupSelectInput(previousRawMode)
     }
 
@@ -184,9 +185,25 @@ async function runTerminalSelect<TValue extends string>(
       handleCancelKey(key, cleanup, reject)
     }
 
+    // R-0000833: also reject the promise if stdin itself errors out.
+    // Without this listener a stream-level failure (closed PTY, broken
+    // pipe in a CI shim, parent process killing stdin) would leave the
+    // keypress listener attached and the terminal in raw mode forever —
+    // the promise would never settle, and a subsequent `handleCliExit`
+    // would have nothing to clean up because the in-flight prompt holds
+    // the only references to `cleanup`. Routing stdin errors through the
+    // same cleanup+reject path the Ctrl-C handler uses guarantees the
+    // terminal state is restored and the awaiting caller sees a real
+    // failure instead of hanging.
+    const onStdinError = (error: Error): void => {
+      cleanup()
+      reject(error)
+    }
+
     process.stdout.write("\x1B[?25l")
     renderer.render()
     process.stdin.on("keypress", onKeypress)
+    process.stdin.on("error", onStdinError)
   })
 }
 
