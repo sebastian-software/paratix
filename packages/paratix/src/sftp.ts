@@ -420,6 +420,27 @@ function wireStreams(options: {
     readStream,
     writeStream,
   })
+
+  // R-0000688 / R-0000255: declare `handleConnectionAbort` as a hoisted
+  // function declaration BEFORE `createTransferSettlement`. The previous
+  // `const` form lived after the settlement and produced a temporal-dead-zone
+  // hazard: `clearTimer` (passed into the settlement) references
+  // `handleConnectionAbort`, so an early teardown — e.g. the timer firing
+  // before the `const` initializer ran — would hit a ReferenceError. A
+  // function declaration is hoisted to the top of the enclosing function so
+  // the reference is always defined when `clearTimer` runs. When the
+  // underlying SSH transport is torn down (e.g. the SIGINT handler in
+  // runner.ts) any in-flight SFTP transfer would otherwise sit idle until
+  // the default 120 s timeout fires, because client.sftp() does NOT emit a
+  // stream error on its own when the parent connection closes. Couple the
+  // transfer to a connection-level abort signal so an external disconnect
+  // destroys the streams immediately.
+  function handleConnectionAbort(): void {
+    readStream.destroy()
+    if (typeof writeStream.destroy === "function") writeStream.destroy()
+    settlement.rejectOnce(new Error("SFTP transfer aborted: ssh disconnect"))
+  }
+
   const settlement = createTransferSettlement({
     clearTimer() {
       clearTimeout(timer)
@@ -443,18 +464,6 @@ function wireStreams(options: {
     resolve,
     sftp,
   })
-
-  // R-0000255: when the underlying SSH transport is torn down (e.g. the
-  // SIGINT handler in runner.ts) any in-flight SFTP transfer would otherwise
-  // sit idle until the default 120 s timeout fires, because client.sftp()
-  // does NOT emit a stream error on its own when the parent connection
-  // closes. Couple the transfer to a connection-level abort signal so an
-  // external disconnect destroys the streams immediately.
-  const handleConnectionAbort = (): void => {
-    readStream.destroy()
-    if (typeof writeStream.destroy === "function") writeStream.destroy()
-    settlement.rejectOnce(new Error("SFTP transfer aborted: ssh disconnect"))
-  }
 
   attachStreamListeners({
     completionEvents,
