@@ -1063,6 +1063,30 @@ describe("cron.absent", () => {
     expect(writeInput).toContain(userReplacedJob)
   })
 
+  // R-0000699: when a tagged marker records a sha256 digest but the follow-up
+  // line differs from the marker's recorded line only in whitespace (e.g. a
+  // hand-edited extra space or tab vs space), the byte-exact digest compare
+  // intentionally rejects the line. Surface that near-miss as an operator
+  // hint via `ModuleResult.detail` so the divergence does not vanish silently.
+  it("apply surfaces a whitespace-mismatch hint when only spacing differs", async () => {
+    const managedJob = "0 3 * * * /backup.sh"
+    const reformattedJob = "0  3  *  *  *  /backup.sh"
+    const mockSsh = createMockSsh({
+      "crontab -u 'alice' -l": {
+        code: 0,
+        stdout: `${taggedMarker("backup", managedJob)}\n${reformattedJob}\n`,
+      },
+    })
+    const mod = cron.absent("alice", "backup")
+    const result = await mod.apply(mockSsh, emptyEnv)
+    expect(result.status).toBe("changed")
+    expect(result.detail).toContain("differs from the recorded digest only in whitespace")
+    // The reformatted follow-up line must survive because the digest check is
+    // byte-exact and intentionally does not normalize whitespace.
+    const writeInput = findCrontabWriteInput(mockSsh)
+    expect(writeInput).toContain(reformattedJob)
+  })
+
   it("apply removes marker and follow-up line when marker hash matches", async () => {
     const job = "0 3 * * * /backup.sh"
     const mockSsh = createMockSsh({

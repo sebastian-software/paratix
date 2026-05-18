@@ -290,6 +290,24 @@ describe("releaseUpgrade.upgrade — check", () => {
     const result = await mod.check(null, emptyEnv)
     expect(result).toBe("needs-apply")
   })
+
+  // R-0000715: the codename allowlist now lives inside
+  // `getDebianStableCodename`, which is called from both `check` and
+  // `apply`. The previous flow only ran the allowlist inside `applyDebian`,
+  // so a TLS-MITM substituting an unstable codename slipped past `check`
+  // and only failed at apply. `check` must now report `needs-apply` for
+  // any non-allowlisted codename so the playbook re-evaluates the situation
+  // (and apply surfaces the structured `failed(...)` ModuleResult) on the
+  // next pass.
+  it.each(["sid", "experimental", "forky", "rcbuggy"])(
+    "R-0000715: check returns needs-apply when mirrors advertise non-allowlisted codename '%s'",
+    async (maliciousCodename) => {
+      const ssh = createMockSsh(debianCheckResponses("bookworm", maliciousCodename))
+      const mod = releaseUpgrade.upgrade()
+      const result = await mod.check(ssh, emptyEnv)
+      expect(result).toBe("needs-apply")
+    }
+  )
 })
 
 // ---------------------------------------------------------------------------

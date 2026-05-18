@@ -2,8 +2,8 @@
  * Helpers that compute the new crontab line array for `cron.job` apply.
  *
  * Extracted out of `cron.ts` so the present-mutation logic — including the
- * R-0000676 / R-0000697 commentary about orphan adoption — does not push
- * `cron.ts` over the file-length budget.
+ * R-0000676 / R-0000697 / R-0000699 commentary about orphan adoption and
+ * whitespace handling — does not push `cron.ts` over the file-length budget.
  */
 
 /**
@@ -93,6 +93,22 @@ export function computePresentMutation(mutation: PresentMutationArguments): null
     // recover from a legacy-marker absent → present cycle must set the
     // flag explicitly. Without the flag, append a fresh marker + job and
     // accept the (visible) duplicate over silently grabbing a user line.
+    //
+    // R-0000699: the orphan match uses a strict exact-string compare
+    // (`lines.indexOf(cronJob)`) and intentionally does NOT normalize
+    // whitespace, tabs vs spaces, leading/trailing spaces or interior
+    // run-length differences. Two reasons:
+    //   1) Crontab uses whitespace as the column separator — collapsing
+    //      runs of spaces could re-interpret a different schedule field
+    //      layout as "the same job".
+    //   2) Any normalization that changes semantics (e.g. tab ↔ space)
+    //      would couple the adoption decision to crond's specific tokenizer
+    //      version, which differs across distros.
+    // The trade-off: an orphan whose exact bytes differ from the desired
+    // `cronJob` (e.g. an extra trailing space saved by an editor) is NOT
+    // re-adopted and the append path runs instead, producing a visible
+    // duplicate. Operators can fix the orphan manually after the visible
+    // duplicate flags the divergence in their crontab review.
     const orphanIndex = adoptOrphans ? lines.indexOf(cronJob) : -1
     if (orphanIndex === -1) {
       next.push(marker, cronJob)

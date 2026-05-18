@@ -97,13 +97,20 @@ async function getDebianCurrentCodename(ssh: SshConnection): Promise<string> {
 /**
  * Fetch the codename of the current Debian stable release from the official mirrors.
  *
+ * R-0000715: the allowlist enforced by
+ * {@link isAllowedDebianStableTargetCodename} is applied directly here, before
+ * the codename is returned to any caller. The previous flow only ran the
+ * allowlist inside `applyDebian`; the `check` phase did not, so a TLS-MITM
+ * or CDN-hijack returning `Codename: sid` / `experimental` would slip past
+ * `check` and only fail at apply. Enforcing the allowlist at the single
+ * extraction point keeps `check`, dry-run and apply consistent.
+ *
  * @param ssh - Active SSH connection.
  * @returns The stable codename (e.g. `"bookworm"`).
- * @throws {Error} When the `Codename:` field is absent or when the codename
- *   does not match the basic shape expected for a Debian suite. Suites that
- *   pass the shape check but are not on the allowlist of legitimate stable
- *   upgrade targets (R-0000632) are returned unchanged here so callers can
- *   surface a `failed(...)` ModuleResult instead of an uncaught throw.
+ * @throws {Error} When the `Codename:` field is absent, when the codename
+ *   does not match the basic shape expected for a Debian suite, or when the
+ *   shape-valid codename is not on the allowlist of legitimate stable
+ *   upgrade targets (R-0000632).
  */
 async function getDebianStableCodename(ssh: SshConnection): Promise<string> {
   // R-0000177: --max-time bounds the wall-clock duration of the request.
@@ -117,6 +124,15 @@ async function getDebianStableCodename(ssh: SshConnection): Promise<string> {
       const codename = match.groups.name
       if (!CODENAME_RE.test(codename)) {
         throw new Error(`Invalid stable codename from Debian mirrors: ${JSON.stringify(codename)}`)
+      }
+      // R-0000715: enforce the allowlist at the extraction point so check,
+      // dry-run and apply all reject untrusted codenames consistently.
+      // The unsigned `Release` file fetched above (see R-0000632) is the
+      // attacker-controllable input that motivates this guard.
+      if (!isAllowedDebianStableTargetCodename(codename)) {
+        throw new Error(
+          `unexpected Debian stable codename from mirrors: ${JSON.stringify(codename)}`
+        )
       }
       return codename
     }
@@ -685,24 +701,24 @@ async function applyDebian(
   options: ReleaseUpgradeOptions
 ): Promise<ModuleResult> {
   const currentCodename = await getDebianCurrentCodename(ssh)
-  const targetCodename = await getDebianStableCodename(ssh)
+  // R-0000715: `getDebianStableCodename` now enforces the allowlist directly
+  // (see `isAllowedDebianStableTargetCodename` inside that helper). A
+  // rejected codename surfaces here as a thrown error, which we convert into
+  // a structured `failed(...)` ModuleResult so the runner reports the issue
+  // alongside the normal failure output instead of an unhandled exception.
+  let targetCodename: string
+  try {
+    targetCodename = await getDebianStableCodename(ssh)
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : String(error)
+    return failed(`[releaseUpgrade.upgrade] ${reason}`)
+  }
 
   if (options.dryRun === true || currentCodename === targetCodename) return { status: "ok" }
 
-  // R-0000632: the Release file fetched by `getDebianStableCodename` is
-  // unsigned, so a TLS-MITM or CDN-hijack could replace its body with
-  // `Codename: sid` / `experimental` / `forky` / any other suite that
-  // satisfies the basic shape check. Reject codenames that
-  // `isAllowedDebianStableTargetCodename` does not recognise as a
-  // legitimate stable upgrade target before any apt source is rewritten.
-  // The pair-level `isSupportedDebianUpgradePath` check below still runs
-  // as defense-in-depth.
-  if (!isAllowedDebianStableTargetCodename(targetCodename)) {
-    return failed(
-      `[releaseUpgrade.upgrade] unexpected Debian stable codename from mirrors: ${JSON.stringify(targetCodename)}`
-    )
-  }
-
+  // R-0000632 / R-0000715: the pair-level `isSupportedDebianUpgradePath`
+  // check remains as defense-in-depth on top of the allowlist guard now
+  // enforced inside `getDebianStableCodename` itself.
   if (!isSupportedDebianUpgradePath(currentCodename, targetCodename)) {
     return failed(
       `[releaseUpgrade.upgrade] unsupported Debian release upgrade path: ${currentCodename} -> ${targetCodename}`

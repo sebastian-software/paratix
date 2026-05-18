@@ -10,6 +10,7 @@ import {
   type SshConnection,
 } from "../types.js"
 import { computePresentMutation, looksLikeCronJobLine } from "./cronMutation.js"
+import { cronJobDigest, selectCronAbsentWarning } from "./cronWarningHelpers.js"
 import { withMutexLock } from "./moduleHelpers.js"
 
 /**
@@ -99,20 +100,6 @@ async function writeCrontab(input: WriteCrontabArguments): Promise<ModuleResult 
     silent: true,
   })
   return installResult.code === 0 ? null : failedCommand(failureMessage, installResult)
-}
-
-/**
- * R-0000168: derive a stable digest of a cron job line so the marker
- * comment can carry the hash of the last managed job. `cron.absent` reads
- * the digest back from the marker and only removes a follow-up line whose
- * hash matches, preventing user-authored replacement jobs from being
- * deleted.
- *
- * @param cronJob - The cron job line to hash.
- * @returns The 64-character lowercase hex sha256 digest.
- */
-function cronJobDigest(cronJob: string): string {
-  return createHash("sha256").update(cronJob).digest("hex")
 }
 
 const MARKER_HASH_TAG = " sha256="
@@ -347,6 +334,15 @@ async function applyCronAbsentMutation(parameters: {
   // to sit below the marker. Be conservative instead: only remove the
   // marker and preserve any follow-up content. Operators get a heads-up
   // on stderr so they can clean up the orphaned job line manually.
+  // R-0000699: the managed-job decision compares the follow-up line's
+  // sha256 against the digest paratix recorded in the marker — that
+  // comparison is byte-exact and intentionally does NOT normalize
+  // whitespace (tabs vs spaces, trailing spaces, run-length differences).
+  // Whitespace differences would otherwise change the digest and a
+  // hand-edited follow-up line would be silently mistaken for a foreign
+  // user line. Operators who reformat managed job lines are expected to
+  // re-run `cron.job(state="present")` so paratix rewrites the marker
+  // with the new digest.
   const recordedDigest = readMarkerDigest(lines[markerIndex] ?? "")
   const followLine = lines[markerIndex + 1] ?? ""
   const followLooksLikeJob = looksLikeCronJobLine(lines, markerIndex + 1)
@@ -358,10 +354,16 @@ async function applyCronAbsentMutation(parameters: {
   // ModuleResult so the runner can render and mask it consistently. The
   // previous direct write to `process.stderr` bypassed the secret-masking
   // pipeline and never appeared in structured logs.
-  const legacyMarkerWarning =
-    recordedDigest === null && followLooksLikeJob
-      ? `legacy marker without recorded digest — keeping follow-up line and removing only the marker`
-      : null
+  // R-0000699: when a recorded digest exists but the follow-up line does
+  // not match byte-exactly, `selectCronAbsentWarning` also emits a
+  // whitespace-normalized near-miss hint so the divergence does not vanish
+  // silently. The decision itself stays byte-exact (see above).
+  const legacyMarkerWarning = selectCronAbsentWarning({
+    followIsManagedJob,
+    followLine,
+    followLooksLikeJob,
+    recordedDigest,
+  })
   const removeCount = followIsManagedJob ? 2 : 1
   const nextLines = [...lines]
   nextLines.splice(markerIndex, removeCount)
