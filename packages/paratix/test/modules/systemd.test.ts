@@ -254,6 +254,10 @@ describe("systemd.unit", () => {
     const previousContent = "[Unit]\nDescription=Previous\n"
     const ssh = createMockSsh({
       [`[ -e '${filePath}' ]`]: { code: 0 },
+      // R-0000683: restoreUnitFileSnapshot now probes `[ -L ]` before
+      // writing back so a planted symlink cannot redirect the write.
+      // Default to "not a symlink" so the restore path keeps running.
+      [`[ -L '${filePath}' ]`]: { code: 1 },
       [`cat '${filePath}'`]: { stdout: previousContent },
       [`stat -c '%a' '${filePath}'`]: { code: 0, stdout: "600\n" },
       "systemctl daemon-reload": { code: 1 },
@@ -273,6 +277,8 @@ describe("systemd.unit", () => {
     const previousContent = "[Unit]\nDescription=Previous\n"
     const ssh = createMockSsh({
       [`[ -e '${filePath}' ]`]: { code: 0 },
+      // R-0000683: see the daemon-reload-fails sibling test.
+      [`[ -L '${filePath}' ]`]: { code: 1 },
       [`cat '${filePath}'`]: { stdout: previousContent },
       [`stat -c '%a' '${filePath}'`]: { code: 0, stdout: "600\n" },
       "systemctl daemon-reload": { code: 1, stderr: "daemon reload failed\n" },
@@ -300,6 +306,8 @@ describe("systemd.unit", () => {
     const previousContent = "[Unit]\nDescription=Previous\n"
     const ssh = createMockSsh({
       [`[ -e '${filePath}' ]`]: { code: 0 },
+      // R-0000683: see the daemon-reload-fails sibling test.
+      [`[ -L '${filePath}' ]`]: { code: 1 },
       [`cat '${filePath}'`]: { stdout: previousContent },
       [`stat -c '%a' '${filePath}'`]: { code: 0, stdout: "600\n" },
       "mkdir -p /var/lib/paratix/flags": { code: 0 },
@@ -327,6 +335,8 @@ describe("systemd.unit", () => {
     const previousContent = "[Unit]\nDescription=Previous\n"
     const ssh = createMockSsh({
       [`[ -e '${filePath}' ]`]: { code: 0 },
+      // R-0000683: see the daemon-reload-fails sibling test.
+      [`[ -L '${filePath}' ]`]: { code: 1 },
       [`cat '${filePath}'`]: { stdout: previousContent },
       [`stat -c '%a' '${filePath}'`]: { code: 0, stdout: "600\n" },
       "mkdir -p /var/lib/paratix/flags": { code: 0 },
@@ -409,6 +419,8 @@ describe("systemd.unit", () => {
     const previousContent = "[Unit]\nDescription=Previous\n"
     const ssh = createMockSsh({
       [`[ -e '${filePath}' ]`]: { code: 0 },
+      // R-0000683: see the daemon-reload-fails sibling test.
+      [`[ -L '${filePath}' ]`]: { code: 1 },
       [`cat '${filePath}'`]: { stdout: previousContent },
       [`stat -c '%a' '${filePath}'`]: { code: 0, stdout: "600\n" },
     })
@@ -431,6 +443,8 @@ describe("systemd.unit", () => {
     const previousContent = "[Unit]\nDescription=Previous\n"
     const ssh = createMockSsh({
       [`[ -e '${filePath}' ]`]: { code: 0 },
+      // R-0000683: see the daemon-reload-fails sibling test.
+      [`[ -L '${filePath}' ]`]: { code: 1 },
       [`cat '${filePath}'`]: { stdout: previousContent },
       [`stat -c '%a' '${filePath}'`]: { code: 0, stdout: "600\n" },
     })
@@ -475,6 +489,63 @@ describe("systemd.unit", () => {
     // eslint-disable-next-line prefer-spread
     const result = await mod.apply(null, emptyEnv)
     expect(result.status).toBe("failed")
+  })
+
+  // R-0000683: a readFile failure on the pre-write snapshot must surface as
+  // a structured failed ModuleResult instead of bubbling an unstructured
+  // throw out of applySystemdUnit. Without this guard the writeFile path
+  // would overwrite the existing unit file while the rollback would have
+  // nothing to restore.
+  it("R-0000683: refuses to write unit file when snapshot read fails", async () => {
+    const ssh = createMockSsh({
+      [`[ -e '${filePath}' ]`]: { code: 0 },
+      [`[ -L '${filePath}' ]`]: { code: 1 },
+    })
+    vi.spyOn(ssh, "readFile").mockRejectedValueOnce(
+      new Error("SFTP read failed: Permission denied")
+    )
+    const writeFile = vi.spyOn(ssh, "writeFile").mockResolvedValue()
+    const mod = systemd.unit(unitName, unitContent)
+    const result = await mod.apply(ssh, emptyEnv)
+
+    expect(result.status).toBe("failed")
+    expect(String(result.error)).toContain("failed to snapshot unit file")
+    expect(String(result.error)).toContain(filePath)
+    expect(String(result.error)).toContain("Permission denied")
+    // The writeFile must NOT have been issued — there is no recoverable
+    // snapshot, so the apply must abort before touching the live unit file.
+    expect(writeFile).not.toHaveBeenCalled()
+    expect(ssh.calls).not.toContain("systemctl daemon-reload")
+  })
+
+  // R-0000683: the restore path must refuse to follow a planted symlink at
+  // the unit file path. Without the leading `[ -L ]` probe a swap between
+  // the snapshot read and the rollback would let `ssh.writeFile` follow the
+  // link to its target (potentially overwriting an unrelated system file).
+  it("R-0000683: refuses to restore through a symlink", async () => {
+    const previousContent = "[Unit]\nDescription=Previous\n"
+    const ssh = createMockSsh({
+      [`[ -e '${filePath}' ]`]: { code: 0 },
+      // The destination became a symlink between snapshot and rollback.
+      [`[ -L '${filePath}' ]`]: { code: 0 },
+      [`cat '${filePath}'`]: { stdout: previousContent },
+      [`stat -c '%a' '${filePath}'`]: { code: 0, stdout: "600\n" },
+      "systemctl daemon-reload": { code: 1, stderr: "daemon reload failed\n" },
+    })
+    vi.spyOn(ssh, "readFile")
+      .mockResolvedValueOnce(previousContent)
+      .mockResolvedValueOnce(unitContent)
+    const writeFile = vi.spyOn(ssh, "writeFile").mockResolvedValue()
+    const mod = systemd.unit(unitName, unitContent)
+    const result = await mod.apply(ssh, emptyEnv)
+
+    expect(result.status).toBe("failed")
+    expect(String(result.error)).toContain("rollback failed")
+    expect(String(result.error)).toContain("refusing to restore through symlink")
+    // The first writeFile attempted the new content; the second (rollback)
+    // writeFile must NOT have been issued.
+    expect(writeFile).toHaveBeenCalledTimes(1)
+    expect(writeFile).toHaveBeenNthCalledWith(1, filePath, unitContent, { mode: "0644" })
   })
 })
 
