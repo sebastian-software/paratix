@@ -33,14 +33,31 @@ const UNAVAILABLE_SELECT = (() => {
 // stdin into raw mode and crash with `setRawMode is not a function`.
 // Surfacing a CliExitError before the readline interface is ever opened
 // keeps the failure mode deterministic and the terminal state intact.
+//
+// R-0000742: the same TTY gate appeared inline in
+// `promptForInitialUserConfig` with a different remediation hint. Both
+// callsites now go through `enforceInteractivePromptTty`, parameterised
+// by the option-specific hint, so the gate logic stays in one place
+// and a future remediation tweak does not have to be applied twice.
+const GENERIC_NON_TTY_HINT =
+  "Pass --admin-public-key/--admin-public-key-file and --expected-host-fingerprint " +
+  "(or run create-paratix from an interactive shell) to skip the prompt."
+
+const INITIAL_USER_NON_TTY_HINT =
+  "Pass --initial-user <root|name> (or run create-paratix from an interactive shell) " +
+  "to skip the prompt."
+
+function isAttachedTty(): boolean {
+  return process.stdin.isTTY === true && process.stdout.isTTY === true
+}
+
+function enforceInteractivePromptTty(remediationHint: string): void {
+  if (isAttachedTty()) return
+  throw new CliExitError(`Interactive prompt requires a TTY. ${remediationHint}`, 1)
+}
+
 function ensureInteractivePromptTty(): void {
-  if (process.stdin.isTTY && process.stdout.isTTY) return
-  throw new CliExitError(
-    "Interactive prompt requires a TTY. Pass --admin-public-key/--admin-public-key-file " +
-      "and --expected-host-fingerprint (or run create-paratix from an interactive shell) " +
-      "to skip the prompt.",
-    1
-  )
+  enforceInteractivePromptTty(GENERIC_NON_TTY_HINT)
 }
 
 const INITIAL_USER_OPTIONS: Array<SelectOption<"admin" | "root">> = [
@@ -219,16 +236,12 @@ export async function promptForInitialUserConfig(
   // only check the single injected handle. A caller that wires up a
   // custom prompt but lets `select` default would otherwise be denied
   // here even though the default-select code path is never reached.
-  if (
-    prompt == null &&
-    createSession === createPromptSession &&
-    (!process.stdin.isTTY || !process.stdout.isTTY)
-  ) {
-    throw new CliExitError(
-      "Interactive prompt requires a TTY. Pass --initial-user <root|name> " +
-        "(or run create-paratix from an interactive shell) to skip the prompt.",
-      1
-    )
+  // R-0000742: the actual TTY check is shared with
+  // `ensureInteractivePromptTty` via `enforceInteractivePromptTty`; we
+  // only run it after the injection guard so consumers that wire up
+  // their own prompt session continue to bypass the gate.
+  if (prompt == null && createSession === createPromptSession) {
+    enforceInteractivePromptTty(INITIAL_USER_NON_TTY_HINT)
   }
   const promptSession = createSession(prompt)
   const chooseInitialUser = select ?? promptSession.chooseInitialUser
