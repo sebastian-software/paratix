@@ -92,9 +92,13 @@ export function isValidExpectedHostFingerprint(value: string): boolean {
   }
   // ssh-keygen prints the SHA256 fingerprint without trailing `=`
   // padding, so we compare against the stripped re-encoding to avoid
-  // accidentally accepting an alternate canonicalisation.
-  const reencoded = decoded.toString("base64").replace(/=+$/v, "")
-  return reencoded === encoded
+  // accidentally accepting an alternate canonical form.
+  const canonical = decoded.toString("base64")
+  let trimmedEnd = canonical.length
+  while (trimmedEnd > 0 && canonical[trimmedEnd - 1] === "=") {
+    trimmedEnd--
+  }
+  return canonical.slice(0, trimmedEnd) === encoded
 }
 
 export function validateExpectedHostFingerprint(

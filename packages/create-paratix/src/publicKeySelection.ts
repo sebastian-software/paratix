@@ -6,6 +6,7 @@ import type { SelectFunction, SelectOption } from "./promptUi.js"
 
 import { CliExitError } from "./cliExitError.js"
 import { hasValidOpenSshPublicKeyWireBlob } from "./openSshPublicKeyWire.js"
+import { isCanonicalBase64 } from "./publicKeyBase64.js"
 import { containsUnsafeCodepoint } from "./unsafeCodepoints.js"
 
 export type LocalPublicKey = {
@@ -98,89 +99,6 @@ function parseOpenSshPublicKey(value: string): null | ParsedPublicKey {
   return {
     algorithm,
     encodedKey,
-  }
-}
-
-function trimBase64Padding(value: string): string {
-  let endIndex = value.length
-  while (endIndex > 0 && value[endIndex - 1] === "=") {
-    endIndex--
-  }
-  return value.slice(0, endIndex)
-}
-
-function isBase64AlphaNumeric(character: string): boolean {
-  return (
-    (character >= "A" && character <= "Z") ||
-    (character >= "a" && character <= "z") ||
-    (character >= "0" && character <= "9")
-  )
-}
-
-function isBase64DataCharacter(character: string): boolean {
-  return isBase64AlphaNumeric(character) || character === "+" || character === "/"
-}
-
-function updatePaddingState(
-  character: string,
-  state: { paddingCount: number; sawPadding: boolean }
-): { paddingCount: number; sawPadding: boolean } | null {
-  if (character !== "=") {
-    return null
-  }
-
-  const nextState = {
-    paddingCount: state.paddingCount + 1,
-    sawPadding: true,
-  }
-
-  return nextState.paddingCount <= 2 ? nextState : null
-}
-
-function hasValidBase64Alphabet(value: string): boolean {
-  if (value.length === 0) {
-    return false
-  }
-
-  const state = { paddingCount: 0, sawPadding: false }
-
-  for (const character of value) {
-    if (isBase64DataCharacter(character)) {
-      if (state.sawPadding) {
-        return false
-      }
-      continue
-    }
-
-    const nextState = updatePaddingState(character, state)
-    if (nextState != null) {
-      state.paddingCount = nextState.paddingCount
-      state.sawPadding = nextState.sawPadding
-      continue
-    }
-
-    return false
-  }
-
-  return true
-}
-
-function isCanonicalBase64(value: string): boolean {
-  if (!hasValidBase64Alphabet(value)) {
-    return false
-  }
-
-  try {
-    const decoded = Buffer.from(value, "base64")
-    if (decoded.length === 0) {
-      return false
-    }
-
-    const normalizedValue = trimBase64Padding(value)
-    const encodedAgain = trimBase64Padding(decoded.toString("base64"))
-    return encodedAgain === normalizedValue
-  } catch {
-    return false
   }
 }
 

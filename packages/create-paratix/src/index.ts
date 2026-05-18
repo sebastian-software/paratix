@@ -1,6 +1,5 @@
 import { rmSync } from "node:fs"
-import { posix as pathPosix, resolve, win32 as pathWin32 } from "node:path"
-import { platform as nodePlatform } from "node:process"
+import { posix as pathPosix, win32 as pathWin32, resolve } from "node:path"
 
 import type { InitialUserConfig } from "./templates.js"
 
@@ -141,8 +140,10 @@ function derivePackageName(projectDirectory: string): string {
   // substitution entirely and correctly handles drive letters,
   // forward-/backslash mixed paths on Windows, and literal backslashes
   // inside POSIX directory names.
-  const basenameFor = nodePlatform === "win32" ? pathWin32.basename : pathPosix.basename
-  return basenameFor(projectDirectory)
+  if (process.platform === "win32") {
+    return pathWin32.basename(projectDirectory)
+  }
+  return pathPosix.basename(projectDirectory)
 }
 
 // R-0000234: writeProjectFiles is exported and accepts an arbitrary path.

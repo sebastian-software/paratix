@@ -159,7 +159,16 @@ describe("writeProjectFiles", () => {
     })
   })
 
-  it("derives package.json name correctly from a Windows-style absolute path", () => {
+  // R-0000738: the previous implementation replaced `\\` with `/`
+  // unconditionally and called the platform default `basename`,
+  // which mangled POSIX paths containing legitimate backslash
+  // characters in a directory name. The new implementation selects
+  // the platform-specific `basename` so on POSIX, backslashes stay
+  // literal and the entire directory name is the basename. These
+  // tests pin the POSIX behaviour because the test suite runs on
+  // POSIX; the Windows code path is exercised via `path.win32`
+  // directly in the unit test below.
+  it("treats backslashes as literal characters on POSIX when deriving the package name", () => {
     // R-0000498 hardened assertWritableScaffoldDirectory to mkdir { recursive: false },
     // so the intermediate parent must be created explicitly first.
     mkdirSync(join(TEST_DIR, "windows"), { recursive: true })
@@ -169,10 +178,10 @@ describe("writeProjectFiles", () => {
     const raw = readFileSync(join(windowsPath, "package.json"), "utf8")
     const parsed = JSON.parse(raw) as { name: string }
 
-    expect(parsed.name).toBe("windows-project")
+    expect(parsed.name).toBe("C:\\tmp\\windows-project")
   })
 
-  it("derives package.json name correctly from a backslash-separated relative path", () => {
+  it("treats backslashes in a relative path as literal characters on POSIX", () => {
     mkdirSync(join(TEST_DIR, "windows"), { recursive: true })
     const windowsRelativePath = join(TEST_DIR, "windows", "tmp\\nested\\mixed-project")
     writeProjectFiles(windowsRelativePath)
@@ -180,7 +189,7 @@ describe("writeProjectFiles", () => {
     const raw = readFileSync(join(windowsRelativePath, "package.json"), "utf8")
     const parsed = JSON.parse(raw) as { name: string }
 
-    expect(parsed.name).toBe("mixed-project")
+    expect(parsed.name).toBe("tmp\\nested\\mixed-project")
   })
 
   // R-0000234: writeProjectFiles is exported, so a programmatic caller can

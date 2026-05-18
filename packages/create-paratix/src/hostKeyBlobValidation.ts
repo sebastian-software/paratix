@@ -172,40 +172,15 @@ function validateEcdsaHostKeyBlob(keyBuffer: Buffer, offset: number, algorithm: 
   assertEcdsaPointIsOnCurve(point.value, expectedCurveName, algorithm)
 }
 
-/**
- * Validate the OpenSSH SSH wire blob behind a host-key algorithm label.
- *
- * R-0000128: an algorithm label alone proves nothing — a MITM can ship
- * arbitrary bytes after the label. Rejecting malformed wire payloads
- * (truncated, wrong curve, point off-curve) before pinning a fingerprint
- * keeps create-paratix from anchoring trust to garbage.
- *
- * @param keyBuffer - Raw host-key wire blob as received from ssh2.
- * @param algorithm - Algorithm label already validated against the allowlist.
- * @throws {Error} When the blob does not match the algorithm's expected structure.
- */
-export function validateHostKeyBlob(
+// R-0000732 / R-0000733: parse the leading wire string, compare it
+// against the expected algorithm and return the authoritative payload
+// offset. Extracted so `validateHostKeyBlob` keeps its statement count
+// under the lint budget.
+function resolvePayloadOffset(
   keyBuffer: Buffer,
   algorithm: string,
-  payloadOffsetHint?: number
-): void {
-  // R-0000732: derive the payload offset from the wire format itself
-  // rather than re-deriving it from the algorithm string. The previous
-  // implementation computed `payloadOffset = 4 + Buffer.byteLength(algorithm)`
-  // which assumes the wire-encoded algorithm length matches the
-  // expected algorithm name. A peer could place a longer algorithm
-  // string on the wire (e.g. padded with trailing bytes) and still
-  // bypass the algorithm check upstream if it normalises differently.
-  // Parsing the leading wire string here and comparing it byte-for-byte
-  // against the expected algorithm closes that gap and gives us the
-  // authoritative offset for the remainder of the payload.
-  //
-  // R-0000733: when the caller already parsed the algorithm wire field
-  // (extractHostKeyAlgorithm in hostFingerprintBootstrap), it threads
-  // the resulting nextOffset in via payloadOffsetHint. We still parse
-  // the algorithm field locally to guarantee fail-closed behaviour for
-  // direct callers, and assert that the hint matches the parsed
-  // offset so the two callsites cannot drift.
+  payloadOffsetHint: number | undefined
+): number {
   const algorithmField = readWireString(keyBuffer, 0)
   if (algorithmField == null) {
     throwInvalidHostKeyBlob(algorithm, "missing or truncated algorithm field")
@@ -224,6 +199,31 @@ export function validateHostKeyBlob(
       `payload offset hint ${String(payloadOffsetHint)} does not match parsed offset ${String(payloadOffset)}`
     )
   }
+  return payloadOffset
+}
+
+/**
+ * Validate the OpenSSH SSH wire blob behind a host-key algorithm label.
+ *
+ * R-0000128: an algorithm label alone proves nothing — a MITM can ship
+ * arbitrary bytes after the label. Rejecting malformed wire payloads
+ * (truncated, wrong curve, point off-curve) before pinning a fingerprint
+ * keeps create-paratix from anchoring trust to garbage.
+ *
+ * @param keyBuffer - Raw host-key wire blob as received from ssh2.
+ * @param algorithm - Algorithm label already validated against the allowlist.
+ * @param payloadOffsetHint - Optional offset from a caller that already
+ *   parsed the algorithm wire field (R-0000733). When provided it must
+ *   match the offset parsed locally; otherwise the validator fails
+ *   closed so the two callsites cannot drift.
+ * @throws {Error} When the blob does not match the algorithm's expected structure.
+ */
+export function validateHostKeyBlob(
+  keyBuffer: Buffer,
+  algorithm: string,
+  payloadOffsetHint?: number
+): void {
+  const payloadOffset = resolvePayloadOffset(keyBuffer, algorithm, payloadOffsetHint)
 
   if (algorithm === "ssh-ed25519") {
     validateEd25519HostKeyBlob(keyBuffer, payloadOffset, algorithm)

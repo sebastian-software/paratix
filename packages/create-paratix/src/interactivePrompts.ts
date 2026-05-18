@@ -47,12 +47,10 @@ const INITIAL_USER_NON_TTY_HINT =
   "Pass --initial-user <root|name> (or run create-paratix from an interactive shell) " +
   "to skip the prompt."
 
-function isAttachedTty(): boolean {
-  return process.stdin.isTTY === true && process.stdout.isTTY === true
-}
-
+// `process.stdin.isTTY` and `process.stdout.isTTY` are typed `boolean`
+// in the Node @types but at runtime are `undefined` for non-TTY streams.
 function enforceInteractivePromptTty(remediationHint: string): void {
-  if (isAttachedTty()) return
+  if (process.stdin.isTTY && process.stdout.isTTY) return
   throw new CliExitError(`Interactive prompt requires a TTY. ${remediationHint}`, 1)
 }
 
@@ -382,13 +380,10 @@ async function scanAndConfirmFingerprint(parameters: {
   try {
     result = await scanner(host)
   } catch (error) {
-    // R-0000128: do not silently swallow scan failures. Surface a
-    // possible-MITM warning and abort scaffolding via the helper, which
-    // returns `never` and unconditionally throws — there is no
-    // fall-through path here, so we deliberately do not add a second
-    // `throw` (R-0000735). The function's `never` return type keeps
-    // the typing consistent for callers that rely on `result` being
-    // assigned after the try/catch.
+    // R-0000128: do not silently swallow scan failures. The helper
+    // returns `never` and unconditionally throws (R-0000735 — no
+    // second throw needed), so `result` is guaranteed to be assigned
+    // for the remainder of the function.
     failAfterScanFailure(host, error)
   }
 
