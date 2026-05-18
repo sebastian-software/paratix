@@ -358,12 +358,19 @@ export function printRecipeModuleResult(name: string, status: DisplayStatus, det
  * @param stderr - Captured standard error of the failed command.
  */
 export function printCommandError(stdout: string, stderr: string): void {
+  // R-0000789: defense-in-depth — apply the process-wide secret sink to the
+  // captured stdout/stderr immediately before they reach stderr. Every
+  // documented caller already masks via `maskRegisteredSecrets`, but a
+  // future caller that forgets the wrapper would otherwise leak verbatim
+  // through this terminal write. The double-masking is idempotent.
+  const maskedStdout = maskRegisteredSecrets(stdout)
+  const maskedStderr = maskRegisteredSecrets(stderr)
   const lines: string[] = []
-  if (stderr.trim()) {
-    lines.push(...stderr.trim().split("\n"))
+  if (maskedStderr.trim()) {
+    lines.push(...maskedStderr.trim().split("\n"))
   }
-  if (stdout.trim()) {
-    lines.push(...stdout.trim().split("\n"))
+  if (maskedStdout.trim()) {
+    lines.push(...maskedStdout.trim().split("\n"))
   }
   if (lines.length > 0) {
     console.error(pc.red(`${getErrorIndent()}Error output:`))
@@ -381,15 +388,21 @@ export function printCommandError(stdout: string, stderr: string): void {
  * @param stderr - Full standard error of the failed command.
  */
 export function printVerboseCommandError(stdout: string, stderr: string): void {
-  if (stderr.trim()) {
+  // R-0000789: defense-in-depth — apply the process-wide secret sink before
+  // the verbose dump reaches stderr so a caller that forgets to pre-mask the
+  // capture buffers still has its output redacted. The double-masking is
+  // idempotent for callers that already passed pre-masked strings.
+  const maskedStdout = maskRegisteredSecrets(stdout)
+  const maskedStderr = maskRegisteredSecrets(stderr)
+  if (maskedStderr.trim()) {
     console.error(pc.red(`${getErrorIndent()}Full stderr:`))
-    for (const line of stderr.trim().split("\n")) {
+    for (const line of maskedStderr.trim().split("\n")) {
       console.error(pc.red(`${getErrorIndent()}${line}`))
     }
   }
-  if (stdout.trim()) {
+  if (maskedStdout.trim()) {
     console.error(pc.red(`${getErrorIndent()}Full stdout:`))
-    for (const line of stdout.trim().split("\n")) {
+    for (const line of maskedStdout.trim().split("\n")) {
       console.error(pc.red(`${getErrorIndent()}${line}`))
     }
   }
