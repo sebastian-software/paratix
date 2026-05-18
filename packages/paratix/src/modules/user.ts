@@ -185,9 +185,31 @@ async function setPassword(
 // between the parser and the truncation guard so both sites stay in sync.
 const PASSWD_ENTRY_FIELD_COUNT = 7
 
-function parsePasswdEntry(entry: string): { home: string; shell: string; uid: string } {
+// R-0000859: validate the parsed passwd fields strictly. A getent entry
+// for a real user always carries a non-empty integer UID and absolute
+// home/shell paths (NSS guarantees this even for root and for system
+// users with `/sbin/nologin`). The previous parser happily returned
+// empty strings or non-numeric values, which `passwdAttributesMatch`
+// would then compare verbatim against the caller-supplied options and
+// either spuriously flag a mismatch or accept a partially-truncated
+// row. Reject any entry that fails these invariants by returning
+// `null` so the caller can surface a structured toolchain-error
+// instead of running apply against malformed data.
+function parsePasswdEntry(
+  entry: string
+): null | { home: string; shell: string; uid: string } {
   const fields = entry.split(":")
-  return { home: fields[5] ?? "", shell: fields[6] ?? "", uid: fields[2] ?? "" }
+  const uid = fields[2] ?? ""
+  const home = fields[5] ?? ""
+  const shell = fields[6] ?? ""
+  if (uid.length === 0) return null
+  const numericUid = Number(uid)
+  if (!Number.isInteger(numericUid) || numericUid < 0 || String(numericUid) !== uid) {
+    return null
+  }
+  if (!home.startsWith("/")) return null
+  if (!shell.startsWith("/")) return null
+  return { home, shell, uid }
 }
 
 function groupsContain(actual: Set<string>, desired: string[]): boolean {
@@ -297,7 +319,20 @@ async function passwdAttributesMatch(
       kind: TOOLCHAIN_ERROR,
     }
   }
+  // R-0000859: strict parser surfaces a `null` when the entry is
+  // syntactically valid (7 fields) but semantically broken — empty or
+  // non-integer UID, relative home/shell paths, etc. Treat that as a
+  // toolchain-error so the apply loop does not race against a NSS
+  // backend that is mid-failure.
   const parsed = parsePasswdEntry(entry)
+  if (parsed == null) {
+    return {
+      failure: failed(
+        `[user.present: ${name}] getent passwd returned a passwd entry with invalid uid/home/shell fields`
+      ),
+      kind: TOOLCHAIN_ERROR,
+    }
+  }
   if (options.uid != null && parsed.uid !== String(options.uid)) return { kind: "mismatch" }
   if (options.home != null && parsed.home !== options.home) return { kind: "mismatch" }
   if (options.shell != null && parsed.shell !== options.shell) return { kind: "mismatch" }
