@@ -125,6 +125,26 @@ function makeOneShotMissingTest(ssh: MockSsh, missingCommand: string): MockSsh["
     command === missingCommand && !consumed ? reportMissingOnce() : originalTest(command)
 }
 
+function makeAlwaysMissingPackageTest(
+  ssh: MockSsh,
+  missingCommand: string
+): { getProbeCount: () => number; test: MockSsh["test"] } {
+  const originalTest = ssh.test.bind(ssh)
+  let probeCount = 0
+  const reportStillMissing = async (command: string) => {
+    await Promise.resolve()
+    probeCount += 1
+    ssh.calls.push(command)
+    return false
+  }
+  return {
+    getProbeCount: () => probeCount,
+    async test(command) {
+      return command === missingCommand ? reportStillMissing(command) : originalTest(command)
+    },
+  }
+}
+
 // ---------------------------------------------------------------------------
 // pkg.installed
 // ---------------------------------------------------------------------------
@@ -224,6 +244,26 @@ describe("pkg.installed", () => {
     expect(ssh.calls).toContain(
       "DEBIAN_FRONTEND=noninteractive apt-get install -y -- 'nginx' 'curl'"
     )
+  })
+
+  it("apply returns failed when apt install succeeds but package remains missing", async () => {
+    const dpkgNginx =
+      "dpkg-query -W -f='${Status}' 'nginx' 2>/dev/null | grep -q 'install ok installed'"
+    const installCommand = "DEBIAN_FRONTEND=noninteractive apt-get install -y -- 'nginx'"
+    const ssh = createMockSsh({
+      ...APT_FOUND,
+      [installCommand]: { code: 0 },
+    })
+    const missingPackage = makeAlwaysMissingPackageTest(ssh, dpkgNginx)
+    ssh.test = missingPackage.test
+    const mod = pkg.installed("nginx")
+    const result = await mod.apply(ssh, emptyEnv)
+    expect(result.status).toBe("failed")
+    expect(result.error?.message).toContain(
+      "[package.installed: nginx] packages still missing after install: nginx"
+    )
+    expect(ssh.calls).toStrictEqual(["which apt-get", dpkgNginx, installCommand, dpkgNginx])
+    expect(missingPackage.getProbeCount()).toBe(2)
   })
 
   it("apply forwards options.timeout when last argument is an options object", async () => {
