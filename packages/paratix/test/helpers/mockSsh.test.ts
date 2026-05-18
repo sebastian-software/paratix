@@ -101,6 +101,33 @@ describe("createMockSsh", () => {
     expect(ssh.reconnectCalls).toHaveLength(1)
   })
 
+  it("rejects traversal paths for write, upload and download allowlists", async () => {
+    const ssh = createMockSsh(
+      {},
+      {
+        allowDownloads: [{ localPath: "/local/file", remotePath: /^\/remote\/file$/v }],
+        allowUploads: [
+          { localPath: "/local/input", options: { mode: "0644" }, remotePath: "/remote/input" },
+        ],
+        allowWrites: [{ options: { mode: "0600" }, remotePath: "/remote/output" }],
+      }
+    )
+
+    await expect(
+      ssh.writeFile("/remote/safe/../output", "secret content", { mode: "0600" })
+    ).rejects.toThrow(
+      "createMockSsh: unstubbed writeFile call: /remote/safe/../output (content redacted, 14 bytes)"
+    )
+    await expect(
+      ssh.uploadFile("/local/safe/../input", "/remote/input", { mode: "0644" })
+    ).rejects.toThrow(
+      "createMockSsh: unstubbed uploadFile call: /local/safe/../input -> /remote/input"
+    )
+    await expect(ssh.downloadFile("/remote/safe/../file", "/local/file")).rejects.toThrow(
+      "createMockSsh: unstubbed downloadFile call: /remote/safe/../file -> /local/file"
+    )
+  })
+
   it("does not include writeFile content in strict error messages", async () => {
     const ssh = createMockSsh()
     const secret = "super-secret-token-value"
