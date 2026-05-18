@@ -177,11 +177,23 @@ async function buildRebootMetaEntries(
  */
 function parseOsRelease(content: string): Partial<Record<string, string>> {
   const result: Record<string, string> = {}
-  for (const line of content.split("\n")) {
+  for (const rawLine of content.split("\n")) {
+    // R-0000857: strip a trailing CR so files with CRLF line endings
+    // (e.g. /etc/os-release authored on Windows or downloaded over a
+    // misconfigured transport) do not leak a stray "\r" into the parsed
+    // value. The previous `replaceAll(/^"|"$/gv, "")` also stripped the
+    // surrounding quotes asymmetrically — turning `value"` into `value` —
+    // which silently accepted malformed entries. Only strip the quotes
+    // when the value is symmetrically quoted (starts and ends with `"`).
+    const line = rawLine.endsWith("\r") ? rawLine.slice(0, -1) : rawLine
     const eqIndex = line.indexOf("=")
     if (eqIndex === -1) continue
     const key = line.slice(0, eqIndex)
-    const value = line.slice(eqIndex + 1).replaceAll(/^"|"$/gv, "")
+    const rawValue = line.slice(eqIndex + 1)
+    const value =
+      rawValue.length >= 2 && rawValue.startsWith('"') && rawValue.endsWith('"')
+        ? rawValue.slice(1, -1)
+        : rawValue
     result[key] = value
   }
   return result
