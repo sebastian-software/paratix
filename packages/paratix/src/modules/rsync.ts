@@ -371,15 +371,20 @@ async function executeRsync(parameters: {
   if (connectionInfo.verifiedHostPublicKey == null) {
     throw new RsyncMissingTrustAnchorError(phase)
   }
+  // R-0000855: open the try/finally directly after `createVerifiedKnownHostsFile`
+  // so a throw in `buildArguments` (or any other helper that runs between
+  // the temp-file creation and the rsync invocation) cannot leak the
+  // verified `known_hosts` file on disk. Previously the try only began
+  // after `buildArguments`, which meant any future helper added between
+  // these two points would silently bypass the cleanup.
   const verifiedKnownHostsPath = createVerifiedKnownHostsFile(connectionInfo)
-  const rsyncArguments = buildArguments({
-    connectionInfo,
-    dryRun,
-    options,
-    verifiedKnownHostsPath,
-  })
-
   try {
+    const rsyncArguments = buildArguments({
+      connectionInfo,
+      dryRun,
+      options,
+      verifiedKnownHostsPath,
+    })
     return await runRsyncTransferProcess({ options, phase, rsyncArguments })
   } finally {
     cleanupVerifiedKnownHostsFile(verifiedKnownHostsPath)
