@@ -7,6 +7,7 @@ import {
   clearHostKeyCache,
   computeFingerprint,
   extractAlgoFromKey,
+  HostKeyVerificationError,
   lookupHostKey,
   parseKnownHosts,
   validateExpectedHostPublicKey,
@@ -571,8 +572,10 @@ function makeKnownHostsContent(host: string, port: number, keyBuf: Buffer): stri
 
 describe("buildHostVerifier", () => {
   let readFileSyncMock: ReturnType<typeof vi.fn>
+  let readFileMock: ReturnType<typeof vi.fn>
   let appendFileMock: ReturnType<typeof vi.fn>
   let mkdirMock: ReturnType<typeof vi.fn>
+  let statMock: ReturnType<typeof vi.fn>
 
   const ed25519Key = makeKeyBuffer("ssh-ed25519", Buffer.from("real-key-material-here"))
   const rsaKey = makeKeyBuffer("ssh-rsa", Buffer.from("real-rsa-key-material"))
@@ -582,10 +585,16 @@ describe("buildHostVerifier", () => {
     const fs = await import("node:fs")
     const fsp = await import("node:fs/promises")
     readFileSyncMock = vi.mocked(fs.readFileSync)
+    readFileMock = vi.mocked(fsp.readFile)
     appendFileMock = vi.mocked(fsp.appendFile)
     mkdirMock = vi.mocked(fsp.mkdir)
+    statMock = vi.mocked(fsp.stat)
+    readFileMock.mockImplementation((...args: unknown[]) =>
+      Promise.resolve(synchronousReadFileMock(...args))
+    )
     appendFileMock.mockResolvedValue(null)
     mkdirMock.mockResolvedValue(null)
+    statMock.mockResolvedValue({ size: 0 })
   })
 
   afterEach(() => {
@@ -693,6 +702,26 @@ describe("buildHostVerifier", () => {
     await expect(
       buildHostVerifier("accept-new", { host: "newhost.com", port: 22 })
     ).rejects.toThrow(/Could not read known_hosts/v)
+    expect(appendFileMock).not.toHaveBeenCalled()
+  })
+
+  it("mode 'accept-new' refuses oversized known_hosts files", async () => {
+    statMock.mockResolvedValueOnce({ size: 16 * 1024 * 1024 + 1 })
+
+    await expect(
+      buildHostVerifier("accept-new", { host: "newhost.com", port: 22 })
+    ).rejects.toThrow(HostKeyVerificationError)
+    expect(readFileMock).not.toHaveBeenCalled()
+    expect(appendFileMock).not.toHaveBeenCalled()
+  })
+
+  it("mode 'accept-new' fails closed when async known_hosts read fails", async () => {
+    const accessError = Object.assign(new Error("Permission denied"), { code: "EACCES" })
+    readFileMock.mockRejectedValueOnce(accessError)
+
+    await expect(
+      buildHostVerifier("accept-new", { host: "newhost.com", port: 22 })
+    ).rejects.toThrow(HostKeyVerificationError)
     expect(appendFileMock).not.toHaveBeenCalled()
   })
 
