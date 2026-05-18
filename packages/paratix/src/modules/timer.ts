@@ -82,11 +82,18 @@ async function checkPresent(ssh: SshConnection, paths: TimerPaths): Promise<"nee
 
 async function checkAbsent(
   ssh: SshConnection,
-  locations: TimerLocations
+  locations: TimerLocations,
+  context: { name: string; path: string }
 ): Promise<"needs-apply" | "ok"> {
   if (await ssh.exists(locations.servicePath)) return NEEDS_APPLY
   if (await ssh.exists(locations.timerPath)) return NEEDS_APPLY
-  return (await hasResidualTimerState(ssh, locations.timerUnit)) ? NEEDS_APPLY : "ok"
+  // R-0000773: a structured probe failure has no failure channel in the
+  // check phase. Treat it as `needs-apply` so the apply phase can
+  // re-issue the probe and surface the toolchain error structurally;
+  // this mirrors the systemd.masked check handling (R-0000772).
+  const residual = await hasResidualTimerState(ssh, locations.timerUnit, context)
+  if (typeof residual !== "boolean") return NEEDS_APPLY
+  return residual ? NEEDS_APPLY : "ok"
 }
 
 type SyncOutcome =
@@ -305,16 +312,92 @@ function describeSnapshotPairFailure(
   return null
 }
 
-async function isTimerFullyActive(ssh: SshConnection, timerUnit: string): Promise<boolean> {
-  const enabled = await ssh.test(`${SYSTEMCTL} is-enabled --quiet -- ${shellQuote(timerUnit)}`)
-  if (!enabled) return false
-  return ssh.test(`${SYSTEMCTL} is-active --quiet -- ${shellQuote(timerUnit)}`)
+// R-0000773: distinguish toolchain failures from disabled/inactive state.
+// `ssh.test` collapses every non-zero exit (including failures of the
+// `systemctl` binary itself or a missing dbus session) into `false`, so a
+// transient probe error would look identical to "the timer is disabled".
+// Route both probes through `ssh.exec({ ignoreExitCode, silent })` and
+// classify the standardised systemctl exit codes:
+//   * `is-enabled --quiet`: 0 == enabled, 1 == disabled/masked/linked
+//     (well-formed disabled-class answer). Codes >= 4 are toolchain errors
+//     ("no such unit", "internal error"), `2` and `3` are reserved by
+//     systemctl as alias indicators. Treat anything outside the known
+//     well-formed set as a structured failure so a missing systemctl
+//     binary or a dbus outage no longer renders as "disabled".
+//   * `is-active --quiet`: 0 == active, 3 == inactive (well-formed). Any
+//     other code is a toolchain error.
+// Mirror the `isSwapActive` contract from R-0000722 by routing the
+// failure case through `failedCommand`. With `--quiet` systemctl emits
+// nothing on stdout, so the classification leans entirely on the exit
+// code rather than stdout content.
+// Treat 0..3 as well-formed answers from systemctl:
+//   * 0: enabled / active
+//   * 1: disabled / masked / linked (is-enabled), or `inactive` on older
+//        systemctl builds that do not emit the modern code 3
+//   * 2: alias of `linked-runtime`/`enabled-runtime` (is-enabled)
+//   * 3: inactive / failed (is-active)
+// Higher codes (e.g. 4 == "no such unit", 5 == "internal error") are
+// reserved for genuine problems that should surface as a structured
+// failure rather than be quietly downgraded to "disabled/inactive".
+const WELL_FORMED_IS_ENABLED_CODES = new Set([0, 1, 2, 3])
+const WELL_FORMED_IS_ACTIVE_CODES = new Set([0, 1, 2, 3])
+
+async function probeUnitEnabled(
+  ssh: SshConnection,
+  timerUnit: string,
+  context: { name: string; path: string }
+): Promise<boolean | ModuleResult> {
+  const result = await ssh.exec(`${SYSTEMCTL} is-enabled --quiet -- ${shellQuote(timerUnit)}`, {
+    ignoreExitCode: true,
+    silent: true,
+  })
+  if (!WELL_FORMED_IS_ENABLED_CODES.has(result.code)) {
+    return failedCommand(
+      `[${context.path}: ${context.name}] systemctl is-enabled failed while probing timer state`,
+      result
+    )
+  }
+  return result.code === 0
 }
 
-async function hasResidualTimerState(ssh: SshConnection, timerUnit: string): Promise<boolean> {
-  const enabled = await ssh.test(`${SYSTEMCTL} is-enabled --quiet -- ${shellQuote(timerUnit)}`)
+async function probeUnitActive(
+  ssh: SshConnection,
+  timerUnit: string,
+  context: { name: string; path: string }
+): Promise<boolean | ModuleResult> {
+  const result = await ssh.exec(`${SYSTEMCTL} is-active --quiet -- ${shellQuote(timerUnit)}`, {
+    ignoreExitCode: true,
+    silent: true,
+  })
+  if (!WELL_FORMED_IS_ACTIVE_CODES.has(result.code)) {
+    return failedCommand(
+      `[${context.path}: ${context.name}] systemctl is-active failed while probing timer state`,
+      result
+    )
+  }
+  return result.code === 0
+}
+
+async function isTimerFullyActive(
+  ssh: SshConnection,
+  timerUnit: string,
+  context: { name: string; path: string }
+): Promise<boolean | ModuleResult> {
+  const enabled = await probeUnitEnabled(ssh, timerUnit, context)
+  if (typeof enabled !== "boolean") return enabled
+  if (!enabled) return false
+  return probeUnitActive(ssh, timerUnit, context)
+}
+
+async function hasResidualTimerState(
+  ssh: SshConnection,
+  timerUnit: string,
+  context: { name: string; path: string }
+): Promise<boolean | ModuleResult> {
+  const enabled = await probeUnitEnabled(ssh, timerUnit, context)
+  if (typeof enabled !== "boolean") return enabled
   if (enabled) return true
-  return ssh.test(`${SYSTEMCTL} is-active --quiet -- ${shellQuote(timerUnit)}`)
+  return probeUnitActive(ssh, timerUnit, context)
 }
 
 function isMissingUnitDisableResult(result: { stderr?: string; stdout?: string }): boolean {
@@ -376,7 +459,20 @@ async function applyPresent(
   if (!sync.ok) return sync.failure
 
   const filesMatched = sync.serviceMatched && sync.timerMatched
-  const fullyActive = filesMatched ? await isTimerFullyActive(ssh, paths.timerUnit) : false
+  // R-0000773: a structured probe failure must surface as a failed
+  // ModuleResult instead of being silently downgraded to "not fully
+  // active". Without this guard a transient systemctl/binary error would
+  // trigger an unnecessary `enable --now` against a unit whose state is
+  // actually unknown.
+  let fullyActive = false
+  if (filesMatched) {
+    const probe = await isTimerFullyActive(ssh, paths.timerUnit, {
+      name,
+      path: "timer.scheduled",
+    })
+    if (typeof probe !== "boolean") return probe
+    fullyActive = probe
+  }
 
   // If both files matched and the timer is already enabled and active, nothing
   // needs to change. Reporting `ok` here keeps direct apply calls (e.g. inside
@@ -704,7 +800,7 @@ export const timer = {
       },
       async check(ssh: null | SshConnection): Promise<"needs-apply" | "ok"> {
         if (!ssh) return NEEDS_APPLY
-        return checkAbsent(ssh, locations)
+        return checkAbsent(ssh, locations, { name, path: "timer.absent" })
       },
       name: `timer.absent: ${name}`,
     }
@@ -744,7 +840,7 @@ export const timer = {
         },
         async check(ssh: null | SshConnection): Promise<"needs-apply" | "ok"> {
           if (!ssh) return NEEDS_APPLY
-          return checkAbsent(ssh, locations)
+          return checkAbsent(ssh, locations, { name, path: "timer.scheduled" })
         },
         name: `timer.scheduled: ${name}`,
       }

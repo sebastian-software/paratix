@@ -202,4 +202,33 @@ describe("timer.scheduled — apply (state: present, idempotency)", () => {
     expect(writes.some((w) => w.path === SERVICE_PATH)).toBe(false)
     expect(ssh.calls).toContain("systemctl restart -- 'backup.timer'")
   })
+
+  // R-0000773: when the on-disk files match and `is-enabled` reports a
+  // toolchain error (e.g. exit code 4 == "no such unit", or a higher
+  // code from a missing dbus session), the apply must surface a
+  // structured failure rather than running `enable --now` against a
+  // unit whose state could not be probed. Previously the legacy
+  // `ssh.test` rendered the probe error as "not fully active" and the
+  // apply silently re-enabled the timer.
+  it("R-0000773: apply returns failed when is-enabled probe reports a toolchain error", async () => {
+    const ssh = createMockSsh({
+      [`[ -e '${SERVICE_PATH}' ]`]: { code: 0 },
+      [`[ -e '${TIMER_PATH}' ]`]: { code: 0 },
+      [`cat '${SERVICE_PATH}'`]: { code: 0, stdout: expectedServiceContent },
+      [`cat '${TIMER_PATH}'`]: { code: 0, stdout: expectedTimerContent },
+      [`stat -c '%a' '${SERVICE_PATH}'`]: { code: 0, stdout: "644\n" },
+      [`stat -c '%a' '${TIMER_PATH}'`]: { code: 0, stdout: "644\n" },
+      "systemctl is-enabled --quiet -- 'backup.timer'": {
+        code: 4,
+        stderr: "Failed to connect to bus",
+      },
+    })
+    const mod = timer.scheduled("backup", baseOptions)
+    const result = await mod.apply(ssh, emptyEnv)
+    expect(result.status).toBe("failed")
+    expect(String(result.error)).toContain(
+      "systemctl is-enabled failed while probing timer state"
+    )
+    expect(ssh.calls).not.toContain("systemctl enable --now -- 'backup.timer'")
+  })
 })

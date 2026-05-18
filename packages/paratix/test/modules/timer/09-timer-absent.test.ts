@@ -382,4 +382,41 @@ describe("timer.absent", () => {
     expect(String(result.error)).toContain("rollback enable failed")
     expect(String(result.error)).toContain("enable rollback boom")
   })
+
+  // R-0000773: the check phase has no failure channel; a toolchain error
+  // from `systemctl is-enabled` (exit code 4 == "no such unit", or any
+  // other code outside the well-formed enabled/disabled set) must
+  // downgrade to `needs-apply` so the apply phase can resurface the
+  // structured failure. Previously the legacy `ssh.test` path collapsed
+  // every non-zero exit into `false` and rendered the timer as
+  // "not enabled" — the probe error was invisible.
+  it("R-0000773: check returns needs-apply when is-enabled probe reports a toolchain error", async () => {
+    const ssh = createMockSsh({
+      [`[ -e '${SERVICE_PATH}' ]`]: { code: 1 },
+      [`[ -e '${TIMER_PATH}' ]`]: { code: 1 },
+      "systemctl is-enabled --quiet -- 'backup.timer'": {
+        code: 4,
+        stderr: "Failed to connect to bus",
+      },
+    })
+    const mod = timer.absent("backup")
+    expect(await mod.check(ssh, emptyEnv)).toBe("needs-apply")
+  })
+
+  // R-0000773: a toolchain error from `is-active` (e.g. exit code 5) on
+  // an enabled timer must also surface as `needs-apply` rather than
+  // silently returning `ok`.
+  it("R-0000773: check returns needs-apply when is-active probe reports a toolchain error", async () => {
+    const ssh = createMockSsh({
+      [`[ -e '${SERVICE_PATH}' ]`]: { code: 1 },
+      [`[ -e '${TIMER_PATH}' ]`]: { code: 1 },
+      "systemctl is-enabled --quiet -- 'backup.timer'": { code: 1 },
+      "systemctl is-active --quiet -- 'backup.timer'": {
+        code: 5,
+        stderr: "Internal error",
+      },
+    })
+    const mod = timer.absent("backup")
+    expect(await mod.check(ssh, emptyEnv)).toBe("needs-apply")
+  })
 })
