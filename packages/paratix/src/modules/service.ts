@@ -19,6 +19,53 @@ function validateUnitName(name: string): string {
   return name
 }
 
+const SYSTEMCTL_STATE_OK = 0
+const SYSTEMCTL_STATE_DISABLED_LIKE = 1
+const SYSTEMCTL_STATE_RUNTIME_LIKE = 2
+const SYSTEMCTL_STATE_INACTIVE_LIKE = 3
+const WELL_FORMED_SYSTEMCTL_STATE_CODES = new Set([
+  SYSTEMCTL_STATE_DISABLED_LIKE,
+  SYSTEMCTL_STATE_INACTIVE_LIKE,
+  SYSTEMCTL_STATE_OK,
+  SYSTEMCTL_STATE_RUNTIME_LIKE,
+])
+
+async function probeServiceEnabled(
+  ssh: SshConnection,
+  serviceName: string,
+  unitName: string
+): Promise<boolean | ModuleResult> {
+  const result = await ssh.exec(`${SYSTEMCTL} is-enabled --quiet -- ${shellQuote(unitName)}`, {
+    ignoreExitCode: true,
+    silent: true,
+  })
+  if (!WELL_FORMED_SYSTEMCTL_STATE_CODES.has(result.code)) {
+    return failedCommand(
+      `[service.disabled: ${serviceName}] systemctl is-enabled failed while probing service state`,
+      result
+    )
+  }
+  return result.code === SYSTEMCTL_STATE_OK
+}
+
+async function probeServiceActive(
+  ssh: SshConnection,
+  serviceName: string,
+  unitName: string
+): Promise<boolean | ModuleResult> {
+  const result = await ssh.exec(`${SYSTEMCTL} is-active --quiet -- ${shellQuote(unitName)}`, {
+    ignoreExitCode: true,
+    silent: true,
+  })
+  if (!WELL_FORMED_SYSTEMCTL_STATE_CODES.has(result.code)) {
+    return failedCommand(
+      `[service.stopped: ${serviceName}] systemctl is-active failed while probing service state`,
+      result
+    )
+  }
+  return result.code === SYSTEMCTL_STATE_OK
+}
+
 /**
  * Modules for managing systemd services.
  *
@@ -36,7 +83,8 @@ export const service = {
     return {
       async apply(ssh: null | SshConnection): Promise<ModuleResult> {
         if (!ssh) return failed(`[service.disabled: ${name}] SSH connection is required`)
-        const enabled = await ssh.test(`${SYSTEMCTL} is-enabled --quiet -- ${shellQuote(unitName)}`)
+        const enabled = await probeServiceEnabled(ssh, name, unitName)
+        if (typeof enabled !== "boolean") return enabled
         if (!enabled) return { status: "ok" }
         const result = await ssh.exec(`${SYSTEMCTL} disable -- ${shellQuote(unitName)}`, {
           ignoreExitCode: true,
@@ -48,7 +96,8 @@ export const service = {
       },
       async check(ssh: null | SshConnection): Promise<"needs-apply" | "ok"> {
         if (!ssh) return NEEDS_APPLY
-        const enabled = await ssh.test(`${SYSTEMCTL} is-enabled --quiet -- ${shellQuote(unitName)}`)
+        const enabled = await probeServiceEnabled(ssh, name, unitName)
+        if (typeof enabled !== "boolean") return NEEDS_APPLY
         return enabled ? "needs-apply" : "ok"
       },
       name: `service.disabled: ${name}`,
@@ -224,7 +273,8 @@ export const service = {
     return {
       async apply(ssh: null | SshConnection): Promise<ModuleResult> {
         if (!ssh) return failed(`[service.stopped: ${name}] SSH connection is required`)
-        const active = await ssh.test(`${SYSTEMCTL} is-active --quiet -- ${shellQuote(unitName)}`)
+        const active = await probeServiceActive(ssh, name, unitName)
+        if (typeof active !== "boolean") return active
         if (!active) return { status: "ok" }
         const result = await ssh.exec(`${SYSTEMCTL} stop -- ${shellQuote(unitName)}`, {
           ignoreExitCode: true,
@@ -236,7 +286,8 @@ export const service = {
       },
       async check(ssh: null | SshConnection): Promise<"needs-apply" | "ok"> {
         if (!ssh) return NEEDS_APPLY
-        const active = await ssh.test(`${SYSTEMCTL} is-active --quiet -- ${shellQuote(unitName)}`)
+        const active = await probeServiceActive(ssh, name, unitName)
+        if (typeof active !== "boolean") return NEEDS_APPLY
         return active ? "needs-apply" : "ok"
       },
       name: `service.stopped: ${name}`,
