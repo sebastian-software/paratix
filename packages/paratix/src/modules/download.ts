@@ -1,7 +1,7 @@
+/* eslint-disable max-lines -- R-0000673 adds an ancestor-walk helper; splitting the module is out of scope for this finding */
 import { createHash, timingSafeEqual } from "node:crypto"
 import { posix as path } from "node:path"
 
-/* eslint-disable max-lines */
 import { failed, failedCommand } from "../moduleFailure.js"
 import { withRegisteredSecrets } from "../secretSink.js"
 import { shellQuote, validateMktempPath, validateMode } from "../ssh.js"
@@ -374,21 +374,65 @@ async function allocateTemporaryDownloadParameters(
   return { ...parameters, destination: temporaryDestination }
 }
 
+// R-0000673: `mkdir -p` followed an attacker-planted symlink at any
+// not-yet-existing ancestor and would happily create directories outside the
+// operator-supplied tree. `ensureDownloadDestinationNotSymlinked` only probes
+// ancestors that already existed at the time of the check, so it cannot close
+// the race for missing levels. Walk the ancestor chain top-down in TypeScript
+// and create each missing directory with plain `mkdir` (no `-p`, so a planted
+// symlink at the leaf trips EEXIST instead of being silently followed). A
+// trailing `[ ! -L "$current" ]` test catches any link that appeared between
+// the existence check and the `mkdir` call. The shell snippet below keeps the
+// existence probe, the create, and the symlink re-check in a single remote
+// round-trip per level so the operator-visible call sequence stays compact.
+function buildAncestorMkdirCommand(ancestor: string): string {
+  const quoted = shellQuote(ancestor)
+  return (
+    `if [ -L ${quoted} ]; then ` +
+    `printf 'ancestor is symlink: %s\\n' ${quoted} >&2; exit 1; ` +
+    `fi; ` +
+    `if [ ! -e ${quoted} ]; then ` +
+    `mkdir -- ${quoted} || exit 1; ` +
+    `if [ -L ${quoted} ]; then ` +
+    `printf 'ancestor became symlink after mkdir: %s\\n' ${quoted} >&2; exit 1; ` +
+    `fi; ` +
+    `elif [ ! -d ${quoted} ]; then ` +
+    `printf 'ancestor exists but is not a directory: %s\\n' ${quoted} >&2; exit 1; ` +
+    `fi`
+  )
+}
+
+function ancestorsTopDown(directory: string): string[] {
+  const ancestors: string[] = []
+  let current = directory
+  const seen = new Set<string>()
+  while (current !== "/" && current !== "." && !seen.has(current)) {
+    seen.add(current)
+    ancestors.push(current)
+    current = path.dirname(current)
+  }
+  return ancestors.reverse()
+}
+
 async function createDownloadTargetDirectory(
   conn: SshConnection,
   parameters: DownloadParameters
 ): Promise<ModuleResult | undefined> {
-  const result = await conn.exec(`mkdir -p "$(dirname ${shellQuote(parameters.destination)})"`, {
-    ignoreExitCode: true,
-    secrets: parameters.secrets,
-    silent: true,
-  })
-  if (result.code !== 0) {
-    return failedCommand(
-      `[download] failed to create target directory for ${parameters.destination}`,
-      result,
-      parameters.secrets
-    )
+  const targetDirectory = path.dirname(parameters.destination)
+  for (const ancestor of ancestorsTopDown(targetDirectory)) {
+    // eslint-disable-next-line no-await-in-loop -- ancestor walk is sequential by nature
+    const result = await conn.exec(buildAncestorMkdirCommand(ancestor), {
+      ignoreExitCode: true,
+      secrets: parameters.secrets,
+      silent: true,
+    })
+    if (result.code !== 0) {
+      return failedCommand(
+        `[download] failed to create target directory for ${parameters.destination}`,
+        result,
+        parameters.secrets
+      )
+    }
   }
   return undefined
 }

@@ -21,7 +21,16 @@ const createMockSsh: typeof createBaseMockSsh = (responses, options) =>
       // eslint-disable-next-line security/detect-unsafe-regex -- bounded character class, not user input
       { command: /^\[ -L '\/(?:opt|tmp|usr|var)(?:\/[^']*)?' \]$/v, result: { code: 1 } },
       { command: /^stat -c '%a %U %G' '\/(?:opt|usr)\//v, result: { stdout: "644 root root" } },
-      { command: /^mkdir -p /v, result: { code: 0 } },
+      // R-0000673: createDownloadTargetDirectory walks each ancestor of the
+      // download dirname and creates missing levels with a per-level
+      // [ ! -L ] guard rather than a single `mkdir -p`. The stub matches the
+      // composite "if [ -L X ]; then …; mkdir -- X …" command for any
+      // ancestor under the allowed prefixes.
+      {
+        // eslint-disable-next-line security/detect-unsafe-regex -- bounded character class, not user input
+        command: /^if \[ -L '\/(?:opt|tmp|usr|var)(?:\/[^']*)?' \];/v,
+        result: { code: 0 },
+      },
       ...buildSafeDownloadApplyStubs(),
       { command: /^\[ -f \/var\/lib\/paratix\/flags\//v, result: { code: 1 } },
       { command: /^mkdir \/var\/lib\/paratix\/flags\/.*\.lock'/v, result: { code: 0 } },
@@ -261,6 +270,49 @@ function expectSafeCurlDownloadPipeline(parameters: {
 
 function commandIndexes(calls: string[], expectedCommand: string): number[] {
   return calls.flatMap((command, index) => (command === expectedCommand ? [index] : []))
+}
+
+// R-0000673: createDownloadTargetDirectory issues one command per ancestor of
+// the download dirname instead of a single `mkdir -p`. The shell snippet
+// guards each level with `[ -L ]` before and after `mkdir`, closing the race
+// where an attacker could plant a symlink between the pre-check and a
+// recursive `mkdir -p` resolving missing levels.
+function buildAncestorMkdirCommand(ancestor: string): string {
+  const quoted = `'${ancestor.replaceAll("'", "'\\''")}'`
+  return (
+    `if [ -L ${quoted} ]; then ` +
+    `printf 'ancestor is symlink: %s\\n' ${quoted} >&2; exit 1; ` +
+    `fi; ` +
+    `if [ ! -e ${quoted} ]; then ` +
+    `mkdir -- ${quoted} || exit 1; ` +
+    `if [ -L ${quoted} ]; then ` +
+    `printf 'ancestor became symlink after mkdir: %s\\n' ${quoted} >&2; exit 1; ` +
+    `fi; ` +
+    `elif [ ! -d ${quoted} ]; then ` +
+    `printf 'ancestor exists but is not a directory: %s\\n' ${quoted} >&2; exit 1; ` +
+    `fi`
+  )
+}
+
+function buildAncestorMkdirCommandsForDestination(destinationPath: string): string[] {
+  const targetDirectory = destinationPath.slice(0, destinationPath.lastIndexOf("/"))
+  const ancestors: string[] = []
+  let current = targetDirectory
+  while (current !== "" && current !== "/") {
+    ancestors.push(current)
+    const lastSlash = current.lastIndexOf("/")
+    current = lastSlash <= 0 ? "/" : current.slice(0, lastSlash)
+  }
+  return ancestors.reverse().map((ancestor) => buildAncestorMkdirCommand(ancestor))
+}
+
+function lastAncestorMkdirCommandForDestination(destinationPath: string): string {
+  const commands = buildAncestorMkdirCommandsForDestination(destinationPath)
+  const last = commands.at(-1)
+  if (last === undefined) {
+    throw new Error(`destination has no ancestor directories: ${destinationPath}`)
+  }
+  return last
 }
 
 describe("download.url", () => {
@@ -593,15 +645,36 @@ describe("download.url", () => {
       expect(mockSsh.calls).not.toContain(`mv -T -- '${temporaryDestination}' '${destination}'`)
     })
 
-    it("creates target directory via mkdir -p", async () => {
+    it("creates target directory via per-level guarded mkdir", async () => {
       const mockSsh = createMockSsh(downloadMktempStub(destination, temporaryDestination))
       const mod = download.url(destination, url, allowUnverifiedDownload)
       await mod.apply(mockSsh, emptyEnv)
-      expect(mockSsh.calls).toContain(`mkdir -p "$(dirname '${destination}')"`)
+      for (const command of buildAncestorMkdirCommandsForDestination(destination)) {
+        expect(mockSsh.calls).toContain(command)
+      }
+    })
+
+    // R-0000673: closing the TOCTOU between ensureDownloadDestinationNotSymlinked
+    // and `mkdir -p` requires the create step to walk the ancestors top-down
+    // with a per-level [ ! -L ] guard. Verify the ordering and that no plain
+    // `mkdir -p "$(dirname ...)"` slips back in.
+    it("walks ancestors top-down with per-level symlink guard", async () => {
+      const mockSsh = createMockSsh(downloadMktempStub(destination, temporaryDestination))
+      const mod = download.url(destination, url, allowUnverifiedDownload)
+      await mod.apply(mockSsh, emptyEnv)
+      const ancestorCommands = buildAncestorMkdirCommandsForDestination(destination)
+      const indexes = ancestorCommands.map((command) => mockSsh.calls.indexOf(command))
+      expect(indexes.every((index) => index >= 0)).toBe(true)
+      for (let i = 1; i < indexes.length; i += 1) {
+        expect(indexes[i]).toBeGreaterThan(indexes[i - 1])
+      }
+      expect(mockSsh.calls.some((command) => command.startsWith(`mkdir -p "$(dirname `))).toBe(
+        false
+      )
     })
 
     it("returns failedCommand and aborts before mktemp when target directory creation fails", async () => {
-      const mkdirCommand = `mkdir -p "$(dirname '${destination}')"`
+      const mkdirCommand = lastAncestorMkdirCommandForDestination(destination)
       const mockSsh = createMockSsh({
         [mkdirCommand]: { code: 1, stderr: "mkdir: Permission denied\n" },
       })
@@ -968,13 +1041,17 @@ describe("download.url", () => {
             stdout: `${temporaryDestination}\n`,
           },
         })
+        const ancestorMkdirCommands = buildAncestorMkdirCommandsForDestination(destination)
         const curlCommand = `curl -fsSL -o '${temporaryDestination}' ${httpsOnlyCurlProtocolFlags} --config -`
         const cleanupCommand = `rm -f -- '${temporaryDestination}'`
-        const execMock = vi
-          .fn<(command: string) => Promise<{ code: number; stderr: string; stdout: string }>>()
-          .mockResolvedValueOnce({ code: 0, stderr: "", stdout: "" })
-          .mockRejectedValueOnce(primaryError)
-          .mockRejectedValueOnce(cleanupError)
+        const execMock =
+          vi.fn<(command: string) => Promise<{ code: number; stderr: string; stdout: string }>>()
+        // R-0000673: ancestor-by-ancestor mkdir means one resolved value per
+        // ancestor before the primary error path triggers on mktemp.
+        for (const _ of ancestorMkdirCommands) {
+          execMock.mockResolvedValueOnce({ code: 0, stderr: "", stdout: "" })
+        }
+        execMock.mockRejectedValueOnce(primaryError).mockRejectedValueOnce(cleanupError)
         const mockSsh = {
           ...base,
           async exec(command: string) {
@@ -985,7 +1062,7 @@ describe("download.url", () => {
 
         const mod = download.url(destination, url, allowUnverifiedDownload)
         await expect(mod.apply(mockSsh, emptyEnv)).rejects.toBe(primaryError)
-        expect(execMock).toHaveBeenCalledTimes(3)
+        expect(execMock).toHaveBeenCalledTimes(ancestorMkdirCommands.length + 2)
         // R-0000226: the symlink guard runs `[ -L ... ]` for the destination
         // and every ancestor of dirname before the mkdir/mktemp/curl flow.
         expect(base.calls).toStrictEqual([
@@ -993,7 +1070,7 @@ describe("download.url", () => {
           `[ -L '/usr/local/bin' ]`,
           `[ -L '/usr/local' ]`,
           `[ -L '/usr' ]`,
-          `mkdir -p "$(dirname '${destination}')"`,
+          ...ancestorMkdirCommands,
           `mktemp "$(dirname -- '${destination}')/.paratix-download.XXXXXX"`,
           curlCommand,
           cleanupCommand,
@@ -1575,7 +1652,7 @@ describe("download.github", () => {
     })
 
     it("returns failedCommand and aborts before mktemp when target directory creation fails", async () => {
-      const mkdirCommand = `mkdir -p "$(dirname '${destination}')"`
+      const mkdirCommand = lastAncestorMkdirCommandForDestination(destination)
       const token = "ghp_secret_token"
       const mockSsh = createMockSsh({
         [mkdirCommand]: { code: 1, stderr: "mkdir: Read-only file system\n" },
@@ -1700,7 +1777,7 @@ describe("download.github", () => {
       expect(result.status).toBe("failed")
     })
 
-    it("creates target directory via mkdir -p", async () => {
+    it("creates target directory via per-level guarded mkdir", async () => {
       const mockSsh = createMockSsh({
         [`mktemp "$(dirname -- '${destination}')/.paratix-download.XXXXXX"`]: {
           stdout: `${temporaryDestination}\n`,
@@ -1708,7 +1785,9 @@ describe("download.github", () => {
       })
       const mod = download.github(destination, { ...allowUnverifiedDownload, asset, repo, tag })
       await mod.apply(mockSsh, emptyEnv)
-      expect(mockSsh.calls).toContain(`mkdir -p "$(dirname '${destination}')"`)
+      for (const command of buildAncestorMkdirCommandsForDestination(destination)) {
+        expect(mockSsh.calls).toContain(command)
+      }
     })
 
     it("keeps the destination untouched when SHA-256 verification fails", async () => {
@@ -2183,7 +2262,7 @@ describe("download.large", () => {
     })
 
     it("returns failedCommand and aborts before mktemp or flag writes when target directory creation fails", async () => {
-      const mkdirCommand = `mkdir -p "$(dirname '${destination}')"`
+      const mkdirCommand = lastAncestorMkdirCommandForDestination(destination)
       const mockSsh = createMockSsh({
         [mkdirCommand]: { code: 1, stderr: "mkdir: No space left on device\n" },
       })
