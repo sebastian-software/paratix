@@ -132,6 +132,35 @@ describe("timer.absent", () => {
     expect(result.status).toBe("changed")
   })
 
+  // R-0000780: a "no such unit" diagnostic from `disable --now` can mask
+  // a real stop failure. When systemd reports the unit file as missing
+  // but `is-enabled` / `is-active` still report the timer as live, the
+  // apply must surface a structured failure rather than silently
+  // dropping the unit files.
+  it("R-0000780: fails when disable swallows the stop failure but the timer is still active", async () => {
+    const ssh = createTimerApplyMockSsh({
+      [`[ -e '${SERVICE_PATH}' ]`]: { code: 0 },
+      [`[ -e '${TIMER_PATH}' ]`]: { code: 0 },
+      "systemctl disable --now -- 'backup.timer'": {
+        code: 1,
+        stderr: "Failed to disable unit: Unit file backup.timer does not exist.",
+      },
+      // The pre-disable activation snapshot reports the timer as active
+      // and enabled so the rollback path replays the snapshot when the
+      // disable returns a structured failure.
+      "systemctl enable --now -- 'backup.timer'": { code: 0 },
+      "systemctl is-active --quiet -- 'backup.timer'": { code: 0 },
+      "systemctl is-enabled --quiet -- 'backup.timer'": { code: 0 },
+    })
+    const mod = timer.absent("backup")
+    const result = await mod.apply(ssh, emptyEnv)
+    expect(result.status).toBe("failed")
+    expect(String(result.error)).toContain(
+      "systemctl disable --now reported missing unit but the timer is still enabled or active"
+    )
+    expect(ssh.calls).not.toContain(`rm -f '${TIMER_PATH}' '${SERVICE_PATH}'`)
+  })
+
   it("apply returns failed when disable reports a real stop error", async () => {
     const ssh = createAbsentApplyWithExistingUnitsMockSsh({
       "systemctl disable --now -- 'backup.timer'": {

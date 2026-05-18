@@ -573,7 +573,31 @@ async function disableTimerForAbsent(
       silent: true,
     }
   )
-  if (disable.code === 0 || isMissingUnitDisableResult(disable)) return undefined
+  if (disable.code === 0) return undefined
+  if (isMissingUnitDisableResult(disable)) {
+    // R-0000780: a "no such unit" diagnostic from `disable --now` can
+    // mask a real stop failure — systemd may report the unit file as
+    // missing (e.g. after the wants/ symlink was already pruned) while
+    // the timer itself is still enabled or active in RAM. Without an
+    // additional residual-state probe the apply path would silently
+    // skip the disable and proceed to `rm -f` the unit files, leaving
+    // a still-active timer pointing at a non-existent service. Probe
+    // the live state and surface a structured failure when the unit
+    // is in fact still enabled or active. A toolchain failure of the
+    // probe (R-0000773) propagates through unchanged.
+    const residualOrFailure = await hasResidualTimerState(ssh, locations.timerUnit, {
+      name,
+      path: module,
+    })
+    if (typeof residualOrFailure !== "boolean") return residualOrFailure
+    if (residualOrFailure) {
+      return failedCommand(
+        `[${module}: ${name}] systemctl disable --now reported missing unit but the timer is still enabled or active`,
+        disable
+      )
+    }
+    return undefined
+  }
   return failedCommand(`[${module}: ${name}] systemctl disable --now failed`, disable)
 }
 
