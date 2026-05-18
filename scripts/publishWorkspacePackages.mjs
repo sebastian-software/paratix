@@ -42,6 +42,21 @@ async function assertWorkspacePackagesMatchFilesystem(fs) {
   // (`packages/<name>/package.json`), so we keep the same convention
   // here for symmetry with the existing test mocks.
   const entries = await fs.readdir(PACKAGES_ROOT_DIRECTORY, { withFileTypes: true })
+  // R-0000830: refuse to publish when any entry in packages/ is a
+  // symbolic link. Symlinks under packages/ usually indicate a developer
+  // testing setup (e.g. linking a local checkout into the workspace) or
+  // an accidental include of an external tree. Publishing through a
+  // symlink would resolve to whatever the link currently targets, which
+  // can ship unintended files or expose a path outside the repository.
+  // Detect this before any registry side effect so the operator gets a
+  // clear diagnostic instead of an unexplained tarball.
+  const symbolicLinkEntries = entries.filter((entry) => entry.isSymbolicLink()).map((e) => e.name)
+  if (symbolicLinkEntries.length > 0) {
+    throw new Error(
+      `Refusing to publish: ${PACKAGES_ROOT_DIRECTORY}/ contains symbolic links (${symbolicLinkEntries.join(", ")}). ` +
+        "Remove the symlinks (e.g. unlink a development checkout) and re-run the publish script."
+    )
+  }
   const filesystemDirectories = entries
     .filter((entry) => entry.isDirectory())
     .map((entry) => entry.name)
