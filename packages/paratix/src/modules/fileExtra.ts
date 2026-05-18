@@ -12,7 +12,12 @@ import {
   type SshConnection,
 } from "../types.js"
 import { compileUserRegex, hexHashesEqual, sha256String } from "./fileHelpers.js"
-import { ownershipMatches, readOwnership, renderChownCommand } from "./fileMetadataHelpers.js"
+import {
+  ownershipMatches,
+  readOwnership,
+  renderChownCommand,
+  resolveWriteMode,
+} from "./fileMetadataHelpers.js"
 import { assertValidGroupName, assertValidUserName } from "./posixNames.js"
 import { isRegularFileWithoutSymlink, isSymlink } from "./remoteFileChecks.js"
 
@@ -20,7 +25,6 @@ const EXEC_OPTS = { ignoreExitCode: true, silent: true } as const
 
 /** Index where the file-type field starts in `stat -c '%s %a %U %G %F %Y'` output. */
 const STAT_TYPE_START_INDEX = 4
-const DEFAULT_FILE_WRITE_MODE = "0644"
 
 async function concatFragments(fragments: string[]): Promise<string> {
   // eslint-disable-next-line security/detect-non-literal-fs-filename -- paths from module config, not user input
@@ -51,26 +55,12 @@ async function concatFragmentsSafely(
   }
 }
 
-function normalizeMode(mode: string): string {
-  return mode.startsWith("0") ? mode : `0${mode}`
-}
-
-async function resolveWriteMode(
-  ssh: SshConnection,
-  remotePath: string,
-  explicitMode?: string
-): Promise<string> {
-  if (explicitMode != null) return explicitMode
-  const exists = await ssh.exists(remotePath)
-  if (!exists) return DEFAULT_FILE_WRITE_MODE
-  // R-0000558: route the stat call through ssh.exec with ignoreExitCode so a
-  // race between the existence probe and the mode read (file unlinked,
-  // EACCES, EIO, …) does not surface as a raw CommandError. Fall back to the
-  // default write mode in that case, matching the "no existing file" branch.
-  const result = await ssh.exec(`stat -c '%a' ${shellQuote(remotePath)}`, EXEC_OPTS)
-  if (result.code !== 0) return DEFAULT_FILE_WRITE_MODE
-  return normalizeMode(result.stdout.trim())
-}
+// R-0000705: `normalizeMode` and `resolveWriteMode` are consolidated in
+// `fileMetadataHelpers` so callers across the file module share the same
+// existence probe, mode-read fallback and "0"-prefix normalization. The
+// helper version uses `readOwnership` (`stat -c '%a %U %G'`) so the
+// ownership snapshot is reusable, but for callers that only need the mode
+// the additional fields are inert.
 
 type BlockMarkers = { begin: string; end: string; full: string }
 type ParsedManagedBlock =
