@@ -1,4 +1,4 @@
-import { shellQuoteForQuadlet } from "./quadletHelpers.js"
+import { shellQuote } from "../ssh.js"
 
 // R-0000176: ask podman for a deterministic, line-oriented projection that
 // stays small even for images with multi-megabyte manifests. The first line
@@ -6,9 +6,10 @@ import { shellQuoteForQuadlet } from "./quadletHelpers.js"
 const QUADLET_INSPECT_FORMAT = "{{.Id}}\\n{{range .RepoDigests}}{{.}}\\n{{end}}"
 
 export function buildQuadletImageInspectCommand(image: string): string {
-  // R-0000606: reuse the shared `shellQuoteForQuadlet` instead of redefining
-  // the same single-quote escape logic locally.
-  const quotedImage = shellQuoteForQuadlet(image)
+  // R-0000606 / R-0000854: reuse the canonical `shellQuote` from `../ssh.js`
+  // so podman command builders share a single POSIX single-quote escape
+  // implementation with the rest of the codebase.
+  const quotedImage = shellQuote(image)
   return `podman image inspect --format '${QUADLET_INSPECT_FORMAT}' -- ${quotedImage}`
 }
 

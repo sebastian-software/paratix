@@ -1,3 +1,5 @@
+import { shellQuote } from "../ssh.js"
+
 type QuadletAutoUpdate = "local" | "registry"
 type QuadletHealthOnFailure = "kill" | "none" | "restart" | "stop"
 type QuadletPullPolicy = "always" | "missing" | "never" | "newer"
@@ -313,7 +315,7 @@ export function buildQuadletInstallSection(options: QuadletContainerOptions): st
 
 export function buildQuadletImagePullCommand(options: QuadletImageUpdateOptions): string {
   const authFileFlag =
-    options.authFile == null ? "" : ` --authfile ${shellQuoteForQuadlet(options.authFile)}`
+    options.authFile == null ? "" : ` --authfile ${shellQuote(options.authFile)}`
   // R-0000569: do NOT redirect stderr into stdout. podman emits
   // registry/auth/transport diagnostics on stderr; merging them into stdout
   // would route sensitive credentials material into `failedCommand`'s
@@ -321,7 +323,7 @@ export function buildQuadletImagePullCommand(options: QuadletImageUpdateOptions)
   // `quadletPullOutputIndicatesChange`. Keep stderr separate; the change
   // heuristic also consults `result.stderr` so progress markers emitted on
   // stderr still flip the changed flag.
-  return `podman pull${authFileFlag} -- ${shellQuoteForQuadlet(options.image)}`
+  return `podman pull${authFileFlag} -- ${shellQuote(options.image)}`
 }
 
 export function getQuadletContainerFilePath(name: string): string {
@@ -342,9 +344,10 @@ export function quadletPullOutputIndicatesChange(...outputs: string[]): boolean 
   )
 }
 
-// R-0000606: shared shell quoter for every quadlet helper module so podman
-// command builders do not redefine the same POSIX single-quote escape logic.
-export function shellQuoteForQuadlet(value: string): string {
-  const escapedQuote = "'\\''"
-  return `'${value.replaceAll("'", escapedQuote)}'`
-}
+// R-0000606 / R-0000854: the dedicated `shellQuoteForQuadlet` helper has
+// been removed. Quadlet helpers now reuse the canonical `shellQuote` from
+// `../ssh.js` (re-exported by `sshHelpers.ts`) so a single implementation of
+// POSIX single-quote escaping covers every shell command builder in the
+// codebase. The original R-0000606 motivation — sharing a quoter across the
+// quadlet helper modules — is now satisfied by importing from the project's
+// canonical helper instead of maintaining a quadlet-local copy.
