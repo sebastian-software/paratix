@@ -261,6 +261,32 @@ async function resolveDesiredComposeContent(options: {
 }
 
 /**
+ * R-0000756: per-module memoiser for the desired compose content. The runner
+ * calls `check()` and then `apply()` sequentially on the same Module instance,
+ * but both used to re-read `options.src` from disk independently. A local
+ * file that changes between those two reads would otherwise let check observe
+ * one revision (and pass/fail accordingly) while apply uploads or writes a
+ * different revision — analogous to file.template's `cachedContent` pattern.
+ *
+ * The memoiser returns the cached value on every subsequent call and resolves
+ * to `null` only when neither `src` nor `content` were provided.
+ *
+ * @param options - The compose-config source / content options.
+ * @returns A nullary loader that resolves to the cached desired content.
+ */
+function createCachedComposeContentResolver(options: {
+  content?: string
+  src?: string
+}): () => Promise<null | string> {
+  let cachedContent: null | string | undefined
+  return async () => {
+    // eslint-disable-next-line require-atomic-updates -- runner invokes check() then apply() sequentially on the same Module instance
+    cachedContent ??= await resolveDesiredComposeContent(options)
+    return cachedContent
+  }
+}
+
+/**
  * R-0000710: cap the size of stdout passed to `JSON.parse`. A compromised
  * remote (or a pathologically large compose project) could otherwise feed
  * arbitrarily large output into `compose ps --format json` and force a
@@ -924,12 +950,6 @@ function generateSystemdUnit(
   return lines.join("\n")
 }
 
-/** Options that {@link createComposeConfigCheck} reads to compute the desired state. */
-type ComposeConfigCheckOptions = {
-  content?: string
-  src?: string
-}
-
 /**
  * Build the `check` function for `compose.config`.
  *
@@ -946,14 +966,17 @@ type ComposeConfigCheckOptions = {
  */
 function createComposeConfigCheck(
   remotePath: string,
-  options: ComposeConfigCheckOptions
+  loadDesiredContent: () => Promise<null | string>
 ): (ssh: null | SshConnection) => Promise<"needs-apply" | "ok"> {
   return async (ssh) => {
     if (!ssh) return NEEDS_APPLY
 
     if (!(await isRegularFileWithoutSymlink(ssh, remotePath))) return NEEDS_APPLY
 
-    const desiredContent = await resolveDesiredComposeContent(options)
+    // R-0000756: share the cached desired content with apply so a local src
+    // change between check and apply cannot produce a check verdict that
+    // disagrees with the bytes apply later uploads.
+    const desiredContent = await loadDesiredContent()
     if (desiredContent == null) return NEEDS_APPLY
 
     const remoteContent = await ssh.readFile(remotePath)
@@ -989,17 +1012,14 @@ function createComposeConfigCheck(
 async function writeComposeStagingFile(
   ssh: SshConnection,
   stagingPath: string,
-  options: { content?: string; src?: string }
+  desiredContent: string
 ): Promise<void> {
-  if (options.src !== undefined && options.src !== "") {
-    // Always pass an explicit { mode } to uploadFile so the resulting
-    // compose.yml mode is independent of the uploadFile temp default.
-    await ssh.uploadFile(options.src, stagingPath, { mode: COMPOSE_CONFIG_MODE })
-    return
-  }
-  if (options.content !== undefined && options.content !== "") {
-    await ssh.writeFile(stagingPath, options.content, { mode: COMPOSE_CONFIG_MODE })
-  }
+  // R-0000756: write the cached desired content (resolved once via
+  // `createCachedComposeContentResolver`) rather than re-reading
+  // `options.src` here. Sharing one buffer between check and apply
+  // prevents a local file change in the window between the two phases
+  // from producing a check verdict that disagrees with the apply payload.
+  await ssh.writeFile(stagingPath, desiredContent, { mode: COMPOSE_CONFIG_MODE })
 }
 
 async function validateStagedComposeFile(parameters: {
@@ -1094,13 +1114,13 @@ async function ensureComposeProjectDirectoryNotSymlinked(
 }
 
 async function applyComposeConfig(parameters: {
-  options: { content?: string; src?: string }
+  loadDesiredContent: () => Promise<null | string>
   projectDirectory: string
   remotePath: string
   runtime: ComposeRuntime
   ssh: SshConnection
 }): Promise<ModuleResult> {
-  const { options, projectDirectory, remotePath, runtime, ssh } = parameters
+  const { loadDesiredContent, projectDirectory, remotePath, runtime, ssh } = parameters
   // R-0000530: validate symlink-free projectDirectory BEFORE creating the
   // staging path. createComposeStagingPath runs `mktemp` inside
   // projectDirectory; if the directory (or an ancestor) is a symlink, the
@@ -1115,7 +1135,16 @@ async function applyComposeConfig(parameters: {
   // `compose up` cannot pick up an unvalidated config. The staging file is
   // also unique per apply and cleaned up if validation or anything else throws.
   try {
-    await writeComposeStagingFile(ssh, stagingPath, options)
+    // R-0000756: resolve the cached desired content after mktemp so the
+    // existing failure ordering (mktemp-output validation, project-dir
+    // symlink check) is preserved. The loader returns the same buffer
+    // check() already observed, so the staging write and the check verdict
+    // can never disagree about a local src file that mutated between phases.
+    const desiredContent = await loadDesiredContent()
+    if (desiredContent == null) {
+      return failed(`[compose.config] content or src is required for ${projectDirectory}`)
+    }
+    await writeComposeStagingFile(ssh, stagingPath, desiredContent)
     const validationFailure = await validateStagedComposeFile({
       projectDirectory,
       runtime,
@@ -1161,6 +1190,11 @@ export const compose = {
   }): Module {
     const { projectDirectory, runtime: explicitRuntime } = options
     const remotePath = `${projectDirectory}/compose.yml`
+    // R-0000756: cache the desired compose content once per Module instance
+    // so check() and apply() always observe the same bytes — even when the
+    // local `src` file is rewritten between the two phases. Mirrors
+    // file.template's `cachedContent` pattern.
+    const loadDesiredContent = createCachedComposeContentResolver(options)
 
     return {
       async apply(ssh: null | SshConnection): Promise<ModuleResult> {
@@ -1183,14 +1217,14 @@ export const compose = {
         }
 
         return applyComposeConfig({
-          options,
+          loadDesiredContent,
           projectDirectory,
           remotePath,
           runtime,
           ssh: connection,
         })
       },
-      check: createComposeConfigCheck(remotePath, options),
+      check: createComposeConfigCheck(remotePath, loadDesiredContent),
       name: `compose.config: ${projectDirectory}`,
     }
   },

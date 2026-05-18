@@ -674,6 +674,46 @@ describe("compose.config — check", () => {
     expect(result).toBe("needs-apply")
   })
 
+  // R-0000756: the desired compose content is read once per Module
+  // instance and cached so that check() and apply() observe the same
+  // bytes — a local `src` file that mutates between check and apply
+  // cannot produce a verdict that disagrees with the apply payload.
+  it("R-0000756: caches src content across check and apply", async () => {
+    const initialContent = "services:\n  web:\n    image: nginx:1\n"
+    const driftedContent = "services:\n  web:\n    image: nginx:2\n"
+    const { readFile } = await import("node:fs/promises")
+    let readCount = 0
+    vi.mocked(readFile).mockImplementation(async () => {
+      await Promise.resolve()
+      readCount += 1
+      return readCount === 1 ? initialContent : driftedContent
+    })
+
+    const mockSsh = createComposeMockSsh({
+      [`[ -e '${remotePath}' ]`]: { code: 0 },
+      [`cat '${remotePath}'`]: { code: 0, stdout: initialContent },
+      [`stat -c '%a' '${remotePath}'`]: { code: 0, stdout: "600" },
+      [`${composeCmd("podman")} -f '${stagingPath}' config --quiet`]: { code: 0 },
+      [`mv -T '${stagingPath}' '${remotePath}'`]: { code: 0 },
+      [`rm -f -- '${stagingPath}'`]: { code: 0 },
+    })
+
+    const mod = compose.config({ projectDirectory, src: "/local/compose.yml" })
+    const checkResult = await mod.check(mockSsh, emptyEnv)
+    expect(checkResult).toBe("ok")
+    // A second call simulates the runner re-reading the same Module
+    // instance during apply; the cached content must survive across both.
+    const applyResult = await mod.apply(mockSsh, emptyEnv)
+    expect(applyResult.status).toBe("changed")
+    // The local src was "modified" between phases, but the cache means
+    // only the first revision is ever observed.
+    expect(readCount).toBe(1)
+    expect(mockSsh.writeFileCalls).toHaveLength(1)
+    expect(mockSsh.writeFileCalls[0]?.content).toBe(initialContent)
+    expect(mockSsh.writeFileCalls[0]?.content).not.toBe(driftedContent)
+    vi.mocked(readFile).mockRestore()
+  })
+
   it("reads local src file to compare content and mode", async () => {
     const localContent = "services:\n  web:\n    image: nginx\n"
     const { readFile } = await import("node:fs/promises")
@@ -776,37 +816,33 @@ describe("compose.config — apply", () => {
     expect(mockSsh.calls).toContain(`rm -f -- '${secondStagingPath}'`)
   })
 
-  it("uploads src file with the explicit COMPOSE_CONFIG_MODE and validates", async () => {
-    const uploadedFiles: Array<{
-      dest: string
-      options: { mode?: string } | undefined
-      src: string
-    }> = []
+  // R-0000756: the src content is read once and cached so check() and
+  // apply() see the same bytes. Apply now writes the cached content via
+  // writeFile (not uploadFile) so the staging file always carries the
+  // exact bytes check inspected.
+  it("writes src file content with the explicit COMPOSE_CONFIG_MODE and validates", async () => {
+    const localContent = "services:\n  web:\n    image: nginx\n"
+    const { readFile } = await import("node:fs/promises")
+    vi.mocked(readFile).mockResolvedValue(localContent)
+
     const mockSsh = createComposeMockSsh({
       [`[ -e '${remotePath}' ]`]: { code: 1 },
       [`${composeCmd("podman")} -f '${stagingPath}' config --quiet`]: { code: 0 },
       [`mv -T '${stagingPath}' '${remotePath}'`]: { code: 0 },
       [`rm -f -- '${stagingPath}'`]: { code: 0 },
     })
-    mockSsh.uploadFile = async (
-      src: string,
-      dest: string,
-      options?: { mode?: string }
-    ): Promise<void> => {
-      await Promise.resolve()
-      uploadedFiles.push({ dest, options, src })
-    }
 
     const mod = compose.config({ projectDirectory, src: "/local/compose.yml" })
     const result = await mod.apply(mockSsh, emptyEnv)
     expect(result.status).toBe("changed")
-    expect(uploadedFiles[0]?.src).toBe("/local/compose.yml")
-    // R-0000228: the src is uploaded to the staging path before validation.
-    expect(uploadedFiles[0]?.dest).toBe(stagingPath)
-    // The src branch must forward an explicit mode so the resulting file is not
-    // produced as the silent uploadFile temp-mode default.
-    expect(uploadedFiles[0]?.options).toStrictEqual({ mode: "0600" })
+    expect(mockSsh.writeFileCalls).toHaveLength(1)
+    const stagingWrite = mockSsh.writeFileCalls[0]
+    expect(stagingWrite?.remotePath).toBe(stagingPath)
+    expect(stagingWrite?.content).toBe(localContent)
+    expect(stagingWrite?.options).toStrictEqual({ mode: "0600" })
+    expect(mockSsh.uploadFileCalls).toHaveLength(0)
     expect(mockSsh.calls).toContain(`${composeCmd("podman")} -f '${stagingPath}' config --quiet`)
+    vi.mocked(readFile).mockRestore()
     expect(mockSsh.calls).toContain(`mv -T '${stagingPath}' '${remotePath}'`)
   })
 
@@ -959,45 +995,24 @@ describe("compose.config — apply", () => {
       return newContent
     })
 
-    const uploadedFiles: Array<{ dest: string; mode: string | undefined; src: string }> = []
-    const writtenFiles: Array<{
-      content: string
-      mode: string | undefined
-      path: string
-    }> = []
     const mockSsh = createComposeMockSsh({
       [`[ -e '${remotePath}' ]`]: { code: 0 },
       [`${composeCmd("podman")} -f '${stagingPath}' config --quiet`]: { code: 1 },
       [`cat '${remotePath}'`]: { code: 0, stdout: priorContent },
       [`rm -f -- '${stagingPath}'`]: { code: 0 },
     })
-    mockSsh.uploadFile = async (
-      src: string,
-      dest: string,
-      uploadOptions?: { mode?: string }
-    ): Promise<void> => {
-      await Promise.resolve()
-      uploadedFiles.push({ dest, mode: uploadOptions?.mode, src })
-    }
-    mockSsh.writeFile = async (
-      path: string,
-      content: string,
-      writeOptions: { mode: string }
-    ): Promise<void> => {
-      await Promise.resolve()
-      writtenFiles.push({ content, mode: writeOptions.mode, path })
-    }
 
     const mod = compose.config({ projectDirectory, src: "/local/broken.yml" })
     const result = await mod.apply(mockSsh, emptyEnv)
 
     expect(result.status).toBe("failed")
-    // The src was uploaded to the staging path; the active compose.yml never
-    // received a write or upload because validation failed before mv -T.
-    expect(uploadedFiles).toHaveLength(1)
-    expect(uploadedFiles[0]?.src).toBe("/local/broken.yml")
-    expect(uploadedFiles[0]?.dest).toBe(stagingPath)
-    expect(writtenFiles).toHaveLength(0)
+    // R-0000756: src content is now cached and written via writeFile (not
+    // uploadFile) so the staging file always carries the bytes check
+    // inspected. Validation still failed before mv -T.
+    expect(mockSsh.writeFileCalls).toHaveLength(1)
+    expect(mockSsh.writeFileCalls[0]?.remotePath).toBe(stagingPath)
+    expect(mockSsh.writeFileCalls[0]?.content).toBe(newContent)
+    expect(mockSsh.uploadFileCalls).toHaveLength(0)
     expect(mockSsh.calls).not.toContain(`mv -T '${stagingPath}' '${remotePath}'`)
     expect(mockSsh.calls).toContain(`rm -f -- '${stagingPath}'`)
   })
