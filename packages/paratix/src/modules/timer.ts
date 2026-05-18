@@ -552,7 +552,7 @@ async function readTimerActivationSnapshot(
 function isTimerActivationSnapshot(
   value: ModuleResult | TimerActivationSnapshot
 ): value is TimerActivationSnapshot {
-  return typeof (value as TimerActivationSnapshot).enabled === "boolean"
+  return "enabled" in value && typeof value.enabled === "boolean"
 }
 
 async function runTimerActivationRollback(
@@ -880,8 +880,21 @@ async function handleAbsentDisableFailure(
   return failed(`${disableMessage}; rollback enable failed: ${restoreMessage}`)
 }
 
+// R-0000858: thin wrapper that forwards the AbsentContext's name/module
+// fields as the structured probe context. Keeps `applyAbsent` flat so
+// it stays under the project-wide max-statements lint budget.
+async function resolveAbsentActivationSnapshot(
+  ssh: SshConnection,
+  context: AbsentContext
+): Promise<ModuleResult | TimerActivationSnapshot> {
+  return readTimerActivationSnapshot(ssh, context.locations.timerUnit, {
+    name: context.name,
+    path: context.module,
+  })
+}
+
 async function applyAbsent(ssh: SshConnection, context: AbsentContext): Promise<ModuleResult> {
-  const { locations, module, name } = context
+  const { locations } = context
 
   // Idempotent no-op: if neither unit file exists, there is nothing to clean
   // up unless systemd still has residual active/enabled state for the timer.
@@ -891,14 +904,11 @@ async function applyAbsent(ssh: SshConnection, context: AbsentContext): Promise<
   // a structured ModuleResult instead of silently coercing them to
   // disabled+inactive. The snapshot helper now mirrors the
   // probeUnitEnabled/probeUnitActive contract.
-  const activationProbe = await readTimerActivationSnapshot(ssh, locations.timerUnit, {
-    name,
-    path: module,
-  })
-  if (!isTimerActivationSnapshot(activationProbe)) return activationProbe
-  const activationSnapshot = activationProbe
-  const residualState = activationSnapshot.enabled || activationSnapshot.active
-  if (!serviceExists && !timerExists && !residualState) return { status: "ok" }
+  const activationSnapshot = await resolveAbsentActivationSnapshot(ssh, context)
+  if (!isTimerActivationSnapshot(activationSnapshot)) return activationSnapshot
+  if (!serviceExists && !timerExists && !activationSnapshot.enabled && !activationSnapshot.active) {
+    return { status: "ok" }
+  }
 
   const disableFailure = await disableTimerForAbsent(ssh, context)
   if (disableFailure) {

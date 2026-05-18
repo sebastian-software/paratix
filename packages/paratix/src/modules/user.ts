@@ -188,16 +188,15 @@ const PASSWD_ENTRY_FIELD_COUNT = 7
 // R-0000859: validate the parsed passwd fields strictly. A getent entry
 // for a real user always carries a non-empty integer UID and absolute
 // home/shell paths (NSS guarantees this even for root and for system
-// users with `/sbin/nologin`). The previous parser happily returned
-// empty strings or non-numeric values, which `passwdAttributesMatch`
-// would then compare verbatim against the caller-supplied options and
-// either spuriously flag a mismatch or accept a partially-truncated
-// row. Reject any entry that fails these invariants by returning
-// `null` so the caller can surface a structured toolchain-error
-// instead of running apply against malformed data.
-function parsePasswdEntry(
-  entry: string
-): null | { home: string; shell: string; uid: string } {
+// users whose shell points at a disabled-login binary). The previous
+// parser happily returned empty strings or non-numeric values, which
+// `passwdAttributesMatch` would then compare verbatim against the
+// caller-supplied options and either spuriously flag a mismatch or
+// accept a partially-truncated row. Reject any entry that fails these
+// invariants by returning `null` so the caller can surface a
+// structured toolchain-error instead of running apply against
+// malformed data.
+function parsePasswdEntry(entry: string): { home: string; shell: string; uid: string } | null {
   const fields = entry.split(":")
   const uid = fields[2] ?? ""
   const home = fields[5] ?? ""

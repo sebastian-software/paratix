@@ -439,7 +439,11 @@ describe("ssh.knownHosts", () => {
     expect(result).toBe("needs-apply")
   })
 
-  it("check surfaces ssh-keygen lookup failures for absent state", async () => {
+  // R-0000835: check no longer rejects on a toolchain failure from
+  // `ssh-keygen -F`. The lookup error is caught and downgraded to
+  // `needs-apply` so the runner forwards execution to `apply`, which
+  // surfaces the failure as a structured ModuleResult.
+  it("check downgrades ssh-keygen lookup failures to needs-apply for absent state", async () => {
     const mockSsh = createMockSsh({
       [`ssh-keygen -F 'github.com' -f '${knownHostsPath}'`]: {
         code: 255,
@@ -448,9 +452,8 @@ describe("ssh.knownHosts", () => {
     })
     const mod = ssh.knownHosts("github.com", { state: "absent" })
 
-    await expect(mod.check(mockSsh, emptyEnv)).rejects.toThrow(
-      "ssh-keygen -F exited with unexpected code 255"
-    )
+    const result = await mod.check(mockSsh, emptyEnv)
+    expect(result).toBe("needs-apply")
   })
 
   it("apply verifies a scanned host key against the expected fingerprint before appending it", async () => {
