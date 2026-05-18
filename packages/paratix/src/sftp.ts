@@ -46,6 +46,26 @@ function noopStreamError(): void {
 }
 
 /**
+ * R-0000687: register a one-shot `error` listener on the SFTP wrapper before
+ * we call `sftp.end()`. Without this sink, ssh2 may emit `error` on the
+ * wrapper after the surrounding Promise has already settled (e.g. when the
+ * underlying channel reports a teardown error post-close). Node would treat
+ * that emit as an unhandled `error` and crash the process. The once-listener
+ * absorbs that straggler emit without keeping the SFTPWrapper alive. The
+ * runtime guard accommodates lightweight test doubles that do not implement
+ * the full EventEmitter surface.
+ *
+ * @param sftp - The SFTP wrapper to silence on late errors.
+ */
+function silenceLateSftpErrors(sftp: SFTPWrapper): void {
+  const maybeOnce = (sftp as { once?: unknown }).once
+  if (typeof maybeOnce !== "function") return
+  sftp.once("error", () => {
+    /* swallow late SFTP wrapper errors after the transfer has settled */
+  })
+}
+
+/**
  * R-0000255: short-circuit the openSftp wait when the SSH connection is torn
  * down externally (e.g. the SIGINT path in runner.ts). Without this, the
  * session-open promise would idle until the default timeout fires even
@@ -109,7 +129,10 @@ function openSftp(options: {
   try {
     client.sftp((error: Error | undefined, sftp: SFTPWrapper | undefined) => {
       if (settled) {
-        sftp?.end()
+        if (sftp !== undefined) {
+          silenceLateSftpErrors(sftp)
+          sftp.end()
+        }
         return
       }
       clearTimeout(timer)
@@ -146,6 +169,7 @@ function createTransferSettlement(options: {
       options.clearTimer()
       if (settled) return
       settled = true
+      silenceLateSftpErrors(options.sftp)
       options.sftp.end()
       options.reject(reason)
     },
@@ -153,6 +177,7 @@ function createTransferSettlement(options: {
       options.clearTimer()
       if (settled) return
       settled = true
+      silenceLateSftpErrors(options.sftp)
       options.sftp.end()
       options.resolve()
     },
@@ -504,6 +529,7 @@ export async function sftpDownload(
           streams = openDownloadStreams(sftp, remotePath, temporaryPath)
           shouldCleanupTemporaryFile = true
         } catch (streamError) {
+          silenceLateSftpErrors(sftp)
           sftp.end()
           rejectWithCleanup(normalizeTransferError(streamError, "Failed to create SFTP download"))
           return
@@ -574,6 +600,7 @@ export async function sftpUpload(
         try {
           streams = openUploadStreams(sftp, localPath, remotePath)
         } catch (streamError) {
+          silenceLateSftpErrors(sftp)
           sftp.end()
           reject(normalizeTransferError(streamError, "Failed to create SFTP upload"))
           return
@@ -626,6 +653,7 @@ export async function sftpUploadContent(
         try {
           streams = openContentUploadStreams(sftp, content, remotePath)
         } catch (streamError) {
+          silenceLateSftpErrors(sftp)
           sftp.end()
           reject(normalizeTransferError(streamError, "Failed to create SFTP content upload"))
           return
