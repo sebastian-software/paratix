@@ -47,6 +47,12 @@ const createMockSsh: typeof createBaseMockSsh = (responses, options) =>
         result: { code: 0 },
       },
       { command: /^mkdir -p '\/(?:remote|var)\//v, result: { code: 0 } },
+      {
+        command:
+          // eslint-disable-next-line security/detect-unsafe-regex -- bounded mock command regex, not user input
+          /^if \[ -L '\/(?:remote|var)(?:\/[^']*)?' \];/v,
+        result: { code: 0 },
+      },
       { command: /^chmod '[0-7]+' '\/(?:remote|var)\//v, result: { code: 0 } },
       { command: /^chmod -- '[0-7]+' '\/(?:remote|var)\//v, result: { code: 0 } },
       { command: /\nchmod -- '[0-7]+' "\$path"$/v, result: { code: 0 } },
@@ -69,6 +75,12 @@ const unicodeContent = "Grüße aus Köln – こんにちは мир\n"
 // and may contain unicode.
 const unicodeName = "ascii-datei.txt"
 const unicodeRemotePath = "/remote/über ordner/äöü.txt"
+
+function findGuardedMkdirCall(calls: string[], directory: string): string | undefined {
+  return calls.find(
+    (call) => call.includes(`if [ -L '${directory}' ];`) && call.includes(`mkdir -- '${directory}'`)
+  )
+}
 
 describe("file.directory", () => {
   it("check returns ok when the directory exists", async () => {
@@ -158,7 +170,9 @@ describe("file.directory", () => {
     const result = await mod.apply(ssh, emptyEnv)
 
     expect(result.status).toBe("changed")
-    expect(ssh.calls).toContain("mkdir -p '/var/app'")
+    expect(findGuardedMkdirCall(ssh.calls, "/var")).toBeDefined()
+    expect(findGuardedMkdirCall(ssh.calls, "/var/app")).toBeDefined()
+    expect(ssh.calls).not.toContain("mkdir -p '/var/app'")
   })
 
   it("regression R-0000109 — apply returns changed and only issues chmod when only mode drifted", async () => {
@@ -254,6 +268,38 @@ describe("file.directory", () => {
     expect(ssh.calls).not.toContain("mkdir -p '/var/app/data'")
   })
 
+  it("fails when the inline mkdir guard sees a symlink after the precheck", async () => {
+    const guardedMkdirCommand = [
+      "if [ -L '/var/app' ]; then",
+      "  printf '%s\\n' 'directory path is a symlink' >&2",
+      "  exit 1",
+      "fi",
+      "if [ -e '/var/app' ] && [ ! -d '/var/app' ]; then",
+      "  printf '%s\\n' 'directory path exists and is not a directory' >&2",
+      "  exit 1",
+      "fi",
+      "if [ ! -d '/var/app' ]; then",
+      "  mkdir -- '/var/app'",
+      "fi",
+    ].join("\n")
+    const ssh = createMockSsh({
+      "[ -d '/var/app' ]": { code: 1 },
+      "[ -L '/var' ]": { code: 1 },
+      "[ -L '/var/app' ]": { code: 1 },
+      [guardedMkdirCommand]: {
+        code: 1,
+        stderr: "directory path is a symlink\n",
+      },
+    })
+    const mod = file.directory("/var/app")
+    const result = await mod.apply(ssh, emptyEnv)
+
+    expect(result.status).toBe("failed")
+    expect(String(result.error)).toContain("mkdir failed")
+    expect(ssh.calls).toContain(guardedMkdirCommand)
+    expect(ssh.calls).not.toContain("mkdir -p '/var/app'")
+  })
+
   it("R-0000270: returns failed when mkdir on a read-only filesystem exits non-zero", async () => {
     // mkdir failures (read-only mount, EACCES on a guarded mount) must
     // propagate as a failedCommand ModuleResult so the runner reports the
@@ -262,7 +308,19 @@ describe("file.directory", () => {
       "[ -d '/var/app' ]": { code: 1 },
       "[ -L '/var' ]": { code: 1 },
       "[ -L '/var/app' ]": { code: 1 },
-      "mkdir -p '/var/app'": {
+      [[
+        "if [ -L '/var/app' ]; then",
+        "  printf '%s\\n' 'directory path is a symlink' >&2",
+        "  exit 1",
+        "fi",
+        "if [ -e '/var/app' ] && [ ! -d '/var/app' ]; then",
+        "  printf '%s\\n' 'directory path exists and is not a directory' >&2",
+        "  exit 1",
+        "fi",
+        "if [ ! -d '/var/app' ]; then",
+        "  mkdir -- '/var/app'",
+        "fi",
+      ].join("\n")]: {
         code: 1,
         stderr: "mkdir: cannot create directory '/var/app': Read-only file system",
       },

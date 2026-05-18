@@ -1,3 +1,5 @@
+import { posix as path } from "node:path"
+
 import type { ModuleResult, SshConnection } from "../types.js"
 
 import { failed, failedCommand } from "../moduleFailure.js"
@@ -100,11 +102,43 @@ async function ensureDirectoryExists(input: {
   // R-0000270: mkdir on a read-only fs or in a directory the current user
   // cannot write to must propagate as a failedCommand result, not as an
   // unguarded CommandError that bypasses the runner failure pipeline.
-  const result = await input.ssh.exec(`mkdir -p ${shellQuote(input.remotePath)}`, EXEC_OPTS)
-  if (result.code !== 0) {
-    return failedCommand(`[file.directory: ${input.remotePath}] mkdir failed`, result)
+  for (const directory of directoryPathWithAncestors(input.remotePath)) {
+    // eslint-disable-next-line no-await-in-loop -- parent directories must be created before children
+    const result = await input.ssh.exec(renderGuardedMkdirCommand(directory), EXEC_OPTS)
+    if (result.code !== 0) {
+      return failedCommand(`[file.directory: ${input.remotePath}] mkdir failed`, result)
+    }
   }
   return true
+}
+
+function directoryPathWithAncestors(remotePath: string): string[] {
+  const normalized = path.normalize(remotePath)
+  const parts = normalized.split("/").filter(Boolean)
+  const directories: string[] = []
+  let current = ""
+  for (const part of parts) {
+    current = `${current}/${part}`
+    directories.push(current)
+  }
+  return directories
+}
+
+function renderGuardedMkdirCommand(directory: string): string {
+  const quotedDirectory = shellQuote(directory)
+  return [
+    `if [ -L ${quotedDirectory} ]; then`,
+    `  printf '%s\\n' 'directory path is a symlink' >&2`,
+    `  exit 1`,
+    `fi`,
+    `if [ -e ${quotedDirectory} ] && [ ! -d ${quotedDirectory} ]; then`,
+    `  printf '%s\\n' 'directory path exists and is not a directory' >&2`,
+    `  exit 1`,
+    `fi`,
+    `if [ ! -d ${quotedDirectory} ]; then`,
+    `  mkdir -- ${quotedDirectory}`,
+    `fi`,
+  ].join("\n")
 }
 
 async function applyDirectoryMetadataDrift(input: {
