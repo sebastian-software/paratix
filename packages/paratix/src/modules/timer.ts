@@ -750,7 +750,28 @@ async function applyAbsent(ssh: SshConnection, context: AbsentContext): Promise<
   if (!serviceExists && !timerExists && !residualState) return { status: "ok" }
 
   const disableFailure = await disableTimerForAbsent(ssh, context)
-  if (disableFailure) return disableFailure
+  if (disableFailure) {
+    // R-0000774: when `disable --now` fails after partially mutating the
+    // timer's enable/active state (e.g. the disable side succeeded but
+    // the stop side did not), the activation snapshot captured above is
+    // still authoritative for the pre-apply state. Replay it through
+    // `restoreTimerActivationForAbsent` before returning so the timer
+    // ends up in its original state rather than "half-disabled while the
+    // unit files are still on disk". Chain the rollback outcome into
+    // the disable failure so neither error is silently dropped — mirrors
+    // the handleAbsentRemoveFailure (R-0000552) and reload-failure
+    // (R-0000655) chain patterns.
+    const activationRestoreFailure = await restoreTimerActivationForAbsent(
+      ssh,
+      context,
+      activationSnapshot
+    )
+    if (activationRestoreFailure == null) return disableFailure
+    const disableMessage = disableFailure.error?.message ?? "systemctl disable --now failed"
+    const restoreMessage =
+      activationRestoreFailure.error?.message ?? TIMER_ACTIVATION_ROLLBACK_FAILED
+    return failed(`${disableMessage}; rollback enable failed: ${restoreMessage}`)
+  }
 
   const removeFailure = await removeAbsentUnitFiles(ssh, context, {
     activationSnapshot,

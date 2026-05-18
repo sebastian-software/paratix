@@ -146,6 +146,57 @@ describe("timer.absent", () => {
     expect(ssh.calls).not.toContain(`rm -f '${TIMER_PATH}' '${SERVICE_PATH}'`)
   })
 
+  // R-0000774: when `disable --now` fails on a timer that was enabled and
+  // active before the apply, the pre-apply activation snapshot must be
+  // replayed via `restoreTimerActivationForAbsent` so the timer ends up
+  // in its original state rather than half-disabled. The unit-file
+  // removal must NOT run after a disable failure.
+  it("R-0000774: restores activation snapshot when disable fails on an active timer", async () => {
+    const ssh = createTimerApplyMockSsh({
+      [`[ -e '${SERVICE_PATH}' ]`]: { code: 0 },
+      [`[ -e '${TIMER_PATH}' ]`]: { code: 0 },
+      "systemctl disable --now -- 'backup.timer'": {
+        code: 1,
+        stderr: "Failed to stop backup.timer: Access denied",
+      },
+      "systemctl enable --now -- 'backup.timer'": { code: 0 },
+      "systemctl is-active --quiet -- 'backup.timer'": { code: 0 },
+      "systemctl is-enabled --quiet -- 'backup.timer'": { code: 0 },
+    })
+    const mod = timer.absent("backup")
+    const result = await mod.apply(ssh, emptyEnv)
+    expect(result.status).toBe("failed")
+    expect(String(result.error)).toContain("systemctl disable --now failed")
+    expect(ssh.calls).toContain("systemctl enable --now -- 'backup.timer'")
+    expect(ssh.calls).not.toContain(`rm -f '${TIMER_PATH}' '${SERVICE_PATH}'`)
+  })
+
+  // R-0000774: chain a rollback failure into the disable failure so
+  // operators see both errors. Mirrors the chained rollback messages in
+  // `handleAbsentRemoveFailure` (R-0000552).
+  it("R-0000774: chains rollback failures into the disable failure", async () => {
+    const ssh = createTimerApplyMockSsh({
+      [`[ -e '${SERVICE_PATH}' ]`]: { code: 0 },
+      [`[ -e '${TIMER_PATH}' ]`]: { code: 0 },
+      "systemctl disable --now -- 'backup.timer'": {
+        code: 1,
+        stderr: "Failed to stop backup.timer: Access denied",
+      },
+      "systemctl enable --now -- 'backup.timer'": {
+        code: 1,
+        stderr: "enable rollback boom",
+      },
+      "systemctl is-active --quiet -- 'backup.timer'": { code: 0 },
+      "systemctl is-enabled --quiet -- 'backup.timer'": { code: 0 },
+    })
+    const mod = timer.absent("backup")
+    const result = await mod.apply(ssh, emptyEnv)
+    expect(result.status).toBe("failed")
+    expect(String(result.error)).toContain("systemctl disable --now failed")
+    expect(String(result.error)).toContain("rollback enable failed")
+    expect(String(result.error)).toContain("enable rollback boom")
+  })
+
   it("apply returns failed when rm fails", async () => {
     const ssh = createAbsentApplyWithExistingUnitsMockSsh({
       [`rm -f '${TIMER_PATH}' '${SERVICE_PATH}'`]: { code: 1, stderr: "EACCES" },
