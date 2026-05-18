@@ -1658,6 +1658,55 @@ describe("releaseUpgrade.upgrade — apply (Debian)", () => {
       expect(result.status).toBe("failed")
       expect(String(result.error)).toContain("path is a symbolic link (NOFOLLOW guard)")
     })
+
+    it("restores already rewritten sources when a later sources rewrite throws", async () => {
+      const extraPath = "/etc/apt/sources.list.d/extra.list"
+      const originalMainSources = "deb http://deb.debian.org/debian bookworm main\n"
+      const originalExtraSources = "deb http://example.com/debian bookworm contrib\n"
+      const writes: WriteCapture[] = []
+      const ssh = createMockSsh(
+        debianApplyResponses("bookworm", "trixie", {
+          [`cat '${extraPath}'`]: { code: 0, stdout: originalExtraSources },
+          "find /etc/apt/sources.list.d/ \\( -name '*.list' -o -name '*.sources' \\) -type f -print0":
+            {
+              code: 0,
+              stdout: `${extraPath}\0`,
+            },
+        })
+      )
+      const originalExec = ssh.exec.bind(ssh)
+      ssh.exec = async (command, execOptions) => {
+        const match = NOFOLLOW_WRITE_COMMAND_PATTERN.exec(command)
+        // oxlint-disable-next-line no-conditional-in-test -- mock dispatcher records sources writes and injects a failure for the second rewrite
+        if (match?.groups == null) return originalExec(command, execOptions)
+        const path = match.groups.path
+        // oxlint-disable-next-line no-conditional-in-test -- the optional input payload is absent only for non-write exec calls
+        const content = execOptions?.input ?? ""
+        // oxlint-disable-next-line no-conditional-in-test -- simulate a later rewrite failure after the main sources file was already rewritten
+        if (path === extraPath && content.includes("trixie")) {
+          throw new Error("disk full")
+        }
+        writes.push({ content, path })
+        return { code: 0, stderr: "", stdout: "" }
+      }
+
+      const mod = releaseUpgrade.upgrade()
+      const result = await mod.apply(ssh, emptyEnv)
+
+      expect(result.status).toBe("failed")
+      expect(result.error?.message).toContain("[releaseUpgrade.upgrade] sources rewrite failed")
+      expect(result.error?.message).toContain("disk full")
+      expect(writes).toStrictEqual([
+        {
+          content: "deb http://deb.debian.org/debian trixie main\n",
+          path: "/etc/apt/sources.list",
+        },
+        { content: originalMainSources, path: "/etc/apt/sources.list" },
+      ])
+      expect(writes).not.toContainEqual({ content: originalExtraSources, path: extraPath })
+      expect(ssh.calls).not.toContain(APT_UPDATE_COMMAND)
+      expect(ssh.calls).not.toContain("DEBIAN_FRONTEND=noninteractive apt-get full-upgrade -y")
+    })
   })
 })
 

@@ -430,6 +430,13 @@ async function rewriteSourcesFile(
 
 type SnapshotSourcesParameters = Omit<RewriteSourcesParameters, "originalContent">
 
+type ReplaceSourcesListParameters = {
+  currentCodename: string
+  snapshots: SourcesSnapshot[]
+  ssh: SshConnection
+  targetCodename: string
+}
+
 // R-0000629: marker exit code used by the combined symlink-guard + nofollow
 // read to signal "the path is (or became) a symbolic link between
 // enumeration and read". Picked outside the normal dd/test exit-code range
@@ -648,20 +655,16 @@ async function snapshotEnumeratedSourcesFile(parameters: {
  * This is the core step for upgrading Debian: pointing apt at the new release
  * suite before running `apt-get full-upgrade`.
  *
- * @param ssh - Active SSH connection to the remote host.
- * @param currentCodename - The codename that is currently in use (e.g. `"bullseye"`).
- * @param targetCodename - The codename to upgrade to (e.g. `"bookworm"`).
+ * @param parameters - Active SSH connection, source and target codenames,
+ *   and externally owned snapshots for transactional rollback.
  * @returns Snapshots of every sources file that was modified, in the order
  *   they were rewritten. The caller can hand these to
  *   {@link restoreSourcesSnapshots} to roll back on a downstream apt failure.
  */
 async function replaceCodenameInSourcesList(
-  ssh: SshConnection,
-  currentCodename: string,
-  targetCodename: string
+  parameters: ReplaceSourcesListParameters
 ): Promise<SourcesSnapshot[]> {
-  const snapshots: SourcesSnapshot[] = []
-
+  const { currentCodename, snapshots, ssh, targetCodename } = parameters
   if (await ssh.exists(APT_SOURCES_LIST)) {
     const mainSnapshot = await snapshotSourcesFileSafely({
       currentCodename,
@@ -699,6 +702,19 @@ async function replaceCodenameInSourcesList(
   }
 
   return snapshots
+}
+
+async function failAfterSourcesRewriteError(parameters: {
+  error: unknown
+  snapshots: SourcesSnapshot[]
+  ssh: SshConnection
+}): Promise<ModuleResult> {
+  const { error, snapshots, ssh } = parameters
+  const reason = error instanceof Error ? error.message : String(error)
+  const rewriteFailure = failed(`[releaseUpgrade.upgrade] sources rewrite failed: ${reason}`)
+  if (snapshots.length === 0) return rewriteFailure
+  const restoreFailures = await restoreSourcesSnapshots(ssh, snapshots)
+  return appendRestoreSourcesFailures(rewriteFailure, restoreFailures)
 }
 
 /**
@@ -1001,12 +1017,11 @@ async function runDebianUpgradeCriticalSection(parameters: {
   // those throws into a structured `failed(...)` ModuleResult so the
   // playbook runner reports them alongside the other apt failure modes
   // instead of letting them escape as uncaught exceptions.
-  let snapshots: SourcesSnapshot[]
+  const snapshots: SourcesSnapshot[] = []
   try {
-    snapshots = await replaceCodenameInSourcesList(ssh, currentCodename, targetCodename)
+    await replaceCodenameInSourcesList({ currentCodename, snapshots, ssh, targetCodename })
   } catch (error) {
-    const reason = error instanceof Error ? error.message : String(error)
-    return failed(`[releaseUpgrade.upgrade] sources rewrite failed: ${reason}`)
+    return failAfterSourcesRewriteError({ error, snapshots, ssh })
   }
 
   return runDebianAptPipelineAfterSourcesRewrite({ options, snapshots, ssh })
