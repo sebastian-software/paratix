@@ -281,6 +281,22 @@ describe("releaseUpgrade.upgrade — check", () => {
     expect(result).toBe("needs-apply")
   })
 
+  it("keeps the Debian stable codename cache scoped to each SSH connection", async () => {
+    const firstSsh = createMockSsh(debianCheckResponses("bookworm", "trixie"))
+    const secondSsh = createMockSsh(debianCheckResponses("bookworm", "bookworm"))
+    const mod = releaseUpgrade.upgrade()
+
+    await expect(mod.check(firstSsh, emptyEnv)).resolves.toBe("needs-apply")
+    await expect(mod.check(secondSsh, emptyEnv)).resolves.toBe("ok")
+
+    expect(
+      firstSsh.execCalls.filter((call) => call.command === DEBIAN_INRELEASE_VERIFY_COMMAND)
+    ).toHaveLength(1)
+    expect(
+      secondSsh.execCalls.filter((call) => call.command === DEBIAN_INRELEASE_VERIFY_COMMAND)
+    ).toHaveLength(1)
+  })
+
   it("Debian: current codename equals stable → ok", async () => {
     const ssh = createMockSsh(debianCheckResponses("trixie", "trixie"))
     const mod = releaseUpgrade.upgrade()

@@ -261,20 +261,23 @@ function parseDebianStableCodenameFromInRelease(body: string): string {
  *   (R-0000632).
  */
 /**
- * R-0000852: per-process cache for verified Debian stable codenames keyed by
- * keyring path. `check` and `applyDebian` both call
+ * R-0000852/R-0000869: per-process cache for verified Debian stable
+ * codenames keyed first by SSH connection and then by keyring path. `check`
+ * and `applyDebian` both call
  * {@link getDebianStableCodename}, and a playbook that bundles several
  * Debian-targeting modules can resolve the same codename multiple times in
  * quick succession. Each resolution issues a remote `gpgv` round-trip, which
- * is wasteful when the keyring (and therefore the trust root) has not
- * changed.
+ * is wasteful when the same host keyring (and therefore the trust root) has
+ * not changed.
  *
- * The cache key is the resolved keyring filesystem path so a future call site
- * that overrides the path (e.g. a test harness pinning a different keyring)
- * is automatically isolated from previously cached results. The TTL is kept
+ * The outer `WeakMap` prevents one host's verified codename from being reused
+ * for another host that happens to expose the same keyring path. The inner
+ * cache key is the resolved keyring filesystem path so a future call site that
+ * overrides the path (e.g. a test harness pinning a different keyring) is
+ * automatically isolated from previously cached results. The TTL is kept
  * intentionally short so operator-driven changes to the keyring or the
- * upstream `InRelease` body are picked up on the next run without requiring
- * a process restart.
+ * upstream `InRelease` body are picked up on the next run without requiring a
+ * process restart.
  */
 const DEBIAN_STABLE_CODENAME_CACHE_TTL_MS = 300_000
 
@@ -283,7 +286,10 @@ type DebianStableCodenameCacheEntry = {
   expiresAt: number
 }
 
-const debianStableCodenameCache = new Map<string, DebianStableCodenameCacheEntry>()
+let debianStableCodenameCache = new WeakMap<
+  SshConnection,
+  Map<string, DebianStableCodenameCacheEntry>
+>()
 
 /**
  * R-0000852: test-only hook to clear the per-process codename cache between
@@ -296,12 +302,26 @@ const debianStableCodenameCache = new Map<string, DebianStableCodenameCacheEntry
  * @internal
  */
 export function clearDebianStableCodenameCacheForTests(): void {
-  debianStableCodenameCache.clear()
+  debianStableCodenameCache = new WeakMap<
+    SshConnection,
+    Map<string, DebianStableCodenameCacheEntry>
+  >()
+}
+
+function getDebianStableCodenameCacheForConnection(
+  ssh: SshConnection
+): Map<string, DebianStableCodenameCacheEntry> {
+  const cache = debianStableCodenameCache.get(ssh)
+  if (cache !== undefined) return cache
+  const next = new Map<string, DebianStableCodenameCacheEntry>()
+  debianStableCodenameCache.set(ssh, next)
+  return next
 }
 
 async function getDebianStableCodename(ssh: SshConnection): Promise<string> {
   const keyringPath = DEBIAN_ARCHIVE_KEYRING_PATH
-  const cached = debianStableCodenameCache.get(keyringPath)
+  const cache = getDebianStableCodenameCacheForConnection(ssh)
+  const cached = cache.get(keyringPath)
   const now = Date.now()
   if (cached !== undefined && cached.expiresAt > now) {
     return cached.codename
@@ -326,7 +346,7 @@ async function getDebianStableCodename(ssh: SshConnection): Promise<string> {
   // R-0000852: only cache after every validation step has accepted the value
   // so an invalid response cannot poison the cache for the remainder of the
   // TTL window.
-  debianStableCodenameCache.set(keyringPath, {
+  cache.set(keyringPath, {
     codename,
     expiresAt: now + DEBIAN_STABLE_CODENAME_CACHE_TTL_MS,
   })
