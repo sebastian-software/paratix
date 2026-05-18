@@ -300,6 +300,65 @@ describe("file.directory", () => {
     expect(ssh.calls).not.toContain("mkdir -p '/var/app'")
   })
 
+  it("creates nested directories through guarded component steps instead of plain mkdir -p", async () => {
+    const guardedVarCommand = [
+      "if [ -L '/var' ]; then",
+      "  printf '%s\\n' 'directory path is a symlink' >&2",
+      "  exit 1",
+      "fi",
+      "if [ -e '/var' ] && [ ! -d '/var' ]; then",
+      "  printf '%s\\n' 'directory path exists and is not a directory' >&2",
+      "  exit 1",
+      "fi",
+      "if [ ! -d '/var' ]; then",
+      "  mkdir -- '/var'",
+      "fi",
+    ].join("\n")
+    const guardedAppCommand = [
+      "if [ -L '/var/app' ]; then",
+      "  printf '%s\\n' 'directory path is a symlink' >&2",
+      "  exit 1",
+      "fi",
+      "if [ -e '/var/app' ] && [ ! -d '/var/app' ]; then",
+      "  printf '%s\\n' 'directory path exists and is not a directory' >&2",
+      "  exit 1",
+      "fi",
+      "if [ ! -d '/var/app' ]; then",
+      "  mkdir -- '/var/app'",
+      "fi",
+    ].join("\n")
+    const guardedDataCommand = [
+      "if [ -L '/var/app/data' ]; then",
+      "  printf '%s\\n' 'directory path is a symlink' >&2",
+      "  exit 1",
+      "fi",
+      "if [ -e '/var/app/data' ] && [ ! -d '/var/app/data' ]; then",
+      "  printf '%s\\n' 'directory path exists and is not a directory' >&2",
+      "  exit 1",
+      "fi",
+      "if [ ! -d '/var/app/data' ]; then",
+      "  mkdir -- '/var/app/data'",
+      "fi",
+    ].join("\n")
+    const ssh = createMockSsh({
+      "[ -d '/var/app/data' ]": { code: 1 },
+      "[ -L '/var' ]": { code: 1 },
+      "[ -L '/var/app' ]": { code: 1 },
+      "[ -L '/var/app/data' ]": { code: 1 },
+      [guardedVarCommand]: { code: 0 },
+      [guardedAppCommand]: { code: 0 },
+      [guardedDataCommand]: { code: 0 },
+    })
+    const mod = file.directory("/var/app/data")
+    const result = await mod.apply(ssh, emptyEnv)
+
+    expect(result.status).toBe("changed")
+    expect(ssh.calls).toContain(guardedVarCommand)
+    expect(ssh.calls).toContain(guardedAppCommand)
+    expect(ssh.calls).toContain(guardedDataCommand)
+    expect(ssh.calls).not.toContain("mkdir -p '/var/app/data'")
+  })
+
   it("R-0000270: returns failed when mkdir on a read-only filesystem exits non-zero", async () => {
     // mkdir failures (read-only mount, EACCES on a guarded mount) must
     // propagate as a failedCommand ModuleResult so the runner reports the
