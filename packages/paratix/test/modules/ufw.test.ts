@@ -7,11 +7,60 @@ import {
   hasTcpIpv6Rule,
   hasTcpRule,
 } from "../../src/modules/ufwStatus.js"
-import { createMockSsh } from "../helpers/mockSsh.js"
+import { createMockSsh as createBaseMockSsh } from "../helpers/mockSsh.js"
 
 const emptyEnv = {}
 const DPKG_STATUS_LITERAL = ["${", "Status}"].join("")
 const DPKG_UFW_INSTALLED = `dpkg-query -W -f='${DPKG_STATUS_LITERAL}' 'ufw' 2>/dev/null | grep -q 'install ok installed'`
+
+// R-0000783: `ufw.enabled.apply` now wraps allow + reverify + enable in
+// `withMutexLock`, which emits flag-lock infrastructure commands
+// (`mkdir -p /var/lib/paratix/flags`, the lock directory create / wait /
+// release statements, the holder marker readback) and an `ssh.output
+// hostname` invocation for the holder token. Opt every test into
+// `allowFlagLockInternalDefaults` so the flag-lock plumbing returns success
+// without each call site re-stubbing the internals; also stub `hostname`
+// and the `printf … > holder` form mirrored by `mount.test.ts`.
+const createMockSsh: typeof createBaseMockSsh = (responses, options) =>
+  createBaseMockSsh(
+    { hostname: { code: 0, stdout: "" }, ...responses },
+    {
+      ...options,
+      allowFlagLockInternalDefaults: true,
+      responseStubs: [
+        {
+          command: /^printf '%s@%s %s\\n' "\$\$" '' "\$\(date \+%s\)" > \S+\/holder$/v,
+          result: { code: 0 },
+        },
+        ...(options?.responseStubs ?? []),
+      ],
+    }
+  )
+
+// R-0000783: filter helper for `toStrictEqual` checks on `ssh.calls`. The
+// `withMutexLock` wrapper around `ufw.enabled.apply` records flag-lock
+// commands that are not relevant to the ufw-domain assertions. Stripping
+// them keeps the historical call-shape checks readable.
+const FLAG_LOCK_CALL_PATTERNS: RegExp[] = [
+  /^hostname$/v,
+  /^mkdir -p \/var\/lib\/paratix\/flags$/v,
+  /^mkdir \/var\/lib\/paratix\/flags\//v,
+  /^rmdir \/var\/lib\/paratix\/flags\//v,
+  /^rm -f \/var\/lib\/paratix\/flags\//v,
+  /^printf '%s@%s %s\\n'/v,
+  /^awk 'NR==1\{print \$1\}'/v,
+  /^\[ "\$\(awk /v,
+  /^if \[ -d /v,
+  /^i=0; while /v,
+]
+
+function isFlagLockCall(call: string): boolean {
+  return FLAG_LOCK_CALL_PATTERNS.some((pattern) => pattern.test(call))
+}
+
+function ufwCalls(calls: string[]): string[] {
+  return calls.filter((call) => !isFlagLockCall(call))
+}
 
 function createMockSshOnPort(
   responses: Parameters<typeof createMockSsh>[0],
@@ -337,7 +386,7 @@ describe("ufw.enabled", () => {
     expect(result.status).toBe("changed")
     // R-0000653: the re-verification read between `ufw allow` and
     // `--force enable` adds a second `command -v ufw` / `ufw status` pair.
-    expect(ssh.calls).toStrictEqual([
+    expect(ufwCalls(ssh.calls)).toStrictEqual([
       "command -v ufw",
       "ufw status",
       "ufw allow '22'",
@@ -364,7 +413,7 @@ describe("ufw.enabled", () => {
 
     expect(result.status).toBe("changed")
     // R-0000653: re-verification adds a second status read between allow and enable.
-    expect(ssh.calls).toStrictEqual([
+    expect(ufwCalls(ssh.calls)).toStrictEqual([
       "command -v ufw",
       "ufw status",
       "ufw allow '2222'",
@@ -385,7 +434,7 @@ describe("ufw.enabled", () => {
     const result = await mod.apply(ssh, emptyEnv)
 
     expect(result.status).toBe("failed")
-    expect(ssh.calls).toStrictEqual(["command -v ufw", "ufw status", "ufw allow '22'"])
+    expect(ufwCalls(ssh.calls)).toStrictEqual(["command -v ufw", "ufw status", "ufw allow '22'"])
   })
 
   it("apply returns failed when ufw --force enable exits with non-zero code", async () => {
@@ -435,7 +484,7 @@ describe("ufw.enabled", () => {
     const mod = ufw.enabled()
     const result = await mod.apply(ssh, emptyEnv)
     expect(result.status).toBe("changed")
-    expect(ssh.calls).toStrictEqual([
+    expect(ufwCalls(ssh.calls)).toStrictEqual([
       "command -v ufw",
       "ufw status",
       "ufw delete 'deny' '22'",
@@ -478,7 +527,7 @@ describe("ufw.enabled", () => {
     const mod = ufw.enabled()
     const result = await mod.apply(ssh, emptyEnv)
     expect(result.status).toBe("changed")
-    expect(ssh.calls).toStrictEqual([
+    expect(ufwCalls(ssh.calls)).toStrictEqual([
       "command -v ufw",
       "ufw status",
       "ufw delete 'deny' '22/tcp'",
@@ -523,7 +572,7 @@ describe("ufw.enabled", () => {
     const mod = ufw.enabled()
     const result = await mod.apply(ssh, emptyEnv)
     expect(result.status).toBe("changed")
-    expect(ssh.calls).toStrictEqual([
+    expect(ufwCalls(ssh.calls)).toStrictEqual([
       "command -v ufw",
       "ufw status",
       "ufw delete 'deny' '22'",
@@ -568,7 +617,7 @@ describe("ufw.enabled", () => {
     const mod = ufw.enabled()
     const result = await mod.apply(ssh, emptyEnv)
     expect(result.status).toBe("changed")
-    expect(ssh.calls).toStrictEqual([
+    expect(ufwCalls(ssh.calls)).toStrictEqual([
       "command -v ufw",
       "ufw status",
       "ufw delete 'deny' '22/tcp'",
@@ -599,7 +648,11 @@ describe("ufw.enabled", () => {
     const result = await mod.apply(ssh, emptyEnv)
     expect(result.status).toBe("failed")
     expect(result.error?.message).toContain("ufw delete deny failed")
-    expect(ssh.calls).toStrictEqual(["command -v ufw", "ufw status", "ufw delete 'deny' '22'"])
+    expect(ufwCalls(ssh.calls)).toStrictEqual([
+      "command -v ufw",
+      "ufw status",
+      "ufw delete 'deny' '22'",
+    ])
   })
 
   it("apply returns failed when ssh is null", async () => {

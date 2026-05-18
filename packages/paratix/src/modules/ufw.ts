@@ -2,6 +2,7 @@ import { failed, failedCommand } from "../moduleFailure.js"
 import { isValidTcpPort } from "../serverDefinitionValidation.js"
 import { shellQuote } from "../ssh.js"
 import { type Module, type ModuleResult, NEEDS_APPLY, type SshConnection } from "../types.js"
+import { withMutexLock } from "./moduleHelpers.js"
 import { detectPackageManager, isPackageInstalled } from "./package.js"
 import {
   applyUfwRulePortsForApply,
@@ -27,6 +28,15 @@ import {
 } from "./ufwStatus.js"
 
 const UFW = "ufw"
+// R-0000783: serialise the allow + reverify + enable critical section under
+// a dedicated mutex name. The lock prevents two paratix runners on the same
+// host from interleaving `ufw allow $sshPort` and `ufw --force enable`,
+// which could otherwise race a competing `ufw delete allow` insertion
+// between the reverify probe and the enable command and lock the runner
+// out. External processes (manual `ufw` invocations, other configuration
+// management tools) still bypass this lock; the residual race window is
+// documented in `ufw.enabled.apply` so operators can reason about it.
+const UFW_ENABLE_LOCK_NAME = "ufw-enable-mutex"
 
 function hasProtocolAgnosticDenyRule(status: string, port: number): boolean {
   const ipv6Rules = statusIncludesIpv6Rules(status)
@@ -221,30 +231,45 @@ export const ufw = {
     return {
       async apply(ssh: null | SshConnection): Promise<ModuleResult> {
         if (!ssh) return failed("[ufw.enabled] SSH connection is required")
-        const allowResult = await allowCurrentSshPort(ssh)
-        if (allowResult !== null) return allowResult
-        // R-0000653: a concurrent process could insert a `deny` rule for
-        // the active SSH port between the initial `ufw status` read in
-        // `allowCurrentSshPort` and the `ufw allow` that follows. ufw
-        // evaluates rules in insertion order, so a deny appended after
-        // we deleted the older ones (or before our allow) would survive
-        // `--force enable` and lock the runner out. Re-read the status
-        // and abort before enable when the SSH port is not reachable
-        // through the rule set.
-        const reverifyFailure = await reverifyCurrentSshAllowedBeforeEnable(ssh)
-        if (reverifyFailure !== null) return reverifyFailure
-        // R-0000064: use the officially supported `--force` flag for
-        // non-interactive enable instead of piping `y` into stdin. Mirrors
-        // the call shape used by ufw.disabled.apply and avoids relying on
-        // the wording of the Y/N prompt or the TTY-detection heuristic in
-        // ufw.
-        const result = await ssh.exec(`${UFW} --force enable`, {
-          ignoreExitCode: true,
-          silent: true,
+        // R-0000783: serialise allow + reverify + enable under a dedicated
+        // mutex so two paratix runners on the same host cannot interleave
+        // their critical sections. The lock closes the in-process race
+        // window between `ufw allow ${sshPort}`, the reverify status read,
+        // and `ufw --force enable`. External callers (manual `ufw delete`,
+        // other configuration tools) are not subject to the lock — their
+        // residual race window is unavoidable from inside paratix and the
+        // reverify step at line 229 below remains the last line of
+        // defence against an externally-inserted deny rule landing right
+        // before enable.
+        return withMutexLock(ssh, {
+          lockName: UFW_ENABLE_LOCK_NAME,
+          section: async () => {
+            const allowResult = await allowCurrentSshPort(ssh)
+            if (allowResult !== null) return allowResult
+            // R-0000653: a concurrent process could insert a `deny` rule for
+            // the active SSH port between the initial `ufw status` read in
+            // `allowCurrentSshPort` and the `ufw allow` that follows. ufw
+            // evaluates rules in insertion order, so a deny appended after
+            // we deleted the older ones (or before our allow) would survive
+            // `--force enable` and lock the runner out. Re-read the status
+            // and abort before enable when the SSH port is not reachable
+            // through the rule set.
+            const reverifyFailure = await reverifyCurrentSshAllowedBeforeEnable(ssh)
+            if (reverifyFailure !== null) return reverifyFailure
+            // R-0000064: use the officially supported `--force` flag for
+            // non-interactive enable instead of piping `y` into stdin. Mirrors
+            // the call shape used by ufw.disabled.apply and avoids relying on
+            // the wording of the Y/N prompt or the TTY-detection heuristic in
+            // ufw.
+            const result = await ssh.exec(`${UFW} --force enable`, {
+              ignoreExitCode: true,
+              silent: true,
+            })
+            return result.code === 0
+              ? { status: "changed" }
+              : failedCommand("[ufw.enabled] ufw enable failed", result)
+          },
         })
-        return result.code === 0
-          ? { status: "changed" }
-          : failedCommand("[ufw.enabled] ufw enable failed", result)
       },
       async check(ssh: null | SshConnection): Promise<"needs-apply" | "ok"> {
         if (!ssh) return NEEDS_APPLY
