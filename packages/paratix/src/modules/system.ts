@@ -302,7 +302,15 @@ function parseDiskRoot(dfOutput: string): string {
  */
 function parsePublicIp(routeOutput: string): string {
   const sourceMatch = /src\s+(?<addr>\d+\.\d+\.\d+\.\d+)/v.exec(routeOutput)
-  return sourceMatch?.groups?.addr ?? ""
+  // R-0000856: the regex accepts any `\d+` per octet, so kernel output
+  // (or a spoofed mock) containing values like `999.0.0.10` would slip
+  // through into `system.ip.public`. Validate each octet is ≤ 255 with
+  // the shared helper before reporting; on mismatch report an empty
+  // string so downstream consumers (env vars, meta entries) never see a
+  // syntactically invalid address.
+  const candidate = sourceMatch?.groups?.addr ?? ""
+  if (candidate.length === 0) return ""
+  return isValidIpv4Octets(candidate) ? candidate : ""
 }
 
 /**
