@@ -7,6 +7,7 @@ import { withRegisteredSecrets } from "../secretSink.js"
 import { isValidTcpPort } from "../serverDefinitionValidation.js"
 import { shellQuote } from "../ssh.js"
 import {
+  type ExecResult,
   guardedWriteFile,
   type Module,
   type ModuleResult,
@@ -497,6 +498,53 @@ async function rollbackInterfaceConfig(
     : failedCommand(`[net.interface] rollback removal failed for ${snapshot.path}`, result)
 }
 
+/**
+ * Build the standard symlink-refusal failure for the interface config writer.
+ *
+ * @param path - The destination path that resolved to a symlink.
+ * @returns A `failed` ModuleResult with the canonical wording.
+ */
+function interfaceSymlinkRefusal(path: string): ModuleResult {
+  return failed(`[net.interface: ${path}] refuses to write through symlink at the destination path`)
+}
+
+/**
+ * Rollback path for `writeAndApplyInterfaceConfig` when the apply command
+ * fails. Restores the on-disk snapshot and re-runs the apply command so the
+ * live network state matches the restored configuration.
+ *
+ * @param parameters - Rollback context.
+ * @param parameters.applyCommand - Command used to apply network config.
+ * @param parameters.failureMessage - Caller-supplied failure prefix.
+ * @param parameters.initialFailure - The original failed apply result.
+ * @param parameters.snapshot - Snapshot captured before the failed write.
+ * @param parameters.ssh - SSH connection.
+ * @returns A ModuleResult describing the rollback outcome.
+ */
+async function rollbackInterfaceApplyFailure(parameters: {
+  applyCommand: string
+  failureMessage: string
+  initialFailure: ExecResult
+  snapshot: InterfaceConfigSnapshot
+  ssh: SshConnection
+}): Promise<ModuleResult> {
+  const rollbackFailure = await rollbackInterfaceConfig(parameters.ssh, parameters.snapshot)
+  if (rollbackFailure != null) return rollbackFailure
+  // Restoring the file is not enough: the live network state still reflects
+  // the failed apply attempt. Re-run the apply command so the kernel/netplan
+  // configuration matches the restored on-disk state. If this re-apply also
+  // fails, surface a clear divergence message so operators know the live
+  // state diverges from the restored configuration file.
+  const reApply = await parameters.ssh.exec(parameters.applyCommand, EXEC_OPTS)
+  if (reApply.code !== 0) {
+    return failedCommand(
+      `${parameters.failureMessage}; rollback restored the configuration file but re-applying the previous configuration also failed — live network state diverges from on-disk configuration`,
+      reApply
+    )
+  }
+  return failedCommand(parameters.failureMessage, parameters.initialFailure)
+}
+
 async function writeAndApplyInterfaceConfig(parameters: {
   applyCommand: string
   content: string
@@ -510,11 +558,16 @@ async function writeAndApplyInterfaceConfig(parameters: {
   // the operator and matches the defense-in-depth pattern in compose.ts,
   // apt.ts and aptKeyHelpers.ts.
   if (await isSymlink(parameters.ssh, parameters.path)) {
-    return failed(
-      `[net.interface: ${parameters.path}] refuses to write through symlink at the destination path`
-    )
+    return interfaceSymlinkRefusal(parameters.path)
   }
   const snapshot = await captureInterfaceConfigSnapshot(parameters.ssh, parameters.path)
+  // R-0000712: defense-in-depth — re-check the destination path after the
+  // snapshot read so a TOCTOU swap between the initial guard above and the
+  // write below cannot slip a planted symlink past `ssh.writeFile`. Matches
+  // the second guard in applyHostsPresent/applyHostsAbsent (R-0000677).
+  if (await isSymlink(parameters.ssh, parameters.path)) {
+    return interfaceSymlinkRefusal(parameters.path)
+  }
   try {
     await parameters.ssh.writeFile(parameters.path, parameters.content, {
       mode: NET_CONFIG_FILE_MODE,
@@ -527,23 +580,13 @@ async function writeAndApplyInterfaceConfig(parameters: {
   }
   const result = await parameters.ssh.exec(parameters.applyCommand, EXEC_OPTS)
   if (result.code === 0) return { status: "changed" }
-
-  const rollbackFailure = await rollbackInterfaceConfig(parameters.ssh, snapshot)
-  if (rollbackFailure != null) return rollbackFailure
-
-  // Restoring the file is not enough: the live network state still reflects
-  // the failed apply attempt. Re-run the apply command so the kernel/netplan
-  // configuration matches the restored on-disk state. If this re-apply also
-  // fails, surface a clear divergence message so operators know the live
-  // state diverges from the restored configuration file.
-  const reApply = await parameters.ssh.exec(parameters.applyCommand, EXEC_OPTS)
-  if (reApply.code !== 0) {
-    return failedCommand(
-      `${parameters.failureMessage}; rollback restored the configuration file but re-applying the previous configuration also failed — live network state diverges from on-disk configuration`,
-      reApply
-    )
-  }
-  return failedCommand(parameters.failureMessage, result)
+  return rollbackInterfaceApplyFailure({
+    applyCommand: parameters.applyCommand,
+    failureMessage: parameters.failureMessage,
+    initialFailure: result,
+    snapshot,
+    ssh: parameters.ssh,
+  })
 }
 
 /**
@@ -914,6 +957,19 @@ async function applyPresentRoute(
     return failedCommand(`[net.route: ${destination}] ip route replace failed`, routeResult)
   }
   const dropinContent = buildRouteDropin(destination, gateway)
+  // R-0000712: defense-in-depth — re-check the drop-in path after the
+  // preparePresentRouteMutation guard so a TOCTOU swap between the initial
+  // `isSymlink` probe and the write below cannot slip a planted symlink past
+  // `ssh.writeFile`. Matches the second guard in applyHostsPresent/Absent
+  // (R-0000677).
+  if (await isSymlink(conn, dropinPath)) {
+    return rollbackLiveRouteAfterFailure({
+      conn,
+      message: `[net.route: ${destination}] refuses to write through symlink at ${dropinPath}`,
+      parameters,
+      snapshot: preflight.snapshot,
+    })
+  }
   try {
     await conn.writeFile(dropinPath, dropinContent, { mode: NET_CONFIG_FILE_MODE })
   } catch (error: unknown) {
