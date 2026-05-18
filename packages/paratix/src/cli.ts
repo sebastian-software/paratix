@@ -811,8 +811,15 @@ program
 
 export function parsePositiveNumber(value: string, options: { max?: number } = {}): number {
   const parsed = Number(value)
-  if (!Number.isFinite(parsed) || parsed <= 0) {
-    console.error(`Invalid --reconnect-timeout value: ${value} (expected a positive number)`)
+  // R-0000839: require a positive integer. Floats like `30.5` would survive
+  // the previous `Number.isFinite` check and then silently round when later
+  // multiplied to milliseconds, while values like `"3e9"` produced numbers
+  // far beyond any sane bound. Pin the type so misuse fails fast at CLI
+  // parse time with a clear exit code.
+  if (!Number.isInteger(parsed) || parsed <= 0) {
+    console.error(
+      `Invalid --reconnect-timeout value: ${value} (expected a positive integer number of seconds)`
+    )
     // eslint-disable-next-line node/no-process-exit
     process.exit(2)
   }
