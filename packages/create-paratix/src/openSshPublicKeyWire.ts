@@ -80,6 +80,23 @@ function isPositiveMpint(value: Buffer): boolean {
   return value[0] < MPINT_SIGN_BIT
 }
 
+// R-0000832: RFC 4251 §5 defines mpint as the minimal-length two's
+// complement encoding. A leading 0x00 byte is permitted only when the
+// next byte has its high bit set (i.e. value[1] >= 0x80) — that single
+// zero byte distinguishes a positive integer from a negative one.
+// Any other leading 0x00 (followed by another 0x00, or by a byte < 0x80)
+// is non-canonical and must be rejected. Without this check, an attacker
+// could re-encode the same RSA exponent/modulus with arbitrary
+// zero-padding and bypass byte-level equality checks downstream, or
+// embed extra bytes that look semantically equivalent but differ on the
+// wire.
+function hasCanonicalMpintEncoding(value: Buffer): boolean {
+  if (value.length === 0) return false
+  if (value[0] !== 0) return true
+  if (value.length < 2) return false
+  return value[1] >= MPINT_SIGN_BIT
+}
+
 function removeMpintSignPadding(value: Buffer): Buffer {
   let offset = 0
   while (offset < value.length - 1 && value[offset] === 0) {
@@ -116,9 +133,13 @@ function hasValidRsaModulus(value: Buffer): boolean {
 
 function validateRsaWireKey(value: Buffer, offset: number): boolean {
   const exponent = readMpint(value, offset)
+  // R-0000832: also enforce canonical mpint encoding on both the
+  // exponent and the modulus so we reject keys whose wire bytes carry
+  // non-canonical leading zero padding.
   if (
     exponent == null ||
     !isPositiveMpint(exponent.value) ||
+    !hasCanonicalMpintEncoding(exponent.value) ||
     !hasValidRsaExponent(exponent.value)
   ) {
     return false
@@ -128,6 +149,7 @@ function validateRsaWireKey(value: Buffer, offset: number): boolean {
   return (
     modulus != null &&
     isPositiveMpint(modulus.value) &&
+    hasCanonicalMpintEncoding(modulus.value) &&
     hasValidRsaModulus(modulus.value) &&
     isAtEnd(value, modulus.nextOffset)
   )
