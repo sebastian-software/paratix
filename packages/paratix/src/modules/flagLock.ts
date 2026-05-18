@@ -245,6 +245,15 @@ export async function releaseFlagLock(
  * `false` without raising. Returning `true` does NOT mean the caller now holds
  * the lock — only that the previous holder was determined stale and removed.
  *
+ * R-0000698: the token verification (R-0000671) only protects the
+ * marker-present branch — by re-reading the marker token immediately before
+ * the `rm -f` it rejects the reclaim when a fresh acquirer raced into the
+ * window between the stale probe and the removal. The missing-marker branch
+ * has no token to re-verify, so it relies on a second `find -mmin` age probe
+ * just before `rmdir` as the equivalent TOCTOU guard: if a fresh acquirer
+ * touched the lock directory after the first probe, the second probe fails
+ * and the reclaim is aborted.
+ *
  * @param ssh - The active SSH connection.
  * @param lockName - The lock directory name under {@link FLAGS_DIRECTORY}.
  * @param staleSeconds - Maximum holder marker age before the lock is reclaimed.
@@ -271,9 +280,15 @@ export async function tryReclaimStaleFlagLock(
   // concurrent acquirers, releasers and reclaimers. Mirrors the
   // verified-release shell statement built by R-0000634.
   //
-  // The missing-marker branch cannot apply a token check (there is no
-  // marker to read), so it keeps the previous behaviour: reclaim only
-  // when the lock directory itself is older than the threshold.
+  // R-0000698: the token verification scope is limited to the
+  // marker-present branch — the second `awk` read just before `rm -f`
+  // catches a fresh acquirer that planted a new marker between the stale
+  // probe and the removal. The missing-marker branch cannot apply a token
+  // check (there is no marker to read), so it relies on a second
+  // `find -mmin` age probe immediately before `rmdir` as the equivalent
+  // TOCTOU guard: if a fresh acquirer touched the lock directory between
+  // the first age probe and the rmdir, the second probe fails and the
+  // reclaim is aborted instead of destroying the new holder's lock.
   const command =
     `if [ -d ${lock} ]; then ` +
     `if [ -f ${markerPath} ]; then ` +
@@ -285,8 +300,11 @@ export async function tryReclaimStaleFlagLock(
     `else ` +
     // Missing marker is treated as stale only if the lock directory itself
     // is older than the threshold to avoid racing with a holder that has
-    // not yet written its marker.
+    // not yet written its marker. R-0000698: re-probe the directory mtime
+    // immediately before `rmdir` so a fresh acquirer that touched the
+    // directory between the two probes aborts the reclaim.
     `if find ${lock} -maxdepth 0 -mmin +${mminThreshold} -print -quit | grep -q .; then ` +
+    `find ${lock} -maxdepth 0 -mmin +${mminThreshold} -print -quit | grep -q . && ` +
     `rm -f ${markerPath} && rmdir ${lock}; ` +
     `else exit 1; fi; ` +
     `fi; ` +
