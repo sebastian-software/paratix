@@ -18,6 +18,16 @@ const SIGN_BIT_MASK = 0x7f
 /** Bitmask for a full byte. */
 const BYTE_MASK = 0xff
 
+/**
+ * R-0000792: cap the Base32 input length so an attacker-controlled secret
+ * (e.g. an op vault entry whose value is gigabytes of `A` characters) cannot
+ * make `decodeBase32` quadratic via string concatenation or allocate an
+ * unbounded byte buffer. A genuine TOTP secret is at most a few dozen
+ * characters; 1024 keeps the cap comfortably above real-world values while
+ * defending the worst case.
+ */
+const MAX_BASE32_INPUT_LENGTH = 1024
+
 /** Bit shift for the first byte in the truncated 32-bit value. */
 const SHIFT_24 = 24
 
@@ -62,21 +72,38 @@ const SUPPORTED_ALGORITHMS: Record<string, string> = {
  * @throws {Error} If the string contains a character outside the Base32 alphabet.
  */
 function decodeBase32(encoded: string): Buffer {
+  // R-0000792: refuse oversized inputs before any allocation work runs.
+  // Without this guard a malicious otpauth URI could supply megabytes of
+  // padding-stripped characters and trigger quadratic copy work.
+  if (encoded.length > MAX_BASE32_INPUT_LENGTH) {
+    throw new Error(
+      `Base32 input exceeds the ${MAX_BASE32_INPUT_LENGTH}-character limit (got ${encoded.length})`
+    )
+  }
   const alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567"
   const stripped = encoded.toUpperCase().replaceAll(/[=\s]/gv, "")
 
-  let bits = ""
+  // R-0000792: accumulate bits into a numeric buffer instead of concatenating
+  // 5-character binary chunks onto a growing string. The previous shape was
+  // O(n^2) in the input length because each `bits += …` copied the entire
+  // running string. The numeric accumulator keeps work strictly linear and
+  // never holds more than 12 bits at once (5 just appended + up to 7 from
+  // the previous round). The `bitCount` tracks how many of the low-order
+  // bits inside `bitBuffer` are currently valid.
+  const bytes: number[] = []
+  let bitBuffer = 0
+  let bitCount = 0
   for (const character of stripped) {
     const index = alphabet.indexOf(character)
     if (index === -1) {
       throw new Error(`Invalid Base32 character: ${character}`)
     }
-    bits += index.toString(2).padStart(BASE32_BITS_PER_CHAR, "0")
-  }
-
-  const bytes: number[] = []
-  for (let index = 0; index + BITS_PER_BYTE <= bits.length; index += BITS_PER_BYTE) {
-    bytes.push(Number.parseInt(bits.slice(index, index + BITS_PER_BYTE), 2))
+    bitBuffer = (bitBuffer << BASE32_BITS_PER_CHAR) | index
+    bitCount += BASE32_BITS_PER_CHAR
+    if (bitCount >= BITS_PER_BYTE) {
+      bitCount -= BITS_PER_BYTE
+      bytes.push((bitBuffer >> bitCount) & BYTE_MASK)
+    }
   }
 
   return Buffer.from(bytes)

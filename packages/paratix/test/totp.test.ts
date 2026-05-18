@@ -156,6 +156,22 @@ describe("generateTotpCode — Base32 decoding", () => {
     const invalidUri = "otpauth://totp/Test?secret=INVALID!@#$"
     expect(() => generateTotpCode(invalidUri)).toThrow(/Invalid Base32 character/v)
   })
+
+  // R-0000792: oversized Base32 inputs must be rejected before the decoder
+  // walks them so a malicious otpauth URI cannot trigger quadratic copy work
+  // or unbounded buffer allocation.
+  it("throws when the Base32 secret exceeds the 1024-character cap (R-0000792)", () => {
+    const oversized = "A".repeat(1025)
+    const oversizedUri = `otpauth://totp/Test?secret=${oversized}`
+    expect(() => generateTotpCode(oversizedUri)).toThrow(/exceeds the 1024-character limit/v)
+  })
+
+  it("still accepts Base32 secrets exactly at the 1024-character cap (R-0000792)", () => {
+    // 1024 'A' characters decode to 640 zero bytes — a fine HMAC key.
+    const atLimit = "A".repeat(1024)
+    const atLimitUri = `otpauth://totp/Test?secret=${atLimit}`
+    expect(() => generateTotpCode(atLimitUri)).not.toThrow()
+  })
 })
 
 // ---------------------------------------------------------------------------
