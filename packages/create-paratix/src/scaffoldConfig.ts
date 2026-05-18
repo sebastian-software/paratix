@@ -179,6 +179,19 @@ function parseArgumentValue(
       | "--initial-user"
   }
 ): string {
+  // R-0000827: wrap parameters.exitWithMessage in a local closure that both
+  // calls the injected exit hook and throws afterwards. The injected
+  // exitWithMessage is typed `never`, but TypeScript cannot prove that a
+  // property access on `parameters` is a non-mutating, always-terminating
+  // call — so the value-narrowing after `value == null` would silently
+  // depend on the hook actually never returning. The explicit `throw`
+  // turns failMissing into a deterministic `never`-returning function that
+  // both the compiler and the runtime can rely on, even if a future
+  // refactor of exitWithMessage accidentally returned.
+  const failMissing = (message: string): never => {
+    parameters.exitWithMessage(message)
+    throw new Error(message)
+  }
   const value = argv.at(index + 1)
   // R-0000734: distinguish between a truly missing argument (no token
   // follows the option) and a token that looks like another long flag
@@ -187,10 +200,10 @@ function parseArgumentValue(
   // for operators to spot whether they forgot the value entirely or
   // accidentally passed a flag where a value belonged.
   if (value == null) {
-    parameters.exitWithMessage(`Error: Missing value for "${parameters.optionName}".`)
+    failMissing(`Error: Missing value for "${parameters.optionName}".`)
   }
   if (value.startsWith("--")) {
-    parameters.exitWithMessage(
+    failMissing(
       `Error: Expected a value for "${parameters.optionName}" but got the flag "${value}". ` +
         `If the value really starts with "--", separate it from the option with "--" or quote it explicitly.`
     )
@@ -204,12 +217,10 @@ function parseArgumentValue(
   // into `server.ts`). Both cases are rejected with a clear,
   // option-specific error message.
   if (value.trim() === "") {
-    parameters.exitWithMessage(
-      `Error: Empty value for "${parameters.optionName}" — provide a non-empty value.`
-    )
+    failMissing(`Error: Empty value for "${parameters.optionName}" — provide a non-empty value.`)
   }
   if (/[\r\n]/v.test(value)) {
-    parameters.exitWithMessage(
+    failMissing(
       `Error: Multi-line value for "${parameters.optionName}" — provide a single-line value.`
     )
   }
