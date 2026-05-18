@@ -485,8 +485,15 @@ async function rollbackInterfaceConfig(
       await conn.writeFile(snapshot.path, snapshot.previousContent, { mode: NET_CONFIG_FILE_MODE })
     } catch (error: unknown) {
       const reason = error instanceof Error ? error.message : String(error)
+      // R-0000809: when restoring the snapshot to disk fails, the live
+      // network configuration (kernel routes, addresses applied via
+      // `ip`/`netplan`/`networkctl` in the failed apply) may already
+      // diverge from whatever the on-disk file holds. Surface that fact in
+      // the failure message so the operator knows to inspect the live
+      // state, not only the on-disk one.
       return failed(
-        `[net.interface] rollback restore failed for ${snapshot.path}; network configuration was not restored: ${reason}`
+        `[net.interface] rollback restore failed for ${snapshot.path}; network configuration was not restored ` +
+          `and the live network configuration may differ from on-disk content: ${reason}`
       )
     }
     return null
