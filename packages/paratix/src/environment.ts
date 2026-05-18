@@ -7,8 +7,13 @@ import type { Environment } from "./types.js"
  * `collectEnvironment` in cli.ts so values supplied via `--env` and values
  * loaded from a `.env` file go through the same allow-list. Lifting the
  * pattern out of the loader keeps the failure message consistent.
+ *
+ * R-0000745: also re-used by `meta.assertAllowedEnvironmentMetaName` so a
+ * `meta.env(name, …)` registration enforces the dotenv allow-list at the
+ * source instead of waiting for the merged value to surface in a CLI parser
+ * (where the pattern would otherwise re-fail with a less actionable error).
  */
-const ENVIRONMENT_KEY_PATTERN = /^[A-Za-z_]\w*$/v
+export const ENVIRONMENT_KEY_PATTERN = /^[A-Za-z_]\w*$/v
 
 /**
  * Reserved JavaScript identifiers that, when set as a property, can leak

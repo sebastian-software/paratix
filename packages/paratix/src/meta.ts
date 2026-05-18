@@ -8,7 +8,11 @@ import type {
   SystemRebootMetaEntry,
 } from "./types.js"
 
-import { createNullPrototypeEnvironment, ENVIRONMENT_FORBIDDEN_KEYS } from "./environment.js"
+import {
+  createNullPrototypeEnvironment,
+  ENVIRONMENT_FORBIDDEN_KEYS,
+  ENVIRONMENT_KEY_PATTERN,
+} from "./environment.js"
 import { isValidTcpPort } from "./serverDefinitionValidation.js"
 
 const SYSTEM_HOST_KIND = "system.host"
@@ -223,6 +227,17 @@ export function assertValidModuleMetaEntries(entries: ModuleMetaEntry[] | undefi
 }
 
 function assertAllowedEnvironmentMetaName(name: string): void {
+  // R-0000745: enforce the same allow-list that `collectEnvironment` (CLI)
+  // and `loadDotEnvironment` already apply so a meta-registered name like
+  // "foo bar", "123abc", or "" fails fast at the registration boundary
+  // instead of slipping into the merged environment and then failing far
+  // away with a confusing downstream error. The exact pattern lives in
+  // environment.ts as the single source of truth.
+  if (!ENVIRONMENT_KEY_PATTERN.test(name)) {
+    throw new Error(
+      `Invalid env meta name ${JSON.stringify(name)}: expected [A-Za-z_]\\w*`
+    )
+  }
   if (ENVIRONMENT_FORBIDDEN_KEYS.has(name)) {
     throw new Error(
       `Forbidden env meta entry name: ${JSON.stringify(name)} (reserved JavaScript identifier)`
