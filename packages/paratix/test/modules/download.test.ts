@@ -2503,6 +2503,33 @@ describe("download.large", () => {
       expect(mockSsh.calls.every((c) => !c.startsWith("curl"))).toBe(true)
       expect(mockSsh.calls.every((c) => !c.startsWith("mktemp"))).toBe(true)
     })
+
+    // R-0000754: when the apply path runs and performDownload returns "ok"
+    // because the destination already matches, the versioned flag must be
+    // persisted unconditionally — even if a probe just before would have
+    // observed the flag file. The previous fast-path split the check and
+    // write into two RTTs, leaving a race window in which a concurrent
+    // process could clear the flag between probe and return; the apply
+    // would then report "ok" with no marker on disk.
+    it("persists the versioned flag even when a stale probe would have observed it", async () => {
+      const sha256 = "aabbccddaabbccddaabbccddaabbccddaabbccddaabbccddaabbccddaabbccdd"
+      const mockSsh = createMockSsh({
+        [`[ -e '${destination}' ]`]: { code: 0 },
+        [`[ -f '${destination}' ]`]: { code: 0 },
+        // The pre-lock check still reports drift (e.g. someone briefly
+        // cleared the flag during the run), so the apply path is entered.
+        [`[ -f /var/lib/paratix/flags/'${flagName}' ]`]: { code: 1 },
+        [`sha256sum '${destination}'`]: { stdout: `${sha256}  ${destination}` },
+      })
+      const mod = download.large(destination, url, { sha256 })
+      const result = await mod.apply(mockSsh, emptyEnv)
+      // performDownload determined the destination already matches, so the
+      // status stays "ok"; the marker is still rewritten unconditionally.
+      expect(result.status).toBe("ok")
+      expect(mockSsh.calls).toContain(
+        buildLargeDownloadVersionedFlagCommand({ destination, flagName })
+      )
+    })
   })
 
   describe("name", () => {
