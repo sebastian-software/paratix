@@ -1594,12 +1594,58 @@ describe("SshConnectionImpl", () => {
         expect(tryConnectOnPort).toHaveBeenCalledOnce()
       })
 
+      // R-0000669: performConnectAttemptOnPort now combines the prompt-level
+      // abort signal with the connection-level abort signal, so the value
+      // passed to tryConnectOnPort is a composite. Verify the composite signal
+      // honors the caller-provided abort source instead of asserting identity.
       const [callArgs] = vi.mocked(tryConnectOnPort).mock.calls[0]
-      expect(callArgs.abortSignal).toBe(abortController.signal)
+      expect(callArgs.abortSignal).toBeInstanceOf(AbortSignal)
+      expect(callArgs.abortSignal?.aborted).toBe(false)
 
       abortController.abort(abortError)
 
       await expect(connectPromise).rejects.toThrow("Interrupted by SIGINT")
+      expect(tryConnectOnPort).toHaveBeenCalledOnce()
+    })
+
+    it("aborts an in-flight initial connect when disconnect() is called (R-0000669)", async () => {
+      // R-0000669: every attempt subscribes to the connection-level abort
+      // signal. Reject from any call that observes the abort so the test
+      // covers the multi-port loop as well as the first attempt.
+      vi.mocked(tryConnectOnPort).mockImplementation(
+        async ({ abortSignal }) =>
+          new Promise<void>((_resolve, reject) => {
+            abortSignal?.addEventListener(
+              "abort",
+              () => {
+                reject(new Error("SSH connect aborted"))
+              },
+              { once: true }
+            )
+          })
+      )
+
+      const ssh = makeSshInstance({ ports: [22] })
+      const connectPromise = ssh.connect()
+      connectPromise.catch(() => {
+        /* handled below */
+      })
+      await vi.waitFor(() => {
+        expect(tryConnectOnPort).toHaveBeenCalledOnce()
+      })
+
+      // Programmatic disconnect without first aborting any prompt-level
+      // signal must still cancel the in-flight connect via the
+      // connection-level abort controller. The composite signal observed by
+      // tryConnectOnPort must fire so the connect attempt rejects instead of
+      // running with the now-orphaned client reference.
+      ssh.disconnect()
+
+      // The connect-loop wraps the per-port rejection into a generic
+      // "Failed to connect" error after every port has failed; the important
+      // observable behavior is that the in-flight attempt was settled (and
+      // the mock recorded only one attempt).
+      await expect(connectPromise).rejects.toThrow(/Failed to connect|SSH connect aborted/v)
       expect(tryConnectOnPort).toHaveBeenCalledOnce()
     })
 

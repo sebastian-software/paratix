@@ -404,6 +404,11 @@ export class SshConnectionImpl implements SshConnection {
     // state (sudoProbeFailedReason, sudoReady, credentialCachePrimed,
     // passwordlessSudo) so reconnect()/updateHost paths inherit the same
     // fresh-probe semantics that public disconnect() needs.
+    // R-0000669: disconnectTransport also rotates connectionAbortController,
+    // which now propagates into performConnectAttemptOnPort. A SIGINT-driven
+    // disconnect() while tryConnectOnPort is still running therefore aborts
+    // the in-flight connect via the abort-signal path instead of leaving an
+    // orphaned client that disconnectTransport already nulled.
     this.disconnectTransport()
   }
 
@@ -775,6 +780,25 @@ export class SshConnectionImpl implements SshConnection {
     }
     const pairs = Object.entries(environment).map(([k, v]) => `${k}=${shellQuote(v)}`)
     return `${pairs.join(" ")} `
+  }
+
+  /**
+   * R-0000669: build the abort signal that {@link tryConnectOnPort} subscribes
+   * to. Combines the prompt-level abort signal (which fires from the SIGINT
+   * handler) with the connection-level abort signal (which fires from
+   * {@link disconnect}/{@link disconnectTransport} via
+   * {@link rotateConnectionAbortController}). The combination ensures that
+   * any caller-initiated disconnect aborts an in-flight connect attempt,
+   * even when the prompt signal was not also aborted (e.g. a programmatic
+   * disconnect from a custom error handler).
+   *
+   * @returns A signal that aborts on the first of the inputs to abort, or
+   *   undefined when there is no signal to subscribe to.
+   */
+  private buildConnectAbortSignal(): AbortSignal {
+    const signals: AbortSignal[] = [this.connectionAbortController.signal]
+    if (this.promptAbortSignal != null) signals.push(this.promptAbortSignal)
+    return signals.length === 1 ? (signals[0] as AbortSignal) : AbortSignal.any(signals)
   }
 
   private buildSecrets(extra?: string[]): SecretSource[] {
@@ -1610,8 +1634,15 @@ trap - EXIT
       }
     )
     const hostKeyAttempt = this.createHostKeyAttempt(verifier.hostVerifier)
+    // R-0000669: combine the prompt-level abort signal (SIGINT-driven prompt
+    // cancellation) with the connection-level abort signal so an in-flight
+    // tryConnectOnPort is aborted whenever disconnect() runs — including
+    // programmatic disconnect paths that did not also abort promptAbortSignal.
+    // Without this, disconnectTransport nulled the client while the connect
+    // continued and emitted a `ready` event on a no-longer-tracked client.
+    const connectAbortSignal = this.buildConnectAbortSignal()
     await tryConnectOnPort({
-      abortSignal: this.promptAbortSignal,
+      abortSignal: connectAbortSignal,
       agent: options.agent,
       agentForward: this.config.agentForward,
       client,
