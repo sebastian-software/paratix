@@ -22,10 +22,51 @@ function readEnvironmentAvailabilityRetries() {
 const DEFAULT_AVAILABILITY_RETRIES = readEnvironmentAvailabilityRetries() ?? 24
 const DEFAULT_AVAILABILITY_DELAY_MS = 10_000
 
+// R-0000740: the publish order between paratix and create-paratix is
+// load-bearing (paratix must be available on the registry before
+// create-paratix can resolve its peer at install time), so we keep the
+// list static. To prevent silent drift when a new workspace package is
+// added to packages/ without being reflected here, we cross-check the
+// static list against the actual `packages/` directory listing at
+// startup. An unexpected entry — or a missing one — aborts the publish
+// flow before any registry side effects.
+const PACKAGES_ROOT_DIRECTORY = "packages"
+
 const packages = [
   { directory: "packages/paratix", name: "paratix" },
   { directory: "packages/create-paratix", name: "create-paratix" },
 ]
+
+async function assertWorkspacePackagesMatchFilesystem(fs) {
+  // The other fs accessors in this script consume relative paths
+  // (`packages/<name>/package.json`), so we keep the same convention
+  // here for symmetry with the existing test mocks.
+  const entries = await fs.readdir(PACKAGES_ROOT_DIRECTORY, { withFileTypes: true })
+  const filesystemDirectories = entries
+    .filter((entry) => entry.isDirectory())
+    .map((entry) => entry.name)
+    .sort()
+  const declaredDirectories = packages
+    .map((packageInfo) => packageInfo.directory.replace(/^packages\//v, ""))
+    .sort()
+  const filesystemSet = new Set(filesystemDirectories)
+  const declaredSet = new Set(declaredDirectories)
+  const missing = declaredDirectories.filter((name) => !filesystemSet.has(name))
+  const unexpected = filesystemDirectories.filter((name) => !declaredSet.has(name))
+  if (missing.length > 0 || unexpected.length > 0) {
+    const details = []
+    if (missing.length > 0) {
+      details.push(`missing from filesystem: ${missing.join(", ")}`)
+    }
+    if (unexpected.length > 0) {
+      details.push(`not declared in publishWorkspacePackages.mjs: ${unexpected.join(", ")}`)
+    }
+    throw new Error(
+      `Workspace package drift detected (${details.join("; ")}). ` +
+        "Update scripts/publishWorkspacePackages.mjs to reflect the actual packages/ contents before publishing."
+    )
+  }
+}
 
 function sleep(milliseconds) {
   return new Promise((resolve) => {
@@ -418,6 +459,12 @@ export async function publishWorkspacePackages({
   fs = { lstat, readdir, readFile, stat },
   filesystem = fs,
 } = {}) {
+  // R-0000740: assert the static `packages` list matches the actual
+  // `packages/` directory contents before reading any package.json so a
+  // new workspace package added without updating this script aborts the
+  // publish flow with a clear diagnostic instead of being silently
+  // skipped.
+  await assertWorkspacePackagesMatchFilesystem(fs)
   const [paratixPackage, createParatixPackage] = await readWorkspacePackages(fs)
   validateWorkspacePackages([paratixPackage, createParatixPackage])
 

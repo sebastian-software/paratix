@@ -58,12 +58,23 @@ function createFs({
   }
   const mtimes = { ...defaultMtimes, ...mtimeOverrides }
   const directories = {
+    // R-0000740: the publish flow now performs a drift assertion against
+    // the `packages/` directory at startup, so the mock has to surface
+    // the workspace package directories alongside the per-package dist/
+    // and src/ trees.
+    packages: ["create-paratix", "paratix"],
     "packages/create-paratix/dist": ["index.js"],
     "packages/create-paratix/src": ["index.ts"],
     "packages/paratix/dist": ["index.js"],
     "packages/paratix/src": ["index.ts"],
   }
   const symlinkSet = new Set(symlinkPaths)
+  // R-0000740: the drift assertion calls `readdir(path, { withFileTypes: true })`
+  // for the `packages/` directory and expects entries whose
+  // `isDirectory()` returns true. The default Dirent factory below
+  // reports all entries as files, so callers tracking package-level
+  // directories register them here.
+  const directoryEntries = new Set(["packages/create-paratix", "packages/paratix"])
   return {
     // R-0000685: lstat reports symbolic-link status without following the
     // link. mtimeMillisecondsForFileEntry now relies on lstat to stay
@@ -96,9 +107,10 @@ function createFs({
       return entries.map((name) => {
         const fullPath = `${path}/${name}`
         const isSymbolicLink = symlinkSet.has(fullPath)
+        const isDirectory = directoryEntries.has(fullPath)
         return {
-          isDirectory: () => false,
-          isFile: () => !isSymbolicLink,
+          isDirectory: () => isDirectory,
+          isFile: () => !isSymbolicLink && !isDirectory,
           isSymbolicLink: () => isSymbolicLink,
           name,
         }
