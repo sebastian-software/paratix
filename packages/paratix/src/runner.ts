@@ -107,6 +107,15 @@ function setupShutdownHandlers(): ShutdownState {
       // the terminal is not left in raw mode / cursor hidden, and so the
       // secret sink does not retain registered values.
       performShutdownBestEffortCleanup()
+      // R-0000694: synchronously destroy the ssh2 client before exiting.
+      // The first SIGINT queued `ssh.disconnect()` as a microtask
+      // (R-0000257) so ssh2 stream internals had a coherent tick to
+      // drain. The second SIGINT may arrive before that microtask has
+      // run, so any in-flight ssh2 callback would die mid-flight on
+      // `process.exit`. Calling `forceDestroy()` here tears down the
+      // underlying socket inside the current tick — fully synchronous, no
+      // microtask required — so no ssh2 state is left dangling.
+      ssh?.forceDestroy()
       // eslint-disable-next-line node/no-process-exit
       process.exit(signalExitCode(signal))
     }
