@@ -317,12 +317,19 @@ describe("pkg.installed", () => {
     expect(() => pkg.installed()).toThrow("at least one package name is required")
   })
 
-  it.each(["", " ", "nginx curl", "nginx\ncurl", "nginx\rcurl", "-o"])(
-    "throws for invalid package name %j",
-    (packageName) => {
-      expect(() => pkg.installed(packageName)).toThrow("invalid package name")
-    }
-  )
+  it.each([
+    "",
+    " ",
+    "nginx curl",
+    "nginx\ncurl",
+    "nginx\rcurl",
+    "-o",
+    "nginx-",
+    "nginx+",
+    "+nginx",
+  ])("throws for invalid package name %j", (packageName) => {
+    expect(() => pkg.installed(packageName)).toThrow("invalid package name")
+  })
 })
 
 // ---------------------------------------------------------------------------
@@ -455,12 +462,19 @@ describe("pkg.absent", () => {
     expect(() => pkg.absent()).toThrow("at least one package name is required")
   })
 
-  it.each(["", " ", "nginx curl", "nginx\ncurl", "nginx\rcurl", "-o"])(
-    "throws for invalid package name %j",
-    (packageName) => {
-      expect(() => pkg.absent(packageName)).toThrow("invalid package name")
-    }
-  )
+  it.each([
+    "",
+    " ",
+    "nginx curl",
+    "nginx\ncurl",
+    "nginx\rcurl",
+    "-o",
+    "nginx-",
+    "nginx+",
+    "+nginx",
+  ])("throws for invalid package name %j", (packageName) => {
+    expect(() => pkg.absent(packageName)).toThrow("invalid package name")
+  })
 })
 
 // ---------------------------------------------------------------------------

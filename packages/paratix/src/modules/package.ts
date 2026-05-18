@@ -38,13 +38,27 @@ function splitPackagesAndOptions(values: ReadonlyArray<string | UpgradeOptions>)
   return { options, packages }
 }
 
+// R-0000812: reject both leading and trailing affix characters in addition
+// to whitespace and option-like prefixes. A trailing `-` is `apt`'s
+// "remove this package" suffix, a trailing `+` is "(re)install this
+// package" — accepting either would let a caller smuggle a state change
+// past `pkg.installed`/`pkg.absent` even though the surrounding command
+// uses the `--` argument terminator. A leading `+` is also disallowed:
+// while `apt` does not treat it as an option, some downstream tooling
+// does, so we keep the allowlist tight.
+const PACKAGE_NAME_PATTERN = /^[a-z0-9][a-z0-9+._-]*[a-z0-9.]$/v
+
 function validatePackageNames(moduleName: string, packages: readonly string[]): void {
   if (packages.length === 0) {
     throw new Error(`${moduleName}: at least one package name is required`)
   }
 
   for (const packageName of packages) {
-    if (packageName.length === 0 || /\s/v.test(packageName) || packageName.startsWith("-")) {
+    // Single-character names are permitted only if they consist of a single
+    // lowercase alnum character — the multi-character regex above requires
+    // a trailing non-affix character which forbids the single-char case.
+    const isSingleAlnum = packageName.length === 1 && /^[a-z0-9]$/v.test(packageName)
+    if (!isSingleAlnum && !PACKAGE_NAME_PATTERN.test(packageName)) {
       throw new Error(`${moduleName}: invalid package name ${JSON.stringify(packageName)}`)
     }
   }
