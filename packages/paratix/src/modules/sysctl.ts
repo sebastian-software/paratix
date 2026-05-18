@@ -316,33 +316,53 @@ type AbsentStateInput = {
 }
 
 /**
+ * Outcome of a persistence-file snapshot: a captured string, an explicit
+ * "missing" marker, or a structured read failure that callers must treat as
+ * uncertain.
+ *
+ * R-0000682: the original implementation collapsed a vanished file and a
+ * permission-denied read into the same `null`. That made `applyAbsentState`
+ * remove the file anyway and `restorePersistenceFile` report "no snapshot to
+ * restore", masking the loss. Distinguish the two so the apply can abort
+ * before the rm when the snapshot is uncertain.
+ */
+type PersistenceFileSnapshot =
+  | { kind: "captured"; content: string }
+  | { kind: "failed"; reason: string }
+  | { kind: "missing" }
+
+/**
  * Capture the current content of the sysctl persistence file so the absent
  * flow can roll it back when the subsequent live-reset fails. R-0000658:
  * without the snapshot, a failed `sysctl -w` left the host with neither the
  * persistence entry nor a converged live value, and the next reboot
- * silently loaded the kernel default. A missing file is reported as `null`
- * so the rollback path can distinguish "nothing to restore" from a
- * captured snapshot.
+ * silently loaded the kernel default.
+ *
+ * R-0000682: distinguish "file missing" (legitimate `kind: "missing"`) from
+ * "readFile failed after a positive `test -f`" (`kind: "failed"`). The
+ * apply path translates a structured failure into a refusal to remove the
+ * file, instead of pretending there was nothing to restore.
  *
  * @param conn - The SSH connection to the remote host.
  * @param configPath - The persistence-file path the absent flow will remove.
- * @returns The captured file contents, or `null` when the file was already
- *   absent or unreadable.
+ * @returns A {@link PersistenceFileSnapshot} describing the outcome of the
+ *   capture.
  */
 async function snapshotPersistenceFile(
   conn: SshConnection,
   configPath: string
-): Promise<null | string> {
+): Promise<PersistenceFileSnapshot> {
   const exists = await conn.exec(`test -f ${shellQuote(configPath)}`, EXEC_OPTS)
-  if (exists.code !== 0) return null
+  if (exists.code !== 0) return { kind: "missing" }
   try {
-    return await conn.readFile(configPath)
-  } catch {
-    // A race where the file vanished between `test -f` and `readFile`
-    // (or a permission error on the read) is treated like "absent" — the
-    // rollback would have nothing useful to restore anyway, so we let the
-    // remove + reset path proceed normally.
-    return null
+    const content = await conn.readFile(configPath)
+    return { content, kind: "captured" }
+  } catch (error) {
+    // R-0000682: a readFile failure after `test -f` reported the file as
+    // present means the snapshot is uncertain. The caller must abort the
+    // absent flow before the rm rather than silently dropping the file.
+    const reason = error instanceof Error ? error.message : String(error)
+    return { kind: "failed", reason }
   }
 }
 
@@ -356,20 +376,26 @@ async function snapshotPersistenceFile(
  *
  * @param conn - The SSH connection to the remote host.
  * @param configPath - The persistence-file path to restore into.
- * @param snapshot - The previously captured content (or `null` when the
- *   file did not exist at the start of the absent flow).
+ * @param snapshot - The previously captured snapshot outcome.
  * @returns A short status string describing the rollback outcome.
  */
 async function restorePersistenceFile(
   conn: SshConnection,
   configPath: string,
-  snapshot: null | string
+  snapshot: PersistenceFileSnapshot
 ): Promise<string> {
-  if (snapshot == null) {
+  if (snapshot.kind === "missing") {
     return "no persistence-file snapshot to restore"
   }
+  if (snapshot.kind === "failed") {
+    // R-0000682: applyAbsentState aborts before the rm when the snapshot
+    // capture failed, so this branch is defensive. Surface the original
+    // reason so the operator can correlate a stale call site with the
+    // uncertain snapshot.
+    return `persistence-file snapshot was uncertain: ${snapshot.reason}`
+  }
   try {
-    await conn.writeFile(configPath, snapshot, { mode: SYSCTL_CONFIG_MODE })
+    await conn.writeFile(configPath, snapshot.content, { mode: SYSCTL_CONFIG_MODE })
     return "persistence file restored from snapshot"
   } catch (error) {
     const reason = error instanceof Error ? error.message : String(error)
@@ -396,6 +422,17 @@ async function applyAbsentState(
 ): Promise<ModuleResult> {
   const { configPath, key, resetValue } = input
   const snapshot = await snapshotPersistenceFile(conn, configPath)
+  // R-0000682: refuse to proceed with the rm when the snapshot capture
+  // failed after `test -f` reported the file as present. Otherwise a
+  // transient SFTP error or a permission denial after a positive existence
+  // probe would silently destroy the persistence file with no chance of
+  // rollback; the operator must reconcile the situation manually before
+  // re-running the absent flow.
+  if (snapshot.kind === "failed") {
+    return failed(
+      `[sysctl.set: ${key}] persistence-file snapshot failed; refusing to remove ${configPath}: ${snapshot.reason}`
+    )
+  }
   const removeResult = await conn.exec(`rm -f ${shellQuote(configPath)}`, EXEC_OPTS)
   if (removeResult.code !== 0) {
     return failedCommand(`[sysctl.set: ${key}] failed to remove config file`, removeResult)

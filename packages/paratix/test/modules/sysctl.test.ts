@@ -401,6 +401,34 @@ describe("sysctl.set — apply", () => {
     expect(String(result.error)).toContain("persistence file restore failed")
     expect(String(result.error)).toContain("read-only file system")
   })
+
+  // R-0000682: when `test -f` reports the persistence file as present but
+  // the subsequent readFile throws (transient SFTP error, permission
+  // denied), the absent flow must NOT proceed with the rm. The legacy
+  // implementation collapsed the read failure into `null`, removed the
+  // file anyway, and reported "no snapshot to restore" — masking the loss.
+  // The apply must abort with a structured failure that names the
+  // persistence path and the underlying reason.
+  it("R-0000682: refuses to remove persistence file when snapshot read fails", async () => {
+    const mockSsh = createMockSsh({
+      [`rm -f '${CONF_PATH}'`]: { code: 0 },
+      [`sysctl -w '${KEY}=0'`]: { code: 0 },
+      [`test -f '${CONF_PATH}'`]: { code: 0 },
+    })
+    vi.spyOn(mockSsh, "readFile").mockRejectedValueOnce(
+      new Error("SFTP read failed: Permission denied")
+    )
+    const mod = sysctl.set(KEY, VALUE, { resetValue: "0", state: "absent" })
+    const result = await mod.apply(mockSsh, emptyEnv)
+    expect(result.status).toBe("failed")
+    expect(String(result.error)).toContain("persistence-file snapshot failed")
+    expect(String(result.error)).toContain(CONF_PATH)
+    expect(String(result.error)).toContain("Permission denied")
+    // The rm must NOT have been issued.
+    expect(mockSsh.calls).not.toContain(`rm -f '${CONF_PATH}'`)
+    // The live-reset must NOT have been issued either.
+    expect(mockSsh.calls).not.toContain(`sysctl -w '${KEY}=0'`)
+  })
 })
 
 describe("sysctl.set — config path", () => {
