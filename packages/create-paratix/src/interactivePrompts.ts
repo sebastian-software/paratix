@@ -370,6 +370,12 @@ async function scanAndConfirmFingerprint(parameters: {
     result = await scanner(host)
   } catch (error) {
     // R-0000128: do not silently swallow scan failures. Surface a
+    // possible-MITM warning and abort scaffolding via the helper, which
+    // returns `never` and unconditionally throws — there is no
+    // fall-through path here, so we deliberately do not add a second
+    // `throw` (R-0000735). The function's `never` return type keeps
+    // the typing consistent for callers that rely on `result` being
+    // assigned after the try/catch.
     failAfterScanFailure(host, error)
   }
 
