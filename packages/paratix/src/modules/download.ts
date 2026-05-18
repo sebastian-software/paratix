@@ -3,9 +3,8 @@ import { createHash, timingSafeEqual } from "node:crypto"
 import { posix as path } from "node:path"
 
 import { failed, failedCommand } from "../moduleFailure.js"
-import { withRegisteredSecrets } from "../secretSink.js"
+import { maskRegisteredSecrets, withRegisteredSecrets } from "../secretSink.js"
 import { shellQuote, validateMktempPath, validateMode } from "../ssh.js"
-import { maskSecrets } from "../sshHelpers.js"
 import { type Module, type ModuleResult, NEEDS_APPLY, type SshConnection } from "../types.js"
 import {
   buildCurlArgvHeaderFlags,
@@ -688,8 +687,16 @@ async function cleanupTemporaryDownloadFile(
     // attacker-controlled path starting with `-`).
     await conn.exec(`rm -f -- ${shellQuote(parameters.destination)}`, { silent: true })
   } catch (cleanupError) {
+    // R-0000675: route the warning through the global secret sink instead of
+    // building the mask list from the call site's local `parameters.secrets`.
+    // `CommandError` messages can embed `--config` stdin fragments or other
+    // material that the call site does not know about; relying on the
+    // registered sink ensures every secret active for the current run is
+    // masked, not just the headers/URL the caller happens to track.
     process.stderr.write(
-      `Warning: failed to remove temp file ${parameters.destination}: ${maskSecrets(String(cleanupError), parameters.secrets ?? [])}\n`
+      maskRegisteredSecrets(
+        `Warning: failed to remove temp file ${parameters.destination}: ${String(cleanupError)}\n`
+      )
     )
   }
 }

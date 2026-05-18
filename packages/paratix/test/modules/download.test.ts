@@ -4,6 +4,7 @@ import { describe, expect, it, vi } from "vitest"
 import type { ExecOptions } from "../../src/types.js"
 
 import { download } from "../../src/modules/download.js"
+import { registerSecret, unregisterSecret } from "../../src/secretSink.js"
 import { createMockSsh as createBaseMockSsh, type ExecCall } from "../helpers/mockSsh.js"
 
 const createMockSsh: typeof createBaseMockSsh = (responses, options) =>
@@ -303,7 +304,7 @@ function buildAncestorMkdirCommandsForDestination(destinationPath: string): stri
     const lastSlash = current.lastIndexOf("/")
     current = lastSlash <= 0 ? "/" : current.slice(0, lastSlash)
   }
-  return ancestors.reverse().map((ancestor) => buildAncestorMkdirCommand(ancestor))
+  return ancestors.toReversed().map((ancestor) => buildAncestorMkdirCommand(ancestor))
 }
 
 function lastAncestorMkdirCommandForDestination(destinationPath: string): string {
@@ -1079,6 +1080,57 @@ describe("download.url", () => {
           `Warning: failed to remove temp file ${temporaryDestination}: Error: cleanup failed\n`
         )
       } finally {
+        stderrSpy.mockRestore()
+      }
+    })
+
+    // R-0000675: the cleanup warning must mask every secret registered in the
+    // global sink — not just the URL/header values the call site happens to
+    // know about. A `CommandError` rejection from `rm -f` could otherwise
+    // surface a `--config` stdin fragment, sudo password or op-resolved value
+    // that the local `parameters.secrets` list does not include.
+    it("R-0000675: cleanup warning routes through the global secret sink", async () => {
+      const globalSecret = "super-secret-value-that-should-be-masked"
+      const cleanupError = new Error(`rm failed: leaked ${globalSecret} via stderr`)
+      const stderrSpy = vi.spyOn(process.stderr, "write").mockImplementation(() => true)
+      registerSecret(globalSecret)
+      try {
+        const base = createMockSsh({
+          [`mktemp "$(dirname -- '${destination}')/.paratix-download.XXXXXX"`]: {
+            stdout: `${temporaryDestination}\n`,
+          },
+        })
+        const ancestorMkdirCommands = buildAncestorMkdirCommandsForDestination(destination)
+        const execMock =
+          vi.fn<(command: string) => Promise<{ code: number; stderr: string; stdout: string }>>()
+        for (const _ of ancestorMkdirCommands) {
+          execMock.mockResolvedValueOnce({ code: 0, stderr: "", stdout: "" })
+        }
+        // mktemp + curl succeed; the temp-file cleanup rejects with a message
+        // that embeds a secret only known to the global sink.
+        execMock
+          .mockResolvedValueOnce({ code: 0, stderr: "", stdout: "" })
+          .mockResolvedValueOnce({ code: 0, stderr: "", stdout: "" })
+          .mockRejectedValueOnce(cleanupError)
+        const mockSsh = {
+          ...base,
+          async exec(command: string) {
+            base.calls.push(command)
+            return execMock(command)
+          },
+        }
+
+        const mod = download.url(destination, url, allowUnverifiedDownload)
+        await mod.apply(mockSsh, emptyEnv)
+
+        const stderrCalls = stderrSpy.mock.calls.map((entry) => String(entry[0]))
+        const warning = stderrCalls.find((entry) =>
+          entry.startsWith(`Warning: failed to remove temp file ${temporaryDestination}:`)
+        )
+        expect(warning).toBeDefined()
+        expect(warning).not.toContain(globalSecret)
+      } finally {
+        unregisterSecret(globalSecret)
         stderrSpy.mockRestore()
       }
     })
