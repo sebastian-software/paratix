@@ -663,7 +663,14 @@ describe("user.present home migration and mode (R-0000656)", () => {
       // chmod runs after usermod regardless of pre-check (stat fails -> mismatch),
       // so include the chmod stub for the default 0700 mode.
       "[ ! -L '/srv/alice' ] && [ -d '/srv/alice' ] && chmod '0700' '/srv/alice'": { code: 0 },
+      // R-0000822: chmod is wrapped in pre/post stat probes that verify
+      // the home directory's inode identity did not change. Stub both
+      // probes with the same identity so the verification succeeds.
       "[ ! -L '/srv/alice' ] && [ -d '/srv/alice' ] && stat -c '%a' '/srv/alice'": { code: 1 },
+      "[ ! -L '/srv/alice' ] && [ -d '/srv/alice' ] && stat -c '%d:%i' '/srv/alice'": {
+        code: 0,
+        stdout: "64769:1234\n",
+      },
       "id 'alice'": { code: 0 },
       "usermod --home '/srv/alice' --move-home 'alice'": { code: 0 },
     })
@@ -679,6 +686,11 @@ describe("user.present home migration and mode (R-0000656)", () => {
       "[ ! -L '/srv/bob' ] && [ -d '/srv/bob' ] && stat -c '%a' '/srv/bob'": {
         code: 0,
         stdout: "755",
+      },
+      // R-0000822: pre/post-chmod inode-identity probes
+      "[ ! -L '/srv/bob' ] && [ -d '/srv/bob' ] && stat -c '%d:%i' '/srv/bob'": {
+        code: 0,
+        stdout: "64769:2345\n",
       },
       "id 'bob'": { code: 1 },
       "useradd --home '/srv/bob' --create-home 'bob'": { code: 0 },
@@ -698,6 +710,11 @@ describe("user.present home migration and mode (R-0000656)", () => {
         code: 0,
         stdout: "755",
       },
+      // R-0000822: pre/post-chmod inode-identity probes
+      "[ ! -L '/home/alice' ] && [ -d '/home/alice' ] && stat -c '%d:%i' '/home/alice'": {
+        code: 0,
+        stdout: "64769:3456\n",
+      },
       "id 'alice'": { code: 1 },
       "useradd --home '/home/alice' --create-home 'alice'": { code: 0 },
     })
@@ -715,6 +732,11 @@ describe("user.present home migration and mode (R-0000656)", () => {
       "[ ! -L '/home/alice' ] && [ -d '/home/alice' ] && stat -c '%a' '/home/alice'": {
         code: 0,
         stdout: "755",
+      },
+      // R-0000822: pre/post-chmod inode-identity probes
+      "[ ! -L '/home/alice' ] && [ -d '/home/alice' ] && stat -c '%d:%i' '/home/alice'": {
+        code: 0,
+        stdout: "64769:4567\n",
       },
       "id 'alice'": { code: 1 },
       "useradd --home '/home/alice' --create-home 'alice'": { code: 0 },
@@ -734,6 +756,11 @@ describe("user.present home migration and mode (R-0000656)", () => {
         stderr: "chmod: cannot access",
       },
       "[ ! -L '/home/alice' ] && [ -d '/home/alice' ] && stat -c '%a' '/home/alice'": { code: 1 },
+      // R-0000822: pre-stat must succeed to reach the chmod step.
+      "[ ! -L '/home/alice' ] && [ -d '/home/alice' ] && stat -c '%d:%i' '/home/alice'": {
+        code: 0,
+        stdout: "64769:5678\n",
+      },
       "id 'alice'": { code: 1 },
       "useradd --home '/home/alice' --create-home 'alice'": { code: 0 },
     })
@@ -832,6 +859,14 @@ describe("user.present home migration and mode (R-0000656)", () => {
       },
       "[ ! -L '/home/alice' ] && [ -d '/home/alice' ] && stat -c '%a' '/home/alice'": {
         code: 1,
+      },
+      // R-0000822: the pre-stat probe uses the same `[ ! -L ] && [ -d ]`
+      // guard as chmod, so it also fails for a symlinked home. The
+      // failure surfaces as `chmod home failed: pre-stat failed`, which
+      // keeps the assertion below intact.
+      "[ ! -L '/home/alice' ] && [ -d '/home/alice' ] && stat -c '%d:%i' '/home/alice'": {
+        code: 1,
+        stderr: "[: not a directory",
       },
       "id 'alice'": { code: 0 },
       "usermod --home '/home/alice' --move-home 'alice'": { code: 0 },

@@ -540,6 +540,39 @@ async function homeModeMatches(
 // the chmod land on a directory the operator never intended to manage.
 // A mismatch is reported as a structured failure so the operator can
 // investigate before re-running.
+// R-0000822: read the home directory's `<device>:<inode>` identity
+// through the same symlink/directory guard the chmod uses. Returned as
+// `{ identity }` on success or `{ failure }` when the probe itself
+// failed; `pre` and `post` callers share this helper so the guarded
+// statement and the failure message stay in one place.
+async function readHomeIdentity(
+  ssh: SshConnection,
+  parameters: { name: string; phase: "post-stat" | "pre-stat"; quotedHome: string }
+): Promise<{ failure: ModuleResult } | { identity: string }> {
+  const { name, phase, quotedHome } = parameters
+  const stat = await ssh.exec(
+    `[ ! -L ${quotedHome} ] && [ -d ${quotedHome} ] && stat -c '%d:%i' ${quotedHome}`,
+    {
+      ignoreExitCode: true,
+      silent: true,
+    }
+  )
+  if (stat.code !== 0) {
+    return {
+      failure: failedCommand(`[user.present: ${name}] chmod home failed: ${phase} failed`, stat),
+    }
+  }
+  const identity = stat.stdout.trim()
+  if (identity === "") {
+    return {
+      failure: failed(
+        `[user.present: ${name}] chmod home failed: ${phase} returned empty identity`
+      ),
+    }
+  }
+  return { identity }
+}
+
 async function applyHomeMode(
   ssh: SshConnection,
   parameters: { home: string; mode: string; name: string }
@@ -551,20 +584,8 @@ async function applyHomeMode(
   // was the same one we inspected here. `stat -c '%d:%i'` follows
   // symlinks but the guarded pipeline already refused symlinked homes
   // (R-0000778).
-  const preStat = await ssh.exec(
-    `[ ! -L ${quotedHome} ] && [ -d ${quotedHome} ] && stat -c '%d:%i' ${quotedHome}`,
-    {
-      ignoreExitCode: true,
-      silent: true,
-    }
-  )
-  if (preStat.code !== 0) {
-    return failedCommand(`[user.present: ${name}] chmod home failed: pre-stat failed`, preStat)
-  }
-  const preIdentity = preStat.stdout.trim()
-  if (preIdentity === "") {
-    return failed(`[user.present: ${name}] chmod home failed: pre-stat returned empty identity`)
-  }
+  const pre = await readHomeIdentity(ssh, { name, phase: "pre-stat", quotedHome })
+  if ("failure" in pre) return pre.failure
   const result = await ssh.exec(
     `[ ! -L ${quotedHome} ] && [ -d ${quotedHome} ] && chmod ${shellQuote(mode)} ${quotedHome}`,
     {
@@ -579,24 +600,12 @@ async function applyHomeMode(
   // snapshot. A mismatch means a concurrent rename/swap replaced the
   // directory between the two stats — the chmod may have landed on a
   // foreign target, so refuse to claim success.
-  const postStat = await ssh.exec(
-    `[ ! -L ${quotedHome} ] && [ -d ${quotedHome} ] && stat -c '%d:%i' ${quotedHome}`,
-    {
-      ignoreExitCode: true,
-      silent: true,
-    }
-  )
-  if (postStat.code !== 0) {
-    return failedCommand(
-      `[user.present: ${name}] chmod home failed: post-stat failed`,
-      postStat
-    )
-  }
-  const postIdentity = postStat.stdout.trim()
-  if (postIdentity !== preIdentity) {
+  const post = await readHomeIdentity(ssh, { name, phase: "post-stat", quotedHome })
+  if ("failure" in post) return post.failure
+  if (post.identity !== pre.identity) {
     return failed(
       `[user.present: ${name}] chmod home failed: home directory inode changed during chmod ` +
-        `(pre=${preIdentity}, post=${postIdentity}); refusing to claim success`
+        `(pre=${pre.identity}, post=${post.identity}); refusing to claim success`
     )
   }
   return null

@@ -36,7 +36,7 @@ const swapBackupPath = `${swapPath}.paratix-backup`
 // check by resolving to a different root-owned directory at probe time.
 const safeSwapParentCommand =
   "[ ! -L '/' ] && find -P '/' -maxdepth 0 -type d -user root ! -perm /022 | grep -Fx '/'"
-const createSwapTempCommand = `fallocate -l '${swapSize}' '${swapTempPath}' || { dd if=/dev/zero of='${swapTempPath}' bs=1M count=2048 status=none && truncate -s 2147483648 '${swapTempPath}'; }`
+const createSwapTempCommand = `fallocate -l '${swapSize}' '${swapTempPath}' || { dd if=/dev/zero of='${swapTempPath}' bs=1M count=2048 conv=fsync status=none && truncate -s 2147483648 '${swapTempPath}' || { rm -f -- '${swapTempPath}'; false; }; }`
 const mktempSwapCommand = "mktemp -p '/' '.swapfile.paratix.XXXXXX'"
 const publishSwapCommand = `[ ! -L '/' ] && find -P '/' -maxdepth 0 -type d -user root ! -perm /022 | grep -Fx '/' && mv -T -n '${swapTempPath}' '${swapPath}'`
 const statSwapTempIdentityCommand = `stat -c '%d:%i' '${swapTempPath}'`
@@ -1020,7 +1020,7 @@ describe("swap.file — apply", () => {
 
   it("uses 1M block size in dd fallback regardless of swap size", async () => {
     const smallSize = "512M"
-    const createSmallSwapTempCommand = `fallocate -l '${smallSize}' '${swapTempPath}' || { dd if=/dev/zero of='${swapTempPath}' bs=1M count=512 status=none && truncate -s 536870912 '${swapTempPath}'; }`
+    const createSmallSwapTempCommand = `fallocate -l '${smallSize}' '${swapTempPath}' || { dd if=/dev/zero of='${swapTempPath}' bs=1M count=512 conv=fsync status=none && truncate -s 536870912 '${swapTempPath}' || { rm -f -- '${swapTempPath}'; false; }; }`
     const writtenFiles: Array<{ content: string; path: string }> = []
     const ssh = createMockSsh({
       [`[ -e '${swapPath}' ]`]: { code: 1 },
@@ -1056,7 +1056,7 @@ describe("swap.file — apply", () => {
 
   it("trims the dd fallback to the exact requested byte size for unaligned sizes", async () => {
     const unalignedSize = "1537K"
-    const createUnalignedSwapTempCommand = `fallocate -l '${unalignedSize}' '${swapTempPath}' || { dd if=/dev/zero of='${swapTempPath}' bs=1M count=2 status=none && truncate -s 1573888 '${swapTempPath}'; }`
+    const createUnalignedSwapTempCommand = `fallocate -l '${unalignedSize}' '${swapTempPath}' || { dd if=/dev/zero of='${swapTempPath}' bs=1M count=2 conv=fsync status=none && truncate -s 1573888 '${swapTempPath}' || { rm -f -- '${swapTempPath}'; false; }; }`
     const writtenFiles: Array<{ content: string; path: string }> = []
     const ssh = createMockSsh({
       [`[ -e '${swapPath}' ]`]: { code: 1 },

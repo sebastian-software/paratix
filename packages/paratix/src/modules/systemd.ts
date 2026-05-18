@@ -130,21 +130,24 @@ async function reloadSystemdDaemon(ssh: SshConnection): Promise<ExecResult> {
   return ssh.exec(`${SYSTEMCTL} daemon-reload`, SILENT_EXEC_OPTS)
 }
 
-// R-0000824: build an operator-actionable hint that the unit file on
-// disk has drifted from what Paratix just wrote — typically because a
-// package upgrade rewrote the file, an admin edited it manually, or
-// another tool stomped on it between the writeFile and the rollback.
-// The rollback could not safely restore the original snapshot because
-// it would have overwritten that upstream change, so the live view
-// (e.g. `systemctl cat`) may now differ from the on-disk content
-// Paratix originally captured. Surface this through the ModuleResult
-// `detail` field so the runner renders it next to the failure.
-function buildRollbackSkippedHint(filePath: string): string {
-  return (
+// R-0000824: attach an operator-actionable hint to a failed
+// ModuleResult when the post-failure rollback was skipped because the
+// live unit file diverged from the snapshot Paratix wrote — typically
+// because a package upgrade rewrote the file, an admin edited it
+// manually, or another tool stomped on it between the writeFile and
+// the rollback. The rollback could not safely restore the original
+// snapshot, so the live view (e.g. `systemctl cat`) may now differ
+// from the on-disk content Paratix originally captured.
+function withRollbackSkippedHint(result: ModuleResult, filePath: string): ModuleResult {
+  const hint =
     `rollback of ${filePath} skipped because the live file diverged from the snapshot ` +
     "Paratix wrote; the on-disk state may differ from the live systemd view — " +
     "inspect with `systemctl cat` and reconcile manually before re-running"
-  )
+  const baseDetail = result.detail
+  return {
+    ...result,
+    detail: baseDetail == null || baseDetail === "" ? hint : `${baseDetail}; ${hint}`,
+  }
 }
 
 async function rollbackUnitAfterFlagPersistenceFailure(parameters: {
@@ -172,18 +175,11 @@ async function rollbackUnitAfterFlagPersistenceFailure(parameters: {
       new Error(`rollback read of ${filePath} failed: ${rollback.reason}`)
     )
   }
-  if (rollback.kind === "skipped") {
-    // R-0000824: a skipped rollback means the live file no longer
-    // matches what we wrote — upstream drift. Emit an
-    // operator-actionable hint via the ModuleResult so the warning
-    // surfaces alongside the primary failure instead of being lost.
-    const hint = buildRollbackSkippedHint(filePath)
-    const baseDetail = flagFailure.detail
-    return {
-      ...flagFailure,
-      detail: baseDetail == null || baseDetail === "" ? hint : `${baseDetail}; ${hint}`,
-    }
-  }
+  // R-0000824: a skipped rollback means the live file no longer matches
+  // what we wrote — upstream drift. Emit an operator-actionable hint
+  // via the ModuleResult so the warning surfaces alongside the primary
+  // failure instead of being lost.
+  if (rollback.kind === "skipped") return withRollbackSkippedHint(flagFailure, filePath)
   const rollbackReload = await reloadSystemdDaemon(ssh)
   if (rollbackReload.code !== 0) {
     return failedCommand(
@@ -229,14 +225,7 @@ async function rollbackUnitAfterDaemonReloadFailure(parameters: {
     // what we just wrote, the on-disk content reflects upstream drift
     // and the live systemd view may now disagree with it. Surface an
     // operator-actionable hint so the warning is not lost.
-    if (rollback.kind === "skipped") {
-      const hint = buildRollbackSkippedHint(filePath)
-      const baseDetail = result.detail
-      return {
-        ...result,
-        detail: baseDetail == null || baseDetail === "" ? hint : `${baseDetail}; ${hint}`,
-      }
-    }
+    if (rollback.kind === "skipped") return withRollbackSkippedHint(result, filePath)
   } catch (error) {
     return failedWithRollbackFailure(
       result.error?.message ?? "systemctl daemon-reload failed",
