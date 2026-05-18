@@ -27,7 +27,7 @@ import {
   startModuleSpinner,
   stopLiveModuleOutput,
 } from "./output.js"
-import { setRunnerAbortSignal } from "./runnerAbortSignal.js"
+import { withRunnerAbortSignal } from "./runnerAbortSignal.js"
 import { resolveExitCode, signalExitCode } from "./runnerHelpers.js"
 import { clearRegisteredSecrets } from "./secretSink.js"
 import { validateServerDefinition } from "./server.js"
@@ -1079,7 +1079,10 @@ function teardownPlaybookResources(parameters: {
   stopLiveModuleOutput(true)
   for (const signal of ["SIGINT", "SIGTERM"] as const)
     getSignalBus().off(signal, parameters.handleShutdownSignal)
-  setRunnerAbortSignal(undefined)
+  // R-0000743: the abort signal lives inside the AsyncLocalStorage scope
+  // installed by `withRunnerAbortSignal` in `runPlaybook`. The scope ends
+  // automatically once the wrapped body returns, so no explicit clear is
+  // needed here and a parallel run is no longer affected.
   parameters.ssh?.disconnect()
 }
 
@@ -1092,7 +1095,10 @@ function initializeRunPlaybookContext(options: RunOptions): {
 } {
   const { handleShutdownSignal, promptAbortSignal, setSsh, shutdownAbortSignal, shutdownSignal } =
     setupShutdownHandlers()
-  setRunnerAbortSignal(promptAbortSignal)
+  // R-0000743: the abort signal is no longer installed eagerly into a
+  // module-global slot. `runPlaybook` wraps its body in
+  // `withRunnerAbortSignal(promptAbortSignal, …)` so the signal lives inside
+  // an AsyncLocalStorage scope and parallel runs never observe each other.
   // R-0000203: scope the reboot grace state (duration, shutdown getter, abort
   // signal) to this invocation so concurrent `runPlaybook` calls cannot race
   // on shared mutable values.
@@ -1110,42 +1116,49 @@ export async function runPlaybook(
   const { handleShutdownSignal, promptAbortSignal, rebootGrace, setSsh, shutdownSignal } =
     initializeRunPlaybookContext(options)
   const stats = new RunStats()
-  let ssh: SshConnectionImpl | undefined
 
-  printRunContext({
-    dryRun,
-    host: definition.host,
-    name: definition.name,
-    ports: definition.ssh.ports,
-  })
+  // R-0000743: wrap the entire playbook lifecycle (connect, executeRun,
+  // teardown, exit-code resolution) in the per-run AsyncLocalStorage scope
+  // so every async branch that the run spawns observes its own abort signal
+  // and a parallel `runPlaybook` invocation never overwrites it.
+  await withRunnerAbortSignal(promptAbortSignal, async () => {
+    let ssh: SshConnectionImpl | undefined
 
-  // No catch block: connect errors propagate to cli.ts, which prints them and exits with code 2.
-  try {
-    ssh = await connectAndRegister({
-      definition,
-      options,
-      promptAbortSignal,
-      setSsh(connection) {
-        ssh = connection
-        setSsh(connection)
-      },
-      shutdownSignal,
-    })
-    await executeRun({
-      definition,
+    printRunContext({
       dryRun,
-      environment,
-      rebootGrace,
-      shutdownSignal,
-      ssh,
-      stats,
-      verbose,
+      host: definition.host,
+      name: definition.name,
+      ports: definition.ssh.ports,
     })
-  } catch (error) {
-    rethrowIfNotShutdown(error, shutdownSignal)
-  } finally {
-    teardownPlaybookResources({ handleShutdownSignal, ssh })
-  }
 
-  resolveExitCode(shutdownSignal(), stats)
+    // No catch block: connect errors propagate to cli.ts, which prints them and exits with code 2.
+    try {
+      ssh = await connectAndRegister({
+        definition,
+        options,
+        promptAbortSignal,
+        setSsh(connection) {
+          ssh = connection
+          setSsh(connection)
+        },
+        shutdownSignal,
+      })
+      await executeRun({
+        definition,
+        dryRun,
+        environment,
+        rebootGrace,
+        shutdownSignal,
+        ssh,
+        stats,
+        verbose,
+      })
+    } catch (error) {
+      rethrowIfNotShutdown(error, shutdownSignal)
+    } finally {
+      teardownPlaybookResources({ handleShutdownSignal, ssh })
+    }
+
+    resolveExitCode(shutdownSignal(), stats)
+  })
 }
