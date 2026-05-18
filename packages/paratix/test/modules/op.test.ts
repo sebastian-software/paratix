@@ -708,6 +708,54 @@ describe("op.resolve — null stdin (R-0000641)", () => {
     // rejected promise; the fix sends SIGTERM as part of the escalation.
     expect(killCalls).toContain("SIGTERM")
   })
+
+  // R-0000678: when `child.stdin.end(input)` throws synchronously (e.g. the
+  // child exited between the null check and the write so the pipe is gone)
+  // rejectOnce settles the promise but leaves the underlying ChildProcess
+  // running. The catch block must call killChildEscalating before rejecting,
+  // mirroring the null-stdin path.
+  it("kills the op child via SIGTERM when stdin.end throws synchronously", async () => {
+    const killCalls: NodeJS.Signals[] = []
+    const child = new EventEmitter() as MockChildProcess
+    Object.defineProperty(child, "stdout", { value: new EventEmitter() })
+    Object.defineProperty(child, "stderr", { value: new EventEmitter() })
+    Object.defineProperty(child, "exitCode", { value: null })
+    Object.defineProperty(child, "signalCode", { value: null })
+    Object.defineProperty(child, "killed", { value: false })
+    ;(child as unknown as { kill: (signal: NodeJS.Signals) => void }).kill = (
+      signal: NodeJS.Signals
+    ) => {
+      killCalls.push(signal)
+    }
+    const stdinEnd = vi.fn(() => {
+      throw new Error("write EPIPE")
+    })
+    child.stdin = Object.assign(new EventEmitter(), {
+      end: stdinEnd,
+      once: vi.fn(function once(
+        this: EventEmitter,
+        eventName: string,
+        listener: (...arguments_: unknown[]) => void
+      ) {
+        EventEmitter.prototype.once.call(this, eventName, listener)
+        return this
+      }),
+    })
+    mockedSpawnFn.mockImplementation((command: string, args: readonly string[]) => {
+      trackSpawn(command, args)
+      return child as never
+    })
+
+    const module_ = op.resolve({ password: "op://vault/item/password" })
+    // eslint-disable-next-line prefer-spread -- Module.apply, not Function.prototype.apply
+    const result = await module_.apply(null, emptyEnv)
+
+    expect(result.status).toBe("failed")
+    expect(result.error?.message).toContain("write EPIPE")
+    // Without the killChildEscalating call the orphaned op CLI process
+    // would outlive the rejected promise.
+    expect(killCalls).toContain("SIGTERM")
+  })
 })
 
 // ---------------------------------------------------------------------------

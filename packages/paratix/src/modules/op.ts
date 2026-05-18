@@ -205,6 +205,13 @@ async function spawnWithInput(
     try {
       child.stdin.end(input)
     } catch (error) {
+      // R-0000678: mirror the null-stdin path above — if `stdin.end()` throws
+      // synchronously (e.g. EPIPE on a child that exited between the
+      // null-check and the write) `rejectOnce` settles the promise but
+      // leaves the underlying ChildProcess running. Send SIGTERM with
+      // SIGKILL escalation first so no orphaned op CLI process outlives
+      // the rejected promise.
+      killChildEscalating(child)
       rejectOnce(describeSpawnError(command, error))
     }
   })
