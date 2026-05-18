@@ -21,6 +21,7 @@ import {
   hasTcpIpv6Rule,
   hasTcpRule,
   readUfwStatus,
+  readUfwStatusDetailed,
   statusIncludesIpv6Rules,
   statusReportsActive,
 } from "./ufwStatus.js"
@@ -194,14 +195,18 @@ export const ufw = {
           return "ok"
         }
 
-        // R-0000251: tolerate hosts where `ufw status` exits non-zero or the
-        // binary disappeared between the package-installed probe and the
-        // status read. `readUfwStatus` returns `null` in that case, which we
-        // treat as "the disabled state is satisfied" so the check does not
-        // throw an unstructured SSH error.
-        const status = await readUfwStatus(ssh)
-        if (status == null) return "ok"
-        return status.includes("Status: inactive") ? "ok" : NEEDS_APPLY
+        // R-0000775: distinguish "ufw missing" from "ufw unreadable". The
+        // previous implementation routed both through `readUfwStatus`, which
+        // returns `null` in either case and was conservatively treated as
+        // satisfied. That hid genuine drift on hosts where `ufw` was installed
+        // but `ufw status` exited non-zero (e.g. permission denied, transient
+        // race). Use `readUfwStatusDetailed` so a missing binary keeps the
+        // historical "satisfied" outcome while an unreadable status triggers
+        // `needs-apply` and forces apply to re-run.
+        const detailed = await readUfwStatusDetailed(ssh)
+        if (detailed.kind === "missing") return "ok"
+        if (detailed.kind === "unreadable") return NEEDS_APPLY
+        return detailed.status.includes("Status: inactive") ? "ok" : NEEDS_APPLY
       },
       name: "ufw.disabled",
     }

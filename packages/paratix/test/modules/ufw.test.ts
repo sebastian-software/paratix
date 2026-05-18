@@ -727,9 +727,12 @@ describe("ufw.disabled", () => {
 
   // R-0000251 regression: when `ufw status` exits non-zero (binary missing
   // between probes, kernel modules unloaded, etc.), the check must not
-  // throw. `readUfwStatus` returns `null`, which we treat as "disabled".
-  it("R-0000251: check returns ok when ufw status exits non-zero", async () => {
+  // throw. R-0000775: distinguish missing binary from unreadable status.
+  // When `command -v ufw` fails the package is considered missing, which
+  // keeps the historical "disabled is satisfied" outcome.
+  it("R-0000251/R-0000775: check returns ok when ufw binary is missing", async () => {
     const ssh = createMockSsh({
+      "command -v ufw": { code: 1 },
       [DPKG_UFW_INSTALLED]: { code: 0 },
       "ufw status": { code: 1, stderr: "ufw: command not found" },
       "which apt-get": { code: 0 },
@@ -737,6 +740,22 @@ describe("ufw.disabled", () => {
     const mod = ufw.disabled()
     const result = await mod.check(ssh, emptyEnv)
     expect(result).toBe("ok")
+  })
+
+  // R-0000775: when ufw is installed but `ufw status` is unreadable
+  // (permission denied, transient race), do not silently swallow the
+  // failure. Return `needs-apply` so apply re-runs and surfaces the issue
+  // as a structured failure.
+  it("R-0000775: check returns needs-apply when ufw status is unreadable", async () => {
+    const ssh = createMockSsh({
+      "command -v ufw": { code: 0 },
+      [DPKG_UFW_INSTALLED]: { code: 0 },
+      "ufw status": { code: 1, stderr: "ERROR: permission denied" },
+      "which apt-get": { code: 0 },
+    })
+    const mod = ufw.disabled()
+    const result = await mod.check(ssh, emptyEnv)
+    expect(result).toBe("needs-apply")
   })
 
   it("apply returns ok when ufw is not installed", async () => {
