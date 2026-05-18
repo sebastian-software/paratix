@@ -136,6 +136,41 @@ describe("systemd.masked", () => {
     const result = await mod.apply(null, emptyEnv)
     expect(result.status).toBe("failed")
   })
+
+  // R-0000772: a toolchain failure of the `systemctl is-enabled` probe
+  // (non-zero exit with empty stdout) must surface as a structured failed
+  // ModuleResult instead of silently rendering the unit as not-masked.
+  // The mask call must NOT run after the probe failed.
+  it("R-0000772: apply returns failed when is-enabled probe fails with empty stdout", async () => {
+    const ssh = createMockSsh({
+      "systemctl is-enabled -- 'apt-daily.timer'": {
+        code: 1,
+        stderr: "Failed to connect to bus",
+        stdout: "",
+      },
+    })
+    const mod = systemd.masked("apt-daily.timer")
+    const result = await mod.apply(ssh, emptyEnv)
+    expect(result.status).toBe("failed")
+    expect(String(result.error)).toContain("systemctl is-enabled failed while probing masked state")
+    expect(ssh.calls).not.toContain("systemctl mask -- 'apt-daily.timer'")
+  })
+
+  // R-0000772: in the check phase a probe-toolchain failure cannot surface
+  // structurally, so the module returns `needs-apply` and lets the apply
+  // phase re-issue the probe and report the real cause.
+  it("R-0000772: check returns needs-apply when is-enabled probe fails with empty stdout", async () => {
+    const ssh = createMockSsh({
+      "systemctl is-enabled -- 'apt-daily.timer'": {
+        code: 1,
+        stderr: "Failed to connect to bus",
+        stdout: "",
+      },
+    })
+    const mod = systemd.masked("apt-daily.timer")
+    const result = await mod.check(ssh, emptyEnv)
+    expect(result).toBe("needs-apply")
+  })
 })
 
 describe("systemd.unit", () => {

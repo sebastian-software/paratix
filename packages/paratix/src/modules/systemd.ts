@@ -43,12 +43,31 @@ function validateUnitName(name: string): string {
   return name
 }
 
-async function isUnitMasked(ssh: SshConnection, unitName: string): Promise<boolean> {
+// R-0000772: surface toolchain failures of the `systemctl is-enabled`
+// probe as a structured ModuleResult instead of blindly returning `false`.
+// Without this, an inaccessible systemd bus or a `systemctl` binary that
+// failed to launch (PATH issue, missing binary, transient sandbox error)
+// would render the unit as "not masked" — even though the real state is
+// unknown. The apply path would then either run `mask` against a
+// possibly-already-masked unit (harmless) or skip `unmask` for a unit
+// that is actually masked (silent regression). Mirrors the structured
+// probe shape introduced for `isSwapActive` (R-0000722).
+async function isUnitMasked(
+  ssh: SshConnection,
+  unitName: string
+): Promise<boolean | ModuleResult> {
   const probe = await ssh.exec(
     `${SYSTEMCTL} is-enabled -- ${shellQuote(unitName)}`,
     SILENT_EXEC_OPTS
   )
-  return probe.stdout.trim().includes("masked")
+  const stdout = probe.stdout.trim()
+  if (probe.code !== 0 && stdout === "") {
+    return failedCommand(
+      `[systemd: ${unitName}] systemctl is-enabled failed while probing masked state`,
+      probe
+    )
+  }
+  return stdout.includes("masked")
 }
 
 function normalizeMode(mode: string): string {
@@ -292,7 +311,12 @@ export const systemd = {
       async apply(ssh: null | SshConnection): Promise<ModuleResult> {
         if (!ssh) return failed(`[systemd.masked: ${name}] SSH connection is required`)
         // R-0000490: skip the mask call when the unit is already masked.
-        if (await isUnitMasked(ssh, unitName)) return { status: "ok" }
+        // R-0000772: a structured probe failure must short-circuit the apply
+        // so the operator sees the real toolchain error instead of a
+        // misleading `mask` attempt.
+        const maskedProbe = await isUnitMasked(ssh, unitName)
+        if (typeof maskedProbe !== "boolean") return maskedProbe
+        if (maskedProbe) return { status: "ok" }
         const result = await ssh.exec(
           `${SYSTEMCTL} mask -- ${shellQuote(unitName)}`,
           SILENT_EXEC_OPTS
@@ -303,7 +327,12 @@ export const systemd = {
       },
       async check(ssh: null | SshConnection): Promise<"needs-apply" | "ok"> {
         if (!ssh) return NEEDS_APPLY
-        return (await isUnitMasked(ssh, unitName)) ? "ok" : NEEDS_APPLY
+        // R-0000772: a probe-toolchain failure is treated as `needs-apply`
+        // so the apply phase has a chance to surface the structured error;
+        // a check call has no failure channel of its own.
+        const maskedProbe = await isUnitMasked(ssh, unitName)
+        if (typeof maskedProbe !== "boolean") return NEEDS_APPLY
+        return maskedProbe ? "ok" : NEEDS_APPLY
       },
       name: `systemd.masked: ${name}`,
     }
@@ -357,7 +386,12 @@ export const systemd = {
       async apply(ssh: null | SshConnection): Promise<ModuleResult> {
         if (!ssh) return failed(`[systemd.unmasked: ${name}] SSH connection is required`)
         // R-0000490: skip the unmask call when the unit is not currently masked.
-        if (!(await isUnitMasked(ssh, unitName))) return { status: "ok" }
+        // R-0000772: a structured probe failure short-circuits the apply
+        // so the operator sees the toolchain error rather than silently
+        // skipping `unmask` for a unit whose state could not be probed.
+        const maskedProbe = await isUnitMasked(ssh, unitName)
+        if (typeof maskedProbe !== "boolean") return maskedProbe
+        if (!maskedProbe) return { status: "ok" }
         const result = await ssh.exec(
           `${SYSTEMCTL} unmask -- ${shellQuote(unitName)}`,
           SILENT_EXEC_OPTS
@@ -368,7 +402,11 @@ export const systemd = {
       },
       async check(ssh: null | SshConnection): Promise<"needs-apply" | "ok"> {
         if (!ssh) return NEEDS_APPLY
-        return (await isUnitMasked(ssh, unitName)) ? NEEDS_APPLY : "ok"
+        // R-0000772: see masked.check; a probe failure routes to NEEDS_APPLY
+        // so apply can resurface the error structurally.
+        const maskedProbe = await isUnitMasked(ssh, unitName)
+        if (typeof maskedProbe !== "boolean") return NEEDS_APPLY
+        return maskedProbe ? NEEDS_APPLY : "ok"
       },
       name: `systemd.unmasked: ${name}`,
     }
