@@ -49,14 +49,14 @@ const createMockSsh: typeof createBaseMockSsh = (responses, options) =>
         // `ssh.output` so release can verify ownership; the stub returns the
         // shared mock token used by `mockSshFlagLock`.
         command:
-          /^awk 'NR==1\{print \$1\}' \/var\/lib\/paratix\/flags\/'cron-crontab-[\da-f]+'\/holder$/v,
+          /^awk 'NR==1\{print \$1\}' -- \/var\/lib\/paratix\/flags\/'cron-crontab-[\da-f]+'\/holder$/v,
         result: { code: 0, stdout: MOCK_FLAG_LOCK_HOLDER_TOKEN },
       },
       {
         // R-0000634: release is a single shell statement that runs the
         // ownership check, marker removal and `rmdir` atomically.
         command:
-          /^\[ "\$\(awk 'NR==1\{print \$1\}' \/var\/lib\/paratix\/flags\/'cron-crontab-[\da-f]+'\/holder 2>\/dev\/null\)" = '[^']*' \] && rm -f \/var\/lib\/paratix\/flags\/'cron-crontab-[\da-f]+'\/holder && rmdir \/var\/lib\/paratix\/flags\/'cron-crontab-[\da-f]+'$/v,
+          /^\[ "\$\(awk 'NR==1\{print \$1\}' -- \/var\/lib\/paratix\/flags\/'cron-crontab-[\da-f]+'\/holder 2>\/dev\/null\)" = '[^']*' \] && rm -f -- \/var\/lib\/paratix\/flags\/'cron-crontab-[\da-f]+'\/holder && rmdir -- \/var\/lib\/paratix\/flags\/'cron-crontab-[\da-f]+'$/v,
         result: { code: 0 },
       },
       { command: /^crontab -u '[^']+' /v, result: { code: 0 } },
@@ -151,11 +151,13 @@ function createSharedCrontabMockSsh(
   // by the holder readback stub in `createMockSsh`.
   const markerPath = `${FLAGS_DIRECTORY}/'${lockName}'/holder`
   const lockPath = `${FLAGS_DIRECTORY}/'${lockName}'`
+  // R-0000749: production code now emits the `--` separator before path
+  // arguments in awk / rm / rmdir invocations.
   const verifiedReleaseCommand =
-    `[ "$(awk 'NR==1{print $1}' ${markerPath} 2>/dev/null)" = ` +
+    `[ "$(awk 'NR==1{print $1}' -- ${markerPath} 2>/dev/null)" = ` +
     `'${MOCK_FLAG_LOCK_HOLDER_TOKEN}' ] && ` +
-    `rm -f ${markerPath} && ` +
-    `rmdir ${lockPath}`
+    `rm -f -- ${markerPath} && ` +
+    `rmdir -- ${lockPath}`
   const readCommand = `crontab -u '${user}' -l`
   const writeCommand = `crontab -u '${user}' -`
   const removeCommand = `crontab -u '${user}' -r`

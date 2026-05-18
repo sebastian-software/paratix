@@ -127,7 +127,10 @@ async function writeFlagLockHolderMarker(
     // Without a marker the verified-release fast path cannot work, so the
     // lock directory would sit until the four-hour stale-lock threshold
     // expires. Drop the directory now so the next acquirer is not blocked.
-    await ssh.exec(`rmdir ${lock}`, { ignoreExitCode: true, silent: true })
+    // R-0000749: `rmdir --` so a future `flagPath`-style value that begins
+    // with `-` cannot be mis-parsed as an option, matching the convention in
+    // archive.ts / compose.ts / aptKeyStaging.ts.
+    await ssh.exec(`rmdir -- ${lock}`, { ignoreExitCode: true, silent: true })
     return {
       failure: failedCommand(
         `[moduleHelpers] failed to write flag lock holder marker for ${lockName}`,
@@ -138,8 +141,11 @@ async function writeFlagLockHolderMarker(
   }
   // R-0000634: read back the `pid@hostname` token from the marker so
   // releaseFlagLock can verify ownership before removing the lock.
+  // R-0000749: `awk … --` so a future path that begins with `-` cannot be
+  // mis-parsed as an awk option, matching the `--` convention applied to
+  // rm / rmdir below.
   const holderToken = await ssh
-    .output(`awk 'NR==1{print $1}' ${markerPath}`)
+    .output(`awk 'NR==1{print $1}' -- ${markerPath}`)
     .then((token) => token.trim())
     .catch(() => "")
   if (holderToken.length === 0) {
@@ -151,8 +157,10 @@ async function writeFlagLockHolderMarker(
     // remove the directory, so we drop it eagerly here and surface a
     // structured failure instead of silently entering the critical
     // section with an unrecoverable lock.
-    await ssh.exec(`rm -f ${markerPath}`, { ignoreExitCode: true, silent: true })
-    await ssh.exec(`rmdir ${lock}`, { ignoreExitCode: true, silent: true })
+    // R-0000749: `rm -f --` and `rmdir --` so path arguments are never
+    // mis-parsed as options.
+    await ssh.exec(`rm -f -- ${markerPath}`, { ignoreExitCode: true, silent: true })
+    await ssh.exec(`rmdir -- ${lock}`, { ignoreExitCode: true, silent: true })
     return {
       failure: failed(
         `[moduleHelpers] flag lock holder marker for ${lockName} is empty after write`
@@ -228,10 +236,12 @@ export async function releaseFlagLock(
   // Single atomic shell statement so the ownership check, marker removal
   // and `rmdir` cannot interleave with a stale-lock reclaim that already
   // handed the lock to another acquirer.
+  // R-0000749: `awk … --`, `rm -f --` and `rmdir --` so path arguments are
+  // never mis-parsed as options.
   const command =
-    `[ "$(awk 'NR==1{print $1}' ${markerPath} 2>/dev/null)" = ${shellQuote(holderToken)} ] && ` +
-    `rm -f ${markerPath} && ` +
-    `rmdir ${lock}`
+    `[ "$(awk 'NR==1{print $1}' -- ${markerPath} 2>/dev/null)" = ${shellQuote(holderToken)} ] && ` +
+    `rm -f -- ${markerPath} && ` +
+    `rmdir -- ${lock}`
   await ssh.exec(command, { ignoreExitCode: true, silent: true })
 }
 
@@ -289,13 +299,18 @@ export async function tryReclaimStaleFlagLock(
   // TOCTOU guard: if a fresh acquirer touched the lock directory between
   // the first age probe and the rmdir, the second probe fails and the
   // reclaim is aborted instead of destroying the new holder's lock.
+  // R-0000749: `awk … --`, `rm -f --` and `rmdir --` so path arguments are
+  // never mis-parsed as options, mirroring the convention used in
+  // archive.ts / compose.ts / aptKeyStaging.ts. `find` is not affected here
+  // because its path argument is followed by additional flags (`-maxdepth`),
+  // so `--` cannot be placed without breaking the operand/expression split.
   const command =
     `if [ -d ${lock} ]; then ` +
     `if [ -f ${markerPath} ]; then ` +
-    `STALE_TOKEN="$(awk 'NR==1{print $1}' ${markerPath} 2>/dev/null)"; ` +
+    `STALE_TOKEN="$(awk 'NR==1{print $1}' -- ${markerPath} 2>/dev/null)"; ` +
     `if find ${markerPath} -maxdepth 0 -mmin +${mminThreshold} -print -quit | grep -q .; then ` +
-    `[ "$(awk 'NR==1{print $1}' ${markerPath} 2>/dev/null)" = "$STALE_TOKEN" ] && ` +
-    `rm -f ${markerPath} && rmdir ${lock}; ` +
+    `[ "$(awk 'NR==1{print $1}' -- ${markerPath} 2>/dev/null)" = "$STALE_TOKEN" ] && ` +
+    `rm -f -- ${markerPath} && rmdir -- ${lock}; ` +
     `else exit 1; fi; ` +
     `else ` +
     // Missing marker is treated as stale only if the lock directory itself
@@ -305,7 +320,7 @@ export async function tryReclaimStaleFlagLock(
     // directory between the two probes aborts the reclaim.
     `if find ${lock} -maxdepth 0 -mmin +${mminThreshold} -print -quit | grep -q .; then ` +
     `find ${lock} -maxdepth 0 -mmin +${mminThreshold} -print -quit | grep -q . && ` +
-    `rm -f ${markerPath} && rmdir ${lock}; ` +
+    `rm -f -- ${markerPath} && rmdir -- ${lock}; ` +
     `else exit 1; fi; ` +
     `fi; ` +
     `else exit 1; fi`

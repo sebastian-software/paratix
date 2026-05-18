@@ -84,19 +84,21 @@ function createSharedFlagMockSsh(flagName: string): ReturnType<typeof createMock
 
   const flagTestCommand = `[ -f ${FLAGS_DIRECTORY}/'${flagName}' ]`
   const lockMkdirCommand = `mkdir ${FLAGS_DIRECTORY}/'${flagName}.lock'`
-  const lockRmdirCommand = `rmdir ${FLAGS_DIRECTORY}/'${flagName}.lock'`
+  const lockRmdirCommand = `rmdir -- ${FLAGS_DIRECTORY}/'${flagName}.lock'`
   const touchFlagCommand = `touch ${FLAGS_DIRECTORY}/'${flagName}'`
   // R-0000634: release is a single atomic shell statement combining the
   // ownership check, marker removal and `rmdir`. The mock recognises the
   // deterministic token returned by the holder-readback `output` stub.
+  // R-0000749: production code now emits the `--` separator before path
+  // arguments in awk / rm / rmdir invocations.
   const markerPath = `${FLAGS_DIRECTORY}/'${flagName}.lock'/holder`
   const lockPath = `${FLAGS_DIRECTORY}/'${flagName}.lock'`
   const verifiedReleaseCommand =
-    `[ "$(awk 'NR==1{print $1}' ${markerPath} 2>/dev/null)" = ` +
+    `[ "$(awk 'NR==1{print $1}' -- ${markerPath} 2>/dev/null)" = ` +
     `'${MOCK_FLAG_LOCK_HOLDER_TOKEN}' ] && ` +
-    `rm -f ${markerPath} && ` +
-    `rmdir ${lockPath}`
-  const markerAwkReadCommand = `awk 'NR==1{print $1}' ${markerPath}`
+    `rm -f -- ${markerPath} && ` +
+    `rmdir -- ${lockPath}`
+  const markerAwkReadCommand = `awk 'NR==1{print $1}' -- ${markerPath}`
 
   return {
     ...base,
@@ -348,8 +350,10 @@ const LOCK_COMMAND_KIND = {
 type LockCommandKind = (typeof LOCK_COMMAND_KIND)[keyof typeof LOCK_COMMAND_KIND]
 
 function classifyLockCommand(command: string, flagName: string): LockCommandKind {
+  // R-0000749: production code emits `rmdir --` to defend against path
+  // arguments that begin with `-`.
   const lockMkdirCommand = `mkdir ${FLAGS_DIRECTORY}/'${flagName}.lock'`
-  const lockRmdirCommand = `rmdir ${FLAGS_DIRECTORY}/'${flagName}.lock'`
+  const lockRmdirCommand = `rmdir -- ${FLAGS_DIRECTORY}/'${flagName}.lock'`
   const touchFlagCommand = `touch ${FLAGS_DIRECTORY}/'${flagName}'`
   const flagTestCommand = `[ -f ${FLAGS_DIRECTORY}/'${flagName}' ]`
   if (command === lockMkdirCommand) return LOCK_COMMAND_KIND.lockMkdir
@@ -431,7 +435,9 @@ function createStaleLockSsh(
     }
   }
 
-  const markerAwkReadCommand = `awk 'NR==1{print $1}' ${FLAGS_DIRECTORY}/'${flagName}.lock'/holder`
+  // R-0000749: production code now emits the `--` separator before the
+  // awk path argument.
+  const markerAwkReadCommand = `awk 'NR==1{print $1}' -- ${FLAGS_DIRECTORY}/'${flagName}.lock'/holder`
 
   const ssh: typeof base = {
     ...base,
@@ -550,10 +556,10 @@ describe("applyWithFlagLock – stale lock recovery", () => {
     const reclaimCall = reclaimCallCandidates.find((call) => call.includes(`STALE_TOKEN=`))
     expect(reclaimCall).toBeDefined()
     expect(reclaimCall).toContain(
-      `STALE_TOKEN="$(awk 'NR==1{print $1}' ${markerPath} 2>/dev/null)"`
+      `STALE_TOKEN="$(awk 'NR==1{print $1}' -- ${markerPath} 2>/dev/null)"`
     )
     expect(reclaimCall).toContain(
-      `[ "$(awk 'NR==1{print $1}' ${markerPath} 2>/dev/null)" = "$STALE_TOKEN" ] && rm -f ${markerPath} && rmdir ${lockPath}`
+      `[ "$(awk 'NR==1{print $1}' -- ${markerPath} 2>/dev/null)" = "$STALE_TOKEN" ] && rm -f -- ${markerPath} && rmdir -- ${lockPath}`
     )
   })
 
@@ -683,13 +689,15 @@ function createSharedMutexMockSsh(lockName: string): ReturnType<typeof createMoc
     for (const resolve of waiters.splice(0)) resolve()
   }
 
+  // R-0000749: production code now emits the `--` separator before path
+  // arguments in awk / rm / rmdir invocations.
   const lockMkdirCommand = `mkdir ${FLAGS_DIRECTORY}/'${lockName}'`
-  const markerAwkReadCommand = `awk 'NR==1{print $1}' ${FLAGS_DIRECTORY}/'${lockName}'/holder`
+  const markerAwkReadCommand = `awk 'NR==1{print $1}' -- ${FLAGS_DIRECTORY}/'${lockName}'/holder`
   const verifiedReleaseCommand =
-    `[ "$(awk 'NR==1{print $1}' ${FLAGS_DIRECTORY}/'${lockName}'/holder 2>/dev/null)" = ` +
+    `[ "$(awk 'NR==1{print $1}' -- ${FLAGS_DIRECTORY}/'${lockName}'/holder 2>/dev/null)" = ` +
     `'${FAKE_HOLDER_TOKEN}' ] && ` +
-    `rm -f ${FLAGS_DIRECTORY}/'${lockName}'/holder && ` +
-    `rmdir ${FLAGS_DIRECTORY}/'${lockName}'`
+    `rm -f -- ${FLAGS_DIRECTORY}/'${lockName}'/holder && ` +
+    `rmdir -- ${FLAGS_DIRECTORY}/'${lockName}'`
 
   return {
     ...base,
@@ -963,9 +971,11 @@ describe("acquireFlagLock – holder marker write failures (R-0000670)", () => {
     const lockPath = `${FLAGS_DIRECTORY}/'${lockDirectoryName}'`
     const markerPath = `${lockPath}/holder`
     const printfFailureStderr = "printf: write error: No space left on device\n"
+    // R-0000749: production code now emits `rm -f --` / `rmdir --` so path
+    // arguments are never mis-parsed as options.
     const mkdirCommand = `mkdir ${lockPath}`
-    const rmdirCommand = `rmdir ${lockPath}`
-    const rmMarkerCommand = `rm -f ${markerPath}`
+    const rmdirCommand = `rmdir -- ${lockPath}`
+    const rmMarkerCommand = `rm -f -- ${markerPath}`
     const printfPattern = /^printf '%s@%s %s\\n' "\$\$" [^"]+ "\$\(date \+%s\)" > \S+\/holder$/v
     return createMockSsh(
       {},
@@ -1015,7 +1025,7 @@ describe("acquireFlagLock – holder marker write failures (R-0000670)", () => {
       status: "failed",
     })
     expect(applyCalls).toBe(0)
-    expect(ssh.calls).toContain(`rmdir ${FLAGS_DIRECTORY}/'${lockDirectoryName}'`)
+    expect(ssh.calls).toContain(`rmdir -- ${FLAGS_DIRECTORY}/'${lockDirectoryName}'`)
   })
 
   it("returns a failed ModuleResult and removes the lock when readback is empty", async () => {
@@ -1044,8 +1054,8 @@ describe("acquireFlagLock – holder marker write failures (R-0000670)", () => {
       status: "failed",
     })
     expect(applyCalls).toBe(0)
-    expect(ssh.calls).toContain(`rm -f ${FLAGS_DIRECTORY}/'${lockDirectoryName}'/holder`)
-    expect(ssh.calls).toContain(`rmdir ${FLAGS_DIRECTORY}/'${lockDirectoryName}'`)
+    expect(ssh.calls).toContain(`rm -f -- ${FLAGS_DIRECTORY}/'${lockDirectoryName}'/holder`)
+    expect(ssh.calls).toContain(`rmdir -- ${FLAGS_DIRECTORY}/'${lockDirectoryName}'`)
   })
 
   it("withMutexLock surfaces the marker-write failure instead of running the section", async () => {
@@ -1066,6 +1076,6 @@ describe("acquireFlagLock – holder marker write failures (R-0000670)", () => {
     ).rejects.toThrow(/failed to write flag lock holder marker/v)
 
     expect(sectionCalls).toBe(0)
-    expect(ssh.calls).toContain(`rmdir ${FLAGS_DIRECTORY}/'${lockName}'`)
+    expect(ssh.calls).toContain(`rmdir -- ${FLAGS_DIRECTORY}/'${lockName}'`)
   })
 })

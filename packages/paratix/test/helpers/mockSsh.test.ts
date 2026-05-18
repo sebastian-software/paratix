@@ -239,7 +239,7 @@ describe("createMockSsh", () => {
       "if [ -d /var/lib/paratix/flags/'etc-hosts-mutex' ]; then " +
       "if [ -f /var/lib/paratix/flags/'etc-hosts-mutex'/holder ]; then " +
       "if find /var/lib/paratix/flags/'etc-hosts-mutex'/holder -maxdepth 0 -mmin +0 -print -quit | grep -q .; then " +
-      "rm -f /var/lib/paratix/flags/'etc-hosts-mutex'/holder && rmdir /var/lib/paratix/flags/'etc-hosts-mutex'; " +
+      "rm -f -- /var/lib/paratix/flags/'etc-hosts-mutex'/holder && rmdir -- /var/lib/paratix/flags/'etc-hosts-mutex'; " +
       "else exit 1; fi; else exit 1; fi; else exit 1; fi"
     const ssh = createMockSsh({}, { allowFlagLockInternalDefaults: true })
 

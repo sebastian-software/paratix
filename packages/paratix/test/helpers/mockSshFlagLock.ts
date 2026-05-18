@@ -16,15 +16,17 @@ const FLAG_LOCK_INTERNAL_SUCCESS_PATTERNS: RegExp[] = [
   // marker write, so the literal hostname is shell-quoted into the printf. The
   // captured value may be empty (catch fallback) or any non-double-quote string.
   /^printf '%s@%s %s\\n' "\$\$" [^"]+ "\$\(date \+%s\)" > \S+\/holder$/v,
-  /^rm -f \S+\/holder$/v,
+  // R-0000749: production code now emits the `--` separator before path
+  // arguments in rm/rmdir/awk invocations.
+  /^rm -f -- \S+\/holder$/v,
   // R-0000634: verified release combines the ownership check, marker
   // removal and `rmdir` into a single shell statement to keep the steps
   // atomic against a concurrent stale-lock reclaim.
-  /^\[ "\$\(awk 'NR==1\{print \$1\}' \S+\/holder 2>\/dev\/null\)" = '[^']*' \] && rm -f \S+\/holder && rmdir \S+$/v,
+  /^\[ "\$\(awk 'NR==1\{print \$1\}' -- \S+\/holder 2>\/dev\/null\)" = '[^']*' \] && rm -f -- \S+\/holder && rmdir -- \S+$/v,
   // Mutex-lock acquire and release commands target lock directories whose
   // last path segment ends in the `-mutex` suffix.
   /^mkdir \/var\/lib\/paratix\/flags\/'[\w.\-]*-mutex'$/v,
-  /^rmdir \/var\/lib\/paratix\/flags\/'[\w.\-]*-mutex'$/v,
+  /^rmdir -- \/var\/lib\/paratix\/flags\/'[\w.\-]*-mutex'$/v,
   /^mkdir -p \/var\/lib\/paratix\/flags$/v,
 ]
 
@@ -33,7 +35,8 @@ const FLAG_LOCK_INTERNAL_SUCCESS_PATTERNS: RegExp[] = [
  * (R-0000634). The readback is issued for every successful acquire so
  * `releaseFlagLock` can verify ownership.
  */
-const FLAG_LOCK_HOLDER_READBACK_PATTERN = /^awk 'NR==1\{print \$1\}' \S+\/holder$/v
+// R-0000749: awk now receives the path after a `--` separator.
+const FLAG_LOCK_HOLDER_READBACK_PATTERN = /^awk 'NR==1\{print \$1\}' -- \S+\/holder$/v
 
 /**
  * Pattern matched by the mutex-lock release wait loop.
@@ -48,9 +51,10 @@ const MUTEX_LOCK_WAIT_PATTERN =
  * intermediate `STALE_TOKEN="$(...)";` shell statement before the
  * `find ... -mmin` check, so the matcher must tolerate that prefix.
  */
+// R-0000749: awk now emits the `--` separator before its path argument.
 const FLAG_LOCK_RECLAIM_PATTERN =
   // eslint-disable-next-line security/detect-unsafe-regex -- mock-only pattern, anchored prefix bounds backtracking on test-controlled input
-  /^if \[ -d \S+ \]; then if \[ -f \S+\/holder \]; then (?:STALE_TOKEN="\$\(awk 'NR==1\{print \$1\}' \S+\/holder 2>\/dev\/null\)"; )?if find \S+\/holder -maxdepth 0 -mmin /v
+  /^if \[ -d \S+ \]; then if \[ -f \S+\/holder \]; then (?:STALE_TOKEN="\$\(awk 'NR==1\{print \$1\}' -- \S+\/holder 2>\/dev\/null\)"; )?if find \S+\/holder -maxdepth 0 -mmin /v
 
 /**
  * @param command - The command intercepted by the mock.
@@ -118,8 +122,10 @@ export function makeIsVerifiedReleaseCall(lockName: string): (call: string) => b
   const markerPath = `/var/lib/paratix/flags/'${lockName}'/holder`
   const lockPath = `/var/lib/paratix/flags/'${lockName}'`
   // eslint-disable-next-line security/detect-non-literal-regexp -- markerPath and lockPath are derived from a validated lockName and shell-escaped above
+  // R-0000749: production code now emits the `--` separator before path
+  // arguments in awk / rm / rmdir invocations.
   const pattern = new RegExp(
-    `^\\[ "\\$\\(awk 'NR==1\\{print \\$1\\}' ${escapeRegex(markerPath)} 2>/dev/null\\)" = '[^']*' \\] && rm -f ${escapeRegex(markerPath)} && rmdir ${escapeRegex(lockPath)}$`,
+    `^\\[ "\\$\\(awk 'NR==1\\{print \\$1\\}' -- ${escapeRegex(markerPath)} 2>/dev/null\\)" = '[^']*' \\] && rm -f -- ${escapeRegex(markerPath)} && rmdir -- ${escapeRegex(lockPath)}$`,
     "v"
   )
   return (call) => pattern.test(call)

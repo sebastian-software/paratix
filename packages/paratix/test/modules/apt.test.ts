@@ -26,14 +26,16 @@ function distUpgradeApplyLockResponses(): Record<string, { code?: number; stdout
   // R-0000634: acquire reads the marker token back via `ssh.output`; release
   // is now a single shell statement that verifies ownership before removing
   // the marker and lock directory.
+  // R-0000749: production code now emits the `--` separator before path
+  // arguments in awk / rm / rmdir invocations.
   const verifiedReleaseCommand =
-    `[ "$(awk 'NR==1{print $1}' ${markerPath} 2>/dev/null)" = ` +
+    `[ "$(awk 'NR==1{print $1}' -- ${markerPath} 2>/dev/null)" = ` +
     `'${MOCK_FLAG_LOCK_HOLDER_TOKEN}' ] && ` +
-    `rm -f ${markerPath} && ` +
-    `rmdir ${lockPath}`
+    `rm -f -- ${markerPath} && ` +
+    `rmdir -- ${lockPath}`
   return {
     [`[ -f /var/lib/paratix/flags/'${DIST_UPGRADE_FLAG}' ]`]: { code: 1 },
-    [`awk 'NR==1{print $1}' ${markerPath}`]: {
+    [`awk 'NR==1{print $1}' -- ${markerPath}`]: {
       code: 0,
       stdout: MOCK_FLAG_LOCK_HOLDER_TOKEN,
     },
