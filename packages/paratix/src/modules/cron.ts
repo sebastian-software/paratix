@@ -243,8 +243,20 @@ function computePresentMutation(mutation: PresentMutationArguments): null | stri
   const next = [...lines]
 
   if (markerIndex === -1) {
-    // No marker yet — append at the end.
-    next.push(marker, cronJob)
+    // R-0000676: cron.absent on a legacy marker preserves the follow-up
+    // line as an orphan (see R-0000567). Without duplicate detection, a
+    // later `state="present"` apply would append a fresh marker + job at
+    // the end, leaving the orphan line behind and resulting in two
+    // identical cron entries running side by side. Re-adopt an existing
+    // exact match instead: splice the marker directly in front of the
+    // first line that equals `cronJob`, so the line becomes managed
+    // again and no duplicate is created.
+    const orphanIndex = lines.indexOf(cronJob)
+    if (orphanIndex !== -1) {
+      next.splice(orphanIndex, 0, marker)
+    } else {
+      next.push(marker, cronJob)
+    }
   } else if (looksLikeCronJobLine(next, markerIndex + 1)) {
     // R-0000047: only overwrite the next line when it actually looks
     // like a managed cron job. This prevents user-authored comments /
