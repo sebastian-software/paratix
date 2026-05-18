@@ -347,11 +347,17 @@ async function ensureOriginUrl(
  * @param reference - The branch, tag, or commit SHA to resolve.
  * @returns The resolved commit SHA.
  */
+// R-0000811: shape of a well-formed `git ls-remote` output line: a 40-hex
+// commit SHA followed by a literal TAB and the reference name. Untrusted
+// remotes could otherwise feed back arbitrary text that we compare verbatim
+// against the local HEAD, masking drift detection.
+const GIT_LS_REMOTE_LINE_PATTERN = /^[a-f0-9]{40}\t/v
+
 async function resolveRemoteReference(
   conn: SshConnection,
   destination: string,
   reference: string
-): Promise<string> {
+): Promise<null | string> {
   const result = await conn.exec(
     `git -C ${shellQuote(destination)} ls-remote -- origin ${shellQuote(reference)}`,
     EXEC_OPTS
@@ -375,6 +381,13 @@ async function resolveRemoteReference(
     }
   }
 
+  // R-0000811: validate that the fallback first line conforms to the
+  // `ls-remote` "<sha>\t<refname>" shape before returning a fragment of it.
+  // A malformed line (empty stdout edge case, attacker-controlled remote
+  // server, transient git error mixed into stdout, ...) would otherwise
+  // surface as an opaque non-SHA string that silently breaks the SHA
+  // comparison in the caller.
+  if (!GIT_LS_REMOTE_LINE_PATTERN.test(lines[0])) return null
   return lines[0].split("\t")[0]
 }
 
@@ -477,6 +490,10 @@ export const git = {
         }
 
         const resolved = await resolveRemoteReference(conn, destination, reference)
+        // R-0000811: a `null` here means `ls-remote` returned a malformed
+        // line. Surface as needs-apply so the upcoming apply re-fetches the
+        // remote rather than silently treating the unknown shape as drift.
+        if (resolved === null) return NEEDS_APPLY
 
         return head === resolved ? "ok" : NEEDS_APPLY
       },
