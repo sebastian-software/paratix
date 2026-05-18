@@ -277,7 +277,11 @@ describe("SshConnectionImpl.writeFile — small content", () => {
       .mockImplementationOnce((cmd: string, cb: ExecCallback) => {
         const stream = makeStream()
         cb(undefined, stream)
-        expect(cmd).toBe("realpath -m -- '/etc'")
+        // R-0000693: assertDirnameHasNoSymlinkComponent now invokes
+        // `realpath` through `command -p` so the absolute lookup runs
+        // against the POSIX default PATH. The expected literal mirrors that
+        // exact shape.
+        expect(cmd).toBe("command -p realpath -m -- '/etc'")
         stream.stderr.emit("data", Buffer.from("realpath: command not found"))
         stream.emit("close", 127)
       })

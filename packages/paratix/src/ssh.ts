@@ -733,7 +733,16 @@ export class SshConnectionImpl implements SshConnection {
     remotePath: string
   ): Promise<void> {
     if (directory === "" || directory === "/") return
-    const result = await this.output(`realpath -m -- ${shellQuote(directory)}`)
+    // R-0000693: invoke `realpath` via `command -p` so the lookup runs
+    // against the POSIX default PATH (`getconf PATH`). The previous
+    // unqualified `realpath` call inherited whatever PATH the connected
+    // shell exposed, which on a manipulated remote (e.g. a wrapper script
+    // earlier in PATH) could short-circuit the symlink resolution and let
+    // a planted symlink survive the guard. `command -p` is a POSIX builtin
+    // available in bash/sh on every supported target, so the call resolves
+    // to a system-shipped `realpath` regardless of how the user's PATH is
+    // shaped.
+    const result = await this.output(`command -p realpath -m -- ${shellQuote(directory)}`)
     const resolved = result.trim()
     if (resolved !== directory) {
       throw new Error(
