@@ -1,5 +1,6 @@
 import { rmSync } from "node:fs"
-import { basename, resolve } from "node:path"
+import { posix as pathPosix, resolve, win32 as pathWin32 } from "node:path"
+import { platform as nodePlatform } from "node:process"
 
 import type { InitialUserConfig } from "./templates.js"
 
@@ -131,7 +132,17 @@ export function normalizeProjectName(name: string): string {
 }
 
 function derivePackageName(projectDirectory: string): string {
-  return basename(projectDirectory.replaceAll("\\", "/"))
+  // R-0000738: previously the implementation replaced `\\` with `/`
+  // and called the platform default `basename`. On POSIX hosts this
+  // mangled paths that legitimately contain a backslash in a
+  // directory component (e.g. when scaffolding into a directory whose
+  // name was created on a mounted Windows share). Selecting the
+  // platform-specific `basename` implementation up front avoids the
+  // substitution entirely and correctly handles drive letters,
+  // forward-/backslash mixed paths on Windows, and literal backslashes
+  // inside POSIX directory names.
+  const basenameFor = nodePlatform === "win32" ? pathWin32.basename : pathPosix.basename
+  return basenameFor(projectDirectory)
 }
 
 // R-0000234: writeProjectFiles is exported and accepts an arbitrary path.
