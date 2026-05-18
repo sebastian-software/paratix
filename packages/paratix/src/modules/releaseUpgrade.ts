@@ -188,16 +188,32 @@ function formatDebianInReleaseFailure(result: ExecResult): string {
  * -----END PGP SIGNATURE-----
  * ```
  *
- * We ignore lines before the first blank line of the body (the PGP header)
- * and stop scanning at the `-----BEGIN PGP SIGNATURE-----` marker so the
- * `Codename:` lookup never accidentally matches inside the signature block.
+ * R-0000764: skip over the cleartext PGP header (the lines between
+ * `-----BEGIN PGP SIGNED MESSAGE-----` and the first blank line) before
+ * looking for `Codename:`. The PGP cleartext header may legitimately carry
+ * arbitrary `Hash:`/`Comment:`/`Charset:` fields, and a hostile or quirky
+ * signer could plant a `Codename: stretch` line in there. Starting the
+ * scan only after the body separator guarantees we read the codename from
+ * the signed metadata block. Scanning still stops at the
+ * `-----BEGIN PGP SIGNATURE-----` marker so the lookup never matches
+ * inside the signature block either.
  *
  * @param body - The full cleartext `InRelease` body as returned by gpgv.
  * @returns The codename extracted from the body.
  * @throws {Error} When the `Codename:` field is absent or invalid.
  */
 function parseDebianStableCodenameFromInRelease(body: string): string {
-  for (const line of body.split("\n")) {
+  const lines = body.split("\n")
+  let inBody = false
+  for (const line of lines) {
+    if (!inBody) {
+      // R-0000764: the cleartext PGP header ends at the first blank line.
+      // Until then we ignore every line — including anything that happens to
+      // look like a `Codename:` field inside `Hash:`/`Comment:`/`Charset:`
+      // continuations.
+      if (line === "") inBody = true
+      continue
+    }
     if (line.startsWith("-----BEGIN PGP SIGNATURE-----")) break
     const match = /^Codename:\s+(?<name>\S+)$/v.exec(line)
     if (match?.groups) {

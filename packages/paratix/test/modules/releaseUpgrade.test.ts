@@ -408,6 +408,67 @@ describe("releaseUpgrade.upgrade — check", () => {
     expect(String(result.error)).toContain("Failed to fetch signed Debian InRelease")
     expect(String(result.error)).toContain("https://deb.debian.org/debian/dists/stable/InRelease")
   })
+
+  // R-0000764: the codename parser must only consume the signed body of the
+  // cleartext PGP message, never the PGP header. A signer (or attacker who
+  // can influence header fields) could otherwise plant a `Codename:` line in
+  // the header that overrides the real signed value.
+  it("R-0000764: check ignores a `Codename:` line inside the cleartext PGP header", async () => {
+    const inReleaseWithCodenameInHeader = [
+      "-----BEGIN PGP SIGNED MESSAGE-----",
+      "Hash: SHA256",
+      "Comment: Codename: stretch",
+      "",
+      "Origin: Debian",
+      "Codename: trixie",
+      "Suite: stable",
+      "-----BEGIN PGP SIGNATURE-----",
+      "",
+      "ABCDEF",
+      "-----END PGP SIGNATURE-----",
+      "",
+    ].join("\n")
+    const ssh = createMockSsh({
+      "cat '/etc/os-release'": { code: 0, stdout: DEBIAN_OS_RELEASE },
+      [DEBIAN_INRELEASE_VERIFY_COMMAND]: { code: 0, stdout: inReleaseWithCodenameInHeader },
+      "lsb_release -cs": { code: 0, stdout: "bookworm\n" },
+    })
+    const mod = releaseUpgrade.upgrade()
+    // bookworm != trixie -> needs-apply; if the header line leaked through,
+    // the parser would have surfaced "stretch" which is rejected by the
+    // allowlist and check would also report needs-apply but for the wrong
+    // reason. We pin the apply path below to assert the codename actually
+    // observed is the body's `trixie`.
+    const result = await mod.check(ssh, emptyEnv)
+    expect(result).toBe("needs-apply")
+  })
+
+  it("R-0000764: apply parses the signed body codename when the PGP header also mentions Codename", async () => {
+    const currentCodename = "bookworm"
+    const targetCodename = "trixie"
+    const inReleaseWithCodenameInHeader = [
+      "-----BEGIN PGP SIGNED MESSAGE-----",
+      "Hash: SHA256",
+      "Comment: Codename: stretch",
+      "",
+      "Origin: Debian",
+      `Codename: ${targetCodename}`,
+      "Suite: stable",
+      "-----BEGIN PGP SIGNATURE-----",
+      "",
+      "ABCDEF",
+      "-----END PGP SIGNATURE-----",
+      "",
+    ].join("\n")
+    const ssh = createMockSsh(
+      debianApplyResponses(currentCodename, targetCodename, {
+        [DEBIAN_INRELEASE_VERIFY_COMMAND]: { code: 0, stdout: inReleaseWithCodenameInHeader },
+      })
+    )
+    const mod = releaseUpgrade.upgrade()
+    const result = await mod.apply(ssh, emptyEnv)
+    expect(result.status).toBe("changed")
+  })
 })
 
 // ---------------------------------------------------------------------------
