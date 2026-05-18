@@ -99,6 +99,13 @@ describe("apt.key", () => {
   const dearmorCommand = `gpg --no-default-keyring --no-options --homedir '${gpgHomedir}' --dearmor --yes -o '${dearmorKeyringPath}' '${dearmorTempPath}'`
   const dearmorChmodCommand = `chmod 0644 '${dearmorKeyringPath}'`
 
+  // R-0000704: `gpg --show-keys` is wrapped in a dedicated homedir scope just
+  // like the dearmor command, so tests must reference the longer command form
+  // including `--no-default-keyring --no-options --homedir <tempdir>`.
+  function showKeysCommand(path: string): string {
+    return `gpg --no-default-keyring --no-options --homedir '${gpgHomedir}' --show-keys --with-colons '${path}'`
+  }
+
   function aptKeyDearmorBaseStubs(): Record<string, { code?: number; stdout?: string }> {
     return {
       [dearmorChmodCommand]: { code: 0 },
@@ -121,7 +128,9 @@ describe("apt.key", () => {
       "[ -f '/etc/apt/keyrings/docker.gpg' ] && [ ! -L '/etc/apt/keyrings/docker.gpg' ]": {
         code: 0,
       },
-      "gpg --show-keys --with-colons '/etc/apt/keyrings/docker.gpg'": {
+      [gpgHomedirCleanupCmd]: { code: 0 },
+      [gpgHomedirMktempCmd]: { stdout: `${gpgHomedir}\n` },
+      [showKeysCommand("/etc/apt/keyrings/docker.gpg")]: {
         code: 0,
         stdout: "pub:-:255:22:::\nfpr:::::::::1234567890ABCDEF1234567890ABCDEF12345678:\n",
       },
@@ -153,7 +162,9 @@ describe("apt.key", () => {
       "[ -f '/etc/apt/keyrings/docker.gpg' ] && [ ! -L '/etc/apt/keyrings/docker.gpg' ]": {
         code: 0,
       },
-      "gpg --show-keys --with-colons '/etc/apt/keyrings/docker.gpg'": {
+      [gpgHomedirCleanupCmd]: { code: 0 },
+      [gpgHomedirMktempCmd]: { stdout: `${gpgHomedir}\n` },
+      [showKeysCommand("/etc/apt/keyrings/docker.gpg")]: {
         code: 0,
         stdout: "pub:-:255:22:::\nfpr:::::::::AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA:\n",
       },
@@ -173,7 +184,7 @@ describe("apt.key", () => {
       [downloadCommand]: {
         code: 0,
       },
-      "gpg --show-keys --with-colons '/tmp/apt-key-docker.ABCDEF'": {
+      [showKeysCommand("/tmp/apt-key-docker.ABCDEF")]: {
         code: 0,
         stdout: "pub:-:255:22:::\nfpr:::::::::1234567890ABCDEF1234567890ABCDEF12345678:\n",
       },
@@ -192,7 +203,7 @@ describe("apt.key", () => {
       input: 'url = "https://download.docker.com/linux/ubuntu/gpg"\n',
       silent: true,
     })
-    expect(ssh.calls).toContain("gpg --show-keys --with-colons '/tmp/apt-key-docker.ABCDEF'")
+    expect(ssh.calls).toContain(showKeysCommand("/tmp/apt-key-docker.ABCDEF"))
     expect(ssh.calls).toContain(dearmorCommand)
     // R-0000225: the dearmor must run with --homedir pointing at a fresh temp
     // dir, and the keyring must be chmod'd 0644 afterwards.
@@ -213,7 +224,7 @@ describe("apt.key", () => {
       [downloadCommand]: {
         code: 0,
       },
-      "gpg --show-keys --with-colons '/tmp/apt-key-docker.ABCDEF'": {
+      [showKeysCommand("/tmp/apt-key-docker.ABCDEF")]: {
         code: 0,
         stdout: "pub:-:255:22:::\nfpr:::::::::1234567890ABCDEF1234567890ABCDEF12345678:\n",
       },
@@ -253,7 +264,9 @@ describe("apt.key", () => {
       [downloadCommand]: {
         code: 0,
       },
-      "gpg --show-keys --with-colons '/tmp/apt-key-docker.ABCDEF'": {
+      [gpgHomedirCleanupCmd]: { code: 0 },
+      [gpgHomedirMktempCmd]: { stdout: `${gpgHomedir}\n` },
+      [showKeysCommand("/tmp/apt-key-docker.ABCDEF")]: {
         code: 0,
         stdout: "pub:-:255:22:::\nfpr:::::::::AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA:\n",
       },
@@ -273,7 +286,9 @@ describe("apt.key", () => {
       [downloadCommand]: {
         code: 0,
       },
-      "gpg --show-keys --with-colons '/tmp/apt-key-docker.ABCDEF'": {
+      [gpgHomedirCleanupCmd]: { code: 0 },
+      [gpgHomedirMktempCmd]: { stdout: `${gpgHomedir}\n` },
+      [showKeysCommand("/tmp/apt-key-docker.ABCDEF")]: {
         code: 0,
         stdout:
           "pub:-:255:22:::\n" +
@@ -307,7 +322,7 @@ describe("apt.key", () => {
       [downloadCommand]: {
         code: 0,
       },
-      "gpg --show-keys --with-colons '/tmp/apt-key-docker.ABCDEF'": {
+      [showKeysCommand("/tmp/apt-key-docker.ABCDEF")]: {
         code: 0,
         stdout: "pub:-:255:22:::\nfpr:::::::::1234567890ABCDEF1234567890ABCDEF12345678:\n",
       },
@@ -333,7 +348,7 @@ describe("apt.key", () => {
       [downloadCommand]: {
         code: 0,
       },
-      "gpg --show-keys --with-colons '/tmp/apt-key-docker.ABCDEF'": {
+      [showKeysCommand("/tmp/apt-key-docker.ABCDEF")]: {
         code: 0,
         stdout: "pub:-:255:22:::\nfpr:::::::::1234567890ABCDEF1234567890ABCDEF12345678:\n",
       },
@@ -371,7 +386,7 @@ describe("apt.key", () => {
       "[apt.key] mktemp produced an unexpected path for docker"
     )
     expect(ssh.calls).not.toContain(downloadCommand)
-    expect(ssh.calls).not.toContain("gpg --show-keys --with-colons '/tmp/apt-key-docker.ABCDEF'")
+    expect(ssh.calls).not.toContain(showKeysCommand("/tmp/apt-key-docker.ABCDEF"))
     expect(ssh.calls).not.toContain(dearmorCommand)
   })
 
@@ -389,7 +404,7 @@ describe("apt.key", () => {
     expect(ssh.calls).not.toContain(
       "curl -fsSL 'https://download.docker.com/linux/ubuntu/gpg' -o '/etc/passwd'"
     )
-    expect(ssh.calls).not.toContain("gpg --show-keys --with-colons '/etc/passwd'")
+    expect(ssh.calls).not.toContain(showKeysCommand("/etc/passwd"))
   })
 
   it("throws for non-https URLs", () => {
@@ -460,14 +475,16 @@ describe("apt.key", () => {
     const mod = apt.key("docker", "https://download.docker.com/linux/ubuntu/gpg", { fingerprint })
     const result = await mod.check(ssh, emptyEnv)
     expect(result).toBe("needs-apply")
-    expect(ssh.calls).not.toContain("gpg --show-keys --with-colons '/etc/apt/keyrings/docker.gpg'")
+    expect(ssh.calls).not.toContain(showKeysCommand("/etc/apt/keyrings/docker.gpg"))
   })
 
   it("apply refuses to dearmor through a symlinked keyring path", async () => {
     const ssh = createMockSsh({
       "[ -L '/etc/apt/keyrings/docker.gpg' ]": { code: 0 },
       [downloadCommand]: { code: 0 },
-      "gpg --show-keys --with-colons '/tmp/apt-key-docker.ABCDEF'": {
+      [gpgHomedirCleanupCmd]: { code: 0 },
+      [gpgHomedirMktempCmd]: { stdout: `${gpgHomedir}\n` },
+      [showKeysCommand("/tmp/apt-key-docker.ABCDEF")]: {
         code: 0,
         stdout: "pub:-:255:22:::\nfpr:::::::::1234567890ABCDEF1234567890ABCDEF12345678:\n",
       },

@@ -79,35 +79,67 @@ function extractAptKeyUrlSecrets(url: string): string[] {
   return secrets
 }
 
+function buildShowKeysCommand(parameters: { homedir: string; path: string }): string {
+  // R-0000704: mirror buildDearmorCommand and force `gpg --show-keys` through
+  // a dedicated temp homedir with `--no-default-keyring --no-options`. Without
+  // these flags `gpg` lazily materialises a `~/.gnupg/trustdb.gpg` for the
+  // invoking user and may consume options from the user's `~/.gnupg/gpg.conf`,
+  // which pollutes the running account and risks loading attacker-friendly
+  // defaults during what is supposed to be a read-only fingerprint probe.
+  return [
+    "gpg",
+    "--no-default-keyring",
+    "--no-options",
+    "--homedir",
+    shellQuote(parameters.homedir),
+    "--show-keys",
+    "--with-colons",
+    shellQuote(parameters.path),
+  ].join(" ")
+}
+
 async function inspectOpenPgpFingerprint(
   ssh: SshConnection,
   name: string,
   path: string
 ): Promise<{ fingerprint: string; result: ModuleResult }> {
-  const fingerprintResult = await ssh.exec(`gpg --show-keys --with-colons ${shellQuote(path)}`, {
-    ignoreExitCode: true,
-    silent: true,
-  })
-  if (fingerprintResult.code !== 0) {
-    return {
-      fingerprint: "",
-      result: failedCommand("[apt.key] failed to inspect key material", fingerprintResult),
+  // R-0000704: allocate a throwaway homedir before invoking `gpg --show-keys`
+  // so the probe cannot pollute the default trustdb and cannot read the
+  // invoking user's `gpg.conf`. The homedir is removed in the finally branch
+  // even when the probe fails.
+  const homedirResult = await allocateGpgHomedir(ssh, name)
+  if ("failure" in homedirResult) {
+    return { fingerprint: "", result: homedirResult.failure }
+  }
+  const { homedir } = homedirResult
+  try {
+    const fingerprintResult = await ssh.exec(buildShowKeysCommand({ homedir, path }), {
+      ignoreExitCode: true,
+      silent: true,
+    })
+    if (fingerprintResult.code !== 0) {
+      return {
+        fingerprint: "",
+        result: failedCommand("[apt.key] failed to inspect key material", fingerprintResult),
+      }
     }
-  }
-  const fingerprints = parseOpenPgpPrimaryKeyFingerprints(fingerprintResult.stdout)
-  if (fingerprints.length === 0) {
-    return { fingerprint: "", result: failed("[apt.key] failed to parse key fingerprint") }
-  }
-  if (fingerprints.length > 1) {
-    return {
-      fingerprint: "",
-      result: failed(
-        `[apt.key] key material for ${name} contains ${fingerprints.length} primary keys`
-      ),
+    const fingerprints = parseOpenPgpPrimaryKeyFingerprints(fingerprintResult.stdout)
+    if (fingerprints.length === 0) {
+      return { fingerprint: "", result: failed("[apt.key] failed to parse key fingerprint") }
     }
+    if (fingerprints.length > 1) {
+      return {
+        fingerprint: "",
+        result: failed(
+          `[apt.key] key material for ${name} contains ${fingerprints.length} primary keys`
+        ),
+      }
+    }
+    const [fingerprint] = fingerprints
+    return { fingerprint, result: { status: "changed" } }
+  } finally {
+    await ssh.exec(`rm -rf -- ${shellQuote(homedir)}`, { ignoreExitCode: true, silent: true })
   }
-  const [fingerprint] = fingerprints
-  return { fingerprint, result: { status: "changed" } }
 }
 
 export async function verifyAptKeyFingerprint(parameters: {
