@@ -899,7 +899,14 @@ async function runModuleLoop(parameters: LoopArguments): Promise<{
 }> {
   const { definitionSignals, dryRun, modules, rebootGrace, shutdownSignal, ssh, stats, verbose } =
     parameters
-  const loopState: ModuleLoopState = {
+  // R-0000842: hold loop state in a single `let` binding and reassign
+  // wholesale each iteration. The previous code created the value as
+  // `const` and used `Object.assign(loopState, applyLoopResultToState(...))`
+  // to mutate the binding in place. Reassigning a plain object is easier to
+  // reason about — it makes the per-iteration transition explicit and
+  // avoids the fragile contract that `applyLoopResultToState` must return a
+  // payload that fully describes every field on `ModuleLoopState`.
+  let loopState: ModuleLoopState = {
     currentEnvironment: parameters.env,
     signalsPending: false,
     stopRun: undefined,
@@ -923,7 +930,7 @@ async function runModuleLoop(parameters: LoopArguments): Promise<{
     // eslint-disable-next-line no-await-in-loop
     const result = await stepPromise
 
-    Object.assign(loopState, applyLoopResultToState(loopState, result, stats))
+    loopState = applyLoopResultToState(loopState, result, stats)
     // eslint-disable-next-line no-await-in-loop
     const flushResult = await flushTopLevelSignalsIfRequested({
       definitionSignals,
@@ -936,7 +943,7 @@ async function runModuleLoop(parameters: LoopArguments): Promise<{
       stats,
       verbose,
     })
-    loopState.signalsPending = flushResult.nextSignalsPending
+    loopState = { ...loopState, signalsPending: flushResult.nextSignalsPending }
     if (flushResult.outcome === "break") break
     if (result.shouldBreak) break
   }
