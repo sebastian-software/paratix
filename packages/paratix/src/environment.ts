@@ -134,6 +134,19 @@ function processValue(raw: string, filePath: string, lineNumber: number): string
     throw new Error(`Invalid env value in ${filePath} line ${lineNumber}: contains a NUL byte`)
   }
 
+  // R-0000791: reject literal CR (0x0D) bytes for the same reason NUL is
+  // rejected — a bare \r emerges as an unprintable byte downstream, hides
+  // line-ending mismatches inside dotenv values, and can re-introduce
+  // mixed CRLF state into command lines that the SSH command builder
+  // already guards against. The double-quoted branch interprets only
+  // `\n`/`\\`/`\"` escapes, so a literal CR is never the intended way to
+  // smuggle a newline into the value.
+  if (raw.includes("\r")) {
+    throw new Error(
+      `Invalid env value in ${filePath} line ${lineNumber}: contains a carriage return`
+    )
+  }
+
   if (raw.length >= 2 && raw.startsWith('"') && raw.endsWith('"')) {
     // Double-quoted: strip quotes and process escape sequences.
     // Use \0 as sentinel for escaped backslashes — safe because .env files never contain null bytes.

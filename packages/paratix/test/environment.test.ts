@@ -221,6 +221,33 @@ describe("loadDotEnvironment", () => {
     await expect(loadDotEnvironment(tmpFile)).rejects.toThrow(/line 2/v)
     await expect(loadDotEnvironment(tmpFile)).rejects.toThrow(tmpFile)
   })
+
+  // R-0000791: a literal CR (0x0D) byte inside a dotenv value emerges
+  // unprintable downstream, hides line-ending mismatches inside values, and
+  // can re-introduce mixed CRLF state into shell command lines. The
+  // double-quoted decoder interprets only `\n` / `\\` / `\"` escapes, so
+  // a literal CR is never the intended way to smuggle a newline in. Refuse
+  // it the same way NUL is refused.
+  it("rejects unquoted values that contain a literal carriage return (R-0000791)", async () => {
+    writeFileSync(tmpFile, "TOKEN=before\rafter\n")
+    await expect(loadDotEnvironment(tmpFile)).rejects.toThrow(/carriage return/v)
+  })
+
+  it("rejects double-quoted values that contain a literal carriage return (R-0000791)", async () => {
+    writeFileSync(tmpFile, 'TOKEN="before\rafter"\n')
+    await expect(loadDotEnvironment(tmpFile)).rejects.toThrow(/carriage return/v)
+  })
+
+  it("rejects single-quoted values that contain a literal carriage return (R-0000791)", async () => {
+    writeFileSync(tmpFile, "TOKEN='before\rafter'\n")
+    await expect(loadDotEnvironment(tmpFile)).rejects.toThrow(/carriage return/v)
+  })
+
+  it("names the offending file and line number when refusing a CR-byte value (R-0000791)", async () => {
+    writeFileSync(tmpFile, "OK=fine\nLEAK=before\rafter\n")
+    await expect(loadDotEnvironment(tmpFile)).rejects.toThrow(/line 2/v)
+    await expect(loadDotEnvironment(tmpFile)).rejects.toThrow(tmpFile)
+  })
 })
 
 describe("mergeEnvironment", () => {
