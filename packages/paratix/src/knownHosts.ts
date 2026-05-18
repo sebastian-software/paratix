@@ -387,8 +387,14 @@ export async function appendHostKey(host: string, port: number, keyBuffer: Buffe
   await withKnownHostsLock(async () => {
     // eslint-disable-next-line security/detect-non-literal-fs-filename
     await mkdir(sshDirectory, { mode: 0o700, recursive: true })
+    // R-0000793: create the file with restrictive 0600 permissions. The
+    // historical 0644 mode mirrored the OpenSSH default that lets other
+    // local users read the file, but Paratix pins host keys on behalf of
+    // automated runs that may store sensitive operator hosts (jump boxes,
+    // bastions). Aligning with `~/.ssh/`'s 0700 keeps the trust store
+    // accessible only to the running user.
     // eslint-disable-next-line security/detect-non-literal-fs-filename
-    await appendFile(filePath, line, { mode: 0o644 })
+    await appendFile(filePath, line, { mode: 0o600 })
   })
 }
 

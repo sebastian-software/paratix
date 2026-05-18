@@ -522,12 +522,15 @@ describe("appendHostKey", () => {
     expect(filePath).toBe("/home/testuser/.ssh/known_hosts")
   })
 
-  it("writes the file with mode 0o644", async () => {
+  // R-0000793: known_hosts must be created with 0600 so other local users
+  // cannot read which hosts the operator pinned. Aligns with the 0700
+  // permissions on `~/.ssh/` and the broader trust-store hygiene contract.
+  it("writes the file with mode 0o600 (R-0000793)", async () => {
     const keyBuf = makeKeyBuffer("ssh-ed25519")
     await appendHostKey("example.com", 22, keyBuf)
 
     const thirdArg = (appendFileMock.mock.calls[0] as [string, string, { mode: number }])[2]
-    expect(thirdArg.mode).toBe(0o644)
+    expect(thirdArg.mode).toBe(0o600)
   })
 })
 
