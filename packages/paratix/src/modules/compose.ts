@@ -261,16 +261,38 @@ async function resolveDesiredComposeContent(options: {
 }
 
 /**
+ * R-0000710: cap the size of stdout passed to `JSON.parse`. A compromised
+ * remote (or a pathologically large compose project) could otherwise feed
+ * arbitrarily large output into `compose ps --format json` and force a
+ * multi-megabyte `JSON.parse` walk in-process. 10 MiB is far above any
+ * realistic compose-project listing and keeps the parser bounded.
+ */
+const COMPOSE_PS_JSON_MAX_BYTES = 10_485_760
+
+/**
  * Parse the container state strings from the JSON output of `compose ps --format json`.
  *
  * Both array JSON (Docker >= 2.x) and newline-delimited JSON (older Docker / Podman)
  * are supported. Each entry is expected to have a `State` property.
  *
+ * R-0000710: stdout is rejected up-front when it exceeds
+ * {@link COMPOSE_PS_JSON_MAX_BYTES}. Oversized input returns an empty array,
+ * which propagates through the call sites in `compose.up.check` /
+ * `compose.down.check` as `needs-apply` so the next run re-evaluates the
+ * stack instead of letting an unbounded parse run in-process.
+ *
  * @param stdout - The raw stdout string from the `compose ps` command.
  * @returns An array of state strings (e.g. `"running"`, `"exited"`). Returns an
- *   empty array when parsing fails or the output is not in a recognised format.
+ *   empty array when parsing fails, the output exceeds the size cap, or the
+ *   output is not in a recognised format.
  */
 function parseContainerStates(stdout: string): string[] {
+  // R-0000710: use the UTF-8 byte length so multi-byte payloads cannot bypass
+  // the cap via a character-count comparison. `Buffer.byteLength` avoids
+  // materialising a Buffer copy of the entire stdout.
+  if (Buffer.byteLength(stdout, "utf8") > COMPOSE_PS_JSON_MAX_BYTES) {
+    return []
+  }
   try {
     const parsed: unknown = stdout.startsWith("[")
       ? JSON.parse(stdout)

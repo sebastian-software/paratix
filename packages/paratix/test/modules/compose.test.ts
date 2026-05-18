@@ -152,6 +152,20 @@ describe("compose.up — check", () => {
     const result = await mod.check(mockSsh, emptyEnv)
     expect(result).toBe("needs-apply")
   })
+
+  // R-0000710: stdout exceeding the 10 MiB JSON size cap must not be parsed.
+  // The check path should report needs-apply so the next run re-evaluates the
+  // stack instead of forcing an unbounded JSON.parse on attacker-controlled
+  // input.
+  it("R-0000710: returns needs-apply when ps stdout exceeds the JSON size cap", async () => {
+    const oversized = `[${"\"x\",".repeat(2_700_000)}\"x\"]`
+    const mockSsh = createComposeMockSsh({
+      [`${composeCmd("podman")} ps --format json`]: { code: 0, stdout: oversized },
+    })
+    const mod = compose.up({ projectDirectory })
+    const result = await mod.check(mockSsh, emptyEnv)
+    expect(result).toBe("needs-apply")
+  })
 })
 
 describe("compose.up — apply", () => {
