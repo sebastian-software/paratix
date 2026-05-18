@@ -189,14 +189,37 @@ async function expectModuleCheckOk(
   await expect(mod.check(ssh, environment)).resolves.toBe("ok")
 }
 
-async function runCleanupSteps(steps: CleanupStep[]): Promise<void> {
+async function runCleanupSteps(steps: CleanupStep[], primaryError?: unknown): Promise<void> {
   const failures: Error[] = []
 
   await runCleanupStep(steps, 0, failures)
 
-  if (failures.length > 0) {
-    throw new AggregateError(failures, "One or more cleanup steps failed")
+  if (failures.length === 0) return
+
+  const cleanupError = new AggregateError(failures, "One or more cleanup steps failed")
+  if (primaryError != null) {
+    attachCleanupFailureDiagnostic(primaryError, cleanupError)
+    return
   }
+
+  throw cleanupError
+}
+
+function attachCleanupFailureDiagnostic(primaryError: unknown, cleanupError: AggregateError): void {
+  if (!(primaryError instanceof Error)) return
+
+  const errorWithDiagnostic = primaryError
+  Object.defineProperty(errorWithDiagnostic, "cleanupError", {
+    configurable: true,
+    value: cleanupError,
+  })
+  errorWithDiagnostic.stack = [
+    errorWithDiagnostic.stack ?? errorWithDiagnostic.message,
+    "",
+    "Cleanup failure after primary error:",
+    ...cleanupError.errors.map((error) => (error instanceof Error ? error.message : String(error))),
+    cleanupError.stack ?? cleanupError.message,
+  ].join("\n")
 }
 
 async function runCleanupStep(
@@ -330,6 +353,48 @@ describe("cleanup helper", () => {
 
     expect(calls).toStrictEqual(["remote", "disconnect", "local"])
   })
+
+  it("keeps the primary error when cleanup also fails", async () => {
+    const primaryError = new Error("primary failure")
+
+    await expect(async () => {
+      try {
+        throw primaryError
+      } catch (error) {
+        await runCleanupSteps(
+          [
+            {
+              name: "remote cleanup",
+              run() {
+                throw new Error("cleanup failed")
+              },
+            },
+          ],
+          error
+        )
+        throw error
+      }
+    }).rejects.toBe(primaryError)
+
+    expect(primaryError.stack).toContain("Cleanup failure after primary error")
+    expect(primaryError.stack).toContain("remote cleanup: cleanup failed")
+    expect((primaryError as { cleanupError?: AggregateError } & Error).cleanupError).toBeInstanceOf(
+      AggregateError
+    )
+  })
+
+  it("throws cleanup errors directly when no primary error exists", async () => {
+    await expect(
+      runCleanupSteps([
+        {
+          name: "remote cleanup",
+          run() {
+            throw new Error("cleanup failed")
+          },
+        },
+      ])
+    ).rejects.toThrow(AggregateError)
+  })
 })
 
 describe("Paratix integration", () => {
@@ -367,10 +432,14 @@ describe("Paratix integration", () => {
       user: "paratix",
     })
 
+    let primaryError: unknown
     try {
       await expect(ssh.connect()).rejects.toBeInstanceOf(HostKeyVerificationError)
+    } catch (error) {
+      primaryError = error
+      throw error
     } finally {
-      await runCleanupSteps([disconnectSshStep(ssh)])
+      await runCleanupSteps([disconnectSshStep(ssh)], primaryError)
     }
   })
 
@@ -391,6 +460,7 @@ describe("Paratix integration", () => {
     const remoteBase = `/home/paratix/integration-${randomUUID()}`
     let localDirectory: string | undefined
 
+    let primaryError: unknown
     try {
       localDirectory = mkdtempSync(join(tmpdir(), "paratix-sftp-"))
       const localUploadPath = join(localDirectory, "upload.txt")
@@ -406,12 +476,18 @@ describe("Paratix integration", () => {
       await ssh.writeFile(remoteDownloadPath, "download-content\n", { mode: "0644" })
       await ssh.downloadFile(remoteDownloadPath, localDownloadPath)
       expect(await readFile(localDownloadPath, "utf8")).toBe("download-content\n")
+    } catch (error) {
+      primaryError = error
+      throw error
     } finally {
-      await runCleanupSteps([
-        removeRemoteDirectoryStep(ssh, remoteBase, "remove remote SFTP test directory"),
-        disconnectSshStep(ssh),
-        removeCreatedLocalDirectoryStep(() => localDirectory),
-      ])
+      await runCleanupSteps(
+        [
+          removeRemoteDirectoryStep(ssh, remoteBase, "remove remote SFTP test directory"),
+          disconnectSshStep(ssh),
+          removeCreatedLocalDirectoryStep(() => localDirectory),
+        ],
+        primaryError
+      )
     }
   })
 
@@ -422,6 +498,7 @@ describe("Paratix integration", () => {
     const remoteDirectory = `${remoteBase}/über ordner`
     let localDirectory: string | undefined
 
+    let primaryError: unknown
     try {
       localDirectory = mkdtempSync(join(tmpdir(), "paratix-sftp-unicode-"))
       const localUploadPath = join(localDirectory, unicodeFileName)
@@ -437,12 +514,18 @@ describe("Paratix integration", () => {
       await ssh.writeFile(remoteDownloadPath, unicodeBlockContent, { mode: "0644" })
       await ssh.downloadFile(remoteDownloadPath, localDownloadPath)
       expect(await readFile(localDownloadPath, "utf8")).toBe(unicodeBlockContent)
+    } catch (error) {
+      primaryError = error
+      throw error
     } finally {
-      await runCleanupSteps([
-        removeRemoteDirectoryStep(ssh, remoteBase, "remove remote unicode SFTP test directory"),
-        disconnectSshStep(ssh),
-        removeCreatedLocalDirectoryStep(() => localDirectory),
-      ])
+      await runCleanupSteps(
+        [
+          removeRemoteDirectoryStep(ssh, remoteBase, "remove remote unicode SFTP test directory"),
+          disconnectSshStep(ssh),
+          removeCreatedLocalDirectoryStep(() => localDirectory),
+        ],
+        primaryError
+      )
     }
   })
 
@@ -452,6 +535,7 @@ describe("Paratix integration", () => {
     const remoteBase = `/root/non-root-sftp-${randomUUID()}`
     let localDirectory: string | undefined
 
+    let primaryError: unknown
     try {
       localDirectory = mkdtempSync(join(tmpdir(), "paratix-sftp-non-root-"))
       const localUploadPath = join(localDirectory, "upload.txt")
@@ -491,12 +575,18 @@ describe("Paratix integration", () => {
       await expect(
         ssh.lines("find /tmp -maxdepth 1 -user paratix -name 'paratix-upload.*' -print | sort")
       ).resolves.toStrictEqual(temporaryUploadsBeforeFailure)
+    } catch (error) {
+      primaryError = error
+      throw error
     } finally {
-      await runCleanupSteps([
-        removeRemoteDirectoryStep(ssh, remoteBase, "remove remote non-root SFTP test directory"),
-        disconnectSshStep(ssh),
-        removeCreatedLocalDirectoryStep(() => localDirectory),
-      ])
+      await runCleanupSteps(
+        [
+          removeRemoteDirectoryStep(ssh, remoteBase, "remove remote non-root SFTP test directory"),
+          disconnectSshStep(ssh),
+          removeCreatedLocalDirectoryStep(() => localDirectory),
+        ],
+        primaryError
+      )
     }
   })
 
@@ -504,11 +594,15 @@ describe("Paratix integration", () => {
     const environment = getEnvironment()
     const acceptNewSsh = await connectWithConfig(createAcceptNewSshConfig(environment.primaryPort))
 
+    let primaryError: unknown
     try {
       const knownHosts = await readFile(join(testHome, ".ssh", "known_hosts"), "utf8")
       expect(knownHosts).toContain(`[${environment.host}]:${String(environment.primaryPort)}`)
+    } catch (error) {
+      primaryError = error
+      throw error
     } finally {
-      await runCleanupSteps([disconnectSshStep(acceptNewSsh)])
+      await runCleanupSteps([disconnectSshStep(acceptNewSsh)], primaryError)
     }
 
     const strictSsh = await connectWithConfig(createKnownHostsSshConfig(environment.primaryPort))
@@ -522,29 +616,44 @@ describe("Paratix integration", () => {
   it("keeps accept-new known_hosts entries scoped to their SSH port", async () => {
     const environment = getEnvironment()
     const primarySsh = await connectWithConfig(createAcceptNewSshConfig(environment.primaryPort))
+    let primaryError: unknown
     try {
       expect(primarySsh.getConnectionInfo().port).toBe(environment.primaryPort)
+    } catch (error) {
+      primaryError = error
+      throw error
     } finally {
-      await runCleanupSteps([disconnectSshStep(primarySsh)])
+      await runCleanupSteps([disconnectSshStep(primarySsh)], primaryError)
     }
 
     const secondaryStrictSsh = new SshConnectionImpl(
       environment.host,
       createKnownHostsSshConfig(environment.secondaryPort)
     )
+    let secondaryStrictPrimaryError: unknown
     try {
       await expect(secondaryStrictSsh.connect()).rejects.toBeInstanceOf(HostKeyVerificationError)
+    } catch (error) {
+      secondaryStrictPrimaryError = error
+      throw error
     } finally {
-      await runCleanupSteps([disconnectSshStep(secondaryStrictSsh)])
+      await runCleanupSteps([disconnectSshStep(secondaryStrictSsh)], secondaryStrictPrimaryError)
     }
 
     const secondaryAcceptNewSsh = await connectWithConfig(
       createAcceptNewSshConfig(environment.secondaryPort)
     )
+    let secondaryAcceptNewPrimaryError: unknown
     try {
       expect(secondaryAcceptNewSsh.getConnectionInfo().port).toBe(environment.secondaryPort)
+    } catch (error) {
+      secondaryAcceptNewPrimaryError = error
+      throw error
     } finally {
-      await runCleanupSteps([disconnectSshStep(secondaryAcceptNewSsh)])
+      await runCleanupSteps(
+        [disconnectSshStep(secondaryAcceptNewSsh)],
+        secondaryAcceptNewPrimaryError
+      )
     }
 
     const secondaryKnownHostsSsh = await connectWithConfig(
@@ -568,10 +677,14 @@ describe("Paratix integration", () => {
       environment.host,
       createKnownHostsSshConfig(environment.primaryPort)
     )
+    let primaryError: unknown
     try {
       await expect(ssh.connect()).rejects.toBeInstanceOf(HostKeyVerificationError)
+    } catch (error) {
+      primaryError = error
+      throw error
     } finally {
-      await runCleanupSteps([disconnectSshStep(ssh)])
+      await runCleanupSteps([disconnectSshStep(ssh)], primaryError)
     }
   })
 
@@ -599,6 +712,7 @@ describe("Paratix integration", () => {
     const ssh = await connectSsh([environment.primaryPort], {}, "root")
     let localDirectory: string | undefined
 
+    let primaryError: unknown
     try {
       localDirectory = mkdtempSync(join(tmpdir(), "paratix-playbook-"))
       const localSourcePath = join(localDirectory, "source.txt")
@@ -629,12 +743,18 @@ describe("Paratix integration", () => {
       expect(await ssh.readFile(`${remoteApp}/source.txt`)).toBe("copied-from-local")
       expect(await ssh.readFile(`${remoteApp}/template.txt`)).toBe("Hello integration")
       expect(await ssh.readFile(markerPath)).toBe("ready")
+    } catch (error) {
+      primaryError = error
+      throw error
     } finally {
-      await runCleanupSteps([
-        removeRemoteDirectoryStep(ssh, remoteBase, "remove remote playbook test directory"),
-        disconnectSshStep(ssh),
-        removeCreatedLocalDirectoryStep(() => localDirectory),
-      ])
+      await runCleanupSteps(
+        [
+          removeRemoteDirectoryStep(ssh, remoteBase, "remove remote playbook test directory"),
+          disconnectSshStep(ssh),
+          removeCreatedLocalDirectoryStep(() => localDirectory),
+        ],
+        primaryError
+      )
     }
   })
 
@@ -651,6 +771,7 @@ describe("Paratix integration", () => {
     const ssh = await connectSsh([environment.primaryPort], {}, "root")
     let localDirectory: string | undefined
 
+    let primaryError: unknown
     try {
       localDirectory = mkdtempSync(join(tmpdir(), "paratix-dist-cli-playbook-"))
       const playbookPath = join(localDirectory, "playbook.mjs")
@@ -695,12 +816,18 @@ describe("Paratix integration", () => {
       expect(output).toContain("create dist cli dry-run marker")
       expect(output).toContain("(dry-run)")
       await expect(ssh.test(`test -f ${shellQuote(markerPath)}`)).resolves.toBe(false)
+    } catch (error) {
+      primaryError = error
+      throw error
     } finally {
-      await runCleanupSteps([
-        removeRemoteDirectoryStep(ssh, remoteBase, "remove remote dist CLI test directory"),
-        disconnectSshStep(ssh),
-        removeCreatedLocalDirectoryStep(() => localDirectory),
-      ])
+      await runCleanupSteps(
+        [
+          removeRemoteDirectoryStep(ssh, remoteBase, "remove remote dist CLI test directory"),
+          disconnectSshStep(ssh),
+          removeCreatedLocalDirectoryStep(() => localDirectory),
+        ],
+        primaryError
+      )
     }
   })
 
@@ -710,6 +837,7 @@ describe("Paratix integration", () => {
     const markerPath = `${remoteBase}/app/marker.txt`
     let localDirectory: string | undefined
 
+    let primaryError: unknown
     try {
       localDirectory = mkdtempSync(join(tmpdir(), "paratix-modules-"))
       const localSourcePath = join(localDirectory, "source.txt")
@@ -762,12 +890,18 @@ describe("Paratix integration", () => {
       await expectModuleCheckOk(copyModule, ssh)
       await expectModuleCheckOk(templateModule, ssh, { NAME: "integration" })
       await expectModuleCheckOk(commandModule, ssh)
+    } catch (error) {
+      primaryError = error
+      throw error
     } finally {
-      await runCleanupSteps([
-        removeRemoteDirectoryStep(ssh, remoteBase, "remove remote module test directory"),
-        disconnectSshStep(ssh),
-        removeCreatedLocalDirectoryStep(() => localDirectory),
-      ])
+      await runCleanupSteps(
+        [
+          removeRemoteDirectoryStep(ssh, remoteBase, "remove remote module test directory"),
+          disconnectSshStep(ssh),
+          removeCreatedLocalDirectoryStep(() => localDirectory),
+        ],
+        primaryError
+      )
     }
   })
 
@@ -780,6 +914,7 @@ describe("Paratix integration", () => {
     const remoteBlockPath = `${remoteDirectory}/konfiguration ü.txt`
     let localDirectory: string | undefined
 
+    let primaryError: unknown
     try {
       localDirectory = mkdtempSync(join(tmpdir(), "paratix-unicode-modules-"))
       const localSourcePath = join(localDirectory, unicodeFileName)
@@ -833,12 +968,18 @@ describe("Paratix integration", () => {
       await expectModuleCheckOk(copyModule, ssh)
       await expectModuleCheckOk(templateModule, ssh, { city: "München", name: "Jörg" })
       await expectModuleCheckOk(blockModule, ssh)
+    } catch (error) {
+      primaryError = error
+      throw error
     } finally {
-      await runCleanupSteps([
-        removeRemoteDirectoryStep(ssh, remoteBase, "remove remote unicode module test directory"),
-        disconnectSshStep(ssh),
-        removeCreatedLocalDirectoryStep(() => localDirectory),
-      ])
+      await runCleanupSteps(
+        [
+          removeRemoteDirectoryStep(ssh, remoteBase, "remove remote unicode module test directory"),
+          disconnectSshStep(ssh),
+          removeCreatedLocalDirectoryStep(() => localDirectory),
+        ],
+        primaryError
+      )
     }
   })
 
@@ -875,6 +1016,7 @@ describe("Paratix integration", () => {
       url: largeArtifactUrl,
     })
 
+    let primaryError: unknown
     try {
       await ssh.exec(`mkdir -p ${shellQuote(httpDirectory)} ${shellQuote(downloadsDirectory)}`, {
         silent: true,
@@ -907,17 +1049,23 @@ describe("Paratix integration", () => {
 
       await expectModuleCheckOk(urlModule, ssh)
       await expectModuleCheckOk(largeModule, ssh)
+    } catch (error) {
+      primaryError = error
+      throw error
     } finally {
-      await runCleanupSteps([
-        {
-          name: "stop remote HTTP server",
-          async run() {
-            await stopRemoteHttpServer(ssh, port)
+      await runCleanupSteps(
+        [
+          {
+            name: "stop remote HTTP server",
+            async run() {
+              await stopRemoteHttpServer(ssh, port)
+            },
           },
-        },
-        removeRemoteDirectoryStep(ssh, remoteBase, "remove remote download test directory"),
-        disconnectSshStep(ssh),
-      ])
+          removeRemoteDirectoryStep(ssh, remoteBase, "remove remote download test directory"),
+          disconnectSshStep(ssh),
+        ],
+        primaryError
+      )
     }
   })
 })
