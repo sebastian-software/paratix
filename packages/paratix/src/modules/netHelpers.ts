@@ -406,15 +406,24 @@ export async function delay(ms: number, abortSignal?: AbortSignal): Promise<void
       return
     }
 
-    const timer = setTimeout(() => {
+    // R-0000816: declare `onAbort` (and a shared cleanup closure) before
+    // scheduling the timer so the listener identity is fixed before any
+    // synchronous abort path can fire. Using `let timer` to break the
+    // declaration cycle keeps the cleanup logic symmetric for both the
+    // resolve and the reject branches.
+    let timer: ReturnType<typeof setTimeout> | undefined
+    const detachAbortListener = (): void => {
       abortSignal?.removeEventListener("abort", onAbort)
-      resolve()
-    }, ms)
-
+    }
     const onAbort = (): void => {
-      clearTimeout(timer)
+      if (timer !== undefined) clearTimeout(timer)
       reject(normalizeDelayAbortReason(abortSignal?.reason))
     }
+
+    timer = setTimeout(() => {
+      detachAbortListener()
+      resolve()
+    }, ms)
 
     abortSignal?.addEventListener("abort", onAbort, { once: true })
   })
