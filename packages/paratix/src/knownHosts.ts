@@ -311,6 +311,13 @@ export function lookupHostKey(
  * The SSH wire format starts with a `uint32` length prefix followed by the
  * algorithm name as an ASCII string.
  *
+ * R-0000834: the extracted algorithm is validated against the same allowlist
+ * used for pinned host keys ({@link PINNED_HOST_KEY_ALGORITHM_PATTERN}). A
+ * remote peer could otherwise smuggle arbitrary bytes (including whitespace
+ * or control characters) into the `known_hosts` line we persist via
+ * {@link appendHostKey}, since the algorithm field would be rewritten verbatim
+ * onto disk.
+ *
  * @param keyBuffer - The raw public key buffer.
  * @returns The algorithm name (e.g. `"ssh-ed25519"`).
  */
@@ -322,7 +329,14 @@ export function extractAlgoFromKey(keyBuffer: Buffer): string {
   if (algoLength === 0 || UINT32_SIZE + algoLength > keyBuffer.length) {
     throw new Error("Invalid SSH key buffer: algorithm length exceeds buffer size")
   }
-  return keyBuffer.subarray(UINT32_SIZE, UINT32_SIZE + algoLength).toString("ascii")
+  const algo = keyBuffer.subarray(UINT32_SIZE, UINT32_SIZE + algoLength).toString("ascii")
+  // R-0000834: refuse remote-supplied algorithm names that fail the
+  // allowlist. Without this, a malicious peer could embed newlines or
+  // whitespace into the field and corrupt the known_hosts line shape.
+  if (!PINNED_HOST_KEY_ALGORITHM_PATTERN.test(algo)) {
+    throw new Error(`Invalid SSH key buffer: unsupported algorithm '${algo}'`)
+  }
+  return algo
 }
 
 /**
@@ -379,6 +393,22 @@ export async function appendHostKey(host: string, port: number, keyBuffer: Buffe
   const hostLabel = formatHostNeedle(host, port)
   const algo = extractAlgoFromKey(keyBuffer)
   const base64Key = keyBuffer.toString("base64")
+
+  // R-0000834: defence-in-depth — even though extractAlgoFromKey enforces the
+  // allowlist and base64 encoding never emits whitespace, refuse to persist a
+  // line whose fields contain any whitespace, newline, or control byte. A
+  // malformed hostLabel (e.g. an IPv6 literal smuggled through configuration)
+  // must not corrupt the known_hosts line shape.
+  if (/\s/v.test(hostLabel)) {
+    throw new Error(`Refusing to persist known_hosts entry: host label contains whitespace`)
+  }
+  if (/\s/v.test(algo)) {
+    throw new Error(`Refusing to persist known_hosts entry: algorithm contains whitespace`)
+  }
+  if (/\s/v.test(base64Key)) {
+    throw new Error(`Refusing to persist known_hosts entry: base64 key contains whitespace`)
+  }
+
   const line = `${hostLabel} ${algo} ${base64Key}\n`
 
   const sshDirectory = join(homedir(), ".ssh")
