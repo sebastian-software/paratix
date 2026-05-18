@@ -359,13 +359,31 @@ async function finalizeDownloadedFile(
   // during the curl download itself.
   const symlinkFailure = await ensureDownloadDestinationNotSymlinked(conn, parameters.destination)
   if (symlinkFailure != null) return symlinkFailure
+  // R-0000696: combine the final `mv -T` with inline parent/destination
+  // symlink and directory guards so the kernel resolves all probes plus the
+  // rename in a single shell pipeline. The earlier
+  // `ensureDownloadDestinationNotSymlinked` call still gives operators a
+  // friendly, distinct error path for the common cases; the inline guards
+  // below close the residual TOCTOU window between that probe and `mv -T`
+  // where an attacker with write access on `dirname(destination)` could
+  // otherwise plant a symlink between the check and the rename.
   // R-0000158: convert non-zero exit codes (e.g. cross-device link, EACCES,
   // EROFS) into a failedCommand result so callers see a maskable failure
   // instead of an uncaught CommandError exception.
-  const result = await conn.exec(
-    `mv -T -- ${shellQuote(downloadParameters.destination)} ${shellQuote(parameters.destination)}`,
-    { ignoreExitCode: true, secrets: parameters.secrets, silent: true }
-  )
+  const parentDirectory = path.dirname(parameters.destination)
+  const quotedParent = shellQuote(parentDirectory)
+  const quotedDestination = shellQuote(parameters.destination)
+  const quotedSource = shellQuote(downloadParameters.destination)
+  const guardedMoveCommand =
+    `[ ! -L ${quotedParent} ] && ` +
+    `[ ! -L ${quotedDestination} ] && ` +
+    `[ ! -d ${quotedDestination} ] && ` +
+    `mv -T -- ${quotedSource} ${quotedDestination}`
+  const result = await conn.exec(guardedMoveCommand, {
+    ignoreExitCode: true,
+    secrets: parameters.secrets,
+    silent: true,
+  })
   if (result.code !== 0) {
     return failedCommand(
       `[download] mv into place failed for ${parameters.destination}`,

@@ -88,8 +88,12 @@ function buildSafeDownloadApplyStubs(): NonNullable<
     },
     {
       command:
+        // R-0000696: the final mv now runs as a single shell pipeline with
+        // inline parent/destination symlink and directory guards so any
+        // attacker-planted symlink between the earlier probe and the rename
+        // is rejected before mv resolves the destination path.
         // eslint-disable-next-line security/detect-unsafe-regex -- bounded mock command regex, not user input
-        /^mv -T -- '\/(?:opt|tmp|usr|var)(?:\/[^\/']+)*\/\.paratix-download\.[^\/']+' '\/(?:opt|tmp|usr|var)(?:\/[^\/']+)*'$/v,
+        /^\[ ! -L '\/(?:opt|tmp|usr|var)(?:\/[^\/']+)*' \] && \[ ! -L '\/(?:opt|tmp|usr|var)(?:\/[^\/']+)*' \] && \[ ! -d '\/(?:opt|tmp|usr|var)(?:\/[^\/']+)*' \] && mv -T -- '\/(?:opt|tmp|usr|var)(?:\/[^\/']+)*\/\.paratix-download\.[^\/']+' '\/(?:opt|tmp|usr|var)(?:\/[^\/']+)*'$/v,
       result: { code: 0 },
     },
     {
@@ -245,6 +249,23 @@ function createMockSshWithDestinationSymlinkAfterFirstProbe(parameters: {
   }
 }
 
+function buildGuardedMoveCommand(parameters: {
+  destination: string
+  temporaryDestination: string
+}): string {
+  const lastSlash = parameters.destination.lastIndexOf("/")
+  const parentDirectory = lastSlash <= 0 ? "/" : parameters.destination.slice(0, lastSlash)
+  // R-0000696: must match the single-pipeline guarded mv in
+  // `finalizeDownloadedFile` (parent symlink, destination symlink and
+  // destination directory probes followed by the atomic rename).
+  return (
+    `[ ! -L '${parentDirectory}' ] && ` +
+    `[ ! -L '${parameters.destination}' ] && ` +
+    `[ ! -d '${parameters.destination}' ] && ` +
+    `mv -T -- '${parameters.temporaryDestination}' '${parameters.destination}'`
+  )
+}
+
 function expectSafeCurlDownloadPipeline(parameters: {
   destination: string
   mockSsh: ReturnType<typeof createMockSsh>
@@ -254,7 +275,10 @@ function expectSafeCurlDownloadPipeline(parameters: {
 }): void {
   const protocolFlags = parameters.protocolFlags ?? httpsOnlyCurlProtocolFlags
   const curlCommand = `curl -fsSL -o '${parameters.temporaryDestination}' ${protocolFlags} --config -`
-  const moveCommand = `mv -T -- '${parameters.temporaryDestination}' '${parameters.destination}'`
+  const moveCommand = buildGuardedMoveCommand({
+    destination: parameters.destination,
+    temporaryDestination: parameters.temporaryDestination,
+  })
   const cleanupCommand = `rm -f -- '${parameters.temporaryDestination}'`
   const curlCall = parameters.mockSsh.execCalls.find((entry) => entry.command === curlCommand)
 
@@ -717,7 +741,7 @@ describe("download.url", () => {
     })
 
     it("returns failed when mv into place exits non-zero", async () => {
-      const mvCommand = `mv -T -- '${temporaryDestination}' '${destination}'`
+      const mvCommand = buildGuardedMoveCommand({ destination, temporaryDestination })
       const mockSsh = createMockSsh({
         ...downloadMktempStub(destination, temporaryDestination),
         [mvCommand]: { code: 1, stderr: "mv: cannot move: Permission denied\n" },
@@ -1282,7 +1306,9 @@ describe("download.url", () => {
         expect(mockSsh.calls).toContain(
           `curl -fsSL -o '${temporaryDestination}' ${httpsOnlyCurlProtocolFlags} --config -`
         )
-        expect(mockSsh.calls).toContain(`mv -T -- '${temporaryDestination}' '${destination}'`)
+        expect(mockSsh.calls).toContain(
+          buildGuardedMoveCommand({ destination, temporaryDestination })
+        )
       })
 
       it("forces a full curl download when force is true even if sha256 matches", async () => {
@@ -1304,7 +1330,9 @@ describe("download.url", () => {
         expect(mockSsh.calls).toContain(
           `curl -fsSL -o '${temporaryDestination}' ${httpsOnlyCurlProtocolFlags} --config -`
         )
-        expect(mockSsh.calls).toContain(`mv -T -- '${temporaryDestination}' '${destination}'`)
+        expect(mockSsh.calls).toContain(
+          buildGuardedMoveCommand({ destination, temporaryDestination })
+        )
       })
 
       it("never enters the fast path when sha256 is not provided", async () => {
@@ -2244,7 +2272,9 @@ describe("download.large", () => {
       expect(mockSsh.calls).toContain(
         `curl -fsSL -o '${temporaryDestination}' ${httpsOnlyCurlProtocolFlags} --config -`
       )
-      expect(mockSsh.calls).toContain(`mv -T -- '${temporaryDestination}' '${destination}'`)
+      expect(mockSsh.calls).toContain(
+        buildGuardedMoveCommand({ destination, temporaryDestination })
+      )
       expect(mockSsh.calls).toContain(
         buildLargeDownloadVersionedFlagCommand({ destination, flagName })
       )
