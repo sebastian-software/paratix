@@ -95,9 +95,47 @@ function validateDotEnvironmentKey(filePath: string, lineNumber: number, key: st
   }
 }
 
+/**
+ * R-0000843: bound the size of an inbound dotenv file and the size of each
+ * decoded value. A misconfigured operator (or a malicious overlay) could
+ * otherwise feed a multi-gigabyte file into the loader and exhaust process
+ * memory long before the parser reaches its first real assignment.
+ *
+ * 1 MiB ist großzügig für legitime `.env`-Dateien (Tausende Schlüssel) und
+ * gleichzeitig klein genug, damit der Parser frühzeitig fehlschlägt.
+ */
+export const ENVIRONMENT_FILE_BYTE_LIMIT = 1024 * 1024
+/** Pro-Wert-Cap (64 KiB) für decodierte Werte vor dem Persistieren in der Map. */
+export const ENVIRONMENT_VALUE_BYTE_LIMIT = 64 * 1024
+
+/**
+ * R-0000843: control-Bytes (außer Tab, LF, CR) sind in dotenv-Werten nicht
+ * vorgesehen. Backspaces, ESC, oder Vertical-Tab überleben den Parser sonst
+ * intransparent und können Terminals oder nachgelagerte Shells in
+ * unvorhersehbare Zustände bringen. NUL und CR werden bereits in
+ * `processValue` abgelehnt; dieses Muster fängt zusätzlich BS, VT, FF und
+ * den restlichen C0-Bereich sowie DEL (0x7F) ab. Wird über RegExp()
+ * konstruiert, damit die Quelle lesbar bleibt und keine echten
+ * Steuerbytes im Source stehen.
+ */
+// eslint-disable-next-line security/detect-non-literal-regexp -- pattern source is a constant string under our control
+const FORBIDDEN_CONTROL_CHARACTER_PATTERN = new RegExp(
+  "[\\x00-\\x08\\x0B\\x0C\\x0E-\\x1F\\x7F]",
+  "v"
+)
+
 export async function loadDotEnvironment(filePath: string): Promise<Environment> {
   // eslint-disable-next-line security/detect-non-literal-fs-filename
   const content = await readFile(filePath, "utf8")
+  // R-0000843: enforce the upper bound on the read content before we
+  // tokenise. Byte length is approximated via Buffer.byteLength so the
+  // limit reflects the on-disk size, not the JS string length.
+  const fileByteLength = Buffer.byteLength(content, "utf8")
+  if (fileByteLength > ENVIRONMENT_FILE_BYTE_LIMIT) {
+    throw new Error(
+      `Refusing to load env file ${filePath}: size ${fileByteLength} bytes exceeds the ${ENVIRONMENT_FILE_BYTE_LIMIT}-byte cap`
+    )
+  }
   // R-0000069/R-0000070: use a null-prototype object so a malicious
   // `__proto__` line cannot pollute the loaded map even before the
   // explicit reject below catches it. This complements the explicit
@@ -114,7 +152,24 @@ export async function loadDotEnvironment(filePath: string): Promise<Environment>
 
     const key = trimmed.slice(0, eqIndex).trim()
     validateDotEnvironmentKey(filePath, index + 1, key)
-    environment[key] = processValue(trimmed.slice(eqIndex + 1).trim(), filePath, index + 1)
+    const value = processValue(trimmed.slice(eqIndex + 1).trim(), filePath, index + 1)
+    // R-0000843: reject decoded values that exceed the per-value cap or
+    // carry forbidden control bytes (anything outside Tab/LF/CR in the
+    // ASCII control range, plus DEL). Tab/LF/CR may appear after
+    // double-quoted escape processing and are intentional, but a literal
+    // ESC or vertical-tab byte almost always indicates a copy-paste
+    // artefact or a hostile payload trying to influence downstream consumers.
+    if (Buffer.byteLength(value, "utf8") > ENVIRONMENT_VALUE_BYTE_LIMIT) {
+      throw new Error(
+        `Invalid env value in ${filePath} line ${index + 1}: value exceeds the ${ENVIRONMENT_VALUE_BYTE_LIMIT}-byte cap`
+      )
+    }
+    if (FORBIDDEN_CONTROL_CHARACTER_PATTERN.test(value)) {
+      throw new Error(
+        `Invalid env value in ${filePath} line ${index + 1}: contains a forbidden control byte`
+      )
+    }
+    environment[key] = value
   }
 
   return environment
