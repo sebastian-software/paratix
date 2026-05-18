@@ -255,9 +255,6 @@ async function moveExtractedContentsIntoDestination(
     String.raw`if [ -L "$target_path" ]; then `,
     String.raw`echo "[archive.extract] refusing staging merge: destination path $target_path is a symlink" >&2; `,
     String.raw`exit 64; fi; `,
-    String.raw`if [ -L "$target_path" ]; then `,
-    String.raw`echo "[archive.extract] refusing staging merge: destination path $target_path is a symlink" >&2; `,
-    String.raw`exit 64; fi; `,
     String.raw`cp -aT --no-dereference --remove-destination "$source_path" "$target_path" || exit $?; `,
     String.raw`done`,
   ].join("")
