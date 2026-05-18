@@ -443,6 +443,27 @@ async function rewriteComposeSystemdUnitViaShell(parameters: {
 
   // R-0000565: pass `--` to both `rm -f` invocations inside the shell
   // pipeline so the temporary path cannot be parsed as an `rm` option.
+  //
+  // R-0000707: the `[ -L final ] && exit 73` probe and the subsequent
+  // `mv -f -T temp final` run in the same shell invocation, but they are
+  // still two separate syscalls. A privileged attacker that races a
+  // symlink swap into the directory **between** the lstat issued by the
+  // shell `test -L` and the kernel `rename(2)` syscall in `mv` can
+  // therefore still redirect the write to an attacker-controlled target.
+  //
+  // POSIX `rename(2)` does not refuse to overwrite a symlink (it removes
+  // the link entry and creates a new one in its place), and there is no
+  // portable shell-level primitive equivalent to Linux's
+  // `renameat2(RENAME_NOREPLACE)` or `O_NOFOLLOW` for the *destination*
+  // of a directory rename. Until the runtime grows a syscall-level
+  // wrapper that issues `renameat2(RENAME_NOREPLACE)` directly (or a
+  // lock-directory pattern around `mv`), this race window remains
+  // unavoidable through plain `sh + mv`. The same-shell guard already
+  // closes the *vast* majority of attacks (cross-process scheduling
+  // gaps), but operators with adversarial neighbours on the systemd unit
+  // directory should rely on filesystem-level protections
+  // (`/etc/systemd/system` owned by root, restrictive parent-directory
+  // permissions) rather than this in-shell check alone.
   const result = await parameters.connection.exec(
     `{ printf '%s' ${shellQuote(encodedContent)} | base64 -d > ${shellQuote(temporaryPath)} && chmod ${shellQuote(SYSTEMD_UNIT_MODE)} ${shellQuote(temporaryPath)} && chown ${shellQuote("root:root")} ${shellQuote(temporaryPath)} && if [ -L ${shellQuote(parameters.filePath)} ]; then rm -f -- ${shellQuote(temporaryPath)}; exit 73; fi && mv -f -T ${shellQuote(temporaryPath)} ${shellQuote(parameters.filePath)}; } || { status=$?; rm -f -- ${shellQuote(temporaryPath)}; exit "$status"; }`,
     EXEC_OPTS
