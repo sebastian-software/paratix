@@ -235,10 +235,13 @@ async function downloadVerifyAndImportAptKey(
     ssh,
   })
   if (fingerprintCheck !== "ok") return fingerprintCheck
-  // R-0000134: refuse to dearmor into a symlinked keyring path. `gpg --dearmor
-  // --yes -o` follows symlinks and would truncate or overwrite whatever the
-  // link points at before we can validate the destination. We deliberately do
-  // not unlink the symlink automatically; the operator must decide.
+  // R-0000134: diagnostic symlink probe only. This `test -L` is racy by design
+  // and exists to surface an early, operator-friendly error before we stage a
+  // dearmored key. The actual atomic-replace guarantee against a symlink swap
+  // between snapshot and publish is enforced inside
+  // `publishAptKeyStagingAtomically` via the in-shell guard that emits
+  // `APT_KEY_PUBLISH_SYMLINK_EXIT_CODE`. We deliberately do not unlink the
+  // symlink automatically; the operator must decide.
   const keyringIsSymlink = await ssh.test(`[ -L ${shellQuote(keyringPath)} ]`)
   if (keyringIsSymlink) {
     return failed(`[apt.key] refuses to write through symlink at ${keyringPath}`)
