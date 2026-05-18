@@ -1,5 +1,7 @@
 import { spawnSync } from "node:child_process"
 
+import { escapeCliControlCharacters } from "./cliFormat.js"
+
 const MS_PER_MINUTE = 60_000
 const INSTALL_TIMEOUT_MS = 120_000
 
@@ -91,12 +93,19 @@ function getCommandPrefix(pm: PackageManager): string {
   return pm.name === "npm" ? "npm run" : pm.name
 }
 
+// R-0000736: even though projectName is validated upstream
+// (isValidProjectName), the success messages are emitted into a
+// terminal where any stray ANSI/control codepoint would be interpreted
+// verbatim. Escaping defensively at the print site prevents future
+// callers from relying on the upstream validation alone and ensures the
+// `cd <name>` line a copy-pasting operator sees is always inert.
 export function printSuccessMessage(projectName: string, pm: PackageManager): void {
   const prefix = getCommandPrefix(pm)
+  const escapedProjectName = escapeCliControlCharacters(projectName)
   console.log(`
 Project created successfully!
 
-  cd ${projectName}
+  cd ${escapedProjectName}
 
 Edit server.ts with your server details, then:
 
@@ -109,10 +118,11 @@ Edit server.ts with your server details, then:
 
 export function printPartialSuccessMessage(projectName: string, pm: PackageManager): void {
   const prefix = getCommandPrefix(pm)
+  const escapedProjectName = escapeCliControlCharacters(projectName)
   console.log(`
 Project files created, but dependency installation failed.
 
-  cd ${projectName}
+  cd ${escapedProjectName}
 
 Install dependencies manually, then run:
 
