@@ -1255,7 +1255,19 @@ async function validateProspectiveSshdConfig(
   if (typeof allocation !== "string") return allocation
   const temporaryConfigPath = allocation
   try {
-    await ssh.writeFile(temporaryConfigPath, content, { mode: SSHD_DRY_RUN_TEMP_MODE })
+    // R-0000814: wrap `ssh.writeFile` so an SFTP / channel failure surfaces
+    // as a structured `failed` ModuleResult instead of bubbling out of the
+    // try block as an unstructured CommandError. The `finally` below still
+    // runs and removes the tempfile (or rather tries to — the file may not
+    // exist yet if the write threw early, hence `rm -f`).
+    try {
+      await ssh.writeFile(temporaryConfigPath, content, { mode: SSHD_DRY_RUN_TEMP_MODE })
+    } catch (error) {
+      const reason = error instanceof Error ? error.message : String(error)
+      return failed(
+        `[sshd dry-run] failed to write prospective sshd_config to ${temporaryConfigPath}: ${reason}`
+      )
+    }
     // R-0000768: structured failure when /run/sshd cannot be created so the
     // dry-run path surfaces a useful `failed` ModuleResult instead of an
     // unstructured CommandError thrown out of `ssh.exec`.
