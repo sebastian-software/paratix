@@ -17,8 +17,18 @@ type SwapFileCreationParameters = {
   ssh: SshConnection
 }
 
+// R-0000771: route `find` through `-P` so the swap parent directory cannot be
+// silently traversed via a symlink. Without `-P`, `find` falls back to its
+// default behaviour of dereferencing the starting point when the path is a
+// command-line argument, meaning a symlink planted between the apply phase
+// and this probe could redirect the safety check to a different directory
+// owned by root with safe permissions. The leading `[ ! -L ]` test refuses
+// the probe up front when the path itself is a symlink, keeping the parity
+// with `moveSwapToBackup` (R-0000624) and `classifySwapFilePath`
+// (R-0000648).
 export function safeParentCommand(parentDirectory: string): string {
-  return `find ${shellQuote(parentDirectory)} -maxdepth 0 -type d -user root ! -perm /022 | grep -Fx ${shellQuote(parentDirectory)}`
+  const quoted = shellQuote(parentDirectory)
+  return `[ ! -L ${quoted} ] && find -P ${quoted} -maxdepth 0 -type d -user root ! -perm /022 | grep -Fx ${quoted}`
 }
 
 function buildEmptyMktempResult(stdout: string): ExecResult {

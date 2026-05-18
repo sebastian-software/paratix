@@ -31,10 +31,14 @@ const fstabLine = `${swapPath} none swap sw 0 0`
 const swapTempPath = "/.swapfile.paratix.ABC123"
 const swapTempIdentity = "2050:12345"
 const swapBackupPath = `${swapPath}.paratix-backup`
-const safeSwapParentCommand = "find '/' -maxdepth 0 -type d -user root ! -perm /022 | grep -Fx '/'"
+// R-0000771: safeParentCommand now prefixes a `[ ! -L ]` guard and runs
+// `find` with `-P` so a symlinked parent directory cannot mask the safety
+// check by resolving to a different root-owned directory at probe time.
+const safeSwapParentCommand =
+  "[ ! -L '/' ] && find -P '/' -maxdepth 0 -type d -user root ! -perm /022 | grep -Fx '/'"
 const createSwapTempCommand = `fallocate -l '${swapSize}' '${swapTempPath}' || { dd if=/dev/zero of='${swapTempPath}' bs=1M count=2048 status=none && truncate -s 2147483648 '${swapTempPath}'; }`
 const mktempSwapCommand = "mktemp -p '/' '.swapfile.paratix.XXXXXX'"
-const publishSwapCommand = `find '/' -maxdepth 0 -type d -user root ! -perm /022 | grep -Fx '/' && mv -T -n '${swapTempPath}' '${swapPath}'`
+const publishSwapCommand = `[ ! -L '/' ] && find -P '/' -maxdepth 0 -type d -user root ! -perm /022 | grep -Fx '/' && mv -T -n '${swapTempPath}' '${swapPath}'`
 const statSwapTempIdentityCommand = `stat -c '%d:%i' '${swapTempPath}'`
 // R-0000680: publishSwapTemporaryFile now prepends a `[ ! -L ]` guard on the
 // final swap path before running the `find -type f`/`swaplabel` verification,
@@ -1476,11 +1480,14 @@ describe("swap.file — option validation", () => {
 
   it("R-0000180: publish uses mv -T -n to avoid TOCTOU on the destination", () => {
     // The constructed command must contain `mv -T -n` and must NOT precede
-    // it with the legacy `[ ! -e ] && [ ! -L ]` test pair, which left a
-    // TOCTOU window between test and rename.
+    // it with the legacy `[ ! -e ] && [ ! -L ${swapPath} ]` test pair on
+    // the destination, which left a TOCTOU window between test and rename.
+    // R-0000771: a `[ ! -L ${parent} ]` guard on the parent directory plus
+    // `find -P` is allowed (and required), so check for the destination
+    // guard specifically by including the path itself.
     expect(publishSwapCommand).toContain("mv -T -n")
     expect(publishSwapCommand).not.toContain("[ ! -e")
-    expect(publishSwapCommand).not.toContain("[ ! -L")
+    expect(publishSwapCommand).not.toContain(`[ ! -L '${swapPath}'`)
   })
 
   // R-0000246 regression: the swap-backup creation in swapHelpers must use
