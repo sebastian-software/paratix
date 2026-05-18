@@ -183,6 +183,44 @@ describe("withRegisteredSecrets", () => {
     expect(getRegisteredSecrets()).toStrictEqual([])
   })
 
+  // R-0000744: cause-field credential synonyms must mask their value the same
+  // way `authorization` / `privateKey` already do. One spec per synonym keeps
+  // regressions easy to localize when the field set is touched again.
+  it.each([
+    ["passwd", "rootpw-1234"],
+    ["pwd", "rootpw-5678"],
+    ["pass", "passcode-9999"],
+    ["passphrase", "long-secret-phrase"],
+    ["apiKey", "api-key-abc-987"],
+    ["bearer", "bearer-xyz-321"],
+    ["credential", "credential-token-12"],
+    ["credentials", "credentials-bag-12"],
+    ["cred", "cred-fragment-77"],
+    ["auth", "auth-blob-7788"],
+  ])(
+    "redacts the `%s` cause field as a known credential synonym",
+    async (fieldName, leakedValue) => {
+      let thrown: unknown
+      try {
+        await withRegisteredSecrets(["registered-secret"], async () => {
+          await Promise.resolve()
+          throw Object.assign(new Error("boom"), {
+            cause: {
+              [fieldName]: leakedValue,
+            },
+          })
+        })
+      } catch (error) {
+        thrown = error
+      }
+
+      expect(thrown).toBeInstanceOf(Error)
+      expect((thrown as Error).cause).toBe(`{"${fieldName}":"${REDACTED}"}`)
+      expect((thrown as Error).cause).not.toContain(leakedValue)
+      expect(getRegisteredSecrets()).toStrictEqual([])
+    }
+  )
+
   it("masks scoped secrets on failed module results before unregistering", async () => {
     const result = await withRegisteredSecrets(["alphabet"], async () => {
       await Promise.resolve()

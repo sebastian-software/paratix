@@ -28,11 +28,27 @@ import { CommandError, maskSecrets } from "./sshHelpers.js"
 const secretCounts = new Map<string, number>()
 const REDACTED_PLACEHOLDER = "[REDACTED]"
 const CIRCULAR_PLACEHOLDER = "[Circular]"
+// R-0000744: cover the common synonyms that operators and third-party
+// libraries use for credential-bearing fields. The set is intentionally
+// over-inclusive: false positives only over-mask diagnostic output, while a
+// miss leaks a real credential into stderr. The suffix-based checks in
+// `isSecretCauseField` keep handling compound names like `userPassword` or
+// `apiToken` without bloating this enumeration.
 const SECRET_CAUSE_FIELD_NAMES = new Set([
+  "apikey",
+  "auth",
   "authorization",
+  "bearer",
+  "cred",
+  "credential",
+  "credentials",
   "key",
+  "pass",
+  "passphrase",
   "password",
+  "passwd",
   "privatekey",
+  "pwd",
   "secret",
   "token",
 ])
