@@ -543,7 +543,20 @@ export async function withCliProcessEnvironment<T>(
  * (e.g. after the operator installs tsx).
  */
 let tsxRegistrationPromise: null | Promise<void> = null
-let playbookImportQueue: Promise<void> = Promise.resolve()
+/**
+ * R-0000846: per-fileUrl serialization queues. The previous design used a
+ * single process-global queue, which meant two independent playbooks A and
+ * B serialized against each other unnecessarily — even though A and B
+ * cannot interfere with each other's module-record. By keying the queue on
+ * the resolved `fileUrl`, parallel imports of distinct playbooks proceed
+ * concurrently while repeated imports of the same `fileUrl` (e.g. tests
+ * loading the same playbook back-to-back) still observe the prior import's
+ * completion.
+ *
+ * Entries are removed when their settling task is the queue head, so the
+ * map does not grow without bound in long-running processes.
+ */
+const playbookImportLocks = new Map<string, Promise<void>>()
 const playbookImportContext = new AsyncLocalStorage<boolean>()
 
 /**
@@ -569,16 +582,25 @@ const playbookImportContext = new AsyncLocalStorage<boolean>()
  *   serialized against every other playbook import in the process.
  * @returns Whatever `body` resolves to.
  */
-export async function withSerializedPlaybookImport<T>(body: () => Promise<T>): Promise<T> {
+export async function withSerializedPlaybookImport<T>(
+  body: () => Promise<T>,
+  fileUrl?: string
+): Promise<T> {
   if (playbookImportContext.getStore() === true) {
     return body()
   }
 
-  const previousImport = playbookImportQueue
+  // R-0000846: callers without a known fileUrl fall back to a sentinel key
+  // so the legacy single-queue behaviour stays available for tests and any
+  // ad-hoc invocation that cannot supply a stable identifier. Production
+  // callers should always pass a resolved `pathToFileURL(...).href`.
+  const lockKey = fileUrl ?? "__paratix_default_playbook_lock__"
+  const previousImport = playbookImportLocks.get(lockKey) ?? Promise.resolve()
   let releaseCurrentImport!: () => void
-  playbookImportQueue = new Promise<void>((resolveQueue) => {
+  const currentImport = new Promise<void>((resolveQueue) => {
     releaseCurrentImport = resolveQueue
   })
+  playbookImportLocks.set(lockKey, currentImport)
 
   // R-0000746: swallow rejections from the previous queue head. A
   // playbook import that fails (tsx registration error, dynamic import
@@ -600,6 +622,13 @@ export async function withSerializedPlaybookImport<T>(body: () => Promise<T>): P
     return await playbookImportContext.run(true, body)
   } finally {
     releaseCurrentImport()
+    // R-0000846: prune the map entry when we are still the head of the
+    // queue. If another caller has already enqueued behind us (the map
+    // value differs from `currentImport`), they own the cleanup once they
+    // settle. This keeps the map bounded in long-running processes.
+    if (playbookImportLocks.get(lockKey) === currentImport) {
+      playbookImportLocks.delete(lockKey)
+    }
   }
 }
 
@@ -708,25 +737,27 @@ export async function loadServerDefinitionFromFile(
   const fileUrl = pathToFileURL(filePath).href
   const isTypeScriptEntry = TYPESCRIPT_ENTRY_EXTENSIONS.has(extname(filePath).toLowerCase())
 
-  return withSerializedPlaybookImport(async () =>
-    withCliProcessEnvironment(options, async () => {
-      // Register tsx for TypeScript imports.
-      // R-0000071: narrow the catch so only a genuine missing-tsx error is
-      // routed through handleTsxLoadFailure. Any other error from the dynamic
-      // import (incompatible Node, broken install, OOM, transitive dep
-      // missing) is rethrown with the original cause so the CLI exit handler
-      // surfaces the real loader failure instead of falsely reporting that
-      // tsx is not installed.
-      if (isTypeScriptEntry) await registerTsxForTypeScriptEntry(filePath)
+  return withSerializedPlaybookImport(
+    async () =>
+      withCliProcessEnvironment(options, async () => {
+        // Register tsx for TypeScript imports.
+        // R-0000071: narrow the catch so only a genuine missing-tsx error is
+        // routed through handleTsxLoadFailure. Any other error from the dynamic
+        // import (incompatible Node, broken install, OOM, transitive dep
+        // missing) is rethrown with the original cause so the CLI exit handler
+        // surfaces the real loader failure instead of falsely reporting that
+        // tsx is not installed.
+        if (isTypeScriptEntry) await registerTsxForTypeScriptEntry(filePath)
 
-      // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment -- Dynamic import has unknown shape
-      const imported = await import(fileUrl)
-      // eslint-disable-next-line @typescript-eslint/no-unsafe-member-access, @typescript-eslint/no-unsafe-type-assertion -- Accessing .default on dynamic import
-      const definition = (imported.default ?? imported) as ServerDefinition
+        // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment -- Dynamic import has unknown shape
+        const imported = await import(fileUrl)
+        // eslint-disable-next-line @typescript-eslint/no-unsafe-member-access, @typescript-eslint/no-unsafe-type-assertion -- Accessing .default on dynamic import
+        const definition = (imported.default ?? imported) as ServerDefinition
 
-      validateServerDefinition(definition, filePath)
-      return definition
-    })
+        validateServerDefinition(definition, filePath)
+        return definition
+      }),
+    fileUrl
   )
 }
 
