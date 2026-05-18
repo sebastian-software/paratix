@@ -1772,6 +1772,19 @@ export const net = {
           )
         }
 
+        // R-0000807/R-0000677: re-probe the symlink state immediately before
+        // the actual write so a systemd-resolved restart (or any other
+        // helper) that plants a symlink between the first probe and the
+        // `conn.writeFile` call cannot smuggle the configuration through to
+        // an attacker-controlled location. Mirrors the recheck pattern used
+        // by other paratix modules just before crossing the
+        // network-boundary write.
+        if (await isSymlink(conn, resolvPath)) {
+          return failed(
+            `[net.resolv] ${resolvPath} became a symlink between the initial probe and the write; refusing to overwrite without operator opt-in`
+          )
+        }
+
         // writeFile uses atomic mv-replace, so a failed write leaves the
         // previous file intact and the host's resolver configuration usable.
         try {
