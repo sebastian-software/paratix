@@ -519,6 +519,23 @@ export const cron = {
    *   in front of an existing crontab line that exactly matches `job` when
    *   no marker is present. Defaults to `false`. Set to `true` only when
    *   knowingly recovering from a `cron.absent` on a legacy marker.
+   *
+   * R-0000804: concurrency semantics.
+   *
+   * Each `cron.job` / `cron.absent` apply is serialised by the per-user
+   * mutex `crontab-<user>` (see `crontabMutexLockName`). All cron modules
+   * targeting the same user therefore share the same flag-lock directory:
+   * only one apply can hold the mutex at a time and writers never
+   * interleave their `crontab -u <user> -` calls.
+   *
+   * `check` does NOT take the mutex — it issues a plain `crontab -u <user>
+   * -l` and inspects the output, which is safe because cron's own crontab
+   * file is read atomically. As a result, `check` may briefly observe a
+   * snapshot that does not yet reflect a concurrent apply on the same
+   * user. The verdict in that case is `NEEDS_APPLY`, and the subsequent
+   * apply re-runs under the mutex against the current crontab state, so a
+   * stale `check` cannot cause a divergent write.
+   *
    * @returns A Module that manages the cron job entry.
    */
   job(user: string, name: string, options: CronJobOptions): Module {
