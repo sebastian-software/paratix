@@ -302,11 +302,17 @@ function errorToString(value: unknown): string {
  * @param error - The root `Error` whose `.cause` chain should be printed.
  */
 function printCauseChain(error: Error): void {
-  const visitedCauses = new WeakSet<Error>()
+  // R-0000795: track every object-typed cause — both `Error` instances and
+  // plain objects — in the same WeakSet so a chain that mixes them cannot
+  // cycle past the cycle-detection guard. A plain `{ cause }` wrapper that
+  // points back to an Error already visited (or to another plain object that
+  // ultimately points back) would previously have been re-printed each pass
+  // because only Error references were tracked.
+  const visitedCauses = new WeakSet<object>()
   visitedCauses.add(error)
-  let cause = error.cause
+  let cause: unknown = error.cause
   while (cause != null) {
-    if (cause instanceof Error) {
+    if (typeof cause === "object") {
       if (visitedCauses.has(cause)) {
         console.error("  Caused by: <cycle detected>")
         return
@@ -314,7 +320,18 @@ function printCauseChain(error: Error): void {
       visitedCauses.add(cause)
     }
     console.error(`  Caused by: ${errorToString(cause)}`)
-    cause = cause instanceof Error ? cause.cause : undefined
+    if (cause instanceof Error) {
+      cause = cause.cause
+      continue
+    }
+    // R-0000795: follow `.cause` on non-Error objects as well so a plain
+    // wrapper like `{ message, cause: realError }` does not silently truncate
+    // the chain. The cycle-detection above keeps the walk bounded.
+    if (typeof cause === "object" && "cause" in cause) {
+      cause = (cause as { cause?: unknown }).cause
+      continue
+    }
+    break
   }
 }
 

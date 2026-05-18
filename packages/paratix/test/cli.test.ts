@@ -1457,6 +1457,27 @@ describe("printExceptionError", () => {
     expect(output).toContain("Circular")
   })
 
+  // R-0000795: when the `cause` chain alternates between an Error and a
+  // plain wrapper object that points back to the Error, only tracking
+  // Error references in the visited-set would leave the plain wrapper
+  // re-visiting the Error forever (or, in the previous shape that aborted
+  // on non-Error causes, leak the cycle by simply truncating the walk).
+  // The fix adds every object-typed cause to the WeakSet so the cycle
+  // detection fires regardless of which side of the chain is plain.
+  it("detects cycles even when a plain-object wrapper points back into an Error cause (R-0000795)", () => {
+    const root: Error & { cause?: unknown } = new Error("root cause")
+    const wrapper: { cause?: unknown; kind: string } = { cause: root, kind: "wrapper" }
+    root.cause = wrapper
+    const top = new Error("top-level error", { cause: wrapper })
+
+    expect(() => {
+      printExceptionError(top, false)
+    }).not.toThrow()
+
+    const output = errorSpy.mock.calls.map((args) => String(args[0])).join("\n")
+    expect(output).toContain("cycle detected")
+  })
+
   it("does not print a stack trace without --verbose", () => {
     const error = new Error("something went wrong")
     printExceptionError(error, false)
