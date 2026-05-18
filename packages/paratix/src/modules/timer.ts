@@ -526,13 +526,33 @@ type TimerActivationSnapshot = {
   enabled: boolean
 }
 
+// R-0000858: the activation snapshot drives the post-apply rollback in
+// `restoreTimerActivationForAbsent`. The previous implementation used
+// `ssh.test`, which coerces any non-zero exit (including toolchain
+// failures such as a missing or broken `systemctl` binary returning
+// exit code 127) to `false`. A toolchain failure would therefore
+// produce a snapshot that reports the timer as disabled+inactive,
+// leading the apply path to skip the rollback and silently leave a
+// previously-enabled timer disabled on failure. Mirror the structured
+// probe helpers (`probeUnitEnabled`, `probeUnitActive`) so toolchain
+// failures surface as a ModuleResult and abort apply instead of
+// corrupting the rollback decision.
 async function readTimerActivationSnapshot(
   ssh: SshConnection,
-  timerUnit: string
-): Promise<TimerActivationSnapshot> {
-  const enabled = await ssh.test(`${SYSTEMCTL} is-enabled --quiet -- ${shellQuote(timerUnit)}`)
-  const active = await ssh.test(`${SYSTEMCTL} is-active --quiet -- ${shellQuote(timerUnit)}`)
+  timerUnit: string,
+  context: { name: string; path: string }
+): Promise<ModuleResult | TimerActivationSnapshot> {
+  const enabled = await probeUnitEnabled(ssh, timerUnit, context)
+  if (typeof enabled !== "boolean") return enabled
+  const active = await probeUnitActive(ssh, timerUnit, context)
+  if (typeof active !== "boolean") return active
   return { active, enabled }
+}
+
+function isTimerActivationSnapshot(
+  value: ModuleResult | TimerActivationSnapshot
+): value is TimerActivationSnapshot {
+  return typeof (value as TimerActivationSnapshot).enabled === "boolean"
 }
 
 async function runTimerActivationRollback(
@@ -861,13 +881,22 @@ async function handleAbsentDisableFailure(
 }
 
 async function applyAbsent(ssh: SshConnection, context: AbsentContext): Promise<ModuleResult> {
-  const { locations } = context
+  const { locations, module, name } = context
 
   // Idempotent no-op: if neither unit file exists, there is nothing to clean
   // up unless systemd still has residual active/enabled state for the timer.
   const serviceExists = await ssh.exists(locations.servicePath)
   const timerExists = await ssh.exists(locations.timerPath)
-  const activationSnapshot = await readTimerActivationSnapshot(ssh, locations.timerUnit)
+  // R-0000858: surface toolchain failures from the activation probes as
+  // a structured ModuleResult instead of silently coercing them to
+  // disabled+inactive. The snapshot helper now mirrors the
+  // probeUnitEnabled/probeUnitActive contract.
+  const activationProbe = await readTimerActivationSnapshot(ssh, locations.timerUnit, {
+    name,
+    path: module,
+  })
+  if (!isTimerActivationSnapshot(activationProbe)) return activationProbe
+  const activationSnapshot = activationProbe
   const residualState = activationSnapshot.enabled || activationSnapshot.active
   if (!serviceExists && !timerExists && !residualState) return { status: "ok" }
 
