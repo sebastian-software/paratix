@@ -405,125 +405,88 @@ export function applyCliEnvironmentOverrides(
 }
 
 /**
- * Snapshot of the original `process.env[FIRST_RUN_ENV_NAME]` value before the
- * outermost {@link withCliProcessEnvironment} mutation. The CLI is normally
- * single-shot, but tests and embedded runners can call it reentrantly. Without
- * this stack the second call would capture the synthetic "true" the first call
- * just installed, and "restore" it back instead of removing the key. The
- * snapshot is only cleared once the outermost frame restores, so nested calls
- * always see the genuine pre-CLI value as the eventual restore target.
- */
-type FirstRunEnvironmentSnapshot = {
-  hadPreviousValue: boolean
-  previousValue: string | undefined
-}
-
-let firstRunEnvironmentSnapshot: FirstRunEnvironmentSnapshot | null = null
-let firstRunEnvironmentDepth = 0
-
-function captureFirstRunEnvironmentSnapshot(): FirstRunEnvironmentSnapshot {
-  if (firstRunEnvironmentSnapshot != null) {
-    return firstRunEnvironmentSnapshot
-  }
-  const snapshot: FirstRunEnvironmentSnapshot = {
-    hadPreviousValue: Object.hasOwn(process.env, FIRST_RUN_ENV_NAME),
-    previousValue: process.env[FIRST_RUN_ENV_NAME],
-  }
-  firstRunEnvironmentSnapshot = snapshot
-  return snapshot
-}
-
-/**
- * Acquire the process-environment frame for the duration of one
- * {@link withCliProcessEnvironment} call and return the matching restore
- * action. Internal helper: the public entrypoint is
- * {@link withCliProcessEnvironment}, which guarantees the restore runs in a
- * try/finally regardless of how `body` resolves.
+ * R-0000695: the first-run flag now propagates through an
+ * {@link AsyncLocalStorage} context instead of mutating `process.env`. The
+ * previous design wrote `PARATIX_FIRST_RUN=true` to the global environment
+ * for the duration of `body` so that a playbook's top-level statements
+ * could read it via `process.env`. Two real-world hazards came with that
+ * approach:
  *
- * @param options - CLI flags that determine which mutations to apply.
- * @param options.firstRun - When `true`, sets `PARATIX_FIRST_RUN=true` in
- *   `process.env` until the returned restore callback runs.
- * @returns A callback that reverts the mutation. Calling it more than once
- *   is safe; only the first call has an effect.
+ * - Every other code path running in the same Node process — vitest
+ *   worker-pool fixtures, embedded runners, unrelated tooling — observed
+ *   the synthetic value too. Tests had to manually clean up
+ *   `process.env.PARATIX_FIRST_RUN` to avoid cross-test contamination.
+ * - The mutation/restore dance trusted every caller to wire up
+ *   try/finally semantics correctly. A missed restore in any code path
+ *   left the flag stuck on the process for the rest of its lifetime.
+ *
+ * The AsyncLocalStorage-based variant solves both problems: the value is
+ * scoped to the async chain that owns `body` and is automatically released
+ * when that chain finishes, regardless of how `body` resolves. Playbooks
+ * now read the flag via the {@link isFirstRun} helper (exported as public
+ * API) which queries the same async-local store.
  */
-function enterCliProcessEnvironmentFrame(options: { firstRun: boolean }): () => void {
-  const snapshot = captureFirstRunEnvironmentSnapshot()
-  firstRunEnvironmentDepth += 1
-  let restored = false
-  const restoreProcessEnvironment = (): void => {
-    if (restored) return
-    restored = true
-    firstRunEnvironmentDepth -= 1
-    if (firstRunEnvironmentDepth > 0) {
-      // Inner frame finished but an outer frame still relies on the synthetic
-      // "true" value — leave process.env alone until the outer frame restores.
-      return
-    }
-    firstRunEnvironmentSnapshot = null
-    // Use FIRST_RUN_ENV_NAME consistently and avoid assigning `undefined`
-    // (which would coerce to the literal string "undefined" on process.env).
-    if (!snapshot.hadPreviousValue || snapshot.previousValue == null) {
-      Reflect.deleteProperty(process.env, FIRST_RUN_ENV_NAME)
-      return
-    }
-    process.env[FIRST_RUN_ENV_NAME] = snapshot.previousValue
-  }
-  if (options.firstRun) {
-    process.env[FIRST_RUN_ENV_NAME] = "true"
-  }
-  return restoreProcessEnvironment
+const firstRunContext = new AsyncLocalStorage<boolean>()
+
+/**
+ * R-0000695: public API helper that returns the current first-run flag.
+ * Returns `true` only when called from inside a
+ * {@link withCliProcessEnvironment} body whose `firstRun` option was
+ * `true`. Outside of a CLI invocation, or when the flag was not set, the
+ * helper returns `false`. The helper is async-context aware: a playbook
+ * that schedules its own microtasks/timers within the CLI body keeps
+ * observing the same flag, while concurrent work outside that body sees
+ * `false`.
+ *
+ * @returns `true` when the current async context is a first-run CLI body.
+ */
+export function isFirstRun(): boolean {
+  return firstRunContext.getStore() === true
 }
 
 /**
- * Runs `body` while the global `process.env` carries the CLI-derived
- * overrides (currently `PARATIX_FIRST_RUN`) and guarantees the original
- * environment is restored before returning, regardless of whether `body`
- * resolves or rejects.
+ * Runs `body` while the CLI-derived first-run flag is observable through
+ * {@link isFirstRun} and guarantees the flag is cleared before returning,
+ * regardless of whether `body` resolves or rejects.
  *
  * R-0000265: this helper replaces the previous `applyCliProcessEnvironment`
  * which returned a manual restore callback. That API trusted every caller
  * to wire up its own try/finally; a missed restore in any code path left
- * `PARATIX_FIRST_RUN=true` stuck on the process for the rest of its
- * lifetime. Wrapping the body internally removes the discipline burden.
+ * the flag stuck on the process for the rest of its lifetime. Wrapping the
+ * body internally removes the discipline burden.
  *
- * Scope and visibility (R-0000208):
+ * R-0000695: the flag no longer touches `process.env`. The runner already
+ * consumes the value through the typed Environment returned by
+ * {@link applyCliEnvironmentOverrides}, so business logic stays free of
+ * implicit globals. Playbooks that previously read
+ * `process.env.PARATIX_FIRST_RUN` at module scope should call
+ * {@link isFirstRun} inside their async surface area
+ * (`init`/`apply`/`check`) instead — the flag is async-local, not global.
  *
- * - The flag is set on the process-wide `process.env` because Node's
- *   ECMAScript module loader has no per-import override; there is no other
- *   way for a freshly imported playbook to read the value at module scope.
- * - While `body` is running, every other code path in the same Node
- *   process — including unrelated worker tasks or vitest worker-pool
- *   fixtures — can observe `PARATIX_FIRST_RUN === "true"`. Production
- *   playbook loading serializes imports around this helper so another
- *   concurrent playbook import does not see the synthetic first-run flag.
- * - Reentrant CLI calls are supported: the snapshot taken on the outermost
- *   invocation always wins, so nested calls cannot overwrite the genuine
- *   pre-CLI value with the synthetic `"true"` an outer call installed.
- *
- * The runner does not read this flag from `process.env` — it consumes the
- * value through the typed Environment returned by
- * {@link applyCliEnvironmentOverrides} — so business logic remains free of
- * implicit globals; the global mutation exists only for the playbook's
- * top-level statements.
+ * Reentrant CLI calls are supported: a nested invocation that sets
+ * `firstRun: true` extends the inner async context but does not leak the
+ * value into the surrounding caller. After every nested call returns, the
+ * outer context's flag remains visible until its own `body` completes.
  *
  * @param options - CLI flags that determine which mutations to apply.
- * @param options.firstRun - When `true`, sets `PARATIX_FIRST_RUN=true` in
- *   `process.env` for the duration of `body`.
- * @param body - Async work to run while the override is installed. Its
- *   resolved value is forwarded; rejections propagate after the restore
- *   runs in `finally`.
+ * @param options.firstRun - When `true`, marks the current async context
+ *   as a first-run invocation for the duration of `body`.
+ * @param body - Async work to run while the flag is installed. Its
+ *   resolved value is forwarded; rejections propagate normally.
  * @returns The value resolved by `body`.
  */
 export async function withCliProcessEnvironment<T>(
   options: { firstRun: boolean },
   body: () => Promise<T>
 ): Promise<T> {
-  const restoreProcessEnvironment = enterCliProcessEnvironmentFrame(options)
-  try {
-    return await body()
-  } finally {
-    restoreProcessEnvironment()
+  if (!options.firstRun) {
+    // R-0000695: when the caller explicitly disables firstRun, do not
+    // touch the surrounding async context. A nested call to a different
+    // helper that read `isFirstRun()` would otherwise observe `false`
+    // even though its enclosing CLI body legitimately set the flag.
+    return body()
   }
+  return firstRunContext.run(true, body)
 }
 
 /**

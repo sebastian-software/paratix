@@ -20,6 +20,7 @@ import {
   exitAfterApplyError,
   handleTsxLoadFailure,
   isDirectCliExecution,
+  isFirstRun,
   isServerDefinitionLike,
   loadServerDefinitionFromFile,
   parsePositiveNumber,
@@ -325,130 +326,122 @@ describe("applyCliEnvironmentOverrides", () => {
 })
 
 describe("withCliProcessEnvironment", () => {
-  afterEach(() => {
-    delete process.env.PARATIX_FIRST_RUN
-  })
+  // R-0000695: PARATIX_FIRST_RUN is no longer written to `process.env`.
+  // The flag flows through an AsyncLocalStorage context that the public
+  // `isFirstRun()` helper queries. The cases below assert on that
+  // observable behavior instead of inspecting global env state.
 
-  it("leaves process.env unchanged without --first-run", async () => {
+  it("leaves the global process.env untouched without --first-run", async () => {
     let observed: string | undefined
+    let firstRunObserved = false
     await withCliProcessEnvironment({ firstRun: false }, async () => {
       await Promise.resolve()
       observed = process.env.PARATIX_FIRST_RUN
+      firstRunObserved = isFirstRun()
     })
 
     expect(observed).toBeUndefined()
+    expect(firstRunObserved).toBe(false)
     expect(process.env.PARATIX_FIRST_RUN).toBeUndefined()
+    expect(isFirstRun()).toBe(false)
   })
 
-  it("sets process.env.PARATIX_FIRST_RUN before playbook loading when --first-run is enabled", async () => {
-    let observed: string | undefined
+  it("exposes the first-run flag through isFirstRun() inside the body", async () => {
+    let firstRunObserved = false
+    let envInsideBody: string | undefined
     await withCliProcessEnvironment({ firstRun: true }, async () => {
       await Promise.resolve()
-      observed = process.env.PARATIX_FIRST_RUN
+      firstRunObserved = isFirstRun()
+      envInsideBody = process.env.PARATIX_FIRST_RUN
     })
 
-    expect(observed).toBe("true")
+    expect(firstRunObserved).toBe(true)
+    // The async-local flag does not leak into process.env any more.
+    expect(envInsideBody).toBeUndefined()
+    expect(isFirstRun()).toBe(false)
     expect(process.env.PARATIX_FIRST_RUN).toBeUndefined()
   })
 
-  it("restores an existing PARATIX_FIRST_RUN value", async () => {
+  it("never touches process.env even when an external value is present", async () => {
     process.env.PARATIX_FIRST_RUN = "external"
-
-    let observed: string | undefined
-    await withCliProcessEnvironment({ firstRun: true }, async () => {
-      await Promise.resolve()
-      observed = process.env.PARATIX_FIRST_RUN
-    })
-
-    expect(observed).toBe("true")
-    expect(process.env.PARATIX_FIRST_RUN).toBe("external")
-  })
-
-  it("deletes PARATIX_FIRST_RUN on restore when no previous value was set (firstRun=true)", async () => {
-    expect(process.env.PARATIX_FIRST_RUN).toBeUndefined()
-
-    let observed: string | undefined
-    await withCliProcessEnvironment({ firstRun: true }, async () => {
-      await Promise.resolve()
-      observed = process.env.PARATIX_FIRST_RUN
-    })
-
-    expect(observed).toBe("true")
-    // The key must be removed entirely, not assigned the literal string "undefined".
-    expect(Object.hasOwn(process.env, "PARATIX_FIRST_RUN")).toBe(false)
-    expect(process.env.PARATIX_FIRST_RUN).toBeUndefined()
-  })
-
-  it("restores process.env to the pre-CLI value across nested reentrant calls", async () => {
-    expect(process.env.PARATIX_FIRST_RUN).toBeUndefined()
-
-    let outerObserved: string | undefined
-    let innerObserved: string | undefined
-    let afterInnerObserved: string | undefined
-
-    await withCliProcessEnvironment({ firstRun: true }, async () => {
-      outerObserved = process.env.PARATIX_FIRST_RUN
-
-      // A reentrant call must not capture the synthetic "true" set by the
-      // outer call as its restore target.
+    try {
+      let envInsideBody: string | undefined
+      let firstRunObserved = false
       await withCliProcessEnvironment({ firstRun: true }, async () => {
         await Promise.resolve()
-        innerObserved = process.env.PARATIX_FIRST_RUN
+        envInsideBody = process.env.PARATIX_FIRST_RUN
+        firstRunObserved = isFirstRun()
       })
 
-      // The outer frame still depends on the synthetic value, so the key must
-      // remain "true" until the outer frame restores.
-      afterInnerObserved = process.env.PARATIX_FIRST_RUN
-    })
-
-    expect(outerObserved).toBe("true")
-    expect(innerObserved).toBe("true")
-    expect(afterInnerObserved).toBe("true")
-    // After the outermost frame restores, the original (absent) state is
-    // recovered — not the synthetic "true" the inner call observed.
-    expect(Object.hasOwn(process.env, "PARATIX_FIRST_RUN")).toBe(false)
-    expect(process.env.PARATIX_FIRST_RUN).toBeUndefined()
+      // The external value stays exactly as the caller set it.
+      expect(envInsideBody).toBe("external")
+      expect(firstRunObserved).toBe(true)
+      expect(process.env.PARATIX_FIRST_RUN).toBe("external")
+    } finally {
+      delete process.env.PARATIX_FIRST_RUN
+    }
   })
 
-  it("preserves an externally set value when reentrant calls layer firstRun", async () => {
-    process.env.PARATIX_FIRST_RUN = "external"
+  it("propagates isFirstRun() to nested async work inside the body", async () => {
+    let nestedObserved = false
+    await withCliProcessEnvironment({ firstRun: true }, async () => {
+      // A nested Promise chain inherits the AsyncLocalStorage frame so
+      // helpers invoked from deeper async boundaries keep observing the
+      // same flag.
+      await Promise.resolve().then(async () => {
+        await Promise.resolve()
+        nestedObserved = isFirstRun()
+      })
+    })
+
+    expect(nestedObserved).toBe(true)
+    expect(isFirstRun()).toBe(false)
+  })
+
+  it("supports reentrant calls without leaking the flag to outer callers", async () => {
+    let outerBefore = false
+    let inner = false
+    let outerAfter = false
 
     await withCliProcessEnvironment({ firstRun: true }, async () => {
-      expect(process.env.PARATIX_FIRST_RUN).toBe("true")
+      outerBefore = isFirstRun()
 
       await withCliProcessEnvironment({ firstRun: true }, async () => {
         await Promise.resolve()
-        expect(process.env.PARATIX_FIRST_RUN).toBe("true")
+        inner = isFirstRun()
       })
 
-      expect(process.env.PARATIX_FIRST_RUN).toBe("true")
+      outerAfter = isFirstRun()
     })
 
-    expect(process.env.PARATIX_FIRST_RUN).toBe("external")
+    expect(outerBefore).toBe(true)
+    expect(inner).toBe(true)
+    // After the nested call returns the outer body still sees the flag —
+    // the inner frame did not pop the outer context.
+    expect(outerAfter).toBe(true)
+    expect(isFirstRun()).toBe(false)
   })
 
-  it("restores process.env even when the body throws", async () => {
-    expect(process.env.PARATIX_FIRST_RUN).toBeUndefined()
-
-    // R-0000265: the wrapper must keep the try/finally discipline regardless
-    // of how the body resolves. A throwing body that previously bypassed an
-    // ad-hoc restore call would have left the global env stuck on "true".
+  it("clears the flag for callers even when the body throws", async () => {
+    // R-0000265: the wrapper must keep the cleanup discipline regardless
+    // of how the body resolves. With AsyncLocalStorage the cleanup is
+    // automatic: leaving `firstRunContext.run` ends the context.
     await expect(
       withCliProcessEnvironment({ firstRun: true }, async () => {
         await Promise.resolve()
-        expect(process.env.PARATIX_FIRST_RUN).toBe("true")
+        expect(isFirstRun()).toBe(true)
         throw new Error("body failure")
       })
     ).rejects.toThrow("body failure")
 
-    expect(Object.hasOwn(process.env, "PARATIX_FIRST_RUN")).toBe(false)
+    expect(isFirstRun()).toBe(false)
     expect(process.env.PARATIX_FIRST_RUN).toBeUndefined()
   })
 
-  it("does not assign the literal string 'undefined' when restoring", async () => {
-    // Capture every assignment of process.env's PARATIX_FIRST_RUN. A
-    // regression would write the literal string "undefined" via
-    // `process.env[KEY] = previousValue` when previousValue is undefined.
+  it("never assigns to process.env in either branch", async () => {
+    // R-0000695: the AsyncLocalStorage variant must not mutate
+    // `process.env`. A regression that re-introduced a global mutation
+    // would surface here as a recorded `set` assignment.
     const seenAssignments: Array<[PropertyKey, unknown]> = []
     const proxy = new Proxy(process.env, {
       deleteProperty(target, property): boolean {
@@ -465,20 +458,13 @@ describe("withCliProcessEnvironment", () => {
     try {
       await withCliProcessEnvironment({ firstRun: true }, async () => {
         await Promise.resolve()
-        expect(process.env.PARATIX_FIRST_RUN).toBe("true")
+        expect(isFirstRun()).toBe(true)
       })
 
-      const firstRunAssignments = seenAssignments
-        .filter(([key]) => key === "PARATIX_FIRST_RUN")
-        .map(([, value]) => value)
-
-      // The literal string "undefined" must never have been assigned.
-      expect(firstRunAssignments).not.toContain("undefined")
-      // After restore the key is gone.
-      expect(process.env.PARATIX_FIRST_RUN).toBeUndefined()
+      const firstRunAssignments = seenAssignments.filter(([key]) => key === "PARATIX_FIRST_RUN")
+      expect(firstRunAssignments).toHaveLength(0)
     } finally {
       Reflect.set(process, "env", previousEnvironment)
-      delete process.env.PARATIX_FIRST_RUN
     }
   })
 })
@@ -1729,19 +1715,27 @@ describe("CLI entrypoint", () => {
     }
   })
 
-  it("sets PARATIX_FIRST_RUN before importing the playbook when --first-run is passed", async () => {
+  it("exposes the first-run flag through isFirstRun() during playbook import when --first-run is passed", async () => {
+    // R-0000695: PARATIX_FIRST_RUN is no longer written to `process.env`.
+    // Playbooks observe the flag through `isFirstRun()` instead, which
+    // queries the AsyncLocalStorage frame the CLI body sets.
     const tempDirectory = mkdtempSync(join(tmpdir(), "paratix-cli-first-run-"))
     const playbookPath = join(tempDirectory, "capture-first-run.mjs")
+    const cliSourceUrl = pathToFileURL(
+      resolve(new URL("../src/cli.ts", import.meta.url).pathname)
+    ).href
 
     try {
       writeFileSync(
         playbookPath,
         [
+          `import { isFirstRun } from ${JSON.stringify(cliSourceUrl)}`,
+          "const flag = isFirstRun() ? 'true' : 'missing'",
           "export default {",
           "  name: 'test-server',",
           "  host: '1.2.3.4',",
           "  ssh: { user: 'root', ports: [22] },",
-          "  run: [process.env['PARATIX_FIRST_RUN'] ?? 'missing'],",
+          "  run: [flag],",
           "}",
         ].join("\n")
       )
@@ -1752,25 +1746,33 @@ describe("CLI entrypoint", () => {
       expect(process.env.PARATIX_FIRST_RUN).toBeUndefined()
     } finally {
       rmSync(tempDirectory, { force: true, recursive: true })
-      delete process.env.PARATIX_FIRST_RUN
     }
   })
 
-  it("serializes concurrent playbook imports so first-run env does not cross-contaminate", async () => {
+  it("serializes concurrent playbook imports so the first-run flag does not cross-contaminate", async () => {
+    // R-0000695: the AsyncLocalStorage-backed `isFirstRun()` keeps the
+    // flag scoped to each playbook's async context. The serialized
+    // playbook-import queue still guarantees that a non-first-run
+    // playbook cannot accidentally observe `true` while a sibling
+    // first-run import is in flight.
     const tempDirectory = mkdtempSync(join(tmpdir(), "paratix-cli-first-run-serialized-"))
     const firstRunPlaybookPath = join(tempDirectory, "first.mjs")
     const observerPlaybookPath = join(tempDirectory, "observer.mjs")
     const leaderStartedPath = join(tempDirectory, "leader-started.txt")
     const releaseLeaderPath = join(tempDirectory, "release-leader")
+    const cliSourceUrl = pathToFileURL(
+      resolve(new URL("../src/cli.ts", import.meta.url).pathname)
+    ).href
 
     try {
       writeFileSync(
         firstRunPlaybookPath,
         [
           "import { existsSync, writeFileSync } from 'node:fs'",
+          `import { isFirstRun } from ${JSON.stringify(cliSourceUrl)}`,
           `const leaderStartedPath = ${JSON.stringify(leaderStartedPath)}`,
           `const releaseLeaderPath = ${JSON.stringify(releaseLeaderPath)}`,
-          "writeFileSync(leaderStartedPath, process.env['PARATIX_FIRST_RUN'] ?? 'missing')",
+          "writeFileSync(leaderStartedPath, isFirstRun() ? 'true' : 'missing')",
           "while (!existsSync(releaseLeaderPath)) {",
           "  await new Promise((resolveWait) => setTimeout(resolveWait, 10))",
           "}",
@@ -1778,18 +1780,19 @@ describe("CLI entrypoint", () => {
           "  name: 'leader',",
           "  host: '1.2.3.4',",
           "  ssh: { user: 'root', ports: [22] },",
-          "  run: [process.env['PARATIX_FIRST_RUN'] ?? 'missing'],",
+          "  run: [isFirstRun() ? 'true' : 'missing'],",
           "}",
         ].join("\n")
       )
       writeFileSync(
         observerPlaybookPath,
         [
+          `import { isFirstRun } from ${JSON.stringify(cliSourceUrl)}`,
           "export default {",
           "  name: 'observer',",
           "  host: '1.2.3.5',",
           "  ssh: { user: 'root', ports: [22] },",
-          "  run: [process.env['PARATIX_FIRST_RUN'] ?? 'missing'],",
+          "  run: [isFirstRun() ? 'true' : 'missing'],",
           "}",
         ].join("\n")
       )
@@ -1807,15 +1810,20 @@ describe("CLI entrypoint", () => {
 
       expect(leader.run).toStrictEqual(["true"])
       expect(observer.run).toStrictEqual(["missing"])
-      // Once both loads complete the global is fully restored.
+      // No process.env mutation, so nothing to verify there.
       expect(process.env.PARATIX_FIRST_RUN).toBeUndefined()
     } finally {
       rmSync(tempDirectory, { force: true, recursive: true })
-      delete process.env.PARATIX_FIRST_RUN
     }
   })
 
   it("allows reentrant playbook imports inside the same import call tree", async () => {
+    // R-0000695: the AsyncLocalStorage frame is inherited by nested
+    // `import()` chains, so a child playbook loaded with `firstRun: false`
+    // still observes the outer flag because the import promise runs in
+    // the outer context. The previous design relied on process.env for
+    // the same observation; the async-local variant preserves the
+    // existing semantics.
     const tempDirectory = mkdtempSync(join(tmpdir(), "paratix-cli-reentrant-import-"))
     const parentPlaybookPath = join(tempDirectory, "parent.mjs")
     const childPlaybookPath = join(tempDirectory, "child.mjs")
@@ -1827,24 +1835,25 @@ describe("CLI entrypoint", () => {
       writeFileSync(
         childPlaybookPath,
         [
+          `import { isFirstRun } from ${JSON.stringify(cliSourceUrl)}`,
           "export default {",
           "  name: 'child',",
           "  host: '1.2.3.5',",
           "  ssh: { user: 'root', ports: [22] },",
-          "  run: [process.env['PARATIX_FIRST_RUN'] ?? 'missing'],",
+          "  run: [isFirstRun() ? 'true' : 'missing'],",
           "}",
         ].join("\n")
       )
       writeFileSync(
         parentPlaybookPath,
         [
-          `import { loadServerDefinitionFromFile } from ${JSON.stringify(cliSourceUrl)}`,
+          `import { isFirstRun, loadServerDefinitionFromFile } from ${JSON.stringify(cliSourceUrl)}`,
           `const child = await loadServerDefinitionFromFile(${JSON.stringify(childPlaybookPath)}, { firstRun: false })`,
           "export default {",
           "  name: 'parent',",
           "  host: '1.2.3.4',",
           "  ssh: { user: 'root', ports: [22] },",
-          "  run: ['parent', child.name, child.run[0], process.env['PARATIX_FIRST_RUN'] ?? 'missing'],",
+          "  run: ['parent', child.name, child.run[0], isFirstRun() ? 'true' : 'missing'],",
           "}",
         ].join("\n")
       )
@@ -1863,25 +1872,31 @@ describe("CLI entrypoint", () => {
       expect(process.env.PARATIX_FIRST_RUN).toBeUndefined()
     } finally {
       rmSync(tempDirectory, { force: true, recursive: true })
-      delete process.env.PARATIX_FIRST_RUN
     }
   })
 
-  it("does not leak PARATIX_FIRST_RUN into a later playbook load", async () => {
+  it("does not leak the first-run flag into a later playbook load", async () => {
+    // R-0000695: the AsyncLocalStorage context ends when the first
+    // load's body returns, so the second load with `firstRun: false`
+    // must observe `missing`.
     const tempDirectory = mkdtempSync(join(tmpdir(), "paratix-cli-first-run-leak-"))
     const firstRunPlaybookPath = join(tempDirectory, "first-run.mjs")
     const regularPlaybookPath = join(tempDirectory, "regular.mjs")
+    const cliSourceUrl = pathToFileURL(
+      resolve(new URL("../src/cli.ts", import.meta.url).pathname)
+    ).href
 
     try {
       for (const playbookPath of [firstRunPlaybookPath, regularPlaybookPath]) {
         writeFileSync(
           playbookPath,
           [
+            `import { isFirstRun } from ${JSON.stringify(cliSourceUrl)}`,
             "export default {",
             "  name: 'test-server',",
             "  host: '1.2.3.4',",
             "  ssh: { user: 'root', ports: [22] },",
-            "  run: [process.env['PARATIX_FIRST_RUN'] ?? 'missing'],",
+            "  run: [isFirstRun() ? 'true' : 'missing'],",
             "}",
           ].join("\n")
         )
@@ -1898,7 +1913,6 @@ describe("CLI entrypoint", () => {
       expect(regularDefinition.run).toStrictEqual(["missing"])
     } finally {
       rmSync(tempDirectory, { force: true, recursive: true })
-      delete process.env.PARATIX_FIRST_RUN
     }
   })
 
@@ -1915,14 +1929,20 @@ describe("CLI entrypoint", () => {
     })
 
     try {
+      // R-0000695: the playbook reads its first-run state through
+      // `isFirstRun()` because `process.env` is no longer mutated.
+      const cliSourceUrl = pathToFileURL(
+        resolve(new URL("../src/cli.ts", import.meta.url).pathname)
+      ).href
       writeFileSync(
         playbookPath,
         [
+          `import { isFirstRun } from ${JSON.stringify(cliSourceUrl)}`,
           "export default {",
           "  name: 'test-server',",
           "  host: '1.2.3.4',",
           "  ssh: { user: 'root', ports: [22] },",
-          "  run: [process.env['PARATIX_FIRST_RUN'] ?? 'missing'],",
+          "  run: [isFirstRun() ? 'true' : 'missing'],",
           "}",
         ].join("\n")
       )
@@ -1960,7 +1980,6 @@ describe("CLI entrypoint", () => {
     } finally {
       logSpy.mockRestore()
       rmSync(tempDirectory, { force: true, recursive: true })
-      delete process.env.PARATIX_FIRST_RUN
     }
   })
 

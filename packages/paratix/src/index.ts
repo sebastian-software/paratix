@@ -1,4 +1,8 @@
 export { assert, debug, fail, firstRun, pause, signals, when } from "./builtins.js"
+// R-0000695: public helper that returns the async-local first-run flag.
+// Playbooks should call this from `init`/`apply`/`check` rather than
+// reading `process.env.PARATIX_FIRST_RUN`, which the CLI no longer mutates.
+export { isFirstRun } from "./cli.js"
 export { resolveEnvironment } from "./environment.js"
 export {
   assertValidModuleMetaEntries,
