@@ -1335,7 +1335,15 @@ export class SshConnectionImpl implements SshConnection {
       let activeStream: ClientChannel | null = null
       const timer = setTimeout(() => {
         activeStream?.close()
-        wrappedReject(new Error(`Command timed out after ${COMMAND_TIMEOUT}ms: ${command}`))
+        // R-0000667: route command interpolation through the same secret sink
+        // execPrepared uses so future callers with secret-bearing commands
+        // cannot leak through verbose error rendering.
+        const secrets = prepareSecrets(this.buildSecrets())
+        wrappedReject(
+          new Error(
+            `Command timed out after ${COMMAND_TIMEOUT}ms: ${maskPreparedSecrets(command, secrets)}`
+          )
+        )
       }, COMMAND_TIMEOUT)
       try {
         client.exec(command, (error: Error | undefined, stream: ClientChannel) => {
@@ -1386,7 +1394,14 @@ export class SshConnectionImpl implements SshConnection {
           stream.on("close", (code: null | number | undefined, signal?: null | string) => {
             clearTimeout(timer)
             if (signal != null && signal !== "") {
-              wrappedReject(new Error(`Command failed with signal ${signal}: ${command}`))
+              // R-0000667: mask command before interpolating it into the
+              // Error.message; mirrors the secret sink used in execPrepared.
+              const secrets = prepareSecrets(this.buildSecrets())
+              wrappedReject(
+                new Error(
+                  `Command failed with signal ${signal}: ${maskPreparedSecrets(command, secrets)}`
+                )
+              )
               return
             }
             wrappedResolve({
@@ -1421,7 +1436,12 @@ export class SshConnectionImpl implements SshConnection {
   private async execWithoutSudo(command: string): Promise<void> {
     const result = await this.execRaw(command)
     if (result.exitCode !== 0) {
-      throw new Error(`Command failed (exit code ${result.exitCode}): ${command}`)
+      // R-0000667: mask the command before interpolating it into the
+      // Error.message; mirrors the secret sink used in execPrepared.
+      const secrets = prepareSecrets(this.buildSecrets())
+      throw new Error(
+        `Command failed (exit code ${result.exitCode}): ${maskPreparedSecrets(command, secrets)}`
+      )
     }
   }
 
@@ -1542,7 +1562,12 @@ trap - EXIT
   private async outputWithoutSudo(command: string): Promise<string> {
     const result = await this.execRaw(command)
     if (result.exitCode !== 0) {
-      throw new Error(`Command failed (exit code ${result.exitCode}): ${command}`)
+      // R-0000667: mask the command before interpolating it into the
+      // Error.message; mirrors the secret sink used in execPrepared.
+      const secrets = prepareSecrets(this.buildSecrets())
+      throw new Error(
+        `Command failed (exit code ${result.exitCode}): ${maskPreparedSecrets(command, secrets)}`
+      )
     }
     return result.stdout.trim()
   }
