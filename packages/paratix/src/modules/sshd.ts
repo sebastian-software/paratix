@@ -113,9 +113,27 @@ async function validateProspectiveSshdConfigOrFailed(
   )
 }
 
-async function readEffectiveSshdConfig(ssh: SshConnection): Promise<ExecResult> {
-  await ensurePrivilegeSeparationDirectory(ssh)
-  return ssh.exec(SSHD_EFFECTIVE_CONFIG_COMMAND, { ignoreExitCode: true, silent: true })
+// R-0000768: tag the privilege-separation-directory failure so callers can
+// distinguish it from `sshd -T` output that just happens to be empty or
+// non-zero. The wrapper keeps the historic `ExecResult` happy path so the
+// vast majority of call sites that already key off `result.code` continue
+// to work unchanged.
+type ReadEffectiveSshdConfigResult =
+  | { kind: "exec"; result: ExecResult }
+  | { failure: ModuleResult; kind: "privilege-separation-failure" }
+
+async function readEffectiveSshdConfig(
+  ssh: SshConnection
+): Promise<ReadEffectiveSshdConfigResult> {
+  const privilegeSeparationFailure = await ensurePrivilegeSeparationDirectory(ssh)
+  if (privilegeSeparationFailure != null) {
+    return { failure: privilegeSeparationFailure, kind: "privilege-separation-failure" }
+  }
+  const result = await ssh.exec(SSHD_EFFECTIVE_CONFIG_COMMAND, {
+    ignoreExitCode: true,
+    silent: true,
+  })
+  return { kind: "exec", result }
 }
 
 // R-0000553: `sshd -T` aborts with non-zero exit codes for two very different
@@ -159,13 +177,21 @@ const PERMISSION_ERROR_KIND = "permission-error" as const
 type EffectiveSshdConfigMismatch =
   | { detail: string; kind: typeof PERMISSION_ERROR_KIND }
   | { directive: string; kind: "mismatch" }
+  | { failure: ModuleResult; kind: "privilege-separation-failure" }
   | { kind: "match" }
 
 async function findEffectiveSshdConfigMismatch(
   ssh: SshConnection,
   settings: Record<string, string>
 ): Promise<EffectiveSshdConfigMismatch> {
-  const result = await readEffectiveSshdConfig(ssh)
+  // R-0000768: route privilege-separation-directory failures through a
+  // structured channel so the caller can surface a `failed` ModuleResult
+  // with stderr context instead of pretending the directive drifted.
+  const readResult = await readEffectiveSshdConfig(ssh)
+  if (readResult.kind === "privilege-separation-failure") {
+    return { failure: readResult.failure, kind: "privilege-separation-failure" }
+  }
+  const result = readResult.result
   if (result.code !== 0) {
     const permissionDetail = sshdEffectiveConfigPermissionError(result)
     if (permissionDetail != null) {
@@ -262,6 +288,16 @@ async function rejectNonMatchingEffectiveSshdConfig(
 ): Promise<ModuleResult | undefined> {
   const mismatch = await findEffectiveSshdConfigMismatch(ssh, parameters.settings)
   if (mismatch.kind === "match") return undefined
+  // R-0000768: surface privilege-separation-directory creation failures as a
+  // structured `failed` ModuleResult so apply can terminate with stderr
+  // context instead of throwing an unstructured CommandError mid-pipeline.
+  if (mismatch.kind === "privilege-separation-failure") {
+    if (!parameters.didChange) return mismatch.failure
+    return rollbackSshdConfigAfterEffectiveMismatch(ssh, {
+      baseMessage: mismatch.failure.error?.message ?? "[sshd] privilege separation directory failed",
+      originalConfig: parameters.originalConfig,
+    })
+  }
   if (mismatch.kind === PERMISSION_ERROR_KIND) {
     // R-0000553: `sshd -T` could not be evaluated (typically because the
     // operator lacks the privileges to read host keys). Surface the failure
@@ -298,11 +334,27 @@ async function rejectNonMatchingEffectiveSshdConfig(
   })
 }
 
-async function ensurePrivilegeSeparationDirectory(ssh: SshConnection): Promise<void> {
-  await ssh.exec(`mkdir -p ${shellQuote(PRIVILEGE_SEPARATION_DIRECTORY)}`, {
-    ignoreExitCode: false,
+// R-0000768: surface privilege-separation-directory creation failures as a
+// structured `ModuleResult` instead of throwing an unstructured
+// CommandError. The legacy `ignoreExitCode: false` form let `ssh.exec`
+// throw on any non-zero exit (e.g. on read-only `/run`, an unwritable
+// parent, or a non-root operator missing CAP_DAC_OVERRIDE), which the
+// runner then surfaced as a generic transport failure with no module
+// context. Callers (readEffectiveSshdConfig, validateProspectiveSshdConfig)
+// now chain on the `null` return value and propagate the `failedCommand`
+// result verbatim so apply/check report `failed` with stderr context.
+async function ensurePrivilegeSeparationDirectory(
+  ssh: SshConnection
+): Promise<ModuleResult | null> {
+  const result = await ssh.exec(`mkdir -p ${shellQuote(PRIVILEGE_SEPARATION_DIRECTORY)}`, {
+    ignoreExitCode: true,
     silent: true,
   })
+  if (result.code === 0) return null
+  return failedCommand(
+    `[sshd] failed to create privilege separation directory ${PRIVILEGE_SEPARATION_DIRECTORY}`,
+    result
+  )
 }
 
 // R-0000608: probe both `ssh.socket` (Debian/Ubuntu) and `sshd.socket`
@@ -1175,7 +1227,11 @@ async function validateProspectiveSshdConfig(
   const temporaryConfigPath = allocation
   try {
     await ssh.writeFile(temporaryConfigPath, content, { mode: SSHD_DRY_RUN_TEMP_MODE })
-    await ensurePrivilegeSeparationDirectory(ssh)
+    // R-0000768: structured failure when /run/sshd cannot be created so the
+    // dry-run path surfaces a useful `failed` ModuleResult instead of an
+    // unstructured CommandError thrown out of `ssh.exec`.
+    const privilegeSeparationFailure = await ensurePrivilegeSeparationDirectory(ssh)
+    if (privilegeSeparationFailure != null) return privilegeSeparationFailure
     const result = await ssh.exec(`sshd -t -f ${shellQuote(temporaryConfigPath)}`, {
       ignoreExitCode: true,
       silent: true,
@@ -1860,7 +1916,14 @@ export const sshd = {
         }
         const effectiveMismatch = await findEffectiveSshdConfigMismatch(ssh, settings)
         if (effectiveMismatch.kind === "match") return "ok"
-        if (effectiveMismatch.kind === PERMISSION_ERROR_KIND) {
+        if (effectiveMismatch.kind === "privilege-separation-failure") {
+          // R-0000768: warn once during check so the operator sees why apply
+          // will fail before the apply path spins through the same mkdir
+          // error a second time.
+          process.stderr.write(
+            `Warning: ${effectiveMismatch.failure.error?.message ?? "[sshd] privilege separation directory could not be created"}\n`
+          )
+        } else if (effectiveMismatch.kind === PERMISSION_ERROR_KIND) {
           // R-0000553: surface the permission failure once during check so the
           // operator sees why apply will hard-fail instead of silently spinning
           // through the apply path.
