@@ -123,13 +123,23 @@ async function rollbackUnitAfterFlagPersistenceFailure(parameters: {
   ssh: SshConnection
 }): Promise<ModuleResult> {
   const { content, filePath, flagFailure, name, snapshot, ssh } = parameters
-  const didRollback = await restoreUnitFileSnapshotIfCurrentMatches({
+  const rollback = await restoreUnitFileSnapshotIfCurrentMatches({
     expectedCurrentContent: content,
     filePath,
     snapshot,
     ssh,
   })
-  if (!didRollback) return flagFailure
+  // R-0000721: surface a probe-read failure alongside the primary flag
+  // persistence failure. Without the chained message the readFile error
+  // (e.g. transient SFTP) would shadow the user-visible reason that
+  // triggered the rollback in the first place.
+  if (rollback.kind === "failed") {
+    return failedWithRollbackFailure(
+      flagFailure.error?.message ?? "flag persistence failed",
+      new Error(`rollback read of ${filePath} failed: ${rollback.reason}`)
+    )
+  }
+  if (rollback.kind === "skipped") return flagFailure
   const rollbackReload = await reloadSystemdDaemon(ssh)
   if (rollbackReload.code !== 0) {
     return failedCommand(
@@ -154,12 +164,22 @@ async function rollbackUnitAfterDaemonReloadFailure(parameters: {
     reloadFailure
   )
   try {
-    await restoreUnitFileSnapshotIfCurrentMatches({
+    const rollback = await restoreUnitFileSnapshotIfCurrentMatches({
       expectedCurrentContent: content,
       filePath,
       snapshot,
       ssh,
     })
+    // R-0000721: a soft read failure must surface alongside the original
+    // daemon-reload failure — the writeFile step inside
+    // `restoreUnitFileSnapshot` (still throws on symlink) keeps the
+    // surrounding try/catch in place for the restore branch.
+    if (rollback.kind === "failed") {
+      return failedWithRollbackFailure(
+        result.error?.message ?? "systemctl daemon-reload failed",
+        new Error(`rollback read of ${filePath} failed: ${rollback.reason}`)
+      )
+    }
   } catch (error) {
     return failedWithRollbackFailure(
       result.error?.message ?? "systemctl daemon-reload failed",

@@ -491,6 +491,73 @@ describe("systemd.unit", () => {
     expect(result.status).toBe("failed")
   })
 
+  // R-0000721: a rollback-time `ssh.readFile` failure (TOCTOU race, transient
+  // SFTP error, permission denial between snapshot and rollback) must surface
+  // alongside the primary daemon-reload failure. Without the try/catch the
+  // read error would bubble out of the module unstructured and the
+  // user-visible reason for the rollback would be lost entirely.
+  it("R-0000721: surfaces rollback readFile failure after daemon-reload failure", async () => {
+    const previousContent = "[Unit]\nDescription=Previous\n"
+    const ssh = createMockSsh({
+      [`[ -e '${filePath}' ]`]: { code: 0 },
+      [`[ -L '${filePath}' ]`]: { code: 1 },
+      [`stat -c '%a' '${filePath}'`]: { code: 0, stdout: "600\n" },
+      "systemctl daemon-reload": { code: 1, stderr: "daemon reload failed\n" },
+    })
+    vi.spyOn(ssh, "readFile")
+      .mockResolvedValueOnce(previousContent)
+      .mockRejectedValueOnce(new Error("SFTP read failed: connection reset"))
+    const writeFile = vi.spyOn(ssh, "writeFile").mockResolvedValue()
+    const mod = systemd.unit(unitName, unitContent)
+    const result = await mod.apply(ssh, emptyEnv)
+
+    expect(result.status).toBe("failed")
+    expect(String(result.error)).toContain("systemctl daemon-reload failed")
+    expect(String(result.error)).toContain("rollback failed")
+    expect(String(result.error)).toContain("rollback read of")
+    expect(String(result.error)).toContain("connection reset")
+    // The first write attempted the new content; the rollback writeFile must
+    // NOT have been issued because the conditional read failed first.
+    expect(writeFile).toHaveBeenCalledTimes(1)
+    expect(writeFile).toHaveBeenNthCalledWith(1, filePath, unitContent, { mode: "0644" })
+  })
+
+  // R-0000721: the same guarantee for the flag-persistence rollback path.
+  // When `setVersionedFlag` fails and the subsequent rollback read trips
+  // on a transient error, both failures must be chained into one
+  // ModuleResult instead of swallowing the flag-persistence reason.
+  it("R-0000721: surfaces rollback readFile failure after flag persistence failure", async () => {
+    const previousContent = "[Unit]\nDescription=Previous\n"
+    const ssh = createMockSsh({
+      [`[ -e '${filePath}' ]`]: { code: 0 },
+      [`[ -L '${filePath}' ]`]: { code: 1 },
+      [`stat -c '%a' '${filePath}'`]: { code: 0, stdout: "600\n" },
+      "mkdir -p /var/lib/paratix/flags": { code: 0 },
+      [reloadFlagSet]: {
+        code: 1,
+        stderr:
+          "touch: cannot touch '/var/lib/paratix/flags/systemd-unit-marker': Permission denied\n",
+      },
+      "systemctl daemon-reload": { code: 0 },
+    })
+    vi.spyOn(ssh, "readFile")
+      .mockResolvedValueOnce(previousContent)
+      .mockRejectedValueOnce(new Error("SFTP read failed: connection reset"))
+    const writeFile = vi.spyOn(ssh, "writeFile").mockResolvedValue()
+    const mod = systemd.unit(unitName, unitContent)
+    const result = await mod.apply(ssh, emptyEnv)
+
+    expect(result.status).toBe("failed")
+    expect(String(result.error)).toContain("failed to persist versioned flag")
+    expect(String(result.error)).toContain("rollback failed")
+    expect(String(result.error)).toContain("rollback read of")
+    expect(String(result.error)).toContain("connection reset")
+    // The first write applied the new content; the rollback writeFile must
+    // NOT have been issued because the conditional read failed first.
+    expect(writeFile).toHaveBeenCalledTimes(1)
+    expect(writeFile).toHaveBeenNthCalledWith(1, filePath, unitContent, { mode: "0644" })
+  })
+
   // R-0000683: a readFile failure on the pre-write snapshot must surface as
   // a structured failed ModuleResult instead of bubbling an unstructured
   // throw out of applySystemdUnit. Without this guard the writeFile path

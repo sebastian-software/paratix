@@ -108,6 +108,25 @@ export async function restoreUnitFileSnapshot(
 }
 
 /**
+ * Outcome of {@link restoreUnitFileSnapshotIfCurrentMatches}.
+ *
+ * - `restored`: the live file matched the expected pre-restore content and
+ *   was rewritten to the snapshot state.
+ * - `skipped`: the live file is either missing or its content diverged from
+ *   the expected pre-restore content; the rollback intentionally left the
+ *   file untouched.
+ * - `failed`: the conditional read itself could not complete (typically a
+ *   transient SFTP error or permission denial). Callers must surface this
+ *   alongside the original failure instead of treating it as `skipped` —
+ *   otherwise a probe error would silently shadow the primary error that
+ *   triggered the rollback in the first place.
+ */
+export type RestoreUnitFileIfCurrentMatchesResult =
+  | { kind: "failed"; reason: string }
+  | { kind: "restored" }
+  | { kind: "skipped" }
+
+/**
  * Restore the unit file only when the current on-disk content still matches
  * `expectedCurrentContent`. Used by rollback paths that must avoid
  * clobbering edits applied after the snapshot was captured.
@@ -117,19 +136,32 @@ export async function restoreUnitFileSnapshot(
  * @param parameters.filePath - Absolute path of the unit file to restore.
  * @param parameters.snapshot - The captured snapshot to restore from.
  * @param parameters.ssh - The active SSH connection.
- * @returns `true` when the file was restored, `false` when the current
- *   content diverged and no action was taken.
+ * @returns A structured outcome describing whether the rollback ran,
+ *   skipped (file missing or content diverged), or failed because the
+ *   live-content read itself could not complete.
  */
 export async function restoreUnitFileSnapshotIfCurrentMatches(parameters: {
   expectedCurrentContent: string
   filePath: string
   snapshot: UnitFileSnapshot
   ssh: SshConnection
-}): Promise<boolean> {
+}): Promise<RestoreUnitFileIfCurrentMatchesResult> {
   const { expectedCurrentContent, filePath, snapshot, ssh } = parameters
-  if (!(await ssh.exists(filePath))) return false
-  const currentContent = await ssh.readFile(filePath)
-  if (currentContent !== expectedCurrentContent) return false
+  if (!(await ssh.exists(filePath))) return { kind: "skipped" }
+  // R-0000721: `ssh.readFile` throws on transient SFTP errors or after a
+  // permission denial. Without this catch the rollback path would bubble
+  // an unstructured exception out of the module and the original failure
+  // (daemon-reload / flag persistence) that triggered the rollback would
+  // be lost. Mirror the snapshot-capture contract from R-0000683 and
+  // surface a structured failure so callers can chain both errors into
+  // a single user-visible message.
+  let currentContent: string
+  try {
+    currentContent = await ssh.readFile(filePath)
+  } catch (error) {
+    return { kind: "failed", reason: formatCaughtError(error) }
+  }
+  if (currentContent !== expectedCurrentContent) return { kind: "skipped" }
   await restoreUnitFileSnapshot(ssh, filePath, snapshot)
-  return true
+  return { kind: "restored" }
 }
