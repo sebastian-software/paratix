@@ -67,17 +67,18 @@ export function renderGuardedChmodCommand(mode: string, remotePath: string): str
   return renderGuardedMetadataCommand("chmod", remotePath, mode)
 }
 
+export function renderGuardedChgrpCommand(group: string, remotePath: string): string {
+  return renderGuardedMetadataCommand("chgrp", remotePath, group)
+}
+
 function renderGuardedMetadataCommand(
-  kind: "chmod" | "chown",
+  kind: "chgrp" | "chmod" | "chown",
   remotePath: string,
   value: string
 ): string {
   if (kind === "chown") assertValidChownOwnershipSpec(value)
 
-  const operation =
-    kind === "chmod"
-      ? `chmod -- ${shellQuote(value)} "$path"`
-      : `chown -- ${shellQuote(value)} "$path"`
+  const operation = `${kind} -- ${shellQuote(value)} "$path"`
 
   return [
     `path=${shellQuote(remotePath)}`,

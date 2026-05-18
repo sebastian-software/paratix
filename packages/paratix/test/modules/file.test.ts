@@ -61,6 +61,7 @@ const createMockSsh: typeof createBaseMockSsh = (responses, options) =>
       { command: /\nchown -- '[^']+' "\$path"$/v, result: { code: 0 } },
       { command: /^chgrp '[^']+' '\/(?:remote|var)\//v, result: { code: 0 } },
       { command: /^chgrp -- '[^']+' '\/(?:remote|var)\//v, result: { code: 0 } },
+      { command: /\nchgrp -- '[^']+' "\$path"$/v, result: { code: 0 } },
     ],
   })
 
@@ -2798,8 +2799,8 @@ describe("file.properties", () => {
     const result = await mod.apply(ssh, emptyEnv)
 
     expect(result.status).toBe("changed")
-    expect(ssh.calls).toContain("chmod -- '0644' '/var/app'")
-    expect(ssh.calls).toContain("chown -- 'www-data' '/var/app'")
+    expect(ssh.calls).toContainEqual(expect.stringContaining("chmod -- '0644' \"$path\""))
+    expect(ssh.calls).toContainEqual(expect.stringContaining("chown -- 'www-data' \"$path\""))
   })
 
   it("apply returns ok and does not run chmod/chown/chgrp when nothing has drifted", async () => {
@@ -2832,7 +2833,7 @@ describe("file.properties", () => {
     const result = await mod.apply(ssh, emptyEnv)
 
     expect(result.status).toBe("changed")
-    expect(ssh.calls).toContain("chmod -- '0644' '/var/app'")
+    expect(ssh.calls).toContainEqual(expect.stringContaining("chmod -- '0644' \"$path\""))
     expect(ssh.calls).not.toContain("chown -- 'www-data:www-data' '/var/app'")
   })
 
@@ -2849,7 +2850,9 @@ describe("file.properties", () => {
 
     expect(result.status).toBe("changed")
     expect(ssh.calls).not.toContain("chmod -- '0644' '/var/app'")
-    expect(ssh.calls).toContain("chown -- 'www-data:www-data' '/var/app'")
+    expect(ssh.calls).toContainEqual(
+      expect.stringContaining("chown -- 'www-data:www-data' \"$path\"")
+    )
     expect(ssh.calls).not.toContain("chown -- 'www-data' '/var/app'")
     expect(ssh.calls).not.toContain("chgrp -- 'www-data' '/var/app'")
   })
@@ -2862,7 +2865,7 @@ describe("file.properties", () => {
     const result = await mod.apply(ssh, emptyEnv)
 
     expect(result.status).toBe("changed")
-    expect(ssh.calls).toContain("chgrp -- 'www-data' '/var/app'")
+    expect(ssh.calls).toContainEqual(expect.stringContaining("chgrp -- 'www-data' \"$path\""))
   })
 
   it("apply normalises mode comparisons: 0644 desired matches 644 from stat", async () => {
@@ -2920,13 +2923,22 @@ describe("file.properties", () => {
     // chmod on a read-only mount must surface as a maskable failedCommand
     // ModuleResult instead of an unguarded CommandError that bypasses the
     // runner's failure pipeline.
-    const ssh = createMockSsh({
-      "chmod -- '0644' '/var/app'": {
-        code: 1,
-        stderr: "chmod: changing permissions of '/var/app': Read-only file system",
+    const ssh = createMockSsh(
+      {
+        "stat -c '%a %U %G' '/var/app'": { stdout: "755 www-data www-data" },
       },
-      "stat -c '%a %U %G' '/var/app'": { stdout: "755 www-data www-data" },
-    })
+      {
+        responseStubs: [
+          {
+            command: /\nchmod -- '0644' "\$path"$/v,
+            result: {
+              code: 1,
+              stderr: "chmod: changing permissions of '/var/app': Read-only file system",
+            },
+          },
+        ],
+      }
+    )
     const mod = file.properties("/var/app", { mode: "0644" })
     const result = await mod.apply(ssh, emptyEnv)
 
@@ -2935,13 +2947,19 @@ describe("file.properties", () => {
   })
 
   it("R-0000268: returns failed when combined chown exits non-zero", async () => {
-    const ssh = createMockSsh({
-      "chown -- 'www-data:www-data' '/var/app'": {
-        code: 1,
-        stderr: "chown: invalid user: 'www-data:www-data'",
+    const ssh = createMockSsh(
+      {
+        "stat -c '%a %U %G' '/var/app'": { stdout: "644 root root" },
       },
-      "stat -c '%a %U %G' '/var/app'": { stdout: "644 root root" },
-    })
+      {
+        responseStubs: [
+          {
+            command: /\nchown -- 'w{3}-data:w{3}-data' "\$path"$/v,
+            result: { code: 1, stderr: "chown: invalid user: 'www-data:www-data'" },
+          },
+        ],
+      }
+    )
     const mod = file.properties("/var/app", { group: "www-data", owner: "www-data" })
     const result = await mod.apply(ssh, emptyEnv)
 
@@ -2950,18 +2968,93 @@ describe("file.properties", () => {
   })
 
   it("R-0000268: returns failed when single chgrp exits non-zero", async () => {
-    const ssh = createMockSsh({
-      "chgrp -- 'www-data' '/var/app'": {
-        code: 1,
-        stderr: "chgrp: invalid group: 'www-data'",
+    const ssh = createMockSsh(
+      {
+        "stat -c '%a %U %G' '/var/app'": { stdout: "644 www-data root" },
       },
-      "stat -c '%a %U %G' '/var/app'": { stdout: "644 www-data root" },
-    })
+      {
+        responseStubs: [
+          {
+            command: /\nchgrp -- 'w{3}-data' "\$path"$/v,
+            result: { code: 1, stderr: "chgrp: invalid group: 'www-data'" },
+          },
+        ],
+      }
+    )
     const mod = file.properties("/var/app", { group: "www-data" })
     const result = await mod.apply(ssh, emptyEnv)
 
     expect(result.status).toBe("failed")
     expect(String(result.error)).toContain("chgrp failed")
+  })
+
+  it("returns failed when the chmod target identity changes before mutation", async () => {
+    const ssh = createMockSsh(
+      {
+        "stat -c '%a %U %G' '/var/app'": { stdout: "755 www-data www-data" },
+      },
+      {
+        responseStubs: [
+          {
+            command: /\nchmod -- '0644' "\$path"$/v,
+            result: { code: 1, stderr: "metadata target changed before chmod" },
+          },
+        ],
+      }
+    )
+    const mod = file.properties("/var/app", { mode: "0644" })
+    const result = await mod.apply(ssh, emptyEnv)
+
+    expect(result.status).toBe("failed")
+    expect(String(result.error)).toContain("metadata target changed before chmod")
+    expect(ssh.calls).toContainEqual(expect.stringContaining("before=$(stat -c '%d:%i:%F'"))
+    expect(ssh.calls).toContainEqual(expect.stringContaining("chmod -- '0644' \"$path\""))
+  })
+
+  it("returns failed when the chown target identity changes before mutation", async () => {
+    const ssh = createMockSsh(
+      {
+        "stat -c '%a %U %G' '/var/app'": { stdout: "644 root www-data" },
+      },
+      {
+        responseStubs: [
+          {
+            command: /\nchown -- 'w{3}-data' "\$path"$/v,
+            result: { code: 1, stderr: "metadata target changed before chown" },
+          },
+        ],
+      }
+    )
+    const mod = file.properties("/var/app", { owner: "www-data" })
+    const result = await mod.apply(ssh, emptyEnv)
+
+    expect(result.status).toBe("failed")
+    expect(String(result.error)).toContain("metadata target changed before chown")
+    expect(ssh.calls).toContainEqual(expect.stringContaining("before=$(stat -c '%d:%i:%F'"))
+    expect(ssh.calls).toContainEqual(expect.stringContaining("chown -- 'www-data' \"$path\""))
+  })
+
+  it("returns failed when the chgrp target identity changes before mutation", async () => {
+    const ssh = createMockSsh(
+      {
+        "stat -c '%a %U %G' '/var/app'": { stdout: "644 www-data root" },
+      },
+      {
+        responseStubs: [
+          {
+            command: /\nchgrp -- 'w{3}-data' "\$path"$/v,
+            result: { code: 1, stderr: "metadata target changed before chgrp" },
+          },
+        ],
+      }
+    )
+    const mod = file.properties("/var/app", { group: "www-data" })
+    const result = await mod.apply(ssh, emptyEnv)
+
+    expect(result.status).toBe("failed")
+    expect(String(result.error)).toContain("metadata target changed before chgrp")
+    expect(ssh.calls).toContainEqual(expect.stringContaining("before=$(stat -c '%d:%i:%F'"))
+    expect(ssh.calls).toContainEqual(expect.stringContaining("chgrp -- 'www-data' \"$path\""))
   })
 })
 

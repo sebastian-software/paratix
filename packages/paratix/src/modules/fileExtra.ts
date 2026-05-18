@@ -16,6 +16,9 @@ import {
   ownershipMatches,
   readOwnership,
   renderChownCommand,
+  renderGuardedChgrpCommand,
+  renderGuardedChmodCommand,
+  renderGuardedChownCommand,
   resolveWriteMode,
 } from "./fileMetadataHelpers.js"
 import { assertValidGroupName, assertValidUserName } from "./posixNames.js"
@@ -433,10 +436,7 @@ function isDriftFailure(result: DriftStepResult): result is ModuleResult {
 async function applyModeDrift(context: DriftContext): Promise<DriftStepResult> {
   const { current, options, remotePath, ssh } = context
   if (options.mode == null || modeMatches(current.mode, options.mode)) return false
-  const result = await ssh.exec(
-    `chmod -- ${shellQuote(options.mode)} ${shellQuote(remotePath)}`,
-    EXEC_OPTS
-  )
+  const result = await ssh.exec(renderGuardedChmodCommand(options.mode, remotePath), EXEC_OPTS)
   if (result.code !== 0) {
     return failedCommand(`[file.properties: ${remotePath}] chmod failed`, result)
   }
@@ -458,7 +458,7 @@ async function maybeApplyCombinedChown(context: DriftContext): Promise<DriftStep
     return false
   }
   const ownerGroup = `${options.owner}:${options.group}`
-  const result = await ssh.exec(renderChownCommand(ownerGroup, remotePath), EXEC_OPTS)
+  const result = await ssh.exec(renderGuardedChownCommand(ownerGroup, remotePath), EXEC_OPTS)
   if (result.code !== 0) {
     return failedCommand(`[file.properties: ${remotePath}] chown failed`, result)
   }
@@ -475,7 +475,7 @@ async function maybeApplyCombinedChown(context: DriftContext): Promise<DriftStep
 async function maybeApplySingleChown(context: DriftContext): Promise<DriftStepResult> {
   const { current, options, remotePath, ssh } = context
   if (options.owner == null || current.owner === options.owner) return false
-  const result = await ssh.exec(renderChownCommand(options.owner, remotePath), EXEC_OPTS)
+  const result = await ssh.exec(renderGuardedChownCommand(options.owner, remotePath), EXEC_OPTS)
   if (result.code !== 0) {
     return failedCommand(`[file.properties: ${remotePath}] chown failed`, result)
   }
@@ -492,10 +492,7 @@ async function maybeApplySingleChown(context: DriftContext): Promise<DriftStepRe
 async function maybeApplySingleChgrp(context: DriftContext): Promise<DriftStepResult> {
   const { current, options, remotePath, ssh } = context
   if (options.group == null || current.group === options.group) return false
-  const result = await ssh.exec(
-    `chgrp -- ${shellQuote(options.group)} ${shellQuote(remotePath)}`,
-    EXEC_OPTS
-  )
+  const result = await ssh.exec(renderGuardedChgrpCommand(options.group, remotePath), EXEC_OPTS)
   if (result.code !== 0) {
     return failedCommand(`[file.properties: ${remotePath}] chgrp failed`, result)
   }
