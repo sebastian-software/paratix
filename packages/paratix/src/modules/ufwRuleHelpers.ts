@@ -1,4 +1,5 @@
 import { failed, failedCommand } from "../moduleFailure.js"
+import { isValidTcpPort } from "../serverDefinitionValidation.js"
 import { shellQuote } from "../ssh.js"
 import { type ModuleResult, NEEDS_APPLY, type SshConnection } from "../types.js"
 import { liveSshdPortMatches, LiveSshdPortProbeError } from "./sshdPortLivenessProbe.js"
@@ -81,6 +82,18 @@ export function rejectWhenDenyingCurrentSshPort(input: {
   const { action, portList, ssh } = input
   if (action !== "deny") return null
   const { configuredPorts, port: currentSshPort } = ssh.getConnectionInfo()
+  // R-0000820: refuse to build the `protectedPorts` set when the live SSH
+  // port reported by the connection is not a valid TCP port. A bogus value
+  // (NaN, Infinity, fractional, out of range) would silently make the
+  // lockout guard match nothing and let a deny rule on the live SSH port
+  // through. Surface the inconsistency as a structured failure so the
+  // operator can fix the connection metadata before retrying.
+  if (!isValidTcpPort(currentSshPort)) {
+    return failed(
+      `[ufw.rule: ${action} ${portList.join(",")}] refuses to evaluate SSH lockout protection: ` +
+        `current SSH port ${JSON.stringify(currentSshPort)} is not a valid TCP port`
+    )
+  }
   const protectedPorts = new Set<number>([currentSshPort, ...configuredPorts])
   const conflictingPorts = portList.filter((port) => protectedPorts.has(port))
   if (conflictingPorts.length === 0) return null
