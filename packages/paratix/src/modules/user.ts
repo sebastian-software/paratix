@@ -204,16 +204,49 @@ async function supplementaryGroupsMatch(
   ssh: SshConnection,
   name: string,
   desiredGroups: string[]
-): Promise<boolean> {
-  const groupOutput = await ssh.output(`${ID_CMD} -Gn ${shellQuote(name)}`)
-  const primaryGroup = await ssh.output(`${ID_CMD} -gn ${shellQuote(name)}`)
+): Promise<AttributesMatchOutcome> {
+  // R-0000777: route the group lookups through `ssh.exec` with
+  // `ignoreExitCode` instead of `ssh.output`. `id` exits non-zero when the
+  // user does not exist, the NSS backend errors, or sudo strips the lookup
+  // permission. The previous `ssh.output` path threw an unstructured SSH
+  // error in those cases; surface a structured failed-Result so the caller
+  // can present the operator with actionable diagnostics.
+  const groupOutputResult = await ssh.exec(`${ID_CMD} -Gn ${shellQuote(name)}`, {
+    ignoreExitCode: true,
+    silent: true,
+  })
+  if (groupOutputResult.code !== 0) {
+    return {
+      failure: failedCommand(
+        `[user.present: ${name}] id -Gn failed during group comparison`,
+        groupOutputResult
+      ),
+      kind: TOOLCHAIN_ERROR,
+    }
+  }
+  const primaryGroupResult = await ssh.exec(`${ID_CMD} -gn ${shellQuote(name)}`, {
+    ignoreExitCode: true,
+    silent: true,
+  })
+  if (primaryGroupResult.code !== 0) {
+    return {
+      failure: failedCommand(
+        `[user.present: ${name}] id -gn failed during group comparison`,
+        primaryGroupResult
+      ),
+      kind: TOOLCHAIN_ERROR,
+    }
+  }
+  const primaryGroup = primaryGroupResult.stdout.trim()
   const actualSupplementaryGroups = new Set(
-    groupOutput
+    groupOutputResult.stdout
       .split(/\s+/v)
       .filter(Boolean)
       .filter((group) => group !== primaryGroup)
   )
   return groupsContain(actualSupplementaryGroups, desiredGroups)
+    ? { kind: "match" }
+    : { kind: "mismatch" }
 }
 
 async function passwdAttributesMatch(
@@ -431,8 +464,9 @@ async function passwdAndGroupsMatch(
     const passwdOutcome = await passwdAttributesMatch(ssh, name, options)
     if (passwdOutcome.kind !== "match") return passwdOutcome
   }
-  if (options.groups != null && !(await supplementaryGroupsMatch(ssh, name, options.groups))) {
-    return { kind: "mismatch" }
+  if (options.groups != null) {
+    const groupsOutcome = await supplementaryGroupsMatch(ssh, name, options.groups)
+    if (groupsOutcome.kind !== "match") return groupsOutcome
   }
   return { kind: "match" }
 }
