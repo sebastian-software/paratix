@@ -1060,24 +1060,37 @@ describe("apt.repository (standard form)", () => {
   it("apply rolls back the repository file when apt-get update fails", async () => {
     const previousContent = "deb https://download.docker.com/linux/ubuntu jammy stable\n"
     const previousContentSha = sha256String(previousContent)
+    // R-0000753: after writeFile, the on-disk content is the new applied
+    // content; the rollback drift check reads sha256sum at that point and
+    // expects it to match the applied hash.
+    const appliedContent = `${expectedContentWithSignedBy}\n`
+    const appliedContentSha = sha256String(appliedContent)
     const ssh = createMockSsh({
       [`[ -f '${filePath}' ] && [ ! -L '${filePath}' ]`]: { code: 0 },
       [`[ -f '${filePath}' ]`]: { code: 0 },
       [`[ -L '${filePath}' ]`]: { code: 1 },
       [`cat '${filePath}'`]: { stdout: previousContent },
-      [`sha256sum '${filePath}'`]: { stdout: `${previousContentSha}  ${filePath}\n` },
       // R-0000702: stat probe reports a stable device:inode pair so the
       // snapshot identity matches on re-probe inside the integrity check.
       [`stat -c '%d:%i' '${filePath}'`]: { code: 0, stdout: "42:1234\n" },
       "DEBIAN_FRONTEND=noninteractive apt-get update": { code: 1 },
     })
+    // First sha256 read happens during the pre-write integrity check (file
+    // still has the previous content); the second read happens during the
+    // rollback drift check (file now has the applied content).
+    let shaCallIndex = 0
+    ssh.sha256 = async () => {
+      await Promise.resolve()
+      shaCallIndex += 1
+      return shaCallIndex === 1 ? previousContentSha : appliedContentSha
+    }
     const mod = apt.repository("docker", source)
     const result = await mod.apply(ssh, emptyEnv)
 
     expect(result.status).toBe("failed")
     expect(ssh.writeFileCalls).toStrictEqual([
       {
-        content: `${expectedContentWithSignedBy}\n`,
+        content: appliedContent,
         options: { mode: "0644" },
         remotePath: filePath,
       },
@@ -1096,16 +1109,24 @@ describe("apt.repository (standard form)", () => {
   it("R-0000163: re-runs apt-get update after a successful rollback to refresh the cache", async () => {
     const previousContent = "deb https://download.docker.com/linux/ubuntu jammy stable\n"
     const previousContentSha = sha256String(previousContent)
+    // R-0000753: rollback drift check reads sha256 after writeFile; supply
+    // the applied content hash for that second read so the rollback proceeds.
+    const appliedContentSha = sha256String(`${expectedContentWithSignedBy}\n`)
     const ssh = createMockSsh({
       [`[ -f '${filePath}' ] && [ ! -L '${filePath}' ]`]: { code: 0 },
       [`[ -f '${filePath}' ]`]: { code: 0 },
       [`[ -L '${filePath}' ]`]: { code: 1 },
       [`cat '${filePath}'`]: { stdout: previousContent },
-      [`sha256sum '${filePath}'`]: { stdout: `${previousContentSha}  ${filePath}\n` },
       // R-0000702: stat probe reports a stable device:inode pair so the
       // snapshot identity matches on re-probe inside the integrity check.
       [`stat -c '%d:%i' '${filePath}'`]: { code: 0, stdout: "42:1234\n" },
     })
+    let shaCallIndex = 0
+    ssh.sha256 = async () => {
+      await Promise.resolve()
+      shaCallIndex += 1
+      return shaCallIndex === 1 ? previousContentSha : appliedContentSha
+    }
     // Override apt-get update so the first invocation (with the new repo)
     // fails and the second (post-rollback, with the restored sources)
     // succeeds — this is the precise sequence required by R-0000163.
@@ -1127,15 +1148,63 @@ describe("apt.repository (standard form)", () => {
     expect(String(result.error)).not.toContain("rollback succeeded but apt-get update")
   })
 
-  it("R-0000163: surfaces both errors when the post-rollback apt-get update also fails", async () => {
+  // R-0000753: when the sources.list has drifted between writeFile and
+  // rollback (operator hotfix, another agent, packaging script), refuse to
+  // overwrite the drifted content with the snapshot. The original update
+  // failure must still be surfaced.
+  it("R-0000753: refuses rollback when sources.list has drifted since snapshot", async () => {
     const previousContent = "deb https://download.docker.com/linux/ubuntu jammy stable\n"
     const previousContentSha = sha256String(previousContent)
+    const driftedSha = sha256String("operator-hotfix\n")
     const ssh = createMockSsh({
       [`[ -f '${filePath}' ] && [ ! -L '${filePath}' ]`]: { code: 0 },
       [`[ -f '${filePath}' ]`]: { code: 0 },
       [`[ -L '${filePath}' ]`]: { code: 1 },
       [`cat '${filePath}'`]: { stdout: previousContent },
-      [`sha256sum '${filePath}'`]: { stdout: `${previousContentSha}  ${filePath}\n` },
+      [`stat -c '%d:%i' '${filePath}'`]: { code: 0, stdout: "42:1234\n" },
+      "DEBIAN_FRONTEND=noninteractive apt-get update": {
+        code: 1,
+        stderr: "E: Repository not signed",
+      },
+    })
+    // First sha256 read is the pre-write integrity check (matches snapshot);
+    // second read is the rollback drift check and returns a hash that
+    // matches neither snapshot nor applied content — operator hotfix.
+    let shaCallIndex = 0
+    ssh.sha256 = async () => {
+      await Promise.resolve()
+      shaCallIndex += 1
+      return shaCallIndex === 1 ? previousContentSha : driftedSha
+    }
+    const mod = apt.repository("docker", source)
+    const result = await mod.apply(ssh, emptyEnv)
+
+    expect(result.status).toBe("failed")
+    expect(String(result.error)).toContain("apt-get update failed for docker")
+    expect(String(result.error)).toContain("rollback refused")
+    expect(String(result.error)).toContain("file has drifted since snapshot")
+    // The drift refusal must abort before the snapshot content is written
+    // back: only the first (apply-time) writeFile call should have happened.
+    expect(ssh.writeFileCalls).toStrictEqual([
+      {
+        content: `${expectedContentWithSignedBy}\n`,
+        options: { mode: "0644" },
+        remotePath: filePath,
+      },
+    ])
+  })
+
+  it("R-0000163: surfaces both errors when the post-rollback apt-get update also fails", async () => {
+    const previousContent = "deb https://download.docker.com/linux/ubuntu jammy stable\n"
+    const previousContentSha = sha256String(previousContent)
+    // R-0000753: rollback drift check reads sha256 after writeFile; supply
+    // the applied content hash for that second read so the rollback proceeds.
+    const appliedContentSha = sha256String(`${expectedContentWithSignedBy}\n`)
+    const ssh = createMockSsh({
+      [`[ -f '${filePath}' ] && [ ! -L '${filePath}' ]`]: { code: 0 },
+      [`[ -f '${filePath}' ]`]: { code: 0 },
+      [`[ -L '${filePath}' ]`]: { code: 1 },
+      [`cat '${filePath}'`]: { stdout: previousContent },
       // R-0000702: stat probe reports a stable device:inode pair so the
       // snapshot identity matches on re-probe inside the integrity check.
       [`stat -c '%d:%i' '${filePath}'`]: { code: 0, stdout: "42:1234\n" },
@@ -1144,6 +1213,12 @@ describe("apt.repository (standard form)", () => {
         stderr: "E: Could not resolve 'broken.example.com'",
       },
     })
+    let shaCallIndex = 0
+    ssh.sha256 = async () => {
+      await Promise.resolve()
+      shaCallIndex += 1
+      return shaCallIndex === 1 ? previousContentSha : appliedContentSha
+    }
     const mod = apt.repository("docker", source)
     const result = await mod.apply(ssh, emptyEnv)
 

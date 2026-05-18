@@ -124,6 +124,10 @@ async function snapshotAptRepository(
 }
 
 type RepositoryRollbackParameters = {
+  // R-0000753: bytes apply wrote to the sources.list just before the failed
+  // `apt-get update`; required so `restoreAptRepository` can refuse the
+  // rollback when the file has drifted in the failure window.
+  appliedContent: string
   filePath: string
   name: string
   previousRepository: AptRepositorySnapshot
@@ -145,9 +149,19 @@ type RepositoryRollbackParameters = {
 async function rollbackRepositoryAfterUpdateFailure(
   parameters: RepositoryRollbackParameters
 ): Promise<ModuleResult> {
-  const { filePath, name, previousRepository, ssh, updateResult } = parameters
-  const rollback = await restoreAptRepository(ssh, filePath, previousRepository)
-  if (rollback !== "ok") return rollback
+  const { appliedContent, filePath, name, previousRepository, ssh, updateResult } = parameters
+  const rollback = await restoreAptRepository(ssh, filePath, previousRepository, appliedContent)
+  if (rollback !== "ok") {
+    // R-0000753: when the rollback is refused (drift detected, or
+    // restoreAptRepository surfaced a structured failure), combine the
+    // original update failure with the rollback refusal so the operator
+    // sees both reasons. Mirrors `combineComposeSystemdRollbackFailure`.
+    const rollbackMessage = rollback.error?.message ?? "rollback failed"
+    return failedCommand(
+      `[apt.repository] apt-get update failed for ${name}; rollback refused: ${rollbackMessage}`,
+      updateResult
+    )
+  }
   const rollbackUpdate = await ssh.exec(`${NONINTERACTIVE} apt-get update`, {
     ignoreExitCode: true,
     silent: true,
@@ -267,10 +281,20 @@ async function ensureAptRepositorySnapshotStillCurrent(parameters: {
   return null
 }
 
+/**
+ * R-0000753: bytes apply wrote to the sources.list just before the failed
+ * `apt-get update`. Used by `restoreAptRepository` to verify the file is
+ * still in the post-apply state before rolling it back to the snapshot.
+ * `null` means "no apply-time content was produced" (rollback paths that do
+ * not run through the standard apply branch, e.g. an early-return failure).
+ */
+type AptRepositoryAppliedContent = null | string
+
 async function restoreAptRepository(
   ssh: SshConnection,
   filePath: string,
-  snapshot: AptRepositorySnapshot
+  snapshot: AptRepositorySnapshot,
+  appliedContent: AptRepositoryAppliedContent
 ): Promise<"ok" | ModuleResult> {
   if (snapshot.exists) {
     // R-0000235: defense in depth — refuse to restore through a symlink that
@@ -279,6 +303,22 @@ async function restoreAptRepository(
     // afterwards must not let writeFile follow it to an arbitrary target.
     if (await isSymlink(ssh, filePath)) {
       return failed(`[apt.repository] refuses to restore through symlink at ${filePath}`)
+    }
+    // R-0000753: refuse rollback when the sources.list on disk has drifted
+    // from the bytes apply just wrote. After a failed `apt-get update` the
+    // file is supposed to still hold the new content, so any divergence
+    // means an operator hotfix, another agent or a packaging script touched
+    // the file in the failure window — overwriting it with the snapshot
+    // would silently clobber that intervention. The drift refusal does not
+    // mask the original update failure: the caller composes a combined
+    // message in the same shape as `combineComposeSystemdRollbackFailure`.
+    if (appliedContent !== null) {
+      const driftFailure = await detectAptRepositoryDriftBeforeRollback(
+        ssh,
+        filePath,
+        appliedContent
+      )
+      if (driftFailure !== null) return driftFailure
     }
     await ssh.writeFile(filePath, snapshot.content, { mode: APT_REPOSITORY_MODE })
     return "ok"
@@ -291,6 +331,40 @@ async function restoreAptRepository(
     return failedCommand("[apt.repository] failed to rollback repository file", removeResult)
   }
   return "ok"
+}
+
+/**
+ * R-0000753: probe whether the on-disk sources.list still matches the bytes
+ * apply just wrote. If not, the file has drifted between writeFile and
+ * rollback — typically an operator hotfix in the apt-get-update window —
+ * and we must refuse to overwrite it with the snapshot. Returns `null`
+ * when no drift is detected, otherwise a failed `ModuleResult` the caller
+ * surfaces as the rollback outcome. A missing remote hash (sha256 returned
+ * `null`) is treated as drift so a rollback never silently writes through
+ * a file whose state we cannot verify.
+ *
+ * @param ssh - Active SSH connection to the remote host.
+ * @param filePath - Absolute path of the sources.list file to verify.
+ * @param appliedContent - The bytes apply wrote to `filePath` before the
+ *   failed `apt-get update`.
+ * @returns `null` when content matches, otherwise a failed `ModuleResult`.
+ */
+async function detectAptRepositoryDriftBeforeRollback(
+  ssh: SshConnection,
+  filePath: string,
+  appliedContent: string
+): Promise<ModuleResult | null> {
+  const currentHash = await ssh.sha256(filePath)
+  if (currentHash === null) {
+    return failed(
+      `[apt.repository] refuses to roll back ${filePath}: current sha256 unavailable, file may have drifted since snapshot`
+    )
+  }
+  const appliedHash = sha256String(appliedContent)
+  if (hexHashesEqual(currentHash, appliedHash)) return null
+  return failed(
+    `[apt.repository] refuses to roll back ${filePath}: file has drifted since snapshot (expected ${appliedHash}, found ${currentHash})`
+  )
 }
 
 const APT_BASE_EXEC_OPTS = { ignoreExitCode: true, silent: true } as const
@@ -948,13 +1022,18 @@ export const apt = {
           ssh,
         })
         if (integrityFailure) return integrityFailure
-        await ssh.writeFile(filePath, `${expectedContent}\n`, { mode: APT_REPOSITORY_MODE })
+        // R-0000753: capture the exact bytes written so the rollback path
+        // can refuse to overwrite a sources.list that has drifted in the
+        // apt-get-update failure window.
+        const appliedContent = `${expectedContent}\n`
+        await ssh.writeFile(filePath, appliedContent, { mode: APT_REPOSITORY_MODE })
         const result = await ssh.exec(`${NONINTERACTIVE} apt-get update`, {
           ignoreExitCode: true,
           silent: true,
         })
         if (result.code !== 0) {
           return rollbackRepositoryAfterUpdateFailure({
+            appliedContent,
             filePath,
             name,
             previousRepository,
