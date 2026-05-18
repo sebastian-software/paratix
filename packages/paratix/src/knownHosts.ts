@@ -1,7 +1,6 @@
 /* eslint-disable max-lines -- known_hosts lock, parser, verifier, and persist helpers stay co-located */
 import { createHash, timingSafeEqual } from "node:crypto"
-import { readFileSync } from "node:fs"
-import { appendFile, mkdir } from "node:fs/promises"
+import { appendFile, mkdir, readFile, stat } from "node:fs/promises"
 import { homedir } from "node:os"
 import { join } from "node:path"
 
@@ -422,7 +421,7 @@ export async function appendHostKey(host: string, port: number, keyBuffer: Buffe
     // already present. Without this guard, repeated TOFU acceptances over
     // the lifetime of a process append duplicate lines to known_hosts which
     // bloat the file and dilute later trust audits.
-    const existingEntries = loadKnownHostEntries()
+    const existingEntries = await loadKnownHostEntries()
     const alreadyTrusted = existingEntries.some(
       (entry) =>
         entry.marker == null &&
@@ -450,19 +449,41 @@ function getFileSystemErrorCode(error: unknown): string | undefined {
 }
 
 /**
+ * R-0000845: cap for the on-disk size of `~/.ssh/known_hosts` (16 MiB).
+ * A well-maintained trust store rarely exceeds a few hundred KiB; the cap
+ * stops a runaway or hostile file from consuming process memory inside
+ * `parseKnownHosts`.
+ */
+const KNOWN_HOSTS_FILE_BYTE_LIMIT = 16 * 1024 * 1024
+
+/**
  * Read and parse `~/.ssh/known_hosts`.
  *
  * A missing file is treated as an empty trust store. Other read failures fail
  * closed so `accept-new` cannot bypass an unreadable existing trust anchor.
  *
+ * R-0000845: switched from `readFileSync` to async {@link readFile} and added
+ * a stat-based size cap. The previous sync read held the event loop for the
+ * entire I/O latency of `~/.ssh/known_hosts` — fine for the typical few-KiB
+ * file, but unbounded on NFS-mounted homes or pathologically large trust
+ * stores.
+ *
  * @returns The parsed entries.
  */
-function loadKnownHostEntries(): KnownHostEntry[] {
+async function loadKnownHostEntries(): Promise<KnownHostEntry[]> {
   const filePath = join(homedir(), ".ssh", "known_hosts")
   try {
     // eslint-disable-next-line security/detect-non-literal-fs-filename
-    return parseKnownHosts(readFileSync(filePath, "utf8"))
+    const stats = await stat(filePath)
+    if (stats.size > KNOWN_HOSTS_FILE_BYTE_LIMIT) {
+      throw new HostKeyVerificationError(
+        `Refusing to read known_hosts at ${filePath}: size ${stats.size} bytes exceeds the ${KNOWN_HOSTS_FILE_BYTE_LIMIT}-byte cap`
+      )
+    }
+    // eslint-disable-next-line security/detect-non-literal-fs-filename
+    return parseKnownHosts(await readFile(filePath, "utf8"))
   } catch (error) {
+    if (error instanceof HostKeyVerificationError) throw error
     if (getFileSystemErrorCode(error) === "ENOENT") {
       return []
     }
