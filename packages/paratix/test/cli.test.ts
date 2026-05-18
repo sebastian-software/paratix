@@ -1021,10 +1021,20 @@ describe("parsePositiveNumber", () => {
     expect(exitSpy).not.toHaveBeenCalled()
   })
 
-  it("returns the numeric value for a positive decimal string", () => {
-    const result = parsePositiveNumber("1.5")
-    expect(result).toBe(1.5)
-    expect(exitSpy).not.toHaveBeenCalled()
+  it("calls process.exit(2) and prints an error for a positive decimal string", () => {
+    // R-0000839: parsePositiveNumber now requires a positive integer so a
+    // fractional value like "1.5" no longer silently rounds when later
+    // converted to milliseconds. The error path is the same as for any
+    // other invalid input — exit code 2 plus a stderr explanation.
+    let exitCalled = false
+    try {
+      parsePositiveNumber("1.5")
+    } catch {
+      exitCalled = true
+    }
+    expect(exitCalled).toBe(true)
+    expect(exitSpy).toHaveBeenCalledWith(2)
+    expect(errorSpy).toHaveBeenCalledOnce()
   })
 
   it("returns the numeric value for the minimum accepted value '1'", () => {

@@ -318,29 +318,35 @@ function isBinaryCauseValue(value: object): boolean {
   return value instanceof ArrayBuffer || ArrayBuffer.isView(value)
 }
 
+/**
+ * R-0000744 / R-0000844: suffixes that mark a credential-bearing field even
+ * when nested inside a compound name (e.g. `userPassword`, `apiToken`,
+ * `awsSessionKey`). The historic four entries (`token`, `password`, `secret`,
+ * `privatekey`) were extended with `sessionkey`, `signature`, `jwt`, `pin`,
+ * `mfa`, `otp`, and `cookie` so additional credential synonyms used by
+ * third-party SDK error causes are masked at the same precedence.
+ */
+const SECRET_CAUSE_FIELD_SUFFIXES = [
+  "token",
+  "password",
+  "secret",
+  "privatekey",
+  "sessionkey",
+  "signature",
+  "jwt",
+  "pin",
+  "mfa",
+  "otp",
+  "cookie",
+]
+
 function isSecretCauseField(key: string): boolean {
   let normalized = ""
   for (const character of key.toLowerCase()) {
     if (isAsciiAlphaNumeric(character)) normalized += character
   }
-  return (
-    SECRET_CAUSE_FIELD_NAMES.has(normalized) ||
-    normalized.endsWith("token") ||
-    normalized.endsWith("password") ||
-    normalized.endsWith("secret") ||
-    normalized.endsWith("privatekey") ||
-    // R-0000844: cover additional credential synonyms that show up in
-    // third-party SDK error causes — session tokens, JWTs, signatures,
-    // PINs, MFA/OTP codes, and HTTP cookies all leak as plaintext if we
-    // only mask the historic four suffixes above.
-    normalized.endsWith("sessionkey") ||
-    normalized.endsWith("signature") ||
-    normalized.endsWith("jwt") ||
-    normalized.endsWith("pin") ||
-    normalized.endsWith("mfa") ||
-    normalized.endsWith("otp") ||
-    normalized.endsWith("cookie")
-  )
+  if (SECRET_CAUSE_FIELD_NAMES.has(normalized)) return true
+  return SECRET_CAUSE_FIELD_SUFFIXES.some((suffix) => normalized.endsWith(suffix))
 }
 
 function isAsciiAlphaNumeric(character: string): boolean {

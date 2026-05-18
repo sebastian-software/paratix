@@ -17,13 +17,31 @@ import {
 // Mocks
 // ---------------------------------------------------------------------------
 
+// R-0000845: `loadKnownHostEntries` now reads asynchronously via
+// `node:fs/promises.readFile` (with a size cap enforced through `stat`).
+// The legacy `node:fs.readFileSync` mock stays available as the source of
+// truth for the "what content does the file have" assertion; the async
+// surface routes through `readFile` so tests can keep setting up
+// `readFileSyncMock.mockReturnValue(...)` without rewriting every case.
+const synchronousReadFileMock = vi.fn<(...args: unknown[]) => string>(() => "")
+
 vi.mock("node:fs", () => ({
-  readFileSync: vi.fn().mockReturnValue(""),
+  readFileSync: synchronousReadFileMock,
 }))
 
 vi.mock("node:fs/promises", () => ({
   appendFile: vi.fn().mockResolvedValue(null),
   mkdir: vi.fn().mockResolvedValue(null),
+  // R-0000845: forward the async `readFile` through the existing sync mock
+  // so a single `readFileSyncMock.mockReturnValue(...)` keeps configuring
+  // both `loadKnownHostEntries` (async) and any legacy call sites.
+  // eslint-disable-next-line @typescript-eslint/promise-function-async -- mock returns Promise directly; an async wrapper would add an extra microtask tick that breaks microtask-counting tests
+  readFile: vi.fn((...args: unknown[]) => Promise.resolve(synchronousReadFileMock(...args))),
+  // R-0000845: report the simulated file size so the in-source size cap
+  // never trips during tests. Real production callers receive a `Stats`
+  // instance; the size-only shape is sufficient for the cap check.
+  // eslint-disable-next-line @typescript-eslint/promise-function-async -- mock returns Promise directly; an async wrapper would add an extra microtask tick that breaks microtask-counting tests
+  stat: vi.fn(() => Promise.resolve({ size: 0 })),
 }))
 
 vi.mock("node:os", () => ({
@@ -1420,7 +1438,11 @@ describe("appendHostKey serialization (R-0000151)", () => {
 
     // Allow several microtasks for `appendHostKey` to start the queued
     // `mkdir`/`appendFile` calls so the mock implementation has been entered.
-    for (let index = 0; index < 5; index++) {
+    // R-0000838/R-0000845: appendHostKey now performs additional async
+    // steps inside the lock (stat + readFile for duplicate detection)
+    // before calling appendFile, so more microtask ticks are required for
+    // the mock implementation to be entered.
+    for (let index = 0; index < 15; index++) {
       // eslint-disable-next-line no-await-in-loop
       await Promise.resolve()
     }
@@ -1505,16 +1527,23 @@ describe("buildHostVerifier read serialization (R-0000194)", () => {
     })
 
     // Allow microtasks to start the append's mock implementation.
-    for (let index = 0; index < 5; index++) {
+    // R-0000838/R-0000845: appendHostKey now performs additional async
+    // steps inside the lock (stat + readFile for duplicate detection)
+    // before calling appendFile, so more microtask ticks are required for
+    // the mock implementation to be entered.
+    for (let index = 0; index < 15; index++) {
       // eslint-disable-next-line no-await-in-loop
       await Promise.resolve()
     }
 
-    // The append is in flight and the lock is held; readFileSync must
-    // not have been invoked yet.
+    // The append is in flight and the lock is held; the verifier's read
+    // must not have been invoked yet. After R-0000838 the append itself
+    // reads the file once to detect duplicates before writing, so the read
+    // counter starts at 1 instead of 0; the assertion below verifies the
+    // verifier has not added a second read while the lock is still held.
     expect(appendStarted).toBe(true)
     expect(appendEnded).toBe(false)
-    expect(readFileSyncMock).not.toHaveBeenCalled()
+    expect(readFileSyncMock).toHaveBeenCalledOnce()
 
     // Release the append; the verifier read should now proceed.
     resolveAppend?.()
@@ -1522,6 +1551,8 @@ describe("buildHostVerifier read serialization (R-0000194)", () => {
     await verifierPromise
 
     expect(appendEnded).toBe(true)
-    expect(readFileSyncMock).toHaveBeenCalledOnce()
+    // One read inside the append (duplicate detection) plus one read by
+    // the verifier after the lock has been released.
+    expect(readFileSyncMock).toHaveBeenCalledTimes(2)
   })
 })

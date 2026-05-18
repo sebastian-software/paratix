@@ -104,9 +104,13 @@ function validateDotEnvironmentKey(filePath: string, lineNumber: number, key: st
  * 1 MiB ist großzügig für legitime `.env`-Dateien (Tausende Schlüssel) und
  * gleichzeitig klein genug, damit der Parser frühzeitig fehlschlägt.
  */
-export const ENVIRONMENT_FILE_BYTE_LIMIT = 1024 * 1024
+const KIBIBYTE = 1024
+const MEBIBYTE = KIBIBYTE * KIBIBYTE
+const ENVIRONMENT_FILE_BYTE_LIMIT_MIB = 1
+const ENVIRONMENT_VALUE_BYTE_LIMIT_KIB = 64
+export const ENVIRONMENT_FILE_BYTE_LIMIT = ENVIRONMENT_FILE_BYTE_LIMIT_MIB * MEBIBYTE
 /** Pro-Wert-Cap (64 KiB) für decodierte Werte vor dem Persistieren in der Map. */
-export const ENVIRONMENT_VALUE_BYTE_LIMIT = 64 * 1024
+export const ENVIRONMENT_VALUE_BYTE_LIMIT = ENVIRONMENT_VALUE_BYTE_LIMIT_KIB * KIBIBYTE
 
 /**
  * R-0000843: control-Bytes (außer Tab, LF, CR) sind in dotenv-Werten nicht
@@ -118,11 +122,52 @@ export const ENVIRONMENT_VALUE_BYTE_LIMIT = 64 * 1024
  * konstruiert, damit die Quelle lesbar bleibt und keine echten
  * Steuerbytes im Source stehen.
  */
-// eslint-disable-next-line security/detect-non-literal-regexp -- pattern source is a constant string under our control
-const FORBIDDEN_CONTROL_CHARACTER_PATTERN = new RegExp(
-  "[\\x00-\\x08\\x0B\\x0C\\x0E-\\x1F\\x7F]",
-  "v"
-)
+// Reject the entire C0 control range except Tab (0x09), LF (0x0A), CR (0x0D),
+// plus DEL (0x7F). The regex literal uses JavaScript control-character
+// escape sequences so the source stays readable while the produced pattern
+// matches the raw control bytes themselves.
+/* eslint-disable-next-line regexp/no-control-character -- intentional: pattern catches forbidden control bytes */ /* oxlint-disable-next-line no-control-regex */
+const FORBIDDEN_CONTROL_CHARACTER_PATTERN = /[\x00-\x08\v\f\x0E-\x1F\x7F]/v
+
+/**
+ * R-0000843: enforce the per-value cap and the control-byte allowlist for a
+ * single decoded dotenv value. Extracted from {@link loadDotEnvironment} so
+ * the loader stays inside the per-function statement budget while keeping
+ * the validation behaviour discoverable from a single helper.
+ *
+ * @param filePath - Path to the dotenv file (used in error messages).
+ * @param lineNumber - 1-based line number for the offending value.
+ * @param value - The already-decoded value about to be persisted.
+ */
+function validateDotEnvironmentValue(filePath: string, lineNumber: number, value: string): void {
+  if (Buffer.byteLength(value, "utf8") > ENVIRONMENT_VALUE_BYTE_LIMIT) {
+    throw new Error(
+      `Invalid env value in ${filePath} line ${lineNumber}: value exceeds the ${ENVIRONMENT_VALUE_BYTE_LIMIT}-byte cap`
+    )
+  }
+  if (FORBIDDEN_CONTROL_CHARACTER_PATTERN.test(value)) {
+    throw new Error(
+      `Invalid env value in ${filePath} line ${lineNumber}: contains a forbidden control byte`
+    )
+  }
+}
+
+/**
+ * R-0000843: enforce the file-size cap before the loader walks the content.
+ * Extracted so {@link loadDotEnvironment} stays under the max-statements
+ * lint budget while keeping the early-fail behaviour traceable.
+ *
+ * @param filePath - Path to the dotenv file (used in error messages).
+ * @param content - The full UTF-8 content read from `filePath`.
+ */
+function assertDotEnvironmentFileSize(filePath: string, content: string): void {
+  const fileByteLength = Buffer.byteLength(content, "utf8")
+  if (fileByteLength > ENVIRONMENT_FILE_BYTE_LIMIT) {
+    throw new Error(
+      `Refusing to load env file ${filePath}: size ${fileByteLength} bytes exceeds the ${ENVIRONMENT_FILE_BYTE_LIMIT}-byte cap`
+    )
+  }
+}
 
 export async function loadDotEnvironment(filePath: string): Promise<Environment> {
   // eslint-disable-next-line security/detect-non-literal-fs-filename
@@ -130,12 +175,7 @@ export async function loadDotEnvironment(filePath: string): Promise<Environment>
   // R-0000843: enforce the upper bound on the read content before we
   // tokenise. Byte length is approximated via Buffer.byteLength so the
   // limit reflects the on-disk size, not the JS string length.
-  const fileByteLength = Buffer.byteLength(content, "utf8")
-  if (fileByteLength > ENVIRONMENT_FILE_BYTE_LIMIT) {
-    throw new Error(
-      `Refusing to load env file ${filePath}: size ${fileByteLength} bytes exceeds the ${ENVIRONMENT_FILE_BYTE_LIMIT}-byte cap`
-    )
-  }
+  assertDotEnvironmentFileSize(filePath, content)
   // R-0000069/R-0000070: use a null-prototype object so a malicious
   // `__proto__` line cannot pollute the loaded map even before the
   // explicit reject below catches it. This complements the explicit
@@ -159,16 +199,7 @@ export async function loadDotEnvironment(filePath: string): Promise<Environment>
     // double-quoted escape processing and are intentional, but a literal
     // ESC or vertical-tab byte almost always indicates a copy-paste
     // artefact or a hostile payload trying to influence downstream consumers.
-    if (Buffer.byteLength(value, "utf8") > ENVIRONMENT_VALUE_BYTE_LIMIT) {
-      throw new Error(
-        `Invalid env value in ${filePath} line ${index + 1}: value exceeds the ${ENVIRONMENT_VALUE_BYTE_LIMIT}-byte cap`
-      )
-    }
-    if (FORBIDDEN_CONTROL_CHARACTER_PATTERN.test(value)) {
-      throw new Error(
-        `Invalid env value in ${filePath} line ${index + 1}: contains a forbidden control byte`
-      )
-    }
+    validateDotEnvironmentValue(filePath, index + 1, value)
     environment[key] = value
   }
 

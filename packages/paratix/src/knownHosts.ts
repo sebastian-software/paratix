@@ -454,7 +454,10 @@ function getFileSystemErrorCode(error: unknown): string | undefined {
  * stops a runaway or hostile file from consuming process memory inside
  * `parseKnownHosts`.
  */
-const KNOWN_HOSTS_FILE_BYTE_LIMIT = 16 * 1024 * 1024
+const KIBIBYTE_BYTES = 1024
+const MEBIBYTE_BYTES = KIBIBYTE_BYTES * KIBIBYTE_BYTES
+const KNOWN_HOSTS_FILE_LIMIT_MIB = 16
+const KNOWN_HOSTS_FILE_BYTE_LIMIT = KNOWN_HOSTS_FILE_LIMIT_MIB * MEBIBYTE_BYTES
 
 /**
  * Read and parse `~/.ssh/known_hosts`.

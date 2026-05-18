@@ -240,19 +240,47 @@ function isBufferLikeView(value: unknown): boolean {
  */
 const REDACT_FORBIDDEN_KEYS = new Set(["__proto__", "constructor", "prototype"])
 
-function redactBufferProperties(value: unknown, depth: number, seen: WeakSet<object>): unknown {
-  if (isBufferLikeView(value)) return REDACTED_BUFFER_PLACEHOLDER
-  if (value === null || typeof value !== "object") return value
-  if (depth > REDACT_BUFFER_MAX_DEPTH) return value
-  if (seen.has(value)) return "[Circular]"
-  seen.add(value)
-  if (Array.isArray(value)) {
-    return value.map((entry) => redactBufferProperties(entry, depth + 1, seen))
+/**
+ * R-0000836/R-0000837: copy a single own-property from `source` into the
+ * prototype-null `redacted` clone, applying the forbidden-key skip list,
+ * descriptor-based access (so malicious getters never execute), and the
+ * symbol-key prefix that prevents collisions with same-named string keys.
+ *
+ * @param parameters - Aggregated arguments describing the copy operation.
+ * @param parameters.depth - Current recursion depth passed through to {@link redactBufferProperties}.
+ * @param parameters.destinationKey - Pre-computed key (string-form) under which the value lands in `redacted`.
+ * @param parameters.redacted - Prototype-null clone receiving the redacted value.
+ * @param parameters.seen - Identity set tracking already-visited object references.
+ * @param parameters.source - Original record the property descriptor is read from.
+ * @param parameters.sourceKey - Own key on `source` (string or symbol) whose descriptor we copy.
+ */
+function copyRedactedProperty(parameters: {
+  depth: number
+  destinationKey: string
+  redacted: Record<string, unknown>
+  seen: WeakSet<object>
+  source: Record<string, unknown>
+  sourceKey: PropertyKey
+}): void {
+  const { depth, destinationKey, redacted, seen, source, sourceKey } = parameters
+  const descriptor = Object.getOwnPropertyDescriptor(source, sourceKey)
+  if (descriptor == null) return
+  if (!("value" in descriptor)) {
+    redacted[destinationKey] = "[Accessor]"
+    return
   }
-  // eslint-disable-next-line @typescript-eslint/no-unsafe-type-assertion -- the prior `typeof value !== "object"` and `Array.isArray` guards above prove that `value` is a non-array plain-style object whose keys can be enumerated via Reflect.ownKeys
-  const sourceRecord = value as Record<string, unknown>
+  const descriptorValue: unknown = descriptor.value
+  redacted[destinationKey] = redactBufferProperties(descriptorValue, depth + 1, seen)
+}
+
+function redactObjectProperties(
+  sourceRecord: Record<string, unknown>,
+  depth: number,
+  seen: WeakSet<object>
+): Record<string, unknown> {
   // R-0000836: prototype-null clone so a `__proto__` key on a tampered cause
   // graph cannot pollute Object.prototype during the assignment below.
+  // eslint-disable-next-line @typescript-eslint/no-unsafe-type-assertion -- intentional: Object.create(null) is the prototype-pollution defense
   const redacted: Record<string, unknown> = Object.create(null) as Record<string, unknown>
   // R-0000691: walk own-enumerable + own-symbol property names so a
   // `cause`-shaped Buffer that lives on an Error instance is still
@@ -268,28 +296,43 @@ function redactBufferProperties(value: unknown, depth: number, seen: WeakSet<obj
   // entry in the clone.
   for (const key of Object.keys(sourceRecord)) {
     if (REDACT_FORBIDDEN_KEYS.has(key)) continue
-    const descriptor = Object.getOwnPropertyDescriptor(sourceRecord, key)
-    if (descriptor == null) continue
-    if (!("value" in descriptor)) {
-      redacted[key] = "[Accessor]"
-      continue
-    }
-    redacted[key] = redactBufferProperties(descriptor.value, depth + 1, seen)
+    copyRedactedProperty({
+      depth,
+      destinationKey: key,
+      redacted,
+      seen,
+      source: sourceRecord,
+      sourceKey: key,
+    })
   }
   for (const symbolKey of Object.getOwnPropertySymbols(sourceRecord)) {
-    const descriptor = Object.getOwnPropertyDescriptor(sourceRecord, symbolKey)
-    if (descriptor == null) continue
     // Stable, unambiguous prefix so symbol keys never collide with string
     // keys produced above (Symbols cannot themselves be JSON keys, and
     // `inspect` happily renders the prefixed string).
-    const stringKey = `@@symbol:${symbolKey.toString()}`
-    if (!("value" in descriptor)) {
-      redacted[stringKey] = "[Accessor]"
-      continue
-    }
-    redacted[stringKey] = redactBufferProperties(descriptor.value, depth + 1, seen)
+    copyRedactedProperty({
+      depth,
+      destinationKey: `@@symbol:${symbolKey.toString()}`,
+      redacted,
+      seen,
+      source: sourceRecord,
+      sourceKey: symbolKey,
+    })
   }
   return redacted
+}
+
+function redactBufferProperties(value: unknown, depth: number, seen: WeakSet<object>): unknown {
+  if (isBufferLikeView(value)) return REDACTED_BUFFER_PLACEHOLDER
+  if (value === null || typeof value !== "object") return value
+  if (depth > REDACT_BUFFER_MAX_DEPTH) return value
+  if (seen.has(value)) return "[Circular]"
+  seen.add(value)
+  if (Array.isArray(value)) {
+    return value.map((entry) => redactBufferProperties(entry, depth + 1, seen))
+  }
+  // eslint-disable-next-line @typescript-eslint/no-unsafe-type-assertion -- the prior `typeof value !== "object"` and `Array.isArray` guards above prove that `value` is a non-array plain-style object whose keys can be enumerated via Reflect.ownKeys
+  const sourceRecord = value as Record<string, unknown>
+  return redactObjectProperties(sourceRecord, depth, seen)
 }
 
 /**
@@ -580,6 +623,10 @@ const playbookImportContext = new AsyncLocalStorage<boolean>()
  *
  * @param body - The async unit of work whose playbook import must be
  *   serialized against every other playbook import in the process.
+ * @param fileUrl - Optional resolved `pathToFileURL(...).href` of the playbook
+ *   being imported. Supplied by production callers so the lock is scoped per
+ *   playbook (R-0000846); omitted by ad-hoc invocations and tests, in which
+ *   case the legacy single-queue behaviour is used.
  * @returns Whatever `body` resolves to.
  */
 export async function withSerializedPlaybookImport<T>(
