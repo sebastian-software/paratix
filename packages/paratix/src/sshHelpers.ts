@@ -511,12 +511,26 @@ function buildConnectConfig(parameters: ConnectParameters): ConnectConfig {
  * @param client - The ssh2 client whose resources should be released.
  */
 export function cleanupFailedSshClient(client: Client): void {
-  try {
-    client.removeAllListeners()
-  } catch {
-    /* removeAllListeners must not throw under any circumstance */
-  }
+  // R-0000794: install the best-effort teardown error sink BEFORE detaching
+  // any other listener so a late `error` event from `client.end()` cannot
+  // escape as an unhandled exception in the window between detaching and
+  // attaching. The sink is idempotent — `attachSshClientTeardownErrorSink`
+  // removes any prior `ignoreTeardownError` before re-adding itself.
   attachSshClientTeardownErrorSink(client)
+  // Detach every non-error listener so caller-installed `ready`/`close`/…
+  // handlers do not fire on the teardown. We deliberately keep the `error`
+  // channel's listeners intact: the connect path's `handleError` (if still
+  // present) would reject its outer Promise but is itself idempotent
+  // (R-0000790), and the freshly attached teardown sink keeps any orphan
+  // `error` emit from crashing the process.
+  try {
+    for (const eventName of client.eventNames()) {
+      if (eventName === "error") continue
+      client.removeAllListeners(eventName)
+    }
+  } catch {
+    /* listener teardown must not throw under any circumstance */
+  }
   try {
     client.end()
   } catch {
