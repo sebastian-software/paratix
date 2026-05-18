@@ -269,6 +269,61 @@ export async function readUfwShowAdded(ssh: SshConnection): Promise<null | strin
   }
 }
 
+/**
+ * Tagged result returned by {@link readUfwShowAddedDetailed}. R-0000821:
+ * the plain {@link readUfwShowAdded} collapsed "ufw is not installed"
+ * (legitimate `kind: "missing"`) and "ufw exists but the read failed"
+ * (`kind: "unreadable"`) into the same `null`. That stripped operators of
+ * the diagnostic they needed to distinguish a brand-new host from a
+ * permission/transient failure that should trigger the apply path.
+ *
+ *   `ok` — `ufw show added` returned and the captured output is in `output`.
+ *   `missing` — `ufw` is not on PATH (binary not installed).
+ *   `unreadable` — `ufw` exists but `ufw show added` failed; the original
+ *     error message is preserved in `detail`.
+ */
+export type UfwShowAddedReadResult =
+  | { detail: string; kind: "unreadable" }
+  | { kind: "missing" }
+  | { kind: "ok"; output: string }
+
+// R-0000821: mirror the `isUfwInstalled` probe used by
+// `readUfwStatusDetailed` (R-0000551). A failure of the probe itself is
+// classified as "binary present" so the apply path takes over and
+// surfaces the real error, rather than silently misclassifying the host
+// as missing ufw.
+async function isUfwBinaryPresent(ssh: SshConnection): Promise<boolean> {
+  try {
+    return await ssh.test(`command -v ${UFW}`)
+  } catch {
+    return true
+  }
+}
+
+/**
+ * Read `ufw show added` and classify the result. Unlike {@link readUfwShowAdded}
+ * the caller can tell whether `ufw` is missing entirely versus simply
+ * unreadable. R-0000821: lets `checkInactiveUfwRulePort` distinguish the
+ * two and report drift for the unreadable case so the apply path surfaces
+ * the underlying error.
+ *
+ * @param ssh - The remote SSH connection.
+ * @returns The classified read result.
+ */
+export async function readUfwShowAddedDetailed(
+  ssh: SshConnection
+): Promise<UfwShowAddedReadResult> {
+  const installed = await isUfwBinaryPresent(ssh)
+  if (!installed) return { kind: "missing" }
+  try {
+    const output = await ssh.output(`${UFW} show added`)
+    return { kind: "ok", output }
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error)
+    return { detail, kind: "unreadable" }
+  }
+}
+
 // R-0000654: defense-in-depth port validation before regex interpolation.
 // `ufw.rule` already validates ports via `isValidTcpPort` at construction
 // time, but a future caller could still pass NaN, Infinity, a fractional
@@ -298,12 +353,25 @@ function hasAddedUfwRule(output: string, action: UfwRuleAction, port: number): b
 
 export function checkInactiveUfwRulePort(input: {
   action: UfwRuleAction
-  addedOutput: null | string
+  addedOutput: null | string | UfwShowAddedReadResult
   port: number
 }): "needs-apply" | "ok" {
   const { action, addedOutput, port } = input
+  // Backwards-compatible legacy call shape (`null | string`): preserve the
+  // historical semantics so callers that still pass the raw output keep
+  // working.
   if (addedOutput == null) return NEEDS_APPLY
-  return hasAddedUfwRule(addedOutput, action, port) ? "ok" : NEEDS_APPLY
+  if (typeof addedOutput === "string") {
+    return hasAddedUfwRule(addedOutput, action, port) ? "ok" : NEEDS_APPLY
+  }
+  // R-0000821: tagged shape — `missing` and `unreadable` previously
+  // collapsed into the same `null`. Treat `unreadable` as drift so the
+  // apply path takes over and surfaces the underlying error; `missing`
+  // is also drift because a queued rule cannot be verified without ufw,
+  // but the diagnostic is meaningfully different and the caller can
+  // expose it before re-running.
+  if (addedOutput.kind !== "ok") return NEEDS_APPLY
+  return hasAddedUfwRule(addedOutput.output, action, port) ? "ok" : NEEDS_APPLY
 }
 
 export function checkUfwRulePort(input: {

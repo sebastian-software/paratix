@@ -9,7 +9,7 @@ import {
   checkInactiveUfwRulePort,
   checkUfwRulePort,
   readUfwRuleStatusForApply,
-  readUfwShowAdded,
+  readUfwShowAddedDetailed,
   rejectWhenDenyingCurrentSshPort,
   rejectWhenDenyingLiveSshdPort,
   type UfwRuleAction,
@@ -143,7 +143,19 @@ async function checkInactiveUfwRule(parameters: {
       "rules are saved but not enforced until ufw.enabled() runs. " +
       "Verifying rule presence via `ufw show added`.\n"
   )
-  const addedOutput = await readUfwShowAdded(ssh)
+  // R-0000821: route through the detailed reader so a "ufw is not
+  // installed" outcome (`missing`) and an "ufw is present but
+  // `ufw show added` failed" outcome (`unreadable`) stay distinguishable
+  // for downstream callers. The check still treats both as
+  // `needs-apply`, but the apply path can now surface the original
+  // diagnostic via the tagged shape instead of a flattened `null`.
+  const addedOutput = await readUfwShowAddedDetailed(ssh)
+  if (addedOutput.kind === "unreadable") {
+    process.stderr.write(
+      `Warning: [ufw.rule: ${action} ${portList.join(",")}] failed to read \`ufw show added\`: ` +
+        `${addedOutput.detail}\n`
+    )
+  }
   for (const port of portList) {
     const portResult = checkInactiveUfwRulePort({ action, addedOutput, port })
     if (portResult === NEEDS_APPLY) return NEEDS_APPLY
