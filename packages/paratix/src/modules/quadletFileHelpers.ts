@@ -144,6 +144,13 @@ export async function checkQuadletFile(parameters: {
   filePath: string
   ssh: SshConnection
 }): Promise<"needs-apply" | "ok"> {
+  // R-0000762: a symlinked unit file is not in convergence even when its
+  // resolved target matches `content` and `0644` — apply must rewrite it as a
+  // regular file so the apply-time symlink guard in `applyQuadletFile` and the
+  // rollback-time guard in `restoreQuadletFileSnapshot` see a deterministic
+  // regular file. Treating a symlink as `ok` would skip apply and leave the
+  // attack surface in place.
+  if (await isSymlink(parameters.ssh, parameters.filePath)) return NEEDS_APPLY
   const exists = await parameters.ssh.exists(parameters.filePath)
   if (!exists) return NEEDS_APPLY
   const remoteContent = await parameters.ssh.readFile(parameters.filePath)
