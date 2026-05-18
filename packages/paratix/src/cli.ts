@@ -640,6 +640,24 @@ async function performTsxRegistration(filePath: string): Promise<void> {
  */
 let tsxRegistrationWaiterCount = 0
 
+/**
+ * R-0000840: marks that the cached registration promise should be discarded
+ * as soon as the last waiter releases. Replaces the prior microtask
+ * busy-loop that re-queued `Promise.resolve().then(clearWhenQuiet)` until
+ * `tsxRegistrationWaiterCount` reached zero — under heavy contention that
+ * loop could spin the microtask queue indefinitely. With this sentinel the
+ * waiter `finally` block performs the clear deterministically as part of
+ * its own settlement.
+ */
+let tsxRegistrationClearPending = false
+
+function clearTsxRegistrationIfQuiet(): void {
+  if (!tsxRegistrationClearPending) return
+  if (tsxRegistrationWaiterCount !== 0) return
+  tsxRegistrationClearPending = false
+  tsxRegistrationPromise = null
+}
+
 async function registerTsxForTypeScriptEntry(filePath: string): Promise<void> {
   // R-0000692: when a cached promise exists, every parallel waiter must
   // observe the same (success or rejection) terminal value before we drop
@@ -653,9 +671,10 @@ async function registerTsxForTypeScriptEntry(filePath: string): Promise<void> {
       await tsxRegistrationPromise
     } finally {
       tsxRegistrationWaiterCount -= 1
-      // The originating caller is responsible for clearing the cache on
-      // failure (see catch-promise below). Sibling awaiters only need to
-      // release their hold so that clear-once-quiet logic can fire.
+      // R-0000840: the last sibling awaiter performs the deferred cache
+      // clear as part of its own `finally`, so the microtask loop the
+      // originating catch used to spin is no longer required.
+      clearTsxRegistrationIfQuiet()
     }
     return
   }
@@ -670,18 +689,10 @@ async function registerTsxForTypeScriptEntry(filePath: string): Promise<void> {
     if (tsxRegistrationWaiterCount === 0) {
       tsxRegistrationPromise = null
     } else {
-      // Defer the cache clear until every parallel awaiter has settled.
-      // Each waiter decrements `tsxRegistrationWaiterCount` in its
-      // `finally`, so a microtask queued from the last awaiter performs
-      // the actual reset without overwriting the cache out from under
-      // an in-flight reader.
-      void Promise.resolve().then(function clearWhenQuiet(): void {
-        if (tsxRegistrationWaiterCount === 0) {
-          tsxRegistrationPromise = null
-          return
-        }
-        void Promise.resolve().then(clearWhenQuiet)
-      })
+      // R-0000840: arm the clear sentinel and let the last waiter perform
+      // the actual reset from its own `finally` block. No microtask loop
+      // is queued — the sentinel is checked once per waiter release.
+      tsxRegistrationClearPending = true
     }
     throw error
   })
