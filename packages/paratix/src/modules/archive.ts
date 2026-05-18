@@ -1,5 +1,6 @@
 /* eslint-disable max-lines -- archive module keeps extraction and idempotency helpers together */
 import { failed, failedCommand } from "../moduleFailure.js"
+import { maskRegisteredSecrets } from "../secretSink.js"
 import { shellQuote, validateMktempPath } from "../ssh.js"
 import { type Module, type ModuleResult, NEEDS_APPLY, type SshConnection } from "../types.js"
 import {
@@ -266,9 +267,30 @@ async function cleanupStagingDirectory(conn: SshConnection, staging: string): Pr
     // R-0000565: pass `--` so a refactor that loosens the staging prefix
     // cannot let an attacker-controlled path that starts with `-` be
     // interpreted as an `rm` option.
-    await conn.exec(`rm -rf -- ${shellQuote(staging)}`, SILENT)
-  } catch {
-    // best effort: cleanup must not mask the original result
+    const result = await conn.exec(`rm -rf -- ${shellQuote(staging)}`, {
+      ...SILENT,
+      ignoreExitCode: true,
+    })
+    if (result.code !== 0) {
+      // R-0000808: a staging cleanup failure used to be discarded silently,
+      // which left orphaned `paratix-staging.*` directories on the remote
+      // host with no operator-visible trace. Surface a masked warning on
+      // stderr so the operator can investigate without overwriting the
+      // module's original result. `maskRegisteredSecrets` covers paths that
+      // were derived from a registered secret (e.g. token-bearing
+      // destinations).
+      const detail = result.stderr.trim() || result.stdout.trim() || `exit ${String(result.code)}`
+      process.stderr.write(
+        `${maskRegisteredSecrets(`[archive.extract] staging cleanup failed for ${staging}: ${detail}`)}\n`
+      )
+    }
+  } catch (error) {
+    // R-0000808: even a thrown SSH error must not be swallowed silently —
+    // it indicates the staging directory may persist on the remote host.
+    const reason = error instanceof Error ? error.message : String(error)
+    process.stderr.write(
+      `${maskRegisteredSecrets(`[archive.extract] staging cleanup raised for ${staging}: ${reason}`)}\n`
+    )
   }
 }
 
