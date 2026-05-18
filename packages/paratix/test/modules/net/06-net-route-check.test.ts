@@ -22,12 +22,23 @@ const createMockSsh: typeof createBaseMockSsh = (responses, options) =>
   createBaseMockSsh(responses, {
     ...options,
     allowWrites: [...NET_WRITE_ALLOWLIST, ...(options?.allowWrites ?? [])],
+    responseStubs: [
+      {
+        command: /^\[ -L '\/etc\/systemd\/network\/.+(?:\.conf|\.network)' \]$/v,
+        result: { code: 1 },
+      },
+      ...(options?.responseStubs ?? []),
+    ],
   })
 
 const emptyEnv = {}
 
 function regularFileCheck(remotePath: string): string {
   return `[ -f '${remotePath}' ] && [ ! -L '${remotePath}' ]`
+}
+
+function symlinkCheck(remotePath: string): string {
+  return `[ -L '${remotePath}' ]`
 }
 
 function buildRouteDropinPath(input: {
@@ -152,10 +163,37 @@ describe("net.route — check", () => {
       "ip route show '10.0.0.0/24'": { stdout: "" },
       [regularFileCheck(dropinPath)]: { code: 1 },
       [regularFileCheck(legacyRouteDropinPath)]: { code: 1 },
+      [symlinkCheck(dropinPath)]: { code: 1 },
+      [symlinkCheck(legacyRouteDropinPath)]: { code: 1 },
     })
     const mod = net.route("10.0.0.0/24", "192.168.1.1", { device: "eth0", state: "absent" })
     const result = await mod.check(mockSsh, emptyEnv)
     expect(result).toBe("ok")
+  })
+
+  it("returns needs-apply when the managed drop-in is a symlink (state: absent)", async () => {
+    const dropinPath = routeDropinPath
+    const mockSsh = createMockSsh({
+      "ip route show '10.0.0.0/24'": { stdout: "" },
+      [regularFileCheck(dropinPath)]: { code: 1 },
+      [symlinkCheck(dropinPath)]: { code: 0 },
+    })
+    const mod = net.route("10.0.0.0/24", "192.168.1.1", { device: "eth0", state: "absent" })
+    const result = await mod.check(mockSsh, emptyEnv)
+    expect(result).toBe("needs-apply")
+  })
+
+  it("returns needs-apply when the legacy drop-in is a symlink (state: absent)", async () => {
+    const dropinPath = routeDropinPath
+    const mockSsh = createMockSsh({
+      "ip route show '10.0.0.0/24'": { stdout: "" },
+      [regularFileCheck(dropinPath)]: { code: 1 },
+      [symlinkCheck(dropinPath)]: { code: 1 },
+      [symlinkCheck(legacyRouteDropinPath)]: { code: 0 },
+    })
+    const mod = net.route("10.0.0.0/24", "192.168.1.1", { device: "eth0", state: "absent" })
+    const result = await mod.check(mockSsh, emptyEnv)
+    expect(result).toBe("needs-apply")
   })
 
   it("returns needs-apply when route is present (state: absent)", async () => {

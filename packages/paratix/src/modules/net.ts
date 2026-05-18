@@ -927,6 +927,8 @@ async function checkRouteState(
   // A drop-in at the same path with different content is foreign state and
   // must not be treated as ours to delete.
   if (live) return NEEDS_APPLY
+  if (await isSymlink(conn, dropinPath)) return NEEDS_APPLY
+  if (await isSymlink(conn, parameters.legacyDropinPath)) return NEEDS_APPLY
   if (
     dropinPresent &&
     (await routeDropinMatchesExpected(conn, parameters, { withoutSymlink: true }))
