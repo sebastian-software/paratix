@@ -933,10 +933,11 @@ describe("download.url", () => {
       const result = await mod.apply(mockSsh, emptyEnv)
 
       expect(result.status).toBe("changed")
+      // R-0000805: the unverified hash marker is written read-only (0o444).
       expect(mockSsh.writeFileCalls).toStrictEqual([
         {
           content: `${recordedHash}\n`,
-          options: { mode: "0644" },
+          options: { mode: "0444" },
           remotePath: `${destination}.sha256`,
         },
       ])
@@ -1842,10 +1843,11 @@ describe("download.github", () => {
       const result = await mod.apply(mockSsh, emptyEnv)
 
       expect(result.status).toBe("changed")
+      // R-0000805: the unverified hash marker is written read-only (0o444).
       expect(mockSsh.writeFileCalls).toStrictEqual([
         {
           content: `${recordedHash}\n`,
-          options: { mode: "0644" },
+          options: { mode: "0444" },
           remotePath: `${destination}.sha256`,
         },
       ])

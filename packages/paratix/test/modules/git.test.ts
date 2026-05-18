@@ -321,7 +321,10 @@ describe("git.clone — check", () => {
   })
 
   it("resolves lightweight tag via first ls-remote line", async () => {
-    const sha = "deadbeef123"
+    // R-0000811: the first ls-remote line is now validated against the
+    // canonical `[a-f0-9]{40}\t` shape before its SHA fragment is returned,
+    // so the fixture uses a full 40-character hex digest.
+    const sha = "deadbeef00112233445566778899aabbccddeeff"
     const mockSsh = createMockSsh({
       [`git -C '${destination}' ls-remote -- origin 'v2.0.0'`]: {
         code: 0,

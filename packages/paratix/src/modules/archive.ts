@@ -227,13 +227,40 @@ async function moveExtractedContentsIntoDestination(
   const { destination, staging } = parameters
   const guardPaths = [...new Set(parameters.guardPaths)].join("\n")
   // R-0000801: the staging merge inspects unsafe attacker-controlled paths
-  // emitted by the archive. We assemble the shell snippet as a single
-  // String.raw template so the embedded quoting is readable, and we reject
-  // any extracted path that contains a literal newline before `cp` ever
+  // emitted by the archive. We assemble the shell snippet as String.raw
+  // segments so the embedded quoting is readable, and we reject any
+  // extracted path that contains a literal newline before `cp` ever
   // touches it. Newlines in extracted filenames are extremely unusual and
   // would otherwise corrupt the `printf | while read` loop that processes
   // `guard_paths`.
-  const mergeScript = String.raw`destination=$1; expected_destination=$2; guard_paths=$3; shift 3; for source_path do case "$source_path" in *"$(printf '\n')"*) echo "[archive.extract] refusing staging merge: extracted path contains a newline" >&2; exit 64;; esac; resolved_destination=$(readlink -f -- "$destination") || { echo "[archive.extract] failed to resolve destination path $destination before staging merge" >&2; exit 64; }; if [ "$resolved_destination" != "$expected_destination" ]; then echo "[archive.extract] refusing staging merge: destination path $destination resolves to $resolved_destination" >&2; exit 64; fi; printf "%s\n" "$guard_paths" | while IFS= read -r guarded_path; do [ -z "$guarded_path" ] && continue; if [ -L "$guarded_path" ]; then echo "[archive.extract] refusing staging merge: destination path $guarded_path is a symlink" >&2; exit 64; fi; done || exit $?; target_path="$destination/${source_path##*/}"; if [ -L "$target_path" ]; then echo "[archive.extract] refusing staging merge: destination path $target_path is a symlink" >&2; exit 64; fi; if [ -L "$target_path" ]; then echo "[archive.extract] refusing staging merge: destination path $target_path is a symlink" >&2; exit 64; fi; cp -aT --no-dereference --remove-destination "$source_path" "$target_path" || exit $?; done`
+  const mergeScript = [
+    String.raw`destination=$1; expected_destination=$2; guard_paths=$3; shift 3; `,
+    String.raw`for source_path do `,
+    String.raw`case "$source_path" in *"$(printf '\n')"*) `,
+    String.raw`echo "[archive.extract] refusing staging merge: extracted path contains a newline" >&2; `,
+    String.raw`exit 64;; esac; `,
+    String.raw`resolved_destination=$(readlink -f -- "$destination") || { `,
+    String.raw`echo "[archive.extract] failed to resolve destination path $destination before staging merge" >&2; `,
+    String.raw`exit 64; }; `,
+    String.raw`if [ "$resolved_destination" != "$expected_destination" ]; then `,
+    String.raw`echo "[archive.extract] refusing staging merge: destination path $destination resolves to $resolved_destination" >&2; `,
+    String.raw`exit 64; fi; `,
+    String.raw`printf "%s\n" "$guard_paths" | while IFS= read -r guarded_path; do `,
+    String.raw`[ -z "$guarded_path" ] && continue; `,
+    String.raw`if [ -L "$guarded_path" ]; then `,
+    String.raw`echo "[archive.extract] refusing staging merge: destination path $guarded_path is a symlink" >&2; `,
+    String.raw`exit 64; fi; `,
+    String.raw`done || exit $?; `,
+    `target_path="$destination/$\{source_path##*/}"; `,
+    String.raw`if [ -L "$target_path" ]; then `,
+    String.raw`echo "[archive.extract] refusing staging merge: destination path $target_path is a symlink" >&2; `,
+    String.raw`exit 64; fi; `,
+    String.raw`if [ -L "$target_path" ]; then `,
+    String.raw`echo "[archive.extract] refusing staging merge: destination path $target_path is a symlink" >&2; `,
+    String.raw`exit 64; fi; `,
+    String.raw`cp -aT --no-dereference --remove-destination "$source_path" "$target_path" || exit $?; `,
+    String.raw`done`,
+  ].join("")
   // R-0000751: defense-in-depth — `[ -L "$target_path" ]` runs immediately
   // before the `cp -aT` so a symlink planted between the first probe and
   // the copy cannot smuggle the merge through to an attacker-controlled
@@ -280,17 +307,15 @@ async function cleanupStagingDirectory(conn: SshConnection, staging: string): Pr
       // were derived from a registered secret (e.g. token-bearing
       // destinations).
       const detail = result.stderr.trim() || result.stdout.trim() || `exit ${String(result.code)}`
-      process.stderr.write(
-        `${maskRegisteredSecrets(`[archive.extract] staging cleanup failed for ${staging}: ${detail}`)}\n`
-      )
+      const message = `[archive.extract] staging cleanup failed for ${staging}: ${detail}`
+      process.stderr.write(`${maskRegisteredSecrets(message)}\n`)
     }
   } catch (error) {
     // R-0000808: even a thrown SSH error must not be swallowed silently —
     // it indicates the staging directory may persist on the remote host.
     const reason = error instanceof Error ? error.message : String(error)
-    process.stderr.write(
-      `${maskRegisteredSecrets(`[archive.extract] staging cleanup raised for ${staging}: ${reason}`)}\n`
-    )
+    const message = `[archive.extract] staging cleanup raised for ${staging}: ${reason}`
+    process.stderr.write(`${maskRegisteredSecrets(message)}\n`)
   }
 }
 

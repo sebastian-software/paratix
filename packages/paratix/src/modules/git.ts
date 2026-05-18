@@ -234,9 +234,9 @@ async function isRemoteTrackingBranch(
   // concat form lets a reference like `foo bar` smuggle a second argv item
   // past the quote because the literal `refs/remotes/origin/` prefix is
   // never inside the quoted span.
-  const remoteRef = `refs/remotes/origin/${reference}`
+  const remoteReference = `refs/remotes/origin/${reference}`
   const probe = await conn.exec(
-    `git -C ${shellQuote(destination)} for-each-ref --format=%(refname) ${shellQuote(remoteRef)}`,
+    `git -C ${shellQuote(destination)} for-each-ref --format=%(refname) ${shellQuote(remoteReference)}`,
     EXEC_OPTS
   )
   if (probe.code !== 0) return false
@@ -392,6 +392,41 @@ async function resolveRemoteReference(
 }
 
 /**
+ * Compare the local worktree HEAD to the expected remote reference and
+ * return the corresponding check verdict.
+ *
+ * Extracted from `git.clone.check` to keep that closure within the cognitive
+ * complexity limits enforced by the linter while preserving the
+ * `null`-aware handling for malformed `ls-remote` output (R-0000811) and
+ * the empty-reference HEAD comparison.
+ *
+ * @param conn - The active SSH connection used to query the remote.
+ * @param parameters - The destination, current head and configured reference.
+ * @param parameters.destination - The repository path on the remote host.
+ * @param parameters.head - The local worktree HEAD SHA observed for the
+ *   destination.
+ * @param parameters.reference - The configured `ref` (branch/tag/commit) or
+ *   `undefined`/`""` to compare against the remote HEAD.
+ * @returns `"ok"` when HEAD matches the resolved reference, otherwise `NEEDS_APPLY`.
+ */
+async function checkHeadMatchesReference(
+  conn: SshConnection,
+  parameters: { destination: string; head: string; reference: string | undefined }
+): Promise<"needs-apply" | "ok"> {
+  const { destination, head, reference } = parameters
+  if (reference === undefined || reference === "") {
+    const remoteHead = await resolveRemoteHead(conn, destination)
+    return remoteHead != null && head === remoteHead ? "ok" : NEEDS_APPLY
+  }
+  const resolved = await resolveRemoteReference(conn, destination, reference)
+  // R-0000811: a `null` here means `ls-remote` returned a malformed line.
+  // Surface as needs-apply so the upcoming apply re-fetches the remote
+  // rather than silently treating the unknown shape as drift.
+  if (resolved === null) return NEEDS_APPLY
+  return head === resolved ? "ok" : NEEDS_APPLY
+}
+
+/**
  * Resolve the remote default branch HEAD to a commit SHA.
  *
  * @param conn - The SSH connection to the remote host.
@@ -484,18 +519,7 @@ export const git = {
         const head = await readWorktreeHead(conn, destination)
         if (head === null) return NEEDS_APPLY
 
-        if (reference === undefined || reference === "") {
-          const remoteHead = await resolveRemoteHead(conn, destination)
-          return remoteHead != null && head === remoteHead ? "ok" : NEEDS_APPLY
-        }
-
-        const resolved = await resolveRemoteReference(conn, destination, reference)
-        // R-0000811: a `null` here means `ls-remote` returned a malformed
-        // line. Surface as needs-apply so the upcoming apply re-fetches the
-        // remote rather than silently treating the unknown shape as drift.
-        if (resolved === null) return NEEDS_APPLY
-
-        return head === resolved ? "ok" : NEEDS_APPLY
+        return checkHeadMatchesReference(conn, { destination, head, reference })
       },
       name: `git.clone: ${destination}`,
     }

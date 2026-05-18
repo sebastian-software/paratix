@@ -98,6 +98,34 @@ async function absentPathExists(ssh: SshConnection, remotePath: string): Promise
  * @returns A `failed` ModuleResult when the file materialised in the race
  *   window, or a `changed` ModuleResult after a successful write.
  */
+// R-0000800: exit code emitted by the inline create-only guard when the
+// destination reappeared between the recheck and the atomic publish. A
+// named constant keeps the magic-number lint rule happy and matches the
+// `APT_KEY_PUBLISH_SYMLINK_EXIT_CODE` pattern in aptKeyStaging.ts.
+const FILE_LINE_CREATE_REAPPEARED_EXIT_CODE = 73
+
+function buildCreateOnlyPublishScript(remotePath: string): string {
+  const quotedPath = shellQuote(remotePath)
+  const directory = posix.dirname(remotePath)
+  const basename = posix.basename(remotePath)
+  const stagingTemplate = `.${basename}.paratix-create.XXXXXX`
+  const quotedDirectory = shellQuote(directory)
+  const quotedTemplate = shellQuote(stagingTemplate)
+  return (
+    `set -eu\n` +
+    `staging=$(mktemp -p ${quotedDirectory} -- ${quotedTemplate})\n` +
+    `[ -n "$staging" ] || exit 1\n` +
+    `trap 'rm -f -- "$staging"' EXIT\n` +
+    `mv -T -- ${quotedPath} "$staging"\n` +
+    `if [ -e ${quotedPath} ] || [ -L ${quotedPath} ]; then\n` +
+    `  printf '%s\\n' 'target reappeared during create-only publish' >&2\n` +
+    `  exit ${String(FILE_LINE_CREATE_REAPPEARED_EXIT_CODE)}\n` +
+    `fi\n` +
+    `mv -T -- "$staging" ${quotedPath}\n` +
+    `trap - EXIT\n`
+  )
+}
+
 async function applyLineCreate(input: {
   line: string
   remotePath: string
@@ -108,32 +136,15 @@ async function applyLineCreate(input: {
       `[file.line: ${input.remotePath}] refuses to overwrite file created concurrently between existence probe and create`
     )
   }
-  const quotedPath = shellQuote(input.remotePath)
   // R-0000800: emulate O_CREAT|O_EXCL on top of `ssh.writeFile` by staging
   // the freshly written file aside and re-publishing it via `mv -T` guarded
   // by `[ ! -e dest ]`. If a concurrent writer created the destination
   // between the recheck above and the publish below, the guard refuses and
   // we clean up the staging file before surfacing the race as a failure.
   await input.ssh.writeFile(input.remotePath, `${input.line}\n`, { mode: "0644" })
-  const directory = posix.dirname(input.remotePath)
-  const basename = posix.basename(input.remotePath)
-  const stagingTemplate = `.${basename}.paratix-create.XXXXXX`
-  const quotedDirectory = shellQuote(directory)
-  const quotedTemplate = shellQuote(stagingTemplate)
-  const publishScript =
-    `set -eu\n` +
-    `staging=$(mktemp -p ${quotedDirectory} -- ${quotedTemplate})\n` +
-    `[ -n "$staging" ] || exit 1\n` +
-    `trap 'rm -f -- "$staging"' EXIT\n` +
-    `mv -T -- ${quotedPath} "$staging"\n` +
-    `if [ -e ${quotedPath} ] || [ -L ${quotedPath} ]; then\n` +
-    `  printf '%s\\n' 'target reappeared during create-only publish' >&2\n` +
-    `  exit 73\n` +
-    `fi\n` +
-    `mv -T -- "$staging" ${quotedPath}\n` +
-    `trap - EXIT\n`
+  const publishScript = buildCreateOnlyPublishScript(input.remotePath)
   const publishResult = await input.ssh.exec(publishScript, { ignoreExitCode: true, silent: true })
-  if (publishResult.code === 73) {
+  if (publishResult.code === FILE_LINE_CREATE_REAPPEARED_EXIT_CODE) {
     return failed(
       `[file.line: ${input.remotePath}] refuses to overwrite file created concurrently between existence probe and create`
     )

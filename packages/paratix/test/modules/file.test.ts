@@ -1437,9 +1437,17 @@ describe("file.line — apply without options.match", () => {
   })
 
   it("creates a missing file with the appended line and an explicit mode", async () => {
-    const ssh = createMockSsh({
-      "[ -e '/etc/config' ]": { code: 1 },
-    })
+    // R-0000800: the create-only branch finalises via a guarded `mv -T`
+    // shell snippet; stub the paratix-create publish script so the mock
+    // returns a success exit code.
+    const ssh = createMockSsh(
+      {
+        "[ -e '/etc/config' ]": { code: 1 },
+      },
+      {
+        responseStubs: [{ command: /paratix-create/v, result: { code: 0 } }],
+      }
+    )
 
     const mod = file.line("/etc/config", "my-line")
     const result = await mod.apply(ssh, emptyEnv)
@@ -1506,28 +1514,34 @@ describe("file.line — apply without options.match", () => {
   // reappeared, `apply` must surface the race as a `failed` ModuleResult
   // instead of silently overwriting whoever else's bytes.
   it("R-0000800: refuses to publish when the create-only guard reports the target reappeared", async () => {
-    const ssh = createMockSsh({
-      "[ -e '/etc/config' ]": { code: 1 },
-    })
-    let execIndex = 0
-    const baseExec = ssh.exec
-    ssh.exec = async (command: string, options) => {
-      const result = await baseExec(command, options)
-      execIndex += 1
-      if (command.includes("paratix-create")) {
-        return { ...result, code: 73, stderr: "target reappeared during create-only publish\n" }
+    // R-0000800: the create-only publish script is uniquely identifiable
+    // by the staging-template prefix, so the mock stubs the script under a
+    // regex match returning the reappeared-target exit code (73).
+    const ssh = createMockSsh(
+      {
+        "[ -e '/etc/config' ]": { code: 1 },
+      },
+      {
+        responseStubs: [
+          {
+            command: /paratix-create/v,
+            result: {
+              code: 73,
+              stderr: "target reappeared during create-only publish\n",
+            },
+          },
+        ],
       }
-      return result
-    }
+    )
 
     const mod = file.line("/etc/config", "my-line")
-    const result = await mod.apply(ssh, emptyEnv)
+    const applyResult = await mod.apply(ssh, emptyEnv)
 
-    expect(result.status).toBe("failed")
-    expect(String(result.error)).toContain(
+    expect(applyResult.status).toBe("failed")
+    expect(String(applyResult.error)).toContain(
       "refuses to overwrite file created concurrently between existence probe and create"
     )
-    expect(execIndex).toBeGreaterThan(0)
+    expect(ssh.calls.some((call) => call.includes("paratix-create"))).toBe(true)
   })
 })
 
