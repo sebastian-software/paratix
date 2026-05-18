@@ -155,10 +155,25 @@ export async function snapshotSwapFileForAbsentFlow(
   // Remove any leftover backup from a prior aborted run before the link.
   // `mv -T --` (used by the restore path) refuses to overwrite the
   // destination otherwise.
-  await ssh.exec(
+  //
+  // R-0000825: capture the rm result and refuse to proceed on any
+  // non-zero exit. `rm -f` silences ENOENT, so a non-zero exit can only
+  // mean either the symlink guard rejected backupPath as a symlink or
+  // the rm hit a real error (permission denied, read-only fs, an
+  // unrelated SFTP / sudo failure). Either way the subsequent `ln -P`
+  // would either be applied against a stale backup or hit the same
+  // condition seconds later with a less informative diagnostic. Surface
+  // the original failure directly so the operator can react.
+  const cleanupResult = await ssh.exec(
     `[ ! -L ${quotedBackup} ] || { echo 'swap backup must not be a symlink' >&2; exit 1; }; rm -f -- ${quotedBackup}`,
     EXEC_OPTS
   )
+  if (cleanupResult.code !== 0) {
+    return failedCommand(
+      `[swap.file: ${path}] failed to remove leftover swap backup at ${backupPath}`,
+      cleanupResult
+    )
+  }
   // R-0000624: build the snapshot inside a single shell statement that
   // re-checks `[ ! -L ]` on both `$path` and `$backupPath` immediately
   // before the link and uses `ln -P --` (no-deref) so a last-instant
