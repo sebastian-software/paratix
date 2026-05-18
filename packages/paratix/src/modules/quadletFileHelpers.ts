@@ -7,7 +7,7 @@ const CONTAINERS_SYSTEMD_DIRECTORY_COMMAND = "mkdir -p '/etc/containers/systemd'
 const QUADLET_FILE_MODE = "0644"
 const SYSTEMCTL = "systemctl"
 
-const OCTAL_MODE_LENGTH_WITHOUT_LEADING_ZERO = 3
+const CANONICAL_OCTAL_MODE_LENGTH = 4
 
 /**
  * R-0000604: normalize a raw `stat -c '%a'` octal mode to the four-digit form
@@ -19,13 +19,17 @@ const OCTAL_MODE_LENGTH_WITHOUT_LEADING_ZERO = 3
  *
  * Analogous to `normalizeSourcesFileMode` in releaseUpgradeSources.ts.
  *
+ * R-0000763: pad to the canonical four-digit length unconditionally so
+ * shorter modes (e.g. world-readable `"4"` from a `0004`-only file) also
+ * compare deterministically rather than being passed through unchanged.
+ *
  * @param raw - Trimmed stdout from a `stat -c '%a'` invocation.
  * @returns The four-digit octal mode, or {@link QUADLET_FILE_MODE} when the
  *   input is empty.
  */
 function normalizeQuadletMode(raw: string): string {
   if (raw.length === 0) return QUADLET_FILE_MODE
-  return raw.length === OCTAL_MODE_LENGTH_WITHOUT_LEADING_ZERO ? `0${raw}` : raw
+  return raw.padStart(CANONICAL_OCTAL_MODE_LENGTH, "0")
 }
 
 type QuadletFileSnapshot =
