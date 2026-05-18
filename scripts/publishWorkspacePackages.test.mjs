@@ -34,6 +34,16 @@ function createFs({
   mtimes: mtimeOverrides = {},
   paratixFiles = DEFAULT_PARATIX_FILES,
   paratixVersion = DEFAULT_STABLE_VERSION,
+  // R-0000685: callers can force `maxMtimeMillisecondsUnder` to fail with
+  // an arbitrary error code for a given directory path so tests can
+  // exercise the operator-friendly missing-src translation in
+  // `verifyDistributionArtefacts`.
+  readdirErrors = {},
+  // R-0000685: callers can declare a set of paths that report
+  // `isSymbolicLink() === true` from lstat so tests can model a vendored
+  // source tree behind a symlink (and the matching dist symlinks) and
+  // verify that the walker treats both sides identically.
+  symlinks: symlinkPaths = [],
 } = {}) {
   const defaultMtimes = {
     "packages/create-paratix/dist": FRESH_DIST_MTIME,
@@ -53,19 +63,46 @@ function createFs({
     "packages/paratix/dist": ["index.js"],
     "packages/paratix/src": ["index.ts"],
   }
+  const symlinkSet = new Set(symlinkPaths)
   return {
+    // R-0000685: lstat reports symbolic-link status without following the
+    // link. mtimeMillisecondsForFileEntry now relies on lstat to stay
+    // symmetric with maxMtimeMillisecondsUnder, which keys off
+    // Dirent.isSymbolicLink() — itself derived from lstat semantics.
+    async lstat(path) {
+      const mtime = mtimes[path]
+      if (mtime === undefined) {
+        throw Object.assign(new Error(`ENOENT lstat ${path}`), { code: "ENOENT" })
+      }
+      const isSymbolicLink = symlinkSet.has(path)
+      const isDirectory = !isSymbolicLink && directories[path] !== undefined
+      return {
+        isDirectory: () => isDirectory,
+        isFile: () => !isDirectory && !isSymbolicLink,
+        isSymbolicLink: () => isSymbolicLink,
+        mtimeMs: mtime,
+      }
+    },
     async readdir(path, options) {
+      const errorCode = readdirErrors[path]
+      if (errorCode !== undefined) {
+        throw Object.assign(new Error(`${errorCode} readdir ${path}`), { code: errorCode })
+      }
       const entries = directories[path]
       if (!entries) {
         throw Object.assign(new Error(`ENOENT readdir ${path}`), { code: "ENOENT" })
       }
       if (options?.withFileTypes !== true) return [...entries]
-      return entries.map((name) => ({
-        isDirectory: () => false,
-        isFile: () => true,
-        isSymbolicLink: () => false,
-        name,
-      }))
+      return entries.map((name) => {
+        const fullPath = `${path}/${name}`
+        const isSymbolicLink = symlinkSet.has(fullPath)
+        return {
+          isDirectory: () => false,
+          isFile: () => !isSymbolicLink,
+          isSymbolicLink: () => isSymbolicLink,
+          name,
+        }
+      })
     },
     async readFile(path) {
       if (path === "packages/paratix/package.json") {
@@ -322,6 +359,86 @@ describe("publishWorkspacePackages", () => {
         fs,
       }),
       'must declare a "files" allowlist'
+    )
+
+    assert.equal(hasCommandCall(commandRunner.calls, "pnpm"), false)
+  })
+
+  // R-0000685: maxMtimeMillisecondsUnder discovered symlinks via
+  // Dirent.isSymbolicLink() (lstat semantics) and skipped them with mtime
+  // 0, while mtimeMillisecondsForFileEntry called `stat()` and silently
+  // followed the link. A symlinked `dist/` entry that pointed at a fresh
+  // tree would then be treated as 0, even though the matching source
+  // tree (also symlinked) was likewise skipped. Probing the entry with
+  // lstat keeps both walkers symmetric, so the freshness comparison
+  // succeeds when both sides are symlinks.
+  it("R-0000685: treats symlinked files entries the same as symlinked source children", async () => {
+    const commandRunner = createCommandRunner()
+    const fs = createFs({
+      mtimes: {
+        "packages/paratix/dist": 9999,
+        "packages/paratix/src": STALE_SOURCE_MTIME,
+        "packages/paratix/src/index.ts": 9999,
+      },
+      symlinks: ["packages/paratix/dist", "packages/paratix/src/index.ts"],
+    })
+
+    await publishWorkspacePackages({
+      availabilityDelayMilliseconds: 0,
+      availabilityRetries: 2,
+      commandRunner,
+      fs,
+    })
+
+    // Both walkers report mtime 0 for the symlinked entries, so the
+    // freshness comparison is satisfied (0 >= 0). Without symmetric
+    // symlink handling the dist side would be 0 while the src side
+    // walked through to mtime 9999 and the publish branch would refuse.
+    assert.equal(hasCommandCall(commandRunner.calls, "pnpm"), true)
+  })
+
+  // R-0000685: a missing `src/` directory previously leaked the raw
+  // ENOENT from `readdir` ("ENOENT readdir packages/paratix/src"). The
+  // operator-friendly translation has to mention the directory and the
+  // remediation ("run pnpm build") so the message is actionable.
+  it("R-0000685: surfaces an operator-friendly error when src/ is missing", async () => {
+    const commandRunner = createCommandRunner()
+    const fs = createFs({
+      readdirErrors: {
+        "packages/paratix/src": "ENOENT",
+      },
+    })
+
+    await assertRejectsWithMessage(
+      publishWorkspacePackages({
+        availabilityDelayMilliseconds: 0,
+        commandRunner,
+        fs,
+      }),
+      "packages/paratix/src is missing — run pnpm build before publishing"
+    )
+
+    assert.equal(hasCommandCall(commandRunner.calls, "pnpm"), false)
+  })
+
+  // R-0000685: a non-ENOENT readdir failure (EACCES, EIO) on src/ has to
+  // surface the same build-before-publishing remediation so the message
+  // stays consistent regardless of the underlying filesystem error.
+  it("R-0000685: maps non-ENOENT src/ failures to the same remediation", async () => {
+    const commandRunner = createCommandRunner()
+    const fs = createFs({
+      readdirErrors: {
+        "packages/paratix/src": "EACCES",
+      },
+    })
+
+    await assertRejectsWithMessage(
+      publishWorkspacePackages({
+        availabilityDelayMilliseconds: 0,
+        commandRunner,
+        fs,
+      }),
+      "Run pnpm build before publishing"
     )
 
     assert.equal(hasCommandCall(commandRunner.calls, "pnpm"), false)

@@ -1,6 +1,6 @@
 import { execFile, spawn } from "node:child_process"
 import { realpathSync } from "node:fs"
-import { readdir, readFile, stat } from "node:fs/promises"
+import { lstat, readdir, readFile, stat } from "node:fs/promises"
 import { join, resolve } from "node:path"
 import { fileURLToPath } from "node:url"
 import { promisify } from "node:util"
@@ -139,6 +139,16 @@ function publishDistributionTag(version) {
   return hasPrereleaseSuffix(version) ? "next" : "latest"
 }
 
+// R-0000685: both walkers must treat symlinks identically. Previously
+// `maxMtimeMillisecondsUnder` skipped symlinks via mtime 0 (driven by
+// Dirent.isSymbolicLink() which reflects lstat semantics) while
+// `mtimeMillisecondsForFileEntry` used `stat` and silently followed the
+// link. A vendored source tree behind a symlink would then lift the
+// dist-freshness bar through the linked target while the matching
+// dist/ entries — also symlinked — were treated as mtime 0, producing
+// an artificially low freshness signal for the publishable artefact
+// set. Probing the entry with `lstat` keeps both walkers symmetric.
+//
 // R-0000661: maximum mtime captured under `directory`. Walking the tree
 // (rather than stat-ing the directory itself) is necessary because
 // directory mtimes only change when entries are added/removed, not when
@@ -163,13 +173,20 @@ async function maxMtimeMillisecondsUnder(directory, filesystem) {
   return childMtimes.length > 0 ? Math.max(...childMtimes) : 0
 }
 
+// R-0000685: probe the entry with `lstat` so a top-level symlink in
+// `files` is skipped the same way `maxMtimeMillisecondsUnder` skips
+// symlinks discovered during recursion. Without this symmetry a
+// symlinked top-level `files` entry would lift the freshness bar via
+// the target while symlinked children of `src/` were treated as 0,
+// flipping the comparison in unpredictable ways.
 async function mtimeMillisecondsForFileEntry(directory, fileEntry, filesystem) {
   const absolutePath = join(directory, fileEntry)
-  const stats = await filesystem.stat(absolutePath)
-  if (stats.isDirectory()) {
+  const linkStats = await filesystem.lstat(absolutePath)
+  if (linkStats.isSymbolicLink()) return 0
+  if (linkStats.isDirectory()) {
     return maxMtimeMillisecondsUnder(absolutePath, filesystem)
   }
-  return stats.mtimeMs
+  return linkStats.mtimeMs
 }
 
 // R-0000661: lift the most recent mtime across every entry referenced by
@@ -197,6 +214,30 @@ async function ensureFilesEntryExists(packageInfo, fileEntry, filesystem) {
   }
 }
 
+// R-0000685: translate raw filesystem failures from the source-tree
+// walk into an operator-friendly hint. The pre-existing handler only
+// covered the case where `files` referenced a missing path; a missing
+// `src/` directory leaked the bare ENOENT from `readdir`, which is not
+// obvious unless the operator already knows that the freshness check
+// walks `src/`. Map every error from the source walk to the same
+// build-before-publishing remediation so the message is consistent.
+async function readSourceMtime(packageInfo, sourceDirectory, filesystem) {
+  try {
+    return await maxMtimeMillisecondsUnder(sourceDirectory, filesystem)
+  } catch (error) {
+    if (error?.code === "ENOENT") {
+      throw new Error(
+        `${packageInfo.name}: ${sourceDirectory} is missing — run pnpm build before publishing.`,
+        { cause: error }
+      )
+    }
+    throw new Error(
+      `${packageInfo.name}: failed to read ${sourceDirectory} (${error?.message ?? String(error)}). Run pnpm build before publishing.`,
+      { cause: error }
+    )
+  }
+}
+
 // R-0000661: confirm every artefact npm would ship actually exists and is
 // at least as fresh as the source tree before pnpm publish runs. Without
 // this guard a skipped build would publish empty or stale dist files under
@@ -214,7 +255,7 @@ async function verifyDistributionArtefacts(packageInfo, filesystem) {
   )
 
   const sourceDirectory = join(packageInfo.directory, "src")
-  const sourceMtime = await maxMtimeMillisecondsUnder(sourceDirectory, filesystem)
+  const sourceMtime = await readSourceMtime(packageInfo, sourceDirectory, filesystem)
   const filesMtime = await maxMtimeMillisecondsForFiles(
     packageInfo.directory,
     packageInfo.files,
@@ -291,7 +332,7 @@ export async function publishWorkspacePackages({
         })
       }),
   },
-  fs = { readdir, readFile, stat },
+  fs = { lstat, readdir, readFile, stat },
   filesystem = fs,
 } = {}) {
   const [paratixPackage, createParatixPackage] = await readWorkspacePackages(fs)
