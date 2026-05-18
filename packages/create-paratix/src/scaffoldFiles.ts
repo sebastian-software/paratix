@@ -125,48 +125,22 @@ function writeScaffoldSupportFiles(projectDirectory: string, initialUser: Initia
   )
 }
 
-function getManagedScaffoldPaths(
-  projectDirectory: string,
-  initialUser: InitialUserConfig
-): string[] {
-  const managedPaths = [
-    "package.json",
-    "server.ts",
-    "tsconfig.json",
-    ".gitignore",
-    ".prettierrc",
-    ".prettierignore",
-    "eslint.config.ts",
-    ".env.example",
-    join("files", ".gitkeep"),
-    join("files", "20auto-upgrades"),
-    join("files", "50unattended-upgrades"),
-  ]
-
-  if (initialUser.kind === "root") {
-    managedPaths.push(join("files", "admin-nopasswd-sudoers"))
-  }
-
-  return managedPaths.map((managedPath) => join(projectDirectory, managedPath))
-}
-
-function assertManagedScaffoldPathsAvailable(
-  projectDirectory: string,
-  initialUser: InitialUserConfig
-): void {
-  for (const managedPath of getManagedScaffoldPaths(projectDirectory, initialUser)) {
-    if (lstatPathIfExists(managedPath) != null) {
-      throwScaffoldPathAlreadyExists(managedPath)
-    }
-  }
-}
-
 export function writeScaffoldFiles(
   projectDirectory: string,
   { adminPublicKey, expectedHostFingerprint, host, initialUser, packageName }: ScaffoldFileOptions
 ): void {
-  assertManagedScaffoldPathsAvailable(projectDirectory, initialUser)
-
+  // R-0000828: the previous implementation pre-walked the list of managed
+  // scaffold paths with `lstatPathIfExists` and aborted if any of them
+  // already existed. That probe was a pure TOCTOU artefact: the actual
+  // writes downstream are already safe because (1) `assertWritableScaffold
+  // Directory` uses `mkdirSync` with `recursive: false` plus a follow-up
+  // lstat that rejects symlinks and non-directories, and (2)
+  // `writeManagedScaffoldFile` opens its target with `flag: "wx"` and maps
+  // `EEXIST` to a clear refusal. The pre-walk therefore only narrowed the
+  // race window between probe and write, while giving no real protection
+  // against an attacker who can race file creation. Removing it keeps the
+  // already-atomic guarantees and avoids advertising a check that does not
+  // actually hold.
   assertWritableScaffoldDirectory(projectDirectory)
   assertWritableScaffoldDirectory(join(projectDirectory, "files"))
 
