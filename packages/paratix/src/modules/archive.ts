@@ -6,6 +6,7 @@ import { type Module, type ModuleResult, NEEDS_APPLY, type SshConnection } from 
 import {
   archiveMemberDestinationPaths,
   archiveMemberPathsWithAncestors,
+  createExtractDestinationDirectory,
   destinationPathWithAncestors,
   validateExistingExtractDestination,
   validateExtractDestination,
@@ -521,16 +522,11 @@ async function prepareExtractDestination(
     source: parameters.source,
   })
   if (unsafeDestinationAncestor !== null) return unsafeDestinationAncestor
-  const createDestination = await conn.exec(
-    `mkdir -p ${shellQuote(validatedDestination.destination)}`,
-    EXEC_OPTS
+  const createDestinationFailure = await createExtractDestinationDirectory(
+    conn,
+    validatedDestination.destination
   )
-  if (createDestination.code !== 0) {
-    return failedCommand(
-      `[archive.extract] failed to create destination directory ${validatedDestination.destination}`,
-      createDestination
-    )
-  }
+  if (createDestinationFailure !== null) return createDestinationFailure
   const unsafeResolvedDestination = await validateResolvedDestinationPath(conn, {
     destination: validatedDestination.destination,
     source: parameters.source,
@@ -679,8 +675,8 @@ async function runExtraction(
   if ("status" in validatedDestination) return validatedDestination
 
   // R-0000067: validate every archive member before we hand the archive to
-  // tar/unzip. This must happen after `mkdir -p` (so the destination
-  // exists) but before the actual extract command runs, otherwise a
+  // tar/unzip. This must happen after guarded destination creation (so the
+  // destination exists) but before the actual extract command runs, otherwise a
   // malicious archive could already have written a file outside the
   // destination by the time we notice.
   const members = await validateMembersForExtraction(conn, {

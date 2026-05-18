@@ -84,6 +84,40 @@ export function destinationPathWithAncestors(destination: string): string[] {
   return pathWithAncestors(destination)
 }
 
+function renderGuardedCreateDirectoryCommand(destination: string): string {
+  const quotedDestination = shellQuote(destination)
+  return [
+    `if [ -L ${quotedDestination} ]; then`,
+    `  printf '%s\\n' 'destination path is a symlink' >&2`,
+    `  exit 1`,
+    `fi`,
+    `if [ -e ${quotedDestination} ] && [ ! -d ${quotedDestination} ]; then`,
+    `  printf '%s\\n' 'destination path exists and is not a directory' >&2`,
+    `  exit 1`,
+    `fi`,
+    `if [ ! -d ${quotedDestination} ]; then`,
+    `  mkdir -- ${quotedDestination}`,
+    `fi`,
+  ].join("\n")
+}
+
+export async function createExtractDestinationDirectory(
+  conn: SshConnection,
+  destination: string
+): Promise<ModuleResult | null> {
+  for (const directory of destinationPathWithAncestors(destination)) {
+    // eslint-disable-next-line no-await-in-loop -- parent directories must be created before children
+    const result = await conn.exec(renderGuardedCreateDirectoryCommand(directory), EXEC_OPTS)
+    if (result.code !== 0) {
+      return failedCommand(
+        `[archive.extract] failed to create destination directory ${destination}`,
+        result
+      )
+    }
+  }
+  return null
+}
+
 function memberDestinationPath(destination: string, member: ArchiveMember): null | string {
   const memberPath = normalizeArchiveMemberPath(member.path)
   if (memberPath === null) return null

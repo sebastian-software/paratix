@@ -53,6 +53,28 @@ const archiveAlternateStageCleanupPattern = /^rm -rf -- '\/opt\/app-alt\/\.parat
 const archiveMembersMarkerPattern =
   /^cat '\/var\/lib\/paratix\/flags\/archive-[a-f0-9]+\.sha256\.members'$/v
 
+function guardedArchiveDestinationMkdirCommand(path: string): string {
+  return [
+    `if [ -L '${path}' ]; then`,
+    `  printf '%s\\n' 'destination path is a symlink' >&2`,
+    `  exit 1`,
+    `fi`,
+    `if [ -e '${path}' ] && [ ! -d '${path}' ]; then`,
+    `  printf '%s\\n' 'destination path exists and is not a directory' >&2`,
+    `  exit 1`,
+    `fi`,
+    `if [ ! -d '${path}' ]; then`,
+    `  mkdir -- '${path}'`,
+    `fi`,
+  ].join("\n")
+}
+
+function findGuardedArchiveMkdirCall(calls: string[], path: string): string | undefined {
+  return calls.find(
+    (call) => call.includes(`if [ -L '${path}' ];`) && call.includes(`mkdir -- '${path}'`)
+  )
+}
+
 const archiveApplyResponseStubs: NonNullable<
   Parameters<typeof createBaseMockSsh>[1]
 >["responseStubs"] = [
@@ -69,7 +91,9 @@ const archiveApplyResponseStubs: NonNullable<
     command: `[ -d '${alternateDestination}' ] && [ ! -L '${alternateDestination}' ]`,
     result: { code: 0 },
   },
-  { command: `mkdir -p '${destination}'`, result: { code: 0 } },
+  { command: guardedArchiveDestinationMkdirCommand("/opt"), result: { code: 0 } },
+  { command: guardedArchiveDestinationMkdirCommand(destination), result: { code: 0 } },
+  { command: guardedArchiveDestinationMkdirCommand(alternateDestination), result: { code: 0 } },
   { command: `readlink -f -- '${destination}'`, result: { code: 0, stdout: `${destination}\n` } },
   {
     command: `readlink -f -- '${alternateDestination}'`,
@@ -641,7 +665,9 @@ describe("archive.extract — apply", () => {
     const result = await mod.apply(mockSsh, emptyEnv)
 
     expect(result.status).toBe("changed")
-    expect(mockSsh.calls).toContain(`mkdir -p '${destination}'`)
+    expect(findGuardedArchiveMkdirCall(mockSsh.calls, "/opt")).toBeDefined()
+    expect(findGuardedArchiveMkdirCall(mockSsh.calls, destination)).toBeDefined()
+    expect(mockSsh.calls).not.toContain(`mkdir -p '${destination}'`)
     expect(mockSsh.calls).toContain(
       `tar --no-same-owner --no-overwrite-dir -xzf '${src}' -C '${archiveStageDirectory}'`
     )
@@ -1138,7 +1164,7 @@ describe("archive.extract — apply", () => {
       {
         responseStubs: [
           {
-            command: `mkdir -p '${destination}'`,
+            command: guardedArchiveDestinationMkdirCommand(destination),
             result: { code: 1, stderr: "mkdir: cannot create directory: Permission denied" },
           },
         ],
@@ -1160,6 +1186,32 @@ describe("archive.extract — apply", () => {
     )
     expect(mockSsh.calls.some((command) => archiveStageMktempPattern.test(command))).toBe(false)
     expect(mockSsh.calls.some((command) => archiveStageMovePattern.test(command))).toBe(false)
+    expectNoArchiveMarkerWrite(mockSsh)
+  })
+
+  it("fails when the inline destination mkdir guard sees a symlink after validation", async () => {
+    const mockSsh = createMockSsh(
+      {
+        [`tar -tvzf '${src}'`]: { code: 0, stdout: safeTarListing },
+      },
+      {
+        responseStubs: [
+          {
+            command: guardedArchiveDestinationMkdirCommand(destination),
+            result: { code: 1, stderr: "destination path is a symlink\n" },
+          },
+        ],
+      }
+    )
+
+    const mod = archive.extract(src, destination)
+    const result = await mod.apply(mockSsh, emptyEnv)
+
+    expect(result.status).toBe("failed")
+    expect(String(result.error)).toContain("failed to create destination directory")
+    expect(mockSsh.calls).toContain(guardedArchiveDestinationMkdirCommand(destination))
+    expect(mockSsh.calls).not.toContain(`mkdir -p '${destination}'`)
+    expectNoTarExtractCalls(mockSsh)
     expectNoArchiveMarkerWrite(mockSsh)
   })
 
@@ -1399,7 +1451,8 @@ describe("archive.extract — apply", () => {
     expect(result.status).toBe("failed")
     expect(String(result.error)).toContain(JSON.stringify(symlinkedMemberAncestor))
     expect(String(result.error)).toContain("is a symlink")
-    expect(mockSsh.calls).toContain(`mkdir -p '${destination}'`)
+    expect(findGuardedArchiveMkdirCall(mockSsh.calls, destination)).toBeDefined()
+    expect(mockSsh.calls).not.toContain(`mkdir -p '${destination}'`)
     expect(mockSsh.calls).toContain(`tar -tvzf '${src}'`)
     expectNoTarExtractCalls(mockSsh)
     expectNoArchiveMarkerWrite(mockSsh)
@@ -1787,7 +1840,7 @@ describe("archive.extract — apply", () => {
     expect(mockSsh.calls.some((c) => archiveStageCleanupPattern.test(c))).toBe(true)
   })
 
-  it("rejects a destination that resolves elsewhere after mkdir -p", async () => {
+  it("rejects a destination that resolves elsewhere after guarded creation", async () => {
     const mockSsh = createMockSsh(
       {
         [`tar -tvzf '${src}'`]: { code: 0, stdout: safeTarListing },
