@@ -290,13 +290,16 @@ function createCachedComposeContentResolver(options: {
 }
 
 /**
- * R-0000710: cap the size of stdout passed to `JSON.parse`. A compromised
- * remote (or a pathologically large compose project) could otherwise feed
- * arbitrarily large output into `compose ps --format json` and force a
- * multi-megabyte `JSON.parse` walk in-process. 10 MiB is far above any
- * realistic compose-project listing and keeps the parser bounded.
+ * R-0000710/R-0000810: cap the size of stdout passed to `JSON.parse`. A
+ * compromised remote (or a pathologically large compose project) could
+ * otherwise feed arbitrarily large output into `compose ps --format json`
+ * and force a multi-megabyte `JSON.parse` walk in-process. 1 MiB is well
+ * above any realistic compose-project listing (a single `ps` entry is on
+ * the order of a few hundred bytes, so 1 MiB still accommodates thousands
+ * of services) and keeps the parser bounded much more tightly than the
+ * previous 10 MiB threshold.
  */
-const COMPOSE_PS_JSON_MAX_BYTES = 10_485_760
+const COMPOSE_PS_JSON_MAX_BYTES = 1_048_576
 
 /**
  * Parse the container state strings from the JSON output of `compose ps --format json`.
