@@ -23,6 +23,7 @@ import { getRegisteredSecrets, withRegisteredSecrets } from "./secretSink.js"
 import { SFTP_TIMEOUT, sftpDownload, sftpUpload, sftpUploadContent } from "./sftp.js"
 import {
   attachSshClientTeardownErrorSink,
+  CAPTURE_TRUNCATION_MARKER,
   cleanupFailedSshClient,
   collectStreamOutput,
   DEFAULT_MAX_OUTPUT_BYTES,
@@ -501,6 +502,17 @@ export class SshConnectionImpl implements SshConnection {
 
   public async readFile(remotePath: string): Promise<string> {
     const result = await this.exec(`cat ${shellQuote(remotePath)}`, { silent: true })
+    // R-0000668: the default 1 MiB output cap silently appends the capture
+    // truncation marker to result.stdout. Returning that to callers corrupts
+    // readFile contents and breaks guardedWriteFile's originalContent
+    // precondition — surface a clear error instead so the caller sees the
+    // real failure and can raise maxOutputBytes if the file legitimately
+    // exceeds the cap.
+    if (result.stdout.endsWith(CAPTURE_TRUNCATION_MARKER)) {
+      throw new Error(
+        `[ssh.readFile: ${remotePath}] remote file exceeds the captured-output cap of ${DEFAULT_MAX_OUTPUT_BYTES} bytes; refusing to return truncated contents`
+      )
+    }
     return result.stdout
   }
 
@@ -543,8 +555,17 @@ export class SshConnectionImpl implements SshConnection {
   public async sha256(remotePath: string): Promise<null | string> {
     const exists = await this.test(`[ -f ${shellQuote(remotePath)} ]`)
     if (!exists) return null
-    const out = await this.output(`sha256sum ${shellQuote(remotePath)}`)
-    return out.split(/\s+/v)[0] ?? null
+    // R-0000668: `output()` strips trailing whitespace which would remove the
+    // newline that precedes the truncation marker, but the marker text itself
+    // survives. Run a raw exec to detect truncation directly on the captured
+    // stream before any trimming corrupts the digest comparison.
+    const result = await this.exec(`sha256sum ${shellQuote(remotePath)}`, { silent: true })
+    if (result.stdout.endsWith(CAPTURE_TRUNCATION_MARKER)) {
+      throw new Error(
+        `[ssh.sha256: ${remotePath}] sha256sum output exceeds the captured-output cap of ${DEFAULT_MAX_OUTPUT_BYTES} bytes; refusing to return a digest derived from truncated output`
+      )
+    }
+    return result.stdout.trim().split(/\s+/v)[0] ?? null
   }
 
   public async test(command: string): Promise<boolean> {

@@ -108,6 +108,9 @@ vi.mock("../src/sshHelpers.js", async () => {
   const actual = await vi.importActual<typeof SshHelpers>("../src/sshHelpers.js")
   return {
     attachSshClientTeardownErrorSink: actual.attachSshClientTeardownErrorSink,
+    // R-0000668: re-export the capture truncation marker so ssh.readFile and
+    // ssh.sha256 can detect output truncation against the real constant.
+    CAPTURE_TRUNCATION_MARKER: actual.CAPTURE_TRUNCATION_MARKER,
     cleanupFailedSshClient: vi.fn(actual.cleanupFailedSshClient),
     collectStreamOutput: vi.fn(actual.collectStreamOutput),
     // R-0000146: secretSink.maskScopedError performs `instanceof CommandError`

@@ -30,7 +30,13 @@ export function shellQuote(s: string): string {
 
 const CONNECTION_TIMEOUT = 10_000
 export const DEFAULT_MAX_OUTPUT_BYTES = Number("1048576")
-const CAPTURE_TRUNCATION_MARKER = "\n[output truncated]"
+/**
+ * Marker appended to {@link CapturedOutput} when the captured stream exceeds
+ * the configured maxOutputBytes. Exported so callers that compare a captured
+ * `result.stdout` against an external source-of-truth (e.g. `ssh.readFile`,
+ * `ssh.sha256`) can detect truncation and refuse to act on corrupted data.
+ */
+export const CAPTURE_TRUNCATION_MARKER = "\n[output truncated]"
 
 function ignoreTeardownError(): void {
   /* teardown sink: late ssh2 errors after cleanup must not crash Node */
