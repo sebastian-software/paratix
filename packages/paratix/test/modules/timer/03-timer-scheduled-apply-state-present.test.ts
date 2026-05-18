@@ -15,6 +15,8 @@ const emptyEnv = {}
 
 const SERVICE_PATH = "/etc/systemd/system/backup.service"
 const TIMER_PATH = "/etc/systemd/system/backup.timer"
+const guardedServiceRollbackRemoveCommand = `[ ! -L '${SERVICE_PATH}' ] && [ -f '${SERVICE_PATH}' ] && rm -f '${SERVICE_PATH}' || [ ! -e '${SERVICE_PATH}' ]`
+const guardedTimerRollbackRemoveCommand = `[ ! -L '${TIMER_PATH}' ] && [ -f '${TIMER_PATH}' ] && rm -f '${TIMER_PATH}' || [ ! -e '${TIMER_PATH}' ]`
 
 const successfulTimerApplyOptions: MockSshOptions = {
   allowWrites: [
@@ -91,15 +93,30 @@ describe("timer.scheduled — apply (state: present)", () => {
     const ssh = createTimerApplyMockSsh({
       [`[ -e '${SERVICE_PATH}' ]`]: { code: 1 },
       [`[ -e '${TIMER_PATH}' ]`]: { code: 1 },
-      [`rm -f '${SERVICE_PATH}'`]: { code: 0 },
-      [`rm -f '${TIMER_PATH}'`]: { code: 0 },
+      [guardedServiceRollbackRemoveCommand]: { code: 0 },
+      [guardedTimerRollbackRemoveCommand]: { code: 0 },
       "systemctl daemon-reload": { code: 1, stderr: "boom" },
     })
     const mod = timer.scheduled("backup", baseOptions)
     const result = await mod.apply(ssh, emptyEnv)
     expect(result.status).toBe("failed")
-    expect(ssh.calls).toContain(`rm -f '${SERVICE_PATH}'`)
-    expect(ssh.calls).toContain(`rm -f '${TIMER_PATH}'`)
+    expect(ssh.calls).toContain(guardedServiceRollbackRemoveCommand)
+    expect(ssh.calls).toContain(guardedTimerRollbackRemoveCommand)
+  })
+
+  it("reports rollback remove failure when daemon-reload fails after creating unit files", async () => {
+    const ssh = createTimerApplyMockSsh({
+      [`[ -e '${SERVICE_PATH}' ]`]: { code: 1 },
+      [`[ -e '${TIMER_PATH}' ]`]: { code: 1 },
+      [guardedServiceRollbackRemoveCommand]: { code: 1, stderr: "symlink guard tripped" },
+      "systemctl daemon-reload": { code: 1, stderr: "boom" },
+    })
+    const mod = timer.scheduled("backup", baseOptions)
+    const result = await mod.apply(ssh, emptyEnv)
+    expect(result.status).toBe("failed")
+    expect(String(result.error)).toContain("systemctl daemon-reload failed")
+    expect(String(result.error)).toContain("rollback of timer unit files also failed")
+    expect(String(result.error)).toContain("symlink guard tripped")
   })
 
   it("restores previous unit files when daemon-reload fails", async () => {

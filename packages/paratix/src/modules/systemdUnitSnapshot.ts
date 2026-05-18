@@ -36,6 +36,11 @@ export type UnitFileSnapshot =
 export const formatCaughtError = (error: unknown): string =>
   error instanceof Error ? error.message : String(error)
 
+function describeExecFailure(result: { code: number; stderr: string; stdout: string }): string {
+  const detail = result.stderr.trim() || result.stdout.trim()
+  return detail === "" ? `exit code ${String(result.code)}` : detail
+}
+
 /**
  * Capture a structured snapshot of `filePath` so a later rollback can
  * decide whether to restore content, restore the original mode, or remove
@@ -112,10 +117,15 @@ export async function restoreUnitFileSnapshot(
   // statement so the kernel evaluates both atomically — mirrors the
   // swap backup guards (R-0000649) and the sysctl rm guard (R-0000769).
   const quotedPath = shellQuote(filePath)
-  await ssh.exec(
+  const removeResult = await ssh.exec(
     `[ ! -L ${quotedPath} ] && [ -f ${quotedPath} ] && rm -f ${quotedPath} || [ ! -e ${quotedPath} ]`,
     SILENT_EXEC_OPTS
   )
+  if (removeResult.code !== 0) {
+    throw new Error(
+      `failed to remove ${filePath} during unit-file rollback: ${describeExecFailure(removeResult)}`
+    )
+  }
 }
 
 /**

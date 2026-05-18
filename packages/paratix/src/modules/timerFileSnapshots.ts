@@ -26,6 +26,11 @@ function formatCaughtError(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
 }
 
+function describeExecFailure(result: { code: number; stderr: string; stdout: string }): string {
+  const detail = result.stderr.trim() || result.stdout.trim()
+  return detail === "" ? `exit code ${String(result.code)}` : detail
+}
+
 // R-0000217: Capture the file mode in the snapshot so the rollback can
 // restore the exact mode the operator had configured. The previous
 // implementation hardcoded `0644` on restore and would silently overwrite
@@ -74,7 +79,18 @@ async function restoreFileSnapshot(
     await ssh.writeFile(path, snapshot.content, { mode: snapshot.mode })
     return
   }
-  await ssh.exec(`rm -f ${shellQuote(path)}`, { ignoreExitCode: true, silent: true })
+  const quotedPath = shellQuote(path)
+  const removeResult = await ssh.exec(
+    `[ ! -L ${quotedPath} ] && [ -f ${quotedPath} ] && rm -f ${quotedPath} || [ ! -e ${quotedPath} ]`,
+    { ignoreExitCode: true, silent: true }
+  )
+  if (removeResult.code !== 0) {
+    throw new Error(
+      `failed to remove ${path} during timer unit-file rollback: ${describeExecFailure(
+        removeResult
+      )}`
+    )
+  }
 }
 
 export async function restoreUnitFileSnapshots(

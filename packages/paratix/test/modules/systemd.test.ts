@@ -659,6 +659,8 @@ describe("systemd.unit", () => {
     const result = await mod.apply(ssh, emptyEnv)
     expect(result.status).toBe("failed")
     expect(String(result.error)).toContain("failed to write unit file")
+    expect(String(result.error)).toContain("rollback failed")
+    expect(String(result.error)).toContain("symlink guard tripped")
     // The guarded rm was issued exactly once. Without R-0000779 the
     // legacy unconditional `rm -f` would have removed the planted
     // symlink instead of refusing the rollback.
