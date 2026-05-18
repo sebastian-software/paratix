@@ -1,6 +1,7 @@
 /* eslint-disable max-lines -- R-0000674 adds shared regex-compile safeguards to file.line; splitting file.ts is out of scope for this finding */
-import { readFile } from "node:fs/promises"
-import { posix } from "node:path"
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises"
+import { tmpdir } from "node:os"
+import { join, posix } from "node:path"
 
 import { failed, failedCommand } from "../moduleFailure.js"
 import { shellQuote, validateMode } from "../ssh.js"
@@ -83,13 +84,11 @@ async function absentPathExists(ssh: SshConnection, remotePath: string): Promise
  * to overwrite when the file materialised between the two probes.
  *
  * The recheck narrows the TOCTOU window for the early bail-out, but the
- * authoritative race protection is the post-write atomic guard: after
- * `ssh.writeFile` stages the new content (via `finalizeRemoteTempFile`'s
- * `mv -T` into the destination), we re-stage the result into a hidden temp
- * in the same directory and re-publish it with a shell snippet that fails
- * unless `[ ! -e dest ]` still holds. This gives create-only semantics
- * equivalent to O_CREAT|O_EXCL even though `ssh.writeFile` itself does not
- * expose the flag.
+ * authoritative race protection is the publish guard: content is uploaded
+ * to a hidden temp file in the same directory and then moved into place only
+ * if the destination is still missing. This gives create-only semantics
+ * equivalent to O_CREAT|O_EXCL even though SSH/SFTP upload does not expose
+ * that flag.
  *
  * @param input - The append-create input.
  * @param input.line - The line to write as the sole content of the new file.
@@ -104,26 +103,55 @@ async function absentPathExists(ssh: SshConnection, remotePath: string): Promise
 // `APT_KEY_PUBLISH_SYMLINK_EXIT_CODE` pattern in aptKeyStaging.ts.
 const FILE_LINE_CREATE_REAPPEARED_EXIT_CODE = 73
 
-function buildCreateOnlyPublishScript(remotePath: string): string {
-  const quotedPath = shellQuote(remotePath)
+function buildCreateOnlyRemoteTemporaryCommand(remotePath: string): string {
   const directory = posix.dirname(remotePath)
   const basename = posix.basename(remotePath)
   const stagingTemplate = `.${basename}.paratix-create.XXXXXX`
-  const quotedDirectory = shellQuote(directory)
-  const quotedTemplate = shellQuote(stagingTemplate)
+  return `mktemp -p ${shellQuote(directory)} -- ${shellQuote(stagingTemplate)}`
+}
+
+function buildCreateOnlyPublishScript(parameters: {
+  remotePath: string
+  stagingPath: string
+}): string {
+  const quotedPath = shellQuote(parameters.remotePath)
+  const quotedStagingPath = shellQuote(parameters.stagingPath)
   return (
     `set -eu\n` +
-    `staging=$(mktemp -p ${quotedDirectory} -- ${quotedTemplate})\n` +
-    `[ -n "$staging" ] || exit 1\n` +
-    `trap 'rm -f -- "$staging"' EXIT\n` +
-    `mv -T -- ${quotedPath} "$staging"\n` +
+    `trap 'rm -f -- ${quotedStagingPath}' EXIT\n` +
     `if [ -e ${quotedPath} ] || [ -L ${quotedPath} ]; then\n` +
     `  printf '%s\\n' 'target reappeared during create-only publish' >&2\n` +
     `  exit ${String(FILE_LINE_CREATE_REAPPEARED_EXIT_CODE)}\n` +
     `fi\n` +
-    `mv -T -- "$staging" ${quotedPath}\n` +
+    `mv -T -- ${quotedStagingPath} ${quotedPath}\n` +
     `trap - EXIT\n`
   )
+}
+
+async function writeLineCreateStagingFile(input: {
+  line: string
+  remotePath: string
+  ssh: SshConnection
+}): Promise<string> {
+  const localDirectory = await mkdtemp(join(tmpdir(), "paratix-file-line-"))
+  const localPath = join(localDirectory, "content")
+  const remoteStagingPath = await input.ssh.output(
+    buildCreateOnlyRemoteTemporaryCommand(input.remotePath)
+  )
+  try {
+    // eslint-disable-next-line security/detect-non-literal-fs-filename -- localPath is inside a freshly created private OS temp directory
+    await writeFile(localPath, `${input.line}\n`)
+    await input.ssh.uploadFile(localPath, remoteStagingPath, { mode: "0644" })
+    return remoteStagingPath
+  } catch (error) {
+    await input.ssh.exec(`rm -f -- ${shellQuote(remoteStagingPath)}`, {
+      ignoreExitCode: true,
+      silent: true,
+    })
+    throw error
+  } finally {
+    await rm(localDirectory, { force: true, recursive: true })
+  }
 }
 
 async function applyLineCreate(input: {
@@ -136,13 +164,11 @@ async function applyLineCreate(input: {
       `[file.line: ${input.remotePath}] refuses to overwrite file created concurrently between existence probe and create`
     )
   }
-  // R-0000800: emulate O_CREAT|O_EXCL on top of `ssh.writeFile` by staging
-  // the freshly written file aside and re-publishing it via `mv -T` guarded
-  // by `[ ! -e dest ]`. If a concurrent writer created the destination
-  // between the recheck above and the publish below, the guard refuses and
-  // we clean up the staging file before surfacing the race as a failure.
-  await input.ssh.writeFile(input.remotePath, `${input.line}\n`, { mode: "0644" })
-  const publishScript = buildCreateOnlyPublishScript(input.remotePath)
+  const remoteStagingPath = await writeLineCreateStagingFile(input)
+  const publishScript = buildCreateOnlyPublishScript({
+    remotePath: input.remotePath,
+    stagingPath: remoteStagingPath,
+  })
   const publishResult = await input.ssh.exec(publishScript, { ignoreExitCode: true, silent: true })
   if (publishResult.code === FILE_LINE_CREATE_REAPPEARED_EXIT_CODE) {
     return failed(

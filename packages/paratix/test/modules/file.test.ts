@@ -1437,14 +1437,14 @@ describe("file.line — apply without options.match", () => {
   })
 
   it("creates a missing file with the appended line and an explicit mode", async () => {
-    // R-0000800: the create-only branch finalises via a guarded `mv -T`
-    // shell snippet; stub the paratix-create publish script so the mock
-    // returns a success exit code.
+    const stagingPath = "/etc/.config.paratix-create.ABC123"
     const ssh = createMockSsh(
       {
         "[ -e '/etc/config' ]": { code: 1 },
+        "mktemp -p '/etc' -- '.config.paratix-create.XXXXXX'": { stdout: stagingPath },
       },
       {
+        allowUploads: [{ localPath: /^\/.+/v, options: { mode: "0644" }, remotePath: stagingPath }],
         responseStubs: [{ command: /paratix-create/v, result: { code: 0 } }],
       }
     )
@@ -1453,9 +1453,10 @@ describe("file.line — apply without options.match", () => {
     const result = await mod.apply(ssh, emptyEnv)
 
     expect(result.status).toBe("changed")
-    expect(ssh.writeFileCalls).toStrictEqual([
-      { content: "my-line\n", options: { mode: "0644" }, remotePath: "/etc/config" },
-    ])
+    expect(ssh.uploadFileCalls).toHaveLength(1)
+    expect(ssh.uploadFileCalls[0]?.options).toStrictEqual({ mode: "0644" })
+    expect(ssh.uploadFileCalls[0]?.remotePath).toBe(stagingPath)
+    expect(ssh.writeFileCalls).toStrictEqual([])
     expect(ssh.calls).not.toContain("cat >> '/etc/config'")
   })
 
@@ -1514,14 +1515,14 @@ describe("file.line — apply without options.match", () => {
   // reappeared, `apply` must surface the race as a `failed` ModuleResult
   // instead of silently overwriting whoever else's bytes.
   it("R-0000800: refuses to publish when the create-only guard reports the target reappeared", async () => {
-    // R-0000800: the create-only publish script is uniquely identifiable
-    // by the staging-template prefix, so the mock stubs the script under a
-    // regex match returning the reappeared-target exit code (73).
+    const stagingPath = "/etc/.config.paratix-create.ABC123"
     const ssh = createMockSsh(
       {
         "[ -e '/etc/config' ]": { code: 1 },
+        "mktemp -p '/etc' -- '.config.paratix-create.XXXXXX'": { stdout: stagingPath },
       },
       {
+        allowUploads: [{ localPath: /^\/.+/v, options: { mode: "0644" }, remotePath: stagingPath }],
         responseStubs: [
           {
             command: /paratix-create/v,
@@ -1542,6 +1543,7 @@ describe("file.line — apply without options.match", () => {
       "refuses to overwrite file created concurrently between existence probe and create"
     )
     expect(ssh.calls.some((call) => call.includes("paratix-create"))).toBe(true)
+    expect(ssh.writeFileCalls).toStrictEqual([])
   })
 })
 
