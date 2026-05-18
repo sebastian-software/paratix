@@ -894,6 +894,20 @@ describe("cron.job", () => {
       "must not contain newlines"
     )
   })
+
+  // R-0000748: validate `user` against the posix name pattern before the
+  // crontab mutex acquires a lock for a bogus identifier.
+  it("throws when user contains a newline", () => {
+    expect(() => cron.job("bad\nuser", "backup", { job: "0 3 * * * /backup.sh" })).toThrow(
+      "user name"
+    )
+  })
+
+  it("throws when user starts with a hyphen", () => {
+    expect(() => cron.job("-alice", "backup", { job: "0 3 * * * /backup.sh" })).toThrow(
+      "user name"
+    )
+  })
 })
 
 describe("cron.absent", () => {
@@ -1204,6 +1218,16 @@ describe("cron.absent", () => {
   // R-0000532: name validation now uses a strict pattern check.
   it("throws when name contains a newline", () => {
     expect(() => cron.absent("alice", "bad\nname")).toThrow("must match")
+  })
+
+  // R-0000748: validate `user` against the posix name pattern up-front so an
+  // invalid identifier never reaches the crontab mutex / readCrontab path.
+  it("throws when user contains a newline", () => {
+    expect(() => cron.absent("bad\nuser", "backup")).toThrow("user name")
+  })
+
+  it("throws when user starts with a hyphen", () => {
+    expect(() => cron.absent("-alice", "backup")).toThrow("user name")
   })
 
   // R-0000272: cron.absent uses the same readCrontab helper as cron.job.

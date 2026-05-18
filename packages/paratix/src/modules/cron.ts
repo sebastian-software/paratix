@@ -12,6 +12,7 @@ import {
 import { computePresentMutation, looksLikeCronJobLine } from "./cronMutation.js"
 import { cronJobDigest, selectCronAbsentWarning } from "./cronWarningHelpers.js"
 import { withMutexLock } from "./moduleHelpers.js"
+import { assertValidUserName } from "./posixNames.js"
 
 /**
  * R-0000272: typed result for {@link readCrontab}. The success arm carries the
@@ -403,6 +404,12 @@ export const cron = {
    * @returns A Module that ensures the cron job entry is absent.
    */
   absent(user: string, name: string): Module {
+    // R-0000748: validate `user` against the posix name pattern before any
+    // command is issued. `user` is shell-quoted by `crontabMutexLockName` /
+    // `readCrontab`, so quoting itself is safe — the assertion still rejects
+    // invalid identifiers (whitespace, newlines, leading dashes) up-front so
+    // callers never see a half-applied mutex acquired against a bogus user.
+    assertValidUserName(user)
     assertCronName(name)
 
     return {
@@ -475,6 +482,10 @@ export const cron = {
    * @returns A Module that manages the cron job entry.
    */
   job(user: string, name: string, options: CronJobOptions): Module {
+    // R-0000748: validate `user` against the posix name pattern before any
+    // command is issued, mirroring `cron.absent`. Prevents invalid identifiers
+    // from reaching `crontabMutexLockName` / `readCrontab`.
+    assertValidUserName(user)
     assertCronName(name)
     if (/[\n\r]/v.test(options.job)) {
       throw new Error(`cron.job: job must not contain newlines: ${JSON.stringify(options.job)}`)
